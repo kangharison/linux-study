@@ -1,3 +1,36 @@
+/*
+ * ===================================================================
+ * NVMe PCIe 호스트 드라이버 관점 파일 요약
+ * -------------------------------------------------------------------
+ * 본 파일(drivers/pci/quirks.c)은 PCI/PCIe 장치들의 하드웨어 버그나
+ * 비표준 동작을 수정(work-around)하는 quirk 함수들을 모아둔 곳이다.
+ * NVMe SSD는 PCIe endpoint로 동작하므로, 본 파일에 등록된 많은 quirk가
+ * NVMe 장치의 초기화, 리셋, 전원 관리, 인터럽트, 링크 상태, 오류 복구에
+ * 직접적인 영향을 미친다.
+ *
+ * NVMe 드라이버(drivers/nvme/host/pci.c) 입장에서 본 주요 호출 경로:
+ *   nvme_probe -> pci_enable_device -> pci_fixup_device(pci_fixup_enable)
+ *   -> 본 파일의 다양한 quirk 적용
+ *   nvme_reset_work -> pci_dev_specific_reset / pcie_flr
+ *   -> nvme_disable_and_flr(), delay_250ms_after_flr() 등 NVMe 리셋 quirk
+ *   nvme_suspend/resume -> pci_save/restore_state, pci_set_power_state
+ *   -> PME, MSI/MSI-X, ASPM 관련 quirk 영향
+ *   AER(Advanced Error Reporting) 처리 -> AER capability quirk
+ *   -> NVMe 링크/Completer Abort 복구
+ *
+ * 특히 NVMe와 밀접한 영역:
+ *   - Function Level Reset(FLR): nvme_disable_and_flr, delay_250ms_after_flr
+ *   - PCIe link retrain/speed: pcie_failed_link_retrain
+ *   - ASPM(L0s/L1): quirk_disable_aspm_l0s, quirk_disable_aspm_l0s_l1
+ *   - MSI/MSI-X: quirk_disable_all_msi, quirk_disable_msi, tegra RP MSI quirk
+ *   - AER: quirk_nvidia_ck804_pcie_aer_ext_cap
+ *   - PME: pci_fixup_no_d0_pme, pci_fixup_no_msi_no_pme
+ *
+ * 본 파일은 커널 부팅/장치 인식 시 자동으로 호출되며, NVMe 드라이버가
+ * 직접 호출하지는 않지만 NVMe 장치가 안정적으로 동작할 수 있는 전제 조건을
+ * 마련해 준다.
+ * ===================================================================
+ */
 // SPDX-License-Identifier: GPL-2.0
 /*
  * This file contains work-arounds for many known PCI hardware bugs.
@@ -93,54 +126,62 @@ static bool pcie_lbms_seen(struct pci_dev *dev, u16 lnksta)
  * Return 0 if the link has been successfully retrained.  Return an error
  * if retraining was not needed or we attempted a retrain and it failed.
  */
+/*
+ * pcie_failed_link_retrain:
+ *   다운스트림 PCIe 포트의 링크 트레이닝이 무한 반복되거나 속도 협상에
+ *   실패하는 경우 수동으로 재시도한다. NVMe SSD는 높은 링크 속도/폭에
+ *   민감하므로, Root Port나 중간 스위치에서 링크가 끊기거나 2.5GT/s로
+ *   제한되면 NVMe 성능/안정성이 크게 저하된다. 이 함수는 NVMe가 연결된
+ *   경로의 PCIe 링크를 복구하는 핵심 보조 함수다.
+ */
 int pcie_failed_link_retrain(struct pci_dev *dev)
 {
-	static const struct pci_device_id ids[] = {
+	static const struct pci_device_id ids[] = { /* NVMe: ASMedia ASM2824 스위치 등 링크 트레이닝 버그가 있는 디바이스 목록. */
 		{ PCI_VDEVICE(ASMEDIA, 0x2824) }, /* ASMedia ASM2824 */
 		{}
 	};
-	u16 lnksta, lnkctl2;
-	int ret = -ENOTTY;
+	u16 lnksta, lnkctl2; /* NVMe: 링크 상태(LNKSTA)와 링크 제어2(LNKCTL2) 레지스터 값. */
+	int ret = -ENOTTY; /* NVMe: 기본적으로 quirk가 필요 없음을 나타내는 반환값. */
 
-	if (!pci_is_pcie(dev) || !pcie_downstream_port(dev) ||
-	    !pcie_cap_has_lnkctl2(dev) || !dev->link_active_reporting)
-		return ret;
+	if (!pci_is_pcie(dev) || !pcie_downstream_port(dev) || /* NVMe: PCIe 장치이면서 다운스트림 포트여야 함. */
+	    !pcie_cap_has_lnkctl2(dev) || !dev->link_active_reporting) /* NVMe: LNKCTL2와 Link Active 보고를 지원해야 quirk 동작. */
+		return ret; /* NVMe: 0이면 성공, -ENOTTY면 quirk 불필요. */
 
-	pcie_capability_read_word(dev, PCI_EXP_LNKSTA, &lnksta);
-	if (!(lnksta & PCI_EXP_LNKSTA_DLLLA) && pcie_lbms_seen(dev, lnksta)) {
-		u16 oldlnkctl2;
+	pcie_capability_read_word(dev, PCI_EXP_LNKSTA, &lnksta); /* NVMe: 현재 링크 상태 읽기(Data Link Layer Link Active 등 확인). */
+	if (!(lnksta & PCI_EXP_LNKSTA_DLLLA) && pcie_lbms_seen(dev, lnksta)) { /* NVMe: 링크가 활성화되지 않았고 LBMS가 설정된 경우. */
+		u16 oldlnkctl2; /* NVMe: 기존 Target Link Speed를 저장하여 나중에 복원. */
 
-		pci_info(dev, "broken device, retraining non-functional downstream link at 2.5GT/s\n");
+		pci_info(dev, "broken device, retraining non-functional downstream link at 2.5GT/s\n"); /* NVMe: 링크 트레이닝 실패를 감지하고 2.5GT/s로 강제 재시도. */
 
-		pcie_capability_read_word(dev, PCI_EXP_LNKCTL2, &oldlnkctl2);
-		ret = pcie_set_target_speed(dev, PCIE_SPEED_2_5GT, false);
+		pcie_capability_read_word(dev, PCI_EXP_LNKCTL2, &oldlnkctl2); /* NVMe: 현재 LNKCTL2 값을 읽어 두고. */
+		ret = pcie_set_target_speed(dev, PCIE_SPEED_2_5GT, false); /* NVMe: 안정적인 2.5GT/s로 강제 낮춰 링크 트레이닝 재시도. */
 		if (ret) {
 			pci_info(dev, "retraining failed\n");
-			pcie_set_target_speed(dev, PCIE_LNKCTL2_TLS2SPEED(oldlnkctl2),
-					      true);
-			return ret;
+			pcie_set_target_speed(dev, PCIE_LNKCTL2_TLS2SPEED(oldlnkctl2), /* NVMe: 재시도 실패 시 원래 속도로 복원. */
+					      true); /* NVMe: 원래 Target Link Speed로 복원 후 종료. */
+			return ret; /* NVMe: 0이면 성공, -ENOTTY면 quirk 불필요. */
 		}
 
-		pcie_capability_read_word(dev, PCI_EXP_LNKSTA, &lnksta);
+		pcie_capability_read_word(dev, PCI_EXP_LNKSTA, &lnksta); /* NVMe: 현재 링크 상태 읽기(Data Link Layer Link Active 등 확인). */
 	}
 
-	pcie_capability_read_word(dev, PCI_EXP_LNKCTL2, &lnkctl2);
+	pcie_capability_read_word(dev, PCI_EXP_LNKCTL2, &lnkctl2); /* NVMe: 최종적으로 설정된 LNKCTL2 값을 확인. */
 
-	if ((lnksta & PCI_EXP_LNKSTA_DLLLA) &&
-	    (lnkctl2 & PCI_EXP_LNKCTL2_TLS) == PCI_EXP_LNKCTL2_TLS_2_5GT &&
-	    pci_match_id(ids, dev)) {
-		u32 lnkcap;
+	if ((lnksta & PCI_EXP_LNKSTA_DLLLA) && /* NVMe: 링크가 활성화되어 있고. */
+	    (lnkctl2 & PCI_EXP_LNKCTL2_TLS) == PCI_EXP_LNKCTL2_TLS_2_5GT && /* NVMe: 2.5GT/s로 제한된 경우. */
+	    pci_match_id(ids, dev)) { /* NVMe: ASMedia 장치 목록과 일치하면 고속 복원 시도. */
+		u32 lnkcap; /* NVMe: 링크 기능 레지스터(최대 지원 속도/폭). */
 
-		pci_info(dev, "removing 2.5GT/s downstream link speed restriction\n");
-		pcie_capability_read_dword(dev, PCI_EXP_LNKCAP, &lnkcap);
-		ret = pcie_set_target_speed(dev, PCIE_LNKCAP_SLS2SPEED(lnkcap), false);
+		pci_info(dev, "removing 2.5GT/s downstream link speed restriction\n"); /* NVMe: NVMe 성능을 위해 최대 지원 속도로 복원 시도. */
+		pcie_capability_read_dword(dev, PCI_EXP_LNKCAP, &lnkcap); /* NVMe: 장치가 지원하는 최대 링크 속도 읽기. */
+		ret = pcie_set_target_speed(dev, PCIE_LNKCAP_SLS2SPEED(lnkcap), false); /* NVMe: NVMe 성능을 위해 최대 지원 속도로 복원. */
 		if (ret) {
 			pci_info(dev, "retraining failed\n");
-			return ret;
+			return ret; /* NVMe: 0이면 성공, -ENOTTY면 quirk 불필요. */
 		}
 	}
 
-	return ret;
+	return ret; /* NVMe: 0이면 성공, -ENOTTY면 quirk 불필요. */
 }
 
 static ktime_t fixup_debug_start(struct pci_dev *dev,
@@ -165,27 +206,34 @@ static void fixup_debug_report(struct pci_dev *dev, ktime_t calltime,
 		pci_info(dev, "%pS took %lld usecs\n", fn, duration);
 }
 
+/*
+ * pci_do_fixups:
+ *   주어진 fixup 단계(early/header/final/enable/...)에 등록된 quirk 목록을
+ *   순회하며, 현재 pci_dev에 적용할 quirk를 찾아 실행한다. NVMe 장치도
+ *   PCI_CLASS_STORAGE_EXPRESS 클래스와 vendor/device ID로 매칭되어
+ *   nvme_disable_and_flr 같은 NVMe 전용 quirk가 적용된다.
+ */
 static void pci_do_fixups(struct pci_dev *dev, struct pci_fixup *f,
 			  struct pci_fixup *end)
 {
-	ktime_t calltime;
+	ktime_t calltime; /* NVMe: quirk 실행 시간 측정용. */
 
-	for (; f < end; f++)
-		if ((f->class == (u32) (dev->class >> f->class_shift) ||
-		     f->class == (u32) PCI_ANY_ID) &&
-		    (f->vendor == dev->vendor ||
-		     f->vendor == (u16) PCI_ANY_ID) &&
-		    (f->device == dev->device ||
-		     f->device == (u16) PCI_ANY_ID)) {
-			void (*hook)(struct pci_dev *dev);
+	for (; f < end; f++) /* NVMe: 등록된 fixup 배열을 끝까지 순회. */
+		if ((f->class == (u32) (dev->class >> f->class_shift) || /* NVMe: 클래스 매칭: NVMe 클래스(PCI_CLASS_STORAGE_EXPRESS) 확인. */
+		     f->class == (u32) PCI_ANY_ID) && /* NVMe: 또는 모든 클래스에 적용되는 quirk. */
+		    (f->vendor == dev->vendor || /* NVMe: vendor ID 매칭(예: PCI_VENDOR_ID_SAMSUNG). */
+		     f->vendor == (u16) PCI_ANY_ID) && /* NVMe: 또는 모든 vendor에 적용. */
+		    (f->device == dev->device || /* NVMe: device ID 매칭(예: 0xa804). */
+		     f->device == (u16) PCI_ANY_ID)) { /* NVMe: 또는 모든 device에 적용. */
+			void (*hook)(struct pci_dev *dev); /* NVMe: 호출할 quirk 함수 포인터. */
 #ifdef CONFIG_HAVE_ARCH_PREL32_RELOCATIONS
-			hook = offset_to_ptr(&f->hook_offset);
+			hook = offset_to_ptr(&f->hook_offset); /* NVMe: relocatable 빌드에서는 offset 기반 함수 주소 해석. */
 #else
-			hook = f->hook;
+			hook = f->hook; /* NVMe: 일반 빌드에서는 직접 함수 포인터 사용. */
 #endif
-			calltime = fixup_debug_start(dev, hook);
-			hook(dev);
-			fixup_debug_report(dev, calltime, hook);
+			calltime = fixup_debug_start(dev, hook); /* NVMe: 디버깅용 시작 시각 기록. */
+			hook(dev); /* NVMe: 매칭된 quirk 함수 실행(예: NVMe 리셋 quirk). */
+			fixup_debug_report(dev, calltime, hook); /* NVMe: 실행 시간 보고. */
 		}
 }
 
@@ -208,58 +256,65 @@ extern struct pci_fixup __end_pci_fixups_suspend_late[];
 
 static bool pci_apply_fixup_final_quirks;
 
+/*
+ * pci_fixup_device:
+ *   PCI core가 지정된 pass(early/header/final/enable/resume/suspend 등)에
+ *   등록된 quirk를 pci_dev에 적용하도록 호출한다. NVMe 장치도 probe/enable/
+ *   suspend/resume 단계에서 이 함수를 거쳐 ASPM/MSI/PME/리셋 quirk를
+ *   자동으로 받는다.
+ */
 void pci_fixup_device(enum pci_fixup_pass pass, struct pci_dev *dev)
 {
-	struct pci_fixup *start, *end;
+	struct pci_fixup *start, *end; /* NVMe: 현재 pass의 fixup 배열 시작/끝. */
 
-	switch (pass) {
-	case pci_fixup_early:
+	switch (pass) { /* NVMe: pass별로 적용할 quirk 배열을 선택. */
+	case pci_fixup_early: /* NVMe: 초기 PCI scan 직후 적용. */
 		start = __start_pci_fixups_early;
 		end = __end_pci_fixups_early;
 		break;
 
-	case pci_fixup_header:
+	case pci_fixup_header: /* NVMe: config header 파싱 후 적용. */
 		start = __start_pci_fixups_header;
 		end = __end_pci_fixups_header;
 		break;
 
-	case pci_fixup_final:
-		if (!pci_apply_fixup_final_quirks)
+	case pci_fixup_final: /* NVMe: 장치 초기화 마지막 단계(대부분의 quirk). */
+		if (!pci_apply_fixup_final_quirks) /* NVMe: final quirk 적용 플래그가 꺼져 있으면 스킵. */
 			return;
 		start = __start_pci_fixups_final;
 		end = __end_pci_fixups_final;
 		break;
 
-	case pci_fixup_enable:
+	case pci_fixup_enable: /* NVMe: pci_enable_device() 시점, NVMe에 매우 중요. */
 		start = __start_pci_fixups_enable;
 		end = __end_pci_fixups_enable;
 		break;
 
-	case pci_fixup_resume:
+	case pci_fixup_resume: /* NVMe: 시스템 resume 시 적용. */
 		start = __start_pci_fixups_resume;
 		end = __end_pci_fixups_resume;
 		break;
 
-	case pci_fixup_resume_early:
+	case pci_fixup_resume_early: /* NVMe: early resume 단계. */
 		start = __start_pci_fixups_resume_early;
 		end = __end_pci_fixups_resume_early;
 		break;
 
-	case pci_fixup_suspend:
+	case pci_fixup_suspend: /* NVMe: 시스템 suspend 직전 적용. */
 		start = __start_pci_fixups_suspend;
 		end = __end_pci_fixups_suspend;
 		break;
 
-	case pci_fixup_suspend_late:
+	case pci_fixup_suspend_late: /* NVMe: suspend 최종 단계. */
 		start = __start_pci_fixups_suspend_late;
 		end = __end_pci_fixups_suspend_late;
 		break;
 
-	default:
+	default: /* NVMe: 정의되지 않은 pass는 무시. */
 		/* stupid compiler warning, you would think with an enum... */
 		return;
 	}
-	pci_do_fixups(dev, start, end);
+	pci_do_fixups(dev, start, end); /* NVMe: 선택한 pass의 quirk를 순회하며 현재 NVMe 장치에 적용. */
 }
 EXPORT_SYMBOL(pci_fixup_device);
 
@@ -2503,11 +2558,18 @@ DECLARE_PCI_FIXUP_CLASS_FINAL(PCI_VENDOR_ID_INTEL, PCI_ANY_ID,
  * The 82575 and 82598 may experience data corruption issues when transitioning
  * out of L0S.  To prevent this we need to disable L0S on the PCIe link.
  */
+/*
+ * quirk_disable_aspm_l0s:
+ *   L0s는 PCIe link의 저전력 상태로, 일부 컨트롤러/스위치에서 L0s
+ *   진입/복귀 시 데이터 손상이나 latency spike가 발생할 수 있다. NVMe SSD가
+ *   연결된 경로에서 L0s가 활성화되면 I/O 완료 시간 불규칙성이나 성능 저하를
+ *   유발하므로, 해당 장치에서 L0s capability를 제거한다.
+ */
 static void quirk_disable_aspm_l0s(struct pci_dev *dev)
 {
-	pcie_aspm_remove_cap(dev, PCI_EXP_LNKCAP_ASPM_L0S);
+	pcie_aspm_remove_cap(dev, PCI_EXP_LNKCAP_ASPM_L0S); /* NVMe: 현재 장치의 ASPM L0s capability를 제거. */
 }
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x10a7, quirk_disable_aspm_l0s);
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x10a7, quirk_disable_aspm_l0s); /* NVMe: Intel 82575/82598 등에서 L0s quirk 등록. */
 DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x10a9, quirk_disable_aspm_l0s);
 DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x10b6, quirk_disable_aspm_l0s);
 DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x10c6, quirk_disable_aspm_l0s);
@@ -2522,10 +2584,17 @@ DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x10f1, quirk_disable_aspm_l0s);
 DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x10f4, quirk_disable_aspm_l0s);
 DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x1508, quirk_disable_aspm_l0s);
 
+/*
+ * quirk_disable_aspm_l0s_l1:
+ *   L0s뿐 아니라 L1 상태도 disable하여 ASPM 관련 AER timeout을 방지한다.
+ *   NVMe: 일부 PCIe-PCI 브리지나 스위치에서 ASPM L0s/L1이 켜져 있으면
+ *   upstream Root Port에서 AER timeout이 발생하고, 이는 NVMe I/O timeout
+ *   으로 이어질 수 있다. 전원 효율 대신 안정성을 우선한다.
+ */
 static void quirk_disable_aspm_l0s_l1(struct pci_dev *dev)
 {
-	pcie_aspm_remove_cap(dev,
-			     PCI_EXP_LNKCAP_ASPM_L0S | PCI_EXP_LNKCAP_ASPM_L1);
+	pcie_aspm_remove_cap(dev, /* NVMe: L0s와 L1 ASPM capability를 동시에 제거. */
+			     PCI_EXP_LNKCAP_ASPM_L0S | PCI_EXP_LNKCAP_ASPM_L1); /* NVMe: L0s 및 L1 capability 비트. */
 }
 
 /*
@@ -2533,10 +2602,10 @@ static void quirk_disable_aspm_l0s_l1(struct pci_dev *dev)
  * upstream PCIe root port when ASPM is enabled. At least L0s mode is affected;
  * disable both L0s and L1 for now to be safe.
  */
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_ASMEDIA, 0x1080, quirk_disable_aspm_l0s_l1);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_FREESCALE, 0x0451, quirk_disable_aspm_l0s_l1);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_PASEMI, 0xa002, quirk_disable_aspm_l0s_l1);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_HUAWEI, 0x1105, quirk_disable_aspm_l0s_l1);
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_ASMEDIA, 0x1080, quirk_disable_aspm_l0s_l1); /* NVMe: ASM1083/1085 브리지에서 ASPM L0s/L1 모두 disable. */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_FREESCALE, 0x0451, quirk_disable_aspm_l0s_l1); /* NVMe: Freescale 장치에서 ASPM L0s/L1 disable. */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_PASEMI, 0xa002, quirk_disable_aspm_l0s_l1); /* NVMe: PA Semi 장치에서 ASPM L0s/L1 disable. */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_HUAWEI, 0x1105, quirk_disable_aspm_l0s_l1); /* NVMe: Huawei 장치에서 ASPM L0s/L1 disable. */
 
 /*
  * Some Pericom PCIe-to-PCI bridges in reverse mode need the PCIe Retrain
@@ -2546,14 +2615,22 @@ DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_HUAWEI, 0x1105, quirk_disable_aspm_l0s_l1
  * Affected devices: PI7C9X110, PI7C9X111SL, PI7C9X130.  See also the
  * Pericom Errata Sheet PI7C9X111SLB_errata_rev1.2_102711.pdf.
  */
+/*
+ * quirk_enable_clear_retrain_link:
+ *   Pericom PCIe-to-PCI 브리지의 reverse mode에서 link retrain 후
+ *   Retrain Link 비트를 수동으로 클리어해야 트레이닝이 완료되는 버그를
+ *   해결한다. NVMe: link retrain이 완료되지 않으면 NVMe 장치가 PCIe
+ *   트리에서 사라지거나 성능이 저하될 수 있으므로, 해당 플래그를 설정해
+ *   core가 비트를 클리어하도록 한다.
+ */
 static void quirk_enable_clear_retrain_link(struct pci_dev *dev)
 {
-	dev->clear_retrain_link = 1;
-	pci_info(dev, "Enable PCIe Retrain Link quirk\n");
+	dev->clear_retrain_link = 1; /* NVMe: link retrain 비트 수동 클리어 활성화. */
+	pci_info(dev, "Enable PCIe Retrain Link quirk\n"); /* NVMe: dmesg에 quirk 적용 기록. */
 }
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_PERICOM, 0xe110, quirk_enable_clear_retrain_link);
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_PERICOM, 0xe111, quirk_enable_clear_retrain_link);
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_PERICOM, 0xe130, quirk_enable_clear_retrain_link);
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_PERICOM, 0xe110, quirk_enable_clear_retrain_link); /* NVMe: Pericom PI7C9X110/111/130 브리지에 대해 early 단계에서 적용. */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_PERICOM, 0xe111, quirk_enable_clear_retrain_link); /* NVMe: Pericom PI7C9X110/111/130 브리지에 대해 early 단계에서 적용. */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_PERICOM, 0xe130, quirk_enable_clear_retrain_link); /* NVMe: Pericom PI7C9X110/111/130 브리지에 대해 early 단계에서 적용. */
 
 static void fixup_rev1_53c810(struct pci_dev *dev)
 {
@@ -2591,14 +2668,21 @@ DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x1460, quirk_p64h2_1k_io);
  * Force it to be linked by setting the corresponding control bit in the
  * config space.
  */
+/*
+ * quirk_nvidia_ck804_pcie_aer_ext_cap:
+ *   AER(Advanced Error Reporting)는 NVMe 장치의 PCIe 링크 오류,
+ *   Completer Abort, Bad TLP 등을 보고하고 복구하는 핵심 메커니즘이다.
+ *   NVIDIA CK804 칩셋에서 AER extended capability가 연결되지 않으면
+ *   NVMe 장치의 PCIe 오류가 감춰져 예기치 않은 I/O 장애로 이어질 수 있다.
+ */
 static void quirk_nvidia_ck804_pcie_aer_ext_cap(struct pci_dev *dev)
 {
-	uint8_t b;
+	uint8_t b; /* NVMe: chip-specific 컨트롤 레지스터 값. */
 
-	if (pci_read_config_byte(dev, 0xf41, &b) == 0) {
-		if (!(b & 0x20)) {
-			pci_write_config_byte(dev, 0xf41, b | 0x20);
-			pci_info(dev, "Linking AER extended capability\n");
+	if (pci_read_config_byte(dev, 0xf41, &b) == 0) { /* NVMe: 0xf41 레지스터에서 AER 연결 제어 비트를 읽는다. */
+		if (!(b & 0x20)) { /* NVMe: AER 연결 비트(0x20)가 꺼져 있으면 켠다. */
+			pci_write_config_byte(dev, 0xf41, b | 0x20); /* NVMe: AER extended capability 연결 활성화. */
+			pci_info(dev, "Linking AER extended capability\n"); /* NVMe: dmesg에 AER 연결 기록. */
 		}
 	}
 }
@@ -2704,10 +2788,17 @@ DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82875_HB,
  * Instead of setting the flag on all buses in the machine, simply disable
  * MSI globally.
  */
+/*
+ * quirk_disable_all_msi:
+ *   해당 칩셋에서 MSI를 전역적으로 비활성화한다. NVMe 드라이버는 기본적으로
+ *   MSI-X를 선호하지만, 일부 플랫폼(예: Samsung 0xa5e3)에서는 MSI 자체를
+ *   지원하지 않으므로 MSI/MSI-X 모두 INTx로 fallback된다. 이 경우 NVMe
+ *   성능이 크게 저하될 수 있으나, 하드웨어 버그를 회피하기 위해 필요하다.
+ */
 static void quirk_disable_all_msi(struct pci_dev *dev)
 {
-	pci_no_msi();
-	pci_warn(dev, "MSI quirk detected; MSI disabled\n");
+	pci_no_msi(); /* NVMe: 시스템 전체 MSI 사용 중지. */
+	pci_warn(dev, "MSI quirk detected; MSI disabled\n"); /* NVMe: dmesg 경고. */
 }
 DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_SERVERWORKS, PCI_DEVICE_ID_SERVERWORKS_GCNB_LE, quirk_disable_all_msi);
 DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RS400_200, quirk_disable_all_msi);
@@ -2720,11 +2811,19 @@ DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_SI, 0x0761, quirk_disable_all_msi);
 DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_SAMSUNG, 0xa5e3, quirk_disable_all_msi);
 
 /* Disable MSI on chipsets that are known to not support it */
+/*
+ * quirk_disable_msi:
+ *   특정 브리지 아래 버스의 MSI를 비활성화한다. NVMe: 해당 버스 아래에
+ *   연결된 NVMe 장치는 MSI/MSI-X를 사용할 수 없게 되어 INTx 인터럽트를
+ *   사용하게 된다. 고성능 NVMe 입장에서는 MSI-X 사용이 거의 필수적이므로,
+ *   이 quirk가 적용된 버스에 NVMe를 연결하면 큐당 인터럽트 분리가
+ *   불가능해져 성능이 제한된다.
+ */
 static void quirk_disable_msi(struct pci_dev *dev)
 {
-	if (dev->subordinate) {
-		pci_warn(dev, "MSI quirk detected; subordinate MSI disabled\n");
-		dev->subordinate->bus_flags |= PCI_BUS_FLAGS_NO_MSI;
+	if (dev->subordinate) { /* NVMe: 브리지가 하위 버스를 가지고 있을 때만 적용. */
+		pci_warn(dev, "MSI quirk detected; subordinate MSI disabled\n"); /* NVMe: 하위 버스 MSI 비활성화 경고. */
+		dev->subordinate->bus_flags |= PCI_BUS_FLAGS_NO_MSI; /* NVMe: 하위 버스 플래그에 NO_MSI 설정. */
 	}
 }
 DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_8131_BRIDGE, quirk_disable_msi);
@@ -2864,58 +2963,66 @@ DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_NVIDIA,
  * INTx and MSI/MSI-X, it is required to disable MSI interrupts to avoid port
  * service drivers registering their respective ISRs for MSIs.
  */
+/*
+ * pci_quirk_nvidia_tegra_disable_rp_msi:
+ *   Tegra PCIe Root Port는 PME/AER 이벤트에 대해 MSI가 아닌 INTx만 생성한다.
+ *   PCIe 스펙상 MSI/MSI-X 활성화 시 INTx 사용이 금지되므로, Root Port
+ *   서비스 드라이버가 MSI용 ISR을 등록하지 않도록 no_msi를 설정한다.
+ *   NVMe: Tegra 플랫폼의 NVMe 장치는 endpoint MSI/MSI-X는 정상 사용 가능하지만,
+ *   Root Port의 PME/AER 이벤트 처리 경로가 INTx 기반으로 동작함을 의미한다.
+ */
 static void pci_quirk_nvidia_tegra_disable_rp_msi(struct pci_dev *dev)
 {
-	dev->no_msi = 1;
+	dev->no_msi = 1; /* NVMe: 해당 Root Port에서 MSI 비활성화 플래그 설정. */
 }
 DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_NVIDIA, 0x1ad0,
 			      PCI_CLASS_BRIDGE_PCI, 8,
-			      pci_quirk_nvidia_tegra_disable_rp_msi);
+			      pci_quirk_nvidia_tegra_disable_rp_msi); /* NVMe: Tegra Root Port에 대해 early 단계에서 MSI disable. */
 DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_NVIDIA, 0x1ad1,
 			      PCI_CLASS_BRIDGE_PCI, 8,
-			      pci_quirk_nvidia_tegra_disable_rp_msi);
+			      pci_quirk_nvidia_tegra_disable_rp_msi); /* NVMe: Tegra Root Port에 대해 early 단계에서 MSI disable. */
 DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_NVIDIA, 0x1ad2,
 			      PCI_CLASS_BRIDGE_PCI, 8,
-			      pci_quirk_nvidia_tegra_disable_rp_msi);
+			      pci_quirk_nvidia_tegra_disable_rp_msi); /* NVMe: Tegra Root Port에 대해 early 단계에서 MSI disable. */
 DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_NVIDIA, 0x0bf0,
 			      PCI_CLASS_BRIDGE_PCI, 8,
-			      pci_quirk_nvidia_tegra_disable_rp_msi);
+			      pci_quirk_nvidia_tegra_disable_rp_msi); /* NVMe: Tegra Root Port에 대해 early 단계에서 MSI disable. */
 DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_NVIDIA, 0x0bf1,
 			      PCI_CLASS_BRIDGE_PCI, 8,
-			      pci_quirk_nvidia_tegra_disable_rp_msi);
+			      pci_quirk_nvidia_tegra_disable_rp_msi); /* NVMe: Tegra Root Port에 대해 early 단계에서 MSI disable. */
 DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_NVIDIA, 0x0e1c,
 			      PCI_CLASS_BRIDGE_PCI, 8,
-			      pci_quirk_nvidia_tegra_disable_rp_msi);
+			      pci_quirk_nvidia_tegra_disable_rp_msi); /* NVMe: Tegra Root Port에 대해 early 단계에서 MSI disable. */
 DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_NVIDIA, 0x0e1d,
 			      PCI_CLASS_BRIDGE_PCI, 8,
-			      pci_quirk_nvidia_tegra_disable_rp_msi);
+			      pci_quirk_nvidia_tegra_disable_rp_msi); /* NVMe: Tegra Root Port에 대해 early 단계에서 MSI disable. */
 DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_NVIDIA, 0x0e12,
 			      PCI_CLASS_BRIDGE_PCI, 8,
-			      pci_quirk_nvidia_tegra_disable_rp_msi);
+			      pci_quirk_nvidia_tegra_disable_rp_msi); /* NVMe: Tegra Root Port에 대해 early 단계에서 MSI disable. */
 DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_NVIDIA, 0x0e13,
 			      PCI_CLASS_BRIDGE_PCI, 8,
-			      pci_quirk_nvidia_tegra_disable_rp_msi);
+			      pci_quirk_nvidia_tegra_disable_rp_msi); /* NVMe: Tegra Root Port에 대해 early 단계에서 MSI disable. */
 DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_NVIDIA, 0x0fae,
 			      PCI_CLASS_BRIDGE_PCI, 8,
-			      pci_quirk_nvidia_tegra_disable_rp_msi);
+			      pci_quirk_nvidia_tegra_disable_rp_msi); /* NVMe: Tegra Root Port에 대해 early 단계에서 MSI disable. */
 DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_NVIDIA, 0x0faf,
 			      PCI_CLASS_BRIDGE_PCI, 8,
-			      pci_quirk_nvidia_tegra_disable_rp_msi);
+			      pci_quirk_nvidia_tegra_disable_rp_msi); /* NVMe: Tegra Root Port에 대해 early 단계에서 MSI disable. */
 DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_NVIDIA, 0x10e5,
 			      PCI_CLASS_BRIDGE_PCI, 8,
-			      pci_quirk_nvidia_tegra_disable_rp_msi);
+			      pci_quirk_nvidia_tegra_disable_rp_msi); /* NVMe: Tegra Root Port에 대해 early 단계에서 MSI disable. */
 DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_NVIDIA, 0x10e6,
 			      PCI_CLASS_BRIDGE_PCI, 8,
-			      pci_quirk_nvidia_tegra_disable_rp_msi);
+			      pci_quirk_nvidia_tegra_disable_rp_msi); /* NVMe: Tegra Root Port에 대해 early 단계에서 MSI disable. */
 DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_NVIDIA, 0x229a,
 			      PCI_CLASS_BRIDGE_PCI, 8,
-			      pci_quirk_nvidia_tegra_disable_rp_msi);
+			      pci_quirk_nvidia_tegra_disable_rp_msi); /* NVMe: Tegra Root Port에 대해 early 단계에서 MSI disable. */
 DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_NVIDIA, 0x229c,
 			      PCI_CLASS_BRIDGE_PCI, 8,
-			      pci_quirk_nvidia_tegra_disable_rp_msi);
+			      pci_quirk_nvidia_tegra_disable_rp_msi); /* NVMe: Tegra Root Port에 대해 early 단계에서 MSI disable. */
 DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_NVIDIA, 0x229e,
 			      PCI_CLASS_BRIDGE_PCI, 8,
-			      pci_quirk_nvidia_tegra_disable_rp_msi);
+			      pci_quirk_nvidia_tegra_disable_rp_msi); /* NVMe: Tegra Root Port에 대해 early 단계에서 MSI disable. */
 
 /*
  * Some versions of the MCP55 bridge from Nvidia have a legacy IRQ routing
@@ -4089,41 +4196,50 @@ static int reset_chelsio_generic_dev(struct pci_dev *dev, bool probe)
  *    Chapter 3: NVMe control registers
  *    Chapter 7.3: Reset behavior
  */
+/*
+ * nvme_disable_and_flr:
+ *   Samsung SM961/PM961 등 일부 NVMe 컨트롤러는 FLR 직전에 컨트롤러를
+ *   명시적으로 disable하지 않으면 FLR 후 config space 읽기가 -1을 반환하는
+ *   치명적 상태에 빠진다. 이 함수는 FLR 전에 NVMe CC.EN을 0으로 만들고
+ *   CSTS.RDY가 클리어될 때까지 기다린 뒤 pcie_flr()을 수행한다.
+ *   NVMe 드라이버 입장에서 본 함수는 pci_dev_specific_reset() 경로를 통해
+ *   nvme_reset_work() 중에 간접 호출될 수 있다.
+ */
 static int nvme_disable_and_flr(struct pci_dev *dev, bool probe)
 {
-	void __iomem *bar;
-	u16 cmd;
-	u32 cfg;
+	void __iomem *bar; /* NVMe: BAR0(NVMe register space)를 iomap한 커널 가상 주소. */
+	u16 cmd; /* NVMe: PCI COMMAND 레지스터 값. */
+	u32 cfg; /* NVMe: NVMe Controller Configuration(CC) 레지스터 값. */
 
-	if (dev->class != PCI_CLASS_STORAGE_EXPRESS ||
-	    pcie_reset_flr(dev, PCI_RESET_PROBE) || !pci_resource_start(dev, 0))
-		return -ENOTTY;
+	if (dev->class != PCI_CLASS_STORAGE_EXPRESS || /* NVMe: NVMe 클래스 확인. */
+	    pcie_reset_flr(dev, PCI_RESET_PROBE) || !pci_resource_start(dev, 0)) /* NVMe: FLR 지원 여부 및 BAR0 유효성 확인. */
+		return -ENOTTY; /* NVMe: 조건 미충족, 다른 리셋 방식 사용. */
 
-	if (probe)
-		return 0;
+	if (probe) /* NVMe: probe 단계에서는 지원 여부만 확인. */
+		return 0; /* NVMe: probe 단계에서 지원 가능함을 알림. */
 
-	bar = pci_iomap(dev, 0, NVME_REG_CC + sizeof(cfg));
-	if (!bar)
-		return -ENOTTY;
+	bar = pci_iomap(dev, 0, NVME_REG_CC + sizeof(cfg)); /* NVMe: BAR0를 iomap (CC 레지스터까지 접근 가능한 크기). */
+	if (!bar) /* NVMe: iomap 실패 시 quirk 포기. */
+		return -ENOTTY; /* NVMe: 조건 미충족, 다른 리셋 방식 사용. */
 
-	pci_read_config_word(dev, PCI_COMMAND, &cmd);
-	pci_write_config_word(dev, PCI_COMMAND, cmd | PCI_COMMAND_MEMORY);
+	pci_read_config_word(dev, PCI_COMMAND, &cmd); /* NVMe: 현재 PCI COMMAND 레지스터 읽기. */
+	pci_write_config_word(dev, PCI_COMMAND, cmd | PCI_COMMAND_MEMORY); /* NVMe: Memory Space Enable를 활성화해 BAR0 접근이 가능하도록 함. */
 
-	cfg = readl(bar + NVME_REG_CC);
+	cfg = readl(bar + NVME_REG_CC); /* NVMe: CC(Controller Configuration) 레지스터 읽기. */
 
-	/* Disable controller if enabled */
-	if (cfg & NVME_CC_ENABLE) {
-		u32 cap = readl(bar + NVME_REG_CAP);
-		unsigned long timeout;
+	/* Disable controller if enabled */ /* NVMe: 컨트롤러가 이미 enable 상태이면 안전하게 disable 수행. */
+	if (cfg & NVME_CC_ENABLE) { /* NVMe: CC.EN 비트가 1이면 disable 절차 시작. */
+		u32 cap = readl(bar + NVME_REG_CAP); /* NVMe: CAP 레지스터(Timeout 등 읽기). */
+		unsigned long timeout; /* NVMe: CC.EN 클리어 대기 타임아웃. */
 
 		/*
 		 * Per nvme_disable_ctrl() skip shutdown notification as it
 		 * could complete commands to the admin queue.  We only intend
 		 * to quiesce the device before reset.
 		 */
-		cfg &= ~(NVME_CC_SHN_MASK | NVME_CC_ENABLE);
+		cfg &= ~(NVME_CC_SHN_MASK | NVME_CC_ENABLE); /* NVMe: SHN(Shutdown Notification)과 CC.EN 비트를 모두 0으로 만든다. */
 
-		writel(cfg, bar + NVME_REG_CC);
+		writel(cfg, bar + NVME_REG_CC); /* NVMe: CC 레지스터에 disable 설정 기록. */
 
 		/*
 		 * Some controllers require an additional delay here, see
@@ -4132,29 +4248,29 @@ static int nvme_disable_and_flr(struct pci_dev *dev, bool probe)
 		 */
 
 		/* Cap register provides max timeout in 500ms increments */
-		timeout = ((NVME_CAP_TIMEOUT(cap) + 1) * HZ / 2) + jiffies;
+		timeout = ((NVME_CAP_TIMEOUT(cap) + 1) * HZ / 2) + jiffies; /* NVMe: CAP.TO를 기반으로 최대 500ms 단위 타임아웃 계산. */
 
-		for (;;) {
-			u32 status = readl(bar + NVME_REG_CSTS);
+		for (;;) { /* NVMe: CSTS.RDY가 0이 될 때까지 폴링. */
+			u32 status = readl(bar + NVME_REG_CSTS); /* NVMe: Controller Status 읽기. */
 
-			/* Ready status becomes zero on disable complete */
-			if (!(status & NVME_CSTS_RDY))
+			/* Ready status becomes zero on disable complete */ /* NVMe: CSTS.RDY가 0이면 disable 완료. */
+			if (!(status & NVME_CSTS_RDY)) /* NVMe: Ready 비트가 클리어되었는지 확인. */
 				break;
 
-			msleep(100);
+			msleep(100); /* NVMe: 100ms 대기 후 재확인. */
 
 			if (time_after(jiffies, timeout)) {
-				pci_warn(dev, "Timeout waiting for NVMe ready status to clear after disable\n");
+				pci_warn(dev, "Timeout waiting for NVMe ready status to clear after disable\n"); /* NVMe: 타임아웃 초과 시 경고 후 진행(차선책). */
 				break;
 			}
 		}
 	}
 
-	pci_iounmap(dev, bar);
+	pci_iounmap(dev, bar); /* NVMe: 임시로 매핑한 BAR0 해제. */
 
-	pcie_flr(dev);
+	pcie_flr(dev); /* NVMe: PCIe Function Level Reset 수행. */
 
-	return 0;
+	return 0; /* NVMe: NVMe 컨트롤러 disable 및 FLR 완료. */
 }
 
 /*
@@ -4164,16 +4280,23 @@ static int nvme_disable_and_flr(struct pci_dev *dev, bool probe)
  * FLR has heuristically proven to produce reliably working results for device
  * assignment cases.
  */
+/*
+ * delay_250ms_after_flr:
+ *   Intel DC P3700, Solidigm P44 Pro 등 일부 NVMe 컨트롤러는 FLR 후
+ *   드라이버가 너무 빨리 장치와 상호작용하면 ready 상태 변경 대기에서
+ *   타임아웃된다. FLR 후 250ms 지연을 두어 NVMe 컨트롤러 낸부 초기화가
+ *   완료될 시간을 확보한다.
+ */
 static int delay_250ms_after_flr(struct pci_dev *dev, bool probe)
 {
-	if (probe)
-		return pcie_reset_flr(dev, PCI_RESET_PROBE);
+	if (probe) /* NVMe: probe 단계에서는 FLR 지원 여부만 확인. */
+		return pcie_reset_flr(dev, PCI_RESET_PROBE); /* NVMe: FLR 지원 가능 여부 반환. */
 
-	pcie_reset_flr(dev, PCI_RESET_DO_RESET);
+	pcie_reset_flr(dev, PCI_RESET_DO_RESET); /* NVMe: 실제 FLR 수행. */
 
-	msleep(250);
+	msleep(250); /* NVMe: FLR 후 NVMe 낸부 로직이 안정화될 때까지 250ms 대기. */
 
-	return 0;
+	return 0; /* NVMe: 지연 후 정상 완료. */
 }
 
 #define PCI_DEVICE_ID_HINIC_VF      0x375E
@@ -4257,20 +4380,26 @@ static const struct pci_dev_reset_methods pci_dev_reset_methods[] = {
 	{ 0 }
 };
 
+/*
+ * __pci_dev_specific_reset:
+ *   IOMMU를 일시 중지한 뒤 장치별 리셋 콜백(예: nvme_disable_and_flr)을
+ *   실행하고, 리셋 후 IOMMU를 복구한다. NVMe 장치를 VFIO로 패스스루 하거나
+ *   nvme_reset_work()에서 리셋할 때 DMA/IOMMU 상태 일관성을 위해 필요하다.
+ */
 static int __pci_dev_specific_reset(struct pci_dev *dev, bool probe,
 				    const struct pci_dev_reset_methods *i)
 {
-	int ret;
+	int ret; /* NVMe: 리셋 결과. */
 
-	ret = pci_dev_reset_iommu_prepare(dev);
+	ret = pci_dev_reset_iommu_prepare(dev); /* NVMe: 리셋 전 IOMMU DMA를 중지해 불완전한 DMA 전송 방지. */
 	if (ret) {
-		pci_err(dev, "failed to stop IOMMU for a PCI reset: %d\n", ret);
-		return ret;
+		pci_err(dev, "failed to stop IOMMU for a PCI reset: %d\n", ret); /* NVMe: IOMMU 준비 실패 기록. */
+		return ret; /* NVMe: IOMMU 준비 실패를 호출자에게 전달하고 리셋 중단. */
 	}
 
-	ret = i->reset(dev, probe);
-	pci_dev_reset_iommu_done(dev);
-	return ret;
+	ret = i->reset(dev, probe); /* NVMe: 장치별 리셋 핸들러 호출(예: NVMe FLR quirk). */
+	pci_dev_reset_iommu_done(dev); /* NVMe: 리셋 후 IOMMU 상태 복구. */
+	return ret; /* NVMe: 리셋 콜백의 반환값 전달. */
 }
 
 /*
@@ -4278,19 +4407,26 @@ static int __pci_dev_specific_reset(struct pci_dev *dev, bool probe,
  * because when a host assigns a device to a guest VM, the host may need
  * to reset the device but probably doesn't have a driver for it.
  */
+/*
+ * pci_dev_specific_reset:
+ *   pci_dev_reset_methods[] 테이블을 순회하며 현재 pci_dev에 맞는
+ *   장치별 리셋 방법을 찾아 실행한다. NVMe 장치의 경우 Samsung SM961/PM961
+ *   (144d:a804)이면 nvme_disable_and_flr()이, Intel DC P3700/Solidigm P44 Pro
+ *   등이면 delay_250ms_after_flr()이 선택된다.
+ */
 int pci_dev_specific_reset(struct pci_dev *dev, bool probe)
 {
-	const struct pci_dev_reset_methods *i;
+	const struct pci_dev_reset_methods *i; /* NVMe: 리셋 메서드 테이블 순회용 포인터. */
 
-	for (i = pci_dev_reset_methods; i->reset; i++) {
+	for (i = pci_dev_reset_methods; i->reset; i++) { /* NVMe: NULL 콜백(테이블 끝)까지 순회. */
 		if ((i->vendor == dev->vendor ||
-		     i->vendor == (u16)PCI_ANY_ID) &&
-		    (i->device == dev->device ||
-		     i->device == (u16)PCI_ANY_ID))
-			return __pci_dev_specific_reset(dev, probe, i);
+		     i->vendor == (u16)PCI_ANY_ID) && /* NVMe: 또는 모든 vendor에 적용되는 항목. */
+		    (i->device == dev->device || /* NVMe: device ID가 NVMe 장치와 일치하는지 확인. */
+		     i->device == (u16)PCI_ANY_ID)) /* NVMe: 또는 모든 device에 적용되는 항목. */
+			return __pci_dev_specific_reset(dev, probe, i); /* NVMe: 매칭된 NVMe 리셋 quirk 실행. */
 	}
 
-	return -ENOTTY;
+	return -ENOTTY; /* NVMe: 매칭되는 장치별 리셋이 없음. */
 }
 
 static void quirk_dma_func0_alias(struct pci_dev *dev)
@@ -6137,12 +6273,19 @@ DECLARE_PCI_FIXUP_CLASS_FINAL(PCI_VENDOR_ID_NVIDIA, 0x13b1,
  * Device [1b21:2142]
  * When in D0, PME# doesn't get asserted when plugging USB 3.0 device.
  */
+/*
+ * pci_fixup_no_d0_pme:
+ *   ASMedia 1b21:2142는 D0 상태에서 PME#를 제대로 어서트하지 못한다.
+ *   NVMe: PME(Power Management Event)는 NVMe 장치의 런타임/시스템
+ *   절전에서 깨어나는 데 사용된다. D0에서 PME가 동작하지 않으면 NVMe
+ *   런타임 전환 시 wake 이벤트를 놓칠 수 있으므로 해당 비트를 비활성화.
+ */
 static void pci_fixup_no_d0_pme(struct pci_dev *dev)
 {
-	pci_info(dev, "PME# does not work under D0, disabling it\n");
-	dev->pme_support &= ~(PCI_PM_CAP_PME_D0 >> PCI_PM_CAP_PME_SHIFT);
+	pci_info(dev, "PME# does not work under D0, disabling it\n"); /* NVMe: dmesg에 D0 PME 버그 기록. */
+	dev->pme_support &= ~(PCI_PM_CAP_PME_D0 >> PCI_PM_CAP_PME_SHIFT); /* NVMe: D0 상태의 PME 지원 비트만 클리어. */
 }
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ASMEDIA, 0x2142, pci_fixup_no_d0_pme);
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ASMEDIA, 0x2142, pci_fixup_no_d0_pme); /* NVMe: ASMedia 2142 장치에 최종 초기화 단계에서 적용. */
 
 /*
  * Device 12d8:0x400e [OHCI] and 12d8:0x400f [EHCI]
@@ -6154,14 +6297,22 @@ DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ASMEDIA, 0x2142, pci_fixup_no_d0_pme);
  * says "The MSI Function is not implemented on this device" in chapters
  * 7.3.27, 7.3.29-7.3.31.
  */
+/*
+ * pci_fixup_no_msi_no_pme:
+ *   Pericom OHCI/EHCI 컨트롤러는 MSI 기능이 미구현이고 PME#도 신뢰할 수
+ *   없다고 알려져 있다. NVMe: 이 quirk는 NVMe 장치 자체가 아니라 동일
+ *   PCIe 트리의 다른 장치에 적용되지만, PME/MSI 버그가 있는 버스 환경은
+ *   NVMe의 절전/인터럽트 동작에도 영향을 줄 수 있으므로 트리 전체의
+ *   안정성을 위해 처리한다.
+ */
 static void pci_fixup_no_msi_no_pme(struct pci_dev *dev)
 {
 #ifdef CONFIG_PCI_MSI
-	pci_info(dev, "MSI is not implemented on this device, disabling it\n");
-	dev->no_msi = 1;
+	pci_info(dev, "MSI is not implemented on this device, disabling it\n"); /* NVMe: MSI 미구현 기록. */
+	dev->no_msi = 1; /* NVMe: MSI 비활성화(해당 장치에 대해). */
 #endif
-	pci_info(dev, "PME# is unreliable, disabling it\n");
-	dev->pme_support = 0;
+	pci_info(dev, "PME# is unreliable, disabling it\n"); /* NVMe: PME 신뢰성 문제 기록. */
+	dev->pme_support = 0; /* NVMe: 모든 전원 상태의 PME 지원 제거. */
 }
 DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_PERICOM, 0x400e, pci_fixup_no_msi_no_pme);
 DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_PERICOM, 0x400f, pci_fixup_no_msi_no_pme);
