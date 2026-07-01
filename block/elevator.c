@@ -24,15 +24,58 @@
  *
  */
 /*
- * NVMe 관점 파일 요약:
- *   이 파일은 블록 계층의 elevator/IO 스케줄러 코어로, 상위 bio/request를
- *   스케줄러(mq-deadline, bfq, none 등)에 연결하고 병합/해시/RB-tree를 관리한다.
- *   NVMe SSD 입장에서 본 elevator는 bio가 nvme_queue_rq()를 통해 SQ 엔트리로
- *   전환되기 전에 요청을 정렬/병합/스케줄링하는 단계이다.
- *   전형적 호출 경로:
- *     blk_mq_submit_bio -> blk_mq_get_request -> elv_merge ->
- *     (optional) blk_attempt_req_merge -> nvme_queue_rq -> nvme_submit_cmd(doorbell)
- *   관련 파일: block/blk-mq.c, block/blk-mq-sched.c, block/blk-core.c
+ * [한국어 설명] 블록 계층 IO 스케줄러(elevator) 핵심 구현 (elevator.c)
+ *
+ * === 파일의 역할 ===
+ * 이 파일은 리눅스 블록 계층에서 IO 스케줄러(elevator)의 공통 인터페이스와
+ * 핵심 자료구조 관리를 담당한다. elevator는 응용이 발행한 bio/request를
+ * mq-deadline·BFQ·kyber·none 등의 스케줄러 플러그인에 연결하고, 요청 병합
+ * (merge)·LBA 기반 해시·RB-tree를 통해 NVMe SQ로 내려가기 전 단계에서 요청을
+ * 정렬·병합·스케줄링한다. 스케줄러 등록/해제, sysfs 연동, 동적 교체(switch)
+ * 로직도 이 파일에 있다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * IO 경로에서 elevator는 blk-mq와 실제 드라이버(nvme_queue_rq) 사이에 위치한다:
+ *
+ *   [응용] write(2) → submit_bio()
+ *       ↓
+ *   [blk-mq] blk_mq_submit_bio()
+ *       ↓  → elv_merge(): 기존 request와 병합 시도 (back/front/discard)
+ *       ↓  → elv_attempt_insert_merge(): 신규 request를 해시에서 찾은 후보와 병합
+ *       ↓  → 스케줄러 ops.insert_requests(): mq-deadline/BFQ 큐에 삽입
+ *       ↓
+ *   [blk-mq dispatch] ops.dispatch_request(): 스케줄러가 최적 request 선택
+ *       ↓
+ *   [NVMe 드라이버] nvme_queue_rq() → SQ doorbell → CQ 완료
+ *
+ * elevator가 없을 때("none" 선택 시): blk-mq가 직접 request를 드라이버에 전달.
+ * 실행 컨텍스트: 대부분 프로세스 컨텍스트(bio 제출 경로); elevator_release는
+ * kobject_put() 경로이므로 어떤 컨텍스트에서도 호출될 수 있다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 의존 모듈:
+ *   - block/blk-mq.c: blk_mq_submit_bio()→elv_merge() 호출, blk_mq_init_sched()
+ *   - block/blk-mq-sched.c: blk_mq_init_sched()·blk_mq_exit_sched() — elevator
+ *     초기화·해제 시 tag_set과 연결
+ *   - block/mq-deadline.c, bfq-iosched.c, kyber-iosched.c: elv_register()로
+ *     elv_list에 등록; ops 콜백(insert/dispatch/allow_merge 등) 제공
+ *   - block/blk-merge.c: blk_attempt_req_merge()·blk_try_merge() 구현
+ *   - block/blk-ioc.c: ioc_clear_queue() — elevator 종료 시 io_context 정리
+ * 공유 자료구조:
+ *   - struct elevator_queue (elevator.h): type·kobj·hash·flags·elevator_data
+ *   - struct elevator_type (elevator.h): ops vtable·elevator_name·icq_cache
+ *   - elv_list (전역): 등록된 스케줄러 목록, elv_list_lock으로 보호
+ *
+ * === 주요 함수/구조체 요약 ===
+ * elv_merge()              - bio가 기존 request와 병합 가능한지 결정; 해시·캐시·스케줄러 순으로 탐색
+ * elv_attempt_insert_merge() - 신규 request를 해시에서 찾은 후보에 연속 back-merge; SQ 엔트리 수 감소
+ * elv_register/unregister()  - 스케줄러 모듈이 전역 elv_list에 등록/해제
+ * elevator_change()          - sysfs/내부 요청으로 elevator를 동적 교체; queue freeze→switch→unfreeze
+ * elevator_set_default()     - 장치 등록 시 mq-deadline(단일큐) 또는 none(멀티큐) 기본 적용
+ * elv_rqhash_{add/del/find}()- 끝 섹터 기반 해시로 back-merge 후보를 O(1) 탐색
+ * elv_rb_{add/del/find}()    - LBA 기반 RB-tree로 front-merge·dispatch 순서를 O(log N) 탐색
+ * struct elevator_queue      - 디바이스 큐(request_queue)에 붙는 elevator 상태; type·hash·kobj
+ * struct elevator_type       - 스케줄러 플러그인 설명자; ops vtable·이름·icq 캐시
  */
 #include <linux/kernel.h>
 #include <linux/fs.h>
@@ -205,12 +248,29 @@ struct elevator_queue *elevator_alloc(struct request_queue *q,
 	return eq;
 }
 
+/*
+ * [한국어]
+ * elevator_release - elevator_queue의 kobject 참조가 0이 됐을 때 메모리 해제
+ *
+ * @kobj: 해제할 elevator_queue에 내장된 kobject 포인터
+ *
+ * kobject_put()이 참조 카운트를 0으로 만들면 kobj_type.release로 등록된
+ * 이 함수가 호출된다. elevator_queue는 직접 kfree할 수 없고 반드시 kobject
+ * 생명주기를 통해 해제해야 하는데, 이 함수가 그 최종 단계이다.
+ * elevator_exit() → kobject_del() → kobject_put() → elevator_release() 순.
+ *
+ * 호출 체인:
+ *   elevator_exit/elv_exit_and_release → kobject_put(&e->kobj) → [elevator_release]
+ */
 static void elevator_release(struct kobject *kobj)
 {
 	struct elevator_queue *e;
 
+/* kobj에서 상위 elevator_queue 포인터 역산: kobject는 구조체 내장 멤버 */
 	e = container_of(kobj, struct elevator_queue, kobj);
+/* 스케줄러 타입(elevator_type) 모듈 참조 해제: 이 시점이 마지막 사용자일 수 있음 */
 	elevator_put(e->type);
+/* elevator_queue 구조체 자체 해제 */
 	kfree(e);
 }
 
@@ -353,37 +413,67 @@ void elv_rb_add(struct rb_root *root, struct request *rq)
 EXPORT_SYMBOL(elv_rb_add);
 
 /*
- * elv_rb_del - RB-tree에서 요청 제거
- *   NVMe 디스패치가 완료되어 제거될 때 호출 (추정).
+ * [한국어]
+ * elv_rb_del - LBA 기준 RB-tree에서 request를 제거
+ *
+ * @root: 스케줄러 내부의 RB-tree 루트
+ * @rq:   제거할 request
+ *
+ * dispatch된 request 또는 병합으로 사라지는 request를 스케줄러 큐에서 제거.
+ * RB_EMPTY_NODE: 이미 제거된 노드를 다시 제거하면 커널 패닉이 일어나므로
+ * BUG_ON으로 사전 방어한다. rb_erase 후 RB_CLEAR_NODE로 "트리 밖" 상태 명시.
+ *
+ * 호출 체인:
+ *   스케줄러 ops.dispatch_request / ops.requests_merged → [elv_rb_del]
  */
 void elv_rb_del(struct rb_root *root, struct request *rq)
 {
+/* 이미 RB-tree에서 제거된 노드인지 확인: 중복 제거는 트리 구조 파괴 */
 	BUG_ON(RB_EMPTY_NODE(&rq->rb_node));
+/* RB-tree에서 노드 제거 및 재균형(rebalance) */
 	rb_erase(&rq->rb_node, root);
+/* rb_node를 "빈 노드"로 초기화: 이후 ELV_ON_HASH 등의 검사와 일관성 유지 */
 	RB_CLEAR_NODE(&rq->rb_node);
 }
 EXPORT_SYMBOL(elv_rb_del);
 
 /*
- * elv_rb_find - @sector에 해당하는 요청을 RB-tree에서 탐색
- *   NVMe 스케줄러 낶부에서 LBA 기반 후보를 O(log N)로 찾는 데 사용.
+ * [한국어]
+ * elv_rb_find - 특정 @sector(LBA)로 시작하는 request를 RB-tree에서 탐색
+ *
+ * @root:   스케줄러 내부의 RB-tree 루트
+ * @sector: 찾을 LBA(논리 블록 주소)
+ * @return: 정확히 @sector에서 시작하는 request; 없으면 NULL
+ *
+ * BFQ·mq-deadline이 front-merge 후보(뒤쪽이 @sector인 request) 탐색,
+ * 또는 dispatch 순서 결정에 O(log N) 탐색으로 사용한다.
+ * 주의: back-merge 후보는 끝 섹터 기준 해시(elv_rqhash_find)로 찾는다.
+ *
+ * 호출 체인:
+ *   스케줄러 ops.request_merge → [elv_rb_find]
  */
 struct request *elv_rb_find(struct rb_root *root, sector_t sector)
 {
+/* RB-tree 루트에서 시작해 이진 탐색 */
 	struct rb_node *n = root->rb_node;
 	struct request *rq;
 
 	while (n) {
+/* 현재 노드의 request 포인터 복원 */
 		rq = rb_entry(n, struct request, rb_node);
 
 		if (sector < blk_rq_pos(rq))
+/* 찾는 LBA가 더 작음 → 왼쪽 서브트리(더 작은 LBA들) 탐색 */
 			n = n->rb_left;
 		else if (sector > blk_rq_pos(rq))
+/* 찾는 LBA가 더 큼 → 오른쪽 서브트리(더 큰 LBA들) 탐색 */
 			n = n->rb_right;
 		else
+/* 정확히 일치: 이 request의 시작 LBA가 @sector */
 			return rq;
 	}
 
+/* 트리에 없음: 해당 LBA에서 시작하는 기존 request 없음 */
 	return NULL;
 }
 EXPORT_SYMBOL(elv_rb_find);
@@ -540,34 +630,83 @@ void elv_merged_request(struct request_queue *q, struct request *rq,
  *   NVMe 연결: merge된 최종 request가 nvme_queue_rq()에서 단일 CID와
  *              하나의 doorbell로 제출될 수 있음 (추정).
  */
+/*
+ * [한국어]
+ * elv_merge_requests - request 두 개가 병합됐음을 스케줄러에 알리고 자료구조 갱신
+ *
+ * @q:    병합이 일어난 request_queue
+ * @rq:   병합 결과로 남을 request (next를 흡수한 쪽)
+ * @next: 병합되어 사라질 request (rq에 흡수됨)
+ *
+ * blk_attempt_req_merge()가 두 request를 하나로 합친 직후에 호출된다.
+ * 스케줄러별 requests_merged 콜백으로 내부 큐 상태(예: BFQ의 두 rq 간
+ * 연결)를 갱신하고, rq의 끝 섹터가 바뀌었으므로 해시를 재배치하여
+ * 이후 back-merge 탐색이 올바른 위치에서 일어나도록 한다.
+ *
+ * 호출 체인:
+ *   blk_attempt_req_merge → [elv_merge_requests]
+ */
 void elv_merge_requests(struct request_queue *q, struct request *rq,
 			     struct request *next)
 {
+/* elevator_queue: 현재 활성 스케줄러 ops 접근 */
 	struct elevator_queue *e = q->elevator;
 
+/* requests_merged: BFQ·mq-deadline 등이 두 rq 간 내부 연결을 정리하는 콜백 */
 	if (e->type->ops.requests_merged)
 		e->type->ops.requests_merged(q, rq, next);
 
+/* rq가 next를 흡수했으므로 끝 섹터가 바뀜 → 해시 키 재계산 후 재배치 */
 	elv_rqhash_reposition(q, rq);
+/* last_merge 캐시: 다음 one-hit 캐시 시도에서 이 rq가 first candidate */
 	q->last_merge = rq;
 }
 
+/*
+ * [한국어]
+ * elv_latter_request - 스케줄러 dispatch 순서에서 @rq 다음에 올 request 반환
+ *
+ * @q:  request_queue
+ * @rq: 기준 request
+ * @return: 스케줄러가 선택한 다음 request; 없으면 NULL
+ *
+ * 스케줄러 내부 자료구조(BFQ의 B-WF2Q 큐, mq-deadline의 fifo/RB-tree 등)에서
+ * @rq 바로 뒤에 위치한 요청을 찾는다. front-merge 시 merge 체인을 따라갈
+ * 때 사용된다.
+ *
+ * 호출 체인:
+ *   blk_try_req_merge → [elv_latter_request] → 스케줄러 ops.next_request
+ */
 struct request *elv_latter_request(struct request_queue *q, struct request *rq)
 {
 	struct elevator_queue *e = q->elevator;
 
-/* 스케줄러별 다음 request 콜백: NVMe dispatch 순서에서 뒤에 위치한 후보 */
+/* 스케줄러별 next_request 콜백: BFQ/mq-deadline 내부 dispatch 순서에서 다음 후보 */
 	if (e->type->ops.next_request)
 		return e->type->ops.next_request(q, rq);
 
 	return NULL;
 }
 
+/*
+ * [한국어]
+ * elv_former_request - 스케줄러 dispatch 순서에서 @rq 이전에 올 request 반환
+ *
+ * @q:  request_queue
+ * @rq: 기준 request
+ * @return: 스케줄러가 선택한 이전 request; 없으면 NULL
+ *
+ * @rq 앞의 요청을 찾아 front-merge 후보를 탐색하거나 dispatch 순서를
+ * 역방향으로 추적할 때 사용된다.
+ *
+ * 호출 체인:
+ *   blk_try_req_merge → [elv_former_request] → 스케줄러 ops.former_request
+ */
 struct request *elv_former_request(struct request_queue *q, struct request *rq)
 {
 	struct elevator_queue *e = q->elevator;
 
-/* 스케줄러별 이전 request 콜백: NVMe dispatch 순서에서 앞에 위치한 후보 */
+/* 스케줄러별 former_request 콜백: dispatch 순서에서 @rq 앞의 request 반환 */
 	if (e->type->ops.former_request)
 		return e->type->ops.former_request(q, rq);
 
@@ -576,41 +715,82 @@ struct request *elv_former_request(struct request_queue *q, struct request *rq)
 
 #define to_elv(atr) container_of_const((atr), struct elv_fs_entry, attr)
 
+/*
+ * [한국어]
+ * elv_attr_show - /sys/block/<disk>/queue/iosched/<attr> 읽기 핸들러
+ *
+ * @kobj: elevator_queue에 내장된 kobject (iosched sysfs 노드)
+ * @attr: 읽을 sysfs attribute (elv_fs_entry로 캐스팅)
+ * @page: 출력 버퍼 (PAGE_SIZE 크기)
+ * @return: 쓴 바이트 수 또는 에러 코드
+ *
+ * sysfs kobject ops.show로 등록되어 사용자가 scheduler 파라미터를 읽을 때
+ * 호출된다. sysfs_lock을 잡아 elevator 구조체와의 race를 막고,
+ * ELEVATOR_FLAG_DYING이면(장치 제거 중) -ENODEV를 반환해 dangling 접근을 차단.
+ *
+ * 호출 체인:
+ *   sysfs read → elv_sysfs_ops.show → [elv_attr_show] → entry->show(e, page)
+ */
 static ssize_t
 elv_attr_show(struct kobject *kobj, struct attribute *attr, char *page)
 {
+/* attr을 elv_fs_entry로 캐스팅: elevator 스케줄러별 sysfs 파일 설명자 */
 	const struct elv_fs_entry *entry = to_elv(attr);
 	struct elevator_queue *e;
+/* -ENODEV: DYING 상태이거나 show 콜백 없는 경우의 기본 에러 */
 	ssize_t error = -ENODEV;
 
+/* show 콜백 없으면 읽기 불가 */
 	if (!entry->show)
 		return -EIO;
 
+/* kobj로부터 상위 elevator_queue 복원 */
 	e = container_of(kobj, struct elevator_queue, kobj);
-/* sysfs_lock: NVMe iosched tunable 읽기 동안 elevator 구조체 보호 */
+/* sysfs_lock: elevator 구조체와 elevator_exit() 간 동시 접근 보호 */
 	mutex_lock(&e->sysfs_lock);
-/* ELEVATOR_FLAG_DYING이 설정되면 NVMe 장치 제거 중이므로 tunable 접근 차단 */
+/* ELEVATOR_FLAG_DYING: 장치 제거/elevator 교체 중 → 파라미터 접근 차단 */
 	if (!test_bit(ELEVATOR_FLAG_DYING, &e->flags))
 		error = entry->show(e, page);
 	mutex_unlock(&e->sysfs_lock);
 	return error;
 }
 
+/*
+ * [한국어]
+ * elv_attr_store - /sys/block/<disk>/queue/iosched/<attr> 쓰기 핸들러
+ *
+ * @kobj:   elevator_queue에 내장된 kobject
+ * @attr:   쓸 sysfs attribute
+ * @page:   사용자 입력 버퍼
+ * @length: 입력 길이
+ * @return: 소비한 바이트 수 또는 에러 코드
+ *
+ * 사용자가 scheduler 파라미터(예: mq-deadline의 read_expire, write_expire)를
+ * 변경할 때 호출된다. sysfs_lock으로 elevator_exit()와의 race를 막고,
+ * DYING 상태이면 변경을 거부한다.
+ *
+ * 호출 체인:
+ *   sysfs write → elv_sysfs_ops.store → [elv_attr_store] → entry->store(e, page, length)
+ */
 static ssize_t
 elv_attr_store(struct kobject *kobj, struct attribute *attr,
 	       const char *page, size_t length)
 {
+/* attr을 elv_fs_entry로 캐스팅 */
 	const struct elv_fs_entry *entry = to_elv(attr);
 	struct elevator_queue *e;
+/* -ENODEV: DYING 상태 기본값 */
 	ssize_t error = -ENODEV;
 
+/* store 콜백 없으면 쓰기 불가 */
 	if (!entry->store)
 		return -EIO;
 
+/* kobj에서 elevator_queue 복원 */
 	e = container_of(kobj, struct elevator_queue, kobj);
-/* sysfs_lock: NVMe scheduler 파라미터 쓰기 중 race 방지 */
+/* sysfs_lock: elevator_exit()와의 race 방지 — 파라미터 변경 중 elevator 해제 금지 */
 	mutex_lock(&e->sysfs_lock);
-/* dying 상태에서는 NVMe 큐가 정리 중이므로 파라미터 변경 불가 */
+/* DYING 상태(장치 제거 중)에서는 파라미터 쓰기 차단 */
 	if (!test_bit(ELEVATOR_FLAG_DYING, &e->flags))
 		error = entry->store(e, page, length);
 	mutex_unlock(&e->sysfs_lock);
@@ -660,15 +840,32 @@ static int elv_register_queue(struct request_queue *q,
 	return error;
 }
 
+/*
+ * [한국어]
+ * elv_unregister_queue - request_queue의 elevator sysfs/debugfs 노드 제거
+ *
+ * @q: elevator가 연결된 request_queue
+ * @e: 제거할 elevator_queue; NULL이면 no-op
+ *
+ * ELEVATOR_FLAG_REGISTERED를 원자적으로 클리어하고(test_and_clear_bit), sysfs의
+ * iosched kobject를 제거한다. 이 시점부터 /sys/block/<disk>/queue/iosched는
+ * 접근 불가하다. elevator_exit() 또는 elevator_change_done() 안에서 호출된다.
+ *
+ * 호출 체인:
+ *   elevator_change_done / elv_exit_and_release → [elv_unregister_queue]
+ */
 static void elv_unregister_queue(struct request_queue *q,
 				 struct elevator_queue *e)
 {
+/* REGISTERED 비트를 원자적으로 클리어; 이미 클리어됐으면(중복 호출) no-op */
 	if (e && test_and_clear_bit(ELEVATOR_FLAG_REGISTERED, &e->flags)) {
-/* kobject 제거: NVMe 장치 제거 시 /sys/block/<disk>/queue/iosched 제거 */
+/* KOBJ_REMOVE uevent: udev 등이 /sys/block/.../queue/iosched 제거를 인지 */
 		kobject_uevent(&e->kobj, KOBJ_REMOVE);
+/* sysfs kobject 제거: /sys/block/<disk>/queue/iosched 디렉토리 삭제 */
 		kobject_del(&e->kobj);
 
 		/* unexport via debugfs before exiting sched */
+/* debugfs 노출 해제: blk-mq sched 디버그 정보 제거 */
 		blk_mq_sched_unreg_debugfs(q);
 	}
 }
@@ -830,23 +1027,42 @@ out_unfreeze:
 	return ret;
 }
 
+/*
+ * [한국어]
+ * elv_exit_and_release - elevator를 완전히 내리고 자원을 해제하는 rollback 경로
+ *
+ * @ctx: elevator 전환 컨텍스트 (전환 중 할당한 res/type 정보)
+ * @q:   elevator를 제거할 request_queue
+ *
+ * elevator_change_done()에서 새 elevator의 sysfs 등록이 실패하면 이 함수로
+ * rollback한다. queue를 freeze해 진행 중인 I/O를 멈추고, elevator_exit()으로
+ * 스케줄러 상태를 해제한 뒤, sched_res와 kobject를 최종 반환한다.
+ * 이 경로를 거치면 request_queue는 elevator가 없는("none") 상태가 된다.
+ *
+ * 호출 체인:
+ *   elevator_change_done → elv_register_queue 실패 → [elv_exit_and_release]
+ */
 static void elv_exit_and_release(struct elv_change_ctx *ctx,
 		struct request_queue *q)
 {
 	struct elevator_queue *e;
+/* memflags: 메모리 압박 상황을 freeze 이전/이후에 복원하기 위해 저장 */
 	unsigned memflags;
 
-/* queue freeze: NVMe submit/dispatch 경로 일시 중단, memflags 보관 */
+/* queue freeze: I/O submit/dispatch를 모두 중단 — elevator 해제 중 race 방지 */
 	memflags = blk_mq_freeze_queue(q);
 	mutex_lock(&q->elevator_lock);
+/* 현재 elevator 포인터 보관 (elevator_exit 후 q->elevator는 NULL이 됨) */
 	e = q->elevator;
-/* elevator_exit: NVMe tag-set과 연결된 scheduler 자원 해제 시작 */
+/* elevator_exit: ioc 정리 + blk_mq_exit_sched(tag_set 연결 해제) */
 	elevator_exit(q);
 	mutex_unlock(&q->elevator_lock);
+/* unfreeze: I/O 경로 재개 (elevator 없는 "none" 상태로) */
 	blk_mq_unfreeze_queue(q, memflags);
 	if (e) {
-/* 스케줄러 자원 반환 후 kobject 참조 해제로 최종 해제 */
+/* 전환 중 사전 할당한 sched_res(tag/hw_ctx 자원) 반환 */
 		blk_mq_free_sched_res(&ctx->res, ctx->type, q->tag_set);
+/* kobject_put: 참조 카운트가 0이 되면 elevator_release()가 kfree 수행 */
 		kobject_put(&e->kobj);
 	}
 }
@@ -863,18 +1079,25 @@ static int elevator_change_done(struct request_queue *q,
 	int ret = 0;
 
 	if (ctx->old) {
+/* ctx->old: elevator_switch()가 교체한 이전 elevator_queue */
 		struct elevator_resources res = {
+/* old elevator의 sched_res를 스택에 복사: 이후 old->elevator_data가 NULL이 돼도 접근 가능 */
 			.et = ctx->old->et,
 			.data = ctx->old->elevator_data
 		};
 
+/* sysfs iosched kobject 제거: 이전 스케줄러 파라미터 파일 비공개 */
 		elv_unregister_queue(q, ctx->old);
+/* 이전 스케줄러의 hw_queue별 자원(tag/wq 등) 해제 */
 		blk_mq_free_sched_res(&res, ctx->old->type, q->tag_set);
+/* kobject_put: 참조가 0이 되면 elevator_release()가 elevator_queue를 kfree */
 		kobject_put(&ctx->old->kobj);
 	}
 	if (ctx->new) {
+/* 새 elevator sysfs 등록: /sys/block/<disk>/queue/iosched 재생성 */
 		ret = elv_register_queue(q, ctx->new, !ctx->no_uevent);
 		if (ret)
+/* 등록 실패 시 rollback: 새 elevator를 내리고 request_queue를 "none" 상태로 */
 			elv_exit_and_release(ctx, q);
 	}
 	return ret;
@@ -1056,17 +1279,33 @@ void elevator_set_none(struct request_queue *q)
 		pr_warn("%s: set none elevator failed %d\n", __func__, err);
 }
 
+/*
+ * [한국어]
+ * elv_iosched_load_module - 아직 로드되지 않은 스케줄러 모듈을 자동 로드
+ *
+ * @elevator_name: 로드할 스케줄러 이름 (예: "bfq", "mq-deadline")
+ *
+ * 사용자가 sysfs로 특정 스케줄러를 요청했을 때, 해당 스케줄러가 아직
+ * elv_list에 없으면 "<name>-iosched" 모듈을 request_module()로 자동 로드한다.
+ * 이렇게 하면 "bfq-iosched.ko"를 명시적으로 insmod하지 않아도 sysfs 쓰기만으로
+ * BFQ를 활성화할 수 있다. 모듈 로드 이후 elv_list에 등록되므로
+ * 이후 elevator_find_get()이 성공한다.
+ *
+ * 호출 체인:
+ *   elv_iosched_store → [elv_iosched_load_module] → request_module()
+ */
 static void elv_iosched_load_module(const char *elevator_name)
 {
 	struct elevator_type *found;
 
-/* elv_list_lock 짧게 획득하여 요청한 scheduler가 이미 등록되었는지 확인 */
+/* elv_list_lock 짧게 획득: 모듈 로드 여부만 확인하므로 빠르게 해제 */
 	spin_lock(&elv_list_lock);
+/* 이미 등록된 스케줄러라면 모듈 로드 불필요 */
 	found = __elevator_find(elevator_name);
 	spin_unlock(&elv_list_lock);
 
 	if (!found)
-/* 미등록 스케줄러 모듈 자동 로드: e.g. "bfq-iosched" */
+/* 미등록 스케줄러: "<name>-iosched" 패턴으로 커널 모듈 자동 로드 */
 		request_module("%s-iosched", elevator_name);
 }
 
@@ -1146,36 +1385,61 @@ ssize_t elv_iosched_show(struct gendisk *disk, char *name)
 	struct elevator_type *cur = NULL, *e;
 	int len = 0;
 
+/* elevator_lock: q->elevator 포인터를 안정적으로 읽기 위해 획득 */
 	mutex_lock(&q->elevator_lock);
 	if (!q->elevator) {
+/* elevator 없음("none"): 현재 선택을 대괄호로 표시 */
 		len += sprintf(name+len, "[none] ");
 	} else {
+/* elevator 있음: "none"은 대괄호 없이, 현재 스케줄러는 뒤에서 대괄호 */
 		len += sprintf(name+len, "none ");
+/* cur: 현재 활성 스케줄러 타입, 이후 목록 출력 시 대괄호 판단에 사용 */
 		cur = q->elevator->type;
 	}
 
+/* elv_list_lock: 등록된 스케줄러 목록을 안정적으로 순회하기 위해 획득 */
 	spin_lock(&elv_list_lock);
-/* elv_list를 순회하며 NVMe에 사용 가능한 scheduler 목록 출력 */
+/* elv_list 순회: 등록된 모든 스케줄러를 공백으로 구분해 출력 */
 	list_for_each_entry(e, &elv_list, list) {
 		if (e == cur)
+/* 현재 활성 스케줄러: 대괄호로 강조 (예: [mq-deadline]) */
 			len += sprintf(name+len, "[%s] ", e->elevator_name);
 		else
+/* 비활성 스케줄러: 이름만 출력 */
 			len += sprintf(name+len, "%s ", e->elevator_name);
 	}
 	spin_unlock(&elv_list_lock);
 
+/* 줄바꿈으로 출력 종료 */
 	len += sprintf(name+len, "\n");
 	mutex_unlock(&q->elevator_lock);
 
 	return len;
 }
 
+/*
+ * [한국어]
+ * elv_rb_former_request - LBA 기준 RB-tree에서 @rq 바로 앞의 request 반환
+ *
+ * @q:  request_queue (미사용이지만 인터페이스 일관성을 위해 유지)
+ * @rq: 기준 request
+ * @return: LBA가 바로 작은 request; 없으면 NULL
+ *
+ * mq-deadline·BFQ 등의 스케줄러가 front-merge 후보를 찾거나 dispatch 순서를
+ * 역방향으로 추적할 때 사용한다. rb_prev()는 O(log N)이다.
+ * elv_former_request()의 실제 구현체이며 스케줄러가 ops.former_request로
+ * 이 함수를 등록한다.
+ *
+ * 호출 체인:
+ *   elv_former_request → 스케줄러 ops.former_request → [elv_rb_former_request]
+ */
 struct request *elv_rb_former_request(struct request_queue *q,
 				      struct request *rq)
 {
+/* rb_prev: RB-tree에서 LBA 기준 직전 노드 — front-merge의 빈번한 탐색 경로 */
 	struct rb_node *rbprev = rb_prev(&rq->rb_node);
 
-/* RB-tree에서 이전 LBA 요청 탐색: NVMe dispatch에서 순차적 prefetach 후보 (추정) */
+/* 이전 노드가 있으면 해당 request 반환; 없으면 NULL (첫 번째 LBA가 가장 작음) */
 	if (rbprev)
 		return rb_entry_rq(rbprev);
 
@@ -1183,12 +1447,27 @@ struct request *elv_rb_former_request(struct request_queue *q,
 }
 EXPORT_SYMBOL(elv_rb_former_request);
 
+/*
+ * [한국어]
+ * elv_rb_latter_request - LBA 기준 RB-tree에서 @rq 바로 뒤의 request 반환
+ *
+ * @q:  request_queue (미사용이지만 인터페이스 일관성을 위해 유지)
+ * @rq: 기준 request
+ * @return: LBA가 바로 큰 request; 없으면 NULL
+ *
+ * mq-deadline·BFQ 등의 스케줄러가 back-merge 후보 및 dispatch 방향 탐색에 사용.
+ * elv_latter_request()의 실제 구현체이며 ops.next_request로 등록된다.
+ *
+ * 호출 체인:
+ *   elv_latter_request → 스케줄러 ops.next_request → [elv_rb_latter_request]
+ */
 struct request *elv_rb_latter_request(struct request_queue *q,
 				      struct request *rq)
 {
+/* rb_next: RB-tree에서 LBA 기준 직후 노드 — back-merge·dispatch 연속성 탐색 */
 	struct rb_node *rbnext = rb_next(&rq->rb_node);
 
-/* RB-tree에서 다음 LBA 요청 탐색: NVMe dispatch에서 뒤이어 제출할 연속 LBA 후보 (추정) */
+/* 다음 노드가 있으면 해당 request 반환; 없으면 NULL (마지막 LBA) */
 	if (rbnext)
 		return rb_entry_rq(rbnext);
 
