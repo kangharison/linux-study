@@ -5353,42 +5353,68 @@ static void __blk_mq_flush_list(struct request_queue *q, struct rq_list *rqs)
 	q->mq_ops->queue_rqs(rqs);
 }
 
+/*
+ * [한국어]
+ * blk_mq_extract_queue_requests - rq_list 에서 동일 request_queue 의 request 만 추출
+ *
+ * @rqs:       전체 request list (여러 queue 가 섞여있을 수 있음)
+ * @queue_rqs: 추출된 동일 queue request 들을 담을 출력 list
+ * @return:    추출한 request 수 (depth)
+ *
+ * plug 에 여러 queue (NVMe namespace, md device 등) 의 request 가 섞여있을 때
+ * 첫 번째 request 의 queue 를 기준으로 같은 queue 의 request 들만 뽑아낸다.
+ * 나머지는 rqs 에 그대로 남아 다음 호출에서 처리된다.
+ */
 static unsigned blk_mq_extract_queue_requests(struct rq_list *rqs,
 					      struct rq_list *queue_rqs)
 {
+	/* [한국어] 첫 번째 request 를 꺼내 기준 queue 결정 */
 	struct request *rq = rq_list_pop(rqs);
 	struct request_queue *this_q = rq->q;
 	struct request **prev = &rqs->head;
 	struct rq_list matched_rqs = {};
 	struct request *last = NULL;
+	/* [한국어] depth: 이 queue 에서 추출한 request 수 */
 	unsigned depth = 1;
 
 	rq_list_add_tail(&matched_rqs, rq);
 	while ((rq = *prev)) {
 		if (rq->q == this_q) {
-// 동일 request_queue(NVMe namespace) request 만 묶음
-			/* move rq from rqs to matched_rqs */
+			/* [한국어] 같은 queue: matched_rqs 로 이동 */
 			*prev = rq->rq_next;
 			rq_list_add_tail(&matched_rqs, rq);
 			depth++;
 		} else {
 			/* leave rq in rqs */
+			/* [한국어] 다른 queue: rqs 에 그대로 둠 */
 			prev = &rq->rq_next;
 			last = rq;
 		}
 	}
 
+	/* [한국어] rqs->tail 갱신: 마지막으로 남은 request 포인터 */
 	rqs->tail = last;
 	*queue_rqs = matched_rqs;
 	return depth;
 }
 
+/*
+ * [한국어]
+ * blk_mq_dispatch_queue_requests - 동일 queue 의 request list 를 batch dispatch
+ *
+ * @rqs:   dispatch 할 request list (모두 동일 request_queue)
+ * @depth: list 의 request 수 (tracepoint 용)
+ *
+ * 드라이버가 queue_rqs 를 제공하면 __blk_mq_flush_list 로 일괄 처리.
+ * 제공하지 않거나 남은 request 가 있으면 blk_mq_issue_direct 로 개별 발행.
+ */
 static void blk_mq_dispatch_queue_requests(struct rq_list *rqs, unsigned depth)
 {
 	struct request_queue *q = rq_list_peek(rqs)->q;
 
+	/* [한국어] block_unplug tracepoint: blktrace/eBPF 가 unplug 이벤트 추적.
+	 * true: 동기 unplug (from_schedule=false) */
 	trace_block_unplug(q, depth, true);
-// trace: plug list 의 batch unplug 기록
 
 	/*
 	 * Peek first request and see if we have a ->queue_rqs() hook.
@@ -5397,16 +5423,29 @@ static void blk_mq_dispatch_queue_requests(struct rq_list *rqs, unsigned depth)
 	 * same queue, caller must ensure that's the case.
 	 */
 	if (q->mq_ops->queue_rqs) {
-// driver 가 queue_rqs() 를 제공하면 batch 로 NVMe SQ 제출
+		/* [한국어] queue_rqs hook 있음: 드라이버에 list 를 한 번에 전달.
+		 * NVMe: SQ entry 를 일괄 기록 후 doorbell 한 번 → CPU 효율적 */
 		blk_mq_run_dispatch_ops(q, __blk_mq_flush_list(q, rqs));
 		if (rq_list_empty(rqs))
+			/* [한국어] 모두 처리됨: 종료 */
 			return;
 	}
 
+	/* [한국어] queue_rqs 없거나 일부 남음: blk_mq_issue_direct 로 개별 발행 */
 	blk_mq_run_dispatch_ops(q, blk_mq_issue_direct(rqs));
-// 그렇지 않으면 개별 issue_direct 로 NVMe SQ 제출
 }
 
+/*
+ * [한국어]
+ * blk_mq_dispatch_list - rq_list 에서 동일 hctx/ctx 의 request 를 묶어 dispatch
+ *
+ * @rqs:        dispatch 할 request list (여러 hctx/ctx 가 섞일 수 있음)
+ * @from_sched: kblockd workqueue 에서 호출되면 true
+ *
+ * plug list 또는 requeue list 에서 동일 hctx+ctx+passthrough 조합의 request 를
+ * 한 번에 묶어 elevator, sw queue, 또는 hctx->dispatch 에 삽입하고 run 한다.
+ * 속성이 다른 request 는 requeue_list 에 남겨 다음 호출에서 처리.
+ */
 static void blk_mq_dispatch_list(struct rq_list *rqs, bool from_sched)
 {
 	struct blk_mq_hw_ctx *this_hctx = NULL;
@@ -5420,13 +5459,13 @@ static void blk_mq_dispatch_list(struct rq_list *rqs, bool from_sched)
 		struct request *rq = rq_list_pop(rqs);
 
 		if (!this_hctx) {
-// 같은 hctx/ctx/passthrough 여부인 request 들끼리 묶음
+			/* [한국어] 첫 request: 기준 hctx/ctx/passthrough 설정 */
 			this_hctx = rq->mq_hctx;
 			this_ctx = rq->mq_ctx;
 			is_passthrough = blk_rq_is_passthrough(rq);
 		} else if (this_hctx != rq->mq_hctx || this_ctx != rq->mq_ctx ||
-// hctx/ctx/passthrough 속성이 다륾면 requeue_list 로 분리
 			   is_passthrough != blk_rq_is_passthrough(rq)) {
+			/* [한국어] hctx/ctx/passthrough 속성이 달라지면 다음 round 로 미룸 */
 			rq_list_add_tail(&requeue_list, rq);
 			continue;
 		}
@@ -5434,44 +5473,74 @@ static void blk_mq_dispatch_list(struct rq_list *rqs, bool from_sched)
 		depth++;
 	} while (!rq_list_empty(rqs));
 
+	/* [한국어] 처리 못한 request 는 rqs 에 돌려줌 */
 	*rqs = requeue_list;
+	/* [한국어] block_unplug tracepoint: !from_sched 이면 동기 unplug */
 	trace_block_unplug(this_hctx->queue, depth, !from_sched);
 
+	/* [한국어] q_usage_counter: dispatch 동안 queue 가 사라지지 않도록 참조 획득 */
 	percpu_ref_get(&this_hctx->queue->q_usage_counter);
-// queue 사용 카운트 획득: dispatch 동안 queue 생존 보장
 	/* passthrough requests should never be issued to the I/O scheduler */
 	if (is_passthrough) {
-// passthrough 는 항상 hctx->dispatch 로 직접 삽입
+		/* [한국어] passthrough (NVMe admin): elevator 우회 → hctx->dispatch 직접 삽입 */
 		spin_lock(&this_hctx->lock);
 		list_splice_tail_init(&list, &this_hctx->dispatch);
 		spin_unlock(&this_hctx->lock);
 		blk_mq_run_hw_queue(this_hctx, from_sched);
 	} else if (this_hctx->queue->elevator) {
-// elevator 사용 시 scheduler 큐로 insert_requests
+		/* [한국어] IO scheduler 있음: elevator 큐에 삽입 후 run */
 		this_hctx->queue->elevator->type->ops.insert_requests(this_hctx,
 				&list, 0);
 		blk_mq_run_hw_queue(this_hctx, from_sched);
 	} else {
+		/* [한국어] elevator 없음: sw queue(ctx->rq_lists) 에 삽입 후 run */
 		blk_mq_insert_requests(this_hctx, this_ctx, &list, from_sched);
-// elevator 미사용 시 sw queue 로 insert_requests
 	}
 	percpu_ref_put(&this_hctx->queue->q_usage_counter);
 }
 
+/*
+ * [한국어]
+ * blk_mq_dispatch_multiple_queue_requests - 여러 queue 의 request 를 queue 별로 분리 dispatch
+ *
+ * @rqs: 여러 request_queue 의 request 가 섞인 rq_list
+ *
+ * plug 에 md, 여러 NVMe namespace 등 다른 queue 의 request 가 섞여 있을 때 사용.
+ * blk_mq_extract_queue_requests 로 동일 queue 묶음을 꺼내 각각 dispatch 한다.
+ */
 static void blk_mq_dispatch_multiple_queue_requests(struct rq_list *rqs)
 {
 	do {
 		struct rq_list queue_rqs;
 		unsigned depth;
 
+		/* [한국어] 동일 queue 의 request 들을 queue_rqs 로 추출 */
 		depth = blk_mq_extract_queue_requests(rqs, &queue_rqs);
-// 같은 queue(NVMe namespace) 의 request 만 추출
+		/* [한국어] queue_rqs 를 batch dispatch (queue_rqs hook 사용 가능) */
 		blk_mq_dispatch_queue_requests(&queue_rqs, depth);
+		/* [한국어] batch dispatch 에서 처리 못한 나머지를 blk_mq_dispatch_list 로 */
 		while (!rq_list_empty(&queue_rqs))
 			blk_mq_dispatch_list(&queue_rqs, false);
 	} while (!rq_list_empty(rqs));
 }
 
+/*
+ * [한국어]
+ * blk_mq_flush_plug_list - plug 에 축적된 request 들을 일괄 dispatch (unplug)
+ *
+ * @plug:          flush 할 blk_plug
+ * @from_schedule: blk_schedule_flush_plug 등 스케줄러에서 호출되면 true
+ *
+ * blk_finish_plug 또는 I/O scheduler 종료 시 호출된다.
+ * elevator 없고 동기 경로면 batch dispatch (queue_rqs/issue_direct).
+ * elevator 있거나 from_schedule 이면 blk_mq_dispatch_list 로 개별 insert + run.
+ * 재귀 호출 방지를 위해 rq_count 를 먼저 0 으로 초기화한다.
+ *
+ * 호출 체인:
+ *   blk_finish_plug → [blk_mq_flush_plug_list]
+ *   → blk_mq_dispatch_queue_requests / blk_mq_dispatch_list
+ *   → blk_mq_insert_requests / __blk_mq_flush_list → nvme_queue_rq
+ */
 void blk_mq_flush_plug_list(struct blk_plug *plug, bool from_schedule)
 {
 	unsigned int depth;
@@ -5483,84 +5552,137 @@ void blk_mq_flush_plug_list(struct blk_plug *plug, bool from_schedule)
 	 * bail out specifically if rq_count is 0 rather than checking
 	 * whether the mq_list is empty.
 	 */
+	/* [한국어] rq_count == 0: 이미 flush 되었거나 재귀 호출 — 즉시 반환 */
 	if (plug->rq_count == 0)
-// plug->rq_count == 0 이면 이미 flush 된 것으로 간주
 		return;
+	/* [한국어] rq_count 를 먼저 0 으로 설정: 재귀 호출 방지 */
 	depth = plug->rq_count;
 	plug->rq_count = 0;
 
 	if (!plug->has_elevator && !from_schedule) {
+		/* [한국어] elevator 없고 동기 경로: batch dispatch fast path */
 		if (plug->multiple_queues) {
+			/* [한국어] 여러 queue 가 섞임: queue 별로 분리 후 batch dispatch */
 			blk_mq_dispatch_multiple_queue_requests(&plug->mq_list);
-// 여러 NVMe SQ 에 걸친 request 들은 큐별로 분리 발행
 			return;
 		}
 
+		/* [한국어] 단일 queue: 전체 list 를 한 번에 batch dispatch */
 		blk_mq_dispatch_queue_requests(&plug->mq_list, depth);
-// 단일 queue 면 batch unplug 로 NVMe SQ 발행
 		if (rq_list_empty(&plug->mq_list))
 			return;
 	}
 
+	/* [한국어] elevator 있거나 from_schedule: dispatch_list 로 개별 처리.
+	 * 남은 request 들이 있는 한 반복 */
 	do {
 		blk_mq_dispatch_list(&plug->mq_list, from_schedule);
 	} while (!rq_list_empty(&plug->mq_list));
 }
 
+/*
+ * [한국어]
+ * blk_mq_try_issue_list_directly - list 의 request 를 동기 즉시 발행
+ *
+ * @hctx: 이 list 에 속하는 HW queue (NVMe SQ 에 대응)
+ * @list: 발행할 struct request 의 queuelist 연결 목록
+ *
+ * blk_mq_insert_requests 의 dispatch_busy=0 fast path 에서 호출.
+ * list 의 request 를 앞에서부터 하나씩 꺼내 blk_mq_request_issue_directly 로
+ * 드라이버(nvme_queue_rq)에 전달한다. 자원 부족(BLK_STS_RESOURCE/DEV_RESOURCE)
+ * 이면 bypass_insert 후 hctx->run 예약, 기타 오류는 즉시 완료 처리.
+ *
+ * 호출 체인:
+ *   blk_mq_insert_requests → [blk_mq_try_issue_list_directly]
+ *   → blk_mq_request_issue_directly → nvme_queue_rq
+ */
 static void blk_mq_try_issue_list_directly(struct blk_mq_hw_ctx *hctx,
 		struct list_head *list)
 {
+	/* [한국어] queued: 이번 배치에서 성공적으로 SQ 에 삽입된 request 수 */
 	int queued = 0;
 	blk_status_t ret = BLK_STS_OK;
 
 	while (!list_empty(list)) {
+		/* [한국어] list 에서 첫 번째 request 를 꺼냄 */
 		struct request *rq = list_first_entry(list, struct request,
 				queuelist);
 
 		list_del_init(&rq->queuelist);
+		/* [한국어] last=list_empty(list): 마지막 request 이면 true → commit_rqs 유발 */
 		ret = blk_mq_request_issue_directly(rq, list_empty(list));
-// list 의 request 를 하나씩 NVMe driver 로 즉시 발행
 		switch (ret) {
-		case BLK_STS_OK: /* NVMe 명령이 SQ 에 성공적으로 배치됨 */
+		case BLK_STS_OK:
+			/* [한국어] NVMe SQ 에 성공적으로 배치됨 */
 			queued++;
 			break;
-		case BLK_STS_RESOURCE: /* NVMe SQ/PRP/SGL 자원 부족, 재시도 예약 */
-		case BLK_STS_DEV_RESOURCE: /* NVMe 컨트롤러 내부 자원 부족 */
+		case BLK_STS_RESOURCE:
+			/* [한국어] NVMe CID(tag)/SQ entry 자원 부족 — bypass 삽입 후 중단 */
+		case BLK_STS_DEV_RESOURCE:
+			/* [한국어] NVMe 컨트롤러 내부 자원 부족 — bypass 삽입 후 중단 */
 			blk_mq_request_bypass_insert(rq, 0);
-// RESOURCE 시 bypass dispatch list 로 재삽입
+			/* [한국어] 남은 request 없으면 hctx run 예약하여 재시도 */
 			if (list_empty(list))
 				blk_mq_run_hw_queue(hctx, false);
 			goto out;
 		default:
+			/* [한국어] 기타 오류: request 를 즉시 에러 완료 처리 */
 			blk_mq_end_request(rq, ret);
 			break;
 		}
 	}
 
 out:
+	/* [한국어] 자원 부족으로 중단됐으면 commit_rqs: NVMe doorbell 일괄 처리 */
 	if (ret != BLK_STS_OK)
-		blk_mq_commit_rqs(hctx, queued, false); /* batch submit 마무리 (NVMe doorbell 유도, 추정) */
+		blk_mq_commit_rqs(hctx, queued, false);
 }
 
+/*
+ * [한국어]
+ * blk_mq_attempt_bio_merge - bio 를 기존 request 에 병합 시도
+ *
+ * @q:      request_queue (NVMe 네임스페이스)
+ * @bio:    병합하려는 신규 bio
+ * @nr_segs: bio 의 segment 수
+ * @return: true = 병합 성공(bio 소유권 이전됨), false = 새 request 필요
+ *
+ * blk_mq_submit_bio 의 초기 단계에서 호출.
+ * merge 가 성공하면 새 request 할당(CID 획득) 없이 기존 NVMe 명령에 IO 가 합쳐진다.
+ * 1) plug merge: 현재 스레드의 plug list 내 인접한 request 와 병합.
+ * 2) scheduler merge: elevator (예: mq-deadline) 가 관리하는 RB-tree 에서 병합.
+ */
 static bool blk_mq_attempt_bio_merge(struct request_queue *q,
 				     struct bio *bio, unsigned int nr_segs)
 {
 	if (!blk_queue_nomerges(q) && bio_mergeable(bio)) {
-// queue 가 merge 금지 상태가 아니고 bio 가 merge 가능할 때
+		/* [한국어] REQ_NOMERGE 플래그 없고 bio 가 merge 가능하면 시도 */
 		if (blk_attempt_plug_merge(q, bio, nr_segs))
-// plug merge: 동일 thread 의 NVMe IO 병합 시도
+			/* [한국어] plug list 에서 병합 성공: bio 는 기존 request 로 흡수됨 */
 			return true;
 		if (blk_mq_sched_bio_merge(q, bio, nr_segs))
-// scheduler merge: elevator 가 NVMe IO reorder/merge 시도
+			/* [한국어] elevator RB-tree 에서 병합 성공 */
 			return true;
 	}
 	return false;
 }
 
 /*
- * blk_mq_get_new_requests: bio 를 위한 request 를 할당.
- *   NVMe 관점: NVMe 명령(slot)을 확보하기 위해 context, hctx, tag(CID)
- *   를 순차적으로 할당.
+ * [한국어]
+ * blk_mq_get_new_requests - bio 에 대한 새 request(NVMe 명령 슬롯) 할당
+ *
+ * @q:    request_queue (NVMe 네임스페이스)
+ * @plug: 현재 스레드의 blk_plug (배치 CID 사전 할당용)
+ * @bio:  요청 원본 bio
+ * @return: 할당된 request 포인터, 실패 시 NULL
+ *
+ * blk_mq_submit_bio 에서 cached_request 가 없을 때 호출.
+ * QoS throttle → CID/tag 할당 → 실패 시 QoS cleanup 순으로 진행.
+ * plug 가 있으면 nr_ios 만큼 sbitmap slot 을 미리 예약해 배치 효율을 높인다.
+ *
+ * 호출 체인:
+ *   blk_mq_submit_bio → [blk_mq_get_new_requests]
+ *   → rq_qos_throttle → __blk_mq_alloc_requests → blk_mq_get_tag
  */
 static struct request *blk_mq_get_new_requests(struct request_queue *q,
 					       struct blk_plug *plug,
@@ -5570,58 +5692,94 @@ static struct request *blk_mq_get_new_requests(struct request_queue *q,
 		.q		= q,
 		.flags		= 0,
 		.shallow_depth	= 0,
+		/* [한국어] cmd_flags: REQ_OP_READ/WRITE 등 bio 의 opcode */
 		.cmd_flags	= bio->bi_opf,
 		.rq_flags	= 0,
+		/* [한국어] nr_tags: 기본 1, plug 있으면 nr_ios 만큼 일괄 예약 */
 		.nr_tags	= 1,
 		.cached_rqs	= NULL,
+		/* [한국어] ctx/hctx: 할당 후 smp_processor_id 기준으로 채워짐 */
 		.ctx		= NULL,
 		.hctx		= NULL
 	};
 	struct request *rq;
 
+	/* [한국어] rq_qos_throttle: iocost/iolatency QoS 정책에 따라 이 bio 를 지연/제한 */
 	rq_qos_throttle(q, bio);
-// rq_qos_throttle(): NVMe IO QoS throttle (예: iocost)
 
 	if (plug) {
-// plug 있을 때는 batch CID 할당을 시도
+		/* [한국어] plug 배치 최적화: nr_ios 개 CID 를 한 번에 sbitmap 예약 */
 		data.nr_tags = plug->nr_ios;
 		plug->nr_ios = 1;
 		data.cached_rqs = &plug->cached_rqs;
 	}
 
+	/* [한국어] __blk_mq_alloc_requests: ctx/hctx 선택 + sbitmap 에서 CID 획득 */
 	rq = __blk_mq_alloc_requests(&data);
-// NVMe CID(tag) 와 hctx(SQ) 할당
 	if (unlikely(!rq))
+		/* [한국어] 할당 실패: throttle 에서 증가시킨 QoS 카운터를 되돌림 */
 		rq_qos_cleanup(q, bio);
-// 할당 실패 시 QoS cleanup
 	return rq;
 }
 
 /*
  * Check if there is a suitable cached request and return it.
  */
+/*
+ * [한국어]
+ * blk_mq_peek_cached_request - plug 의 pre-allocated request 를 재사용 가능한지 확인
+ *
+ * @plug: 현재 스레드의 blk_plug
+ * @q:    요청 대상 request_queue (NVMe 네임스페이스)
+ * @opf:  bio->bi_opf (REQ_OP_READ/WRITE 등)
+ * @return: 재사용 가능한 request 포인터, 없으면 NULL
+ *
+ * blk_mq_get_new_requests 의 배치 CID 사전 할당 최적화의 소비 측.
+ * cached_rqs 에 있는 request 가 (queue, hctx type, flush) 모두 일치하면
+ * 새 CID 를 sbitmap 에서 획득하지 않고 기존 slot 을 재사용한다.
+ * READ가 DEFAULT hctx type 에 매핑될 수 있음을 허용하는 예외 조건 포함.
+ */
 static struct request *blk_mq_peek_cached_request(struct blk_plug *plug,
 		struct request_queue *q, blk_opf_t opf)
 {
+	/* [한국어] hctx type: DEFAULT(일반 read/write) / READ(전용 read 큐) / POLL */
 	enum hctx_type type = blk_mq_get_hctx_type(opf);
 	struct request *rq;
 
+	/* [한국어] plug 없으면 cached request 도 없음 */
 	if (!plug)
 		return NULL;
+	/* [한국어] cached_rqs 의 첫 번째 request 를 들여다봄 (pop 하지 않음) */
 	rq = rq_list_peek(&plug->cached_rqs);
+	/* [한국어] 다른 queue (NVMe 네임스페이스) 의 request 면 재사용 불가 */
 	if (!rq || rq->q != q)
 		return NULL;
+	/* [한국어] hctx type 불일치: READ 요청이 DEFAULT hctx 에 배치된 경우만 허용 */
 	if (type != rq->mq_hctx->type &&
 	    (type != HCTX_TYPE_READ || rq->mq_hctx->type != HCTX_TYPE_DEFAULT))
 		return NULL;
+	/* [한국어] flush 여부 불일치: flush request 는 flush request 캐시만 재사용 */
 	if (op_is_flush(rq->cmd_flags) != op_is_flush(opf))
 		return NULL;
 	return rq;
 }
 
+/*
+ * [한국어]
+ * blk_mq_use_cached_rq - pre-allocated cached request 를 이 bio 에 바인딩
+ *
+ * @rq:   blk_mq_peek_cached_request 가 반환한 cached request
+ * @plug: 현재 스레드의 blk_plug (cached_rqs 소유자)
+ * @bio:  이 request 에 매핑할 bio
+ *
+ * QoS throttle 이 block 되면 plug 가 flush 되어 cached_rqs 가 사라지므로,
+ * 반드시 pop(소유권 이전) 후에 throttle 을 호출해야 한다.
+ * 이후 rq 의 시간/cmd_flags/queuelist 를 초기화하여 재사용 준비 완료.
+ */
 static void blk_mq_use_cached_rq(struct request *rq, struct blk_plug *plug,
 		struct bio *bio)
 {
+	/* [한국어] cached_rqs 에서 rq 를 pop: 소유권을 호출자 측으로 이전 */
 	if (rq_list_pop(&plug->cached_rqs) != rq)
 		WARN_ON_ONCE(1);
 
@@ -5630,18 +5788,36 @@ static void blk_mq_use_cached_rq(struct request *rq, struct blk_plug *plug,
 	 * plug and hence killed the cached_rq list as well. Pop this entry
 	 * before we throttle.
 	 */
+	/* [한국어] QoS throttle: iocost/iolatency 가 이 bio 를 지연시킬 수 있음 */
 	rq_qos_throttle(rq->q, bio);
 
+	/* [한국어] rq 시작 시각 초기화: 타임아웃 계산의 기준 */
 	blk_mq_rq_time_init(rq, blk_time_get_ns());
+	/* [한국어] cmd_flags: 이 bio 의 opcode 로 갱신 */
 	rq->cmd_flags = bio->bi_opf;
+	/* [한국어] queuelist 초기화: plug list / scheduler queue 삽입 준비 */
 	INIT_LIST_HEAD(&rq->queuelist);
 }
 
+/*
+ * [한국어]
+ * bio_unaligned - bio 의 LBA/length 가 논리 블록 크기 정렬을 위반하는지 검사
+ *
+ * @bio: 검사 대상 bio
+ * @q:   request_queue (NVMe 네임스페이스의 logical_block_size 보유)
+ * @return: true = 정렬 위반 (즉시 EIO), false = 정상
+ *
+ * NVMe 컨트롤러는 LBA 단위(통상 512B 또는 4KiB)로만 명령을 수용한다.
+ * bs_mask = logical_block_size - 1: 하위 비트 마스크로 정렬 여부 확인.
+ * bi_sector 는 512B sector 단위이므로 << SECTOR_SHIFT 로 byte 단위로 변환 후 검사.
+ */
 static bool bio_unaligned(const struct bio *bio, struct request_queue *q)
 {
+	/* [한국어] bs_mask: 논리 블록 크기 - 1. 이 비트가 켜지면 정렬 위반 */
 	unsigned int bs_mask = queue_logical_block_size(q) - 1;
 
 	/* .bi_sector of any zero sized bio need to be initialized */
+	/* [한국어] bi_size 가 블록 크기 배수인지, bi_sector 바이트 오프셋이 정렬됐는지 확인 */
 	if ((bio->bi_iter.bi_size & bs_mask) ||
 	    ((bio->bi_iter.bi_sector << SECTOR_SHIFT) & bs_mask))
 		return true;
@@ -5662,19 +5838,33 @@ static bool bio_unaligned(const struct bio *bio, struct request_queue *q)
  * request creation.
  */
 /*
- * blk_mq_submit_bio: 파일시스템/페이지캐시로부터 받은 bio 의 상위
- *   진입점.
- *   NVMe 관점: submit_bio -> blk_mq_submit_bio -> blk_mq_get_new_requests
- *   -> __blk_mq_alloc_requests(tag/CID 할당) -> blk_mq_bio_to_request
- *   -> blk_mq_try_issue_directly / blk_mq_insert_request ->
- *   blk_mq_run_hw_queue -> blk_mq_dispatch_rq_list ->
- *   q->mq_ops->queue_rq -> nvme_queue_rq -> nvme_submit_cmd(doorbell).
- *   merge, split, plug, scheduler 처리를 모두 수행.
+ * [한국어]
+ * blk_mq_submit_bio - bio 를 NVMe SQ 까지 전달하는 중심 경로
+ *
+ * @bio: 파일시스템/페이지캐시가 제출한 I/O 요청 (원자적 bio 단위)
+ *
+ * 모든 블록 I/O 는 이 함수를 거친다.
+ * 전처리(정렬/분할/무결성/merge/zone-write-plug) → request 할당(CID) →
+ * 발행 경로 결정(plug batch / scheduler / 직접 dispatch) 의 흐름.
+ *
+ * NVMe 관점 전체 호출 체인:
+ *   submit_bio (VFS/파일시스템) → [blk_mq_submit_bio]
+ *   → blk_mq_get_new_requests → __blk_mq_alloc_requests (CID = sbitmap slot)
+ *   → blk_mq_bio_to_request (bio → rq field 복사, LBA/length/PRP 기초)
+ *   → (plug 있으면) blk_add_rq_to_plug → blk_mq_flush_plug_list
+ *   → blk_mq_dispatch_rq_list → nvme_queue_rq → nvme_submit_cmd (SQ doorbell)
+ *   → (직접) blk_mq_try_issue_directly → nvme_queue_rq → doorbell
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트 (I/O 를 발행하는 유저/커널 스레드).
+ * 인터럽트/softirq 에서 호출 금지.
  */
 void blk_mq_submit_bio(struct bio *bio)
 {
+	/* [한국어] q: bdev 에서 request_queue 를 얻어옴 (NVMe 네임스페이스 큐) */
 	struct request_queue *q = bdev_get_queue(bio->bi_bdev);
+	/* [한국어] plug: 현재 프로세스의 IO plug (배치 batch 최적화용) */
 	struct blk_plug *plug = current->plug;
+	/* [한국어] is_sync: REQ_OP_READ 등 동기 작업이면 true — 직접 dispatch 경로 결정 */
 	const int is_sync = op_is_sync(bio->bi_opf);
 	unsigned int integrity_action;
 	struct blk_mq_hw_ctx *hctx;
@@ -5685,6 +5875,7 @@ void blk_mq_submit_bio(struct bio *bio)
 	/*
 	 * If the plug has a cached request for this queue, try to use it.
 	 */
+	/* [한국어] cached_request 확인: plug 배치 사전 할당된 CID 재사용 가능하면 peek */
 	rq = blk_mq_peek_cached_request(plug, q, bio->bi_opf);
 
 	/*
@@ -5694,8 +5885,10 @@ void blk_mq_submit_bio(struct bio *bio)
 	 * the target zone. Go straight to preparing a request for it.
 	 */
 	if (bio_zone_write_plugging(bio)) {
-// zone write plug bio 는 이미 준비된 상태 -> 바로 request 생성
+		/* [한국어] zoned NVMe zone write plug 에서 해제된 bio:
+		 * q_usage_counter 이미 보유, 정렬/분할 처리 완료 → request 할당 직행 */
 		nr_segs = bio->__bi_nr_segments;
+		/* [한국어] cached_rq 는 q_usage_counter 를 보유하므로 미리 반납 */
 		if (rq)
 			blk_queue_exit(q);
 		goto new_request;
@@ -5706,8 +5899,9 @@ void blk_mq_submit_bio(struct bio *bio)
 	 * don't have to acquire a new one if we use it.
 	 */
 	if (!rq) {
+		/* [한국어] cached_rq 없으면 q_usage_counter 직접 획득:
+		 * queue freeze/teardown 중이면 bio 에 EIO 반환 */
 		if (unlikely(bio_queue_enter(bio)))
-// queue 사용 카운드 획득 실패 시 bio error
 			return;
 	}
 
@@ -5717,64 +5911,71 @@ void blk_mq_submit_bio(struct bio *bio)
 	 * have to be done with queue usage counter held.
 	 */
 	if (unlikely(bio_unaligned(bio, q))) {
-// bio_unaligned: NVMe LBA/length 정렬 위반 시 즉시 오류
+		/* [한국어] NVMe LBA/length 정렬 위반: EIO 반환 후 종료 */
 		bio_io_error(bio);
 		goto queue_exit;
 	}
 
 	if ((bio->bi_opf & REQ_POLLED) && !blk_mq_can_poll(q)) {
-// REQ_POLLED 설정 시 poll queue 지원 여부 확인
+		/* [한국어] REQ_POLLED 요청인데 poll 큐 없음: ENOTSUPP 반환 */
 		bio->bi_status = BLK_STS_NOTSUPP;
 		bio_endio(bio);
 		goto queue_exit;
 	}
 
+	/* [한국어] __bio_split_to_limits: NVMe max_sectors/max_segments 제한에 맞게
+	 * bio 를 분할. 분할된 경우 원본 bio 는 체인에 연결되고 첫 조각이 반환됨 */
 	bio = __bio_split_to_limits(bio, &q->limits, &nr_segs);
-// __bio_split_to_limits(): NVMe max sectors/segments 제한에 맞게 분할
 	if (!bio)
+		/* [한국어] 분할 자체가 실패 (메모리 등): 이미 에러 처리됨 */
 		goto queue_exit;
 
+	/* [한국어] NVMe PI (Protection Information): T10 DIF/DIX 무결성 메타데이터 준비 */
 	integrity_action = bio_integrity_action(bio);
-// bio_integrity_prep(): NVMe PI 메타데이터 연결
 	if (integrity_action)
 		bio_integrity_prep(bio, integrity_action);
 
+	/* [한국어] bio_issue 통계 초기화 (cgroup IO accounting 기준 시각 등) */
 	blk_mq_bio_issue_init(q, bio);
 	if (blk_mq_attempt_bio_merge(q, bio, nr_segs))
-// bio merge 성공 시 NVMe SQ 제출 없이 상위로 즉시 완료
+		/* [한국어] bio 가 기존 request 에 merge 성공: 새 CID 불필요, 즉시 반환 */
 		goto queue_exit;
 
 	if (bio_needs_zone_write_plugging(bio)) {
-// zone write plug: zoned NVMe 의 sequential write 제어
+		/* [한국어] zoned NVMe sequential write zone: zone write plug 에 등록.
+		 * 이 zone 에 이미 진행 중인 write 가 있으면 true 반환 → 대기 */
 		if (blk_zone_plug_bio(bio, nr_segs))
 			goto queue_exit;
 	}
 
 new_request:
 	if (rq) {
+		/* [한국어] pre-allocated cached_rq 재사용: sbitmap 획득 없이 CID 재활용 */
 		blk_mq_use_cached_rq(rq, plug, bio);
-// cached request 재사용: 기존 NVMe CID 를 갱신하여 사용
 	} else {
+		/* [한국어] 새 CID 할당: QoS throttle → sbitmap → hctx/ctx 선택 */
 		rq = blk_mq_get_new_requests(q, plug, bio);
-// 새로운 NVMe CID 할당
 		if (unlikely(!rq)) {
+			/* [한국어] CID 고갈: REQ_NOWAIT 이면 EAGAIN, 아니면 block */
 			if (bio->bi_opf & REQ_NOWAIT)
-// REQ_NOWAIT 이고 CID 없으면 EAGAIN
 				bio_wouldblock_error(bio);
 			goto queue_exit;
 		}
 	}
 
+	/* [한국어] block_getrq tracepoint: blktrace 가 request 생성 시각 기록 */
 	trace_block_getrq(bio);
 
+	/* [한국어] rq_qos_track: iocost/iolatency 가 이 request 에 QoS 어카운팅 시작 */
 	rq_qos_track(q, rq, bio);
-// rq_qos_track(): NVMe IO QoS accounting 시작
 
+	/* [한국어] bio → rq 필드 복사: LBA(bi_iter), length(bi_size),
+	 * nr_phys_segments, crypto context, io accounting 등 */
 	blk_mq_bio_to_request(rq, bio, nr_segs);
-// bio 데이터를 request 에 복사 -> NVMe LBA/length/PRP/SGL 기초
 
+	/* [한국어] NVMe inline encryption: keyslot manager 에서 키 슬롯 예약.
+	 * 실패하면 bio 에 에러 반환 후 rq 해제 */
 	ret = blk_crypto_rq_get_keyslot(rq);
-// encryption keyslot 획득: NVMe inline encryption 명령
 	if (ret != BLK_STS_OK) {
 		bio->bi_status = ret;
 		bio_endio(bio);
@@ -5783,28 +5984,34 @@ new_request:
 	}
 
 	if (bio_zone_write_plugging(bio))
-// zoned NVMe request 초기화
+		/* [한국어] zone write plug 에서 해제된 bio: zone sequence 추적 초기화 */
 		blk_zone_write_plug_init_request(rq);
 
 	if (op_is_flush(bio->bi_opf) && blk_insert_flush(rq))
-// flush request 는 blk-flush 상태머신으로 전달
+		/* [한국어] flush(FUA/FUA+WRITE_SAME): blk-flush 상태머신으로 전달.
+		 * true = 상태머신이 rq 를 소유했음 → 여기서 바로 반환 */
 		return;
 
 	if (plug) {
+		/* [한국어] plug 활성: request 를 plug->mq_list 에 누적.
+		 * blk_finish_plug 시 blk_mq_flush_plug_list 로 일괄 dispatch */
 		blk_add_rq_to_plug(plug, rq);
-// plug 존재 시 request 를 plug list 에 쌓음
 		return;
 	}
 
+	/* [한국어] plug 없음: 즉시 dispatch 경로 */
 	hctx = rq->mq_hctx;
 	if ((rq->rq_flags & RQF_USE_SCHED) ||
-// dispatch_busy 이거나 단일 SQ+async 면 scheduler/sw queue 경유
 	    (hctx->dispatch_busy && (q->nr_hw_queues == 1 || !is_sync))) {
+		/* [한국어] scheduler 사용(RQF_USE_SCHED) 또는
+		 * dispatch_busy=1 이면서 단일 HW queue 이거나 async I/O:
+		 * sw queue 삽입 후 kblockd 에서 dispatch */
 		blk_mq_insert_request(rq, 0);
 		blk_mq_run_hw_queue(hctx, true);
 	} else {
+		/* [한국어] dispatch_busy 없고 sync + 다중 HW queue:
+		 * 현재 CPU 에서 nvme_queue_rq 를 바로 호출 (doorbell) */
 		blk_mq_run_dispatch_ops(q, blk_mq_try_issue_directly(hctx, rq));
-// sync 경로: blk_mq_try_issue_directly -> nvme_queue_rq -> doorbell
 	}
 	return;
 
@@ -5813,6 +6020,8 @@ queue_exit:
 	 * Don't drop the queue reference if we were trying to use a cached
 	 * request and thus didn't acquire one.
 	 */
+	/* [한국어] cached_rq 를 사용하려 했다면 q_usage_counter 를 획득하지 않았으므로
+	 * 반납하지 않음. 새로 획득한 경우에만 blk_queue_exit 호출 */
 	if (!rq)
 		blk_queue_exit(q);
 }
@@ -5822,15 +6031,33 @@ queue_exit:
  * blk_insert_cloned_request - Helper for stacking drivers to submit a request
  * @rq: the request being queued
  */
+/*
+ * [한국어]
+ * blk_insert_cloned_request - 스태킹 드라이버가 하위 큐에 cloned request 를 발행
+ *
+ * @rq: 상위 device 의 scheduler 를 거쳐 복제된 request
+ * @return: BLK_STS_OK 성공, BLK_STS_NOTSUPP/IOERR 실패
+ *
+ * dm(device mapper), md(RAID) 등 스태킹 드라이버에서 사용.
+ * 상위 device 의 scheduler 에서 내려온 rq 를 하위 NVMe 큐에 직접 삽입한다.
+ * 하위 큐에는 scheduler 가 있더라도 반드시 bypass 해야 한다.
+ * max_sectors/max_segments 초과 여부를 검사하여 EIO 반환.
+ *
+ * 호출 체인:
+ *   dm/md 드라이버 → [blk_insert_cloned_request]
+ *   → blk_mq_request_issue_directly → nvme_queue_rq → doorbell
+ */
 blk_status_t blk_insert_cloned_request(struct request *rq)
 {
 	struct request_queue *q = rq->q;
+	/* [한국어] max_sectors: 하위 NVMe namespace 의 최대 전송 sector 수 */
 	unsigned int max_sectors = blk_queue_get_max_sectors(rq);
+	/* [한국어] max_segments: 하위 NVMe namespace 의 최대 PRP/SGL entry 수 */
 	unsigned int max_segments = blk_rq_get_max_segments(rq);
 	blk_status_t ret;
 
 	if (blk_rq_sectors(rq) > max_sectors) {
-// cloned request 의 sector 수가 NVMe max sectors 초과 시 거부
+		/* [한국어] sector 수 초과: 하위 NVMe max_sectors 보다 크면 EIO */
 		/*
 		 * SCSI device does not have a good way to return if
 		 * Write Same/Zero is actually supported. If a device rejects
@@ -5841,6 +6068,7 @@ blk_status_t blk_insert_cloned_request(struct request *rq)
 		 * reset need to be completed with BLK_STS_NOTSUPP to avoid I/O
 		 * errors being propagated to upper layers.
 		 */
+		/* [한국어] max_sectors == 0: 기능 미지원으로 큐 제한이 0이 됨 → NOTSUPP */
 		if (max_sectors == 0)
 			return BLK_STS_NOTSUPP;
 
@@ -5853,23 +6081,25 @@ blk_status_t blk_insert_cloned_request(struct request *rq)
 	 * The queue settings related to segment counting may differ from the
 	 * original queue.
 	 */
+	/* [한국어] 하위 queue 의 segment 계산 방식으로 nr_phys_segments 재계산 */
 	rq->nr_phys_segments = blk_recalc_rq_segments(rq);
-// 하위 queue 의 segment 계산 방식에 맞게 nr_phys_segments 재계산
 	if (rq->nr_phys_segments > max_segments) {
-// nr_phys_segments > max_segments: NVMe PRP/SGL 용량 초과
+		/* [한국어] segment 수 초과: NVMe PRP/SGL 리스트 용량 초과 → EIO */
 		printk(KERN_ERR "%s: over max segments limit. (%u > %u)\n",
 			__func__, rq->nr_phys_segments, max_segments);
 		return BLK_STS_IOERR;
 	}
 
+	/* [한국어] fault injection: 테스트 목적으로 강제 EIO 발생 */
 	if (q->disk && should_fail_request(q->disk->part0, blk_rq_bytes(rq)))
 		return BLK_STS_IOERR;
 
+	/* [한국어] NVMe inline encryption: 하위 큐의 keyslot manager 에서 슬롯 예약 */
 	ret = blk_crypto_rq_get_keyslot(rq);
-// cloned passthrough 도 NVMe encryption keyslot 필요
 	if (ret != BLK_STS_OK)
 		return ret;
 
+	/* [한국어] IO accounting 시작: blk-cgroup, iostat 통계 기준 시각 기록 */
 	blk_account_io_start(rq);
 
 	/*
@@ -5877,9 +6107,10 @@ blk_status_t blk_insert_cloned_request(struct request *rq)
 	 * bypass a potential scheduler on the bottom device for
 	 * insert.
 	 */
+	/* [한국어] 상위에서 이미 스케줄링 된 request: 하위 scheduler 우회 직접 발행 */
 	blk_mq_run_dispatch_ops(q,
-// cloned request 를 NVMe SQ 로 즉시 발행
 			ret = blk_mq_request_issue_directly(rq, true));
+	/* [한국어] 발행 실패하면 IO accounting 완료 처리 (에러 완료) */
 	if (ret)
 		blk_account_io_done(rq, blk_time_get_ns());
 	return ret;
@@ -5893,14 +6124,22 @@ EXPORT_SYMBOL_GPL(blk_insert_cloned_request);
  * Description:
  *     Free all bios in @rq for a cloned request.
  */
+/*
+ * [한국어]
+ * blk_rq_unprep_clone - cloned request 의 모든 bio 를 해제
+ *
+ * @rq: 정리할 cloned request
+ *
+ * blk_rq_prep_clone 실패 경로 또는 clone 완료 후 호출.
+ * rq->bio 체인을 따라 bio_put 으로 모두 해제한다.
+ */
 void blk_rq_unprep_clone(struct request *rq)
 {
 	struct bio *bio;
 
 	while ((bio = rq->bio) != NULL) {
-// clone request 의 bio 들을 해제
+		/* [한국어] bio 체인에서 다음 bio 로 이동 후 현재 bio 해제 */
 		rq->bio = bio->bi_next;
-
 		bio_put(bio);
 	}
 }
@@ -5923,6 +6162,22 @@ EXPORT_SYMBOL_GPL(blk_rq_unprep_clone);
  *     So cloned bios must be completed before original bios, which means
  *     the caller must complete @rq before @rq_src.
  */
+/*
+ * [한국어]
+ * blk_rq_prep_clone - 원본 request 를 복제하여 cloned request 준비
+ *
+ * @rq:      복제 대상 빈 request
+ * @rq_src:  원본 request (상위 device 에서 내려온 것)
+ * @bs:      clone bio 할당에 사용할 bio_set
+ * @gfp_mask: 메모리 할당 플래그
+ * @bio_ctr: 각 clone bio 에 대해 호출될 드라이버 초기화 콜백 (NULL 가능)
+ * @data:    bio_ctr 에 전달할 private data
+ * @return:  0 성공, -ENOMEM 실패
+ *
+ * dm, md 등에서 원본 bio 의 페이지를 공유하는 shallow clone 을 생성.
+ * clone bio 가 먼저 완료되어야 원본 bio 해제 가능 (page 공유 때문).
+ * 실패 시 blk_rq_unprep_clone 으로 부분 할당된 bio 들을 정리한다.
+ */
 int blk_rq_prep_clone(struct request *rq, struct request *rq_src,
 		      struct bio_set *bs, gfp_t gfp_mask,
 		      int (*bio_ctr)(struct bio *, struct bio *, void *),
@@ -5930,21 +6185,25 @@ int blk_rq_prep_clone(struct request *rq, struct request *rq_src,
 {
 	struct bio *bio_src;
 
+	/* [한국어] bs 미지정이면 기본 파일시스템 bio_set 사용 */
 	if (!bs)
 		bs = &fs_bio_set;
 
 	__rq_for_each_bio(bio_src, rq_src) {
+		/* [한국어] bio_alloc_clone: 동일 page 를 참조하는 shallow clone bio 생성.
+		 * 복사 없이 page pointer 만 공유 — zero-copy */
 		struct bio *bio	 = bio_alloc_clone(rq->q->disk->part0, bio_src,
-// bio_alloc_clone(): 동일한 페이지를 참조하는 cloned bio 생성
 					gfp_mask, bs);
 		if (!bio)
 			goto free_and_out;
 
+		/* [한국어] 드라이버 custom bio 초기화: dm_crypt 등이 여기서 추가 설정 */
 		if (bio_ctr && bio_ctr(bio, bio_src, data)) {
 			bio_put(bio);
 			goto free_and_out;
 		}
 
+		/* [한국어] rq->bio 체인에 clone bio 를 연결 (tail append) */
 		if (rq->bio) {
 			rq->biotail->bi_next = bio;
 			rq->biotail = bio;
@@ -5954,24 +6213,30 @@ int blk_rq_prep_clone(struct request *rq, struct request *rq_src,
 	}
 
 	/* Copy attributes of the original request to the clone request. */
+	/* [한국어] NVMe LBA 시작 주소 복사 */
 	rq->__sector = blk_rq_pos(rq_src);
-// 원본 request 의 sector/length 복사 -> NVMe LBA/length
+	/* [한국어] NVMe 전송 바이트 수 복사 */
 	rq->__data_len = blk_rq_bytes(rq_src);
+	/* [한국어] 특수 payload (discard, write-same): 플래그 + 벡터 복사 */
 	if (rq_src->rq_flags & RQF_SPECIAL_PAYLOAD) {
 		rq->rq_flags |= RQF_SPECIAL_PAYLOAD;
 		rq->special_vec = rq_src->special_vec;
 	}
+	/* [한국어] NVMe PRP/SGL entry 수 복사 */
 	rq->nr_phys_segments = rq_src->nr_phys_segments;
-// nr_phys_segments 복사: NVMe PRP/SGL entry 수 동일하게 유지
+	/* [한국어] NVMe PI(T10 DIF/DIX) integrity segment 수 복사 */
 	rq->nr_integrity_segments = rq_src->nr_integrity_segments;
+	/* [한국어] phys_gap_bit: segment 간 물리 주소 비연속 여부 */
 	rq->phys_gap_bit = rq_src->phys_gap_bit;
 
+	/* [한국어] NVMe inline encryption: clone bio 에 crypto context 연결 */
 	if (rq->bio && blk_crypto_rq_bio_prep(rq, rq->bio, gfp_mask) < 0)
 		goto free_and_out;
 
 	return 0;
 
 free_and_out:
+	/* [한국어] 실패: 부분 clone 된 bio 들 모두 해제 */
 	blk_rq_unprep_clone(rq);
 
 	return -ENOMEM;
@@ -5983,13 +6248,25 @@ EXPORT_SYMBOL_GPL(blk_rq_prep_clone);
  * Steal bios from a request and add them to a bio list.
  * The request must not have been partially completed before.
  */
+/*
+ * [한국어]
+ * blk_steal_bios - request 의 bio 들을 bio_list 로 빼앗아 재제출 준비
+ *
+ * @list: bio 들을 추가할 bio_list
+ * @rq:   bio 를 빼앗길 request (부분 완료되지 않아야 함)
+ *
+ * dm-multipath 같은 스태킹 드라이버에서 I/O 경로 변경 시 사용.
+ * rq 의 bio chain 을 list 로 이동하면서 새 queue 재제출에 맞게 플래그를 정리.
+ * 재제출할 queue 가 frozen 일 수 있으므로 REQ_NOWAIT 를 반드시 제거해야 한다.
+ */
 void blk_steal_bios(struct bio_list *list, struct request *rq)
 {
 	struct bio *bio;
 
 	for (bio = rq->bio; bio; bio = bio->bi_next) {
 		if (bio->bi_opf & REQ_POLLED) {
-// REQ_POLLED 플래그 해제: 새 queue 에 재제출 시 poll 설정 초기화
+			/* [한국어] REQ_POLLED 제거: 새 queue 의 poll 큐 매핑이 다를 수 있음.
+			 * bi_cookie 도 초기화: 완료 poll 에 사용하는 식별자 */
 			bio->bi_opf &= ~REQ_POLLED;
 			bio->bi_cookie = BLK_QC_T_NONE;
 		}
@@ -6000,20 +6277,22 @@ void blk_steal_bios(struct bio_list *list, struct request *rq)
 		 * We are not in the issuer context which cannot block. Clear
 		 * the flag to avoid spurious EAGAIN I/O failures.
 		 */
+		/* [한국어] REQ_NOWAIT 제거: 재제출 큐 freeze 시 spurious EAGAIN 방지 */
 		bio->bi_opf &= ~REQ_NOWAIT;
-// REQ_NOWAIT 해제: issuer context 가 아니므로 EAGAIN 방지
+		/* [한국어] QoS 상태 초기화: 새 queue 의 iocost/iolatency 에서 다시 적용 */
 		bio_clear_flag(bio, BIO_QOS_THROTTLED);
 		bio_clear_flag(bio, BIO_QOS_MERGED);
 	}
 
 	if (rq->bio) {
-// rq 의 bio 리스트를 다른 bio list 로 이동
+		/* [한국어] rq->bio chain 을 bio_list 의 tail 에 연결 */
 		if (list->tail)
 			list->tail->bi_next = rq->bio;
 		else
 			list->head = rq->bio;
 		list->tail = rq->biotail;
 
+		/* [한국어] rq 의 bio 포인터 초기화: rq 는 이제 bio 없음 */
 		rq->bio = NULL;
 		rq->biotail = NULL;
 	}
@@ -6022,12 +6301,31 @@ void blk_steal_bios(struct bio_list *list, struct request *rq)
 }
 EXPORT_SYMBOL_GPL(blk_steal_bios);
 
+/*
+ * [한국어]
+ * order_to_size - page order 를 바이트 크기로 변환
+ *
+ * @order: 페이지 order (2^order pages)
+ * @return: 바이트 크기
+ */
 static size_t order_to_size(unsigned int order)
 {
+	/* [한국어] PAGE_SIZE << order = 2^order 페이지의 바이트 크기 */
 	return (size_t)PAGE_SIZE << order;
 }
 
 /* called before freeing request pool in @tags */
+/*
+ * [한국어]
+ * blk_mq_clear_rq_mapping - drv_tags->rqs[] 에서 해제될 page 범위의 매핑을 제거
+ *
+ * @drv_tags: 드라이버 tag set (rqs[] 역참조 테이블을 보유)
+ * @tags:     해제될 tag pool (page_list 를 보유)
+ *
+ * tags->page_list 에 속한 page 의 주소 범위 내에 있는
+ * drv_tags->rqs[i] 항목을 NULL 로 초기화한다.
+ * cmpxchg 를 사용해 완료 경로(nvme_complete_rq)와의 race 를 방지.
+ */
 static void blk_mq_clear_rq_mapping(struct blk_mq_tags *drv_tags,
 				    struct blk_mq_tags *tags)
 {
@@ -6037,51 +6335,65 @@ static void blk_mq_clear_rq_mapping(struct blk_mq_tags *drv_tags,
 	 * There is no need to clear mapping if driver tags is not initialized
 	 * or the mapping belongs to the driver tags.
 	 */
+	/* [한국어] drv_tags 가 tags 와 동일하면 자기 자신을 클리어할 필요 없음 */
 	if (!drv_tags || drv_tags == tags)
-// drv_tags 미초기화 또는 동일하면 매핑 클리어 불필요
 		return;
 
 	list_for_each_entry(page, &tags->page_list, lru) {
+		/* [한국어] 이 page 의 주소 범위 [start, end) */
 		unsigned long start = (unsigned long)page_address(page);
-// tags page_list 를 순회하며 매핑된 request 주소 범위 확인
 		unsigned long end = start + order_to_size(page->private);
 		int i;
 
 		for (i = 0; i < drv_tags->nr_tags; i++) {
+			/* [한국어] drv_tags->rqs[i]: CID i 에 현재 할당된 request 포인터 */
 			struct request *rq = drv_tags->rqs[i];
-// drv_tags->rqs[i]: i 번째 NVMe CID slot 의 request 매핑
 			unsigned long rq_addr = (unsigned long)rq;
 
 			if (rq_addr >= start && rq_addr < end) {
+				/* [한국어] 참조 카운트가 0 이어야 안전하게 매핑 해제 가능 */
 				WARN_ON_ONCE(req_ref_read(rq) != 0);
+				/* [한국어] cmpxchg: 완료 경로와의 race 없이 원자적으로 NULL 설정 */
 				cmpxchg(&drv_tags->rqs[i], rq, NULL);
-// 참조 카운트가 0이어야 매핑 해제 가능
 			}
-// cmpxchg 로 NULL 설정: 완료 경로와의 race 회피
 		}
 	}
 }
 
+/*
+ * [한국어]
+ * blk_mq_free_rqs - tag pool 의 request 객체들을 해제
+ *
+ * @set:      blk_mq_tag_set (NVMe 드라이버 전역 tag 설정)
+ * @tags:     해제할 blk_mq_tags (특정 hctx 의 tag pool)
+ * @hctx_idx: 해당 hctx 의 인덱스 (NVMe SQ 번호)
+ *
+ * page_list 가 비었으면 이미 해제된 것이므로 즉시 반환.
+ * shared_tags 여부에 따라 drv_tags 를 선택한 후,
+ * static_rqs[] 의 exit_request 콜백을 호출하고 매핑을 클리어.
+ * 실제 page 해제는 SRCU callback 에서 수행.
+ */
 void blk_mq_free_rqs(struct blk_mq_tag_set *set, struct blk_mq_tags *tags,
 		     unsigned int hctx_idx)
 {
 	struct blk_mq_tags *drv_tags;
 
+	/* [한국어] page_list 가 비어있으면 이미 해제된 tag pool — 중복 해제 방지 */
 	if (list_empty(&tags->page_list))
 		return;
-// page_list 가 비었으면 이미 해제된 tag pool
 
 	if (blk_mq_is_shared_tags(set->flags))
-// shared tags: 여러 NVMe SQ 가 하나의 CID pool 공유
+		/* [한국어] shared_tags: 여러 NVMe SQ 가 CID pool 을 공유하는 경우 */
 		drv_tags = set->shared_tags;
 	else
+		/* [한국어] 개별 tags: 각 NVMe SQ 가 독립적인 CID pool 보유 */
 		drv_tags = set->tags[hctx_idx];
 
 	if (tags->static_rqs && set->ops->exit_request) {
 		int i;
 
 		for (i = 0; i < tags->nr_tags; i++) {
-// 모든 tag slot 의 request 에 대해 driver exit_request 호출
+			/* [한국어] CID slot i 의 request 에 드라이버 cleanup 콜백 호출 */
 			struct request *rq = tags->static_rqs[i];
 
 			if (!rq)
@@ -6091,29 +6403,55 @@ void blk_mq_free_rqs(struct blk_mq_tag_set *set, struct blk_mq_tags *tags,
 		}
 	}
 
+	/* [한국어] drv_tags->rqs[] 에서 이 tags 에 속한 매핑 항목들을 클리어 */
 	blk_mq_clear_rq_mapping(drv_tags, tags);
 	/*
 	 * Free request pages in SRCU callback, which is called from
 	 * blk_mq_free_tags().
 	 */
+	/* [한국어] page 실제 해제는 blk_mq_free_tags() 내 SRCU 콜백에서 수행 */
 }
 
+/*
+ * [한국어]
+ * blk_mq_free_rq_map - tags 의 rqs/static_rqs 배열과 sbitmap 해제
+ *
+ * @set:  blk_mq_tag_set
+ * @tags: 해제할 blk_mq_tags
+ *
+ * blk_mq_free_rqs 호출 후 tag 자료구조 자체를 해제.
+ */
 void blk_mq_free_rq_map(struct blk_mq_tag_set *set, struct blk_mq_tags *tags)
 {
+	/* [한국어] rqs[]: CID별 request 역참조 테이블 해제 */
 	kfree(tags->rqs);
 	tags->rqs = NULL;
+	/* [한국어] static_rqs[]: CID별 request 객체 포인터 배열 해제 */
 	kfree(tags->static_rqs);
 	tags->static_rqs = NULL;
 
+	/* [한국어] sbitmap + tags 구조체 자체 해제 */
 	blk_mq_free_tags(set, tags);
 }
 
+/*
+ * [한국어]
+ * hctx_idx_to_type - hctx 인덱스로 hctx type 결정
+ *
+ * @set:      blk_mq_tag_set
+ * @hctx_idx: 전역 hctx 인덱스
+ * @return:   HCTX_TYPE_DEFAULT / READ / POLL 중 하나
+ *
+ * set->map[type].queue_offset ~ +nr_queues 범위로 어느 type 에 속하는지 판별.
+ * NVMe 에서 READ/POLL 큐를 별도로 구성한 경우 해당 type 을 반환.
+ */
 static enum hctx_type hctx_idx_to_type(struct blk_mq_tag_set *set,
 		unsigned int hctx_idx)
 {
 	int i;
 
 	for (i = 0; i < set->nr_maps; i++) {
+		/* [한국어] map[i] 의 queue_offset..+nr_queues 범위에 속하면 type=i */
 		unsigned int start = set->map[i].queue_offset;
 		unsigned int end = start + set->map[i].nr_queues;
 
@@ -6121,46 +6459,70 @@ static enum hctx_type hctx_idx_to_type(struct blk_mq_tag_set *set,
 			break;
 	}
 
+	/* [한국어] 매핑 실패: DEFAULT 로 fallback */
 	if (i >= set->nr_maps)
 		i = HCTX_TYPE_DEFAULT;
 
 	return i;
 }
 
+/*
+ * [한국어]
+ * blk_mq_get_hctx_node - hctx 의 NUMA node 번호를 반환
+ *
+ * @set:      blk_mq_tag_set
+ * @hctx_idx: hctx 인덱스
+ * @return:   NUMA node 번호 (NUMA_NO_NODE 이면 set->numa_node 사용)
+ *
+ * NVMe SQ request 메모리를 NVMe 컨트롤러와 같은 NUMA node 에 배치하기 위해 사용.
+ */
 static int blk_mq_get_hctx_node(struct blk_mq_tag_set *set,
 		unsigned int hctx_idx)
 {
 	enum hctx_type type = hctx_idx_to_type(set, hctx_idx);
 
+	/* [한국어] blk_mq_hw_queue_to_node: map 의 queue_to_node[] 배열에서 조회 */
 	return blk_mq_hw_queue_to_node(&set->map[type], hctx_idx);
 }
 
+/*
+ * [한국어]
+ * blk_mq_alloc_rq_map - 특정 hctx 를 위한 blk_mq_tags 구조체 할당
+ *
+ * @set:           blk_mq_tag_set
+ * @hctx_idx:      대상 hctx 인덱스 (NVMe SQ 번호)
+ * @nr_tags:       이 hctx 의 CID (Command ID) 슬롯 수
+ * @reserved_tags: 예약 CID 수 (내부 admin 명령용)
+ * @return:        blk_mq_tags 포인터, 실패 시 NULL
+ *
+ * sbitmap(CID 할당 비트맵) + rqs[]/static_rqs[] 배열을 NUMA-local 메모리에 할당.
+ */
 static struct blk_mq_tags *blk_mq_alloc_rq_map(struct blk_mq_tag_set *set,
 					       unsigned int hctx_idx,
 					       unsigned int nr_tags,
 					       unsigned int reserved_tags)
 {
+	/* [한국어] NVMe SQ 메모리를 컨트롤러와 같은 NUMA node 에 배치 */
 	int node = blk_mq_get_hctx_node(set, hctx_idx);
-// hctx 의 NUMA node 결정: NVMe SQ 메모리 배치
 	struct blk_mq_tags *tags;
 
 	if (node == NUMA_NO_NODE)
 		node = set->numa_node;
 
+	/* [한국어] blk_mq_init_tags: sbitmap 초기화 — 각 bit 가 CID 하나를 나타냄 */
 	tags = blk_mq_init_tags(nr_tags, reserved_tags, set->flags, node);
-// blk_mq_init_tags(): NVMe SQ slot(CID) bitmap 초기화
 	if (!tags)
 		return NULL;
 
+	/* [한국어] tags->rqs[i]: CID i 를 현재 사용 중인 request 역참조 테이블 */
 	tags->rqs = kcalloc_node(nr_tags, sizeof(struct request *),
-// tags->rqs[]: CID 별 request 역참조 테이블
 				 GFP_NOIO | __GFP_NOWARN | __GFP_NORETRY,
 				 node);
 	if (!tags->rqs)
 		goto err_free_tags;
 
+	/* [한국어] tags->static_rqs[i]: CID i 에 고정 배치된 request 객체 포인터 */
 	tags->static_rqs = kcalloc_node(nr_tags, sizeof(struct request *),
-// tags->static_rqs[]: CID 별 request 객체 포인터
 					GFP_NOIO | __GFP_NOWARN | __GFP_NORETRY,
 					node);
 	if (!tags->static_rqs)
@@ -6175,23 +6537,51 @@ err_free_tags:
 	return NULL;
 }
 
+/*
+ * [한국어]
+ * blk_mq_init_request - 개별 request 객체를 초기화
+ *
+ * @set:      blk_mq_tag_set
+ * @rq:       초기화할 request
+ * @hctx_idx: 이 request 가 속할 hctx 인덱스 (NVMe SQ 번호)
+ * @node:     NUMA node
+ * @return:   0 성공, 음수 에러
+ *
+ * 드라이버의 init_request 콜백(NVMe: nvme_init_request) 을 호출해
+ * NVMe 명령 payload 영역을 초기화한 뒤, request 상태를 MQ_RQ_IDLE 로 설정.
+ */
 static int blk_mq_init_request(struct blk_mq_tag_set *set, struct request *rq,
 			       unsigned int hctx_idx, int node)
 {
 	int ret;
 
 	if (set->ops->init_request) {
-// driver 의 init_request(): NVMe queue 를 위한 request 초기화
+		/* [한국어] nvme_init_request: NVMe submission queue entry 메모리 초기화 */
 		ret = set->ops->init_request(set, rq, hctx_idx, node);
 		if (ret)
 			return ret;
 	}
 
+	/* [한국어] MQ_RQ_IDLE: sbitmap 에서 CID 를 재획득할 수 있는 완전 idle 상태 */
 	WRITE_ONCE(rq->state, MQ_RQ_IDLE);
-// request 상태를 IDLE 로 설정: CID 재할당 가능
 	return 0;
 }
 
+/*
+ * [한국어]
+ * blk_mq_alloc_rqs - tags 에 depth 개의 request 객체 메모리를 할당하고 초기화
+ *
+ * @set:      blk_mq_tag_set (cmd_size 정보 포함)
+ * @tags:     할당할 tag pool (static_rqs[] 를 채울 대상)
+ * @hctx_idx: hctx 인덱스 (NVMe SQ 번호)
+ * @depth:    할당할 CID 슬롯 수 (= queue depth)
+ * @return:   0 성공, -ENOMEM 실패
+ *
+ * request 객체와 드라이버 payload(NVMe submission queue entry) 를 한 덩어리로
+ * page 단위로 할당하여 NUMA-local 메모리에 배치.
+ * 각 request 는 rq_size 바이트(sizeof(struct request)+set->cmd_size, cacheline 정렬)
+ * 를 차지하며, 가능한 큰 order(최대 4) 로 한 번에 할당해 단편화를 최소화.
+ */
 static int blk_mq_alloc_rqs(struct blk_mq_tag_set *set,
 			    struct blk_mq_tags *tags,
 			    unsigned int hctx_idx, unsigned int depth)
@@ -6207,9 +6597,11 @@ static int blk_mq_alloc_rqs(struct blk_mq_tag_set *set,
 	 * rq_size is the size of the request plus driver payload, rounded
 	 * to the cacheline size
 	 */
+	/* [한국어] rq_size: struct request + NVMe cmd payload, cacheline 정렬.
+	 * false sharing 방지: 각 request 는 독립적인 cacheline 에 배치 */
 	rq_size = round_up(sizeof(struct request) + set->cmd_size,
-// request 크기 + driver payload(NVMe cmd) 를 cacheline 정렬
 				cache_line_size());
+	/* [한국어] left: 아직 할당해야 할 총 바이트 수 */
 	left = rq_size * depth;
 
 	for (i = 0; i < depth; ) {
@@ -6218,18 +6610,23 @@ static int blk_mq_alloc_rqs(struct blk_mq_tag_set *set,
 		int to_do;
 		void *p;
 
+		/* [한국어] left 가 담기기에 충분한 가장 작은 order 로 낮춤 */
 		while (this_order && left < order_to_size(this_order - 1))
 			this_order--;
 
 		do {
+			/* [한국어] GFP_NOIO: IO 대기 없이 할당 (IO 경로 진입 방지 데드락 방지).
+			 * __GFP_NORETRY: 실패 시 order 를 낮춰 재시도.
+			 * __GFP_ZERO: 초기화 보장 */
 			page = alloc_pages_node(node,
-// GFP_NOIO | __GFP_NORETRY: NVMe SQ 메모리 할당 시 IO 대기 없음
 				GFP_NOIO | __GFP_NOWARN | __GFP_NORETRY | __GFP_ZERO,
 				this_order);
 			if (page)
 				break;
+			/* [한국어] 할당 실패: order 를 낮춰 재시도 */
 			if (!this_order--)
 				break;
+			/* [한국어] order 낮춰도 request 하나도 못 담으면 포기 */
 			if (order_to_size(this_order) < rq_size)
 				break;
 		} while (1);
@@ -6237,7 +6634,9 @@ static int blk_mq_alloc_rqs(struct blk_mq_tag_set *set,
 		if (!page)
 			goto fail;
 
+		/* [한국어] page->private 에 order 저장: 해제 시 order 복원에 사용 */
 		page->private = this_order;
+		/* [한국어] tags->page_list 에 등록: blk_mq_free_rqs 에서 page 해제에 사용 */
 		list_add_tail(&page->lru, &tags->page_list);
 
 		p = page_address(page);
@@ -6245,21 +6644,25 @@ static int blk_mq_alloc_rqs(struct blk_mq_tag_set *set,
 		 * Allow kmemleak to scan these pages as they contain pointers
 		 * to additional allocations like via ops->init_request().
 		 */
+		/* [한국어] kmemleak: 이 page 에 포인터가 있으므로 GC 추적 허용 */
 		kmemleak_alloc(p, order_to_size(this_order), 1, GFP_NOIO);
+		/* [한국어] 이 page 에 들어갈 request 수 계산 */
 		entries_per_page = order_to_size(this_order) / rq_size;
-// 페이지당 들어갈 request 수 계산
+		/* [한국어] 남은 depth 와 page 수용량 중 작은 것만 처리 */
 		to_do = min(entries_per_page, depth - i);
 		left -= to_do * rq_size;
 		for (j = 0; j < to_do; j++) {
 			struct request *rq = p;
 
+			/* [한국어] CID slot i 에 request 객체 배정 */
 			tags->static_rqs[i] = rq;
-// static_rqs[i] 에 CID slot 별 request 배정
+			/* [한국어] 드라이버 init_request: NVMe cmd 영역 초기화 */
 			if (blk_mq_init_request(set, rq, hctx_idx, node)) {
 				tags->static_rqs[i] = NULL;
 				goto fail;
 			}
 
+			/* [한국어] 다음 request 객체로 포인터 이동 */
 			p += rq_size;
 			i++;
 		}
@@ -6267,34 +6670,64 @@ static int blk_mq_alloc_rqs(struct blk_mq_tag_set *set,
 	return 0;
 
 fail:
+	/* [한국어] 실패: 지금까지 할당된 request 들 모두 해제 */
 	blk_mq_free_rqs(set, tags, hctx_idx);
 	return -ENOMEM;
 }
 
-/*
- * struct rq_iter_data: tag 전체를 순회하며 hctx 에 속한 request
- *   존재 여부를 검사할 때 사용.
- *   hctx: 검사할 NVMe SQ.
- *   has_rq: 해당 SQ 에 아직 완료되지 않은 CID(request) 존재 여부.
- */
 struct rq_iter_data {
+	/* [한국어] hctx: 검사 대상 NVMe SQ — 이 hctx 에 속한 request 가 있는지 조사
+	 * 설정자: blk_mq_hctx_has_requests 에서 초기화
+	 * 읽는 자: blk_mq_has_request 가 rq->mq_hctx 와 비교
+	 * 값 범위: NULL 불가 (유효한 hctx 포인터)
+	 * 동기화: tags_srcu read lock 보호 하에서만 접근 */
 	struct blk_mq_hw_ctx *hctx;
-	bool has_rq; /* hctx 에 속한 request 존재 여부 */
+	/* [한국어] has_rq: 이 hctx 에 아직 미완료 request 가 하나라도 있으면 true
+	 * 설정자: blk_mq_has_request 가 해당 hctx 의 request 를 발견하면 true 로 설정
+	 * 읽는 자: blk_mq_hctx_has_requests 가 반환 전에 읽음
+	 * 초기값: false (blk_mq_hctx_has_requests 에서 초기화)
+	 * 동기화: 단일 스레드 접근 (CPU offline 핫플러그 경로) */
+	bool has_rq;
 };
 
+/*
+ * [한국어]
+ * blk_mq_has_request - tag 순회 콜백: 이 hctx 에 속한 request 발견 시 순회 중단
+ *
+ * @rq:   현재 순회 중인 request
+ * @data: struct rq_iter_data 포인터
+ * @return: true=계속, false=중단
+ *
+ * blk_mq_all_tag_iter 의 콜백으로 호출.
+ * rq->mq_hctx 가 iter_data->hctx 와 같으면 has_rq=true 로 설정하고 순회 중단.
+ */
 static bool blk_mq_has_request(struct request *rq, void *data)
 {
 	struct rq_iter_data *iter_data = data;
 
+	/* [한국어] 이 CID 가 다른 hctx(NVMe SQ)에 속하면 계속 순회 */
 	if (rq->mq_hctx != iter_data->hctx)
-// rq->mq_hctx != hctx 이면 이 CID 는 다른 NVMe SQ 에 속함
 		return true;
+	/* [한국어] 이 hctx 의 미완료 request 발견: 순회 중단 */
 	iter_data->has_rq = true;
 	return false;
 }
 
+/*
+ * [한국어]
+ * blk_mq_hctx_has_requests - 이 hctx 에 아직 미완료 request 가 있는지 확인
+ *
+ * @hctx: 검사할 NVMe SQ
+ * @return: true = 미완료 request 있음, false = 없음
+ *
+ * CPU offline 핫플러그 시 이 SQ 를 비활성화하기 전에 모든 in-flight request 가
+ * 완료될 때까지 대기하기 위해 호출.
+ * sched_tags 가 있으면 scheduler 레이어의 tag 도 검사.
+ * tags_srcu 로 hctx/tags 교체 race 를 방지.
+ */
 static bool blk_mq_hctx_has_requests(struct blk_mq_hw_ctx *hctx)
 {
+	/* [한국어] sched_tags 우선: IO scheduler 가 보유한 request 도 포함 */
 	struct blk_mq_tags *tags = hctx->sched_tags ?
 			hctx->sched_tags : hctx->tags;
 	struct rq_iter_data data = {
@@ -6302,16 +6735,26 @@ static bool blk_mq_hctx_has_requests(struct blk_mq_hw_ctx *hctx)
 	};
 	int srcu_idx;
 
+	/* [한국어] tags_srcu read lock: blk_mq_update_nr_hw_queues 등 구조 변경 방지 */
 	srcu_idx = srcu_read_lock(&hctx->queue->tag_set->tags_srcu);
-// tags_srcu read lock: hctx/tags 동적 변경으로부터 보호
+	/* [한국어] 전체 CID slot 을 순회하며 이 hctx 의 미완료 request 검색 */
 	blk_mq_all_tag_iter(tags, blk_mq_has_request, &data);
-// blk_mq_all_tag_iter(): 전체 CID slot 순회
 	srcu_read_unlock(&hctx->queue->tag_set->tags_srcu, srcu_idx);
-// srcu_read_unlock(): NVMe submit/complete 의 SRCU 임계 종료
 
 	return data.has_rq;
 }
 
+/*
+ * [한국어]
+ * blk_mq_hctx_has_online_cpu - 이 hctx 에 online 상태의 CPU 가 있는지 확인
+ *
+ * @hctx:     검사할 hctx
+ * @this_cpu: 현재 offline 되는 CPU (제외 대상)
+ * @return:   true = this_cpu 외의 online CPU 가 매핑돼 있음
+ *
+ * cpumask 는 isolated CPU 를 제외하므로 queue map 을 직접 조회해야 함.
+ * this_cpu 가 마지막 online CPU 라면 false 반환 → hctx 비활성화 필요.
+ */
 static bool blk_mq_hctx_has_online_cpu(struct blk_mq_hw_ctx *hctx,
 		unsigned int this_cpu)
 {
@@ -6324,7 +6767,7 @@ static bool blk_mq_hctx_has_online_cpu(struct blk_mq_hw_ctx *hctx,
 	 * check if all CPUs mapped to this hctx are offline
 	 */
 	for_each_online_cpu(cpu) {
-// online CPU 중에서 이 hctx(NVMe SQ)에 매핑된 CPU 검색
+		/* [한국어] 각 online CPU 가 이 hctx 에 매핑되는지 queue map 에서 조회 */
 		struct blk_mq_hw_ctx *h = blk_mq_map_queue_type(hctx->queue,
 				type, cpu);
 
@@ -6332,6 +6775,7 @@ static bool blk_mq_hctx_has_online_cpu(struct blk_mq_hw_ctx *hctx,
 			continue;
 
 		/* this hctx has at least one online CPU */
+		/* [한국어] this_cpu 가 아닌 다른 online CPU 가 이 hctx 를 사용 → 유지 */
 		if (this_cpu != cpu)
 			return true;
 	}
@@ -6339,12 +6783,25 @@ static bool blk_mq_hctx_has_online_cpu(struct blk_mq_hw_ctx *hctx,
 	return false;
 }
 
+/*
+ * [한국어]
+ * blk_mq_hctx_notify_offline - CPU offline 시 해당 hctx 비활성화 처리
+ *
+ * @cpu:  offline 되는 CPU 번호
+ * @node: cpuhp_online hlist node (hctx 포인터로 복원)
+ * @return: 0 성공, -EBUSY (PM wakeup 으로 인한 조기 종료)
+ *
+ * 이 CPU 가 마지막 online CPU 이고 nr_ctx > 0 이면 hctx 를 INACTIVE 로 표시.
+ * 이후 모든 미완료 request 가 drain 되기를 기다린다 (5ms polling).
+ * suspend 중 IRQ 없어 drain 이 불가능하면 -EBUSY 로 조기 종료.
+ */
 static int blk_mq_hctx_notify_offline(unsigned int cpu, struct hlist_node *node)
 {
 	struct blk_mq_hw_ctx *hctx = hlist_entry_safe(node,
 			struct blk_mq_hw_ctx, cpuhp_online);
 	int ret = 0;
 
+	/* [한국어] ctx 없거나 다른 online CPU 가 있으면 비활성화 불필요 */
 	if (!hctx->nr_ctx || blk_mq_hctx_has_online_cpu(hctx, cpu))
 		return 0;
 
@@ -6355,10 +6812,11 @@ static int blk_mq_hctx_notify_offline(unsigned int cpu, struct hlist_node *node)
 	 * test_and_set_bit_lock in sbitmap_get().  Ensures the inactive flag is
 	 * seen once we return from the tag allocator.
 	 */
+	/* [한국어] BLK_MQ_S_INACTIVE: 이 hctx 에서 새 CID 할당 차단 */
 	set_bit(BLK_MQ_S_INACTIVE, &hctx->state);
-// BLK_MQ_S_INACTIVE: 이 NVMe SQ 에 더 이상 새 CID 할당 금지
+	/* [한국어] smp_mb__after_atomic: INACTIVE 비트가 sbitmap_get 의 lock bit 보다
+	 * 먼저 보이도록 순서 보장 — tag allocator 가 INACTIVE 를 놓치면 안 됨 */
 	smp_mb__after_atomic();
-// smp_mb__after_atomic(): INACTIVE 설정과 tag allocator 사이 순서 보장
 
 	/*
 	 * Try to grab a reference to the queue and wait for any outstanding
@@ -6366,19 +6824,21 @@ static int blk_mq_hctx_notify_offline(unsigned int cpu, struct hlist_node *node)
 	 * frozen and there are no requests.
 	 */
 	if (percpu_ref_tryget(&hctx->queue->q_usage_counter)) {
+		/* [한국어] q_usage_counter 획득 성공: in-flight request 가 drain 될 때까지 대기 */
 		while (blk_mq_hctx_has_requests(hctx)) {
-// 해당 NVMe SQ 에 남은 request 가 없어질 때까지 대기
 			/*
 			 * The wakeup capable IRQ handler of block device is
 			 * not called during suspend. Skip the loop by checking
 			 * pm_wakeup_pending to prevent the deadlock and improve
 			 * suspend latency.
 			 */
+			/* [한국어] suspend 중 IRQ 없으면 pm_wakeup_pending 으로 탈출 */
 			if (pm_wakeup_pending()) {
 				clear_bit(BLK_MQ_S_INACTIVE, &hctx->state);
 				ret = -EBUSY;
 				break;
 			}
+			/* [한국어] 5ms 대기 후 재확인: in-flight request drain 대기 */
 			msleep(5);
 		}
 		percpu_ref_put(&hctx->queue->q_usage_counter);
@@ -6394,6 +6854,16 @@ static int blk_mq_hctx_notify_offline(unsigned int cpu, struct hlist_node *node)
  * to be used for scheduling kworker only. For other usage, please call this
  * helper for checking if one CPU belongs to the specified hctx
  */
+/*
+ * [한국어]
+ * blk_mq_cpu_mapped_to_hctx - 주어진 CPU 가 이 hctx 에 매핑되는지 확인
+ *
+ * @cpu:  확인할 CPU 번호
+ * @hctx: 확인할 hctx
+ * @return: true = 매핑됨, false = 아님
+ *
+ * cpumask 는 isolated CPU 를 제외하므로 queue map 을 직접 조회해야 함.
+ */
 static bool blk_mq_cpu_mapped_to_hctx(unsigned int cpu,
 		const struct blk_mq_hw_ctx *hctx)
 {
@@ -6403,11 +6873,23 @@ static bool blk_mq_cpu_mapped_to_hctx(unsigned int cpu,
 	return mapped_hctx == hctx;
 }
 
+/*
+ * [한국어]
+ * blk_mq_hctx_notify_online - CPU online 시 해당 hctx 를 다시 활성화
+ *
+ * @cpu:  online 된 CPU 번호
+ * @node: cpuhp_online hlist node
+ * @return: 항상 0
+ *
+ * CPU 가 online 되고 이 hctx 에 매핑되면 BLK_MQ_S_INACTIVE 비트를 클리어.
+ * 이후 새 CID 할당이 다시 허용된다.
+ */
 static int blk_mq_hctx_notify_online(unsigned int cpu, struct hlist_node *node)
 {
 	struct blk_mq_hw_ctx *hctx = hlist_entry_safe(node,
 			struct blk_mq_hw_ctx, cpuhp_online);
 
+	/* [한국어] 이 CPU 가 이 hctx 에 매핑되면 INACTIVE 해제 → CID 할당 재허용 */
 	if (blk_mq_cpu_mapped_to_hctx(cpu, hctx))
 		clear_bit(BLK_MQ_S_INACTIVE, &hctx->state);
 	return 0;
@@ -6418,6 +6900,19 @@ static int blk_mq_hctx_notify_online(unsigned int cpu, struct hlist_node *node)
  * software queue to the hw queue dispatch list, and ensure that it
  * gets run.
  */
+/*
+ * [한국어]
+ * blk_mq_hctx_notify_dead - CPU dead 시 sw queue 의 잔여 request 를 hctx->dispatch 로 이관
+ *
+ * @cpu:  dead 된 CPU 번호
+ * @node: cpuhp_dead hlist node
+ * @return: 항상 0
+ *
+ * CPU 가 완전히 죽으면 그 CPU 의 per-CPU sw queue(ctx->rq_lists[type]) 에 남아 있는
+ * request 들을 처리하는 CPU 가 없어진다. 이를 hctx->dispatch 로 옮겨
+ * 다른 CPU 에서 kblockd 가 처리하도록 한다.
+ * ctx->lock → hctx->lock 순서로 획득 (데드락 방지).
+ */
 static int blk_mq_hctx_notify_dead(unsigned int cpu, struct hlist_node *node)
 {
 	struct blk_mq_hw_ctx *hctx;
@@ -6426,18 +6921,20 @@ static int blk_mq_hctx_notify_dead(unsigned int cpu, struct hlist_node *node)
 	enum hctx_type type;
 
 	hctx = hlist_entry_safe(node, struct blk_mq_hw_ctx, cpuhp_dead);
+	/* [한국어] 이 CPU 가 이 hctx 에 매핑되지 않으면 처리 불필요 */
 	if (!blk_mq_cpu_mapped_to_hctx(cpu, hctx))
 		return 0;
 
+	/* [한국어] 죽은 CPU 의 per-CPU sw queue 가져오기 */
 	ctx = __blk_mq_get_ctx(hctx->queue, cpu);
 	type = hctx->type;
 
 	spin_lock(&ctx->lock);
 	if (!list_empty(&ctx->rq_lists[type])) {
-// 죽은 CPU 의 sw queue 에 남은 request 를 임시 list 로 옮김
+		/* [한국어] sw queue 의 request 들을 tmp 로 이동 (locking 최소화) */
 		list_splice_init(&ctx->rq_lists[type], &tmp);
+		/* [한국어] ctx_map 의 pending 비트 클리어: 이 ctx 에 request 없음을 표시 */
 		blk_mq_hctx_clear_pending(hctx, ctx);
-// ctx_map 에서 죽은 CPU pending 비트 제거
 	}
 	spin_unlock(&ctx->lock);
 
@@ -6445,33 +6942,47 @@ static int blk_mq_hctx_notify_dead(unsigned int cpu, struct hlist_node *node)
 		return 0;
 
 	spin_lock(&hctx->lock);
+	/* [한국어] tmp 의 request 들을 hctx->dispatch 로 이관: 다른 CPU 에서 처리 */
 	list_splice_tail_init(&tmp, &hctx->dispatch);
-// 죽은 CPU 의 request 들을 hctx->dispatch 로 이동
 	spin_unlock(&hctx->lock);
 
+	/* [한국어] async(true) 로 hctx run: kblockd 에서 이관된 request 처리 */
 	blk_mq_run_hw_queue(hctx, true);
-// 이동 후 NVMe SQ dispatch rerun
 	return 0;
 }
 
+/*
+ * [한국어]
+ * __blk_mq_remove_cpuhp - hctx 의 CPU hotplug 콜백 등록 해제 (잠금 보유 상태에서)
+ *
+ * @hctx: 대상 hctx
+ *
+ * blk_mq_cpuhp_lock 보유 상태에서 호출. 스태킹 드라이버는 online 콜백 불필요.
+ */
 static void __blk_mq_remove_cpuhp(struct blk_mq_hw_ctx *hctx)
 {
 	lockdep_assert_held(&blk_mq_cpuhp_lock);
 
 	if (!(hctx->flags & BLK_MQ_F_STACKING) &&
 	    !hlist_unhashed(&hctx->cpuhp_online)) {
+		/* [한국어] CPUHP_AP_BLK_MQ_ONLINE: CPU online 시 INACTIVE 클리어 콜백 제거 */
 		cpuhp_state_remove_instance_nocalls(CPUHP_AP_BLK_MQ_ONLINE,
 						    &hctx->cpuhp_online);
 		INIT_HLIST_NODE(&hctx->cpuhp_online);
 	}
 
 	if (!hlist_unhashed(&hctx->cpuhp_dead)) {
+		/* [한국어] CPUHP_BLK_MQ_DEAD: CPU dead 시 sw queue drain 콜백 제거 */
 		cpuhp_state_remove_instance_nocalls(CPUHP_BLK_MQ_DEAD,
 						    &hctx->cpuhp_dead);
 		INIT_HLIST_NODE(&hctx->cpuhp_dead);
 	}
 }
 
+/*
+ * [한국어]
+ * blk_mq_remove_cpuhp - hctx 의 CPU hotplug 콜백 등록 해제 (잠금 획득 포함)
+ */
 static void blk_mq_remove_cpuhp(struct blk_mq_hw_ctx *hctx)
 {
 	mutex_lock(&blk_mq_cpuhp_lock);
@@ -6479,20 +6990,35 @@ static void blk_mq_remove_cpuhp(struct blk_mq_hw_ctx *hctx)
 	mutex_unlock(&blk_mq_cpuhp_lock);
 }
 
+/*
+ * [한국어]
+ * __blk_mq_add_cpuhp - hctx 의 CPU hotplug 콜백 등록 (잠금 보유 상태에서)
+ *
+ * @hctx: 대상 hctx
+ *
+ * CPUHP_AP_BLK_MQ_ONLINE(online 콜백) 과 CPUHP_BLK_MQ_DEAD(dead 콜백) 를 등록.
+ * 스태킹 드라이버는 online 콜백 불필요 (BLK_MQ_F_STACKING 체크).
+ */
 static void __blk_mq_add_cpuhp(struct blk_mq_hw_ctx *hctx)
 {
 	lockdep_assert_held(&blk_mq_cpuhp_lock);
 
 	if (!(hctx->flags & BLK_MQ_F_STACKING) &&
 	    hlist_unhashed(&hctx->cpuhp_online))
+		/* [한국어] CPU online 시 BLK_MQ_S_INACTIVE 클리어 콜백 등록 */
 		cpuhp_state_add_instance_nocalls(CPUHP_AP_BLK_MQ_ONLINE,
 				&hctx->cpuhp_online);
 
 	if (hlist_unhashed(&hctx->cpuhp_dead))
+		/* [한국어] CPU dead 시 sw queue drain 콜백 등록 */
 		cpuhp_state_add_instance_nocalls(CPUHP_BLK_MQ_DEAD,
 				&hctx->cpuhp_dead);
 }
 
+/*
+ * [한국어]
+ * __blk_mq_remove_cpuhp_list - hctx_list 의 모든 hctx 에서 cpuhp 콜백 해제
+ */
 static void __blk_mq_remove_cpuhp_list(struct list_head *head)
 {
 	struct blk_mq_hw_ctx *hctx;
@@ -6508,10 +7034,20 @@ static void __blk_mq_remove_cpuhp_list(struct list_head *head)
  *
  * Safe to call if this `request_queue` is live
  */
+/*
+ * [한국어]
+ * blk_mq_remove_hw_queues_cpuhp - unused_hctx_list 의 모든 hctx cpuhp 콜백 해제
+ *
+ * @q: request_queue
+ *
+ * queue 가 live 상태여도 안전하게 호출 가능.
+ * unused_hctx_list 를 임시로 꺼내 잠금 없이 처리 후 되돌린다.
+ */
 static void blk_mq_remove_hw_queues_cpuhp(struct request_queue *q)
 {
 	LIST_HEAD(hctx_list);
 
+	/* [한국어] unused_hctx_list 를 임시 hctx_list 로 이동 */
 	spin_lock(&q->unused_hctx_lock);
 	list_splice_init(&q->unused_hctx_list, &hctx_list);
 	spin_unlock(&q->unused_hctx_lock);
@@ -6520,6 +7056,7 @@ static void blk_mq_remove_hw_queues_cpuhp(struct request_queue *q)
 	__blk_mq_remove_cpuhp_list(&hctx_list);
 	mutex_unlock(&blk_mq_cpuhp_lock);
 
+	/* [한국어] 처리 완료 후 unused_hctx_list 로 복원 */
 	spin_lock(&q->unused_hctx_lock);
 	list_splice(&hctx_list, &q->unused_hctx_list);
 	spin_unlock(&q->unused_hctx_lock);
@@ -6529,6 +7066,15 @@ static void blk_mq_remove_hw_queues_cpuhp(struct request_queue *q)
  * Register cpuhp callbacks from all hw queues
  *
  * Safe to call if this `request_queue` is live
+ */
+/*
+ * [한국어]
+ * blk_mq_add_hw_queues_cpuhp - 모든 hctx 에 cpuhp 콜백 등록
+ *
+ * @q: request_queue
+ *
+ * blk_mq_init_allocated_queue 등 queue 초기화 시 호출.
+ * 이후 CPU hotplug 이벤트에 반응할 수 있게 된다.
  */
 static void blk_mq_add_hw_queues_cpuhp(struct request_queue *q)
 {
@@ -6545,21 +7091,44 @@ static void blk_mq_add_hw_queues_cpuhp(struct request_queue *q)
  * Before freeing hw queue, clearing the flush request reference in
  * tags->rqs[] for avoiding potential UAF.
  */
+/*
+ * [한국어]
+ * blk_mq_clear_flush_rq_mapping - hctx 해제 전 flush_rq 의 tags->rqs[] 매핑 제거
+ *
+ * @tags:        대상 tag pool
+ * @queue_depth: tag slot 수
+ * @flush_rq:    제거할 flush request
+ *
+ * hctx 해제 전 flush_rq 에 대한 역참조를 cmpxchg 로 NULL 로 설정.
+ * 완료 경로(nvme_complete_rq)와의 UAF(use-after-free) race 방지.
+ */
 static void blk_mq_clear_flush_rq_mapping(struct blk_mq_tags *tags,
 		unsigned int queue_depth, struct request *flush_rq)
 {
 	int i;
 
 	/* The hw queue may not be mapped yet */
+	/* [한국어] tags == NULL: 이 hctx 의 tag pool 이 아직 할당되지 않은 경우 */
 	if (!tags)
 		return;
 
+	/* [한국어] 해제 전 flush_rq 참조 카운트가 0 이어야 안전 */
 	WARN_ON_ONCE(req_ref_read(flush_rq) != 0);
 
+	/* [한국어] 전체 tag slot 에서 flush_rq 에 대한 매핑을 원자적으로 NULL 로 교체 */
 	for (i = 0; i < queue_depth; i++)
 		cmpxchg(&tags->rqs[i], flush_rq, NULL);
 }
 
+/*
+ * [한국어]
+ * blk_free_flush_queue_callback - SRCU 콜백: flush queue 메모리 해제
+ *
+ * @head: rcu_head (blk_flush_queue 내 임베딩)
+ *
+ * blk_mq_exit_hctx 에서 call_srcu 로 등록된 콜백.
+ * SRCU 임계 구간이 모두 종료된 후 호출되어 안전하게 flush queue 를 해제.
+ */
 static void blk_free_flush_queue_callback(struct rcu_head *head)
 {
 	struct blk_flush_queue *fq =
@@ -6569,33 +7138,62 @@ static void blk_free_flush_queue_callback(struct rcu_head *head)
 }
 
 /* hctx->ctxs will be freed in queue's release handler */
+/*
+ * [한국어]
+ * blk_mq_exit_hctx - 하나의 hctx (NVMe SQ) 를 종료 및 정리
+ *
+ * @q:        request_queue
+ * @set:      blk_mq_tag_set
+ * @hctx:     종료할 hctx
+ * @hctx_idx: hctx 인덱스 (NVMe SQ 번호)
+ *
+ * tag_idle → flush_rq 매핑 해제 → exit_request/exit_hctx 콜백 →
+ * flush_queue SRCU 해제 → unused_hctx_list 이동 순으로 처리.
+ * flush queue 는 SRCU 를 통해 모든 reader 가 빠져나간 후 해제.
+ */
 static void blk_mq_exit_hctx(struct request_queue *q,
 		struct blk_mq_tag_set *set,
 		struct blk_mq_hw_ctx *hctx, unsigned int hctx_idx)
 {
 	struct request *flush_rq = hctx->fq->flush_rq;
 
+	/* [한국어] sw queue 가 매핑돼 있으면 tag idle 처리 (CID 해제 시도) */
 	if (blk_mq_hw_queue_mapped(hctx))
 		blk_mq_tag_idle(hctx);
 
+	/* [한국어] queue 초기화 완료 후 진입한 경우에만 flush_rq 매핑 클리어 */
 	if (blk_queue_init_done(q))
 		blk_mq_clear_flush_rq_mapping(set->tags[hctx_idx],
 				set->queue_depth, flush_rq);
+	/* [한국어] 드라이버 exit_request: NVMe flush_rq 의 cmd payload 해제 */
 	if (set->ops->exit_request)
 		set->ops->exit_request(set, flush_rq, hctx_idx);
 
+	/* [한국어] 드라이버 exit_hctx: NVMe SQ/CQ 드라이버 레벨 정리 */
 	if (set->ops->exit_hctx)
 		set->ops->exit_hctx(hctx, hctx_idx);
 
+	/* [한국어] flush_queue 를 SRCU 콜백으로 해제: 모든 reader 퇴장 후 안전 해제 */
 	call_srcu(&set->tags_srcu, &hctx->fq->rcu_head,
 			blk_free_flush_queue_callback);
 	hctx->fq = NULL;
 
+	/* [한국어] hctx 를 unused_hctx_list 로 이동: 메모리는 queue release 시 해제 */
 	spin_lock(&q->unused_hctx_lock);
 	list_add(&hctx->hctx_list, &q->unused_hctx_list);
 	spin_unlock(&q->unused_hctx_lock);
 }
 
+/*
+ * [한국어]
+ * blk_mq_exit_hw_queues - 첫 nr_queue 개의 hctx 를 종료
+ *
+ * @q:        request_queue
+ * @set:      blk_mq_tag_set
+ * @nr_queue: 종료할 hctx 수
+ *
+ * 부분 초기화 실패 시 이미 초기화된 hctx 들만 정리하기 위해 nr_queue 로 상한 지정.
+ */
 static void blk_mq_exit_hw_queues(struct request_queue *q,
 		struct blk_mq_tag_set *set, int nr_queue)
 {
@@ -6605,30 +7203,48 @@ static void blk_mq_exit_hw_queues(struct request_queue *q,
 	queue_for_each_hw_ctx(q, hctx, i) {
 		if (i == nr_queue)
 			break;
+		/* [한국어] cpuhp 콜백 해제 후 hctx 종료 */
 		blk_mq_remove_cpuhp(hctx);
 		blk_mq_exit_hctx(q, set, hctx, i);
 	}
 }
 
+/*
+ * [한국어]
+ * blk_mq_init_hctx - 하나의 hctx (NVMe SQ) 를 초기화
+ *
+ * @q:        request_queue
+ * @set:      blk_mq_tag_set
+ * @hctx:     초기화할 hctx
+ * @hctx_idx: hctx 인덱스 (NVMe SQ 번호)
+ * @return:   0 성공, -1 실패
+ *
+ * flush queue 할당 → queue_num/tags 설정 → 드라이버 init_hctx 콜백 →
+ * flush_rq 초기화 순으로 진행. 실패 시 역순으로 정리.
+ */
 static int blk_mq_init_hctx(struct request_queue *q,
 		struct blk_mq_tag_set *set,
 		struct blk_mq_hw_ctx *hctx, unsigned hctx_idx)
 {
 	gfp_t gfp = GFP_NOIO | __GFP_NOWARN | __GFP_NORETRY;
 
+	/* [한국어] flush queue: PRE_FLUSH/POST_FLUSH 명령용 flush_rq 포함 */
 	hctx->fq = blk_alloc_flush_queue(hctx->numa_node, set->cmd_size, gfp);
 	if (!hctx->fq)
 		goto fail;
 
-	hctx->queue_num = hctx_idx; /* NVMe queue index (SQ id) 설정 */
+	/* [한국어] queue_num = hctx 인덱스 = NVMe SQ 번호 */
+	hctx->queue_num = hctx_idx;
 
-	hctx->tags = set->tag1s[hctx_idx]; /* 해당 NVMe SQ 의 tag pool 연결 */
+	/* [한국어] 이 hctx 의 CID pool 연결 */
+	hctx->tags = set->tags[hctx_idx];
 
 	if (set->ops->init_hctx &&
-// driver 의 init_hctx(): NVMe SQ/CQ 구조체 초기화
+	    /* [한국어] nvme_init_hctx: nvme_queue 를 hctx 에 바인딩 */
 	    set->ops->init_hctx(hctx, set->driver_data, hctx_idx))
 		goto fail_free_fq;
 
+	/* [한국어] flush_rq 초기화: 드라이버 init_request 콜백으로 NVMe cmd payload 준비 */
 	if (blk_mq_init_request(set, hctx->fq->flush_rq, hctx_idx,
 				hctx->numa_node))
 		goto exit_hctx;
@@ -6645,6 +7261,18 @@ static int blk_mq_init_hctx(struct request_queue *q,
 	return -1;
 }
 
+/*
+ * [한국어]
+ * blk_mq_alloc_hctx - 새 blk_mq_hw_ctx 구조체 할당 및 기본 초기화
+ *
+ * @q:    request_queue
+ * @set:  blk_mq_tag_set
+ * @node: NUMA node
+ * @return: 할당된 hctx, 실패 시 NULL
+ *
+ * hctx 메모리, cpumask, ctxs[], ctx_map(sbitmap), dispatch_wait 초기화.
+ * blk_mq_init_hctx 와 분리된 이유: 일부 필드는 queue 구조체 없이 미리 할당 가능.
+ */
 static struct blk_mq_hw_ctx *
 blk_mq_alloc_hctx(struct request_queue *q, struct blk_mq_tag_set *set,
 		int node)
@@ -6656,47 +7284,54 @@ blk_mq_alloc_hctx(struct request_queue *q, struct blk_mq_tag_set *set,
 	if (!hctx)
 		goto fail_alloc_hctx;
 
+	/* [한국어] hctx->cpumask: 이 NVMe SQ 에 매핑된 CPU 집합 */
 	if (!zalloc_cpumask_var_node(&hctx->cpumask, gfp, node))
 		goto free_hctx;
 
+	/* [한국어] nr_active: 이 hctx 에서 drv 에 전달된 CID 수 (budget tracking) */
 	atomic_set(&hctx->nr_active, 0);
-// hctx->nr_active = 0: NVMe SQ 활성 CID 카운터 초기화
 	if (node == NUMA_NO_NODE)
 		node = set->numa_node;
 	hctx->numa_node = node;
 
+	/* [한국어] run_work: kblockd 에서 이 NVMe SQ 의 dispatch 를 비동기 실행 */
 	INIT_DELAYED_WORK(&hctx->run_work, blk_mq_run_work_fn);
-// run_work: kblockd 가 NVMe SQ dispatch 를 실행할 work
 	spin_lock_init(&hctx->lock);
+	/* [한국어] dispatch: bypass 된 passthrough/requeue request 의 대기 list */
 	INIT_LIST_HEAD(&hctx->dispatch);
-// hctx->dispatch: NVMe SQ 로 곧바로 날아갈 request list
+	/* [한국어] cpuhp_dead/cpuhp_online: CPU hotplug hlist 노드 초기화 */
 	INIT_HLIST_NODE(&hctx->cpuhp_dead);
 	INIT_HLIST_NODE(&hctx->cpuhp_online);
 	hctx->queue = q;
+	/* [한국어] TAG_QUEUE_SHARED 는 나중에 add_queue_tag_set 에서 설정 */
 	hctx->flags = set->flags & ~BLK_MQ_F_TAG_QUEUE_SHARED;
 
+	/* [한국어] hctx_list: unused_hctx_list 연결용 */
 	INIT_LIST_HEAD(&hctx->hctx_list);
 
 	/*
 	 * Allocate space for all possible cpus to avoid allocation at
 	 * runtime
 	 */
+	/* [한국어] ctxs[]: 이 hctx 에 매핑된 per-CPU sw queue 포인터 배열 */
 	hctx->ctxs = kmalloc_array_node(nr_cpu_ids, sizeof(void *),
 			gfp, node);
 	if (!hctx->ctxs)
 		goto free_cpumask;
 
+	/* [한국어] ctx_map: 이 hctx 에 pending request 가 있는 CPU 를 추적하는 sbitmap */
 	if (sbitmap_init_node(&hctx->ctx_map, nr_cpu_ids, ilog2(8),
-// ctx_map: 이 NVMe SQ 에 매핑된 CPU(sw queue) bitmap
 				gfp, node, false, false))
 		goto free_ctxs;
 	hctx->nr_ctx = 0;
 
 	spin_lock_init(&hctx->dispatch_wait_lock);
+	/* [한국어] dispatch_wait: CID 고갈 시 tag 해제를 기다리는 waitqueue entry.
+	 * blk_mq_dispatch_wake 가 wake 콜백으로 등록됨 */
 	init_waitqueue_func_entry(&hctx->dispatch_wait, blk_mq_dispatch_wake);
-// dispatch_wait: 이 NVMe SQ 의 CID 대기 waitqueue entry
 	INIT_LIST_HEAD(&hctx->dispatch_wait.entry);
 
+	/* [한국어] sysfs kobject 초기화: /sys/block/nvme0n1/mq/<hctx_idx>/ */
 	blk_mq_hctx_kobj_init(hctx);
 
 	return hctx;
@@ -6711,6 +7346,16 @@ blk_mq_alloc_hctx(struct request_queue *q, struct blk_mq_tag_set *set,
 	return NULL;
 }
 
+/*
+ * [한국어]
+ * blk_mq_init_cpu_queues - 모든 possible CPU 에 대해 per-CPU sw queue 초기화
+ *
+ * @q:            request_queue
+ * @nr_hw_queues: hctx 수 (NVMe SQ 수)
+ *
+ * 각 CPU 의 blk_mq_ctx 를 초기화하고 CPU → hctx NUMA node 를 설정.
+ * 다중 HW queue 가 있을 때만 CPU local node 를 hctx 에 반영.
+ */
 static void blk_mq_init_cpu_queues(struct request_queue *q,
 				   unsigned int nr_hw_queues)
 {
@@ -6718,13 +7363,14 @@ static void blk_mq_init_cpu_queues(struct request_queue *q,
 	unsigned int i, j;
 
 	for_each_possible_cpu(i) {
-// 모든 가능한 CPU 에 대해 software queue 초기화
+		/* [한국어] 이 CPU 의 per-CPU sw queue 초기화 */
 		struct blk_mq_ctx *__ctx = per_cpu_ptr(q->queue_ctx, i);
 		struct blk_mq_hw_ctx *hctx;
 		int k;
 
 		__ctx->cpu = i;
 		spin_lock_init(&__ctx->lock);
+		/* [한국어] rq_lists[type]: DEFAULT/READ/POLL 각 유형별 pending request list */
 		for (k = HCTX_TYPE_DEFAULT; k < HCTX_MAX_TYPES; k++)
 			INIT_LIST_HEAD(&__ctx->rq_lists[k]);
 
@@ -6736,13 +7382,22 @@ static void blk_mq_init_cpu_queues(struct request_queue *q,
 		 */
 		for (j = 0; j < set->nr_maps; j++) {
 			hctx = blk_mq_map_queue_type(q, j, i);
-// CPU -> hctx(NVMe SQ) 매핑에 따른 NUMA node 설정
+			/* [한국어] 다중 HW queue: CPU 의 NUMA node 를 hctx 에 반영 */
 			if (nr_hw_queues > 1 && hctx->numa_node == NUMA_NO_NODE)
 				hctx->numa_node = cpu_to_node(i);
 		}
 	}
 }
 
+/*
+ * [한국어]
+ * blk_mq_alloc_map_and_rqs - hctx 를 위한 tag map 과 request 객체 일괄 할당
+ *
+ * @set:      blk_mq_tag_set
+ * @hctx_idx: hctx 인덱스 (NVMe SQ 번호)
+ * @depth:    CID 슬롯 수 (= queue depth)
+ * @return:   blk_mq_tags 포인터, 실패 시 NULL
+ */
 struct blk_mq_tags *blk_mq_alloc_map_and_rqs(struct blk_mq_tag_set *set,
 					     unsigned int hctx_idx,
 					     unsigned int depth)
@@ -6750,11 +7405,12 @@ struct blk_mq_tags *blk_mq_alloc_map_and_rqs(struct blk_mq_tag_set *set,
 	struct blk_mq_tags *tags;
 	int ret;
 
+	/* [한국어] sbitmap + rqs[]/static_rqs[] 배열 할당 */
 	tags = blk_mq_alloc_rq_map(set, hctx_idx, depth, set->reserved_tags);
-// tag set 의 CID pool 과 request pool 할당
 	if (!tags)
 		return NULL;
 
+	/* [한국어] static_rqs[]: request 객체 + NVMe cmd payload 페이지 할당 */
 	ret = blk_mq_alloc_rqs(set, tags, hctx_idx, depth);
 	if (ret) {
 		blk_mq_free_rq_map(set, tags);
@@ -6764,22 +7420,30 @@ struct blk_mq_tags *blk_mq_alloc_map_and_rqs(struct blk_mq_tag_set *set,
 	return tags;
 }
 
+/*
+ * [한국어]
+ * __blk_mq_alloc_map_and_rqs - shared tags 여부에 따라 tag 할당 또는 공유 연결
+ */
 static bool __blk_mq_alloc_map_and_rqs(struct blk_mq_tag_set *set,
 				       int hctx_idx)
 {
 	if (blk_mq_is_shared_tags(set->flags)) {
-// shared tags: 모든 NVMe SQ 가 동일한 CID pool 공유
+		/* [한국어] shared_tags: 별도 할당 없이 공유 pool 포인터만 복사 */
 		set->tags[hctx_idx] = set->shared_tags;
-
 		return true;
 	}
 
+	/* [한국어] 개별 tags: 이 hctx 전용 CID pool 과 request 객체 할당 */
 	set->tags[hctx_idx] = blk_mq_alloc_map_and_rqs(set, hctx_idx,
 						       set->queue_depth);
 
 	return set->tags[hctx_idx];
 }
 
+/*
+ * [한국어]
+ * blk_mq_free_map_and_rqs - tag pool 의 request 객체와 map 해제
+ */
 void blk_mq_free_map_and_rqs(struct blk_mq_tag_set *set,
 			     struct blk_mq_tags *tags,
 			     unsigned int hctx_idx)
@@ -6790,21 +7454,34 @@ void blk_mq_free_map_and_rqs(struct blk_mq_tag_set *set,
 	}
 }
 
+/*
+ * [한국어]
+ * __blk_mq_free_map_and_rqs - set->tags[hctx_idx] 해제 및 NULL 초기화
+ *
+ * shared_tags 는 공유 pool 이므로 직접 해제하지 않는다.
+ */
 static void __blk_mq_free_map_and_rqs(struct blk_mq_tag_set *set,
 				      unsigned int hctx_idx)
 {
+	/* [한국어] shared_tags 가 아닐 때만 개별 tag pool 해제 */
 	if (!blk_mq_is_shared_tags(set->flags))
-// shared tags 가 아닐 때만 개별 tag pool 해제
 		blk_mq_free_map_and_rqs(set, set->tags[hctx_idx], hctx_idx);
 
 	set->tags[hctx_idx] = NULL;
 }
 
 /*
- * blk_mq_map_swqueue: CPU (software queue) 를 hctx (hardware queue)
- *   에 매핑.
- *   NVMe 관점: 각 CPU 가 어느 nvme_queue(SQ/CQ 쌍) 로 I/O 를
- *   볂낼지 결정. nr_hw_queues 가 NVMe SQ 개수와 대응.
+ * [한국어]
+ * blk_mq_map_swqueue - CPU(sw queue) 를 hctx(NVMe SQ) 에 매핑 (재)설정
+ *
+ * @q: request_queue
+ *
+ * set->map[type].mq_map[cpu] 배열을 참조하여 각 CPU 가 어느 hctx(NVMe SQ) 를
+ * 사용할지 ctx->hctxs[type] 에 저장하고, hctx->cpumask 와 ctxs[] 를 갱신한다.
+ * CPU topology 변경 또는 tag 할당 실패 시 hctx[0] 로 fallback 처리.
+ * isolated CPU 는 kworker 스케줄링 방지를 위해 cpumask 에서 제외.
+ *
+ * 호출 컨텍스트: queue freeze 상태에서 호출 (blk_mq_init_queue, update_nr_hw_queues)
  */
 static void blk_mq_map_swqueue(struct request_queue *q)
 {
@@ -6815,8 +7492,8 @@ static void blk_mq_map_swqueue(struct request_queue *q)
 	struct blk_mq_tag_set *set = q->tag_set;
 
 	queue_for_each_hw_ctx(q, hctx, i) {
+		/* [한국어] 재매핑 전 초기화: cpumask/nr_ctx/dispatch_from 클리어 */
 		cpumask_clear(hctx->cpumask);
-// 매핑 전 기존 hctx cpumask 와 ctx_map 초기화
 		hctx->nr_ctx = 0;
 		hctx->dispatch_from = NULL;
 	}
@@ -6827,11 +7504,11 @@ static void blk_mq_map_swqueue(struct request_queue *q)
 	 * If the cpu isn't present, the cpu is mapped to first hctx.
 	 */
 	for_each_possible_cpu(i) {
-// 모든 CPU 에 대해 NVMe SQ 매핑 재계산
-
+		/* [한국어] 이 CPU 의 per-CPU ctx 를 가져옴 */
 		ctx = per_cpu_ptr(q->queue_ctx, i);
 		for (j = 0; j < set->nr_maps; j++) {
 			if (!set->map[j].nr_queues) {
+				/* [한국어] 이 type(j)에 queue 없음: DEFAULT hctx 로 fallback */
 				ctx->hctxs[j] = blk_mq_map_queue_type(q,
 						HCTX_TYPE_DEFAULT, i);
 				continue;
@@ -6839,7 +7516,7 @@ static void blk_mq_map_swqueue(struct request_queue *q)
 			hctx_idx = set->map[j].mq_map[i];
 			/* unmapped hw queue can be remapped after CPU topo changed */
 			if (!set->tags[hctx_idx] &&
-// tag pool 할당 실패 시 queue 0 으로 fallback
+			    /* [한국어] tag 할당 실패: hctx[0] 에 fallback 매핑 */
 			    !__blk_mq_alloc_map_and_rqs(set, hctx_idx)) {
 				/*
 				 * If tags initialization fail for some hctx,
@@ -6851,21 +7528,23 @@ static void blk_mq_map_swqueue(struct request_queue *q)
 			}
 
 			hctx = blk_mq_map_queue_type(q, j, i);
-// ctx->hctxs[j] 에 이 CPU 의 NVMe SQ(hctx) 저장
+			/* [한국어] ctx->hctxs[j]: 이 CPU 가 type j 로 사용할 hctx(NVMe SQ) */
 			ctx->hctxs[j] = hctx;
 			/*
 			 * If the CPU is already set in the mask, then we've
 			 * mapped this one already. This can happen if
 			 * devices share queues across queue maps.
 			 */
+			/* [한국어] 이미 이 CPU 가 이 hctx 에 매핑돼 있으면 중복 등록 생략 */
 			if (cpumask_test_cpu(i, hctx->cpumask))
 				continue;
 
+			/* [한국어] hctx->cpumask 에 이 CPU 추가: SQ IRQ affinity 기반 */
 			cpumask_set_cpu(i, hctx->cpumask);
-// hctx->cpumask 에 이 CPU 추가: NVMe SQ affinity
 			hctx->type = j;
+			/* [한국어] ctx->index_hw[j]: 이 CPU 가 hctx->ctxs[] 에서 몇 번째인지 */
 			ctx->index_hw[hctx->type] = hctx->nr_ctx;
-// ctx->index_hw[]: 이 CPU가 hctx 내 몇 번째 sw queue 인지
+			/* [한국어] hctx->ctxs[nr_ctx++] 에 이 ctx 등록 */
 			hctx->ctxs[hctx->nr_ctx++] = ctx;
 
 			/*
@@ -6875,6 +7554,7 @@ static void blk_mq_map_swqueue(struct request_queue *q)
 			BUG_ON(!hctx->nr_ctx);
 		}
 
+		/* [한국어] 남은 type(j..HCTX_MAX_TYPES) 은 모두 DEFAULT hctx 로 설정 */
 		for (; j < HCTX_MAX_TYPES; j++)
 			ctx->hctxs[j] = blk_mq_map_queue_type(q,
 					HCTX_TYPE_DEFAULT, i);
@@ -6888,7 +7568,8 @@ static void blk_mq_map_swqueue(struct request_queue *q)
 		 * disable it and free the request entries.
 		 */
 		if (!hctx->nr_ctx) {
-// sw queue 가 매핑되지 않은 NVMe SQ 는 비활성화
+			/* [한국어] sw queue 가 없는 NVMe SQ: tag pool 해제 후 비활성화.
+			 * hctx[0] 는 fallback 으로 보존 */
 			/* Never unmap queue 0.  We need it as a
 			 * fallback in case of a new remap fails
 			 * allocation
@@ -6900,8 +7581,8 @@ static void blk_mq_map_swqueue(struct request_queue *q)
 			continue;
 		}
 
+		/* [한국어] 활성화된 hctx 에 tag pool 연결 */
 		hctx->tags = set->tags[i];
-// hctx->tags: 활성화된 NVMe SQ 의 tag pool 재연결
 		WARN_ON(!hctx->tags);
 
 		/*
@@ -6909,8 +7590,8 @@ static void blk_mq_map_swqueue(struct request_queue *q)
 		 * This is more accurate and more efficient than looping
 		 * over all possibly mapped software queues.
 		 */
+		/* [한국어] ctx_map 의 실제 크기를 매핑된 sw queue 수에 맞게 축소 */
 		sbitmap_resize(&hctx->ctx_map, hctx->nr_ctx);
-// ctx_map 크기를 실제 매핑된 sw queue 수로 조정
 
 		/*
 		 * Rule out isolated CPUs from hctx->cpumask to avoid
@@ -6919,10 +7600,9 @@ static void blk_mq_map_swqueue(struct request_queue *q)
 		 * here.
 		 */
 		rcu_read_lock();
-// rcu_read_lock: isolated CPU cpumask 수정 보호
+		/* [한국어] isolated CPU 는 kblockd 스케줄링 방지를 위해 cpumask 제외 */
 		for_each_cpu(cpu, hctx->cpumask) {
 			if (cpu_is_isolated(cpu))
-// isolated CPU 는 hctx cpumask 에서 제외
 				cpumask_clear_cpu(cpu, hctx->cpumask);
 		}
 		rcu_read_unlock();
@@ -6930,8 +7610,9 @@ static void blk_mq_map_swqueue(struct request_queue *q)
 		/*
 		 * Initialize batch roundrobin counts
 		 */
+		/* [한국어] next_cpu: kblockd work 가 실행될 CPU (round-robin 시작점) */
 		hctx->next_cpu = blk_mq_first_mapped_cpu(hctx);
-// next_cpu: kblockd work 를 실행할 NVMe SQ 제출 CPU
+		/* [한국어] next_cpu_batch: round-robin 전환 전 같은 CPU 에서 처리할 request 수 */
 		hctx->next_cpu_batch = BLK_MQ_CPU_WORK_BATCH;
 	}
 }
@@ -6947,15 +7628,26 @@ static void queue_set_hctx_shared(struct request_queue *q, bool shared)
 
 	queue_for_each_hw_ctx(q, hctx, i) {
 		if (shared) {
-// shared tag pool 사용 시 플래그 설정
+			/* [한국어] shared 전환: BLK_MQ_F_TAG_QUEUE_SHARED 플래그 설정 */
 			hctx->flags |= BLK_MQ_F_TAG_QUEUE_SHARED;
 		} else {
+			/* [한국어] unshared 전환: tag idle 후 플래그 제거 */
 			blk_mq_tag_idle(hctx);
 			hctx->flags &= ~BLK_MQ_F_TAG_QUEUE_SHARED;
 		}
 	}
 }
 
+/*
+ * [한국어]
+ * blk_mq_update_tag_set_shared - tag_set 의 모든 queue 에 shared 모드 변경 적용
+ *
+ * @set:    blk_mq_tag_set
+ * @shared: true = shared 모드로, false = unshared 모드로
+ *
+ * tag_list_lock 보유 상태에서 호출.
+ * 각 queue 를 개별적으로 freeze → 모드 변경 → unfreeze.
+ */
 static void blk_mq_update_tag_set_shared(struct blk_mq_tag_set *set,
 					 bool shared)
 {
@@ -6965,29 +7657,48 @@ static void blk_mq_update_tag_set_shared(struct blk_mq_tag_set *set,
 	lockdep_assert_held(&set->tag_list_lock);
 
 	list_for_each_entry(q, &set->tag_list, tag_set_list) {
+		/* [한국어] queue freeze: in-flight request 완료 대기 후 shared 전환 */
 		memflags = blk_mq_freeze_queue(q);
-// queue freeze 후 shared 모드 전환: NVMe SQ 간 tag 공유
 		queue_set_hctx_shared(q, shared);
 		blk_mq_unfreeze_queue(q, memflags);
 	}
 }
 
+/*
+ * [한국어]
+ * blk_mq_del_queue_tag_set - request_queue 를 tag_set 의 tag_list 에서 제거
+ *
+ * @q: 제거할 request_queue
+ *
+ * tag_list 의 마지막 queue 가 제거되면 shared 상태에서 unshared 로 전환.
+ * RCU 를 사용하여 reader 와 race 없이 안전하게 제거.
+ */
 static void blk_mq_del_queue_tag_set(struct request_queue *q)
 {
 	struct blk_mq_tag_set *set = q->tag_set;
 
 	mutex_lock(&set->tag_list_lock);
+	/* [한국어] RCU list 제거: 이후 readers 는 이 q 를 보지 못함 */
 	list_del_rcu(&q->tag_set_list);
-// list_del_rcu: request_queue 를 tag_set list 에서 안전 제거
 	if (list_is_singular(&set->tag_list)) {
 		/* just transitioned to unshared */
+		/* [한국어] 1개만 남음: unshared 로 전환 (CID pool 분리) */
 		set->flags &= ~BLK_MQ_F_TAG_QUEUE_SHARED;
-		/* update existing queue */
 		blk_mq_update_tag_set_shared(set, false);
 	}
 	mutex_unlock(&set->tag_list_lock);
 }
 
+/*
+ * [한국어]
+ * blk_mq_add_queue_tag_set - request_queue 를 tag_set 의 tag_list 에 추가
+ *
+ * @set: blk_mq_tag_set
+ * @q:   추가할 request_queue
+ *
+ * 2번째 queue 추가 시 shared 모드로 전환하여 모든 queue 가 CID pool 을 공유.
+ * RCU 를 사용하여 reader 와 race 없이 안전하게 추가.
+ */
 static void blk_mq_add_queue_tag_set(struct blk_mq_tag_set *set,
 				     struct request_queue *q)
 {
@@ -6998,40 +7709,52 @@ static void blk_mq_add_queue_tag_set(struct blk_mq_tag_set *set,
 	 */
 	if (!list_empty(&set->tag_list) &&
 	    !(set->flags & BLK_MQ_F_TAG_QUEUE_SHARED)) {
+		/* [한국어] 1→2 queue 전환: shared 모드 활성화 */
 		set->flags |= BLK_MQ_F_TAG_QUEUE_SHARED;
-// tag_set 이 shared 상태로 전환: NVMe SQ 간 CID pool 공유
-		/* update existing queue */
 		blk_mq_update_tag_set_shared(set, true);
 	}
 	if (set->flags & BLK_MQ_F_TAG_QUEUE_SHARED)
+		/* [한국어] 이미 shared 면 새 queue 에도 플래그 설정 */
 		queue_set_hctx_shared(q, true);
+	/* [한국어] RCU list 추가: reader 는 이 시점부터 새 q 를 볼 수 있음 */
 	list_add_tail_rcu(&q->tag_set_list, &set->tag_list);
-// list_add_tail_rcu: request_queue 를 tag_set list 에 추가
 
 	mutex_unlock(&set->tag_list_lock);
 }
 
 /* All allocations will be freed in release handler of q->mq_kobj */
+/*
+ * [한국어]
+ * blk_mq_alloc_ctxs - per-CPU blk_mq_ctx 배열 할당 및 초기화
+ *
+ * @q: request_queue
+ * @return: 0 성공, -ENOMEM 실패
+ *
+ * blk_mq_ctxs 컨테이너와 per-CPU blk_mq_ctx 를 할당하고 q->queue_ctx 에 연결.
+ * 모든 할당은 q->mq_kobj release handler 에서 해제된다.
+ */
 static int blk_mq_alloc_ctxs(struct request_queue *q)
 {
 	struct blk_mq_ctxs *ctxs;
 	int cpu;
 
+	/* [한국어] blk_mq_ctxs: kobject + per-CPU queue_ctx 를 묶는 컨테이너 */
 	ctxs = kzalloc_obj(*ctxs);
-// blk_mq_ctxs: per-CPU software queue 컨테이너
 	if (!ctxs)
 		return -ENOMEM;
 
+	/* [한국어] alloc_percpu: 각 CPU 에 독립적인 blk_mq_ctx 할당 */
 	ctxs->queue_ctx = alloc_percpu(struct blk_mq_ctx);
-// per-CPU blk_mq_ctx 할당
 	if (!ctxs->queue_ctx)
 		goto fail;
 
+	/* [한국어] 각 CPU ctx 에 컨테이너 역참조 등록 */
 	for_each_possible_cpu(cpu) {
 		struct blk_mq_ctx *ctx = per_cpu_ptr(ctxs->queue_ctx, cpu);
 		ctx->ctxs = ctxs;
 	}
 
+	/* [한국어] q->mq_kobj: sysfs kobject. q->queue_ctx: per-CPU ctx 배열 */
 	q->mq_kobj = &ctxs->kobj;
 	q->queue_ctx = ctxs->queue_ctx;
 
@@ -7047,34 +7770,54 @@ static int blk_mq_alloc_ctxs(struct request_queue *q)
  * and headache because q->mq_kobj shouldn't have been introduced,
  * but we can't group ctx/kctx kobj without it.
  */
+/*
+ * [한국어]
+ * blk_mq_release - blk-mq request_queue 의 실제 해제 처리
+ *
+ * @q: 해제할 request_queue
+ *
+ * request_queue release handler 에서 호출.
+ * unused_hctx_list 의 모든 hctx kobject 해제 → queue_hw_ctx 배열 해제 →
+ * mq_kobj(per-CPU ctx) 해제 순으로 처리.
+ */
 void blk_mq_release(struct request_queue *q)
 {
 	struct blk_mq_hw_ctx *hctx, *next;
 	unsigned long i;
 
+	/* [한국어] 모든 hctx 가 unused_hctx_list 에 있어야 함 (exit_hw_queues 완료 확인) */
 	queue_for_each_hw_ctx(q, hctx, i)
-// release 전 모든 hctx 가 unused list 에 있어야 함
 		WARN_ON_ONCE(hctx && list_empty(&hctx->hctx_list));
 
 	/* all hctx are in .unused_hctx_list now */
+	/* [한국어] unused_hctx_list 의 모든 hctx kobject 해제 */
 	list_for_each_entry_safe(hctx, next, &q->unused_hctx_list, hctx_list) {
 		list_del_init(&hctx->hctx_list);
 		kobject_put(&hctx->kobj);
 	}
 
+	/* [한국어] queue_hw_ctx[]: hctx 포인터 배열 해제 */
 	kfree(q->queue_hw_ctx);
 
 	/*
 	 * release .mq_kobj and sw queue's kobject now because
 	 * both share lifetime with request queue.
 	 */
+	/* [한국어] mq_kobj(blk_mq_ctxs) 와 sw queue sysfs 객체 해제 */
 	blk_mq_sysfs_deinit(q);
 }
 
 /*
- * blk_mq_alloc_queue: blk-mq request_queue 를 생성.
- *   NVMe 관점: NVMe namespace 의 상위 I/O 큐를 생성하고 tag set 과
- *   연결.
+ * [한국어]
+ * blk_mq_alloc_queue - blk-mq request_queue 생성 (NVMe namespace 큐)
+ *
+ * @set:       blk_mq_tag_set (NVMe 드라이버가 미리 초기화한 tag set)
+ * @lim:       queue 제한 (max_sectors, max_segments 등). NULL 이면 기본값
+ * @queuedata: 드라이버 private data (nvme_ns 포인터 등)
+ * @return:    생성된 request_queue, 실패 시 ERR_PTR
+ *
+ * blk_alloc_queue → blk_mq_init_allocated_queue 순으로 초기화.
+ * NVMe namespace 등록 전에 호출되어 I/O 가 가능한 큐를 반환.
  */
 struct request_queue *blk_mq_alloc_queue(struct blk_mq_tag_set *set,
 		struct queue_limits *lim, void *queuedata)
@@ -7085,17 +7828,17 @@ struct request_queue *blk_mq_alloc_queue(struct blk_mq_tag_set *set,
 
 	if (!lim)
 		lim = &default_lim;
+	/* [한국어] IO_STAT: iostat/cgroup accounting, NOWAIT: REQ_NOWAIT 지원 */
 	lim->features |= BLK_FEAT_IO_STAT | BLK_FEAT_NOWAIT;
-// BLK_FEAT_IO_STAT | BLK_FEAT_NOWAIT: NVMe IO 통계/nowait 지원
 	if (set->nr_maps > HCTX_TYPE_POLL)
+		/* [한국어] POLL queue 포함 시 polling 완료 지원 활성화 */
 		lim->features |= BLK_FEAT_POLL;
-// POLL queue 지원 시 BLK_FEAT_POLL 추가
 
 	q = blk_alloc_queue(lim, set->numa_node);
 	if (IS_ERR(q))
 		return q;
+	/* [한국어] queuedata: nvme_ns 구조체 — nvme_queue_rq 에서 역참조 */
 	q->queuedata = queuedata;
-// queuedata: NVMe controller 구조체(nvme_ns 등) 연결
 	ret = blk_mq_init_allocated_queue(set, q);
 	if (ret) {
 		blk_put_queue(q);
