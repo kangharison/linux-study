@@ -2,131 +2,256 @@
 #
 # Partition configuration
 #
-menu "Partition Types"
 
+# ============================================================================
+# NVMe SSD 관점 파일 상단 요약
+# - 이 파일(block/partitions/Kconfig)은 블록 계층의 파티션 테이블 파서를
+#   커널 빌드 시 선택하는 설정을 정의한다.
+# - NVMe SSD의 namespace가 gendisk로 등록되면 block/partitions/core.c의
+#   read_partitions() 등이 파티션을 스캔하여 /dev/nvmeXnYpZ를 만든다.
+# - 여기서 Y로 선택된 파서가 NVMe namespace에서 인식 가능한 파티션 종류를
+#   결정하고, blk_mq_submit_bio -> blk_mq_get_request -> nvme_queue_rq ->
+#   nvme_submit_cmd(doorbell) 경로의 LBA 단위 I/O에 영향을 준다.
+# - 본 파일은 block/Kconfig에 의해 include되며, block/partitions/Makefile이
+#   이 CONFIG_* 옵션들에 따라 개별 파서 object를 선택해 빌드한다.
+# ============================================================================
+
+menu "Partition Types"  # NVMe namespace가 gendisk로 등록될 때 이 메뉴에서 Y로 선택된 파서들이 /dev/nvmeXnYpZ 생성 후보가 됨
+
+# ------------------------------------------------------------------
+# config PARTITION_ADVANCED
+# - 목적: 외국 OS(Acorn, AIX, Amiga 등)에서 생성한 파티션 테이블 지원을
+#   메뉴에 노출할지 결정한다.
+# - NVMe 관련: NVMe namespace 블록 장치(/dev/nvmeXnY)에 대해서도 등록된
+#   파서들을 후보로 삼아 파티션을 인식한다. 이 값이 N이면 희귀 파서들은
+#   사용자 설정에서 아예 제외된다.
+# - 호출 경로(추정): add_disk -> register_disk -> blk_dev_scan_partitions ->
+#   read_partitions -> 각 파서 함수(msdos_partition, efi_partition 등)
+# - I/O 연결: 파티션이 등록된 후 blk_mq_submit_bio -> blk_mq_get_request ->
+#   nvme_queue_rq -> nvme_submit_cmd(doorbell)로 CID/SQ/CQ를 통해 전송되며,
+#   데이터 버퍼는 PRP 또는 SGL로 기술된다(추정).
+# ------------------------------------------------------------------
 config PARTITION_ADVANCED
-	bool "Advanced partition selection"
+	bool "Advanced partition selection"  # PARTITION_ADVANCED가 N이면 하위 희귀 파서 메뉴가 생략됨; NVMe namespace에서 Acorn/AIX 등 파서를 사용할 수 없게 됨
 	help
 	  Say Y here if you would like to use hard disks under Linux which
 	  were partitioned under an operating system running on a different
-	  architecture than your Linux system.
+	  architecture than your Linux system.  # NVMe SSD를 다른 아키텍처에서 포맷한 경우에도 파티션 인식 폭이 넓어짐
 
 	  Note that the answer to this question won't directly affect the
 	  kernel: saying N will just cause the configurator to skip all
-	  the questions about foreign partitioning schemes.
+	  the questions about foreign partitioning schemes.  # N이면 NVMe 장치에 대해서도 희귀 파서 옵션이 .config에 노출되지 않음
 
 	  If unsure, say N.
 
+# ------------------------------------------------------------------
+# config ACORN_PARTITION
+# - 목적: Acorn OS 계열에서 생성한 파티션 테이블을 읽는 파서를 커널에 포함한다.
+# - NVMe 관련: NVMe SSD에서 Acorn 파티션은 거의 사용되지 않지만, Y면
+#   namespace 등록 시 block/partitions/core.c의 read_partitions()가
+#   acorn.c의 파서를 후보로 삼아 인식 시도를 한다(추정).
+# - 호출 경로(추정): read_partitions -> acorn_partition() -> add_partition()
+# ------------------------------------------------------------------
 config ACORN_PARTITION
-	bool "Acorn partition support" if PARTITION_ADVANCED
-	default y if ARCH_ACORN
+	bool "Acorn partition support" if PARTITION_ADVANCED  # PARTITION_ADVANCED가 Y일 때만 메뉴에 표시; NVMe namespace 파서 후보 목록에 acorn.c 추가
+	default y if ARCH_ACORN                             # Acorn 아키텍처에서만 기본 활성화; NVMe 장치 존재 여부와 무관
 	help
-	  Support hard disks partitioned under Acorn operating systems.
+	  Support hard disks partitioned under Acorn operating systems.  # NVMe namespace에서 Acorn 포맷 탐색 시도 시 필요
 
+# ------------------------------------------------------------------
+# config ACORN_PARTITION_CUMANA
+# - 목적: Acorn 머신의 Cumana 인터페이스로 생성한 파티션 서브 포맷 지원.
+# - NVMe 관련: NVMe namespace에서 Cumana 서브 포맷은 거의 나타나지 않음.
+#   ACORN_PARTITION에 의존하므로, NVMe 장치의 파티션 인식 범위가 간접적으로
+#   좁혀진다(추정).
+# ------------------------------------------------------------------
 config ACORN_PARTITION_CUMANA
-	bool "Cumana partition support" if PARTITION_ADVANCED
-	default y if ARCH_ACORN
-	depends on ACORN_PARTITION
+	bool "Cumana partition support" if PARTITION_ADVANCED  # PARTITION_ADVANCED 메뉴 노출 조건; NVMe 입장에선 거의 사용되지 않는 서브 파서
+	default y if ARCH_ACORN                              # Acorn 플랫폼에서만 기본 Y; NVMe 장치와 무관
+	depends on ACORN_PARTITION  # 상위 ACORN_PARTITION이 Y일 때만 유효; NVMe 파서 선택에도 영향
 	help
 	  Say Y here if you would like to use hard disks under Linux which
-	  were partitioned using the Cumana interface on Acorn machines.
+	  were partitioned using the Cumana interface on Acorn machines.  # NVMe namespace에서 Cumana 서브 포맷 인식 시도 시 필요(추정)
 
+# ------------------------------------------------------------------
+# config ACORN_PARTITION_EESOX
+# - 목적: Acorn EESOX 인터페이스 파티션 서브 포맷 지원.
+# - NVMe 관련: NVMe SSD와 직접적 연결은 없으며, 상위 Acorn 파서가 빌드될 때
+#   함께 포함되어 드문 호환 상황에서만 namespace 파티션 인식에 참여(추정).
+# ------------------------------------------------------------------
 config ACORN_PARTITION_EESOX
-	bool "EESOX partition support" if PARTITION_ADVANCED
-	default y if ARCH_ACORN
-	depends on ACORN_PARTITION
-
-config ACORN_PARTITION_ICS
-	bool "ICS partition support" if PARTITION_ADVANCED
-	default y if ARCH_ACORN
-	depends on ACORN_PARTITION
+	bool "EESOX partition support" if PARTITION_ADVANCED  # 희귀 Acorn 서브 포맷; NVMe namespace 탐색 시 후보로 거의 고려되지 않음
+	default y if ARCH_ACORN                             # Acorn 플랫폼 한정 기본 Y
+	depends on ACORN_PARTITION  # Acorn 파서 트리의 하위 옵션; NVMe 장치에선 거의 무관
 	help
 	  Say Y here if you would like to use hard disks under Linux which
-	  were partitioned using the ICS interface on Acorn machines.
+	  were partitioned using the EESOX interface on Acorn machines.  # NVMe SSD에서 EESOX 서브 포맷을 만날 가능성은 매우 낮음(추정)
 
+# ------------------------------------------------------------------
+# config ACORN_PARTITION_ICS
+# - 목적: Acorn ICS 인터페이스 파티션 서브 포맷 지원.
+# - NVMe 관련: NVMe namespace 탐색 시 ICS 포맷을 추가 후보로 삼음(추정).
+# ------------------------------------------------------------------
+config ACORN_PARTITION_ICS
+	bool "ICS partition support" if PARTITION_ADVANCED  # PARTITION_ADVANCED 조건 하에서만 메뉴에 표시; NVMe 입장에선 드문 후보
+	default y if ARCH_ACORN                           # Acorn 아키텍처에서만 기본 Y
+	depends on ACORN_PARTITION  # ICS 서브 파서도 ACORN_PARTITION에 종속
+	help
+	  Say Y here if you would like to use hard disks under Linux which
+	  were partitioned using the ICS interface on Acorn machines.  # NVMe namespace에서 ICS 포맷 파싱 시도 시 필요(추정)
+
+# ------------------------------------------------------------------
+# config ACORN_PARTITION_ADFS
+# - 목적: Acorn Disc Filing System(ADFS) 기반 파티션 테이블 지원.
+# - NVMe 관련: RiscOS/Acorn 환경의 NVMe 마이그레이션 시에만 의미 있음(추정).
+# ------------------------------------------------------------------
 config ACORN_PARTITION_ADFS
-	bool "Native filecore partition support" if PARTITION_ADVANCED
-	default y if ARCH_ACORN
-	depends on ACORN_PARTITION
+	bool "Native filecore partition support" if PARTITION_ADVANCED  # ADFS/RiscOS 파서; NVMe 장치에서 사용될 일은 거의 없음
+	default y if ARCH_ACORN                                       # Acorn 아키텍처 전용 기본값
+	depends on ACORN_PARTITION  # ADFS 서브 포맷도 Acorn 파서에 종속
 	help
 	  The Acorn Disc Filing System is the standard file system of the
 	  RiscOS operating system which runs on Acorn's ARM-based Risc PC
 	  systems and the Acorn Archimedes range of machines.  If you say
-	  `Y' here, Linux will support disk partitions created under ADFS.
+	  `Y' here, Linux will support disk partitions created under ADFS.  # NVMe namespace에서 ADFS 포맷을 인식하려면 Y 필요(추정)
 
+# ------------------------------------------------------------------
+# config ACORN_PARTITION_POWERTEC
+# - 목적: Acorn 머신에서 PowerTec SCSI 드라이브로 생성한 파티션 지원.
+# - NVMe 관련: SCSI 레거시 포맷이므로 NVMe namespace에서는 실용성이 낮음(추정).
+# ------------------------------------------------------------------
 config ACORN_PARTITION_POWERTEC
-	bool "PowerTec partition support" if PARTITION_ADVANCED
-	default y if ARCH_ACORN
-	depends on ACORN_PARTITION
+	bool "PowerTec partition support" if PARTITION_ADVANCED  # Acorn SCSI 레거시 포맷; NVMe namespace에서는 거의 무의미
+	default y if ARCH_ACORN                                # Acorn 플랫폼에서만 기본 Y
+	depends on ACORN_PARTITION  # PowerTec 서브 파서도 Acorn 파서에 종속
 	help
 	  Support reading partition tables created on Acorn machines using
-	  the PowerTec SCSI drive.
+	  the PowerTec SCSI drive.  # NVMe SSD가 아닌 SCSI 레거시 대상; NVMe namespace 파싱에는 거의 관련 없음(추정)
 
+# ------------------------------------------------------------------
+# config ACORN_PARTITION_RISCIX
+# - 목적: RISCiX(Acorn용 Unix) 파티션 테이블 지원.
+# - NVMe 관련: 레거시 Unix 포맷으로, NVMe SSD에서 사용될 가능성은 매우 낮음(추정).
+# ------------------------------------------------------------------
 config ACORN_PARTITION_RISCIX
-	bool "RISCiX partition support" if PARTITION_ADVANCED
-	default y if ARCH_ACORN
-	depends on ACORN_PARTITION
+	bool "RISCiX partition support" if PARTITION_ADVANCED  # Acorn용 Unix 파티션; NVMe namespace에서 실용성 낮음
+	default y if ARCH_ACORN                              # Acorn 아키텍처 한정 기본 Y
+	depends on ACORN_PARTITION  # RISCiX 서브 파서도 Acorn 파서에 종속
 	help
 	  Once upon a time, there was a native Unix port for the Acorn series
 	  of machines called RISCiX.  If you say 'Y' here, Linux will be able
-	  to read disks partitioned under RISCiX.
+	  to read disks partitioned under RISCiX.  # NVMe 장치에서 RISCiX 포맷 파티션 인식 시도 시 필요(추정)
 
+# ------------------------------------------------------------------
+# config AIX_PARTITION
+# - 목적: IBM/Motorola PowerPC AIX 머신의 기본 파티션 테이블 지원.
+# - NVMe 관련: AIX 환경의 NVMe 장치(예: PowerNV 시스템)에서 namespace의
+#   파티션을 인식할 수 있게 함(추정).
+# - 호출 경로(추정): read_partitions -> aix_partition() -> add_partition()
+# ------------------------------------------------------------------
 config AIX_PARTITION
-	bool "AIX basic partition table support" if PARTITION_ADVANCED
+	bool "AIX basic partition table support" if PARTITION_ADVANCED  # PARTITION_ADVANCED가 Y일 때만 메뉴에 표시; PowerNV 등 AIX 기반 NVMe에서 namespace 파티션 인식
 	help
 	  Say Y here if you would like to be able to read the hard disk
 	  partition table format used by IBM or Motorola PowerPC machines
 	  running AIX.  AIX actually uses a Logical Volume Manager, where
 	  "logical volumes" can be spread across one or multiple disks,
 	  but this driver works only for the simple case of partitions which
-	  are contiguous.
+	  are contiguous.  # NVMe namespace가 단일 contiguous 파티션으로 매핑될 때 AIX 레이블 인식 가능(추정)
 	  Otherwise, say N.
 
+# ------------------------------------------------------------------
+# config OSF_PARTITION
+# - 목적: Alpha OSF/1 파티션 테이블 지원.
+# - NVMe 관련: Alpha 플랫폼의 NVMe 장치에서만 의미 있음(추정).
+# ------------------------------------------------------------------
 config OSF_PARTITION
-	bool "Alpha OSF partition support" if PARTITION_ADVANCED
-	default y if ALPHA
+	bool "Alpha OSF partition support" if PARTITION_ADVANCED  # PARTITION_ADVANCED가 Y일 때만 메뉴에 표시; Alpha 플랫폼 NVMe에서만 관련
+	default y if ALPHA                                        # Alpha 아키텍처에서 기본 활성화
 	help
 	  Say Y here if you would like to use hard disks under Linux which
-	  were partitioned on an Alpha machine.
+	  were partitioned on an Alpha machine.  # Alpha 머신의 NVMe namespace에서 OSF 포맷 파티션 인식 시 필요(추정)
 
+# ------------------------------------------------------------------
+# config AMIGA_PARTITION
+# - 목적: AmigaOS 파티션 테이블 지원.
+# - NVMe 관련: AmigaOS 환경이나 에뮬레이션에서 NVMe namespace를 사용할 때
+#   파티션 인식에 참여(추정).
+# ------------------------------------------------------------------
 config AMIGA_PARTITION
-	bool "Amiga partition table support" if PARTITION_ADVANCED
-	default y if (AMIGA || AFFS_FS=y)
+	bool "Amiga partition table support" if PARTITION_ADVANCED  # PARTITION_ADVANCED가 Y일 때만 메뉴에 표시; AmigaOS 환경 NVMe에서만 의미
+	default y if (AMIGA || AFFS_FS=y)                         # Amiga 플랫폼이나 AFFS 파일시스템 사용 시 기본 활성화
 	help
 	  Say Y here if you would like to use hard disks under Linux which
-	  were partitioned under AmigaOS.
+	  were partitioned under AmigaOS.  # AmigaOS용 NVMe namespace 파티션 인식 시 Amiga 파서 필요(추정)
 
+# ------------------------------------------------------------------
+# config ATARI_PARTITION
+# - 목적: Atari OS 파티션 테이블 지원.
+# - NVMe 관련: Atari 머신의 NVMe 컨트롤러가 있다면 namespace 파티션 인식에
+#   사용될 수 있음(추정).
+# ------------------------------------------------------------------
 config ATARI_PARTITION
-	bool "Atari partition table support" if PARTITION_ADVANCED
-	default y if ATARI
+	bool "Atari partition table support" if PARTITION_ADVANCED  # PARTITION_ADVANCED가 Y일 때만 메뉴에 표시; Atari NVMe 환경에서만 관련
+	default y if ATARI                                        # Atari 아키텍처에서 기본 활성화
 	help
 	  Say Y here if you would like to use hard disks under Linux which
-	  were partitioned under the Atari OS.
+	  were partitioned under the Atari OS.  # Atari OS용 NVMe namespace 파티션 인식 시 필요(추정)
 
+# ------------------------------------------------------------------
+# config IBM_PARTITION
+# - 목적: IBM DASD/CMS 디스크 라벨 및 파티션 지원.
+# - NVMe 관련: S390 메인프레임 환경에서 NVMe 장치가 노출될 경우(드묾),
+#   CMS 라벨을 가진 namespace를 인식하는 데 사용될 수 있음(추정).
+# ------------------------------------------------------------------
 config IBM_PARTITION
-	bool "IBM disk label and partition support"
-	depends on PARTITION_ADVANCED && S390
+	bool "IBM disk label and partition support"                  # PARTITION_ADVANCED에 의존하지 않고 직접 노출됨; S390 NVMe namespace의 CMS 라벨 인식
+	depends on PARTITION_ADVANCED && S390                        # S390 플랫폼과 ADVANCED 모두 필요; NVMe 사용 시에도 동일 조건 적용
 	help
 	  Say Y here if you would like to be able to read the hard disk
 	  partition table format used by IBM DASD disks operating under CMS.
-	  Otherwise, say N.
+	  Otherwise, say N.  # S390 기반 NVMe namespace에서 CMS 라벨 파티션 인식 시 필요(추정)
 
+# ------------------------------------------------------------------
+# config MAC_PARTITION
+# - 목적: Macintosh(PPC) 파티션 맵 지원.
+# - NVMe 관련: New World Mac이나 PPC 머신의 NVMe 컨트롤러에서 namespace
+#   파티션을 인식할 수 있게 함(추정).
+# ------------------------------------------------------------------
 config MAC_PARTITION
-	bool "Macintosh partition map support" if PARTITION_ADVANCED
-	default y if (MAC || PPC_PMAC)
+	bool "Macintosh partition map support" if PARTITION_ADVANCED  # PARTITION_ADVANCED가 Y일 때만 메뉴에 표시; PPC/New World Mac NVMe에서 namespace 파티션 인식
+	default y if (MAC || PPC_PMAC)                              # Macintosh 또는 PPC_PMAC 시 기본 활성화
 	help
 	  Say Y here if you would like to use hard disks under Linux which
-	  were partitioned on a Macintosh.
+	  were partitioned on a Macintosh.  # Mac/PPC 환경의 NVMe namespace에서 Macintosh 파티션 맵 인식 시 필요(추정)
 
+# ------------------------------------------------------------------
+# config MSDOS_PARTITION
+# - 목적: PC BIOS/MBR 파티션 테이블 지원.
+# - NVMe 관련: NVMe SSD에서 가장 널리 사용되는 레거시 포맷 중 하나이며,
+#   GPT와 함께 사용되는 보호 MBR(protective MBR) 파싱에도 필요하다.
+#   이 파서가 없으면 NVMe namespace의 MBR/GPT 하이브리드 레이아웃을
+#   인식하지 못할 수 있다.
+# - 호출 경로(추정): read_partitions -> msdos_partition() -> add_partition()
+# ------------------------------------------------------------------
 config MSDOS_PARTITION
-	bool "PC BIOS (MSDOS partition tables) support" if PARTITION_ADVANCED
-	default y
+	bool "PC BIOS (MSDOS partition tables) support" if PARTITION_ADVANCED  # PARTITION_ADVANCED가 Y일 때만 메뉴에 표시; NVMe namespace의 MBR 및 protective MBR 파싱 핵심
+	default y                                                              # 대부분의 NVMe 시스템에서 MBR/GPT 인식을 위해 기본 활성화
 	help
-	  Say Y here.
+	  Say Y here.  # NVMe SSD에서 MBR 파티션(/dev/nvmeXnYpZ) 생성을 위해 필수적; GPT protective MBR도 msdos.c가 처리
 
+# ------------------------------------------------------------------
+# config BSD_DISKLABEL
+# - 목적: FreeBSD/NetBSD/OpenBSD disklabel 파티션 테이블 지원.
+# - NVMe 관련: BSD 시스템에서 NVMe namespace를 사용할 때 논리 파티션을
+#   인식한다. MSDOS_PARTITION의 확장 파티션 안에 disklabel이 들어가는
+#   경우가 많다.
+# - 호출 경로(추정): read_partitions -> bsd_disklabel_partition() ->
+#   add_partition()
+# ------------------------------------------------------------------
 config BSD_DISKLABEL
-	bool "BSD disklabel (FreeBSD partition tables) support"
-	depends on PARTITION_ADVANCED && MSDOS_PARTITION
+	bool "BSD disklabel (FreeBSD partition tables) support"  # BSD disklabel 파서; NVMe namespace의 논리 파티션 인식에 참여
+	depends on PARTITION_ADVANCED && MSDOS_PARTITION  # MSDOS 파서가 있어야 확장 파티션 내 disklabel 탐색 가능
 	help
 	  FreeBSD uses its own hard disk partition scheme on your PC. It
 	  requires only one entry in the primary partition table of your disk
@@ -135,148 +260,246 @@ config BSD_DISKLABEL
 	  here allows you to read these disklabels and further mount FreeBSD
 	  partitions from within Linux if you have also said Y to "UFS
 	  file system support", above. If you don't know what all this is
-	  about, say N.
+	  about, say N.  # NVMe namespace에서 FreeBSD/NetBSD/OpenBSD disklabel 파티션 인식 시 MSDOS_PARTITION과 함께 필요
 
+# ------------------------------------------------------------------
+# config MINIX_SUBPARTITION
+# - 목적: Minix 2.0.0/2.0.2 서브파티션 지원.
+# - NVMe 관련: NVMe SSD에서 Minix 서브파티션은 거의 사용되지 않음(추정).
+#   MSDOS_PARTITION에 의존한다.
+# ------------------------------------------------------------------
 config MINIX_SUBPARTITION
-	bool "Minix subpartition support"
-	depends on PARTITION_ADVANCED && MSDOS_PARTITION
+	bool "Minix subpartition support"  # Minix 서브파티션 파서; NVMe namespace에서 거의 사용되지 않음
+	depends on PARTITION_ADVANCED && MSDOS_PARTITION  # MSDOS 파서 기반의 서브 파티션
 	help
 	  Minix 2.0.0/2.0.2 subpartition table support for Linux.
 	  Say Y here if you want to mount and use Minix 2.0.0/2.0.2
-	  subpartitions.
+	  subpartitions.  # NVMe namespace에서 Minix 서브파티션을 인식하려면 MSDOS_PARTITION과 함께 Y 필요(추정)
 
+# ------------------------------------------------------------------
+# config SOLARIS_X86_PARTITION
+# - 목적: Solaris x86용 파티션 테이블(VTOC x86) 지원.
+# - NVMe 관련: Solaris x86 시스템에서 NVMe namespace를 사용할 때 파티션
+#   인식에 사용됨(추정).
+# ------------------------------------------------------------------
 config SOLARIS_X86_PARTITION
-	bool "Solaris (x86) partition table support"
-	depends on PARTITION_ADVANCED && MSDOS_PARTITION
+	bool "Solaris (x86) partition table support"  # Solaris x86 VTOC 파서; NVMe namespace에서 Solaris 슬라이스 인식
+	depends on PARTITION_ADVANCED && MSDOS_PARTITION  # MSDOS 기반의 Solaris 슬라이스 파싱
 	help
 	  Like most systems, Solaris x86 uses its own hard disk partition
 	  table format, incompatible with all others. Saying Y here allows you
 	  to read these partition tables and further mount Solaris x86
 	  partitions from within Linux if you have also said Y to "UFS
-	  file system support", above.
+	  file system support", above.  # NVMe namespace에서 Solaris x86 슬라이스를 /dev/nvmeXnYpZ로 인식하려면 필요(추정)
 
+# ------------------------------------------------------------------
+# config UNIXWARE_DISKLABEL
+# - 목적: UnixWare VTOC 슬라이스 지원.
+# - NVMe 관련: UnixWare 마이그레이션 환경의 NVMe 장치에서 파티션 인식에
+#   참여할 수 있음(추정).
+# ------------------------------------------------------------------
 config UNIXWARE_DISKLABEL
-	bool "Unixware slices support"
-	depends on PARTITION_ADVANCED && MSDOS_PARTITION
+	bool "Unixware slices support"  # UnixWare VTOC 슬라이스 파서; NVMe namespace에서 UnixWare 파티션 인식
+	depends on PARTITION_ADVANCED && MSDOS_PARTITION  # MSDOS 파서에 의존하는 VTOC 슬라이스 파서
 	help
 	  Like some systems, UnixWare uses its own slice table inside a
 	  partition (VTOC - Virtual Table of Contents). Its format is
 	  incompatible with all other OSes. Saying Y here allows you to read
 	  VTOC and further mount UnixWare partitions read-only from within
 	  Linux if you have also said Y to "UFS file system support" or
-	  "System V and Coherent file system support", above.
+	  "System V and Coherent file system support", above.  # NVMe namespace의 UnixWare VTOC 슬라이스 인식 시 MSDOS_PARTITION과 함께 필요(추정)
 
 	  This is mainly used to carry data from a UnixWare box to your
 	  Linux box via a removable medium like magneto-optical, ZIP or
 	  removable IDE drives. Note, however, that a good portable way to
 	  transport files and directories between unixes (and even other
 	  operating systems) is given by the tar program ("man tar" or
-	  preferably "info tar").
+	  preferably "info tar").  # NVMe SSD로 UnixWare 데이터를 마이그레이션할 때 VTOC 슬라이스 인식에 사용될 수 있음(추정)
 
 	  If you don't know what all this is about, say N.
 
+# ------------------------------------------------------------------
+# config LDM_PARTITION
+# - 목적: Windows Logical Disk Manager(동적 디스크) 파티션 지원.
+# - NVMe 관련: Windows 동적 디스크를 사용하는 NVMe SSD에서 소프트웨어 RAID,
+#   스팬, 스트라이프 볼륨의 파티션 정보를 읽을 수 있게 함(추정).
+# - 호출 경로(추정): read_partitions -> ldm_partition() -> add_partition()
+# ------------------------------------------------------------------
 config LDM_PARTITION
-	bool "Windows Logical Disk Manager (Dynamic Disk) support"
-	depends on PARTITION_ADVANCED
+	bool "Windows Logical Disk Manager (Dynamic Disk) support" if PARTITION_ADVANCED  # PARTITION_ADVANCED가 Y일 때만 메뉴에 표시; Windows 동적 디스크용 NVMe namespace 파티션 인식
+	depends on PARTITION_ADVANCED                                                   # LDM 자체도 ADVANCED 옵션에 종속
 	help
 	  Say Y here if you would like to use hard disks under Linux which
 	  were partitioned using Windows 2000's/XP's or Vista's Logical Disk
-	  Manager.  They are also known as "Dynamic Disks".
+	  Manager.  They are also known as "Dynamic Disks".  # NVMe SSD를 Windows 동적 디스크로 구성한 경우 /dev/nvmeXnYpZ 생성에 필요(추정)
 
 	  Note this driver only supports Dynamic Disks with a protective MBR
 	  label, i.e. DOS partition table.  It does not support GPT labelled
-	  Dynamic Disks yet as can be created with Vista.
+	  Dynamic Disks yet as can be created with Vista.  # NVMe namespace가 protective MBR(MSDOS) 기반 동적 디스크일 때만 지원; GPT 동적 디스크는 미지원
 
 	  Windows 2000 introduced the concept of Dynamic Disks to get around
 	  the limitations of the PC's partitioning scheme.  The Logical Disk
 	  Manager allows the user to repartition a disk and create spanned,
 	  mirrored, striped or RAID volumes, all without the need for
-	  rebooting.
+	  rebooting.  # NVMe namespace를 spanned/mirrored/striped/RAID 볼륨으로 구성한 Windows 환경에서 파티션 인식 시 사용(추정)
 
 	  Normal partitions are now called Basic Disks under Windows 2000, XP,
-	  and Vista.
+	  and Vista.  # Basic Disk 형태의 NVMe namespace는 MSDOS_PARTITION/EFI_PARTITION로 인식
 
 	  For a fuller description read <file:Documentation/admin-guide/ldm.rst>.
 
 	  If unsure, say N.
 
+# ------------------------------------------------------------------
+# config LDM_DEBUG
+# - 목적: LDM 파서의 상세 로깅을 활성화하여 디버깅에 사용.
+# - NVMe 관련: NVMe 기반 동적 디스크 문제 해결 시 LDM 파싱 과정을 추적할
+#   수 있음(추정).
+# ------------------------------------------------------------------
 config LDM_DEBUG
-	bool "Windows LDM extra logging"
-	depends on LDM_PARTITION
+	bool "Windows LDM extra logging"  # LDM 상세 로깅; NVMe 기반 Windows 동적 디스크 파싱 문제 디버깅 시 유용
+	depends on LDM_PARTITION  # LDM_PARTITION이 Y일 때만 의미 있음
 	help
 	  Say Y here if you would like LDM to log verbosely.  This could be
 	  helpful if the driver doesn't work as expected and you'd like to
-	  report a bug.
+	  report a bug.  # NVMe namespace에서 LDM 파싱이 실패할 때 상세 로그로 CID/SQ/CQ와 무관한 파서 단계 문제를 구분하는 데 도움(추정)
 
 	  If unsure, say N.
 
+# ------------------------------------------------------------------
+# config SGI_PARTITION
+# - 목적: SGI 머신의 파티션 테이블 지원.
+# - NVMe 관련: SGI 하드웨어에서 NVMe 컨트롤러를 사용할 경우 namespace
+#   파티션 인식에 참여(추정).
+# ------------------------------------------------------------------
 config SGI_PARTITION
-	bool "SGI partition support" if PARTITION_ADVANCED
-	default y if DEFAULT_SGI_PARTITION
+	bool "SGI partition support" if PARTITION_ADVANCED  # PARTITION_ADVANCED가 Y일 때만 메뉴에 표시; SGI 하드웨어 NVMe에서만 의미
+	default y if DEFAULT_SGI_PARTITION                  # SGI 기본 파티션 설정 시 활성화
 	help
 	  Say Y here if you would like to be able to read the hard disk
-	  partition table format used by SGI machines.
+	  partition table format used by SGI machines.  # SGI 머신의 NVMe namespace에서 SGI 파티션 테이블 인식 시 필요(추정)
 
+# ------------------------------------------------------------------
+# config ULTRIX_PARTITION
+# - 목적: DEC Ultrix 머신의 파티션 테이블 지원.
+# - NVMe 관련: DECstation 등 레거시 플랫폼의 NVMe 장치에서만 의미 있음(추정).
+# ------------------------------------------------------------------
 config ULTRIX_PARTITION
-	bool "Ultrix partition table support" if PARTITION_ADVANCED
-	default y if MACH_DECSTATION
+	bool "Ultrix partition table support" if PARTITION_ADVANCED  # PARTITION_ADVANCED가 Y일 때만 메뉴에 표시; DECstation NVMe 환경에서만 관련
+	default y if MACH_DECSTATION                                 # DECstation 머신에서 기본 활성화
 	help
 	  Say Y here if you would like to be able to read the hard disk
 	  partition table format used by DEC (now Compaq) Ultrix machines.
-	  Otherwise, say N.
+	  Otherwise, say N.  # DECstation 등의 NVMe namespace에서 Ultrix 파티션 인식 시 필요(추정)
 
+# ------------------------------------------------------------------
+# config SUN_PARTITION
+# - 목적: SunOS/Solaris SPARC 파티션 테이블 지원.
+# - NVMe 관련: SPARC 시스템에서 NVMe namespace를 사용할 때 파티션 인식에
+#   사용됨(추정).
+# ------------------------------------------------------------------
 config SUN_PARTITION
-	bool "Sun partition tables support" if PARTITION_ADVANCED
-	default y if (SPARC || SUN3 || SUN3X)
+	bool "Sun partition tables support" if PARTITION_ADVANCED  # PARTITION_ADVANCED가 Y일 때만 메뉴에 표시; SPARC NVMe namespace에서 Sun 파티션 인식
+	default y if (SPARC || SUN3 || SUN3X)                      # Sun/SPARC 아키텍처에서 기본 활성화
 	help
 	  Like most systems, SunOS uses its own hard disk partition table
 	  format, incompatible with all others. Saying Y here allows you to
 	  read these partition tables and further mount SunOS partitions from
-	  within Linux if you have also said Y to "UFS file system support",
-	  above. This is mainly used to carry data from a SPARC under SunOS to
-	  your Linux box via a removable medium like magneto-optical or ZIP
-	  drives; note however that a good portable way to transport files and
-	  directories between unixes (and even other operating systems) is
-	  given by the tar program ("man tar" or preferably "info tar"). If
-	  you don't know what all this is about, say N.
+	  within Linux if you have also said Y to "UFS
+	  file system support", above. This is mainly used to carry data from a
+	  SPARC under SunOS to your Linux box via a removable medium like
+	  magneto-optical or ZIP drives; note however, that a good portable way
+	  to transport files and directories between unixes (and even other
+	  operating systems) is given by the tar program ("man tar" or
+	  preferably "info tar"). If you don't know what all this is about,
+	  say N.  # SPARC 시스템의 NVMe namespace에서 SunOS 파티션 테이블을 /dev/nvmeXnYpZ로 인식 시 필요(추정)
 
+# ------------------------------------------------------------------
+# config KARMA_PARTITION
+# - 목적: Rio Karma MP3 플레이어 전용 파티션 테이블 지원.
+# - NVMe 관련: NVMe SSD와는 관련 없는 레거시 임베디드 장치용 포맷(추정).
+# ------------------------------------------------------------------
 config KARMA_PARTITION
-	bool "Karma Partition support"
-	depends on PARTITION_ADVANCED
+	bool "Karma Partition support" if PARTITION_ADVANCED  # PARTITION_ADVANCED가 Y일 때만 메뉴에 표시; NVMe SSD와는 거의 무관한 휴양 디바이스 포맷
+	depends on PARTITION_ADVANCED                         # 희귀 파서이므로 ADVANCED에 종속
 	help
 	  Say Y here if you would like to mount the Rio Karma MP3 player, as it
-	  uses a proprietary partition table.
+	  uses a proprietary partition table.  # NVMe SSD에서는 사용되지 않는 Rio Karma 전용 포맷; namespace 파싱 후보에서도 거의 관련 없음(추정)
 
+# ------------------------------------------------------------------
+# config EFI_PARTITION
+# - 목적: EFI GUID Partition Table(GPT) 지원.
+# - NVMe 관련: 현대 NVMe SSD에서 가장 일반적으로 사용하는 파티션 스킴이다.
+#   GPT 헤더/파티션 항목의 CRC32 무결성 검증을 위해 CRC32가 필요하다.
+#   이 파서가 없으면 NVMe namespace의 GPT 파티션(/dev/nvmeXnYpZ)이
+#   생성되지 않아 파일시스템 마운트가 불가능하다.
+# - 호출 경로(추정): read_partitions -> efi_partition() -> add_partition()
+# ------------------------------------------------------------------
 config EFI_PARTITION
-	bool "EFI GUID Partition support" if PARTITION_ADVANCED
-	default y
-	select CRC32
+	bool "EFI GUID Partition support" if PARTITION_ADVANCED  # PARTITION_ADVANCED가 Y일 때만 메뉴에 표시; 현대 NVMe SSD의 표준 GPT 파싱에 필수
+	default y                                                # 현대 NVMe SSD용 GPT 인식을 위해 기본 활성화
+	select CRC32                                             # GPT 헤더 및 파티션 배열 CRC32 검증용; NVMe namespace GPT 무결성 확인에 필요
 	help
 	  Say Y here if you would like to use hard disks under Linux which
-	  were partitioned using EFI GPT.
+	  were partitioned using EFI GPT.  # NVMe SSD의 GPT 파티션(/dev/nvmeXnYpZ) 생성 및 LBA 범위 I/O를 위한 필수 옵션
 
+# ------------------------------------------------------------------
+# config SYSV68_PARTITION
+# - 목적: Motorola Delta(sysv68) 파티션 테이블 지원.
+# - NVMe 관련: VME 기반 시스템에서 NVMe 장치를 사용할 경우 드물게 사용됨(추정).
+# ------------------------------------------------------------------
 config SYSV68_PARTITION
-	bool "SYSV68 partition table support" if PARTITION_ADVANCED
-	default y if VME
+	bool "SYSV68 partition table support" if PARTITION_ADVANCED  # PARTITION_ADVANCED가 Y일 때만 메뉴에 표시; VME 기반 NVMe에서만 드물게 사용
+	default y if VME                                             # VME 플랫폼에서 기본 활성화
 	help
 	  Say Y here if you would like to be able to read the hard disk
 	  partition table format used by Motorola Delta machines (using
 	  sysv68).
-	  Otherwise, say N.
+	  Otherwise, say N.  # VME 기반 NVMe namespace에서 sysv68 파티션 인식 시 필요(추정)
 
+# ------------------------------------------------------------------
+# config CMDLINE_PARTITION
+# - 목적: 커널 커맨드 라인(bootargs)에서 파티션 테이블을 읽어오는 지원.
+# - NVMe 관련: 임베디드/서버 환경에서 NVMe namespace의 파티션 레이아웃을
+#   firmware/device tree 정보 없이 커맨드 라인으로 강제 지정할 수 있음.
+#   파서 우선순위에 따라 add_disk 이후 파티션 정보가 오버라이드될 수
+#   있다(추정).
+# ------------------------------------------------------------------
 config CMDLINE_PARTITION
-	bool "Command line partition support" if PARTITION_ADVANCED
+	bool "Command line partition support" if PARTITION_ADVANCED  # PARTITION_ADVANCED가 Y일 때만 메뉴에 표시; NVMe namespace 파티션을 커맨드 라인으로 강제 지정 가능
 	help
 	  Say Y here if you want to read the partition table from bootargs.
-	  The format for the command line is just like mtdparts.
+	  The format for the command line is just like mtdparts.  # NVMe namespace의 파티션 레이아웃을 firmware/device tree 없이 bootargs로 오버라이드하여 /dev/nvmeXnYpZ 생성(추정)
 
+# ------------------------------------------------------------------
+# config OF_PARTITION
+# - 목적: Device Tree에 정의된 fixed-partition 레이아웃 지원.
+# - NVMe 관련: 주로 eMMC에 사용되지만, Device Tree에 노드로 기술된 NVMe
+#   namespace에도 동일한 fixed-partition 스키마를 적용할 수 있음(추정).
+# - 호출 경로(추정): read_partitions -> of_partition() -> add_partition()
+# ------------------------------------------------------------------
 config OF_PARTITION
-	bool "Device Tree partition support" if PARTITION_ADVANCED
-	depends on OF
+	bool "Device Tree partition support" if PARTITION_ADVANCED  # PARTITION_ADVANCED가 Y일 때만 메뉴에 표시; Device Tree 기반 NVMe namespace fixed-partition 인식
+	depends on OF                                               # Device Tree 지원이 커널에 포함되어 있어야 함; NVMe 드라이브 노드에 fixed-partition 서브노드가 있을 때 적용 가능
 	help
 	  Say Y here if you want to enable support for partition table
 	  defined in Device Tree. (mainly for eMMC)
 	  The format for the device tree node is just like MTD fixed-partition
-	  schema.
+	  schema.  # eMMC뿐 아니라 Device Tree에 노출된 NVMe namespace에도 fixed-partition 스키마로 /dev/nvmeXnYpZ 생성 가능(추정)
 
-endmenu
+endmenu  # Partition Types 메뉴 종료; 이 메뉴에서 Y로 선택된 CONFIG_* 옵션들이 NVMe namespace의 /dev/nvmeXnYpZ 파티션 생성 범위를 결정
+
+# /* NVMe 관점 핵심 요약 */
+# - NVMe namespace는 블록 장치(gendisk)로 등록되며, 이 Kconfig에서 Y로
+#   선택된 파서들이 namespace의 파티션 테이블을 인식해 /dev/nvmeXnYpZ
+#   형태의 하위 장치를 생성한다.
+# - EFI_PARTITION(GPT)과 MSDOS_PARTITION이 실제 NVMe SSD에서 가장 많이
+#   사용되며, EFI_PARTITION은 select CRC32를 통해 GPT 헤더 무결성을
+#   검증한다.
+# - 파서가 없거나 인식에 실패하면 namespace 전체에 대한 I/O만 가능하고,
+#   blk_mq_submit_bio -> blk_mq_get_request -> nvme_queue_rq ->
+#   nvme_submit_cmd(doorbell) 경로로 제출되는 bio의 LBA 범위에 영향을 준다.
+# - PARTITION_ADVANCED는 Acorn, AIX, Amiga 등 희귀 파서를 메뉴에 노출하여
+#   NVMe 장치에서도 이들 스킴을 시도할 수 있게 한다.
+# - 본 Kconfig는 block/Kconfig에 의해 include되며, block/partitions/Makefile이
+#   이 CONFIG_* 옵션들을 기반으로 core.o, msdos.o, efi.o 등을 빌드한다.

@@ -1,47 +1,145 @@
-# SPDX-License-Identifier: GPL-2.0
-menu "IO Schedulers"
+# SPDX-License-Identifier: GPL-2.0 // 라이선스 선언; NVMe I/O 경로의 런타임 동작에는 영향을 주지 않으며, blk-mq 스케줄러 소스 배포 조건을 규정한다.
+# ============================================================================
+# 파일 상단 요약: block/Kconfig.iosched
+# ----------------------------------------------------------------------------
+# 이 파일은 리눅스 블록 계층(Block Layer)에서 사용 가능한 I/O 스케줄러들을
+# 커널 빌드 시점(Kconfig)에 선택/활성화하는 설정 메뉴를 정의한다.
+# NVMe SSD 입장에서 본 파일은 blk-mq(Multi-Queue Block Layer) 위에 탑재되는
+# I/O 스케줄링 정책(deadline, kyber, bfq)을 켜거나 끄는 "스위치판" 역할을 한다.
+# bio -> submit_bio -> blk_mq_submit_bio -> blk_mq_get_request -> I/O 스케줄러
+# -> nvme_queue_rq -> nvme_submit_cmd(doorbell) 경로에서, 이 파일이 선택한
+# 스케줄러가 바로 bio가 NVMe SQ/CQ로 날아가기 전 마지막 정렬/합병/지연 단계를
+# 담당한다. 선행 파일로는 blk-mq 자체를 구성하는 block/Kconfig 가 있으며,
+# 본 파일은 그 아래 "IO Schedulers" 서브메뉴를 제공한다.
+# ============================================================================
 
-config MQ_IOSCHED_DEADLINE
-	tristate "MQ deadline I/O scheduler"
-	default y
+menu "IO Schedulers" // blk-mq 기반 NVMe 장치에 적용할 수 있는 상위 스케줄러 메뉴; "none"을 선택하면 bio가 스케줄러 없이 거의 직접 nvme_queue_rq 로 전달된다.
+
+# ----------------------------------------------------------------------------
+# config MQ_IOSCHED_DEADLINE
+# 목적: blk-mq용 deadline I/O 스케줄러를 커널에 포함/모듈로 빌드할지 결정한다.
+# NVMe 연결: NVMe는 보통 요청 정렬/합병보다는 낮은 지연과 예측 가능한 완료
+#            시간이 중요하다. deadline은 각 요청에 만료 시간(read 500ms,
+#            write 5s 기본값)을 부여해 기아(starvation)를 방지한다.
+# call chain: submit_bio -> blk_mq_submit_bio -> __blk_mq_alloc_request ->
+#             blk_mq_sched_request_inserted -> deadline_insert_requests ->
+#             nvme_queue_rq -> nvme_submit_cmd(doorbell)
+# NVMe 행동: 랜덤 read가 많은 NVMe 워크로드에서 SQ에 들어가기 전 만료
+#            임박한 요청을 우선적으로 dispatch 해 CID 단위로 빠르게 전송된다.
+# (추정): NVMe 하드웨어 큐 개수가 많을수록 deadline의 정렬 효과는 감소하고
+#         지연 보장 효과가 더 두드러진다.
+# ----------------------------------------------------------------------------
+config MQ_IOSCHED_DEADLINE // NVMe에서 만료 시간 기반 기아 방지가 필요할 때 활성화; "none" 대비 예측 가능한 완료 시점을 제공한다.
+	tristate "MQ deadline I/O scheduler" // y=빌트인(모듈 로딩 없이 NVMe 장치에 바로 적용), m=모듈(NVMe 장치 연결 시 스케줄러 모듈 수동/자동 로딩 필요), n=사용 불가.
+	default y // 대부분의 범용 커널에서 NVMe 포함 모든 blk-mq 장치가 deadline을 기본 후보로 볼 수 있도록 한다.
 	help
-	  MQ version of the deadline IO scheduler.
+	  MQ version of the deadline IO scheduler. // NVMe SQ 진입 전 read/write 요청을 만료 시간 순으로 재정렬해 starvation을 방지하는 MQ용 deadline 구현체.
 
-config MQ_IOSCHED_KYBER
-	tristate "Kyber I/O scheduler"
-	default y
+# ----------------------------------------------------------------------------
+# config MQ_IOSCHED_KYBER
+# 목적: blk-mq용 Kyber I/O 스케줄러를 포함/모듈로 빌드할지 결정한다.
+# NVMe 연결: Kyber는 "빠른 장치"를 염두에 둔 저오버헤드 스케줄러로, read와
+#            sync write에 대한 목표 지연시간(target latency)을 주고 자체
+#            큐 깊이(queue depth)를 조절한다.
+# call chain: submit_bio -> blk_mq_submit_bio -> blk_mq_get_request ->
+#             kyber_queue_rq -> (kyber 도메인별 큐 관리) ->
+#             blk_mq_run_hw_queue -> nvme_queue_rq -> nvme_write_sq_db(doorbell)
+# NVMe 행동: NVMe SQ에 채워지는 outstanding CID 개수를 target latency 기반으로
+#            동적으로 조절해, 폭발적인 IOPS 상황에서도 p99 지연을 억제한다.
+# (추정): NVMe SQ/CQ 쌍이 여러 개일수록 Kyber는 per-hctx 통계를 이용해
+#         각 nvme_queue에 맞는 큐 깊이를 개별 튜닝할 수 있다.
+# ----------------------------------------------------------------------------
+config MQ_IOSCHED_KYBER // 저지연 NVMe 워크로드에서 SQ outstanding(CID) 수를 자동 튜닝해 p99 지연을 억제하는 스케줄러.
+	tristate "Kyber I/O scheduler" // NVMe target latency 달성을 위해 큐 깊이를 조절하는 코드를 커널 내장 또는 모듈로 포함한다.
+	default y // NVMe 등 고속 장치에서 기본 사용 가능하도록 하며, 런타임에 Kyber 또는 none 등으로 전환할 수 있다.
 	help
 	  The Kyber I/O scheduler is a low-overhead scheduler suitable for
 	  multiqueue and other fast devices. Given target latencies for reads and
 	  synchronous writes, it will self-tune queue depths to achieve that
-	  goal.
+	  goal. // "self-tune queue depths"는 NVMe 입장에서 SQ에 남겨둘 outstanding CID 수를 조절함을 의미하며, WBT(Writeback Throttling)와 함께 쓰기 버스트로 인한 NVMe 지연 폭주를 완화할 수 있다.
 
-config IOSCHED_BFQ
-	tristate "BFQ I/O scheduler"
-	select BLK_ICQ
+# ----------------------------------------------------------------------------
+# config IOSCHED_BFQ
+# 목적: blk-mq용 BFQ(Budget Fair Queueing) I/O 스케줄러를 포함/모듈로 빌드.
+# NVMe 연결: BFQ는 프로세스/ cgroup 단위로 대역폭을 공정 분배하고, 인터랙티브
+#            및 소프트 실시간 앱의 지연을 보장한다. NVMe 같이 IOPS가 높은
+#            장치에서도 워크로드 특성에 크게 의존하지 않는다.
+# call chain: submit_bio -> blk_mq_submit_bio -> blk_mq_get_request ->
+#             bfq_insert_requests -> (entity 스케줄링) -> bfq_dispatch_request ->
+#             nvme_queue_rq -> nvme_submit_cmd(PRP/SGL 채우기, doorbell)
+# NVMe 행동: 여러 프로세스가 동시에 NVMe에 접근할 때, 각 프로세스가 받는
+#            SQ 슬롯/ CID 자원을 공정하게 분배해 한 태스크가 독점하지 않도록 한다.
+# (추정): BFQ는 single-queue 시절부터 있었으나 BLK-MQ용으로 재설계되었고,
+#         BLK_ICQ(select BLK_ICQ)를 통해 per-process iocontext 정보를 활용한다.
+#         BLK_ICQ를 선택하면 각 프로세스의 bio가 NVMe SQ로 들어갈 때
+#         소속 프로세스를 구분하는 데 필요한 I/O 컨텍스트를 얻는다.
+# ----------------------------------------------------------------------------
+config IOSCHED_BFQ // NVMe를 공유하는 다중 프로세스/서비스 환경에서 SQ/CQ 자원과 CID/doorbell 기회를 공정 분배하는 스케줄러.
+	tristate "BFQ I/O scheduler" // y/m/n으로 NVMe QoS(공정성) 기능을 커널에 포함할지 결정; 데스크톱/서버 워크로드 격리에 유용하다.
+	select BLK_ICQ // NVMe 요청에 태깅될 per-process iocontext를 활성화해, 어떤 프로세스의 bio가 nvme_queue_rq 로 전달되는지 식별할 수 있게 한다.
 	help
-	BFQ I/O scheduler for BLK-MQ. BFQ distributes the bandwidth of
-	of the device among all processes according to their weights,
-	regardless of the device parameters and with any workload. It
-	also guarantees a low latency to interactive and soft
-	real-time applications.  Details in
-	Documentation/block/bfq-iosched.rst
+		BFQ I/O scheduler for BLK-MQ. BFQ distributes the bandwidth of
+		of the device among all processes according to their weights,
+		regardless of the device parameters and with any workload. It
+		also guarantees a low latency to interactive and soft
+		real-time applications.  Details in
+		Documentation/block/bfq-iosched.rst // NVMe에서 "process별 weight"는 결국 각 프로세스가 NVMe SQ에 발행할 CID/doorbell 기회의 상대 비율로 환원된다.
 
-config BFQ_GROUP_IOSCHED
-       bool "BFQ hierarchical scheduling support"
-       depends on IOSCHED_BFQ && BLK_CGROUP
-       default y
-       select BLK_CGROUP_RWSTAT
+# ----------------------------------------------------------------------------
+# config BFQ_GROUP_IOSCHED
+# 목적: BFQ가 cgroup 계층 구조를 따라 I/O를 스케줄링하도록 활성화.
+# NVMe 연결: BLK_CGROUP과 함께 동작하며, NVMe를 공유하는 여러 컨테이너/서비스의
+#            I/O 자원 격리를 가능하게 한다.
+# call chain: cgroup 파일시스템(io.weight) -> bfq_group_set_weight ->
+#             bfq_entity -> bfq_dispatch_request -> nvme_queue_rq
+# NVMe 행동: 특정 cgroup의 writeback이 NVMe SQ를 모두 점유하는 것을 방지하고,
+#            cgroup 가중치에 비례하여 CID/doorbell 기회를 분배한다.
+# (추정): cgroups-v1(blkio)와 cgroups-v2(io) 컨트롤러 양쪽 모두 지원한다.
+# ----------------------------------------------------------------------------
+config BFQ_GROUP_IOSCHED // 컨테이너/VM 단위로 NVMe SQ/CQ 대역폭과 큐 깊이 자원을 격리하기 위한 BFQ cgroup 확장.
+	       bool "BFQ hierarchical scheduling support" // NVMe QoS를 cgroup 계층에 적용할지 여부를 결정하는 bool 옵션.
+	       depends on IOSCHED_BFQ && BLK_CGROUP // BFQ 본체와 BLK_CGROUP이 모두 활성화되어야 NVMe 장치에 대한 cgroup 기반 I/O 제어가 동작한다.
+	       default y // BFQ를 사용하는 NVMe 시스템에서 cgroup 기반 QoS를 기본적으로 사용할 수 있게 한다.
+	       select BLK_CGROUP_RWSTAT // NVMe cgroup별 읽기/쓰기 통계를 수집해 io.weight 기반 SQ/CQ 자원 분배의 피드백으로 사용한다.
 	help
 
-       Enable hierarchical scheduling in BFQ, using the blkio
-       (cgroups-v1) or io (cgroups-v2) controller.
+	       Enable hierarchical scheduling in BFQ, using the blkio
+	       (cgroups-v1) or io (cgroups-v2) controller. // cgroups-v1 blkio 또는 cgroups-v2 io 컨트롤러를 통해 컨테이너/서비스별 NVMe IOPS/대역폭 제한과 우선순위를 적용한다.
 
-config BFQ_CGROUP_DEBUG
-	bool "BFQ IO controller debugging"
-	depends on BFQ_GROUP_IOSCHED
-	help
-	Enable some debugging help. Currently it exports additional stat
-	files in a cgroup which can be useful for debugging.
+# ----------------------------------------------------------------------------
+# config BFQ_CGROUP_DEBUG
+# 목적: BFQ cgroup 디버깅용 추가 통계 파일을 남긴다.
+# NVMe 연결: NVMe 성능 이슈(예: 특정 cgroup이 SQ/CQ를 과점유)를 분석할 때
+#            cgroup별 추가 통계가 도움이 된다.
+# call chain: 사용자가 debug stat 읽기 -> bfq-cgroup.c 낸 debug 파일 ->
+#             NVMe 장치의 blk-mq hctx 통계와 대조 분석
+# (추정): 운영 환경에서는 오버헤드 때문에 비활성화하는 것이 일반적이다.
+# ----------------------------------------------------------------------------
+config BFQ_CGROUP_DEBUG // NVMe 성능 트러블슈팅 시 특정 cgroup의 SQ/CQ 점유율과 지연 원인을 분석하기 위한 추가 디버그 통계.
+		bool "BFQ IO controller debugging" // 활성화하면 NVMe cgroup QoS 동작을 추적할 수 있는 추가 카운터/파일이 노출되나 런타임 오버헤드가 증가한다.
+		depends on BFQ_GROUP_IOSCHED // BFQ cgroup 스케줄링이 활성화된 상태에서만 NVMe cgroup 디버그 정보가 의미를 갖는다.
+		help
+		Enable some debugging help. Currently it exports additional stat
+		files in a cgroup which can be useful for debugging. // NVMe SQ/CQ 사용량, 지연 분포 등을 cgroup별로 추가 노출해 병목 지점을 파악할 수 있다.
 
-endmenu
+endmenu // IO Schedulers 메뉴 종료; 여기서 선택한 스케줄러는 NVMe 장치의 /sys/block/nvme*/queue/scheduler 에서 런타임에 확인 및 교체 가능하다.
+
+# ============================================================================
+# NVMe 관점 핵심 요약
+# ----------------------------------------------------------------------------
+# - 본 파일은 blk-mq 위의 I/O 스케줄러(deadline/kyber/bfq)를 빌드 시점에
+#   선택하는 "정책 스위치"이며, NVMe SSD로 가는 bio 흐름에 최종 정렬/지연/
+#   공정 분배를 가한다.
+# - deadline은 NVMe 랜덤 read에서 만료 시간 기반 기아 방지를,
+#   kyber은 target latency 기반 SQ/CQ outstanding CID(큐 깊이) 자동 튜닝을,
+#   bfq는 프로세스/cgroup 단위 SQ/CQ 자원 공정 분배를 담당한다.
+# - bio -> blk_mq_submit_bio -> blk_mq_get_request -> (이 파일에서 선택한
+#   스케줄러) -> nvme_queue_rq -> nvme_submit_cmd(doorbell) 경로의 중간
+#   관문이므로, NVMe 성능/지연 특성에 직접적인 영향을 준다.
+# - NVMe 같이 SQ/CQ 쌍과 hctx가 여러 개인 장치에서는 각 스케줄러가
+#   per-hctx/per-nvme_queue 데이터를 유지하며 동작한다 (구현체는
+#   각 스케줄러 소스에서 확인).
+# - block/Kconfig (blk-mq 본체) -> block/Kconfig.iosched (스케줄러 선택) 순으로
+#   논리적으로 이어지며, 이후 drivers/nvme/host/pci.c 등에서 실제 doorbell,
+#   PRP/SGL, CID 할당이 처리된다.
+# ============================================================================

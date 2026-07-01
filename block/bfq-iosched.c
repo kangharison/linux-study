@@ -113,6 +113,19 @@
  *
  * http://www.cs.berkeley.edu/~istoica/papers/eevdf-tr-95.pdf
  */
+/*
+ * NVMe SSD 관점 BFQ 요약
+ *
+ * 이 파일(block/bfq-iosched.c)은 blk-mq 스케줄러 인터페이스를 구현하며,
+ * 파일 시스템이 생성한 bio -> request 를 BFQ 내부 queue(bfqq)에 배분하고,
+ * dispatch 시점에 blk_mq_hw_ctx 를 통해 NVMe 드라이버로 request 를 전달한다.
+ * NVMe 관점에서는 SQ/CQ 엔트리 수, doorbell 빈도, NCQ reordering,
+ * 그리고 다중 actuator 활용도가 주요 동작 특성이다.
+ * 상위 흐름: blk_mq_submit_bio -> blk_mq_get_request -> bfq_insert_request
+ *           -> bfq_dispatch_request -> nvme_queue_rq -> nvme_submit_cmd(doorbell)
+ * 관련 파일: block/elevator.c, block/blk-mq.c, block/blk-mq-sched.c,
+ *           block/blk-mq-tag.c, drivers/nvme/host/pci.c 등
+ */
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/blkdev.h>
@@ -133,6 +146,66 @@
 #include "bfq-iosched.h"
 #include "blk-wbt.h"
 
+/*
+ * 주요 구조체와 NVMe 동작 연결
+ *
+ * struct bfq_queue (per-process 또는 per-actuator 잎 노드)
+ *   - sort_list: LBA 순으로 정렬된 pending request 의 rb-tree. NVMe 에서는
+ *     이 순서가 SQ 에 들어가는 CID 순서와는 무관하지만, controller 의
+ *     reordering 을 고려한 스케줄링 기반이 된다.
+ *   - next_rq: 다음에 dispatch 될 후보 request. NVMe SQ 에 삽입될
+ *     명령 후보이며, doorbell 발행 전 마지막으로 선별된다.
+ *   - dispatched/queued: 드라이브 내(SQ/CQ 경로) 및 BFQ 내 request 수.
+ *     NVMe queue depth 제한과 직결된다.
+ *   - actuator_idx: 해당 bfqq 가 대상으로 하는 actuator 인덱스. 다중
+ *     actuator NVMe 드라이브에서 SQ/CQ 쌍 또는 namespace 단위 병렬도를
+ *     결정하는 데 사용된다(추정).
+ *   - inject_limit: service hole 을 메울 때 다른 bfqq 에서 끼워 넣을 수
+ *     있는 최대 request 수. NVMe 의 NCQ queue depth(최대 32)를 고려하여
+ *     in-flight 수를 제한한다.
+ *   - wr_coeff/wr_cur_max_time: weight-raising 상태와 지속 시간. NVMe
+ *     SSD 의 낮은 개별 request 지연(latency)을 활용해 interactive/soft-rt
+ *     워크로드에 우선권을 부여한다.
+ *   - entity: B-WF2Q+ 스케줄러 엔티티. budget, weight, start/finish
+ *     timestamp 를 통해 NVMe 의 공정한 queue depth 할당을 시뮬레이션한다.
+ *
+ * struct bfq_data (per-request_queue)
+ *   - queue: 상위 block layer 의 request_queue. NVMe 드라이버의
+ *     nvme_queue 와 연결된다.
+ *   - dispatch: BFQ 가 blk-mq 로 곧바로 보낼 request 리스트.
+ *     BLK_MQ_INSERT_AT_HEAD 등으로 NVMe SQ 삽입 직전 거치는 통로다.
+ *   - in_service_queue: 현재 서비스 중인 bfqq. NVMe controller 가
+ *     처리 중인 request 의 논리적 소유자로 볼 수 있다.
+ *   - tot_rq_in_driver/rq_in_driver[]: 드라이버/컨트롤러에 남아 있는
+ *     request 수. NVMe 의 SQ 엔트리 사용량 및 per-actuator 부하 추정에
+ *     사용된다.
+ *   - hw_tag/nonrot_with_queueing: 장치가 NCQ 능력이 있고 회전하지 않는지
+ *     여부. NVMe SSD 는 항상 nonrot_with_queueing=true 이며, 이 값이
+ *     idling/merge 정책에 결정적 영향을 준다.
+ *   - num_actuators/sector[]/nr_sectors[]: blk_independent_access_ranges
+ *     에서 복사한 독립 접근 영역. NVMe 다중 actuator/namespace 의
+ *     병렬 dispatch 를 가능하게 한다.
+ *   - peak_rate/delta_from_first: NVMe SSD 의 최대 처리율(섹터/us)을
+ *     추정. budget 자동 조정과 interactive weight-raising 기간 계산에
+ *     쓰인다(추정).
+ *   - idle_slice_timer: NVMe SQ 에 새 CID 를 급히 밀어넣지 않고 잠시
+ *     대기해 throughput 보장/공정성을 유지하는 타이머.
+ *
+ * struct bfq_io_cq (per-io_context)
+ *   - bfqq[2][BFQ_MAX_ACTUATORS]: sync/async x actuator 별 bfqq.
+ *     NVMe 다중 actuator 환경에서 프로세스가 생성하는 request 를
+ *     actuator별로 분리하여 SQ 병렬도를 극대화한다.
+ *   - requests: 해당 프로세스가 inflight 상태로 둔 request 수.
+ *     NVMe tag 범위에서 cgroup/우선순위 기반 깊이 제한에 활용된다.
+ *
+ * struct bfq_group (cgroup 단위)
+ *   - rq_pos_tree: 인접 LBA 를 가진 bfqq 를 빠르게 찾아 queue merging
+ *     후보로 삼는다. NVMe SSD 에서는 nonrot_with_queueing 이면 merge 를
+ *     대부분 하지 않는다.
+ *   - async_bfqq[][][]: cgroup 내 비동기 request 공유 queue.
+ *     NVMe flush/writeback 요청을 한데 모아 SQ depth 관리에 유리하게
+ *     만든다.
+ */
 #define BFQ_BFQQ_FNS(name)						\
 void bfq_mark_bfqq_##name(struct bfq_queue *bfqq)			\
 {									\
@@ -381,8 +454,10 @@ struct bfq_queue *bic_to_bfqq(struct bfq_io_cq *bic, bool is_sync,
 {
 	if (is_sync)
 		return bic->bfqq[1][actuator_idx];
+		// NVMe 다중 actuator: 독립 접근 영역에 따라 request를 분리하며, 각 actuator는 별도 SQ/CQ 또는 namespace 병렬 경로로 dispatch(추정)
 
 	return bic->bfqq[0][actuator_idx];
+	// NVMe 다중 actuator: 독립 접근 영역에 따라 request를 분리하며, 각 actuator는 별도 SQ/CQ 또는 namespace 병렬 경로로 dispatch(추정)
 }
 
 static void bfq_put_stable_ref(struct bfq_queue *bfqq);
@@ -393,6 +468,7 @@ void bic_set_bfqq(struct bfq_io_cq *bic,
 		  unsigned int actuator_idx)
 {
 	struct bfq_queue *old_bfqq = bic->bfqq[is_sync][actuator_idx];
+	// NVMe 다중 actuator: 독립 접근 영역에 따라 request를 분리하며, 각 actuator는 별도 SQ/CQ 또는 namespace 병렬 경로로 dispatch(추정)
 
 	/*
 	 * If bfqq != NULL, then a non-stable queue merge between
@@ -408,6 +484,7 @@ void bic_set_bfqq(struct bfq_io_cq *bic,
 	 * bic->stable_merge_bfqq == bfqq.
 	 */
 	struct bfq_iocq_bfqq_data *bfqq_data = &bic->bfqq_data[actuator_idx];
+	// NVMe 다중 actuator: 독립 접근 영역에 따라 request를 분리하며, 각 actuator는 별도 SQ/CQ 또는 namespace 병렬 경로로 dispatch(추정)
 
 	/* Clear bic pointer if bfqq is detached from this bic */
 	if (old_bfqq && old_bfqq->bic == bic)
@@ -415,10 +492,13 @@ void bic_set_bfqq(struct bfq_io_cq *bic,
 
 	if (is_sync)
 		bic->bfqq[1][actuator_idx] = bfqq;
+		// NVMe 다중 actuator: 독립 접근 영역에 따라 request를 분리하며, 각 actuator는 별도 SQ/CQ 또는 namespace 병렬 경로로 dispatch(추정)
 	else
 		bic->bfqq[0][actuator_idx] = bfqq;
+		// NVMe 다중 actuator: 독립 접근 영역에 따라 request를 분리하며, 각 actuator는 별도 SQ/CQ 또는 namespace 병렬 경로로 dispatch(추정)
 
 	if (bfqq && bfqq_data->stable_merge_bfqq == bfqq) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		/*
 		 * Actually, these same instructions are executed also
 		 * in bfq_setup_cooperator, in case of abort or actual
@@ -436,6 +516,7 @@ void bic_set_bfqq(struct bfq_io_cq *bic,
 struct bfq_data *bic_to_bfqd(struct bfq_io_cq *bic)
 {
 	return bic->icq.q->elevator->elevator_data;
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 }
 
 /**
@@ -446,6 +527,7 @@ static struct bfq_io_cq *icq_to_bic(struct io_cq *icq)
 {
 	/* bic->icq is the first member, %NULL will convert to %NULL */
 	return container_of(icq, struct bfq_io_cq, icq);
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 }
 
 /**
@@ -456,21 +538,33 @@ static struct bfq_io_cq *bfq_bic_lookup(struct request_queue *q)
 {
 	if (!current->io_context)
 		return NULL;
+		// NVMe 에러 반환: 할당/초기화 실패 시 NVMe 상위 경로로 오류를 전파하며, 해당 request는 SQ로 전달되지 않음
 
 	return icq_to_bic(ioc_lookup_icq(q));
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 }
 
 /*
  * Scheduler run of queue, if there are requests pending and no one in the
  * driver that will restart queueing.
  */
+/*
+ * bfq_schedule_dispatch: BFQ 가 더 이상 처리할 request 가 있을 때
+ * blk-mq 의 hw queue 를 깨워 dispatch 를 재개하도록 예약한다.
+ * 호출 경로: bfq_completed_request -> bfq_schedule_dispatch ->
+ *          blk_mq_run_hw_queues -> blk_mq_run_hw_queue -> nvme_queue_rq
+ * NVMe 연결: NVMe 드라이버가 SQ 에 빈 슬롯이 있다고 알릴 때까지
+ *            blk_mq_run_hw_queues 가 polling/sleeping hctx 를 깨운다.
+ */
 void bfq_schedule_dispatch(struct bfq_data *bfqd)
 {
 	lockdep_assert_held(&bfqd->lock);
 
 	if (bfqd->queued != 0) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		bfq_log(bfqd, "schedule dispatch");
-		blk_mq_run_hw_queues(bfqd->queue, true);
+		blk_mq_run_hw_queues(bfqd->queue, true); // NVMe hw queue 깨우기: SQ 에 채울 request 가 있음을 알린다.
+		// NVMe SQ/CQ 활성화: 하드웨어 큐를 깨워 dispatch를 트리거하며, hctx -> nvme_queue -> doorbell 발행 경로(추정)
 	}
 }
 
@@ -496,20 +590,28 @@ static struct request *bfq_choose_req(struct bfq_data *bfqd,
 
 	if (!rq1 || rq1 == rq2)
 		return rq2;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 	if (!rq2)
 		return rq1;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 
 	if (rq_is_sync(rq1) && !rq_is_sync(rq2))
 		return rq1;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 	else if (rq_is_sync(rq2) && !rq_is_sync(rq1))
 		return rq2;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 	if ((rq1->cmd_flags & REQ_META) && !(rq2->cmd_flags & REQ_META))
 		return rq1;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 	else if ((rq2->cmd_flags & REQ_META) && !(rq1->cmd_flags & REQ_META))
 		return rq2;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 
 	s1 = blk_rq_pos(rq1);
+	// NVMe 명령 크기: request의 sector/byte 수가 NVMe command CDW10-11 길이와 PRP 필요량을 결정(추정)
 	s2 = blk_rq_pos(rq2);
+	// NVMe 명령 크기: request의 sector/byte 수가 NVMe command CDW10-11 길이와 PRP 필요량을 결정(추정)
 
 	/*
 	 * By definition, 1KiB is 2 sectors.
@@ -545,18 +647,24 @@ static struct request *bfq_choose_req(struct bfq_data *bfqd,
 	case 0: /* common case for CFQ: rq1 and rq2 not wrapped */
 		if (d1 < d2)
 			return rq1;
+			// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		else if (d2 < d1)
 			return rq2;
+			// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 
 		if (s1 >= s2)
 			return rq1;
+			// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		else
 			return rq2;
+			// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 
 	case BFQ_RQ2_WRAP:
 		return rq1;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 	case BFQ_RQ1_WRAP:
 		return rq2;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 	case BFQ_RQ1_WRAP|BFQ_RQ2_WRAP: /* both rqs wrapped */
 	default:
 		/*
@@ -567,8 +675,10 @@ static struct request *bfq_choose_req(struct bfq_data *bfqd,
 		 */
 		if (s1 <= s2)
 			return rq1;
+			// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		else
 			return rq2;
+			// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 	}
 }
 
@@ -583,6 +693,7 @@ static bool bfqq_request_over_limit(struct bfq_data *bfqd,
 	struct bfq_entity **entities = inline_entities;
 	int alloc_depth = BFQ_LIMIT_INLINE_DEPTH;
 	struct bfq_sched_data *sched_data;
+	// NVMe 스케줄 결정: B-WF2Q+가 다음에 SQ로 전달할 bfqq/entity를 선정하며, 이 선정이 곧 NVMe CID 순서와 doorbell batch를 결정(추정)
 	struct bfq_entity *entity;
 	struct bfq_queue *bfqq;
 	unsigned long wsum;
@@ -595,25 +706,32 @@ retry:
 	bfqq = bic_to_bfqq(bic, op_is_sync(opf), act_idx);
 	if (!bfqq)
 		goto out;
+		// NVMe 에러/드레인 분기: goto는 보통 unlock/out 경로로 연결되며, controller abort나 queue drain 시 request를 안전하게 반납(추정)
 
 	entity = &bfqq->entity;
 	if (!entity->on_st_or_in_serv)
 		goto out;
+		// NVMe 에러/드레인 분기: goto는 보통 unlock/out 경로로 연결되며, controller abort나 queue drain 시 request를 안전하게 반납(추정)
 
 	/* +1 for bfqq entity, root cgroup not included */
 	depth = bfqg_to_blkg(bfqq_group(bfqq))->blkcg->css.cgroup->level + 1;
 	if (depth > alloc_depth) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		spin_unlock_irq(&bfqd->lock);
 		if (entities != inline_entities)
 			kfree(entities);
+			// NVMe 메모리 생명주기: bfqq/entity 할당/해제이며, NVMe request_pool와 별개이나 동시에 많은 bfqq는 tag 회수 지연 초래(추정)
 		entities = kmalloc_objs(*entities, depth, GFP_NOIO);
 		if (!entities)
 			return false;
+			// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		alloc_depth = depth;
 		goto retry;
+		// NVMe 에러/드레인 분기: goto는 보통 unlock/out 경로로 연결되며, controller abort나 queue drain 시 request를 안전하게 반납(추정)
 	}
 
 	sched_data = entity->sched_data;
+	// NVMe 스케줄 결정: B-WF2Q+가 다음에 SQ로 전달할 bfqq/entity를 선정하며, 이 선정이 곧 NVMe CID 순서와 doorbell batch를 결정(추정)
 	/* Gather our ancestors as we need to traverse them in reverse order */
 	level = 0;
 	for_each_entity(entity) {
@@ -624,17 +742,22 @@ retry:
 		 */
 		if (!entity->on_st_or_in_serv)
 			goto out;
+			// NVMe 에러/드레인 분기: goto는 보통 unlock/out 경로로 연결되며, controller abort나 queue drain 시 request를 안전하게 반납(추정)
 		/* Uh, more parents than cgroup subsystem thinks? */
 		if (WARN_ON_ONCE(level >= depth))
 			break;
 		entities[level++] = entity;
 	}
 	WARN_ON_ONCE(level != depth);
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 	for (level--; level >= 0; level--) {
+	// NVMe 반복 처리: request/tag/bio/bvec/SQ/CQ 엔트리를 순회하며 CID 할당, PRP/SGL 조립, completion 상태를 누적한다(추정) -> blk-mq tag/hctx/CQ
 		entity = entities[level];
 		if (level > 0) {
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 			wsum = bfq_entity_service_tree(entity)->wsum;
 		} else {
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 			int i;
 			/*
 			 * For bfqq itself we take into account service trees
@@ -645,17 +768,22 @@ retry:
 			 */
 			wsum = 0;
 			for (i = 0; i <= bfqq->ioprio_class - 1; i++) {
+			// NVMe 반복 처리: request/tag/bio/bvec/SQ/CQ 엔트리를 순회하며 CID 할당, PRP/SGL 조립, completion 상태를 누적한다(추정) -> blk-mq tag/hctx/CQ
 				wsum = wsum * IOPRIO_BE_NR +
 					sched_data->service_tree[i].wsum;
+					// NVMe 스케줄 결정: B-WF2Q+가 다음에 SQ로 전달할 bfqq/entity를 선정하며, 이 선정이 곧 NVMe CID 순서와 doorbell batch를 결정(추정)
 			}
 		}
 		if (!wsum)
 			continue;
 		limit = DIV_ROUND_CLOSEST(limit * entity->weight, wsum);
+		// NVMe 스케줄 결정: B-WF2Q+가 다음에 SQ로 전달할 bfqq/entity를 선정하며, 이 선정이 곧 NVMe CID 순서와 doorbell batch를 결정(추정)
 		if (entity->allocated >= limit) {
+		// NVMe 스케줄 결정: B-WF2Q+가 다음에 SQ로 전달할 bfqq/entity를 선정하며, 이 선정이 곧 NVMe CID 순서와 doorbell batch를 결정(추정)
 			bfq_log_bfqq(bfqq->bfqd, bfqq,
 				"too many requests: allocated %d limit %d level %d",
 				entity->allocated, limit, level);
+				// NVMe 스케줄 결정: B-WF2Q+가 다음에 SQ로 전달할 bfqq/entity를 선정하며, 이 선정이 곧 NVMe CID 순서와 doorbell batch를 결정(추정)
 			ret = true;
 			break;
 		}
@@ -664,7 +792,9 @@ out:
 	spin_unlock_irq(&bfqd->lock);
 	if (entities != inline_entities)
 		kfree(entities);
+		// NVMe 메모리 생명주기: bfqq/entity 할당/해제이며, NVMe request_pool와 별개이나 동시에 많은 bfqq는 tag 회수 지연 초래(추정)
 	return ret;
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 }
 #else
 static bool bfqq_request_over_limit(struct bfq_data *bfqd,
@@ -672,6 +802,7 @@ static bool bfqq_request_over_limit(struct bfq_data *bfqd,
 				    unsigned int act_idx, int limit)
 {
 	return false;
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 }
 #endif
 
@@ -690,6 +821,15 @@ static bool bfqq_request_over_limit(struct bfq_data *bfqd,
  * significantly affect service guarantees coming from the BFQ scheduling
  * algorithm.
  */
+/*
+ * bfq_limit_depth: request 할당 단계에서 sync/async 및 cgroup 가중치에
+ * 따라 blk_mq_alloc_data->shallow_depth 를 제한한다.
+ * 호출 경로: blk_mq_get_request -> blk_mq_sched_get_request ->
+ *          elevator_ops.limit_depth(bfq_limit_depth)
+ * NVMe 연결: NVMe controller 의 SQ/tag 풀 소진을 막기 위해 읽기/쓰기/
+ *           cgroup 별로 tag 깊이를 조절한다. 이 제한이 없으면 특정
+ *           cgroup 이 모든 CID/tag 를 독점할 수 있다.
+ */
 static void bfq_limit_depth(blk_opf_t opf, struct blk_mq_alloc_data *data)
 {
 	struct bfq_data *bfqd = data->q->elevator->elevator_data;
@@ -703,6 +843,7 @@ static void bfq_limit_depth(blk_opf_t opf, struct blk_mq_alloc_data *data)
 		limit = bfqd->async_depths[!!bfqd->wr_busy_queues][op_is_sync(opf)];
 
 	for (act_idx = 0; bic && act_idx < bfqd->num_actuators; act_idx++) {
+	// NVMe 반복 처리: request/tag/bio/bvec/SQ/CQ 엔트리를 순회하며 CID 할당, PRP/SGL 조립, completion 상태를 누적한다(추정) -> blk-mq tag/hctx/CQ
 		/* Fast path to check if bfqq is already allocated. */
 		if (!bic_to_bfqq(bic, op_is_sync(opf), act_idx))
 			continue;
@@ -714,6 +855,7 @@ static void bfq_limit_depth(blk_opf_t opf, struct blk_mq_alloc_data *data)
 		 * available requests and thus starve other entities.
 		 */
 		if (bfqq_request_over_limit(bfqd, bic, opf, act_idx, limit)) {
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 			limit = 1;
 			break;
 		}
@@ -723,7 +865,7 @@ static void bfq_limit_depth(blk_opf_t opf, struct blk_mq_alloc_data *data)
 		__func__, bfqd->wr_busy_queues, op_is_sync(opf), limit);
 
 	if (limit < data->q->nr_requests)
-		data->shallow_depth = limit;
+		data->shallow_depth = limit; // NVMe SQ/tag 풀에서 실제로 사용 가능한 최대 깊이 제한.
 }
 
 static struct bfq_queue *
@@ -737,6 +879,7 @@ bfq_rq_pos_tree_lookup(struct bfq_data *bfqd, struct rb_root *root,
 	parent = NULL;
 	p = &root->rb_node;
 	while (*p) {
+	// NVMe 반복 처리: request/tag/bio/bvec/SQ/CQ 엔트리를 순회하며 CID 할당, PRP/SGL 조립, completion 상태를 누적한다(추정) -> blk-mq tag/hctx/CQ
 		struct rb_node **n;
 
 		parent = *p;
@@ -765,6 +908,7 @@ bfq_rq_pos_tree_lookup(struct bfq_data *bfqd, struct rb_root *root,
 		bfqq ? bfqq->pid : 0);
 
 	return bfqq;
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 }
 
 static bool bfq_too_late_for_merging(struct bfq_queue *bfqq)
@@ -789,6 +933,7 @@ bfq_pos_tree_add_move(struct bfq_data *bfqd, struct bfq_queue *bfqq)
 	struct bfq_queue *__bfqq;
 
 	if (bfqq->pos_root) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		rb_erase(&bfqq->pos_node, bfqq->pos_root);
 		bfqq->pos_root = NULL;
 	}
@@ -813,7 +958,9 @@ bfq_pos_tree_add_move(struct bfq_data *bfqd, struct bfq_queue *bfqq)
 	bfqq->pos_root = &bfqq_group(bfqq)->rq_pos_tree;
 	__bfqq = bfq_rq_pos_tree_lookup(bfqd, bfqq->pos_root,
 			blk_rq_pos(bfqq->next_rq), &parent, &p);
+			// NVMe 다음 명령: next_rq는 doorbell 발행 직전 SQ에 삽입될 후보 request이며, LBA 순서와 controller reordering을 고려
 	if (!__bfqq) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		rb_link_node(&bfqq->pos_node, parent, p);
 		rb_insert_color(&bfqq->pos_node, bfqq->pos_root);
 	} else
@@ -877,6 +1024,7 @@ static bool bfq_asymmetric_scenario(struct bfq_data *bfqd,
 		(bfqd->busy_queues[0] && bfqd->busy_queues[1]) ||
 		(bfqd->busy_queues[0] && bfqd->busy_queues[2]) ||
 		(bfqd->busy_queues[1] && bfqd->busy_queues[2]);
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 
 	return varied_queue_weights || multiple_classes_busy
 #ifdef CONFIG_BFQ_GROUP_IOSCHED
@@ -921,18 +1069,22 @@ void bfq_weights_tree_add(struct bfq_queue *bfqq)
 		return;
 
 	while (*new) {
+	// NVMe 반복 처리: request/tag/bio/bvec/SQ/CQ 엔트리를 순회하며 CID 할당, PRP/SGL 조립, completion 상태를 누적한다(추정) -> blk-mq tag/hctx/CQ
 		struct bfq_weight_counter *__counter = container_of(*new,
 						struct bfq_weight_counter,
 						weights_node);
 		parent = *new;
 
 		if (entity->weight == __counter->weight) {
+		// NVMe 스케줄 결정: B-WF2Q+가 다음에 SQ로 전달할 bfqq/entity를 선정하며, 이 선정이 곧 NVMe CID 순서와 doorbell batch를 결정(추정)
 			bfqq->weight_counter = __counter;
 			goto inc_counter;
+			// NVMe 에러/드레인 분기: goto는 보통 unlock/out 경로로 연결되며, controller abort나 queue drain 시 request를 안전하게 반납(추정)
 		}
 		if (entity->weight < __counter->weight)
 			new = &((*new)->rb_left);
 		else {
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 			new = &((*new)->rb_right);
 			leftmost = false;
 		}
@@ -957,6 +1109,7 @@ void bfq_weights_tree_add(struct bfq_queue *bfqq)
 		return;
 
 	bfqq->weight_counter->weight = entity->weight;
+	// NVMe 스케줄 결정: B-WF2Q+가 다음에 SQ로 전달할 bfqq/entity를 선정하며, 이 선정이 곧 NVMe CID 순서와 doorbell batch를 결정(추정)
 	rb_link_node(&bfqq->weight_counter->weights_node, parent, new);
 	rb_insert_color_cached(&bfqq->weight_counter->weights_node, root,
 				leftmost);
@@ -983,13 +1136,16 @@ void bfq_weights_tree_remove(struct bfq_queue *bfqq)
 	bfqq->weight_counter->num_active--;
 	if (bfqq->weight_counter->num_active > 0)
 		goto reset_entity_pointer;
+		// NVMe 에러/드레인 분기: goto는 보통 unlock/out 경로로 연결되며, controller abort나 queue drain 시 request를 안전하게 반납(추정)
 
 	rb_erase_cached(&bfqq->weight_counter->weights_node, root);
 	kfree(bfqq->weight_counter);
+	// NVMe 메모리 생명주기: bfqq/entity 할당/해제이며, NVMe request_pool와 별개이나 동시에 많은 bfqq는 tag 회수 지연 초래(추정)
 
 reset_entity_pointer:
 	bfqq->weight_counter = NULL;
 	bfq_put_queue(bfqq);
+	// NVMe bfqq 반납: 참조 카운트가 0이면 bfqq를 해제하며, 남은 request는 완료/abort로 정리되어야 함
 }
 
 /*
@@ -1002,6 +1158,7 @@ static struct request *bfq_check_fifo(struct bfq_queue *bfqq,
 
 	if (bfq_bfqq_fifo_expire(bfqq))
 		return NULL;
+		// NVMe 에러 반환: 할당/초기화 실패 시 NVMe 상위 경로로 오류를 전파하며, 해당 request는 SQ로 전달되지 않음
 
 	bfq_mark_bfqq_fifo_expire(bfqq);
 
@@ -1009,9 +1166,11 @@ static struct request *bfq_check_fifo(struct bfq_queue *bfqq,
 
 	if (rq == last || blk_time_get_ns() < rq->fifo_time)
 		return NULL;
+		// NVMe 에러 반환: 할당/초기화 실패 시 NVMe 상위 경로로 오류를 전파하며, 해당 request는 SQ로 전달되지 않음
 
 	bfq_log_bfqq(bfqq->bfqd, bfqq, "check_fifo: returned %p", rq);
 	return rq;
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 }
 
 static struct request *bfq_find_next_rq(struct bfq_data *bfqd,
@@ -1026,6 +1185,7 @@ static struct request *bfq_find_next_rq(struct bfq_data *bfqd,
 	next = bfq_check_fifo(bfqq, last);
 	if (next)
 		return next;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 
 	if (rbprev)
 		prev = rb_entry_rq(rbprev);
@@ -1033,12 +1193,14 @@ static struct request *bfq_find_next_rq(struct bfq_data *bfqd,
 	if (rbnext)
 		next = rb_entry_rq(rbnext);
 	else {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		rbnext = rb_first(&bfqq->sort_list);
 		if (rbnext && rbnext != &last->rb_node)
 			next = rb_entry_rq(rbnext);
 	}
 
 	return bfq_choose_req(bfqd, next, prev, blk_rq_pos(last));
+	// NVMe dispatch 선별: LBA/방향/위치를 고려해 다음 CID로 SQ에 넣을 request를 선택하며, controller reordering window 활용(추정)
 }
 
 /* see the definition of bfq_async_charge_factor for details */
@@ -1048,8 +1210,10 @@ static unsigned long bfq_serv_to_charge(struct request *rq,
 	if (bfq_bfqq_sync(bfqq) || bfqq->wr_coeff > 1 ||
 	    bfq_asymmetric_scenario(bfqq->bfqd, bfqq))
 		return blk_rq_sectors(rq);
+		// NVMe 명령 크기: request의 sector/byte 수가 NVMe command CDW10-11 길이와 PRP 필요량을 결정(추정)
 
 	return blk_rq_sectors(rq) * bfq_async_charge_factor;
+	// NVMe 명령 크기: request의 sector/byte 수가 NVMe command CDW10-11 길이와 PRP 필요량을 결정(추정)
 }
 
 /**
@@ -1068,6 +1232,7 @@ static void bfq_updated_next_req(struct bfq_data *bfqd,
 {
 	struct bfq_entity *entity = &bfqq->entity;
 	struct request *next_rq = bfqq->next_rq;
+	// NVMe 다음 명령: next_rq는 doorbell 발행 직전 SQ에 삽입될 후보 request이며, LBA 순서와 controller reordering을 고려
 	unsigned long new_budget;
 
 	if (!next_rq)
@@ -1084,11 +1249,15 @@ static void bfq_updated_next_req(struct bfq_data *bfqd,
 			   max_t(unsigned long, bfqq->max_budget,
 				 bfq_serv_to_charge(next_rq, bfqq)),
 			   entity->service);
+			   // NVMe 스케줄 결정: B-WF2Q+가 다음에 SQ로 전달할 bfqq/entity를 선정하며, 이 선정이 곧 NVMe CID 순서와 doorbell batch를 결정(추정)
 	if (entity->budget != new_budget) {
+	// NVMe 스케줄 결정: B-WF2Q+가 다음에 SQ로 전달할 bfqq/entity를 선정하며, 이 선정이 곧 NVMe CID 순서와 doorbell batch를 결정(추정)
 		entity->budget = new_budget;
+		// NVMe 스케줄 결정: B-WF2Q+가 다음에 SQ로 전달할 bfqq/entity를 선정하며, 이 선정이 곧 NVMe CID 순서와 doorbell batch를 결정(추정)
 		bfq_log_bfqq(bfqd, bfqq, "updated next rq: new budget %lu",
 					 new_budget);
 		bfq_requeue_bfqq(bfqd, bfqq, false);
+		// NVMe 스케줄 결정: B-WF2Q+가 다음에 SQ로 전달할 bfqq/entity를 선정하며, 이 선정이 곧 NVMe CID 순서와 doorbell batch를 결정(추정)
 	}
 }
 
@@ -1098,6 +1267,7 @@ static unsigned int bfq_wr_duration(struct bfq_data *bfqd)
 
 	dur = bfqd->rate_dur_prod;
 	do_div(dur, bfqd->peak_rate);
+	// NVMe 성능 추정: peak_rate는 NVMe SSD의 최대 처리율(섹터/us)을 측정하며, budget 계산과 interactive latency 예측에 사용(추정)
 
 	/*
 	 * Limit duration between 3 and 25 seconds. The upper limit
@@ -1120,6 +1290,7 @@ static unsigned int bfq_wr_duration(struct bfq_data *bfqd)
 	 * before weight-raising finishes.
 	 */
 	return clamp_val(dur, msecs_to_jiffies(3000), msecs_to_jiffies(25000));
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 }
 
 /* switch back from soft real-time to interactive weight raising */
@@ -1127,8 +1298,11 @@ static void switch_back_to_interactive_wr(struct bfq_queue *bfqq,
 					  struct bfq_data *bfqd)
 {
 	bfqq->wr_coeff = bfqd->bfq_wr_coeff;
+	// NVMe 우선순위/가중치: weight-raising은 interactive/soft-rt request가 SQ로 먼저 dispatch되도록 하여 NVMe latency QoS를 향상시키며, CID 우선순위는 아님(추정)
 	bfqq->wr_cur_max_time = bfq_wr_duration(bfqd);
+	// NVMe 우선순위/가중치: weight-raising은 interactive/soft-rt request가 SQ로 먼저 dispatch되도록 하여 NVMe latency QoS를 향상시키며, CID 우선순위는 아님(추정)
 	bfqq->last_wr_start_finish = bfqq->wr_start_at_switch_to_srt;
+	// NVMe 우선순위/가중치: weight-raising은 interactive/soft-rt request가 SQ로 먼저 dispatch되도록 하여 NVMe latency QoS를 향상시키며, CID 우선순위는 아님(추정)
 }
 
 static void
@@ -1137,7 +1311,9 @@ bfq_bfqq_resume_state(struct bfq_queue *bfqq, struct bfq_data *bfqd,
 {
 	unsigned int old_wr_coeff = 1;
 	bool busy = bfq_already_existing && bfq_bfqq_busy(bfqq);
+	// NVMe idle/throughput: bfqq가 busy/idle 상태에 따라 SQ doorbell 발행 시점과 batch 크기가 조정되며, NVMe NCQ reordering으로 인해 idle은 throughput 희생 가능(추정)
 	unsigned int a_idx = bfqq->actuator_idx;
+	// NVMe 다중 actuator: 독립 접근 영역에 따라 request를 분리하며, 각 actuator는 별도 SQ/CQ 또는 namespace 병렬 경로로 dispatch(추정)
 	struct bfq_iocq_bfqq_data *bfqq_data = &bic->bfqq_data[a_idx];
 
 	if (bfqq_data->saved_has_short_ttime)
@@ -1156,31 +1332,39 @@ bfq_bfqq_resume_state(struct bfq_queue *bfqq, struct bfq_data *bfqd,
 
 	bfqq->entity.new_weight = bfqq_data->saved_weight;
 	bfqq->ttime = bfqq_data->saved_ttime;
+	// NVMe 워크로드 특성: seek/think time 추정으로 interactive/sequential을 판단하며, NVMe NCQ reordering 특성에 맞춰 budget/idling을 조정(추정)
 	bfqq->io_start_time = bfqq_data->saved_io_start_time;
 	bfqq->tot_idle_time = bfqq_data->saved_tot_idle_time;
 	/*
 	 * Restore weight coefficient only if low_latency is on
 	 */
 	if (bfqd->low_latency) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		old_wr_coeff = bfqq->wr_coeff;
+		// NVMe 우선순위/가중치: weight-raising은 interactive/soft-rt request가 SQ로 먼저 dispatch되도록 하여 NVMe latency QoS를 향상시키며, CID 우선순위는 아님(추정)
 		bfqq->wr_coeff = bfqq_data->saved_wr_coeff;
+		// NVMe 우선순위/가중치: weight-raising은 interactive/soft-rt request가 SQ로 먼저 dispatch되도록 하여 NVMe latency QoS를 향상시키며, CID 우선순위는 아님(추정)
 	}
 	bfqq->service_from_wr = bfqq_data->saved_service_from_wr;
 	bfqq->wr_start_at_switch_to_srt =
 		bfqq_data->saved_wr_start_at_switch_to_srt;
 	bfqq->last_wr_start_finish = bfqq_data->saved_last_wr_start_finish;
 	bfqq->wr_cur_max_time = bfqq_data->saved_wr_cur_max_time;
+	// NVMe 우선순위/가중치: weight-raising은 interactive/soft-rt request가 SQ로 먼저 dispatch되도록 하여 NVMe latency QoS를 향상시키며, CID 우선순위는 아님(추정)
 
 	if (bfqq->wr_coeff > 1 && (bfq_bfqq_in_large_burst(bfqq) ||
 	    time_is_before_jiffies(bfqq->last_wr_start_finish +
 				   bfqq->wr_cur_max_time))) {
+				   // NVMe 우선순위/가중치: weight-raising은 interactive/soft-rt request가 SQ로 먼저 dispatch되도록 하여 NVMe latency QoS를 향상시키며, CID 우선순위는 아님(추정)
 		if (bfqq->wr_cur_max_time == bfqd->bfq_wr_rt_max_time &&
 		    !bfq_bfqq_in_large_burst(bfqq) &&
 		    time_is_after_eq_jiffies(bfqq->wr_start_at_switch_to_srt +
 					     bfq_wr_duration(bfqd))) {
 			switch_back_to_interactive_wr(bfqq, bfqd);
 		} else {
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 			bfqq->wr_coeff = 1;
+			// NVMe 우선순위/가중치: weight-raising은 interactive/soft-rt request가 SQ로 먼저 dispatch되도록 하여 NVMe latency QoS를 향상시키며, CID 우선순위는 아님(추정)
 			bfq_log_bfqq(bfqq->bfqd, bfqq,
 				     "resume state: switching off wr");
 		}
@@ -1203,6 +1387,7 @@ static int bfqq_process_refs(struct bfq_queue *bfqq)
 	return bfqq->ref - bfqq->entity.allocated -
 		bfqq->entity.on_st_or_in_serv -
 		(bfqq->weight_counter != NULL) - bfqq->stable_ref;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 }
 
 /* Empty burst list and add just bfqq (see comments on bfq_handle_burst) */
@@ -1220,6 +1405,7 @@ static void bfq_reset_burst_list(struct bfq_data *bfqd, struct bfq_queue *bfqq)
 	 * bfq_handle_burst().
 	 */
 	if (bfq_tot_busy_queues(bfqd) == 0) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		hlist_add_head(&bfqq->burst_list_node, &bfqd->burst_list);
 		bfqd->burst_size = 1;
 	} else
@@ -1235,6 +1421,7 @@ static void bfq_add_to_burst(struct bfq_data *bfqd, struct bfq_queue *bfqq)
 	bfqd->burst_size++;
 
 	if (bfqd->burst_size == bfqd->bfq_large_burst_thresh) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		struct bfq_queue *pos, *bfqq_item;
 		struct hlist_node *n;
 
@@ -1414,9 +1601,11 @@ static void bfq_handle_burst(struct bfq_data *bfqd, struct bfq_queue *bfqq)
 	if (time_is_before_jiffies(bfqd->last_ins_in_burst +
 	    bfqd->bfq_burst_interval) ||
 	    bfqq->entity.parent != bfqd->burst_parent_entity) {
+	    // NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		bfqd->large_burst = false;
 		bfq_reset_burst_list(bfqd, bfqq);
 		goto end;
+		// NVMe 에러/드레인 분기: goto는 보통 unlock/out 경로로 연결되며, controller abort나 queue drain 시 request를 안전하게 반납(추정)
 	}
 
 	/*
@@ -1425,8 +1614,10 @@ static void bfq_handle_burst(struct bfq_data *bfqd, struct bfq_queue *bfqq)
 	 * bfqq as belonging to this large burst immediately.
 	 */
 	if (bfqd->large_burst) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		bfq_mark_bfqq_in_large_burst(bfqq);
 		goto end;
+		// NVMe 에러/드레인 분기: goto는 보통 unlock/out 경로로 연결되며, controller abort나 queue drain 시 request를 안전하게 반납(추정)
 	}
 
 	/*
@@ -1452,6 +1643,7 @@ static int bfq_bfqq_budget_left(struct bfq_queue *bfqq)
 	struct bfq_entity *entity = &bfqq->entity;
 
 	return entity->budget - entity->service;
+	// NVMe 스케줄 결정: B-WF2Q+가 다음에 SQ로 전달할 bfqq/entity를 선정하며, 이 선정이 곧 NVMe CID 순서와 doorbell batch를 결정(추정)
 }
 
 /*
@@ -1463,8 +1655,10 @@ static int bfq_max_budget(struct bfq_data *bfqd)
 {
 	if (bfqd->budgets_assigned < bfq_stats_min_budgets)
 		return bfq_default_max_budget;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 	else
 		return bfqd->bfq_max_budget;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 }
 
 /*
@@ -1475,8 +1669,10 @@ static int bfq_min_budget(struct bfq_data *bfqd)
 {
 	if (bfqd->budgets_assigned < bfq_stats_min_budgets)
 		return bfq_default_max_budget / 32;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 	else
 		return bfqd->bfq_max_budget / 32;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 }
 
 /*
@@ -1618,6 +1814,7 @@ static bool bfq_bfqq_update_budg_for_activation(struct bfq_data *bfqd,
 		entity->budget = min_t(unsigned long,
 				       bfq_bfqq_budget_left(bfqq),
 				       bfqq->max_budget);
+				       // NVMe queue depth: in-flight/request 수가 NVMe SQ/CQ 엔트리 사용량과 budget을 제한하며, NCQ queue depth(32/64) 초과 시 dispatch 지연
 
 		/*
 		 * At this point, we have used entity->service to get
@@ -1629,18 +1826,23 @@ static bool bfq_bfqq_update_budg_for_activation(struct bfq_data *bfqd,
 		 * service slot(s).
 		 */
 		entity->service = 0;
+		// NVMe 스케줄 결정: B-WF2Q+가 다음에 SQ로 전달할 bfqq/entity를 선정하며, 이 선정이 곧 NVMe CID 순서와 doorbell batch를 결정(추정)
 
 		return true;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 	}
 
 	/*
 	 * We can finally complete expiration, by setting service to 0.
 	 */
 	entity->service = 0;
+	// NVMe 스케줄 결정: B-WF2Q+가 다음에 SQ로 전달할 bfqq/entity를 선정하며, 이 선정이 곧 NVMe CID 순서와 doorbell batch를 결정(추정)
 	entity->budget = max_t(unsigned long, bfqq->max_budget,
 			       bfq_serv_to_charge(bfqq->next_rq, bfqq));
+			       // NVMe 다음 명령: next_rq는 doorbell 발행 직전 SQ에 삽입될 후보 request이며, LBA 순서와 controller reordering을 고려
 	bfq_clear_bfqq_non_blocking_wait_rq(bfqq);
 	return false;
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 }
 
 /*
@@ -1650,6 +1852,7 @@ static bool bfq_bfqq_update_budg_for_activation(struct bfq_data *bfqd,
 static unsigned long bfq_smallest_from_now(void)
 {
 	return jiffies - MAX_JIFFY_OFFSET;
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 }
 
 static void bfq_update_bfqq_wr_on_rq_arrival(struct bfq_data *bfqd,
@@ -1661,12 +1864,17 @@ static void bfq_update_bfqq_wr_on_rq_arrival(struct bfq_data *bfqd,
 					     bool soft_rt)
 {
 	if (old_wr_coeff == 1 && wr_or_deserves_wr) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		/* start a weight-raising period */
 		if (interactive) {
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 			bfqq->service_from_wr = 0;
 			bfqq->wr_coeff = bfqd->bfq_wr_coeff;
+			// NVMe 우선순위/가중치: weight-raising은 interactive/soft-rt request가 SQ로 먼저 dispatch되도록 하여 NVMe latency QoS를 향상시키며, CID 우선순위는 아님(추정)
 			bfqq->wr_cur_max_time = bfq_wr_duration(bfqd);
+			// NVMe 우선순위/가중치: weight-raising은 interactive/soft-rt request가 SQ로 먼저 dispatch되도록 하여 NVMe latency QoS를 향상시키며, CID 우선순위는 아님(추정)
 		} else {
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 			/*
 			 * No interactive weight raising in progress
 			 * here: assign minus infinity to
@@ -1699,12 +1907,18 @@ static void bfq_update_bfqq_wr_on_rq_arrival(struct bfq_data *bfqd,
 					    bfqq->entity.budget,
 					    2 * bfq_min_budget(bfqd));
 	} else if (old_wr_coeff > 1) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		if (interactive) { /* update wr coeff and duration */
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 			bfqq->wr_coeff = bfqd->bfq_wr_coeff;
+			// NVMe 우선순위/가중치: weight-raising은 interactive/soft-rt request가 SQ로 먼저 dispatch되도록 하여 NVMe latency QoS를 향상시키며, CID 우선순위는 아님(추정)
 			bfqq->wr_cur_max_time = bfq_wr_duration(bfqd);
+			// NVMe 우선순위/가중치: weight-raising은 interactive/soft-rt request가 SQ로 먼저 dispatch되도록 하여 NVMe latency QoS를 향상시키며, CID 우선순위는 아님(추정)
 		} else if (in_burst)
 			bfqq->wr_coeff = 1;
+			// NVMe 우선순위/가중치: weight-raising은 interactive/soft-rt request가 SQ로 먼저 dispatch되도록 하여 NVMe latency QoS를 향상시키며, CID 우선순위는 아님(추정)
 		else if (soft_rt) {
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 			/*
 			 * The application is now or still meeting the
 			 * requirements for being deemed soft rt.  We
@@ -1770,26 +1984,45 @@ static bool bfq_bfqq_higher_class_or_weight(struct bfq_queue *bfqq,
 
 	if (bfqq->ioprio_class < in_serv_bfqq->ioprio_class)
 		return true;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 
 	if (in_serv_bfqq->entity.parent == bfqq->entity.parent) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		bfqq_weight = bfqq->entity.weight;
+		// NVMe 우선순위/가중치: weight-raising은 interactive/soft-rt request가 SQ로 먼저 dispatch되도록 하여 NVMe latency QoS를 향상시키며, CID 우선순위는 아님(추정)
 		in_serv_weight = in_serv_bfqq->entity.weight;
+		// NVMe 우선순위/가중치: weight-raising은 interactive/soft-rt request가 SQ로 먼저 dispatch되도록 하여 NVMe latency QoS를 향상시키며, CID 우선순위는 아님(추정)
 	} else {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		if (bfqq->entity.parent)
 			bfqq_weight = bfqq->entity.parent->weight;
+			// NVMe 우선순위/가중치: weight-raising은 interactive/soft-rt request가 SQ로 먼저 dispatch되도록 하여 NVMe latency QoS를 향상시키며, CID 우선순위는 아님(추정)
 		else
 			bfqq_weight = bfqq->entity.weight;
+			// NVMe 우선순위/가중치: weight-raising은 interactive/soft-rt request가 SQ로 먼저 dispatch되도록 하여 NVMe latency QoS를 향상시키며, CID 우선순위는 아님(추정)
 		if (in_serv_bfqq->entity.parent)
 			in_serv_weight = in_serv_bfqq->entity.parent->weight;
+			// NVMe 우선순위/가중치: weight-raising은 interactive/soft-rt request가 SQ로 먼저 dispatch되도록 하여 NVMe latency QoS를 향상시키며, CID 우선순위는 아님(추정)
 		else
 			in_serv_weight = in_serv_bfqq->entity.weight;
+			// NVMe 우선순위/가중치: weight-raising은 interactive/soft-rt request가 SQ로 먼저 dispatch되도록 하여 NVMe latency QoS를 향상시키며, CID 우선순위는 아님(추정)
 	}
 
 	return bfqq_weight > in_serv_weight;
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 }
 
 /*
  * Get the index of the actuator that will serve bio.
+ */
+/*
+ * bfq_actuator_index: bio 의 종료 섹터가 속하는 독립 접근 영역을 찾아
+ * actuator 인덱스를 반환한다.
+ * 호출 경로: bfq_init_rq/bfq_get_queue/bfq_insert_request ->
+ *          bfq_actuator_index
+ * NVMe 연결: 다중 actuator NVMe SSD 에서 request 를 어느 actuator/SQ
+ *           쪽으로 라우팅할지 결정한다(추정). 단일 actuator 장치에서는
+ *           항상 0을 반환한다.
  */
 static unsigned int bfq_actuator_index(struct bfq_data *bfqd, struct bio *bio)
 {
@@ -1799,20 +2032,24 @@ static unsigned int bfq_actuator_index(struct bfq_data *bfqd, struct bio *bio)
 	/* no search needed if one or zero ranges present */
 	if (bfqd->num_actuators == 1)
 		return 0;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 
 	/* bio_end_sector(bio) gives the sector after the last one */
 	end = bio_end_sector(bio) - 1;
 
 	for (i = 0; i < bfqd->num_actuators; i++) {
+	// NVMe 반복 처리: request/tag/bio/bvec/SQ/CQ 엔트리를 순회하며 CID 할당, PRP/SGL 조립, completion 상태를 누적한다(추정) -> blk-mq tag/hctx/CQ
 		if (end >= bfqd->sector[i] &&
 		    end < bfqd->sector[i] + bfqd->nr_sectors[i])
 			return i;
+			// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 	}
 
 	WARN_ONCE(true,
 		  "bfq_actuator_index: bio sector out of ranges: end=%llu\n",
 		  end);
 	return 0;
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 }
 
 static bool bfq_better_to_idle(struct bfq_queue *bfqq);
@@ -1837,6 +2074,7 @@ static void bfq_bfqq_handle_idle_busy_switch(struct bfq_data *bfqd,
 	unsigned int act_idx = bfq_actuator_index(bfqd, rq->bio);
 	bool bfqq_non_merged_or_stably_merged =
 		bfqq->bic || RQ_BIC(rq)->bfqq_data[act_idx].stably_merged;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 
 	/*
 	 * bfqq deserves to be weight-raised if:
@@ -1854,8 +2092,10 @@ static void bfq_bfqq_handle_idle_busy_switch(struct bfq_data *bfqd,
 		time_is_before_jiffies(bfqq->soft_rt_next_start) &&
 		bfqq->dispatched == 0 &&
 		bfqq->entity.new_weight == 40;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 	*interactive = !in_burst && idle_for_long_time &&
 		bfqq->entity.new_weight == 40;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 	/*
 	 * Merged bfq_queues are kept out of weight-raising
 	 * (low-latency) mechanisms. The reason is that these queues
@@ -1872,6 +2112,7 @@ static void bfq_bfqq_handle_idle_busy_switch(struct bfq_data *bfqd,
 		(bfqq->wr_coeff > 1 ||
 		 (bfq_bfqq_sync(bfqq) && bfqq_non_merged_or_stably_merged &&
 		  (*interactive || soft_rt)));
+		  // NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 
 	/*
 	 * Using the last flag, update budget and check whether bfqq
@@ -1906,6 +2147,7 @@ static void bfq_bfqq_handle_idle_busy_switch(struct bfq_data *bfqd,
 	bfq_clear_bfqq_just_created(bfqq);
 
 	if (bfqd->low_latency) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		if (unlikely(time_is_after_jiffies(bfqq->split_time)))
 			/* wraparound */
 			bfqq->split_time =
@@ -2057,6 +2299,7 @@ static void bfq_update_io_intensity(struct bfq_queue *bfqq, u64 now_ns)
 	if (RB_EMPTY_ROOT(&bfqq->sort_list) && bfqq->dispatched == 0)
 		bfqq->tot_idle_time +=
 			now_ns - bfqq->ttime.last_end_request;
+			// NVMe 워크로드 특성: seek/think time 추정으로 interactive/sequential을 판단하며, NVMe NCQ reordering 특성에 맞춰 budget/idling을 조정(추정)
 
 	if (unlikely(bfq_bfqq_just_created(bfqq)))
 		return;
@@ -2075,8 +2318,10 @@ static void bfq_update_io_intensity(struct bfq_queue *bfqq, u64 now_ns)
 	 * from now.
 	 */
 	if (tot_io_time > 200 * NSEC_PER_MSEC) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		bfqq->io_start_time = now_ns - (tot_io_time>>1);
 		bfqq->tot_idle_time >>= 1;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 	}
 }
 
@@ -2170,6 +2415,7 @@ static void bfq_check_waker(struct bfq_data *bfqd, struct bfq_queue *bfqq,
 		bfqq->num_waker_detections++;
 
 	if (bfqq->num_waker_detections == 3) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		bfqq->waker_bfqq = bfqd->last_completed_rq_bfqq;
 		bfqq->tentative_waker_bfqq = NULL;
 		bfq_bfqq_name(bfqq->waker_bfqq, waker_name,
@@ -2203,12 +2449,22 @@ static void bfq_check_waker(struct bfq_data *bfqd, struct bfq_queue *bfqq,
 	}
 }
 
+/*
+ * bfq_add_request: request 를 bfqq 의 sort_list/fifo 에 삽입하고,
+ * weight-raising, waker 검출, injection 샘플링 상태를 갱신한다.
+ * 호출 경로: bfq_insert_request -> __bfq_insert_request ->
+ *          bfq_add_request
+ * NVMe 연결: 파일 시스템의 bio 가 request 로 승격된 후 NVMe SQ 로
+ *           전달되기 전 마지막으로 BFQ 내부 우선순위를 조정하는 단계다.
+ */
 static void bfq_add_request(struct request *rq)
 {
 	struct bfq_queue *bfqq = RQ_BFQQ(rq);
 	struct bfq_data *bfqd = bfqq->bfqd;
 	struct request *next_rq, *prev;
+	// NVMe 다음 명령: next_rq는 doorbell 발행 직전 SQ에 삽입될 후보 request이며, LBA 순서와 controller reordering을 고려
 	unsigned int old_wr_coeff = bfqq->wr_coeff;
+	// NVMe 우선순위/가중치: weight-raising은 interactive/soft-rt request가 SQ로 먼저 dispatch되도록 하여 NVMe latency QoS를 향상시키며, CID 우선순위는 아님(추정)
 	bool interactive = false;
 	u64 now_ns = blk_time_get_ns();
 
@@ -2218,9 +2474,10 @@ static void bfq_add_request(struct request *rq)
 	 * Updating of 'bfqd->queued' is protected by 'bfqd->lock', however, it
 	 * may be read without holding the lock in bfq_has_work().
 	 */
-	WRITE_ONCE(bfqd->queued, bfqd->queued + 1);
+	WRITE_ONCE(bfqd->queued, bfqd->queued + 1); // BFQ 대기열 증가: NVMe SQ 로 아직 전달되지 않은 request 수.
 
 	if (bfq_bfqq_sync(bfqq) && RQ_BIC(rq)->requests <= 1) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		bfq_check_waker(bfqd, bfqq, now_ns);
 
 		/*
@@ -2293,14 +2550,17 @@ static void bfq_add_request(struct request *rq)
 	if (bfq_bfqq_sync(bfqq))
 		bfq_update_io_intensity(bfqq, now_ns);
 
-	elv_rb_add(&bfqq->sort_list, rq);
+	elv_rb_add(&bfqq->sort_list, rq); // LBA 순으로 정렬: NVMe controller 의 reordering 과 무관한 BFQ 내부 순서.
 
 	/*
 	 * Check if this request is a better next-serve candidate.
 	 */
 	prev = bfqq->next_rq;
-	next_rq = bfq_choose_req(bfqd, bfqq->next_rq, rq, bfqd->last_position);
+	// NVMe 다음 명령: next_rq는 doorbell 발행 직전 SQ에 삽입될 후보 request이며, LBA 순서와 controller reordering을 고려
+	next_rq = bfq_choose_req(bfqd, bfqq->next_rq, rq, bfqd->last_position); // 다음에 NVMe SQ 로 보낼 next_rq 후보 갱신.
+	// NVMe 다음 명령: next_rq는 doorbell 발행 직전 SQ에 삽입될 후보 request이며, LBA 순서와 controller reordering을 고려
 	bfqq->next_rq = next_rq;
+	// NVMe 다음 명령: next_rq는 doorbell 발행 직전 SQ에 삽입될 후보 request이며, LBA 순서와 controller reordering을 고려
 
 	/*
 	 * Adjust priority tree position, if next_rq changes.
@@ -2309,16 +2569,19 @@ static void bfq_add_request(struct request *rq)
 	if (unlikely(!bfqd->nonrot_with_queueing && prev != bfqq->next_rq))
 		bfq_pos_tree_add_move(bfqd, bfqq);
 
-	if (!bfq_bfqq_busy(bfqq)) /* switching to busy ... */
+	if (!bfq_bfqq_busy(bfqq)) /* switching to busy ... */ // idle -> busy 전환: NVMe SQ 에 명령을 채울 준비 완료.
 		bfq_bfqq_handle_idle_busy_switch(bfqd, bfqq, old_wr_coeff,
 						 rq, &interactive);
 	else {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		if (bfqd->low_latency && old_wr_coeff == 1 && !rq_is_sync(rq) &&
 		    time_is_before_jiffies(
 				bfqq->last_wr_start_finish +
 				bfqd->bfq_wr_min_inter_arr_async)) {
 			bfqq->wr_coeff = bfqd->bfq_wr_coeff;
+			// NVMe 우선순위/가중치: weight-raising은 interactive/soft-rt request가 SQ로 먼저 dispatch되도록 하여 NVMe latency QoS를 향상시키며, CID 우선순위는 아님(추정)
 			bfqq->wr_cur_max_time = bfq_wr_duration(bfqd);
+			// NVMe 우선순위/가중치: weight-raising은 interactive/soft-rt request가 SQ로 먼저 dispatch되도록 하여 NVMe latency QoS를 향상시키며, CID 우선순위는 아님(추정)
 
 			bfqd->wr_busy_queues++;
 			bfqq->entity.prio_changed = 1;
@@ -2367,16 +2630,20 @@ static struct request *bfq_find_rq_fmerge(struct bfq_data *bfqd,
 
 	if (bfqq)
 		return elv_rb_find(&bfqq->sort_list, bio_end_sector(bio));
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 
 	return NULL;
+	// NVMe 에러 반환: 할당/초기화 실패 시 NVMe 상위 경로로 오류를 전파하며, 해당 request는 SQ로 전달되지 않음
 }
 
 static sector_t get_sdist(sector_t last_pos, struct request *rq)
 {
 	if (last_pos)
 		return abs(blk_rq_pos(rq) - last_pos);
+		// NVMe 명령 크기: request의 sector/byte 수가 NVMe command CDW10-11 길이와 PRP 필요량을 결정(추정)
 
 	return 0;
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 }
 
 static void bfq_remove_request(struct request_queue *q,
@@ -2387,7 +2654,9 @@ static void bfq_remove_request(struct request_queue *q,
 	const int sync = rq_is_sync(rq);
 
 	if (bfqq->next_rq == rq) {
+	// NVMe 다음 명령: next_rq는 doorbell 발행 직전 SQ에 삽입될 후보 request이며, LBA 순서와 controller reordering을 고려
 		bfqq->next_rq = bfq_find_next_rq(bfqd, bfqq, rq);
+		// NVMe 다음 명령: next_rq는 doorbell 발행 직전 SQ에 삽입될 후보 request이며, LBA 순서와 controller reordering을 고려
 		bfq_updated_next_req(bfqd, bfqq);
 	}
 
@@ -2406,9 +2675,12 @@ static void bfq_remove_request(struct request_queue *q,
 		q->last_merge = NULL;
 
 	if (RB_EMPTY_ROOT(&bfqq->sort_list)) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		bfqq->next_rq = NULL;
+		// NVMe 다음 명령: next_rq는 doorbell 발행 직전 SQ에 삽입될 후보 request이며, LBA 순서와 controller reordering을 고려
 
 		if (bfq_bfqq_busy(bfqq) && bfqq != bfqd->in_service_queue) {
+		// NVMe idle/throughput: bfqq가 busy/idle 상태에 따라 SQ doorbell 발행 시점과 batch 크기가 조정되며, NVMe NCQ reordering으로 인해 idle은 throughput 희생 가능(추정)
 			bfq_del_bfqq_busy(bfqq, false);
 			/*
 			 * bfqq emptied. In normal operation, when
@@ -2424,16 +2696,19 @@ static void bfq_remove_request(struct request_queue *q,
 			 * process that may issue I/O requests to it.
 			 */
 			bfqq->entity.budget = bfqq->entity.service = 0;
+			// NVMe 예산 관리: budget은 한 bfqq가 NVMe SQ에 넣을 수 있는 sector 예산이며, queue depth와 throughput 공정성을 조율(추정)
 		}
 
 		/*
 		 * Remove queue from request-position tree as it is empty.
 		 */
 		if (bfqq->pos_root) {
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 			rb_erase(&bfqq->pos_node, bfqq->pos_root);
 			bfqq->pos_root = NULL;
 		}
 	} else {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		/* see comments on bfq_pos_tree_add_move() for the unlikely() */
 		if (unlikely(!bfqd->nonrot_with_queueing))
 			bfq_pos_tree_add_move(bfqd, bfqq);
@@ -2444,6 +2719,14 @@ static void bfq_remove_request(struct request_queue *q,
 
 }
 
+/*
+ * bfq_bio_merge: blk-mq bio-merge 콜백. bio 를 기존 request 에
+ * 병합할 수 있는지 확인하고, 필요하면 bfqq 를 cooperator 와 merge 한다.
+ * 호출 경로: blk_mq_submit_bio -> blk_attempt_bio_merge ->
+ *          elevator_ops.bio_merge(bfq_bio_merge)
+ * NVMe 연결: NVMe 명령 크기를 키워 PRP/SGL chain 을 줄이고 doorbell
+ *           횟수를 감소시킨다.
+ */
 static bool bfq_bio_merge(struct request_queue *q, struct bio *bio,
 		unsigned int nr_segs)
 {
@@ -2455,6 +2738,7 @@ static bool bfq_bio_merge(struct request_queue *q, struct bio *bio,
 	spin_lock_irq(&bfqd->lock);
 
 	if (bic) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		/*
 		 * Make sure cgroup info is uptodate for current process before
 		 * considering the merge.
@@ -2464,6 +2748,7 @@ static bool bfq_bio_merge(struct request_queue *q, struct bio *bio,
 		bfqd->bio_bfqq = bic_to_bfqq(bic, op_is_sync(bio->bi_opf),
 					     bfq_actuator_index(bfqd, bio));
 	} else {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		bfqd->bio_bfqq = NULL;
 	}
 	bfqd->bio_bic = bic;
@@ -2475,6 +2760,7 @@ static bool bfq_bio_merge(struct request_queue *q, struct bio *bio,
 		blk_mq_free_request(free);
 
 	return ret;
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 }
 
 static int bfq_request_merge(struct request_queue *q, struct request **req,
@@ -2485,14 +2771,18 @@ static int bfq_request_merge(struct request_queue *q, struct request **req,
 
 	__rq = bfq_find_rq_fmerge(bfqd, bio, q);
 	if (__rq && elv_bio_merge_ok(__rq, bio)) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		*req = __rq;
 
 		if (blk_discard_mergable(__rq))
 			return ELEVATOR_DISCARD_MERGE;
+			// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		return ELEVATOR_FRONT_MERGE;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 	}
 
 	return ELEVATOR_NO_MERGE;
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 }
 
 static void bfq_request_merged(struct request_queue *q, struct request *req,
@@ -2506,6 +2796,7 @@ static void bfq_request_merged(struct request_queue *q, struct request *req,
 		struct bfq_queue *bfqq = RQ_BFQQ(req);
 		struct bfq_data *bfqd;
 		struct request *prev, *next_rq;
+		// NVMe 다음 명령: next_rq는 doorbell 발행 직전 SQ에 삽입될 후보 request이며, LBA 순서와 controller reordering을 고려
 
 		if (!bfqq)
 			return;
@@ -2518,15 +2809,18 @@ static void bfq_request_merged(struct request_queue *q, struct request *req,
 
 		/* Choose next request to be served for bfqq */
 		prev = bfqq->next_rq;
+		// NVMe 다음 명령: next_rq는 doorbell 발행 직전 SQ에 삽입될 후보 request이며, LBA 순서와 controller reordering을 고려
 		next_rq = bfq_choose_req(bfqd, bfqq->next_rq, req,
 					 bfqd->last_position);
 		bfqq->next_rq = next_rq;
+		// NVMe 다음 명령: next_rq는 doorbell 발행 직전 SQ에 삽입될 후보 request이며, LBA 순서와 controller reordering을 고려
 		/*
 		 * If next_rq changes, update both the queue's budget to
 		 * fit the new request and the queue's position in its
 		 * rq_pos_tree.
 		 */
 		if (prev != bfqq->next_rq) {
+		// NVMe 다음 명령: next_rq는 doorbell 발행 직전 SQ에 삽입될 후보 request이며, LBA 순서와 controller reordering을 고려
 			bfq_updated_next_req(bfqd, bfqq);
 			/*
 			 * See comments on bfq_pos_tree_add_move() for
@@ -2560,6 +2854,7 @@ static void bfq_requests_merged(struct request_queue *q, struct request *rq,
 
 	if (!bfqq)
 		goto remove;
+		// NVMe 에러/드레인 분기: goto는 보통 unlock/out 경로로 연결되며, controller abort나 queue drain 시 request를 안전하게 반납(추정)
 
 	/*
 	 * If next and rq belong to the same bfq_queue and next is older
@@ -2580,12 +2875,15 @@ static void bfq_requests_merged(struct request_queue *q, struct request *rq,
 
 	if (bfqq->next_rq == next)
 		bfqq->next_rq = rq;
+		// NVMe 다음 명령: next_rq는 doorbell 발행 직전 SQ에 삽입될 후보 request이며, LBA 순서와 controller reordering을 고려
 
 	bfqg_stats_update_io_merged(bfqq_group(bfqq), next->cmd_flags);
 remove:
 	/* Merged request may be in the IO scheduler. Remove it. */
 	if (!RB_EMPTY_NODE(&next->rb_node)) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		bfq_remove_request(next->q, next);
+		// NVMe request 제거: dispatch되거나 merge/abort로 인해 BFQ queue에서 request를 제거하며, SQ/CQ에서 제거된 것은 아님(완료 경로에서 처리)
 		if (next_bfqq)
 			bfqg_stats_update_io_remove(bfqq_group(next_bfqq),
 						    next->cmd_flags);
@@ -2616,7 +2914,9 @@ static void bfq_bfqq_end_wr(struct bfq_queue *bfqq)
 	if (bfq_bfqq_busy(bfqq))
 		bfqq->bfqd->wr_busy_queues--;
 	bfqq->wr_coeff = 1;
+	// NVMe 우선순위/가중치: weight-raising은 interactive/soft-rt request가 SQ로 먼저 dispatch되도록 하여 NVMe latency QoS를 향상시키며, CID 우선순위는 아님(추정)
 	bfqq->wr_cur_max_time = 0;
+	// NVMe 우선순위/가중치: weight-raising은 interactive/soft-rt request가 SQ로 먼저 dispatch되도록 하여 NVMe latency QoS를 향상시키며, CID 우선순위는 아님(추정)
 	bfqq->last_wr_start_finish = jiffies;
 	/*
 	 * Trigger a weight change on the next invocation of
@@ -2631,6 +2931,7 @@ void bfq_end_wr_async_queues(struct bfq_data *bfqd,
 	int i, j, k;
 
 	for (k = 0; k < bfqd->num_actuators; k++) {
+	// NVMe 반복 처리: request/tag/bio/bvec/SQ/CQ 엔트리를 순회하며 CID 할당, PRP/SGL 조립, completion 상태를 누적한다(추정) -> blk-mq tag/hctx/CQ
 		for (i = 0; i < 2; i++)
 			for (j = 0; j < IOPRIO_NR_LEVELS; j++)
 				if (bfqg->async_bfqq[i][j][k])
@@ -2648,6 +2949,7 @@ static void bfq_end_wr(struct bfq_data *bfqd)
 	spin_lock_irq(&bfqd->lock);
 
 	for (i = 0; i < bfqd->num_actuators; i++) {
+	// NVMe 반복 처리: request/tag/bio/bvec/SQ/CQ 엔트리를 순회하며 CID 할당, PRP/SGL 조립, completion 상태를 누적한다(추정) -> blk-mq tag/hctx/CQ
 		list_for_each_entry(bfqq, &bfqd->active_list[i], bfqq_list)
 			bfq_bfqq_end_wr(bfqq);
 	}
@@ -2662,6 +2964,7 @@ static sector_t bfq_io_struct_pos(void *io_struct, bool request)
 {
 	if (request)
 		return blk_rq_pos(io_struct);
+		// NVMe 명령 크기: request의 sector/byte 수가 NVMe command CDW10-11 길이와 PRP 필요량을 결정(추정)
 	else
 		return ((struct bio *)io_struct)->bi_iter.bi_sector;
 }
@@ -2683,6 +2986,7 @@ static struct bfq_queue *bfqq_find_close(struct bfq_data *bfqd,
 
 	if (RB_EMPTY_ROOT(root))
 		return NULL;
+		// NVMe 에러 반환: 할당/초기화 실패 시 NVMe 상위 경로로 오류를 전파하며, 해당 request는 SQ로 전달되지 않음
 
 	/*
 	 * First, if we find a request starting at the end of the last
@@ -2691,6 +2995,7 @@ static struct bfq_queue *bfqq_find_close(struct bfq_data *bfqd,
 	__bfqq = bfq_rq_pos_tree_lookup(bfqd, root, sector, &parent, NULL);
 	if (__bfqq)
 		return __bfqq;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 
 	/*
 	 * If the exact sector wasn't found, the parent of the NULL leaf
@@ -2700,6 +3005,7 @@ static struct bfq_queue *bfqq_find_close(struct bfq_data *bfqd,
 	__bfqq = rb_entry(parent, struct bfq_queue, pos_node);
 	if (bfq_rq_close_to_sector(__bfqq->next_rq, true, sector))
 		return __bfqq;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 
 	if (blk_rq_pos(__bfqq->next_rq) < sector)
 		node = rb_next(&__bfqq->pos_node);
@@ -2707,12 +3013,15 @@ static struct bfq_queue *bfqq_find_close(struct bfq_data *bfqd,
 		node = rb_prev(&__bfqq->pos_node);
 	if (!node)
 		return NULL;
+		// NVMe 에러 반환: 할당/초기화 실패 시 NVMe 상위 경로로 오류를 전파하며, 해당 request는 SQ로 전달되지 않음
 
 	__bfqq = rb_entry(node, struct bfq_queue, pos_node);
 	if (bfq_rq_close_to_sector(__bfqq->next_rq, true, sector))
 		return __bfqq;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 
 	return NULL;
+	// NVMe 에러 반환: 할당/초기화 실패 시 NVMe 상위 경로로 오류를 전파하며, 해당 request는 SQ로 전달되지 않음
 }
 
 static struct bfq_queue *bfq_find_close_cooperator(struct bfq_data *bfqd,
@@ -2731,8 +3040,10 @@ static struct bfq_queue *bfq_find_close_cooperator(struct bfq_data *bfqd,
 	bfqq = bfqq_find_close(bfqd, cur_bfqq, sector);
 	if (!bfqq || bfqq == cur_bfqq)
 		return NULL;
+		// NVMe 에러 반환: 할당/초기화 실패 시 NVMe 상위 경로로 오류를 전파하며, 해당 request는 SQ로 전달되지 않음
 
 	return bfqq;
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 }
 
 static struct bfq_queue *
@@ -2749,11 +3060,14 @@ bfq_setup_merge(struct bfq_queue *bfqq, struct bfq_queue *new_bfqq)
 	 */
 	if (!bfqq_process_refs(new_bfqq))
 		return NULL;
+		// NVMe 에러 반환: 할당/초기화 실패 시 NVMe 상위 경로로 오류를 전파하며, 해당 request는 SQ로 전달되지 않음
 
 	/* Avoid a circular list and skip interim queue merges. */
 	while ((__bfqq = new_bfqq->new_bfqq)) {
+	// NVMe 반복 처리: request/tag/bio/bvec/SQ/CQ 엔트리를 순회하며 CID 할당, PRP/SGL 조립, completion 상태를 누적한다(추정) -> blk-mq tag/hctx/CQ
 		if (__bfqq == bfqq)
 			return NULL;
+			// NVMe 에러 반환: 할당/초기화 실패 시 NVMe 상위 경로로 오류를 전파하며, 해당 request는 SQ로 전달되지 않음
 		new_bfqq = __bfqq;
 	}
 
@@ -2765,6 +3079,7 @@ bfq_setup_merge(struct bfq_queue *bfqq, struct bfq_queue *new_bfqq)
 	 */
 	if (process_refs == 0 || new_process_refs == 0)
 		return NULL;
+		// NVMe 에러 반환: 할당/초기화 실패 시 NVMe 상위 경로로 오류를 전파하며, 해당 request는 SQ로 전달되지 않음
 
 	/*
 	 * Make sure merged queues belong to the same parent. Parents could
@@ -2773,6 +3088,7 @@ bfq_setup_merge(struct bfq_queue *bfqq, struct bfq_queue *new_bfqq)
 	 */
 	if (new_bfqq->entity.parent != bfqq->entity.parent)
 		return NULL;
+		// NVMe 에러 반환: 할당/초기화 실패 시 NVMe 상위 경로로 오류를 전파하며, 해당 request는 SQ로 전달되지 않음
 
 	bfq_log_bfqq(bfqq->bfqd, bfqq, "scheduling merge with queue %d",
 		new_bfqq->pid);
@@ -2809,6 +3125,7 @@ bfq_setup_merge(struct bfq_queue *bfqq, struct bfq_queue *new_bfqq)
 	 */
 	new_bfqq->ref += process_refs;
 	return new_bfqq;
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 }
 
 static bool bfq_may_be_close_cooperator(struct bfq_queue *bfqq,
@@ -2816,10 +3133,12 @@ static bool bfq_may_be_close_cooperator(struct bfq_queue *bfqq,
 {
 	if (bfq_too_late_for_merging(new_bfqq))
 		return false;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 
 	if (bfq_class_idle(bfqq) || bfq_class_idle(new_bfqq) ||
 	    (bfqq->ioprio_class != new_bfqq->ioprio_class))
 		return false;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 
 	/*
 	 * If either of the queues has already been detected as seeky,
@@ -2828,6 +3147,7 @@ static bool bfq_may_be_close_cooperator(struct bfq_queue *bfqq,
 	 */
 	if (BFQQ_SEEKY(bfqq) || BFQQ_SEEKY(new_bfqq))
 		return false;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 
 	/*
 	 * Interleaved I/O is known to be done by (some) applications
@@ -2836,8 +3156,10 @@ static bool bfq_may_be_close_cooperator(struct bfq_queue *bfqq,
 	 */
 	if (!bfq_bfqq_sync(bfqq) || !bfq_bfqq_sync(new_bfqq))
 		return false;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 
 	return true;
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 }
 
 static bool idling_boosts_thr_without_issues(struct bfq_data *bfqd,
@@ -2855,14 +3177,18 @@ bfq_setup_stable_merge(struct bfq_data *bfqd, struct bfq_queue *bfqq,
 	bfqq_data->stable_merge_bfqq = NULL;
 	if (idling_boosts_thr_without_issues(bfqd, bfqq) || proc_ref == 0)
 		goto out;
+		// NVMe 에러/드레인 분기: goto는 보통 unlock/out 경로로 연결되며, controller abort나 queue drain 시 request를 안전하게 반납(추정)
 
 	/* next function will take at least one ref */
 	new_bfqq = bfq_setup_merge(bfqq, stable_merge_bfqq);
 
 	if (new_bfqq) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		bfqq_data->stably_merged = true;
 		if (new_bfqq->bic) {
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 			unsigned int new_a_idx = new_bfqq->actuator_idx;
+			// NVMe 다중 actuator: 독립 접근 영역에 따라 request를 분리하며, 각 actuator는 별도 SQ/CQ 또는 namespace 병렬 경로로 dispatch(추정)
 			struct bfq_iocq_bfqq_data *new_bfqq_data =
 				&new_bfqq->bic->bfqq_data[new_a_idx];
 
@@ -2875,6 +3201,7 @@ out:
 	bfq_put_stable_ref(stable_merge_bfqq);
 
 	return new_bfqq;
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 }
 
 /*
@@ -2897,20 +3224,32 @@ out:
  * requests than the ones produced by its originally-associated
  * process.
  */
+/*
+ * bfq_setup_cooperator: 인접 LBA 에 접근하는 process 들의 bfqq 를
+ * merge 하여 scheduling overhead 를 줄이고 sequential 처리를 돕는다.
+ * 호출 경로: bfq_allow_bio_merge/bfq__insert_request ->
+ *          bfq_setup_cooperator
+ * NVMe 연결: NVMe SSD(nonrot_with_queueing)에서는 controller 가 이미
+ *           내부적으로 reordering 하므로 merge 를 대부분 수행하지
+ *           않는다(추정).
+ */
 static struct bfq_queue *
 bfq_setup_cooperator(struct bfq_data *bfqd, struct bfq_queue *bfqq,
 		     void *io_struct, bool request, struct bfq_io_cq *bic)
 {
 	struct bfq_queue *in_service_bfqq, *new_bfqq;
 	unsigned int a_idx = bfqq->actuator_idx;
+	// NVMe 다중 actuator: 독립 접근 영역에 따라 request를 분리하며, 각 actuator는 별도 SQ/CQ 또는 namespace 병렬 경로로 dispatch(추정)
 	struct bfq_iocq_bfqq_data *bfqq_data = &bic->bfqq_data[a_idx];
 
 	/* if a merge has already been setup, then proceed with that first */
 	new_bfqq = bfqq->new_bfqq;
 	if (new_bfqq) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		while (new_bfqq->new_bfqq)
 			new_bfqq = new_bfqq->new_bfqq;
 		return new_bfqq;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 	}
 
 	/*
@@ -2923,6 +3262,7 @@ bfq_setup_cooperator(struct bfq_data *bfqd, struct bfq_queue *bfqq,
 	 * costly and complicated.
 	 */
 	if (unlikely(!bfqd->nonrot_with_queueing)) {
+	// NVMe 장치 특성: NVMe SSD는 nonrot_with_queueing=true로 merge 대신 NCQ reordering과 idling 정책을 적용하며, hw_tag는 controller queueing 능력 표시
 		/*
 		 * Make sure also that bfqq is sync, because
 		 * bic->stable_merge_bfqq may point to some queue (for
@@ -2983,6 +3323,7 @@ bfq_setup_cooperator(struct bfq_data *bfqd, struct bfq_queue *bfqq,
 	 */
 	if (likely(bfqd->nonrot_with_queueing))
 		return NULL;
+		// NVMe 에러 반환: 할당/초기화 실패 시 NVMe 상위 경로로 오류를 전파하며, 해당 request는 SQ로 전달되지 않음
 
 	/*
 	 * Prevent bfqq from being merged if it has been created too
@@ -2997,13 +3338,16 @@ bfq_setup_cooperator(struct bfq_data *bfqd, struct bfq_queue *bfqq,
 	 */
 	if (bfq_too_late_for_merging(bfqq))
 		return NULL;
+		// NVMe 에러 반환: 할당/초기화 실패 시 NVMe 상위 경로로 오류를 전파하며, 해당 request는 SQ로 전달되지 않음
 
 	if (!io_struct || unlikely(bfqq == &bfqd->oom_bfqq))
 		return NULL;
+		// NVMe 에러 반환: 할당/초기화 실패 시 NVMe 상위 경로로 오류를 전파하며, 해당 request는 SQ로 전달되지 않음
 
 	/* If there is only one backlogged queue, don't search. */
 	if (bfq_tot_busy_queues(bfqd) == 1)
 		return NULL;
+		// NVMe 에러 반환: 할당/초기화 실패 시 NVMe 상위 경로로 오류를 전파하며, 해당 request는 SQ로 전달되지 않음
 
 	in_service_bfqq = bfqd->in_service_queue;
 
@@ -3016,6 +3360,7 @@ bfq_setup_cooperator(struct bfq_data *bfqd, struct bfq_queue *bfqq,
 		new_bfqq = bfq_setup_merge(bfqq, in_service_bfqq);
 		if (new_bfqq)
 			return new_bfqq;
+			// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 	}
 	/*
 	 * Check whether there is a cooperator among currently scheduled
@@ -3028,14 +3373,17 @@ bfq_setup_cooperator(struct bfq_data *bfqd, struct bfq_queue *bfqq,
 	if (new_bfqq && likely(new_bfqq != &bfqd->oom_bfqq) &&
 	    bfq_may_be_close_cooperator(bfqq, new_bfqq))
 		return bfq_setup_merge(bfqq, new_bfqq);
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 
 	return NULL;
+	// NVMe 에러 반환: 할당/초기화 실패 시 NVMe 상위 경로로 오류를 전파하며, 해당 request는 SQ로 전달되지 않음
 }
 
 static void bfq_bfqq_save_state(struct bfq_queue *bfqq)
 {
 	struct bfq_io_cq *bic = bfqq->bic;
 	unsigned int a_idx = bfqq->actuator_idx;
+	// NVMe 다중 actuator: 독립 접근 영역에 따라 request를 분리하며, 각 actuator는 별도 SQ/CQ 또는 namespace 병렬 경로로 dispatch(추정)
 	struct bfq_iocq_bfqq_data *bfqq_data = &bic->bfqq_data[a_idx];
 
 	/*
@@ -3052,6 +3400,7 @@ static void bfq_bfqq_save_state(struct bfq_queue *bfqq)
 
 	bfqq_data->saved_weight = bfqq->entity.orig_weight;
 	bfqq_data->saved_ttime = bfqq->ttime;
+	// NVMe 워크로드 특성: seek/think time 추정으로 interactive/sequential을 판단하며, NVMe NCQ reordering 특성에 맞춰 budget/idling을 조정(추정)
 	bfqq_data->saved_has_short_ttime =
 		bfq_bfqq_has_short_ttime(bfqq);
 	bfqq_data->saved_IO_bound = bfq_bfqq_IO_bound(bfqq);
@@ -3080,14 +3429,18 @@ static void bfq_bfqq_save_state(struct bfq_queue *bfqq)
 			bfq_wr_duration(bfqq->bfqd);
 		bfqq_data->saved_last_wr_start_finish = jiffies;
 	} else {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		bfqq_data->saved_wr_coeff = bfqq->wr_coeff;
+		// NVMe 우선순위/가중치: weight-raising은 interactive/soft-rt request가 SQ로 먼저 dispatch되도록 하여 NVMe latency QoS를 향상시키며, CID 우선순위는 아님(추정)
 		bfqq_data->saved_wr_start_at_switch_to_srt =
 			bfqq->wr_start_at_switch_to_srt;
+			// NVMe 우선순위/가중치: weight-raising은 interactive/soft-rt request가 SQ로 먼저 dispatch되도록 하여 NVMe latency QoS를 향상시키며, CID 우선순위는 아님(추정)
 		bfqq_data->saved_service_from_wr =
 			bfqq->service_from_wr;
 		bfqq_data->saved_last_wr_start_finish =
 			bfqq->last_wr_start_finish;
 		bfqq_data->saved_wr_cur_max_time = bfqq->wr_cur_max_time;
+		// NVMe 우선순위/가중치: weight-raising은 interactive/soft-rt request가 SQ로 먼저 dispatch되도록 하여 NVMe latency QoS를 향상시키며, CID 우선순위는 아님(추정)
 	}
 }
 
@@ -3122,6 +3475,7 @@ void bfq_release_process_ref(struct bfq_data *bfqd, struct bfq_queue *bfqq)
 	bfq_reassign_last_bfqq(bfqq, NULL);
 
 	bfq_put_queue(bfqq);
+	// NVMe bfqq 반납: 참조 카운트가 0이면 bfqq를 해제하며, 남은 request는 완료/abort로 정리되어야 함
 }
 
 static struct bfq_queue *bfq_merge_bfqqs(struct bfq_data *bfqd,
@@ -3148,6 +3502,7 @@ static struct bfq_queue *bfq_merge_bfqqs(struct bfq_data *bfqd,
 	 */
 	if (bfqq->waker_bfqq && !new_bfqq->waker_bfqq &&
 	    bfqq->waker_bfqq != new_bfqq) {
+	    // NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		new_bfqq->waker_bfqq = bfqq->waker_bfqq;
 		new_bfqq->tentative_waker_bfqq = NULL;
 
@@ -3172,18 +3527,24 @@ static struct bfq_queue *bfq_merge_bfqqs(struct bfq_data *bfqd,
 	 * easy, thanks to the flag just_created.
 	 */
 	if (new_bfqq->wr_coeff == 1 && bfqq->wr_coeff > 1) {
+	// NVMe 우선순위/가중치: weight-raising은 interactive/soft-rt request가 SQ로 먼저 dispatch되도록 하여 NVMe latency QoS를 향상시키며, CID 우선순위는 아님(추정)
 		new_bfqq->wr_coeff = bfqq->wr_coeff;
+		// NVMe 우선순위/가중치: weight-raising은 interactive/soft-rt request가 SQ로 먼저 dispatch되도록 하여 NVMe latency QoS를 향상시키며, CID 우선순위는 아님(추정)
 		new_bfqq->wr_cur_max_time = bfqq->wr_cur_max_time;
+		// NVMe 우선순위/가중치: weight-raising은 interactive/soft-rt request가 SQ로 먼저 dispatch되도록 하여 NVMe latency QoS를 향상시키며, CID 우선순위는 아님(추정)
 		new_bfqq->last_wr_start_finish = bfqq->last_wr_start_finish;
 		new_bfqq->wr_start_at_switch_to_srt =
 			bfqq->wr_start_at_switch_to_srt;
+			// NVMe 우선순위/가중치: weight-raising은 interactive/soft-rt request가 SQ로 먼저 dispatch되도록 하여 NVMe latency QoS를 향상시키며, CID 우선순위는 아님(추정)
 		if (bfq_bfqq_busy(new_bfqq))
 			bfqd->wr_busy_queues++;
 		new_bfqq->entity.prio_changed = 1;
 	}
 
 	if (bfqq->wr_coeff > 1) { /* bfqq has given its wr to new_bfqq */
+	// NVMe 우선순위/가중치: weight-raising은 interactive/soft-rt request가 SQ로 먼저 dispatch되도록 하여 NVMe latency QoS를 향상시키며, CID 우선순위는 아님(추정)
 		bfqq->wr_coeff = 1;
+		// NVMe 우선순위/가중치: weight-raising은 interactive/soft-rt request가 SQ로 먼저 dispatch되도록 하여 NVMe latency QoS를 향상시키며, CID 우선순위는 아님(추정)
 		bfqq->entity.prio_changed = 1;
 		if (bfq_bfqq_busy(bfqq))
 			bfqd->wr_busy_queues--;
@@ -3196,7 +3557,9 @@ static struct bfq_queue *bfq_merge_bfqqs(struct bfq_data *bfqd,
 	 * Merge queues (that is, let bic redirect its requests to new_bfqq)
 	 */
 	bic_set_bfqq(bic, new_bfqq, true, bfqq->actuator_idx);
+	// NVMe 다중 actuator: 독립 접근 영역에 따라 request를 분리하며, 각 actuator는 별도 SQ/CQ 또는 namespace 병렬 경로로 dispatch(추정)
 	bfq_mark_bfqq_coop(new_bfqq);
+	// NVMe queue 병합/분할: cooperative IO를 한 bfqq로 모아 SQ depth를 관리하며, 과도한 분할은 CID fragmentation 초래(추정)
 	/*
 	 * new_bfqq now belongs to at least two bics (it is a shared queue):
 	 * set new_bfqq->bic to NULL. bfqq either:
@@ -3225,6 +3588,7 @@ static struct bfq_queue *bfq_merge_bfqqs(struct bfq_data *bfqd,
 	bfq_release_process_ref(bfqd, bfqq);
 
 	return new_bfqq;
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 }
 
 static bool bfq_allow_bio_merge(struct request_queue *q, struct request *rq,
@@ -3239,6 +3603,7 @@ static bool bfq_allow_bio_merge(struct request_queue *q, struct request *rq,
 	 */
 	if (is_sync && !rq_is_sync(rq))
 		return false;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 
 	/*
 	 * Lookup the bfqq that this bio will be queued with. Allow
@@ -3246,6 +3611,7 @@ static bool bfq_allow_bio_merge(struct request_queue *q, struct request *rq,
 	 */
 	if (!bfqq)
 		return false;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 
 	/*
 	 * We take advantage of this function to perform an early merge
@@ -3253,6 +3619,7 @@ static bool bfq_allow_bio_merge(struct request_queue *q, struct request *rq,
 	 */
 	new_bfqq = bfq_setup_cooperator(bfqd, bfqq, bio, false, bfqd->bio_bic);
 	if (new_bfqq) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		/*
 		 * bic still points to bfqq, then it has not yet been
 		 * redirected to some other bfq_queue, and a queue
@@ -3273,6 +3640,7 @@ static bool bfq_allow_bio_merge(struct request_queue *q, struct request *rq,
 	}
 
 	return bfqq == RQ_BFQQ(rq);
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 }
 
 /*
@@ -3290,6 +3658,7 @@ static void bfq_set_budget_timeout(struct bfq_data *bfqd,
 		timeout_coeff = 1;
 	else
 		timeout_coeff = bfqq->entity.weight / bfqq->entity.orig_weight;
+		// NVMe 우선순위/가중치: weight-raising은 interactive/soft-rt request가 SQ로 먼저 dispatch되도록 하여 NVMe latency QoS를 향상시키며, CID 우선순위는 아님(추정)
 
 	bfqd->last_budget_start = blk_time_get();
 
@@ -3301,6 +3670,7 @@ static void __bfq_set_in_service_queue(struct bfq_data *bfqd,
 				       struct bfq_queue *bfqq)
 {
 	if (bfqq) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		bfq_clear_bfqq_fifo_expire(bfqq);
 
 		bfqd->budgets_assigned = (bfqd->budgets_assigned * 7 + 256) / 8;
@@ -3345,6 +3715,7 @@ static void __bfq_set_in_service_queue(struct bfq_data *bfqd,
 		bfq_log_bfqq(bfqd, bfqq,
 			     "set_in_service_queue, cur-budget = %d",
 			     bfqq->entity.budget);
+			     // NVMe 예산 관리: budget은 한 bfqq가 NVMe SQ에 넣을 수 있는 sector 예산이며, queue depth와 throughput 공정성을 조율(추정)
 	}
 
 	bfqd->in_service_queue = bfqq;
@@ -3360,6 +3731,7 @@ static struct bfq_queue *bfq_set_in_service_queue(struct bfq_data *bfqd)
 
 	__bfq_set_in_service_queue(bfqd, bfqq);
 	return bfqq;
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 }
 
 static void bfq_arm_slice_timer(struct bfq_data *bfqd)
@@ -3420,6 +3792,7 @@ static unsigned long bfq_calc_max_budget(struct bfq_data *bfqd)
 static void update_thr_responsiveness_params(struct bfq_data *bfqd)
 {
 	if (bfqd->bfq_user_max_budget == 0) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		bfqd->bfq_max_budget =
 			bfq_calc_max_budget(bfqd);
 		bfq_log(bfqd, "new max_budget = %d", bfqd->bfq_max_budget);
@@ -3430,11 +3803,13 @@ static void bfq_reset_rate_computation(struct bfq_data *bfqd,
 				       struct request *rq)
 {
 	if (rq != NULL) { /* new rq dispatch now, reset accordingly */
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		bfqd->last_dispatch = bfqd->first_dispatch = blk_time_get_ns();
 		bfqd->peak_rate_samples = 1;
 		bfqd->sequential_samples = 0;
 		bfqd->tot_sectors_dispatched = bfqd->last_rq_max_size =
 			blk_rq_sectors(rq);
+			// NVMe 명령 크기: request의 sector/byte 수가 NVMe command CDW10-11 길이와 PRP 필요량을 결정(추정)
 	} else /* no new rq dispatched, just reset the number of samples */
 		bfqd->peak_rate_samples = 0; /* full re-init on next disp. */
 
@@ -3447,6 +3822,7 @@ static void bfq_reset_rate_computation(struct bfq_data *bfqd,
 static void bfq_update_rate_reset(struct bfq_data *bfqd, struct request *rq)
 {
 	u32 rate, weight, divisor;
+	// NVMe 우선순위/가중치: weight-raising은 interactive/soft-rt request가 SQ로 먼저 dispatch되도록 하여 NVMe latency QoS를 향상시키며, CID 우선순위는 아님(추정)
 
 	/*
 	 * For the convergence property to hold (see comments on
@@ -3459,6 +3835,7 @@ static void bfq_update_rate_reset(struct bfq_data *bfqd, struct request *rq)
 	if (bfqd->peak_rate_samples < BFQ_RATE_MIN_SAMPLES ||
 	    bfqd->delta_from_first < BFQ_RATE_MIN_INTERVAL)
 		goto reset_computation;
+		// NVMe 에러/드레인 분기: goto는 보통 unlock/out 경로로 연결되며, controller abort나 queue drain 시 request를 안전하게 반납(추정)
 
 	/*
 	 * If a new request completion has occurred after last
@@ -3476,6 +3853,7 @@ static void bfq_update_rate_reset(struct bfq_data *bfqd, struct request *rq)
 	 */
 	rate = div64_ul(bfqd->tot_sectors_dispatched<<BFQ_RATE_SHIFT,
 			div_u64(bfqd->delta_from_first, NSEC_PER_USEC));
+			// NVMe 성능 추정: peak_rate는 NVMe SSD의 최대 처리율(섹터/us)을 측정하며, budget 계산과 interactive latency 예측에 사용(추정)
 
 	/*
 	 * Peak rate not updated if:
@@ -3487,6 +3865,7 @@ static void bfq_update_rate_reset(struct bfq_data *bfqd, struct request *rq)
 	     rate <= bfqd->peak_rate) ||
 		rate > 20<<BFQ_RATE_SHIFT)
 		goto reset_computation;
+		// NVMe 에러/드레인 분기: goto는 보통 unlock/out 경로로 연결되며, controller abort나 queue drain 시 request를 안전하게 반납(추정)
 
 	/*
 	 * We have to update the peak rate, at last! To this purpose,
@@ -3512,6 +3891,7 @@ static void bfq_update_rate_reset(struct bfq_data *bfqd, struct request *rq)
 	 * incremented for the first sample.
 	 */
 	weight = (9 * bfqd->sequential_samples) / bfqd->peak_rate_samples;
+	// NVMe 우선순위/가중치: weight-raising은 interactive/soft-rt request가 SQ로 먼저 dispatch되도록 하여 NVMe latency QoS를 향상시키며, CID 우선순위는 아님(추정)
 
 	/*
 	 * Second step: further refine the weight as a function of the
@@ -3526,6 +3906,7 @@ static void bfq_update_rate_reset(struct bfq_data *bfqd, struct request *rq)
 	 * maximum weight.
 	 */
 	divisor = 10 - weight;
+	// NVMe 우선순위/가중치: weight-raising은 interactive/soft-rt request가 SQ로 먼저 dispatch되도록 하여 NVMe latency QoS를 향상시키며, CID 우선순위는 아님(추정)
 
 	/*
 	 * Finally, update peak rate:
@@ -3533,10 +3914,13 @@ static void bfq_update_rate_reset(struct bfq_data *bfqd, struct request *rq)
 	 * peak_rate = peak_rate * (divisor-1) / divisor  +  rate / divisor
 	 */
 	bfqd->peak_rate *= divisor-1;
+	// NVMe 성능 추정: peak_rate는 NVMe SSD의 최대 처리율(섹터/us)을 측정하며, budget 계산과 interactive latency 예측에 사용(추정)
 	bfqd->peak_rate /= divisor;
+	// NVMe 성능 추정: peak_rate는 NVMe SSD의 최대 처리율(섹터/us)을 측정하며, budget 계산과 interactive latency 예측에 사용(추정)
 	rate /= divisor; /* smoothing constant alpha = 1/divisor */
 
 	bfqd->peak_rate += rate;
+	// NVMe 성능 추정: peak_rate는 NVMe SSD의 최대 처리율(섹터/us)을 측정하며, budget 계산과 interactive latency 예측에 사용(추정)
 
 	/*
 	 * For a very slow device, bfqd->peak_rate can reach 0 (see
@@ -3546,6 +3930,7 @@ static void bfq_update_rate_reset(struct bfq_data *bfqd, struct request *rq)
 	 * divisor.
 	 */
 	bfqd->peak_rate = max_t(u32, 1, bfqd->peak_rate);
+	// NVMe 성능 추정: peak_rate는 NVMe SSD의 최대 처리율(섹터/us)을 측정하며, budget 계산과 interactive latency 예측에 사용(추정)
 
 	update_thr_responsiveness_params(bfqd);
 
@@ -3585,15 +3970,25 @@ reset_computation:
  * of the observed dispatch rate. The function assumes to be invoked
  * on every request dispatch.
  */
+/*
+ * bfq_update_peak_rate: dispatch 시점마다 샘플을 모아 NVMe 장치의
+ * 최대 처리율(peak_rate)을 추정한다.
+ * 호출 경로: bfq_dispatch_remove -> bfq_update_peak_rate
+ * NVMe 연결: NVMe SSD 의 실제 처리율은 SQ/CQ depth, doorbell 빈도,
+ *           내부 parallelism 에 좌우된다. 이 추정값은 budget 과
+ *           weight-raising 기간을 자동 조정하는 데 쓰인다.
+ */
 static void bfq_update_peak_rate(struct bfq_data *bfqd, struct request *rq)
 {
 	u64 now_ns = blk_time_get_ns();
 
 	if (bfqd->peak_rate_samples == 0) { /* first dispatch */
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		bfq_log(bfqd, "update_peak_rate: goto reset, samples %d",
 			bfqd->peak_rate_samples);
 		bfq_reset_rate_computation(bfqd, rq);
 		goto update_last_values; /* will add one sample */
+		// NVMe 에러/드레인 분기: goto는 보통 unlock/out 경로로 연결되며, controller abort나 queue drain 시 request를 안전하게 반납(추정)
 	}
 
 	/*
@@ -3611,6 +4006,7 @@ static void bfq_update_peak_rate(struct bfq_data *bfqd, struct request *rq)
 	if (now_ns - bfqd->last_dispatch > 100*NSEC_PER_MSEC &&
 	    bfqd->tot_rq_in_driver == 0)
 		goto update_rate_and_reset;
+		// NVMe 에러/드레인 분기: goto는 보통 unlock/out 경로로 연결되며, controller abort나 queue drain 시 request를 안전하게 반납(추정)
 
 	/* Update sampling information */
 	bfqd->peak_rate_samples++;
@@ -3621,24 +4017,30 @@ static void bfq_update_peak_rate(struct bfq_data *bfqd, struct request *rq)
 		bfqd->sequential_samples++;
 
 	bfqd->tot_sectors_dispatched += blk_rq_sectors(rq);
+	// NVMe 명령 크기: request의 sector/byte 수가 NVMe command CDW10-11 길이와 PRP 필요량을 결정(추정)
 
 	/* Reset max observed rq size every 32 dispatches */
 	if (likely(bfqd->peak_rate_samples % 32))
 		bfqd->last_rq_max_size =
 			max_t(u32, blk_rq_sectors(rq), bfqd->last_rq_max_size);
+			// NVMe 명령 크기: request의 sector/byte 수가 NVMe command CDW10-11 길이와 PRP 필요량을 결정(추정)
 	else
 		bfqd->last_rq_max_size = blk_rq_sectors(rq);
+		// NVMe 명령 크기: request의 sector/byte 수가 NVMe command CDW10-11 길이와 PRP 필요량을 결정(추정)
 
 	bfqd->delta_from_first = now_ns - bfqd->first_dispatch;
+	// NVMe 성능 추정: peak_rate는 NVMe SSD의 최대 처리율(섹터/us)을 측정하며, budget 계산과 interactive latency 예측에 사용(추정)
 
 	/* Target observation interval not yet reached, go on sampling */
 	if (bfqd->delta_from_first < BFQ_RATE_REF_INTERVAL)
 		goto update_last_values;
+		// NVMe 에러/드레인 분기: goto는 보통 unlock/out 경로로 연결되며, controller abort나 queue drain 시 request를 안전하게 반납(추정)
 
 update_rate_and_reset:
 	bfq_update_rate_reset(bfqd, rq);
 update_last_values:
 	bfqd->last_position = blk_rq_pos(rq) + blk_rq_sectors(rq);
+	// NVMe 명령 크기: request의 sector/byte 수가 NVMe command CDW10-11 길이와 PRP 필요량을 결정(추정)
 	if (RQ_BFQQ(rq) == bfqd->in_service_queue)
 		bfqd->in_serv_last_pos = bfqd->last_position;
 	bfqd->last_dispatch = now_ns;
@@ -3664,9 +4066,12 @@ static void bfq_dispatch_remove(struct request_queue *q, struct request *rq)
 	 * happens to be taken into account.
 	 */
 	bfqq->dispatched++;
+	// NVMe queue depth: in-flight/request 수가 NVMe SQ/CQ 엔트리 사용량과 budget을 제한하며, NCQ queue depth(32/64) 초과 시 dispatch 지연
 	bfq_update_peak_rate(q->elevator->elevator_data, rq);
+	// NVMe 성능 추정: peak_rate는 NVMe SSD의 최대 처리율(섹터/us)을 측정하며, budget 계산과 interactive latency 예측에 사용(추정)
 
 	bfq_remove_request(q, rq);
+	// NVMe request 제거: dispatch되거나 merge/abort로 인해 BFQ queue에서 request를 제거하며, SQ/CQ에서 제거된 것은 아님(완료 경로에서 처리)
 }
 
 /*
@@ -3870,6 +4275,15 @@ static void bfq_dispatch_remove(struct request_queue *q, struct request *rq)
  * avoid this series of events, the scenario is preventively declared
  * as asymmetric also if bfqq is the only busy queues
  */
+/*
+ * idling_needed_for_service_guarantees: 비대칭 가중치/그룹 구성에서
+ * 특정 bfqq 의 throughput share 를 보장하기 위해 idling 이 필요한지
+ * 판단한다.
+ * 호출 경로: bfq_better_to_idle -> idling_needed_for_service_guarantees
+ * NVMe 연결: NVMe controller 의 내부 reordering 이 작업 순서를 왜곡할
+ *           수 있으므로, 공정성이 중요할 때는 SQ 에 새 CID 를 밀어넣지
+ *           않고 잠시 대기한다.
+ */
 static bool idling_needed_for_service_guarantees(struct bfq_data *bfqd,
 						 struct bfq_queue *bfqq)
 {
@@ -3878,12 +4292,14 @@ static bool idling_needed_for_service_guarantees(struct bfq_data *bfqd,
 	/* No point in idling for bfqq if it won't get requests any longer */
 	if (unlikely(!bfqq_process_refs(bfqq)))
 		return false;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 
 	return (bfqq->wr_coeff > 1 &&
 		(bfqd->wr_busy_queues < tot_busy_queues ||
 		 bfqd->tot_rq_in_driver >= bfqq->dispatched + 4)) ||
 		bfq_asymmetric_scenario(bfqd, bfqq) ||
 		tot_busy_queues == 1;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 }
 
 static bool __bfq_bfqq_expire(struct bfq_data *bfqd, struct bfq_queue *bfqq,
@@ -3925,7 +4341,9 @@ static bool __bfq_bfqq_expire(struct bfq_data *bfqd, struct bfq_queue *bfqq,
 
 		bfq_del_bfqq_busy(bfqq, true);
 	} else {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		bfq_requeue_bfqq(bfqd, bfqq, true);
+		// NVMe 스케줄 결정: B-WF2Q+가 다음에 SQ로 전달할 bfqq/entity를 선정하며, 이 선정이 곧 NVMe CID 순서와 doorbell batch를 결정(추정)
 		/*
 		 * Resort priority tree of potential close cooperators.
 		 * See comments on bfq_pos_tree_add_move() for the unlikely().
@@ -3943,6 +4361,7 @@ static bool __bfq_bfqq_expire(struct bfq_data *bfqd, struct bfq_queue *bfqq,
 	 * function returns true.
 	 */
 	return __bfq_bfqd_reset_in_service(bfqd);
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 }
 
 /**
@@ -3954,17 +4373,29 @@ static bool __bfq_bfqq_expire(struct bfq_data *bfqd, struct bfq_queue *bfqq,
  * Handle the feedback on @bfqq budget at queue expiration.
  * See the body for detailed comments.
  */
+/*
+ * __bfq_bfqq_recalc_budget: 만료 원인에 따라 다음 budget 크기를 조정한다.
+ * sequential/IO-bound queue 에는 budget 을 키우고, seeky/time-out
+ * queue 에는 줄인다.
+ * 호출 경로: bfq_bfqq_expire -> __bfq_bfqq_recalc_budget
+ * NVMe 연결: NVMe SSD 의 parallelism 을 활용할 수 있는 큰 sequential
+ *           요청 묶음은 budget 을 늘려 SQ 를 효과적으로 채운다.
+ */
 static void __bfq_bfqq_recalc_budget(struct bfq_data *bfqd,
 				     struct bfq_queue *bfqq,
 				     enum bfqq_expiration reason)
 {
 	struct request *next_rq;
+	// NVMe 다음 명령: next_rq는 doorbell 발행 직전 SQ에 삽입될 후보 request이며, LBA 순서와 controller reordering을 고려
 	int budget, min_budget;
+	// NVMe 예산 관리: budget은 한 bfqq가 NVMe SQ에 넣을 수 있는 sector 예산이며, queue depth와 throughput 공정성을 조율(추정)
 
 	min_budget = bfq_min_budget(bfqd);
+	// NVMe 예산 관리: budget은 한 bfqq가 NVMe SQ에 넣을 수 있는 sector 예산이며, queue depth와 throughput 공정성을 조율(추정)
 
 	if (bfqq->wr_coeff == 1)
 		budget = bfqq->max_budget;
+		// NVMe queue depth: in-flight/request 수가 NVMe SQ/CQ 엔트리 사용량과 budget을 제한하며, NCQ queue depth(32/64) 초과 시 dispatch 지연
 	else /*
 	      * Use a constant, low budget for weight-raised queues,
 	      * to help achieve a low latency. Keep it slightly higher
@@ -3972,15 +4403,19 @@ static void __bfq_bfqq_recalc_budget(struct bfq_data *bfqd,
 	      * bit fewer expirations.
 	      */
 		budget = 2 * min_budget;
+		// NVMe 예산 관리: budget은 한 bfqq가 NVMe SQ에 넣을 수 있는 sector 예산이며, queue depth와 throughput 공정성을 조율(추정)
 
 	bfq_log_bfqq(bfqd, bfqq, "recalc_budg: last budg %d, budg left %d",
 		bfqq->entity.budget, bfq_bfqq_budget_left(bfqq));
+		// NVMe 예산 관리: budget은 한 bfqq가 NVMe SQ에 넣을 수 있는 sector 예산이며, queue depth와 throughput 공정성을 조율(추정)
 	bfq_log_bfqq(bfqd, bfqq, "recalc_budg: last max_budg %d, min budg %d",
 		budget, bfq_min_budget(bfqd));
+		// NVMe 예산 관리: budget은 한 bfqq가 NVMe SQ에 넣을 수 있는 sector 예산이며, queue depth와 throughput 공정성을 조율(추정)
 	bfq_log_bfqq(bfqd, bfqq, "recalc_budg: sync %d, seeky %d",
 		bfq_bfqq_sync(bfqq), BFQQ_SEEKY(bfqd->in_service_queue));
 
 	if (bfq_bfqq_sync(bfqq) && bfqq->wr_coeff == 1) {
+	// NVMe 우선순위/가중치: weight-raising은 interactive/soft-rt request가 SQ로 먼저 dispatch되도록 하여 NVMe latency QoS를 향상시키며, CID 우선순위는 아님(추정)
 		switch (reason) {
 		/*
 		 * Caveat: in all the following cases we trade latency
@@ -4013,11 +4448,15 @@ static void __bfq_bfqq_recalc_budget(struct bfq_data *bfqd,
 			 */
 			if (bfqq->dispatched > 0) /* still outstanding reqs */
 				budget = min(budget * 2, bfqd->bfq_max_budget);
+				// NVMe 예산 관리: budget은 한 bfqq가 NVMe SQ에 넣을 수 있는 sector 예산이며, queue depth와 throughput 공정성을 조율(추정)
 			else {
+			// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 				if (budget > 5 * min_budget)
 					budget -= 4 * min_budget;
+					// NVMe 예산 관리: budget은 한 bfqq가 NVMe SQ에 넣을 수 있는 sector 예산이며, queue depth와 throughput 공정성을 조율(추정)
 				else
 					budget = min_budget;
+					// NVMe 예산 관리: budget은 한 bfqq가 NVMe SQ에 넣을 수 있는 sector 예산이며, queue depth와 throughput 공정성을 조율(추정)
 			}
 			break;
 		case BFQQE_BUDGET_TIMEOUT:
@@ -4028,6 +4467,7 @@ static void __bfq_bfqq_recalc_budget(struct bfq_data *bfqd,
 			 * this timeout because of, e.g., ZBR).
 			 */
 			budget = min(budget * 2, bfqd->bfq_max_budget);
+			// NVMe 예산 관리: budget은 한 bfqq가 NVMe SQ에 넣을 수 있는 sector 예산이며, queue depth와 throughput 공정성을 조율(추정)
 			break;
 		case BFQQE_BUDGET_EXHAUSTED:
 			/*
@@ -4040,6 +4480,7 @@ static void __bfq_bfqq_recalc_budget(struct bfq_data *bfqd,
 			 * candidate to boost the disk throughput.
 			 */
 			budget = min(budget * 4, bfqd->bfq_max_budget);
+			// NVMe 예산 관리: budget은 한 bfqq가 NVMe SQ에 넣을 수 있는 sector 예산이며, queue depth와 throughput 공정성을 조율(추정)
 			break;
 		case BFQQE_NO_MORE_REQUESTS:
 			/*
@@ -4075,11 +4516,13 @@ static void __bfq_bfqq_recalc_budget(struct bfq_data *bfqd,
 			 * other reasons.
 			 */
 			budget = max_t(int, bfqq->entity.service, min_budget);
+			// NVMe 예산 관리: budget은 한 bfqq가 NVMe SQ에 넣을 수 있는 sector 예산이며, queue depth와 throughput 공정성을 조율(추정)
 			break;
 		default:
 			return;
 		}
 	} else if (!bfq_bfqq_sync(bfqq)) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		/*
 		 * Async queues get always the maximum possible
 		 * budget, as for them we do not care about latency
@@ -4087,13 +4530,16 @@ static void __bfq_bfqq_recalc_budget(struct bfq_data *bfqd,
 		 * by the charging factor).
 		 */
 		budget = bfqd->bfq_max_budget;
+		// NVMe 예산 관리: budget은 한 bfqq가 NVMe SQ에 넣을 수 있는 sector 예산이며, queue depth와 throughput 공정성을 조율(추정)
 	}
 
 	bfqq->max_budget = budget;
+	// NVMe queue depth: in-flight/request 수가 NVMe SQ/CQ 엔트리 사용량과 budget을 제한하며, NCQ queue depth(32/64) 초과 시 dispatch 지연
 
 	if (bfqd->budgets_assigned >= bfq_stats_min_budgets &&
 	    !bfqd->bfq_user_max_budget)
 		bfqq->max_budget = min(bfqq->max_budget, bfqd->bfq_max_budget);
+		// NVMe queue depth: in-flight/request 수가 NVMe SQ/CQ 엔트리 사용량과 budget을 제한하며, NCQ queue depth(32/64) 초과 시 dispatch 지연
 
 	/*
 	 * If there is still backlog, then assign a new budget, making
@@ -4106,13 +4552,16 @@ static void __bfq_bfqq_recalc_budget(struct bfq_data *bfqd,
 	 * it will be updated on the arrival of a new request.
 	 */
 	next_rq = bfqq->next_rq;
+	// NVMe 다음 명령: next_rq는 doorbell 발행 직전 SQ에 삽입될 후보 request이며, LBA 순서와 controller reordering을 고려
 	if (next_rq)
 		bfqq->entity.budget = max_t(unsigned long, bfqq->max_budget,
 					    bfq_serv_to_charge(next_rq, bfqq));
+					    // NVMe 다음 명령: next_rq는 doorbell 발행 직전 SQ에 삽입될 후보 request이며, LBA 순서와 controller reordering을 고려
 
 	bfq_log_bfqq(bfqd, bfqq, "head sect: %u, new budget %d",
 			next_rq ? blk_rq_sectors(next_rq) : 0,
 			bfqq->entity.budget);
+			// NVMe 예산 관리: budget은 한 bfqq가 NVMe SQ에 넣을 수 있는 sector 예산이며, queue depth와 throughput 공정성을 조율(추정)
 }
 
 /*
@@ -4155,6 +4604,7 @@ static bool bfq_bfqq_is_slow(struct bfq_data *bfqd, struct bfq_queue *bfqq,
 
 	if (!bfq_bfqq_sync(bfqq))
 		return false;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 
 	if (compensate)
 		delta_ktime = bfqd->last_idling_start;
@@ -4165,6 +4615,7 @@ static bool bfq_bfqq_is_slow(struct bfq_data *bfqd, struct bfq_queue *bfqq,
 
 	/* don't use too short time intervals */
 	if (delta_usecs < 1000) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		if (!blk_queue_rot(bfqd->queue))
 			 /*
 			  * give same worst-case guarantees as idling
@@ -4175,6 +4626,7 @@ static bool bfq_bfqq_is_slow(struct bfq_data *bfqd, struct bfq_queue *bfqq,
 			*delta_ms = bfq_slice_idle / NSEC_PER_MSEC;
 
 		return slow;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 	}
 
 	*delta_ms = delta_usecs / USEC_PER_MSEC;
@@ -4184,6 +4636,7 @@ static bool bfq_bfqq_is_slow(struct bfq_data *bfqd, struct bfq_queue *bfqq,
 	 * spikes in service rate estimation.
 	 */
 	if (delta_usecs > 20000) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		/*
 		 * Caveat for rotational devices: processes doing I/O
 		 * in the slower disk zones tend to be slow(er) even
@@ -4195,11 +4648,13 @@ static bool bfq_bfqq_is_slow(struct bfq_data *bfqd, struct bfq_queue *bfqq,
 		 * peak rate.
 		 */
 		slow = bfqq->entity.service < bfqd->bfq_max_budget / 2;
+		// NVMe 예산 관리: budget은 한 bfqq가 NVMe SQ에 넣을 수 있는 sector 예산이며, queue depth와 throughput 공정성을 조율(추정)
 	}
 
 	bfq_log_bfqq(bfqd, bfqq, "bfq_bfqq_is_slow: slow %d", slow);
 
 	return slow;
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 }
 
 /*
@@ -4331,6 +4786,14 @@ static unsigned long bfq_bfqq_softrt_next_start(struct bfq_data *bfqd,
  * former on a timeslice basis, without violating service domain
  * guarantees among the latter.
  */
+/*
+ * bfq_bfqq_expire: in-service bfqq 의 서비스를 종료하고 budget/weight
+ * 갱신, soft-rt 판정, 만료 이유를 기록한다.
+ * 호출 경로: bfq_select_queue/bfq_completed_request/bfq_dispatch_rq_from_bfqq
+ *          -> bfq_bfqq_expire
+ * NVMe 연결: controller 에 이미 날려간 request 들은 중단할 수 없으므로,
+ *           만료는 다음 CID 묶음의 우선순위를 재설정하는 효과가 있다.
+ */
 void bfq_bfqq_expire(struct bfq_data *bfqd,
 		     struct bfq_queue *bfqq,
 		     bool compensate,
@@ -4387,6 +4850,7 @@ void bfq_bfqq_expire(struct bfq_data *bfqd,
 			bfqq->soft_rt_next_start =
 				bfq_bfqq_softrt_next_start(bfqd, bfqq);
 		else if (bfqq->dispatched > 0) {
+		// NVMe queue depth: in-flight/request 수가 NVMe SQ/CQ 엔트리 사용량과 budget을 제한하며, NCQ queue depth(32/64) 초과 시 dispatch 지연
 			/*
 			 * Schedule an update of soft_rt_next_start to when
 			 * the task may be discovered to be isochronous.
@@ -4398,6 +4862,7 @@ void bfq_bfqq_expire(struct bfq_data *bfqd,
 	bfq_log_bfqq(bfqd, bfqq,
 		"expire (%d, slow %d, num_disp %d, short_ttime %d)", reason,
 		slow, bfqq->dispatched, bfq_bfqq_has_short_ttime(bfqq));
+		// NVMe queue depth: in-flight/request 수가 NVMe SQ/CQ 엔트리 사용량과 budget을 제한하며, NCQ queue depth(32/64) 초과 시 dispatch 지연
 
 	/*
 	 * bfqq expired, so no total service time needs to be computed
@@ -4420,6 +4885,7 @@ void bfq_bfqq_expire(struct bfq_data *bfqd,
 	if (!bfq_bfqq_busy(bfqq) &&
 	    reason != BFQQE_BUDGET_TIMEOUT &&
 	    reason != BFQQE_BUDGET_EXHAUSTED) {
+	    // NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		bfq_mark_bfqq_non_blocking_wait_rq(bfqq);
 		/*
 		 * Not setting service to 0, because, if the next rq
@@ -4428,6 +4894,7 @@ void bfq_bfqq_expire(struct bfq_data *bfqd,
 		 */
 	} else
 		entity->service = 0;
+		// NVMe 스케줄 결정: B-WF2Q+가 다음에 SQ로 전달할 bfqq/entity를 선정하며, 이 선정이 곧 NVMe CID 순서와 doorbell batch를 결정(추정)
 
 	/*
 	 * Reset the received-service counter for every parent entity.
@@ -4447,8 +4914,10 @@ void bfq_bfqq_expire(struct bfq_data *bfqd,
 	 * service with the same budget.
 	 */
 	entity = entity->parent;
+	// NVMe 스케줄 결정: B-WF2Q+가 다음에 SQ로 전달할 bfqq/entity를 선정하며, 이 선정이 곧 NVMe CID 순서와 doorbell batch를 결정(추정)
 	for_each_entity(entity)
 		entity->service = 0;
+		// NVMe 스케줄 결정: B-WF2Q+가 다음에 SQ로 전달할 bfqq/entity를 선정하며, 이 선정이 곧 NVMe CID 순서와 doorbell batch를 결정(추정)
 }
 
 /*
@@ -4459,6 +4928,7 @@ void bfq_bfqq_expire(struct bfq_data *bfqd,
 static bool bfq_bfqq_budget_timeout(struct bfq_queue *bfqq)
 {
 	return time_is_before_eq_jiffies(bfqq->budget_timeout);
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 }
 
 /*
@@ -4494,9 +4964,11 @@ static bool idling_boosts_thr_without_issues(struct bfq_data *bfqd,
 	/* No point in idling for bfqq if it won't get requests any longer */
 	if (unlikely(!bfqq_process_refs(bfqq)))
 		return false;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 
 	bfqq_sequential_and_IO_bound = !BFQQ_SEEKY(bfqq) &&
 		bfq_bfqq_IO_bound(bfqq) && bfq_bfqq_has_short_ttime(bfqq);
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 
 	/*
 	 * The next variable takes into account the cases where idling
@@ -4560,6 +5032,7 @@ static bool idling_boosts_thr_without_issues(struct bfq_data *bfqd,
 	 */
 	return idling_boosts_thr &&
 		bfqd->wr_busy_queues == 0;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 }
 
 /*
@@ -4583,6 +5056,14 @@ static bool idling_boosts_thr_without_issues(struct bfq_data *bfqd,
  * functions providing the main pieces of information needed by this
  * function.
  */
+/*
+ * bfq_better_to_idle: in-service bfqq 가 비어 있을 때 device 를
+ * idle 상태로 두는 것이 throughput/공정성에 이로운지 판단한다.
+ * 호출 경로: bfq_select_queue/bfq_completed_request -> bfq_better_to_idle
+ * NVMe 연결: NVMe SSD 는 nonrot_with_queueing=true 이므로 보통 idle 을
+ *           피해 SQ 를 계속 채우려 하지만, weight-raised/sync queue 의
+ *           latency 보장을 위해 예외적으로 idle 을 허용한다.
+ */
 static bool bfq_better_to_idle(struct bfq_queue *bfqq)
 {
 	struct bfq_data *bfqd = bfqq->bfqd;
@@ -4591,9 +5072,11 @@ static bool bfq_better_to_idle(struct bfq_queue *bfqq)
 	/* No point in idling for bfqq if it won't get requests any longer */
 	if (unlikely(!bfqq_process_refs(bfqq)))
 		return false;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 
 	if (unlikely(bfqd->strict_guarantees))
 		return true;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 
 	/*
 	 * Idling is performed only if slice_idle > 0. In addition, we
@@ -4606,6 +5089,7 @@ static bool bfq_better_to_idle(struct bfq_queue *bfqq)
 	if (bfqd->bfq_slice_idle == 0 || !bfq_bfqq_sync(bfqq) ||
 	   bfq_class_idle(bfqq))
 		return false;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 
 	idling_boosts_thr_with_no_issue =
 		idling_boosts_thr_without_issues(bfqd, bfqq);
@@ -4637,6 +5121,7 @@ static bool bfq_better_to_idle(struct bfq_queue *bfqq)
 static bool bfq_bfqq_must_idle(struct bfq_queue *bfqq)
 {
 	return RB_EMPTY_ROOT(&bfqq->sort_list) && bfq_better_to_idle(bfqq);
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 }
 
 /*
@@ -4647,6 +5132,14 @@ static bool bfq_bfqq_must_idle(struct bfq_queue *bfqq)
  * below.
  */
 static struct bfq_queue *
+/*
+ * bfq_choose_bfqq_for_injection: in-service bfqq 가 비어 있을 때,
+ * 다른 bfqq 에서 몇 개의 request 를 끼워 넣을지(inject) 결정한다.
+ * 호출 경로: bfq_select_queue -> bfq_choose_bfqq_for_injection
+ * NVMe 연결: NVMe NCQ(최대 32 depth)를 채워 service hole 을 메우며
+ *           throughput 을 높인다. inject_limit 은 NVMe SQ 슬롯을
+ *           과도하게 점유하지 않도록 제한한다.
+ */
 bfq_choose_bfqq_for_injection(struct bfq_data *bfqd)
 {
 	struct bfq_queue *bfqq, *in_serv_bfqq = bfqd->in_service_queue;
@@ -4686,6 +5179,7 @@ bfq_choose_bfqq_for_injection(struct bfq_data *bfqd)
 
 	if (bfqd->tot_rq_in_driver >= limit)
 		return NULL;
+		// NVMe 에러 반환: 할당/초기화 실패 시 NVMe 상위 경로로 오류를 전파하며, 해당 request는 SQ로 전달되지 않음
 
 	/*
 	 * Linear search of the source queue for injection; but, with
@@ -4700,6 +5194,7 @@ bfq_choose_bfqq_for_injection(struct bfq_data *bfqd)
 	 *   is assigned again enough budget for its new backlog).
 	 */
 	for (i = 0; i < bfqd->num_actuators; i++) {
+	// NVMe 반복 처리: request/tag/bio/bvec/SQ/CQ 엔트리를 순회하며 CID 할당, PRP/SGL 조립, completion 상태를 누적한다(추정) -> blk-mq tag/hctx/CQ
 		list_for_each_entry(bfqq, &bfqd->active_list[i], bfqq_list)
 			if (!RB_EMPTY_ROOT(&bfqq->sort_list) &&
 				(in_serv_always_inject || bfqq->wr_coeff > 1) &&
@@ -4728,13 +5223,16 @@ bfq_choose_bfqq_for_injection(struct bfq_data *bfqd)
 			    bfqd->tot_rq_in_driver >= 1)
 				continue;
 			else {
+			// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 				bfqd->rqs_injected = true;
 				return bfqq;
+				// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 			}
 		}
 	}
 
 	return NULL;
+	// NVMe 에러 반환: 할당/초기화 실패 시 NVMe 상위 경로로 오류를 전파하며, 해당 request는 SQ로 전달되지 않음
 }
 
 static struct bfq_queue *
@@ -4745,16 +5243,20 @@ bfq_find_active_bfqq_for_actuator(struct bfq_data *bfqd, int idx)
 	if (bfqd->in_service_queue &&
 	    bfqd->in_service_queue->actuator_idx == idx)
 		return bfqd->in_service_queue;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 
 	list_for_each_entry(bfqq, &bfqd->active_list[idx], bfqq_list) {
+	// NVMe 반복 처리: request/tag/bio/bvec/SQ/CQ 엔트리를 순회하며 CID 할당, PRP/SGL 조립, completion 상태를 누적한다(추정) -> blk-mq tag/hctx/CQ
 		if (!RB_EMPTY_ROOT(&bfqq->sort_list) &&
 			bfq_serv_to_charge(bfqq->next_rq, bfqq) <=
 				bfq_bfqq_budget_left(bfqq)) {
 			return bfqq;
+			// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		}
 	}
 
 	return NULL;
+	// NVMe 에러 반환: 할당/초기화 실패 시 NVMe 상위 경로로 오류를 전파하며, 해당 request는 SQ로 전달되지 않음
 }
 
 /*
@@ -4771,23 +5273,35 @@ bfq_find_active_bfqq_for_actuator(struct bfq_data *bfqd, int idx)
  * tends to distribute injection uniformly across actuators.
  */
 static struct bfq_queue *
+/*
+ * bfq_find_bfqq_for_underused_actuator: 특정 actuator 의 부하가
+ * actuator_load_threshold 보다 낮을 때 해당 actuator 로 보낼 수 있는
+ * 다른 bfqq 를 찾는다.
+ * 호출 경로: bfq_select_queue -> bfq_find_bfqq_for_underused_actuator
+ * NVMe 연결: 다중 actuator NVMe 장치에서 한산한 actuator 의 SQ/CQ 를
+ *           활용해 병렬 throughput 을 극대화한다(추정).
+ */
 bfq_find_bfqq_for_underused_actuator(struct bfq_data *bfqd)
 {
 	int i;
 
 	for (i = 0 ; i < bfqd->num_actuators; i++) {
+	// NVMe 반복 처리: request/tag/bio/bvec/SQ/CQ 엔트리를 순회하며 CID 할당, PRP/SGL 조립, completion 상태를 누적한다(추정) -> blk-mq tag/hctx/CQ
 		if (bfqd->rq_in_driver[i] < bfqd->actuator_load_threshold &&
 		    (i == bfqd->num_actuators - 1 ||
 		     bfqd->rq_in_driver[i] < bfqd->rq_in_driver[i+1])) {
+		     // NVMe queue depth: in-flight/request 수가 NVMe SQ/CQ 엔트리 사용량과 budget을 제한하며, NCQ queue depth(32/64) 초과 시 dispatch 지연
 			struct bfq_queue *bfqq =
 				bfq_find_active_bfqq_for_actuator(bfqd, i);
 
 			if (bfqq)
 				return bfqq;
+				// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		}
 	}
 
 	return NULL;
+	// NVMe 에러 반환: 할당/초기화 실패 시 NVMe 상위 경로로 오류를 전파하며, 해당 request는 SQ로 전달되지 않음
 }
 
 
@@ -4795,15 +5309,25 @@ bfq_find_bfqq_for_underused_actuator(struct bfq_data *bfqd)
  * Select a queue for service.  If we have a current queue in service,
  * check whether to continue servicing it, or retrieve and set a new one.
  */
+/*
+ * bfq_select_queue: 다음에 서비스할 bfqq 를 선정한다. budget 소진,
+ * idle, injection, actuator 부하 균형을 종합적으로 판단한다.
+ * 호출 경로: __bfq_dispatch_request -> bfq_select_queue
+ * NVMe 연결: NVMe SQ 에 들어갈 다음 CID 를 만들 request 를 고르는
+ *           행위와 직결되며, injection 은 controller 의 queue depth 를
+ *           적극 활용하면서도 latency 를 보장하려는 핵심 메커니즘이다.
+ */
 static struct bfq_queue *bfq_select_queue(struct bfq_data *bfqd)
 {
 	struct bfq_queue *bfqq, *inject_bfqq;
 	struct request *next_rq;
+	// NVMe 다음 명령: next_rq는 doorbell 발행 직전 SQ에 삽입될 후보 request이며, LBA 순서와 controller reordering을 고려
 	enum bfqq_expiration reason = BFQQE_BUDGET_TIMEOUT;
 
 	bfqq = bfqd->in_service_queue;
 	if (!bfqq)
 		goto new_queue;
+		// NVMe 에러/드레인 분기: goto는 보통 unlock/out 경로로 연결되며, controller abort나 queue drain 시 request를 안전하게 반납(추정)
 
 	bfq_log_bfqq(bfqd, bfqq, "select_queue: already in-service queue");
 
@@ -4817,6 +5341,7 @@ static struct bfq_queue *bfq_select_queue(struct bfq_data *bfqd)
 	if (bfq_may_expire_for_budg_timeout(bfqq) &&
 	    !bfq_bfqq_must_idle(bfqq))
 		goto expire;
+		// NVMe 에러/드레인 분기: goto는 보통 unlock/out 경로로 연결되며, controller abort나 queue drain 시 request를 안전하게 반납(추정)
 
 check_queue:
 	/*
@@ -4827,6 +5352,7 @@ check_queue:
 	inject_bfqq = bfq_find_bfqq_for_underused_actuator(bfqd);
 	if (inject_bfqq && inject_bfqq != bfqq)
 		return inject_bfqq;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 
 	/*
 	 * This loop is rarely executed more than once. Even when it
@@ -4835,11 +5361,13 @@ check_queue:
 	 * request served.
 	 */
 	next_rq = bfqq->next_rq;
+	// NVMe 다음 명령: next_rq는 doorbell 발행 직전 SQ에 삽입될 후보 request이며, LBA 순서와 controller reordering을 고려
 	/*
 	 * If bfqq has requests queued and it has enough budget left to
 	 * serve them, keep the queue, otherwise expire it.
 	 */
 	if (next_rq) {
+	// NVMe 다음 명령: next_rq는 doorbell 발행 직전 SQ에 삽입될 후보 request이며, LBA 순서와 controller reordering을 고려
 		if (bfq_serv_to_charge(next_rq, bfqq) >
 			bfq_bfqq_budget_left(bfqq)) {
 			/*
@@ -4850,13 +5378,16 @@ check_queue:
 			 */
 			reason = BFQQE_BUDGET_EXHAUSTED;
 			goto expire;
+			// NVMe 에러/드레인 분기: goto는 보통 unlock/out 경로로 연결되며, controller abort나 queue drain 시 request를 안전하게 반납(추정)
 		} else {
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 			/*
 			 * The idle timer may be pending because we may
 			 * not disable disk idling even when a new request
 			 * arrives.
 			 */
 			if (bfq_bfqq_wait_request(bfqq)) {
+			// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 				/*
 				 * If we get here: 1) at least a new request
 				 * has arrived but we have not disabled the
@@ -4872,8 +5403,10 @@ check_queue:
 				 */
 				bfq_clear_bfqq_wait_request(bfqq);
 				hrtimer_try_to_cancel(&bfqd->idle_slice_timer);
+				// NVMe idling/doorbell 타이밍: slice 타이머로 다음 request 도착을 기다려 batch를 키우며, NVMe SQ doorbell 빈도와 throughput/latency 트레이드오프(추정)
 			}
 			goto keep_queue;
+			// NVMe 에러/드레인 분기: goto는 보통 unlock/out 경로로 연결되며, controller abort나 queue drain 시 request를 안전하게 반납(추정)
 		}
 	}
 
@@ -4887,7 +5420,9 @@ check_queue:
 	 */
 	if (bfq_bfqq_wait_request(bfqq) ||
 	    (bfqq->dispatched != 0 && bfq_better_to_idle(bfqq))) {
+	    // NVMe queue depth: in-flight/request 수가 NVMe SQ/CQ 엔트리 사용량과 budget을 제한하며, NCQ queue depth(32/64) 초과 시 dispatch 지연
 		unsigned int act_idx = bfqq->actuator_idx;
+		// NVMe 다중 actuator: 독립 접근 영역에 따라 request를 분리하며, 각 actuator는 별도 SQ/CQ 또는 namespace 병렬 경로로 dispatch(추정)
 		struct bfq_queue *async_bfqq = NULL;
 		struct bfq_queue *blocked_bfqq =
 			!hlist_empty(&bfqq->woken_list) ?
@@ -5009,16 +5544,21 @@ check_queue:
 			bfqq = NULL;
 
 		goto keep_queue;
+		// NVMe 에러/드레인 분기: goto는 보통 unlock/out 경로로 연결되며, controller abort나 queue drain 시 request를 안전하게 반납(추정)
 	}
 
 	reason = BFQQE_NO_MORE_REQUESTS;
 expire:
 	bfq_bfqq_expire(bfqd, bfqq, false, reason);
+	// NVMe 스케줄 결정: B-WF2Q+가 다음에 SQ로 전달할 bfqq/entity를 선정하며, 이 선정이 곧 NVMe CID 순서와 doorbell batch를 결정(추정)
 new_queue:
 	bfqq = bfq_set_in_service_queue(bfqd);
+	// NVMe 스케줄 결정: B-WF2Q+가 다음에 SQ로 전달할 bfqq/entity를 선정하며, 이 선정이 곧 NVMe CID 순서와 doorbell batch를 결정(추정)
 	if (bfqq) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		bfq_log_bfqq(bfqd, bfqq, "select_queue: checking new queue");
 		goto check_queue;
+		// NVMe 에러/드레인 분기: goto는 보통 unlock/out 경로로 연결되며, controller abort나 queue drain 시 request를 안전하게 반납(추정)
 	}
 keep_queue:
 	if (bfqq)
@@ -5027,6 +5567,7 @@ keep_queue:
 		bfq_log(bfqd, "select_queue: no queue returned");
 
 	return bfqq;
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 }
 
 static void bfq_update_wr_data(struct bfq_data *bfqd, struct bfq_queue *bfqq)
@@ -5034,12 +5575,14 @@ static void bfq_update_wr_data(struct bfq_data *bfqd, struct bfq_queue *bfqq)
 	struct bfq_entity *entity = &bfqq->entity;
 
 	if (bfqq->wr_coeff > 1) { /* queue is being weight-raised */
+	// NVMe 우선순위/가중치: weight-raising은 interactive/soft-rt request가 SQ로 먼저 dispatch되도록 하여 NVMe latency QoS를 향상시키며, CID 우선순위는 아님(추정)
 		bfq_log_bfqq(bfqd, bfqq,
 			"raising period dur %u/%u msec, old coeff %u, w %d(%d)",
 			jiffies_to_msecs(jiffies - bfqq->last_wr_start_finish),
 			jiffies_to_msecs(bfqq->wr_cur_max_time),
 			bfqq->wr_coeff,
 			bfqq->entity.weight, bfqq->entity.orig_weight);
+			// NVMe 우선순위/가중치: weight-raising은 interactive/soft-rt request가 SQ로 먼저 dispatch되도록 하여 NVMe latency QoS를 향상시키며, CID 우선순위는 아님(추정)
 
 		if (entity->prio_changed)
 			bfq_log_bfqq(bfqd, bfqq, "WARN: pending prio change");
@@ -5053,6 +5596,7 @@ static void bfq_update_wr_data(struct bfq_data *bfqd, struct bfq_queue *bfqq)
 			bfq_bfqq_end_wr(bfqq);
 		else if (time_is_before_jiffies(bfqq->last_wr_start_finish +
 						bfqq->wr_cur_max_time)) {
+						// NVMe 우선순위/가중치: weight-raising은 interactive/soft-rt request가 SQ로 먼저 dispatch되도록 하여 NVMe latency QoS를 향상시키며, CID 우선순위는 아님(추정)
 			if (bfqq->wr_cur_max_time != bfqd->bfq_wr_rt_max_time ||
 			time_is_before_jiffies(bfqq->wr_start_at_switch_to_srt +
 					       bfq_wr_duration(bfqd))) {
@@ -5097,10 +5641,19 @@ static void bfq_update_wr_data(struct bfq_data *bfqd, struct bfq_queue *bfqq)
 /*
  * Dispatch next request from bfqq.
  */
+/*
+ * bfq_dispatch_rq_from_bfqq: 선택된 bfqq 의 next_rq 를 꺼내 서비스에
+ * 따른 budget/weight-raising 갱신을 수행한다.
+ * 호출 경로: __bfq_dispatch_request -> bfq_dispatch_rq_from_bfqq
+ * NVMe 연결: 이 request 가 곧 blk_mq_run_hw_queue 를 거쳐 NVMe
+ *           controller 의 SQ 에 CID 로 기록되며, doorbell 이 후에
+ *           울린다.
+ */
 static struct request *bfq_dispatch_rq_from_bfqq(struct bfq_data *bfqd,
 						 struct bfq_queue *bfqq)
 {
 	struct request *rq = bfqq->next_rq;
+	// NVMe 다음 명령: next_rq는 doorbell 발행 직전 SQ에 삽입될 후보 request이며, LBA 순서와 controller reordering을 고려
 	unsigned long service_to_charge;
 
 	service_to_charge = bfq_serv_to_charge(rq, bfqq);
@@ -5108,14 +5661,17 @@ static struct request *bfq_dispatch_rq_from_bfqq(struct bfq_data *bfqd,
 	bfq_bfqq_served(bfqq, service_to_charge);
 
 	if (bfqq == bfqd->in_service_queue && bfqd->wait_dispatch) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		bfqd->wait_dispatch = false;
 		bfqd->waited_rq = rq;
 	}
 
 	bfq_dispatch_remove(bfqd->queue, rq);
+	// NVMe dispatch 리스트 제거/삽입: BFQ에서 선택된 request를 blk-mq로 넘기거나 회수하며, 이 시점에서 CID/tag는 아직/이미 할당될 수 있음(추정)
 
 	if (bfqq != bfqd->in_service_queue)
 		return rq;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 
 	/*
 	 * If weight raising has to terminate for bfqq, then next
@@ -5137,13 +5693,23 @@ static struct request *bfq_dispatch_rq_from_bfqq(struct bfq_data *bfqd,
 	 */
 	if (bfq_tot_busy_queues(bfqd) > 1 && bfq_class_idle(bfqq))
 		bfq_bfqq_expire(bfqd, bfqq, false, BFQQE_BUDGET_EXHAUSTED);
+		// NVMe 스케줄 결정: B-WF2Q+가 다음에 SQ로 전달할 bfqq/entity를 선정하며, 이 선정이 곧 NVMe CID 순서와 doorbell batch를 결정(추정)
 
 	return rq;
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 }
 
+/*
+ * bfq_has_work: blk-mq 가 dispatch 할 작업이 있는지 확인하는 콜백.
+ * lock-less read 로 bfqd->queued 를 검사한다.
+ * 호출 경로: blk_mq_has_work -> elevator_ops.has_work(bfq_has_work)
+ * NVMe 연결: NVMe controller 가 CQ 를 비우고 나서 SQ 를 다시 채울
+ *           준비가 되었는지 빠르게 판단한다.
+ */
 static bool bfq_has_work(struct blk_mq_hw_ctx *hctx)
 {
 	struct bfq_data *bfqd = hctx->queue->elevator->elevator_data;
+	// NVMe SQ/CQ 선택: hctx는 NVMe controller의 한 개의 SQ/CQ 쌍에 대응하며, CPU/queue affinity에 따라 doorbell 대상이 결정(추정)
 
 	/*
 	 * Avoiding lock: a race on bfqd->queued should cause at
@@ -5153,20 +5719,31 @@ static bool bfq_has_work(struct blk_mq_hw_ctx *hctx)
 		READ_ONCE(bfqd->queued);
 }
 
+/*
+ * __bfq_dispatch_request: BFQ 의 핵심 dispatch 루틴. dispatch 리스트나
+ * bfqq 로부터 request 를 선택하고, per-actuator inflight 카운트를
+ * 증가시킨 후 blk-mq 로 전달한다.
+ * 호출 경로: bfq_dispatch_request -> __bfq_dispatch_request
+ * NVMe 연결: request 가 blk_mq_run_hw_queue 를 통해 nvme_queue_rq 로
+ *           전달되고, nvme_submit_cmd(doorbell) 이 뒤따른다.
+ */
 static struct request *__bfq_dispatch_request(struct blk_mq_hw_ctx *hctx)
 {
 	struct bfq_data *bfqd = hctx->queue->elevator->elevator_data;
+	// NVMe SQ/CQ 선택: hctx는 NVMe controller의 한 개의 SQ/CQ 쌍에 대응하며, CPU/queue affinity에 따라 doorbell 대상이 결정(추정)
 	struct request *rq = NULL;
 	struct bfq_queue *bfqq = NULL;
 
 	if (!list_empty(&bfqd->dispatch)) {
-		rq = list_first_entry(&bfqd->dispatch, struct request,
+	// NVMe list 연결: dispatch/completion 리스트 조작이며, request가 SQ/CQ 경로에서 이동할 때 일관성 유지
+		rq = list_first_entry(&bfqd->dispatch, struct request, // BFQ dispatch 리스트에서 곧바로 NVMe SQ 로 보낼 request 획득.
 				      queuelist);
 		list_del_init(&rq->queuelist);
 
 		bfqq = RQ_BFQQ(rq);
 
 		if (bfqq) {
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 			/*
 			 * Increment counters here, because this
 			 * dispatch does not follow the standard
@@ -5174,8 +5751,10 @@ static struct request *__bfq_dispatch_request(struct blk_mq_hw_ctx *hctx)
 			 * incremented)
 			 */
 			bfqq->dispatched++;
+			// NVMe queue depth: in-flight/request 수가 NVMe SQ/CQ 엔트리 사용량과 budget을 제한하며, NCQ queue depth(32/64) 초과 시 dispatch 지연
 
 			goto inc_in_driver_start_rq;
+			// NVMe 에러/드레인 분기: goto는 보통 unlock/out 경로로 연결되며, controller abort나 queue drain 시 request를 안전하게 반납(추정)
 		}
 
 		/*
@@ -5202,6 +5781,7 @@ static struct request *__bfq_dispatch_request(struct blk_mq_hw_ctx *hctx)
 		 * requests very low.
 		 */
 		goto start_rq;
+		// NVMe 에러/드레인 분기: goto는 보통 unlock/out 경로로 연결되며, controller abort나 queue drain 시 request를 안전하게 반납(추정)
 	}
 
 	bfq_log(bfqd, "dispatch requests: %d busy queues",
@@ -5209,6 +5789,7 @@ static struct request *__bfq_dispatch_request(struct blk_mq_hw_ctx *hctx)
 
 	if (bfq_tot_busy_queues(bfqd) == 0)
 		goto exit;
+		// NVMe 에러/드레인 분기: goto는 보통 unlock/out 경로로 연결되며, controller abort나 queue drain 시 request를 안전하게 반납(추정)
 
 	/*
 	 * Force device to serve one request at a time if
@@ -5222,24 +5803,30 @@ static struct request *__bfq_dispatch_request(struct blk_mq_hw_ctx *hctx)
 	 * Of course, serving one request at a time may cause loss of
 	 * throughput.
 	 */
-	if (bfqd->strict_guarantees && bfqd->tot_rq_in_driver > 0)
+	if (bfqd->strict_guarantees && bfqd->tot_rq_in_driver > 0) // strict_guarantees 시 NVMe controller 에 1개만 허용해 reordering 완전 배제.
 		goto exit;
+		// NVMe 에러/드레인 분기: goto는 보통 unlock/out 경로로 연결되며, controller abort나 queue drain 시 request를 안전하게 반납(추정)
 
 	bfqq = bfq_select_queue(bfqd);
 	if (!bfqq)
 		goto exit;
+		// NVMe 에러/드레인 분기: goto는 보통 unlock/out 경로로 연결되며, controller abort나 queue drain 시 request를 안전하게 반납(추정)
 
 	rq = bfq_dispatch_rq_from_bfqq(bfqd, bfqq);
 
 	if (rq) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 inc_in_driver_start_rq:
-		bfqd->rq_in_driver[bfqq->actuator_idx]++;
+		bfqd->rq_in_driver[bfqq->actuator_idx]++; // per-actuator inflight 증가: NVMe 다중 actuator 부하 추적.
+		// NVMe 다중 actuator: 독립 접근 영역에 따라 request를 분리하며, 각 actuator는 별도 SQ/CQ 또는 namespace 병렬 경로로 dispatch(추정)
 		bfqd->tot_rq_in_driver++;
+		// NVMe queue depth: in-flight/request 수가 NVMe SQ/CQ 엔트리 사용량과 budget을 제한하며, NCQ queue depth(32/64) 초과 시 dispatch 지연
 start_rq:
-		rq->rq_flags |= RQF_STARTED;
+		rq->rq_flags |= RQF_STARTED; // blk-mq 가 NVMe driver 로 request 전달 시작 표시.
 	}
 exit:
 	return rq;
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 }
 
 #ifdef CONFIG_BFQ_CGROUP_DEBUG
@@ -5279,6 +5866,7 @@ static void bfq_update_dispatch_stats(struct request_queue *q,
 		 */
 		bfqg_stats_update_idle_time(bfqq_group(in_serv_queue));
 	if (bfqq) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		struct bfq_group *bfqg = bfqq_group(bfqq);
 
 		bfqg_stats_update_avg_queue_size(bfqg);
@@ -5294,9 +5882,19 @@ static inline void bfq_update_dispatch_stats(struct request_queue *q,
 					     bool idle_timer_disabled) {}
 #endif /* CONFIG_BFQ_CGROUP_DEBUG */
 
+/*
+ * bfq_dispatch_request: blk-mq 스케줄러 ops 의 dispatch_request 콜백.
+ * scheduler lock 을 잡고 __bfq_dispatch_request 을 호출한다.
+ * 호출 경로: blk_mq_dispatch_rq_list -> blk_mq_do_dispatch_sched ->
+ *          elevator_ops.dispatch_request(bfq_dispatch_request)
+ * NVMe 연결: 이 함수가 반환한 request 는 NVMe SQ 에 enqueued 되어
+ *           CID 를 할당받고, completion 이 돌아오면 bfq_finish_requeue_request
+ *           가 호출된다.
+ */
 static struct request *bfq_dispatch_request(struct blk_mq_hw_ctx *hctx)
 {
 	struct bfq_data *bfqd = hctx->queue->elevator->elevator_data;
+	// NVMe SQ/CQ 선택: hctx는 NVMe controller의 한 개의 SQ/CQ 쌍에 대응하며, CPU/queue affinity에 따라 doorbell 대상이 결정(추정)
 	struct request *rq;
 	struct bfq_queue *in_serv_queue;
 	bool waiting_rq, idle_timer_disabled = false;
@@ -5305,11 +5903,15 @@ static struct request *bfq_dispatch_request(struct blk_mq_hw_ctx *hctx)
 
 	in_serv_queue = bfqd->in_service_queue;
 	waiting_rq = in_serv_queue && bfq_bfqq_wait_request(in_serv_queue);
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 
 	rq = __bfq_dispatch_request(hctx);
+	// NVMe dispatch: BFQ가 선택한 request를 blk_mq_hw_ctx로 넘기며, NVMe SQ의 다음 free CID에 대응한다; doorbell은 blk-mq가 일괄 발행(추정)
 	if (in_serv_queue == bfqd->in_service_queue) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		idle_timer_disabled =
 			waiting_rq && !bfq_bfqq_wait_request(in_serv_queue);
+			// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 	}
 
 	spin_unlock_irq(&bfqd->lock);
@@ -5318,6 +5920,7 @@ static struct request *bfq_dispatch_request(struct blk_mq_hw_ctx *hctx)
 				idle_timer_disabled);
 
 	return rq;
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 }
 
 /*
@@ -5340,6 +5943,7 @@ void bfq_put_queue(struct bfq_queue *bfqq)
 		return;
 
 	if (!hlist_unhashed(&bfqq->burst_list_node)) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		hlist_del_init(&bfqq->burst_list_node);
 		/*
 		 * Decrement also burst size after the removal, if the
@@ -5401,10 +6005,13 @@ void bfq_put_queue(struct bfq_queue *bfqq)
 		bfqq->bfqd->last_completed_rq_bfqq = NULL;
 
 	WARN_ON_ONCE(!list_empty(&bfqq->fifo));
+	// NVMe list 연결: dispatch/completion 리스트 조작이며, request가 SQ/CQ 경로에서 이동할 때 일관성 유지
 	WARN_ON_ONCE(!RB_EMPTY_ROOT(&bfqq->sort_list));
 	WARN_ON_ONCE(bfqq->dispatched);
+	// NVMe queue depth: in-flight/request 수가 NVMe SQ/CQ 엔트리 사용량과 budget을 제한하며, NCQ queue depth(32/64) 초과 시 dispatch 지연
 
 	kmem_cache_free(bfq_pool, bfqq);
+	// NVMe 메모리 생명주기: bfqq/entity 할당/해제이며, NVMe request_pool와 별개이나 동시에 많은 bfqq는 tag 회수 지연 초래(추정)
 	bfqg_and_blkg_put(bfqg);
 }
 
@@ -5412,6 +6019,7 @@ static void bfq_put_stable_ref(struct bfq_queue *bfqq)
 {
 	bfqq->stable_ref--;
 	bfq_put_queue(bfqq);
+	// NVMe bfqq 반납: 참조 카운트가 0이면 bfqq를 해제하며, 남은 request는 완료/abort로 정리되어야 함
 }
 
 void bfq_put_cooperator(struct bfq_queue *bfqq)
@@ -5425,8 +6033,10 @@ void bfq_put_cooperator(struct bfq_queue *bfqq)
 	 */
 	__bfqq = bfqq->new_bfqq;
 	while (__bfqq) {
+	// NVMe 반복 처리: request/tag/bio/bvec/SQ/CQ 엔트리를 순회하며 CID 할당, PRP/SGL 조립, completion 상태를 누적한다(추정) -> blk-mq tag/hctx/CQ
 		next = __bfqq->new_bfqq;
 		bfq_put_queue(__bfqq);
+		// NVMe bfqq 반납: 참조 카운트가 0이면 bfqq를 해제하며, 남은 request는 완료/abort로 정리되어야 함
 		__bfqq = next;
 	}
 }
@@ -5434,6 +6044,7 @@ void bfq_put_cooperator(struct bfq_queue *bfqq)
 static void bfq_exit_bfqq(struct bfq_data *bfqd, struct bfq_queue *bfqq)
 {
 	if (bfqq == bfqd->in_service_queue) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		__bfq_bfqq_expire(bfqd, bfqq, BFQQE_BUDGET_TIMEOUT);
 		bfq_schedule_dispatch(bfqd);
 	}
@@ -5449,13 +6060,16 @@ static void bfq_exit_icq_bfqq(struct bfq_io_cq *bic, bool is_sync,
 			      unsigned int actuator_idx)
 {
 	struct bfq_queue *bfqq = bic_to_bfqq(bic, is_sync, actuator_idx);
+	// NVMe 다중 actuator: 독립 접근 영역에 따라 request를 분리하며, 각 actuator는 별도 SQ/CQ 또는 namespace 병렬 경로로 dispatch(추정)
 	struct bfq_data *bfqd;
 
 	if (bfqq)
 		bfqd = bfqq->bfqd; /* NULL if scheduler already exited */
 
 	if (bfqq && bfqd) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		bic_set_bfqq(bic, NULL, is_sync, actuator_idx);
+		// NVMe 다중 actuator: 독립 접근 영역에 따라 request를 분리하며, 각 actuator는 별도 SQ/CQ 또는 namespace 병렬 경로로 dispatch(추정)
 		bfq_exit_bfqq(bfqd, bfqq);
 	}
 }
@@ -5466,11 +6080,14 @@ static void _bfq_exit_icq(struct bfq_io_cq *bic, unsigned int num_actuators)
 	unsigned int act_idx;
 
 	for (act_idx = 0; act_idx < num_actuators; act_idx++) {
+	// NVMe 반복 처리: request/tag/bio/bvec/SQ/CQ 엔트리를 순회하며 CID 할당, PRP/SGL 조립, completion 상태를 누적한다(추정) -> blk-mq tag/hctx/CQ
 		if (bfqq_data[act_idx].stable_merge_bfqq)
 			bfq_put_stable_ref(bfqq_data[act_idx].stable_merge_bfqq);
 
 		bfq_exit_icq_bfqq(bic, true, act_idx);
+		// NVMe per-request/per-ioctxt 설정: request 생명주기 시작/종료이며, NVMe req->pdu 초기화 및 io_context와 bfqq 연결(추정)
 		bfq_exit_icq_bfqq(bic, false, act_idx);
+		// NVMe per-request/per-ioctxt 설정: request 생명주기 시작/종료이며, NVMe req->pdu 초기화 및 io_context와 bfqq 연결(추정)
 	}
 }
 
@@ -5490,11 +6107,17 @@ static void bfq_exit_icq(struct io_cq *icq)
 	 * this is the last time these queues are accessed.
 	 */
 	if (bfqd) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		spin_lock_irqsave(&bfqd->lock, flags);
+		// NVMe 동기화: hctx/bfqd 스핀락은 dispatch(SQ 삽입)와 completion(CQ 처리) 사이 자료구조 경쟁을 제어한다; ISR context에서 짧게 획득(추정)
 		_bfq_exit_icq(bic, bfqd->num_actuators);
+		// NVMe 다중 actuator: 독립 접근 영역에 따라 request를 분리하며, 각 actuator는 별도 SQ/CQ 또는 namespace 병렬 경로로 dispatch(추정)
 		spin_unlock_irqrestore(&bfqd->lock, flags);
+		// NVMe 동기화: hctx/bfqd 스핀락은 dispatch(SQ 삽입)와 completion(CQ 처리) 사이 자료구조 경쟁을 제어한다; ISR context에서 짧게 획득(추정)
 	} else {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		_bfq_exit_icq(bic, BFQ_MAX_ACTUATORS);
+		// NVMe 다중 actuator: 독립 접근 영역에 따라 request를 분리하며, 각 actuator는 별도 SQ/CQ 또는 namespace 병렬 경로로 dispatch(추정)
 	}
 }
 
@@ -5541,6 +6164,7 @@ bfq_set_next_ioprio_data(struct bfq_queue *bfqq, struct bfq_io_cq *bic)
 	}
 
 	if (bfqq->new_ioprio >= IOPRIO_NR_LEVELS) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		pr_crit("bfq_set_next_ioprio_data: new_ioprio %d\n",
 			bfqq->new_ioprio);
 		bfqq->new_ioprio = IOPRIO_NR_LEVELS - 1;
@@ -5574,9 +6198,11 @@ static void bfq_check_ioprio_change(struct bfq_io_cq *bic, struct bio *bio)
 
 	bfqq = bic_to_bfqq(bic, false, bfq_actuator_index(bfqd, bio));
 	if (bfqq) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		struct bfq_queue *old_bfqq = bfqq;
 
 		bfqq = bfq_get_queue(bfqd, bio, false, bic, true);
+		// NVMe bfqq 획득/분할: process의 IO를 어떤 bfqq(actuator/SQ 경로)로 할당할지 결정하며, 다중 actuator mapping 시작점
 		bic_set_bfqq(bic, bfqq, false, bfq_actuator_index(bfqd, bio));
 		bfq_release_process_ref(bfqd, old_bfqq);
 	}
@@ -5593,8 +6219,10 @@ static void bfq_init_bfqq(struct bfq_data *bfqd, struct bfq_queue *bfqq,
 	u64 now_ns = blk_time_get_ns();
 
 	bfqq->actuator_idx = act_idx;
+	// NVMe 다중 actuator: 독립 접근 영역에 따라 request를 분리하며, 각 actuator는 별도 SQ/CQ 또는 namespace 병렬 경로로 dispatch(추정)
 	RB_CLEAR_NODE(&bfqq->entity.rb_node);
 	INIT_LIST_HEAD(&bfqq->fifo);
+	// NVMe list 연결: dispatch/completion 리스트 조작이며, request가 SQ/CQ 경로에서 이동할 때 일관성 유지
 	INIT_HLIST_NODE(&bfqq->burst_list_node);
 	INIT_HLIST_NODE(&bfqq->woken_list_node);
 	INIT_HLIST_HEAD(&bfqq->woken_list);
@@ -5606,6 +6234,7 @@ static void bfq_init_bfqq(struct bfq_data *bfqd, struct bfq_queue *bfqq,
 		bfq_set_next_ioprio_data(bfqq, bic);
 
 	if (is_sync) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		/*
 		 * No need to mark as has_short_ttime if in
 		 * idle_class, because no device idling is performed
@@ -5621,6 +6250,7 @@ static void bfq_init_bfqq(struct bfq_data *bfqd, struct bfq_queue *bfqq,
 
 	/* set end request to minus infinity from now */
 	bfqq->ttime.last_end_request = now_ns + 1;
+	// NVMe 워크로드 특성: seek/think time 추정으로 interactive/sequential을 판단하며, NVMe NCQ reordering 특성에 맞춰 budget/idling을 조정(추정)
 
 	bfqq->creation_time = jiffies;
 
@@ -5632,11 +6262,14 @@ static void bfq_init_bfqq(struct bfq_data *bfqd, struct bfq_queue *bfqq,
 
 	/* Tentative initial value to trade off between thr and lat */
 	bfqq->max_budget = (2 * bfq_max_budget(bfqd)) / 3;
+	// NVMe queue depth: in-flight/request 수가 NVMe SQ/CQ 엔트리 사용량과 budget을 제한하며, NCQ queue depth(32/64) 초과 시 dispatch 지연
 	bfqq->budget_timeout = bfq_smallest_from_now();
 
 	bfqq->wr_coeff = 1;
+	// NVMe 우선순위/가중치: weight-raising은 interactive/soft-rt request가 SQ로 먼저 dispatch되도록 하여 NVMe latency QoS를 향상시키며, CID 우선순위는 아님(추정)
 	bfqq->last_wr_start_finish = jiffies;
 	bfqq->wr_start_at_switch_to_srt = bfq_smallest_from_now();
+	// NVMe 우선순위/가중치: weight-raising은 interactive/soft-rt request가 SQ로 먼저 dispatch되도록 하여 NVMe latency QoS를 향상시키며, CID 우선순위는 아님(추정)
 	bfqq->split_time = bfq_smallest_from_now();
 
 	/*
@@ -5672,6 +6305,7 @@ static struct bfq_queue **bfq_async_queue_prio(struct bfq_data *bfqd,
 		return &bfqg->async_idle_bfqq[act_idx];
 	default:
 		return NULL;
+		// NVMe 에러 반환: 할당/초기화 실패 시 NVMe 상위 경로로 오류를 전파하며, 해당 request는 SQ로 전달되지 않음
 	}
 }
 
@@ -5681,11 +6315,13 @@ bfq_do_early_stable_merge(struct bfq_data *bfqd, struct bfq_queue *bfqq,
 			  struct bfq_queue *last_bfqq_created)
 {
 	unsigned int a_idx = last_bfqq_created->actuator_idx;
+	// NVMe 다중 actuator: 독립 접근 영역에 따라 request를 분리하며, 각 actuator는 별도 SQ/CQ 또는 namespace 병렬 경로로 dispatch(추정)
 	struct bfq_queue *new_bfqq =
 		bfq_setup_merge(bfqq, last_bfqq_created);
 
 	if (!new_bfqq)
 		return bfqq;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 
 	if (new_bfqq->bic)
 		new_bfqq->bic->bfqq_data[a_idx].stably_merged = true;
@@ -5699,6 +6335,7 @@ bfq_do_early_stable_merge(struct bfq_data *bfqd, struct bfq_queue *bfqq,
 	 */
 	bfqq->bic = bic;
 	return bfq_merge_bfqqs(bfqd, bic, bfqq);
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 }
 
 /*
@@ -5803,6 +6440,7 @@ static struct bfq_queue *bfq_do_or_sched_stable_merge(struct bfq_data *bfqd,
 							 bic,
 							 last_bfqq_created);
 		else { /* schedule tentative stable merge */
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 			/*
 			 * get reference on last_bfqq_created,
 			 * to prevent it from being freed,
@@ -5823,9 +6461,17 @@ static struct bfq_queue *bfq_do_or_sched_stable_merge(struct bfq_data *bfqd,
 	}
 
 	return bfqq;
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 }
 
 
+/*
+ * bfq_get_queue: process/cgroup/actuator 에 해당하는 bfqq 를 할당하거나
+ * 공유 async queue 를 반환한다.
+ * 호출 경로: __bfq_get_bfqq_handle_split -> bfq_get_queue
+ * NVMe 연결: request 가 처음 생성될 때 NVMe SQ/actuator 단위로 queue 를
+ *           분리하여, 다중 actuator SSD 의 병렬성을 살린다.
+ */
 static struct bfq_queue *bfq_get_queue(struct bfq_data *bfqd,
 				       struct bio *bio, bool is_sync,
 				       struct bfq_io_cq *bic,
@@ -5839,26 +6485,31 @@ static struct bfq_queue *bfq_get_queue(struct bfq_data *bfqd,
 
 	bfqg = bfq_bio_bfqg(bfqd, bio);
 	if (!is_sync) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		async_bfqq = bfq_async_queue_prio(bfqd, bfqg, ioprio_class,
 						  ioprio,
 						  bfq_actuator_index(bfqd, bio));
 		bfqq = *async_bfqq;
 		if (bfqq)
 			goto out;
+			// NVMe 에러/드레인 분기: goto는 보통 unlock/out 경로로 연결되며, controller abort나 queue drain 시 request를 안전하게 반납(추정)
 	}
 
 	bfqq = kmem_cache_alloc_node(bfq_pool, GFP_NOWAIT | __GFP_ZERO,
 				     bfqd->queue->node);
 
 	if (bfqq) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		bfq_init_bfqq(bfqd, bfqq, bic, current->pid,
 			      is_sync, bfq_actuator_index(bfqd, bio));
 		bfq_init_entity(&bfqq->entity, bfqg);
 		bfq_log_bfqq(bfqd, bfqq, "allocated");
 	} else {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		bfqq = &bfqd->oom_bfqq;
 		bfq_log_bfqq(bfqd, bfqq, "using oom bfqq");
 		goto out;
+		// NVMe 에러/드레인 분기: goto는 보통 unlock/out 경로로 연결되며, controller abort나 queue drain 시 request를 안전하게 반납(추정)
 	}
 
 	/*
@@ -5866,6 +6517,7 @@ static struct bfq_queue *bfq_get_queue(struct bfq_data *bfqd,
 	 * prune it.
 	 */
 	if (async_bfqq) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		bfqq->ref++; /*
 			      * Extra group reference, w.r.t. sync
 			      * queue. This extra reference is removed
@@ -5884,12 +6536,14 @@ out:
 	if (bfqq != &bfqd->oom_bfqq && is_sync && !respawn)
 		bfqq = bfq_do_or_sched_stable_merge(bfqd, bfqq, bic);
 	return bfqq;
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 }
 
 static void bfq_update_io_thinktime(struct bfq_data *bfqd,
 				    struct bfq_queue *bfqq)
 {
 	struct bfq_ttime *ttime = &bfqq->ttime;
+	// NVMe 워크로드 특성: seek/think time 추정으로 interactive/sequential을 판단하며, NVMe NCQ reordering 특성에 맞춰 budget/idling을 조정(추정)
 	u64 elapsed;
 
 	/*
@@ -5900,12 +6554,16 @@ static void bfq_update_io_thinktime(struct bfq_data *bfqd,
 	if (bfqq->dispatched || bfq_bfqq_busy(bfqq))
 		return;
 	elapsed = blk_time_get_ns() - bfqq->ttime.last_end_request;
+	// NVMe 워크로드 특성: seek/think time 추정으로 interactive/sequential을 판단하며, NVMe NCQ reordering 특성에 맞춰 budget/idling을 조정(추정)
 	elapsed = min_t(u64, elapsed, 2ULL * bfqd->bfq_slice_idle);
 
 	ttime->ttime_samples = (7*ttime->ttime_samples + 256) / 8;
+	// NVMe 워크로드 특성: seek/think time 추정으로 interactive/sequential을 판단하며, NVMe NCQ reordering 특성에 맞춰 budget/idling을 조정(추정)
 	ttime->ttime_total = div_u64(7*ttime->ttime_total + 256*elapsed,  8);
+	// NVMe 워크로드 특성: seek/think time 추정으로 interactive/sequential을 판단하며, NVMe NCQ reordering 특성에 맞춰 budget/idling을 조정(추정)
 	ttime->ttime_mean = div64_ul(ttime->ttime_total + 128,
 				     ttime->ttime_samples);
+				     // NVMe 워크로드 특성: seek/think time 추정으로 interactive/sequential을 판단하며, NVMe NCQ reordering 특성에 맞춰 budget/idling을 조정(추정)
 }
 
 static void
@@ -5913,6 +6571,7 @@ bfq_update_io_seektime(struct bfq_data *bfqd, struct bfq_queue *bfqq,
 		       struct request *rq)
 {
 	bfqq->seek_history <<= 1;
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 	bfqq->seek_history |= BFQ_RQ_SEEKY(bfqd, bfqq->last_request_pos, rq);
 
 	if (bfqq->wr_coeff > 1 &&
@@ -5970,6 +6629,7 @@ static void bfq_update_has_short_ttime(struct bfq_data *bfqd,
 		has_short_ttime = false;
 
 	state_changed = has_short_ttime != bfq_bfqq_has_short_ttime(bfqq);
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 
 	if (has_short_ttime)
 		bfq_mark_bfqq_has_short_ttime(bfqq);
@@ -6078,10 +6738,13 @@ static void bfq_rq_enqueued(struct bfq_data *bfqd, struct bfq_queue *bfqq,
 		bfqq->meta_pending++;
 
 	bfqq->last_request_pos = blk_rq_pos(rq) + blk_rq_sectors(rq);
+	// NVMe 명령 크기: request의 sector/byte 수가 NVMe command CDW10-11 길이와 PRP 필요량을 결정(추정)
 
 	if (bfqq == bfqd->in_service_queue && bfq_bfqq_wait_request(bfqq)) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		bool small_req = bfqq->queued[rq_is_sync(rq)] == 1 &&
 				 blk_rq_sectors(rq) < 32;
+				 // NVMe 명령 크기: request의 sector/byte 수가 NVMe command CDW10-11 길이와 PRP 필요량을 결정(추정)
 		bool budget_timeout = bfq_bfqq_budget_timeout(bfqq);
 
 		/*
@@ -6113,6 +6776,7 @@ static void bfq_rq_enqueued(struct bfq_data *bfqd, struct bfq_queue *bfqq,
 		 */
 		bfq_clear_bfqq_wait_request(bfqq);
 		hrtimer_try_to_cancel(&bfqd->idle_slice_timer);
+		// NVMe idling/doorbell 타이밍: slice 타이머로 다음 request 도착을 기다려 batch를 키우며, NVMe SQ doorbell 빈도와 throughput/latency 트레이드오프(추정)
 
 		/*
 		 * The queue is not empty, because a new request just
@@ -6133,6 +6797,7 @@ static void bfqq_request_allocated(struct bfq_queue *bfqq)
 
 	for_each_entity(entity)
 		entity->allocated++;
+		// NVMe 스케줄 결정: B-WF2Q+가 다음에 SQ로 전달할 bfqq/entity를 선정하며, 이 선정이 곧 NVMe CID 순서와 doorbell batch를 결정(추정)
 }
 
 static void bfqq_request_freed(struct bfq_queue *bfqq)
@@ -6141,6 +6806,7 @@ static void bfqq_request_freed(struct bfq_queue *bfqq)
 
 	for_each_entity(entity)
 		entity->allocated--;
+		// NVMe 스케줄 결정: B-WF2Q+가 다음에 SQ로 전달할 bfqq/entity를 선정하며, 이 선정이 곧 NVMe CID 순서와 doorbell batch를 결정(추정)
 }
 
 /* returns true if it causes the idle timer to be disabled */
@@ -6152,6 +6818,7 @@ static bool __bfq_insert_request(struct bfq_data *bfqd, struct request *rq)
 	bool waiting, idle_timer_disabled = false;
 
 	if (new_bfqq) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		struct bfq_queue *old_bfqq = bfqq;
 		/*
 		 * Release the request's reference to the old bfqq
@@ -6170,6 +6837,7 @@ static bool __bfq_insert_request(struct bfq_data *bfqd, struct request *rq)
 		 */
 		if (bic_to_bfqq(RQ_BIC(rq), true,
 				bfq_actuator_index(bfqd, rq->bio)) == bfqq) {
+				// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 			while (bfqq != new_bfqq)
 				bfqq = bfq_merge_bfqqs(bfqd, RQ_BIC(rq), bfqq);
 		}
@@ -6180,6 +6848,7 @@ static bool __bfq_insert_request(struct bfq_data *bfqd, struct request *rq)
 		 * release rq reference on bfqq
 		 */
 		bfq_put_queue(old_bfqq);
+		// NVMe bfqq 반납: 참조 카운트가 0이면 bfqq를 해제하며, 남은 request는 완료/abort로 정리되어야 함
 		rq->elv.priv[1] = new_bfqq;
 	}
 
@@ -6188,8 +6857,11 @@ static bool __bfq_insert_request(struct bfq_data *bfqd, struct request *rq)
 	bfq_update_io_seektime(bfqd, bfqq, rq);
 
 	waiting = bfqq && bfq_bfqq_wait_request(bfqq);
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 	bfq_add_request(rq);
+	// NVMe request 등록: bio가 request로 승격된 후 BFQ 내부 rb-tree(sort_list)에 삽입하며, 이후 dispatch 후보(next_rq)로 선별
 	idle_timer_disabled = waiting && !bfq_bfqq_wait_request(bfqq);
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 
 	rq->fifo_time = blk_time_get_ns() + bfqd->bfq_fifo_expire[rq_is_sync(rq)];
 	list_add_tail(&rq->queuelist, &bfqq->fifo);
@@ -6197,6 +6869,7 @@ static bool __bfq_insert_request(struct bfq_data *bfqd, struct request *rq)
 	bfq_rq_enqueued(bfqd, bfqq, rq);
 
 	return idle_timer_disabled;
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 }
 
 #ifdef CONFIG_BFQ_CGROUP_DEBUG
@@ -6232,11 +6905,22 @@ static inline void bfq_update_insert_stats(struct request_queue *q,
 #endif /* CONFIG_BFQ_CGROUP_DEBUG */
 
 static struct bfq_queue *bfq_init_rq(struct request *rq);
+// NVMe per-request/per-ioctxt 설정: request 생명주기 시작/종료이며, NVMe req->pdu 초기화 및 io_context와 bfqq 연결(추정)
 
+/*
+ * bfq_insert_request: blk-mq 스케줄러 ops 의 insert_requests 콜백.
+ * request 를 BFQ 내부 queue 에 넣거나 dispatch 리스트(head/tail)로
+ * 직접 추가한다.
+ * 호출 경로: blk_mq_sched_insert_requests -> elevator_ops.insert_requests
+ *          (bfq_insert_request)
+ * NVMe 연결: bio -> request 변환이 끝난 직후이며, NVMe SQ 로 가기 전
+ *           BFQ 가 request 를 정렬/병합/우선순위 배정하는 관문이다.
+ */
 static void bfq_insert_request(struct blk_mq_hw_ctx *hctx, struct request *rq,
 			       blk_insert_t flags)
 {
 	struct request_queue *q = hctx->queue;
+	// NVMe SQ/CQ 선택: hctx는 NVMe controller의 한 개의 SQ/CQ 쌍에 대응하며, CPU/queue affinity에 따라 doorbell 대상이 결정(추정)
 	struct bfq_data *bfqd = q->elevator->elevator_data;
 	struct bfq_queue *bfqq;
 	bool idle_timer_disabled = false;
@@ -6248,8 +6932,10 @@ static void bfq_insert_request(struct blk_mq_hw_ctx *hctx, struct request *rq,
 		bfqg_stats_update_legacy_io(q, rq);
 #endif
 	spin_lock_irq(&bfqd->lock);
-	bfqq = bfq_init_rq(rq);
+	bfqq = bfq_init_rq(rq); // request 를 소유할 bfqq(따라서 NVMe SQ/actuator) 결정.
+	// NVMe per-request/per-ioctxt 설정: request 생명주기 시작/종료이며, NVMe req->pdu 초기화 및 io_context와 bfqq 연결(추정)
 	if (blk_mq_sched_try_insert_merge(q, rq, &free)) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		spin_unlock_irq(&bfqd->lock);
 		blk_mq_free_requests(&free);
 		return;
@@ -6258,11 +6944,15 @@ static void bfq_insert_request(struct blk_mq_hw_ctx *hctx, struct request *rq,
 	trace_block_rq_insert(rq);
 
 	if (flags & BLK_MQ_INSERT_AT_HEAD) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		list_add(&rq->queuelist, &bfqd->dispatch);
+		// NVMe list 연결: dispatch/completion 리스트 조작이며, request가 SQ/CQ 경로에서 이동할 때 일관성 유지
 	} else if (!bfqq) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		list_add_tail(&rq->queuelist, &bfqd->dispatch);
 	} else {
-		idle_timer_disabled = __bfq_insert_request(bfqd, rq);
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
+		idle_timer_disabled = __bfq_insert_request(bfqd, rq); // BFQ 내부 queue 에 삽입; NVMe SQ 로는 아직 전달되지 않음.
 		/*
 		 * Update bfqq, because, if a queue merge has occurred
 		 * in __bfq_insert_request, then rq has been
@@ -6271,6 +6961,7 @@ static void bfq_insert_request(struct blk_mq_hw_ctx *hctx, struct request *rq,
 		bfqq = RQ_BFQQ(rq);
 
 		if (rq_mergeable(rq)) {
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 			elv_rqhash_add(q, rq);
 			if (!q->last_merge)
 				q->last_merge = rq;
@@ -6294,20 +6985,31 @@ static void bfq_insert_requests(struct blk_mq_hw_ctx *hctx,
 				blk_insert_t flags)
 {
 	while (!list_empty(list)) {
+	// NVMe 반복 처리: request/tag/bio/bvec/SQ/CQ 엔트리를 순회하며 CID 할당, PRP/SGL 조립, completion 상태를 누적한다(추정) -> blk-mq tag/hctx/CQ
 		struct request *rq;
 
 		rq = list_first_entry(list, struct request, queuelist);
 		list_del_init(&rq->queuelist);
 		bfq_insert_request(hctx, rq, flags);
+		// NVMe 진입점: blk-mq가 request를 스케줄러에 삽입하며, 이후 bfq_dispatch_request -> nvme_queue_rq -> nvme_submit_cmd(doorbell)로 연결된다
 	}
 }
 
+/*
+ * bfq_update_hw_tag: 장치가 실제로 여러 request 를 동시에 queueing
+ * 하는지(hw_tag) 감지한다.
+ * 호출 경로: bfq_completed_request -> bfq_update_hw_tag
+ * NVMe 연결: NVMe SSD 는 항상 NCQ 능력이 있으므로 hw_tag 가 1로
+ *           수렴하며, nonrot_with_queueing=true 가 되어 merge/idling
+ *           정책이 SSD 에 맞게 조정된다.
+ */
 static void bfq_update_hw_tag(struct bfq_data *bfqd)
 {
 	struct bfq_queue *bfqq = bfqd->in_service_queue;
 
 	bfqd->max_rq_in_driver = max_t(int, bfqd->max_rq_in_driver,
 				       bfqd->tot_rq_in_driver);
+				       // NVMe queue depth: in-flight/request 수가 NVMe SQ/CQ 엔트리 사용량과 budget을 제한하며, NCQ queue depth(32/64) 초과 시 dispatch 지연
 
 	if (bfqd->hw_tag == 1)
 		return;
@@ -6336,32 +7038,47 @@ static void bfq_update_hw_tag(struct bfq_data *bfqd)
 		return;
 
 	bfqd->hw_tag = bfqd->max_rq_in_driver > BFQ_HW_QUEUE_THRESHOLD;
+	// NVMe 장치 특성: NVMe SSD는 nonrot_with_queueing=true로 merge 대신 NCQ reordering과 idling 정책을 적용하며, hw_tag는 controller queueing 능력 표시
 	bfqd->max_rq_in_driver = 0;
 	bfqd->hw_tag_samples = 0;
 
 	bfqd->nonrot_with_queueing =
 		!blk_queue_rot(bfqd->queue) && bfqd->hw_tag;
+		// NVMe 장치 특성: NVMe SSD는 nonrot_with_queueing=true로 merge 대신 NCQ reordering과 idling 정책을 적용하며, hw_tag는 controller queueing 능력 표시
 }
 
+/*
+ * bfq_completed_request: 하나의 request 가 완료되었을 때 BFQ 의
+ * per-actuator inflight 카운트를 줄이고, in-service queue 의 idle/
+ * budget-timeout/만료를 처리한다.
+ * 호출 경로: bfq_finish_requeue_request -> bfq_completed_request
+ * NVMe 연결: NVMe CQ 완료 핸들러(nvme_process_cq) 경로 하부에서
+ *           불리며, controller 가 처리를 마친 CID/PRP/SGL 영역을
+ *           회수하는 시점과 맞물린다.
+ */
 static void bfq_completed_request(struct bfq_queue *bfqq, struct bfq_data *bfqd)
 {
 	u64 now_ns;
 	u32 delta_us;
 
-	bfq_update_hw_tag(bfqd);
+	bfq_update_hw_tag(bfqd); // 완료 시점에 NVMe NCQ queueing 동작을 다시 평가.
 
-	bfqd->rq_in_driver[bfqq->actuator_idx]--;
+	bfqd->rq_in_driver[bfqq->actuator_idx]--; // per-actuator inflight 감소: NVMe SQ/CQ 에서 해당 CID 완료 반영.
+	// NVMe 다중 actuator: 독립 접근 영역에 따라 request를 분리하며, 각 actuator는 별도 SQ/CQ 또는 namespace 병렬 경로로 dispatch(추정)
 	bfqd->tot_rq_in_driver--;
+	// NVMe queue depth: in-flight/request 수가 NVMe SQ/CQ 엔트리 사용량과 budget을 제한하며, NCQ queue depth(32/64) 초과 시 dispatch 지연
 	bfqq->dispatched--;
+	// NVMe queue depth: in-flight/request 수가 NVMe SQ/CQ 엔트리 사용량과 budget을 제한하며, NCQ queue depth(32/64) 초과 시 dispatch 지연
 
 	if (!bfqq->dispatched && !bfq_bfqq_busy(bfqq)) {
+	// NVMe queue depth: in-flight/request 수가 NVMe SQ/CQ 엔트리 사용량과 budget을 제한하며, NCQ queue depth(32/64) 초과 시 dispatch 지연
 		/*
 		 * Set budget_timeout (which we overload to store the
 		 * time at which the queue remains with no backlog and
 		 * no outstanding request; used by the weight-raising
 		 * mechanism).
 		 */
-		bfqq->budget_timeout = jiffies;
+		bfqq->budget_timeout = jiffies; // request 가 모두 완료된 시점 기록: NVMe controller 의 CQ 비우기 시점 활용.
 
 		bfq_del_bfqq_in_groups_with_pending_reqs(bfqq);
 		bfq_weights_tree_remove(bfqq);
@@ -6370,6 +7087,7 @@ static void bfq_completed_request(struct bfq_queue *bfqq, struct bfq_data *bfqd)
 	now_ns = blk_time_get_ns();
 
 	bfqq->ttime.last_end_request = now_ns;
+	// NVMe 워크로드 특성: seek/think time 추정으로 interactive/sequential을 판단하며, NVMe NCQ reordering 특성에 맞춰 budget/idling을 조정(추정)
 
 	/*
 	 * Using us instead of ns, to get a reasonable precision in
@@ -6434,9 +7152,12 @@ static void bfq_completed_request(struct bfq_queue *bfqq, struct bfq_data *bfqd)
 	 * or if we want to idle in case it has no pending requests.
 	 */
 	if (bfqd->in_service_queue == bfqq) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		if (bfq_bfqq_must_idle(bfqq)) {
+		// NVMe idle/throughput: bfqq가 busy/idle 상태에 따라 SQ doorbell 발행 시점과 batch 크기가 조정되며, NVMe NCQ reordering으로 인해 idle은 throughput 희생 가능(추정)
 			if (bfqq->dispatched == 0)
 				bfq_arm_slice_timer(bfqd);
+				// NVMe idling/doorbell 타이밍: slice 타이머로 다음 request 도착을 기다려 batch를 키우며, NVMe SQ doorbell 빈도와 throughput/latency 트레이드오프(추정)
 			/*
 			 * If we get here, we do not expire bfqq, even
 			 * if bfqq was in budget timeout or had no
@@ -6579,6 +7300,15 @@ static void bfq_completed_request(struct bfq_queue *bfqq, struct bfq_data *bfqd)
  * bfq_choose_bfqq_for_injection(). These comments also explain some
  * exceptions, made by the injection mechanism in some special cases.
  */
+/*
+ * bfq_update_inject_limit: service hole 동안 삽입된 request 가
+ * in-service bfqq 의 첫 request 완료 시간에 미친 영향을 측정하여
+ * inject_limit 를 조정한다.
+ * 호출 경로: bfq_finish_requeue_request -> bfq_update_inject_limit
+ * NVMe 연결: NVMe SQ depth(32) 안에서 injection 이 latency 를 해치지
+ *           않는 최적 지점을 찾아, controller queue 를 적극 활용하면서
+ *           latency 도 보장한다.
+ */
 static void bfq_update_inject_limit(struct bfq_data *bfqd,
 				    struct bfq_queue *bfqq)
 {
@@ -6586,9 +7316,11 @@ static void bfq_update_inject_limit(struct bfq_data *bfqd,
 	unsigned int old_limit = bfqq->inject_limit;
 
 	if (bfqq->last_serv_time_ns > 0 && bfqd->rqs_injected) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		u64 threshold = (bfqq->last_serv_time_ns * 3)>>1;
 
 		if (tot_time_ns >= threshold && old_limit > 0) {
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 			bfqq->inject_limit--;
 			bfqq->decrease_time_jif = jiffies;
 		} else if (tot_time_ns < threshold &&
@@ -6611,6 +7343,7 @@ static void bfq_update_inject_limit(struct bfq_data *bfqd,
 	if ((bfqq->last_serv_time_ns == 0 && bfqd->tot_rq_in_driver == 1) ||
 	    tot_time_ns < bfqq->last_serv_time_ns) {
 		if (bfqq->last_serv_time_ns == 0) {
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 			/*
 			 * Now we certainly have a base value: make sure we
 			 * start trying injection.
@@ -6642,6 +7375,17 @@ static void bfq_update_inject_limit(struct bfq_data *bfqd,
  * particular, rq is considered completed from the point of view of
  * the scheduler.
  */
+/*
+ * bfq_finish_requeue_request: request 의 수명이 끝날 때(completion,
+ * requeue) 호출되는 콜백. inflight 카운트와 injection limit 을
+ * 갱신한다.
+ * 호출 경로: blk_mq_free_request -> __blk_mq_free_request ->
+ *          elevator_ops.finish_request(bfq_finish_request) ->
+ *          bfq_finish_requeue_request
+ * NVMe 연결: NVMe controller 의 CQ 에서 completion 이 도착한 후
+ *           해당 CID 를 해제하고, BFQ 가 다음 dispatch 결정에 사용할
+ *           inflight/peak_rate 상태를 업데이트한다.
+ */
 static void bfq_finish_requeue_request(struct request *rq)
 {
 	struct bfq_queue *bfqq = RQ_BFQQ(rq);
@@ -6665,16 +7409,21 @@ static void bfq_finish_requeue_request(struct request *rq)
 					     rq->cmd_flags);
 
 	spin_lock_irqsave(&bfqd->lock, flags);
+	// NVMe 동기화: hctx/bfqd 스핀락은 dispatch(SQ 삽입)와 completion(CQ 처리) 사이 자료구조 경쟁을 제어한다; ISR context에서 짧게 획득(추정)
 	if (likely(rq->rq_flags & RQF_STARTED)) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		if (rq == bfqd->waited_rq)
 			bfq_update_inject_limit(bfqd, bfqq);
 
-		bfq_completed_request(bfqq, bfqd);
+		bfq_completed_request(bfqq, bfqd); // NVMe CQ completion 하부에서 BFQ 상태 동기화.
+		// NVMe completion 콜백: CQ ISR에서 호출되며, bfqq의 inflight를 감소시키고 budget 소비를 반영하여 다음 dispatch를 결정한다
 	}
 	bfqq_request_freed(bfqq);
 	bfq_put_queue(bfqq);
+	// NVMe bfqq 반납: 참조 카운트가 0이면 bfqq를 해제하며, 남은 request는 완료/abort로 정리되어야 함
 	RQ_BIC(rq)->requests--;
 	spin_unlock_irqrestore(&bfqd->lock, flags);
+	// NVMe 동기화: hctx/bfqd 스핀락은 dispatch(SQ 삽입)와 completion(CQ 처리) 사이 자료구조 경쟁을 제어한다; ISR context에서 짧게 획득(추정)
 
 	/*
 	 * Reset private fields. In case of a requeue, this allows
@@ -6700,8 +7449,10 @@ static void bfq_finish_requeue_request(struct request *rq)
 static void bfq_finish_request(struct request *rq)
 {
 	bfq_finish_requeue_request(rq);
+	// NVMe abort/requeue: 명령이 controller에서 제거되거나 timeout 시 request를 BFQ queue로 되돌리며, CID/tag를 회수 후 재발행 가능(추정)
 
 	if (rq->elv.icq) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		put_io_context(rq->elv.icq->ioc);
 		rq->elv.icq = NULL;
 	}
@@ -6719,18 +7470,22 @@ bfq_split_bfqq(struct bfq_io_cq *bic, struct bfq_queue *bfqq)
 	bfq_log_bfqq(bfqq->bfqd, bfqq, "splitting queue");
 
 	if (bfqq_process_refs(bfqq) == 1 && !bfqq->new_bfqq) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		bfqq->pid = current->pid;
 		bfq_clear_bfqq_coop(bfqq);
 		bfq_clear_bfqq_split_coop(bfqq);
 		return bfqq;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 	}
 
 	bic_set_bfqq(bic, NULL, true, bfqq->actuator_idx);
+	// NVMe 다중 actuator: 독립 접근 영역에 따라 request를 분리하며, 각 actuator는 별도 SQ/CQ 또는 namespace 병렬 경로로 dispatch(추정)
 
 	bfq_put_cooperator(bfqq);
 
 	bfq_release_process_ref(bfqq->bfqd, bfqq);
 	return NULL;
+	// NVMe 에러 반환: 할당/초기화 실패 시 NVMe 상위 경로로 오류를 전파하며, 해당 request는 SQ로 전달되지 않음
 }
 
 static struct bfq_queue *
@@ -6744,20 +7499,25 @@ __bfq_get_bfqq_handle_split(struct bfq_data *bfqd, struct bfq_io_cq *bic,
 
 	if (likely(bfqq && bfqq != &bfqd->oom_bfqq))
 		return bfqq;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 
 	if (new_queue)
 		*new_queue = true;
 
 	if (bfqq)
 		bfq_put_queue(bfqq);
+		// NVMe bfqq 반납: 참조 카운트가 0이면 bfqq를 해제하며, 남은 request는 완료/abort로 정리되어야 함
 	bfqq = bfq_get_queue(bfqd, bio, is_sync, bic, split);
+	// NVMe bfqq 획득/분할: process의 IO를 어떤 bfqq(actuator/SQ 경로)로 할당할지 결정하며, 다중 actuator mapping 시작점
 
 	bic_set_bfqq(bic, bfqq, is_sync, act_idx);
 	if (split && is_sync) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		if ((bfqq_data->was_in_burst_list && bfqd->large_burst) ||
 		    bfqq_data->saved_in_large_burst)
 			bfq_mark_bfqq_in_large_burst(bfqq);
 		else {
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 			bfq_clear_bfqq_in_large_burst(bfqq);
 			if (bfqq_data->was_in_burst_list)
 				/*
@@ -6795,6 +7555,7 @@ __bfq_get_bfqq_handle_split(struct bfq_data *bfqd, struct bfq_io_cq *bic,
 	}
 
 	return bfqq;
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 }
 
 /*
@@ -6802,6 +7563,14 @@ __bfq_get_bfqq_handle_split(struct bfq_data *bfqd, struct bfq_io_cq *bic,
  * performed by bfq_init_rq, when rq is either inserted or merged. See
  * comments on bfq_init_rq for the reason behind this delayed
  * preparation.
+ */
+/*
+ * bfq_prepare_request: blk-mq 가 request 를 할당할 때 호출하는
+ * prepare_request 콜백. io_context 를 미리 찾아 둔다.
+ * 호출 경로: blk_mq_get_request -> blk_mq_sched_setup_rq ->
+ *          elevator_ops.prepare_request(bfq_prepare_request)
+ * NVMe 연결: NVMe SQ CID/tag 할당 전에 필요한 io_context 를 준비하며,
+ *           이후 bfq_init_rq 에서 actuator/SQ 라우팅 정보가 완성된다.
  */
 static void bfq_prepare_request(struct request *rq)
 {
@@ -6822,17 +7591,22 @@ static struct bfq_queue *bfq_waker_bfqq(struct bfq_queue *bfqq)
 
 	if (!waker_bfqq)
 		return NULL;
+		// NVMe 에러 반환: 할당/초기화 실패 시 NVMe 상위 경로로 오류를 전파하며, 해당 request는 SQ로 전달되지 않음
 
 	while (new_bfqq) {
+	// NVMe 반복 처리: request/tag/bio/bvec/SQ/CQ 엔트리를 순회하며 CID 할당, PRP/SGL 조립, completion 상태를 누적한다(추정) -> blk-mq tag/hctx/CQ
 		if (new_bfqq == waker_bfqq) {
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 			/*
 			 * If waker_bfqq is in the merge chain, and current
 			 * is the only process, waker_bfqq can be freed.
 			 */
 			if (bfqq_process_refs(waker_bfqq) == 1)
 				return NULL;
+				// NVMe 에러 반환: 할당/초기화 실패 시 NVMe 상위 경로로 오류를 전파하며, 해당 request는 SQ로 전달되지 않음
 
 			return waker_bfqq;
+			// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		}
 
 		new_bfqq = new_bfqq->new_bfqq;
@@ -6844,8 +7618,10 @@ static struct bfq_queue *bfq_waker_bfqq(struct bfq_queue *bfqq)
 	 */
 	if (bfqq_process_refs(waker_bfqq) == 0)
 		return NULL;
+		// NVMe 에러 반환: 할당/초기화 실패 시 NVMe 상위 경로로 오류를 전파하며, 해당 request는 SQ로 전달되지 않음
 
 	return waker_bfqq;
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 }
 
 static struct bfq_queue *bfq_get_bfqq_handle_split(struct bfq_data *bfqd,
@@ -6862,11 +7638,13 @@ static struct bfq_queue *bfq_get_bfqq_handle_split(struct bfq_data *bfqd,
 					   &new_queue);
 	if (unlikely(new_queue))
 		return bfqq;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 
 	/* If the queue was seeky for too long, break it apart. */
 	if (!bfq_bfqq_coop(bfqq) || !bfq_bfqq_split_coop(bfqq) ||
 	    bic->bfqq_data[idx].stably_merged)
 		return bfqq;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 
 	waker_bfqq = bfq_waker_bfqq(bfqq);
 
@@ -6875,14 +7653,18 @@ static struct bfq_queue *bfq_get_bfqq_handle_split(struct bfq_data *bfqd,
 		bic->bfqq_data[idx].saved_in_large_burst = true;
 
 	bfqq = bfq_split_bfqq(bic, bfqq);
+	// NVMe queue 병합/분할: cooperative IO를 한 bfqq로 모아 SQ depth를 관리하며, 과도한 분할은 CID fragmentation 초래(추정)
 	if (bfqq) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		bfq_bfqq_resume_state(bfqq, bfqd, bic, true);
 		return bfqq;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 	}
 
 	bfqq = __bfq_get_bfqq_handle_split(bfqd, bic, bio, true, is_sync, NULL);
 	if (unlikely(bfqq == &bfqd->oom_bfqq))
 		return bfqq;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 
 	bfq_bfqq_resume_state(bfqq, bfqd, bic, false);
 	bfqq->waker_bfqq = waker_bfqq;
@@ -6899,6 +7681,7 @@ static struct bfq_queue *bfq_get_bfqq_handle_split(struct bfq_data *bfqd,
 			       &bfqq->waker_bfqq->woken_list);
 
 	return bfqq;
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 }
 
 /*
@@ -6924,6 +7707,13 @@ static struct bfq_queue *bfq_get_bfqq_handle_split(struct bfq_data *bfqd,
  * rq after rq has been inserted or merged. So, it is safe to execute
  * these preparation operations when rq is finally inserted or merged.
  */
+/*
+ * bfq_init_rq: request 가 BFQ 에 처음 들어올 때 bfq_io_cq 와 bfqq 를
+ * 찾거나 생성하고, request 의 elv.priv[] 를 설정한다.
+ * 호출 경로: bfq_insert_request -> bfq_init_rq
+ * NVMe 연결: request 가 어떤 프로세스/SQ/actuator 에 속하는지 결정하여
+ *           NVMe controller 가 수행할 명령의 소유자를 식별한다.
+ */
 static struct bfq_queue *bfq_init_rq(struct request *rq)
 {
 	struct request_queue *q = rq->q;
@@ -6936,6 +7726,7 @@ static struct bfq_queue *bfq_init_rq(struct request *rq)
 
 	if (unlikely(!rq->elv.icq))
 		return NULL;
+		// NVMe 에러 반환: 할당/초기화 실패 시 NVMe 상위 경로로 오류를 전파하며, 해당 request는 SQ로 전달되지 않음
 
 	/*
 	 * Assuming that RQ_BFQQ(rq) is set only if everything is set
@@ -6946,20 +7737,22 @@ static struct bfq_queue *bfq_init_rq(struct request *rq)
 	 */
 	if (RQ_BFQQ(rq))
 		return RQ_BFQQ(rq);
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 
 	bic = icq_to_bic(rq->elv.icq);
 	bfq_check_ioprio_change(bic, bio);
 	bfq_bic_update_cgroup(bic, bio);
 	bfqq = bfq_get_bfqq_handle_split(bfqd, bic, bio, a_idx, is_sync);
+	// NVMe bfqq 획득/분할: process의 IO를 어떤 bfqq(actuator/SQ 경로)로 할당할지 결정하며, 다중 actuator mapping 시작점
 
-	bfqq_request_allocated(bfqq);
+	bfqq_request_allocated(bfqq); // bfqq 및 상위 entity 의 allocated 카운트 증가: NVMe tag/cgroup 한도 추적.
 	bfqq->ref++;
 	bic->requests++;
 	bfq_log_bfqq(bfqd, bfqq, "get_request %p: bfqq %p, %d",
 		     rq, bfqq, bfqq->ref);
 
-	rq->elv.priv[0] = bic;
-	rq->elv.priv[1] = bfqq;
+	rq->elv.priv[0] = bic; // request 의 io_context 연결: NVMe SQ CID 가 어느 process 의 명령인지 식별.
+	rq->elv.priv[1] = bfqq; // request 가 속한 bfqq 연결: NVMe actuator/SQ 라우팅에 사용.
 
 	/*
 	 * If a bfq_queue has only one process reference, it is owned
@@ -6997,6 +7790,7 @@ static struct bfq_queue *bfq_init_rq(struct request *rq)
 		bfq_handle_burst(bfqd, bfqq);
 
 	return bfqq;
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 }
 
 static void
@@ -7006,6 +7800,7 @@ bfq_idle_slice_timer_body(struct bfq_data *bfqd, struct bfq_queue *bfqq)
 	unsigned long flags;
 
 	spin_lock_irqsave(&bfqd->lock, flags);
+	// NVMe 동기화: hctx/bfqd 스핀락은 dispatch(SQ 삽입)와 completion(CQ 처리) 사이 자료구조 경쟁을 제어한다; ISR context에서 짧게 획득(추정)
 
 	/*
 	 * Considering that bfqq may be in race, we should firstly check
@@ -7015,7 +7810,9 @@ bfq_idle_slice_timer_body(struct bfq_data *bfqd, struct bfq_queue *bfqq)
 	 * been cleared in __bfq_bfqd_reset_in_service func.
 	 */
 	if (bfqq != bfqd->in_service_queue) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		spin_unlock_irqrestore(&bfqd->lock, flags);
+		// NVMe 동기화: hctx/bfqd 스핀락은 dispatch(SQ 삽입)와 completion(CQ 처리) 사이 자료구조 경쟁을 제어한다; ISR context에서 짧게 획득(추정)
 		return;
 	}
 
@@ -7038,22 +7835,34 @@ bfq_idle_slice_timer_body(struct bfq_data *bfqd, struct bfq_queue *bfqq)
 		reason = BFQQE_TOO_IDLE;
 	else
 		goto schedule_dispatch;
+		// NVMe 에러/드레인 분기: goto는 보통 unlock/out 경로로 연결되며, controller abort나 queue drain 시 request를 안전하게 반납(추정)
 
 	bfq_bfqq_expire(bfqd, bfqq, true, reason);
+	// NVMe 스케줄 결정: B-WF2Q+가 다음에 SQ로 전달할 bfqq/entity를 선정하며, 이 선정이 곧 NVMe CID 순서와 doorbell batch를 결정(추정)
 
 schedule_dispatch:
 	bfq_schedule_dispatch(bfqd);
 	spin_unlock_irqrestore(&bfqd->lock, flags);
+	// NVMe 동기화: hctx/bfqd 스핀락은 dispatch(SQ 삽입)와 completion(CQ 처리) 사이 자료구조 경쟁을 제어한다; ISR context에서 짧게 획득(추정)
 }
 
 /*
  * Handler of the expiration of the timer running if the in-service queue
  * is idling inside its time slice.
  */
+/*
+ * bfq_idle_slice_timer: in-service bfqq 가 idle slice 동안 새 request
+ * 를 받지 못하면 만료시키는 hrtimer 핸들러.
+ * 호출 경로: hrtimer 콜백 -> bfq_idle_slice_timer ->
+ *          bfq_idle_slice_timer_body
+ * NVMe 연결: NVMe SQ 를 일정 시간 채우지 않고 대기하다가 timeout 이
+ *           되면 다른 bfqq 로 넘어가 controller queue 를 활용한다.
+ */
 static enum hrtimer_restart bfq_idle_slice_timer(struct hrtimer *timer)
 {
 	struct bfq_data *bfqd = container_of(timer, struct bfq_data,
 					     idle_slice_timer);
+					     // NVMe idling/doorbell 타이밍: slice 타이머로 다음 request 도착을 기다려 batch를 키우며, NVMe SQ doorbell 빈도와 throughput/latency 트레이드오프(추정)
 	struct bfq_queue *bfqq = bfqd->in_service_queue;
 
 	/*
@@ -7068,6 +7877,7 @@ static enum hrtimer_restart bfq_idle_slice_timer(struct hrtimer *timer)
 		bfq_idle_slice_timer_body(bfqd, bfqq);
 
 	return HRTIMER_NORESTART;
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 }
 
 static void __bfq_put_async_bfqq(struct bfq_data *bfqd,
@@ -7077,11 +7887,13 @@ static void __bfq_put_async_bfqq(struct bfq_data *bfqd,
 
 	bfq_log(bfqd, "put_async_bfqq: %p", bfqq);
 	if (bfqq) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		bfq_bfqq_move(bfqd, bfqq, bfqd->root_group);
 
 		bfq_log_bfqq(bfqd, bfqq, "put_async_bfqq: putting %p, %d",
 			     bfqq, bfqq->ref);
 		bfq_put_queue(bfqq);
+		// NVMe bfqq 반납: 참조 카운트가 0이면 bfqq를 해제하며, 남은 request는 완료/abort로 정리되어야 함
 		*bfqq_ptr = NULL;
 	}
 }
@@ -7097,6 +7909,7 @@ void bfq_put_async_queues(struct bfq_data *bfqd, struct bfq_group *bfqg)
 	int i, j, k;
 
 	for (k = 0; k < bfqd->num_actuators; k++) {
+	// NVMe 반복 처리: request/tag/bio/bvec/SQ/CQ 엔트리를 순회하며 CID 할당, PRP/SGL 조립, completion 상태를 누적한다(추정) -> blk-mq tag/hctx/CQ
 		for (i = 0; i < 2; i++)
 			for (j = 0; j < IOPRIO_NR_LEVELS; j++)
 				__bfq_put_async_bfqq(bfqd, &bfqg->async_bfqq[i][j][k]);
@@ -7109,10 +7922,18 @@ void bfq_put_async_queues(struct bfq_data *bfqd, struct bfq_group *bfqg)
  * See the comments on bfq_limit_depth for the purpose of
  * the depths set in the function. Return minimum shallow depth we'll use.
  */
+/*
+ * bfq_depth_updated: request_queue 의 async_depth 가 바뀔 때
+ * bfqd->async_depths[] 를 재계산하고 shallow depth 를 설정한다.
+ * 호출 경로: blk_mq_update_nr_requests -> blk_mq_sched_depth_updated ->
+ *          elevator_ops.depth_updated(bfq_depth_updated)
+ * NVMe 연결: NVMe controller 의 SQ/tag 수가 늘어나거나 줄면, sync/async
+ *           및 weight-raised queue 별로 tag 할당 비율을 재조정한다.
+ */
 static void bfq_depth_updated(struct request_queue *q)
 {
 	struct bfq_data *bfqd = q->elevator->elevator_data;
-	unsigned int async_depth = q->async_depth;
+	unsigned int async_depth = q->async_depth; // NVMe async SQ 에 할당 가능한 tag 깊이 기준.
 
 	/*
 	 * By default:
@@ -7138,6 +7959,13 @@ static void bfq_depth_updated(struct request_queue *q)
 	blk_mq_set_min_shallow_depth(q, 1);
 }
 
+/*
+ * bfq_exit_queue: elevator 가 해제될 때 idle list, async queue,
+ * cgroup 정책, timer 등을 정리한다.
+ * 호출 경로: elevator_exit -> elevator_ops.exit_sched(bfq_exit_queue)
+ * NVMe 연결: NVMe controller 의 모든 SQ/CQ 가 비었음을 확인하고,
+ *           관련 자원을 해제한다.
+ */
 static void bfq_exit_queue(struct elevator_queue *e)
 {
 	struct bfq_data *bfqd = e->elevator_data;
@@ -7145,17 +7973,22 @@ static void bfq_exit_queue(struct elevator_queue *e)
 	unsigned int actuator;
 
 	hrtimer_cancel(&bfqd->idle_slice_timer);
+	// NVMe doorbell 타이밍: timer는 batch 완료 후 SQ tail doorbell 발행 시점을 조절하며, 너무 잦은 doorbell은 MMIO 비용을 증가시킨다(추정)
 
 	spin_lock_irq(&bfqd->lock);
 	list_for_each_entry_safe(bfqq, n, &bfqd->idle_list, bfqq_list)
 		bfq_deactivate_bfqq(bfqd, bfqq, false, false);
+		// NVMe queue 활성화/비활성화: BFQ service tree에 추가/제거하며, 활성화된 bfqq만 dispatch되어 NVMe SQ로 전달
 	spin_unlock_irq(&bfqd->lock);
 
 	for (actuator = 0; actuator < bfqd->num_actuators; actuator++)
 		WARN_ON_ONCE(bfqd->rq_in_driver[actuator]);
+		// NVMe queue depth: in-flight/request 수가 NVMe SQ/CQ 엔트리 사용량과 budget을 제한하며, NCQ queue depth(32/64) 초과 시 dispatch 지연
 	WARN_ON_ONCE(bfqd->tot_rq_in_driver);
+	// NVMe queue depth: in-flight/request 수가 NVMe SQ/CQ 엔트리 사용량과 budget을 제한하며, NCQ queue depth(32/64) 초과 시 dispatch 지연
 
 	hrtimer_cancel(&bfqd->idle_slice_timer);
+	// NVMe doorbell 타이밍: timer는 batch 완료 후 SQ tail doorbell 발행 시점을 조절하며, 너무 잦은 doorbell은 MMIO 비용을 증가시킨다(추정)
 
 	/* release oom-queue reference to root group */
 	bfqg_and_blkg_put(bfqd->root_group);
@@ -7166,14 +7999,18 @@ static void bfq_exit_queue(struct elevator_queue *e)
 	spin_lock_irq(&bfqd->lock);
 	bfq_put_async_queues(bfqd, bfqd->root_group);
 	kfree(bfqd->root_group);
+	// NVMe 메모리 생명주기: bfqq/entity 할당/해제이며, NVMe request_pool와 별개이나 동시에 많은 bfqq는 tag 회수 지연 초래(추정)
 	spin_unlock_irq(&bfqd->lock);
 #endif
 
 	blk_stat_disable_accounting(bfqd->queue);
 	blk_queue_flag_clear(QUEUE_FLAG_DISABLE_WBT_DEF, bfqd->queue);
+	// NVMe queue 상태: request_queue 플래그 변경은 NVMe controller run/stop/drain과 연동되며, doorbell 발행 여부에 영향(추정)
 	wbt_enable_default(bfqd->queue->disk);
+	// NVMe writeback 제어: write throttle은 NVMe write cache flush 빈도와 열화 방지하며, FUA/flush 명령 비율에 영향(추정)
 
 	kfree(bfqd);
+	// NVMe 메모리 생명주기: bfqq/entity 할당/해제이며, NVMe request_pool와 별개이나 동시에 많은 bfqq는 tag 회수 지연 초래(추정)
 }
 
 static void bfq_init_root_group(struct bfq_group *root_group,
@@ -7189,18 +8026,31 @@ static void bfq_init_root_group(struct bfq_group *root_group,
 	root_group->rq_pos_tree = RB_ROOT;
 	for (i = 0; i < BFQ_IOPRIO_CLASSES; i++)
 		root_group->sched_data.service_tree[i] = BFQ_SERVICE_TREE_INIT;
+		// NVMe 스케줄 결정: B-WF2Q+가 다음에 SQ로 전달할 bfqq/entity를 선정하며, 이 선정이 곧 NVMe CID 순서와 doorbell batch를 결정(추정)
 	root_group->sched_data.bfq_class_idle_last_service = jiffies;
+	// NVMe 스케줄 결정: B-WF2Q+가 다음에 SQ로 전달할 bfqq/entity를 선정하며, 이 선정이 곧 NVMe CID 순서와 doorbell batch를 결정(추정)
 }
 
+/*
+ * bfq_init_queue: elevator 를 선택했을 때 bfq_data 를 할당하고
+ * actuator 정보, idle 타이머, cgroup 계층 등을 초기화한다.
+ * 호출 경로: elevator_init -> elevator_ops.init_sched(bfq_init_queue)
+ * NVMe 연결: NVMe 장치의 blk_independent_access_ranges 를 읽어
+ *           num_actuators/sector/nr_sectors 를 설정하고, SSD 에 맞는
+ *           nonrot_with_queueing, hw_tag 초기값을 준비한다.
+ */
 static int bfq_init_queue(struct request_queue *q, struct elevator_queue *eq)
 {
 	struct bfq_data *bfqd;
 	unsigned int i;
-	struct blk_independent_access_ranges *ia_ranges = q->disk->ia_ranges;
+	struct blk_independent_access_ranges *ia_ranges = q->disk->ia_ranges; // NVMe 다중 actuator/namespace 의 독립 접근 영역 획득.
+	// NVMe 다중 도메인: 독립 접근 범위를 기반으로 actuator/SQ를 분리하며, ZNS/multi-actuator NVMe에서 병렬성 극대화(추정)
 
 	bfqd = kzalloc_node(sizeof(*bfqd), GFP_KERNEL, q->node);
+	// NVMe 메모리 생명주기: bfqq/entity 할당/해제이며, NVMe request_pool와 별개이나 동시에 많은 bfqq는 tag 회수 지연 초래(추정)
 	if (!bfqd)
 		return -ENOMEM;
+		// NVMe 에러 반환: 할당/초기화 실패 시 NVMe 상위 경로로 오류를 전파하며, 해당 request는 SQ로 전달되지 않음
 
 	eq->elevator_data = bfqd;
 
@@ -7234,26 +8084,33 @@ static int bfq_init_queue(struct request_queue *q, struct elevator_queue *eq)
 
 	bfqd->queue = q;
 
-	bfqd->num_actuators = 1;
+	bfqd->num_actuators = 1; // 기본값: 단일 actuator NVMe SSD.
+	// NVMe 다중 actuator: 독립 접근 영역에 따라 request를 분리하며, 각 actuator는 별도 SQ/CQ 또는 namespace 병렬 경로로 dispatch(추정)
 	/*
 	 * If the disk supports multiple actuators, copy independent
 	 * access ranges from the request queue structure.
 	 */
 	spin_lock_irq(&q->queue_lock);
 	if (ia_ranges) {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		/*
 		 * Check if the disk ia_ranges size exceeds the current bfq
 		 * actuator limit.
 		 */
 		if (ia_ranges->nr_ia_ranges > BFQ_MAX_ACTUATORS) {
+		// NVMe 다중 actuator: 독립 접근 영역에 따라 request를 분리하며, 각 actuator는 별도 SQ/CQ 또는 namespace 병렬 경로로 dispatch(추정)
 			pr_crit("nr_ia_ranges higher than act limit: iars=%d, max=%d.\n",
 				ia_ranges->nr_ia_ranges, BFQ_MAX_ACTUATORS);
+				// NVMe 다중 actuator: 독립 접근 영역에 따라 request를 분리하며, 각 actuator는 별도 SQ/CQ 또는 namespace 병렬 경로로 dispatch(추정)
 			pr_crit("Falling back to single actuator mode.\n");
 		} else {
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 			bfqd->num_actuators = ia_ranges->nr_ia_ranges;
+			// NVMe 다중 actuator: 독립 접근 영역에 따라 request를 분리하며, 각 actuator는 별도 SQ/CQ 또는 namespace 병렬 경로로 dispatch(추정)
 
 			for (i = 0; i < bfqd->num_actuators; i++) {
-				bfqd->sector[i] = ia_ranges->ia_range[i].sector;
+			// NVMe 반복 처리: request/tag/bio/bvec/SQ/CQ 엔트리를 순회하며 CID 할당, PRP/SGL 조립, completion 상태를 누적한다(추정) -> blk-mq tag/hctx/CQ
+				bfqd->sector[i] = ia_ranges->ia_range[i].sector; // 각 actuator 가 커버하는 LBA 범위를 NVMe 독립 접근 영역에서 복사.
 				bfqd->nr_sectors[i] =
 					ia_ranges->ia_range[i].nr_sectors;
 			}
@@ -7262,12 +8119,14 @@ static int bfq_init_queue(struct request_queue *q, struct elevator_queue *eq)
 
 	/* Otherwise use single-actuator dev info */
 	if (bfqd->num_actuators == 1) {
+	// NVMe 다중 actuator: 독립 접근 영역에 따라 request를 분리하며, 각 actuator는 별도 SQ/CQ 또는 namespace 병렬 경로로 dispatch(추정)
 		bfqd->sector[0] = 0;
 		bfqd->nr_sectors[0] = get_capacity(q->disk);
 	}
 	spin_unlock_irq(&q->queue_lock);
 
 	INIT_LIST_HEAD(&bfqd->dispatch);
+	// NVMe list 연결: dispatch/completion 리스트 조작이며, request가 SQ/CQ 경로에서 이동할 때 일관성 유지
 
 	hrtimer_setup(&bfqd->idle_slice_timer, bfq_idle_slice_timer, CLOCK_MONOTONIC,
 		      HRTIMER_MODE_REL);
@@ -7278,12 +8137,17 @@ static int bfq_init_queue(struct request_queue *q, struct elevator_queue *eq)
 #endif
 
 	INIT_LIST_HEAD(&bfqd->active_list[0]);
+	// NVMe list 연결: dispatch/completion 리스트 조작이며, request가 SQ/CQ 경로에서 이동할 때 일관성 유지
 	INIT_LIST_HEAD(&bfqd->active_list[1]);
+	// NVMe list 연결: dispatch/completion 리스트 조작이며, request가 SQ/CQ 경로에서 이동할 때 일관성 유지
 	INIT_LIST_HEAD(&bfqd->idle_list);
+	// NVMe list 연결: dispatch/completion 리스트 조작이며, request가 SQ/CQ 경로에서 이동할 때 일관성 유지
 	INIT_HLIST_HEAD(&bfqd->burst_list);
 
 	bfqd->hw_tag = -1;
-	bfqd->nonrot_with_queueing = !blk_queue_rot(bfqd->queue);
+	// NVMe 장치 특성: NVMe SSD는 nonrot_with_queueing=true로 merge 대신 NCQ reordering과 idling 정책을 적용하며, hw_tag는 controller queueing 능력 표시
+	bfqd->nonrot_with_queueing = !blk_queue_rot(bfqd->queue); // NVMe SSD 는 회전하지 않고 queueing 지원: merge/idling 정책의 핵심 플래그.
+	// NVMe 장치 특성: NVMe SSD는 nonrot_with_queueing=true로 merge 대신 NCQ reordering과 idling 정책을 적용하며, hw_tag는 controller queueing 능력 표시
 
 	bfqd->bfq_max_budget = bfq_default_max_budget;
 
@@ -7321,6 +8185,7 @@ static int bfq_init_queue(struct request_queue *q, struct elevator_queue *eq)
 	bfqd->rate_dur_prod = ref_rate[!blk_queue_rot(bfqd->queue)] *
 		ref_wr_duration[!blk_queue_rot(bfqd->queue)];
 	bfqd->peak_rate = ref_rate[!blk_queue_rot(bfqd->queue)] * 2 / 3;
+	// NVMe 성능 추정: peak_rate는 NVMe SSD의 최대 처리율(섹터/us)을 측정하며, budget 계산과 interactive latency 예측에 사용(추정)
 
 	/* see comments on the definition of next field inside bfq_data */
 	bfqd->actuator_load_threshold = 4;
@@ -7345,28 +8210,36 @@ static int bfq_init_queue(struct request_queue *q, struct elevator_queue *eq)
 	bfqd->root_group = bfq_create_group_hierarchy(bfqd, q->node);
 	if (!bfqd->root_group)
 		goto out_free;
+		// NVMe 에러/드레인 분기: goto는 보통 unlock/out 경로로 연결되며, controller abort나 queue drain 시 request를 안전하게 반납(추정)
 	bfq_init_root_group(bfqd->root_group, bfqd);
 	bfq_init_entity(&bfqd->oom_bfqq.entity, bfqd->root_group);
 	bfq_depth_updated(q);
 
 	/* We dispatch from request queue wide instead of hw queue */
-	blk_queue_flag_set(QUEUE_FLAG_SQ_SCHED, q);
+	blk_queue_flag_set(QUEUE_FLAG_SQ_SCHED, q); // request queue 전체에서 BFQ dispatch 수행(SQ sched): NVMe SQ 단일 관점.
+	// NVMe queue 상태: request_queue 플래그 변경은 NVMe controller run/stop/drain과 연동되며, doorbell 발행 여부에 영향(추정)
 
 	blk_queue_flag_set(QUEUE_FLAG_DISABLE_WBT_DEF, q);
+	// NVMe queue 상태: request_queue 플래그 변경은 NVMe controller run/stop/drain과 연동되며, doorbell 발행 여부에 영향(추정)
 	wbt_disable_default(q->disk);
+	// NVMe writeback 제어: write throttle은 NVMe write cache flush 빈도와 열화 방지하며, FUA/flush 명령 비율에 영향(추정)
 	blk_stat_enable_accounting(q);
 	q->async_depth = (q->nr_requests * 3) >> 2;
 
 	return 0;
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 
 out_free:
 	kfree(bfqd);
+	// NVMe 메모리 생명주기: bfqq/entity 할당/해제이며, NVMe request_pool와 별개이나 동시에 많은 bfqq는 tag 회수 지연 초래(추정)
 	return -ENOMEM;
+	// NVMe 에러 반환: 할당/초기화 실패 시 NVMe 상위 경로로 오류를 전파하며, 해당 request는 SQ로 전달되지 않음
 }
 
 static void bfq_slab_kill(void)
 {
 	kmem_cache_destroy(bfq_pool);
+	// NVMe 메모리 생명주기: bfqq/entity 할당/해제이며, NVMe request_pool와 별개이나 동시에 많은 bfqq는 tag 회수 지연 초래(추정)
 }
 
 static int __init bfq_slab_setup(void)
@@ -7374,12 +8247,15 @@ static int __init bfq_slab_setup(void)
 	bfq_pool = KMEM_CACHE(bfq_queue, 0);
 	if (!bfq_pool)
 		return -ENOMEM;
+		// NVMe 에러 반환: 할당/초기화 실패 시 NVMe 상위 경로로 오류를 전파하며, 해당 request는 SQ로 전달되지 않음
 	return 0;
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 }
 
 static ssize_t bfq_var_show(unsigned int var, char *page)
 {
 	return sprintf(page, "%u\n", var);
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 }
 
 static int bfq_var_store(unsigned long *var, const char *page)
@@ -7389,8 +8265,10 @@ static int bfq_var_store(unsigned long *var, const char *page)
 
 	if (ret)
 		return ret;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 	*var = new_val;
 	return 0;
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 }
 
 #define SHOW_FUNCTION(__FUNC, __VAR, __CONV)				\
@@ -7490,10 +8368,12 @@ static ssize_t bfq_max_budget_store(struct elevator_queue *e,
 	ret = bfq_var_store(&__data, (page));
 	if (ret)
 		return ret;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 
 	if (__data == 0)
 		bfqd->bfq_max_budget = bfq_calc_max_budget(bfqd);
 	else {
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 		if (__data > INT_MAX)
 			__data = INT_MAX;
 		bfqd->bfq_max_budget = __data;
@@ -7502,6 +8382,7 @@ static ssize_t bfq_max_budget_store(struct elevator_queue *e,
 	bfqd->bfq_user_max_budget = __data;
 
 	return count;
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 }
 
 /*
@@ -7518,6 +8399,7 @@ static ssize_t bfq_timeout_sync_store(struct elevator_queue *e,
 	ret = bfq_var_store(&__data, (page));
 	if (ret)
 		return ret;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 
 	if (__data < 1)
 		__data = 1;
@@ -7529,6 +8411,7 @@ static ssize_t bfq_timeout_sync_store(struct elevator_queue *e,
 		bfqd->bfq_max_budget = bfq_calc_max_budget(bfqd);
 
 	return count;
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 }
 
 static ssize_t bfq_strict_guarantees_store(struct elevator_queue *e,
@@ -7541,6 +8424,7 @@ static ssize_t bfq_strict_guarantees_store(struct elevator_queue *e,
 	ret = bfq_var_store(&__data, (page));
 	if (ret)
 		return ret;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 
 	if (__data > 1)
 		__data = 1;
@@ -7551,6 +8435,7 @@ static ssize_t bfq_strict_guarantees_store(struct elevator_queue *e,
 	bfqd->strict_guarantees = __data;
 
 	return count;
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 }
 
 static ssize_t bfq_low_latency_store(struct elevator_queue *e,
@@ -7563,6 +8448,7 @@ static ssize_t bfq_low_latency_store(struct elevator_queue *e,
 	ret = bfq_var_store(&__data, (page));
 	if (ret)
 		return ret;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 
 	if (__data > 1)
 		__data = 1;
@@ -7571,6 +8457,7 @@ static ssize_t bfq_low_latency_store(struct elevator_queue *e,
 	bfqd->low_latency = __data;
 
 	return count;
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 }
 
 #define BFQ_ATTR(name) \
@@ -7628,11 +8515,13 @@ static int __init bfq_init(void)
 	ret = blkcg_policy_register(&blkcg_policy_bfq);
 	if (ret)
 		return ret;
+		// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 #endif
 
 	ret = -ENOMEM;
 	if (bfq_slab_setup())
 		goto err_pol_unreg;
+		// NVMe 에러/드레인 분기: goto는 보통 unlock/out 경로로 연결되며, controller abort나 queue drain 시 request를 안전하게 반납(추정)
 
 	/*
 	 * Times to load large popular applications for the typical
@@ -7653,8 +8542,10 @@ static int __init bfq_init(void)
 	ret = elv_register(&iosched_bfq_mq);
 	if (ret)
 		goto slab_kill;
+		// NVMe 에러/드레인 분기: goto는 보통 unlock/out 경로로 연결되며, controller abort나 queue drain 시 request를 안전하게 반납(추정)
 
 	return 0;
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 
 slab_kill:
 	bfq_slab_kill();
@@ -7663,6 +8554,7 @@ err_pol_unreg:
 	blkcg_policy_unregister(&blkcg_policy_bfq);
 #endif
 	return ret;
+	// NVMe 제어 흐름: 조건/비교/반환은 위의 SQ/CQ 선택, doorbell 타이밍, tag/queue depth 제어 변수에 영향(추정)
 }
 
 static void __exit bfq_exit(void)
@@ -7680,3 +8572,17 @@ module_exit(bfq_exit);
 MODULE_AUTHOR("Paolo Valente");
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("MQ Budget Fair Queueing I/O Scheduler");
+/*
+ * NVMe 관점 핵심 요약
+ *
+ *  - BFQ 는 blk-mq 와 NVMe 드라이버 사이에서 request 를 정렬/선별/제한하며,
+ *    NVMe SQ/CQ 의 queue depth 와 CID 할당에 직접적인 영향을 준다.
+ *  - nonrot_with_queueing=true 인 NVMe SSD 에서는 merge 를 억제하고
+ *    injection 으로 NCQ depth 를 적극 활용하며, 필요할 때만 idle 을 허용한다.
+ *  - num_actuators/rq_in_driver[] 를 통해 다중 actuator NVMe 장치의
+ *    per-actuator 부하를 추정하고 병렬 throughput 을 극대화한다(추정).
+ *  - bfq_limit_depth/bfq_depth_updated 는 NVMe SQ/tag 자원을
+ *    sync/async/cgroup 우선순위에 따라 배분한다.
+ *  - bfq_finish_requeue_request/bfq_update_peak_rate 는 NVMe CQ completion
+ *    정보를 바탕으로 처리율을 추정하고 다음 dispatch 결정에 반영한다.
+ */

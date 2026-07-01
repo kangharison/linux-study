@@ -5,6 +5,16 @@
  * Portions Copyright (C) 2020 Christoph Hellwig
  */
 
+/*
+ * ============================================================================
+ * NVMe SSD 관점 gendisk 관리 파일
+ *
+ * 이 파일은 struct gendisk의 생명주기(할당/등록/삭제)와 블록 장치 번호(major/minor),
+ * 파티션 스캔, sysfs/proc 인터페이스를 담당한다. NVMe SSD 입장에서는 상위 VFS/파일
+ * 시스템의 bio가 request_queue를 거쳐 gendisk 단위로 라우팅되며, 이 파일은 해당
+ * 디스크 객체가 블록 클래스에 노출되고 제거되는 관문(gate) 역할을 한다.
+ * ============================================================================
+ */
 #include <linux/module.h>
 #include <linux/ctype.h>
 #include <linux/fs.h>
@@ -56,6 +66,16 @@ static atomic64_t diskseq;
 #define NR_EXT_DEVT		(1 << MINORBITS)
 static DEFINE_IDA(ext_devt_ida);
 
+/*
+ * set_capacity - gendisk의 논리 용량을 갱신
+ * @disk: 대상 gendisk (NVMe 네임스페이스에 대응)
+ * @sectors: 새로운 섹터 수
+ *
+ * NVMe 네임스페이스의 사용 가능한 논리 블록 수(LBA count)가 결정되면 이 함수를
+ * 통해 상위 레이어에 용량을 알린다. 이 값은 파일시스템이 bio를 생성할 때
+ * 최종 LBA 범위를 검증하는 기준이 된다.
+ * 호출 경로(추정): nvme_update_disk_info -> set_capacity
+ */
 void set_capacity(struct gendisk *disk, sector_t sectors)
 {
 	if (sectors > BLK_DEV_MAX_SECTORS) {
@@ -69,6 +89,15 @@ void set_capacity(struct gendisk *disk, sector_t sectors)
 }
 EXPORT_SYMBOL(set_capacity);
 
+/*
+ * set_capacity_and_notify - 용량 변경 및 uevent 통지
+ * @disk: 대상 gendisk
+ * @size: 새 섹터 수
+ *
+ * NVMe 네임스페이스가 동적 재조정(namespace resize)되었을 때 호출된다.
+ * 용량이 0에서/으로 바뀌지 않는 한 "RESIZE=1" uevent를 발생시켜 udev가
+ * 파티션 테이블을 다시 읽도록 유도한다.
+ */
 /*
  * Set disk capacity and notify if the size is not currently zero and will not
  * be set to zero.  Returns true if a uevent was sent, otherwise false.
@@ -133,7 +162,7 @@ static void bdev_count_inflight_rw(struct block_device *part,
 	int cpu;
 
 	if (mq_driver) {
-		blk_mq_in_driver_rw(part, inflight);
+		blk_mq_in_driver_rw(part, inflight); /* NVMe: SQ/CQ에 아직 완료되지 않은 CID 기반 요청 집계 */
 		return;
 	}
 
@@ -151,6 +180,14 @@ static void bdev_count_inflight_rw(struct block_device *part,
 	inflight[WRITE] = write > 0 ? write : 0;
 }
 
+/*
+ * bdev_count_inflight - 디바이스별 진행 중인 I/O 개수 반환
+ * @part: 대상 block_device
+ *
+ * NVMe 큐에서 아직 완료되지 않은 요청 수를 집계한다.
+ * rq-based 경로: blk_mq_start_request -> blk_account_io_start로 시작된 I/O
+ * bio-based 경로: bdev_start_io_acct로 시작된 I/O
+ */
 /**
  * bdev_count_inflight - get the number of inflight IOs for a block device.
  *
@@ -175,14 +212,19 @@ EXPORT_SYMBOL_GPL(bdev_count_inflight);
  *
  */
 #define BLKDEV_MAJOR_HASH_SIZE 255
+/*
+ * NVMe 연결점: major 번호는 /dev/nvmeXnY 같은 장치 노드 생성의 첫 단계이다.
+ * NVMe 드라이버(drivers/nvme/host)는 이 해시를 통해 자신의 major를 등록하고,
+ * 사용자 공간이 해당 major의 minor를 open할 때 디스크를 찾을 수 있게 한다.
+ */
 static struct blk_major_name {
-	struct blk_major_name *next;
-	int major;
-	char name[16];
+	struct blk_major_name *next; /* 해시 체인의 다음 엔트리 */
+	int major;                   /* /dev/nvmeXnY의 MAJOR 번호; NVMe 드라이버 등록 시 결정 */
+	char name[16];               /* 드라이버 이름, 예: "nvme" */
 #ifdef CONFIG_BLOCK_LEGACY_AUTOLOAD
-	void (*probe)(dev_t devt);
+	void (*probe)(dev_t devt);   /* 레거시 자동 로드 콜백(추정: 현대 NVMe 드라이버에서는 거의 사용 안 함) */
 #endif
-} *major_names[BLKDEV_MAJOR_HASH_SIZE];
+} *major_names[BLKDEV_MAJOR_HASH_SIZE]; /* major 번호 -> 드라이버 매핑 해시 테이블 */
 static DEFINE_MUTEX(major_names_lock);
 static DEFINE_SPINLOCK(major_names_spinlock);
 
@@ -205,6 +247,16 @@ void blkdev_show(struct seq_file *seqf, off_t offset)
 }
 #endif /* CONFIG_PROC_FS */
 
+/*
+ * __register_blkdev - 새로운 블록 장치 major 번호 등록
+ * @major: 요청 major 번호 (0이면 동적 할당)
+ * @name: 장치 이름 (예: "nvme")
+ * @probe: 레거시 자동 탐색 콜백
+ *
+ * NVMe 호스트 드라이버가 초기화될 때 자신의 major 번호를 시스템에 등록한다.
+ * 등록된 major는 /dev/nvmeXnY 장치 노드 생성의 근거가 되며, 이후
+ * add_disk()에서 gendisk의 major/minor가 설정된다.
+ */
 /**
  * __register_blkdev - register a new block device
  *
@@ -300,6 +352,13 @@ out:
 }
 EXPORT_SYMBOL(__register_blkdev);
 
+/*
+ * unregister_blkdev - 블록 장치 major 번호 등록 해제
+ * @major: 등록 해제할 major 번호
+ * @name: 등록 시 사용한 이름
+ *
+ * NVMe 드라이버가 unload되거나 컨트롤러가 제거될 때 major를 해제한다.
+ */
 void unregister_blkdev(unsigned int major, const char *name)
 {
 	struct blk_major_name **n;
@@ -360,6 +419,15 @@ void disk_uevent(struct gendisk *disk, enum kobject_action action)
 }
 EXPORT_SYMBOL_GPL(disk_uevent);
 
+/*
+ * disk_scan_partitions - gendisk에 연결된 파티션 테이블 스캔
+ * @disk: 대상 gendisk
+ * @mode: 블록 장치 open 모드
+ *
+ * NVMe 네임스페이스가 등록된 후 사용자 공간에 노출되기 전에 파티션 정보를
+ * 읽어들인다. GPT/MBR 파티션 테이블을 해석하여 disk->part_tbl에 추가한다.
+ * 호출 경로: add_disk_final -> disk_scan_partitions
+ */
 int disk_scan_partitions(struct gendisk *disk, blk_mode_t mode)
 {
 	struct file *file;
@@ -402,6 +470,15 @@ int disk_scan_partitions(struct gendisk *disk, blk_mode_t mode)
 	return ret;
 }
 
+/*
+ * add_disk_final - gendisk 등록의 마무리 단계
+ * @disk: 등록할 gendisk
+ *
+ * sysfs/proc 노출, uevent 발생, 파티션 스캔, queue limits 적용을 수행한다.
+ * NVMe 관점에서는 이 단계까지 완료되어야 /dev/nvmeXnY 노드가 생성되고
+ * 상위 파일시스템이 I/O를 발행할 수 있다.
+ * 호출 경로: add_disk_fwnode -> add_disk_final
+ */
 static void add_disk_final(struct gendisk *disk)
 {
 	struct device *ddev = disk_to_dev(disk);
@@ -428,6 +505,18 @@ static void add_disk_final(struct gendisk *disk)
 	set_bit(GD_ADDED, &disk->state);
 }
 
+/*
+ * __add_disk - gendisk를 커널 장치 계층에 등록
+ * @parent: 부모 장치 (NVMe 컨트롤러의 device)
+ * @disk: 등록할 gendisk
+ * @groups: 추가 sysfs 속성 그룹
+ * @fwnode: 연결할 firmware node
+ *
+ * blk-mq 기반 NVMe 드라이버는 disk->fops->submit_bio를 제공하지 않는다.
+ * 대신 request_queue의 tag_set을 통해 blk_mq_submit_bio 경로가 활성화된다.
+ * 이 함수는 major/minor 할당, device_add, queue 등록, bdi 등록을 순차 수행한다.
+ * 호출 경로: add_disk_fwnode -> __add_disk -> blk_register_queue
+ */
 static int __add_disk(struct device *parent, struct gendisk *disk,
 		      const struct attribute_group **groups,
 		      struct fwnode_handle *fwnode)
@@ -439,7 +528,7 @@ static int __add_disk(struct device *parent, struct gendisk *disk,
 	if (WARN_ON_ONCE(bdev_nr_sectors(disk->part0) > BLK_DEV_MAX_SECTORS))
 		return -EINVAL;
 
-	if (queue_is_mq(disk->queue)) {
+	if (queue_is_mq(disk->queue)) { /* NVMe는 blk-mq 경로를 사용하므로 submit_bio 미제공 */
 		/*
 		 * ->submit_bio and ->poll_bio are bypassed for blk-mq drivers.
 		 */
@@ -513,7 +602,7 @@ static int __add_disk(struct device *parent, struct gendisk *disk,
 	 */
 	pm_runtime_set_memalloc_noio(ddev, true);
 
-	disk->part0->bd_holder_dir =
+	disk->part0->bd_holder_dir = /* NVMe 디스크의 holder 디렉터리(예: dm/lvm 마운트 정보) */
 		kobject_create_and_add("holders", &ddev->kobj);
 	if (!disk->part0->bd_holder_dir) {
 		ret = -ENOMEM;
@@ -525,12 +614,12 @@ static int __add_disk(struct device *parent, struct gendisk *disk,
 		goto out_put_holder_dir;
 	}
 
-	ret = blk_register_queue(disk);
+	ret = blk_register_queue(disk); /* NVMe request_queue를 sysfs /sys/block/nvmeXnY/queue에 등록 */
 	if (ret)
 		goto out_put_slave_dir;
 
 	if (!(disk->flags & GENHD_FL_HIDDEN)) {
-		ret = bdi_register(disk->bdi, "%u:%u",
+		ret = bdi_register(disk->bdi, "%u:%u", /* NVMe 네임스페이스의 writeback 인프라 등록 */
 				   disk->major, disk->first_minor);
 		if (ret)
 			goto out_unregister_queue;
@@ -572,6 +661,17 @@ out:
 	return ret;
 }
 
+/*
+ * add_disk_fwnode - firmware node를 가진 gendisk 등록
+ * @parent: 부모 장치
+ * @disk: 등록할 gendisk
+ * @groups: 추가 sysfs 속성 그룹
+ * @fwnode: firmware node
+ *
+ * blk-mq 드라이버의 경우 tag_set->update_nr_hwq_lock을 read 잡은 상태에서
+ * __add_disk을 호출한다. NVMe 드라이버가 동적으로 hw queue 개수를 변경할 때
+ * 이 락이 등록 경로와 동기화한다. add_disk_final은 락 밖에서 호출된다.
+ */
 /**
  * add_disk_fwnode - add disk information to kernel list with fwnode
  * @parent: parent device for the disk
@@ -591,9 +691,9 @@ int __must_check add_disk_fwnode(struct device *parent, struct gendisk *disk,
 	int ret;
 
 	if (queue_is_mq(disk->queue)) {
-		set = disk->queue->tag_set;
+		set = disk->queue->tag_set; /* NVMe blk_mq_tag_set, nr_hw_queues 변경과 동기화 */
 		memflags = memalloc_noio_save();
-		down_read(&set->update_nr_hwq_lock);
+		down_read(&set->update_nr_hwq_lock); /* nvme_update_nr_queues 등과 경쟁 방지 */
 		ret = __add_disk(parent, disk, groups, fwnode);
 		up_read(&set->update_nr_hwq_lock);
 		memalloc_noio_restore(memflags);
@@ -612,6 +712,16 @@ int __must_check add_disk_fwnode(struct device *parent, struct gendisk *disk,
 }
 EXPORT_SYMBOL_GPL(add_disk_fwnode);
 
+/*
+ * device_add_disk - gendisk를 커널에 등록 (레거시 진입점)
+ * @parent: 부모 장치
+ * @disk: 등록할 gendisk
+ * @groups: 추가 sysfs 속성 그룹
+ *
+ * NVMe 드라이버가 nvme_alloc_ns_disk 또는 유사 경로에서 이 함수를 호출하여
+ * 네임스페이스를 블록 서브시스템에 노출시킨다.
+ * 호출 경로(추정): nvme_revalidate_disk -> device_add_disk
+ */
 /**
  * device_add_disk - add disk information to kernel list
  * @parent: parent device for the disk
@@ -676,6 +786,15 @@ static bool __blk_mark_disk_dead(struct gendisk *disk)
 	return blk_queue_start_drain(disk->queue);
 }
 
+/*
+ * blk_mark_disk_dead - 디스크를 죽은 상태로 표시하고 새 I/O 차단
+ * @disk: 대상 gendisk
+ *
+ * NVMe 컨트롤러가 갑작스럽게 제거되거나 치명적 오류 발생 시 호출된다.
+ * GD_DEAD 플래그를 설정하고 QUEUE_FLAG_DYING를 request_queue에 설정하여
+ * bio_queue_enter() 이후의 새 I/O를 차단한다. 기존 진행 중인 I/O는
+ * nvme_timeout/nvme_cancel_request 등을 통해 하위에서 완료 처리된다.
+ */
 /**
  * blk_mark_disk_dead - mark a disk as dead
  * @disk: disk to mark as dead
@@ -690,6 +809,15 @@ void blk_mark_disk_dead(struct gendisk *disk)
 }
 EXPORT_SYMBOL_GPL(blk_mark_disk_dead);
 
+/*
+ * __del_gendisk - gendisk와 관련 자원을 제거
+ * @disk: 제거할 gendisk
+ *
+ * NVMe 네임스페이스가 제거될 때 파티션을 drop하고, queue를 drain/freeze한 뒤
+ * request_queue를 unregister한다. blk_mq_freeze_queue_wait으로 모든 진행 중인
+ * I/O가 완료될 때까지 대기한다. 이 함수는 del_gendisk의 실제 구현체이다.
+ * 호출 경로: del_gendisk -> __del_gendisk -> blk_unregister_queue
+ */
 static void __del_gendisk(struct gendisk *disk)
 {
 	struct request_queue *q = disk->queue;
@@ -759,8 +887,8 @@ static void __del_gendisk(struct gendisk *disk)
 	blk_sync_queue(q);
 	blk_flush_integrity();
 
-	if (queue_is_mq(q))
-		blk_mq_cancel_work_sync(q);
+	if (queue_is_mq(q)) /* NVMe: blk_mq_cancel_work_sync로 태그 재활용 지연 작업 취소 */
+		blk_mq_cancel_work_sync(q); /* NVMe timeout/work 재스케줄링 정리 */
 
 	rq_qos_exit(q);
 
@@ -787,6 +915,14 @@ static void disable_elv_switch(struct request_queue *q)
 	up_write(&set->update_nr_hwq_lock);
 }
 
+/*
+ * del_gendisk - gendisk 제거의 공개 인터페이스
+ * @disk: 제거할 gendisk
+ *
+ * blk-mq 기반 NVMe 드라이버는 tag_set의 update_nr_hwq_lock 아래 __del_gendisk을
+ * 호출한다. 이는 nvme_update_nr_queues 등에서 hw queue 수가 변경되는 동안
+ * gendisk 제거와 경쟁하지 않도록 한다.
+ */
 /**
  * del_gendisk - remove the gendisk
  * @disk: the struct gendisk to remove
@@ -811,12 +947,12 @@ void del_gendisk(struct gendisk *disk)
 	struct blk_mq_tag_set *set;
 	unsigned int memflags;
 
-	if (!queue_is_mq(disk->queue)) {
+	if (!queue_is_mq(disk->queue)) { /* NVMe는 항상 blk-mq이므로 else 분기만 사용 */
 		__del_gendisk(disk);
 	} else {
 		set = disk->queue->tag_set;
 
-		disable_elv_switch(disk->queue);
+		disable_elv_switch(disk->queue); /* 삭제 중 I/O 스케줄러 교체 방지(추정) */
 
 		memflags = memalloc_noio_save();
 		down_read(&set->update_nr_hwq_lock);
@@ -827,6 +963,12 @@ void del_gendisk(struct gendisk *disk)
 }
 EXPORT_SYMBOL(del_gendisk);
 
+/*
+ * invalidate_disk - 디스크의 버퍼/페이지 캐시를 무효화
+ * @disk: 대상 gendisk
+ *
+ * NVMe 네임스페이스를 재사용하기 전에 기존 캐시와 용량 정보를 초기화한다.
+ */
 /**
  * invalidate_disk - invalidate the disk
  * @disk: the struct gendisk to invalidate
@@ -992,6 +1134,12 @@ static const struct seq_operations partitions_op = {
 };
 #endif
 
+/*
+ * genhd_device_init - 블록 장치 클래스 초기화
+ *
+ * 부팅 시 block_class를 등록하고 /sys/block 디렉터리를 만든다.
+ * 이 초기화 이후에 NVMe 드라이버가 로드되어 gendisk를 등록할 수 있다.
+ */
 static int __init genhd_device_init(void)
 {
 	int error;
@@ -1059,6 +1207,16 @@ ssize_t part_size_show(struct device *dev,
 	return sysfs_emit(buf, "%llu\n", bdev_nr_sectors(dev_to_bdev(dev)));
 }
 
+/*
+ * part_stat_show - sysfs를 통한 파티션 I/O 통계 출력
+ * @dev: 장치
+ * @attr: 속성
+ * @buf: 출력 버퍼
+ *
+ * /sys/block/nvmeXnY/stat 등에서 읽히는 값을 생성한다.
+ * read/write/discard/flush 별 ios, merges, sectors, nsecs를 집계하며,
+ * NVMe 큐의 doorbell 왕복 지연, PRP/SGL 준비 시간 등이 이 통계에 반영된다.
+ */
 ssize_t part_stat_show(struct device *dev,
 		       struct device_attribute *attr, char *buf)
 {
@@ -1103,6 +1261,15 @@ ssize_t part_stat_show(struct device *dev,
 		(unsigned int)div_u64(stat.nsecs[STAT_FLUSH], NSEC_PER_MSEC));
 }
 
+/*
+ * part_inflight_show - sysfs를 통한 진행 중 I/O 개수 출력
+ * @dev: 장치
+ * @attr: 속성
+ * @buf: 출력 버퍼
+ *
+ * /sys/block/nvmeXnY/inflight에서 확인되는, NVMe SQ에 submit되어 CID를
+ * 할당받았으나 아직 CQ에서 완료되지 않은 요청 수를 read/write별로 반환한다.
+ */
 /*
  * Show the number of IOs issued to driver.
  * For bio-based device, started from bdev_start_io_acct();
@@ -1259,6 +1426,14 @@ static const struct attribute_group *disk_attr_groups[] = {
 	NULL
 };
 
+/*
+ * disk_release - gendisk의 모든 자원을 해제
+ * @dev: 디스크를 나타내는 장치
+ *
+ * gendisk의 refcount가 0이 되면 호출된다. blk-mq 기반 NVMe 드라이버는
+ * request_queue의 refcount도 여기서 0으로 만들어 queue를 해제한다.
+ * tag_set은 put_disk 이전에 해제되어야 한다(드라이버 문서 참조).
+ */
 /**
  * disk_release - releases all allocated resources of the gendisk
  * @dev: the device representing this disk
@@ -1289,7 +1464,7 @@ static void disk_release(struct device *dev)
 	 * teardown case (yet) as the tagset can be gone by the time the disk
 	 * is released once it was added.
 	 */
-	if (queue_is_mq(disk->queue) &&
+	if (queue_is_mq(disk->queue) && /* NVMe probe 실패 시 add_disk 전 queue 정리 */
 	    test_bit(GD_OWNS_QUEUE, &disk->state) &&
 	    !test_bit(GD_ADDED, &disk->state))
 		blk_mq_exit_queue(disk->queue);
@@ -1443,6 +1618,16 @@ dev_t part_devt(struct gendisk *disk, u8 partno)
 	return devt;
 }
 
+/*
+ * __alloc_disk_node - 지정 노드에 gendisk 할당
+ * @q: 연결할 request_queue (NVMe의 blk_mq_tag_set에서 파생)
+ * @node_id: 할당할 NUMA 노드
+ * @lkclass: lockdep 클래스
+ *
+ * NVMe 드라이버가 네임스페이스당 하나의 gendisk를 생성할 때 사용한다.
+ * disk->queue에 NVMe request_queue를 연결하고, part0 block_device를 생성하며,
+ * cgroup, zone, random seed 등의 하위 자원을 초기화한다.
+ */
 struct gendisk *__alloc_disk_node(struct request_queue *q, int node_id,
 		struct lock_class_key *lkclass)
 {
@@ -1481,7 +1666,7 @@ struct gendisk *__alloc_disk_node(struct request_queue *q, int node_id,
 	disk_to_dev(disk)->type = &disk_type;
 	device_initialize(disk_to_dev(disk));
 	inc_diskseq(disk);
-	q->disk = disk;
+	q->disk = disk; /* NVMe request_queue가 이 gendisk를 역참조할 수 있도록 연결 */
 	lockdep_init_map(&disk->lockdep_map, "(bio completion)", lkclass, 0);
 #ifdef CONFIG_BLOCK_HOLDER_DEPRECATED
 	INIT_LIST_HEAD(&disk->slave_bdevs);
@@ -1505,6 +1690,15 @@ out_free_disk:
 	return NULL;
 }
 
+/*
+ * __blk_alloc_disk - queue limits를 포함한 gendisk 할당
+ * @lim: queue limits (NVMe의 물리적 섹터 크기, 최대 세그먼트 수 등)
+ * @node: NUMA 노드
+ * @lkclass: lockdep 클래스
+ *
+ * NVMe 드라이버가 자체 queue를 소유하는 단순 디스크를 만들 때 사용한다.
+ * GD_OWNS_QUEUE 플래그를 설정하여 queue 생명주기를 gendisk가 관리함을 표시한다.
+ */
 struct gendisk *__blk_alloc_disk(struct queue_limits *lim, int node,
 		struct lock_class_key *lkclass)
 {
@@ -1526,6 +1720,15 @@ struct gendisk *__blk_alloc_disk(struct queue_limits *lim, int node,
 }
 EXPORT_SYMBOL(__blk_alloc_disk);
 
+/*
+ * put_disk - gendisk의 참조 카운트 감소
+ * @disk: 대상 gendisk
+ *
+ * NVMe 드라이버가 네임스페이스 제거 시 호출한다. 마지막 참조가 해제되면
+ * disk_release -> blk_put_queue로 이어져 request_queue가 해제된다.
+ * 프로브 실패 시에는 add_disk() 호출 전에 put_disk을 호출해야 tag_set이
+ * 아직 유효한 상태에서 queue 정리가 가능하다.
+ */
 /**
  * put_disk - decrements the gendisk refcount
  * @disk: the struct gendisk to decrement the refcount for
@@ -1556,6 +1759,14 @@ static void set_disk_ro_uevent(struct gendisk *gd, int ro)
 	kobject_uevent_env(&disk_to_dev(gd)->kobj, KOBJ_CHANGE, envp);
 }
 
+/*
+ * set_disk_ro - gendisk의 읽기 전용 상태 설정
+ * @disk: 대상 gendisk
+ * @read_only: true면 읽기 전용, false면 읽기/쓰기
+ *
+ * NVMe 네임스페이스가 write-protected 상태이거나 읽기 전용 모드로 노출되어야
+ * 할 때 호출한다. 상태 변경 시 "DISK_RO=1/0" uevent를 발생시킨다.
+ */
 /**
  * set_disk_ro - set a gendisk read-only
  * @disk:	gendisk to operate on
@@ -1582,3 +1793,27 @@ void inc_diskseq(struct gendisk *disk)
 {
 	disk->diskseq = atomic64_inc_return(&diskseq);
 }
+
+/*
+ * ============================================================================
+ * NVMe 관점 핵심 요약
+ * ----------------------------------------------------------------------------
+ * - 이 파일은 gendisk 생명주기를 관리하며, NVMe 네임스페이스를 블록 서브시스템에
+ *   노출/제거하는 관문이다. 실제 I/O 처리는 request_queue -> blk-mq -> NVMe
+ *   드라이버가 담당한다.
+ *
+ * - add_disk_fwnode/device_add_disk -> __add_disk -> blk_register_queue 경로를
+ *   통해 NVMe 디스크가 /dev, /sys/block, /proc/diskstats에 등록되고, 이후
+ *   blk_mq_submit_bio -> blk_mq_get_request -> nvme_queue_rq -> nvme_submit_cmd
+ *   (doorbell)로 I/O가 전달된다.
+ *
+ * - del_gendisk/__del_gendisk은 NVMe 컨트롤러/네임스페이스 제거 시 queue를
+ *   freeze/drain하고 모든 파티션과 sysfs 링크를 정리한다.
+ *
+ * - blk_mark_disk_dead은 갑작스러운 NVMe 제거(hot-unplug) 시 새 I/O 진입을
+ *   차단하며, 하위 NVMe 레이어에서 진행 중인 CID의 완료/취소를 유도한다.
+ *
+ * - 이 파일은 block/bdev.c(block_device 관리), block/blk-mq.c(다중 큐 I/O),
+ *   drivers/nvme/host/core.c(네임스페이스 생명주기)와 글로벌하게 연결된다.
+ * ============================================================================
+ */

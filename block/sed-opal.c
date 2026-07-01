@@ -9,6 +9,21 @@
 
 #define pr_fmt(fmt) KBUILD_MODNAME ":OPAL: " fmt
 
+/*
+ * ============================================================================
+ * NVMe SSD 관점 파일 요약
+ * ============================================================================
+ * 이 파일은 Linux 커널 block layer의 TCG Opal(Self-Encrypting Drive) 프로토콜
+ * 핸들러로, NVMe SSD의 디스크 레벨 하드웨어 암호화/잠금을 제어한다.
+ * 사용자 공간 ioctl -> sed_ioctl() -> opal_dev command 조립 ->
+ * dev->send_recv() -> NVMe Security Send/Receive(admin command) ->
+ * NVMe 컨트롤러의 TCG session 관리 및 locking range 제어
+ * block layer의 상위 ioctl 인프라(block/ioctl.c, include/uapi/linux/sed-opal.h
+ * 등)와 연결되며, 실제 NVMe 전송은 drivers/nvme/host/core.c 또는 드라이버 측
+ * sec_send_recv 콜백에서 이루어진다.
+ * ============================================================================
+ */
+
 #include <linux/delay.h>
 #include <linux/device.h>
 #include <linux/kernel.h>
@@ -35,6 +50,13 @@
 
 static struct key *sed_opal_keyring;
 
+/*
+ * opal_step: OPAL 명령 시퀀스의 한 단계.
+ *  fn   : 해당 단계에서 실행할 함수. 보통 OPAL STARTSESSION/GET/SET 등
+ *         명령을 조립하고 dev->send_recv()를 통해 NVMe Security Send를
+ *         발행한다. call path: sed_ioctl -> opal_* -> execute_steps -> fn.
+ *  data : 단계 함수에 전달할 사용자 정의 인자(e.g. opal_session_info).
+ */
 struct opal_step {
 	int (*fn)(struct opal_dev *dev, void *data);
 	void *data;
@@ -55,6 +77,16 @@ enum opal_atom_width {
  * pointer to the position in the buffer where the token starts, and the size
  * of the token in bytes.
  */
+/*
+ * opal_resp_tok: OPAL 응답 버퍼에서 파싱한 단일 토큰.
+ *  pos    : dev->resp 버퍼 내 토큰 시작 위치. NVMe Security Receive로
+ *           수신한 2KB 응답 날(raw) 바이트를 가리킨다.
+ *  len    : 토큰 전체 길이(헤더 포함).
+ *  type   : uint/sint/bytestring/token 중 하나.
+ *  width  : tiny/short/medium/long/token 중 하나. NVMe 응답 패킷의
+ *           atom encoding 폭을 결정한다.
+ *  stored : 숫자형 토큰의 경우 여기에 변환된 값을 저장.
+ */
 struct opal_resp_tok {
 	const u8 *pos;
 	size_t len;
@@ -74,11 +106,40 @@ struct opal_resp_tok {
  * response, the first one counting how many tokens we have and the second one
  * actually storing the positions.
  */
+/*
+ * parsed_resp: NVMe Security Receive로 들어온 OPAL 응답의 파싱 결과.
+ *  num  : 실제 파싱된 토큰 개수.
+ *  toks : 미리 할당된 토큰 배열. 응답이 2KB를 넘지 않으므로 64개면
+ *         일반적으로 충분하다(추정).
+ */
 struct parsed_resp {
 	int num;
 	struct opal_resp_tok toks[MAX_TOKS];
 };
 
+/*
+ * opal_dev: 하나의 NVMe SSD에 대한 OPAL 세션/상태 컨텍스트.
+ *  flags              : OPAL_FL_SUPPORTED, OPAL_FL_LOCKED 등 디바이스
+ *                       능력/상태 플래그. NVMe Identify/Security에서
+ *                       획득한 정보가 아닌 OPAL discovery0 결과를 반영.
+ *  data               : 하위 드라이버 콜백용 남은 인자(예: nvme_ctrl).
+ *  send_recv          : 보안 명령 전송 콜백. NVMe SSD의 경우
+ *                       nvme_security_send()/nvme_security_recv()를
+ *                       통해 Admin Queue SQ/CQ/doorbell을 사용한다.
+ *  dev_lock           : OPAL 명령 시퀀스 실행 중 동시 접근 보호.
+ *  comid              : Communication ID. discovery0에서 얻으며 NVMe
+ *                       Security Send/Receive의 SPSP/SECP 필드에 해당.
+ *  hsn/tsn            : Host/TPER Session Number. OPAL STARTSESSION
+ *                       응답에서 획득, 이후 모든 패킷에 기록된다.
+ *  align/lowest_lba/logical_block_size/align_required :
+ *                       NVMe SSD의 물리적/논리적 블록 정렬 정보.
+ *                       OPAL locking range 설정 시 LBA 정렬 제약으로 사용.
+ *  pos                : dev->cmd 버퍼 내 현재 기록 위치.
+ *  cmd/resp           : NVMe Security Send/Receive용 2KB 버퍼.
+ *  parsed             : 최근 수신한 resp의 파싱 결과.
+ *  prev_data/prev_d_len : step 사이에 임시로 전달되는 데이터.
+ *  unlk_lst           : suspend/resume 시 복원할 unlock 정보 리스트.
+ */
 struct opal_dev {
 	u32 flags;
 
@@ -227,6 +288,11 @@ static const u8 opalmethod[][OPAL_METHOD_LENGTH] = {
 static int end_opal_session_error(struct opal_dev *dev);
 static int opal_discovery0_step(struct opal_dev *dev);
 
+/*
+ * opal_suspend_data: 시스템 suspend/resume 시 locking range 잠금 해제에
+ * 필요한 정보를 저장한다. NVMe SSD가 S3 이후에도 동일한 key로 unlock될
+ * 수 있도록 커널이 key를 보관한다.
+ */
 struct opal_suspend_data {
 	struct opal_lock_unlock unlk;
 	u8 lr;
@@ -457,17 +523,33 @@ static u16 get_comid_v200(const void *data)
 	return be16_to_cpu(v200->baseComID);
 }
 
+/*
+ * opal_send_cmd()
+ * 목적: 조립된 OPAL 명령을 NVMe SSD로 전송한다.
+ * 호출 경로: finalize_and_send -> opal_send_recv -> opal_send_cmd
+ *           -> dev->send_recv -> NVMe Security Send(admin command).
+ * NVMe 연결: Security Send opcode 0x81, 데이터 버퍼는 PRP 또는 SGL로
+ *           전달되고 doorbell 업데이트로 컨트롤러에 제출된다.
+ */
 static int opal_send_cmd(struct opal_dev *dev)
 {
 	return dev->send_recv(dev->data, dev->comid, TCG_SECP_01,
-			      dev->cmd, IO_BUFFER_LENGTH,
+			      dev->cmd, IO_BUFFER_LENGTH,  /* NVMe Security Send payload */
 			      true);
 }
 
+/*
+ * opal_recv_cmd()
+ * 목적: NVMe SSD로부터 OPAL 응답을 수신한다.
+ * 호출 경로: opal_send_recv -> opal_recv_cmd
+ *           -> dev->send_recv -> NVMe Security Receive(admin command).
+ * NVMe 연결: Security Receive opcode 0x82, 완료 큐(CQ) 항목을 통해
+ *           SSD가 응답한 2KB 데이터를 받는다.
+ */
 static int opal_recv_cmd(struct opal_dev *dev)
 {
 	return dev->send_recv(dev->data, dev->comid, TCG_SECP_01,
-			      dev->resp, IO_BUFFER_LENGTH,
+			      dev->resp, IO_BUFFER_LENGTH,  /* NVMe Security Receive buffer */
 			      false);
 }
 
@@ -494,6 +576,15 @@ static int opal_recv_check(struct opal_dev *dev)
 	return ret;
 }
 
+/*
+ * opal_send_recv()
+ * 목적: OPAL 명령을 전송하고 응답을 받은 뒤 후속 처리(cont)를 수행한다.
+ * 호출 경로: finalize_and_send -> opal_send_recv -> (opal_send_cmd ->
+ *           NVMe Security Send) -> (opal_recv_cmd -> NVMe Security Receive)
+ *           -> opal_recv_check -> cont.
+ * NVMe 연결: 하나의 OPAL 트랜잭션은 Admin Queue에서 Send/Receive 한 쌍으로
+ *           구성되며, outstandingData가 0이 될 때까지 평링한다.
+ */
 static int opal_send_recv(struct opal_dev *dev, cont_fn *cont)
 {
 	int ret;
@@ -510,6 +601,14 @@ static int opal_send_recv(struct opal_dev *dev, cont_fn *cont)
 	return cont(dev);
 }
 
+/*
+ * check_geometry()
+ * 목적: OPAL discovery0 응답의 Geometry feature에서 NVMe SSD의 블록
+ *      정렬 정보를 추출한다.
+ * NVMe 연결: alignment_granularity/lowest_aligned_lba는 NVMe namespace의
+ *           LBAF(Logical Block Address Format)와 독립적이며, OPAL
+ *           locking range 경계를 맞추는 데 사용된다.
+ */
 static void check_geometry(struct opal_dev *dev, const void *data)
 {
 	const struct d0_geometry_features *geo = data;
@@ -534,6 +633,15 @@ static int execute_step(struct opal_dev *dev,
 	return error;
 }
 
+/*
+ * execute_steps()
+ * 목적: OPAL 작업을 discovery0 단계와 하나 이상의 OPAL step으로 실행한다.
+ * 호출 경로: opal_* 상위 함수 -> execute_steps -> (discovery0 +
+ *           opal_step[] 순차 실행).
+ * NVMe 연결: 각 step은 dev->send_recv()를 통해 NVMe Security Send/Receive
+ *           를 1회 이상 발행할 수 있다. state > 0일 때 오류가 나면
+ *           ENDOFSESSION을 전송해 NVMe SSD 측 세션 자원을 정리한다.
+ */
 static int execute_steps(struct opal_dev *dev,
 			 const struct opal_step *steps, size_t n_steps)
 {
@@ -677,7 +785,7 @@ static int opal_discovery0(struct opal_dev *dev, void *data)
 	int ret;
 
 	memset(dev->resp, 0, IO_BUFFER_LENGTH);
-	dev->comid = OPAL_DISCOVERY_COMID;
+	dev->comid = OPAL_DISCOVERY_COMID;  /* discovery0는 receive만 수행 */
 	ret = opal_recv_cmd(dev);
 	if (ret)
 		return ret;
@@ -848,6 +956,14 @@ static void set_comid(struct opal_dev *cmd, u16 comid)
 	hdr->cp.extendedComID[3] = 0;
 }
 
+/*
+ * cmd_finalize()
+ * 목적: OPAL 명령 payload의 마무리(ENDLIST/ENDOFDATA)와 길이/세션 필드를
+ *      기록하여 NVMe Security Send용 버퍼를 완성한다.
+ * 호출 경로: finalize_and_send -> cmd_finalize -> opal_send_recv.
+ * NVMe 연결: 헤더의 hsn/tsn은 OPAL 세션 식별자로, NVMe 명령 자체는
+ *           Security Send이지만 payload 내에 OPAL 세션 문맥이 포함된다.
+ */
 static int cmd_finalize(struct opal_dev *cmd, u32 hsn, u32 tsn)
 {
 	struct opal_header *hdr;
@@ -1010,6 +1126,13 @@ static ssize_t response_parse_token(struct opal_resp_tok *tok,
 	return tok->len;
 }
 
+/*
+ * response_parse()
+ * 목적: NVMe Security Receive로 들어온 2KB OPAL 응답 버퍼를 token 단위로
+ *      파싱한다.
+ * 호출 경로: parse_and_check_status -> response_parse.
+ * NVMe 연결: buf는 NVMe SSD가 CQ를 통해 반환한 Security Receive payload.
+ */
 static int response_parse(const u8 *buf, size_t length,
 			  struct parsed_resp *resp)
 {
@@ -1148,6 +1271,14 @@ static bool response_token_matches(const struct opal_resp_tok *token, u8 match)
 	return true;
 }
 
+/*
+ * response_status()
+ * 목적: NVMe SSD로부터 수신한 OPAL 응답의 method status code를 추출한다.
+ *      정상 응답은 끝에서 5번째 OPAL_STARTLIST, 끝에서 4번째 status,
+ *      끝에서 1번째 OPAL_ENDLIST 형태를 띤다.
+ * NVMe 연결: SSD가 Security Receive 응답에 실은 OPAL method status는
+ *           NVMe 명령 자체의 status와는 별개이며, 여기서만 해석된다.
+ */
 static u8 response_status(const struct parsed_resp *resp)
 {
 	const struct opal_resp_tok *tok;
@@ -1171,6 +1302,11 @@ static u8 response_status(const struct parsed_resp *resp)
 }
 
 /* Parses and checks for errors */
+/*
+ * parse_and_check_status()
+ * 목적: NVMe SSD로부터 받은 OPAL 응답을 파싱하고 method status를 검사한다.
+ * 호출 경로: opal_send_recv -> (cont) parse_and_check_status.
+ */
 static int parse_and_check_status(struct opal_dev *dev)
 {
 	int error;
@@ -1186,12 +1322,25 @@ static int parse_and_check_status(struct opal_dev *dev)
 	return response_status(&dev->parsed);
 }
 
+/*
+ * clear_opal_cmd()
+ * 목적: NVMe Security Send에 사용할 OPAL 명령 버퍼를 초기화한다.
+ *      opal_header 다음 위치부터 payload를 채운다.
+ */
 static void clear_opal_cmd(struct opal_dev *dev)
 {
 	dev->pos = sizeof(struct opal_header);
 	memset(dev->cmd, 0, IO_BUFFER_LENGTH);
 }
 
+/*
+ * cmd_start()
+ * 목적: OPAL 메서드 호출 명령의 공통 헤더를 조립한다.
+ * 호출 경로: 다수의 OPAL step 함수 -> cmd_start -> (add_token_* +
+ *           cmd_finalize) -> opal_send_recv -> NVMe Security Send.
+ * NVMe 연결: comid는 NVMe Security Send의 SPSP/SECP로 매핑되며,
+ *           cmd 버퍼는 전체 2KB가 SSD로 전송된다.
+ */
 static int cmd_start(struct opal_dev *dev, const u8 *uid, const u8 *method)
 {
 	int err = 0;
@@ -1259,6 +1408,13 @@ static int end_session_cont(struct opal_dev *dev)
 	return parse_and_check_status(dev);
 }
 
+/*
+ * finalize_and_send()
+ * 목적: 조립된 OPAL 명령을 마무리하고 NVMe SSD로 전송한다.
+ * 호출 경로: 대부분의 OPAL step 함수 -> finalize_and_send ->
+ *           cmd_finalize -> opal_send_recv ->
+ *           opal_send_cmd -> dev->send_recv -> NVMe Security Send.
+ */
 static int finalize_and_send(struct opal_dev *dev, cont_fn cont)
 {
 	int ret;
@@ -1398,6 +1554,13 @@ static int get_active_key(struct opal_dev *dev, void *data)
 	return get_active_key_cont(dev);
 }
 
+/*
+ * generic_table_write_data()
+ * 목적: OPAL table(예: shadow MBR, datastore)에 데이터를 분할 기록한다.
+ * 호출 경로: write_shadow_mbr/write_table_data -> generic_table_write_data.
+ * NVMe 연결: 2KB cmd 버퍼 크기 제한 때문에 큰 데이터는 여러 번의
+ *           NVMe Security Send로 나누어 전송한다.
+ */
 static int generic_table_write_data(struct opal_dev *dev, const u64 data,
 				    u64 offset, u64 size, const u8 *uid)
 {
@@ -1702,6 +1865,17 @@ static int locking_range_status(struct opal_dev *dev, void *data)
 	return 0;
 }
 
+/*
+ * start_generic_opal_session()
+ * 목적: OPAL Admin SP 또는 Locking SP에 대한 인증 세션을 시작한다.
+ * 호출 경로: start_anybodyASP_opal_session / start_SIDASP_opal_session /
+ *           start_admin1LSP_opal_session / start_PSID_opal_session ->
+ *           start_generic_opal_session -> finalize_and_send ->
+ *           opal_send_recv -> NVMe Security Send/Receive.
+ * NVMe 연결: STARTSESSION 메서드의 응답에서 hsn(호스트 세션 번호)과
+ *           tsn(TPER 세션 번호)을 획득, 이후 동일 세션의 모든 명령에
+ *           cmd_finalize에서 기록된다.
+ */
 static int start_generic_opal_session(struct opal_dev *dev,
 				      enum opal_uid auth,
 				      enum opal_uid sp_type,
@@ -1805,6 +1979,15 @@ static int start_PSID_opal_session(struct opal_dev *dev, void *data)
 					  okey->key_len);
 }
 
+/*
+ * start_auth_opal_session()
+ * 목적: Locking SP에 대한 인증 세션을 시작한다. Admin1 또는 사용자별
+ *      authority UID를 선택한다.
+ * 호출 경로: lock/unlock/erase/secure erase 등 대부분의 사용자 OPAL
+ *           작업 -> start_auth_opal_session.
+ * NVMe 연결: 세션 인증 성공 후 생성된 hsn/tsn을 가지고 후속
+ *           SET/GET/ERASE 명령을 NVMe Security Send로 전송한다.
+ */
 static int start_auth_opal_session(struct opal_dev *dev, void *data)
 {
 	struct opal_session_info *session = data;
@@ -2171,6 +2354,15 @@ static int add_user_to_lr_ace(struct opal_dev *dev, void *data)
 	return finalize_and_send(dev, parse_and_check_status);
 }
 
+/*
+ * lock_unlock_locking_range()
+ * 목적: 특정 locking range의 읽기/쓰기 잠금 상태를 변경한다.
+ * 호출 경로: __opal_lock_unlock -> lock_unlock_locking_range ->
+ *           cmd_start(OPAL_SET) -> finalize_and_send -> NVMe Security Send.
+ * NVMe 연결: OPAL SET 메서드가 SSD 낶은 encryption engine에 설정된
+ *           readLocked/writeLocked 비트를 갱신, NVMe I/O 명령 처리 시
+ *           해당 LBA 범위 접근이 허용/거부된다.
+ */
 static int lock_unlock_locking_range(struct opal_dev *dev, void *data)
 {
 	u8 lr_buffer[OPAL_UID_LENGTH];
@@ -2227,6 +2419,12 @@ static int lock_unlock_locking_range(struct opal_dev *dev, void *data)
 }
 
 
+/*
+ * lock_unlock_locking_range_sum()
+ * 목적: Single User Mode(SUM)에서 locking range의 잠금을 변경한다.
+ *      SUM은 다른 authority 개입 없이 단일 사용자가 range를 관리하는
+ *      모드로, OPAL 2.0 이상 NVMe SSD에서 지원된다(추정).
+ */
 static int lock_unlock_locking_range_sum(struct opal_dev *dev, void *data)
 {
 	u8 lr_buffer[OPAL_UID_LENGTH];
@@ -2455,6 +2653,13 @@ static int read_table_data_cont(struct opal_dev *dev)
  */
 #define OPAL_MAX_READ_TABLE (0x7BD)
 
+/*
+ * read_table_data()
+ * 목적: OPAL table에서 데이터를 여러 번에 걸쳐 읽어 userspace로 복사한다.
+ * 호출 경로: opal_read_table -> read_table_data.
+ * NVMe 연결: 한 번의 NVMe Security Receive로는 1981바이트(OPAL_MAX_READ_TABLE)
+ *           이상을 받을 수 없으므로, 테이블 크기만큼 반복 수신한다.
+ */
 static int read_table_data(struct opal_dev *dev, void *data)
 {
 	struct opal_read_write_table *read_tbl = data;
@@ -2583,6 +2788,12 @@ static void clean_opal_dev(struct opal_dev *dev)
 	mutex_unlock(&dev->dev_lock);
 }
 
+/*
+ * free_opal_dev()
+ * 목적: init_opal_dev()에서 할당한 NVMe SSD 관련 OPAL 자원을 해제한다.
+ *      세션 종료 없이 free하면 SSD 측에 남은 세션이 있을 수 있으나,
+ *      일반적으로 상위 드라이버가 먼저 종료 처리를 한다(추정).
+ */
 void free_opal_dev(struct opal_dev *dev)
 {
 	if (!dev)
@@ -2595,6 +2806,16 @@ void free_opal_dev(struct opal_dev *dev)
 }
 EXPORT_SYMBOL(free_opal_dev);
 
+/*
+ * init_opal_dev()
+ * 목적: NVMe SSD 하나에 대한 opal_dev 컨텍스트를 할당하고 OPAL 지원
+ *      여부를 discovery0로 확인한다.
+ * 호출 경로: NVMe 드라이버(예: drivers/nvme/host/core.c) ->
+ *           init_opal_dev -> check_opal_support -> opal_discovery0_step ->
+ *           dev->send_recv -> NVMe Security Receive.
+ * NVMe 연결: data는 보통 struct nvme_ctrl 포인터이며, send_recv 콜백은
+ *           nvme_security_send()/nvme_security_recv() 래퍼일 것이다(추정).
+ */
 struct opal_dev *init_opal_dev(void *data, sec_send_recv *send_recv)
 {
 	struct opal_dev *dev;
@@ -3256,6 +3477,15 @@ static int opal_activate_user(struct opal_dev *dev,
 	return ret;
 }
 
+/*
+ * opal_unlock_from_suspend()
+ * 목적: S3 resume 등 시스템 복귀 시 저장해 둔 key로 NVMe SSD locking
+ *      range를 자동 unlock한다.
+ * 호출 경로: 전원 관리 resume 콜백 -> opal_unlock_from_suspend ->
+ *           __opal_lock_unlock -> execute_steps -> NVMe Security Send/Receive.
+ * NVMe 연결: resume 직후 NVMe 컨트롤러가 다시 초기화되면, 커널은 저장된
+ *           key로 OPAL 세션을 재개하여 OS가 디스크에 접근할 수 있게 한다.
+ */
 bool opal_unlock_from_suspend(struct opal_dev *dev)
 {
 	struct opal_suspend_data *suspend;
@@ -3545,6 +3775,15 @@ static int opal_get_sum_ranges(struct opal_dev *dev, struct opal_sum_ranges *opa
 	return ret;
 }
 
+/*
+ * opal_stack_reset()
+ * 목적: NVMe SSD의 OPAL 스택을 리셋하여 교착 상태나 남은 세션을
+ *      정리한다.
+ * 호출 경로: IOC_OPAL_STACK_RESET -> opal_stack_reset ->
+ *           dev->send_recv(TCG_SECP_02).
+ * NVMe 연결: TCG_SECP_02 프로토콜을 사용하여 NVMe Security Send/Receive로
+ *           stack reset 요청/응답을 주고받는다(추정).
+ */
 static int opal_stack_reset(struct opal_dev *dev)
 {
 	struct opal_stack_reset *req;
@@ -3559,7 +3798,7 @@ static int opal_stack_reset(struct opal_dev *dev)
 	req->extendedComID[1] = dev->comid & 0xFF;
 	req->request_code = cpu_to_be32(OPAL_STACK_RESET);
 
-	ret = dev->send_recv(dev->data, dev->comid, TCG_SECP_02,
+	ret = dev->send_recv(dev->data, dev->comid, TCG_SECP_02,  /* stack reset용 보안 프로토콜 */
 			     dev->cmd, IO_BUFFER_LENGTH, true);
 	if (ret) {
 		pr_debug("Error sending stack reset: %d\n", ret);
@@ -3589,6 +3828,16 @@ out:
 	return ret;
 }
 
+/*
+ * sed_ioctl()
+ * 목적: 사용자 공간에서 들어온 OPAL ioctl을 분기하여 해당 OPAL 작업을
+ *      실행한다.
+ * 호출 경로: 사용자 공간 -> blkdev_ioctl/block/ioctl.c ->
+ *           sed_ioctl -> opal_* -> execute_steps ->
+ *           dev->send_recv -> NVMe Security Send/Receive.
+ * NVMe 연결: CAP_SYS_ADMIN 권한이 필요하며, NVMe SSD의 admin queue를
+ *           통해 보안 명령이 전달된다.
+ */
 int sed_ioctl(struct opal_dev *dev, unsigned int cmd, void __user *arg)
 {
 	void *p;
@@ -3725,3 +3974,19 @@ static int __init sed_opal_init(void)
 	return update_sed_opal_key(OPAL_AUTH_KEY, init_sed_key, keylen);
 }
 late_initcall(sed_opal_init);
+/*
+ * ============================================================================
+ * NVMe 관점 핵심 요약
+ * ============================================================================
+ *  - block/sed-opal.c는 block layer의 상위 ioctl 인프라(block/ioctl.c,
+ *    include/uapi/linux/sed-opal.h 등)와 NVMe 보안 명령을 잇는 중간층이다.
+ *  - 모든 OPAL 명령은 dev->send_recv() 콜백을 통해 NVMe Security Send(0x81)
+ *    /Security Receive(0x82) Admin command로 변환되어 NVMe SSD로 전달된다.
+ *  - OPAL session(hsn/tsn)과 locking range 상태는 NVMe 컨트롤러/SSD 낶은
+ *    encryption engine에서 유지되며, 이 파일은 단지 명령 조립/해석을 담당한다.
+ *  - 2KB 고정 버퍼(IO_BUFFER_LENGTH) 때문에 큰 테이블 읽기/쓰기는 여러
+ *    NVMe Security Send/Receive 트랜잭션으로 분할된다.
+ *  - suspend/resume 시 저장된 key를 사용해 NVMe SSD locking range를
+ *    자동으로 unlock함으로써 OS 재부팅 없이 디스크 접근이 가능하다.
+ * ============================================================================
+ */

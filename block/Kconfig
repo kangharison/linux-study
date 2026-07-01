@@ -2,11 +2,22 @@
 #
 # Block layer core configuration
 #
-menuconfig BLOCK
-       bool "Enable the block layer" if EXPERT
-       default y
-       select FS_IOMAP
-       select SBITMAP
+# ============================================================================
+# NVMe 관점 파일 개요
+# ============================================================================
+# 이 파일은 리눅스 블록 계층(block layer)의 핵심 기능을 커널 빌드 시점에
+# 활성화/비활성화하는 Kconfig 중심 설정 파일이다. 파일시스템이 생성한 bio가
+# blk-mq를 거쳐 nvme_queue_rq() 같은 드라이버 콜백으로 전달되기 전, 블록
+# 계층이 제공해야 할 인프라(요청 할당, cgroup IO 제어, 쓰기백 스로틀링,
+# debugfs, 인라인 암호화 등)를 결정한다. 즉, 이 파일은 상위(bio/VFS)와
+# 하위(NVMe controller/queue) 사이의 교량 역할을 하는 block layer의
+# 스위치보드이며, NVMe 드라이버(drivers/nvme/)와 직접적으로 연결된다.
+# ============================================================================
+menuconfig BLOCK				# NVMe SSD 지원의 최상위 마스터 스위치: N이면 request_queue, gendisk, blk-mq 전체가 커널에서 빠짐
+       bool "Enable the block layer" if EXPERT	# EXPERT 모드에서만 노출; NVMe 입장에서는 이 옵션 자체가 /dev/nvme* 존재 전제조건
+       default y				# 대부분의 NVMe 시스템에서 Y 유지; block layer 없이는 nvme.ko, nvme-core.ko 모두 동작 불가
+       select FS_IOMAP				# 파일시스템의 iomap 인프라 활성화; NVMe에 직접 IO할 때 buffer head 대신 iomap -> bio -> blk-mq 경로 사용
+       select SBITMAP				# blk-mq tag 할당용 sbitmap 자료구조 활성화; NVMe CID(Command Identifier) 할당의 핵심 하위 구조
        help
 	 Provide block layer support for the kernel.
 
@@ -22,205 +33,328 @@ menuconfig BLOCK
 	 they make use of various block layer definitions and facilities.
 
 	 Say Y here unless you know you really don't want to mount disks and
-	 suchlike.
+	 suchlike.				# NVMe namespace 마운트를 위해서도 Y 필요
 
-if BLOCK
+# BLOCK이 활성화되지 않으면 blk_mq_init_queue(), request_queue, gendisk 등 모든
+# 블록 계층 자료구조가 사라지므로 NVMe SSD도 /dev/nvme* 노드를 가질 수 없다.
+# NVMe 입장에서 BLOCK은 최상위 스위치이자 존재 전제 조건이다.
 
-config BLOCK_LEGACY_AUTOLOAD
-	bool "Legacy autoloading support"
-	default y
+if BLOCK					# 이 블록 내의 모든 옵션은 NVMe stack 구성에 직접 영향
+
+config BLOCK_LEGACY_AUTOLOAD			# NVMe 모듈 자동 로드 여부를 제어하는 레거시 플래그
+	bool "Legacy autoloading support"	# /dev/nvme0n1 접근 시 nvme.ko 자동 삽입 가능
+	default y				# 기본적으로 Y; systemd/udev 환경에서는 거의 사용되지 않음
 	help
-	  Enable loading modules and creating block device instances based on
-	  accesses through their device special file.  This is a historic Linux
-	  feature and makes no sense in a udev world where device files are
-	  created on demand, but scripts that manually create device nodes and
-	  then call losetup might rely on this behavior.
+	  Enable loading modules and creating block device instances based on	# nvme.ko 자동 로드 트리거
+	  accesses through their device special file.  This is a historic Linux	# /dev/nvme0n1 같은 특수 파일 open 시 모듈 로드
+	  feature and makes no sense in a udev world where device files are	# 레거시 autoload 메커니즘; udev 환경에서는 중복
+	  created on demand, but scripts that manually create device nodes and	# 레거시 스크립트 환경에서만 의미 있음
+	  then call losetup might rely on this behavior.	# NVMe 노드를 직접 다루는 경우 영향
 
-config BLK_RQ_ALLOC_TIME
-	bool
+# NVMe 모듈(nvme.ko)을 수동 modprobe 없이 /dev/nvme0n1 같은 특수 파일 접근 시
+# 자동 로드할 수 있게 해주는 레거시 메커니즘이다. udev 기반 시스템에서는 거의
+# 쓰이지 않지만, NVMe 디바이스 노드를 직접 다루는 스크립트 환경에서는 영향을
+# 줄 수 있다.
 
-config BLK_CGROUP_RWSTAT
-	bool
+config BLK_RQ_ALLOC_TIME			# NVMe 요청 할당 시점의 타임스탬프 기록
+	bool					# bio -> blk_mq_submit_bio -> blk_mq_get_request 경로에서 측정
+# bio 제출 경로에서 blk_mq_submit_bio -> blk_mq_get_request -> nvme_queue_rq
+# 로 전달되기 전 요청(request) 할당 시점의 시간을 기록한다. NVMe 드라이버는
+# 이 시간을 참고해 SQ(Send Queue) 대기 시간이나 CID(Command Identifier) 할당
+# 지연을 분석할 수 있다.
 
-config BLK_CGROUP_PUNT_BIO
-	bool
+config BLK_CGROUP_RWSTAT			# cgroup별 read/write 통계; NVMe QoS 모니터링 기초
+	bool					# blk-throttle, iocost, iolatency 등이 이 통계를 사용
+# cgroup별 읽기/쓰기 통계를 수집한다. NVMe SSD가 다수의 cgroup을 호스팅할 때
+# 각 cgroup이 발생시킨 read/write IO량을 blk-mq 통계에서 구분해 준다.
 
-config BLK_DEV_BSG_COMMON
-	tristate
+config BLK_CGROUP_PUNT_BIO			# cgroup throttle로 인해 bio를 워커로 넘김
+	bool					# NVMe queue depth 포화 시 bio 지연 제어에 영향
+# IO cgroup 제한에 걸린 bio를 워커 컨텍스트로 넘겨(punt) 처리한다. NVMe queue
+# depth가 포화 상태이거나 cgroup throttle에 걸린 경우, 원래 submit 경로를
+# 벗어나 지연 실행되어 nvme_queue_rq()에 도달하는 시점이 늦춰질 수 있다.
 
-config BLK_ICQ
-	bool
+config BLK_DEV_BSG_COMMON			# SG v4 공통 인프라; NVMe pass-through의 토대
+	tristate				# nvme-ns-hdev -> SG_IO 변환 경로의 공통 코드
+# Generic SG(SCSI Generic) v4 인프라의 공통 부분을 빌드한다. NVMe에서는
+# nvme-ns-hdev를 통해 사용자 공간의 SG_IO 요청을 NVMe Admin/IO 명령으로
+# 변환하는 pass-through 경로에 사용된다.
 
-config BLK_DEV_BSGLIB
-	bool "Block layer SG support v4 helper lib"
-	select BLK_DEV_BSG_COMMON
+config BLK_ICQ					# blk-mq IO Context Queue; hctx 매핑에 참고
+	bool					# task/CPU별 IO 문맥 유지 -> blk_mq_get_request -> hctx 선택
+# blk-mq의 IO Context Queue(ICQ)를 활성화한다. 태스크별/CPU별 IO 문맥을
+# 유지해, blk_mq_get_request -> nvme_queue_rq 로 이어지는 요청 할당 시
+# 어느 hctx(hardware queue context)로 연결할지 결정하는 데 참고된다.
+
+
+# NVMe namespace에 대한 SG_IO ioctl 기반 pass-through를 지원하는 라이브러리
+# 계층이다. nvme-cli 같은 도구가 "nvme io-passthru" 명령으로 CID, SQ, PRP,
+# SGL 등 raw NVMe 명령을 내릴 때 하위에서 사용된다.
+config BLK_DEV_BSGLIB				# NVMe raw IO 명령 pass-through 헬퍼 라이브러리
+	bool "Block layer SG support v4 helper lib"	# nvme-cli io-passthru -> bsg -> nvme_submit_cmd 경로 지원
+	select BLK_DEV_BSG_COMMON			# SG v4 공통 인프라 필요
 	help
 	  Subsystems will normally enable this if needed. Users will not
-	  normally need to manually enable this.
+	  normally need to manually enable this.	# NVMe pass-through 도구를 쓰지 않으면 N 가능
 
 	  If unsure, say N.
 
-config BLK_DEV_INTEGRITY
+
+# NVMe DIF/DIX(Domain/Interval Field) 형태의 End-to-End Data Protection을
+# 블록 계층에서 처리할 수 있게 한다. NVMe 명령의 PRP/SGL 버퍼 외에
+# 메타데이터/가드 정보를 함께 전송해야 하는 경우 활성화해야 한다.
+config BLK_DEV_INTEGRITY			# NVMe DIF/DIX end-to-end 데이터 보호 지원
 	bool "Block layer data integrity support"
-	select CRC_T10DIF
-	select CRC64
+	select CRC_T10DIF				# DIF CRC 계산에 필요; NVMe PI 메타데이터 검증 시 사용
+	select CRC64					# CRC64 guard 계산용; NVMe extended LBA 메타데이터와 연관
 	help
 	Some storage devices allow extra information to be
-	stored/retrieved to help protect the data.  The block layer
+	stored/retrieved to help protect the data.  The block layer	# NVMe PI/PRACT/PRCHK 메타데이터가 여기에 해당
 	data integrity option provides hooks which can be used by
-	filesystems to ensure better data integrity.
+	filesystems to ensure better data integrity.	# bio -> blk-mq -> nvme_setup_cmd -> PRP/SGL + metadata 경로
 
 	Say yes here if you have a storage device that provides the
 	T10/SCSI Data Integrity Field or the T13/ATA External Path
-	Protection.  If in doubt, say N.
+	Protection.  If in doubt, say N.		# NVMe DIF/DIX 호환 컨트롤러라면 Y
 
-config BLK_DEV_WRITE_MOUNTED
+
+# NVMe namespace(/dev/nvme0n1 등)에 직접 쓰는 행위를 파일시스템 마운트 상태에서
+# 허용할지 결정한다. NVMe pass-through(nvme-cli io-passthru)로 장치를 직접
+# 제어할 때 주의가 필요한 옵션이다.
+config BLK_DEV_WRITE_MOUNTED			# 마운트된 NVMe namespace 직접 쓰기 허용
 	bool "Allow writing to mounted block devices"
-	default y
+	default y					# 기본 Y; fsck, ext4 기능 변경 등에 필요
 	help
 	When a block device is mounted, writing to its buffer cache is very
-	likely going to cause filesystem corruption. It is also rather easy to
+	likely going to cause filesystem corruption. It is also rather easy to	# /dev/nvme0n1에 직접 쓰면 ext4 메타데이터 훼손 위험
 	crash the kernel in this way since the filesystem has no practical way
 	of detecting these writes to buffer cache and verifying its metadata
 	integrity. However there are some setups that need this capability
 	like running fsck on read-only mounted root device, modifying some
-	features on mounted ext4 filesystem, and similar. If you say N, the
+	features on mounted ext4 filesystem, and similar. If you say N, the	# NVMe rootfs 유지보수 시 필요
 	kernel will prevent processes from writing to block devices that are
 	mounted by filesystems which provides some more protection from runaway
 	privileged processes and generally makes it much harder to crash
-	filesystem drivers. Note however that this does not prevent
+	filesystem drivers. Note however that this does not prevent	# NVMe pass-through 테스트 시 N으로 안전하게 제한 가능
 	underlying device(s) from being modified by other means, e.g. by
 	directly submitting SCSI commands or through access to lower layers of
-	storage stack. If in doubt, say Y. The configuration can be overridden
+	storage stack. If in doubt, say Y. The configuration can be overridden	# nvme-cli io-passthru는 이 제한 우회 가능
 	with the bdev_allow_write_mounted boot option.
 
-config BLK_DEV_ZONED
+
+# NVMe ZNS(Zoned Namespace) SSD를 사용하려면 반드시 필요하다. zone append,
+# zone management send/receive 같은 NVMe ZNS 명령이 블록 계층의 zoned block
+# 인터페이스를 통해 사용자 공간/파일시스템으로 노출된다.
+config BLK_DEV_ZONED				# NVMe ZNS(Zoned Namespace) SSD 필수 지원
 	bool "Zoned block device support"
 	help
 	Block layer zoned block device support. This option enables
 	support for ZAC/ZBC/ZNS host-managed and host-aware zoned block
-	devices.
+	devices.					# bio -> blk-mq -> nvme_queue_rq -> zone append/zone mgmt 명령
 
-	Say yes here if you have a ZAC, ZBC, or ZNS storage device.
+	Say yes here if you have a ZAC, ZBC, or ZNS storage device.	# NVMe ZNS SSD를 쓰면 반드시 Y
 
-config BLK_DEV_THROTTLING
+
+# cgroup별로 NVMe 장치에 전달되는 bio의 IOPS/BPS를 제한한다. 제한에 걸리면
+# bio는 blk-mq로 즉시 날아가지 않고 지연되어, 결과적으로 nvme_queue_rq() ->
+# nvme_submit_cmd(doorbell) 호출 간격이 조절된다.
+config BLK_DEV_THROTTLING			# cgroup 기반 NVMe IO throttling (bps/iops)
 	bool "Block layer bio throttling support"
-	depends on BLK_CGROUP
-	select BLK_CGROUP_RWSTAT
+	depends on BLK_CGROUP				# cgroup 인프라 필요; NVMe QoS의 상위 제어 레버
+	select BLK_CGROUP_RWSTAT			# throttle 통계 수집을 위해 rwstat 필요
 	help
 	Block layer bio throttling support. It can be used to limit
-	the IO rate to a device. IO rate policies are per cgroup and
+	the IO rate to a device. IO rate policies are per cgroup and	# /sys/fs/cgroup/blkio.throttle.* 로 NVMe 장치별 제한
 	one needs to mount and use blkio cgroup controller for creating
-	cgroups and specifying per device IO rate policies.
+	cgroups and specifying per device IO rate policies.	# 컨테이너/VM별 NVMe 대역폭 격리에 사용
 
 	See Documentation/admin-guide/cgroup-v1/blkio-controller.rst for more information.
 
-config BLK_WBT
+
+# 페이지 캐시의 writeback 스트림을 조절해 NVMe SSD의 급격한 latency spike를
+# 완화한다. NVMe queue depth가 writeback 폭주로 포화되는 것을 방지하여
+# foreground IO가 doorbell 갱신까지 지연되지 않도록 돕는다.
+config BLK_WBT					# NVMe writeback 급증으로 인한 latency spike 완화
 	bool "Enable support for block device writeback throttling"
 	help
 	Enabling this option enables the block layer to throttle buffered
 	background writeback from the VM, making it more smooth and having
-	less impact on foreground operations. The throttling is done
+	less impact on foreground operations. The throttling is done	# dirty page -> writeback -> bio -> blk-mq -> nvme_queue_rq 완화
 	dynamically on an algorithm loosely based on CoDel, factoring in
-	the realtime performance of the disk.
+	the realtime performance of the disk.	# NVMe CQ 완료 latency를 관측해 wb율 자동 조정
 
-config BLK_WBT_MQ
+
+# blk-mq 기반 NVMe 장치에 대해 WBT(writeback throttling)를 기본 켜기한다.
+# NVMe SSD는 보통 request-based이므로, 이 옵션이 Y일 때 writeback 율이
+# NVMe CQ(Completion Queue) 완료 패턴에 맞춰 자동 조정된다.
+config BLK_WBT_MQ				# request-based NVMe 장치에서 WBT 기본 활성화
 	bool "Enable writeback throttling by default"
-	default y
-	depends on BLK_WBT
+	default y					# NVMe SSD 운영 시 writeback 폭주 방지를 위해 Y 권장
+	depends on BLK_WBT				# BLK_WBT 없이는 동작하지 않음
 	help
-	Enable writeback throttling by default for request-based block devices.
+	Enable writeback throttling by default for request-based block devices.	# NVMe는 request-based이므로 직접 적용 대상
 
-config BLK_CGROUP_IOLATENCY
+
+# cgroup 단위로 NVMe IO의 평균 latency 목표를 설정하고, 목표를 초과하는
+# 그룹의 bio를 제한한다. NVMe SSD를 공유하는 워크로드 간 QoS 격리에 직접
+# 사용된다.
+config BLK_CGROUP_IOLATENCY			# cgroup별 NVMe latency target 제어
 	bool "Enable support for latency based cgroup IO protection"
-	depends on BLK_CGROUP
+	depends on BLK_CGROUP				# io.latency 인터페이스 활성화
 	help
 	Enabling this option enables the .latency interface for IO throttling.
 	The IO controller will attempt to maintain average IO latencies below
-	the configured latency target, throttling anybody with a higher latency
+	the configured latency target, throttling anybody with a higher latency	# cgroup io.latency -> bio 지연 -> nvme_queue_rq 호출 조절
 	target than the victimized group.
 
 	Note, this is an experimental interface and could be changed someday.
 
-config BLK_CGROUP_FC_APPID
+
+# NVMe over Fabrics 중 FC(Fibre Channel) 트랜스포트에서 cgroup별 어플리케이션
+# ID를 FC 프레임에 삽입한다. 스토리지 타겟이 특정 VM/컨테이너의 NVMe traffic을
+# 식별·모니터링할 수 있게 한다.
+config BLK_CGROUP_FC_APPID			# NVMe-oF FC에서 cgroup별 app ID 삽입
 	bool "Enable support to track FC I/O Traffic across cgroup applications"
-	depends on BLK_CGROUP && NVME_FC
+	depends on BLK_CGROUP && NVME_FC		# NVMe FC 트랜스포트와 cgroup 동시 필요
 	help
 	  Enabling this option enables the support to track FC I/O traffic across
-	  cgroup applications. It enables the Fabric and the storage targets to
+	  cgroup applications. It enables the Fabric and the storage targets to	# VM/컨테이너별 NVMe FC 프레임 태깅
 	  identify, monitor, and handle FC traffic based on VM tags by inserting
-	  application specific identification into the FC frame.
+	  application specific identification into the FC frame.	# 타겟에서 특정 cgroup의 NVMe I/O 추적 가능
 
-config BLK_CGROUP_IOCOST
+
+# NVMe SSD의 IO 용량을 cgroup 가중치에 따라 분배한다. BLK_RQ_ALLOC_TIME과
+# 연계되어 요청 할당 비용을 측정하고, 특정 cgroup이 nvme_queue_rq()를
+# 과도하게 점유하지 못하도록 제어한다.
+config BLK_CGROUP_IOCOST			# cgroup 가중치 기반 NVMe IO 용량 분배
 	bool "Enable support for cost model based cgroup IO controller"
-	depends on BLK_CGROUP
-	select BLK_RQ_ALLOC_TIME
+	depends on BLK_CGROUP				# io.cost 인터페이스
+	select BLK_RQ_ALLOC_TIME			# 요청 할당 비용 측정에 필요
 	help
 	Enabling this option enables the .weight interface for cost
-	model based proportional IO control.  The IO controller
+	model based proportional IO control.  The IO controller	# cgroup io.weight -> NVMe queue 자원 비율 할당
 	distributes IO capacity between different groups based on
-	their share of the overall weight distribution.
+	their share of the overall weight distribution.	# 특정 cgroup이 NVMe SQ/CID를 독점하지 않도록 제어
 
-config BLK_CGROUP_IOPRIO
+
+# cgroup별로 NVMe 요청의 IO 우선순위 클래스를 지정한다. NVMe 장치가 weighted
+# round-robin이나 UP(urgency priority) 큐를 지원하면, 이 우선순위가 SQ 탐색
+# 순서에 반영될 수 있다(추정).
+config BLK_CGROUP_IOPRIO			# cgroup별 NVMe IO 우선순위 클래스
 	bool "Cgroup I/O controller for assigning an I/O priority class"
-	depends on BLK_CGROUP
+	depends on BLK_CGROUP				# io.prio 인터페이스
 	help
 	Enable the .prio interface for assigning an I/O priority class to
-	requests. The I/O priority class affects the order in which an I/O
+	requests. The I/O priority class affects the order in which an I/O	# bio -> request에 prio 부여 -> NVMe SQ 삽입 우선순위에 반영 가능(추정)
 	scheduler and block devices process requests. Only some I/O schedulers
-	and some block devices support I/O priorities.
+	and some block devices support I/O priorities.	# NVMe SSD는 보통 none 스케줄러라 효과는 제한적일 수 있음(추정)
 
-config BLK_DEBUG_FS
+
+# /sys/kernel/debug/block/ 아래에 blk-mq 통계, hctx 상태, request 상태 등을
+# 노출한다. NVMe 성능 분석 시 queue depth, hctx 매핑, nvme_queue_rq() 호출
+# 빈도, CQ 완료 지연 등을 추적하는 데 필수적이다.
+config BLK_DEBUG_FS				# NVMe 성능 디버깅을 위한 debugfs 인프라
 	bool "Block layer debugging information in debugfs"
-	default y
-	depends on DEBUG_FS
+	default y					# 성능 튜닝 시 거의 필수
+	depends on DEBUG_FS				# 커널 debugfs 필요
 	help
 	Include block layer debugging information in debugfs. This information
 	is mostly useful for kernel developers, but it doesn't incur any cost
-	at runtime.
+	at runtime.					# NVMe queue depth, tag usage, hctx cpu map 등 확인
 
 	Unless you are building a kernel for a tiny system, you should
-	say Y here.
+	say Y here.					# NVMe 트러블슈팅/튜닝을 위해 Y 권장
 
-config BLK_SED_OPAL
+
+# Opal SED(self-encrypting drive)와의 인터페이스를 빌드한다. NVMe SED
+# 컨트롤러의 잠금 범위(locking range)를 설정·해제할 때 사용되며, NVMe
+# security send/receive 명령과 연결될 수 있다(추정).
+config BLK_SED_OPAL				# NVMe SED Opal 잠금 범위 제어
 	bool "Logic for interfacing with Opal enabled SEDs"
-	depends on KEYS
-	select PSERIES_PLPKS if PPC_PSERIES
-	select PSERIES_PLPKS_SED if PPC_PSERIES
+	depends on KEYS					# 키 관리 인프라 필요
+	select PSERIES_PLPKS if PPC_PSERIES		# PowerNV 플랫폼 키 스토리지
+	select PSERIES_PLPKS_SED if PPC_PSERIES		# PowerNV SED 연동
 	help
 	Builds Logic for interfacing with Opal enabled controllers.
 	Enabling this option enables users to setup/unlock/lock
-	Locking ranges for SED devices using the Opal protocol.
+	Locking ranges for SED devices using the Opal protocol.	# NVMe security send/receive -> locking range 설정(추정)
 
-config BLK_INLINE_ENCRYPTION
+
+# NVMe Key Per I/O(KPIO)나 inline encryption을 지원하는 컨트롤러에서, 암호화
+# 컨텍스트를 bio 단위로 전달할 수 있게 한다. NVMe 명령의 DFXML(encryption
+# context)이나 관련 확장 영역과 매핑된다(추정).
+config BLK_INLINE_ENCRYPTION			# NVMe KPIO/inline encryption을 위한 blk-crypto
 	bool "Enable inline encryption support in block layer"
 	help
 	  Build the blk-crypto subsystem. Enabling this lets the
 	  block layer handle encryption, so users can take
-	  advantage of inline encryption hardware if present.
+	  advantage of inline encryption hardware if present.	# bio -> blk-crypto -> NVMe command encryption context(추정)
+
 
 config BLK_INLINE_ENCRYPTION_FALLBACK
-	bool "Enable crypto API fallback for blk-crypto"
-	depends on BLK_INLINE_ENCRYPTION
-	select CRYPTO
-	select CRYPTO_SKCIPHER
+# NVMe 컨트롤러가 inline encryption을 지원하지 않을 때, 커널 crypto API로
+# 평문 변환(fallback)을 수행한다. 성능은 하드웨어 가속보다 떨어지지만
+# 기능 호환성을 보장한다.
+	bool "Enable crypto API fallback for blk-crypto"	# NVMe hardware inline encryption 미지원 시 소프트웨어 평문 변환
+	depends on BLK_INLINE_ENCRYPTION		# blk-crypto 없이는 의미 없음
+	select CRYPTO					# 커널 crypto API 필요
+	select CRYPTO_SKCIPHER				# symmetric cipher로 NVMe I/O 평문 변환
 	help
 	  Enabling this lets the block layer handle inline encryption
 	  by falling back to the kernel crypto API when inline
-	  encryption hardware is not present.
+	  encryption hardware is not present.	# NVMe SSD가 inline encryption 미지원할 때에도 투명 암호화 가능
 
-source "block/partitions/Kconfig"
+
+# 파티션 테이블(MBR/GPT) 설정을 로드한다. NVMe namespace 위에 생성된
+# /dev/nvme0n1p1 같은 파티션은 이 설정을 통해 블록 계층에 등록된다.
+source "block/partitions/Kconfig"		# NVMe namespace 파티션(nvme0n1p1) 등록 정책
+
 
 config BLK_PM
-	def_bool PM
+# 블록 장치의 runtime power management를 활성화한다. NVMe SSD의 APST
+# (Autonomous Power State Transition) 및 PCIe ASPM 동작에 영향을 주며,
+# idle 시 doorbell 처리와 CQ polling 정책이 절전 상태에 맞춰 조정된다.
+	def_bool PM					# PM=Y일 때만 활성화; NVMe APST/PCIe ASPM 제어의 blk layer 스위치
+
 
 # do not use in new code
-config BLOCK_HOLDER_DEPRECATED
-	bool
+# 레거시 block device holder 메커니즘이다. NVMe multipath나 device mapper
+# 같은 스택 장치에서는 새로운 holder API를 사용해야 하며, 이 옵션은 하위
+# 호환을 위해서만 남아 있다.
+config BLOCK_HOLDER_DEPRECATED			# NVMe multipath/DM에서 하위 호환용 holder API
+	bool					# 새 코드에서는 사용 금지; nvme multipath 경로와 간접 연관
+
 
 config BLK_MQ_STACKING
-	bool
+# blk-mq 기반 장치를 스택(stack)할 수 있게 한다. NVMe multipath,
+# dm-multipath, dm-crypt 등에서 상위 가상 장치가 하위 NVMe queue를
+# 연결할 때 필요하다.
+	bool					# multipath/dm-crypt -> blk-mq -> 하위 NVMe queue 연결 지원
 
-source "block/Kconfig.iosched"
 
-endif # BLOCK
+source "block/Kconfig.iosched"			# I/O 스케줄러 설정 로드: NVMe는 보통 none, 일부 mq-deadline/kyber 사용
+# block/Kconfig.iosched: I/O 스케줄러(BFQ, mq-deadline, kyber, none) 설정을
+# 로드한다. NVMe SSD는 보통 "none"을 사용하며, bio -> blk_mq_submit_bio ->
+# I/O scheduler -> nvme_queue_rq 경로에서 요청 정렬/합병 정책이 여기서
+# 결정된다.
+
+endif # BLOCK					# BLOCK 비활성화 시 이후 모든 NVMe block layer 지원 끔
+
+# ============================================================================
+# NVMe 관점 핵심 요약
+# ============================================================================
+# - 이 파일은 bio가 NVMe queue(nvme_queue_rq)에 도달하기 전, 블록 계층의
+#   인프라(요청 할당, cgroup 제어, writeback 스로틀링, debugfs, power
+#   management)를 모두 켜거나 끄는 최상위 스위치보드이다.
+# - BLK_DEV_ZONED, BLK_DEV_INTEGRITY, BLK_INLINE_ENCRYPTION 같은 옵션은
+#   NVMe의 ZNS, DIF/DIX, Key Per I/O 같은 고급 기능을 사용자 공간과
+#   연결하는 블록 계층 게이트 역할을 한다.
+# - BLK_CGROUP_*, BLK_WBT_MQ, BLK_MQ_STACKING 등은 bio -> blk_mq_submit_bio
+#   -> blk_mq_get_request -> (I/O scheduler) -> nvme_queue_rq ->
+#   nvme_submit_cmd(doorbell) 전체 경로의 지연, 우선순위, 큐 depth를
+#   제어하며, NVMe SSD에서 latency spike나 queue 포화를 완화하는 핵심
+#   레버이다.
+# - 이 파일은 상위 drivers/Kconfig에서 먼저 소스되고, 이후
+#   block/Kconfig.iosched(I/O scheduler)와 drivers/nvme/Kconfig(NVMe
+#   드라이버 자체)가 추가되어 NVMe stack을 완성한다.
+# ============================================================================

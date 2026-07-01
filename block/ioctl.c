@@ -1,4 +1,17 @@
 // SPDX-License-Identifier: GPL-2.0
+
+/*
+ * block/ioctl.c - 블록 장치에 대한 사용자 공간 ioctl을 처리하는 block layer 진입점
+ *
+ * 이 파일은 사용자 공간에서 요청한 BLKDISCARD, BLKZEROOUT, BLKSECDISCARD,
+ * BLKPG, flush, geometry 조회 등을 request_queue와 blk-mq를 통해
+ * NVMe SSD의 namespace 드라이버(drivers/nvme/host/core.c 등)로 연결한다.
+ *
+ * NVMe 관점 주요 흐름:
+ *   vfs_ioctl -> blkdev_ioctl -> blkdev_common_ioctl
+ *   -> nvme_ioctl / nvme_ns_ioctl -> nvme_queue_rq -> nvme_submit_cmd(doorbell)
+ */
+
 #include <linux/capability.h>
 #include <linux/compat.h>
 #include <linux/blkdev.h>
@@ -18,6 +31,14 @@
 #include "blk.h"
 #include "blk-crypto-internal.h"
 
+/*
+ * blkpg_do_ioctl - BLKPG 파티션 추가/삭제/크기 조정 ioctl의 실제 처리
+ *
+ * 사용자 공간의 blkpg_partition 정보를 바탕으로 블록 장치 내 가상 파티션을
+ * 관리한다. NVMe SSD에서는 namespace의 LBA 공간을 나누는 것으로, 파티션
+ * 오프셋은 이후 submit_bio -> blk_mq_submit_bio -> nvme_queue_rq 경로에서
+ * NVMe command의 SLBA(Starting LBA) 필드로 변환된다.
+ */
 static int blkpg_do_ioctl(struct block_device *bdev,
 			  struct blkpg_partition __user *upart, int op)
 {
@@ -41,7 +62,7 @@ static int blkpg_do_ioctl(struct block_device *bdev,
 	if (p.start < 0 || p.length <= 0 || LLONG_MAX - p.length < p.start)
 		return -EINVAL;
 	/* Check that the partition is aligned to the block size */
-	if (!IS_ALIGNED(p.start | p.length, bdev_logical_block_size(bdev)))
+	if (!IS_ALIGNED(p.start | p.length, bdev_logical_block_size(bdev))) // NVMe namespace LBAF의 logical block size 기준 정렬 검사
 		return -EINVAL;
 
 	start = p.start >> SECTOR_SHIFT;
@@ -64,6 +85,12 @@ static int blkpg_do_ioctl(struct block_device *bdev,
 	}
 }
 
+/*
+ * blkpg_ioctl - BLKPG ioctl 진입점
+ *
+ * 사용자 공간의 blkpg_ioctl_arg에서 op와 data 포인터를 복사한 뒤
+ * blkpg_do_ioctl()을 호출한다.
+ */
 static int blkpg_ioctl(struct block_device *bdev,
 		       struct blkpg_ioctl_arg __user *arg)
 {
@@ -77,6 +104,16 @@ static int blkpg_ioctl(struct block_device *bdev,
 }
 
 #ifdef CONFIG_COMPAT
+/*
+ * struct compat_blkpg_ioctl_arg - 32비트 호환 BLKPG ioctl 인자
+ *
+ * @op:      BLKPG_ADD_PARTITION/DEL_PARTITION/RESIZE_PARTITION 등의 동작.
+ * @flags:   예약된 플래그.
+ * @datalen: data 버퍼 길이.
+ * @data:    사용자 공간의 blkpg_partition 포인터(32비트 compat 주소).
+ *          NVMe namespace 난내 파티션 오프셋은 이 data가 가리키는
+ *          blkpg_partition을 통해 NVMe LBA로 변환된다.
+ */
 struct compat_blkpg_ioctl_arg {
 	compat_int_t op;
 	compat_int_t flags;
@@ -84,6 +121,12 @@ struct compat_blkpg_ioctl_arg {
 	compat_caddr_t data;
 };
 
+/*
+ * compat_blkpg_ioctl - 32비트 호환 BLKPG ioctl 처리
+ *
+ * compat_caddr_t 형태의 data 포인터를 변환하여 blkpg_do_ioctl()로 전달한다.
+ * NVMe namespace에 대한 파티션 조작이 32/64비트 ABI 간에 동일하게 동작한다.
+ */
 static int compat_blkpg_ioctl(struct block_device *bdev,
 			      struct compat_blkpg_ioctl_arg __user *arg)
 {
@@ -98,6 +141,14 @@ static int compat_blkpg_ioctl(struct block_device *bdev,
 #endif
 
 /*
+ * blk_validate_byte_range - 사용자가 요청한 바이트 범위의 정합성 검증
+ *
+ * 논리 블록 크기(lba data size) 기준 정렬, 길이 0 여부, 오버플로우,
+ * 장치 용량 초과 여부를 검사한다. NVMe controller는 namespace 범위를
+ * 벗어나는 LBA 명령을 Invalid Field/Invalid Namespace or Size 등으로
+ * 거부하므로, block layer에서 사전에 차단한다.
+ */
+/*
  * Check that [start, start + len) is a valid range from the block device's
  * perspective, including verifying that it can be correctly translated into
  * logical block addresses.
@@ -108,7 +159,7 @@ static int blk_validate_byte_range(struct block_device *bdev,
 	unsigned int bs_mask = bdev_logical_block_size(bdev) - 1;
 	uint64_t end;
 
-	if ((start | len) & bs_mask)
+	if ((start | len) & bs_mask) // logical block size 기준 정렬 위반 시 NVMe LBA 정렬 오류 방지
 		return -EINVAL;
 	if (!len)
 		return -EINVAL;
@@ -118,6 +169,15 @@ static int blk_validate_byte_range(struct block_device *bdev,
 	return 0;
 }
 
+/*
+ * blk_ioctl_discard - BLKDISCARD ioctl 처리
+ *
+ * 사용자가 지정한 바이트 범위를 discard bio로 변환하여 제출한다.
+ * NVMe에서는 Dataset Management 명령(Deallocate)에 해당하며,
+ * bio_chain_and_submit -> submit_bio -> blk_mq_submit_bio ->
+ * blk_mq_get_request -> nvme_queue_rq -> nvme_submit_cmd(doorbell)
+ * 순으로 NVMe submission queue에 기록된다.
+ */
 static int blk_ioctl_discard(struct block_device *bdev, blk_mode_t mode,
 		unsigned long arg)
 {
@@ -132,7 +192,7 @@ static int blk_ioctl_discard(struct block_device *bdev, blk_mode_t mode,
 	start = range[0];
 	len = range[1];
 
-	if (!bdev_max_discard_sectors(bdev))
+	if (!bdev_max_discard_sectors(bdev)) // NVMe namespace가 Dataset Management(Deallocate)를 지원하지 않으면 0
 		return -EOPNOTSUPP;
 
 	if (!(mode & BLK_OPEN_WRITE))
@@ -152,13 +212,13 @@ static int blk_ioctl_discard(struct block_device *bdev, blk_mode_t mode,
 	sector = start >> SECTOR_SHIFT;
 	nr_sects = len >> SECTOR_SHIFT;
 
-	blk_start_plug(&plug);
+	blk_start_plug(&plug); // 이후 제출되는 discard bio들을 NVMe SQ batching을 위해 일시 묶음
 	while (!fatal_signal_pending(current)) {
 		bio = blk_alloc_discard_bio(bdev, &sector, &nr_sects,
 				GFP_KERNEL);
 		if (!bio)
 			break;
-		prev = bio_chain_and_submit(prev, bio);
+		prev = bio_chain_and_submit(prev, bio); // bio를 submit_bio로 본내 blk-mq -> nvme_queue_rq로 연결
 	}
 	if (prev) {
 		err = bio_submit_or_kill(prev, BLKDEV_ZERO_KILLABLE);
@@ -173,6 +233,13 @@ fail:
 	return err;
 }
 
+/*
+ * blk_ioctl_secure_erase - BLKSECDISCARD ioctl 처리
+ *
+ * 보안 삭제를 요청한 바이트 범위를 blkdev_issue_secure_erase()로 전달한다.
+ * NVMe에서는 Sanitize 동작(Crypto Erase/Block Erase/Overwrite)에
+ * 매핑될 수 있다(추정).
+ */
 static int blk_ioctl_secure_erase(struct block_device *bdev, blk_mode_t mode,
 		void __user *argp)
 {
@@ -182,7 +249,7 @@ static int blk_ioctl_secure_erase(struct block_device *bdev, blk_mode_t mode,
 
 	if (!(mode & BLK_OPEN_WRITE))
 		return -EBADF;
-	if (!bdev_max_secure_erase_sectors(bdev))
+	if (!bdev_max_secure_erase_sectors(bdev)) // NVMe Sanitize/Secure Erase 제한 반영
 		return -EOPNOTSUPP;
 	if (copy_from_user(range, argp, sizeof(range)))
 		return -EFAULT;
@@ -207,6 +274,13 @@ static int blk_ioctl_secure_erase(struct block_device *bdev, blk_mode_t mode,
 }
 
 
+/*
+ * blk_ioctl_zeroout - BLKZEROOUT ioctl 처리
+ *
+ * 지정한 범위를 0으로 채우는 명령을 발행한다. NVMe에서는 Write Zeroes
+ * 명령에 해당하며, BLKDEV_ZERO_NOUNMAP 플래그로 인해 controller가
+ * Write Zeroes를 지원하지 않을 때는 일반 write로 fallback할 수 있다(추정).
+ */
 static int blk_ioctl_zeroout(struct block_device *bdev, blk_mode_t mode,
 		unsigned long arg)
 {
@@ -241,7 +315,7 @@ static int blk_ioctl_zeroout(struct block_device *bdev, blk_mode_t mode,
 		goto fail;
 
 	err = blkdev_issue_zeroout(bdev, start >> 9, len >> 9, GFP_KERNEL,
-				   BLKDEV_ZERO_NOUNMAP | BLKDEV_ZERO_KILLABLE);
+				   BLKDEV_ZERO_NOUNMAP | BLKDEV_ZERO_KILLABLE); // NVMe Write Zeroes 우선, 미지원 시 일반 write로 fallback할 수 있다(추정)
 
 fail:
 	filemap_invalidate_unlock(bdev->bd_mapping);
@@ -297,6 +371,12 @@ static int compat_put_ulong(compat_ulong_t __user *argp, compat_ulong_t val)
  * drivers that implement only commands that are completely compatible
  * between 32-bit and 64-bit user space
  */
+/*
+ * blkdev_compat_ptr_ioctl - 32/64비트 호환 block device ioctl fallback
+ *
+ * low-level block driver가 32/64비트 호환 ioctl을 직접 구현한 경우
+ * 호출된다. NVMe 드라이버도 이 경로를 통해 compat_ioctl를 지원할 수 있다.
+ */
 int blkdev_compat_ptr_ioctl(struct block_device *bdev, blk_mode_t mode,
 			unsigned cmd, unsigned long arg)
 {
@@ -311,11 +391,25 @@ int blkdev_compat_ptr_ioctl(struct block_device *bdev, blk_mode_t mode,
 EXPORT_SYMBOL(blkdev_compat_ptr_ioctl);
 #endif
 
+/*
+ * enum pr_direction - Persistent Reservation(PR) 데이터 방향
+ *
+ * PR_IN  : controller로부터 PR 정보를 읽는다 (e.g. PR Report).
+ * PR_OUT : controller에 PR 키/상태를 기록한다 (e.g. PR Register/Reserve).
+ * NVMe에서는 Reservation Register/Report/Acquire/Release 명령과 대응된다.
+ */
 enum pr_direction {
 	PR_IN,  /* read from device */
 	PR_OUT, /* write to device */
 };
 
+/*
+ * blkdev_pr_allowed - Persistent Reservation ioctl의 권한 검사
+ *
+ * 파티션에는 PR이 의미 없으므로 항상 false를 반환하고,
+ * 관리자면 true를 반환한다.
+ * 읽기 전용 PR_IN은 읽기 권한, PR_OUT은 쓰기 권한이 필요하다.
+ */
 static bool blkdev_pr_allowed(struct block_device *bdev, blk_mode_t mode,
 		enum pr_direction dir)
 {
@@ -338,6 +432,12 @@ static bool blkdev_pr_allowed(struct block_device *bdev, blk_mode_t mode,
 		return mode & BLK_OPEN_WRITE;
 }
 
+/*
+ * blkdev_pr_register - PR Register 명령 처리
+ *
+ * old_key/new_key를 driver의 pr_ops->pr_register로 전달한다.
+ * NVMe에서는 Reservation Register 명령에 해당한다.
+ */
 static int blkdev_pr_register(struct block_device *bdev, blk_mode_t mode,
 		struct pr_registration __user *arg)
 {
@@ -356,6 +456,12 @@ static int blkdev_pr_register(struct block_device *bdev, blk_mode_t mode,
 	return ops->pr_register(bdev, reg.old_key, reg.new_key, reg.flags);
 }
 
+/*
+ * blkdev_pr_reserve - PR Reserve(획득) 명령 처리
+ *
+ * key/type/flags를 driver의 pr_ops->pr_reserve로 전달한다.
+ * NVMe에서는 Reservation Acquire 명령에 해당한다.
+ */
 static int blkdev_pr_reserve(struct block_device *bdev, blk_mode_t mode,
 		struct pr_reservation __user *arg)
 {
@@ -374,6 +480,12 @@ static int blkdev_pr_reserve(struct block_device *bdev, blk_mode_t mode,
 	return ops->pr_reserve(bdev, rsv.key, rsv.type, rsv.flags);
 }
 
+/*
+ * blkdev_pr_release - PR Release 명령 처리
+ *
+ * key/type을 driver의 pr_ops->pr_release로 전달한다.
+ * NVMe에서는 Reservation Release 명령에 해당한다.
+ */
 static int blkdev_pr_release(struct block_device *bdev, blk_mode_t mode,
 		struct pr_reservation __user *arg)
 {
@@ -392,6 +504,12 @@ static int blkdev_pr_release(struct block_device *bdev, blk_mode_t mode,
 	return ops->pr_release(bdev, rsv.key, rsv.type);
 }
 
+/*
+ * blkdev_pr_preempt - PR Preempt/Abort 명령 처리
+ *
+ * old_key/new_key/type을 driver의 pr_ops->pr_preempt로 전달한다.
+ * NVMe Reservation Preempt/Abort 기능과 대응된다.
+ */
 static int blkdev_pr_preempt(struct block_device *bdev, blk_mode_t mode,
 		struct pr_preempt __user *arg, bool abort)
 {
@@ -410,6 +528,12 @@ static int blkdev_pr_preempt(struct block_device *bdev, blk_mode_t mode,
 	return ops->pr_preempt(bdev, p.old_key, p.new_key, p.type, abort);
 }
 
+/*
+ * blkdev_pr_clear - PR Clear 명령 처리
+ *
+ * key를 driver의 pr_ops->pr_clear로 전달한다.
+ * NVMe Reservation Release의 Clear 타입과 유사한 역할을 한다.
+ */
 static int blkdev_pr_clear(struct block_device *bdev, blk_mode_t mode,
 		struct pr_clear __user *arg)
 {
@@ -428,6 +552,13 @@ static int blkdev_pr_clear(struct block_device *bdev, blk_mode_t mode,
 	return ops->pr_clear(bdev, c.key);
 }
 
+/*
+ * blkdev_pr_read_keys - 등록된 PR 키 목록 조회
+ *
+ * driver의 pr_ops->pr_read_keys를 호출하여 controller로부터
+ * Reservation key 목록을 가져오고 사용자 공간으로 복사한다.
+ * NVMe에서는 Reservation Report 명령에 해당한다.
+ */
 static int blkdev_pr_read_keys(struct block_device *bdev, blk_mode_t mode,
 		struct pr_read_keys __user *arg)
 {
@@ -483,6 +614,12 @@ out:
 	return ret;
 }
 
+/*
+ * blkdev_pr_read_reservation - 현재 hold 중인 PR 정보 조회
+ *
+ * controller의 현재 reservation 상태(key, generation, type)를
+ * 사용자 공간으로 복사한다. NVMe Reservation Report 데이터와 대응된다.
+ */
 static int blkdev_pr_read_reservation(struct block_device *bdev,
 		blk_mode_t mode, struct pr_read_reservation __user *arg)
 {
@@ -509,6 +646,13 @@ static int blkdev_pr_read_reservation(struct block_device *bdev,
 	return 0;
 }
 
+/*
+ * blkdev_flushbuf - BLKFLSBUF: 버퍼 캐시 동기화 및 무효화
+ *
+ * dirty page를 모두 기록한 뒤 캐시를 무효화한다. NVMe에서는
+ * volatile write cache를 flush하기 위한 Flush command 또는
+ * REQ_PREFLUSH/REQ_FUA 비트가 설정된 I/O로 변환될 수 있다.
+ */
 static int blkdev_flushbuf(struct block_device *bdev, unsigned cmd,
 		unsigned long arg)
 {
@@ -527,6 +671,13 @@ static int blkdev_flushbuf(struct block_device *bdev, unsigned cmd,
 	return 0;
 }
 
+/*
+ * blkdev_roset - BLKROSET: 블록 장치 읽기 전용 상태 변경
+ *
+ * driver가 set_read_only()를 구현하면 해당 함수를 호출하고,
+ * 그렇지 않으면 block device의 BD_READ_ONLY 플래그만 갱신한다.
+ * NVMe namespace 레벨에서의 쓰기 금지 설정과 유사한 역할을 한다.
+ */
 static int blkdev_roset(struct block_device *bdev, unsigned cmd,
 		unsigned long arg)
 {
@@ -549,6 +700,12 @@ static int blkdev_roset(struct block_device *bdev, unsigned cmd,
 	return 0;
 }
 
+/*
+ * blkdev_getgeo - HDIO_GETGEO: CHS geometry 조회
+ *
+ * legacy IDE/SCSI 스타일의 가상 geometry 정보를 반환한다.
+ * NVMe SSD는 CHS 개념이 없으므로 driver가 dummy 값을 채워 반환한다.
+ */
 static int blkdev_getgeo(struct block_device *bdev,
 		struct hd_geometry __user *argp)
 {
@@ -576,6 +733,17 @@ static int blkdev_getgeo(struct block_device *bdev,
 }
 
 #ifdef CONFIG_COMPAT
+/*
+ * struct compat_hd_geometry - 32비트 호환용 CHS geometry 구조체
+ *
+ * @heads:     가상 헤드 수. NVMe는 CHS 개념이 없어 driver가 dummy 값 설정.
+ * @sectors:   가상 섹터 수. NVMe에서도 legacy 호환을 위한 dummy 값.
+ * @cylinders: 가상 실린더 수.
+ * @start:     파티션 시작 섹터. NVMe namespace LBA 기준 오프셋과 대응.
+ *
+ * hd_geometry의 32비트 ABI 버전이며, NVMe에도 동일하게
+ * legacy geometry 정보를 사용자 공간으로 전달할 때 사용된다.
+ */
 struct compat_hd_geometry {
 	unsigned char heads;
 	unsigned char sectors;
@@ -583,6 +751,12 @@ struct compat_hd_geometry {
 	u32 start;
 };
 
+/*
+ * compat_hdio_getgeo - 32비트 호환 HDIO_GETGEO
+ *
+ * hd_geometry를 compat_hd_geometry 형태로 변환하여 복사한다.
+ * NVMe에서도 dummy geometry를 32비트 ABI로 노출할 때 사용된다.
+ */
 static int compat_hdio_getgeo(struct block_device *bdev,
 			      struct compat_hd_geometry __user *ugeo)
 {
@@ -614,6 +788,13 @@ static int compat_hdio_getgeo(struct block_device *bdev,
 }
 #endif
 
+/*
+ * blkdev_bszset - BLKBSZSET: 논리 블록 크기 설정
+ *
+ * block device의 block size를 변경한다. NVMe namespace가 포맷된
+ * LBA format(LBAF)의 LBADS(logical block address data size)와
+ * 일치해야 정상적으로 동작한다.
+ */
 /* set the logical block size */
 static int blkdev_bszset(struct file *file, blk_mode_t mode,
 		int __user *argp)
@@ -642,6 +823,17 @@ static int blkdev_bszset(struct file *file, blk_mode_t mode,
 	return ret;
 }
 
+/*
+ * blkdev_common_ioctl - native/compat 공통 block ioctl 분기
+ *
+ * BLKDISCARD, BLKZEROOUT, flush, geometry/block size 조회, PR,
+ * zone management, crypto 등 다수의 ioctl을 분기한다.
+ * NVMe 관점에서는 Identify Namespace/Controller에서 가져온
+ * logical block size, physical block size, max sectors, discard
+ * 지원 여부, zone, rotational 여부 등을 사용자 공간에 노출한다.
+ * 처리할 수 없는 cmd는 -ENOIOCTLCMD를 반환하여 caller가
+ * driver의 fops->ioctl(NVMe vendor/admin/passthrough)로 넘기게 한다.
+ */
 /*
  * Common commands that are handled the same way on native and compat
  * user space. Note the separate arg/argp parameters that are needed
@@ -680,9 +872,9 @@ static int blkdev_common_ioctl(struct block_device *bdev, blk_mode_t mode,
 		return put_uint(argp, bdev_nr_zones(bdev));
 	case BLKROGET:
 		return put_int(argp, bdev_read_only(bdev) != 0);
-	case BLKSSZGET: /* get block device logical block size */
+	case BLKSSZGET: /* get block device logical block size */ // NVMe Identify Namespace LBAF.LBADS (logical block size)
 		return put_int(argp, bdev_logical_block_size(bdev));
-	case BLKPBSZGET: /* get block device physical block size */
+	case BLKPBSZGET: /* get block device physical block size */ // NVMe Identify Namespace의 physical block/alignment 관련 필드 반영
 		return put_uint(argp, bdev_physical_block_size(bdev));
 	case BLKIOMIN:
 		return put_uint(argp, bdev_io_min(bdev));
@@ -694,9 +886,9 @@ static int blkdev_common_ioctl(struct block_device *bdev, blk_mode_t mode,
 		return put_uint(argp, 0);
 	case BLKSECTGET:
 		max_sectors = min_t(unsigned int, USHRT_MAX,
-				    queue_max_sectors(bdev_get_queue(bdev)));
+				    queue_max_sectors(bdev_get_queue(bdev))); // NVMe Identify Controller의 MDTS 또는 namespace max sectors 제한
 		return put_ushort(argp, max_sectors);
-	case BLKROTATIONAL:
+	case BLKROTATIONAL: // NVMe는 non-rotational 미디어이므로 항상 0
 		return put_ushort(argp, bdev_rot(bdev));
 	case BLKRASET:
 	case BLKFRASET:
@@ -736,7 +928,7 @@ static int blkdev_common_ioctl(struct block_device *bdev, blk_mode_t mode,
 	case IOC_PR_READ_RESERVATION:
 		return blkdev_pr_read_reservation(bdev, mode, argp);
 	default:
-		return blk_get_meta_cap(bdev, cmd, argp);
+		return blk_get_meta_cap(bdev, cmd, argp); // NVMe vendor/admin/passthrough ioctl은 driver의 fops->ioctl로 전달
 	}
 }
 
@@ -745,6 +937,15 @@ static int blkdev_common_ioctl(struct block_device *bdev, blk_mode_t mode,
  * to handle all incompatible commands in both functions.
  *
  * New commands must be compatible and go into blkdev_common_ioctl
+ */
+/*
+ * blkdev_ioctl - block device에 대한 메인 ioctl 핸들러
+ *
+ * vfs_ioctl()이 호출하는 block_device_operations.ioctl 진입점이다.
+ * HDIO_GETGEO, BLKPG, BLKBSZGET/SET, BLKTRACESETUP 등을 직접 처리하고,
+ * 나머지는 blkdev_common_ioctl()으로 위임한다.
+ * -ENOIOCTLCMD 반환 시 disk->fops->ioctl을 호출하여
+ * NVMe vendor/admin 명령이나 passthrough를 처리할 수 있다.
  */
 long blkdev_ioctl(struct file *file, unsigned cmd, unsigned long arg)
 {
@@ -788,7 +989,7 @@ long blkdev_ioctl(struct file *file, unsigned cmd, unsigned long arg)
 		break;
 	}
 
-	ret = blkdev_common_ioctl(bdev, mode, cmd, arg, argp);
+	ret = blkdev_common_ioctl(bdev, mode, cmd, arg, argp); // NVMe 공통 ioctl 분기, 미처리 시 -ENOIOCTLCMD 반환
 	if (ret != -ENOIOCTLCMD)
 		return ret;
 
@@ -806,6 +1007,14 @@ long blkdev_ioctl(struct file *file, unsigned cmd, unsigned long arg)
 /* Most of the generic ioctls are handled in the normal fallback path.
    This assumes the blkdev's low level compat_ioctl always returns
    ENOIOCTLCMD for unknown ioctls. */
+/*
+ * compat_blkdev_ioctl - 32비트 호환 block device ioctl 핸들러
+ *
+ * 32비트 사용자 공간의 ioctl 번호/자료구조 차이를 처리한 뒤
+ * blkdev_common_ioctl()로 공통 처리를 위임한다.
+ * NVMe compat_ioctl 지원 시 driver의 disk->fops->compat_ioctl로
+ * 전달될 수 있다.
+ */
 long compat_blkdev_ioctl(struct file *file, unsigned cmd, unsigned long arg)
 {
 	int ret;
@@ -856,11 +1065,26 @@ long compat_blkdev_ioctl(struct file *file, unsigned cmd, unsigned long arg)
 }
 #endif
 
+/*
+ * struct blk_iou_cmd - block layer io_uring 명령 private 데이터
+ *
+ * @res:    명령 결과. NVMe completion status(CQ entry의 SC)가
+ *          blk_status_to_errno()를 거쳐 저장될 수 있다.
+ * @nowait: non-block 요청 여부. true이면 REQ_NOWAIT가 설정되어
+ *          NVMe SQ가 가득 찼을 때 sleep 대신 -EAGAIN을 반환한다.
+ */
 struct blk_iou_cmd {
 	int res;
 	bool nowait;
 };
 
+/*
+ * blk_cmd_complete - io_uring 명령의 task-work 완료 콜백
+ *
+ * non-block 시 -EAGAIN이면 blocking context에서 재시도하고,
+ * 그 외에는 io_uring_cmd_done()으로 완료를 알린다.
+ * NVMe CQ가 도착하여 bio completion -> task work로 이어진 뒤 실행된다.
+ */
 static void blk_cmd_complete(struct io_tw_req tw_req, io_tw_token_t tw)
 {
 	struct io_uring_cmd *cmd = io_uring_cmd_from_tw(tw_req);
@@ -873,18 +1097,33 @@ static void blk_cmd_complete(struct io_tw_req tw_req, io_tw_token_t tw)
 				  IO_URING_CMD_TASK_WORK_ISSUE_FLAGS);
 }
 
+/*
+ * bio_cmd_bio_end_io - discard bio 완료 콜백
+ *
+ * bio->bi_status를 errno로 변환하여 blk_iou_cmd.res에 저장하고
+ * io_uring_cmd_do_in_task_lazy()로 task work를 예약한다.
+ * NVMe CQ entry의 status field가 bio status로 변환된 뒤 도달한다.
+ */
 static void bio_cmd_bio_end_io(struct bio *bio)
 {
 	struct io_uring_cmd *cmd = bio->bi_private;
 	struct blk_iou_cmd *bic = io_uring_cmd_to_pdu(cmd, struct blk_iou_cmd);
 
 	if (unlikely(bio->bi_status) && !bic->res)
-		bic->res = blk_status_to_errno(bio->bi_status);
+		bic->res = blk_status_to_errno(bio->bi_status); // NVMe CQ status -> bio status -> errno 변환
 
 	io_uring_cmd_do_in_task_lazy(cmd, blk_cmd_complete);
 	bio_put(bio);
 }
 
+/*
+ * blkdev_cmd_discard - io_uring discard 명령 처리
+ *
+ * BLOCK_URING_CMD_DISCARD에 대해 discard bio를 할당/제출한다.
+ * BLKDISCARD ioctl과 마찬가지로 NVMe Dataset Management(Deallocate)
+ * 명령으로 매핑되며, nowait가 설정되면 REQ_NOWAIT를 사용해
+ * NVMe SQ가 가득 찼을 때 sleep 없이 -EAGAIN을 반환한다.
+ */
 static int blkdev_cmd_discard(struct io_uring_cmd *cmd,
 			      struct block_device *bdev,
 			      uint64_t start, uint64_t len, bool nowait)
@@ -926,7 +1165,7 @@ static int blkdev_cmd_discard(struct io_uring_cmd *cmd,
 				bio_put(bio);
 				return -EAGAIN;
 			}
-			bio->bi_opf |= REQ_NOWAIT;
+			bio->bi_opf |= REQ_NOWAIT; // NVMe SQ가 가득 차면 sleep 없이 -EAGAIN 반환
 		}
 
 		prev = bio_chain_and_submit(prev, bio);
@@ -936,12 +1175,22 @@ static int blkdev_cmd_discard(struct io_uring_cmd *cmd,
 	if (unlikely(nr_sects))
 		bic->res = -EAGAIN;
 
-	prev->bi_private = cmd;
+	prev->bi_private = cmd; // 마지막 bio가 io_uring completion을 받도록 설정
 	prev->bi_end_io = bio_cmd_bio_end_io;
 	submit_bio(prev);
 	return -EIOCBQUEUED;
 }
 
+/*
+ * blkdev_uring_cmd - io_uring block command 진입점
+ *
+ * io_uring submission queue entry(sqe)에서 addr/addr3를 읽어
+ * start/len을 결정하고 cmd_op에 따라 분기한다.
+ * BLOCK_URING_CMD_DISCARD는 blkdev_cmd_discard()로 전달되며,
+ * 기존 ioctl 경로를 우회하지만 최종적으로는 동일한
+ * submit_bio -> blk_mq_submit_bio -> blk_mq_get_request ->
+ * nvme_queue_rq -> nvme_submit_cmd(doorbell) 경로로 NVMe SQ에 기록된다.
+ */
 int blkdev_uring_cmd(struct io_uring_cmd *cmd, unsigned int issue_flags)
 {
 	struct block_device *bdev = I_BDEV(cmd->file->f_mapping->host);
@@ -950,7 +1199,7 @@ int blkdev_uring_cmd(struct io_uring_cmd *cmd, unsigned int issue_flags)
 	u32 cmd_op = cmd->cmd_op;
 	uint64_t start, len;
 
-	if (unlikely(sqe->ioprio || sqe->__pad1 || sqe->len ||
+	if (unlikely(sqe->ioprio || sqe->__pad1 || sqe->len || // io_uring SQE 필드 검증; NVMe SQE와 무관한 block layer 검증
 		     sqe->rw_flags || sqe->file_index))
 		return -EINVAL;
 
@@ -966,3 +1215,23 @@ int blkdev_uring_cmd(struct io_uring_cmd *cmd, unsigned int issue_flags)
 	}
 	return -EINVAL;
 }
+
+/* NVMe 관점 핵심 요약 */
+/*
+ * - block/ioctl.c는 사용자 공간의 블록 장치 ioctl을 NVMe command path로
+ *   라우팅하는 dispatcher 역할을 한다 (BLKDISCARD -> Dataset Management,
+ *   BLKZEROOUT -> Write Zeroes 등).
+ * - block layer가 namespace의 logical block size, physical block size,
+ *   discard 제한, zone, alignment, rotational 여부 등을 캐시하며,
+ *   이는 NVMe Identify Namespace/Controller 정보를 반영한다.
+ * - blkdev_ioctl/compat_blkdev_ioctl은 -ENOIOCTLCMD 시 driver의
+ *   fops->ioctl/compat_ioctl로 넘겨 NVMe vendor/admin/passthrough
+ *   명령 처리를 가능하게 한다.
+ * - io_uring 경로(BLOCK_URING_CMD_DISCARD)는 bio 직접 제출을 통해
+ *   기존 ioctl 경로를 우회하지만, 동일한 blk-mq -> nvme_queue_rq ->
+ *   doorbell 흐름을 타며 SQ/CID/CQ completion을 사용한다.
+ * - 본 파일은 fs/block_dev.c의 block_device_operations 및 blk-mq
+ *   request 분배 경로와 연결되며, NVMe 드라이버는 drivers/nvme/host/에서
+ *   이 요청을 SQE로 변환하여 doorbell을 갱신한다.
+ */
+
