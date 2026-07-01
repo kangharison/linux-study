@@ -2,278 +2,341 @@
 #ifndef BLK_MQ_SCHED_H
 #define BLK_MQ_SCHED_H
 
+/* [한국어] elevator.h: elevator_type, elevator_queue, elv_change_ctx 등 공통 스케줄러 타입 */
 #include "elevator.h"
+/* [한국어] blk-mq.h: blk_mq_hw_ctx, blk_mq_ctx, blk_mq_tag_set 등 멀티큐 핵심 구조체 */
 #include "blk-mq.h"
 
 /*
- * blk-mq-sched.h - Multi-Queue Block Layer Scheduler Interface
+ * [한국어 설명] blk-mq IO 스케줄러 인터페이스 헤더 (blk-mq-sched.h)
  *
- * 파일 개요:
- *   이 헤더는 blk-mq I/O 스케줄러의 핵심 인터페이스를 정의한다.
- *   elevator.h에서 제공하는 범용 I/O 스케줄러 프레임워크를 blk-mq
- *   (Multi-Queue) 환경에 연결하며, 요청 합병(bio merge), 디스패치
- *   (dispatch), 재시작(restart), 스케줄러 자원 할당/해제 등을
- *   조율한다.
+ * === 파일의 역할 ===
+ * 이 헤더는 blk-mq(Multi-Queue Block Layer)의 IO 스케줄러 프레임워크가 외부에
+ * 제공하는 공개 API와 내부 인라인 함수들을 선언한다. elevator(mq-deadline·BFQ·kyber)와
+ * blk-mq dispatch 엔진 사이의 인터페이스를 정의하며, bio merge·dispatch·restart·
+ * tag pool 할당/해제 등의 함수 프로토타입을 담는다. 구현은 blk-mq-sched.c에 있다.
  *
- *   NVMe SSD 관점에서 볼 때, 이 파일은 상위 elevator / schedulers
- *   (mq-deadline, bfq, kyber 등)와 하위 NVMe 드라이버 사이의
- *   중재 계층이다. NVMe queue, SQ/CQ, doorbell, CID, PRP/SGL 등의
- *   실제 하드웨어 동작은 drivers/nvme/에서 처리하지만, 이 파일은
- *   언제 어느 request를 NVMe에 날릴지 결정하는 정책 레이어의
- *   연결고리 역할을 한다.
+ * === 전체 아키텍처에서의 위치 ===
+ * 이 헤더를 include하는 파일들이 blk-mq-sched.c의 기능을 사용하는 계층이다:
  *
- *   상/하위 연결:
- *     blk-mq.c / blk-mq-tag.c  ->  blk-mq-sched.h  ->  elevator.h
- *     blk_mq_submit_bio -> blk_mq_get_request -> blk_mq_sched_try_merge
- *     -> (scheduler 선택) -> blk_mq_sched_dispatch_requests
- *     -> blk_mq_run_hw_queue -> nvme_queue_rq -> nvme_submit_cmd(doorbell)
+ *   [blk-mq.c] blk_mq_submit_bio()
+ *       ↓ #include "blk-mq-sched.h"
+ *   blk_mq_sched_bio_merge()         ← bio를 기존 request에 합치기 시도
+ *       ↓
+ *   blk_mq_sched_dispatch_requests() ← hctx dispatch 최상위 진입점
+ *       ↓
+ *   [blk-mq-sched.c 구현] → nvme_queue_rq() → SQ doorbell
+ *
+ * 실행 컨텍스트: 선언만 담긴 헤더이므로 컨텍스트는 각 함수 구현에서 결정.
+ * inline 함수들은 호출 지점의 컨텍스트를 그대로 따른다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 이 헤더를 include하는 모듈:
+ *   - block/blk-mq.c: submit_bio, complete, requeue 경로에서 sched API 호출
+ *   - block/elevator.c: elevator_change_done에서 blk_mq_init_sched() 호출
+ *   - block/mq-deadline.c, bfq-iosched.c, kyber-iosched.c: elevator 구현체가
+ *     blk_mq_sched_dispatch_requests() 등을 통해 dispatch 예약
+ * 의존 헤더:
+ *   - elevator.h: elevator_type(ops vtable), elevator_queue, elv_change_ctx
+ *   - blk-mq.h: blk_mq_hw_ctx(dispatch·sched_tags·ctx_map), blk_mq_tag_set
+ *
+ * === 주요 함수/구조체 요약 ===
+ * blk_mq_sched_bio_merge()        - bio를 sw queue 기존 request에 merge 시도
+ * blk_mq_sched_try_insert_merge() - request 삽입 시 elevator hash에서 merge 시도
+ * blk_mq_sched_dispatch_requests()- hctx dispatch 최상위 진입점
+ * blk_mq_sched_mark_restart_hctx()- SCHED_RESTART 비트 설정 (SQ full 재출발 예약)
+ * blk_mq_sched_restart()          - SCHED_RESTART 확인 후 조건부 __blk_mq_sched_restart
+ * blk_mq_sched_allow_merge()      - elevator의 allow_merge ops 위임
+ * blk_mq_sched_completed_request()- CQ 완료 시 elevator에 latency 피드백
+ * blk_mq_init_sched()             - elevator 초기화 + hctx sched_tags 연결
+ * blk_mq_alloc_sched_tags()       - scheduler shadow CID pool(elevator_tags) 할당
+ * MAX_SCHED_RQ                    - scheduler shadow tag pool 최대 크기 (16×default)
  */
 
-/*
- * MAX_SCHED_RQ:
- *   스케줄러가 한 번에 관리할 수 있는 최대 request 수.
- *   NVMe에서 이 값은 여러 SQ(Submission Queue) 엔트리를
- *   추상화한 software-side 요청 풀의 상한과 연관된다.
- */
-#define MAX_SCHED_RQ (16 * BLKDEV_DEFAULT_RQ) /* NVMe 다중 SQ 엔트리를 커버하는 software-side request pool 상한 */
+/* [한국어] MAX_SCHED_RQ: scheduler shadow tag pool 최대 크기;
+ * BLKDEV_DEFAULT_RQ×16 = 여러 NVMe SQ depth를 커버하는 software-side request pool 상한;
+ * blk_mq_alloc_sched_tags()에서 shared tags 모드의 pool 크기로 사용 */
+#define MAX_SCHED_RQ (16 * BLKDEV_DEFAULT_RQ)
 
 /*
- * blk_mq_sched_try_merge():
- *   bio를 기존 request에 합병할 수 있는지 시도한다.
- *   NVMe 관점: 연속한 LBA의 두 NVMe read/write command를
- *   하나의 PRP/SGL list로 묶어 SQ 엔트리 수를 아낄 수 있다.
- *   호출 경로 (추정):
- *     blk_mq_submit_bio -> blk_mq_bio_list_merge -> blk_mq_sched_try_merge
- *     -> (성공 시) request 길이 확장 -> nvme_queue_rq
+ * [한국어]
+ * blk_mq_sched_try_merge - bio를 request_queue의 기존 request에 merge 시도
+ *
+ * @q:              NVMe namespace request_queue
+ * @bio:            merge를 시도할 신규 bio
+ * @nr_segs:        bio의 물리 세그먼트 수 (PRP/SGL 엔트리 복잡도 지표)
+ * @merged_request: back-merge 시 기존 request를 역할 병합한 request 반환 (out)
+ * @return:         merge 성공이면 true
+ *
+ * blk_mq_submit_bio()에서 elevator의 merge hash/RB-tree를 통해 back/front/discard
+ * merge를 시도한다. 성공하면 NVMe CID(driver tag)를 새로 소모하지 않고 기존
+ * request의 PRP/SGL list를 연장해 SQ 엔트리 수를 절약한다.
  */
 bool blk_mq_sched_try_merge(struct request_queue *q, struct bio *bio,
-		unsigned int nr_segs, struct request **merged_request); /* bio merge 성공 시 NVMe PRP/SGL list 확장, CID 소모 없이 SQ 엔트리 재활용 */
+		unsigned int nr_segs, struct request **merged_request);
 
 /*
- * blk_mq_sched_bio_merge():
- *   상위에서 bio merge 가능 여부를 스케줄러에 문의한다.
- *   NVMe 연결: bio merge가 허용되면 CID 소모 없이 기존 request를
- *   재활용하므로 NVMe queue depth를 효율적으로 쓸 수 있다.
+ * [한국어]
+ * blk_mq_sched_bio_merge - elevator 또는 sw queue에서 bio merge 가능 여부 확인
+ *
+ * @q:      NVMe namespace request_queue
+ * @bio:    merge를 시도할 신규 bio
+ * @nr_segs: bio의 물리 세그먼트 수
+ * @return: merge 성공이면 true
+ *
+ * elevator가 있으면 e->ops.bio_merge()에 위임하고, 없으면 per-CPU sw queue에서
+ * 역방향 8개를 검사한다. 구현: blk-mq-sched.c::blk_mq_sched_bio_merge()
  */
 bool blk_mq_sched_bio_merge(struct request_queue *q, struct bio *bio,
-		unsigned int nr_segs); /* merge 가능 여부 -> CID/tag 사용량 및 NVMe queue depth 효율 결정 */
+		unsigned int nr_segs);
 
 /*
- * blk_mq_sched_try_insert_merge():
- *   request를 스케줄러 큐에 삽입하면서 동시에 merge 후보를 탐색한다.
- *   NVMe 연결: NVMe I/O가 완료되어 풀린 request slot에 다시 채울 때
- *   스케줄러 낸 request들을 합쳐서 SQ에 밀어넣는 경로의 일부다.
+ * [한국어]
+ * blk_mq_sched_try_insert_merge - request 삽입 시 elevator hash에서 merge 시도
+ *
+ * @q:    NVMe namespace request_queue
+ * @rq:   elevator에 삽입하려는 request
+ * @free: merge로 흡수되어 해제할 request 목록 (out)
+ * @return: merge 성공이면 true
+ *
+ * rq_mergeable() 기본 조건 확인 후 elv_attempt_insert_merge()를 호출한다.
+ * 성공 시 NVMe PRP/SGL 체인이 길어지고 SQ 엔트리 수가 감소한다.
  */
 bool blk_mq_sched_try_insert_merge(struct request_queue *q, struct request *rq,
-				   struct list_head *free); /* scheduler 삽입+merge -> SQ에 밀어넣기 전 후보 묶음 */
+				   struct list_head *free);
 
 /*
- * blk_mq_sched_mark_restart_hctx():
- *   hctx(hardware queue context)에 BLK_MQ_S_SCHED_RESTART 플래그를 세워
- *   나중에 dispatch가 다시 시도되도록 표시한다.
- *   NVMe 관점: NVMe SQ가 가득 차 doorbell 발행이 막혔을 때,
- *   CQ completion이 도착해 SQ 엔트리가 비면 hctx를 restart하여
- *   대기 중인 request를 다시 NVMe에 전달한다.
+ * [한국어]
+ * blk_mq_sched_mark_restart_hctx - hctx에 SCHED_RESTART 비트 설정 (SQ 재출발 예약)
+ *
+ * @hctx: NVMe SQ/CQ hardware context
+ *
+ * budget·tag 고갈 또는 dispatch 중단 시 이 비트를 세워 나중에 SQ가 비면
+ * __blk_mq_sched_restart()가 재가동을 트리거하도록 예약한다.
  */
-void blk_mq_sched_mark_restart_hctx(struct blk_mq_hw_ctx *hctx); /* SQ full 시 doorbell 재발행을 위한 restart flag 설정 (추정) */
+void blk_mq_sched_mark_restart_hctx(struct blk_mq_hw_ctx *hctx);
 
 /*
- * __blk_mq_sched_restart():
- *   hctx restart의 실제 처리를 수행한다.
- *   호출 경로:
- *     blk_mq_sched_restart() -> __blk_mq_sched_restart(hctx)
- *     -> blk_mq_run_hw_queue -> nvme_queue_rq -> nvme_submit_cmd(doorbell)
+ * [한국어]
+ * __blk_mq_sched_restart - SCHED_RESTART 클리어 + smp_mb() + blk_mq_run_hw_queue
+ *
+ * @hctx: 재가동할 NVMe SQ/CQ hardware context
+ *
+ * blk_mq_sched_restart()에서 SCHED_RESTART가 세워진 경우에만 호출된다.
+ * 메모리 배리어로 dispatch list 가시성을 보장한 후 async work 예약.
  */
-void __blk_mq_sched_restart(struct blk_mq_hw_ctx *hctx); /* hctx restart -> blk_mq_run_hw_queue -> nvme_queue_rq -> doorbell */
+void __blk_mq_sched_restart(struct blk_mq_hw_ctx *hctx);
 
 /*
- * blk_mq_sched_dispatch_requests():
- *   hctx에 대해 스케줄러가 관리하는 request들을 NVMe queue로
- *   디스패치한다. NVMe 관점에서 이 함수는 SQ 엔트리를 채우기 직전
- *   마지막 software-side 정책 결정 지점이다.
- *   호출 경로 (추정):
- *     blk_mq_run_hw_queue -> blk_mq_sched_dispatch_requests
- *     -> e->type->ops.dispatch -> nvme_queue_rq -> nvme_submit_cmd
+ * [한국어]
+ * blk_mq_sched_dispatch_requests - hctx dispatch 최상위 진입점
+ *
+ * @hctx: 처리할 NVMe SQ/CQ hardware context
+ *
+ * blk_mq_run_hw_queue()에서 호출. stopped/quiesced 확인 후
+ * __blk_mq_sched_dispatch_requests()를 최대 2회 시도한다.
  */
-void blk_mq_sched_dispatch_requests(struct blk_mq_hw_ctx *hctx); /* scheduler -> NVMe SQ 엔트리 채우기 직전 마지막 정책 결정 */
+void blk_mq_sched_dispatch_requests(struct blk_mq_hw_ctx *hctx);
 
 /*
- * blk_mq_init_sched() / blk_mq_exit_sched():
- *   request_queue에 elevator 스케줄러를 attach/detach한다.
- *   NVMe 연결: NVMe namespace가 처음 열릴 때 queue setup 중
- *   elevator를 초기화하며, teardown 시 정리한다.
+ * [한국어]
+ * blk_mq_init_sched / blk_mq_exit_sched - elevator attach/detach
+ *
+ * init: elevator_queue 할당 + hctx sched_tags 연결 + init_sched/init_hctx ops 호출
+ * exit: exit_hctx/exit_sched ops 호출 + sched_tags 정리 + ELEVATOR_FLAG_DYING 설정
  */
 int blk_mq_init_sched(struct request_queue *q, struct elevator_type *e,
-		struct elevator_resources *res); /* elevator attach: NVMe namespace open 시 queue setup 단계 */
-void blk_mq_exit_sched(struct request_queue *q, struct elevator_queue *e); /* elevator detach: NVMe namespace close/teardown 시 */
+		struct elevator_resources *res);
+/* [한국어] blk_mq_exit_sched: elevator 제거; exit_hctx + exit_sched + sched_tags teardown */
+void blk_mq_exit_sched(struct request_queue *q, struct elevator_queue *e);
+
+/* [한국어] blk_mq_sched_free_rqs: scheduler shadow tag pool에 남은 request 해제
+ * (queue cleanup 또는 elevator switch 시 tagset 보유 하에 호출) */
+void blk_mq_sched_free_rqs(struct request_queue *q);
 
 /*
- * blk_mq_sched_free_rqs():
- *   스케줄러가 할당한 request들을 해제한다.
- */
-void blk_mq_sched_free_rqs(struct request_queue *q); /* scheduler 할당 request 해제 -> NVMe queue drain 이후 자원 정리 */
-
-/*
- * blk_mq_alloc_sched_tags() / blk_mq_free_sched_tags():
- *   스케줄러 전용 tag bitmap을 할당/해제한다.
- *   NVMe 연결: struct blk_mq_hw_ctx의 sched_tags는 NVMe queue depth에
- *   대응하는 software-side tag pool로, CID(Command Identifier) 할당의
- *   한 단계 위에서 동작한다.
+ * [한국어]
+ * blk_mq_alloc_sched_tags / blk_mq_free_sched_tags
+ *   scheduler shadow CID pool(elevator_tags) 할당/해제.
+ *   hctx->sched_tags는 NVMe CID shadow로 동작하며 dispatch 시 driver tag 확보 전 사용.
  */
 struct elevator_tags *blk_mq_alloc_sched_tags(struct blk_mq_tag_set *set,
-		unsigned int nr_hw_queues, unsigned int nr_requests); /* sched_tags 할당: NVMe queue depth 대응 tag pool 생성 */
+		unsigned int nr_hw_queues, unsigned int nr_requests);
+/* [한국어] blk_mq_alloc_sched_res: 단일 queue에 대해 elevator_tags + private data 할당 */
 int blk_mq_alloc_sched_res(struct request_queue *q,
 		struct elevator_type *type,
 		struct elevator_resources *res,
-		unsigned int nr_hw_queues); /* scheduler 리소스 할당 (추정) */
+		unsigned int nr_hw_queues);
+/* [한국어] blk_mq_alloc_sched_res_batch: tagset 모든 queue에 일괄 할당 (update_nr_hwq_lock write 하에) */
 int blk_mq_alloc_sched_res_batch(struct xarray *elv_tbl,
-		struct blk_mq_tag_set *set, unsigned int nr_hw_queues); /* elevator 리소스 batch 할당 (추정) */
+		struct blk_mq_tag_set *set, unsigned int nr_hw_queues);
+/* [한국어] blk_mq_alloc_sched_ctx_batch: elv_tbl에 elv_change_ctx를 queue별로 일괄 생성 */
 int blk_mq_alloc_sched_ctx_batch(struct xarray *elv_tbl,
-		struct blk_mq_tag_set *set); /* scheduler context batch 할당 (추정) */
-void blk_mq_free_sched_ctx_batch(struct xarray *elv_tbl); /* scheduler context batch 해제 */
+		struct blk_mq_tag_set *set);
+/* [한국어] blk_mq_free_sched_ctx_batch: elv_tbl의 모든 elv_change_ctx를 xa_erase + kfree */
+void blk_mq_free_sched_ctx_batch(struct xarray *elv_tbl);
+/* [한국어] blk_mq_free_sched_tags: elevator_tags(nr_hw_queues개 tag map) 해제 후 kfree(et) */
 void blk_mq_free_sched_tags(struct elevator_tags *et,
-		struct blk_mq_tag_set *set); /* sched_tags 해제: NVMe queue depth 대응 tag pool 제거 */
+		struct blk_mq_tag_set *set);
+/* [한국어] blk_mq_free_sched_res: elevator_resources(et + data)의 두 필드를 각각 해제 */
 void blk_mq_free_sched_res(struct elevator_resources *res,
 		struct elevator_type *type,
-		struct blk_mq_tag_set *set); /* scheduler 리소스 해제 */
+		struct blk_mq_tag_set *set);
+/* [한국어] blk_mq_free_sched_res_batch: tagset 모든 queue의 elevator 자원 일괄 해제 */
 void blk_mq_free_sched_res_batch(struct xarray *et_table,
-		struct blk_mq_tag_set *set); /* elevator 리소스 batch 해제 */
+		struct blk_mq_tag_set *set);
 
 /*
- * blk_mq_alloc_sched_data() - 스케줄러별 private data를 할당한다.
+ * [한국어]
+ * blk_mq_alloc_sched_data - elevator_type의 alloc_sched_data() 콜백 래퍼
  *
- * 목적:
- *   elevator_type(e)에 등록된 alloc_sched_data 콜백을 호출하여
- *   mq-deadline, bfq, kyber 등 각 스케줄러의 상태 구조체를 생성한다.
+ * @q: NVMe namespace request_queue
+ * @e: elevator_type (mq-deadline/BFQ/kyber 등)
+ * @return: 할당된 private data 포인터; 불필요 시 NULL; 실패 시 ERR_PTR(-ENOMEM)
  *
- * 호출 경로 (추정):
- *   blk_mq_init_sched -> blk_mq_alloc_sched_data -> e->ops.alloc_sched_data
- *
- * NVMe 연결:
- *   반환된 sched_data는 NVMe queue 설정 시 request_queue에 붙으며,
- *   이후 nvme_queue_rq 전 스케줄러의 dispatch 정책을 결정하는 데
- *   사용된다.
- *
- * 반환:
- *   - 성공 시 할당된 포인터
- *   - 할당 불필요 시 NULL
- *   - 실패 시 ERR_PTR(-ENOMEM)
+ * e->ops.alloc_sched_data()를 호출해 스케줄러별 상태 구조체를 생성한다.
+ * "none" 스케줄러거나 alloc 콜백이 없으면 NULL을 반환한다.
  */
-static inline void *blk_mq_alloc_sched_data(struct request_queue *q, /* request_queue: NVMe namespace당 하나의 blk queue */
-		struct elevator_type *e) /* elevator_type: mq-deadline/bfq/kyber 등 택일 */
+static inline void *blk_mq_alloc_sched_data(struct request_queue *q,
+		struct elevator_type *e)
 {
-	void *sched_data; /* 스케줄러별 private state 포인터 (NVMe 큐 정책 상태) */
+	/* [한국어] sched_data: 스케줄러별 private 상태 포인터 (mq-deadline rb-tree, bfq_data 등) */
+	void *sched_data;
 
-	if (!e || !e->ops.alloc_sched_data) /* 스케줄러가 alloc 콜백을 제공하지 않으면 */
-		return NULL; /* private data 없이 진행 (예: none 스케줄러) */
+	/* [한국어] elevator 없거나 alloc 콜백 미등록(none 스케줄러 또는 불필요) → NULL 반환 */
+	if (!e || !e->ops.alloc_sched_data)
+		return NULL;
 
-	sched_data = e->ops.alloc_sched_data(q); /* 스케줄러 내부 테이블/큐 초기화 -> NVMe dispatch 정책 준비 */
-	return (sched_data) ?: ERR_PTR(-ENOMEM); /* 할당 실패 시 ENOMEM 강제 반환 (추정) */
+	/* [한국어] alloc_sched_data(): 스케줄러 내부 자료구조 초기화 + 반환 */
+	sched_data = e->ops.alloc_sched_data(q);
+	/* [한국어] NULL 반환은 ENOMEM으로 변환: 호출자가 IS_ERR()로 실패 구분 */
+	return (sched_data) ?: ERR_PTR(-ENOMEM);
 }
 
 /*
- * blk_mq_free_sched_data():
- *   blk_mq_alloc_sched_data()로 할당된 스케줄러 private data를 해제한다.
- *   NVMe teardown 경로에서 request_queue 해제 직전에 호출된다 (추정).
+ * [한국어]
+ * blk_mq_free_sched_data - elevator_type의 free_sched_data() 콜백 래퍼
+ *
+ * @e:    elevator_type
+ * @data: blk_mq_alloc_sched_data()로 할당된 private 상태 포인터
+ *
+ * blk_mq_free_sched_res()에서 호출되어 스케줄러 private 구조체를 해제한다.
  */
-static inline void blk_mq_free_sched_data(struct elevator_type *e, void *data) /* data: 스케줄러 private state */
+static inline void blk_mq_free_sched_data(struct elevator_type *e, void *data)
 {
-	if (e && e->ops.free_sched_data) /* elevator_type과 free 콜백이 유효할 때만 */
-		e->ops.free_sched_data(data); /* NVMe teardown 중 정책 상태 해제 */
+	/* [한국어] elevator와 free 콜백이 모두 유효할 때만 해제 */
+	if (e && e->ops.free_sched_data)
+		/* [한국어] free_sched_data(): 스케줄러 private 상태 구조체 해제 */
+		e->ops.free_sched_data(data);
 }
 
 /*
- * blk_mq_sched_restart():
- *   hctx->state에 SCHED_RESTART 플래그가 있을 때만 __blk_mq_sched_restart()
- *   를 호출하여 불필요한 dispatch 재시도를 방지한다.
+ * [한국어]
+ * blk_mq_sched_restart - SCHED_RESTART 비트 확인 후 조건부 재가동
  *
- *   NVMe 연결: NVMe doorbell 발행 후 SQ가 가득 찼다면, 이 함수가
- *   completion CQ 처리 후 남은 request를 다시 밀어넣는 trigger가 된다.
+ * @hctx: NVMe SQ/CQ hardware context
+ *
+ * SQ 완료(CQ entry) 처리 후 호출되어, SCHED_RESTART가 세워진 hctx만
+ * 재가동한다. 비트가 없으면 함수 체인 없이 즉시 반환 — 불필요한 dispatch 방지.
  */
-static inline void blk_mq_sched_restart(struct blk_mq_hw_ctx *hctx) /* hctx: NVMe SQ에 대응하는 hardware queue context */
+static inline void blk_mq_sched_restart(struct blk_mq_hw_ctx *hctx)
 {
-	if (test_bit(BLK_MQ_S_SCHED_RESTART, &hctx->state)) /* atomic bit test: SQ full로 인해 pending된 restart 요청 존재 여부 */
-		__blk_mq_sched_restart(hctx); /* 실제 restart 수행 -> blk_mq_run_hw_queue -> nvme_queue_rq -> doorbell */
+	/* [한국어] BLK_MQ_S_SCHED_RESTART 비트 원자적 확인: 세워진 경우에만 재가동 */
+	if (test_bit(BLK_MQ_S_SCHED_RESTART, &hctx->state))
+		/* [한국어] clear_bit + smp_mb() + blk_mq_run_hw_queue() → 재 dispatch → doorbell */
+		__blk_mq_sched_restart(hctx);
 }
 
 /*
- * bio_mergeable():
- *   bio->bi_opf에 REQ_NOMERGE_FLAGS가 설정되어 있지 않으면
- *   merge가 가능하다고 판단한다.
+ * [한국어]
+ * bio_mergeable - bio에 REQ_NOMERGE_FLAGS가 없어 merge 가능한지 확인
  *
- *   NVMe 연결: REQ_NOMERGE가 설정된 bio는 NVMe 상에서도 독립된
- *   command(SQ 엔트리)로 전달되어야 하며, 상위에서 묶이지 않는다.
+ * @bio: 확인할 bio
+ * @return: merge 가능하면 true; REQ_NOMERGE/NOWAIT 등이 있으면 false
+ *
+ * REQ_NOMERGE_FLAGS: REQ_NOMERGE | REQ_PREFLUSH | REQ_FUA | REQ_SWAP 등;
+ * 이 플래그가 있는 bio는 독립 NVMe 명령(SQ 엔트리)으로 전달되어야 한다.
  */
-static inline bool bio_mergeable(struct bio *bio) /* bio: NVMe command로 변환될 I/O 단위 */
+static inline bool bio_mergeable(struct bio *bio)
 {
-	return !(bio->bi_opf & REQ_NOMERGE_FLAGS); /* REQ_NOMERGE/REQ_NOMERGE_FLAGS 미설정 시에만 merge 가능 -> SQ 엔트리 절약 가능 */
+	/* [한국어] REQ_NOMERGE_FLAGS 미설정이면 merge 허용 → NVMe PRP/SGL 연장 가능 */
+	return !(bio->bi_opf & REQ_NOMERGE_FLAGS);
 }
 
 /*
- * blk_mq_sched_allow_merge():
- *   스케줄러가 rq와 bio의 merge를 허용하는지 확인한다.
+ * [한국어]
+ * blk_mq_sched_allow_merge - elevator의 allow_merge ops 위임
  *
- *   호출 경로 (추정):
- *     blk_mq_sched_try_merge -> blk_mq_sched_allow_merge
- *     -> e->type->ops.allow_merge
+ * @q:   NVMe namespace request_queue
+ * @rq:  merge 대상 기존 request
+ * @bio: 합치려는 신규 bio
+ * @return: merge 허용이면 true
  *
- *   NVMe 연결: merge가 거부되면 NVMe SQ에는 별도의 command로
- *   들어가며, 이는 SQ/CQ 자원을 더 소모하지만 일관성/성능 trade-off를
- *   스케줄러가 결정하는 지점이다.
+ * RQF_USE_SCHED 플래그로 스케줄러 관리 request인지 확인한 후 e->ops.allow_merge() 호출.
+ * 스케줄러 미사용("none") 또는 콜백 없으면 기본적으로 true 반환.
  */
 static inline bool
-blk_mq_sched_allow_merge(struct request_queue *q, struct request *rq, /* rq: NVMe command 후보 request */
-			 struct bio *bio) /* bio: rq에 합칠 후보 bio */
+blk_mq_sched_allow_merge(struct request_queue *q, struct request *rq,
+			 struct bio *bio)
 {
-	if (rq->rq_flags & RQF_USE_SCHED) { /* 이 request가 스케줄러 관리 대상일 때만 문의 */
-		struct elevator_queue *e = q->elevator; /* q->elevator: 현재 attach된 scheduler 인스턴스 */
+	/* [한국어] RQF_USE_SCHED: 이 request가 elevator(shadow tag)로 관리되는지 표시 */
+	if (rq->rq_flags & RQF_USE_SCHED) {
+		/* [한국어] 현재 attach된 elevator 인스턴스 */
+		struct elevator_queue *e = q->elevator;
 
-		if (e->type->ops.allow_merge) /* 스케줄러별 allow_merge 콜백 존재 시 */
-			return e->type->ops.allow_merge(q, rq, bio); /* 정책에 따라 merge 허용/거부 -> SQ/CQ 자원 사용량 결정 */
+		/* [한국어] allow_merge() ops가 있으면 스케줄러 정책에 위임 */
+		if (e->type->ops.allow_merge)
+			/* [한국어] merge 정책에 따라 허용/거부: 거부 시 별도 NVMe 명령으로 전달 */
+			return e->type->ops.allow_merge(q, rq, bio);
 	}
-	return true; /* 스케줄러 미사용 시 기본적으로 merge 허용 -> NVMe PRP/SGL 연장 가능 */
+	/* [한국어] 스케줄러 미사용 또는 allow_merge 콜백 없음 → 기본 허용 */
+	return true;
 }
 
 /*
- * blk_mq_sched_completed_request():
- *   request 완료 시점에 스케줄러에게 통지한다.
+ * [한국어]
+ * blk_mq_sched_completed_request - NVMe CQ 완료 시 elevator에 latency 피드백
  *
- *   호출 경로 (추정):
- *     nvme_irq -> nvme_process_cq -> blk_mq_complete_request
- *     -> blk_mq_sched_completed_request -> e->ops.completed_request
+ * @rq:  완료된 request
+ * @now: 완료 시점 타임스탬프 (ktime_get_ns() 기반)
  *
- *   NVMe 연결: NVMe CQ 엔트리가 도착해 CID가 반환되면, 스케줄러는
- *   완료 시간을 피드백하여 향후 dispatch 우선순위를 조정한다.
+ * NVMe CQ 엔트리 처리(blk_mq_complete_request) 경로에서 호출된다. elevator에게
+ * 완료 latency를 피드백하여 mq-deadline·BFQ 등이 dispatch 우선순위를 조정하게 한다.
  */
-static inline void blk_mq_sched_completed_request(struct request *rq, u64 now) /* now: 완료 시점 timestamp (NVMe CQ entry 기반) */
+static inline void blk_mq_sched_completed_request(struct request *rq, u64 now)
 {
-	if (rq->rq_flags & RQF_USE_SCHED) { /* 스케줄러가 관리한 request만 피드백 */
-		struct elevator_queue *e = rq->q->elevator; /* namespace queue의 elevator */
+	/* [한국어] RQF_USE_SCHED: 스케줄러 관리 request만 피드백 대상 */
+	if (rq->rq_flags & RQF_USE_SCHED) {
+		/* [한국어] 이 request가 속한 namespace queue의 elevator */
+		struct elevator_queue *e = rq->q->elevator;
 
-		if (e->type->ops.completed_request) /* 완료 콜백 등록 시 */
-			e->type->ops.completed_request(rq, now); /* latency 샘플 갱신 -> 향후 NVMe dispatch 우선순위 재조정 */
+		/* [한국어] completed_request() ops: latency 샘플 기록 → 향후 dispatch 우선순위 재조정 */
+		if (e->type->ops.completed_request)
+			e->type->ops.completed_request(rq, now);
 	}
 }
 
 /*
- * blk_mq_sched_requeue_request():
- *   완료되지 않은 request를 스케줄러 큐의 맨 앞 등으로 재삽입한다.
+ * [한국어]
+ * blk_mq_sched_requeue_request - abort/timeout된 request를 elevator 큐에 재삽입
  *
- *   호출 경로 (추정):
- *     nvme_timeout / nvme_reset -> blk_mq_requeue_request
- *     -> blk_mq_sched_requeue_request -> e->ops.requeue_request
+ * @rq: NVMe timeout/reset으로 abort된 request
  *
- *   NVMe 연결: NVMe controller timeout이나 reset으로 command가
- *   abort되면, 해당 request를 다시 스케줄링하여 SQ에 재전달한다.
+ * blk_mq_requeue_request()에서 호출. elevator의 requeue_request() ops를 통해
+ * 스케줄러 큐 맨 앞 등 우선 위치에 재삽입 → 이후 다시 nvme_queue_rq()로 전달.
  */
-static inline void blk_mq_sched_requeue_request(struct request *rq) /* rq: NVMe timeout/abort로 반환된 request */
+static inline void blk_mq_sched_requeue_request(struct request *rq)
 {
-	if (rq->rq_flags & RQF_USE_SCHED) { /* scheduler 소유 tag를 가진 request일 때만 */
-		struct request_queue *q = rq->q; /* NVMe namespace queue */
-		struct elevator_queue *e = q->elevator; /* 현재 scheduler */
+	/* [한국어] RQF_USE_SCHED: 스케줄러(shadow tag) 관리 request만 처리 */
+	if (rq->rq_flags & RQF_USE_SCHED) {
+		/* [한국어] NVMe namespace request_queue */
+		struct request_queue *q = rq->q;
+		/* [한국어] 현재 attach된 elevator 인스턴스 */
+		struct elevator_queue *e = q->elevator;
 
-		if (e->type->ops.requeue_request) /* requeue 콜백이 있으면 */
-			e->type->ops.requeue_request(rq); /* 스케줄러 큐 맨 앞 등으로 재삽입 -> 이후 다시 nvme_queue_rq로 전달 */
+		/* [한국어] requeue_request() ops: 우선 위치에 재삽입 → CQ 복구 후 재전달 */
+		if (e->type->ops.requeue_request)
+			e->type->ops.requeue_request(rq);
 	}
 }
 
