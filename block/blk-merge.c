@@ -2,23 +2,66 @@
 /*
  * Functions related to segment and merge handling
  *
- * ============================================================================
- * NVMe SSD 관점 파일 요약
- * ============================================================================
- * 이 파일은 block layer의 bio/request 분할(segmentation)과 병합(merge)을 담당한다.
- * 파일 시스템이나 상위 I/O 경로에서 날라온 bio를 NVMe 컨트롤러가 소화할 수 있는
- * 크기와 형태로 정제하며, NVMe 입장에서는 SQ(Submission Queue) 엔트리 하나에
- * 매핑될 I/O의 크기, PRP/SGL 개수, 물리 연속성, Discard 범위 등을 결정하는
- * 핵심 전처리 단계이다.
+ * [한국어 설명] 블록 계층 bio/request 분할·병합 핵심 구현 (blk-merge.c)
  *
- * 대표적 호출 경로:
- * submit_bio -> blk_mq_submit_bio -> blk_mq_get_request ->
- *   bio_split_to_limits -> bio_split_rw -> nvme_queue_rq -> nvme_submit_cmd(doorbell)
+ * === 파일의 역할 ===
+ * 이 파일은 파일시스템·응용이 발행한 bio를 NVMe 컨트롤러(또는 임의의 블록
+ * 디바이스)가 처리할 수 있는 크기와 형태로 정제하는 두 가지 핵심 역할을 한다:
  *
- * 관련 파일: block/blk-mq.c(실제 요청 할당/제출), block/blk-settings.c(queue_limits
- *           초기화), block/bio.c(bio 할당/분할), drivers/nvme/host/pci.c나
- *           tcp.c에서 nvme_queue_rq가 최종적으로 doorbell을 울림).
- * ============================================================================
+ * 1) 분할(split): bio가 queue_limits(max_sectors, max_segments, MDTS,
+ *    virt_boundary_mask 등)을 초과하면 여러 개의 작은 bio로 쪼개어 각각
+ *    NVMe SQ 엔트리 하나로 매핑되도록 한다.
+ * 2) 병합(merge): 인접한 LBA를 가진 두 request 또는 bio를 하나로 합쳐
+ *    SQ 엔트리 수와 doorbell 횟수를 줄이고 처리량을 높인다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * split 경로:
+ *   응용 write(2) → submit_bio()
+ *       ↓
+ *   [blk-mq] blk_mq_submit_bio()
+ *       ↓ → bio_split_to_limits()  ← 이 파일의 진입점
+ *       ↓ → bio_split_rw()         ← queue_limits 위반 시 분할
+ *       ↓ → bio_submit_split_bioset() ← 분할된 앞부분 먼저 제출
+ *       ↓
+ *   [nvme_queue_rq] → SQ doorbell
+ *
+ * merge 경로:
+ *   blk_mq_submit_bio → elv_merge() [elevator.c]
+ *       ↓ → ll_back_merge_fn() / ll_front_merge_fn()  ← 이 파일
+ *       ↓ → blk_attempt_req_merge()
+ *       ↓ → attempt_merge() → ll_merge_requests_fn()
+ *       ↓
+ *   병합된 request → nvme_queue_rq → SQ doorbell
+ *
+ * 실행 컨텍스트: bio 제출 경로(프로세스/IRQ 컨텍스트), 분할된 bio는 재귀
+ * submit_bio_noacct_nocheck() 경로로 다시 진입하여 추가 분할될 수 있다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 의존 모듈:
+ *   - block/blk-settings.c: queue_limits 값(max_sectors, max_segments,
+ *     discard_granularity, logical_block_size 등) 초기화
+ *   - block/bio.c: bio_split(), bio_chain(), bio_get_last_bvec() 등 bio 조작
+ *   - block/elevator.c: elv_merge()에서 ll_back/front_merge_fn 호출
+ *   - block/blk-mq.c: bio_split_to_limits() 호출, request 완료 통계 기록
+ *   - drivers/nvme/host/pci.c|tcp.c: 최종 nvme_queue_rq()에서 분할된
+ *     bio를 PRP/SGL로 매핑하여 SQ에 제출
+ * 공유 자료구조:
+ *   - struct queue_limits: max_sectors, max_segments, virt_boundary_mask,
+ *     discard_granularity 등 — 분할·병합 판단의 기준
+ *   - struct bio_vec: 물리 페이지 기술자 — PRP/SGL 엔트리로 변환되는 단위
+ *
+ * === 주요 함수/구조체 요약 ===
+ * bio_split_to_limits()      - 모든 bio가 거치는 분할 진입점; queue_limits 검사 후 분기
+ * bio_split_rw()             - 읽기/쓰기 bio를 세그먼트·섹터 한계에 맞게 분할
+ * bio_split_io_at()          - 분할 지점(섹터 수)을 계산해 반환
+ * bio_submit_split_bioset()  - 분할 실행 + 앞부분 즉시 submit
+ * ll_back_merge_fn()         - back-merge 가능 여부 최종 확인 (세그먼트 수, gap)
+ * ll_front_merge_fn()        - front-merge 가능 여부 최종 확인
+ * ll_merge_requests_fn()     - 두 request를 완전 병합; 세그먼트 합산 검사
+ * attempt_merge()            - back/front/discard merge 시도 전체 로직
+ * blk_attempt_req_merge()    - elevator에서 호출하는 request 병합 공개 API
+ * blk_rq_merge_ok()          - 두 request가 병합 가능한지 기본 조건 검사
+ * bio_will_gap()             - PRP/SGL 물리 불연속(gap) 여부 검사
  */
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -36,17 +79,40 @@
 #include "blk-throttle.h"
 
 /*
- * bio의 첫 번째 bvec를 가져온다. NVMe SGL/PRP 엔트리 시작점을 계산할 때
- * bv_offset와 bv_len이 DMA 주소 및 길이로 변환된다.
+ * [한국어]
+ * bio_get_first_bvec - bio의 첫 번째 bvec(물리 페이지 기술자)를 추출
+ *
+ * @bio: 첫 번째 bvec를 가져올 bio
+ * @bv:  결과를 담을 bio_vec 포인터
+ *
+ * bi_iter(현재 이터레이터 위치)를 기준으로 첫 번째 bvec를 읽는다.
+ * NVMe PRP/SGL 구성 시 첫 번째 페이지의 시작 오프셋(bv_offset)과
+ * 길이(bv_len)가 DMA 주소 계산의 기준이 된다.
+ * bio_will_gap()에서 연속 bio 병합 시 gap 검사에 사용된다.
+ *
+ * 호출 체인:
+ *   bio_will_gap → [bio_get_first_bvec]
  */
 static inline void bio_get_first_bvec(struct bio *bio, struct bio_vec *bv)
 {
+/* mp_bvec_iter_bvec: 이터레이터 위치에서 현재 bvec를 반환 (multi-page 지원) */
 	*bv = mp_bvec_iter_bvec(bio->bi_io_vec, bio->bi_iter);
 }
 
 /*
- * bio의 마지막 bvec를 가져온다. 연속된 두 bio를 NVMe PRP 리스트로 연결할 때
- * 마지막 페이지 경계가 물리적으로 인접한지 확인해야 하므로 중요하다.
+ * [한국어]
+ * bio_get_last_bvec - bio의 마지막 bvec(물리 페이지 기술자)를 추출
+ *
+ * @bio: 마지막 bvec를 가져올 bio
+ * @bv:  결과를 담을 bio_vec 포인터
+ *
+ * bio의 전체 크기(bi_size)만큼 이터레이터를 전진시킨 뒤, 마지막으로
+ * 실제 bvec가 있는 인덱스를 찾아 반환한다. bi_bvec_done이 0이 아니면
+ * 마지막 bvec의 중간에서 bio가 끝나는 것이므로 bv_len을 조정한다.
+ * NVMe 병합 시 두 bio의 물리 경계 연속성 확인에 필수적이다.
+ *
+ * 호출 체인:
+ *   bio_will_gap → [bio_get_last_bvec]
  */
 static inline void bio_get_last_bvec(struct bio *bio, struct bio_vec *bv)
 {
@@ -127,13 +193,45 @@ static inline bool bio_will_gap(struct request_queue *q,
 	return __bvec_gap_to_prev(&q->limits, &pb, nb.bv_offset);
 }
 
+/*
+ * [한국어]
+ * req_gap_back_merge - request의 뒤(biotail)에 bio를 붙일 때 PRP/SGL gap 발생 여부 검사
+ *
+ * @req: 뒤에 bio를 붙이려는 기존 request
+ * @bio: 병합하려는 새 bio
+ * @return: true이면 gap이 생겨 병합 불가; false이면 gap 없음(병합 안전)
+ *
+ * request의 마지막 bio(biotail)와 새 bio 사이에 물리 불연속이 생기는지
+ * bio_will_gap()으로 확인한다. NVMe PRP/SGL 한 엔트리에 연속된 물리 메모리만
+ * 들어갈 수 있으므로, gap이 있으면 SGL 엔트리를 추가해야 하는데 이미 한계에
+ * 달했다면 병합을 거부한다.
+ *
+ * 호출 체인:
+ *   ll_back_merge_fn → [req_gap_back_merge] → bio_will_gap
+ */
 static inline bool req_gap_back_merge(struct request *req, struct bio *bio)
 {
+/* req->biotail: request 마지막 bio; 새 bio를 그 뒤에 붙일 때의 gap 검사 */
 	return bio_will_gap(req->q, req, req->biotail, bio);
 }
 
+/*
+ * [한국어]
+ * req_gap_front_merge - request의 앞(bio)에 bio를 붙일 때 PRP/SGL gap 발생 여부 검사
+ *
+ * @req: 앞에 bio를 붙이려는 기존 request
+ * @bio: 병합하려는 새 bio
+ * @return: true이면 gap이 생겨 병합 불가; false이면 gap 없음(병합 안전)
+ *
+ * 새 bio를 request의 첫 번째 bio 앞에 붙이는(front-merge) 경우의 gap 검사.
+ * bio_will_gap()에 prev_rq=NULL을 전달해 "앞부분 bio만" 기준으로 경계 확인.
+ *
+ * 호출 체인:
+ *   ll_front_merge_fn → [req_gap_front_merge] → bio_will_gap
+ */
 static inline bool req_gap_front_merge(struct request *req, struct bio *bio)
 {
+/* prev_rq=NULL: front-merge 시 req->bio(첫 bio) 기준의 gap 검사 */
 	return bio_will_gap(req->q, NULL, bio, req->bio);
 }
 
@@ -1192,25 +1290,57 @@ static struct request *attempt_merge(struct request_queue *q,
 	return next;
 }
 
+/*
+ * [한국어]
+ * attempt_back_merge - 스케줄러 큐에서 @rq 바로 뒤 request와 back-merge 시도
+ *
+ * @q:  request_queue
+ * @rq: 기준 request (앞쪽, LBA 작은 쪽)
+ * @return: 병합 후 소멸된 next 포인터(호출자가 free); 실패 시 NULL
+ *
+ * elv_latter_request()로 스케줄러 내부에서 @rq 바로 뒤(LBA 큰 쪽) request를
+ * 찾아 attempt_merge(rq, next)로 넘긴다. back-merge가 성공하면 next가 rq에
+ * 흡수되어 NVMe SQ에 제출되는 request 수가 줄어든다.
+ *
+ * 호출 체인:
+ *   blk_mq_sched_try_merge / elv_attempt_insert_merge
+ *       → [attempt_back_merge] → elv_latter_request → attempt_merge
+ */
 static struct request *attempt_back_merge(struct request_queue *q,
 		struct request *rq)
 {
-	/* scheduler list에서 rq의 뒤쪽 이웃 request를 찾아 병합. */
+/* 스케줄러 dispatch 순서에서 rq 다음에 오는 request(LBA 큰 쪽) 탐색 */
 	struct request *next = elv_latter_request(q, rq);
 
+/* 다음 request가 있으면 rq <- next 방향으로 back-merge 시도 */
 	if (next)
 		return attempt_merge(q, rq, next);
 
 	return NULL;
 }
 
+/*
+ * [한국어]
+ * attempt_front_merge - 스케줄러 큐에서 @rq 바로 앞 request와 front-merge 시도
+ *
+ * @q:  request_queue
+ * @rq: 기준 request (뒤쪽, LBA 큰 쪽)
+ * @return: 병합 후 소멸된 rq 포인터(호출자가 free); 실패 시 NULL
+ *
+ * elv_former_request()로 @rq 바로 앞(LBA 작은 쪽) request prev를 찾아
+ * attempt_merge(prev, rq) 형태로 prev에 rq를 흡수시킨다.
+ * front-merge는 back-merge보다 드물지만, out-of-order bio 제출 시 발생한다.
+ *
+ * 호출 체인:
+ *   blk_mq_sched_try_merge → [attempt_front_merge] → elv_former_request → attempt_merge
+ */
 static struct request *attempt_front_merge(struct request_queue *q,
 		struct request *rq)
 {
-	/* scheduler list에서 rq의 앞쪽 이웃 request를 찾아 prev <- rq 형태로
-	 * 병합. */
+/* 스케줄러 dispatch 순서에서 rq 이전에 오는 request(LBA 작은 쪽) 탐색 */
 	struct request *prev = elv_former_request(q, rq);
 
+/* 앞 request가 있으면 prev <- rq 방향으로 front-merge 시도 */
 	if (prev)
 		return attempt_merge(q, prev, rq);
 
@@ -1283,10 +1413,26 @@ enum elv_merge blk_try_merge(struct request *rq, struct bio *bio)
 	return ELEVATOR_NO_MERGE;
 }
 
+/*
+ * [한국어]
+ * blk_account_io_merge_bio - bio 병합 시 파티션 통계의 merge 카운터 증가
+ *
+ * @req: 병합이 일어난 request (통계 기록 대상)
+ *
+ * bio가 기존 request에 병합될 때 호출된다. RQF_IO_STAT 플래그가 설정된
+ * request만 /proc/diskstats나 sysfs stats에 카운터가 반영된다.
+ * part_stat_lock/unlock은 per-CPU stat을 집계할 때의 동시성 보호이다.
+ *
+ * 호출 체인:
+ *   bio_attempt_back_merge / bio_attempt_front_merge → [blk_account_io_merge_bio]
+ */
 static void blk_account_io_merge_bio(struct request *req)
 {
+/* RQF_IO_STAT: 이 request가 diskstats에 집계되어야 하는지 여부 */
 	if (req->rq_flags & RQF_IO_STAT) {
+/* per-CPU stat 집계 보호 */
 		part_stat_lock();
+/* merges[읽기/쓰기/기타] 카운터 증가: iostat의 "merges" 열에 반영 */
 		part_stat_inc(req->part, merges[op_stat_group(req_op(req))]);
 		part_stat_unlock();
 	}
