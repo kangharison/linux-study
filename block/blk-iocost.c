@@ -173,21 +173,63 @@
  */
 
 /*
- * NVMe SSD 관점 파일 요약
+ * [한국어 설명] IO 비용 모델 기반 cgroup IO 컨트롤러 (blk-iocost.c)
  *
- * 이 파일은 blk-mq 요청 큐 상단에서 동작하는 IO 비용 모델 기반 cgroup IO
- * 컨트롤러(iocost)를 구현한다. 응용이 낸 bio가 blk_mq_submit_bio()를 통해
- * blk-mq로 낱개 request로 변환되기 전, RQ_QOS_COST 훅에서 가상 시간(vtime)
- * 예산을 검사하여 NVMe 제출률을 조절한다.
+ * === 파일의 역할 ===
+ * blk-iocost는 blk-mq 요청 큐 위에 앉는 rq-qos 계층으로, cgroup 트리의 가중치
+ * 비율에 따라 각 cgroup의 IO 처리량을 공정하게 분배한다. "비용 모델"이란 iops나
+ * 대역폭 대신 디바이스 가상 시간(vtime)을 공통 단위로 삼아 순차/랜덤 IO,
+ * 크기 차이를 하나의 척도로 통일하는 것을 의미한다. 주기적 타이머(ioc_timer_fn)가
+ * 100~300ms 주기로 실제 장치 포화도를 측정해 vrate(가상 시간 진행 속도)와
+ * 각 cgroup의 inuse 가중치를 동적으로 조정하며, 잉여 가중치는 타 cgroup에 양도해
+ * 유휴 용량을 낭비하지 않는 Work Conservation을 달성한다.
  *
- *   bio -> blk_mq_submit_bio -> ioc_rqos_throttle ->
- *   (budget OK) -> blk_mq_get_request -> nvme_queue_rq ->
- *   nvme_submit_cmd(doorbell) -> SQ/CQ
+ * === 전체 아키텍처에서의 위치 ===
+ * 커널 IO 경로에서 blk-iocost는 다음 위치에 삽입된다:
  *
- * 완료 시 ioc_rqos_done()에서 CQ 엔트리에 대한 완료 지연과 rq 할당 대기
- * 시간(rq_wait_ns)을 측정해, 다음 주기의 vrate 및 cgroup 가중치 조정에
- * 반영한다. blk-iocost는 NVMe 드라이버 바로 위에서 장치 포화를 사전에
- * 방지하는 제어 계층이다.
+ *   [응용] write(2) / io_uring
+ *       ↓
+ *   [VFS/파일시스템] submit_bio()
+ *       ↓
+ *   [blk-mq] blk_mq_submit_bio()
+ *       ↓  ← rq_qos_throttle() 훅: ioc_rqos_throttle() 호출
+ *   [iocost] vtime 예산 검사 → 초과 시 iocg_kick_delay()로 발급자 지연
+ *       ↓  ← vtime 예산 확보 후
+ *   [blk-mq] blk_mq_get_request() → 드라이버 큐에 request 삽입
+ *       ↓
+ *   [NVMe 드라이버] nvme_queue_rq() → doorbell 기입 → SQ/CQ
+ *       ↓  ← 완료 인터럽트
+ *   [blk-mq] blk_mq_complete_request()
+ *       ↓  ← rq_qos_done() 훅: ioc_rqos_done() 호출
+ *   [iocost] rq_wait_ns / 완료 지연 누적 → 다음 주기 vrate 조정 입력
+ *
+ * 실행 컨텍스트: ioc_rqos_throttle()은 프로세스 컨텍스트(bio 제출 경로),
+ * ioc_timer_fn()은 softirq 타이머 컨텍스트에서 실행된다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 의존 모듈:
+ *   - block/blk-rq-qos.c: rq_qos 훅 프레임워크 (ioc_rqos_ops 등록)
+ *   - block/blk-cgroup.c: blkcg_policy 등록(blkcg_policy_iocost), blkg별 ioc_gq
+ *     생성/소멸 콜백(pd_alloc_fn/pd_free_fn)
+ *   - block/blk-mq.c: blk_mq_submit_bio() → rq_qos_throttle() 경로로 훅 진입
+ *   - include/linux/blk-cgroup.h: blkcg_gq, blkcg_policy_data 구조체
+ * 의존받는 모듈:
+ *   - 사용자 공간: /sys/fs/cgroup/io.cost.model, io.cost.qos 로 파라미터 제어
+ *   - tools/cgroup/iocost_monitor.py: drgn 기반 모니터링 스크립트
+ * 공유 자료구조:
+ *   - struct ioc: 디바이스(request_queue)당 하나, vrate·타이머·활성 iocg 리스트
+ *   - struct ioc_gq: cgroup × 디바이스 교차점, vtime 예산·부채·stat 보유
+ *
+ * === 주요 함수/구조체 요약 ===
+ * ioc_rqos_throttle()   - bio 제출 시 vtime 예산 검사, 초과 cgroup 지연/대기
+ * ioc_timer_fn()        - 주기 타이머: rq_wait/완료지연 측정 → vrate 조정 → 가중치 재계산
+ * ioc_adjust_base_vrate() - 장치 포화도(rq_wait_pct, missed latency)로 vrate 상하 조정
+ * propagate_weights()   - hweight(계층적 가중치) 트리 전파, inuse 서플러스 조정
+ * iocg_activate()       - 첫 IO 시 비활성 cgroup 활성화, 초기 vtime/가중치 설정
+ * transfer_surpluses()  - 잉여 가중치를 수요 있는 cgroup에 양도 (Work Conservation)
+ * iocg_kick_waitq()     - 예산 회복 시 대기 중인 bio 발급자들을 깨워 재시도
+ * struct ioc            - 디바이스당 컨트롤러 상태: vtime, vrate, 타이머, active_iocgs
+ * struct ioc_gq         - cgroup별 IO 상태: vtime 예산, 부채(debt), 지연 레벨, wait 큐
  */
 #include <linux/kernel.h>
 #include <linux/module.h>
