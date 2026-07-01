@@ -1597,12 +1597,34 @@ out_queue_exit:
 }
 EXPORT_SYMBOL_GPL(blk_mq_alloc_request_hctx);
 
+/*
+ * [한국어]
+ * blk_mq_finish_request - request 완료 직전 스케줄러/zoned 정리
+ *
+ * @rq: 완료 처리 중인 request
+ *
+ * 스케줄러의 finish_request 콜백을 호출해 scheduler 내부 상태를 정리하고,
+ * zoned storage (ZNS NVMe) 관련 마무리를 수행한다.
+ * RQF_USE_SCHED 플래그 해제로 postflush request 의 이중 finish_request 방지.
+ * 실행 컨텍스트: softirq 또는 프로세스 컨텍스트 (blk_mq_free_request 경로).
+ *
+ * 호출 체인:
+ *   blk_mq_free_request → [blk_mq_finish_request]
+ *     → blk_zone_finish_request (ZNS NVMe 쓰기 포인터 갱신)
+ *     → elevator.finish_request (scheduler 내부 상태 정리)
+ */
 static void blk_mq_finish_request(struct request *rq)
 {
+	/* [한국어] rq->q: 이 request 가 속한 NVMe namespace 의 request_queue */
 	struct request_queue *q = rq->q;
 
+	/* [한국어] ZNS NVMe: 쓰기 완료 시 zone 의 write pointer 를 갱신.
+	 * 일반 NVMe (CMB, namespace 가 zoned 아님) 에서는 no-op. */
 	blk_zone_finish_request(rq);
 
+	/* [한국어] IO 스케줄러를 경유한 request 만 finish_request 콜백 호출.
+	 * BFQ: bfq_finish_request (bfqq 와의 연결 해제).
+	 * mq-deadline: 내부 타이머/통계 정리. */
 	if (rq->rq_flags & RQF_USE_SCHED) {
 		q->elevator->type->ops.finish_request(rq);
 		/*
@@ -1610,71 +1632,128 @@ static void blk_mq_finish_request(struct request *rq)
 		 * completed twice, we should clear this flag
 		 * to avoid double finish_request() on the rq.
 		 */
+		/* [한국어] postflush: 쓰기 → flush → 쓰기 순서 보장을 위해 두 번 완료될 수 있다.
+		 * 플래그를 clear 해 두 번째 완료 시 finish_request 가 재호출되지 않도록. */
 		rq->rq_flags &= ~RQF_USE_SCHED;
 	}
 }
 
 /*
- * __blk_mq_free_request: request 의 tag(CID) 와 참조를 해제.
- *   NVMe 관점: 완료된 NVMe 명령의 CID 를 SQ 의 free bitmap 에
- *   반납하고, active count 를 감소시켜 재사용 가능하게 한다.
- *   호출 경로: blk_mq_free_request -> __blk_mq_free_request.
+ * [한국어]
+ * __blk_mq_free_request - tag(CID) 와 q_usage_counter 참조를 반납하는 최종 해제
+ *
+ * @rq: 해제할 request (참조 카운트가 이미 0이 된 상태)
+ *
+ * 완료된 NVMe 명령의 CID 를 hctx->tags sbitmap 에 반납하고,
+ * scheduler tag 가 있으면 sched_tags 에도 반납한다.
+ * 이후 blk_mq_sched_restart 로 새 dispatch 가 가능함을 알리고,
+ * blk_queue_exit 로 q_usage_counter 를 1 감소시킨다.
+ * 실행 컨텍스트: softirq 또는 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   blk_mq_free_request → (req_ref_put_and_test == true) → [__blk_mq_free_request]
+ *     → blk_mq_put_tag (CID 반납 → sbitmap 비트 clear → wakeup submitters)
+ *     → blk_queue_exit (percpu_ref_put)
  */
 static void __blk_mq_free_request(struct request *rq)
 {
+	/* [한국어] rq->q: blk_queue_exit 에 전달할 큐 포인터 (rq 해제 전에 저장) */
 	struct request_queue *q = rq->q;
+	/* [한국어] rq->mq_ctx: CID 반납 시 per-CPU 통계 갱신에 필요 */
 	struct blk_mq_ctx *ctx = rq->mq_ctx;
+	/* [한국어] rq->mq_hctx: tag 가 속한 SQ(hctx)를 NULL 전에 저장 */
 	struct blk_mq_hw_ctx *hctx = rq->mq_hctx;
+	/* [한국어] internal_tag: scheduler tag 번호 (사용 시 별도 반납 필요) */
 	const int sched_tag = rq->internal_tag;
 
+	/* [한국어] blk_crypto_free_request: NVMe inline encryption keyslot 반환.
+	 * 암호화 미사용 시 no-op. */
 	blk_crypto_free_request(rq);
-// blk_crypto_free_request(): NVMe encryption keyslot 해제
+	/* [한국어] blk_pm_mark_last_busy: 런타임 PM 의 idle 타이머를 현재 시각으로 갱신.
+	 * NVMe 컨트롤러가 idle 상태로 인식되어 자동 suspend 로 진입 가능하게 준비. */
 	blk_pm_mark_last_busy(rq);
-// blk_pm_mark_last_busy(): NVMe power management idle 갱신
+	/* [한국어] rq->mq_hctx = NULL: 이 request 가 더 이상 SQ 에 속하지 않음을 표시 */
 	rq->mq_hctx = NULL;
 
+	/* [한국어] tag != BLK_MQ_NO_TAG: driver tag(CID)가 실제 할당된 경우만 반납.
+	 * driver tag 없이 sched tag 만 있을 수도 있다 (flush passthrough 등). */
 	if (rq->tag != BLK_MQ_NO_TAG) { /* 유효한 CID 가 할당된 경우만 반납 */
+		/* [한국어] hctx 의 active request 수 감소 → dispatch budget 반환 */
 		blk_mq_dec_active_requests(hctx); /* hctx(SQ) 의 활성 CID 카운트 감소 */
+		/* [한국어] blk_mq_put_tag: sbitmap 에서 이 tag(CID) 비트를 clear.
+		 * 비트 해제 후 tag 를 기다리던 submitter 들에게 wakeup 신호 전송. */
 		blk_mq_put_tag(hctx->tags, ctx, rq->tag); /* NVMe SQ slot(CID) 반납 */
 	}
+	/* [한국어] scheduler tag 가 있으면 sched_tags 에도 반납.
+	 * BFQ/mq-deadline 은 driver tag 와 별도 sched_tags sbitmap 을 사용한다. */
 	if (sched_tag != BLK_MQ_NO_TAG)
 		blk_mq_put_tag(hctx->sched_tags, ctx, sched_tag);
+	/* [한국어] blk_mq_sched_restart: hctx 에 tag 여유가 생겼음을 알려
+	 * dispatch 를 재시도하도록 hctx 의 run 플래그를 세우거나 work 를 예약. */
 	blk_mq_sched_restart(hctx);
-// scheduler restart: NVMe SQ 에 다시 dispatch 할 여지가 있음을 표시
+	/* [한국어] blk_queue_exit: q_usage_counter 를 1 감소 (percpu_ref_put).
+	 * freeze 대기 중이라면 이 감소가 percpu_ref_is_zero 조건을 충족시킬 수 있다. */
 	blk_queue_exit(q);
-// queue 사용 카운트 감소: request 생명주기 종료
 }
 
 /*
- * blk_mq_free_request: request 의 수명을 종료.
- *   NVMe 관점: NVMe 명령 완료 후 해당 CID slot 을 회수하여
- *   동일 CID 의 재사용이 가능하게 한다.
- *   호출 경로: blk_mq_end_request -> blk_mq_free_request.
+ * [한국어]
+ * blk_mq_free_request - request 생명주기 종료: 스케줄러/QoS 정리 후 tag 반납
+ *
+ * @rq: 완료 처리된 request
+ *
+ * request 의 최종 처리 순서:
+ * 1) blk_mq_finish_request: scheduler.finish_request + zone 정리
+ * 2) rq_qos_done: writeback throttle, iolatency, iocost 완료 통보
+ * 3) state = MQ_RQ_IDLE: 이 CID 가 이제 재할당 가능함을 표시
+ * 4) req_ref_put_and_test: 참조 카운트 감소; 0이 되면 __blk_mq_free_request
+ * 실행 컨텍스트: softirq(완료 경로) 또는 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   blk_mq_end_request → [blk_mq_free_request] → __blk_mq_free_request
  */
 void blk_mq_free_request(struct request *rq)
 {
+	/* [한국어] rq->q: rq_qos_done 전달에 필요 */
 	struct request_queue *q = rq->q;
 
+	/* [한국어] 스케줄러 finish_request 콜백 및 zone 완료 처리 */
 	blk_mq_finish_request(rq);
-// scheduler finish_request 수행(NVMe passthrough 가 아닌 일반 IO)
 
+	/* [한국어] rq_qos_done: QoS 체인(WBT, iolatency, iocost)에 완료를 통보.
+	 * writeback throttle 은 여기서 IO 토큰을 반납한다. */
 	rq_qos_done(q, rq);
-// rq_qos_done(): NVMe IO QoS(latency/iocost) 완료 통보
 
+	/* [한국어] WRITE_ONCE: rq->state 를 MQ_RQ_IDLE 로 원자적으로 변경.
+	 * 다른 CPU 가 state 를 polling 할 경우를 위한 순서 보장. */
 	WRITE_ONCE(rq->state, MQ_RQ_IDLE);
-// rq->state = MQ_RQ_IDLE: NVMe CID 가 이제 재할당 가능함
+	/* [한국어] req_ref_put_and_test: 참조 카운트 --; 0이 되면 true 반환.
+	 * 다중 end_io 경로가 있을 때 마지막 반납자만 tag 를 실제로 해제한다. */
 	if (req_ref_put_and_test(rq))
-// 참조 카운트가 0이 되면 __blk_mq_free_request() 로 CID 반납
 		__blk_mq_free_request(rq);
 }
 EXPORT_SYMBOL_GPL(blk_mq_free_request);
 
+/*
+ * [한국어]
+ * blk_mq_free_plug_rqs - plug cache 에 남은 미사용 request 를 모두 해제
+ *
+ * @plug: 해제할 cached_rqs 를 보유한 blk_plug
+ *
+ * 태스크가 unplug 되거나 io_schedule 에서 plug 를 제거할 때, 미리 할당해 두었지만
+ * 실제 bio 에 사용되지 않은 request(CID) 를 반납한다.
+ * 실행 컨텍스트: 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   blk_finish_plug / blk_flush_plug → [blk_mq_free_plug_rqs]
+ */
 void blk_mq_free_plug_rqs(struct blk_plug *plug)
 {
 	struct request *rq;
 
+	/* [한국어] rq_list_pop: cached_rqs 에서 하나씩 꺼내 blk_mq_free_request 로 반납.
+	 * cached_rqs 가 빌 때까지 반복. */
 	while ((rq = rq_list_pop(&plug->cached_rqs)) != NULL)
-// plug cache 에 남은 request 들을 해제(CID 반납)
 		blk_mq_free_request(rq);
 }
 
@@ -2031,154 +2110,317 @@ static inline void __blk_mq_end_request_acct(struct request *rq, u64 now)
 }
 
 /*
- * __blk_mq_end_request: request 의 최종 완료 후 정리.
- *   NVMe 관점: NVMe 컨트롤러가 CQ 항목을 기록한 뒤,
- *   nvme_complete_rq -> blk_mq_end_request -> __blk_mq_end_request
- *   순으로 호출되어 상위 계층으로 완료를 전달.
+ * [한국어]
+ * __blk_mq_end_request - request 최종 완료 처리 (통계 수집 + free 또는 end_io 호출)
+ *
+ * @rq:    완료할 request
+ * @error: NVMe CQ status → 블록 레이어 상태 코드 (BLK_STS_*)
+ *
+ * NVMe 컨트롤러가 CQ 에 완료 항목을 기록한 뒤 드라이버(nvme_complete_rq)가
+ * 이 함수를 호출한다. 완료 흐름:
+ * 1) 타임스탬프 필요 시 IO 통계(latency, iops) 갱신
+ * 2) blk_mq_finish_request: scheduler/zone 정리
+ * 3) end_io 콜백 호출(있을 경우) 또는 blk_mq_free_request 로 CID 반납
+ * 실행 컨텍스트: softirq(BLOCK_SOFTIRQ) 또는 poll 컨텍스트.
+ *
+ * 호출 체인:
+ *   nvme_irq / nvme_poll → nvme_complete_rq → blk_mq_end_request
+ *     → blk_update_request → [__blk_mq_end_request] → blk_mq_free_request
  */
 inline void __blk_mq_end_request(struct request *rq, blk_status_t error)
 {
+	/* [한국어] blk_mq_need_time_stamp: RQF_IO_STAT, RQF_STATS 중 하나라도 있으면 true.
+	 * 타임스탬프 기반 latency 계산이 필요한 request 에만 비용을 지불한다. */
 	if (blk_mq_need_time_stamp(rq))
-// 타임스탬프 필요 시 완료 시각 기록
+		/* [한국어] blk_time_get_ns(): 완료 시각 측정 후 통계/histogram 업데이트 */
 		__blk_mq_end_request_acct(rq, blk_time_get_ns());
 
+	/* [한국어] scheduler finish_request + zone 완료 정리 */
 	blk_mq_finish_request(rq);
 
+	/* [한국어] end_io 콜백이 있으면 호출:
+	 * - blk_rq_prep_clone (dm) 처럼 상위 레이어가 추가 처리를 원할 때 사용.
+	 * - RQ_END_IO_FREE 반환 시 blk_mq_free_request 로 CID 반납.
+	 * - RQ_END_IO_NONE 반환 시 소유권이 콜백에게 남아있음 (아직 사용 중). */
 	if (rq->end_io) {
-// rq->end_io: NVMe 명령별 완료 콜백이 있으면 호출
+		/* [한국어] rq_qos_done: WBT/iolatency/iocost 에 완료 통보 */
 		rq_qos_done(rq->q, rq);
 		if (rq->end_io(rq, error, NULL) == RQ_END_IO_FREE)
-// 콜백이 RQ_END_IO_FREE 를 반환하면 request/CID 해제
+			/* [한국어] end_io 가 소유권을 반납했으므로 tag/CID 해제 */
 			blk_mq_free_request(rq);
 	} else {
+		/* [한국어] end_io 없음: blk_mq_free_request 로 직접 CID 반납 */
 		blk_mq_free_request(rq);
 	}
 }
 EXPORT_SYMBOL(__blk_mq_end_request);
 
 /*
- * blk_mq_end_request: request 의 모든 바이트를 완료하고 정리.
- *   NVMe 관점: 하나의 NVMe 명령(CID) 이 전체 완료되면 호출.
- *   호출 경로: nvme_complete_rq -> blk_mq_end_request.
+ * [한국어]
+ * blk_mq_end_request - NVMe 명령(CID) 전체 완료 처리 공개 API
+ *
+ * @rq:    완료할 request
+ * @error: 완료 상태 (BLK_STS_OK = 0 정상, 그 외 오류)
+ *
+ * blk_update_request 로 request 의 모든 바이트를 완료 처리한 뒤
+ * __blk_mq_end_request 로 통계/정리/반납을 수행한다.
+ * blk_update_request 가 true 를 반환하면 아직 남은 데이터가 있다는 의미인데
+ * 전체 바이트를 전달했으므로 이 경우는 버그다.
+ * 실행 컨텍스트: softirq 또는 poll 컨텍스트.
+ *
+ * 호출 체인:
+ *   nvme_complete_rq → [blk_mq_end_request] → __blk_mq_end_request
  */
 void blk_mq_end_request(struct request *rq, blk_status_t error)
 {
+	/* [한국어] blk_rq_bytes(rq): 이 request 의 전체 바이트 수.
+	 * blk_update_request 에 전체 바이트를 넘기면 false(더 이상 없음)가 반환돼야 함. */
 	if (blk_update_request(rq, error, blk_rq_bytes(rq)))
-// request 의 모든 바이트를 완료 처리
+		/* [한국어] 전체 바이트를 넘겼는데 true 반환 = 버그 (남은 데이터가 있음) */
 		BUG();
+	/* [한국어] 통계 갱신 + scheduler/zone 정리 + CID 반납 */
 	__blk_mq_end_request(rq, error);
 }
 EXPORT_SYMBOL(blk_mq_end_request);
 
+/* [한국어] TAG_COMP_BATCH: 한 번에 batch 처리할 최대 tag 수 (= 32).
+ * blk_mq_flush_tag_batch 에서 hctx 의 active count 와 q_usage_counter 를
+ * 32개씩 묶어 한 번에 감소시켜 atomic 오버헤드를 줄인다. */
 #define TAG_COMP_BATCH		32
 
+/*
+ * [한국어]
+ * blk_mq_flush_tag_batch - 여러 tag(CID)를 한 번에 반납하고 카운터를 일괄 감소
+ *
+ * @hctx:      tag 가 속한 하드웨어 큐
+ * @tag_array: 반납할 tag 번호 배열
+ * @nr_tags:   반납할 tag 수 (최대 TAG_COMP_BATCH)
+ *
+ * blk_mq_end_request_batch 에서 호출. TAG_COMP_BATCH 단위로 모아
+ * blk_mq_put_tags 로 sbitmap 에 한 번에 돌려주고,
+ * percpu_ref_put_many 로 q_usage_counter 를 nr_tags 만큼 일괄 감소시킨다.
+ * 실행 컨텍스트: softirq(BLOCK_SOFTIRQ) 컨텍스트.
+ *
+ * 호출 체인:
+ *   blk_mq_end_request_batch → [blk_mq_flush_tag_batch]
+ */
 static inline void blk_mq_flush_tag_batch(struct blk_mq_hw_ctx *hctx,
 					  int *tag_array, int nr_tags)
 {
+	/* [한국어] hctx 의 request_queue 역참조 (q_usage_counter 감소에 필요) */
 	struct request_queue *q = hctx->queue;
 
+	/* [한국어] blk_mq_sub_active_requests: hctx->active_requests 를 nr_tags 만큼 감소.
+	 * 이 값이 0이 되면 dispatch budget 여유가 생겨 run_hw_queue 를 유발할 수 있다. */
 	blk_mq_sub_active_requests(hctx, nr_tags);
-// batch 완료 시 hctx(NVMe SQ) 의 active CID 카운트 일괄 감소
 
+	/* [한국어] blk_mq_put_tags: sbitmap 에서 tag_array 의 각 태그 비트를 batch 로 clear.
+	 * 각 비트 해제마다 해당 wq 를 깨워 대기 submitter 가 tag 를 재획득할 수 있게 한다. */
 	blk_mq_put_tags(hctx->tags, tag_array, nr_tags);
-// 획득했던 NVMe CID 들을 batch 로 반납
+	/* [한국어] percpu_ref_put_many: q_usage_counter 를 nr_tags 만큼 감소.
+	 * 한 번에 여러 개를 감소시켜 percpu_ref atomic 비용을 분산시킨다. */
 	percpu_ref_put_many(&q->q_usage_counter, nr_tags);
-// queue 사용 카운트를 batch 만큼 감소
 }
 
 /*
- * blk_mq_end_request_batch: 여러 request 를 일괄 완료.
- *   NVMe 관점: CQ 에서 여러 완료 항목을 한 번에 처리할 때
- *   tag 를 batch 로 반납하여 오버헤드를 줄인다.
+ * [한국어]
+ * blk_mq_end_request_batch - IO 완료 배치(io_comp_batch)의 모든 request 를 일괄 처리
+ *
+ * @iob: 완료된 request 목록 (NVMe poll/irq 에서 CQ 항목 여러 개를 담은 배치)
+ *
+ * NVMe 인터럽트 핸들러가 한 번의 인터럽트에서 여러 CQ 항목을 처리할 때
+ * 각 request 를 개별적으로 end_request 하는 대신 배치로 처리해 성능을 높인다.
+ * tag 반납은 TAG_COMP_BATCH(32) 단위로 묶어 blk_mq_flush_tag_batch 로 한 번에 처리.
+ * 실행 컨텍스트: softirq(BLOCK_SOFTIRQ) 또는 nvme_irq 컨텍스트.
+ *
+ * 호출 체인:
+ *   nvme_irq / nvme_poll → nvme_process_cq → blk_mq_complete_request_batch
+ *     → [blk_mq_end_request_batch]
  */
 void blk_mq_end_request_batch(struct io_comp_batch *iob)
 {
+	/* [한국어] tags[]: hctx 가 동일한 request 들의 tag 를 모아두는 배열.
+	 * hctx 가 바뀌면 먼저 flush 후 새 배열에 누적한다. */
 	int tags[TAG_COMP_BATCH], nr_tags = 0;
+	/* [한국어] cur_hctx: 현재 누적 중인 hctx — 다른 hctx 로 바뀌면 flush 트리거 */
 	struct blk_mq_hw_ctx *cur_hctx = NULL;
 	struct request *rq;
+	/* [한국어] now: 타임스탬프 수집 시 배치 내 모든 request 에 동일한 완료 시각 사용 */
 	u64 now = 0;
 
+	/* [한국어] iob->need_ts: 배치 내 어느 request 라도 타임스탬프가 필요하면 미리 기록 */
 	if (iob->need_ts)
 		now = blk_time_get_ns();
 
 	while ((rq = rq_list_pop(&iob->req_list)) != NULL) {
+		/* [한국어] 다음 반복에서 사용할 rq->bio 와 rq_next 를 캐시에 미리 로드.
+		 * NVMe high-IOPS 에서 cache miss 를 숨기는 핵심 최적화. */
 		prefetch(rq->bio);
-// 다음 완료될 rq->bio 와 rq_next 를 prefetch
 		prefetch(rq->rq_next);
 
+		/* [한국어] blk_complete_request: request 에 연결된 bio chain 을 모두 완료
+		 * bio_endio 로 상위(파일시스템/VFS) 에 결과를 전달한다. */
 		blk_complete_request(rq);
-// bio 완료 처리: NVMe CQ 항목 1개 상위 전달
+		/* [한국어] 타임스탬프가 필요한 배치면 각 request 의 IO 통계 갱신 */
 		if (iob->need_ts)
 			__blk_mq_end_request_acct(rq, now);
-// 타임스탬프 수집 시 정확한 NVMe 완료 latency 기록
 
+		/* [한국어] scheduler finish_request + zone 완료 정리 */
 		blk_mq_finish_request(rq);
 
+		/* [한국어] rq_qos_done: WBT/iolatency/iocost 완료 통보 */
 		rq_qos_done(rq->q, rq);
 
 		/*
 		 * If end_io handler returns NONE, then it still has
 		 * ownership of the request.
 		 */
+		/* [한국어] end_io 콜백이 있고 NONE 을 반환하면 소유권이 콜백에 있음 → skip.
+		 * iob 를 전달하여 콜백이 배치 완료 후 처리할 수 있게 한다. */
 		if (rq->end_io && rq->end_io(rq, 0, iob) == RQ_END_IO_NONE)
-// end_io 콜백이 RQ_END_IO_NONE 이면 request 소유권은 아직 드라이버에 있음
 			continue;
 
+		/* [한국어] state = MQ_RQ_IDLE: 이 CID 가 이제 재할당 가능함을 원자적으로 표시 */
 		WRITE_ONCE(rq->state, MQ_RQ_IDLE);
-// MQ_RQ_IDLE: NVMe CID 재사용 가능
+		/* [한국어] 참조 카운트가 0이 되지 않았으면 아직 다른 참조자가 있음 → tag 반납 미뤄짐 */
 		if (!req_ref_put_and_test(rq))
 			continue;
 
 		blk_crypto_free_request(rq);
 		blk_pm_mark_last_busy(rq);
 
+		/* [한국어] batch 버퍼가 가득 찼거나(TAG_COMP_BATCH=32) hctx 가 바뀌면
+		 * 지금까지 모은 tag 들을 한 번에 반납(flush)한다.
+		 * hctx 가 다르면 같은 tags sbitmap 에 속하지 않으므로 반드시 분리 flush. */
 		if (nr_tags == TAG_COMP_BATCH || cur_hctx != rq->mq_hctx) {
-// hctx 가 바뀌거나 batch 가 차면 지금까지 모은 CID 반납
 			if (cur_hctx)
+				/* [한국어] 지금까지 누적된 tag 배열을 hctx 단위로 일괄 반납 */
 				blk_mq_flush_tag_batch(cur_hctx, tags, nr_tags);
+			/* [한국어] 배열 초기화 후 새 hctx 시작 */
 			nr_tags = 0;
 			cur_hctx = rq->mq_hctx;
 		}
+		/* [한국어] 이 request 의 driver tag(CID)를 batch 버퍼에 추가 */
 		tags[nr_tags++] = rq->tag;
-// 완료된 request 의 CID 를 batch 버퍼에 저장
 	}
 
+	/* [한국어] 루프 종료 후 남은 tag 들을 최종 flush */
 	if (nr_tags)
 		blk_mq_flush_tag_batch(cur_hctx, tags, nr_tags);
 }
 EXPORT_SYMBOL_GPL(blk_mq_end_request_batch);
 
+/*
+ * [한국어]
+ * blk_complete_reqs - llist 에 모인 완료 request 들을 드라이버 complete 콜백으로 처리
+ *
+ * @list: 처리할 per-CPU llist (blk_cpu_done 또는 핫플러그 dead CPU 의 것)
+ *
+ * llist_del_all 로 리스트를 원자적으로 비우고, llist_reverse_order 로
+ * 삽입 순서대로 뒤집은 뒤 각 request 의 mq_ops->complete 콜백을 호출한다.
+ * complete 는 nvme_complete_rq 등 드라이버가 등록한 함수이며,
+ * 최종적으로 blk_mq_end_request 를 호출해 상위로 완료를 전달한다.
+ * 실행 컨텍스트: BLOCK_SOFTIRQ 또는 CPU hotplug 핸들러.
+ *
+ * 호출 체인:
+ *   blk_done_softirq → [blk_complete_reqs] → nvme_complete_rq → blk_mq_end_request
+ */
 static void blk_complete_reqs(struct llist_head *list)
 {
+	/* [한국어] llist_del_all: 리스트 전체를 원자적으로 분리 (다른 CPU 의 push 와 race 없음).
+	 * llist_reverse_order: llist 는 LIFO 이므로 FIFO 순서로 뒤집어 삽입 순서 복원. */
 	struct llist_node *entry = llist_reverse_order(llist_del_all(list));
-// llist_reverse_order(): NVMe CQ 처리 순서 보장
 	struct request *rq, *next;
 
+	/* [한국어] ipi_list: blk_mq_complete_send_ipi 에서 llist_add 로 연결한 노드.
+	 * 각 request 의 드라이버 complete 콜백을 호출해 최종 blk_mq_end_request 진행. */
 	llist_for_each_entry_safe(rq, next, entry, ipi_list)
 		rq->q->mq_ops->complete(rq); /* nvme_complete_rq 로 CQ 항목 처리 */
 }
 
+/*
+ * [한국어]
+ * blk_done_softirq - BLOCK_SOFTIRQ 핸들러: 이 CPU 의 완료 큐를 처리
+ *
+ * BLOCK_SOFTIRQ 가 raise 되면 이 함수가 호출된다. 현재 CPU 의 blk_cpu_done
+ * llist 에 쌓인 모든 완료 request 를 blk_complete_reqs 로 처리한다.
+ * __latent_entropy: 엔트로피 취약점 완화를 위한 컴파일러 속성.
+ * 실행 컨텍스트: BLOCK_SOFTIRQ 컨텍스트 (인터럽트 비활성 하에서 실행).
+ *
+ * 호출 체인:
+ *   raise_softirq(BLOCK_SOFTIRQ) → [blk_done_softirq] → blk_complete_reqs
+ */
 static __latent_entropy void blk_done_softirq(void)
 {
+	/* [한국어] this_cpu_ptr(blk_cpu_done): 현재 CPU 에 할당된 완료 llist 포인터.
+	 * blk_mq_complete_send_ipi 가 llist_add 로 추가한 request 들을 여기서 처리. */
 	blk_complete_reqs(this_cpu_ptr(&blk_cpu_done));
-// this_cpu_ptr(blk_cpu_done): 현재 CPU 에 도착한 NVMe 완료 항목 처리
 }
 
+/*
+ * [한국어]
+ * blk_softirq_cpu_dead - CPU 오프라인 시 해당 CPU 의 완료 큐를 현재 CPU 에서 처리
+ *
+ * @cpu: 오프라인된 CPU 번호
+ * @return: 0 (항상 성공)
+ *
+ * CPU 핫플러그 오프라인 이벤트에서 호출된다. 오프라인 CPU 의 blk_cpu_done llist 에
+ * 아직 처리되지 않은 완료 request 가 있을 수 있으므로 현재 CPU 에서 drain 한다.
+ * 실행 컨텍스트: CPU 핫플러그 notifier.
+ *
+ * 호출 체인:
+ *   CPU offline notifier → [blk_softirq_cpu_dead] → blk_complete_reqs
+ */
 static int blk_softirq_cpu_dead(unsigned int cpu)
 {
+	/* [한국어] per_cpu(blk_cpu_done, cpu): 오프라인된 CPU 의 완료 llist 처리 */
 	blk_complete_reqs(&per_cpu(blk_cpu_done, cpu));
 	return 0;
 }
 
+/*
+ * [한국어]
+ * __blk_mq_complete_request_remote - 원격 CPU 에서 BLOCK_SOFTIRQ 를 raise
+ *
+ * @data: IPI smp_call_function_single_async 에서 전달된 CSD 데이터 (미사용)
+ *
+ * smp_call_function_single_async 의 콜백 함수. 원래 요청 CPU 에서 IPI 를 받아
+ * BLOCK_SOFTIRQ 를 발사(raise)하면 blk_done_softirq 가 실행된다.
+ * 실행 컨텍스트: IPI 핸들러 (인터럽트 컨텍스트).
+ *
+ * 호출 체인:
+ *   smp_call_function_single_async → [__blk_mq_complete_request_remote]
+ *     → raise_softirq(BLOCK_SOFTIRQ) → blk_done_softirq
+ */
 static void __blk_mq_complete_request_remote(void *data)
 {
+	/* [한국어] __raise_softirq_irqoff: 인터럽트가 이미 비활성화된 컨텍스트에서
+	 * BLOCK_SOFTIRQ 를 발사한다. 이후 인터럽트 복원 시 softirq 가 처리된다. */
 	__raise_softirq_irqoff(BLOCK_SOFTIRQ);
 }
 
+/*
+ * [한국어]
+ * blk_mq_complete_need_ipi - 완료를 원래 요청 CPU 로 보내야 하는지 판단
+ *
+ * @rq: 완료 처리할 request
+ * @return: true 이면 IPI 로 원래 CPU 에서 완료 처리, false 이면 현재 CPU 에서 처리
+ *
+ * QUEUE_FLAG_SAME_COMP 가 설정된 큐(NVMe 등)에서 완료 인터럽트가 다른 CPU 에서
+ * 발생했을 때 원래 요청 CPU 로 완료를 "귀환"시킬지 결정한다.
+ * 같은 CPU 이거나, 같은 캐시 도메인이고 capacity 가 같으면 현재 CPU 에서 처리해도
+ * cache locality 가 충분하다. 오프라인 CPU 로는 IPI 불가.
+ * 실행 컨텍스트: 인터럽트 핸들러(nvme_irq 등).
+ *
+ * 호출 체인:
+ *   blk_mq_complete_request_remote → [blk_mq_complete_need_ipi]
+ */
 static inline bool blk_mq_complete_need_ipi(struct request *rq)
 {
+	/* [한국어] 현재 완료 처리 중인 CPU */
 	int cpu = raw_smp_processor_id();
 
+	/* [한국어] SMP 비활성 또는 SAME_COMP 플래그 없으면 IPI 불필요 — 현재 CPU 에서 처리 */
 	if (!IS_ENABLED(CONFIG_SMP) ||
 	    !test_bit(QUEUE_FLAG_SAME_COMP, &rq->q->queue_flags))
 		return false;
@@ -2188,10 +2430,13 @@ static inline bool blk_mq_complete_need_ipi(struct request *rq)
 	 * This is probably worse than completing the request on a different
 	 * cache domain.
 	 */
+	/* [한국어] force_irqthreads: 소프트IRQ 가 스레드로 처리되어 오히려 느릴 수 있음 → IPI 포기 */
 	if (force_irqthreads())
 		return false;
 
 	/* same CPU or cache domain and capacity?  Complete locally */
+	/* [한국어] 원래 요청 CPU 와 현재 CPU 가 같으면 IPI 불필요 (이미 같은 CPU).
+	 * SAME_FORCE 가 없고 캐시 공유 + capacity 동일이면 locality 충분 → 현재 CPU 처리. */
 	if (cpu == rq->mq_ctx->cpu ||
 	    (!test_bit(QUEUE_FLAG_SAME_FORCE, &rq->q->queue_flags) &&
 	     cpus_share_cache(cpu, rq->mq_ctx->cpu) &&
@@ -2199,66 +2444,129 @@ static inline bool blk_mq_complete_need_ipi(struct request *rq)
 		return false;
 
 	/* don't try to IPI to an offline CPU */
+	/* [한국어] 원래 요청 CPU 가 온라인인 경우에만 IPI 가능; 오프라인이면 현재 CPU 처리 */
 	return cpu_online(rq->mq_ctx->cpu);
 }
 
+/*
+ * [한국어]
+ * blk_mq_complete_send_ipi - 완료를 원래 요청 CPU 로 IPI 를 통해 전달
+ *
+ * @rq: 완료 처리할 request (rq->mq_ctx->cpu 가 대상 CPU)
+ *
+ * rq 를 대상 CPU 의 blk_cpu_done llist 에 추가하고, 리스트가 비어있었다면
+ * (이전에 추가된 request 가 없었다면) smp_call_function_single_async 로
+ * 해당 CPU 에 IPI 를 보내 BLOCK_SOFTIRQ 를 raise 하게 한다.
+ * 이미 리스트에 항목이 있다면 IPI 는 이미 보냈으므로 추가 IPI 불필요.
+ * 실행 컨텍스트: 인터럽트 핸들러.
+ *
+ * 호출 체인:
+ *   blk_mq_complete_request_remote → [blk_mq_complete_send_ipi]
+ *     → smp_call_function_single_async → __blk_mq_complete_request_remote
+ *     → raise_softirq(BLOCK_SOFTIRQ) → blk_done_softirq
+ */
 static void blk_mq_complete_send_ipi(struct request *rq)
 {
+	/* [한국어] 원래 요청 CPU 번호 (rq->mq_ctx 는 submit 한 CPU 의 sw 큐) */
 	unsigned int cpu;
 
 	cpu = rq->mq_ctx->cpu;
+	/* [한국어] llist_add: 대상 CPU 의 blk_cpu_done 에 rq 를 원자적으로 추가.
+	 * 반환값 true = 리스트가 비어있었음 → 이 추가가 처음이므로 IPI 필요.
+	 * false = 이미 항목이 있었음 → IPI 는 이미 진행 중이므로 추가 불필요. */
 	if (llist_add(&rq->ipi_list, &per_cpu(blk_cpu_done, cpu)))
-// llist_add(): NVMe 완료 request 를 대상 CPU 의 softirq list 에 삽입
+		/* [한국어] smp_call_function_single_async: 지정 CPU 에 비동기 IPI 전송.
+		 * 콜백(blk_cpu_csd 의 func)이 그 CPU 에서 __blk_mq_complete_request_remote 를 실행.
+		 * async 이므로 현재 CPU 는 블록 없이 즉시 반환한다. */
 		smp_call_function_single_async(cpu, &per_cpu(blk_cpu_csd, cpu));
-// smp_call_function_single_async(): 대상 CPU 에 softirq/IPI 발송
 }
 
+/*
+ * [한국어]
+ * blk_mq_raise_softirq - 현재 CPU 의 blk_cpu_done 에 rq 를 추가하고 BLOCK_SOFTIRQ raise
+ *
+ * @rq: softirq 에서 완료 처리할 request
+ *
+ * 현재 CPU 에서 바로 softirq 를 통해 완료를 처리할 때 사용.
+ * llist_add 로 blk_cpu_done 에 추가하고 리스트가 비었었다면(처음 추가)
+ * raise_softirq 로 BLOCK_SOFTIRQ 를 발사한다.
+ * preempt_disable/enable 으로 CPU 전환을 막아 this_cpu_ptr 안전성 보장.
+ * 실행 컨텍스트: 인터럽트 핸들러.
+ *
+ * 호출 체인:
+ *   blk_mq_complete_request_remote → [blk_mq_raise_softirq]
+ *     → raise_softirq(BLOCK_SOFTIRQ) → blk_done_softirq
+ */
 static void blk_mq_raise_softirq(struct request *rq)
 {
 	struct llist_head *list;
 
+	/* [한국어] preempt_disable: this_cpu_ptr 호출 동안 CPU 를 고정.
+	 * CPU 가 바뀌면 다른 CPU 의 리스트에 추가될 수 있으므로 방지. */
 	preempt_disable();
+	/* [한국어] 현재 CPU 의 완료 llist 포인터 획득 */
 	list = this_cpu_ptr(&blk_cpu_done);
+	/* [한국어] llist_add: request 를 llist 에 lock-free 로 추가.
+	 * 반환 true = 리스트가 처음으로 비어있지 않게 됨 → softirq 발사 필요. */
 	if (llist_add(&rq->ipi_list, list))
-// 현재 CPU 의 blk_cpu_done 리스트에 완료 request 추가
+		/* [한국어] raise_softirq(BLOCK_SOFTIRQ): blk_done_softirq 를 예약.
+		 * 인터럽트 복원 후 소프트IRQ 체크 시점에 blk_done_softirq 가 실행됨. */
 		raise_softirq(BLOCK_SOFTIRQ);
-// BLOCK_SOFTIRQ 발동: NVMe CQ 인터럽트 bottom-half 시작
+	/* [한국어] 프리엠션 복원 */
 	preempt_enable();
 }
 
 /*
- * blk_mq_complete_request_remote: 완료를 다른 CPU 로 발송(IPI)할지 결정.
- *   NVMe 관점: NVMe CQ 인터럽트가 발생한 CPU 와 bio 를 제출한 CPU 가
- *   다를 경우, cache affinity 를 위해 softirq/IPI 를 통해 해당 CPU 로
- *   완료를 라우팅한다.
+ * [한국어]
+ * blk_mq_complete_request_remote - NVMe 완료를 원래 CPU 로 라우팅할지 결정
+ *
+ * @rq: 완료 처리할 request
+ * @return: true 이면 IPI/softirq 로 완료를 다른 경로에 위임했음, false 이면 직접 처리
+ *
+ * NVMe CQ 인터럽트가 발생한 CPU 와 bio 를 submit 한 CPU 가 다를 경우,
+ * cache affinity 를 높이기 위해 완료를 원래 요청 CPU 로 돌려보낸다.
+ * 라우팅 결정 기준:
+ * 1) ctx가 1개이고 같은 CPU면 또는 polled request → 현재 CPU 에서 직접 처리 (false)
+ * 2) blk_mq_complete_need_ipi: 다른 CPU, 다른 캐시 도메인 → IPI 전송 (true)
+ * 3) nr_hw_queues == 1: softirq 로 현재 CPU 에서 처리 (true)
+ * 4) 기타 → false (호출자가 직접 처리)
+ * 실행 컨텍스트: 인터럽트 핸들러 (nvme_irq, nvme_poll_queue 등).
+ *
+ * 호출 체인:
+ *   nvme_irq → nvme_complete_rq → blk_mq_complete_request
+ *     → [blk_mq_complete_request_remote] → blk_mq_complete_send_ipi 또는 직접 처리
  */
 bool blk_mq_complete_request_remote(struct request *rq)
 {
+	/* [한국어] WRITE_ONCE: state 를 MQ_RQ_COMPLETE 로 원자적 변경.
+	 * poll loop 에서 이 state 를 보고 완료 여부를 판단한다. */
 	WRITE_ONCE(rq->state, MQ_RQ_COMPLETE);
-// MQ_RQ_COMPLETE: NVMe CQ 가 이 request 를 보고했음
 
 	/*
 	 * For request which hctx has only one ctx mapping,
 	 * or a polled request, always complete locally,
 	 * it's pointless to redirect the completion.
 	 */
+	/* [한국어] nr_ctx == 1 이고 현재 CPU 가 그 ctx 의 CPU 이면 IPI 불필요.
+	 * REQ_POLLED: poll 요청은 호출자가 직접 완료를 확인하므로 라우팅 불필요. */
 	if ((rq->mq_hctx->nr_ctx == 1 &&
-// hctx 가 ctx 를 1개만 갖고 같은 CPU 면 굳이 IPI 안 함
 	     rq->mq_ctx->cpu == raw_smp_processor_id()) ||
 	     rq->cmd_flags & REQ_POLLED)
 		return false;
 
+	/* [한국어] cache affinity 를 위해 원래 요청 CPU 로 IPI 를 통해 완료 전달 */
 	if (blk_mq_complete_need_ipi(rq)) {
-// cache affinity 를 위해 NVMe 완료를 다른 CPU 로 IPI 발송
 		blk_mq_complete_send_ipi(rq);
 		return true;
 	}
 
+	/* [한국어] nr_hw_queues == 1: 단일 SQ 큐 — IPI 대신 로컬 softirq 로 처리.
+	 * 대부분의 SCSI HBA나 virtio-blk 등이 이 경로를 사용한다. */
 	if (rq->q->nr_hw_queues == 1) {
-// hw queue 가 1개면 local softirq 로 완료 라우팅
 		blk_mq_raise_softirq(rq);
 		return true;
 	}
+	/* [한국어] 위 조건 모두 해당 없음: 호출자가 mq_ops->complete 로 직접 처리 */
 	return false;
 }
 EXPORT_SYMBOL_GPL(blk_mq_complete_request_remote);
@@ -2271,15 +2579,28 @@ EXPORT_SYMBOL_GPL(blk_mq_complete_request_remote);
  *	Complete a request by scheduling the ->complete_rq operation.
  **/
 /*
- * blk_mq_complete_request: NVMe 완료 인터럽트의 상위 진입점.
- *   NVMe 관점: nvme_irq / nvme_poll  -> blk_mq_complete_request
- *   -> mq_ops->complete (nvme_complete_rq) 로 이어진다.
- *   remote complete 가 필요하면 IPI/softirq 를, 아니면 즉시
- *   driver 의 complete 콜백을 호출.
+ * [한국어]
+ * blk_mq_complete_request - 드라이버가 호출하는 NVMe 완료 상위 API
+ *
+ * @rq: 완료된 request
+ *
+ * blk_mq_complete_request_remote 로 완료 라우팅을 시도한다:
+ * - false 반환(현재 CPU 에서 처리): mq_ops->complete(rq) 를 직접 호출
+ * - true 반환(IPI/softirq 로 위임): complete 는 원래 CPU 에서 비동기 실행
+ * nvme_irq 에서는 이 함수를 통하지 않고 nvme_complete_rq 를 직접 호출하기도 한다.
+ * 실행 컨텍스트: 인터럽트 핸들러 또는 poll 컨텍스트.
+ *
+ * 호출 체인:
+ *   nvme_poll / nvme_irq → [blk_mq_complete_request]
+ *     → blk_mq_complete_request_remote → nvme_complete_rq 또는 IPI
  */
 void blk_mq_complete_request(struct request *rq)
 {
+	/* [한국어] blk_mq_complete_request_remote: 라우팅 필요시 IPI/softirq 로 위임.
+	 * false 이면 현재 CPU 에서 즉시 드라이버 complete 콜백 실행. */
 	if (!blk_mq_complete_request_remote(rq)) /* 완료 CPU 라우팅 결정 */
+		/* [한국어] mq_ops->complete: nvme_complete_rq 등 드라이버 등록 완료 함수.
+		 * 최종적으로 blk_mq_end_request 를 호출해 tag/CID 반납까지 처리. */
 		rq->q->mq_ops->complete(rq); /* nvme_complete_rq 로 CQ 항목 처리 */
 }
 EXPORT_SYMBOL(blk_mq_complete_request);
@@ -2293,39 +2614,70 @@ EXPORT_SYMBOL(blk_mq_complete_request);
  * such as starting the timeout timer.
  */
 /*
- * blk_mq_start_request: driver 가 request 를 실제로 처리하기 직전에 호출.
- *   NVMe 관점: nvme_queue_rq 가 SQ 에 명령을 기록하고 doorbell 을
- *   울리기 전, rq->state 를 MQ_RQ_IN_FLIGHT 로 변경하고 timeout
- *   timer 를 시작. tags->rqs[tag] 에 rq 를 등록하여 완료 시 CID 로
- *   request 를 역참조할 수 있게 한다.
+ * [한국어]
+ * blk_mq_start_request - 드라이버가 request 를 SQ 에 투입하기 직전에 호출
+ *
+ * @rq: 시작할 request
+ *
+ * 이 함수가 호출된 후에 드라이버(nvme_queue_rq)는 SQ Entry 를 기록하고 doorbell 을 울린다.
+ * 주요 동작:
+ * 1) trace_block_rq_issue: perf/ftrace 에 request 발행 이벤트 기록
+ * 2) io_start_time_ns 기록 + rq_qos_issue: QoS 정책에 발행 통보
+ * 3) blk_add_timer: 타임아웃 타이머 시작 (nvme timeout handler 의 근거)
+ * 4) state = MQ_RQ_IN_FLIGHT: 이제 이 CID 는 "처리 중" 상태
+ * 5) tags->rqs[tag] = rq: CID 로 request 역참조 가능하게 등록
+ *    (nvme 완료 인터럽트에서 CID → request 를 찾는 경로)
+ * 실행 컨텍스트: 프로세스 컨텍스트 (dispatch 경로, nvme_queue_rq 에서 직접 호출).
+ *
+ * 호출 체인:
+ *   blk_mq_dispatch_rq_list → nvme_queue_rq → [blk_mq_start_request]
+ *     → blk_add_timer / state MQ_RQ_IN_FLIGHT 설정
  */
 void blk_mq_start_request(struct request *rq)
 {
+	/* [한국어] q: 통계 플래그 확인 및 QoS issue 통보에 사용 */
 	struct request_queue *q = rq->q;
 
+	/* [한국어] trace_block_rq_issue: blktrace/ftrace "D" (driver) 이벤트 기록.
+	 * io_uring, fio 등의 latency 추적에서 이 이벤트가 드라이버 처리 시작점이 됨. */
 	trace_block_rq_issue(rq);
 
+	/* [한국어] QUEUE_FLAG_STATS: wbt(writeback throttle), iolatency 등의
+	 * 통계 수집이 활성화된 큐. passthrough(NVMe admin 명령 등)는 제외. */
 	if (test_bit(QUEUE_FLAG_STATS, &q->queue_flags) &&
-// 통계 수집 queue 에서만 NVMe IO 세부 latency 기록
 	    !blk_rq_is_passthrough(rq)) {
+		/* [한국어] io_start_time_ns: 드라이버 발행 시각 (latency 히스토그램 시작점) */
 		rq->io_start_time_ns = blk_time_get_ns();
+		/* [한국어] stats_sectors: 발행 당시의 sector 수 (부분 완료 추적용) */
 		rq->stats_sectors = blk_rq_sectors(rq);
+		/* [한국어] RQF_STATS: end_request 에서 blk_stat_add 를 트리거하도록 표시 */
 		rq->rq_flags |= RQF_STATS;
+		/* [한국어] rq_qos_issue: wbt/iolatency/iocost 에 request 발행 통보.
+		 * wbt 는 여기서 발행 토큰을 소비한다. */
 		rq_qos_issue(q, rq);
 	}
 
+	/* [한국어] 발행 시점에 state 가 MQ_RQ_IDLE 이어야 함 — 버그 감지 */
 	WARN_ON_ONCE(blk_mq_rq_state(rq) != MQ_RQ_IDLE);
 
+	/* [한국어] blk_add_timer: hrtimer 로 request 타임아웃을 예약.
+	 * NVMe 타임아웃은 nvme_timeout 핸들러로 연결되어 abort/reset 을 시도. */
 	blk_add_timer(rq); /* NVMe 명령 deadline 타이머 시작 */
+	/* [한국어] WRITE_ONCE: state 를 MQ_RQ_IN_FLIGHT 로 원자적 전환.
+	 * timeout handler 와 completion handler 모두 이 state 를 보고 처리 여부를 판단. */
 	WRITE_ONCE(rq->state, MQ_RQ_IN_FLIGHT); /* NVMe 명령이 SQ 에 제출됨 */
+	/* [한국어] tags->rqs[tag]: 드라이버 tag(CID) → request 역매핑 등록.
+	 * NVMe 인터럽트 핸들러가 CQ Entry 의 CID 로 이 배열을 조회해 request 를 찾는다. */
 	rq->mq_hctx->tags->rqs[rq->tag] = rq; /* CID 로 request 역참조 가능하게 매핑 */
 
+	/* [한국어] NVMe Protection Information(PI): WRITE 명령에 대해
+	 * T10 DIF/DIX 데이터를 bio 에 첨부하는 사전 준비 수행. */
 	if (blk_integrity_rq(rq) && req_op(rq) == REQ_OP_WRITE)
-// WRITE 일 때 integrity(PI) metadata 준비
 		blk_integrity_prepare(rq);
 
+	/* [한국어] REQ_POLLED: 인터럽트 없이 poll 하는 NVMe queue 에서 사용.
+	 * bi_cookie 에 hctx->queue_num 을 기록해 poll 시 어느 CQ 를 확인할지 알린다. */
 	if (rq->bio && rq->bio->bi_opf & REQ_POLLED)
-// REQ_POLLED: 인터럽트 없이 NVMe poll queue CQ 를 직접 폴리
 	        WRITE_ONCE(rq->bio->bi_cookie, rq->mq_hctx->queue_num);
 }
 EXPORT_SYMBOL(blk_mq_start_request);
