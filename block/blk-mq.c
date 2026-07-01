@@ -2687,40 +2687,77 @@ EXPORT_SYMBOL(blk_mq_start_request);
  * queues. This is important for md arrays to benefit from merging
  * requests.
  */
+/*
+ * [한국어]
+ * blk_plug_max_rq_count - plug 리스트의 최대 request 수 반환
+ *
+ * @plug: 대상 blk_plug
+ * @return: 최대 허용 request 수
+ *
+ * 여러 큐(NVMe 여러 namespace 또는 md 등)에서 오는 request 가 섞이면
+ * merge 기회를 높이기 위해 두 배로 늘린다.
+ * BLK_MAX_REQUEST_COUNT 를 초과하면 flush 하여 batch dispatch 를 유발.
+ */
 static inline unsigned short blk_plug_max_rq_count(struct blk_plug *plug)
 {
+	/* [한국어] multiple_queues: 둘 이상의 request_queue 의 request 가 섞인 경우.
+	 * md RAID 처럼 여러 NVMe namespace 에 걸친 IO 를 merge 하기 위해 2배 허용. */
 	if (plug->multiple_queues)
-// multiple_queues 시 plug 크기 2배: 여러 NVMe SQ 병렬 활용
 		return BLK_MAX_REQUEST_COUNT * 2;
 	return BLK_MAX_REQUEST_COUNT;
 }
 
+/*
+ * [한국어]
+ * blk_add_rq_to_plug - request 를 plug 리스트에 추가 (배치 dispatch 대기열)
+ *
+ * @plug: 현재 태스크의 blk_plug (blk_start_plug 로 설정)
+ * @rq:   plug 에 넣을 request
+ *
+ * "Plugging" 은 IO 를 바로 드라이버에 보내지 않고 누적했다가 한 번에 flush 하는
+ * 배치 최적화다. NVMe 같이 고속 장치에서는 batch dispatch 가 doorbell 횟수를 줄인다.
+ * 용량 초과 또는 큰 IO 가 쌓이면 blk_mq_flush_plug_list 로 즉시 dispatch 한다.
+ * 실행 컨텍스트: 프로세스 컨텍스트 (submit_bio 경로).
+ *
+ * 호출 체인:
+ *   blk_mq_submit_bio → [blk_add_rq_to_plug]
+ *   blk_finish_plug → blk_mq_flush_plug_list (unplug 시 전체 dispatch)
+ */
 static void blk_add_rq_to_plug(struct blk_plug *plug, struct request *rq)
 {
+	/* [한국어] 현재 plug 리스트의 마지막 request (merge/flush 조건 확인용) */
 	struct request *last = rq_list_peek(&plug->mq_list);
 
 	if (!plug->rq_count) {
+		/* [한국어] 첫 번째 request 추가: block_plug tracepoint 기록 */
 		trace_block_plug(rq->q);
 	} else if (plug->rq_count >= blk_plug_max_rq_count(plug) ||
-// plug 용량 초과 또는 큰 IO 가 쌓이면 plug flush -> NVMe SQ 로 발행
+		   /* [한국어] nomerges 가 아니고 마지막 request 가 BLK_PLUG_FLUSH_SIZE
+		    * 이상이면 이미 큰 IO 가 쌓였으므로 지금 flush 하는 것이 낫다. */
 		   (!blk_queue_nomerges(rq->q) &&
 		    blk_rq_bytes(last) >= BLK_PLUG_FLUSH_SIZE)) {
+		/* [한국어] 현재 plug 를 flush: 쌓인 request 들을 모두 hctx 에 dispatch */
 		blk_mq_flush_plug_list(plug, false);
+		/* [한국어] flush 후 last 는 무효 — trace 를 새로 기록 */
 		last = NULL;
 		trace_block_plug(rq->q);
 	}
 
+	/* [한국어] 서로 다른 request_queue 의 request 가 섞이면 multiple_queues 표시.
+	 * 이후 blk_plug_max_rq_count 가 2배를 허용한다. */
 	if (!plug->multiple_queues && last && last->q != rq->q)
-// 서로 다른 queue(bio)가 섞이면 multiple_queues 표시
 		plug->multiple_queues = true;
 	/*
 	 * Any request allocated from sched tags can't be issued to
 	 * ->queue_rqs() directly
 	 */
+	/* [한국어] sched_tags 를 사용하는 request 가 하나라도 있으면 has_elevator = true.
+	 * flush_plug_list 에서 ->queue_rqs() 를 건너뛰고 elevator 경로를 사용한다. */
 	if (!plug->has_elevator && (rq->rq_flags & RQF_SCHED_TAGS))
-// sched tag 를 사용하는 request 가 있으면 elevator 경유 표시
 		plug->has_elevator = true;
+	/* [한국어] plug 리스트 끝에 request 추가 (FIFO 순서 유지) */
 	rq_list_add_tail(&plug->mq_list, rq);
+	/* [한국어] plug 리스트의 총 request 수 증가 */
 	plug->rq_count++;
 }
 
@@ -2737,68 +2774,146 @@ static void blk_add_rq_to_plug(struct blk_plug *plug, struct request *rq)
  *    This function will invoke @done directly if the queue is dead.
  */
 /*
- * blk_execute_rq_nowait: passthrough request 를 큐에 삽입.
- *   NVMe 관점: NVMe ioctl/admin 명령을 scheduler 를 우회하거나
- *   거쳐서 NVMe SQ 로 전달.
+ * [한국어]
+ * blk_execute_rq_nowait - passthrough request 를 큐에 비동기로 삽입
+ *
+ * @rq:      실행할 passthrough request (nvme_alloc_request 등으로 생성)
+ * @at_head: true 면 dispatch list 맨 앞에, false 면 맨 뒤에 삽입
+ *
+ * NVMe ioctl/admin 명령을 비동기로 발행하는 진입점.
+ * scheduler 가 있으면 elevator 를 통해, 없으면 hctx->dispatch 리스트로 바로 간다.
+ * plug 가 활성화된 경우 완료 콜백이 호출될 때까지 request 를 plug 에 축적한다.
+ * 실행 컨텍스트: 프로세스 컨텍스트 (ioctl/admin 명령 제출 경로).
+ *
+ * 호출 체인:
+ *   nvme_submit_sync_cmd / nvme_userspace_io → [blk_execute_rq_nowait]
+ *   → blk_mq_insert_request → blk_mq_run_hw_queue → nvme_queue_rq
  */
 void blk_execute_rq_nowait(struct request *rq, bool at_head)
 {
+	/* [한국어] rq->mq_hctx: 이 request 가 발행될 NVMe SQ 에 대응하는 hctx */
 	struct blk_mq_hw_ctx *hctx = rq->mq_hctx;
 
+	/* [한국어] 인터럽트 비활성 컨텍스트에서는 호출 불가 — spin 이 아닌 completion 대기 필요 */
 	WARN_ON(irqs_disabled());
+	/* [한국어] blk_rq_is_passthrough: NVMe passthrough 가 아닌 FS I/O request 는 금지 */
 	WARN_ON(!blk_rq_is_passthrough(rq));
 
+	/* [한국어] IO 통계 기록 시작 (iostat, blk-cgroup 계정) */
 	blk_account_io_start(rq);
 
 	if (current->plug && !at_head) {
-// plug 가 있으면 NVMe IO 를 모아두고 merge/일괄 발행
+		/* [한국어] plug 가 열려 있으면 즉시 dispatch 하지 않고 plug 에 모아둔다.
+		 * blk_finish_plug 시점에 blk_mq_flush_plug_list 가 일괄 dispatch 한다.
+		 * at_head 요청은 plug 에 넣지 않고 바로 insert — 우선순위가 있기 때문. */
 		blk_add_rq_to_plug(current->plug, rq);
 		return;
 	}
 
+	/* [한국어] BLK_MQ_INSERT_AT_HEAD: at_head 시 hctx->dispatch 맨 앞에 삽입
+	 * → dispatch 시 가장 먼저 nvme_queue_rq 로 전달됨 */
 	blk_mq_insert_request(rq, at_head ? BLK_MQ_INSERT_AT_HEAD : 0);
-// passthrough/admin request 를 NVMe SQ dispatch list 에 삽입
+	/* [한국어] BLK_MQ_F_BLOCKING: true 면 동기 run (blk_mq_run_hw_queue 내부에서 sleep 허용)
+	 * false(일반 경우) 면 asyn kblockd workqueue 에 디스패치 */
 	blk_mq_run_hw_queue(hctx, hctx->flags & BLK_MQ_F_BLOCKING);
-// hctx->flags & BLK_MQ_F_BLOCKING 에 따라 async/sync run 선택
 }
 EXPORT_SYMBOL_GPL(blk_execute_rq_nowait);
 
 /*
- * struct blk_rq_wait: 동기 passthrough request 의 완료 대기 구조체.
- *   done: NVMe admin/vendor 명령 완료를 기다리는 completion.
- *   ret: NVMe 명령의 최종 status (SCSI/NVMe 상태가 아닌 blk_status_t).
+ * [한국어]
+ * struct blk_rq_wait - 동기 passthrough request 완료 대기 구조체
+ *
+ * blk_execute_rq 에서 스택에 할당하여 NVMe admin/passthrough 명령의
+ * 동기 완료를 기다린다. blk_end_sync_rq 콜백이 done 을 signal 하면
+ * 호출자가 깨어나 ret 으로 결과를 가져간다.
  */
 struct blk_rq_wait {
-	struct completion done; /* 동기 passthrough 완료 대기 */
+	struct completion done;
+	/* [한국어] NVMe admin 명령 완료를 기다리는 completion.
+	 * 설정자: blk_end_sync_rq 가 complete(&wait->done) 으로 signal.
+	 * 읽는 자: blk_execute_rq 가 blk_wait_io 로 대기.
+	 * 초기화: COMPLETION_INITIALIZER_ONSTACK — 스택 변수이므로 정적 초기화 불가. */
+
 	blk_status_t ret;
+	/* [한국어] NVMe 명령의 최종 blk_status_t 결과 코드.
+	 * 설정자: blk_end_sync_rq 가 completion 전에 저장.
+	 * 읽는 자: blk_execute_rq 가 done 대기 후 이 값을 반환.
+	 * 값 범위: BLK_STS_OK (성공), BLK_STS_IOERR, BLK_STS_TIMEOUT 등. */
 };
 
+/*
+ * [한국어]
+ * blk_end_sync_rq - 동기 passthrough request 의 end_io 콜백
+ *
+ * @rq:  완료된 NVMe passthrough request
+ * @ret: NVMe CQ 에서 읽어온 완료 상태 (blk_status_t)
+ * @iob: batch completion 컨텍스트 (이 함수에서는 사용 안 함)
+ * @return: RQ_END_IO_NONE (request 를 free 하지 않음 — 호출자가 스택에서 관리)
+ *
+ * blk_execute_rq 가 rq->end_io 에 등록하는 콜백.
+ * NVMe 인터럽트 완료 경로(blk_mq_end_request)에서 불린다.
+ * completion 을 signal 하여 blk_execute_rq 의 대기를 깨운다.
+ *
+ * 호출 체인:
+ *   nvme_irq → blk_mq_end_request → [blk_end_sync_rq]
+ */
 static enum rq_end_io_ret blk_end_sync_rq(struct request *rq, blk_status_t ret,
 					  const struct io_comp_batch *iob)
 {
+	/* [한국어] rq->end_io_data: blk_execute_rq 가 스택에 생성한 blk_rq_wait 포인터 */
 	struct blk_rq_wait *wait = rq->end_io_data;
 
+	/* [한국어] 완료 상태를 대기 중인 호출자에게 전달 */
 	wait->ret = ret;
+	/* [한국어] complete: blk_execute_rq 의 blk_wait_io 를 깨움 */
 	complete(&wait->done);
+	/* [한국어] RQ_END_IO_NONE: request 를 여기서 free 하지 않음.
+	 * blk_execute_rq 가 wait 를 읽은 뒤 호출자가 blk_mq_free_request 로 해제. */
 	return RQ_END_IO_NONE;
 }
 
+/*
+ * [한국어]
+ * blk_rq_is_poll - request 가 poll (인터럽트리스) hctx 에 할당되었는지 확인
+ *
+ * @rq:    검사할 request
+ * @return: true 이면 HCTX_TYPE_POLL 큐에 대기 중 — 폴링으로 완료 대기 가능
+ *
+ * NVMe 에서 poll queue(io_uring IORING_OP_READ + IOSQE_FIXED_FILE + IORING_SETUP_IOPOLL)
+ * 를 사용하는 경우 인터럽트 없이 CQ 를 직접 읽어 완료 확인.
+ */
 bool blk_rq_is_poll(struct request *rq)
 {
+	/* [한국어] mq_hctx 가 없으면 아직 hctx 에 할당되기 전 — poll 불가 */
 	if (!rq->mq_hctx)
 		return false;
+	/* [한국어] HCTX_TYPE_POLL: NVMe 드라이버가 poll 전용으로 등록한 SQ 타입 */
 	if (rq->mq_hctx->type != HCTX_TYPE_POLL)
 		return false;
 	return true;
 }
 EXPORT_SYMBOL_GPL(blk_rq_is_poll);
 
+/*
+ * [한국어]
+ * blk_rq_poll_completion - poll hctx 의 request 완료를 폴링으로 대기
+ *
+ * @rq:   poll queue 에 발행된 request
+ * @wait: 완료 시 signal 될 completion (blk_rq_wait.done)
+ *
+ * 인터럽트를 사용하지 않는 NVMe poll queue 에서 CQ 를 반복 조회한다.
+ * io_uring 의 IORING_SETUP_IOPOLL 모드에서 사용.
+ * cond_resched 로 CPU 점유를 제어해 완료 전에 다른 태스크 실행 기회 제공.
+ */
 static void blk_rq_poll_completion(struct request *rq, struct completion *wait)
 {
 	do {
+		/* [한국어] blk_hctx_poll: NVMe poll SQ 의 CQ 를 한 번 조회 (BLK_POLL_ONESHOT)
+		 * 완료된 CQ Entry 가 있으면 blk_mq_end_request → blk_end_sync_rq 까지 실행 */
 		blk_hctx_poll(rq->q, rq->mq_hctx, NULL, BLK_POLL_ONESHOT);
+		/* [한국어] 완료가 없으면 scheduler 에 CPU 를 양보하여 스핀 방지 */
 		cond_resched();
-	} while (!completion_done(wait));
+	} while (!completion_done(wait)); /* [한국어] signal 될 때까지 반복 */
 }
 
 /**
@@ -2812,91 +2927,169 @@ static void blk_rq_poll_completion(struct request *rq, struct completion *wait)
  * Return: The blk_status_t result provided to blk_mq_end_request().
  */
 /*
- * blk_execute_rq: 동기 passthrough request 실행.
- *   NVMe 관점: NVMe Identify, Get Features 등 admin/vendor 명령을
- *   동기적으로 제출하고 CQ 완료를 기다린다.
+ * [한국어]
+ * blk_execute_rq - passthrough request 를 동기로 실행하고 완료를 기다림
+ *
+ * @rq:      실행할 NVMe passthrough request (nvme_alloc_request 등으로 생성)
+ * @at_head: true 면 dispatch list 맨 앞에 삽입 (우선순위 처리용)
+ * @return:  NVMe 명령 결과 (BLK_STS_OK, BLK_STS_IOERR, BLK_STS_TIMEOUT 등)
+ *
+ * NVMe Identify, Get/Set Features, Format NVM 등 동기 admin/passthrough 명령을
+ * 실행하고 완료까지 block 한다. 내부적으로 스택에 blk_rq_wait 를 두고,
+ * end_io 콜백(blk_end_sync_rq)이 complete 를 signal 할 때까지 대기한다.
+ * poll queue 면 인터럽트 없이 blk_rq_poll_completion 으로 CQ 폴링.
+ * 실행 컨텍스트: 프로세스 컨텍스트 (블록 가능, interruptible 아님).
+ *
+ * 호출 체인:
+ *   nvme_submit_sync_cmd / nvme_sec_submit → [blk_execute_rq]
+ *   → blk_mq_insert_request → blk_mq_run_hw_queue → nvme_queue_rq → SQ doorbell
+ *   → nvme_irq → blk_mq_end_request → blk_end_sync_rq → complete(&wait.done)
+ *   → [blk_execute_rq] 반환
  */
 blk_status_t blk_execute_rq(struct request *rq, bool at_head)
 {
+	/* [한국어] rq->mq_hctx: 이 request 가 발행될 NVMe SQ 에 대응하는 hctx */
 	struct blk_mq_hw_ctx *hctx = rq->mq_hctx;
+	/* [한국어] blk_rq_wait: 스택 할당 완료 대기 구조체.
+	 * COMPLETION_INITIALIZER_ONSTACK: 스택 변수는 정적 초기화 불가하므로
+	 * 이 매크로로 런타임에 초기화한다. */
 	struct blk_rq_wait wait = {
 		.done = COMPLETION_INITIALIZER_ONSTACK(wait.done),
 	};
 
+	/* [한국어] 인터럽트 비활성 컨텍스트에서 sleep 이 불가하므로 금지 */
 	WARN_ON(irqs_disabled());
+	/* [한국어] passthrough 가 아닌 일반 FS I/O request 는 여기로 오면 안 됨 */
 	WARN_ON(!blk_rq_is_passthrough(rq));
 
+	/* [한국어] rq->end_io_data: 완료 콜백(blk_end_sync_rq)이 result 를 써넣을 구조체 */
 	rq->end_io_data = &wait;
-// rq->end_io_data = &wait: NVMe admin 명령 동기 완료용 completion 연결
+	/* [한국어] blk_end_sync_rq: NVMe 완료 인터럽트 경로에서 호출될 콜백 */
 	rq->end_io = blk_end_sync_rq;
 
+	/* [한국어] IO 통계 기록 시작 */
 	blk_account_io_start(rq);
+	/* [한국어] hctx->dispatch 또는 elevator 에 request 삽입 */
 	blk_mq_insert_request(rq, at_head ? BLK_MQ_INSERT_AT_HEAD : 0);
-// NVMe admin/vendor 명령을 hctx->dispatch 또는 scheduler 에 삽입
+	/* [한국어] false: non-blocking run — kblockd workqueue 에서 async dispatch */
 	blk_mq_run_hw_queue(hctx, false);
 
 	if (blk_rq_is_poll(rq))
-// poll queue 면 인터럽트 없이 CQ 폴링으로 완료 대기
+		/* [한국어] poll queue: CQ 를 직접 반복 조회하여 완료 확인 */
 		blk_rq_poll_completion(rq, &wait.done);
 	else
+		/* [한국어] 일반 인터럽트 방식: 완료 인터럽트가 signal 할 때까지 sleep */
 		blk_wait_io(&wait.done);
 
 	return wait.ret;
 }
 EXPORT_SYMBOL(blk_execute_rq);
 
+/*
+ * [한국어]
+ * __blk_mq_requeue_request - request 재발행 준비 (tag 반납, 상태 초기화)
+ *
+ * @rq: 재발행할 request
+ *
+ * request 를 requeue_list 에 넣기 전에 드라이버 tag(NVMe CID) 를 반납하고
+ * 상태를 MQ_RQ_IDLE 로 되돌려 재할당 가능하게 한다.
+ * blk_mq_requeue_request 의 내부 헬퍼.
+ */
 static void __blk_mq_requeue_request(struct request *rq)
 {
+	/* [한국어] q: request 가 속한 request_queue (requeue_lock 보호 대상) */
 	struct request_queue *q = rq->q;
 
+	/* [한국어] NVMe CID(driver tag) 를 tag_set 으로 반납 — 다른 request 가 재사용 가능 */
 	blk_mq_put_driver_tag(rq);
-// NVMe driver tag(CID) 반납 후 재삽입 준비
 
+	/* [한국어] block_rq_requeue tracepoint: blktrace/bpf 도구가 requeue 를 추적 */
 	trace_block_rq_requeue(rq);
+	/* [한국어] rq_qos_requeue: cgroup blkio 계정/throttle 에 requeue 통보 */
 	rq_qos_requeue(q, rq);
 
 	if (blk_mq_request_started(rq)) {
+		/* [한국어] MQ_RQ_IN_FLIGHT → MQ_RQ_IDLE: 이미 발행된 request 를
+		 * 재발행 가능 상태로 되돌린다. WRITE_ONCE 로 state machine 원자적 전환. */
 		WRITE_ONCE(rq->state, MQ_RQ_IDLE);
-// requeue 전에 MQ_RQ_IDLE 로 되돌려 CID 재할당 가능하게 함
+		/* [한국어] RQF_TIMED_OUT 플래그 제거: requeue 후 타임아웃 카운터 초기화 */
 		rq->rq_flags &= ~RQF_TIMED_OUT;
 	}
 }
 
+/*
+ * [한국어]
+ * blk_mq_requeue_request - request 를 requeue_list 에 넣어 재발행 대기
+ *
+ * @rq:               재발행할 request
+ * @kick_requeue_list: true 면 즉시 blk_mq_kick_requeue_list 로 kblockd 워크 예약
+ *
+ * NVMe 드라이버가 queue full(BLK_STS_RESOURCE) 등의 이유로 request 를 처리하지 못할 때
+ * 재발행 대기열에 넣는다. requeue_list 는 requeue_lock 으로 보호.
+ * 이후 blk_mq_requeue_work 가 kblockd workqueue 에서 재삽입을 처리.
+ *
+ * 호출 체인:
+ *   nvme_queue_rq (BLK_STS_RESOURCE 반환) → blk_mq_dispatch_rq_list
+ *   → [blk_mq_requeue_request] → blk_mq_kick_requeue_list
+ *   → kblockd → blk_mq_requeue_work → blk_mq_run_hw_queues
+ */
 void blk_mq_requeue_request(struct request *rq, bool kick_requeue_list)
 {
+	/* [한국어] q->requeue_list 와 requeue_lock 에 접근하기 위한 큐 참조 */
 	struct request_queue *q = rq->q;
 	unsigned long flags;
 
+	/* [한국어] tag 반납, 상태 초기화 등 재발행 준비 */
 	__blk_mq_requeue_request(rq);
 
 	/* this request will be re-inserted to io scheduler queue */
+	/* [한국어] elevator 가 있으면 sched 내부 requeue 처리 (RQF_SOFTBARRIER 등) */
 	blk_mq_sched_requeue_request(rq);
 
+	/* [한국어] IRQ 비활성화 후 spinlock: requeue_list 는 인터럽트 컨텍스트에서도 접근 가능 */
 	spin_lock_irqsave(&q->requeue_lock, flags);
+	/* [한국어] requeue_list 끝에 추가: FIFO 순서로 재발행 */
 	list_add_tail(&rq->queuelist, &q->requeue_list);
-// requeue_list 에 추가: NVMe SQ dispatch 보류 queue
 	spin_unlock_irqrestore(&q->requeue_lock, flags);
 
+	/* [한국어] kick_requeue_list: true 면 즉시 kblockd workqueue 에 재발행 작업 예약 */
 	if (kick_requeue_list)
 		blk_mq_kick_requeue_list(q);
 }
 EXPORT_SYMBOL(blk_mq_requeue_request);
 
+/*
+ * [한국어]
+ * blk_mq_requeue_work - requeue_list 의 request 들을 재삽입하는 kblockd work
+ *
+ * @work: request_queue 의 requeue_work (delayed_work 임베디드)
+ *
+ * blk_mq_kick_requeue_list 가 kblockd workqueue 에 예약한 delayed work 핸들러.
+ * requeue_list 와 flush_list 의 모든 request 를 꺼내 다시 hctx 에 삽입한 뒤
+ * 모든 hctx 를 run 하여 NVMe SQ 에 발행 시도한다.
+ * 실행 컨텍스트: kblockd workqueue 스레드 (sleep 가능).
+ */
 static void blk_mq_requeue_work(struct work_struct *work)
 {
+	/* [한국어] container_of: work 포인터에서 request_queue 를 역산
+	 * requeue_work 는 q 에 embedded delayed_work */
 	struct request_queue *q =
 		container_of(work, struct request_queue, requeue_work.work);
+	/* [한국어] 로컬 리스트: spinlock 구간을 최소화하기 위해 일괄 이동 후 처리 */
 	LIST_HEAD(rq_list);
 	LIST_HEAD(flush_list);
 	struct request *rq;
 
+	/* [한국어] requeue_lock: requeue_list/flush_list 접근을 IRQ 차단 후 잠금 */
 	spin_lock_irq(&q->requeue_lock);
+	/* [한국어] requeue_list 전체를 로컬 rq_list 로 이동 — lock 구간 최소화 */
 	list_splice_init(&q->requeue_list, &rq_list);
-// requeue_list 의 request 들을 모두 꺼냄
+	/* [한국어] flush_list(flush sequence 관련 request) 도 동일하게 이동 */
 	list_splice_init(&q->flush_list, &flush_list);
 	spin_unlock_irq(&q->requeue_lock);
 
 	while (!list_empty(&rq_list)) {
+		/* [한국어] rq_list 앞에서 하나씩 꺼내 재삽입 */
 		rq = list_entry(rq_list.next, struct request, queuelist);
 		list_del_init(&rq->queuelist);
 		/*
@@ -2906,41 +3099,91 @@ static void blk_mq_requeue_work(struct work_struct *work)
 		 * block layer merges for the request.
 		 */
 		if (rq->rq_flags & RQF_DONTPREP)
-// RQF_DONTPREP: 이미 driver 가 준비한 NVMe 명령이면 scheduler 우회
+			/* [한국어] RQF_DONTPREP: 드라이버가 이미 NVMe SQE 를 준비한 경우.
+			 * elevator merge 를 우회하고 hctx->dispatch 에 직접 삽입. */
 			blk_mq_request_bypass_insert(rq, 0);
 		else
+			/* [한국어] 일반 requeue: 큐 앞머리에 삽입하여 다음 run 에서 우선 발행 */
 			blk_mq_insert_request(rq, BLK_MQ_INSERT_AT_HEAD);
 	}
 
 	while (!list_empty(&flush_list)) {
+		/* [한국어] flush_list: blk-flush.c 의 flush sequence request — 일반 삽입 */
 		rq = list_entry(flush_list.next, struct request, queuelist);
 		list_del_init(&rq->queuelist);
 		blk_mq_insert_request(rq, 0);
 	}
 
+	/* [한국어] 모든 hctx 를 async run — NVMe SQ doorbell 을 통해 재발행 시도 */
 	blk_mq_run_hw_queues(q, false);
 }
 
+/*
+ * [한국어]
+ * blk_mq_kick_requeue_list - requeue work 를 즉시 kblockd 에 예약
+ *
+ * @q: 대상 request_queue
+ *
+ * NVMe 드라이버가 BLK_STS_RESOURCE 로 request 를 돌려보낸 뒤 또는
+ * device 가 다시 사용 가능해졌을 때 호출하여 requeue_work 를 예약한다.
+ * delay 0 으로 예약하므로 kblockd 스레드가 가능한 빨리 실행한다.
+ */
 void blk_mq_kick_requeue_list(struct request_queue *q)
 {
+	/* [한국어] WORK_CPU_UNBOUND: 특정 CPU 에 묶이지 않은 kblockd workqueue 에 예약
+	 * delay 0: 즉시 (다음 kblockd 스케줄 시점에) 실행 */
 	kblockd_mod_delayed_work_on(WORK_CPU_UNBOUND, &q->requeue_work, 0);
-// kblockd workqueue 에서 requeue_list 를 다시 dispatch 시도
 }
 EXPORT_SYMBOL(blk_mq_kick_requeue_list);
 
+/*
+ * [한국어]
+ * blk_mq_delay_kick_requeue_list - 지연 후 requeue work 를 kblockd 에 예약
+ *
+ * @q:     대상 request_queue
+ * @msecs: 지연 시간 (밀리초)
+ *
+ * NVMe queue full 상태가 해소될 때까지 일정 시간 기다린 뒤
+ * requeue_work 를 실행하려 할 때 사용.
+ */
 void blk_mq_delay_kick_requeue_list(struct request_queue *q,
 				    unsigned long msecs)
 {
+	/* [한국어] msecs_to_jiffies: ms → jiffies 변환 후 delayed work 예약 */
 	kblockd_mod_delayed_work_on(WORK_CPU_UNBOUND, &q->requeue_work,
 				    msecs_to_jiffies(msecs));
 }
 EXPORT_SYMBOL(blk_mq_delay_kick_requeue_list);
 
+/*
+ * [한국어]
+ * blk_is_flush_data_rq - flush sequence 중의 data transfer request 인지 확인
+ *
+ * @rq:    검사할 request
+ * @return: true 이면 flush sequence 내의 data request (is_flush_rq 는 아님)
+ *
+ * queue quiesce 중 flush data request 가 완료된 경우를 inflight 에서 제외하기 위해 사용.
+ * flush sequence: PRE_FLUSH → DATA → POST_FLUSH 단계에서 DATA 단계 request.
+ */
 static bool blk_is_flush_data_rq(struct request *rq)
 {
+	/* [한국어] RQF_FLUSH_SEQ: flush sequence 에 속하는 request 표시
+	 * is_flush_rq: PRE/POST_FLUSH request 이면 true — DATA request 는 false */
 	return (rq->rq_flags & RQF_FLUSH_SEQ) && !is_flush_rq(rq);
 }
 
+/*
+ * [한국어]
+ * blk_mq_rq_inflight - inflight request 탐색 콜백 (하나라도 발견하면 조기 종료)
+ *
+ * @rq:   순회 중인 request
+ * @priv: bool *busy 포인터 (inflight 발견 시 true 로 설정)
+ * @return: false 이면 busy=true 로 설정 후 순회 조기 종료
+ *
+ * blk_mq_queue_inflight 에서 blk_mq_queue_tag_busy_iter 의 콜백으로 사용.
+ * MQ_RQ_IN_FLIGHT 상태인 request 를 발견하면 큐가 바쁘다고 판단.
+ * 단, queue quiesce 중 완료된 flush data request 는 inflight 로 보지 않는다.
+ */
 static bool blk_mq_rq_inflight(struct request *rq, void *priv)
 {
 	/*
@@ -2953,73 +3196,141 @@ static bool blk_mq_rq_inflight(struct request *rq, void *priv)
 	 * and the original flush data request is invisible to driver, just
 	 * like other pending requests because of quiesce
 	 */
+	/* [한국어] blk_mq_request_started: MQ_RQ_IN_FLIGHT 또는 MQ_RQ_COMPLETE 상태
+	 * quiesce 중 완료된 flush data request 는 inflight 로 세지 않음 */
 	if (blk_mq_request_started(rq) && !(blk_queue_quiesced(rq->q) &&
 				blk_is_flush_data_rq(rq) &&
 				blk_mq_request_completed(rq))) {
 		bool *busy = priv;
 
+		/* [한국어] inflight request 발견: busy=true 로 표시 */
 		*busy = true;
+		/* [한국어] false 반환: 이후 순회를 멈춤 — 하나라도 있으면 충분 */
 		return false;
 	}
 
+	/* [한국어] IDLE 상태이거나 quiesce 제외 조건 충족: 계속 순회 */
 	return true;
 }
 
+/*
+ * [한국어]
+ * blk_mq_queue_inflight - queue 에 inflight request 가 있는지 확인
+ *
+ * @q:     검사할 request_queue
+ * @return: inflight request 가 하나라도 있으면 true
+ *
+ * NVMe reset/shutdown 전 drain 이 완료되었는지 확인하는 데 사용.
+ * 모든 tag 의 request 를 순회하며 하나라도 MQ_RQ_IN_FLIGHT 이면 true 반환.
+ */
 bool blk_mq_queue_inflight(struct request_queue *q)
 {
+	/* [한국어] false 초기값: 만료 시 반환 (inflight 없음) */
 	bool busy = false;
 
+	/* [한국어] blk_mq_queue_tag_busy_iter: 모든 busy tag 의 request 를 순회
+	 * blk_mq_rq_inflight 콜백이 첫 번째 inflight request 발견 시 busy=true */
 	blk_mq_queue_tag_busy_iter(q, blk_mq_rq_inflight, &busy);
 	return busy;
 }
 EXPORT_SYMBOL_GPL(blk_mq_queue_inflight);
 
+/*
+ * [한국어]
+ * blk_mq_rq_timed_out - timeout 만료된 request 를 드라이버 timeout handler 로 전달
+ *
+ * @req: timeout 된 NVMe request (MQ_RQ_IN_FLIGHT 상태)
+ *
+ * blk_mq_timeout_work 에서 만료된 request 에 대해 호출된다.
+ * mq_ops->timeout(nvme_timeout) 을 통해 컨트롤러 abort/reset 을 시도하고,
+ * BLK_EH_RESET_TIMER 이면 타이머를 재설정하여 다음 기회를 준다.
+ *
+ * 호출 체인:
+ *   blk_mq_timeout_work → blk_mq_handle_expired → [blk_mq_rq_timed_out]
+ *   → nvme_timeout → nvme_abort_req 또는 nvme_reset_ctrl
+ */
 static void blk_mq_rq_timed_out(struct request *req)
 {
+	/* [한국어] RQF_TIMED_OUT: 이 request 가 만료되었음 표시
+	 * blk_mq_req_expired 에서 두 번 만료 처리되는 것을 방지 */
 	req->rq_flags |= RQF_TIMED_OUT;
-// RQF_TIMED_OUT: NVMe 명령이 deadline 초과되었음 표시
 	if (req->q->mq_ops->timeout) {
 		enum blk_eh_timer_return ret;
 
+		/* [한국어] nvme_timeout: NVMe 드라이버의 timeout error handler.
+		 * abort 성공 → BLK_EH_DONE (완료로 처리)
+		 * reset 필요 → BLK_EH_RESET_TIMER (타이머 재설정) */
 		ret = req->q->mq_ops->timeout(req);
-// mq_ops->timeout == nvme_timeout: 컨트롤러 reset/abort 시도
 		if (ret == BLK_EH_DONE)
+			/* [한국어] timeout handler 가 직접 request 를 완료 처리 — 종료 */
 			return;
 		WARN_ON_ONCE(ret != BLK_EH_RESET_TIMER);
 	}
 
+	/* [한국어] BLK_EH_RESET_TIMER: 컨트롤러가 리셋 중이므로 타이머 재설정.
+	 * 이 request 는 컨트롤러 복구 후 재완료 될 예정. */
 	blk_add_timer(req);
-// timeout handler 가 BLK_EH_RESET_TIMER 이면 타이머 재설정
 }
 
 /*
- * struct blk_expired_data: timeout 검사 중 사용하는 상태 구조체.
- *   has_timedout_rq: timeout 이 발생한 CID(request) 존재 여부.
- *   next: 가장 가까운 다음 timeout deadline.
- *   timeout_start: 이번 timeout work 의 시작 시점.
+ * [한국어]
+ * struct blk_expired_data - timeout 검사를 위한 상태 집합
+ *
+ * blk_mq_timeout_work 가 스택에 할당하여 blk_mq_queue_tag_busy_iter 콜백에 전달.
+ * 두 단계로 사용: 1) blk_mq_check_expired 에서 만료 여부만 확인,
+ *                 2) blk_mq_handle_expired 에서 실제 timeout 처리.
  */
 struct blk_expired_data {
-	bool has_timedout_rq; /* timeout 된 request(CID) 존재 여부 */
-	unsigned long next; /* 다음 timeout deadline */
-	unsigned long timeout_start; /* timeout 검사 시작 시각 */
+	bool has_timedout_rq;
+	/* [한국어] timeout 된 request 가 하나라도 발견되면 true.
+	 * 설정자: blk_mq_check_expired 가 만료 request 발견 시 true 로 설정.
+	 * 읽는 자: blk_mq_timeout_work 가 두 번째 순회(handle) 실행 여부 결정.
+	 * 초기값: false (스택 초기화) */
+
+	unsigned long next;
+	/* [한국어] 다음 timeout 이 발생할 가장 이른 deadline (jiffies).
+	 * 설정자: blk_mq_req_expired 에서 만료 안 된 request 의 deadline 중 최솟값.
+	 * 읽는 자: blk_mq_timeout_work 가 mod_timer 로 타이머 재설정.
+	 * 초기값: 0 (아직 설정 안 됨) */
+
+	unsigned long timeout_start;
+	/* [한국어] 이번 timeout 검사를 시작한 시각 (jiffies).
+	 * 설정자: blk_mq_timeout_work 가 jiffies 로 초기화.
+	 * 읽는 자: blk_mq_req_expired 가 time_after_eq 로 만료 여부 판단.
+	 * 목적: 검사 도중 jiffies 가 변해도 일관된 기준 시점 유지. */
 };
 
+/*
+ * [한국어]
+ * blk_mq_req_expired - request 의 timeout deadline 이 지났는지 확인
+ *
+ * @rq:      검사할 request
+ * @expired: timeout 검사 상태 (timeout_start, next 업데이트)
+ * @return:  만료되었으면 true
+ *
+ * MQ_RQ_IN_FLIGHT 상태이고 RQF_TIMED_OUT 이 없는 request 만 검사.
+ * 만료되지 않은 경우 expired->next 를 가장 이른 deadline 으로 업데이트한다.
+ */
 static bool blk_mq_req_expired(struct request *rq, struct blk_expired_data *expired)
 {
 	unsigned long deadline;
 
 	if (blk_mq_rq_state(rq) != MQ_RQ_IN_FLIGHT)
-// MQ_RQ_IN_FLIGHT 상태인 NVMe CID 만 만료 검사
+		/* [한국어] 아직 드라이버에 발행되지 않은 request 는 timeout 대상 아님 */
 		return false;
 	if (rq->rq_flags & RQF_TIMED_OUT)
+		/* [한국어] 이미 timeout 처리된 request 는 중복 처리 방지 */
 		return false;
 
+	/* [한국어] READ_ONCE: blk_add_timer 가 다른 컨텍스트에서 deadline 을 갱신하는
+	 * 것과의 torn read 를 방지 */
 	deadline = READ_ONCE(rq->deadline);
-// READ_ONCE(rq->deadline): 타이머 갱신과의 race 방지
 	if (time_after_eq(expired->timeout_start, deadline))
-// timeout_start 가 deadline 을 넘었으면 NVMe 명령 만료
+		/* [한국어] timeout_start >= deadline: 현재 시각이 deadline 을 넘었으므로 만료 */
 		return true;
 
+	/* [한국어] 아직 만료 안 됨: expired->next 를 가장 이른 deadline 으로 갱신
+	 * blk_mq_timeout_work 가 이 값으로 타이머를 재설정한다. */
 	if (expired->next == 0)
 		expired->next = deadline;
 	else if (time_after(expired->next, deadline))
@@ -3027,16 +3338,42 @@ static bool blk_mq_req_expired(struct request *rq, struct blk_expired_data *expi
 	return false;
 }
 
+/*
+ * [한국어]
+ * blk_mq_put_rq_ref - request 의 ref count 를 감소하고 0 이 되면 해제
+ *
+ * @rq: ref count 를 감소할 request
+ *
+ * flush request 와 일반 request 두 가지 경로를 처리.
+ * flush request 는 end_io 콜백을 통해 해제 여부를 결정.
+ * 일반 request 는 req_ref_put_and_test 로 마지막 참조자 여부 확인.
+ */
 void blk_mq_put_rq_ref(struct request *rq)
 {
 	if (is_flush_rq(rq)) {
+		/* [한국어] flush request: end_io 콜백이 RQ_END_IO_FREE 를 반환하면 해제 */
 		if (rq->end_io(rq, 0, NULL) == RQ_END_IO_FREE)
 			blk_mq_free_request(rq);
 	} else if (req_ref_put_and_test(rq)) {
+		/* [한국어] req_ref_put_and_test: 마지막 참조자이면 true → request 해제 */
 		__blk_mq_free_request(rq);
 	}
 }
 
+/*
+ * [한국어]
+ * blk_mq_check_expired - 만료 request 존재 여부만 확인하는 1차 순회 콜백
+ *
+ * @rq:    순회 중인 request
+ * @priv:  blk_expired_data 포인터
+ * @return: false 이면 순회 중단 (만료 request 발견)
+ *
+ * blk_mq_timeout_work 의 1차 순회에서 사용.
+ * 만료 request 발견 시 has_timedout_rq=true 로 설정하고 순회를 중단.
+ * 이후 2차 순회(blk_mq_handle_expired)에서 실제 timeout 처리를 수행.
+ * 두 단계로 나누는 이유: blk_mq_queue_tag_busy_iter 가 lock 을 유지한 채로
+ * timeout 처리(abort/reset)까지 하면 교착 위험이 있기 때문.
+ */
 static bool blk_mq_check_expired(struct request *rq, void *priv)
 {
 	struct blk_expired_data *expired = priv;
@@ -3049,35 +3386,65 @@ static bool blk_mq_check_expired(struct request *rq, void *priv)
 	 * from blk_mq_check_expired().
 	 */
 	if (blk_mq_req_expired(rq, expired)) {
-// 만료된 CID 발견: timeout_work 가 상세 처리를 위해 재순회
+		/* [한국어] 만료된 CID 발견: 2차 순회(handle) 가 필요함을 표시 */
 		expired->has_timedout_rq = true;
+		/* [한국어] false: 순회 조기 종료 — 하나라도 있으면 충분 */
 		return false;
 	}
 	return true;
 }
 
+/*
+ * [한국어]
+ * blk_mq_handle_expired - 만료 request 에 실제 timeout 처리를 수행하는 2차 콜백
+ *
+ * @rq:    순회 중인 request
+ * @priv:  blk_expired_data 포인터 (next 업데이트용)
+ * @return: 항상 true (모든 request 를 순회)
+ *
+ * blk_mq_timeout_work 의 2차 순회에서 사용.
+ * 만료된 모든 request 에 blk_mq_rq_timed_out 을 호출하여
+ * nvme_timeout 으로 abort/reset 을 시도한다.
+ */
 static bool blk_mq_handle_expired(struct request *rq, void *priv)
 {
 	struct blk_expired_data *expired = priv;
 
 	if (blk_mq_req_expired(rq, expired))
+		/* [한국어] 만료된 request 마다 nvme_timeout(abort/reset) 호출 */
 		blk_mq_rq_timed_out(rq);
 	return true;
 }
 
 /*
- * blk_mq_timeout_work: timeout 된 request 를 검사하고 처리.
- *   NVMe 관점: NVMe 명령이 CQ 완료 없이 deadline 을 넘기면,
- *   mq_ops->timeout (nvme_timeout) 을 호출하여 controller reset
- *   이나 abort 를 시도.
+ * [한국어]
+ * blk_mq_timeout_work - 만료된 request 를 찾아 드라이버 timeout handler 를 호출하는 work
+ *
+ * @work: request_queue 에 embed 된 timeout_work (work_struct)
+ *
+ * q->timeout 타이머가 만료되면 kblockd workqueue 에서 이 함수가 실행된다.
+ * 1차 순회(blk_mq_check_expired)로 만료 request 존재 여부 확인 후,
+ * 2차 순회(blk_mq_handle_expired)로 nvme_timeout(abort/reset) 를 실제 호출한다.
+ * 만료 request 가 없으면 다음 deadline 까지 타이머 재설정, 또는 hctx 를 idle 마킹.
+ * freeze 와의 deadlock 방지를 위해 blk_queue_enter 대신 percpu_ref_tryget 를 사용.
+ * 실행 컨텍스트: kblockd workqueue 스레드 (sleep 가능).
+ *
+ * 호출 체인:
+ *   q->timeout 타이머 만료 → [blk_mq_timeout_work]
+ *   → blk_mq_check_expired (1차: 만료 여부만) → blk_mq_handle_expired (2차: 처리)
+ *   → blk_mq_rq_timed_out → nvme_timeout
  */
 static void blk_mq_timeout_work(struct work_struct *work)
 {
+	/* [한국어] container_of: timeout_work 포인터에서 request_queue 를 역산 */
 	struct request_queue *q =
 		container_of(work, struct request_queue, timeout_work);
+	/* [한국어] expired: 이번 timeout 순회의 기준 시각과 결과를 담는 구조체.
+	 * timeout_start=jiffies: 순회 중 jiffies 변화와 무관하게 일관된 판단 기준 */
 	struct blk_expired_data expired = {
 		.timeout_start = jiffies,
 	};
+	/* [한국어] hctx/i: queue_for_each_hw_ctx 순회용 (idle 마킹 단계에서 사용) */
 	struct blk_mq_hw_ctx *hctx;
 	unsigned long i;
 
@@ -3094,13 +3461,17 @@ static void blk_mq_timeout_work(struct work_struct *work)
 	 * consumed, marked by the instant q_usage_counter reaches
 	 * zero.
 	 */
+	/* [한국어] percpu_ref_tryget: freeze 중에도 reference 를 시도 획득.
+	 * blk_queue_enter 대신 사용하는 이유: freeze 가 진행 중일 때 blk_queue_enter 는
+	 * 영구 block 될 수 있어 timeout workqueue 와 freeze 간 교착이 발생하기 때문.
+	 * tryget 실패 시 freeze 중인 것이므로 timeout 처리를 건너뜀. */
 	if (!percpu_ref_tryget(&q->q_usage_counter))
-// freeze 와 deadlock 방지를 위해 percpu_ref_tryget() 만 사용
 		return;
 
 	/* check if there is any timed-out request */
+	/* [한국어] 1차 순회: 모든 busy tag 를 순회하며 만료 request 존재 여부만 확인.
+	 * 만료 발견 시 expired.has_timedout_rq = true, 순회 조기 종료 */
 	blk_mq_queue_tag_busy_iter(q, blk_mq_check_expired, &expired);
-// 모든 tag 를 순회하며 만료된 NVMe CID(request) 검출
 	if (expired.has_timedout_rq) {
 		/*
 		 * Before walking tags, we must ensure any submit started
@@ -3108,17 +3479,22 @@ static void blk_mq_timeout_work(struct work_struct *work)
 		 * uses srcu or rcu, wait for a synchronization point to
 		 * ensure all running submits have finished
 		 */
+		/* [한국어] blk_mq_wait_quiesce_done: RCU/SRCU grace period 대기.
+		 * submit 경로가 tag 또는 hctx 접근을 마칠 때까지 기다린다.
+		 * 이후 tag_busy_iter 가 안정된 상태에서 만료 request 를 처리 가능. */
 		blk_mq_wait_quiesce_done(q->tag_set);
-// submitter 들이 tags/hctx 접근을 마칠 때까지 SRCU/RCU 대기
 
+		/* [한국어] expired.next 를 0 으로 재설정: 2차 순회에서 새로 계산 */
 		expired.next = 0;
+		/* [한국어] 2차 순회: 모든 만료 request 에 blk_mq_rq_timed_out 호출
+		 * nvme_timeout 이 abort/reset 를 실행 */
 		blk_mq_queue_tag_busy_iter(q, blk_mq_handle_expired, &expired);
-// 실제 timeout 처리: nvme_timeout 콜백 호출
 	}
 
 	if (expired.next != 0) {
+		/* [한국어] 아직 만료 안 된 request 의 가장 이른 deadline 으로 타이머 재설정
+		 * 다음 번 timeout_work 가 정확한 시점에 실행되도록 */
 		mod_timer(&q->timeout, expired.next);
-// 다음 만료 시각까지 timeout 타이머 재설정
 	} else {
 		/*
 		 * Request timeouts are handled as a forward rolling timer. If
@@ -3126,40 +3502,75 @@ static void blk_mq_timeout_work(struct work_struct *work)
 		 * also that no request has been pending for a while. Mark
 		 * each hctx as idle.
 		 */
+		/* [한국어] pending request 가 전혀 없음: 모든 hctx 를 idle 로 마킹.
+		 * sbitmap 의 wakeup 상태를 정리하여 불필요한 wakeup 방지 */
 		queue_for_each_hw_ctx(q, hctx, i) {
-// pending NVMe CID 가 없으면 각 hctx 를 idle 로 표시
 			/* the hctx may be unmapped, so check it here */
+			/* [한국어] blk_mq_hw_queue_mapped: hctx 에 CPU 가 매핑되어 있어야
+			 * idle 마킹 의미 있음. unmapped hctx 는 건너뜀 */
 			if (blk_mq_hw_queue_mapped(hctx))
+				/* [한국어] blk_mq_tag_idle: sbitmap_queue 의 wake_batch 재설정
+				 * NVMe SQ 의 tag 할당 wakeup 배치 크기를 idle 기본값으로 복원 */
 				blk_mq_tag_idle(hctx);
-// blk_mq_tag_idle(): NVMe SQ 의 sbitmap wakeup 상태 idle 처리
 		}
 	}
+	/* [한국어] blk_queue_exit: percpu_ref_tryget 으로 획득한 참조 반납 */
 	blk_queue_exit(q);
 }
 
 /*
- * struct flush_busy_ctx_data: busy software queue 의 request 를
- *   hctx dispatch list 로 이동할 때 사용.
- *   hctx: 대상 NVMe SQ 에 해당하는 hardware queue.
- *   list: 이동할 request list.
+ * [한국어]
+ * struct flush_busy_ctx_data - sw queue 를 hctx dispatch list 로 flush 할 때의 컨텍스트
+ *
+ * blk_mq_flush_busy_ctxs 가 sbitmap_for_each_set 의 콜백(flush_busy_ctx)에
+ * 전달하는 보조 구조체. hctx->ctx_map 의 set bit 마다 해당 sw queue 를
+ * dispatch list 로 이동한다.
  */
 struct flush_busy_ctx_data {
 	struct blk_mq_hw_ctx *hctx;
+	/* [한국어] 대상 hardware queue (NVMe SQ 에 대응).
+	 * 설정자: blk_mq_flush_busy_ctxs 가 현재 dispatch 대상 hctx 로 초기화.
+	 * 읽는 자: flush_busy_ctx 가 hctx->ctxs[bitnr] 로 sw queue 를 참조. */
+
 	struct list_head *list;
+	/* [한국어] sw queue 의 request 를 이동시킬 대상 list (보통 hctx->dispatch).
+	 * 설정자: blk_mq_flush_busy_ctxs 가 dispatch 대기 list 로 초기화.
+	 * 읽는 자: flush_busy_ctx 가 list_splice_tail_init 으로 rq_lists 를 여기에 append. */
 };
 
+/*
+ * [한국어]
+ * flush_busy_ctx - 하나의 busy sw queue 를 dispatch list 로 이동하는 sbitmap 콜백
+ *
+ * @sb:    hctx->ctx_map (per-CPU sw queue 의 pending 비트맵)
+ * @bitnr: set 된 비트 번호 (= sw queue 의 인덱스)
+ * @data:  flush_busy_ctx_data 포인터
+ * @return: 항상 true (순회 계속)
+ *
+ * hctx->ctx_map 에서 set 된 비트(pending sw queue)마다 호출된다.
+ * ctx->rq_lists[hctx->type] 의 모든 request 를 dispatch list 로 splice 하고
+ * ctx_map 의 비트를 클리어하여 pending 상태를 해제한다.
+ * ctx->lock 으로 sw queue 접근을 보호한다.
+ */
 static bool flush_busy_ctx(struct sbitmap *sb, unsigned int bitnr, void *data)
 {
+	/* [한국어] flush_data: flush 대상 hctx 와 dispatch list 참조 */
 	struct flush_busy_ctx_data *flush_data = data;
+	/* [한국어] hctx: dispatch 대상 hw queue */
 	struct blk_mq_hw_ctx *hctx = flush_data->hctx;
+	/* [한국어] ctx: bitnr 에 해당하는 per-CPU sw queue — hctx 에 매핑된 CPU 의 큐 */
 	struct blk_mq_ctx *ctx = hctx->ctxs[bitnr];
+	/* [한국어] type: hctx 의 타입 (DEFAULT/READ/POLL) — rq_lists 인덱스로 사용 */
 	enum hctx_type type = hctx->type;
 
+	/* [한국어] ctx->lock: sw queue 의 rq_lists 와 pending 비트를 보호 */
 	spin_lock(&ctx->lock);
+	/* [한국어] list_splice_tail_init: ctx->rq_lists[type] 의 모든 request 를
+	 * flush_data->list 끝에 append 하고 rq_lists 를 빈 상태로 초기화 */
 	list_splice_tail_init(&ctx->rq_lists[type], flush_data->list);
-// ctx->rq_lists[type] 의 request 들을 hctx->dispatch 로 이동
+	/* [한국어] sbitmap_clear_bit: ctx_map 에서 bitnr 비트를 클리어.
+	 * 이제 이 sw queue 는 더 이상 pending 이 없으므로 비트 해제 */
 	sbitmap_clear_bit(sb, bitnr);
-// 이동 완료된 sw queue 는 ctx_map 비트 클리어
 	spin_unlock(&ctx->lock);
 	return true;
 }
@@ -3168,115 +3579,220 @@ static bool flush_busy_ctx(struct sbitmap *sb, unsigned int bitnr, void *data)
  * Process software queues that have been marked busy, splicing them
  * to the for-dispatch
  */
+/*
+ * [한국어]
+ * blk_mq_flush_busy_ctxs - hctx 에 pending 인 모든 sw queue 를 dispatch list 로 이동
+ *
+ * @hctx: 대상 hardware queue (NVMe SQ 에 대응)
+ * @list: request 를 모을 dispatch 대기 list
+ *
+ * hctx->ctx_map 의 모든 set bit (= pending sw queue) 에 대해 flush_busy_ctx 를 호출.
+ * blk_mq_dispatch_rq_list 가 dispatch 전에 이 함수로 sw queue 를 비운다.
+ * NVMe 관점: 여러 CPU 가 submit 한 request 들이 이 함수에서 하나의 dispatch list 로 모임.
+ */
 void blk_mq_flush_busy_ctxs(struct blk_mq_hw_ctx *hctx, struct list_head *list)
 {
+	/* [한국어] flush_busy_ctx 에 전달할 컨텍스트 초기화 */
 	struct flush_busy_ctx_data data = {
 		.hctx = hctx,
 		.list = list,
 	};
 
+	/* [한국어] sbitmap_for_each_set: ctx_map 에서 set 된 비트마다 flush_busy_ctx 호출
+	 * 결과: hctx 에 pending 된 모든 sw queue 의 request 가 list 에 모임 */
 	sbitmap_for_each_set(&hctx->ctx_map, flush_busy_ctx, &data);
-// hctx->ctx_map 의 set bit 순회: pending 인 sw queue 모두 flush
 }
 
 /*
- * struct dispatch_rq_data: software queue 로부터 request 를
- *   하나 꺼낼 때 사용하는 보조 구조체.
- *   hctx: 대상 NVMe SQ.
- *   rq: 꺼낸 NVMe request(CID 포함).
+ * [한국어]
+ * struct dispatch_rq_data - sw queue 에서 request 하나를 꺼낼 때의 컨텍스트
+ *
+ * dispatch_rq_from_ctx 의 sbitmap 콜백에 전달하는 보조 구조체.
+ * busy sw queue 에서 request 를 하나만 꺼내어 hctx 에 직접 dispatch 할 때 사용.
  */
 struct dispatch_rq_data {
 	struct blk_mq_hw_ctx *hctx;
+	/* [한국어] 대상 hardware queue (NVMe SQ 에 대응).
+	 * 설정자: blk_mq_dequeue_from_ctx 가 현재 hctx 로 초기화.
+	 * 읽는 자: dispatch_rq_from_ctx 가 hctx->ctxs[bitnr] 접근에 사용. */
+
 	struct request *rq;
+	/* [한국어] 꺼낸 request 를 돌려주는 출력 필드.
+	 * 설정자: dispatch_rq_from_ctx 가 rq_lists 에서 꺼낸 request 를 저장.
+	 * 읽는 자: blk_mq_dequeue_from_ctx 가 이 포인터로 결과를 받아 반환.
+	 * 값: NULL 이면 해당 sw queue 가 비어있음. */
 };
 
+/*
+ * [한국어]
+ * dispatch_rq_from_ctx - sw queue 에서 request 를 하나 꺼내는 sbitmap 콜백
+ *
+ * @sb:    hctx->ctx_map (pending sw queue 비트맵)
+ * @bitnr: set 된 비트 번호 (sw queue 인덱스)
+ * @data:  dispatch_rq_data 포인터
+ * @return: rq 를 꺼냈으면 false (순회 중단), 아직 비어있으면 true (계속)
+ *
+ * bitnr 에 해당하는 sw queue 에서 rq_lists 의 맨 앞 request 를 하나 꺼낸다.
+ * sw queue 가 이 request 로 인해 비게 되면 ctx_map 비트를 클리어.
+ * blk_mq_dequeue_from_ctx 가 하나의 request 만 필요할 때 사용.
+ */
 static bool dispatch_rq_from_ctx(struct sbitmap *sb, unsigned int bitnr,
 		void *data)
 {
+	/* [한국어] dispatch_data: 결과 request 를 저장할 출력 구조체 */
 	struct dispatch_rq_data *dispatch_data = data;
+	/* [한국어] hctx: dispatch 대상 hw queue */
 	struct blk_mq_hw_ctx *hctx = dispatch_data->hctx;
+	/* [한국어] ctx: bitnr 에 해당하는 per-CPU sw queue */
 	struct blk_mq_ctx *ctx = hctx->ctxs[bitnr];
+	/* [한국어] type: hctx 타입 — rq_lists 인덱스 (DEFAULT/READ/POLL) */
 	enum hctx_type type = hctx->type;
 
+	/* [한국어] ctx->lock: rq_lists 수정 보호 */
 	spin_lock(&ctx->lock);
 	if (!list_empty(&ctx->rq_lists[type])) {
+		/* [한국어] rq_lists 맨 앞 request 를 꺼냄 — FIFO 순서 유지 */
 		dispatch_data->rq = list_entry_rq(ctx->rq_lists[type].next);
-// sw queue 맨 앞 request 를 꺼내 NVMe SQ dispatch 준비
+		/* [한국어] list_del_init: request 를 sw queue 에서 분리 */
 		list_del_init(&dispatch_data->rq->queuelist);
 		if (list_empty(&ctx->rq_lists[type]))
+			/* [한국어] sw queue 가 비었으면 ctx_map 비트 클리어 —
+			 * 다음 flush_busy_ctxs 가 이 sw queue 를 순회하지 않음 */
 			sbitmap_clear_bit(sb, bitnr);
-// sw queue 가 비면 ctx_map 에서 해당 CPU pending 제거
 	}
 	spin_unlock(&ctx->lock);
 
+	/* [한국어] rq 가 없으면 true (다음 set bit 로 계속), 있으면 false (조기 종료) */
 	return !dispatch_data->rq;
 }
 
+/*
+ * [한국어]
+ * blk_mq_dequeue_from_ctx - hctx 의 sw queue 들에서 request 를 하나 꺼냄
+ *
+ * @hctx:  대상 hardware queue
+ * @start: 순회 시작 sw queue (round-robin 공정성을 위해 매번 다른 ctx 부터)
+ * @return: 꺼낸 request 포인터, 없으면 NULL
+ *
+ * blk_mq_dispatch_rq_list 의 budget/tag 가 부족할 때 sw queue 에서
+ * 하나만 꺼내 dispatch 를 재시도하는 경로에서 사용.
+ * start 부터 ctx_map 을 순회하여 첫 번째 non-empty sw queue 의 request 를 반환.
+ */
 struct request *blk_mq_dequeue_from_ctx(struct blk_mq_hw_ctx *hctx,
 					struct blk_mq_ctx *start)
 {
+	/* [한국어] off: start ctx 의 ctx_map 인덱스 — 0 이면 처음부터 순회
+	 * round-robin 공정성: 매 dispatch 마다 다른 sw queue 부터 시작 */
 	unsigned off = start ? start->index_hw[hctx->type] : 0;
-// start ctx 부터 순회: round-robin SQ feed (추정)
+	/* [한국어] data: dispatch_rq_from_ctx 에 전달할 컨텍스트 */
 	struct dispatch_rq_data data = {
 		.hctx = hctx,
 		.rq   = NULL,
 	};
 
+	/* [한국어] __sbitmap_for_each_set: off 부터 순회 (wrap-around 포함)
+	 * dispatch_rq_from_ctx 가 request 를 찾으면 false 반환 → 순회 중단 */
 	__sbitmap_for_each_set(&hctx->ctx_map, off,
 			       dispatch_rq_from_ctx, &data);
 
 	return data.rq;
 }
 
+/*
+ * [한국어]
+ * __blk_mq_alloc_driver_tag - 드라이버 tag(NVMe CID) 를 sbitmap 에서 할당
+ *
+ * @rq:    tag 를 할당할 request
+ * @return: 할당 성공 시 true, SQ full 시 false
+ *
+ * scheduler 내부 tag(internal_tag) 와 다른 드라이버 실제 tag(NVMe CID) 를 할당.
+ * scheduler reserved tag 이면 breserved_tags 에서, 아니면 bitmap_tags 에서 할당.
+ * rq->tag 에 최종 NVMe CID 를 설정하고 active request 수를 증가.
+ *
+ * 호출 체인:
+ *   blk_mq_get_budget_and_tag → [__blk_mq_alloc_driver_tag]
+ *   → __sbitmap_queue_get (lock-free 비트 할당) → rq->tag = CID
+ */
 bool __blk_mq_alloc_driver_tag(struct request *rq)
 {
+	/* [한국어] bitmap_tags: 비예약(일반) tag pool 의 sbitmap_queue.
+	 * NVMe SQ depth 만큼의 slot 을 비트맵으로 관리 */
 	struct sbitmap_queue *bt = &rq->mq_hctx->tags->bitmap_tags;
-// 기본적으로 비예약 tag pool 에서 NVMe CID 할당
+	/* [한국어] tag_offset: 예약 tag 수만큼 offset → 일반 CID 는 reserved 영역 이후부터 */
 	unsigned int tag_offset = rq->mq_hctx->tags->nr_reserved_tags;
-// reserved_tags 수만큼 offset: 예약 CID 와 일반 CID 구분
 	int tag;
 
+	/* [한국어] blk_mq_tag_busy: hctx 를 busy 상태로 표시 — idle 타이머 방지 */
 	blk_mq_tag_busy(rq->mq_hctx);
 
 	if (blk_mq_tag_is_reserved(rq->mq_hctx->sched_tags, rq->internal_tag)) {
-// scheduler reserved tag 면 breserved_tags 에서 CID 할당
+		/* [한국어] scheduler reserved tag 이면 별도의 reserved CID pool 에서 할당.
+		 * offset 0: breserved_tags 는 비트 0 부터 직접 사용 */
 		bt = &rq->mq_hctx->tags->breserved_tags;
 		tag_offset = 0;
 	} else {
 		if (!hctx_may_queue(rq->mq_hctx, bt))
-// hctx_may_queue(): NVMe SQ queue depth 예산 확인
+			/* [한국어] hctx_may_queue: queue depth 예산 초과 확인.
+			 * false 이면 SQ 가 허용 깊이에 도달 — CID 할당 거부 */
 			return false;
 	}
 
+	/* [한국어] __sbitmap_queue_get: lock-free 원자적 비트 할당.
+	 * 성공 시 비트 번호(0~depth-1), 실패 시 BLK_MQ_NO_TAG(==-1) */
 	tag = __sbitmap_queue_get(bt);
-// __sbitmap_queue_get(): NVMe SQ slot(CID) 1개 확보
 	if (tag == BLK_MQ_NO_TAG)
+		/* [한국어] SQ 가 완전히 찼거나 경쟁으로 할당 실패 */
 		return false;
 
+	/* [한국어] rq->tag: 드라이버 관점의 NVMe CID.
+	 * tag_offset 을 더해 reserved 영역을 건너뛴 실제 CID 값으로 설정 */
 	rq->tag = tag + tag_offset;
-// rq->tag = tag + tag_offset: 실제 NVMe CID 값 설정
+	/* [한국어] blk_mq_inc_active_requests: hctx 의 active request 카운터 증가 */
 	blk_mq_inc_active_requests(rq->mq_hctx);
 	return true;
 }
 
+/*
+ * [한국어]
+ * blk_mq_dispatch_wake - sbitmap wakeup 콜백: tag 가 반납되면 hctx 를 깨워 재dispatch
+ *
+ * @wait:  hctx->dispatch_wait (wait_queue_entry)
+ * @mode:  wakeup 모드 (사용 안 함)
+ * @flags: wakeup 플래그 (사용 안 함)
+ * @key:   sbitmap wakeup 키 (사용 안 함)
+ * @return: 1 (wakeup 완료)
+ *
+ * NVMe 완료 인터럽트 → blk_mq_put_tag → sbitmap wakeup → 이 함수 호출.
+ * hctx 를 wait queue 에서 제거하고 blk_mq_run_hw_queue 로 재dispatch 를 시도.
+ *
+ * 호출 체인:
+ *   nvme_irq → blk_mq_end_request → blk_mq_put_tag → sbitmap_queue_wake
+ *   → [blk_mq_dispatch_wake] → blk_mq_run_hw_queue
+ */
 static int blk_mq_dispatch_wake(wait_queue_entry_t *wait, unsigned mode,
 				int flags, void *key)
 {
 	struct blk_mq_hw_ctx *hctx;
 
+	/* [한국어] container_of: dispatch_wait 포인터에서 hctx 역산 */
 	hctx = container_of(wait, struct blk_mq_hw_ctx, dispatch_wait);
 
+	/* [한국어] dispatch_wait_lock: wait entry 제거와 sbq->ws_active 감소를 원자적으로 */
 	spin_lock(&hctx->dispatch_wait_lock);
 	if (!list_empty(&wait->entry)) {
 		struct sbitmap_queue *sbq;
 
+		/* [한국어] wait queue 에서 hctx 제거 — 중복 wakeup 방지 */
 		list_del_init(&wait->entry);
+		/* [한국어] bitmap_tags: 일반 tag pool sbitmap */
 		sbq = &hctx->tags->bitmap_tags;
+		/* [한국어] ws_active 감소: sbitmap wakeup 배치의 활성 카운터 감소 */
 		atomic_dec(&sbq->ws_active);
-// dispatch waitqueue 활성화 개수 감소
 	}
 	spin_unlock(&hctx->dispatch_wait_lock);
 
+	/* [한국어] blk_mq_run_hw_queue(hctx, true): sync=true 로 즉시 dispatch 시도.
+	 * NVMe CID 가 반납되었으므로 requeue 된 request 를 다시 발행 가능 */
 	blk_mq_run_hw_queue(hctx, true);
 	return 1;
 }
@@ -3288,9 +3804,22 @@ static int blk_mq_dispatch_wake(wait_queue_entry_t *wait, unsigned mode,
  * marking us as waiting.
  */
 /*
- * blk_mq_mark_tag_wait: tag(CID) 가 부족할 때 대기 큐에 등록.
- *   NVMe 관점: NVMe SQ 가 꽉 차면(CID 고갈), hctx 의 waitqueue 에
- *   등록하여 다른 I/O 가 CID 를 반납할 때 깨어난다.
+ * [한국어]
+ * blk_mq_mark_tag_wait - NVMe SQ 가 꽉 찼을 때(CID 고갈) hctx 를 대기 등록
+ *
+ * @hctx: tag 가 고갈된 hardware queue
+ * @rq:   tag 를 기다리는 request
+ * @return: true 이면 대기 등록 성공 (request 는 나중에 재dispatch 됨),
+ *          false 이면 tag 가 이미 반납되었거나 대기 불필요
+ *
+ * NVMe SQ depth 가 가득 차면 blk_mq_dispatch_rq_list 가 이 함수를 호출한다.
+ * 비공유 tag 이면 RESTART 플래그만 설정. 공유 tag 이면 sbitmap wakeup queue 에
+ * hctx->dispatch_wait 를 등록하여 다른 CQ 완료가 CID 를 반납할 때 깨어난다.
+ *
+ * 호출 체인:
+ *   blk_mq_dispatch_rq_list (tag 없음) → [blk_mq_mark_tag_wait]
+ *   → add_wait_queue 등록
+ *   → (CID 반납 후) blk_mq_dispatch_wake → blk_mq_run_hw_queue
  */
 static bool blk_mq_mark_tag_wait(struct blk_mq_hw_ctx *hctx,
 				 struct request *rq)
@@ -3302,8 +3831,10 @@ static bool blk_mq_mark_tag_wait(struct blk_mq_hw_ctx *hctx,
 
 	if (!(hctx->flags & BLK_MQ_F_TAG_QUEUE_SHARED) &&
 	    !(blk_mq_is_shared_tags(hctx->flags))) {
+		/* [한국어] 비공유 tag: wait queue 에 등록할 필요 없이 RESTART 표시만.
+		 * CID 반납 시 __blk_mq_free_request → blk_mq_sched_restart_hctx 가
+		 * hctx 를 재실행한다. */
 		blk_mq_sched_mark_restart_hctx(hctx);
-// tag 부족 시 RESTART 표시: CID 반납 시 큐 rerun 유도
 
 		/*
 		 * It's possible that a tag was freed in the window between the
@@ -3313,32 +3844,40 @@ static bool blk_mq_mark_tag_wait(struct blk_mq_hw_ctx *hctx,
 		 * Don't clear RESTART here, someone else could have set it.
 		 * At most this will cost an extra queue run.
 		 */
+		/* [한국어] RESTART 마킹 후 즉시 tag 재시도: 마킹 직전 다른 CPU 가
+		 * CID 를 반납했을 가능성이 있으므로 한 번 더 시도. 성공 시 true 반환. */
 		return blk_mq_get_driver_tag(rq);
-// 다른 경쟁자가 tag 를 반납했을 수 있어 즉시 재시도
 	}
 
+	/* [한국어] wait: hctx 에 내장된 dispatch wait queue entry */
 	wait = &hctx->dispatch_wait;
+	/* [한국어] list_empty_careful: 이미 wait queue 에 등록된 경우 중복 방지 */
 	if (!list_empty_careful(&wait->entry))
 		return false;
 
+	/* [한국어] reserved tag 이면 breserved_tags, 아니면 bitmap_tags 의 wakeup queue 사용 */
 	if (blk_mq_tag_is_reserved(rq->mq_hctx->sched_tags, rq->internal_tag))
 		sbq = &hctx->tags->breserved_tags;
 	else
 		sbq = &hctx->tags->bitmap_tags;
+	/* [한국어] bt_wait_ptr: sbitmap 의 wakeup wait queue head 를 해시로 선택 */
 	wq = &bt_wait_ptr(sbq, hctx)->wait;
-// bt_wait_ptr(): 이 NVMe SQ tag pool 의 wait queue 선택
 
+	/* [한국어] wq->lock 먼저, dispatch_wait_lock 다음: 락 순서 고정 (역순 방지) */
 	spin_lock_irq(&wq->lock);
 	spin_lock(&hctx->dispatch_wait_lock);
 	if (!list_empty(&wait->entry)) {
+		/* [한국어] 경쟁으로 다른 코드가 먼저 등록: 중복 등록 방지 후 실패 반환 */
 		spin_unlock(&hctx->dispatch_wait_lock);
 		spin_unlock_irq(&wq->lock);
 		return false;
 	}
 
+	/* [한국어] ws_active 증가: sbitmap 의 wakeup 배치가 이 wait entry 를 포함함을 기록 */
 	atomic_inc(&sbq->ws_active);
-// waitqueue 활성화 카운트 증가
+	/* [한국어] WQ_FLAG_EXCLUSIVE 제거: 비배타적 wakeup — 여러 hctx 동시에 깨울 수 있음 */
 	wait->flags &= ~WQ_FLAG_EXCLUSIVE;
+	/* [한국어] __add_wait_queue: wq 에 dispatch_wait 등록 (CID 반납 시 blk_mq_dispatch_wake 호출) */
 	__add_wait_queue(wq, wait);
 
 	/*
@@ -3375,7 +3914,10 @@ static bool blk_mq_mark_tag_wait(struct blk_mq_hw_ctx *hctx,
 	 * We got a tag, remove ourselves from the wait queue to ensure
 	 * someone else gets the wakeup.
 	 */
+	/* [한국어] CID 를 얻었으므로 wait queue 에서 자기 자신 제거.
+	 * 다른 wakeup 대상을 놓치지 않도록 배타적 wakeup 방지 */
 	list_del_init(&wait->entry);
+	/* [한국어] ws_active 감소: wakeup 배치에서 이 wait entry 제거 */
 	atomic_dec(&sbq->ws_active);
 	spin_unlock(&hctx->dispatch_wait_lock);
 	spin_unlock_irq(&wq->lock);
@@ -3383,7 +3925,9 @@ static bool blk_mq_mark_tag_wait(struct blk_mq_hw_ctx *hctx,
 	return true;
 }
 
+/* [한국어] BLK_MQ_DISPATCH_BUSY_EWMA_WEIGHT: EWMA 가중치 분모 (새 샘플 비율 = 1/8) */
 #define BLK_MQ_DISPATCH_BUSY_EWMA_WEIGHT  8
+/* [한국어] BLK_MQ_DISPATCH_BUSY_EWMA_FACTOR: busy 시 더하는 값의 비트 시프트 (1<<4=16) */
 #define BLK_MQ_DISPATCH_BUSY_EWMA_FACTOR  4
 /*
  * Update dispatch busy with the Exponential Weighted Moving Average(EWMA):
@@ -3392,59 +3936,107 @@ static bool blk_mq_mark_tag_wait(struct blk_mq_hw_ctx *hctx,
  * - take 4 as factor for avoiding to get too small(0) result, and this
  *   factor doesn't matter because EWMA decreases exponentially
  */
+/*
+ * [한국어]
+ * blk_mq_update_dispatch_busy - hctx 의 dispatch busy 수준을 EWMA 로 갱신
+ *
+ * @hctx: 갱신할 hardware queue
+ * @busy: 이번 dispatch 에서 자원 부족이 발생했으면 true
+ *
+ * dispatch_busy 가 높으면 blk_mq_dispatch_rq_list 가 single-dispatch 경로를 선택해
+ * sw queue 를 미리 flush 하지 않는다 (자원이 없으면 overflow 만 늘어나므로).
+ */
 static void blk_mq_update_dispatch_busy(struct blk_mq_hw_ctx *hctx, bool busy)
 {
 	unsigned int ewma;
 
+	/* [한국어] 현재 EWMA 값 로드 */
 	ewma = hctx->dispatch_busy;
-// dispatch_busy EWMA: NVMe SQ 자원 부족 빈도를 부드럽게 추적
 
+	/* [한국어] 이전에도, 지금도 busy 가 아니면 0 유지 (noop) */
 	if (!ewma && !busy)
 		return;
 
+	/* [한국어] EWMA = (ewma * 7 + new_sample) / 8
+	 * new_sample: busy=true → 16, busy=false → 0 */
 	ewma *= BLK_MQ_DISPATCH_BUSY_EWMA_WEIGHT - 1;
 	if (busy)
 		ewma += 1 << BLK_MQ_DISPATCH_BUSY_EWMA_FACTOR;
 	ewma /= BLK_MQ_DISPATCH_BUSY_EWMA_WEIGHT;
 
+	/* [한국어] 갱신된 EWMA 저장 — 다음 dispatch 경로 결정에 반영 */
 	hctx->dispatch_busy = ewma;
 }
 
+/* [한국어] BLK_MQ_RESOURCE_DELAY: NVMe controller BLK_STS_RESOURCE 후 재시도 지연(ms) */
 #define BLK_MQ_RESOURCE_DELAY	3		/* ms units */
 
+/*
+ * [한국어]
+ * blk_mq_handle_dev_resource - NVMe controller 자원 부족(BLK_STS_DEV_RESOURCE) 처리
+ *
+ * @rq:   reject 된 request
+ * @list: dispatch 재시도 대기 list
+ *
+ * nvme_queue_rq 가 BLK_STS_DEV_RESOURCE 를 반환하면 이 함수로 들어온다.
+ * request 를 dispatch list 앞으로 돌려보내고 driver tag 를 반납한다.
+ */
 static void blk_mq_handle_dev_resource(struct request *rq,
 				       struct list_head *list)
 {
+	/* [한국어] list_add: dispatch list 맨 앞에 삽입 — 다음 run 에서 우선 재발행 */
 	list_add(&rq->queuelist, list);
-// NVMe controller 가 BLK_STS_RESOURCE 를 반환하면 dispatch list 로 재삽입
+	/* [한국어] driver tag(NVMe CID) 반납 및 request 상태 초기화 */
 	__blk_mq_requeue_request(rq);
 }
 
+/*
+ * [한국어]
+ * enum prep_dispatch - blk_mq_prep_dispatch_rq 의 결과 코드
+ *
+ * dispatch 준비 단계에서 budget 또는 tag 획득 여부를 나타낸다.
+ * blk_mq_dispatch_rq_list 가 이 값으로 request 처리 방식을 결정한다.
+ */
 enum prep_dispatch {
-	PREP_DISPATCH_OK,
-	PREP_DISPATCH_NO_TAG,
-	PREP_DISPATCH_NO_BUDGET,
+	PREP_DISPATCH_OK,        /* [한국어] budget 과 tag 모두 확보 성공 */
+	PREP_DISPATCH_NO_TAG,    /* [한국어] NVMe CID 할당 실패 (SQ full) */
+	PREP_DISPATCH_NO_BUDGET, /* [한국어] dispatch budget 고갈 (queue depth 제한) */
 };
 
+/*
+ * [한국어]
+ * blk_mq_prep_dispatch_rq - request 하나의 dispatch 를 위해 budget 과 tag 준비
+ *
+ * @rq:          준비할 request
+ * @need_budget: true 이면 dispatch budget(token)도 획득 필요
+ * @return:      PREP_DISPATCH_OK / NO_TAG / NO_BUDGET
+ *
+ * blk_mq_dispatch_rq_list 에서 request 하나마다 호출되는 준비 단계.
+ * budget(SQ throttle token) → driver tag(CID) 순서로 획득.
+ * 실패 시 이미 획득한 자원을 되돌리고 실패 이유를 반환한다.
+ */
 static enum prep_dispatch blk_mq_prep_dispatch_rq(struct request *rq,
 						  bool need_budget)
 {
+	/* [한국어] hctx: 이 request 가 발행될 NVMe SQ 에 대응하는 hw queue */
 	struct blk_mq_hw_ctx *hctx = rq->mq_hctx;
+	/* [한국어] budget_token: dispatch budget 획득 결과 (음수면 실패) */
 	int budget_token = -1;
 
 	if (need_budget) {
+		/* [한국어] blk_mq_get_dispatch_budget: queue depth / throttle 예산 확인 */
 		budget_token = blk_mq_get_dispatch_budget(rq->q);
-// NVMe SQ budget(token) 획득: queue depth/stride 제한
 		if (budget_token < 0) {
+			/* [한국어] budget 고갈: 이미 확보한 driver tag 반납 후 NO_BUDGET 반환 */
 			blk_mq_put_driver_tag(rq);
-// budget 실패 시 이미 획득한 driver tag(CID) 반납
 			return PREP_DISPATCH_NO_BUDGET;
 		}
+		/* [한국어] budget_token 을 request 에 저장 — 완료 시 put_budget 에서 반납 */
 		blk_mq_set_rq_budget_token(rq, budget_token);
 	}
 
 	if (!blk_mq_get_driver_tag(rq)) {
-// NVMe CID(driver tag) 확보: SQ slot 점유
+		/* [한국어] NVMe CID 확보 실패: SQ 가 가득 찼음 */
 		/*
 		 * The initial allocation attempt failed, so we need to
 		 * rerun the hardware queue when a tag is freed. The
@@ -3453,14 +4045,14 @@ static enum prep_dispatch blk_mq_prep_dispatch_rq(struct request *rq,
 		 * we'll re-run it below.
 		 */
 		if (!blk_mq_mark_tag_wait(hctx, rq)) {
-// CID 부족 시 dispatch wait queue 등록 후 재시도
+			/* [한국어] 대기 등록 후에도 CID 없음: budget token 도 반납 후 NO_TAG */
 			/*
 			 * All budgets not got from this function will be put
 			 * together during handling partial dispatch
 			 */
 			if (need_budget)
+				/* [한국어] budget 반납 — 다음 재시도를 위해 */
 				blk_mq_put_dispatch_budget(rq->q, budget_token);
-// tag 확보 실패 시 budget token 도 반납
 			return PREP_DISPATCH_NO_TAG;
 		}
 	}
@@ -3469,14 +4061,25 @@ static enum prep_dispatch blk_mq_prep_dispatch_rq(struct request *rq,
 }
 
 /* release all allocated budgets before calling to blk_mq_dispatch_rq_list */
+/*
+ * [한국어]
+ * blk_mq_release_budgets - list 의 모든 request 에 대해 dispatch budget 반납
+ *
+ * @q:    대상 request_queue
+ * @list: budget 을 반납할 request 들의 list
+ *
+ * blk_mq_dispatch_rq_list 가 실패로 중단될 때 미리 확보한 budget token 들을 반납한다.
+ */
 static void blk_mq_release_budgets(struct request_queue *q,
 		struct list_head *list)
 {
 	struct request *rq;
 
 	list_for_each_entry(rq, list, queuelist) {
+		/* [한국어] 각 request 의 budget_token 을 읽어 put */
 		int budget_token = blk_mq_get_rq_budget_token(rq);
 
+		/* [한국어] budget_token < 0 이면 budget 없음 (passthrough 등) — 건너뜀 */
 		if (budget_token >= 0)
 			blk_mq_put_dispatch_budget(q, budget_token);
 	}
@@ -3490,14 +4093,29 @@ static void blk_mq_release_budgets(struct request_queue *q,
  *  1) did not queue everything initially scheduled to queue
  *  2) the last attempt to queue a request failed
  */
+/*
+ * [한국어]
+ * blk_mq_commit_rqs - batch dispatch 완료를 드라이버에 통보
+ *
+ * @hctx:          완료 통보할 hardware queue
+ * @queued:        이번 batch 에서 발행한 request 수
+ * @from_schedule: kblockd workqueue 에서 실행 중이면 true
+ *
+ * mq_ops->commit_rqs (NVMe: nvme_commit_rqs) 를 호출하여
+ * 드라이버에게 이 batch 의 마지막 request 가 발행되었음을 알린다.
+ * NVMe 드라이버는 이 시점에 doorbell 을 기록한다.
+ * batch dispatch 도중 실패했거나 비정상 종료 시에도 명시적으로 호출 필요.
+ */
 static void blk_mq_commit_rqs(struct blk_mq_hw_ctx *hctx, int queued,
 			      bool from_schedule)
 {
 	if (hctx->queue->mq_ops->commit_rqs && queued) {
-// driver 의 commit_rqs(): batch submit 후 NVMe doorbell 기록 유도
+		/* [한국어] block_unplug tracepoint: blktrace/eBPF 가 batch dispatch 끝을 추적.
+		 * !from_schedule: 동기 unplug 이면 true */
 		trace_block_unplug(hctx->queue, queued, !from_schedule);
+		/* [한국어] mq_ops->commit_rqs: 드라이버에게 batch 완료 통보.
+		 * NVMe 드라이버에서 doorbell 쓰기를 여기서 일괄 처리할 수 있음 */
 		hctx->queue->mq_ops->commit_rqs(hctx);
-// q->mq_ops->commit_rqs == nvme_commit_rqs (추정)
 	}
 }
 
@@ -3505,13 +4123,23 @@ static void blk_mq_commit_rqs(struct blk_mq_hw_ctx *hctx, int queued,
  * Returns true if we did some work AND can potentially do more.
  */
 /*
- * blk_mq_dispatch_rq_list: hctx 의 dispatch list 에 있는 request 를
- *   driver 의 queue_rq 콜백으로 전달.
- *   NVMe 관점: blk-mq 의 핵심 dispatch 경로.
- *   blk_mq_run_hw_queue -> blk_mq_sched_dispatch_requests ->
- *   blk_mq_dispatch_rq_list -> q->mq_ops->queue_rq(hctx, &bd)
- *   -> nvme_queue_rq -> nvme_submit_cmd(doorbell) 로 이어진다.
- *   budget 과 tag(CID) 를 확보한 후에만 driver 로 전달.
+ * [한국어]
+ * blk_mq_dispatch_rq_list - dispatch list 의 request 들을 드라이버 queue_rq 로 전달
+ *
+ * @hctx:       dispatch 대상 hardware queue (NVMe SQ 에 대응)
+ * @list:       dispatch 할 request 들의 list
+ * @get_budget: true 이면 각 request 마다 dispatch budget 도 획득
+ * @return:     true 이면 일부 또는 전부를 dispatch 했고 더 할 가능성 있음
+ *
+ * blk-mq dispatch 의 핵심 함수. budget 과 driver tag(CID) 를 확보한 후
+ * mq_ops->queue_rq(hctx, &bd) → nvme_queue_rq → SQ doorbell 로 이어진다.
+ * BLK_STS_RESOURCE/DEV_RESOURCE 시 지연 재시도(requeue_list), NO_TAG 시 대기 등록.
+ * batch dispatch 마지막에 commit_rqs 로 NVMe doorbell 을 일괄 기록.
+ *
+ * 호출 체인:
+ *   blk_mq_run_hw_queue → blk_mq_sched_dispatch_requests
+ *   → [blk_mq_dispatch_rq_list] → mq_ops->queue_rq → nvme_queue_rq
+ *   → nvme_submit_cmd (SQ doorbell 기록)
  */
 bool blk_mq_dispatch_rq_list(struct blk_mq_hw_ctx *hctx, struct list_head *list,
 			     bool get_budget)
@@ -3523,58 +4151,71 @@ bool blk_mq_dispatch_rq_list(struct blk_mq_hw_ctx *hctx, struct list_head *list,
 	blk_status_t ret = BLK_STS_OK;
 	bool needs_resource = false;
 
+	/* [한국어] dispatch list 가 비었으면 할 일 없음 */
 	if (list_empty(list))
-// dispatch list 가 비었으면 할 일 없음
 		return false;
 
 	/*
 	 * Now process all the entries, sending them to the driver.
 	 */
+	/* [한국어] queued: 이번 batch 에서 성공적으로 발행한 request 수 */
 	queued = 0;
 	do {
+		/* [한국어] bd: 드라이버(nvme_queue_rq)에 전달하는 dispatch 컨텍스트 */
 		struct blk_mq_queue_data bd;
 
+		/* [한국어] list 첫 번째 request 를 꺼내 dispatch 준비 */
 		rq = list_first_entry(list, struct request, queuelist);
 
-// list 의 첫 request 를 꺼내 NVMe driver 로 전달
+		/* [한국어] request 의 hctx 가 현재 hctx 와 일치해야 함 (코딩 오류 감지) */
 		WARN_ON_ONCE(hctx != rq->mq_hctx);
+		/* [한국어] blk_mq_prep_dispatch_rq: budget(SQ throttle) + tag(NVMe CID) 확보 */
 		prep = blk_mq_prep_dispatch_rq(rq, get_budget);
-// budget(CID 할당 전 단계) 와 driver tag(CID) 확보
 		if (prep != PREP_DISPATCH_OK)
+			/* [한국어] NO_TAG 또는 NO_BUDGET: 자원 부족으로 dispatch 중단 */
 			break;
 
+		/* [한국어] driver 에 전달할 request 를 dispatch list 에서 분리 */
 		list_del_init(&rq->queuelist);
-// driver 전달 성공 시 dispatch list 에서 제거
 
+		/* [한국어] bd.rq: nvme_queue_rq 에 전달될 request (NVMe SQE 작성 대상) */
 		bd.rq = rq;
-// bd.rq: NVMe 명령으로 날아갈 request
+		/* [한국어] bd.last: 이 request 다음 list 가 비면 true.
+		 * 드라이버는 last==true 일 때 NVMe doorbell 을 기록한다. */
 		bd.last = list_empty(list);
-// bd.last: 이 request 이후 list 에 남은 것이 없으면 true
 
-		ret = q->mq_ops->queue_rq(hctx, &bd); /* nvme_queue_rq 호출: SQ 에 명령 기록 */
+		/* [한국어] mq_ops->queue_rq: nvme_queue_rq → SQ entry 기록 → doorbell.
+		 * 이 호출 이후 NVMe 컨트롤러가 명령을 실행하기 시작한다. */
+		ret = q->mq_ops->queue_rq(hctx, &bd);
 		switch (ret) {
-		case BLK_STS_OK: /* NVMe 명령이 SQ 에 성공적으로 배치됨 */
-// BLK_STS_OK: NVMe SQ 에 성공적으로 배치, doorbell 은 driver 에서
+		case BLK_STS_OK:
+			/* [한국어] NVMe SQ 에 명령 성공적 배치 — CQ 완료 인터럽트 대기 */
 			queued++;
 			break;
-		case BLK_STS_RESOURCE: /* NVMe SQ/PRP/SGL 자원 부족, 재시도 예약 */
-// BLK_STS_RESOURCE: NVMe SQ/PRP/SGL 용량 부족
+		case BLK_STS_RESOURCE:
+			/* [한국어] BLK_STS_RESOURCE: NVMe SQ/PRP list/SGL 자원 부족.
+			 * needs_resource = true 로 3ms 지연 후 재시도 예약 */
 			needs_resource = true;
 			fallthrough;
-		case BLK_STS_DEV_RESOURCE: /* NVMe 컨트롤러 내부 자원 부족 */
-			blk_mq_handle_dev_resource(rq, list); /* 자원 부족 시 dispatch list 로 재삽입 */
+		case BLK_STS_DEV_RESOURCE:
+			/* [한국어] BLK_STS_DEV_RESOURCE: NVMe 컨트롤러 내부 자원 고갈.
+			 * blk_mq_handle_dev_resource: rq 를 list 앞으로 돌려보내고 CID 반납 */
+			blk_mq_handle_dev_resource(rq, list);
 			goto out;
 		default:
+			/* [한국어] 기타 오류 (BLK_STS_IOERR 등): 즉시 request 완료 처리.
+			 * 상위 계층(VFS/io_uring)에 error 를 전파 */
 			blk_mq_end_request(rq, ret);
-// 그 외 오류: NVMe 명령 즉시 완료(상위로 error 전파)
 		}
 	} while (!list_empty(list));
 out:
 	/* If we didn't flush the entire list, we could have told the driver
 	 * there was more coming, but that turned out to be a lie.
 	 */
+	/* [한국어] list 가 남거나 오류가 있으면 commit_rqs 로 batch 마감 통보.
+	 * 드라이버에게 "더 이상 request 없음(bd.last 정정)" 을 알리고 doorbell 기록 유도 */
 	if (!list_empty(list) || ret != BLK_STS_OK)
-		blk_mq_commit_rqs(hctx, queued, false); /* batch submit 마무리 (NVMe doorbell 유도, 추정) */
+		blk_mq_commit_rqs(hctx, queued, false);
 
 	/*
 	 * Any items that need requeuing? Stuff them into hctx->dispatch,
@@ -3583,8 +4224,10 @@ out:
 	if (!list_empty(list)) {
 		bool needs_restart;
 		/* For non-shared tags, the RESTART check will suffice */
+		/* [한국어] no_tag: tag 부족이면서 공유 tag 를 사용하는 경우.
+		 * 비공유 tag 에서는 RESTART 플래그만으로 충분하지만,
+		 * 공유 tag 는 dispatch wait queue 도 체크해야 한다. */
 		bool no_tag = prep == PREP_DISPATCH_NO_TAG &&
-// shared tag 사용 시 tag 부족은 별도 wait/재시작 처리 필요
 			((hctx->flags & BLK_MQ_F_TAG_QUEUE_SHARED) ||
 			blk_mq_is_shared_tags(hctx->flags));
 
@@ -3592,13 +4235,16 @@ out:
 		 * If the caller allocated budgets, free the budgets of the
 		 * requests that have not yet been passed to the block driver.
 		 */
+		/* [한국어] get_budget==false: caller 가 이미 budget 을 확보했다면
+		 * 미처 dispatch 하지 못한 request 의 budget 을 여기서 반납 */
 		if (!get_budget)
-// budget 을 caller 가 이미 할당했다면 남은 request 의 budget 반납
 			blk_mq_release_budgets(q, list);
 
+		/* [한국어] hctx->dispatch: 다음 run 에서 재처리할 request list.
+		 * hctx->lock 으로 보호 */
 		spin_lock(&hctx->lock);
+		/* [한국어] list_splice_tail_init: 남은 request 들을 hctx->dispatch 끝에 append */
 		list_splice_tail_init(list, &hctx->dispatch);
-// 남은 request 들을 hctx->dispatch 에 연결하여 다음 run 때 재시도
 		spin_unlock(&hctx->lock);
 
 		/*
@@ -3608,8 +4254,10 @@ out:
 		 * miss the new added requests to hctx->dispatch, meantime
 		 * SCHED_RESTART is observed here.
 		 */
+		/* [한국어] smp_mb(): hctx->dispatch 삽입과 SCHED_RESTART 플래그 체크 사이
+		 * 메모리 순서 보장. blk_mq_sched_restart 의 smp_mb 와 쌍을 이룬다.
+		 * 순서가 뒤집히면 restart 코드가 dispatch 에 추가된 request 를 놓칠 수 있다. */
 		smp_mb();
-// smp_mb(): hctx->dispatch 삽입과 SCHED_RESTART 플래그 체크 사이 순서 보장
 
 		/*
 		 * If SCHED_RESTART was set by the caller of this function and
@@ -3637,32 +4285,49 @@ out:
 		 * similar if we couldn't get budget or couldn't lock a zone
 		 * and SCHED_RESTART is set.
 		 */
+		/* [한국어] SCHED_RESTART: elevator 가 이미 재시작을 예약했는지 확인 */
 		needs_restart = blk_mq_sched_needs_restart(hctx);
-// SCHED_RESTART: NVMe SQ 가 멈췄다가 다시 dispatch 해야 함
+		/* [한국어] NO_BUDGET 도 resource 부족으로 간주: 지연 재시도 필요 */
 		if (prep == PREP_DISPATCH_NO_BUDGET)
-// PREP_DISPATCH_NO_BUDGET: NVMe queue depth 예산 부족
 			needs_resource = true;
 		if (!needs_restart ||
 		    (no_tag && list_empty_careful(&hctx->dispatch_wait.entry)))
+			/* [한국어] SCHED_RESTART 가 없거나 no_tag + dispatch_wait 비어있으면
+			 * 즉시 hctx 를 rerun — dispatch 에 추가된 request 를 바로 처리 */
 			blk_mq_run_hw_queue(hctx, true);
-// 즉시 blk_mq_run_hw_queue(): NVMe SQ rerun
 		else if (needs_resource)
+			/* [한국어] RESOURCE 부족이면 BLK_MQ_RESOURCE_DELAY(3ms) 후 rerun.
+			 * NVMe 컨트롤러 자원이 회복될 시간을 준다 */
 			blk_mq_delay_run_hw_queue(hctx, BLK_MQ_RESOURCE_DELAY);
-// RESOURCE 발생 시 짧은 지연 후 rerun: NVMe controller 여유 생성
 
+		/* [한국어] dispatch busy EWMA 증가: 자원 부족 상황 기록 */
 		blk_mq_update_dispatch_busy(hctx, true);
 		return false;
 	}
 
+	/* [한국어] 전체 list 를 소진: dispatch busy EWMA 감소 */
 	blk_mq_update_dispatch_busy(hctx, false);
-// dispatch list 소진 성공: NVMe SQ idle 로 간주 가능
 	return true;
 }
 
+/*
+ * [한국어]
+ * blk_mq_first_mapped_cpu - hctx 의 cpumask 에서 첫 번째 온라인 CPU 반환
+ *
+ * @hctx: 대상 hw queue
+ * @return: hctx->cpumask 에서 cpu_online_mask 와 교집합의 첫 번째 CPU.
+ *          온라인 CPU 가 없으면 cpumask 의 첫 번째 CPU(offline 포함).
+ *
+ * blk_mq_delay_run_hw_queue / blk_mq_run_hw_queue 가 work 를 어느 CPU 에 예약할지
+ * 결정할 때 사용한다. NVMe IRQ affinity 와 일치하는 CPU 에 work 를 보냄으로써
+ * cache locality 를 높인다.
+ */
 static inline int blk_mq_first_mapped_cpu(struct blk_mq_hw_ctx *hctx)
 {
+	/* [한국어] cpumask_first_and: hctx->cpumask ∩ cpu_online_mask 의 첫 CPU */
 	int cpu = cpumask_first_and(hctx->cpumask, cpu_online_mask);
 
+	/* [한국어] 온라인 교집합이 없으면 cpumask 의 첫 CPU (offline 일 수도 있음) */
 	if (cpu >= nr_cpu_ids)
 		cpu = cpumask_first(hctx->cpumask);
 	return cpu;
@@ -3672,8 +4337,19 @@ static inline int blk_mq_first_mapped_cpu(struct blk_mq_hw_ctx *hctx)
  * ->next_cpu is always calculated from hctx->cpumask, so simply use
  * it for speeding up the check
  */
+/*
+ * [한국어]
+ * blk_mq_hctx_empty_cpumask - hctx 에 매핑된 CPU 가 없는지 확인
+ *
+ * @hctx: 검사할 hw queue
+ * @return: true 이면 hctx->cpumask 가 비어있음 (unmapped hctx)
+ *
+ * hctx->next_cpu 는 항상 cpumask 에서 계산되므로 next_cpu >= nr_cpu_ids 이면
+ * cpumask 가 비어있음을 의미한다.
+ */
 static bool blk_mq_hctx_empty_cpumask(struct blk_mq_hw_ctx *hctx)
 {
+        /* [한국어] next_cpu >= nr_cpu_ids: 유효한 CPU 없음 → cpumask 비어있음 */
         return hctx->next_cpu >= nr_cpu_ids;
 }
 
