@@ -1,16 +1,61 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  * Functions related to setting various queue properties from drivers
+ */
+
+/*
+ * [한국어 설명] 블록 큐 한도 설정 및 스택 병합 (blk-settings.c)
  *
- * NVMe 관점 파일 요약:
- * 이 파일은 block layer의 request_queue(q)와 queue_limits(lim)를 초기화/검증/스택하는
- * 함수들을 담고 있다. NVMe SSD 드라이버(drivers/nvme/host/pci.c 등)가 호스트 메모리와
- * NVMe 컨트롤러 간 SQ/CQ, PRP/SGL, doorbell, CID 등의 하드웨어 제약을 queue_limits
- * 형태로 등록하면, 본 파일이 이를 정규화하여 상위 bio/request 경로
- * (submit_bio -> blk_mq_submit_bio -> blk_mq_get_request -> nvme_queue_rq ->
- *  nvme_submit_cmd(doorbell))로 전달될 I/O 크기/정렬/세그먼트 한도를 확정한다.
- * blk-mq core, elevator, rq-qos, partition, integrity, zoned block 장치들과
- * 밀접하게 연결된다.
+ * === 파일의 역할 ===
+ * 이 파일은 block layer의 request_queue(q)가 보유하는 queue_limits(lim) 구조체를
+ * 초기화·검증·정규화·병합하는 모든 함수를 담는다. NVMe/SCSI/virtio 등 다양한 드라이버가
+ * 하드웨어 capability(MDTS, PRP/SGL 엔트리 수, LBA 크기, Deallocate granularity 등)를
+ * queue_limits 필드에 채워 넣으면, 본 파일의 blk_validate_limits()가 이를 블록 레이어
+ * 표준 형식으로 정규화하여 bio splitting·request 조립 경로에서 사용할 최종 I/O 한도를
+ * 확정한다. 스택형 장치(MD RAID, Device Mapper, LUKS 등)에서는 blk_stack_limits()가
+ * 여러 하위 장치의 한도를 최소 공통 분모로 교차 병합(stacking)한다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * 호출 위치: 커널 유저스페이스가 아닌 커널 블록 레이어 내부 (kernel context).
+ * 드라이버 probe 경로:
+ *   nvme_reset_work → nvme_configure_admin_queue → blk_mq_init_queue →
+ *   queue_limits_set → blk_validate_limits  (NVMe PCI 드라이버 예시)
+ * I/O 경로 (blk-mq가 limit 참조):
+ *   submit_bio → blk_mq_submit_bio → blk_mq_get_request → nvme_queue_rq →
+ *   nvme_submit_cmd(doorbell write)
+ * 스택 병합 경로:
+ *   md_run / dm-table-load → queue_limits_stack_bdev → blk_stack_limits
+ * blk_validate_limits()는 드라이버 probe, 큐 재설정, limits 갱신 시 호출되며,
+ * bio splitting 임계값을 결정하는 blk_mq_submit_bio() 이전에 항상 완료된다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 의존 모듈:
+ *   - include/linux/blk-mq.h: struct request_queue, struct queue_limits 정의
+ *   - block/blk.h: BLK_SAFE_MAX_SECTORS, BLK_DEF_MAX_SECTORS_CAP 등 상수
+ *   - block/blk-rq-qos.h: rq_qos_queue_depth_changed() — QoS depth 전파
+ *   - block/blk-wbt.h: writeback throttle (queue depth 변경 통지)
+ *   - include/linux/blk-integrity.h: struct blk_integrity (DIF/DIX PI 설정)
+ * 피의존 모듈 (이 파일 함수를 호출하는 쪽):
+ *   - drivers/nvme/host/pci.c: blk_queue_rq_timeout, queue_limits_set 등
+ *   - drivers/md/md.c: blk_set_stacking_limits, blk_stack_limits
+ *   - block/blk-mq.c: blk_set_default_limits, queue_limits_commit_update
+ *   - block/partitions/core.c: queue_limits_stack_bdev, bdev_alignment_offset
+ * 공유 자료구조:
+ *   - struct queue_limits: 이 파일의 핵심 출력물. 모든 I/O 경로가 참조한다.
+ *   - struct blk_integrity: NVMe DIF/DIX PI 설정을 담는 sub-structure.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * blk_validate_limits()    — queue_limits의 모든 필드를 정규화·검증하는 게이트키퍼.
+ *                            드라이버가 채운 HW 값 → 블록 레이어 표준 값 변환.
+ * blk_stack_limits()       — MD/DM 등이 여러 하위 장치의 queue_limits를 교차 병합.
+ *                            alignment, max_sectors, discard, atomic_write를 통합.
+ * blk_set_stacking_limits()— 스택형 가상 장치 초기화: 모든 필드를 UINT_MAX/0으로 두어
+ *                            하위 장치 값과의 min/max 병합 시 neutral identity가 됨.
+ * queue_limits_commit_update() — limits_lock 보호 하에 큐에 검증된 limits 원자적 적용.
+ * blk_validate_integrity_limits() — NVMe DIF/DIX PI 조합의 유효성 검사 및 dma_alignment
+ *                                   보강. metadata_size, csum_type, interval_exp 검증.
+ * blk_validate_zoned_limits()    — NVMe ZNS의 zone_append_sectors 최종 한도 결정.
+ * blk_validate_atomic_write_limits() — NVMe FAW(원자적 쓰기) 단위 검증 및 정규화.
  */
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -39,10 +84,36 @@
  *   tags/tag_set: blk-mq tag ↔ NVMe CID/SQ slot 매핑을 위한 자료구조.
  *   (추정) bdi: read-ahead, writeback 시 NVMe optimal I/O 크기 힌트 반영.
  */
+/*
+ * [한국어]
+ * blk_queue_rq_timeout - 큐 단위 request 타임아웃 값 설정
+ *
+ * @q: 타임아웃을 적용할 request_queue. NVMe라면 blk_mq_init_queue()로 만들어진
+ *     admin/IO 큐.
+ * @timeout: 새 타임아웃 값(jiffies 단위). 호출자가 msecs_to_jiffies() 등으로
+ *     이미 변환해서 전달한다고 가정한다.
+ * @return: 없음 (void). 검증 없이 항상 성공.
+ *
+ * NVMe 컨트롤러는 명령 제출 후 완료를 받지 못하면 blk-mq의 워치독 타이머가
+ * nvme_timeout()을 호출해 abort/controller reset을 트리거하는데, 이때 기준
+ * 시간이 q->rq_timeout이다. NVMe 드라이버는 컨트롤러 특성(PCIe vs Fabrics,
+ * 링크 상태 등)에 맞춰 이 값을 조정하려고 본 함수를 호출한다. 동작은
+ * WRITE_ONCE 한 줄뿐이며 별도 검증이나 락이 없다.
+ * 실행 컨텍스트: 드라이버 probe/reset 경로의 프로세스 컨텍스트. 재진입 보호가
+ * 없으므로 호출자가 큐 초기화 시점에만 호출하도록 보장해야 한다.
+ * 호출자: nvme_alloc_admin_tag_set(), nvme_alloc_io_tag_set() 등 드라이버 큐
+ * 초기화 경로. 호출 대상: 없음(단순 필드 대입으로 종료).
+ * 에러 경로: 없음(void, 항상 성공).
+ *
+ * 호출 체인:
+ *   nvme_alloc_admin_tag_set/nvme_alloc_io_tag_set → [blk_queue_rq_timeout] → (필드 대입으로 종료)
+ */
 void blk_queue_rq_timeout(struct request_queue *q, unsigned int timeout)
 {
 	/* q->rq_timeout은 nvme_timeout -> nvme_abort_req -> Abort 명령 CID
-	 * 선택 기준이 되며, jiffies 단위로 변환되어 nvme watchdog에서 사용된다. */
+	 * 선택 기준이 되며, jiffies 단위로 변환되어 nvme watchdog에서 사용된다.
+	 * WRITE_ONCE: 타임아웃 워커(다른 CPU/인터럽트 컨텍스트)가 락 없이 이
+	 * 필드를 읽으므로, 컴파일러의 재정렬/분할 저장을 막기 위해 사용한다. */
 	WRITE_ONCE(q->rq_timeout, timeout);
 }
 EXPORT_SYMBOL_GPL(blk_queue_rq_timeout);
@@ -59,6 +130,30 @@ EXPORT_SYMBOL_GPL(blk_queue_rq_timeout);
  *   lim을 "제한 없음" 상태로 초기화한다. 이후 blk_stack_limits()에서
  *   NVMe max_hw_sectors, max_segments, discard, zoned 등을 교차 병합한다.
  */
+/*
+ * [한국어]
+ * blk_set_stacking_limits - 스택형(가상) 장치용 queue_limits를 "제한 없음" 상태로 초기화
+ *
+ * @lim: 초기화할 queue_limits. MD/DM 등 스택 드라이버가 자신의 request_queue를
+ *     만들기 직전에 스택 위에 얹을 lim을 가리킨다.
+ * @return: 없음 (void). 항상 성공.
+ *
+ * blk_stack_limits()는 각 필드를 t(상위)와 b(하위 NVMe 등) 사이의 min/max로
+ * 병합하는데, 병합 연산의 항등원(identity)이 없으면 첫 하위 장치를 병합할 때
+ * 기존 값과 충돌한다. 그래서 본 함수는 min으로 병합될 필드는 UINT_MAX/
+ * USHRT_MAX로, max로 병합될 필드는 SECTOR_SIZE 등 가장 보수적인 값으로
+ * 채워 "아직 아무 제약도 걸리지 않은" 중립 상태를 만든다. 이후 첫 번째
+ * blk_stack_limits() 호출에서 실제 하위 NVMe 장치의 값으로 대체된다.
+ * 실행 컨텍스트: MD/DM 큐 생성 경로의 프로세스 컨텍스트, 동시성 걱정 없는
+ * 지역 구조체 초기화.
+ * 호출자: drivers/md/md.c, drivers/md/dm-table.c 등 스택 드라이버의 큐 초기화.
+ * 호출 대상: memset() 뿐이며, 이후 blk_stack_limits()가 별도로 호출되어
+ * 실제 병합을 수행한다(본 함수 내부에서 호출하지 않음).
+ * 에러 경로: 없음.
+ *
+ * 호출 체인:
+ *   md_run/dm_table_add_target → [blk_set_stacking_limits] → (이후 blk_stack_limits가 반복 호출됨)
+ */
 void blk_set_stacking_limits(struct queue_limits *lim)
 {
 	/* 상속 전 구조체를 0으로 클리어하여 하위 NVMe 값과 min/max 병합 시
@@ -68,6 +163,7 @@ void blk_set_stacking_limits(struct queue_limits *lim)
 	lim->logical_block_size = SECTOR_SIZE;
 	/* NVMe 물리 페이지 정렬 기본값, LBAF에서 4K일 경우 갱신됨. */
 	lim->physical_block_size = SECTOR_SIZE;
+	/* NVMe 최소 I/O 크기 기본값: physical_block_size와 동일한 512B로 시작. */
 	lim->io_min = SECTOR_SIZE;
 	/* NVMe Deallocate granularity 기본값, Identify에서 갱신됨. */
 	lim->discard_granularity = SECTOR_SIZE;
@@ -87,14 +183,19 @@ void blk_set_stacking_limits(struct queue_limits *lim)
 	lim->max_segment_size = UINT_MAX;
 	/* 사용자/커널 최종 I/O 크기 상한 준비. */
 	lim->max_sectors = UINT_MAX;
+	/* NVMe SCSI ULP류 max_dev_sectors 상한 준비: 하위 값과 min 병합. */
 	lim->max_dev_sectors = UINT_MAX;
 	/* NVMe Write Zeroes 최대 섹터 상한 준비. */
 	lim->max_write_zeroes_sectors = UINT_MAX;
+	/* NVMe Write Zeroes와 함께 unmap(할당 해제)까지 수행 가능한 HW 상한 준비. */
 	lim->max_hw_wzeroes_unmap_sectors = UINT_MAX;
+	/* 사용자 sysfs 설정 가능한 Write Zeroes unmap 상한 준비. */
 	lim->max_user_wzeroes_unmap_sectors = UINT_MAX;
 	/* NVMe ZNS Zone Append 최대 섹터 상한 준비. */
 	lim->max_hw_zone_append_sectors = UINT_MAX;
+	/* 사용자 sysfs 설정 가능한 Deallocate 상한 준비. */
 	lim->max_user_discard_sectors = UINT_MAX;
+	/* NVMe FAW(원자적 쓰기) 하드웨어 최대 상한 준비. */
 	lim->atomic_write_hw_max = UINT_MAX;
 }
 EXPORT_SYMBOL(blk_set_stacking_limits);
@@ -111,9 +212,41 @@ EXPORT_SYMBOL(blk_set_stacking_limits);
  *   (추정) NVMe SSD는 회전식 디스크와 달리 BLK_FEAT_ROTATIONAL이 꺼져 있으므로
  *   io_opt가 0이면 max_sectors 기반의 큰 read-ahead를 사용하지 않는다.
  */
+/*
+ * [한국어]
+ * blk_apply_bdi_limits - queue_limits의 최적 I/O 크기를 backing_dev_info(bdi)에 반영
+ *
+ * @bdi: 큐가 속한 gendisk의 backing_dev_info. VFS의 read-ahead/writeback
+ *     서브시스템이 참조하는 페이지 수 힌트를 담는다.
+ * @lim: blk_validate_limits()로 이미 정규화된 queue_limits. io_opt, max_sectors,
+ *     features(BLK_FEAT_ROTATIONAL 등)를 읽기만 하고 수정하지 않는다.
+ * @return: 없음 (void). 실패 조건이 없다.
+ *
+ * VFS read-ahead가 효율적이려면 최적 I/O 크기의 최소 2배를 미리 읽어야
+ * 한다는 경험칙에 따라 ra_pages를 계산한다. 순회식(rotational) 장치가
+ * io_opt를 보고하지 않는 경우에는 max_sectors를 대신 사용해 작은 기본
+ * read-ahead로 떨어지는 것을 막는다. NVMe SSD는 BLK_FEAT_ROTATIONAL이
+ * 꺼져 있으므로 이 fallback 경로를 타지 않고, io_opt=0이면 ra_pages는
+ * VM_READAHEAD_PAGES 최소값만 보장된다. 사용자가 sysfs로 이미 ra_pages를
+ * 늘려둔 경우를 존중하기 위해 max3()로 "줄어들지 않게"만 계산한다.
+ * io_pages는 max_sectors를 PAGE 단위로 환산한 값으로, writeback 시 한
+ * 번에 내보낼 페이지 수의 상한이 된다.
+ * 실행 컨텍스트: queue_limits_commit_update() 등 큐 갱신 경로의 프로세스
+ * 컨텍스트. bdi 필드에 대한 별도 락은 없고 큐 초기화/갱신 시점에서만
+ * 호출된다고 가정한다.
+ * 호출자: queue_limits_commit_update(). 호출 대상: max3(), lcm 계열 없음
+ * (산술 매크로만 사용, 하위 함수 호출 없음).
+ * 에러 경로: 없음.
+ *
+ * 호출 체인:
+ *   queue_limits_commit_update → [blk_apply_bdi_limits] → (bdi 필드 대입으로 종료)
+ */
 void blk_apply_bdi_limits(struct backing_dev_info *bdi,
 		struct queue_limits *lim)
 {
+	/* NVMe io_opt(컨트롤러 권장 최적 I/O 크기)를 읽어와 지역 변수에 보관 -
+	 * 아래에서 rotational fallback으로 값을 바꿀 수 있어 lim을 직접 수정하지
+	 * 않고 복사본을 사용한다. */
 	u64 io_opt = lim->io_opt;
 
 	/*
@@ -151,6 +284,37 @@ void blk_apply_bdi_limits(struct backing_dev_info *bdi,
  *   BLK_FEAT_ZONED가 설정되지 않은 일반 NVMe namespace에서는 관련 필드가 0이어야
  *   하며, 그렇지 않으면 -EINVAL을 반환한다.
  */
+/*
+ * [한국어]
+ * blk_validate_zoned_limits - ZNS(Zoned Namespace) 관련 queue_limits 검증/보정
+ *
+ * @lim: 검증할 queue_limits. features, max_open_zones, max_active_zones,
+ *     zone_write_granularity, max_hw_zone_append_sectors, chunk_sectors,
+ *     max_hw_sectors 필드를 읽고 zone_write_granularity/max_zone_append_sectors를
+ *     보정해 채운다.
+ * @return: 성공 시 0, 필드 조합이 모순되면 -EINVAL. blk_validate_limits()가
+ *     마지막 단계에서 호출하며, 실패하면 전체 검증도 실패로 전파된다.
+ *
+ * NVMe ZNS 네임스페이스는 Identify Namespace의 Zone Descriptor Extension,
+ * Identify Controller의 ZASL(Zone Append Size Limit) 등에서 zone 관련 한도를
+ * 얻는다. BLK_FEAT_ZONED가 꺼져 있는 일반 NVMe 네임스페이스인데 zone 관련
+ * 필드가 잔존(residual)해 있다면 드라이버 버그이므로 WARN_ON_ONCE로 알리고
+ * -EINVAL을 반환한다. BLK_FEAT_ZONED가 켜져 있으면: (1) 커널이
+ * CONFIG_BLK_DEV_ZONED로 빌드됐는지 확인하고, (2) active zone 수가 open
+ * zone 수 이상인지 검사하고(활성 zone은 열린 zone을 포함하는 상위 집합),
+ * (3) zone_write_granularity가 logical_block_size 미만이면 논리 블록
+ * 크기로 올려 보정하고, (4) Zone Append 명령이 zone 경계를 넘을 수 없다는
+ * 제약을 반영해 max_zone_append_sectors를 HW 한도, chunk_sectors(zone
+ * 크기), max_hw_sectors(MDTS) 중 최솟값으로 확정한다.
+ * 실행 컨텍스트: blk_validate_limits() 호출 경로의 프로세스 컨텍스트(드라이버
+ * probe 또는 큐 갱신). 동시성 보호는 상위 limits_lock에 의존한다.
+ * 호출자: blk_validate_limits(). 호출 대상: 없음 (매크로/산술 연산만 사용).
+ * 에러 경로: 조건 위반 시 -EINVAL을 반환하며 blk_validate_limits()가 이를
+ * 그대로 상위(드라이버 probe)로 전파해 큐 생성/갱신을 실패시킨다.
+ *
+ * 호출 체인:
+ *   blk_validate_limits → [blk_validate_zoned_limits] → (없음, 순수 검증/대입)
+ */
 static int blk_validate_zoned_limits(struct queue_limits *lim)
 {
 	/* BLK_FEAT_ZONED 미설정 시 ZNS 관련 값이 residual하면 컨트롤러 상태 불일치. */
@@ -163,6 +327,9 @@ static int blk_validate_zoned_limits(struct queue_limits *lim)
 		return 0;
 	}
 
+	/* ZNS 지원을 알리는 BLK_FEAT_ZONED가 켜져 있는데 커널이 zoned block
+	 * device 지원 없이 빌드됐다면 상위 zoned 관련 코드가 전혀 없으므로
+	 * 즉시 오류로 처리한다. */
 	if (WARN_ON_ONCE(!IS_ENABLED(CONFIG_BLK_DEV_ZONED)))
 		return -EINVAL;
 
@@ -214,9 +381,33 @@ static int blk_validate_zoned_limits(struct queue_limits *lim)
  *   tag_size: NVMe PI Reftag 크기.
  *   flags: NOGENERATE/NOVERIFY/DEVICE_CAPABLE/REF_TAG/SPLIT_INTERVAL_CAPABLE
  *          등 DIF 처리 방식을 지정.
+ *
+ * [한국어 보강]
+ * @lim: (위와 동일) integrity 서브필드를 in-place로 검증/보정한다.
+ * @return: 성공 시 0, PI 필드 조합이 스펙과 어긋나면 -EINVAL,
+ *     CONFIG_BLK_DEV_INTEGRITY가 꺼져 있는데 metadata_size>0이면 -EINVAL.
+ *
+ * PI가 전혀 없는 경우(metadata_size==0)는 관련 필드도 모두 0이어야 하며,
+ * 그렇지 않으면 드라이버가 절반만 설정한 것이므로 거부한다. PI가 있는
+ * 경우 pi_offset+pi_tuple_size가 metadata_size를 넘지 않는지, csum_type별로
+ * pi_tuple_size가 표준 크기(T10 PI 8바이트, CRC64 PI 16바이트)와 일치하는지
+ * 검사한다. interval_exp가 0이면 logical_block_size의 log2 값으로 기본
+ * 설정하고, dma_alignment를 interval 경계에 맞춰 보강해 PRP/SGL 엔트리가
+ * PI 검증 구간을 가로지르지 않게 한다. 마지막으로 block layer가 자동
+ * 생성/검증하는 PI 메타데이터가 한 세그먼트에 다 들어가도록 max_sectors를
+ * 추가로 제한한다.
+ * 실행 컨텍스트: blk_validate_limits() 호출 경로의 프로세스 컨텍스트.
+ * 호출자: blk_validate_limits(). 호출 대상: max_integrity_io_size() (blk.h),
+ * ilog2(), pr_warn().
+ * 에러 경로: 위반 시 -EINVAL 반환, blk_validate_limits()가 그대로 전파.
+ *
+ * 호출 체인:
+ *   blk_validate_limits → [blk_validate_integrity_limits] → max_integrity_io_size()
  */
 static int blk_validate_integrity_limits(struct queue_limits *lim)
 {
+	/* lim 안에 임베드된 blk_integrity 서브구조체 포인터 - 이후 모든 PI
+	 * 필드 접근은 이 bi를 통해 이루어진다. */
 	struct blk_integrity *bi = &lim->integrity;
 
 	/* NVMe PI metadata_size=0이면 checksum/reftag도 없어야 정상. */
@@ -231,6 +422,8 @@ static int blk_validate_integrity_limits(struct queue_limits *lim)
 		return 0;
 	}
 
+	/* metadata_size>0(PI 사용 요청)인데 커널이 integrity 지원 없이
+	 * 빌드됐다면 상위 blk-integrity 인프라 자체가 없으므로 거부. */
 	if (!IS_ENABLED(CONFIG_BLK_DEV_INTEGRITY)) {
 		pr_warn("integrity support disabled.\n");
 		return -EINVAL;
@@ -250,8 +443,11 @@ static int blk_validate_integrity_limits(struct queue_limits *lim)
 		return -EINVAL;
 	}
 
+	/* NVMe csum_type(체크섬 방식)별로 pi_tuple_size가 표준 규격과
+	 * 일치하는지 검사 - 방식마다 tuple 레이아웃 크기가 고정되어 있음. */
 	switch (bi->csum_type) {
 	case BLK_INTEGRITY_CSUM_NONE:
+		/* 체크섬이 없는데 tuple 크기가 0이 아니면 설정 모순. */
 		if (bi->pi_tuple_size) {
 			pr_warn("pi_tuple_size must be 0 when checksum type is none\n");
 			return -EINVAL;
@@ -283,6 +479,8 @@ static int blk_validate_integrity_limits(struct queue_limits *lim)
 		bi->interval_exp = ilog2(lim->logical_block_size);
 	} else if (bi->interval_exp < SECTOR_SHIFT ||
 		   bi->interval_exp > ilog2(lim->logical_block_size)) {
+		/* 드라이버가 명시적으로 지정한 interval_exp가 섹터 크기(2^9)보다
+		 * 작거나 LBA 크기보다 크면 범위를 벗어난 것이므로 거부. */
 		pr_warn("invalid interval_exp %u\n", bi->interval_exp);
 		return -EINVAL;
 	}
@@ -328,11 +526,36 @@ static int blk_validate_integrity_limits(struct queue_limits *lim)
  * 통해 보장하는 원자적 쓰기 단위를 계산할 때 사용된다. (추정) NVMe FAW 단위는
  * 보통 power-of-2이며, PRP/SGL segment 수와 LBA 정렬을 동시에 만족해야 한다.
  */
+/*
+ * [한국어]
+ * blk_queue_max_guaranteed_bio - 단일 bio에 보장 가능한 최대 바이트 수 계산
+ *
+ * @lim: max_segments, logical_block_size를 참조하는 queue_limits (읽기 전용).
+ * @return: 이 큐가 세그먼트 수/정렬 제약 하에서 "항상" 하나의 bio에 담을 수
+ *     있다고 보장할 수 있는 최대 바이트 수. blk_atomic_writes_update_limits()가
+ *     atomic write 단위 상한 계산에 사용한다.
+ *
+ * atomic write(원자적 쓰기)는 커널 내부에서 ITER_UBUF 방식의 단일 iov_iter로
+ * 제출되므로 세그먼트 하나가 여러 페이지에 걸쳐 있어도 결과적으로 하나의
+ * 연속된 사용자 버퍼로 취급된다. 다만 페이지 정렬이 어긋난 첫/마지막
+ * 세그먼트는 최소 logical_block_size만큼만 보장할 수 있고, 중간 세그먼트는
+ * 항상 PAGE_SIZE 전체를 채울 수 있다고 가정한다. 따라서 (min(세그먼트수,2) *
+ * LBA크기) + (남은 세그먼트수 * PAGE_SIZE)로 계산한다. NVMe 관점에서 이
+ * 값은 PRP/SGL 엔트리 수 제한과 LBA 정렬 요건을 동시에 만족하는 "보장
+ * 가능한" atomic write 크기의 상한이 된다.
+ * 실행 컨텍스트: blk_validate_atomic_write_limits() 호출 경로의 프로세스
+ * 컨텍스트. 부수효과 없음(순수 계산 함수).
+ * 호출자: blk_atomic_writes_update_limits(). 호출 대상: min()/제자리 산술뿐.
+ * 에러 경로: 없음 (값 계산만 수행, 실패 없음).
+ *
+ * 호출 체인:
+ *   blk_atomic_writes_update_limits → [blk_queue_max_guaranteed_bio] → (산술 계산으로 종료)
+ */
 static unsigned int blk_queue_max_guaranteed_bio(struct queue_limits *lim)
 {
 	/* NVMe atomic write: PRP/SGL 최대 엔트리 수와 BIO_MAX_VECS 중 작은 값. */
 	unsigned int max_segments = min(BIO_MAX_VECS, lim->max_segments);
-	unsigned int length;
+	unsigned int length; /* 최종 반환할 "보장 가능 바이트 수" 누산 변수. */
 
 	/* 처음/마지막 세그먼트는 LBA 정렬을 위해 logical_block_size만 사용. */
 	length = min(max_segments, 2) * lim->logical_block_size;
@@ -340,9 +563,36 @@ static unsigned int blk_queue_max_guaranteed_bio(struct queue_limits *lim)
 	if (max_segments > 2)
 		length += (max_segments - 2) * PAGE_SIZE;
 
+	/* 계산된 보장 가능 최대 바이트 수를 호출자(atomic write 단위 계산)에게 반환. */
 	return length;
 }
 
+/*
+ * [한국어]
+ * blk_atomic_writes_update_limits - NVMe FAW(원자적 쓰기) 최종 한도 계산
+ *
+ * @lim: atomic_write_hw_* (드라이버가 채운 하드웨어 원본 값) 필드를 읽어
+ *     atomic_write_max_sectors/unit_min/unit_max/boundary_sectors(블록
+ *     레이어가 노출할 최종 값)를 채우는 queue_limits.
+ * @return: 없음 (void). 실패 조건 없음 - 이미 blk_validate_atomic_write_limits()
+ *     에서 하드웨어 값의 유효성을 검증한 뒤에만 호출된다.
+ *
+ * NVMe Identify Controller가 보고하는 Atomic Write Unit Normal/Power Fail,
+ * Atomic Boundary 같은 하드웨어 원시값(atomic_write_hw_*)을 그대로 상위에
+ * 노출하면 MDTS(max_hw_sectors)나 단일 bio 보장 크기(guaranteed bio)를
+ * 넘어설 수 있다. 그래서 먼저 unit_limit = min(MDTS 바이트, guaranteed bio
+ * 바이트)를 구하고 2의 거듭제곱으로 내림해, 이 값과 하드웨어 unit_min/max를
+ * 다시 min()으로 묶어 최종 atomic_write_unit_min/max를 정한다.
+ * atomic_write_max_sectors는 HW 최대치와 MDTS 중 작은 값, boundary_sectors는
+ * HW boundary를 섹터 단위로 환산한 값이다.
+ * 실행 컨텍스트: blk_validate_atomic_write_limits() 내부, 프로세스 컨텍스트.
+ * 호출자: blk_validate_atomic_write_limits(). 호출 대상:
+ *     blk_queue_max_guaranteed_bio(), rounddown_pow_of_two().
+ * 에러 경로: 없음 (호출 전에 이미 하드웨어 값이 검증된 상태).
+ *
+ * 호출 체인:
+ *   blk_validate_atomic_write_limits → [blk_atomic_writes_update_limits] → blk_queue_max_guaranteed_bio
+ */
 static void blk_atomic_writes_update_limits(struct queue_limits *lim)
 {
 	/* NVMe FAW 단위는 MDTS와 보장 bio 크기 중 작은 값으로 제한. */
@@ -352,13 +602,17 @@ static void blk_atomic_writes_update_limits(struct queue_limits *lim)
 	/* NVMe atomic write 단위는 2의 거듭제곱이어야 함(컨트롤러 요구). */
 	unit_limit = rounddown_pow_of_two(unit_limit);
 
+	/* NVMe atomic write 최종 최대 섹터 = min(HW 최대, MDTS). */
 	lim->atomic_write_max_sectors =
 		min(lim->atomic_write_hw_max >> SECTOR_SHIFT,
 			lim->max_hw_sectors);
+	/* NVMe atomic write 최종 최소 단위 = min(HW 최소 단위, unit_limit). */
 	lim->atomic_write_unit_min =
 		min(lim->atomic_write_hw_unit_min, unit_limit);
+	/* NVMe atomic write 최종 최대 단위 = min(HW 최대 단위, unit_limit). */
 	lim->atomic_write_unit_max =
 		min(lim->atomic_write_hw_unit_max, unit_limit);
+	/* NVMe atomic boundary를 섹터 단위로 환산해 최종 값으로 노출. */
 	lim->atomic_write_boundary_sectors =
 		lim->atomic_write_hw_boundary >> SECTOR_SHIFT;
 }
@@ -366,6 +620,30 @@ static void blk_atomic_writes_update_limits(struct queue_limits *lim)
 /*
  * Test whether any boundary is aligned with any chunk size. Stacked
  * devices store any stripe size in t->chunk_sectors.
+ */
+/*
+ * [한국어]
+ * blk_valid_atomic_writes_boundary - atomic write 경계와 chunk 크기의 정렬 검사
+ *
+ * @chunk_sectors: RAID stripe 등 스택 장치가 저장한 chunk 크기(섹터 단위).
+ *     0이면 스트라이핑이 없는 것으로 간주한다.
+ * @boundary_sectors: NVMe atomic write boundary(섹터 단위). 이 경계를 넘는
+ *     원자적 쓰기는 두 개로 쪼개질 수 있어 원자성이 깨진다.
+ * @return: 두 값이 서로 배수 관계여서 함께 사용해도 안전하면 true, 한쪽이
+ *     다른 쪽의 배수가 아니면(경계 불일치) false.
+ *
+ * chunk_sectors(스트라이프 크기)와 atomic write boundary가 서로 배수
+ * 관계가 아니면, 원자적 쓰기가 stripe 경계를 넘거나 반대로 stripe가
+ * atomic boundary 중간에서 끊겨 두 제약을 동시에 만족시킬 수 없다. 둘 중
+ * 하나라도 0이면(제약이 없으면) 검사할 필요가 없으므로 true를 반환한다.
+ * 실행 컨텍스트: blk_validate_atomic_write_limits(), blk_stack_atomic_writes_head()
+ * 호출 경로의 프로세스 컨텍스트. 순수 함수(부수효과 없음).
+ * 호출자: blk_validate_atomic_write_limits(), blk_stack_atomic_writes_head().
+ * 호출 대상: 없음 (나눗셈 연산자만 사용).
+ * 에러 경로: 없음 (bool만 반환, 호출자가 실패로 처리할지 결정).
+ *
+ * 호출 체인:
+ *   blk_validate_atomic_write_limits/blk_stack_atomic_writes_head → [blk_valid_atomic_writes_boundary] → (산술 비교로 종료)
  */
 static bool blk_valid_atomic_writes_boundary(unsigned int chunk_sectors,
 					unsigned int boundary_sectors)
@@ -379,10 +657,12 @@ static bool blk_valid_atomic_writes_boundary(unsigned int chunk_sectors,
 	    boundary_sectors % chunk_sectors)
 		return false;
 
+	/* 반대로 chunk가 atomic boundary보다 크면 chunk가 boundary의 배수인지 검사. */
 	if (chunk_sectors > boundary_sectors &&
 	    chunk_sectors % boundary_sectors)
 		return false;
 
+	/* 배수 관계가 성립(또는 한쪽이 정확히 일치)하므로 두 제약이 호환됨. */
 	return true;
 }
 
@@ -396,9 +676,33 @@ static bool blk_valid_atomic_writes_boundary(unsigned int chunk_sectors,
  *   등(Identify Controller)에서 채워진 값을 반영한다.
  *   단위는 2의 거듭제곱이어야 하며, chunk_sectors(RAID stripe)와 정렬해야 한다.
  */
+/*
+ * [한국어 보강]
+ * @lim: (위와 동일) atomic_write_hw_* 원본 값을 검증하고, 실패 시 노출용
+ *     atomic_write_* 필드를 모두 0으로 만들어 "지원 안 함"을 표시한다.
+ * @return: 없음 (void). 성공/실패 여부는 lim->atomic_write_max_sectors 등이
+ *     0인지 여부로 호출자가 판단한다(반환값이 아니라 필드로 결과 전달).
+ *
+ * NVMe Identify Controller의 AWUN(Atomic Write Unit Normal), AWUPF(Atomic
+ * Write Unit Power Fail), Atomic Boundary 필드에서 얻은 하드웨어 원시값이
+ * block layer가 요구하는 불변식(2의 거듭제곱, min<=max<=hw_max, RAID
+ * stripe와의 정렬 등)을 만족하는지 하나씩 검사한다. 하나라도 어긋나면
+ * unsupported 레이블로 점프해 모든 atomic_write_* 값을 0으로 지워 상위
+ * 계층이 atomic write 기능을 아예 사용하지 못하게 한다. 모든 검사를
+ * 통과하면 blk_atomic_writes_update_limits()를 호출해 MDTS/guaranteed
+ * bio 크기까지 반영한 최종 한도를 확정한다.
+ * 실행 컨텍스트: blk_validate_limits() 호출 경로의 프로세스 컨텍스트.
+ * 호출자: blk_validate_limits(). 호출 대상: blk_valid_atomic_writes_boundary(),
+ * blk_atomic_writes_update_limits(), is_power_of_2().
+ * 에러 경로: 정식 에러 코드는 없다(void) - 실패 시 unsupported 레이블에서
+ * 필드를 0으로 만드는 것 자체가 에러 표시 방식이다.
+ *
+ * 호출 체인:
+ *   blk_validate_limits → [blk_validate_atomic_write_limits] → blk_valid_atomic_writes_boundary / blk_atomic_writes_update_limits
+ */
 static void blk_validate_atomic_write_limits(struct queue_limits *lim)
 {
-	unsigned int boundary_sectors;
+	unsigned int boundary_sectors; /* NVMe atomic boundary를 섹터 단위로 담을 지역 변수. */
 	/* NVMe FAW를 섹터 단위로 변환. */
 	unsigned int atomic_write_hw_max_sectors =
 			lim->atomic_write_hw_max >> SECTOR_SHIFT;
@@ -408,9 +712,13 @@ static void blk_validate_atomic_write_limits(struct queue_limits *lim)
 		goto unsupported;
 
 	/* UINT_MAX indicates stacked limits in initial state */
+	/* NVMe: blk_set_stacking_limits()가 초기화한 UINT_MAX가 그대로 남아
+	 * 있다면 실제 하위 장치 값이 병합되지 않은 것이므로 미지원 처리. */
 	if (lim->atomic_write_hw_max == UINT_MAX)
 		goto unsupported;
 
+	/* NVMe atomic_write_hw_max가 0이면 컨트롤러가 atomic write를 아예
+	 * 보고하지 않은 것이므로 미지원 처리. */
 	if (!lim->atomic_write_hw_max)
 		goto unsupported;
 
@@ -427,6 +735,7 @@ static void blk_validate_atomic_write_limits(struct queue_limits *lim)
 			 lim->atomic_write_hw_unit_max))
 		goto unsupported;
 
+	/* NVMe atomic_write_hw_unit_max가 atomic_write_hw_max를 넘으면 모순이므로 거부. */
 	if (WARN_ON_ONCE(lim->atomic_write_hw_unit_max >
 			 lim->atomic_write_hw_max))
 		goto unsupported;
@@ -436,8 +745,10 @@ static void blk_validate_atomic_write_limits(struct queue_limits *lim)
 			atomic_write_hw_max_sectors > lim->chunk_sectors))
 		goto unsupported;
 
+	/* NVMe atomic boundary(바이트)를 섹터 단위로 환산해 이후 검사에 사용. */
 	boundary_sectors = lim->atomic_write_hw_boundary >> SECTOR_SHIFT;
 
+	/* boundary가 설정된 컨트롤러(0이 아니면)만 아래 추가 정렬 검사를 수행. */
 	if (boundary_sectors) {
 		/* NVMe atomic boundary는 FAW 이상이어야 함. */
 		if (WARN_ON_ONCE(lim->atomic_write_hw_max >
@@ -456,11 +767,14 @@ static void blk_validate_atomic_write_limits(struct queue_limits *lim)
 		 * Furthermore, if needed, unit_max could even be reduced so
 		 * that it is compliant with a !power-of-2 boundary.
 		 */
+		/* NVMe: 현재 구현은 boundary도 2의 거듭제곱일 것을 요구(향후 완화 가능). */
 		if (!is_power_of_2(boundary_sectors))
 			goto unsupported;
 	}
 
+	/* 모든 검증 통과 - MDTS/guaranteed bio 크기를 반영한 최종 한도 계산. */
 	blk_atomic_writes_update_limits(lim);
+	/* 성공 경로는 여기서 종료(불린 반환값 없음, void). */
 	return;
 
 unsupported:
@@ -508,13 +822,35 @@ unsupported:
  *   discard_*: NVMe Deallocate/DSM 명령의 granularities.
  *   atomic_write_*: NVMe FAW/FUA 기반 원자 쓰기 단위(컨트롤러 종속).
  *   integrity: NVMe DIF/DIX 형식의 end-to-end data protection 설정.
+ *
+ * [한국어 보강]
+ * @return: 성공 시 0. logical/physical block size가 잘못됐거나, max_hw_sectors가
+ *     PAGE_SIZE 미만이거나, segment boundary/DMA alignment가 규격을 벗어나거나,
+ *     integrity/zoned 하위 검증이 실패하면 -EINVAL.
+ *
+ * 이 함수는 blk_validate_zoned_limits(), blk_validate_integrity_limits(),
+ * blk_validate_atomic_write_limits()를 순서대로 호출하는 최상위 게이트키퍼로,
+ * 드라이버가 (일부만) 채운 queue_limits를 block layer 전역에서 안전하게
+ * 참조할 수 있는 완전한 값으로 만든다. 각 단계는 이전 단계가 확정한 값(예:
+ * logical_block_size)에 의존하므로 순서를 바꿀 수 없다.
+ * 실행 컨텍스트: 드라이버 probe(큐 최초 생성) 또는 큐 갱신(reset 후 재검증)
+ * 경로의 프로세스 컨텍스트. 큐가 아직 freeze/lock 되지 않았을 수도 있으므로
+ * 호출자(queue_limits_commit_update 등)가 동시성을 보장해야 한다.
+ * 호출자: blk_set_default_limits(), queue_limits_commit_update().
+ * 호출 대상: blk_validate_block_size(), blk_validate_atomic_write_limits(),
+ * blk_validate_integrity_limits(), blk_validate_zoned_limits().
+ * 에러 경로: 각 단계에서 -EINVAL을 즉시 반환하며, 상위(드라이버 probe 또는
+ * queue_limits_commit_update)가 이를 그대로 전파해 큐 생성/갱신을 실패시킨다.
+ *
+ * 호출 체인:
+ *   blk_set_default_limits/queue_limits_commit_update → [blk_validate_limits] → blk_validate_atomic_write_limits → blk_validate_integrity_limits → blk_validate_zoned_limits
  */
 int blk_validate_limits(struct queue_limits *lim)
 {
-	unsigned int max_hw_sectors;
-	unsigned int logical_block_sectors;
-	unsigned long seg_size;
-	int err;
+	unsigned int max_hw_sectors; /* max_hw_sectors와 max_dev_sectors를 min 병합한 중간값. */
+	unsigned int logical_block_sectors; /* logical_block_size를 섹터 단위로 환산한 값. */
+	unsigned long seg_size; /* fast-path segment 크기 계산용 임시 변수. */
+	int err; /* 하위 검증 함수(integrity)의 반환값을 담는 임시 변수. */
 
 	/*
 	 * Unless otherwise specified, default to 512 byte logical blocks and a
@@ -526,14 +862,19 @@ int blk_validate_limits(struct queue_limits *lim)
 	/* NVMe LBA Data Size 미보고 시 512B 기본값. */
 	if (!lim->logical_block_size)
 		lim->logical_block_size = SECTOR_SIZE;
+	/* NVMe LBA Data Size가 명시된 경우 2의 거듭제곱/범위 등 규격을 검사 -
+	 * 위반 시 경고 로그를 남기고 큐 생성/갱신을 즉시 실패시킨다. */
 	else if (blk_validate_block_size(lim->logical_block_size)) {
 		pr_warn("Invalid logical block size (%d)\n", lim->logical_block_size);
 		return -EINVAL;
 	}
 	/* NVMe physical block size는 logical block size 이상의 2의 거듭제곱. */
 	if (lim->physical_block_size < lim->logical_block_size) {
+		/* physical_block_size가 logical보다 작게 설정됐으면(드라이버 미설정
+		 * 등) logical_block_size와 같게 끌어올려 최소 불변식을 만족시킴. */
 		lim->physical_block_size = lim->logical_block_size;
 	} else if (!is_power_of_2(lim->physical_block_size)) {
+		/* logical 이상이지만 2의 거듭제곱이 아니면 규격 위반이므로 거부. */
 		pr_warn("Invalid physical block size (%d)\n", lim->physical_block_size);
 		return -EINVAL;
 	}
@@ -600,6 +941,8 @@ int blk_validate_limits(struct queue_limits *lim)
 	/* NVMe 최종 max_sectors = min(MDTS, max_dev_sectors). */
 	max_hw_sectors = min_not_zero(lim->max_hw_sectors,
 				lim->max_dev_sectors);
+	/* 사용자가 sysfs(max_sectors_kb)로 명시적 한도를 설정했다면 그 값을
+	 * 최우선으로 하되, HW 한도(max_hw_sectors)를 넘지 않도록 min 병합. */
 	if (lim->max_user_sectors) {
 		/* 사용자가 sysfs로 제한한 최소 세그먼트 크기 미만이면 거부. */
 		if (lim->max_user_sectors < BLK_MIN_SEGMENT_SIZE / SECTOR_SIZE)
@@ -638,6 +981,7 @@ int blk_validate_limits(struct queue_limits *lim)
 	if (lim->max_hw_wzeroes_unmap_sectors &&
 	    lim->max_hw_wzeroes_unmap_sectors != lim->max_write_zeroes_sectors)
 		return -EINVAL;
+	/* NVMe Write Zeroes unmap 최종 한도 = min(HW, 사용자 sysfs 설정). */
 	lim->max_wzeroes_unmap_sectors = min(lim->max_hw_wzeroes_unmap_sectors,
 			lim->max_user_wzeroes_unmap_sectors);
 
@@ -729,7 +1073,11 @@ int blk_validate_limits(struct queue_limits *lim)
 
 	/* NVMe 파티션/스택 alignment_offset 마스크 처리. */
 	if (lim->alignment_offset) {
+		/* alignment_offset을 physical_block_size 이내로 마스킹 - 그보다
+		 * 큰 절대 오프셋은 의미가 없고 배수 부분은 이미 정렬된 것과 같음. */
 		lim->alignment_offset &= (lim->physical_block_size - 1);
+		/* 이 시점의 alignment_offset은 새로 계산된 유효한 값이므로,
+		 * 이전에 남아있을 수 있는 misaligned 플래그를 새로 지운다. */
 		lim->flags &= ~BLK_FLAG_MISALIGNED;
 	}
 
@@ -742,11 +1090,16 @@ int blk_validate_limits(struct queue_limits *lim)
 	if (!(lim->features & BLK_FEAT_WRITE_CACHE))
 		lim->features &= ~BLK_FEAT_FUA;
 
+	/* NVMe FAW(원자적 쓰기) 한도를 검증/정규화 - 실패해도 atomic_write_*가
+	 * 0으로 클리어될 뿐 이 함수 자체를 실패시키지 않는다(void 반환). */
 	blk_validate_atomic_write_limits(lim);
 
+	/* NVMe DIF/DIX PI 설정 검증 - 실패 시 err에 -EINVAL이 담긴다. */
 	err = blk_validate_integrity_limits(lim);
+	/* PI 검증 실패는 전체 blk_validate_limits()의 실패로 즉시 전파. */
 	if (err)
 		return err;
+	/* 마지막 단계로 NVMe ZNS 관련 한도를 검증하고 그 결과를 그대로 반환. */
 	return blk_validate_zoned_limits(lim);
 }
 EXPORT_SYMBOL_GPL(blk_validate_limits);
@@ -759,6 +1112,23 @@ EXPORT_SYMBOL_GPL(blk_validate_limits);
  *   NVMe 드라이버가 blk_mq_init_queue() 등으로 큐를 생성할 때 호출되며,
  *   사용자가 덮어쓸 수 있는 discard/write-zeroes 한도를 UINT_MAX로 초기화한
  *   뒤 blk_validate_limits()를 통해 NVMe 하드웨어 제약을 정규화한다.
+ *
+ * [한국어 보강]
+ * @return: blk_validate_limits(lim)의 반환값을 그대로 전달 - 성공 시 0,
+ *     검증 실패 시 -EINVAL.
+ *
+ * 사용자 sysfs가 낮출 수 있는 max_user_discard_sectors/
+ * max_user_wzeroes_unmap_sectors는 blk_validate_limits() 내부의 일반적인
+ * "0이면 기본값" 패턴으로는 초기화할 수 없다(0 자체가 "제한 없음"이 아니라
+ * "완전 금지"를 의미하는 필드이기 때문). 따라서 이 두 필드만 별도로
+ * UINT_MAX로 세팅한 뒤 나머지 정규화는 blk_validate_limits()에 위임한다.
+ * 실행 컨텍스트: 큐 최초 생성 경로의 프로세스 컨텍스트.
+ * 호출자: blk_mq_init_queue() 등 큐 최초 생성 경로. 호출 대상:
+ * blk_validate_limits().
+ * 에러 경로: blk_validate_limits()가 -EINVAL을 반환하면 그대로 전파.
+ *
+ * 호출 체인:
+ *   blk_mq_init_queue → [blk_set_default_limits] → blk_validate_limits
  */
 int blk_set_default_limits(struct queue_limits *lim)
 {
@@ -771,6 +1141,7 @@ int blk_set_default_limits(struct queue_limits *lim)
 	lim->max_user_discard_sectors = UINT_MAX;
 	/* NVMe Write Zeroes unmap 사용자 한도를 최대로 두고 HW 값과 min 준비. */
 	lim->max_user_wzeroes_unmap_sectors = UINT_MAX;
+	/* 나머지 필드 정규화/검증은 공통 경로인 blk_validate_limits()에 위임. */
 	return blk_validate_limits(lim);
 }
 
@@ -784,11 +1155,32 @@ int blk_set_default_limits(struct queue_limits *lim)
  *   갱신할 때 사용된다. limits_lock 아래에서 blk_validate_limits()로 검증한
  *   뒤 q->limits에 복사하고, disk->bdi에도 optimal I/O 크기를 전파한다.
  *   (주의) 호출자는 큐를 freeze하거나 outstanding I/O가 없음을 보장해야 한다.
+ *
+ * [한국어 보강]
+ * @return: 성공 시 0. blk_validate_limits() 실패 시 -EINVAL, inline
+ *     encryption과 DIF/DIX가 동시에 요구되면 -EINVAL. 두 경우 모두
+ *     q->limits는 갱신되지 않은 채로 남는다(원자성 보장).
+ *
+ * 이 함수는 반드시 q->limits_lock을 쥔 상태(mutex_lock 또는 mutex_trylock
+ * 성공)에서 호출되어야 하며, 성공/실패 어느 경로든 함수 끝에서 반드시
+ * mutex_unlock으로 락을 해제한다(lockdep_assert_held로 사전 조건을 강제).
+ * 검증에 실패하면 q->limits를 건드리지 않고 즉시 unlock 후 반환해 "전부
+ * 반영 또는 전부 무시"의 원자적 갱신을 보장한다. 성공하면 q->limits를
+ * 통째로 교체하고, gendisk가 있다면 blk_apply_bdi_limits()로 read-ahead
+ * 힌트도 함께 갱신한다.
+ * 실행 컨텍스트: 드라이버 reset/재구성 경로의 프로세스 컨텍스트. 호출자가
+ * 큐를 freeze했거나 outstanding I/O가 없음을 보장해야 race 없이 안전하다.
+ * 호출자: queue_limits_set(), queue_limits_commit_update_frozen().
+ * 호출 대상: blk_validate_limits(), blk_apply_bdi_limits().
+ * 에러 경로: out_unlock 레이블에서 항상 mutex_unlock 후 error 값을 반환.
+ *
+ * 호출 체인:
+ *   queue_limits_set/queue_limits_commit_update_frozen → [queue_limits_commit_update] → blk_validate_limits → blk_apply_bdi_limits
  */
 int queue_limits_commit_update(struct request_queue *q,
 		struct queue_limits *lim)
 {
-	int error;
+	int error; /* blk_validate_limits() 또는 encryption 호환성 검사의 결과 코드. */
 
 	/* NVMe limits 갱신은 limits_lock 보호 아래 수행되어야 함. */
 	lockdep_assert_held(&q->limits_lock);
@@ -828,12 +1220,32 @@ EXPORT_SYMBOL_GPL(queue_limits_commit_update);
  *   Identify 값으로 채우고, 본 함수를 통해 I/O를 멈춘 상태에서 안전하게
  *   커밋한다. blk_mq_freeze_queue/unfreeze_queue로 SQ/CQ에 새 request가
  *   들어가지 않음을 보장한다.
+ *
+ * [한국어 보강]
+ * @return: queue_limits_commit_update()의 반환값을 그대로 전달 - 성공 0,
+ *     실패 시 -EINVAL. freeze는 성공/실패와 무관하게 항상 unfreeze된다.
+ *
+ * queue_limits_commit_update()는 q->limits를 통째로 교체하므로, outstanding
+ * request가 새 limits와 옛 limits가 뒤섞인 상태로 처리될 위험이 있다.
+ * 이를 막기 위해 blk_mq_freeze_queue()로 새 request 진입을 막고 이미
+ * 처리 중인 request가 모두 drain될 때까지 기다린 뒤 limits를 교체하고,
+ * blk_mq_unfreeze_queue()로 I/O를 재개한다. memflags는 freeze 중
+ * 메모리 회수(reclaim) 재진입을 막기 위한 GFP 플래그 스냅샷으로,
+ * unfreeze 시 그대로 복원해야 한다.
+ * 실행 컨텍스트: 드라이버 reset 경로의 프로세스 컨텍스트. freeze/unfreeze
+ * 쌍은 반드시 짝을 맞춰야 하며 중첩 호출도 허용된다(refcount 기반).
+ * 호출자: NVMe 등 드라이버의 reset/재구성 경로. 호출 대상:
+ * blk_mq_freeze_queue(), queue_limits_commit_update(), blk_mq_unfreeze_queue().
+ * 에러 경로: queue_limits_commit_update() 실패도 unfreeze는 반드시 수행.
+ *
+ * 호출 체인:
+ *   (NVMe reset 등 드라이버 경로) → [queue_limits_commit_update_frozen] → blk_mq_freeze_queue → queue_limits_commit_update → blk_mq_unfreeze_queue
  */
 int queue_limits_commit_update_frozen(struct request_queue *q,
 		struct queue_limits *lim)
 {
-	unsigned int memflags;
-	int ret;
+	unsigned int memflags; /* freeze 시점의 GFP 플래그 스냅샷 - unfreeze에 그대로 복원. */
+	int ret; /* queue_limits_commit_update()의 결과를 담아 그대로 반환. */
 
 	/* NVMe reset 중 SQ/CQ에 새 request 진입 차단(freeze). */
 	memflags = blk_mq_freeze_queue(q);
@@ -842,6 +1254,7 @@ int queue_limits_commit_update_frozen(struct request_queue *q,
 	/* NVMe I/O 재개: 새 limits 하에서 SQ/CQ에 request 투입 가능. */
 	blk_mq_unfreeze_queue(q, memflags);
 
+	/* 커밋 성공/실패 여부를 호출자에게 그대로 전달. */
 	return ret;
 }
 EXPORT_SYMBOL_GPL(queue_limits_commit_update_frozen);
@@ -855,10 +1268,32 @@ EXPORT_SYMBOL_GPL(queue_limits_commit_update_frozen);
  *   NVMe PCI/FC/TCP transport에서 request_queue를 생성할 때 처음으로 호출.
  *   blk_mq_init_queue -> queue_limits_set -> blk_validate_limits 경로를 통해
  *   NVMe 컨트롤러 capability를 block layer에 등록한다.
+ *
+ * [한국어 보강]
+ * @return: queue_limits_commit_update()의 반환값을 그대로 전달 - 성공 0,
+ *     실패 시 -EINVAL.
+ *
+ * 큐가 아직 사용자에게 노출되지 않은 최초 생성 시점에는 별도의 freeze가
+ * 필요 없으므로(어차피 outstanding I/O가 없음), mutex_lock으로 limits_lock만
+ * 잡고 바로 queue_limits_commit_update()에 위임한다. lock/unlock을 직접
+ * 감싸는 이유는 queue_limits_commit_update()가 "락을 이미 쥔 상태"를
+ * 전제로 만들어져 있어(lockdep_assert_held) 최초 호출부와 갱신 호출부가
+ * 락 획득 방식만 다르게 재사용할 수 있게 하기 위함이다.
+ * 실행 컨텍스트: 드라이버 큐 최초 생성 경로의 프로세스 컨텍스트.
+ * 호출자: nvme_alloc_admin_tag_set() 이후 큐 초기화 경로 등. 호출 대상:
+ * queue_limits_commit_update() (내부에서 blk_validate_limits() 등 호출).
+ * 에러 경로: queue_limits_commit_update()가 실패해도 해당 함수 내부에서
+ * mutex_unlock을 수행하므로 이 함수에서 별도 unlock은 필요 없다.
+ *
+ * 호출 체인:
+ *   blk_mq_init_queue → [queue_limits_set] → queue_limits_commit_update → blk_validate_limits
  */
 int queue_limits_set(struct request_queue *q, struct queue_limits *lim)
 {
+	/* NVMe 큐 최초 생성 시 limits_lock을 잡아 commit_update의 lockdep 전제
+	 * 조건(lockdep_assert_held)을 충족시킨다. */
 	mutex_lock(&q->limits_lock);
+	/* 실제 검증/커밋/unlock은 공통 경로인 queue_limits_commit_update에 위임. */
 	return queue_limits_commit_update(q, lim);
 }
 EXPORT_SYMBOL_GPL(queue_limits_set);
@@ -872,6 +1307,25 @@ EXPORT_SYMBOL_GPL(queue_limits_set);
  *   NVMe namespace 위의 파티션이나 MD/DM 스택 장치에서 물리 블록 경계와
  *   데이터 시작 위치가 맞지 않을 때 alignment_offset을 계산한다. 이 값은
  *   상위 bio의 LBA 정렬 검사에 사용된다.
+ *
+ * [한국어 보강]
+ * @return: sector 위치에서 granularity(= max(physical_block_size, io_min))
+ *     경계까지 남은 바이트 오프셋(0이면 완전 정렬).
+ *
+ * 파티션이나 MD/DM 스택 장치는 하위 NVMe namespace의 물리 블록 경계와
+ * 다른 위치에서 시작할 수 있다. 이 함수는 lim->alignment_offset(namespace
+ * 전체의 기준 오프셋)과 sector가 granularity 내에서 차지하는 위치를
+ * 비교해, "이 섹터부터 얼마나 더 가야 다음 정렬 경계가 나오는지"를 바이트
+ * 단위로 계산한다. sector_div()는 64비트 sector_t를 32비트 나눗셈으로
+ * 처리하기 위한 커널 헬퍼(나머지를 반환하고 sector 자체는 몫으로 갱신)이다.
+ * 실행 컨텍스트: 프로세스 컨텍스트(sysfs 읽기, blk_stack_limits() 등).
+ * 부수효과 없는 순수 계산 함수.
+ * 호출자: blk_stack_limits(), bdev_alignment_offset(). 호출 대상:
+ * sector_div() (asm-generic/div64.h 매크로).
+ * 에러 경로: 없음 (항상 유효한 오프셋 값을 반환).
+ *
+ * 호출 체인:
+ *   blk_stack_limits/bdev_alignment_offset → [queue_limit_alignment_offset] → sector_div
  */
 static int queue_limit_alignment_offset(const struct queue_limits *lim,
 		sector_t sector)
@@ -882,6 +1336,8 @@ static int queue_limit_alignment_offset(const struct queue_limits *lim,
 	unsigned int alignment = sector_div(sector, granularity >> SECTOR_SHIFT)
 		<< SECTOR_SHIFT;
 
+	/* namespace 전체 기준 alignment_offset에서 이 섹터의 국소 위치를 빼고
+	 * granularity로 나머지 연산해, 다음 정렬 경계까지 남은 바이트를 구함. */
 	return (granularity + lim->alignment_offset - alignment) % granularity;
 }
 
@@ -894,11 +1350,29 @@ static int queue_limit_alignment_offset(const struct queue_limits *lim,
  *   NVMe Deallocate(Trim) 명령은 discard_granularity 단위로 정렬되어야
  *   효율적으로 동작한다. 파티션 시작 섹터를 고려하여 discard alignment를
  *   보정한다.
+ *
+ * [한국어 보강]
+ * @return: sector 위치에서 discard_granularity 경계까지 남은 바이트
+ *     오프셋. Deallocate 미지원(max_discard_sectors==0)이면 0.
+ *
+ * queue_limit_alignment_offset()과 동일한 아이디어를 discard_granularity/
+ * discard_alignment에 적용한다. NVMe Deallocate는 특정 granularity
+ * 단위로 정렬된 요청이라야 효율적으로 처리되므로(정렬이 안 맞으면
+ * 컨트롤러가 부분 페이지를 read-modify-write 해야 할 수 있음), 파티션
+ * 시작 섹터를 반영한 정확한 정렬 오프셋을 계산해 상위(blkdev_issue_discard
+ * 등)에 알려준다.
+ * 실행 컨텍스트: 프로세스 컨텍스트. 순수 계산 함수(부수효과 없음).
+ * 호출자: blk_stack_limits(), bdev_discard_alignment(). 호출 대상:
+ * sector_div().
+ * 에러 경로: 없음. Deallocate 미지원 시 0을 반환해 "정렬 걱정 없음"을 표시.
+ *
+ * 호출 체인:
+ *   blk_stack_limits/bdev_discard_alignment → [queue_limit_discard_alignment] → sector_div
  */
 static unsigned int queue_limit_discard_alignment(
 		const struct queue_limits *lim, sector_t sector)
 {
-	unsigned int alignment, granularity, offset;
+	unsigned int alignment, granularity, offset; /* 섹터/바이트 변환 중간값들. */
 
 	/* NVMe Deallocate 미지원 시 alignment 0 반환. */
 	if (!lim->max_discard_sectors)
@@ -919,9 +1393,33 @@ static unsigned int queue_limit_discard_alignment(
 	offset = (granularity + alignment - offset) % granularity;
 
 	/* Turn it back into bytes, gaah */
+	/* 섹터 단위 offset을 다시 바이트 단위로 환산해 반환. */
 	return offset << SECTOR_SHIFT;
 }
 
+/*
+ * [한국어]
+ * blk_round_down_sectors - 섹터 수를 LBA 단위로 내림하되 최소 PAGE_SIZE는 보장
+ *
+ * @sectors: 내림할 섹터 수 (예: 스택 병합 중간값인 max_sectors 등).
+ * @lbs: 기준이 되는 logical_block_size(바이트). NVMe LBA Data Size.
+ * @return: lbs 단위로 내림된 섹터 수. 단, 그 결과가 PAGE_SIZE 상당 섹터
+ *     수보다 작으면 PAGE_SIZE 상당 섹터 수로 올려 반환한다.
+ *
+ * blk_stack_limits()가 여러 하위 NVMe 장치의 max_sectors/max_hw_sectors/
+ * max_dev_sectors를 병합한 뒤, 그 결과가 LBA 경계에 맞도록 정렬해야
+ * 한다(round_down). 그런데 병합 과정에서 값이 지나치게 작아지면 블록
+ * 레이어가 요구하는 "최소 한 페이지는 처리 가능해야 한다"는 불변식이
+ * 깨질 수 있으므로, 내림 후에도 PAGE_SIZE 상당 섹터 수 미만이면 강제로
+ * 끌어올린다.
+ * 실행 컨텍스트: blk_stack_limits() 호출 경로의 프로세스 컨텍스트. 순수
+ * 계산 함수(부수효과 없음).
+ * 호출자: blk_stack_limits(). 호출 대상: round_down() (산술 매크로).
+ * 에러 경로: 없음 (항상 유효한 섹터 수를 반환).
+ *
+ * 호출 체인:
+ *   blk_stack_limits → [blk_round_down_sectors] → (산술 계산으로 종료)
+ */
 static unsigned int blk_round_down_sectors(unsigned int sectors, unsigned int lbs)
 {
 	/* NVMe I/O 크기를 LBA 단위로 내림. */
@@ -929,10 +1427,36 @@ static unsigned int blk_round_down_sectors(unsigned int sectors, unsigned int lb
 	/* NVMe: 최소 PAGE_SIZE 이상 보장. */
 	if (sectors < PAGE_SIZE >> SECTOR_SHIFT)
 		sectors = PAGE_SIZE >> SECTOR_SHIFT;
+	/* 내림 + 최소값 보정이 끝난 최종 섹터 수를 호출자에게 반환. */
 	return sectors;
 }
 
 /* Check if second and later bottom devices are compliant */
+/*
+ * [한국어]
+ * blk_stack_atomic_writes_tail - 두 번째 이후 하위 장치의 atomic write 호환성 검사/병합
+ *
+ * @t: 이미 최소 하나의 하위 장치가 병합된 상위(target) queue_limits.
+ * @b: 새로 병합할 하위(bottom) 장치의 queue_limits.
+ * @return: 호환되어 병합에 성공하면 true, boundary가 다르거나 unit 범위가
+ *     겹치지 않으면 false(이 경우 상위 호출자가 atomic write 전체를
+ *     미지원으로 처리).
+ *
+ * MD/DM 등으로 여러 NVMe 장치를 스트라이핑/미러링할 때, 두 번째 이후
+ * 추가되는 하위 장치는 이미 확정된 t->atomic_write_hw_boundary와 정확히
+ * 일치해야 한다(서로 다른 boundary를 가진 장치를 섞는 조합은 아직
+ * 지원하지 않음). 또한 t의 최소/최대 unit 범위가 b의 최대/최소 unit
+ * 범위와 겹치는 구간이 있어야 하며, 겹치면 t의 범위를 b와 교집합으로
+ * 좁히고(min/max 재계산) hw_max도 더 작은 쪽으로 줄인다.
+ * 실행 컨텍스트: blk_stack_atomic_writes_limits() 호출 경로의 프로세스
+ * 컨텍스트.
+ * 호출자: blk_stack_atomic_writes_limits() (두 번째 이후 하위 장치 병합 시).
+ * 호출 대상: 없음 (min/max 산술 연산만 사용).
+ * 에러 경로: 비호환 시 false 반환, 호출자가 unsupported 레이블로 이동.
+ *
+ * 호출 체인:
+ *   blk_stack_atomic_writes_limits → [blk_stack_atomic_writes_tail] → (산술 병합으로 종료)
+ */
 static bool blk_stack_atomic_writes_tail(struct queue_limits *t,
 				struct queue_limits *b)
 {
@@ -958,12 +1482,38 @@ static bool blk_stack_atomic_writes_tail(struct queue_limits *t,
 				b->atomic_write_hw_unit_min);
 	t->atomic_write_hw_unit_max = min(t->atomic_write_hw_unit_max,
 				b->atomic_write_unit_max);
+	/* boundary 일치 + unit 범위 교집합 존재 → 병합 성공. */
 	return true;
 }
 
+/*
+ * [한국어]
+ * blk_stack_atomic_writes_chunk_sectors - chunk_sectors(RAID stripe)와 atomic write 단위 재정렬
+ *
+ * @t: 이미 atomic_write_hw_* 필드가 병합된 상위 queue_limits. chunk_sectors가
+ *     0이 아니면(스트라이핑 등으로 stripe 경계가 존재) 이 값을 기준으로
+ *     atomic_write_hw_unit_max/unit_min/hw_max를 추가로 좁힌다.
+ * @return: 없음 (void). t의 필드를 in-place로 보정한다.
+ *
+ * chunk_sectors(RAID stripe 크기 등)는 2의 거듭제곱일 필요가 없지만
+ * atomic write 단위는 2의 거듭제곱이어야 하므로, chunk 크기를 "넘지
+ * 않는" 가장 큰 2의 거듭제곱 인자를 max_pow_of_two_factor()로 구해
+ * unit_max의 상한으로 삼는다(예: chunk=24KB이면 8KB). chunk_sectors를
+ * 바이트로 환산할 때 오버플로가 발생하면(매우 큰 stripe) 어차피 그런
+ * 크기의 atomic write는 지원하지 않으므로 섹터 값을 그대로 바이트처럼
+ * 취급해 안전한 쪽으로 보정한다.
+ * 실행 컨텍스트: blk_stack_atomic_writes_limits() 호출 경로의 프로세스
+ * 컨텍스트.
+ * 호출자: blk_stack_atomic_writes_limits() (head/tail 병합 후 마지막 단계).
+ * 호출 대상: check_shl_overflow(), max_pow_of_two_factor().
+ * 에러 경로: 없음 (오버플로 시에도 안전한 값으로 대체할 뿐 실패하지 않음).
+ *
+ * 호출 체인:
+ *   blk_stack_atomic_writes_limits → [blk_stack_atomic_writes_chunk_sectors] → max_pow_of_two_factor
+ */
 static void blk_stack_atomic_writes_chunk_sectors(struct queue_limits *t)
 {
-	unsigned int chunk_bytes;
+	unsigned int chunk_bytes; /* chunk_sectors를 바이트로 환산한 값(오버플로 가능). */
 
 	/* chunk_sectors가 0이면 atomic write와의 정렬 검사 불필요. */
 	if (!t->chunk_sectors)
@@ -1000,6 +1550,31 @@ static void blk_stack_atomic_writes_chunk_sectors(struct queue_limits *t)
 }
 
 /* Check stacking of first bottom device */
+/*
+ * [한국어]
+ * blk_stack_atomic_writes_head - 첫 번째 하위 장치의 atomic write 한도를 상위로 상속
+ *
+ * @t: 아직 atomic write 값이 설정되지 않은 상위(target) queue_limits
+ *     (atomic_write_hw_max == UINT_MAX인 초기 상태).
+ * @b: 상속할 첫 번째 하위(bottom) 장치의 queue_limits.
+ * @return: chunk_sectors와 boundary가 정렬 가능하면 true(상속 수행),
+ *     정렬 불가능하면 false(호출자가 atomic write 전체를 미지원 처리).
+ *
+ * 두 번째 이후 장치는 blk_stack_atomic_writes_tail()로 "호환성 검사 후
+ * 교집합"을 구하지만, 첫 번째 하위 장치는 비교 대상이 없으므로 t의
+ * chunk_sectors(RAID stripe, 스택 드라이버가 이미 설정해뒀을 수 있음)와
+ * b의 atomic boundary가 서로 배수 관계인지만 확인한 뒤 b의 값을 그대로
+ * 복사해 상위 t의 초기 atomic write 프로필로 삼는다.
+ * 실행 컨텍스트: blk_stack_atomic_writes_limits() 호출 경로의 프로세스
+ * 컨텍스트.
+ * 호출자: blk_stack_atomic_writes_limits() (t->atomic_write_hw_max ==
+ * UINT_MAX일 때, 즉 아직 하위 장치가 하나도 병합되지 않은 상태).
+ * 호출 대상: blk_valid_atomic_writes_boundary().
+ * 에러 경로: 정렬 실패 시 false, 호출자가 unsupported로 처리.
+ *
+ * 호출 체인:
+ *   blk_stack_atomic_writes_limits → [blk_stack_atomic_writes_head] → blk_valid_atomic_writes_boundary
+ */
 static bool blk_stack_atomic_writes_head(struct queue_limits *t,
 				struct queue_limits *b)
 {
@@ -1013,6 +1588,7 @@ static bool blk_stack_atomic_writes_head(struct queue_limits *t,
 	t->atomic_write_hw_unit_min = b->atomic_write_hw_unit_min;
 	t->atomic_write_hw_max = b->atomic_write_hw_max;
 	t->atomic_write_hw_boundary = b->atomic_write_hw_boundary;
+	/* 정렬 검사 통과 + 값 상속 완료 → 첫 장치 채택 성공. */
 	return true;
 }
 
@@ -1026,6 +1602,27 @@ static bool blk_stack_atomic_writes_head(struct queue_limits *t,
  *   MD/DM 등이 여러 NVMe 장치를 묶을 때 각 장치의 atomic write 단위가
  *   호환되는지 검사하고, 호환되면 상위 장치로 병합한다. 호환되지 않으면
  *   상위 장치는 atomic write를 노출하지 않는다.
+ *
+ * [한국어 보강]
+ * @return: 없음 (void). 성공/실패는 t->atomic_write_hw_max가 0인지 여부로
+ *     상위(blk_stack_limits)가 판단한다.
+ *
+ * blk_stack_limits()가 물리/논리 블록 크기 등 기본 필드를 병합한 뒤 마지막
+ * 단계로 호출하는 함수다. 하위 장치가 atomic write를 아예 지원하지
+ * 않거나(BLK_FEAT_ATOMIC_WRITES 꺼짐), 단위가 0이거나, start 섹터가
+ * 정렬되지 않았다면 곧바로 unsupported로 점프한다. 그렇지 않으면 t가
+ * 아직 아무 하위 장치도 병합하지 않은 초기 상태(UINT_MAX)인지에 따라
+ * head/tail 병합 함수를 선택 호출하고, 마지막으로 chunk_sectors(RAID
+ * stripe)와의 정렬을 blk_stack_atomic_writes_chunk_sectors()로 재조정한다.
+ * 실행 컨텍스트: blk_stack_limits() 호출 경로의 프로세스 컨텍스트.
+ * 호출자: blk_stack_limits(). 호출 대상: blk_atomic_write_start_sect_aligned(),
+ * blk_stack_atomic_writes_head(), blk_stack_atomic_writes_tail(),
+ * blk_stack_atomic_writes_chunk_sectors().
+ * 에러 경로: 어떤 검사든 실패하면 unsupported 레이블에서 관련 필드를 모두
+ * 0으로 만들어 상위 장치가 atomic write를 노출하지 않게 한다.
+ *
+ * 호출 체인:
+ *   blk_stack_limits → [blk_stack_atomic_writes_limits] → blk_stack_atomic_writes_head/tail → blk_stack_atomic_writes_chunk_sectors
  */
 static void blk_stack_atomic_writes_limits(struct queue_limits *t,
 				struct queue_limits *b, sector_t start)
@@ -1052,7 +1649,9 @@ static void blk_stack_atomic_writes_limits(struct queue_limits *t,
 		if (!blk_stack_atomic_writes_tail(t, b))
 			goto unsupported;
 	}
+	/* head/tail 병합 결과를 RAID stripe(chunk_sectors)와 재정렬. */
 	blk_stack_atomic_writes_chunk_sectors(t);
+	/* 병합 성공 - unsupported 레이블은 건너뛰고 함수 종료. */
 	return;
 
 unsupported:
@@ -1083,12 +1682,41 @@ unsupported:
  *     조건으로 재사용한다.
  *   - BLK_FEAT_POLL/NOWAIT 등 NVMe 특화 feature를 상위로 상속한다.
  *   - zoned NVMe(ZNS)의 zone_append_sectors, zone_write_granularity를 병합.
+ *
+ * [한국어 보강]
+ * @return: 모든 필드가 완벽히 정렬/호환되면 0. 하나라도 misaligned 보정이
+ *     발생하면 -1(치명적 에러는 아니며, t->flags에 BLK_FLAG_MISALIGNED가
+ *     설정되고 값 자체는 보정되어 계속 사용 가능하다). 호출자는 반환값을
+ *     경고 로그 출력 여부 판단에만 사용한다.
+ *
+ * 이 함수는 값 하나하나를 "상위(t)와 하위(b) 중 더 제한적인 쪽"으로
+ * 좁혀나가는 병합기다. min 계열로 합쳐야 하는 필드(max_sectors, segment
+ * 수 등)는 min_not_zero/min으로, max 계열(logical/physical block size,
+ * alignment 등)은 max로, 배수/최소공배수 관계가 필요한 필드(io_opt,
+ * alignment_offset)는 lcm_not_zero로, chunk_sectors처럼 "공약수"가
+ * 필요한 필드는 gcd로 처리한다. 정렬이 깨지는 경우(physical_block_size가
+ * logical_block_size의 배수가 아님 등)에는 안전한 값으로 강제 보정하고
+ * BLK_FLAG_MISALIGNED를 세워 상위에 경고할 수 있게 한다. 마지막으로
+ * discard/secure-erase/zoned/atomic-write 관련 필드를 각각의 하위 병합
+ * 함수(queue_limit_discard_alignment, blk_stack_atomic_writes_limits)로
+ * 넘겨 처리한다.
+ * 실행 컨텍스트: MD/DM 등 스택 드라이버의 큐 구성 경로, 프로세스 컨텍스트.
+ * t/b는 호출자가 배타적으로 소유하는 지역/임시 구조체라고 가정하므로
+ * 별도 락이 없다.
+ * 호출자: queue_limits_stack_bdev(). 호출 대상: queue_limit_alignment_offset(),
+ * blk_round_down_sectors(), queue_limit_discard_alignment(),
+ * blk_stack_atomic_writes_limits().
+ * 에러 경로: 정식 실패(음수 errno)는 없다 - misalignment는 값 보정 +
+ * -1 반환으로만 표시되며, 큐 생성 자체를 막지 않는다.
+ *
+ * 호출 체인:
+ *   queue_limits_stack_bdev → [blk_stack_limits] → queue_limit_alignment_offset/blk_round_down_sectors/blk_stack_atomic_writes_limits
  */
 int blk_stack_limits(struct queue_limits *t, struct queue_limits *b,
 		     sector_t start)
 {
-	unsigned int top, bottom, alignment;
-	int ret = 0;
+	unsigned int top, bottom, alignment; /* 정렬 구간 비교 및 하위 discard alignment 계산용 임시 변수. */
+	int ret = 0; /* misalignment가 하나라도 발생하면 -1로 바뀌는 최종 반환값. */
 
 	/* NVMe feature flags 중 상위로 상속 가능한 마스크 복사. */
 	t->features |= (b->features & BLK_FEAT_INHERIT_MASK);
@@ -1128,9 +1756,11 @@ int blk_stack_limits(struct queue_limits *t, struct queue_limits *b,
 	/* NVMe Write Zeroes 최대 섹터 병합. */
 	t->max_write_zeroes_sectors = min(t->max_write_zeroes_sectors,
 					b->max_write_zeroes_sectors);
+	/* NVMe Write Zeroes 사용자 unmap 한도 병합: 더 보수적인(작은) 값 채택. */
 	t->max_user_wzeroes_unmap_sectors =
 			min(t->max_user_wzeroes_unmap_sectors,
 			    b->max_user_wzeroes_unmap_sectors);
+	/* NVMe Write Zeroes HW unmap 한도 병합: 더 보수적인(작은) 값 채택. */
 	t->max_hw_wzeroes_unmap_sectors =
 			min(t->max_hw_wzeroes_unmap_sectors,
 			    b->max_hw_wzeroes_unmap_sectors);
@@ -1284,8 +1914,10 @@ int blk_stack_limits(struct queue_limits *t, struct queue_limits *b,
 		t->zone_write_granularity = 0;
 		t->max_zone_append_sectors = 0;
 	}
+	/* atomic write(FAW) 한도는 별도 서브함수로 위임해 병합/호환성 검사. */
 	blk_stack_atomic_writes_limits(t, b, start);
 
+	/* misalignment가 하나라도 있었으면 -1, 완전히 호환되면 0을 반환. */
 	return ret;
 }
 EXPORT_SYMBOL(blk_stack_limits);
@@ -1301,11 +1933,30 @@ EXPORT_SYMBOL(blk_stack_limits);
  *   bdev_limits(bdev)로 하위 NVMe 장치의 q->limits를 가져와
  *   blk_stack_limits()로 병합한다. 파티션의 bd_start_sect를 더해 파티션
  *   시작 위치를 반영한다.
+ *
+ * [한국어 보강]
+ * @return: 없음 (void). 병합 결과의 misalignment 여부는 t->flags의
+ *     BLK_FLAG_MISALIGNED로 확인 가능하며, 여기서는 경고 로그만 남긴다.
+ *
+ * blk_stack_limits()가 구조체 두 개(queue_limits)를 직접 받는 저수준
+ * API인 반면, 이 함수는 block_device를 받아 bdev_limits()로 실제
+ * q->limits를 얻고 파티션 시작 섹터(get_start_sect)까지 자동으로
+ * 더해주는 상위 편의 함수다. MD/DM 등이 실제 bdev를 스택에 추가할 때
+ * 저수준 API 대신 이 함수를 사용한다.
+ * 실행 컨텍스트: 드라이버/DM 테이블 로드 경로의 프로세스 컨텍스트.
+ * 호출자: drivers/md/md.c, dm-table.c 등. 호출 대상: bdev_limits(),
+ * get_start_sect(), blk_stack_limits().
+ * 에러 경로: blk_stack_limits()가 misalignment(-1)를 반환하면 정식 에러로
+ * 취급하지 않고 pr_notice()로 경고만 남긴다(치명적이지 않음).
+ *
+ * 호출 체인:
+ *   md_run/dm_table_add_target → [queue_limits_stack_bdev] → blk_stack_limits
  */
 void queue_limits_stack_bdev(struct queue_limits *t, struct block_device *bdev,
 		sector_t offset, const char *pfx)
 {
-	/* NVMe 파티션 시작 섹터를 offset에 더해 alignment 검사. */
+	/* NVMe 파티션 시작 섹터를 offset에 더해 alignment 검사. misalignment
+	 * 발생(-1) 시 pr_notice로 경고만 남기고 진행(치명적 오류 아님). */
 	if (blk_stack_limits(t, bdev_limits(bdev),
 			get_start_sect(bdev) + offset))
 		pr_notice("%s: Warning: Device %pg is misaligned\n",
@@ -1322,13 +1973,40 @@ EXPORT_SYMBOL_GPL(queue_limits_stack_bdev);
  *   NVMe DIF/DIX PI 설정이 하위 장치에서 상위 스택 장치로 상속될 수 있는지
  *   검사한다. 메타데이터 크기, interval, tag size, checksum 종류 등이
  *   일치해야 상위 장치도 PI를 노출할 수 있다.
+ *
+ * [한국어 보강]
+ * @return: PI 프로필이 호환되어 상속(또는 최초 복사)에 성공하면 true.
+ *     이미 스택된 상태에서 하위 장치와 필드가 달라 호환 불가하면 false
+ *     (이 경우 t->integrity는 모두 0으로 초기화되어 PI 미지원이 된다).
+ *
+ * MD/DM 등으로 여러 NVMe 장치를 묶을 때, 각 장치가 서로 다른 DIF/DIX
+ * 포맷(metadata_size, checksum 종류 등)을 쓰면 상위 가상 장치가 일관된
+ * PI를 보장할 수 없다. 이 함수는 "아직 아무 장치도 스택되지 않은 상태
+ * (BLK_INTEGRITY_STACKED 미설정)"라면 첫 하위 장치의 PI 프로필을 그대로
+ * 복사하고, "이미 스택된 상태"라면 metadata_size/interval_exp/tag_size/
+ * csum_type/pi_tuple_size/REF_TAG가 모두 일치하는지 검사해 다르면
+ * incompatible로 점프한다. SPLIT_INTERVAL_CAPABLE은 하위 장치 중 하나라도
+ * 지원하지 않으면 상위에서도 클리어한다(보수적 병합).
+ * 실행 컨텍스트: blk_stack_limits() 밖에서 스택 드라이버가 별도로 호출하는
+ * 프로세스 컨텍스트(주: blk_stack_limits() 자체는 integrity를 병합하지
+ * 않으며, MD/DM이 이 함수를 별도로 호출해야 한다).
+ * 호출자: drivers/md/dm-table.c, drivers/md/md.c 등 PI를 지원하려는 스택
+ * 드라이버. 호출 대상: 없음 (구조체 필드 비교/대입만 수행).
+ * 에러 경로: 비호환 시 false를 반환하고 t->integrity를 통째로 0-clear.
+ *
+ * 호출 체인:
+ *   dm_table_add_target/md_run → [queue_limits_stack_integrity] → (필드 비교/대입으로 종료)
  */
 bool queue_limits_stack_integrity(struct queue_limits *t,
 		struct queue_limits *b)
 {
+	/* 상위(target) 스택 장치의 PI 프로필 포인터. */
 	struct blk_integrity *ti = &t->integrity;
+	/* 하위(base) 장치의 PI 프로필 포인터. */
 	struct blk_integrity *bi = &b->integrity;
 
+	/* 커널이 blk-integrity 지원 없이 빌드됐다면 PI 검사 자체가 무의미 -
+	 * 항상 호환(true)으로 처리해 상위 로직이 막히지 않게 한다. */
 	if (!IS_ENABLED(CONFIG_BLK_DEV_INTEGRITY))
 		return true;
 
@@ -1370,6 +2048,8 @@ bool queue_limits_stack_integrity(struct queue_limits *t,
 		ti->interval_exp = bi->interval_exp;
 		ti->tag_size = bi->tag_size;
 	}
+	/* 이미 스택된 경우 모든 필드 일치 확인 완료, 처음인 경우 복사 완료 -
+	 * 두 경우 모두 호환 성공으로 true 반환. */
 	return true;
 
 incompatible:
@@ -1396,6 +2076,22 @@ EXPORT_SYMBOL_GPL(queue_limits_stack_integrity);
  *   - q->queue_depth는 tag_set->queue_depth와 연동되어 SQ tail doorbell write
  *     횟수 및 CID 재사용에 영향을 준다.
  *   - rq_qos_queue_depth_changed()로 QoS/scheduler에도 전파된다.
+ *
+ * [한국어 보강]
+ * @return: 없음 (void). 실패 조건 없음.
+ *
+ * NVMe는 Create I/O Submission/Completion Queue 명령으로 SQ/CQ pair의
+ * 엔트리 수(Queue Size)를 정하는데, 이 값이 곧 동시에 outstanding 가능한
+ * command 수(=blk-mq tag 수, CID 재사용 폭)의 상한이 된다. q->queue_depth를
+ * 갱신하면 wbt(writeback throttle)나 io.latency 같은 rq-qos 정책이
+ * inflight 제한을 다시 계산해야 하므로 rq_qos_queue_depth_changed()로
+ * 이를 통지한다.
+ * 실행 컨텍스트: 드라이버 큐 구성 경로의 프로세스 컨텍스트.
+ * 호출자: nvme_alloc_io_queues() 등. 호출 대상: rq_qos_queue_depth_changed().
+ * 에러 경로: 없음.
+ *
+ * 호출 체인:
+ *   nvme_alloc_io_queues → [blk_set_queue_depth] → rq_qos_queue_depth_changed
  */
 void blk_set_queue_depth(struct request_queue *q, unsigned int depth)
 {
@@ -1415,9 +2111,28 @@ EXPORT_SYMBOL(blk_set_queue_depth);
  *   NVMe namespace 위의 파티션이나 스택 장치가 물리 블록 경계에 맞지 않게
  *   시작할 때, 상위 bio 경로에서 사용할 alignment_offset을 반환한다.
  *   BLK_FLAG_MISALIGNED가 설정되면 -1을 반환하여 상위에서 처리를 강제한다.
+ *
+ * [한국어 보강]
+ * @return: 정상 정렬 상태면 alignment_offset(바이트, 파티션이면 재계산된
+ *     값), 이미 misaligned로 표시된 큐라면 -1.
+ *
+ * sysfs의 /sys/block/<disk>/alignment_offset이 이 함수를 통해 노출된다.
+ * BLK_FLAG_MISALIGNED가 이미 설정된 큐(blk_stack_limits()에서 정렬
+ * 불가능이 확정된 경우)는 계산 자체가 의미 없으므로 -1(사용자 공간
+ * 컨벤션상 "알 수 없음/비정상")을 즉시 반환한다. 파티션이면 파티션의
+ * bd_start_sect를 반영해 queue_limit_alignment_offset()으로 재계산하고,
+ * 전체 디스크라면 q->limits.alignment_offset을 그대로 반환한다.
+ * 실행 컨텍스트: sysfs 읽기 등 프로세스 컨텍스트. 순수 조회 함수.
+ * 호출자: block/genhd.c의 sysfs 속성 핸들러 등. 호출 대상:
+ * bdev_get_queue(), queue_limit_alignment_offset().
+ * 에러 경로: 없음(항상 유효한 값 또는 관례적 -1을 반환).
+ *
+ * 호출 체인:
+ *   (sysfs alignment_offset 읽기) → [bdev_alignment_offset] → queue_limit_alignment_offset
  */
 int bdev_alignment_offset(struct block_device *bdev)
 {
+	/* bdev가 속한 request_queue를 조회 - q->limits를 참조하기 위함. */
 	struct request_queue *q = bdev_get_queue(bdev);
 
 	/* NVMe misalignment 발생 시 상위에서 강제 처리를 위해 -1 반환. */
@@ -1427,6 +2142,7 @@ int bdev_alignment_offset(struct block_device *bdev)
 	if (bdev_is_partition(bdev))
 		return queue_limit_alignment_offset(&q->limits,
 				bdev->bd_start_sect);
+	/* 전체 디스크(파티션 아님)는 큐의 alignment_offset을 그대로 반환. */
 	return q->limits.alignment_offset;
 }
 EXPORT_SYMBOL_GPL(bdev_alignment_offset);
@@ -1438,15 +2154,33 @@ EXPORT_SYMBOL_GPL(bdev_alignment_offset);
  * NVMe 연결 지점:
  *   NVMe Deallocate(Trim) 명령을 발행할 때 discard_granularity 경계에 맞추기
  *   위해 파티션 시작 섹터를 고려한 discard_alignment를 반환한다.
+ *
+ * [한국어 보강]
+ * @return: 파티션이면 bd_start_sect를 반영한 discard alignment(바이트),
+ *     전체 디스크면 q->limits.discard_alignment 그대로.
+ *
+ * bdev_alignment_offset()의 discard 버전이다. sysfs의
+ * /sys/block/<disk>/discard_alignment로 노출되며, blkdev_issue_discard()가
+ * NVMe Deallocate(DSM) 요청을 discard_granularity 경계에 맞춰 잘라 보낼 때
+ * 이 값을 참조한다.
+ * 실행 컨텍스트: sysfs 읽기 등 프로세스 컨텍스트. 순수 조회 함수.
+ * 호출자: block/genhd.c sysfs 핸들러 등. 호출 대상: bdev_get_queue(),
+ * queue_limit_discard_alignment().
+ * 에러 경로: 없음.
+ *
+ * 호출 체인:
+ *   (sysfs discard_alignment 읽기) → [bdev_discard_alignment] → queue_limit_discard_alignment
  */
 unsigned int bdev_discard_alignment(struct block_device *bdev)
 {
+	/* bdev가 속한 request_queue를 조회 - q->limits를 참조하기 위함. */
 	struct request_queue *q = bdev_get_queue(bdev);
 
 	/* NVMe 파티션의 경우 bd_start_sect를 고려한 discard alignment 계산. */
 	if (bdev_is_partition(bdev))
 		return queue_limit_discard_alignment(&q->limits,
 				bdev->bd_start_sect);
+	/* 전체 디스크(파티션 아님)는 큐의 discard_alignment를 그대로 반환. */
 	return q->limits.discard_alignment;
 }
 EXPORT_SYMBOL_GPL(bdev_discard_alignment);
