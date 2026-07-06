@@ -452,7 +452,7 @@ void blkg_rwstat_exit(struct blkg_rwstat *rwstat);		/* -> blkcg_gq 소멸 시 nv
  * namespace/controller별 Read/Write/Discard 바이트 합계가 최종
  * 텍스트로 변환되는 지점이다.
  */
-u64 __blkg_prfill_rwstat(struct seq_file *sf, struct blkcg_policy_data *pd,
+u64 __blkg_prfill_rwstat(struct seq_file *sf, struct blkg_policy_data *pd,
 			 const struct blkg_rwstat_sample *rwstat);	/* io.stat: "rbytes=... wbytes=... dbytes=..." 포맷 변환 (추정) */
 
 /*
@@ -486,7 +486,7 @@ u64 __blkg_prfill_rwstat(struct seq_file *sf, struct blkcg_policy_data *pd,
  *   blkcg_print_blkgs -> [blkg_prfill_rwstat] -> blkg_rwstat_read()
  *   -> __blkg_prfill_rwstat -> seq_printf()
  */
-u64 blkg_prfill_rwstat(struct seq_file *sf, struct blkcg_policy_data *pd,
+u64 blkg_prfill_rwstat(struct seq_file *sf, struct blkg_policy_data *pd,
 		       int off);		/* blkg + policy offset -> blkg_rwstat_read_counter -> NVMe namespace I/O 집계 (추정) */
 
 /*
