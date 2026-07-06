@@ -251,14 +251,12 @@ static int __blk_mq_do_dispatch_sched(struct blk_mq_hw_ctx *hctx)
 	struct request_queue *q = hctx->queue;
 	/* [한국어] elevator_queue: mq-deadline/BFQ/kyber 스케줄러 상태; ops.dispatch_request로 request 추출 */
 	struct elevator_queue *e = q->elevator;
-	/* [한국어] multi_hctxs: 뽑은 request들이 여러 NVMe SQ로 흩어지면 true — list_sort 필요 */
-	bool multi_hctxs = false;
-	/* [한국어] run_queue: budget 확보 후 dispatch_request()가 NULL을 반환했을 때 SQ 재가동 필요 표시 */
-	bool run_queue = false;
-	/* [한국어] dispatched: 1개 이상 NVMe SQ로 전달 성공 여부 */
-	bool dispatched = false;
-	/* [한국어] busy: hctx->dispatch에 잔여 request가 있어 flush 기아 위험 표시 */
-	bool busy = false;
+	/* [한국어] multi_hctxs: 뽑은 request들이 여러 NVMe SQ로 흩어지면 true — list_sort 필요
+	 * run_queue: budget 확보 후 dispatch_request()가 NULL을 반환했을 때 SQ 재가동 필요 표시 */
+	bool multi_hctxs = false, run_queue = false;
+	/* [한국어] dispatched: 1개 이상 NVMe SQ로 전달 성공 여부
+	 * busy: hctx->dispatch에 잔여 request가 있어 flush 기아 위험 표시 */
+	bool dispatched = false, busy = false;
 	/* [한국어] max_dispatch: 이번 루프에서 NVMe SQ로 보낼 최대 request 수
 	 * dispatch_busy이면 1(conservative)로 제한, 아니면 queue depth까지 허용 */
 	unsigned int max_dispatch;
