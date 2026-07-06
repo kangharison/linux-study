@@ -346,7 +346,7 @@ unsigned long blk_mq_get_tags(struct blk_mq_alloc_data *data, int nr_tags,
 
 	/* [한국어] batch 할당 불가 조건 확인: shallow_depth 제한, 예약 tag 요청, shared tag pool 사용 시
 	 * 각각 공정성·예약성·복잡성 문제로 개별 할당 경로로 fallback */
-	if (data->shallow_depth || data->flags & BLK_MQ_REQ_RESERVED ||
+	if (data->shallow_depth ||data->flags & BLK_MQ_REQ_RESERVED ||
 	    data->hctx->flags & BLK_MQ_F_TAG_QUEUE_SHARED)
 		return 0;	/* [한국어] 0 반환 시 호출자가 개별 blk_mq_get_tag()로 재시도 */
 	ret = __sbitmap_queue_get_batch(bt, nr_tags, offset);	/* [한국어] sbitmap에서 nr_tags개의 CID를 원자적으로 일괄 획득; *offset에 sbitmap 내 시작 위치 저장 */
@@ -1410,6 +1410,8 @@ void blk_mq_tag_update_sched_shared_tags(struct request_queue *q,
  *
  * 호출 체인: 외부 호출자 → [blk_mq_unique_tag]
  */
+u32 blk_mq_unique_tag(struct request *rq)
+{
 	return (rq->mq_hctx->queue_num << BLK_MQ_UNIQUE_TAG_BITS) |
 	/* [한국어] NVMe queue pair 번호(queue_num)를 상위 비트에 배치 — controller 내 여러 SQ/CQ 쌍 구분 */
 		(rq->tag & BLK_MQ_UNIQUE_TAG_MASK);
