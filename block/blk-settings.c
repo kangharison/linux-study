@@ -1467,12 +1467,12 @@ static bool blk_stack_atomic_writes_tail(struct queue_limits *t,
 
 	/* Can't support this */
 	/* NVMe t의 최소 단위가 b의 최대 단위보다 크면 호환 불가. */
-	if (t->atomic_write_hw_unit_min > b->atomic_write_unit_max)
+	if (t->atomic_write_hw_unit_min > b->atomic_write_hw_unit_max)
 		return false;
 
 	/* Or this */
 	/* NVMe t의 최대 단위가 b의 최소 단위보다 작으면 호환 불가. */
-	if (t->atomic_write_hw_unit_max < b->atomic_write_unit_min)
+	if (t->atomic_write_hw_unit_max < b->atomic_write_hw_unit_min)
 		return false;
 
 	/* NVMe 멀티 장치 스택 시 FAW/unit는 교차 병합. */
@@ -1481,7 +1481,7 @@ static bool blk_stack_atomic_writes_tail(struct queue_limits *t,
 	t->atomic_write_hw_unit_min = max(t->atomic_write_hw_unit_min,
 				b->atomic_write_hw_unit_min);
 	t->atomic_write_hw_unit_max = min(t->atomic_write_hw_unit_max,
-				b->atomic_write_unit_max);
+				b->atomic_write_hw_unit_max);
 	/* boundary 일치 + unit 범위 교집합 존재 → 병합 성공. */
 	return true;
 }
