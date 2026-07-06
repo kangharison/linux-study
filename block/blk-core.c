@@ -1683,7 +1683,7 @@ EXPORT_SYMBOL_GPL(iocb_bio_iopoll);
  * bd_stamp 에 CAS(Compare-And-Swap)를 사용하여 io_ticks 를 원자적으로 갱신한다.
  * I/O 가 진행 중(inflight > 0)이거나 완료 시점(end=true)에만 ticks 를 증가시킨다.
  * 파티션인 경우 bdev_whole() 로 whole disk 포인터로 전환하여 재귀 없이 반복 처리한다.
- * /proc/diskstats 와 /sys/block/*/stat 의 io_ticks 필드에 반영된다.
+ * /proc/diskstats 와 /sys/block/<disk>/stat 의 io_ticks 필드에 반영된다.
  * 실행 컨텍스트: part_stat_lock() 보호 하에 호출
  */
 void update_io_ticks(struct block_device *part, unsigned long now, bool end)
@@ -1761,7 +1761,7 @@ EXPORT_SYMBOL_GPL(bio_start_io_acct);
  * @start_time: bdev_start_io_acct() 가 반환한 시작 jiffies
  *
  * ios[sgrp], sectors[sgrp], nsecs[sgrp] 를 증가시키고 in_flight 를 감소시킨다.
- * /proc/diskstats 와 /sys/block/*/stat 의 완료 통계를 갱신한다.
+ * /proc/diskstats 와 /sys/block/<disk>/stat 의 완료 통계를 갱신한다.
  * blk-mq 에서는 blk_account_io_done() 을 통해 호출된다.
  * 실행 컨텍스트: softirq 완료 컨텍스트 또는 프로세스 컨텍스트
  */
