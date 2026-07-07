@@ -311,8 +311,8 @@ static void free_partitions(struct parsed_partitions *state) /* [한국어] pars
  */
 static struct parsed_partitions *check_partition(struct gendisk *hd) /* [한국어] 파티션 테이블 프로브 함수 시작 */
 {
-	struct parsed_partitions *state; /* [한국어] 각 프로버의 반환값을 모으는 지역 변수들 - i: 다음 시도할 프로버 인덱스, res: 현재/최종 결과, err: 누적된 I/O 에러 코드 */
-	int i, res, err;
+	struct parsed_partitions *state; /* [한국어] check_partition()이 채우고 반환할 parsed_partitions 상태 포인터 - allocate_partitions()로 아래에서 초기화됨 */
+	int i, res, err; /* [한국어] 각 프로버의 반환값을 모으는 지역 변수들 - i: 다음 시도할 프로버 인덱스, res: 현재/최종 결과, err: 누적된 I/O 에러 코드 */
 
 	state = allocate_partitions(hd); /* [한국어] parts[] 컨테이너와 parsed_partitions 구조체를 먼저 확보 */
 	if (!state) /* [한국어] 메모리 부족 검사 */
@@ -1037,23 +1037,23 @@ static bool partition_overlaps(struct gendisk *disk, sector_t start, /* [한국�
  */
 int bdev_add_partition(struct gendisk *disk, int partno, sector_t start, /* [한국어] 사용자 요청 파티션 추가 함수 시작 - 전역 심볼(EXPORT 여부는 헤더 선언에 따름) */
 		sector_t length)
-{ /* [한국어] add_partition()이 반환할 새 block_device(성공 시에만 유효, 반환값 자체는 errno로 변환됨) */
-	struct block_device *part; /* [한국어] 최종 반환할 errno(또는 0) */
-	int ret;
- /* [한국어] part_tbl 갱신을 직렬화하기 위해 open_mutex 획득(add_partition()의 사전 조건) */
-	mutex_lock(&disk->open_mutex); /* [한국어] 디스크가 등록 해제(dead) 상태가 아닌지 확인 */
-	if (!disk_live(disk)) { /* [한국어] dead 상태면 파티션을 추가할 수 없음 */
-		ret = -ENXIO; /* [한국어] -ENXIO(장치 없음)로 설정 */
+{
+	struct block_device *part; /* [한국어] add_partition()이 반환할 새 block_device(성공 시에만 유효, 반환값 자체는 errno로 변환됨) */
+	int ret; /* [한국어] 최종 반환할 errno(또는 0) */
+
+	mutex_lock(&disk->open_mutex); /* [한국어] part_tbl 갱신을 직렬화하기 위해 open_mutex 획득(add_partition()의 사전 조건) */
+	if (!disk_live(disk)) { /* [한국어] 디스크가 등록 해제(dead) 상태가 아닌지 확인 */
+		ret = -ENXIO; /* [한국어] dead 상태면 파티션을 추가할 수 없음 - -ENXIO(장치 없음)로 설정 */
 		goto out; /* [한국어] 락 해제 후 반환하는 공통 out 레이블로 점프 */
 	} /* [한국어] if 블록 종료 */
- /* [한국어] 이 디스크가 애초에 파티션을 지원하지 않도록 플래그 설정되어 있는지 확인(GENHD_FL_NO_PART) */
-	if (disk->flags & GENHD_FL_NO_PART) { /* [한국어] 파티션 미지원 디스크에는 추가 불가 */
-		ret = -EINVAL; /* [한국어] -EINVAL(잘못된 인자)로 설정 */
+
+	if (disk->flags & GENHD_FL_NO_PART) { /* [한국어] 이 디스크가 애초에 파티션을 지원하지 않도록 플래그 설정되어 있는지 확인(GENHD_FL_NO_PART) */
+		ret = -EINVAL; /* [한국어] 파티션 미지원 디스크에는 추가 불가 - -EINVAL(잘못된 인자)로 설정 */
 		goto out; /* [한국어] out으로 점프 */
 	} /* [한국어] if 블록 종료 */
- /* [한국어] 요청한 [start, start+length) 구간이 기존 파티션과 겹치는지 확인(자기 자신을 제외할 필요 없으므로 skip_partno=-1) */
-	if (partition_overlaps(disk, start, length, -1)) { /* [한국어] 겹치면 추가 거부 */
-		ret = -EBUSY; /* [한국어] -EBUSY(자원 사용 중)로 설정 */
+
+	if (partition_overlaps(disk, start, length, -1)) { /* [한국어] 요청한 [start, start+length) 구간이 기존 파티션과 겹치는지 확인(자기 자신을 제외할 필요 없으므로 skip_partno=-1) */
+		ret = -EBUSY; /* [한국어] 겹치면 추가 거부 - -EBUSY(자원 사용 중)로 설정 */
 		goto out; /* [한국어] out으로 점프 */
 	} /* [한국어] if 블록 종료 */
 
@@ -1157,30 +1157,30 @@ out_unlock: /* [한국어] 공통 출구 레이블 - 존재하지 않음/사용 
  */
 int bdev_resize_partition(struct gendisk *disk, int partno, sector_t start, /* [한국어] 파티션 크기 조정 함수 시작 */
 		sector_t length)
-{ /* [한국어] 조회된 파티션 포인터 */
-	struct block_device *part = NULL; /* [한국어] 기본 실패 코드를 -ENXIO로 설정 */
-	int ret = -ENXIO;
- /* [한국어] open_mutex 획득 */
-	mutex_lock(&disk->open_mutex); /* [한국어] partno로 part_tbl에서 조회 */
-	part = xa_load(&disk->part_tbl, partno); /* [한국어] 존재하지 않으면 */
-	if (!part) /* [한국어] out_unlock으로 점프(이미 -ENXIO 설정됨) */
-		goto out_unlock;
- /* [한국어] 다음 실패 코드를 -EINVAL로 갱신 */
-	ret = -EINVAL; /* [한국어] 호출자가 넘긴 start가 실제 파티션의 시작 섹터와 다르면(정체성 불일치) */
-	if (start != part->bd_start_sect) /* [한국어] 잘못된 요청으로 거부 - out_unlock으로 점프 */
-		goto out_unlock;
- /* [한국어] 다음 실패 코드를 -EBUSY로 갱신 */
-	ret = -EBUSY; /* [한국어] 새 길이로 다른 파티션과 겹치는지 확인(자기 자신은 skip_partno=partno로 제외) */
-	if (partition_overlaps(disk, start, length, partno)) /* [한국어] 겹치면 거부 */
-		goto out_unlock; /* [한국어] out_unlock으로 점프 */
- /* [한국어] bdev의 크기(섹터 수)를 새 길이로 갱신(block/bdev.c) - i_size 등도 함께 갱신됨 */
-	bdev_set_nr_sectors(part, length);
- /* [한국어] 성공(0)으로 결과 갱신 */
-	ret = 0; /* [한국어] 공통 출구 레이블 */
-out_unlock: /* [한국어] open_mutex 해제 */
-	mutex_unlock(&disk->open_mutex); /* [한국어] 결과 반환 */
-	return ret; /* [한국어] bdev_resize_partition() 함수 종료 */
-}
+{
+	struct block_device *part = NULL; /* [한국어] 조회된 파티션 포인터 */
+	int ret = -ENXIO; /* [한국어] 기본 실패 코드를 -ENXIO로 설정 */
+
+	mutex_lock(&disk->open_mutex); /* [한국어] open_mutex 획득 */
+	part = xa_load(&disk->part_tbl, partno); /* [한국어] partno로 part_tbl에서 조회 */
+	if (!part) /* [한국어] 존재하지 않으면 */
+		goto out_unlock; /* [한국어] out_unlock으로 점프(이미 -ENXIO 설정됨) */
+
+	ret = -EINVAL; /* [한국어] 다음 실패 코드를 -EINVAL로 갱신 */
+	if (start != part->bd_start_sect) /* [한국어] 호출자가 넘긴 start가 실제 파티션의 시작 섹터와 다르면(정체성 불일치) */
+		goto out_unlock; /* [한국어] 잘못된 요청으로 거부 - out_unlock으로 점프 */
+
+	ret = -EBUSY; /* [한국어] 다음 실패 코드를 -EBUSY로 갱신 */
+	if (partition_overlaps(disk, start, length, partno)) /* [한국어] 새 길이로 다른 파티션과 겹치는지 확인(자기 자신은 skip_partno=partno로 제외) */
+		goto out_unlock; /* [한국어] 겹치면 거부 - out_unlock으로 점프 */
+
+	bdev_set_nr_sectors(part, length); /* [한국어] bdev의 크기(섹터 수)를 새 길이로 갱신(block/bdev.c) - i_size 등도 함께 갱신됨 */
+
+	ret = 0; /* [한국어] 성공(0)으로 결과 갱신 */
+out_unlock: /* [한국어] 공통 출구 레이블 */
+	mutex_unlock(&disk->open_mutex); /* [한국어] open_mutex 해제 */
+	return ret; /* [한국어] 결과 반환 */
+} /* [한국어] bdev_resize_partition() 함수 종료 */
 
 /*
  * [한국어]
@@ -1521,8 +1521,8 @@ rescan: /* [한국어] rescan: native 용량 unlock으로 인해 처음부터 �
 		 * Tell userspace that the media / partition table may have
 		 * changed.
 		 */
-		kobject_uevent(&disk_to_dev(disk)->kobj, KOBJ_CHANGE); /* [한국어] 주석 이어짐 */
-	} /* [한국어] 미디어 제거/변경을 사용자 공간(udev)에 KOBJ_CHANGE로 통지 */
+		kobject_uevent(&disk_to_dev(disk)->kobj, KOBJ_CHANGE); /* [한국어] 미디어 제거/변경을 사용자 공간(udev)에 KOBJ_CHANGE로 통지 */
+	} /* [한국어] else if 블록 종료 */
 
 	return ret; /* [한국어] 최종 결과(보통 0, blk_add_partitions에서 온 -EIO 등)를 호출자에게 반환 */
 } /* [한국어] bdev_disk_changed() 함수 종료 */
