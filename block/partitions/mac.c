@@ -6,18 +6,56 @@
  *  Copyright (C) 1991-1998  Linus Torvalds
  *  Re-organised Feb 1998 Russell King
  *
- *  ========================================================================
- *  NVMe 관점 파일 요약
- *  ========================================================================
- *  이 파일은 NVMe SSD 뒤에 연결된 블록 장치의 0번 섹터 및 후속 섹터를 읽어
- *  MacOS 파티션 테이블(Apple Partition Map)을 해석하는 코드이다.
- *  블록 계층에서 파티션 인식 단계는 submit_bio -> blk_mq_submit_bio ->
- *  blk_mq_get_request -> nvme_queue_rq -> nvme_submit_cmd(doorbell) 경로를
- *  통해 NVMe 컨트롤러가 실제 LBA를 읽기 전, 소프트웨어적으로 디스크 레이아웃을
- *  구성하는 위치에 해당한다. NVMe 입장에서는 파티션 테이블 해석 자체는
- *  호스트 소프트웨어의 책임이며, 컨트롤러는 CID, SQ, CQ, PRP/SGL 기반의
- *  Read 명령으로 요청된 LBA 영역을 그저 반환한다.
- *  ========================================================================
+ * [한국어 설명] 구형 68k/PowerPC Mac OS의 Apple Partition Map(APM) 파티션
+ * 테이블을 인식하는 파서 (mac.c)
+ *
+ * === 파일의 역할 ===
+ * 이 파일은 블록 장치의 0번 블록에서 mac_driver_desc(드라이버 서술자)를
+ * 읽어 매직 넘버("ER" = MAC_DRIVER_MAGIC)와 논리 블록 크기를 확인한 뒤,
+ * 이어지는 블록들에서 mac_partition 엔트리(파티션 맵)를 순서대로 읽어
+ * 각 파티션의 시작 위치와 크기를 커널 표준 512바이트 섹터 단위로 환산해
+ * parsed_partitions 구조체에 등록한다. CONFIG_PPC_PMAC(PowerPC 기반
+ * PowerMac) 환경에서는 추가로 부팅에 가장 적합한 루트 파티션을 찾아
+ * note_bootable_part()로 부팅 서브시스템에 알려주는 역할도 겸한다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * 블록 장치가 커널에 등록되거나 재검사될 때(add_disk, ioctl BLKRRPART 등)
+ * bdev_disk_changed() -> rescan_partitions() -> check_partition() 호출
+ * 체인을 거치며, check.c의 check_partition()이 등록된 파티션 파서 배열
+ * (check.c의 check_part[])을 순서대로 시도하다가 이 파일의
+ * mac_partition()을 호출한다. mac_partition()은 섹터를 읽기 위해
+ * check.h가 선언한 read_part_sector()를 호출하며, 이는 내부적으로 bio를
+ * 구성해 블록 계층에 동기적으로 제출한다(구체적 제출 경로는 하위 드라이버에
+ * 따라 다르며, 예를 들어 NVMe 장치라면 submit_bio -> blk_mq_submit_bio ->
+ * blk_mq_get_request -> nvme_queue_rq -> nvme_submit_cmd(doorbell) 순으로
+ * 진행될 것으로 추정된다 - 추정). 실행 컨텍스트는 디스크 스캔을 수행하는
+ * 커널 프로세스 컨텍스트이며, 인터럽트 컨텍스트에서는 호출되지 않는다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 의존 모듈: block/partitions/check.h가 선언하는 read_part_sector(),
+ * put_dev_sector(), put_partition(), struct parsed_partitions를 사용해
+ * 섹터 입출력과 파티션 등록을 수행한다. mac.h가 정의하는
+ * struct mac_partition, struct mac_driver_desc, MAC_PARTITION_MAGIC/
+ * MAC_DRIVER_MAGIC/MAC_STATUS_BOOTABLE/APPLE_AUX_TYPE에 전적으로
+ * 의존한다. CONFIG_PPC_PMAC가 켜진 경우 arch/powerpc가 제공하는
+ * <asm/machdep.h>의 note_bootable_part()를 호출해 부팅 서브시스템에
+ * 결과를 전달한다. 데이터 흐름은 "블록 장치의 원시 섹터 바이트(빅엔디안)
+ * -> read_part_sector()가 채운 커널 버퍼 -> be16_to_cpu()/be32_to_cpu()로
+ * 호스트 엔디안 변환 -> parsed_partitions 구조체의 시작 섹터/크기 필드"
+ * 순서로 이어지며, 이 정보는 이후 커널 파티션 디바이스(/dev/<disk>N 형태)
+ * 생성에 쓰인다.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * - mac_partition(): 이 파일의 유일한 공개 진입점. 0번 블록을 읽어
+ *   드라이버 서술자를 검증하고, 파티션 맵을 순회하며 각 파티션을
+ *   parsed_partitions에 등록한다. 반환값 1/0/-1로 각각 "Mac 파티션 인식
+ *   성공"/"Mac 디스크 아님"/"I/O 오류 또는 비정상 블록 크기"를 구분한다.
+ * - mac_fix_string() (CONFIG_PPC_PMAC 전용 static 함수): 고정폭 문자열
+ *   필드의 우측 공백을 제거해 strcasecmp()/strncmp() 비교가 정확히
+ *   동작하도록 만드는 보조 함수.
+ * - struct mac_partition (mac.h): 온디스크 파티션 엔트리 1개의 레이아웃.
+ * - struct mac_driver_desc (mac.h): 0번 블록에 위치한 드라이버 서술자로,
+ *   블록 크기(block_size)와 매직 넘버를 담는다.
  */
 
 #include <linux/ctype.h> /* 문자열 처리용; NVMe I/O 경로와 직접 무관 */
@@ -35,14 +73,38 @@ extern void note_bootable_part(dev_t dev, int part, int goodness); /* PowerMac�
 
 #ifdef CONFIG_PPC_PMAC
 /*
- * mac_fix_string()
- *   목적: MacOS 파티션 엔트리의 고정폭 문자열에서 우측 공백을 제거한다.
- *   호출 경로: mac_partition() 낸부, PowerMac 부팅 파티션 평가 시
- *   NVMe 연결: NVMe 입장에서는 의미 없는 메타데이터 가공이며, 실제 I/O는
- *             read_part_sector() -> submit_bio -> ... -> nvme_submit_cmd(doorbell)
- *             경로에서 이미 완료된 상태에서 호출된다 (추정).
+ * [한국어]
+ * mac_fix_string() - 고정폭 문자열 필드 우측의 공백 패딩을 제거한다.
+ *
+ * @stg: 우측 공백을 제거할 대상 버퍼. mac_partition()이 온디스크
+ *       struct mac_partition의 processor[16]/name[32]/type[32] 필드
+ *       포인터를 그대로 전달한다 (널 종료가 보장되지 않는 고정폭 버퍼).
+ * @len: stg 버퍼의 전체 길이(바이트). 호출부에서 16 또는 32가 전달된다.
+ * @return: 없음(void). stg 버퍼를 제자리(in-place)에서 수정한다.
+ *
+ * APM(Apple Partition Map) 온디스크 포맷은 name/type/processor 필드를
+ * 고정 길이 문자 배열로 저장하며, 실제 문자열보다 짧을 경우 남는 공간을
+ * 공백(' ')으로 채운다. 이 상태로 strcasecmp()/strncmp() 등을 사용하면
+ * "root"와 "root            "(공백 패딩)가 다른 문자열로 취급되어 비교가
+ * 실패하므로, 비교 전에 우측 공백을 널 문자('\0')로 덮어써 실질적인
+ * 문자열 종료 지점을 만들어 주는 것이 이 함수의 목적이다.
+ * 동작 과정: len-1번째(마지막) 바이트부터 역방향으로 훑으며 공백을
+ * 만나는 동안 계속 '\0'으로 덮어쓰고, 공백이 아닌 문자를 만나거나
+ * 인덱스가 0 미만이 되면 멈춘다. 즉 문자열 끝의 연속된 공백만 제거하고
+ * 중간에 있는 공백은 건드리지 않는다.
+ * 실행 컨텍스트: mac_partition() 호출 스레드 내에서 동기적으로 실행되는
+ * 순수 CPU 연산이며, 별도의 잠금이나 재진입 문제는 없다(각 호출은 서로
+ * 다른 온디스크 버퍼 영역을 대상으로 하며 공유 상태가 없다).
+ * 호출자: mac_partition()이 CONFIG_PPC_PMAC 블록 안에서
+ * part->processor/name/type 각각에 대해 한 번씩 호출한다.
+ * 피호출자: 없음(단순 반복문, 외부 함수 호출 없음).
+ * 에러 처리: 실패 개념이 없는 단순 문자열 가공 함수이므로 에러 경로가
+ * 존재하지 않는다.
+ *
+ * 호출 체인:
+ *   mac_partition() → [mac_fix_string()] → (반환값 없음, stg 버퍼 직접 수정)
  */
-static inline void mac_fix_string(char *stg, int len) /* PowerMac 문자열 정리; NVMe DMA 완료 후 CPU가 버퍼를 가공 (추정) */
+static inline void mac_fix_string(char *stg, int len)
 {
 	int i;
 
@@ -53,25 +115,72 @@ static inline void mac_fix_string(char *stg, int len) /* PowerMac 문자열 정�
 #endif
 
 /*
- * mac_partition()
- *   목적: NVMe SSD로부터 읽어온 블록 0번 및 이어지는 섹터들을 해석하여
- *         MacOS Apple Partition Map을 찾고, 각 파티션의 시작 LBA와 크기를
- *         parsed_partitions 구조체에 등록한다.
- *   주요 호출 경로:
- *     rescan_partitions() -> check_partition() -> mac_partition()
- *   NVMe I/O 발생 경로 (파티션 테이블 읽기):
- *     read_part_sector() -> read_part_sector() 낸부 bio 할당/제출 ->
- *     submit_bio -> blk_mq_submit_bio -> blk_mq_get_request ->
- *     nvme_queue_rq -> nvme_submit_cmd(doorbell, CID 부여, PRP/SGL 설정)
- *   반환값:
- *     1  : Mac 파티션 테이블을 인식하고 파티션 등록 완료
- *     0  : MacOS 디스크가 아님
- *     -1 : I/O 오류 또는 비정상적인 블록 크기
+ * [한국어]
+ * mac_partition() - Apple Partition Map(APM)을 인식해 파티션을 등록한다.
+ *
+ * @state: check_partition()이 넘겨주는 parsed_partitions 컨텍스트. 대상
+ *         블록 장치(gendisk)와 파티션 등록 결과를 담을 배열(state->parts[]),
+ *         현재까지 처리 가능한 파티션 개수 한도(state->limit), 파티션 스캔
+ *         결과를 사람이 읽을 문자열로 누적하는 seq_buf(state->pp_buf) 등을
+ *         포함한다.
+ * @return: 1  - Mac 파티션 테이블을 정상 인식하고 파티션 등록을 완료한 경우.
+ *          0  - 매직 넘버 불일치 등으로 이 디스크가 Mac 포맷이 아니라고
+ *               판단한 경우(에러가 아니라 "이 파서는 해당 없음"을 의미).
+ *          -1 - 섹터 읽기 실패, 또는 block_size가 2의 거듭제곱이 아니거나
+ *               파티션 엔트리가 읽은 버퍼 범위를 벗어나는 등 비정상적인
+ *               상황(진짜 오류)을 만난 경우.
+ *
+ * 이 함수는 이 파일의 유일한 공개 심볼로, block/partitions/check.c가 관리
+ * 하는 파티션 파서 테이블에 등록되어 있다. 디스크(또는 파티션이 없는
+ * 블록 장치)를 처음 스캔할 때 다른 파서들과 마찬가지로 한 번 시도되며,
+ * 자신이 인식할 수 없는 포맷이면 조용히 0을 반환해 다음 파서에게 기회를
+ * 넘겨준다.
+ * 동작 과정:
+ *   1) 0번 블록을 read_part_sector()로 읽어 struct mac_driver_desc로
+ *      캐스팅하고, signature가 MAC_DRIVER_MAGIC("ER")인지 확인한다.
+ *   2) block_size(secsize)를 얻어 2의 거듭제곱인지 검증한다(그렇지 않으면
+ *      파티션 엔트리가 섹터 경계를 넘어 read_part_sector()로 정렬된 접근이
+ *      불가능해지므로 -1을 반환).
+ *   3) secsize를 512바이트 단위로 내림(datasize)한 뒤 해당 블록을 다시
+ *      읽어 첫 번째 mac_partition 엔트리를 찾고, 매직 넘버(0x504d, "PM")와
+ *      map_count(파티션 총 개수)를 확인한다.
+ *   4) slot = 1부터 map_count(또는 state->limit-1로 제한된 값)까지 순회
+ *      하며 각 슬롯 위치(slot * secsize)의 섹터를 읽어 파티션 엔트리를
+ *      해석하고, put_partition()으로 시작 섹터/크기를 등록한다.
+ *   5) type 필드가 "Linux_RAID"면 ADDPART_FLAG_RAID를 설정한다.
+ *   6) CONFIG_PPC_PMAC가 활성화된 커널에서는 각 파티션의 부팅 적합도
+ *      (goodness)를 계산해 가장 적합한 파티션을 찾고, 루프가 끝난 뒤
+ *      note_bootable_part()로 부팅 서브시스템에 알려준다.
+ * 실행 컨텍스트: 디스크 스캔을 수행하는 단일 커널 프로세스 컨텍스트에서
+ * 동기적으로 실행되며, 인터럽트 컨텍스트에서 호출되지 않는다. 이 함수
+ * 내에서 사용하는 Sector sect/버퍼는 매 반복마다 put_dev_sector()로
+ * 해제되므로 장기 보유되는 락이나 공유 상태는 없다(재진입 시에도 각
+ * 호출은 독립된 지역 변수만 사용).
+ * 호출자: block/partitions/check.c의 check_partition()이
+ * rescan_partitions() 흐름 안에서 다른 파티션 파서들과 함께 순서대로
+ * 이 함수를 호출한다.
+ * 피호출자: read_part_sector()/put_dev_sector()(섹터 I/O),
+ * be16_to_cpu()/be32_to_cpu()(엔디안 변환), is_power_of_2()/round_down()
+ * (블록 크기 검증), put_partition()(파티션 등록), seq_buf_puts()(로그
+ * 문자열 누적), mac_fix_string()/strcasecmp()/strncasecmp()/strncmp()/
+ * strnlen()(CONFIG_PPC_PMAC 부팅 후보 판정), note_bootable_part()
+ * (CONFIG_PPC_PMAC 부팅 통보).
+ * 에러 처리: read_part_sector()가 NULL을 반환하면 즉시 -1로 반환한다.
+ * 매직 넘버가 맞지 않으면 이미 읽은 섹터를 put_dev_sector()로 해제한 뒤
+ * 0을 반환한다. 파티션 엔트리가 읽은 버퍼 범위를 벗어나면(partoffset +
+ * sizeof(*part) > datasize) 버퍼를 해제하고 -1을 반환한다. 파티션 맵
+ * 순회 도중 매직 넘버가 깨지면(더 이상 유효한 엔트리가 없으면) 에러로
+ * 취급하지 않고 break로 루프만 종료한다.
+ *
+ * 호출 체인:
+ *   rescan_partitions() → check_partition() → [mac_partition()] →
+ *     read_part_sector() / put_dev_sector() / put_partition() /
+ *     mac_fix_string() / note_bootable_part()
  */
-int mac_partition(struct parsed_partitions *state) /* NVMe namespace 단위 파티션 스캔 진입점 */
+int mac_partition(struct parsed_partitions *state)
 {
 	Sector sect;		/* read_part_sector()가 반환한 512바이트 섹터 버퍼 (NVMe에서 PRP/SGL로 채워진 데이터의 호스트 사본) */
-	unsigned char *data;	/* sect 낸부의 실제 바이트 포인터, NVMe Read 완료 후 CPU가 해석하는 메모리 주소 */
+	unsigned char *data;	/* sect 내부의 실제 바이트 포인터, NVMe Read 완료 후 CPU가 해석하는 메모리 주소 */
 	/* 파티션 맵 순회 인덱스(slot)와 총 엔트리 수; 각 slot마다 별도의 NVMe Read가 제출될 수 있음 */
 	int slot, blocks_in_map;
 	/* Mac 블록 크기(secsize)를 NVMe 512B LBA 단위로 환산하기 위한 변수들 */
@@ -86,7 +195,7 @@ int mac_partition(struct parsed_partitions *state) /* NVMe namespace 단위 파�
 	/* Get 0th block and look at the first partition map entry. */
 	/* LBA 0을 NVMe에서 읽음: read_part_sector() -> submit_bio -> blk_mq_submit_bio -> blk_mq_get_request -> nvme_queue_rq -> nvme_submit_cmd(Read, SLBA=0, doorbell) */
 	md = read_part_sector(state, 0, &sect);
-	/* read_part_sector() 낸부 bio/mem 할당 실패 또는 NVMe CQE 오류(SQ full, LBA 초과 등) 시 NULL 반환 (추정) */
+	/* read_part_sector() 내부 bio/mem 할당 실패 또는 NVMe CQE 오류(SQ full, LBA 초과 등) 시 NULL 반환 (추정) */
 	if (!md)
 		return -1;	/* NVMe Read 명령 실패 또는 메모리 부족 (CID 완료 전/후 오류 가능) */
 	/* NVMe Read CQE가 성공했어도 매직 넘버 검증이 필요; MAC_DRIVER_MAGIC(0x4552) 불일치 시 Mac 디스크 아님 */
@@ -252,25 +361,3 @@ int mac_partition(struct parsed_partitions *state) /* NVMe namespace 단위 파�
 	/* Mac 파티션 등록 완료; 이후 bio가 partition remap을 거쳐 submit_bio -> blk_mq_submit_bio -> nvme_queue_rq -> nvme_submit_cmd(SLBA = 파티션 시작 LBA + bi_sector)로 전달됨 */
 	return 1;	/* Mac 파티션 등록 완료; 이후 blk_mq_submit_bio -> nvme_queue_rq 경로는 파티션 오프셋을 반영한 LBA로 변환됨 */
 }
-
-/* NVMe 관점 핵심 요약
- *
- * - 이 파일은 NVMe SSD의 LBA 0번 및 이후 섹터를 읽어 MacOS 파티션 맵을
- *   해석하며, 파티션별 시작/크기를 blk_mq가 이해하는 512B LBA 단위로 변환한다.
- *
- * - 파티션 테이블 읽기는 read_part_sector() 낸부 bio 제출을 통해
- *   submit_bio -> blk_mq_submit_bio -> blk_mq_get_request -> nvme_queue_rq ->
- *   nvme_submit_cmd(doorbell, CID, PRP/SGL) 경로로 NVMe 컨트롤러와 연결된다.
- *
- * - NVMe 컨트롤러는 파티션 개념을 모름; 컨트롤러는 단지 CID, SQ, CQ, doorbell
- *   기반의 Read/Write 명령으로 지정된 LBA를 처리할 뿐, 파티션 경계는 호스트
- *   블록 계층이 관리한다.
- *
- * - secsize, start_block, block_count 등의 Mac 전용 필드는 NVMe 물리
- *   레이아웃과 직접 대응하지 않으므로, 512B 단위로 정규화한 후에야 NVMe
- *   명령의 LBA 필드로 사용될 수 있다 (추정).
- *
- * - 다른 블록 계층 파일(block/partitions/check.c, block/partition-generic.c 등)과
- *   논리적으로 연결되어 있으며, rescan_partitions() -> check_partition() 형태로
- *   호출되어 NVMe 장치 초기화 시점에 파티션 정보를 구성한다.
- */
