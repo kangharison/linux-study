@@ -3638,46 +3638,90 @@ int bioset_init(struct bio_set *bs,  // bio_set 초기화: NVMe 제출에 사용
 		unsigned int front_pad,
 		int flags)
 {
+	/* [한국어] front_pad = bio 본체 "앞"에 붙일 드라이버 전용 공간 크기.
+	 * 슬랩 오브젝트 레이아웃이 [front_pad][struct bio][back_pad]가 되어,
+	 * 드라이버가 bio 하나당 자기 데이터를 별도 할당 없이 함께 쓸 수 있다.
+	 * NVMe에서는 struct nvme_iod가 이 자리를 차지해, bio→request 변환 시
+	 * PRP/SGL 구성 상태를 담는다. */
 	bs->front_pad = front_pad;
+	/* [한국어] back_pad = bio 본체 "뒤"에 붙일 인라인 bvec 배열 공간.
+	 * BIO_INLINE_VECS(보통 4)개까지는 별도 할당 없이 여기 담아, 작은 I/O에서
+	 * bvec 슬랩 할당을 통째로 생략한다. 대부분의 파일시스템 I/O가 4개 이하
+	 * 세그먼트라 이 최적화의 적중률이 높다. */
 	if (flags & BIOSET_NEED_BVECS)
 		bs->back_pad = BIO_INLINE_VECS * sizeof(struct bio_vec);
 	else
+		/* [한국어] bvec이 필요 없는 bio_set(예: 데이터 없는 flush 전용)은
+		 * 뒤쪽 공간을 잡지 않아 오브젝트 크기를 줄인다. */
 		bs->back_pad = 0;
 
+	/* [한국어] ★ rescue 메커니즘 ★
+	 * 스택형 드라이버(dm/md)에서 bio를 분할해 하위로 보내는데, 그 하위 제출이
+	 * 다시 같은 bio_set에서 할당을 시도할 수 있다. mempool이 비어 있으면
+	 * 앞선 bio의 완료를 기다려야 하는데, 그 bio는 아직 제출되지 않고 현재
+	 * 스레드의 bio_list에 대기 중이라 영원히 완료되지 않는다 — 자기 자신을
+	 * 기다리는 교착이다.
+	 * rescue_list와 워커가 이 상황을 푼다: 대기 중인 bio를 별도 워커가
+	 * 대신 제출해 진행을 만든다. */
 	spin_lock_init(&bs->rescue_lock);
-	bio_list_init(&bs->rescue_list);  // bio batch/plug list: NVMe multi-queue 병렬성을 위한 제출 묶음
-	INIT_WORK(&bs->rescue_work, bio_alloc_rescue);  // mempool 고갈 시 bio를 다시 submit해 NVMe SQ drain 방지
+	bio_list_init(&bs->rescue_list);
+	INIT_WORK(&bs->rescue_work, bio_alloc_rescue);
 
-	bs->bio_slab = bio_find_or_create_slab(bs);  // bio slab 공유/생성: NVMe bio 할당 성능에 영향
+	/* [한국어] 이 bio_set의 오브젝트 크기(front_pad + bio + back_pad)에 맞는
+	 * 슬랩 캐시를 찾거나 만든다. 같은 크기를 쓰는 bio_set끼리는 캐시를
+	 * 공유해 슬랩 종류가 무한정 늘어나지 않게 한다. */
+	bs->bio_slab = bio_find_or_create_slab(bs);
 	if (!bs->bio_slab)
 		return -ENOMEM;
 
-	if (mempool_init_slab_pool(&bs->bio_pool, pool_size, bs->bio_slab))  // mempool 초기화: NVMe bio 할당 보장 풀 구성
-		goto bad;  // 초기화 실패: NVMe bio pool 사용 불가 처리
+	/* [한국어] 위 슬랩 위에 mempool을 얹는다. mempool은 pool_size개를 미리
+	 * 확보해 두어, 메모리가 고갈되어도 진행 중인 I/O가 완료될 만큼은
+	 * 반드시 할당된다 — write-back 교착을 막는 안전망이다. */
+	if (mempool_init_slab_pool(&bs->bio_pool, pool_size, bs->bio_slab))
+		goto bad;
 
+	/* [한국어] 인라인 한도를 넘는 bvec 배열을 위한 mempool. 같은 이유로
+	 * 예약분이 필요하다 — 큰 I/O도 메모리 압박 하에서 진행되어야 한다. */
 	if ((flags & BIOSET_NEED_BVECS) &&
 	    biovec_init_pool(&bs->bvec_pool, pool_size))
-		goto bad;  // 초기화 실패: NVMe bio pool 사용 불가 처리
+		goto bad;
 
 	if (flags & BIOSET_NEED_RESCUER) {
+		/* [한국어] rescue 워커를 실행할 워크큐. WQ_MEM_RECLAIM이 필수인
+		 * 이유: 이 워커가 푸는 문제 자체가 메모리 부족 상황의 교착이라,
+		 * 워커 실행이 다시 메모리를 기다리면 아무것도 해결되지 않는다.
+		 * 전용 rescuer 스레드가 그 순환을 끊는다. */
 		bs->rescue_workqueue = alloc_workqueue("bioset",
 							WQ_MEM_RECLAIM, 0);
 		if (!bs->rescue_workqueue)
-			goto bad;  // 초기화 실패: NVMe bio pool 사용 불가 처리
+			goto bad;
 	}
 	if (flags & BIOSET_PERCPU_CACHE) {
+		/* [한국어] per-CPU bio 캐시. 완료된 bio를 슬랩에 돌려주는 대신
+		 * 자기 CPU의 리스트에 쌓아 두었다가 다음 할당에 재사용한다.
+		 * 락도 원자적 연산도 없어 매우 빠르며, 초당 수십만 bio를 만드는
+		 * NVMe 워크로드에서 할당 비용을 크게 줄인다. */
 		bs->cache = alloc_percpu(struct bio_alloc_cache);
 		if (!bs->cache)
-			goto bad;  // 초기화 실패: NVMe bio pool 사용 불가 처리
+			goto bad;
+		/* [한국어] CPU 핫플러그 알림에 등록한다. CPU가 오프라인되면 그
+		 * CPU의 캐시에 남은 bio를 회수해야 한다 — 그대로 두면 그 메모리가
+		 * 영원히 묶인다. _nocalls 변형은 등록만 하고 지금 콜백을 부르지
+		 * 않는다는 뜻으로, 아직 캐시가 비어 있어 회수할 것이 없기 때문이다. */
 		cpuhp_state_add_instance_nocalls(CPUHP_BIO_DEAD, &bs->cpuhp_dead);
 	}
 
 	return 0;
 bad:
-	bioset_exit(bs);  // bio_set 해제: NVMe 제출 풀 정리
+	/* [한국어] 어느 단계에서 실패하든 bioset_exit()에 전부 맡긴다.
+	 * 이것이 가능한 이유는 호출자가 bs를 0으로 초기화해 넘기고,
+	 * bioset_exit()이 각 필드의 NULL/초기 상태를 확인해 "만들어진 것만"
+	 * 정리하도록 작성되어 있기 때문이다. 단계별 goto 라벨 사다리를
+	 * 두지 않아도 되는 깔끔한 구조다. */
+	bioset_exit(bs);
 	return -ENOMEM;
 }
-EXPORT_SYMBOL(bioset_init);  // bio_set 초기화: NVMe 제출에 사용되는 전역/드라이버 풀 생성
+EXPORT_SYMBOL(bioset_init);
 
 /*
  * [한국어]

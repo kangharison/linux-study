@@ -4013,14 +4013,35 @@ static int ioc_check_iocgs(struct ioc *ioc, struct ioc_now *now)
 	int nr_debtors = 0;
 	struct ioc_gq *iocg, *tiocg;
 
-	list_for_each_entry_safe(iocg, tiocg, &ioc->active_iocgs, active_list) {	/* NVMe 활성 cgroup 전체 점검 */
+	/* [한국어] 활성 cgroup 전체를 순회하며 상태를 점검한다.
+	 * _safe 변형인 이유: 아래에서 idle로 판정된 cgroup을 이 목록에서
+	 * 제거(비활성화)하기 때문이다. */
+	list_for_each_entry_safe(iocg, tiocg, &ioc->active_iocgs, active_list) {
+		/* [한국어] ★ 빠른 건너뛰기 ★
+		 * 네 조건 중 하나도 해당하지 않으면 손댈 이유가 없다:
+		 *   waitq 활성  - 예산이 없어 대기 중인 bio가 있다
+		 *   abs_vdebt   - 예산을 초과해 쓴 "빚"이 있다
+		 *   delay       - 스케줄 아웃 시 부과할 지연이 걸려 있다
+		 *   idle        - 오래 놀아서 비활성화해야 한다
+		 * 정상적으로 예산 안에서 I/O하는 cgroup이 대부분이므로, 이 검사가
+		 * 주기 타이머의 비용을 크게 줄인다. 락을 잡기 "전에" 검사하는 것도
+		 * 중요하다 — 대부분의 경우 락 획득 자체를 피한다. */
 		if (!waitqueue_active(&iocg->waitq) && !iocg->abs_vdebt &&
 		    !iocg->delay && !iocg_is_idle(iocg))
 			continue;
 
+		/* [한국어] 이 cgroup의 대기 큐 락. waitq를 보호하는 동시에
+		 * vdebt/delay 필드의 갱신도 이 락으로 직렬화한다. */
 		spin_lock(&iocg->waitq.lock);
 
 		/* flush wait and indebt stat deltas */
+		/* [한국어] ★ "시작 시각 + 주기적 정산" 패턴 ★
+		 * 세 통계(대기/부채/지연 시간)는 모두 같은 방식으로 누적된다.
+		 * 상태에 진입할 때 *_since에 시각을 찍어 두고, 여기서 주기적으로
+		 * "지금 - since"를 더한 뒤 since를 현재로 갱신한다.
+		 * 상태가 끝날 때만 정산하지 않는 이유: 오래 지속되는 상태(수 초간
+		 * 계속 부채 상태)에서도 io.stat이 진행 상황을 보여줘야 하기 때문이다.
+		 * since를 갱신하므로 같은 구간이 두 번 세어지지 않는다. */
 		if (iocg->wait_since) {
 			iocg->stat.wait_us += now->now - iocg->wait_since;
 			iocg->wait_since = now->now;
@@ -4039,12 +4060,24 @@ static int ioc_check_iocgs(struct ioc *ioc, struct ioc_now *now)
 		if (waitqueue_active(&iocg->waitq) || iocg->abs_vdebt ||
 		    iocg->delay) {
 			/* might be oversleeping vtime / hweight changes, kick */
+			/* [한국어] 대기자가 있거나 빚/지연이 있는 cgroup을 깨워 재평가한다.
+			 * 영문 주석이 밝히듯 "너무 오래 자고 있을" 수 있기 때문이다 —
+			 * 대기자는 "예산이 이만큼 쌓이면 깨어나겠다"고 계산해 잠들었는데,
+			 * 그 사이 vrate가 올라가거나 다른 cgroup이 사라져 가중치가 바뀌면
+			 * 실제로는 이미 깨어날 조건이 충족되었을 수 있다.
+			 * 그 변화를 대기자에게 통지할 방법이 없으므로, 주기 타이머가
+			 * 대신 흔들어 재계산하게 한다. */
 			iocg_kick_waitq(iocg, true, now);
+			/* [한국어] 빚이나 지연이 남아 있으면 "채무자"로 센다. 이 개수는
+			 * 호출자가 부채 상환 정책을 정하는 데 쓴다 — 채무자가 많으면
+			 * 장치가 전반적으로 과부하라는 신호다. */
 			if (iocg->abs_vdebt || iocg->delay)
 				nr_debtors++;
 		} else if (iocg_is_idle(iocg)) {
 			/* no waiter and idle, deactivate */
-			u64 vtime = atomic64_read(&iocg->vtime);			/* atomic: NVMe issued vtime */
+			/* [한국어] 이 cgroup이 쓴 가상 시간. atomic인 이유는 I/O 제출
+			 * 경로가 락 없이 이 값을 갱신하기 때문이다. */
+			u64 vtime = atomic64_read(&iocg->vtime);
 			s64 excess;
 
 			/*
@@ -4053,26 +4086,56 @@ static int ioc_check_iocgs(struct ioc *ioc, struct ioc_now *now)
 			 * error and throw away. On reactivation, it'll start
 			 * with the target budget.
 			 */
-			excess = now->vnow - vtime - ioc->margins.target;			/* NVMe target margin 초과 예산 */
-			if (excess > 0) {				/* 비활성화 시 초과 NVMe 예산 버림 */
+			/* [한국어] ★ 놀던 cgroup의 예산을 왜 버리는가 ★
+			 * iocost의 예산은 "가상 시간이 흐른 만큼 쌓인다". 그래서 오래
+			 * 논 cgroup은 예산이 잔뜩 쌓여 있다. 그대로 두면 다시 I/O를
+			 * 시작하는 순간 그 축적분으로 장치를 독점해 버린다 —
+			 * 다른 cgroup의 지연이 갑자기 튀는 원인이 된다.
+			 * 그래서 목표치(margins.target)를 넘는 부분은 버리고, 재활성화
+			 * 시 목표 예산에서 다시 시작하게 한다. */
+			excess = now->vnow - vtime - ioc->margins.target;
+			if (excess > 0) {
 				u32 old_hwi;
 
-				current_hweight(iocg, NULL, &old_hwi);					/* 버려진 예산에 대한 NVMe vrate 보정용 */
+				/* [한국어] 버린 예산을 vtime_err에 반영한다.
+				 * vtime_err은 "가상 시간과 실제 장치 능력 사이의 누적 오차"로,
+				 * vrate 보정에 쓰인다. 예산을 그냥 버리면 시스템 전체의
+				 * 가상 시간 회계가 어긋나므로, 버린 만큼을 이 오차 항에
+				 * 기록해 이후 vrate 계산에서 상쇄한다.
+				 * hweight를 곱하는 이유: excess는 이 cgroup 기준의 가상 시간
+				 * 이지만 vtime_err은 장치 전체 기준이라, 이 cgroup이 차지하는
+				 * 비율만큼 환산해야 한다. */
+				current_hweight(iocg, NULL, &old_hwi);
 				ioc->vtime_err -= div64_u64(excess * old_hwi,
 							    WEIGHT_ONE);
 			}
 
+			/* [한국어] 비활성화 사건을 tracepoint로 기록한다. iocost 동작을
+			 * 추적할 때 "어느 cgroup이 언제 놀다가 빠졌는가"를 보여준다. */
 			TRACE_IOCG_PATH(iocg_idle, iocg, now,
 					atomic64_read(&iocg->active_period),
 					atomic64_read(&ioc->cur_period), vtime);
+			/* [한국어] 가중치를 0으로 전파한다. 이 cgroup이 계층에서 차지하던
+			 * 몫이 사라져, 형제들이 그만큼 더 큰 비율을 갖게 된다.
+			 * 놀고 있는 cgroup 때문에 활성 cgroup이 손해 보지 않게 하는
+			 * 핵심 처리다. */
 			__propagate_weights(iocg, 0, 0, false, now);
+			/* [한국어] 활성 목록에서 제거한다. 다음 주기부터 순회 대상이
+			 * 아니게 되어, 노는 cgroup이 많아도 타이머 비용이 늘지 않는다.
+			 * 다시 I/O가 오면 iocg_activate()가 목록에 되돌린다. */
 			list_del_init(&iocg->active_list);
 		}
 
 		spin_unlock(&iocg->waitq.lock);
 	}
 
-	commit_weights(ioc);	/* 비활성화로 변경된 NVMe 가중치 캐시 갱신 */
+	/* [한국어] 위에서 __propagate_weights()로 바뀐 계층 가중치를 확정해
+	 * 캐시에 반영한다. 개별 변경마다 커밋하지 않고 순회가 끝난 뒤 한 번에
+	 * 하는 이유는, 여러 cgroup이 동시에 비활성화될 때 중간 상태로 계산이
+	 * 반복되는 낭비를 피하기 위해서다. */
+	commit_weights(ioc);
+	/* [한국어] 채무자 수를 호출자(ioc_timer_fn)에게 알린다. 이 값이 0이면
+	 * 부채 상환 로직 전체를 건너뛸 수 있다. */
 	return nr_debtors;
 }
 
