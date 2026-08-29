@@ -1851,7 +1851,15 @@ ssize_t part_stat_show(struct device *dev,
 		update_io_ticks(bdev, jiffies, true); /* [한국어] 큐 점유 시간(io_ticks) 갱신 */
 		part_stat_unlock(); /* [한국어] preemption 재활성화 */
 	}
-	part_stat_read_all(bdev, &stat); /* [한국어] 모든 CPU 통계 합산 */
+	/* [한국어] 모든 CPU의 per-CPU 통계를 하나의 구조체로 합산한다. 통계는
+	 * 갱신 비용을 줄이려고 CPU마다 흩어져 누적되므로, 읽을 때 모아야 한다.
+	 * CPU가 많으면 이 합산 자체가 비싸기 때문에, 이 파일을 초당 수십 번
+	 * 읽는 모니터링 도구는 그 자체로 부하가 된다는 점에 유의해야 한다. */
+	part_stat_read_all(bdev, &stat);
+	/* [한국어] ★ /sys/block/nvme0n1/stat 출력 형식 ★
+	 * 공백으로 구분된 17개 필드를 한 줄로 낸다. /proc/diskstats의 뒷부분과
+	 * 같은 순서이며, iostat이 이 값들의 시간당 변화율로 지표를 계산한다.
+	 * 아래 인자들이 그 17개 필드에 순서대로 대응한다. */
 	return sysfs_emit(buf,
 		"%8lu %8lu %8llu %8u "
 		"%8lu %8lu %8llu %8u "
@@ -1859,25 +1867,49 @@ ssize_t part_stat_show(struct device *dev,
 		"%8lu %8lu %8llu %8u "
 		"%8lu %8u"
 		"\n",
+		/* [한국어] 1) 완료된 읽기 I/O 수 → iostat의 r/s */
 		stat.ios[STAT_READ],
+		/* [한국어] 2) 병합된 읽기 수 → iostat의 rrqm/s.
+		 * 이 값이 크면 순차 읽기가 잘 합쳐져 NVMe 커맨드 수가 절약되고 있다는 뜻이다. */
 		stat.merges[STAT_READ],
+		/* [한국어] 3) 읽은 섹터 수(512B 단위) → iostat의 rkB/s 근거.
+		 * 4Kn NVMe라도 이 값은 항상 512B 단위다. */
 		(unsigned long long)stat.sectors[STAT_READ],
+		/* [한국어] 4) 읽기에 소비된 누적 시간(ms). ns 누적값을 밀리초로 나눈다.
+		 * 이 값 ÷ 읽기 수 = 평균 지연(iostat의 r_await).
+		 * div_u64를 쓰는 이유: 32비트 아키텍처에서 u64를 그대로 나누면
+		 * 링크 에러가 나므로 전용 헬퍼가 필요하다. */
 		(unsigned int)div_u64(stat.nsecs[STAT_READ], NSEC_PER_MSEC),
+		/* [한국어] 5~8) 쓰기에 대한 같은 네 항목 → w/s, wrqm/s, wkB/s, w_await */
 		stat.ios[STAT_WRITE],
 		stat.merges[STAT_WRITE],
 		(unsigned long long)stat.sectors[STAT_WRITE],
 		(unsigned int)div_u64(stat.nsecs[STAT_WRITE], NSEC_PER_MSEC),
+		/* [한국어] 9) 현재 진행 중인 I/O 수 → iostat의 aqu-sz 근거.
+		 * NVMe 관점에서는 SQ에 제출되어 아직 CQ 완료가 오지 않은 커맨드 수다. */
 		inflight,
+		/* [한국어] 10) 장치가 바빴던 누적 시간(ms) → iostat의 %util 근거.
+		 * 주의: NVMe처럼 큐 깊이가 깊은 장치에서 %util은 포화도를 뜻하지 않는다.
+		 * 커맨드 하나만 진행 중이어도 100%로 표시되므로, 이 값이 100%라고
+		 * 해서 장치가 한계에 도달한 것이 아니다. */
 		jiffies_to_msecs(stat.io_ticks),
+		/* [한국어] 11) 모든 방향의 누적 대기 시간 합(ms). 읽기·쓰기·discard·
+		 * flush를 전부 더한 값으로, 큐에 쌓인 총 대기 시간을 나타낸다. */
 		(unsigned int)div_u64(stat.nsecs[STAT_READ] +
 				      stat.nsecs[STAT_WRITE] +
 				      stat.nsecs[STAT_DISCARD] +
 				      stat.nsecs[STAT_FLUSH],
 						NSEC_PER_MSEC),
+		/* [한국어] 12~15) discard 통계 4항목. NVMe에서는 Dataset Management
+		 * (옵코드 0x09) 커맨드에 해당한다. sectors는 실제로 전송된 데이터가
+		 * 아니라 "무효화를 요청한 LBA 범위의 크기"임에 유의. */
 		stat.ios[STAT_DISCARD],
 		stat.merges[STAT_DISCARD],
 		(unsigned long long)stat.sectors[STAT_DISCARD],
 		(unsigned int)div_u64(stat.nsecs[STAT_DISCARD], NSEC_PER_MSEC),
+		/* [한국어] 16~17) flush 통계 2항목. NVMe Flush(옵코드 0x00)에 해당하며,
+		 * 데이터 전송이 없어 sectors/merges 항목이 없다.
+		 * fsync가 잦은 워크로드에서 이 값과 지연이 함께 커진다. */
 		stat.ios[STAT_FLUSH],
 		(unsigned int)div_u64(stat.nsecs[STAT_FLUSH], NSEC_PER_MSEC));
 }
@@ -2096,28 +2128,71 @@ static struct device_attribute dev_attr_fail_timeout =
 	__ATTR(io-timeout-fail, 0644, part_timeout_show, part_timeout_store);
 #endif
 
+/*
+ * [한국어] /sys/block/<disk>/ 아래에 만들어질 속성 파일 목록.
+ * 이 배열이 곧 사용자 공간이 디스크에 대해 볼 수 있는 정보의 전부다
+ * (queue/ 하위 디렉터리는 blk-sysfs.c가 따로 만든다).
+ * NULL로 끝나야 하며, disk_visible() 콜백이 일부를 조건부로 숨긴다.
+ */
 static struct attribute *disk_attrs[] = {
+	/* [한국어] range: 이 디스크가 가질 수 있는 최대 파티션 수(minor 개수).
+	 * NVMe는 보통 GENHD_FL_EXT_DEVT를 쓰므로 1이 나오고, 실제 파티션은
+	 * 확장 devt 공간에서 할당된다. */
 	&dev_attr_range.attr,
+	/* [한국어] ext_range: 확장 devt를 포함한 파티션 상한. */
 	&dev_attr_ext_range.attr,
+	/* [한국어] removable: 매체를 뺄 수 있는 장치인가(CD/USB는 1).
+	 * NVMe SSD는 0이다 — 컨트롤러 자체를 뽑는 것은 hot-unplug이지
+	 * "매체 교체"가 아니다. */
 	&dev_attr_removable.attr,
+	/* [한국어] hidden: 사용자에게 노출하지 않을 디스크인가.
+	 * NVMe 멀티패스에서 개별 경로 디스크(nvme0c0n1 등)가 이 플래그를 갖는다 —
+	 * 사용자는 통합된 헤드 디스크(nvme0n1)만 봐야 하기 때문이다. */
 	&dev_attr_hidden.attr,
+	/* [한국어] ro: 읽기 전용 여부. NVMe에서는 네임스페이스가 write-protected
+	 * 이거나 호스트가 NVME_NS_FORCE_RO를 설정한 경우 1이 된다. */
 	&dev_attr_ro.attr,
+	/* [한국어] size: 512B 섹터 단위 용량. NVMe Identify Namespace의 NSZE와
+	 * LBA 크기에서 유도된다. */
 	&dev_attr_size.attr,
+	/* [한국어] alignment_offset: 논리 블록 0이 물리 블록 경계에서 얼마나
+	 * 밀려 있는가. 파티션 도구가 이 값을 보고 파티션 시작을 정렬한다. */
 	&dev_attr_alignment_offset.attr,
+	/* [한국어] discard_alignment: discard granularity 경계 기준의 오프셋.
+	 * NVMe에서는 NPDA/NPDAL에서 유도된다. */
 	&dev_attr_discard_alignment.attr,
+	/* [한국어] capability: 장치 능력 비트마스크(레거시 인터페이스). */
 	&dev_attr_capability.attr,
+	/* [한국어] stat: 위 disk_stat_show()가 내는 17개 필드 I/O 통계.
+	 * iostat과 모니터링 도구의 주 데이터 소스다. */
 	&dev_attr_stat.attr,
+	/* [한국어] inflight: 진행 중인 읽기/쓰기 수. NVMe 관점에서는 SQ에 제출되어
+	 * 아직 완료가 오지 않은 커맨드 수에 해당한다. */
 	&dev_attr_inflight.attr,
+	/* [한국어] badblocks: 불량 블록 목록. disk->bb가 없으면
+	 * disk_visible()이 이 항목만 숨긴다(NVMe는 보통 설정하지 않는다). */
 	&dev_attr_badblocks.attr,
+	/* [한국어] events / events_async / events_poll_msecs: 매체 변경 이벤트
+	 * 폴링 설정. 제거 가능 매체용이라 NVMe에서는 거의 쓰이지 않는다. */
 	&dev_attr_events.attr,
 	&dev_attr_events_async.attr,
 	&dev_attr_events_poll_msecs.attr,
+	/* [한국어] diskseq: 디스크 인스턴스의 고유 일련번호. 같은 이름(nvme0n1)이
+	 * 재사용되더라도 이 값은 달라지므로, 사용자 공간이 "같은 이름의 다른
+	 * 장치"를 구분할 수 있다. hot-plug가 잦은 환경에서 중요하다. */
 	&dev_attr_diskseq.attr,
+	/* [한국어] partscan: 파티션 스캔이 활성화되어 있는가. */
 	&dev_attr_partscan.attr,
 #ifdef CONFIG_FAIL_MAKE_REQUEST
+	/* [한국어] make-it-fail: 이 디스크에 fault injection을 걸지 여부.
+	 * 여기에 1을 쓰고 debugfs에서 확률을 설정해야 실제로 주입된다
+	 * (block/blk-core.c의 should_fail_request 참고). */
 	&dev_attr_fail.attr,
 #endif
 #ifdef CONFIG_FAIL_IO_TIMEOUT
+	/* [한국어] io-timeout-fail: 타임아웃 경로 fault injection.
+	 * NVMe의 nvme_timeout → Abort → 컨트롤러 리셋 복구 경로를 실제 고장
+	 * 없이 시험할 때 쓴다. */
 	&dev_attr_fail_timeout.attr,
 #endif
 	NULL
