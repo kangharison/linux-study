@@ -99,8 +99,22 @@
 #include "blk-wbt.h"
 #include "blk-cgroup.h"
 
-/* 등록된 elevator_type 목록을 보호하는 스핀락; NVMe 스케줄러 플러그인들도 이 리스트에 등록됨 */
+/* [한국어] 전역 스케줄러 등록 목록(elv_list)을 보호하는 스핀락.
+ * 보호 대상: elv_list 자체의 연결 구조와, 그 위에서 수행하는 elevator_tryget().
+ * 경쟁 상황: mq-deadline/bfq/kyber는 모듈로 빌드될 수 있어, 한 CPU가
+ *   sysfs로 스케줄러를 바꾸는 중에 다른 CPU가 rmmod로 그 스케줄러를 목록에서
+ *   빼려 할 수 있다. 락 없이는 이미 해제된 elevator_type을 참조하게 된다.
+ * 범위: 시스템 전역(큐별이 아님). 스케줄러 "종류"는 모든 블록 장치가 공유하는
+ *   전역 자원이기 때문이다. 큐별 인스턴스는 q->elevator가 따로 갖는다. */
 static DEFINE_SPINLOCK(elv_list_lock);
+/* [한국어] 커널에 등록된 모든 I/O 스케줄러(struct elevator_type)의 목록.
+ * 설정자: elv_register()가 모듈 로드 시 추가, elv_unregister()가 언로드 시 제거.
+ * 읽는 자: __elevator_find()(이름으로 조회), elv_iosched_show()(sysfs에서
+ *   선택 가능한 목록 출력).
+ * NVMe와의 관계: /sys/block/nvme0n1/queue/scheduler를 cat하면 이 목록이
+ *   나오고, echo로 쓰면 여기서 이름을 찾아 큐에 붙인다. NVMe 기본값은
+ *   "none"(스케줄러 없음)인데, 하드웨어 큐가 여러 개라 소프트웨어에서
+ *   순서를 다시 정할 이유가 적기 때문이다. */
 static LIST_HEAD(elv_list);
 
 /*
@@ -109,9 +123,23 @@ static LIST_HEAD(elv_list);
 #define rq_hash_key(rq)		(blk_rq_pos(rq) + blk_rq_sectors(rq))
 
 /*
- * rq_hash_key: 요청의 끝 섹터를 해시 키로 사용.
- *   NVMe 관점에서는 연속된 LBA를 가진 bio들을 back-merge 후보로 빠르게 찾아
- *   PRP/SGL 체인 길이를 줄이는 데 활용된다.
+ * [한국어] rq_hash_key - request의 "끝나는 섹터"를 해시 키로 만든다
+ *
+ * blk_rq_pos(rq)는 시작 섹터, blk_rq_sectors(rq)는 길이이므로 둘을 더하면
+ * 이 request가 끝나는 지점(= 다음 섹터의 시작 위치)이 된다.
+ *
+ * 왜 "끝"을 키로 쓰는가:
+ *   back merge는 "새 bio의 시작 == 기존 request의 끝"일 때 성립한다. 따라서
+ *   request를 끝 섹터로 해시해 두면, 새 bio가 왔을 때 그 bio의 시작 섹터로
+ *   해시를 한 번 조회하는 것만으로 O(1)에 병합 후보를 찾을 수 있다.
+ *   시작 섹터로 해시했다면 후보를 찾기 위해 전체를 뒤져야 했을 것이다.
+ *
+ * front merge는 이 해시로 찾을 수 없다(반대 방향이므로). 그래서 elv_merge()는
+ * 해시 조회가 실패하면 스케줄러의 request_merge 콜백으로 넘겨, 정렬된
+ * rb-tree에서 front 후보까지 찾게 한다.
+ *
+ * NVMe 관점: 이 해시 한 번의 조회가 성공할 때마다 SQ 엔트리 하나, CID 하나,
+ * 완료 처리 한 번이 절약된다. 순차 워크로드에서 적중률이 매우 높다.
  */
 /*
  * Query io scheduler to see if the current process issuing bio may be
@@ -127,13 +155,26 @@ static LIST_HEAD(elv_list);
  */
 static bool elv_iosched_allow_bio_merge(struct request *rq, struct bio *bio)
 {
+	/* [한국어] request가 속한 큐. 스케줄러 콜백이 큐 컨텍스트를 필요로 한다. */
 	struct request_queue *q = rq->q;
+	/* [한국어] 이 큐에 붙은 스케줄러 인스턴스. 이 함수는 스케줄러가 반드시
+	 * 존재하는 경로(elv_merge 등)에서만 호출되므로 NULL 검사를 하지 않는다.
+	 * 스케줄러가 없는 NVMe 기본 구성("none")에서는 이 경로 자체를 타지 않고
+	 * blk_attempt_plug_merge()가 병합을 처리한다. */
 	struct elevator_queue *e = q->elevator;
 
-/* allow_merge ops: 스케줄러별 NVMe 병합 정책 확인 지점 */
+	/* [한국어] allow_merge 콜백은 선택 사항이다. 구현한 스케줄러:
+	 *   BFQ  - bfq_allow_bio_merge(). 두 I/O가 같은 bfq_queue(대략 같은
+	 *          프로세스)에 속하는지 확인한다. 다른 프로세스의 I/O를 합치면
+	 *          완료 시 서비스 시간을 누구에게 청구할지 모호해져, BFQ의
+	 *          가중치 기반 공정성이 무너진다.
+	 *   mq-deadline / kyber - 구현하지 않음. 지연 목표만 관리하고 프로세스
+	 *          단위 공정성은 추구하지 않으므로 병합을 막을 이유가 없다. */
 	if (e->type->ops.allow_merge)
 		return e->type->ops.allow_merge(q, rq, bio);
 
+	/* [한국어] 콜백이 없으면 허용이 기본값 — 병합은 거의 항상 이득이므로
+	 * "명시적으로 막지 않는 한 허용"이 올바른 기본 정책이다. */
 	return true;
 }
 
@@ -144,20 +185,37 @@ static bool elv_iosched_allow_bio_merge(struct request *rq, struct bio *bio)
  * elv_bio_merge_ok - 요청 병합의 기본 안전성 검사
  *   blk_rq_merge_ok()로 장치/방향/기타 제약을 확인하고,
  *   스케줄러 정책 허용 여부를 elv_iosched_allow_bio_merge()로 재확인한다.
- *   NVMe 연결: 병합 성공 시 하나의 struct request에 여러 bio가 묶여
- *              nvme_queue_rq()가 SQ 엔트리 1개로 처리할 수 있어
- *              doorbell 횟수와 CID 소모를 감소시킨다 (추정).
+ *   NVMe 연결: 병합에 성공하면 여러 bio가 하나의 struct request로 묶이고,
+ *              nvme_setup_rw()가 그것을 SLBA/NLB가 확장된 커맨드 하나로
+ *              변환한다. 그 결과 SQ 엔트리 하나, Command ID 하나, 완료 CQ
+ *              엔트리 하나가 절약된다.
+ *
+ * === 두 단계 검사인 이유 ===
+ * blk_rq_merge_ok()는 "하드웨어와 데이터 정합성상 합쳐도 되는가"(연산 종류,
+ * cgroup, PI, 암호화, 우선순위)를 보고, elv_iosched_allow_bio_merge()는
+ * "스케줄러 정책상 합쳐도 되는가"를 본다. 후자가 필요한 이유는 BFQ 같은
+ * 공정성 스케줄러 때문이다 — 서로 다른 프로세스의 I/O를 합치면 그 request가
+ * 완료될 때 누구의 몫으로 계산할지 모호해져 공정성 보장이 무너진다.
+ * mq-deadline은 allow_merge 콜백이 없어 항상 허용한다.
  */
 bool elv_bio_merge_ok(struct request *rq, struct bio *bio)
 {
-/* 장치/파티션/방향 등이 달라 NVMe SQ로 분리 제출되어야 하는지 확인 */
+	/* [한국어] 1단계 — 하드웨어·정합성 검사(block/blk-merge.c). 연산 종류,
+	 * cgroup 소속, 무결성(PI) 설정, 인라인 암호화 컨텍스트, write hint,
+	 * write stream, I/O 우선순위, 원자성 요구가 모두 호환되어야 한다.
+	 * 하나라도 어긋나면 합쳐진 커맨드가 잘못된 결과를 내므로 즉시 거부한다. */
 	if (!blk_rq_merge_ok(rq, bio))
 		return false;
 
-/* 스케줄러가 허용하면 NVMe 관점에서도 병합이 유리한지 최종 판단 */
+	/* [한국어] 2단계 — 스케줄러 정책 검사. 하드웨어적으로는 가능하지만
+	 * 스케줄러가 원하지 않을 수 있다(BFQ의 프로세스 간 격리 등).
+	 * 순서가 중요하다: 싸고 자주 걸리는 하드웨어 검사를 먼저 해서, 대부분의
+	 * 거부를 콜백 호출 없이 처리한다. */
 	if (!elv_iosched_allow_bio_merge(rq, bio))
 		return false;
 
+	/* [한국어] 두 관문 통과 — 병합 가능. 호출자(elv_merge, elv_rqhash_find
+	 * 이후 경로)가 blk_try_merge()로 방향(back/front/discard)을 정한다. */
 	return true;
 }
 EXPORT_SYMBOL(elv_bio_merge_ok);
@@ -169,35 +227,115 @@ EXPORT_SYMBOL(elv_bio_merge_ok);
  *
  * Return true if the elevator @e's name or alias matches @name.
  */
+/*
+ * [한국어]
+ * elevator_match - 스케줄러의 정식 이름 또는 별칭이 @name과 일치하는지 확인
+ *
+ * @e:    검사할 스케줄러 타입
+ * @name: 찾는 이름. 보통 사용자가 /sys/block/nvme0n1/queue/scheduler에 쓴 문자열.
+ * @return: true = 이 스케줄러가 요청된 것
+ *
+ * 별칭(elevator_alias)이 존재하는 이유는 하위 호환이다. 예를 들어 예전
+ * 단일 큐 시절의 "deadline"이라는 이름으로 쓰는 스크립트가 많은데, 지금의
+ * 구현은 "mq-deadline"이다. 별칭 덕분에 옛 스크립트가 그대로 동작한다.
+ *
+ * 실행 컨텍스트: elv_list_lock을 쥔 상태(호출자 __elevator_find가 잡는다).
+ * 순수 문자열 비교로 부수 효과가 없다.
+ *
+ * 호출 체인:
+ *   elv_iosched_store(sysfs) → elevator_find_get → __elevator_find
+ *     → [elevator_match]
+ */
 static bool elevator_match(const struct elevator_type *e, const char *name)
 {
-/* NVMe 장치가 sysfs에서 선택한 scheduler 이름과 등록된 스케줄러를 매칭 */
+	/* [한국어] 정식 이름이 일치하거나, 별칭이 등록되어 있고 그것이 일치하면 참.
+	 * 단락 평가 순서상 정식 이름을 먼저 보므로, 별칭 검사는 정식 이름이
+	 * 다를 때만 수행된다. elevator_alias NULL 검사를 먼저 하는 것은
+	 * strcmp에 NULL을 넘기는 것을 막기 위한 필수 가드다. */
 	return !strcmp(e->elevator_name, name) ||
 		(e->elevator_alias && !strcmp(e->elevator_alias, name));
 }
 
+/*
+ * [한국어]
+ * __elevator_find - 등록 목록에서 이름으로 스케줄러를 찾는다(참조 획득 없음)
+ *
+ * @name: 찾을 스케줄러 이름
+ * @return: 찾은 elevator_type, 없으면 NULL
+ *
+ * 앞의 밑줄 두 개는 커널 관례로 "락을 이미 잡은 상태에서 호출하라"는 뜻이다.
+ * 호출자 elevator_find_get()이 elv_list_lock을 쥐고 이 함수를 부른 뒤,
+ * 같은 락 안에서 참조까지 획득한다. 찾기와 참조 획득이 원자적으로 이루어져야
+ * 그 사이에 모듈이 언로드되는 것을 막을 수 있기 때문이다.
+ *
+ * 실행 컨텍스트: elv_list_lock을 반드시 쥔 상태.
+ *
+ * 호출 체인:
+ *   elevator_find_get → [__elevator_find] → elevator_match
+ *   elv_register (중복 등록 검사) → [__elevator_find]
+ */
 static struct elevator_type *__elevator_find(const char *name)
 {
 	struct elevator_type *e;
 
-/* elv_list를 순회하며 NVMe에 적용할 scheduler를 탐색 */
+	/* [한국어] 등록된 스케줄러를 선형 탐색한다. 목록에 있는 항목이 보통 3~5개
+	 * (none은 목록에 없고, mq-deadline/bfq/kyber 정도)라 해시 같은 자료구조를
+	 * 쓸 이유가 없다. 게다가 이 경로는 sysfs로 스케줄러를 바꿀 때만 실행되는
+	 * 냉경로(cold path)라 성능이 문제되지 않는다. */
 	list_for_each_entry(e, &elv_list, list)
 		if (elevator_match(e, name))
 			return e;
+	/* [한국어] 없음 — 사용자가 존재하지 않는 스케줄러 이름을 썼거나, 해당
+	 * 모듈이 아직 로드되지 않았다. 호출자가 request_module()로 자동 로드를
+	 * 시도한 뒤 다시 찾기도 한다. */
 	return NULL;
 }
 
+/*
+ * [한국어]
+ * elevator_find_get - 이름으로 스케줄러를 찾고 모듈 참조까지 안전하게 획득
+ *
+ * @name: 찾을 스케줄러 이름
+ * @return: 참조를 획득한 elevator_type. 없거나 획득 실패면 NULL.
+ *          호출자는 다 쓴 뒤 elevator_put()으로 반드시 반납해야 한다.
+ *
+ * === 찾기와 참조 획득이 같은 락 안에 있어야 하는 이유 ===
+ * 만약 락을 풀고 나서 참조를 잡으려 하면 그 사이에 다른 CPU가 rmmod로
+ * 모듈을 내려 elevator_type 구조체 자체가 해제될 수 있다. 그러면 이미
+ * 해제된 메모리에 대해 참조를 잡으려 시도하는 use-after-free가 된다.
+ * 그래서 락 안에서 "찾기 → 참조 획득"을 원자적으로 끝낸다.
+ *
+ * elevator_tryget()이 실패할 수 있는 이유: 모듈 언로드가 이미 시작되어
+ * 모듈 참조 카운트를 더 올릴 수 없는 상태다. 아직 목록에서 제거되지는
+ * 않았지만 곧 사라질 것이므로, 새로 쓰겠다고 잡아서는 안 된다.
+ *
+ * NVMe 관점: 사용자가 /sys/block/nvme0n1/queue/scheduler에 "mq-deadline"을
+ * 쓰면 이 함수로 스케줄러를 확보한 뒤 큐에 붙인다. 참조를 잡아 두므로
+ * 그 스케줄러를 사용하는 큐가 하나라도 있는 한 모듈을 내릴 수 없다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트(sysfs write 또는 큐 초기화).
+ * 내부에서 스핀락을 잡으므로 그 구간에서는 잠들 수 없다.
+ *
+ * 호출 체인:
+ *   elv_iosched_store / elevator_init_mq → [elevator_find_get]
+ *     → __elevator_find → elevator_tryget
+ */
 static struct elevator_type *elevator_find_get(const char *name)
 {
 	struct elevator_type *e;
 
-/* elv_list 보호: NVMe 스케줄러 등록/제거와 동시에 접근하지 않도록 */
+	/* [한국어] 목록 보호 락 획득. 이 구간 안에서 찾기와 참조 획득을 모두 끝낸다. */
 	spin_lock(&elv_list_lock);
+	/* [한국어] 이름으로 조회. 락을 이미 쥐었으므로 __ 접두사 버전을 쓴다. */
 	e = __elevator_find(name);
+	/* [한국어] 찾았다면 모듈 참조를 시도한다. try_module_get() 기반이라
+	 * 언로드가 진행 중이면 실패한다. 실패 시 e를 NULL로 만들어 "못 찾았다"와
+	 * 같은 결과로 취급한다 — 호출자 입장에서 "쓸 수 없다"는 점은 동일하다. */
 	if (e && (!elevator_tryget(e)))
-/* 참조 획득 실패 시(e.g. 모듈 제거 중) NVMe 장치는 해당 스케줄러 사용 불가 */
 		e = NULL;
 	spin_unlock(&elv_list_lock);
+	/* [한국어] 참조를 쥔 포인터 또는 NULL을 반환한다. 반환값이 NULL이 아니면
+	 * 호출자가 elevator_put()으로 반납할 책임을 진다. */
 	return e;
 }
 
@@ -308,12 +446,33 @@ static inline void __elv_rqhash_del(struct request *rq)
 }
 
 /*
- * elv_rqhash_del - 해시에 있을 경우에만 __elv_rqhash_del() 호출
- *   NVMe SQ에 제출된 요청은 더 이상 병합 대상이 아니므로 해시에서 제거하는 경로가
- *   있음 (추정).
+ * [한국어]
+ * elv_rqhash_del - request를 병합 후보 해시에서 안전하게 제거
+ *
+ * @q:  request가 속한 큐 (현재 구현에서는 쓰이지 않지만 API 일관성상 유지)
+ * @rq: 해시에서 뺄 request
+ * @return: 없음
+ *
+ * request가 드라이버로 dispatch되거나 병합으로 소멸하면 더 이상 병합 대상이
+ * 아니므로 해시에서 빼야 한다. 남겨 두면 이미 NVMe SQ에 실린(또는 해제된)
+ * request에 새 bio를 붙이려는 시도가 발생한다.
+ *
+ * ELV_ON_HASH() 검사가 필요한 이유: 이 함수는 여러 경로에서 호출되고, 그중
+ * 일부는 해당 request가 애초에 해시에 들어간 적이 없다(스케줄러를 거치지 않은
+ * passthrough, 이미 다른 경로에서 제거된 경우). 해시에 없는 노드를
+ * hash_del()하면 리스트 포인터가 손상되므로 반드시 확인해야 한다.
+ *
+ * 실행 컨텍스트: 스케줄러 락을 쥔 상태. 해시는 큐 단위 자료구조라 보호가 필요하다.
+ *
+ * 호출 체인:
+ *   elv_merge_requests / 스케줄러의 dispatch·완료 경로
+ *     (dd_finish_request, bfq_finish_requeue_request 등) → [elv_rqhash_del]
  */
 void elv_rqhash_del(struct request_queue *q, struct request *rq)
 {
+	/* [한국어] RQF_HASHED 플래그로 "실제로 해시에 들어 있는지"를 확인한다.
+	 * 이 검사 덕분에 호출자가 중복 호출하거나 해시에 없는 request를 넘겨도
+	 * 안전하다(멱등성). */
 	if (ELV_ON_HASH(rq))
 		__elv_rqhash_del(rq);
 }
@@ -357,24 +516,47 @@ void elv_rqhash_reposition(struct request_queue *q, struct request *rq)
  */
 struct request *elv_rqhash_find(struct request_queue *q, sector_t offset)
 {
+	/* [한국어] 해시 테이블은 스케줄러 인스턴스(elevator_queue)마다 하나씩 있다.
+	 * 큐마다 독립적이므로 다른 NVMe 네임스페이스의 request가 섞이지 않는다. */
 	struct elevator_queue *e = q->elevator;
+	/* [한국어] _safe 순회에 필요한 다음 노드 보관용. 순회 도중 현재 노드를
+	 * 삭제할 수 있기 때문에 반드시 필요하다(아래 __elv_rqhash_del 참고). */
 	struct hlist_node *next;
 	struct request *rq;
 
+	/* [한국어] offset을 키로 같은 버킷에 있는 request들을 순회한다.
+	 * 해시 충돌 때문에 키가 다른 request도 같은 버킷에 있을 수 있어,
+	 * 아래에서 rq_hash_key를 한 번 더 비교해야 한다.
+	 * _safe 변형인 이유: 루프 안에서 __elv_rqhash_del()로 현재 노드를
+	 * 제거하는데, 일반 순회 매크로는 제거된 노드의 next 포인터를 읽어
+	 * use-after-free를 일으킨다. */
 	hash_for_each_possible_safe(e->hash, rq, next, hash, offset) {
+		/* [한국어] 해시 버킷에 들어 있는데 RQF_HASHED가 없다면 자료구조가
+		 * 손상된 것이다. 조용히 넘어가면 이후 병합에서 잘못된 request를
+		 * 건드리므로 즉시 커널을 멈춰 디버깅을 강제한다. */
 		BUG_ON(!ELV_ON_HASH(rq));
 
-/* rq_mergeable: 이미 NVMe SQ에 제출된 요청은 병합 불가 */
+		/* [한국어] 이 request가 더 이상 병합 가능한 상태가 아니라면(REQ_NOMERGE가
+		 * 붙었거나 이미 dispatch되었거나 FLUSH 계열이면) 해시에 남아 있을
+		 * 이유가 없다. 찾는 김에 청소하는 지연 제거(lazy deletion) 전략으로,
+		 * 별도의 청소 순회를 돌 필요를 없앤다.
+		 * continue로 같은 버킷의 다음 후보를 계속 본다. */
 		if (unlikely(!rq_mergeable(rq))) {
 			__elv_rqhash_del(rq);
 			continue;
 		}
 
-/* back-merge 가능한 후보 발견; 이후 blk_try_merge로 연결 */
+		/* [한국어] 해시 충돌을 걸러내는 최종 확인. rq_hash_key(rq)는 이
+		 * request가 끝나는 섹터이고, offset은 새 bio가 시작하는 섹터다.
+		 * 둘이 같다는 것은 두 영역이 정확히 맞닿는다는 뜻이므로 back merge
+		 * 후보가 확정된다. 호출자 elv_merge()가 이어서 blk_try_merge()로
+		 * 방향을 확정하고 실제 병합을 수행한다. */
 		if (rq_hash_key(rq) == offset)
 			return rq;
 	}
 
+	/* [한국어] 인접한 request가 없다 — 이 bio는 새 request가 되거나, 호출자가
+	 * 스케줄러의 request_merge 콜백으로 front merge까지 찾아본다. */
 	return NULL;
 }
 
@@ -383,31 +565,84 @@ struct request *elv_rqhash_find(struct request_queue *q, sector_t offset)
  * in a sorted RB tree.
  */
 /*
- * elv_rb_add - 요청을 LBA 기준 RB-tree에 삽입
- *   호출 경로: mq-deadline/bfq 등의 스케줄러 낶부
- *   NVMe 연결: NVMe SSD에서는 디스패치 순서가 SQ/CID 순서에 의해 결정되지만,
- *              elevator 단계에서 LBA 순서로 정렬하면 rotational latency 없는
- *              NVMe에서도 연속된 LBA 액세스를 모아 성능을 높일 수 있다.
+ * [한국어]
+ * elv_rb_add - request를 시작 LBA 기준으로 정렬된 RB-tree에 삽입
+ *
+ * @root: 삽입 대상 RB-tree 루트. 스케줄러가 자기 자료구조 안에 갖고 있다
+ *        (mq-deadline의 dd_per_prio.sort_list[], BFQ의 bfq_queue.sort_list).
+ * @rq:   삽입할 request. blk_rq_pos(rq)(시작 섹터)를 정렬 키로 쓴다.
+ * @return: 없음
+ *
+ * === 왜 LBA로 정렬된 트리가 필요한가 ===
+ * 해시(elv_rqhash_find)는 "정확히 맞닿는" back merge 후보만 O(1)에 찾을 수
+ * 있다. 그런데 스케줄러는 두 가지를 더 해야 한다:
+ *   1) front merge 후보 찾기 — "이 bio 바로 뒤에서 시작하는 request"를
+ *      찾으려면 정렬된 구조에서 이분 탐색을 해야 한다.
+ *   2) dispatch 순서 정하기 — 다음에 내보낼 request를 LBA 순으로 고르면
+ *      장치 입장에서 접근이 순차적으로 보인다.
+ * 이 두 용도를 위해 스케줄러는 해시와 별개로 RB-tree를 유지한다.
+ *
+ * === NVMe에서도 LBA 정렬이 의미가 있는가 ===
+ * 회전 디스크만큼 극적이지는 않지만 여전히 이득이 있다. SSD 내부의 FTL은
+ * 논리적으로 인접한 LBA를 같은 물리 블록/채널에 배치하는 경향이 있어,
+ * 순차 접근이 읽기 증폭과 GC 부담을 줄인다. 또 LBA 순으로 나가면 블록 계층의
+ * 병합 기회 자체가 늘어나 커맨드 수가 줄어든다.
+ * 다만 이 이득이 스케줄러의 락 경합 비용보다 작기 때문에, 멀티큐 NVMe의
+ * 기본값은 여전히 "none"이다(elevator_set_default 참고).
+ *
+ * === 중복 키 처리 ===
+ * 같은 시작 LBA를 가진 request가 이미 있으면 오른쪽 서브트리로 내려간다.
+ * 즉 중복을 허용하며, 같은 키끼리는 나중에 삽입된 것이 뒤에 온다. 두 요청이
+ * 같은 LBA에서 시작하는 상황은 서로 다른 길이의 겹치는 I/O일 때 발생한다.
+ *
+ * 실행 컨텍스트: 스케줄러 락(dd->lock, bfqd->lock)을 쥔 상태.
+ *
+ * 호출 체인:
+ *   dd_insert_request / bfq_add_request → [elv_rb_add]
+ *     → rb_link_node → rb_insert_color(레드-블랙 균형 복원)
  */
 void elv_rb_add(struct rb_root *root, struct request *rq)
 {
+	/* [한국어] p는 "새 노드를 매달 위치를 가리키는 포인터의 포인터"다.
+	 * 이중 포인터를 쓰는 이유: 트리가 비었을 때는 root->rb_node에, 아니면
+	 * 부모의 rb_left 또는 rb_right에 써야 하는데, 이중 포인터로 두면
+	 * 세 경우를 분기 없이 동일하게 처리할 수 있다. */
 	struct rb_node **p = &root->rb_node;
+	/* [한국어] 새 노드의 부모가 될 노드. 루프가 끝나면 마지막으로 들른 노드가
+	 * 담긴다. 트리가 비어 있으면 NULL로 남아 새 노드가 루트가 된다. */
 	struct rb_node *parent = NULL;
+	/* [한국어] 순회 중 비교 대상 request. 이름 앞의 밑줄은 인자 rq와
+	 * 구분하기 위한 관례다. */
 	struct request *__rq;
 
+	/* [한국어] 루트에서 시작해 리프까지 내려가며 삽입 위치를 찾는다.
+	 * *p가 NULL이 되는 지점이 빈 자리다. 평균 O(log n). */
 	while (*p) {
+		/* [한국어] 현재 노드를 부모 후보로 기억한다. */
 		parent = *p;
+		/* [한국어] rb_node 포인터에서 그것을 품고 있는 request 구조체 주소를
+		 * 역산한다(container_of 매크로 기반). 커널의 내장형 자료구조 관용구로,
+		 * 별도의 노드 객체를 할당하지 않아 메모리와 캐시 미스를 아낀다. */
 		__rq = rb_entry(parent, struct request, rb_node);
 
+		/* [한국어] 새 request의 시작 LBA가 더 작으면 왼쪽 서브트리로 내려간다.
+		 * 그 결과 트리를 중위 순회하면 LBA 오름차순이 된다. */
 		if (blk_rq_pos(rq) < blk_rq_pos(__rq))
-/* LBA가 작으면 왼쪽: NVMe에 제출될 때도 순차적 LBA가 인접하도록 유도 */
 			p = &(*p)->rb_left;
+		/* [한국어] 크거나 같으면 오른쪽. >= 이므로 중복 키는 뒤쪽에 쌓인다.
+		 * (else if로 쓰였지만 앞 조건의 부정과 같아 항상 참이다 — 명시적으로
+		 *  조건을 적어 의도를 드러내는 스타일이다.) */
 		else if (blk_rq_pos(rq) >= blk_rq_pos(__rq))
-/* LBA가 같거나 크면 오른쪽: 다음 병합/디스패치 후보 탐색에 활용 */
 			p = &(*p)->rb_right;
 	}
 
+	/* [한국어] 찾은 빈 자리에 새 노드를 물리적으로 연결한다. 부모 포인터를
+	 * 설정하고, *p에 새 노드 주소를 써 넣는다. 이 시점의 트리는 연결은
+	 * 되었지만 레드-블랙 속성이 깨져 있을 수 있다. */
 	rb_link_node(&rq->rb_node, parent, p);
+	/* [한국어] 색칠과 회전으로 레드-블랙 속성을 복원해 트리 높이를 O(log n)로
+	 * 유지한다. 이 두 단계(연결 → 균형)를 분리하는 것이 커널 RB-tree API의
+	 * 표준 사용법이다. */
 	rb_insert_color(&rq->rb_node, root);
 }
 EXPORT_SYMBOL(elv_rb_add);
@@ -509,7 +744,11 @@ enum elv_merge elv_merge(struct request_queue *q, struct request **req,
 	 * First try one-hit cache.
 	 */
 	if (q->last_merge && elv_bio_merge_ok(q->last_merge, bio)) {
-/* one-hit 캐시: 직전 병합 요청을 재활용해 doorbell 지연 감소 (추정) */
+		/* [한국어] one-hit 캐시 적중. q->last_merge는 "가장 최근에 병합이
+		 * 성공한 request" 하나만 기억하는 극단적으로 단순한 캐시다.
+		 * 이것만으로도 효과가 큰 이유: 순차 I/O에서는 같은 request에 연달아
+		 * 붙는 경우가 압도적이라, 해시 조회조차 하지 않고 포인터 비교 한 번으로
+		 * 끝나는 경우가 대부분이다. 실패하면 아래 해시 조회로 넘어간다. */
 		enum elv_merge ret = blk_try_merge(q->last_merge, bio);
 
 		if (ret != ELEVATOR_NO_MERGE) {
@@ -561,63 +800,124 @@ enum elv_merge elv_merge(struct request_queue *q, struct request **req,
 bool elv_attempt_insert_merge(struct request_queue *q, struct request *rq,
 			      struct list_head *free)
 {
+	/* [한국어] 해시에서 찾아낸 병합 상대. 루프마다 새로 갱신된다. */
 	struct request *__rq;
+	/* [한국어] 한 번이라도 병합이 성공했는지. 호출자는 이 값으로 rq가
+	 * 살아 있는지(false) 소멸했는지(true) 판단한다. */
 	bool ret;
 
+	/* [한국어] 관리자가 /sys/block/<dev>/queue/nomerges에 2를 써서 병합을 전면
+	 * 금지한 경우. 병합 판정 자체가 CPU를 쓰므로, 랜덤 워크로드처럼 병합이
+	 * 절대 성공하지 않는 상황에서는 끄는 편이 빠르다. */
 	if (blk_queue_nomerges(q))
-/* nomerges 설정 시 즉시 실패: NVMe도 별도 SQ 엔트리 유지 */
 		return false;
 
 	/*
 	 * First try one-hit cache.
 	 */
+	/* [한국어] 가장 최근에 병합에 성공한 request와 먼저 시도한다. 순차 I/O에서는
+	 * 이 한 번의 시도로 끝나는 경우가 대부분이라, 해시 조회 비용조차 아낀다.
+	 * 성공하면 rq는 last_merge에 흡수되어 사라지므로 free 목록에 넣는다. */
 	if (q->last_merge && blk_attempt_req_merge(q, q->last_merge, rq)) {
-/* last_merge 캐시 우선 시도 */
+		/* [한국어] 소멸한 rq를 호출자가 나중에 해제하도록 free 리스트에 넣는다.
+		 * 여기서 직접 해제하지 않는 이유는 호출자가 스케줄러 락을 쥔 상태라,
+		 * 락을 푼 뒤에 해제해야 락 순서 역전을 피할 수 있기 때문이다. */
 		list_add(&rq->queuelist, free);
 		return true;
 	}
 
+	/* [한국어] nomerges에 1을 쓰면 noxmerges — "단순 캐시만 시도하고 복잡한
+	 * 탐색은 하지 말라"는 중간 설정이다. 캐시는 이미 위에서 시도했으므로
+	 * 여기서 종료한다. 해시 조회와 반복 병합의 CPU 비용을 아끼면서 가장
+	 * 쉬운 병합 기회는 놓치지 않는 절충안이다. */
 	if (blk_queue_noxmerges(q))
-/* noxmerges 시 해시 탐색 생략 */
 		return false;
 
 	ret = false;
 	/*
 	 * See if our hash lookup can find a potential backmerge.
 	 */
+	/* [한국어] ★ 연쇄 병합 루프 ★
+	 * 한 번 병합에 성공하면 결과 request가 더 커지고, 그 커진 request가
+	 * 또 다른 이웃과 맞닿을 수 있다. 예를 들어 [200~300]이 들어왔을 때
+	 * [100~200]에 흡수되어 [100~300]이 되면, 이제 [300~400]과도 인접해진다.
+	 * 더 이상 병합할 것이 없을 때까지 반복해 최대한 큰 request를 만든다.
+	 * NVMe 관점에서 이 루프가 도는 횟수만큼 SQ 엔트리와 Command ID가 절약된다. */
 	while (1) {
+		/* [한국어] 현재 rq의 "시작 섹터"로 해시를 조회한다. 해시는 request의
+		 * "끝 섹터"를 키로 하므로, 이 조회는 "rq 바로 앞에서 끝나는 request"를
+		 * 찾는 것이다. 즉 rq를 그 뒤에 붙이는 back merge 후보를 찾는다. */
 		__rq = elv_rqhash_find(q, blk_rq_pos(rq));
-/* 해시에서 찾은 후보와 병합 시도; 성공 시 rq는 free 목록으로 */
+		/* [한국어] 후보가 없거나 실제 병합에 실패하면(하드웨어 한계 등) 종료한다.
+		 * blk_attempt_req_merge()가 blk-merge.c의 attempt_merge()를 불러
+		 * 세그먼트 수·크기·virt boundary를 모두 검사한다. */
 		if (!__rq || !blk_attempt_req_merge(q, __rq, rq))
 			break;
 
+		/* [한국어] rq가 __rq에 흡수되어 소멸했다. 해제 목록에 넣는다. */
 		list_add(&rq->queuelist, free);
-/* 병합된 request를 다시 후보로 해 추가 병합 시도: NVMe SQ 엔트리 최소화 */
 		/* The merged request could be merged with others, try again */
+		/* [한국어] 최소 한 번 병합했음을 기록. 이후 루프에서 실패해도 이
+		 * 값은 유지되어 호출자에게 "원래 rq는 사라졌다"고 알린다. */
 		ret = true;
-/* rq를 병합된 __rq로 교체, 다음 루프에서 더 뒤의 연속 LBA 탐색 */
+		/* [한국어] 이제 커진 __rq를 새로운 기준으로 삼아 다시 시도한다.
+		 * 다음 반복에서는 __rq의 시작 섹터로 조회하므로, 더 앞쪽으로
+		 * 이어지는 request를 찾게 된다. */
 		rq = __rq;
 	}
 
+	/* [한국어] true = 원래 rq는 병합되어 사라졌다(free 목록에 있음).
+	 * false = 병합 실패, rq는 그대로 살아 있으니 호출자가 큐에 삽입해야 한다. */
 	return ret;
 }
 
 /*
- * elv_merged_request - 병합 완료 후 스케줄러에 알리고 해시/캐시 갱신
- *   호출 경로: blk_attempt_req_merge 완료 후
- *   NVMe 연결: 병합된 request가 nvme_queue_rq()에 의해 SQ 엔트리로 변환될 때
- *              더 큰 단위로 전송되어 host memory buffer(PRP/SGL) 효율 상승.
+ * [한국어]
+ * elv_merged_request - bio 병합 직후 스케줄러 자료구조와 캐시를 일관되게 갱신
+ *
+ * @q:    병합이 일어난 request_queue
+ * @rq:   bio를 흡수해 커진 request
+ * @type: 병합 방향(ELEVATOR_BACK_MERGE / ELEVATOR_FRONT_MERGE 등)
+ * @return: 없음
+ *
+ * request의 위치나 크기가 바뀌면 그것을 색인하고 있던 세 자료구조가 모두
+ * 낡은 상태가 된다. 이 함수가 그 셋을 한꺼번에 맞춘다:
+ *   1) 스케줄러 내부 색인 — request_merged 콜백(mq-deadline이면 정렬 rb-tree의
+ *      키가 바뀌었으므로 재삽입)
+ *   2) 병합 후보 해시 — back merge면 끝 섹터가 바뀌었으므로 재배치
+ *   3) one-hit 캐시 — 방금 병합에 성공한 request를 캐시에 올려 다음 시도를 가속
+ *
+ * === 왜 back merge에서만 해시를 재배치하는가 ===
+ * 해시 키는 rq_hash_key(rq) = 시작 섹터 + 길이 = "끝 섹터"다.
+ *   back merge  : 뒤에 붙였으므로 끝 섹터가 바뀐다 → 재배치 필요
+ *   front merge : 앞에 붙였으므로 시작 섹터와 길이가 함께 바뀌지만, 끝 섹터는
+ *                 그대로다 → 해시 키가 변하지 않아 재배치 불필요
+ * 이 비대칭은 "끝 섹터를 키로 삼은" 설계에서 자연스럽게 따라 나온다.
+ *
+ * 실행 컨텍스트: 스케줄러 락을 쥔 상태(호출자가 이미 잡고 있다).
+ *
+ * 호출 체인:
+ *   blk_mq_sched_try_merge → [elv_merged_request]
+ *     → ops.request_merged (dd_request_merged / bfq_request_merged)
+ *     → elv_rqhash_reposition
  */
 void elv_merged_request(struct request_queue *q, struct request *rq,
 		enum elv_merge type)
 {
+	/* [한국어] 이 큐의 스케줄러 인스턴스. 콜백 테이블 접근용. */
 	struct elevator_queue *e = q->elevator;
 
+	/* [한국어] 스케줄러에게 "이 request가 커졌다"고 알린다. 콜백은 선택 사항이며,
+	 * mq-deadline은 dd_request_merged()에서 정렬 rb-tree에 다시 넣는다
+	 * (시작 LBA가 바뀌는 front merge에서 특히 중요하다). 콜백이 없는
+	 * 스케줄러는 위치 색인을 유지하지 않으므로 할 일이 없다. */
 	if (e->type->ops.request_merged)
 		e->type->ops.request_merged(q, rq, type);
 
+	/* [한국어] back merge라 끝 섹터가 바뀌었다 — 병합 후보 해시에서 뺐다가
+	 * 새 키로 다시 넣는다. 이걸 빠뜨리면 이후 조회가 옛 끝 섹터로 이 request를
+	 * 찾아내, 실제로는 인접하지 않은 bio를 붙이려 시도하게 된다. */
 	if (type == ELEVATOR_BACK_MERGE)
-/* back-merge 후 해시 키가 바뀌므로 재배치 */
 		elv_rqhash_reposition(q, rq);
 
 /* last_merge 캐시 갱신 */
@@ -625,10 +925,10 @@ void elv_merged_request(struct request_queue *q, struct request *rq,
 }
 
 /*
- * elv_merge_requests - 두 request가 병합됨을 스케줄러에 통지
- *   호출 경로: blk_attempt_req_merge -> elv_merge_requests
- *   NVMe 연결: merge된 최종 request가 nvme_queue_rq()에서 단일 CID와
- *              하나의 doorbell로 제출될 수 있음 (추정).
+ * [한국어] (아래 상세 블록 참고) 두 request 병합을 스케줄러에 통지하는 진입점.
+ * 병합 결과 살아남은 request 하나가 nvme_setup_rw()에서 SLBA/NLB가 확장된
+ * 커맨드 하나로 변환되므로, SQ 엔트리·Command ID·완료 CQ 엔트리가 각각
+ * 하나씩 절약된다.
  */
 /*
  * [한국어]
@@ -807,24 +1107,67 @@ static const struct kobj_type elv_ktype = {
 	.release	= elevator_release,
 };
 
+/*
+ * [한국어]
+ * elv_register_queue - 스케줄러를 sysfs/debugfs에 노출해 사용자에게 공개
+ *
+ * @q:      스케줄러가 붙은 request_queue
+ * @e:      노출할 스케줄러 인스턴스
+ * @uevent: udev에 KOBJ_ADD 이벤트를 보낼지 여부. 부팅 초기의 기본 스케줄러
+ *          설정처럼 udev가 반응할 필요가 없는 경우에는 false를 넘긴다.
+ * @return: 0 성공, 음수 errno 실패
+ *
+ * 스케줄러를 큐에 붙이는 실제 동작(elevator_switch)이 끝난 뒤, 그것을 사용자
+ * 공간에서 보고 조정할 수 있게 만드는 마지막 단계다. 세 가지를 만든다:
+ *   1) /sys/block/nvme0n1/queue/iosched/ 디렉터리
+ *   2) 그 안의 튜너블 파일들 (mq-deadline이면 read_expire, write_expire,
+ *      fifo_batch, writes_starved 등)
+ *   3) debugfs의 스케줄러 상태 덤프
+ *
+ * ELEVATOR_FLAG_REGISTERED를 마지막에 세우는 순서가 중요하다. 이 비트가
+ * 서 있어야 elv_unregister_queue()가 실제로 정리 작업을 수행하므로,
+ * 등록이 완료된 뒤에 세워야 부분적으로 등록된 상태를 해제하려다 꼬이는 일이 없다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. sysfs 조작은 잠들 수 있다.
+ * q->elevator_lock을 쥔 상태에서 호출된다.
+ *
+ * 에러 경로: kobject_add()가 실패하면 그대로 반환하고, 호출자
+ * elevator_change_done()이 스케줄러를 해제한다. 개별 튜너블 파일 생성 실패는
+ * 치명적이지 않다고 보고 루프만 중단한다(아래 참고).
+ *
+ * 호출 체인:
+ *   elevator_change → elevator_change_done → [elv_register_queue]
+ *     → kobject_add → sysfs_create_file → blk_mq_sched_reg_debugfs
+ */
 static int elv_register_queue(struct request_queue *q,
 			      struct elevator_queue *e,
 			      bool uevent)
 {
 	int error;
 
-/* /sys/block/<disk>/queue/iosched kobject 생성: NVMe 관리자 접근 지점 */
+	/* [한국어] 큐의 sysfs 디렉터리(/sys/block/nvme0n1/queue/) 아래에 "iosched"
+	 * 라는 이름으로 kobject를 등록한다. 이 호출이 성공해야 디렉터리가 생긴다. */
 	error = kobject_add(&e->kobj, &q->disk->queue_kobj, "iosched");
 	if (!error) {
+		/* [한국어] 스케줄러가 노출할 튜너블 목록. NULL로 끝나는 배열이며,
+		 * 스케줄러마다 다르다(none은 아예 없고, mq-deadline은 5~6개). */
 		const struct elv_fs_entry *attr = e->type->elevator_attrs;
 		if (attr) {
-/* scheduler별 sysfs 파일 생성(e.g. read_expire, fifo_batch 등) */
+			/* [한국어] 배열 끝(name == NULL)까지 순회하며 파일을 만든다. */
 			while (attr->attr.name) {
+				/* [한국어] 파일 생성에 실패하면 루프를 중단하되 함수 전체는
+				 * 성공으로 처리한다. 튜너블 하나가 없어도 스케줄러 자체는
+				 * 정상 동작하므로, 여기서 실패시켜 I/O를 못 하게 만드는 것보다
+				 * 일부 튜너블 없이 진행하는 편이 낫다는 판단이다. */
 				if (sysfs_create_file(&e->kobj, &attr->attr))
 					break;
 				attr++;
 			}
 		}
+		/* [한국어] udev에 "새 kobject가 생겼다"고 알린다. udev 규칙이 스케줄러
+		 * 변경에 반응해 추가 튜닝을 하도록 만들 수 있다. 부팅 시 기본 스케줄러
+		 * 설정(elevator_set_default)은 no_uevent=true로 이를 건너뛴다 —
+		 * 아직 udev가 준비되지 않았고 불필요한 이벤트 폭주를 막기 위해서다. */
 		if (uevent)
 			kobject_uevent(&e->kobj, KOBJ_ADD);
 
@@ -832,11 +1175,16 @@ static int elv_register_queue(struct request_queue *q,
 		 * Sched is initialized, it is ready to export it via
 		 * debugfs
 		 */
-/* blk-mq sched debugfs 등록: NVMe dispatch 지연/depth 분석용 */
+		/* [한국어] debugfs에 스케줄러 상태를 노출한다.
+		 * /sys/kernel/debug/block/nvme0n1/sched/ 아래에 dispatch 큐 내용,
+		 * 각 우선순위별 FIFO 상태 등이 덤프되어, NVMe I/O가 스케줄러에서
+		 * 얼마나 대기하는지 직접 관찰할 수 있다. */
 		blk_mq_sched_reg_debugfs(q);
-/* ELEVATOR_FLAG_REGISTERED 설정: NVMe I/O 경로에서 이 elevator를 사용 가능 */
+		/* [한국어] 등록 완료 표시. 이 비트를 마지막에 세우는 이유는 위
+		 * 함수 주석 참고 — 해제 경로가 이 비트를 보고 동작하기 때문이다. */
 		set_bit(ELEVATOR_FLAG_REGISTERED, &e->flags);
 	}
+	/* [한국어] kobject_add의 결과를 그대로 반환. 실패하면 호출자가 롤백한다. */
 	return error;
 }
 
@@ -890,23 +1238,42 @@ static void elv_unregister_queue(struct request_queue *q,
 int elv_register(struct elevator_type *e)
 {
 	/* finish request is mandatory */
-/* finish_request는 NVMe 완료 인터럽트 경로에서도 호출되므로 필수 */
+	/* [한국어] 필수 콜백 검사 1 — finish_request.
+	 * request가 완료될 때(성공이든 실패든) 스케줄러가 내부 상태를 정리할
+	 * 기회다. 이것이 없으면 스케줄러가 자기가 발행한 request를 회수하지 못해
+	 * 자료구조가 계속 부풀어 오른다. WARN_ON_ONCE로 개발자에게 스택 트레이스를
+	 * 남기는 이유: 이것은 사용자 오류가 아니라 스케줄러 구현 버그이므로
+	 * 조용히 거부하기보다 명확히 알려야 한다. */
 	if (WARN_ON_ONCE(!e->ops.finish_request))
 		return -EINVAL;
 	/* insert_requests and dispatch_request are mandatory */
+	/* [한국어] 필수 콜백 검사 2 — 요청의 입구와 출구.
+	 *   insert_requests  : blk-mq가 request를 스케줄러에 맡기는 경로
+	 *   dispatch_request : 스케줄러가 다음에 내보낼 request를 고르는 경로
+	 * 이 둘이 스케줄러 존재 이유 자체이므로 없으면 등록할 수 없다.
+	 * NVMe 관점에서 dispatch_request가 고른 request가 곧 다음 SQ 엔트리가 된다. */
 	if (WARN_ON_ONCE(!e->ops.insert_requests || !e->ops.dispatch_request))
-/* insert_requests/dispatch_request: blk-mq와 NVMe 간 요청 흐름의 핵심 콜백 */
 		return -EINVAL;
 
 	/* create icq_cache if requested */
+	/* [한국어] icq(io_cq, I/O Context Queue)를 쓰는 스케줄러라면 전용 slab
+	 * 캐시를 만든다. icq는 "프로세스 × 큐" 조합마다 하나씩 만들어지는 객체로,
+	 * 그 프로세스가 이 장치에 대해 갖는 스케줄링 상태(BFQ의 가중치, 대기
+	 * 이력 등)를 담는다. BFQ만 이것을 쓰고 mq-deadline/kyber는 쓰지 않는다.
+	 * 자주 할당·해제되는 고정 크기 객체라 전용 slab 캐시가 효율적이다. */
 	if (e->icq_size) {
-/* icq 캐시: cgroup별 NVMe I/O 스케줄링 상태 저장소 */
+		/* [한국어] icq는 struct io_cq를 첫 멤버로 품어야 한다(상속 관용구).
+		 * 크기나 정렬이 그보다 작으면 공통 코드가 구조체 밖을 침범한다. */
 		if (WARN_ON(e->icq_size < sizeof(struct io_cq)) ||
 		    WARN_ON(e->icq_align < __alignof__(struct io_cq)))
 			return -EINVAL;
 
+		/* [한국어] "bfq_io_cq" 같은 캐시 이름을 만든다. /proc/slabinfo에
+		 * 이 이름으로 나타나 메모리 사용량을 추적할 수 있다. */
 		snprintf(e->icq_cache_name, sizeof(e->icq_cache_name),
 			 "%s_io_cq", e->elevator_name);
+		/* [한국어] slab 캐시 생성. 생성자(마지막 인자 NULL)를 두지 않으므로
+		 * 할당 시점에 스케줄러가 직접 초기화한다. */
 		e->icq_cache = kmem_cache_create(e->icq_cache_name, e->icq_size,
 						 e->icq_align, 0, NULL);
 		if (!e->icq_cache)
@@ -914,17 +1281,27 @@ int elv_register(struct elevator_type *e)
 	}
 
 	/* register, don't allow duplicate names */
-/* 중복 등록 방지: 동일 이름의 NVMe 스케줄러가 두 개 존재하면 안 됨 */
+	/* [한국어] 전역 목록을 보호하며 등록한다. 검사와 삽입이 같은 락 안에 있어야
+	 * 두 모듈이 동시에 같은 이름으로 등록하는 경쟁을 막을 수 있다. */
 	spin_lock(&elv_list_lock);
+	/* [한국어] 이름 중복 검사. 같은 이름이 둘이면 elevator_find_get()이
+	 * 어느 것을 돌려줄지 불확정해지고, 사용자가 sysfs로 고른 스케줄러가
+	 * 의도한 것이 아닐 수 있다. */
 	if (__elevator_find(e->elevator_name)) {
 		spin_unlock(&elv_list_lock);
+		/* [한국어] 위에서 만든 slab 캐시를 되돌린다. icq_size가 0이었다면
+		 * icq_cache는 NULL이고, kmem_cache_destroy(NULL)은 안전한 no-op다. */
 		kmem_cache_destroy(e->icq_cache);
 		return -EBUSY;
 	}
-/* elv_list에 추가되어 NVMe 장치에서 선택 가능해짐 */
+	/* [한국어] 목록 끝에 추가한다. 이 순간부터 다른 CPU가 이 스케줄러를
+	 * 조회하고 큐에 붙일 수 있다. tail에 넣는 이유는 등록 순서를 유지해
+	 * /sys/.../queue/scheduler 출력이 안정적으로 보이게 하기 위해서다. */
 	list_add_tail(&e->list, &elv_list);
 	spin_unlock(&elv_list_lock);
 
+	/* [한국어] dmesg에 등록 사실을 남긴다. 부팅 로그에서 어떤 스케줄러가
+	 * 사용 가능한지 확인할 수 있다. */
 	printk(KERN_INFO "io scheduler %s registered\n", e->elevator_name);
 
 	return 0;
@@ -975,53 +1352,101 @@ EXPORT_SYMBOL_GPL(elv_unregister);
  */
 static int elevator_switch(struct request_queue *q, struct elv_change_ctx *ctx)
 {
+	/* [한국어] 새로 붙일 스케줄러 타입. "none"으로 전환하는 경우 NULL로 남는다. */
 	struct elevator_type *new_e = NULL;
 	int ret = 0;
 
+	/* [한국어] 큐가 freeze된 상태여야 한다는 불변식 검사. freeze는 "새 요청
+	 * 진입을 막고 진행 중인 요청이 모두 끝나기를 기다린" 상태를 뜻한다.
+	 * 스케줄러를 바꾸는 동안 그것을 참조하는 request가 살아 있으면 해제된
+	 * 자료구조를 건드리게 되므로, 호출자가 반드시 먼저 freeze해야 한다. */
 	WARN_ON_ONCE(q->mq_freeze_depth == 0);
+	/* [한국어] 스케줄러 교체 직렬화 락도 쥐고 있어야 한다. freeze는 I/O를
+	 * 막을 뿐, 두 스레드가 동시에 스케줄러를 바꾸는 것은 막지 못한다. */
 	lockdep_assert_held(&q->elevator_lock);
 
+	/* [한국어] "none"이 아니면 실제 스케줄러 모듈을 찾아 참조를 획득한다.
+	 * strncmp의 반환값이 0이 아닐 때(= 이름이 "none"이 아닐 때) 진입한다.
+	 * "none"은 등록 목록에 없는 특별한 이름으로, "스케줄러를 붙이지 않음"을
+	 * 뜻한다. NVMe 멀티큐의 기본 상태가 바로 이것이다. */
 	if (strncmp(ctx->name, "none", 4)) {
 		new_e = elevator_find_get(ctx->name);
+		/* [한국어] 없는 스케줄러 이름 — 사용자에게 -EINVAL을 돌려준다.
+		 * 아직 아무것도 바꾸지 않았으므로 롤백할 것이 없다. */
 		if (!new_e)
 			return -EINVAL;
 	}
 
+	/* [한국어] freeze에 더해 quiesce까지 건다. 둘의 차이가 중요하다:
+	 *   freeze  - 새 요청이 큐에 "들어오는 것"을 막는다.
+	 *   quiesce - 이미 큐에 있는 요청이 드라이버로 "나가는 것"을 막는다.
+	 * 스케줄러 교체는 dispatch 경로가 완전히 멈춰야 안전하므로 둘 다 필요하다.
+	 * 내부적으로 SRCU 유예 기간을 기다려 실행 중인 dispatch가 끝나게 한다. */
 	blk_mq_quiesce_queue(q);
-/* queue quiesce: NVMe I/O 진행 중인 request들이 안전히 멈춤 */
 
 	if (q->elevator) {
+		/* [한국어] 기존 스케줄러 포인터를 ctx에 보관한다. 여기서 바로 해제하지
+		 * 않는 이유는, 해제에 sysfs 조작이 포함되어 있어 지금 쥐고 있는 락
+		 * 아래에서 하면 락 순서 역전이 발생하기 때문이다. 호출자
+		 * elevator_change_done()이 락을 푼 뒤 정리한다. */
 		ctx->old = q->elevator;
-/* 기존 elevator_exit: NVMe 요청이 old scheduler를 참조하지 않도록 정리 */
+		/* [한국어] 스케줄러의 exit_sched 콜백을 부르고 q->elevator를 떼어낸다.
+		 * 이 시점 이후 큐는 잠시 스케줄러가 없는 상태가 된다. */
 		elevator_exit(q);
 	}
 
 	if (new_e) {
+		/* [한국어] 새 스케줄러를 초기화해 큐에 연결한다. 내부에서 스케줄러
+		 * 전용 태그 세트(sched_tags)를 할당하는데, 이것이 드라이버 태그와
+		 * 별개인 이유는 스케줄러가 "장치에 보낼 수 있는 것보다 많은" 요청을
+		 * 큐에 담아야 재정렬할 여지가 생기기 때문이다. 보통 드라이버 태그
+		 * 개수의 2배를 잡는다. NVMe에서 이는 CID 공간과는 별개의 논리적
+		 * 슬롯이며, 실제 CID는 dispatch 시점에 따로 획득한다. */
 		ret = blk_mq_init_sched(q, new_e, &ctx->res);
-/* blk_mq_init_sched: 새 elevator와 NVMe tag_set을 연결 */
+		/* [한국어] 초기화 실패(대개 메모리 부족) — 큐는 스케줄러 없는 상태로
+		 * 남는다. 위 영문 주석이 밝히듯 옛 스케줄러를 되살리는 것도 메모리를
+		 * 요구하므로, 그냥 "none"으로 두는 것이 가장 안전한 폴백이다. */
 		if (ret)
 			goto out_unfreeze;
+		/* [한국어] 새 인스턴스를 ctx에 기록. 호출자가 나중에 sysfs 등록을 한다. */
 		ctx->new = q->elevator;
 	} else {
+		/* [한국어] "none"으로 전환하는 경로.
+		 * QUEUE_FLAG_SQ_SCHED는 "단일 큐 스케줄러가 붙어 있다"는 표시로,
+		 * dispatch 경로가 스케줄러를 경유할지 결정한다. 해제하면 이후
+		 * request가 소프트웨어 큐에서 하드웨어 큐로 직행한다. */
 		blk_queue_flag_clear(QUEUE_FLAG_SQ_SCHED, q);
-/* "none" 선택 시 QUEUE_FLAG_SQ_SCHED 해제: software scheduling 우회 */
 		q->elevator = NULL;
+		/* [한국어] 큐 깊이를 드라이버 태그 개수로 되돌린다. 스케줄러가 있을
+		 * 때는 sched_tags 크기(보통 2배)를 쓰지만, 없으면 실제 드라이버가
+		 * 받을 수 있는 만큼만 담는 것이 맞다. NVMe에서 tag_set->queue_depth는
+		 * I/O 큐 하나의 깊이(nvme_dev의 q_depth, 보통 1024)에서 온다. */
 		q->nr_requests = q->tag_set->queue_depth;
-/* none으로 전환 시 queue_depth를 tag_set depth로 복원: NVMe SQ 깊이와 동기화 */
+		/* [한국어] 비동기 요청 전용 깊이 제한도 함께 되돌린다. 스케줄러가
+		 * 있을 때는 async 쓰기가 태그를 독점해 동기 읽기를 굶기지 않도록
+		 * 더 낮은 값을 두지만, 스케줄러가 없으면 그런 제한이 무의미하다. */
 		q->async_depth = q->tag_set->queue_depth;
 	}
-/* blk_add_trace_msg: elevator 변경 이벤트 트레이싱 */
+	/* [한국어] blktrace 로그에 전환 사실을 남긴다. I/O 성능이 특정 시점부터
+	 * 달라졌을 때 스케줄러 변경이 원인인지 추적하는 데 쓴다. */
 	blk_add_trace_msg(q, "elv switch: %s", ctx->name);
 
 out_unfreeze:
+	/* [한국어] dispatch를 재개한다. 이 시점부터 새 스케줄러(또는 none)를
+	 * 통해 요청이 드라이버로 흐른다. freeze 해제는 호출자가 담당한다. */
 	blk_mq_unquiesce_queue(q);
-/* queue unquiesce: NVMe I/O 경로 재개 */
 
 	if (ret) {
+		/* [한국어] 실패를 사용자에게 알린다. 큐는 "none" 상태로 남아 I/O는
+		 * 계속 동작하므로 치명적이지 않다. new_e는 여기 도달할 때 반드시
+		 * NULL이 아니다(ret이 0이 아닌 유일한 경로가 blk_mq_init_sched
+		 * 실패이고, 그것은 new_e가 있을 때만 실행되므로). */
 		pr_warn("elv: switch to \"%s\" failed, falling back to \"none\"\n",
 			new_e->elevator_name);
 	}
 
+	/* [한국어] elevator_find_get()으로 잡았던 모듈 참조를 반납한다. 성공했다면
+	 * blk_mq_init_sched()가 자체 참조를 이미 잡았으므로 여기서 놓아도 안전하다. */
 	if (new_e)
 		elevator_put(new_e);
 	return ret;
@@ -1068,36 +1493,77 @@ static void elv_exit_and_release(struct elv_change_ctx *ctx,
 }
 
 /*
- * elevator_change_done - 스케줄러 전환 후 sysfs/debugfs 등록 및 자원 정리
- *   호출 경로: elevator_change -> elevator_change_done
- *   NVMe 연결: 전환이 끝난 후 /sys/block/<disk>/queue/iosched가 다시
- *              노출되며, NVMe I/O 경로가 새 elevator의 dispatch를 사용.
+ * [한국어]
+ * elevator_change_done - 락 밖에서 해야 하는 뒷정리: 옛 스케줄러 해제 + 새 것 등록
+ *
+ * @q:   전환이 일어난 request_queue
+ * @ctx: 전환 컨텍스트. ctx->old(내려간 것)와 ctx->new(올라온 것)가 채워져 있다.
+ * @return: 0 성공, 음수 errno(새 스케줄러 sysfs 등록 실패)
+ *
+ * === 왜 elevator_switch()에서 다 하지 않고 이 함수로 미뤘는가 ===
+ * elevator_switch()는 q->elevator_lock을 쥐고 큐가 freeze/quiesce된 상태에서
+ * 실행된다. 그런데 이 함수가 하는 두 가지 일은 그 상태에서 하면 안 된다:
+ *   - sysfs kobject 조작(생성/제거)은 내부적으로 자체 락을 잡는데, 그것이
+ *     elevator_lock과 반대 순서로 잡히는 경로가 있어 데드락 위험이 있다.
+ *   - kobject_put()으로 인한 최종 해제는 잠들 수 있다.
+ * 그래서 elevator_switch()는 포인터만 ctx에 담아 두고, 호출자가 락을 푼 뒤
+ * 이 함수를 불러 실제 정리를 한다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. q->elevator_lock을 쥐지 않은 상태이며,
+ * 큐도 이미 unfreeze되어 I/O가 흐르고 있다. 옛 스케줄러는 이미 큐에서
+ * 분리되었으므로 지금 해제해도 아무도 참조하지 않는다.
+ *
+ * 에러 경로: 새 스케줄러의 sysfs 등록이 실패하면 elv_exit_and_release()로
+ * 롤백해 큐를 "none" 상태로 만든다. I/O는 계속 동작한다.
+ *
+ * 호출 체인:
+ *   elevator_change → [elevator_change_done]
+ *     → elv_unregister_queue / blk_mq_free_sched_res / kobject_put (옛 것)
+ *     → elv_register_queue (새 것) → 실패 시 elv_exit_and_release
  */
 static int elevator_change_done(struct request_queue *q,
 				struct elv_change_ctx *ctx)
 {
 	int ret = 0;
 
+	/* [한국어] 옛 스케줄러가 있었다면(none → X 전환이 아니라면) 먼저 정리한다.
+	 * 순서가 중요하다 — 옛 것을 완전히 치우고 나서 새 것을 등록해야
+	 * /sys/.../queue/iosched 라는 같은 이름의 kobject가 충돌하지 않는다. */
 	if (ctx->old) {
-/* ctx->old: elevator_switch()가 교체한 이전 elevator_queue */
+		/* [한국어] 해제할 자원 정보를 스택 구조체에 미리 복사해 둔다.
+		 * elv_unregister_queue()나 kobject_put()이 진행되면서 ctx->old의
+		 * 필드가 무효해질 수 있으므로, 그 전에 필요한 값(et = 스케줄러 태그
+		 * 세트, data = 스케줄러 사설 데이터)을 안전한 곳으로 옮긴다. */
 		struct elevator_resources res = {
-/* old elevator의 sched_res를 스택에 복사: 이후 old->elevator_data가 NULL이 돼도 접근 가능 */
 			.et = ctx->old->et,
 			.data = ctx->old->elevator_data
 		};
 
-/* sysfs iosched kobject 제거: 이전 스케줄러 파라미터 파일 비공개 */
+		/* [한국어] sysfs에서 iosched 디렉터리와 튜너블 파일들을 제거한다.
+		 * 이 시점부터 사용자 공간은 옛 스케줄러의 파라미터에 접근할 수 없다. */
 		elv_unregister_queue(q, ctx->old);
-/* 이전 스케줄러의 hw_queue별 자원(tag/wq 등) 해제 */
+		/* [한국어] 스케줄러 전용 태그 세트(sched_tags)와 사설 데이터를 해제한다.
+		 * sched_tags는 하드웨어 큐마다 하나씩 있으므로 tag_set 정보가 필요하다.
+		 * NVMe에서 이 태그들은 드라이버 태그(= Command ID)와 별개의 논리적
+		 * 슬롯이므로, 해제해도 컨트롤러 쪽 상태에는 영향이 없다. */
 		blk_mq_free_sched_res(&res, ctx->old->type, q->tag_set);
-/* kobject_put: 참조가 0이 되면 elevator_release()가 elevator_queue를 kfree */
+		/* [한국어] kobject 참조를 놓는다. 마지막 참조였다면 elevator_release()가
+		 * 호출되어 elevator_queue 구조체 자체가 kfree된다. sysfs를 통해 누군가
+		 * 아직 파일을 열고 있다면 그가 닫을 때까지 해제가 지연된다 —
+		 * 참조 계수 방식이 주는 안전성이다. */
 		kobject_put(&ctx->old->kobj);
 	}
+	/* [한국어] 새 스케줄러가 올라왔다면("none"으로의 전환이 아니라면) 사용자
+	 * 공간에 노출한다. */
 	if (ctx->new) {
-/* 새 elevator sysfs 등록: /sys/block/<disk>/queue/iosched 재생성 */
+		/* [한국어] no_uevent를 뒤집어 uevent 인자로 넘긴다. 부팅 시 기본
+		 * 스케줄러 설정은 no_uevent=true라 udev 이벤트를 보내지 않고,
+		 * 사용자가 sysfs로 명시적으로 바꾼 경우에는 이벤트를 보낸다. */
 		ret = elv_register_queue(q, ctx->new, !ctx->no_uevent);
+		/* [한국어] sysfs 등록 실패 — 스케줄러는 이미 큐에 붙어 동작 중이지만
+		 * 사용자가 제어할 수 없는 반쪽 상태다. 그런 상태로 두느니 완전히
+		 * 내려서 "none"으로 만드는 편이 낫다. */
 		if (ret)
-/* 등록 실패 시 rollback: 새 elevator를 내리고 request_queue를 "none" 상태로 */
 			elv_exit_and_release(ctx, q);
 	}
 	return ret;
@@ -1123,16 +1589,29 @@ static int elevator_change(struct request_queue *q, struct elv_change_ctx *ctx)
 
 	lockdep_assert_held(&set->update_nr_hwq_lock);
 
+	/* [한국어] "none"이 아니라면 스케줄러 자원을 미리 할당한다.
+	 * 왜 미리 하는가: 아래에서 큐를 freeze한 뒤에 할당하면, 메모리 회수가
+	 * 이 큐로의 write-back I/O를 필요로 할 때 데드락이 발생한다(freeze된 큐는
+	 * I/O를 받지 않으므로 회수가 영원히 끝나지 않는다). freeze 전에 할당하면
+	 * 이 재귀를 피할 수 있다.
+	 * nr_hw_queues만큼 할당하는 이유: 스케줄러 태그 세트는 하드웨어 큐마다
+	 * 하나씩 필요하기 때문이다. NVMe에서는 SQ/CQ 쌍 개수만큼 만들어진다. */
 	if (strncmp(ctx->name, "none", 4)) {
 		ret = blk_mq_alloc_sched_res(q, ctx->type, &ctx->res,
-/* 스케줄러 자원 사전 할당: NVMe tag_set의 hw_queue 수만큼 */
 				set->nr_hw_queues);
+		/* [한국어] 메모리 부족 — 아직 아무것도 바꾸지 않았으므로 그대로 반환.
+		 * 기존 스케줄러가 계속 동작한다. */
 		if (ret)
 			return ret;
 	}
 
+	/* [한국어] 큐를 freeze한다. 새 요청 진입을 막고 진행 중인 요청이 모두
+	 * 완료되기를 기다린다. 반환값 memflags는 freeze 동안 설정된
+	 * PF_MEMALLOC_NOIO 상태를 담고 있어, unfreeze 시 원복하는 데 쓴다.
+	 * 이 플래그가 필요한 이유: freeze 구간에서 메모리 할당이 I/O를 유발하면
+	 * 자기 자신이 막아 놓은 큐를 기다리는 데드락이 되므로, 커널에 "이 구간에서는
+	 * I/O를 유발하는 회수를 하지 말라"고 알려 둔다. */
 	memflags = blk_mq_freeze_queue(q);
-/* queue freeze: NVMe request 발행을 일시 중단 */
 	/*
 	 * May be called before adding disk, when there isn't any FS I/O,
 	 * so freezing queue plus canceling dispatch work is enough to
@@ -1142,23 +1621,44 @@ static int elevator_change(struct request_queue *q, struct elv_change_ctx *ctx)
 	 *
 	 * Disk isn't added yet, so verifying queue lock only manually.
 	 */
+	/* [한국어] 예약된 dispatch 워크(run_work, requeue_work)를 취소하고 이미
+	 * 실행 중인 것이 끝나기를 기다린다. freeze는 새 요청을 막을 뿐, 워커가
+	 * 이미 큐에 있던 요청을 드라이버로 내보내는 것은 막지 못한다. 스케줄러를
+	 * 교체하는 동안 워커가 옛 스케줄러 자료구조를 만지면 안 되므로 필요하다.
+	 * 위 영문 주석이 설명하듯, freeze + 워크 취소만으로 충분해서 quiesce까지
+	 * 걸지 않는다 — 디스크가 여러 개인 시스템에서 quiesce의 SRCU 대기가
+	 * 부팅 지연을 크게 늘리기 때문이다. */
 	blk_mq_cancel_work_sync(q);
-/* dispatch work 취소: 진행 중인 blk-mq dispatch가 NVMe SQ에 쓰지 않도록 */
+	/* [한국어] 스케줄러 교체를 직렬화하는 뮤텍스. 두 스레드가 동시에 sysfs로
+	 * 스케줄러를 바꾸는 상황을 막는다. */
 	mutex_lock(&q->elevator_lock);
+	/* [한국어] 요청된 스케줄러가 이미 붙어 있으면 아무것도 하지 않는다.
+	 * 조건을 풀어 읽으면 "현재 스케줄러가 있고 그 이름이 요청과 일치하는"
+	 * 경우가 아닐 때만 전환한다. 같은 스케줄러로 다시 바꾸는 것은 무의미한
+	 * freeze/quiesce 비용만 발생시키므로 걸러 낸다.
+	 * q->elevator가 NULL("none")인데 ctx->name도 "none"인 경우는 이 조건에
+	 * 걸리지 않아 elevator_switch()가 호출되지만, 그쪽에서 다시 무해하게
+	 * 처리된다. */
 	if (!(q->elevator && elevator_match(q->elevator->type, ctx->name)))
-/* 이미 동일 스케줄러면 전환 생략 */
 		ret = elevator_switch(q, ctx);
 	mutex_unlock(&q->elevator_lock);
+	/* [한국어] 큐를 다시 열어 I/O를 재개한다. memflags로 freeze 전의 메모리
+	 * 할당 컨텍스트를 원복한다. 이 시점부터 새 스케줄러로 요청이 흐른다. */
 	blk_mq_unfreeze_queue(q, memflags);
+	/* [한국어] 전환이 성공했다면 락 밖에서 해야 하는 뒷정리(옛 스케줄러 해제,
+	 * 새 스케줄러 sysfs 등록)를 수행한다. 실패했다면 정리할 것이 없다. */
 	if (!ret)
 		ret = elevator_change_done(q, ctx);
-/* 전환 후 등록/정리 수행 */
 
 	/*
 	 * Free sched resource if it's allocated but we couldn't switch elevator.
 	 */
+	/* [한국어] ctx->new가 NULL이면 새 스케줄러가 큐에 붙지 못했다는 뜻이다
+	 * (전환 실패, 또는 "none"으로 전환, 또는 이미 같은 스케줄러라 생략).
+	 * 그렇다면 위에서 미리 할당해 둔 자원이 주인 없이 남으므로 해제한다.
+	 * 반대로 ctx->new가 있으면 그 자원은 스케줄러가 소유하고 있으므로
+	 * 여기서 건드리면 안 된다. */
 	if (!ctx->new)
-/* 전환 실패 시 미사용 스케줄러 자원 해제 */
 		blk_mq_free_sched_res(&ctx->res, ctx->type, set);
 
 	return ret;
@@ -1215,10 +1715,28 @@ void elv_update_nr_hw_queues(struct request_queue *q,
  *   호출 경로: add_disk -> blk_register_queue -> elevator_set_default
  *   NVMe 연결:
  *     - NVMe namespace가 디스크로 등록될 때 호출.
- *     - 단일 hw_queue 또는 shared tags인 경우 mq-deadline을 시도하고,
- *       실패하거나 멀티큐이면 "none"을 사용한다.
- *     - NVMe SSD는 보통 "none"이 기본이지만, 커널 구성/태그셋 플래그에 따라
- *       mq-deadline이 선택되기도 한다 (추정).
+ *     - 단일 hw_queue이거나 shared tags인 경우에만 mq-deadline을 시도하고,
+ *       그 외(멀티큐)에는 "none"을 그대로 둔다.
+ *
+ * === NVMe가 보통 "none"이 되는 실제 이유 ===
+ * 조건은 코드 그대로 (q->nr_hw_queues == 1 || blk_mq_is_shared_tags(...)) 이다.
+ * NVMe PCIe는 CPU 수에 맞춰 여러 개의 하드웨어 큐(SQ/CQ 쌍)를 만들므로
+ * nr_hw_queues > 1 이고 shared tags도 쓰지 않아, 이 조건에 걸리지 않아
+ * "none"으로 남는다. NVMe 드라이버가 BLK_MQ_F_NO_SCHED_BY_DEFAULT를 설정해서가
+ * 아니다(설정하지 않는다).
+ *
+ * 왜 멀티큐에 스케줄러를 붙이지 않는가:
+ *   I/O 스케줄러의 본래 목적은 회전 디스크에서 탐색(seek)을 줄이려고 요청을
+ *   재정렬하는 것이었다. NVMe SSD는 탐색이 없고 내부적으로 수십 개의 채널을
+ *   병렬 처리하므로 재정렬 이득이 없다. 반면 스케줄러는 큐 전역 락을 쓰기
+ *   때문에 여러 CPU가 동시에 제출할 때 심각한 경합을 만든다. 즉 멀티큐 NVMe에서
+ *   스케줄러는 이득 없이 비용만 발생시킨다.
+ *   다만 지연 격리나 cgroup 대역폭 제어가 필요하면 사용자가 sysfs로
+ *   mq-deadline이나 bfq를 명시적으로 붙일 수 있다.
+ *
+ * 하드웨어 큐가 하나뿐인 장치(SATA AHCI, 일부 eMMC/UFS, 큐를 하나만 만든
+ * NVMe 구성)는 어차피 락이 하나로 직렬화되므로 스케줄러의 재정렬 이득이
+ * 비용을 넘어선다. 그래서 mq-deadline이 기본값이 된다.
  */
 void elevator_set_default(struct request_queue *q)
 {
@@ -1233,8 +1751,12 @@ void elevator_set_default(struct request_queue *q)
 /* elevator 전환 허용: NVMe 장치도 sysfs로 변경 가능 */
 	blk_queue_flag_clear(QUEUE_FLAG_NO_ELV_SWITCH, q);
 
+	/* [한국어] 드라이버가 "기본적으로 스케줄러를 붙이지 말라"고 명시한 경우
+	 * 즉시 반환해 "none" 상태를 유지한다. 스케줄링이 오히려 해로운 장치
+	 * (예: 자체적으로 순서를 최적화하는 가상 장치)를 위한 탈출구다.
+	 * 참고: NVMe PCIe 드라이버는 이 플래그를 설정하지 않는다. NVMe가 보통
+	 * "none"이 되는 이유는 이 플래그가 아니라 아래의 nr_hw_queues 조건이다. */
 	if (q->tag_set->flags & BLK_MQ_F_NO_SCHED_BY_DEFAULT)
-/* BLK_MQ_F_NO_SCHED_BY_DEFAULT: NVMe 장치에서 "none" 강제 플래그 */
 		return;
 
 	/*
@@ -1327,8 +1849,11 @@ ssize_t elv_iosched_store(struct gendisk *disk, const char *buf,
 	struct blk_mq_tag_set *set = q->tag_set;
 
 	/* Make sure queue is not in the middle of being removed */
+	/* [한국어] 큐가 sysfs에 등록된 상태인지 확인한다. 장치 제거(del_gendisk)가
+	 * 진행 중이면 이 플래그가 이미 내려가 있어, 사라지는 중인 큐의 스케줄러를
+	 * 바꾸려는 무의미하고 위험한 시도를 막는다. NVMe 컨트롤러가 갑자기
+	 * 뽑히는(surprise removal) 상황에서 실제로 발생할 수 있는 경쟁이다. */
 	if (!blk_queue_registered(q))
-/* 장치가 아직 등록되지 않았으면 NVMe 스케줄러 변경 불가 */
 		return -ENOENT;
 
 	/*
@@ -1336,12 +1861,23 @@ ssize_t elv_iosched_store(struct gendisk *disk, const char *buf,
 	 * queue to ensure that the module file can be read when the request
 	 * queue is the one for the device storing the module file.
 	 */
+	/* [한국어] 사용자 입력을 고정 크기 스택 버퍼로 복사한다. strscpy는 항상
+	 * NUL로 끝맺고 넘치면 잘라 내므로, sysfs로 들어온 임의 길이 입력에
+	 * 안전하다(strcpy나 strncpy와 달리). */
 	strscpy(elevator_name, buf, sizeof(elevator_name));
-/* 사용자 입력을 "none"/"mq-deadline"/"bfq" 등 정제 */
+	/* [한국어] 앞뒤 공백과 개행을 제거한다. `echo mq-deadline > scheduler`는
+	 * 끝에 '\n'을 붙여 쓰므로 이 처리가 없으면 이름 비교가 항상 실패한다.
+	 * strstrip은 버퍼 안에서 앞쪽 공백을 건너뛴 포인터를 돌려주고 뒤쪽은
+	 * NUL로 잘라 낸다. */
 	ctx.name = strstrip(elevator_name);
 
+	/* [한국어] 필요하면 스케줄러 모듈을 먼저 로드한다. 위 영문 주석이 밝히듯
+	 * 이것을 큐 freeze "전에" 해야 한다 — 모듈 파일이 바로 이 블록 장치에
+	 * 저장되어 있을 수 있는데, freeze된 큐에서 모듈을 읽으려 하면 자기 자신을
+	 * 기다리는 데드락이 된다. */
 	elv_iosched_load_module(ctx.name);
-/* 해당 이름의 스케줄러를 elv_list에서 조회/참조 획득 */
+	/* [한국어] 이름으로 스케줄러 타입을 찾고 모듈 참조를 획득한다.
+	 * "none"이면 NULL이 반환되는데 이는 오류가 아니라 정상 경로다. */
 	ctx.type = elevator_find_get(ctx.name);
 
 	/*
@@ -1350,21 +1886,36 @@ ssize_t elv_iosched_store(struct gendisk *disk, const char *buf,
 	 *   update_nr_hwq_lock -> kn->active (via del_gendisk -> kobject_del)
 	 *   kn->active -> update_nr_hwq_lock (via this sysfs write path)
 	 */
+	/* [한국어] 하드웨어 큐 수 변경(blk_mq_update_nr_hw_queues)과의 동시 실행을
+	 * 막는 읽기 락을 잡는다. 스케줄러 자원은 hw 큐 개수만큼 할당되므로,
+	 * 할당 도중에 개수가 바뀌면 크기가 어긋난다.
+	 *
+	 * 일반 down_read가 아니라 trylock을 쓰는 이유는 위 영문 주석의 순환 의존
+	 * 때문이다:
+	 *   디스크 삭제 경로: update_nr_hwq_lock → kn->active (kobject_del)
+	 *   이 sysfs 쓰기 경로: kn->active(이미 보유) → update_nr_hwq_lock
+	 * 두 경로가 락을 반대 순서로 잡으므로 서로 기다리면 데드락이다.
+	 * trylock으로 즉시 포기하고 -EBUSY를 돌려주면 사용자가 재시도하면 된다.
+	 * NVMe 컨트롤러 리셋 중에 스케줄러를 바꾸려 하면 실제로 이 -EBUSY를 본다. */
 	if (!down_read_trylock(&set->update_nr_hwq_lock)) {
-/* update_nr_hwq_lock: NVMe hw_queue 수 변경과 동시 수정 방지 */
 		ret = -EBUSY;
 		goto out;
 	}
+	/* [한국어] QUEUE_FLAG_NO_ELV_SWITCH는 "지금은 스케줄러를 바꾸지 말라"는
+	 * 일시적 금지 표시로, 디스크 등록 전이나 하드웨어 큐 재구성 중에 설정된다.
+	 * 이 플래그가 없을 때만 실제 전환을 수행한다. */
 	if (!blk_queue_no_elv_switch(q)) {
-/* elevator_change: 실제로 NVMe request_queue의 스케줄러 교체 */
 		ret = elevator_change(q, &ctx);
+		/* [한국어] sysfs write 핸들러의 관례상 "소비한 바이트 수"를 반환해야
+		 * 한다. 성공했으면 입력 전체를 소비한 것이므로 count를 돌려준다.
+		 * 그렇지 않으면 사용자 공간의 write()가 부분 쓰기로 오해해 무한 재시도한다. */
 		if (!ret)
 			ret = count;
 	} else {
 		ret = -ENOENT;
 	}
+	/* [한국어] 읽기 락 해제. 이 시점부터 하드웨어 큐 수 변경이 가능해진다. */
 	up_read(&set->update_nr_hwq_lock);
-/* lock 해제 후 참조 해제 */
 
 out:
 	if (ctx.type)
