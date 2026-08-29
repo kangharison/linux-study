@@ -462,6 +462,37 @@ void blkcg_punt_bio_submit(struct bio *bio)
 }
 EXPORT_SYMBOL_GPL(blkcg_punt_bio_submit);
 
+/*
+ * [한국어]
+ * blkcg_punt_bio_init - kthread 우회 bio 제출용 전용 워크큐를 만든다
+ *
+ * @return: 0 성공, -ENOMEM 실패
+ *
+ * === 왜 별도 워크큐가 필요한가 ===
+ * 어떤 bio는 제출 스레드에서 바로 내보내면 안 된다. 대표적으로 btrfs 같은
+ * 파일시스템이 압축/체크섬 작업을 위해 kthread에서 bio를 만드는 경우인데,
+ * 그 kthread는 특정 cgroup에 속하지 않는다. 그대로 제출하면 I/O가 root
+ * cgroup 몫으로 계산되어 cgroup 대역폭 제한이 우회된다.
+ * 그래서 원래 요청자의 cgroup 정보를 실어 이 워크큐로 넘기고, 워커가
+ * 그 cgroup의 컨텍스트에서 대신 제출한다("punt" = 넘긴다).
+ *
+ * === 워크큐 플래그의 의미 ===
+ *   WQ_MEM_RECLAIM - 메모리 회수 경로에서도 진행이 보장되어야 한다.
+ *     write-back I/O가 이 워크큐를 거치는데, 메모리가 부족할 때 이 워커가
+ *     막히면 회수가 끝나지 않아 시스템 전체가 멈춘다. 이 플래그가
+ *     전용 rescuer 스레드를 붙여 그 상황을 방지한다.
+ *   WQ_FREEZABLE - 시스템 suspend 시 이 워커를 멈춰, 얼어붙은 장치로
+ *     I/O가 나가지 않게 한다.
+ *   WQ_UNBOUND - 특정 CPU에 묶지 않는다. 제출 CPU 지역성보다 지연 없이
+ *     실행되는 것이 중요하기 때문이다.
+ *   WQ_SYSFS - /sys/bus/workqueue/devices/blkcg_punt_bio로 노출해
+ *     관리자가 nice 값이나 CPU 마스크를 조정할 수 있게 한다.
+ *
+ * 실행 컨텍스트: subsys_initcall — 부팅 중 블록 계층 초기화 시점.
+ *
+ * 호출 체인:
+ *   subsys_initcall → [blkcg_punt_bio_init] → alloc_workqueue
+ */
 static int __init blkcg_punt_bio_init(void)
 {
 	blkcg_punt_bio_wq = alloc_workqueue("blkcg_punt_bio",
@@ -510,6 +541,31 @@ EXPORT_SYMBOL_GPL(bio_blkcg_css);
  * @blkcg: blkcg of interest
  *
  * Return the parent blkcg of @blkcg.  Can be called anytime.
+ */
+/*
+ * [한국어]
+ * blkcg_parent - 부모 blkcg를 반환 (cgroup 트리 상향 탐색)
+ *
+ * @blkcg: 기준 blkcg
+ * @return: 부모 blkcg. root cgroup이면 NULL.
+ *
+ * blkcg는 cgroup 코어의 css(cgroup_subsys_state)를 내장하고 있고, 트리 구조
+ * 자체는 css가 관리한다. 따라서 부모를 찾으려면 css의 parent를 따라간 뒤
+ * 다시 blkcg로 되돌리면 된다.
+ *
+ * 이 상향 탐색이 필요한 이유는 blk-cgroup의 여러 정책이 계층적이기 때문이다.
+ * 자식 cgroup에 설정이 없으면 부모의 설정을 물려받고(상속), 통계는 자식에서
+ * 부모로 합산되어 올라간다(recursive sum). 그 두 방향의 순회가 모두 이
+ * 함수를 쓴다.
+ *
+ * root cgroup에서는 css.parent가 NULL이므로 이 함수도 NULL을 반환한다 —
+ * 호출자는 그것을 "트리 꼭대기에 도달했다"는 종료 조건으로 쓴다.
+ *
+ * 실행 컨텍스트: 어디서든(단순 포인터 역참조). 다만 blkcg 자체의 생존은
+ * 호출자가 참조나 RCU로 보장해야 한다.
+ *
+ * 호출 체인:
+ *   blkg_alloc / blkcg_css_online / 정책별 상속 로직 → [blkcg_parent]
  */
 static inline struct blkcg *blkcg_parent(struct blkcg *blkcg)
 {
@@ -1021,14 +1077,33 @@ restart:
 	/* [한국어] root_blkg NULL 대기 중인 blkcg_init_disk() 깨우기 */
 }
 
+/*
+ * [한국어]
+ * blkg_iostat_set - I/O 통계 구조체를 통째로 복사(대입)
+ *
+ * @dst: 복사 대상
+ * @src: 복사 원본
+ * @return: 없음
+ *
+ * blkg_iostat은 read/write/discard 세 방향의 bytes[]와 ios[] 배열을 담은
+ * 구조체다. 구조체 대입(*dst = *src) 대신 필드를 하나씩 도는 이유는,
+ * 이 구조체가 u64_stats_sync로 보호되는 seqlock 영역 안에서 다뤄지기 때문에
+ * 컴파일러가 임의로 최적화하거나 재배치하지 않도록 명시적으로 쓰기 위해서다.
+ *
+ * 실행 컨텍스트: u64_stats_update_begin/end 구간 안(호출자가 보장).
+ *
+ * 호출 체인:
+ *   __blkg_clear_stat / blkcg_iostat_update / blkg_iostat_add 등 → [blkg_iostat_set]
+ */
 static void blkg_iostat_set(struct blkg_iostat *dst, struct blkg_iostat *src)
 {
 	int i;
 	/* [한국어] BLKG_IOSTAT_READ/WRITE/DISCARD 세 항목 순회 */
 
 	for (i = 0; i < BLKG_IOSTAT_NR; i++) {
-	/* [한국어] read/write/discard 세 항목에 대해 복사; NVMe opcode 별 통계 분류 */
-	/* [한국어] read/write/discard 세 항목에 대해 복사 */
+	/* [한국어] read/write/discard 세 항목을 순회하며 복사한다. 이 세 분류는
+	 * op_stat_group()이 REQ_OP_*에서 도출하며, NVMe에서는 각각
+	 * Read(0x02) / Write(0x01)·Write Zeroes(0x08) / DSM(0x09)에 대응한다. */
 		dst->bytes[i] = src->bytes[i];
 		/* [한국어] i 유형(read/write/discard) 바이트 복사 */
 		dst->ios[i] = src->ios[i];
@@ -1036,6 +1111,31 @@ static void blkg_iostat_set(struct blkg_iostat *dst, struct blkg_iostat *src)
 	}
 }
 
+/*
+ * [한국어]
+ * __blkg_clear_stat - per-CPU 통계 슬롯 하나를 0으로 초기화
+ *
+ * @bis: 초기화할 per-CPU 통계 집합(cur + last + seqlock)
+ * @return: 없음
+ *
+ * blkg_iostat_set 구조체는 두 개의 통계를 갖는다:
+ *   cur  - 지금까지 이 CPU에서 누적된 값
+ *   last - 마지막으로 상위(부모 blkg)로 전파할 때의 스냅숏
+ * 둘의 차이가 "아직 전파하지 않은 증분"이며, 그래서 초기화할 때 둘 다
+ * 0으로 맞춰야 한다. cur만 지우면 last가 남아 다음 전파에서 음수 증분이
+ * 계산된다.
+ *
+ * u64_stats_update_begin_irqsave/end_irqrestore로 감싸는 이유: 32비트
+ * 아키텍처에서 u64 값은 두 번의 32비트 쓰기로 나뉘어, 그 사이에 읽는
+ * 쪽이 앞뒤가 섞인 값(torn read)을 볼 수 있다. seqlock이 읽는 쪽에
+ * 재시도를 시켜 그것을 막는다. 64비트에서는 이 매크로가 IRQ 비활성화만
+ * 남기고 사실상 사라진다.
+ *
+ * 실행 컨텍스트: cgroup 통계 리셋 경로(프로세스 컨텍스트). IRQ를 끄고 진행.
+ *
+ * 호출 체인:
+ *   blkg_clear_stat → [__blkg_clear_stat] → blkg_iostat_set
+ */
 static void __blkg_clear_stat(struct blkg_iostat_set *bis)
 {
 	struct blkg_iostat cur = {0};
@@ -1052,6 +1152,26 @@ static void __blkg_clear_stat(struct blkg_iostat_set *bis)
 	/* [한국어] seqlock 해제; NVMe 통계 readers 에게 일관된 값 공개 */
 }
 
+/*
+ * [한국어]
+ * blkg_clear_stat - 한 blkg의 모든 CPU 통계와 전역 통계를 초기화
+ *
+ * @blkg: 초기화할 blkcg_gq(= cgroup × 디스크 조합 하나)
+ * @return: 없음
+ *
+ * 통계가 per-CPU에 흩어져 있으므로 모든 CPU의 슬롯을 순회해야 한다.
+ * for_each_possible_cpu를 쓰는 이유가 중요하다 — online CPU만 돌면,
+ * 지금 오프라인이지만 과거에 값을 쌓아 둔 CPU의 통계가 남는다. 그 CPU가
+ * 나중에 온라인되면 지워졌어야 할 값이 되살아난다.
+ *
+ * 사용 시점: 사용자가 cgroup의 io.stat을 리셋하거나, blkg가 새로 만들어질 때
+ * 이전 사용의 잔재를 없앤다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   blkcg_reset_stats(cgroupfs write) → [blkg_clear_stat] → __blkg_clear_stat
+ */
 static void blkg_clear_stat(struct blkcg_gq *blkg)
 {
 	int cpu;
@@ -1112,6 +1232,27 @@ static int blkcg_reset_stats(struct cgroup_subsys_state *css,
 	return 0;
 }
 
+/*
+ * [한국어]
+ * blkg_dev_name - blkg가 가리키는 블록 장치의 이름 문자열을 얻는다
+ *
+ * @blkg: 이름을 알고 싶은 blkcg_gq
+ * @return: "nvme0n1" 같은 장치 이름. 디스크가 아직 없으면 NULL.
+ *
+ * cgroupfs의 io.stat, io.max 등은 "장치이름 값" 형식으로 출력되므로 blkg마다
+ * 대응하는 장치 이름이 필요하다. bdi(backing_dev_info)의 이름을 쓰는 이유는
+ * 그것이 파티션이 아닌 디스크 단위 이름을 주기 때문이다.
+ *
+ * NULL이 반환될 수 있는 상황: blkg는 request_queue 단위로 만들어지는데, 큐가
+ * gendisk보다 먼저 존재할 수 있다(큐를 만든 뒤 디스크를 붙이는 순서).
+ * 그 짧은 구간에 통계를 출력하려 하면 이름이 없고, 호출자는 그 blkg를
+ * 출력에서 건너뛴다.
+ *
+ * 실행 컨텍스트: cgroupfs read(프로세스 컨텍스트).
+ *
+ * 호출 체인:
+ *   __blkg_prfill_u64 / blkcg_print_one_stat 등 → [blkg_dev_name]
+ */
 const char *blkg_dev_name(struct blkcg_gq *blkg)
 {
 	if (!blkg->q->disk)
@@ -1138,6 +1279,34 @@ const char *blkg_dev_name(struct blkcg_gq *blkg)
  *
  * This is to be used to construct print functions for
  * cftype->read_seq_string method.
+ */
+/*
+ * [한국어] (위 영문 kernel-doc 참고)
+ * blkcg_print_blkgs - 한 cgroup에 속한 모든 blkg를 순회하며 출력 콜백을 호출
+ *
+ * @sf:         출력 대상 seq_file
+ * @blkcg:      순회 기준이 되는 cgroup
+ * @prfill:     blkg마다 호출될 출력 콜백. 정책이 자기 형식에 맞게 제공한다.
+ * @pol:        대상 정책. 이 정책의 policy_data가 없는 blkg는 건너뛴다.
+ * @data:       prfill에 그대로 전달되는 값(보통 policy_data 안의 필드 오프셋)
+ * @show_total: true면 모든 prfill 반환값의 합을 마지막에 "Total"로 출력
+ * @return: 없음
+ *
+ * cgroupfs의 정책별 통계/설정 파일을 읽을 때 공통으로 쓰는 순회 골격이다.
+ * 각 정책(blk-throttle, blk-iolatency, BFQ)은 출력 형식만 prfill 콜백으로
+ * 제공하고, "어떤 blkg들을 어떤 순서로, 어떤 락 아래에서 도는가"라는 공통
+ * 문제는 이 함수가 한 번에 해결한다.
+ *
+ * @pol의 policy_data가 없는 blkg를 건너뛰는 이유: 정책은 장치마다 개별적으로
+ * 활성화되므로, 같은 cgroup 안에서도 어떤 디스크에는 blk-throttle이 붙어
+ * 있고 어떤 디스크에는 없을 수 있다. 없는 쪽은 출력할 값 자체가 없다.
+ *
+ * 실행 컨텍스트: cgroupfs read(프로세스 컨텍스트). 각 blkg의 큐 락을 잡은
+ * 상태로 prfill을 호출하므로, 콜백 안에서 잠들면 안 된다.
+ *
+ * 호출 체인:
+ *   cgroupfs read → 정책의 seq_show 콜백 → [blkcg_print_blkgs]
+ *     → prfill (예: __blkg_prfill_u64, blkg_prfill_rwstat)
  */
 void blkcg_print_blkgs(struct seq_file *sf, struct blkcg *blkcg,
 		       u64 (*prfill)(struct seq_file *,
@@ -1178,6 +1347,29 @@ EXPORT_SYMBOL_GPL(blkcg_print_blkgs);
  *
  * Print @v to @sf for the device associated with @pd.
  */
+/*
+ * [한국어]
+ * __blkg_prfill_u64 - "장치이름 값" 한 줄을 seq_file에 출력하는 공용 prfill
+ *
+ * @sf: 출력 대상 seq_file(cgroupfs 파일 읽기 버퍼)
+ * @pd: 출력 중인 blkg의 정책 데이터. 여기서 장치 이름을 얻는다.
+ * @v:  출력할 값
+ * @return: 출력한 값 v. 장치 이름이 없어 출력을 건너뛰었으면 0.
+ *
+ * blkcg_print_blkgs()가 blkg마다 호출하는 콜백의 가장 단순한 구현이다.
+ * 정책들(blk-throttle, blk-iolatency 등)은 자기 값을 꺼내 이 함수에 넘기기만
+ * 하면 되므로 출력 형식이 통일된다.
+ *
+ * 반환값이 "출력한 값"인 이유: blkcg_print_blkgs()가 show_total 옵션일 때
+ * 모든 blkg의 반환값을 더해 마지막에 "Total"로 찍는다. 출력하지 않은
+ * 경우 0을 반환해야 그 합계가 왜곡되지 않는다.
+ *
+ * 실행 컨텍스트: cgroupfs read. 호출자가 큐 락을 쥔 상태다.
+ *
+ * 호출 체인:
+ *   blkcg_print_blkgs → (정책의 prfill 콜백) → [__blkg_prfill_u64]
+ *     → blkg_dev_name → seq_printf
+ */
 u64 __blkg_prfill_u64(struct seq_file *sf, struct blkg_policy_data *pd, u64 v)
 {
 	const char *dname = blkg_dev_name(pd->blkg);
@@ -1201,6 +1393,34 @@ EXPORT_SYMBOL_GPL(__blkg_prfill_u64);
  * Once initialized, @ctx can be used with blkg_conf_open_bdev() and
  * blkg_conf_prep(), and must be cleaned up with blkg_conf_exit().
  */
+/*
+ * [한국어]
+ * blkg_conf_init - cgroup 설정 문자열 파싱 컨텍스트를 초기화
+ *
+ * @ctx:   초기화할 컨텍스트(호출자 스택에 있는 경우가 많다)
+ * @input: 사용자가 cgroupfs에 쓴 문자열. 예: "259:0 rbps=1048576 wbps=max"
+ * @return: 없음
+ *
+ * === 왜 3단계(init → open_bdev → prep) 구조인가 ===
+ * cgroup 설정 쓰기는 여러 자원을 순서대로 잡아야 한다: 문자열 파싱 →
+ * 대상 블록 장치 열기 → 큐 락 획득 → blkg 찾기/생성. 이 과정에서 실패할
+ * 수 있는 지점이 여러 곳이라, 어디서 실패하든 이미 잡은 것만 정확히
+ * 되돌려야 한다.
+ * ctx에 진행 상태를 모아 두고 blkg_conf_exit()이 "채워진 것만" 정리하는
+ * 구조로 만들면, 각 단계가 실패 처리를 중복 구현하지 않아도 된다.
+ *
+ * 이 함수는 그 시작점으로, 구조체를 통째로 0으로 만들고 입력 문자열만
+ * 심는다. 지정 초기화자(designated initializer)로 대입하면 나머지 필드가
+ * 자동으로 0/NULL이 되어, 나중에 exit이 "NULL이면 건너뛴다" 규칙으로
+ * 안전하게 정리할 수 있다.
+ *
+ * 실행 컨텍스트: cgroupfs write(프로세스 컨텍스트).
+ *
+ * 호출 체인:
+ *   정책의 write 핸들러(tg_set_limit, iolatency_set_limit 등)
+ *     → [blkg_conf_init] → blkg_conf_open_bdev → blkg_conf_prep
+ *     → ... → blkg_conf_exit
+ */
 void blkg_conf_init(struct blkg_conf_ctx *ctx, char *input)
 {
 	*ctx = (struct blkg_conf_ctx){ .input = input };
@@ -1220,6 +1440,32 @@ EXPORT_SYMBOL_GPL(blkg_conf_init);
  * NOOPs. blkg_conf_prep() implicitly calls this function. Use this function
  * explicitly if bdev access is needed without resolving the blkcg / policy part
  * of @ctx->input. Returns -errno on error.
+ */
+/*
+ * [한국어]
+ * blkg_conf_open_bdev - 설정 문자열 앞머리의 "MAJ:MIN"을 파싱해 블록 장치를 연다
+ *
+ * @ctx: blkg_conf_init()으로 초기화된 컨텍스트. 성공 시 ctx->bdev가 채워지고
+ *       ctx->body가 MAJ:MIN 뒤의 나머지 문자열을 가리킨다.
+ * @return: 0 성공, 음수 errno(형식 오류 -EINVAL, 장치 없음 -ENODEV 등)
+ *
+ * cgroup의 I/O 설정은 항상 "어느 장치에 대한 설정인가"로 시작한다.
+ * 예: "259:0 rbps=1048576"에서 259:0이 /dev/nvme0n1의 major:minor다.
+ * 장치 이름이 아니라 번호를 쓰는 이유는 이름이 부팅마다 바뀔 수 있는 반면
+ * major:minor는 커널 내부에서 장치를 유일하게 식별하는 값이기 때문이다.
+ *
+ * 위 영문 주석대로 이 함수는 여러 번 호출해도 안전하다(두 번째부터는 no-op).
+ * blkg_conf_prep()이 내부적으로 이 함수를 부르므로, 정책이 blkg 조회 없이
+ * 장치만 필요한 경우에만 따로 호출하면 된다.
+ *
+ * 실행 컨텍스트: cgroupfs write(프로세스 컨텍스트). 장치 열기가 잠들 수 있다.
+ *
+ * 에러 경로: ctx->bdev는 실패 시 NULL로 남으므로 blkg_conf_exit()이
+ * 안전하게 건너뛴다.
+ *
+ * 호출 체인:
+ *   정책의 write 핸들러 또는 blkg_conf_prep → [blkg_conf_open_bdev]
+ *     → blkdev_get_by_dev
  */
 int blkg_conf_open_bdev(struct blkg_conf_ctx *ctx)
 {
@@ -1278,6 +1524,35 @@ int blkg_conf_open_bdev(struct blkg_conf_ctx *ctx)
  * memflags which must be saved and later passed to blkg_conf_exit_frozen
  * for restoring the memalloc scope.
  */
+/*
+ * [한국어]
+ * blkg_conf_open_bdev_frozen - 장치를 열고 큐를 freeze한 상태로 만든다
+ *
+ * @ctx: blkg_conf_init()으로 초기화된 컨텍스트
+ * @return: 성공 시 memflags(나중에 blkg_conf_exit_frozen()에 그대로 넘겨야 함),
+ *          실패 시 음수 errno. __must_check이므로 반환값을 무시하면 컴파일 경고.
+ *
+ * 일부 정책 설정은 진행 중인 I/O가 없는 상태에서만 안전하게 바꿀 수 있다.
+ * 예를 들어 rq-qos 정책을 큐에 붙이거나 떼는 작업은, 그 정책을 참조하는
+ * request가 살아 있으면 해제된 자료구조를 건드리게 된다.
+ *
+ * === 락 순서가 이 함수의 핵심 ===
+ * 큐 freeze는 진행 중인 I/O의 완료를 기다리는데, 그 I/O가 rq_qos_mutex를
+ * 필요로 할 수 있다. 따라서 rq_qos_mutex를 쥔 채 freeze하면 데드락이다.
+ * 그래서 이 함수는 "락 해제 → freeze → 락 재획득" 순서를 밟는다.
+ *
+ * memflags를 반환하는 이유: freeze 구간에서는 메모리 할당이 I/O를 유발하면
+ * 안 되므로 PF_MEMALLOC_NOIO가 설정되는데, 그 이전 상태를 복원하려면
+ * 저장해 두어야 한다. 반환값을 잃으면 태스크의 메모리 할당 컨텍스트가
+ * 영구히 잘못된 상태로 남는다 — __must_check이 붙은 이유다.
+ *
+ * 실행 컨텍스트: cgroupfs write(프로세스 컨텍스트). freeze가 잠든다.
+ *
+ * 호출 체인:
+ *   rq-qos 계열 정책의 write 핸들러 → [blkg_conf_open_bdev_frozen]
+ *     → blkg_conf_open_bdev → blk_mq_freeze_queue
+ *   해제: blkg_conf_exit_frozen(ctx, memflags)
+ */
 unsigned long __must_check blkg_conf_open_bdev_frozen(struct blkg_conf_ctx *ctx)
 {
 	int ret;
@@ -1322,6 +1597,36 @@ unsigned long __must_check blkg_conf_open_bdev_frozen(struct blkg_conf_ctx *ctx)
  * blkg_conf_open_bdev() may be called on @ctx beforehand. On success, this
  * function returns with queue lock held and must be followed by
  * blkg_conf_exit().
+ */
+/*
+ * [한국어] (위 영문 kernel-doc 참고)
+ * blkg_conf_prep - 설정 문자열을 끝까지 해석해 대상 blkg를 확보하고 락을 잡는다
+ *
+ * @blkcg: 설정을 적용할 cgroup
+ * @pol:   대상 정책(blk-throttle, blk-iolatency 등)
+ * @ctx:   blkg_conf_init()으로 초기화된 컨텍스트.
+ *         성공 시 ctx->bdev(장치), ctx->blkg(대상 blkg), ctx->body(값 부분
+ *         문자열)가 모두 채워진다.
+ * @return: 0 성공, 음수 errno
+ *
+ * 3단계 설정 흐름(init → open_bdev → prep)의 마지막 단계다. 하는 일:
+ *   1) 아직 장치를 열지 않았으면 blkg_conf_open_bdev()로 연다.
+ *   2) 큐 락을 잡는다(이후 blkg 트리를 안전하게 조회하기 위해).
+ *   3) (cgroup, 장치) 조합의 blkg를 찾고, 없으면 새로 만든다.
+ *      blkg는 "이 cgroup이 이 장치에 대해 갖는 상태"이므로, 사용자가
+ *      처음 설정하는 조합이면 이 시점에 생성된다.
+ *
+ * 락을 잡은 채로 반환하는 것이 이 함수의 계약이다(__acquires 주석). 호출자는
+ * 설정을 적용한 뒤 반드시 blkg_conf_exit()으로 락을 풀어야 한다. 이렇게
+ * 설계한 이유는 "blkg를 찾은 시점부터 설정을 적용할 때까지" 그 blkg가
+ * 사라지지 않아야 하기 때문이다.
+ *
+ * 실행 컨텍스트: cgroupfs write(프로세스 컨텍스트). blkg 생성이 잠들 수
+ * 있으므로 락을 잡기 전에 미리 할당(preload)하는 패턴을 쓴다.
+ *
+ * 호출 체인:
+ *   정책의 write 핸들러 → [blkg_conf_prep]
+ *     → blkg_conf_open_bdev → blkg_lookup_check / blkg_create
  */
 int blkg_conf_prep(struct blkcg *blkcg, const struct blkcg_policy *pol,
 		   struct blkg_conf_ctx *ctx)
@@ -1468,6 +1773,32 @@ EXPORT_SYMBOL_GPL(blkg_conf_prep);
  * Clean up after per-blkg config update. This function must be called on all
  * blkg_conf_ctx's initialized with blkg_conf_init().
  */
+/*
+ * [한국어]
+ * blkg_conf_exit - 설정 파싱 과정에서 잡은 자원을 역순으로 모두 반납
+ *
+ * @ctx: 정리할 컨텍스트
+ * @return: 없음
+ *
+ * blkg_conf_init/open_bdev/prep이 단계적으로 잡은 것들(큐 락, rq_qos_mutex,
+ * blkg 참조, block_device 참조)을 반대 순서로 풀어 준다.
+ *
+ * 이 함수의 설계상 중요한 성질은 "부분적으로 진행된 상태에서도 안전하다"는
+ * 것이다. blkg_conf_init()이 구조체를 전부 0으로 만들어 두었기 때문에, 각
+ * 필드가 NULL인지 확인하는 것만으로 "그 단계까지 갔는지"를 알 수 있다.
+ * 덕분에 어느 단계에서 실패하든 호출자는 이 함수 하나만 부르면 된다.
+ *
+ * __releases() 주석은 sparse 정적 분석기에게 "이 함수가 락을 해제한 채로
+ * 반환한다"고 알리는 표시다. 이것이 없으면 sparse가 락 불균형으로 오인해
+ * 경고를 낸다.
+ *
+ * 실행 컨텍스트: cgroupfs write의 마무리(프로세스 컨텍스트).
+ *
+ * 호출 체인:
+ *   정책의 write 핸들러(성공/실패 무관) → [blkg_conf_exit]
+ *     → spin_unlock_irq(queue_lock) → mutex_unlock(rq_qos_mutex)
+ *     → blkg_put → blkdev_put
+ */
 void blkg_conf_exit(struct blkg_conf_ctx *ctx)
 	__releases(&ctx->bdev->bd_queue->queue_lock)
 	__releases(&ctx->bdev->bd_queue->rq_qos_mutex)
@@ -1493,6 +1824,27 @@ EXPORT_SYMBOL_GPL(blkg_conf_exit);
  * Similar to blkg_conf_exit, but also unfreezes the queue. Should be used
  * when blkg_conf_open_bdev_frozen is used to open the bdev.
  */
+/*
+ * [한국어]
+ * blkg_conf_exit_frozen - freeze된 상태로 시작한 설정 작업의 뒷정리
+ *
+ * @ctx:      정리할 컨텍스트
+ * @memflags: blkg_conf_open_bdev_frozen()이 반환했던 값. 반드시 그대로 전달해야 한다.
+ * @return: 없음
+ *
+ * blkg_conf_exit()의 freeze 버전이다. 일반 정리에 더해 큐 unfreeze와
+ * 메모리 할당 컨텍스트 복원을 수행한다.
+ *
+ * 순서가 중요하다: unfreeze를 먼저 해야 그 뒤에 오는 자원 해제 과정에서
+ * 메모리 할당이 필요해져도 I/O가 막혀 있지 않다. 반대로 하면 해제 도중
+ * 자기가 막아 놓은 큐를 기다리는 데드락이 될 수 있다.
+ *
+ * 실행 컨텍스트: cgroupfs write의 마무리(프로세스 컨텍스트).
+ *
+ * 호출 체인:
+ *   rq-qos 계열 정책의 write 핸들러 → [blkg_conf_exit_frozen]
+ *     → blk_mq_unfreeze_queue(memflags) → blkg_conf_exit
+ */
 void blkg_conf_exit_frozen(struct blkg_conf_ctx *ctx, unsigned long memflags)
 {
 	if (ctx->bdev) {
@@ -1505,6 +1857,25 @@ void blkg_conf_exit_frozen(struct blkg_conf_ctx *ctx, unsigned long memflags)
 	}
 }
 
+/*
+ * [한국어]
+ * blkg_iostat_add - 통계 구조체를 항목별로 더한다 (dst += src)
+ *
+ * @dst: 누적 대상
+ * @src: 더할 값
+ * @return: 없음
+ *
+ * 두 곳에서 쓰인다:
+ *   1) per-CPU 통계를 blkg 전역 통계로 모을 때 — 각 CPU의 증분을 합산
+ *   2) 자식 blkg의 통계를 부모로 전파할 때 — cgroup 트리 상향 누적
+ * 둘 다 "지금까지의 합계에 새 값을 더한다"는 같은 연산이라 하나의 함수를 공유한다.
+ *
+ * 실행 컨텍스트: 통계 집계 경로. 호출자가 u64_stats seqlock 또는 적절한
+ * 락으로 보호한다.
+ *
+ * 호출 체인:
+ *   __blkcg_rstat_flush → [blkg_iostat_add]
+ */
 static void blkg_iostat_add(struct blkg_iostat *dst, struct blkg_iostat *src)
 {
 	int i;
@@ -1519,6 +1890,30 @@ static void blkg_iostat_add(struct blkg_iostat *dst, struct blkg_iostat *src)
 	}
 }
 
+/*
+ * [한국어]
+ * blkg_iostat_sub - 통계 구조체를 항목별로 뺀다 (dst -= src)
+ *
+ * @dst: 차감 대상
+ * @src: 뺄 값
+ * @return: 없음
+ *
+ * "증분"을 계산하는 데 쓴다. per-CPU 통계는 단조 증가하는 누적값이므로,
+ * "지난번 전파 이후 얼마나 늘었는가"를 알려면 현재값(cur)에서 마지막
+ * 스냅숏(last)을 빼야 한다:
+ *   delta = cur - last;  부모에 delta를 더함;  last = cur;
+ * 이 패턴 덕분에 같은 값을 두 번 전파하지 않으면서도 CPU별 카운터를
+ * 초기화할 필요가 없다.
+ *
+ * 결과가 음수가 되면 안 되는데, cur >= last가 항상 성립하기 때문이다
+ * (통계는 감소하지 않는다). 다만 blkg_clear_stat()으로 리셋할 때 둘을
+ * 함께 0으로 맞추는 이유가 바로 이 불변식을 지키기 위해서다.
+ *
+ * 실행 컨텍스트: 통계 집계 경로.
+ *
+ * 호출 체인:
+ *   __blkcg_rstat_flush → [blkg_iostat_sub]
+ */
 static void blkg_iostat_sub(struct blkg_iostat *dst, struct blkg_iostat *src)
 {
 	int i;
@@ -1802,6 +2197,31 @@ static void blkcg_fill_root_iostats(void)
 	/* [한국어] 장치 순회 종료 */
 }
 
+/*
+ * [한국어]
+ * blkcg_print_one_stat - blkg 하나의 io.stat 한 줄을 출력
+ *
+ * @blkg: 출력할 blkcg_gq
+ * @s:    출력 대상 seq_file
+ * @return: 없음
+ *
+ * cgroup v2의 io.stat 파일에서 한 장치에 해당하는 줄을 만든다. 출력 형식:
+ *   259:0 rbytes=... wbytes=... rios=... wios=... dbytes=... dios=...
+ *
+ * 값을 읽을 때 u64_stats_fetch_begin/retry 루프를 쓰는 이유: 통계는
+ * per-CPU에서 갱신되는 u64 값이라, 32비트 아키텍처에서는 상위/하위 32비트가
+ * 따로 쓰여 그 사이에 읽으면 앞뒤가 섞인 값을 본다. seqlock이 갱신 중임을
+ * 감지하면 읽기를 재시도시킨다.
+ *
+ * 등록된 정책들의 pd_stat_fn 콜백도 함께 호출해, 정책별 추가 통계
+ * (blk-iocost의 cost.stat 등)를 같은 줄에 이어 붙인다.
+ *
+ * 실행 컨텍스트: cgroupfs read(프로세스 컨텍스트).
+ *
+ * 호출 체인:
+ *   cgroupfs read(io.stat) → blkcg_print_stat → [blkcg_print_one_stat]
+ *     → u64_stats_fetch_begin/retry → 정책의 pd_stat_fn
+ */
 static void blkcg_print_one_stat(struct blkcg_gq *blkg, struct seq_file *s)
 {
 	struct blkg_iostat_set *bis = &blkg->iostat;
@@ -1923,6 +2343,28 @@ static struct cftype blkcg_legacy_files[] = {
 };
 
 #ifdef CONFIG_CGROUP_WRITEBACK
+/*
+ * [한국어]
+ * blkcg_get_cgwb_list - 이 cgroup에 속한 cgroup writeback 구조체 목록을 반환
+ *
+ * @css: blkcg의 cgroup_subsys_state
+ * @return: blkcg->cgwb_list의 주소(항상 유효)
+ *
+ * cgroup writeback(cgwb)은 "어느 cgroup의 더티 페이지를 어느 장치로
+ * write-back할 것인가"를 cgroup별로 분리해 관리하는 메커니즘이다. 그
+ * 구조체들은 blkcg마다 리스트로 매달려 있고, mm 계층(mm/backing-dev.c)이
+ * 그 리스트를 순회해야 할 때가 있다.
+ *
+ * 이 함수가 존재하는 이유는 계층 분리다. mm 계층은 struct blkcg의 정의를
+ * 알지 못하므로(블록 계층 내부 타입), css 포인터만 넘겨받아 리스트 주소를
+ * 얻는 접근자를 블록 계층이 제공한다.
+ *
+ * 실행 컨텍스트: mm의 writeback 경로. 리스트 자체의 동기화는 호출자가
+ * blkcg->lock 등으로 처리한다.
+ *
+ * 호출 체인:
+ *   mm/backing-dev.c의 cgwb 정리 경로 → [blkcg_get_cgwb_list]
+ */
 struct list_head *blkcg_get_cgwb_list(struct cgroup_subsys_state *css)
 {
 	return &css_to_blkcg(css)->cgwb_list;
@@ -2019,6 +2461,33 @@ static void blkcg_destroy_blkgs(struct blkcg *blkcg)
  * While pinned, a blkcg is kept online.  This is primarily used to
  * impedance-match blkg and cgwb lifetimes so that blkg doesn't go offline
  * while an associated cgwb is still active.
+ */
+/*
+ * [한국어]
+ * blkcg_pin_online - blkcg가 offline 처리되지 않도록 참조를 건다
+ *
+ * @blkcg_css: 고정할 blkcg의 css
+ * @return: 없음
+ *
+ * === online_pin이 필요한 이유 ===
+ * 사용자가 cgroup 디렉터리를 지우면 cgroup 코어가 offline 절차를 시작한다.
+ * 그런데 그 시점에 아직 그 cgroup에 속한 write-back I/O가 남아 있을 수 있다.
+ * offline이 진행되면 정책 데이터가 해제되어, 뒤늦게 완료되는 I/O가 이미
+ * 사라진 자료구조를 참조하게 된다.
+ *
+ * online_pin은 그것을 막는 별도의 참조 카운터다. 일반적인 css 참조와 달리
+ * "구조체가 살아 있는가"가 아니라 "offline 콜백을 미룰 것인가"를 제어한다.
+ * blkcg_unpin_online()으로 마지막 참조가 풀릴 때 비로소 실제 offline
+ * 처리(정책 데이터 해제)가 진행된다.
+ *
+ * 주 사용처는 cgroup writeback으로, 더티 페이지가 남아 있는 동안 cgroup을
+ * 붙잡아 둔다.
+ *
+ * 실행 컨텍스트: 어디서든(refcount 원자적 증가).
+ *
+ * 호출 체인:
+ *   mm의 cgroup writeback 초기화 → [blkcg_pin_online]
+ *   해제: blkcg_unpin_online → blkcg_css_offline 실제 수행
  */
 void blkcg_pin_online(struct cgroup_subsys_state *blkcg_css)
 {
@@ -2359,6 +2828,29 @@ void blkcg_exit_disk(struct gendisk *disk)
 	/* [한국어] throtl 자원 정리; NVMe queue depth throttle 상태 해제 */
 }
 
+/*
+ * [한국어]
+ * blkcg_exit - 태스크가 종료될 때 남은 블록 계층 스로틀 상태를 정리
+ *
+ * @tsk: 종료 중인 태스크
+ * @return: 없음
+ *
+ * cgroup_subsys의 exit 콜백으로 등록되어, 태스크가 사라질 때 호출된다.
+ *
+ * 정리 대상은 tsk->throttle_disk다. blk-throttle이나 blk-iocost가 이 태스크를
+ * 스로틀하기로 결정하면, "스케줄 아웃될 때 지연을 부과하라"는 표시로 대상
+ * 디스크를 태스크에 매달아 둔다(blkcg_schedule_throttle). 그런데 지연이
+ * 부과되기 전에 태스크가 종료되면 그 참조가 남아 디스크가 해제되지 못한다.
+ *
+ * 여기서 참조를 놓고 포인터를 지워 그 누수를 막는다. 태스크가 이미 죽는
+ * 중이므로 지연을 실제로 부과할 필요는 없다.
+ *
+ * 실행 컨텍스트: 태스크 종료 경로(do_exit). 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   do_exit → cgroup_exit → io_cgrp_subsys.exit == [blkcg_exit]
+ *     → put_disk
+ */
 static void blkcg_exit(struct task_struct *tsk)
 {
 	if (tsk->throttle_disk)
@@ -2650,6 +3142,29 @@ void blkcg_deactivate_policy(struct gendisk *disk,
 }
 EXPORT_SYMBOL_GPL(blkcg_deactivate_policy);
 
+/*
+ * [한국어]
+ * blkcg_free_all_cpd - 모든 cgroup에서 이 정책의 cgroup-level 데이터를 해제
+ *
+ * @pol: 해제 대상 정책
+ * @return: 없음
+ *
+ * blk-cgroup에는 두 종류의 정책 데이터가 있다:
+ *   cpd (cgroup policy data) - cgroup마다 하나. 장치와 무관한 설정
+ *                              (예: BFQ의 cgroup 가중치 기본값)
+ *   pd  (policy data)        - (cgroup × 장치) 조합마다 하나. blkg에 붙는다.
+ * 이 함수는 전자를 정리한다.
+ *
+ * 정책 등록 실패 시의 롤백과 정책 모듈 언로드 시에 호출된다. 모든 blkcg를
+ * 순회해야 하므로 blkcg_pol_mutex 보호가 필요하며, 호출자가 이미 잡고 있다.
+ *
+ * 실행 컨텍스트: 정책 등록/해제 경로(프로세스 컨텍스트),
+ * blkcg_pol_mutex 보유 상태.
+ *
+ * 호출 체인:
+ *   blkcg_policy_register(실패 롤백) / blkcg_policy_unregister
+ *     → [blkcg_free_all_cpd] → pol->cpd_free_fn
+ */
 static void blkcg_free_all_cpd(struct blkcg_policy *pol)
 {
 	struct blkcg *blkcg;
