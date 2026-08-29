@@ -42,11 +42,11 @@
  *     → blk_rq_map_sg() (blk-merge.c)가 세그먼트를 구성할 때
  *       blk_rq_count_integrity_sg()로 필요한 세그먼트 수를 사전 계산 ← 이 파일
  *     → nvme_map_data()/nvme_setup_prps()/nvme_setup_sgls()
- *       (drivers/nvme/host/, 추정) → NVMe 컨트롤러 SQ(Submission Queue)
+ *       (drivers/nvme/host/pci.c: nvme_map_metadata) → NVMe 컨트롤러 SQ
  *   드라이버 등록 경로:
  *     NVMe 드라이버가 Identify Namespace의 metadata 포맷을 파싱해
  *     q->limits.integrity(struct blk_integrity)를 채움
- *     (drivers/nvme/host/core.c, 추정)
+ *     (drivers/nvme/host/core.c: nvme_init_integrity)
  *       → 사용자 공간이 /sys/block/<disk>/integrity/ 아래 sysfs 속성으로 조회
  *
  * 실행 컨텍스트: merge/count/map_user/get_meta_cap 계열 함수는 I/O 제출
@@ -74,7 +74,7 @@
  *     queue_limits_commit_update_frozen() — flag_store()가 sysfs write로
  *     받은 값을 큐에 반영할 때 사용하는 원자적 갱신 인프라.
  *   - drivers/nvme/host/        : Identify Namespace/Controller의 PI 필드를
- *     파싱해 q->limits.integrity를 채우는 코드(core.c, 추정) — 이 파일이
+ *     파싱해 q->limits.integrity를 채우는 코드(core.c) — 이 파일이
  *     다루는 blk_integrity 값의 실제 출처.
  *
  * 데이터 흐름:
@@ -181,13 +181,17 @@
  * 컨텍스트)에서 재진입 없이 호출된다.
  *
  * 호출 체인:
- *   blk_rq_map_sg() (blk-merge.c, 추정) → [blk_rq_count_integrity_sg]
- *   → biovec_phys_mergeable → nvme_setup_prps/nvme_setup_sgls (드라이버, 추정)
+ *   blk_mq_bio_to_request (block/blk-mq.c:5935) / ll_new_hw_segment
+ *     (block/blk-merge.c:1623) / blk_rq_integrity_map_user
+ *     → [blk_rq_count_integrity_sg] → biovec_phys_mergeable
+ *   결과는 rq->nr_integrity_segments가 되어, NVMe에서
+ *   nvme_map_metadata()가 MPTR 단일 주소와 메타데이터 SGL 중 하나를
+ *   고르는 근거가 된다.
  */
 int blk_rq_count_integrity_sg(struct request_queue *q, struct bio *bio)
 {
 	struct bio_vec iv, ivprv = { NULL };	/* 현재/이전 integrity 벡터; 각 bvec은 PI 메타데이터 물리 페이지를 가리키며 NVMe PRP/SGL 엔트리 후보 */
-	unsigned int segments = 0;		/* 최종 sg 세그먼트 수 (NVMe PRP/SGL 엔트리 수 추정) */
+	unsigned int segments = 0;		/* [한국어] 최종 세그먼트 수 — NVMe 메타데이터 SGL 디스크립터 개수가 된다 */
 	unsigned int seg_size = 0;		/* 현재 누적 세그먼트 크기; NVMe SGL segment 한도 추적용 */
 	struct bvec_iter iter;			/* bio_integrity 벡터 순회용; NVMe DMA sg 엔트리 생성 전 단계 */
 	int prev = 0;				/* 첫 번째 integrity bvec 여부; 연속성 판단 상태 */
@@ -202,14 +206,14 @@ int blk_rq_count_integrity_sg(struct request_queue *q, struct bio *bio)
 				goto new_segment;	/* 물리적으로 불연속 — 새 세그먼트로 분리해야 함 */
 			/* queue_max_segment_size()는 DMA/PCIe 메모리 매핑 단위를
 			 * 고려한 값; NVMe 컨트롤러의 max sdata segment 크기와
-			 * 관련될 수 있다(추정). */
+			 * 관련된다. */
 			if (seg_size + iv.bv_len > queue_max_segment_size(q))
 				goto new_segment;	/* 합치면 세그먼트 크기 한도 초과 — 새 세그먼트로 분리 */
 
 			seg_size += iv.bv_len;	/* 현재 segment의 누적 크기 갱신 */
 		} else {	/* 첫 번째 bvec(prev==0)이면 비교 대상이 없으므로 곧바로 새 세그먼트 취급 */
 new_segment:		/* 물리적 불연속 또는 크기 한도 초과로 새 세그먼트가 필요한 지점 */
-			segments++;		/* 새로운 sg/PRP/SGL 엔트리 추가 (추정) */
+			segments++;		/* [한국어] 새 세그먼트 확정 — 메타데이터 디스크립터 하나가 늘어난다 */
 			seg_size = iv.bv_len;	/* 새 segment 시작; NVMe PRP/SGL의 다음 엔트리 크기 */
 		}
 
@@ -253,7 +257,7 @@ new_segment:		/* 물리적 불연속 또는 크기 한도 초과로 새 세그�
  * 프로세스 컨텍스트에서 실행되며 락을 잡지 않는 순수 조회 함수다.
  *
  * 호출 체인:
- *   사용자 공간 ioctl(FS_IOC_GETLBMD_CAP) → VFS ioctl 디스패치(추정)
+ *   사용자 공간 ioctl(FS_IOC_GETLBMD_CAP) → VFS ioctl 디스패치
  *   → [blk_get_meta_cap] → blk_get_integrity → copy_struct_to_user
  */
 int blk_get_meta_cap(struct block_device *bdev, unsigned int cmd,
@@ -275,7 +279,8 @@ int blk_get_meta_cap(struct block_device *bdev, unsigned int cmd,
 		goto out;			/* NVMe namespace가 PI를 노출하지 않는 경우(NVMe 1.0 / PI 미지원 / disabled) */
 
 	/* NVMe 컨트롤러가 End-to-end Data Protection을 지원하는지 여부
-	 * (ID_CTRL.DPS bit 연동 추정). */
+	 * NVMe에서는 Identify Namespace의 DPS(End-to-end Data Protection Type
+	 * Settings) 필드가 0이 아닐 때 설정된다. */
 	if (bi->flags & BLK_INTEGRITY_DEVICE_CAPABLE)
 		meta_cap.lbmd_flags |= LBMD_PI_CAP_INTEGRITY;	/* 디스크가 하드웨어 PI 생성/검증 지원 — 능력 비트 설정 */
 	/* NVMe Reference Tag(Logical Block Reference Tag) 검사 지원. */
@@ -283,7 +288,7 @@ int blk_get_meta_cap(struct block_device *bdev, unsigned int cmd,
 		meta_cap.lbmd_flags |= LBMD_PI_CAP_REFTAG;	/* RefTag 검증 지원 — 능력 비트 설정 */
 	/* interval_exp: 2의 거듭제곱 형태의 보호 구간 크기;
 	 * NVMe PI는 일반적으로 논리 블록 단위(LBA Data Size)의 배수로
-	 * 구간을 설정한다(추정). */
+	 * 구간을 설정한다. */
 	meta_cap.lbmd_interval = 1 << bi->interval_exp;	/* 2^interval_exp 바이트마다 PI tuple 하나가 대응 */
 	/* metadata_size: NVMe LBA Format에서 보고하는 메타데이터 바이트 수;
 	 * PI tuple(Guard/App/Ref) + opaque 영역을 포함할 수 있다. */
@@ -306,7 +311,7 @@ int blk_get_meta_cap(struct block_device *bdev, unsigned int cmd,
 		meta_cap.lbmd_guard_tag_type = LBMD_PI_CSUM_NONE;	/* Guard 미사용 — PI 자체가 없는 포맷 */
 		break;
 	case BLK_INTEGRITY_CSUM_IP:
-		/* NVMe IP checksum guard 지원 시(추정). */
+		/* [한국어] IP 체크섬 방식 guard. T10 DIF의 CRC16 대신 인터넷 체크섬을 쓰는 변형이다. */
 		meta_cap.lbmd_guard_tag_type = LBMD_PI_CSUM_IP;
 		break;
 	case BLK_INTEGRITY_CSUM_CRC:
@@ -315,7 +320,7 @@ int blk_get_meta_cap(struct block_device *bdev, unsigned int cmd,
 		break;
 	case BLK_INTEGRITY_CSUM_CRC64:
 		/* NVMe CRC64 guard; T10-DIF 64-bit 확장 또는 NVMe PI-64
-		 * 모드와 매핑(추정). */
+		 * 모드에 대응한다. NVMe의 확장 PI(Guard 64비트) 포맷이다. */
 		meta_cap.lbmd_guard_tag_type = LBMD_PI_CSUM_CRC64_NVME;
 		break;
 	}	/* default 분기 없음 — enum blk_integrity_checksum의 모든 값이 위 4개 case로 열거됨 */
@@ -379,7 +384,7 @@ out:
  * 있으므로 원자적 컨텍스트에서 호출해서는 안 된다.
  *
  * 호출 체인:
- *   (NVMe passthrough ioctl 핸들러, 추정) → [blk_rq_integrity_map_user]
+ *   nvme-cli 등의 passthrough ioctl 핸들러 → [blk_rq_integrity_map_user]
  *   → bio_integrity_map_user → blk_rq_count_integrity_sg
  */
 int blk_rq_integrity_map_user(struct request *rq, void __user *ubuf,
@@ -391,7 +396,8 @@ int blk_rq_integrity_map_user(struct request *rq, void __user *ubuf,
 	/* READ/WRITE 방향에 따라 사용자 버퍼 iterator 초기화;
 	 * NVMe opcode 방향과 일치해야 함. */
 	iov_iter_ubuf(&iter, rq_data_dir(rq), ubuf, bytes);
-	/* PI 메타데이터를 bio integrity payload로 매핑; NVMe passthrough에서만 사용(추정). */
+	/* [한국어] 사용자 metadata 버퍼를 bio integrity payload로 매핑한다.
+	 * passthrough 경로에서만 쓰인다 — 일반 I/O는 커널이 PI를 직접 만든다. */
 	ret = bio_integrity_map_user(rq->bio, &iter);
 	if (ret)
 		return ret;			/* 매핑 실패 시 NVMe 명령 생성 전 단계에서 리턴; -ENOMEM/-EINVAL 등 */
@@ -457,7 +463,7 @@ bool blk_integrity_merge_rq(struct request_queue *q, struct request *req,
 	bip = bio_integrity(req->bio);		/* req의 첫 bio에서 PI payload 획득; NVMe PRCHK 설정 원본 */
 	bip_next = bio_integrity(next->bio);	/* next request의 PI payload 획득 */
 	/* BIPFlags: BIP_CHECK_APPTAG 등 NVMe PRCHK 비트와 대응되는
-	 * 블록 계층 무결성 검사 플래그(추정). */
+	 * 검사 플래그가 다르면 합친 요청에 어떤 검증을 지시할지 결정할 수 없다. */
 	if (bip->bip_flags != bip_next->bip_flags)
 		return false;	/* 검사 플래그 조합이 다름 — 동일 정책이 아니므로 병합 거부 */
 
@@ -467,7 +473,8 @@ bool blk_integrity_merge_rq(struct request_queue *q, struct request *req,
 		return false;	/* App Tag 값 불일치 — 병합 거부 */
 
 	/* integrity 세그먼트 수 합이 queue 한도를 초과하면 NVMe SGL/PRP
-	 * 엔트리 한도를 넘을 수 있으므로 병합 불가(추정). */
+	 * 한도(max_integrity_segments)를 넘으면 병합할 수 없다. NVMe PCIe에서 이
+	 * 값은 SGL 지원 시 NVME_MAX_META_SEGS, 아니면 1(MPTR은 단일 주소만 담음)이다. */
 	if (req->nr_integrity_segments + next->nr_integrity_segments >
 	    q->limits.max_integrity_segments)
 		return false;	/* 합산 세그먼트 수가 큐 한도 초과 — 병합 거부 */
@@ -532,7 +539,7 @@ bool blk_integrity_merge_bio(struct request_queue *q, struct request *req,
 		return false;	/* App Tag 불일치 — 병합 거부 */
 
 	/* 추가될 bio의 integrity sg 수를 계산하여 NVMe SGL/PRP 한도
-	 * 초과 여부 판단(추정). */
+	 * 초과 여부를 판단한다. */
 	nr_integrity_segs = blk_rq_count_integrity_sg(q, bio);
 	if (req->nr_integrity_segments + nr_integrity_segs >
 	    q->limits.max_integrity_segments)
@@ -596,8 +603,8 @@ const char *blk_integrity_profile_name(struct blk_integrity *bi)
 	switch (bi->csum_type) {	/* Guard 알고리즘 종류별로 반환할 프로파일 이름이 완전히 다름 */
 	case BLK_INTEGRITY_CSUM_IP:
 		if (bi->flags & BLK_INTEGRITY_REF_TAG)	/* RefTag까지 사용하는 조합인지 확인 */
-			return "T10-DIF-TYPE1-IP";	/* NVMe Type1 + IP checksum PI(추정) */
-		return "T10-DIF-TYPE3-IP";		/* NVMe Type3 + IP checksum PI(추정) */
+			return "T10-DIF-TYPE1-IP";	/* [한국어] Type 1(RefTag를 LBA와 대조) + IP 체크섬 guard */
+		return "T10-DIF-TYPE3-IP";		/* [한국어] Type 3(RefTag 미검사) + IP 체크섬 guard */
 	case BLK_INTEGRITY_CSUM_CRC:
 		if (bi->flags & BLK_INTEGRITY_REF_TAG)	/* RefTag까지 사용하는 조합인지 확인 */
 			return "T10-DIF-TYPE1-CRC";	/* NVMe Type1 + CRC16 guard; PRCHK.Guard 활성 */
@@ -605,8 +612,8 @@ const char *blk_integrity_profile_name(struct blk_integrity *bi)
 	case BLK_INTEGRITY_CSUM_CRC64:
 		/* NVMe PI-64(CRC64 guard)에 대응하는 확장 DIF 프로파일. */
 		if (bi->flags & BLK_INTEGRITY_REF_TAG)	/* RefTag까지 사용하는 조합인지 확인 */
-			return "EXT-DIF-TYPE1-CRC64";	/* NVMe Type1 + CRC64 guard(추정) */
-		return "EXT-DIF-TYPE3-CRC64";		/* NVMe Type3 + CRC64 guard(추정) */
+			return "EXT-DIF-TYPE1-CRC64";	/* [한국어] 확장 PI: Type 1 + 64비트 CRC guard(16바이트 tuple) */
+		return "EXT-DIF-TYPE3-CRC64";		/* [한국어] 확장 PI: Type 3 + 64비트 CRC guard(16바이트 tuple) */
 	case BLK_INTEGRITY_CSUM_NONE:
 		break;	/* PI 미사용 — switch를 빠져나가 아래 공통 "nop" 반환으로 처리 */
 	}
@@ -665,11 +672,12 @@ static ssize_t flag_store(struct device *dev, const char *page, size_t count,
 	/* note that the flags are inverted vs the values in the sysfs files */
 	lim = queue_limits_start_update(q);		/* queue_limits 업데이트 시작; NVMe queue depth/segment 등 다른 한도는 그대로 */
 	if (val)
-		lim.integrity.flags &= ~flag;		/* 플래그 클리어: NVMe PI 커널 검증/생성 비활성화(추정) */
+		lim.integrity.flags &= ~flag;		/* [한국어] 플래그 클리어 — 커널 측 PI 생성/검증을 끈다(장치에 위임) */
 	else
-		lim.integrity.flags |= flag;		/* 플래그 설정: NVMe PI 커널 검증/생성 활성화(추정) */
+		lim.integrity.flags |= flag;		/* [한국어] 플래그 설정 — 커널이 직접 PI를 생성/검증하도록 한다 */
 
-	err = queue_limits_commit_update_frozen(q, &lim);	/* 업데이트 커밋; NVMe I/O 경로에 새로운 PI 정책 반영(추정) */
+	err = queue_limits_commit_update_frozen(q, &lim);	/* [한국어] 큐를 freeze한 상태로 커밋 — 진행 중인 I/O가 옛 정책과 새 정책
+							 * 사이에서 뒤섞이지 않도록 보장한다 */
 	if (err)
 		return err;		/* 커밋 실패(검증 오류 등) — errno 그대로 전달, q->limits는 변경되지 않음 */
 	return count;			/* 성공 — sysfs 관례상 요청 바이트 수 전체를 소비했다고 보고 */
@@ -850,7 +858,7 @@ static ssize_t read_verify_show(struct device *dev,
  * 호출하는 얇은 래퍼다. 사용자가 1을 쓰면(WRITE 시 생성함) NOGENERATE
  * 비트가 클리어되어 host가 Guard/App/Ref 태그를 소프트웨어로 채우고,
  * 0을 쓰면 host 생성을 끄고 NVMe 컨트롤러의 PRACT=1 하드웨어 생성에
- * 맡긴다(추정, __bio_integrity_action() 참고).
+ * 맡긴다(block/bio-integrity-auto.c의 __bio_integrity_action() 참고).
  *
  * 호출 체인:
  *   sysfs write(2) → dev_attr_write_generate.store → [write_generate_store]
