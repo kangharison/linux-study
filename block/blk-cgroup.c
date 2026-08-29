@@ -1480,38 +1480,59 @@ int blkg_conf_open_bdev(struct blkg_conf_ctx *ctx)
 	/* [한국어] 이미 bdev 가 열린 경우 NOOP */
 		return 0;
 
+	/* [한국어] 입력 앞머리의 "MAJ:MIN"을 파싱한다. %n은 "여기까지 몇 글자를
+	 * 읽었는가"를 key_len에 기록하는 지시자로, 파싱 후 나머지 문자열의
+	 * 시작점을 알아내는 데 쓴다. 반환값 2는 major와 minor 두 개를 모두
+	 * 성공적으로 읽었다는 뜻이다(%n은 변환 개수에 세지 않는다). */
 	if (sscanf(input, "%u:%u%n", &major, &minor, &key_len) != 2)
-	/* [한국어] MAJ:MIN 파싱 실패 */
 		return -EINVAL;
 
+	/* [한국어] 읽은 만큼 포인터를 전진시킨다. */
 	input += key_len;
-	/* [한국어] MAJ:MIN 뒤로 포인터 이동 */
+	/* [한국어] 형식 검증 — MAJ:MIN 뒤에는 반드시 공백이 와야 한다.
+	 * 이 검사가 없으면 "259:01048576" 같은 입력에서 minor를 01048576으로
+	 * 잘못 읽고도 통과해 엉뚱한 장치에 설정이 걸린다. */
 	if (!isspace(*input))
-	/* [한국어] MAJ:MIN 뒤에 공백이 없으면 형식 오류 */
 		return -EINVAL;
+	/* [한국어] 공백을 건너뛰어 정책별 값 부분("rbps=1048576" 등)의 시작을 얻는다. */
 	input = skip_spaces(input);
-	/* [한국어] 선행 공백 스킵; 정책별 본문 시작점 */
 
+	/* [한국어] major:minor를 dev_t로 조합해 block_device를 얻는다.
+	 * _no_open 변형은 "장치를 실제로 여는" 절차(파티션 스캔, holder 등록,
+	 * fops->open 호출)를 건너뛰고 참조만 얻는다. 설정을 바꾸려는 것뿐이라
+	 * 전체 open 절차가 불필요하고, 그 절차가 잠들거나 다른 락을 잡으면
+	 * 여기서 원하지 않는 부작용이 생기기 때문이다. */
 	bdev = blkdev_get_no_open(MKDEV(major, minor), false);
-	/* [한국어] major:minor 에 해당하는 block_device 를 연다(NVMe namespace bdev) */
 	if (!bdev)
-	/* [한국어] 장치를 찾을 수 없음; NVMe namespace 미존재 */
 		return -ENODEV;
+	/* [한국어] 파티션에는 cgroup I/O 설정을 걸 수 없다.
+	 * cgroup 제한은 request_queue 단위로 동작하는데, 파티션들은 디스크 하나의
+	 * 큐를 공유하므로 "이 파티션만 100MB/s"라는 제한이 성립하지 않는다.
+	 * 사용자가 파티션을 지정하면 조용히 디스크 전체에 적용하는 대신
+	 * 명시적으로 거부해, 의도와 다른 결과를 막는다. */
 	if (bdev_is_partition(bdev)) {
-	/* [한국어] partition 은 직접 설정 불가; NVMe namespace 전체에 적용 */
 		blkdev_put_no_open(bdev);
 		return -ENODEV;
 	}
 
+	/* [한국어] rq-qos 정책 목록을 보호하는 뮤텍스. 설정 적용 도중 다른
+	 * 스레드가 정책을 붙이거나 떼면 자료구조가 꼬이므로 직렬화한다.
+	 * 이 락은 blkg_conf_exit()이 해제한다 — 이 함수가 락을 쥔 채로
+	 * 반환하는 계약이다. */
 	mutex_lock(&bdev->bd_queue->rq_qos_mutex);
-	/* [한국어] request_queue QoS lock 획득; NVMe queue 정책 상태 보호 */
+	/* [한국어] 디스크가 아직 살아 있는지 확인한다. NVMe 컨트롤러가 뽑히거나
+	 * 네임스페이스가 제거되는 중이면 설정을 걸어도 곧 사라진다.
+	 * 락을 잡은 뒤에 확인하는 순서가 중요하다 — 락 밖에서 확인하면
+	 * 확인과 사용 사이에 상태가 바뀔 수 있다. */
 	if (!disk_live(bdev->bd_disk)) {
-	/* [한국어] disk 가 live 상태가 아니면 설정 거부; NVMe controller offline/remove */
 		blkdev_put_no_open(bdev);
 		mutex_unlock(&bdev->bd_queue->rq_qos_mutex);
 		return -ENODEV;
 	}
 
+	/* [한국어] 파싱 결과를 컨텍스트에 기록한다. body는 정책이 이어서 파싱할
+	 * 값 부분이고, bdev는 대상 장치다. 이 둘이 채워졌다는 사실 자체가
+	 * blkg_conf_exit()에게 "여기까지 진행됐으니 이만큼 정리하라"는 신호가 된다. */
 	ctx->body = input;
 	ctx->bdev = bdev;
 	return 0;
@@ -1672,66 +1693,93 @@ int blkg_conf_prep(struct blkcg *blkcg, const struct blkcg_policy *pol,
 	 * Create blkgs walking down from blkcg_root to @blkcg, so that all
 	 * non-root blkgs have access to their parents.
 	 */
+	/* [한국어] ★ 왜 루프인가: 부모 blkg가 먼저 존재해야 한다 ★
+	 * blkg는 (cgroup × 디스크) 조합마다 하나씩 만들어지는데, 자식 blkg는
+	 * 통계 전파와 설정 상속을 위해 부모 blkg를 참조한다. 그런데 사용자가
+	 * 중간 cgroup을 건너뛰고 깊은 자식에만 설정을 걸 수 있어, 그 경로의
+	 * 부모 blkg들이 아직 없을 수 있다.
+	 * 그래서 root 쪽으로 거슬러 올라가 "가장 가까운 없는 조상"부터 하나씩
+	 * 만들어 내려온다. 한 번에 하나씩 만드는 이유는 아래에서 보듯 할당을
+	 * 위해 락을 놓았다 잡아야 하기 때문이다. */
 	while (true) {
-	/* [한국어] root 에서 목표 cgroup 까지 부모 blkg 를 생성하며 남겨감 */
+		/* [한국어] 이번 반복에서 만들 대상. 아래 탐색으로 조상 쪽으로 밀린다. */
 		struct blkcg *pos = blkcg;
 		struct blkcg *parent;
 		struct blkcg_gq *new_blkg;
 
 		parent = blkcg_parent(blkcg);
-		/* [한국어] pos 의 부모 cgroup */
+		/* [한국어] blkg가 없는 가장 가까운 조상을 찾아 pos를 그쪽으로 옮긴다.
+		 * 루프가 끝나면 pos는 "지금 만들어야 할 가장 위쪽 blkg"가 된다.
+		 * parent가 NULL이면 root에 도달한 것이고, root blkg는 큐 생성 시
+		 * 이미 만들어져 있으므로 탐색이 거기서 멈춘다. */
 		while (parent && !blkg_lookup(parent, q)) {
-		/* [한국어] 아직 blkg 가 없는 가장 가까운 부모를 찾음 */
 			pos = parent;
 			parent = blkcg_parent(parent);
 		}
 
 		/* Drop locks to do new blkg allocation with GFP_KERNEL. */
+		/* [한국어] 스핀락을 쥔 채로는 잠들 수 있는 할당을 할 수 없으므로
+		 * 일시적으로 놓는다. 이 틈에 다른 스레드가 같은 blkg를 만들 수
+		 * 있는데, 아래에서 다시 조회해 그 경쟁을 처리한다. */
 		spin_unlock_irq(&q->queue_lock);
-		/* [한국어] GFP_KERNEL 할당을 위해 락 해제; NVMe IO 제출이 잠시 재개될 수 있음 */
 
+		/* [한국어] GFP_NOIO로 할당한다. GFP_KERNEL이 아닌 이유: 이 할당이
+		 * 메모리 회수를 유발하고 그 회수가 이 디스크로의 write-back을
+		 * 필요로 하면, 그 I/O가 다시 blkg를 찾으려다 교착에 빠질 수 있다. */
 		new_blkg = blkg_alloc(pos, disk, GFP_NOIO);
-		/* [한국어] GFP_NOIO 로 blkg 할당; NVMe IO 경로에서 락 해제 상태이므로 NOIO 로 재귀적 IO 방지 */
 		if (unlikely(!new_blkg)) {
-		/* [한국어] blkg 할당 실패; 설정 중단 */
 			ret = -ENOMEM;
 			goto fail_exit;
 		}
 
+		/* [한국어] blkg는 radix tree에 등록되는데, 그 삽입이 내부적으로
+		 * 노드를 할당할 수 있다. 그런데 삽입은 스핀락 안에서 해야 하므로
+		 * 그때는 할당이 불가능하다.
+		 * radix_tree_preload()는 미리 per-CPU 캐시에 노드를 채워 두어,
+		 * 락 안의 삽입이 할당 없이 성공하도록 보장한다. 이후
+		 * radix_tree_preload_end()까지 preemption이 비활성화된다. */
 		if (radix_tree_preload(GFP_KERNEL)) {
-		/* [한국어] radix tree preload 실패; 설정 중단 */
 			blkg_free(new_blkg);
 			ret = -ENOMEM;
 			goto fail_exit;
 		}
 
 		spin_lock_irq(&q->queue_lock);
-		/* [한국어] 다시 queue_lock 획득 */
 
+		/* [한국어] 락을 놓은 사이에 상황이 변했을 수 있다. 정책이 이 큐에서
+		 * 비활성화되었다면(다른 스레드가 blkcg_deactivate_policy 실행)
+		 * 더 진행할 이유가 없다. 락을 놓았다 잡는 코드에서 이런 재확인은
+		 * 선택이 아니라 필수다. */
 		if (!blkcg_policy_enabled(q, pol)) {
-		/* [한국어] 락 해제 중 정책이 비활성화되면 실패 처리 */
 			blkg_free(new_blkg);
 			ret = -EOPNOTSUPP;
 			goto fail_preloaded;
 		}
 
+		/* [한국어] 같은 이유로 blkg도 다시 조회한다. 락을 놓은 틈에 다른
+		 * 스레드가 같은 (cgroup, 디스크) 조합을 이미 만들었을 수 있다. */
 		blkg = blkg_lookup(pos, q);
-		/* [한국어] 재확인; 다른 경로에서 이미 생성했을 수 있음 */
 		if (blkg) {
-		/* [한국어] 이미 존재하면 미리 할당한 blkg 해제 */
+			/* [한국어] 경쟁에서 졌다 — 상대가 만든 것을 쓰고 내가 준비한
+			 * 것은 버린다. 오류가 아니라 정상적인 결과다. */
 			blkg_free(new_blkg);
 		} else {
+			/* [한국어] 내가 만든다. blkg_create()가 radix tree와 blkcg의
+			 * 리스트에 등록하고, 부모 blkg와의 연결도 맺는다. */
 			blkg = blkg_create(pos, disk, new_blkg);
-		/* [한국어] blkg 생성 및 tree/list 에 등록 */
 			if (IS_ERR(blkg)) {
 				ret = PTR_ERR(blkg);
 				goto fail_preloaded;
 			}
 		}
 
+		/* [한국어] preload 구간을 닫아 preemption을 다시 허용한다.
+		 * 이 호출을 빠뜨리면 preemption이 영구히 비활성화되어 시스템이 멈춘다. */
 		radix_tree_preload_end();
-		/* [한국어] radix tree preload 종료 */
 
+		/* [한국어] 목표 cgroup까지 도달했으면 완료. 아니면 다음 반복에서
+		 * 그다음 자손을 만든다. 매 반복마다 조상이 하나씩 채워지므로
+		 * 반드시 유한 횟수 안에 끝난다. */
 		if (pos == blkcg)
 			goto success;
 	}
@@ -2305,22 +2353,34 @@ static int blkcg_print_stat(struct seq_file *sf, void *v)
 	struct blkcg_gq *blkg;
 	/* [한국어] 순회 중인 blkg */
 
+	/* [한국어] ★ root와 non-root의 통계 출처가 다르다 ★
+	 * root cgroup은 "cgroup에 속하지 않은 I/O를 포함한 전부"를 보여야 한다.
+	 * 그런데 blkg 통계는 cgroup을 명시적으로 거친 I/O만 집계하므로, 커널
+	 * 스레드가 낸 I/O 등이 빠진다. 그래서 root는 blkg 통계 대신
+	 * /proc/diskstats와 같은 소스(디스크별 part_stat)에서 채운다. */
 	if (!seq_css(sf)->parent)
-	/* [한국어] root cgroup 은 시스템 전체 disk_stats 에서 채움 */
 		blkcg_fill_root_iostats();
 	else
+		/* [한국어] non-root는 per-CPU rstat에 흩어져 누적된 통계를 먼저
+		 * 상위로 flush한다. cgroup의 rstat 인프라는 갱신 비용을 줄이려고
+		 * CPU마다 값을 쌓아 두고, 읽을 때만 트리를 따라 합산한다.
+		 * 이 호출이 없으면 방금 발생한 I/O가 통계에 반영되지 않는다. */
 		css_rstat_flush(&blkcg->css);
-		/* [한국어] non-root cgroup 은 per-cpu blkg 통계를 flush */
 
+	/* [한국어] blkg 목록은 RCU로 보호된다. 순회 도중 다른 스레드가 blkg를
+	 * 제거할 수 있는데, RCU 유예 해제 덕분에 이 구간에서는 안전하게 읽는다. */
 	rcu_read_lock();
-	/* [한국어] blkg_list RCU read-side 보호 */
+	/* [한국어] 이 cgroup에 속한 모든 blkg를 순회한다. blkg는 (cgroup × 디스크)
+	 * 조합이므로, 시스템에 NVMe 네임스페이스가 여러 개면 각각에 대해
+	 * 한 줄씩 출력된다. */
 	hlist_for_each_entry_rcu(blkg, &blkcg->blkg_list, blkcg_node) {
-	/* [한국어] cgroup 의 모든 NVMe namespace blkg 순회 */
+		/* [한국어] 큐 락을 잡는다. blkcg_print_one_stat()이 정책별 통계
+		 * (pd_stat_fn)까지 출력하는데, 그 정책 데이터가 큐 락으로 보호되기
+		 * 때문이다. blkg마다 잡았다 놓아, 한 blkg 출력이 다른 디스크의
+		 * I/O를 막지 않게 한다. */
 		spin_lock_irq(&blkg->q->queue_lock);
-		/* [한국어] blkg 통계 출력 중 NVMe queue 상태 변경 방지 */
 		blkcg_print_one_stat(blkg, sf);
 		spin_unlock_irq(&blkg->q->queue_lock);
-		/* [한국어] queue_lock 해제; NVMe IO 경로 재개 */
 	}
 	rcu_read_unlock();
 	return 0;
@@ -2853,22 +2913,48 @@ void blkcg_exit_disk(struct gendisk *disk)
  */
 static void blkcg_exit(struct task_struct *tsk)
 {
+	/* [한국어] 스로틀 예약이 걸려 있었다면 그 디스크 참조를 반납한다.
+	 * NULL이면 스로틀 대상이 아니었으므로 할 일이 없다. */
 	if (tsk->throttle_disk)
-	/* [한국어] throttle_disk 참조 반낑 */
 		put_disk(tsk->throttle_disk);
+	/* [한국어] 포인터를 지운다. 태스크 구조체가 재사용될 수 있으므로
+	 * 해제된 주소를 남기면 안 된다. */
 	tsk->throttle_disk = NULL;
-	/* [한국어] 포인터 클리어 */
 }
 
+/*
+ * [한국어] blk-cgroup을 cgroup 코어에 등록하는 서브시스템 기술자.
+ * cgroup 코어가 cgroup 생성/삭제/태스크 이동 시 여기 등록된 콜백을 호출한다.
+ * 이 구조체가 곧 "cgroup의 io 컨트롤러"의 정의다.
+ */
 struct cgroup_subsys io_cgrp_subsys = {
+	/* [한국어] cgroup 디렉터리가 만들어질 때 struct blkcg를 할당한다.
+	 * 이 시점에는 아직 어떤 디스크와도 연결되지 않는다 — blkg는 실제로
+	 * 그 cgroup의 I/O가 발생하거나 설정이 걸릴 때 만들어진다. */
 	.css_alloc = blkcg_css_alloc,
+	/* [한국어] 할당 후 cgroup을 실제로 사용 가능하게 만드는 단계.
+	 * 정책별 cpd(cgroup policy data) 초기화가 여기서 이뤄진다. */
 	.css_online = blkcg_css_online,
+	/* [한국어] cgroup 디렉터리가 지워질 때 호출. 다만 online_pin 참조가
+	 * 남아 있으면(cgroup writeback이 더티 페이지를 들고 있는 등) 실제
+	 * 정리는 그 참조가 풀릴 때까지 미뤄진다(blkcg_pin_online 참고). */
 	.css_offline = blkcg_css_offline,
+	/* [한국어] 모든 참조가 사라진 뒤 struct blkcg를 해제한다. */
 	.css_free = blkcg_css_free,
+	/* [한국어] ★ 통계 집계의 핵심 ★
+	 * cgroup의 rstat 인프라가 "이 cgroup의 per-CPU 통계를 상위로 올려라"고
+	 * 요청할 때 호출된다. I/O 완료 경로는 per-CPU 카운터만 갱신하고(락 없음),
+	 * 실제 트리 합산은 io.stat을 읽을 때 이 콜백으로 지연 수행된다.
+	 * 이 분리 덕분에 완료 경로가 cgroup 트리 락 경합에서 자유롭다. */
 	.css_rstat_flush = blkcg_rstat_flush,
+	/* [한국어] cgroup v2에서 노출할 파일 목록(io.stat, io.max, io.weight 등). */
 	.dfl_cftypes = blkcg_files,
+	/* [한국어] cgroup v1에서 노출할 파일 목록. v1은 blkio.* 이름을 쓴다. */
 	.legacy_cftypes = blkcg_legacy_files,
+	/* [한국어] v1에서의 서브시스템 이름. v2에서는 "io"지만 v1 호환을 위해
+	 * "blkio"라는 옛 이름을 유지한다. */
 	.legacy_name = "blkio",
+	/* [한국어] 태스크 종료 시 스로틀 예약 정리(위 blkcg_exit). */
 	.exit = blkcg_exit,
 #ifdef CONFIG_MEMCG
 	/*
