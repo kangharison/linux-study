@@ -35,7 +35,7 @@
  *   queue_limits 초과 시 분할) -> blk_mq_submit_bio ->
  *   blk_attempt_plug_merge/blk_try_merge(본 파일, 병합 시도) ->
  *   blk_insert_flush(본 파일, PREFLUSH/FUA 시퀀싱 진입) ->
- *   blk_mq_get_request -> nvme_queue_rq -> nvme_submit_cmd(doorbell).
+ *   blk_mq_get_request -> mq_ops->queue_rq (간접 호출; NVMe PCIe 면 nvme_queue_rq -> nvme_sq_copy_cmd -> nvme_write_sq_db).
  * 완료 경로는 역순으로 진행된다: NVMe CQ 완료 인터럽트 -> nvme_complete_rq
  * -> blk_mq_end_request -> req_ref_put_and_test(본 파일, rq 참조 해제) ->
  * bio_endio. 실행 컨텍스트는 함수별로 다르다 — 제출 경로 대부분은 프로세스
@@ -95,7 +95,7 @@ struct elv_change_ctx;
  * 왜 필요한가: 드라이버가 하드웨어적으로 훨씬 큰 max_hw_sectors(예: NVMe MDTS가 매우 큰
  * 경우)를 보고하더라도, 소프트웨어 기본값은 지연시간·페이지 캐시 사용량 균형을 위해
  * 4MB로 제한한다. sysfs(/sys/block/<disk>/queue/max_sectors_kb)를 통해 max_hw_sectors
- * 한도 내에서 사용자가 늘릴 수 있다(추정: nvme_revalidate_disk 등에서 조정). */
+ * 한도 내에서 사용자가 늘릴 수 있다(추정: nvme_update_ns_info_block 등에서 조정). */
 #define BLK_DEF_MAX_SECTORS_CAP	(SZ_4M >> SECTOR_SHIFT)	/* [한국어] 4MB를 섹터(512B) 단위로 환산 = 8192 sectors */
 
 /* [한국어] BLK_DEV_MAX_SECTORS — request_queue가 표현 가능한 섹터 수의 이론적 최댓값.
@@ -445,7 +445,7 @@ int __bio_queue_enter(struct request_queue *q, struct bio *bio);
  *
  * 호출 체인:
  *   submit_bio_noacct -> [submit_bio_noacct_nocheck] -> __submit_bio_noacct_mq
- *   -> blk_mq_submit_bio -> nvme_queue_rq -> nvme_submit_cmd(doorbell)
+ *   -> blk_mq_submit_bio -> mq_ops->queue_rq (간접 호출; NVMe PCIe 면 nvme_queue_rq -> nvme_sq_copy_cmd -> nvme_write_sq_db)
  */
 void submit_bio_noacct_nocheck(struct bio *bio, bool split);
 /*
@@ -662,7 +662,7 @@ bool bvec_try_merge_hw_page(struct request_queue *q, struct bio_vec *bv,
  *
  * 호출 체인:
  *   blk_recalc_rq_segments -> ... -> [biovec_phys_mergeable]
- *   -> blk_rq_map_sg -> nvme_setup_prps/nvme_pci_setup_sgls
+ *   -> blk_rq_map_sg -> nvme_pci_setup_data_prp/nvme_pci_setup_data_sgl
  */
 static inline bool biovec_phys_mergeable(struct request_queue *q,
 		struct bio_vec *vec1, struct bio_vec *vec2)
@@ -1633,7 +1633,7 @@ struct bio *bio_split_write_zeroes(struct bio *bio,
  *
  * 호출 체인:
  *   submit_bio -> __bio_split_to_limits -> [bio_split_rw]
- *   -> bio_submit_split -> nvme_setup_prps/nvme_pci_setup_sgls
+ *   -> bio_submit_split -> nvme_pci_setup_data_prp/nvme_pci_setup_data_sgl
  */
 struct bio *bio_split_rw(struct bio *bio, const struct queue_limits *lim,
 		unsigned *nr_segs);

@@ -18,11 +18,11 @@
  * === 전체 아키텍처에서의 위치 ===
  * 호출 위치: 커널 유저스페이스가 아닌 커널 블록 레이어 내부 (kernel context).
  * 드라이버 probe 경로:
- *   nvme_reset_work → nvme_configure_admin_queue → blk_mq_init_queue →
+ *   nvme_reset_work → nvme_pci_configure_admin_queue → blk_mq_init_queue →
  *   queue_limits_set → blk_validate_limits  (NVMe PCI 드라이버 예시)
  * I/O 경로 (blk-mq가 limit 참조):
  *   submit_bio → blk_mq_submit_bio → blk_mq_get_request → nvme_queue_rq →
- *   nvme_submit_cmd(doorbell write)
+ *   nvme_sq_copy_cmd → nvme_write_sq_db (SQ 기록 후 doorbell)
  * 스택 병합 경로:
  *   md_run / dm-table-load → queue_limits_stack_bdev → blk_stack_limits
  * blk_validate_limits()는 드라이버 probe, 큐 재설정, limits 갱신 시 호출되며,
@@ -113,7 +113,7 @@
  */
 void blk_queue_rq_timeout(struct request_queue *q, unsigned int timeout)
 {
-	/* q->rq_timeout은 nvme_timeout -> nvme_abort_req -> Abort 명령 CID
+	/* q->rq_timeout은 nvme_timeout -> nvme_abort_cmd -> Abort 명령 CID
 	 * 선택 기준이 되며, jiffies 단위로 변환되어 nvme watchdog에서 사용된다.
 	 * WRITE_ONCE: 타임아웃 워커(다른 CPU/인터럽트 컨텍스트)가 락 없이 이
 	 * 필드를 읽으므로, 컴파일러의 재정렬/분할 저장을 막기 위해 사용한다. */
@@ -841,7 +841,7 @@ unsupported:
  *   표준 형식으로 변환하고, 상호 불가능한 조합을 걸러낸다.
  *
  * 주요 호출 경로:
- *   nvme_reset_work -> nvme_configure_admin_queue -> blk_mq_init_queue /
+ *   nvme_reset_work -> nvme_pci_configure_admin_queue -> blk_mq_init_queue /
  *   queue_limits_set -> blk_validate_limits
  *   (PCI transport에서 queue_depth, max_hw_sectors 등을 채운 뒤 호출)
  *
@@ -2118,7 +2118,7 @@ EXPORT_SYMBOL_GPL(queue_limits_stack_integrity);
  *   알려, inflight request 수와 tag 할당 범위를 맞춘다.
  *
  * 호출 경로:
- *   nvme_alloc_io_queues -> nvme_setup_io_queues -> blk_mq_tag_set_depth ->
+ *   nvme_setup_io_queues -> nvme_setup_io_queues -> blk_mq_tag_set_depth ->
  *   blk_set_queue_depth
  *
  * NVMe 연결 지점:
@@ -2136,11 +2136,11 @@ EXPORT_SYMBOL_GPL(queue_limits_stack_integrity);
  * inflight 제한을 다시 계산해야 하므로 rq_qos_queue_depth_changed()로
  * 이를 통지한다.
  * 실행 컨텍스트: 드라이버 큐 구성 경로의 프로세스 컨텍스트.
- * 호출자: nvme_alloc_io_queues() 등. 호출 대상: rq_qos_queue_depth_changed().
+ * 호출자: nvme_setup_io_queues() 등. 호출 대상: rq_qos_queue_depth_changed().
  * 에러 경로: 없음.
  *
  * 호출 체인:
- *   nvme_alloc_io_queues → [blk_set_queue_depth] → rq_qos_queue_depth_changed
+ *   nvme_setup_io_queues → [blk_set_queue_depth] → rq_qos_queue_depth_changed
  */
 void blk_set_queue_depth(struct request_queue *q, unsigned int depth)
 {
@@ -2239,7 +2239,7 @@ EXPORT_SYMBOL_GPL(bdev_discard_alignment);
  * - 본 파일은 NVMe 컨트롤러가 보고한 MDTS, LBA format, PRP/SGL segment 한도,
  *   feature flags를 block layer 표준 queue_limits로 정규화한다.
  * - 정규화된 한도는 submit_bio -> blk_mq_submit_bio -> blk_mq_get_request ->
- *   nvme_queue_rq -> nvme_submit_cmd(doorbell) 경로에서 request 조립,
+ *   mq_ops->queue_rq (간접 호출; NVMe PCIe 면 nvme_queue_rq -> nvme_sq_copy_cmd -> nvme_write_sq_db) 경로에서 request 조립,
  *   bio splitting, tag/CID 할당에 직접 사용된다.
  * - NVMe SSD 위에 MD/DM 등 스택형 장치가 있을 때 본 파일의 stacking 함수가
  *   하위 NVMe q->limits를 상위 가상 장치로 병합하여 하드웨어 특성이 올바르게

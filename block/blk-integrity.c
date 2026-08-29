@@ -41,7 +41,7 @@
  *         → blk_integrity_merge_bio() / blk_integrity_merge_rq()  ← 이 파일
  *     → blk_rq_map_sg() (blk-merge.c)가 세그먼트를 구성할 때
  *       blk_rq_count_integrity_sg()로 필요한 세그먼트 수를 사전 계산 ← 이 파일
- *     → nvme_map_data()/nvme_setup_prps()/nvme_setup_sgls()
+ *     → nvme_map_data()/nvme_pci_setup_data_prp()/nvme_pci_setup_data_sgl()
  *       (drivers/nvme/host/pci.c: nvme_map_metadata) → NVMe 컨트롤러 SQ
  *   드라이버 등록 경로:
  *     NVMe 드라이버가 Identify Namespace의 metadata 포맷을 파싱해
@@ -403,7 +403,7 @@ int blk_rq_integrity_map_user(struct request *rq, void __user *ubuf,
 		return ret;			/* 매핑 실패 시 NVMe 명령 생성 전 단계에서 리턴; -ENOMEM/-EINVAL 등 */
 
 	/* 무결성 세그먼트 수를 계산하여 request에 기록;
-	 * nvme_setup_prps()/nvme_setup_sgl() 등에서 DMA sg 매핑 시 활용
+	 * nvme_pci_setup_data_prp()/nvme_pci_setup_data_sgl() 등에서 DMA sg 매핑 시 활용
 	 * (NVMe driver 낮은 계층으로 전달됨). */
 	rq->nr_integrity_segments = blk_rq_count_integrity_sg(rq->q, rq->bio);
 	rq->cmd_flags |= REQ_INTEGRITY;	/* 이 request에 PI 메타데이터가 있음을 표시 */

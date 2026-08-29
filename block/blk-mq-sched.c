@@ -11,12 +11,38 @@
  * 이 파일은 리눅스 블록 멀티큐(blk-mq) 계층의 IO 스케줄링 프레임워크를 구현한다.
  * bio → request 변환 이후, mq-deadline·BFQ·kyber 등의 IO 스케줄러(elevator)와
  * blk-mq dispatch 엔진 사이의 연결 고리 역할을 한다. 스케줄러가 있으면 정렬된
- * request를 꺼내 NVMe SQ(Submission Queue)로 전달하고, 없으면("none") per-CPU
- * sw queue에서 곧바로 dispatch한다. 스케줄러 태그 풀(shadow CID pool)의 할당·해제,
- * bio merge, hctx restart 메커니즘도 이 파일에 있다.
+ * request를 꺼내 드라이버로 전달하고, 없으면("none") per-CPU sw queue에서
+ * 곧바로 dispatch한다. 스케줄러 태그 풀의 할당·해제, bio merge 진입점,
+ * hctx restart 메커니즘도 이 파일에 있다.
+ *
+ * 이 파일은 장치 종류와 무관한 일반 코드다. nvme·scsi 같은 드라이버 식별자가
+ * 하나도 없고, 드라이버에 닿는 유일한 통로는 blk_mq_dispatch_rq_list()가
+ * 수행하는 간접 호출 q->mq_ops->queue_rq()뿐이다. 아래의 NVMe 언급은 모두
+ * "이 일반 코드가 NVMe 장치에서 어떻게 보이는가"를 설명하는 맥락이다.
+ *
+ * === 스케줄러가 있을 때와 없을 때, 요청 경로가 어떻게 갈라지는가 ===
+ * 이 파일의 핵심 주제다. 갈림길은 딱 두 군데이고, 판정 기준은 둘 다
+ * q->elevator가 NULL인지 하나뿐이다.
+ *
+ *   (A) 제출 시 병합 — blk_mq_sched_bio_merge()
+ *       스케줄러 있음: e->type->ops.bio_merge() 콜백에 위임한다.
+ *                      (mq-deadline이면 dd_bio_merge → blk_mq_sched_try_merge)
+ *       스케줄러 없음: 이 CPU의 sw queue(ctx->rq_lists[type])만 훑어
+ *                      blk_bio_list_merge()로 병합을 시도한다. 훨씬 좁은
+ *                      범위지만 락도 그 sw queue 하나(ctx->lock)만 잡는다.
+ *
+ *   (B) 디스패치 — __blk_mq_sched_dispatch_requests()
+ *       스케줄러 있음: blk_mq_do_dispatch_sched()
+ *                      → ops.dispatch_request()로 한 개씩 꺼낸다.
+ *       스케줄러 없음 & 이전에 바빴음: blk_mq_do_dispatch_ctx()
+ *                      → sw queue들을 라운드 로빈으로 하나씩 꺼낸다.
+ *       스케줄러 없음 & 한가함: blk_mq_flush_busy_ctxs()로 모든 sw queue를
+ *                      한 번에 비워 통째로 dispatch한다(가장 빠른 경로).
+ *
+ * 멀티큐 NVMe의 기본값은 "none"이므로, 실제로 NVMe에서 도는 것은 대부분
+ * 위의 "스케줄러 없음" 경로다(근거는 block/elevator.c의 elevator_set_default).
  *
  * === 전체 아키텍처에서의 위치 ===
- * IO 경로에서 이 파일은 blk-mq와 드라이버(nvme_queue_rq) 사이의 dispatch 조율자이다:
  *
  *   [응용] write(2) → submit_bio() → blk_mq_submit_bio()
  *       ↓
@@ -24,47 +50,91 @@
  *       ↓
  *   [blk-mq-sched] blk_mq_sched_dispatch_requests()
  *       ↓ elevator 있음              ↓ elevator 없음("none")
- *   blk_mq_do_dispatch_sched()   blk_mq_do_dispatch_ctx()
+ *   blk_mq_do_dispatch_sched()   blk_mq_do_dispatch_ctx() / flush_busy_ctxs
  *       ↓                              ↓
- *   blk_mq_dispatch_rq_list() → nvme_queue_rq() → SQ doorbell
+ *   blk_mq_dispatch_rq_list()  (block/blk-mq.c)
+ *       ↓
+ *   q->mq_ops->queue_rq()  ← 간접 호출. PCIe NVMe라면 이 함수 포인터가
+ *                             nvme_queue_rq다(drivers/nvme/host/pci.c의
+ *                             nvme_mq_ops.queue_rq).
  *
- * 실행 컨텍스트: 주로 process context(blk_mq_run_hw_queue work); dispatch 경로는
- * softirq에서도 호출될 수 있다. hctx 단위로 동작하며 각 hctx는 NVMe SQ/CQ 쌍 대응.
+ * 실행 컨텍스트: 주로 프로세스 컨텍스트(blk_mq_run_hw_queue의 워크큐 실행 또는
+ * 제출 스레드 직접 실행). hctx 단위로 동작하며, PCIe NVMe에서 hctx 하나는
+ * I/O 큐 하나(SQ/CQ 쌍)에 대응한다 — nvme_alloc_io_tag_set()이
+ * set->nr_hw_queues를 I/O 큐 개수로 잡기 때문이다.
+ *
+ * === 스케줄러 태그와 드라이버 태그의 분리 (NVMe 독자 필독) ===
+ * 이 파일이 다루는 태그는 두 종류이고, 둘을 혼동하면 NVMe 동작을 잘못 이해하게 된다.
+ *
+ *   드라이버 태그 (rq->tag, tag_set->tags[])
+ *     "실제로 장치에 떠 있을 수 있는 커맨드"마다 하나씩 배정되는 번호.
+ *     NVMe에서 이 번호가 커맨드의 Command ID로 그대로 들어간다:
+ *       nvme_cid(rq) = (genctr << 12) | rq->tag        (drivers/nvme/host/nvme.h)
+ *       cmd->common.command_id = nvme_cid(req)         (drivers/nvme/host/core.c)
+ *       nvme_tag_from_cid(cid) = cid & 0xfff           (완료 시 역변환)
+ *     즉 CID의 하위 12비트가 곧 드라이버 태그이고, 상위 4비트는 태그 재사용
+ *     오검출을 막는 세대 카운터다. 완료 인터럽트에서 CQE의 command_id로
+ *     nvme_find_rq()가 request를 되찾는 것도 이 대응 덕분이다.
+ *
+ *   스케줄러 태그 (rq->internal_tag, hctx->sched_tags)
+ *     "스케줄러 큐에 대기시켜 둘 수 있는 request"마다 하나씩 배정되는 번호.
+ *     장치에는 전혀 보이지 않는 순수 소프트웨어 슬롯이다. NVMe Command ID가
+ *     아니며, 컨트롤러는 이 번호의 존재조차 모른다.
+ *
+ * 왜 나누는가: 스케줄러가 재정렬을 하려면 "장치에 보낼 수 있는 것보다 많은"
+ * 요청을 손에 쥐고 있어야 한다. 그런데 드라이버 태그를 미리 다 잡아 버리면
+ * 그 태그들이 장치 큐를 점유한 것처럼 되어, 나중에 도착한 더 급한 요청이
+ * 태그를 못 받는다. 그래서 스케줄러 단계에서는 논리적 슬롯만 잡고,
+ * 실제로 내보내는 순간(__blk_mq_do_dispatch_sched의 blk_mq_get_driver_tag)에
+ * 드라이버 태그를 따로 획득한다.
+ * 크기: blk_mq_alloc_sched_res()가 blk_mq_default_nr_requests(set)
+ *   = 2 * min(set->queue_depth, BLKDEV_DEFAULT_RQ=128)을 쓴다(block/blk-mq.h).
+ *   큐 깊이가 큰 NVMe(보통 1023)에서는 2*128 = 256으로, 드라이버 태그보다 적다.
+ * 스케줄러가 없으면("none") 이 분리 자체가 사라진다 — request 할당 시점에
+ * 드라이버 태그를 바로 받고 internal_tag는 BLK_MQ_NO_TAG로 남는다
+ * (block/blk-mq.c의 태그 할당 경로 참고).
  *
  * === 타 모듈과의 연결 ===
  * 의존 모듈:
  *   - block/blk-mq.c: blk_mq_dispatch_rq_list(), blk_mq_run_hw_queue() — dispatch 실행;
- *     blk_mq_dequeue_from_ctx()로 sw queue에서 request 추출
+ *     blk_mq_dequeue_from_ctx()로 sw queue에서 request 추출;
+ *     blk_mq_get_driver_tag()로 드라이버 태그 획득
  *   - block/elevator.c: elevator_alloc() — elevator_queue 할당;
  *     e->type->ops.dispatch_request()로 정렬된 request 획득
  *   - block/blk-mq-tag.c: blk_mq_alloc_map_and_rqs(), blk_mq_free_map_and_rqs() —
- *     scheduler shadow CID(tag) pool 할당/해제
- *   - drivers/nvme/host/pci.c: blk_mq_dispatch_rq_list() 경유로 nvme_queue_rq() 호출
+ *     스케줄러 태그 풀 할당/해제
+ *   - block/blk-merge.c: blk_mq_sched_try_merge() — 스케줄러가 부르는 병합 헬퍼
+ *   - block/mq-deadline.c, bfq-iosched.c, kyber-iosched.c: ops 콜백 제공자
  * 공유 자료구조:
- *   - struct blk_mq_hw_ctx (blk-mq.h): dispatch(잔여 list), sched_tags(shadow tag),
- *     dispatch_busy(SQ 혼잡), ctx_map(sw queue 비트맵), state(SCHED_RESTART)
+ *   - struct blk_mq_hw_ctx (blk-mq.h): dispatch(잔여 list), sched_tags(스케줄러 태그),
+ *     dispatch_busy(드라이버가 BLK_STS_*RESOURCE로 밀어낸 정도), ctx_map(sw queue
+ *     비트맵), state(BLK_MQ_S_SCHED_RESTART)
  *   - struct elevator_queue / elevator_type (elevator.h): ops vtable
  *   - struct elevator_tags (blk-mq-sched.h): nr_hw_queues, nr_requests, tags[]
  *
  * === 주요 함수/구조체 요약 ===
  * blk_mq_sched_dispatch_requests()   - dispatch 최상위; stopped/quiesced 체크 후 위임
- * __blk_mq_sched_dispatch_requests() - residual(잔여) 처리 후 elevator/ctx 경로 분기
- * __blk_mq_do_dispatch_sched()       - elevator에서 request 뽑아 CID 확보 후 SQ dispatch
- * blk_mq_do_dispatch_ctx()           - none 스케줄러 경로; sw queue 라운드 로빈 dispatch
- * blk_mq_sched_bio_merge()           - bio를 sw queue 기존 request에 merge (PRP/SGL 절약)
+ * __blk_mq_sched_dispatch_requests() - 잔여(hctx->dispatch) 처리 후 스케줄러/none 경로 분기
+ * __blk_mq_do_dispatch_sched()       - 스케줄러에서 request를 꺼내 예산·드라이버 태그를
+ *                                      확보한 뒤 드라이버로 넘긴다(이 파일의 핵심)
+ * blk_mq_do_dispatch_ctx()           - "none" 경로; sw queue 라운드 로빈 dispatch
+ * blk_mq_sched_bio_merge()           - 제출 경로의 bio 병합 진입점; 스케줄러 유무로 갈림
  * blk_mq_init_sched()                - elevator_queue 할당 + hctx sched_tags 연결 + init_sched
  * blk_mq_exit_sched()                - elevator 제거; exit_hctx/exit_sched + sched_tags 정리
- * blk_mq_alloc_sched_tags()          - scheduler shadow CID pool(elevator_tags) 할당
- * blk_mq_sched_mark_restart_hctx()   - BLK_MQ_S_SCHED_RESTART 비트 세팅; SQ 재출발 예약
+ * blk_mq_alloc_sched_tags()          - 스케줄러 태그 풀(elevator_tags) 할당
+ * blk_mq_sched_mark_restart_hctx()   - BLK_MQ_S_SCHED_RESTART 비트 세팅; 재가동 예약
  */
 /* [한국어] 커널 기본 매크로(KERN_ERR 등)와 타입(size_t 등) */
 #include <linux/kernel.h>
 /* [한국어] EXPORT_SYMBOL_GPL, module_init/exit 등 모듈 인프라 */
 #include <linux/module.h>
-/* [한국어] list_sort(): request를 hctx 기준으로 정렬해 doorbell batching 효율 향상 */
+/* [한국어] list_sort(): 여러 hctx로 흩어진 request 목록을 hctx 기준으로 묶어
+ * 정렬할 때 쓴다(sched_rq_cmp). 같은 하드웨어 큐로 갈 것들을 붙여 놓아야
+ * blk_mq_dispatch_rq_list()를 hctx당 한 번씩만 부를 수 있다. */
 #include <linux/list_sort.h>
 
-/* [한국어] blktrace block 이벤트: dispatch/insert/complete 추적용 (NVMe 성능 분석) */
+/* [한국어] blktrace의 block 이벤트 정의. 이 파일에서 직접 쓰지는 않지만
+ * 포함된 blk-mq 헤더들의 추적점이 이 정의를 필요로 한다. */
 #include <trace/events/block.h>
 
 /* [한국어] block layer 내부 헤더: blk_queue_*, queue_limits 등 공통 정의 */
@@ -75,14 +145,16 @@
 #include "blk-mq-debugfs.h"
 /* [한국어] elevator_tags, blk_mq_init_sched(), blk_mq_exit_sched() 선언 */
 #include "blk-mq-sched.h"
-/* [한국어] writeback throttling: NVMe 쓰기 폭주 시 QoS 제어 (blk_wbt_*) */
+/* [한국어] writeback throttling(blk_wbt_*) 선언. 버퍼드 쓰기가 읽기 지연을
+ * 밀어내지 않도록 제출 쪽에서 조절하는 기능으로, 스케줄러 교체 시 함께
+ * 다뤄지기 때문에 포함된다. 장치 종류와 무관한 일반 기능이다. */
 #include "blk-wbt.h"
 
 /*
  * [한국어]
  * blk_mq_sched_mark_restart_hctx - hctx에 SCHED_RESTART 비트를 세워 재출발 예약
  *
- * @hctx: NVMe SQ/CQ 쌍에 대응하는 hardware context
+ * @hctx: 대상 하드웨어 큐 컨텍스트(PCIe NVMe라면 I/O 큐 하나 = SQ/CQ 쌍에 대응)
  *
  * NVMe 컨트롤러가 일시적으로 SQ를 더 받을 수 없거나 budget/tag 고갈로 dispatch를
  * 중단해야 할 때 이 함수로 재출발을 표시한다. BLK_MQ_S_SCHED_RESTART 비트가
@@ -100,7 +172,7 @@ void blk_mq_sched_mark_restart_hctx(struct blk_mq_hw_ctx *hctx)
 	if (test_bit(BLK_MQ_S_SCHED_RESTART, &hctx->state))
 		return;
 
-	/* [한국어] BLK_MQ_S_SCHED_RESTART 비트 세팅: 이 hctx(NVMe SQ)를 나중에 재가동 예약;
+	/* [한국어] BLK_MQ_S_SCHED_RESTART 비트 세팅: 이 hctx(하드웨어 큐)를 나중에 재가동 예약;
 	 * __blk_mq_sched_restart()가 이 비트를 클리어하고 blk_mq_run_hw_queue()를 호출 */
 	set_bit(BLK_MQ_S_SCHED_RESTART, &hctx->state);
 }
@@ -108,9 +180,9 @@ EXPORT_SYMBOL_GPL(blk_mq_sched_mark_restart_hctx);
 
 /*
  * [한국어]
- * __blk_mq_sched_restart - SCHED_RESTART 비트를 클리어하고 hctx(NVMe SQ)를 재가동
+ * __blk_mq_sched_restart - SCHED_RESTART 비트를 클리어하고 hctx(하드웨어 큐)를 재가동
  *
- * @hctx: 재가동할 NVMe SQ/CQ hardware context
+ * @hctx: 재가동할 하드웨어 큐 컨텍스트
  *
  * blk_mq_sched_mark_restart_hctx()로 예약된 재출발을 실제로 수행한다. 먼저
  * BLK_MQ_S_SCHED_RESTART 비트를 클리어한 뒤, smp_mb()로 메모리 배리어를 놓아
@@ -125,7 +197,7 @@ EXPORT_SYMBOL_GPL(blk_mq_sched_mark_restart_hctx);
  */
 void __blk_mq_sched_restart(struct blk_mq_hw_ctx *hctx)
 {
-	/* [한국어] SCHED_RESTART 클리어: 이 hctx(NVMe SQ)가 재출발 대기 상태에서 벗어남 */
+	/* [한국어] SCHED_RESTART 클리어: 이 hctx(하드웨어 큐)가 재출발 대기 상태에서 벗어남 */
 	clear_bit(BLK_MQ_S_SCHED_RESTART, &hctx->state);
 
 	/*
@@ -153,7 +225,7 @@ void __blk_mq_sched_restart(struct blk_mq_hw_ctx *hctx)
  * @b:    두 번째 request의 queuelist 노드
  * @return: rqa->mq_hctx > rqb->mq_hctx이면 양수; 같은 hctx끼리 인접하도록 정렬
  *
- * blk_mq_dispatch_hctx_list()가 list_sort()를 호출해 같은 NVMe SQ(hctx)로 가는
+ * blk_mq_dispatch_hctx_list()가 list_sort()를 호출해 같은 하드웨어 큐(hctx)로 가는
  * request들을 연속 배치한다. 이렇게 하면 같은 SQ로 가는 request들을 한 번에
  * dispatch할 수 있어 doorbell 발행 횟수와 CPU 캐시 miss를 줄인다.
  *
@@ -168,7 +240,7 @@ static int sched_rq_cmp(void *priv, const struct list_head *a,
 	/* [한국어] container_of: queuelist 노드 포인터 → request 포인터로 역참조 */
 	struct request *rqb = container_of(b, struct request, queuelist);
 
-	/* [한국어] mq_hctx 포인터 값 비교: 같은 NVMe SQ(hctx)끼리 인접하게 정렬됨;
+	/* [한국어] mq_hctx 포인터 값 비교: 같은 하드웨어 큐(hctx)끼리 인접하게 정렬됨;
 	 * 정렬 후 blk_mq_dispatch_hctx_list()가 동일 hctx 구간을 잘라 batch dispatch */
 	return rqa->mq_hctx > rqb->mq_hctx;
 }
@@ -180,18 +252,18 @@ static int sched_rq_cmp(void *priv, const struct list_head *a,
  * @rq_list: sched_rq_cmp()로 정렬된 request 리스트 (여러 hctx가 섞일 수 있음)
  * @return: blk_mq_dispatch_rq_list() 반환값 — 1개 이상 SQ에 들어갔으면 true
  *
- * list_sort() 후 호출되며, rq_list 앞쪽의 같은 hctx(NVMe SQ)에 해당하는 request들을
+ * list_sort() 후 호출되며, rq_list 앞쪽의 같은 hctx(하드웨어 큐)에 해당하는 request들을
  * hctx_list로 잘라낸 뒤 blk_mq_dispatch_rq_list()로 일괄 전달한다. 호출자는 rq_list가
  * 빌 때까지 이 함수를 반복 호출한다. 다른 hctx를 만나는 순간 현재 hctx 구간만 처리하고
  * 나머지는 rq_list에 남겨 다음 호출에서 처리하게 한다.
  *
  * 호출 체인:
  *   __blk_mq_do_dispatch_sched → list_sort → [blk_mq_dispatch_hctx_list]
- *   → blk_mq_dispatch_rq_list → nvme_queue_rq → SQ doorbell
+ *   → blk_mq_dispatch_rq_list → q->mq_ops->queue_rq()(간접 호출)
  */
 static bool blk_mq_dispatch_hctx_list(struct list_head *rq_list)
 {
-	/* [한국어] 리스트 첫 request의 mq_hctx(NVMe SQ/CQ)를 현재 처리할 hctx로 선택 */
+	/* [한국어] 리스트 첫 request의 mq_hctx(하드웨어 큐; NVMe라면 SQ/CQ 쌍 하나)를 현재 처리할 hctx로 선택 */
 	struct blk_mq_hw_ctx *hctx =
 		list_first_entry(rq_list, struct request, queuelist)->mq_hctx;
 	/* [한국어] 순회용 request 포인터 — 다음 hctx 경계를 찾는 데 사용 */
@@ -199,24 +271,27 @@ static bool blk_mq_dispatch_hctx_list(struct list_head *rq_list)
 	/* [한국어] 현재 hctx에 해당하는 request들만 담을 부분 리스트 */
 	LIST_HEAD(hctx_list);
 
-	/* [한국어] rq_list 순회: 다른 hctx(NVMe SQ)를 만나면 경계에서 분리 */
+	/* [한국어] rq_list 순회: 다른 hctx(하드웨어 큐)를 만나면 경계에서 분리 */
 	list_for_each_entry(rq, rq_list, queuelist) {
 		if (rq->mq_hctx != hctx) {
 			/* [한국어] list_cut_before: rq 바로 앞까지(동일 hctx 구간)를 hctx_list로 이동;
 			 * rq_list에는 나머지(다음 hctx 이후)가 남아 다음 호출에서 처리된다 */
 			list_cut_before(&hctx_list, rq_list, &rq->queuelist);
+			/* [한국어] 잘라낸 구간만 들고 아래 dispatch 라벨로 뛴다.
+			 * break로는 "전체를 옮기는" 아래 splice까지 실행되므로
+			 * goto로 그 줄을 건너뛰어야 한다. */
 			goto dispatch;
 		}
 	}
-	/* [한국어] 모든 request가 같은 hctx(NVMe SQ)면 전체를 hctx_list로 이동 후 dispatch */
+	/* [한국어] 모든 request가 같은 hctx(하드웨어 큐)면 전체를 hctx_list로 이동 후 dispatch */
 	list_splice_tail_init(rq_list, &hctx_list);
 
 dispatch:
-	/* [한국어] 동일 hctx(NVMe SQ)로 가는 request batch를 일괄 dispatch → nvme_queue_rq → doorbell */
+	/* [한국어] 동일 hctx(하드웨어 큐)로 가는 request batch를 일괄 dispatch(→ blk_mq_dispatch_rq_list → mq_ops->queue_rq 간접 호출) */
 	return blk_mq_dispatch_rq_list(hctx, &hctx_list, false);
 }
 
-/* [한국어] BLK_MQ_BUDGET_DELAY: budget 확보 실패 후 NVMe SQ 재가동 전 대기 시간(밀리초);
+/* [한국어] BLK_MQ_BUDGET_DELAY: budget 확보 실패 후 하드웨어 큐 재가동 전 대기 시간(밀리초);
  * 너무 짧으면 CPU를 낭비하고 너무 길면 latency가 늘어나므로 3ms로 설정 */
 #define BLK_MQ_BUDGET_DELAY	3		/* ms units */
 
@@ -230,53 +305,117 @@ dispatch:
  */
 /*
  * [한국어]
- * __blk_mq_do_dispatch_sched - elevator에서 request를 꺼내 NVMe SQ로 dispatch
+ * __blk_mq_do_dispatch_sched - elevator에서 request를 꺼내 드라이버로 dispatch
  *
- * @hctx: 처리할 NVMe SQ/CQ hardware context
+ * @hctx: 처리할 하드웨어 큐 컨텍스트
  * @return: 1 = 1개 이상 dispatch 성공; 0 = 아무것도 dispatch 못함; -EAGAIN = 잔여 residual 존재
  *
- * IO scheduler(elevator)가 관리하는 큐에서 request를 반복적으로 꺼내 NVMe SQ로
- * dispatch한다. 각 반복에서: (1) has_work 확인, (2) residual dispatch list 체크,
- * (3) budget(컨트롤러 처리 용량) 확보, (4) dispatch_request()로 request 추출,
- * (5) driver tag(NVMe CID) 확보까지 완료해야 rq_list에 추가된다. 여러 hctx로
- * 흩어지는 request들은 list_sort()로 hctx별로 모아 batch dispatch한다.
+ * 스케줄러가 붙어 있을 때의 디스패치 본체다. 스케줄러 큐에서 request를 하나씩
+ * 꺼내 배치(batch)를 만든 뒤, 그 배치를 드라이버로 넘긴다.
+ *
+ * === 한 반복(iteration)의 5단계와 그 순서가 중요한 이유 ===
+ *   1) e->type->ops.has_work(hctx)
+ *      스케줄러에 내보낼 것이 있는지 먼저 물어본다. 없으면 아래 단계의
+ *      비용(예산 획득 등)을 전혀 치르지 않고 빠져나간다.
+ *   2) hctx->dispatch가 비어 있는지 확인
+ *      이전에 드라이버가 거절해 되돌아온 request(잔여 목록)가 있으면 그쪽이
+ *      우선이다. busy=true로 표시하고 -EAGAIN을 돌려 호출자가 잔여부터
+ *      처리하게 만든다. 이것이 없으면 FLUSH 같은 요청이 굶는다(영문 주석 참고).
+ *   3) blk_mq_get_dispatch_budget(q)  ← 예산 먼저
+ *   4) e->type->ops.dispatch_request(hctx)  ← 그 다음에 request를 꺼낸다
+ *   5) blk_mq_get_driver_tag(rq)  ← 마지막에 드라이버 태그
+ *
+ * 순서가 (예산 → request → 드라이버 태그)인 데는 각각 이유가 있다.
+ *   - 예산을 request보다 먼저 잡는 이유: request를 스케줄러에서 빼낸 뒤에
+ *     예산이 없어 못 보내면, 그 request를 스케줄러 큐에 도로 넣어야 한다.
+ *     되돌리기는 스케줄러의 정렬 상태를 흐트러뜨리고 코드도 복잡해진다.
+ *     예산을 먼저 확보하면 "꺼냈으면 반드시 보낸다"가 성립한다.
+ *   - 드라이버 태그를 마지막에 잡는 이유: 드라이버 태그는 장치가 실제로
+ *     동시에 처리할 수 있는 커맨드 수라는 희소 자원이다. 스케줄러 큐에서
+ *     순서를 기다리는 동안 이것을 붙들고 있으면, 나중에 도착한 더 급한
+ *     요청이 태그를 못 받는다. 그래서 정말 내보내기 직전에 잡는다.
+ *     여기서 실패하면(태그 고갈) 루프를 즉시 끝낸다 — 위 영문 주석이
+ *     설명하듯, 더 꺼내 봐야 못 보내고 스케줄러에게 "장치가 더 받을 수 있다"는
+ *     잘못된 인상만 주기 때문이다.
+ *
+ * NVMe 관점:
+ *   - 3단계 예산은 mq_ops->get_budget/put_budget 콜백인데, 이 트리에서 NVMe
+ *     드라이버는 이 콜백을 구현하지 않는다(drivers/nvme/host/에 get_budget이
+ *     없다). 구현하지 않으면 blk_mq_get_dispatch_budget()이 항상 성공하므로,
+ *     NVMe에서 3단계는 사실상 통과 지점이다. SCSI가 호스트 단위 동시 커맨드
+ *     수를 제한하려고 쓰는 기능이다.
+ *   - 5단계에서 얻는 드라이버 태그(rq->tag)가 NVMe Command ID의 하위 12비트가
+ *     된다: nvme_cid(rq) = (genctr << 12) | rq->tag (drivers/nvme/host/nvme.h),
+ *     cmd->common.command_id = nvme_cid(req) (drivers/nvme/host/core.c).
+ *     즉 이 줄이 "이 request가 어떤 CID로 컨트롤러에 나갈지"를 정하는 순간이다.
+ *     반면 스케줄러가 이미 갖고 있던 rq->internal_tag는 CID와 무관하다.
+ *   - 다만 멀티큐 NVMe의 기본값은 "none"이라 이 함수 자체가 호출되지 않는다.
+ *     사용자가 sysfs로 mq-deadline 등을 붙였을 때만 이 경로가 돈다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트(제출 스레드 직접 실행 또는 kblockd 워커).
+ * 락은 잡지 않지만, 스케줄러 콜백 내부에서 스케줄러 락(dd->lock 등)을 잡는다.
+ * 이 함수가 여러 CPU에서 동시에 같은 hctx에 대해 도는 것은 blk_mq_run_hw_queue
+ * 쪽의 BLK_MQ_S_SCHED_RESTART/run_work 처리로 조절된다.
+ *
+ * 에러 경로: 예산만 잡고 request를 못 얻으면 즉시 예산을 반납하고
+ * run_queue=true로 표시해, 루프 종료 후 3ms 뒤 재가동을 예약한다. 반납하지
+ * 않으면 같은 큐의 다른 hctx가 예산을 못 받아 멈출 수 있다.
  *
  * 호출 체인:
  *   blk_mq_do_dispatch_sched → [__blk_mq_do_dispatch_sched]
- *   → blk_mq_dispatch_rq_list → nvme_queue_rq → SQ doorbell
+ *     → ops.dispatch_request → blk_mq_get_driver_tag
+ *     → blk_mq_dispatch_rq_list → q->mq_ops->queue_rq()(간접 호출)
  */
 static int __blk_mq_do_dispatch_sched(struct blk_mq_hw_ctx *hctx)
 {
-	/* [한국어] request_queue: 이 hctx가 속한 NVMe namespace 큐 */
+	/* [한국어] request_queue: 이 hctx가 속한 request_queue(디스크 하나에 하나) */
 	struct request_queue *q = hctx->queue;
 	/* [한국어] elevator_queue: mq-deadline/BFQ/kyber 스케줄러 상태; ops.dispatch_request로 request 추출 */
 	struct elevator_queue *e = q->elevator;
-	/* [한국어] multi_hctxs: 뽑은 request들이 여러 NVMe SQ로 흩어지면 true — list_sort 필요
-	 * run_queue: budget 확보 후 dispatch_request()가 NULL을 반환했을 때 SQ 재가동 필요 표시 */
+	/* [한국어] multi_hctxs: 뽑은 request들이 여러 하드웨어 큐로 흩어지면 true.
+	 *   왜 그런 일이 생기는가 — mq-deadline과 bfq는 큐 전체를 하나의 정렬된
+	 *   목록으로 관리하므로, hctx A를 처리하다가 hctx B로 갈 request를
+	 *   내주기도 한다. 그래서 배치를 hctx별로 다시 묶어야 한다.
+	 * run_queue: 예산은 잡았는데 dispatch_request()가 NULL을 돌려준 경우,
+	 *   루프 종료 후 이 큐를 딜레이 재가동해야 함을 표시. */
 	bool multi_hctxs = false, run_queue = false;
-	/* [한국어] dispatched: 1개 이상 NVMe SQ로 전달 성공 여부
+	/* [한국어] dispatched: 1개 이상 드라이버로 전달 성공 여부
 	 * busy: hctx->dispatch에 잔여 request가 있어 flush 기아 위험 표시 */
 	bool dispatched = false, busy = false;
-	/* [한국어] max_dispatch: 이번 루프에서 NVMe SQ로 보낼 최대 request 수
+	/* [한국어] max_dispatch: 이번 루프에서 드라이버로 보낼 최대 request 수
 	 * dispatch_busy이면 1(conservative)로 제한, 아니면 queue depth까지 허용 */
 	unsigned int max_dispatch;
-	/* [한국어] rq_list: elevator에서 뽑아 driver tag(CID)까지 확보한 NVMe 명령 후보 목록 */
+	/* [한국어] rq_list: elevator에서 뽑아 driver tag(CID)까지 확보한 request 후보 목록 */
 	LIST_HEAD(rq_list);
 	/* [한국어] count: 이번 루프에서 실제로 rq_list에 추가된 request 수 */
 	int count = 0;
 
-	/* [한국어] dispatch_busy: NVMe SQ full/backpressure 신호; true이면 보수적으로 1개씩만 dispatch */
+	/* [한국어] dispatch_busy: 드라이버가 최근에 BLK_STS_RESOURCE/DEV_RESOURCE로
+	 * 요청을 되돌려 보낸 정도를 지수이동평균으로 추적한 값(block/blk-mq.c가 갱신).
+	 * 0이 아니면 "드라이버가 바쁘다"는 뜻이라 한 번에 하나씩만 시도해
+	 * 되돌려받는 낭비를 줄인다.
+	 * NVMe 관점: nvme_queue_rq는 태그를 이미 받은 요청을 거의 거절하지 않으므로
+	 * 이 값이 0에 머무는 것이 보통이다. 주로 SCSI 같은 트랜스포트에서 의미가 있다 */
 	if (hctx->dispatch_busy)
-		/* [한국어] SQ 혼잡 상태 — 1개만 보내서 컨트롤러 부담 완화 */
+		/* [한국어] 드라이버가 바쁜 상태 — 하나만 만들어 보내 본다. 많이 만들어
+		 * 봐야 대부분 거절당해 되돌아오고, 그 되돌리기 비용이 더 크다. */
 		max_dispatch = 1;
+	/* [한국어] 최근에 거절당한 적이 없다면 마음껏 배치를 만든다. */
 	else
-		/* [한국어] SQ 여유 있음 — queue depth(nr_requests)까지 한 번에 batch dispatch */
+		/* [한국어] 큐의 nr_requests를 상한으로 쓴다. 스케줄러가 붙어 있을 때
+		 * 이 값은 스케줄러 태그 수(blk_mq_init_sched에서 et->nr_requests로
+		 * 설정)이므로, 큐에 담긴 것보다 많이 뽑으려 하지 않게 된다.
+		 * 실제로는 이 상한에 닿기 전에 has_work가 거짓이 되거나
+		 * 드라이버 태그가 떨어져 루프가 끝나는 경우가 대부분이다. */
 		max_dispatch = hctx->queue->nr_requests;
 
 	do {
-		/* [한국어] 이번 반복에서 처리할 NVMe 명령 후보 (elevator에서 추출 예정) */
+		/* [한국어] 이번 반복에서 처리할 request 후보 (elevator에서 추출 예정) */
 		struct request *rq;
-		/* [한국어] budget_token: NVMe 컨트롤러 동시처리 슬롯 — SCSI 외에는 대부분 no-op */
+		/* [한국어] budget_token: mq_ops->get_budget()이 돌려주는 예산 토큰.
+		 * 음수면 "지금은 더 보낼 수 없다"는 뜻이다. 이 콜백을 구현하지 않는
+		 * 드라이버(NVMe 포함)에서는 항상 성공하는 상수로 처리된다.
+		 * SCSI가 호스트/타깃 단위 동시 커맨드 수를 지키려고 쓰는 장치다. */
 		int budget_token;
 
 		/*
@@ -285,28 +424,47 @@ static int __blk_mq_do_dispatch_sched(struct blk_mq_hw_ctx *hctx)
 		 * to submit them anyway and it creates false impression for
 		 * scheduling heuristics that the device can take more IO.
 		 */
-		/* [한국어] has_work(): elevator 큐에 NVMe SQ로 보낼 request가 있는지 확인;
+		/* [한국어] has_work(): elevator 큐에 드라이버로 보낼 request가 있는지 확인;
 		 * 없으면 루프 종료 — 불필요한 budget 소비 방지 */
 		if (e->type->ops.has_work && !e->type->ops.has_work(hctx))
 			break;
 
-		/* [한국어] hctx->dispatch가 비어있지 않으면 residual(이전 SQ 거부) 처리 우선;
-		 * busy=true로 표시해 -EAGAIN 반환 → 호출자가 residual을 먼저 처리하게 함 */
+		/* [한국어] hctx->dispatch는 "드라이버가 거절해 되돌아온" request들의
+		 * 잔여 목록이다. 그것이 비어 있지 않으면 스케줄러에서 새로 꺼내는
+		 * 것보다 먼저 처리해야 한다 — 잔여를 계속 뒤로 미루면 그 안의
+		 * FLUSH 같은 요청이 영원히 굶기 때문이다(영문 주석의 "starving flushes").
+		 * _careful 변형은 락 없이 읽어도 되도록 리스트 포인터를 안전하게
+		 * 검사하는 헬퍼다. busy=true → 아래에서 -EAGAIN을 반환한다. */
 		if (!list_empty_careful(&hctx->dispatch)) {
 			busy = true;
 			break;
 		}
 
-		/* [한국어] blk_mq_get_dispatch_budget(): NVMe 컨트롤러 동시처리 용량 확보;
-		 * SCSI만 구현하며 NVMe에서는 no-op이어서 항상 성공(budget_token >= 0) */
+		/* [한국어] ★ 순서 1: 예산 먼저 ★
+		 * mq_ops->get_budget()을 부른다. request를 스케줄러에서 빼내기 "전에"
+		 * 잡아야, 나중에 못 보내서 스케줄러 큐로 되돌려 넣는 상황을 피할 수 있다.
+		 * 이 트리의 NVMe 드라이버는 get_budget을 구현하지 않으므로 항상 성공한다.
+		 * 위 영문 주석이 밝히듯, SCSI는 실패 시 자기 완료 핸들러에서 큐를
+		 * 다시 돌리므로 여기서 재가동을 예약해 줄 필요가 없다. */
 		budget_token = blk_mq_get_dispatch_budget(q);
-		/* [한국어] budget_token < 0: 컨트롤러 처리 용량 초과 — 더 이상 뽑을 수 없음 */
+		/* [한국어] 음수 = 예산 없음. 아직 request를 꺼내지 않았으므로 되돌릴
+		 * 것 없이 그냥 루프를 끝낸다. */
 		if (budget_token < 0)
 			break;
 
-		/* [한국어] dispatch_request(): elevator가 다음에 NVMe SQ로 보낼 최적 request 선택;
-		 * 반환 값이 NULL이면 scheduler 큐가 비었거나 dispatch 조건 불만족 */
+		/* [한국어] ★ 순서 2: 스케줄러가 다음 request를 고른다 ★
+		 * 스케줄러별 정책이 여기서 발현된다:
+		 *   mq-deadline - dd_dispatch_request(). 만료된 요청이 있으면 그것을,
+		 *                 없으면 LBA 순서대로 고른다.
+		 *   kyber       - kyber_dispatch_request(). 도메인별 토큰이 남아 있는
+		 *                 쪽에서 고른다.
+		 *   bfq         - bfq_dispatch_request(). 가중치 기반으로 서비스할
+		 *                 bfq_queue를 고른다.
+		 * 이 호출 안에서 스케줄러 락을 잡았다 푼다. */
 		rq = e->type->ops.dispatch_request(hctx);
+		/* [한국어] NULL = 내줄 것이 없다. has_work가 참이었는데도 NULL이 나올
+		 * 수 있다 — 그 사이에 다른 CPU가 가져갔거나, 스케줄러가 지금은
+		 * 내보내지 않기로 결정했기 때문이다(kyber의 토큰 소진 등). */
 		if (!rq) {
 			/* [한국어] budget만 가져가고 dispatch하지 못한 경우 즉시 반납 — 다른 hctx가 사용할 수 있게 */
 			blk_mq_put_dispatch_budget(q, budget_token);
@@ -317,7 +475,7 @@ static int __blk_mq_do_dispatch_sched(struct blk_mq_hw_ctx *hctx)
 			 * no guarantee anyone will kick the queue.  Kick it
 			 * ourselves.
 			 */
-			/* [한국어] run_queue=true: 루프 종료 후 NVMe SQ를 3ms 딜레이로 재가동 예약 */
+			/* [한국어] run_queue=true: 루프 종료 후 이 하드웨어 큐를 3ms 딜레이로 재가동 예약 */
 			run_queue = true;
 			break;
 		}
@@ -331,10 +489,12 @@ static int __blk_mq_do_dispatch_sched(struct blk_mq_hw_ctx *hctx)
 		 * 실패하면 그 안에서 budget을 반납함 */
 		blk_mq_set_rq_budget_token(rq, budget_token);
 
-		/* [한국어] rq_list 뒤에 추가: budget과 driver tag 확보 후 일괄 dispatch 대기 */
+		/* [한국어] 배치 목록 끝에 붙인다. tail에 넣어야 스케줄러가 정한 순서가
+		 * 그대로 보존된다 — 스케줄러가 애써 만든 순서를 여기서 뒤집으면 안 된다. */
 		list_add_tail(&rq->queuelist, &rq_list);
+		/* [한국어] 배치 크기 증가. 루프 조건(count < max_dispatch)의 기준이다. */
 		count++;
-		/* [한국어] rq->mq_hctx != hctx: 이 request가 다른 NVMe SQ로 가야 함 → list_sort 필요 */
+		/* [한국어] rq->mq_hctx != hctx: 이 request가 다른 하드웨어 큐로 가야 함 → list_sort 필요 */
 		if (rq->mq_hctx != hctx)
 			multi_hctxs = true;
 
@@ -344,17 +504,32 @@ static int __blk_mq_do_dispatch_sched(struct blk_mq_hw_ctx *hctx)
 		 * to submit them anyway and it creates false impression for
 		 * scheduling heuristics that the device can take more IO.
 		 */
-		/* [한국어] blk_mq_get_driver_tag(): NVMe CID(Command Identifier) = driver tag 할당;
-		 * 실패하면 SQ가 가득 차거나 tag 고갈 — 더 이상 elevator에서 뽑지 않음 */
+		/* [한국어] ★ 순서 3: 드라이버 태그를 마지막에 ★
+		 * rq->tag에 드라이버 태그를 배정한다(rq->internal_tag는 이미 스케줄러
+		 * 태그로 채워져 있다 — 둘은 별개의 번호다).
+		 * NVMe 관점: 여기서 정해진 rq->tag가 곧 이 커맨드의 Command ID
+		 * 하위 12비트가 된다. nvme_cid(rq) = (genctr << 12) | rq->tag이고
+		 * 완료 시 nvme_find_rq()가 CQE의 command_id에서 이 태그를 되뽑아
+		 * request를 찾는다(drivers/nvme/host/nvme.h).
+		 * 실패 = 드라이버 태그 고갈(장치가 받을 수 있는 만큼 이미 나가 있음).
+		 * 이때 더 꺼내 봐야 보낼 수 없고, 스케줄러에게 "장치가 여유롭다"는
+		 * 잘못된 신호만 주므로 루프를 끝낸다(영문 주석 참고).
+		 * 참고: 태그를 못 받은 이 rq도 이미 rq_list에 들어가 있다. 배치를
+		 * 넘겨받은 blk_mq_dispatch_rq_list()가 태그 없는 request를 만나면
+		 * 거기서 다시 태그를 시도하고, 안 되면 hctx->dispatch로 되돌린다. */
 		if (!blk_mq_get_driver_tag(rq))
 			break;
-	} while (count < max_dispatch); /* [한국어] max_dispatch 한계까지 반복 (SQ depth 또는 1) */
+	/* [한국어] 배치가 상한에 찰 때까지 반복. 위의 break 조건들(내줄 것 없음,
+	 * 잔여 존재, 예산 없음, 태그 고갈) 중 하나로 먼저 끝나는 것이 보통이다. */
+	} while (count < max_dispatch);
 
+	/* [한국어] 한 건도 만들지 못한 경우의 처리. */
 	if (!count) {
 		/* [한국어] 아무것도 dispatch하지 못한 경우 */
 		if (run_queue)
 			/* [한국어] 3ms 후 모든 hctx를 재가동 — budget 반납 후 다른 hctx가 먼저 처리할 기회 */
 			blk_mq_delay_run_hw_queues(q, BLK_MQ_BUDGET_DELAY);
+	/* [한국어] 배치가 여러 하드웨어 큐에 걸쳐 있는 경우 — 정렬 후 구간별 전달. */
 	} else if (multi_hctxs) {
 		/*
 		 * Requests from different hctx may be dequeued from some
@@ -363,15 +538,20 @@ static int __blk_mq_do_dispatch_sched(struct blk_mq_hw_ctx *hctx)
 		 * Sort the requests in the list according to their hctx,
 		 * dispatch batching requests from same hctx at a time.
 		 */
-		/* [한국어] list_sort(sched_rq_cmp): 여러 NVMe SQ로 흩어진 request를 hctx별로 정렬;
-		 * 같은 SQ끼리 모아야 doorbell 횟수를 최소화하고 CPU 캐시 효율을 높일 수 있다 */
+		/* [한국어] 여러 하드웨어 큐로 흩어진 request들을 hctx 포인터 값 기준으로
+		 * 정렬해, 같은 하드웨어 큐로 갈 것들을 인접하게 만든다. 그래야 아래
+		 * 루프가 hctx당 blk_mq_dispatch_rq_list()를 한 번씩만 부를 수 있다.
+		 * 정렬 없이 섞인 채로 보내면 hctx가 바뀔 때마다 호출을 새로 해야 해서
+		 * 배치의 이점이 사라진다.
+		 * list_sort는 병합 정렬 기반이라 안정(stable)하므로, 같은 hctx 안에서는
+		 * 스케줄러가 정한 순서가 그대로 유지된다 — 이것이 중요하다. */
 		list_sort(NULL, &rq_list, sched_rq_cmp);
 		do {
-			/* [한국어] 한 hctx(NVMe SQ) 구간씩 잘라 batch dispatch; rq_list가 빌 때까지 반복 */
+			/* [한국어] 한 hctx(하드웨어 큐) 구간씩 잘라 batch dispatch; rq_list가 빌 때까지 반복 */
 			dispatched |= blk_mq_dispatch_hctx_list(&rq_list);
 		} while (!list_empty(&rq_list));
 	} else {
-		/* [한국어] 모든 request가 같은 hctx(NVMe SQ)면 바로 일괄 dispatch */
+		/* [한국어] 모든 request가 같은 hctx(하드웨어 큐)면 바로 일괄 dispatch */
 		dispatched = blk_mq_dispatch_rq_list(hctx, &rq_list, false);
 	}
 
@@ -386,31 +566,37 @@ static int __blk_mq_do_dispatch_sched(struct blk_mq_hw_ctx *hctx)
  * [한국어]
  * blk_mq_do_dispatch_sched - elevator 경로 dispatch 루프: 최대 1초간 반복 dispatch
  *
- * @hctx: 처리할 NVMe SQ/CQ hardware context
+ * @hctx: 처리할 하드웨어 큐 컨텍스트
  * @return: __blk_mq_do_dispatch_sched()의 마지막 반환값
  *          (0=아무것도 못 함; 1=성공; -EAGAIN=잔여)
  *
  * __blk_mq_do_dispatch_sched()를 반복 호출해 elevator에서 가능한 한 많은 request를
- * NVMe SQ로 dispatch한다. 한 번 성공(ret==1)하면 계속 시도하고, 선점 요청이 오거나
+ * 드라이버로 dispatch한다. 한 번 성공(ret==1)하면 계속 시도하고, 선점 요청이 오거나
  * 1초(HZ jiffies)가 지나면 blk_mq_delay_run_hw_queue(hctx, 0)로 즉시 재가동 예약
- * 후 루프를 탈출해 CPU를 양보한다. 이는 SQ가 매우 바쁠 때 CPU 독점을 방지하면서도
- * throughput을 최대화하는 절충안이다.
+ * 후 루프를 탈출해 CPU를 양보한다. 큐가 매우 바쁠 때 이 스레드가 CPU를
+ * 독점하는 것을 막으면서도 처리량을 최대한 뽑아내는 절충안이다.
+ * (배치 하나를 만들 때마다 워커를 다시 깨우면 지연이 커지므로 되도록 이어서
+ *  돌리되, 무한정 돌지는 않게 상한을 둔 것이다.)
  *
  * 호출 체인:
  *   __blk_mq_sched_dispatch_requests → [blk_mq_do_dispatch_sched]
- *   → __blk_mq_do_dispatch_sched → blk_mq_dispatch_rq_list → nvme_queue_rq
+ *   → __blk_mq_do_dispatch_sched → blk_mq_dispatch_rq_list → mq_ops->queue_rq()
  */
 static int blk_mq_do_dispatch_sched(struct blk_mq_hw_ctx *hctx)
 {
 	/* [한국어] end: 루프 종료 시한 — jiffies + HZ = 현재 시각 + 1초;
 	 * 1초를 넘으면 CPU를 양보하고 재가동 예약 */
 	unsigned long end = jiffies + HZ;
+	/* [한국어] 안쪽 함수의 반환값. 마지막 값이 그대로 호출자에게 전달되므로
+	 * -EAGAIN(잔여 존재)이 밖으로 새어 나가 재시도를 유발할 수 있다. */
 	int ret;
 
 	do {
-		/* [한국어] elevator에서 request 추출 후 NVMe SQ dispatch 시도 */
+		/* [한국어] 배치 한 묶음을 만들어 드라이버로 넘긴다. */
 		ret = __blk_mq_do_dispatch_sched(hctx);
-		/* [한국어] ret != 1: SQ full/budget 부족/elevator 작업 없음 → 루프 종료 */
+		/* [한국어] 1이 아니면(0 = 아무것도 못 보냄, -EAGAIN = 잔여 우선 처리
+		 * 필요) 더 반복할 이유가 없다. 1일 때만 "아직 일이 남았을 수 있다"고
+		 * 보고 계속 돈다. */
 		if (ret != 1)
 			break;
 		/* [한국어] need_resched(): 더 높은 우선순위 태스크가 대기 중 → CPU 양보 필요;
@@ -429,7 +615,7 @@ static int blk_mq_do_dispatch_sched(struct blk_mq_hw_ctx *hctx)
  * [한국어]
  * blk_mq_next_ctx - 같은 hctx 내에서 현재 ctx 다음의 sw queue를 라운드 로빈으로 반환
  *
- * @hctx: NVMe SQ/CQ hardware context — 매핑된 ctx들의 컨테이너
+ * @hctx: 하드웨어 큐 컨텍스트 — 여기에 매핑된 sw queue(ctx)들의 컨테이너
  * @ctx:  현재 CPU의 software queue (per-CPU request 큐)
  * @return: 다음 CPU sw queue 포인터 (마지막이면 첫 번째로 wrap)
  *
@@ -467,38 +653,42 @@ static struct blk_mq_ctx *blk_mq_next_ctx(struct blk_mq_hw_ctx *hctx,
  * [한국어]
  * blk_mq_do_dispatch_ctx - elevator 없음("none" 스케줄러) 경로: sw queue 라운드 로빈 dispatch
  *
- * @hctx: 처리할 NVMe SQ/CQ hardware context
+ * @hctx: 처리할 하드웨어 큐 컨텍스트
  * @return: 0 = 정상 종료; -EAGAIN = hctx->dispatch에 잔여 request 존재 (flush 기아 방지)
  *
  * IO 스케줄러가 없는 상황("none", NVMe에서 흔히 사용)에서 각 CPU의 sw queue(ctx)에서
- * request를 하나씩 꺼내 NVMe SQ로 dispatch한다. per-CPU ctx를 라운드 로빈으로 순회해
+ * request를 하나씩 꺼내 드라이버로 dispatch한다. per-CPU ctx를 라운드 로빈으로 순회해
  * 공정성을 보장한다. 각 반복에서 (1) residual 확인, (2) ctx_map 비트맵 확인,
  * (3) budget 확보, (4) dequeue_from_ctx()로 request 추출, (5) dispatch_rq_list()로
  * SQ 전달까지 진행한다. dispatch_from을 갱신해 다음 호출에서 같은 지점에서 재개한다.
  *
  * 호출 체인:
  *   __blk_mq_sched_dispatch_requests (elevator 없음 경로)
- *   → [blk_mq_do_dispatch_ctx] → blk_mq_dispatch_rq_list → nvme_queue_rq
+ *   → [blk_mq_do_dispatch_ctx] → blk_mq_dispatch_rq_list → mq_ops->queue_rq()
  */
 static int blk_mq_do_dispatch_ctx(struct blk_mq_hw_ctx *hctx)
 {
-	/* [한국어] NVMe namespace request_queue — budget/tag 확보에 사용 */
+	/* [한국어] request_queue(디스크 하나에 하나) — budget/tag 확보에 사용 */
 	struct request_queue *q = hctx->queue;
-	/* [한국어] rq_list: 현재 ctx에서 뽑아 NVMe SQ로 보낼 request 1개 임시 보관 */
+	/* [한국어] rq_list: 현재 ctx에서 뽑아 드라이버로 보낼 request 1개 임시 보관 */
 	LIST_HEAD(rq_list);
 	/* [한국어] dispatch_from: 라운드 로빈 시작점 — 이전 dispatch가 멈춘 ctx에서 재개;
 	 * READ_ONCE: 다른 CPU의 WRITE_ONCE와 경쟁 — 원자적 읽기 필요 */
 	struct blk_mq_ctx *ctx = READ_ONCE(hctx->dispatch_from);
 	/* [한국어] 0: 정상 종료; -EAGAIN으로 설정되면 flush 기아 방지 재호출 신호 */
 	int ret = 0;
+	/* [한국어] sw queue에서 꺼낸 request. 루프 밖에서 선언한 이유가 있다 —
+	 * do/while 조건식에서 rq->mq_hctx를 참조하기 때문이다. */
 	struct request *rq;
 
 	do {
-		/* [한국어] budget_token: NVMe 컨트롤러 동시처리 슬롯 (SCSI 외 no-op) */
+		/* [한국어] budget_token: mq_ops->get_budget()의 예산 토큰. NVMe는 이
+		 * 콜백을 구현하지 않아 항상 성공한다. SCSI 전용 장치라고 보면 된다. */
 		int budget_token;
 
-		/* [한국어] hctx->dispatch에 이전 SQ 거부 잔여 request 존재 → 우선 처리 필요;
-		 * -EAGAIN 반환으로 호출자가 residual을 먼저 처리하도록 지시 */
+		/* [한국어] 드라이버가 거절해 되돌아온 잔여 request가 있으면 그쪽이
+		 * 우선이다. 여기서는 __blk_mq_do_dispatch_sched와 달리 곧바로
+		 * ret = -EAGAIN을 설정해 호출자에게 재시도를 요구한다. */
 		if (!list_empty_careful(&hctx->dispatch)) {
 			ret = -EAGAIN;
 			break;
@@ -509,15 +699,19 @@ static int blk_mq_do_dispatch_ctx(struct blk_mq_hw_ctx *hctx)
 		if (!sbitmap_any_bit_set(&hctx->ctx_map))
 			break;
 
-		/* [한국어] NVMe 컨트롤러 동시처리 용량 확보 (NVMe에서는 보통 no-op, 항상 성공) */
+		/* [한국어] 여기서도 request를 꺼내기 전에 예산을 먼저 잡는다.
+		 * 이유는 __blk_mq_do_dispatch_sched와 같다 — 꺼낸 뒤에 못 보내면
+		 * 되돌려 넣어야 하기 때문이다. */
 		budget_token = blk_mq_get_dispatch_budget(q);
-		/* [한국어] budget_token < 0: 컨트롤러 처리 한계 초과 → 루프 종료 */
+		/* [한국어] 음수 = 예산 없음. 아직 아무것도 꺼내지 않았으므로 그냥 종료. */
 		if (budget_token < 0)
 			break;
 
 		/* [한국어] blk_mq_dequeue_from_ctx(): 현재 ctx(CPU sw queue)에서 request 1개 추출;
 		 * ctx_map 비트는 설정되어 있었으나 다른 CPU가 이미 뽑아갔을 수 있음 → NULL 체크 필요 */
 		rq = blk_mq_dequeue_from_ctx(hctx, ctx);
+		/* [한국어] NULL = 이 sw queue가 비어 있다. ctx_map 비트를 보고 왔지만
+		 * 그 사이 다른 CPU가 먼저 가져갔을 수 있어 반드시 확인해야 한다. */
 		if (!rq) {
 			/* [한국어] dequeue 실패 — budget만 가져가고 dispatch 못 함 → 즉시 반납 */
 			blk_mq_put_dispatch_budget(q, budget_token);
@@ -541,7 +735,7 @@ static int blk_mq_do_dispatch_ctx(struct blk_mq_hw_ctx *hctx)
 		/* [한국어] rq가 budget_token 소유; dispatch_rq_list에서 queue_rq 실패 시 자동 반납 */
 		blk_mq_set_rq_budget_token(rq, budget_token);
 
-		/* [한국어] rq_list에 추가: dispatch_rq_list()가 NVMe SQ에 전달할 단일 request */
+		/* [한국어] rq_list에 추가: dispatch_rq_list()가 드라이버로 전달할 단일 request */
 		list_add(&rq->queuelist, &rq_list);
 
 		/* round robin for fair dispatch */
@@ -562,7 +756,7 @@ static int blk_mq_do_dispatch_ctx(struct blk_mq_hw_ctx *hctx)
  * [한국어]
  * __blk_mq_sched_dispatch_requests - hctx 단위 dispatch 핵심 로직
  *
- * @hctx: 처리할 NVMe SQ/CQ hardware context
+ * @hctx: 처리할 하드웨어 큐 컨텍스트
  * @return: 0 = 정상; -EAGAIN = hctx->dispatch 잔여로 재호출 필요
  *
  * 두 단계로 동작한다:
@@ -577,7 +771,7 @@ static int blk_mq_do_dispatch_ctx(struct blk_mq_hw_ctx *hctx)
  * 호출 체인:
  *   blk_mq_sched_dispatch_requests → [__blk_mq_sched_dispatch_requests]
  *   → blk_mq_do_dispatch_sched OR blk_mq_do_dispatch_ctx
- *   → blk_mq_dispatch_rq_list → nvme_queue_rq → SQ doorbell
+ *   → blk_mq_dispatch_rq_list → q->mq_ops->queue_rq()(간접 호출)
  */
 static int __blk_mq_sched_dispatch_requests(struct blk_mq_hw_ctx *hctx)
 {
@@ -599,6 +793,8 @@ static int __blk_mq_sched_dispatch_requests(struct blk_mq_hw_ctx *hctx)
 		if (!list_empty(&hctx->dispatch))
 			/* [한국어] splice_init: hctx->dispatch의 모든 잔여 request를 rq_list로 이동 후 초기화 */
 			list_splice_init(&hctx->dispatch, &rq_list);
+		/* [한국어] 잔여 목록을 통째로 가져왔으므로 락 해제. 이후 조작은
+		 * 지역 리스트(rq_list) 위에서만 일어나 락이 필요 없다. */
 		spin_unlock(&hctx->lock);
 	}
 
@@ -615,12 +811,25 @@ static int __blk_mq_sched_dispatch_requests(struct blk_mq_hw_ctx *hctx)
 	 * on the dispatch list or we were able to dispatch from the
 	 * dispatch list.
 	 */
+	/* [한국어] 잔여 목록에서 뭔가 가져왔다면 그것부터 처리한다.
+	 * 위 영문 주석의 논리가 핵심이다: 장치 큐 깊이가 얕을 때 스케줄러에서
+	 * 미리 다 꺼내 버리면, 꺼낸 순간부터 그 request들은 더 이상 병합·정렬
+	 * 대상이 아니게 된다("we can no longer merge or sort them").
+	 * 그래서 되도록 스케줄러 안에 오래 두고, 잔여가 있을 때는 스케줄러를
+	 * 건드리지 않는다. */
 	if (!list_empty(&rq_list)) {
-		/* [한국어] residual request가 있음 → SCHED_RESTART 표시: 이후 scheduler에서도 더 뽑을 것임을 예약 */
+		/* [한국어] "이번에 스케줄러에서 못 꺼냈으니 나중에 다시 돌려 달라"는
+		 * 예약을 남긴다. 이 비트가 없으면, 잔여 처리 후 아무도 큐를 다시
+		 * 깨우지 않아 스케줄러에 쌓인 request가 그대로 멈춰 버린다. */
 		blk_mq_sched_mark_restart_hctx(hctx);
-		/* [한국어] residual batch를 NVMe SQ에 전달; 'from_sched=true'는 scheduler 큐에서 온 것처럼 처리 */
+		/* [한국어] 잔여 배치를 드라이버로 넘긴다. 세 번째 인자 true는
+		 * "이 목록은 잔여(dispatch list)에서 온 것"이라는 표시로,
+		 * 실패 시 되돌려 넣는 처리와 dispatch_busy 갱신 방식이 달라진다. */
 		if (!blk_mq_dispatch_rq_list(hctx, &rq_list, true))
-			/* [한국어] SQ가 일부를 받지 못함 → 0 반환, SCHED_RESTART가 나중에 재시도를 트리거 */
+			/* [한국어] 전부 넘기지 못했다 = 드라이버가 여전히 바쁘다.
+			 * 스케줄러에서 더 꺼내 봐야 소용없으므로 여기서 끝낸다.
+			 * 남은 것은 blk_mq_dispatch_rq_list가 다시 hctx->dispatch로
+			 * 되돌려 놓았고, 위에서 세운 SCHED_RESTART가 재시도를 부른다. */
 			return 0;
 		/* [한국어] residual 처리 성공 → scheduler에서 추가 request를 더 뽑아야 함 */
 		need_dispatch = true;
@@ -639,7 +848,7 @@ static int __blk_mq_sched_dispatch_requests(struct blk_mq_hw_ctx *hctx)
 		return blk_mq_do_dispatch_ctx(hctx);
 	/* [한국어] SQ가 여유롭고 need_dispatch 아님: busy ctx들을 한꺼번에 flush해 rq_list로 수집 */
 	blk_mq_flush_busy_ctxs(hctx, &rq_list);
-	/* [한국어] sw queue 전체 flush batch를 NVMe SQ로 한 번에 전달 (from_sched=true) */
+	/* [한국어] sw queue 전체 flush batch를 드라이버로 한 번에 전달 (from_sched=true) */
 	blk_mq_dispatch_rq_list(hctx, &rq_list, true);
 	return 0;
 }
@@ -648,27 +857,38 @@ static int __blk_mq_sched_dispatch_requests(struct blk_mq_hw_ctx *hctx)
  * [한국어]
  * blk_mq_sched_dispatch_requests - hctx dispatch 최상위 진입점
  *
- * @hctx: 처리할 NVMe SQ/CQ hardware context
+ * @hctx: 처리할 하드웨어 큐 컨텍스트
  *
  * blk_mq_run_hw_queue()에서 호출되는 dispatch 최상위 함수. hctx가 stopped 상태이거나
- * queue가 quiesced(NVMe reset/remove 중)이면 즉시 리턴해 SQ doorbell 발행을 막는다.
+ * 큐가 quiesced 상태이면 즉시 리턴해, 드라이버로 아무것도 내보내지 않는다.
+ * (quiesce는 스케줄러 교체, 컨트롤러 리셋, 디스크 제거처럼 "지금 요청이 나가면
+ *  안 되는" 상황에서 걸린다. NVMe라면 그 구간 동안 nvme_queue_rq가 불리지
+ *  않으므로 새 커맨드가 SQ에 실리지 않는다.)
  * __blk_mq_sched_dispatch_requests()를 호출하고, -EAGAIN이 반환되면(hctx->dispatch에
  * 잔여 request 존재) 한 번 더 시도한다. 두 번째도 -EAGAIN이면 async work로 예약해
  * flush 기아를 방지한다. 총 최대 2번 시도 후 work 예약으로 보장한다.
  *
  * 호출 체인:
  *   blk_mq_run_hw_queue (work queue/softirq) → [blk_mq_sched_dispatch_requests]
- *   → __blk_mq_sched_dispatch_requests → ... → nvme_queue_rq → SQ doorbell
+ *   → __blk_mq_sched_dispatch_requests → ... → q->mq_ops->queue_rq()(간접 호출)
  */
 void blk_mq_sched_dispatch_requests(struct blk_mq_hw_ctx *hctx)
 {
-	/* [한국어] NVMe namespace request_queue: quiesced 상태 확인에 사용 */
+	/* [한국어] request_queue(디스크 하나에 하나): quiesced 상태 확인에 사용 */
 	struct request_queue *q = hctx->queue;
 
 	/* RCU or SRCU read lock is needed before checking quiesced flag */
-	/* [한국어] blk_mq_hctx_stopped(): BLK_MQ_S_STOPPED 비트 — NVMe controller 멈춤/드레인 중;
-	 * blk_queue_quiesced(): queue를 동결(quiesce)해 새 I/O 금지 상태 (elevator switch 등);
-	 * 두 경우 모두 SQ doorbell 발행을 막아야 함 */
+	/* [한국어] 두 가지 정지 상태를 함께 확인한다.
+	 *   blk_mq_hctx_stopped() — 이 하드웨어 큐 하나에만 걸린 BLK_MQ_S_STOPPED.
+	 *     드라이버가 blk_mq_stop_hw_queue()로 "이 큐는 지금 받을 수 없다"고
+	 *     선언한 상태다(자원 부족 등).
+	 *   blk_queue_quiesced() — 큐 전체에 걸린 정지. 스케줄러 교체
+	 *     (elevator_switch의 blk_mq_quiesce_queue), 컨트롤러 리셋, 디스크
+	 *     제거 등에서 걸린다.
+	 * unlikely()로 감싼 이유: 정상 동작 중에는 거의 항상 거짓이라, 분기
+	 * 예측이 통과 쪽으로 최적화되어야 핫패스가 빠르다.
+	 * 위 영문 주석대로 이 검사는 RCU/SRCU read 락 안에서 이루어져야 한다 —
+	 * 호출자 blk_mq_run_hw_queue가 그 락을 쥐고 부른다. */
 	if (unlikely(blk_mq_hctx_stopped(hctx) || blk_queue_quiesced(q)))
 		return;
 
@@ -689,15 +909,19 @@ void blk_mq_sched_dispatch_requests(struct blk_mq_hw_ctx *hctx)
  * [한국어]
  * blk_mq_sched_bio_merge - bio를 scheduler 또는 sw queue의 기존 request에 merge 시도
  *
- * @q:      request_queue (NVMe namespace 큐)
+ * @q:      request_queue(디스크 하나에 하나)
  * @bio:    merge 시도할 신규 bio
- * @nr_segs: bio의 물리 세그먼트 수 (NVMe PRP/SGL 엔트리 복잡도 지표)
+ * @nr_segs: 이 bio의 물리 세그먼트 수. 병합 판정 시 결과 request가
+ *           큐 한계(max_segments 등)를 넘지 않는지 검사하는 데 쓰인다.
  * @return: merge 성공이면 true, 실패이면 false
  *
  * blk_mq_submit_bio()에서 bio를 request로 변환하기 전에 호출된다. elevator가 있으면
  * e->type->ops.bio_merge()로 scheduler의 merge 정책을 사용하고, 없으면("none") per-CPU
  * sw queue(ctx->rq_lists[type])에서 역방향으로 최대 8개의 request를 검사해 merge한다.
- * merge 성공 시 NVMe PRP/SGL 엔트리 수와 SQ doorbell 횟수가 줄어든다.
+ * merge에 성공하면 request 하나가 줄고, NVMe에서는 그만큼 발행되는 커맨드가
+ * 하나 줄어든다(SQ 엔트리·Command ID·완료 CQ 엔트리 각각 하나씩 절약).
+ * 주의: 줄어드는 것은 커맨드 "개수"이며, 남은 커맨드가 더 많은 데이터를
+ * 담게 되므로 그 커맨드의 PRP/SGL 엔트리 수는 오히려 늘어난다.
  *
  * 호출 체인:
  *   blk_mq_submit_bio → [blk_mq_sched_bio_merge]
@@ -710,7 +934,7 @@ bool blk_mq_sched_bio_merge(struct request_queue *q, struct bio *bio,
 	struct elevator_queue *e = q->elevator;
 	/* [한국어] 현재 CPU에 해당하는 software queue */
 	struct blk_mq_ctx *ctx;
-	/* [한국어] bio가 매핑될 NVMe SQ에 대응하는 hardware context */
+	/* [한국어] bio가 매핑될 하드웨어 큐 컨텍스트 */
 	struct blk_mq_hw_ctx *hctx;
 	/* [한국어] merge 성공 여부 초기화 */
 	bool ret = false;
@@ -719,14 +943,18 @@ bool blk_mq_sched_bio_merge(struct request_queue *q, struct bio *bio,
 
 	/* [한국어] elevator가 있고 bio_merge ops가 있으면 스케줄러에게 merge 위임 */
 	if (e && e->type->ops.bio_merge) {
-		/* [한국어] elevator 내부에서 LBA 정렬 기반 merge 시도 — NVMe PRP/SGL 최적화 */
+		/* [한국어] elevator 내부 자료구조(해시/정렬 rb-tree)를 이용한 merge 시도.
+		 * 스케줄러가 큐 전체를 보므로 아래 sw queue 경로보다 병합 범위가 넓다 */
 		ret = e->type->ops.bio_merge(q, bio, nr_segs);
+		/* [한국어] 스케줄러가 판정을 끝냈으므로 아래 sw queue 경로는 건너뛴다.
+		 * 두 경로를 모두 시도하지 않는 이유: 스케줄러가 붙어 있으면 request는
+		 * 스케줄러 큐에 있지 sw queue에 있지 않아, 뒤져 봐야 항상 비어 있다. */
 		goto out_put;
 	}
 
 	/* [한국어] blk_mq_get_ctx(): 현재 CPU의 sw queue 포인터 획득 (preempt-safe) */
 	ctx = blk_mq_get_ctx(q);
-	/* [한국어] blk_mq_map_queue(): bio->bi_opf 플래그 기반으로 적합한 hctx(NVMe SQ) 선택 */
+	/* [한국어] blk_mq_map_queue(): bio->bi_opf 플래그 기반으로 적합한 hctx(하드웨어 큐) 선택 */
 	hctx = blk_mq_map_queue(bio->bi_opf, ctx);
 	/* [한국어] hctx->type: HCTX_TYPE_DEFAULT / READ / POLL — 각 타입별 rq_lists 분리 */
 	type = hctx->type;
@@ -743,12 +971,20 @@ bool blk_mq_sched_bio_merge(struct request_queue *q, struct bio *bio,
 	 * count of 8, to not spend too much time checking for merges.
 	 */
 	/* [한국어] blk_bio_list_merge(): sw queue를 역방향으로 최대 8개 검사해 back/front merge;
-	 * merge 성공 시 PRP/SGL 엔트리 감소 → NVMe SQ doorbell 효율 향상 */
+	 * merge에 성공하면 발행될 request가 하나 줄어든다
+	 * (NVMe라면 커맨드 하나, Command ID 하나, 완료 하나가 절약된다) */
 	if (blk_bio_list_merge(q, &ctx->rq_lists[type], bio, nr_segs))
+		/* [한국어] 병합 성공 — 호출자 blk_mq_submit_bio는 새 request를
+		 * 만들지 않고 그대로 돌아간다. */
 		ret = true;
 
+	/* [한국어] sw queue 조작 끝 — 락 해제. */
 	spin_unlock(&ctx->lock);
 out_put:
+	/* [한국어] 공통 반환 지점. 라벨 이름이 out_put인 것은 예전에 여기서
+	 * blk_mq_put_ctx()로 preempt를 풀던 흔적이다(현재 구현에는 그 호출이 없다).
+	 * true면 bio가 기존 request에 흡수되었고, false면 호출자가 새 request를
+	 * 할당해 이 bio를 담는다. */
 	return ret;
 }
 
@@ -756,14 +992,15 @@ out_put:
  * [한국어]
  * blk_mq_sched_try_insert_merge - scheduler에 request를 삽입할 때 merge 시도
  *
- * @q:    request_queue (NVMe namespace 큐)
+ * @q:    request_queue(디스크 하나에 하나)
  * @rq:   scheduler에 삽입하려는 request
  * @free: merge로 인해 해제할 request들을 담는 리스트
  * @return: merge 성공이면 true (rq는 기존 request에 흡수됨); 실패이면 false
  *
  * blk-mq가 request를 elevator에 삽입하기 직전, 기존 request와 merge 가능한지 확인한다.
  * rq_mergeable()로 기본 조건을 검사한 후 elv_attempt_insert_merge()로 elevator의
- * merge hash를 사용해 back-merge를 시도한다. 성공하면 NVMe SQ 엔트리와 doorbell 수를 줄인다.
+ * merge hash를 사용해 back-merge를 시도한다. 성공하면 드라이버로 내려갈
+ * request가 하나 줄어든다(NVMe라면 커맨드 하나가 절약된다).
  * merge된 request는 @free 리스트를 통해 호출자가 해제한다.
  *
  * 호출 체인:
@@ -784,7 +1021,7 @@ EXPORT_SYMBOL_GPL(blk_mq_sched_try_insert_merge);
  * [한국어]
  * blk_mq_sched_tags_teardown - 모든 hctx에서 sched_tags 레퍼런스 제거
  *
- * @q:     NVMe namespace request_queue
+ * @q:     request_queue(디스크 하나에 하나)
  * @flags: blk_mq_tag_set의 flags (shared tags 여부 판단용)
  *
  * request_queue 해제 또는 elevator 종료 시 모든 hctx->sched_tags 포인터를 NULL로
@@ -797,11 +1034,15 @@ EXPORT_SYMBOL_GPL(blk_mq_sched_try_insert_merge);
  */
 static void blk_mq_sched_tags_teardown(struct request_queue *q, unsigned int flags)
 {
-	/* [한국어] 각 NVMe SQ/CQ 쌍에 대응하는 hctx 순회 */
+	/* [한국어] 순회 커서로 쓸 하드웨어 큐 포인터. */
 	struct blk_mq_hw_ctx *hctx;
+	/* [한국어] queue_for_each_hw_ctx가 쓰는 인덱스(xarray 순회용). */
 	unsigned long i;
 
-	/* [한국어] 모든 hctx의 sched_tags 포인터 NULL: 이후 dispatch 시 shadow tag에 접근하지 않음 */
+	/* [한국어] 모든 hctx에서 스케줄러 태그 포인터를 떼어 낸다. 메모리를 여기서
+	 * 해제하지 않는 것이 중요하다 — 실제 해제는 blk_mq_free_sched_tags()가
+	 * 별도로 하며, 그 시점은 큐를 녹인 뒤다. 여기서는 "더 이상 이 태그를
+	 * 쓰지 않는다"는 연결 끊기만 한다. */
 	queue_for_each_hw_ctx(q, hctx, i)
 		hctx->sched_tags = NULL;
 
@@ -814,27 +1055,35 @@ static void blk_mq_sched_tags_teardown(struct request_queue *q, unsigned int fla
  * [한국어]
  * blk_mq_sched_reg_debugfs - scheduler debugfs 항목 등록
  *
- * @q: NVMe namespace request_queue
+ * @q: request_queue(디스크 하나에 하나)
  *
  * /sys/kernel/debug/block/<disk>/sched/ 하위에 scheduler 진단 정보를 등록한다.
- * queue 전체용 debugfs와 hctx별 debugfs를 함께 등록해 NVMe SQ별 latency·
+ * queue 전체용 debugfs와 hctx별 debugfs를 함께 등록해 하드웨어 큐별 latency·
  * dispatch 통계를 확인할 수 있게 한다. blk_debugfs_lock()으로 직렬화.
  */
 void blk_mq_sched_reg_debugfs(struct request_queue *q)
 {
-	/* [한국어] 각 NVMe SQ(hctx) debugfs 등록에 사용할 포인터 */
+	/* [한국어] 각 하드웨어 큐(hctx) debugfs 등록에 사용할 순회 커서 */
 	struct blk_mq_hw_ctx *hctx;
-	/* [한국어] memflags: irq 상태 저장용 (blk_debugfs_lock 반환값) */
+	/* [한국어] memflags: blk_debugfs_lock()이 NOIO 컨텍스트로 전환하며 저장해 주는
+	 * 이전 memalloc 상태. unlock 시 그대로 돌려줘야 원복된다.
+	 * irq 플래그가 아니다 — debugfs 생성이 fs reclaim을 유발하고 그 reclaim이
+	 * 다시 이 (얼어 있을 수도 있는) 큐로 I/O를 내려보내는 재귀를 막기 위한 것이다. */
 	unsigned int memflags;
+	/* [한국어] queue_for_each_hw_ctx가 쓰는 인덱스. */
 	unsigned long i;
 
-	/* [한국어] debugfs 등록 직렬화: 다른 CPU의 동시 등록/해제 방지 */
+	/* [한국어] debugfs_mutex 획득 + NOIO 전환. 등록/해제가 동시에 일어나는 것을
+	 * 막고, 위에서 설명한 reclaim 재귀 데드락도 함께 막는다. */
 	memflags = blk_debugfs_lock(q);
 	/* [한국어] queue 수준 scheduler debugfs 등록: dispatch 통계, elevator 파라미터 등 */
 	blk_mq_debugfs_register_sched(q);
-	/* [한국어] hctx(NVMe SQ)별 scheduler debugfs 등록: per-SQ dispatch 카운터 등 */
+	/* [한국어] 하드웨어 큐마다 별도의 debugfs 항목을 만든다. 큐별로 나뉘어야
+	 * 어느 하드웨어 큐에서 요청이 밀리는지 구분해 볼 수 있다.
+	 * (스케줄러가 큐 전역 락으로 직렬화된다는 사실도 여기서 관찰 가능하다.) */
 	queue_for_each_hw_ctx(q, hctx, i)
 		blk_mq_debugfs_register_sched_hctx(q, hctx);
+	/* [한국어] 락 해제 + memflags로 memalloc 컨텍스트 원복. */
 	blk_debugfs_unlock(q, memflags);
 }
 
@@ -842,22 +1091,27 @@ void blk_mq_sched_reg_debugfs(struct request_queue *q)
  * [한국어]
  * blk_mq_sched_unreg_debugfs - scheduler debugfs 항목 제거
  *
- * @q: NVMe namespace request_queue
+ * @q: request_queue(디스크 하나에 하나)
  *
  * elevator 종료 또는 queue 해제 시 hctx별 debugfs와 queue debugfs를 역순으로 제거한다.
  */
 void blk_mq_sched_unreg_debugfs(struct request_queue *q)
 {
+	/* [한국어] 하드웨어 큐 순회 커서. */
 	struct blk_mq_hw_ctx *hctx;
+	/* [한국어] queue_for_each_hw_ctx가 쓰는 인덱스. */
 	unsigned long i;
 
-	/* [한국어] nomemsave 변형: irq disable 없이 스핀락만 획득 (해제 경로에서 GFP 불가) */
+	/* [한국어] _nomemsave 변형은 debugfs_mutex만 잡고 NOIO 전환은 하지 않는다.
+	 * 제거 경로는 새 파일을 만들지 않아 fs reclaim을 유발할 여지가 없으므로,
+	 * memalloc 상태를 건드릴 필요가 없기 때문이다(등록 경로와 대칭이 아니다). */
 	blk_debugfs_lock_nomemsave(q);
-	/* [한국어] hctx(NVMe SQ)별 scheduler debugfs 제거 */
+	/* [한국어] hctx(하드웨어 큐)별 scheduler debugfs 제거 */
 	queue_for_each_hw_ctx(q, hctx, i)
 		blk_mq_debugfs_unregister_sched_hctx(hctx);
 	/* [한국어] queue 수준 scheduler debugfs 제거 */
 	blk_mq_debugfs_unregister_sched(q);
+	/* [한국어] 락만 해제한다(복원할 memflags가 없다). */
 	blk_debugfs_unlock_nomemrestore(q);
 }
 
@@ -868,7 +1122,7 @@ void blk_mq_sched_unreg_debugfs(struct request_queue *q)
  * @et:  해제할 elevator_tags 구조체 (nr_hw_queues, tags[] 포함)
  * @set: NVMe 장치 blk_mq_tag_set (shared tags 여부 판단, request 해제에 사용)
  *
- * blk_mq_alloc_sched_tags()로 할당된 scheduler shadow CID pool을 해제한다.
+ * blk_mq_alloc_sched_tags()로 할당된 스케줄러 태그 풀을 해제한다.
  * shared tags 모드면 index 0의 tag map 하나만, per-SQ 모드면 nr_hw_queues개의
  * tag map을 순서대로 해제한다. 마지막으로 elevator_tags 구조체 자체를 kfree한다.
  *
@@ -879,15 +1133,16 @@ void blk_mq_sched_unreg_debugfs(struct request_queue *q)
 void blk_mq_free_sched_tags(struct elevator_tags *et,
 		struct blk_mq_tag_set *set)
 {
+	/* [한국어] 비공유 모드에서 tags[] 배열을 순회할 인덱스. */
 	unsigned long i;
 
 	/* Shared tags are stored at index 0 in @tags. */
-	/* [한국어] shared tags: 모든 NVMe SQ가 하나의 tag pool 공유 → et->tags[0] 하나만 해제 */
+	/* [한국어] shared tags: 모든 하드웨어 큐가 태그 풀 하나를 공유 → et->tags[0] 하나만 해제 */
 	if (blk_mq_is_shared_tags(set->flags))
 		/* [한국어] BLK_MQ_NO_HCTX_IDX: 특정 hctx에 귀속되지 않는 공유 pool을 나타내는 sentinel */
 		blk_mq_free_map_and_rqs(set, et->tags[0], BLK_MQ_NO_HCTX_IDX);
 	else {
-		/* [한국어] per-SQ: 각 hctx(NVMe SQ)에 독립 tag map → nr_hw_queues개 순서대로 해제 */
+		/* [한국어] 비공유 모드: 하드웨어 큐마다 독립된 태그 맵이 있다 → nr_hw_queues개 순서대로 해제 */
 		for (i = 0; i < et->nr_hw_queues; i++)
 			blk_mq_free_map_and_rqs(set, et->tags[i], i);
 	}
@@ -902,7 +1157,7 @@ void blk_mq_free_sched_tags(struct elevator_tags *et,
  *
  * @res:  해제할 elevator_resources (et, data 포인터 포함)
  * @type: elevator_type (blk_mq_free_sched_data ops 호출용)
- * @set:  NVMe 장치 blk_mq_tag_set (tag pool 해제에 필요)
+ * @set:  이 큐가 속한 blk_mq_tag_set (태그 맵 해제에 필요)
  *
  * elevator_resources는 elevator 전환 시 새 elevator를 위해 미리 할당한 자원 묶음이다.
  * et(elevator_tags)와 data(스케줄러 private data)를 각각 해제하고 포인터를 NULL로 초기화한다.
@@ -911,15 +1166,20 @@ void blk_mq_free_sched_res(struct elevator_resources *res,
 		struct elevator_type *type,
 		struct blk_mq_tag_set *set)
 {
-	/* [한국어] et가 있으면 scheduler shadow CID pool 해제 */
+	/* [한국어] et가 있으면 스케줄러 태그 풀 해제 */
 	if (res->et) {
 		blk_mq_free_sched_tags(res->et, set);
 		/* [한국어] 해제 후 NULL로 초기화 — double free 방지 */
 		res->et = NULL;
 	}
-	/* [한국어] data가 있으면 scheduler private data(mq-deadline rb-tree, BFQ bfqd 등) 해제 */
+	/* [한국어] data가 있으면 scheduler private data(mq-deadline의 deadline_data,
+	 * BFQ의 bfq_data, kyber의 kyber_queue_data 등) 해제 */
 	if (res->data) {
+		/* [한국어] 스케줄러 타입별 해제 루틴에 위임한다. 어떤 구조체인지는
+		 * 스케줄러만 알기 때문에 type을 함께 넘겨야 한다. */
 		blk_mq_free_sched_data(type, res->data);
+		/* [한국어] 마찬가지로 NULL로 지워 double free를 막는다. 이 함수는
+		 * 전환 실패 경로와 정상 종료 경로 양쪽에서 불릴 수 있어 멱등성이 중요하다. */
 		res->data = NULL;
 	}
 }
@@ -929,16 +1189,17 @@ void blk_mq_free_sched_res(struct elevator_resources *res,
  * blk_mq_free_sched_res_batch - tagset에 속한 모든 queue의 scheduler 자원 일괄 해제
  *
  * @elv_tbl: queue id → elv_change_ctx 매핑 xarray (elevator 전환 컨텍스트 테이블)
- * @set:     NVMe 장치 blk_mq_tag_set
+ * @set:     대상 blk_mq_tag_set (NVMe라면 컨트롤러 하나가 소유하고
+ *           그 컨트롤러의 모든 네임스페이스 큐가 공유한다)
  *
- * update_nr_hwq_lock write lock을 보유한 상태에서 호출된다. NVMe SQ 수 변경
+ * update_nr_hwq_lock write lock을 보유한 상태에서 호출된다. 하드웨어 큐 수 변경
  * (update_nr_hw_queues) 롤백 경로나 elevator 일괄 교체 종료 시 사용한다.
  * scheduler가 붙은 queue만 처리하며 elv_tbl에서 ctx를 찾아 free한다.
  */
 void blk_mq_free_sched_res_batch(struct xarray *elv_tbl,
 		struct blk_mq_tag_set *set)
 {
-	/* [한국어] tagset에 속한 NVMe namespace queue 순회용 포인터 */
+	/* [한국어] tagset에 속한 request_queue 순회용 포인터 */
 	struct request_queue *q;
 	/* [한국어] elv_tbl에서 로드할 elevator 전환 컨텍스트 */
 	struct elv_change_ctx *ctx;
@@ -998,7 +1259,8 @@ void blk_mq_free_sched_ctx_batch(struct xarray *elv_tbl)
  * blk_mq_alloc_sched_ctx_batch - tagset의 모든 queue에 대해 elv_change_ctx를 일괄 할당
  *
  * @elv_tbl: queue id → elv_change_ctx 매핑 xarray (비어있는 상태로 전달)
- * @set:     NVMe 장치 blk_mq_tag_set
+ * @set:     대상 blk_mq_tag_set (NVMe라면 컨트롤러 하나가 소유하고
+ *           그 컨트롤러의 모든 네임스페이스 큐가 공유한다)
  * @return:  0 = 성공; -ENOMEM = 메모리 부족 (일부 할당 성공 상태로 반환 — 롤백은 호출자)
  *
  * elevator 전환(elevator_change) 시 미리 모든 queue의 컨텍스트를 할당한다. 이후
@@ -1008,7 +1270,7 @@ void blk_mq_free_sched_ctx_batch(struct xarray *elv_tbl)
 int blk_mq_alloc_sched_ctx_batch(struct xarray *elv_tbl,
 		struct blk_mq_tag_set *set)
 {
-	/* [한국어] tagset 소속 NVMe namespace queue 순회용 */
+	/* [한국어] tagset 소속 request_queue 순회용 */
 	struct request_queue *q;
 	/* [한국어] 새로 할당할 elevator 전환 컨텍스트 */
 	struct elv_change_ctx *ctx;
@@ -1016,7 +1278,7 @@ int blk_mq_alloc_sched_ctx_batch(struct xarray *elv_tbl,
 	/* [한국어] update_nr_hwq_lock write lock 보유 확인 — 미보유 시 lockdep 경고 */
 	lockdep_assert_held_write(&set->update_nr_hwq_lock);
 
-	/* [한국어] tagset에 속한 모든 NVMe namespace queue를 순회해 ctx 할당 */
+	/* [한국어] tagset에 속한 모든 request_queue를 순회해 ctx 할당 */
 	list_for_each_entry(q, &set->tag_list, tag_set_list) {
 		/* [한국어] kzalloc_obj: elv_change_ctx 구조체를 zero-init으로 할당 */
 		ctx = kzalloc_obj(struct elv_change_ctx);
@@ -1036,21 +1298,27 @@ int blk_mq_alloc_sched_ctx_batch(struct xarray *elv_tbl,
 
 /*
  * [한국어]
- * blk_mq_alloc_sched_tags - scheduler shadow CID pool(elevator_tags) 할당
+ * blk_mq_alloc_sched_tags - 스케줄러 태그 풀(elevator_tags) 할당
  *
  * @set:          NVMe 장치 blk_mq_tag_set
- * @nr_hw_queues: NVMe SQ(hctx) 수
- * @nr_requests:  scheduler가 관리할 최대 request 수 (NVMe SQ depth 근접)
+ * @nr_hw_queues: 하드웨어 큐(hctx) 수
+ * @nr_requests:  스케줄러가 대기시켜 둘 수 있는 최대 request 수.
+ *               호출자 blk_mq_alloc_sched_res()가 blk_mq_default_nr_requests(set)
+ *               = 2 * min(set->queue_depth, BLKDEV_DEFAULT_RQ=128)로 계산해 넘긴다.
+ *               NVMe처럼 queue_depth가 큰 장치에서는 256으로 고정되어,
+ *               오히려 드라이버 태그 수보다 적다.
  * @return:       할당된 elevator_tags 포인터; 실패 시 NULL
  *
- * scheduler가 driver tag(NVMe CID)를 shadow로 관리할 tag map과 request pool을 할당한다.
+ * scheduler가 대기 request를 담아 둘 태그 맵과 request 풀을 할당한다.
+ * 이 태그는 드라이버 태그와 완전히 별개이며, NVMe Command ID가 아니다
+ * (CID로 쓰이는 것은 dispatch 시점에 따로 잡는 드라이버 태그다).
  * shared tags 모드면 모든 hctx가 tags[0] 하나를 공유하고(MAX_SCHED_RQ 한도),
  * per-SQ 모드면 hctx별로 독립된 tag map을 nr_requests 크기로 할당한다.
  * 할당 실패 시 out_unwind 경로에서 이미 할당된 tag map을 역순으로 해제한다.
  *
  * 구조체 field 역할:
  *   et->nr_requests:  이 elevator_tags가 관리하는 최대 request 수 (SQ depth와 맞춤)
- *   et->nr_hw_queues: hctx(NVMe SQ) 수; per-SQ 모드에서 해제 루프 상한
+ *   et->nr_hw_queues: hctx(하드웨어 큐) 수; per-SQ 모드에서 해제 루프 상한
  *   et->tags[i]:      i번째 hctx용 blk_mq_tags (tag bitmap + request pool)
  *
  * 호출 체인:
@@ -1069,11 +1337,11 @@ struct elevator_tags *blk_mq_alloc_sched_tags(struct blk_mq_tag_set *set,
 	 * __GFP_ZERO: 제로 초기화; __GFP_NOWARN|__GFP_NORETRY: 실패해도 경고 없이 NULL 반환 */
 	gfp_t gfp = GFP_NOIO | __GFP_ZERO | __GFP_NOWARN | __GFP_NORETRY;
 
-	/* [한국어] shared tags 모드: 모든 NVMe SQ가 하나의 tag pool 공유 → tag map 1개만 필요 */
+	/* [한국어] shared tags 모드: 모든 하드웨어 큐가 태그 풀 하나를 공유 → tag map 1개만 필요 */
 	if (blk_mq_is_shared_tags(set->flags))
 		nr_tags = 1;
 	else
-		/* [한국어] per-SQ: 각 hctx(NVMe SQ)마다 독립 tag map → nr_hw_queues개 필요 */
+		/* [한국어] per-SQ: 각 hctx(하드웨어 큐)마다 독립 tag map → nr_hw_queues개 필요 */
 		nr_tags = nr_hw_queues;
 
 	/* [한국어] kmalloc_flex: elevator_tags + tags[nr_tags] flexible array 한 번에 할당 */
@@ -1120,10 +1388,10 @@ out:
  * [한국어]
  * blk_mq_alloc_sched_res - 하나의 queue에 대한 elevator_resources 할당
  *
- * @q:            NVMe namespace request_queue
+ * @q:            request_queue(디스크 하나에 하나)
  * @type:         elevator_type (alloc_sched_data ops 호출 및 data 초기화)
  * @res:          결과를 저장할 elevator_resources (out parameter)
- * @nr_hw_queues: NVMe SQ 수 (tag pool 크기 계산에 사용)
+ * @nr_hw_queues: 하드웨어 큐 개수 (스케줄러 태그 배열 길이 결정)
  * @return:       0 = 성공; -ENOMEM = 메모리 부족
  *
  * elevator 전환 시 새 elevator를 위해 필요한 자원(tag pool + private data)을 미리 할당한다.
@@ -1142,7 +1410,7 @@ int blk_mq_alloc_sched_res(struct request_queue *q,
 	res->et = blk_mq_alloc_sched_tags(set, nr_hw_queues,
 			blk_mq_default_nr_requests(set));
 	if (!res->et)
-		/* [한국어] tag pool 할당 실패: scheduler shadow CID pool 없음 → 전환 불가 */
+		/* [한국어] tag pool 할당 실패: 스케줄러 태그 풀 없음 → 전환 불가 */
 		return -ENOMEM;
 
 	/* [한국어] blk_mq_alloc_sched_data(): elevator_type->ops.alloc_data()로 private 구조체 할당
@@ -1163,7 +1431,7 @@ int blk_mq_alloc_sched_res(struct request_queue *q,
  *
  * @elv_tbl:      queue id → elv_change_ctx xarray (blk_mq_alloc_sched_ctx_batch로 미리 준비)
  * @set:          NVMe 장치 blk_mq_tag_set
- * @nr_hw_queues: 새 NVMe SQ 수 (tag pool 크기 계산)
+ * @nr_hw_queues: 새 하드웨어 큐 개수 (스케줄러 태그 배열 길이 결정)
  * @return:       0 = 성공; 음수 = 오류 (할당된 자원은 out_unwind에서 자동 해제)
  *
  * update_nr_hwq_lock write lock 하에 호출되며, elevator가 붙은 queue에 대해
@@ -1174,7 +1442,7 @@ int blk_mq_alloc_sched_res_batch(struct xarray *elv_tbl,
 		struct blk_mq_tag_set *set, unsigned int nr_hw_queues)
 {
 	struct elv_change_ctx *ctx;
-	/* [한국어] 순회 및 롤백에 사용할 NVMe namespace queue 포인터 */
+	/* [한국어] 순회 및 롤백에 사용할 request_queue 포인터 */
 	struct request_queue *q;
 	/* [한국어] 초기값 -ENOMEM: queue가 없거나 첫 번째 queue에서 실패 시 이 값 반환 */
 	int ret = -ENOMEM;
@@ -1229,7 +1497,7 @@ out_unwind:
  * [한국어]
  * blk_mq_init_sched - request_queue에 elevator(IO 스케줄러)를 초기화하고 연결
  *
- * @q:   NVMe namespace request_queue
+ * @q:   request_queue(디스크 하나에 하나)
  * @e:   초기화할 elevator_type (호출자가 참조를 이미 보유)
  * @res: blk_mq_alloc_sched_res()로 미리 할당된 elevator_resources (et + data)
  * @return: 0 = 성공; 음수 = 실패 (자원 롤백 포함)
@@ -1251,9 +1519,9 @@ int blk_mq_init_sched(struct request_queue *q, struct elevator_type *e,
 {
 	/* [한국어] flags: shared tags 여부 등 tagset 설정 */
 	unsigned int flags = q->tag_set->flags;
-	/* [한국어] et: 미리 할당된 scheduler shadow CID pool */
+	/* [한국어] et: 미리 할당된 스케줄러 태그 풀 */
 	struct elevator_tags *et = res->et;
-	/* [한국어] hctx: 각 NVMe SQ/CQ hardware context */
+	/* [한국어] hctx: 각 하드웨어 큐 컨텍스트 */
 	struct blk_mq_hw_ctx *hctx;
 	struct elevator_queue *eq;
 	unsigned long i;
@@ -1265,19 +1533,19 @@ int blk_mq_init_sched(struct request_queue *q, struct elevator_type *e,
 		return -ENOMEM;
 
 	/* [한국어] q->nr_requests를 scheduler tag pool 크기로 설정:
-	 * elevator가 이 많큼의 request를 동시에 관리할 수 있어야 NVMe SQ를 최대 활용 가능 */
+	 * elevator가 이 많큼의 request를 동시에 관리할 수 있어야 하드웨어 큐를 놀리지 않고 채울 수 있다 */
 	q->nr_requests = et->nr_requests;
 
 	if (blk_mq_is_shared_tags(flags)) {
 		/* Shared tags are stored at index 0 in @et->tags. */
-		/* [한국어] 모든 hctx(NVMe SQ)가 공유할 scheduler tag map 포인터 등록 */
+		/* [한국어] 모든 hctx(하드웨어 큐)가 공유할 scheduler tag map 포인터 등록 */
 		q->sched_shared_tags = et->tags[0];
 		/* [한국어] 공유 tag map의 크기(nr_requests)를 실제 tag bitmap에 반영 */
 		blk_mq_tag_update_sched_shared_tags(q, et->nr_requests);
 	}
 
-	/* [한국어] 모든 hctx(NVMe SQ)에 scheduler tag map 연결:
-	 * hctx->sched_tags는 dispatch 시 shadow CID를 확보하는 데 사용 */
+	/* [한국어] 모든 hctx(하드웨어 큐)에 scheduler tag map 연결:
+	 * hctx->sched_tags는 dispatch 시 스케줄러 태그를 확보하는 데 사용 */
 	queue_for_each_hw_ctx(q, hctx, i) {
 		if (blk_mq_is_shared_tags(flags))
 			/* [한국어] shared: 모든 SQ가 같은 tag pool → q->sched_shared_tags 연결 */
@@ -1293,7 +1561,7 @@ int blk_mq_init_sched(struct request_queue *q, struct elevator_type *e,
 	if (ret)
 		goto out;
 
-	/* [한국어] ops.init_hctx(): hctx별 elevator context 초기화; NVMe SQ당 per-ctx 자료구조 설정 */
+	/* [한국어] ops.init_hctx(): hctx별 elevator context 초기화; 하드웨어 큐마다 하나씩 필요한 스케줄러 사설 자료구조 설정 */
 	queue_for_each_hw_ctx(q, hctx, i) {
 		if (e->ops.init_hctx) {
 			ret = e->ops.init_hctx(hctx, i);
@@ -1327,7 +1595,7 @@ out:
  * [한국어]
  * blk_mq_sched_free_rqs - scheduler shadow tag pool에 남은 request 해제
  *
- * @q: NVMe namespace request_queue
+ * @q: request_queue(디스크 하나에 하나)
  *
  * elevator 종료(blk_mq_exit_sched) 또는 queue cleanup 시 scheduler shadow tag pool에
  * 아직 남아있는 request들을 해제한다. shared tags면 q->sched_shared_tags의 request들을,
@@ -1340,7 +1608,7 @@ out:
  */
 void blk_mq_sched_free_rqs(struct request_queue *q)
 {
-	/* [한국어] 각 NVMe SQ(hctx) 순회용 */
+	/* [한국어] 각 하드웨어 큐(hctx) 순회용 */
 	struct blk_mq_hw_ctx *hctx;
 	unsigned long i;
 
@@ -1363,7 +1631,7 @@ void blk_mq_sched_free_rqs(struct request_queue *q)
  * [한국어]
  * blk_mq_exit_sched - request_queue에서 elevator(IO 스케줄러)를 제거하고 자원 정리
  *
- * @q: NVMe namespace request_queue
+ * @q: request_queue(디스크 하나에 하나)
  * @e: 제거할 elevator_queue
  *
  * elevator 전환이나 queue 종료 시 호출되며 다음 순서로 정리한다:
@@ -1378,13 +1646,13 @@ void blk_mq_sched_free_rqs(struct request_queue *q)
  */
 void blk_mq_exit_sched(struct request_queue *q, struct elevator_queue *e)
 {
-	/* [한국어] NVMe SQ/CQ hardware context 순회용 */
+	/* [한국어] 하드웨어 큐 컨텍스트 순회용 */
 	struct blk_mq_hw_ctx *hctx;
 	unsigned long i;
 	/* [한국어] flags: 마지막 hctx의 flags — shared tags 판단에 사용 */
 	unsigned int flags = 0;
 
-	/* [한국어] 모든 hctx(NVMe SQ)에 대해 per-SQ scheduler context 해제 */
+	/* [한국어] 모든 hctx(하드웨어 큐)에 대해 per-SQ scheduler context 해제 */
 	queue_for_each_hw_ctx(q, hctx, i) {
 		/* [한국어] exit_hctx: per-SQ 자원(mq-deadline per-prio 큐 등) 해제;
 		 * sched_data != NULL 확인으로 중복 호출 방지 */
@@ -1418,14 +1686,14 @@ void blk_mq_exit_sched(struct request_queue *q, struct elevator_queue *e)
  *   blk_mq_run_hw_queue → blk_mq_sched_dispatch_requests
  *                     ↓
  *   __blk_mq_sched_dispatch_requests
- *     ├─ [residual 있음] → dispatch_rq_list → nvme_queue_rq
+ *     ├─ [residual 있음] → dispatch_rq_list → mq_ops->queue_rq()
  *     ├─ [elevator 있음] → blk_mq_do_dispatch_sched
- *     │      └─ __blk_mq_do_dispatch_sched (budget → CID → SQ)
+ *     │      └─ __blk_mq_do_dispatch_sched (budget → 드라이버 태그 → mq_ops->queue_rq)
  *     └─ [elevator 없음] → blk_mq_do_dispatch_ctx
- *            └─ 라운드 로빈 ctx → dispatch_rq_list → nvme_queue_rq
+ *            └─ 라운드 로빈 ctx → dispatch_rq_list → mq_ops->queue_rq()
  *
  * 핵심 자원 관계:
- *   elevator_tags (et)       ← scheduler shadow CID pool
+ *   elevator_tags (et)       ← 스케줄러 태그 풀
  *   hctx->sched_tags         ← et->tags[i] 또는 et->tags[0](shared)
  *   q->sched_shared_tags     ← et->tags[0] (shared 모드만)
  *   hctx->dispatch           ← SQ 거부된 residual request 목록

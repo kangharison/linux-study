@@ -20,11 +20,39 @@
  * 아래로는 request_queue/blk-mq와 드라이버(NVMe, SCSI 등)를 연결한다.
  * 실행 컨텍스트: 커널 프로세스 컨텍스트 (device_add, sysfs probe, 드라이버 초기화).
  * 주요 호출 체인:
- *   [등록] NVMe 드라이버 → device_add_disk() → add_disk_fwnode() → __add_disk()
+ *   [등록] 드라이버 → device_add_disk() → add_disk_fwnode() → __add_disk()
  *          → blk_register_queue() + add_disk_final() → bdev_add() + disk_scan_partitions()
- *   [삭제] NVMe 드라이버 → del_gendisk() → __del_gendisk() → blk_unregister_queue()
- *   [sysfs] /sys/block/nvmeXnY/stat → part_stat_show() → part_stat_read_all()
- *   [할당] __blk_alloc_disk() → blk_alloc_queue() + __alloc_disk_node()
+ *   [삭제] 드라이버 → del_gendisk() → __del_gendisk() → blk_unregister_queue()
+ *   [sysfs] /sys/block/<name>/stat → part_stat_show() → part_stat_read_all()
+ *   [할당] __blk_alloc_disk() 또는 __blk_mq_alloc_disk() → blk_alloc_queue()/
+ *          blk_mq_alloc_queue() + __alloc_disk_node()
+ *
+ * === /dev/nvme0n1 은 어떻게 생기는가 (드라이버 코드로 확인한 실제 경로) ===
+ * 이 파일을 NVMe 관점에서 읽을 때 가장 실용적인 질문이 이것이다. 답은
+ * drivers/nvme/host/core.c 의 nvme_alloc_ns() 에 있다:
+ *   1. blk_mq_alloc_disk(ctrl->tagset, &lim, ns)   (core.c:4604)
+ *      → __blk_mq_alloc_disk() → blk_mq_alloc_queue() + __alloc_disk_node()
+ *      이 시점에 gendisk 와 그 안에 박혀 있는 part0(struct block_device)이
+ *      메모리에 생긴다. 아직 시스템에는 보이지 않는다.
+ *   2. sprintf(disk->disk_name, "nvme%dn%d", ...)  (core.c:4626-4629)
+ *      이름이 여기서 정해진다. multipath 로 숨겨지는 개별 경로 디스크는
+ *      "nvme%dc%dn%d" 라는 이름과 함께 GENHD_FL_HIDDEN 을 받는다(core.c:4632).
+ *   3. device_add_disk(ctrl->device, ns->disk, ...)  (core.c:4658)
+ *      → 이 파일의 add_disk_fwnode() → __add_disk(). 여기서 비로소
+ *      major/minor 가 배정되고(아래 참고), /sys/block/nvme0n1 디렉터리가
+ *      만들어지며, add_disk_final() 이 bdev_add() 로 part0 을 bdev inode
+ *      해시에 등록한다. 이 등록이 끝나야 udev 가 /dev/nvme0n1 노드를 만들
+ *      수 있고, open(2) 이 성공한다.
+ *   4. disk_scan_partitions() 가 파티션 테이블을 읽어 nvme0n1p1 같은
+ *      파티션 block_device 를 bdev_add_partition() 으로 추가한다.
+ * major/minor 에 대해: NVMe 드라이버는 register_blkdev() 를 호출하지 않는다
+ * (drivers/nvme/ 전체에 그 호출이 없다). 따라서 disk->major 가 0 인 채로
+ * device_add_disk() 에 들어오고, __add_disk() 가 blk_alloc_ext_minor() 로
+ * BLOCK_EXT_MAJOR(=259) 아래의 minor 를 하나 받아 온다. nvme 가
+ * register_blkdev 로 얻는 것은 블록 major 가 아니라, alloc_chrdev_region()
+ * 으로 얻는 문자 장치 영역(/dev/nvmeN, /dev/ngNnM)이다 — 이 둘은 별개다.
+ * 순서 제약: add_disk() 가 끝나기 전에는 이 디스크로 I/O 를 보낼 수 없다.
+ * bdev 가 해시에 없어 open 자체가 불가능하고, GD_ADDED 비트도 서 있지 않다.
  *
  * === 타 모듈과의 연결 ===
  * 의존 모듈:
@@ -129,26 +157,37 @@ static DEFINE_IDA(ext_devt_ida);
  * [한국어]
  * set_capacity - gendisk의 논리 용량(섹터 수)을 갱신
  *
- * @disk:    대상 gendisk 포인터. NVMe 네임스페이스 1개에 대응하는 블록 장치 객체.
- * @sectors: 설정할 새 섹터 수. 섹터 크기는 항상 512B 단위(struct block_device 기준).
+ * @disk:    대상 gendisk 포인터.
+ * @sectors: 설정할 새 섹터 수. 여기서 섹터는 언제나 512B 고정 단위이며,
+ *           장치의 논리 블록 크기와는 무관하다. 4Kn 네임스페이스라도 이 값은
+ *           512B 단위로 표현된다.
  * @return:  void. BLK_DEV_MAX_SECTORS 초과 시 내부에서 클램프 후 설정.
  *
- * NVMe 네임스페이스의 사용 가능한 논리 블록 수(NSZE/NCAP 필드)가 확정된 후
- * nvme_update_disk_info()가 이 함수를 호출해 상위 블록 레이어에 용량을 전달한다.
- * 파일시스템이 bio를 생성할 때 최종 LBA 범위 검증의 기준이 되며, 0으로 설정하면
- * 모든 쓰기 I/O가 차단된다(__blk_mark_disk_dead에서 활용).
+ * 드라이버가 장치 용량을 확정한 뒤 블록 계층에 알리는 통로다. 이 값이
+ * part0 의 bd_nr_sectors 와 bdev inode 의 i_size 를 결정하고(bdev.c 의
+ * bdev_set_nr_sectors), 그 결과 /sys/block/<name>/size 와 llseek(SEEK_END),
+ * 그리고 blkdev_write_iter 의 범위 검사 기준이 된다. 0 으로 설정하면 사실상
+ * 모든 I/O 가 차단되며, __blk_mark_disk_dead() 가 그 성질을 이용한다.
+ *
+ * NVMe 관점: 이 값의 출처는 Identify Namespace 의 NSZE(총 논리 블록 수)이며,
+ * nvme_update_ns_info_block() 이 그것을 512B 섹터 수로 환산해
+ * set_capacity_and_notify() 로 전달한다(drivers/nvme/host/core.c:2852).
+ * 네임스페이스 제거 경로에서는 set_capacity(ns->disk, 0) 을 직접 부른다
+ * (core.c:4715).
+ *
  * 실행 컨텍스트: 프로세스 컨텍스트(드라이버 probe/재검증 경로).
  * 에러 경로: sectors가 BLK_DEV_MAX_SECTORS를 초과하면 pr_warn_once 후 클램프.
  *
  * 호출 체인:
- *   nvme_update_disk_info() → [set_capacity()] → bdev_set_nr_sectors()
+ *   드라이버(용량 확정) → [set_capacity()] → bdev_set_nr_sectors()
+ *   set_capacity_and_notify() → [set_capacity()] → (변경 시) uevent
  *   __blk_mark_disk_dead()  → [set_capacity(disk, 0)] (용량 0으로 I/O 차단)
  */
 void set_capacity(struct gendisk *disk, sector_t sectors)
 {
 	if (sectors > BLK_DEV_MAX_SECTORS) { /* [한국어] 섹터 수가 커널 최대치(BLK_DEV_MAX_SECTORS)를 초과하면 클램프 */
-		pr_warn_once("%s: truncate capacity from %lld to %lld\n",
-				disk->disk_name, sectors,
+		pr_warn_once("%s: truncate capacity from %lld to %lld\n", /* [한국어] once 계열이라 부팅 중 한 번만 찍힌다 - 같은 경고가 디스크마다 반복되어 로그를 덮는 것을 막는다 */
+				disk->disk_name, sectors, /* [한국어] 디스크 이름과 드라이버가 요청한 원래 섹터 수 */
 				BLK_DEV_MAX_SECTORS); /* [한국어] 클램프 사실을 커널 로그에 1회만 경고 출력 */
 		sectors = BLK_DEV_MAX_SECTORS; /* [한국어] 최대 허용 섹터 수로 강제 제한 */
 	}
@@ -165,15 +204,18 @@ EXPORT_SYMBOL(set_capacity);
  * @size: 설정할 새 섹터 수.
  * @return: uevent를 발생시키면 true, 그렇지 않으면 false.
  *
- * NVMe 네임스페이스가 온라인 중 동적으로 크기가 변경(namespace resize)되었을 때
- * 호출된다. set_capacity()로 새 용량을 설정한 후, 장치가 user-visible하고 살아있으며
+ * 장치 용량이 온라인 중 바뀌었을 때(NVMe 라면 네임스페이스 resize, 즉 NSZE 가
+ * 달라졌을 때) 드라이버가 호출한다. set_capacity()로 새 용량을 설정한 후,
+ * 장치가 user-visible하고 살아있으며
  * 기존/신규 용량 모두 0이 아닌 경우에만 "RESIZE=1" uevent를 발생시킨다.
  * 이 uevent를 udev가 수신하면 파티션 테이블을 재스캔한다.
  * 실행 컨텍스트: 프로세스 컨텍스트(드라이버 재검증 경로).
  * 에러 경로: 조건 불충족 시 false 반환, uevent 없음.
  *
  * 호출 체인:
- *   nvme_update_ns_info() → [set_capacity_and_notify()] → kobject_uevent_env()
+ *   드라이버 재검증 경로 → [set_capacity_and_notify()] → kobject_uevent_env()
+ * NVMe 에서는 nvme_update_ns_info_block()(drivers/nvme/host/core.c:2852)과
+ * multipath head 갱신 경로(core.c:2945)가 이 함수를 부른다.
  */
 /*
  * Set disk capacity and notify if the size is not currently zero and will not
@@ -196,8 +238,8 @@ bool set_capacity_and_notify(struct gendisk *disk, sector_t size)
 	    (disk->flags & GENHD_FL_HIDDEN)) /* [한국어] hidden 디스크(dm 내부 등)는 uevent 생략 */
 		return false;
 
-	pr_info_ratelimited("%s: detected capacity change from %lld to %lld\n",
-		disk->disk_name, capacity, size); /* [한국어] 용량 변경 사실을 rate-limited로 커널 로그에 출력 */
+	pr_info_ratelimited("%s: detected capacity change from %lld to %lld\n", /* [한국어] 용량 변경을 로그에 남긴다. ratelimited 인 이유는 컨트롤러가 resize 를 반복 보고하는 상황에서 로그가 폭주하지 않게 하기 위함이다 */
+		disk->disk_name, capacity, size); /* [한국어] 이전 용량(capacity)과 새 용량(size)을 함께 찍어 변화 폭을 알 수 있게 한다 */
 
 	/*
 	 * Historically we did not send a uevent for changes to/from an empty
@@ -341,9 +383,20 @@ EXPORT_SYMBOL_GPL(bdev_count_inflight);
  * struct blk_major_name — major 번호와 드라이버 이름의 매핑 엔트리
  *
  * major_names[] 해시 테이블의 각 버킷에 연결 리스트로 매달리는 엔트리.
- * NVMe 드라이버(drivers/nvme/host/core.c)는 probe 시 __register_blkdev()를
- * 통해 자신의 major("nvme")를 이 테이블에 등록한다. 이후 사용자가 /dev/nvmeXnY를
- * open하면 커널이 major로 이 테이블을 조회해 해당 드라이버를 찾는다.
+ * sd(SCSI 디스크, major 8), loop(7) 처럼 고정 major 를 쓰는 드라이버가
+ * __register_blkdev() 로 자신의 major 와 이름을 여기 등록한다. 이 테이블의
+ * 실질적 용도는 두 가지뿐이다: /proc/devices 의 "Block devices" 목록 출력
+ * (blkdev_show)과, CONFIG_BLOCK_LEGACY_AUTOLOAD 빌드에서의 자동 모듈 로드.
+ * 파일 상단 원본 주석이 "Can be deleted altogether. Later." 라고 적어 둔
+ * 것도 이 때문이다.
+ *
+ * NVMe 관점 주의: nvme 드라이버는 이 테이블에 등록하지 않는다.
+ * drivers/nvme/ 어디에도 register_blkdev() 호출이 없다. NVMe 네임스페이스는
+ * disk->major 를 0 으로 둔 채 device_add_disk() 에 들어가고, __add_disk() 가
+ * blk_alloc_ext_minor() 로 BLOCK_EXT_MAJOR(259) 아래 minor 를 배정한다.
+ * 그래서 /proc/devices 의 블록 목록에는 "nvme" 대신 259 blkext 가 보이고,
+ * ls -l /dev/nvme0n1 의 major 도 259 로 나온다. (nvme_core_init() 이 부르는
+ * alloc_chrdev_region()은 /dev/nvmeN 같은 문자 장치용이라 이것과 무관하다.)
  */
 static struct blk_major_name {
 	struct blk_major_name *next;
@@ -440,19 +493,28 @@ void blkdev_show(struct seq_file *seqf, off_t offset)
  * __register_blkdev - 새로운 블록 장치 major 번호를 시스템에 등록
  *
  * @major: 요청 major 번호 [1..BLKDEV_MAJOR_MAX-1]. 0이면 빈 슬롯을 동적으로 할당.
- * @name:  장치 이름 문자열 (예: "nvme"). 시스템 내 고유해야 함.
+ * @name:  장치 이름 문자열 (예: "sd", "loop", "md"). 시스템 내 고유해야 함.
  * @probe: 레거시 장치 자동 탐색 콜백. NULL이면 비활성화.
  * @return: 성공 시 0(또는 동적 할당된 major 번호), 실패 시 음수 에러 코드.
  *
- * NVMe 호스트 드라이버가 초기화될 때 자신의 major 번호를 major_names[] 해시 테이블에
- * 등록한다. 등록된 major는 /dev/nvmeXnY 장치 노드 생성의 근거가 되며, 이후 add_disk()에서
- * gendisk의 major 필드가 이 값으로 설정된다. major=0이면 배열 끝부터 역순으로 빈 슬롯을
- * 탐색해 동적 할당한다. 동일 major 중복 등록 시 -EBUSY를 반환한다.
+ * 고정 major 를 쓰는 블록 드라이버가 초기화 시 자신의 major 와 이름을
+ * major_names[] 해시 테이블에 등록한다. 등록 결과는 /proc/devices 의 블록
+ * 목록에 나타나며, CONFIG_BLOCK_LEGACY_AUTOLOAD 빌드에서는 아직 존재하지
+ * 않는 장치 노드에 접근했을 때 @probe 콜백을 불러 모듈을 올리는 데 쓰인다.
+ * major=0 이면 배열 끝부터 역순으로 빈 슬롯을 탐색해 동적 할당한다. 동일
+ * major 중복 등록 시 -EBUSY 를 반환한다.
+ *
+ * 중요한 오해 방지: 이 함수를 부르는 것은 gendisk 등록의 전제 조건이 아니다.
+ * 이 등록 없이도 device_add_disk() 만으로 블록 장치를 정상적으로 노출할 수
+ * 있고, 그 경우 __add_disk() 가 BLOCK_EXT_MAJOR 아래 minor 를 배정한다.
+ * NVMe 가 정확히 그 경우다 — drivers/nvme/ 에 register_blkdev() 호출이
+ * 하나도 없다.
+ *
  * 실행 컨텍스트: 프로세스 컨텍스트 (드라이버 초기화 경로, 슬립 가능).
  * 에러 경로: -EBUSY(이미 사용 중), -EINVAL(범위 초과), -ENOMEM(메모리 부족).
  *
  * 호출 체인:
- *   nvme_core_init() → register_blkdev() → [__register_blkdev()]
+ *   드라이버 module_init → register_blkdev() → [__register_blkdev()]
  */
 /**
  * __register_blkdev - register a new block device
@@ -496,27 +558,27 @@ int __register_blkdev(unsigned int major, const char *name,
 		}
 
 		if (index == 0) { /* [한국어] 빈 슬롯을 찾지 못한 경우 — 모든 major가 소진됨 */
-			printk("%s: failed to get major for %s\n",
-			       __func__, name); /* [한국어] 커널 로그에 할당 실패 기록 */
-			ret = -EBUSY; /* [한국어] 슬롯 소진 — EBUSY 반환 */
-			goto out;     /* [한국어] 뮤텍스 해제 후 반환 */
+			printk("%s: failed to get major for %s\n", /* [한국어] 동적 major 풀이 완전히 소진되었음을 알린다 */
+			       __func__, name); /* [한국어] 함수 이름과 등록을 시도한 드라이버 이름을 함께 남겨 원인 추적을 돕는다 */
+			ret = -EBUSY; /* [한국어] 슬롯 소진 - EBUSY 반환 */
+			goto out;     /* [한국어] 아래 out 라벨에서 major_names_lock 을 풀고 반환한다 */
 		}
 		major = index; /* [한국어] 동적으로 찾은 빈 슬롯을 major 번호로 확정 */
 		ret = major;   /* [한국어] 동적 할당 시 반환값은 할당된 major 번호 자체 */
 	}
 
 	if (major >= BLKDEV_MAJOR_MAX) { /* [한국어] major 번호가 허용 범위(BLKDEV_MAJOR_MAX-1)를 초과하면 거부 */
-		pr_err("%s: major requested (%u) is greater than the maximum (%u) for %s\n",
-		       __func__, major, BLKDEV_MAJOR_MAX-1, name); /* [한국어] 에러 메시지 출력 */
+		pr_err("%s: major requested (%u) is greater than the maximum (%u) for %s\n", /* [한국어] 요청된 major 가 해시 테이블이 다룰 수 있는 범위를 넘었다 */
+		       __func__, major, BLKDEV_MAJOR_MAX-1, name); /* [한국어] 요청값과 허용 상한을 나란히 찍어 드라이버 쪽 버그를 바로 알아볼 수 있게 한다 */
 
-		ret = -EINVAL; /* [한국어] 범위 초과 — EINVAL 반환 */
-		goto out;
+		ret = -EINVAL; /* [한국어] 범위 초과 - EINVAL 반환 */
+		goto out; /* [한국어] 아직 아무것도 할당하지 않았으므로 락 해제만 하면 된다 */
 	}
 
 	p = kmalloc_obj(struct blk_major_name); /* [한국어] 새 해시 엔트리를 GFP_KERNEL로 동적 할당 */
 	if (p == NULL) { /* [한국어] 메모리 부족 시 에러 처리 */
-		ret = -ENOMEM;
-		goto out;
+		ret = -ENOMEM; /* [한국어] 엔트리 할당 실패 */
+		goto out; /* [한국어] 해제할 자원이 없으므로 락만 풀고 나간다 */
 	}
 
 	p->major = major; /* [한국어] 엔트리에 major 번호 저장 */
@@ -534,13 +596,13 @@ int __register_blkdev(unsigned int major, const char *name,
 	}
 	if (!*n)       /* [한국어] 체인 끝에 도달한 경우 — 새 엔트리를 삽입 */
 		*n = p;
-	else           /* [한국어] 동일 major가 이미 존재 — EBUSY로 중복 등록 거부 */
-		ret = -EBUSY;
+	else           /* [한국어] 동일 major가 이미 존재 - EBUSY로 중복 등록 거부 */
+		ret = -EBUSY; /* [한국어] 위 루프가 break 로 빠져나온 경우이므로 *n 이 기존 엔트리를 가리킨다 - 덮어쓰지 않고 실패시킨다 */
 	spin_unlock(&major_names_spinlock); /* [한국어] 체인 수정 완료 후 스핀락 해제 */
 
 	if (ret < 0) { /* [한국어] 삽입 실패(중복 또는 이전 에러) 시 동적 할당한 엔트리 해제 */
-		printk("register_blkdev: cannot get major %u for %s\n",
-		       major, name); /* [한국어] 중복 등록 시도 커널 로그 기록 */
+		printk("register_blkdev: cannot get major %u for %s\n", /* [한국어] 중복 등록 시도를 로그에 남긴다 */
+		       major, name); /* [한국어] 충돌한 major 번호와 드라이버 이름 */
 		kfree(p); /* [한국어] 삽입되지 못한 엔트리 메모리 해제 */
 	}
 out:
@@ -557,13 +619,14 @@ EXPORT_SYMBOL(__register_blkdev);
  * @name:  등록 시 사용한 이름 (검증용).
  * @return: void. major/name 불일치 시 WARN_ON(1) 트리거.
  *
- * NVMe 드라이버 모듈이 언로드되거나 컨트롤러가 제거될 때 호출된다.
+ * __register_blkdev() 로 major 를 등록했던 드라이버가 모듈 언로드 시 호출한다
+ * (NVMe 는 애초에 등록하지 않으므로 이 함수도 부르지 않는다).
  * major_names[] 해시 테이블에서 해당 엔트리를 찾아 체인에서 제거하고 해제한다.
  * major와 name 모두 일치해야 제거하며, 불일치 시 WARN_ON으로 버그를 경고한다.
  * 실행 컨텍스트: 프로세스 컨텍스트 (드라이버 해제/언로드 경로, 슬립 가능).
  *
  * 호출 체인:
- *   nvme_core_exit() → [unregister_blkdev()] → major_names[] 체인 제거 + kfree()
+ *   드라이버 module_exit → [unregister_blkdev()] → major_names[] 체인 제거 + kfree()
  */
 void unregister_blkdev(unsigned int major, const char *name)
 {
@@ -595,8 +658,17 @@ EXPORT_SYMBOL(unregister_blkdev);
  *
  * @return: 성공 시 할당된 minor 번호 (0 ~ NR_EXT_DEVT-1), 실패 시 -EBUSY.
  *
- * BLOCK_EXT_MAJOR 아래에서 NVMe처럼 동적 major를 사용하지 않는 장치가
- * ext_devt_ida 풀에서 minor 번호를 할당받는다.
+ * 자기 major 를 등록하지 않은 드라이버의 gendisk(=disk->major 가 0 인 채로
+ * device_add_disk() 에 들어온 경우)는 major 를 BLOCK_EXT_MAJOR(259)로 고정하고
+ * minor 만 이 ext_devt_ida 풀에서 하나 받아 온다. NVMe 네임스페이스가 정확히
+ * 이 경로를 탄다 - 그래서 /dev/nvme0n1 의 major 가 259 다.
+ *
+ * disk->minors 와의 관계: 명시적 major 를 쓰는 드라이버(sd 등)는 디스크 하나당
+ * disk->minors 개의 minor 를 연속으로 예약해 두고, 파티션 N 번은
+ * first_minor + N 을 그대로 쓴다(block/partitions/core.c:899). 반면 NVMe 처럼
+ * disk->minors 가 0 인 디스크는 예약된 연속 구간이 없으므로, 파티션마다
+ * 이 함수를 다시 불러 ext 풀에서 minor 를 하나씩 따로 받는다(core.c:901-904).
+ * 그래서 nvme0n1 과 nvme0n1p1 의 minor 는 서로 이웃하지 않을 수 있다.
  * IDA 내부적으로 슬립 가능하므로 GFP_KERNEL 플래그 사용.
  * 실행 컨텍스트: 프로세스 컨텍스트 (__add_disk 내 major == 0 분기).
  *
@@ -676,15 +748,25 @@ EXPORT_SYMBOL_GPL(disk_uevent);
  * [한국어]
  * disk_scan_partitions - gendisk의 파티션 테이블 스캔
  *
- * @disk: 파티션을 스캔할 gendisk 포인터 (NVMe 네임스페이스 1개에 대응).
+ * @disk: 파티션을 스캔할 gendisk 포인터.
  * @mode: 블록 장치 open 모드 (BLK_OPEN_READ 등). 배타적 오픈 여부 포함.
  * @return: 성공 시 0, 실패 시 음수 에러 코드 (-EINVAL, -EBUSY 등).
  *
- * NVMe 네임스페이스가 add_disk_final()에서 등록 완료 직전에 호출되어,
- * GPT/MBR 파티션 테이블을 해석하고 disk->part_tbl에 파티션을 추가한다.
- * GD_NEED_PART_SCAN 플래그를 설정 후 bdev_file_open_by_dev()로 장치를 열면
- * 파티션 스캔 경로가 자동으로 진입된다. 비배타적 오픈 모드에서는
- * bd_prepare_to_claim()으로 다른 배타적 오프너와 동기화한다.
+ * add_disk_final() 에서 등록 마무리 직전에 호출되어, GPT/MBR 파티션 테이블을
+ * 해석하고 disk->part_tbl 에 파티션 block_device 를 추가한다(실제 추가는
+ * block/partitions/core.c 의 bdev_add_partition() → add_partition() 이
+ * 담당하며, 그 안에서 파티션용 dev_t 배정과 bdev_add() 까지 이루어진다).
+ * 이 함수 자신은 파서를 직접 부르지 않는다 - GD_NEED_PART_SCAN 비트를 세운
+ * 뒤 장치를 한 번 열었다 닫는 것이 전부다. 열기 경로(bdev_open)가 그 비트를
+ * 보고 파티션 스캔을 수행하는 구조라, "스캔"을 별도 진입점 없이 open 경로에
+ * 얹어 재사용한다. 비배타적 오픈 모드에서는 bd_prepare_to_claim() 으로 다른
+ * 배타적 오프너/스캐너와 동기화한다.
+ *
+ * NVMe 로 보면: 이 단계가 nvme0n1p1, nvme0n1p2 같은 파티션 노드를 만들어
+ * 내는 지점이다. 단, multipath 로 숨겨진 개별 경로 디스크(nvme0c0n1)는
+ * GENHD_FL_HIDDEN 때문에 disk_has_partscan() 에서 걸러져 여기까지 오지
+ * 않고, multipath head 디스크는 alloc 시 GD_SUPPRESS_PART_SCAN 을 세워
+ * (drivers/nvme/host/multipath.c:1077) 등록 시점의 동기 스캔을 피한다.
  * 실행 컨텍스트: 프로세스 컨텍스트 (add_disk_final 내, 슬립 가능).
  * 에러 경로: partscan 불가(-EINVAL), 파티션 오픈 중(-EBUSY), open 실패(PTR_ERR).
  *
@@ -697,10 +779,10 @@ int disk_scan_partitions(struct gendisk *disk, blk_mode_t mode)
 	struct file *file; /* [한국어] bdev_file_open_by_dev 반환 파일 핸들 — open/close 트리거로만 사용 */
 	int ret = 0;       /* [한국어] 반환값 초기화 */
 
-	if (!disk_has_partscan(disk)) /* [한국어] GENHD_FL_NO_PART 등 파티션 스캔 불가 플래그 확인 */
-		return -EINVAL;
-	if (disk->open_partitions) /* [한국어] 이미 파티션이 열려있으면 스캔 불가 */
-		return -EBUSY;
+	if (!disk_has_partscan(disk)) /* [한국어] GENHD_FL_NO_PART / GENHD_FL_HIDDEN / GD_SUPPRESS_PART_SCAN 중 하나라도 걸리면 이 디스크는 파티션을 갖지 않기로 되어 있다 */
+		return -EINVAL; /* [한국어] 스캔 대상이 아님을 호출자에게 알린다 - add_disk_final 은 이 반환값을 무시한다 */
+	if (disk->open_partitions) /* [한국어] 이미 열려 있는 파티션이 하나라도 있으면 재스캔 불가 */
+		return -EBUSY; /* [한국어] 사용 중인 파티션의 경계를 바꾸면 그 파티션을 쓰는 쪽이 엉뚱한 LBA 를 읽게 되므로 거부한다 */
 
 	/*
 	 * If the device is opened exclusively by current thread already, it's
@@ -709,19 +791,19 @@ int disk_scan_partitions(struct gendisk *disk, blk_mode_t mode)
 	 * scanners.
 	 */
 	if (!(mode & BLK_OPEN_EXCL)) { /* [한국어] 비배타적 모드: 다른 배타적 오프너와 동기화 필요 */
-		ret = bd_prepare_to_claim(disk->part0, disk_scan_partitions,
-					  NULL); /* [한국어] 배타적 점유를 선점하여 동시 스캔 방지 */
-		if (ret) /* [한국어] 배타적 점유 실패 시 즉시 반환 */
-			return ret;
+		ret = bd_prepare_to_claim(disk->part0, disk_scan_partitions, /* [한국어] holder 를 이 함수 주소로 삼아 배타적 점유를 예약 - 함수 포인터를 holder 토큰으로 쓰는 것은 블록 계층의 관용구다 */
+					  NULL); /* [한국어] holder_ops 는 없음 - 이 점유는 mark_dead 같은 콜백을 받을 필요가 없는 일시적 점유다 */
+		if (ret) /* [한국어] 다른 배타적 오프너(마운트된 파일시스템 등)가 이미 잡고 있으면 실패 */
+			return ret; /* [한국어] -EBUSY 등을 그대로 전달 */
 	}
 
 	set_bit(GD_NEED_PART_SCAN, &disk->state); /* [한국어] GD_NEED_PART_SCAN 플래그 설정: open 시 파티션 스캔 진입 신호 */
-	file = bdev_file_open_by_dev(disk_devt(disk), mode & ~BLK_OPEN_EXCL,
-				     NULL, NULL); /* [한국어] 장치를 열어 파티션 스캔 경로(blkdev_open→blk_partpick) 진입 */
-	if (IS_ERR(file))  /* [한국어] open 실패 시 에러 코드 추출 */
-		ret = PTR_ERR(file);
-	else
-		fput(file); /* [한국어] 스캔 목적 달성 후 파일 핸들 즉시 해제 */
+	file = bdev_file_open_by_dev(disk_devt(disk), mode & ~BLK_OPEN_EXCL, /* [한국어] part0 을 한 번 연다. EXCL 은 떼어낸다 - 위에서 이미 bd_prepare_to_claim 으로 점유를 잡아 두었으므로 중복해서 배타 요구를 하면 자기 자신과 충돌한다 */
+				     NULL, NULL); /* [한국어] holder 와 holder_ops 는 비배타 열기이므로 둘 다 NULL */
+	if (IS_ERR(file))  /* [한국어] 열기 실패(장치가 죽었거나 권한 문제 등) 검사 */
+		ret = PTR_ERR(file); /* [한국어] ERR_PTR 로 인코딩된 음수 errno 를 꺼내 반환값으로 삼는다 */
+	else /* [한국어] 정상적으로 열렸다면 - 이 시점에 이미 파티션 스캔이 끝나 있다 */
+		fput(file); /* [한국어] 스캔은 여는 순간 끝났으므로 곧바로 닫는다 - 여기서 bdev_release 가 불리며 파티션 스캔 결과가 확정된다 */
 
 	/*
 	 * If blkdev_get_by_dev() failed early, GD_NEED_PART_SCAN is still set,
@@ -815,17 +897,17 @@ static int __add_disk(struct device *parent, struct gendisk *disk,
 	int ret;                                 /* [한국어] 반환값 저장 변수 */
 
 	if (WARN_ON_ONCE(bdev_nr_sectors(disk->part0) > BLK_DEV_MAX_SECTORS)) /* [한국어] 등록 시점에 이미 초과 용량이면 버그 경고 */
-		return -EINVAL;
+		return -EINVAL; /* [한국어] 드라이버가 set_capacity()를 거치지 않고 직접 크기를 넣은 경우에만 발생한다 */
 
 	if (queue_is_mq(disk->queue)) { /* [한국어] blk-mq 드라이버(NVMe 포함): submit_bio를 제공하면 안 됨 */
 		/*
 		 * ->submit_bio and ->poll_bio are bypassed for blk-mq drivers.
 		 */
 		if (disk->fops->submit_bio || disk->fops->poll_bio) /* [한국어] blk-mq 드라이버가 submit_bio/poll_bio를 제공하면 등록 거부 */
-			return -EINVAL;
+			return -EINVAL; /* [한국어] blk-mq 경로에서는 이 콜백들이 절대 불리지 않으므로, 정의해 두는 것 자체가 드라이버의 오해를 뜻한다 */
 	} else { /* [한국어] bio-based 드라이버: submit_bio가 필수 */
 		if (!disk->fops->submit_bio) /* [한국어] bio-based 드라이버에 submit_bio가 없으면 등록 거부 */
-			return -EINVAL;
+			return -EINVAL; /* [한국어] 요청을 받아 줄 진입점이 아예 없다는 뜻이라 등록해도 I/O 를 처리할 수 없다 */
 		bdev_set_flag(disk->part0, BD_HAS_SUBMIT_BIO); /* [한국어] bio-based 경로 표시 — blk_submit_bio 대신 fops->submit_bio 사용 */
 	}
 
@@ -838,51 +920,51 @@ static int __add_disk(struct device *parent, struct gendisk *disk,
 	 */
 	ret = -EINVAL; /* [한국어] 이후 goto out 시 기본 에러 코드로 EINVAL 설정 */
 	if (disk->major) { /* [한국어] 드라이버가 명시적 major를 제공한 경우 minor 범위 검증 */
-		if (WARN_ON(!disk->minors)) /* [한국어] major가 있으면 minors도 반드시 있어야 함 */
-			goto out;
+		if (WARN_ON(!disk->minors)) /* [한국어] major가 있으면 minors도 반드시 있어야 함 - 파티션에 배정할 minor 구간의 길이가 정해지지 않기 때문 */
+			goto out; /* [한국어] ret 은 위에서 -EINVAL 로 미리 세팅되어 있다 */
 
 		if (disk->minors > DISK_MAX_PARTS) { /* [한국어] minors가 최대 파티션 수를 초과하면 클램프 */
-			pr_err("block: can't allocate more than %d partitions\n",
-				DISK_MAX_PARTS); /* [한국어] 최대치 초과 경고 출력 */
+			pr_err("block: can't allocate more than %d partitions\n", /* [한국어] 요청된 minor 개수가 파티션 수 상한을 넘었음을 알린다 */
+				DISK_MAX_PARTS); /* [한국어] 커널이 허용하는 디스크당 파티션 수 상한 */
 			disk->minors = DISK_MAX_PARTS; /* [한국어] DISK_MAX_PARTS로 강제 제한 */
 		}
 		if (disk->first_minor > MINORMASK ||           /* [한국어] first_minor가 minor 비트 마스크 초과 */
 		    disk->minors > MINORMASK + 1 ||             /* [한국어] minors 수가 최대 minor 공간 초과 */
-		    disk->first_minor + disk->minors > MINORMASK + 1) /* [한국어] first_minor+minors 합계가 minor 공간 초과 */
-			goto out;
-	} else { /* [한국어] major == 0: BLOCK_EXT_MAJOR에서 동적 minor 할당 */
-		if (WARN_ON(disk->minors)) /* [한국어] 동적 할당 경우 드라이버가 minors를 직접 설정하면 안 됨 */
-			goto out;
+		    disk->first_minor + disk->minors > MINORMASK + 1) /* [한국어] first_minor+minors 합계가 minor 공간 초과 - 오버플로로 다른 장치의 minor 를 침범하는 것을 막는다 */
+			goto out; /* [한국어] -EINVAL 로 등록 실패 */
+	} else { /* [한국어] major == 0: BLOCK_EXT_MAJOR에서 동적 minor 할당 (NVMe 가 이 경로) */
+		if (WARN_ON(disk->minors)) /* [한국어] 동적 할당 경우 드라이버가 minors를 직접 설정하면 안 됨 - 예약 구간이라는 개념 자체가 없기 때문 */
+			goto out; /* [한국어] 드라이버 버그이므로 등록 거부 */
 
 		ret = blk_alloc_ext_minor(); /* [한국어] ext_devt_ida에서 동적 minor 번호 할당 */
 		if (ret < 0) /* [한국어] 풀 소진(-EBUSY) 또는 메모리 부족 시 에러 처리 */
-			goto out;
-		disk->major = BLOCK_EXT_MAJOR; /* [한국어] NVMe 등 동적 장치: BLOCK_EXT_MAJOR 사용 */
+			goto out; /* [한국어] ret 에 이미 음수 errno 가 들어 있다 */
+		disk->major = BLOCK_EXT_MAJOR; /* [한국어] major 를 259(blkext)로 고정 - /dev/nvme0n1 의 major 가 259 인 이유가 이 한 줄이다 */
 		disk->first_minor = ret;       /* [한국어] 동적 할당된 minor 번호를 first_minor로 설정 */
 	}
 
 	/* delay uevents, until we scanned partition table */
 	dev_set_uevent_suppress(ddev, 1); /* [한국어] 파티션 스캔 완료 전 uevent 억제 — add_disk_final에서 해제 */
 
-	ddev->parent = parent;               /* [한국어] NVMe 컨트롤러 device를 부모로 설정 */
+	ddev->parent = parent;               /* [한국어] sysfs 상의 부모 장치를 설정 - NVMe 라면 nvme_alloc_ns()가 넘긴 ctrl->device 이고, 그래서 /sys/block/nvme0n1/device 가 컨트롤러를 가리킨다 */
 	ddev->groups = groups;               /* [한국어] 드라이버별 추가 sysfs 속성 그룹 등록 */
-	dev_set_name(ddev, "%s", disk->disk_name); /* [한국어] sysfs 경로명을 disk_name(예: "nvme0n1")으로 설정 */
+	dev_set_name(ddev, "%s", disk->disk_name); /* [한국어] sysfs 경로명을 disk_name 으로 설정 - NVMe 는 nvme_alloc_ns()가 sprintf 로 "nvme%dn%d" 를 미리 채워 둔다(core.c:4626) */
 	if (fwnode)                          /* [한국어] ACPI/DT firmware node가 있으면 장치에 연결 */
-		device_set_node(ddev, fwnode);
+		device_set_node(ddev, fwnode); /* [한국어] 임베디드 MMC/UFS 처럼 device tree 노드와 묶이는 장치를 위한 경로. NVMe 는 보통 NULL 로 들어온다 */
 	if (!(disk->flags & GENHD_FL_HIDDEN)) /* [한국어] hidden이 아닌 경우만 devt를 설정하여 /dev 노드 생성 가능 */
 		ddev->devt = MKDEV(disk->major, disk->first_minor); /* [한국어] major+minor로 dev_t 조합하여 장치 번호 설정 */
-	ret = device_add(ddev); /* [한국어] 장치 드라이버 코어에 등록 — /sys/block/nvmeXnY 디렉터리 생성 */
+	ret = device_add(ddev); /* [한국어] 장치 드라이버 코어에 등록 - /sys/block/<name> 디렉터리가 이 시점에 생긴다 */
 	if (ret) /* [한국어] device_add 실패 시 ext_minor 해제 경로로 이동 */
-		goto out_free_ext_minor;
+		goto out_free_ext_minor; /* [한국어] 앞서 잡은 동적 minor 를 되돌려 준다 */
 
 	ret = disk_alloc_events(disk); /* [한국어] 미디어 변경·꺼냄 이벤트를 위한 poll 타이머 자원 할당 */
-	if (ret)
-		goto out_device_del;
+	if (ret) /* [한국어] 이벤트 자원 할당 실패 */
+		goto out_device_del; /* [한국어] 방금 등록한 device 를 되돌린다 */
 
-	ret = sysfs_create_link(block_depr, &ddev->kobj,
-				kobject_name(&ddev->kobj)); /* [한국어] /sys/block/nvmeXnY → 실제 경로로 레거시 심볼릭 링크 생성 */
-	if (ret)
-		goto out_device_del;
+	ret = sysfs_create_link(block_depr, &ddev->kobj, /* [한국어] 구식 /sys/block 디렉터리에서 실제 장치 경로로 가는 심볼릭 링크 생성 - 지금 장치들은 /sys/devices/... 아래에 있어서 호환용 링크가 필요하다 */
+				kobject_name(&ddev->kobj)); /* [한국어] 링크 이름은 장치 이름 그대로 */
+	if (ret) /* [한국어] 링크 생성 실패 */
+		goto out_device_del; /* [한국어] device 등록까지 되돌린다 */
 
 	/*
 	 * avoid probable deadlock caused by allocating memory with
@@ -891,32 +973,32 @@ static int __add_disk(struct device *parent, struct gendisk *disk,
 	 */
 	pm_runtime_set_memalloc_noio(ddev, true); /* [한국어] 런타임 resume 콜백에서 GFP_KERNEL 할당 금지 — 데드락 방지 */
 
-	disk->part0->bd_holder_dir = /* [한국어] NVMe 디스크의 holder 디렉터리 — dm/lvm 등이 여기에 링크를 걸어 의존성 추적 */
-		kobject_create_and_add("holders", &ddev->kobj); /* [한국어] /sys/block/nvmeXnY/holders 디렉터리 생성 */
-	if (!disk->part0->bd_holder_dir) { /* [한국어] 메모리 부족으로 direcory 생성 실패 */
-		ret = -ENOMEM;
-		goto out_del_block_link;
+	disk->part0->bd_holder_dir = /* [한국어] 이 디스크를 배타적으로 잡고 있는 상위 계층(md/dm/LVM, 마운트된 파일시스템)이 심볼릭 링크를 거는 디렉터리 */
+		kobject_create_and_add("holders", &ddev->kobj); /* [한국어] /sys/block/<name>/holders 디렉터리 생성 */
+	if (!disk->part0->bd_holder_dir) { /* [한국어] 메모리 부족으로 디렉터리 생성 실패 */
+		ret = -ENOMEM; /* [한국어] 할당 실패 */
+		goto out_del_block_link; /* [한국어] 바로 위에서 만든 /sys/block 링크부터 되돌린다 */
 	}
-	disk->slave_dir = kobject_create_and_add("slaves", &ddev->kobj); /* [한국어] /sys/block/nvmeXnY/slaves 디렉터리 생성 */
+	disk->slave_dir = kobject_create_and_add("slaves", &ddev->kobj); /* [한국어] 반대 방향 - 이 디스크가 다른 장치 위에 쌓여 있을 때(dm/md 스택) 하위 장치로 가는 링크가 모이는 디렉터리 */
 	if (!disk->slave_dir) { /* [한국어] slaves 디렉터리 생성 실패 */
-		ret = -ENOMEM;
-		goto out_put_holder_dir;
+		ret = -ENOMEM; /* [한국어] 할당 실패 */
+		goto out_put_holder_dir; /* [한국어] 방금 만든 holders kobject 를 되돌린다 */
 	}
 
-	ret = blk_register_queue(disk); /* [한국어] NVMe request_queue를 /sys/block/nvmeXnY/queue에 sysfs 등록 */
-	if (ret)
-		goto out_put_slave_dir;
+	ret = blk_register_queue(disk); /* [한국어] request_queue 를 /sys/block/<name>/queue 로 노출 - nr_requests, scheduler, max_sectors_kb 같은 튜닝 노브가 여기서 생긴다 */
+	if (ret) /* [한국어] queue sysfs 등록 실패 */
+		goto out_put_slave_dir; /* [한국어] slaves 디렉터리부터 되돌린다 */
 
 	if (!(disk->flags & GENHD_FL_HIDDEN)) { /* [한국어] visible 디스크만 bdi를 sysfs에 등록 */
-		ret = bdi_register(disk->bdi, "%u:%u", /* [한국어] bdi를 "major:minor" 이름으로 /sys/class/bdi/에 등록 */
-				   disk->major, disk->first_minor);
-		if (ret)
-			goto out_unregister_queue;
+		ret = bdi_register(disk->bdi, "%u:%u", /* [한국어] bdi(backing_dev_info)를 "major:minor" 이름으로 /sys/class/bdi/에 등록 - writeback 튜닝(read_ahead_kb 등)이 여기 달린다 */
+				   disk->major, disk->first_minor); /* [한국어] NVMe 라면 259:N 형태의 이름이 된다 */
+		if (ret) /* [한국어] bdi 등록 실패 */
+			goto out_unregister_queue; /* [한국어] queue sysfs 등록부터 되돌린다 */
 		bdi_set_owner(disk->bdi, ddev); /* [한국어] bdi의 소유 장치를 gendisk device로 설정 */
-		ret = sysfs_create_link(&ddev->kobj,
-					&disk->bdi->dev->kobj, "bdi"); /* [한국어] /sys/block/nvmeXnY/bdi → bdi 장치로 심볼릭 링크 */
-		if (ret)
-			goto out_unregister_bdi;
+		ret = sysfs_create_link(&ddev->kobj, /* [한국어] 디스크 디렉터리에서 방금 등록한 bdi 장치로 가는 편의 링크를 만든다 */
+					&disk->bdi->dev->kobj, "bdi"); /* [한국어] /sys/block/<name>/bdi 라는 이름으로 노출 */
+		if (ret) /* [한국어] 링크 생성 실패 */
+			goto out_unregister_bdi; /* [한국어] bdi 등록까지 되돌린다 */
 	} else {
 		/*
 		 * Even if the block_device for a hidden gendisk is not
@@ -929,13 +1011,13 @@ static int __add_disk(struct device *parent, struct gendisk *disk,
 
 out_unregister_bdi:
 	if (!(disk->flags & GENHD_FL_HIDDEN)) /* [한국어] visible 디스크만 bdi를 등록했으므로 조건부 해제 */
-		bdi_unregister(disk->bdi);
+		bdi_unregister(disk->bdi); /* [한국어] hidden 디스크는 애초에 등록하지 않았으므로 건드리면 안 된다 */
 out_unregister_queue:
 	blk_unregister_queue(disk); /* [한국어] queue sysfs 등록 해제 */
 	rq_qos_exit(disk->queue);   /* [한국어] request QoS 정리 */
 out_put_slave_dir:
 	kobject_put(disk->slave_dir); /* [한국어] slaves 디렉터리 kobject 참조 해제 */
-	disk->slave_dir = NULL;
+	disk->slave_dir = NULL; /* [한국어] 해제 후 반드시 NULL 로 지운다 - 이 포인터를 뒤에서 다시 보는 정리 경로가 dangling 을 만지지 않게 하기 위함 */
 out_put_holder_dir:
 	kobject_put(disk->part0->bd_holder_dir); /* [한국어] holders 디렉터리 kobject 참조 해제 */
 out_del_block_link:
@@ -1203,8 +1285,8 @@ static void __del_gendisk(struct gendisk *disk)
 	 */
 	mutex_lock(&disk->open_mutex); /* [한국어] open과 동기화하여 새 open이 부분적으로 제거된 디스크를 보지 않도록 */
 	xa_for_each(&disk->part_tbl, idx, part) /* [한국어] 모든 파티션 순회 */
-		bdev_unhash(part); /* [한국어] block_device를 bdev 해시에서 제거 — 이후 lookup 불가 */
-	mutex_unlock(&disk->open_mutex);
+		bdev_unhash(part); /* [한국어] block_device를 bdev 해시에서 제거 - 이후 lookup 불가 */
+	mutex_unlock(&disk->open_mutex); /* [한국어] 해시 제거만 끝내고 락을 놓는다 - 아래 blk_report_disk_dead 는 파일시스템까지 내려가는 블로킹 경로라 이 락을 쥔 채 부를 수 없다 */
 
 	/*
 	 * Tell the file system to write back all dirty data and shut down if
@@ -1222,7 +1304,7 @@ static void __del_gendisk(struct gendisk *disk)
 		blk_freeze_acquire_lock(q); /* [한국어] 큐 동결 상태 확인을 위한 freeze 락 획득 */
 	xa_for_each_start(&disk->part_tbl, idx, part, 1) /* [한국어] idx=1부터: part0 제외하고 파티션만 순회 */
 		drop_partition(part); /* [한국어] 각 파티션 block_device를 XArray에서 제거하고 bdev_drop */
-	mutex_unlock(&disk->open_mutex);
+	mutex_unlock(&disk->open_mutex); /* [한국어] 파티션 제거가 끝났으므로 open 경로를 다시 열어 준다 */
 
 	if (!(disk->flags & GENHD_FL_HIDDEN)) { /* [한국어] hidden이 아닌 경우만 visible sysfs 자원 제거 */
 		sysfs_remove_link(&disk_to_dev(disk)->kobj, "bdi"); /* [한국어] /sys/block/nvmeXnY/bdi 심볼릭 링크 제거 */
@@ -1337,8 +1419,8 @@ void del_gendisk(struct gendisk *disk)
 	struct blk_mq_tag_set *set; /* [한국어] blk-mq 태그셋 — nr_hw_queues 락 접근에 사용 */
 	unsigned int memflags;      /* [한국어] memalloc_noio 이전 플래그 저장 */
 
-	if (!queue_is_mq(disk->queue)) { /* [한국어] bio-based 드라이버: 락 없이 직접 제거 */
-		__del_gendisk(disk);
+	if (!queue_is_mq(disk->queue)) { /* [한국어] bio-based 드라이버: 태그셋이 없으므로 nr_hw_queues 경합도 없다 */
+		__del_gendisk(disk); /* [한국어] 추가 락 없이 곧바로 실제 제거 수행 */
 	} else { /* [한국어] blk-mq 드라이버(NVMe 포함) */
 		set = disk->queue->tag_set; /* [한국어] queue에 연결된 태그셋 포인터 획득 */
 
@@ -1412,7 +1494,7 @@ static ssize_t disk_badblocks_show(struct device *dev,
 	struct gendisk *disk = dev_to_disk(dev); /* [한국어] device 포인터에서 gendisk 역참조 */
 
 	if (!disk->bb) /* [한국어] bad block 테이블이 없으면 빈 줄 반환 */
-		return sysfs_emit(page, "\n");
+		return sysfs_emit(page, "\n"); /* [한국어] 속성 자체는 존재하되 내용이 비어 있음을 나타낸다 - 에러 대신 빈 줄을 주어 read 하는 툴이 깨지지 않게 한다 */
 
 	return badblocks_show(disk->bb, page, 0); /* [한국어] bad block 목록을 텍스트 형식으로 page에 출력 */
 }
@@ -1439,7 +1521,7 @@ static ssize_t disk_badblocks_store(struct device *dev,
 	struct gendisk *disk = dev_to_disk(dev); /* [한국어] device 포인터에서 gendisk 역참조 */
 
 	if (!disk->bb) /* [한국어] bad block 테이블 미설정 시 -ENXIO 반환 */
-		return -ENXIO;
+		return -ENXIO; /* [한국어] 쓰기는 읽기와 달리 기록할 대상이 없으면 조용히 넘길 수 없으므로 에러로 알린다 */
 
 	return badblocks_store(disk->bb, page, len, 0); /* [한국어] 입력을 파싱하여 bad block 목록에 추가/제거 */
 }
@@ -1467,12 +1549,12 @@ static bool blk_probe_dev(dev_t devt)
 	mutex_lock(&major_names_lock); /* [한국어] major_names 테이블 읽기 보호 */
 	for (n = &major_names[major_to_index(major)]; *n; n = &(*n)->next) { /* [한국어] 버킷 체인 순회 */
 		if ((*n)->major == major && (*n)->probe) { /* [한국어] major 일치 + probe 콜백 존재 확인 */
-			(*n)->probe(devt); /* [한국어] 레거시 probe 콜백 호출 — 드라이버가 add_disk 등을 수행 */
-			mutex_unlock(&major_names_lock);
+			(*n)->probe(devt); /* [한국어] 레거시 probe 콜백 호출 - 드라이버가 add_disk 등을 수행 */
+			mutex_unlock(&major_names_lock); /* [한국어] 콜백이 끝난 뒤 락 해제 */
 			return true; /* [한국어] probe 호출 완료 */
 		}
 	}
-	mutex_unlock(&major_names_lock);
+	mutex_unlock(&major_names_lock); /* [한국어] 체인을 끝까지 훑었지만 일치하는 probe 가 없었던 경우의 락 해제 */
 	return false; /* [한국어] 해당 major에 probe 콜백 없음 */
 }
 
@@ -1501,9 +1583,9 @@ void blk_request_module(dev_t devt)
 	error = request_module("block-major-%d-%d", MAJOR(devt), MINOR(devt)); /* [한국어] "block-major-NNN-MMM" 모듈 로드 시도 */
 	/* Make old-style 2.4 aliases work */
 	if (error > 0) /* [한국어] 모듈 로드 실패 시 레거시 2.4 형식("block-major-NNN")으로 재시도 */
-		error = request_module("block-major-%d", MAJOR(devt));
+		error = request_module("block-major-%d", MAJOR(devt)); /* [한국어] minor 를 뺀 옛 별칭 형식으로 한 번 더 시도 - 2.4 시절 모듈 별칭을 쓰는 드라이버 호환용 */
 	if (!error) /* [한국어] 모듈 로드 성공 시 probe 콜백 재시도 */
-		blk_probe_dev(devt);
+		blk_probe_dev(devt); /* [한국어] 방금 올라온 모듈이 __register_blkdev 로 probe 를 등록했을 것이므로 다시 훑는다 */
 }
 #endif /* CONFIG_BLOCK_LEGACY_AUTOLOAD */
 
@@ -1531,15 +1613,15 @@ static void *disk_seqf_start(struct seq_file *seqf, loff_t *pos)
 	struct device *dev;          /* [한국어] 현재 순회 중인 device */
 
 	iter = kmalloc_obj(*iter); /* [한국어] GFP_KERNEL로 이터레이터 동적 할당 */
-	if (!iter)
-		return ERR_PTR(-ENOMEM); /* [한국어] 메모리 부족 시 에러 반환 */
+	if (!iter) /* [한국어] 할당 실패 검사 */
+		return ERR_PTR(-ENOMEM); /* [한국어] seq_file 코어는 start 의 반환값을 IS_ERR 로 검사하므로 포인터에 인코딩해 돌려준다 */
 
 	seqf->private = iter; /* [한국어] iter를 seqf->private에 저장하여 next/stop에서 재사용 */
 	class_dev_iter_init(iter, &block_class, NULL, &disk_type); /* [한국어] block_class의 disk_type 장치만 순회하도록 초기화 */
 	do {
 		dev = class_dev_iter_next(iter); /* [한국어] 다음 블록 장치 순회 */
 		if (!dev) /* [한국어] 더 이상 디스크 없음 */
-			return NULL;
+			return NULL; /* [한국어] skip 을 다 소진하기 전에 목록이 끝난 경우 - 출력할 항목이 없다는 뜻 */
 	} while (skip--); /* [한국어] *pos만큼 건너뜀 */
 
 	return dev_to_disk(dev); /* [한국어] device에서 gendisk 역참조하여 반환 */
@@ -1564,7 +1646,7 @@ static void *disk_seqf_next(struct seq_file *seqf, void *v, loff_t *pos)
 
 	(*pos)++; /* [한국어] seq_file 위치 증가 — /proc lseek/pread 정확성 유지 */
 	dev = class_dev_iter_next(seqf->private); /* [한국어] 이터레이터로 다음 블록 장치 획득 */
-	if (dev)
+	if (dev) /* [한국어] 다음 장치가 있으면 */
 		return dev_to_disk(dev); /* [한국어] gendisk 역참조하여 반환 */
 
 	return NULL; /* [한국어] 더 이상 디스크 없음 */
@@ -1645,8 +1727,8 @@ static int show_partition(struct seq_file *seqf, void *v)
 	xa_for_each(&sgp->part_tbl, idx, part) { /* [한국어] 모든 파티션 순회 */
 		if (!bdev_nr_sectors(part)) /* [한국어] 크기 0인 파티션은 /proc/partitions에서 생략 */
 			continue;
-		seq_printf(seqf, "%4d  %7d %10llu %pg\n",
-			   MAJOR(part->bd_dev), MINOR(part->bd_dev),
+		seq_printf(seqf, "%4d  %7d %10llu %pg\n", /* [한국어] /proc/partitions 의 한 줄 형식: major, minor, 블록 수, 이름 */
+			   MAJOR(part->bd_dev), MINOR(part->bd_dev), /* [한국어] dev_t 에서 major/minor 를 분리 - NVMe 네임스페이스면 major 는 259 로 나온다 */
 			   bdev_nr_sectors(part) >> 1, part); /* [한국어] "major minor blocks(KB) name" 형식 출력; >>1로 섹터→KB 변환 */
 	}
 	rcu_read_unlock(); /* [한국어] RCU 읽기 종료 */
@@ -1683,17 +1765,17 @@ static int __init genhd_device_init(void)
 
 	error = class_register(&block_class); /* [한국어] block_class를 /sys/class/block에 등록 */
 	if (unlikely(error)) /* [한국어] 등록 실패 시 초기화 중단 */
-		return error;
+		return error; /* [한국어] block_class 등록에 실패하면 블록 서브시스템 자체를 올릴 수 없으므로 즉시 중단한다 */
 	blk_dev_init(); /* [한국어] blk-mq, elevator, throttle 등 블록 서브시스템 내부 초기화 */
 
-	register_blkdev(BLOCK_EXT_MAJOR, "blkext"); /* [한국어] BLOCK_EXT_MAJOR를 "blkext"로 예약 — 확장 동적 minor 풀 소유자 */
+	register_blkdev(BLOCK_EXT_MAJOR, "blkext"); /* [한국어] major 259 를 "blkext" 라는 이름으로 미리 예약해 둔다 - 자기 major 가 없는 모든 디스크(NVMe 네임스페이스 포함)가 이 major 아래 minor 를 나눠 쓰므로, /proc/devices 에서도 그 이름 하나로만 보인다 */
 
 	/* create top-level block dir */
 	block_depr = kobject_create_and_add("block", NULL); /* [한국어] /sys/block 레거시 디렉터리 kobject 생성(최상위 NULL 아래) */
 	return 0; /* [한국어] 초기화 성공 */
 }
 
-subsys_initcall(genhd_device_init);
+subsys_initcall(genhd_device_init); /* [한국어] subsys 단계 initcall 로 등록 - 개별 블록 드라이버(module_init/device_initcall)보다 먼저 실행되어야 block_class 와 /sys/block 이 준비된다 */
 
 /*
  * [한국어]
@@ -1733,8 +1815,8 @@ static ssize_t disk_ext_range_show(struct device *dev,
 {
 	struct gendisk *disk = dev_to_disk(dev); /* [한국어] device → gendisk 역참조 */
 
-	return sysfs_emit(buf, "%d\n",
-		(disk->flags & GENHD_FL_NO_PART) ? 1 : DISK_MAX_PARTS); /* [한국어] 파티션 불가 플래그 유무에 따라 1 또는 최대 파티션 수 출력 */
+	return sysfs_emit(buf, "%d\n", /* [한국어] ext_range: 확장 minor 공간까지 포함해 이 디스크가 가질 수 있는 파티션 수 상한 */
+		(disk->flags & GENHD_FL_NO_PART) ? 1 : DISK_MAX_PARTS); /* [한국어] GENHD_FL_NO_PART 면 파티션 자체를 만들지 않으므로 1(전체 디스크 하나뿐), 아니면 DISK_MAX_PARTS. NVMe 네임스페이스는 보통 후자다 */
 }
 
 /*
@@ -1755,8 +1837,8 @@ static ssize_t disk_removable_show(struct device *dev,
 {
 	struct gendisk *disk = dev_to_disk(dev); /* [한국어] device → gendisk 역참조 */
 
-	return sysfs_emit(buf, "%d\n",
-		       (disk->flags & GENHD_FL_REMOVABLE ? 1 : 0)); /* [한국어] REMOVABLE 플래그 유무를 1/0으로 출력 */
+	return sysfs_emit(buf, "%d\n", /* [한국어] removable: 미디어를 뺐다 끼웠다 할 수 있는 장치인지 */
+		       (disk->flags & GENHD_FL_REMOVABLE ? 1 : 0)); /* [한국어] CD-ROM/플로피 같은 장치가 1 이다. NVMe SSD 는 0 - 카드를 뽑는 것은 미디어 교체가 아니라 장치 자체의 hot-unplug 이기 때문이다 */
 }
 
 /*
@@ -1777,8 +1859,8 @@ static ssize_t disk_hidden_show(struct device *dev,
 {
 	struct gendisk *disk = dev_to_disk(dev); /* [한국어] device → gendisk 역참조 */
 
-	return sysfs_emit(buf, "%d\n",
-		       (disk->flags & GENHD_FL_HIDDEN ? 1 : 0)); /* [한국어] hidden 플래그 유무를 1/0으로 출력 */
+	return sysfs_emit(buf, "%d\n", /* [한국어] hidden: 사용자에게 /dev 노드를 노출하지 않는 디스크인지 */
+		       (disk->flags & GENHD_FL_HIDDEN ? 1 : 0)); /* [한국어] NVMe multipath 에서 개별 경로 디스크(nvme0c0n1)가 1 이 된다 - 사용자는 통합된 head 디스크(nvme0n1)만 봐야 하기 때문이다(drivers/nvme/host/core.c:4632) */
 }
 
 /*
@@ -2119,13 +2201,20 @@ ssize_t part_fail_store(struct device *dev,
 	return count; /* [한국어] 성공 시 입력 바이트 수 반환 */
 }
 
-static struct device_attribute dev_attr_fail =
-	__ATTR(make-it-fail, 0644, part_fail_show, part_fail_store);
+/* [한국어] CONFIG_FAIL_MAKE_REQUEST 빌드에서만 존재하는 fault injection 노브.
+ * /sys/block/<disk>/make-it-fail 에 1 을 쓰면 이 장치로 가는 bio 를 인위적으로
+ * 실패시킨다 - 에러 처리 경로를 실제 하드웨어 고장 없이 시험하기 위한 것이다. */
+static struct device_attribute dev_attr_fail = /* [한국어] 속성 구조체 정의 */
+	__ATTR(make-it-fail, 0644, part_fail_show, part_fail_store); /* [한국어] 이름/권한(rw-r--r--)/show/store 콜백을 한 번에 지정하는 매크로 */
 #endif /* CONFIG_FAIL_MAKE_REQUEST */
 
 #ifdef CONFIG_FAIL_IO_TIMEOUT
-static struct device_attribute dev_attr_fail_timeout =
-	__ATTR(io-timeout-fail, 0644, part_timeout_show, part_timeout_store);
+/* [한국어] CONFIG_FAIL_IO_TIMEOUT 빌드에서만 존재하는 타임아웃 fault injection 노브.
+ * /sys/block/<disk>/io-timeout-fail 로 요청 타임아웃을 인위적으로 유발해
+ * 드라이버의 타임아웃/복구 경로(NVMe 라면 nvme_timeout → Abort → 컨트롤러
+ * 리셋)를 실제 고장 없이 시험할 수 있다. */
+static struct device_attribute dev_attr_fail_timeout = /* [한국어] 속성 구조체 정의 */
+	__ATTR(io-timeout-fail, 0644, part_timeout_show, part_timeout_store); /* [한국어] 이름/권한/show/store 콜백 지정 */
 #endif
 
 /*
@@ -2432,28 +2521,28 @@ static int diskstats_show(struct seq_file *seqf, void *v)
 		seq_put_decimal_ull(seqf, " ", stat.ios[STAT_READ]);     /* [한국어] 읽기 완료 I/O 수 */
 		seq_put_decimal_ull(seqf, " ", stat.merges[STAT_READ]);   /* [한국어] 읽기 병합 수 */
 		seq_put_decimal_ull(seqf, " ", stat.sectors[STAT_READ]);  /* [한국어] 읽기 섹터 수 */
-		seq_put_decimal_ull(seqf, " ", (unsigned int)div_u64(stat.nsecs[STAT_READ],
+		seq_put_decimal_ull(seqf, " ", (unsigned int)div_u64(stat.nsecs[STAT_READ], /* [한국어] 나노초 누적값을 밀리초로 나눠 출력 - 커널은 ns 로 재고 사용자 인터페이스는 ms 로 노출한다 */
 								     NSEC_PER_MSEC)); /* [한국어] 읽기 총 시간(ms) */
 		seq_put_decimal_ull(seqf, " ", stat.ios[STAT_WRITE]);     /* [한국어] 쓰기 완료 I/O 수 */
 		seq_put_decimal_ull(seqf, " ", stat.merges[STAT_WRITE]);  /* [한국어] 쓰기 병합 수 */
 		seq_put_decimal_ull(seqf, " ", stat.sectors[STAT_WRITE]); /* [한국어] 쓰기 섹터 수 */
-		seq_put_decimal_ull(seqf, " ", (unsigned int)div_u64(stat.nsecs[STAT_WRITE],
+		seq_put_decimal_ull(seqf, " ", (unsigned int)div_u64(stat.nsecs[STAT_WRITE], /* [한국어] 쓰기 누적 서비스 시간(ns)을 ms 로 환산 */
 								     NSEC_PER_MSEC)); /* [한국어] 쓰기 총 시간(ms) */
 		seq_put_decimal_ull(seqf, " ", inflight);                 /* [한국어] 현재 진행 중 I/O 수 */
 		seq_put_decimal_ull(seqf, " ", jiffies_to_msecs(stat.io_ticks)); /* [한국어] 큐 점유 시간(ms) */
-		seq_put_decimal_ull(seqf, " ", (unsigned int)div_u64(stat.nsecs[STAT_READ] +
-								     stat.nsecs[STAT_WRITE] +
-								     stat.nsecs[STAT_DISCARD] +
-								     stat.nsecs[STAT_FLUSH],
-								     NSEC_PER_MSEC)); /* [한국어] 전체 I/O 누적 대기 시간(ms) */
+		seq_put_decimal_ull(seqf, " ", (unsigned int)div_u64(stat.nsecs[STAT_READ] + /* [한국어] 네 종류 연산의 누적 서비스 시간을 모두 더한다 - iostat 의 마지막 "weighted time" 열에 해당 */
+								     stat.nsecs[STAT_WRITE] + /* [한국어] 쓰기 몫 */
+								     stat.nsecs[STAT_DISCARD] + /* [한국어] discard(TRIM) 몫 */
+								     stat.nsecs[STAT_FLUSH], /* [한국어] flush 몫 */
+								     NSEC_PER_MSEC)); /* [한국어] 합계를 ms 로 환산해 출력 */
 		seq_put_decimal_ull(seqf, " ", stat.ios[STAT_DISCARD]);   /* [한국어] discard(TRIM) 완료 수 */
 		seq_put_decimal_ull(seqf, " ", stat.merges[STAT_DISCARD]); /* [한국어] discard 병합 수 */
 		seq_put_decimal_ull(seqf, " ", stat.sectors[STAT_DISCARD]); /* [한국어] discard 섹터 수 */
-		seq_put_decimal_ull(seqf, " ", (unsigned int)div_u64(stat.nsecs[STAT_DISCARD],
-								     NSEC_PER_MSEC)); /* [한국어] discard 총 시간(ms) */
+		seq_put_decimal_ull(seqf, " ", (unsigned int)div_u64(stat.nsecs[STAT_DISCARD], /* [한국어] discard 누적 서비스 시간(ns) */
+								     NSEC_PER_MSEC)); /* [한국어] ms 로 환산해 출력 */
 		seq_put_decimal_ull(seqf, " ", stat.ios[STAT_FLUSH]);     /* [한국어] flush 완료 수 */
-		seq_put_decimal_ull(seqf, " ", (unsigned int)div_u64(stat.nsecs[STAT_FLUSH],
-								     NSEC_PER_MSEC)); /* [한국어] flush 총 시간(ms) */
+		seq_put_decimal_ull(seqf, " ", (unsigned int)div_u64(stat.nsecs[STAT_FLUSH], /* [한국어] flush 누적 서비스 시간(ns) */
+								     NSEC_PER_MSEC)); /* [한국어] ms 로 환산해 출력 */
 		seq_putc(seqf, '\n'); /* [한국어] 행 종료 */
 	}
 	rcu_read_unlock(); /* [한국어] RCU 읽기 종료 */
@@ -2521,51 +2610,64 @@ dev_t part_devt(struct gendisk *disk, u8 partno)
  * [한국어]
  * __alloc_disk_node - 지정 NUMA 노드에 gendisk 할당 및 초기화
  *
- * @q:       연결할 request_queue 포인터 (NVMe blk_mq_tag_set에서 파생됨).
+ * @q:       연결할 request_queue 포인터. 호출자가 이미 만들어 둔 큐다.
  * @node_id: 메모리 할당에 사용할 NUMA 노드 번호.
  * @lkclass: lockdep 클래스 키 (bio completion 락 추적용).
  * @return:  성공 시 초기화된 gendisk 포인터, 실패 시 NULL.
  *
- * NVMe 드라이버가 네임스페이스당 gendisk를 하나씩 생성할 때 호출된다.
- * gendisk 구조체, bio_split mempool, bdi, part0 block_device, part_tbl XArray,
- * blkcg, zone 자원, 난수 시드를 순서대로 초기화한다. 실패 시 역순으로 정리.
+ * gendisk 생명주기의 첫 단계다. gendisk 구조체, bio_split mempool, bdi,
+ * part0 block_device, part_tbl XArray, blkcg, zone 자원, 난수 시드를 순서대로
+ * 초기화한다. 실패 시 역순으로 정리한다.
+ *
+ * 여기서 만들어지는 disk->part0 가 중요하다. 이것은 "전체 디스크"를 나타내는
+ * struct block_device 로, bdev_alloc()(block/bdev.c)이 bdev pseudo-filesystem
+ * 의 inode 위에 얹어 만든다. /dev/nvme0n1 을 open(2) 할 때 실제로 참조되는
+ * 객체가 바로 이것이다. 다만 이 시점에는 아직 bdev inode 해시에 등록되지
+ * 않아서 lookup 이 되지 않는다 - 등록은 나중에 add_disk_final() 이 부르는
+ * bdev_add() 가 한다. 즉 "객체 생성"과 "시스템에 노출"이 분리되어 있고,
+ * 그 사이 구간에서는 드라이버가 아직 이름/용량 등을 자유롭게 채울 수 있다.
+ *
  * 실행 컨텍스트: 프로세스 컨텍스트 (GFP_KERNEL 할당 가능).
  *
  * 호출 체인:
- *   __blk_alloc_disk() → [__alloc_disk_node()] (gendisk+queue 패키지)
- *   nvme 드라이버 직접  → [__alloc_disk_node()] (외부 queue 사용)
+ *   __blk_alloc_disk()    → [__alloc_disk_node()] (bio-based: 큐를 함께 생성)
+ *   __blk_mq_alloc_disk() → [__alloc_disk_node()] (blk-mq: 태그셋 공유 큐 생성)
+ *   blk_mq_alloc_disk_for_queue() → [__alloc_disk_node()] (기존 큐 재사용)
+ * NVMe 는 네임스페이스마다 blk_mq_alloc_disk() 를 부르므로 두 번째 경로로
+ * 들어온다(drivers/nvme/host/core.c:4604). multipath head 디스크는
+ * blk_alloc_disk() 를 쓰므로 첫 번째 경로다(multipath.c:1063).
  */
 struct gendisk *__alloc_disk_node(struct request_queue *q, int node_id,
 		struct lock_class_key *lkclass)
 {
 	struct gendisk *disk; /* [한국어] 할당할 gendisk 포인터 */
 
-	disk = kzalloc_node(sizeof(struct gendisk), GFP_KERNEL, node_id); /* [한국어] NUMA 노드에 gendisk 0-초기화 할당 */
+	disk = kzalloc_node(sizeof(struct gendisk), GFP_KERNEL, node_id); /* [한국어] 지정 NUMA 노드에서 gendisk 를 0 으로 채워 할당 - 완료 처리와 통계가 이 구조체를 자주 만지므로 큐가 붙은 노드에 두는 것이 유리하다 */
 	if (!disk) /* [한국어] 메모리 부족 시 NULL 반환 */
-		return NULL;
+		return NULL; /* [한국어] 아직 아무 자원도 잡지 않았으므로 정리할 것이 없다 */
 
-	if (bioset_init(&disk->bio_split, BIO_POOL_SIZE, 0, 0)) /* [한국어] bio 분할 mempool 초기화 (big bio 분할에 사용) */
-		goto out_free_disk;
+	if (bioset_init(&disk->bio_split, BIO_POOL_SIZE, 0, 0)) /* [한국어] bio 분할 전용 mempool 초기화 - 큐 한도(max_sectors, max_segments 등)를 넘는 bio 를 쪼갤 때 여기서 새 bio 를 얻는다. 전용 풀을 두는 이유는 분할이 메모리 회수 경로에서도 반드시 전진해야 하기 때문이다 */
+		goto out_free_disk; /* [한국어] 방금 할당한 gendisk 만 되돌린다 */
 
-	disk->bdi = bdi_alloc(node_id); /* [한국어] backing_dev_info 할당 — writeback 관리용 */
+	disk->bdi = bdi_alloc(node_id); /* [한국어] backing_dev_info 할당 - 이 장치에 대한 writeback 정책과 readahead 크기를 담는 객체 */
 	if (!disk->bdi) /* [한국어] bdi 할당 실패 */
-		goto out_free_bioset;
+		goto out_free_bioset; /* [한국어] bio_split 풀부터 되돌린다 */
 
 	/* bdev_alloc() might need the queue, set before the first call */
 	disk->queue = q; /* [한국어] bdev_alloc 호출 전 queue를 먼저 설정해야 함 */
 
-	disk->part0 = bdev_alloc(disk, 0); /* [한국어] 파티션 번호 0(전체 디스크)의 block_device 할당 */
+	disk->part0 = bdev_alloc(disk, 0); /* [한국어] partno=0, 즉 "전체 디스크"에 해당하는 block_device 를 만든다. block/bdev.c 의 bdev_alloc()이 bdevfs inode 를 하나 뽑아 그 안에 block_device 를 심는 구조라, 이 한 줄로 inode + block_device 가 동시에 생긴다 */
 	if (!disk->part0) /* [한국어] part0 할당 실패 */
-		goto out_free_bdi;
+		goto out_free_bdi; /* [한국어] bdi 부터 되돌린다 */
 
 	disk->node_id = node_id;           /* [한국어] NUMA 노드 번호 저장 */
 	mutex_init(&disk->open_mutex);     /* [한국어] 동시 open/close/scan 직렬화 뮤텍스 초기화 */
 	xa_init(&disk->part_tbl);          /* [한국어] 파티션 테이블 XArray 초기화 */
-	if (xa_insert(&disk->part_tbl, 0, disk->part0, GFP_KERNEL)) /* [한국어] part0을 인덱스 0에 삽입 */
-		goto out_destroy_part_tbl;
+	if (xa_insert(&disk->part_tbl, 0, disk->part0, GFP_KERNEL)) /* [한국어] part0 을 파티션 테이블의 0 번 자리에 넣는다 - 이후 파티션 스캔이 찾아내는 nvme0n1p1 등은 1 번부터 채워진다 */
+		goto out_destroy_part_tbl; /* [한국어] XArray 를 파기하고 그 아래 자원까지 되돌린다 */
 
-	if (blkcg_init_disk(disk)) /* [한국어] 블록 cgroup 초기화 — throttle/iolatency 등에 필요 */
-		goto out_erase_part0;
+	if (blkcg_init_disk(disk)) /* [한국어] 블록 cgroup 초기화 - blk-throttle, iolatency, iocost 가 이 디스크에 정책을 붙일 수 있게 한다 */
+		goto out_erase_part0; /* [한국어] part_tbl 에서 part0 를 지우는 것부터 되돌린다 */
 
 	disk_init_zone_resources(disk); /* [한국어] zoned block device 자원 초기화 */
 	rand_initialize_disk(disk);     /* [한국어] 엔트로피 시드 초기화 */
@@ -2615,7 +2717,13 @@ out_free_disk:
  * 실행 컨텍스트: 프로세스 컨텍스트 (GFP_KERNEL 할당 가능).
  *
  * 호출 체인:
- *   nvme_alloc_ns() → [__blk_alloc_disk()] → blk_alloc_queue() + __alloc_disk_node()
+ *   드라이버(blk_alloc_disk 매크로) → [__blk_alloc_disk()]
+ *     → blk_alloc_queue() + __alloc_disk_node()
+ * 주의: NVMe 네임스페이스는 이 함수가 아니라 __blk_mq_alloc_disk() 를 탄다
+ * (blk_mq_alloc_disk 매크로, drivers/nvme/host/core.c:4604). 그쪽은
+ * blk_alloc_queue() 대신 blk_mq_alloc_queue() 로 태그셋에 묶인 큐를 만든다.
+ * 이 함수를 쓰는 NVMe 쪽 코드는 multipath head 디스크뿐이다
+ * (blk_alloc_disk, drivers/nvme/host/multipath.c:1063).
  */
 struct gendisk *__blk_alloc_disk(struct queue_limits *lim, int node,
 		struct lock_class_key *lkclass)
@@ -2624,9 +2732,9 @@ struct gendisk *__blk_alloc_disk(struct queue_limits *lim, int node,
 	struct request_queue *q;               /* [한국어] 새로 할당할 request_queue 포인터 */
 	struct gendisk *disk;                  /* [한국어] 새로 할당할 gendisk 포인터 */
 
-	q = blk_alloc_queue(lim ? lim : &default_lim, node); /* [한국어] queue limits 적용하여 blk-mq queue 할당 */
+	q = blk_alloc_queue(lim ? lim : &default_lim, node); /* [한국어] bio-based 용 request_queue 를 만든다. lim 이 NULL 이면 전부 0 인 기본값이 쓰이고, 그 경우 큐 한도는 blk_validate_limits() 가 채워 넣는 보수적인 기본치가 된다 */
 	if (IS_ERR(q)) /* [한국어] queue 할당 실패 시 에러 포인터 전파 */
-		return ERR_CAST(q);
+		return ERR_CAST(q); /* [한국어] request_queue* 로 인코딩된 에러를 gendisk* 타입으로 캐스팅해 그대로 돌려준다 */
 
 	disk = __alloc_disk_node(q, node, lkclass); /* [한국어] 위에서 만든 queue로 gendisk 초기화 */
 	if (!disk) { /* [한국어] gendisk 할당 실패 */

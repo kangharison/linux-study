@@ -916,7 +916,7 @@ void blk_free_flush_queue(struct blk_flush_queue *fq)
  * 에서 synchronize_rcu 대기로 30분 이상 지연이 발생하므로 정적 key를 사용한다.
  *
  * 호출 체인:
- *   nvme_pci_init_hctx / nvme_loop_init_hctx
+ *   nvme_init_hctx / nvme_init_hctx
  *     → [blk_mq_hctx_set_fq_lock_class]
  */
 /*

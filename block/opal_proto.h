@@ -74,7 +74,7 @@
  * opal_session_info 등 ioctl ABI를 정의하며, sed-opal.c 내부에서 이 헤더의
  * opal_uid/opal_method와 결합되어 실제 프로토콜 메시지로 변환됨), 그리고 SED를
  * 캐리어로 사용하는 저장장치 드라이버(예: drivers/nvme/host/core.c의
- * nvme_sec_submit/nvme_sec_recv 계열)가 이 헤더가 정의하는 바이트열을 그대로
+ * nvme_sec_submit/nvme_sec_submit 계열)가 이 헤더가 정의하는 바이트열을 그대로
  * Security Send/Receive의 데이터 페이로드로 전달한다. 데이터 흐름 관점에서 보면,
  * 호스트가 조립한 opal_header(compacket+packet+subpacket 헤더) 뒤에 opal_token/
  * opal_uid/opal_method로 구성된 메소드 호출 스트림이 이어져 하나의 요청 버퍼가
@@ -1521,7 +1521,7 @@ struct d0_features {
  * - 이 헤더가 정의하는 것은 "데이터 버퍼 안의 바이트 배치"뿐이다. 어떤
  *   명령으로 그 버퍼를 실어 나르는지는 전적으로 각 저장장치 드라이버의
  *   sec_send_recv 콜백 구현에 달려 있다(NVMe: nvme_sec_submit/
- *   nvme_sec_recv, SCSI/ATA: 각자의 SECURITY PROTOCOL IN/OUT 경로).
+ *   nvme_sec_submit, SCSI/ATA: 각자의 SECURITY PROTOCOL IN/OUT 경로).
  *
  * - sed-opal의 트래픽은 블록 I/O 경로를 타지 않는다. 유저스페이스 ioctl이
  *   sed_ioctl()을 부르고, 그 안에서 dev->send_recv()를 직접 호출하는

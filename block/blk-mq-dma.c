@@ -28,7 +28,7 @@
  * blk_mq_submit_bio() -> blk_mq_get_request()로 request가 만들어진 뒤, 드라이버의
  * ->queue_rq (예: nvme_queue_rq) -> nvme_setup_cmd() -> nvme_map_data()가
  * blk_rq_dma_map_iter_start()/blk_rq_dma_map_iter_next()를 반복 호출하며 세그먼트를
- * 하나씩 꺼내 PRP1/PRP2 또는 SGL entry에 채우고, 다 채우면 nvme_submit_cmd()로
+ * 하나씩 꺼내 PRP1/PRP2 또는 SGL entry에 채우고, 다 채우면 nvme_sq_copy_cmd/nvme_write_sq_db()로
  * SQ(Submission Queue)에 넣고 doorbell을 울린다. 이 파일 자체는 별도 커널 스레드나
  * 인터럽트 컨텍스트를 만들지 않는 순수 라이브러리 함수 모음이며, 블록 I/O를
  * 제출한 프로세스 컨텍스트(동기 read/write, io_uring worker 등) 안에서 호출자의

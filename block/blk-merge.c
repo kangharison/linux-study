@@ -3204,7 +3204,7 @@ EXPORT_SYMBOL_GPL(blk_mq_sched_try_merge);
  *  - Discard/Secure Erase/Write Zeroes는 각각 NVMe Dataset Management,
  *    Sanitize, Write Zeroes 명령의 제약을 반영하여 분할/병합한다.
  *  - 이 파일의 처리 이후 request는 block/blk-mq.c의 blk_mq_get_request를
- *    거쳐 nvme_queue_rq로 전달되고, 최종적으로 nvme_submit_cmd()에서
+ *    거쳐 nvme_queue_rq로 전달되고, 최종적으로 nvme_sq_copy_cmd/nvme_write_sq_db()에서
  *    doorbell을 울려 NVMe 컨트롤러에 전송된다.
  * ============================================================================
  */

@@ -32,7 +32,7 @@
  * request가 들어오고, 이후 blk_mq_run_hw_queue() -> bfq_dispatch_request()가
  * 이 헤더에 정의된 bfq_queue/bfq_entity 트리(B-WF2Q+ service_tree)에서 다음에
  * 내보낼 request를 고른다. 선택된 request는 blk_mq_dispatch_rq_list()를 거쳐
- * 실제 드라이버(NVMe의 경우 nvme_queue_rq() -> nvme_submit_cmd()의 SQ tail
+ * 실제 드라이버(NVMe의 경우 nvme_queue_rq() -> nvme_sq_copy_cmd/nvme_write_sq_db()의 SQ tail
  * doorbell 기록)로 전달된다. 이 헤더는 세 .c 파일이 컴파일 타임에 include하여
  * 동일한 타입 정의를 공유하는 지점이며, 실행 컨텍스트는 커널 블록 계층
  * 내부로, 대부분 프로세스 컨텍스트(시스템 콜 경로)에서 bfqd->lock(스핀락)을

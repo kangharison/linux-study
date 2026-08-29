@@ -32,7 +32,7 @@
  *   → submit_bio_noacct [여기] → submit_bio_noacct_nocheck [여기]
  *   → __submit_bio_noacct_mq [여기] → __submit_bio [여기]
  *   → blk_mq_submit_bio [block/blk-mq.c] → blk_mq_get_request
- *   → nvme_queue_rq [drivers/nvme/host/pci.c] → nvme_submit_cmd(doorbell)
+ *   → mq_ops->queue_rq (NVMe PCIe 면 nvme_queue_rq) → nvme_sq_copy_cmd → nvme_write_sq_db
  * plug 배치 경로: blk_start_plug [여기] → (bio 제출) → blk_finish_plug [여기]
  *   → __blk_flush_plug [여기] → blk_mq_flush_plug_list [blk-mq.c] → nvme_queue_rq
  * queue freeze 경로: blk_queue_start_drain [여기] → blk_freeze_queue_start
@@ -387,7 +387,7 @@ EXPORT_SYMBOL_GPL(blk_status_to_str);
  * 실행 컨텍스트: 프로세스 컨텍스트만 허용 (sleep 가능; cancel_work_sync 내부 대기)
  *
  * 호출 체인:
- *   nvme_shutdown_ctrl / nvme_remove → [blk_sync_queue] → timer_delete_sync + cancel_work_sync
+ *   nvme_disable_ctrl / nvme_remove → [blk_sync_queue] → timer_delete_sync + cancel_work_sync
  */
 void blk_sync_queue(struct request_queue *q)
 {
@@ -415,7 +415,7 @@ EXPORT_SYMBOL(blk_sync_queue);
  * 실행 컨텍스트: 임의 컨텍스트 (runtime PM suspend 경로)
  *
  * 호출 체인:
- *   nvme_runtime_suspend / blk_pre_runtime_suspend → [blk_set_pm_only] → atomic_inc
+ *   드라이버의 runtime_suspend 콜백 / blk_pre_runtime_suspend → [blk_set_pm_only] → atomic_inc
  */
 void blk_set_pm_only(struct request_queue *q)
 {
@@ -436,7 +436,7 @@ EXPORT_SYMBOL_GPL(blk_set_pm_only);
  * 실행 컨텍스트: 임의 컨텍스트 (runtime PM resume 경로)
  *
  * 호출 체인:
- *   nvme_runtime_resume / blk_post_runtime_resume → [blk_clear_pm_only] → wake_up_all
+ *   드라이버의 runtime_resume 콜백 / blk_post_runtime_resume → [blk_clear_pm_only] → wake_up_all
  */
 void blk_clear_pm_only(struct request_queue *q)
 {
@@ -522,7 +522,7 @@ static void blk_free_queue(struct request_queue *q)
  * 실행 컨텍스트: 임의 컨텍스트 (refcount 가 0이 되는 경로에 따라 다름)
  *
  * 호출 체인:
- *   blk_cleanup_disk / nvme_remove_ns → [blk_put_queue] → blk_free_queue
+ *   blk_cleanup_disk / nvme_ns_remove → [blk_put_queue] → blk_free_queue
  */
 void blk_put_queue(struct request_queue *q)
 {
@@ -1158,7 +1158,7 @@ static inline blk_status_t blk_check_zone_append(struct request_queue *q,
  *
  * 호출 체인:
  *   __submit_bio_noacct_mq / __submit_bio_noacct → [__submit_bio]
- *   → blk_mq_submit_bio → nvme_queue_rq → nvme_submit_cmd(doorbell)
+ *   → blk_mq_submit_bio → mq_ops->queue_rq (간접 호출; NVMe PCIe 면 nvme_queue_rq → nvme_sq_copy_cmd → nvme_write_sq_db)
  */
 static void __submit_bio(struct bio *bio)
 {
@@ -1280,7 +1280,7 @@ static void __submit_bio_noacct(struct bio *bio)
  *
  * 호출 체인:
  *   submit_bio_noacct_nocheck → [__submit_bio_noacct_mq] → __submit_bio (반복)
- *   → blk_mq_submit_bio → nvme_queue_rq → nvme_submit_cmd(doorbell)
+ *   → blk_mq_submit_bio → mq_ops->queue_rq (간접 호출; NVMe PCIe 면 nvme_queue_rq → nvme_sq_copy_cmd → nvme_write_sq_db)
  */
 static void __submit_bio_noacct_mq(struct bio *bio)
 {
@@ -1567,7 +1567,7 @@ static void bio_set_ioprio(struct bio *bio)
  * 호출 체인:
  *   ext4_readpages / generic_writepages → [submit_bio]
  *   → submit_bio_noacct → submit_bio_noacct_nocheck → __submit_bio
- *   → blk_mq_submit_bio → nvme_queue_rq → nvme_submit_cmd(doorbell)
+ *   → blk_mq_submit_bio → mq_ops->queue_rq (간접 호출; NVMe PCIe 면 nvme_queue_rq → nvme_sq_copy_cmd → nvme_write_sq_db)
  */
 void submit_bio(struct bio *bio)
 {
@@ -2089,14 +2089,14 @@ EXPORT_SYMBOL(blk_check_plugged);
  *
  * 호출 체인:
  *   blk_finish_plug → [__blk_flush_plug] → blk_mq_flush_plug_list
- *   → nvme_queue_rq → nvme_submit_cmd(doorbell)
+ *   → mq_ops->queue_rq (간접 호출; NVMe PCIe 면 nvme_queue_rq → nvme_sq_copy_cmd → nvme_write_sq_db)
  */
 void __blk_flush_plug(struct blk_plug *plug, bool from_schedule)
 {
 	if (!list_empty(&plug->cb_list)) /* [한국어] unplug callback 이 등록된 경우 먼저 실행 */
 		flush_plug_callbacks(plug, from_schedule); /* [한국어] elevator/DM 등의 unplug callback 호출 */
 	blk_mq_flush_plug_list(plug, from_schedule); /* [한국어] mq_list 의 request 를 NVMe SQ 로 dispatch;
-	                                               * nvme_queue_rq → nvme_submit_cmd(doorbell) */
+	                                               * mq_ops->queue_rq (간접 호출; NVMe PCIe 면 nvme_queue_rq → nvme_sq_copy_cmd → nvme_write_sq_db) */
 	/*
 	 * Unconditionally flush out cached requests, even if the unplug
 	 * event came from schedule. Since we know hold references to the
@@ -2214,7 +2214,7 @@ int __init blk_dev_init(void)
  * - 주요 NVMe I/O 흐름:
  *   submit_bio → submit_bio_noacct → submit_bio_noacct_nocheck → __submit_bio
  *   → blk_mq_submit_bio [blk-mq.c] → blk_mq_get_request → nvme_queue_rq
- *   → nvme_submit_cmd(doorbell) [drivers/nvme/host/pci.c]
+ *   → nvme_sq_copy_cmd → nvme_write_sq_db (SQ 기록 후 doorbell) [drivers/nvme/host/pci.c]
  * - q->limits 는 NVMe 최대 전송 크기·PRP/SGL·ZNS·poll 등 컨트롤러 제약을 담는다.
  * - q->nr_requests / q->timeout 은 NVMe SQ 깊이(tagset depth)·명령 타임아웃과 직결된다.
  * - blk_queue_enter/exit(), blk_queue_start_drain(), blk_sync_queue() 는 NVMe

@@ -195,10 +195,12 @@
  *       ↓  ← rq_qos_throttle() 훅: ioc_rqos_throttle() 호출
  *   [iocost] vtime 예산 검사 → 초과 시 iocg_kick_delay()로 발급자 지연
  *       ↓  ← vtime 예산 확보 후
- *   [blk-mq] blk_mq_get_request() → 드라이버 큐에 request 삽입
+ *   [blk-mq] request 할당 후 하드웨어 큐(hctx)에 삽입
  *       ↓
- *   [NVMe 드라이버] nvme_queue_rq() → doorbell 기입 → SQ/CQ
- *       ↓  ← 완료 인터럽트
+ *   [블록 드라이버] blk-mq가 mq_ops->queue_rq 를 **간접 호출**한다. iocost는
+ *                   드라이버를 직접 부르지 않으며 어떤 드라이버인지도 모른다.
+ *                   (NVMe라면 이 자리에 nvme_queue_rq()가 들어간다.)
+ *       ↓  ← 드라이버 완료 처리
  *   [blk-mq] blk_mq_complete_request()
  *       ↓  ← rq_qos_done() 훅: ioc_rqos_done() 호출
  *   [iocost] rq_wait_ns / 완료 지연 누적 → 다음 주기 vrate 조정 입력
@@ -299,6 +301,8 @@ enum {
 	WEIGHT_ONE		= 1 << 16,	/* [한국어] 정규화된 가중치 1.0을 나타내는 고정소수점 값(65536): u32로 충분한 정밀도 확보 */
 };
 
+/* [한국어] vtime(가상 시간)의 단위계와 vrate 허용 범위를 정의하는 익명 enum.
+ * iocost 전체가 이 단위 위에서 돌아가므로 여기 상수들이 정밀도와 wrap-around 한계를 결정한다. */
 enum {
 	/*
 	 * As vtime is used to calculate the cost of each IO, it needs to
@@ -327,6 +331,8 @@ enum {
 	AUTOP_CYCLE_NSEC	= 10LLU * NSEC_PER_SEC,	/* [한국어] HDD/SSD 자동 프로파일 전환 조건이 10초 연속 충족돼야 실제 전환 — 일시적 부하 변동에 의한 오전환 방지 */
 };
 
+/* [한국어] 되먹임 제어(vrate 조정)와 부채/지연 유도에 쓰이는 임계값 익명 enum.
+ * ioc_timer_fn()과 ioc_adjust_base_vrate()의 판정 상수가 모여 있다. */
 enum {
 	/* if IOs end up waiting for requests, issue less */
 	RQ_WAIT_BUSY_PCT	= 5,	/* [한국어] 한 주기 내 request(tag) 할당 대기 시간이 5% 이상이면 장치 포화로 판단해 vrate 하강 */
@@ -379,10 +385,11 @@ enum {
 	LCOEF_RANDIO_PAGES	= 4096,	/* [한국어] 직전 IO 끝 섹터에서 4096 페이지(16MB) 이상 떨어지면 랜덤 IO로 분류 — 선형 비용 모델에서 seek 비용 항 적용 */
 };
 
+/* [한국어] ioc->running이 가질 수 있는 세 상태. 주기 타이머의 수명을 나타낸다. */
 enum ioc_running {
 	IOC_IDLE,	/* [한국어] IO 미발행 상태: 활성 iocg 없음, 주기 타이머 정지 — 첫 bio 도착 시 IOC_RUNNING으로 전환 */
 	IOC_RUNNING,	/* [한국어] IO 활성 상태: ioc_timer_fn이 주기적으로 vrate/가중치 재계산 수행 */
-	IOC_STOP,	/* [한국어] 컨트롤러 종료 중: iocost_exit() 호출 후 타이머·waitq 정리 진행 중 */
+	IOC_STOP,	/* [한국어] 컨트롤러 종료 중: ioc_rqos_exit() 호출 후 타이머·waitq 정리 진행 중 */
 };
 
 /* io.cost.qos controls including per-dev enable of the whole controller */
@@ -414,7 +421,7 @@ enum {
 };
 
 /* builtin linear cost model coefficients */
-/* [한국어] 사용자 입력 선형 비용 계수 인덱스 (i_lcoefs: 장치 최대 IOPS/BPS, ioc_autop_idx_to_params()에서 lcoefs로 변환) */
+/* [한국어] 사용자 입력 선형 비용 계수 인덱스 (i_lcoefs: 장치 최대 IOPS/BPS, ioc_refresh_params_disk()에서 lcoefs로 변환) */
 enum {
 	I_LCOEF_RBPS,		/* [한국어] 읽기 최대 대역폭(bytes/s): 순차 읽기 최대 처리량 */
 	I_LCOEF_RSEQIOPS,	/* [한국어] 읽기 순차 최대 IOPS: IO당 고정 vtime 비용 계산 기준 */
@@ -425,7 +432,7 @@ enum {
 	NR_I_LCOEFS,		/* [한국어] 입력 계수 총 개수 — ioc_params.i_lcoefs[] 크기 */
 };
 
-/* [한국어] 내부 선형 비용 계수 인덱스 (lcoefs: VTIME_PER_SEC/[BPS or IOPS] 단위, ioc_cost_model()에서 직접 사용) */
+/* [한국어] 내부 선형 비용 계수 인덱스 (lcoefs: VTIME_PER_SEC/[BPS or IOPS] 단위, calc_vtime_cost_builtin()에서 직접 사용) */
 enum {
 	LCOEF_RPAGE,	/* [한국어] 읽기 1페이지(4KB)의 vtime 비용: VTIME_PER_SEC/I_LCOEF_RBPS×pagesize 로 유도 */
 	LCOEF_RSEQIO,	/* [한국어] 읽기 순차 IO 1회의 기본 vtime 비용: VTIME_PER_SEC/I_LCOEF_RSEQIOPS */
@@ -442,15 +449,17 @@ enum {
 	AUTOP_HDD,	/* [한국어] 회전 디스크: seek 비용 지배, 대역폭 낮음, latency 목표 250ms */
 	AUTOP_SSD_QD1,	/* [한국어] SSD 큐 깊이 1 운용 모드: 병렬 IO 없이 순차 발행, latency 목표 25ms */
 	AUTOP_SSD_DFL,	/* [한국어] SSD 기본 프로파일: too_fast_vrate_pct=500, latency 목표 25ms */
-	AUTOP_SSD_FAST,	/* [한국어] 고속 SSD/NVMe: 높은 IOPS, too_slow_vrate_pct=10, latency 목표 5ms */
+	AUTOP_SSD_FAST,	/* [한국어] 최상위 프로파일. 랜덤 읽기 778122 IOPS·읽기 대역폭 약 3.1GB/s·지연 목표 5ms를
+			 * 가정한다 — NVMe 급 장치가 도달하는 등급이다. too_slow_vrate_pct=10만 두고
+			 * too_fast는 두지 않는다(더 올라갈 프로파일이 없으므로). */
 };
 
 /*
  * [한국어] ioc_params: 장치별 비용/QoS 파라미터 집합.
  * autop[] 테이블에서 장치 유형(HDD, SSD QD1, SSD 기본/고속)에 따라
  * 초기화되며, sequential/random IOPS와 대역폭 특성을 반영한다.
- * 설정자: ioc_autop_idx_to_params()에서 i_lcoefs→lcoefs 변환 후 저장.
- * 읽는 자: ioc_cost_model()에서 bio당 abs_cost 계산 시 lcoefs 참조.
+ * 설정자: ioc_refresh_params_disk()에서 i_lcoefs→lcoefs 변환 후 저장.
+ * 읽는 자: calc_vtime_cost_builtin()에서 bio당 abs_cost 계산 시 lcoefs 참조.
  */
 struct ioc_params {
 	u32				qos[NR_QOS_PARAMS];
@@ -462,143 +471,166 @@ struct ioc_params {
 	u64				i_lcoefs[NR_I_LCOEFS];
 	/* [한국어] 사용자가 지정한 원시 계수(BPS/IOPS 단위).
 	 * 설정자: io.cost.model sysfs 쓰기 → ioc_cost_model_write().
-	 * 읽는 자: ioc_autop_idx_to_params()에서 lcoefs[]로 변환.
+	 * 읽는 자: ioc_refresh_params_disk()에서 lcoefs[]로 변환.
 	 * 값 범위: bytes/s 또는 IO/s; 0이면 해당 계수 미사용.
 	 * 동기화: ioc->lock 보호. */
 	u64				lcoefs[NR_LCOEFS];
 	/* [한국어] 실제 비용 계산에 쓰이는 내부 계수(vtime/page 또는 vtime/IO).
-	 * 설정자: ioc_autop_idx_to_params()가 i_lcoefs에서 변환해 저장.
-	 * 읽는 자: ioc_cost_model()이 bio당 abs_cost = lcoef_page*pages + lcoef_io.
+	 * 설정자: ioc_refresh_params_disk()가 i_lcoefs에서 변환해 저장.
+	 * 읽는 자: calc_vtime_cost_builtin()이 bio당 abs_cost = lcoef_page*pages + lcoef_io.
 	 * 값 범위: VTIME_PER_SEC 기반 고정소수점 값.
 	 * 동기화: ioc->lock 보호. */
 	u32				too_fast_vrate_pct;
 	/* [한국어] 이 백분율(%)을 초과하는 vrate에서 장치가 "너무 빠름"으로 판단.
 	 * AUTOP_SSD_DFL=500(5x), AUTOP_SSD_FAST=0(미사용).
-	 * 설정자: ioc_autop_idx_to_params(). 읽는 자: ioc_adjust_base_vrate().
+	 * 설정자: ioc_refresh_params_disk(). 읽는 자: ioc_adjust_base_vrate().
 	 * 동기화: ioc->lock 보호. */
 	u32				too_slow_vrate_pct;
 	/* [한국어] 이 백분율(%) 미만의 vrate에서 장치가 "너무 느림"으로 판단.
 	 * AUTOP_SSD_FAST=10(0.1x), 나머지=0(미사용).
-	 * 설정자: ioc_autop_idx_to_params(). 읽는 자: ioc_adjust_base_vrate().
+	 * 설정자: ioc_refresh_params_disk(). 읽는 자: ioc_adjust_base_vrate().
 	 * 동기화: ioc->lock 보호. */
 };
 
 /*
  * [한국어] ioc_margins: cgroup vtime이 device vtime보다 뒤처질 수 있는 여유분(vtime 단위).
  * 장치 포화 전에 선제적으로 throttle할 IO 크레딧 버퍼 역할을 한다.
- * 설정자: ioc_margins_calc()가 period_us와 vrate로부터 계산.
+ * 설정자: ioc_refresh_margins()가 period_us와 vrate로부터 계산.
  * 읽는 자: iocg_activate(), current_hweight() 등 vbudget 검사 경로.
  */
 struct ioc_margins {
 	s64				min;
 	/* [한국어] MARGIN_MIN_PCT(10%) 수준의 여유분: 이 이하로 내려가면
 	 * 서플러스 가중치 조정을 즉시 취소해 vtime 고갈을 방지.
-	 * 설정자: ioc_margins_calc(). 읽는 자: iocg_kick_delay().
+	 * 설정자: ioc_refresh_margins(). 읽는 자: iocg_kick_delay().
 	 * 값 범위: 양수(vtime 단위). 동기화: ioc->lock 보호. */
 	s64				low;
 	/* [한국어] MARGIN_LOW_PCT(20%) 수준의 여유분: 이 이하에서 inuse
 	 * 하향 조정 검토 시작. min보다 크고 target보다 작음.
-	 * 설정자: ioc_margins_calc(). 읽는 자: transfer_surpluses().
+	 * 설정자: ioc_refresh_margins(). 읽는 자: transfer_surpluses().
 	 * 동기화: ioc->lock 보호. */
 	s64				target;
 	/* [한국어] MARGIN_TARGET_PCT(50%) 수준의 목표 버퍼: iocg->vtime이
 	 * device vtime 대비 이 여유분을 유지하는 것을 목표로 함.
-	 * 설정자: ioc_margins_calc(). 읽는 자: iocg_activate().
+	 * 설정자: ioc_refresh_margins(). 읽는 자: iocg_activate().
 	 * 동기화: ioc->lock 보호. */
 };
 
 /*
- * [한국어] ioc_missed: 한 주기 내 latency QoS 달성/미달성 카운터.
- * NVMe CQ 완료 인터럽트에서 per-CPU로 갱신되며, 타이머 주기마다
- * 집계해 미달성 비율로 vrate 조정 여부를 결정한다.
- * 설정자: ioc_rqos_done_bio()가 CQ 완료 시 CPU-local로 증가.
- * 읽는 자: ioc_timer_fn()이 period마다 전 CPU를 집계.
+ * [한국어] ioc_missed: 한 주기 안에서 지연(latency) QoS를 지킨 IO 수와
+ * 못 지킨 IO 수를 세는 per-CPU 카운터 쌍.
+ * ioc_rqos_done()이 request 완료 시점에 on_q_ns(= 완료시각 - rq->alloc_time_ns)에서
+ * 크기 비례분(size_nsec)을 뺀 값을 params.qos[QOS_RLAT/QOS_WLAT]와 비교해
+ * nr_met 또는 nr_missed를 하나 올린다. ioc_timer_fn()은 주기마다
+ * ioc_lat_stat()으로 전 CPU를 합산해 missed_ppm을 구하고, 그것이 목표
+ * 백분위(QOS_RPPM/QOS_WPPM)를 넘으면 장치 포화로 보고 vrate를 낮춘다.
+ * 실행 컨텍스트: 갱신은 request 완료 컨텍스트(드라이버 구현에 따라 하드웨어
+ * IRQ, softirq, 또는 완료용 스레드), 집계는 타이머(softirq) 컨텍스트.
  */
 struct ioc_missed {
 	local_t				nr_met;
 	/* [한국어] latency 목표를 달성한 IO 수(per-CPU local_t).
-	 * 설정자: ioc_rqos_done_bio()에서 local_inc(&missed->nr_met).
-	 * 읽는 자: ioc_timer_fn()에서 ioc_missed_update()로 전 CPU 합산.
+	 * 설정자: ioc_rqos_done()에서 local_inc(&ccs->missed[rw].nr_met).
+	 * 읽는 자: ioc_timer_fn()에서 ioc_lat_stat()로 전 CPU 합산.
 	 * 동기화: local_t는 단일 CPU 접근만 가정; 집계 시 READ_ONCE. */
 	local_t				nr_missed;
 	/* [한국어] latency 목표를 초과한 IO 수(per-CPU local_t).
-	 * 설정자: ioc_rqos_done_bio()에서 local_inc(&missed->nr_missed).
+	 * 설정자: ioc_rqos_done()에서 local_inc(&ccs->missed[rw].nr_missed).
 	 * 읽는 자: ioc_timer_fn()에서 nr_missed/(nr_met+nr_missed)로 미달성률 계산.
 	 * 동기화: nr_met와 동일. */
 	u32				last_met;
 	/* [한국어] 직전 집계 주기의 nr_met 스냅샷.
 	 * 이번 주기 증분 = 현재 합산값 - last_met.
-	 * 설정자/읽는 자: ioc_missed_update()에서 갱신 및 참조.
+	 * 설정자/읽는 자: ioc_lat_stat()에서 갱신 및 참조.
 	 * 동기화: ioc->lock 보호(집계는 타이머 컨텍스트). */
 	u32				last_missed;
 	/* [한국어] 직전 집계 주기의 nr_missed 스냅샷.
 	 * 이번 주기 증분 = 현재 합산값 - last_missed.
-	 * 설정자/읽는 자: ioc_missed_update().
+	 * 설정자/읽는 자: ioc_lat_stat().
 	 * 동기화: ioc->lock 보호. */
 };
 
 /*
- * [한국어] ioc_pcpu_stat: 장치 단위 per-CPU IO 통계.
- * NVMe CQ 완료 인터럽트가 발생하는 CPU에서 lock 없이 갱신되며,
- * ioc_timer_fn() 타이머가 주기마다 전 CPU를 순회해 집계한다.
- * 설정자: ioc_rqos_done_bio() (완료 인터럽트), ioc_rqos_throttle() (rq_wait).
- * 읽는 자: ioc_timer_fn()의 ioc_missed_update(), ioc_rq_wait_update().
+ * [한국어] ioc_pcpu_stat: 장치(ioc) 단위 per-CPU IO 통계.
+ * request가 완료되는 CPU에서 락 없이 갱신되고, ioc_timer_fn()이 주기마다
+ * for_each_online_cpu()로 전 CPU를 순회해 집계한다. per-CPU로 쪼갠 이유는
+ * 완료 경로가 초당 수십만 번 돌 수 있어 공유 카운터를 쓰면 캐시라인 경합이
+ * 그 자체로 병목이 되기 때문이다.
+ * 설정자: ioc_rqos_done() — missed[rw]와 rq_wait_ns를 모두 이 한 함수에서 갱신한다.
+ * 읽는 자: ioc_timer_fn()이 호출하는 ioc_lat_stat()이 for_each_online_cpu()로 전 CPU를 합산.
+ * 동기화: 쓰기는 local_t/local64_t로 CPU-local, 집계는 ioc->lock 아래 타이머 단독.
  */
 struct ioc_pcpu_stat {
 	struct ioc_missed		missed[2];
 	/* [한국어] 읽기(missed[0])·쓰기(missed[1]) 방향별 latency QoS 달성/미달 카운터.
-	 * 설정자: ioc_rqos_done_bio()에서 bio 방향에 따라 missed[0] 또는 missed[1] 갱신.
+	 * 설정자: ioc_rqos_done()에서 op_is_write(rq->cmd_flags)로 방향을 골라 갱신.
 	 * 읽는 자: ioc_timer_fn()이 양 방향 미달성률을 계산해 vrate 하강 여부 판단.
 	 * 동기화: local_t이므로 CPU-local write; 집계는 타이머가 READ_ONCE로 읽음. */
 
 	local64_t			rq_wait_ns;
 	/* [한국어] request(blk-mq tag) 할당 대기에 소요된 누적 시간(ns).
-	 * 설정자: ioc_rqos_throttle()에서 rq 할당 전후 ktime 차이를 local64_add().
+	 * 설정자: ioc_rqos_done()이 rq->start_time_ns - rq->alloc_time_ns 를 local64_add().
 	 * 읽는 자: ioc_timer_fn()에서 주기당 rq_wait_pct = delta_wait/period_ns×100.
 	 * 동기화: local64_t는 CPU-local 원자적 64비트 연산. */
 	u64				last_rq_wait_ns;
 	/* [한국어] 직전 집계 주기의 rq_wait_ns 스냅샷(비원자 u64).
 	 * 이번 주기 증분 = 현재 합산값 - last_rq_wait_ns.
-	 * 설정자/읽는 자: ioc_rq_wait_update()에서 갱신 및 참조.
+	 * 설정자/읽는 자: ioc_lat_stat()에서 갱신 및 참조.
 	 * 동기화: ioc->lock 보호(집계는 단일 타이머 컨텍스트). */
 };
 
 /*
- * ioc: 장치별 iocost 컨트롤러. NVMe 큐 한 세트(SQ/CQ)에 대응되며,
- * 전체 장치의 가상 시간 축(vtime)과 주기 타이머를 관리한다.
+ * [한국어] struct ioc: 블록 장치(request_queue) 하나당 하나 존재하는 iocost
+ * 컨트롤러. rq_qos 체인에 RQ_QOS_COST로 등록되며, 그 장치 전체의 가상 시간
+ * 축(vtime)과 주기 제어 타이머를 소유한다. 장치 종류에 대한 지식은 없다 —
+ * 이 파일이 장치에 대해 보는 것은 blk_queue_rot()(회전 미디어 여부)과
+ * blk_queue_depth()(큐 깊이) 둘뿐이고, 나머지는 전부 실측 지연으로 추론한다.
  *
- * - params: NVMe 장치별 선형 비용 계수(시퀀셜/랜덤 IOPS, 대역폭)
- * - vtime_rate: NVMe에 실제로 날아가는 bio 속도에 대한 보정률(vrate)
- * - active_iocgs: 현재 IO를 활발히 제출 중인 cgroup 목록
- * - pcpu_stat: CQ 완료 시 측정된 latency QoS 및 rq_wait 통계
- * - busy_level: NVMe 장치/소프트웨어 큐 포화 정도의 누적 지표
+ * - params      : 이 장치에 적용 중인 선형 비용 계수와 지연 QoS 목표
+ * - vtime_rate  : 가상 시간이 실제 시간 대비 얼마나 빨리 흐르는가(vrate).
+ *                 이 값 하나가 장치 전체의 총 발행 허용량을 좌우한다.
+ * - active_iocgs: 현재 IO를 발행 중인 ioc_gq 목록. 타이머가 이 목록만 순회한다.
+ * - pcpu_stat   : request 완료 시 측정한 지연 QoS 달성/미달성과 rq_wait 통계
+ * - busy_level  : 장치 포화도의 누적 지표. vrate_adj_pct[]의 인덱스가 된다.
  */
 /* per device */
 struct ioc {
 	struct rq_qos			rqos;
+	/* [한국어] rq_qos 프레임워크에 등록되는 임베디드 헤더. 반드시 첫 멤버여야
+	 * rqos_to_ioc()의 container_of가 성립한다.
+	 * 설정자: blk_iocost_init()이 rq_qos_add(&ioc->rqos, disk, RQ_QOS_COST, &ioc_rqos_ops).
+	 * 읽는 자: rq_qos_throttle()/rq_qos_done() 등 블록 계층 훅이 이 포인터로 콜백 진입.
+	 * 값 범위: rqos.disk는 init 경로에서 아직 NULL일 수 있다(ioc_name() 참조).
+	 * 동기화: 등록/해제는 요청 큐 freeze 상태에서만 이루어진다. */
 
 	bool				enabled;
+	/* [한국어] 이 장치에서 iocost 제어를 실제로 걸고 있는지 여부.
+	 * false면 ioc_rqos_throttle()이 즉시 반환해 모든 bio가 무검사 통과한다
+	 * (구조체와 통계는 남아 있지만 정책은 꺼진 상태).
+	 * 설정자: ioc_qos_write()가 io.cost.qos의 enable 값으로 갱신.
+	 * 읽는 자: ioc_rqos_throttle(), ioc_rqos_merge(), ioc_rqos_done().
+	 * 동기화: ioc->lock 아래에서 갱신하되, 읽기는 락 없이 하는 빠른 경로가 있다. */
 
 	struct ioc_params		params;
 	/* [한국어] 현재 장치에 적용 중인 비용/QoS 파라미터 집합.
-	 * 설정자: ioc_qos_write(), ioc_cost_model_write(), ioc_autop_idx_to_params().
-	 * 읽는 자: ioc_cost_model()(lcoefs), ioc_adjust_base_vrate()(qos).
+	 * 설정자: ioc_qos_write(), ioc_cost_model_write(), ioc_refresh_params_disk().
+	 * 읽는 자: calc_vtime_cost_builtin()(lcoefs), ioc_adjust_base_vrate()(qos).
 	 * 동기화: ioc->lock 보호. */
 	struct ioc_margins		margins;
 	/* [한국어] period_us와 vrate로부터 계산된 vtime 여유분(min/low/target).
-	 * 설정자: ioc_margins_calc()가 타이머 주기마다 재계산.
+	 * 설정자: ioc_refresh_margins()가 타이머 주기마다 재계산.
 	 * 읽는 자: iocg_activate(), iocg_kick_delay() 등 vbudget 검사 경로.
 	 * 동기화: ioc->lock 보호. */
 	u32				period_us;
 	/* [한국어] 타이머 주기 길이(us). latency QoS 목표로부터 계산되며
 	 * MIN_PERIOD(1ms)~MAX_PERIOD(1s) 범위로 clamp됨.
-	 * 설정자: ioc_calc_period()가 QoS 파라미터 변경 시 갱신.
-	 * 읽는 자: ioc_timer_fn(), ioc_margins_calc().
+	 * 설정자: ioc_refresh_period_us()가 QoS 파라미터 변경 시 갱신.
+	 * 읽는 자: ioc_timer_fn(), ioc_refresh_margins().
 	 * 동기화: ioc->lock 보호. */
 	u32				timer_slack_ns;
 	/* [한국어] hrtimer 슬랙(ns). TIMER_SLACK_PCT(1%)×period_us를 ns로 변환한 값.
 	 * hrtimer_start() 호출 시 slack으로 전달해 CPU wake-up 집중화(timer coalescing) 허용.
-	 * 설정자: ioc_calc_period(). 읽는 자: ioc_arm_waitq_timer().
+	 * 설정자: ioc_refresh_period_us(). 읽는 자: iocg_kick_waitq().
 	 * 동기화: ioc->lock 보호. */
 	u64				vrate_min;
 	/* [한국어] vrate 허용 최솟값(vtime/ns 단위). QOS_MIN에서 변환.
@@ -623,25 +655,25 @@ struct ioc {
 	struct list_head		active_iocgs;	/* active cgroups */
 	/* [한국어] 현재 IO를 발행 중인 ioc_gq들의 연결 리스트.
 	 * iocg->active_list가 여기에 연결됨.
-	 * 설정자: iocg_activate()가 list_add(). iocg_idle()이 list_del().
+	 * 설정자: iocg_activate()가 list_add(). ioc_check_iocgs()/ioc_pd_free()가 list_del_init().
 	 * 읽는 자: ioc_timer_fn()이 리스트를 순회해 가중치/vtime 재계산.
 	 * 동기화: ioc->lock 보호. */
 	struct ioc_pcpu_stat __percpu	*pcpu_stat;
 	/* [한국어] per-CPU 완료 지연·rq_wait 통계 배열.
 	 * 각 CPU의 CQ 완료 인터럽트에서 lock 없이 업데이트되며,
-	 * 타이머 주기마다 ioc_pcpu_stat_sum()으로 집계.
-	 * 설정자: kmalloc_percpu()로 iocost_init() 시 할당.
+	 * 타이머 주기마다 ioc_lat_stat()으로 집계.
+	 * 설정자: blk_blk_iocost_init()이 alloc_percpu(struct ioc_pcpu_stat)으로 할당.
 	 * 동기화: 쓰기는 local_t/local64_t, 읽기는 집계 시 READ_ONCE. */
 
 	enum ioc_running		running;
 	/* [한국어] 컨트롤러 동작 상태(IOC_IDLE/IOC_RUNNING/IOC_STOP).
-	 * 설정자: ioc_start_period()(→RUNNING), iocost_exit()(→STOP), 마지막 iocg 비활성화(→IDLE).
+	 * 설정자: ioc_start_period()(→IOC_RUNNING), ioc_rqos_exit()(→IOC_STOP), ioc_timer_fn()이 활성 iocg가 없을 때(→IOC_IDLE).
 	 * 읽는 자: ioc_timer_fn()이 진입 시 상태 확인.
 	 * 동기화: ioc->lock 보호. */
 	atomic64_t			vtime_rate;
 	/* [한국어] 현재 vrate를 vtime/ns 단위로 저장한 atomic 값.
 	 * 설정자: ioc_adjust_base_vrate()가 타이머 주기마다 갱신.
-	 * 읽는 자: ioc_vtime_rate() 인라인, iocg_activate() 등 빈번히 읽힘.
+	 * 읽는 자: ioc_now()가 vnow = period_at_vtime + 경과μs × vrate 계산에 사용.
 	 * 값 범위: VRATE_MIN~vrate_max. 동기화: atomic64 읽기/쓰기. */
 	u64				vtime_base_rate;
 	/* [한국어] ioc->lock을 잡은 상태에서 참조하는 vrate 캐시.
@@ -665,7 +697,7 @@ struct ioc {
 	 * 동기화: period_seqcount로 period_at_vtime과 함께 원자적으로 갱신. */
 	u64				period_at_vtime; /* vtime starttime */
 	/* [한국어] 현재 주기 시작 시점의 device vtime 값.
-	 * 설정자: ioc_start_period(). 읽는 자: ioc_at_period_vtime() 등.
+	 * 설정자: ioc_start_period(). 읽는 자: ioc_now()(vnow 계산), transfer_surpluses(), ioc_timer_fn().
 	 * 동기화: period_seqcount로 period_at과 함께 원자적으로 갱신. */
 
 	atomic64_t			cur_period;	/* inc'd each period */
@@ -714,11 +746,11 @@ struct ioc {
 	 * 설정자: ioc_adjust_base_vrate(). 동기화: ioc->lock 보호. */
 	int				autop_idx;
 	/* [한국어] 현재 적용 중인 자동 프로파일 인덱스(AUTOP_HDD/SSD_QD1/SSD_DFL/SSD_FAST).
-	 * 설정자: ioc_autop_idx()가 vrate 관측값으로 결정. 읽는 자: ioc_autop_idx_to_params().
+	 * 설정자: ioc_autop_idx()가 vrate 관측값으로 결정. 읽는 자: ioc_refresh_params_disk().
 	 * 동기화: ioc->lock 보호. */
 	bool				user_qos_params:1;
 	/* [한국어] 사용자가 직접 QoS 파라미터를 지정했음을 나타내는 플래그.
-	 * true이면 자동 프로파일 전환(ioc_autop_idx_to_params)이 QoS 파라미터를 덮어쓰지 않음.
+	 * true이면 자동 프로파일 전환(ioc_refresh_params_disk)이 QoS 파라미터를 덮어쓰지 않음.
 	 * 설정자: ioc_qos_write()가 절대값 모드로 설정 시 true.
 	 * 동기화: ioc->lock 보호. */
 	bool				user_cost_model:1;
@@ -733,53 +765,64 @@ struct ioc {
  * bio 발행 시점에 각 CPU에서 lock 없이 abs_cost를 누적하며,
  * 타이머 주기마다 전 CPU를 합산해 이번 주기 사용량을 계산한다.
  * 설정자: iocg_pay_debt()·ioc_rqos_throttle()에서 local64_add().
- * 읽는 자: ioc_timer_fn()의 iocg_stat_update()에서 합산.
+ * 읽는 자: ioc_timer_fn()의 iocg_flush_stat_leaf()에서 합산.
  */
 struct iocg_pcpu_stat {
 	local64_t			abs_vusage;
 	/* [한국어] 이 CPU에서 이 cgroup이 소비한 절대 vtime 비용 누계(MILLION 단위).
 	 * abs_cost = cost × WEIGHT_ONE / hweight_inuse 공식의 결과를 여기에 누적.
 	 * 설정자: iocg_commit_bio()에서 local64_add(&pcpu_stat->abs_vusage, abs_cost).
-	 * 읽는 자: iocg_abs_vusage()가 전 CPU local64_read()를 합산.
+	 * 읽는 자: iocg_flush_stat_leaf()가 전 CPU local64_read()를 합산.
 	 * 동기화: local64_t이므로 단일 CPU 쓰기만 허용; 읽기는 READ_ONCE 기반. */
 };
 
 /*
  * [한국어] iocg_stat: cgroup별 누적 IO 시간 통계(us 단위).
- * 타이머 주기마다 iocg_stat_update()가 갱신하며,
+ * 타이머 주기마다 iocg_flush_stat_leaf()가 갱신하며,
  * io.stat cgroup 인터페이스와 iocost_monitor.py에 노출된다.
- * 설정자: iocg_stat_update()가 period마다 증분을 더함.
- * 읽는 자: iocg_stat_show(), iocost_monitor.py.
+ * 설정자: iocg_flush_stat_leaf()가 period마다 증분을 더함.
+ * 읽는 자: ioc_pd_stat(), iocost_monitor.py.
  * 동기화: ioc->lock 보호.
  */
 struct iocg_stat {
 	u64				usage_us;
 	/* [한국어] 이 cgroup이 실제로 소비한 누적 IO 시간(us).
-	 * abs_vusage를 us 단위로 환산해 누적. 설정자: iocg_stat_update().
+	 * abs_vusage를 us 단위로 환산해 누적. 설정자: iocg_flush_stat_leaf().
 	 * iocost_monitor.py의 "usages%" 필드에 표시. */
 	u64				wait_us;
 	/* [한국어] vtime 예산 부족으로 waitq에서 대기한 누적 시간(us).
-	 * wait_since 타임스탬프로부터 계산. 설정자: iocg_stat_update().
+	 * wait_since 타임스탬프로부터 계산. 설정자: iocg_flush_stat_leaf().
 	 * iocost_monitor.py의 "wait" 정보에 반영. */
 	u64				indebt_us;
 	/* [한국어] abs_vdebt > 0인(부채 상태) 상태로 있었던 누적 시간(us).
-	 * indebt_since 타임스탬프로부터 계산. 설정자: iocg_stat_update(). */
+	 * indebt_since 타임스탬프로부터 계산. 설정자: iocg_flush_stat_leaf(). */
 	u64				indelay_us;
 	/* [한국어] delay > 0인(지연 인가) 상태로 있었던 누적 시간(us).
-	 * indelay_since 타임스탬프로부터 계산. 설정자: iocg_stat_update(). */
+	 * indelay_since 타임스탬프로부터 계산. 설정자: iocg_flush_stat_leaf(). */
 };
 
 /*
- * ioc_gq: 장치-cgroup 쌍별 상태. NVMe에 실제 제출될 bio 한 개 단위의
- * 예산(vtime)과 계층적 가중치를 관리한다.
+ * [한국어] ioc_gq: (블록 장치 × cgroup) 교차점 하나의 상태. 이 cgroup이 이
+ * 장치에서 쓸 수 있는 vtime 예산과, cgroup 계층에서 차지하는 몫(hweight)을
+ * 관리한다. blkcg 프레임워크가 blkg마다 자동으로 생성/소멸시킨다.
  *
- * - vtime: 이 cgroup이 NVMe에 내린 명령들의 누적 비용(issued 기준)
- * - done_vtime: NVMe CQ 완료로 돌아온 명령들의 누적 비용(completed 기준)
- * - cursor: 직전 bio의 마지막 섹터; NVMe sequential vs random 판별에 사용
- * - waitq: 예산 부족으로 블록된 issuer 대기열
- * - hweight_active/hweight_inuse: cgroup 계층에서 이 cgroup의 NVMe 시간
- *   할당 비율. hweight_inuse가 낮을수록 동일한 bio도 더 비싸게 계산됨
- * - abs_vdebt: root cgroup 등 우선 발행된 IO의 미지급 절대 비용
+ * 이 구조체의 핵심은 "가상 시간(vtime) 두 개"다:
+ * - vtime      : 이 cgroup이 **발행한**(issued) bio 비용의 누적. bio를 낼 때마다
+ *                iocg_commit_bio()가 cost만큼 앞으로 민다. 이 값이 장치 전체의
+ *                현재 가상 시각(now->vnow)보다 앞서면 예산 초과 → 대기.
+ * - done_vtime : 그중 **완료된**(completed) 몫의 누적. ioc_rqos_done_bio()가
+ *                bio 완료 때마다 민다. (vtime - done_vtime)이 곧 in-flight
+ *                비용이며, ioc_timer_fn()이 이 차이로 "발행은 했는데 안 돌아온"
+ *                IO가 얼마나 쌓였는지(lagging)를 판정한다.
+ *
+ * - cursor     : 직전 bio의 끝 섹터. 다음 bio가 이 위치에서 얼마나 떨어졌는지로
+ *                순차/랜덤을 갈라 LCOEF_*SEQIO / LCOEF_*RANDIO 중 하나를 고른다.
+ * - waitq      : 예산이 모자라 잠든 발행자(issuer)들의 대기열.
+ * - hweight_active / hweight_inuse: cgroup 계층을 평탄화한 이 cgroup의 몫
+ *                (0~WEIGHT_ONE). hweight_inuse가 낮을수록 같은 bio도 더 비싼
+ *                vtime으로 환산된다 — abs_cost_to_cost()가 hw_inuse로 나누므로.
+ * - abs_vdebt  : 예산 없이 먼저 내보낸 IO(메모리 회수, fatal signal 등)의
+ *                미지급 절대 비용. 나중에 예산이 생기면 갚는다.
  */
 /* per device-cgroup pair */
 /* [한국어] ioc_gq: 장치-cgroup 쌍별 IO 비용 상태. blkg_policy_data를 상속해
@@ -816,15 +859,15 @@ struct ioc_gq {
 	u32				cfg_weight;
 	/* [한국어] 이 장치-cgroup 쌍에 대해 io.weight로 직접 설정된 가중치.
 	 * 0이면 cgroup 기본값(ioc_cgrp->dfl_weight) 사용.
-	 * 설정자: ioc_set_weight(). 읽는 자: iocg_activate()에서 weight 결정.
+	 * 설정자: ioc_weight_write(). 읽는 자: iocg_activate()에서 weight 결정.
 	 * 동기화: ioc->lock 보호. */
 	u32				weight;
 	/* [한국어] cfg_weight와 dfl_weight 중 유효한 값으로 결정된 실효 가중치.
-	 * 설정자: iocg_weight_updated(). 읽는 자: __propagate_weights().
+	 * 설정자: weight_updated(). 읽는 자: __propagate_weights().
 	 * 동기화: ioc->lock 보호. */
 	u32				active;
 	/* [한국어] 이 iocg가 활성 상태일 때의 가중치(= weight). 비활성 시 0.
-	 * 설정자: iocg_activate()(weight로 설정), iocg_idle()(0으로 설정).
+	 * 설정자: __propagate_weights()가 iocg_activate()/ioc_check_iocgs() 경로에서 갱신(비활성 시 0).
 	 * hweight_active 계산에 사용. 동기화: ioc->lock 보호. */
 	u32				inuse;
 	/* [한국어] 서플러스 조정이 적용된 실제 사용 가중치. active 이하.
@@ -835,7 +878,7 @@ struct ioc_gq {
 	u32				last_inuse;
 	/* [한국어] 이 iocg가 비활성화될 때 저장한 inuse 값.
 	 * 재활성화 시 복원해 서플러스 조정 상태를 유지.
-	 * 설정자: iocg_idle()에서 last_inuse = inuse로 저장.
+	 * 설정자: ioc_check_iocgs()에서 last_inuse = inuse로 저장.
 	 * 읽는 자: iocg_activate()에서 inuse = last_inuse로 복원.
 	 * 동기화: ioc->lock 보호. */
 	s64				saved_margin;
@@ -848,7 +891,7 @@ struct ioc_gq {
 	/* [한국어] 직전 bio의 마지막 섹터 주소. 다음 bio의 시작 섹터와 비교해
 	 * LCOEF_RANDIO_PAGES(16MB) 이상 떨어지면 random IO로 분류.
 	 * 설정자: iocg_commit_bio()에서 bio 처리 후 갱신.
-	 * 읽는 자: ioc_cost_model()에서 순차/랜덤 분류.
+	 * 읽는 자: calc_vtime_cost_builtin()에서 순차/랜덤 분류.
 	 * 동기화: 단일 iocg는 단일 blkcg(단일 잡 스레드)에서만 접근 — 별도 락 불필요. */
 
 	/*
@@ -865,7 +908,7 @@ struct ioc_gq {
 	/* [한국어] 이 cgroup의 IO 발행 기준 가상 시간 커서(atomic64).
 	 * 값 범위: device vtime - margin.target ~ device vtime + overage.
 	 * 설정자: iocg_commit_bio()가 cost 단위로 원자적 증가.
-	 * 읽는 자: iocg_is_behind(), ioc_rqos_throttle() 등 빈번히 읽힘.
+	 * 읽는 자: ioc_rqos_throttle()(예산 검사), iocg_kick_waitq(), ioc_timer_fn()(vdone 대비 지연 판정).
 	 * 동기화: atomic64 연산 (락 없이 빠른 경로에서 읽기 가능). */
 	atomic64_t			done_vtime;
 	/* [한국어] CQ 완료 기준 가상 시간 커서. vtime과 동일 구조이나
@@ -882,12 +925,12 @@ struct ioc_gq {
 	u64				delay;
 	/* [한국어] 현재 인가 중인 IO 발행 지연(us). 0이면 지연 없음.
 	 * 이 값이 양수이면 blkcg use_delay 메커니즘으로 bio 제출을 늦춤.
-	 * 설정자: iocg_set_delay(). 읽는 자: iocg_check_delay().
+	 * 설정자: iocg_kick_delay(). 읽는 자: iocg_kick_delay().
 	 * 동기화: ioc->lock 보호. */
 	u64				delay_at;
 	/* [한국어] 현재 지연이 설정된 시각(ktime_get_ns()).
 	 * delay 값이 0으로 초기화됐을 때 언제 만료할지 계산에 사용.
-	 * 설정자: iocg_set_delay(). 읽는 자: iocg_check_delay().
+	 * 설정자: iocg_kick_delay(). 읽는 자: iocg_kick_delay().
 	 * 동기화: ioc->lock 보호. */
 
 	/*
@@ -900,9 +943,9 @@ struct ioc_gq {
 	 * 설정자: iocg_activate()에서 cur_period 값으로 설정.
 	 * 읽는 자: ioc_timer_fn()의 비활성 판정 로직.
 	 * 동기화: atomic64 연산. */
-	struct list_head		active_list;	/* ioc->active_iocgs: NVMe 제출 중인 cgroup 연결 */
+	struct list_head		active_list;	/* ioc->active_iocgs: 제출 중인 cgroup 연결 */
 	/* [한국어] ioc->active_iocgs 리스트의 연결 노드.
-	 * 설정자: iocg_activate()가 list_add(). iocg_idle()이 list_del().
+	 * 설정자: iocg_activate()가 list_add(). ioc_check_iocgs()이 list_del().
 	 * 읽는 자: ioc_timer_fn()이 active_iocgs를 순회할 때.
 	 * 동기화: ioc->lock 보호. */
 
@@ -957,7 +1000,7 @@ struct ioc_gq {
 	 * 동기화: waitq 자체의 내부 스핀락(wait_queue_head.lock). */
 	struct hrtimer			waitq_timer;
 	/* [한국어] waitq 대기 bio들을 예산 회복 시점에 깨우는 hrtimer.
-	 * ioc_arm_waitq_timer()가 다음 vtime 충전 예상 시각에 설정.
+	 * iocg_kick_waitq()가 다음 vtime 충전 예상 시각에 설정.
 	 * 콜백: iocg_waitq_timer_fn() → iocg_kick_waitq() 호출.
 	 * 동기화: hrtimer 자체 락; 콜백 내에서 ioc->lock 획득. */
 
@@ -971,36 +1014,36 @@ struct ioc_gq {
 	struct iocg_pcpu_stat __percpu	*pcpu_stat;
 	/* [한국어] per-CPU abs_vusage 누적 카운터 배열.
 	 * 설정자: iocg_commit_bio()에서 local64_add().
-	 * 읽는 자: iocg_stat_update()에서 iocg_abs_vusage()로 합산.
+	 * 읽는 자: iocg_flush_stat_leaf()에서 iocg_flush_stat_leaf()로 합산.
 	 * 동기화: local64_t 기반 CPU-local 쓰기; 읽기는 타이머 경로. */
 	struct iocg_stat		stat;
 	/* [한국어] 현재까지의 누적 IO 시간 통계(usage_us/wait_us/indebt_us/indelay_us).
-	 * 설정자: iocg_stat_update(). 읽는 자: io.stat sysfs, iocost_monitor.py.
+	 * 설정자: iocg_flush_stat_leaf(). 읽는 자: io.stat sysfs, iocost_monitor.py.
 	 * 동기화: ioc->lock 보호. */
 	struct iocg_stat		last_stat;
 	/* [한국어] 직전 period의 stat 스냅샷. 이번 period 증분 = stat - last_stat.
-	 * 설정자: iocg_stat_update(). 동기화: ioc->lock 보호. */
+	 * 설정자: iocg_flush_stat_leaf(). 동기화: ioc->lock 보호. */
 	u64				last_stat_abs_vusage;
 	/* [한국어] 직전 period의 abs_vusage 합산값. 증분 계산의 기준점.
-	 * 설정자: iocg_stat_update(). 동기화: ioc->lock 보호. */
+	 * 설정자: iocg_flush_stat_leaf(). 동기화: ioc->lock 보호. */
 	u64				usage_delta_us;
 	/* [한국어] 이번 period의 IO 사용량 증분(us). debt 탕감 판단에 사용.
-	 * 설정자: iocg_stat_update(). 읽는 자: ioc_forgive_debts().
+	 * 설정자: iocg_flush_stat_leaf(). 읽는 자: ioc_forgive_debts().
 	 * 동기화: ioc->lock 보호. */
 	u64				wait_since;
 	/* [한국어] waitq에서 대기가 시작된 시각(ktime_get_ns(), ns 단위).
 	 * 0이면 현재 대기 중 아님. 설정자: ioc_rqos_throttle().
-	 * 읽는 자: iocg_stat_update()가 wait_us 계산.
+	 * 읽는 자: iocg_flush_stat_leaf()가 wait_us 계산.
 	 * 동기화: ioc->lock 보호. */
 	u64				indebt_since;
 	/* [한국어] abs_vdebt > 0 상태(부채 존재)가 시작된 시각(ktime_get_ns()).
 	 * 설정자: iocg_pay_debt()가 부채 발생 시 기록.
-	 * 읽는 자: iocg_stat_update()가 indebt_us 계산.
+	 * 읽는 자: iocg_flush_stat_leaf()가 indebt_us 계산.
 	 * 동기화: ioc->lock 보호. */
 	u64				indelay_since;
 	/* [한국어] delay > 0 상태(지연 인가)가 시작된 시각(ktime_get_ns()).
-	 * 설정자: iocg_set_delay()가 지연 설정 시 기록.
-	 * 읽는 자: iocg_stat_update()가 indelay_us 계산.
+	 * 설정자: iocg_kick_delay()가 지연 설정 시 기록.
+	 * 읽는 자: iocg_flush_stat_leaf()가 indelay_us 계산.
 	 * 동기화: ioc->lock 보호. */
 
 	/* this iocg's depth in the hierarchy and ancestors including self */
@@ -1019,7 +1062,7 @@ struct ioc_gq {
  * [한국어] ioc_cgrp: cgroup별 기본 가중치 저장소.
  * ioc_gq에 장치별 명시 가중치(cfg_weight)가 없을 때 폴백으로 사용되며,
  * blkcg_policy_data를 상속해 cgroup당 하나가 자동 관리된다.
- * 설정자: ioc_set_weight()가 io.weight 쓰기 시 갱신.
+ * 설정자: ioc_weight_write()가 io.weight 쓰기 시 갱신.
  * 읽는 자: iocg_activate()가 cfg_weight==0일 때 이 값 사용.
  */
 /* per cgroup */
@@ -1029,7 +1072,7 @@ struct ioc_cgrp {
 	 * 설정자: blkcg 프레임워크의 cpd_alloc_fn 콜백. 동기화: blkcg 락. */
 	unsigned int			dfl_weight;
 	/* [한국어] 이 cgroup의 기본 IO 가중치(WEIGHT_ONE 단위로 정규화됨).
-	 * 설정자: ioc_set_weight()가 echo N > io.weight 시 갱신.
+	 * 설정자: ioc_weight_write()가 echo N > io.weight 시 갱신.
 	 * 읽는 자: iocg_activate()가 cfg_weight==0인 iocg에 적용.
 	 * 값 범위: CGROUP_WEIGHT_MIN(1)~CGROUP_WEIGHT_MAX(10000).
 	 * 동기화: blkcg 락 보호. */
@@ -1039,13 +1082,13 @@ struct ioc_cgrp {
  * [한국어] ioc_now: 한 시점의 wallclock/가상 시간 스냅샷.
  * ioc_timer_fn() 진입 시 한 번 채워지고 이후 경로들이 동일 시각을 참조하므로
  * ktime_get_ns()를 여러 번 호출할 때의 시계 진행 오차를 제거한다.
- * 설정자: ioc_now_fn()이 seqcount로 period_at/period_at_vtime을 읽어 vnow 계산.
+ * 설정자: ioc_now()이 seqcount로 period_at/period_at_vtime을 읽어 vnow 계산.
  * 읽는 자: ioc_timer_fn() 내 대부분의 계산 경로.
  */
 struct ioc_now {
 	u64				now_ns;
 	/* [한국어] 스냅샷 시각(ktime_get_ns() 반환값, ns 단위).
-	 * ioc_now_fn() 호출 시점의 단조 시계값. */
+	 * ioc_now() 호출 시점의 단조 시계값. */
 	u64				now;
 	/* [한국어] 스냅샷 시각을 us 단위로 변환한 값(= now_ns/NSEC_PER_USEC).
 	 * period 경과 계산, delay 계산 등 us 단위가 필요한 경로에서 사용. */
@@ -1074,7 +1117,7 @@ struct iocg_wait {
 	u64				abs_cost;
 	/* [한국어] 이 bio의 절대 IO 비용(MILLION 단위, hweight 미적용).
 	 * 깨어날 때 hweight_inuse로 나눠 vtime 차감량을 결정.
-	 * 설정자: ioc_rqos_throttle()이 ioc_cost_model()로 계산.
+	 * 설정자: ioc_rqos_throttle()이 calc_vtime_cost_builtin()로 계산.
 	 * 읽는 자: iocg_wake_fn(). */
 	bool				committed;
 	/* [한국어] 이 wait 항목이 vtime을 이미 차감(commit)했는지를 나타내는 플래그.
@@ -1106,12 +1149,33 @@ struct iocg_wake_ctx {
 };
 
 /*
- * [한국어] autop[]: 장치 유형별 자동 프로파일 파라미터 테이블.
- * ioc_autop_idx()가 장치 성능 관측값(vrate 추이)으로 프로파일을 선택하면
- * ioc_autop_idx_to_params()가 이 테이블에서 QoS·lcoef 파라미터를 복사한다.
- * 사용자가 io.cost.qos/model로 직접 설정하지 않은 한 이 값이 적용된다.
- * 읽는 자: ioc_autop_idx_to_params().
- * 동기화: 읽기 전용 const 테이블 — 초기화 후 불변.
+ * [한국어] autop[]: 장치 등급별 자동 프로파일 파라미터 테이블.
+ * ioc_autop_idx()가 등급을 고르면 ioc_refresh_params_disk()가 여기서
+ * qos[]와 i_lcoefs[]를 ioc->params로 복사하고, ioc_refresh_lcoefs()가
+ * calc_lcoefs()로 i_lcoefs(장치 최대 성능) → lcoefs(IO당 vtime 비용)를 변환한다.
+ * 사용자가 io.cost.qos / io.cost.model 로 직접 값을 넣지 않은 한 이 값이 쓰인다.
+ * 읽는 자: ioc_refresh_params_disk(), ioc_refresh_lcoefs(), ioc_autop_idx().
+ * 동기화: const 읽기 전용 테이블 — 런타임 불변.
+ *
+ * ── i_lcoefs 를 어떻게 읽어야 하나 ──
+ * i_lcoefs 는 "이 등급의 장치가 낼 수 있는 최대 성능"이고, calc_lcoefs()가
+ * 이를 뒤집어 "IO 하나가 얼마의 vtime을 먹는가"로 바꾼다:
+ *   page   = VTIME_PER_SEC / (BPS/4096)          … 4KB 전송 1회의 비용
+ *   seqio  = max(VTIME_PER_SEC/SEQIOPS  - page, 0) … 순차 IO의 크기 무관 기본 비용
+ *   randio = max(VTIME_PER_SEC/RANDIOPS - page, 0) … 랜덤 IO의 크기 무관 기본 비용
+ * max(..., 0) 클램프가 중요하다. 장치가 충분히 빠르면 "IO 1회당 시간"이
+ * "4KB 전송 시간"보다 작아지고, 그러면 기본 비용이 통째로 0이 된다.
+ * 아래 각 프로파일 주석의 변환 결과는 이 공식을 그대로 계산한 값이다
+ * (VTIME_PER_SEC = 2^37 = 137438953472, VTIME_PER_USEC = 137438.95).
+ *
+ * ── 네 프로파일의 read 계수 대비표(위 공식으로 산출) ──
+ *              page(4KB전송)   seqio(순차 기본)   randio(랜덤 기본)
+ *   HDD          23.537 us         0.439 us         2679.166 us
+ *   SSD_QD1      16.660 us         0        us          127.308 us
+ *   SSD_DFL       8.382 us       103.575 us          109.016 us
+ *   SSD_FAST      1.320 us         0.059 us            0        us
+ * HDD의 randio 2.68ms는 헤드 탐색 시간 그 자체다. 등급이 올라갈수록 이 항이
+ * 무너져 SSD_FAST에서는 0이 된다 — 랜덤 IO에 추가 요금이 전혀 없다는 뜻이다.
  */
 static const struct ioc_params autop[] = {
 	/* [한국어] ★ 회전 디스크(HDD) 프로파일 ★
@@ -1160,7 +1224,9 @@ static const struct ioc_params autop[] = {
 	 * 장치 캐시가 흡수해 완료를 빨리 보고할 수 있기 때문이다. */
 	[AUTOP_SSD_QD1] = {
 		.qos				= {
-			/* [한국어] 지연 목표 25ms. HDD(250ms)와 고속 NVMe(5ms)의 중간. */
+			/* [한국어] 지연 목표 25ms. HDD(250ms)와 SSD_FAST(5ms)의 중간값이며
+			 * SSD_DFL과 같다. 세 SSD 등급 중 QD1과 DFL이 25ms를 공유하고,
+			 * FAST만 5ms로 조여진다. */
 			[QOS_RLAT]		=         25000, /* 25ms */
 			[QOS_WLAT]		=         25000,
 			[QOS_MIN]		= VRATE_MIN_PPM,
@@ -1184,12 +1250,20 @@ static const struct ioc_params autop[] = {
 	 * 여기서 시작해 위아래로 이동한다. */
 	[AUTOP_SSD_DFL] = {
 		.qos				= {
+			/* [한국어] 읽기 완료 지연 목표 25ms — QD1과 같은 값이다.
+			 * 다만 QOS_RPPM/QOS_WPPM(목표 백분위)은 지정하지 않으므로
+			 * 0으로 남고, 지연 기반 포화 판정은 기본적으로 꺼진 상태다.
+			 * (파일 상단 원본 주석: "Latency QoS is disabled by default")
+			 * 이 값들은 io.cost.qos로 켜기 전까지는 ioc_refresh_period_us()의
+			 * 타이머 주기 산출에만 쓰인다. */
 			[QOS_RLAT]		=         25000, /* 25ms */
-			[QOS_WLAT]		=         25000,
-			[QOS_MIN]		= VRATE_MIN_PPM,
-			[QOS_MAX]		= VRATE_MAX_PPM,
+			[QOS_WLAT]		=         25000,	/* [한국어] 쓰기도 동일 25ms — 이 등급에서는 read/write를 구분하지 않는다 */
+			[QOS_MIN]		= VRATE_MIN_PPM,	/* [한국어] vrate 하한 1%(10000ppm) — 이보다 낮추면 vtime이 사실상 멈춘다 */
+			[QOS_MAX]		= VRATE_MAX_PPM,	/* [한국어] vrate 상한 10000%(1e8 ppm) — 관측이 아무리 좋아도 이 이상은 허용 안 함 */
 		},
-		.i_lcoefs			= {
+		.i_lcoefs			= {			/* [한국어] 아래 6개가 calc_lcoefs()의 입력이 된다.
+										 * 변환 결과(read): page 8.382us / seqio 103.575us / randio 109.016us —
+										 * seqio와 randio가 거의 같아 순차/랜덤 구분이 사실상 무의미해진다. */
 			/* [한국어] 읽기 대역폭 약 489MB/s — SATA 3 포화 수준. */
 			[I_LCOEF_RBPS]		=     488636629,
 			/* [한국어] 순차 8932, 랜덤 8518로 거의 같다. 큐 깊이가 확보되면
@@ -1200,45 +1274,70 @@ static const struct ioc_params autop[] = {
 			[I_LCOEF_WSEQIOPS]	=         28755,
 			[I_LCOEF_WRANDIOPS]	=         21940,
 		},
-		/* [한국어] 관측 vrate가 이 프로파일 기준의 500%를 넘으면 "이 장치는
-		 * 가정보다 훨씬 빠르다"고 판단해 AUTOP_SSD_FAST로 올라간다.
-		 * NVMe SSD가 처음 이 프로파일로 시작했다가 곧 FAST로 승격되는
-		 * 경로가 바로 이것이다. */
+		/* [한국어] 관측 vrate가 이 프로파일 기준의 500%(5배)를 넘는 상태가
+		 * AUTOP_CYCLE_NSEC(10초) 이상 지속되면 "이 장치는 가정보다 훨씬
+		 * 빠르다"고 보고 idx+1, 즉 AUTOP_SSD_FAST로 올라간다
+		 * (ioc_autop_idx()의 too_fast 분기).
+		 * ioc_autop_idx()는 회전 여부와 큐 깊이만 직접 보므로, 비회전이고
+		 * 큐 깊이가 1이 아닌 장치는 예외 없이 이 DFL 프로파일에서 출발한다.
+		 * NVMe 급 장치가 FAST 등급에 도달하는 경로도 바로 이 승격이다 —
+		 * "NVMe라서" 뽑히는 것이 아니라 10초간 관측된 vrate로 뽑힌다. */
 		.too_fast_vrate_pct		=           500,
 	},
-	/* [한국어] ★ 고속 SSD / NVMe 프로파일 ★
-	 * NVMe SSD가 실제로 선택되는 프로파일이다. HDD와 비교하면 iocost가
-	 * 왜 장치별 프로파일을 두는지가 분명해진다:
-	 *   RRANDIOPS: HDD 370 → 여기 778122 (2100배)
-	 *   RSEQIOPS 대비 RRANDIOPS 비율: HDD는 1/112, 여기는 오히려 1.07배
-	 * 즉 NVMe는 랜덤이 순차보다 "느리지 않다". 내부적으로 수십 개 채널을
-	 * 병렬 처리하고 탐색 시간이 없기 때문이다. 순차가 오히려 약간 낮은 것은
-	 * 큰 요청이 여러 채널에 걸쳐 완료 대기를 만들기 때문으로 보인다.
+	/* [한국어] ★ 고속 SSD 프로파일 — NVMe 급 장치가 도달하는 등급 ★
+	 * 이 파일에서 NVMe 독자에게 가장 볼 만한 곳이다. HDD 프로파일과
+	 * 나란히 놓으면 iocost가 왜 등급별 상수를 따로 두는지가 드러난다.
 	 *
-	 * 이 차이가 비용 모델에 직접 반영된다. HDD에서는 "랜덤 I/O 한 번"이
-	 * 매우 비싼 자원이라 그것을 기준으로 배분해야 하지만, NVMe에서는
-	 * 랜덤/순차 구분보다 총 IOPS와 대역폭이 지배적이다. */
+	 * 원시 상수 대비:
+	 *   RRANDIOPS      : HDD 370       →  여기 778122   (약 2103배)
+	 *   RSEQIOPS       : HDD 41708     →  여기 724816
+	 *   RSEQIOPS 대비 RRANDIOPS: HDD는 1/112.7, 여기는 1.074배
+	 * 즉 이 등급에서는 랜덤이 순차보다 오히려 IOPS가 높다고 가정한다.
+	 * (그 원인은 하드웨어 특성이지 이 코드가 증명하는 바가 아니다. 코드가
+	 *  말해주는 것은 "커널이 그렇게 가정한다"는 사실까지다.)
+	 *
+	 * calc_lcoefs()를 통과시키면 그 가정이 비용으로 어떻게 나타나는지 보인다:
+	 *   read : page 181449(1.320us) / seqio 8171(0.059us) / randio 0
+	 *   write: page 323018(2.350us) / seqio 0             / randio 0
+	 * randio 가 0인 이유는 산술적으로 명확하다 —
+	 *   VTIME_PER_SEC/778122 = 176630  <  page 181449
+	 * 이라 calc_lcoefs()의 `if (v > *page)` 조건이 거짓이 되어 클램프된다.
+	 * 결과적으로 이 프로파일에서 랜덤 IO에는 추가 요금이 붙지 않으며,
+	 * write는 seqio·randio가 모두 0이라 비용이 순수하게 크기 비례다.
+	 * 읽기 쪽 순차 기본 비용 8171이 랜덤(0)보다 크므로, 같은 크기라면
+	 * 랜덤 읽기가 순차 읽기보다 아주 근소하게 싸게 계산되기까지 한다.
+	 *
+	 * HDD와의 대비가 여기서 완성된다. HDD는 randio가 2679us로 page(23.5us)의
+	 * 114배라 "랜덤 IO 한 번"이 배분해야 할 희소 자원이지만, 이 등급에서는
+	 * 그 항이 통째로 사라지고 대역폭(page 비용)만 남는다. */
 	[AUTOP_SSD_FAST] = {
 		.qos				= {
-			/* [한국어] 지연 목표 5ms — HDD의 250ms 대비 1/50이다.
-			 * NVMe의 실제 지연은 보통 수십~수백 마이크로초이므로 5ms는
-			 * 여전히 넉넉한 값이며, 이를 넘으면 확실히 포화 상태다. */
+			/* [한국어] 지연 목표 5ms — HDD의 250ms 대비 1/50, 다른 두 SSD
+			 * 등급(25ms) 대비 1/5이다. 이 값은 ioc_refresh_period_us()에서
+			 * 타이머 주기 계산의 입력이 되기도 한다(주기 = multi × lat 후
+			 * MIN_PERIOD~MAX_PERIOD로 clamp). 즉 등급이 빨라질수록 제어
+			 * 루프도 함께 빨라진다. */
 			[QOS_RLAT]		=          5000, /* 5ms */
 			[QOS_WLAT]		=          5000,
 			[QOS_MIN]		= VRATE_MIN_PPM,
 			[QOS_MAX]		= VRATE_MAX_PPM,
 		},
 		.i_lcoefs			= {
-			/* [한국어] 읽기 대역폭 약 3.1GB/s. LLU 접미사가 필요한 이유는
-			 * 이 값이 32비트 int 범위(약 21억)를 넘기 때문이다. */
+			/* [한국어] 읽기 대역폭 약 3.10GB/s(3102524156 B/s). LLU 접미사가
+			 * 붙은 이유는 이 값이 signed 32비트 범위(2147483647)를 넘기 때문이다.
+			 * 이 값이 page 비용 181449(4KB당 1.320us)를 결정한다. */
 			[I_LCOEF_RBPS]		=    3102524156LLU,
 			/* [한국어] 순차 읽기 724816 IOPS. */
 			[I_LCOEF_RSEQIOPS]	=        724816,
-			/* [한국어] 랜덤 읽기 778122 IOPS — 순차보다 오히려 높다.
-			 * 이것이 NVMe의 특징이다. */
+			/* [한국어] 랜덤 읽기 778122 IOPS — 순차(724816)보다 오히려 높다.
+			 * 이 한 숫자가 위에서 설명한 randio=0 클램프를 만든다. */
 			[I_LCOEF_RRANDIOPS]	=        778122,
-			/* [한국어] 쓰기 대역폭 약 1.7GB/s. 읽기의 절반 수준인 것은
-			 * NAND 프로그램 시간이 읽기보다 길기 때문이다. */
+			/* [한국어] 쓰기 대역폭 약 1.74GB/s — 읽기(3.10GB/s)의 약 56%.
+			 * 플래시 매체 일반의 읽기/쓰기 비대칭이 반영된 값이다(이 코드로
+			 * 증명되는 것은 아니고, 벤치마크로 얻은 상수라는 사실만이 코드의 내용이다).
+			 * page 비용은 323018(4KB당 2.350us)로 읽기의 약 1.78배가 된다.
+			 * 참고: 이 값은 2147483647 미만이라 LLU가 문법상 필수는 아니지만,
+			 * 위 RBPS와 표기를 맞춰 붙여 두었다. */
 			[I_LCOEF_WBPS]		=    1742780862LLU,
 			[I_LCOEF_WSEQIOPS]	=        425702,
 			[I_LCOEF_WRANDIOPS]	=	 443193,
@@ -1315,7 +1414,8 @@ static struct ioc *rqos_to_ioc(struct rq_qos *rqos)
  * 변환하는 두 단계를 하나로 묶어 코드 중복을 방지한다.
  *
  * 실행 컨텍스트: rqos_to_ioc()와 동일, IRQ-safe 경로에서 호출 가능.
- * 호출자: iocost_exit(), iocost_iolatency_update(), ioc_looking_at_rt_budget().
+ * 호출자: ioc_rqos_throttle(), ioc_rqos_merge(), ioc_rqos_done(), ioc_rqos_done_bio(),
+ *         ioc_rqos_queue_depth_changed(), ioc_rqos_exit() — rq_qos 콜백 진입점 전부.
  * 호출 대상: rq_qos_id() → rqos_to_ioc().
  *
  * 호출 체인:
@@ -1350,7 +1450,7 @@ static const char __maybe_unused *ioc_name(struct ioc *ioc)
 	struct gendisk *disk = ioc->rqos.disk; /* [한국어] ioc가 제어하는 블록 디바이스의 gendisk 포인터 — init 경로에서는 아직 NULL일 수 있음 */
 
 	if (!disk) /* [한국어] 초기화 전(init 경로) 또는 디스크가 없는 경우 — 안전한 fallback 문자열 반환 */
-		return "<unknown>";
+		return "<unknown>";	/* [한국어] disk 미설정 시 트레이스 출력이 NULL을 역참조하지 않도록 고정 문자열 반환 */
 	return disk->disk_name; /* [한국어] "sda", "nvme0n1" 같은 커널 블록 디바이스 이름 반환 */
 }
 
@@ -1442,7 +1542,7 @@ static struct blkcg_gq *iocg_to_blkg(struct ioc_gq *iocg)
  * ioc_cgrp에는 weight(가중치) 등 cgroup 레벨 설정이 저장된다.
  *
  * 실행 컨텍스트: cgroup 파일시스템 read/write 콜백 (프로세스 컨텍스트, 슬리핑 가능).
- * 호출자: ioc_weight_show(), ioc_weight_store(), ioc_cpd_alloc(), ioc_cpd_init().
+ * 호출자: ioc_weight_prfill(), ioc_weight_show(), ioc_weight_write().
  * 호출 대상: blkcg_to_cpd() → container_of.
  *
  * 호출 체인:
@@ -1475,15 +1575,15 @@ static struct ioc_cgrp *blkcg_to_iocc(struct blkcg *blkcg)
  * 버짓 부족 판정에서 cgroup이 소량의 무료 IO를 얻지 못하도록 보수적으로 계산하기 위함.
  *
  * 실행 컨텍스트: IO 제출 경로 (iocg_commit_bio 등), IRQ-safe.
- * 호출자: iocg_commit_bio(), ioc_rqos_throttle(), ioc_looking_at_rt_budget().
+ * 호출자: iocg_wake_fn(), iocg_kick_waitq(), adjust_inuse_and_calc_cost(), ioc_rqos_throttle(), ioc_rqos_merge().
  * 호출 대상: DIV64_U64_ROUND_UP (올림 나눗셈 매크로).
  *
  * 호출 체인:
  *   bio 제출 경로 → [abs_cost_to_cost] → DIV64_U64_ROUND_UP → vtime cost
  */
-static u64 abs_cost_to_cost(u64 abs_cost, u32 hw_inuse) /* hw_inuse가 낮을수록 동일 NVMe 명령 비용 증가 */
+static u64 abs_cost_to_cost(u64 abs_cost, u32 hw_inuse) /* hw_inuse가 낮을수록 동일 IO 비용 증가 */
 {
-	return DIV64_U64_ROUND_UP(abs_cost * WEIGHT_ONE, hw_inuse);	/* hweight_inuse 반비례 NVMe cost 환산 */
+	return DIV64_U64_ROUND_UP(abs_cost * WEIGHT_ONE, hw_inuse);	/* hweight_inuse 반비례 cost 환산 */
 }
 
 /*
@@ -1509,9 +1609,9 @@ static u64 abs_cost_to_cost(u64 abs_cost, u32 hw_inuse) /* hw_inuse가 낮을수
  * 호출 체인:
  *   IO 완료/통계 수집 경로 → [cost_to_abs_cost] → DIV64_U64_ROUND_UP → abs_cost
  */
-static u64 cost_to_abs_cost(u64 cost, u32 hw_inuse) /* vtime을 NVMe 절대 비용으로 역환산 */
+static u64 cost_to_abs_cost(u64 cost, u32 hw_inuse) /* vtime을 절대 비용으로 역환산 */
 {
-	return DIV64_U64_ROUND_UP(cost * hw_inuse, WEIGHT_ONE);	/* hweight_inuse 비례 NVMe 절대 비용 복원 */
+	return DIV64_U64_ROUND_UP(cost * hw_inuse, WEIGHT_ONE);	/* hweight_inuse 비례 절대 비용 복원 */
 }
 
 /*
@@ -1544,12 +1644,12 @@ static void iocg_commit_bio(struct ioc_gq *iocg, struct bio *bio,
 {
 	struct iocg_pcpu_stat *gcs; /* [한국어] 현재 CPU에 바인딩된 per-CPU 통계 포인터 — false sharing 없이 사용량을 누적하기 위한 변수 */
 
-	bio->bi_iocost_cost = cost;	/* bio 단위 NVMe 비용 기록 → CQ 완료 시 done_vtime 차감 */
-	atomic64_add(cost, &iocg->vtime);	/* atomic: 다중 CPU에서 NVMe 제출 경쟁 시에도 vtime 일관 */
+	bio->bi_iocost_cost = cost;	/* bio 단위 비용 기록 → CQ 완료 시 done_vtime 차감 */
+	atomic64_add(cost, &iocg->vtime);	/* atomic: 다중 CPU에서 제출 경쟁 시에도 vtime 일관 */
 
-	gcs = get_cpu_ptr(iocg->pcpu_stat);	/* 현재 CPU의 NVMe 사용량 통계 획득 */
-	local64_add(abs_cost, &gcs->abs_vusage);	/* per-CPU local64: NVMe 사용량 누적, 캐시 일관성 최소화 */
-	put_cpu_ptr(gcs);	/* preemption 복원: 다른 CPU로 이주 시에도 NVMe 통계 정확성 */
+	gcs = get_cpu_ptr(iocg->pcpu_stat);	/* 현재 CPU의 사용량 통계 획득 */
+	local64_add(abs_cost, &gcs->abs_vusage);	/* per-CPU local64: 사용량 누적, 캐시 일관성 최소화 */
+	put_cpu_ptr(gcs);	/* preemption 복원: 다른 CPU로 이주 시에도 통계 정확성 */
 }
 
 /*
@@ -1582,9 +1682,9 @@ static void iocg_commit_bio(struct ioc_gq *iocg, struct bio *bio,
  */
 static void iocg_lock(struct ioc_gq *iocg, bool lock_ioc, unsigned long *flags)
 {
-	if (lock_ioc) {	/* debt 처리 시 ioc->lock + waitq.lock 중첩: NVMe 예산/부채 동시 변경 방지 */
+	if (lock_ioc) {	/* debt 처리 시 ioc->lock + waitq.lock 중첩: vtime 예산/부채 동시 변경 방지 */
 		spin_lock_irqsave(&iocg->ioc->lock, *flags);	/* ioc 레벨 lock: vrate/weight/주기 보호 */
-		spin_lock(&iocg->waitq.lock);	/* waitq lock: NVMe 예산 대기자 상태 보호 */
+		spin_lock(&iocg->waitq.lock);	/* waitq lock: vtime 예산 대기자 상태 보호 */
 	} else { /* [한국어] waitq.lock만 필요한 빠른 경로 — ioc 전역 상태를 건드리지 않는 경우 */
 		spin_lock_irqsave(&iocg->waitq.lock, *flags); /* [한국어] waitq.lock을 IRQ 비활성화와 함께 획득 — 타이머 콜백과의 경쟁 방지 */
 	}
@@ -1651,12 +1751,12 @@ static void iocg_unlock(struct ioc_gq *iocg, bool unlock_ioc, unsigned long *fla
 static void ioc_refresh_margins(struct ioc *ioc)
 {
 	struct ioc_margins *margins = &ioc->margins; /* [한국어] 갱신 대상 마진 구조체 포인터 — ioc 내 임베디드 필드 */
-	u32 period_us = ioc->period_us;	/* NVMe latency QoS에서 유도된 현재 제어 주기 */
-	u64 vrate = ioc->vtime_base_rate;	/* 현재 NVMe IO 속도 보정값 */
+	u32 period_us = ioc->period_us;	/* 지연(latency) QoS에서 유도된 현재 제어 주기 */
+	u64 vrate = ioc->vtime_base_rate;	/* 현재 IO 속도 보정값 */
 
-	margins->min = (period_us * MARGIN_MIN_PCT / 100) * vrate;	/* NVMe SQ 포화 직전 최소 vtime 여유 */
-	margins->low = (period_us * MARGIN_LOW_PCT / 100) * vrate;	/* NVMe 제출률 검토 임계 vtime */
-	margins->target = (period_us * MARGIN_TARGET_PCT / 100) * vrate;	/* NVMe SQ/CQ 안정 목표 vtime 버퍼 */
+	margins->min = (period_us * MARGIN_MIN_PCT / 100) * vrate;	/* 장치 포화 직전 최소 vtime 여유 */
+	margins->low = (period_us * MARGIN_LOW_PCT / 100) * vrate;	/* 제출률 검토 임계 vtime */
+	margins->target = (period_us * MARGIN_TARGET_PCT / 100) * vrate;	/* 장치 안정 목표 vtime 버퍼 */
 }
 
 /* latency Qos params changed, update period_us and all the dependent params */
@@ -1689,13 +1789,13 @@ static void ioc_refresh_period_us(struct ioc *ioc)
 	lockdep_assert_held(&ioc->lock); /* [한국어] ioc->lock 없이 호출 시 lockdep가 경고 — period 갱신은 락 하에서만 안전 */
 
 	/* pick the higher latency target */
-	/* NVMe read/write 중 느린 쪽이 병목 결정 */
-	if (ioc->params.qos[QOS_RLAT] >= ioc->params.qos[QOS_WLAT]) {	/* NVMe read QoS가 write보다 느리면 read 기준 */
+	/* read/write 중 느린 쪽이 병목 결정 */
+	if (ioc->params.qos[QOS_RLAT] >= ioc->params.qos[QOS_WLAT]) {	/* read QoS가 write보다 느리면 read 기준 */
 		ppm = ioc->params.qos[QOS_RPPM];	/* read latency QoS 백분위수 */
-		lat = ioc->params.qos[QOS_RLAT];	/* read latency 목표(μs): NVMe CQ ISR 처리 목표 */
+		lat = ioc->params.qos[QOS_RLAT];	/* read 완료 지연 목표(μs) — 이 분위에서 이 값을 넘으면 포화로 판정 */
 	} else { /* [한국어] write latency가 read보다 엄격한 경우 write 기준으로 주기 결정 */
 		ppm = ioc->params.qos[QOS_WPPM];	/* write latency QoS 백분위수 */
-		lat = ioc->params.qos[QOS_WLAT];	/* write latency 목표(μs): NVMe CQ ISR 처리 목표 */
+		lat = ioc->params.qos[QOS_WLAT];	/* write 완료 지연 목표(μs) — read보다 크면 write가 병목을 결정 */
 	}
 
 	/*
@@ -1707,11 +1807,11 @@ static void ioc_refresh_period_us(struct ioc *ioc)
 	 * scale it linearly so that it's 2x >= pct(90) and 10x at pct(50).
 	 */
 	if (ppm) /* [한국어] 유효한 백분위수가 있으면 — ppm=0은 QoS 목표 미설정을 의미 */
-		multi = max_t(u32, (MILLION - ppm) / 50000, 2);	/* 백분위수가 낮을수록(예: p50) NVMe 샘플 주기를 길게 */
+		multi = max_t(u32, (MILLION - ppm) / 50000, 2);	/* 백분위수가 낮을수록(예: p50) 샘플 주기를 길게 */
 	else
 		multi = 2; /* [한국어] ppm=0(백분위수 미설정): 기본 배율 2로 안전한 최솟값 사용 */
-	period_us = multi * lat;	/* NVMe 완료 지연의 배수로 타이머 주기 산출 */
-	period_us = clamp_t(u32, period_us, MIN_PERIOD, MAX_PERIOD);	/* NVMe 제어 반응성/안정성 균형 */
+	period_us = multi * lat;	/* 완료 지연의 배수로 타이머 주기 산출 */
+	period_us = clamp_t(u32, period_us, MIN_PERIOD, MAX_PERIOD);	/* 제어 반응성/안정성 균형 */
 
 	/* calculate dependent params */
 	ioc->period_us = period_us; /* [한국어] 확정된 주기를 ioc에 저장 — 이후 ioc_refresh_margins가 이 값을 참조 */
@@ -1761,8 +1861,10 @@ static int ioc_autop_idx(struct ioc *ioc, struct gendisk *disk)
 	u32 vrate_pct; /* [한국어] 현재 vtime_base_rate를 백분율로 환산한 값 — 프로파일 전환 판단에 사용 */
 	u64 now_ns; /* [한국어] 현재 monotonic 시각(nanoseconds) — 프로파일 전환 유지 시간 계산용 */
 
-	/* rotational? */	/* blk_queue_rot: NVMe가 아닌 회전 미디어(HDD) 분기 → seek cost 모델 */
-	if (blk_queue_rot(disk->queue))	/* NVMe 장치가 아닌 HDD면 AUTOP_HDD */
+	/* rotational? */	/* [한국어] iocost가 장치에 대해 직접 물어보는 것은 이 한 가지 —
+				 * QUEUE_FLAG_ROTATIONAL(회전 미디어인가)뿐이다. 프로토콜(SATA/SAS/NVMe)은
+				 * 보지 않는다. 회전 미디어면 탐색(seek) 비용이 지배하므로 즉시 AUTOP_HDD. */
+	if (blk_queue_rot(disk->queue))	/* [한국어] 회전 미디어면 나머지 판정 없이 HDD 프로파일 확정 */
 		return AUTOP_HDD;
 
 	/* handle SATA SSDs w/ broken NCQ */	/* [한국어] 원본 주석대로 NCQ가 고장난 SATA SSD 대응 —
@@ -1772,15 +1874,17 @@ static int ioc_autop_idx(struct ioc *ioc, struct gendisk *disk)
 
 	/* use one of the normal ssd sets */
 	if (idx < AUTOP_SSD_DFL)	/* 이전 프로파일이 HDD/QD1이었으면 기본 SSD 프로파일로 전이 */
-		return AUTOP_SSD_DFL;
+		return AUTOP_SSD_DFL;	/* [한국어] 비회전 + 큐 깊이>1 인 장치는 모두 여기서 출발한다.
+					 * 이후 too_fast가 10초 지속되면 AUTOP_SSD_FAST로 승격된다. */
 
 	/* if user is overriding anything, maintain what was there */
-	if (ioc->user_qos_params || ioc->user_cost_model)	/* 사용자가 NVMe QoS/모델을 오버라이드하면 자동 전환 금지 */
-		return idx;
+	if (ioc->user_qos_params || ioc->user_cost_model)	/* 사용자가 지연 QoS/비용 모델을 오버라이드하면 자동 전환 금지 */
+		return idx;	/* [한국어] 사용자 오버라이드가 있으면 자동 전환이 그 설정을 덮어쓰지 않도록 현 인덱스 유지 */
 
 	/* step up/down based on the vrate */
-	vrate_pct = div64_u64(ioc->vtime_base_rate * 100, VTIME_PER_USEC);	/* NVMe에 대한 현재 상대 IO 속도(%) */
-	now_ns = blk_time_get_ns();	/* NVMe CQ/타이머와 동일한 monotonic 시계 */
+	vrate_pct = div64_u64(ioc->vtime_base_rate * 100, VTIME_PER_USEC);	/* [한국어] 현재 vtime_base_rate를 기준 속도(VTIME_PER_USEC = 1.0 = 100%) 대비 %로 환산 —
+										 * 이 값이 프로파일의 too_fast/too_slow 임계와 비교된다 */
+	now_ns = blk_time_get_ns();	/* iocost 제어 루프와 동일한 monotonic 시계 */
 
 	if (p->too_fast_vrate_pct && p->too_fast_vrate_pct <= vrate_pct) { /* [한국어] 현재 프로파일에 too_fast 임계가 정의되어 있고 현재 vrate가 그 이상이면 — 장치가 더 빠른 프로파일로 올릴 여력이 있음 */
 		if (!ioc->autop_too_fast_at) /* [한국어] too_fast 상태 진입 시각 미기록이면 지금을 시작점으로 기록 */
@@ -1899,10 +2003,12 @@ static void ioc_refresh_lcoefs(struct ioc *ioc)
 	u64 *u = ioc->params.i_lcoefs; /* [한국어] 입력 지표 배열 포인터 — 사용자 설정 또는 autop 프로파일이 제공한 원시 성능 수치(bps/seqiops/randiops) */
 	u64 *c = ioc->params.lcoefs; /* [한국어] 출력 계수 배열 포인터 — calc_lcoefs()가 계산한 page/seqio/randio 비용 계수를 저장할 대상 */
 
-	calc_lcoefs(u[I_LCOEF_RBPS], u[I_LCOEF_RSEQIOPS], u[I_LCOEF_RRANDIOPS],	/* read 방향 NVMe seq/rand/대역폭 계수 */
-		    &c[LCOEF_RPAGE], &c[LCOEF_RSEQIO], &c[LCOEF_RRANDIO]);
-	calc_lcoefs(u[I_LCOEF_WBPS], u[I_LCOEF_WSEQIOPS], u[I_LCOEF_WRANDIOPS],	/* write 방향 NVMe seq/rand/대역폭 계수 */
-		    &c[LCOEF_WPAGE], &c[LCOEF_WSEQIO], &c[LCOEF_WRANDIO]);
+	calc_lcoefs(u[I_LCOEF_RBPS], u[I_LCOEF_RSEQIOPS], u[I_LCOEF_RRANDIOPS],	/* [한국어] read 방향 입력 3개(RBPS/RSEQIOPS/RRANDIOPS) 전달 */
+		    &c[LCOEF_RPAGE], &c[LCOEF_RSEQIO], &c[LCOEF_RRANDIO]);	/* [한국어] 출력 3개를 lcoefs의 read 슬롯에 직접 기록 —
+										 * 이후 calc_vtime_cost_builtin()이 REQ_OP_READ bio에 이 셋을 적용한다 */
+	calc_lcoefs(u[I_LCOEF_WBPS], u[I_LCOEF_WSEQIOPS], u[I_LCOEF_WRANDIOPS],	/* [한국어] write 방향 입력 3개(WBPS/WSEQIOPS/WRANDIOPS) 전달 */
+		    &c[LCOEF_WPAGE], &c[LCOEF_WSEQIO], &c[LCOEF_WRANDIO]);	/* [한국어] 출력 3개를 lcoefs의 write 슬롯에 기록 —
+										 * read/write를 나눠 두므로 쓰기가 느린 매체도 정확히 과금된다 */
 }
 
 /*
@@ -1932,7 +2038,8 @@ static void ioc_refresh_lcoefs(struct ioc *ioc)
  * 7) vrate_min/vrate_max를 QOS_MIN/MAX에서 vtime 단위로 환산하여 저장.
  *
  * 실행 컨텍스트: ioc->lock 보유 상태 (lockdep_assert_held로 확인).
- * 호출자: ioc_refresh_params(), ioc_create(), ioc_qos_read/write 등.
+ * 호출자: ioc_refresh_params_disk() — 즉 ioc_refresh_params()를 거쳐 blk_blk_iocost_init(),
+ *         ioc_qos_write(), ioc_cost_model_write(), ioc_rqos_queue_depth_changed(), ioc_timer_fn()에서.
  * 호출 대상: ioc_autop_idx(), atomic64_set(), memcpy(), ioc_refresh_period_us(),
  *            ioc_refresh_lcoefs(), DIV64_U64_ROUND_UP().
  *
@@ -1951,11 +2058,11 @@ static bool ioc_refresh_params_disk(struct ioc *ioc, bool force,
 	idx = ioc_autop_idx(ioc, disk); /* [한국어] 장치 특성과 vrate 추이를 바탕으로 최적 프로파일 인덱스 결정 */
 	p = &autop[idx]; /* [한국어] 결정된 프로파일의 파라미터 세트 포인터 — qos[], i_lcoefs[] 복사 소스 */
 
-	if (idx == ioc->autop_idx && !force)	/* NVMe 프로파일 변경 없으면 skip */
-		return false;	/* NVMe 제출 억제 상태 유지 */
+	if (idx == ioc->autop_idx && !force)	/* autop 프로파일 변경 없으면 skip */
+		return false;	/* 제출 억제 상태 유지 */
 
-	if (idx != ioc->autop_idx) {	/* NVMe 장치 프로파일 전환 시 vrate 리셋 */
-		atomic64_set(&ioc->vtime_rate, VTIME_PER_USEC);	/* atomic: 새 프로파일의 NVMe 기준 속도로 갱신 */
+	if (idx != ioc->autop_idx) {	/* 장치 프로파일 전환 시 vrate 리셋 */
+		atomic64_set(&ioc->vtime_rate, VTIME_PER_USEC);	/* atomic: 새 프로파일의 기준 속도로 갱신 */
 		ioc->vtime_base_rate = VTIME_PER_USEC; /* [한국어] 비원자적 base_rate도 동기화 — 타이머 경로가 이 값을 마진 계산에 사용 */
 	}
 
@@ -1963,18 +2070,22 @@ static bool ioc_refresh_params_disk(struct ioc *ioc, bool force,
 	ioc->autop_too_fast_at = 0; /* [한국어] 프로파일 전환(또는 강제 갱신) 후 too_fast 이력 초기화 — 새 프로파일 기준으로 다시 측정 */
 	ioc->autop_too_slow_at = 0; /* [한국어] 프로파일 전환(또는 강제 갱신) 후 too_slow 이력 초기화 — hysteresis 카운터 리셋 */
 
-	if (!ioc->user_qos_params)	/* 사용자 미지정 시 자동 NVMe latency QoS 적용 */
-		memcpy(ioc->params.qos, p->qos, sizeof(p->qos));
-	if (!ioc->user_cost_model)	/* 사용자 미지정 시 자동 NVMe 비용 계수 적용 */
-		memcpy(ioc->params.i_lcoefs, p->i_lcoefs, sizeof(p->i_lcoefs));
+	if (!ioc->user_qos_params)	/* 사용자 미지정 시 자동 지연(latency) QoS 적용 */
+		memcpy(ioc->params.qos, p->qos, sizeof(p->qos));	/* [한국어] autop[] 프로파일의 qos[6개]를 통째로 복사 —
+										 * QOS_RPPM/RLAT/WPPM/WLAT/MIN/MAX가 한 번에 교체된다 */
+	if (!ioc->user_cost_model)	/* 사용자 미지정 시 자동 비용 계수 적용 */
+		memcpy(ioc->params.i_lcoefs, p->i_lcoefs, sizeof(p->i_lcoefs));	/* [한국어] 프로파일의 원시 성능치 6개(BPS/SEQIOPS/RANDIOPS × R/W)를 복사.
+												 * 실제 비용 계수(lcoefs)는 바로 아래 ioc_refresh_lcoefs()가 파생시킨다 */
 
 	ioc_refresh_period_us(ioc); /* [한국어] 새 qos[] 값으로 타이머 주기 및 마진 재계산 */
 	ioc_refresh_lcoefs(ioc); /* [한국어] 새 i_lcoefs[] 값으로 선형 비용 모델 계수 재계산 */
 
-	ioc->vrate_min = DIV64_U64_ROUND_UP((u64)ioc->params.qos[QOS_MIN] *	/* NVMe 최소 vrate 절대값 */
-					    VTIME_PER_USEC, MILLION);
-	ioc->vrate_max = DIV64_U64_ROUND_UP((u64)ioc->params.qos[QOS_MAX] *	/* NVMe 최대 vrate 절대값 */
-					    VTIME_PER_USEC, MILLION);
+	ioc->vrate_min = DIV64_U64_ROUND_UP((u64)ioc->params.qos[QOS_MIN] *	/* 최소 vrate 절대값 */
+					    VTIME_PER_USEC, MILLION);	/* [한국어] qos[QOS_MIN]은 ppm 단위(1e6=100%)이므로 ×VTIME_PER_USEC/1e6 으로
+									 * vtime/us 절대 단위로 환산. 올림이라 하한이 0이 되는 일은 없다 */
+	ioc->vrate_max = DIV64_U64_ROUND_UP((u64)ioc->params.qos[QOS_MAX] *	/* 최대 vrate 절대값 */
+					    VTIME_PER_USEC, MILLION);	/* [한국어] 상한도 같은 방식으로 ppm → vtime/us 환산.
+									 * 이 두 값이 ioc_adjust_base_vrate()의 clamp 경계가 된다 */
 
 	return true; /* [한국어] 파라미터 실제 변경됨 — 호출자(ioc_refresh_params 등)가 후속 처리(예: 활성 cgroup 재스케줄) 필요 */
 }
@@ -2115,8 +2226,8 @@ static void ioc_adjust_base_vrate(struct ioc *ioc, u32 rq_wait_pct,
 
 	if (!ioc->busy_level || (ioc->busy_level < 0 && nr_lagging)) { /* [한국어] busy_level이 0(중립)이거나, 여유 상태(음수)이면서 vtime 뒤처진 cgroup이 존재하면 vrate 조정 보류 */
 		if (ioc->busy_level != prev_busy_level || nr_lagging) /* [한국어] busy_level이 바뀌었거나 lag 중인 cgroup이 있으면 트레이스 이벤트 기록 — 상태 변화 추적용 */
-			trace_iocost_ioc_vrate_adj(ioc, vrate,
-						   missed_ppm, rq_wait_pct,
+			trace_iocost_ioc_vrate_adj(ioc, vrate,	/* [한국어] 조정을 하지 않는 경우에도 상태 변화는 남긴다 — vrate는 현재 값 그대로 */
+						   missed_ppm, rq_wait_pct,	/* [한국어] 판단 근거였던 두 관측치(read/write 미달 ppm, rq 대기 비율)를 함께 기록 */
 						   nr_lagging, nr_shortages); /* [한국어] 현재 vrate, 미달 ppm, 큐 대기율, 지연/부족 cgroup 수를 트레이스에 기록 */
 
 		return; /* [한국어] vrate 조정 없이 반환 — 포화 신호가 불명확하면 현 vrate 유지 */
@@ -2144,10 +2255,11 @@ static void ioc_adjust_base_vrate(struct ioc *ioc, u32 rq_wait_pct,
 			adj_pct = 100 + adj_pct; /* [한국어] 예: adj_pct=3이면 103% → 3% 증가 */
 
 		vrate = clamp(DIV64_U64_ROUND_UP(vrate * adj_pct, 100), /* [한국어] 올림 나눗셈으로 새 vrate 계산 후 [vrate_min, vrate_max] 범위 내로 클램프 */
-			      vrate_min, vrate_max);
+			      vrate_min, vrate_max);	/* [한국어] 조정 결과를 사용자 지정 [min,max] 안으로 최종 클램프 —
+							 * busy_level이 아무리 커도 이 경계는 넘지 못한다 */
 	}
 
-	trace_iocost_ioc_vrate_adj(ioc, vrate, missed_ppm, rq_wait_pct,
+	trace_iocost_ioc_vrate_adj(ioc, vrate, missed_ppm, rq_wait_pct,	/* [한국어] 실제 조정이 일어난 경로의 트레이스 — 위 early-return 경로와 같은 이벤트를 쓴다 */
 				   nr_lagging, nr_shortages); /* [한국어] 조정 후 새 vrate, 미달 ppm, 큐 대기율 등을 트레이스에 기록 — ftrace/perf로 제어 동작 관찰 가능 */
 
 	ioc->vtime_base_rate = vrate; /* [한국어] 계산된 새 기준 vrate를 ioc에 저장 — ioc_refresh_vrate()가 이 값을 보정의 기준으로 사용 */
@@ -2347,7 +2459,7 @@ static void __propagate_weights(struct ioc_gq *iocg, u32 active, u32 inuse,
 		if (parent->child_active_sum) { /* [한국어] 부모에 아직 활성 자식이 남아 있으면 부모의 active/inuse를 자식 비율로 재계산 */
 			parent_active = parent->weight; /* [한국어] 부모의 active = 부모 자신의 설정 가중치(weight) */
 			parent_inuse = DIV64_U64_ROUND_UP( /* [한국어] 부모의 inuse = 부모 weight × (자식 inuse 합 / 자식 active 합) — 자식들이 실제 사용하는 비율만큼만 부모 inuse 인정 */
-				parent_active * parent->child_inuse_sum,
+				parent_active * parent->child_inuse_sum,	/* [한국어] 분자: 부모 weight × 자식들이 실제로 쓰겠다고 한 inuse 총합 */
 				parent->child_active_sum); /* [한국어] 올림 나눗셈으로 최소 1이 되도록 보장 */
 		}
 		/* else: parent_active/inuse는 0 유지 — 자식이 모두 비활성화된 경우 부모도 비활성 처리 */
@@ -2642,7 +2754,7 @@ static void weight_updated(struct ioc_gq *iocg, struct ioc_now *now)
  *
  * 실행 컨텍스트: 처음에는 락 없이 빠른 경로 확인. 이후 spin_lock_irq(&ioc->lock)으로
  *   진입. process 컨텍스트에서 bio 제출 경로(ioc_rq_qos_throttle)에 의해 호출됨.
- * 호출자: ioc_rq_qos_throttle() — bio 제출 시 iocg가 비활성이면 활성화 시도.
+ * 호출자: ioc_rqos_throttle() — bio 제출 시 iocg가 비활성이면 활성화 시도.
  * 호출 대상: ioc_now(), atomic64_read/set/add(), list_empty(), list_add(),
  *            propagate_weights(), TRACE_IOCG_PATH(), ioc_start_period().
  *
@@ -2715,7 +2827,7 @@ static bool iocg_activate(struct ioc_gq *iocg, struct ioc_now *now)
 	propagate_weights(iocg, iocg->weight, /* [한국어] 새 active = iocg->weight (자신의 설정 가중치) */
 			  iocg->last_inuse ?: iocg->weight, true, now); /* [한국어] 이전 비활성화 시 저장된 last_inuse로 복원 (없으면 weight 사용), save=true로 현재 margin 기록 */
 
-	TRACE_IOCG_PATH(iocg_activate, iocg, now,
+	TRACE_IOCG_PATH(iocg_activate, iocg, now,	/* [한국어] 활성화 트레이스. 매크로가 cgroup 경로 문자열을 붙여 준다 */
 			last_period, cur_period, vtime); /* [한국어] 활성화 이벤트 트레이스 — 이전/현재 주기, 초기 vtime을 기록 */
 
 	iocg->activated_at = now->now; /* [한국어] 활성화 시각 기록 — ioc_timer_fn()에서 활성화 이후 경과 시간 측정에 사용 */
@@ -2808,8 +2920,8 @@ static bool iocg_kick_delay(struct ioc_gq *iocg, struct ioc_now *now)
 	else if (vover_pct >= MAX_DELAY_THR_PCT) /* [한국어] 초과 비율이 최대 임계(MAX_DELAY_THR_PCT%) 이상이면 최대 지연 적용 */
 		new_delay = MAX_DELAY; /* [한국어] MAX_DELAY(250ms): 심각한 예산 초과 시 IO를 최대한 억제 */
 	else /* [한국어] 중간 범위: MIN_DELAY에서 MAX_DELAY 사이를 선형 보간 */
-		new_delay = MIN_DELAY +
-			div_u64((MAX_DELAY - MIN_DELAY) *
+		new_delay = MIN_DELAY +	/* [한국어] 기저값 250us에서 출발 — 지연을 걸기로 한 이상 최소 억제력은 보장한다 */
+			div_u64((MAX_DELAY - MIN_DELAY) *	/* [한국어] 보간 폭 = 250ms - 250us. 이 폭을 초과 비율에 비례 배분한다 */
 				(vover_pct - MIN_DELAY_THR_PCT), /* [한국어] 임계 초과분에 비례한 추가 지연량 계산 */
 				MAX_DELAY_THR_PCT - MIN_DELAY_THR_PCT); /* [한국어] 전체 임계 범위로 정규화 */
 
@@ -2857,7 +2969,7 @@ static bool iocg_kick_delay(struct ioc_gq *iocg, struct ioc_now *now)
  *
  * 실행 컨텍스트: ioc->lock AND iocg->waitq.lock 동시 보유 상태 (양쪽 lockdep 확인).
  *   IO 제출 경로(이 iocg가 우선 발행으로 처리되는 특수 경로)에서 호출됨.
- * 호출자: ioc_rq_qos_throttle()의 우선 발행 경로 — root/fatal-signal IO의 비용 기록.
+ * 호출자: ioc_rqos_throttle()의 우선 발행 경로 — root/fatal-signal IO의 비용 기록.
  * 호출 대상: propagate_weights(), get_cpu_ptr/put_cpu_ptr(), local64_add().
  *
  * 호출 체인:
@@ -2974,16 +3086,18 @@ static int iocg_wake_fn(struct wait_queue_entry *wq_entry, unsigned mode,
 			int flags, void *key)
 {
 	struct iocg_wait *wait = container_of(wq_entry, struct iocg_wait, wait);
-	struct iocg_wake_ctx *ctx = key;
-	u64 cost = abs_cost_to_cost(wait->abs_cost, ctx->hw_inuse);	/* 현재 NVMe 사용 비율로 대기 bio 비용 환산 */
+	struct iocg_wake_ctx *ctx = key;	/* [한국어] __wake_up_locked_key()의 key 인자를 그대로 문맥으로 재해석.
+						 * 이 콜백은 waitq를 순회하며 항목마다 불리므로, 남은 예산(vbudget)을
+						 * 호출 간에 이어 나르는 통로가 필요하다 — key가 그 통로다. */
+	u64 cost = abs_cost_to_cost(wait->abs_cost, ctx->hw_inuse);	/* 현재 hweight_inuse(사용 비율)로 대기 bio 비용 환산 */
 
-	ctx->vbudget -= cost;	/* 남은 NVMe 예산에서 bio 차감 */
+	ctx->vbudget -= cost;	/* 남은 vtime 예산에서 bio 차감 */
 
-	if (ctx->vbudget < 0)	/* NVMe 예산 소진: 더 이상 대기자 깨우지 않음 */
-		return -1;		/* waitq 탐색 중단: NVMe 제출 한도 도달 */
+	if (ctx->vbudget < 0)	/* vtime 예산 소진: 더 이상 대기자 깨우지 않음 */
+		return -1;		/* waitq 탐색 중단: 제출 한도 도달 */
 
-	iocg_commit_bio(ctx->iocg, wait->bio, wait->abs_cost, cost);	/* NVMe 제출 예산 확정, vtime 전진 */
-	wait->committed = true;	/* issuer 깨어나 blk-mq/NVMe 경로로 진행 허가 */
+	iocg_commit_bio(ctx->iocg, wait->bio, wait->abs_cost, cost);	/* 제출 예산 확정, vtime 전진 */
+	wait->committed = true;	/* issuer 깨어나 blk-mq 경로로 진행 허가 */
 
 	/*
 	 * autoremove_wake_function() removes the wait entry only when it
@@ -2992,8 +3106,8 @@ static int iocg_wake_fn(struct wait_queue_entry *wq_entry, unsigned mode,
 	 * order of operations is important as finish_wait() tests whether
 	 * @wq_entry is removed without grabbing the lock.
 	 */
-	default_wake_function(wq_entry, mode, flags, key);	/* issuer 깨움 → blk_mq_submit_bio/NVMe로 재진입 */
-	list_del_init_careful(&wq_entry->entry);	/* waitq에서 제거: NVMe 예산 경쟁 방지 */
+	default_wake_function(wq_entry, mode, flags, key);	/* issuer 깨움 → blk_mq_submit_bio 경로로 재진입 */
+	list_del_init_careful(&wq_entry->entry);	/* waitq에서 제거: vtime 예산 경쟁 방지 */
 	return 0;
 }
 
@@ -3028,31 +3142,35 @@ static void iocg_kick_waitq(struct ioc_gq *iocg, bool pay_debt,
 			    struct ioc_now *now)
 {
 	struct ioc *ioc = iocg->ioc;
-	struct iocg_wake_ctx ctx = { .iocg = iocg };
-	u64 vshortage, expires, oexpires;
-	s64 vbudget;
-	u32 hwa;
+	struct iocg_wake_ctx ctx = { .iocg = iocg };	/* [한국어] iocg_wake_fn()에 넘길 문맥. vbudget/hw_inuse는 아래에서 채운다 */
+	u64 vshortage, expires, oexpires;	/* [한국어] vshortage=모자란 vtime, expires=새 타이머 만료(ns), oexpires=기존 만료(ns) */
+	s64 vbudget;	/* [한국어] 부호 있는 예산. 음수가 될 수 있어야 "얼마나 모자란가"를 표현할 수 있다 */
+	u32 hwa;	/* [한국어] hweight_active — 부채(abs_vdebt)를 vtime으로 환산할 때의 분모 */
 
-	lockdep_assert_held(&iocg->waitq.lock);
+	lockdep_assert_held(&iocg->waitq.lock);	/* [한국어] 이 함수는 waitq를 직접 순회/수정하므로 waitq.lock 보유가 전제.
+						 * 부채를 갚는 경로(pay_debt)에서는 ioc->lock까지 추가로 필요하다 —
+						 * 아래 lockdep_assert_held(&ioc->lock) 참조. iocg_lock()이 이 두 락의
+						 * 순서(ioc->lock → waitq.lock)를 보장한다. */
 
-	current_hweight(iocg, &hwa, NULL);
-	vbudget = now->vnow - atomic64_read(&iocg->vtime);	/* atomic: 현재 사용 가능한 NVMe vtime 예산 */
+	current_hweight(iocg, &hwa, NULL);	/* [한국어] 최신 hweight_active 획득(캐시가 stale이면 여기서 재계산됨) */
+	vbudget = now->vnow - atomic64_read(&iocg->vtime);	/* atomic: 현재 사용 가능한 vtime 예산 */
 
 	/* pay off debt */
-	if (pay_debt && iocg->abs_vdebt && vbudget > 0) {	/* NVMe 예산으로 부채부터 상환 */
-		u64 abs_vbudget = cost_to_abs_cost(vbudget, hwa);		/* vtime을 NVMe 절대 비용으로 역환산 */
-		u64 abs_vpay = min_t(u64, abs_vbudget, iocg->abs_vdebt);		/* 상환 가능한 NVMe 부채량 */
-		u64 vpay = abs_cost_to_cost(abs_vpay, hwa);		/* NVMe vtime으로 상환량 환산 */
+	if (pay_debt && iocg->abs_vdebt && vbudget > 0) {	/* vtime 예산으로 부채부터 상환 */
+		u64 abs_vbudget = cost_to_abs_cost(vbudget, hwa);		/* vtime을 절대 비용으로 역환산 */
+		u64 abs_vpay = min_t(u64, abs_vbudget, iocg->abs_vdebt);		/* 상환 가능한 vtime 부채량 */
+		u64 vpay = abs_cost_to_cost(abs_vpay, hwa);		/* vtime으로 상환량 환산 */
 
-		lockdep_assert_held(&ioc->lock);
+		lockdep_assert_held(&ioc->lock);	/* [한국어] 부채 상환은 inuse 가중치를 되돌리는 작업이라 트리 전파가 일어난다.
+							 * 따라서 waitq.lock만으로는 부족하고 ioc->lock이 반드시 필요하다. */
 
 		atomic64_add(vpay, &iocg->vtime);		/* atomic: issued vtime에 부채 상환 반영 */
 		atomic64_add(vpay, &iocg->done_vtime);		/* atomic: completed vtime 동기화 → in-flight 불변 */
-		iocg_pay_debt(iocg, abs_vpay, now);		/* NVMe 부채 잔액 갱신 및 inuse 복원 */
-		vbudget -= vpay;		/* 상환 후 남은 NVMe 예산 */
+		iocg_pay_debt(iocg, abs_vpay, now);		/* vtime 부채 잔액 갱신 및 inuse 복원 */
+		vbudget -= vpay;		/* 상환 후 남은 vtime 예산 */
 	}
 
-	if (iocg->abs_vdebt || iocg->delay)	/* 부채/지연 상태면 NVMe 제출 억제 재평가 */
+	if (iocg->abs_vdebt || iocg->delay)	/* 부채/지연 상태면 제출 억제 재평가 */
 		iocg_kick_delay(iocg, now);		/* [한국어] cgroup의 use_delay를 갱신 — 스로틀 대상 프로세스가
 						 * 스케줄 아웃 시점에 지연을 부과받게 한다. */
 
@@ -3063,8 +3181,8 @@ static void iocg_kick_waitq(struct ioc_gq *iocg, bool pay_debt,
 	 * not positive.
 	 */
 	if (iocg->abs_vdebt) {	/* 미상환 부채가 남아있으면 예산 차감 */
-		s64 vdebt = abs_cost_to_cost(iocg->abs_vdebt, hwa);		/* 남은 NVMe 부채를 vtime으로 환산 */
-		vbudget = min_t(s64, 0, vbudget - vdebt);		/* 부채를 제외한 실제 NVMe 제출 예산 */
+		s64 vdebt = abs_cost_to_cost(iocg->abs_vdebt, hwa);		/* 남은 vtime 부채를 vtime으로 환산 */
+		vbudget = min_t(s64, 0, vbudget - vdebt);		/* 부채를 제외한 실제 제출 예산 */
 	}
 
 	/*
@@ -3072,45 +3190,50 @@ static void iocg_kick_waitq(struct ioc_gq *iocg, bool pay_debt,
 	 * the next one. As paying off debt restores hw_inuse, it must be read
 	 * after the above debt payment.
 	 */
-	ctx.vbudget = vbudget;	/* wake_fn에 전달할 남은 NVMe 예산 */
-	current_hweight(iocg, NULL, &ctx.hw_inuse);
+	ctx.vbudget = vbudget;	/* wake_fn에 전달할 남은 vtime 예산 */
+	current_hweight(iocg, NULL, &ctx.hw_inuse);	/* [한국어] hw_inuse를 "부채 상환 이후"에 읽는 것이 핵심이다.
+							 * iocg_pay_debt()가 inuse를 복원하므로, 그 전에 읽으면 대기 bio의
+							 * 비용을 실제보다 비싸게 환산해 불필요하게 계속 재우게 된다. */
 
-	__wake_up_locked_key(&iocg->waitq, TASK_NORMAL, &ctx);	/* 예산 내 대기 bio를 깨워 NVMe 제출 재개 */
+	__wake_up_locked_key(&iocg->waitq, TASK_NORMAL, &ctx);	/* 예산 내 대기 bio를 깨워 제출 재개 */
 
-	if (!waitqueue_active(&iocg->waitq)) {	/* NVMe 예산 대기자가 모두 처리됨 */
-		if (iocg->wait_since) {		/* NVMe 예산 대기 통계 종료 */
-			iocg->stat.wait_us += now->now - iocg->wait_since;
-			iocg->wait_since = 0;
+	if (!waitqueue_active(&iocg->waitq)) {	/* vtime 예산 대기자가 모두 처리됨 */
+		if (iocg->wait_since) {		/* vtime 예산 대기 통계 종료 */
+			iocg->stat.wait_us += now->now - iocg->wait_since;	/* [한국어] 대기가 끝났으므로 (지금 - 대기 시작)을 누적 대기 시간에 더한다.
+										 * 이 값이 io.stat / iocost_monitor.py의 wait 항목이 된다 */
+			iocg->wait_since = 0;	/* [한국어] 0 = "현재 대기 중 아님" 표식. 다음 대기 시작 때 다시 찍힌다 */
 		}
 		return;
 	}
 
-	if (!iocg->wait_since)	/* 새로운 NVMe 예산 대기 시작 */
-		iocg->wait_since = now->now;		/* NVMe 예산 대기 시작 시각 기록 */
+	if (!iocg->wait_since)	/* 새로운 vtime 예산 대기 시작 */
+		iocg->wait_since = now->now;		/* vtime 예산 대기 시작 시각 기록 */
 
 	if (WARN_ON_ONCE(ctx.vbudget >= 0))	/* 대기자가 남았는데 예산이 양수면 버그 */
 		return;
 
 	/* determine next wakeup, add a timer margin to guarantee chunking */
-	vshortage = -ctx.vbudget;	/* 다음 NVMe 제출까지 필요한 vtime 부족분 */
-	expires = now->now_ns +	/* 다음 NVMe 예산 회복 시점 */
-		DIV64_U64_ROUND_UP(vshortage, ioc->vtime_base_rate) *
-		NSEC_PER_USEC;
+	vshortage = -ctx.vbudget;	/* 다음 제출까지 필요한 vtime 부족분 */
+	expires = now->now_ns +	/* 다음 vtime 예산 회복 시점 */
+		DIV64_U64_ROUND_UP(vshortage, ioc->vtime_base_rate) *	/* [한국어] 모자란 vtime ÷ vrate = 그만큼 채우는 데 걸릴 wallclock μs.
+									 * 올림이라 아직 예산이 안 찼는데 깨우는 조기 기상을 막는다 */
+		NSEC_PER_USEC;	/* [한국어] μs → ns 변환. hrtimer가 ns 단위이기 때문 */
 	expires += ioc->timer_slack_ns;	/* [한국어] 만료 시각에 slack을 더해 인접 타이머와 함께 처리되도록 한다 */
 
 	/* if already active and close enough, don't bother */
-	oexpires = ktime_to_ns(hrtimer_get_softexpires(&iocg->waitq_timer));	/* 기존 NVMe 재개 타이머 만료 시각 */
-	if (hrtimer_is_queued(&iocg->waitq_timer) &&	/* 이미 NVMe 재개 타이머가 있고 */
+	oexpires = ktime_to_ns(hrtimer_get_softexpires(&iocg->waitq_timer));	/* 기존 재개 타이머 만료 시각 */
+	if (hrtimer_is_queued(&iocg->waitq_timer) &&	/* 이미 재개 타이머가 있고 */
 	    abs(oexpires - expires) <= ioc->timer_slack_ns)	/* slack 내에 있으면 재스케줄 생략 */
 		return;
 
-	hrtimer_start_range_ns(&iocg->waitq_timer, ns_to_ktime(expires),	/* NVMe 예산 회복 시점에 issuer 깨움 */
-			       ioc->timer_slack_ns, HRTIMER_MODE_ABS);
+	hrtimer_start_range_ns(&iocg->waitq_timer, ns_to_ktime(expires),	/* vtime 예산 회복 시점에 issuer 깨움 */
+			       ioc->timer_slack_ns, HRTIMER_MODE_ABS);	/* [한국어] slack 범위(주기의 1%)를 주어 인접 타이머와 묶이도록 허용하고,
+										 * ABS 모드로 위에서 계산한 절대 시각에 만료시킨다 */
 }
 
 /*
  * [한국어]
- * iocg_waitq_timer_fn - waitq hrtimer 만료 콜백: NVMe 예산 회복 시 대기 bio 재개
+ * iocg_waitq_timer_fn - waitq hrtimer 만료 콜백: vtime 예산 회복 시 대기 bio 재개
  *
  * @timer: 만료된 hrtimer (iocg->waitq_timer에 내장)
  * @return: HRTIMER_NORESTART — one-shot; 재암은 iocg_kick_waitq 내에서 수행
@@ -3130,27 +3253,30 @@ static void iocg_kick_waitq(struct ioc_gq *iocg, bool pay_debt,
 static enum hrtimer_restart iocg_waitq_timer_fn(struct hrtimer *timer)
 {
 	struct ioc_gq *iocg = container_of(timer, struct ioc_gq, waitq_timer);
-	bool pay_debt = READ_ONCE(iocg->abs_vdebt);	/* READ_ONCE: NVMe 부채 존재 여부를 lock 없이 확인 */
-	struct ioc_now now;	/* NVMe 제어 시계 스냅샷 */
-	unsigned long flags;
+	bool pay_debt = READ_ONCE(iocg->abs_vdebt);	/* READ_ONCE: vtime 부채 존재 여부를 lock 없이 확인 */
+	struct ioc_now now;	/* [한국어] 제어 시계 스냅샷 — 이 콜백 안의 모든 계산이 같은 시각을 보게 한다 */
+	unsigned long flags;	/* [한국어] spin_lock_irqsave가 저장할 인터럽트 상태.
+				 * hrtimer 콜백은 softirq 컨텍스트이지만, 같은 락을 IRQ를 끈 채
+				 * 잡는 경로가 있으므로 irqsave 변형을 쓴다 */
 
-	ioc_now(iocg->ioc, &now);
+	ioc_now(iocg->ioc, &now);	/* [한국어] 락을 잡기 **전에** 시각을 뜬다. ioc_now()는 seqcount 재시도 루프를
+					 * 돌 뿐 락을 잡지 않으므로, 락 보유 구간을 짧게 유지할 수 있다 */
 
-	iocg_lock(iocg, pay_debt, &flags);	/* 부채 있으면 ioc->lock도 획득: NVMe 예산/부채 동시 보호 */
-	iocg_kick_waitq(iocg, pay_debt, &now);	/* NVMe 예산 회복 시 waitq 처리 */
-	iocg_unlock(iocg, pay_debt, &flags);
+	iocg_lock(iocg, pay_debt, &flags);	/* 부채 있으면 ioc->lock도 획득: vtime 예산/부채 동시 보호 */
+	iocg_kick_waitq(iocg, pay_debt, &now);	/* vtime 예산 회복 시 waitq 처리 */
+	iocg_unlock(iocg, pay_debt, &flags);	/* [한국어] 잡은 순서의 역순으로 해제 — iocg_lock()과 대칭이어야 lockdep이 통과한다 */
 
 	return HRTIMER_NORESTART;	/* hrtimer는 one-shot: 필요시 iocg_kick_waitq가 재시작 */
 }
 
 /*
  * [한국어]
- * ioc_lat_stat - 주기별 NVMe 완료 지연(missed_ppm) 및 rq 대기(rq_wait_pct) 통계 집계
+ * ioc_lat_stat - 주기별 완료 지연(missed_ppm) 및 rq 대기(rq_wait_pct) 통계 집계
  *
  * @ioc:             대상 ioc 컨트롤러 (pcpu_stat 배열 포함)
  * @missed_ppm_ar:   [READ/WRITE] latency QoS 목표를 놓친 비율(ppm) 출력 배열
  * @rq_wait_pct_p:   이번 주기 대비 rq(request/tag) 할당 대기 시간 비율(%) 출력
- * @nr_done:         이번 주기 NVMe 완료 총수(met + missed) 출력
+ * @nr_done:         이번 주기 완료 총수(met + missed) 출력
  * @return:          없음 (void)
  *
  * 모든 온라인 CPU의 ioc_pcpu_stat를 순회하며 nr_met[], nr_missed[], rq_wait_ns를
@@ -3169,43 +3295,47 @@ static enum hrtimer_restart iocg_waitq_timer_fn(struct hrtimer *timer)
 static void ioc_lat_stat(struct ioc *ioc, u32 *missed_ppm_ar, u32 *rq_wait_pct_p,
 			 u32 *nr_done)
 {
-	u32 nr_met[2] = { };
-	u32 nr_missed[2] = { };
-	u64 rq_wait_ns = 0;
-	int cpu, rw;
+	u32 nr_met[2] = { };	/* [한국어] [READ], [WRITE] 방향별 "이번 주기에 지연 목표를 지킨" IO 수의 전 CPU 합 */
+	u32 nr_missed[2] = { };	/* [한국어] 같은 방향별 "목표를 못 지킨" IO 수. 이 둘의 비가 missed_ppm이 된다 */
+	u64 rq_wait_ns = 0;	/* [한국어] 이번 주기에 전 CPU에서 request 할당을 기다린 시간의 총합(ns) */
+	int cpu, rw;	/* [한국어] cpu: for_each_online_cpu 순회 변수, rw: READ(0)/WRITE(1) 인덱스 */
 
-	for_each_online_cpu(cpu) {	/* per-CPU NVMe CQ 통계를 CPU 순회하며 집계 */
-		struct ioc_pcpu_stat *stat = per_cpu_ptr(ioc->pcpu_stat, cpu);		/* 해당 CPU의 NVMe 완료/대기 통계 */
-		u64 this_rq_wait_ns;
+	for_each_online_cpu(cpu) {	/* per-CPU 완료 통계를 CPU 순회하며 집계 */
+		struct ioc_pcpu_stat *stat = per_cpu_ptr(ioc->pcpu_stat, cpu);		/* 해당 CPU의 완료/대기 통계 */
+		u64 this_rq_wait_ns;	/* [한국어] 이 CPU의 rq_wait_ns 누계 스냅샷. 아래에서 last_rq_wait_ns와 차분한다 */
 
-		for (rw = READ; rw <= WRITE; rw++) {		/* read/write NVMe 완료 지연 각각 집계 */
-			u32 this_met = local_read(&stat->missed[rw].nr_met);			/* local: 해당 CPU에서 NVMe latency QoS 달성 횟수 */
-			u32 this_missed = local_read(&stat->missed[rw].nr_missed);			/* local: 해당 CPU에서 NVMe latency QoS 미달 횟수 */
+		for (rw = READ; rw <= WRITE; rw++) {		/* [한국어] read/write를 따로 집계한다. QoS 목표(QOS_RLAT vs QOS_WLAT)가
+								 * 방향별로 다르고, ioc_timer_fn()도 둘을 따로 임계와 비교하기 때문 */
+			u32 this_met = local_read(&stat->missed[rw].nr_met);			/* local: 해당 CPU에서 지연(latency) QoS 달성 횟수 */
+			u32 this_missed = local_read(&stat->missed[rw].nr_missed);			/* local: 해당 CPU에서 지연(latency) QoS 미달 횟수 */
 
-			nr_met[rw] += this_met - stat->missed[rw].last_met;			/* 주기 간 NVMe QoS 달성 증가량 */
-			nr_missed[rw] += this_missed - stat->missed[rw].last_missed;			/* 주기 간 NVMe QoS 미달 증가량 */
-			stat->missed[rw].last_met = this_met;			/* 다음 주기 NVMe QoS 집계 기준 */
-			stat->missed[rw].last_missed = this_missed;			/* 다음 주기 NVMe QoS 집계 기준 */
+			nr_met[rw] += this_met - stat->missed[rw].last_met;			/* 주기 간 지연 QoS 달성 증가량 */
+			nr_missed[rw] += this_missed - stat->missed[rw].last_missed;			/* 주기 간 지연 QoS 미달 증가량 */
+			stat->missed[rw].last_met = this_met;			/* 다음 주기 지연 QoS 집계 기준 */
+			stat->missed[rw].last_missed = this_missed;			/* 다음 주기 지연 QoS 집계 기준 */
 		}
 
-		this_rq_wait_ns = local64_read(&stat->rq_wait_ns);		/* local64: 해당 CPU의 NVMe request(tag) 할당 대기 시간 */
-		rq_wait_ns += this_rq_wait_ns - stat->last_rq_wait_ns;		/* 주기 간 NVMe rq_wait 증가량 */
-		stat->last_rq_wait_ns = this_rq_wait_ns;		/* 다음 주기 NVMe rq_wait 집계 기준 */
+		this_rq_wait_ns = local64_read(&stat->rq_wait_ns);		/* local64: 해당 CPU의 request(blk-mq tag) 할당 대기 시간 */
+		rq_wait_ns += this_rq_wait_ns - stat->last_rq_wait_ns;		/* 주기 간 rq_wait 증가량 */
+		stat->last_rq_wait_ns = this_rq_wait_ns;		/* 다음 주기 rq_wait 집계 기준 */
 	}
 
-	for (rw = READ; rw <= WRITE; rw++) {
-		if (nr_met[rw] + nr_missed[rw])		/* 해당 방향 NVMe 완료가 있을 때만 ppm 계산 */
-			missed_ppm_ar[rw] =
-				DIV64_U64_ROUND_UP((u64)nr_missed[rw] * MILLION,
-						   nr_met[rw] + nr_missed[rw]);
+	for (rw = READ; rw <= WRITE; rw++) {	/* [한국어] 합산이 끝났으니 방향별로 미달 비율(ppm)을 산출한다 */
+		if (nr_met[rw] + nr_missed[rw])		/* [한국어] 분모가 0이면(이번 주기에 그 방향 완료가 하나도 없으면) 나눗셈 불가 */
+			missed_ppm_ar[rw] =	/* [한국어] 출력 배열에 기록 — 호출자 ioc_timer_fn()의 missed_ppm[]이 된다 */
+				DIV64_U64_ROUND_UP((u64)nr_missed[rw] * MILLION,	/* [한국어] ×MILLION 으로 ppm 스케일. u64 캐스팅은 곱셈 오버플로 방지용 */
+						   nr_met[rw] + nr_missed[rw]);	/* [한국어] 분모 = 이번 주기 그 방향 완료 총수. 올림이라 미달을 과소평가하지 않는다 */
 		else
-			missed_ppm_ar[rw] = 0;
+			missed_ppm_ar[rw] = 0;	/* [한국어] 표본이 없으면 0(미달 없음)으로 보고 — 이후 임계 비교에서 포화 신호를 내지 않는다 */
 	}
 
-	*rq_wait_pct_p = div64_u64(rq_wait_ns * 100,	/* NVMe request 할당 대기 시간을 주기 대비 %로 */
-				   ioc->period_us * NSEC_PER_USEC);
+	*rq_wait_pct_p = div64_u64(rq_wait_ns * 100,	/* request 할당 대기 시간을 주기 대비 %로 */
+				   ioc->period_us * NSEC_PER_USEC);	/* [한국어] 분모 = 한 주기 길이를 ns로 환산한 값.
+									 * 주의: 전 CPU 대기 시간의 합을 한 CPU분 주기로 나누므로
+									 * CPU가 많으면 100%를 넘을 수 있다. RQ_WAIT_BUSY_PCT(5%)라는
+									 * 낮은 임계는 이 스케일을 전제로 한 값이다 */
 
-	*nr_done = nr_met[READ] + nr_met[WRITE] + nr_missed[READ] + nr_missed[WRITE];	/* 이번 주기 NVMe 완료 총수 */
+	*nr_done = nr_met[READ] + nr_met[WRITE] + nr_missed[READ] + nr_missed[WRITE];	/* 이번 주기 완료 총수 */
 }
 
 /*
@@ -3232,12 +3362,12 @@ static bool iocg_is_idle(struct ioc_gq *iocg)
 	struct ioc *ioc = iocg->ioc;
 
 	/* did something get issued this period? */
-	if (atomic64_read(&iocg->active_period) ==	/* atomic: 이번 NVMe 주기에 제출했는가 */
-	    atomic64_read(&ioc->cur_period))	/* atomic: 현재 NVMe 주기 번호 */
+	if (atomic64_read(&iocg->active_period) ==	/* atomic: 이번 제어 주기에 제출했는가 */
+	    atomic64_read(&ioc->cur_period))	/* atomic: 현재 제어 주기 번호 */
 		return false;
 
 	/* is something in flight? */
-	if (atomic64_read(&iocg->done_vtime) != atomic64_read(&iocg->vtime))	/* atomic: NVMe in-flight 명령이 남아있으면 idle 아님 */
+	if (atomic64_read(&iocg->done_vtime) != atomic64_read(&iocg->vtime))	/* atomic: in-flight 명령이 남아있으면 idle 아님 */
 		return false;
 
 	return true;
@@ -3269,20 +3399,27 @@ static void iocg_build_inner_walk(struct ioc_gq *iocg,
 {
 	int lvl;
 
-	WARN_ON_ONCE(!list_empty(&iocg->walk_list));
+	WARN_ON_ONCE(!list_empty(&iocg->walk_list));	/* [한국어] leaf 자신은 아직 어떤 순회 목록에도 들어 있으면 안 된다.
+								 * walk_list가 비어 있지 않다는 것은 앞선 순회가 정리되지
+								 * 않았다는 뜻이므로 버그 신호다. */
 
 	/* find the first ancestor which hasn't been visited yet */
-	for (lvl = iocg->level - 1; lvl >= 0; lvl--) {
-		if (!list_empty(&iocg->ancestors[lvl]->walk_list))
-			break;
+	for (lvl = iocg->level - 1; lvl >= 0; lvl--) {	/* [한국어] 자기 바로 위 부모부터 root(level 0) 방향으로 거슬러 올라간다 */
+		if (!list_empty(&iocg->ancestors[lvl]->walk_list))	/* [한국어] walk_list가 비어 있지 않다 = 이 조상은 이미 방문됨.
+										 * 여러 leaf가 조상을 공유하므로 이 중복 제거가 필수다 */
+			break;	/* [한국어] 방문된 조상을 만나면 거기서 멈춘다 — 그 위는 모두 이미 등록되어 있다 */
 	}
 
 	/* walk down and visit the inner nodes to get pre-order traversal */
-	while (++lvl <= iocg->level - 1) {	/* 미방문 낮부 노드를 순서대로 NVMe 통계 트리에 추가 */
-		struct ioc_gq *inner = iocg->ancestors[lvl];
+	while (++lvl <= iocg->level - 1) {	/* [한국어] 위에서 멈춘 지점 바로 아래부터 다시 내려오며 미방문 내부 노드를 등록.
+						 * 위로 올라갔다가 아래로 내려오는 이 두 단계가 pre-order(부모 먼저)를 만든다.
+						 * 자기 자신(level)은 제외 — 이 함수는 "내부 노드"만 모은다 */
+		struct ioc_gq *inner = iocg->ancestors[lvl];	/* [한국어] 현재 깊이의 조상 노드 */
 
 		/* record traversal order */
-		list_add_tail(&inner->walk_list, inner_walk);
+		list_add_tail(&inner->walk_list, inner_walk);	/* [한국어] 꼬리에 붙여 root→leaf 순서를 유지.
+									 * 호출자는 이 목록을 정방향으로 돌면 pre-order,
+									 * 역방향으로 돌면 post-order(자식 먼저)를 얻는다 */
 	}
 }
 
@@ -3308,21 +3445,23 @@ static void iocg_build_inner_walk(struct ioc_gq *iocg,
  */
 static void iocg_flush_stat_upward(struct ioc_gq *iocg)
 {
-	if (iocg->level > 0) {	/* root가 아니면 상위 cgroup으로 NVMe 통계 전파 */
-		struct iocg_stat *parent_stat =
-			&iocg->ancestors[iocg->level - 1]->stat;
+	if (iocg->level > 0) {	/* root가 아니면 상위 cgroup으로 통계 전파 */
+		struct iocg_stat *parent_stat =	/* [한국어] 바로 위 부모의 stat 구조체를 가리키는 포인터 */
+			&iocg->ancestors[iocg->level - 1]->stat;	/* [한국어] ancestors[]는 root(0)~자신(level)이므로 level-1이 부모다 */
 
-		parent_stat->usage_us +=		/* 상위 cgroup NVMe 사용량 누적 */
-			iocg->stat.usage_us - iocg->last_stat.usage_us;			/* 주기 간 NVMe 사용량 증가분 */
-		parent_stat->wait_us +=
-			iocg->stat.wait_us - iocg->last_stat.wait_us;
-		parent_stat->indebt_us +=
+		parent_stat->usage_us +=		/* 상위 cgroup 사용량 누적 */
+			iocg->stat.usage_us - iocg->last_stat.usage_us;			/* 주기 간 사용량 증가분 */
+		parent_stat->wait_us +=	/* [한국어] 예산 부족으로 waitq에서 잔 시간도 같은 방식으로 부모에 올린다 */
+			iocg->stat.wait_us - iocg->last_stat.wait_us;	/* [한국어] 절대값이 아니라 "직전 flush 이후 증가분"만 전파한다 */
+		parent_stat->indebt_us +=	/* [한국어] 부채(abs_vdebt>0) 상태로 있던 시간 */
 			iocg->stat.indebt_us - iocg->last_stat.indebt_us;
-		parent_stat->indelay_us +=
+		parent_stat->indelay_us +=	/* [한국어] 유도 지연(delay>0)이 걸려 있던 시간 */
 			iocg->stat.indelay_us - iocg->last_stat.indelay_us;
 	}
 
-	iocg->last_stat = iocg->stat;
+	iocg->last_stat = iocg->stat;	/* [한국어] 구조체 통째 대입으로 이번 flush 지점을 스냅샷.
+					 * 다음 호출의 차분 기준이 되며, 같은 증가분을 두 번 올리는 것을 막는다.
+					 * root(level==0)도 이 줄은 반드시 실행해야 하므로 if 블록 밖에 있다 */
 }
 
 /*
@@ -3348,24 +3487,27 @@ static void iocg_flush_stat_upward(struct ioc_gq *iocg)
 static void iocg_flush_stat_leaf(struct ioc_gq *iocg, struct ioc_now *now)
 {
 	struct ioc *ioc = iocg->ioc;
-	u64 abs_vusage = 0;
-	u64 vusage_delta;
-	int cpu;
+	u64 abs_vusage = 0;	/* [한국어] 전 CPU 합산용 누산기 — 이 cgroup이 지금까지 쓴 절대 vtime의 총계 */
+	u64 vusage_delta;	/* [한국어] 직전 flush 이후의 증가분. 실제로 의미 있는 값은 총계가 아니라 이 차분이다 */
+	int cpu;	/* [한국어] for_each_possible_cpu 순회 변수 */
 
 	lockdep_assert_held(&iocg->ioc->lock);
 
 	/* collect per-cpu counters */
-	for_each_possible_cpu(cpu) {	/* leaf cgroup의 per-CPU NVMe 사용량을 모두 합산 */
-		abs_vusage += local64_read(		/* local64: 해당 CPU에서 NVMe에 소진된 절대 vtime */
-				per_cpu_ptr(&iocg->pcpu_stat->abs_vusage, cpu));			/* per-CPU 포인터로 NVMe 사용량 읽기 */
+	for_each_possible_cpu(cpu) {	/* leaf cgroup의 per-CPU 사용량을 모두 합산 */
+		abs_vusage += local64_read(		/* [한국어] local64_read: 이 CPU에서 이 cgroup이 소진한 절대 vtime 누계 —
+						 * 쓰기는 iocg_commit_bio()/iocg_incur_debt()가 CPU-local로 한다 */
+				per_cpu_ptr(&iocg->pcpu_stat->abs_vusage, cpu));			/* [한국어] per-CPU 영역에서 이 CPU 몫의 abs_vusage 주소를 얻는다.
+													 * online이 아니라 possible 전체를 도는 이유: CPU가 오프라인이 되어도
+													 * 그 CPU가 남긴 누계는 살아 있어야 총합이 맞기 때문 */
 	}
-	vusage_delta = abs_vusage - iocg->last_stat_abs_vusage;	/* 주기 간 NVMe 절대 사용량 증가분 */
-	iocg->last_stat_abs_vusage = abs_vusage;
+	vusage_delta = abs_vusage - iocg->last_stat_abs_vusage;	/* 주기 간 절대 사용량 증가분 */
+	iocg->last_stat_abs_vusage = abs_vusage;	/* [한국어] 다음 주기 차분 기준점 갱신. 이 대입을 빼먹으면 같은 사용량이 매 주기 재계상된다 */
 
-	iocg->usage_delta_us = div64_u64(vusage_delta, ioc->vtime_base_rate);	/* NVMe vtime을 wallclock μs로 환산 */
-	iocg->stat.usage_us += iocg->usage_delta_us;
+	iocg->usage_delta_us = div64_u64(vusage_delta, ioc->vtime_base_rate);	/* vtime을 wallclock μs로 환산 */
+	iocg->stat.usage_us += iocg->usage_delta_us;	/* [한국어] 누적 사용 시간에 이번 주기분을 더한다 — io.stat의 usage 항목 */
 
-	iocg_flush_stat_upward(iocg);
+	iocg_flush_stat_upward(iocg);	/* [한국어] 방금 갱신한 증가분을 부모로 밀어 올리고 last_stat을 스냅샷한다 */
 }
 
 /*
@@ -3394,19 +3536,24 @@ static void iocg_flush_stat_leaf(struct ioc_gq *iocg, struct ioc_now *now)
  */
 static void iocg_flush_stat(struct list_head *target_iocgs, struct ioc_now *now)
 {
-	LIST_HEAD(inner_walk);
-	struct ioc_gq *iocg, *tiocg;	/* NVMe 활성 cgroup 순회용 */
+	LIST_HEAD(inner_walk);	/* [한국어] 스택에 만드는 임시 리스트 헤드. 이번 flush에서 방문할 내부(비-leaf) 노드들을
+				 * root→leaf pre-order로 담는다. 여러 leaf가 조상을 공유하므로
+				 * iocg_build_inner_walk()가 중복 없이 채워 준다 */
+	struct ioc_gq *iocg, *tiocg;	/* [한국어] iocg=현재 항목, tiocg=순회 중 삭제에 대비한 다음 항목 보관용(_safe 변형용) */
 
 	/* flush leaves and build inner node walk list */
-	list_for_each_entry(iocg, target_iocgs, active_list) {	/* NVMe 활성 cgroup 전체 통계 플러시 */
-		iocg_flush_stat_leaf(iocg, now);		/* leaf cgroup의 per-CPU NVMe 사용량 집계 */
-		iocg_build_inner_walk(iocg, &inner_walk);		/* NVMe 통계 상위 전파용 트리 구축 */
+	list_for_each_entry(iocg, target_iocgs, active_list) {	/* 활성 cgroup 전체 통계 플러시 */
+		iocg_flush_stat_leaf(iocg, now);		/* leaf cgroup의 per-CPU 사용량 집계 */
+		iocg_build_inner_walk(iocg, &inner_walk);		/* 통계 상위 전파용 트리 구축 */
 	}
 
 	/* keep flushing upwards by walking the inner list backwards */
-	list_for_each_entry_safe_reverse(iocg, tiocg, &inner_walk, walk_list) {	/* leaf에서 root로 NVMe 통계 전파 */
-		iocg_flush_stat_upward(iocg);
-		list_del_init(&iocg->walk_list);
+	list_for_each_entry_safe_reverse(iocg, tiocg, &inner_walk, walk_list) {	/* leaf에서 root로 통계 전파 */
+		iocg_flush_stat_upward(iocg);	/* [한국어] 역순(=leaf에 가까운 쪽부터) 순회이므로, 자식이 부모에게 올린 값이
+						 * 다시 조부모로 올라간다. 순서를 뒤집으면 아래에서 올라온 몫이 누락된다 */
+		list_del_init(&iocg->walk_list);	/* [한국어] 순회 목록에서 떼면서 walk_list를 빈 상태로 되돌린다.
+							 * 다음 flush의 iocg_build_inner_walk()가 "미방문" 판정에 이 상태를 쓴다.
+							 * _safe_reverse 변형을 쓰는 이유가 바로 이 순회 중 삭제 때문이다 */
 	}
 }
 
@@ -3441,25 +3588,31 @@ static u32 hweight_after_donation(struct ioc_gq *iocg, u32 old_hwi, u32 hwm,
 				  u32 usage, struct ioc_now *now)
 {
 	struct ioc *ioc = iocg->ioc;
-	u64 vtime = atomic64_read(&iocg->vtime);
-	s64 excess, delta, target, new_hwi;
+	u64 vtime = atomic64_read(&iocg->vtime);	/* [한국어] atomic 읽기: 이 cgroup의 현재 발행 기준 가상 시각.
+							 * now->vnow와의 거리가 곧 "남은 예산"이다 */
+	s64 excess, delta, target, new_hwi;	/* [한국어] excess=target margin 초과분, delta=vnow와의 거리를 주기 대비 비율로,
+						 * target=MARGIN_TARGET_PCT를 WEIGHT_ONE 스케일로, new_hwi=산출된 목표 hweight_inuse.
+						 * 모두 부호 있는 타입인 이유는 delta/excess가 음수가 될 수 있기 때문 */
 
 	/* debt handling owns inuse for debtors */
-	if (iocg->abs_vdebt)	/* 부채 cgroup은 NVMe 시간 기부 불가 */
-		return 1;
+	if (iocg->abs_vdebt)	/* 부채 cgroup은 장치 시간 기부 불가 */
+		return 1;	/* [한국어] 부채가 있으면 inuse를 부채 처리 로직이 소유한다.
+				 * 여기서 1(가능한 최소 hweight)을 돌려 "최대한 기부한 상태"로 만든다 */
 
 	/* see whether minimum margin requirement is met */
-	if (waitqueue_active(&iocg->waitq) ||	/* NVMe 예산 대기자가 있으면 기부하지 않음 */
-	    time_after64(vtime, now->vnow - ioc->margins.min))	/* 최소 margin 이하로 NVMe 예산이 줄면 기부 금지 */
-		return hwm;
+	if (waitqueue_active(&iocg->waitq) ||	/* vtime 예산 대기자가 있으면 기부하지 않음 */
+	    time_after64(vtime, now->vnow - ioc->margins.min))	/* 최소 margin 이하로 vtime 예산이 줄면 기부 금지 */
+		return hwm;	/* [한국어] 대기자가 있거나 여유가 min margin 아래면 기부할 형편이 아니다.
+				 * 상한 hwm을 그대로 돌려 "기부 없음"으로 처리한다(snapback) */
 
 	/* throw away excess above target */
-	excess = now->vnow - vtime - ioc->margins.target;	/* NVMe target margin 초과 예산 */
-	if (excess > 0) {	/* NVMe 예산이 target 이상 남아있으면 버림 */
-		atomic64_add(excess, &iocg->vtime);		/* atomic: 초과 NVMe issued vtime 버림 */
+	excess = now->vnow - vtime - ioc->margins.target;	/* [한국어] target margin(=주기의 50%)을 넘어 남아도는 예산 —
+										 * 이만큼은 이 주기에 쓰지 못했으므로 버린다 */
+	if (excess > 0) {	/* vtime 예산이 target 이상 남아있으면 버림 */
+		atomic64_add(excess, &iocg->vtime);		/* atomic: 초과 issued vtime 버림 */
 		atomic64_add(excess, &iocg->done_vtime);		/* atomic: 초과 completed vtime도 동기화 */
-		vtime += excess;
-		ioc->vtime_err -= div64_u64(excess * old_hwi, WEIGHT_ONE);		/* 버려진 NVMe 예산을 vrate로 보정 */
+		vtime += excess;	/* [한국어] 지역 변수 vtime도 함께 밀어 준다 — 아래 delta 계산이 버린 뒤의 값을 써야 하기 때문 */
+		ioc->vtime_err -= div64_u64(excess * old_hwi, WEIGHT_ONE);		/* 버려진 vtime 예산을 vrate로 보정 */
 	}
 
 	/*
@@ -3478,12 +3631,18 @@ static u32 hweight_after_donation(struct ioc_gq *iocg, u32 old_hwi, u32 hwm,
 	 *
 	 *   new_hwi = usage / (1 - MARGIN_TARGET + delta)
 	 */
-	delta = div64_s64(WEIGHT_ONE * (now->vnow - vtime),
-			  now->vnow - ioc->period_at_vtime);
-	target = WEIGHT_ONE * MARGIN_TARGET_PCT / 100;
-	new_hwi = div64_s64(WEIGHT_ONE * usage, WEIGHT_ONE - target + delta);
+	delta = div64_s64(WEIGHT_ONE * (now->vnow - vtime),	/* [한국어] 분자: 이 cgroup이 장치 vtime보다 얼마나 뒤처져 있는가(=남은 예산)를
+								 * WEIGHT_ONE 스케일로 올린 값 */
+			  now->vnow - ioc->period_at_vtime);	/* [한국어] 분모: 이번 주기 동안 장치 vtime이 전진한 총량.
+								 * 결과 delta = "남은 예산이 한 주기의 몇 분의 몇인가"(WEIGHT_ONE=1.0) */
+	target = WEIGHT_ONE * MARGIN_TARGET_PCT / 100;	/* [한국어] 목표 여유 50%를 WEIGHT_ONE 스케일로 = 32768 */
+	new_hwi = div64_s64(WEIGHT_ONE * usage, WEIGHT_ONE - target + delta);	/* [한국어] 위 주석의 공식 그대로:
+											 * new_hwi = usage / (1 - MARGIN_TARGET + delta).
+											 * 다음 주기 끝에 여유가 정확히 목표 50%가 되도록 하는 몫이다.
+											 * 이미 여유가 많으면(delta 큼) 분모가 커져 new_hwi가 작아진다 = 더 많이 기부 */
 
-	return clamp_t(s64, new_hwi, 1, hwm);
+	return clamp_t(s64, new_hwi, 1, hwm);	/* [한국어] 하한 1: hweight 0은 "영원히 IO 불가"를 뜻하므로 금지.
+						 * 상한 hwm: 자기 몫 이상을 가져갈 수는 없다 */
 }
 
 /*
@@ -3545,14 +3704,14 @@ static u32 hweight_after_donation(struct ioc_gq *iocg, u32 old_hwi, u32 hwm,
  */
 /*
  * [한국어]
- * transfer_surpluses - 잉여 iocg들의 NVMe 시간 할당분을 부족한 iocg로 재분배
+ * transfer_surpluses - 잉여 iocg들의 장치 시간 할당분을 부족한 iocg로 재분배
  *
  * @surpluses: 잉여가 있는 iocg 목록 (surplus_list로 연결)
  * @now:       현재 vtime/wallclock 스냅샷
  * @return:    없음 (void)
  *
- * Work-conservation을 달성하기 위해 NVMe 시간을 사용하지 않는 기부자(donor)
- * iocg들의 inuse를 낮춰, 부족한 수혜자(beneficiary) iocg들이 더 많은 NVMe
+ * Work-conservation을 달성하기 위해 장치 시간을 사용하지 않는 기부자(donor)
+ * iocg들의 inuse를 낮춰, 부족한 수혜자(beneficiary) iocg들이 더 많은 장치
  * 시간을 할당받을 수 있도록 한다 (vrate 조정 없이 inuse만 조정하는 #2 방식).
  *
  * 알고리즘 개요 (Andy's method):
@@ -3574,10 +3733,14 @@ static u32 hweight_after_donation(struct ioc_gq *iocg, u32 old_hwi, u32 hwm,
  */
 static void transfer_surpluses(struct list_head *surpluses, struct ioc_now *now)
 {
-	LIST_HEAD(over_hwa);
-	LIST_HEAD(inner_walk);
-	struct ioc_gq *iocg, *tiocg, *root_iocg;
-	u32 after_sum, over_sum, over_target, gamma;
+	LIST_HEAD(over_hwa);	/* [한국어] 반올림으로 "원래 몫보다 커진" 기부자들을 임시로 모으는 목록.
+				 * iocg->walk_list를 링크로 쓴다(surplus_list와는 별개 링크) */
+	LIST_HEAD(inner_walk);	/* [한국어] 기부자들의 조상(내부 노드)을 pre-order로 담는 목록.
+				 * Andy's method가 레벨별 비례 배분을 하려면 트리 구조가 필요하다 */
+	struct ioc_gq *iocg, *tiocg, *root_iocg;	/* [한국어] iocg=순회 항목, tiocg=_safe 순회용 예비 포인터,
+							 * root_iocg=inner_walk의 첫 항목(=level 0, 트리 루트) */
+	u32 after_sum, over_sum, over_target, gamma;	/* [한국어] after_sum=기부 후 비율의 총합, over_sum=부풀려진 것들의 합,
+							 * over_target=그것들이 줄어들 목표 합, gamma=비기부자에게 적용할 전역 배율 */
 
 	/*
 	 * It's pretty unlikely but possible for the total sum of
@@ -3586,8 +3749,8 @@ static void transfer_surpluses(struct list_head *surpluses, struct ioc_now *now)
 	 * scale down everyone over its full share equally to keep the sum below
 	 * WEIGHT_ONE.
 	 */
-	after_sum = 0;
-	over_sum = 0;
+	after_sum = 0;	/* [한국어] 누산 시작 — 아래 루프에서 모든 기부자의 hweight_after_donation을 더한다 */
+	over_sum = 0;	/* [한국어] 그중 원래 몫(hwa)을 넘어선 것들만 따로 더할 누산기 */
 	/* [한국어] ★ 기부(donation) 모델의 배경 ★
 	 * iocost는 각 cgroup에 가중치에 비례한 "가상 시간 예산"을 준다. 그런데
 	 * 예산을 다 쓰지 않는 cgroup이 있으면 그 몫이 놀게 되어 장치가 낭비된다.
@@ -3603,13 +3766,16 @@ static void transfer_surpluses(struct list_head *surpluses, struct ioc_now *now)
 
 		/* [한국어] 이 cgroup의 현재 활성 가중치(원래 몫)를 구한다. */
 		current_hweight(iocg, &hwa, NULL);
-		after_sum += iocg->hweight_after_donation;
+		after_sum += iocg->hweight_after_donation;	/* [한국어] 기부 후 비율을 전부 더한다. 이상적으로는 WEIGHT_ONE 미만이어야 하지만,
+								 * DIV64_U64_ROUND_UP 들이 쌓여 넘칠 수 있어 아래에서 검사한다 */
 
 		/* [한국어] 기부 후 비율이 원래 몫보다 크다 = 반올림으로 부풀려졌다.
 		 * 보정 대상 목록에 넣고 그 합도 따로 센다. */
 		if (iocg->hweight_after_donation > hwa) {
 			over_sum += iocg->hweight_after_donation;
-			list_add(&iocg->walk_list, &over_hwa);
+			list_add(&iocg->walk_list, &over_hwa);	/* [한국어] 보정 대상으로 임시 목록에 등록.
+								 * 여기서 walk_list를 빌려 쓰므로, 아래에서 반드시 list_del_init()으로
+								 * 되돌려야 이후 iocg_build_inner_walk()의 미방문 판정이 정상 동작한다 */
 		}
 	}
 
@@ -3653,17 +3819,22 @@ static void transfer_surpluses(struct list_head *surpluses, struct ioc_now *now)
 	 * Build pre-order inner node walk list and prepare for donation
 	 * adjustment calculations.
 	 */
-	list_for_each_entry(iocg, surpluses, surplus_list) {
-		iocg_build_inner_walk(iocg, &inner_walk);
+	list_for_each_entry(iocg, surpluses, surplus_list) {	/* [한국어] 모든 기부자에 대해 그 조상 경로를 inner_walk에 등록한다 */
+		iocg_build_inner_walk(iocg, &inner_walk);	/* [한국어] 조상이 겹쳐도 중복 등록되지 않으며, 결과는 root→leaf pre-order다 */
 	}
 
-	root_iocg = list_first_entry(&inner_walk, struct ioc_gq, walk_list);
-	WARN_ON_ONCE(root_iocg->level > 0);
+	root_iocg = list_first_entry(&inner_walk, struct ioc_gq, walk_list);	/* [한국어] pre-order의 첫 항목은 반드시 트리 루트다.
+											 * 아래 gamma 계산이 루트의 집계값을 필요로 한다 */
+	WARN_ON_ONCE(root_iocg->level > 0);	/* [한국어] 첫 항목이 level 0이 아니면 순회 구성이 깨진 것 — 계산 전제가 무너진다 */
 
-	list_for_each_entry(iocg, &inner_walk, walk_list) {	/* NVMe 기부 비율 검증/보정 */
-		iocg->child_adjusted_sum = 0;
-		iocg->hweight_donating = 0;
-		iocg->hweight_after_donation = 0;
+	list_for_each_entry(iocg, &inner_walk, walk_list) {	/* [한국어] 내부 노드들의 집계 필드를 0으로 초기화한다.
+								 * 이 값들은 매 주기 아래에서 자식들로부터 새로 누적되므로,
+								 * 지난 주기 잔값을 반드시 지워야 한다.
+								 * 기부자(leaf) 자신의 값은 여기서 지우지 않는다 —
+								 * inner_walk에는 조상만 들어 있기 때문이다 */
+		iocg->child_adjusted_sum = 0;	/* [한국어] 자식들의 조정된 inuse 합. 레벨별 비례 배분의 분모가 된다 */
+		iocg->hweight_donating = 0;	/* [한국어] 이 서브트리가 기부하는 몫의 합(b_t) */
+		iocg->hweight_after_donation = 0;	/* [한국어] 기부 후 이 서브트리에 남는 몫의 합(b'_t) */
 	}
 
 	/*
@@ -3677,8 +3848,8 @@ static void transfer_surpluses(struct list_head *surpluses, struct ioc_now *now)
 	list_for_each_entry(iocg, surpluses, surplus_list) {
 		struct ioc_gq *parent = iocg->ancestors[iocg->level - 1];
 
-		parent->hweight_donating += iocg->hweight_donating;
-		parent->hweight_after_donation += iocg->hweight_after_donation;
+		parent->hweight_donating += iocg->hweight_donating;	/* [한국어] 기부자 자신의 기부량을 부모에 합산 */
+		parent->hweight_after_donation += iocg->hweight_after_donation;	/* [한국어] 기부 후 남는 몫도 같이 올린다 */
 	}
 
 	/* [한국어] 내부 노드들의 값을 다시 root까지 누적 전파한다.
@@ -3692,8 +3863,8 @@ static void transfer_surpluses(struct list_head *surpluses, struct ioc_now *now)
 		if (iocg->level > 0) {
 			struct ioc_gq *parent = iocg->ancestors[iocg->level - 1];
 
-			parent->hweight_donating += iocg->hweight_donating;
-			parent->hweight_after_donation += iocg->hweight_after_donation;
+			parent->hweight_donating += iocg->hweight_donating;	/* [한국어] 이 내부 노드가 자식들로부터 모은 기부량을 다시 자기 부모로 */
+			parent->hweight_after_donation += iocg->hweight_after_donation;	/* [한국어] 기부 후 잔량도 동일하게 위로 */
 		}
 	}
 
@@ -3703,25 +3874,31 @@ static void transfer_surpluses(struct list_head *surpluses, struct ioc_now *now)
 	 * roundups.
 	 */
 	list_for_each_entry(iocg, &inner_walk, walk_list) {
-		if (iocg->level) {		/* root 제외 NVMe 기부자 비율 재계산 */
+		if (iocg->level) {		/* root 제외 기부자 비율 재계산 */
 			struct ioc_gq *parent = iocg->ancestors[iocg->level - 1];
 
-			iocg->hweight_active = DIV64_U64_ROUND_UP(			/* 부모로부터 상속된 NVMe 활성 비율 */
-				(u64)parent->hweight_active * iocg->active,				/* 부모 NVMe 비율 * 자식 active */
-				parent->child_active_sum);
+			iocg->hweight_active = DIV64_U64_ROUND_UP(			/* 부모로부터 상속된 hweight_active */
+				(u64)parent->hweight_active * iocg->active,				/* 부모 hweight * 자식 active */
+				parent->child_active_sum);	/* [한국어] 분모: 부모의 자식 active 총합.
+								 * 결과 = 부모 몫 × (내 active / 형제 active 합) = 내 계층적 몫.
+								 * 올림을 쓰므로 형제들의 합이 부모를 살짝 넘을 수 있고,
+								 * 그래서 바로 아래에서 min()으로 다시 조인다 */
 
 		}
 
-		iocg->hweight_donating = min(iocg->hweight_donating,
+		iocg->hweight_donating = min(iocg->hweight_donating,	/* [한국어] 자기 몫보다 많이 기부할 수는 없다 — 올림 오차로 초과했으면 여기서 자른다 */
 					     iocg->hweight_active);
-		iocg->hweight_after_donation = min(iocg->hweight_after_donation,
-						   iocg->hweight_donating - 1);
-		if (WARN_ON_ONCE(iocg->hweight_active <= 1 ||
-				 iocg->hweight_donating <= 1 ||
-				 iocg->hweight_after_donation == 0)) {
-			pr_warn("iocg: invalid donation weights in ");
-			pr_cont_cgroup_path(iocg_to_blkg(iocg)->blkcg->css.cgroup);
-			pr_cont(": active=%u donating=%u after=%u\n",
+		iocg->hweight_after_donation = min(iocg->hweight_after_donation,	/* [한국어] 기부 후 잔량은 기부량보다 반드시 작아야 한다 */
+						   iocg->hweight_donating - 1);	/* [한국어] -1 로 강한 부등식을 강제한다. 같아지면 "기부했는데 준 게 없는"
+											 * 상태가 되어 아래 gamma 계산의 분모가 0이 될 수 있다 */
+		if (WARN_ON_ONCE(iocg->hweight_active <= 1 ||	/* [한국어] 위 min() 보정 이후에도 성립해야 하는 불변식 검사.
+								 * active<=1 이면 이 노드에 사실상 몫이 없다는 뜻이라
+								 * 아래 나눗셈들이 0 또는 음수 분모를 만들 수 있다 */
+				 iocg->hweight_donating <= 1 ||	/* [한국어] 기부량이 1 이하이면 -1 후 0이 되어 위 min()이 무의미해진다 */
+				 iocg->hweight_after_donation == 0)) {	/* [한국어] 잔량 0 = 이 서브트리가 IO를 전혀 못 하게 되는 상태. 허용 불가 */
+			pr_warn("iocg: invalid donation weights in ");	/* [한국어] 진단 로그: 어떤 cgroup에서 깨졌는지 경로와 함께 남긴다 */
+			pr_cont_cgroup_path(iocg_to_blkg(iocg)->blkcg->css.cgroup);	/* [한국어] blkg → blkcg → css.cgroup 을 거쳐 cgroup 경로 문자열을 이어 붙인다 */
+			pr_cont(": active=%u donating=%u after=%u\n",	/* [한국어] 세 값을 같이 찍어야 어느 불변식이 깨졌는지 사후 판별이 가능하다 */
 				iocg->hweight_active, iocg->hweight_donating,
 				iocg->hweight_after_donation);
 		}
@@ -3742,8 +3919,8 @@ static void transfer_surpluses(struct list_head *surpluses, struct ioc_now *now)
 	 * gamma = (1 - t_r') / (1 - t_r)
 	 */
 	gamma = DIV_ROUND_UP(	/* [한국어] 전역 시간 기부율(donation rate) 계산 */
-		(WEIGHT_ONE - root_iocg->hweight_after_donation) * WEIGHT_ONE,		/* 기부 후 비기부자 NVMe 비율 */
-		WEIGHT_ONE - min_t(u32, root_iocg->hweight_donating, WEIGHT_ONE - 1));		/* 기부 전 기부자 NVMe 비율(0 나눔 방지) */
+		(WEIGHT_ONE - root_iocg->hweight_after_donation) * WEIGHT_ONE,		/* 기부 후 비기부자 hweight */
+		WEIGHT_ONE - min_t(u32, root_iocg->hweight_donating, WEIGHT_ONE - 1));		/* 기부 전 기부자 hweight(0 나눔 방지) */
 
 	/*
 	 * Calculate adjusted hwi, child_adjusted_sum and inuse for the inner
@@ -3762,12 +3939,16 @@ static void transfer_surpluses(struct list_head *surpluses, struct ioc_now *now)
 	 *   b' = 조정 후 비율,  b_f = 비기부분,  b_t = 기부분
 	 *   s  = child_active_sum(자식 가중치 합),  s' = 조정된 합
 	 *   w  = 개별 가중치,  gamma = 비기부자들이 나눠 가질 확대 배율 */
-	list_for_each_entry(iocg, &inner_walk, walk_list) {
-		struct ioc_gq *parent;
-		u32 inuse, wpt, wptp;
-		u64 st, sf;
+	list_for_each_entry(iocg, &inner_walk, walk_list) {	/* [한국어] pre-order 정방향 순회 — 부모가 자식보다 먼저 처리된다.
+								 * 자식이 부모의 child_adjusted_sum을 읽어야 하므로 이 방향이 필수다
+								 * (위쪽 집계 루프가 reverse였던 것과 정반대) */
+		struct ioc_gq *parent;	/* [한국어] 직계 부모 노드 */
+		u32 inuse, wpt, wptp;	/* [한국어] inuse=이 노드의 조정된 가중치, wpt=조정 전 부모 내 기부분 몫,
+					 * wptp=조정 후 그 몫. 이 둘의 비가 기부분에 곱해질 배율이 된다 */
+		u64 st, sf;	/* [한국어] st=자식 가중치 합 중 기부분(donating), sf=비기부분(free).
+				 * st + sf = child_active_sum 이며, 기부분만 스케일링한다 */
 
-		if (iocg->level == 0) {
+		if (iocg->level == 0) {	/* [한국어] root는 부모가 없어 아래 일반식을 쓸 수 없다 — 전용 식으로 처리 */
 			/* adjusted weight sum for 1st level: s' = s * b_pf / b'_pf */
 			/* [한국어] root는 부모가 없어 위쪽에서 물려받을 비율이 없다.
 			 * 대신 "전체 100% 중 기부되지 않은 몫"이 조정 후 얼마가 되는지의
@@ -3841,27 +4022,35 @@ static void transfer_surpluses(struct list_head *surpluses, struct ioc_now *now)
 		 * @iocg->inuse stay at the minimum and we don't wanna
 		 * interfere.
 		 */
-		if (iocg->abs_vdebt) {		/* 부채 cgroup은 NVMe 기부에서 제외, inuse 최소 유지 */
-			WARN_ON_ONCE(iocg->inuse > 1);
-			continue;
+		if (iocg->abs_vdebt) {		/* 부채 cgroup은 기부에서 제외, inuse 최소 유지 */
+			WARN_ON_ONCE(iocg->inuse > 1);	/* [한국어] 부채 상태의 iocg는 iocg_incur_debt()가 inuse를 0 또는 1로 눌러 둔다.
+							 * 1을 넘는다면 부채 처리와 기부 처리가 서로 간섭한 것이므로 버그 신호 */
+			continue;	/* [한국어] inuse를 건드리지 않고 넘어간다 — 부채 처리 쪽이 소유권을 갖는다 */
 		}
 
 		/* w' = s' * b' / b'_p, note that b' == b'_t for donating leaves */
-		inuse = DIV64_U64_ROUND_UP(
-			parent->child_adjusted_sum * iocg->hweight_after_donation,
-			parent->hweight_inuse);
+		inuse = DIV64_U64_ROUND_UP(	/* [한국어] 위 주석의 w' = s' × b' / b'_p 를 그대로 계산한다.
+						 * 조상 노드들의 조정이 모두 끝났으므로, 이제 리프의 최종 inuse를 뽑을 수 있다 */
+			parent->child_adjusted_sum * iocg->hweight_after_donation,	/* [한국어] 분자: 부모의 조정된 자식 가중치 합 × 이 리프의 기부 후 목표 몫 */
+			parent->hweight_inuse);	/* [한국어] 분모: 부모의 계층적 사용 몫. 결과는 부모의 가중치 스케일로 표현된 이 리프의 inuse */
 
-		TRACE_IOCG_PATH(inuse_transfer, iocg, now,
-				iocg->inuse, inuse,
-				iocg->hweight_inuse,
-				iocg->hweight_after_donation);
+		TRACE_IOCG_PATH(inuse_transfer, iocg, now,	/* [한국어] 기부 전/후 값을 트레이스에 남긴다 — 이 알고리즘은 눈으로 검증하기 어려워
+								 * iocost_monitor.py / ftrace 관찰이 사실상 유일한 디버깅 수단이다 */
+				iocg->inuse, inuse,	/* [한국어] 이전 inuse → 새 inuse */
+				iocg->hweight_inuse,	/* [한국어] 이전 계층적 사용 몫 */
+				iocg->hweight_after_donation);	/* [한국어] 목표로 삼은 기부 후 몫 */
 
-		__propagate_weights(iocg, iocg->active, inuse, true, now);
+		__propagate_weights(iocg, iocg->active, inuse, true, now);	/* [한국어] 새 inuse를 조상 트리에 전파해 hweight 캐시를 무효화한다.
+										 * `__` 접두 버전은 ioc->lock을 이미 쥐고 있음을 전제한다 —
+										 * transfer_surpluses()는 ioc_timer_fn()이 ioc->lock을 쥔 채 호출한다.
+										 * save=true 이므로 saved_margin/saved_wpay도 함께 갱신된다 */
 	}
 
 	/* walk list should be dissolved after use */
-	list_for_each_entry_safe(iocg, tiocg, &inner_walk, walk_list)
-		list_del_init(&iocg->walk_list);
+	list_for_each_entry_safe(iocg, tiocg, &inner_walk, walk_list)	/* [한국어] inner_walk는 스택 위의 지역 리스트이므로 함수를 벗어나기 전에 반드시 비워야 한다 */
+		list_del_init(&iocg->walk_list);	/* [한국어] 각 노드의 walk_list를 빈 상태로 되돌린다.
+							 * 남겨 두면 다음 주기 iocg_build_inner_walk()가 "이미 방문됨"으로
+							 * 오판해 조상 등록을 통째로 건너뛴다 */
 }
 
 /*
@@ -3877,7 +4066,7 @@ static void transfer_surpluses(struct list_head *surpluses, struct ioc_now *now)
  */
 /*
  * [한국어]
- * ioc_forgive_debts - NVMe 장치가 충분히 한가할 때 부채 cgroup의 abs_vdebt/delay를 탕감
+ * ioc_forgive_debts - 장치가 충분히 한가할 때 부채 cgroup의 abs_vdebt/delay를 탕감
  *
  * @ioc:          대상 ioc 컨트롤러
  * @usage_us_sum: 이번 주기 전체 활성 iocg의 wallclock 사용량 합계 (μs)
@@ -3887,7 +4076,8 @@ static void transfer_surpluses(struct list_head *surpluses, struct ioc_now *now)
  *
  * 부채 탕감 배경: 낮은 weight의 cgroup이 메모리 회수(anonymous page reclaim)
  * 같은 상황에서 다수의 write를 발행하면 abs_vdebt가 수 초분까지 누적될 수 있다.
- * 이후 다른 IO 발행자가 없으면 부채 cgroup만 홀로 NVMe에 접근하면서 장치가 idle해진다.
+ * 이후 다른 IO 발행자가 없으면 부채 cgroup만 홀로 장치에 접근하는데, 그 cgroup은
+ * 부채 때문에 throttle되어 있으므로 장치는 놀고 있는데 아무도 못 쓰는 상태가 된다.
  * 이를 방지하기 위해, 사용률이 DFGV_USAGE_PCT(50%) 이하인 상태가 DFGV_PERIOD(100ms)
  * 이상 지속되면 abs_vdebt와 delay를 nr_cycles번 반감(>>)한다.
  * busy_level > 0이면 device 포화로 간주해 usage_us_sum을 최소 period_us로 올림.
@@ -3902,15 +4092,16 @@ static void transfer_surpluses(struct list_head *surpluses, struct ioc_now *now)
 static void ioc_forgive_debts(struct ioc *ioc, u64 usage_us_sum, int nr_debtors,
 			      struct ioc_now *now)
 {
-	struct ioc_gq *iocg;
-	u64 dur, usage_pct, nr_cycles, nr_cycles_shift;
+	struct ioc_gq *iocg;	/* [한국어] active_iocgs 순회 변수 */
+	u64 dur, usage_pct, nr_cycles, nr_cycles_shift;	/* [한국어] dur=직전 평가 이후 경과 μs, usage_pct=그 구간 평균 장치 사용률(%),
+							 * nr_cycles=DFGV_PERIOD(100ms)가 몇 번 지났는지, nr_cycles_shift=실제 적용할 시프트량 */
 
 	/* if no debtor, reset the cycle */
-	if (!nr_debtors) {	/* NVMe 부채 cgroup이 없으면 idle 측정 리셋 */
-		ioc->dfgv_period_at = now->now;
-		ioc->dfgv_period_rem = 0;
-		ioc->dfgv_usage_us_sum = 0;
-		return;
+	if (!nr_debtors) {	/* vtime 부채 cgroup이 없으면 idle 측정 리셋 */
+		ioc->dfgv_period_at = now->now;	/* [한국어] 탕감 대상이 없으므로 측정 창을 지금부터 새로 시작한다 */
+		ioc->dfgv_period_rem = 0;	/* [한국어] 이월 잔량도 버린다 — 다음에 부채가 생기면 처음부터 100ms를 재야 한다 */
+		ioc->dfgv_usage_us_sum = 0;	/* [한국어] 누적 사용량 리셋 */
+		return;	/* [한국어] 탕감할 부채가 없으니 더 할 일이 없다 */
 	}
 
 	/*
@@ -3919,27 +4110,29 @@ static void ioc_forgive_debts(struct ioc *ioc, u64 usage_us_sum, int nr_debtors,
 	 * write bursts. If we're missing latency targets, consider the device
 	 * fully utilized.
 	 */
-	if (ioc->busy_level > 0)	/* NVMe 장치가 포화면 사용률을 100%로 간주, 부채 탕감 억제 */
-		usage_us_sum = max_t(u64, usage_us_sum, ioc->period_us);		/* NVMe busy 시 최소 사용량 보정 */
+	if (ioc->busy_level > 0)	/* 장치가 포화면 사용률을 100%로 간주, 부채 탕감 억제 */
+		usage_us_sum = max_t(u64, usage_us_sum, ioc->period_us);		/* 장치 busy 시 최소 사용량 보정 */
 
-	ioc->dfgv_usage_us_sum += usage_us_sum;
-	if (time_before64(now->now, ioc->dfgv_period_at + DFGV_PERIOD))	/* 100ms 미만이면 NVMe idle 판단 보류 */
+	ioc->dfgv_usage_us_sum += usage_us_sum;	/* [한국어] 이번 ioc 주기의 사용량을 dfgv 창(100ms)에 누적한다.
+						 * ioc 주기(1ms~1s)와 dfgv 주기(100ms)가 다르므로 이렇게 따로 모은다 */
+	if (time_before64(now->now, ioc->dfgv_period_at + DFGV_PERIOD))	/* 100ms 미만이면 장치 idle 판단 보류 */
 		return;
 
 	/*
 	 * At least DFGV_PERIOD has passed since the last period. Calculate the
 	 * average usage and reset the period counters.
 	 */
-	dur = now->now - ioc->dfgv_period_at;	/* NVMe idle 측정 구간 */
-	usage_pct = div64_u64(100 * ioc->dfgv_usage_us_sum, dur);	/* NVMe 사용률(%) */
+	dur = now->now - ioc->dfgv_period_at;	/* 장치 idle 측정 구간 */
+	usage_pct = div64_u64(100 * ioc->dfgv_usage_us_sum, dur);	/* 장치 사용률(%) */
 
-	ioc->dfgv_period_at = now->now;
-	ioc->dfgv_usage_us_sum = 0;
+	ioc->dfgv_period_at = now->now;	/* [한국어] 평가를 마쳤으니 다음 창의 시작점을 지금으로 옮긴다 */
+	ioc->dfgv_usage_us_sum = 0;	/* [한국어] 누적 사용량도 비워 새 창을 시작 */
 
 	/* if was too busy, reset everything */
-	if (usage_pct > DFGV_USAGE_PCT) {	/* NVMe 사용률이 50% 초과면 부채 탕감 중단 */
-		ioc->dfgv_period_rem = 0;
-		return;
+	if (usage_pct > DFGV_USAGE_PCT) {	/* 장치 사용률이 50% 초과면 부채 탕감 중단 */
+		ioc->dfgv_period_rem = 0;	/* [한국어] 장치가 바빴으므로 이월 잔량을 버린다.
+						 * 이렇게 해야 바쁜 구간이 섞였을 때 탕감이 누적되어 몰아치지 않는다 */
+		return;	/* [한국어] 사용률 50% 초과 — 이번 창에서는 탕감하지 않는다 */
 	}
 
 	/*
@@ -3951,34 +4144,42 @@ static void ioc_forgive_debts(struct ioc *ioc, u64 usage_us_sum, int nr_debtors,
 	 * - if ioc period is 75% of DFGV_PERIOD, one out of three consecutive
 	 * reductions is doubled.
 	 */
-	nr_cycles = dur + ioc->dfgv_period_rem;
-	ioc->dfgv_period_rem = do_div(nr_cycles, DFGV_PERIOD);
+	nr_cycles = dur + ioc->dfgv_period_rem;	/* [한국어] 실제 경과 시간에 지난번 나머지를 더한다 —
+						 * ioc 주기와 100ms가 나누어떨어지지 않아 생기는 오차를 이월로 흡수한다 */
+	ioc->dfgv_period_rem = do_div(nr_cycles, DFGV_PERIOD);	/* [한국어] do_div은 nr_cycles를 몫으로 덮어쓰고 나머지를 반환하는 커널 매크로다.
+								 * 즉 nr_cycles = 100ms가 몇 번 들어가는가, 반환값 = 남은 시간.
+								 * 원본 주석의 예: ioc 주기가 75ms면 세 번에 한 번은 탕감이 두 배로 적용된다 */
 
-	list_for_each_entry(iocg, &ioc->active_iocgs, active_list) {	/* NVMe 활성 cgroup별 사용량/잉여 계산 */
-		u64 __maybe_unused old_debt, __maybe_unused old_delay;
+	list_for_each_entry(iocg, &ioc->active_iocgs, active_list) {	/* 활성 cgroup별 사용량/잉여 계산 */
+		u64 __maybe_unused old_debt, __maybe_unused old_delay;	/* [한국어] 탕감 전 값 보관 — 아래 TRACE_IOCG_PATH에만 쓰이므로,
+										 * CONFIG_TRACEPOINTS가 꺼진 빌드에서 미사용 경고가 나지 않도록
+										 * __maybe_unused를 붙였다 */
 
-		if (!iocg->abs_vdebt && !iocg->delay)
-			continue;
+		if (!iocg->abs_vdebt && !iocg->delay)	/* [한국어] 부채도 지연도 없는 cgroup은 탕감할 것이 없다 */
+			continue;	/* [한국어] 락도 잡지 않고 건너뛴다 — 활성 cgroup 대부분이 이 경로다 */
 
-		spin_lock(&iocg->waitq.lock);
+		spin_lock(&iocg->waitq.lock);	/* [한국어] abs_vdebt/delay와 waitq를 함께 만지므로 waitq.lock이 필요하다.
+						 * 호출자 ioc_timer_fn()이 이미 ioc->lock을 IRQ를 끈 채 쥐고 있으므로
+						 * 여기서는 irqsave 없는 spin_lock으로 충분하고, 락 순서
+						 * (ioc->lock → waitq.lock)도 지켜진다 */
 
-		old_debt = iocg->abs_vdebt;
+		old_debt = iocg->abs_vdebt;	/* [한국어] 트레이스용 이전 값 스냅샷 */
 		old_delay = iocg->delay;
 
 		nr_cycles_shift = min_t(u64, nr_cycles, BITS_PER_LONG - 1);		/* shift 오버플로우 방지 */
-		if (iocg->abs_vdebt)			/* NVMe 부채가 있으면 절반으로 탕감 */
+		if (iocg->abs_vdebt)			/* vtime 부채가 있으면 절반으로 탕감 */
 			iocg->abs_vdebt = iocg->abs_vdebt >> nr_cycles_shift ?: 1;			/* 부채 절반 감소, 최소 1 유지 */
 
-		if (iocg->delay)			/* NVMe 제출 지연도 절반 감소 */
-			iocg->delay = iocg->delay >> nr_cycles_shift ?: 1;			/* 지연 절반 감소 → NVMe doorbell 간격 점진적 복원 */
+		if (iocg->delay)			/* 제출 지연도 절반 감소 */
+			iocg->delay = iocg->delay >> nr_cycles_shift ?: 1;			/* 지연 절반 감소 → 유도 지연이 점진적으로 풀림 */
 
-		iocg_kick_waitq(iocg, true, now);			/* 부채 탕감 후 NVMe 예산으로 waitq 처리 */
+		iocg_kick_waitq(iocg, true, now);			/* 부채 탕감 후 vtime 예산으로 waitq 처리 */
 
-		TRACE_IOCG_PATH(iocg_forgive_debt, iocg, now, usage_pct,
-				old_debt, iocg->abs_vdebt,
-				old_delay, iocg->delay);
+		TRACE_IOCG_PATH(iocg_forgive_debt, iocg, now, usage_pct,	/* [한국어] 탕감 이벤트 기록: 판단 근거였던 사용률과 전/후 값을 함께 남긴다 */
+				old_debt, iocg->abs_vdebt,	/* [한국어] 부채 전 → 후 */
+				old_delay, iocg->delay);	/* [한국어] 지연 전 → 후 */
 
-		spin_unlock(&iocg->waitq.lock);
+		spin_unlock(&iocg->waitq.lock);	/* [한국어] iocg별 락 해제. 다음 iocg로 넘어가며 락을 잘게 잡았다 놓는다 */
 	}
 }
 
@@ -4010,8 +4211,9 @@ static void ioc_forgive_debts(struct ioc *ioc, u64 usage_us_sum, int nr_debtors,
  */
 static int ioc_check_iocgs(struct ioc *ioc, struct ioc_now *now)
 {
-	int nr_debtors = 0;
-	struct ioc_gq *iocg, *tiocg;
+	int nr_debtors = 0;	/* [한국어] 이번 점검에서 발견한 "부채 또는 지연이 걸린" cgroup 수.
+				 * 반환값이며, ioc_timer_fn()이 ioc_forgive_debts()에 그대로 넘긴다 */
+	struct ioc_gq *iocg, *tiocg;	/* [한국어] iocg=현재 항목, tiocg=순회 중 삭제(list_del_init)에 대비한 예비 포인터 */
 
 	/* [한국어] 활성 cgroup 전체를 순회하며 상태를 점검한다.
 	 * _safe 변형인 이유: 아래에서 idle로 판정된 cgroup을 이 목록에서
@@ -4043,21 +4245,24 @@ static int ioc_check_iocgs(struct ioc *ioc, struct ioc_now *now)
 		 * 계속 부채 상태)에서도 io.stat이 진행 상황을 보여줘야 하기 때문이다.
 		 * since를 갱신하므로 같은 구간이 두 번 세어지지 않는다. */
 		if (iocg->wait_since) {
-			iocg->stat.wait_us += now->now - iocg->wait_since;
-			iocg->wait_since = now->now;
+			iocg->stat.wait_us += now->now - iocg->wait_since;	/* [한국어] 대기 시작 이후 지금까지를 누적 */
+			iocg->wait_since = now->now;	/* [한국어] 기준점을 현재로 옮겨 다음 정산 때 중복 계상되지 않게 한다.
+							 * (iocg_kick_waitq()의 종료 경로는 0으로 지우지만, 여기서는
+							 *  아직 대기 중이므로 0이 아닌 현재 시각으로 갱신한다) */
 		}
-		if (iocg->indebt_since) {
+		if (iocg->indebt_since) {	/* [한국어] 부채 상태 진입 시각이 찍혀 있으면 = 지금도 부채 중 */
 			iocg->stat.indebt_us +=
-				now->now - iocg->indebt_since;
-			iocg->indebt_since = now->now;
+				now->now - iocg->indebt_since;	/* [한국어] 부채 상태로 보낸 시간 누적 */
+			iocg->indebt_since = now->now;	/* [한국어] 기준점 이동 */
 		}
-		if (iocg->indelay_since) {
+		if (iocg->indelay_since) {	/* [한국어] 유도 지연이 걸린 채로 있는 중이면 */
 			iocg->stat.indelay_us +=
-				now->now - iocg->indelay_since;
-			iocg->indelay_since = now->now;
+				now->now - iocg->indelay_since;	/* [한국어] 지연 상태로 보낸 시간 누적 */
+			iocg->indelay_since = now->now;	/* [한국어] 기준점 이동 */
 		}
 
-		if (waitqueue_active(&iocg->waitq) || iocg->abs_vdebt ||
+		if (waitqueue_active(&iocg->waitq) || iocg->abs_vdebt ||	/* [한국어] 셋 중 하나라도 있으면 "아직 살아 있는" cgroup — 비활성화 대상이 아니다.
+										 * idle 판정은 이 세 조건이 모두 거짓일 때만 도달한다(아래 else if) */
 		    iocg->delay) {
 			/* might be oversleeping vtime / hweight changes, kick */
 			/* [한국어] 대기자가 있거나 빚/지연이 있는 cgroup을 깨워 재평가한다.
@@ -4073,12 +4278,15 @@ static int ioc_check_iocgs(struct ioc *ioc, struct ioc_now *now)
 			 * 장치가 전반적으로 과부하라는 신호다. */
 			if (iocg->abs_vdebt || iocg->delay)
 				nr_debtors++;
-		} else if (iocg_is_idle(iocg)) {
+		} else if (iocg_is_idle(iocg)) {	/* [한국어] 대기자도 부채도 지연도 없고 iocg_is_idle()이 참 —
+							 * 즉 (1) 이번 주기에 IO를 하나도 안 냈고 (2) in-flight도 없다.
+							 * 이 두 조건이 모두 서야 비활성화한다 */
 			/* no waiter and idle, deactivate */
 			/* [한국어] 이 cgroup이 쓴 가상 시간. atomic인 이유는 I/O 제출
 			 * 경로가 락 없이 이 값을 갱신하기 때문이다. */
 			u64 vtime = atomic64_read(&iocg->vtime);
-			s64 excess;
+			s64 excess;	/* [한국어] vnow 대비 목표 여유를 넘어 과하게 쌓인 예산.
+					 * 부호 있는 타입이라 예산이 목표에 못 미치면 음수가 되어 아래 if가 걸러진다 */
 
 			/*
 			 * @iocg has been inactive for a full duration and will
@@ -4094,8 +4302,8 @@ static int ioc_check_iocgs(struct ioc *ioc, struct ioc_now *now)
 			 * 그래서 목표치(margins.target)를 넘는 부분은 버리고, 재활성화
 			 * 시 목표 예산에서 다시 시작하게 한다. */
 			excess = now->vnow - vtime - ioc->margins.target;
-			if (excess > 0) {
-				u32 old_hwi;
+			if (excess > 0) {	/* [한국어] 목표를 넘긴 만큼만 처리한다. 목표 이하로 쌓인 예산은 정상이므로 그대로 둔다 */
+				u32 old_hwi;	/* [한국어] 이 cgroup의 현재 hweight_inuse — cgroup 기준 vtime을 장치 기준으로 환산할 배율 */
 
 				/* [한국어] 버린 예산을 vtime_err에 반영한다.
 				 * vtime_err은 "가상 시간과 실제 장치 능력 사이의 누적 오차"로,
@@ -4106,8 +4314,10 @@ static int ioc_check_iocgs(struct ioc *ioc, struct ioc_now *now)
 				 * 이지만 vtime_err은 장치 전체 기준이라, 이 cgroup이 차지하는
 				 * 비율만큼 환산해야 한다. */
 				current_hweight(iocg, NULL, &old_hwi);
-				ioc->vtime_err -= div64_u64(excess * old_hwi,
-							    WEIGHT_ONE);
+				ioc->vtime_err -= div64_u64(excess * old_hwi,	/* [한국어] excess(cgroup 기준) × hweight = 장치 기준 vtime.
+										 * 빼기(-=)인 이유: 예산을 "버렸으니" 장치는 그만큼 덜 쓴 셈이고,
+										 * 다음 ioc_refresh_vrate()가 이 오차를 vtime 진행에 되돌려 반영한다 */
+							    WEIGHT_ONE);	/* [한국어] hweight의 고정소수점 스케일(65536)로 나눠 정규화 */
 			}
 
 			/* [한국어] 비활성화 사건을 tracepoint로 기록한다. iocost 동작을
@@ -4126,7 +4336,7 @@ static int ioc_check_iocgs(struct ioc *ioc, struct ioc_now *now)
 			list_del_init(&iocg->active_list);
 		}
 
-		spin_unlock(&iocg->waitq.lock);
+		spin_unlock(&iocg->waitq.lock);	/* [한국어] iocg별 락 해제. ioc->lock은 호출자가 계속 쥐고 있다 */
 	}
 
 	/* [한국어] 위에서 __propagate_weights()로 바뀐 계층 가중치를 확정해
@@ -4170,53 +4380,64 @@ static int ioc_check_iocgs(struct ioc *ioc, struct ioc_now *now)
 static void ioc_timer_fn(struct timer_list *timer)
 {
 	struct ioc *ioc = container_of(timer, struct ioc, timer);
-	struct ioc_gq *iocg, *tiocg;
-	struct ioc_now now;
-	LIST_HEAD(surpluses);	/* NVMe 시간 잉여 cgroup 임시 목록 */
-	int nr_debtors, nr_shortages = 0, nr_lagging = 0;	/* NVMe 포화상태 지표 초기화 */
-	u64 usage_us_sum = 0;	/* NVMe 사용량 합계 */
-	u32 ppm_rthr;	/* read latency QoS 목표를 벗어날 NVMe 명령 비율 임계 */
-	u32 ppm_wthr;	/* write latency QoS 목표를 벗어날 NVMe 명령 비율 임계 */
-	u32 missed_ppm[2], rq_wait_pct, nr_done;	/* NVMe 완료 지연/ rq_wait/처리량 통계 */
-	u64 period_vtime;	/* 이번 NVMe 주기의 가상 시간 총량 */
-	int prev_busy_level;	/* 이전 NVMe 포화 수준 */
+	struct ioc_gq *iocg, *tiocg;	/* [한국어] iocg=순회 항목, tiocg=surplus 목록 정리 시 _safe 순회용 예비 포인터 */
+	struct ioc_now now;	/* [한국어] 이 주기 처리 전체가 공유할 시각 스냅샷. 함수 안에서 시계를 다시 읽지 않는다 —
+				 * 계산 도중 시간이 흘러 vtime 비교가 서로 어긋나는 것을 막기 위함이다 */
+	LIST_HEAD(surpluses);	/* [한국어] 이번 주기에 예산이 남아 기부 가능한 iocg들을 모으는 스택 지역 목록.
+				 * iocg->surplus_list를 링크로 쓰며, 함수 끝에서 반드시 비운다 */
+	int nr_debtors, nr_shortages = 0, nr_lagging = 0;	/* 장치 포화 상태 지표 초기화 */
+	u64 usage_us_sum = 0;	/* 사용량 합계 */
+	u32 ppm_rthr;	/* read latency QoS 목표를 벗어날 IO 비율 임계 */
+	u32 ppm_wthr;	/* write latency QoS 목표를 벗어날 IO 비율 임계 */
+	u32 missed_ppm[2], rq_wait_pct, nr_done;	/* 완료 지연/ rq_wait/처리량 통계 */
+	u64 period_vtime;	/* 이번 제어 주기의 가상 시간 총량 */
+	int prev_busy_level;	/* 이전 장치 포화 수준 */
 
 	/* how were the latencies during the period? */
-	ioc_lat_stat(ioc, missed_ppm, &rq_wait_pct, &nr_done);	/* 이번 주기 NVMe CQ 완료/대기 통계 수집 */
+	ioc_lat_stat(ioc, missed_ppm, &rq_wait_pct, &nr_done);	/* 이번 주기 완료 지연/rq_wait 통계 수집 */
 
 	/* take care of active iocgs */
-	spin_lock_irq(&ioc->lock);
+	spin_lock_irq(&ioc->lock);	/* [한국어] 여기서부터 함수 끝까지 ioc 전체 상태(활성 목록, 가중치, vrate, 주기)를
+					 * 배타적으로 소유한다. irq 변형인 이유: 같은 락을 IO 제출 경로
+					 * (ioc_rqos_throttle)가 잡으며 그 경로는 인터럽트가 걸릴 수 있기 때문이다.
+					 * 위의 ioc_lat_stat()을 락 밖에서 먼저 부른 것은 per-CPU 집계가
+					 * 길어질 수 있어 락 보유 시간을 줄이려는 것이다.
+					 * 실행 컨텍스트: 타이머 softirq. */
 
 	ppm_rthr = MILLION - ioc->params.qos[QOS_RPPM];	/* read latency QoS 미달 허용 ppm */
 	ppm_wthr = MILLION - ioc->params.qos[QOS_WPPM];	/* write latency QoS 미달 허용 ppm */
-	ioc_now(ioc, &now);	/* NVMe 타이머 기준 시계 획득 */
+	ioc_now(ioc, &now);	/* 타이머 기준 시계 획득 */
 
-	period_vtime = now.vnow - ioc->period_at_vtime;	/* 현재 NVMe 주기에서 소진된 가상 시간 */
-	if (WARN_ON_ONCE(!period_vtime)) {	/* 주기 길이가 0이면 NVMe vrate 계산 불가 */
-		spin_unlock_irq(&ioc->lock);		/* NVMe 타이머 lock 해제 */
-		return;
+	period_vtime = now.vnow - ioc->period_at_vtime;	/* 현재 제어 주기에서 소진된 가상 시간 */
+	if (WARN_ON_ONCE(!period_vtime)) {	/* 주기 길이가 0이면 vrate 계산 불가 */
+		spin_unlock_irq(&ioc->lock);		/* [한국어] 조기 반환 경로에서도 락 해제를 빠뜨리면 안 된다 */
+		return;	/* [한국어] 주기 vtime이 0이면 이후 계산의 분모가 0이 되므로 이번 주기를 통째로 포기한다.
+				 * 타이머 재무장도 하지 않는데, 정상적으로는 도달할 수 없는 경로다(WARN_ON_ONCE) */
 	}
 
-	nr_debtors = ioc_check_iocgs(ioc, &now);	/* NVMe 활성 cgroup 정리 및 debtor 집계 */
+	nr_debtors = ioc_check_iocgs(ioc, &now);	/* 활성 cgroup 정리 및 debtor 집계 */
 
 	/*
 	 * Wait and indebt stat are flushed above and the donation calculation
 	 * below needs updated usage stat. Let's bring stat up-to-date.
 	 */
-	iocg_flush_stat(&ioc->active_iocgs, &now);	/* NVMe 사용량 통계 플러시 */
+	iocg_flush_stat(&ioc->active_iocgs, &now);	/* 사용량 통계 플러시 */
 
 	/* calc usage and see whether some weights need to be moved around */
-	list_for_each_entry(iocg, &ioc->active_iocgs, active_list) {
-		u64 vdone, vtime, usage_us;
-		u32 hw_active, hw_inuse;
+	list_for_each_entry(iocg, &ioc->active_iocgs, active_list) {	/* [한국어] 활성 cgroup만 순회한다. ioc_check_iocgs()가 방금 idle을 걷어냈으므로
+										 * 여기 남은 것은 모두 이번 주기에 실제로 IO를 다룬 cgroup이다 */
+		u64 vdone, vtime, usage_us;	/* [한국어] vdone=완료 기준 vtime, vtime=발행 기준 vtime, usage_us=이번 주기 사용 시간(μs).
+						 * (vtime - vdone)이 곧 아직 안 돌아온 in-flight 비용이다 */
+		u32 hw_active, hw_inuse;	/* [한국어] 이 cgroup의 계층적 몫 두 가지 — 설정상의 몫(active)과 실제 쓰는 몫(inuse).
+						 * inuse < active 이면 이미 기부 중이라는 뜻이다 */
 
 		/*
 		 * Collect unused and wind vtime closer to vnow to prevent
 		 * iocgs from accumulating a large amount of budget.
 		 */
-		vdone = atomic64_read(&iocg->done_vtime);		/* atomic: NVMe CQ 완료 vtime */
-		vtime = atomic64_read(&iocg->vtime);		/* atomic: NVMe 제출 vtime */
-		current_hweight(iocg, &hw_active, &hw_inuse);		/* 현재 NVMe 활성/사용 비율 */
+		vdone = atomic64_read(&iocg->done_vtime);		/* atomic: 완료 기준 vtime(done_vtime) */
+		vtime = atomic64_read(&iocg->vtime);		/* atomic: 제출 vtime */
+		current_hweight(iocg, &hw_active, &hw_inuse);		/* 현재 hweight_active/hweight_inuse */
 
 		/*
 		 * Latency QoS detection doesn't account for IOs which are
@@ -4226,52 +4447,63 @@ static void ioc_timer_fn(struct timer_list *timer)
 		 */
 		if ((ppm_rthr != MILLION || ppm_wthr != MILLION) &&		/* latency QoS가 설정되어 있고 */
 		    !atomic_read(&iocg_to_blkg(iocg)->use_delay) &&		/* blkcg delay로 인한 지연이 아니며 */
-		    time_after64(vtime, vdone) &&		/* NVMe in-flight 명령이 있고 */
-		    time_after64(vtime, now.vnow -		/* NVMe issued vtime이 너무 앞서 있고 */
-				 MAX_LAGGING_PERIODS * period_vtime) &&
+		    time_after64(vtime, vdone) &&		/* in-flight 명령이 있고 */
+		    time_after64(vtime, now.vnow -		/* issued vtime이 너무 앞서 있고 */
+				 MAX_LAGGING_PERIODS * period_vtime) &&	/* [한국어] 10주기보다 더 앞서 있으면 lagging이 아니라 그냥 예산 초과로 본다 —
+										 * 극단적으로 오래 걸리는 IO 하나가 vrate 상승을 영원히 막지 않게 하는 상한 */
 		    time_before64(vdone, now.vnow - period_vtime))		/* completed vtime이 한 주기 이상 뒤처짐 */
-			nr_lagging++;			/* NVMe CQ 완료가 지척되는 장기 in-flight 명령 카운트 */
+			nr_lagging++;			/* request 완료가 지척되는 장기 in-flight 명령 카운트 */
 
 		/*
 		 * Determine absolute usage factoring in in-flight IOs to avoid
 		 * high-latency completions appearing as idle.
 		 */
-		usage_us = iocg->usage_delta_us;		/* 이번 주기 NVMe wallclock 사용량 */
-		usage_us_sum += usage_us;
+		usage_us = iocg->usage_delta_us;		/* 이번 주기 wallclock 사용량 */
+		usage_us_sum += usage_us;	/* [한국어] 전 cgroup 사용 시간의 합. ioc_forgive_debts()가 장치 유휴 판정에 쓴다.
+						 * 아래의 in-flight 보정 전 값으로 더한다는 점에 유의 */
 
 		/* see whether there's surplus vtime */
-		WARN_ON_ONCE(!list_empty(&iocg->surplus_list));
+		WARN_ON_ONCE(!list_empty(&iocg->surplus_list));	/* [한국어] 지난 주기의 surplus 목록이 제대로 정리되지 않았다면 여기서 걸린다.
+								 * 함수 끝의 list_del_init() 루프가 그 정리를 담당한다 */
 		if (hw_inuse < hw_active ||		/* 잉여 기부 중이거나 */
-		    (!waitqueue_active(&iocg->waitq) &&		/* 대기자 없이 NVMe 예산이 low margin 이상 남아있거나 */
-		     time_before64(vtime, now.vnow - ioc->margins.low))) {		/* low margin 이상 NVMe 예산 잉여 */
-			u32 hwa, old_hwi, hwm, new_hwi, usage;
-			u64 usage_dur;
+		    (!waitqueue_active(&iocg->waitq) &&		/* 대기자 없이 vtime 예산이 low margin 이상 남아있거나 */
+		     time_before64(vtime, now.vnow - ioc->margins.low))) {		/* low margin 이상 vtime 예산 잉여 */
+			u32 hwa, old_hwi, hwm, new_hwi, usage;	/* [한국어] hwa=현재 hweight_active, old_hwi=현재 hweight_inuse,
+								 * hwm=inuse를 active까지 올렸을 때의 상한, new_hwi=기부 후 목표,
+								 * usage=실사용 비율(WEIGHT_ONE 스케일) */
+			u64 usage_dur;	/* [한국어] usage 비율의 분모가 될 관측 구간 길이(μs) */
 
-			if (vdone != vtime) {			/* NVMe in-flight 명령이 있으면 사용량에 보정 */
-				u64 inflight_us = DIV64_U64_ROUND_UP(
-					cost_to_abs_cost(vtime - vdone, hw_inuse),
-					ioc->vtime_base_rate);
+			if (vdone != vtime) {			/* in-flight 명령이 있으면 사용량에 보정 */
+				u64 inflight_us = DIV64_U64_ROUND_UP(	/* [한국어] 아직 완료되지 않은 IO들의 비용을 wallclock μs로 환산한다 */
+					cost_to_abs_cost(vtime - vdone, hw_inuse),	/* [한국어] (발행-완료) 차이는 cgroup 기준 vtime이므로 hw_inuse를 곱해 절대 비용으로 되돌린다 */
+					ioc->vtime_base_rate);	/* [한국어] 절대 vtime ÷ vrate = 실제 시간(μs) */
 
-				usage_us = max(usage_us, inflight_us);
+				usage_us = max(usage_us, inflight_us);	/* [한국어] 둘 중 큰 값을 사용량으로 삼는다.
+									 * 완료가 느린 장치에서는 "보낸 IO는 많은데 돌아온 게 없어"
+									 * 사용량이 0처럼 보일 수 있는데, 그러면 한가한 줄 알고
+									 * 예산을 남에게 기부해 버린다. 그 오판을 막는 보정이다 */
 			}
 
 			/* convert to hweight based usage ratio */
-			if (time_after64(iocg->activated_at, ioc->period_at))			/* 이번 주기에 활성화된 NVMe cgroup */
-				usage_dur = max_t(u64, now.now - iocg->activated_at, 1);
+			if (time_after64(iocg->activated_at, ioc->period_at))			/* 이번 주기에 활성화된 cgroup */
+				usage_dur = max_t(u64, now.now - iocg->activated_at, 1);	/* [한국어] 주기 도중에 활성화됐으면 활성화 시점부터를 분모로 삼는다.
+												 * 주기 전체로 나누면 사용량이 부당하게 작아 보여 과도한 기부를 유발한다.
+												 * max(..,1)은 0으로 나누는 것을 막는다 */
 			else
-				usage_dur = max_t(u64, now.now - ioc->period_at, 1);
+				usage_dur = max_t(u64, now.now - ioc->period_at, 1);	/* [한국어] 주기 시작부터 계속 활성이었으면 주기 전체가 분모다 */
 
-			usage = clamp(DIV64_U64_ROUND_UP(usage_us * WEIGHT_ONE, usage_dur),
-				      1, WEIGHT_ONE);					/* 최소 1, 최대 100% */
+			usage = clamp(DIV64_U64_ROUND_UP(usage_us * WEIGHT_ONE, usage_dur),	/* [한국어] 사용 시간 ÷ 관측 구간 = 사용률. WEIGHT_ONE 스케일 고정소수점으로 표현 */
+				      1, WEIGHT_ONE);	/* [한국어] 하한 1: 사용률 0이면 hweight_after_donation()이 0을 내놓아
+							 * 그 cgroup이 영원히 IO를 못 하게 된다. 상한은 100%(=WEIGHT_ONE) */
 
 			/*
 			 * Already donating or accumulated enough to start.
 			 * Determine the donation amount.
 			 */
-			current_hweight(iocg, &hwa, &old_hwi);				/* 기부 전 NVMe 활성/사용 비율 */
-			hwm = current_hweight_max(iocg);				/* inuse를 최대로 했을 때 NVMe 사용 비율 */
-			new_hwi = hweight_after_donation(iocg, old_hwi, hwm,				/* 기부 후 목표 NVMe 사용 비율 */
-							 usage, &now);
+			current_hweight(iocg, &hwa, &old_hwi);				/* 기부 전 hweight_active/hweight_inuse */
+			hwm = current_hweight_max(iocg);				/* inuse를 최대로 했을 때 hweight_inuse(사용 비율) */
+			new_hwi = hweight_after_donation(iocg, old_hwi, hwm,				/* 기부 후 목표 hweight_inuse(사용 비율) */
+							 usage, &now);	/* [한국어] 실사용 비율과 현재 시각을 넘겨, 다음 주기 끝에 여유가 목표(50%)가 되도록 하는 몫을 받는다 */
 			/*
 			 * Donation calculation assumes hweight_after_donation
 			 * to be positive, a condition that a donor w/ hwa < 2
@@ -4279,11 +4511,11 @@ static void ioc_timer_fn(struct timer_list *timer)
 			 * below 2. It's not gonna make a meaningful difference
 			 * anyway.
 			 */
-			if (new_hwi < hwm && hwa >= 2) {				/* NVMe 시간 기부가 의미 있을 때만 */
-				iocg->hweight_donating = hwa;
-				iocg->hweight_after_donation = new_hwi;
-				list_add(&iocg->surplus_list, &surpluses);
-			} else if (!iocg->abs_vdebt) {				/* 기부할 만큼 NVMe 예산이 없고 부채 아님 */
+			if (new_hwi < hwm && hwa >= 2) {				/* 장치 시간 기부가 의미 있을 때만 */
+				iocg->hweight_donating = hwa;	/* [한국어] 기부 "전"의 몫을 기록. transfer_surpluses()가 조상으로 집계할 값이다 */
+				iocg->hweight_after_donation = new_hwi;	/* [한국어] 기부 "후" 목표 몫. 둘의 차이가 실제 기부량이 된다 */
+				list_add(&iocg->surplus_list, &surpluses);	/* [한국어] 기부자 목록에 등록. 아래에서 부족한 cgroup이 하나라도 있어야 실제 이전이 일어난다 */
+			} else if (!iocg->abs_vdebt) {				/* 기부할 만큼 vtime 예산이 없고 부채 아님 */
 				/*
 				 * @iocg doesn't have enough to donate. Reset
 				 * its inuse to active.
@@ -4294,28 +4526,33 @@ static void ioc_timer_fn(struct timer_list *timer)
 				 * as @iocg doesn't have a meaningful amount of
 				 * share anyway.
 				 */
-				TRACE_IOCG_PATH(inuse_shortage, iocg, &now,
-						iocg->inuse, iocg->active,
-						iocg->hweight_inuse, new_hwi);
+				TRACE_IOCG_PATH(inuse_shortage, iocg, &now,	/* [한국어] 기부 여력이 없어 snapback하는 사건을 기록한다 */
+						iocg->inuse, iocg->active,	/* [한국어] 되돌리기 전 inuse → 목표인 active */
+						iocg->hweight_inuse, new_hwi);	/* [한국어] 현재 계층적 몫과 계산된 목표 몫 */
 
-				__propagate_weights(iocg, iocg->active,					/* inuse를 active로 복원해 NVMe 예산 확보 */
-						    iocg->active, true, &now);
-				nr_shortages++;				/* NVMe 예산 부족 cgroup 수 증가 */
+				__propagate_weights(iocg, iocg->active,	/* [한국어] inuse를 active와 같게 되돌린다(snapback) — 과거에 기부했던 몫을 즉시 회수한다.
+									 * 기부는 서서히, 회수는 즉시. 그래야 갑자기 IO가 몰려도 굶지 않는다 */
+						    iocg->active, true, &now);	/* [한국어] save=true로 saved_margin 등도 갱신. `__` 버전이라 ioc->lock 보유가 전제다 */
+				nr_shortages++;	/* [한국어] "예산이 부족한 cgroup"으로 계수. 아래 busy_level 판정과
+						 * transfer_surpluses() 실행 여부의 조건이 된다 */
 			}
-		} else {			/* 진짜 NVMe 예산 부족: 기부 여력 없음 */
+		} else {			/* [한국어] inuse == active 이고(기부 중 아님) 예산 여유도 low margin 미만 —
+						 * 즉 자기 몫을 다 쓰고 있는 진짜 수요자다 */
 			/* genuinely short on vtime */
-			nr_shortages++;
+			nr_shortages++;	/* [한국어] 수혜자 후보로 계수. 기부자가 있어도 수혜자가 없으면 재분배는 하지 않는다 */
 		}
 	}
 
-	if (!list_empty(&surpluses) && nr_shortages)	/* 잉여와 부족이 모두 있으면 NVMe 시간 이전 */
-		transfer_surpluses(&surpluses, &now);		/* NVMe 시간 잉여 → 부족 cgroup 재분배 */
+	if (!list_empty(&surpluses) && nr_shortages)	/* 잉여와 부족이 모두 있으면 장치 시간 이전 */
+		transfer_surpluses(&surpluses, &now);		/* 장치 시간 잉여 → 부족 cgroup 재분배 */
 
-	commit_weights(ioc);
+	commit_weights(ioc);	/* [한국어] 위에서 쌓인 가중치 변경(__propagate_weights)을 한 번에 확정하고
+				 * hweight_gen을 올려 모든 iocg의 hweight 캐시를 무효화한다 */
 
 	/* surplus list should be dissolved after use */
-	list_for_each_entry_safe(iocg, tiocg, &surpluses, surplus_list)	/* NVMe 잉여 목록 정리 */
-		list_del_init(&iocg->surplus_list);
+	list_for_each_entry_safe(iocg, tiocg, &surpluses, surplus_list)	/* [한국어] surpluses는 스택 지역 목록이므로 함수를 벗어나기 전에 반드시 비운다 */
+		list_del_init(&iocg->surplus_list);	/* [한국어] 각 iocg의 surplus_list를 빈 상태로 되돌린다 —
+							 * 위쪽 WARN_ON_ONCE(!list_empty(...))가 이 상태를 전제로 한다 */
 
 	/*
 	 * If q is getting clogged or we're missing too much, we're issuing
@@ -4323,8 +4560,8 @@ static void ioc_timer_fn(struct timer_list *timer)
 	 * and experiencing shortages but not surpluses, we're too stingy
 	 * and should increase vtime rate.
 	 */
-	prev_busy_level = ioc->busy_level;	/* NVMe 포화 상태 변화 추적 */
-	if (!nr_done && nr_lagging) {	/* NVMe 완료는 없지만 장기 in-flight 명령이 있으면 busy_level 유지 */
+	prev_busy_level = ioc->busy_level;	/* 장치 포화 상태 변화 추적 */
+	if (!nr_done && nr_lagging) {	/* 완료는 없지만 장기 in-flight 명령이 있으면 busy_level 유지 */
 		/*
 		 * When there are lagging IOs but no completions, we don't
 		 * know if the IO latency will meet the QoS targets. The
@@ -4333,28 +4570,32 @@ static void ioc_timer_fn(struct timer_list *timer)
 		 * up or down), but rather to keep it unchanged.
 		 */
 	} else if (rq_wait_pct > RQ_WAIT_BUSY_PCT ||	/* [한국어] request 할당 대기 비율이 임계치를 넘음 = 장치가 포화 상태 */
-		   missed_ppm[READ] > ppm_rthr ||	/* read NVMe latency QoS 미달 비율 초과 */
-		   missed_ppm[WRITE] > ppm_wthr) {	/* write NVMe latency QoS 미달 비율 초과 */
-		/* clearly missing QoS targets, slow down vrate */		/* NVMe SQ/CQ 과부하 → IO 압력 감소 */
-		ioc->busy_level = max(ioc->busy_level, 0);
-		ioc->busy_level++;
-	} else if (rq_wait_pct <= RQ_WAIT_BUSY_PCT * UNBUSY_THR_PCT / 100 &&	/* rq_wait가 3.75% 이하: NVMe tag/queue 여유 있음 */
-		   missed_ppm[READ] <= ppm_rthr * UNBUSY_THR_PCT / 100 &&	/* read NVMe QoS 목표를 75% 수준으로 여유 달성 */
-		   missed_ppm[WRITE] <= ppm_wthr * UNBUSY_THR_PCT / 100) {	/* write NVMe QoS 목표를 75% 수준으로 여유 달성 */
+		   missed_ppm[READ] > ppm_rthr ||	/* read 지연(latency) QoS 미달 비율 초과 */
+		   missed_ppm[WRITE] > ppm_wthr) {	/* write 지연(latency) QoS 미달 비율 초과 */
+		/* clearly missing QoS targets, slow down vrate */		/* 장치/요청 큐 과부하 → IO 압력 감소 */
+		ioc->busy_level = max(ioc->busy_level, 0);	/* [한국어] 여유 쪽(음수)에 있었다면 즉시 0으로 올린다.
+								 * 음수에서 하나씩 올라오게 두면 명백한 포화 신호에 반응이 늦어진다 */
+		ioc->busy_level++;	/* [한국어] 포화 방향으로 한 칸. 이 값이 vrate_adj_pct[]의 인덱스가 되어
+					 * 연속으로 포화가 관측될수록 vrate 하강폭이 커진다 */
+	} else if (rq_wait_pct <= RQ_WAIT_BUSY_PCT * UNBUSY_THR_PCT / 100 &&	/* rq_wait가 3.75% 이하: blk-mq tag/요청 큐 여유 있음 */
+		   missed_ppm[READ] <= ppm_rthr * UNBUSY_THR_PCT / 100 &&	/* read 지연 QoS 목표를 75% 수준으로 여유 달성 */
+		   missed_ppm[WRITE] <= ppm_wthr * UNBUSY_THR_PCT / 100) {	/* write 지연 QoS 목표를 75% 수준으로 여유 달성 */
 		/* QoS targets are being met with >25% margin */
 		if (nr_shortages) {
 			/*
 			 * We're throttling while the device has spare
 			 * capacity.  If vrate was being slowed down, stop.
 			 */
-			ioc->busy_level = min(ioc->busy_level, 0);
+			ioc->busy_level = min(ioc->busy_level, 0);	/* [한국어] 대기자가 있는데 장치는 여유롭다 = 우리가 과하게 조이고 있다.
+									 * 포화 쪽(양수)에 있었다면 즉시 0으로 내려 vrate 하강을 멈춘다 */
 
 			/*
 			 * If there are IOs spanning multiple periods, wait
 			 * them out before pushing the device harder.
 			 */
-			if (!nr_lagging)
-				ioc->busy_level--;
+			if (!nr_lagging)	/* [한국어] 여러 주기에 걸친 미완료 IO가 남아 있으면 아직 판단을 미룬다 —
+						 * 그 IO들이 돌아오면서 지연이 튈 수 있어 지금 가속하면 진동한다 */
+				ioc->busy_level--;	/* [한국어] 여유 방향으로 한 칸. 다음 ioc_adjust_base_vrate()가 vrate를 올린다 */
 		} else {
 			/*
 			 * Nobody is being throttled and the users aren't
@@ -4362,41 +4603,46 @@ static void ioc_timer_fn(struct timer_list *timer)
 			 * simply don't know how close the device is to
 			 * saturation.  Coast.
 			 */
-			ioc->busy_level = 0;
+			ioc->busy_level = 0;	/* [한국어] 아무도 조여지지 않았고 장치도 안 바쁘다 = 그냥 부하가 없는 것.
+							 * 이 상태에서 vrate를 올리면 근거 없이 예산만 부풀린다. 현상 유지(coast) */
 		}
 	} else {
 		/* inside the hysterisis margin, we're good */
-		ioc->busy_level = 0;
+		ioc->busy_level = 0;	/* [한국어] 포화도 아니고 충분한 여유도 아닌 중간 지대(히스테리시스 구간).
+					 * 여기서 반응하면 busy/unbusy를 오가며 vrate가 떨린다 */
 	}
 
-	ioc->busy_level = clamp(ioc->busy_level, -1000, 1000);	/* NVMe busy_level 안전 범위 제한 */
+	ioc->busy_level = clamp(ioc->busy_level, -1000, 1000);	/* busy_level 안전 범위 제한 */
 
-	ioc_adjust_base_vrate(ioc, rq_wait_pct, nr_lagging, nr_shortages,	/* NVMe 포화상태에 따른 기본 vrate 조정 */
+	ioc_adjust_base_vrate(ioc, rq_wait_pct, nr_lagging, nr_shortages,	/* 장치 포화 상태에 따른 기본 vrate 조정 */
 			      prev_busy_level, missed_ppm);
 
-	ioc_refresh_params(ioc, false);	/* NVMe autop 프로파일 재평가 */
+	ioc_refresh_params(ioc, false);	/* autop 프로파일 재평가 */
 
-	ioc_forgive_debts(ioc, usage_us_sum, nr_debtors, &now);	/* NVMe idle 시 부채 탕감 */
+	ioc_forgive_debts(ioc, usage_us_sum, nr_debtors, &now);	/* 장치 idle 시 부채 탕감 */
 
 	/*
 	 * This period is done.  Move onto the next one.  If nothing's
 	 * going on with the device, stop the timer.
 	 */
-	atomic64_inc(&ioc->cur_period);	/* atomic: 다음 NVMe 제어 주기로 진행 */
+	atomic64_inc(&ioc->cur_period);	/* atomic: 다음 제어 주기로 진행 */
 
-	if (ioc->running != IOC_STOP) {	/* NVMe 컨트롤러 종료 중이 아니면 */
-		if (!list_empty(&ioc->active_iocgs)) {		/* NVMe 활성 cgroup이 있으면 다음 주기 시작 */
-			ioc_start_period(ioc, &now);			/* 다음 NVMe 피드백 주기 타이머 설정 */
+	if (ioc->running != IOC_STOP) {	/* iocost 컨트롤러 종료 중이 아니면 */
+		if (!list_empty(&ioc->active_iocgs)) {		/* 활성 cgroup이 있으면 다음 주기 시작 */
+			ioc_start_period(ioc, &now);			/* 다음 피드백 주기 타이머 설정 */
 		} else {
-			ioc->busy_level = 0;
-			ioc->vtime_err = 0;
-			ioc->running = IOC_IDLE;
+			ioc->busy_level = 0;	/* [한국어] 활성 cgroup이 하나도 없다 — 관측할 부하가 없으므로 포화 이력을 지운다 */
+			ioc->vtime_err = 0;	/* [한국어] 누적 vtime 오차도 리셋. 유휴 구간의 오차를 다음 활성 구간으로 끌고 가면 안 된다 */
+			ioc->running = IOC_IDLE;	/* [한국어] 타이머를 재무장하지 않고 IOC_IDLE로 내려간다.
+							 * 다음 bio가 오면 iocg_activate()가 다시 IOC_RUNNING으로 올리고
+							 * ioc_start_period()로 타이머를 살린다 */
 		}
 
-		ioc_refresh_vrate(ioc, &now);		/* 다음 주기 NVMe vrate 보정 */
+		ioc_refresh_vrate(ioc, &now);		/* [한국어] vtime_err(누적 오차)를 남은 주기에 나눠 반영해 atomic vtime_rate를 갱신한다.
+							 * 제출 경로(ioc_now)가 읽는 것은 이 atomic 값이다 */
 	}
 
-	spin_unlock_irq(&ioc->lock);
+	spin_unlock_irq(&ioc->lock);	/* [한국어] 이 주기의 모든 처리 완료 — 락 해제와 함께 인터럽트 상태 복원 */
 }
 
 /*
@@ -4404,7 +4650,7 @@ static void ioc_timer_fn(struct timer_list *timer)
  * adjust_inuse_and_calc_cost - bio 발행 직전 예산 여유를 검사하고,
  *                               부족하면 inuse를 단계적으로 올려 cost 확정
  *
- * @iocg:     비용을 검사할 cgroup의 NVMe 예산 상태 (ioc_gq)
+ * @iocg:     비용을 검사할 cgroup의 vtime 예산 상태 (ioc_gq)
  * @vtime:    현재 iocg의 issued vtime (atomic64_read(&iocg->vtime))
  * @abs_cost: hwi-독립 절대 비용 (calc_vtime_cost가 반환한 값)
  * @now:      현재 주기의 vnow/vrate 스냅샷
@@ -4429,36 +4675,40 @@ static u64 adjust_inuse_and_calc_cost(struct ioc_gq *iocg, u64 vtime,
 				      u64 abs_cost, struct ioc_now *now)
 {
 	struct ioc *ioc = iocg->ioc;
-	struct ioc_margins *margins = &ioc->margins;
-	u32 __maybe_unused old_inuse = iocg->inuse, __maybe_unused old_hwi;
-	u32 hwi, adj_step;
-	s64 margin;
-	u64 cost, new_inuse;
-	unsigned long flags;
+	struct ioc_margins *margins = &ioc->margins;	/* [한국어] min/low/target 세 여유 기준. 여기서는 low만 쓴다 */
+	u32 __maybe_unused old_inuse = iocg->inuse, __maybe_unused old_hwi;	/* [한국어] 조정 전 값 — 아래 TRACE_IOCG_PATH 전용이라
+											 * 트레이스 비활성 빌드에서 미사용 경고가 나지 않게 __maybe_unused */
+	u32 hwi, adj_step;	/* [한국어] hwi=현재 hweight_inuse, adj_step=한 번에 올릴 inuse 증분(active의 25%) */
+	s64 margin;	/* [한국어] 이 bio를 발행하고 나면 남을 예산 여유. 음수면 이미 초과다 */
+	u64 cost, new_inuse;	/* [한국어] cost=hwi를 적용한 이 bio의 vtime 비용, new_inuse=단계적으로 올려 갈 inuse */
+	unsigned long flags;	/* [한국어] spin_lock_irqsave용 인터럽트 상태 저장 */
 
-	current_hweight(iocg, NULL, &hwi);	/* 현재 NVMe 사용 비율로 bio 비용 환산 */
-	old_hwi = hwi;	/* inuse 조정 전 NVMe 사용 비율 기록 */
-	cost = abs_cost_to_cost(abs_cost, hwi);	/* NVMe 사용 비율에 따른 bio cost */
-	margin = now->vnow - vtime - cost;	/* bio 발행 후 남을 NVMe 예산 여유 */
+	current_hweight(iocg, NULL, &hwi);	/* 현재 hweight_inuse(사용 비율)로 bio 비용 환산 */
+	old_hwi = hwi;	/* inuse 조정 전 hweight_inuse(사용 비율) 기록 */
+	cost = abs_cost_to_cost(abs_cost, hwi);	/* hweight_inuse(사용 비율)에 따른 bio cost */
+	margin = now->vnow - vtime - cost;	/* bio 발행 후 남을 vtime 예산 여유 */
 
 	/* debt handling owns inuse for debtors */
-	if (iocg->abs_vdebt)
-		return cost;
+	if (iocg->abs_vdebt)	/* [한국어] 부채 상태에서는 iocg_incur_debt()/iocg_pay_debt()가 inuse를 소유한다 */
+		return cost;	/* [한국어] inuse를 건드리지 않고 현재 hwi로 계산한 비용만 돌려준다 */
 
 	/*
 	 * We only increase inuse during period and do so if the margin has
 	 * deteriorated since the previous adjustment.
 	 */
-	if (margin >= iocg->saved_margin || margin >= margins->low ||	/* NVMe 예산 여유가 충분하면 조정 불필요 */
-	    iocg->inuse == iocg->active)	/* 이미 최대 NVMe 사용 가중치면 조정 불가 */
-		return cost;
+	if (margin >= iocg->saved_margin || margin >= margins->low ||	/* vtime 예산 여유가 충분하면 조정 불필요 */
+	    iocg->inuse == iocg->active)	/* [한국어] inuse가 이미 active와 같으면 더 올릴 여지가 없다 */
+		return cost;	/* [한국어] 조정 없이 반환 — 이것이 압도적으로 흔한 빠른 경로이며, 락을 잡지 않는다 */
 
-	spin_lock_irqsave(&ioc->lock, flags);	/* NVMe 가중치 변경 보호 */
+	spin_lock_irqsave(&ioc->lock, flags);	/* [한국어] 여기부터는 가중치 트리를 만지므로 ioc->lock이 필요하다.
+						 * 이 함수는 bio 제출(프로세스) 컨텍스트에서 불리고 같은 락을
+						 * 타이머 softirq도 잡으므로 irqsave 변형을 쓴다 */
 
 	/* we own inuse only when @iocg is in the normal active state */
-	if (iocg->abs_vdebt || list_empty(&iocg->active_list)) {	/* lock 획득 후 상태 변화 확인 */
-		spin_unlock_irqrestore(&ioc->lock, flags);
-		return cost;
+	if (iocg->abs_vdebt || list_empty(&iocg->active_list)) {	/* [한국어] 락을 잡는 사이에 다른 CPU가 부채를 지웠거나 이 iocg를 비활성화했을 수 있다.
+								 * 락 없이 본 조건을 락을 잡은 뒤 다시 확인하는 표준 패턴이다 */
+		spin_unlock_irqrestore(&ioc->lock, flags);	/* [한국어] 상태가 바뀌었으므로 조정을 포기하고 락 해제 */
+		return cost;	/* [한국어] 락 밖에서 계산해 둔 비용을 그대로 반환 */
 	}
 
 	/*
@@ -4468,22 +4718,30 @@ static u64 adjust_inuse_and_calc_cost(struct ioc_gq *iocg, u64 vtime,
 	 * be reading 0 iocg->active before ioc->lock which will lead to
 	 * infinite loop.
 	 */
-	new_inuse = iocg->inuse;	/* NVMe 사용 가중치 조정 시작점 */
-	adj_step = DIV_ROUND_UP(iocg->active * INUSE_ADJ_STEP_PCT, 100);	/* inuse 25% 단위 NVMe 시간 회복 */
+	new_inuse = iocg->inuse;	/* [한국어] 현재 inuse에서 출발해 단계적으로 올린다 */
+	adj_step = DIV_ROUND_UP(iocg->active * INUSE_ADJ_STEP_PCT, 100);	/* [한국어] 증분 = active의 25%. 올림이라 active가 작아도 최소 1은 보장되어
+										 * 아래 do-while이 무한 루프에 빠지지 않는다.
+										 * 원본 주석대로 이 계산은 반드시 ioc->lock을 잡은 **뒤**여야 한다 —
+										 * 활성화 경쟁에 져서 active를 0으로 읽으면 adj_step이 0이 되어
+										 * inuse가 영원히 늘지 않는 무한 루프가 된다 */
 	do {
-		new_inuse = new_inuse + adj_step;		/* NVMe 사용 가중치 단계적 증가 */
-		propagate_weights(iocg, iocg->active, new_inuse, true, now);		/* 상위로 NVMe 사용 가중치 전파 */
-		current_hweight(iocg, NULL, &hwi);		/* 증가된 NVMe 사용 비율로 cost 재계산 */
-		cost = abs_cost_to_cost(abs_cost, hwi);		/* 새로운 NVMe 사용 비율로 bio cost */
-	} while (time_after64(vtime + cost, now->vnow) &&	/* bio 발행이 NVMe vnow를 초과하면 반복 */
-		 iocg->inuse != iocg->active);
+		new_inuse = new_inuse + adj_step;		/* [한국어] inuse를 adj_step(active의 25%)만큼 증가 — 한 번에 active로 올리지 않는 이유는
+						 * 필요 최소한만 회수해 기부분을 남겨두기 위함이다 */
+		propagate_weights(iocg, iocg->active, new_inuse, true, now);		/* [한국어] 새 inuse를 조상 노드까지 전파해 hweight 재계산(save=true로 saved_* 갱신) */
+		current_hweight(iocg, NULL, &hwi);		/* 증가된 hweight_inuse(사용 비율)로 cost 재계산 */
+		cost = abs_cost_to_cost(abs_cost, hwi);		/* 새로운 hweight_inuse(사용 비율)로 bio cost */
+	} while (time_after64(vtime + cost, now->vnow) &&	/* [한국어] 종료 조건 1: 이 bio를 발행해도 vnow를 넘지 않게 되면 충분하므로 멈춘다.
+								 * time_after64를 쓰는 이유는 vtime이 u64로 순환(wrap)하기 때문 —
+								 * 단순 > 비교는 wrap 지점에서 뒤집힌다 */
+		 iocg->inuse != iocg->active);	/* [한국어] 종료 조건 2: inuse가 active까지 올라갔으면 더 올릴 수 없으니 멈춘다.
+						 * propagate_weights()가 내부에서 active로 클램프하므로 이 조건이 반드시 성립한다 */
 
-	spin_unlock_irqrestore(&ioc->lock, flags);
+	spin_unlock_irqrestore(&ioc->lock, flags);	/* [한국어] 가중치 조정 완료 — 락 해제 및 인터럽트 상태 복원 */
 
-	TRACE_IOCG_PATH(inuse_adjust, iocg, now,
-			old_inuse, iocg->inuse, old_hwi, hwi);
+	TRACE_IOCG_PATH(inuse_adjust, iocg, now,	/* [한국어] snapback(예산 회수) 사건 기록 */
+			old_inuse, iocg->inuse, old_hwi, hwi);	/* [한국어] inuse 전/후와 그에 따른 hweight_inuse 전/후 */
 
-	return cost;
+	return cost;	/* [한국어] 최종 hwi로 재계산된 비용. 호출자는 이 값으로 vtime을 전진시킨다 */
 }
 
 /*
@@ -4491,13 +4749,13 @@ static u64 adjust_inuse_and_calc_cost(struct ioc_gq *iocg, u64 vtime,
  * calc_vtime_cost_builtin - bio의 선형(linear) 비용 모델로 vtime 비용 산출
  *
  * @bio:      비용을 계산할 bio (방향/크기/LBA 정보 포함)
- * @iocg:     이 bio를 제출하는 cgroup의 NVMe 예산 상태 (cursor 접근)
+ * @iocg:     이 bio를 제출하는 cgroup의 vtime 예산 상태 (cursor 접근)
  * @is_merge: true이면 기존 request와 병합 — seek 비용(seqio/randio)을 건너뜀
  * @costp:    계산 결과 vtime 비용을 반환하는 출력 포인터
  * @return:   void (비용은 *costp에 저장)
  *
  * ioc->params.lcoefs[] 테이블(AUTOP 또는 사용자 설정)과 bio 크기, 직전
- * cursor와의 LBA 거리를 조합해 NVMe 처리 예상 vtime을 계산한다.
+ * cursor와의 LBA 거리를 조합해 처리 예상 vtime을 계산한다.
  * cursor 거리 > LCOEF_RANDIO_PAGES(4096 페이지 = 16 MB)이면 random IO
  * 계수(coef_randio)를, 이하이면 sequential IO 계수(coef_seqio)를 적용한다.
  * 크기 기반 비용은 (페이지 수 × coef_page)로 누적한다.
@@ -4515,45 +4773,54 @@ static void calc_vtime_cost_builtin(struct bio *bio, struct ioc_gq *iocg,
 				    bool is_merge, u64 *costp)
 {
 	struct ioc *ioc = iocg->ioc;
-	u64 coef_seqio, coef_randio, coef_page;
-	u64 pages = max_t(u64, bio_sectors(bio) >> IOC_SECT_TO_PAGE_SHIFT, 1);	/* bio 크기를 NVMe PRP/SGL 4KB 페이지 수로 */
-	u64 seek_pages = 0;
-	u64 cost = 0;
+	u64 coef_seqio, coef_randio, coef_page;	/* [한국어] 이 bio 방향(read/write)에 해당하는 lcoefs 세 개를 담을 지역 변수.
+						 * 아래 switch에서 read 슬롯 또는 write 슬롯으로 채워진다 */
+	u64 pages = max_t(u64, bio_sectors(bio) >> IOC_SECT_TO_PAGE_SHIFT, 1);	/* [한국어] 섹터 수를 4KB 페이지 수로 변환(>>3).
+										 * max(..,1)로 4KB 미만 bio도 최소 1페이지로 과금한다 —
+										 * 작은 IO를 공짜로 두면 그것만 쏟아부어 제어를 우회할 수 있다 */
+	u64 seek_pages = 0;	/* [한국어] 직전 IO 끝에서 이 bio 시작까지의 거리(페이지 단위). 순차/랜덤 판정의 기준 */
+	u64 cost = 0;	/* [한국어] 누적 비용. out 레이블로 건너뛰는 경로에서는 0인 채로 반환된다 */
 
 	/* Can't calculate cost for empty bio */
-	if (!bio->bi_iter.bi_size)	/* 0-byte bio는 NVMe 명령 비용 0 */
-		goto out;
+	if (!bio->bi_iter.bi_size)	/* 0-byte bio는 IO 비용 0 */
+		goto out;	/* [한국어] 크기가 0이면 전송할 것이 없다 — cost=0으로 반환해 throttle 대상에서 제외 */
 
-	switch (bio_op(bio)) {
-	case REQ_OP_READ:	/* read bio: NVMe read 명령 coef 적용 */
-		coef_seqio	= ioc->params.lcoefs[LCOEF_RSEQIO];
-		coef_randio	= ioc->params.lcoefs[LCOEF_RRANDIO];
-		coef_page	= ioc->params.lcoefs[LCOEF_RPAGE];
+	switch (bio_op(bio)) {	/* [한국어] 선형 비용 모델은 read와 write 두 방향만 다룬다 */
+	case REQ_OP_READ:	/* [한국어] read bio: lcoefs의 read 슬롯 세 개를 고른다 */
+		coef_seqio	= ioc->params.lcoefs[LCOEF_RSEQIO];	/* [한국어] 순차 read 1회의 크기 무관 기본 비용 */
+		coef_randio	= ioc->params.lcoefs[LCOEF_RRANDIO];	/* [한국어] 랜덤 read 1회의 기본 비용. HDD에서는 탐색 시간(2.68ms)이,
+										 * AUTOP_SSD_FAST에서는 0이 들어간다(autop[] 주석 참조) */
+		coef_page	= ioc->params.lcoefs[LCOEF_RPAGE];	/* [한국어] 4KB 1페이지 전송 비용 — 크기에 비례하는 항 */
 		break;
-	case REQ_OP_WRITE:	/* write bio: NVMe write/fused 명령 coef 적용 */
-		coef_seqio	= ioc->params.lcoefs[LCOEF_WSEQIO];
-		coef_randio	= ioc->params.lcoefs[LCOEF_WRANDIO];
-		coef_page	= ioc->params.lcoefs[LCOEF_WPAGE];
+	case REQ_OP_WRITE:	/* [한국어] write bio: LCOEF_WPAGE/WSEQIO/WRANDIO 계수 선택 */
+		coef_seqio	= ioc->params.lcoefs[LCOEF_WSEQIO];	/* [한국어] 순차 write 1회의 기본 비용 */
+		coef_randio	= ioc->params.lcoefs[LCOEF_WRANDIO];	/* [한국어] 랜덤 write 1회의 기본 비용 */
+		coef_page	= ioc->params.lcoefs[LCOEF_WPAGE];	/* [한국어] write 4KB 전송 비용. 매체 특성상 read보다 큰 것이 보통이다 */
 		break;
 	default:	/* [한국어] discard/write-zeroes/flush 등 — 선형 비용 모델을 적용할 수 없는 연산 */
-		goto out;
+		goto out;	/* [한국어] cost=0으로 반환. 이 bio들은 iocost가 아예 과금하지 않고 통과시킨다 */
 	}
 
-	if (iocg->cursor) {	/* 직전 bio 끝이 있으면 NVMe seq/rand 판별 */
+	if (iocg->cursor) {	/* 직전 bio 끝이 있으면 seq/rand 판별 */
 		seek_pages = abs(bio->bi_iter.bi_sector - iocg->cursor);		/* [한국어] 직전 I/O 위치(cursor)와의 LBA 거리 — 탐색 비용 모델 입력 */
-		seek_pages >>= IOC_SECT_TO_PAGE_SHIFT;
+		seek_pages >>= IOC_SECT_TO_PAGE_SHIFT;	/* [한국어] 섹터 거리를 페이지 거리로(>>3). 아래 LCOEF_RANDIO_PAGES와 단위를 맞춘다 */
 	}
 
-	if (!is_merge) {	/* 신규 NVMe 명령이면 seq/rand 기본 비용 추가 */
-		if (seek_pages > LCOEF_RANDIO_PAGES) {		/* 16MB 이상 seek: NVMe random IO latency 반영 */
+	if (!is_merge) {	/* 신규 IO이면 seq/rand 기본 비용 추가 */
+		if (seek_pages > LCOEF_RANDIO_PAGES) {		/* [한국어] 4096페이지 = 16MB 넘게 떨어졌으면 랜덤으로 분류한다.
+								 * 16MB라는 넉넉한 경계는 파일 내 근접 접근을 순차로 봐주기 위한 것이다.
+								 * cursor가 0(첫 IO)이면 seek_pages도 0이라 순차로 취급된다 */
 			cost += coef_randio;
 		} else {
-			cost += coef_seqio;
+			cost += coef_seqio;	/* [한국어] 순차 기본 비용. 빠른 SSD 프로파일에서는 이 값이 0일 수도 있다 */
 		}
 	}
-	cost += pages * coef_page;
+	cost += pages * coef_page;	/* [한국어] 크기 비례 항을 더한다. 병합(is_merge) 경로에서는 기본 비용을 빼고
+					 * 이 항만 더하는데, 이미 발행된 request에 데이터만 얹는 것이기 때문이다.
+					 * 최종 형태: cost = (seqio 또는 randio) + pages × page */
 out:
-	*costp = cost;
+	*costp = cost;	/* [한국어] 계산 결과를 출력 포인터에 기록. 이 값이 abs_cost(hweight 무관 절대 비용)다 —
+				 * 호출자가 abs_cost_to_cost()로 cgroup별 cost로 바꾼 뒤 vtime에 더한다 */
 }
 
 /*
@@ -4561,7 +4828,7 @@ out:
  * calc_vtime_cost - bio의 vtime 비용을 계산하는 공개 래퍼
  *
  * @bio:      비용을 계산할 bio
- * @iocg:     이 bio를 제출하는 cgroup의 NVMe 예산 상태
+ * @iocg:     이 bio를 제출하는 cgroup의 vtime 예산 상태
  * @is_merge: true이면 seek 비용 제외 (bio 병합 경로)
  * @return:   hwi-독립 절대 vtime 비용 (abs_cost); 0이면 throttle 대상 외
  *
@@ -4585,7 +4852,7 @@ static u64 calc_vtime_cost(struct bio *bio, struct ioc_gq *iocg, bool is_merge)
  * [한국어]
  * calc_size_vtime_cost_builtin - request 크기만으로 vtime 비용 산출 (seek 제외)
  *
- * @rq:    완료된 NVMe request (크기·방향 정보)
+ * @rq:    완료된 request (크기·방향 정보)
  * @ioc:   이 장치의 iocost 컨트롤러 (lcoefs 테이블 접근)
  * @costp: 계산 결과 비용을 반환하는 출력 포인터
  * @return: void (*costp에 비용 저장)
@@ -4593,9 +4860,9 @@ static u64 calc_vtime_cost(struct bio *bio, struct ioc_gq *iocg, bool is_merge)
  * ioc_rqos_done에서 request 완료 latency를 분석할 때 사용한다.
  * seek 비용(seqio/randio)은 제외하고 데이터 전송량(pages × coef_page)만으로
  * "이 request가 순수 전송에 걸릴 예상 vtime"을 반환한다.
- * 이 값을 기준으로 on_q_ns와 비교해 NVMe latency QoS 달성 여부를 판단한다.
+ * 이 값을 기준으로 on_q_ns와 비교해 지연(latency) QoS 달성 여부를 판단한다.
  *
- * 실행 컨텍스트: NVMe CQ 완료 softirq 또는 NVMe completion 태스크.
+ * 실행 컨텍스트: 블록 계층 request 완료 컨텍스트(드라이버에 따라 하드웨어 IRQ / softirq / 완료 스레드).
  * 에러 경로: 없음. 미지원 opcode는 *costp=0.
  *
  * 호출 체인:
@@ -4604,9 +4871,10 @@ static u64 calc_vtime_cost(struct bio *bio, struct ioc_gq *iocg, bool is_merge)
 static void calc_size_vtime_cost_builtin(struct request *rq, struct ioc *ioc,
 					 u64 *costp)
 {
-	unsigned int pages = blk_rq_stats_sectors(rq) >> IOC_SECT_TO_PAGE_SHIFT;	/* request의 NVMe PRP/SGL 페이지 수 */
+	unsigned int pages = blk_rq_stats_sectors(rq) >> IOC_SECT_TO_PAGE_SHIFT;	/* request의 4KB 페이지 수 */
 
-	switch (req_op(rq)) {
+	switch (req_op(rq)) {	/* [한국어] bio가 아니라 request 단위라 req_op()를 쓴다. 이 시점에는 이미 병합이 끝나
+				 * 여러 bio가 하나의 request로 합쳐져 있을 수 있다 */
 	case REQ_OP_READ:	/* [한국어] read: 읽기 페이지당 lcoef_page 비용 */
 		*costp = pages * ioc->params.lcoefs[LCOEF_RPAGE];
 		break;
@@ -4614,7 +4882,8 @@ static void calc_size_vtime_cost_builtin(struct request *rq, struct ioc *ioc,
 		*costp = pages * ioc->params.lcoefs[LCOEF_WPAGE];
 		break;
 	default:	/* [한국어] discard/flush 등: 비용 0 (latency 측정 제외) */
-		*costp = 0;
+		*costp = 0;	/* [한국어] 비용 0 = ioc_rqos_done()에서 size_nsec가 0이 되어
+				 * on_q_ns 전체가 QoS 목표와 비교된다. 사실상 지연 측정에서 제외된다 */
 	}
 }
 
@@ -4622,7 +4891,7 @@ static void calc_size_vtime_cost_builtin(struct request *rq, struct ioc *ioc,
  * [한국어]
  * calc_size_vtime_cost - request 크기 기반 vtime 비용 계산 래퍼
  *
- * @rq:    완료된 NVMe request
+ * @rq:    완료된 request
  * @ioc:   이 장치의 iocost 컨트롤러
  * @return: 크기 기반 vtime 비용 (seek 제외); ioc_rqos_done에서 latency 기준선으로 사용
  *
@@ -4642,7 +4911,7 @@ static u64 calc_size_vtime_cost(struct request *rq, struct ioc *ioc)
 
 /*
  * [한국어]
- * ioc_rqos_throttle - bio가 blk-mq/NVMe SQ로 날아가기 전 예산 검사 및 쓰로틀
+ * ioc_rqos_throttle - bio가 하위 blk-mq 경로로 날아가기 전 예산 검사 및 쓰로틀
  *
  * @rqos: ioc->rqos, RQ_QOS_COST로 등록된 핸들
  * @bio:  사용자 태스크가 방금 submit_bio()로 제출한 bio
@@ -4669,40 +4938,47 @@ static u64 calc_size_vtime_cost(struct request *rq, struct ioc *ioc)
  */
 static void ioc_rqos_throttle(struct rq_qos *rqos, struct bio *bio)
 {
-	struct blkcg_gq *blkg = bio->bi_blkg;	/* bio의 blk-cgroup: NVMe SQ 제출률 분리 기준 */
-	struct ioc *ioc = rqos_to_ioc(rqos);	/* 이 bio가 속한 NVMe 장치의 iocost 컨트롤러 */
-	struct ioc_gq *iocg = blkg_to_iocg(blkg);	/* 장치-cgroup 쌍의 NVMe 예산 상태 */
-	struct ioc_now now;
-	struct iocg_wait wait;	/* NVMe 예산 부족 시 잠들 wait 엔트리 */
-	u64 abs_cost, cost, vtime;	/* abs_cost=NVMe 절대 비용, cost=할당비율 적용 비용, vtime=현재 issued */
-	bool use_debt, ioc_locked;	/* debt 사용 시 ioc->lock 필요: NVMe 부채/주기 보호 */
+	struct blkcg_gq *blkg = bio->bi_blkg;	/* bio의 blk-cgroup: 제출률 분리 기준 */
+	struct ioc *ioc = rqos_to_ioc(rqos);	/* 이 bio가 속한 장치의 iocost 컨트롤러 */
+	struct ioc_gq *iocg = blkg_to_iocg(blkg);	/* 장치-cgroup 쌍의 vtime 예산 상태 */
+	struct ioc_now now;	/* [한국어] 이 bio 처리 동안 공유할 시각 스냅샷. iocg_activate()가 채워 준다 */
+	struct iocg_wait wait;	/* [한국어] 예산이 모자랄 때 waitq에 매달 대기 엔트리.
+				 * **스택 위**에 있다는 점이 중요하다 — 이 함수가 반환하기 전에
+				 * 반드시 finish_wait()으로 큐에서 떼어내야 한다 */
+	u64 abs_cost, cost, vtime;	/* abs_cost=절대 비용, cost=할당비율 적용 비용, vtime=현재 issued */
+	bool use_debt, ioc_locked;	/* debt 사용 시 ioc->lock 필요: vtime 부채/주기 보호 */
 	unsigned long flags;
 
 	/* bypass IOs if disabled, still initializing, or for root cgroup */
-	if (!ioc->enabled || !iocg || !iocg->level)	/* iocost 미활성/root cgroup은 NVMe throttling bypass */
+	if (!ioc->enabled || !iocg || !iocg->level)	/* iocost 미활성/root cgroup은 throttling bypass */
 		return;
 
 	/* calculate the absolute vtime cost */
-	abs_cost = calc_vtime_cost(bio, iocg, false);	/* bio의 NVMe 예상 처리 시간(절대값) */
-	if (!abs_cost)	/* 0이면 NVMe throttling 대상 외 bio */
+	abs_cost = calc_vtime_cost(bio, iocg, false);	/* bio의 예상 처리 시간(절대값) */
+	if (!abs_cost)	/* 0이면 throttling 대상 외 bio */
 		return;
 
-	if (!iocg_activate(iocg, &now))	/* NVMe 활성화 실패(낮부 node IO) 시 bypass */
+	if (!iocg_activate(iocg, &now))	/* 활성화 실패(낮부 node IO) 시 bypass */
 		return;
 
-	iocg->cursor = bio_end_sector(bio);	/* 다음 bio의 NVMe seq/rand 판별 기준 갱신 */
-	vtime = atomic64_read(&iocg->vtime);
-	cost = adjust_inuse_and_calc_cost(iocg, vtime, abs_cost, &now);	/* NVMe 예산 내이면 cost 확정, 아니면 inuse 회복 시도 */
+	iocg->cursor = bio_end_sector(bio);	/* [한국어] 다음 bio의 순차/랜덤 판정 기준을 이 bio의 끝 섹터로 갱신한다.
+						 * 락 없이 쓰지만 근사 판정용이라 경쟁이 있어도 무해하다 */
+	vtime = atomic64_read(&iocg->vtime);	/* [한국어] atomic 읽기: 이 cgroup의 현재 발행 기준 가상 시각.
+						 * 락 없이 읽는다 — 아래 비교는 경쟁이 있어도 치명적이지 않다 */
+	cost = adjust_inuse_and_calc_cost(iocg, vtime, abs_cost, &now);	/* vtime 예산 내이면 cost 확정, 아니면 inuse 회복 시도 */
 
 	/*
 	 * If no one's waiting and within budget, issue right away.  The
 	 * tests are racy but the races aren't systemic - we only miss once
 	 * in a while which is fine.
 	 */
-	if (!waitqueue_active(&iocg->waitq) && !iocg->abs_vdebt &&	/* NVMe 예산 대기/부채/지연/idle 모두 없으면 skip */
-	    time_before_eq64(vtime + cost, now.vnow)) {	/* NVMe vtime 예산 내 */
-		iocg_commit_bio(iocg, bio, abs_cost, cost);		/* NVMe 제출 예산 확정 → blk_mq_get_request 진행 */
-		return;
+	if (!waitqueue_active(&iocg->waitq) && !iocg->abs_vdebt &&	/* vtime 예산 대기/부채/지연/idle 모두 없으면 skip */
+	    time_before_eq64(vtime + cost, now.vnow)) {	/* vtime 예산 내 */
+		iocg_commit_bio(iocg, bio, abs_cost, cost);		/* [한국어] 빠른 경로: vtime을 cost만큼 전진시키고 bio->bi_iocost_cost에 기록한 뒤 통과.
+									 * 원본 주석대로 위 조건 검사들은 경쟁적(racy)이지만,
+									 * 가끔 한 번 놓치는 정도라 제어 품질에 영향이 없다 */
+		return;	/* [한국어] 여기서 반환하면 호출자 rq_qos_throttle()이 그대로 진행해
+				 * blk-mq가 request를 할당하고 드라이버로 내려보낸다 */
 	}
 
 	/*
@@ -4714,9 +4990,9 @@ static void ioc_rqos_throttle(struct rq_qos *rqos, struct bio *bio)
 	 */
 	use_debt = bio_issue_as_root_blkg(bio) || fatal_signal_pending(current);	/* [한국어] root cgroup의 I/O이거나 치명 시그널 대기 중이면 대기 대신
 											     * "부채"로 처리한다 — 여기서 막으면 시스템 진행이 멈출 수 있다 */
-	ioc_locked = use_debt || READ_ONCE(iocg->abs_vdebt);	/* READ_ONCE: NVMe 부채 존재 시 ioc->lock 획득 결정 */
-retry_lock:	/* NVMe 가중치/부채 변경에 따라 lock 범위 재조정 후 재시도 */
-	iocg_lock(iocg, ioc_locked, &flags);	/* NVMe 예산/부채/대기 상태 보호 */
+	ioc_locked = use_debt || READ_ONCE(iocg->abs_vdebt);	/* READ_ONCE: vtime 부채 존재 시 ioc->lock 획득 결정 */
+retry_lock:	/* 가중치/부채 변경에 따라 lock 범위 재조정 후 재시도 */
+	iocg_lock(iocg, ioc_locked, &flags);	/* vtime 예산/부채/대기 상태 보호 */
 
 	/*
 	 * @iocg must stay activated for debt and waitq handling. Deactivation
@@ -4725,9 +5001,9 @@ retry_lock:	/* NVMe 가중치/부채 변경에 따라 lock 범위 재조정 후 
 	 * if we're activated here. In the unlikely cases that we aren't, just
 	 * issue the IO.
 	 */
-	if (unlikely(list_empty(&iocg->active_list))) {	/* race로 NVMe 비활성화되면 그냥 통과 */
-		iocg_unlock(iocg, ioc_locked, &flags);		/* NVMe 예산 lock 해제 */
-		iocg_commit_bio(iocg, bio, abs_cost, cost);
+	if (unlikely(list_empty(&iocg->active_list))) {	/* race로 비활성화되면 그냥 통과 */
+		iocg_unlock(iocg, ioc_locked, &flags);		/* vtime 예산 lock 해제 */
+		iocg_commit_bio(iocg, bio, abs_cost, cost);	/* [한국어] 락을 잡는 사이 비활성화되었다 — 재우면 아무도 깨워 주지 않으므로 그냥 통과시킨다 */
 		return;
 	}
 
@@ -4748,23 +5024,25 @@ retry_lock:	/* NVMe 가중치/부채 변경에 따라 lock 범위 재조정 후 
 	 * clear them and leave @iocg inactive w/ dangling use_delay heavily
 	 * penalizing the cgroup and its descendants.
 	 */
-	if (use_debt) {	/* root/fatal signal: NVMe 부채로 처리해 우선 발행 */
-		iocg_incur_debt(iocg, abs_cost, &now);		/* NVMe 부채 누적, vtime은 미리 차감 안 함 */
-		if (iocg_kick_delay(iocg, &now))		/* 부채가 너무 커지면 blkcg use_delay로 NVMe 제출 억제 */
+	if (use_debt) {	/* root/fatal signal: vtime 부채로 처리해 우선 발행 */
+		iocg_incur_debt(iocg, abs_cost, &now);		/* vtime 부채 누적, vtime은 미리 차감 안 함 */
+		if (iocg_kick_delay(iocg, &now))		/* 부채가 너무 커지면 blkcg use_delay로 제출 억제 */
 			blkcg_schedule_throttle(rqos->disk,			/* [한국어] 스케줄 아웃 시점에 지연을 부과하도록 예약 */
 					(bio->bi_opf & REQ_SWAP) == REQ_SWAP);
-		iocg_unlock(iocg, ioc_locked, &flags);
-		return;
+		iocg_unlock(iocg, ioc_locked, &flags);	/* [한국어] 부채로 처리했으므로 잠들지 않고 락만 풀고 나간다 */
+		return;	/* [한국어] bio는 즉시 통과. 대신 abs_vdebt가 늘어 이후 주기에서 갚게 된다 */
 	}
 
-	/* guarantee that iocgs w/ waiters have maximum inuse */	/* NVMe 예산 대기 중인 cgroup은 최대 할당분 사용 */
+	/* guarantee that iocgs w/ waiters have maximum inuse */	/* vtime 예산 대기 중인 cgroup은 최대 할당분 사용 */
 	if (!iocg->abs_vdebt && iocg->inuse != iocg->active) {	/* 부채 아니면 active까지 inuse 복원 */
-		if (!ioc_locked) {		/* ioc->lock 없이는 NVMe 가중치 변경 불가 */
+		if (!ioc_locked) {		/* ioc->lock 없이는 가중치 변경 불가 */
 			iocg_unlock(iocg, false, &flags);			/* waitq.lock만 해제 */
-			ioc_locked = true;			/* ioc->lock 획득 후 NVMe 가중치 조정 재시도 */
-			goto retry_lock;			/* NVMe 가중치 변경을 위해 lock 다시 획득 */
+			ioc_locked = true;			/* ioc->lock 획득 후 가중치 조정 재시도 */
+			goto retry_lock;			/* 가중치 변경을 위해 lock 다시 획득 */
 		}
-		propagate_weights(iocg, iocg->active, iocg->active, true,		/* inuse=active로 NVMe 예산 최대화 */
+		propagate_weights(iocg, iocg->active, iocg->active, true,	/* [한국어] inuse를 active와 같게 만든다(snapback).
+									 * 대기자가 생겼다는 것은 이 cgroup에 수요가 있다는 뜻이므로,
+									 * 기부했던 몫을 전부 회수해 예산 회복 속도를 최대로 올린다 */
 				  &now);
 	}
 
@@ -4781,25 +5059,32 @@ retry_lock:	/* NVMe 가중치/부채 변경에 따라 lock 범위 재조정 후 
 	 * All waiters are on iocg->waitq and the wait states are
 	 * synchronized using waitq.lock.
 	 */
-	init_wait_func(&wait.wait, iocg_wake_fn);	/* wait 엔트리: 예산 회복 시 iocg_wake_fn -> blk-mq/NVMe 재진입 */
-	wait.bio = bio;	/* NVMe 제출 대기 중인 bio */
-	wait.abs_cost = abs_cost;	/* 깨어날 때 NVMe 절대 비용으로 cost 재계산 */
-	wait.committed = false;	/* will be set true by waker */	/* waker가 NVMe 예산 확정 시 true */
+	init_wait_func(&wait.wait, iocg_wake_fn);	/* wait 엔트리: 예산 회복 시 iocg_wake_fn -> blk-mq 제출 경로로 재진입 */
+	wait.bio = bio;	/* 제출 대기 중인 bio */
+	wait.abs_cost = abs_cost;	/* 깨어날 때 절대 비용으로 cost 재계산 */
+	wait.committed = false;	/* will be set true by waker */	/* waker가 vtime 예산 확정 시 true */
 
-	__add_wait_queue_entry_tail(&iocg->waitq, &wait.wait);	/* NVMe 예산 부족 bio를 FIFO 순서로 대기 */
+	__add_wait_queue_entry_tail(&iocg->waitq, &wait.wait);	/* vtime 예산 부족 bio를 FIFO 순서로 대기 */
 	iocg_kick_waitq(iocg, ioc_locked, &now);	/* 기존 대기자 처리 및 waitq_timer 재설정 */
 
-	iocg_unlock(iocg, ioc_locked, &flags);
+	iocg_unlock(iocg, ioc_locked, &flags);	/* [한국어] 대기열 등록을 마쳤으니 락을 푼다.
+						 * 아래 io_schedule() 루프는 락을 쥔 채 잠들 수 없으므로 반드시 여기서 풀어야 한다 */
 
-	while (true) {	/* NVMe 예산 확정까지 issuer 대기 */
-		set_current_state(TASK_UNINTERRUPTIBLE);		/* signal에도 깨지 않음: NVMe 제출 순서 보장 */
-		if (wait.committed)		/* waker가 NVMe 예산 확정 완료 */
-			break;
-		io_schedule();		/* IO scheduler에 양보: 다른 태스크의 NVMe 제출 기회 확보 */
+	while (true) {	/* [한국어] 표준 커널 대기 관용구. wait.committed가 설 때까지 반복한다.
+				 * 조건을 다시 검사하는 루프인 이유: 가짜 기상(spurious wakeup)이 있을 수 있다 */
+		set_current_state(TASK_UNINTERRUPTIBLE);		/* signal에도 깨지 않음: 제출 순서 보장 */
+		if (wait.committed)		/* [한국어] iocg_wake_fn()이 예산으로 이 bio의 비용을 확정했다는 표식.
+							 * set_current_state() **이후에** 검사해야 확정과 기상 사이의 경쟁을 막는다 */
+			break;	/* [한국어] 확정되었으니 대기 종료. 아래 finish_wait()에서 상태를 RUNNING으로 되돌린다 */
+		io_schedule();		/* [한국어] 단순 schedule()이 아니라 io_schedule()인 이유: 이 태스크가 IO를 기다린다고
+						 * 스케줄러에 알려 iowait 통계에 잡히게 하고, CPU 유휴 정책에도 반영되게 한다 */
 	}
 
 	/* waker already committed us, proceed */
-	finish_wait(&iocg->waitq, &wait.wait);	/* waitq 정리 후 blk-mq -> nvme_queue_rq 진행 */
+	finish_wait(&iocg->waitq, &wait.wait);	/* [한국어] 태스크 상태를 TASK_RUNNING으로 되돌리고 대기 엔트리를 큐에서 뗀다.
+						 * wait이 스택 변수이므로 이 정리를 빠뜨리면 함수 반환 후
+						 * 해제된 스택을 waitq가 가리키게 된다.
+						 * 반환하면 호출자가 blk-mq 제출을 계속 진행한다 */
 }
 
 /*
@@ -4831,9 +5116,9 @@ retry_lock:	/* NVMe 가중치/부채 변경에 따라 lock 범위 재조정 후 
 static void ioc_rqos_merge(struct rq_qos *rqos, struct request *rq,
 			   struct bio *bio)
 {
-	struct ioc_gq *iocg = blkg_to_iocg(bio->bi_blkg);	/* 병합 bio의 blk-cgroup NVMe 예산 상태 */
+	struct ioc_gq *iocg = blkg_to_iocg(bio->bi_blkg);	/* 병합 bio의 blk-cgroup vtime 예산 상태 */
 	struct ioc *ioc = rqos_to_ioc(rqos);
-	sector_t bio_end = bio_end_sector(bio);	/* 병합 후 NVMe LBA 끝: cursor 갱신용 */
+	sector_t bio_end = bio_end_sector(bio);	/* 병합 후 LBA 끝: cursor 갱신용 */
 	struct ioc_now now;
 	u64 vtime, abs_cost, cost;
 	unsigned long flags;
@@ -4842,27 +5127,28 @@ static void ioc_rqos_merge(struct rq_qos *rqos, struct request *rq,
 	if (!ioc->enabled || !iocg || !iocg->level)
 		return;
 
-	abs_cost = calc_vtime_cost(bio, iocg, true);	/* 병합으로 추가된 NVMe 비용만 계산 */
+	abs_cost = calc_vtime_cost(bio, iocg, true);	/* 병합으로 추가된 비용만 계산 */
 	if (!abs_cost)
 		return;
 
 	ioc_now(ioc, &now);
 
-	vtime = atomic64_read(&iocg->vtime);
-	cost = adjust_inuse_and_calc_cost(iocg, vtime, abs_cost, &now);
+	vtime = atomic64_read(&iocg->vtime);	/* [한국어] atomic 읽기: 현재 발행 기준 가상 시각 */
+	cost = adjust_inuse_and_calc_cost(iocg, vtime, abs_cost, &now);	/* [한국어] abs_cost → (hweight_inuse 반영) cost 변환.
+										 * 여유가 모자라면 여기서 inuse를 단계적으로 올려 회수한다 */
 
 	/* update cursor if backmerging into the request at the cursor */
 	if (blk_rq_pos(rq) < bio_end &&	/* back-merge 범위 확인 */
 	    blk_rq_pos(rq) + blk_rq_sectors(rq) == iocg->cursor)	/* request 끝이 cursor와 일치하면 sequential 확장 */
-		iocg->cursor = bio_end;		/* NVMe sequential cursor 확장 */
+		iocg->cursor = bio_end;		/* 순차 판정용 cursor 확장 */
 
 	/*
 	 * Charge if there's enough vtime budget and the existing request has
 	 * cost assigned.
 	 */
-	if (rq->bio && rq->bio->bi_iocost_cost &&	/* 기존 request가 NVMe 예산을 차지 중이면 병합 비용도 차감 */
-	    time_before_eq64(atomic64_read(&iocg->vtime) + cost, now.vnow)) {	/* 병합 후에도 NVMe 예산 내 */
-		iocg_commit_bio(iocg, bio, abs_cost, cost);
+	if (rq->bio && rq->bio->bi_iocost_cost &&	/* 기존 request가 vtime 예산을 차지 중이면 병합 비용도 차감 */
+	    time_before_eq64(atomic64_read(&iocg->vtime) + cost, now.vnow)) {	/* 병합 후에도 vtime 예산 내 */
+		iocg_commit_bio(iocg, bio, abs_cost, cost);	/* [한국어] 예산이 있으면 병합분만큼 vtime을 전진시키고 통과 */
 		return;
 	}
 
@@ -4871,20 +5157,24 @@ static void ioc_rqos_merge(struct rq_qos *rqos, struct request *rq,
 	 * be for the vast majority of cases. See debt handling in
 	 * ioc_rqos_throttle() for details.
 	 */
-	spin_lock_irqsave(&ioc->lock, flags);
-	spin_lock(&iocg->waitq.lock);	/* 각 cgroup의 NVMe 예산/대기 상태 보호 */
+	spin_lock_irqsave(&ioc->lock, flags);	/* [한국어] 부채 처리는 inuse 전파를 동반하므로 ioc->lock이 필요하다 */
+	spin_lock(&iocg->waitq.lock);	/* [한국어] 이어서 waitq.lock. 이 파일 전체가 지키는 락 순서는 ioc->lock → waitq.lock 이며,
+					 * 바깥에서 이미 IRQ를 껐으므로 안쪽은 irqsave 없는 변형으로 충분하다 */
 
-	if (likely(!list_empty(&iocg->active_list))) {	/* 활성 상태면 병합 bio를 NVMe 부채로 처리 */
-		iocg_incur_debt(iocg, abs_cost, &now);
-		if (iocg_kick_delay(iocg, &now))
-			blkcg_schedule_throttle(rqos->disk,
-					(bio->bi_opf & REQ_SWAP) == REQ_SWAP);
+	if (likely(!list_empty(&iocg->active_list))) {	/* 활성 상태면 병합 bio를 vtime 부채로 처리 */
+		iocg_incur_debt(iocg, abs_cost, &now);	/* [한국어] 병합은 되돌릴 수 없으므로 재우지 않고 부채로 기록한다.
+							 * 이미 드라이버로 내려갔을 수도 있는 request에 데이터를 얹는 상황이라
+							 * 여기서 블록하면 완료를 기다리는 쪽과 교착할 수 있다 */
+		if (iocg_kick_delay(iocg, &now))	/* [한국어] 부채가 임계를 넘으면 blkcg use_delay를 세팅하고 true를 반환한다 */
+			blkcg_schedule_throttle(rqos->disk,	/* [한국어] 지금 재우는 대신, 이 태스크가 커널을 빠져나갈 때 지연을 물도록 예약한다 */
+					(bio->bi_opf & REQ_SWAP) == REQ_SWAP);	/* [한국어] swap IO 여부를 알린다 — 메모리 회수 경로를 과하게 지연시키면
+												 * OOM으로 이어질 수 있어 처리 강도가 달라진다 */
 	} else {
-		iocg_commit_bio(iocg, bio, abs_cost, cost);
+		iocg_commit_bio(iocg, bio, abs_cost, cost);	/* [한국어] 이미 비활성화된 iocg면 부채를 지울 주체가 없으므로 그냥 정상 차감 처리 */
 	}
 
-	spin_unlock(&iocg->waitq.lock);
-	spin_unlock_irqrestore(&ioc->lock, flags);
+	spin_unlock(&iocg->waitq.lock);	/* [한국어] 잡은 역순으로 해제 */
+	spin_unlock_irqrestore(&ioc->lock, flags);	/* [한국어] 바깥 락 해제와 함께 인터럽트 상태 복원 */
 }
 
 /*
@@ -4895,16 +5185,16 @@ static void ioc_rqos_merge(struct rq_qos *rqos, struct request *rq,
  * @bio:  완료된 bio (bi_iocost_cost 필드에 할당된 비용 기록됨)
  * @return: void
  *
- * NVMe CQ 완료 처리 경로(blk_mq_end_request → rq_qos_done_bio)에서 호출.
+ * request 완료 처리 경로(blk_mq_end_request → rq_qos_done_bio)에서 호출.
  * bio가 iocg_commit_bio()에서 할당받은 bi_iocost_cost를 iocg->done_vtime에
  * 원자적으로 누적해, 현재 in-flight 비용(vtime - done_vtime)을 감소시킨다.
  * done_vtime은 iocg_is_idle() 등에서 참조해 실제 IO 완료 진행 상황을 파악.
  *
- * 실행 컨텍스트: NVMe CQ 완료 softirq 또는 NVMe completion kthread.
+ * 실행 컨텍스트: 블록 계층 request 완료 컨텍스트(드라이버에 따라 하드웨어 IRQ / softirq / 완료 스레드).
  *               bi_iocost_cost=0인 bio는 무시.
  *
  * 호출 체인:
- *   nvme_complete_rq → blk_mq_end_request → bio_endio
+ *   (드라이버 완료 처리) → blk_mq_end_request → bio_endio
  *     → rq_qos_done_bio → [ioc_rqos_done_bio]
  *     → atomic64_add(&iocg->done_vtime)
  */
@@ -4912,31 +5202,31 @@ static void ioc_rqos_done_bio(struct rq_qos *rqos, struct bio *bio)
 {
 	struct ioc_gq *iocg = blkg_to_iocg(bio->bi_blkg);
 
-	if (iocg && bio->bi_iocost_cost)	/* bio가 NVMe 비용을 가지고 있으면 */
-		atomic64_add(bio->bi_iocost_cost, &iocg->done_vtime);		/* atomic: NVMe CQ 완료로 in-flight 비용 감소 */
+	if (iocg && bio->bi_iocost_cost)	/* bio가 비용을 가지고 있으면 */
+		atomic64_add(bio->bi_iocost_cost, &iocg->done_vtime);		/* atomic: 요청 완료로 in-flight 비용 감소 */
 }
 
 /*
  * [한국어]
- * ioc_rqos_done - NVMe request 완료 시 latency QoS 통계와 rq_wait_ns 기록
+ * ioc_rqos_done - request 완료 시 latency QoS 통계와 rq_wait_ns 기록
  *
  * @rqos: ioc->rqos, RQ_QOS_COST 핸들
- * @rq:   완료된 NVMe request (alloc_time_ns, start_time_ns 기록됨)
+ * @rq:   완료된 request (alloc_time_ns, start_time_ns 기록됨)
  * @return: void
  *
- * NVMe CQ 완료 경로(blk_mq_end_request → rq_qos_done)에서 request 단위로
+ * request 완료 경로(blk_mq_end_request → rq_qos_done)에서 request 단위로
  * 호출된다. 다음 세 지표를 per-CPU ioc_pcpu_stat에 기록한다:
  *   - on_q_ns: rq->alloc_time_ns 기준 총 체류 시간 (큐 대기 + 장치 처리)
- *   - rq_wait_ns: NVMe tag/sbitmap 할당 대기 시간 (alloc → start 차이)
+ *   - rq_wait_ns: blk-mq tag(sbitmap) 할당 대기 시간 (alloc → start 차이)
  *   - nr_met/nr_missed: (on_q_ns - size_nsec)이 QoS 목표 이내면 met, 초과면 missed
  * ioc_timer_fn()이 이 통계를 집계해 vrate와 busy_level을 조정한다.
  *
- * 실행 컨텍스트: NVMe CQ 완료 softirq 또는 completion kthread (CPU 고정).
+ * 실행 컨텍스트: request 완료 softirq 또는 completion kthread (CPU 고정).
  *               per-CPU 통계는 local_inc/local64_add로 lock-free 접근.
  * 에러 경로: ioc 미활성, alloc_time_ns=0, start_time_ns=0, 미지원 opcode 시 skip.
  *
  * 호출 체인:
- *   nvme_complete_rq → blk_mq_end_request → rq_qos_done
+ *   (드라이버 완료 처리) → blk_mq_end_request → rq_qos_done
  *     → [ioc_rqos_done]
  *     → calc_size_vtime_cost, get_cpu_ptr(ioc->pcpu_stat)
  *     → local_inc(nr_met/nr_missed), local64_add(rq_wait_ns)
@@ -4944,51 +5234,54 @@ static void ioc_rqos_done_bio(struct rq_qos *rqos, struct bio *bio)
 static void ioc_rqos_done(struct rq_qos *rqos, struct request *rq)
 {
 	struct ioc *ioc = rqos_to_ioc(rqos);
-	struct ioc_pcpu_stat *ccs;	/* NVMe CQ 완료 CPU의 per-CPU 통계 */
-	u64 on_q_ns, rq_wait_ns, size_nsec;	/* on_q_ns=NVMe 큐+디바이스 체류, rq_wait_ns=request 할당 대기 */
-	int pidx, rw;	/* read/write NVMe latency QoS 인덱스 */
+	struct ioc_pcpu_stat *ccs;	/* 완료 처리 CPU의 per-CPU 통계 */
+	u64 on_q_ns, rq_wait_ns, size_nsec;	/* on_q_ns=요청 큐 + 디바이스 체류, rq_wait_ns=request 할당 대기 */
+	int pidx, rw;	/* read/write 지연(latency) QoS 인덱스 */
 
 	if (!ioc->enabled || !rq->alloc_time_ns || !rq->start_time_ns)	/* iocost 비활성이거나 rq 시간 미기록 시 skip */
 		return;
 
-	switch (req_op(rq)) {
+	switch (req_op(rq)) {	/* [한국어] 지연 QoS는 read/write 두 방향에 대해서만 목표를 둔다 */
 	case REQ_OP_READ:
-		pidx = QOS_RLAT;
-		rw = READ;		/* read 방향 NVMe 통계 */
+		pidx = QOS_RLAT;	/* [한국어] 비교 대상이 될 params.qos[] 인덱스 = 읽기 지연 목표(μs) */
+		rw = READ;		/* [한국어] missed[] 배열의 읽기 슬롯(0) */
 		break;
 	case REQ_OP_WRITE:
-		pidx = QOS_WLAT;
-		rw = WRITE;		/* write 방향 NVMe 통계 */
+		pidx = QOS_WLAT;	/* [한국어] 쓰기 지연 목표(μs) */
+		rw = WRITE;		/* [한국어] missed[] 배열의 쓰기 슬롯(1) */
 		break;
 	default:
-		return;
+		return;	/* [한국어] discard/flush 등은 지연 통계에 포함하지 않는다 —
+				 * 이 연산들은 소요 시간이 크게 튀어 vrate 판정을 왜곡한다 */
 	}
 
-	on_q_ns = blk_time_get_ns() - rq->alloc_time_ns;	/* request 할당(NVMe tag CID) ~ CQ 완료 총시간 */
+	on_q_ns = blk_time_get_ns() - rq->alloc_time_ns;	/* [한국어] rq->alloc_time_ns(=blk-mq tag 할당을 시도한 시각)부터 지금(완료)까지의
+						 * 총 체류 시간 — tag 대기 + 소프트/하드웨어 큐 대기 + 장치 처리를 모두 포함 */
 	rq_wait_ns = rq->start_time_ns - rq->alloc_time_ns;	/* [한국어] request 할당에 걸린 시간 = 태그(sbitmap) 대기 시간 */
-	size_nsec = div64_u64(calc_size_vtime_cost(rq, ioc), VTIME_PER_NSEC);	/* request 크기에 비례하는 NVMe 기본 전송 시간 */
+	size_nsec = div64_u64(calc_size_vtime_cost(rq, ioc), VTIME_PER_NSEC);	/* request 크기에 비례하는 기본 전송 시간 */
 
 	ccs = get_cpu_ptr(ioc->pcpu_stat);	/* [한국어] 현재 CPU(완료 처리가 일어난 CPU)의 per-CPU 통계 */
 
 	if (on_q_ns <= size_nsec ||	/* 데이터 전송 시간 이하이거나(추정) */
-	    on_q_ns - size_nsec <= ioc->params.qos[pidx] * NSEC_PER_USEC)	/* NVMe latency QoS 목표 이내 */
-		local_inc(&ccs->missed[rw].nr_met);		/* local: NVMe latency QoS 달성 카운트 */
+	    on_q_ns - size_nsec <= ioc->params.qos[pidx] * NSEC_PER_USEC)	/* 지연(latency) QoS 목표 이내 */
+		local_inc(&ccs->missed[rw].nr_met);		/* [한국어] 목표 달성. local_inc는 이 CPU에만 보이는 증가라 락도 원자적 연산도 필요 없다 */
 	else
-		local_inc(&ccs->missed[rw].nr_missed);		/* local: NVMe latency QoS 미달 카운트 */
+		local_inc(&ccs->missed[rw].nr_missed);		/* [한국어] 목표 초과. 이 카운트의 비율(missed_ppm)이 ioc_timer_fn()에서
+									 * QOS_RPPM/QOS_WPPM 임계와 비교되어 vrate 하강을 부른다 */
 
-	local64_add(rq_wait_ns, &ccs->rq_wait_ns);	/* local64: NVMe request 할당 대기 시간 누적 */
+	local64_add(rq_wait_ns, &ccs->rq_wait_ns);	/* local64: request 할당 대기 시간 누적 */
 
-	put_cpu_ptr(ccs);	/* preemption 복원: NVMe 통계 per-CPU 일관성 */
+	put_cpu_ptr(ccs);	/* preemption 복원: 통계 per-CPU 일관성 */
 }
 
 /*
  * [한국어]
- * ioc_rqos_queue_depth_changed - NVMe 큐 깊이 변경 시 autop 프로파일 재선택
+ * ioc_rqos_queue_depth_changed - 큐 깊이 변경 시 autop 프로파일 재선택
  *
  * @rqos: ioc->rqos, RQ_QOS_COST 핸들
  * @return: void
  *
- * NVMe 장치의 queue depth가 변경되면(예: nr_hw_queues 조정, 런타임 재설정)
+ * 장치의 queue depth가 변경되면(예: nr_hw_queues 조정, 런타임 재설정)
  * blk-mq가 이 콜백을 호출한다. ioc_refresh_params()를 재호출해 현재 queue
  * depth에 맞는 autop 프로파일(AUTOP_SSD_QD1 / AUTOP_SSD_DEFAULT 등)을
  * 재선택하고 lcoefs를 갱신한다.
@@ -5036,11 +5329,11 @@ static void ioc_rqos_exit(struct rq_qos *rqos)
 	blkcg_deactivate_policy(rqos->disk, &blkcg_policy_iocost);	/* blk-cgroup에서 iocost 분리 */
 
 	spin_lock_irq(&ioc->lock);
-	ioc->running = IOC_STOP;	/* NVMe 제어 타이머 정지 예고 */
+	ioc->running = IOC_STOP;	/* 제어 타이머 정지 예고 */
 	spin_unlock_irq(&ioc->lock);
 
-	timer_shutdown_sync(&ioc->timer);	/* NVMe 주기 타이머 동기 종료 */
-	free_percpu(ioc->pcpu_stat);	/* [한국어] per-CPU NVMe 완료/대기 통계 메모리 해제 */
+	timer_shutdown_sync(&ioc->timer);	/* 제어 주기 타이머 동기 종료 */
+	free_percpu(ioc->pcpu_stat);	/* [한국어] per-CPU 완료/대기 통계 메모리 해제 */
 	kfree(ioc);	/* [한국어] iocost 컨트롤러 구조체 해제 */
 }
 
@@ -5048,7 +5341,7 @@ static void ioc_rqos_exit(struct rq_qos *rqos)
  * [한국어]
  * ioc_rqos_ops - iocost가 blk-mq RQ_QOS 체인에 등록하는 콜백 테이블
  *
- * blk_iocost_init()에서 rq_qos_add()에 전달된다.
+ * blk_blk_iocost_init()에서 rq_qos_add()에 전달된다.
  * blk-mq는 각 IO 단계에서 체인의 모든 rq_qos를 순서대로 호출한다.
  */
 static const struct rq_qos_ops ioc_rqos_ops = {
@@ -5061,7 +5354,7 @@ static const struct rq_qos_ops ioc_rqos_ops = {
 	.done = ioc_rqos_done,
 	/* [한국어] request 완료 시 latency QoS 통계(nr_met/nr_missed, rq_wait_ns) 기록 */
 	.queue_depth_changed = ioc_rqos_queue_depth_changed,
-	/* [한국어] NVMe queue depth 변경 시 autop 프로파일 재선택 */
+	/* [한국어] 요청 큐 depth 변경 시 autop 프로파일 재선택 */
 	.exit = ioc_rqos_exit,
 	/* [한국어] 장치 제거 시 ioc 자원 정리 */
 };
@@ -5070,7 +5363,7 @@ static const struct rq_qos_ops ioc_rqos_ops = {
  * [한국어]
  * blk_iocost_init - gendisk에 iocost 컨트롤러를 초기화하고 RQ_QOS_COST로 등록
  *
- * @disk:   iocost를 활성화할 블록 장치의 gendisk (NVMe 네임스페이스 단위)
+ * @disk:   iocost를 활성화할 블록 장치의 gendisk (파티션이 아닌 디스크 단위)
  * @return: 0 성공, 음수 errno 실패
  *
  * 이 함수는 두 단계로 iocost를 장치에 연결한다:
@@ -5098,17 +5391,17 @@ static int blk_iocost_init(struct gendisk *disk)
 	struct ioc *ioc;
 	int i, cpu, ret;
 
-	ioc = kzalloc_obj(*ioc);	/* NVMe 장치당 하나의 iocost 컨트롤러 */
+	ioc = kzalloc_obj(*ioc);	/* 장치당 하나의 iocost 컨트롤러 */
 	if (!ioc)
 		return -ENOMEM;
 
-	ioc->pcpu_stat = alloc_percpu(struct ioc_pcpu_stat);	/* per-CPU NVMe CQ 완료/대기 통계 */
+	ioc->pcpu_stat = alloc_percpu(struct ioc_pcpu_stat);	/* per-CPU 완료 지연/rq_wait 통계 */
 	if (!ioc->pcpu_stat) {
 		kfree(ioc);
 		return -ENOMEM;
 	}
 
-	/* [한국어] 모든 CPU의 per-CPU NVMe latency QoS 통계를 0으로 초기화 */
+	/* [한국어] 모든 CPU의 per-CPU 지연(latency) QoS 통계를 0으로 초기화 */
 	for_each_possible_cpu(cpu) {
 		struct ioc_pcpu_stat *ccs = per_cpu_ptr(ioc->pcpu_stat, cpu);
 
@@ -5116,20 +5409,20 @@ static int blk_iocost_init(struct gendisk *disk)
 			local_set(&ccs->missed[i].nr_met, 0);	/* [한국어] latency QoS 달성 카운트 초기화 */
 			local_set(&ccs->missed[i].nr_missed, 0);	/* [한국어] latency QoS 미달 카운트 초기화 */
 		}
-		local64_set(&ccs->rq_wait_ns, 0);		/* NVMe rq_wait_ns 0 */
+		local64_set(&ccs->rq_wait_ns, 0);		/* rq_wait_ns 0 */
 	}
 
 	spin_lock_init(&ioc->lock);
-	timer_setup(&ioc->timer, ioc_timer_fn, 0);	/* NVMe 주기 타이머 핸들러 등록 */
-	INIT_LIST_HEAD(&ioc->active_iocgs);	/* NVMe 활성 cgroup 목록 초기화 */
+	timer_setup(&ioc->timer, ioc_timer_fn, 0);	/* 제어 주기 타이머 핸들러 등록 */
+	INIT_LIST_HEAD(&ioc->active_iocgs);	/* 활성 cgroup 목록 초기화 */
 
 	ioc->running = IOC_IDLE;	/* [한국어] 초기 상태는 idle: 활성 iocg 없을 때 타이머 미실행 */
 	ioc->vtime_base_rate = VTIME_PER_USEC;	/* [한국어] vtime_base_rate 초기값: 1.0 (1 vtime/usec) */
 	atomic64_set(&ioc->vtime_rate, VTIME_PER_USEC);	/* [한국어] atomic vtime_rate 초기화 */
-	seqcount_spinlock_init(&ioc->period_seqcount, &ioc->lock);	/* NVMe 주기 시계 seqcount 초기화 */
+	seqcount_spinlock_init(&ioc->period_seqcount, &ioc->lock);	/* 제어 주기 시계 seqcount 초기화 */
 	ioc->period_at = ktime_to_us(blk_time_get());	/* [한국어] 현재 시각을 첫 주기 시작점으로 */
-	atomic64_set(&ioc->cur_period, 0);	/* NVMe 주기 번호 0 */
-	atomic_set(&ioc->hweight_gen, 0);	/* NVMe hweight 캐시 세대 0 */
+	atomic64_set(&ioc->cur_period, 0);	/* 제어 주기 번호 0 */
+	atomic_set(&ioc->hweight_gen, 0);	/* hweight 캐시 세대 0 */
 
 	spin_lock_irq(&ioc->lock);
 	ioc->autop_idx = AUTOP_INVALID;	/* [한국어] autop 인덱스를 무효 상태로 초기화: refresh 강제 실행 */
@@ -5142,11 +5435,12 @@ static int blk_iocost_init(struct gendisk *disk)
 	 * called before policy activation completion, can't assume that the
 	 * target bio has an iocg associated and need to test for NULL iocg.
 	 */
-	ret = rq_qos_add(&ioc->rqos, disk, RQ_QOS_COST, &ioc_rqos_ops);	/* blk-mq RQ_QOS_COST 체인에 등록: bio -> ioc_rqos_throttle -> NVMe */
+	ret = rq_qos_add(&ioc->rqos, disk, RQ_QOS_COST, &ioc_rqos_ops);	/* [한국어] 이 요청 큐의 rq_qos 체인에 RQ_QOS_COST id로 삽입 —
+											 * 이후 rq_qos_throttle()/rq_qos_done() 훅이 ioc_rqos_ops를 통해 이 파일로 들어온다 */
 	if (ret)
 		goto err_free_ioc;
 
-	ret = blkcg_activate_policy(disk, &blkcg_policy_iocost);	/* blk-cgroup과 연결: cgroup별 NVMe 예산 할당 */
+	ret = blkcg_activate_policy(disk, &blkcg_policy_iocost);	/* blk-cgroup과 연결: cgroup별 vtime 예산 할당 */
 	if (ret)
 		goto err_del_qos;
 	return 0;
@@ -5233,12 +5527,12 @@ static struct blkg_policy_data *ioc_pd_alloc(struct gendisk *disk,
 	int levels = blkcg->css.cgroup->level + 1;	/* [한국어] root(0)부터 이 cgroup까지의 계층 수 */
 	struct ioc_gq *iocg;
 
-	iocg = kzalloc_node(struct_size(iocg, ancestors, levels), gfp,	/* cgroup 계층 깊이만큼 NVMe 조상 포인터 할당 */
-			    disk->node_id);			/* NVMe 장치 NUMA node에 맞춤 메모리 할당 */
+	iocg = kzalloc_node(struct_size(iocg, ancestors, levels), gfp,	/* cgroup 계층 깊이만큼 조상 포인터 할당 */
+			    disk->node_id);			/* 장치 NUMA node에 맞춤 메모리 할당 */
 	if (!iocg)
 		return NULL;
 
-	iocg->pcpu_stat = alloc_percpu_gfp(struct iocg_pcpu_stat, gfp);	/* cgroup별 per-CPU NVMe 사용량 */
+	iocg->pcpu_stat = alloc_percpu_gfp(struct iocg_pcpu_stat, gfp);	/* cgroup별 per-CPU 사용량 */
 	if (!iocg->pcpu_stat) {
 		kfree(iocg);
 		return NULL;
@@ -5280,27 +5574,27 @@ static void ioc_pd_init(struct blkg_policy_data *pd)
 	ioc_now(ioc, &now);
 
 	iocg->ioc = ioc;
-	atomic64_set(&iocg->vtime, now.vnow);	/* atomic: 초기 NVMe issued vtime을 현재 vnow로 */
-	atomic64_set(&iocg->done_vtime, now.vnow);	/* atomic: 초기 NVMe completed vtime 동기화 */
-	atomic64_set(&iocg->active_period, atomic64_read(&ioc->cur_period));	/* atomic: 현재 NVMe 주기로 활성 스탬프 */
+	atomic64_set(&iocg->vtime, now.vnow);	/* atomic: 초기 issued vtime을 현재 vnow로 */
+	atomic64_set(&iocg->done_vtime, now.vnow);	/* atomic: 초기 completed vtime 동기화 */
+	atomic64_set(&iocg->active_period, atomic64_read(&ioc->cur_period));	/* atomic: 현재 제어 주기로 활성 스탬프 */
 	INIT_LIST_HEAD(&iocg->active_list);
 	INIT_LIST_HEAD(&iocg->walk_list);
 	INIT_LIST_HEAD(&iocg->surplus_list);
-	iocg->hweight_active = WEIGHT_ONE;	/* 단일 cgroup 시 100% NVMe 활성 비율 */
-	iocg->hweight_inuse = WEIGHT_ONE;	/* 단일 cgroup 시 100% NVMe 사용 비율 */
+	iocg->hweight_active = WEIGHT_ONE;	/* 단일 cgroup 시 100% hweight_active */
+	iocg->hweight_inuse = WEIGHT_ONE;	/* 단일 cgroup 시 100% hweight_inuse(사용 비율) */
 
 	init_waitqueue_head(&iocg->waitq);
-	hrtimer_setup(&iocg->waitq_timer, iocg_waitq_timer_fn, CLOCK_MONOTONIC, HRTIMER_MODE_ABS);	/* NVMe 예산 회복 monotonic 타이머 */
+	hrtimer_setup(&iocg->waitq_timer, iocg_waitq_timer_fn, CLOCK_MONOTONIC, HRTIMER_MODE_ABS);	/* vtime 예산 회복 monotonic 타이머 */
 
 	iocg->level = blkg->blkcg->css.cgroup->level;
 
-	for (tblkg = blkg; tblkg; tblkg = tblkg->parent) {	/* blk-cgroup 계층을 따라 NVMe 조상 ioc_gq 포인터 저장 */
-		struct ioc_gq *tiocg = blkg_to_iocg(tblkg);		/* 조상 cgroup의 NVMe 예산 상태 */
-		iocg->ancestors[tiocg->level] = tiocg;		/* ancestors[]에 NVMe 계층 위치 기록 */
+	for (tblkg = blkg; tblkg; tblkg = tblkg->parent) {	/* blk-cgroup 계층을 따라 조상 ioc_gq 포인터 저장 */
+		struct ioc_gq *tiocg = blkg_to_iocg(tblkg);		/* 조상 cgroup의 vtime 예산 상태 */
+		iocg->ancestors[tiocg->level] = tiocg;		/* ancestors[]에 계층 위치 기록 */
 	}
 
 	spin_lock_irqsave(&ioc->lock, flags);
-	weight_updated(iocg, &now);	/* 초기 weight를 상위로 전파해 NVMe hweight 계산 준비 */
+	weight_updated(iocg, &now);	/* 초기 weight를 상위로 전파해 hweight 계산 준비 */
 	spin_unlock_irqrestore(&ioc->lock, flags);
 }
 
@@ -5330,7 +5624,7 @@ static void ioc_pd_init(struct blkg_policy_data *pd)
 static void ioc_pd_free(struct blkg_policy_data *pd)
 {
 	struct ioc_gq *iocg = pd_to_iocg(pd);	/* [한국어] blkg_policy_data에서 ioc_gq 복원 */
-	struct ioc *ioc = iocg->ioc;	/* [한국어] 이 iocg가 속한 NVMe 장치 iocost 컨트롤러 */
+	struct ioc *ioc = iocg->ioc;	/* [한국어] 이 iocg가 속한 장치 iocost 컨트롤러 */
 	unsigned long flags;
 
 	if (ioc) {	/* [한국어] ioc_pd_init()이 호출된 경우에만 정리 수행 */
@@ -5349,7 +5643,7 @@ static void ioc_pd_free(struct blkg_policy_data *pd)
 
 		spin_unlock_irqrestore(&ioc->lock, flags);
 
-		hrtimer_cancel(&iocg->waitq_timer);	/* NVMe 예산 회복 타이머 취소 */
+		hrtimer_cancel(&iocg->waitq_timer);	/* vtime 예산 회복 타이머 취소 */
 	}
 	free_percpu(iocg->pcpu_stat);	/* [한국어] per-CPU usage_us 통계 메모리 해제 */
 	kfree(iocg);	/* [한국어] ioc_gq 구조체(ancestors[] 포함) 해제 */
@@ -5379,15 +5673,15 @@ static void ioc_pd_free(struct blkg_policy_data *pd)
 static void ioc_pd_stat(struct blkg_policy_data *pd, struct seq_file *s)
 {
 	struct ioc_gq *iocg = pd_to_iocg(pd);	/* [한국어] blkg_policy_data에서 ioc_gq 복원 */
-	struct ioc *ioc = iocg->ioc;	/* [한국어] 이 iocg가 속한 NVMe 장치 iocost 컨트롤러 */
+	struct ioc *ioc = iocg->ioc;	/* [한국어] 이 iocg가 속한 장치 iocost 컨트롤러 */
 
 	if (!ioc->enabled)	/* [한국어] iocost 미활성 시 통계 항목 미출력 */
 		return;
 
-	if (iocg->level == 0) {	/* root cgroup 출력: 전체 NVMe vrate */
+	if (iocg->level == 0) {	/* root cgroup 출력: 전체 vrate */
 		unsigned vp10k = DIV64_U64_ROUND_CLOSEST(
 			ioc->vtime_base_rate * 10000,		/* vrate * 10000 */
-			VTIME_PER_USEC);		/* 1.0 기준으로 정규화: NVMe 상대 IO 속도 */
+			VTIME_PER_USEC);		/* 1.0 기준으로 정규화: 상대 IO 속도 */
 		seq_printf(s, " cost.vrate=%u.%02u", vp10k / 100, vp10k % 100);
 		/* [한국어] vp10k/100.vp10k%100 형식: 예) 9876 → "98.76" (98.76% 속도) */
 	}
@@ -5709,7 +6003,7 @@ static ssize_t ioc_qos_write(struct kernfs_open_file *of, char *input,
 		ioc = q_to_ioc(disk->queue);
 	}
 
-	blk_mq_quiesce_queue(disk->queue);	/* NVMe queue 일시 정지: qos 변경 중 race 방지 */
+	blk_mq_quiesce_queue(disk->queue);	/* 요청 큐 일시 정지: qos 변경 중 race 방지 */
 
 	spin_lock_irq(&ioc->lock);	/* [한국어] QoS 파라미터 변경 직렬화 */
 	memcpy(qos, ioc->params.qos, sizeof(qos));	/* [한국어] 현재 파라미터 복사 (파싱 중 수정 가능한 임시 버퍼) */
@@ -5783,13 +6077,13 @@ static ssize_t ioc_qos_write(struct kernfs_open_file *of, char *input,
 	if (qos[QOS_MIN] > qos[QOS_MAX])	/* [한국어] min > max는 유효하지 않은 vrate 범위 */
 		goto einval;
 
-	if (enable && !ioc->enabled) {	/* iocost 활성화: NVMe rq_alloc_time 계정 시작 */
-		blk_stat_enable_accounting(disk->queue);		/* request 할당/완료 시간 측정 활성화 -> NVMe latency QoS 통계 정확도 향상 */
-		blk_queue_flag_set(QUEUE_FLAG_RQ_ALLOC_TIME, disk->queue);		/* NVMe tag/sbitmap 대기 시간 측정 플래그 설정 */
+	if (enable && !ioc->enabled) {	/* iocost 활성화: rq alloc_time 계정 시작 */
+		blk_stat_enable_accounting(disk->queue);		/* request 할당/완료 시간 측정 활성화 -> 지연(latency) QoS 통계 정확도 향상 */
+		blk_queue_flag_set(QUEUE_FLAG_RQ_ALLOC_TIME, disk->queue);		/* blk-mq tag(sbitmap) 대기 시간 측정 플래그 설정 */
 		ioc->enabled = true;
-	} else if (!enable && ioc->enabled) {	/* iocost 비활성화: NVMe 통계 중지 */
-		blk_stat_disable_accounting(disk->queue);		/* NVMe 완료/대기 시간 측정 중지 */
-		blk_queue_flag_clear(QUEUE_FLAG_RQ_ALLOC_TIME, disk->queue);		/* NVMe tag/sbitmap 대기 시간 측정 플래그 해제 */
+	} else if (!enable && ioc->enabled) {	/* iocost 비활성화: 통계 중지 */
+		blk_stat_disable_accounting(disk->queue);		/* 완료/대기 시간 측정 중지 */
+		blk_queue_flag_clear(QUEUE_FLAG_RQ_ALLOC_TIME, disk->queue);		/* blk-mq tag(sbitmap) 대기 시간 측정 플래그 해제 */
 		ioc->enabled = false;
 	}
 
@@ -5803,12 +6097,12 @@ static ssize_t ioc_qos_write(struct kernfs_open_file *of, char *input,
 	ioc_refresh_params(ioc, true);	/* [한국어] 새 파라미터로 lcoefs/margins 재계산 */
 	spin_unlock_irq(&ioc->lock);
 
-	if (enable)	/* iocost 켜지면 wbt는 중복 제어이므로 NVMe writeback throttling 비활성화 */
-		wbt_disable_default(disk);		/* wbt 중복 제거: NVMe latency QoS 제어 단일화 */
+	if (enable)	/* iocost 켜지면 wbt는 중복 제어이므로 writeback throttling 비활성화 */
+		wbt_disable_default(disk);		/* wbt 중복 제거: 지연(latency) QoS 제어 단일화 */
 	else
-		wbt_enable_default(disk);		/* wbt 복원: NVMe 제어 없을 때 writeback 조절 */
+		wbt_enable_default(disk);		/* wbt 복원: 제어 없을 때 writeback 조절 */
 
-	blk_mq_unquiesce_queue(disk->queue);	/* NVMe queue 재개: qos 변경 완료 */
+	blk_mq_unquiesce_queue(disk->queue);	/* 요청 큐 재개: qos 변경 완료 */
 
 	blkg_conf_exit_frozen(&ctx, memflags);	/* [한국어] bdev/frozen 상태 해제 */
 	return nbytes;
@@ -5965,8 +6259,8 @@ static ssize_t ioc_cost_model_write(struct kernfs_open_file *of, char *input,
 		ioc = q_to_ioc(q);
 	}
 
-	memflags = blk_mq_freeze_queue(q);	/* NVMe queue 동결: cost model 변경 중 IO 정지 */
-	blk_mq_quiesce_queue(q);	/* NVMe queue 휴양: hctx dispatch 중단 */
+	memflags = blk_mq_freeze_queue(q);	/* 요청 큐 동결: cost model 변경 중 IO 정지 */
+	blk_mq_quiesce_queue(q);	/* 요청 큐 휴양: hctx dispatch 중단 */
 
 	spin_lock_irq(&ioc->lock);	/* [한국어] i_lcoefs 변경 직렬화 */
 	memcpy(u, ioc->params.i_lcoefs, sizeof(u));	/* [한국어] 현재 i_lcoefs를 임시 버퍼에 복사 */
@@ -6016,8 +6310,8 @@ static ssize_t ioc_cost_model_write(struct kernfs_open_file *of, char *input,
 	ioc_refresh_params(ioc, true);	/* [한국어] 새 i_lcoefs로 lcoefs/vtime 계수 재계산 */
 	spin_unlock_irq(&ioc->lock);
 
-	blk_mq_unquiesce_queue(q);	/* NVMe queue 재개 */
-	blk_mq_unfreeze_queue(q, memflags);	/* NVMe queue 동결 해제 */
+	blk_mq_unquiesce_queue(q);	/* 요청 큐 재개 */
+	blk_mq_unfreeze_queue(q, memflags);	/* 요청 큐 동결 해제 */
 
 	blkg_conf_exit(&ctx);	/* [한국어] blkg 참조 해제 */
 	return nbytes;
@@ -6135,21 +6429,33 @@ static void __exit ioc_exit(void)
 module_init(ioc_init);	/* [한국어] 커널 모듈 로드 시 ioc_init 자동 호출 등록 */
 module_exit(ioc_exit);	/* [한국어] 커널 모듈 언로드 시 ioc_exit 자동 호출 등록 */
 
-/* NVMe 관점 핵심 요약 */
+/* [한국어] 핵심 요약 */
 /*
- * - iocost는 blk-mq 상단(RQ_QOS_COST)에서 bio가 NVMe driver/SQ로 날아가기
- *   전에 vtime 예산을 검사해, NVMe SQ/CQ 포화와 latency QoS 저하를
- *   사전에 억제한다.
- * - calc_vtime_cost()는 bio의 READ/WRITE, 크기, cursor 간 거리를 바탕으로
- *   NVMe 처리 예상 시간을 산출하며, sequential/random을 구분해 coef를
- *   다르게 적용한다.
- * - ioc_rqos_done()은 NVMe CQ 완료 시점의 rq_wait_ns와 latency QoS
- *   달성 여부를 per-CPU 통계에 기록, ioc_timer_fn()이 이를 바탕으로
- *   vrate를 조정한다.
- * - busy_level은 rq_wait_pct(software/hardware queue 포화)와 missed_ppm
- *   (완료 지연 QoS 미달)을 조합해 산출되며, 이를 통해 NVMe에 제출되는
- *   전체 IO 압력을 증감한다.
- * - 이 파일은 blk-cgroup, blk-rq-qos, blk-wbt, blk-stat 등 block layer
- *   파일들의 위에서 동작하며, 특히 blk-mq의 rq_qos 체인과 밀접하게
- *   연결된다.
+ * - iocost는 blk-mq 위(RQ_QOS_COST)에 앉아, bio가 드라이버로 내려가기 전에
+ *   vtime 예산을 검사한다. 예산이 있으면 통과, 없으면 발행자를 waitq에 재우거나
+ *   blkcg use_delay로 늦춘다.
+ * - calc_vtime_cost_builtin()은 bio의 READ/WRITE, 4KB 페이지 수, 직전 bio 끝
+ *   섹터(cursor)와의 거리로 비용을 산출한다. 거리가 LCOEF_RANDIO_PAGES(4096
+ *   페이지 = 16MB)를 넘으면 랜덤으로 보고 LCOEF_*RANDIO를, 아니면 LCOEF_*SEQIO를
+ *   더한다. 여기에 페이지 수 × LCOEF_*PAGE가 합쳐진다.
+ * - ioc_rqos_done()은 request 완료 시점의 rq_wait_ns와 지연 QoS 달성 여부를
+ *   per-CPU 통계에 기록하고, ioc_timer_fn()이 주기마다 이를 집계해 vrate를 조정한다.
+ * - busy_level은 rq_wait_pct(요청 큐 포화)와 missed_ppm(완료 지연 QoS 미달)을
+ *   조합해 산출되며, vrate_adj_pct[]의 인덱스가 되어 장치 전체 IO 압력을 증감한다.
+ * - 이 파일은 blk-cgroup, blk-rq-qos, blk-wbt, blk-stat 위에서 동작하며,
+ *   특히 blk-mq의 rq_qos 체인과 밀접하게 연결된다.
+ *
+ * [한국어] NVMe 를 공부하는 독자를 위한 주의:
+ *   이 파일에는 NVMe 고유 개념(SQ/CQ, doorbell, PRP/SGL, opcode, Command ID)이
+ *   하나도 등장하지 않으며, 등장할 수 없다. iocost는 rq_qos 훅으로만 블록 계층에
+ *   붙고, 드라이버는 blk-mq가 mq_ops->queue_rq 로 간접 호출하기 때문이다.
+ *   이 파일이 장치에 대해 실제로 물어보는 것은 blk_queue_rot()(회전 미디어인가)과
+ *   blk_queue_depth()(큐 깊이가 1인가) 두 가지뿐이고, 나머지 장치 특성은 전부
+ *   실측 지연에서 역산한다.
+ *   NVMe 와 진짜로 맞닿는 지점은 하나다 — autop[] 테이블의 AUTOP_SSD_FAST
+ *   프로파일(위 autop[] 정의 참조). 그 상수들(랜덤 읽기 778122 IOPS, 읽기 대역폭
+ *   약 3.1GB/s, 지연 목표 5ms)이 NVMe 급 장치를 실측해 얻은 값이며, HDD 프로파일
+ *   (랜덤 읽기 370 IOPS, 지연 목표 250ms)과 나란히 두면 iocost가 왜 장치별 비용
+ *   모델을 두는지가 드러난다. 다만 그 프로파일은 "NVMe 라서" 선택되는 것이 아니라
+ *   ioc_autop_idx()가 관측한 vrate 로 도달하는 것임에 유의하라.
  */

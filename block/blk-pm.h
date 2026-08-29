@@ -52,7 +52,7 @@
  * blk_post_runtime_resume, blk_set_pm_only/blk_clear_pm_only)와 짝을
  * 이루어 동작한다. 더 아래로는 NVMe/SCSI 등 블록 드라이버가
  * struct device에 등록한 runtime_suspend/runtime_resume PM 콜백
- * (drivers/nvme/host/pci.c의 nvme_runtime_suspend/nvme_runtime_resume
+ * (drivers/nvme/host/pci.c의 드라이버의 runtime_suspend 콜백/드라이버의 runtime_resume 콜백
  * 등)이 blk_pre_runtime_suspend()/blk_post_runtime_resume()을 호출하는
  * 형태로 최종 연결된다. 데이터 흐름 관점에서 핵심 공유 상태는
  * q->dev(디바이스 포인터), q->rpm_status(enum rpm_status:
@@ -202,7 +202,7 @@ static inline int blk_pm_resume_queue(const bool pm, struct request_queue *q)
 	/* [한국어] PM 코어에 비동기 runtime resume을 예약한다. 이 호출은
 	 * 즉시 반환하며(여기서 sleep하지 않는다), 실제 resume은 PM 코어의
 	 * 워크큐에서 디바이스의 runtime_resume 콜백(NVMe라면
-	 * nvme_runtime_resume 계열)을 통해 별도로 수행된다. */
+	 * 드라이버의 runtime_resume 콜백 계열)을 통해 별도로 수행된다. */
 	return 0;
 	/* [한국어] resume이 끝나기 전까지 이번 진입은 보류시킨다. 호출자인
 	 * blk_queue_enter()/__bio_queue_enter()의 wait_event() 조건식이 이
@@ -255,7 +255,7 @@ static inline int blk_pm_resume_queue(const bool pm, struct request_queue *q)
  * 에러 경로: 없음 — 실패할 수 없는 상태 갱신이다.
  *
  * 호출 체인:
- *   nvme_irq → nvme_process_cq → nvme_complete_rq → blk_mq_end_request
+ *   nvme_irq → nvme_poll_cq → nvme_complete_rq → blk_mq_end_request
  *   → [blk_pm_mark_last_busy] → pm_runtime_mark_last_busy(rq->q->dev)
  */
 static inline void blk_pm_mark_last_busy(struct request *rq)
@@ -338,7 +338,7 @@ static inline int blk_pm_resume_queue(const bool pm, struct request_queue *q)
  * 에러 경로: 없음.
  *
  * 호출 체인:
- *   nvme_irq → nvme_process_cq → nvme_complete_rq → blk_mq_end_request
+ *   nvme_irq → nvme_poll_cq → nvme_complete_rq → blk_mq_end_request
  *   → [blk_pm_mark_last_busy] (아무 동작 없이 즉시 반환)
  */
 static inline void blk_pm_mark_last_busy(struct request *rq)

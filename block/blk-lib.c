@@ -259,7 +259,7 @@ struct bio *blk_alloc_discard_bio(struct block_device *bdev,
  * 호출 체인:
  *   blkdev_issue_discard -> [__blkdev_issue_discard] -> blk_alloc_discard_bio
  *   -> bio_chain_and_submit -> submit_bio -> blk_mq_submit_bio -> ... ->
- *   nvme_queue_rq -> nvme_submit_cmd(doorbell)
+ *   mq_ops->queue_rq (간접 호출; NVMe PCIe 면 nvme_queue_rq -> nvme_sq_copy_cmd -> nvme_write_sq_db)
  */
 void __blkdev_issue_discard(struct block_device *bdev, sector_t sector,
 		sector_t nr_sects, gfp_t gfp_mask, struct bio **biop)
@@ -304,7 +304,7 @@ EXPORT_SYMBOL(__blkdev_issue_discard); /* [한국어] 이 심볼을 커널 심�
  *
  * 호출 체인:
  *   fs 계층/BLKDISCARD ioctl -> [blkdev_issue_discard] ->
- *   __blkdev_issue_discard -> ... -> nvme_queue_rq -> nvme_submit_cmd(doorbell)
+ *   __blkdev_issue_discard -> ... -> mq_ops->queue_rq (간접 호출; NVMe PCIe 면 nvme_queue_rq -> nvme_sq_copy_cmd -> nvme_write_sq_db)
  */
 /**
  * blkdev_issue_discard - queue a discard
@@ -419,7 +419,7 @@ static sector_t bio_write_zeroes_limit(struct block_device *bdev)
  * 호출 체인:
  *   blkdev_issue_write_zeroes -> [__blkdev_issue_write_zeroes] ->
  *   bio_chain_and_submit -> submit_bio -> ... -> nvme_queue_rq ->
- *   nvme_submit_cmd(doorbell)
+ *   nvme_sq_copy_cmd → nvme_write_sq_db (SQ 기록 후 doorbell)
  */
 static void __blkdev_issue_write_zeroes(struct block_device *bdev,
 		sector_t sector, sector_t nr_sects, gfp_t gfp_mask,
@@ -858,7 +858,7 @@ EXPORT_SYMBOL(blkdev_issue_zeroout); /* [한국어] 커널 심볼 공개 */
  * 호출 체인:
  *   BLKSECDISCARD ioctl -> [blkdev_issue_secure_erase] -> blk_next_bio ->
  *   bio_chain_and_submit -> submit_bio -> ... -> nvme_queue_rq ->
- *   nvme_submit_cmd(doorbell, Sanitize/Format NVM 계열 추정)
+ *   mq_ops->queue_rq (이 요청이 어떤 NVMe 명령이 되는지는 드라이버가 정한다)
  */
 int blkdev_issue_secure_erase(struct block_device *bdev, sector_t sector,
 		sector_t nr_sects, gfp_t gfp)

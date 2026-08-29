@@ -22,7 +22,7 @@
  * === 전체 아키텍처에서의 위치 ===
  * 정상 I/O 경로는 submit_bio() -> blk_mq_submit_bio() -> blk_mq_get_tag()
  * -> blk_mq_get_driver_tag() -> hctx->dispatch 삽입 -> mq_ops->queue_rq()
- * (NVMe라면 nvme_queue_rq() -> nvme_submit_cmd() 로 SQ doorbell 갱신)로
+ * (NVMe라면 nvme_queue_rq() -> nvme_sq_copy_cmd/nvme_write_sq_db() 로 SQ doorbell 갱신)로
  * 흐르지만, 이 파일의 함수들은 그 경로에 직접 관여하지 않고 옆에서 상태를
  * "관찰"만 하는 별도의 얕은 경로다. 호출 체인은 두 갈래로 나뉜다.
  *   (1) 등록/해제 체인: 디스크 등록(block/blk-sysfs.c의

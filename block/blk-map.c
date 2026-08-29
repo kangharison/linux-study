@@ -24,11 +24,47 @@
  *     -> (bio_map_user_iov | bio_copy_user_iov | blk_rq_map_user_bvec
  *         | bio_map_kern | bio_copy_kern)
  *     -> blk_rq_append_bio()
- *     -> blk_mq_submit_bio() -> blk_mq_get_request() (block/blk-mq.c)
- *     -> nvme_queue_rq() -> nvme_submit_cmd() (SQ에 커맨드 기록, doorbell 갱신)
+ *     -> blk_execute_rq / blk_mq_run_hw_queue -> mq_ops->queue_rq (간접 호출)
  * I/O 완료 후에는 역방향으로 다음과 같이 실행된다.
- *   NVMe 인터럽트/CQ 처리 -> blk_mq_end_request() -> blk_rq_unmap_user()
+ *   장치 완료 -> blk_mq_end_request() -> (호출자가) blk_rq_unmap_user()
  *     -> (bio_uncopy_user | bio_release_pages) -> bio_integrity_unmap_user()
+ *
+ * === NVMe passthrough 에서 이 파일이 놓이는 정확한 자리 (실물 확인) ===
+ * drivers/nvme/host/ioctl.c 의 nvme_map_user_request() 가 다음을 호출한다:
+ *     ret = blk_rq_map_user_io(req, NULL, nvme_to_user_ptr(ubuffer), ...);
+ * 즉 nvme-cli 의 admin-passthru/io-passthru 와 io_uring 패스스루가 데이터
+ * 버퍼를 커널에 들여오는 통로가 정확히 이 파일이다.
+ *
+ * 다만 이 파일은 PRP 도 SGL 도 만들지 않는다. 여기서 만들어지는 것은
+ * bio 와 그 안의 bio_vec 배열(page, offset, len)뿐이다. 그 bvec 이
+ * PRP/SGL 로 번역되는 것은 훨씬 뒤, 드라이버 안에서다:
+ *     nvme_pci_setup_data_prp()    — PRP1/PRP2/PRP list 구성
+ *     nvme_pci_setup_data_sgl()    — SGL descriptor 구성
+ *     nvme_pci_setup_data_simple() — 단일 물리 세그먼트 고속 경로
+ * 이 파일이 신경 쓰는 것은 오직 "그 번역이 가능한 모양의 bvec 을 만드는
+ * 것"이며, 불가능하면 사용자 페이지를 포기하고 커널 페이지로 복사한다
+ * (bounce). 그 판정 기준이 아래 두 큐 한계다.
+ *
+ * === bounce 여부를 가르는 두 한계와 NVMe 에서의 실제 값 ===
+ * nvme_set_ctrl_limits() (core.c) 가 큐에 심는 값들:
+ *     lim->dma_alignment      = 3;
+ *         → 4바이트 정렬. 512B 를 요구하는 장치들과 달리 NVMe 는 매우 관대해
+ *           대부분의 사용자 버퍼가 복사 없이 그대로 매핑된다.
+ *     lim->virt_boundary_mask = ctrl->ops->get_virt_boundary(ctrl, is_admin);
+ *         → PCIe 는 (NVME_CTRL_PAGE_SIZE - 1). PRP 는 "첫 항목만 오프셋을
+ *           가질 수 있고 나머지는 페이지 경계에 딱 맞아야 한다"는 형식이라,
+ *           중간에 페이지 경계를 어긋나게 걸치는 세그먼트가 있으면 PRP 로
+ *           표현할 수 없다. 이 마스크가 그 제약을 블록 계층 언어로 옮긴 것이며,
+ *           blk_rq_map_user_iov() 가 이것을 보고 zero-copy 를 포기한다.
+ *     lim->max_hw_sectors     = ctrl->max_hw_sectors;
+ *         → max_hw_sectors = nvme_mps_to_sectors(ctrl, id->mdts), MDTS=0 이면
+ *           UINT_MAX(무제한). 한 명령이 옮길 수 있는 최대 바이트 수다.
+ *     lim->max_segments       = min(USHRT_MAX,
+ *                                min_not_zero(nvme_max_drv_segments(ctrl), ...))
+ *         → nvme_max_drv_segments = max_hw_sectors / (페이지/섹터) + 1,
+ *           즉 MDTS 에서 유도한 세그먼트 수 상한.
+ * 이 한계들을 넘으면 blk_rq_append_bio() 가 실패하고, 호출자는 명령을
+ * 더 작게 쪼개야 한다. nvme-cli 가 큰 전송을 나눠 보내는 이유가 이것이다.
  * 이 파일의 API 호출부는 항상 매핑을 요청한 프로세스의 컨텍스트(user/process
  * context, 슬립 가능)에서 실행되며 인터럽트 컨텍스트에서 직접 호출되지 않는다.
  * 다만 bio 완료 콜백(bio_map_kern_endio, bio_copy_kern_endio 등)은 NVMe
@@ -86,7 +122,7 @@
  * bio_map_data: NVMe passthrough 요청에서 사용자 버퍼를 복사/관리할 때 쓰이는
  *   메타데이터 구조체. bio->bi_private에 연결되며, 완료 시 사용자 공간으로의
  *   복사 여부나 페이지 회수 방식을 결정한다. 이러한 플래그들은 NVMe 컨트롤러가
- *   사용할 PRP/SGL 목록이 커널 할당 페이지인지, 원본 사용자 페이지인지를
+ *   데이터를 담은 페이지가 블록 계층이 할당한 bounce 페이지인지, 사용자 페이지를 pin 한 것인지를
  *   구분하는 데 참조된다.
  */
 struct bio_map_data {
@@ -94,7 +130,7 @@ struct bio_map_data {
 	/* [한국어] 이 bio에 연결된 페이지가 block 계층이 bio_copy_user_iov()
 	 * 안에서 alloc_page()로 직접 할당한 bounce page인지(true), 아니면
 	 * 호출자가 미리 준비해 넘긴 map_data->pages 풀에서 가져온 페이지인지
-	 * (false)를 구분하는 비트필드. NVMe PRP/SGL은 결국 이 페이지들의
+	 * (false)를 구분하는 비트필드. 해제 방식이 달라지므로 반드시 구분해야 한다. 이 페이지들의
 	 * 물리 주소를 가리키게 되므로, 이 값은 "누가 그 물리 메모리의 수명을
 	 * 책임지는가"를 나타낸다.
 	 * 설정자: bio_copy_user_iov()가 `bmd->is_our_pages = !map_data;`로
@@ -110,7 +146,7 @@ struct bio_map_data {
 
 	bool is_null_mapped : 1;
 	/* [한국어] 실제 데이터 전송이 없는 passthrough 명령(NVMe Flush나 Write Zeroes처럼
-	 * PRP/SGL에 담을 페이로드가 없는 명령)을 위해
+	 * 데이터 페이로드가 없는 명령(예: NVMe Flush, Identify 없는 admin 명령))을 위해
 	 * map_data->null_mapped가 설정되어 들어온 경우를 그대로 옮겨 기록하는
 	 * 플래그.
 	 * 설정자: bio_copy_user_iov()에서
@@ -143,7 +179,7 @@ struct bio_map_data {
 	/* [한국어] 호출자의 iovec 배열을 깊은 복사해 담아 두는 가변 길이 배열
 	 * (flexible array member, 구조체 끝에 이어 붙는 형태). 원본 iovec이
 	 * 스택 등 짧은 수명 메모리에 있어도, 이 사본이 별도로 존재하는 한
-	 * NVMe PRP/SGL entry 후보 목록을 안전하게 참조할 수 있다.
+	 * 완료 시점까지 원본 iovec 을 안전하게 참조할 수 있다.
 	 * 설정자: bio_alloc_map_data()에서 kmalloc_flex(*bmd, iov,
 	 *   data->nr_segs, gfp_mask)로 struct bio_map_data 본체와 함께 한
 	 *   번에 할당되고, iter_is_iovec(data)일 때 memcpy()로 원본 iovec
@@ -196,15 +232,15 @@ static struct bio_map_data *bio_alloc_map_data(struct iov_iter *data,
 {
 	struct bio_map_data *bmd; /* bio->bi_private로 붙어 NVMe CQ 완료 후 사용자 공간 복사/페이지 회수에 재사용됨 */
 
-	if (data->nr_segs > UIO_MAXIOV) /* 사용자가 넘긴 iovec이 너무 많으면 NVMe SGL/PRP 제한을 초과할 수 있어 거부 */
+	if (data->nr_segs > UIO_MAXIOV) /* iovec 개수 상한(UIO_MAXIOV)은 VFS 공통 제약이지 NVMe 와는 무관하다. 여기서는 아래 kmalloc 크기가 폭주하는 것을 막는 위생 검사로 쓰인다 */
 		return NULL;
 
 	bmd = kmalloc_flex(*bmd, iov, data->nr_segs, gfp_mask); /* bio_map_data + iov[] 가변 길이 할당; 이 메모리는 NVMe I/O 완료 시까지 생존 */
-	if (!bmd) /* 메모리 부족 시 NVMe SQ에 CID 할당도, doorbell 갱신도 일어나지 않음 */
+	if (!bmd) /* 할당 실패. 이 시점에는 아직 bio 도 만들지 않았으므로 되돌릴 것이 없다 — 그냥 -ENOMEM 으로 나가면 된다 */
 		return NULL;
 	bmd->iter = *data; /* 원본 iov_iter를 복사해 놓아 NVMe READ 완료 후 사용자 공간으로 데이터를 되돌릴 수 있게 함 */
 	if (iter_is_iovec(data)) { /* iovec 반복자인 경우에만 복사본 저장 */
-		memcpy(bmd->iov, iter_iov(data), sizeof(struct iovec) * data->nr_segs); /* 짧은 수명의 caller iovec을 커널 힙으로 복사; NVMe PRP/SGL 후보 목록을 안전하게 보관 */
+		memcpy(bmd->iov, iter_iov(data), sizeof(struct iovec) * data->nr_segs); /* 수명이 짧은 호출자 iovec 을 커널 힙에 깊은 복사한다. 언매핑 시점(완료 후)까지 원본 목적지 주소를 알아야 하는데, 그때 호출자 스택은 이미 사라졌을 수 있다. 원래 주석: NVMe PRP/SGL 후보 목록을 안전하게 보관 */
 		bmd->iter.__iov = bmd->iov; /* 복사된 커널 내 iov 배열을 가리키도록 교체 */
 	}
 	return bmd; /* 이 포인터는 이후 bio->bi_private에 저장되어 NVMe completion path로 전달됨 */
@@ -235,11 +271,11 @@ static struct bio_map_data *bio_alloc_map_data(struct iov_iter *data,
  *   <다양한 실패/완료 경로> -> [blk_mq_map_bio_put] -> bio_put
  *
  * NVMe 연결:
- *   bio가 SQ에 들어가기 전에 매핑에 실패하면 doorbell 없이 bio만 정리된다.
+ *   매핑 단계의 실패는 요청이 아직 장치로 내려가기 전이므로, bio 를 되돌리는 것만으로 완전히 복구된다.
  */
 static inline void blk_mq_map_bio_put(struct bio *bio)
 {
-	bio_put(bio); /* bio 참조 카운트 감소; 0이 되면 fs_bio_set mempool으로 반환되어 NVMe SQ 제출 전 실패 경로에서 재사용 가능 */
+	bio_put(bio); /* bio 참조 카운트 감소; 0 이 되면 fs_bio_set mempool 로 돌아가 다음 매핑에 재사용된다. 실패 경로에서도 메모리가 새지 않는 이유가 이 mempool 반환이다. 원래 주석: 재사용 가능 */
 }
 
 /*
@@ -273,7 +309,7 @@ static inline void blk_mq_map_bio_put(struct bio *bio)
  *
  * NVMe 연결:
  *   bio의 cmd_flags는 NVMe 명령의 opcode 방향(READ/WRITE)을 반영하며,
- *   이 bio가 nvme_queue_rq에서 PRP/SGL로 변환될 때 사용된다.
+ *   이 bio 의 bvec 이 나중에 드라이버에서 DMA 매핑되고, NVMe PCIe 라면 nvme_pci_setup_data_prp/sgl 이 그것을 PRP 또는 SGL 로 기술한다.
  */
 static struct bio *blk_rq_map_bio_alloc(struct request *rq,
 		unsigned int nr_vecs, gfp_t gfp_mask)
@@ -283,10 +319,10 @@ static struct bio *blk_rq_map_bio_alloc(struct request *rq,
 
 	bio = bio_alloc_bioset(bdev, nr_vecs, rq->cmd_flags, gfp_mask, /* cmd_flags에 NVMe READ/WRITE 방향이 담김 */
 				&fs_bio_set); /* fs_bio_set mempool에서 bio 할당; NVMe multi-queue 경쟁 상황에서도 메모리 고갈 방지 */
-	if (!bio) /* bio 할당 실패는 NVMe SQ doorbell 이전에 처리되므로 하드웨어 큐 상태는 변하지 않음 */
+	if (!bio) /* bio 할당 실패 — 아직 request 에 아무것도 연결하지 않았으므로 bmd 만 해제하면 된다 */
 		return NULL;
 
-	return bio; /* 할당된 bio는 이후 PRP/SGL로 변환될 page/offset/len 후보를 담게 됨 */
+	return bio; /* 할당된 bio 는 (page, offset, len) 삼중항의 배열을 담게 된다. 이 삼중항이 곧 DMA 매핑의 단위다 */
 }
 
 /**
@@ -326,8 +362,8 @@ static struct bio *blk_rq_map_bio_alloc(struct request *rq,
  *   blk_rq_map_user_iov -> bio_copy_user_iov -> [bio_copy_from_iter]
  *
  * NVMe 연결:
- *   쓰기(WRITE) 경로에서 NVMe SQ에 제출되기 전에 데이터가 커널 메모리에
- *   존재해야 하므로, 이 단계에서 복사가 완료되어야 nvme_submit_cmd 전에
+ *   쓰기(WRITE) 경로에서 요청이 장치로 내려가기 전에 데이터가 커널 메모리에
+ *   존재해야 하므로, 장치가 데이터를 읽어 가기 전인 이 단계에서 복사가 끝나야
  *   DMA 매핑이 안정적이다.
  */
 static int bio_copy_from_iter(struct bio *bio, struct iov_iter *iter)
@@ -346,11 +382,11 @@ static int bio_copy_from_iter(struct bio *bio, struct iov_iter *iter)
 		if (!iov_iter_count(iter)) /* 사용자 공간에 남은 데이터가 없으면 복사 종료; NVMe WRITE 데이터 준비 완료 */
 			break;
 
-		if (ret < bvec->bv_len) /* 요청보다 적게 복사되면 -EFAULT; NVMe SQ 제출 실패, abort 없이 상위로 오류 반환 */
+		if (ret < bvec->bv_len) /* 요청보다 적게 복사됐다면 사용자 포인터가 잘못된 것 — -EFAULT. 아직 아무것도 제출하지 않았으므로 취소할 것도 없다 */
 			return -EFAULT;
 	}
 
-	return 0; /* 모든 segment 복사 성공; 이제 bio는 nvme_queue_rq에서 DMA 매핑 가능한 상태 */
+	return 0; /* 모든 세그먼트 복사 성공. 이제 bio 의 페이지들은 커널 소유이며 물리적으로 고정되어 있어 DMA 매핑이 가능하다 */
 }
 
 /**
@@ -528,14 +564,14 @@ static int bio_copy_user_iov(struct request *rq, struct rq_map_data *map_data,
 {
 	struct bio_map_data *bmd; /* NVMe READ 완료 후 사용자 공간 복사 여부를 결정하는 메타데이터 */
 	struct page *page; /* bio에 추가될 페이지; NVMe PRP/SGL entry의 물리 페이지 후보 */
-	struct bio *bio; /* 조립 중인 bio; 최종적으로 request에 붙여 blk_mq -> NVMe SQ로 전달 */
+	struct bio *bio; /* 조립 중인 bio. 완성되면 blk_rq_append_bio 로 request 에 붙는다 */
 	int i = 0, ret; /* i: map_data 풀 내 페이지 인덱스; ret: NVMe 명령 생성 성공/실패 상태 */
 	int nr_pages; /* 필요한 페이지/segment 수; NVMe PRP entry 개수 상한을 초과하지 않도록 조절 */
 	unsigned int len = iter->count; /* 전송할 총 바이트 수; NVMe 명령의 데이터 길이(NLBA*sector_size)가 됨 */
 	unsigned int offset = map_data ? offset_in_page(map_data->offset) : 0; /* map_data가 주어지면 페이지 내 오프셋 사용; NVMe PRP 제약에 맞추기 위한 오프셋 */
 
 	bmd = bio_alloc_map_data(iter, gfp_mask); /* 메타데이터 할당 실패 시 -ENOMEM */
-	if (!bmd) /* 메모리 부족으로 NVMe SQ doorbell 이전에 실패; 하드웨어 큐 상태는 변함없음 */
+	if (!bmd) /* bio_map_data 할당 실패 — 아직 아무것도 연결하지 않았으므로 그대로 반환 */
 		return -ENOMEM;
 
 	/*
@@ -557,18 +593,18 @@ static int bio_copy_user_iov(struct request *rq, struct rq_map_data *map_data,
 		nr_pages = 1U << map_data->page_order; /* page_order에 따른 페이지 묶음 크기 */
 		i = map_data->offset / PAGE_SIZE; /* offset에서 시작 페이지 인덱스 계산 */
 	}
-	while (len) { /* 남은 데이터를 페이지 단위로 분할하여 bio에 추가; 각 반복은 잠재적 NVMe PRP entry 하나를 생성 */
+	while (len) { /* 남은 데이터를 페이지 단위로 분할하여 bio에 추가; 한 반복이 최대 한 페이지를 처리한다 하나를 생성 */
 		unsigned int bytes = PAGE_SIZE; /* 이번 페이지에서 쓸 수 있는 최대 바이트 수(한 페이지 전체)로 초기화 */
 
 		bytes -= offset; /* 현재 페이지의 시작 오프셋만큼 usable byte 감소 */
 
-		if (bytes > len) /* 남은 길이보다 크면 맞춤; NVMe 명령 길이와 정확히 일치 */
+		if (bytes > len) /* 남은 길이보다 크면 잘라 맞춘다 — 마지막 페이지는 부분만 쓰인다 */
 			bytes = len;
 
 		if (map_data) { /* map_data 페이지 풀에서 다음 페이지를 가져오는 분기 */
 			if (i == map_data->nr_entries * nr_pages) { /* 페이지 풀의 끝에 도달하면 실패 */
-				ret = -ENOMEM; /* 페이지 풀 고갈; NVMe SQ에는 도달하지 않음 */
-				goto cleanup; /* NVMe SQ 제출 실패; 이미 추가된 페이지들만 cleanup에서 정리 */
+				ret = -ENOMEM; /* 페이지 확보 실패 */
+				goto cleanup; /* cleanup 라벨로 — 지금까지 bio 에 붙인 페이지를 전부 되돌린다 */
 			}
 
 			page = map_data->pages[i / nr_pages]; /* map_data 페이지 배열에서 해당 페이지 획득 */
@@ -576,21 +612,26 @@ static int bio_copy_user_iov(struct request *rq, struct rq_map_data *map_data,
 
 			i++; /* 다음 반복을 위해 map_data 풀 인덱스 전진 */
 		} else { /* map_data가 없으면 매번 새 bounce page를 직접 할당 */
-			page = alloc_page(GFP_NOIO | gfp_mask); /* bounce buffer용 커널 페이지 할당; NVMe DMA에 사용할 커널 메모리 */
+			page = alloc_page(GFP_NOIO | gfp_mask); /* bounce 버퍼용 커널 페이지 할당. GFP_NOIO 를 강제하는 이유가 중요하다 — 이 경로는 이미 블록 IO 를 처리하는 중이므로, 여기서 메모리 회수가 다시 블록 IO 를 일으키면 자기 자신을 기다리는 교착이 된다. 원래 주석: NVMe DMA에 사용할 커널 메모리 */
 			if (!page) { /* 페이지 할당 실패 - 지금까지 추가한 페이지는 cleanup에서 일괄 해제 */
-				ret = -ENOMEM; /* 메모리 부족; NVMe SQ doorbell 이전에 실패 */
+				ret = -ENOMEM; /* 페이지 확보 실패 — 아래 cleanup 라벨에서 지금까지 잡은 페이지를 전부 되돌린다 */
 				goto cleanup;
 			}
 		}
 
-		if (bio_add_page(bio, page, bytes, offset) < bytes) { /* bio에 페이지/오프셋/길이 추가; NVMe PRP entry 후보 */
+		if (bio_add_page(bio, page, bytes, offset) < bytes) { /* bio 에 (page, offset, len) 삼중항 하나를 추가.
+								 * 반환값이 bytes 보다 작다는 것은 bio 의 bvec 배열이 꽉 찼다는 뜻이다
+								 * (BIO_MAX_VECS 또는 이 bio 에 할당한 nr_pages 상한). */
 			if (!map_data) /* 추가 실패 시 직접 할당한 페이지만 해제; map_data 페이지는 caller가 관리 */
-				__free_page(page);
-			break; /* bio capacity 초과; 이후 상위에서 분할/복사로 폴백 */
+				__free_page(page);	/* [한국어] 이 페이지는 bio 에 붙지 못했으므로 아래 bio_free_pages 가 회수해 주지 않는다 */
+			break; /* [한국어] 에러가 아니다. 지금까지 담은 만큼만으로 bio 하나를 완성하고,
+			    * 호출자(blk_rq_map_user_iov)의 루프가 나머지를 다음 bio 로 이어 붙인다.
+			    * 하나의 iov_iter 가 여러 bio 로 쪼개지는 것이 정상 동작이다. */
 		}
 
-		len -= bytes; /* 남은 길이 감소, 이후 페이지는 오프셋 0부터 시작 */
-		offset = 0;
+		len -= bytes; /* 남은 길이 감소 */
+		offset = 0;   /* [한국어] 오프셋은 첫 페이지에서만 의미가 있다. 사용자 버퍼가 페이지 중간에서
+			   * 시작할 수 있어 첫 페이지만 앞이 잘리고, 이후 페이지들은 항상 0 부터 쓴다. */
 	}
 
 	if (map_data) /* map_data를 쓴 경우에만 다음 호출을 위해 진행 오프셋을 갱신 */
@@ -601,7 +642,7 @@ static int bio_copy_user_iov(struct request *rq, struct rq_map_data *map_data,
 	 */
 	if (iov_iter_rw(iter) == WRITE && /* WRITE이고 null mapped가 아니면 사용자 데이터를 bio로 복사 */
 	     (!map_data || !map_data->null_mapped)) {
-		ret = bio_copy_from_iter(bio, iter); /* NVMe WRITE: SQ 제출 전 데이터를 커널 페이지에 준비; DMA 일관성 확보 */
+		ret = bio_copy_from_iter(bio, iter); /* 쓰기라면 지금 사용자 데이터를 bounce 페이지로 옮겨 둔다. 장치는 나중에 이 페이지에서 읽어 가므로 제출 전에 반드시 채워져 있어야 한다. 원래 주석: DMA 일관성 확보 */
 		if (ret) /* 사용자 데이터 복사 실패(-EFAULT) - 이미 구성된 bio/페이지를 정리해야 함 */
 			goto cleanup;
 	} else if (map_data && map_data->from_user) { /* SG_DXFER_TO_FROM_DEV 양방향 복사 처리 */
@@ -613,23 +654,26 @@ static int bio_copy_user_iov(struct request *rq, struct rq_map_data *map_data,
 		if (ret) /* copy-in 실패 - 이미 구성된 bio/페이지를 정리해야 함 */
 			goto cleanup;
 	} else { /* READ이거나(그리고 null-mapped가 아니거나) 관리용 명령: 사용자 -> bio 복사가 필요 없는 경우 */
-		if (bmd->is_our_pages) /* READ가 아닌데 bounce 페이지가 있으면 0으로 채움(관리용 명령 등) */
+		if (bmd->is_our_pages) /* [한국어] 우리가 할당한 페이지라면 반드시 0 으로 밀어야 한다.
+				    * alloc_page() 는 이전 소유자의 내용이 남은 페이지를 줄 수 있고,
+				    * 읽기 명령이 그 전부를 덮어쓰지 않으면 남은 부분이 사용자 공간으로
+				    * 새어 나간다. 성능이 아니라 정보 유출 방지를 위한 코드다. */
 			zero_fill_bio(bio);
 		iov_iter_advance(iter, bio->bi_iter.bi_size); /* 사용자 반복자를 진행시켜 이미 처리한 길이만큼 걸너뜀 */
 	}
 
-	bio->bi_private = bmd; /* bio와 bio_map_data 연결; NVMe CQ 수신 후 bio_uncopy_user가 복사/해제 수행 */
+	bio->bi_private = bmd; /* bio 에 bmd 를 매달아 둔다. 완료 시점에 bio_uncopy_user() 가 이 포인터로 원본 iovec 을 되찾아 읽기 데이터를 사용자 공간에 되돌린다 — 그때 호출자 스택은 이미 사라졌을 수 있으므로 이 연결이 유일한 경로다 */
 
 	ret = blk_rq_append_bio(rq, bio); /* 구성된 bio를 request에 연결; 이후 blk_mq 제출 단계로 진행 */
 	if (ret)
 		goto cleanup;
-	return 0; /* bio가 request에 성공적으로 연결; 이제 blk_mq_get_request -> nvme_queue_rq 가능 */
+	return 0; /* bio 가 request 에 연결됐다. 호출자는 이제 blk_execute_rq 등으로 이 요청을 제출할 수 있다 */
 cleanup:
 	if (!map_data) /* 실패 시 직접 할당한 bounce 페이지 해제 */
 		bio_free_pages(bio);
-	blk_mq_map_bio_put(bio); /* bio 참조 해제; NVMe SQ에는 doorbell 없음 */
+	blk_mq_map_bio_put(bio); /* bio 반환. 아직 request 에 연결하지 않았으므로 이것으로 완전히 되돌아간다 */
 out_bmd:
-	kfree(bmd); /* bio_map_data 메모리 반환; NVMe CID와 매핑 컨텍스트가 소멸 */
+	kfree(bmd); /* bio_map_data 해제 */
 	return ret; /* 음수 오류 코드; 호출자 blk_rq_map_user_iov가 unmap_rq 경로로 처리 */
 }
 
@@ -664,7 +708,7 @@ out_bmd:
  *     -> bio_iov_iter_get_pages -> blk_rq_append_bio
  *
  * NVMe 연결:
- *   이 bio의 페이지들은 nvme_queue_rq에서 DMA 매핑되어 PRP entry나 SGL
+ *   이 bio 의 페이지들은 뒤에 드라이버가 DMA 매핑하고, NVMe PCIe 라면 PRP 또는 SGL
  *   segment로 사용된다. 사용자 버퍼가 물리적으로 불연속이면 PRP list로,
  *   SGL을 지원하면(nvme_ctrl_sgl_supported) SGL 디스크립터로 기술된다.
  */
@@ -691,12 +735,12 @@ static int bio_map_user_iov(struct request *rq, struct iov_iter *iter,
 	ret = blk_rq_append_bio(rq, bio); /* bio를 request에 추가; NVMe PRP/SGL 변환 준비 완료 */
 	if (ret) /* append 실패(세그먼트/크기 제약 초과) - 이미 pin된 페이지도 함께 해제해야 함 */
 		goto out_release;
-	return 0; /* 제로 카피 성공; NVMe SQ 제출 전 DMA 매핑만 남음 */
+	return 0; /* 제로 카피 성공 — 사용자 페이지를 그대로 pin 해서 썼다. 복사 비용이 0 인 대신, 완료까지 그 페이지들이 pin 된 채로 묶인다 */
 
 out_release:
 	bio_release_pages(bio, false); /* 매핑 실패 시 pin 한 사용자 페이지 해제; NVMe 명령은 SQ에 도달하지 않음 */
 out_put:
-	blk_mq_map_bio_put(bio); /* bio 반환; NVMe doorbell은 갱신되지 않음 */
+	blk_mq_map_bio_put(bio); /* bio 반환 — 실패 경로 */
 	return ret; /* 음수 오류 코드; 호출자 blk_rq_map_user_iov가 -EREMOTEIO를 -EINVAL로 변환하거나 unmap 처리 */
 }
 
@@ -816,19 +860,19 @@ static struct bio *bio_map_kern(struct request *rq, void *data, unsigned int len
 
 	bio = blk_rq_map_bio_alloc(rq, nr_vecs, gfp_mask); /* NVMe READ/WRITE 방향이 설정된 bio 할당 */
 	if (!bio) /* bio 할당 실패 - 아직 아무 자원도 잡지 않아 별도 정리 없이 반환 */
-		return ERR_PTR(-ENOMEM); /* 메모리 부족; NVMe SQ doorbell 이전에 실패 */
+		return ERR_PTR(-ENOMEM); /* 페이지 확보 실패 — 아래 cleanup 라벨에서 지금까지 잡은 페이지를 전부 되돌린다 */
 
 	if (is_vmalloc_addr(data)) { /* [한국어] vmalloc 주소는 물리적으로 불연속이라 페이지 단위로 쪼개 추가해야 한다. */
 		bio->bi_private = data; /* vmalloc 기준 주소를 bi_private에 보관; 완료 시 캐시 무효화에 사용 */
 		if (!bio_add_vmalloc(bio, data, len)) { /* vmalloc 페이지를 bio에 추가; NVMe PRP/SGL용 페이지 목록 구성 */
 			blk_mq_map_bio_put(bio); /* 추가 실패 - 지금까지 만든 bio를 반환(아직 완료 콜백 등록 전) */
-			return ERR_PTR(-EINVAL); /* vmalloc bio 구성 실패; NVMe SQ에 도달하지 않음 */
+			return ERR_PTR(-EINVAL); /* vmalloc 영역 bio 구성 실패 */
 		}
 	} else { /* vmalloc이 아닌 물리적으로 연속된 일반 커널 주소(kmalloc/정적 버퍼 등) */
 		bio_add_virt_nofail(bio, data, len); /* [한국어] 직접 매핑 영역(kmalloc 등)은 물리적으로 연속이라 세그먼트 하나로 추가한다. */
 	}
 	bio->bi_end_io = bio_map_kern_endio; /* I/O 완료 시 bio_map_kern_endio 호출; NVMe CQ 처리 후 vmalloc 캐시 정리 및 bio 반환 */
-	return bio; /* 커널 버퍼가 담긴 bio; 이후 blk_rq_append_bio -> blk_mq -> nvme_queue_rq */
+	return bio; /* 커널 버퍼가 담긴 bio. 이후 blk_rq_append_bio 로 request 에 연결된다 */
 }
 
 /*
@@ -970,7 +1014,7 @@ static struct bio *bio_copy_kern(struct request *rq, void *data, unsigned int le
 	nr_pages = end - start; /* 필요한 페이지 수; NVMe PRP entry 수 상한 */
 	bio = blk_rq_map_bio_alloc(rq, nr_pages, gfp_mask); /* NVMe READ/WRITE 방향이 설정된 bio 할당 */
 	if (!bio) /* bio 할당 실패 - 아직 페이지를 확보하지 않아 별도 정리 없이 반환 */
-		return ERR_PTR(-ENOMEM); /* 메모리 부족; NVMe SQ doorbell 이전에 실패 */
+		return ERR_PTR(-ENOMEM); /* 페이지 확보 실패 — 아래 cleanup 라벨에서 지금까지 잡은 페이지를 전부 되돌린다 */
 
 	while (len) { /* 남은 데이터를 페이지 단위로 bounce buffer에 복사; 각 페이지는 NVMe PRP/SGL 후보 */
 		struct page *page; /* 이번 반복에서 새로 할당할 bounce page */
@@ -983,7 +1027,7 @@ static struct bio *bio_copy_kern(struct request *rq, void *data, unsigned int le
 		if (!page) /* 페이지 할당 실패 - 이미 추가된 페이지들은 cleanup에서 일괄 회수 */
 			goto cleanup; /* 메모리 부족; 이미 할당된 bounce 페이지들은 cleanup에서 해제 */
 
-		if (op_is_write(op)) /* 쓰기면 원본 커널 버퍼를 페이지에 복사; NVMe SQ 제출 전 데이터가 커널 메모리에 존재해야 함 */
+		if (op_is_write(op)) /* 쓰기라면 지금 복사해 둬야 한다 — 장치는 나중에 이 bounce 페이지에서 데이터를 읽어 가므로, 그 전에 내용이 채워져 있어야 한다 */
 			memcpy(page_address(page), p, bytes);
 
 		__bio_add_page(bio, page, bytes, 0); /* 커널 페이지를 bio에 추가; PRP/SGL용 페이지 후보 */
@@ -999,10 +1043,10 @@ static struct bio *bio_copy_kern(struct request *rq, void *data, unsigned int le
 		bio->bi_private = data; /* NVMe CQ 완료 후 원래 커널 버퍼로 결과 복사할 때 사용 */
 	}
 
-	return bio; /* bounce buffer bio; blk_rq_append_bio -> blk_mq -> nvme_queue_rq로 진행 */
+	return bio; /* bounce 버퍼로 구성한 bio. 이후 blk_rq_append_bio 로 request 에 연결된다 */
 
 cleanup:
-	bio_free_pages(bio); /* 실패 시 이미 추가된 bounce 페이지 회수; NVMe SQ에는 도달하지 않음 */
+	bio_free_pages(bio); /* 실패 시 이미 붙인 bounce 페이지를 전부 회수한다 */
 	blk_mq_map_bio_put(bio); /* bio 반환 */
 	return ERR_PTR(-ENOMEM); /* 페이지 할당 실패를 -ENOMEM으로 보고 */
 }
@@ -1043,7 +1087,7 @@ cleanup:
  * 호출 체인:
  *   bio_copy_user_iov | bio_map_user_iov | blk_rq_map_user_bvec
  *     | blk_rq_map_kern -> [blk_rq_append_bio]
- *     -> blk_mq_submit_bio -> blk_mq_get_request -> nvme_queue_rq
+ *     -> blk_execute_rq -> (디스패치) -> mq_ops->queue_rq
  *
  * NVMe 연결:
  *   queue_limits.max_hw_sectors는 NVMe Max Data Transfer Size(MDTS)에
@@ -1061,7 +1105,7 @@ int blk_rq_append_bio(struct request *rq, struct bio *bio)
 	ret = bio_split_io_at(bio, lim, &nr_segs, max_bytes, 0); /* bio가 하드웨어 한계를 초과하면 분할 또는 복사 필요 */
 	if (ret) { /* 0이 아니면 분할이 필요하거나(양수) 다른 오류(음수)가 발생한 것 */
 		/* if we would have to split the bio, copy instead */
-		if (ret > 0) /* 분할이 필요하면 EREMOTEIO로 표시 후 상위에서 복사로 폴백; NVMe SQ에는 doorbell 없음 */
+		if (ret > 0) /* 이 bvec 구성으로는 큐 한계(max_segments/virt_boundary 등) 때문에 분할이 필요하다는 뜻. 패스스루는 명령을 쪼갤 수 없으므로 EREMOTEIO 로 표시해 상위가 복사 경로로 폴백하게 한다 */
 			ret = -EREMOTEIO;
 		return ret; /* NVMe 명령 생성 실패; 상위에서 복사 경로로 재시도 */
 	}
@@ -1082,7 +1126,7 @@ int blk_rq_append_bio(struct request *rq, struct bio *bio)
 	rq->bio = rq->biotail = bio; /* request의 bio 리스트를 이 bio로 시작 */
 	rq->__data_len = bio->bi_iter.bi_size; /* request의 총 데이터 길이; NVMe 명령의 데이터 길이와 일치 */
 	rq->phys_gap_bit = bio->bi_bvec_gap_bit; /* bio 내부 segment 간 물리적 gap 기록 */
-	return 0; /* bio가 request에 성공적으로 연결; 이후 blk_mq -> nvme_queue_rq 진행 가능 */
+	return 0; /* bio 가 request 에 연결됐다 */
 }
 EXPORT_SYMBOL(blk_rq_append_bio);
 
@@ -1135,8 +1179,8 @@ static int blk_rq_map_user_bvec(struct request *rq, const struct iov_iter *iter)
 
 	ret = blk_rq_append_bio(rq, bio); /* 재사용한 bvec bio를 request에 추가 */
 	if (ret) /* append 실패 - request는 변경되지 않았으므로 방금 만든 bio만 반환 */
-		blk_mq_map_bio_put(bio); /* request 추가 실패 시 bio 반환; NVMe SQ doorbell 없음 */
-	return ret; /* 0이면 blk_mq -> nvme_queue_rq로 진행 가능 */
+		blk_mq_map_bio_put(bio); /* request 연결에 실패했으면 bio 를 반환한다 */
+	return ret; /* 0 이면 호출자가 이 요청을 제출할 수 있다 */
 }
 
 /**
@@ -1196,11 +1240,12 @@ static int blk_rq_map_user_bvec(struct request *rq, const struct iov_iter *iter)
  *     -> [blk_rq_map_user_iov]
  *     -> bio_map_user_iov | bio_copy_user_iov | blk_rq_map_user_bvec
  *     -> blk_rq_append_bio -> blk_mq_submit_bio -> blk_mq_get_request
- *     -> nvme_queue_rq -> nvme_submit_cmd(doorbell)
+ *     -> blk_execute_rq -> (디스패치) -> mq_ops->queue_rq (간접 호출)
  *
  * NVMe 연결:
  *   DMA 정렬, 가상 경계, 최대 전송 크기 등 NVMe 컨트롤러 제약을 반영해
- *   bio를 준비한다. PRP/SGL 변환은 nvme_queue_rq에서 이루어진다.
+ *   bio 를 준비한다. PRP/SGL 변환은 이 파일이 아니라 드라이버(NVMe PCIe 라면
+ *   nvme_pci_setup_data_prp/sgl)에서 일어난다.
  */
 int blk_rq_map_user_iov(struct request_queue *q, struct request *rq,
 			struct rq_map_data *map_data,
@@ -1227,7 +1272,7 @@ int blk_rq_map_user_iov(struct request_queue *q, struct request *rq,
 	if (map_bvec) { /* bvec 재사용 시도; NVMe SGL/PRP entry가 이미 준비된 경우 */
 		ret = blk_rq_map_user_bvec(rq, iter); /* bvec을 그대로 연결 시도; 하드웨어 한계 초과 시 -EREMOTEIO */
 		if (!ret) /* 성공 - 더 볼 것 없이 바로 완료 */
-			return 0; /* bvec 재사용 성공; blk_mq -> nvme_queue_rq로 진행 */
+			return 0; /* bvec 재사용 성공 — 이미 bvec 형태로 들어온 iov_iter 라 페이지를 새로 pin 하거나 복사할 필요가 없었다 */
 		if (ret != -EREMOTEIO) /* bvec 재사용이 한계 초과 외의 이유로 실패면 즉시 종료 */
 			goto fail;
 		/* fall back to copying the data on limits mismatches */
@@ -1241,20 +1286,20 @@ int blk_rq_map_user_iov(struct request_queue *q, struct request *rq,
 		else /* 사용자 페이지를 그대로 pin해서 쓸 수 있는 경우 */
 			ret = bio_map_user_iov(rq, &i, gfp_mask); /* zero-copy bio를 만들어 request에 연결 */
 		if (ret) { /* 이번 반복에서 bio 생성/연결이 실패한 경우 */
-			if (ret == -EREMOTEIO) /* EREMOTEIO는 상위에서 -EINVAL로 변환; NVMe SQ 도달 전 매핑 실패 */
+			if (ret == -EREMOTEIO) /* EREMOTEIO 는 "이 bvec 그대로는 큐 한계에 안 맞는다"는 내부 신호다. 패스스루는 쪼갤 수 없으므로 상위에서 -EINVAL 로 바꿔 사용자에게 돌려준다 */
 				ret = -EINVAL;
-			goto unmap_rq; /* 이미 연결된 bio들을 정리; NVMe doorbell은 갱신되지 않음 */
+			goto unmap_rq; /* unmap_rq 라벨로 — 앞선 반복에서 이미 request 에 붙인 bio 들까지 전부 되돌려야 한다 */
 		}
 		if (!bio) /* 첫 bio를 기록해 실패 시 언매핑에 사용 */
 			bio = rq->bio;
 	} while (iov_iter_count(&i)); /* 처리하지 않은 사용자 데이터가 남아 있으면 반복; NVMe 명령은 bio 단위로 분할 연결 */
 
-	return 0; /* 모든 bio가 request에 연결; blk_mq_submit_bio -> blk_mq_get_request -> nvme_queue_rq 가능 */
+	return 0; /* 모든 bio 가 request 에 연결됐다. 이제 호출자가 blk_execute_rq 로 제출할 수 있다 */
 
 unmap_rq:
 	blk_rq_unmap_user(bio); /* 실패 시 기존에 연결된 bio들을 언매핑; pin된 페이지나 bounce buffer 회수 */
 fail:
-	rq->bio = NULL; /* request와 bio의 연결을 끊어 상위가 재시도/정리 가능하게 함; NVMe SQ에는 도달하지 않음 */
+	rq->bio = NULL; /* request 와 bio 의 연결을 끊는다. 이미 blk_rq_unmap_user 가 bio 들을 해제했으므로, 이 포인터를 남겨 두면 해제된 메모리를 가리키게 된다 */
 	return ret; /* -EINVAL 등 오류 코드 반환; 호출자(SG_IO 등)는 이 값을 그대로 유저스페이스로 전달 */
 }
 EXPORT_SYMBOL(blk_rq_map_user_iov);
@@ -1298,10 +1343,10 @@ int blk_rq_map_user(struct request_queue *q, struct request *rq,
 	struct iov_iter i; /* import_ubuf가 채워줄 단일 버퍼 기반 iov_iter */
 	int ret = import_ubuf(rq_data_dir(rq), ubuf, len, &i); /* 사용자 단일 버퍼를 iov_iter로 변환; rq_data_dir은 NVMe READ/WRITE 방향 */
 
-	if (unlikely(ret < 0)) /* 사용자 공간 버퍼 import 실패; NVMe SQ 도달 전 상위로 오류 반환 */
+	if (unlikely(ret < 0)) /* 사용자 공간 버퍼 import 실패 — 잘못된 포인터나 접근 권한 문제 */
 		return ret;
 
-	return blk_rq_map_user_iov(q, rq, map_data, &i, gfp_mask); /* zero-copy/bounce 경로 선택 후 bio 구성 -> blk_mq -> nvme_queue_rq */
+	return blk_rq_map_user_iov(q, rq, map_data, &i, gfp_mask); /* 실제 작업은 전부 여기로 위임한다. 이 래퍼가 한 일은 raw 포인터+길이를 iov_iter 로 바꾼 것뿐이다 */
 }
 EXPORT_SYMBOL(blk_rq_map_user);
 
@@ -1355,7 +1400,7 @@ int blk_rq_map_user_io(struct request *req, struct rq_map_data *map_data,
 		ret = import_iovec(rw, ubuf, iov_count ? iov_count : buf_len, /* 사용자 iovec을 가져와 iov_iter 생성; rw는 NVMe READ/WRITE 방향 */
 				UIO_FASTIOV, &iov, &iter);
 		if (ret < 0) /* import 실패(잘못된 iovec 등) */
-			return ret; /* iovec import 실패; NVMe SQ 도달 전 종료 */
+			return ret; /* iovec import 실패 — 사용자 iovec 배열 자체를 읽지 못했다 */
 
 		if (iov_count) { /* 호출자가 명시적으로 iovec 개수를 지정한 경우에만 길이 재조정 */
 			/* SG_IO howto says that the shorter of the two wins */
@@ -1373,7 +1418,7 @@ int blk_rq_map_user_io(struct request *req, struct rq_map_data *map_data,
 		ret = blk_rq_map_user(req->q, req, map_data, ubuf, buf_len,
 				gfp_mask);
 	}
-	return ret; /* 성공 시 blk_mq -> nvme_queue_rq 진행; 실패 시 NVMe SQ 도달 안 함 */
+	return ret; /* 0 이면 매핑 완료, 음수면 실패. 실패 시 부분 매핑은 이미 내부에서 정리됐다 */
 }
 EXPORT_SYMBOL(blk_rq_map_user_io);
 
@@ -1499,7 +1544,7 @@ EXPORT_SYMBOL(blk_rq_unmap_user);
  *   커널 passthrough 발행자 -> [blk_rq_map_kern]
  *     -> bio_map_kern | bio_copy_kern -> blk_rq_append_bio
  *     -> blk_mq_submit_bio -> blk_mq_get_request
- *     -> nvme_queue_rq -> nvme_submit_cmd(doorbell)
+ *     -> blk_execute_rq -> (디스패치) -> mq_ops->queue_rq (간접 호출)
  *
  * NVMe 연결:
  *   커널 드라이버나 nvme-cli가 발행하는 admin/IO 명령의 데이터 버퍼를
@@ -1523,12 +1568,12 @@ int blk_rq_map_kern(struct request *rq, void *kbuf, unsigned int len,
 		bio = bio_map_kern(rq, kbuf, len, gfp_mask); /* [한국어] 직접 매핑 경로: 복사 없이 커널 버퍼를 그대로 bio에 연결한다 */
 
 	if (IS_ERR(bio)) /* 두 경로 모두 에러 포인터를 반환할 수 있음 */
-		return PTR_ERR(bio); /* bio 구성 실패; NVMe SQ doorbell 이전에 상위로 오류 */
+		return PTR_ERR(bio); /* bio 구성 실패 — 에러 포인터를 그대로 전달 */
 
-	ret = blk_rq_append_bio(rq, bio); /* bio를 request에 추가 -> blk_mq -> nvme_queue_rq로 진행 */
+	ret = blk_rq_append_bio(rq, bio); /* bio 를 request 에 연결. 여기서 큐 한계 검사도 함께 이뤄진다 */
 	if (unlikely(ret)) /* append 실패(하드웨어 제약 위반 등) - 흔치 않은 경로 */
-		blk_mq_map_bio_put(bio); /* request 추가 실패 시 bio 반환; NVMe SQ에 도달하지 않음 */
-	return ret; /* 0이면 NVMe SQ 제출 가능; 비0이면 매핑 실패 */
+		blk_mq_map_bio_put(bio); /* 연결 실패 시 bio 를 반환해 누수를 막는다 */
+	return ret; /* 0 이면 매핑 완료, 비0 이면 실패 */
 }
 EXPORT_SYMBOL(blk_rq_map_kern);
 
@@ -1540,8 +1585,8 @@ EXPORT_SYMBOL(blk_rq_map_kern);
  * - DMA 정렬, 가상 경계, max_hw_sectors 등의 제약을 검사/우회하여
  *   NVMe 컨트롤러가 처리할 수 있는 형태로 bio를 정리한다.
  * - blk_rq_append_bio를 거쳐 request에 bio가 연결되면, 이후
- *   blk_mq_submit_bio -> blk_mq_get_request -> nvme_queue_rq 순으로
- *   NVMe SQ에 CID가 할당되고 doorbell이 갱신된다.
+ *   호출자가 blk_execute_rq 등으로 제출하면 그때 드라이버 태그가 붙고
+ *   mq_ops->queue_rq 를 통해 장치로 내려간다.
  * - READ 완료 시 CQ 처리 후 blk_rq_unmap_user -> bio_uncopy_user를 통해
  *   사용자 공간으로 데이터가 복사되거나 페이지가 반납된다.
  * - block/blk-merge.c의 bio 병합/분할과 밀접하게 연결되며, 본 파일이

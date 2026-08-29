@@ -29,7 +29,7 @@
  *     → (cgroup 변경 시) bfq_link_bfqg()/bfq_bfqq_move() [이 파일]
  *     → entity->sched_data 갱신 → B-WF2Q+ 트리 재편입
  *     → bfq_dispatch_request() → blk-mq hctx → nvme_queue_rq()
- *     → nvme_submit_cmd() (doorbell)
+ *     → nvme_sq_copy_cmd/nvme_write_sq_db() (doorbell)
  *
  * 호출 체인 (사용자 weight 설정):
  *   `echo N > cgroupfs/io.bfq.weight` → kernfs write → bfq_io_set_weight[_legacy]()

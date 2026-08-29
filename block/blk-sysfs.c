@@ -35,7 +35,7 @@
  *   호출되며, 최종적으로 blk_mq_update_nr_requests(), queue_limits_commit_update_frozen()
  *   등을 거쳐 request_queue 상태가 바뀐다. 이렇게 바뀐 값들은 이후 I/O 경로인
  *   submit_bio -> blk_mq_submit_bio -> blk_mq_get_request -> nvme_queue_rq
- *   -> nvme_submit_cmd(SQ doorbell 레지스터 기록)에서 실제로 참조된다.
+ *   -> nvme_sq_copy_cmd/nvme_write_sq_db(SQ doorbell 레지스터 기록)에서 실제로 참조된다.
  *
  * === 타 모듈과의 연결 ===
  * 의존 모듈:

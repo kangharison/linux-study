@@ -19,85 +19,146 @@
  * [한국어 설명] 블록 cgroup 공통 제어 인프라 (blk-cgroup.c)
  *
  * === 파일의 역할 ===
- * 이 파일은 Linux block layer 의 cgroup(제어 그룹) 통합 핵심 인프라를 구현한다.
- * bio(Block I/O) 가 제출될 때 어느 cgroup 에 속하는지를 결정하고(bio_associate_blkg),
- * per-cgroup IO 통계(read/write/discard 바이트 및 횟수)를 per-cpu lockless 방식으로
- * 집계하며, IO 정책(throttle, BFQ, ioprio 등)을 blkg(blkcg_gq) 단위로 연결·관리한다.
- * cgroup 계층의 생성(blkcg_css_alloc)·온라인(blkcg_css_online)·오프라인(blkcg_css_offline)·
- * 해제(blkcg_css_free) 라이프사이클 콜백도 여기서 구현된다.
+ * 이 파일은 block layer 의 cgroup(control group) 통합 "공통 기반"을 구현한다.
+ * 개별 IO 제어 정책(blk-throttle, iocost, iolatency, BFQ, blk-ioprio)이 아니라,
+ * 그 정책들이 공통으로 올라탈 뼈대만 제공한다. 구체적으로 세 가지다.
+ * (1) blkg(struct blkcg_gq) 라이프사이클: cgroup 하나와 블록 장치 큐 하나의
+ *     교차점을 나타내는 객체를 만들고(blkg_create), 찾고(blkg_lookup), 지우고
+ *     (blkg_destroy), 지연 해제(blkg_free_workfn)한다.
+ * (2) 정책 등록/활성화 프레임워크: blkcg_policy_register() 가 정책마다 plid 를
+ *     배정하고, blkcg_activate_policy() 가 그 장치의 모든 blkg 에 정책 전용
+ *     데이터(pd)를 붙인다. 정책 코드는 blkg->pd[plid] 만 보면 된다.
+ * (3) per-cgroup IO 통계: blk_cgroup_bio_start() 가 per-cpu 로 바이트/건수를
+ *     누적하고, cgroup rstat 프레임워크가 flush 를 요청할 때
+ *     __blkcg_rstat_flush() 가 상위 cgroup 으로 전파하여 io.stat 로 출력된다.
+ * 여기에 더해 cgroup 서브시스템 콜백(blkcg_css_alloc/online/offline/free)과
+ * cgroupfs 파일 파싱 헬퍼(blkg_conf_*), delay 기반 태스크 throttle 훅
+ * (blkcg_maybe_throttle_current)도 이 파일이 담당한다.
+ *
+ * 이 파일에는 장치 종류에 의존하는 코드가 전혀 없다. NVMe/SCSI/virtio/loop 등
+ * 어떤 드라이버든 request_queue 를 가진 gendisk 라면 동일하게 동작한다.
+ * (이 파일의 코드에는 nvme 관련 식별자가 하나도 없다 — grep 으로 확인함.)
  *
  * === 전체 아키텍처에서의 위치 ===
- * 호출 체인 (IO 제출):
- *   userspace write() → submit_bio() → bio_associate_blkg() [이 파일]
- *     → blk_mq_submit_bio() → blk_mq_get_request() → nvme_queue_rq() → doorbell
+ * blkcg 가 IO 경로에 개입하는 유일한 지점은 bio 가 submit_bio() 로 들어올 때다.
+ *
+ * 호출 체인 (bio 에 cgroup 을 붙이는 시점):
+ *   submit_bio() → __submit_bio_noacct()/blk_mq_submit_bio() 이전 단계에서
+ *   bio_associate_blkg() [이 파일] → blkg_lookup_create() [이 파일]
+ *     → bio->bi_blkg 설정 → 이후 정책(blk-throttle 등)이 이 bi_blkg 를 본다
  *
  * 호출 체인 (IO 통계):
- *   blk_cgroup_bio_start() [이 파일] → per-cpu lockless list 등록
- *     → cgroup rstat flush → blkcg_rstat_flush() → __blkcg_rstat_flush() [이 파일]
+ *   submit_bio_noacct() → blk_cgroup_bio_start() [이 파일]
+ *     → blkg->iostat_cpu 갱신 + blkcg->lhead(per-cpu lockless list) 등록
+ *     → cgroup rstat flush 시 blkcg_rstat_flush() → __blkcg_rstat_flush() [이 파일]
+ *     → blkg->iostat.cur → blkcg_print_stat() → cgroupfs io.stat
  *
- * 호출 체인 (정책 등록):
- *   blk_throtl_init() / bfq_init() → blkcg_policy_register() [이 파일]
- *     → blkcg_activate_policy() [이 파일] → blkg->pd[] 연결
+ * 호출 체인 (정책 등록/활성화):
+ *   blk_throtl_init()/iocost/iolatency/bfq 모듈 init
+ *     → blkcg_policy_register() [이 파일] : pol->plid 배정
+ *   디스크에 정책이 처음 필요해질 때
+ *     → blkcg_activate_policy() [이 파일] : 그 disk 의 모든 blkg 에 pd 부착
  *
- * 실행 컨텍스트: 커널 스레드(kworker), 태스크 컨텍스트, 소프트IRQ(blkg 통계 완료)
- * 이 파일은 block layer (block/blk-*.c) 와 cgroup 서브시스템(kernel/cgroup/) 사이에 위치한다.
+ * 실행 컨텍스트: 대부분 프로세스 컨텍스트(submit_bio 경로, cgroupfs write,
+ * cgroup 콜백)이며, 통계 갱신 경로는 preempt 를 끈 상태에서 per-cpu 로 동작한다.
+ * blkg 해제는 RCU 콜백과 workqueue(kworker)로 넘어간다.
  *
  * === 타 모듈과의 연결 ===
  * 의존 모듈:
- *   - include/linux/blk-cgroup.h : blkcg_gq, blkcg, blkcg_policy 등 핵심 구조체 정의
- *   - block/blk-throttle.c (blk_throtl_*) : IO 처리량 제한 정책 구현체
- *   - block/blk-ioprio.c : IO 우선순위 정책 구현체
- *   - block/blk.h : block layer 공통 헬퍼
- *   - kernel/cgroup/rstat.c : cgroup 통계 flush 프레임워크 (css_rstat_flush)
+ *   - block/blk-cgroup.h : blkcg, blkcg_gq, blkg_policy_data, blkcg_policy 정의
+ *   - block/blk-throttle.h, block/blk-ioprio.h : 내장 정책의 init/exit 훅
+ *   - block/blk.h : block layer 내부 공통 헬퍼(bdev_get_queue 등)
+ *   - kernel/cgroup/ : cgroup_subsys 콜백과 rstat(css_rstat_updated/flush) 프레임워크
+ *   - include/linux/percpu-refcount.h : blkg->refcnt 의 percpu_ref 구현
+ *   - include/linux/radix-tree.h : blkcg->blkg_tree 색인
  *
  * 의존받는 모듈:
- *   - block/blk-mq.c : blk_mq_submit_bio 에서 bio->bi_blkg 참조
- *   - block/bio.c : bio_associate_blkg, bio_clone_blkg_association 호출
- *   - drivers/nvme/host/*.c : request_queue 의 blkg 기반 cgroup 분류 결과 사용
- *   - mm/page-writeback.c : blkcg_cgwb_*, writeback cgroup 연동
+ *   - block/blk-throttle.c, block/blk-iocost.c, block/blk-iolatency.c,
+ *     block/bfq-cgroup.c, block/blk-ioprio.c : 모두 blkcg_policy 로 등록되어
+ *     blkg->pd[plid] 슬롯 위에서 동작한다
+ *   - block/bio.c : bio_associate_blkg(), bio_clone_blkg_association() 호출
+ *   - block/genhd.c : blkcg_init_disk()/blkcg_exit_disk() 호출
+ *   - mm/page-writeback.c, fs/fs-writeback.c : cgroup writeback(cgwb) 리스트 공유
  *
  * 데이터 흐름:
- *   bio → bi_blkg(blkcg_gq) → iostat_cpu(per-cpu) → lhead(lockless list)
- *     → __blkcg_rstat_flush → blkg->iostat.cur(global) → cgroupfs io.stat 출력
+ *   bio → bi_blkg(blkcg_gq) → blkg->iostat_cpu(per-cpu) → blkcg->lhead(llist)
+ *     → __blkcg_rstat_flush → blkg->iostat.cur(전역) → io.stat 출력
+ *   cgroupfs write("<major>:<minor> <값>") → blkg_conf_prep() → 정책 pd 갱신
  *
  * === 주요 함수/구조체 요약 ===
- * bio_associate_blkg()        - bio 제출 시 bio->bi_blkg 를 현재 태스크 cgroup 의 blkg 로 설정
- * blkg_lookup_create()        - (cgroup, request_queue) 쌍에 대한 blkg 를 조회하거나 생성
- * blkcg_activate_policy()     - gendisk 에 blkcg 정책(throtl/bfq/ioprio) 활성화; blkg->pd[] 할당
- * blkcg_deactivate_policy()   - gendisk 에서 blkcg 정책 비활성화; blkg->pd[] 해제
- * blkcg_policy_register()     - 정책 모듈 초기화 시 blkcg_policy[] 테이블에 정책 전역 등록
- * blk_cgroup_bio_start()      - bio 시작 시 per-cpu IO 통계 누적 및 lockless list 등록
- * __blkcg_rstat_flush()       - per-cpu lockless list 를 drain 하여 global blkg 통계에 반영
- * blkcg_css_alloc/online/offline/free() - cgroup 라이프사이클 콜백, blkcg 생성·소멸 관리
- * blkg_alloc/blkg_create/blkg_destroy() - blkg 라이프사이클; request_queue-cgroup 연결 생성·삭제
- * blkcg_maybe_throttle_current() - user space 복귀 시 delay_nsec 기반 태스크 throttle 적용
+ * blkg_lookup()/blkg_lookup_create() - (blkcg, disk->queue) 쌍의 blkg 조회/생성
+ * blkg_alloc()/blkg_create()/blkg_destroy()/blkg_free() - blkg 라이프사이클
+ * blkcg_policy_register()/unregister() - 정책 전역 등록, pol->plid 배정
+ * blkcg_activate_policy()/deactivate_policy() - 한 disk 의 blkg 들에 pd 부착/제거
+ * blk_cgroup_bio_start() - bio 제출 시 per-cpu 통계 누적 + llist 등록
+ * __blkcg_rstat_flush() - per-cpu 통계를 blkg->iostat.cur 와 부모로 전파
+ * blkcg_print_blkgs() - 정책의 seq_file 출력 공통 루프(정책별 prfill 콜백 호출)
+ * blkg_conf_prep()/blkg_conf_exit() - cgroupfs 설정 입력 파싱과 정리
+ * bio_associate_blkg() - bio 에 현재 태스크의 blkg 를 결합
+ * blkcg_maybe_throttle_current() - 누적된 delay_nsec 만큼 유저 복귀 시 태스크 지연
  *
- * 핵심 자료구조:
- *   struct blkcg_gq (blkg): (cgroup, request_queue) 1:1 연결체; pd[]로 정책 데이터, iostat_cpu로 통계 보유
- *   struct blkcg: 한 cgroup의 block subsystem 상태; blkg_tree(radix)·blkg_list·lhead(per-cpu lockless) 포함
- *   struct blkcg_policy: throtl/bfq/ioprio 등 정책 인터페이스; blkcg_policy[] 테이블에 최대 BLKCG_MAX_POLS 개 등록
+ * 핵심 자료구조 (정의는 blk-cgroup.h):
+ *   struct blkcg      : cgroup 하나의 블록 서브시스템 상태. blkg_tree(radix)로
+ *                       (queue id → blkg) 색인, blkg_list 로 소유 blkg 나열.
+ *   struct blkcg_gq   : (blkcg, request_queue) 쌍마다 정확히 하나. pd[] 에 정책
+ *                       데이터, iostat_cpu 에 통계, refcnt(percpu_ref)로 수명 관리.
+ *   struct blkg_policy_data : 정책 하나가 blkg 하나에 붙이는 데이터의 공통 헤더.
+ *   struct blkcg_policy     : 정책이 구현해야 할 콜백 모음. blkcg_policy[plid] 에 등록.
  */
 
 #include <linux/ioprio.h>
+/* [한국어] IOPRIO_PRIO_* 매크로. blk-ioprio 정책과 bio->bi_ioprio 처리를 위해 필요. */
 #include <linux/kdev_t.h>
+/* [한국어] MAJOR()/MINOR()/MKDEV(). cgroupfs 입력이 "<major>:<minor> <값>" 형식이라
+ *          blkg_conf_prep() 에서 장치 번호를 파싱·조립하는 데 쓴다. */
 #include <linux/module.h>
+/* [한국어] module_param(blkcg_debug_stats,...) 과 EXPORT_SYMBOL_GPL() 을 위해 필요. */
 #include <linux/sched/signal.h>
+/* [한국어] blkcg_maybe_throttle_blkg() 가 fatal_signal_pending(current) 로
+ *          치명 시그널을 받은 태스크는 delay 대기를 중단시키기 위해 필요. */
 #include <linux/err.h>
+/* [한국어] ERR_PTR()/PTR_ERR()/IS_ERR(). blkg_lookup_create() 등이 실패를
+ *          포인터에 인코딩해 돌려주므로 필수. */
 #include <linux/blkdev.h>
+/* [한국어] struct request_queue, struct gendisk, struct block_device 정의.
+ *          blkg 가 (blkcg, request_queue) 쌍이므로 큐 정의가 필요하다. */
 #include <linux/backing-dev.h>
+/* [한국어] blkcg_fill_root_iostats() 가 bdi 하위 장치를 순회할 때, 그리고
+ *          cgroup writeback 연동에서 backing_dev_info 를 참조한다. */
 #include <linux/slab.h>
+/* [한국어] kzalloc/kfree. blkg, blkcg, pd(policy data) 할당에 사용. */
 #include <linux/delay.h>
+/* [한국어] blkcg_destroy_blkgs() 가 queue_lock 획득 실패 시 cpu_relax 대신
+ *          잠깐 쉬어가는 등 지연 루프에 사용. */
 #include <linux/wait_bit.h>
+/* [한국어] blkcg_maybe_throttle_blkg() 의 대기 관련 헬퍼. */
 #include <linux/atomic.h>
+/* [한국어] atomic64_* (blkg->delay_nsec, delay_start), atomic_* (use_delay,
+ *          congestion_count) 원자 연산에 필요. */
 #include <linux/ctype.h>
+/* [한국어] blkg_conf_prep() 이 입력 문자열에서 isspace() 로 토큰을 나눌 때 사용. */
 #include <linux/resume_user_mode.h>
+/* [한국어] set_notify_resume(). 유저 공간 복귀 직전에
+ *          blkcg_maybe_throttle_current() 를 호출하도록 태스크에 표시한다. */
 #include <linux/psi.h>
+/* [한국어] psi_memstall_enter/leave. use_memdelay 로 지연될 때 그 시간을
+ *          메모리 stall 로 계상해 PSI 압력 지표에 반영한다. */
 #include <linux/part_stat.h>
+/* [한국어] part_stat_read_all(). root cgroup 통계는 blkg 가 아니라 디스크
+ *          파티션 통계에서 직접 채우므로(blkcg_fill_root_iostats) 필요. */
 #include "blk.h"
+/* [한국어] block layer 내부 전용 헬퍼(bdev_get_queue, blk_queue_* 등). */
 #include "blk-cgroup.h"
+/* [한국어] 이 파일의 짝이 되는 헤더. blkcg/blkcg_gq/blkg_policy_data/
+ *          blkcg_policy 구조체와 blkg_lookup() 같은 인라인 헬퍼가 여기 있다. */
 #include "blk-ioprio.h"
+/* [한국어] blk_ioprio_init()/exit() 선언. blkcg_init_disk() 가 디스크마다
+ *          내장 정책을 켤 때 호출한다. */
 #include "blk-throttle.h"
+/* [한국어] blk_throtl_init()/exit()/cancel_bios() 선언. 위와 같은 이유. */
 
+/* [한국어] 전방 선언: __blkcg_rstat_flush() 는 파일 아래쪽(통계 절)에 정의되지만
+ *          blkcg_destroy_blkgs() 등 위쪽 코드가 먼저 호출하므로 미리 선언한다. */
 static void __blkcg_rstat_flush(struct blkcg *blkcg, int cpu);
 
 /*
@@ -107,33 +168,55 @@ static void __blkcg_rstat_flush(struct blkcg *blkcg, int cpu);
  * removals.  Putting cgroup file registration outside blkcg_pol_mutex
  * allows grabbing it from cgroup callbacks.
  */
+/* [한국어] 정책 등록/해제 전체를 직렬화하는 바깥쪽 뮤텍스.
+ * blkcg_pol_mutex 보다 바깥에 중첩(nest)되며, cgroupfs 파일 등록/제거
+ * (cgroup_add_dfl_cftypes 등)까지 이 락 안에서 수행한다. 파일 등록을
+ * blkcg_pol_mutex 밖에 두는 이유는 cgroup 콜백 안에서 blkcg_pol_mutex 를
+ * 잡을 수 있어야 하기 때문(위 영문 주석 참조). */
 static DEFINE_MUTEX(blkcg_pol_register_mutex);
-	/* [한국어] policy 등록/해제와 activate/deactivate 사이의 nesting 보호; NVMe queue 정책 활성화 시 경쟁 방지 */
+/* [한국어] blkcg_policy[] 테이블 자체와 정책 활성/비활성(activate/deactivate)을
+ * 보호하는 안쪽 뮤텍스. blkg->pd[] 슬롯 배열을 건드리는 모든 경로가 이 락을
+ * 요구한다. 잡는 순서는 항상 blkcg_pol_register_mutex → blkcg_pol_mutex. */
 static DEFINE_MUTEX(blkcg_pol_mutex);
-	/* [한국어] blkcg_policy[] 및 policy on/off 를 보호; nvme_queue_rq() 가 참조하는 blkg->pd[] 일관성 확보 */
 
+/* [한국어] 루트 cgroup 의 blkcg. 정적 전역이라 부팅 초기부터 존재하며,
+ * cgroup 이 지정되지 않았거나 소멸 중인 모든 IO 가 되돌아갈 기준점이다.
+ * blkcg_css_alloc(parent==NULL) 이 이 전역을 그대로 재사용한다. */
 struct blkcg blkcg_root;
-	/* [한국어] root cgroup 은 시스템 전체 NVMe IO 의 fallback cgroup */
 EXPORT_SYMBOL_GPL(blkcg_root);
 
+/* [한국어] blkcg_root 의 css 를 가리키는 상수 포인터. cgroup 코어는 blkcg 가
+ * 아니라 css 단위로 다루므로, 루트를 css 로 가리켜야 하는 코드
+ * (bio_associate_blkg_from_css 등)가 이 심볼을 쓴다. */
 struct cgroup_subsys_state * const blkcg_root_css = &blkcg_root.css;
-	/* [한국어] root cgroup 의 css; bio_associate_blkg() 경로에서 root blkg 매핑의 기준점 */
 EXPORT_SYMBOL_GPL(blkcg_root_css);
 
+/* [한국어] 등록된 정책들의 전역 테이블. 인덱스가 곧 pol->plid 이고,
+ * 같은 인덱스가 모든 blkg 의 pd[] 슬롯 번호로도 그대로 쓰인다.
+ * 즉 blkcg_policy[i] 와 blkg->pd[i] 는 항상 같은 정책을 가리킨다.
+ * 크기는 BLKCG_MAX_POLS(현재 6) 로 고정 — 정책 수가 컴파일 타임 상수다.
+ * 설정자: blkcg_policy_register()/unregister(). 보호: blkcg_pol_mutex. */
 static struct blkcg_policy *blkcg_policy[BLKCG_MAX_POLS];
-	/* [한국어] throtl/BFQ/ioprio 같은 cgroup 정책 포인터 테이블; NVMe request_queue 의 q->blkcg_pols 와 연결됨 */
 
+/* [한국어] 시스템의 모든 blkcg 를 잇는 전역 리스트(각 blkcg->all_blkcgs_node).
+ * 정책이 나중에 등록될 때 이미 존재하는 모든 cgroup 에 cpd(cgroup 단위 정책
+ * 데이터)를 소급 할당해야 하므로 전체 열거 수단이 필요하다. */
 static LIST_HEAD(all_blkcgs);		/* protected by blkcg_pol_mutex */
-	/* [한국어] 시스템 전체 blkcg 리스트; 정책 등록 시 모든 cgroup 의 cpd 할당 대상 */
 
+/* [한국어] io.stat 에 디버그용 추가 필드(use_delay/delay_nsec, 정책별 pd_stat)를
+ * 출력할지 여부. 파일 끝의 module_param 으로 런타임 변경 가능(0644). */
 bool blkcg_debug_stats = false;
-	/* [한국어] debug stats 출력 시 use_delay/delay_nsec 같은 NVMe queue 지연 상태를 노출 */
 
+/* [한국어] blkg 통계의 전역(cur/last) 부분을 갱신할 때만 잡는 raw spinlock.
+ * per-cpu 누적은 락 없이 하지만, flush 로 상위에 합산하는 순간은 서로 다른
+ * CPU 가 같은 blkg->iostat 을 건드리므로 직렬화가 필요하다. raw_ 인 이유는
+ * PREEMPT_RT 에서도 잠들지 않는 짧은 임계구역이어야 하기 때문. */
 static DEFINE_RAW_SPINLOCK(blkg_stat_lock);
-	/* [한국어] per-cpu lockless list flush 시 reordering 방지용 raw spinlock; NVMe CQ 완료 통계 집계 직렬화 */
 
+/* [한국어] blkg_destroy_all() 이 한 번에 지우는 blkg 개수 상한.
+ * 디스크 하나에 cgroup 이 수천 개 붙어 있으면 queue_lock 을 쥔 채 전부 지우다
+ * softlockup 이 날 수 있어, 64개마다 락을 놓고 cond_resched() 한다. */
 #define BLKG_DESTROY_BATCH_SIZE  64
-	/* [한국어] NVMe namespace 제거 시 blkg 일괄 제거 배치 크기; 락 장기 점유로 인한 softlockup 방지 */
 
 /*
  * Lockless lists for tracking IO stats update
@@ -154,33 +237,52 @@ static DEFINE_RAW_SPINLOCK(blkg_stat_lock);
  * Return: 0 if successful or -ENOMEM if allocation fails.
  */
 /*
- * init_blkcg_llists - blkcg 의 per-cpu lockless 통계 리스트 초기화
+ * [한국어]
+ * init_blkcg_llists - blkcg 의 per-cpu lockless 통계 리스트(lhead) 할당·초기화
  *
- * 호출 경로: blkcg_css_alloc() -> init_blkcg_llists()
- * NVMe 연결점: NVMe namespace(request_queue)가 많을 때 모든 blkg 를 순회하지
- *   않고, IO 가 발생한 CPU 의 lockless list(lhead)만 추적해 통계 flush 비용을
- *   줄인다. 이는 고성능 NVMe SSD 에서 cgroup 통계 오버헤드를 최소화한다.
+ * @blkcg: 방금 kzalloc 된, 아직 공개되지 않은 blkcg. 이 함수가 lhead 필드를 채운다.
+ * @return: 0 이면 성공, -ENOMEM 이면 per-cpu 영역 할당 실패.
+ *          호출자(blkcg_css_alloc)는 실패 시 blkcg 전체를 되돌리고 ERR_PTR 을 반환한다.
+ *
+ * 왜 필요한가: 위 영문 주석이 설명하듯, cgroup rstat 프레임워크는 "어느 CPU 에서
+ * 통계가 갱신됐는지"까지만 기억하고 "그 CPU 에서 어느 blkg 가 갱신됐는지"는 모른다.
+ * 한 blkcg 에는 블록 장치 수만큼 blkg 가 달려 있으므로, flush 때마다 그 blkcg 의
+ * blkg 를 전부 훑으면 장치가 많은 시스템에서 비용이 커진다. 그래서 blkcg 마다
+ * per-cpu lockless list 를 두고, 갱신된 blkg 의 iostat_cpu 만 그 리스트에 매달아
+ * flush 때 그것만 처리한다. 리스트에 넣는 쪽이 blk_cgroup_bio_start(),
+ * 빼는 쪽이 __blkcg_rstat_flush() 다.
+ *
+ * 실행 컨텍스트: blkcg 생성 시점(프로세스 컨텍스트, GFP_KERNEL 로 잠들 수 있음).
+ * 아직 아무도 이 blkcg 를 볼 수 없는 상태라 별도 동기화가 필요 없다.
+ *
+ * 호출 체인:
+ *   blkcg_css_alloc() → [init_blkcg_llists] → alloc_percpu_gfp()/init_llist_head()
  */
-
 static int init_blkcg_llists(struct blkcg *blkcg)
 {
+	/* [한국어] for_each_possible_cpu 순회용 CPU 인덱스. possible(부팅 후 온라인이
+	 * 될 수 있는 모든 CPU)을 도는 이유는, CPU 가 나중에 핫플러그로 올라와도
+	 * 그 CPU 의 lhead 가 이미 초기화돼 있어야 하기 때문이다. */
 	int cpu;
-	/* [한국어] 가능한 모든 CPU 에 대해 lhead 초기화 반복 */
 
+	/* [한국어] CPU 개수만큼의 struct llist_head 를 per-cpu 영역에 할당한다.
+	 * GFP_KERNEL 이므로 잠들 수 있고, 따라서 이 함수는 락 없는 문맥에서만 호출된다.
+	 * lockless list 를 쓰는 이유: 갱신 측(blk_cgroup_bio_start)은 IO 제출 핫패스라
+	 * 스핀락조차 피하고 cmpxchg 한 번으로 끝내야 하기 때문. */
 	blkcg->lhead = alloc_percpu_gfp(struct llist_head, GFP_KERNEL);
-	/* [한국어] per-cpu lockless list 할당; namespace 가 많아도 전체 blkg 순회 대신 갱신된 CPU 만 추적 */
-	/* [한국어] per-cpu lockless list, NVMe namespace 가 많아도 전체 blkg 순회 없이 통계 갱신 추적 */
 	if (!blkcg->lhead)
-		/* [한국어] 메모리 부족 시 NVMe cgroup 통계 인프라 할당 실패 */
+		/* [한국어] per-cpu 할당 실패. 통계 인프라 없이는 blkcg 를 만들 수 없으므로
+		 * -ENOMEM 을 올려 blkcg_css_alloc() 이 전체를 롤백하게 한다. */
 		return -ENOMEM;
 
+	/* [한국어] 할당된 per-cpu 슬롯을 모두 "빈 리스트" 상태로 만든다.
+	 * alloc_percpu_gfp 는 0 으로 채워주지만, llist_head 의 초기값이 NULL 이라는
+	 * 사실에 의존하지 않고 명시적으로 초기화하는 것이 커널 관례다. */
 	for_each_possible_cpu(cpu)
-	/* [한국어] 모든 CPU 코어에 대한 lockless 통계 헤드 초기화; NVMe 멀티 큐 완료 경로의 per-cpu 집계 준비 */
+		/* [한국어] per_cpu_ptr 로 cpu 번째 슬롯 주소를 얻어 llist 를 빈 상태로 만든다. */
 		init_llist_head(per_cpu_ptr(blkcg->lhead, cpu));
-		/* [한국어] 각 CPU 별 통계 flush 대기열(lhead) 초기화 */
-		/* [한국어] 각 CPU 별 통계 flush 엔트리 초기화 */
+	/* [한국어] 모든 CPU 슬롯 초기화 완료 — 성공. */
 	return 0;
-	/* [한국어] per-cpu lhead 초기화 완료 후 반환 */
 }
 
 /**
@@ -191,48 +293,89 @@ static int init_blkcg_llists(struct blkcg *blkcg)
  * to confirm it is alive and well.
  */
 /*
- * blkcg_css - 현재 태스크(또는 kthread)가 속한 blkcg 의 css 반환
+ * [한국어]
+ * blkcg_css - "지금 이 IO 는 어느 cgroup 것인가"를 결정하는 함수
  *
- * 호출 경로: bio_associate_blkg() -> blkcg_css()
- *            blkcg_maybe_throttle_current() -> blkcg_css()
- * NVMe 연결점: NVMe IO 를 발행하는 태스크의 cgroup 을 식별해 이후
- *   blk_mq_submit_bio -> nvme_queue_rq 경로에서 적용할 cgroup context 를
- *   결정한다. kthread 가 bio 를 발행하는 경우 kthread_blkcg() 를 우선 확인한다.
+ * @return: 현재 문맥에 해당하는 blkcg 의 css 포인터. NULL 을 반환하지 않는다
+ *          (최소한 태스크가 속한 io cgroup 의 css 가 나온다).
+ *          단, 위 영문 주석대로 이미 죽어가는(dying) css 일 수 있으므로,
+ *          참조를 잡으려는 호출자는 css_tryget_online() 류로 생존을 확인해야 한다.
+ *
+ * 왜 필요한가: bio 에 cgroup 을 붙일 때 기준이 되는 "현재 cgroup" 은 두 종류다.
+ * (1) 일반 태스크: 자기가 속한 io cgroup.
+ * (2) 워커 kthread: 자기 자신의 cgroup 이 아니라, 일을 위임한 원래 cgroup.
+ *     대표적으로 cgroup writeback 이 파일 페이지를 내려쓸 때 writeback 워커는
+ *     kthread_associate_blkcg() 로 "이 IO 는 저 cgroup 것" 이라고 미리 표시해 둔다.
+ * 그래서 kthread 표시를 먼저 보고, 없을 때만 current 의 cgroup 을 쓴다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트(submit_bio 경로). task_css() 접근을 위해
+ * rcu_read_lock() 안에서 호출되어야 한다 — 호출자인 bio_associate_blkg() 가
+ * rcu_read_lock 을 잡고 들어온다.
+ *
+ * 호출 체인:
+ *   bio_associate_blkg() / blkcg_maybe_throttle_current()
+ *     → [blkcg_css] → kthread_blkcg() 또는 task_css(current, io_cgrp_id)
  */
-
 static struct cgroup_subsys_state *blkcg_css(void)
 {
+	/* [한국어] 반환할 css. 아래 두 경로 중 하나에서 채워진다. */
 	struct cgroup_subsys_state *css;
-	/* [한국어] kthread 혹은 current task 의 cgroup 상태 포인터 */
 
+	/* [한국어] 이 커널 스레드가 다른 cgroup 을 대신해 IO 를 내는 중인지 확인.
+	 * kthread_associate_blkcg() 로 설정돼 있으면 그 css 가, 아니면 NULL 이 온다.
+	 * 일반 유저 태스크에서는 항상 NULL. */
 	css = kthread_blkcg();
-	/* [한국어] kthread 가 NVMe IO 를 대신 발행할 때 kthread 의 blkcg 우선 사용 */
 	if (css)
-		/* [한국어] kthread blkcg 가 명시 지정되어 있으면 이를 채택 */
+		/* [한국어] 위임된 cgroup 이 있으므로 그것을 그대로 쓴다. 이렇게 해야
+		 * writeback 으로 미뤄진 IO 도 원래 cgroup 의 제한/통계에 잡힌다. */
 		return css;
+	/* [한국어] 일반 경로: current 태스크가 붙어 있는 io cgroup 의 css 를 반환한다.
+	 * io_cgrp_id 는 cgroup 코어가 io 서브시스템에 부여한 인덱스이고,
+	 * task_css() 는 그 인덱스로 태스크의 css_set 에서 css 를 꺼낸다.
+	 * task_css() 는 RCU 보호를 전제로 하므로 호출자가 rcu_read_lock 을 쥐고 있어야 한다. */
 	return task_css(current, io_cgrp_id);
-	/* [한국어] 일반 태스크라면 io cgroup 의 css 를 반환 -> NVMe SQ/CQ batching 의 cgroup 기준 */
 }
 
 /*
  * [한국어]
- * blkg_free_workfn - workqueue 에서 blkg 메모리를 해제
+ * blkg_free_workfn - blkg 의 실제 자원 해제를 잠들 수 있는 문맥에서 수행
  *
- * 호출 경로: blkg_destroy() -> blkg_put() -> blkg_release() -> call_rcu() ->
- *            __blkg_release() -> blkg_free() -> schedule_work() ->
- *            blkg_free_workfn()
- * NVMe 연결점: NVMe namespace 가 제거되거나 cgroup 이 off-line 될 때 해당
- *   request_queue(q)와 연결된 blkg 를 정리한다. pd_free_fn() 으로 throtl/BFQ
- *   정책 데이터도 함께 해제되어 NVMe queue 에 적용되던 cgroup 정책이 제거된다.
+ * @work: blkg->free_work. container_of 로 blkg 본체를 복원한다.
+ * @return: 없음(workqueue 콜백).
+ *
+ * 왜 필요한가: blkg 해제는 두 가지 이유로 잠들 수 있다.
+ * (1) 정책의 pd_free_fn() 이 잠들 수 있고, (2) blk_put_queue() 가 마지막 참조를
+ * 놓으면 request_queue 의 release 핸들러가 실행되며 이 역시 잠들 수 있다.
+ * 그런데 blkg 해제의 시작점(percpu_ref 가 0 이 되는 순간, 그리고 그 뒤의 RCU
+ * 콜백)은 아토믹/소프트IRQ 문맥일 수 있다. 그래서 blkg_free() 가 이 함수를
+ * workqueue 에 얹고, 여기서 잠들 수 있는 정리를 마저 한다.
+ *
+ * 해제 순서가 중요한 이유: 같은 pd 를 blkcg_deactivate_policy() 도 해제할 수
+ * 있으므로(위 영문 주석), 둘 사이를 q->blkcg_mutex 로 직렬화한다. 또한
+ * blkg 를 q->blkg_list 에서 떼는 list_del_init 을 blkg_destroy() 가 아니라
+ * 여기까지 미룬 이유도 같다 — deactivate 쪽이 리스트를 순회하며 pd 를 지울 때
+ * 아직 pd 를 해제하지 않은 blkg 가 리스트에 남아 있어야 순서가 보장된다.
+ *
+ * 실행 컨텍스트: 시스템 workqueue 의 kworker(프로세스 컨텍스트, 잠들 수 있음).
+ * 이 시점에는 blkg 를 가리키는 참조가 이미 0 이므로 다른 CPU 가 이 blkg 를
+ * 새로 볼 수 없다.
+ *
+ * 호출 체인:
+ *   blkg_destroy() → blkg_put() → percpu_ref 0 → blkg_release()
+ *     → call_rcu(__blkg_release) → blkg_free() → schedule_work()
+ *     → [blkg_free_workfn] → pd_free_fn / blk_put_queue / kfree
  */
-
 static void blkg_free_workfn(struct work_struct *work)
 {
+	/* [한국어] workqueue 는 struct work_struct 포인터만 넘겨주므로,
+	 * blkg 안에 임베드된 free_work 필드의 오프셋을 빼서 blkg 본체를 되찾는다. */
 	struct blkcg_gq *blkg = container_of(work, struct blkcg_gq,
-	/* [한국어] work 구조체에서 blkg 객체 복원; NVMe request_queue 와의 연결 해제 직전 단계 */
 					     free_work);
+	/* [한국어] 이 blkg 가 붙어 있던 request_queue. 아래에서 queue_lock 을 잡고
+	 * blkg_list 에서 떼어낸 뒤 참조를 놓기 위해 미리 지역 변수에 담아 둔다
+	 * (kfree(blkg) 이후에는 blkg->q 를 읽을 수 없으므로). */
 	struct request_queue *q = blkg->q;
-	/* [한국어] 이 blkg 가 속한 NVMe namespace 의 request_queue */
+	/* [한국어] pd[] 슬롯 순회용 인덱스(= 정책의 plid). */
 	int i;
 
 	/*
@@ -242,33 +385,46 @@ static void blkg_free_workfn(struct work_struct *work)
 	 * blkcg_mutex is used to synchronize blkg_free_workfn() and
 	 * blkcg_deactivate_policy().
 	 */
+	/* [한국어] pd 해제 경로가 여기(blkg 소멸)와 blkcg_deactivate_policy() 두 곳이므로
+	 * q 단위 뮤텍스로 직렬화한다. 뮤텍스이므로 잠들 수 있는 문맥이어야 하고,
+	 * 그것이 이 정리를 workqueue 로 미룬 이유 중 하나다. */
 	mutex_lock(&q->blkcg_mutex);
-	/* [한국어] blkg 해제와 policy deactivate 간 동기화; NVMe queue 의 cgroup 정책 상태 보호 */
+	/* [한국어] 이 blkg 에 붙어 있는 모든 정책 데이터를 plid 순서대로 해제한다.
+	 * BLKCG_MAX_POLS 는 pd[] 배열 크기이자 등록 가능한 정책 수의 상한. */
 	for (i = 0; i < BLKCG_MAX_POLS; i++)
-	/* [한국어] throtl/BFQ/ioprio 등 활성화된 정책 데이터를 순서대로 해제 */
+		/* [한국어] 그 정책이 이 큐에서 활성화되지 않았다면 pd[i] 는 NULL 이다. */
 		if (blkg->pd[i])
-		/* [한국어] 이 blkg 에 할당된 policy private data 가 있을 때만 해제 */
+			/* [한국어] 정책이 스스로 정의한 해제 콜백을 호출한다.
+			 * 예: blk-throttle 은 throtl_grp 를, iocost 는 ioc_gq 를 반납한다.
+			 * 여기서 blkcg_policy[i] 를 곧바로 참조할 수 있는 이유는,
+			 * pd[i] 가 살아 있다는 것 자체가 그 정책이 아직 등록돼 있고
+			 * 이 큐에서 활성 상태임을 뜻하기 때문이다. */
 			blkcg_policy[i]->pd_free_fn(blkg->pd[i]);
-			/* [한국어] throtl_data/bfq_queue 해제; 이후 nvme_queue_rq() 에서 해당 정책 상태 참조 불가 */
+	/* [한국어] blkg 는 생성 시 부모 blkg 의 참조를 잡아 두었다(자식이 살아 있는 한
+	 * 부모는 죽지 않는다). 루트 blkg 는 부모가 없어 NULL 검사가 필요하다.
+	 * 이 put 이 부모의 마지막 참조라면 부모도 같은 해제 사슬을 타게 된다. */
 	if (blkg->parent)
 		blkg_put(blkg->parent);
-	/* [한국어] 계층 구조상 부모 blkg 참조를 해제하여 cgroup 트리 일관성 유지 */
+	/* [한국어] q->blkg_list 는 queue_lock 으로 보호된다. IO 완료 등 IRQ 문맥에서도
+	 * 이 리스트를 만질 수 있으므로 _irq 변형으로 로컬 인터럽트까지 막는다. */
 	spin_lock_irq(&q->queue_lock);
-	/* [한국어] NVMe request_queue 의 blkg_list 와 queue_lock 보호 */
+	/* [한국어] 큐가 소유한 blkg 목록에서 이 blkg 를 뗀다. blkg_destroy() 가 아니라
+	 * pd 해제를 끝낸 지금에야 떼는 것이 핵심(위 영문 주석의 순서 보장). */
 	list_del_init(&blkg->q_node);
-		/* [한국어] NVMe request_queue 의 blkg list 에서 제거; 이후 IO 는 root blkg 로 spill */
 	spin_unlock_irq(&q->queue_lock);
 	mutex_unlock(&q->blkcg_mutex);
-	/* [한국어] policy 해제 완료 후 mutex 해제 */
 
+	/* [한국어] blkg_alloc() 에서 잡았던 request_queue 참조를 반납한다.
+	 * 마지막 참조라면 큐의 release 핸들러가 여기서 실행되며, 이 역시 잠들 수 있다. */
 	blk_put_queue(q);
-	/* [한국어] request_queue(NVMe namespace q) 참조 해제 */
+	/* [한국어] per-cpu IO 통계 영역 해제. 이 시점에는 __blkg_release() 가 이미
+	 * 모든 CPU 의 통계를 flush 했으므로 잃어버리는 수치가 없다. */
 	free_percpu(blkg->iostat_cpu);
-	/* [한국어] per-cpu IO 통계 버퍼 반납 */
+	/* [한국어] percpu_ref 가 내부적으로 들고 있던 per-cpu 카운터를 해제한다.
+	 * percpu_ref_kill() → 참조 0 → release 콜백까지 모두 끝난 뒤여야 안전하다. */
 	percpu_ref_exit(&blkg->refcnt);
-	/* [한국어] blkg 참조 카운터 정리; RCU 해제 이후 최종 자원 반납 */
+	/* [한국어] 마지막으로 blkg 구조체 자체를 반납한다. 이 줄 이후 blkg 접근 금지. */
 	kfree(blkg);
-	/* [한국어] blkg 객체 반납; NVMe cgroup 분류 엔트리 소멸 */
 }
 
 /**
@@ -279,52 +435,82 @@ static void blkg_free_workfn(struct work_struct *work)
  */
 /*
  * [한국어]
- * blkg_free - blkg 해제를 workqueue 에 예약
+ * blkg_free - blkg 해제를 workqueue 로 넘기는 얇은 진입점
  *
- * 호출 경로: blkg_create() 실패 / blkg_destroy() -> blkg_free()
- * NVMe 연결점: request_queue(q)의 release 핸들러가 sleep 할 수 있으므로
- *   비동기 work 로 해제한다. NVMe 드라이버 입장에서는 blkg 가 사라지면 더 이상
- *   해당 cgroup 의 IO 흐름을 구분할 수 없게 된다.
+ * @blkg: 해제할 blkg. NULL 이거나 "부분적으로만 할당된" 상태일 수 있다
+ *        (blkg_alloc() 중간에 실패한 경우 — 위 영문 주석의 partially allocated).
+ * @return: 없음.
+ *
+ * 왜 필요한가: 실제 해제(blkg_free_workfn)는 잠들 수 있는데, 호출자는 그렇지
+ * 않은 문맥일 수 있다. 두 호출자를 보면 이유가 분명하다.
+ *   - blkg_alloc()/blkg_create() 실패 경로: 잠들 수 있는 문맥이지만 코드 단순화를
+ *     위해 같은 경로를 쓴다.
+ *   - __blkg_release(): RCU 콜백이라 잠들 수 없다. 여기서는 반드시 비동기여야 한다.
+ * 그래서 무조건 work 로 넘겨 한 갈래로 통일한다.
+ *
+ * 실행 컨텍스트: 임의(RCU 콜백 포함). 이 함수 자체는 잠들지 않는다.
+ *
+ * 호출 체인:
+ *   blkg_alloc() 실패 / blkg_create() 실패 / __blkg_release()
+ *     → [blkg_free] → schedule_work() → blkg_free_workfn()
  */
-
 static void blkg_free(struct blkcg_gq *blkg)
 {
+	/* [한국어] 할당 실패 경로에서 NULL 이 그대로 넘어올 수 있으므로 방어한다. */
 	if (!blkg)
-	/* [한국어] NULL blkg 에 대한 방어적 체크 */
 		return;
 
 	/*
 	 * Both ->pd_free_fn() and request queue's release handler may
 	 * sleep, so free us by scheduling one work func
 	 */
+	/* [한국어] blkg 안에 임베드된 work_struct 를 blkg_free_workfn 으로 초기화한다.
+	 * 별도 할당이 필요 없도록 구조체 안에 work 를 품고 있는 전형적인 패턴 —
+	 * 해제 경로에서 메모리 할당이 실패할 여지를 없앤다. */
 	INIT_WORK(&blkg->free_work, blkg_free_workfn);
-	/* [한국어] blkg 해제 work 초기화; NVMe namespace cleanup 비동기 수행 */
+	/* [한국어] 시스템 기본 workqueue 에 얹는다. 이 호출 이후 blkg 는 kworker 소유가
+	 * 되므로 호출자는 blkg 를 더 이상 건드리면 안 된다. */
 	schedule_work(&blkg->free_work);
-	/* [한국어] workqueue 에 blkg 해제 예약; NVMe queue 완료 경로와 분리된 컨텍스트에서 실행 */
 }
 
 /*
  * [한국어]
- * __blkg_release - RCU grace period 이후 blkg 정리
+ * __blkg_release - RCU grace period 가 지난 뒤 실행되는 blkg 해제 2단계
  *
- * 호출 경로: blkg_put() -> blkg_release() -> call_rcu() -> __blkg_release()
- * NVMe 연결점: blkg 를 참조하던 모든 NVMe IO 경로(CPU, CQ 처리 등)가 RCU
- *   grace period 를 지난 후에만 메모리를 해제한다. 해제 전 __blkcg_rstat_flush()
- *   로 per-cpu 통계를 모두 global 로 반영한다.
+ * @rcu: blkg->rcu_head. container_of 로 blkg 를 복원한다.
+ * @return: 없음(RCU 콜백).
+ *
+ * 왜 필요한가: blkg 조회 경로(blkg_lookup)는 RCU read-side 에서 락 없이 포인터를
+ * 읽는다. 따라서 참조 카운트가 0 이 되었더라도, 그 직전에 blkg 포인터를 집어간
+ * 독자가 아직 남아 있을 수 있다. RCU grace period 를 한 번 기다린 뒤에야
+ * "더 이상 이 blkg 를 새로 볼 사람이 없다" 가 보장되므로 여기서 뒷정리를 한다.
+ *
+ * 여기서 통계를 flush 하는 이유: blkg 가 사라지면 그 blkg 의 per-cpu 통계도
+ * 함께 사라진다. 그런데 그 수치는 부모 cgroup 의 누적치에도 반영돼야 하므로,
+ * 메모리를 놓기 전에 모든 CPU 의 lockless list 를 비워 전역/부모로 올린다.
+ * 이렇게 하지 않으면 cgroup 을 지울 때마다 io.stat 수치가 줄어드는 현상이 생긴다.
+ *
+ * 실행 컨텍스트: RCU 콜백 — 소프트IRQ 문맥이며 잠들 수 없다. 그래서 실제
+ * kfree/뮤텍스 구간은 다시 blkg_free() → workqueue 로 넘긴다.
+ *
+ * 호출 체인:
+ *   blkg_release() → call_rcu() → [__blkg_release] → __blkcg_rstat_flush(),
+ *                                                    css_put(), blkg_free()
  */
-
 static void __blkg_release(struct rcu_head *rcu)
 {
+	/* [한국어] RCU 콜백 인자는 blkg 안에 임베드된 rcu_head 이므로 본체를 복원한다. */
 	struct blkcg_gq *blkg = container_of(rcu, struct blkcg_gq, rcu_head);
-	/* [한국어] RCU 콜백으로부터 blkg 복원 */
+	/* [한국어] 통계를 밀어 올릴 대상 cgroup. 아래 css_put 전에 읽어 두어야 한다. */
 	struct blkcg *blkcg = blkg->blkcg;
-	/* [한국어] 이 blkg 가 속한 cgroup; rstat flush 의 대상 cgroup */
+	/* [한국어] 모든 possible CPU 를 도는 인덱스. */
 	int cpu;
 
 #ifdef CONFIG_BLK_CGROUP_PUNT_BIO
-/* [한국어] kthread 우회 제출이 활성화된 경우에만 async bio 관련 필드 초기화 */
+	/* [한국어] PUNT_BIO 기능이 켜진 커널에서만 존재하는 대기 bio 리스트 검사.
+	 * blkg 가 죽는 시점에 아직 제출되지 않은 bio 가 남아 있다면 그 IO 는 영원히
+	 * 유실되므로, 논리 오류를 잡기 위한 WARN 이다(패닉이 아닌 경고). */
 	WARN_ON(!bio_list_empty(&blkg->async_bios));
-	/* [한국어] kthread 우회 제출(async_bios)이 남아있으면 버그; NVMe IO 누락 방지 */
 #endif
 	/*
 	 * Flush all the non-empty percpu lockless lists before releasing
@@ -332,16 +518,22 @@ static void __blkg_release(struct rcu_head *rcu)
 	 *
 	 * blkg_stat_lock is for serializing blkg stat update
 	 */
+	/* [한국어] 이 blkg 의 통계가 아직 어느 CPU 의 lockless list 에 걸려 있을지
+	 * 모르므로 모든 CPU 를 훑는다. __blkcg_rstat_flush 는 해당 CPU 의 llist 를
+	 * 통째로 떼어내 각 blkg 의 iostat.cur 과 부모로 합산한다. */
 	for_each_possible_cpu(cpu)
-	/* [한국어] NVMe 멀티 코어 CQ 완료가 기록한 per-cpu 통계를 모두 global 로 flush */
+		/* [한국어] blkcg 단위로 flush 한다 — 이 blkg 것뿐 아니라 같은 CPU 에
+		 * 걸려 있던 형제 blkg 통계도 함께 정리되지만, 그래도 정확성은 유지된다. */
 		__blkcg_rstat_flush(blkcg, cpu);
-		/* [한국어] 각 CPU 의 lockless list 를 drain 하여 NVMe IO 통계를 상위 cgroup 으로 전파 */
 
 	/* release the blkcg and parent blkg refs this blkg has been holding */
+	/* [한국어] blkg 는 자신이 속한 cgroup 의 css 참조를 잡고 있었다(살아 있는 blkg 가
+	 * 있는 한 blkcg 는 해제되지 않는다). 이제 그 참조를 놓는다.
+	 * 부모 blkg 참조는 blkg_free_workfn() 에서 놓는다. */
 	css_put(&blkg->blkcg->css);
-	/* [한국어] blkg 생성 시 획득한 cgroup css 참조 반납 */
+	/* [한국어] 남은 정리(pd 해제, 큐 참조 반납, kfree)는 잠들 수 있으므로
+	 * workqueue 로 넘긴다. */
 	blkg_free(blkg);
-	/* [한국어] 실제 메모리 해제를 workqueue 에 예약 */
 }
 
 /*
@@ -354,72 +546,113 @@ static void __blkg_release(struct rcu_head *rcu)
  */
 /*
  * [한국어]
- * blkg_release - blkg 의 percpu_ref 가 0이 되면 RCU 해제 예약
+ * blkg_release - blkg->refcnt(percpu_ref) 가 0 이 되었을 때 불리는 release 콜백
  *
- * 호출 경로: blkg_put() -> percpu_ref_put() -> blkg_release()
- * NVMe 연결점: NVMe IO 완료 후 request 가 반납되면서 blkg 참조가 감소한다.
- *   참조 카운트가 0이 되면 blkg 구조체를 안전하게 해제하기 위해 RCU 콜백을
- *   등록한다.
+ * @ref: blkg 안에 임베드된 percpu_ref. container_of 로 blkg 를 복원한다.
+ * @return: 없음.
+ *
+ * === percpu_ref 생명주기 ===
+ * blkg->refcnt 는 percpu_ref 다. 살아 있는 동안(per-cpu 모드)에는 참조 증감이
+ * per-cpu 카운터 증감일 뿐이라 원자적 연산조차 없다 — bio 마다 blkg 참조를
+ * 잡아야 하는 핫패스이므로 이 비용이 중요하다. blkg_destroy() 가
+ * percpu_ref_kill() 을 부르면 그때부터 atomic 모드로 전환되고, 흩어져 있던
+ * per-cpu 카운터가 합산되어 실제 0 인지 판정된다. 0 이 되는 순간 이 콜백이 불린다.
+ * 즉 이 함수가 불렸다는 것은 "kill 되었고, 마지막 참조까지 반납됐다" 는 뜻이다.
+ *
+ * 왜 곧바로 해제하지 않는가: 위 영문 주석대로 blkg 는 RCU 로 보호된다.
+ * RCU 독자가 blkg 포인터를 이미 들고 있을 수 있으므로 grace period 를 기다린다.
+ * (영문 주석은 덧붙여, RCU 락만으로는 blkg 의 "모든" 필드가 유효하다고 가정하면
+ *  안 된다고 경고한다 — q 나 정책 데이터 같은 외부 링크는 따라가면 안 되고,
+ *  그룹 통계·요율 같은 blkg 로컬 값만 읽어야 한다.)
+ *
+ * 실행 컨텍스트: percpu_ref 의 마지막 put 을 한 문맥 그대로. IRQ/소프트IRQ 일 수
+ * 있으므로 잠들 수 없다. call_rcu 는 잠들지 않으므로 여기서 안전하다.
+ *
+ * 호출 체인:
+ *   blkg_put() → percpu_ref_put() → (0 도달) → [blkg_release]
+ *     → call_rcu() → __blkg_release() → blkg_free() → blkg_free_workfn()
  */
-
 static void blkg_release(struct percpu_ref *ref)
 {
+	/* [한국어] percpu_ref 는 blkg 안에 refcnt 필드로 임베드돼 있으므로 본체 복원. */
 	struct blkcg_gq *blkg = container_of(ref, struct blkcg_gq, refcnt);
-	/* [한국어] percpu_ref 로부터 blkg 복원 */
 
+	/* [한국어] RCU grace period 이후 __blkg_release 를 실행하도록 예약한다.
+	 * 이 시점 이후로도 기존 RCU 독자는 잠시 blkg 를 볼 수 있지만,
+	 * 그들은 이미 tryget 에 실패했거나 참조를 들고 있던 쪽이다. */
 	call_rcu(&blkg->rcu_head, __blkg_release);
-		/* [한국어] RCU grace period 후 메모리 해제; NVMe CQ/ISR 경로의 read-side 보장 */
 }
 
 #ifdef CONFIG_BLK_CGROUP_PUNT_BIO
+/* [한국어] punt(우회 제출)된 bio 를 대신 제출해 줄 전용 워크큐.
+ * 이 기능을 쓰는 코드가 없는 커널 구성에서는 통째로 컴파일되지 않는다. */
 static struct workqueue_struct *blkcg_punt_bio_wq;
 
 /*
  * [한국어]
- * blkg_async_bio_workfn - punted bio 들을 실제 submit_bio 로 발행
+ * blkg_async_bio_workfn - 워커 문맥에서 대기 중인 bio 들을 실제로 제출
  *
- * 호출 경로: blkcg_punt_bio_submit() -> queue_work() ->
- *            blkg_async_bio_workfn()
- * NVMe 연결점: 공유 kthread 가 NVMe IO(bio)를 동기적으로 발행하면 우선순위
- *   역전(priority inversion)이 발생할 수 있다. workqueue 로 비동기 발행하여
- *   submit_bio -> blk_mq_submit_bio -> nvme_queue_rq 로 전달되도록 한다.
+ * @work: blkg->async_bio_work. container_of 로 blkg 를 복원한다.
+ * @return: 없음(workqueue 콜백).
+ *
+ * 왜 필요한가: blkcg_punt_bio_submit() 이 "지금 이 스레드에서 제출하면 안 되는"
+ * bio 를 blkg->async_bios 에 쌓아 두었다. 이 함수가 그 목록을 통째로 가져와
+ * 워커 문맥에서 submit_bio() 를 호출한다. 우선순위 역전(공유 kthread 가 특정
+ * cgroup 의 제한에 걸려 멈추는 상황)을 피하는 것이 목적이다.
+ *
+ * 실행 컨텍스트: blkcg_punt_bio_wq 의 kworker(프로세스 컨텍스트, 잠들 수 있음).
+ * 대기 중인 bio 가 있는 한 blkg 는 사라지지 않는다(영문 주석) — bio 자체가
+ * blkg 참조를 들고 있기 때문이다.
+ *
+ * 호출 체인:
+ *   blkcg_punt_bio_submit() → queue_work() → [blkg_async_bio_workfn]
+ *     → submit_bio()
  */
-
 static void blkg_async_bio_workfn(struct work_struct *work)
 {
+	/* [한국어] work_struct 에서 이 bio 들의 주인 blkg 를 복원한다. */
 	struct blkcg_gq *blkg = container_of(work, struct blkcg_gq,
-	/* [한국어] work 로부터 blkg 복원 */
 					     async_bio_work);
+	/* [한국어] blkg->async_bios 를 통째로 옮겨 받을 지역 리스트.
+	 * 지역으로 옮기면 락을 짧게 잡고, 제출은 락 밖에서 할 수 있다. */
 	struct bio_list bios = BIO_EMPTY_LIST;
-	/* [한국어] 비동기 제출 대기 중인 bio 들의 임시 리스트 */
+	/* [한국어] 리스트에서 하나씩 꺼낸 bio. */
 	struct bio *bio;
+	/* [한국어] 여러 bio 를 모아 한 번에 드라이버로 내려보내기 위한 plug 컨텍스트.
+	 * plug 는 현재 태스크(current->plug)에 매달리는 스택 지역 구조체다. */
 	struct blk_plug plug;
-	/* [한국어] plug/batch 시작점; NVMe multi-queue parallelism 를 위한 제출 배치링 */
+	/* [한국어] plug 을 실제로 시작했는지 여부. 끝에서 짝 맞춰 finish 하기 위함. */
 	bool need_plug = false;
-	/* [한국어] bio 가 2개 이상일 때만 plug 를 시작하여 doorbell batching 효과 극대화 */
 
 	/* as long as there are pending bios, @blkg can't go away */
+	/* [한국어] async_bios 는 제출자(punt_bio_submit)와 이 워커가 동시에 만지므로
+	 * 스핀락으로 보호한다. IRQ 문맥에서는 접근하지 않으므로 _irq 변형이 아니다. */
 	spin_lock(&blkg->async_bio_lock);
-	/* [한국어] async_bios 리스트와 work 경쟁 보호 */
+	/* [한국어] blkg->async_bios 의 내용을 지역 bios 로 옮기고 원본은 비운다.
+	 * 이후 새로 들어오는 bio 는 비워진 리스트에 쌓이고 다음 work 실행이 처리한다. */
 	bio_list_merge_init(&bios, &blkg->async_bios);
-	/* [한국어] lock 보호 하에 대기 bio 들을 로컬 리스트로 이동 */
+	/* [한국어] 리스트 이관이 끝났으므로 즉시 락을 놓는다. submit_bio 는 오래 걸리고
+	 * 잠들 수도 있어 락을 쥔 채 부르면 안 된다. */
 	spin_unlock(&blkg->async_bio_lock);
-	/* [한국어] 리스트 이동 완료 후 lock 해제; 이후 submit_bio 는 queue_lock 등 다른 lock 과 교차 가능 */
 
 	/* start plug only when bio_list contains at least 2 bios */
+	/* [한국어] head 가 있고 head->bi_next 도 있으면 bio 가 2개 이상이라는 뜻.
+	 * 1개뿐이면 plug 을 걸어도 병합할 상대가 없어 오히려 오버헤드만 는다. */
 	if (bios.head && bios.head->bi_next) {
-		/* [한국어] bio 가 2개 이상이면 plug 시작 -> NVMe SQ batch submit 및 doorbell 최소화 */
 		need_plug = true;
+		/* [한국어] 이 구간의 submit_bio 결과 request 들이 곧바로 드라이버로 가지 않고
+		 * current->plug 리스트에 모였다가 finish 시점에 일괄 dispatch 된다. */
 		blk_start_plug(&plug);
-		/* [한국어] plug 구조체 초기화; 이 구간의 submit_bio 가 NVMe multi-queue scheduler plug list 로 모임 */
 	}
+	/* [한국어] 리스트가 빌 때까지 하나씩 꺼내 정상 제출 경로로 넘긴다.
+	 * bio->bi_blkg 는 이미 원래 cgroup 으로 설정돼 있으므로, 제출자가 워커라도
+	 * 요금은 원래 cgroup 에 매겨진다. */
 	while ((bio = bio_list_pop(&bios)))
-	/* [한국어] 대기 bio 리스트를 순회하며 submit_bio; NVMe SQ/CQ CID 태그 할당의 시작점 */
 		submit_bio(bio);
-		/* [한국어] bio -> blk_mq_submit_bio -> blk_mq_get_request -> nvme_queue_rq -> nvme_submit_cmd(doorbell) */
+	/* [한국어] plug 을 시작했던 경우에만 닫는다. 여기서 모인 요청들이 실제로
+	 * 드라이버 큐로 내려간다. */
 	if (need_plug)
 		blk_finish_plug(&plug);
-		/* [한국어] plug 종료; NVMe hctx dispatch 로의 일괄 제출 유도 */
 }
 
 /*
@@ -430,34 +663,48 @@ static void blkg_async_bio_workfn(struct work_struct *work)
  */
 /*
  * [한국어]
- * blkcg_punt_bio_submit - kthread 발행 bio 를 workqueue 로 우회
+ * blkcg_punt_bio_submit - submit_bio() 대신 쓰는, 우회 제출용 진입점
  *
- * 호출 경로: block layer 의 shared kthread submit 경로 ->
- *            blkcg_punt_bio_submit()
- * NVMe 연결점: root cgroup 에는 bounce 하지 않고, 하위 cgroup 의 bio 는
- *   async_bios 리스트에 연결한 뒤 workqueue 에서 순차적으로 submit_bio 한다.
- *   이로 인해 NVMe queue 로의 실제 제출 시점이 지연되지만 우선순위 역전을
- *   방지한다.
+ * @bio: 제출할 bio. bi_blkg 가 이미 설정돼 있어야 한다(호출 전에
+ *       bio_associate_blkg 계열로 cgroup 이 붙어 있는 상태).
+ * @return: 없음. bio 의 완료는 평소처럼 bi_end_io 로 통지된다.
+ *
+ * 왜 필요한가(위 영문 주석의 요지): 여러 cgroup 이 공유하는 kthread 가 특정
+ * cgroup 을 대신해 bio 를 동기적으로 제출하면, 그 cgroup 의 IO 제한에 걸려
+ * kthread 가 통째로 멈출 수 있다. 그러면 다른 cgroup 의 작업까지 함께 굶는
+ * 우선순위 역전이 일어난다. 그래서 제출 자체를 blkg 별 work item 으로 넘긴다.
+ *
+ * 실행 컨텍스트: 호출자 문맥(주로 kthread, 프로세스 컨텍스트).
+ * 이 함수는 잠들지 않는다 — 실제 제출은 워커가 대신 한다.
+ *
+ * 호출 체인:
+ *   (공유 kthread 의 bio 제출 지점) → [blkcg_punt_bio_submit]
+ *     → queue_work() → blkg_async_bio_workfn() → submit_bio()
  */
-
 void blkcg_punt_bio_submit(struct bio *bio)
 {
+	/* [한국어] 이 bio 가 어느 cgroup 몫인지는 bi_blkg 에 이미 박혀 있다. */
 	struct blkcg_gq *blkg = bio->bi_blkg;
-	/* [한국어] bio 에 연결된 cgroup context; NVMe SQ/CQ 선택의 상위 기준 */
 
+	/* [한국어] parent 가 있다 == 루트가 아닌 cgroup 이다.
+	 * 루트에는 IO 제한이 없으므로 우회할 이유가 없다(아래 else). */
 	if (blkg->parent) {
-		/* [한국어] root 가 아닌 cgroup 의 bio 만 비동기 우회 제출 */
+		/* [한국어] 이 blkg 의 대기 리스트를 워커와 공유하므로 스핀락으로 보호. */
 		spin_lock(&blkg->async_bio_lock);
-		/* [한국어] async_bios 리스트 보호 */
+		/* [한국어] 제출하지 않고 리스트 꼬리에 매단다. bio 가 blkg 참조를 들고
+		 * 있으므로, 리스트에 남아 있는 동안 blkg 는 해제되지 않는다. */
 		bio_list_add(&blkg->async_bios, bio);
-		/* [한국어] bio 를 async 대기열에 추가; 실제 NVMe doorbell 은 workqueue 에서 지연 */
 		spin_unlock(&blkg->async_bio_lock);
+		/* [한국어] blkg 전용 work 를 큐잉한다. 이미 큐잉/실행 중이면 queue_work 는
+		 * 아무 일도 하지 않고 false 를 반환하는데, 그래도 문제없다 —
+		 * 워커가 리스트를 통째로 비우는 방식이라 새 항목도 함께 처리되거나
+		 * 다음 큐잉에서 처리된다. */
 		queue_work(blkcg_punt_bio_wq, &blkg->async_bio_work);
-		/* [한국어] workqueue 에서 blkg_async_bio_workfn 실행 -> submit_bio -> NVMe 경로 */
 	} else {
 		/* never bounce for the root cgroup */
+		/* [한국어] 루트 cgroup 은 제한을 받지 않으므로 우회 지연을 만들 필요가 없다.
+		 * 곧바로 정상 제출 경로로 보낸다. */
 		submit_bio(bio);
-		/* [한국어] root cgroup bio 는 직접 제출; 추가 지연 없이 NVMe SQ 로 진입 */
 	}
 }
 EXPORT_SYMBOL_GPL(blkcg_punt_bio_submit);
@@ -495,17 +742,21 @@ EXPORT_SYMBOL_GPL(blkcg_punt_bio_submit);
  */
 static int __init blkcg_punt_bio_init(void)
 {
+	/* [한국어] 플래그 조합의 의미는 위 함수 주석 참조. 마지막 인자 0 은
+	 * max_active(동시 실행 work 수 제한) 를 기본값에 맡긴다는 뜻이다. */
 	blkcg_punt_bio_wq = alloc_workqueue("blkcg_punt_bio",
-	/* [한국어] unbound workqueue; kthread 우회 bio 가 NVMe submit 경로로 진입할 때 CPU affinity 와 무관하게 스케줄링 */
 					    WQ_MEM_RECLAIM | WQ_FREEZABLE |
 					    WQ_UNBOUND | WQ_SYSFS, 0);
 	if (!blkcg_punt_bio_wq)
-	/* [한국어] workqueue 할당 실패 시 NVMe kthread 우회 제출 인프라 초기화 실패 */
+		/* [한국어] 부팅 초기 메모리 부족. initcall 이 음수를 반환하면 커널이
+		 * 경고를 남기지만 부팅은 계속된다. */
 		return -ENOMEM;
+	/* [한국어] 워크큐 준비 완료. 이제 blkcg_punt_bio_submit() 을 쓸 수 있다. */
 	return 0;
 }
+/* [한국어] 부팅 시 subsys 초기화 단계에서 위 함수를 실행하도록 등록한다.
+ * 블록 계층이 올라오기 전에 워크큐가 준비돼 있어야 하므로 이 단계를 쓴다. */
 subsys_initcall(blkcg_punt_bio_init);
-	/* [한국어] 서브시스템 초기화 시 workqueue 등록; NVMe IO 우회 경로 준비 */
 #endif /* CONFIG_BLK_CGROUP_PUNT_BIO */
 
 /**
@@ -518,21 +769,34 @@ subsys_initcall(blkcg_punt_bio_init);
  */
 /*
  * [한국어]
- * bio_blkcg_css - bio 에 연결된 blkcg 의 css 반환
+ * bio_blkcg_css - bio 가 어느 cgroup 것인지 css 형태로 되돌려주는 조회 헬퍼
  *
- * 호출 경로: blk_cgroup_mergeable() 등
- * NVMe 연결점: bio->bi_blkg 를 통해 NVMe IO 가 속한 cgroup 을 조회한다.
- *   merge 가능 여부 판단 등에서 cgroup 이 일치해야 같은 SQ batching 대상으로
- *   볼 수 있다.
+ * @bio: 대상 bio. NULL 이어도 된다(아래에서 방어한다).
+ * @return: bio 에 결합된 blkcg 의 css. 결합되지 않았거나 bio 가 NULL 이면 %NULL.
+ *          위 영문 주석대로, 호출자는 NULL 을 처리하거나 "이 시점에는 반드시
+ *          결합돼 있다" 를 스스로 알고 있어야 한다.
+ *
+ * 왜 필요한가: blkg 는 (blkcg, queue) 쌍이므로 bio->bi_blkg 하나에서 cgroup 을
+ * 역으로 알아낼 수 있다. cgroup 단위 비교/판정이 필요한 곳(예: 서로 다른
+ * cgroup 의 bio 를 하나의 request 로 합치면 요금 계산이 틀어지므로 병합을
+ * 막는 검사)에서 이 헬퍼로 css 를 꺼내 비교한다.
+ *
+ * 실행 컨텍스트: 제한 없음. 다만 반환된 css 는 참조를 잡아 주지 않으므로,
+ * bio 가 살아 있는 동안에만 유효하다고 보아야 한다(bio 가 blkg 참조를,
+ * blkg 가 css 참조를 들고 있어 그 사슬로 생존이 보장된다).
+ *
+ * 호출 체인:
+ *   blk_cgroup_mergeable() 등 cgroup 비교가 필요한 지점 → [bio_blkcg_css]
  */
-
 struct cgroup_subsys_state *bio_blkcg_css(struct bio *bio)
 {
+	/* [한국어] bio 자체가 없거나, 아직 bio_associate_blkg() 를 거치지 않아
+	 * cgroup 이 붙지 않은 bio 는 소속을 말할 수 없으므로 NULL. */
 	if (!bio || !bio->bi_blkg)
-	/* [한국어] bio 가 없거나 cgroup 미연결 시 NULL; NVMe passthrough/admin 명령 등 */
 		return NULL;
+	/* [한국어] bio → blkg → blkcg → css 로 두 단계 역참조한다.
+	 * blkg 가 blkcg 를 가리키는 것은 blkg 생성 시 고정되며 이후 바뀌지 않는다. */
 	return &bio->bi_blkg->blkcg->css;
-	/* [한국어] bio->bi_blkg 경로로 cgroup css 반환 */
 }
 EXPORT_SYMBOL_GPL(bio_blkcg_css);
 
@@ -569,8 +833,10 @@ EXPORT_SYMBOL_GPL(bio_blkcg_css);
  */
 static inline struct blkcg *blkcg_parent(struct blkcg *blkcg)
 {
+	/* [한국어] cgroup 계층은 css 가 관리하므로 css.parent 로 한 칸 올라간 뒤,
+	 * css_to_blkcg() (container_of 래퍼)로 다시 blkcg 로 되돌린다.
+	 * 루트에서는 css.parent 가 NULL 이고, css_to_blkcg(NULL) 은 NULL 을 준다. */
 	return css_to_blkcg(blkcg->css.parent);
-	/* [한국어] css.parent 를 blkcg 로 변환; NVMe queue 의 cgroup 트리 탐색 */
 }
 
 /**
@@ -583,111 +849,166 @@ static inline struct blkcg *blkcg_parent(struct blkcg *blkcg)
  */
 /*
  * [한국어]
- * blkg_alloc - blkcg 와 request_queue(disk)를 연결하는 blkg 할당
+ * blkg_alloc - (blkcg, disk->queue) 교차점을 나타내는 blkg 객체를 만들어 채운다
  *
- * 호출 경로: blkcg_init_disk() -> blkg_alloc()
- *            blkg_conf_prep() -> blkg_alloc()
- * NVMe 연결점: NVMe namespace 의 gendisk 와 cgroup 을 연결하는 blkg 를
- *   생성한다. 이후 pd_alloc_fn() 으로 throtl/BFQ/ioprio 정책 데이터를 할당해
- *   nvme_queue_rq() 호출 시 적용할 cgroup 단위 상태를 준비한다.
+ * @blkcg: 이 blkg 가 대표할 cgroup. 이후 blkg->blkcg 로 고정된다.
+ * @disk:  이 blkg 가 대표할 블록 장치. 실제로 붙는 대상은 disk->queue 다.
+ * @gfp_mask: 할당 플래그. 호출 문맥에 따라 GFP_KERNEL 또는 GFP_NOWAIT 이 온다
+ *            (락을 쥔 채 부르는 경로가 있어 무조건 잠들 수 없다).
+ * @return: 완성된 blkg, 실패 시 NULL. 반환된 blkg 는 아직 어떤 자료구조에도
+ *          등록되지 않은 "고아" 상태다 — 등록은 blkg_create() 가 한다.
+ *
+ * === 왜 (blkcg, queue) 쌍마다 하나인가 ===
+ * cgroup 은 여러 장치에 IO 를 낼 수 있고, 한 장치는 여러 cgroup 이 함께 쓴다.
+ * 즉 "cgroup × 장치" 는 2차원 격자이고, 제한값·통계·정책 상태는 그 격자의
+ * 칸마다 따로 있어야 한다(예: cgroup A 의 sda 제한과 sdb 제한은 별개).
+ * 그 한 칸이 바로 blkg 다. 그래서 blkg 는 blkcg 쪽 리스트(blkcg->blkg_list)와
+ * queue 쪽 리스트(q->blkg_list)에 동시에 매달리고, blkcg->blkg_tree 라는
+ * radix tree 에 queue id 를 키로 색인된다.
+ *
+ * === 이 함수가 준비하는 것 ===
+ * (1) blkg 구조체 자체와 percpu_ref 참조 카운터
+ * (2) per-cpu IO 통계 영역(iostat_cpu)
+ * (3) request_queue 참조 획득 — blkg 가 사는 동안 큐가 사라지면 안 된다
+ * (4) 그 큐에서 활성화된 모든 정책의 pd(정책 데이터)를 할당해 pd[] 에 꽂기
+ * 실패하면 goto 사슬을 역순으로 타고 내려가며 정확히 반대 순서로 되돌린다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. gfp_mask 가 GFP_NOWAIT 인 경로
+ * (blkg_lookup_create 가 queue_lock 을 쥔 채 부르는 경우)도 있으므로,
+ * 이 함수는 잠드는 것을 전제해서는 안 된다.
+ *
+ * 호출 체인:
+ *   blkcg_init_disk() / blkg_lookup_create() / blkg_conf_prep()
+ *     → [blkg_alloc] → percpu_ref_init / alloc_percpu_gfp / blk_get_queue
+ *                      / pol->pd_alloc_fn
  */
-
 static struct blkcg_gq *blkg_alloc(struct blkcg *blkcg, struct gendisk *disk,
 				   gfp_t gfp_mask)
 {
+	/* [한국어] 만들어 반환할 blkg. 실패 경로에서 부분 해제 대상이 된다. */
 	struct blkcg_gq *blkg;
-	/* [한국어] 할당될 blkcg_gq 객체; NVMe request_queue 와 cgroup 의 1:1 연결체 */
+	/* [한국어] i 는 정책 슬롯(plid) 인덱스, cpu 는 per-cpu 통계 초기화 인덱스. */
 	int i, cpu;
 
 	/* alloc and init base part */
+	/* [한국어] 큐가 속한 NUMA 노드에서 0 으로 초기화된 blkg 를 할당한다.
+	 * _node 변형을 쓰는 이유는 이 blkg 를 주로 만지는 것이 그 큐에 IO 를 내는
+	 * 경로이기 때문 — 같은 노드 메모리를 쓰면 원격 노드 접근을 줄일 수 있다.
+	 * kzalloc 이라 pd[] 와 각종 포인터가 자동으로 NULL 이 되고, 이는 아래
+	 * 실패 경로의 NULL 검사가 성립하는 전제이기도 하다. */
 	blkg = kzalloc_node(sizeof(*blkg), gfp_mask, disk->queue->node);
-	/* [한국어] NVMe namespace q 의 NUMA node 에 blkg 할당; 메모리 지역성으로 NVMe CQ 완료 경로 성능 향상(추정) */
 	if (!blkg)
-		/* [한국어] blkg 할당 실패 시 NVMe cgroup 분류 불가; 상위에서 root blkg 로 fallback */
+		/* [한국어] 첫 할당부터 실패 — 되돌릴 것이 없으므로 바로 NULL. */
 		return NULL;
+	/* [한국어] 참조 카운터를 per-cpu 모드로 초기화한다. 인자 순서는
+	 * (ref, release 콜백, 초기 플래그, gfp). 초기 플래그 0 은 "처음부터
+	 * per-cpu 모드로 시작" 을 뜻하고, 카운트는 1 에서 시작한다.
+	 * 0 이 되면 blkg_release() 가 불린다(단, percpu_ref_kill 이후에만 판정됨). */
 	if (percpu_ref_init(&blkg->refcnt, blkg_release, 0, gfp_mask))
-	/* [한국어] percpu_ref 초기화; NVMe IO 가 blkg 를 참조하는 동안 메모리 유지 */
 		goto out_free_blkg;
+	/* [한국어] CPU 마다 하나씩인 통계 묶음(blkg_iostat_set). IO 제출 핫패스가
+	 * 락 없이 여기에 누적하고, flush 때 전역 iostat 으로 합산된다. */
 	blkg->iostat_cpu = alloc_percpu_gfp(struct blkg_iostat_set, gfp_mask);
-	/* [한국어] NVMe 멀티 코어 CQ 완료용 per-cpu 통계 영역 할당 */
 	if (!blkg->iostat_cpu)
+		/* [한국어] percpu_ref 를 이미 초기화했으므로 그것부터 되돌린다. */
 		goto out_exit_refcnt;
-		/* [한국어] per-cpu 통계 할당 실패 시 blkg 할당 롤백 */
+	/* [한국어] 큐 참조를 하나 얻는다. blkg 가 살아 있는 한 request_queue 가
+	 * 해제되면 안 되기 때문이다. 큐가 이미 죽어가는 중이면 실패하며,
+	 * 그때는 이 blkg 를 만들 이유도 없다. 짝이 되는 반납은 blkg_free_workfn(). */
 	if (!blk_get_queue(disk->queue))
-	/* [한국어] request_queue(NVMe namespace q) 참조 획득 실패 시 롤백; queue 가 dying 상태면 실패할 수 있음 */
 		goto out_free_iostat;
 
+	/* [한국어] 이 blkg 가 붙는 큐를 고정한다. 이후 변경되지 않는 불변 필드. */
 	blkg->q = disk->queue;
-	/* [한국어] blkg 가 속한 NVMe request_queue 설정 */
+	/* [한국어] q->blkg_list 에 매달릴 링크를 빈 상태로 초기화. 실제 연결은
+	 * blkg_create() 에서, 해제는 blkg_free_workfn() 에서 한다. */
 	INIT_LIST_HEAD(&blkg->q_node);
-	/* [한국어] request_queue->blkg_list 연결 준비 */
+	/* [한국어] 이 blkg 가 대표하는 cgroup 을 고정한다. 이것 역시 불변 필드이며,
+	 * (blkcg, q) 쌍이 blkg 의 정체성이다. */
 	blkg->blkcg = blkcg;
-	/* [한국어] blkg 가 대표하는 cgroup 설정 */
+	/* [한국어] 전역 통계 묶음이 자기 주인 blkg 를 역참조하도록 백포인터를 건다.
+	 * flush 코드가 iostat 포인터만 들고 blkg 를 찾아가야 하기 때문. */
 	blkg->iostat.blkg = blkg;
-	/* [한국어] global 통계가 역참조할 blkg 설정 */
 #ifdef CONFIG_BLK_CGROUP_PUNT_BIO
+	/* [한국어] 우회 제출 대기 리스트를 보호할 스핀락 초기화. */
 	spin_lock_init(&blkg->async_bio_lock);
-	/* [한국어] kthread 우회 bio 리스트 보호 */
+	/* [한국어] 우회 제출 대기 bio 리스트를 빈 상태로 초기화. */
 	bio_list_init(&blkg->async_bios);
-	/* [한국어] kthread 우회 대기 bio 리스트 초기화 */
+	/* [한국어] 그 리스트를 처리할 work 를 blkg_async_bio_workfn 으로 묶는다. */
 	INIT_WORK(&blkg->async_bio_work, blkg_async_bio_workfn);
 #endif
 
+	/* [한국어] u64_stats_sync 초기화. 32비트 아키텍처에서 64비트 카운터를
+	 * 찢김 없이 읽기 위한 seqcount 이며, 64비트에서는 사실상 no-op 이다. */
 	u64_stats_init(&blkg->iostat.sync);
-	/* [한국어] global 통계의 u64_stats_sync 초기화 (32bit 배경) */
+	/* [한국어] possible CPU 전부에 대해 per-cpu 통계 슬롯을 초기화한다.
+	 * 나중에 핫플러그로 올라올 CPU 도 준비돼 있어야 하므로 online 이 아니라
+	 * possible 을 돈다. */
 	for_each_possible_cpu(cpu) {
-	/* [한국어] 모든 CPU 에 대해 per-cpu 통계 초기화; NVMe 멀티 큐 완료 경로의 lockless 집계 준비 */
+		/* [한국어] 각 CPU 슬롯의 seqcount 초기화. */
 		u64_stats_init(&per_cpu_ptr(blkg->iostat_cpu, cpu)->sync);
-		/* [한국어] per-cpu 통계의 seqlock/u64_stats_sync 초기화 */
+		/* [한국어] 각 CPU 슬롯도 자기 blkg 를 가리키게 한다. flush 시
+		 * llist 에서 꺼낸 iostat_set 하나만으로 blkg 를 찾아야 하기 때문이다. */
 		per_cpu_ptr(blkg->iostat_cpu, cpu)->blkg = blkg;
-		/* [한국어] per-cpu 통계가 역참조할 blkg 설정 */
 	}
 
+	/* [한국어] 정책 슬롯을 0..BLKCG_MAX_POLS-1 까지 훑으며, 이 큐에서 켜져 있는
+	 * 정책마다 전용 데이터를 할당해 pd[i] 에 꽂는다. i 가 곧 pol->plid 다. */
 	for (i = 0; i < BLKCG_MAX_POLS; i++) {
-	/* [한국어] 활성화된 모든 cgroup 정책에 대해 private data 할당/연결 */
-	/* [한국어] queue 제거 시 모든 활성화된 cgroup 정책 비트 클리어 */
+		/* [한국어] 전역 테이블에서 i 번 정책을 꺼낸다. 등록된 정책이 없으면 NULL. */
 		struct blkcg_policy *pol = blkcg_policy[i];
-		/* [한국어] i 번째 정책(throtl/BFQ/ioprio) 포인터 */
+		/* [한국어] 이 정책이 이 blkg 에 붙일 데이터. 정책마다 실제 타입이 다르지만
+		 * 공통 헤더(blkg_policy_data)를 앞에 두는 규약으로 통일돼 있다. */
 		struct blkg_policy_data *pd;
-		/* [한국어] 정책별 private data 포인터; bfq_queue/throtl_data 등 */
 
+		/* [한국어] pol 이 NULL 이거나, 등록은 됐어도 이 큐에서 활성화되지 않았으면
+		 * 건너뛴다. blkcg_policy_enabled() 는 q->blkcg_pols 비트맵의 plid 비트를
+		 * 확인하는 헬퍼다(blk-cgroup.h). */
 		if (!blkcg_policy_enabled(disk->queue, pol))
-		/* [한국어] 해당 queue(NVMe namespace)에서 이 정책이 켜져 있을 때만 pd 할당 */
-		/* [한국어] 해당 queue(NVMe namespace)에서 이 정책이 켜져 있을 때만 할당 */
 			continue;
 
 		/* alloc per-policy data and attach it to blkg */
+		/* [한국어] 정책이 자기 구조체를 직접 할당한다(예: blk-throttle 의
+		 * throtl_grp, iocost 의 ioc_gq, iolatency 의 iolatency_grp). */
 		pd = pol->pd_alloc_fn(disk, blkcg, gfp_mask);
-		/* [한국어] 정책별 private data 할당 (예: throtl_data, bfq_queue); NVMe queue depth/latency 제어 상태 */
-		/* [한국어] 정책별 private data 할당 (예: throtl_data, bfq_queue) */
 		if (!pd)
-		/* [한국어] pd 할당 실패 시 지금까지 할당한 pd 롤백 */
+			/* [한국어] 여기까지 할당한 pd 들을 역순으로 되돌려야 한다. */
 			goto out_free_pds;
+		/* [한국어] blkg 의 i 번 슬롯에 꽂는다. 이후 정책 코드는 blkg->pd[plid] 만
+		 * 보면 자기 데이터를 찾을 수 있다. */
 		blkg->pd[i] = pd;
-		/* [한국어] blkg 에 정책 데이터 연결; nvme_queue_rq() 시 이 데이터로 SQ/CQ 선택/제한 */
+		/* [한국어] pd → blkg 역참조. 정책 콜백은 pd 만 받으므로 여기서 blkg 로
+		 * 되돌아갈 수 있어야 한다(pd_to_blkg 헬퍼가 이 필드를 쓴다). */
 		pd->blkg = blkg;
-		/* [한국어] pd 가 역참조할 blkg 설정 */
+		/* [한국어] 자기 슬롯 번호를 기록. blkcg_policy[pd->plid] 로 정책을 되찾는다. */
 		pd->plid = i;
-		/* [한국어] policy id 기록; q->blkcg_pols 비트와 대응 */
+		/* [한국어] 아직 pd_online_fn 이 불리기 전이므로 false.
+		 * blkg_create() 가 등록을 마친 뒤 online 으로 뒤집는다. */
 		pd->online = false;
-		/* [한국어] 아직 online 콜백 전; IO 경로에서 pd 사용은 online 이후 */
 	}
 
+	/* [한국어] 모든 준비 완료 — 아직 등록되지 않은 blkg 를 호출자에게 넘긴다. */
 	return blkg;
 
 out_free_pds:
+	/* [한국어] 실패한 i 번은 할당되지 않았으므로 --i 부터(즉 직전 슬롯부터)
+	 * 0 까지 역순으로 되돌린다. */
 	while (--i >= 0)
-	/* [한국어] 할당 실패 시 역순으로 이미 할당한 정책 데이터 해제 */
+		/* [한국어] 활성화되지 않아 건너뛴 슬롯은 NULL 이므로 검사한다. */
 		if (blkg->pd[i])
-		/* [한국어] i 번째 pd 가 존재하면 해제 */
+			/* [한국어] 정책이 자기 방식대로 해제하도록 콜백을 부른다. */
 			blkcg_policy[i]->pd_free_fn(blkg->pd[i]);
-			/* [한국어] throtl/BFQ 상태 해제; NVMe queue 의 cgroup 제어 상태 복구 */
+	/* [한국어] 위에서 얻은 큐 참조 반납. */
 	blk_put_queue(disk->queue);
 out_free_iostat:
+	/* [한국어] per-cpu 통계 영역 반납. */
 	free_percpu(blkg->iostat_cpu);
 out_exit_refcnt:
+	/* [한국어] percpu_ref 내부 per-cpu 카운터 반납. 아직 kill 도 get 도 없었으므로
+	 * 곧바로 exit 해도 안전하다. */
 	percpu_ref_exit(&blkg->refcnt);
 out_free_blkg:
+	/* [한국어] 마지막으로 구조체 자체 해제 후 실패를 알린다. */
 	kfree(blkg);
 	return NULL;
 }
@@ -698,128 +1019,180 @@ out_free_blkg:
  */
 /*
  * [한국어]
- * blkg_create - blkg 를 생성하고 radix tree/list 에 등록
+ * blkg_create - blkg 를 만들어 blkcg 와 queue 양쪽 자료구조에 등록한다
  *
- * 호출 경로: blkcg_init_disk() -> blkg_create()
- *            blkg_lookup_create() -> blkg_create()
- * NVMe 연결점: root blkg 부터 타겟 blkcg 까지 부모를 따라 남겨가며 생성해
- *   하위 cgroup 이 항상 상위 blkg->parent 를 참조할 수 있게 한다. 등록 후
- *   q->blkg_list 에 추가되어 NVMe request_queue 의 cgroup 분류 체계가 완성된다.
+ * @blkcg: 이 blkg 가 대표할 cgroup.
+ * @disk:  이 blkg 가 대표할 장치(실제 대상은 disk->queue).
+ * @new_blkg: 호출자가 미리 할당해 둔 blkg. NULL 이면 이 함수가 GFP_NOWAIT 로
+ *            직접 할당한다. 위 영문 주석대로 성공/실패와 무관하게 항상
+ *            "소비"된다 — 실패 시 이 함수가 해제하므로 호출자는 다시 free
+ *            하면 안 된다.
+ * @return: 등록된 blkg, 실패 시 ERR_PTR(-ENODEV/-ENOMEM 등).
+ *
+ * === 이 함수가 blkg 를 "보이게" 만드는 세 곳 ===
+ * (1) blkcg->blkg_tree (radix tree, 키 = queue->id) — blkg_lookup() 의 주 색인
+ * (2) blkcg->blkg_list (hlist, RCU) — 이 cgroup 이 가진 blkg 전체 열거용
+ * (3) q->blkg_list (list) — 이 큐에 붙은 blkg 전체 열거용(정책 활성화/해제,
+ *     디스크 제거 시 일괄 정리에 쓰인다)
+ * 이 세 등록을 blkcg->lock 안에서 원자적으로 처리해, 어느 한쪽에만 있는
+ * 중간 상태가 다른 CPU 에 보이지 않게 한다.
+ *
+ * === 계층 연결 ===
+ * 루트가 아닌 cgroup 의 blkg 는 반드시 "같은 큐에 대한 부모 cgroup 의 blkg" 를
+ * parent 로 가져야 한다. 통계는 자식→부모로 합산되고, 정책 제한도 계층적으로
+ * 적용되기 때문이다. 그래서 호출자(blkg_lookup_create)가 루트부터 아래로
+ * 내려오며 순서대로 만들어 주고, 여기서는 부모가 이미 있다고 가정한다.
+ * 없으면 WARN_ON_ONCE 로 잡히는 논리 오류다.
+ *
+ * 실행 컨텍스트: disk->queue->queue_lock 을 쥔 상태여야 한다(lockdep 로 강제).
+ * 그 락이 spin_lock_irqsave 로 잡혀 있을 수 있으므로 잠들 수 없고,
+ * 그래서 내부 할당이 GFP_NOWAIT 이다.
+ *
+ * 호출 체인:
+ *   blkg_lookup_create() / blkcg_init_disk()
+ *     → [blkg_create] → blkg_alloc(), radix_tree_insert(), pd_init_fn/pd_online_fn
  */
-
 static struct blkcg_gq *blkg_create(struct blkcg *blkcg, struct gendisk *disk,
 				    struct blkcg_gq *new_blkg)
 {
+	/* [한국어] 실제로 등록할 blkg (new_blkg 를 그대로 쓴다). */
 	struct blkcg_gq *blkg;
-	/* [한국어] 생성/등록될 blkg */
+	/* [한국어] i 는 정책 슬롯 인덱스, ret 는 오류 코드/삽입 결과. */
 	int i, ret;
 
+	/* [한국어] 이 함수는 queue_lock 을 이미 쥐고 있어야 한다. blkg 등록과
+	 * 큐 상태(dying 여부, blkg_list) 확인이 원자적이어야 하기 때문이다.
+	 * lockdep 이 꺼진 커널에서는 아무 코드도 생성되지 않는다. */
 	lockdep_assert_held(&disk->queue->queue_lock);
-	/* [한국어] queue_lock 이 잡힌 상태에서만 blkg 생성; NVMe request_queue 상태 일관성 보호 */
 
 	/* request_queue is dying, do not create/recreate a blkg */
+	/* [한국어] 큐가 제거 중이면 새 blkg 를 만들어 봐야 곧 지워질 뿐이고,
+	 * blkg_destroy_all() 이 이미 지나간 뒤라면 영영 정리되지 않는 누수가 된다.
+	 * 그래서 -ENODEV 로 거절한다. */
 	if (blk_queue_dying(disk->queue)) {
-	/* [한국어] queue 가 제거 중이면 새 blkg 를 만들지 않음; NVMe controller reset/remove 경로 */
-	/* [한국어] queue 가 제거 중이면 새 blkg 를 만들지 않음 */
 		ret = -ENODEV;
-		/* [한국어] dying queue 에 대한 blkg 생성 거부 */
 		goto err_free_blkg;
 	}
 
 	/* blkg holds a reference to blkcg */
+	/* [한국어] blkg 는 자기 cgroup 의 css 참조를 하나 들고 산다.
+	 * tryget_"online" 인 이유: 이미 오프라인(rmdir 진행 중)인 cgroup 에
+	 * 새 blkg 를 붙이면, 그 cgroup 의 정리 루틴(blkcg_destroy_blkgs)이
+	 * 이미 지나가 버려 blkg 가 남을 수 있기 때문이다. */
 	if (!css_tryget_online(&blkcg->css)) {
-	/* [한국어] cgroup 이 online 상태가 아니면 blkg 생성 실패; cgroup 소멸 중일 때 NVMe IO spill 방지 */
-	/* [한국어] cgroup 이 online 상태가 아니면 blkg 생성 실패 */
 		ret = -ENODEV;
 		goto err_free_blkg;
 	}
 
 	/* allocate */
+	/* [한국어] 호출자가 미리 만들어 준 blkg 가 없으면 여기서 만든다. */
 	if (!new_blkg) {
-	/* [한국어] 호출자가 미리 할당한 blkg 가 없으면 GFP_NOWAIT 로 시도 */
+		/* [한국어] queue_lock 을 쥔 상태라 잠들 수 없으므로 GFP_NOWAIT.
+		 * 메모리 압박 시 실패할 수 있고, 그 실패는 치명적이지 않다 —
+		 * 호출자가 가장 가까운 조상 blkg 로 대체한다. */
 		new_blkg = blkg_alloc(blkcg, disk, GFP_NOWAIT);
-		/* [한국어] IO 경로에서 락을 잡은 채로 빠르게 blkg 할당 시도 */
 		if (unlikely(!new_blkg)) {
-		/* [한국어] GFP_NOWAIT 실패 시 -ENOMEM; 상위 blkg 로 fallback 가능 */
 			ret = -ENOMEM;
 			goto err_put_css;
 		}
 	}
+	/* [한국어] 이후 코드는 blkg 라는 이름으로 다룬다. */
 	blkg = new_blkg;
-	/* [한국어] 할당받은 blkg 를 실제 등록 대상으로 설정 */
 
 	/* link parent */
+	/* [한국어] 부모 cgroup 이 있다 == 루트가 아니다. 루트 blkg 는 parent 가 NULL. */
 	if (blkcg_parent(blkcg)) {
-	/* [한국어] root 가 아닌 cgroup 이면 부모 blkg 와 연결 */
+		/* [한국어] "부모 cgroup + 같은 큐" 의 blkg 를 찾는다. 호출자가 루트부터
+		 * 차례로 만들어 내려왔다면 반드시 존재한다. */
 		blkg->parent = blkg_lookup(blkcg_parent(blkcg), disk->queue);
-		/* [한국어] 상위 cgroup blkg 를 찾아 계층 구조 연결; throttle/통계 전파 경로 */
-		/* [한국어] 상위 cgroup blkg 를 찾아 계층 구조 연결 */
+		/* [한국어] 없다면 생성 순서 규약이 깨진 것이므로 커널 버그다.
+		 * _ONCE 라 로그 폭주 없이 한 번만 경고하고 실패 처리한다. */
 		if (WARN_ON_ONCE(!blkg->parent)) {
-		/* [한국어] 부모 blkg 가 없으면 계층 구조 파괴; 버그로 간주 */
 			ret = -ENODEV;
 			goto err_put_css;
 		}
+		/* [한국어] 자식이 사는 동안 부모가 해제되면 안 되므로 참조를 잡는다.
+		 * 반납은 blkg_free_workfn() 의 blkg_put(blkg->parent). */
 		blkg_get(blkg->parent);
-		/* [한국어] 부모 참조 획득; 자식 blkg 수명 동안 부모 유지 */
 	}
 
 	/* invoke per-policy init */
+	/* [한국어] pd 는 blkg_alloc 에서 "할당"만 됐다. 여기서 정책별 초기화 콜백을
+	 * 불러 기본 제한값·계층 상속 등을 세팅한다. 아직 등록 전이라 다른 CPU 가
+	 * 이 blkg 를 볼 수 없는 시점이므로 락 없이 안전하다. */
 	for (i = 0; i < BLKCG_MAX_POLS; i++) {
-	/* [한국어] 생성된 blkg 의 정책 데이터 초기화; throtl/bfq 상태 기본값 설정 */
+		/* [한국어] i 번 슬롯에 해당하는 정책. */
 		struct blkcg_policy *pol = blkcg_policy[i];
 
+		/* [한국어] 이 큐에서 켜진 정책만 pd 가 있고, init 콜백은 선택 사항이다. */
 		if (blkg->pd[i] && pol->pd_init_fn)
-		/* [한국어] pd 가 할당되고 init 콜백이 있을 때만 초기화 */
-		/* [한국어] 정책 초기화 콜백 (throtl/bfq 상태 기본값 설정) */
 			pol->pd_init_fn(blkg->pd[i]);
 	}
 
 	/* insert */
+	/* [한국어] blkcg 쪽 자료구조(blkg_tree, blkg_list)를 보호하는 락.
+	 * queue_lock 은 이미 쥐고 있으므로, 여기서 잠금 순서는
+	 * queue_lock → blkcg->lock 이다. 이 순서를 다른 곳에서도 지켜야 데드락이 없다. */
 	spin_lock(&blkcg->lock);
-	/* [한국어] blkcg lock 획득; radix tree/list 와 rstat 간 동기화 */
+	/* [한국어] queue->id 를 키로 radix tree 에 넣는다. 이 id 는 큐마다 유일한
+	 * 정수이며, 덕분에 blkg_lookup() 이 (blkcg, q) → blkg 를 빠르게 찾는다.
+	 * 같은 키가 이미 있으면 -EEXIST 가 돌아온다(정상 흐름에서는 발생하지 않음). */
 	ret = radix_tree_insert(&blkcg->blkg_tree, disk->queue->id, blkg);
-	/* [한국어] queue id(NVMe namespace 식별자)로 blkg 색인 추가 */
+	/* [한국어] 삽입 성공 경로 — 나머지 등록을 이어서 한다. */
 	if (likely(!ret)) {
-	/* [한국어] radix tree 삽입 성공 시 list 에도 등록 */
+		/* [한국어] cgroup 쪽 열거 리스트에 RCU 안전하게 추가한다.
+		 * _rcu 변형은 포인터 공개 전에 쓰기 배리어를 넣어, 리스트를 따라온
+		 * RCU 독자가 초기화되지 않은 blkg 를 보지 않도록 보장한다. */
 		hlist_add_head_rcu(&blkg->blkcg_node, &blkcg->blkg_list);
-		/* [한국어] RCU read-side(blkg_lookup)에서 볼 수 있게 list 에 추가 */
+		/* [한국어] 큐 쪽 열거 리스트에 추가한다. 이쪽은 queue_lock 으로 보호되며
+		 * RCU 순회 대상이 아니라 _rcu 변형을 쓰지 않는다. */
 		list_add(&blkg->q_node, &disk->queue->blkg_list);
-		/* [한국어] request_queue 의 blkg list 에 등록 */
 
+		/* [한국어] 자료구조 등록이 끝났으니 이제 정책들을 online 으로 전환한다.
+		 * 순서가 중요하다 — 등록 전에 online 으로 만들면 아직 조회되지 않는
+		 * blkg 에 대해 정책이 활동을 시작할 수 있다. */
 		for (i = 0; i < BLKCG_MAX_POLS; i++) {
-		/* [한국어] list 등록 후 정책 online; 이 시점부터 IO 경로에서 pd 참조 가능 */
+			/* [한국어] i 번 슬롯의 정책. */
 			struct blkcg_policy *pol = blkcg_policy[i];
 
+			/* [한국어] pd 가 붙어 있는 슬롯만 처리한다. */
 			if (blkg->pd[i]) {
-			/* [한국어] 할당된 정책 데이터가 있으면 online 처리 */
+				/* [한국어] online 콜백은 선택 사항. 정책이 이 시점에
+				 * 부모와의 연결(weight 재계산 등)을 마무리한다. */
 				if (pol->pd_online_fn)
-				/* [한국어] 정책 online 콜백, 이제 IO 경로에서 참조 가능 */
 					pol->pd_online_fn(blkg->pd[i]);
-				/* [한국어] 정책 online 콜백, 이제 IO 경로에서 참조 가능 */
+				/* [한국어] "이 pd 는 이제 IO 경로에서 써도 된다" 는 표시.
+				 * 통계 출력 등에서 online 인 pd 만 다루는 근거가 된다. */
 				blkg->pd[i]->online = true;
-				/* [한국어] pd online 상태 표시 */
 			}
 		}
 	}
+	/* [한국어] blkg 전체를 online 으로 표시한다. 삽입이 실패한 경우에도 이 값을
+	 * 세팅하지만, 곧바로 blkg_put 으로 해제 경로를 타므로 문제되지 않는다. */
 	blkg->online = true;
-	/* [한국어] IO 경로에서 이 blkg 를 사용할 수 있음을 표시 */
 	spin_unlock(&blkcg->lock);
 
+	/* [한국어] radix tree 삽입까지 성공했으면 완성된 blkg 를 돌려준다. */
 	if (!ret)
-	/* [한국어] 등록 성공; bio_associate_blkg 에서 사용 가능 */
 		return blkg;
 
 	/* @blkg failed fully initialized, use the usual release path */
+	/* [한국어] 여기 도달했다는 것은 blkg 가 이미 "완전히 초기화된" 상태라는 뜻이므로
+	 * (부모 참조·pd·css 참조를 모두 들고 있다) 부분 해제(blkg_free)가 아니라
+	 * 정상 참조 반납 경로를 태워야 한다. blkg_put → percpu_ref 0 →
+	 * blkg_release → RCU → __blkg_release → blkg_free 순으로 정리된다. */
 	blkg_put(blkg);
-		/* [한국어] 초기화 실패 시 blkg 참조 반납 -> blkg_free_workfn 으로 해제 */
 	return ERR_PTR(ret);
 
 err_put_css:
+	/* [한국어] css_tryget_online 으로 얻은 참조를 되돌린다. 아직 blkg 가
+	 * 그 참조를 넘겨받지 못한 시점의 실패이므로 여기서 직접 놓는다. */
 	css_put(&blkcg->css);
-		/* [한국어] css_tryget_online 으로 획득한 css 참조 반납 */
 err_free_blkg:
+	/* [한국어] 호출자가 넘겨준 new_blkg 든 여기서 할당한 것이든, 항상 이 함수가
+	 * 소비(해제)한다는 규약을 지킨다. 아직 아무 자료구조에도 없고 참조도
+	 * 늘지 않았으므로 부분 해제 경로인 blkg_free 가 맞다. */
 	if (new_blkg)
-	/* [한국어] 할당된 new_blkg 메모리 해제 예약 */
 		blkg_free(new_blkg);
 	return ERR_PTR(ret);
 }
@@ -839,44 +1212,71 @@ err_free_blkg:
  */
 /*
  * [한국어]
- * blkg_lookup_create - blkg 를 찾고 없으면 생성
+ * blkg_lookup_create - (blkcg, disk) 쌍의 blkg 를 찾고, 없으면 만들어 돌려준다
  *
- * 호출 경로: bio_associate_blkg() -> blkg_lookup_create()
- * NVMe 연결점: submit_bio -> bio_associate_blkg -> blkg_lookup_create ->
- *   blk_mq_submit_bio -> blk_mq_get_request -> nvme_queue_rq ->
- *   nvme_submit_cmd(doorbell). 이 함수에서 bio 의 cgroup context 를 확정한다.
- *   없으면 GFP_NOWAIT 으로 생성을 시도하고 실패하면 가장 가까운 부모 blkg 로
- *   fallback 한다.
+ * @blkcg: 대상 cgroup.
+ * @disk:  대상 장치.
+ * @return: 원하는 blkg. 생성이 실패하면 위 영문 주석대로 "가장 가까운"
+ *          조상 blkg(최악의 경우 q->root_blkg)를 돌려준다 — NULL 이나 ERR_PTR 을
+ *          돌려주지 않으므로 호출자는 항상 유효한 blkg 를 얻는다.
+ *
+ * === blkg 조회 3단계 ===
+ * 이 파일의 조회 경로는 비용 순서대로 세 단계다.
+ *   1) blkcg->blkg_hint : 직전에 쓴 blkg 하나를 캐시. 한 태스크가 같은 장치에
+ *      연속으로 IO 를 내는 흔한 패턴에서 대부분 여기서 끝난다.
+ *      (이 검사는 blk-cgroup.h 의 blkg_lookup() 안에 있다.)
+ *   2) blkcg->blkg_tree : queue->id 를 키로 하는 radix tree 조회. hint 가
+ *      빗나갔을 때 쓰이며, 성공하면 hint 를 갱신한다.
+ *   3) 생성 : 위 둘이 모두 실패하면 이 함수가 queue_lock 을 잡고 blkg_create().
+ * 1)과 2)는 RCU read-side 에서 락 없이 수행되고, 3)만 락을 잡는다.
+ *
+ * === 왜 루트부터 내려오며 만드는가 ===
+ * blkg 는 부모 blkg 를 반드시 가져야 한다(계층 통계/제한 때문). 그래서 목표
+ * cgroup 의 조상 중 blkg 가 없는 가장 위쪽을 찾아 거기부터 한 단계씩 만든다.
+ * 도중에 실패하면, 그때까지 확인해 둔 "가장 가까운 조상 blkg" 로 되돌려
+ * IO 가 최소한 상위 cgroup 몫으로는 계산되게 한다.
+ *
+ * 실행 컨텍스트: rcu_read_lock() 을 쥔 상태로 호출해야 하며(WARN 으로 확인),
+ * 내부에서 q->queue_lock 을 irqsave 로 잡는다. 잠들 수 없다.
+ *
+ * 호출 체인:
+ *   bio_associate_blkg_from_css() → [blkg_lookup_create]
+ *     → blkg_lookup() / blkg_create()
  */
-
 static struct blkcg_gq *blkg_lookup_create(struct blkcg *blkcg,
 		struct gendisk *disk)
 {
+	/* [한국어] blkg 는 gendisk 가 아니라 request_queue 에 매달리므로 큐를 꺼낸다. */
 	struct request_queue *q = disk->queue;
-	/* [한국어] bio 의 대상 NVMe namespace request_queue */
+	/* [한국어] 조회 또는 생성 결과. */
 	struct blkcg_gq *blkg;
-	/* [한국어] 검색/생성 결과 blkg */
+	/* [한국어] spin_lock_irqsave 가 저장할 인터럽트 상태. */
 	unsigned long flags;
 
+	/* [한국어] blkg_lookup() 이 RCU 보호를 전제로 포인터를 읽으므로,
+	 * 호출자가 rcu_read_lock 을 쥐고 들어왔는지 확인한다(디버그 커널 한정). */
 	WARN_ON_ONCE(!rcu_read_lock_held());
-	/* [한국어] RCU read-side 필요; blkg_lookup() 과 radix tree 접근 보호 */
 
+	/* [한국어] 1·2단계(hint → radix tree)를 락 없이 시도한다. 대부분 여기서 끝난다. */
 	blkg = blkg_lookup(blkcg, q);
-	/* [한국어] radix tree 로 기존 blkg 검색; O(1) cgroup 분류 */
 	if (blkg)
-		/* [한국어] 기존 blkg 반환; NVMe SQ/CQ 선택에 사용 */
 		return blkg;
 
+	/* [한국어] 생성이 필요하다. blkg 등록은 queue_lock 을 요구하고,
+	 * 이 락은 IO 완료(IRQ) 경로에서도 잡히므로 irqsave 변형을 쓴다. */
 	spin_lock_irqsave(&q->queue_lock, flags);
-	/* [한국어] queue_lock 획득; blkg 생성과 동시 제출 경쟁 보호 */
+	/* [한국어] 락을 잡는 사이 다른 CPU 가 같은 blkg 를 만들었을 수 있으므로
+	 * 다시 확인한다(전형적인 double-checked locking). */
 	blkg = blkg_lookup(blkcg, q);
-	/* [한국어] 락 획득 후 재확인; 다른 CPU 가 이미 생성했을 수 있음 */
 	if (blkg) {
+		/* [한국어] 남이 만들어 둔 blkg 를 찾았다. 이번 조회가 hint 를 빗나갔다는
+		 * 뜻이므로 hint 를 이 blkg 로 갱신해 다음 조회를 1단계에서 끝내게 한다.
+		 * 루트는 어차피 별도 경로(q->root_blkg)로 빠르게 찾으므로 제외한다. */
 		if (blkcg != &blkcg_root &&
-		/* [한국어] root 가 아니고 hint 가 다륾면 hint 갱신; 이후 bio 제출 시 탐색 가속 */
 		    blkg != rcu_dereference(blkcg->blkg_hint))
+			/* [한국어] rcu_assign_pointer 는 쓰기 배리어를 포함해,
+			 * hint 를 따라온 RCU 독자가 부분 초기화된 객체를 보지 않게 한다. */
 			rcu_assign_pointer(blkcg->blkg_hint, blkg);
-			/* [한국어] RCU 배리어 내장; hint 가 일관되게 보이도록 설정 */
 		goto found;
 	}
 
@@ -885,70 +1285,97 @@ static struct blkcg_gq *blkg_lookup_create(struct blkcg *blkcg,
 	 * non-root blkgs have access to their parents.  Returns the closest
 	 * blkg to the intended blkg should blkg_create() fail.
 	 */
+	/* [한국어] 바깥 루프는 "한 단계 만들기" 를 목표에 도달할 때까지 반복한다.
+	 * 매 회차마다 다시 조상을 훑는 이유는, 방금 만든 blkg 덕분에 다음 회차의
+	 * "가장 가까운 기존 blkg" 위치가 한 칸씩 내려오기 때문이다. */
 	while (true) {
-	/* [한국어] root 에서 목표 cgroup 까지 부모를 따라 남겨가며 blkg 생성; cgroup 계층 무결성 */
-	/* [한국어] root 에서 목표 cgroup 까지 부모를 따라 남겨가며 blkg 생성 */
+		/* [한국어] 이번 회차에 실제로 생성할 cgroup. 초기값은 목표 cgroup 이고,
+		 * 아래 안쪽 루프가 조상 쪽으로 끌어올린다. */
 		struct blkcg *pos = blkcg;
-		/* [한국어] 현재 생성해야 할 cgroup 위치 */
+		/* [한국어] 조상 탐색 커서. 루트에 도달하면 NULL 이 되어 루프가 끝난다. */
 		struct blkcg *parent = blkcg_parent(blkcg);
-		/* [한국어] pos 의 부모 cgroup */
+		/* [한국어] 생성 실패 시 대신 돌려줄 blkg. 최악의 경우가 루트 blkg 이며,
+		 * 루트 blkg 는 디스크 초기화 때 미리 만들어져 항상 존재한다. */
 		struct blkcg_gq *ret_blkg = q->root_blkg;
-		/* [한국어] 생성 실패 시 root blkg 로 fallback 준비 */
 
+		/* [한국어] 위로 올라가며 blkg 가 이미 있는 가장 가까운 조상을 찾는다. */
 		while (parent) {
-		/* [한국어] 부모 중 가장 가까운 존재하는 blkg 를 찾아 fallback 지점 확보 */
+			/* [한국어] 이 조상 cgroup 에 대한 blkg 가 있는지 조회. */
 			blkg = blkg_lookup(parent, q);
-		/* [한국어] 부모 cgroup 의 blkg 검색 */
 			if (blkg) {
 				/* remember closest blkg */
+				/* [한국어] 찾았다. 실패 시 이 blkg 로 대체하면 되고,
+				 * 지금 만들어야 할 것은 그 바로 아래인 pos 다. */
 				ret_blkg = blkg;
-			/* [한국어] 생성 실패 시 이 blkg 로 IO 를 spill 할 수 있음 */
 				break;
 			}
+			/* [한국어] 이 조상도 blkg 가 없다 — 생성 지점을 한 칸 위로 올린다. */
 			pos = parent;
-		/* [한국어] 아직 blkg 가 없는 가장 가까운 조상으로 이동 */
+			/* [한국어] 계속 위로. 루트까지 없으면 parent 가 NULL 이 되어 종료. */
 			parent = blkcg_parent(parent);
-		/* [한국어] 한 단계 더 위의 조상 탐색 */
 		}
 
+		/* [한국어] pos 의 부모 blkg 는 이제 확실히 존재하므로 안전하게 만들 수 있다.
+		 * 세 번째 인자 NULL 은 "blkg 를 직접 할당하라(GFP_NOWAIT)" 는 뜻. */
 		blkg = blkg_create(pos, disk, NULL);
-		/* [한국어] pos cgroup 의 blkg 생성; NVMe queue 의 cgroup 분류 노드 추가 */
 		if (IS_ERR(blkg)) {
-		/* [한국어] 생성 실패 시 가장 가까운 부모 blkg 로 fallback; NVMe IO 누락 방지 */
+			/* [한국어] 메모리 부족이나 큐 소멸로 실패. 오류를 위로 던지지 않고
+			 * 가장 가까운 조상 blkg 를 결과로 삼는다 — IO 를 실패시키는 것보다
+			 * 상위 cgroup 몫으로 처리하는 편이 낫기 때문이다. */
 			blkg = ret_blkg;
 			break;
 		}
+		/* [한국어] 방금 만든 것이 목표 cgroup 이면 완료. 아니면 한 단계 아래를
+		 * 만들기 위해 바깥 루프를 한 번 더 돈다. */
 		if (pos == blkcg)
 			break;
 	}
 
 found:
+	/* [한국어] 락 해제 및 인터럽트 상태 복원. 이 시점 이후 blkg 는 RCU 독자와
+	 * 다른 CPU 에게도 보인다. */
 	spin_unlock_irqrestore(&q->queue_lock, flags);
-	/* [한국어] queue_lock 해제; 이후 submit_bio 가 blkg 를 참조 가능 */
 	return blkg;
 }
 
 /*
  * [한국어]
- * blkg_destroy - blkg 를 tree/list 에서 제거하고 refcnt 를 종료
+ * blkg_destroy - blkg 를 조회 가능한 자료구조에서 떼어내고 참조를 kill 한다
  *
- * 호출 경로: blkcg_destroy_blkgs() -> blkg_destroy()
- *            blkg_destroy_all() -> blkg_destroy()
- * NVMe 연결점: NVMe namespace 제거 또는 cgroup 삭제 시 해당 cgroup 에 대한
- *   IO 분류/정책을 중단한다. percpu_ref_kill() 로 참조 카운트를 감소시키고
- *   blkg_free_workfn() 에서 최종 메모리 해제가 일어난다.
+ * @blkg: 제거할 blkg.
+ * @return: 없음. 실제 메모리 해제는 참조가 0 이 된 뒤 비동기로 일어난다.
+ *
+ * === "제거" 의 두 단계 ===
+ * 이 함수는 blkg 를 "새로 찾을 수 없게" 만들 뿐, 메모리를 놓지는 않는다.
+ *   1) 정책들을 offline 시키고(pd_offline_fn), online 플래그를 내린다.
+ *   2) radix tree 와 blkcg_node 해시에서 뺀다 → 이제 blkg_lookup() 이 못 찾는다.
+ *   3) hint 가 이 blkg 를 가리키면 지운다.
+ *   4) percpu_ref_kill() — 생성 시 잡아 둔 초기 참조를 놓고 atomic 모드로 전환.
+ * 이미 이 blkg 를 참조하고 있는 진행 중인 IO 는 그대로 끝까지 진행되고,
+ * 마지막 참조가 반납되는 순간 blkg_release() 사슬이 시작된다.
+ * 주의: q->blkg_list 에서는 여기서 빼지 않는다 — 위 영문 주석대로 그 제거는
+ * pd 해제 순서를 지키기 위해 blkg_free_workfn() 까지 미뤄진다. 그래서 이
+ * 함수는 같은 blkg 에 대해 두 번 불릴 수 있고(cgroup 삭제 경로와 디스크 제거
+ * 경로가 겹칠 때), hlist_unhashed 검사로 두 번째 호출을 걸러낸다.
+ *
+ * 실행 컨텍스트: blkg->q->queue_lock 과 blkcg->lock 을 둘 다 쥔 상태여야 한다
+ * (lockdep 으로 강제). 잠글 수 없는 스핀락 구간이다.
+ *
+ * 호출 체인:
+ *   blkcg_destroy_blkgs()(cgroup 삭제) / blkg_destroy_all()(디스크 제거)
+ *     → [blkg_destroy] → pd_offline_fn / radix_tree_delete / percpu_ref_kill
  */
-
 static void blkg_destroy(struct blkcg_gq *blkg)
 {
+	/* [한국어] 이 blkg 의 소유 cgroup. blkg_tree/blkg_list 가 여기에 있다. */
 	struct blkcg *blkcg = blkg->blkcg;
-	/* [한국어] blkg 가 속한 cgroup */
+	/* [한국어] 정책 슬롯 순회 인덱스. */
 	int i;
 
+	/* [한국어] 두 락을 모두 요구한다. queue 쪽 자료구조와 blkcg 쪽 자료구조를
+	 * 동시에 건드리기 때문이며, 잠금 순서는 queue_lock → blkcg->lock 이다. */
 	lockdep_assert_held(&blkg->q->queue_lock);
-	/* [한국어] queue_lock 보호 하에서만 blkg 제거; NVMe request_queue 상태와 동기화 */
 	lockdep_assert_held(&blkcg->lock);
-	/* [한국어] blkcg lock 보호 하에서만 radix tree/list 조작 */
 
 	/*
 	 * blkg stays on the queue list until blkg_free_workfn(), see details in
@@ -956,99 +1383,137 @@ static void blkg_destroy(struct blkcg_gq *blkg)
 	 * blkcg_destroy_blkgs() first and again from blkg_destroy_all() before
 	 * blkg_free_workfn().
 	 */
+	/* [한국어] blkcg_node 가 이미 해시에서 빠져 있다면 이 blkg 는 이미 한 번
+	 * destroy 된 것이다(위 영문 주석의 이중 호출 시나리오). 조용히 돌아간다. */
 	if (hlist_unhashed(&blkg->blkcg_node))
-	/* [한국어] 이미 제거된 blkg 는 다시 destroy 하지 않음; 중복 제거 방지 */
-	/* [한국어] 이미 제거된 blkg 는 다시 destroy 하지 않음 */
 		return;
 
+	/* [한국어] 붙어 있는 정책들을 먼저 offline 시킨다. 정책이 이 blkg 를 대상으로
+	 * 진행 중이던 활동(타이머, 대기 큐 등)을 정리할 기회를 주는 단계다. */
 	for (i = 0; i < BLKCG_MAX_POLS; i++) {
-	/* [한국어] 활성화된 정책들을 offline -> free 경로로 전환 */
+		/* [한국어] i 번 슬롯의 정책. */
 		struct blkcg_policy *pol = blkcg_policy[i];
 
+		/* [한국어] pd 가 있고 아직 online 인 것만 내린다 — 이중 offline 방지. */
 		if (blkg->pd[i] && blkg->pd[i]->online) {
-		/* [한국어] online 상태인 pd 만 offline 처리; NVMe IO 경로에서 pd 접근 차단 */
+			/* [한국어] 먼저 플래그를 내려, 콜백이 도는 동안 다른 경로가
+			 * 이 pd 를 online 으로 오인하지 않게 한다. */
 			blkg->pd[i]->online = false;
-			/* [한국어] pd offline 표시 */
+			/* [한국어] offline 콜백은 선택 사항. */
 			if (pol->pd_offline_fn)
 				pol->pd_offline_fn(blkg->pd[i]);
 		}
 	}
 
+	/* [한국어] blkg 자체도 offline 표시. 통계 출력 등이 이 플래그를 본다. */
 	blkg->online = false;
-	/* [한국어] blkg 를 IO 경로에서 사용 불가로 표시; 이후 bio 는 상위 blkg 로 spill */
 
+	/* [한국어] radix tree 색인에서 제거 — 이 순간부터 blkg_lookup() 의 2단계가
+	 * 이 blkg 를 찾지 못한다. 키는 생성 때와 같은 queue id. */
 	radix_tree_delete(&blkcg->blkg_tree, blkg->q->id);
-	/* [한국어] queue id 기반 radix tree 색인 제거 */
+	/* [한국어] cgroup 의 blkg 해시에서도 제거한다. _rcu 변형이라 RCU 독자가
+	 * 순회 중이어도 안전하고, _init 이라 노드가 "빠진 상태" 로 표시되어
+	 * 위의 hlist_unhashed 재진입 검사가 성립한다. */
 	hlist_del_init_rcu(&blkg->blkcg_node);
-	/* [한국어] RCU read-side 가 완료될 때까지 메모리는 유지; NVMe CQ 완료 경로 안전성 */
 
 	/*
 	 * Both setting lookup hint to and clearing it from @blkg are done
 	 * under queue_lock.  If it's not pointing to @blkg now, it never
 	 * will.  Hint assignment itself can race safely.
 	 */
+	/* [한국어] 캐시(hint)가 지금 지우는 blkg 를 가리키고 있으면 비운다.
+	 * rcu_access_pointer 는 "역참조하지 않고 포인터 값만 비교" 할 때 쓰는
+	 * 접근자라 RCU 락 없이도 lockdep 경고가 나지 않는다.
+	 * 영문 주석의 요지: hint 설정도 해제도 모두 queue_lock 아래에서 일어나므로,
+	 * 지금 이 blkg 를 가리키지 않는다면 앞으로도 가리킬 일이 없다. */
 	if (rcu_access_pointer(blkcg->blkg_hint) == blkg)
-	/* [한국어] hint 가 제거 대상 blkg 를 가리키면 NULL 로 클리어 */
 		rcu_assign_pointer(blkcg->blkg_hint, NULL);
-		/* [한국어] RCU 배리어를 통해 hint 일관성 유지 */
 
 	/*
 	 * Put the reference taken at the time of creation so that when all
 	 * queues are gone, group can be destroyed.
 	 */
+	/* [한국어] 생성 시점에 잡혀 있던 초기 참조 1 을 반납한다. 동시에 percpu_ref 가
+	 * per-cpu 모드에서 atomic 모드로 바뀌어, 이제부터 실제 0 도달을 판정할 수
+	 * 있게 된다. 진행 중인 IO 가 들고 있는 참조가 모두 반납되면
+	 * blkg_release() 가 호출된다. */
 	percpu_ref_kill(&blkg->refcnt);
-	/* [한국어] blkg 참조 카운트 종료, 이후 IO 는 root blkg 로 spill; percpu_ref 가 0이 되면 RCU 해제 */
-	/* [한국어] blkg 참조 카운트 종료, 이후 IO 는 root blkg 로 spill */
 }
 
 /*
  * [한국어]
- * blkg_destroy_all - 디스크의 모든 blkg 를 일괄 제거
+ * blkg_destroy_all - 한 디스크에 붙어 있는 모든 blkg 를 정리한다
  *
- * 호출 경로: blkcg_exit_disk() -> blkg_destroy_all()
- * NVMe 연결점: NVMe namespace 가 사라질 때 해당 request_queue 의 모든 cgroup
- *   연결을 해제한다. BLKG_DESTROY_BATCH_SIZE 단위로 락을 풀어 softlockup 을
- *   방지한다.
+ * @disk: 사라지는 디스크. 정리 대상은 disk->queue 의 blkg_list 전체.
+ * @return: 없음.
+ *
+ * 왜 필요한가: 디스크가 제거되면 그 큐와 짝지어진 blkg 는 전부 의미를 잃는다.
+ * blkg 는 (blkcg, queue) 2차원 격자의 한 칸이므로, 큐 하나가 사라진다는 것은
+ * 그 큐에 해당하는 "열" 전체를 지운다는 뜻이다. cgroup 쪽에서 지우는 반대편
+ * 함수가 blkcg_destroy_blkgs()(cgroup 하나의 "행" 을 지움)다.
+ *
+ * === 배치 처리와 재시작 ===
+ * cgroup 이 수천 개인 시스템에서는 blkg 도 그만큼 많다. queue_lock 을 쥔 채
+ * 전부 지우면 인터럽트가 오래 막혀 softlockup 경고가 뜬다. 그래서 64개
+ * (BLKG_DESTROY_BATCH_SIZE)마다 락을 놓고 cond_resched() 로 양보한 뒤
+ * restart 라벨로 돌아가 리스트를 처음부터 다시 훑는다. 이미 처리된 blkg 는
+ * blkcg_node 가 unhashed 라 continue 로 건너뛰므로 중복 작업은 없다.
+ * (리스트를 처음부터 다시 훑는 이유: 락을 놓은 사이 리스트가 바뀔 수 있어
+ *  중단 지점 커서를 신뢰할 수 없기 때문이다.)
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트(디스크 해제 경로). cond_resched() 를
+ * 부르므로 아토믹 문맥에서 호출하면 안 된다.
+ *
+ * 호출 체인:
+ *   del_gendisk() → blkcg_exit_disk() → [blkg_destroy_all] → blkg_destroy()
  */
-
 static void blkg_destroy_all(struct gendisk *disk)
 {
+	/* [한국어] blkg 들이 매달려 있는 큐. */
 	struct request_queue *q = disk->queue;
-	/* [한국어] 제거 대상 NVMe namespace request_queue */
+	/* [한국어] 리스트 순회 커서. */
 	struct blkcg_gq *blkg;
+	/* [한국어] 이번 배치에서 앞으로 몇 개 더 지울 수 있는지 남은 예산. */
 	int count = BLKG_DESTROY_BATCH_SIZE;
-	/* [한국어] 한 번에 제거할 blkg 개수; NVMe queue lock 장기 점유 방지 */
+	/* [한국어] 마지막에 정책 비트를 지울 때 쓰는 슬롯 인덱스. */
 	int i;
 
 restart:
+	/* [한국어] blkg_list 순회와 blkg_destroy 는 queue_lock 을 요구한다.
+	 * IO 완료 경로(IRQ)와도 경쟁하므로 _irq 변형으로 로컬 인터럽트를 막는다. */
 	spin_lock_irq(&q->queue_lock);
-	/* [한국어] queue_lock 획득; blkg_list 순회 보호 */
+	/* [한국어] 이 큐에 붙은 blkg 를 차례로 훑는다. blkg_destroy() 는 q_node 를
+	 * 리스트에서 빼지 않으므로(해제는 blkg_free_workfn 에서) 순회 중 커서가
+	 * 무효화되지 않는다 — 이것이 안전하게 list_for_each_entry 를 쓸 수 있는 이유다. */
 	list_for_each_entry(blkg, &q->blkg_list, q_node) {
-	/* [한국어] queue 의 모든 blkg 를 순회하며 제거 */
-	/* [한국어] 메모리 부족 시 이미 추가된 정책 데이터 모두 롤백 */
+		/* [한국어] blkg 마다 소유 cgroup 이 다르므로 매번 꺼내 그 락을 잡는다. */
 		struct blkcg *blkcg = blkg->blkcg;
-		/* [한국어] 현재 blkg 의 cgroup */
 
+		/* [한국어] 이미 지워진 blkg(직전 배치에서 처리했거나 cgroup 삭제 경로가
+		 * 먼저 처리한 것)는 건너뛴다. */
 		if (hlist_unhashed(&blkg->blkcg_node))
-		/* [한국어] 이미 제거된 blkg 는 스킵 */
 			continue;
 
+		/* [한국어] 잠금 순서 규약대로 queue_lock 다음에 blkcg->lock 을 잡는다. */
 		spin_lock(&blkcg->lock);
-		/* [한국어] blkcg lock 추가 획득; radix tree/list 동기화 */
+		/* [한국어] 실제 제거(정책 offline, 색인 제거, percpu_ref kill). */
 		blkg_destroy(blkg);
-		/* [한국어] blkg 제거 및 refcnt 종료 */
 		spin_unlock(&blkcg->lock);
 
 		/*
 		 * in order to avoid holding the spin lock for too long, release
 		 * it when a batch of blkgs are destroyed.
 		 */
+		/* [한국어] 예산을 하나 소진하고 0 이 되면 배치 경계다. */
 		if (!(--count)) {
-		/* [한국어] 배치 단위로 queue_lock 해제; softirq/NVMe ISR 응답 지연 방지 */
+			/* [한국어] 다음 배치 예산 재충전. */
 			count = BLKG_DESTROY_BATCH_SIZE;
+			/* [한국어] 락과 인터럽트를 풀어 다른 CPU/인터럽트가 진행할 틈을 준다. */
 			spin_unlock_irq(&q->queue_lock);
-			/* [한국어] 스케줄링 양보 */
+			/* [한국어] 필요하면 스케줄러에 양보한다(선점 불가 커널에서도
+			 * 여기서 다른 태스크가 돌 수 있게 된다). */
 			cond_resched();
+			/* [한국어] 락을 놓았으므로 리스트를 처음부터 다시 훑는다. */
 			goto restart;
 		}
 	}
@@ -1058,23 +1523,29 @@ restart:
 	 * the free is scheduled, so future blkcg_deactivate_policy() can
 	 * be bypassed
 	 */
+	/* [한국어] 모든 blkg 의 정책이 offline 되고 해제가 예약됐으므로,
+	 * 이 큐의 "정책 활성" 비트맵을 통째로 비운다. 이후 누군가
+	 * blkcg_deactivate_policy() 를 불러도 비트가 없어 곧바로 반환한다. */
 	for (i = 0; i < BLKCG_MAX_POLS; i++) {
-	/* [한국어] queue 에서 모든 cgroup 정책 비트 클리어 */
+		/* [한국어] i 번 슬롯에 등록된 정책(없으면 NULL). */
 		struct blkcg_policy *pol = blkcg_policy[i];
 
+		/* [한국어] 등록된 정책에 대해서만 비트를 지운다. */
 		if (pol)
-		/* [한국어] 이 queue(NVMe namespace)에서 해당 정책 비활성화 표시 */
+			/* [한국어] __clear_bit 은 원자적이지 않은 비트 클리어다.
+			 * queue_lock 을 쥐고 있어 배타성이 보장되므로 원자 버전이 불필요하다. */
 			__clear_bit(pol->plid, q->blkcg_pols);
-			/* [한국어] queue 에서 정책 비활성화 표시 */
-			/* [한국어] 이 queue 에서 해당 정책 비활성화 표시 */
 	}
 
+	/* [한국어] 루트 blkg 포인터도 끊는다. 이것이 NULL 이 되었다는 것은
+	 * "이 큐에는 더 이상 blkcg 구조가 없다" 는 신호다. */
 	q->root_blkg = NULL;
-	/* [한국어] root blkg 제거 완료, 이후 disk rebind 가능 */
 	spin_unlock_irq(&q->queue_lock);
 
+	/* [한국어] blkcg_init_disk() 가 같은 큐를 다시 초기화하려고
+	 * root_blkg 가 NULL 이 되기를 기다리고 있을 수 있으므로 깨운다.
+	 * wake_up_var 는 변수 주소를 키로 쓰는 대기/통지 메커니즘이다. */
 	wake_up_var(&q->root_blkg);
-	/* [한국어] root_blkg NULL 대기 중인 blkcg_init_disk() 깨우기 */
 }
 
 /*
@@ -1097,17 +1568,17 @@ restart:
  */
 static void blkg_iostat_set(struct blkg_iostat *dst, struct blkg_iostat *src)
 {
+	/* [한국어] 통계 분류 인덱스. BLKG_IOSTAT_NR 은 아래 세 분류의 개수(3). */
 	int i;
-	/* [한국어] BLKG_IOSTAT_READ/WRITE/DISCARD 세 항목 순회 */
 
+	/* [한국어] read/write/discard 세 분류를 순회하며 복사한다. 이 분류는 같은
+	 * 파일 아래쪽의 blk_cgroup_io_type() 이 bio->bi_opf 에서 결정한다:
+	 * discard 면 BLKG_IOSTAT_DISCARD, 쓰기면 WRITE, 나머지는 READ. */
 	for (i = 0; i < BLKG_IOSTAT_NR; i++) {
-	/* [한국어] read/write/discard 세 항목을 순회하며 복사한다. 이 세 분류는
-	 * op_stat_group()이 REQ_OP_*에서 도출하며, NVMe에서는 각각
-	 * Read(0x02) / Write(0x01)·Write Zeroes(0x08) / DSM(0x09)에 대응한다. */
+		/* [한국어] 해당 분류의 누적 바이트 수 복사. */
 		dst->bytes[i] = src->bytes[i];
-		/* [한국어] i 유형(read/write/discard) 바이트 복사 */
+		/* [한국어] 해당 분류의 누적 IO 건수 복사. */
 		dst->ios[i] = src->ios[i];
-		/* [한국어] i 유형 IO 횟수 복사 */
 	}
 }
 
@@ -1138,18 +1609,21 @@ static void blkg_iostat_set(struct blkg_iostat *dst, struct blkg_iostat *src)
  */
 static void __blkg_clear_stat(struct blkg_iostat_set *bis)
 {
+	/* [한국어] 전부 0 인 임시 구조체. 이것을 복사해 넣는 방식으로 초기화한다. */
 	struct blkg_iostat cur = {0};
-	/* [한국어] 0 으로 초기화할 임시 통계 구조체 */
+	/* [한국어] u64_stats_update_begin_irqsave 가 저장하는 인터럽트 상태. */
 	unsigned long flags;
 
+	/* [한국어] 쓰기 측 seqcount 구간 진입. 인터럽트도 함께 끄는 이유는
+	 * 같은 CPU 의 IRQ 핸들러가 통계를 갱신하러 들어오면 seqcount 가 꼬이기 때문. */
 	flags = u64_stats_update_begin_irqsave(&bis->sync);
-	/* [한국어] u64_stats_seqlock 진입; 32bit NVMe 통계 업데이트의 readers/writers 동기화 */
+	/* [한국어] 현재 누적치를 0 으로. */
 	blkg_iostat_set(&bis->cur, &cur);
-	/* [한국어] cur 통계 클리어 */
+	/* [한국어] 마지막 전파 스냅숏도 0 으로. cur 만 지우면 (cur - last) 가 음수가 된다. */
 	blkg_iostat_set(&bis->last, &cur);
-	/* [한국어] last 통계 클리어; delta 계산 기준점 재설정 */
+	/* [한국어] seqcount 구간 종료 및 인터럽트 상태 복원. 이 시점에 독자는
+	 * 일관된 0 값을 보게 된다. */
 	u64_stats_update_end_irqrestore(&bis->sync, flags);
-	/* [한국어] seqlock 해제; NVMe 통계 readers 에게 일관된 값 공개 */
 }
 
 /*
@@ -1174,61 +1648,91 @@ static void __blkg_clear_stat(struct blkg_iostat_set *bis)
  */
 static void blkg_clear_stat(struct blkcg_gq *blkg)
 {
+	/* [한국어] per-cpu 슬롯 순회 인덱스. */
 	int cpu;
 
+	/* [한국어] online 이 아니라 possible 을 도는 이유는 위 함수 주석 참조 —
+	 * 지금 오프라인인 CPU 에 남은 값이 되살아나는 것을 막기 위해서다. */
 	for_each_possible_cpu(cpu) {
-	/* [한국어] NVMe 멀티 코어 CQ 완료가 사용한 모든 per-cpu 통계 영역 초기화 */
+		/* [한국어] cpu 번째 per-cpu 통계 슬롯 주소. */
 		struct blkg_iostat_set *s = per_cpu_ptr(blkg->iostat_cpu, cpu);
-		/* [한국어] cpu 번호의 per-cpu blkg_iostat_set 획득 */
 
+		/* [한국어] 그 슬롯의 cur/last 를 모두 0 으로. */
 		__blkg_clear_stat(s);
 	}
+	/* [한국어] 마지막으로 blkg 의 전역(합산) 통계도 0 으로. */
 	__blkg_clear_stat(&blkg->iostat);
 }
 
 /*
  * [한국어]
- * blkcg_reset_stats - cgroup 의 blkio 통계를 초기화
+ * blkcg_reset_stats - cgroupfs 의 blkio.reset_stats 쓰기 핸들러
  *
- * 호출 경로: cgroup legacy reset_stats 쓰기 -> blkcg_reset_stats()
- * NVMe 연결점: 해당 cgroup 의 NVMe IO 누적 통계(bytes/ios)와 각 정책의
- *   통계를 초기화한다.
+ * @css:    대상 cgroup 의 css. css_to_blkcg 로 blkcg 를 얻는다.
+ * @cftype: 쓰기가 일어난 cgroupfs 파일 정보. 여기서는 deprecated 경고 메시지에
+ *          파일 이름을 넣는 용도로만 쓴다.
+ * @val:    사용자가 쓴 값. 이 함수는 값을 무시하고 "쓰기가 있었다" 는 사실만 본다.
+ * @return: 항상 0(성공). cgroup 코어가 이 값을 write(2) 결과로 사용자에게 돌려준다.
+ *
+ * 왜 필요한가: cgroup v1(legacy) 인터페이스에는 통계를 0 으로 되돌리는 파일이
+ * 있었다. v2 에는 대응 파일이 없어 deprecated 경고를 남기며, 실제로 이
+ * cgroup 이 가진 모든 blkg 의 통계와 정책별 통계를 초기화한다.
+ *
+ * 경쟁 조건: 위 영문 주석이 명시하듯 이 초기화는 통계 갱신과 동기화되지 않는다.
+ * 초기화 도중 들어온 IO 의 수치는 지워질 수도, 남을 수도 있다. 디버그 기능이라
+ * 그 정도 부정확성을 감수한다.
+ *
+ * 실행 컨텍스트: cgroupfs write(프로세스 컨텍스트). blkcg_pol_mutex(잠들 수 있음)를
+ * 먼저 잡고, 그 안에서 blkcg->lock 을 irq-safe 로 잡는다.
+ *
+ * 호출 체인:
+ *   userspace write("blkio.reset_stats") → cgroup 코어 → [blkcg_reset_stats]
+ *     → blkg_clear_stat() / pol->pd_reset_stats_fn()
  */
-
 static int blkcg_reset_stats(struct cgroup_subsys_state *css,
 			     struct cftype *cftype, u64 val)
 {
+	/* [한국어] css 를 감싸고 있는 blkcg 로 되돌린다(container_of 래퍼). */
 	struct blkcg *blkcg = css_to_blkcg(css);
-	/* [한국어] 대상 cgroup */
+	/* [한국어] blkg_list 순회 커서. */
 	struct blkcg_gq *blkg;
+	/* [한국어] 정책 슬롯 인덱스. */
 	int i;
 
+	/* [한국어] 사용 중단 예정임을 부팅 후 한 번만 알린다(_once). */
 	pr_info_once("blkio.%s is deprecated\n", cftype->name);
+	/* [한국어] 순회 중 정책이 등록/해제되면 pd_reset_stats_fn 포인터가 흔들리므로
+	 * 정책 테이블을 고정한다. 뮤텍스라 잠들 수 있는 문맥이어야 한다. */
 	mutex_lock(&blkcg_pol_mutex);
-	/* [한국어] 정책 등록/해제와 reset 경쟁 보호 */
+	/* [한국어] 이 cgroup 의 blkg_list 를 순회하는 동안 목록이 바뀌지 않도록 보호.
+	 * blkg 생성/삭제가 IRQ 를 끈 상태에서도 이 락을 잡으므로 _irq 변형을 쓴다. */
 	spin_lock_irq(&blkcg->lock);
-	/* [한국어] blkcg 의 blkg_list 순회 보호 */
 
 	/*
 	 * Note that stat reset is racy - it doesn't synchronize against
 	 * stat updates.  This is a debug feature which shouldn't exist
 	 * anyway.  If you get hit by a race, retry.
 	 */
+	/* [한국어] 이 cgroup 이 쓰고 있는 모든 장치의 blkg 를 훑는다. 즉 2차원 격자에서
+	 * 이 cgroup 에 해당하는 "행" 전체다. */
 	hlist_for_each_entry(blkg, &blkcg->blkg_list, blkcg_node) {
-	/* [한국어] 이 cgroup 의 모든 NVMe namespace blkg 순회 */
+		/* [한국어] 공통 IO 통계(bytes/ios)를 모든 CPU 슬롯까지 0 으로. */
 		blkg_clear_stat(blkg);
+		/* [한국어] 이어서 정책들이 따로 관리하는 통계도 초기화한다. */
 		for (i = 0; i < BLKCG_MAX_POLS; i++) {
-		/* [한국어] 각 정책별 통계 리셋 콜백 순회 */
+			/* [한국어] i 번 슬롯의 정책. */
 			struct blkcg_policy *pol = blkcg_policy[i];
 
+			/* [한국어] pd 가 붙어 있고 리셋 콜백을 제공하는 정책만 호출한다. */
 			if (blkg->pd[i] && pol->pd_reset_stats_fn)
-			/* [한국어] 정책별 통계 리셋 함수 호출; throtl/BFQ NVMe 통계 초기화 */
 				pol->pd_reset_stats_fn(blkg->pd[i]);
 		}
 	}
 
+	/* [한국어] 역순으로 락 해제. */
 	spin_unlock_irq(&blkcg->lock);
 	mutex_unlock(&blkcg_pol_mutex);
+	/* [한국어] 항상 성공으로 처리한다 — 실패할 만한 자원 할당이 없다. */
 	return 0;
 }
 
@@ -1255,11 +1759,14 @@ static int blkcg_reset_stats(struct cgroup_subsys_state *css,
  */
 const char *blkg_dev_name(struct blkcg_gq *blkg)
 {
+	/* [한국어] 큐는 있지만 아직 gendisk 가 붙지 않은 구간이 존재한다.
+	 * 그때는 이름을 만들 수 없으므로 NULL 을 돌려주고, 호출자가 이 blkg 를
+	 * 출력에서 건너뛴다. */
 	if (!blkg->q->disk)
-	/* [한국어] disk 가 없으면 이름 없음; 미연결 queue */
 		return NULL;
+	/* [한국어] backing_dev_info 에 등록된 장치 이름을 돌려준다.
+	 * 이 이름이 cgroupfs 출력의 "<장치이름> <값>" 앞부분이 된다. */
 	return bdi_dev_name(blkg->q->disk->bdi);
-	/* [한국어] bdi 이름 반환; NVMe namespace stat 출력용 */
 }
 
 /**
@@ -1314,27 +1821,34 @@ void blkcg_print_blkgs(struct seq_file *sf, struct blkcg *blkcg,
 		       const struct blkcg_policy *pol, int data,
 		       bool show_total)
 {
+	/* [한국어] blkg_list 순회 커서. 이 cgroup 이 쓰는 장치 수만큼 돈다. */
 	struct blkcg_gq *blkg;
-	/* [한국어] 순회 중인 blkg */
+	/* [한국어] prfill 이 돌려준 값들의 누계. show_total 일 때만 출력된다. */
 	u64 total = 0;
-	/* [한국어] 출력값 합산; NVMe namespace 간 cgroup 통계 집계 */
 
+	/* [한국어] blkg_list 는 RCU 로 순회한다. 순회 중 blkg 가 destroy 되어도
+	 * hlist_del_init_rcu 덕분에 커서가 무효화되지 않고, blkg 메모리도
+	 * grace period 전에는 해제되지 않는다. */
 	rcu_read_lock();
-	/* [한국어] blkg_list RCU read-side 보호 */
+	/* [한국어] 이 cgroup 에 달린 모든 blkg — 즉 (이 cgroup) × (모든 장치) 조합. */
 	hlist_for_each_entry_rcu(blkg, &blkcg->blkg_list, blkcg_node) {
-	/* [한국어] cgroup 의 모든 NVMe namespace blkg 를 RCU 로 순회 */
+		/* [한국어] 정책 데이터를 읽는 동안 그 장치의 상태가 바뀌지 않도록
+		 * 해당 blkg 의 큐 락을 잡는다. blkg 마다 큐가 다르므로 매 반복마다
+		 * 잡고 푼다. 이 때문에 prfill 콜백 안에서는 잠들 수 없다. */
 		spin_lock_irq(&blkg->q->queue_lock);
-		/* [한국어] blkg 출력 시 해당 NVMe queue lock 획득 */
+		/* [한국어] 이 장치에서 해당 정책이 켜져 있어야 pd[pol->plid] 가 유효하다.
+		 * 같은 cgroup 이라도 장치마다 활성 정책이 다를 수 있다. */
 		if (blkcg_policy_enabled(blkg->q, pol))
-		/* [한국어] 해당 queue 에서 정책이 활성화된 blkg 만 출력 */
+			/* [한국어] 정책이 준 콜백에 자기 pd 를 넘겨 한 줄을 출력하게 하고,
+			 * 반환값을 합계에 더한다. plid 가 pd[] 슬롯 번호라는 규약이
+			 * 여기서 그대로 쓰인다. */
 			total += prfill(sf, blkg->pd[pol->plid], data);
-			/* [한국어] 정책별 출력 함수 호출; NVMe queue 별 throtl/BFQ 상태 노출 */
 		spin_unlock_irq(&blkg->q->queue_lock);
 	}
 	rcu_read_unlock();
 
+	/* [한국어] 호출자가 요청했으면 마지막 줄에 합계를 덧붙인다. */
 	if (show_total)
-	/* [한국어] namespace 간 NVMe cgroup 통계 합계 출력 */
 		seq_printf(sf, "Total %llu\n", (unsigned long long)total);
 }
 EXPORT_SYMBOL_GPL(blkcg_print_blkgs);
@@ -1372,14 +1886,19 @@ EXPORT_SYMBOL_GPL(blkcg_print_blkgs);
  */
 u64 __blkg_prfill_u64(struct seq_file *sf, struct blkg_policy_data *pd, u64 v)
 {
+	/* [한국어] pd->blkg 로 blkg 를 되찾고, 거기서 장치 이름을 얻는다.
+	 * pd 만 받는 콜백이 blkg 로 돌아갈 수 있는 것은 blkg_alloc 이 걸어 둔
+	 * pd->blkg 백포인터 덕분이다. */
 	const char *dname = blkg_dev_name(pd->blkg);
-	/* [한국어] blkg 의 NVMe 장치 이름 */
 
+	/* [한국어] 아직 gendisk 가 붙지 않은 큐라면 출력할 이름이 없다.
+	 * 0 을 반환해 합계(total)에 영향을 주지 않으면서 이 줄을 건너뛴다. */
 	if (!dname)
-	/* [한국어] 장치명이 없으면 출력 불가 */
 		return 0;
 
+	/* [한국어] cgroupfs 관례 형식 "<장치이름> <값>" 한 줄을 찍는다. */
 	seq_printf(sf, "%s %llu\n", dname, (unsigned long long)v);
+	/* [한국어] 출력한 값을 그대로 반환 — 호출자가 Total 합산에 쓴다. */
 	return v;
 }
 EXPORT_SYMBOL_GPL(__blkg_prfill_u64);
@@ -1423,8 +1942,10 @@ EXPORT_SYMBOL_GPL(__blkg_prfill_u64);
  */
 void blkg_conf_init(struct blkg_conf_ctx *ctx, char *input)
 {
+	/* [한국어] 구조체 통째 대입. 지정 초기화자에서 언급하지 않은 필드
+	 * (bdev, body, blkg 등)는 C 규칙에 따라 0/NULL 이 되므로,
+	 * blkg_conf_exit() 이 "NULL 이면 건너뛴다" 로 안전하게 정리할 수 있다. */
 	*ctx = (struct blkg_conf_ctx){ .input = input };
-	/* [한국어] 입력 문자열 저장; MAJ:MIN 파싱 시작점 */
 }
 EXPORT_SYMBOL_GPL(blkg_conf_init);
 
@@ -1450,7 +1971,7 @@ EXPORT_SYMBOL_GPL(blkg_conf_init);
  * @return: 0 성공, 음수 errno(형식 오류 -EINVAL, 장치 없음 -ENODEV 등)
  *
  * cgroup의 I/O 설정은 항상 "어느 장치에 대한 설정인가"로 시작한다.
- * 예: "259:0 rbps=1048576"에서 259:0이 /dev/nvme0n1의 major:minor다.
+ * 예: "8:0 rbps=1048576"에서 앞의 "8:0"이 대상 블록 장치의 major:minor다.
  * 장치 이름이 아니라 번호를 쓰는 이유는 이름이 부팅마다 바뀔 수 있는 반면
  * major:minor는 커널 내부에서 장치를 유일하게 식별하는 값이기 때문이다.
  *
@@ -1469,15 +1990,20 @@ EXPORT_SYMBOL_GPL(blkg_conf_init);
  */
 int blkg_conf_open_bdev(struct blkg_conf_ctx *ctx)
 {
+	/* [한국어] 파싱 커서. 원본 ctx->input 은 건드리지 않고 지역 포인터를 옮긴다. */
 	char *input = ctx->input;
-	/* [한국어] 파싱 중인 입력 문자열 */
+	/* [한국어] 파싱해 낼 장치 번호. dev_t 로 조합해 장치를 찾는 데 쓴다. */
 	unsigned int major, minor;
-	/* [한국어] NVMe block 장치 major/minor 번호 */
+	/* [한국어] 찾아낸 블록 장치. 성공 시 ctx->bdev 에 보관되고
+	 * blkg_conf_exit() 에서 참조가 반납된다. */
 	struct block_device *bdev;
+	/* [한국어] sscanf 의 %n 이 채워 줄 "여기까지 소비한 문자 수". */
 	int key_len;
 
+	/* [한국어] 이미 열려 있으면 아무 것도 하지 않는다. 위 영문 주석의
+	 * "여러 번 불러도 no-op" 계약을 구현하는 부분이며, blkg_conf_prep() 이
+	 * 무조건 이 함수를 부를 수 있게 해 준다. */
 	if (ctx->bdev)
-	/* [한국어] 이미 bdev 가 열린 경우 NOOP */
 		return 0;
 
 	/* [한국어] 입력 앞머리의 "MAJ:MIN"을 파싱한다. %n은 "여기까지 몇 글자를
@@ -1503,6 +2029,7 @@ int blkg_conf_open_bdev(struct blkg_conf_ctx *ctx)
 	 * 전체 open 절차가 불필요하고, 그 절차가 잠들거나 다른 락을 잡으면
 	 * 여기서 원하지 않는 부작용이 생기기 때문이다. */
 	bdev = blkdev_get_no_open(MKDEV(major, minor), false);
+	/* [한국어] 그런 번호의 블록 장치가 없다 — 사용자 입력 오류. */
 	if (!bdev)
 		return -ENODEV;
 	/* [한국어] 파티션에는 cgroup I/O 설정을 걸 수 없다.
@@ -1511,6 +2038,7 @@ int blkg_conf_open_bdev(struct blkg_conf_ctx *ctx)
 	 * 사용자가 파티션을 지정하면 조용히 디스크 전체에 적용하는 대신
 	 * 명시적으로 거부해, 의도와 다른 결과를 막는다. */
 	if (bdev_is_partition(bdev)) {
+		/* [한국어] 방금 얻은 참조를 되돌리고 거절한다. */
 		blkdev_put_no_open(bdev);
 		return -ENODEV;
 	}
@@ -1520,11 +2048,12 @@ int blkg_conf_open_bdev(struct blkg_conf_ctx *ctx)
 	 * 이 락은 blkg_conf_exit()이 해제한다 — 이 함수가 락을 쥔 채로
 	 * 반환하는 계약이다. */
 	mutex_lock(&bdev->bd_queue->rq_qos_mutex);
-	/* [한국어] 디스크가 아직 살아 있는지 확인한다. NVMe 컨트롤러가 뽑히거나
-	 * 네임스페이스가 제거되는 중이면 설정을 걸어도 곧 사라진다.
+	/* [한국어] 디스크가 아직 살아 있는지(제거 중이 아닌지) 확인한다.
+	 * 사라지는 장치에 설정을 걸어 봐야 곧 함께 사라진다.
 	 * 락을 잡은 뒤에 확인하는 순서가 중요하다 — 락 밖에서 확인하면
 	 * 확인과 사용 사이에 상태가 바뀔 수 있다. */
 	if (!disk_live(bdev->bd_disk)) {
+		/* [한국어] 실패 경로에서는 잡은 순서의 역순으로 모두 되돌린다. */
 		blkdev_put_no_open(bdev);
 		mutex_unlock(&bdev->bd_queue->rq_qos_mutex);
 		return -ENODEV;
@@ -1533,8 +2062,11 @@ int blkg_conf_open_bdev(struct blkg_conf_ctx *ctx)
 	/* [한국어] 파싱 결과를 컨텍스트에 기록한다. body는 정책이 이어서 파싱할
 	 * 값 부분이고, bdev는 대상 장치다. 이 둘이 채워졌다는 사실 자체가
 	 * blkg_conf_exit()에게 "여기까지 진행됐으니 이만큼 정리하라"는 신호가 된다. */
+	/* [한국어] 정책이 이어서 파싱할 값 부분의 시작 위치. */
 	ctx->body = input;
+	/* [한국어] 대상 장치와 그 참조의 소유권을 ctx 로 넘긴다. */
 	ctx->bdev = bdev;
+	/* [한국어] 성공. 주의: rq_qos_mutex 를 쥔 채로 반환한다(위 설명 참조). */
 	return 0;
 }
 /*
@@ -1576,16 +2108,20 @@ int blkg_conf_open_bdev(struct blkg_conf_ctx *ctx)
  */
 unsigned long __must_check blkg_conf_open_bdev_frozen(struct blkg_conf_ctx *ctx)
 {
+	/* [한국어] blkg_conf_open_bdev() 의 반환 코드. */
 	int ret;
+	/* [한국어] blk_mq_freeze_queue() 가 돌려주는, 복원해야 할 메모리 할당 범위 상태. */
 	unsigned long memflags;
 
+	/* [한국어] 이 변형은 반드시 "아직 열리지 않은" ctx 로 시작해야 한다.
+	 * 이미 열려 있으면 아래의 unlock/freeze/lock 순서가 성립하지 않으므로 거절. */
 	if (ctx->bdev)
-	/* [한국어] 이미 열린 bdev 가 있으면 오류 */
 		return -EINVAL;
 
+	/* [한국어] 장치 열기 + 파티션/생존 검사. 성공하면 rq_qos_mutex 를 쥔 채 돌아온다. */
 	ret = blkg_conf_open_bdev(ctx);
-	/* [한국어] bdev 열기 및 live 검증 */
 	if (ret < 0)
+		/* [한국어] 실패 시 open_bdev 가 이미 모두 되돌렸으므로 그대로 전달. */
 		return ret;
 	/*
 	 * At this point, we haven’t started protecting anything related to QoS,
@@ -1593,14 +2129,21 @@ unsigned long __must_check blkg_conf_open_bdev_frozen(struct blkg_conf_ctx *ctx)
 	 * conf_open_bdev. Later, we re-acquire q->rq_qos_mutex after freezing
 	 * the queue to maintain the correct locking order.
 	 */
+	/* [한국어] freeze 전에 rq_qos_mutex 를 반드시 놓는다. freeze 는 진행 중인
+	 * request 가 모두 끝나기를 기다리는데, 그 request 처리 경로가 이 뮤텍스를
+	 * 필요로 할 수 있어 쥔 채로 freeze 하면 데드락이다(위 영문 주석). */
 	mutex_unlock(&ctx->bdev->bd_queue->rq_qos_mutex);
-	/* [한국어] freeze 전 lock 해제; 올바른 lock ordering 유지 */
 
+	/* [한국어] 큐를 freeze 한다: 새 request 진입을 막고 이미 들어온 것들이
+	 * 완료될 때까지 기다린다. 반환된 memflags 는 freeze 구간 동안 설정된
+	 * memalloc 범위(회수 중 I/O 재진입 방지)를 되돌리는 데 필요하다. */
 	memflags = blk_mq_freeze_queue(ctx->bdev->bd_queue);
-	/* [한국어] blk-mq queue freeze; QUEUE_FLAG_QUIESCED 와 유사하게 NVMe IO 제출/완료 일시 정지 */
+	/* [한국어] freeze 가 끝난 뒤 올바른 순서(freeze → rq_qos_mutex)로 다시 잡는다.
+	 * 이 뮤텍스는 blkg_conf_exit_frozen() 이 푼다. */
 	mutex_lock(&ctx->bdev->bd_queue->rq_qos_mutex);
-	/* [한국어] freeze 후 다시 QoS lock 획득 */
 
+	/* [한국어] 성공. 반환값은 오류 코드가 아니라 memflags 이며, 호출자는 이것을
+	 * blkg_conf_exit_frozen() 에 그대로 넘겨야 한다. */
 	return memflags;
 }
 
@@ -1653,40 +2196,44 @@ int blkg_conf_prep(struct blkcg *blkcg, const struct blkcg_policy *pol,
 		   struct blkg_conf_ctx *ctx)
 	__acquires(&bdev->bd_queue->queue_lock)
 {
+	/* [한국어] 대상 장치의 gendisk. blkg_alloc/blkg_create 가 disk 를 요구한다. */
 	struct gendisk *disk;
-	/* [한국어] 대상 NVMe namespace 의 gendisk */
+	/* [한국어] 그 디스크의 request_queue. blkg 가 실제로 매달리는 대상. */
 	struct request_queue *q;
-	/* [한국어] 대상 NVMe request_queue */
+	/* [한국어] 설정을 적용할 blkg — 이 함수의 최종 산출물. */
 	struct blkcg_gq *blkg;
-	/* [한국어] 설정 대상 blkg */
+	/* [한국어] 오류 코드 임시 저장. */
 	int ret;
 
+	/* [한국어] 아직 장치를 열지 않았다면 여기서 연다(이미 열렸으면 no-op).
+	 * 성공하면 rq_qos_mutex 를 쥔 상태가 된다. */
 	ret = blkg_conf_open_bdev(ctx);
-	/* [한국어] bdev 열기 */
 	if (ret)
-	/* [한국어] bdev 열기 실패 시 즉시 반환 */
 		return ret;
 
+	/* [한국어] 열린 bdev 에서 디스크와 큐를 꺼낸다. */
 	disk = ctx->bdev->bd_disk;
-	/* [한국어] bdev 로부터 gendisk 획득 */
 	q = disk->queue;
-	/* [한국어] gendisk 의 request_queue 획득; NVMe namespace queue */
 
 	/* Prevent concurrent with blkcg_deactivate_policy() */
+	/* [한국어] 정책 비활성화와의 경쟁을 막는다. 이 락이 없으면 blkg 를 만든 직후
+	 * 다른 스레드가 정책을 꺼서 pd 를 해제해 버릴 수 있다. */
 	mutex_lock(&q->blkcg_mutex);
-	/* [한국어] blkcg_deactivate_policy() 와 동기화 */
+	/* [한국어] blkg 조회/생성은 queue_lock 을 요구한다. */
 	spin_lock_irq(&q->queue_lock);
-	/* [한국어] queue_lock 획득; blkg 생성/조회 보호 */
 
+	/* [한국어] 이 장치에서 해당 정책이 켜져 있지 않으면 설정할 대상이 없다.
+	 * -EOPNOTSUPP 는 "이 장치는 이 기능을 지원하지 않는다" 는 뜻으로
+	 * 사용자에게 전달된다. */
 	if (!blkcg_policy_enabled(q, pol)) {
 		ret = -EOPNOTSUPP;
 		goto fail_unlock;
 	}
 
+	/* [한국어] 목표 (cgroup, 큐) 조합의 blkg 가 이미 있으면 그대로 쓴다.
+	 * 대부분의 재설정은 이 빠른 경로로 끝난다. */
 	blkg = blkg_lookup(blkcg, q);
-	/* [한국어] 기존 blkg 검색 */
 	if (blkg)
-	/* [한국어] 기존 blkg 를 설정 대상으로 사용 */
 		goto success;
 
 	/*
@@ -1704,16 +2251,22 @@ int blkg_conf_prep(struct blkcg *blkcg, const struct blkcg_policy *pol,
 	while (true) {
 		/* [한국어] 이번 반복에서 만들 대상. 아래 탐색으로 조상 쪽으로 밀린다. */
 		struct blkcg *pos = blkcg;
+		/* [한국어] 조상 탐색 커서. NULL 이 되면 루트에 닿았다는 뜻. */
 		struct blkcg *parent;
+		/* [한국어] 락 밖에서 미리 할당해 둘 blkg. 락 안에서는 잠들 수 없으므로
+		 * 이렇게 "미리 만들어 두고 락 안에서 등록만" 하는 패턴을 쓴다. */
 		struct blkcg_gq *new_blkg;
 
+		/* [한국어] 목표 cgroup 의 부모부터 위로 훑기 시작한다. */
 		parent = blkcg_parent(blkcg);
 		/* [한국어] blkg가 없는 가장 가까운 조상을 찾아 pos를 그쪽으로 옮긴다.
 		 * 루프가 끝나면 pos는 "지금 만들어야 할 가장 위쪽 blkg"가 된다.
 		 * parent가 NULL이면 root에 도달한 것이고, root blkg는 큐 생성 시
 		 * 이미 만들어져 있으므로 탐색이 거기서 멈춘다. */
 		while (parent && !blkg_lookup(parent, q)) {
+			/* [한국어] 이 조상도 blkg 가 없다 — 생성 지점을 한 칸 위로 올린다. */
 			pos = parent;
+			/* [한국어] 다시 그 위를 본다. */
 			parent = blkcg_parent(parent);
 		}
 
@@ -1727,6 +2280,8 @@ int blkg_conf_prep(struct blkcg *blkcg, const struct blkcg_policy *pol,
 		 * 메모리 회수를 유발하고 그 회수가 이 디스크로의 write-back을
 		 * 필요로 하면, 그 I/O가 다시 blkg를 찾으려다 교착에 빠질 수 있다. */
 		new_blkg = blkg_alloc(pos, disk, GFP_NOIO);
+		/* [한국어] 할당 실패. 락은 이미 놓은 상태이므로 fail_exit 로 간다
+		 * (fail_unlock 으로 가면 잡지 않은 스핀락을 풀게 된다). */
 		if (unlikely(!new_blkg)) {
 			ret = -ENOMEM;
 			goto fail_exit;
@@ -1739,11 +2294,14 @@ int blkg_conf_prep(struct blkcg *blkcg, const struct blkcg_policy *pol,
 		 * 락 안의 삽입이 할당 없이 성공하도록 보장한다. 이후
 		 * radix_tree_preload_end()까지 preemption이 비활성화된다. */
 		if (radix_tree_preload(GFP_KERNEL)) {
+			/* [한국어] preload 실패 — 방금 만든 blkg 를 되돌리고 나간다. */
 			blkg_free(new_blkg);
 			ret = -ENOMEM;
 			goto fail_exit;
 		}
 
+		/* [한국어] 등록을 위해 다시 락을 잡는다. 이 아래는 모두 "락을 놓은 사이
+		 * 상황이 바뀌었을 수 있다" 를 전제로 재확인하는 코드다. */
 		spin_lock_irq(&q->queue_lock);
 
 		/* [한국어] 락을 놓은 사이에 상황이 변했을 수 있다. 정책이 이 큐에서
@@ -1751,6 +2309,8 @@ int blkg_conf_prep(struct blkcg *blkcg, const struct blkcg_policy *pol,
 		 * 더 진행할 이유가 없다. 락을 놓았다 잡는 코드에서 이런 재확인은
 		 * 선택이 아니라 필수다. */
 		if (!blkcg_policy_enabled(q, pol)) {
+			/* [한국어] 준비했던 blkg 를 버리고, preload 상태까지 정리하는
+			 * fail_preloaded 경로로 간다. */
 			blkg_free(new_blkg);
 			ret = -EOPNOTSUPP;
 			goto fail_preloaded;
@@ -1765,8 +2325,11 @@ int blkg_conf_prep(struct blkcg *blkcg, const struct blkcg_policy *pol,
 			blkg_free(new_blkg);
 		} else {
 			/* [한국어] 내가 만든다. blkg_create()가 radix tree와 blkcg의
-			 * 리스트에 등록하고, 부모 blkg와의 연결도 맺는다. */
+			 * 리스트에 등록하고, 부모 blkg와의 연결도 맺는다.
+			 * new_blkg 는 성공/실패와 무관하게 blkg_create 가 소비하므로
+			 * 아래 실패 경로에서 다시 free 하지 않는다. */
 			blkg = blkg_create(pos, disk, new_blkg);
+			/* [한국어] 큐가 죽었거나 부모가 없는 등의 이유로 실패. */
 			if (IS_ERR(blkg)) {
 				ret = PTR_ERR(blkg);
 				goto fail_preloaded;
@@ -1784,17 +2347,20 @@ int blkg_conf_prep(struct blkcg *blkcg, const struct blkcg_policy *pol,
 			goto success;
 	}
 success:
+	/* [한국어] blkg 확보 완료. 정책 비활성화 방지용 뮤텍스는 여기서 놓는다
+	 * (queue_lock 은 계약대로 계속 쥔 채 반환한다). */
 	mutex_unlock(&q->blkcg_mutex);
+	/* [한국어] 호출자가 이어서 설정을 적용할 대상 blkg 를 컨텍스트에 심는다. */
 	ctx->blkg = blkg;
-	/* [한국어] 설정 대상 blkg 확정; blkg_conf_prep() 호출자가 queue_lock 해제 */
+	/* [한국어] 성공. queue_lock 은 blkg_conf_exit() 이 푼다. */
 	return 0;
 
 fail_preloaded:
+	/* [한국어] radix_tree_preload() 가 껐던 preemption 을 반드시 되살린다. */
 	radix_tree_preload_end();
-	/* [한국어] preload 상태 정리 */
 fail_unlock:
+	/* [한국어] queue_lock 해제. */
 	spin_unlock_irq(&q->queue_lock);
-	/* [한국어] queue_lock 해제 */
 fail_exit:
 	mutex_unlock(&q->blkcg_mutex);
 	/* [한국어] blkcg_mutex 해제 */
@@ -1851,18 +2417,26 @@ void blkg_conf_exit(struct blkg_conf_ctx *ctx)
 	__releases(&ctx->bdev->bd_queue->queue_lock)
 	__releases(&ctx->bdev->bd_queue->rq_qos_mutex)
 {
+	/* [한국어] ctx->blkg 가 채워졌다는 것은 blkg_conf_prep() 이 성공해
+	 * queue_lock 을 쥔 채 반환했다는 뜻이다. 그러니 그 락을 여기서 푼다. */
 	if (ctx->blkg) {
-	/* [한국어] blkg_conf_prep() 에서 잡은 queue_lock 해제; NVMe IO 경로 재개 */
+		/* [한국어] prep 이 잡은 그 큐의 락. bdev_get_queue 로 같은 큐를 다시 얻는다. */
 		spin_unlock_irq(&bdev_get_queue(ctx->bdev)->queue_lock);
+		/* [한국어] 이중 해제를 막기 위해 즉시 표식을 지운다. */
 		ctx->blkg = NULL;
 	}
 
+	/* [한국어] ctx->bdev 가 채워졌다는 것은 blkg_conf_open_bdev() 가 성공해
+	 * rq_qos_mutex 를 쥐고 bdev 참조를 들고 있다는 뜻이다. */
 	if (ctx->bdev) {
-	/* [한국어] QoS lock 해제 */
+		/* [한국어] open_bdev 가 잡은 채 반환했던 뮤텍스를 여기서 푼다. */
 		mutex_unlock(&ctx->bdev->bd_queue->rq_qos_mutex);
+		/* [한국어] blkdev_get_no_open 으로 얻은 참조를 짝 맞춰 반납한다. */
 		blkdev_put_no_open(ctx->bdev);
-	/* [한국어] bdev 참조 반낑; NVMe namespace bdev */
+		/* [한국어] body 는 input 문자열 내부를 가리키던 포인터라 해제 대상은
+		 * 아니지만, 유효하지 않은 상태를 남기지 않도록 함께 지운다. */
 		ctx->body = NULL;
+		/* [한국어] 이중 해제 방지 표식. */
 		ctx->bdev = NULL;
 	}
 }
@@ -1895,13 +2469,17 @@ EXPORT_SYMBOL_GPL(blkg_conf_exit);
  */
 void blkg_conf_exit_frozen(struct blkg_conf_ctx *ctx, unsigned long memflags)
 {
+	/* [한국어] 장치를 열지 못했다면 freeze 도 없었으므로 할 일이 없다. */
 	if (ctx->bdev) {
-	/* [한국어] 대상 NVMe request_queue */
+		/* [한국어] blkg_conf_exit() 이 ctx->bdev 를 NULL 로 만들기 전에
+		 * 큐 포인터를 따로 보관해 둔다. 그 뒤에 unfreeze 해야 하기 때문. */
 		struct request_queue *q = ctx->bdev->bd_queue;
 
+		/* [한국어] 공통 정리(락 해제, 참조 반납)를 먼저 수행한다. */
 		blkg_conf_exit(ctx);
+		/* [한국어] 큐 freeze 해제 + memflags 로 메모리 할당 범위 복원.
+		 * memflags 는 open_bdev_frozen 이 돌려준 값 그대로여야 한다. */
 		blk_mq_unfreeze_queue(q, memflags);
-	/* [한국어] queue freeze 해제; NVMe IO 제출/완료 재개 */
 	}
 }
 
@@ -1926,15 +2504,15 @@ void blkg_conf_exit_frozen(struct blkg_conf_ctx *ctx, unsigned long memflags)
  */
 static void blkg_iostat_add(struct blkg_iostat *dst, struct blkg_iostat *src)
 {
+	/* [한국어] read/write/discard 세 분류 인덱스. */
 	int i;
-	/* [한국어] read/write/discard 항목 순회 */
 
+	/* [한국어] 분류별로 바이트와 건수를 각각 더한다. */
 	for (i = 0; i < BLKG_IOSTAT_NR; i++) {
-	/* [한국어] 세 IO 유형별로 합산 */
+		/* [한국어] 누적 바이트 합산. u64 라 사실상 오버플로 걱정이 없다. */
 		dst->bytes[i] += src->bytes[i];
-		/* [한국어] i 유형 바이트 누적 */
+		/* [한국어] 누적 IO 건수 합산. */
 		dst->ios[i] += src->ios[i];
-		/* [한국어] i 유형 IO 횟수 누적 */
 	}
 }
 
@@ -1964,100 +2542,146 @@ static void blkg_iostat_add(struct blkg_iostat *dst, struct blkg_iostat *src)
  */
 static void blkg_iostat_sub(struct blkg_iostat *dst, struct blkg_iostat *src)
 {
+	/* [한국어] read/write/discard 세 분류 인덱스. */
 	int i;
-	/* [한국어] read/write/discard 항목 순회 */
 
+	/* [한국어] 분류별로 바이트와 건수를 각각 뺀다. */
 	for (i = 0; i < BLKG_IOSTAT_NR; i++) {
-	/* [한국어] 세 IO 유형별로 차감 */
+		/* [한국어] cur - last 로 "아직 전파하지 않은 증분" 을 얻는 용도. */
 		dst->bytes[i] -= src->bytes[i];
-		/* [한국어] i 유형 바이트 차감 */
+		/* [한국어] 건수도 같은 방식. */
 		dst->ios[i] -= src->ios[i];
-		/* [한국어] i 유형 IO 횟수 차감 */
 	}
 }
 
 /*
  * [한국어]
- * blkcg_iostat_update - per-cpu 통계 delta 를 global blkg 통계에 반영
+ * blkcg_iostat_update - "증분만 더하고 스냅숏을 갱신" 하는 통계 전파의 핵심 연산
  *
- * 호출 경로: __blkcg_rstat_flush() -> blkcg_iostat_update()
- * NVMe 연결점: NVMe CQ 완료 등으로 이미 per-cpu 에 누적된 read/write/discard
- *   바이트/IO 수를 blkg->iostat.cur 로 합산한다. 상위 cgroup 으로의 전파는
- *   __blkcg_rstat_flush() 에서 수행한다.
+ * @blkg: 갱신 대상 blkg. blkg->iostat.cur 에 증분이 더해진다.
+ * @cur:  현재 누적값(단조 증가). per-cpu 슬롯의 cur 이거나, 부모로 전파할 때는
+ *        자식 blkg 의 iostat.cur 이다.
+ * @last: 지난번 전파 시점의 스냅숏. 이 함수가 cur 값으로 갱신한다.
+ * @return: 없음.
+ *
+ * 왜 이런 방식인가: 통계 카운터를 flush 할 때마다 0 으로 초기화하면, 초기화와
+ * 갱신 사이에 들어온 IO 를 잃는다. 그래서 카운터는 계속 단조 증가시키고,
+ * "지난번에 어디까지 반영했는지" 를 last 에 기억한다.
+ *   delta = cur - last;  대상에 delta 를 더함;  last = cur;
+ * 이렇게 하면 갱신 측(핫패스)은 cur 을 더하기만 하면 되고 flush 와 경쟁하지 않는다.
+ *
+ * 실행 컨텍스트: __blkcg_rstat_flush() 안. 호출자가 blkg_stat_lock 을 쥔 상태이며,
+ * 여기서는 추가로 대상 blkg 의 u64_stats seqcount 를 잡아 독자와 동기화한다.
+ *
+ * 호출 체인:
+ *   __blkcg_rstat_flush() → [blkcg_iostat_update]
+ *     → blkg_iostat_set/sub/add
  */
-
 static void blkcg_iostat_update(struct blkcg_gq *blkg, struct blkg_iostat *cur,
 				struct blkg_iostat *last)
 {
+	/* [한국어] cur - last 결과를 담을 지역 변수. 스택에 두어 다른 CPU 가
+	 * 중간 상태를 볼 수 없게 한다. */
 	struct blkg_iostat delta;
-	/* [한국어] per-cpu 와 last 사이의 delta */
+	/* [한국어] seqcount 진입 시 저장할 인터럽트 상태. */
 	unsigned long flags;
 
 	/* propagate percpu delta to global */
+	/* [한국어] 목적지 통계의 쓰기 구간 진입. 독자(io.stat 읽기)는 이 구간 동안
+	 * seq 값이 바뀌는 것을 보고 재시도한다. */
 	flags = u64_stats_update_begin_irqsave(&blkg->iostat.sync);
-	/* [한국어] global 통계 seqlock 진입; NVMe read/write/discard 누적값 보호 */
+	/* [한국어] delta = cur (일단 현재값을 통째로 복사). */
 	blkg_iostat_set(&delta, cur);
-	/* [한국어] 현재 per-cpu 값을 delta 로 복사 */
+	/* [한국어] delta -= last (이제 delta 는 지난 flush 이후의 증분). */
 	blkg_iostat_sub(&delta, last);
-	/* [한국어] last 를 뺌으로써 실제 delta 산출 */
+	/* [한국어] 목적지 누적값에 증분을 더한다. */
 	blkg_iostat_add(&blkg->iostat.cur, &delta);
-	/* [한국어] global cur 에 delta 누적; NVMe namespace 별 cgroup 통계 업데이트 */
+	/* [한국어] last += delta, 즉 last 를 cur 과 같게 만든다. 다음 flush 의 기준점.
+	 * (last = cur 대신 더하기를 쓰는 이유는 위 세 헬퍼만으로 표현하기 위해서다.) */
 	blkg_iostat_add(last, &delta);
-	/* [한국어] last 를 현재값으로 갱신; 다음 delta 계산 기준 */
+	/* [한국어] 쓰기 구간 종료 및 인터럽트 복원. */
 	u64_stats_update_end_irqrestore(&blkg->iostat.sync, flags);
-	/* [한국어] seqlock 해제; NVMe 통계 readers 에게 일관된 값 공개 */
 }
 
 /*
- * 주요 구조체와 NVMe 동작 연관성
+ * [한국어] === 통계 관련 자료구조 정리 (blk-cgroup.h 정의를 이 파일 관점에서 요약) ===
  *
- * struct blkcg_gq (blkg): request_queue 와 blkcg 의 1:1 연결체. NVMe SSD 에서
- *   하나의 namespace 는 하나의 request_queue(q)를 가지며, 여러 cgroup 의 IO
- *   를 이 q 위에서 분류할 때 blkg 가 사용된다. pd[] 는 throtl, BFQ, ioprio 등
- *   정책별 private data 를 담아 nvme_queue_rq() 호출 시 큐 선택/제한/우선순위
- *   결정에 반영된다. iostat_cpu 는 NVMe 완료(CQ)에서 blk_cgroup_bio_start()로
- *   집계되는 per-cpu 통계이며, use_delay/delay_nsec/delay_start 는 cgroup 단위
- *   IO 지연 누적으로 NVMe queue depth 완화를 유도한다.
+ * struct blkg_iostat
+ *   bytes[3], ios[3] 두 배열뿐인 순수 카운터. 인덱스는 BLKG_IOSTAT_READ /
+ *   WRITE / DISCARD 이며, 어느 분류인지는 blk_cgroup_io_type() 이 bio->bi_opf 로
+ *   결정한다. 값은 단조 증가하며 flush 때 0 으로 되돌리지 않는다.
  *
- * struct blkcg: cgroup 하위 시스템 상태(css)와 함께 해당 cgroup 의 모든 blkg
- *   들을 blkg_tree/blkg_list 로 관리한다. NVMe 장치가 다수 namespace 를 가지면
- *   하나의 blkcg 는 namespace 개수만큼 blkg 를 가진다. lhead 는 per-cpu 통계
- *   갱신을 lazy flush 하기 위한 lockless list 의 헤드이다.
+ * struct blkg_iostat_set
+ *   cur(현재 누적) + last(마지막 전파 시점 스냅숏) + sync(u64_stats seqcount)
+ *   + blkg(주인 역참조) + lnode/lqueued(lockless list 연결). 두 벌로 쓰인다:
+ *     - blkg->iostat_cpu : CPU 마다 하나. IO 제출 시 락 없이 갱신되는 쪽.
+ *     - blkg->iostat     : blkg 당 하나. flush 로 합산된 전역 값이며 io.stat 출력원.
  *
- * struct blkg_iostat_set: read/write/discard 바이트/IO 수를 per-cpu(cur)와
- *   전역(blkg->iostat.cur) 두 벌로 유지한다. NVMe 명령어(OPC) 중 read, write,
- *   discard 를 구분해 통계를 집계하며, CID 단위로 SQ 에 기록된 후 CQ 완료
- *   시점에 누적된다(추정).
+ * 통계가 흐르는 길
+ *   blk_cgroup_bio_start()  [갱신, 프로세스 컨텍스트, preempt off]
+ *     → blkg->iostat_cpu[cpu].cur 증가, 아직 llist 에 없으면 blkcg->lhead 에 등록
+ *   → (cgroup rstat 프레임워크가 적당한 때 flush 요청)
+ *   → blkcg_rstat_flush() → __blkcg_rstat_flush()
+ *     → llist 를 통째로 떼어 각 항목의 (cur - last) 를 blkg->iostat.cur 에 더하고,
+ *       같은 증분을 부모 blkg 의 iostat.cur 에도 더한다(계층 누적)
+ *   → blkcg_print_stat() 이 blkg->iostat.cur 을 읽어 io.stat 으로 출력
  */
 
 /*
  * [한국어]
- * __blkcg_rstat_flush - lockless list 에 대기 중인 per-cpu 통계를 flush
+ * __blkcg_rstat_flush - 한 CPU 의 lockless list 에 쌓인 통계 갱신을 모두 반영한다
  *
- * 호출 경로: cgroup rstat flush -> blkcg_rstat_flush() -> __blkcg_rstat_flush()
- * NVMe 연결점: NVMe SSD 가 멀티 코어에서 동시에 IO 완료(CQ)를 처리하면
- *   per-cpu blkg_iostat_set 의 갱신이 lockless list 에 쌓인다. 이 함수는 해당
- *   리스트를 순회하여 delta 를 blkg->iostat.cur 로 반영하고, 부모 cgroup 까지
- *   전파한다. smp_mb() 와 lqueued 플래그로 reordering 을 방지한다.
+ * @blkcg: flush 대상 cgroup. 이 cgroup 의 lhead[cpu] 를 비운다.
+ * @cpu:   flush 할 CPU 번호. rstat 프레임워크가 "이 CPU 에서 갱신이 있었다" 고
+ *         알려 준 값이거나, blkg 소멸 시 모든 CPU 를 도는 경우의 인덱스다.
+ * @return: 없음.
+ *
+ * === 왜 lockless list 가 필요한가 ===
+ * cgroup rstat 프레임워크는 "어느 (cgroup, CPU) 에서 갱신이 있었나" 까지만
+ * 기억한다. 그런데 한 cgroup 에는 장치 수만큼 blkg 가 있으므로, 그것만으로는
+ * 어느 blkg 를 봐야 할지 알 수 없어 전부 훑어야 한다. 그래서 갱신 측이
+ * "내가 갱신한 iostat_cpu" 를 blkcg->lhead[cpu] 에 매달아 두고, 이 함수는
+ * 그 리스트만 처리한다. 장치가 많아도 실제 IO 가 있었던 blkg 만 비용이 든다.
+ *
+ * === 두 방향의 반영 ===
+ * 항목 하나마다 (cur - last) 증분을 구해 두 곳에 더한다.
+ *   1) 자기 blkg 의 전역 iostat.cur  — io.stat 에 그대로 나오는 값
+ *   2) 부모 blkg 의 iostat.cur       — cgroup 계층 누적(부모는 자식 합을 포함)
+ * 부모로의 전파는 여기서 한 단계만 한다. 조부모 이상은 부모 blkg 가 다시
+ * flush 될 때 같은 방식으로 올라간다.
+ *
+ * 실행 컨텍스트: rstat flush 경로(프로세스 컨텍스트) 또는 __blkg_release()
+ * (RCU 콜백). 어느 쪽이든 잠들 수 없다. 전역 통계를 만지는 구간은
+ * blkg_stat_lock(raw spinlock)으로 직렬화한다.
+ *
+ * 호출 체인:
+ *   cgroup rstat flush → blkcg_rstat_flush() → [__blkcg_rstat_flush]
+ *   __blkg_release() → [__blkcg_rstat_flush]
+ *     → blkcg_iostat_update(), blkg_put()
  */
 
 static void __blkcg_rstat_flush(struct blkcg *blkcg, int cpu)
 {
+	/* [한국어] 이 (blkcg, cpu) 조합의 lockless list 헤드. 갱신 측이 여기에
+	 * iostat_set 을 매달아 둔다. */
 	struct llist_head *lhead = per_cpu_ptr(blkcg->lhead, cpu);
-	/* [한국어] 대상 CPU 의 lockless list 헤드 */
+	/* [한국어] 통째로 떼어 낸 리스트의 첫 노드. */
 	struct llist_node *lnode;
-	/* [한국어] lockless list 의 첫 노드 */
+	/* [한국어] 순회 커서와 다음 노드(safe 순회를 위해 미리 읽어 둔다). */
 	struct blkg_iostat_set *bisc, *next_bisc;
-	/* [한국어] 순회 중인 per-cpu 통계 노드와 다음 노드 */
+	/* [한국어] raw_spin_lock_irqsave 가 저장할 인터럽트 상태. */
 	unsigned long flags;
 
+	/* [한국어] 리스트에 매달린 iostat_set 에서 blkg 와 그 부모 포인터를 따라가므로,
+	 * 그 객체들이 해제되지 않도록 RCU read-side 로 감싼다. */
 	rcu_read_lock();
-	/* [한국어] blkg 객체 및 계층 포인터 접근을 RCU 로 보호 */
 
+	/* [한국어] 리스트 전체를 원자적으로 떼어 온다(헤드는 즉시 빈 상태가 된다).
+	 * 이후 새로 들어오는 갱신은 빈 리스트에 쌓이므로, 이 함수가 처리하는
+	 * 집합과 겹치지 않는다. llist 는 xchg 기반이라 락이 필요 없다. */
 	lnode = llist_del_all(lhead);
-	/* [한국어] 해당 CPU 의 lockless list 전체를 분리; NVMe 통계 업데이트 노드들을 한꺼번에 가져옴 */
+	/* [한국어] 이 CPU 에서 갱신된 blkg 가 없다 — 할 일 없이 빠져나간다. */
 	if (!lnode)
-	/* [한국어] flush 할 통계 노드가 없음 */
 		goto out;
 
 	/*
@@ -2066,22 +2690,28 @@ static void __blkcg_rstat_flush(struct blkcg *blkcg, int cpu)
 	 * When flushing from cgroup, the subsystem rstat lock is always held,
 	 * so this lock won't cause contention most of time.
 	 */
+	/* [한국어] 전역/부모 통계를 만지는 구간을 직렬화한다. 같은 부모 blkg 를
+	 * 서로 다른 CPU 가 동시에 갱신할 수 있고, __blkg_release() 도 여기에
+	 * 끼어들 수 있기 때문이다(위 영문 주석). raw_ 인 이유는 PREEMPT_RT 에서도
+	 * 잠들지 않아야 하기 때문이며, 영문 주석대로 rstat 경로에서는 상위 락이
+	 * 이미 직렬화를 해 주므로 실제 경합은 드물다. */
 	raw_spin_lock_irqsave(&blkg_stat_lock, flags);
-	/* [한국어] 부모 blkg update 와의 경쟁 보호; NVMe 통계 상위 전파 직렬화 */
 
 	/*
 	 * Iterate only the iostat_cpu's queued in the lockless list.
 	 */
+	/* [한국어] 떼어 온 리스트만 순회한다 — 이 cgroup 의 모든 blkg 가 아니라,
+	 * 실제로 갱신이 있었던 것만. _safe 변형이라 순회 중 노드를 다시 리스트에
+	 * 넣어도 커서가 깨지지 않는다. */
 	llist_for_each_entry_safe(bisc, next_bisc, lnode, lnode) {
-	/* [한국어] lockless list 의 per-cpu 통계 노드를 순회; NVMe CQ 완료별 누적 처리 */
+		/* [한국어] 이 통계 슬롯의 주인 blkg (blkg_alloc 이 심어 둔 백포인터). */
 		struct blkcg_gq *blkg = bisc->blkg;
-		/* [한국어] 통계가 속한 blkg; NVMe namespace 와 cgroup 의 연결체 */
+		/* [한국어] 증분을 한 단계 위로 전파할 대상. 루트 blkg 면 NULL. */
 		struct blkcg_gq *parent = blkg->parent;
-		/* [한국어] 통계를 전파할 부모 blkg */
+		/* [한국어] per-cpu 현재값의 일관된 스냅숏을 담을 지역 변수. */
 		struct blkg_iostat cur;
-		/* [한국어] per-cpu 통계 스냅샷 */
+		/* [한국어] u64_stats seqcount 재시도 루프용 시퀀스 값. */
 		unsigned int seq;
-		/* [한국어] u64_stats_seqlock 의 sequence 번호 */
 
 		/*
 		 * Order assignment of `next_bisc` from `bisc->lnode.next` in
@@ -2091,74 +2721,110 @@ static void __blkcg_rstat_flush(struct blkcg *blkcg, int cpu)
 		 *
 		 * The pair barrier is implied in llist_add() in blk_cgroup_bio_start().
 		 */
+		/* [한국어] 전체 메모리 배리어. 영문 주석이 설명하는 경쟁은 이렇다:
+		 * 순회 매크로가 next_bisc 를 bisc->lnode.next 에서 읽는 것과,
+		 * 바로 아래 lqueued=false 쓰기의 순서가 뒤바뀌면 위험하다.
+		 * lqueued 가 먼저 false 로 보이면 blk_cgroup_bio_start() 가 이 노드를
+		 * 리스트에 다시 넣으면서 lnode.next 를 새 값으로 덮어쓰고,
+		 * 그러면 우리가 읽는 next_bisc 가 이미 처리한 리스트가 아니라
+		 * 새 리스트를 가리키게 된다. 배리어로 "next 읽기 → lqueued 쓰기"
+		 * 순서를 강제한다. 짝이 되는 배리어는 llist_add() 안에 들어 있다. */
 		smp_mb();
-		/* [한국어] llist_for_each_entry_safe 의 next 포인터 로드와 lqueued 클리어 사이의 reordering 방지; NVMe 통계 노드 안전성 */
 
+		/* [한국어] "이 노드는 이제 리스트에 없다" 고 표시해, 다음 IO 가 다시
+		 * 등록할 수 있게 한다. WRITE_ONCE 로 컴파일러 최적화(쪼개기/삭제)를 막는다. */
 		WRITE_ONCE(bisc->lqueued, false);
-		/* [한국어] 배리어와 함께 list 등록 상태 클리어; 이후 blk_cgroup_bio_start() 에서 재등록 가능 */
+		/* [한국어] 리스트에는 두 종류가 섞여 있다: per-cpu 슬롯(iostat_cpu)과,
+		 * 자식이 부모를 대신 등록해 둔 전역 슬롯(&blkg->iostat).
+		 * 후자는 이미 전역값이므로 per-cpu → 전역 합산 단계를 건너뛰고
+		 * 곧바로 부모 전파만 한다. */
 		if (bisc == &blkg->iostat)
-		/* [한국어] global 통계 노드는 부모로만 전파; per-cpu 통계는 먼저 global 에 합산 */
 			goto propagate_up; /* propagate up to parent only */
 
 		/* fetch the current per-cpu values */
+		/* [한국어] seqcount 재시도 루프. 갱신 측이 쓰는 도중이면 seq 가 홀수/변경되어
+		 * 재시도하게 되고, 그 결과 찢기지 않은 스냅숏을 얻는다. */
 		do {
-		/* [한국어] u64_stats_seqlock 시작; 32bit 에서 NVMe 통계 reader/writer race 회피 */
+			/* [한국어] 읽기 시작 시퀀스 확보. */
 			seq = u64_stats_fetch_begin(&bisc->sync);
-		/* [한국어] per-cpu 통계 스냅샷 복사 */
+			/* [한국어] per-cpu 누적값을 지역 변수로 복사. */
 			blkg_iostat_set(&cur, &bisc->cur);
 		} while (u64_stats_fetch_retry(&bisc->sync, seq));
-		/* [한국어] seqlock 갱신 시 재시도; NVMe 통계 일관성 확보 */
-
+		/* [한국어] (cur - bisc->last) 증분을 blkg 전역 통계에 더하고 last 를 갱신. */
 		blkcg_iostat_update(blkg, &cur, &bisc->last);
-		/* [한국어] per-cpu delta 를 global blkg 통계에 반영 */
 
 propagate_up:
 		/* propagate global delta to parent (unless that's root) */
+		/* [한국어] parent && parent->parent 조건: 부모가 있고, 그 부모도 루트가
+		 * 아니어야 한다. 즉 "루트의 직계 자식" 까지만 올린다.
+		 * 루트 cgroup 의 통계는 blkg 가 아니라 디스크 파티션 통계에서
+		 * 직접 채우므로(blkcg_fill_root_iostats) 중복 집계를 피하는 것이다. */
 		if (parent && parent->parent) {
-		/* [한국어] root 의 직계 자식이 아니면 부모에게 통계 전파; cgroup 계층별 NVMe IO 집계 */
+			/* [한국어] 방금 갱신된 이 blkg 의 전역 누적값에서, 부모로 아직
+			 * 올리지 않은 증분만큼을 부모 전역 통계에 더한다.
+			 * 여기서 last 는 "부모로 전파한 지점" 을 기억하는 용도로 재사용된다. */
 			blkcg_iostat_update(parent, &blkg->iostat.cur,
-			/* [한국어] 부모 blkg 의 global 통계에 delta 누적 */
 					    &blkg->iostat.last);
 			/*
 			 * Queue parent->iostat to its blkcg's lockless
 			 * list to propagate up to the grandparent if the
 			 * iostat hasn't been queued yet.
 			 */
+			/* [한국어] 조부모까지 올리려면 부모의 전역 슬롯도 flush 대상이
+			 * 되어야 한다. 아직 등록돼 있지 않다면 부모 cgroup 의 같은 CPU
+			 * 리스트에 넣어 둔다(위에서 bisc == &blkg->iostat 로 걸러지는 그 경우). */
 			if (!parent->iostat.lqueued) {
-			/* [한국어] 부모 통계 노드가 아직 list 에 없으면 등록; 상위 cgroup 으로 재귀 전파 준비 */
+				/* [한국어] 부모 cgroup 의 lockless list 헤드를 담을 지역 변수. */
 				struct llist_head *plhead;
 
+				/* [한국어] 부모의 blkcg 에서 같은 CPU 슬롯을 고른다.
+				 * cgroup 이 다르므로 lhead 배열도 다르다. */
 				plhead = per_cpu_ptr(parent->blkcg->lhead, cpu);
-				/* [한국어] 부모 cgroup 의 동일 CPU lockless list 헤드 */
+				/* [한국어] 원자적 리스트 추가(내부에 배리어 포함).
+				 * 위 smp_mb() 와 짝이 되는 배리어가 여기 있다. */
 				llist_add(&parent->iostat.lnode, plhead);
-				/* [한국어] 부모 통계 노드를 lockless list 에 추가; 이후 상위 flush 에 의해 처리 */
+				/* [한국어] 중복 등록 방지 표시. blkg_stat_lock 아래이므로
+				 * 평범한 대입으로 충분하다. */
 				parent->iostat.lqueued = true;
-				/* [한국어] 부모 노드 list 등록 상태 표시 */
 			}
 		}
 	}
+	/* [한국어] 전역 통계 갱신 구간 종료. */
 	raw_spin_unlock_irqrestore(&blkg_stat_lock, flags);
-	/* [한국어] blkg 통계 전파 lock 해제 */
 out:
+	/* [한국어] blkg 포인터 추적이 끝났으므로 RCU read-side 종료. */
 	rcu_read_unlock();
-	/* [한국어] RCU read-side 종료 */
 }
 
 /*
  * [한국어]
- * blkcg_rstat_flush - cgroup rstat 콜백, root 가 아니면 flush 수행
+ * blkcg_rstat_flush - cgroup rstat 프레임워크가 부르는 flush 콜백
  *
- * 호출 경로: cgroup rstat framework -> blkcg_rstat_flush()
- * NVMe 연결점: root cgroup 은 시스템 전체 disk_stats 를 사용하고, 그 외
- *   cgroup 은 NVMe queue 별 blkg 통계를 flush 한다.
+ * @css: flush 대상 cgroup 의 css. blkcg 로 변환해 쓴다.
+ * @cpu: 갱신이 있었다고 rstat 이 기록해 둔 CPU 번호.
+ * @return: 없음.
+ *
+ * 왜 필요한가: cgroup 코어는 서브시스템마다 "이 (cgroup, CPU) 의 통계를
+ * 정리하라" 는 콜백을 부른다. 이 파일은 그 콜백에서 lockless list 를 비운다.
+ * blkcg 구조체의 css.ss->css_rstat_flush 로 등록되며, io.stat 을 읽거나
+ * 주기적 flush 가 일어날 때 호출된다.
+ *
+ * 루트를 건너뛰는 이유: 루트 cgroup 의 io.stat 은 blkg 통계가 아니라
+ * 디스크 전체 통계(part_stat)에서 직접 만든다(blkcg_fill_root_iostats).
+ * 그래야 cgroup 을 하나도 만들지 않은 시스템에서 blkg 통계 유지 비용이
+ * 들지 않는다. 그래서 루트에서는 flush 할 것이 없다.
+ *
+ * 실행 컨텍스트: rstat flush 경로. 상위에서 서브시스템 rstat 락을 쥔 상태다.
+ *
+ * 호출 체인:
+ *   css_rstat_flush() → [blkcg_rstat_flush] → __blkcg_rstat_flush()
  */
-
 static void blkcg_rstat_flush(struct cgroup_subsys_state *css, int cpu)
 {
 	/* Root-level stats are sourced from system-wide IO stats */
+	/* [한국어] cgroup_parent() 가 NULL 이면 루트다. 루트가 아닐 때만 실제 flush. */
 	if (cgroup_parent(css->cgroup))
 		__blkcg_rstat_flush(css_to_blkcg(css), cpu);
-		/* [한국어] 특정 cgroup 의 CPU 별 NVMe 통계를 global 로 반영 */
 }
 
 /*
@@ -2185,64 +2851,72 @@ static void blkcg_rstat_flush(struct cgroup_subsys_state *css, int cpu)
 
 static void blkcg_fill_root_iostats(void)
 {
+	/* [한국어] block_class 에 등록된 장치를 안전하게 순회하기 위한 반복자.
+	 * 순회 중 장치가 제거되지 않도록 내부에서 참조를 잡아 준다. */
 	struct class_dev_iter iter;
-	/* [한국어] block_class 장치 순회자 */
+	/* [한국어] 반복자가 돌려주는 struct device. dev_to_bdev 로 block_device 로 바꾼다. */
 	struct device *dev;
-	/* [한국어] 순회 중인 block 장치 */
 
+	/* [한국어] block_class 의 장치 중 타입이 disk_type 인 것(= 파티션이 아닌 디스크)만
+	 * 순회하도록 반복자를 초기화한다. 세 번째 인자 NULL 은 "처음부터" 라는 뜻. */
 	class_dev_iter_init(&iter, &block_class, NULL, &disk_type);
+	/* [한국어] 시스템의 모든 디스크를 하나씩 훑는다. 루트 통계는 장치 전체 합이므로
+	 * 특정 cgroup 이 아니라 장치 목록을 도는 것이 맞다. */
 	while ((dev = class_dev_iter_next(&iter))) {
-	/* [한국어] 시스템의 모든 block 장치(NVMe namespace 포함)를 순회 */
+		/* [한국어] device → block_device. 파티션 통계(bd_stats)가 여기에 있다. */
 		struct block_device *bdev = dev_to_bdev(dev);
+		/* [한국어] 이 디스크 큐의 루트 blkg. 여기에 합산 결과를 써 넣는다. */
 		struct blkcg_gq *blkg = bdev->bd_disk->queue->root_blkg;
-		/* [한국어] 장치에 해당하는 block_device */
+		/* [한국어] 모든 CPU 의 disk_stats 를 더해 담을 임시 버퍼. */
 		struct blkg_iostat tmp;
-		/* [한국어] 해당 NVMe namespace 의 root blkg */
+		/* [한국어] per-cpu disk_stats 순회 인덱스. */
 		int cpu;
-		/* [한국어] disk_stats 누적 임시 버퍼 */
+		/* [한국어] seqcount 진입 시 저장할 인터럽트 상태. */
 		unsigned long flags;
-		/* [한국어] per-cpu disk_stats 순회 */
 
-		/* [한국어] u64_stats_update irqsave 플래그 */
+		/* [한국어] 누적 전에 0 으로 초기화. 이 함수는 "더하기" 가 아니라
+		 * "현재 절대값으로 덮어쓰기" 이므로 매번 새로 계산한다. */
 		memset(&tmp, 0, sizeof(tmp));
-		/* [한국어] 누적 버퍼 초기화 */
+		/* [한국어] 디스크 통계도 per-cpu 로 흩어져 있어 전부 더해야 한다. */
 		for_each_possible_cpu(cpu) {
-		/* [한국어] 모든 CPU 의 disk_stats 를 합산; NVMe 멀티 코어 완료 통계 집계 */
+			/* [한국어] 이 CPU 의 디스크 통계 슬롯. */
 			struct disk_stats *cpu_dkstats;
 
+			/* [한국어] bd_stats 는 block_device 의 per-cpu disk_stats 배열이다. */
 			cpu_dkstats = per_cpu_ptr(bdev->bd_stats, cpu);
-			/* [한국어] CPU 별 disk_stats 획득 */
+			/* [한국어] 읽기 건수 누적. STAT_READ 는 disk_stats 쪽 인덱스,
+			 * BLKG_IOSTAT_READ 는 blkg 쪽 인덱스로 서로 다른 열거형이다. */
 			tmp.ios[BLKG_IOSTAT_READ] +=
-			/* [한국어] read IO 횟수 누적; NVMe read opcode 와 대응 */
 				cpu_dkstats->ios[STAT_READ];
+			/* [한국어] 쓰기 건수 누적. */
 			tmp.ios[BLKG_IOSTAT_WRITE] +=
-			/* [한국어] write IO 횟수 누적; NVMe write opcode 와 대응 */
 				cpu_dkstats->ios[STAT_WRITE];
+			/* [한국어] discard 건수 누적. */
 			tmp.ios[BLKG_IOSTAT_DISCARD] +=
-			/* [한국어] discard IO 횟수 누적; NVMe DSM/discard 와 대응 */
 				cpu_dkstats->ios[STAT_DISCARD];
 			// convert sectors to bytes
+			/* [한국어] disk_stats 는 섹터 단위로 센다. blkg 통계는 바이트 단위라
+			 * << 9 (즉 ×512)로 변환한다. 512 는 커널이 쓰는 논리 섹터 크기이며
+			 * 장치의 실제 블록 크기와는 무관한 고정 환산 단위다. */
 			tmp.bytes[BLKG_IOSTAT_READ] +=
-			/* [한국어] sector(512B) 를 byte 로 변환해 read 바이트 누적 */
-			/* [한국어] sector(512B) 를 byte 로 변환해 누적 */
 				cpu_dkstats->sectors[STAT_READ] << 9;
-			/* [한국어] write 바이트 누적; NVMe PRP/SGL 로 전송된 총량(추정) */
+			/* [한국어] 쓰기 바이트 누적(섹터→바이트 변환). */
 			tmp.bytes[BLKG_IOSTAT_WRITE] +=
 				cpu_dkstats->sectors[STAT_WRITE] << 9;
-			/* [한국어] discard 바이트 누적; NVMe DSM range 와 대응 */
+			/* [한국어] discard 바이트 누적(섹터→바이트 변환). */
 			tmp.bytes[BLKG_IOSTAT_DISCARD] +=
 				cpu_dkstats->sectors[STAT_DISCARD] << 9;
 		}
 
+		/* [한국어] 루트 blkg 의 전역 통계를 쓰는 구간. 읽는 쪽
+		 * (blkcg_print_one_stat)이 찢긴 값을 보지 않도록 seqcount 로 감싼다. */
 		flags = u64_stats_update_begin_irqsave(&blkg->iostat.sync);
-		/* [한국어] root blkg global 통계 seqlock 진입 */
+		/* [한국어] 누적이 아니라 통째로 대입한다 — 이미 절대값을 계산했기 때문. */
 		blkg_iostat_set(&blkg->iostat.cur, &tmp);
-		/* [한국어] 집계된 disk_stats 를 root blkg 통계로 복사 */
 		u64_stats_update_end_irqrestore(&blkg->iostat.sync, flags);
-		/* [한국어] seqlock 해제 */
 	}
+	/* [한국어] 반복자가 잡고 있던 참조를 반납한다. 빠뜨리면 장치가 해제되지 않는다. */
 	class_dev_iter_exit(&iter);
-	/* [한국어] 장치 순회 종료 */
 }
 
 /*
@@ -2272,93 +2946,126 @@ static void blkcg_fill_root_iostats(void)
  */
 static void blkcg_print_one_stat(struct blkcg_gq *blkg, struct seq_file *s)
 {
+	/* [한국어] 출력 대상은 per-cpu 가 아니라 이미 flush 된 전역 통계 묶음이다. */
 	struct blkg_iostat_set *bis = &blkg->iostat;
-	/* [한국어] 출력할 blkg 의 global 통계 세트 */
+	/* [한국어] seqcount 루프 안에서 한꺼번에 떠 오는 여섯 값의 스냅숏.
+	 * 루프 밖에서 쓰려면 지역 변수에 복사해 두어야 한다. */
 	u64 rbytes, wbytes, rios, wios, dbytes, dios;
-	/* [한국어] read/write/discard 의 bytes/ios 스냅샷 */
+	/* [한국어] 줄 앞머리에 찍을 장치 이름. */
 	const char *dname;
-	/* [한국어] NVMe 장치 이름 */
+	/* [한국어] u64_stats 재시도 루프의 시퀀스 값. */
 	unsigned seq;
-	/* [한국어] u64_stats_seqlock sequence */
+	/* [한국어] 정책별 추가 통계를 붙일 때 쓰는 슬롯 인덱스. */
 	int i;
 
+	/* [한국어] 소멸 중인 blkg 는 출력하지 않는다 — 곧 사라질 장치 줄을
+	 * 사용자에게 보여 줄 이유가 없다. */
 	if (!blkg->online)
-	/* [한국어] offline blkg 는 통계 미출력; 제거 중인 NVMe cgroup */
 		return;
 
+	/* [한국어] 장치 이름 조회. */
 	dname = blkg_dev_name(blkg);
-	/* [한국어] 장치명 획득 */
+	/* [한국어] 아직 gendisk 가 붙지 않은 큐라면 줄을 만들 수 없다. */
 	if (!dname)
-	/* [한국어] 장치명 없으면 출력 불가 */
 		return;
 
+	/* [한국어] "<장치이름> " 으로 줄을 시작한다. 뒤에 key=value 들이 이어 붙는다. */
 	seq_printf(s, "%s ", dname);
 
+	/* [한국어] 여섯 값을 "같은 순간의 값" 으로 읽기 위한 재시도 루프.
+	 * 도중에 갱신이 끼어들면 seq 가 달라져 통째로 다시 읽는다. */
 	do {
-	/* [한국어] u64_stats_seqlock 시작; NVMe 통계 reader/writer race 회피 */
+		/* [한국어] 읽기 시작 시퀀스 확보. */
 		seq = u64_stats_fetch_begin(&bis->sync);
-		/* [한국어] read/write/discard 바이트 스냅샷 */
 
+		/* [한국어] 읽기 누적 바이트. */
 		rbytes = bis->cur.bytes[BLKG_IOSTAT_READ];
+		/* [한국어] 쓰기 누적 바이트. */
 		wbytes = bis->cur.bytes[BLKG_IOSTAT_WRITE];
+		/* [한국어] discard 누적 바이트. */
 		dbytes = bis->cur.bytes[BLKG_IOSTAT_DISCARD];
+		/* [한국어] 읽기 건수. */
 		rios = bis->cur.ios[BLKG_IOSTAT_READ];
+		/* [한국어] 쓰기 건수. */
 		wios = bis->cur.ios[BLKG_IOSTAT_WRITE];
+		/* [한국어] discard 건수. */
 		dios = bis->cur.ios[BLKG_IOSTAT_DISCARD];
 	} while (u64_stats_fetch_retry(&bis->sync, seq));
-	/* [한국어] seqlock 갱신 시 재시도; NVMe 통계 일관성 확보 */
 
+	/* [한국어] 모든 수치가 0 이면(= 이 cgroup 이 이 장치를 쓴 적이 없으면)
+	 * 통계 부분을 생략한다. discard 만 있는 경우는 판정에서 빠져 있는데,
+	 * 이는 상류 커널 코드 그대로다. */
 	if (rbytes || wbytes || rios || wios) {
-	/* [한국어] 통계가 0 이 아닐 때만 출력; NVMe IO 가 실제 발생한 장치 */
+		/* [한국어] cgroup v2 io.stat 의 표준 키 이름들. */
 		seq_printf(s, "rbytes=%llu wbytes=%llu rios=%llu wios=%llu dbytes=%llu dios=%llu",
 			rbytes, wbytes, rios, wios,
 			dbytes, dios);
 	}
 
+	/* [한국어] 디버그 모드이고 실제로 지연이 걸려 있는 blkg 에만 추가 정보를 붙인다.
+	 * use_delay 는 "지연을 요구하는 정책 수" 격의 카운터라 0 이면 지연이 없다. */
 	if (blkcg_debug_stats && atomic_read(&blkg->use_delay)) {
-	/* [한국어] debug 모드에서 use_delay/delay_nsec 출력; NVMe queue 지연/스로틀 상태 */
+		/* [한국어] atomic 값들은 여기서 각각 따로 읽으므로 서로 완전히
+		 * 일관된 스냅숏은 아니다 — 디버그 출력이라 허용된다. */
 		seq_printf(s, " use_delay=%d delay_nsec=%llu",
 			atomic_read(&blkg->use_delay),
 			atomic64_read(&blkg->delay_nsec));
 	}
 
+	/* [한국어] 마지막으로 정책들이 자기 통계를 같은 줄에 이어 붙일 기회를 준다.
+	 * 예: blk-iocost 는 cost.usage/cost.wait 같은 항목을 추가한다. */
 	for (i = 0; i < BLKCG_MAX_POLS; i++) {
-	/* [한국어] 등록된 정책별 추가 통계 출력; throtl/BFQ/ioprio NVMe 상태 */
+		/* [한국어] i 번 슬롯의 정책. */
 		struct blkcg_policy *pol = blkcg_policy[i];
 
+		/* [한국어] 이 blkg 에 pd 가 없거나(정책 비활성) 출력 콜백을 제공하지
+		 * 않는 정책은 건너뛴다. */
 		if (!blkg->pd[i] || !pol->pd_stat_fn)
-		/* [한국어] pd 없거나 stat 콜백 없으면 스킵 */
 			continue;
 
+		/* [한국어] 정책이 자기 형식대로 seq_file 에 덧붙인다. */
 		pol->pd_stat_fn(blkg->pd[i], s);
 	}
 
+	/* [한국어] 한 장치에 대한 줄을 끝맺는다. */
 	seq_puts(s, "\n");
 }
 
 /*
  * [한국어]
- * blkcg_print_stat - cgroup 의 blkcg.stat 파일 출력
+ * blkcg_print_stat - cgroup v2 의 io.stat 파일 전체를 출력하는 seq_show 핸들러
  *
- * 호출 경로: cgroup 파일 read -> blkcg_print_stat()
- * NVMe 연결점: NVMe namespace 별 blkg 의 read/write/discard 바이트/IO,
- *   use_delay, delay_nsec 등을 출력한다. root cgroup 은 전체 NVMe 장치
- *   통계를 합산해 보여준다.
+ * @sf: 출력 대상 seq_file. seq_css(sf) 로 어느 cgroup 의 파일인지 알아낸다.
+ * @v:  seq_file 반복자 인자. 이 파일은 한 번에 전부 출력하므로 쓰지 않는다.
+ * @return: 항상 0.
+ *
+ * 하는 일: 먼저 통계 원본을 최신화한 뒤, 이 cgroup 이 가진 blkg 마다
+ * blkcg_print_one_stat() 으로 한 줄씩 찍는다. 즉 출력 줄 수 = 이 cgroup 이
+ * 실제로 IO 를 낸 장치 수다.
+ *
+ * 실행 컨텍스트: cgroupfs read(프로세스 컨텍스트). css_rstat_flush() 가
+ * 잠들 수 있으므로 락을 잡기 전에 부른다.
+ *
+ * 호출 체인:
+ *   userspace read("io.stat") → cgroup 코어 → [blkcg_print_stat]
+ *     → blkcg_fill_root_iostats() 또는 css_rstat_flush()
+ *     → blkcg_print_one_stat()
  */
-
 static int blkcg_print_stat(struct seq_file *sf, void *v)
 {
+	/* [한국어] 이 seq_file 이 속한 cgroup 의 blkcg. */
 	struct blkcg *blkcg = css_to_blkcg(seq_css(sf));
-	/* [한국어] 출력 대상 cgroup */
+	/* [한국어] blkg_list 순회 커서. */
 	struct blkcg_gq *blkg;
-	/* [한국어] 순회 중인 blkg */
 
 	/* [한국어] ★ root와 non-root의 통계 출처가 다르다 ★
 	 * root cgroup은 "cgroup에 속하지 않은 I/O를 포함한 전부"를 보여야 한다.
 	 * 그런데 blkg 통계는 cgroup을 명시적으로 거친 I/O만 집계하므로, 커널
 	 * 스레드가 낸 I/O 등이 빠진다. 그래서 root는 blkg 통계 대신
 	 * /proc/diskstats와 같은 소스(디스크별 part_stat)에서 채운다. */
+	/* [한국어] parent 가 NULL 이면 루트 cgroup 이다. */
 	if (!seq_css(sf)->parent)
+		/* [한국어] 루트는 blkg 통계 대신 디스크별 part_stat 합계로 채운다. */
 		blkcg_fill_root_iostats();
 	else
 		/* [한국어] non-root는 per-CPU rstat에 흩어져 누적된 통계를 먼저
@@ -2366,6 +3073,7 @@ static int blkcg_print_stat(struct seq_file *sf, void *v)
 		 * CPU마다 값을 쌓아 두고, 읽을 때만 트리를 따라 합산한다.
 		 * 이 호출이 없으면 방금 발생한 I/O가 통계에 반영되지 않는다. */
 		css_rstat_flush(&blkcg->css);
+	/* [한국어] 이 호출이 끝나면 blkg->iostat.cur 이 최신 상태가 된다. */
 
 	/* [한국어] blkg 목록은 RCU로 보호된다. 순회 도중 다른 스레드가 blkg를
 	 * 제거할 수 있는데, RCU 유예 해제 덕분에 이 구간에서는 안전하게 읽는다. */
@@ -2379,24 +3087,36 @@ static int blkcg_print_stat(struct seq_file *sf, void *v)
 		 * 때문이다. blkg마다 잡았다 놓아, 한 blkg 출력이 다른 디스크의
 		 * I/O를 막지 않게 한다. */
 		spin_lock_irq(&blkg->q->queue_lock);
+		/* [한국어] 이 blkg 에 해당하는 한 줄을 출력한다. */
 		blkcg_print_one_stat(blkg, sf);
 		spin_unlock_irq(&blkg->q->queue_lock);
 	}
 	rcu_read_unlock();
+	/* [한국어] seq_file 출력은 오류를 내지 않으므로 항상 성공. */
 	return 0;
 }
 
+/* [한국어] cgroup v2(default hierarchy)에서 io 서브시스템이 만드는 파일 목록.
+ * 여기서는 읽기 전용 "io.stat" 하나뿐이고, io.max/io.weight 같은 파일은
+ * 각 정책(blk-throttle, iocost 등)이 자기 cftype 배열로 따로 등록한다.
+ * 마지막 빈 원소 { } 가 배열의 끝 표식이다. */
 static struct cftype blkcg_files[] = {
 	{
+		/* [한국어] cgroupfs 에 "io.stat" 으로 노출된다(접두사 io. 는 코어가 붙인다). */
 		.name = "stat",
+		/* [한국어] 읽기 핸들러. 위의 blkcg_print_stat 이 내용을 만든다. */
 		.seq_show = blkcg_print_stat,
 	},
 	{ }	/* terminate */
 };
 
+/* [한국어] cgroup v1(legacy hierarchy) 전용 파일 목록. 현재는 통계 초기화용
+ * "blkio.reset_stats" 하나만 남아 있으며 deprecated 경고를 낸다. */
 static struct cftype blkcg_legacy_files[] = {
 	{
+		/* [한국어] cgroupfs 에 "blkio.reset_stats" 로 노출된다. */
 		.name = "reset_stats",
+		/* [한국어] 쓰기 핸들러. 값은 무시하고 통계를 0 으로 만든다. */
 		.write_u64 = blkcg_reset_stats,
 	},
 	{ }	/* terminate */
@@ -2427,6 +3147,8 @@ static struct cftype blkcg_legacy_files[] = {
  */
 struct list_head *blkcg_get_cgwb_list(struct cgroup_subsys_state *css)
 {
+	/* [한국어] css → blkcg 로 되돌린 뒤 그 안의 리스트 헤드 주소를 준다.
+	 * 리스트 내용 자체는 넘겨주지 않고 주소만 노출하는 얇은 접근자다. */
 	return &css_to_blkcg(css)->cgwb_list;
 }
 #endif
@@ -2475,43 +3197,56 @@ struct list_head *blkcg_get_cgwb_list(struct cgroup_subsys_state *css)
 
 static void blkcg_destroy_blkgs(struct blkcg *blkcg)
 {
+	/* [한국어] 아래에서 cond_resched() 를 부르므로 이 함수는 잠들 수 있는
+	 * 문맥에서만 호출돼야 한다. 디버그 커널에서 그 계약을 검사한다. */
 	might_sleep();
-	/* [한국어] cond_resched() 사용 가능 표시 */
 
+	/* [한국어] 이 cgroup 의 blkg_list 를 보호한다. 잠금 순서 규약은
+	 * queue_lock → blkcg->lock 인데, 여기서는 반대로 blkcg->lock 을 먼저
+	 * 잡을 수밖에 없다(리스트가 blkcg 쪽에 있으므로). 그래서 아래에서
+	 * queue_lock 은 trylock 으로만 잡는 "역순 이중 락 춤" 을 춘다
+	 * (위 영문 주석의 reverse double lock dancing). */
 	spin_lock_irq(&blkcg->lock);
-	/* [한국어] blkcg 의 blkg_list 보호 */
 
+	/* [한국어] 리스트가 빌 때까지 계속 첫 항목을 지운다. blkg_destroy() 가
+	 * blkcg_node 를 해시에서 빼므로 반복마다 리스트가 줄어든다. */
 	while (!hlist_empty(&blkcg->blkg_list)) {
-	/* [한국어] 모든 blkg 가 제거될 때까지 반복 */
+		/* [한국어] 항상 첫 번째 항목을 대상으로 삼는다. 커서를 유지하지 않으므로
+		 * 중간에 락을 놓았다 잡아도 안전하다. */
 		struct blkcg_gq *blkg = hlist_entry(blkcg->blkg_list.first,
-		/* [한국어] blkg_list 의 첫 번째 blkg 획득 */
 						struct blkcg_gq, blkcg_node);
+		/* [한국어] 이 blkg 가 붙어 있는 큐. queue_lock 을 잡아야 지울 수 있다. */
 		struct request_queue *q = blkg->q;
-		/* [한국어] blkg 가 속한 NVMe request_queue */
 
+		/* [한국어] 두 가지 이유로 물러난다.
+		 * (1) need_resched(): blkg 가 아주 많으면 락을 오래 쥐어 softlockup 이 난다.
+		 * (2) trylock 실패: 잠금 순서를 어기고 있으므로 기다리면 데드락이다.
+		 *     기다리는 대신 blkcg->lock 을 놓고 처음부터 다시 시도한다. */
 		if (need_resched() || !spin_trylock(&q->queue_lock)) {
-		/* [한국어] 스케줄링 필요 또는 queue_lock 획득 실패 시 락 해제 후 재시도; softlockup 방지 */
 			/*
 			 * Given that the system can accumulate a huge number
 			 * of blkgs in pathological cases, check to see if we
 			 * need to rescheduling to avoid softlockup.
 			 */
+			/* [한국어] 바깥 락을 놓아 상대가 진행할 수 있게 한다. */
 			spin_unlock_irq(&blkcg->lock);
-			/* [한국어] 스케줄링 양보 */
+			/* [한국어] 필요하면 스케줄러에 양보. */
 			cond_resched();
+			/* [한국어] 다시 잡고 루프 조건부터 재평가한다. */
 			spin_lock_irq(&blkcg->lock);
-			/* [한국어] blkg_list 가 변경되었을 수 있으므로 처음부터 재시도 */
 			continue;
 		}
 
+		/* [한국어] 두 락을 모두 쥔 상태 — 이제 안전하게 제거할 수 있다. */
 		blkg_destroy(blkg);
-		/* [한국어] blkg 제거 및 refcnt 종료; NVMe IO 는 root blkg 로 spill */
+		/* [한국어] trylock 으로 잡은 안쪽 락만 푼다(인터럽트 상태는
+		 * 바깥 blkcg->lock 이 계속 들고 있으므로 _irq 변형이 아니다). */
 		spin_unlock(&q->queue_lock);
-		/* [한국어] queue_lock 해제 */
 	}
 
+	/* [한국어] 리스트가 비었다 — 이 cgroup 은 더 이상 어떤 blkg 도 갖지 않는다.
+	 * blkg 들이 들고 있던 css 참조가 반납되므로 blkcg_css_free() 로 가는 길이 열린다. */
 	spin_unlock_irq(&blkcg->lock);
-	/* [한국어] blkcg lock 해제 */
 }
 
 /**
@@ -2551,8 +3286,10 @@ static void blkcg_destroy_blkgs(struct blkcg *blkcg)
  */
 void blkcg_pin_online(struct cgroup_subsys_state *blkcg_css)
 {
+	/* [한국어] online_pin 을 원자적으로 1 증가시킨다. refcount_t 는 오버플로/
+	 * use-after-free 를 잡아내는 검사가 붙은 원자 카운터다.
+	 * 짝이 되는 감소는 blkcg_unpin_online(). */
 	refcount_inc(&css_to_blkcg(blkcg_css)->online_pin);
-	/* [한국어] online_pin 증가; cgroup 이 NVMe blkg 제거 지연 */
 }
 
 /**
@@ -2565,29 +3302,49 @@ void blkcg_pin_online(struct cgroup_subsys_state *blkcg_css)
  * blkcg can continue destruction by calling blkcg_destroy_blkgs().
  */
 /*
- * blkcg_unpin_online - online_pin 카운트가 0이면 blkg 제거 시작
+ * [한국어]
+ * blkcg_unpin_online - online 고정을 풀고, 0 이 되면 blkg 일괄 제거를 시작한다
  *
- * 호출 경로: blkcg_css_offline() -> blkcg_unpin_online()
- * NVMe 연결점: cgroup 의 writeback(cgwb) 등이 모두 끝나면 NVMe 장치와의
- *   blkg 연결을 해제한다. 부모 cgroup 으로 재귀적으로 처리한다.
+ * @blkcg_css: 고정을 풀 blkcg 의 css.
+ * @return: 없음.
+ *
+ * 왜 부모까지 거슬러 올라가는가: 자식 cgroup 은 살아 있는 동안 부모의
+ * online_pin 을 하나 잡고 있다(blkcg_css_online 에서 blkcg_pin_online 호출).
+ * 그래서 자식의 pin 이 0 이 되어 자식이 정리되면, 그 자식이 잡고 있던 부모의
+ * pin 도 함께 풀어야 한다. 재귀 대신 루프로 부모를 따라 올라가며 처리하는데,
+ * 어느 단계에서 카운트가 0 이 아니면(다른 자식이나 cgwb 가 아직 붙잡고 있으면)
+ * 거기서 멈춘다. 재귀를 쓰지 않는 것은 계층이 깊을 때 스택 사용을 피하기 위함이다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. blkcg_destroy_blkgs() 가 잠들 수 있으므로
+ * 아토믹 문맥에서 부르면 안 된다(cgwb_release_workfn 같은 워커에서 불린다).
+ *
+ * 호출 체인:
+ *   blkcg_css_offline() 또는 cgwb 해제 경로 → [blkcg_unpin_online]
+ *     → blkcg_destroy_blkgs() → blkg_destroy()
  */
-
 void blkcg_unpin_online(struct cgroup_subsys_state *blkcg_css)
 {
+	/* [한국어] css 를 blkcg 로 되돌린다. 루프 안에서 부모로 갱신된다. */
 	struct blkcg *blkcg = css_to_blkcg(blkcg_css);
-	/* [한국어] unpin 할 cgroup */
 
+	/* [한국어] 자기 자신부터 시작해 루트 방향으로 올라간다. */
 	do {
+		/* [한국어] blkg 를 지우기 전에 부모 포인터를 미리 읽어 둔다 —
+		 * blkcg_destroy_blkgs() 이후에도 blkcg 자체는 살아 있지만,
+		 * 코드 흐름을 명확히 하기 위해 먼저 확보한다. */
 		struct blkcg *parent;
 
+		/* [한국어] 카운트를 1 줄이고 0 이 되었는지 본다. 0 이 아니면 아직
+		 * 이 cgroup 을 붙잡고 있는 주체가 남았다는 뜻이라 여기서 멈춘다.
+		 * refcount_dec_and_test 는 감소와 판정을 원자적으로 수행한다. */
 		if (!refcount_dec_and_test(&blkcg->online_pin))
-		/* [한국어] pin 카운트가 아직 남아있으면 제거 대기 */
 			break;
 
+		/* [한국어] 다음 단계에서 처리할 부모. 루트면 NULL 이 되어 루프가 끝난다. */
 		parent = blkcg_parent(blkcg);
-		/* [한국어] 부모 cgroup; offline 은 root 방향으로 진행 */
+		/* [한국어] 이 cgroup 이 가진 모든 blkg 를 제거한다(2단계 소멸의 핵심). */
 		blkcg_destroy_blkgs(blkcg);
-		/* [한국어] 이 cgroup 의 모든 NVMe blkg 제거 */
+		/* [한국어] 부모의 pin 도 이 자식이 잡고 있었으므로 이어서 처리한다. */
 		blkcg = parent;
 	} while (blkcg);
 }
@@ -2602,101 +3359,157 @@ void blkcg_unpin_online(struct cgroup_subsys_state *blkcg_css)
  */
 /*
  * [한국어]
- * blkcg_css_offline - cgroup offline 콜백
+ * blkcg_css_offline - cgroup 이 사라지기 시작할 때 cgroup 코어가 부르는 콜백
  *
- * 호출 경로: cgroup offline -> blkcg_css_offline()
- * NVMe 연결점: 더 이상 태스크가 이 cgroup 에 attach/migrate 되지 않도록
- *   막고, writeback 종료 후 blkg 파괴를 시작한다. NVMe IO 는 남아있는 request
- *   들이 root blkg 로 spill 될 수 있다.
+ * @css: 오프라인 처리할 cgroup 의 css.
+ * @return: 없음.
+ *
+ * 이 파일 위쪽의 영문 주석이 설명하는 "3단계 소멸" 중 1단계다.
+ *   1단계(여기): cgroup writeback 을 먼저 오프라인시키고, 기본 online_pin 을
+ *                놓는다. 아직 cgwb 가 남아 있으면 카운트가 0 이 되지 않아
+ *                2단계로 넘어가지 않는다.
+ *   2단계: 카운트가 0 이 되는 순간 blkcg_destroy_blkgs() 가 불려 blkg 를 지우고,
+ *          blkg 들이 들고 있던 css 참조가 반납된다.
+ *   3단계: css 참조가 0 이 되면 blkcg_css_free() 가 blkcg 를 해제한다.
+ * writeback 을 먼저 처리하는 이유는, 아직 내려쓰지 않은 대량의 더티 페이지를
+ * 루트 cgroup 으로 떠넘기지 않으면서 진행 중인 정책은 유지하기 위해서다.
+ *
+ * 실행 컨텍스트: cgroup 소멸 경로(프로세스 컨텍스트, 잠들 수 있음).
+ *
+ * 호출 체인:
+ *   rmdir(cgroup) → cgroup 코어 → [blkcg_css_offline]
+ *     → wb_blkcg_offline() / blkcg_unpin_online()
  */
-
 static void blkcg_css_offline(struct cgroup_subsys_state *css)
 {
 	/* this prevents anyone from attaching or migrating to this blkcg */
+	/* [한국어] 이 cgroup 에 딸린 cgroup writeback 구조체들을 오프라인 표시한다.
+	 * 각 cgwb 가 풀릴 때마다 blkcg_unpin_online() 이 불려 카운트가 줄어든다. */
 	wb_blkcg_offline(css);
-	/* [한국어] writeback 종료 후 blkg 파괴 단계로 진행 */
 
 	/* put the base online pin allowing step 2 to be triggered */
+	/* [한국어] blkcg_css_alloc() 에서 1 로 세팅했던 "기본" pin 을 놓는다.
+	 * 남은 cgwb 가 없다면 여기서 카운트가 0 이 되어 곧바로 2단계
+	 * (blkcg_destroy_blkgs)가 실행된다. */
 	blkcg_unpin_online(css);
-	/* [한국어] online_pin 을 낮춰 blkg 제거 트리거 */
 }
 
 /*
  * [한국어]
- * blkcg_css_free - blkcg 구조체 최종 해제
+ * blkcg_css_free - blkcg 소멸 3단계 중 마지막: 구조체와 부속 자원을 해제한다
  *
- * 호출 경로: cgroup free -> blkcg_css_free()
- * NVMe 연결점: cpd_free_fn() 으로 per-cgroup 정책 데이터를 해제하고
- *   lhead(per-cpu lockless list)를 반납한다. 모든 NVMe queue 와의 연결이
- *   사라진 후 호출된다.
+ * @css: 해제할 blkcg 의 css. 이 시점에는 css 참조가 0 이라 아무도 참조하지 않는다.
+ * @return: 없음.
+ *
+ * 여기 도달했다는 것은 이 cgroup 의 blkg 가 모두 지워졌고(각 blkg 가 들고 있던
+ * css 참조가 반납됐고), 다른 참조도 남지 않았다는 뜻이다. 그래서 이제
+ * cgroup 단위 정책 데이터(cpd)와 per-cpu 통계 리스트를 놓을 수 있다.
+ *
+ * blkg 의 pd 와 blkcg 의 cpd 구분: pd 는 (cgroup, 장치) 조합마다 하나,
+ * cpd 는 cgroup 하나에 정책마다 하나다. 예컨대 "이 cgroup 의 기본 weight" 같은
+ * 장치 무관 설정이 cpd 에 들어간다.
+ *
+ * 실행 컨텍스트: cgroup 코어의 css 해제 경로(프로세스 컨텍스트).
+ * blkcg_pol_mutex 를 잡으므로 잠들 수 있어야 한다.
+ *
+ * 호출 체인:
+ *   css 참조 0 → cgroup 코어 → [blkcg_css_free] → cpd_free_fn() / kfree()
  */
-
 static void blkcg_css_free(struct cgroup_subsys_state *css)
 {
+	/* [한국어] 해제 대상 blkcg. */
 	struct blkcg *blkcg = css_to_blkcg(css);
-	/* [한국어] 해제할 cgroup */
+	/* [한국어] 정책 슬롯 인덱스. */
 	int i;
 
+	/* [한국어] all_blkcgs 리스트와 cpd 해제를 정책 등록/해제와 직렬화한다.
+	 * 이 락을 놓치면 blkcg_policy_register() 가 방금 해제 중인 blkcg 에
+	 * cpd 를 할당하려 들 수 있다. */
 	mutex_lock(&blkcg_pol_mutex);
-	/* [한국어] 정책 테이블과 cpd 해제 동기화 */
 
+	/* [한국어] 전역 blkcg 목록에서 뺀다. 이후 새로 등록되는 정책이
+	 * 이 blkcg 를 대상으로 삼지 않는다. */
 	list_del(&blkcg->all_blkcgs_node);
-	/* [한국어] 시스템 전체 blkcg 리스트에서 제거 */
 
+	/* [한국어] 정책별 cgroup 단위 데이터를 모두 해제한다. */
 	for (i = 0; i < BLKCG_MAX_POLS; i++)
-	/* [한국어] per-cgroup 정책 데이터(cpds) 해제 */
+		/* [한국어] 해당 정책이 cpd 를 요구하지 않았다면 NULL 이다. */
 		if (blkcg->cpd[i])
-		/* [한국어] cpd 가 할당되어 있으면 해제 */
+			/* [한국어] 정책이 스스로 정의한 해제 콜백. */
 			blkcg_policy[i]->cpd_free_fn(blkcg->cpd[i]);
 
 	mutex_unlock(&blkcg_pol_mutex);
 
+	/* [한국어] init_blkcg_llists() 가 할당했던 per-cpu lockless list 반납.
+	 * 락 밖에서 해도 되는 이유는 이 blkcg 를 참조하는 주체가 이미 없기 때문. */
 	free_percpu(blkcg->lhead);
-	/* [한국어] per-cpu lockless 통계 리스트 반낑 */
+	/* [한국어] 마지막으로 blkcg 구조체 자체 해제.
+	 * 주의: blkcg_root 는 정적 전역이라 이 경로로 오지 않는다. */
 	kfree(blkcg);
-	/* [한국어] blkcg 객체 반낑 */
 }
 
 static struct cgroup_subsys_state *
 /*
  * [한국어]
- * blkcg_css_alloc - 새 cgroup 생성 시 blkcg 할당/초기화
+ * blkcg_css_alloc - cgroup 이 만들어질 때 그 cgroup 의 블록 서브시스템 상태를 생성
  *
- * 호출 경로: cgroup create -> blkcg_css_alloc()
- * NVMe 연결점: cgroup 이 생성되면 해당 cgroup 의 cpd[] 를 할당하고
- *   init_blkcg_llists() 로 per-cpu lockless list 를 준비한다. 이후 NVMe
- *   namespace 가 추가될 때 이 blkcg 를 위한 blkg 가 생성된다.
+ * @parent_css: 부모 cgroup 의 css. NULL 이면 루트 cgroup 생성이다.
+ * @return: 새 blkcg 의 css, 실패 시 ERR_PTR(-ENOMEM).
+ *
+ * 하는 일:
+ *   1) blkcg 구조체 확보(루트는 정적 blkcg_root 재사용)
+ *   2) per-cpu 통계 lockless list 준비(init_blkcg_llists)
+ *   3) 이미 등록된 모든 정책에 대해 cpd(cgroup 단위 정책 데이터) 할당
+ *   4) 조회 자료구조 초기화: blkg_tree(radix), blkg_list(hlist), 락, pin 카운트
+ *   5) 전역 all_blkcgs 목록에 등록 — 나중에 새 정책이 등록될 때 이 blkcg 도
+ *      cpd 를 소급 할당받을 수 있게 하기 위함
+ * 이 시점에는 blkg 가 하나도 없다. blkg 는 실제로 IO 가 나거나 설정이 걸릴 때
+ * blkg_lookup_create()/blkg_conf_prep() 이 만든다.
+ *
+ * 실행 컨텍스트: mkdir(cgroup) 경로(프로세스 컨텍스트). GFP_KERNEL 할당과
+ * 뮤텍스를 쓰므로 잠들 수 있다.
+ *
+ * 호출 체인:
+ *   mkdir(cgroup) → cgroup 코어 → [blkcg_css_alloc]
+ *     → init_blkcg_llists() / pol->cpd_alloc_fn()
  */
-
 blkcg_css_alloc(struct cgroup_subsys_state *parent_css)
 {
+	/* [한국어] 만들어 반환할 blkcg. 실패 경로에서 부분 해제 대상. */
 	struct blkcg *blkcg;
-	/* [한국어] 할당/초기화될 blkcg */
+	/* [한국어] 정책 슬롯 인덱스. 실패 시 이 값부터 역순으로 되돌린다. */
 	int i;
 
+	/* [한국어] 정책 테이블(blkcg_policy[])을 읽으며 cpd 를 만들어야 하므로,
+	 * 그 사이 정책이 등록/해제되지 않도록 고정한다. all_blkcgs 리스트도 보호. */
 	mutex_lock(&blkcg_pol_mutex);
-	/* [한국어] 정책 테이블 보호 */
 
+	/* [한국어] parent_css 가 NULL 이면 루트 cgroup 이다. */
 	if (!parent_css) {
-		/* [한국어] 최상위 root cgroup 은 정적 blkcg_root 사용 */
+		/* [한국어] 루트는 부팅 초기부터 필요하므로 정적 전역을 그대로 쓴다.
+		 * 그래서 실패 경로에서도 kfree 하지 않는다(아래 free_blkcg 참조). */
 		blkcg = &blkcg_root;
 	} else {
-		/* [한국어] 일반 cgroup 용 blkcg 동적 할당 */
+		/* [한국어] 일반 cgroup 은 0 으로 초기화된 blkcg 를 새로 할당한다.
+		 * kzalloc 이므로 cpd[] 가 전부 NULL 로 시작하고, 이는 실패 경로의
+		 * NULL 검사가 성립하는 전제다. */
 		blkcg = kzalloc_obj(*blkcg);
-		/* [한국어] root 가 아닌 cgroup 에 대한 blkcg 메모리 동적 할당; NVMe cgroup 트리의 신규 노드 */
-		/* [한국어] 일반 cgroup 용 blkcg 동적 할당 */
 		if (!blkcg)
+			/* [한국어] 아직 아무 것도 잡지 않았으므로 락만 풀고 나간다. */
 			goto unlock;
 	}
 
+	/* [한국어] per-cpu 통계 lockless list 준비. 실패하면 blkcg 자체를 되돌린다. */
 	if (init_blkcg_llists(blkcg))
-	/* [한국어] per-cpu lockless 통계 리스트 초기화 실패 시 롤백 */
-	/* [한국어] per-cpu lockless 통계 리스트 초기화 */
 		goto free_blkcg;
 
+	/* [한국어] 지금 등록돼 있는 모든 정책에 대해 cpd 를 만든다.
+	 * 나중에 등록되는 정책은 blkcg_policy_register() 가 all_blkcgs 를 훑으며
+	 * 소급해서 채워 준다. */
 	for (i = 0; i < BLKCG_MAX_POLS ; i++) {
-	/* [한국어] 등록된 정책별 cpd 할당 */
+		/* [한국어] i 번 슬롯의 정책(없으면 NULL). */
 		struct blkcg_policy *pol = blkcg_policy[i];
+		/* [한국어] 이 정책이 이 cgroup 에 붙일 cgroup 단위 데이터. */
 		struct blkcg_policy_data *cpd;
 
 		/*
@@ -2705,55 +3518,66 @@ blkcg_css_alloc(struct cgroup_subsys_state *parent_css)
 		 * check if the policy requires any specific per-cgroup
 		 * data: if it does, allocate and initialize it.
 		 */
+		/* [한국어] 슬롯이 비었거나, 그 정책이 cgroup 단위 데이터를 쓰지 않으면
+		 * (cpd_alloc_fn 이 NULL) 할 일이 없다. */
 		if (!pol || !pol->cpd_alloc_fn)
-		/* [한국어] 정책 미등록 또는 cpd 필요 없음 */
 			continue;
 
+		/* [한국어] 정책이 자기 구조체를 할당한다. 여기서는 잠들 수 있으므로
+		 * GFP_KERNEL 을 쓴다(뮤텍스만 쥐고 있고 스핀락은 없다). */
 		cpd = pol->cpd_alloc_fn(GFP_KERNEL);
-		/* [한국어] per-cgroup 정책 데이터 할당; throtl/BFQ/ioprio 전역 상태 */
 		if (!cpd)
-		/* [한국어] cpd 할당 실패 시 롤백 */
+			/* [한국어] 여기까지 만든 cpd 들을 역순으로 해제해야 한다. */
 			goto free_pd_blkcg;
 
+		/* [한국어] i 번 슬롯에 꽂는다. blkg->pd[] 와 같은 인덱스 규약이다. */
 		blkcg->cpd[i] = cpd;
-		/* [한국어] blkcg 에 정책 데이터 연결 */
+		/* [한국어] cpd → blkcg 역참조. 정책 콜백이 cpd 만 받기 때문에 필요하다. */
 		cpd->blkcg = blkcg;
-		/* [한국어] cpd 가 역참조할 blkcg 설정 */
+		/* [한국어] 자기 슬롯 번호 기록. */
 		cpd->plid = i;
-		/* [한국어] policy id 기록 */
 	}
 
+	/* [한국어] blkg_tree/blkg_list 를 보호할 스핀락 초기화. */
 	spin_lock_init(&blkcg->lock);
-	/* [한국어] blkcg lock 초기화 */
+	/* [한국어] "기본" online pin 1 개. blkcg_css_offline() 이 이것을 놓는다.
+	 * cgwb 가 추가로 잡는 pin 들과 합쳐져 0 이 될 때 blkg 정리가 시작된다. */
 	refcount_set(&blkcg->online_pin, 1);
-	/* [한국어] 초기 online_pin 설정; cgroup 온라인 상태 유지 */
+	/* [한국어] (queue id → blkg) radix tree 초기화. GFP_NOWAIT 는 이 트리가
+	 * 내부 노드를 할당할 때 쓰는 플래그로, 스핀락 안에서 삽입되기 때문이다
+	 * (그래서 호출자가 radix_tree_preload 로 미리 채워 둔다). */
 	INIT_RADIX_TREE(&blkcg->blkg_tree, GFP_NOWAIT);
-	/* [한국어] queue id -> blkg radix tree 초기화 */
+	/* [한국어] 이 cgroup 이 가진 blkg 들을 잇는 해시 리스트 헤드 초기화.
+	 * RCU 순회 대상이라 hlist_add_head_rcu/hlist_del_init_rcu 로 조작된다. */
 	INIT_HLIST_HEAD(&blkcg->blkg_list);
-	/* [한국어] blkg list 초기화; NVMe namespace 별 blkg 들의 RCU list */
 #ifdef CONFIG_CGROUP_WRITEBACK
+	/* [한국어] cgroup writeback 구조체 목록. mm 계층이 blkcg_get_cgwb_list()
+	 * 로 접근한다. 해당 기능이 꺼진 커널에는 필드 자체가 없다. */
 	INIT_LIST_HEAD(&blkcg->cgwb_list);
 #endif
+	/* [한국어] 전역 목록에 등록. 이후 새 정책이 등록되면 이 blkcg 도
+	 * cpd 를 받게 된다. */
 	list_add_tail(&blkcg->all_blkcgs_node, &all_blkcgs);
-	/* [한국어] 시스템 전체 blkcg 리스트에 추가 */
 
 	mutex_unlock(&blkcg_pol_mutex);
+	/* [한국어] cgroup 코어에는 blkcg 가 아니라 그 안의 css 를 돌려준다. */
 	return &blkcg->css;
 
 free_pd_blkcg:
+	/* [한국어] 실패한 i 번은 할당되지 않았으므로 i-1 부터 역순으로 해제. */
 	for (i--; i >= 0; i--)
-	/* [한국어] 할당 실패 시 역순으로 cpd 해제 */
+		/* [한국어] cpd 를 쓰지 않는 정책 슬롯은 NULL 이다. */
 		if (blkcg->cpd[i])
-		/* [한국어] cpd 가 할당되어 있으면 해제 */
 			blkcg_policy[i]->cpd_free_fn(blkcg->cpd[i]);
+	/* [한국어] 통계 리스트도 반납. */
 	free_percpu(blkcg->lhead);
-	/* [한국어] per-cpu lockless list 반낑 */
 free_blkcg:
+	/* [한국어] 루트는 정적 전역이므로 절대 kfree 하면 안 된다. */
 	if (blkcg != &blkcg_root)
-	/* [한국어] 동적 할당된 blkcg 만 해제 */
 		kfree(blkcg);
 unlock:
 	mutex_unlock(&blkcg_pol_mutex);
+	/* [한국어] 실패 원인은 모두 메모리 부족이므로 -ENOMEM 하나로 통일한다. */
 	return ERR_PTR(-ENOMEM);
 }
 

@@ -28,7 +28,7 @@
  *   -> blk_mq_submit_bio() -> blk_mq_get_request() (bio -> request 승격,
  *      request->ioprio에 bio->bi_ioprio가 복사됨)
  *   -> I/O 스케줄러(mq-deadline/bfq/kyber)의 삽입/디스패치 순서 결정
- *   -> (NVMe 드라이버가 붙어 있다면) nvme_queue_rq() -> nvme_submit_cmd()로
+ *   -> (NVMe 드라이버가 붙어 있다면) nvme_queue_rq() -> nvme_sq_copy_cmd/nvme_write_sq_db()로
  *      SQ(Submission Queue)에 커맨드가 올라가고 도어벨(doorbell)이 눌린다.
  * 이 함수는 "아직 스케줄러 정책이 개입하기 전, 순수 bio 단계에서 우선순위를
  * 덮어쓰는 마지막 지점"이라는 점이 중요하다 — 이후 단계(스케줄러 삽입, 디스패치,
@@ -149,7 +149,7 @@ struct bio;			/* [한국어] 불완전 타입 전방 선언 - blkcg_set_ioprio(s
  *   submit_bio_noacct_nocheck() → [blkcg_set_ioprio] → (bio->bi_ioprio 갱신)
  *   → blk_mq_submit_bio() → blk_mq_get_request() (request->ioprio로 전파)
  *   → I/O 스케줄러(mq-deadline/bfq/kyber) 디스패치 순서 결정
- *   → (NVMe 드라이버 경로라면) nvme_queue_rq() → nvme_submit_cmd(doorbell)
+ *   → (NVMe 드라이버 경로라면) nvme_queue_rq() → nvme_sq_copy_cmd → nvme_write_sq_db (SQ 기록 후 doorbell)
  */
 void blkcg_set_ioprio(struct bio *bio);	/* [한국어] 실제 구현 선언 - block/blk-ioprio.c에 정의되어 있으며, 이 헤더를 include하는 쪽(예: block/blk-mq.c)은 링크 타임에 이 심볼을 연결받는다 */
 #else

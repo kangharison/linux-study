@@ -190,7 +190,7 @@ enum blkg_rwstat_type {
 	 * 동기화: percpu_counter 규약을 따름.
 	 * NVMe 관점: NVMe Dataset Management 커맨드(Deallocate 속성,
 	 *   옵코드 0x09) — 리눅스 REQ_OP_DISCARD가 NVMe로 변환될 때
-	 *   nvme_setup_dsm()을 거쳐 도달하는 TRIM 계열 요청이 이 인덱스로
+	 *   nvme_setup_discard()을 거쳐 도달하는 TRIM 계열 요청이 이 인덱스로
 	 *   집계된다. */
 
 	BLKG_RWSTAT_NR,
@@ -546,7 +546,7 @@ u64 blkg_prfill_rwstat(struct seq_file *sf, struct blkg_policy_data *pd,
  *   blkcg_stat_show/policy->stat_show -> [blkg_rwstat_recursive_sum]
  *   -> css_for_each_descendant_pre() -> blkg_rwstat_read_counter()
  *
- * NVMe 연결: 상위 cgroup 아래 여러 nvme_controller/namespace가
+ * NVMe 연결: 상위 cgroup 아래 여러 nvme_ctrl/namespace가
  * 자식 cgroup으로 걸려 있을 때, 이 함수가 그 전체를 통합해 상위
  * cgroup 단위의 Read/Write/Discard 총 사용량을 보고하는 데 쓰인다.
  */
@@ -619,7 +619,7 @@ static inline void blkg_rwstat_add(struct blkg_rwstat *rwstat,
 	struct percpu_counter *cnt;							/* 선택된 NVMe 명령 유형별 per-CPU 카운터 포인터 */
 
 	/* NVMe Deallocate(Discard) 명령이면 DISCARD 카운터를 선택 */
-	if (op_is_discard(opf))								/* REQ_OP_DISCARD: -> nvme_setup_dsm() -> Dataset Management(0x09) */
+	if (op_is_discard(opf))								/* REQ_OP_DISCARD: -> nvme_setup_discard() -> Dataset Management(0x09) */
 		cnt = &rwstat->cpu_cnt[BLKG_RWSTAT_DISCARD];		/* discard/deallocate 통계 누적 대상 설정 */
 	/* NVMe Write 명령이면 WRITE 카운터를 선택 */
 	else if (op_is_write(opf))							/* REQ_OP_WRITE / REQ_OP_WRITE_ZEROES: -> nvme_setup_rw() */

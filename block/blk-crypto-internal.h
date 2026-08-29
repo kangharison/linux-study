@@ -1203,7 +1203,7 @@ int __blk_crypto_rq_bio_prep(struct request *rq, struct bio *bio,
  * bio가 암호화 컨텍스트를 가진 경우에만 실제 준비 함수를 호출하고, 평문
  * bio라면 아무 것도 하지 않고 0(성공)을 반환한다.
  * NVMe 연결점: request가 처음 bio를 받는 이 시점에 crypt_ctx가 복사되며,
- * 이후 blk_crypto_rq_get_keyslot() -> nvme_queue_rq() -> nvme_setup_rw_ctx()
+ * 이후 blk_crypto_rq_get_keyslot() -> nvme_queue_rq() -> nvme_setup_rw()
  * -> SQ 제출(doorbell) 경로에서 NVMe 컨트롤러가 사용할 keyslot/DUN 정보가
  * 최종 확정된다.
  * 실행 컨텍스트: blk_mq_submit_bio() 등 request-bio 결합 경로의 프로세스 컨텍스트.

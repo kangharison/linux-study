@@ -44,7 +44,7 @@
  * (q->pm_only 카운터 증감과 mq_freeze_wq wake_up_all). percpu_ref_switch_to_atomic_sync()/
  * percpu_ref_is_zero()는 percpu-refcount 서브시스템이 제공하는 q->q_usage_counter
  * 조작 API다. 이 파일에 의존하는 모듈: NVMe(drivers/nvme/host/pci.c의
- * nvme_runtime_suspend/nvme_runtime_resume), SCSI, USB 스토리지 등 request 기반
+ * 드라이버의 runtime_suspend 콜백/드라이버의 runtime_resume 콜백), SCSI, USB 스토리지 등 request 기반
  * runtime PM을 지원하는 모든 블록 드라이버가 이 파일의 5개 EXPORT_SYMBOL 함수를
  * 자신의 struct dev_pm_ops 콜백 안에서 직접 호출한다. block/blk-pm.h의
  * blk_pm_resume_queue()/blk_pm_mark_last_busy()는 이 파일이 갱신하는
@@ -267,7 +267,7 @@ EXPORT_SYMBOL(blk_pm_runtime_init);
  * 실행 컨텍스트: 드라이버의 struct dev_pm_ops.runtime_suspend 콜백 안, PM
  * 코어의 pm_wq 워크큐 컨텍스트(프로세스 컨텍스트, sleep 가능 — percpu_ref
  * 전환 대기와 spin_lock_irq 모두 이 컨텍스트에서 안전하게 쓸 수 있다).
- * 호출자: 드라이버의 runtime_suspend 콜백(NVMe라면 nvme_runtime_suspend())이
+ * 호출자: 드라이버의 runtime_suspend 콜백(NVMe라면 드라이버의 runtime_suspend 콜백())이
  * 콜백 시작 부분에서 호출한다.
  * 피호출자: blk_set_pm_only()/blk_clear_pm_only(), blk_freeze_queue_start(),
  * percpu_ref_switch_to_atomic_sync(), percpu_ref_is_zero(),
@@ -465,7 +465,7 @@ EXPORT_SYMBOL(blk_pre_runtime_suspend);
  *      새 I/O를 계속 막을 수 있다.
  * 실행 컨텍스트: 드라이버의 runtime_suspend 콜백 맨 끝, PM 코어 워크큐의
  * 프로세스 컨텍스트.
- * 호출자: 드라이버의 runtime_suspend 콜백(NVMe라면 nvme_runtime_suspend())이
+ * 호출자: 드라이버의 runtime_suspend 콜백(NVMe라면 드라이버의 runtime_suspend 콜백())이
  * 실제 하드웨어 suspend를 마친 직후 호출한다.
  * 피호출자: pm_runtime_mark_last_busy(), blk_clear_pm_only().
  * 에러 경로: err가 음수면 rpm_status를 ACTIVE로 되돌리고 pm_only를 해제해
@@ -547,7 +547,7 @@ EXPORT_SYMBOL(blk_post_runtime_suspend);
  *   2) queue_lock 아래에서 rpm_status를 RPM_RESUMING으로 설정한다.
  * 실행 컨텍스트: 드라이버의 runtime_resume 콜백 시작 부분, PM 코어 워크큐의
  * 프로세스 컨텍스트.
- * 호출자: 드라이버의 runtime_resume 콜백(NVMe라면 nvme_runtime_resume())이
+ * 호출자: 드라이버의 runtime_resume 콜백(NVMe라면 드라이버의 runtime_resume 콜백())이
  * 실제 하드웨어를 깨우기 직전에 호출한다.
  * 피호출자: 없음(스핀락 조작 외에는 다른 함수를 호출하지 않는다).
  * 에러 경로: 없음 — 실패할 수 없는 상태 표시 함수다.
@@ -613,7 +613,7 @@ EXPORT_SYMBOL(blk_pre_runtime_resume);
  *      있으므로 중복 해제를 피하기 위해 건너뛴다.
  * 실행 컨텍스트: 드라이버의 runtime_resume 콜백 맨 끝, PM 코어 워크큐의
  * 프로세스 컨텍스트.
- * 호출자: 드라이버의 runtime_resume 콜백(NVMe라면 nvme_runtime_resume())이
+ * 호출자: 드라이버의 runtime_resume 콜백(NVMe라면 드라이버의 runtime_resume 콜백())이
  * 실제 하드웨어 resume을 마친 직후(성공/실패 무관) 호출한다.
  * 피호출자: pm_runtime_mark_last_busy(), pm_request_autosuspend(),
  * blk_clear_pm_only().

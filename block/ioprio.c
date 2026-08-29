@@ -77,7 +77,7 @@
  *        초기값으로 반영, 구현은 이 파일 범위 밖)
  *     -> blk_mq_submit_bio() -> blk_mq_get_request() (request->ioprio로 전파)
  *     -> I/O 스케줄러(mq-deadline/bfq/kyber)가 디스패치 순서 결정에 참고
- *     -> (NVMe 드라이버 경로라면) nvme_queue_rq() -> nvme_submit_cmd()로
+ *     -> (NVMe 드라이버 경로라면) nvme_queue_rq() -> nvme_sq_copy_cmd/nvme_write_sq_db()로
  *        SQ(Submission Queue)에 커맨드가 올라가고 도어벨(doorbell)이 눌림
  *        (NVMe 컨트롤러가 WRR(Weighted Round Robin) Arbitration을 지원하는
  *        경우의 이야기이며, 정확한 매핑 여부는 개별 드라이버 구현에 달려

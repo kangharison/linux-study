@@ -28,7 +28,7 @@
  *   → blkdev_common_ioctl(이 파일) → blk_ioctl_discard(이 파일)
  *   → blk_alloc_discard_bio(block/blk-lib.c)/bio_chain_and_submit(block/bio.c)
  *   → submit_bio → submit_bio_noacct → blk_mq_submit_bio → blk_mq_get_request
- *   → (드라이버, 예: NVMe) nvme_queue_rq → nvme_submit_cmd(도어벨 갱신)
+ *   → (드라이버, 예: NVMe) nvme_queue_rq → nvme_sq_copy_cmd/nvme_write_sq_db(도어벨 갱신)
  * io_uring 경로는 io_uring 커맨드 인프라(io_uring/cmd.c 등)가
  * BLOCK_URING_CMD_DISCARD를 blkdev_uring_cmd()(이 파일)로 전달하며, 이후
  * blkdev_cmd_discard()가 동일한 bio 제출 경로를 타되 완료를 io_uring completion

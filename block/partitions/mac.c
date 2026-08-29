@@ -27,7 +27,7 @@
  * check.h가 선언한 read_part_sector()를 호출하며, 이는 내부적으로 bio를
  * 구성해 블록 계층에 동기적으로 제출한다(구체적 제출 경로는 하위 드라이버에
  * 따라 다르며, 예를 들어 NVMe 장치라면 submit_bio -> blk_mq_submit_bio ->
- * blk_mq_get_request -> nvme_queue_rq -> nvme_submit_cmd(doorbell) 순으로
+ * blk_mq_get_request -> mq_ops->queue_rq (간접 호출; NVMe PCIe 면 nvme_queue_rq -> nvme_sq_copy_cmd -> nvme_write_sq_db) 순으로
  * 진행될 것으로 추정된다 - 추정). 실행 컨텍스트는 디스크 스캔을 수행하는
  * 커널 프로세스 컨텍스트이며, 인터럽트 컨텍스트에서는 호출되지 않는다.
  *
@@ -193,7 +193,7 @@ int mac_partition(struct parsed_partitions *state)
 	struct mac_driver_desc *md;	/* 0번 블록에 위치한 Mac 드라이버 서술자 (NVMe LBA 0에서 읽음) */
 
 	/* Get 0th block and look at the first partition map entry. */
-	/* LBA 0을 NVMe에서 읽음: read_part_sector() -> submit_bio -> blk_mq_submit_bio -> blk_mq_get_request -> nvme_queue_rq -> nvme_submit_cmd(Read, SLBA=0, doorbell) */
+	/* LBA 0을 NVMe에서 읽음: read_part_sector() -> submit_bio -> blk_mq_submit_bio -> blk_mq_get_request -> nvme_queue_rq -> nvme_sq_copy_cmd/nvme_write_sq_db(Read, SLBA=0, doorbell) */
 	md = read_part_sector(state, 0, &sect);
 	/* read_part_sector() 내부 bio/mem 할당 실패 또는 NVMe CQE 오류(SQ full, LBA 초과 등) 시 NULL 반환 (추정) */
 	if (!md)
@@ -358,6 +358,6 @@ int mac_partition(struct parsed_partitions *state)
 	put_dev_sector(sect);
 	/* 파티션 목록 출력의 줄바꿈; NVMe I/O와 무관 */
 	seq_buf_puts(&state->pp_buf, "\n");
-	/* Mac 파티션 등록 완료; 이후 bio가 partition remap을 거쳐 submit_bio -> blk_mq_submit_bio -> nvme_queue_rq -> nvme_submit_cmd(SLBA = 파티션 시작 LBA + bi_sector)로 전달됨 */
+	/* Mac 파티션 등록 완료; 이후 bio가 partition remap을 거쳐 submit_bio -> blk_mq_submit_bio -> nvme_queue_rq -> nvme_sq_copy_cmd/nvme_write_sq_db(SLBA = 파티션 시작 LBA + bi_sector)로 전달됨 */
 	return 1;	/* Mac 파티션 등록 완료; 이후 blk_mq_submit_bio -> nvme_queue_rq 경로는 파티션 오프셋을 반영한 LBA로 변환됨 */
 }

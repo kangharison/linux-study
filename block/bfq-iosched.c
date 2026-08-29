@@ -9525,7 +9525,7 @@ static bool bfq_has_work(struct blk_mq_hw_ctx *hctx)
  * 실행 컨텍스트: 호출자 bfq_dispatch_request()가 bfqd->lock을 보유한
  * 상태에서 실행되므로 이 함수는 락을 잡지 않는다.
  * NVMe 관점: 이 함수가 고른 request는 blk_mq_run_hw_queue()를 거쳐
- * nvme_queue_rq()로 전달되고, 뒤이어 nvme_submit_cmd()가 SQ doorbell을
+ * nvme_queue_rq()로 전달되고, 뒤이어 nvme_sq_copy_cmd/nvme_write_sq_db()가 SQ doorbell을
  * 울린다. rq_in_driver[]는 각 actuator(독립 접근 영역)별 in-flight
  * 카운터로, NVMe의 큐 깊이(queue depth) 관리와 유사한 역할을 한다.
  *
@@ -11678,7 +11678,7 @@ static void bfq_update_hw_tag(struct bfq_data *bfqd)
  * per-actuator inflight 카운트를 줄이고, in-service queue 의 idle/
  * budget-timeout/만료를 처리한다.
  * 호출 경로: bfq_finish_requeue_request -> bfq_completed_request
- * NVMe 연결: NVMe CQ 완료 핸들러(nvme_process_cq) 경로 하부에서
+ * NVMe 연결: NVMe CQ 완료 핸들러(nvme_poll_cq) 경로 하부에서
  *           불리며, controller 가 처리를 마친 CID/PRP/SGL 영역을
  *           회수하는 시점과 맞물린다.
  */
