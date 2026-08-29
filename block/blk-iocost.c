@@ -1114,39 +1114,75 @@ struct iocg_wake_ctx {
  * 동기화: 읽기 전용 const 테이블 — 초기화 후 불변.
  */
 static const struct ioc_params autop[] = {
-	[AUTOP_HDD] = {		/* [한국어] 회전 디스크 프로파일: seek IOPS=370으로 낮고 latency 목표 250ms */
+	/* [한국어] ★ 회전 디스크(HDD) 프로파일 ★
+	 * 이 테이블의 숫자들은 실측 벤치마크에서 얻은 "이 종류의 장치가 이만큼의
+	 * 일을 하는 데 드는 비용"이다. 커널은 이 계수로 각 I/O에 가상 비용을
+	 * 매기고, cgroup에 배분된 예산만큼만 쓰게 해 대역폭을 나눈다.
+	 *
+	 * HDD를 다른 프로파일과 구분 짓는 결정적 숫자는 RRANDIOPS = 370이다.
+	 * 랜덤 읽기가 초당 370회 — 헤드 탐색 시간(~5ms)이 지배하기 때문이다.
+	 * 반면 RSEQIOPS는 41708로 100배 이상 크다. 순차 접근은 탐색이 없어서다.
+	 * 이 100배 격차가 HDD 비용 모델의 본질이며, SSD에서는 이 격차가 거의
+	 * 사라진다(아래 참고). */
+	[AUTOP_HDD] = {
 		.qos				= {
+			/* [한국어] 읽기 지연 목표 250ms. 탐색이 겹치면 실제로 이만큼
+			 * 걸릴 수 있으므로 목표를 느슨하게 잡는다. 이 값을 넘는 지연이
+			 * 관측되면 iocost가 vrate를 낮춰 전체 발행량을 줄인다. */
 			[QOS_RLAT]		=        250000, /* 250ms */
 			[QOS_WLAT]		=        250000,
+			/* [한국어] vrate(가상 시간 진행 속도)의 하한/상한. vrate는
+			 * "장치가 예상보다 빠른가 느린가"를 반영해 동적으로 조정되는데,
+			 * 이 범위를 벗어나지 않도록 제한한다. */
 			[QOS_MIN]		= VRATE_MIN_PPM,
 			[QOS_MAX]		= VRATE_MAX_PPM,
 		},
 		.i_lcoefs			= {
+			/* [한국어] 읽기 대역폭 174MB/s — 순차 전송 능력. */
 			[I_LCOEF_RBPS]		=     174019176,
+			/* [한국어] 순차 읽기 IOPS. 탐색이 없어 대역폭에만 제약된다. */
 			[I_LCOEF_RSEQIOPS]	=         41708,
+			/* [한국어] 랜덤 읽기 IOPS 370 — 헤드 탐색이 지배하는 값이다.
+			 * 순차 대비 1/112 수준. */
 			[I_LCOEF_RRANDIOPS]	=           370,
+			/* [한국어] 쓰기 쪽도 대칭적이다. 쓰기가 읽기보다 근소하게 빠른
+			 * 것은 디스크 캐시가 쓰기를 흡수하기 때문이다. */
 			[I_LCOEF_WBPS]		=     178075866,
 			[I_LCOEF_WSEQIOPS]	=         42705,
 			[I_LCOEF_WRANDIOPS]	=           378,
 		},
 	},
-	[AUTOP_SSD_QD1] = {	/* [한국어] SSD 큐깊이-1 프로파일: rand IOPS=6946, latency 목표 25ms */
+	/* [한국어] ★ 큐 깊이 1 SSD 프로파일 ★
+	 * NCQ가 고장났거나 큐 깊이가 1로 제한된 SATA SSD용이다. 한 번에 하나씩만
+	 * 처리하므로 병렬성이 없어, 같은 SSD라도 IOPS가 크게 낮다
+	 * (랜덤 읽기 6946 — 아래 SSD_DFL의 8518보다도 낮다).
+	 * 쓰기 랜덤 IOPS가 26796으로 읽기의 4배인 점이 특이한데, 쓰기는
+	 * 장치 캐시가 흡수해 완료를 빨리 보고할 수 있기 때문이다. */
+	[AUTOP_SSD_QD1] = {
 		.qos				= {
+			/* [한국어] 지연 목표 25ms. HDD(250ms)와 고속 NVMe(5ms)의 중간. */
 			[QOS_RLAT]		=         25000, /* 25ms */
 			[QOS_WLAT]		=         25000,
 			[QOS_MIN]		= VRATE_MIN_PPM,
 			[QOS_MAX]		= VRATE_MAX_PPM,
 		},
 		.i_lcoefs			= {
+			/* [한국어] 읽기 대역폭 약 246MB/s — SATA 3의 절반 수준. */
 			[I_LCOEF_RBPS]		=     245855193,
 			[I_LCOEF_RSEQIOPS]	=         61575,
+			/* [한국어] 랜덤 읽기 6946 IOPS. 병렬성이 없어 순차의 1/9 수준이다. */
 			[I_LCOEF_RRANDIOPS]	=          6946,
 			[I_LCOEF_WBPS]		=     141365009,
 			[I_LCOEF_WSEQIOPS]	=         33716,
+			/* [한국어] 쓰기 랜덤이 읽기의 4배 — 장치 캐시 효과다. */
 			[I_LCOEF_WRANDIOPS]	=         26796,
 		},
 	},
-	[AUTOP_SSD_DFL] = {	/* [한국어] SSD 기본 프로파일: rand IOPS=8518, too_fast_vrate=500%, latency 목표 25ms */
+	/* [한국어] ★ 일반 SSD 기본 프로파일 ★
+	 * 장치 종류를 판별하지 못했을 때의 출발점이다. iocost는 실행 중
+	 * 관측한 vrate로 프로파일을 자동 조정하는데(ioc_autop_idx),
+	 * 여기서 시작해 위아래로 이동한다. */
+	[AUTOP_SSD_DFL] = {
 		.qos				= {
 			[QOS_RLAT]		=         25000, /* 25ms */
 			[QOS_WLAT]		=         25000,
@@ -1154,30 +1190,63 @@ static const struct ioc_params autop[] = {
 			[QOS_MAX]		= VRATE_MAX_PPM,
 		},
 		.i_lcoefs			= {
+			/* [한국어] 읽기 대역폭 약 489MB/s — SATA 3 포화 수준. */
 			[I_LCOEF_RBPS]		=     488636629,
+			/* [한국어] 순차 8932, 랜덤 8518로 거의 같다. 큐 깊이가 확보되면
+			 * SSD에서는 랜덤/순차 차이가 사라진다는 특성이 여기서부터 나타난다. */
 			[I_LCOEF_RSEQIOPS]	=          8932,
 			[I_LCOEF_RRANDIOPS]	=          8518,
 			[I_LCOEF_WBPS]		=     427891549,
 			[I_LCOEF_WSEQIOPS]	=         28755,
 			[I_LCOEF_WRANDIOPS]	=         21940,
 		},
+		/* [한국어] 관측 vrate가 이 프로파일 기준의 500%를 넘으면 "이 장치는
+		 * 가정보다 훨씬 빠르다"고 판단해 AUTOP_SSD_FAST로 올라간다.
+		 * NVMe SSD가 처음 이 프로파일로 시작했다가 곧 FAST로 승격되는
+		 * 경로가 바로 이것이다. */
 		.too_fast_vrate_pct		=           500,
 	},
-	[AUTOP_SSD_FAST] = {	/* [한국어] 고속 SSD/NVMe 프로파일: rand IOPS=778122, too_slow_vrate=10%, latency 목표 5ms */
+	/* [한국어] ★ 고속 SSD / NVMe 프로파일 ★
+	 * NVMe SSD가 실제로 선택되는 프로파일이다. HDD와 비교하면 iocost가
+	 * 왜 장치별 프로파일을 두는지가 분명해진다:
+	 *   RRANDIOPS: HDD 370 → 여기 778122 (2100배)
+	 *   RSEQIOPS 대비 RRANDIOPS 비율: HDD는 1/112, 여기는 오히려 1.07배
+	 * 즉 NVMe는 랜덤이 순차보다 "느리지 않다". 내부적으로 수십 개 채널을
+	 * 병렬 처리하고 탐색 시간이 없기 때문이다. 순차가 오히려 약간 낮은 것은
+	 * 큰 요청이 여러 채널에 걸쳐 완료 대기를 만들기 때문으로 보인다.
+	 *
+	 * 이 차이가 비용 모델에 직접 반영된다. HDD에서는 "랜덤 I/O 한 번"이
+	 * 매우 비싼 자원이라 그것을 기준으로 배분해야 하지만, NVMe에서는
+	 * 랜덤/순차 구분보다 총 IOPS와 대역폭이 지배적이다. */
+	[AUTOP_SSD_FAST] = {
 		.qos				= {
+			/* [한국어] 지연 목표 5ms — HDD의 250ms 대비 1/50이다.
+			 * NVMe의 실제 지연은 보통 수십~수백 마이크로초이므로 5ms는
+			 * 여전히 넉넉한 값이며, 이를 넘으면 확실히 포화 상태다. */
 			[QOS_RLAT]		=          5000, /* 5ms */
 			[QOS_WLAT]		=          5000,
 			[QOS_MIN]		= VRATE_MIN_PPM,
 			[QOS_MAX]		= VRATE_MAX_PPM,
 		},
 		.i_lcoefs			= {
+			/* [한국어] 읽기 대역폭 약 3.1GB/s. LLU 접미사가 필요한 이유는
+			 * 이 값이 32비트 int 범위(약 21억)를 넘기 때문이다. */
 			[I_LCOEF_RBPS]		=    3102524156LLU,
+			/* [한국어] 순차 읽기 724816 IOPS. */
 			[I_LCOEF_RSEQIOPS]	=        724816,
+			/* [한국어] 랜덤 읽기 778122 IOPS — 순차보다 오히려 높다.
+			 * 이것이 NVMe의 특징이다. */
 			[I_LCOEF_RRANDIOPS]	=        778122,
+			/* [한국어] 쓰기 대역폭 약 1.7GB/s. 읽기의 절반 수준인 것은
+			 * NAND 프로그램 시간이 읽기보다 길기 때문이다. */
 			[I_LCOEF_WBPS]		=    1742780862LLU,
 			[I_LCOEF_WSEQIOPS]	=        425702,
 			[I_LCOEF_WRANDIOPS]	=	 443193,
 		},
+		/* [한국어] 관측된 vrate가 이 프로파일 기준의 10% 아래로 떨어지면
+		 * "이 장치는 이 프로파일이 가정한 것보다 훨씬 느리다"고 판단해
+		 * 더 낮은 프로파일로 내려간다. 상한(too_fast)이 없는 이유는
+		 * 이것이 이미 가장 빠른 프로파일이라 올라갈 곳이 없기 때문이다. */
 		.too_slow_vrate_pct		=            10,
 	},
 };
@@ -3519,35 +3588,64 @@ static void transfer_surpluses(struct list_head *surpluses, struct ioc_now *now)
 	 */
 	after_sum = 0;
 	over_sum = 0;
-	list_for_each_entry(iocg, surpluses, surplus_list) {	/* NVMe 시간 잉여 cgroup 순회 */
+	/* [한국어] ★ 기부(donation) 모델의 배경 ★
+	 * iocost는 각 cgroup에 가중치에 비례한 "가상 시간 예산"을 준다. 그런데
+	 * 예산을 다 쓰지 않는 cgroup이 있으면 그 몫이 놀게 되어 장치가 낭비된다.
+	 * 그래서 남는 예산을 다른 cgroup에 빌려주는 것이 donation이다.
+	 * 이 함수는 그 재배분 비율을 계산하는데, 부동소수점 없이 32비트 고정
+	 * 소수(WEIGHT_ONE = 100%)로 하다 보니 반올림 오차가 쌓여 합이 100%를
+	 * 넘을 수 있다. 아래 코드가 그 초과분을 되돌리는 보정이다.
+	 *
+	 * 1단계 — 기부 후 비율의 합을 구하고, 그중 "원래 몫보다 커진" 것들을
+	 * 따로 모은다. 반올림으로 부풀려진 쪽이 바로 이들이기 때문이다. */
+	list_for_each_entry(iocg, surpluses, surplus_list) {
 		u32 hwa;
 
+		/* [한국어] 이 cgroup의 현재 활성 가중치(원래 몫)를 구한다. */
 		current_hweight(iocg, &hwa, NULL);
-		after_sum += iocg->hweight_after_donation;		/* 기부 후 NVMe 사용 비율 합 */
+		after_sum += iocg->hweight_after_donation;
 
+		/* [한국어] 기부 후 비율이 원래 몫보다 크다 = 반올림으로 부풀려졌다.
+		 * 보정 대상 목록에 넣고 그 합도 따로 센다. */
 		if (iocg->hweight_after_donation > hwa) {
 			over_sum += iocg->hweight_after_donation;
 			list_add(&iocg->walk_list, &over_hwa);
 		}
 	}
 
+	/* [한국어] 2단계 — 합이 100%를 넘었는지 확인하고 목표치를 계산한다. */
 	if (after_sum >= WEIGHT_ONE) {
 		/*
 		 * The delta should be deducted from the over_sum, calculate
 		 * target over_sum value.
 		 */
+		/* [한국어] 초과분을 구한다. WEIGHT_ONE - 1을 목표로 삼는 이유는
+		 * 정확히 100%가 되면 이후 나눗셈에서 경계 조건이 까다로워지기
+		 * 때문으로, 1 낮춰 여유를 둔다. */
 		u32 over_delta = after_sum - (WEIGHT_ONE - 1);
+		/* [한국어] 초과분이 "부풀려진 쪽의 합"보다 크면 보정할 수 없다.
+		 * 계산이 어딘가 잘못된 것이므로 경고를 남긴다. */
 		WARN_ON_ONCE(over_sum <= over_delta);
+		/* [한국어] 부풀려진 쪽들이 나눠 가질 목표 총합. */
 		over_target = over_sum - over_delta;
 	} else {
+		/* [한국어] 100% 이내면 보정이 필요 없다. 0은 "보정 안 함" 표시다. */
 		over_target = 0;
 	}
 
+	/* [한국어] 3단계 — 부풀려진 cgroup들의 비율을 목표치에 맞춰 비례 축소한다.
+	 * 초과분을 모두에게 균등하게 빼는 대신 비례 배분하는 이유는, 균등하게
+	 * 빼면 원래 몫이 작은 cgroup이 음수가 될 수 있기 때문이다.
+	 * _safe 변형인 이유: 루프 안에서 walk_list에서 노드를 제거하기 때문이다. */
 	list_for_each_entry_safe(iocg, tiocg, &over_hwa, walk_list) {
 		if (over_target)
+			/* [한국어] 새 비율 = 기존 × (목표합 / 현재합). u64로 승격 후
+			 * 나누는 이유는 32비트 곱셈에서 오버플로가 나기 때문이다. */
 			iocg->hweight_after_donation =
 				div_u64((u64)iocg->hweight_after_donation *
 					over_target, over_sum);
+		/* [한국어] 임시 목록에서 제거한다. _init 변형이라 노드가 초기 상태로
+		 * 돌아가, 다음에 다른 목록에 넣어도 안전하다. */
 		list_del_init(&iocg->walk_list);
 	}
 
@@ -3572,6 +3670,10 @@ static void transfer_surpluses(struct list_head *surpluses, struct ioc_now *now)
 	 * Propagate the donating budget (b_t) and after donation budget (b'_t)
 	 * up the hierarchy.
 	 */
+	/* [한국어] 리프(실제 기부자)의 값을 부모로 한 단계 올린다.
+	 * ancestors[level - 1]이 직계 부모다 — ancestors 배열은 root부터
+	 * 자기 자신까지의 경로를 담고 있어, 자기 레벨보다 하나 낮은 인덱스가
+	 * 부모가 된다. */
 	list_for_each_entry(iocg, surpluses, surplus_list) {
 		struct ioc_gq *parent = iocg->ancestors[iocg->level - 1];
 
@@ -3579,8 +3681,15 @@ static void transfer_surpluses(struct list_head *surpluses, struct ioc_now *now)
 		parent->hweight_after_donation += iocg->hweight_after_donation;
 	}
 
-	list_for_each_entry_reverse(iocg, &inner_walk, walk_list) {	/* 낮부에서 root로 NVMe 기부량 전파 */
-		if (iocg->level > 0) {		/* root가 아닌 NVMe 기부자면 부모로 누적 */
+	/* [한국어] 내부 노드들의 값을 다시 root까지 누적 전파한다.
+	 * ★ reverse로 도는 것이 핵심 ★
+	 * inner_walk는 전위 순회(pre-order, 부모가 자식보다 앞)로 만들어졌다.
+	 * 역순으로 돌면 후위 순회가 되어 "자식을 모두 처리한 뒤 부모"라는
+	 * 순서가 보장된다. 정순으로 돌면 부모를 먼저 처리해 아직 올라오지 않은
+	 * 자식의 기여가 빠진 채 계산된다. */
+	list_for_each_entry_reverse(iocg, &inner_walk, walk_list) {
+		/* [한국어] root(level 0)는 더 올릴 부모가 없으므로 건너뛴다. */
+		if (iocg->level > 0) {
 			struct ioc_gq *parent = iocg->ancestors[iocg->level - 1];
 
 			parent->hweight_donating += iocg->hweight_donating;
@@ -3640,43 +3749,80 @@ static void transfer_surpluses(struct list_head *surpluses, struct ioc_now *now)
 	 * Calculate adjusted hwi, child_adjusted_sum and inuse for the inner
 	 * nodes.
 	 */
+	/* [한국어] ★ 이 루프가 푸는 문제 ★
+	 * 기부자들이 남는 예산을 내놓으면, 그것을 비기부자들에게 나눠 줘야 한다.
+	 * 문제는 cgroup이 트리 구조라 "형제끼리의 비율"이 각 계층마다 다시
+	 * 정의된다는 점이다. 부모의 몫이 늘어나면 그 자식들의 절대 몫도 늘어나야
+	 * 하는데, 형제 간 상대 비율은 유지되어야 한다.
+	 * 그래서 각 내부 노드마다 "조정된 가중치 합(child_adjusted_sum)"을
+	 * 다시 계산해, 자식들이 그 합에 대한 비율로 새 몫을 얻게 한다.
+	 *
+	 * 주석의 수식 기호(원본 커밋에서 유래):
+	 *   b  = hweight(계층 전체에서 이 노드가 차지하는 비율)
+	 *   b' = 조정 후 비율,  b_f = 비기부분,  b_t = 기부분
+	 *   s  = child_active_sum(자식 가중치 합),  s' = 조정된 합
+	 *   w  = 개별 가중치,  gamma = 비기부자들이 나눠 가질 확대 배율 */
 	list_for_each_entry(iocg, &inner_walk, walk_list) {
 		struct ioc_gq *parent;
 		u32 inuse, wpt, wptp;
 		u64 st, sf;
 
-		if (iocg->level == 0) {		/* root: 1st level 자식들의 NVMe adjusted 합 계산 */
+		if (iocg->level == 0) {
 			/* adjusted weight sum for 1st level: s' = s * b_pf / b'_pf */
+			/* [한국어] root는 부모가 없어 위쪽에서 물려받을 비율이 없다.
+			 * 대신 "전체 100% 중 기부되지 않은 몫"이 조정 후 얼마가 되는지의
+			 * 비율로 자식 가중치 합을 늘린다.
+			 * 분자가 기부 "전" 비기부분, 분모가 기부 "후" 비기부분이므로,
+			 * 기부가 있었다면 분모가 커져 s'가 s보다 작아진다 — 같은 절대
+			 * 예산을 더 큰 비율로 표현하게 되는 정규화다. */
 			iocg->child_adjusted_sum = DIV64_U64_ROUND_UP(
 				iocg->child_active_sum * (WEIGHT_ONE - iocg->hweight_donating),
 				WEIGHT_ONE - iocg->hweight_after_donation);
 			continue;
 		}
 
-		parent = iocg->ancestors[iocg->level - 1];		/* NVMe 기부 조정 시 부모 cgroup 참조 */
+		/* [한국어] 내부 노드는 부모의 조정 결과를 물려받아야 한다.
+		 * inner_walk가 전위 순회라 부모가 먼저 처리되었음이 보장된다. */
+		parent = iocg->ancestors[iocg->level - 1];
 
 		/* b' = gamma * b_f + b_t' */
+		/* [한국어] 이 노드의 조정 후 비율 = (비기부분 × 확대배율) + (기부 후 몫).
+		 * 비기부분에만 gamma를 곱하는 이유: 기부한 부분은 이미
+		 * hweight_after_donation으로 확정되었고, 남는 예산은 "실제로 쓰고
+		 * 있는" 비기부분에게만 돌아가야 하기 때문이다. */
 		iocg->hweight_inuse = DIV64_U64_ROUND_UP(
 			(u64)gamma * (iocg->hweight_active - iocg->hweight_donating),
 			WEIGHT_ONE) + iocg->hweight_after_donation;
 
 		/* w' = s' * b' / b'_p */
-		inuse = DIV64_U64_ROUND_UP(		/* NVMe 기부 후 자식의 새 inuse */
+		/* [한국어] 부모의 조정된 합에서 이 노드가 차지할 몫(inuse)을 구한다.
+		 * "부모 합 × (내 비율 / 부모 비율)" 형태로, 형제 간 상대 관계를
+		 * 유지하면서 절대값만 조정한다. */
+		inuse = DIV64_U64_ROUND_UP(
 			(u64)parent->child_adjusted_sum * iocg->hweight_inuse,
 			parent->hweight_inuse);
 
 		/* adjusted weight sum for children: s' = s_f + s_t * w'_pt / w_pt */
+		/* [한국어] 이제 이 노드의 자식들을 위한 조정된 합을 만든다.
+		 * st = 자식 가중치 합 중 "기부에 해당하는" 부분 */
 		st = DIV64_U64_ROUND_UP(
 			iocg->child_active_sum * iocg->hweight_donating,
 			iocg->hweight_active);
+		/* [한국어] sf = 나머지(비기부 부분). 뺄셈으로 구해 반올림 오차가
+		 * 두 값의 합에 누적되지 않게 한다. */
 		sf = iocg->child_active_sum - st;
+		/* [한국어] wpt = 조정 전 이 노드의 기부분 가중치 */
 		wpt = DIV64_U64_ROUND_UP(
 			(u64)iocg->active * iocg->hweight_donating,
 			iocg->hweight_active);
+		/* [한국어] wptp = 조정 후 이 노드의 기부분 가중치 */
 		wptp = DIV64_U64_ROUND_UP(
 			(u64)inuse * iocg->hweight_after_donation,
 			iocg->hweight_inuse);
 
+		/* [한국어] 최종 조정 합 = 비기부분 + 기부분 × (조정후/조정전 비율).
+		 * 비기부분은 그대로 두고 기부분만 스케일링하는 것이 핵심으로,
+		 * 이렇게 해야 기부하지 않은 자식의 몫이 왜곡되지 않는다. */
 		iocg->child_adjusted_sum = sf + DIV64_U64_ROUND_UP(st * wptp, wpt);
 	}
 
