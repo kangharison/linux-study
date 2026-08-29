@@ -9521,44 +9521,99 @@ int blk_mq_init_allocated_queue(struct blk_mq_tag_set *set,
 		struct request_queue *q)
 {
 	/* mark the queue as mq asap */
-	q->mq_ops = set->ops; /* nvme_mq_ops (추정) 와 request_queue 연결 */
+	/* [한국어] 드라이버의 연산 테이블을 연결한다. NVMe PCIe에서는
+	 * drivers/nvme/host/pci.c의 nvme_mq_ops이며, 이 안의 queue_rq가
+	 * 곧 nvme_queue_rq다. 영문 주석대로 "가능한 한 빨리" 설정하는 이유는
+	 * queue_is_mq()가 이 필드로 판정하기 때문이다 — 아래 초기화 함수들이
+	 * 그 판정에 의존한다. */
+	q->mq_ops = set->ops;
 
 	/*
 	 * ->tag_set has to be setup before initialize hctx, which cpuphp
 	 * handler needs it for checking queue mapping
 	 */
-	q->tag_set = set; /* NVMe tag set(SQ slot pool) 연결 */
+	/* [한국어] tag set 연결. 영문 주석이 밝힌 순서 제약이 중요하다:
+	 * 아래 blk_mq_realloc_hw_ctxs()가 hctx를 만들면서 CPU 핫플러그 콜백을
+	 * 등록하는데, 그 콜백이 즉시 실행될 수 있고 실행되면 q->tag_set으로
+	 * 큐 매핑을 확인한다. 먼저 설정하지 않으면 NULL 역참조가 된다. */
+	q->tag_set = set;
 
+	/* [한국어] CPU마다 하나씩인 소프트웨어 큐(ctx)를 할당한다. 실패하면
+	 * 아직 아무것도 만들지 않았으므로 err_exit로 바로 나간다. */
 	if (blk_mq_alloc_ctxs(q))
 		goto err_exit;
 
 	/* init q->mq_kobj and sw queues' kobjects */
+	/* [한국어] /sys/block/<disk>/mq/ 아래에 노출될 kobject들을 초기화한다.
+	 * 실제 sysfs 등록은 나중에 blk_register_queue()에서 이뤄지고, 여기서는
+	 * 구조체만 준비한다. */
 	blk_mq_sysfs_init(q);
 
+	/* [한국어] 해체된 hctx를 재사용하기 위해 보관하는 목록과 그 보호 락.
+	 * hctx는 per-CPU 자료구조를 포함해 할당 비용이 크므로, 큐 재구성 시
+	 * 버리지 않고 여기 모았다가 같은 NUMA 노드의 요청에 되돌려 준다. */
 	INIT_LIST_HEAD(&q->unused_hctx_list);
 	spin_lock_init(&q->unused_hctx_lock);
 
-	blk_mq_realloc_hw_ctxs(set, q); /* NVMe SQ/CQ 쌍에 해당하는 hctx 할당 */
+	/* [한국어] 하드웨어 컨텍스트 배열을 만든다. NVMe에서 hctx 하나가
+	 * nvme_queue 하나(SQ/CQ 쌍 + MSI-X 벡터)에 대응하며, 내부에서
+	 * set->ops->init_hctx == nvme_init_hctx가 호출되어 그 연결이 맺어진다. */
+	blk_mq_realloc_hw_ctxs(set, q);
+	/* [한국어] 하나도 못 만들었으면 이 큐로는 I/O를 할 수 없다. */
 	if (!q->nr_hw_queues)
 		goto err_hctxs;
 
-	/* [한국어] timeout_work: NVMe 명령 deadline 초과 검사 work 초기화 */
+	/* [한국어] ★ 타임아웃 인프라 ★
+	 * blk_mq_timeout_work는 주기적으로 깨어나 deadline이 지난 request를
+	 * 찾고, 발견하면 q->mq_ops->timeout(NVMe: nvme_timeout)을 호출한다.
+	 * 그 콜백이 CSTS 확인 → Abort 커맨드 → 컨트롤러 리셋 순으로 복구를
+	 * 시도한다. 즉 이 한 줄이 NVMe 에러 복구의 출발점을 설치하는 것이다. */
 	INIT_WORK(&q->timeout_work, blk_mq_timeout_work);
+	/* [한국어] 기본 타임아웃을 설정한다. 드라이버가 set->timeout을 지정했으면
+	 * 그 값을, 아니면 30초를 쓴다. NVMe는 io_timeout 모듈 파라미터(기본 30초)를
+	 * 넘기므로 결국 같은 값이 되는 경우가 많다.
+	 * 이 값이 너무 짧으면 정상적으로 느린 I/O(대용량 discard 등)까지
+	 * 타임아웃되어 불필요한 컨트롤러 리셋을 유발한다. */
 	blk_queue_rq_timeout(q, set->timeout ? set->timeout : 30 * HZ);
 
+	/* [한국어] blk-mq 큐의 기본 플래그 묶음(통계 수집, I/O 폴링 허용 등)을
+	 * 한 번에 켠다. */
 	q->queue_flags |= QUEUE_FLAG_MQ_DEFAULT;
 
+	/* [한국어] ★ requeue 인프라 ★
+	 * 드라이버가 BLK_STS_RESOURCE로 요청을 거부하면 그 request를
+	 * requeue_list에 넣고 이 지연 워크가 나중에 다시 제출한다.
+	 * NVMe에서는 SQ가 꽉 찼거나 DMA 매핑용 메모리가 부족할 때 발생한다.
+	 * DELAYED_WORK인 이유: 즉시 재시도하면 같은 이유로 다시 실패할 가능성이
+	 * 높아, 약간의 지연을 두어 자원이 회복될 시간을 준다. */
 	INIT_DELAYED_WORK(&q->requeue_work, blk_mq_requeue_work);
+	/* [한국어] blk-flush 상태 기계가 쓰는 리스트 — FLUSH/FUA 요청이 여기서
+	 * 단계별로 관리된다. */
 	INIT_LIST_HEAD(&q->flush_list);
+	/* [한국어] 재제출 대기 중인 request 목록과 그 보호 락. 완료 경로(IRQ)와
+	 * 워커가 동시에 만지므로 스핀락이 필요하다. */
 	INIT_LIST_HEAD(&q->requeue_list);
 	spin_lock_init(&q->requeue_lock);
 
-	/* [한국어] nr_requests: NVMe SQ depth 설정 — tag sbitmap 의 유효 비트 수와 일치 */
+	/* [한국어] 큐가 담을 수 있는 request 수 = 드라이버 태그 개수.
+	 * NVMe에서 이 값은 I/O 큐 하나의 깊이(nvme_dev의 q_depth)에서 오며,
+	 * 곧 동시에 진행 가능한 커맨드 수(= CID 공간 크기)다.
+	 * /sys/block/nvme0n1/queue/nr_requests로 조회·조정할 수 있다. */
 	q->nr_requests = set->queue_depth;
+	/* [한국어] 비동기 요청 전용 상한. 스케줄러가 없는 상태에서는 제한할
+	 * 이유가 없으므로 전체 깊이와 같게 둔다. 스케줄러를 붙이면
+	 * elevator_switch()가 더 낮은 값으로 조정한다. */
 	q->async_depth = set->queue_depth;
 
-	blk_mq_init_cpu_queues(q, set->nr_hw_queues); /* CPU 와 NVMe SQ affinity 초기화 */
-	blk_mq_map_swqueue(q); /* CPU -> NVMe SQ 매핑 완료 */
+	/* [한국어] 각 CPU의 소프트웨어 큐를 초기화한다(리스트 헤드, CPU 번호 등). */
+	blk_mq_init_cpu_queues(q, set->nr_hw_queues);
+	/* [한국어] CPU ↔ 하드웨어 큐 매핑을 실제로 구축한다. NVMe에서는
+	 * MSI-X affinity를 따라가므로, 이 호출 이후 "제출 CPU = 완료 CPU"
+	 * 정렬이 성립한다. */
+	blk_mq_map_swqueue(q);
+	/* [한국어] 이 큐를 tag set의 공유 목록에 등록한다. 같은 컨트롤러의
+	 * 다른 네임스페이스가 이미 등록되어 있으면, 이 시점에 양쪽 모두
+	 * BLK_MQ_F_TAG_QUEUE_SHARED로 전환되어 태그를 공평하게 나눠 쓰게 된다. */
 	blk_mq_add_queue_tag_set(set, q);
 	return 0;
 
@@ -9883,9 +9938,17 @@ int blk_mq_alloc_tag_set(struct blk_mq_tag_set *set)
 		/* [한국어] 단일 map: NVMe SQ 수가 CPU 수보다 많아도 의미 없음 */
 		set->nr_hw_queues = nr_cpu_ids;
 
+	/* [한국어] ★ BLK_MQ_F_BLOCKING과 SRCU ★
+	 * 이 플래그는 "드라이버의 queue_rq가 잠들 수 있다"는 선언이다.
+	 * 그러면 dispatch 경로를 일반 RCU로 보호할 수 없다 — RCU 읽기 구간
+	 * 안에서는 잠들 수 없기 때문이다. 그래서 잠들 수 있는 SRCU
+	 * (Sleepable RCU)를 대신 쓴다.
+	 * NVMe PCIe의 nvme_queue_rq()는 잠들지 않으므로 이 플래그를 쓰지 않지만,
+	 * NVMe over TCP는 소켓 전송에서 잠들 수 있어 이 플래그를 설정한다.
+	 * 이 SRCU가 보호하는 것은 "dispatch 실행 중"과 "큐 quiesce" 사이의
+	 * 경쟁으로, blk_mq_quiesce_queue()가 SRCU 유예 기간을 기다려
+	 * 실행 중인 queue_rq가 모두 끝났음을 보장한다. */
 	if (set->flags & BLK_MQ_F_BLOCKING) {
-		/* [한국어] BLK_MQ_F_BLOCKING: queue_rq 가 sleep 가능한 드라이버용.
-		 * per-set SRCU 로 queue_rq 와 구조 변경 사이 race 방지 */
 		set->srcu = kmalloc_obj(*set->srcu);
 		if (!set->srcu)
 			return -ENOMEM;
@@ -9893,48 +9956,78 @@ int blk_mq_alloc_tag_set(struct blk_mq_tag_set *set)
 		if (ret)
 			goto out_free_srcu;
 	}
-	/* [한국어] tags_srcu: hctx/tags 교체 시 reader (complete 경로) 보호 */
+	/* [한국어] tags_srcu는 위와 별개의 SRCU로, 태그 세트 자체의 교체를
+	 * 보호한다. 완료 경로가 태그 번호로 request를 역참조하는 동안
+	 * (blk_mq_tag_to_rq) 태그 배열이 해제되면 안 되기 때문이다.
+	 * 하드웨어 큐 수가 바뀌어 태그 세트가 재구성될 때 이 SRCU의 유예
+	 * 기간이 옛 배열의 해제를 미룬다. */
 	ret = init_srcu_struct(&set->tags_srcu);
 	if (ret)
 		goto out_cleanup_srcu;
 
-	/* [한국어] update_nr_hwq_lock: HW queue 수 변경 직렬화 */
+	/* [한국어] 하드웨어 큐 수 변경을 직렬화하는 rwsem. 읽기 잠금은
+	 * 스케줄러 변경 같은 "큐 수가 안 바뀌어야 하는" 작업이 잡고,
+	 * 쓰기 잠금은 blk_mq_update_nr_hw_queues()가 잡는다. */
 	init_rwsem(&set->update_nr_hwq_lock);
 
+	/* [한국어] 이후 실패 경로는 모두 메모리 부족이므로 미리 설정해 둔다. */
 	ret = -ENOMEM;
-	/* [한국어] tags[]: hctx 인덱스 → blk_mq_tags 포인터 배열 */
+	/* [한국어] 하드웨어 큐 인덱스로 blk_mq_tags를 찾는 포인터 배열.
+	 * NVMe에서 인덱스 하나가 nvme_queue 하나(SQ/CQ 쌍)에 대응하고,
+	 * 그 blk_mq_tags가 해당 큐의 CID 공간(sbitmap)을 관리한다.
+	 * _node 변형으로 tag set의 NUMA 노드에 할당해 접근 지역성을 확보한다. */
 	set->tags = kcalloc_node(set->nr_hw_queues,
 				 sizeof(struct blk_mq_tags *), GFP_KERNEL,
 				 set->numa_node);
 	if (!set->tags)
 		goto out_cleanup_tags_srcu;
 
+	/* [한국어] 큐 타입(DEFAULT/READ/POLL)마다 CPU→하드웨어 큐 매핑 테이블을
+	 * 할당한다. NVMe는 write_queues/poll_queues 모듈 파라미터에 따라
+	 * 최대 3개의 맵을 쓴다. */
 	for (i = 0; i < set->nr_maps; i++) {
-		/* [한국어] mq_map[cpu]: CPU → hctx 인덱스(NVMe SQ 번호) 테이블 */
+		/* [한국어] CPU 번호로 인덱싱해 하드웨어 큐 번호를 얻는 배열.
+		 * nr_cpu_ids(가능한 최대 CPU 수)만큼 잡는 이유는 CPU 핫플러그로
+		 * 나중에 온라인될 CPU도 매핑을 가져야 하기 때문이다. */
 		set->map[i].mq_map = kcalloc_node(nr_cpu_ids,
 						  sizeof(set->map[i].mq_map[0]),
 						  GFP_KERNEL, set->numa_node);
 		if (!set->map[i].mq_map)
 			goto out_free_mq_map;
+		/* [한국어] 일단 전체 큐 수로 초기화한다. 드라이버의 map_queues
+		 * 콜백(NVMe는 nvme_pci_map_queues)이 타입별 실제 개수로 덮어쓴다. */
 		set->map[i].nr_queues = set->nr_hw_queues;
 	}
 
-	/* [한국어] CPU→SQ 매핑 테이블 채우기 */
+	/* [한국어] 드라이버의 map_queues 콜백을 호출해 실제 매핑을 채운다.
+	 * NVMe PCIe에서는 MSI-X affinity를 그대로 따라가므로, 결과적으로
+	 * "제출 CPU = 완료 인터럽트를 받는 CPU"라는 정렬이 만들어진다. */
 	blk_mq_update_queue_map(set);
 
-	/* [한국어] 모든 SQ 의 CID sbitmap + request 객체 페이지 할당 */
+	/* [한국어] 각 하드웨어 큐의 태그 sbitmap과 request 객체 배열을 실제로
+	 * 할당한다. request 객체는 미리 전부 할당해 두고 태그로 인덱싱만 하므로,
+	 * I/O 경로에서 메모리 할당이 일어나지 않는다 — blk-mq의 핵심 설계다.
+	 * 크기는 queue_depth × 하드웨어 큐 수라 NVMe에서는 수 MB에 이른다. */
 	ret = blk_mq_alloc_set_map_and_rqs(set);
 	if (ret)
 		goto out_free_mq_map;
 
+	/* [한국어] 이 tag set을 공유하는 request_queue들의 목록과 그 보호 락.
+	 * NVMe에서 컨트롤러 하나의 여러 네임스페이스가 여기 등록되어, 태그를
+	 * 공유하는 큐들이 서로를 알 수 있게 된다. */
 	mutex_init(&set->tag_list_lock);
 	INIT_LIST_HEAD(&set->tag_list);
 
 	return 0;
 
+	/* [한국어] ★ 역순 해제 사다리 ★
+	 * 각 라벨이 "그 직전까지 성공한 자원"만 정리하고 아래로 흘러내린다. */
 out_free_mq_map:
 	for (i = 0; i < set->nr_maps; i++) {
 		kfree(set->map[i].mq_map);
+		/* [한국어] 포인터를 NULL로 지운다. tag set 구조체는 드라이버가
+		 * 소유하고 있어 이 함수가 실패해도 살아남으므로, 해제된 주소를
+		 * 남기면 이후 정리 코드가 이중 해제를 일으킨다. */
 		set->map[i].mq_map = NULL;
 	}
 	kfree(set->tags);
@@ -9942,6 +10035,8 @@ out_free_mq_map:
 out_cleanup_tags_srcu:
 	cleanup_srcu_struct(&set->tags_srcu);
 out_cleanup_srcu:
+	/* [한국어] BLOCKING이 아니면 애초에 srcu를 만들지 않았으므로 건너뛴다.
+	 * 이 조건 검사가 없으면 초기화되지 않은 SRCU를 정리하려다 크래시한다. */
 	if (set->flags & BLK_MQ_F_BLOCKING)
 		cleanup_srcu_struct(set->srcu);
 out_free_srcu:
@@ -10291,7 +10386,14 @@ static void __blk_mq_update_nr_hw_queues(struct blk_mq_tag_set *set,
 	 * with the previous scheduler. We will switch back once we are done
 	 * updating the new sw to hw queue mappings.
 	 */
-	/* [한국어] elevator 를 none 으로 교체: 구 hctx 포인터 참조 제거 */
+	/* [한국어] ★ 스케줄러를 일시적으로 떼어내는 이유 ★
+	 * I/O 스케줄러는 하드웨어 큐마다 전용 태그 세트(sched_tags)를 갖고,
+	 * 자기 자료구조 안에 hctx 포인터를 들고 있다. 그런데 지금부터 hctx
+	 * 배열을 통째로 재구성할 것이므로, 그 포인터들이 전부 무효해진다.
+	 * 안전하게 재구성하려면 스케줄러를 먼저 떼어 참조를 없애고, 재구성이
+	 * 끝난 뒤 새 hctx로 다시 붙여야 한다.
+	 * elv_tbl에 "원래 어떤 스케줄러였는지"를 기록해 두었다가
+	 * blk_mq_elv_switch_back()이 복원한다. */
 	list_for_each_entry(q, &set->tag_list, tag_set_list)
 		if (blk_mq_elv_switch_none(q, &elv_tbl))
 			goto switch_back;
@@ -10301,16 +10403,25 @@ static void __blk_mq_update_nr_hw_queues(struct blk_mq_tag_set *set,
 	if (IS_ERR(new_tags))
 		goto switch_back;
 
-	/* [한국어] 모든 NVMe namespace 의 request_queue freeze: 새 dispatch 차단 */
+	/* [한국어] 이 tag set을 공유하는 "모든" 큐를 freeze한다. NVMe에서는
+	 * 컨트롤러 하나의 모든 네임스페이스(/dev/nvme0n1, n2, ...)가 여기 해당한다.
+	 * 하나라도 빠뜨리면 그 큐의 I/O가 재구성 중인 hctx를 참조해 크래시한다.
+	 * freeze는 새 I/O 진입을 막고 진행 중인 것이 모두 끝나기를 기다린다. */
 	list_for_each_entry(q, &set->tag_list, tag_set_list)
 		blk_mq_freeze_queue_nomemsave(q);
+	/* [한국어] 아래 switch_back 라벨에서 "이미 freeze했는가"를 판단하는 플래그.
+	 * 오류로 중간에 점프해 왔을 때 중복 freeze를 피하기 위해 필요하다. */
 	queues_frozen = true;
+	/* [한국어] 큐 수가 늘어난 경우에만 새 tags 배열이 준비되어 있다.
+	 * 줄어드는 경우는 기존 배열을 그대로 쓰고 뒤쪽만 비운다. */
 	if (new_tags) {
-		/* [한국어] 새 tags 배열로 교체 */
 		kfree(set->tags);
 		set->tags = new_tags;
 	}
-	/* [한국어] set->nr_hw_queues: NVMe SQ 개수 갱신 */
+	/* [한국어] 목표 큐 수를 확정한다. 이 시점부터 아래 재구성 코드가
+	 * 이 값을 기준으로 동작한다. NVMe에서 이 값이 바뀌는 대표적 상황은
+	 * 컨트롤러 리셋 후 Set Features(Number of Queues) 재협상 결과가
+	 * 이전과 달라졌을 때다. */
 	set->nr_hw_queues = nr_hw_queues;
 
 fallback:
@@ -10320,16 +10431,28 @@ fallback:
 		/* [한국어] 각 request_queue 의 hctx 배열 재할당 */
 		__blk_mq_realloc_hw_ctxs(set, q);
 
+		/* [한국어] ★ 확장 실패 시의 우아한 저하 ★
+		 * __blk_mq_realloc_hw_ctxs()는 메모리 부족으로 목표 개수만큼
+		 * hctx를 만들지 못하면 q->nr_hw_queues를 올리지 않는다. 그 불일치를
+		 * 여기서 감지한다.
+		 * 이때 실패로 끝내지 않는 이유: 큐 수가 적어도 I/O는 정상 동작하므로,
+		 * 장치를 못 쓰게 만드는 것보다 이전 개수로 되돌아가 계속 쓰는 편이
+		 * 훨씬 낫다. NVMe 컨트롤러 리셋 도중 메모리가 빠듯할 때 실제로
+		 * 발생할 수 있는 상황이다. */
 		if (q->nr_hw_queues != set->nr_hw_queues) {
 			int i = prev_nr_hw_queues;
 
 			pr_warn("Increasing nr_hw_queues to %d fails, fallback to %d\n",
 					nr_hw_queues, prev_nr_hw_queues);
-			/* [한국어] 새로 할당된 초과 SQ tags 해제 */
+			/* [한국어] 부분적으로 만들어진 초과분의 태그 세트를 해제한다.
+			 * hctx는 못 만들었어도 태그는 앞서 할당되었을 수 있어 따로
+			 * 정리해야 누수가 없다. */
 			for (; i < set->nr_hw_queues; i++)
 				__blk_mq_free_map_and_rqs(set, i);
 
-			/* [한국어] 이전 SQ 수로 복귀 후 재시도 */
+			/* [한국어] 목표를 이전 개수로 낮추고 fallback 라벨로 되돌아가
+			 * 매핑 재구성을 처음부터 다시 한다. 이번에는 이미 존재하는
+			 * 개수이므로 반드시 성공한다 — 무한 루프가 되지 않는다. */
 			set->nr_hw_queues = prev_nr_hw_queues;
 			goto fallback;
 		}
@@ -10358,12 +10481,20 @@ switch_back:
 	}
 
 out_free_ctx:
+	/* [한국어] 스케줄러 복원용으로 잡아 둔 컨텍스트들을 해제한다.
+	 * 성공 경로와 실패 경로가 모두 여기를 지나므로, 어느 쪽이든 누수가 없다. */
 	blk_mq_free_sched_ctx_batch(&elv_tbl);
 	xa_destroy(&elv_tbl);
+	/* [한국어] NOIO 메모리 컨텍스트를 원복한다. 이 구간에서 I/O를 유발하는
+	 * 회수를 막았던 제약이 풀린다. */
 	memalloc_noio_restore(memflags);
 
 	/* Free the excess tags when nr_hw_queues shrink. */
-	/* [한국어] shrink 시: 초과 SQ 인덱스의 CID pool 해제 */
+	/* [한국어] 큐 수가 줄어든 경우, 이제 쓰이지 않는 인덱스의 태그 세트를
+	 * 해제한다. 루프 조건이 set->nr_hw_queues < prev_nr_hw_queues일 때만
+	 * 도는 구조라, 늘어난 경우에는 자연히 아무 일도 하지 않는다.
+	 * 여기까지 미룬 이유: 재구성 도중에 해제하면 fallback으로 되돌아갔을 때
+	 * 필요한 태그가 이미 사라져 있게 된다. */
 	for (i = set->nr_hw_queues; i < prev_nr_hw_queues; i++)
 		__blk_mq_free_map_and_rqs(set, i);
 }
