@@ -152,17 +152,17 @@ static int bfq_stat_init(struct bfq_stat *stat, gfp_t gfp)
 {
 	int ret; /* [한국어] percpu_counter_init()의 반환값(0=성공, 음수=메모리 부족 등 에러) 임시 저장 */
 
-	ret = percpu_counter_init(&stat->cpu_cnt, 0, gfp);
 	/* [한국어] cpu_cnt를 초깃값 0으로 하는 percpu_counter로 초기화 -
 	 * 내부적으로 CPU 개수만큼의 배열을 gfp 플래그로 할당한다. */
+	ret = percpu_counter_init(&stat->cpu_cnt, 0, gfp);
+	/* [한국어] percpu 배열 할당 실패(메모리 부족) 시 즉시 에러 반환 -
+	 * 이 경우 aux_cnt는 아직 건드리지 않았으므로 별도 롤백 불필요 */
 	if (ret)
-		/* [한국어] percpu 배열 할당 실패(메모리 부족) 시 즉시 에러 반환 -
-		 * 이 경우 aux_cnt는 아직 건드리지 않았으므로 별도 롤백 불필요 */
 		return ret;
 
-	atomic64_set(&stat->aux_cnt, 0);
 	/* [한국어] aux_cnt를 0으로 초기화 - 아직 어떤 자식 cgroup의 통계도
 	 * 이관받지 않은 최초 상태를 의미한다. */
+	atomic64_set(&stat->aux_cnt, 0);
 	return 0; /* [한국어] 초기화 성공 */
 }
 
@@ -420,13 +420,14 @@ static void bfqg_stats_update_group_wait_time(struct bfqg_stats *stats)
 {
 	u64 now; /* [한국어] 현재 시각(ns) - waiting 중이었다면 대기 종료 시각으로 쓰임 */
 
+	/* [한국어] waiting 플래그가 꺼져 있으면(측정 중이 아니면) 아무 것도 하지 않고 반환 */
 	if (!bfqg_stats_waiting(stats))
-		return; /* [한국어] waiting 플래그가 꺼져 있으면(측정 중이 아니면) 아무 것도 하지 않고 반환 */
+		return;
 
 	now = blk_time_get_ns(); /* [한국어] 단조 증가 시계로 현재 시각을 얻음 - start_group_wait_time과 같은 시간축 */
+	/* [한국어] 시작 시각보다 현재가 커야(정상적인 시간 흐름) 델타를 누적 -
+	 * 시계 이상 등으로 역전된 경우는 방어적으로 스킵 */
 	if (now > stats->start_group_wait_time)
-		/* [한국어] 시작 시각보다 현재가 커야(정상적인 시간 흐름) 델타를 누적 -
-		 * 시계 이상 등으로 역전된 경우는 방어적으로 스킵 */
 		bfq_stat_add(&stats->group_wait_time,
 			      now - stats->start_group_wait_time);
 			      /* [한국어] 대기 시작부터 지금까지의 경과 시간을 group_wait_time에 누적 */
@@ -456,10 +457,12 @@ static void bfqg_stats_set_start_group_wait_time(struct bfq_group *bfqg,
 {
 	struct bfqg_stats *stats = &bfqg->stats; /* [한국어] 갱신 대상 통계 구조체 포인터 */
 
+	/* [한국어] 이미 측정 중이면 시작 시각을 덮어쓰지 않고 그대로 반환(중복 시작 방지) */
 	if (bfqg_stats_waiting(stats))
-		return; /* [한국어] 이미 측정 중이면 시작 시각을 덮어쓰지 않고 그대로 반환(중복 시작 방지) */
+		return;
+	/* [한국어] 자기 자신이 이미 서비스 중인 그룹이면 대기가 아니므로 측정 불필요 */
 	if (bfqg == curr_bfqg)
-		return; /* [한국어] 자기 자신이 이미 서비스 중인 그룹이면 대기가 아니므로 측정 불필요 */
+		return;
 	stats->start_group_wait_time = blk_time_get_ns(); /* [한국어] 대기 시작 시각 기록 */
 	bfqg_stats_mark_waiting(stats); /* [한국어] waiting 플래그를 세워 "측정 진행 중" 표시 */
 }
@@ -484,12 +487,13 @@ static void bfqg_stats_end_empty_time(struct bfqg_stats *stats)
 {
 	u64 now; /* [한국어] 현재 시각(ns) */
 
+	/* [한국어] empty 플래그가 꺼져 있으면(측정 중이 아니면) 즉시 반환 */
 	if (!bfqg_stats_empty(stats))
-		return; /* [한국어] empty 플래그가 꺼져 있으면(측정 중이 아니면) 즉시 반환 */
+		return;
 
 	now = blk_time_get_ns(); /* [한국어] 현재 시각 조회 */
+	/* [한국어] 정상적인 시간 흐름일 때만 델타 누적(시계 역전 방어) */
 	if (now > stats->start_empty_time)
-		/* [한국어] 정상적인 시간 흐름일 때만 델타 누적(시계 역전 방어) */
 		bfq_stat_add(&stats->empty_time,
 			      now - stats->start_empty_time);
 			      /* [한국어] empty 상태로 머문 경과 시간을 empty_time에 누적 */
@@ -536,16 +540,18 @@ void bfqg_stats_set_start_empty_time(struct bfq_group *bfqg)
 {
 	struct bfqg_stats *stats = &bfqg->stats; /* [한국어] 대상 통계 구조체 포인터 */
 
+	/* [한국어] 아직 큐잉된 request가 남아 있으면(합이 0이 아니면) empty가 아니므로 반환 */
 	if (blkg_rwstat_total(&stats->queued))
-		return; /* [한국어] 아직 큐잉된 request가 남아 있으면(합이 0이 아니면) empty가 아니므로 반환 */
+		return;
 
 	/*
 	 * group is already marked empty. This can happen if bfqq got new
 	 * request in parent group and moved to this group while being added
 	 * to service tree. Just ignore the event and move on.
 	 */
+	/* [한국어] 이미 empty로 표시된 경우 원본 주석의 레이스를 무시하고 그대로 반환 */
 	if (bfqg_stats_empty(stats))
-		return; /* [한국어] 이미 empty로 표시된 경우 원본 주석의 레이스를 무시하고 그대로 반환 */
+		return;
 
 	stats->start_empty_time = blk_time_get_ns(); /* [한국어] empty 시작 시각 기록 */
 	bfqg_stats_mark_empty(stats); /* [한국어] empty 플래그를 세워 측정 진행 중 표시 */
@@ -570,12 +576,12 @@ void bfqg_stats_update_idle_time(struct bfq_group *bfqg)
 {
 	struct bfqg_stats *stats = &bfqg->stats; /* [한국어] 대상 통계 구조체 포인터 */
 
+	/* [한국어] idling 플래그가 세팅되어 있을 때만(측정 중일 때만) 종료 처리 */
 	if (bfqg_stats_idling(stats)) {
-		/* [한국어] idling 플래그가 세팅되어 있을 때만(측정 중일 때만) 종료 처리 */
 		u64 now = blk_time_get_ns(); /* [한국어] 현재 시각(ns) */
 
+		/* [한국어] 정상적인 시간 흐름일 때만 누적(시계 역전 방어) */
 		if (now > stats->start_idle_time)
-			/* [한국어] 정상적인 시간 흐름일 때만 누적(시계 역전 방어) */
 			bfq_stat_add(&stats->idle_time,
 				      now - stats->start_idle_time);
 				      /* [한국어] idling으로 보낸 경과 시간을 idle_time에 누적 */
@@ -627,9 +633,9 @@ void bfqg_stats_update_avg_queue_size(struct bfq_group *bfqg)
 {
 	struct bfqg_stats *stats = &bfqg->stats; /* [한국어] 대상 통계 구조체 포인터 */
 
+	/* [한국어] 현재 큐잉 개수(읽기+쓰기 합)를 누적 합에 더함 - 평균의 분자 */
 	bfq_stat_add(&stats->avg_queue_size_sum,
 		      blkg_rwstat_total(&stats->queued));
-		      /* [한국어] 현재 큐잉 개수(읽기+쓰기 합)를 누적 합에 더함 - 평균의 분자 */
 	bfq_stat_add(&stats->avg_queue_size_samples, 1); /* [한국어] 표본 개수 1 증가 - 평균의 분모 */
 	bfqg_stats_update_group_wait_time(stats); /* [한국어] 이 시점에 group_wait_time 측정도 함께 마감 */
 }
@@ -657,8 +663,8 @@ void bfqg_stats_update_io_add(struct bfq_group *bfqg, struct bfq_queue *bfqq,
 {
 	blkg_rwstat_add(&bfqg->stats.queued, opf, 1); /* [한국어] opf 방향의 queued 카운터를 1 증가 */
 	bfqg_stats_end_empty_time(&bfqg->stats); /* [한국어] 지금까지 empty였다면 그 구간을 마감 */
+	/* [한국어] 이 bfqq가 현재 서비스 중인 큐가 아니면(=대기 상태) */
 	if (!(bfqq == bfqg->bfqd->in_service_queue))
-		/* [한국어] 이 bfqq가 현재 서비스 중인 큐가 아니면(=대기 상태) */
 		bfqg_stats_set_start_group_wait_time(bfqg, bfqq_group(bfqq));
 		/* [한국어] bfqq_group(bfqq)=현재 실제 서비스 중인 그룹을 기준으로 group_wait_time 측정 시작 */
 }
@@ -728,8 +734,8 @@ void bfqg_stats_update_completion(struct bfq_group *bfqg, u64 start_time_ns,
 	struct bfqg_stats *stats = &bfqg->stats; /* [한국어] 대상 통계 구조체 포인터 */
 	u64 now = blk_time_get_ns(); /* [한국어] 완료 시각(ns) */
 
+	/* [한국어] issue 시각보다 완료 시각이 커야(정상 흐름) service_time 계산 */
 	if (now > io_start_time_ns)
-		/* [한국어] issue 시각보다 완료 시각이 커야(정상 흐름) service_time 계산 */
 		blkg_rwstat_add(&stats->service_time, opf,
 				now - io_start_time_ns);
 				/* [한국어] issue부터 완료까지의 디바이스 처리 시간을 누적 */
@@ -1109,9 +1115,9 @@ static void bfqg_stats_add_aux(struct bfqg_stats *to, struct bfqg_stats *from)
 	blkg_rwstat_add_aux(&to->wait_time, &from->wait_time); /* [한국어] wait_time 이관 */
 	bfq_stat_add_aux(&to->time, &from->time); /* [한국어] time(총 디스패치 시간/섹터) 이관 */
 	bfq_stat_add_aux(&to->avg_queue_size_sum, &from->avg_queue_size_sum); /* [한국어] 평균 큐 크기 합계 이관 */
+	/* [한국어] 평균 큐 크기 표본 수 이관 */
 	bfq_stat_add_aux(&to->avg_queue_size_samples,
 			  &from->avg_queue_size_samples);
-			  /* [한국어] 평균 큐 크기 표본 수 이관 */
 	bfq_stat_add_aux(&to->dequeue, &from->dequeue); /* [한국어] dequeue 횟수 이관 */
 	bfq_stat_add_aux(&to->group_wait_time, &from->group_wait_time); /* [한국어] group_wait_time 이관 */
 	bfq_stat_add_aux(&to->idle_time, &from->idle_time); /* [한국어] idle_time 이관 */
@@ -1149,22 +1155,24 @@ static void bfqg_stats_xfer_dead(struct bfq_group *bfqg)
 {
 	struct bfq_group *parent; /* [한국어] 통계를 이관받을 부모 bfq_group */
 
+	/* [한국어] bfqg 자체가 없으면(원본 주석: root_group의 경우) 이관 불필요 */
 	if (!bfqg) /* root_group */
-		return; /* [한국어] bfqg 자체가 없으면(원본 주석: root_group의 경우) 이관 불필요 */
+		return;
 
 	parent = bfqg_parent(bfqg); /* [한국어] 계층상의 부모 bfq_group 탐색 */
 
-	lockdep_assert_held(&bfqg_to_blkg(bfqg)->q->queue_lock);
 	/* [한국어] 이 함수가 반드시 queue_lock을 쥔 상태에서 호출되어야 함을 런타임에
 	 * 검증(lockdep) - 이관 도중 통계 갱신과의 경쟁을 방지하기 위한 전제조건 */
+	lockdep_assert_held(&bfqg_to_blkg(bfqg)->q->queue_lock);
 
+	/* [한국어] 부모가 없으면(이 bfqg 자신이 최상위) 이관할 곳이 없으므로 반환 */
 	if (unlikely(!parent))
-		return; /* [한국어] 부모가 없으면(이 bfqg 자신이 최상위) 이관할 곳이 없으므로 반환 */
+		return;
 
-	bfqg_stats_add_aux(&parent->stats, &bfqg->stats);
 	/* [한국어] 자식(bfqg)의 통계를 부모(parent)의 aux 카운터에 합산 */
-	bfqg_stats_reset(&bfqg->stats);
+	bfqg_stats_add_aux(&parent->stats, &bfqg->stats);
 	/* [한국어] 이관을 마쳤으므로 자식 자신의 통계는 0으로 리셋(중복 집계 방지) */
+	bfqg_stats_reset(&bfqg->stats);
 }
 
 /*
@@ -1276,11 +1284,16 @@ static void bfqg_stats_exit(struct bfqg_stats *stats)
 static int bfqg_stats_init(struct bfqg_stats *stats, gfp_t gfp)
 {
 	if (blkg_rwstat_init(&stats->bytes, gfp) ||
+	    /* [한국어] bytes 또는 ios 중 하나라도 초기화 실패 시 error 레이블로 이동 */
 	    blkg_rwstat_init(&stats->ios, gfp))
-		/* [한국어] bytes 또는 ios 중 하나라도 초기화 실패 시 error 레이블로 이동 */
 		goto error;
 
 #ifdef CONFIG_BFQ_CGROUP_DEBUG
+	/* [한국어] 디버그 통계 필드들 중 하나라도 초기화 실패 시 error 레이블로 이동 -
+	 * ||의 단락 평가(short-circuit) 덕분에 실패 지점 이후 필드는 아예 시도되지 않음 */
+	/* [한국어] 아래 디버그 통계는 CONFIG_BFQ_CGROUP_DEBUG일 때만 존재한다.
+	 * 하나라도 실패하면 error로 빠져 이미 초기화한 것까지 모두 되돌린다 -
+	 * percpu 할당이라 부분 초기화 상태로 두면 해제 경로에서 터진다. */
 	if (blkg_rwstat_init(&stats->merged, gfp) ||
 	    blkg_rwstat_init(&stats->service_time, gfp) ||
 	    blkg_rwstat_init(&stats->wait_time, gfp) ||
@@ -1292,17 +1305,15 @@ static int bfqg_stats_init(struct bfqg_stats *stats, gfp_t gfp)
 	    bfq_stat_init(&stats->group_wait_time, gfp) ||
 	    bfq_stat_init(&stats->idle_time, gfp) ||
 	    bfq_stat_init(&stats->empty_time, gfp))
-		/* [한국어] 디버그 통계 필드들 중 하나라도 초기화 실패 시 error 레이블로 이동 -
-		 * ||의 단락 평가(short-circuit) 덕분에 실패 지점 이후 필드는 아예 시도되지 않음 */
 		goto error;
 #endif
 
 	return 0; /* [한국어] 모든 필드 초기화 성공 */
 
 error:
-	bfqg_stats_exit(stats);
 	/* [한국어] 지금까지 성공적으로 초기화된 필드들을 포함해 안전하게 해제(각 exit
 	 * 함수는 초기화되지 않은 필드에 대해서도 안전하도록 설계된 blk-cgroup 관례를 따름) */
+	bfqg_stats_exit(stats);
 	return -ENOMEM; /* [한국어] 메모리 부족으로 통계 구조체 준비 실패를 호출자에게 알림 */
 }
 
@@ -1368,13 +1379,14 @@ static struct blkcg_policy_data *bfq_cpd_alloc(gfp_t gfp)
 {
 	struct bfq_group_data *bgd; /* [한국어] 새로 할당할 bfq_group_data 포인터 */
 
-	bgd = kzalloc_obj(*bgd, gfp);
 	/* [한국어] *bgd 크기만큼 0으로 채워 할당(kzalloc_obj는 sizeof(*bgd)를 자동 계산하는 헬퍼) */
+	bgd = kzalloc_obj(*bgd, gfp);
+	/* [한국어] 메모리 부족 시 cgroup 생성 자체가 실패하도록 NULL 반환 */
 	if (!bgd)
-		return NULL; /* [한국어] 메모리 부족 시 cgroup 생성 자체가 실패하도록 NULL 반환 */
+		return NULL;
 
-	bgd->weight = CGROUP_WEIGHT_DFL;
 	/* [한국어] 사용자 설정 전 기본 weight - cgroup v2 공통 기본값(보통 100)으로 초기화 */
+	bgd->weight = CGROUP_WEIGHT_DFL;
 	return &bgd->pd; /* [한국어] blk-cgroup 코어가 기대하는 blkcg_policy_data* 타입으로 반환 */
 }
 
@@ -1423,21 +1435,22 @@ static struct blkg_policy_data *bfq_pd_alloc(struct gendisk *disk,
 {
 	struct bfq_group *bfqg; /* [한국어] 새로 할당할 bfq_group 포인터 */
 
-	bfqg = kzalloc_node(sizeof(*bfqg), gfp, disk->node_id);
 	/* [한국어] disk->node_id(디바이스가 선호하는 NUMA 노드)에 맞춰 0으로 채워 할당 -
 	 * 이후 이 그룹에 접근하는 스케줄링 코드의 메모리 지역성을 높이기 위함 */
+	bfqg = kzalloc_node(sizeof(*bfqg), gfp, disk->node_id);
+	/* [한국어] 메모리 부족 시 blkg 생성 자체가 실패하도록 NULL 반환 */
 	if (!bfqg)
-		return NULL; /* [한국어] 메모리 부족 시 blkg 생성 자체가 실패하도록 NULL 반환 */
+		return NULL;
 
+	/* [한국어] 통계 자료구조(percpu_counter 등) 할당이 실패한 경우 */
 	if (bfqg_stats_init(&bfqg->stats, gfp)) {
-		/* [한국어] 통계 자료구조(percpu_counter 등) 할당이 실패한 경우 */
 		kfree(bfqg); /* [한국어] 이미 할당한 bfqg 본체도 함께 롤백 */
 		return NULL; /* [한국어] 상위 blkg_alloc()이 실패로 처리하도록 NULL 반환 */
 	}
 
 	/* see comments in bfq_bic_update_cgroup for why refcounting */
-	refcount_set(&bfqg->ref, 1);
 	/* [한국어] 참조 카운트를 1로 초기화 - 이 할당 자체가 첫 번째(생성자) 참조 */
+	refcount_set(&bfqg->ref, 1);
 	return &bfqg->pd; /* [한국어] blk-cgroup 코어가 기대하는 blkg_policy_data* 타입으로 반환 */
 }
 
@@ -1569,11 +1582,11 @@ static void bfq_group_set_parent(struct bfq_group *bfqg,
 	struct bfq_entity *entity; /* [한국어] 재배치할 대상 entity(항상 bfqg 자신의 entity) */
 
 	entity = &bfqg->entity; /* [한국어] bfqg를 상위 트리에 등록하는 데 쓰이는 entity 포인터 획득 */
-	entity->parent = parent->my_entity;
 	/* [한국어] 부모 entity로 parent의 대표 entity(my_entity)를 설정 - parent가
 	 * root_group이면 my_entity가 NULL이라 entity->parent도 NULL이 됨 */
-	entity->sched_data = &parent->sched_data;
+	entity->parent = parent->my_entity;
 	/* [한국어] 이 entity가 실제로 편입될 서비스 트리를 parent의 sched_data로 지정 */
+	entity->sched_data = &parent->sched_data;
 }
 
 /*
@@ -1608,14 +1621,14 @@ static void bfq_link_bfqg(struct bfq_data *bfqd, struct bfq_group *bfqg)
 	 * to the private hierarchy of BFQ.
 	 */
 	entity = &bfqg->entity; /* [한국어] 순회 시작점 - 대상 leaf 그룹 자신의 entity */
+	/* [한국어] entity->parent를 따라 root까지 상향 순회(bfq-iosched.h의
+	 * for_each_entity 매크로) - 이미 연결된 조상까지도 재확인/재연결한다 */
 	for_each_entity(entity) {
-		/* [한국어] entity->parent를 따라 root까지 상향 순회(bfq-iosched.h의
-		 * for_each_entity 매크로) - 이미 연결된 조상까지도 재확인/재연결한다 */
 		struct bfq_group *curr_bfqg = container_of(entity,
+						/* [한국어] 현재 순회 위치의 entity를 포함하는 bfq_group 획득 */
 						struct bfq_group, entity);
-		/* [한국어] 현재 순회 위치의 entity를 포함하는 bfq_group 획득 */
+		/* [한국어] root_group 자신은 연결할 부모가 없으므로 제외 */
 		if (curr_bfqg != bfqd->root_group) {
-			/* [한국어] root_group 자신은 연결할 부모가 없으므로 제외 */
 			parent = bfqg_parent(curr_bfqg);
 			/* [한국어] cgroup 계층상의 실제 부모 bfq_group 탐색 */
 			if (!parent)
@@ -1870,12 +1883,12 @@ static void bfq_sync_bfqq_move(struct bfq_data *bfqd,
 {
 	struct bfq_queue *bfqq; /* [한국어] merge 체인 순회용 반복자 */
 
+	/* [한국어] 다른 큐로 병합되지도 않았고(new_bfqq==NULL) 협력 큐 플래그도
+	 * 없다면 이 bic만의 전용 큐이므로 병합 검증이 필요 없음 */
 	if (!sync_bfqq->new_bfqq && !bfq_bfqq_coop(sync_bfqq)) {
-		/* [한국어] 다른 큐로 병합되지도 않았고(new_bfqq==NULL) 협력 큐 플래그도
-		 * 없다면 이 bic만의 전용 큐이므로 병합 검증이 필요 없음 */
 		/* We are the only user of this bfqq, just move it */
+		/* [한국어] 이미 목적지 그룹에 속해 있지 않을 때만 이동 수행(불필요한 이동 방지) */
 		if (sync_bfqq->entity.sched_data != &bfqg->sched_data)
-			/* [한국어] 이미 목적지 그룹에 속해 있지 않을 때만 이동 수행(불필요한 이동 방지) */
 			bfq_bfqq_move(bfqd, sync_bfqq, bfqg);
 		return; /* [한국어] 단순 이동 경로는 여기서 종료 */
 	}
@@ -1885,8 +1898,8 @@ static void bfq_sync_bfqq_move(struct bfq_data *bfqd,
 	 * that the merge chain still belongs to the same
 	 * cgroup.
 	 */
+	/* [한국어] sync_bfqq부터 시작해 new_bfqq 포인터를 따라 병합 체인 전체를 순회 */
 	for (bfqq = sync_bfqq; bfqq; bfqq = bfqq->new_bfqq)
-		/* [한국어] sync_bfqq부터 시작해 new_bfqq 포인터를 따라 병합 체인 전체를 순회 */
 		if (bfqq->entity.sched_data != &bfqg->sched_data)
 			/* [한국어] 체인 중 하나라도 목적지 그룹과 sched_data가 다르면(=다른 cgroup) */
 			break; /* [한국어] 루프를 중단 - bfqq가 NULL이 아닌 상태로 남아 아래 조건이 참이 됨 */
@@ -1953,8 +1966,8 @@ static void __bfq_bic_change_cgroup(struct bfq_data *bfqd,
 {
 	unsigned int act_idx; /* [한국어] 0..num_actuators-1 범위의 actuator 인덱스 */
 
+	/* [한국어] 이 디바이스의 모든 actuator에 대해 반복 처리 */
 	for (act_idx = 0; act_idx < bfqd->num_actuators; act_idx++) {
-		/* [한국어] 이 디바이스의 모든 actuator에 대해 반복 처리 */
 		struct bfq_queue *async_bfqq = bic_to_bfqq(bic, false, act_idx);
 		/* [한국어] 이 actuator의 async(비동기) 큐 - 그룹 공유 자원 */
 		struct bfq_queue *sync_bfqq = bic_to_bfqq(bic, true, act_idx);
@@ -2025,12 +2038,12 @@ void bfq_bic_update_cgroup(struct bfq_io_cq *bic, struct bio *bio)
 	 * New cgroup for this process. Make sure it is linked to bfq internal
 	 * cgroup hierarchy.
 	 */
-	bfq_link_bfqg(bfqd, bfqg);
 	/* [한국어] bfqg부터 root까지의 BFQ 내부 계층 연결을 최신 cgroup 구조에 맞춰 보정 */
-	__bfq_bic_change_cgroup(bfqd, bic, bfqg);
+	bfq_link_bfqg(bfqd, bfqg);
 	/* [한국어] 이 프로세스(bic)의 모든 actuator별 async/sync 큐를 실제로 새 그룹으로 이전 */
-	bic->blkcg_serial_nr = serial_nr;
+	__bfq_bic_change_cgroup(bfqd, bic, bfqg);
 	/* [한국어] 다음 bio 제출부터는 이 값과 비교해 변경 여부를 판단하도록 캐시 갱신 */
+	bic->blkcg_serial_nr = serial_nr;
 }
 
 /**
@@ -2103,12 +2116,12 @@ static void bfq_reparent_leaf_entity(struct bfq_data *bfqd,
 				     int ioprio_class)
 {
 	struct bfq_queue *bfqq; /* [한국어] 최종적으로 찾아낼 leaf entity에 대응하는 bfq_queue */
-	struct bfq_entity *child_entity = entity;
 	/* [한국어] 하향 탐색에 쓰이는 현재 위치 entity(처음엔 entity 자신) */
+	struct bfq_entity *child_entity = entity;
 
+	/* [한국어] my_sched_data가 있다는 것은 아직 그룹(중간 노드) entity라는 뜻 -
+	 * NULL이 될 때까지(=leaf bfq_queue entity에 도달할 때까지) 반복 */
 	while (child_entity->my_sched_data) { /* leaf not reached yet */
-		/* [한국어] my_sched_data가 있다는 것은 아직 그룹(중간 노드) entity라는 뜻 -
-		 * NULL이 될 때까지(=leaf bfq_queue entity에 도달할 때까지) 반복 */
 		struct bfq_sched_data *child_sd = child_entity->my_sched_data;
 		/* [한국어] 현재 그룹 entity의 자식 스케줄러 */
 		struct bfq_service_tree *child_st = child_sd->service_tree +
@@ -2223,8 +2236,8 @@ static void bfq_reparent_active_queues(struct bfq_data *bfqd,
 static void bfq_pd_offline(struct blkg_policy_data *pd)
 {
 	struct bfq_service_tree *st; /* [한국어] 루프에서 순회할 현재 ioprio_class의 서비스 트리 */
-	struct bfq_group *bfqg = pd_to_bfqg(pd);
 	/* [한국어] offline 처리 대상 bfq_group */
+	struct bfq_group *bfqg = pd_to_bfqg(pd);
 	struct bfq_data *bfqd = bfqg->bfqd; /* 오프라인 대상 bfq_group */
 	/* [한국어] 스케줄러 락(bfqd->lock)과 root_group을 얻기 위한 디바이스 전역 상태 */
 	struct bfq_entity *entity = bfqg->my_entity; /* 오프라인할 group entity */
@@ -2327,8 +2340,8 @@ void bfq_end_wr_async(struct bfq_data *bfqd)
 {
 	struct blkcg_gq *blkg; /* [한국어] blkg_list 순회용 반복자 */
 
+	/* [한국어] 이 request_queue(디바이스)에 연결된 모든 blkg(=모든 cgroup)를 순회 */
 	list_for_each_entry(blkg, &bfqd->queue->blkg_list, q_node) {
-		/* [한국어] 이 request_queue(디바이스)에 연결된 모든 blkg(=모든 cgroup)를 순회 */
 		struct bfq_group *bfqg = blkg_to_bfqg(blkg);
 		/* [한국어] 해당 blkg의 BFQ 전용 bfq_group으로 변환 */
 
@@ -2590,42 +2603,48 @@ static ssize_t bfq_io_set_device_weight(struct kernfs_open_file *of,
 {
 	int ret; /* [한국어] 각 단계의 성공/실패 코드(음수 errno 또는 0) */
 	struct blkg_conf_ctx ctx; /* [한국어] blkg_conf_prep/exit이 관리하는 파싱 컨텍스트(대상 blkg 등) */
-	struct blkcg *blkcg = css_to_blkcg(of_css(of));
 	/* [한국어] 이 write가 발생한 cgroup의 blkcg */
+	struct blkcg *blkcg = css_to_blkcg(of_css(of));
 	struct bfq_group *bfqg; /* [한국어] 파싱된 대상 디바이스의 bfq_group */
 	u64 v; /* [한국어] 파싱된 weight 값(0=default로 되돌림을 의미) */
 
-	blkg_conf_init(&ctx, buf);
 	/* [한국어] ctx를 buf 기준으로 초기화 - 이후 blkg_conf_prep가 이 버퍼를 파싱 */
+	blkg_conf_init(&ctx, buf);
 
-	ret = blkg_conf_prep(blkcg, &blkcg_policy_bfq, &ctx);
 	/* [한국어] buf 앞부분의 "<MAJ>:<MIN>"을 파싱해 대상 gendisk/blkg를 찾고 ctx에 채움 */
+	ret = blkg_conf_prep(blkcg, &blkcg_policy_bfq, &ctx);
+	/* [한국어] 디바이스 지정이 잘못되었거나 blkg 준비 실패 시 즉시 정리 후 반환 */
 	if (ret)
-		goto out; /* [한국어] 디바이스 지정이 잘못되었거나 blkg 준비 실패 시 즉시 정리 후 반환 */
+		goto out;
 
+	/* [한국어] "<MAJ>:<MIN> N" 형식 - 나머지 본문이 순수 숫자로 파싱되는 경우 */
 	if (sscanf(ctx.body, "%llu", &v) == 1) {
-		/* [한국어] "<MAJ>:<MIN> N" 형식 - 나머지 본문이 순수 숫자로 파싱되는 경우 */
 		/* require "default" on dfl */
+		/* [한국어] 숫자 0은 허용하지 않음 - 0을 원하면 반드시 "default"라고 써야 함 */
 		ret = -ERANGE;
-		if (!v)
-			goto out; /* [한국어] 숫자 0은 허용하지 않음 - 0을 원하면 반드시 "default"라고 써야 함 */
+		if (!v) // 숫자로 0을 준 경우 - cgroup v2 인터페이스에서는 "가중치 없음"을 0이 아니라 "default"라는 낱말로만 표현하게 강제한다
+			goto out;
+	/* [한국어] "<MAJ>:<MIN> default" 형식 - 본문이 숫자로 파싱되지 않았다면
+	 * 앞뒤 공백을 떼고 정확히 "default"인지 확인한다. 이 형식은 해당
+	 * 디바이스에 걸어 둔 per-device override를 지우고 cgroup 기본
+	 * weight로 되돌리라는 뜻이다. */
 	} else if (!strcmp(strim(ctx.body), "default")) {
-		/* [한국어] "<MAJ>:<MIN> default" 형식 - 앞뒤 공백 제거 후 정확히 "default"와 일치 */
 		v = 0; /* [한국어] v=0은 아래에서 "override 없음"으로 해석됨 */
 	} else {
+		/* [한국어] 숫자도 "default"도 아니면 잘못된 입력으로 거부 */
 		ret = -EINVAL;
-		goto out; /* [한국어] 숫자도 "default"도 아니면 잘못된 입력으로 거부 */
+		goto out;
 	}
 
-	bfqg = blkg_to_bfqg(ctx.blkg);
 	/* [한국어] blkg_conf_prep가 찾아준 대상 blkg를 bfq_group으로 변환 */
+	bfqg = blkg_to_bfqg(ctx.blkg);
 
+	/* [한국어] v==0(default로 복귀)이거나 정상 범위 내의 값일 때만 적용 허용 */
 	ret = -ERANGE;
+	/* [한국어] 두 번째 인자로 "현재 weight"(사실상 default 역할)를 그대로 넘기고,
+	 * 세 번째 인자 v를 dev_weight로 넘겨 이 디바이스만의 override를 적용/해제 */
 	if (!v || (v >= BFQ_MIN_WEIGHT && v <= BFQ_MAX_WEIGHT)) {
-		/* [한국어] v==0(default로 복귀)이거나 정상 범위 내의 값일 때만 적용 허용 */
 		bfq_group_set_weight(bfqg, bfqg->entity.weight, v);
-		/* [한국어] 두 번째 인자로 "현재 weight"(사실상 default 역할)를 그대로 넘기고,
-		 * 세 번째 인자 v를 dev_weight로 넘겨 이 디바이스만의 override를 적용/해제 */
 		ret = 0; /* [한국어] 적용 성공 */
 	}
 out:
@@ -2666,12 +2685,12 @@ static ssize_t bfq_io_set_weight(struct kernfs_open_file *of,
 	buf = strim(buf); /* [한국어] 입력 문자열 앞뒤 공백 제거 */
 
 	/* "WEIGHT" or "default WEIGHT" sets the default weight */
-	v = simple_strtoull(buf, &endp, 0);
 	/* [한국어] buf를 숫자로 파싱 시도 - "<MAJ>:<MIN> ..."이면 콜론에서 파싱이 멈춰
 	 * endp가 문자열 끝이 아니게 됨 */
+	v = simple_strtoull(buf, &endp, 0);
+	/* [한국어] buf 전체가 순수 숫자였거나("N"), "default N" 형식과 일치하면
+	 * cgroup 전체 default 설정 경로 */
 	if (*endp == '\0' || sscanf(buf, "default %llu", &v) == 1) {
-		/* [한국어] buf 전체가 순수 숫자였거나("N"), "default N" 형식과 일치하면
-		 * cgroup 전체 default 설정 경로 */
 		ret = bfq_io_set_weight_legacy(of_css(of), NULL, v);
 		/* [한국어] 파싱된 v로 이 cgroup 전체의 default weight를 설정(모든 디바이스 override도 초기화됨) */
 		return ret ?: nbytes; /* [한국어] 성공이면 nbytes, 실패면 에러코드 반환 */
@@ -2701,9 +2720,9 @@ static ssize_t bfq_io_set_weight(struct kernfs_open_file *of,
 static int bfqg_print_rwstat(struct seq_file *sf, void *v)
 {
 	blkcg_print_blkgs(sf, css_to_blkcg(seq_css(sf)), blkg_prfill_rwstat,
-			  &blkcg_policy_bfq, seq_cft(sf)->private, true);
 			  /* [한국어] 마지막 인자 true는 "0 값도 라인을 생략하지 않고 출력"을 의미 -
 			   * rwstat은 항상 방향별 4개 카운터(read/write/sync/async 등)를 함께 보여줘야 하므로 */
+			  &blkcg_policy_bfq, seq_cft(sf)->private, true);
 	return 0;
 }
 
@@ -2730,10 +2749,10 @@ static u64 bfqg_prfill_rwstat_recursive(struct seq_file *sf,
 {
 	struct blkg_rwstat_sample sum; /* [한국어] 재귀 합산 결과를 담을 임시 구조체 */
 
-	blkg_rwstat_recursive_sum(pd_to_blkg(pd), &blkcg_policy_bfq, off, &sum);
 	/* [한국어] pd의 blkg부터 하위 cgroup 트리 전체를 순회하며 off 위치의 rwstat을 합산 */
-	return __blkg_prfill_rwstat(sf, pd, &sum);
+	blkg_rwstat_recursive_sum(pd_to_blkg(pd), &blkcg_policy_bfq, off, &sum);
 	/* [한국어] 합산 결과를 방향별로 seq_file에 출력 */
+	return __blkg_prfill_rwstat(sf, pd, &sum);
 }
 
 /*
@@ -2755,9 +2774,9 @@ static u64 bfqg_prfill_rwstat_recursive(struct seq_file *sf,
 static int bfqg_print_rwstat_recursive(struct seq_file *sf, void *v)
 {
 	blkcg_print_blkgs(sf, css_to_blkcg(seq_css(sf)),
+			  /* [한국어] true=값이 0이어도 라인 생략하지 않음(비재귀 버전과 동일 규칙) */
 			  bfqg_prfill_rwstat_recursive, &blkcg_policy_bfq,
 			  seq_cft(sf)->private, true);
-			  /* [한국어] true=값이 0이어도 라인 생략하지 않음(비재귀 버전과 동일 규칙) */
 	return 0;
 }
 
@@ -2779,8 +2798,8 @@ static int bfqg_print_rwstat_recursive(struct seq_file *sf, void *v)
 static int bfqg_print_stat(struct seq_file *sf, void *v)
 {
 	blkcg_print_blkgs(sf, css_to_blkcg(seq_css(sf)), blkg_prfill_stat,
-			  &blkcg_policy_bfq, seq_cft(sf)->private, false);
 			  /* [한국어] 마지막 인자 false는 "값이 0이면 해당 blkg 라인 자체를 생략"을 의미 */
+			  &blkcg_policy_bfq, seq_cft(sf)->private, false);
 	return 0;
 }
 
@@ -2815,23 +2834,24 @@ static u64 bfqg_prfill_stat_recursive(struct seq_file *sf,
 	struct cgroup_subsys_state *pos_css; /* [한국어] blkg_for_each_descendant_pre 내부 순회용 css 커서 */
 	u64 sum = 0; /* [한국어] 누적 합계 */
 
-	lockdep_assert_held(&blkg->q->queue_lock);
 	/* [한국어] 호출자가 queue_lock을 쥐고 있어야 함을 런타임 검증 - descendant
 	 * 트리 구조 변경(cgroup 생성/삭제)과의 경쟁 방지 전제조건 */
+	lockdep_assert_held(&blkg->q->queue_lock);
 
-	rcu_read_lock();
 	/* [한국어] blkg_for_each_descendant_pre 내부가 RCU로 blkg 트리를 순회하므로 보호 구간 진입 */
+	rcu_read_lock();
+	/* [한국어] blkg를 루트로 하는 서브트리를 pre-order(부모 먼저)로 순회 */
 	blkg_for_each_descendant_pre(pos_blkg, pos_css, blkg) {
-		/* [한국어] blkg를 루트로 하는 서브트리를 pre-order(부모 먼저)로 순회 */
 		struct bfq_stat *stat; /* [한국어] 이번 순회 위치의 대상 bfq_stat 필드 포인터 */
 
+		/* [한국어] offline된 blkg는 이미 부모 aux_cnt에 흡수되었으므로 건너뜀 */
 		if (!pos_blkg->online)
-			continue; /* [한국어] offline된 blkg는 이미 부모 aux_cnt에 흡수되었으므로 건너뜀 */
+			continue;
 
-		stat = (void *)blkg_to_pd(pos_blkg, &blkcg_policy_bfq) + off;
 		/* [한국어] 이 blkg의 policy_data 시작 주소 + off로 대상 필드 주소 계산 */
-		sum += bfq_stat_read(stat) + atomic64_read(&stat->aux_cnt);
+		stat = (void *)blkg_to_pd(pos_blkg, &blkcg_policy_bfq) + off;
 		/* [한국어] 현재 percpu 합산값과, 이미 이 blkg가 이관받은 aux_cnt를 함께 더함 */
+		sum += bfq_stat_read(stat) + atomic64_read(&stat->aux_cnt);
 	}
 	rcu_read_unlock(); /* [한국어] RCU 보호 구간 종료 */
 
@@ -2852,9 +2872,9 @@ static u64 bfqg_prfill_stat_recursive(struct seq_file *sf,
 static int bfqg_print_stat_recursive(struct seq_file *sf, void *v)
 {
 	blkcg_print_blkgs(sf, css_to_blkcg(seq_css(sf)),
+			  /* [한국어] false=0이면 라인 생략(디버그 stat 계열 공통 규칙) */
 			  bfqg_prfill_stat_recursive, &blkcg_policy_bfq,
 			  seq_cft(sf)->private, false);
-			  /* [한국어] false=0이면 라인 생략(디버그 stat 계열 공통 규칙) */
 	return 0;
 }
 
@@ -2878,11 +2898,11 @@ static u64 bfqg_prfill_sectors(struct seq_file *sf, struct blkg_policy_data *pd,
 			       int off)
 {
 	struct bfq_group *bfqg = blkg_to_bfqg(pd->blkg); /* [한국어] pd가 속한 blkg로부터 bfq_group 획득 */
-	u64 sum = blkg_rwstat_total(&bfqg->stats.bytes);
 	/* [한국어] bytes 통계의 모든 방향(read+write 등)을 합산한 총 바이트 수 */
+	u64 sum = blkg_rwstat_total(&bfqg->stats.bytes);
 
-	return __blkg_prfill_u64(sf, pd, sum >> 9);
 	/* [한국어] 512바이트 단위(섹터)로 변환(>>9 = /512)해 출력 */
+	return __blkg_prfill_u64(sf, pd, sum >> 9);
 }
 
 /*
@@ -2897,6 +2917,10 @@ static u64 bfqg_prfill_sectors(struct seq_file *sf, struct blkg_policy_data *pd,
  */
 static int bfqg_print_stat_sectors(struct seq_file *sf, void *v)
 {
+	/* [한국어] 마지막 인자 false는 "값이 0인 blkg는 출력 줄 자체를 생략"을
+	 * 뜻한다. 섹터 수가 0인 cgroup까지 모두 찍으면 계층이 깊을 때 출력이
+	 * 무의미하게 길어지기 때문이다. 네 번째 인자 0은 prfill 콜백이 오프셋
+	 * 대신 stats.bytes를 직접 읽으므로 쓰이지 않는 자리다. */
 	blkcg_print_blkgs(sf, css_to_blkcg(seq_css(sf)),
 			  bfqg_prfill_sectors, &blkcg_policy_bfq, 0, false);
 	return 0;
@@ -2925,13 +2949,13 @@ static u64 bfqg_prfill_sectors_recursive(struct seq_file *sf,
 {
 	struct blkg_rwstat_sample tmp; /* [한국어] 재귀 합산 결과를 담을 임시 구조체 */
 
+	/* [한국어] stats.bytes 필드를 명시적 offsetof로 지정해 하위 cgroup 포함 합산 */
 	blkg_rwstat_recursive_sum(pd->blkg, &blkcg_policy_bfq,
 			offsetof(struct bfq_group, stats.bytes), &tmp);
-			/* [한국어] stats.bytes 필드를 명시적 offsetof로 지정해 하위 cgroup 포함 합산 */
 
+	/* [한국어] read+write 두 방향만 더한 뒤 섹터 단위(>>9)로 변환해 출력 */
 	return __blkg_prfill_u64(sf, pd,
 		(tmp.cnt[BLKG_RWSTAT_READ] + tmp.cnt[BLKG_RWSTAT_WRITE]) >> 9);
-		/* [한국어] read+write 두 방향만 더한 뒤 섹터 단위(>>9)로 변환해 출력 */
 }
 
 /*
@@ -2947,6 +2971,8 @@ static u64 bfqg_prfill_sectors_recursive(struct seq_file *sf,
  */
 static int bfqg_print_stat_sectors_recursive(struct seq_file *sf, void *v)
 {
+	/* [한국어] 비재귀 버전과 같은 규칙(0이면 줄 생략)이며, prfill 콜백만
+	 * 하위 cgroup까지 합산하는 recursive 버전으로 바뀐다. */
 	blkcg_print_blkgs(sf, css_to_blkcg(seq_css(sf)),
 			  bfqg_prfill_sectors_recursive, &blkcg_policy_bfq, 0,
 			  false);
@@ -2975,12 +3001,12 @@ static u64 bfqg_prfill_avg_queue_size(struct seq_file *sf,
 				      struct blkg_policy_data *pd, int off)
 {
 	struct bfq_group *bfqg = pd_to_bfqg(pd); /* [한국어] pd를 포함하는 bfq_group */
-	u64 samples = bfq_stat_read(&bfqg->stats.avg_queue_size_samples);
 	/* [한국어] 지금까지 채취된 표본 수(평균의 분모) */
+	u64 samples = bfq_stat_read(&bfqg->stats.avg_queue_size_samples);
 	u64 v = 0; /* [한국어] 계산될 평균값 - 표본이 없으면 0 유지 */
 
+	/* [한국어] 표본이 하나라도 있을 때만 실제 나눗셈 수행 */
 	if (samples) {
-		/* [한국어] 표본이 하나라도 있을 때만 실제 나눗셈 수행 */
 		v = bfq_stat_read(&bfqg->stats.avg_queue_size_sum);
 		/* [한국어] 누적된 큐 크기 합(분자) 읽기 */
 		v = div64_u64(v, samples);
@@ -3006,6 +3032,8 @@ static u64 bfqg_prfill_avg_queue_size(struct seq_file *sf,
  */
 static int bfqg_print_avg_queue_size(struct seq_file *sf, void *v)
 {
+	/* [한국어] 평균 큐 크기는 sum/samples 나눗셈 결과라 표본이 0인 그룹은
+	 * 출력할 값 자체가 없으므로, 여기서도 false(0이면 줄 생략)를 쓴다. */
 	blkcg_print_blkgs(sf, css_to_blkcg(seq_css(sf)),
 			  bfqg_prfill_avg_queue_size, &blkcg_policy_bfq,
 			  0, false);
@@ -3038,13 +3066,14 @@ struct bfq_group *bfq_create_group_hierarchy(struct bfq_data *bfqd, int node)
 {
 	int ret; /* [한국어] blkcg_activate_policy()의 반환값(0=성공, 음수=실패) */
 
-	ret = blkcg_activate_policy(bfqd->queue->disk, &blkcg_policy_bfq);
 	/* [한국어] 이 gendisk의 모든 cgroup에 대해 BFQ 정책의 pd_alloc/init 콜백을 실행시킴 */
+	ret = blkcg_activate_policy(bfqd->queue->disk, &blkcg_policy_bfq);
+	/* [한국어] 정책 활성화 실패(메모리 부족 등) 시 그룹 계층을 만들 수 없으므로 NULL 반환 */
 	if (ret)
-		return NULL; /* [한국어] 정책 활성화 실패(메모리 부족 등) 시 그룹 계층을 만들 수 없으므로 NULL 반환 */
+		return NULL;
 
-	return blkg_to_bfqg(bfqd->queue->root_blkg);
 	/* [한국어] 활성화가 끝난 root_blkg에서 이제 유효해진 bfq_group을 꺼내 반환 */
+	return blkg_to_bfqg(bfqd->queue->root_blkg);
 }
 
 /*
@@ -3108,9 +3137,9 @@ struct blkcg_policy blkcg_policy_bfq = {
  */
 struct cftype bfq_blkcg_legacy_files[] = {
 	{
-		.name = "bfq.weight",
 		/* [한국어] 이 cgroup의 기본(default) I/O weight를 읽고 쓰는 파일 -
 		 * read: bfq_io_show_weight_legacy(), write: bfq_io_set_weight_legacy() */
+		.name = "bfq.weight",
 		.flags = CFTYPE_NOT_ON_ROOT,
 		/* [한국어] 루트 cgroup은 weight 개념이 없으므로(항상 최상위 우선) 이 파일을 만들지 않음 */
 		.seq_show = bfq_io_show_weight_legacy,
@@ -3236,8 +3265,8 @@ struct cftype bfq_blkcg_legacy_files[] = {
 	},
 	{
 		.name = "bfq.group_wait_time",
-		.private = offsetof(struct bfq_group, stats.group_wait_time),
 		/* [한국어] (디버그) 그룹이 서비스를 받기까지 기다린 누적 시간 */
+		.private = offsetof(struct bfq_group, stats.group_wait_time),
 		.seq_show = bfqg_print_stat,
 	},
 	{
@@ -3273,9 +3302,9 @@ struct cftype bfq_blkcg_legacy_files[] = {
  */
 struct cftype bfq_blkg_files[] = {
 	{
-		.name = "bfq.weight",
 		/* [한국어] cgroup v2의 "io.bfq.weight" 파일 - default+per-device weight를 하나의
 		 * 파일에서 함께 다룸(bfq_io_show_weight/bfq_io_set_weight) */
+		.name = "bfq.weight",
 		.flags = CFTYPE_NOT_ON_ROOT,
 		.seq_show = bfq_io_show_weight,
 		.write = bfq_io_set_weight,
@@ -3405,13 +3434,14 @@ struct bfq_group *bfq_create_group_hierarchy(struct bfq_data *bfqd, int node)
 	struct bfq_group *bfqg; /* [한국어] 새로 할당할 유일한 root_group */
 	int i; /* [한국어] BFQ_IOPRIO_CLASSES 루프 인덱스 */
 
-	bfqg = kmalloc_node(sizeof(*bfqg), GFP_KERNEL | __GFP_ZERO, node);
 	/* [한국어] node에 지역성을 갖도록 할당하고 __GFP_ZERO로 0 초기화(kzalloc_node와 동등) */
+	bfqg = kmalloc_node(sizeof(*bfqg), GFP_KERNEL | __GFP_ZERO, node);
+	/* [한국어] 메모리 부족 시 elevator 초기화 자체가 실패하도록 NULL 반환 */
 	if (!bfqg)
-		return NULL; /* [한국어] 메모리 부족 시 elevator 초기화 자체가 실패하도록 NULL 반환 */
+		return NULL;
 
+	/* [한국어] RT/BE/IDLE 각 클래스의 서비스 트리를 초기화 */
 	for (i = 0; i < BFQ_IOPRIO_CLASSES; i++)
-		/* [한국어] RT/BE/IDLE 각 클래스의 서비스 트리를 초기화 */
 		bfqg->sched_data.service_tree[i] = BFQ_SERVICE_TREE_INIT;
 		/* [한국어] 빈 active/idle rb-tree, vtime=0 등으로 이루어진 초기 상태 대입 */
 

@@ -132,7 +132,7 @@
  *   → blk_mq_get_request() → bfq_limit_depth() → bfq_insert_request()
  *   → bfq_add_request() (내부 request 큐에 삽입)
  * 하위 호출 체인: blk_mq_run_hw_queues() → bfq_dispatch_request()
- *   → blk-mq hctx → nvme_queue_rq() → nvme_submit_cmd() (doorbell)
+ *   → blk-mq hctx → 장치 드라이버의 queue_rq() (NVMe라면 nvme_queue_rq())
  * 실행 컨텍스트: blk-mq softirq, process context(insert 경로),
  *   hrtimer 콜백(idle slice timer), kblockd workqueue(dispatch).
  * B-WF2Q+ (Budgeted WF2Q+) 알고리즘과 H-WF2Q+ cgroup 계층 확장으로
@@ -149,8 +149,13 @@
  * 공유 핵심 자료구조: struct bfq_data (장치당 스케줄러 상태),
  *   struct bfq_queue (프로세스당 I/O 큐), struct bfq_entity (B-WF2Q+ 스케줄 단위),
  *   struct bfq_io_cq (프로세스 I/O 컨텍스트, per-io_context 추적).
- * NVMe 연결: SQ/CQ 엔트리 수, doorbell 빈도, NCQ reordering, 다중 actuator
- *   활용도가 BFQ의 idling·budget·inject_limit 정책에 직접 영향을 준다.
+ * 장치 특성과의 연결: BFQ는 드라이버를 알지 못하고, 장치 특성을 오직
+ *   blk_queue_rot()(회전 디스크 여부)과 스스로 관찰해 추정한
+ *   hw_tag(장치가 실제로 여러 요청을 동시에 처리하는가)로만 받아들인다.
+ *   이 둘이 idling·budget·inject_limit 휴리스틱의 방향을 바꾼다. NVMe처럼
+ *   내부 병렬성이 큰 장치에서는 idling이 처리량 손실이 되고 bfqd->lock이
+ *   장치 단위 전역 락이라 확장성 병목이 되므로, 그런 장치의 기본
+ *   스케줄러로는 none이나 mq-deadline이 쓰이는 것이 일반적이다.
  *
  * === 주요 함수/구조체 요약 ===
  * bfq_dispatch_request()  — 메인 dispatch 엔트리: in-service queue 선택 후
@@ -249,64 +254,71 @@
  * wbt와 협력해 비동기 쓰기 처리량을 조절하는 데 사용된다. */
 
 /*
- * 주요 구조체와 NVMe 동작 연결
+ * 주요 구조체와 스케줄링 동작의 연결
  *
- * struct bfq_queue (per-process 또는 per-actuator 잎 노드)
- *   - sort_list: LBA 순으로 정렬된 pending request 의 rb-tree. NVMe 에서는
- *     이 순서가 SQ 에 들어가는 CID 순서와는 무관하지만, controller 의
- *     reordering 을 고려한 스케줄링 기반이 된다.
- *   - next_rq: 다음에 dispatch 될 후보 request. NVMe SQ 에 삽입될
- *     명령 후보이며, doorbell 발행 전 마지막으로 선별된다.
- *   - dispatched/queued: 드라이브 내(SQ/CQ 경로) 및 BFQ 내 request 수.
- *     NVMe queue depth 제한과 직결된다.
- *   - actuator_idx: 해당 bfqq 가 대상으로 하는 actuator 인덱스. 다중
- *     actuator NVMe 드라이브에서 SQ/CQ 쌍 또는 namespace 단위 병렬도를
- *     결정하는 데 사용된다(추정).
- *   - inject_limit: service hole 을 메울 때 다른 bfqq 에서 끼워 넣을 수
- *     있는 최대 request 수. NVMe 의 NCQ queue depth(최대 32)를 고려하여
- *     in-flight 수를 제한한다.
- *   - wr_coeff/wr_cur_max_time: weight-raising 상태와 지속 시간. NVMe
- *     SSD 의 낮은 개별 request 지연(latency)을 활용해 interactive/soft-rt
- *     워크로드에 우선권을 부여한다.
- *   - entity: B-WF2Q+ 스케줄러 엔티티. budget, weight, start/finish
- *     timestamp 를 통해 NVMe 의 공정한 queue depth 할당을 시뮬레이션한다.
+ * (BFQ 는 장치 종류에 중립적인 스케줄러다. 아래 필드 중 어느 것도 특정
+ *  드라이버의 큐/커맨드 구조를 알지 못하며, 장치 특성은 오직 두 경로로만
+ *  들어온다: blk_queue_rot()이 알려주는 회전 여부와, BFQ 가 in-flight
+ *  요청 수를 관찰해 스스로 추정하는 hw_tag(장치가 실제로 여러 요청을
+ *  동시에 처리하는가)다.)
  *
- * struct bfq_data (per-request_queue)
- *   - queue: 상위 block layer 의 request_queue. NVMe 드라이버의
- *     nvme_queue 와 연결된다.
- *   - dispatch: BFQ 가 blk-mq 로 곧바로 보낼 request 리스트.
- *     BLK_MQ_INSERT_AT_HEAD 등으로 NVMe SQ 삽입 직전 거치는 통로다.
- *   - in_service_queue: 현재 서비스 중인 bfqq. NVMe controller 가
- *     처리 중인 request 의 논리적 소유자로 볼 수 있다.
- *   - tot_rq_in_driver/rq_in_driver[]: 드라이버/컨트롤러에 남아 있는
- *     request 수. NVMe 의 SQ 엔트리 사용량 및 per-actuator 부하 추정에
- *     사용된다.
- *   - hw_tag/nonrot_with_queueing: 장치가 NCQ 능력이 있고 회전하지 않는지
- *     여부. NVMe SSD 는 항상 nonrot_with_queueing=true 이며, 이 값이
- *     idling/merge 정책에 결정적 영향을 준다.
+ * struct bfq_queue (프로세스 단위, actuator 단위로 분리된 잎 노드)
+ *   - sort_list: LBA 순으로 정렬된 pending request 의 rb-tree. 위치가
+ *     가까운 요청을 연달아 내보내기 위한 정렬이며, 실제로 어떤 순서로
+ *     완료될지는 장치가 정한다.
+ *   - next_rq: 이 큐에서 다음에 내보낼 후보 request. bfq_choose_req()가
+ *     마지막 서비스 위치(last_position)를 기준으로 고른다.
+ *   - dispatched/queued: 각각 "이미 드라이버로 넘어가 완료를 기다리는 수"와
+ *     "아직 BFQ 안에 대기 중인 수". 전자는 idling/injection 판단에,
+ *     후자는 큐가 비었는지(만료 사유 판정)에 쓰인다.
+ *   - actuator_idx: 이 bfqq 가 담당하는 독립 접근 영역의 인덱스.
+ *     gendisk->ia_ranges 가 없으면 항상 0 이다(대다수 장치가 이 경우).
+ *   - inject_limit: in-service 큐가 idling 중일 때 다른 큐의 요청을 몇 개나
+ *     끼워 넣어도 되는지의 상한. 값은 고정 상수가 아니라, 주입 전후의
+ *     서비스 시간(last_serv_time_ns)을 실측해 늘리거나 줄인다.
+ *   - wr_coeff/wr_cur_max_time: weight-raising 배수와 그 유지 기간.
+ *     대화형/soft real-time 으로 보이는 큐를 한시적으로 우대해, 처리량을
+ *     조금 내주는 대신 응답성을 산다.
+ *   - entity: B-WF2Q+ 스케줄링 단위. F_i = S_i + budget/weight 로 가상
+ *     종료 시각을 계산해, weight 에 비례하는 대역폭 몫을 보장한다.
+ *
+ * struct bfq_data (request_queue 하나당 하나)
+ *   - queue: 이 스케줄러가 붙어 있는 blk-mq request_queue.
+ *   - dispatch: 스케줄링을 건너뛰고 곧바로 내보낼 request 리스트(예:
+ *     requeue 된 요청). bfq_dispatch_request()가 서비스 트리보다 먼저 본다.
+ *   - in_service_queue: 지금 장치를 점유해 서비스받고 있는 bfqq.
+ *   - tot_rq_in_driver/rq_in_driver[]: 스케줄러를 떠나 드라이버에서
+ *     처리 중인 request 수(전체 / actuator 별). injection 한도와 hw_tag
+ *     판정, peak_rate 표본의 유효성 판단에 쓰인다.
+ *   - hw_tag/nonrot_with_queueing: hw_tag 는 "장치가 실제로 여러 요청을
+ *     동시에 처리하는가"를 관찰로 추정한 값(-1=미확정)이고,
+ *     nonrot_with_queueing 은 여기에 "회전 디스크가 아님"을 더한 것이다.
+ *     참이면 한 큐를 기다리는 idling 이 대부분 손해이므로 idling 과 큐
+ *     병합 휴리스틱이 크게 완화된다.
  *   - num_actuators/sector[]/nr_sectors[]: blk_independent_access_ranges
- *     에서 복사한 독립 접근 영역. NVMe 다중 actuator/namespace 의
- *     병렬 dispatch 를 가능하게 한다.
- *   - peak_rate/delta_from_first: NVMe SSD 의 최대 처리율(섹터/us)을
- *     추정. budget 자동 조정과 interactive weight-raising 기간 계산에
- *     쓰인다(추정).
- *   - idle_slice_timer: NVMe SQ 에 새 CID 를 급히 밀어넣지 않고 잠시
- *     대기해 throughput 보장/공정성을 유지하는 타이머.
+ *     에서 복사한 독립 접근 영역 정보. 영역별로 부하를 따로 세어, 한
+ *     영역의 혼잡이 다른 영역의 판단을 오염시키지 않게 한다.
+ *   - peak_rate/delta_from_first: 순차 구간을 표본으로 삼아 저역통과
+ *     필터로 추정한 장치 처리율(고정소수점 섹터/us). max_budget 자동
+ *     조정과 weight-raising 지속 기간 계산의 입력이다.
+ *   - idle_slice_timer: 다음 요청을 기다리며 장치를 비워 두는 idling 의
+ *     만기 타이머. 만료 전에 요청이 오면 도박에 성공한 것이고, 만료되면
+ *     그 시간만큼 장치를 놀린 셈이 된다.
  *
- * struct bfq_io_cq (per-io_context)
- *   - bfqq[2][BFQ_MAX_ACTUATORS]: sync/async x actuator 별 bfqq.
- *     NVMe 다중 actuator 환경에서 프로세스가 생성하는 request 를
- *     actuator별로 분리하여 SQ 병렬도를 극대화한다.
- *   - requests: 해당 프로세스가 inflight 상태로 둔 request 수.
- *     NVMe tag 범위에서 cgroup/우선순위 기반 깊이 제한에 활용된다.
+ * struct bfq_io_cq (io_context 단위, 즉 태스크 단위)
+ *   - bfqq[2][BFQ_MAX_ACTUATORS]: sync/async x actuator 별 bfqq 행렬.
+ *     같은 프로세스라도 접근 영역이 다르면 별도의 큐로 나눠 추적한다.
+ *   - requests: 이 태스크가 현재 점유 중인 request 수. bfq_limit_depth()가
+ *     가중치 몫을 넘겨 태그를 독점하는 태스크를 억제할 때 참조한다.
  *
  * struct bfq_group (cgroup 단위)
- *   - rq_pos_tree: 인접 LBA 를 가진 bfqq 를 빠르게 찾아 queue merging
- *     후보로 삼는다. NVMe SSD 에서는 nonrot_with_queueing 이면 merge 를
- *     대부분 하지 않는다.
- *   - async_bfqq[][][]: cgroup 내 비동기 request 공유 queue.
- *     NVMe flush/writeback 요청을 한데 모아 SQ depth 관리에 유리하게
- *     만든다.
+ *   - rq_pos_tree: 인접 LBA 를 다루는 bfqq 를 빠르게 찾아 병합 후보로
+ *     삼는다. 서로 다른 프로세스가 하나의 순차 스트림을 번갈아 내는
+ *     경우를 발견하기 위한 것이며, nonrot_with_queueing 장치에서는 병합
+ *     이득이 작아 대부분 수행되지 않는다.
+ *   - async_bfqq[][][]: 그룹 내 비동기(주로 writeback) 요청이 공유하는 큐.
+ *     async I/O 는 발생시킨 프로세스를 특정하기 어렵고 지연시간을 지켜 줄
+ *     이유도 적으므로, 프로세스별로 나누지 않고 그룹 단위로 모은다.
  */
 /*
  * [한국어]
@@ -545,13 +557,13 @@ const int bfq_timeout = HZ / 8;
  * 위험도 커지는 트레이드오프가 있다. */
 static const unsigned long bfq_merge_time_limit = HZ/10;
 
-static struct kmem_cache *bfq_pool;
 /* [한국어] struct bfq_queue 전용 슬랩 캐시 핸들. bfq 모듈 초기화 시
  * kmem_cache_create("bfq_queue", sizeof(struct bfq_queue), ...)로 생성되고,
  * bfq_get_queue() 경로에서 kmem_cache_alloc(bfq_pool, ...)로 새 bfqq를
  * 할당, bfq_put_queue()에서 마지막 참조가 사라질 때 kmem_cache_free(bfq_pool,
  * bfqq)로 반환한다. 프로세스/그룹마다 빈번히 생성·소멸되는 bfqq를 범용
  * kmalloc 대신 전용 캐시로 관리해 할당 지역성과 속도를 높인다. */
+static struct kmem_cache *bfq_pool;
 
 /* Below this threshold (in ns), we consider thinktime immediate. */
 /* [한국어] 프로세스의 think-time(요청 완료 후 다음 요청까지의 대기 시간,
@@ -842,6 +854,12 @@ struct bfq_queue *bic_to_bfqq(struct bfq_io_cq *bic, bool is_sync,
 	return bic->bfqq[0][actuator_idx]; /* 비동기(async)는 bfqq[0] 슬롯에서 반환 */
 }
 
+/* [한국어] stable-merge(큐 생성 직후의 조기 병합) 후보로 붙잡아 둔 bfqq의
+ * 참조를 되돌려주는 함수의 전방 선언. 정의는 파일 뒤쪽에 있지만
+ * bic_set_bfqq()가 그보다 먼저 이 함수를 호출해야 하므로 여기에서
+ * 미리 선언한다. stable merge는 "아직 병합할지 말지 결정하지 않은"
+ * 상태에서 상대 큐가 해제되지 않도록 별도의 참조(stable_merge_bfqq)를
+ * 잡아 두는데, bic가 다른 bfqq로 재연결되면 그 참조를 여기서 푼다. */
 static void bfq_put_stable_ref(struct bfq_queue *bfqq);
 
 /*
@@ -1100,8 +1118,8 @@ static struct request *bfq_choose_req(struct bfq_data *bfqd,
 	unsigned long back_max; /* 뒤쪽 탐색을 허용하는 최대 거리(섹터, bfq_back_max*2) */
 #define BFQ_RQ1_WRAP	0x01 /* request 1 wraps */
 #define BFQ_RQ2_WRAP	0x02 /* request 2 wraps */
-	unsigned int wrap = 0; /* bit mask: requests behind the disk head? */
 	/* wrap: rq1/rq2가 각각 "허용 범위를 넘는 뒤쪽" 위치라 wrap 취급되는지 나타내는 비트마스크 */
+	unsigned int wrap = 0; /* bit mask: requests behind the disk head? */
 
 	if (!rq1 || rq1 == rq2) /* rq1이 없거나 두 후보가 사실상 같은 request면 */
 		return rq2; /* rq2를 그대로 반환(같으면 어느 쪽이든 무방) */
@@ -1151,8 +1169,8 @@ static struct request *bfq_choose_req(struct bfq_data *bfqd,
 	 * check two variables for all permutations: --> faster!
 	 */
 	switch (wrap) { /* 두 개의 불리언(rq1/rq2 wrap 여부) 대신 비트마스크 하나로 분기해 속도를 높임 */
+	/* 둘 다 wrap 아님(가장 흔한 경우) - 순수 거리 비교로 결정 */
 	case 0: /* common case for CFQ: rq1 and rq2 not wrapped */
-		/* 둘 다 wrap 아님(가장 흔한 경우) - 순수 거리 비교로 결정 */
 		if (d1 < d2) /* rq1이 head에 더 가까우면 */
 			return rq1; /* rq1 선택 - 탐색 거리 최소화 */
 		else if (d2 < d1) /* rq2가 더 가까우면 */
@@ -1295,9 +1313,10 @@ retry:
 			continue; /* 이 레벨은 판정 불가 - 다음(더 상위 또는 bfqq 자신) 레벨로 */
 		limit = DIV_ROUND_CLOSEST(limit * entity->weight, wsum); /* limit을 "전체 대비 이 entity의 weight 비율"만큼 축소/재조정(반올림) */
 		if (entity->allocated >= limit) { /* 이 entity가 이미 재조정된 한도 이상으로 request를 점유했다면 */
+			/* [한국어] 디버그 로그 - 어느 레벨에서 얼마나 초과했는지 기록 */
 			bfq_log_bfqq(bfqq->bfqd, bfqq,
 				"too many requests: allocated %d limit %d level %d",
-				entity->allocated, limit, level); /* 디버그 로그 - 어느 레벨에서 얼마나 초과했는지 기록 */
+				entity->allocated, limit, level);
 			ret = true; /* 한도 초과 확정 */
 			break; /* 더 볼 필요 없이 즉시 루프 종료 */
 		}
@@ -1416,11 +1435,12 @@ static void bfq_limit_depth(blk_opf_t opf, struct blk_mq_alloc_data *data)
 		}
 	}
 
+	/* [한국어] 디버그 로그 - 최종 결정된 depth와 그 근거가 된 상태값 기록 */
 	bfq_log(bfqd, "[%s] wr_busy %d sync %d depth %u",
-		__func__, bfqd->wr_busy_queues, op_is_sync(opf), limit); /* 디버그 로그 - 최종 결정된 depth와 그 근거가 된 상태값 기록 */
+		__func__, bfqd->wr_busy_queues, op_is_sync(opf), limit);
 
 	if (limit < data->q->nr_requests) /* 계산된 limit이 큐의 기본 depth보다 작을 때만 */
-		data->shallow_depth = limit; // NVMe SQ/tag 풀에서 실제로 사용 가능한 최대 깊이 제한.
+		data->shallow_depth = limit; // blk-mq의 sbitmap 태그 풀에서 이 할당 요청이 쓸 수 있는 최대 깊이 - 장치의 큐가 아니라 request_queue의 nr_requests를 나누는 값이다.
 }
 
 /*
@@ -1590,8 +1610,9 @@ bfq_pos_tree_add_move(struct bfq_data *bfqd, struct bfq_queue *bfqq)
 		return; /* 정렬 기준이 될 위치 자체가 없으므로 트리에 넣을 수 없음 */
 
 	bfqq->pos_root = &bfqq_group(bfqq)->rq_pos_tree; /* 이 bfqq가 속한 cgroup의 position tree를 대상으로 지정 */
+	/* [한국어] next_rq의 시작 섹터로 삽입 위치를 탐색 - 동일 위치의 기존 bfqq도 함께 찾음 */
 	__bfqq = bfq_rq_pos_tree_lookup(bfqd, bfqq->pos_root,
-			blk_rq_pos(bfqq->next_rq), &parent, &p); /* next_rq의 시작 섹터로 삽입 위치를 탐색 - 동일 위치의 기존 bfqq도 함께 찾음 */
+			blk_rq_pos(bfqq->next_rq), &parent, &p);
 	if (!__bfqq) { /* 동일한 LBA를 가진 다른 bfqq가 없다면(트리에 새로 넣을 수 있음) */
 		rb_link_node(&bfqq->pos_node, parent, p); /* 탐색으로 찾은 parent/p 위치에 새 노드를 연결 */
 		rb_insert_color(&bfqq->pos_node, bfqq->pos_root); /* rb-tree 균형(적흑 규칙)을 맞추며 실제로 삽입 완료 */
@@ -1761,9 +1782,10 @@ void bfq_weights_tree_add(struct bfq_queue *bfqq)
 		return; /* 재등록할 필요 없이 즉시 반환 */
 
 	while (*new) { /* 리프에 도달할 때까지 이진 탐색 계속 */
+		/* [한국어] 현재 노드를 감싸는 bfq_weight_counter 획득 */
 		struct bfq_weight_counter *__counter = container_of(*new,
 						struct bfq_weight_counter,
-						weights_node); /* 현재 노드를 감싸는 bfq_weight_counter 획득 */
+						weights_node);
 		parent = *new; /* 못 찾으면 삽입 지점의 부모가 될 후보로 기록 */
 
 		if (entity->weight == __counter->weight) { /* 이미 같은 weight의 카운터가 존재하면 */
@@ -1778,8 +1800,9 @@ void bfq_weights_tree_add(struct bfq_queue *bfqq)
 		}
 	}
 
+	/* [한국어] 같은 weight의 카운터가 없으므로 새로 0-초기화 할당 - GFP_ATOMIC: 락 보유 중이라 슬립 불가 */
 	bfqq->weight_counter = kzalloc_obj(struct bfq_weight_counter,
-					   GFP_ATOMIC); /* 같은 weight의 카운터가 없으므로 새로 0-초기화 할당 - GFP_ATOMIC: 락 보유 중이라 슬립 불가 */
+					   GFP_ATOMIC);
 
 	/*
 	 * In the unlucky event of an allocation failure, we just
@@ -1798,8 +1821,9 @@ void bfq_weights_tree_add(struct bfq_queue *bfqq)
 
 	bfqq->weight_counter->weight = entity->weight; /* 새 카운터에 이 weight 값을 기록 */
 	rb_link_node(&bfqq->weight_counter->weights_node, parent, new); /* 탐색으로 찾은 위치에 새 노드를 연결 */
+	/* [한국어] rb-tree 균형을 맞추며 삽입 완료 - leftmost면 캐시된 최소값 포인터도 갱신 */
 	rb_insert_color_cached(&bfqq->weight_counter->weights_node, root,
-				leftmost); /* rb-tree 균형을 맞추며 삽입 완료 - leftmost면 캐시된 최소값 포인터도 갱신 */
+				leftmost);
 
 inc_counter:
 	bfqq->weight_counter->num_active++; /* 이 weight를 공유하는 활성 큐 수 증가 */
@@ -2055,8 +2079,9 @@ static void bfq_updated_next_req(struct bfq_data *bfqd,
 			   entity->service); /* 그리고 현재까지 이미 소모한 service량 중에서도 가장 큰 값을 최종 budget으로 선택 */
 	if (entity->budget != new_budget) { /* 재계산한 값이 기존 budget과 다르면(변경이 실제로 필요하면) */
 		entity->budget = new_budget; /* budget 갱신 */
+		/* [한국어] 디버그 로그 - 새 budget 값 기록 */
 		bfq_log_bfqq(bfqd, bfqq, "updated next rq: new budget %lu",
-					 new_budget); /* 디버그 로그 - 새 budget 값 기록 */
+					 new_budget);
 		bfq_requeue_bfqq(bfqd, bfqq, false); /* budget 변경으로 B-WF2Q+ 마감시각이 바뀌므로 서비스 트리에서 위치 재조정 */
 	}
 }
@@ -2206,13 +2231,15 @@ bfq_bfqq_resume_state(struct bfq_queue *bfqq, struct bfq_data *bfqd,
 
 	if (bfqq_data->saved_has_short_ttime) /* 병합 전 "think time이 짧은(interactive에 가까운)" 상태였다면 */
 		bfq_mark_bfqq_has_short_ttime(bfqq); /* 그 플래그를 복원 */
+	/* [한국어] 아니었다면 플래그 해제 */
 	else
-		bfq_clear_bfqq_has_short_ttime(bfqq); /* 아니었다면 플래그 해제 */
+		bfq_clear_bfqq_has_short_ttime(bfqq);
 
 	if (bfqq_data->saved_IO_bound) /* 병합 전 "I/O 바운드(순수 I/O 위주)" 분류였다면 */
 		bfq_mark_bfqq_IO_bound(bfqq); /* 그 분류를 복원 */
+	/* [한국어] 아니었다면 해제 */
 	else
-		bfq_clear_bfqq_IO_bound(bfqq); /* 아니었다면 해제 */
+		bfq_clear_bfqq_IO_bound(bfqq);
 
 	bfqq->last_serv_time_ns = bfqq_data->saved_last_serv_time_ns; /* 마지막 서비스 시간 추정치 복원 - injection 한도 계산에 사용됨 */
 	bfqq->inject_limit = bfqq_data->saved_inject_limit; /* injection(다른 큐 request 끼워넣기) 허용 한도 복원 */
@@ -2230,8 +2257,9 @@ bfq_bfqq_resume_state(struct bfq_queue *bfqq, struct bfq_data *bfqd,
 		bfqq->wr_coeff = bfqq_data->saved_wr_coeff; /* 병합 전 WR 계수를 복원 */
 	}
 	bfqq->service_from_wr = bfqq_data->saved_service_from_wr; /* WR 기간 중 누적 서비스량 복원 */
+	/* [한국어] SRT 전환 시각 복원 - switch_back_to_interactive_wr 등에서 참조 */
 	bfqq->wr_start_at_switch_to_srt =
-		bfqq_data->saved_wr_start_at_switch_to_srt; /* SRT 전환 시각 복원 - switch_back_to_interactive_wr 등에서 참조 */
+		bfqq_data->saved_wr_start_at_switch_to_srt;
 	bfqq->last_wr_start_finish = bfqq_data->saved_last_wr_start_finish; /* 현재 WR 구간의 시작/직전 종료 시각 복원 */
 	bfqq->wr_cur_max_time = bfqq_data->saved_wr_cur_max_time; /* WR 최대 유지 기간 복원 */
 
@@ -2245,8 +2273,9 @@ bfq_bfqq_resume_state(struct bfq_queue *bfqq, struct bfq_data *bfqd,
 			switch_back_to_interactive_wr(bfqq, bfqd); /* SRT에서 interactive WR로 복귀시켜 표준 파라미터로 이어감 */
 		} else { /* 그 외의 초과/burst 상황이라면 */
 			bfqq->wr_coeff = 1; /* WR을 아예 종료(계수를 1로) - 더 이상 우대할 근거가 없음 */
+			/* [한국어] 디버그 로그 - WR 종료 사실 기록 */
 			bfq_log_bfqq(bfqq->bfqd, bfqq,
-				     "resume state: switching off wr"); /* 디버그 로그 - WR 종료 사실 기록 */
+				     "resume state: switching off wr");
 		}
 	}
 
@@ -2351,9 +2380,9 @@ static void bfq_reset_burst_list(struct bfq_data *bfqd, struct bfq_queue *bfqq)
 	 * active queue. See comments on the conditional invocation of
 	 * bfq_handle_burst().
 	 */
-	if (bfq_tot_busy_queues(bfqd) == 0) {
 	/* 현재 장치에 활성(busy) 상태인 bfqq가 하나도 없다는 뜻 - 즉 bfqq가
 	 * 정말로 "새로운 burst의 첫 큐"일 가능성이 있으므로 리스트에 등록한다. */
+	if (bfq_tot_busy_queues(bfqd) == 0) {
 		hlist_add_head(&bfqq->burst_list_node, &bfqd->burst_list);
 		/* bfqq를 burst_list의 head에 삽입 - 이후 짧은 시간 안에 다른 큐가
 		 * 생성되면 bfq_add_to_burst에서 이 리스트에 이어 붙는다. */
@@ -2398,12 +2427,12 @@ static void bfq_reset_burst_list(struct bfq_data *bfqd, struct bfq_queue *bfqq)
 static void bfq_add_to_burst(struct bfq_data *bfqd, struct bfq_queue *bfqq)
 {
 	/* Increment burst size to take into account also bfqq */
-	bfqd->burst_size++;
 	/* 지금 활성화되는 bfqq도 burst의 일원으로 카운트에 반영한다. */
+	bfqd->burst_size++;
 
-	if (bfqd->burst_size == bfqd->bfq_large_burst_thresh) {
 	/* burst_size가 정확히 임계값에 도달한 순간 - 이 시점에 딱 한 번만
 	 * "large burst로 전환"하는 부수효과(리스트 비우기 포함)를 수행한다. */
+	if (bfqd->burst_size == bfqd->bfq_large_burst_thresh) {
 		struct bfq_queue *pos, *bfqq_item;
 		/* burst_list를 순회하며 각 큐를 large-burst로 표시할 때 쓰는 커서들. */
 		struct hlist_node *n;
@@ -2429,8 +2458,8 @@ static void bfq_add_to_burst(struct bfq_data *bfqd, struct bfq_queue *bfqq)
 			 * 생성된) 큐들을 모두 large-burst 멤버로 표시 - 이들은
 			 * weight-raising 대상에서 제외되어 처리량 위주로 처리된다. */
 			bfq_mark_bfqq_in_large_burst(bfqq_item);
-		bfq_mark_bfqq_in_large_burst(bfqq);
 		/* 방금 임계치를 채운 bfqq 자신도 large-burst 멤버로 표시. */
+		bfq_mark_bfqq_in_large_burst(bfqq);
 
 		/*
 		 * From now on, and until the current burst finishes, any
@@ -2439,12 +2468,12 @@ static void bfq_add_to_burst(struct bfq_data *bfqd, struct bfq_queue *bfqq)
 		 * belonging to a large burst. So the burst list is not
 		 * needed any more. Remove it.
 		 */
+		/* large_burst 플래그로 판정이 넘어갔으므로 burst_list
+		 * 자체는 더 이상 쓰이지 않는다 - 각 노드를 리스트에서
+		 * 제거해(hlist_del_init) bfqq들이 이후 다른 burst_list에
+		 * 재사용될 수 있도록 정리한다. */
 		hlist_for_each_entry_safe(pos, n, &bfqd->burst_list,
 					  burst_list_node)
-			/* large_burst 플래그로 판정이 넘어갔으므로 burst_list
-			 * 자체는 더 이상 쓰이지 않는다 - 각 노드를 리스트에서
-			 * 제거해(hlist_del_init) bfqq들이 이후 다른 burst_list에
-			 * 재사용될 수 있도록 정리한다. */
 			hlist_del_init(&pos->burst_list_node);
 	} else /*
 		* Burst not yet large: add bfqq to the burst list. Do
@@ -2452,10 +2481,10 @@ static void bfq_add_to_burst(struct bfq_data *bfqd, struct bfq_queue *bfqq)
 		* is removed from the burst list before freeing bfqq
 		* in put_queue.
 		*/
-		hlist_add_head(&bfqq->burst_list_node, &bfqd->burst_list);
 		/* 아직 large burst로 확정되지 않았으므로 bfqq를 burst_list
 		 * head에 추가만 해 두고, 다음 큐 생성 시 이 리스트 길이가
 		 * 다시 검사된다. */
+		hlist_add_head(&bfqq->burst_list_node, &bfqd->burst_list);
 }
 
 /*
@@ -2608,9 +2637,9 @@ static void bfq_handle_burst(struct bfq_data *bfqd, struct bfq_queue *bfqq)
 	 * burst, or finally has just been split, then there is
 	 * nothing else to do.
 	 */
+	/* bfqq->burst_list_node가 이미 어떤 hlist엔가 걸려 있다는 뜻 -
+	 * 즉 이미 현재(또는 과거) burst_list의 멤버로 등록된 상태. */
 	if (!hlist_unhashed(&bfqq->burst_list_node) ||
-	    /* bfqq->burst_list_node가 이미 어떤 hlist엔가 걸려 있다는 뜻 -
-	     * 즉 이미 현재(또는 과거) burst_list의 멤버로 등록된 상태. */
 	    bfq_bfqq_in_large_burst(bfqq) ||
 	    /* 이미 large burst 멤버로 표시된 큐라면 재판정이 불필요. */
 	    time_is_after_eq_jiffies(bfqq->split_time +
@@ -2663,8 +2692,8 @@ static void bfq_handle_burst(struct bfq_data *bfqd, struct bfq_queue *bfqq)
 	/* 이미 large burst로 확정된 상태에서 bfqq가 짧은 간격 안에 도착했다 -
 	 * burst_list를 거칠 필요 없이 곧바로 large burst 멤버로 확정. */
 		bfq_mark_bfqq_in_large_burst(bfqq);
-		goto end;
 		/* 공통 마무리로 점프 - last_ins_in_burst만 갱신하면 된다. */
+		goto end;
 	}
 
 	/*
@@ -2672,9 +2701,9 @@ static void bfq_handle_burst(struct bfq_data *bfqd, struct bfq_queue *bfqq)
 	 * reached, but bfqq is being activated shortly after the last
 	 * queue. Then we add bfqq to the burst.
 	 */
-	bfq_add_to_burst(bfqd, bfqq);
 	/* 아직 large 판정 전이므로 burst_list에 bfqq를 추가하고 임계치
 	 * 도달 여부를 검사(임계치 도달 시 그 함수 내부에서 large 전환). */
+	bfq_add_to_burst(bfqd, bfqq);
 end:
 	/*
 	 * At this point, bfqq either has been added to the current
@@ -2684,10 +2713,10 @@ end:
 	 * burst.  In both cases last_ins_in_burst needs to be moved
 	 * forward.
 	 */
-	bfqd->last_ins_in_burst = jiffies;
 	/* 세 경로(리셋/large 즉시 편입/burst_list 추가) 모두 공통으로
 	 * "가장 최근에 burst에 큐가 삽입된 시각"을 지금으로 갱신 - 다음
 	 * bfq_handle_burst 호출에서 시간 간격 판정의 기준이 된다. */
+	bfqd->last_ins_in_burst = jiffies;
 }
 
 /*
@@ -2754,9 +2783,9 @@ static int bfq_max_budget(struct bfq_data *bfqd)
 	/* 아직 충분한 수의 예산 배정 샘플이 쌓이지 않음 - peak_rate 기반
 	 * 추정치를 신뢰하기 이르므로 안전한 고정 기본값을 사용한다. */
 		return bfq_default_max_budget;
-	else
 	/* 충분한 샘플이 쌓였다 - 실측 peak_rate로부터 갱신된, 장치별로
 	 * 최적화된 최대 예산 값을 사용한다. */
+	else
 		return bfqd->bfq_max_budget;
 }
 
@@ -2788,8 +2817,8 @@ static int bfq_min_budget(struct bfq_data *bfqd)
 	if (bfqd->budgets_assigned < bfq_stats_min_budgets)
 	/* 샘플 부족 - 고정 기본 최대 예산(bfq_default_max_budget)의 1/32을 사용. */
 		return bfq_default_max_budget / 32;
-	else
 	/* 샘플 충분 - 실측 기반 최대 예산(bfqd->bfq_max_budget)의 1/32을 사용. */
+	else
 		return bfqd->bfq_max_budget / 32;
 }
 
@@ -3323,9 +3352,9 @@ static bool bfq_bfqq_higher_class_or_weight(struct bfq_queue *bfqq,
 		 * 가중치를 볼 것도 없이 즉시 true. */
 		return true;
 
-	if (in_serv_bfqq->entity.parent == bfqq->entity.parent) {
 	/* 두 큐가 같은 부모 엔티티(같은 cgroup 서비스 트리)를 공유한다 -
 	 * 이 경우 각 큐 자신의 entity.weight를 직접 비교하면 된다. */
+	if (in_serv_bfqq->entity.parent == bfqq->entity.parent) {
 		bfqq_weight = bfqq->entity.weight;
 		/* bfqq 자신의 유효 가중치(weight-raising이 적용된 경우
 		 * 이미 반영된 값). */
@@ -3401,27 +3430,27 @@ static unsigned int bfq_actuator_index(struct bfq_data *bfqd, struct bio *bio)
 		return 0;
 
 	/* bio_end_sector(bio) gives the sector after the last one */
-	end = bio_end_sector(bio) - 1;
 	/* bio_end_sector()는 "마지막 섹터 다음" 값을 주므로 1을 빼서 실제
 	 * bio가 다루는 마지막 섹터 번호를 구한다. */
+	end = bio_end_sector(bio) - 1;
 
-	for (i = 0; i < bfqd->num_actuators; i++) {
 	/* 등록된 모든 액추에이터의 섹터 범위를 순서대로 검사 - 액추에이터
 	 * 개수는 보통 2~수 개 수준이라 선형 탐색으로 충분하다. */
+	for (i = 0; i < bfqd->num_actuators; i++) {
 		if (end >= bfqd->sector[i] &&
+		    /* end가 i번째 액추에이터의 시작 섹터 이상이고, 그 범위
+		     * (시작 + 섹터 수) 안에 들어가면 이 bio는 액추에이터 i가
+		     * 담당하는 영역에 속한다. */
 		    end < bfqd->sector[i] + bfqd->nr_sectors[i])
-			/* end가 i번째 액추에이터의 시작 섹터 이상이고, 그 범위
-			 * (시작 + 섹터 수) 안에 들어가면 이 bio는 액추에이터 i가
-			 * 담당하는 영역에 속한다. */
 			return i;
 	}
 
-	WARN_ONCE(true,
-		  "bfq_actuator_index: bio sector out of ranges: end=%llu\n",
-		  end);
 	/* 어떤 액추에이터 범위에도 속하지 않는 섹터 - 정상적으로는 발생하면
 	 * 안 되는 상황(설정 오류 또는 장치 topology 불일치)이므로 커널
 	 * 로그에 한 번만 경고를 남긴다. */
+	WARN_ONCE(true,
+		  "bfq_actuator_index: bio sector out of ranges: end=%llu\n",
+		  end);
 	return 0;
 	/* 안전한 폴백으로 0번 액추에이터를 반환해 크래시 대신 계속 동작하게 한다. */
 }
@@ -3478,10 +3507,10 @@ static void bfq_bfqq_handle_idle_busy_switch(struct bfq_data *bfqd,
 					     bool *interactive)
 {
 	bool soft_rt, in_burst,	wr_or_deserves_wr,
-		bfqq_wants_to_preempt,
-		idle_for_long_time = bfq_bfqq_idle_for_long_time(bfqd, bfqq),
 		/* idle 상태가 "충분히 길었는지" - interactive 판정과, 아래의
 		 * 오래된 burst 멤버십 해제 판단 양쪽에 쓰인다. */
+		bfqq_wants_to_preempt,
+		idle_for_long_time = bfq_bfqq_idle_for_long_time(bfqd, bfqq),
 		/*
 		 * See the comments on
 		 * bfq_bfqq_update_budg_for_activation for
@@ -3625,26 +3654,31 @@ static void bfq_bfqq_handle_idle_busy_switch(struct bfq_data *bfqd,
 			bfqq->split_time =
 				jiffies - bfqd->bfq_wr_min_idle_time - 1;
 
+		/* 협조 큐 병합에서 분리(split)된 시각으로부터 최소
+		 * idle 시간이 지났는지 검사 - 너무 최근에 분리된
+		 * 큐라면(아직 병합 이력의 영향권) wr 상태를 성급하게
+		 * 바꾸지 않기 위해 이 블록 전체를 건너뛴다. */
 		if (time_is_before_jiffies(bfqq->split_time +
 					   bfqd->bfq_wr_min_idle_time)) {
-			/* 협조 큐 병합에서 분리(split)된 시각으로부터 최소
-			 * idle 시간이 지났는지 검사 - 너무 최근에 분리된
-			 * 큐라면(아직 병합 이력의 영향권) wr 상태를 성급하게
-			 * 바꾸지 않기 위해 이 블록 전체를 건너뛴다. */
+			/* [한국어] 실제 wr_coeff/wr_cur_max_time 갱신은 이 함수에
+			 * 위임한다. old_wr_coeff를 함께 넘기는 이유는, 그 안에서
+			 * "WR을 새로 시작하는 것인지(1 -> N) 이미 진행 중이던
+			 * WR을 이어가는 것인지"를 구분해야 wr_busy_queues 카운터가
+			 * 이중 증가하지 않기 때문이다. in_burst/soft_rt는 각각
+			 * "large burst의 일원이라 WR 대상에서 제외" / "soft
+			 * real-time으로 판정되어 더 긴 wr_cur_max_time을 부여"라는
+			 * 상반된 결정을 유발하는 입력이다. */
 			bfq_update_bfqq_wr_on_rq_arrival(bfqd, bfqq,
 							 old_wr_coeff,
 							 wr_or_deserves_wr,
 							 *interactive,
 							 in_burst,
 							 soft_rt);
-							 /* 실제 wr_coeff/wr_cur_max_time
-							  * 갱신은 이 함수에 위임(상세
-							  * 로직은 해당 함수 주석 참고). */
 
+			/* 위 호출로 실제 wr_coeff가 바뀌었다면 -
+			 * entity의 유효 가중치가 달라졌으므로 상위
+			 * 스케줄러가 이를 인지하도록 표시해야 한다. */
 			if (old_wr_coeff != bfqq->wr_coeff)
-				/* 위 호출로 실제 wr_coeff가 바뀌었다면 -
-				 * entity의 유효 가중치가 달라졌으므로 상위
-				 * 스케줄러가 이를 인지하도록 표시해야 한다. */
 				bfqq->entity.prio_changed = 1;
 				/* B-WF2Q+ 트리에서 다음에 이 entity를 다룰 때
 				 * 가중치를 다시 계산하도록 하는 플래그. */
@@ -3707,8 +3741,8 @@ static void bfq_bfqq_handle_idle_busy_switch(struct bfq_data *bfqd,
 	 * request to arrive for the currently in-service queue, but
 	 * (2) this switch of bfqq to busy changes the scenario.
 	 */
+	/* 애초에 현재 in-service 큐가 있어야 선점할 대상이 존재한다. */
 	if (bfqd->in_service_queue &&
-	    /* 애초에 현재 in-service 큐가 있어야 선점할 대상이 존재한다. */
 	    ((bfqq_wants_to_preempt &&
 	      bfqq->wr_coeff >= bfqd->in_service_queue->wr_coeff) ||
 	      /* (조건 A) bfqq가 서비스 공백을 회복하고 싶어하고, 동시에
@@ -3767,19 +3801,19 @@ static void bfq_reset_inject_limit(struct bfq_data *bfqd,
 				   struct bfq_queue *bfqq)
 {
 	/* invalidate baseline total service time */
-	bfqq->last_serv_time_ns = 0;
 	/* 주입 효과를 측정하기 위한 기준(baseline) 총 서비스 시간을
 	 * 무효화(0) - 이후 bfq_update_inject_limit이 이 값이 0인 것을
 	 * 보고 "아직 기준 측정이 안 됐다"고 인식해 새로 측정을 시작한다. */
+	bfqq->last_serv_time_ns = 0;
 
 	/*
 	 * Reset pointer in case we are waiting for
 	 * some request completion.
 	 */
-	bfqd->waited_rq = NULL;
 	/* 혹시 이전에 "이 요청의 완료를 기다려 서비스 시간을 측정하겠다"고
 	 * 지정해 둔 요청 포인터가 있었다면 무효화 - 리셋 도중에는 그
 	 * 측정이 더 이상 의미가 없으므로 추적을 중단한다. */
+	bfqd->waited_rq = NULL;
 
 	/*
 	 * If bfqq has a short think time, then start by setting the
@@ -3827,23 +3861,23 @@ static void bfq_reset_inject_limit(struct bfq_data *bfqd,
 	 * limit-update algorithm and possibly raise the limit to more
 	 * than 1.
 	 */
+	/* think time이 짧은(연속적으로 요청을 내는 경향이 강한) 큐 -
+	 * 주입된 요청의 서비스 시간이 이 큐의 think time보다 길면
+	 * 오히려 지연이 커질 수 있으므로 일단 보수적으로 주입을
+	 * 아예 금지(0)하고 시작한다. 감내 가능하다고 판명되면
+	 * bfq_update_inject_limit이 곧 한도를 올려줄 것이다. */
 	if (bfq_bfqq_has_short_ttime(bfqq))
-		/* think time이 짧은(연속적으로 요청을 내는 경향이 강한) 큐 -
-		 * 주입된 요청의 서비스 시간이 이 큐의 think time보다 길면
-		 * 오히려 지연이 커질 수 있으므로 일단 보수적으로 주입을
-		 * 아예 금지(0)하고 시작한다. 감내 가능하다고 판명되면
-		 * bfq_update_inject_limit이 곧 한도를 올려줄 것이다. */
 		bfqq->inject_limit = 0;
+	/* think time이 긴 큐 - 요청 하나 정도의 주입은 지연에 큰
+	 * 해가 되지 않을 가능성이 높으므로 처음부터 1을 허용해,
+	 * 장치가 놀지 않도록 한다(위 영어 주석의 트레이드오프 참고). */
 	else
-		/* think time이 긴 큐 - 요청 하나 정도의 주입은 지연에 큰
-		 * 해가 되지 않을 가능성이 높으므로 처음부터 1을 허용해,
-		 * 장치가 놀지 않도록 한다(위 영어 주석의 트레이드오프 참고). */
 		bfqq->inject_limit = 1;
 
-	bfqq->decrease_time_jif = jiffies;
 	/* 한도를 낮춰야 할지 재평가할 기준 시각을 지금으로 갱신 - 이후
 	 * bfq_update_inject_limit이 이 시각 이후 얼마나 지났는지를 보고
 	 * 한도 조정 주기를 판단한다. */
+	bfqq->decrease_time_jif = jiffies;
 }
 
 /*
@@ -4041,22 +4075,22 @@ static void bfq_check_waker(struct bfq_data *bfqd, struct bfq_queue *bfqq,
 		/* [한국어] 이번에 완료된 큐를 새로운 후보 waker로 설정. */
 		bfqq->tentative_waker_bfqq =
 			bfqd->last_completed_rq_bfqq;
-		bfqq->num_waker_detections = 1;
 		/* [한국어] 감지 카운터를 1로 리셋 - 이번이 첫 관측. */
-		bfqq->waker_detection_started = now_ns;
+		bfqq->num_waker_detections = 1;
 		/* [한국어] 감지 시작 시각 기록 - 위 128*slice_idle 만료 판정의 기준점. */
+		bfqq->waker_detection_started = now_ns;
 		/* [한국어] 디버그 로그용으로 후보 waker 큐의 이름 문자열을 만든다. */
 		bfq_bfqq_name(bfqq->tentative_waker_bfqq, waker_name,
 			      MAX_BFQQ_NAME_LENGTH);
-		bfq_log_bfqq(bfqd, bfqq, "set tentative waker %s", waker_name);
 		/* [한국어] '임시 waker 설정됨' 트레이스 로그. */
+		bfq_log_bfqq(bfqd, bfqq, "set tentative waker %s", waker_name);
+	/* [한국어] 같은 후보가 다시 관측됨 - 연속 관측 횟수를 증가시킨다. */
 	} else /* Same tentative waker queue detected again */
 		bfqq->num_waker_detections++;
-		/* [한국어] 같은 후보가 다시 관측됨 - 연속 관측 횟수를 증가시킨다. */
 
-	if (bfqq->num_waker_detections == 3) {
 	/* [한국어] 동일한 후보가 연속 3회 관측되면 우연이 아니라 실제
 	 * 동기화 관계로 판단하고 waker로 확정한다. */
+	if (bfqq->num_waker_detections == 3) {
 		bfqq->waker_bfqq = bfqd->last_completed_rq_bfqq;
 		/* [한국어] waker_bfqq를 확정 - 이후 bfq_select_queue()의 injection
 		 * 로직이 이 큐의 요청을 우선 주입할 수 있게 참조한다. */
@@ -4065,8 +4099,8 @@ static void bfq_check_waker(struct bfq_data *bfqd, struct bfq_queue *bfqq,
 		/* [한국어] 확정된 waker 큐의 이름을 로그용으로 생성. */
 		bfq_bfqq_name(bfqq->waker_bfqq, waker_name,
 			      MAX_BFQQ_NAME_LENGTH);
-		bfq_log_bfqq(bfqd, bfqq, "set waker %s", waker_name);
 		/* [한국어] 'waker 확정됨' 트레이스 로그. */
+		bfq_log_bfqq(bfqd, bfqq, "set waker %s", waker_name);
 
 		/*
 		 * If the waker queue disappears, then
@@ -4260,9 +4294,9 @@ static void bfq_add_request(struct request *rq)
 	/*
 	 * Check if this request is a better next-serve candidate.
 	 */
-	prev = bfqq->next_rq;
 	/* [한국어] 삽입 전 next_rq를 보존 - 아래에서 값이 바뀌었는지 비교할
 	 * 기준으로 사용. */
+	prev = bfqq->next_rq;
 	/* [한국어] (관련) next_rq 재계산 직전의 기존 값. */
 	next_rq = bfq_choose_req(bfqd, bfqq->next_rq, rq, bfqd->last_position); // [한국어] 기존 next_rq 후보와 방금 삽입한 rq 중 last_position 기준으로 더 유리한 쪽을 선택 - 다음 서비스 시 실제로 내보낼 request 후보.
 	/* [한국어] (관련) 위에서 계산한 새 next_rq 후보. */
@@ -4510,9 +4544,9 @@ static void bfq_remove_request(struct request_queue *q,
 	if (q->last_merge == rq)
 		q->last_merge = NULL;
 
-	if (RB_EMPTY_ROOT(&bfqq->sort_list)) {
 	/* [한국어] 이번 제거로 bfqq의 sort_list가 완전히 비었다면 - bfqq
 	 * 자체가 '빈 큐'로 전환되는 부수 처리를 진행한다. */
+	if (RB_EMPTY_ROOT(&bfqq->sort_list)) {
 	/* [한국어] (계속) 아래에서 busy 리스트/위치 트리 정리를 진행한다. */
 		bfqq->next_rq = NULL;
 		/* [한국어] 대기 중인 request가 없으므로 next_rq도 없음으로 설정. */
@@ -4776,25 +4810,25 @@ static void bfq_request_merged(struct request_queue *q, struct request *req,
 		 * (비정상 상태) 더 진행할 수 없으므로 반환한다. */
 			return;
 
-		bfqd = bfqq->bfqd;
 		/* [한국어] bfqq로부터 전역 bfqd를 얻는다. */
+		bfqd = bfqq->bfqd;
 
 		/* Reposition request in its sort_list */
-		elv_rb_del(&bfqq->sort_list, req);
 		/* [한국어] 정렬이 깨진 req를 일단 rb-tree에서 제거한다. */
-		elv_rb_add(&bfqq->sort_list, req);
+		elv_rb_del(&bfqq->sort_list, req);
 		/* [한국어] 병합으로 바뀐 새 섹터 값 기준으로 다시 삽입해 정렬을
 		 * 복구한다. */
+		elv_rb_add(&bfqq->sort_list, req);
 
 		/* Choose next request to be served for bfqq */
-		prev = bfqq->next_rq;
 		/* [한국어] 재계산 전 next_rq를 보존해 변경 여부 비교에 사용. */
+		prev = bfqq->next_rq;
 		/* [한국어] 재정렬된 req와 기존 next_rq 후보 중 last_position
 		 * 기준으로 더 나은 쪽을 다시 선택한다. */
 		next_rq = bfq_choose_req(bfqd, bfqq->next_rq, req,
 					 bfqd->last_position);
-		bfqq->next_rq = next_rq;
 		/* [한국어] 새 next_rq 후보를 반영한다. */
+		bfqq->next_rq = next_rq;
 		/* [한국어] next_rq 갱신이 끝났으므로 아래에서 변경 여부에 따라
 		 * 예산/위치 트리를 갱신한다. */
 		/*
@@ -4921,7 +4955,7 @@ remove:
 	/* [한국어] (계속) 아래에서 next를 스케줄러에서 완전히 제거한다. */
 		bfq_remove_request(next->q, next);
 		/* [한국어] next를 sort_list/fifo/해시/위치 트리 등 BFQ의 모든
-		 * 자료구조에서 제거한다. 이 시점의 next는 NVMe SQ로 이미
+		 * 자료구조에서 제거한다. 이 시점의 next는 이미 드라이버로
 		 * 내려간 것이 아니라 아직 대기 중이던 request이며, 여기서
 		 * 제거되는 것은 스케줄러 내부 큐에서일 뿐 드라이버 완료 경로와는
 		 * 무관하다. */
@@ -4986,23 +5020,23 @@ static void bfq_bfqq_end_wr(struct bfq_queue *bfqq)
 	 * 카운터도 하나 줄여야 정확한 집계가 유지된다. */
 	if (bfq_bfqq_busy(bfqq))
 		bfqq->bfqd->wr_busy_queues--;
-	bfqq->wr_coeff = 1;
 	/* [한국어] weight-raising 계수를 1(가중치 상승 없음, 원래
 	 * 가중치)로 되돌린다. */
+	bfqq->wr_coeff = 1;
 	/* [한국어] 남은 wr 지속시간을 0으로 만들어 '더 이상 wr 기간이
 	 * 아님'을 명시한다. */
 	bfqq->wr_cur_max_time = 0;
-	bfqq->last_wr_start_finish = jiffies;
 	/* [한국어] wr가 '끝난' 시각을 기록 - 이후 재승격 여부 판단(예:
 	 * bfq_wr_min_inter_arr_async 간격 계산)의 기준점이 된다. */
+	bfqq->last_wr_start_finish = jiffies;
 	/*
 	 * Trigger a weight change on the next invocation of
 	 * __bfq_entity_update_weight_prio.
 	 */
-	bfqq->entity.prio_changed = 1;
 	/* [한국어] 엔티티(B-WF2Q+ 스케줄링 트리 노드) 가중치가 바뀌었음을
 	 * 표시 - 다음 __bfq_entity_update_weight_prio 호출 시 실제로
 	 * 트리상의 타임스탬프/가중치를 원래 값으로 재계산하도록 트리거. */
+	bfqq->entity.prio_changed = 1;
 }
 
 /*
@@ -5096,12 +5130,12 @@ static void bfq_end_wr(struct bfq_data *bfqd)
 	 * 잔여 상태가 남아있지 않게 한다. */
 	list_for_each_entry(bfqq, &bfqd->idle_list, bfqq_list)
 		bfq_bfqq_end_wr(bfqq);
-	bfq_end_wr_async(bfqd);
 	/* [한국어] 개별 bfq_group에 속한 것이 아닌, 최상위(root cgroup)
 	 * 비동기 큐들까지 포함해 정리한다. */
+	bfq_end_wr_async(bfqd);
 
-	spin_unlock_irq(&bfqd->lock);
 	/* [한국어] 모든 정리가 끝났으므로 락 해제. */
+	spin_unlock_irq(&bfqd->lock);
 }
 
 /*
@@ -5241,9 +5275,9 @@ static struct bfq_queue *bfqq_find_close(struct bfq_data *bfqd,
 	 * 있는 다음 노드 쪽을 마저 확인해봐야 한다(양쪽 이웃 모두 검토). */
 	if (blk_rq_pos(__bfqq->next_rq) < sector)
 		node = rb_next(&__bfqq->pos_node);
+	/* [한국어] 후보의 위치가 기준보다 뒤라면 반대로 이전 노드를
+	 * 확인한다. */
 	else
-		/* [한국어] 후보의 위치가 기준보다 뒤라면 반대로 이전 노드를
-		 * 확인한다. */
 		node = rb_prev(&__bfqq->pos_node);
 	/* [한국어] 그 방향에 더 이상 노드가 없다면(트리의 끝) 더 볼
 	 * 후보가 없으므로 NULL. */
@@ -5429,10 +5463,10 @@ bfq_setup_merge(struct bfq_queue *bfqq, struct bfq_queue *new_bfqq)
 	 * requests close to the last request served and, by doing so,
 	 * are likely to increase the throughput.
 	 */
-	bfqq->new_bfqq = new_bfqq;
 	/* [한국어] 실제 리다이렉션 연결 - 이후 bfqq에 새 I/O가 도착하면
 	 * 이 포인터를 통해 new_bfqq 쪽으로 넘겨진다(위 English 주석
 	 * 설명 참고). */
+	bfqq->new_bfqq = new_bfqq;
 	/*
 	 * The above assignment schedules the following redirections:
 	 * each time some I/O for bfqq arrives, the process that
@@ -5442,13 +5476,13 @@ bfq_setup_merge(struct bfq_queue *bfqq, struct bfq_queue *new_bfqq)
 	 * expected to be associated with new_bfqq as they happen to
 	 * issue I/O.
 	 */
-	new_bfqq->ref += process_refs;
 	/* [한국어] bfqq를 소유했던 프로세스 수만큼 new_bfqq의 참조
 	 * 카운트를 미리 올려둔다 - 실제 재배정은 각 프로세스가 다음
 	 * I/O를 낼 때 일어나지만, 그 사이에 new_bfqq가 조기 해제되지
 	 * 않도록 참조를 선반영하는 것. */
-	return new_bfqq;
+	new_bfqq->ref += process_refs;
 	/* [한국어] 병합이 성사된 대상 큐(공유 큐)를 호출자에게 반환한다. */
+	return new_bfqq;
 }
 
 /*
@@ -5568,12 +5602,12 @@ bfq_setup_stable_merge(struct bfq_data *bfqd, struct bfq_queue *bfqq,
 	 * 판단하기 위함. */
 	int proc_ref = min(bfqq_process_refs(bfqq),
 			   bfqq_process_refs(stable_merge_bfqq));
-	struct bfq_queue *new_bfqq = NULL;
 	/* [한국어] 병합 성공 시 결과 큐를 담을 변수 - 기본값은 '병합 안 됨'. */
+	struct bfq_queue *new_bfqq = NULL;
 
-	bfqq_data->stable_merge_bfqq = NULL;
 	/* [한국어] 이번 시도로 안정 병합 후보 슬롯은 소진되므로(성공하든
 	 * 실패하든) 미리 비워, 같은 후보로 중복 재시도되지 않게 한다. */
+	bfqq_data->stable_merge_bfqq = NULL;
 	/* [한국어] bfqq가 idling만으로 이미 부작용 없이 충분한 처리량을
 	 * 내고 있다면 병합으로 얻을 추가 이득이 없고, proc_ref가 0이면
 	 * 어느 한쪽 프로세스가 이미 사라져 병합할 대상 자체가 없다 -
@@ -5610,23 +5644,23 @@ bfq_setup_stable_merge(struct bfq_data *bfqd, struct bfq_queue *bfqq,
 			struct bfq_iocq_bfqq_data *new_bfqq_data =
 				&new_bfqq->bic->bfqq_data[new_a_idx];
 
-			new_bfqq_data->stably_merged = true;
 			/* [한국어] new_bfqq 쪽에도 안정 병합 표시를 남겨, 이후 이
 			 * 프로세스 쌍이 다시 분리되더라도 '예전에 안정 병합됐었다'는
 			 * 이력을 참조할 수 있게 한다. */
+			new_bfqq_data->stably_merged = true;
 		}
 	}
 
 out:
 	/* deschedule stable merge, because done or aborted here */
-	bfq_put_stable_ref(stable_merge_bfqq);
 	/* [한국어] 함수 진입 전 stable_merge_bfqq에 대해 별도로 쥐고
 	 * 있던 '안정 병합 예약용' 참조(stable ref)를 여기서 반납한다 -
 	 * 병합이 성사됐든 포기됐든 이 예약 참조는 더 이상 필요 없다. */
+	bfq_put_stable_ref(stable_merge_bfqq);
 
-	return new_bfqq;
 	/* [한국어] 병합 결과(성공 시 공유 큐, 실패 시 NULL)를 호출자에게
 	 * 반환한다. */
+	return new_bfqq;
 }
 
 /*
@@ -5712,7 +5746,7 @@ bfq_setup_cooperator(struct bfq_data *bfqd, struct bfq_queue *bfqq,
 	new_bfqq = bfqq->new_bfqq; // bfqq가 과거에 이미 다른 bfqq로 병합 예약돼 있었는지 확인
 	if (new_bfqq) { // 이미 병합이 예약된 경우 - 새로 후보를 찾지 않고 기존 병합 체인을 그대로 따라간다
 		while (new_bfqq->new_bfqq) // new_bfqq 자신도 또 다른 큐로 재병합됐을 수 있으므로 체인의 끝까지 이동
-			new_bfqq = new_bfqq->new_bfqq;
+			new_bfqq = new_bfqq->new_bfqq; // new_bfqq 링크는 항상 "합쳐진 뒤 살아남은 큐"를 가리키므로, 끝까지 따라가면 현재 실제로 request를 담고 있는 큐가 나온다(체인은 순환하지 않는다)
 		return new_bfqq; // 체인의 최종 목적지 bfqq를 병합 대상으로 반환
 	}
 
@@ -5738,12 +5772,14 @@ bfq_setup_cooperator(struct bfq_data *bfqd, struct bfq_queue *bfqq,
 					  msecs_to_jiffies(bfq_late_stable_merging)) && // 마지막으로 분리(split)된 뒤 bfq_late_stable_merging(ms)이 충분히 지났고
 		    time_is_before_jiffies(bfqq->creation_time +
 					   msecs_to_jiffies(bfq_late_stable_merging))) { // bfqq가 생성된 뒤에도 그만큼 시간이 지났다면(너무 이른 재병합 방지)
+			/* [한국어] 과거 병합 상대였던 bfqq를 지역 변수로 확보 */
 			struct bfq_queue *stable_merge_bfqq =
-				bfqq_data->stable_merge_bfqq; // 과거 병합 상대였던 bfqq를 지역 변수로 확보
+				bfqq_data->stable_merge_bfqq;
 
+			/* [한국어] stable merge 재시도는 별도 함수로 위임하고 그 결과를 그대로 반환 */
 			return bfq_setup_stable_merge(bfqd, bfqq,
 						      stable_merge_bfqq,
-						      bfqq_data); // stable merge 재시도는 별도 함수로 위임하고 그 결과를 그대로 반환
+						      bfqq_data);
 		}
 	}
 
@@ -5825,8 +5861,9 @@ bfq_setup_cooperator(struct bfq_data *bfqd, struct bfq_queue *bfqq,
 	 * queues. The only thing we need is that the bio/request is not
 	 * NULL, as we need it to establish whether a cooperator exists.
 	 */
+	/* [한국어] in-service 큐가 후보가 아니었다면 rq_pos_tree에서 섹터 위치가 가장 가까운 다른 bfqq를 탐색 */
 	new_bfqq = bfq_find_close_cooperator(bfqd, bfqq,
-			bfq_io_struct_pos(io_struct, request)); // in-service 큐가 후보가 아니었다면 rq_pos_tree에서 섹터 위치가 가장 가까운 다른 bfqq를 탐색
+			bfq_io_struct_pos(io_struct, request));
 
 	if (new_bfqq && likely(new_bfqq != &bfqd->oom_bfqq) && // 인접한 bfqq를 찾았고 oom_bfqq가 아니며
 	    bfq_may_be_close_cooperator(bfqq, new_bfqq)) // 협력 조건도 만족하면
@@ -5891,18 +5928,22 @@ static void bfq_bfqq_save_state(struct bfq_queue *bfqq)
 
 	bfqq_data->saved_weight = bfqq->entity.orig_weight; // 병합 전 원래 스케줄링 가중치 - 분리 시 이 가중치로 복원해야 공정성 유지
 	bfqq_data->saved_ttime = bfqq->ttime; // 평균 think time(요청 간 유휴 시간) 통계 보존 - 병합 후에도 프로세스 패턴 학습을 이어가기 위함
+	/* [한국어] "think time이 짧다(interactive 성향)" 플래그 - 분리 후 idle 정책 판단에 재사용 */
 	bfqq_data->saved_has_short_ttime =
-		bfq_bfqq_has_short_ttime(bfqq); // "think time이 짧다(interactive 성향)" 플래그 - 분리 후 idle 정책 판단에 재사용
+		bfq_bfqq_has_short_ttime(bfqq);
 	bfqq_data->saved_IO_bound = bfq_bfqq_IO_bound(bfqq); // I/O-bound(끊임없이 요청을 내는) 프로세스 여부 플래그 보존
 	bfqq_data->saved_io_start_time = bfqq->io_start_time; // 이 bfqq가 I/O를 시작한 시각 - soft real-time 판정 등에 사용되므로 보존
 	bfqq_data->saved_tot_idle_time = bfqq->tot_idle_time; // 누적 유휴 시간 - burst/idle 통계 연속성 유지
 	bfqq_data->saved_in_large_burst = bfq_bfqq_in_large_burst(bfqq); // "대량 큐 생성 burst"에 속했는지 여부 보존 - 분리 후에도 burst 판정을 이어감
+	/* [한국어] burst_list에 실제로 연결(hashed)돼 있었는지 확인 - 아직 리스트에 남아있는 채로 병합됐는지 기록 */
 	bfqq_data->was_in_burst_list =
-		!hlist_unhashed(&bfqq->burst_list_node); // burst_list에 실제로 연결(hashed)돼 있었는지 확인 - 아직 리스트에 남아있는 채로 병합됐는지 기록
+		!hlist_unhashed(&bfqq->burst_list_node);
 
+	/* [한국어] bfqq가 생성된 직후 곧바로 병합됐고(정상적으로 WR을 받을 기회가 없었음), burst가 아니며,
+	 * low_latency 모드가 켜져 있다면 */
 	if (unlikely(bfq_bfqq_just_created(bfqq) &&
 		     !bfq_bfqq_in_large_burst(bfqq) &&
-		     bfqq->bfqd->low_latency)) { // bfqq가 생성된 직후 곧바로 병합됐고(정상적으로 WR을 받을 기회가 없었음), burst가 아니며, low_latency 모드가 켜져 있다면
+		     bfqq->bfqd->low_latency)) {
 		/*
 		 * bfqq being merged right after being created: bfqq
 		 * would have deserved interactive weight raising, but
@@ -5913,19 +5954,25 @@ static void bfq_bfqq_save_state(struct bfq_queue *bfqq)
 		 * to enjoy weight raising if split soon.
 		 */
 		bfqq_data->saved_wr_coeff = bfqq->bfqd->bfq_wr_coeff; // 실제로는 못 받았지만 받았어야 할 WR(weight-raising) 계수를 대신 저장
+		/* [한국어] soft-real-time 전환 시각을 "지금"으로 설정 - 아직 SRT 전환 이력이 없으므로 최솟값
+		 * 사용 */
 		bfqq_data->saved_wr_start_at_switch_to_srt =
-			bfq_smallest_from_now(); // soft-real-time 전환 시각을 "지금"으로 설정 - 아직 SRT 전환 이력이 없으므로 최솟값 사용
+			bfq_smallest_from_now();
+		/* [한국어] 이 장치의 peak_rate 기반 WR 지속시간을 그대로 사용 */
 		bfqq_data->saved_wr_cur_max_time =
-			bfq_wr_duration(bfqq->bfqd); // 이 장치의 peak_rate 기반 WR 지속시간을 그대로 사용
+			bfq_wr_duration(bfqq->bfqd);
 		bfqq_data->saved_last_wr_start_finish = jiffies; // WR이 지금 막 시작한 것처럼 현재 시각을 기록
 	} else { // 그 외 일반적인 경우 - 이미 WR 상태(또는 비-WR 상태)가 실제로 반영돼 있으므로 있는 그대로 저장
 		bfqq_data->saved_wr_coeff = bfqq->wr_coeff; // 현재 적용 중인 WR 계수(1이면 WR 없음, >1이면 가중치 배수)를 그대로 보존
+		/* [한국어] soft-real-time으로 전환된 시각을 그대로 보존 */
 		bfqq_data->saved_wr_start_at_switch_to_srt =
-			bfqq->wr_start_at_switch_to_srt; // soft-real-time으로 전환된 시각을 그대로 보존
+			bfqq->wr_start_at_switch_to_srt;
+		/* [한국어] WR 기간 동안 이미 받은 서비스량 보존 - 남은 WR 자격 계산에 필요 */
 		bfqq_data->saved_service_from_wr =
-			bfqq->service_from_wr; // WR 기간 동안 이미 받은 서비스량 보존 - 남은 WR 자격 계산에 필요
+			bfqq->service_from_wr;
+		/* [한국어] 마지막 WR 시작/갱신 시각 보존 */
 		bfqq_data->saved_last_wr_start_finish =
-			bfqq->last_wr_start_finish; // 마지막 WR 시작/갱신 시각 보존
+			bfqq->last_wr_start_finish;
 		bfqq_data->saved_wr_cur_max_time = bfqq->wr_cur_max_time; // 이번 WR 구간에 적용 중인 최대 지속시간 보존
 	}
 }
@@ -6076,8 +6123,9 @@ static struct bfq_queue *bfq_merge_bfqqs(struct bfq_data *bfqd,
 {
 	struct bfq_queue *new_bfqq = bfqq->new_bfqq; // bfq_setup_merge()가 미리 설정해 둔 병합 목적지 큐
 
+	/* [한국어] 디버그 트레이스: 어떤 pid의 큐로 병합되는지 기록 */
 	bfq_log_bfqq(bfqd, bfqq, "merging with queue %lu",
-		(unsigned long)new_bfqq->pid); // 디버그 트레이스: 어떤 pid의 큐로 병합되는지 기록
+		(unsigned long)new_bfqq->pid);
 	/* Save weight raising and idle window of the merged queues */
 	bfq_bfqq_save_state(bfqq); // 사라질 bfqq의 상태를 이 프로세스의 bic 저장 공간에 백업(향후 분리 시 복원용)
 	bfq_bfqq_save_state(new_bfqq); // new_bfqq 쪽 상태도 함께 백업 - new_bfqq 자신의 원래 프로세스가 나중에 분리될 수도 있으므로
@@ -6103,8 +6151,10 @@ static struct bfq_queue *bfq_merge_bfqqs(struct bfq_data *bfqd,
 		 * new_bfqq into the woken_list of the waker. See
 		 * bfq_check_waker for details.
 		 */
+		/* [한국어] waker 큐가 나중에 사라질 때 new_bfqq->waker_bfqq를 역참조로 찾아 NULL로
+		 * 정리할 수 있도록 waker의 woken_list에 등록 */
 		hlist_add_head(&new_bfqq->woken_list_node,
-			       &new_bfqq->waker_bfqq->woken_list); // waker 큐가 나중에 사라질 때 new_bfqq->waker_bfqq를 역참조로 찾아 NULL로 정리할 수 있도록 waker의 woken_list에 등록
+			       &new_bfqq->waker_bfqq->woken_list);
 
 	}
 
@@ -6121,22 +6171,25 @@ static struct bfq_queue *bfq_merge_bfqqs(struct bfq_data *bfqd,
 		new_bfqq->wr_coeff = bfqq->wr_coeff; // bfqq의 WR 배수를 new_bfqq에 그대로 적용
 		new_bfqq->wr_cur_max_time = bfqq->wr_cur_max_time; // 이번 WR 구간의 최대 지속시간도 함께 승계
 		new_bfqq->last_wr_start_finish = bfqq->last_wr_start_finish; // WR이 마지막으로 시작/갱신된 시각도 승계 - 잔여 WR 기간 계산의 기준점 유지
+		/* [한국어] soft-real-time 전환 시각도 함께 승계 */
 		new_bfqq->wr_start_at_switch_to_srt =
-			bfqq->wr_start_at_switch_to_srt; // soft-real-time 전환 시각도 함께 승계
+			bfqq->wr_start_at_switch_to_srt;
 		if (bfq_bfqq_busy(new_bfqq)) // new_bfqq가 이미 busy(스케줄링 대상)라면
 			bfqd->wr_busy_queues++; // WR 중인 busy 큐 개수를 하나 증가 - new_bfqq가 새로 WR 집합에 편입됐으므로
 		new_bfqq->entity.prio_changed = 1; // 엔티티 우선순위/가중치가 바뀌었으니 B-WF2Q+ 트리 재삽입이 필요함을 표시
 	}
 
+	/* [한국어] bfqq는 이제 WR을 new_bfqq에게 넘겼으므로 자신의 배수를 1(비-WR)로 되돌림 */
 	if (bfqq->wr_coeff > 1) { /* bfqq has given its wr to new_bfqq */
-		bfqq->wr_coeff = 1; // bfqq는 이제 WR을 new_bfqq에게 넘겼으므로 자신의 배수를 1(비-WR)로 되돌림
+		bfqq->wr_coeff = 1;
 		bfqq->entity.prio_changed = 1; // bfqq의 엔티티도 가중치가 바뀌었음을 표시(다만 곧 release될 큐이므로 영향은 제한적)
 		if (bfq_bfqq_busy(bfqq)) // bfqq가 아직 busy 상태였다면
 			bfqd->wr_busy_queues--; // WR busy 큐 카운터에서 하나 제거 - bfqq가 WR 집합에서 빠졌으므로
 	}
 
+	/* [한국어] 디버그 트레이스: 병합 후 WR busy 큐 개수 기록 */
 	bfq_log_bfqq(bfqd, new_bfqq, "merge_bfqqs: wr_busy %d",
-		     bfqd->wr_busy_queues); // 디버그 트레이스: 병합 후 WR busy 큐 개수 기록
+		     bfqd->wr_busy_queues);
 
 	/*
 	 * Merge queues (that is, let bic redirect its requests to new_bfqq)
@@ -6300,13 +6353,16 @@ static void bfq_set_budget_timeout(struct bfq_data *bfqd,
 
 	if (bfqq->wr_cur_max_time == bfqd->bfq_wr_rt_max_time) // 이 큐가 soft-real-time 목적의 weight-raising 중이라면(짧고 엄격한 WR 구간)
 		timeout_coeff = 1; // 이미 지연시간 보장이 목적이므로 타임아웃을 늘리지 않고 기본값 그대로 사용
+	/* [한국어] 그 외에는 현재 가중치/원래 가중치 비율(=WR 배수)만큼 타임아웃을 늘려 WR 큐가 짧은 슬라이스로 손해보지 않게
+	 * 함 */
 	else
-		timeout_coeff = bfqq->entity.weight / bfqq->entity.orig_weight; // 그 외에는 현재 가중치/원래 가중치 비율(=WR 배수)만큼 타임아웃을 늘려 WR 큐가 짧은 슬라이스로 손해보지 않게 함
+		timeout_coeff = bfqq->entity.weight / bfqq->entity.orig_weight;
 
 	bfqd->last_budget_start = blk_time_get(); // 이번 budget 소비 구간이 시작된 시각(모노토닉 클록)을 기록 - 나중에 실제 소비 시간 계산에 사용
 
+	/* [한국어] 기본 타임아웃(bfq_timeout, 기본 HZ/8)에 배수를 곱해 만료 시각(jiffies 단위)을 설정 */
 	bfqq->budget_timeout = jiffies +
-		bfqd->bfq_timeout * timeout_coeff; // 기본 타임아웃(bfq_timeout, 기본 HZ/8)에 배수를 곱해 만료 시각(jiffies 단위)을 설정
+		bfqd->bfq_timeout * timeout_coeff;
 }
 
 /*
@@ -6358,10 +6414,12 @@ static void __bfq_set_in_service_queue(struct bfq_data *bfqd,
 
 		bfqd->budgets_assigned = (bfqd->budgets_assigned * 7 + 256) / 8; // 평균 budget 크기의 지수 가중이동평균 갱신(가중치 7/8은 과거, 나머지는 256을 새 표본처럼 반영하는 근사식)
 
+		/* [한국어] WR이 시작된 뒤 시간이 흘렀고, 실제로 WR 중이며, soft-real-time 유형의 WR이고,
+		 * 마지막 budget_timeout도 이미 지난(서비스 공백이 있었던) 경우 */
 		if (time_is_before_jiffies(bfqq->last_wr_start_finish) &&
 		    bfqq->wr_coeff > 1 &&
 		    bfqq->wr_cur_max_time == bfqd->bfq_wr_rt_max_time &&
-		    time_is_before_jiffies(bfqq->budget_timeout)) { // WR이 시작된 뒤 시간이 흘렀고, 실제로 WR 중이며, soft-real-time 유형의 WR이고, 마지막 budget_timeout도 이미 지난(서비스 공백이 있었던) 경우
+		    time_is_before_jiffies(bfqq->budget_timeout)) {
 			/*
 			 * For soft real-time queues, move the start
 			 * of the weight-raising period forward by the
@@ -6390,14 +6448,16 @@ static void __bfq_set_in_service_queue(struct bfq_data *bfqd,
 				       bfqq->last_wr_start_finish)) // budget_timeout이 WR 시작 시각보다 나중이면(정상적인 순서라면 항상 참)
 				bfqq->last_wr_start_finish +=
 					jiffies - bfqq->budget_timeout; // WR 시작 시각을 "서비스를 못 받은 시간(jiffies - budget_timeout)"만큼 앞으로 밀어 WR 잔여 기간을 보정
+			/* [한국어] 시간 관계가 역전된 예외적 경우엔 그냥 지금 시각으로 재설정(방어적 처리) */
 			else
-				bfqq->last_wr_start_finish = jiffies; // 시간 관계가 역전된 예외적 경우엔 그냥 지금 시각으로 재설정(방어적 처리)
+				bfqq->last_wr_start_finish = jiffies;
 		}
 
 		bfq_set_budget_timeout(bfqd, bfqq); // 이번 서비스 구간의 시간 제한(budget_timeout)을 새로 계산
+		/* [한국어] 디버그 트레이스: 이 큐에 부여된 현재 budget(섹터 단위) 기록 */
 		bfq_log_bfqq(bfqd, bfqq,
 			     "set_in_service_queue, cur-budget = %d",
-			     bfqq->entity.budget); // 디버그 트레이스: 이 큐에 부여된 현재 budget(섹터 단위) 기록
+			     bfqq->entity.budget);
 	}
 
 	bfqd->in_service_queue = bfqq; // 장치를 실제로 점유하는 bfqq를 갱신(NULL이면 "점유 큐 없음")
@@ -6506,7 +6566,7 @@ static void bfq_arm_slice_timer(struct bfq_data *bfqd)
 	 * needed if the queue has a higher weight than some other
 	 * queue).
 	 */
-	if (BFQQ_SEEKY(bfqq) && bfqq->wr_coeff == 1 &&
+	if (BFQQ_SEEKY(bfqq) && bfqq->wr_coeff == 1 && // seeky 큐는 기다려 봐야 다음 요청이 인접 LBA로 오지 않으므로 idling의 순차성 이득이 없고, WR 중도 아니라 지연시간을 지켜줄 이유도 없다
 	    !bfq_asymmetric_scenario(bfqd, bfqq)) // 이 큐가 seeky(무작위 접근 패턴)하고 WR 중이 아니며, 대칭적인(공정성 위협이 적은) 시나리오라면
 		sl = min_t(u64, sl, BFQ_MIN_TT); // 오래 기다려봐야 순차 I/O로 이어지지 않으므로 대기시간을 최소값(2ms)으로 낮춤 - 처리량 우선
 	else if (bfqq->wr_coeff > 1) // 반대로 이 큐가 weight-raised(interactive/soft-rt) 상태라면
@@ -6515,8 +6575,10 @@ static void bfq_arm_slice_timer(struct bfq_data *bfqd)
 	bfqd->last_idling_start = blk_time_get(); // idle이 시작된 시각(모노토닉 클록) 기록 - 이후 idle 소요시간 통계에 사용
 	bfqd->last_idling_start_jiffies = jiffies; // jiffies 단위로도 기록 - 다른 시간 비교 로직과의 호환을 위해 병행 유지
 
+	/* [한국어] sl 나노초 뒤(현재 시각 기준 상대시간) 만료되는 고해상도 타이머를 무장 - 만료 시
+	 * bfq_idle_slice_timer 콜백이 실행되어 큐를 만료시킴 */
 	hrtimer_start(&bfqd->idle_slice_timer, ns_to_ktime(sl),
-		      HRTIMER_MODE_REL); // sl 나노초 뒤(현재 시각 기준 상대시간) 만료되는 고해상도 타이머를 무장 - 만료 시 bfq_idle_slice_timer 콜백이 실행되어 큐를 만료시킴
+		      HRTIMER_MODE_REL);
 	bfqg_stats_set_start_idle_time(bfqq_group(bfqq)); // 이 bfqq가 속한 cgroup의 blkio 통계에도 idle 시작 시각을 기록
 }
 
@@ -6598,8 +6660,9 @@ static unsigned long bfq_calc_max_budget(struct bfq_data *bfqd)
 static void update_thr_responsiveness_params(struct bfq_data *bfqd)
 {
 	if (bfqd->bfq_user_max_budget == 0) { // 사용자가 sysfs로 max_budget을 고정하지 않은 경우(자동 튜닝 모드)
+		/* [한국어] 새로 추정된 peak_rate를 반영해 max_budget을 재계산 */
 		bfqd->bfq_max_budget =
-			bfq_calc_max_budget(bfqd); // 새로 추정된 peak_rate를 반영해 max_budget을 재계산
+			bfq_calc_max_budget(bfqd);
 		bfq_log(bfqd, "new max_budget = %d", bfqd->bfq_max_budget); // 디버그 트레이스: 갱신된 max_budget 값 기록
 	}
 }
@@ -6639,15 +6702,17 @@ static void bfq_reset_rate_computation(struct bfq_data *bfqd,
 		bfqd->last_dispatch = bfqd->first_dispatch = blk_time_get_ns(); // 새 관측 구간의 시작 시각을 "지금"으로 설정 - 이후 dispatch/completion과의 시간차 계산 기준점
 		bfqd->peak_rate_samples = 1; // 이 rq 자체가 첫 표본이므로 표본 수를 1로 시작
 		bfqd->sequential_samples = 0; // 순차 표본 카운터는 아직 없음(첫 표본은 순차 여부를 판단할 이전 표본이 없으므로 0)
+		/* [한국어] 누적 디스패치 섹터 수와 "최근 최대 요청 크기"를 모두 이번 rq의 섹터 수로 초기화 */
 		bfqd->tot_sectors_dispatched = bfqd->last_rq_max_size =
-			blk_rq_sectors(rq); // 누적 디스패치 섹터 수와 "최근 최대 요청 크기"를 모두 이번 rq의 섹터 수로 초기화
+			blk_rq_sectors(rq);
 	} else /* no new rq dispatched, just reset the number of samples */
 		bfqd->peak_rate_samples = 0; /* full re-init on next disp. */ // rq가 없는 리셋(조건 미달 등)은 표본 수만 0으로 만들어, 다음 dispatch 때 위 if(rq != NULL) 분기가 아니라 "peak_rate_samples == 0"이라는 완전 초기화 분기가 실행되도록 유도
 
+	/* [한국어] 디버그 트레이스: 리셋 직후의 표본 상태 기록 */
 	bfq_log(bfqd,
 		"reset_rate_computation at end, sample %u/%u tot_sects %llu",
 		bfqd->peak_rate_samples, bfqd->sequential_samples,
-		bfqd->tot_sectors_dispatched); // 디버그 트레이스: 리셋 직후의 표본 상태 기록
+		bfqd->tot_sectors_dispatched);
 }
 
 /*
@@ -6732,16 +6797,19 @@ static void bfq_update_rate_reset(struct bfq_data *bfqd, struct request *rq)
 	 * have been served by the device, it is more precise to
 	 * extend the observation interval to the last completion.
 	 */
+	/* [한국어] 마지막 dispatch 이후 완료가 있었다면 그 시점까지 관측 구간을 늘려 실제 서비스 시간에 더 가깝게 근사 */
 	bfqd->delta_from_first =
 		max_t(u64, bfqd->delta_from_first,
-		      bfqd->last_completion - bfqd->first_dispatch); // 마지막 dispatch 이후 완료가 있었다면 그 시점까지 관측 구간을 늘려 실제 서비스 시간에 더 가깝게 근사
+		      bfqd->last_completion - bfqd->first_dispatch);
 
 	/*
 	 * Rate computed in sects/usec, and not sects/nsec, for
 	 * precision issues.
 	 */
+	/* [한국어] rate[sectors/usec, <<16] = (누적 디스패치 섹터 수 << 16) / (관측 시간을 나노초에서
+	 * 마이크로초로 변환한 값) - usec 단위로 나눠 정밀도 손실을 줄임 */
 	rate = div64_ul(bfqd->tot_sectors_dispatched<<BFQ_RATE_SHIFT,
-			div_u64(bfqd->delta_from_first, NSEC_PER_USEC)); // rate[sectors/usec, <<16] = (누적 디스패치 섹터 수 << 16) / (관측 시간을 나노초에서 마이크로초로 변환한 값) - usec 단위로 나눠 정밀도 손실을 줄임
+			div_u64(bfqd->delta_from_first, NSEC_PER_USEC));
 
 	/*
 	 * Peak rate not updated if:
@@ -6749,7 +6817,7 @@ static void bfq_update_rate_reset(struct bfq_data *bfqd, struct request *rq)
 	 *   total, and rate is below the current estimated peak rate
 	 * - rate is unreasonably high (> 20M sectors/sec)
 	 */
-	if ((bfqd->sequential_samples < (3 * bfqd->peak_rate_samples)>>2 &&
+	if ((bfqd->sequential_samples < (3 * bfqd->peak_rate_samples)>>2 && // 순차 표본이 전체의 3/4 미만(>>2는 /4) - peak "최고" 처리율을 논하기엔 랜덤 성분이 너무 많은 구간이다
 	     rate <= bfqd->peak_rate) || // 순차 표본 비율이 75% 미만이면서 이번 rate가 기존 peak_rate보다 낮으면(신뢰도 낮은 하향 측정)
 		rate > 20<<BFQ_RATE_SHIFT) // 또는 rate가 20M sectors/sec(<<16 스케일)을 초과하는 비현실적인 값이면
 		goto reset_computation; // 이번 측정은 반영하지 않고 리셋만 수행(노이즈로 peak_rate가 오염되는 것을 방지)
@@ -6783,9 +6851,11 @@ static void bfq_update_rate_reset(struct bfq_data *bfqd, struct request *rq)
 	 * Second step: further refine the weight as a function of the
 	 * duration of the observation interval.
 	 */
+	/* [한국어] 2단계: 관측 시간이 기준 구간(BFQ_RATE_REF_INTERVAL, 1초)에 비해 얼마나 긴지도 반영 - 길게
+	 * 관측할수록 신뢰도(weight)를 최대 8까지 끌어올림 */
 	weight = min_t(u32, 8,
 		       div_u64(weight * bfqd->delta_from_first,
-			       BFQ_RATE_REF_INTERVAL)); // 2단계: 관측 시간이 기준 구간(BFQ_RATE_REF_INTERVAL, 1초)에 비해 얼마나 긴지도 반영 - 길게 관측할수록 신뢰도(weight)를 최대 8까지 끌어올림
+			       BFQ_RATE_REF_INTERVAL));
 
 	/*
 	 * Divisor ranging from 10, for minimum weight, to 2, for
@@ -6911,8 +6981,9 @@ static void bfq_update_peak_rate(struct bfq_data *bfqd, struct request *rq)
 	u64 now_ns = blk_time_get_ns(); // 이번 dispatch의 현재 시각(모노토닉, 나노초) - 이후 모든 시간차 계산의 기준
 
 	if (bfqd->peak_rate_samples == 0) { /* first dispatch */ // 표본이 아예 없는 상태 - 스케줄러 시작 직후이거나 직전 리셋에서 완전 초기화된 경우
+		/* [한국어] 디버그 트레이스: 리셋 경로로 들어감을 기록 */
 		bfq_log(bfqd, "update_peak_rate: goto reset, samples %d",
-			bfqd->peak_rate_samples); // 디버그 트레이스: 리셋 경로로 들어감을 기록
+			bfqd->peak_rate_samples);
 		bfq_reset_rate_computation(bfqd, rq); // 이번 rq를 첫 표본으로 삼아 관측 구간을 새로 시작
 		goto update_last_values; /* will add one sample */ // rate 계산은 아직 이르므로(표본 1개) 바로 위치/시각 갱신 단계로 건너뜀
 	}
@@ -6929,15 +7000,15 @@ static void bfq_update_peak_rate(struct bfq_data *bfqd, struct request *rq)
 	 * - compute rate, if possible, for that observation interval
 	 * - start a new observation interval with this dispatch
 	 */
-	if (now_ns - bfqd->last_dispatch > 100*NSEC_PER_MSEC &&
+	if (now_ns - bfqd->last_dispatch > 100*NSEC_PER_MSEC && // 100ms는 "관측 구간이 유휴로 오염됐다"고 볼 만큼 넉넉한 값 - 기준 관측 구간(BFQ_RATE_REF_INTERVAL, 1초)의 1/10이라 이보다 짧은 공백은 노이즈로 흡수한다
 	    bfqd->tot_rq_in_driver == 0) // 마지막 dispatch로부터 100ms 넘게 지났고 그동안 장치에 진행 중인 요청도 없었다면(장치가 오래 놀았음)
 		goto update_rate_and_reset; // 그 유휴 구간이 rate 계산을 왜곡하지 않도록, 지금까지의 구간을 즉시 마감하고 rate를 계산한 뒤 새 구간을 시작
 
 	/* Update sampling information */
 	bfqd->peak_rate_samples++; // 정상적인 연속 dispatch이므로 표본 수 증가
 
-	if ((bfqd->tot_rq_in_driver > 0 ||
-		now_ns - bfqd->last_completion < BFQ_MIN_TT)
+	if ((bfqd->tot_rq_in_driver > 0 || // 장치가 실제로 일하고 있어야 이 표본이 "처리율"을 반영한다 - 놀고 있는 구간의 dispatch는 rate를 과소평가하게 만든다
+		now_ns - bfqd->last_completion < BFQ_MIN_TT) // 또는 직전 완료가 BFQ_MIN_TT(2ms) 이내였다면 장치가 사실상 연속 가동 중이라고 간주
 	    && !BFQ_RQ_SEEKY(bfqd, bfqd->last_position, rq)) // 장치가 바쁘거나(진행 중 요청 존재) 최근 완료가 있었고(2ms 이내), 이번 rq가 이전 위치에서 순차적(비-seeky)이면
 		bfqd->sequential_samples++; // "순차 표본" 카운터 증가 - 이 비율이 bfq_update_rate_reset의 신뢰도(weight) 계산에 쓰임
 
@@ -6945,10 +7016,11 @@ static void bfq_update_peak_rate(struct bfq_data *bfqd, struct request *rq)
 
 	/* Reset max observed rq size every 32 dispatches */
 	if (likely(bfqd->peak_rate_samples % 32)) // 32번째 dispatch가 아니면(대부분의 경우)
-		bfqd->last_rq_max_size =
+		bfqd->last_rq_max_size = // 이 값은 bfq_update_peak_rate()가 "이번 dispatch가 관측 구간을 늘릴 만큼 큰 요청이었는지" 판단할 때 쓰이는 참조 크기다
 			max_t(u32, blk_rq_sectors(rq), bfqd->last_rq_max_size); // 지금까지 관측된 최대 요청 크기와 이번 rq 크기 중 큰 값으로 갱신(단조 누적)
+	/* [한국어] 32번째마다 누적을 리셋해 이번 rq 크기로 다시 시작 - 오래된 이상치가 영구히 남지 않도록 주기적으로 갱신 */
 	else
-		bfqd->last_rq_max_size = blk_rq_sectors(rq); // 32번째마다 누적을 리셋해 이번 rq 크기로 다시 시작 - 오래된 이상치가 영구히 남지 않도록 주기적으로 갱신
+		bfqd->last_rq_max_size = blk_rq_sectors(rq);
 
 	bfqd->delta_from_first = now_ns - bfqd->first_dispatch; // 첫 dispatch 이후 지금까지 경과한 시간(관측 구간 길이) 갱신
 
@@ -7492,7 +7564,7 @@ static void __bfq_bfqq_recalc_budget(struct bfq_data *bfqd,
 		 * Caveat: in all the following cases we trade latency
 		 * for throughput.
 		 */
-		case BFQQE_TOO_IDLE:
+		case BFQQE_TOO_IDLE: // idle 타이머가 만료되도록 다음 요청이 오지 않아 만료된 경우 - budget을 "줄일" 수 있는 유일한 사유다
 			/*
 			 * This is the only case where we may reduce
 			 * the budget: if there is no request of the
@@ -7531,12 +7603,12 @@ static void __bfq_bfqq_recalc_budget(struct bfq_data *bfqd,
 					/* [한국어] 여유가 충분하면(5*min 초과) 4*min 만큼만 깎아
 					 * 급격한 축소를 피한다(완만한 감소). */
 					budget -= 4 * min_budget;
+				/* [한국어] 여유가 적으면 아예 최소값까지 낮춘다. */
 				else
-					/* [한국어] 여유가 적으면 아예 최소값까지 낮춘다. */
 					budget = min_budget;
 			}
 			break;
-		case BFQQE_BUDGET_TIMEOUT:
+		case BFQQE_BUDGET_TIMEOUT: // 예산(섹터)은 남았는데 시간 제한 budget_timeout이 먼저 끝난 경우 - "장치가 느렸다"는 뜻이지 큐가 나쁘다는 뜻이 아니다
 			/*
 			 * We double the budget here because it gives
 			 * the chance to boost the throughput if this
@@ -7549,7 +7621,7 @@ static void __bfq_bfqq_recalc_budget(struct bfq_data *bfqd,
 			 * 시간 안에 더 많은 서비스를 받을 기회를 준다. */
 			budget = min(budget * 2, bfqd->bfq_max_budget);
 			break;
-		case BFQQE_BUDGET_EXHAUSTED:
+		case BFQQE_BUDGET_EXHAUSTED: // 배정된 예산을 시간 안에 전부 소진한 경우 - 순차적이고 think time도 짧은 "우량" 큐라는 증거다
 			/*
 			 * The process still has backlog, and did not
 			 * let either the budget timeout or the disk
@@ -7564,7 +7636,7 @@ static void __bfq_bfqq_recalc_budget(struct bfq_data *bfqd,
 			 * 하지도, thinktime 이 길지도 않다는 것이 이미 입증된 셈. */
 			budget = min(budget * 4, bfqd->bfq_max_budget);
 			break;
-		case BFQQE_NO_MORE_REQUESTS:
+		case BFQQE_NO_MORE_REQUESTS: // 예산도 시간도 남았는데 큐가 비어 자연 만료된 경우 - 실제 필요량에 budget을 맞춰야 B-WF2Q+ 타임스탬프가 어긋나지 않는다
 			/*
 			 * For queues that expire for this reason, it
 			 * is particularly important to keep the
@@ -7610,7 +7682,7 @@ static void __bfq_bfqq_recalc_budget(struct bfq_data *bfqd,
 			 * 피드백 대상이 아니다. */
 			return;
 		}
-	} else if (!bfq_bfqq_sync(bfqq)) {
+	} else if (!bfq_bfqq_sync(bfqq)) { // 위 switch는 sync이면서 WR이 아닌 큐 전용 - 여기로 오는 것은 async 큐뿐이다(sync + WR 큐는 두 분기 모두 건너뛴다)
 		/*
 		 * Async queues get always the maximum possible
 		 * budget, as for them we do not care about latency
@@ -7650,11 +7722,11 @@ static void __bfq_bfqq_recalc_budget(struct bfq_data *bfqd,
 	 * 를 서비스하기에 충분한 budget 을 즉시 확정해야 한다(엔티티의 finish-time 계산이
 	 * budget 값에 의존하므로, 이 갱신은 반드시 __bfq_bfqq_expire() 호출 전에 끝나야 함). */
 	next_rq = bfqq->next_rq;
+	/* [한국어] 엔티티에 실제로 부여할 budget 은 (a) 방금 정한 max_budget 과
+	 * (b) 다음 request 하나를 서비스하는 데 필요한 최소 charge(섹터 환산량)
+	 * 중 더 큰 쪽으로 설정한다 - budget 이 다음 request 하나도 못 채울 만큼
+	 * 작아지는 것을 방지. */
 	if (next_rq)
-		/* [한국어] 엔티티에 실제로 부여할 budget 은 (a) 방금 정한 max_budget 과
-		 * (b) 다음 request 하나를 서비스하는 데 필요한 최소 charge(섹터 환산량)
-		 * 중 더 큰 쪽으로 설정한다 - budget 이 다음 request 하나도 못 채울 만큼
-		 * 작아지는 것을 방지. */
 		bfqq->entity.budget = max_t(unsigned long, bfqq->max_budget,
 					    bfq_serv_to_charge(next_rq, bfqq));
 
@@ -7743,8 +7815,8 @@ static bool bfq_bfqq_is_slow(struct bfq_data *bfqd, struct bfq_queue *bfqq,
 	 * 서비스 시간으로 치지 않기 위한 보정. */
 	if (compensate)
 		delta_ktime = bfqd->last_idling_start;
+	/* [한국어] compensate == false: 지금 이 순간까지를 서비스 슬롯의 끝으로 본다. */
 	else
-		/* [한국어] compensate == false: 지금 이 순간까지를 서비스 슬롯의 끝으로 본다. */
 		delta_ktime = blk_time_get();
 	/* [한국어] 슬롯 시작 시각(last_budget_start)을 빼서 실제 경과 시간을 구한다. */
 	delta_ktime = ktime_sub(delta_ktime, bfqd->last_budget_start);
@@ -7804,9 +7876,9 @@ static bool bfq_bfqq_is_slow(struct bfq_data *bfqd, struct bfq_queue *bfqq,
 	/* [한국어] 디버그 트레이스 로그 - 최종 slow 판정 결과 기록. */
 	bfq_log_bfqq(bfqd, bfqq, "bfq_bfqq_is_slow: slow %d", slow);
 
-	return slow;
 	/* [한국어] 최종 판정값 반환 - bfq_bfqq_expire() 는 이 값이 true 이면 시간 기반 과금
 	 * (bfq_bfqq_charge_time)을 적용해 seeky/저속 프로세스의 향후 서비스를 제한한다. */
+	return slow;
 }
 
 
@@ -8086,7 +8158,7 @@ void bfq_bfqq_expire(struct bfq_data *bfqd,
 		if (bfqq->dispatched == 0)
 			bfqq->soft_rt_next_start =
 				bfq_bfqq_softrt_next_start(bfqd, bfqq);
-		else if (bfqq->dispatched > 0) {
+		else if (bfqq->dispatched > 0) { // 아직 완료를 기다리는 in-flight 요청이 남아 있어, 지금 판정하면 "요청이 끊긴 것"과 "완료 대기 중인 것"을 구분할 수 없다
 			/*
 			 * Schedule an update of soft_rt_next_start to when
 			 * the task may be discovered to be isochronous.
@@ -8699,17 +8771,17 @@ bfq_choose_bfqq_for_injection(struct bfq_data *bfqd)
 				 * 일어났음을 기록해 두면(rqs_injected), 이후 총 서비스 시간
 				 * 측정 로직이 injection 여부를 고려해 계산을 조정할 수 있다. */
 				bfqd->rqs_injected = true;
-				return bfqq;
 				/* [한국어] 이 후보 큐를 반환 - 호출자(bfq_select_queue)가 이
 				 * 큐의 request 를 실제로 디스패치해 service hole 을 메운다. */
+				return bfqq;
 			}
 		}
 	}
 
-	return NULL;
 	/* [한국어] 모든 액추에이터의 활성 리스트를 다 뒤졌지만 조건을 만족하는 큐를
 	 * 찾지 못했다는 뜻 - 주입 없이 in-service 큐가 새 request 를 받을 때까지
 	 * 기다리거나(idling) 다른 경로로 진행해야 한다. */
+	return NULL;
 }
 
 /*
@@ -8826,14 +8898,14 @@ bfq_find_bfqq_for_underused_actuator(struct bfq_data *bfqd)
 				/* [한국어] 이 한산한 actuator로 실제로 보낼 수 있는 bfqq가 있는지 조회 */
 				bfq_find_active_bfqq_for_actuator(bfqd, i);
 
+			/* [한국어] 조건을 만족하는 첫 actuator에서 큐를 찾으면 더 스캔하지 않고 즉시 반환 */
 			if (bfqq)
-				/* [한국어] 조건을 만족하는 첫 actuator에서 큐를 찾으면 더 스캔하지 않고 즉시 반환 */
 				return bfqq;
 		}
 	}
 
-	return NULL;
 	/* [한국어] 한산한 actuator가 없거나, 있어도 보낼 I/O가 없음을 호출자에게 알림 */
+	return NULL;
 }
 
 
@@ -8889,8 +8961,8 @@ static struct bfq_queue *bfq_select_queue(struct bfq_data *bfqd)
 		/* [한국어] in-service 큐가 아예 없는 초기/유휴 상태 - 새 큐 선정 경로로 점프 */
 		goto new_queue;
 
-	bfq_log_bfqq(bfqd, bfqq, "select_queue: already in-service queue");
 	/* [한국어] 디버그 트레이스 로그 - 이미 in-service인 큐를 계속 검사하는 경로로 들어왔음을 기록 */
+	bfq_log_bfqq(bfqd, bfqq, "select_queue: already in-service queue");
 
 	/*
 	 * Do not expire bfqq for budget timeout if bfqq may be about
@@ -8899,8 +8971,8 @@ static struct bfq_queue *bfq_select_queue(struct bfq_data *bfqd)
 	 * on the case where bfq_bfqq_must_idle() returns true, in
 	 * bfq_completed_request().
 	 */
+	/* [한국어] budget timeout으로 만료할 만한 조건인지 확인(시간 초과로 인한 강제 만료 후보) */
 	if (bfq_may_expire_for_budg_timeout(bfqq) &&
-	    /* [한국어] budget timeout으로 만료할 만한 조건인지 확인(시간 초과로 인한 강제 만료 후보) */
 	    !bfq_bfqq_must_idle(bfqq))
 		/* [한국어] 동시에, 이 큐가 device idling을 계속 누려야 하는 상황이 아닌지도 확인 - idling이 필요하면 timeout이어도 만료하지 않음 */
 		goto expire;
@@ -9165,12 +9237,12 @@ keep_queue:
 	if (bfqq)
 		/* [한국어] 최종적으로 반환할 큐가 있는 경우 */
 		bfq_log_bfqq(bfqd, bfqq, "select_queue: returned this queue");
+	/* [한국어] 반환할 큐가 없는 경우(NULL) - dispatch할 것이 없음을 로그로 남김 */
 	else
-		/* [한국어] 반환할 큐가 없는 경우(NULL) - dispatch할 것이 없음을 로그로 남김 */
 		bfq_log(bfqd, "select_queue: no queue returned");
 
-	return bfqq;
 	/* [한국어] 최종 선택된 bfqq(또는 NULL)를 호출자(__bfq_dispatch_request)에게 반환 */
+	return bfqq;
 }
 
 /*
@@ -9709,7 +9781,7 @@ static inline void bfq_update_dispatch_stats(struct request_queue *q,
  * 실행 컨텍스트: blk-mq dispatch 컨텍스트(보통 소프트 IRQ나 워커
  * 컨텍스트)에서 호출되며, 이 함수 안에서 스핀락으로 임계구역을
  * 보호한다(spin_lock_irq이므로 로컬 인터럽트도 비활성화).
- * NVMe 관점: 이 함수가 반환한 request는 blk-mq에 의해 NVMe SQ에
+ * NVMe 관점: 이 함수가 반환한 request는 blk-mq를 거쳐 드라이버에
  * enqueue되어 CID를 할당받고, 완료(completion)가 CQ로 돌아오면
  * bfq_finish_requeue_request가 호출되어 BFQ 쪽 통계/스케줄링 상태를
  * 마무리한다.
@@ -9754,8 +9826,8 @@ static struct request *bfq_dispatch_request(struct blk_mq_hw_ctx *hctx)
 			/* [한국어] idle 타이머가 실제로 꺼졌을 때만 in_serv_queue를 전달 - 아니면 NULL(통계 함수 내부에서 idle_timer_disabled로 다시 분기) */
 				idle_timer_disabled);
 
-	return rq;
 	/* [한국어] dispatch된 request(또는 NULL)를 blk-mq 코어에 반환 */
+	return rq;
 }
 
 /*
@@ -10250,43 +10322,48 @@ bfq_set_next_ioprio_data(struct bfq_queue *bfqq, struct bfq_io_cq *bic)
 		bfqq->new_ioprio_class = task_nice_ioclass(tsk);
 		/* [한국어] 마찬가지로 nice 값 기반으로 ioprio 클래스(보통 BE)를 유추 */
 		break;
+	/* [한국어] 실시간(RT) 클래스 - bic에 저장된 원본 값에서 레벨(하위 비트)만 추출 */
 	case IOPRIO_CLASS_RT:
 		bfqq->new_ioprio = IOPRIO_PRIO_LEVEL(bic->ioprio);
-		/* [한국어] 실시간(RT) 클래스 - bic에 저장된 원본 값에서 레벨(하위 비트)만 추출 */
-		bfqq->new_ioprio_class = IOPRIO_CLASS_RT;
 		/* [한국어] 클래스를 RT로 확정 - BFQ에서 가장 높은 우선순위/가중치로 매핑됨 */
+		bfqq->new_ioprio_class = IOPRIO_CLASS_RT;
 		break;
+	/* [한국어] 최선-노력(Best-Effort) 클래스의 레벨 값 추출 - 대부분의 일반 프로세스가 이 클래스 */
 	case IOPRIO_CLASS_BE:
 		bfqq->new_ioprio = IOPRIO_PRIO_LEVEL(bic->ioprio);
-		/* [한국어] 최선-노력(Best-Effort) 클래스의 레벨 값 추출 - 대부분의 일반 프로세스가 이 클래스 */
-		bfqq->new_ioprio_class = IOPRIO_CLASS_BE;
+		bfqq->new_ioprio_class = IOPRIO_CLASS_BE; // 클래스를 BE로 확정 - RT와 IDLE 사이의 중간 서비스 트리에 배치된다
 		break;
+	/* [한국어] 유휴시에만(IDLE) 클래스로 확정 - 다른 모든 클래스에 항상 양보 */
 	case IOPRIO_CLASS_IDLE:
 		bfqq->new_ioprio_class = IOPRIO_CLASS_IDLE;
-		/* [한국어] 유휴시에만(IDLE) 클래스로 확정 - 다른 모든 클래스에 항상 양보 */
-		bfqq->new_ioprio = IOPRIO_NR_LEVELS - 1;
 		/* [한국어] IDLE 클래스는 레벨 개념이 없으므로 가장 낮은(최후순위) 레벨 값으로 고정 */
+		bfqq->new_ioprio = IOPRIO_NR_LEVELS - 1;
 		break;
 	}
 
-	if (bfqq->new_ioprio >= IOPRIO_NR_LEVELS) {
 	/* [한국어] 위 계산 결과가 유효한 레벨 범위(0..IOPRIO_NR_LEVELS-1)를 벗어났는지 검증 - 정상 흐름에서는 발생하면 안 되는 방어적 코드 */
+	if (bfqq->new_ioprio >= IOPRIO_NR_LEVELS) {
 		pr_crit("bfq_set_next_ioprio_data: new_ioprio %d\n",
-			bfqq->new_ioprio);
 			/* [한국어] 커널 크리티컬 로그로 비정상 값을 기록 - 디버깅을 위한 흔적 남기기 */
-		bfqq->new_ioprio = IOPRIO_NR_LEVELS - 1;
+			bfqq->new_ioprio);
 		/* [한국어] 범위를 벗어난 값을 가장 낮은 우선순위로 강제 보정해 이후 배열 인덱싱 등에서 out-of-bounds가 나지 않도록 함 */
+		bfqq->new_ioprio = IOPRIO_NR_LEVELS - 1;
 	}
 
-	bfqq->entity.new_weight = bfq_ioprio_to_weight(bfqq->new_ioprio);
 	/* [한국어] 확정된 레벨 값을 BFQ의 실제 스케줄링 가중치(weight) 수치로 변환해 저장 - 값이 클수록 더 많은 서비스를 받음 */
+	bfqq->entity.new_weight = bfq_ioprio_to_weight(bfqq->new_ioprio);
+	/* [한국어] 디버그 트레이스: 변경된 ioprio 레벨과 그에 대응하는 weight를 기록 */
 	bfq_log_bfqq(bfqd, bfqq, "new_ioprio %d new_weight %d",
 		     bfqq->new_ioprio, bfqq->entity.new_weight);
-		     /* [한국어] 디버그 트레이스: 변경된 ioprio 레벨과 그에 대응하는 weight를 기록 */
-	bfqq->entity.prio_changed = 1;
 	/* [한국어] "적용 대기 중인 우선순위 변경이 있다"는 플래그 설정 - 다음 활성화(재-스케줄링) 시점에 이 new_weight/new_ioprio가 실제 weight/ioprio로 반영됨 */
+	bfqq->entity.prio_changed = 1;
 }
 
+/* [한국어] bfq_get_queue()의 전방 선언. 정의는 파일 뒤쪽에 있으나
+ * bfq_check_ioprio_change()가 ioprio 변경을 감지하면 기존 async 큐를
+ * 버리고 새 우선순위에 맞는 큐를 다시 얻어야 하므로, 그보다 앞선
+ * 이 위치에서 선언이 필요하다. respawn 인자는 "기존 큐를 재사용하지
+ * 말고 새로 만들라"는 뜻으로, 바로 이 ioprio 변경 경로에서 true가 된다. */
 static struct bfq_queue *bfq_get_queue(struct bfq_data *bfqd,
 				       struct bio *bio, bool is_sync,
 				       struct bfq_io_cq *bic,
@@ -10331,9 +10408,11 @@ static void bfq_check_ioprio_change(struct bfq_io_cq *bic, struct bio *bio)
 	 * This condition may trigger on a newly created bic, be sure to
 	 * drop the lock before returning.
 	 */
+	/* [한국어] bfqd가 아직 연결되지 않은 갓 생성된 bic이거나, 캐시된 ioprio와
+	 * 실제 값이 같아(가장 흔한 경우) 갱신할 것이 없으므로 즉시 반환.
+	 * likely/unlikely 배치에 주목: ionice 변경은 극히 드물기 때문에 이
+	 * 조기 반환이 정상 경로가 되도록 분기 예측을 유도한다. */
 	if (unlikely(!bfqd) || likely(bic->ioprio == ioprio))
-		// bfqd가 아직 연결되지 않은 갓 생성된 bic이거나, 캐시된 ioprio와 실제 값이 같아
-		// (가장 흔한 경우) 갱신할 것이 없으므로 즉시 반환.
 		return;
 
 	bic->ioprio = ioprio; // 새 ioprio를 bic에 캐시해, 다음 호출부터는 이 값과 비교해 중복 갱신을 피한다.
@@ -10531,8 +10610,10 @@ bfq_do_early_stable_merge(struct bfq_data *bfqd, struct bfq_queue *bfqq,
 			  struct bfq_queue *last_bfqq_created)
 {
 	unsigned int a_idx = last_bfqq_created->actuator_idx; // 병합 대상(last_bfqq_created)이 속한 actuator 인덱스 - bic->bfqq_data[]도 actuator별로 나뉘어 있어 인덱스를 맞춰야 한다.
+	/* [한국어] 두 bfqq를 실제로 합칠 수 있는지 검사하고, 가능하면 병합 후 살아남을 bfqq를 계산(협력 큐 병합과 동일한
+	 * 로직을 재사용). */
 	struct bfq_queue *new_bfqq =
-		bfq_setup_merge(bfqq, last_bfqq_created); // 두 bfqq를 실제로 합칠 수 있는지 검사하고, 가능하면 병합 후 살아남을 bfqq를 계산(협력 큐 병합과 동일한 로직을 재사용).
+		bfq_setup_merge(bfqq, last_bfqq_created);
 
 	if (!new_bfqq) // bfq_setup_merge가 병합 불가로 판단한 경우(예: 이미 다른 큐와 병합이 진행 중)
 		return bfqq; // 병합하지 않고 원래의 bfqq를 그대로 반환.
@@ -10695,8 +10776,10 @@ static struct bfq_queue *bfq_do_or_sched_stable_merge(struct bfq_data *bfqd,
 			/*
 			 * Record the bfqq to merge to.
 			 */
+			/* [한국어] 이 프로세스(bic)가 다음 기회(예: 다음 I/O 도착 시)에
+			 * last_bfqq_created와 병합해야 함을 예약해 둔다. */
 			bic->bfqq_data[last_bfqq_created->actuator_idx].stable_merge_bfqq =
-				last_bfqq_created; // 이 프로세스(bic)가 다음 기회(예: 다음 I/O 도착 시)에 last_bfqq_created와 병합해야 함을 예약해 둔다.
+				last_bfqq_created;
 		}
 	}
 
@@ -10778,6 +10861,10 @@ static struct bfq_queue *bfq_get_queue(struct bfq_data *bfqd,
 	 * prune it.
 	 */
 	if (async_bfqq) { // 방금 새로 할당한 것이 async bfqq라면(캐시 슬롯이 비어 있었던 경우)
+		/* [한국어] async 큐는 프로세스가 아니라 bfq_group의 캐시 슬롯이
+		 * 소유한다. sync 큐라면 bic가 참조를 들고 있다가 프로세스 종료 시
+		 * 놓아주지만, async 큐에는 그런 소유자가 없으므로 슬롯 몫의 참조를
+		 * 여기서 하나 더 올려 두고 그룹이 사라질 때에야 되돌려준다. */
 		bfqq->ref++; /*
 			      * Extra group reference, w.r.t. sync
 			      * queue. This extra reference is removed
@@ -10839,8 +10926,10 @@ static void bfq_update_io_thinktime(struct bfq_data *bfqd,
 
 	ttime->ttime_samples = (7*ttime->ttime_samples + 256) / 8; // 표본 수 항목을 7/8 계수로 감쇠시키고 256(=2^8, 새 표본 1개를 고정소수점으로 표현한 값)을 더함 - 지수이동평균의 "가중치" 갱신.
 	ttime->ttime_total = div_u64(7*ttime->ttime_total + 256*elapsed,  8); // 누적 합계도 같은 7/8 감쇠 계수로 갱신하고 새 표본(elapsed)을 256배 가중치로 반영 - 정수 연산에서 정밀도를 유지하기 위한 고정소수점 스케일링.
+	/* [한국어] 반올림 보정(+128, 256의 절반)을 적용해 누적 합계를 표본 수로 나눠 최종 평균 think time을 계산
+	 * - 이 값이 bfq_update_has_short_ttime()의 판정 기준이 된다. */
 	ttime->ttime_mean = div64_ul(ttime->ttime_total + 128,
-				     ttime->ttime_samples); // 반올림 보정(+128, 256의 절반)을 적용해 누적 합계를 표본 수로 나눠 최종 평균 think time을 계산 - 이 값이 bfq_update_has_short_ttime()의 판정 기준이 된다.
+				     ttime->ttime_samples);
 }
 
 /*
@@ -11380,7 +11469,7 @@ static struct bfq_queue *bfq_init_rq(struct request *rq);
  * 직접 추가한다.
  * 호출 경로: blk_mq_sched_insert_requests -> elevator_ops.insert_requests
  *          (bfq_insert_request)
- * NVMe 연결: bio -> request 변환이 끝난 직후이며, NVMe SQ 로 가기 전
+ * NVMe 연결: bio -> request 변환이 끝난 직후이며, 드라이버로 가기 전
  *           BFQ 가 request 를 정렬/병합/우선순위 배정하는 관문이다.
  */
 /*
@@ -11430,7 +11519,7 @@ static void bfq_insert_request(struct blk_mq_hw_ctx *hctx, struct request *rq,
 		bfqg_stats_update_legacy_io(q, rq); // cgroup1 전용 레거시 I/O 통계를 갱신(cgroup2 unified hierarchy에서는 다른 경로로 통계를 낸다).
 #endif
 	spin_lock_irq(&bfqd->lock); // 이 시점부터 BFQ 내부 자료구조(스케줄러 상태 전체)를 보호하는 스핀락 획득 - 인터럽트 컨텍스트로부터의 재진입도 차단.
-	bfqq = bfq_init_rq(rq); // request 를 소유할 bfqq(따라서 NVMe SQ/actuator) 결정.
+	bfqq = bfq_init_rq(rq); // request 를 소유할 bfqq(따라서 담당 actuator) 결정.
 	if (blk_mq_sched_try_insert_merge(q, rq, &free)) { // 이 rq를 기존에 대기 중인 다른 request와 (request 단위로) 병합할 수 있는지 시도
 		spin_unlock_irq(&bfqd->lock); // 병합되어 이 rq가 더 이상 필요 없어졌으므로 락을 먼저 풀고
 		blk_mq_free_requests(&free); // 병합으로 인해 불필요해진 request(들)를 blk-mq에 반납.
@@ -11444,7 +11533,7 @@ static void bfq_insert_request(struct blk_mq_hw_ctx *hctx, struct request *rq,
 	} else if (!bfqq) { // bfq_init_rq가 유효한 bfqq를 결정하지 못한 경우(초기화 실패 등 예외 상황)
 		list_add_tail(&rq->queuelist, &bfqd->dispatch); // 어쩔 수 없이 dispatch 리스트 뒤쪽에 추가 - BFQ의 우선순위/idling 정책 없이 순서대로만 나간다.
 	} else { // 정상적인 경우(bfqq가 결정되었고 head 삽입도 아님)
-		idle_timer_disabled = __bfq_insert_request(bfqd, rq); // BFQ 내부 queue 에 삽입; NVMe SQ 로는 아직 전달되지 않고 dispatch될 때까지 대기.
+		idle_timer_disabled = __bfq_insert_request(bfqd, rq); // BFQ 내부 queue 에 삽입; 드라이버로는 아직 전달되지 않고 dispatch될 때까지 대기.
 		/*
 		 * Update bfqq, because, if a queue merge has occurred
 		 * in __bfq_insert_request, then rq has been
@@ -11567,7 +11656,7 @@ static void bfq_update_hw_tag(struct bfq_data *bfqd)
 	 */
 	if (bfqq && bfq_bfqq_has_short_ttime(bfqq) && // 현재 서비스 중인 큐가 있고, 그 큐가 "생각 시간이 짧다(interactive)"고 판정되어 idling 대상이며
 	    bfqq->dispatched + bfqq->queued[0] + bfqq->queued[1] < // 그 큐 자체의 미처리+대기 요청 수가
-	    BFQ_HW_QUEUE_THRESHOLD &&
+	    BFQ_HW_QUEUE_THRESHOLD && // 임계값(4)은 "이 정도도 동시에 안 나간다면 장치의 큐잉 능력 문제가 아니라 BFQ가 idling으로 억제한 결과"라고 볼 하한선이다
 	    bfqd->tot_rq_in_driver < BFQ_HW_QUEUE_THRESHOLD) // 임계값보다 적고, 드라이버 전체 in-flight도 임계값 미만이라면
 		return; // 큐잉 미지원이 아니라 idling 정책 때문에 dispatch가 적은 상황일 수 있으므로 판정을 유보(hw_tag를 깎지 않음).
 
@@ -11578,8 +11667,10 @@ static void bfq_update_hw_tag(struct bfq_data *bfqd)
 	bfqd->max_rq_in_driver = 0; // 다음 판정 주기를 위해 최대값 관찰치를 리셋.
 	bfqd->hw_tag_samples = 0; // 표본 수도 리셋해 새 관찰 구간을 시작.
 
+	/* [한국어] 비회전(SSD, 예: NVMe)이면서 큐잉까지 지원하는 장치인지 최종 결정 - true면 merge보다
+	 * idling/inject 정책이 SSD에 맞게 조정된다. */
 	bfqd->nonrot_with_queueing =
-		!blk_queue_rot(bfqd->queue) && bfqd->hw_tag; // 비회전(SSD, 예: NVMe)이면서 큐잉까지 지원하는 장치인지 최종 결정 - true면 merge보다 idling/inject 정책이 SSD에 맞게 조정된다.
+		!blk_queue_rot(bfqd->queue) && bfqd->hw_tag;
 }
 
 /*
@@ -11922,7 +12013,7 @@ static void bfq_update_inject_limit(struct bfq_data *bfqd,
 		/* [한국어] 실측 시간이 임계값을 넘었다 = injection 이 in-service bfqq 의 완료를
 		 * 과도하게 늦췄다는 뜻. inject_limit 을 낮춰 다음부터는 덜 주입하게 한다. */
 			bfqq->inject_limit--;
-			/* [한국어] 동시 주입 가능 개수를 1 감소시켜, NVMe controller queue 에 함께
+			/* [한국어] 동시 주입 가능 개수를 1 감소시켜, 드라이버 큐에 함께
 			 * 밀어 넣는 "남의 request" 수를 줄이고 in-service bfqq 의 completion 지연을
 			 * 완화한다. */
 			bfqq->decrease_time_jif = jiffies;
@@ -11948,11 +12039,11 @@ static void bfq_update_inject_limit(struct bfq_data *bfqd,
 	 * in particular, this function is executed before
 	 * bfqd->tot_rq_in_driver is decremented in such a code path.
 	 */
-	if ((bfqq->last_serv_time_ns == 0 && bfqd->tot_rq_in_driver == 1) ||
-	    tot_time_ns < bfqq->last_serv_time_ns) {
 	/* [한국어] (a) 아직 baseline 이 계산된 적 없고 지금 driver 에 미완료 request 가 이것
 	 * 하나뿐이거나(순수 측정 가능 시점), 또는 (b) 이번 실측 시간이 기존 baseline 보다
 	 * 짧다(=더 낮은/정확한 기준을 발견) — 두 경우 모두 baseline 을 갱신할 신호다. */
+	if ((bfqq->last_serv_time_ns == 0 && bfqd->tot_rq_in_driver == 1) ||
+	    tot_time_ns < bfqq->last_serv_time_ns) {
 		if (bfqq->last_serv_time_ns == 0) {
 		/* [한국어] 이번이 baseline 최초 계산이라면, 지금까지는 injection 효과를 평가할
 		 * 기준이 없어 injection 자체를 시도하지 못했다는 뜻 — 이제 baseline 이 생겼으니
@@ -12054,12 +12145,12 @@ static void bfq_finish_requeue_request(struct request *rq)
 		 * 상태가 없으므로 바로 반환해 이중 처리(double-free 유사 상황)를 막는다. */
 		return;
 
-	bfqd = bfqq->bfqd;
 	/* [한국어] bfqq 로부터 소속 bfqd(스케줄러 전역 상태)를 얻는다 - 이후 락/통계 갱신에 사용. */
+	bfqd = bfqq->bfqd;
 
+	/* [한국어] rq 가 실제로 driver(NVMe controller)에 dispatch 된 적이 있는지 확인 -
+	 * dispatch 되지 않고 취소된 rq 는 서비스 시간 통계에 반영하면 왜곡되므로 제외. */
 	if (rq->rq_flags & RQF_STARTED)
-		/* [한국어] rq 가 실제로 driver(NVMe controller)에 dispatch 된 적이 있는지 확인 -
-		 * dispatch 되지 않고 취소된 rq 는 서비스 시간 통계에 반영하면 왜곡되므로 제외. */
 		bfqg_stats_update_completion(bfqq_group(bfqq),
 					     rq->start_time_ns,
 					     rq->io_start_time_ns,
@@ -12079,22 +12170,22 @@ static void bfq_finish_requeue_request(struct request *rq)
 			 * 지목해 둔 바로 그 request 라면, 완료 시점에 inject_limit 을 조정한다. */
 			bfq_update_inject_limit(bfqd, bfqq);
 
-		bfq_completed_request(bfqq, bfqd);
 		/* [한국어] bfqq/entity 의 dispatched 카운트, budget 소비, tot_rq_in_driver 등을
 		 * 갱신하고 필요하면 idle 타이머를 무장하거나 in-service bfqq 만료를 판단한다 -
 		 * NVMe CQ completion 이 도착했을 때 BFQ 스케줄 상태를 실제로 갱신하는 핵심 지점. */
+		bfq_completed_request(bfqq, bfqd);
 	}
-	bfqq_request_freed(bfqq);
 	/* [한국어] bfqq(및 상위 entity 체인)의 "allocated request 수"를 1 감소 - 이 카운트는
 	 * cgroup 별 동시 tag 사용 한도를 넘지 않도록 bfq_limit_depth 가 참조한다. */
-	bfq_put_queue(bfqq);
+	bfqq_request_freed(bfqq);
 	/* [한국어] 이 rq 가 쥐고 있던 bfqq 참조를 반납(ref--) - 참조 카운트가 0 이 되면 bfqq
 	 * 자체가 free 된다. rq 준비 시(bfq_init_rq) ref++ 했던 것과 짝을 이루는 해제. */
-	RQ_BIC(rq)->requests--;
+	bfq_put_queue(bfqq);
 	/* [한국어] 이 rq 를 발급한 io_context(bic) 의 in-flight request 수를 감소 - 프로세스
 	 * 단위 동시 발급 요청 수를 추적해 cooperating queue 병합/분리 판단 등에 쓰인다. */
-	spin_unlock_irqrestore(&bfqd->lock, flags);
+	RQ_BIC(rq)->requests--;
 	/* [한국어] 락 해제 및 인터럽트 상태 복원 - 위 임계구역에서의 자료구조 갱신이 끝났다. */
+	spin_unlock_irqrestore(&bfqd->lock, flags);
 
 	/*
 	 * Reset private fields. In case of a requeue, this allows
@@ -12113,12 +12204,12 @@ static void bfq_finish_requeue_request(struct request *rq)
 	 * requests (which are not re-inserted into bfq internal
 	 * queues).
 	 */
-	rq->elv.priv[0] = NULL;
 	/* [한국어] bic 포인터 제거 - 위에서 이미 icq/bic 기반 정리를 마쳤으므로, 이 rq 가
 	 * 재사용되더라도 낡은 bic 를 다시 참조하지 않도록 끊는다. */
-	rq->elv.priv[1] = NULL;
+	rq->elv.priv[0] = NULL;
 	/* [한국어] bfqq 포인터 제거 - 함수 맨 위의 "!bfqq" 검사가 재호출 시 조기 반환하도록
 	 * 만드는 핵심 장치이며, 재삽입 시에는 bfq_init_rq 가 이 필드들을 다시 채운다. */
+	rq->elv.priv[1] = NULL;
 }
 
 /*
@@ -12318,22 +12409,22 @@ __bfq_get_bfqq_handle_split(struct bfq_data *bfqd, struct bfq_io_cq *bic,
 		/* [한국어] 기존에 oom_bfqq(진짜 큐가 아닌 임시 폴백)를 갖고 있었다면 -
 		 * 이제 진짜 큐로 교체할 것이므로 그 임시 참조를 먼저 반납한다. */
 		bfq_put_queue(bfqq);
-	bfqq = bfq_get_queue(bfqd, bio, is_sync, bic, split);
 	/* [한국어] 진짜 bfq_queue 를 새로 찾거나 할당 - ioprio/cgroup 기준으로 기존
 	 * 큐를 재사용할 수도 있고, 정말 새로 kmem_cache 할당할 수도 있다(내부에서
 	 * 메모리 부족 시 oom_bfqq 로 폴백). */
+	bfqq = bfq_get_queue(bfqd, bio, is_sync, bic, split);
 
-	bic_set_bfqq(bic, bfqq, is_sync, act_idx);
 	/* [한국어] 이 프로세스·actuator 슬롯에 새로 얻은 bfqq 를 연결 - 다음 I/O 부터는
 	 * bic_to_bfqq() 로 곧장 이 bfqq 를 찾을 수 있게 된다. */
-	if (split && is_sync) {
+	bic_set_bfqq(bic, bfqq, is_sync, act_idx);
 	/* [한국어] 이번 호출이 "협력 관계가 깨져 분리된 직후"이고 동기 I/O 라면 - burst
 	 * 감지 상태를 새 bfqq 로 이어 붙여야 한다(비동기 큐는 burst 판정 대상이 아님). */
+	if (split && is_sync) {
 		if ((bfqq_data->was_in_burst_list && bfqd->large_burst) ||
+		    /* [한국어] 분리 전에 burst 목록에 있었고 현재 large_burst 상태이거나,
+		     * 이미 large burst 로 저장돼 있었다면 - 새 bfqq 도 곧바로 large burst
+		     * 로 표시해 weight-raise 배제 등의 정책을 이어가게 한다. */
 		    bfqq_data->saved_in_large_burst)
-			/* [한국어] 분리 전에 burst 목록에 있었고 현재 large_burst 상태이거나,
-			 * 이미 large burst 로 저장돼 있었다면 - 새 bfqq 도 곧바로 large burst
-			 * 로 표시해 weight-raise 배제 등의 정책을 이어가게 한다. */
 			bfq_mark_bfqq_in_large_burst(bfqq);
 		else {
 		/* [한국어] large burst 조건이 아니라면 일단 large burst 표시를 지운다 -
@@ -12368,20 +12459,20 @@ __bfq_get_bfqq_handle_split(struct bfq_data *bfqd, struct bfq_io_cq *bic,
 				 * harm the detection of large
 				 * bursts significantly.
 				 */
-				hlist_add_head(&bfqq->burst_list_node,
-					       &bfqd->burst_list);
 				/* [한국어] 원본 주석대로, 정확한 burst 목록 일치 여부를 따지는
 				 * 비용을 피하려고 "예전에 burst 목록에 있었다"는 사실만으로
 				 * 무조건 현재 burst_list 에 재등록한다 - 드물게 부정확할 수
 				 * 있으나 large burst 탐지에 미치는 영향은 미미하다. */
+				hlist_add_head(&bfqq->burst_list_node,
+					       &bfqd->burst_list);
 		}
-		bfqq->split_time = jiffies;
 		/* [한국어] 분리가 일어난 시각을 기록 - 이후 "너무 빨리 다시 분리/병합을
 		 * 반복하는지" 등을 판단하는 데 참조 시각으로 쓰인다. */
+		bfqq->split_time = jiffies;
 	}
 
-	return bfqq;
 	/* [한국어] 이번 bio 가 실제로 속할 bfqq 를 호출자에게 반환. */
+	return bfqq;
 }
 
 /*
@@ -12617,22 +12708,22 @@ static struct bfq_queue *bfq_get_bfqq_handle_split(struct bfq_data *bfqd,
 		return bfqq;
 	}
 
-	bfqq = __bfq_get_bfqq_handle_split(bfqd, bic, bio, true, is_sync, NULL);
 	/* [한국어] 여전히 다른 프로세스와 공유 중이어서 분리가 실제로 일어났다 - 이번엔
 	 * split=true 로 호출해 이 프로세스 전용의 완전히 새로운 bfqq 를 할당받는다. */
+	bfqq = __bfq_get_bfqq_handle_split(bfqd, bic, bio, true, is_sync, NULL);
+	/* [한국어] 메모리 부족으로 새 큐 할당에 실패해 oom_bfqq 로 폴백된 경우 -
+	 * waker 관계 등 추가 상태 복원은 의미가 없으므로 그대로 반환. */
 	if (unlikely(bfqq == &bfqd->oom_bfqq))
 		return bfqq;
-		/* [한국어] 메모리 부족으로 새 큐 할당에 실패해 oom_bfqq 로 폴백된 경우 -
-		 * waker 관계 등 추가 상태 복원은 의미가 없으므로 그대로 반환. */
 
-	bfq_bfqq_resume_state(bfqq, bfqd, bic, false);
 	/* [한국어] 새로 만든 bfqq 에 bic 가 저장해 둔 이전 상태를 복원 - false 인자는
 	 * "완전히 새로 생성된 큐로의 복원"임을 표시(위의 true 케이스와 구분). */
-	bfqq->waker_bfqq = waker_bfqq;
+	bfq_bfqq_resume_state(bfqq, bfqd, bic, false);
 	/* [한국어] 분리 전에 확보해 둔 waker 관계를 새 bfqq 로 이어 붙인다. */
-	bfqq->tentative_waker_bfqq = NULL;
+	bfqq->waker_bfqq = waker_bfqq;
 	/* [한국어] "아직 확정되지 않은 waker 후보" 필드는 새 큐이므로 초기화 - 이후
 	 * bfq_check_waker() 가 새로 관찰하며 채워 나간다. */
+	bfqq->tentative_waker_bfqq = NULL;
 
 	/*
 	 * If the waker queue disappears, then new_bfqq->waker_bfqq must be
@@ -12640,15 +12731,15 @@ static struct bfq_queue *bfq_get_bfqq_handle_split(struct bfq_data *bfqd,
 	 * woken_list of the waker. See
 	 * bfq_check_waker for details.
 	 */
+	/* [한국어] waker_bfqq 가 나중에 소멸할 때 이 새 bfqq->waker_bfqq 포인터도
+	 * 함께 정리(리셋)될 수 있도록, waker 쪽의 woken_list 에 이 bfqq 를
+	 * 등록해 둔다 - 상세 정리 로직은 bfq_check_waker() 참고. */
 	if (waker_bfqq)
 		hlist_add_head(&bfqq->woken_list_node,
 			       &bfqq->waker_bfqq->woken_list);
-		/* [한국어] waker_bfqq 가 나중에 소멸할 때 이 새 bfqq->waker_bfqq 포인터도
-		 * 함께 정리(리셋)될 수 있도록, waker 쪽의 woken_list 에 이 bfqq 를
-		 * 등록해 둔다 - 상세 정리 로직은 bfq_check_waker() 참고. */
 
-	return bfqq;
 	/* [한국어] 분리를 거쳐 이 프로세스 전용으로 확정된 새 bfqq 를 반환. */
+	return bfqq;
 }
 
 /*
@@ -12904,47 +12995,47 @@ bfq_idle_slice_timer_body(struct bfq_data *bfqd, struct bfq_queue *bfqq)
 		return;
 	}
 
-	bfq_clear_bfqq_wait_request(bfqq);
 	/* [한국어] "request 도착을 기다리며 idling 중" 플래그를 해제 - 타이머가 만료돼
 	 * idling 구간이 끝났음을 반영한다. */
+	bfq_clear_bfqq_wait_request(bfqq);
 
-	if (bfq_bfqq_budget_timeout(bfqq))
+	if (bfq_bfqq_budget_timeout(bfqq)) // idling으로 기다리는 사이에 budget 시간 제한까지 지나버린 경우 - idling의 목적(다음 요청 확보)보다 시간 제한이 우선한다
 		/*
 		 * Also here the queue can be safely expired
 		 * for budget timeout without wasting
 		 * guarantees
 		 */
-		reason = BFQQE_BUDGET_TIMEOUT;
 		/* [한국어] 이 bfqq 에 할당된 budget(서비스 시간/섹터 한도) 이 이미 소진돼
 		 * 타임아웃됐다면 - budget timeout 사유로 만료해도 서비스 보장을 해치지
 		 * 않는다고 판단한다. */
-	else if (bfqq->queued[0] == 0 && bfqq->queued[1] == 0)
+		reason = BFQQE_BUDGET_TIMEOUT;
+	else if (bfqq->queued[0] == 0 && bfqq->queued[1] == 0) // 기다린 보람 없이 sync/async 어느 쪽에도 요청이 도착하지 않은 경우 - idling이 순수 손실이었다는 뜻
 		/*
 		 * The queue may not be empty upon timer expiration,
 		 * because we may not disable the timer when the
 		 * first request of the in-service queue arrives
 		 * during disk idling.
 		 */
-		reason = BFQQE_TOO_IDLE;
 		/* [한국어] queued[0](동기)/queued[1](비동기) 모두 0, 즉 아직도 대기 중인
 		 * request 가 전혀 없다면 - 예상했던 request 가 결국 오지 않았으므로
 		 * "너무 오래 idle 했다"는 사유로 만료한다. */
+		reason = BFQQE_TOO_IDLE;
+	/* [한국어] 이미 request 가 도착해 있다면(idling 중 타이머 해제가 레이스로
+	 * 늦어진 경우) - 만료하지 않고 곧바로 dispatch 재개 단계로 건너뛴다. */
 	else
 		goto schedule_dispatch;
-		/* [한국어] 이미 request 가 도착해 있다면(idling 중 타이머 해제가 레이스로
-		 * 늦어진 경우) - 만료하지 않고 곧바로 dispatch 재개 단계로 건너뛴다. */
 
-	bfq_bfqq_expire(bfqd, bfqq, true, reason);
 	/* [한국어] 결정된 사유로 bfqq 를 만료시켜 B-WF2Q+ 스케줄러가 다음 in-service
 	 * 큐를 새로 선택하게 한다 - true 인자는 "타이머 콜백에 의한 강제 만료"임을
 	 * 표시(자발적 만료와 구분해 통계 처리가 달라질 수 있음). */
+	bfq_bfqq_expire(bfqd, bfqq, true, reason);
 
 schedule_dispatch:
-	bfq_schedule_dispatch(bfqd);
 	/* [한국어] blk-mq 에 dispatch 워크를 예약 - 만료로 새 in-service 큐가 정해졌든,
 	 * 만료 없이 그냥 넘어왔든 대기 중인 request 처리를 재개시킨다. */
-	spin_unlock_irqrestore(&bfqd->lock, flags);
+	bfq_schedule_dispatch(bfqd);
 	/* [한국어] 락 해제 및 인터럽트 상태 복원. */
+	spin_unlock_irqrestore(&bfqd->lock, flags);
 }
 
 /*
@@ -12983,13 +13074,13 @@ schedule_dispatch:
 static enum hrtimer_restart bfq_idle_slice_timer(struct hrtimer *timer)
 {
 	struct bfq_data *bfqd = container_of(timer, struct bfq_data,
+					     /* [한국어] hrtimer 포인터로부터 그것을 멤버로 포함하는 struct bfq_data 전체를
+					      * 역산(container_of) - hrtimer API 는 콜백에 timer 자체만 넘기므로, BFQ
+					      * 전역 상태에 접근하려면 이 매크로로 바깥 구조체를 복원해야 한다. */
 					     idle_slice_timer);
-	/* [한국어] hrtimer 포인터로부터 그것을 멤버로 포함하는 struct bfq_data 전체를
-	 * 역산(container_of) - hrtimer API 는 콜백에 timer 자체만 넘기므로, BFQ
-	 * 전역 상태에 접근하려면 이 매크로로 바깥 구조체를 복원해야 한다. */
-	struct bfq_queue *bfqq = bfqd->in_service_queue;
 	/* [한국어] 현재(콜백 실행 시점) in-service 인 bfqq 를 읽는다 - 타이머가 걸렸을
 	 * 때와 동일한 큐라는 보장은 없으며, 아래 주석처럼 레이스가 있을 수 있다. */
+	struct bfq_queue *bfqq = bfqd->in_service_queue;
 
 	/*
 	 * Theoretical race here: the in-service queue can be NULL or
@@ -12999,16 +13090,16 @@ static enum hrtimer_restart bfq_idle_slice_timer(struct hrtimer *timer)
 	 * happen, but in the worst case we just expire a queue too
 	 * early.
 	 */
+	/* [한국어] in-service 큐가 존재한다면(가장 흔한 경우) 실제 만료 판단과
+	 * dispatch 재개 처리를 위임한다 - 내부에서 다시 한 번 이 bfqq 가 여전히
+	 * in-service 인지 재검증한다. */
 	if (bfqq)
 		bfq_idle_slice_timer_body(bfqd, bfqq);
-		/* [한국어] in-service 큐가 존재한다면(가장 흔한 경우) 실제 만료 판단과
-		 * dispatch 재개 처리를 위임한다 - 내부에서 다시 한 번 이 bfqq 가 여전히
-		 * in-service 인지 재검증한다. */
 
-	return HRTIMER_NORESTART;
 	/* [한국어] 이 hrtimer 는 반복(periodic) 타이머가 아니라 매번 새로 무장되는
 	 * 일회성 타이머이므로, 커널이 자동 재시작하지 않도록 NORESTART 를 반환한다 -
 	 * 다음 idling 이 필요해지면 bfq_arm_slice_timer() 가 다시 hrtimer_start() 한다. */
+	return HRTIMER_NORESTART;
 }
 
 /*
@@ -13322,22 +13413,22 @@ static void bfq_exit_queue(struct elevator_queue *e)
 	spin_unlock_irq(&bfqd->lock);
 #endif
 
-	blk_stat_disable_accounting(bfqd->queue);
 	/* [한국어] bfq_init_queue() 에서 활성화했던 blk_stat(요청 완료 시간 통계 수집)을
 	 * 비활성화 - peak_rate 추정 등에 쓰이던 통계 수집 훅을 해제한다. */
-	blk_queue_flag_clear(QUEUE_FLAG_DISABLE_WBT_DEF, bfqd->queue);
+	blk_stat_disable_accounting(bfqd->queue);
 	/* [한국어] BFQ 가 초기화 시 설정했던 "기본 WBT(Writeback Throttling) 비활성화"
 	 * 플래그를 다시 지운다 - BFQ 자체가 쓰기 흐름을 조절하므로 WBT 를 꺼 두었던
 	 * 것을 원상복구하는 절차의 일부. */
-	wbt_enable_default(bfqd->queue->disk);
+	blk_queue_flag_clear(QUEUE_FLAG_DISABLE_WBT_DEF, bfqd->queue);
 	/* [한국어] 다른 스케줄러(WBT 를 필요로 할 수 있는)로 전환될 것에 대비해 WBT 를
 	 * 기본 정책대로 다시 활성화 - BFQ 는 자체 저지연 로직이 있어 WBT 와 중복
 	 * 제어를 피하려고 꺼 두었지만, 스케줄러가 바뀌면 이 배려가 필요 없다. */
+	wbt_enable_default(bfqd->queue->disk);
 
-	kfree(bfqd);
 	/* [한국어] 이 device 의 BFQ 전역 상태 전체를 해제 - bfq_init_queue() 에서
 	 * kzalloc_node() 로 할당했던 바로 그 메모리. 이 시점 이후로는 bfqd 를 참조하는
 	 * 어떤 콜백도 실행되지 않음이 보장돼야 한다(위에서 타이머/훅을 모두 정리했으므로). */
+	kfree(bfqd);
 }
 
 /*
@@ -13868,9 +13959,9 @@ static int __init bfq_slab_setup(void)
 	 * 플래그 0은 SLAB_HWCACHE_ALIGN 등의 추가 옵션 없이 기본 정책을 사용한다는 뜻.
 	 * 이 캐시는 이후 bfq_get_queue() 등에서 kmem_cache_alloc_node()로 사용된다. */
 	bfq_pool = KMEM_CACHE(bfq_queue, 0);
+	/* [한국어] slab 생성 실패 - 시스템 메모리 부족 등 극단적 상황.
+	 * 이 경우 BFQ 자체를 elevator로 등록할 수 없으므로 즉시 실패 반환. */
 	if (!bfq_pool)
-		/* [한국어] slab 생성 실패 - 시스템 메모리 부족 등 극단적 상황.
-		 * 이 경우 BFQ 자체를 elevator로 등록할 수 없으므로 즉시 실패 반환. */
 		return -ENOMEM;
 	return 0;
 	/* [한국어] 정상 초기화 완료 - bfq_init()이 이어서 elv_register()를 호출하도록 허용. */
@@ -14188,16 +14279,16 @@ static ssize_t bfq_max_budget_store(struct elevator_queue *e,
 			/* [한국어] budget 필드가 int이므로 INT_MAX를 넘는 입력은 잘라낸다
 			 * (오버플로/부호 반전 방지). */
 			__data = INT_MAX;
-		bfqd->bfq_max_budget = __data;
 		/* [한국어] 클램프된 값을 실제 사용 중인 max_budget에 즉시 반영. */
+		bfqd->bfq_max_budget = __data;
 	}
 
-	bfqd->bfq_user_max_budget = __data;
 	/* [한국어] 사용자가 마지막으로 지정한 원본 값을 별도로 기록 - 0이면 이후
 	 * bfq_timeout_sync_store() 등에서 "autotuning 모드"로 판단하는 기준이 된다. */
+	bfqd->bfq_user_max_budget = __data;
 
-	return count;
 	/* [한국어] write(2)가 입력 전체를 소비한 것으로 간주하도록 count를 그대로 반환. */
+	return count;
 }
 
 /*
@@ -14245,21 +14336,21 @@ static ssize_t bfq_timeout_sync_store(struct elevator_queue *e,
 	if (__data < 1)
 		/* [한국어] 0 이하는 의미 없는 타임아웃이므로 최소 1ms로 강제. */
 		__data = 1;
+	/* [한국어] jiffies 변환 후 int 필드에 담기므로 상한을 INT_MAX로 제한. */
 	else if (__data > INT_MAX)
-		/* [한국어] jiffies 변환 후 int 필드에 담기므로 상한을 INT_MAX로 제한. */
 		__data = INT_MAX;
 
-	bfqd->bfq_timeout = msecs_to_jiffies(__data);
 	/* [한국어] ms 입력을 jiffies로 변환해 실제 타임아웃 필드에 저장 - 이후
 	 * bfq_queue의 budget 만료 판정에서 이 값이 기준이 된다. */
+	bfqd->bfq_timeout = msecs_to_jiffies(__data);
+	/* [한국어] 사용자가 max_budget을 0(autotuning)으로 둔 상태라면, 새
+	 * timeout에 맞춰 peak_rate 기반 budget도 즉시 다시 계산해 둔다 -
+	 * timeout과 budget이 서로 어긋난 채로 남아있지 않도록. */
 	if (bfqd->bfq_user_max_budget == 0)
-		/* [한국어] 사용자가 max_budget을 0(autotuning)으로 둔 상태라면, 새
-		 * timeout에 맞춰 peak_rate 기반 budget도 즉시 다시 계산해 둔다 -
-		 * timeout과 budget이 서로 어긋난 채로 남아있지 않도록. */
 		bfqd->bfq_max_budget = bfq_calc_max_budget(bfqd);
 
-	return count;
 	/* [한국어] 입력 전체를 소비한 것으로 간주. */
+	return count;
 }
 
 /*
@@ -14302,18 +14393,18 @@ static ssize_t bfq_strict_guarantees_store(struct elevator_queue *e,
 	if (__data > 1)
 		/* [한국어] 불리언 필드이므로 1을 초과하는 값은 모두 1(true)로 취급. */
 		__data = 1;
+	/* [한국어] 지금까지 꺼져 있던 strict_guarantees를 새로 켜는 전이(0→1)이고,
+	 * 동시에 현재 idle 시간이 8ms 미만이면 - strict 모드가 실효성을 가지도록
+	 * 최소 8ms로 끌어올린다(이 분기에 안 걸리면 기존 idle 값 유지). */
 	if (!bfqd->strict_guarantees && __data == 1
 	    && bfqd->bfq_slice_idle < 8 * NSEC_PER_MSEC)
-		/* [한국어] 지금까지 꺼져 있던 strict_guarantees를 새로 켜는 전이(0→1)이고,
-		 * 동시에 현재 idle 시간이 8ms 미만이면 - strict 모드가 실효성을 가지도록
-		 * 최소 8ms로 끌어올린다(이 분기에 안 걸리면 기존 idle 값 유지). */
 		bfqd->bfq_slice_idle = 8 * NSEC_PER_MSEC;
 
-	bfqd->strict_guarantees = __data;
 	/* [한국어] 최종 클램프된 값을 실제 플래그 필드에 반영. */
+	bfqd->strict_guarantees = __data;
 
-	return count;
 	/* [한국어] 입력 전체를 소비한 것으로 간주. */
+	return count;
 }
 
 /*
@@ -14358,16 +14449,16 @@ static ssize_t bfq_low_latency_store(struct elevator_queue *e,
 	if (__data > 1)
 		/* [한국어] 불리언 필드이므로 1을 초과하는 값은 모두 1(true)로 취급. */
 		__data = 1;
+	/* [한국어] "켜짐 → 꺼짐" 전이를 감지 - low_latency 기능을 끄는 순간
+	 * 이미 진행 중인 weight-raising을 계속 두면 정책 불일치가 생기므로
+	 * 모든 큐의 WR을 즉시 강제 종료한다. */
 	if (__data == 0 && bfqd->low_latency != 0)
-		/* [한국어] "켜짐 → 꺼짐" 전이를 감지 - low_latency 기능을 끄는 순간
-		 * 이미 진행 중인 weight-raising을 계속 두면 정책 불일치가 생기므로
-		 * 모든 큐의 WR을 즉시 강제 종료한다. */
 		bfq_end_wr(bfqd);
-	bfqd->low_latency = __data;
 	/* [한국어] 최종 클램프된 값을 실제 플래그 필드에 반영. */
+	bfqd->low_latency = __data;
 
-	return count;
 	/* [한국어] 입력 전체를 소비한 것으로 간주. */
+	return count;
 }
 
 /*
@@ -14429,7 +14520,7 @@ static const struct elv_fs_entry bfq_attrs[] = {
  */
 static struct elevator_type iosched_bfq_mq = {
 	.ops = {
-		.limit_depth		= bfq_limit_depth, /* [한국어] tag 할당 전 depth 제한 - sync/async/cgroup별 blk-mq tag 수 제한(NVMe SQ 슬롯 배분) */
+		.limit_depth		= bfq_limit_depth, /* [한국어] tag 할당 전 depth 제한 - sync/async/cgroup별 blk-mq tag 수 제한(장치 슬롯 배분) */
 		.prepare_request	= bfq_prepare_request, /* [한국어] request가 스케줄러에 삽입되기 전 bfq_queue와 연결 준비 */
 		.requeue_request        = bfq_finish_requeue_request, /* [한국어] dispatch 되었다가 재큐잉되는 request 처리(에러/재시도 경로) */
 		.finish_request		= bfq_finish_request, /* [한국어] request 완전 종료 시 bfq_queue/entity 정리 */
@@ -14598,12 +14689,12 @@ MODULE_DESCRIPTION("MQ Budget Fair Queueing I/O Scheduler"); /* [한국어] modi
  * NVMe 관점 핵심 요약
  *
  *  - BFQ 는 blk-mq 와 NVMe 드라이버 사이에서 request 를 정렬/선별/제한하며,
- *    NVMe SQ/CQ 의 queue depth 와 CID 할당에 직접적인 영향을 준다.
+ *    장치/CQ 의 queue depth 와 CID 할당에 직접적인 영향을 준다.
  *  - nonrot_with_queueing=true 인 NVMe SSD 에서는 merge 를 억제하고
  *    injection 으로 NCQ depth 를 적극 활용하며, 필요할 때만 idle 을 허용한다.
  *  - num_actuators/rq_in_driver[] 를 통해 다중 actuator NVMe 장치의
  *    per-actuator 부하를 추정하고 병렬 throughput 을 극대화한다(추정).
- *  - bfq_limit_depth/bfq_depth_updated 는 NVMe SQ/tag 자원을
+ *  - bfq_limit_depth/bfq_depth_updated 는 장치/tag 자원을
  *    sync/async/cgroup 우선순위에 따라 배분한다.
  *  - bfq_finish_requeue_request/bfq_update_peak_rate 는 NVMe CQ completion
  *    정보를 바탕으로 처리율을 추정하고 다음 dispatch 결정에 반영한다.
