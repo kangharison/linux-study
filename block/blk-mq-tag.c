@@ -11,37 +11,79 @@
  * [한국어] blk-mq tag 할당·해제 엔진 (block/blk-mq-tag.c)
  *
  * === 파일의 역할 ===
- * blk-mq 레이어에서 tag(NVMe의 Command ID와 1:1 대응)를 할당·해제하는 핵심
- * 엔진이다. IO 요청이 하드웨어 큐(NVMe SQ)로 내려가기 전에 고유한 tag를
- * 발급하고, NVMe CQ 완료 인터럽트 이후 해당 tag를 회수하여 재사용할 수 있도록
- * 관리한다. sbitmap_queue 기반의 lock-free 비트맵을 사용하여 다중 CPU에서
- * 발생하는 동시 tag 할당·해제 경쟁을 효율적으로 처리한다.
+ * blk-mq 레이어에서 "tag"를 할당·해제하는 핵심 엔진이다. tag 는 0..(깊이-1)
+ * 범위의 정수 하나로, 이것을 쥐고 있는 동안만 요청이 장치로 내려갈 수 있다.
+ * 즉 tag 는 단순한 식별자가 아니라 **동시 진행(in-flight) IO 수를 제한하는
+ * 자원 티켓**이다. tag 가 없으면 요청은 여기서 잠들어 기다린다. 할당/해제는
+ * lib/sbitmap.c 의 sbitmap_queue(계층형 lock-free 비트맵) 위에서 이루어져,
+ * 수십 개 CPU 가 동시에 tag 를 다투어도 단일 락 병목이 생기지 않는다.
+ * 같은 tag 값이 `tags->rqs[tag]` 배열의 인덱스로도 쓰이므로, 장치가 완료를
+ * 보고할 때 정수 하나만으로 원래 request 포인터를 O(1)에 복원할 수 있다.
+ *
+ * === NVMe 독자를 위한 정확한 대응 관계 (흔한 오해 교정) ===
+ * "blk-mq tag == NVMe Command ID" 라는 설명이 널리 퍼져 있으나 부정확하다.
+ * drivers/nvme/host/nvme.h 의 실제 정의는 다음과 같다:
+ *
+ *     CID(16bit) = | gen(4bit) | blk-mq tag(12bit) |
+ *     nvme_cid(rq) = nvme_cid_install_genctr(nvme_req(rq)->genctr) | rq->tag
+ *
+ * 상위 4비트는 세대 카운터(genctr)다. tag 는 반납 즉시 재사용되므로, 늦게
+ * 도착한 이전 세대의 CQE 가 새 요청을 잘못 완료시킬 수 있다. 세대 니블이
+ * 이 stale 완료를 걸러낸다(nvme_find_rq 가 불일치 시 NULL 반환).
+ * NVME_QUIRK_SKIP_CID_GEN 장치만 gen 없이 tag 를 그대로 쓴다.
+ *
+ * 이 12비트 폭이 실제 제약으로 나타난 곳이 drivers/nvme/host/pci.c 다:
+ *     #define NVME_PCI_MAX_QUEUE_SIZE 4095      (= 0xfff)
+ *     MODULE_PARM_DESC(io_queue_depth, "should >= 2 and < 4096")
+ * 즉 **NVMe PCIe 의 I/O 큐 깊이 상한 4095 는 이 파일이 발급하는 tag 가
+ * 12비트에 들어가야 하기 때문에 생긴 값**이다(기본값 1024).
+ *
+ * 또 하나 흔한 오해: "tag 가 SQ 슬롯 번호와 1:1 대응한다"는 서술도 틀렸다.
+ * SQE 가 기록되는 위치는 링의 생산자 인덱스로 정해진다:
+ *     memcpy(nvmeq->sq_cmds + (nvmeq->sq_tail << nvmeq->sqes), cmd, 64);
+ * tag 와 sq_tail 은 서로 독립적이다. tag 는 "몇 개까지 동시에 띄울 수
+ * 있는가"를 정하고, sq_tail 은 "이번 것을 링 어디에 쓸 것인가"를 정한다.
+ * 두 값의 상한이 같은 q_depth 로 맞춰져 있을 뿐이다.
  *
  * === 전체 아키텍처에서의 위치 ===
- * 제출 경로:
- *   blk_mq_submit_bio → blk_mq_get_request → blk_mq_get_tag [본 파일]
- *   → nvme_queue_rq → nvme_submit_cmd (NVMe SQ doorbell)
+ * 제출 경로 (모두 블록 계층 내부 호출):
+ *   blk_mq_submit_bio → blk_mq_get_new_requests → __blk_mq_alloc_requests
+ *   → blk_mq_get_tag [본 파일] → (tag 확보 후) blk_mq_dispatch_rq_list
+ *   → mq_ops->queue_rq
+ * 여기서 mq_ops->queue_rq 는 **함수 포인터 간접 호출**이며, NVMe PCIe 가
+ * 붙어 있을 때 그 실체가 nvme_queue_rq 다. 블록 계층 코드가 nvme_* 심볼을
+ * 직접 부르는 곳은 한 군데도 없다.
  * 완료 경로:
- *   NVMe CQ 완료 인터럽트 → nvme_complete_rq → blk_mq_complete_request
- *   → __blk_mq_end_request → blk_mq_put_driver_tag → blk_mq_put_tag [본 파일]
- * 실행 컨텍스트: 제출 경로는 프로세스 컨텍스트(또는 softirq), 완료 경로는
- * 하드웨어 인터럽트 컨텍스트에서 호출된다.
+ *   (NVMe PCIe 기준) nvme_irq → nvme_poll_cq → nvme_handle_cqe
+ *   → nvme_try_complete_req → blk_mq_complete_request → __blk_mq_end_request
+ *   → blk_mq_put_driver_tag → blk_mq_put_tag [본 파일] → sbitmap_queue_clear
+ *   → tag 를 기다리며 잠든 제출자 wakeup
+ * 실행 컨텍스트: 제출 경로는 프로세스 컨텍스트(잠들 수 있음; BLK_MQ_REQ_NOWAIT
+ * 이면 잠들지 않고 즉시 실패). 완료 경로는 장치 인터럽트 핸들러에서
+ * 시작하지만, blk_mq_complete_request 가 완료 CPU 정책(BLK_MQ_F_BLOCKING,
+ * IPI/softirq 위임)에 따라 다른 컨텍스트로 넘길 수 있다.
  *
  * === 타 모듈과의 연결 ===
  * 의존 모듈:
- *   - lib/sbitmap.c: lock-free 비트맵(sbitmap_queue)으로 CID 할당·해제 수행.
- *   - block/blk-mq.c: blk_mq_get_request()가 본 파일의 blk_mq_get_tag() 호출.
- *   - block/blk-mq-sched.h: IO 스케줄러 연동 시 shallow_depth 등 hint 전달.
+ *   - lib/sbitmap.c: sbitmap_queue 자료구조 본체. 실제 비트 탐색/해제/대기열
+ *     wakeup 로직은 전부 여기에 있고, 본 파일은 정책(예약 영역 분리, 공정
+ *     분배, hctx 활성 상태 확인)만 얹는다.
+ *   - block/blk-mq.c: 요청 할당 경로가 blk_mq_get_tag()를, 완료/해제 경로가
+ *     blk_mq_put_tag()를 호출한다.
+ *   - block/blk-mq-sched.h: IO 스케줄러가 붙으면 shallow_depth 로 한 큐가
+ *     드라이버 태그를 독점하지 못하게 제한한다.
  * 피의존 모듈:
- *   - drivers/nvme/host/pci.c: nvme_complete_rq에서 blk_mq_put_tag 간접 호출.
+ *   - 모든 blk-mq 드라이버(nvme, scsi, virtio-blk 등)가 blk_mq_tag_to_rq()로
+ *     완료 시 정수 → request 복원을 수행한다. NVMe 는 nvme_find_rq() 안에서
+ *     이 함수를 부른다.
  *   - block/blk-mq-tag.h: blk_mq_tags 구조체 및 공개 API 선언.
  * 공유 자료구조:
  *   - struct blk_mq_tags: tag pool 전체 상태(비트맵, 예약 영역, rqs 배열 등).
  *   - struct blk_mq_alloc_data: tag 할당 시 CPU/hctx/플래그 컨텍스트 전달.
  *
  * === 주요 함수/구조체 요약 ===
- * blk_mq_get_tag()      : tag(NVMe CID) 할당 진입점; SQ가 꽉 차면 sleep 대기.
- * blk_mq_put_tag()      : CQ 완료 후 tag(CID) 반납; sbitmap bit 클리어.
+ * blk_mq_get_tag()      : tag 할당 진입점; 고갈 시 sbitmap 대기열에서 sleep.
+ * blk_mq_put_tag()      : 완료 후 tag 반납; 비트 클리어 + waiter wakeup.
  * blk_mq_init_tags()    : blk_mq_tags 구조체 할당 및 sbitmap_queue 초기화.
  * blk_mq_free_tags()    : tag pool 해제; 참조 중인 page_list는 RCU 후 해제.
  * blk_mq_tagset_busy_iter(): tag set의 모든 started request 순회(timeout/abort).
@@ -61,17 +103,19 @@
 #include "blk-mq-sched.h"   /* [한국어] hctx_may_queue — IO 스케줄러 연동 시 quota 판단 함수 */
 
 /*
- * [한국어] struct blk_mq_tags 주요 필드 — NVMe CID 관리 관점 (include/linux/blk-mq.h 정의)
+ * [한국어] struct blk_mq_tags 주요 필드 — tag 회계 관점 (include/linux/blk-mq.h 정의)
  *
  * nr_tags:
- *   전체 tag 수. NVMe SQ의 최대 엔트리 수(queue depth)와 대응하며,
- *   동시에 진행 가능한 CID의 총 개수를 제한한다.
+ *   전체 tag 수(예약 + 일반). NVMe 라면 nvme_alloc_io_tag_set() 이 넣는
+ *   min(ctrl->sqsize, BLK_MQ_MAX_DEPTH-1) 이 여기 들어오므로 SQ 깊이와
+ *   같은 값이 되지만, 개념적으로는 "동시 인플라이트 상한"이지 링 크기가 아니다.
+ *   동시에 진행 가능한 tag의 총 개수를 제한한다.
  *   설정자: blk_mq_init_tags(). 읽는 자: blk_mq_get_tag(), bt_alloc().
  *   값 범위: 1 ~ BLK_MQ_TAG_MAX. 동기화: 초기화 후 불변.
  *
  * nr_reserved_tags:
  *   예약 tag 수. NVMe admin/flush 등 긴급 명령이 일반 IO에 밀려 starvation되지
- *   않도록 별도 예약된 CID 영역이다.
+ *   않도록 별도 예약된 tag 영역이다.
  *   설정자: blk_mq_init_tags(). 읽는 자: blk_mq_get_tag(), blk_mq_put_tag().
  *   값 범위: 0 ~ nr_tags - 1. 동기화: 초기화 후 불변.
  *
@@ -82,18 +126,20 @@
  *   읽는 자: blk_mq_update_wake_batch(). 동기화: tags->lock 스핀락.
  *
  * bitmap_tags:
- *   일반 IO 요청용 sbitmap_queue. NVMe SQ의 일반 CID pool.
+ *   일반 IO 요청용 sbitmap_queue. NVMe 로 치면 이 큐로 동시에 띄울 수 있는 명령 수를 정한다.
  *   설정자: bt_alloc(). 할당: __blk_mq_get_tag(). 해제: blk_mq_put_tag().
  *   동기화: sbitmap 내부 atomic 연산으로 lock-free 처리.
  *
  * breserved_tags:
- *   예약 요청(BLK_MQ_REQ_RESERVED)용 sbitmap_queue. NVMe flush/admin CID pool.
+ *   예약 요청(BLK_MQ_REQ_RESERVED)용 sbitmap_queue. 표준 NVMe PCIe 에서는 크기 0 이라 사실상 쓰이지 않는다.
  *   설정자: bt_alloc(). 읽는 자: blk_mq_get_tag() — REQ_RESERVED 경로.
  *   동기화: sbitmap 내부 atomic 연산.
  *
  * rqs[tag]:
- *   tag에 매핑된 struct request 포인터 배열. CID→request 역조회에 사용되며,
- *   NVMe CQ 완료 엔트리의 CID로 해당 request를 찾는 핵심 자료구조이다.
+ *   tag에 매핑된 struct request 포인터 배열. tag→request 역조회에 사용되며,
+ *   NVMe 는 CQE 의 command_id 에서 하위 12비트(nvme_tag_from_cid)를 뽑아
+ *   이 배열을 인덱싱한다 — 장치가 돌려주는 것은 정수뿐이므로, 완료를 원래
+ *   request 에 다시 붙이는 유일한 수단이 이 배열이다.
  *   설정자: blk_mq_rq_ctx_init() — bit set 이후 할당(race 가능).
  *   읽는 자: blk_mq_find_and_get_req(). 동기화: req_ref 원자적 참조 카운트.
  *
@@ -104,7 +150,7 @@
  *   동기화: 초기화 후 불변(read-only).
  *
  * lock:
- *   active_queues/wake_batch 갱신 시 사용하는 스핀락. NVMe SQ 상태 공정 분배를
+ *   active_queues/wake_batch 갱신 시 사용하는 스핀락. shared tag set 에서 큐 간 공정 분배를
  *   위한 짧은 임계 구간만 보호한다.
  *   사용처: __blk_mq_tag_busy(), __blk_mq_tag_idle(), blk_mq_update_wake_batch().
  */
@@ -116,7 +162,7 @@
  * [한국어]
  * blk_mq_update_wake_batch - shared tag pool의 wakeup batch 값을 재계산한다.
  *
- * @tags:  wakeup batch를 조정할 blk_mq_tags (CID pool 전체 상태 포함).
+ * @tags:  wakeup batch를 조정할 blk_mq_tags (tag pool 전체 상태 포함).
  * @users: 현재 active 상태인 hardware queue(hctx) 수.
  * @return: 없음.
  *
@@ -140,9 +186,9 @@ static void blk_mq_update_wake_batch(struct blk_mq_tags *tags,
 		return;
 
 	sbitmap_queue_recalculate_wake_batch(&tags->bitmap_tags,
-			users);	/* [한국어] 일반 CID pool(bitmap_tags)의 wakeup batch 재계산 — user 증가 시 batch 축소로 thundering herd 완화 */
+			users);	/* [한국어] 일반 tag pool(bitmap_tags)의 wakeup batch 재계산 — user 증가 시 batch 축소로 thundering herd 완화 */
 	sbitmap_queue_recalculate_wake_batch(&tags->breserved_tags,
-			users);	/* [한국어] 예약 CID pool(breserved_tags)도 동일하게 batch 재계산 — flush/admin 명령 경쟁도 분산 */
+			users);	/* [한국어] 예약 tag pool(breserved_tags)도 동일하게 batch 재계산 — flush/admin 명령 경쟁도 분산 */
 }
 
 /*
@@ -172,16 +218,19 @@ static void blk_mq_update_wake_batch(struct blk_mq_tags *tags,
  */
 void __blk_mq_tag_busy(struct blk_mq_hw_ctx *hctx)
 {
-	unsigned int users;
-	unsigned long flags;
-	struct blk_mq_tags *tags = hctx->tags;	/* [한국어] 이 hctx가 사용하는 tag pool — NVMe SQ CID pool 또는 shared pool */
+	unsigned int users;		/* [한국어] 갱신 후의 활성 큐 수 — wake_batch 재계산 입력값 */
+	unsigned long flags;		/* [한국어] tags->lock 을 irqsave 로 잡을 때 저장할 인터럽트 상태.
+					 * 완료 경로가 인터럽트 컨텍스트에서 이 락을 건드릴 수 있어 spin_lock 만으로는 부족하다 */
+	struct blk_mq_tags *tags = hctx->tags;	/* [한국어] 이 hctx가 사용하는 tag pool — 이 hctx 전용 pool, 또는 shared tag set 이면 큐 전체가 공유하는 pool */
 
 	/*
 	 * calling test_bit() prior to test_and_set_bit() is intentional,
 	 * it avoids dirtying the cacheline if the queue is already active.
 	 */
-	if (blk_mq_is_shared_tags(hctx->flags)) {
-		struct request_queue *q = hctx->queue;
+	if (blk_mq_is_shared_tags(hctx->flags)) {	/* [한국어] 공유 구성에서는 "활성"의 단위가 hctx 가 아니라 request_queue 다.
+						 * 같은 큐의 hctx 여럿이 각자 카운트를 올리면 한 큐가 몫을 여러 번 받는 셈이 되므로,
+						 * 큐 단위 플래그를 두어 큐당 정확히 한 번만 세도록 만든다. */
+		struct request_queue *q = hctx->queue;	/* [한국어] 플래그를 걸어 둘 대상 — hctx 가 아니라 그 상위 큐 */
 
 		/* [한국어] shared tag 모드: request_queue 단위 HCTX_ACTIVE 플래그 검사 후 원자적 세트
 		 * test_bit()로 캐시라인 오염 없이 먼저 확인한 뒤, test_and_set_bit()로 중복 카운트 방지 */
@@ -199,7 +248,7 @@ void __blk_mq_tag_busy(struct blk_mq_hw_ctx *hctx)
 	spin_lock_irqsave(&tags->lock, flags);	/* [한국어] active_queues/wake_batch 동시 갱신 보호 — 인터럽트까지 막아 NVMe ISR와의 경쟁 방지 */
 	users = tags->active_queues + 1;	/* [한국어] 새로 활성화된 NVMe queue(hctx)를 공유 풀 user 카운트에 추가 */
 	WRITE_ONCE(tags->active_queues, users);	/* [한국어] 컴파일러/CPU 재배치 방지 — 다른 CPU에서 읽는 active_queues가 즉시 갱신된 값을 보도록 보장 */
-	blk_mq_update_wake_batch(tags, users);	/* [한국어] active queue 수 변화에 맞춰 wakeup batch 재조정 — 공정한 NVMe CID 분배 */
+	blk_mq_update_wake_batch(tags, users);	/* [한국어] active queue 수 변화에 맞춰 wakeup batch 재조정 — 공정한 tag 분배 */
 	spin_unlock_irqrestore(&tags->lock, flags);	/* [한국어] 임계 구간 종료 및 인터럽트 복원 */
 }
 
@@ -210,12 +259,12 @@ void __blk_mq_tag_busy(struct blk_mq_hw_ctx *hctx)
  * [한국어]
  * blk_mq_tag_wakeup_all - tag를 기다리며 잠든 모든 waiter를 깨운다.
  *
- * @tags:            wakeup 대상 CID pool.
- * @include_reserve: true이면 예약 CID pool(breserved_tags)의 waiter도 깨운다.
+ * @tags:            wakeup 대상 tag pool.
+ * @include_reserve: true이면 예약 tag pool(breserved_tags)의 waiter도 깨운다.
  * @return: 없음.
  *
- * NVMe SQ가 가득 차서 blk_mq_get_tag()가 io_schedule()로 대기 중인 submitter들을
- * 모두 깨운다. tag(CID)가 회수되거나 pool 크기가 변경되어 빈 slot이 생겼을 때
+ * tag 가 없어 blk_mq_get_tag() 안에서 io_schedule() 로 잠든 제출자들을
+ * 모두 깨운다. tag가 회수되거나 pool 크기가 변경되어 빈 slot이 생겼을 때
  * 호출되며, 깨어난 submitter는 다시 __blk_mq_get_tag()를 시도한다.
  * 실행 컨텍스트: NVMe 완료 인터럽트 후 softirq, 또는 프로세스 컨텍스트.
  * 호출자: __blk_mq_tag_idle(), blk_mq_tag_resize_shared_tags() 등.
@@ -226,9 +275,9 @@ void __blk_mq_tag_busy(struct blk_mq_hw_ctx *hctx)
  */
 void blk_mq_tag_wakeup_all(struct blk_mq_tags *tags, bool include_reserve)
 {
-	sbitmap_queue_wake_all(&tags->bitmap_tags);	/* [한국어] 일반 CID pool 대기자 전원 깨움 — NVMe SQ slot 회수 후 다음 doorbell 제출 기회 부여 */
-	if (include_reserve)	/* [한국어] 예약 CID pool 깨움 필요 여부 확인 — __blk_mq_tag_idle은 false, 외부 resize는 true 전달 */
-		sbitmap_queue_wake_all(&tags->breserved_tags);	/* [한국어] 예약 CID pool(flush/admin) 대기자도 깨움 */
+	sbitmap_queue_wake_all(&tags->bitmap_tags);	/* [한국어] 일반 tag pool 대기자 전원 깨움 — tag 가 생겼으니 다시 시도해 보라고 알리는 것 */
+	if (include_reserve)	/* [한국어] 예약 tag pool 깨움 필요 여부 확인 — __blk_mq_tag_idle은 false, 외부 resize는 true 전달 */
+		sbitmap_queue_wake_all(&tags->breserved_tags);	/* [한국어] 예약 tag pool(flush/admin) 대기자도 깨움 */
 }
 
 /*
@@ -244,7 +293,7 @@ void blk_mq_tag_wakeup_all(struct blk_mq_tags *tags, bool include_reserve)
  *
  * 이전에 busy(active) 상태였던 hctx가 더 이상 IO를 제출하지 않으면 호출된다.
  * active_queues를 감소시켜 공유 tag pool에서 사용 중이던 예산을 반납하고,
- * 다른 hctx가 더 많은 CID를 할당받을 수 있도록 wakeup batch를 재조정한다.
+ * 다른 hctx가 더 많은 tag를 할당받을 수 있도록 wakeup batch를 재조정한다.
  * 이후 대기 중인 모든 submitter를 깨워 tag 재할당을 시도하게 한다.
  * 실행 컨텍스트: 프로세스 컨텍스트; spin_lock_irq로 ISR와의 경쟁 방지.
  * 호출자: blk_mq_tag_idle() (blk-mq.h 인라인).
@@ -256,11 +305,11 @@ void blk_mq_tag_wakeup_all(struct blk_mq_tags *tags, bool include_reserve)
  */
 void __blk_mq_tag_idle(struct blk_mq_hw_ctx *hctx)
 {
-	struct blk_mq_tags *tags = hctx->tags;	/* [한국어] 이 hctx가 사용하는 CID pool — per-hctx 또는 shared */
-	unsigned int users;
+	struct blk_mq_tags *tags = hctx->tags;	/* [한국어] 이 hctx가 사용하는 tag pool — per-hctx 또는 shared */
+	unsigned int users;			/* [한국어] 감소 후의 활성 큐 수 — 0 이 될 수도 있다 */
 
-	if (blk_mq_is_shared_tags(hctx->flags)) {
-		struct request_queue *q = hctx->queue;
+	if (blk_mq_is_shared_tags(hctx->flags)) {	/* [한국어] busy 쪽과 대칭 — 활성 해제도 큐 단위로 정확히 한 번만 일어나야 한다 */
+		struct request_queue *q = hctx->queue;	/* [한국어] 플래그가 걸려 있는 상위 큐 */
 
 		/* [한국어] shared tag 모드: QUEUE_FLAG_HCTX_ACTIVE 비트를 원자적으로 클리어
 		 * 이미 inactive면 중복 감소를 막기 위해 즉시 반환 */
@@ -276,10 +325,10 @@ void __blk_mq_tag_idle(struct blk_mq_hw_ctx *hctx)
 	spin_lock_irq(&tags->lock);	/* [한국어] active_queues/wake_batch 갱신 보호 — NVMe ISR와의 경쟁 차단 */
 	users = tags->active_queues - 1;	/* [한국어] idle로 전환된 hctx를 공유 풀 user 카운트에서 제거 */
 	WRITE_ONCE(tags->active_queues, users);	/* [한국어] 컴파일러/CPU 재배치 방지 — 다른 CPU에서 즉시 갱신된 값이 보이도록 */
-	blk_mq_update_wake_batch(tags, users);	/* [한국어] user 수 감소에 맞춰 wakeup batch 재조정 — 남은 active queue가 더 많은 CID 확보 가능 */
+	blk_mq_update_wake_batch(tags, users);	/* [한국어] user 수 감소에 맞춰 wakeup batch 재조정 — 남은 active queue가 더 많은 tag 확보 가능 */
 	spin_unlock_irq(&tags->lock);	/* [한국어] 임계 구간 종료 */
 
-	blk_mq_tag_wakeup_all(tags, false);	/* [한국어] 예약 CID 제외한 일반 대기자 전원 깨움 — idle 전환으로 생긴 tag 여유를 다른 submitter에 재분배 */
+	blk_mq_tag_wakeup_all(tags, false);	/* [한국어] 예약 tag 제외한 일반 대기자 전원 깨움 — idle 전환으로 생긴 tag 여유를 다른 submitter에 재분배 */
 }
 
 /*
@@ -306,15 +355,18 @@ static int __blk_mq_get_tag(struct blk_mq_alloc_data *data,
 			    struct sbitmap_queue *bt)
 {
 	/* [한국어] IO 스케줄러 없고 예약 요청도 아닌데 이 hctx의 quota가 초과됐으면 즉시 실패
-	 * — shared CID pool 공정 분배 보장; quota 초과 hctx는 대기 후 재시도 */
+	 * — shared tag pool 공정 분배 보장; quota 초과 hctx는 대기 후 재시도 */
 	if (!data->q->elevator && !(data->flags & BLK_MQ_REQ_RESERVED) &&
 			!hctx_may_queue(data->hctx, bt))
-		return BLK_MQ_NO_TAG;	/* [한국어] CID 할당 실패 반환 — 상위 blk_mq_get_tag가 sleep 또는 NOWAIT 처리 결정 */
+		return BLK_MQ_NO_TAG;	/* [한국어] tag 할당 실패 반환 — 상위 blk_mq_get_tag가 sleep 또는 NOWAIT 처리 결정 */
 
 	if (data->shallow_depth)	/* [한국어] IO 스케줄러가 shallow_depth로 queue depth를 임시 제한한 상태 */
-		return sbitmap_queue_get_shallow(bt, data->shallow_depth);	/* [한국어] 제한된 depth 범위 내에서만 CID 할당 — NVMe SQ 과부하 완화 */
+		return sbitmap_queue_get_shallow(bt, data->shallow_depth);	/* [한국어] sbitmap 전체가 아니라 앞쪽 shallow_depth 범위에서만 비트를 찾는다.
+									 * IO 스케줄러가 한 큐/한 cgroup 이 드라이버 태그를 전부 채가지 못하도록
+									 * 상한을 거는 경로다. 태그를 다 뺏기면 스케줄러 큐에 재정렬할 후보가
+									 * 남지 않아 정책 자체가 무력화되기 때문이다. */
 	else
-		return __sbitmap_queue_get(bt);	/* [한국어] 제한 없이 sbitmap에서 빈 bit(CID) 하나를 원자적으로 획득 */
+		return __sbitmap_queue_get(bt);	/* [한국어] 제한 없이 sbitmap에서 빈 비트 하나를 원자적으로 획득 */
 }
 
 /*
@@ -326,7 +378,7 @@ static int __blk_mq_get_tag(struct blk_mq_alloc_data *data,
  * @offset:  할당된 tag들의 sbitmap 내 시작 offset을 반환(nr_reserved_tags 보정 포함).
  * @return:  할당된 tag 집합을 나타내는 비트맵(unsigned long); 0이면 실패.
  *
- * plug-merge 이후 여러 요청을 일괄 제출할 때 NVMe CID 여러 개를 한 번의 atomic
+ * plug-merge 이후 여러 요청을 일괄 제출할 때 tag 여러 개를 한 번의 atomic
  * 연산으로 예약한다. shallow_depth 제한, 예약 tag 요청, shared tag pool 사용 시에는
  * batch 경로를 쓸 수 없으므로 0을 반환하여 개별 blk_mq_get_tag() 경로로 fallback.
  * 실행 컨텍스트: 프로세스 컨텍스트; lock-free(sbitmap atomic ops).
@@ -340,31 +392,33 @@ static int __blk_mq_get_tag(struct blk_mq_alloc_data *data,
 unsigned long blk_mq_get_tags(struct blk_mq_alloc_data *data, int nr_tags,
 			      unsigned int *offset)
 {
-	struct blk_mq_tags *tags = blk_mq_tags_from_data(data);	/* [한국어] 이 hctx에 해당하는 blk_mq_tags(CID pool) 획득 */
-	struct sbitmap_queue *bt = &tags->bitmap_tags;	/* [한국어] 일반 IO용 CID pool 선택 — batch 할당은 일반 pool에서만 지원 */
-	unsigned long ret;
+	struct blk_mq_tags *tags = blk_mq_tags_from_data(data);	/* [한국어] 이 hctx에 해당하는 blk_mq_tags(tag pool) 획득 */
+	struct sbitmap_queue *bt = &tags->bitmap_tags;	/* [한국어] 일반 IO용 tag pool 선택 — batch 할당은 일반 pool에서만 지원 */
+	unsigned long ret;				/* [한국어] 획득한 tag 들의 비트마스크. 0 이면 하나도 못 얻은 것이고,
+							 * 그 외에는 *offset 부터 시작하는 연속 구간 안에서 어느 비트를 얻었는지를 나타낸다.
+							 * 연속 확보를 노리는 이유는 request 초기화를 한 루프로 돌리기 위해서다. */
 
 	/* [한국어] batch 할당 불가 조건 확인: shallow_depth 제한, 예약 tag 요청, shared tag pool 사용 시
 	 * 각각 공정성·예약성·복잡성 문제로 개별 할당 경로로 fallback */
 	if (data->shallow_depth ||data->flags & BLK_MQ_REQ_RESERVED ||
 	    data->hctx->flags & BLK_MQ_F_TAG_QUEUE_SHARED)
 		return 0;	/* [한국어] 0 반환 시 호출자가 개별 blk_mq_get_tag()로 재시도 */
-	ret = __sbitmap_queue_get_batch(bt, nr_tags, offset);	/* [한국어] sbitmap에서 nr_tags개의 CID를 원자적으로 일괄 획득; *offset에 sbitmap 내 시작 위치 저장 */
-	*offset += tags->nr_reserved_tags;	/* [한국어] nr_reserved_tags 크기만큼 offset 보정 — 예약 영역 다음에 일반 CID가 시작하므로 */
+	ret = __sbitmap_queue_get_batch(bt, nr_tags, offset);	/* [한국어] sbitmap에서 nr_tags개의 tag를 원자적으로 일괄 획득; *offset에 sbitmap 내 시작 위치 저장 */
+	*offset += tags->nr_reserved_tags;	/* [한국어] nr_reserved_tags 크기만큼 offset 보정 — 예약 영역 다음에 일반 tag가 시작하므로 */
 	return ret;	/* [한국어] 할당된 tag 비트맵 반환 — 0이면 sbitmap 여유 없음, 호출자가 개별 할당으로 재시도 */
 }
 
 /*
  * [한국어]
- * blk_mq_get_tag - tag(NVMe CID) 할당의 핵심 진입점; SQ 가득 차면 sleep 대기.
+ * blk_mq_get_tag - tag 할당의 핵심 진입점; SQ 가득 차면 sleep 대기.
  *
  * @data: tag 할당 컨텍스트 — q, hctx, ctx, flags(REQ_RESERVED/NOWAIT), shallow_depth.
  * @return: 할당된 tag 값(0 이상, tag_offset 포함), 또는 BLK_MQ_NO_TAG(실패/NOWAIT).
  *
- * blk_mq_get_request()에서 호출되어 request에 고유한 tag(= NVMe CID)를 부여한다.
+ * blk_mq_get_request()에서 호출되어 request에 고유한 tag를 부여한다.
  * fast-path: __blk_mq_get_tag()로 즉시 할당 시도.
  * slow-path: 실패 시 blk_mq_run_hw_queue()로 SQ doorbell → CQ 완료 유도 → 재시도.
- * sleep-path: 여전히 실패면 io_schedule()로 대기, CID 반납 시 wakeup 후 재시도.
+ * sleep-path: 여전히 실패면 io_schedule()로 대기, tag 반납 시 wakeup 후 재시도.
  * sleep 중 CPU가 변경될 수 있어 매 루프에서 ctx/hctx/tags/bt를 재획득한다.
  * hctx가 변경되면 이전 hctx waiter를 가짜 wakeup하여 starvation을 방지한다.
  * 실행 컨텍스트: 프로세스 컨텍스트(블로킹 가능); NOWAIT이면 non-blocking.
@@ -373,80 +427,97 @@ unsigned long blk_mq_get_tags(struct blk_mq_alloc_data *data, int nr_tags,
  *           sbitmap_prepare_to_wait(), sbitmap_finish_wait(), blk_mq_put_tag().
  *
  * 호출 체인:
- *   blk_mq_submit_bio → blk_mq_get_request → [blk_mq_get_tag]
+ *   blk_mq_submit_bio → __blk_mq_alloc_requests → [blk_mq_get_tag]
  *   → __blk_mq_get_tag / blk_mq_run_hw_queue / io_schedule
- *   (완료 후) → nvme_queue_rq → nvme_submit_cmd(doorbell)
+ * tag 를 손에 넣은 뒤에야 요청이 디스패치되어 mq_ops->queue_rq(간접 호출;
+ * NVMe PCIe 라면 nvme_queue_rq)로 내려간다. 이 함수 자체는 드라이버를
+ * 전혀 알지 못하며, 오직 sbitmap 에서 비트 하나를 얻어올 뿐이다.
  */
 unsigned int blk_mq_get_tag(struct blk_mq_alloc_data *data)
 {
-	struct blk_mq_tags *tags = blk_mq_tags_from_data(data);	/* [한국어] 이 hctx의 CID pool 획득 — per-hctx 또는 shared */
+	struct blk_mq_tags *tags = blk_mq_tags_from_data(data);	/* [한국어] 이 hctx의 tag pool 획득 — per-hctx 또는 shared */
 	struct sbitmap_queue *bt;	/* [한국어] 실제 할당할 sbitmap_queue — 일반(bitmap_tags) 또는 예약(breserved_tags) */
-	struct sbq_wait_state *ws;	/* [한국어] sbitmap wait state — CID 대기 큐 항목, 루프마다 hctx별로 재획득 */
+	struct sbq_wait_state *ws;	/* [한국어] sbitmap wait state — tag 대기 큐 항목, 루프마다 hctx별로 재획득 */
 	DEFINE_SBQ_WAIT(wait);		/* [한국어] 스택에 sbq_wait 구조체 선언+초기화 — tag 대기 시 waiter로 등록 */
-	unsigned int tag_offset;	/* [한국어] 최종 CID = local_tag + tag_offset; 예약 영역 이후에 일반 영역이 위치하므로 필요 */
+	unsigned int tag_offset;	/* [한국어] 최종 tag = local_tag + tag_offset; 예약 영역 이후에 일반 영역이 위치하므로 필요 */
 	int tag;			/* [한국어] sbitmap에서 획득한 local tag 값(0 ~ depth-1); BLK_MQ_NO_TAG이면 실패 */
 
 	/* [한국어] 예약 요청(BLK_MQ_REQ_RESERVED)이면 breserved_tags에서, 일반이면 bitmap_tags에서 할당 */
 	if (data->flags & BLK_MQ_REQ_RESERVED) {
 		if (unlikely(!tags->nr_reserved_tags)) {
 			WARN_ON_ONCE(1);	/* [한국어] 예약 tag 없이 REQ_RESERVED 요청 — 드라이버 설정 버그 */
-			return BLK_MQ_NO_TAG;	/* [한국어] 예약 CID가 없으면 할당 불가 */
+			return BLK_MQ_NO_TAG;	/* [한국어] 예약 tag가 없으면 할당 불가 */
 		}
-		bt = &tags->breserved_tags;	/* [한국어] 예약 CID pool 선택 — flush, admin command 등 우선 처리 명령용 */
-		tag_offset = 0;			/* [한국어] 예약 영역은 CID 0부터 시작 — offset 보정 불필요 */
+		bt = &tags->breserved_tags;	/* [한국어] 예약 tag pool 선택 — flush, admin command 등 우선 처리 명령용 */
+		tag_offset = 0;			/* [한국어] 예약 영역은 tag 0번부터 시작 — offset 보정 불필요 */
 	} else {
-		bt = &tags->bitmap_tags;	/* [한국어] 일반 IO CID pool 선택 */
-		tag_offset = tags->nr_reserved_tags;	/* [한국어] 일반 CID는 예약 영역 크기만큼 뒤에서 시작 */
+		bt = &tags->bitmap_tags;	/* [한국어] 일반 IO tag pool 선택 */
+		tag_offset = tags->nr_reserved_tags;	/* [한국어] 일반 요청의 전역 번호는 예약 영역 다음부터다.
+						 * 예약/일반이 서로 다른 sbitmap 이지만 번호 공간은 하나로 이어 붙여
+						 * tags->rqs[] 한 배열로 양쪽을 모두 인덱싱할 수 있게 만든다. */
 	}
 
-	tag = __blk_mq_get_tag(data, bt);	/* [한국어] fast-path: sbitmap에서 즉시 CID 하나 획득 시도 */
-	if (tag != BLK_MQ_NO_TAG)
-		goto found_tag;			/* [한국어] 즉시 성공 — NVMe SQ doorbell 단계로 바로 진행 */
+	tag = __blk_mq_get_tag(data, bt);	/* [한국어] fast-path: sbitmap에서 즉시 비트 하나 획득 시도 */
+	if (tag != BLK_MQ_NO_TAG)		/* [한국어] BLK_MQ_NO_TAG(-1)가 아니면 성공. 부하가 낮을 때는 거의 항상 여기서 끝난다 */
+		goto found_tag;			/* [한국어] 경합 없이 비트를 얻었다 — 대기 준비 없이 곧장 found_tag 로 */
 
-	if (data->flags & BLK_MQ_REQ_NOWAIT)
-		return BLK_MQ_NO_TAG;		/* [한국어] NOWAIT 요청은 blocking 없이 즉시 실패 반환 — 상위에서 -EAGAIN 처리 */
+	if (data->flags & BLK_MQ_REQ_NOWAIT)	/* [한국어] 잠들면 안 되는 호출자 — io_uring IOSQE_ASYNC 미사용 제출, O_NONBLOCK, 원자적 컨텍스트 등 */
+		return BLK_MQ_NO_TAG;		/* [한국어] 아래 대기 루프에 진입하지 않고 즉시 실패. 호출자는 -EAGAIN 으로 되돌린다 */
 
 	ws = bt_wait_ptr(bt, data->hctx);	/* [한국어] 이 hctx에 대응하는 sbitmap wait state 획득 — hctx별로 분산된 대기 큐 */
 	do {
-		struct sbitmap_queue *bt_prev;
+		struct sbitmap_queue *bt_prev;	/* [한국어] 이번 회차에 기다렸던 sbitmap 을 기억해 둔다.
+						 * 잠든 사이 CPU 가 바뀌면(다른 CPU 에서 깨어나면) 매핑되는 hctx 가 달라져
+						 * 대기할 sbitmap 자체가 바뀔 수 있다. 그때 이전 대기열에 남은 다른 waiter 를
+						 * 깨워 주지 않으면, 반납된 tag 를 아무도 가져가지 않는 상황이 생긴다. */
 
 		/*
 		 * We're out of tags on this hardware queue, kick any
 		 * pending IO submits before going to sleep waiting for
 		 * some to complete.
 		 */
-		/* [한국어] CID 고갈 상태 — sleep 전에 SQ에 쌓인 요청을 doorbell로 전달해 CQ 완료 유도 */
-		blk_mq_run_hw_queue(data->hctx, false);	/* [한국어] NVMe SQ doorbell 트리거 — 완료 인터럽트 → blk_mq_put_tag → CID 회수 기대 */
+		/* [한국어] tag 가 고갈됐다. 잠들기 전에 반드시 큐를 한 번 돌려야 한다.
+		 * 이유: 소프트웨어 큐에 요청이 남은 채 아무도 디스패치하지 않았다면
+		 * 장치는 할 일이 없어 완료를 만들지 않고, 완료가 없으니 tag 도 돌아오지
+		 * 않는다. "내가 잠들면 나를 깨워 줄 사건이 영영 일어나지 않는" 교착이
+		 * 성립한다. 여기서 밀어 넣어야 장치가 일을 시작하고 완료가 흘러나온다. */
+		blk_mq_run_hw_queue(data->hctx, false);	/* [한국어] async=false — 워커에 미루지 않고 지금 이 컨텍스트에서 바로 디스패치한다.
+						 * NVMe PCIe 라면 이 호출이 mq_ops->queue_rq(=nvme_queue_rq) → SQ 기록 →
+						 * doorbell 로 이어지고, 그 완료가 blk_mq_put_tag 를 불러 나를 깨운다. */
 
 		/*
 		 * Retry tag allocation after running the hardware queue,
 		 * as running the queue may also have found completions.
 		 */
-		tag = __blk_mq_get_tag(data, bt);	/* [한국어] doorbell 후 CQ 완료로 회수된 CID 재할당 시도 */
+		tag = __blk_mq_get_tag(data, bt);	/* [한국어] 큐를 돌린 뒤, 그 사이 완료로 반납된 tag 가 있는지 다시 시도 */
 		if (tag != BLK_MQ_NO_TAG)
 			break;	/* [한국어] 재시도 성공 — sleep 없이 루프 탈출 */
 
 		sbitmap_prepare_to_wait(bt, ws, &wait, TASK_UNINTERRUPTIBLE);
 		/* [한국어] sleep 준비: waitqueue에 등록 후 task 상태를 UNINTERRUPTIBLE로 변경
-		 * 이후 CID 반납 시 sbitmap_queue_wake_up()이 이 waiter를 깨움 */
+		 * 이후 tag 반납 시 sbitmap_queue_wake_up()이 이 waiter를 깨움 */
 
-		tag = __blk_mq_get_tag(data, bt);	/* [한국어] sleep 직전 마지막 재시도 — prepare_to_wait 이후 완료된 CID 놓치지 않도록 */
+		tag = __blk_mq_get_tag(data, bt);	/* [한국어] sleep 직전 마지막 재시도 — prepare_to_wait 이후 완료된 tag 놓치지 않도록 */
 		if (tag != BLK_MQ_NO_TAG)
 			break;	/* [한국어] 마지막 재시도 성공 — sbitmap_finish_wait로 정리 후 탈출 */
 
 		bt_prev = bt;				/* [한국어] sleep 중 hctx가 변경될 수 있으므로 현재 bt 보관 */
-		io_schedule();				/* [한국어] NVMe SQ 포화로 CID 없음 — CPU를 다른 태스크에 양보하고 CID 반납 시 깨어남 */
+		io_schedule();				/* [한국어] 실제로 잠드는 지점. 평범한 schedule() 이 아니라 io_schedule() 인 이유는
+						 * 이 대기를 "IO 대기"로 회계 처리하기 위해서다 — 커널이 이 시간을 iowait 로
+						 * 집계하고, 잠든 동안 CPU 가 깊은 절전 상태로 내려가지 않도록 힌트를 준다.
+						 * 깨어나는 조건은 단 하나: 다른 요청이 완료되어 blk_mq_put_tag →
+						 * sbitmap_queue_clear 가 이 waiter 를 깨우는 것. tag 는 완료 없이는 돌아오지 않는다. */
 
 		sbitmap_finish_wait(bt, ws, &wait);	/* [한국어] 깨어난 후 waitqueue에서 waiter 제거, task 상태 정상화 */
 
 		/* [한국어] sleep 동안 CPU 마이그레이션 가능 — 현재 CPU에 맞는 ctx/hctx/tags/bt를 재획득해야 함 */
 		data->ctx = blk_mq_get_ctx(data->q);		/* [한국어] 현재 CPU의 software queue(blk_mq_ctx) 재획득 */
 		data->hctx = blk_mq_map_queue(data->cmd_flags, data->ctx);	/* [한국어] CPU/IRQ affinity에 따른 NVMe hctx 재매핑 */
-		tags = blk_mq_tags_from_data(data);		/* [한국어] 새 hctx의 CID pool 재조회 */
+		tags = blk_mq_tags_from_data(data);		/* [한국어] 새 hctx의 tag pool 재조회 */
 		if (data->flags & BLK_MQ_REQ_RESERVED)
-			bt = &tags->breserved_tags;		/* [한국어] 예약 CID pool 재선택 */
+			bt = &tags->breserved_tags;		/* [한국어] 예약 tag pool 재선택 */
 		else
-			bt = &tags->bitmap_tags;		/* [한국어] 일반 CID pool 재선택 */
+			bt = &tags->bitmap_tags;		/* [한국어] 일반 tag pool 재선택 */
 
 		/*
 		 * If destination hw queue is changed, fake wake up on
@@ -468,37 +539,62 @@ found_tag:
 	 * Give up this allocation if the hctx is inactive.  The caller will
 	 * retry on an active hctx.
 	 */
-	/* [한국어] tag를 획득했더라도 hctx가 비활성 상태이면 즉시 반납하고 실패 반환
-	 * — NVMe queue pair 제거/드레인 중에 CID가 누수되는 것을 방지 */
+	/* [한국어] tag 를 이미 얻었더라도 그 사이에 hctx 가 BLK_MQ_S_INACTIVE 로
+	 * 바뀌었으면 즉시 반납하고 실패를 반환한다.
+	 * INACTIVE 는 이 hctx 에 대응하던 CPU 가 오프라인되어(blk_mq_hctx_notify_offline)
+	 * 더 이상 새 요청을 받으면 안 되는 상태다. 여기서 반납하지 않으면 아무도
+	 * 완료시켜 주지 않는 tag 가 비트맵에 영원히 남아 풀이 조금씩 줄어든다.
+	 * 확인 순서가 중요하다 — 먼저 tag 를 얻고 나서 검사한다. 반대로 하면
+	 * "검사 통과 → (그 사이 INACTIVE 전환) → tag 획득" 경쟁이 열린다. */
 	if (unlikely(test_bit(BLK_MQ_S_INACTIVE, &data->hctx->state))) {
-		blk_mq_put_tag(tags, data->ctx, tag + tag_offset);	/* [한국어] 획득한 CID 즉시 반납 — SQ slot 누수 방지 */
-		return BLK_MQ_NO_TAG;					/* [한국어] 호출자는 active hctx에서 재시도해야 함 */
+		blk_mq_put_tag(tags, data->ctx, tag + tag_offset);	/* [한국어] 방금 얻은 tag 를 그대로 반납 — 반납에도 전역값(offset 포함)을 넘겨야 짝이 맞는다 */
+		return BLK_MQ_NO_TAG;					/* [한국어] 호출자(__blk_mq_alloc_requests)는 살아 있는 hctx 로 다시 매핑해 재시도한다 */
 	}
-	return tag + tag_offset;	/* [한국어] 최종 CID 반환 = sbitmap local tag + 예약 영역 offset; 이후 nvme_submit_cmd의 CID 필드로 사용됨 */
+	return tag + tag_offset;	/* [한국어] 전역 tag = sbitmap 안에서의 지역 인덱스 + tag_offset.
+					 * tag_offset 은 예약(reserved) 영역을 건너뛰기 위한 보정이다: 일반 요청은
+					 * breserved_tags 다음 번호부터 시작하므로 nr_reserved_tags 를 더하고,
+					 * 예약 요청(BLK_MQ_REQ_RESERVED)은 0번부터 쓰므로 보정이 0이다.
+					 * 이렇게 두 비트맵을 하나의 연속 번호 공간으로 합쳐 놓기 때문에
+					 * tags->rqs[tag] 인덱싱이 두 영역 모두에 그대로 통한다. */
 }
 
 /*
  * [한국어]
- * blk_mq_put_tag - 완료된 request의 tag(NVMe CID)를 sbitmap_queue에 반납한다.
+ * blk_mq_put_tag - 완료된 request의 tag를 sbitmap_queue에 반납한다.
  *
- * @tags: CID pool — 반납할 sbitmap_queue를 포함.
+ * @tags: tag pool — 반납할 sbitmap_queue를 포함.
  * @ctx:  완료 처리 CPU의 blk_mq_ctx — sbitmap 내 CPU 힌트 제공으로 cache 효율 향상.
  * @tag:  반납할 전역 tag 값(tag_offset 포함). 예약 영역이면 nr_reserved_tags 미만.
  * @return: 없음.
  *
- * NVMe CQ 완료 인터럽트 → nvme_complete_rq → blk_mq_complete_request →
- * __blk_mq_end_request → blk_mq_put_driver_tag 경로로 호출된다.
  * tag 값이 예약 영역인지(nr_reserved_tags 미만)에 따라 breserved_tags 또는
- * bitmap_tags 중 적절한 sbitmap을 선택하여 비트를 클리어한다.
- * 비트 클리어 후 sbitmap_queue_clear 내부에서 대기 중인 waiter를 wakeup한다.
- * 실행 컨텍스트: 하드웨어 인터럽트 컨텍스트(NVMe ISR) 또는 softirq.
- * 호출자: blk_mq_put_driver_tag() → __blk_mq_end_request() 경로.
- * 피호출자: sbitmap_queue_clear() (lib/sbitmap.c).
+ * bitmap_tags 중 적절한 sbitmap 을 골라 비트를 클리어한다. 클리어 자체보다
+ * 중요한 것은 그 뒤에 일어나는 wakeup 이다 — sbitmap_queue_clear() 내부가
+ * 대기열의 waiter 를 깨우고, 그때서야 blk_mq_get_tag() 에서 잠들어 있던
+ * 제출자가 다시 뛴다. 이 파일에서 tag 공급이 재개되는 유일한 지점이다.
  *
- * 호출 체인:
- *   NVMe CQ 인터럽트 → nvme_complete_rq → blk_mq_complete_request
- *   → __blk_mq_end_request → blk_mq_put_driver_tag → [blk_mq_put_tag]
- *   → sbitmap_queue_clear
+ * @ctx 를 받는 이유: sbitmap 은 해제된 비트의 위치를 해제한 CPU 쪽 힌트로
+ * 기억해 둔다. 다음 할당이 같은 CPU 에서 일어나면 같은 워드를 다시 만나
+ * 캐시 라인이 살아 있고, 다른 CPU 의 워드를 건드리지 않아 false sharing 도
+ * 준다. 완료 CPU 와 제출 CPU 를 맞추는 것(NVMe 라면 MSI-X 인터럽트 어피니티)이
+ * 성능에 영향을 주는 이유가 여기 있다.
+ *
+ * === NVMe PCIe 기준 실제 완료 경로 (drivers/nvme/host 에서 확인) ===
+ *   nvme_irq → nvme_poll_cq → nvme_handle_cqe
+ *     → nvme_find_rq: CQE 의 command_id 에서 gen/tag 를 분해하고 세대 검증,
+ *                     blk_mq_tag_to_rq(tags, tag) 로 request 복원
+ *     → nvme_try_complete_req → blk_mq_complete_request_remote
+ *        (완료를 보고할 CPU 가 다르면 IPI 로 넘김)
+ *     → mq_ops->complete = nvme_pci_complete_rq  (DMA unmap)
+ *     → nvme_complete_rq (core) → blk_mq_end_request
+ *     → blk_mq_put_driver_tag → [blk_mq_put_tag] → sbitmap_queue_clear
+ * 주의: nvme_mq_ops 에 등록된 .complete 는 nvme_pci_complete_rq 이고,
+ * core 의 nvme_complete_rq 는 그 안에서 불린다. 둘은 다른 함수다.
+ *
+ * 실행 컨텍스트: 장치 인터럽트 핸들러에서 시작하지만, 위 IPI/softirq 위임
+ * 때문에 실제로 이 함수가 도는 컨텍스트는 구성에 따라 달라진다. 어느 쪽이든
+ * 잠들 수 없는 컨텍스트일 수 있으므로 여기서 blocking 연산을 해서는 안 된다.
+ * 피호출자: sbitmap_queue_clear() (lib/sbitmap.c).
  */
 void blk_mq_put_tag(struct blk_mq_tags *tags, struct blk_mq_ctx *ctx,
 		    unsigned int tag)
@@ -507,13 +603,13 @@ void blk_mq_put_tag(struct blk_mq_tags *tags, struct blk_mq_ctx *ctx,
 		const int real_tag = tag - tags->nr_reserved_tags;
 		/* [한국어] 전역 tag에서 예약 영역 offset 제거 → bitmap_tags 내 local 인덱스 계산 */
 
-		BUG_ON(real_tag >= tags->nr_tags);	/* [한국어] local 인덱스가 일반 pool 범위 초과 — CID 손상 또는 double-put 등 치명적 버그 */
+		BUG_ON(real_tag >= tags->nr_tags);	/* [한국어] local 인덱스가 일반 pool 범위 초과 — tag 손상 또는 double-put 등 치명적 버그 */
 		sbitmap_queue_clear(&tags->bitmap_tags, real_tag, ctx->cpu);
-		/* [한국어] 일반 CID pool의 해당 비트 클리어 → 이 CID를 다음 IO에 재사용 가능
+		/* [한국어] 일반 tag pool의 해당 비트 클리어 → 이 tag를 다음 IO에 재사용 가능
 		 * ctx->cpu 힌트로 같은 CPU의 캐시에서 처리하여 성능 향상 */
 	} else {
 		sbitmap_queue_clear(&tags->breserved_tags, tag, ctx->cpu);
-		/* [한국어] 예약 CID pool 비트 클리어 → flush/admin 명령용 CID 반납
+		/* [한국어] 예약 tag pool 비트 클리어 → flush/admin 명령용 tag 반납
 		 * 반납 직후 sbitmap 내부에서 대기 중인 waiter를 wakeup */
 	}
 }
@@ -522,12 +618,12 @@ void blk_mq_put_tag(struct blk_mq_tags *tags, struct blk_mq_ctx *ctx,
  * [한국어]
  * blk_mq_put_tags - 여러 tag를 한 번에 batch로 sbitmap_queue에 반납한다.
  *
- * @tags:      CID pool.
+ * @tags:      tag pool.
  * @tag_array: 반납할 전역 tag 값들의 배열(tag_offset 포함).
  * @nr_tags:   반납할 tag 수.
  * @return: 없음.
  *
- * NVMe CQ에서 한 인터럽트 핸들러 내에 여러 완료 엔트리를 처리한 후, 해당 CID들을
+ * NVMe CQ에서 한 인터럽트 핸들러 내에 여러 완료 엔트리를 처리한 후, 해당 tag 들을
  * 개별 sbitmap_queue_clear() 대신 단일 batch 호출로 일괄 클리어한다. cache line을
  * 여러 번 dirty하는 비용을 줄이고 waiter wakeup도 한 번에 처리한다.
  * 실행 컨텍스트: 하드웨어 인터럽트 또는 softirq(NVMe CQ 처리 경로).
@@ -542,7 +638,7 @@ void blk_mq_put_tags(struct blk_mq_tags *tags, int *tag_array, int nr_tags)
 {
 	sbitmap_queue_clear_batch(&tags->bitmap_tags, tags->nr_reserved_tags,
 					tag_array, nr_tags);
-	/* [한국어] 여러 CID를 한 번의 batch 연산으로 bitmap에 반납
+	/* [한국어] 여러 tag를 한 번의 batch 연산으로 bitmap에 반납
 	 * nr_reserved_tags를 base offset으로 전달해 local tag 인덱스 자동 보정
 	 * — 개별 clear보다 cache 효율이 높고 waiter wakeup도 일괄 처리 */
 }
@@ -574,21 +670,21 @@ struct bt_iter_data {
 	 * 예: nvme_timeout 상태 구조체 포인터. */
 
 	bool reserved;
-	/* [한국어] 현재 순회 중인 pool이 예약 CID 영역(breserved_tags)인지 여부.
-	 * true: breserved_tags 순회 — flush/admin 명령용 CID.
-	 * false: bitmap_tags 순회 — 일반 IO CID.
+	/* [한국어] 현재 순회 중인 pool이 예약 tag 영역(breserved_tags)인지 여부.
+	 * true: breserved_tags 순회 — 예약 영역. 표준 NVMe PCIe 는 이 영역 크기가 0 이다.
+	 * false: bitmap_tags 순회 — 일반 IO 영역. NVMe 에서 실제로 쓰이는 쪽은 거의 전부 이쪽이다.
 	 * 설정자: bt_for_each(). 읽는 자: bt_iter() — bitnr offset 보정에 사용. */
 };
 
 /*
  * [한국어]
- * blk_mq_find_and_get_req - tag(CID)로 rqs[] 배열에서 request를 찾고 참조를 획득한다.
+ * blk_mq_find_and_get_req - tag로 rqs[] 배열에서 request를 찾고 참조를 획득한다.
  *
- * @tags:  조회할 CID pool — rqs[] 배열 포함.
+ * @tags:  조회할 tag pool — rqs[] 배열 포함.
  * @bitnr: 전역 tag 값(tag_offset 포함) — sbitmap에서 set된 비트 번호.
  * @return: 유효한 struct request 포인터(참조 카운트 1 증가됨), NULL이면 유효하지 않음.
  *
- * sbitmap에서 set된 비트(active CID)에 대응하는 struct request를 찾는다.
+ * sbitmap에서 set된 비트(사용 중인 tag)에 대응하는 struct request를 찾는다.
  * tag 할당 시 sbitmap bit가 먼저 set된 후 rqs[bitnr]에 request가 기록되므로,
  * 두 사이의 race로 rqs[bitnr]이 NULL이거나 rq->tag가 bitnr와 다를 수 있다.
  * req_ref_inc_not_zero()로 참조를 획득하여 caller가 사용하는 동안 request가
@@ -605,19 +701,19 @@ static struct request *blk_mq_find_and_get_req(struct blk_mq_tags *tags,
 {
 	struct request *rq;
 
-	rq = tags->rqs[bitnr];		/* [한국어] CID(bitnr)로 rqs 배열 역조회 — NVMe CQ 완료 CID에 해당하는 request 찾기 */
+	rq = tags->rqs[bitnr];		/* [한국어] bitnr(= 전역 tag)로 rqs 배열 역조회 — 완료 보고에 실린 정수를 request 포인터로 되돌리는 그 동작 */
 	if (!rq || rq->tag != bitnr || !req_ref_inc_not_zero(rq))
 	/* [한국어] 세 가지 유효성 검사:
 	 * 1) rq==NULL: bit set 직후 rqs[] 미기록 race 상태
 	 * 2) rq->tag != bitnr: 이미 완료되어 다른 request가 같은 slot 재사용 중
 	 * 3) req_ref_inc_not_zero 실패: request가 막 해제 중 — 참조 불가 */
-		rq = NULL;		/* [한국어] 유효하지 않은 CID — 이 tag는 skip */
+		rq = NULL;		/* [한국어] 유효하지 않은 tag — 이 tag는 skip */
 	return rq;			/* [한국어] 유효하면 참조 카운트 1 증가된 request 반환; NULL이면 skip */
 }
 
 /*
  * [한국어]
- * bt_iter - sbitmap의 각 set bit(active CID)에 대해 콜백을 호출하는 sbitmap 순회 콜백.
+ * bt_iter - sbitmap의 각 set bit(사용 중인 tag)에 대해 콜백을 호출하는 sbitmap 순회 콜백.
  *
  * @bitmap: 현재 순회 중인 sbitmap (bitmap_tags.sb 또는 breserved_tags.sb).
  * @bitnr:  sbitmap 내 set된 비트 번호(local tag 인덱스).
@@ -643,25 +739,28 @@ static bool bt_iter(struct sbitmap *bitmap, unsigned int bitnr, void *data)
 	struct blk_mq_hw_ctx *hctx = iter_data->hctx;	/* [한국어] 순회 대상 NVMe hctx — NULL이면 q 기준만 필터링 */
 	struct request_queue *q = iter_data->q;		/* [한국어] NVMe namespace request_queue — namespace 필터링 기준 */
 	struct blk_mq_tag_set *set = q->tag_set;	/* [한국어] NVMe controller의 tag_set — shared/per-hctx 모드 판단에 사용 */
-	struct blk_mq_tags *tags;
-	struct request *rq;
-	bool ret = true;
+	struct blk_mq_tags *tags;	/* [한국어] 이 비트가 속한 tag pool — shared 여부에 따라 바로 아래에서 결정 */
+	struct request *rq;		/* [한국어] 비트에서 복원한 요청. 참조를 얻은 뒤에만 콜백에 넘긴다 */
+	bool ret = true;		/* [한국어] 순회 계속 여부. 콜백이 false 를 주면 그대로 돌려보내 전체 순회를 끊는다 */
 
-	if (blk_mq_is_shared_tags(set->flags))
-		tags = set->shared_tags;	/* [한국어] shared tag 모드: 여러 NVMe namespace가 공유하는 CID pool */
+	if (blk_mq_is_shared_tags(set->flags))	/* [한국어] tag set 하나를 여러 request_queue 가 함께 쓰는 구성인지 */
+		tags = set->shared_tags;	/* [한국어] 공유 구성 — pool 이 tag set 에 하나뿐이다.
+					 * NVMe 로 치면 한 컨트롤러의 여러 네임스페이스(/dev/nvme0n1, n2 …)가
+					 * 같은 하드웨어 큐를 쓰므로 tag 도 함께 나눠 쓰는 경우. */
 	else
-		tags = hctx->tags;		/* [한국어] per-hctx 모드: 이 NVMe queue pair 전용 CID pool */
+		tags = hctx->tags;		/* [한국어] 비공유 구성 — hctx(하드웨어 큐)마다 자기 pool 을 갖는다.
+					 * NVMe PCIe 의 hctx 는 SQ/CQ 한 쌍에 대응한다. */
 
 	if (!iter_data->reserved)
 		bitnr += tags->nr_reserved_tags;
-	/* [한국어] 일반 CID 순회 시 bitnr에 예약 영역 크기를 더해 전역 CID 값으로 변환
+	/* [한국어] 일반 tag 순회 시 bitnr에 예약 영역 크기를 더해 전역 tag 값으로 변환
 	 * — rqs[] 배열은 전역 tag(예약+일반 통합) 인덱스를 사용하므로 offset 보정 필수 */
 
 	/*
 	 * We can hit rq == NULL here, because the tagging functions
 	 * test and set the bit before assigning ->rqs[].
 	 */
-	rq = blk_mq_find_and_get_req(tags, bitnr);	/* [한국어] 전역 CID로 rqs[] 역조회 및 참조 획득 — race로 NULL 가능 */
+	rq = blk_mq_find_and_get_req(tags, bitnr);	/* [한국어] 전역 tag 로 rqs[] 역조회 및 참조 획득 — race로 NULL 가능 */
 	if (!rq)
 		return true;	/* [한국어] 유효한 request 없음(race 또는 미기록) — 다음 set bit로 진행 */
 
@@ -697,11 +796,11 @@ static bool bt_iter(struct sbitmap *bitmap, unsigned int bitnr, void *data)
  * @bt:       순회할 sbitmap_queue(bitmap_tags 또는 breserved_tags).
  * @fn:       각 유효한 request에 호출할 콜백.
  * @data:     fn에 전달할 private 데이터.
- * @reserved: true이면 예약 CID 영역 순회; false이면 일반 CID 영역.
+ * @reserved: true이면 예약 tag 영역 순회; false이면 일반 tag 영역.
  * @return: 없음.
  *
  * bt_iter_data 구조체로 컨텍스트를 패키징한 뒤 sbitmap_for_each_set()을 통해
- * bt->sb에서 set된 비트(active CID)마다 bt_iter()를 호출한다. blk_mq_queue_tag_busy_iter()
+ * bt->sb에서 set된 비트(사용 중인 tag)마다 bt_iter()를 호출한다. blk_mq_queue_tag_busy_iter()
  * 에서 shared/per-hctx 모드에 따라 적절한 bt와 hctx를 조합하여 호출한다.
  * 실행 컨텍스트: 프로세스 컨텍스트(timeout/reset 경로).
  * 호출자: blk_mq_queue_tag_busy_iter().
@@ -719,13 +818,15 @@ static void bt_for_each(struct blk_mq_hw_ctx *hctx, struct request_queue *q,
 		.hctx = hctx,		/* [한국어] 순회 대상 NVMe hctx — bt_iter가 rq->mq_hctx와 비교 */
 		.fn = fn,		/* [한국어] timeout/abort/complete 처리 콜백 */
 		.data = data,		/* [한국어] 콜백 private(예: nvme_timeout 상태 구조체) */
-		.reserved = reserved,	/* [한국어] 예약 CID 순회 여부 — bitnr offset 보정에 사용 */
+		.reserved = reserved,	/* [한국어] 예약 tag 순회 여부 — bitnr offset 보정에 사용 */
 		.q = q,			/* [한국어] NVMe namespace request_queue — rq->q 필터링 기준 */
 	};
 
 	sbitmap_for_each_set(&bt->sb, bt_iter, &iter_data);
-	/* [한국어] bt->sb(sbitmap)에서 set된 bit(active CID)를 하나씩 찾아 bt_iter 호출
-	 * — NVMe SQ에서 현재 진행 중인 모든 명령을 스캔하는 핵심 루프 */
+	/* [한국어] bt->sb(sbitmap)에서 set된 bit(사용 중인 tag)를 하나씩 찾아 bt_iter 호출
+	 * — 스캔 대상은 장치의 SQ 링이 아니라 blk-mq 의 tag 비트맵이다.
+	 * 호스트는 장치 큐 내용을 읽지 않는다; "지금 발급되어 있는 tag" 집합이
+	 * 곧 "인플라이트 요청" 집합이라는 등식으로 진행 중인 IO 를 파악한다 */
 }
 
 /*
@@ -734,7 +835,7 @@ static void bt_for_each(struct blk_mq_hw_ctx *hctx, struct request_queue *q,
  */
 struct bt_tags_iter_data {
 	struct blk_mq_tags *tags;
-	/* [한국어] 순회할 CID pool(blk_mq_tags).
+	/* [한국어] 순회할 tag pool(blk_mq_tags).
 	 * 설정자: bt_tags_for_each() 호출자. 읽는 자: bt_tags_iter().
 	 * rqs[]/static_rqs[] 배열과 nr_reserved_tags 등을 담고 있음. */
 
@@ -748,12 +849,12 @@ struct bt_tags_iter_data {
 
 	unsigned int flags;
 	/* [한국어] BT_TAG_ITER_* 플래그 조합으로 순회 동작 제어.
-	 * BT_TAG_ITER_RESERVED(1<<0): 현재 순회 중인 pool이 예약 CID 영역 — bitnr offset 보정 생략.
+	 * BT_TAG_ITER_RESERVED(1<<0): 현재 순회 중인 pool이 예약 tag 영역 — bitnr offset 보정 생략.
 	 * BT_TAG_ITER_STARTED(1<<1): blk_mq_request_started()인 request만 콜백 대상.
 	 * BT_TAG_ITER_STATIC_RQS(1<<2): rqs[] 대신 static_rqs[] 사용 — NVMe reset/초기화 중 안전한 순회. */
 };
 
-#define BT_TAG_ITER_RESERVED		(1 << 0)	/* [한국어] 예약 CID 영역(breserved_tags) 순회 중임을 표시 — bitnr offset 보정 제어 */
+#define BT_TAG_ITER_RESERVED		(1 << 0)	/* [한국어] 예약 tag 영역(breserved_tags) 순회 중임을 표시 — bitnr offset 보정 제어 */
 #define BT_TAG_ITER_STARTED		(1 << 1)	/* [한국어] NVMe에 실제 제출된(started) request만 순회 — abort/timeout 대상 선별 */
 #define BT_TAG_ITER_STATIC_RQS		(1 << 2)	/* [한국어] static_rqs[] 사용 — rqs[]가 미설정인 초기화/reset 단계에서도 안전하게 순회 */
 
@@ -766,10 +867,12 @@ struct bt_tags_iter_data {
  * @data:   struct bt_tags_iter_data 포인터.
  * @return: true이면 계속, false이면 중단.
  *
- * bt_iter()와 달리 hctx/q 필터 없이 지정된 CID pool 전체를 대상으로 순회한다.
+ * bt_iter()와 달리 hctx/q 필터 없이 지정된 tag pool 전체를 대상으로 순회한다.
  * BT_TAG_ITER_STATIC_RQS 플래그가 설정된 경우 rqs[] 대신 static_rqs[]에서 직접
  * 참조하며(참조 카운트 불필요), 그렇지 않으면 blk_mq_find_and_get_req()로 안전하게
- * 참조를 획득한다. BT_TAG_ITER_STARTED 필터로 이미 NVMe에 제출된 명령만 선별한다.
+ * 참조를 획득한다. BT_TAG_ITER_STARTED 필터는 tag 만 잡아 두고 아직
+ * mq_ops->queue_rq 로 내려가지 않은 요청을 걸러낸다 — 아직 장치가 알지도
+ * 못하는 요청까지 취소·타임아웃 대상에 넣으면 안 되기 때문이다.
  * 실행 컨텍스트: sbitmap_for_each_set() 내에서 동기 호출.
  * 호출자: sbitmap_for_each_set() ← bt_tags_for_each() ← __blk_mq_all_tag_iter().
  * 피호출자: blk_mq_find_and_get_req(), blk_mq_request_started(), fn(), blk_mq_put_rq_ref().
@@ -781,15 +884,15 @@ struct bt_tags_iter_data {
 static bool bt_tags_iter(struct sbitmap *bitmap, unsigned int bitnr, void *data)
 {
 	struct bt_tags_iter_data *iter_data = data;
-	struct blk_mq_tags *tags = iter_data->tags;	/* [한국어] 순회 대상 CID pool */
-	struct request *rq;
-	bool ret = true;
+	struct blk_mq_tags *tags = iter_data->tags;	/* [한국어] 순회 대상 tag pool */
+	struct request *rq;		/* [한국어] 이 비트에 대응하는 요청 */
+	bool ret = true;		/* [한국어] 기본은 순회 계속 */
 	bool iter_static_rqs = !!(iter_data->flags & BT_TAG_ITER_STATIC_RQS);
 	/* [한국어] static_rqs[] 사용 여부 — NVMe reset/초기화 단계에서도 안전하게 접근하기 위한 플래그 */
 
 	if (!(iter_data->flags & BT_TAG_ITER_RESERVED))
 		bitnr += tags->nr_reserved_tags;
-	/* [한국어] 일반 CID 영역 순회 시 예약 영역 크기를 더해 전역 CID로 변환
+	/* [한국어] 일반 tag 영역 순회 시 예약 영역 크기를 더해 전역 tag 로 변환
 	 * — RESERVED 플래그가 있으면 이미 breserved_tags 영역이므로 보정 불필요 */
 
 	/*
@@ -802,10 +905,10 @@ static bool bt_tags_iter(struct sbitmap *bitmap, unsigned int bitnr, void *data)
 		 * NVMe controller 초기화/복구 단계에서도 안전하게 참조 가능 */
 	else
 		rq = blk_mq_find_and_get_req(tags, bitnr);
-		/* [한국어] 동적 rqs[] 배열에서 CID에 해당하는 request를 참조 카운트와 함께 획득
+		/* [한국어] 동적 rqs[] 배열에서 tag에 해당하는 request를 참조 카운트와 함께 획득
 		 * bit set 후 rqs[] 기록 전 race로 NULL 가능 */
 	if (!rq)
-		return true;	/* [한국어] 유효하지 않은 CID — 다음 set bit로 진행 */
+		return true;	/* [한국어] 유효하지 않은 tag — 다음 set bit로 진행 */
 
 	if (!(iter_data->flags & BT_TAG_ITER_STARTED) ||
 	    blk_mq_request_started(rq))
@@ -814,7 +917,7 @@ static bool bt_tags_iter(struct sbitmap *bitmap, unsigned int bitnr, void *data)
 		ret = iter_data->fn(rq, iter_data->data);	/* [한국어] timeout/abort/complete 콜백 실행 */
 	if (!iter_static_rqs)
 		blk_mq_put_rq_ref(rq);	/* [한국어] blk_mq_find_and_get_req로 증가시킨 참조 해제 — static_rqs 경로는 참조 획득 없으므로 제외 */
-	return ret;			/* [한국어] true: 다음 CID 계속 순회, false: 전체 순회 즉시 중단 */
+	return ret;			/* [한국어] true: 다음 tag 계속 순회, false: 전체 순회 즉시 중단 */
 }
 
 /**
@@ -831,9 +934,9 @@ static bool bt_tags_iter(struct sbitmap *bitmap, unsigned int bitnr, void *data)
  */
 /*
  * [한국어]
- * bt_tags_for_each - 특정 sbitmap_queue의 모든 active CID에 대해 bt_tags_iter를 호출한다.
+ * bt_tags_for_each - 특정 sbitmap_queue의 모든 active tag에 대해 bt_tags_iter를 호출한다.
  *
- * @tags:  순회할 CID pool(blk_mq_tags) — rqs[], static_rqs[], nr_reserved_tags 포함.
+ * @tags:  순회할 tag pool(blk_mq_tags) — rqs[], static_rqs[], nr_reserved_tags 포함.
  * @bt:    순회할 sbitmap_queue(bitmap_tags 또는 breserved_tags).
  * @fn:    각 request에 호출할 콜백.
  * @data:  fn에 전달할 private 데이터.
@@ -854,7 +957,7 @@ static void bt_tags_for_each(struct blk_mq_tags *tags, struct sbitmap_queue *bt,
 			     busy_tag_iter_fn *fn, void *data, unsigned int flags)
 {
 	struct bt_tags_iter_data iter_data = {
-		.tags = tags,	/* [한국어] 순회할 CID pool */
+		.tags = tags,	/* [한국어] 순회할 tag pool */
 		.fn = fn,	/* [한국어] timeout/abort/complete 처리 콜백 */
 		.data = data,	/* [한국어] 콜백 private(예: 완료 카운터, abort 상태) */
 		.flags = flags,	/* [한국어] BT_TAG_ITER_*: reserved/started/static_rqs 동작 제어 */
@@ -862,21 +965,22 @@ static void bt_tags_for_each(struct blk_mq_tags *tags, struct sbitmap_queue *bt,
 
 	if (tags->rqs)	/* [한국어] 동적 rqs[] 배열이 초기화된 경우에만 순회 — 미초기화 시 NULL deref 방지 */
 		sbitmap_for_each_set(&bt->sb, bt_tags_iter, &iter_data);
-		/* [한국어] bt->sb에서 set된 비트(active CID)마다 bt_tags_iter 호출
-		 * — NVMe SQ에서 현재 진행 중인 명령 전체를 콜백으로 처리 */
+		/* [한국어] bt->sb에서 set된 비트(사용 중인 tag)마다 bt_tags_iter 호출
+		 * — 마찬가지로 tag 비트맵을 훑는다. 타임아웃 처리나 컨트롤러 리셋 시
+		 * "아직 안 끝난 요청 전부"를 찾아 실패 처리할 때 쓰는 경로다 */
 }
 
 /*
  * [한국어]
- * __blk_mq_all_tag_iter - 예약 CID 영역과 일반 CID 영역을 모두 순회하는 내부 공통 함수.
+ * __blk_mq_all_tag_iter - 예약 tag 영역과 일반 tag 영역을 모두 순회하는 내부 공통 함수.
  *
- * @tags:  순회할 CID pool.
+ * @tags:  순회할 tag pool.
  * @fn:    각 request에 호출할 콜백.
  * @priv:  fn에 전달할 private 데이터.
  * @flags: BT_TAG_ITER_* 플래그(RESERVED 제외) — 호출자가 설정, 이 함수가 RESERVED 추가.
  * @return: 없음.
  *
- * NVMe의 전체 CID 범위(예약 CID + 일반 CID)를 빠짐없이 커버하는 공통 순회 함수.
+ * 전체 tag 번호 공간(예약 영역 + 일반 영역)를 빠짐없이 커버하는 공통 순회 함수.
  * 상위에서 BT_TAG_ITER_RESERVED를 미리 지정하면 이 함수의 예약/일반 분기 로직이
  * 중복되어 혼란을 야기하므로 WARN_ON_ONCE로 방지한다.
  * 실행 컨텍스트: 프로세스 컨텍스트(blk_mq_tagset_busy_iter/blk_mq_all_tag_iter에서 호출).
@@ -896,10 +1000,10 @@ static void __blk_mq_all_tag_iter(struct blk_mq_tags *tags,
 	if (tags->nr_reserved_tags)
 		bt_tags_for_each(tags, &tags->breserved_tags, fn, priv,
 				 flags | BT_TAG_ITER_RESERVED);
-	/* [한국어] 예약 CID 영역(breserved_tags) 순회 — flush/admin 명령용 CID 포함
+	/* [한국어] 예약 tag 영역(breserved_tags) 순회 — 표준 NVMe PCIe 에서는 크기 0 이라 대개 빈 순회
 	 * RESERVED 플래그 추가로 bt_tags_iter가 bitnr offset 보정을 건너뜀 */
 	bt_tags_for_each(tags, &tags->bitmap_tags, fn, priv, flags);
-	/* [한국어] 일반 IO CID 영역(bitmap_tags) 순회 — 두 영역 합쳐 전체 CID 공간 커버 */
+	/* [한국어] 일반 IO tag 영역(bitmap_tags) 순회 — 두 영역 합쳐 전체 tag 공간 커버 */
 }
 
 /**
@@ -917,7 +1021,7 @@ static void __blk_mq_all_tag_iter(struct blk_mq_tags *tags,
  * [한국어]
  * blk_mq_all_tag_iter - 특정 tag map의 모든 request를 static_rqs 포함하여 순회한다.
  *
- * @tags: 순회할 CID pool.
+ * @tags: 순회할 tag pool.
  * @fn:   각 request에 호출할 콜백.
  * @priv: fn에 전달할 private 데이터.
  * @return: 없음.
@@ -938,7 +1042,7 @@ void blk_mq_all_tag_iter(struct blk_mq_tags *tags, busy_tag_iter_fn *fn,
 {
 	__blk_mq_all_tag_iter(tags, fn, priv, BT_TAG_ITER_STATIC_RQS);
 	/* [한국어] STATIC_RQS 플래그: rqs[] 대신 static_rqs[] 사용
-	 * — NVMe 초기화/reset 중에도 안전하게 전체 CID 공간 스캔 가능 */
+	 * — NVMe 초기화/reset 중에도 안전하게 전체 tag 공간 스캔 가능 */
 }
 
 /**
@@ -957,43 +1061,56 @@ void blk_mq_all_tag_iter(struct blk_mq_tags *tags, busy_tag_iter_fn *fn,
  * [한국어]
  * blk_mq_tagset_busy_iter - tag set 전체에서 NVMe에 제출된(started) request를 순회한다.
  *
- * @tagset: 순회할 tag set — NVMe controller의 모든 queue pair를 포함.
+ * @tagset: 순회할 tag set. NVMe 라면 한 컨트롤러의 IO 큐 전체(또는 admin 큐)에 해당.
  * @fn:     각 started request에 호출할 콜백; true 반환 시 계속, false 반환 시 중단.
  * @priv:   fn에 전달할 private 데이터.
  * @return: 없음.
  *
- * NVMe controller 전체에서 현재 SQ에 제출되어 진행 중인 모든 명령을 대상으로
- * timeout, abort, reset 처리를 수행한다. shared_tags 모드에서는 tags[0]만,
- * per-hctx 모드에서는 nr_hw_queues만큼 반복한다.
- * tags[] 배열은 __blk_mq_update_nr_hw_queues()가 queue freeze 중에 갱신하므로,
- * srcu_read_lock()으로 동시 변경과의 race를 방지한다.
- * 실행 컨텍스트: 프로세스 컨텍스트(nvme_timeout, nvme_reset_work 등).
- * 호출자: NVMe 드라이버(nvme_timeout, nvme_reset_work 등).
+ * "지금 진행 중인 요청 전부"를 열거하는 수단이다. 드라이버는 장치 큐를
+ * 읽어서 이를 알아낼 수 없으므로, 발급된 tag 비트 집합을 훑는 이 함수에
+ * 의존한다. shared_tags 모드에서는 tags[0] 하나만, per-hctx 모드에서는
+ * nr_hw_queues 만큼 반복한다.
+ * tags[] 배열은 __blk_mq_update_nr_hw_queues()가 큐 freeze 중에 갈아치우므로
+ * srcu_read_lock() 으로 그 교체와의 경쟁을 막는다.
+ *
+ * NVMe 에서의 실제 사용처(drivers/nvme/host/core.c 확인):
+ *   nvme_cancel_tagset(ctrl)       → blk_mq_tagset_busy_iter(ctrl->tagset,
+ *                                       nvme_cancel_request, ctrl)
+ *   nvme_cancel_admin_tagset(ctrl) → 같은 것을 admin_tagset 에 대해
+ * 컨트롤러 리셋·연결 해제 시 "장치가 영영 완료해 주지 않을 요청들"을 전부
+ * 찾아 강제로 실패 처리하는 용도다. 이어서 호출되는
+ * blk_mq_tagset_wait_completed_request() 가 완료 콜백이 끝나기를 기다린다.
+ * 흔한 오해와 달리 nvme_timeout() 이 이 함수를 부르지는 않는다 —
+ * nvme_timeout 은 문제가 된 그 요청 하나만 다룬다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. 콜백이 잠들 수 있어 RCU 가 아닌 SRCU 를 쓴다.
  * 피호출자: __blk_mq_all_tag_iter().
  *
  * 호출 체인:
- *   nvme_timeout / nvme_reset_work → [blk_mq_tagset_busy_iter]
+ *   nvme_cancel_tagset → [blk_mq_tagset_busy_iter]
  *   → __blk_mq_all_tag_iter → bt_tags_for_each → bt_tags_iter → fn(rq, priv)
  */
 void blk_mq_tagset_busy_iter(struct blk_mq_tag_set *tagset,
 		busy_tag_iter_fn *fn, void *priv)
 {
 	unsigned int flags = tagset->flags;	/* [한국어] tag set 플래그 — shared tag pool 여부 판단 */
-	int i, nr_tags, srcu_idx;
+	int i, nr_tags, srcu_idx;	/* [한국어] i: 순회 중인 tags[] 인덱스, nr_tags: 훑을 pool 개수
+					 * (shared 면 1, 아니면 nr_hw_queues), srcu_idx: unlock 에 돌려줄 값 */
 
 	srcu_idx = srcu_read_lock(&tagset->tags_srcu);
 	/* [한국어] SRCU(Sleepable RCU) read lock 획득 — tags[] 배열 보호
 	 * __blk_mq_update_nr_hw_queues()가 queue freeze 중 tags[]를 갱신할 수 있으므로 race 방지 */
 
 	nr_tags = blk_mq_is_shared_tags(flags) ? 1 : tagset->nr_hw_queues;
-	/* [한국어] shared tag 모드: tags[0] 하나만 순회(모든 queue가 같은 CID pool 공유)
+	/* [한국어] shared tag 모드: tags[0] 하나만 순회(모든 queue가 같은 tag pool 공유)
 	 * per-hctx 모드: NVMe queue pair 수만큼 순회 */
 
 	for (i = 0; i < nr_tags; i++) {
-		if (tagset->tags && tagset->tags[i])	/* [한국어] tags 배열과 해당 CID pool이 유효한지 확인 — 초기화 중이거나 이미 해제된 경우 skip */
+		if (tagset->tags && tagset->tags[i])	/* [한국어] tags 배열과 해당 tag pool이 유효한지 확인 — 초기화 중이거나 이미 해제된 경우 skip */
 			__blk_mq_all_tag_iter(tagset->tags[i], fn, priv,
 					      BT_TAG_ITER_STARTED);
-		/* [한국어] STARTED 플래그: 실제 NVMe SQ에 제출된 명령만 순회
+		/* [한국어] STARTED 플래그: tag 만 잡아 두고 아직 드라이버로 내려가지 않은 요청은 제외하고,
+		 * 실제로 mq_ops->queue_rq 를 통과한 것만 순회
 		 * — 아직 dispatch 전인 request는 제외하여 false-positive abort 방지 */
 	}
 	srcu_read_unlock(&tagset->tags_srcu, srcu_idx);	/* [한국어] SRCU read lock 해제 — tags[] 보호 종료 */
@@ -1107,7 +1224,7 @@ EXPORT_SYMBOL(blk_mq_tagset_wait_completed_request);	/* [한국어] NVMe 드라�
 void blk_mq_queue_tag_busy_iter(struct request_queue *q, busy_tag_iter_fn *fn,
 		void *priv)
 {
-	int srcu_idx;
+	int srcu_idx;			/* [한국어] srcu_read_unlock 에 되돌려 줄 인덱스 */
 
 	/*
 	 * __blk_mq_update_nr_hw_queues() updates nr_hw_queues and queue_hw_ctx
@@ -1120,26 +1237,28 @@ void blk_mq_queue_tag_busy_iter(struct request_queue *q, busy_tag_iter_fn *fn,
 		return;
 
 	srcu_idx = srcu_read_lock(&q->tag_set->tags_srcu);
-	/* [한국어] SRCU read lock — tags[] 배열 보호; NVMe queue pair 재구성 중 race 방지 */
+	/* [한국어] SRCU read lock — 순회 도중 __blk_mq_update_nr_hw_queues() 가 tags 를
+	 * 교체·해제하는 것을 막는다. 해제는 call_srcu 로 미뤄지므로 이 구간 안에서는
+	 * 포인터 유효성이 보장된다. RCU 가 아니라 SRCU 인 이유는 콜백 fn 이 잠들 수 있어서다. */
 	if (blk_mq_is_shared_tags(q->tag_set->flags)) {
-		struct blk_mq_tags *tags = q->tag_set->shared_tags;	/* [한국어] shared CID pool — 여러 NVMe namespace가 공유 */
-		struct sbitmap_queue *bresv = &tags->breserved_tags;	/* [한국어] shared 예약 CID pool */
-		struct sbitmap_queue *btags = &tags->bitmap_tags;	/* [한국어] shared 일반 CID pool */
+		struct blk_mq_tags *tags = q->tag_set->shared_tags;	/* [한국어] shared tag pool — 여러 NVMe namespace가 공유 */
+		struct sbitmap_queue *bresv = &tags->breserved_tags;	/* [한국어] shared 예약 tag pool */
+		struct sbitmap_queue *btags = &tags->bitmap_tags;	/* [한국어] shared 일반 tag pool */
 
 		if (tags->nr_reserved_tags)
 			bt_for_each(NULL, q, bresv, fn, priv, true);
-			/* [한국어] shared 예약 CID(flush/admin) 순회; hctx=NULL이면 q 기준만 필터링 */
+			/* [한국어] shared tag set 의 예약 영역 순회; hctx=NULL이면 q 기준만 필터링 */
 		bt_for_each(NULL, q, btags, fn, priv, false);
-		/* [한국어] shared 일반 CID 순회 — 동일 tag_set 공유 다른 namespace request도 포함되므로 bt_iter의 rq->q 필터 필수 */
+		/* [한국어] shared 일반 tag 순회 — 동일 tag_set 공유 다른 namespace request도 포함되므로 bt_iter의 rq->q 필터 필수 */
 	} else {
 		struct blk_mq_hw_ctx *hctx;
 		unsigned long i;
 
 		queue_for_each_hw_ctx(q, hctx, i) {
 		/* [한국어] NVMe queue pair(hctx)를 하나씩 순회 — SQ/CQ 쌍 단위 스캔 */
-			struct blk_mq_tags *tags = hctx->tags;		/* [한국어] 이 hctx의 per-hctx CID pool */
-			struct sbitmap_queue *bresv = &tags->breserved_tags;	/* [한국어] per-hctx 예약 CID pool */
-			struct sbitmap_queue *btags = &tags->bitmap_tags;	/* [한국어] per-hctx 일반 CID pool */
+			struct blk_mq_tags *tags = hctx->tags;		/* [한국어] 이 hctx의 per-hctx tag pool */
+			struct sbitmap_queue *bresv = &tags->breserved_tags;	/* [한국어] per-hctx 예약 tag pool */
+			struct sbitmap_queue *btags = &tags->bitmap_tags;	/* [한국어] per-hctx 일반 tag pool */
 
 			/*
 			 * If no software queues are currently mapped to this
@@ -1149,8 +1268,8 @@ void blk_mq_queue_tag_busy_iter(struct request_queue *q, busy_tag_iter_fn *fn,
 				continue;	/* [한국어] CPU/IRQ affinity에 매핑된 software queue가 없는 hctx는 skip — 실제 IO가 없는 NVMe queue pair */
 
 			if (tags->nr_reserved_tags)
-				bt_for_each(hctx, q, bresv, fn, priv, true);	/* [한국어] per-hctx 예약 CID(flush/admin) 순회 */
-			bt_for_each(hctx, q, btags, fn, priv, false);	/* [한국어] per-hctx 일반 CID 순회 — timeout/abort 대상 request 수집 */
+				bt_for_each(hctx, q, bresv, fn, priv, true);	/* [한국어] hctx 별 예약 영역 순회 */
+			bt_for_each(hctx, q, btags, fn, priv, false);	/* [한국어] per-hctx 일반 tag 순회 — timeout/abort 대상 request 수집 */
 		}
 	}
 	srcu_read_unlock(&q->tag_set->tags_srcu, srcu_idx);	/* [한국어] SRCU read lock 해제 — tags[] 보호 종료 */
@@ -1162,7 +1281,8 @@ void blk_mq_queue_tag_busy_iter(struct request_queue *q, busy_tag_iter_fn *fn,
  * bt_alloc - sbitmap_queue를 할당·초기화하여 지정된 depth만큼 tag를 관리하게 한다.
  *
  * @bt:          초기화할 sbitmap_queue 포인터.
- * @depth:       관리할 tag(CID) 수 — NVMe SQ/CQ의 queue depth에 대응.
+ * @depth:       이 sbitmap 이 관리할 비트 수. NVMe 라면 결국 SQ 깊이와 같은 값이 되지만,
+ *               의미는 "동시에 발급 가능한 tag 수"다.
  * @round_robin: true이면 bit 검색 시 CPU 간 round-robin — BLK_MQ_F_TAG_RR 플래그.
  * @node:        NUMA 노드 번호 — 이 노드의 로컬 메모리에 bitmap 할당.
  * @return: 0(성공), 음수(실패) — blk_mq_init_tags가 오류 경로 처리.
@@ -1180,29 +1300,33 @@ void blk_mq_queue_tag_busy_iter(struct request_queue *q, busy_tag_iter_fn *fn,
 static int bt_alloc(struct sbitmap_queue *bt, unsigned int depth,
 		    bool round_robin, int node)
 {
-	return sbitmap_queue_init_node(bt, depth, -1, round_robin, GFP_KERNEL,
-				       node);
+	return sbitmap_queue_init_node(bt, depth, -1, round_robin, GFP_KERNEL,	/* [한국어] 세 번째 인자 -1 은 shift 자동 계산 요청.
+									 * sbitmap 이 depth 와 CPU 수를 보고 워드당 비트 수를 정한다.
+									 * 너무 촘촘하면 CPU 들이 같은 워드를 두고 다투고, 너무 성기면 메모리를 낭비한다. */
+				       node);					/* [한국어] NUMA 노드 — 비트맵을 해당 노드 로컬 메모리에 둔다.
+									 * NVMe 는 nvme_alloc_io_tag_set 이 ctrl->numa_node 를 넘기므로
+									 * 결국 그 장치가 붙은 PCIe 루트에 가까운 메모리가 선택된다. */
 	/* [한국어] sbitmap_queue 초기화:
-	 * depth: 관리할 CID 수(NVMe SQ queue depth)
+	 * depth: 이 sbitmap 이 관리할 비트 수 = 이 큐의 동시 진행 상한
 	 * -1: shift 자동 계산(depth에 맞는 최적 bit 폭)
-	 * round_robin: CPU 간 CID 할당 분산으로 cache 편중 완화
+	 * round_robin: CPU 간 시작 위치 분산으로 cache 편중 완화
 	 * GFP_KERNEL: 슬립 허용 메모리 할당
 	 * node: NUMA 로컬 할당으로 접근 지연 최소화 */
 }
 
 /*
  * [한국어]
- * blk_mq_init_tags - blk_mq_tags 구조체를 할당하고 일반/예약 CID sbitmap을 초기화한다.
+ * blk_mq_init_tags - blk_mq_tags 구조체를 할당하고 일반/예약 tag sbitmap을 초기화한다.
  *
- * @total_tags:    전체 tag 수 — NVMe SQ 최대 queue depth.
- * @reserved_tags: 예약 tag 수 — flush/admin 등 우선 명령용 CID 수.
+ * @total_tags:    전체 tag 수(예약 + 일반).
+ * @reserved_tags: 예약 영역 크기. NVMe PCIe 는 0, fabrics 는 connect 용 1, Apple(SHARED_TAGS) 만 admin 깊이만큼 잡는다.
  * @flags:         tag set 플래그 — BLK_MQ_F_TAG_RR(round-robin) 포함.
  * @node:          NUMA 노드 번호.
  * @return:        초기화된 blk_mq_tags 포인터, 실패 시 NULL.
  *
  * NVMe queue pair 생성 시(blk_mq_alloc_map_and_rqs) 호출된다.
- * total_tags - reserved_tags만큼 bitmap_tags(일반 CID)를, reserved_tags만큼
- * breserved_tags(예약 CID)를 별도로 초기화하여 두 영역을 독립적으로 관리한다.
+ * total_tags - reserved_tags만큼 bitmap_tags(일반 영역)를, reserved_tags만큼
+ * breserved_tags(예약 영역)를 별도로 초기화하여 두 영역을 독립적으로 관리한다.
  * BLK_MQ_TAG_MAX 초과 시 NVMe 드라이버 설정 오류로 판단하고 즉시 실패 반환한다.
  * 실행 컨텍스트: 프로세스 컨텍스트(NVMe probe/init 경로); GFP_KERNEL 슬립 가능.
  * 호출자: blk_mq_alloc_map_and_rqs().
@@ -1215,37 +1339,40 @@ static int bt_alloc(struct sbitmap_queue *bt, unsigned int depth,
 struct blk_mq_tags *blk_mq_init_tags(unsigned int total_tags,
 		unsigned int reserved_tags, unsigned int flags, int node)
 {
-	unsigned int depth = total_tags - reserved_tags;	/* [한국어] 일반 IO CID 수 = 전체 SQ depth - 예약 CID 수 */
-	bool round_robin = flags & BLK_MQ_F_TAG_RR;		/* [한국어] CPU 간 round-robin CID 할당 여부 — 편중 방지 */
-	struct blk_mq_tags *tags;
+	unsigned int depth = total_tags - reserved_tags;	/* [한국어] 일반 영역 크기 = 전체 tag 수 − 예약 영역 크기 */
+	bool round_robin = flags & BLK_MQ_F_TAG_RR;		/* [한국어] CPU 간 round-robin 탐색 시작점 사용 여부 — 편중 방지 */
+	struct blk_mq_tags *tags;			/* [한국어] 이번에 만들 tag pool */
 
-	if (total_tags > BLK_MQ_TAG_MAX) {
+	if (total_tags > BLK_MQ_TAG_MAX) {		/* [한국어] blk-mq 절대 상한 검사. NVMe 는 여기 닿기 전에 이미 두 번 잘린다:
+							 * pci.c 가 io_queue_depth 를 4095 로, core 가 BLK_MQ_MAX_DEPTH-1 로. */
 		pr_err("blk-mq: tag depth too large\n");	/* [한국어] NVMe controller의 SQ depth가 커널 지원 최대치 초과 — 드라이버 설정 오류 */
 		return NULL;				/* [한국어] 초기화 실패 반환 — NVMe queue pair 생성 중단 */
 	}
 
-	tags = kzalloc_node(sizeof(*tags), GFP_KERNEL, node);
+	tags = kzalloc_node(sizeof(*tags), GFP_KERNEL, node);	/* [한국어] 0 초기화 — 명시적으로 채우지 않는 필드(lock, active_queues 등)가
+							 * 0 을 올바른 초깃값으로 갖는다. _node 판을 쓰는 이유는 이 구조체가
+							 * 제출·완료 핫패스에서 매번 접근되어 원격 노드 접근을 피해야 하기 때문이다. */
 	/* [한국어] NUMA 로컬 메모리로 blk_mq_tags 구조체 할당(zeroed)
 	 * node 로컬 할당으로 NVMe 컨트롤러가 위치한 NUMA 노드와 메모리 친화성 유지 */
 	if (!tags)
 		return NULL;	/* [한국어] 메모리 할당 실패 */
 
-	tags->nr_tags = total_tags;		/* [한국어] 전체 CID 수 설정 = NVMe SQ queue depth */
-	tags->nr_reserved_tags = reserved_tags;	/* [한국어] 예약 CID 수 설정 = flush/admin 우선 명령용 */
+	tags->nr_tags = total_tags;		/* [한국어] 이 tag set 이 발급할 수 있는 tag 총수 (예약 + 일반) */
+	tags->nr_reserved_tags = reserved_tags;	/* [한국어] 예약 tag 수 설정 = flush/admin 우선 명령용 */
 	spin_lock_init(&tags->lock);		/* [한국어] active_queues/wake_batch 보호 스핀락 초기화 */
 	INIT_LIST_HEAD(&tags->page_list);	/* [한국어] request pool 페이지 리스트 초기화 — blk_mq_alloc_rqs에서 할당된 페이지들이 여기 연결됨 */
 
 	if (bt_alloc(&tags->bitmap_tags, depth, round_robin, node))
-		/* [한국어] 일반 IO CID pool sbitmap 초기화 — 실패 시 메모리 정리 경로로 */
+		/* [한국어] 일반 IO tag pool sbitmap 초기화 — 실패 시 메모리 정리 경로로 */
 		goto out_free_tags;
 	if (bt_alloc(&tags->breserved_tags, reserved_tags, round_robin, node))
-		/* [한국어] 예약 CID pool sbitmap 초기화 — 실패 시 bitmap_tags도 함께 정리 */
+		/* [한국어] 예약 tag pool sbitmap 초기화 — 실패 시 bitmap_tags도 함께 정리 */
 		goto out_free_bitmap_tags;
 
-	return tags;	/* [한국어] CID pool 완전 초기화 완료 — NVMe SQ/CQ와 1:1 매핑 준비됨 */
+	return tags;	/* [한국어] 두 sbitmap 과 rqs 배열까지 준비 완료 — 이제 이 pool 로 tag 발급이 가능하다 */
 
 out_free_bitmap_tags:
-	sbitmap_queue_free(&tags->bitmap_tags);	/* [한국어] 이미 성공한 일반 CID bitmap 해제 */
+	sbitmap_queue_free(&tags->bitmap_tags);	/* [한국어] 이미 성공한 일반 tag bitmap 해제 */
 out_free_tags:
 	kfree(tags);	/* [한국어] tags 구조체 해제 — NVMe queue pair 생성 실패 */
 	return NULL;
@@ -1300,10 +1427,10 @@ static void blk_mq_free_tags_callback(struct rcu_head *head)
 
 /*
  * [한국어]
- * blk_mq_free_tags - CID sbitmap을 해제하고 필요 시 SRCU를 통해 tags를 지연 해제한다.
+ * blk_mq_free_tags - tag sbitmap 을 해제하고 필요 시 SRCU를 통해 tags를 지연 해제한다.
  *
  * @set:  tag set — SRCU 보호 도메인(tags_srcu)을 제공.
- * @tags: 해제할 blk_mq_tags(CID pool).
+ * @tags: 해제할 blk_mq_tags(tag pool).
  * @return: 없음.
  *
  * NVMe controller 제거 또는 queue pair 재구성 시(blk_mq_free_map_and_rqs) 호출된다.
@@ -1321,8 +1448,8 @@ static void blk_mq_free_tags_callback(struct rcu_head *head)
  */
 void blk_mq_free_tags(struct blk_mq_tag_set *set, struct blk_mq_tags *tags)
 {
-	sbitmap_queue_free(&tags->bitmap_tags);		/* [한국어] 일반 CID sbitmap 해제 — bitmap 메모리와 wait queue 정리 */
-	sbitmap_queue_free(&tags->breserved_tags);	/* [한국어] 예약 CID sbitmap 해제 — flush/admin CID pool 정리 */
+	sbitmap_queue_free(&tags->bitmap_tags);		/* [한국어] 일반 tag sbitmap 해제 — bitmap 메모리와 wait queue 정리 */
+	sbitmap_queue_free(&tags->breserved_tags);	/* [한국어] 예약 tag sbitmap 해제 — flush/admin tag pool 정리 */
 
 	/* if tags pages is not allocated yet, free tags directly */
 	if (list_empty(&tags->page_list)) {
@@ -1340,15 +1467,15 @@ void blk_mq_free_tags(struct blk_mq_tag_set *set, struct blk_mq_tags *tags)
 
 /*
  * [한국어]
- * blk_mq_tag_resize_shared_tags - shared tag pool의 CID 수를 동적으로 재조정한다.
+ * blk_mq_tag_resize_shared_tags - shared tag pool 의 tag 수를 동적으로 재조정한다.
  *
  * @set:  shared_tags를 보유한 tag set.
- * @size: 새로운 전체 tag 수(예약 포함) — NVMe SQ의 새 queue depth.
+ * @size: 새로운 전체 tag 수(예약 포함).
  * @return: 없음.
  *
  * NVMe 장치의 SQ queue depth가 런타임에 변경될 때(예: 장치 성능 상태 전환,
- * APST 등) shared CID pool의 일반 영역 bitmap 크기를 재조정한다.
- * 예약 CID 수(reserved_tags)는 불변이므로 새 depth에서 이를 뺀 값으로 조정한다.
+ * APST 등) shared tag pool의 일반 영역 bitmap 크기를 재조정한다.
+ * 예약 tag 수(reserved_tags)는 불변이므로 새 depth에서 이를 뺀 값으로 조정한다.
  * sbitmap_queue_resize()는 내부적으로 기존 할당된 tag에 영향을 주지 않으면서
  * 가용 슬롯 수만 변경한다.
  * 실행 컨텍스트: 프로세스 컨텍스트(queue depth 변경 경로).
@@ -1361,11 +1488,11 @@ void blk_mq_free_tags(struct blk_mq_tag_set *set, struct blk_mq_tags *tags)
  */
 void blk_mq_tag_resize_shared_tags(struct blk_mq_tag_set *set, unsigned int size)
 {
-	struct blk_mq_tags *tags = set->shared_tags;	/* [한국어] 여러 NVMe queue/namespace가 공유하는 CID pool */
+	struct blk_mq_tags *tags = set->shared_tags;	/* [한국어] 여러 NVMe queue/namespace가 공유하는 tag pool */
 
 	sbitmap_queue_resize(&tags->bitmap_tags, size - set->reserved_tags);
-	/* [한국어] 일반 CID pool 크기 재조정: 새 depth(size)에서 예약 CID 수를 빼 일반 영역만 변경
-	 * — 예약 CID는 breserved_tags에 고정이므로 bitmap_tags만 조정 */
+	/* [한국어] 일반 tag pool 크기 재조정: 새 depth(size)에서 예약 tag 수를 빼 일반 영역만 변경
+	 * — 예약 tag 는 breserved_tags에 고정이므로 bitmap_tags만 조정 */
 }
 
 /*
@@ -1378,8 +1505,8 @@ void blk_mq_tag_resize_shared_tags(struct blk_mq_tag_set *set, unsigned int size
  *
  * NVMe queue에 IO 스케줄러(mq-deadline, BFQ 등)가 연결된 상태에서 shared tag pool을
  * 사용할 때, 스케줄러 내부용 tag pool(sched_shared_tags)의 일반 영역 크기를 조정한다.
- * sched_shared_tags는 NVMe CID와는 별도의 스케줄러 내부 request 추적용 tag pool이며,
- * driver tag(NVMe CID)와 독립적으로 관리된다.
+ * sched_shared_tags는 tag와는 별도의 스케줄러 내부 request 추적용 tag pool이며,
+ * driver tag와 독립적으로 관리된다.
  * 실행 컨텍스트: 프로세스 컨텍스트(nr_requests sysfs 쓰기 등).
  * 호출자: blk_mq_update_nr_requests().
  * 피호출자: sbitmap_queue_resize() (lib/sbitmap.c).
@@ -1395,7 +1522,7 @@ void blk_mq_tag_update_sched_shared_tags(struct request_queue *q,
 			     nr - q->tag_set->reserved_tags);
 	/* [한국어] IO 스케줄러 shared tag pool 일반 영역 크기 재조정
 	 * nr: 새 전체 요청 수, reserved_tags 제외한 값이 스케줄러 일반 tag 수
-	 * — NVMe driver tag(CID)와 별개; 스케줄러 내부 request 순서 관리에 사용 */
+	 * — NVMe driver tag와 별개; 스케줄러 내부 request 순서 관리에 사용 */
 }
 
 /**
@@ -1403,7 +1530,7 @@ void blk_mq_tag_update_sched_shared_tags(struct request_queue *q,
  * [한국어] blk_mq_unique_tag - queue 전체에서 고유한 tag 값을 반환한다.
  *
  * 상위 비트에 hctx->queue_num(NVMe queue pair 번호)을,
- * 하위 BLK_MQ_UNIQUE_TAG_BITS 비트에 per-queue CID를 결합하여
+ * 하위 BLK_MQ_UNIQUE_TAG_BITS 비트에 per-queue tag를 결합하여
  * controller 전체에서 유일한 64비트 식별자를 생성한다.
  * 호출자: 디버깅, tracing, 또는 태그를 전역적으로 식별해야 하는 경로.
  * 피호출자: (없음, 단순 비트 연산).
@@ -1415,7 +1542,7 @@ u32 blk_mq_unique_tag(struct request *rq)
 	return (rq->mq_hctx->queue_num << BLK_MQ_UNIQUE_TAG_BITS) |
 	/* [한국어] NVMe queue pair 번호(queue_num)를 상위 비트에 배치 — controller 내 여러 SQ/CQ 쌍 구분 */
 		(rq->tag & BLK_MQ_UNIQUE_TAG_MASK);
-	/* [한국어] 하위 비트는 per-queue CID(NVMe command ID) — BLK_MQ_UNIQUE_TAG_MASK로 마스킹 */
+	/* [한국어] 하위 비트는 per-queue tag (NVMe 라면 CID 의 하위 12비트에 해당) — BLK_MQ_UNIQUE_TAG_MASK로 마스킹 */
 }
 EXPORT_SYMBOL(blk_mq_unique_tag);	/* [한국어] 드라이버/트레이싱 도구에서 직접 호출하므로 외부 공개 */
 
@@ -1424,19 +1551,53 @@ EXPORT_SYMBOL(blk_mq_unique_tag);	/* [한국어] 드라이버/트레이싱 도�
  * [한국어] ===================================================================
  * NVMe 관점 핵심 요약 (blk-mq-tag.c)
  * ============================================================================
- * - 본 파일은 NVMe CID(Command ID) 할당/회수의 blk-mq 측 핵심 엔진이다.
- *   제출 경로: blk_mq_submit_bio → blk_mq_get_request → blk_mq_get_tag
- *             → nvme_queue_rq → nvme_submit_cmd(SQ doorbell).
- *   완료 경로: NVMe CQ 인터럽트 → nvme_complete_rq → blk_mq_put_tag
- *             → sbitmap_queue_clear → waiter wakeup.
- * - tag(CID)는 NVMe SQ slot과 1:1로 대응하며, SQ depth = 동시 진행 가능한
- *   IO 수를 제한하는 핵심 자원이다.
- * - shared tag 모드(BLK_MQ_F_TAG_QUEUE_SHARED): 여러 NVMe queue/namespace가
- *   하나의 CID pool(set->shared_tags)을 공유하며, active_queues 카운트와
- *   hctx_may_queue()를 통해 공정 분배를 보장한다.
- * - 예약 CID 영역(breserved_tags): flush/admin 등 우선 처리 명령용으로 일반
- *   IO CID(bitmap_tags)와 완전히 분리 관리된다.
- * - SRCU(tags_srcu): blk_mq_tagset_busy_iter()와 tags[] 배열 변경의 race 방지.
- * - sbitmap_queue: lock-free atomic bit 연산으로 다중 CPU 동시 CID 할당/해제.
+ * 아래는 전부 이 트리의 drivers/nvme/host/ 소스에서 직접 확인한 내용이다.
+ *
+ * 1) tag 와 Command ID 는 같은 것이 아니다.
+ *      nvme_cid(rq) = (genctr & 0xf) << 12 | rq->tag      [nvme.h]
+ *    하위 12비트만 이 파일이 발급한 tag 다. 상위 4비트 세대 니블은 tag 가
+ *    재사용된 뒤 뒤늦게 도착한 CQE 를 걸러내는 용도이며, nvme_find_rq() 가
+ *    불일치를 감지하면 그 완료를 버린다. tag 재사용이 안전한 이유가 이것이다.
+ *
+ * 2) 그 12비트가 NVMe 큐 깊이 상한의 실제 근거다.
+ *      #define NVME_PCI_MAX_QUEUE_SIZE 4095      [pci.c]  (= 0xfff)
+ *      io_queue_depth 기본값 1024, 유효 범위 [2, 4095]
+ *      dev->q_depth = min(CAP.MQES + 1, io_queue_depth)
+ *    장치가 MQES 로 더 깊은 큐를 광고해도 드라이버가 4095 에서 자른다.
+ *
+ * 3) tag 는 SQ 슬롯 번호가 아니다.
+ *      memcpy(nvmeq->sq_cmds + (nvmeq->sq_tail << nvmeq->sqes), cmd, 64);
+ *    SQE 가 놓이는 자리는 링 생산자 인덱스 sq_tail 이 정한다. tag 는
+ *    "동시에 몇 개까지 띄울 수 있는가"(자원 티켓), sq_tail 은 "이번 것을
+ *    어디에 쓸 것인가"(링 위치)로 역할이 완전히 다르다.
+ *
+ * 4) 완료 시 정수 하나로 request 를 되찾는 경로가 이 파일의 존재 이유다.
+ *      nvme_handle_cqe → nvme_find_rq → blk_mq_tag_to_rq(tags, tag)
+ *    tags->rqs[tag] 한 번의 배열 접근으로 끝난다. 장치는 64비트 포인터를
+ *    돌려주지 않고 16비트 정수만 돌려주므로, 이 인덱싱이 없으면 완료를
+ *    원래 요청에 붙일 방법이 없다.
+ *
+ * 5) 예약 태그(breserved_tags)는 표준 NVMe PCIe 에서는 쓰이지 않는다.
+ *    nvme_alloc_io_tag_set() 이 reserved_tags 를 설정하는 경우는 두 가지뿐이다:
+ *      - NVME_QUIRK_SHARED_TAGS (Apple 계열): admin 과 태그 공간을 공유
+ *      - NVME_F_FABRICS (RDMA/TCP/FC): connect 명령용으로 1개
+ *    즉 "flush 용 예약 태그" 같은 것은 없다. blk-mq 의 flush 는 예약 태그가
+ *    아니라 큐마다 따로 잡아 두는 flush_rq 로 처리된다(blk-flush.c).
+ *
+ * 6) shared tag 모드(BLK_MQ_F_TAG_QUEUE_SHARED)는 하나의 tag set 을 여러
+ *    request_queue 가 공유할 때 켜진다. NVMe 에서는 한 컨트롤러의 여러
+ *    네임스페이스(/dev/nvme0n1, n2, ...)가 같은 tag set 을 쓰는 구성이
+ *    여기 해당한다 — 하드웨어 큐를 공유하니 tag 도 공유해야 한다.
+ *    이때 hctx_may_queue() 가 active_queues 로 나눈 몫을 넘지 못하게 막아,
+ *    한 네임스페이스가 태그를 독점해 다른 쪽을 굶기는 것을 방지한다.
+ *
+ * 7) tags_srcu: blk_mq_tagset_busy_iter() 가 tags[] 를 훑는 도중 큐 재구성
+ *    (__blk_mq_update_nr_hw_queues)이 tags 를 교체·해제하는 경쟁을 막는다.
+ *    해제는 call_srcu 로 미뤄져 순회가 끝난 뒤에 일어난다. RCU 가 아니라
+ *    SRCU 인 이유는 순회 콜백이 잠들 수 있기 때문이다.
+ *
+ * 8) sbitmap_queue: tag 자체보다 "고갈됐을 때 어떻게 기다리는가"가 성능을
+ *    좌우한다. 대기열을 여러 개(sbq_wait_state)로 쪼개 wakeup 시 thundering
+ *    herd 를 줄이고, CPU 별 힌트로 캐시 라인 핑퐁을 줄인다.
  * ============================================================================
  */
