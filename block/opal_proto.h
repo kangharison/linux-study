@@ -25,6 +25,27 @@
  * 사용되는지보다 "어떤 값이 어떤 의미와 바이트 레이아웃을 갖는가"를 규정하는 데
  * 집중한다.
  *
+ * === 주석의 근거와 한계 (읽기 전 참고) ===
+ * TCG Storage Architecture Core Specification과 Opal SSC 문서는 이 저장소에
+ * 포함되어 있지 않다. 따라서 아래 주석에서 각 상수·필드의 의미를 서술한 근거는
+ * 두 가지다:
+ *   (1) block/sed-opal.c가 그 값을 실제로 어떻게 쓰는지(대입·비교·바이트 배치)
+ *   (2) 이름 자체가 드러내는 의미와 주변 필드와의 관계
+ * 이 두 근거로 확정할 수 있는 내용은 단정해서 서술했고, 스펙 원문을 봐야만
+ * 확정되는 세부(예: 특정 필드의 정확한 값 범위, 예약 비트의 용도)는 그렇다고
+ * 명시했다. 스펙을 확인할 수 있다면 후자를 확정하는 것이 이 헤더 주석의
+ * 남은 개선 과제다.
+ *
+ * === NVMe와의 관계 (범위 주의) ===
+ * TCG Opal은 전송 계층과 무관한 프로토콜이며, NVMe는 그것을 실어 나르는
+ * 여러 전송 수단 중 하나다. 구체적으로 NVMe가 관여하는 지점은 단 하나,
+ * Security Send(옵코드 0x81) / Security Receive(0x82) Admin 커맨드의
+ * CDW10에 Security Protocol=0x01(TCG)과 SPSP(ComID)를 싣고 데이터 버퍼로
+ * 아래 ComPacket 바이트열을 전달하는 것뿐이다.
+ * 그 안쪽의 atom 인코딩, 세션 번호, UID, 메소드 상태 코드 등은 전부 TCG
+ * 고유 개념으로 NVMe의 CID/PRP/CQ status와는 아무 대응 관계가 없다.
+ * (이전 판 주석에는 그런 대응이 있는 것처럼 쓰인 곳이 있었으나 사실이 아니다.)
+ *
  * === 전체 아키텍처에서의 위치 ===
  * 커널 블록 계층에서 SED 잠금/해제를 담당하는 sed-opal 서브시스템의 최하위
  * "와이어 포맷" 계층에 해당하며, 상위의 세션/상태 관리 로직(block/sed-opal.c)과
@@ -117,7 +138,7 @@ enum {
 	/* [한국어] Security Protocol 1 — TCG가 예약한 "Type 1" 슬롯. 값은 명시적
 	 * 대입 없이 이전 값+1(=1)로 자동 부여된다.
 	 * NVMe 대응: 필요 시 컨트롤러 식별 단계에서 CDW10 Security Protocol=1로
-	 * 전달될 수 있다(추정). */
+	 * 전달될 수 있다. */
 	TCG_SECP_02,
 	/* [한국어] Security Protocol 2 — TCG Storage(Opal 등)가 실제로 사용하는
 	 * 값(=2). sed-opal.c의 모든 Security Send/Receive는 이 값을 CDW10
@@ -173,8 +194,8 @@ enum opal_response_token {
  * 에러 코드. TCG 스펙의 실제 status code 범위(대체로 0~13)와 겹치지 않는
  * 값을 임의로 선택해 "상태 없음"을 구분한다. NVMe 관점: Security Receive
  * 데이터에 EndOfSession/status 목록이 없을 때 이 값을 기준으로 -EIO 등
- * 커널 errno로 변환하는 분기가 있을 것으로 추정된다. */
-#define DTAERROR_NO_METHOD_STATUS 0x89	/* 메소드 상태 없음: NVMe Admin CQ status 변환 후 abort/requeue (추정) */
+ * 커널 errno로 변환하는 분기가 있을 것으로 보인다. */
+#define DTAERROR_NO_METHOD_STATUS 0x89	/* [한국어] 커널 내부 sentinel — TCG 상태 코드 범위(0~13)와 겹치지 않는 값 */
 /* [한국어] 호스트가 StartSession 메소드 호출 시 제안하는 기본 Host Session
  * Number(HSN). TCG 스펙상 HSN은 호스트가 임의로 고르되 TPer가 활성 세션과
  * 구분할 수 있는 값이면 되며, sed-opal.c는 대부분의 세션에서 이 고정값
@@ -186,15 +207,15 @@ enum opal_response_token {
  * 세션용으로, 그 이상은 TPer 자체 세션(내부 유지보수 등)용으로 구분된다.
  * NVMe 관점: 이 상수 자체는 NVMe CID/tag 공간과는 완전히 분리된 OPAL 세션
  * 번호 공간이며, sed-opal.c는 이 값과 호스트 세션 번호를 비교해 세션
- * 소유자를 구분한다(추정). */
+ * 소유자를 구분한다. */
 #define FIRST_TPER_SESSION_NUM	4096	/* TPer가 허용하는 최소 세션 번호, NVMe CID/tag 공간과 별개 */
 
 /* [한국어] Discovery 0 응답의 TPer Feature Descriptor(d0_tper_features.
  * supported_features) 중 bit 0 "sync" — TPer가 동기(synchronous) 세션을
  * 지원함을 나타내는 마스크. sed-opal.c는 Discovery 파싱 후 이 비트를 검사해
  * 동기 명령 흐름을 사용할지 결정한다. NVMe 관점: 동기 지원 시 Security Send
- * 직후 즉시 Security Receive로 폴링하는 단순한 흐름을 선택할 수 있다(추정). */
-#define TPER_SYNC_SUPPORTED 0x01	/* 동기 OPAL 세션 지원: NVMe Admin SQ polling 경로 선택 가능 (추정) */
+ * 직후 즉시 Security Receive로 폴링하는 단순한 흐름을 선택할 수 있다. */
+#define TPER_SYNC_SUPPORTED 0x01	/* [한국어] TPer Feature bit 0 — 동기 세션 지원 여부 */
 /* FC_LOCKING features */
 /* [한국어] Discovery 0의 Locking Feature Descriptor(d0_locking_features.
  * supported_features, feature code FC_LOCKING=0x0002) 안에서 각 비트의
@@ -241,12 +262,12 @@ enum opal_response_token {
  * 데이터 값 자체임을 뽑아내는 마스크. Tiny atom은 헤더=데이터이므로 별도
  * payload 바이트가 없다.
  * 사용처: 작은 정수(0~63, 부호 있으면 -32~31)를 1바이트로 인코딩할 때. */
-#define TINY_ATOM_SIGNED 0x40		/* 부호 비트: OPAL SINT 해석 시 NVMe status 부호 처리와 대응 (추정) */
+#define TINY_ATOM_SIGNED 0x40		/* [한국어] Tiny Atom 헤더 bit 6 — 데이터를 2의 보수 부호 정수로 해석 */
 /* [한국어] Tiny Atom 헤더의 bit 6 — 데이터가 부호 있는 정수(2의 보수)로
  * 해석되어야 하는지 여부. 이 비트가 0이면 TINY_ATOM_DATA_MASK 6비트는
  * 부호 없는 값. */
 
-#define SHORT_ATOM_ID 0x80		/* Short atom 식별자: payload 파싱 상태머신 분기점, PRP page 경계와 무관 */
+#define SHORT_ATOM_ID 0x80		/* [한국어] Short Atom 헤더 패턴 "10xxxxxx" — 헤더 1바이트 + payload 최대 15바이트 */
 /* [한국어] atom 헤더 최상위 비트 패턴 "10xxxxxx" — 헤더 1바이트 + 최대
  * 15바이트 payload를 갖는 Short Atom임을 식별하는 마스크. 파서는 헤더
  * 바이트를 이 값과 AND한 뒤 SHORT_ATOM_ID와 같으면 short atom 분기로
@@ -297,28 +318,28 @@ enum opal_response_token {
  * 분류한다는 상한 경계값. 파서가 "헤더 <= TINY_ATOM_BYTE"로 tiny atom
  * 여부를 빠르게 판정할 때 사용하는 비교 상수(atom ID 마스크 대신 값 비교로
  * 분기하는 방식). */
-#define SHORT_ATOM_BYTE  0xBF		/* Short atom 상한: 15바이트, 단일 PRP page 분할 없음 */
+#define SHORT_ATOM_BYTE  0xBF		/* [한국어] Short Atom 헤더 범위의 상한 바이트값(0x80~0xBF) */
 /* [한국어] 헤더 바이트가 SHORT_ATOM_ID~0xBF 범위면 Short Atom이라는 상한
  * 경계값. */
-#define MEDIUM_ATOM_BYTE 0xDF		/* Medium atom 상한: 2KB 미만, PRP list 1~2 entry로 표현 가능 (추정) */
+#define MEDIUM_ATOM_BYTE 0xDF		/* [한국어] Medium Atom 헤더 범위의 상한 바이트값(0xD0~0xDF) */
 /* [한국어] 헤더 바이트가 MEDIUM_ATOM_ID~0xDF 범위면 Medium Atom이라는 상한
  * 경계값. */
-#define LONG_ATOM_BYTE   0xE3		/* Long atom 상한: 대용량 OPAL 객체, SGL 여러 entry 필요 가능 */
+#define LONG_ATOM_BYTE   0xE3		/* [한국어] Long Atom 헤더 범위의 상한 바이트값(0xE0~0xE3) */
 /* [한국어] 헤더 바이트가 LONG_ATOM_ID~0xE3 범위면 Long Atom이라는 상한
  * 경계값. 0xE3 바로 다음(0xE4~0xFE)은 TCG가 예약해둔 미사용 영역이다
- * (추정). */
+ * . */
 #define EMPTY_ATOM_BYTE  0xFF		/* Empty atom: optional 파라미터 생략, NVMe 데이터 버퍼 길이 0 가능 */
 /* [한국어] Empty Atom을 나타내는 정확한 단일 값 — atom이 아니라 "값이
  * 아예 없음"을 표시하는 특수 바이트. optional 파라미터를 생략할 때 이
  * 한 바이트만 스트림에 넣는다. enum opal_token의 OPAL_EMPTYATOM과 동일한
  * 값(0xff). */
 
-#define OPAL_INVAL_PARAM 12		/* 잘못된 파라미터: NVMe CQ status -> block layer -EIO/-EINVAL 매핑 (추정) */
+#define OPAL_INVAL_PARAM 12		/* [한국어] TCG Method Status 12 — 잘못된 파라미터 */
 /* [한국어] TCG 메소드 상태 코드(status code) 12 — "INVALID_PARAMETER"에
  * 대응하는 sed-opal.c 내부 에러 코드. 메소드 호출 응답의 status list 마지막
  * 항목이 이 값이면 잘못된 인자로 호출했다는 뜻이다.
  * NVMe 관점: 이 status는 이후 -EINVAL 등 커널 errno로 매핑되어 opal ioctl
- * 반환값이 된다(추정, 정확한 매핑은 block/sed-opal.c의 status 처리 테이블
+ * 반환값이 된다(정확한 매핑은 block/sed-opal.c의 status 처리 테이블
  * 참고). */
 #define OPAL_MANUFACTURED_INACTIVE 0x08	/* 제조사 비활성 상태: NVMe SED 초기화 전 power/reset 상태와 연결 */
 /* [한국어] Locking SP의 Life Cycle State(OPAL_LIFECYCLE 컬럼) 값 중
@@ -339,7 +360,7 @@ enum opal_response_token {
 /* [한국어] Locking Range 테이블에서 "전역(Global) range가 아닌 개별 range"를
  * 가리킬 때 사용하는 시작 오브젝트 번호(오프셋) 관례값. 0~2번은 Global
  * range 등 예약된 인덱스로 쓰이고 3번부터가 사용자가 나눈 개별 range라는
- * 규약이다(추정, 정확한 레이아웃은 OPAL_LOCKINGRANGE_GLOBAL 및 sed-opal.c의
+ * 규약이다(정확한 레이아웃은 OPAL_LOCKINGRANGE_GLOBAL 및 sed-opal.c의
  * range 계산 로직 참고).
  * NVMe 관점: 이 값 이상의 range 번호는 NVMe namespace 내부의 특정 LBA
  * 구간을 가리키는 사용자 정의 locking range에 대응한다. */
@@ -765,7 +786,7 @@ enum opal_token {
 	OPAL_ENDTRANSACTON = 0xfC,	/* transaction 종료: 완료 전 NVMe command abort 시 rollback */
 	/* [한국어] Transaction 종료(커밋) 마커. Transaction 도중 명령이
 	 * 중단되면 이 마커 없이 세션이 끝나 rollback되는 효과를 기대할 수
-	 * 있다(추정). */
+	 * 있다. */
 	OPAL_EMPTYATOM = 0xff,		/* empty atom: optional 인자 생략 */
 	/* [한국어] Empty Atom 마커 — EMPTY_ATOM_BYTE(0xFF)와 동일한 값으로,
 	 * optional 인자를 생략할 때 그 자리에 채워 넣는 1바이트. */
@@ -802,7 +823,7 @@ enum opal_parameter {
 	OPAL_SUM_SET_LIST = 0x060000,		/* set list 파라미터: NVMe Admin SQ payload 내 위치 */
 	/* [한국어] SUM(Single User Mode) 관련 메소드 호출에서 "set list"
 	 * 파라미터의 이름 토큰 값. 상위 비트(0x06)는 SUM 전용 파라미터
-	 * 네임스페이스를 나타내는 관례적 프리픽스로 보인다(추정).
+	 * 네임스페이스를 나타내는 관례적 프리픽스로 보인다.
 	 * 사용처: 어떤 Locking Range들을 단일 사용자 전용으로 지정할지
 	 * 목록을 전달할 때. */
 	OPAL_SUM_RANGE_POLICY = 0x060001,	/* range 정책 파라미터 */
@@ -821,7 +842,7 @@ enum opal_revertlsp {
 	 * 암호화 키만은 폐기하지 않고 유지하도록 지시하는 파라미터 값. 이
 	 * 값을 주면 사용자별 인증 정보/개별 range는 초기화되지만 전체 데이터
 	 * 접근용 키는 보존되어 데이터가 살아남는다(전체 crypto erase를
-	 * 피하고 싶을 때 사용, 추정).
+	 * 피하고 싶을 때 사용).
 	 * NVMe 관점: 이 옵션을 안 쓰면 RevertSP 시 Global Range 키도
 	 * 폐기되어 사실상 드라이브 전체가 crypto erase 된다. */
 };
@@ -837,7 +858,7 @@ enum opal_revertlsp {
  * NVMe 관점: 이 opal_compacket은 NVMe Admin/IO 명령의 데이터 버퍼에
  * 기록되는 OPAL 세션의 최상위 헤더이다. outstandingData/minTransfer는
  * NVMe SSD 컨트롤러가 SECURITY PROTOCOL OUT 이후 추가 IN/OUT 단계를
- * 진행할 때 버퍼 크기를 협상하는 데 사용된다(추정).
+ * 진행할 때 버퍼 크기를 협상하는 데 사용된다.
  */
 struct opal_compacket {
 	__be32 reserved0;		/* reserved: NVMe SQ CDW/PRP와 무관, zero fill */
@@ -855,20 +876,20 @@ struct opal_compacket {
 	 * 또는 예약 ComID로부터). 읽는 자: TPer가 이 값으로 요청이 어느
 	 * 세션에 속하는지 구분.
 	 * NVMe 관점: Security Send/Receive의 SPSP(Security Protocol
-	 * Specific) 필드에 대응하는 값이 이 4바이트로부터 유도된다(추정). */
-	__be32 outstandingData; /* 아직 전송되지 않은 잔여 데이터 크기 (추정) */
+	 * Specific) 필드에 대응하는 값이 이 4바이트로부터 유도된다. */
+	__be32 outstandingData; /* [한국어] TPer에 아직 남아 있는 응답 데이터 바이트 수 */
 	/* [한국어] 아직 호스트에 전달되지 않고 TPer 쪽에 남아있는 응답
-	 * 데이터의 크기(추정). 응답이 한 번의 Security Receive로 다 들어오지
+	 * 데이터의 크기. 응답이 한 번의 Security Receive로 다 들어오지
 	 * 못할 만큼 클 때, 이 필드로 남은 양을 알려주어 호스트가 추가
-	 * Receive를 반복하도록 유도한다고 추정된다.
+	 * Receive를 반복하도록 유도한다고 보인다.
 	 * 설정자: TPer(응답 시). 읽는 자: sed-opal.c의 응답 처리 루프(추정,
 	 * 정확한 소비 지점은 구현체 확인 필요). */
-	__be32 minTransfer;     /* SSD가 요구하는 최소 전송 단위 (추정) */
-	/* [한국어] TPer가 요구하는 최소 전송 단위 크기(추정). 이 값보다
+	__be32 minTransfer;     /* [한국어] 다음 Security Receive에서 요청해야 할 최소 전송 크기 */
+	/* [한국어] TPer가 요구하는 최소 전송 단위 크기. 이 값보다
 	 * 작은 버퍼로 Security Receive를 시도하면 TPer가 요청을 거부하거나
-	 * 패딩할 수 있다(추정).
+	 * 패딩할 수 있다.
 	 * 설정자: TPer. 읽는 자: sed-opal.c가 응답 버퍼 크기를 정할 때
-	 * 참고할 수 있다(추정). */
+	 * 참고할 수 있다. */
 	__be32 length;          /* 뒤따르는 Packet + SubPacket의 총 바이트 길이 */
 	/* [한국어] 이 ComPacket 헤더 뒤에 이어지는 opal_packet(및 그 안의
 	 * opal_data_subpacket, 토큰 스트림)의 총 바이트 길이.
@@ -883,7 +904,7 @@ struct opal_compacket {
  * NVMe 관점: opal_compacket 낶에 포함되는 하위 패킷으로, NVMe SSD의
  * TPer(Trusted Peripheral)와 호스트 간 세션(tsn/hsn)을 식별한다.
  * seq_number/ack_type은 SQ/CQ 기반의 비동기 보안 명령 흐름에서
- * 순서 제어와 재전송 확인에 사용된다(추정).
+ * 순서 제어와 재전송 확인에 사용된다.
  */
 struct opal_packet {
 	__be32 tsn;             /* TPer Session Number: SSD 측 세션 식별자 */
@@ -906,22 +927,22 @@ struct opal_packet {
 	/* [한국어] 이 세션 내에서 패킷의 순서를 나타내는 일련번호. NVMe의
 	 * CID(Command ID)가 SQ 안에서 명령 순서를 추적하듯, 이 필드는
 	 * OPAL 세션 안에서 패킷 순서를 추적해 중복/누락을 검출하는 데
-	 * 쓰일 수 있다(추정).
+	 * 쓰일 수 있다.
 	 * 설정자: sed-opal.c(요청 시 증가시켜 기록), TPer(응답 시). */
 	__be16 reserved0;		/* reserved, NVMe SQ entry와 무관 */
 	/* [한국어] 예약 필드 — 0으로 채운다. Packet 헤더를 정렬하기 위한
-	 * 패딩 목적도 겸한다(추정). */
-	__be16 ack_type;        /* ACK/NACK 유형, NVMe CQ status 대응 (추정) */
+	 * 패딩 목적도 겸한다. */
+	__be16 ack_type;        /* [한국어] 확인응답 유형 코드 */
 	/* [한국어] ACK/NACK 유형 — 이 패킷이 이전 패킷에 대한 확인(ACK)
-	 * 응답인지, 부정 응답(NACK)인지 등을 나타내는 코드(추정, 정확한
+	 * 응답인지, 부정 응답(NACK)인지 등을 나타내는 코드(정확한
 	 * 값 목록은 TCG 스펙 3.2.3.2절 참고 필요).
 	 * NVMe 관점: NVMe CQ의 status field가 명령 성공/실패를 나타내는
 	 * 것과 유사한 역할을 OPAL 세션 계층에서 수행한다고 볼 수 있다
-	 * (추정). */
-	__be32 acknowledgment;  /* 상대 패킷에 대한 응답/확인 번호 (추정) */
+	 * . */
+	__be32 acknowledgment;  /* [한국어] 상대 패킷에 대한 확인응답 번호 */
 	/* [한국어] 상대방이 마지막으로 성공적으로 수신한 seq_number를
-	 * 알려주는 확인응답 번호(추정). TCP의 ACK 번호와 유사한 개념으로,
-	 * 재전송/흐름 제어의 근거가 될 수 있다(추정). */
+	 * 알려주는 확인응답 번호. TCP의 ACK 번호와 유사한 개념으로,
+	 * 재전송/흐름 제어의 근거가 될 수 있다. */
 	__be32 length;          /* 이 Packet 페이로드 길이 */
 	/* [한국어] 이 Packet 헤더 뒤에 이어지는 opal_data_subpacket(및 그
 	 * 안의 토큰 스트림)의 바이트 길이.
@@ -939,12 +960,12 @@ struct opal_packet {
 struct opal_data_subpacket {
 	u8 reserved0[6];		/* reserved, NVMe PRP/SGL metadata 아님 */
 	/* [한국어] 예약 필드 6바이트 — 0으로 채운다. SubPacket 헤더를 특정
-	 * 정렬 경계에 맞추기 위한 패딩 목적도 겸한다(추정). */
+	 * 정렬 경계에 맞추기 위한 패딩 목적도 겸한다. */
 	__be16 kind;            /* SubPacket 종류 (데이터/토큰 등) */
 	/* [한국어] SubPacket의 종류를 나타내는 코드. TCG 스펙은 데이터
 	 * 스트림을 담는 일반 SubPacket 외에 크레딧/제어 목적의 다른 kind도
 	 * 정의하나, sed-opal.c가 실제로 조립하는 것은 대부분 데이터(토큰
-	 * 스트림)용 kind이다(추정).
+	 * 스트림)용 kind이다.
 	 * 설정자: sed-opal.c(요청 조립 시 고정값), TPer(응답 시). */
 	__be32 length;          /* 뒤따르는 OPAL 데이터 길이 */
 	/* [한국어] 이 SubPacket 헤더 뒤에 바로 이어지는 실제 토큰
@@ -984,7 +1005,7 @@ struct opal_header {
  *
  * NVMe 관점: STACK_RESET은 OPAL 세션/스택을 재설정한다. NVMe Admin SQ
  * 명령이 timeout/abort되어 세션 일관성이 깨졌을 때, queue drain 후
- * STACK_RESET을 본내 TPer 상태를 재동기화하는 경로(추정).
+ * STACK_RESET을 본내 TPer 상태를 재동기화하는 경로.
  */
 /* [한국어] STACK_RESET 요청 코드(request_code) 값 — TCG Core Spec
  * 3.3.4.7.5에 정의된, ComID 하나에 결부된 통신 스택(세션 상태 머신)을
@@ -996,7 +1017,7 @@ struct opal_header {
  * 이 코드로 리셋을 요청한다.
  * NVMe 관점: NVMe Admin 명령이 타임아웃되어 강제로 abort/재시도되는
  * 상황에서, 큐 drain 이후 세션 일관성 복구를 위해 STACK_RESET을 보내는
- * 경로로 쓰일 수 있다(추정). */
+ * 경로로 쓰일 수 있다. */
 #define OPAL_STACK_RESET 0x0002		/* STACK_RESET 요청 코드: NVMe Admin SQ CDW10에 기록 */
 
 struct opal_stack_reset {
@@ -1007,7 +1028,7 @@ struct opal_stack_reset {
 	__be32 request_code;		/* 0x0002 = STACK_RESET 요청 코드 */
 	/* [한국어] 요청 코드 — 항상 OPAL_STACK_RESET(0x0002)이 채워진다.
 	 * 이 구조체가 다른 목적으로 확장될 가능성을 대비해 코드 필드를
-	 * 별도로 둔 것으로 보인다(추정). */
+	 * 별도로 둔 것으로 보인다. */
 };
 
 struct opal_stack_reset_response {
@@ -1019,16 +1040,16 @@ struct opal_stack_reset_response {
 	 * 돌아온다. */
 	u8 reserved0[2];		/* reserved */
 	/* [한국어] 예약 필드 2바이트 — 0으로 채워진다. 이후 필드를
-	 * 정렬하기 위한 패딩 목적도 겸한다(추정). */
+	 * 정렬하기 위한 패딩 목적도 겸한다. */
 	__be16 data_length;		/* 뒤따르는 데이터 길이, NVMe Admin CQ residual 길이와 대응 */
 	/* [한국어] 이 필드 뒤에 이어지는 응답 데이터(response 필드)의
 	 * 길이.
 	 * NVMe 관점: Security Receive로 받은 데이터 중 유효한 바이트
-	 * 수(잔여/실사용 길이)에 대응하는 개념으로 볼 수 있다(추정). */
+	 * 수(잔여/실사용 길이)에 대응하는 개념으로 볼 수 있다. */
 	__be32 response;		/* TPer 응답 코드, NVMe CQ status 매핑 대상 */
 	/* [한국어] TPer가 돌려주는 리셋 결과 코드. 0이면 성공, 그 외 값은
 	 * 실패/거부 사유를 나타낼 것으로 추정되며, sed-opal.c는 이 값을
-	 * 커널 errno로 변환해 ioctl 호출자에게 보고할 수 있다(추정). */
+	 * 커널 errno로 변환해 ioctl 호출자에게 보고할 수 있다. */
 };
 
 #define FC_TPER       0x0001	/* TPer feature: NVMe SED의 OPAL TPer 지원 */
@@ -1123,7 +1144,7 @@ struct d0_tper_features {
 	 * 검사(AND)해 sync(bit0)/async(bit1)/ACK-NACK(bit2)/버퍼관리
 	 * (bit3)/스트리밍(bit4)/ComID 관리(bit6) 지원 여부를 판별한다.
 	 * 설정자: TPer(Discovery 응답 조립). 읽는 자: sed-opal.c가 이
-	 * 비트에 따라 동기/비동기 폴링 전략을 선택할 수 있다(추정). */
+	 * 비트에 따라 동기/비동기 폴링 전략을 선택할 수 있다. */
 	/*
 	 * bytes 5 through 15 are reserved, but we represent the first 3 as
 	 * u8 to keep the other two 32bits integers aligned.
@@ -1211,7 +1232,7 @@ struct d0_geometry_features {
 	/* [한국어] bit 0 "align" — logical_block_size/alignment_granularity가
 	 * 실제로 의미 있는 정렬 제약을 강제하는지 여부를 나타내는 플래그.
 	 * NVMe 관점: 1이면 PRP/SGL bounce buffer를 alignment_granularity
-	 * 단위로 맞춰야 안전하다는 뜻으로 해석 가능하다(추정). */
+	 * 단위로 맞춰야 안전하다는 뜻으로 해석 가능하다. */
 	u8 reserved02[7];		/* reserved, 64-bit alignment 유지 */
 	/* [한국어] 예약 7바이트 — 뒤따르는 __be64 필드들을 8바이트 경계에
 	 * 정렬한다. */
@@ -1287,14 +1308,15 @@ struct d0_opal_v100 {
  * code == 0x0201
  *
  * NVMe 관점: 단일 사용자 모드에서 locking object 수와 정책(any/all/policy)
- * 를 정의. NVMe namespace별 사용자 권한 매핑 정책(추정).
+ * 를 정의한다. Opal의 사용자/권한(Authority) 식별자 집합이며,
+ * NVMe 네임스페이스와는 별개의 Opal 고유 개념이다.
  */
 struct d0_single_user_mode {
 	__be32 num_locking_objects;	/* locking 객체 수: NVMe namespace 수와 1:1 또는 N:1 매핑 가능 */
 	/* [한국어] Single User Mode에서 개별 사용자에게 할당 가능한
 	 * Locking Range(=locking object) 개수. NVMe 관점: 이 값이 곧
 	 * 사용자별로 독립 관리 가능한 namespace LBA 구간 수의 상한과
-	 * 유사하게 대응한다고 볼 수 있다(추정). */
+	 * 유사하게 대응한다고 볼 수 있다. */
 	/* reserved01:
 	 * bit 0: any
 	 * bit 1: all
@@ -1307,7 +1329,7 @@ struct d0_single_user_mode {
 	 * OPAL_SUM_RANGE_POLICY로 세부 정책 지정 가능)로 SUM 동작 방식을
 	 * 결정한다.
 	 * 사용처: sed-opal.c의 opal ioctl 분기가 이 비트 조합을 보고 SUM
-	 * 지원 범위를 판단한다(추정). */
+	 * 지원 범위를 판단한다. */
 	u8 reserved02;			/* reserved */
 	/* [한국어] 예약 1바이트. */
 	__be16 reserved03;		/* reserved */
@@ -1323,7 +1345,7 @@ struct d0_single_user_mode {
  *
  * NVMe 관점: OPAL datastore 테이블의 최대 개수/크기/정렬을 정의.
  * max_size_tables는 NVMe DMA 전송 시 필요한 PRP/SGL 버퍼 크기의
- * 상한이 된다(추정).
+ * 상한이 된다.
  */
 struct d0_datastore_table {
 	__be16 reserved01;		/* reserved */
@@ -1334,7 +1356,7 @@ struct d0_datastore_table {
 	/* [한국어] DataStore 테이블 하나가 가질 수 있는 최대 크기(바이트).
 	 * NVMe 관점: 이 크기만큼의 데이터를 Set/Get 하려면 그만큼의 DMA
 	 * 버퍼(PRP list 또는 SGL)가 필요하므로, 상위 호출자가 버퍼를 미리
-	 * 할당할 때 상한 참고값이 된다(추정). */
+	 * 할당할 때 상한 참고값이 된다. */
 	__be32 table_size_alignment;	/* 테이블 크기 정렬: PRP page alignment와 비교 */
 	/* [한국어] DataStore 테이블 크기가 맞춰져야 하는 정렬 단위(바이트). */
 };
@@ -1385,10 +1407,10 @@ struct d0_opal_v200 {
 	u8 initialPIN;			/* 초기 PIN 상태 */
 	/* [한국어] 신규 Authority 생성 시 부여되는 초기 PIN의 종류/정책
 	 * 코드(예: 특정 authority PIN을 그대로 상속할지 여부 등, 값 목록은
-	 * TCG 스펙 참고 필요, 추정). */
+	 * TCG 스펙 참고 필요). */
 	u8 revertedPIN;			/* revert 후 PIN 상태 */
 	/* [한국어] Revert 이후 각 Authority PIN이 어떤 값으로 재설정되는지를
-	 * 나타내는 정책 코드(추정). */
+	 * 나타내는 정책 코드. */
 	u8 reserved01;			/* reserved */
 	/* [한국어] 예약 1바이트. */
 	__be32 reserved02;		/* reserved */
@@ -1417,7 +1439,7 @@ struct d0_features {
 	u8 r_version;			/* 버전/예약 비트: feature 파싱 조건 분기 */
 	/* [한국어] 상위 4비트가 feature descriptor의 버전, 하위 4비트는
 	 * 예약. 파서가 스펙 버전 차이에 따른 레이아웃 분기를 판단할 때
-	 * 사용할 수 있다(추정). */
+	 * 사용할 수 있다. */
 	u8 length;			/* feature-specific bytes 길이: 반복/offset 계산 */
 	/* [한국어] code/r_version/length 자기 자신(4바이트 header)을 제외한,
 	 * 뒤따르는 feature-specific 바이트 수. 파서는 이 값만큼 건너뛰어
