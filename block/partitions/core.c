@@ -328,7 +328,7 @@ static struct parsed_partitions *check_partition(struct gendisk *hd) /* [한국�
 	strscpy(state->name, hd->disk_name); /* [한국어] gendisk 이름(예: 「sda」, 「nvme0n1」)을 state->name 버퍼로 안전하게(널종단 보장) 복사 */
 	seq_buf_printf(&state->pp_buf, " %s:", state->name); /* [한국어] 커널 로그 접두어로 「 <이름>:」 형태를 seq_buf에 기록 시작 - 이후 각 프로버가 인식한 파티션 요약이 이어붙여짐 */
 	if (isdigit(state->name[strlen(state->name)-1])) /* [한국어] 이름의 마지막 글자가 숫자인지 검사(예: nvme0n1, loop0) - 파티션 번호 접미사와 혼동을 피하기 위해 구분자가 필요한 경우 */
-		sprintf(state->name, "p"); /* [한국어] 이름이 숫자로 끝나면 state->name을 「p」로 덮어써 이후 파티션 이름 생성 시 접두어 사이에 'p' 구분자가 들어가게 함(예: nvme0n1 + p + 1 = nvme0n1p1) */
+		sprintf(state->name, "p"); /* [한국어] 주의: 디스크 이름을 "p" 한 글자로 통째로 덮어쓴다. 바로 윗줄에서 전체 이름을 이미 pp_buf 접두어(" nvme0n1:")로 찍어 두었기 때문에 가능한 절약으로, 이후 put_partition()의 " %s%d" 출력이 " p1 p2"가 되어 로그가 " nvme0n1: p1 p2" 형태로 완성된다. 실제 /dev 이름을 만드는 것은 이 값이 아니라 add_partition()의 dev_set_name()이므로, 여기서 이름을 잃어도 장치 이름에는 영향이 없다. */
 
 	i = res = err = 0; /* [한국어] 루프 인덱스/결과/에러 누적값을 모두 0으로 초기화(연쇄 대입) */
 	while (!res && check_part[i]) { /* [한국어] res가 아직 실패(0)가 아니고 check_part[i]가 NULL(sentinel)이 아닌 동안 반복 - 즉 '아직 인식 못했고 시도할 프로버가 남은 동안' */
@@ -358,8 +358,12 @@ static struct parsed_partitions *check_partition(struct gendisk *hd) /* [한국�
 	if (err) /* [한국어] 그 외의 경우, 누적된 I/O 에러(err)가 있었다면 그것을 최종 결과(res)로 채택 */
 		res = err; /* [한국어] err를 res에 반영 */
 	if (res) { /* [한국어] 최종적으로 에러가 남아 있는 경우(res != 0) 로그에 실패 메시지를 남긴다 */
+		/* [한국어] 실패 사유를 즉시 printk하지 않고 pp_buf에 이어 붙이는 이유:
+		 * 각 프로버가 남긴 부분 출력과 이 마지막 줄을 하나의 로그 라인으로
+		 * 합쳐 내보내야, 여러 CPU에서 동시에 스캔이 돌아도 메시지가 서로
+		 * 뒤섞이지 않기 때문이다. */
 		seq_buf_puts(&state->pp_buf,
-			     " unable to read partition table\n"); /* [한국어] 「unable to read partition table」 메시지를 seq_buf에 추가 */
+			     " unable to read partition table\n");
 		printk(KERN_INFO "%s", seq_buf_str(&state->pp_buf)); /* [한국어] 완성된 로그 문자열을 KERN_INFO로 출력 */
 	} /* [한국어] if(res) 블록 종료 */
 
@@ -856,7 +860,10 @@ static struct block_device *add_partition(struct gendisk *disk, int partno, /* [
 	 * such.
 	 */
 	if (bdev_is_zoned(disk->part0)) { /* [한국어] host-managed zoned 블록 디바이스(SMR HDD, ZNS SSD 등)는 zone 순서 쓰기 제약 때문에 파티션 분할을 지원하지 않음 */
-		pr_warn("%s: partitions not supported on host managed zoned block device\n", /* [한국어] 사용자에게 zoned 디바이스 파티션 미지원 경고 로그 출력 */
+		/* [한국어] host-managed zoned 디바이스는 각 존을 순차적으로만 쓸 수
+		 * 있어, 파티션이라는 임의 오프셋 창을 얹으면 존 경계와 쓰기 포인터
+		 * 규칙이 깨진다. 그래서 거부 사유를 디스크 이름과 함께 남긴다. */
+		pr_warn("%s: partitions not supported on host managed zoned block device\n",
 			disk->disk_name);
 		return ERR_PTR(-ENXIO); /* [한국어] -ENXIO(장치 또는 주소 없음)로 거부 */
 	} /* [한국어] if 블록 종료 */
@@ -879,7 +886,7 @@ static struct block_device *add_partition(struct gendisk *disk, int partno, /* [
 	dname = dev_name(ddev); /* [한국어] 상위 디스크의 sysfs 이름을 얻음(예: 「nvme0n1」) */
 	if (isdigit(dname[strlen(dname) - 1])) /* [한국어] 상위 디스크 이름이 숫자로 끝나는지 검사(예: nvme0n1의 '1') - 파티션 번호와 시각적으로 구분하기 위해 'p' 구분자가 필요한지 판단 */
 		dev_set_name(pdev, "%sp%d", dname, partno); /* [한국어] 숫자로 끝나면 「이름p번호」 형식(예: nvme0n1p1) */
-	else
+	else /* [한국어] 이름이 문자로 끝나는 경우 - 숫자를 바로 붙여도 디스크 번호와 파티션 번호가 섞일 여지가 없다. */
 		dev_set_name(pdev, "%s%d", dname, partno); /* [한국어] 그렇지 않으면 「이름번호」 형식(예: sda1) */
 
 	device_initialize(pdev); /* [한국어] device 구조체 기본 필드(kobject 등)를 초기화 - 아직 sysfs에 등록되지는 않음(device_add 전) */
@@ -1275,7 +1282,10 @@ static bool blk_add_partition(struct gendisk *disk, /* [한국어] 파티션 후
 		return true; /* [한국어] 아무 것도 하지 않고 「정상 진행」 의미로 true 반환 - 다음 p로 계속 */
 
 	if (from >= get_capacity(disk)) { /* [한국어] 파티션의 시작 자체가 이미 디스크가 보고하는 용량(EOD)을 넘어선 경우 - 손상된 테이블이거나 native 용량이 숨겨진 경우 */
-		printk(KERN_WARNING /* [한국어] 「p%d start ... is beyond EOD」 형태의 경고 로그 출력 시작 */
+		/* [한국어] 문장이 쉼표로 끝나는 것은 실수가 아니다. 바로 아래
+		 * disk_unlock_native_capacity()의 결과에 따라 "enabling native
+		 * capacity" 같은 뒷말이 이어 붙어 한 줄로 완성되기 때문이다. */
+		printk(KERN_WARNING
 		       "%s: p%d start %llu is beyond EOD, ",
 		       disk->disk_name, p, (unsigned long long) from);
 		if (disk_unlock_native_capacity(disk)) /* [한국어] native 용량을 풀 수 있는지 시도 */
@@ -1284,7 +1294,10 @@ static bool blk_add_partition(struct gendisk *disk, /* [한국어] 파티션 후
 	} /* [한국어] if 블록 종료 */
 
 	if (from + size > get_capacity(disk)) { /* [한국어] 시작은 EOD 안이지만 시작+크기가 EOD를 넘어서는 경우(파티션이 디스크 끝을 살짝 넘어감) */
-		printk(KERN_WARNING /* [한국어] 「p%d size ... extends beyond EOD」 경고 로그 출력 시작 */
+		/* [한국어] 시작 위치가 아니라 끝이 넘치는 경우라 메시지를 따로 둔다.
+		 * 이 구분이 있어야 로그만 보고 "테이블이 통째로 엉뚱한가"와 "디스크가
+		 * 기대보다 작게 보고되는가"를 가려낼 수 있다. */
+		printk(KERN_WARNING
 		       "%s: p%d size %llu extends beyond EOD, ",
 		       disk->disk_name, p, (unsigned long long) size);
 
@@ -1373,7 +1386,10 @@ static int blk_add_partitions(struct gendisk *disk) /* [한국어] 디스크 전
 		 * beyond EOD, retry after unlocking the native capacity.
 		 */
 		if (PTR_ERR(state) == -ENOSPC) { /* [한국어] 특히 EOD를 넘어 읽으려다 실패한 경우(-ENOSPC)라면 native 용량이 숨겨져 있을 가능성이 있음 */
-			printk(KERN_WARNING "%s: partition table beyond EOD, ", /* [한국어] 「partition table beyond EOD」 경고 로그 출력 */
+			/* [한국어] 파티션 하나가 아니라 테이블 자체를 읽다가 디스크 끝을
+			 * 넘은 경우다. ATA의 HPA(Host Protected Area)처럼 실제보다 작은
+			 * 용량을 보고하는 장치에서 흔히 발생한다. */
+			printk(KERN_WARNING "%s: partition table beyond EOD, ",
 			       disk->disk_name);
 			if (disk_unlock_native_capacity(disk)) /* [한국어] native 용량 unlock을 시도해 실제로 풀렸다면 */
 				return -EAGAIN; /* [한국어] 더 큰 용량으로 처음부터 재스캔해야 하므로 -EAGAIN 반환(bdev_disk_changed의 rescan 레이블로 되돌아감) */
@@ -1385,7 +1401,9 @@ static int blk_add_partitions(struct gendisk *disk) /* [한국어] 디스크 전
 	 * Partitions are not supported on host managed zoned block devices.
 	 */
 	if (bdev_is_zoned(disk->part0)) { /* [한국어] host-managed zoned 블록 디바이스는 파티션을 아예 지원하지 않으므로(add_partition()에서도 거부됨) 여기서도 미리 걸러냄 */
-		pr_warn("%s: ignoring partition table on host managed zoned block device\n", /* [한국어] 무시한다는 경고 로그 출력 */
+		/* [한국어] add_partition()에서도 어차피 거부되지만, 여기서 먼저
+		 * 걸러 두면 파티션마다 같은 실패를 반복하며 경고를 도배하지 않는다. */
+		pr_warn("%s: ignoring partition table on host managed zoned block device\n",
 			disk->disk_name);
 		ret = 0; /* [한국어] 파티션 없이 성공으로 취급 */
 		goto out_free_state; /* [한국어] 정리 후 반환하는 out_free_state로 점프 */
@@ -1397,7 +1415,10 @@ static int blk_add_partitions(struct gendisk *disk) /* [한국어] 디스크 전
 	 * partitions.
 	 */
 	if (state->access_beyond_eod) { /* [한국어] 파티션 테이블 자체는 성공적으로 읽혔지만, 그 파싱 과정에서 일부 항목이 EOD 너머를 참조했다면(테이블은 있지만 일부 파티션이 안 보일 수 있음) */
-		printk(KERN_WARNING /* [한국어] 「partition table partially beyond EOD」 경고 로그 출력 */
+		/* [한국어] 테이블은 읽혔지만 그 안의 일부 항목이 EOD 너머를
+		 * 가리킨 경우다. 파싱에 성공했더라도 숨은 용량을 풀면 더 많은
+		 * 파티션이 보일 수 있으므로 재스캔 가치가 있다. */
+		printk(KERN_WARNING
 		       "%s: partition table partially beyond EOD, ",
 		       disk->disk_name);
 		if (disk_unlock_native_capacity(disk)) /* [한국어] native 용량 unlock을 시도해 실제로 풀렸다면 */

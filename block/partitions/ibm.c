@@ -392,7 +392,7 @@ static int find_label(struct parsed_partitions *state,
 		if ((info->cu_type == 0x6310 && info->dev_type == 0x9336) ||		/* [한국어] 특정 FBA 모델(제어장치 0x6310/장치타입 0x9336) - label_block이 이미 섹터 단위 */
 		    (info->cu_type == 0x3880 && info->dev_type == 0x3370))		/* [한국어] 또 다른 FBA 모델 조합(0x3880/0x3370) - 동일하게 섹터 단위로 취급 */
 			testsect[0] = info->label_block;			/* [한국어] 예외 장치는 label_block을 그대로 섹터 번호로 사용(추가 스케일링 불필요) */
-		else
+		else	/* [한국어] 위 두 모델 이외의 장치 - label_block이 512바이트 섹터가 아니라 디바이스 블록 번호이므로 환산이 필요하다. */
 			testsect[0] = info->label_block * (blocksize >> 9);			/* [한국어] 일반적인 경우 label_block(디바이스 블록 단위)을 512바이트 섹터 단위로 환산 */
 		testcount = 1;		/* [한국어] info가 있으므로 후보를 하나만 검사하면 충분 */
 	} else {
@@ -684,7 +684,7 @@ static int find_cms1_partitions(struct parsed_partitions *state,
 		 */
 		if (labelsect == 1)		/* [한국어] 레이블이 블록 1이 아니라 물리 섹터 1에서 발견된 DIAG FBA 특수 케이스 */
 			offset = 2 * secperblk;			/* [한국어] 이 경우에도 파티션은 관례대로 블록 2부터 시작한다고 가정 */
-		else
+		else	/* [한국어] 레이블이 정상적으로 블록 경계에서 발견된 일반 경로 - 위 특수 케이스처럼 위치를 고정하지 않고 레이블 위치에서 이어 계산한다. */
 			offset = labelsect + secperblk;			/* [한국어] 일반적인 경우 레이블 바로 다음 블록부터 파티션 시작 */
 		size = label->cms.block_count * secperblk;		/* [한국어] 미니디스크가 아니므로 전체 block_count를 그대로 크기로 환산(빼기 없음) */
 	}

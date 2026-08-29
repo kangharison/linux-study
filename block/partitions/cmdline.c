@@ -634,13 +634,13 @@ static int add_part(int slot, struct cmdline_subpart *subpart,
 	if (slot >= state->limit)	/* [한국어] 요청한 슬롯 번호가 parsed_partitions가 허용하는 최대 파티션 수(state->limit, DISK_MAX_PARTS)를 넘는지 검사. */
 		return 1;		/* [한국어] 한도 초과 - 더 이상 등록할 자리가 없으므로 1을 반환해 호출자가 순회를 중단하게 한다(에러 코드가 아닌 "중단 신호"). */
 
-	put_partition(state, slot, subpart->from >> 9,	/* [한국어] put_partition() 호출부 시작 - subpart->from/size(바이트)를 섹터 단위로 변환해 넘긴다. */
+	/* [한국어] >>9는 512로 나누는 것과 같다. blkdevparts= 문법의 크기/오프셋은
+	 * 사람이 쓰기 편하도록 바이트 단위(1G, 64M 같은 접미사 포함)로 파싱되는
+	 * 반면, put_partition()은 512바이트 섹터 단위를 받으므로 여기서 단위가
+	 * 바뀐다. 나눗셈 대신 시프트를 쓰는 것은 커널에서 64비트 나눗셈을 피하는
+	 * 관행이며, 파서가 이미 섹터 정렬을 보장하므로 절삭 손실은 없다. */
+	put_partition(state, slot, subpart->from >> 9,
 		      subpart->size >> 9);
-	/* [한국어] >>9는 512바이트(1섹터)로 나누는 것과 같다 - 여기서부터 이 값들의
-	 * 단위가 "바이트"에서 "섹터"로 바뀐다(put_partition이 state->parts[slot].from/size에
-	 * 저장하는 값은 섹터 단위). put_partition()은 slot < state->limit일 때만
-	 * 실제로 채우며(이미 위에서 검사했으므로 여기서는 항상 참), 파티션 이름 로그
-	 * 버퍼에도 " 장치명slot" 형태를 덧붙인다(check.h의 put_partition 구현 참고). */
 
 	if (subpart->flags & PF_RDONLY)	/* [한국어] 파싱 단계에서 "ro" 접미사로 세팅됐던 PF_RDONLY 비트 검사. */
 		state->parts[slot].flags |= ADDPART_FLAG_READONLY;		/* [한국어] block layer 공용 플래그 ADDPART_FLAG_READONLY로 변환해 이 슬롯에 OR - 이후 파티션 block_device가 읽기 전용으로 만들어진다. */
@@ -869,7 +869,11 @@ static void cmdline_parts_verifier(int slot, struct parsed_partitions *state)
 	for (; slot < state->limit && state->parts[slot].has_info; slot++) {	/* [한국어] 바깥 루프: has_info가 true인 슬롯(=실제 등록된 파티션)만 골라 slot을 증가시키며 순회 - limit에 도달하거나 미등록 슬롯을 만나면 종료. */
 		for (i = slot+1; i < state->limit && state->parts[i].has_info;		/* [한국어] 안쪽 루프 시작: slot보다 뒤에 있는 슬롯들과만 비교해 같은 쌍을 두 번 검사하는 것을 방지. */
 		     i++) {		     /* [한국어] 안쪽 루프의 계속 조건: limit 이내이고 해당 슬롯도 has_info(등록됨)여야 함. */
-			if (has_overlaps(state->parts[slot].from,			/* [한국어] slot과 i, 두 파티션의 (from, size) 쌍이 겹치는지 검사. */
+			/* [한국어] 커맨드라인 파티션은 커널이 스스로 계산한 것이 아니라
+			 * 사람이 손으로 적어 넣은 값이라, 오프셋 계산 실수로 서로 겹치는
+			 * 구간이 나오기 쉽다. 겹친 채로 마운트하면 한쪽 쓰기가 다른 쪽을
+			 * 조용히 파괴하므로, 등록은 그대로 진행하되 경고는 반드시 남긴다. */
+			if (has_overlaps(state->parts[slot].from,
 					 state->parts[slot].size,
 					 state->parts[i].from,
 					 state->parts[i].size)) {
@@ -877,10 +881,16 @@ static void cmdline_parts_verifier(int slot, struct parsed_partitions *state)
 					header = false;						/* [한국어] 다음부터는 머리말을 다시 찍지 않도록 플래그를 내림. */
 					overlaps_warns_header();						/* [한국어] 겹침 경고 머리말 두 줄을 한 번만 출력. */
 				}
-				pr_warn("%s[%llu,%llu] overlaps with "					/* [한국어] 겹치는 두 파티션의 이름과 [시작,크기] 범위를 상세히 로그로 남기는 pr_warn 호출 시작(포맷 문자열이 다음 줄로 이어짐). */
+				/* [한국어] 겹치는 두 파티션을 이름과 [시작,크기]로 함께
+				 * 찍는다. <<9로 다시 바이트 단위로 되돌리는 것이 핵심인데,
+				 * 사용자가 blkdevparts=에 적은 것과 같은 단위로 보여 줘야
+				 * 어느 항목을 고쳐야 하는지 바로 알 수 있기 때문이다.
+				 * (u64) 캐스팅은 sector_t가 32비트로 설정된 커널에서도
+				 * %llu와 타입을 맞추기 위한 것이다. */
+				pr_warn("%s[%llu,%llu] overlaps with "
 					"%s[%llu,%llu].",
 					state->parts[slot].info.volname,
-					(u64)state->parts[slot].from << 9,					/* [한국어] <<9는 섹터(512바이트) 단위를 다시 바이트로 환산 - 사용자가 blkdevparts=에 입력했던 것과 같은 단위(바이트)로 보여주기 위함. */
+					(u64)state->parts[slot].from << 9,
 					(u64)state->parts[slot].size << 9,
 					state->parts[i].info.volname,
 					(u64)state->parts[i].from << 9,

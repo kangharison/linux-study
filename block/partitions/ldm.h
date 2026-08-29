@@ -323,13 +323,13 @@ struct privhead {			/* Offsets and sizes are in sectors. */
 	uuid_t	disk_id;
 };
 
-struct tocblock {			/* We have exactly two bitmaps. */
 /* [한국어]
  * struct tocblock - TOCBLOCK(Table Of Contents) 섹터 하나를 파싱한 in-memory 표현.
  * 데이터베이스(config_start 기준) 안에 정확히 두 개의 비트맵("config"와 "log")이 있다는
  * 전제(원문 주석: "We have exactly two bitmaps") 하에 그 위치/크기만 담는다. 최대 4개 사본
  * (OFF_TOCB1~4)이 존재할 수 있으며 ldm_validate_tocblocks()가 최소 1개 이상 유효하면 통과시키고
  * 서로 다른 사본끼리는 ldm_compare_tocblocks()로 비교한다. */
+struct tocblock {			/* We have exactly two bitmaps. */
 	/* [한국어] 첫 번째 비트맵의 이름 문자열(널 패딩, strscpy_pad()로 복사). 온디스크 data+0x24.
 	 * 설정자: ldm_parse_tocblock().
 	 * 읽는 자: 같은 함수에서 TOC_BITMAP1("config")과 strncmp()로 일치하는지 검증 -- 다르면
@@ -364,12 +364,12 @@ struct tocblock {			/* We have exactly two bitmaps. */
 	u64	bitmap2_size;
 };
 
-struct vmdb {				/* VMDB: The database header */
 /* [한국어]
  * struct vmdb - VMDB(Virtual [Machine? Media?] DataBase, 원문 주석: "The database header")
  * 섹터 하나를 파싱한 in-memory 표현. config_start + OFF_VMDB(=17) 위치에 정확히 1부 존재하며
  * (백업 없음), 그 뒤로 VBLK 레코드들이 이어지는 테이블 전체의 메타데이터(레코드 크기/시작
  * 오프셋/총 개수)를 담는다. */
+struct vmdb {				/* VMDB: The database header */
 	/* [한국어] VMDB 포맷 주 버전. 온디스크 data+0x12(빅엔디안 16비트).
 	 * 설정자: ldm_parse_vmdb().
 	 * 읽는 자: 같은 함수에서 ver_minor와 함께 정확히 4.10인지 검사(privhead와 달리 단일 버전만
@@ -399,13 +399,13 @@ struct vmdb {				/* VMDB: The database header */
 	u32	last_vblk_seq;
 };
 
-struct vblk_comp {			/* VBLK Component */
 /* [한국어]
  * struct vblk_comp - VBLK Component(컴포넌트) 레코드의 타입별 페이로드.
  * 하나의 Volume을 구성하는 스트라이프/기본/RAID 구성 단위 하나를 표현하며, 실제 파티션 위치
  * 정보는 담지 않고(그건 vblk_part의 몫) 상위 Volume과의 관계(parent_id)와 구성 방식만 담는다.
  * ldm_parse_cmp3()가 채우며 ldb->v_comp 리스트에 들어가지만, 이 리스트는 이후 순회되지 않아
  * 실질적인 파티션 생성에는 관여하지 않는다. */
+struct vblk_comp {			/* VBLK Component */
 	/* [한국어] 컴포넌트 상태 이름 문자열(예: "ACTIVE", 길이-접두 문자열을 ldm_get_vstr()로
 	 * 복사). 온디스크 buffer + 0x18 + r_name.
 	 * 설정자: ldm_parse_cmp3().
@@ -434,12 +434,12 @@ struct vblk_comp {			/* VBLK Component */
 	u16	chunksize;
 };
 
-struct vblk_dgrp {			/* VBLK Disk Group */
 /* [한국어]
  * struct vblk_dgrp - VBLK Disk Group(디스크 그룹) 레코드의 타입별 페이로드.
  * 필드가 문자열 하나뿐일 만큼 단순하며, 여러 디스크를 하나의 그룹(예: 하나의 RAID 세트를
  * 구성하는 디스크들)으로 묶는 식별자 역할만 한다. ldm_parse_dgr3()가 채우고, ldm_parse_dgr4()는
  * 이 구조체를 아예 쓰지 않고 지역 변수에만 파싱 결과를 버린다(v4는 그룹 문자열을 저장하지 않음). */
+struct vblk_dgrp {			/* VBLK Disk Group */
 	/* [한국어] 디스크 그룹 식별 문자열(길이-접두 문자열, ldm_get_vstr()로 복사). 이름은
 	 * "disk_id"지만 다른 구조체들의 uuid_t disk_id와 달리 여기서는 평문 문자열이다 - 이 파일
 	 * 안에서 서로 다른 4가지 disk_id 의미 중 하나(문자열)임에 주의.
@@ -449,12 +449,12 @@ struct vblk_dgrp {			/* VBLK Disk Group */
 	u8	disk_id[64];
 };
 
-struct vblk_disk {			/* VBLK Disk */
 /* [한국어]
  * struct vblk_disk - VBLK Disk(물리 디스크) 레코드의 타입별 페이로드.
  * 이 물리 디스크 그 자체를 나타내는 레코드로, GUID를 통해 struct privhead.disk_id와 매칭되어
  * "이 gendisk가 곧 이 Disk VBLK다"라는 관계를 확립한다(ldm_get_disk_objid()). ldm_parse_dsk3()
  * (v3)와 ldm_parse_dsk4()(v4)가 각각 채우되 채우는 필드가 서로 다르다는 점에 주의. */
+struct vblk_disk {			/* VBLK Disk */
 	/* [한국어] 물리 디스크의 128비트 GUID.
 	 * 설정자: ldm_parse_dsk3()는 uuid_parse(buffer+0x19+r_name, ...)로, ldm_parse_dsk4()는
 	 *   import_uuid(buffer+0x18+r_name, ...)로 채운다(오프셋과 파싱 API가 v3/v4 서로 다름).
@@ -472,12 +472,12 @@ struct vblk_disk {			/* VBLK Disk */
 	u8	alt_name[128];
 };
 
-struct vblk_part {			/* VBLK Partition */
 /* [한국어]
  * struct vblk_part - VBLK Partition(파티션) 레코드의 타입별 페이로드.
  * 이 파일 전체에서 실제로 리눅스 파티션 테이블에 반영되는 유일한 VBLK 타입이다.
  * ldm_parse_prt3()가 채우고, ldm_create_data_partitions()가 이 구조체의 start/size를 그대로
  * put_partition()에 넘긴다. */
+struct vblk_part {			/* VBLK Partition */
 	/* [한국어] 이 파티션의 시작 위치 -- "논리 디스크"(privhead.logical_disk_start) 시작을
 	 * 0으로 하는 상대 섹터 오프셋. 온디스크 buffer + 0x24 + r_name(고정폭 빅엔디안 64비트,
 	 * 다른 필드들과 달리 가변폭 인코딩이 아니다).
@@ -521,12 +521,12 @@ struct vblk_part {			/* VBLK Partition */
 	u8	partnum;
 };
 
-struct vblk_volu {			/* VBLK Volume */
 /* [한국어]
  * struct vblk_volu - VBLK Volume(논리 볼륨) 레코드의 타입별 페이로드.
  * 사용자가 Windows에서 보는 "드라이브"에 해당하는 최상위 논리 개념으로, 하나 이상의
  * Component(및 그 아래 Partition)를 아우른다. ldm_parse_vol5()가 채우고 ldb->v_volu에
  * 들어가지만, 이 리스트 역시 이후 순회되지 않아 실제 파티션 생성에는 관여하지 않는다. */
+struct vblk_volu {			/* VBLK Volume */
 	/* [한국어] 볼륨 종류를 나타내는 문자열(길이-접두, 예: "gen"과 같은 값이 알려져 있으나
 	 * 전체 열거값은 이 파일만으로는 확인 불가 - 추정). 온디스크 buffer+0x18+r_name.
 	 * 설정자: ldm_parse_vol5(). */
@@ -558,13 +558,13 @@ struct vblk_volu {			/* VBLK Volume */
 	u8	partition_type;
 };
 
-struct vblk_head {			/* VBLK standard header */
 /* [한국어]
  * struct vblk_head - "VBLK standard header"라는 원문 주석이 붙어 있으나, 이 구조체 타입을
  * 실제로 선언/사용하는 코드가 ldm.c 어디에도 없다(grep 결과 정의 지점 외 참조 0건) - 죽은
  * (dead/vestigial) 구조체로 보인다. 실제로 조각 헤더 역할을 하는 것은 struct frag의 group/
  * num/rec 필드다. 필드 의미는 이름으로 유추한 내용을 아래에 적되, 실사용처가 없으므로
  * "현재는 쓰이지 않는다"는 점이 가장 중요한 사실이다. */
+struct vblk_head {			/* VBLK standard header */
 	/* [한국어] (추정) VBLK가 속한 그룹 ID. struct frag.group과 대응할 것으로 보이나 실사용 없음. */
 	u32 group;
 	/* [한국어] (추정) 조각 레코드 번호. struct frag.rec과 대응할 것으로 보이나 실사용 없음. */
@@ -573,7 +573,6 @@ struct vblk_head {			/* VBLK standard header */
 	u16 nrec;
 };
 
-struct vblk {				/* Generalised VBLK */
 /* [한국어]
  * struct vblk - 파싱이 끝난 VBLK 레코드 하나의 범용(generalised) in-memory 표현.
  * ldm_parse_vblk()가 공통 헤더(name/obj_id/flags/type)를 채운 뒤 type에 따라
@@ -581,6 +580,7 @@ struct vblk {				/* Generalised VBLK */
  * kmalloc_obj()로만 할당되고 별도 zero-fill이 없으므로, type이 요구하지 않는 필드/멤버는
  * 초기화되지 않은 채로 남을 수 있다는 점에 유의해야 한다(예: sequence 필드는 이 파일 어디에서도
  * 대입되지 않는 죽은 필드다 - grep 검증 완료). */
+struct vblk {				/* Generalised VBLK */
 	/* [한국어] 이 VBLK의 이름 문자열(길이-접두, ldm_get_vstr()로 buf+0x18+r_objid에서 복사) -
 	 * 디스크 이름, 볼륨 이름 등 type에 따라 의미가 달라진다.
 	 * 설정자: ldm_parse_vblk() (모든 타입 공통).
@@ -611,13 +611,18 @@ struct vblk {				/* Generalised VBLK */
 	 *   switch문이 어느 리스트(v_dgrp/v_disk/v_volu/v_comp/v_part)에 연결할지 결정하는 두 곳의
 	 *   핵심 디스패치 키. */
 	u8	type;
-	/* [한국어] 아래 각주(1)~(5) 참고 - type에 따라 정확히 한 멤버만 유효한 공용체(union). */
+	/* [한국어] 타입별 페이로드를 union으로 겹쳐 두어, VBLK 하나가 가장 큰
+	 * 멤버 크기만 차지하게 한다. 다섯 멤버 중 유효한 것은 바로 위 type
+	 * 필드가 지정하는 하나뿐이며, 어느 멤버를 읽을지는 ldm_parse_vblk()와
+	 * ldm_ldmdb_add()의 switch가 type을 보고 결정한다. type 확인 없이
+	 * 다른 멤버를 읽으면 전혀 다른 레코드의 바이트를 잘못된 구조체로
+	 * 재해석하게 된다. */
 	union {
-		struct vblk_comp comp;
-		struct vblk_dgrp dgrp;
-		struct vblk_disk disk;
-		struct vblk_part part;
-		struct vblk_volu volu;
+		struct vblk_comp comp; /* [한국어] type == VBLK_CMP3일 때 유효. ldm_parse_cmp3()가 채우고 ldb->v_comp 리스트에 연결된다. */
+		struct vblk_dgrp dgrp; /* [한국어] type == VBLK_DGR3일 때만 실제로 채워진다(VBLK_DGR4는 ldm_parse_dgr4()가 파싱 결과를 지역 변수에 버리고 이 멤버를 건드리지 않는다). */
+		struct vblk_disk disk; /* [한국어] type == VBLK_DSK3 또는 VBLK_DSK4일 때 유효. 두 버전이 채우는 필드가 서로 달라(v4는 alt_name을 채우지 않는다) 읽는 쪽에서 주의가 필요하다. */
+		struct vblk_part part; /* [한국어] type == VBLK_PRT3일 때 유효. 이 파일에서 실제로 리눅스 파티션으로 이어지는 유일한 멤버로, ldm_create_data_partitions()가 start/size를 읽어 간다. */
+		struct vblk_volu volu; /* [한국어] type == VBLK_VOL5일 때 유효. ldb->v_volu 리스트에 쌓이지만 파티션 생성에는 관여하지 않는다. */
 	/* [한국어] 위 union의 인스턴스 vblk - struct vblk 안에 실제로 필드가 아니라 "vblk"라는
 	 * 이름의 익명 union 인스턴스로 내장된다(즉 접근 시 outer->vblk.comp처럼 씀).
 	 * 설정자: ldm_parse_{cmp3,dgr3,dgr4,dsk3,dsk4,prt3,vol5}() 중 outer->type에 대응하는 하나만
@@ -636,13 +641,13 @@ struct vblk {				/* Generalised VBLK */
 	struct list_head list;
 };
 
-struct ldmdb {				/* Cache of the database */
 /* [한국어]
  * struct ldmdb - "Cache of the database"라는 원문 주석대로, PRIVHEAD/TOCBLOCK/VMDB 각 1부와
  * 전체 VBLK 레코드를 타입별로 분류한 다섯 리스트를 모두 모은 최상위 캐시 구조체.
  * ldm_partition()이 kmalloc_obj()로 스택이 아닌 힙에 하나 할당해 파싱 전 과정 동안 들고 있다가,
  * ldm_create_data_partitions()까지 끝나면 리스트들을 ldm_free_vblks()로, 자기 자신은
  * kfree(ldb)로 해제한다. */
+struct ldmdb {				/* Cache of the database */
 	/* [한국어] 이 물리 디스크의 검증된 PRIVHEAD(주 사본, 세 사본을 비교해 대표로 채택된 값).
 	 * 설정자: ldm_validate_privheads()가 &ldb->ph를 ph1으로 받아 직접 채움.
 	 * 읽는 자: ldm_partition()이 base(=ph.config_start) 계산; ldm_get_disk_objid()가 ph.disk_id로

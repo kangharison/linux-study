@@ -570,8 +570,9 @@ static void parse_extended(struct parsed_partitions *state,
 			 * 파티션의 절대 시작 LBA를 구한다. */
 			next = this_sector + offs;
 			/* [한국어] 3, 4번째 엔트리(i=2,3)는 원본 주석대로 쓰레기 값이 들어 있는 경우가
-			 * 흔하므로, 아래 세 조건으로 범위를 검증한다(NVMe 등 하위 컨트롤러로 잘못된
-			 * LBA 범위가 전달돼 오류를 유발하지 않도록 막는 가드). */
+			 * 흔하므로, 아래 세 조건으로 범위를 검증한다. 이 가드가 없으면 쓰레기
+			 * 값이 그대로 파티션 시작/크기가 되어, 확장 영역 밖이나 디스크 밖을
+			 * 가리키는 파티션이 등록된다. */
 			if (i >= 2) {
 				/* [한국어] 이 엔트리가 현재 확장 영역(this_size)을 벗어나면 무효. */
 				if (offs + size > this_size)
@@ -1500,7 +1501,7 @@ static struct {
 	/* [한국어] 해당 타입을 만났을 때 호출할 서브 파서 함수 포인터 - 모든 parse_*() 함수가
 	 * 동일한 (state, offset, size, origin) 시그니처를 공유하므로 균일하게 저장 가능하다. */
 	void (*parse)(struct parsed_partitions *, sector_t, sector_t, int);
-} subtypes[] = {
+} subtypes[] = {	/* [한국어] 파일 스코프 static 배열로 두어 초기화가 컴파일 타임에 끝나고, 새 서브 포맷을 지원할 때 이 표에 한 줄만 추가하면 되도록 한 구조다(디스패치 코드는 손대지 않는다). */
 	/* [한국어] FreeBSD 파티션 타입 -> parse_freebsd(). */
 	{FREEBSD_PARTITION, parse_freebsd},
 	/* [한국어] NetBSD 파티션 타입 -> parse_netbsd(). */

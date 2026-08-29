@@ -374,7 +374,19 @@ static inline void put_dev_sector(Sector p)
  * 비정상적으로 많은 엔트리를 담고 있을 때의 방어 코드). (2)
  * p->parts[n].from과 .size에 좌표를 기록한다. (3)
  * seq_buf_printf(&p->pp_buf, " %s%d", p->name, n)으로 " <name><n>"
- * 형태(예: " nvme0n1p1")를 로그 버퍼에 이어붙인다. 이때 flags/has_info/
+ * 형태를 로그 버퍼에 이어붙인다.
+ *
+ * ★ 주의: 출력되는 name은 디스크 이름이 아니다 ★
+ * check_partition()(block/partitions/core.c)이 디스크 이름의 마지막 글자가
+ * 숫자이면(nvme0n1, loop0 등) state->name을 "p" 한 글자로 덮어쓴다. 그
+ * 직전에 전체 이름을 pp_buf 접두어(" nvme0n1:")로 이미 찍어 두었기 때문이다.
+ * 따라서 실제 로그는 " nvme0n1: p1 p2" 형태가 되고, 이 함수가 이어붙이는
+ * 조각은 " p1"이지 " nvme0n1p1"이 아니다. 이름이 숫자로 끝나지 않는
+ * 디스크(sda 등)라면 덮어쓰기가 없어 " sda1"이 그대로 붙는다.
+ * /dev 노드 이름을 만드는 것은 이 값이 아니라 add_partition()의
+ * dev_set_name()이므로, 여기서 이름이 짧아져도 장치 이름에는 영향이 없다.
+ *
+ * 이때 flags/has_info/
  * info는 건드리지 않으므로, RAID 플래그나 UUID가 필요한 프로버는
  * put_partition() 호출과 별개로 p->parts[n].flags 등을 직접 대입해야
  * 한다.
@@ -398,7 +410,8 @@ put_partition(struct parsed_partitions *p, int n, sector_t from, sector_t size)
 	if (n < p->limit) {	/* [한국어] 슬롯 인덱스가 배열 범위 안일 때만 기록 - 손상된 테이블의 과도한 엔트리를 방어 */
 		p->parts[n].from = from;	/* [한국어] 이 파티션의 시작 LBA 기록 */
 		p->parts[n].size = size;	/* [한국어] 이 파티션의 길이(섹터 수) 기록 */
-		seq_buf_printf(&p->pp_buf, " %s%d", p->name, n);	/* [한국어] 로그 문자열에 " <name><n>" 이어붙이기(예: " nvme0n1p1") */
+		seq_buf_printf(&p->pp_buf, " %s%d", p->name, n);	/* [한국어] 로그 문자열에 " <name><n>" 이어붙이기. name이 "p"로 덮어써진
+								 * 경우(디스크 이름이 숫자로 끝날 때)에는 " p1"이 붙는다 — 위 함수 주석 참고 */
 	}
 }
 

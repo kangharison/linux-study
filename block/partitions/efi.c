@@ -165,9 +165,10 @@
 
 /* 커널 커맨드라인 'gpt' 옵션으로 PMBR(보호 MBR) 검사를 우회할 수 있다.
  * 파티션 테이블 재읽기는 init 이후에도 발생하므로 __initdata가 아니다.
- * NVMe SSD가 가상 이미지나 비표준 레이아웃을 가진 경우 이 옵션이 필요할 수 있다. (추정)
+ * pMBR이 아예 없거나 깨진 디스크(다른 크기 디스크로 dd 복사한 이미지 등)에서도
+ * GPT 헤더만 보고 파티션을 잡고 싶을 때 쓰는 명시적 탈출구다.
  */
-static int force_gpt; /* PMBR 우회 플래그: NVMe 비표준/가상 이미지 대응 (추정) */
+static int force_gpt; /* [한국어] 0이면 pMBR 검사를 통과한 디스크만 GPT로 스캔하고, 1이면 pMBR 판정과 무관하게 primary/alternate GPT를 읽어 본다. 부트 파라미터 파싱 때 한 번 쓰이고 이후에는 읽기 전용이라 별도 락이 필요 없다. */
 
 /**
  * force_gpt_fn() - 커널 커맨드라인 'gpt' 옵션 파서
@@ -196,7 +197,7 @@ static int force_gpt; /* PMBR 우회 플래그: NVMe 비표준/가상 이미지 
 static int __init
 force_gpt_fn(char *str)
 {
-	force_gpt = 1;	/* PMBR 검사 강제 통과 */ /* 'gpt' 옵션 시 PMBR 없이 GPT 스캔, NVMe 가상 디스크 대응 (추정) */
+	force_gpt = 1;	/* PMBR 검사 강제 통과 */ /* [한국어] 이 플래그가 서면 find_valid_gpt()는 is_pmbr_valid()가 0을 돌려줘도 중단하지 않고, primary GPT까지 깨진 경우에는 fops->alternative_gpt_sector 힌트 위치까지 추가로 시도한다. */
 	return 1; /* [한국어] __setup 콜백 규약: 1을 반환해 이 커맨드라인 토큰을 정상 소비했음을 알린다. */
 }
 __setup("gpt", force_gpt_fn); /* [한국어] "gpt" 토큰을 부트 파라미터로 등록: 커널 커맨드라인에 "gpt"가 있으면 force_gpt_fn()을 호출하도록 부트 파라미터 테이블에 등재한다. */
@@ -213,8 +214,8 @@ __setup("gpt", force_gpt_fn); /* [한국어] "gpt" 토큰을 부트 파라미터
  *          비교한다.
  *
  * GPT 헤더와 파티션 엔트리 배열의 무결성을 검증하는 CRC32를 계산한다.
- * NVMe SSD는 PRP/SGL로 전달된 원본 데이터와 무관하게, 디스크에 기록된
- * GPT 메타데이터의 CRC가 정확해야 이 헤더를 신뢰할 수 있다.
+ * 디스크에서 읽어온 바이트열을 그대로 대상으로 계산하며, 그 결과가 헤더에
+ * 기록된 CRC 필드와 일치해야만 그 헤더/엔트리 배열을 신뢰할 수 있다.
  * Ethernet 다항식에 ~0 시드, 최종 ~0 XOR 방식을 사용한다.
  * 실행 컨텍스트: is_gpt_valid() 호출 도중, 디스크 스캔 프로세스 컨텍스트에서
  * 동기적으로 실행되며 별도 동기화가 필요 없다(순수 계산 함수, 부작용 없음).
@@ -239,7 +240,7 @@ __setup("gpt", force_gpt_fn); /* [한국어] "gpt" 토큰을 부트 파라미터
 static inline u32
 efi_crc32(const void *buf, unsigned long len)
 {
-	return (crc32(~0L, buf, len) ^ ~0L); /* buf는 read_lba -> read_part_sector -> NVMe Read로 채워진 GPT 메타데이터 */
+	return (crc32(~0L, buf, len) ^ ~0L); /* [한국어] 시드를 ~0으로 주고 결과를 다시 ~0과 XOR한다 - lib/crc32.c의 crc32()는 시드/최종 반전을 호출자에게 맡기므로, UEFI 사양이 규정한 CRC32(초기값 0xFFFFFFFF, 최종 보수) 형태를 맞추려면 두 반전을 여기서 직접 해줘야 한다. */
 }
 
 /**
@@ -250,9 +251,11 @@ efi_crc32(const void *buf, unsigned long len)
  *          크기가 0이면 이론상 언더플로가 발생할 수 있으나(bdev_nr_bytes가
  *          0인 극단 케이스), 실제 등록된 gendisk에서는 발생하지 않는다.
  *
- * NVMe namespace의 전체 용량에서 논리 블록 크기(queue_logical_block_size)로
- * 나누어 최종 LBA를 계산한다. NVMe Identify Namespace의 NN(총 namespace 크기)와
- * 유사한 개념이며, GPT first/last_usable_lba 검증의 기준점이 된다.
+ * 디스크 전체 바이트 수를 논리 블록 크기(queue_logical_block_size)로 나눠
+ * 마지막 LBA를 얻는다. GPT가 말하는 LBA는 512바이트가 아니라 "논리 블록"
+ * 단위이므로, 512바이트 커널 섹터 개수(get_capacity())가 아니라 반드시 이
+ * 값으로 범위를 검증해야 한다. first/last_usable_lba와 각 PTE의
+ * starting/ending_lba 상한이 모두 이 값이다.
  * Returns: 마지막 LBA, 오류 시 0.
  * 실행 컨텍스트: 디스크 파티션 스캔 프로세스 컨텍스트, 부작용 없는 순수
  * 계산 함수라 재진입/동시 호출에도 안전하다.
@@ -275,11 +278,13 @@ efi_crc32(const void *buf, unsigned long len)
  */
 static u64 last_lba(struct gendisk *disk)
 {
-	/* bdev_nr_bytes: NVMe namespace 전체 바이트 수,
-	 * queue_logical_block_size: NVMe 포맷된 LBA 크기(보통 512 or 4096)
+	/* [한국어] 바이트 단위 용량을 논리 블록 크기로 나눠 블록 개수를 얻고 1을
+	 * 빼서 0-base 마지막 LBA로 바꾼다. 64비트 나눗셈을 div_u64()로 하는 이유는
+	 * 32비트 아키텍처에서 '/' 연산이 컴파일러 런타임 헬퍼를 요구해 커널에서
+	 * 링크 에러가 나기 때문이다.
 	 */
-	return div_u64(bdev_nr_bytes(disk->part0), /* bdev_nr_bytes: NVMe namespace 전체 용량(바이트) */
-		       queue_logical_block_size(disk->queue)) - 1ULL; /* queue_logical_block_size: NVMe Format LBA size, Identify Namespace FORMAT -> lbads와 대응 (추정) */
+	return div_u64(bdev_nr_bytes(disk->part0), /* [한국어] part0는 디스크 전체를 나타내는 block_device이므로 그 크기가 곧 디스크 총 바이트 수다. */
+		       queue_logical_block_size(disk->queue)) - 1ULL; /* [한국어] 논리 블록 크기는 512가 아닐 수 있다(4Kn 포맷이면 4096). GPT LBA가 이 단위이므로 여기서 나눠야 하며, -1은 "개수 -> 마지막 인덱스" 변환이다. */
 }
 
 /**
@@ -290,8 +295,11 @@ static u64 last_lba(struct gendisk *disk)
  * @return: GPT_MBR_PROTECTIVE(이 레코드가 GPT 보호 엔트리로 확인됨) 또는
  *          0(이 레코드는 GPT 보호 엔트리가 아님 - 레거시 파티션이거나 미사용).
  *
- * NVMe SSD의 첫 512바이트(LBA 0)는 legacy MBR 또는 protective MBR을 담는다.
- * os_type이 0xEE이고 starting_lba가 1이면 GPT protective MBR로 인식한다.
+ * 디스크 첫 512바이트(LBA 0)에는 레거시 MBR이 놓이는데, GPT 디스크는 그
+ * 자리에 "이 디스크 전체가 이미 쓰이고 있다"고 거짓말하는 더미 파티션 하나만
+ * 담은 보호(protective) MBR을 둔다. GPT를 모르는 옛 도구가 디스크를 빈 것으로
+ * 보고 덮어쓰는 사고를 막기 위해서다. os_type이 0xEE이고 starting_lba가 1이면
+ * 그 더미 파티션으로 인식한다.
  * 두 조건(os_type, starting_lba) 중 하나라도 어긋나면 이 레코드는 GPT와
  * 무관한 레거시 파티션 레코드로 간주하고 invalid 라벨로 점프한다.
  * 실행 컨텍스트: is_pmbr_valid()의 순회 루프 내부, 디스크 스캔 프로세스
@@ -308,7 +316,7 @@ static inline int pmbr_part_valid(gpt_mbr_record *part)
 
 	/* GPT protective MBR의 starting_lba는 GPT Partition Header가 위치한 LBA 1을 가리킨다. */
 	/* set to 0x00000001 (i.e., the LBA of the GPT Partition Header) */
-	if (le32_to_cpu(part->starting_lba) != GPT_PRIMARY_PARTITION_TABLE_LBA) /* starting_lba=1이면 LBA 1에 GPT 헤더가 있음을 의미, NVMe Read SLBA=1 준비 */
+	if (le32_to_cpu(part->starting_lba) != GPT_PRIMARY_PARTITION_TABLE_LBA) /* [한국어] UEFI 사양은 보호 파티션의 starting_lba를 1(=primary GPT 헤더가 놓인 LBA)로 못박는다. 온디스크 값은 리틀엔디안 고정이므로 빅엔디안 호스트에서도 맞게 비교하려면 le32_to_cpu()가 반드시 필요하다. */
 		goto invalid; /* [한국어] os_type은 0xEE였지만 starting_lba가 1이 아니면 GPT 보호 엔트리 스펙에 어긋나므로 무효 처리 */
 
 	return GPT_MBR_PROTECTIVE; /* [한국어] 두 조건을 모두 만족: 이 레코드는 GPT를 보호하는 더미 파티션임이 확정 */
@@ -318,7 +326,7 @@ invalid:
 
 /*
  * [한국어]
- * is_pmbr_valid() - NVMe LBA 0의 보호 MBR(pMBR) 또는 하이브리드 MBR 검사
+ * is_pmbr_valid() - LBA 0의 보호 MBR(pMBR) 또는 하이브리드 MBR 검사
  * @mbr: read_lba(state, 0, ...)로 미리 읽어둔 LBA 0 버퍼를 legacy_mbr로
  *       캐스팅한 포인터(find_valid_gpt()가 kzalloc으로 할당 후 채움).
  * @total_sectors: get_capacity(state->disk)로 얻은 디스크 전체 512바이트
@@ -326,9 +334,10 @@ invalid:
  * @return: 0(무효한 MBR - GPT 없음), GPT_MBR_PROTECTIVE(순수 보호용 MBR),
  *          GPT_MBR_HYBRID(레거시 파티션이 공존하는 하이브리드 MBR).
  *
- * NVMe SSD는 첫 섹터에 legacy MBR 대신 protective MBR(0xEE)을 배치해
- * GPT 레이아웃임을 알린다. 이 함수는 check.c -> efi_partition() 호출 전
- * (또는 그 내부에서) GPT 존재 여부를 판단하는 관문 역할을 한다.
+ * GPT 디스크는 첫 섹터에 레거시 MBR 대신 0xEE 타입 하나만 담긴 보호 MBR을
+ * 둔다. 이 함수는 find_valid_gpt()가 GPT 헤더를 읽기 전에 통과해야 하는
+ * 관문으로, 여기서 0이 나오면(그리고 force_gpt가 꺼져 있으면) GPT 스캔
+ * 자체를 시작하지 않는다.
  * 동작 단계: (1) MSDOS_MBR_SIGNATURE(0xAA55) 확인 (2) 4개
  * partition_record를 순회하며 pmbr_part_valid()로 GPT 보호 엔트리 탐색
  * (3) 보호 엔트리를 찾으면 나머지 레코드로 하이브리드 여부 판정 (4)
@@ -365,7 +374,7 @@ static int is_pmbr_valid(legacy_mbr *mbr, sector_t total_sectors)
 	int i, part = 0, ret = 0; /* invalid by default */ /* 4개 primary partition record 순회, GPT 보호 파티션 인덱스 기록 */
 
 	/* legacy_mbr.signature: MBR 시그니처 0xAA55 확인 */
-	if (!mbr || le16_to_cpu(mbr->signature) != MSDOS_MBR_SIGNATURE) /* LBA 0 마지막 2바이트 0xAA55 확인, NVMe CQE success 후 데이터 무결성의 첫 관문 */
+	if (!mbr || le16_to_cpu(mbr->signature) != MSDOS_MBR_SIGNATURE) /* [한국어] LBA 0의 마지막 2바이트(오프셋 510)에 있는 0xAA55 부트 시그니처 확인. 디스크에는 55 AA 순으로 기록되므로 le16_to_cpu()로 호스트 바이트 순서로 바꾼 뒤 비교해야 한다. 이 검사가 없으면 아무 쓰레기 섹터나 파티션 테이블로 해석하게 된다. */
 		goto done; /* [한국어] mbr 포인터가 NULL이거나(할당 실패) 시그니처 불일치 시 ret=0(초기값) 그대로 즉시 반환 - 4개 레코드는 들여다보지도 않는다 */
 
 	/* 4개 primary 파티션 중 GPT 보호 파티션(0xEE) 탐색 */
@@ -386,11 +395,15 @@ static int is_pmbr_valid(legacy_mbr *mbr, sector_t total_sectors)
 		goto done; /* [한국어] protective MBR 자체가 없으므로 hybrid 여부 검사도 건너뛰고 done으로: 이 디스크는 순수 레거시 MBR이거나 파티션이 없는 것으로 처리 */
 check_hybrid:
 	/* 다른 non-EFI/non-empty 파티션이 있으면 hybrid MBR로 간주 */
-	for (i = 0; i < 4; i++) /* GPT 외 추가 레거시 파티션 존재 시 hybrid MBR로 판정 */
-		if ((mbr->partition_record[i].os_type !=
+	/* [한국어] 보호 엔트리를 찾았어도 나머지 3개 슬롯을 다시 훑는다. 순수
+	 * 보호 MBR이라면 나머지는 전부 os_type 0x00(미사용)이어야 하고, 실제
+	 * 파일시스템을 가리키는 레거시 엔트리가 하나라도 남아 있으면 이는 같은
+	 * 디스크를 MBR로도 GPT로도 부팅시키려고 만든 하이브리드 MBR이다. */
+	for (i = 0; i < 4; i++) /* [한국어] 조기 탈출 없이 4개를 모두 보는 이유: 하이브리드 판정은 "하나라도 있으면"이므로 마지막 슬롯까지 확인해야 한다. */
+		if ((mbr->partition_record[i].os_type != /* [한국어] os_type은 1바이트라 엔디안 변환이 필요 없다. 0xEE 슬롯 자신은 하이브리드 근거가 못 되므로 제외하고, */
 			EFI_PMBR_OSTYPE_EFI_GPT) &&
-		    (mbr->partition_record[i].os_type != 0x00))
-			ret = GPT_MBR_HYBRID;
+		    (mbr->partition_record[i].os_type != 0x00)) /* [한국어] 미사용(0x00)도 제외한다. 남는 것은 실제 레거시 파티션 타입뿐이다. */
+			ret = GPT_MBR_HYBRID; /* [한국어] 반환값을 HYBRID로 승격. find_valid_gpt()는 PROTECTIVE와 HYBRID를 모두 "0이 아님"으로만 취급해 GPT 스캔을 진행하므로, 이 구분은 사실상 아래 size_in_lba 관용 검사를 건너뛰는 용도다(하이브리드 MBR은 디스크 크기 규칙을 지키지 않는다). */
 
 	/*
 	 * Protective MBRs take up the lesser of the whole disk
@@ -405,8 +418,16 @@ check_hybrid:
 	 * an image from a smaller disk to a larger disk.
 	 */
 	if (ret == GPT_MBR_PROTECTIVE) {
-		sz = le32_to_cpu(mbr->partition_record[part].size_in_lba); /* CHS 32비트 LBA 한계(2TiB) 반영, size_in_lba가 전체 디스크 또는 0xFFFFFFFF 허용 */
-		if (sz != (uint32_t) total_sectors - 1 && sz != 0xFFFFFFFF) /* total_sectors는 get_capacity() 값, NVMe namespace 총 512바이트 섹터 수 */
+		sz = le32_to_cpu(mbr->partition_record[part].size_in_lba); /* [한국어] 보호 파티션이 주장하는 크기(리틀엔디안 32비트). MBR 필드가 32비트뿐이라 표현 가능한 최대가 2TiB이고, 그래서 그 이상 디스크에서는 애초에 정확한 값을 담을 수 없다. */
+		/* [한국어] 기대값은 두 가지뿐이다: 디스크 전체(LBA 0을 제외한
+		 * total_sectors-1) 또는 32비트 포화값 0xFFFFFFFF. 둘 다 아니어도
+		 * 실패로 처리하지 않고 진단만 남기는데, 작은 디스크 이미지를 큰
+		 * 디스크에 dd로 복사한 흔한 상황을 부팅 불능으로 만들지 않기 위한
+		 * 의도적 관용이다. */
+		if (sz != (uint32_t) total_sectors - 1 && sz != 0xFFFFFFFF)
+			/* [한국어] 기대값 쪽은 min()으로 32비트 상한에 맞춰 찍는다.
+			 * 2TiB를 넘는 디스크에서 total_sectors-1을 그대로 %u로
+			 * 출력하면 잘린 값이 나와 오히려 혼란스럽기 때문이다. */
 			pr_debug("GPT: mbr size in lba (%u) different than whole disk (%u).\n",
 				 sz, (uint32_t)min(total_sectors - 1, 0xFFFFFFFF));
 	}
@@ -427,11 +448,11 @@ done: /* [한국어] 성공/실패 공통 반환 지점: ret에는 0(무효), GP
  *          그때까지 누적된(count보다 작은) 바이트 수를 반환하며, 호출자는
  *          "< count"로 부족분을 판정한다.
  *
- * GPT의 모든 LBA는 512바이트 단위이지만, NVMe SSD는 queue_logical_block_size가
- * 512/4096 등으로 포맷될 수 있다. 따라서 lba에 (lblk_size/512)를 곱해
- * read_part_sector()용 커널 섹터 번호 n으로 변환한다.
- * 이 요청은 이후 submit_bio -> blk_mq_submit_bio -> ... -> nvme_queue_rq 경로로
- * NVMe Read 명령(CID 할당, PRP/SGL 생성, doorbell 갱신)으로 변환된다. (추정)
+ * 단위 변환이 이 함수의 핵심이다. GPT가 말하는 LBA는 디바이스의 논리 블록
+ * (queue_logical_block_size, 512일 수도 4096일 수도 있다) 단위인 반면,
+ * 블록 계층의 read_part_sector()는 항상 512바이트 고정 섹터 번호를 받는다.
+ * 그래서 lba에 (논리 블록 크기 / 512)를 곱해 커널 섹터 번호 n으로 바꾼다.
+ * 4Kn 디스크라면 GPT LBA 1이 커널 섹터 8이 되는 식이다.
  * Returns: 성공 시 읽은 바이트 수, 실패 시 0.
  * 동작 단계: (1) GPT LBA를 커널 섹터 번호로 환산 (2) count가 남아있는 동안
  * 512바이트씩 read_part_sector()로 섹터를 읽어 buffer에 memcpy (3) 섹터를
@@ -458,30 +479,32 @@ done: /* [한국어] 성공/실패 공통 반환 지점: ret에는 0(무효), GP
 static size_t read_lba(struct parsed_partitions *state,
 		       u64 lba, u8 *buffer, size_t count)
 {
-	size_t totalreadcount = 0; /* read_part_sector 호출 누적 바이트 카운트 */
-	/* GPT LBA(512B) -> 커널 섹터(512B) 번호: NVMe 4K 포맷 시 8배 차이 */
-	sector_t n = lba * /* GPT LBA(512B)를 커널 섹터 n으로 변환: NVMe 4K 포맷 시 LBA 1 == 섹터 8 */
+	size_t totalreadcount = 0; /* [한국어] 지금까지 buffer에 채운 바이트 수. 중간에 I/O가 실패해도 이 값을 그대로 반환하므로, 호출자는 반환값 < count 여부로 부분 실패를 감지한다. */
+	/* [한국어] GPT LBA(논리 블록 단위) -> 커널 섹터(항상 512B) 번호 변환.
+	 * 이 곱셈을 빠뜨리면 4Kn 디스크에서 엉뚱한 위치를 읽게 된다. */
+	sector_t n = lba * /* [한국어] 논리 블록 크기가 512면 계수는 1이라 무변환, 4096이면 8배가 된다. */
 		(queue_logical_block_size(state->disk->queue) / 512);
 
-	if (!buffer || lba > last_lba(state->disk)) /* 버퍼 NULL 또는 NVMe namespace 끝 초과 시 조기 리턴 */
+	if (!buffer || lba > last_lba(state->disk)) /* [한국어] 디스크 끝을 넘는 LBA 요청을 여기서 막는다. GPT 헤더의 alternate_lba/partition_entry_lba는 디스크가 손상되면 임의의 큰 값일 수 있으므로, 이 상한 검사가 없으면 조작된 헤더 하나로 디스크 범위 밖 읽기를 유발할 수 있다. */
                 return 0; /* [한국어] 인자 검증 실패: 아무 것도 읽지 않았으므로 0 반환, 호출자는 count와 비교해 실패로 판정 */
 
-	while (count) { /* 512바이트씩 read_part_sector 호출 -> NVMe Read 명령이 count/512 만큼 반복 제출 (추정) */
-		int copied = 512; /* GPT 메타데이터는 512바이트 단위로 처리, NVMe PRP/SGL entry 단위(4K 정렬)와 다를 수 있음 */
+	while (count) { /* [한국어] 남은 요청 바이트가 0이 될 때까지 한 섹터씩 진행. 페이지 캐시 헬퍼가 섹터 단위 인터페이스라 한 번에 큰 덩어리를 받을 수 없다. */
+		int copied = 512; /* [한국어] 한 회차에 옮길 최대 바이트 = 커널 섹터 크기. read_part_sector()가 돌려주는 포인터가 512바이트 경계 기준이므로 그 이상을 읽으면 인접 섹터 데이터를 침범한다. */
 		Sector sect; /* [한국어] read_part_sector()가 내부적으로 페이지 캐시 페이지를 가리키도록 채워주는 핸들 - put_dev_sector()로 반드시 짝 맞춰 반납해야 페이지 참조 카운트가 새지 않는다 */
-		/* read_part_sector -> ... -> NVMe Read 명령으로 512바이트 단위 읽기 (추정) */
-		unsigned char *data = read_part_sector(state, n++, &sect); /* read_part_sector -> bdev_read_sector -> submit_bio_wait -> blk_mq_submit_bio -> blk_mq_get_request -> nvme_queue_rq -> nvme_submit_cmd(SQ doorbell) (추정) */
-		if (!data) /* NVMe CQE 오류, IO scheduler timeout, 또는 메모리 할당 실패 시 루프 탈출, 스캔 중단 가능 */
+		/* [한국어] 페이지 캐시를 경유하는 동기 읽기. 이 스캔은 프로세스
+		 * 컨텍스트에서만 돌기 때문에 여기서 블로킹되어도 문제가 없다. */
+		unsigned char *data = read_part_sector(state, n++, &sect); /* [한국어] n을 후위 증가시켜 다음 회차가 자동으로 다음 섹터를 읽게 한다. */
+		if (!data) /* [한국어] I/O 실패나 메모리 부족. 여기서 에러를 위로 던지지 않고 break만 하는 이유는, 부분적으로 읽힌 양(totalreadcount)을 호출자에게 그대로 알려 판단을 맡기기 위해서다. */
 			break;
-		if (copied > count) /* 마지막 512바이트 미만 조각 처리 */
-			copied = count;
-		memcpy(buffer, data, copied); /* read_part_sector가 반환한 섹터 버퍼를 GPT 파싱 버퍼로 복사 */
-		put_dev_sector(sect); /* 섹터 버퍼 해제, NVMe Read 완료 자원 정리 */
-		buffer += copied; /* 다음 GPT 메타데이터 오프셋 이동 */
-		totalreadcount +=copied; /* 읽은 바이트 누적, 반환값으로 사용 */
-		count -= copied; /* 남은 바이트 감소, 0이면 while 종료 */
+		if (copied > count) /* [한국어] 마지막 회차에서 남은 요청이 512바이트 미만인 경우. 이 절삭이 없으면 호출자 버퍼 뒤로 최대 511바이트를 넘겨 쓴다. */
+			copied = count; /* [한국어] 남은 요청량으로 줄여 호출자 버퍼 밖을 건드리지 않게 한다. */
+		memcpy(buffer, data, copied); /* [한국어] 페이지 캐시 페이지의 내용을 호출자 버퍼로 복사. 캐시 페이지는 put_dev_sector() 이후 언제든 회수될 수 있으므로 포인터를 들고 있지 않고 즉시 복사한다. */
+		put_dev_sector(sect); /* [한국어] 읽기 참조 반납. 루프 안에서 매회 반납하지 않으면 큰 PTE 배열을 읽는 동안 페이지 참조가 계속 쌓인다. */
+		buffer += copied; /* [한국어] 목적지 커서 전진 */
+		totalreadcount +=copied; /* [한국어] 반환할 누적량 갱신 */
+		count -= copied; /* [한국어] 남은 요청량 감소. 0이 되면 while 조건이 거짓이 되어 정상 종료. */
 	}
-	return totalreadcount;
+	return totalreadcount; /* [한국어] 요청 전량을 읽었으면 count와 같고, 중간 실패면 그보다 작다. 호출자들은 예외 없이 "< count"로 실패를 판정한다. */
 }
 
 /**
@@ -499,8 +522,10 @@ static size_t read_lba(struct parsed_partitions *state,
  *
  * gpt->num_partition_entries와 gpt->sizeof_partition_entry를 곱해 PTE 배열
  * 전체 크기를 결정하고, gpt->partition_entry_lba부터 read_lba()로 읽어온다.
- * NVMe SSD에서 PTE는 일반적으로 LBA 2부터 연속 배치되며, 각 엔트리는
- * starting_lba/ending_lba를 포함해 NVMe Read/Write의 SLBA 입력값과 직결된다.
+ * 표준 레이아웃에서 PTE 배열은 primary 헤더 바로 뒤(LBA 2)부터 연속 배치되고
+ * 기본값은 128개 x 128바이트 = 16KiB지만, 두 값 모두 헤더가 자칭하는 값이므로
+ * 여기서는 곱셈 결과를 그대로 할당 크기로 쓴다. 그래서 호출자 is_gpt_valid()가
+ * 이 함수를 부르기 전에 헤더 CRC를 먼저 검증해 값의 신뢰성을 확보해야 한다.
  * 실행 컨텍스트: is_gpt_valid() 내부에서, 헤더 CRC 검증 성공 직후 호출된다.
  * 에러 경로: gpt==NULL(즉시 NULL 반환), count==0(엔트리 없음, NULL 반환),
  * kmalloc 실패(NULL 반환), read_lba()가 count보다 적게 읽으면 방금 할당한
@@ -521,29 +546,34 @@ static size_t read_lba(struct parsed_partitions *state,
 static gpt_entry *alloc_read_gpt_entries(struct parsed_partitions *state,
 					 gpt_header *gpt)
 {
-	size_t count; /* PTE 배열 kmalloc 할당 크기 */
+	size_t count; /* [한국어] PTE 배열 전체 바이트 수. 엔트리 개수 x 엔트리 크기로 계산하며, 할당 크기이자 read_lba() 요청 길이로 함께 쓰인다. */
 	gpt_entry *pte; /* [한국어] kmalloc으로 새로 할당해 디스크에서 읽어들일 PTE 배열의 시작 포인터. 성공 시 이 값을 그대로 반환, 실패 시 NULL로 재설정 후 반환 */
 
-	if (!gpt) /* NULL 헤더 방어, NVMe 메타데이터 없음 */
+	if (!gpt) /* [한국어] 헤더 읽기가 이미 실패한 경우. 호출자가 검사를 생략해도 여기서 걸러지도록 방어적으로 둔다. */
+		return NULL; /* [한국어] 이 함수의 모든 실패는 NULL 하나로만 표현된다 - 호출자 is_gpt_valid()가 원인을 구분할 필요가 없기 때문이다. */
+
+	/* [한국어] 두 필드 모두 온디스크 리틀엔디안 32비트다. 곱하기 전에 한쪽을
+	 * (size_t)로 캐스팅하는 것이 핵심으로, 32비트 x 32비트를 32비트 안에서
+	 * 곱하면 오버플로가 나 실제보다 작은 버퍼를 할당한 뒤 read_lba()가 그
+	 * 뒤를 덮어쓰게 된다. 64비트 size_t로 승격시켜 그 경로를 막는다. */
+	count = (size_t)le32_to_cpu(gpt->num_partition_entries) * /* [한국어] 엔트리 개수(사양 권장 최소 128) */
+                le32_to_cpu(gpt->sizeof_partition_entry); /* [한국어] 엔트리 하나의 바이트 크기(사양상 128의 배수). 호출자가 헤더 CRC를 이미 통과시켰고, is_gpt_valid()가 이 곱을 디스크 크기와 다시 대조한다. */
+	if (!count) /* [한국어] 둘 중 하나가 0이면 읽을 것이 없다. kmalloc(0)은 NULL이 아닌 특수 포인터를 돌려주므로, 그것을 유효한 PTE 배열로 오인하지 않도록 여기서 미리 잘라낸다. */
+		return NULL; /* [한국어] 엔트리가 없는 GPT는 파티션도 없다는 뜻이므로 실패로 처리한다. */
+	pte = kmalloc(count, GFP_KERNEL); /* [한국어] GFP_KERNEL - 이 경로는 프로세스 컨텍스트에서만 실행되므로 슬립 가능한 할당을 써도 된다. */
+	if (!pte) /* [한국어] 메모리 부족. 파티션 없이 디스크 전체만 노출되는 결과가 되지만, 스캔 실패는 시스템을 멈추는 오류가 아니므로 NULL 반환으로 끝낸다. */
 		return NULL;
 
-	/* gpt_header.num_partition_entries * sizeof_partition_entry = PTE 배열 총 바이트 */
-	count = (size_t)le32_to_cpu(gpt->num_partition_entries) * /* num_partition_entries * sizeof_partition_entry = PTE 배열 전체 바이트 */
-                le32_to_cpu(gpt->sizeof_partition_entry);
-	if (!count) /* 0개 엔트리 시 NVMe 파티션 정보 없음으로 처리 */
-		return NULL;
-	pte = kmalloc(count, GFP_KERNEL); /* PTE 배열 메모리 할당, 실패 시 GPT 스캔 중단 */
-	if (!pte) /* 메모리 부족: NVMe 파티션 메타데이터 파싱 불가, 블록 레이블 없이 namespace 전체 사용 가능 */
-		return NULL;
-
-	/* gpt->partition_entry_lba: PTE 배열 시작 LBA (일반적으로 LBA 2) */
-	if (read_lba(state, le64_to_cpu(gpt->partition_entry_lba), /* partition_entry_lba(보통 LBA 2)부터 PTE 배열 연속 읽기 -> 다수 NVMe Read 제출 */
+	/* [한국어] partition_entry_lba는 64비트라 le64_to_cpu()로 변환한다. 값이
+	 * 디스크 끝을 넘더라도 read_lba()의 last_lba() 상한 검사가 0을 돌려주므로
+	 * 아래 "< count" 조건에서 실패로 걸러진다. */
+	if (read_lba(state, le64_to_cpu(gpt->partition_entry_lba), /* [한국어] 표준 배치라면 LBA 2 */
 			(u8 *) pte, count) < count) {
-		kfree(pte); /* read_lba 실패(예: NVMe CQE error) 시 pte 정리 */
-                pte=NULL;
-		return NULL;
+		kfree(pte); /* [한국어] 부분만 읽힌 배열은 CRC 검증을 어차피 통과하지 못하므로 즉시 버린다. 여기서 해제해 두어야 호출자가 실패 시 정리 책임을 지지 않아도 된다. */
+                pte=NULL; /* [한국어] 바로 다음 줄에서 NULL을 반환하므로 기능상 불필요하지만, 해제한 포인터를 지역 변수에 남기지 않는 관습을 따른 것이다. */
+		return NULL; /* [한국어] 부분 읽기는 실패로 취급한다. 절반만 읽힌 배열을 넘기면 뒤쪽 엔트리가 초기화되지 않은 힙 내용이 되어, CRC 검증 이전에 이미 위험하다. */
 	}
-	return pte;
+	return pte; /* [한국어] count 바이트를 온전히 채운 배열. 해제 책임은 호출자(is_gpt_valid()의 fail 경로 또는 efi_partition())에게 넘어간다. */
 }
 
 /**
@@ -556,9 +586,10 @@ static gpt_entry *alloc_read_gpt_entries(struct parsed_partitions *state,
  *          CRC 등은 검증되지 않은 "날 것" 상태이며, 검증은 호출자
  *          is_gpt_valid()의 몫이다.
  *
- * NVMe SSD의 LBA 1(primary) 또는 마지막 LBA(alternate)에서 GPT 헤더를 읽는다.
- * 할당 크기는 queue_logical_block_size이며, 헤더는 항상 하나의 논리 블록에
- * 들어간다고 가정한다. (추정)
+ * LBA 1(primary) 또는 마지막 LBA(alternate)에서 GPT 헤더를 읽는다. 할당/읽기
+ * 단위를 sizeof(gpt_header)(92바이트)가 아니라 논리 블록 크기로 잡는 이유는,
+ * read_lba()가 섹터 단위로만 복사하고 UEFI 사양도 헤더가 자신의 LBA 한 블록을
+ * 통째로 차지한다고 규정하기 때문이다. 헤더 뒤 여분 바이트는 사용하지 않는다.
  * 에러 경로: kmalloc 실패 시 즉시 NULL, read_lba()가 ssz보다 적게 읽으면
  * 방금 할당한 gpt를 kfree하고 NULL 반환(메모리 누수 방지).
  *
@@ -578,20 +609,23 @@ static gpt_header *alloc_read_gpt_header(struct parsed_partitions *state,
 					 u64 lba)
 {
 	gpt_header *gpt; /* [한국어] 이 함수가 새로 할당해 디스크 내용을 채워 넣을 GPT 헤더 버퍼 포인터. 성공 시 그대로 반환, 실패 시 NULL로 재설정 */
-	unsigned ssz = queue_logical_block_size(state->disk->queue); /* NVMe namespace 논리 블록 크기(512 or 4096) = 헤더 할당/읽기 단위 */
+	unsigned ssz = queue_logical_block_size(state->disk->queue); /* [한국어] 논리 블록 크기 = 헤더 하나가 차지하는 온디스크 공간. 할당 크기와 읽기 길이를 같은 값으로 맞춰야 아래 "< ssz" 부족 판정이 성립한다. */
 
-	gpt = kmalloc(ssz, GFP_KERNEL); /* 하나의 논리 블록 크기만큼 GPT 헤더 버퍼 할당 */
-	if (!gpt) /* 헤더 버퍼 할당 실패 시 NVMe GPT 스캔 불가 */
-		return NULL;
+	gpt = kmalloc(ssz, GFP_KERNEL); /* [한국어] 헤더 구조체(92바이트)보다 크게 잡는다. 92바이트만 잡으면 read_lba()가 512바이트를 복사하며 힙을 넘어 쓴다. */
+	if (!gpt) /* [한국어] 할당 실패 - 검증 없이 곧장 포기한다. */
+		return NULL; /* [한국어] 아직 아무것도 할당·획득하지 않았으므로 정리할 것이 없다. */
 
-	/* primary GPT(LBA 1) 또는 alternate GPT(마지막 LBA)에서 헤더 읽기 */
-	if (read_lba(state, lba, (u8 *) gpt, ssz) < ssz) { /* primary(LBA 1) 또는 alternate(마지막 LBA)에서 헤더 읽기, NVMe Read 실패 시 fallback */
-		kfree(gpt); /* 실패 시 헤더 메모리 정리 */
+	/* [한국어] 호출자가 넘긴 lba가 곧 primary(1) / alternate(마지막 LBA) /
+	 * 드라이버 힌트 위치를 구분하는 유일한 인자다. 이 함수는 어느 쪽인지
+	 * 신경 쓰지 않고 바이트만 읽어오며, 시그니처와 CRC 판정은 전적으로
+	 * 호출자 is_gpt_valid()가 맡는다. */
+	if (read_lba(state, lba, (u8 *) gpt, ssz) < ssz) { /* [한국어] 한 블록을 다 못 읽었다면 그 위치에 헤더가 없거나 매체 오류다. */
+		kfree(gpt); /* [한국어] 실패 시 이 함수가 직접 해제해, 호출자가 NULL만 확인하면 되도록 만든다. */
                 gpt=NULL;
-		return NULL;
+		return NULL; /* [한국어] "이 LBA에는 헤더가 없다"는 신호. 호출자는 이를 곧바로 폴백 판단에 쓴다. */
 	}
 
-	return gpt;
+	return gpt; /* [한국어] 아직 검증되지 않은 날 것의 한 블록. 시그니처/CRC 판정은 전적으로 is_gpt_valid()의 몫이다. */
 }
 
 /**
@@ -608,9 +642,10 @@ static gpt_header *alloc_read_gpt_header(struct parsed_partitions *state,
  *          *gpt/*ptes는 반드시 NULL로 정리되어 호출자가 이중 해제를 하지
  *          않아도 안전하다).
  *
- * NVMe SSD에 기록된 GPT 헤더의 서명, 헤더 크기, my_lba, first/last_usable_lba,
+ * 디스크에서 읽어온 GPT 헤더의 서명, 헤더 크기, my_lba, first/last_usable_lba,
  * 헤더 CRC32, PTE 배열 CRC32를 검증한다. 헤더가 손상되면 alternate GPT로
- * fallback하는 근거가 되며, 이는 NVMe namespace의 메타데이터 신뢰성과 직결된다.
+ * fallback하는 근거가 된다. 이 함수가 0을 돌려주는 것은 "이 위치에 신뢰할 수
+ * 있는 GPT가 없다"는 뜻일 뿐, 디스크 자체의 오류를 뜻하지는 않는다.
  * 동작 단계: (1) alloc_read_gpt_header()로 헤더 읽기 (2) signature 검사
  * (3) header_size 상한/하한 검사 (4) header_crc32 재계산 비교(계산 중
  * 필드를 0으로 뒀다가 원복) (5) my_lba 일치 검사 (6) first/last_usable_lba가
@@ -642,16 +677,16 @@ static int is_gpt_valid(struct parsed_partitions *state, u64 lba,
 			gpt_header **gpt, gpt_entry **ptes)
 {
 	u32 crc, origcrc; /* 헤더 CRC32 저장 */
-	u64 lastlba, pt_size; /* NVMe namespace 경계 및 PTE 배열 크기 */
+	u64 lastlba, pt_size; /* [한국어] lastlba는 디스크 마지막 LBA(범위 검사의 상한), pt_size는 PTE 배열 전체 바이트 수(할당 폭주 방지 검사와 CRC 계산 범위로 함께 쓰인다). */
 
-	if (!ptes) /* ptes 출력 인자 NULL 방어 */
+	if (!ptes) /* [한국어] 출력 인자 방어. gpt는 NULL 검사를 하지 않는데, 이 함수의 유일한 호출자 find_valid_gpt()가 항상 지역 변수의 주소를 넘기기 때문이다. */
 		return 0; /* [한국어] 호출자 프로그래밍 오류 방어: ptes가 NULL이면 이후 *ptes 대입이 크래시를 유발하므로 아무 것도 하지 않고 즉시 실패 반환 */
-	if (!(*gpt = alloc_read_gpt_header(state, lba))) /* NVMe LBA에서 GPT 헤더 읽기 실패, CQE error 또는 메모리 부족 가능 */
+	if (!(*gpt = alloc_read_gpt_header(state, lba))) /* [한국어] 헤더 한 블록 읽기. 대입과 검사를 한 문장에 합쳐 두어, 실패 시 *gpt가 NULL로 남아 호출자가 그대로 판정할 수 있다. */
 		return 0; /* [한국어] 헤더 자체를 읽지 못했으므로 이후 검증 단계 진입 불가, *gpt는 이미 alloc_read_gpt_header 내부에서 NULL 처리됨 */
 
 	/* Check the GUID Partition Table signature */
 	/* gpt_header.signature: "EFI PART" 시그니처(0x5452415020494645) 확인 */
-	if (le64_to_cpu((*gpt)->signature) != GPT_HEADER_SIGNATURE) { /* 오프셋 0x00: signature "EFI PART"(0x5452415020494645) 확인, 잘못된 NVMe LBA 1 내용 */
+	if (le64_to_cpu((*gpt)->signature) != GPT_HEADER_SIGNATURE) { /* [한국어] 오프셋 0x00의 8바이트 시그니처. 디스크에는 ASCII "EFI PART"(45 46 49 20 50 41 52 54)가 그 순서로 적혀 있고, 이를 리틀엔디안 64비트 정수로 읽으면 0x5452415020494645가 된다. le64_to_cpu()가 없으면 빅엔디안 호스트에서 정상 디스크를 전부 거부하게 된다. */
 		pr_debug("GUID Partition Table Header signature is wrong:"
 			 "%lld != %lld\n",
 			 (unsigned long long)le64_to_cpu((*gpt)->signature),
@@ -660,9 +695,15 @@ static int is_gpt_valid(struct parsed_partitions *state, u64 lba,
 	}
 
 	/* Check the GUID Partition Table header size is too big */
-	/* gpt_header.header_size: NVMe 논리 블록 크기를 초과하면 invalid */
-	if (le32_to_cpu((*gpt)->header_size) > /* 오프셋 0x0C: header_size가 NVMe 논리 블록보다 큼, invalid */
+	/* [한국어] 상한 검사. header_size는 아래에서 CRC 계산 길이로 그대로
+	 * 쓰이는데, alloc_read_gpt_header()가 잡아 둔 버퍼는 논리 블록 하나
+	 * 크기뿐이다. 손상된 디스크가 header_size에 큰 값을 적어 두면 그 길이만큼
+	 * 힙 바깥을 읽으며 CRC를 계산하게 되므로, 계산 전에 반드시 막아야 한다. */
+	if (le32_to_cpu((*gpt)->header_size) > /* [한국어] 오프셋 0x0C, 리틀엔디안 32비트 */
 			queue_logical_block_size(state->disk->queue)) {
+		/* [한국어] pr_err가 아니라 pr_debug인 이유: GPT가 아닌 디스크를
+		 * 스캔하다 여기 걸리는 것은 정상적인 일상 동작이라, 기본 로그
+		 * 레벨에서는 조용해야 한다. */
 		pr_debug("GUID Partition Table Header size is too large: %u > %u\n",
 			le32_to_cpu((*gpt)->header_size),
 			queue_logical_block_size(state->disk->queue));
@@ -671,7 +712,7 @@ static int is_gpt_valid(struct parsed_partitions *state, u64 lba,
 
 	/* Check the GUID Partition Table header size is too small */
 	/* gpt_header.header_size: gpt_header 구조체 최소 크기보다 작으면 invalid */
-	if (le32_to_cpu((*gpt)->header_size) < sizeof(gpt_header)) { /* 오프셋 0x0C: header_size가 gpt_header 구조체 최소 크기보다 작음, invalid */
+	if (le32_to_cpu((*gpt)->header_size) < sizeof(gpt_header)) { /* [한국어] 하한 검사. 아래 검증들이 partition_entry_array_crc32(오프셋 0x58)까지 읽는데, header_size가 그보다 짧으면 헤더가 보증하지 않는(=CRC 범위 밖) 쓰레기 바이트를 필드로 신뢰하게 된다. */
 		pr_debug("GUID Partition Table Header size is too small: %u < %zu\n",
 			le32_to_cpu((*gpt)->header_size),
 			sizeof(gpt_header));
@@ -680,21 +721,21 @@ static int is_gpt_valid(struct parsed_partitions *state, u64 lba,
 
 	/* Check the GUID Partition Table CRC */
 	/* gpt_header.header_crc32: 헤더 CRC32 계산 후 비교 (계산 시 crc 필드는 0으로 둠) */
-	origcrc = le32_to_cpu((*gpt)->header_crc32); /* 오프셋 0x10: 저장된 header_crc32 읽기 */
-	(*gpt)->header_crc32 = 0; /* CRC 계산 시 header_crc32 필드 자신은 0으로 간주 (UEFI spec) */
-	crc = efi_crc32((const unsigned char *) (*gpt), le32_to_cpu((*gpt)->header_size)); /* 헤더 전체(0 ~ header_size) CRC32 재계산, NVMe에서 읽은 원본 데이터 사용 */
+	origcrc = le32_to_cpu((*gpt)->header_crc32); /* [한국어] 오프셋 0x10에 저장된 기대값을 호스트 바이트 순서로 빼 둔다. 곧바로 필드를 0으로 덮을 것이므로 먼저 읽어야 한다. */
+	(*gpt)->header_crc32 = 0; /* [한국어] UEFI 사양은 "CRC 필드 자신을 0으로 둔 상태의 헤더"에 대해 CRC를 계산하라고 규정한다. 자기 자신을 포함해 계산할 수는 없으므로 생기는 필연적 규칙이며, 인메모리 사본만 건드리고 디스크는 쓰지 않는다. */
+	crc = efi_crc32((const unsigned char *) (*gpt), le32_to_cpu((*gpt)->header_size)); /* [한국어] CRC 범위는 헤더 맨 앞부터 header_size까지이며, 그 뒤 블록 잔여 바이트는 포함하지 않는다. 바로 위에서 상·하한을 검사해 둔 덕분에 이 길이는 항상 버퍼 안이다. */
 
-	if (crc != origcrc) { /* CRC 불일치: NVMe media 손상 또는 전송 오류 (CQE status는 success였으나 데이터 무결성 깨짐) */
+	if (crc != origcrc) { /* [한국어] 매체 손상이나 쓰기 도중 전원 차단으로 헤더가 반만 갱신된 경우. 이 검사가 통과해야 비로소 my_lba 이하 필드를 신뢰할 수 있다. */
 		pr_debug("GUID Partition Table Header CRC is wrong: %x != %x\n",
 			 crc, origcrc);
 		goto fail; /* [한국어] 헤더 CRC32가 어긋남 - 이 헤더가 (일부라도) 손상되었다는 강한 신호이므로 신뢰할 수 없어 실패 처리. find_valid_gpt()가 이후 alternate GPT로 폴백을 시도하는 근거가 된다 */
 	}
-	(*gpt)->header_crc32 = cpu_to_le32(origcrc); /* CRC 필드 원복 (fail path에서 kfree 전 복원, 디버깅용) */
+	(*gpt)->header_crc32 = cpu_to_le32(origcrc); /* [한국어] 검증을 위해 잠시 0으로 만든 필드를 원래 값으로 되돌려, 이후 이 사본을 보는 코드가 온디스크 내용과 동일한 헤더를 보게 한다. origcrc는 이미 호스트 순서이므로 cpu_to_le32()로 다시 리틀엔디안으로 되돌린다. */
 
 	/* Check that the my_lba entry points to the LBA that contains
 	 * the GUID Partition Table */
 	/* gpt_header.my_lba: 현재 읽은 LBA와 일치해야 함 (primary/alternate 구분) */
-	if (le64_to_cpu((*gpt)->my_lba) != lba) { /* 오프셋 0x18: my_lba는 현재 읽은 LBA와 일치해야 함 (primary vs alternate 구분) */
+	if (le64_to_cpu((*gpt)->my_lba) != lba) { /* [한국어] 오프셋 0x18. 헤더가 자칭하는 위치와 실제로 읽어온 위치가 같아야 한다. CRC는 헤더 내용의 무결성만 보증할 뿐 "이 헤더가 여기 있어야 할 헤더인가"는 말해 주지 않으므로, 백업 헤더를 primary 자리에 복사해 둔 디스크를 걸러내려면 이 검사가 필요하다. */
 		pr_debug("GPT my_lba incorrect: %lld != %lld\n",
 			 (unsigned long long)le64_to_cpu((*gpt)->my_lba),
 			 (unsigned long long)lba);
@@ -704,21 +745,28 @@ static int is_gpt_valid(struct parsed_partitions *state, u64 lba,
 	/* Check the first_usable_lba and last_usable_lba are
 	 * within the disk.
 	 */
-	/* gpt_header.first_usable_lba/last_usable_lba: NVMe namespace 경계 내에 있어야 함 */
-	lastlba = last_lba(state->disk); /* NVMe namespace 마지막 LBA 재계산 */
-	if (le64_to_cpu((*gpt)->first_usable_lba) > lastlba) { /* 오프셋 0x28: first_usable_lba가 NVMe namespace 범위 초과 */
+	/* [한국어] 여기서부터는 "헤더가 손상되지 않았다"가 아니라 "헤더가 이
+	 * 디스크와 앞뒤가 맞는가"를 본다. usable 범위는 나중에 각 파티션의
+	 * starting/ending_lba를 검증하는 기준이 되므로, 그 기준부터 디스크
+	 * 범위 안에 있어야 한다. */
+	lastlba = last_lba(state->disk); /* [한국어] 실제 디스크의 마지막 LBA. 헤더가 주장하는 값이 아니라 장치가 보고한 용량에서 계산한 값이라, 위조할 수 없는 유일한 기준점이다. */
+	if (le64_to_cpu((*gpt)->first_usable_lba) > lastlba) { /* [한국어] 오프셋 0x28 */
 		pr_debug("GPT: first_usable_lba incorrect: %lld > %lld\n",
 			 (unsigned long long)le64_to_cpu((*gpt)->first_usable_lba),
 			 (unsigned long long)lastlba);
 		goto fail; /* [한국어] first_usable_lba가 디스크 끝을 넘는다는 것은 헤더 값 자체가 조작/손상되었다는 뜻 - 실패 처리 */
 	}
-	if (le64_to_cpu((*gpt)->last_usable_lba) > lastlba) { /* 오프셋 0x30: last_usable_lba가 NVMe namespace 범위 초과 */
+	if (le64_to_cpu((*gpt)->last_usable_lba) > lastlba) { /* [한국어] 오프셋 0x30 */
+		/* [한국어] 디스크를 줄여서 복제했을 때 전형적으로 걸리는 조건이다. */
 		pr_debug("GPT: last_usable_lba incorrect: %lld > %lld\n",
 			 (unsigned long long)le64_to_cpu((*gpt)->last_usable_lba),
 			 (unsigned long long)lastlba);
 		goto fail; /* [한국어] last_usable_lba도 동일하게 디스크 끝을 넘으면 손상된 헤더로 간주해 실패 처리 */
 	}
-	if (le64_to_cpu((*gpt)->last_usable_lba) < le64_to_cpu((*gpt)->first_usable_lba)) { /* usable LBA 범위 역전, NVMe namespace 레이아웃 오류 */
+	if (le64_to_cpu((*gpt)->last_usable_lba) < le64_to_cpu((*gpt)->first_usable_lba)) { /* [한국어] 두 값이 각각 디스크 안에 있어도 순서가 뒤집혀 있으면 usable 구간의 길이가 음수가 된다. 개별 상한 검사만으로는 잡히지 않는 조합이라 따로 본다. */
+		/* [한국어] 출력 형식의 ">"는 실제 조건("<")과 반대인데, 이는 위
+		 * 메시지에서 복사해 온 문구 그대로다. 진단 문자열이라 동작에는
+		 * 영향이 없다. */
 		pr_debug("GPT: last_usable_lba incorrect: %lld > %lld\n",
 			 (unsigned long long)le64_to_cpu((*gpt)->last_usable_lba),
 			 (unsigned long long)le64_to_cpu((*gpt)->first_usable_lba));
@@ -726,41 +774,46 @@ static int is_gpt_valid(struct parsed_partitions *state, u64 lba,
 	}
 	/* Check that sizeof_partition_entry has the correct value */
 	/* gpt_header.sizeof_partition_entry: 커널의 sizeof(gpt_entry)와 일치해야 함 */
-	if (le32_to_cpu((*gpt)->sizeof_partition_entry) != sizeof(gpt_entry)) { /* 오프셋 0x4C: PTE 크기가 커널 gpt_entry(128바이트)와 불일치 */
+	if (le32_to_cpu((*gpt)->sizeof_partition_entry) != sizeof(gpt_entry)) { /* [한국어] 오프셋 0x54. 사양은 128의 배수면 무엇이든 허용하지만, 이 파서는 배열을 gpt_entry[]로 그냥 인덱싱하므로 커널 구조체 크기(128바이트)와 정확히 같을 때만 진행한다. 다르면 두 번째 엔트리부터 전부 어긋난 위치를 읽게 된다. */
 		pr_debug("GUID Partition Entry Size check failed.\n");
 		goto fail; /* [한국어] 디스크의 PTE 엔트리 크기가 커널이 이해하는 gpt_entry 레이아웃과 다르면 이후 배열 인덱싱이 전부 어긋나므로 실패 처리 */
 	}
 
 	/* Sanity check partition table size */
-	/* gpt_header.num_partition_entries * sizeof_partition_entry: kmalloc 최대 크기 초과 금지 */
-	pt_size = (u64)le32_to_cpu((*gpt)->num_partition_entries) * /* 오프셋 0x50/0x54: PTE 배열 총 크기 = num_partition_entries * sizeof_partition_entry */
-		le32_to_cpu((*gpt)->sizeof_partition_entry);
-	if (pt_size > KMALLOC_MAX_SIZE) { /* PTE 배열이 커널 슬랩 한계 초과, 스캔 중단 (악의적/손상된 GPT) */
+	/* [한국어] 두 32비트 값의 곱을 (u64)로 승격해 계산한다. 32비트 안에서
+	 * 곱하면 오버플로된 작은 값이 나와 아래 상한 검사를 그냥 통과해 버린다. */
+	pt_size = (u64)le32_to_cpu((*gpt)->num_partition_entries) * /* [한국어] 오프셋 0x50: 엔트리 개수 */
+		le32_to_cpu((*gpt)->sizeof_partition_entry); /* [한국어] 오프셋 0x54: 엔트리 크기(바로 위에서 128로 확정됨) */
+	if (pt_size > KMALLOC_MAX_SIZE) { /* [한국어] 여기가 없으면 num_partition_entries에 0xFFFFFFFF를 적은 디스크 하나로 수백 GB 규모의 kmalloc을 유발할 수 있다. 실패할 할당을 시도조차 하지 않고 컷하는 것이 요점이다. */
+		/* [한국어] pt_size는 u64라 %llu 앞에 캐스팅이 필요하고,
+		 * KMALLOC_MAX_SIZE는 (1UL << ...) 형태의 unsigned long이라 %lu로 받는다. */
 		pr_debug("GUID Partition Table is too large: %llu > %lu bytes\n",
 			 (unsigned long long)pt_size, KMALLOC_MAX_SIZE);
 		goto fail; /* [한국어] kmalloc이 애초에 실패할 것이 뻔한 크기이므로 시도조차 하지 않고 실패 처리 - 손상되거나 악의적으로 조작된 num_partition_entries로부터 커널을 보호 */
 	}
 
-	if (!(*ptes = alloc_read_gpt_entries(state, *gpt))) /* PTE 배열 읽기 실패: NVMe LBA 연속 읽기 또는 메모리 할당 실패 */
+	if (!(*ptes = alloc_read_gpt_entries(state, *gpt))) /* [한국어] 헤더 검증이 모두 끝난 뒤에야 PTE 배열을 읽는다. 순서가 중요한 이유는 배열의 위치·개수·크기를 모두 헤더 필드에서 가져오기 때문이다. */
 		goto fail; /* [한국어] 이 시점에서 *gpt는 이미 CRC까지 검증된 상태지만, PTE 배열을 확보하지 못하면 헤더만으로는 쓸모가 없으므로 헤더까지 함께 실패 처리 */
 
 	/* Check the GUID Partition Entry Array CRC */
 	/* gpt_header.partition_entry_array_crc32: PTE 배열 전체 CRC32 검증 */
-	crc = efi_crc32((const unsigned char *) (*ptes), pt_size); /* PTE 배열 전체 CRC32 계산, NVMe로부터 읽은 모든 파티션 엔트리 대상 */
+	crc = efi_crc32((const unsigned char *) (*ptes), pt_size); /* [한국어] 헤더 CRC와 달리 배열은 통째로(사용 중이든 빈 엔트리든 전부) 계산 대상이다. 그래서 파티션 하나만 바꿔도 이 값이 달라진다. */
 
-	if (crc != le32_to_cpu((*gpt)->partition_entry_array_crc32)) { /* 오프셋 0x58: PTE CRC32 불일치, NVMe media 손상 가능 */
+	if (crc != le32_to_cpu((*gpt)->partition_entry_array_crc32)) { /* [한국어] 오프셋 0x58. 헤더와 배열은 서로 다른 LBA에 있으므로, 둘 중 한쪽만 기록된 채 전원이 끊긴 상황을 이 교차 CRC가 잡아낸다. */
 		pr_debug("GUID Partition Entry Array CRC check failed.\n");
 		goto fail_ptes; /* [한국어] 헤더는 유효했지만 PTE 배열 자체가 손상된 경우 - fail_ptes로 점프해 *ptes부터 해제한 뒤 아래로 흘러 *gpt도 함께 해제(폴스루) */
 	}
 
 	/* We're done, all's well */
-	return 1; /* [한국어] 10단계 검증을 모두 통과 - *gpt와 *ptes가 호출자(find_valid_gpt)에게 유효한 상태로 전달된다 */
+	/* [한국어] 여기까지 왔다면 시그니처, 헤더 크기, 헤더 CRC, 자기 위치,
+	 * usable 범위, 엔트리 크기, 배열 크기, 배열 CRC가 모두 통과한 것이다. */
+	return 1; /* [한국어] *gpt와 *ptes의 해제 책임이 호출자 find_valid_gpt()로 넘어간다. */
 
  fail_ptes: /* [한국어] PTE 배열까지는 할당됐으나 그 내용이 무효로 판명된 경우의 진입점 */
-	kfree(*ptes); /* 손상된 PTE 배열 해제 */
+	kfree(*ptes); /* [한국어] 배열만 무효인 경우의 진입점. 아래 fail로 그대로 흘러내려(폴스루) 헤더까지 함께 해제한다 - 헤더만 남겨 봐야 파티션을 읽을 수 없기 때문이다. */
 	*ptes = NULL; /* [한국어] 해제된 포인터를 NULL로 명시해 use-after-free/이중 해제 방지 */
  fail: /* [한국어] 헤더 자체가 무효였거나(위 단계들) PTE까지 해제된 뒤 도달하는 공통 실패 진입점(fail_ptes에서 폴스루) */
-	kfree(*gpt); /* 손상된 헤더 해제, GPT 스캔 실패 */
+	kfree(*gpt); /* [한국어] 이 함수는 실패 시 자신이 할당한 것을 전부 되돌린다. 덕분에 find_valid_gpt()는 primary가 실패하면 별도 정리 없이 곧바로 alternate 시도로 넘어갈 수 있다. */
 	*gpt = NULL; /* [한국어] 해제된 포인터를 NULL로 명시 - 호출자가 실수로 역참조/재해제하지 않도록 보장 */
 	return 0; /* [한국어] 이 lba의 헤더는 무효함을 호출자(find_valid_gpt)에 알림 - 다른 lba(alternate 등)로 재시도할지는 호출자가 결정 */
 }
@@ -773,7 +826,7 @@ static int is_gpt_valid(struct parsed_partitions *state, u64 lba,
  * @return: 1(유효한 파티션 - 등록 대상), 0(무효 - 미사용 엔트리이거나 LBA
  *          범위가 디스크를 벗어남, efi_partition()이 이 엔트리를 건너뜀).
  *
- * NVMe SSD의 usable LBA 범위를 벗어나는 파티션은 무시한다. 또한 unused
+ * 헤더가 정한 usable LBA 범위를 벗어나는 파티션은 무시한다. 또한 unused
  * partition_type_guid(NULL_GUID) 파티션은 커널에 등록하지 않는다.
  * 실행 컨텍스트: efi_partition()의 PTE 순회 루프 내부, 매 엔트리마다 호출.
  * 에러 경로: 없음(단순 판정 함수). 0을 반환받은 호출자가 continue로
@@ -793,12 +846,14 @@ static inline int
 is_pte_valid(const gpt_entry *pte, const u64 lastlba)
 {
 	/* gpt_entry.partition_type_guid: NULL_GUID이면 미사용 엔트리 */
-	/* gpt_entry.starting_lba/ending_lba: NVMe namespace 경계 초과 검사 */
-	if ((!efi_guidcmp(pte->partition_type_guid, NULL_GUID)) || /* 오프셋 0x00: partition_type_guid가 00000000-0000-0000-0000-000000000000이면 미사용 엔트리 */
-	    le64_to_cpu(pte->starting_lba) > lastlba         || /* 오프셋 0x20: starting_lba가 NVMe namespace 끝 초과 */
-	    le64_to_cpu(pte->ending_lba)   > lastlba) /* 오프셋 0x28: ending_lba가 NVMe namespace 끝 초과 */
-		return 0;
-	return 1;
+	/* [한국어] 세 조건을 OR로 묶어 "쓰면 안 되는 엔트리"를 한 번에 거른다.
+	 * 배열은 항상 num_partition_entries개가 통째로 존재하고 빈 슬롯이
+	 * 중간에 섞일 수 있으므로, 개수가 아니라 엔트리별 판정이 필요하다. */
+	if ((!efi_guidcmp(pte->partition_type_guid, NULL_GUID)) || /* [한국어] 오프셋 0x00. 타입 GUID가 전부 0이면 빈 슬롯이라는 사양상의 약속이다. efi_guidcmp()는 같을 때 0을 돌려주므로 여기서는 부정(!)이 곧 "빈 슬롯"을 뜻한다. */
+	    le64_to_cpu(pte->starting_lba) > lastlba         || /* [한국어] 오프셋 0x20. 이 상한이 없으면 조작된 엔트리가 디스크 밖을 가리키는 파티션 디바이스를 만들어, 이후 그 파티션에 대한 I/O가 전부 범위 밖 요청이 된다. */
+	    le64_to_cpu(pte->ending_lba)   > lastlba) /* [한국어] 오프셋 0x28. 끝 LBA도 같은 이유로 검사한다. 다만 start > end 역전은 여기서 걸러지지 않고, 호출자 efi_partition()의 size 계산에서 처리된다. */
+		return 0; /* [한국어] 빈 슬롯이거나 범위를 벗어남 - 호출자는 이 엔트리를 등록하지 않고 건너뛴다. */
+	return 1; /* [한국어] 사용 중이며 디스크 범위 안 - put_partition() 대상. */
 }
 
 /**
@@ -812,10 +867,13 @@ is_pte_valid(const gpt_entry *pte, const u64 lastlba)
  *          이나 출력 인자로 호출자에게 전달되지 않는다 - 즉 이 함수는 GPT
  *          스캔의 성공/실패를 좌우하지 않고 순수하게 진단 목적이다.
  *
- * NVMe SSD에 기록된 primary/alternate GPT 헤더의 my_lba, alternate_lba,
+ * 디스크에 이중으로 기록된 primary/alternate GPT 헤더의 my_lba, alternate_lba,
  * first/last_usable_lba, disk_guid, num_partition_entries, sizeof_partition_entry,
- * partition_entry_array_crc32가 일치하는지 확인한다. 불일치 시 경고를 출력하고
- * 사용자에게 GNU parted로 수정할 것을 권고한다.
+ * partition_entry_array_crc32가 서로 일치하는지 확인한다. 불일치 시 경고를
+ * 출력하고 사용자에게 GNU parted로 수정할 것을 권고한다. 각 헤더는 자기
+ * CRC로 자신의 무결성만 보증하므로, "둘 다 개별적으로는 멀쩡한데 내용이
+ * 서로 다른" 상태(디스크를 키운 뒤 한쪽만 갱신한 경우가 대표적)는 오직 이
+ * 교차 비교로만 드러난다.
  * 동작 원리: 두 헤더가 모두 유효(is_gpt_valid() 통과)하더라도 서로 다른
  * 디스크 이미지를 이어붙였거나 부분적으로만 갱신된 경우 내용이 어긋날 수
  * 있으므로, 이 함수가 8가지 필드를 하나씩 비교해 불일치 개수(error_found)를
@@ -844,85 +902,138 @@ compare_gpts(gpt_header *pgpt, gpt_header *agpt, u64 lastlba)
 	int error_found = 0; /* [한국어] 발견된 불일치 필드 개수 누적 - 0이면 마지막에 GNU Parted 권고 메시지를 생략 */
 	if (!pgpt || !agpt) /* [한국어] 둘 중 하나라도 확보되지 않았으면(단일 헤더만 유효했던 경우) 비교 자체가 불가능 */
 		return; /* [한국어] 비교 대상 부재로 조기 종료 - 이 경우도 에러가 아니라 정상 흐름(단일 GPT만 유효한 디스크) */
-	/* gpt_header.my_lba vs alternate_lba: primary의 my_lba는 alternate의 alternate_lba와 같아야 함 */
-	if (le64_to_cpu(pgpt->my_lba) != le64_to_cpu(agpt->alternate_lba)) { /* 오프셋 0x18/0x20: primary.my_lba == alternate.alternate_lba 확인 */
+	/* [한국어] 검사 1: 두 헤더의 상호 참조(정방향). primary가 "나는 여기
+	 * 있다"고 적은 my_lba와, alternate가 "상대 헤더는 저기 있다"고 적은
+	 * alternate_lba는 같은 값이어야 한다. 어긋나면 두 헤더는 애초에 서로를
+	 * 짝으로 알고 있지 않다는 뜻이다(다른 디스크에서 복사해 온 이미지 등). */
+	if (le64_to_cpu(pgpt->my_lba) != le64_to_cpu(agpt->alternate_lba)) {
 		pr_warn("GPT:Primary header LBA != Alt. header alternate_lba\n");
+		/* [한국어] u64는 64비트 아키텍처에서 unsigned long, 32비트에서는
+		 * unsigned long long으로 정의되어 %lld와 타입이 어긋난다. 그래서
+		 * 커널 코드는 이런 값 출력마다 (unsigned long long) 캐스팅을
+		 * 명시해 아키텍처별 포맷 경고를 없앤다. */
 		pr_warn("GPT:%lld != %lld\n",
 		       (unsigned long long)le64_to_cpu(pgpt->my_lba),
                        (unsigned long long)le64_to_cpu(agpt->alternate_lba));
-		error_found++;
+		error_found++; /* [한국어] 상호 참조(정방향) 불일치 1건 기록 */
 	}
-	if (le64_to_cpu(pgpt->alternate_lba) != le64_to_cpu(agpt->my_lba)) { /* 오프셋 0x20/0x18: primary.alternate_lba == alternate.my_lba 확인 */
+	/* [한국어] 검사 2: 같은 상호 참조를 반대 방향으로도 본다. 한쪽 방향만
+	 * 보면 "primary만 새로 쓰고 alternate는 옛것" 같은 반쪽 갱신을 놓친다. */
+	if (le64_to_cpu(pgpt->alternate_lba) != le64_to_cpu(agpt->my_lba)) {
 		pr_warn("GPT:Primary header alternate_lba != Alt. header my_lba\n");
+		/* [한국어] 어느 쪽이 옛 값인지 사람이 판단할 수 있도록 실제 두 값을
+		 * 함께 찍는다. 커널은 여기서 스스로 고치려 들지 않는다. */
 		pr_warn("GPT:%lld != %lld\n",
 		       (unsigned long long)le64_to_cpu(pgpt->alternate_lba),
                        (unsigned long long)le64_to_cpu(agpt->my_lba));
-		error_found++;
+		error_found++; /* [한국어] 상호 참조(역방향) 불일치 1건 기록 */
 	}
-	if (le64_to_cpu(pgpt->first_usable_lba) != /* 오프셋 0x28: NVMe usable 영역 시작 일치 */
+	/* [한국어] 검사 3: 파티션이 놓일 수 있는 영역의 시작점. 두 헤더가 서로
+	 * 다른 first_usable_lba를 주장하면, 어느 헤더를 믿느냐에 따라 PTE 배열
+	 * 영역과 파티션 영역의 경계가 달라져 메타데이터를 덮어쓸 수 있다. */
+	if (le64_to_cpu(pgpt->first_usable_lba) !=
             le64_to_cpu(agpt->first_usable_lba)) {
 		pr_warn("GPT:first_usable_lbas don't match.\n");
+		/* [한국어] 값 자체를 남겨야 어느 쪽이 백업 PTE 영역을 잘못 잡고
+		 * 있는지 추적할 수 있다. */
 		pr_warn("GPT:%lld != %lld\n",
 		       (unsigned long long)le64_to_cpu(pgpt->first_usable_lba),
                        (unsigned long long)le64_to_cpu(agpt->first_usable_lba));
-		error_found++;
+		error_found++; /* [한국어] usable 영역 시작 불일치 1건 기록 */
 	}
-	if (le64_to_cpu(pgpt->last_usable_lba) != /* 오프셋 0x30: NVMe usable 영역 끝 일치 */
+	/* [한국어] 검사 4: usable 영역의 끝. 디스크(또는 가상 디스크 이미지)를
+	 * 키운 뒤 alternate GPT만 새 끝으로 옮기고 primary를 갱신하지 않은
+	 * 상황에서 가장 흔하게 걸리는 항목이다. */
+	if (le64_to_cpu(pgpt->last_usable_lba) !=
             le64_to_cpu(agpt->last_usable_lba)) {
 		pr_warn("GPT:last_usable_lbas don't match.\n");
+		/* [한국어] 두 값의 차이가 곧 "인식하지 못하고 버려지는 뒤쪽 용량"의
+		 * 크기이므로 그대로 출력해 준다. */
 		pr_warn("GPT:%lld != %lld\n",
 		       (unsigned long long)le64_to_cpu(pgpt->last_usable_lba),
                        (unsigned long long)le64_to_cpu(agpt->last_usable_lba));
-		error_found++;
+		error_found++; /* [한국어] usable 영역 끝 불일치 1건 기록 */
 	}
-	/* gpt_header.disk_guid: primary와 alternate의 디스크 GUID 일치해야 함 */
-	if (efi_guidcmp(pgpt->disk_guid, agpt->disk_guid)) { /* 오프셋 0x38: 디스크 GUID 일치, NVMe namespace 식별자와 연결 (추정) */
+	/* [한국어] 검사 5: 디스크 GUID. 이 값이 다르면 두 헤더는 서로 다른
+	 * 디스크의 것이다. GUID는 정수가 아니라 바이트 배열이므로 le*_to_cpu를
+	 * 쓰지 않고 efi_guidcmp()(memcmp 계열)로 원시 바이트를 그대로 비교한다.
+	 * 값 자체는 128비트라 출력하지 않고 불일치 사실만 알린다. */
+	if (efi_guidcmp(pgpt->disk_guid, agpt->disk_guid)) {
 		pr_warn("GPT:disk_guids don't match.\n");
-		error_found++;
+		error_found++; /* [한국어] 디스크 GUID 불일치 1건 기록 */
 	}
-	if (le32_to_cpu(pgpt->num_partition_entries) != /* 오프셋 0x50: 파티션 개수 일치 */
+	/* [한국어] 검사 6: PTE 배열의 엔트리 개수. 두 배열의 길이가 다르면
+	 * partition_entry_array_crc32의 계산 범위 자체가 달라지므로, 백업으로
+	 * 폴백했을 때 인식되는 파티션 개수가 바뀔 수 있다. */
+	if (le32_to_cpu(pgpt->num_partition_entries) !=
             le32_to_cpu(agpt->num_partition_entries)) {
+		/* [한국어] 32비트 값이라 캐스팅 없이 %x로 바로 찍는다. 개수를 16진수로
+		 * 보이는 이유는 흔한 값 128이 0x80처럼 눈에 익은 형태로 드러나기
+		 * 때문이다. */
 		pr_warn("GPT:num_partition_entries don't match: "
 		       "0x%x != 0x%x\n",
 		       le32_to_cpu(pgpt->num_partition_entries),
 		       le32_to_cpu(agpt->num_partition_entries));
-		error_found++;
+		error_found++; /* [한국어] 엔트리 개수 불일치 1건 기록 */
 	}
-	if (le32_to_cpu(pgpt->sizeof_partition_entry) != /* 오프셋 0x54: PTE 크기 일치 */
+	/* [한국어] 검사 7: 엔트리 하나의 크기. is_gpt_valid()는 채택한 헤더의
+	 * 값만 sizeof(gpt_entry)와 대조하므로, 두 헤더가 서로 다른 크기를
+	 * 주장하는 상황은 여기서만 드러난다. */
+	if (le32_to_cpu(pgpt->sizeof_partition_entry) !=
             le32_to_cpu(agpt->sizeof_partition_entry)) {
+		/* [한국어] 문자열 리터럴을 두 줄로 쪼갠 것은 한 줄 80칸 제한을 지키기
+		 * 위한 것으로, C의 인접 문자열 연결로 하나의 포맷 문자열이 된다. */
 		pr_warn("GPT:sizeof_partition_entry values don't match: "
 		       "0x%x != 0x%x\n",
                        le32_to_cpu(pgpt->sizeof_partition_entry),
 		       le32_to_cpu(agpt->sizeof_partition_entry));
-		error_found++;
+		error_found++; /* [한국어] 엔트리 크기 불일치 1건 기록 */
 	}
-	if (le32_to_cpu(pgpt->partition_entry_array_crc32) != /* 오프셋 0x58: PTE CRC 일치, NVMe media 두 위치 데이터 비교 */
+	/* [한국어] 검사 8: PTE 배열의 CRC32. 앞의 개수/크기가 같은데 이 값이
+	 * 다르다면 두 배열의 내용 자체가 다르다는 뜻, 즉 파티션 구성이 한쪽에만
+	 * 반영되어 있다는 결정적 증거다. 여기서 CRC를 다시 계산하지는 않고
+	 * 헤더에 적힌 값끼리만 비교한다(각 배열의 실제 CRC 검증은 이미
+	 * is_gpt_valid()가 마쳤다). */
+	if (le32_to_cpu(pgpt->partition_entry_array_crc32) !=
             le32_to_cpu(agpt->partition_entry_array_crc32)) {
+		/* [한국어] 두 CRC 값을 그대로 보여 준다. 사용자는 이 값이 다르다는
+		 * 사실만으로 "백업 GPT가 오래된 구성을 담고 있다"고 판단할 수 있다. */
 		pr_warn("GPT:partition_entry_array_crc32 values don't match: "
 		       "0x%x != 0x%x\n",
                        le32_to_cpu(pgpt->partition_entry_array_crc32),
 		       le32_to_cpu(agpt->partition_entry_array_crc32));
-		error_found++;
+		error_found++; /* [한국어] PTE 배열 내용 불일치 1건 기록 */
 	}
-	/* gpt_header.alternate_lba: primary는 alternate가 마지막 LBA라고 가리켜야 함 */
-	if (le64_to_cpu(pgpt->alternate_lba) != lastlba) { /* primary의 alternate_lba는 NVMe 마지막 LBA를 가리켜야 함 */
+	/* [한국어] 검사 9: 두 헤더끼리가 아니라 실제 디스크 크기와 대조한다.
+	 * UEFI 사양상 백업 헤더는 반드시 마지막 LBA에 있어야 하므로, primary가
+	 * 가리키는 위치가 lastlba가 아니면 디스크가 커졌거나 잘렸다는 뜻이다. */
+	if (le64_to_cpu(pgpt->alternate_lba) != lastlba) {
 		pr_warn("GPT:Primary header thinks Alt. header is not at the end of the disk.\n");
+		/* [한국어] primary가 믿는 위치와 실제 디스크 끝을 나란히 출력한다. */
 		pr_warn("GPT:%lld != %lld\n",
 			(unsigned long long)le64_to_cpu(pgpt->alternate_lba),
 			(unsigned long long)lastlba);
-		error_found++;
+		error_found++; /* [한국어] primary가 가리키는 백업 위치와 디스크 끝 불일치 1건 기록 */
 	}
 
-	/* gpt_header.my_lba: alternate 헤더는 마지막 LBA에 위치해야 함 */
-	if (le64_to_cpu(agpt->my_lba) != lastlba) { /* alternate 헤더는 NVMe 마지막 LBA에 위치해야 함 */
+	/* [한국어] 검사 10: 백업 헤더 자신이 주장하는 위치도 디스크 끝인지 본다.
+	 * 검사 9와 달리 이쪽은 agpt를 실제로 그 위치에서 읽어왔는지와 무관하게
+	 * (드라이버가 준 alternative_gpt_sector 힌트에서 읽었을 수도 있다)
+	 * 사양 위반 여부를 알려 준다. */
+	if (le64_to_cpu(agpt->my_lba) != lastlba) {
 		pr_warn("GPT:Alternate GPT header not at the end of the disk.\n");
+		/* [한국어] 백업 헤더가 자칭하는 위치와 실제 디스크 끝을 나란히 출력. */
 		pr_warn("GPT:%lld != %lld\n",
 			(unsigned long long)le64_to_cpu(agpt->my_lba),
 			(unsigned long long)lastlba);
-		error_found++;
+		error_found++; /* [한국어] 백업 헤더 위치가 디스크 끝이 아님 1건 기록 */
 	}
 
-	if (error_found) /* [한국어] 위 8가지 검사 중 하나라도 불일치가 있었다면(error_found > 0) 종합 안내 메시지 출력 */
+	/* [한국어] 개별 경고는 이미 다 찍었으므로 여기서는 조치 방법만 한 줄로
+	 * 안내한다. 커널이 스스로 헤더를 고쳐 쓰지 않는 이유는 파티션 스캔이
+	 * 읽기 전용 동작이어야 하기 때문이다 - 잘못 추측해 덮어쓰면 아직
+	 * 살아 있는 사본까지 잃는다. */
+	if (error_found)
 		pr_warn("GPT: Use GNU Parted to correct GPT errors.\n");
 	return; /* [한국어] void 함수의 명시적 종료 - 스캔 성공/실패 여부에는 영향 없음(진단 전용) */
 }
@@ -936,10 +1047,10 @@ compare_gpts(gpt_header *pgpt, gpt_header *agpt, u64 lastlba)
  * @return: 1(유효한 GPT를 찾음 - primary 또는 alternate 중 하나), 0(둘 다
  *          무효 - pMBR이 없거나 primary/alternate 모두 CRC/범위 검증 실패).
  *
- * check.c -> efi_partition() 내부에서 호출된다. (추정)
+ * 이 파일 안에서 efi_partition()만이 이 함수를 호출한다(static 함수).
  * 먼저 LBA 0의 protective MBR을 검사하고, primary GPT(LBA 1)와 alternate GPT
- * (마지막 LBA)를 읽어 유효한 쪽을 선택한다. NVMe SSD에서 파티션 테이블을 찾지
- * 못하면 이 디스크는 NVMe I/O 요청 시에도 블록 레이블 없이 전체 namespace로
+ * (마지막 LBA)를 읽어 유효한 쪽을 선택한다. 파티션 테이블을 찾지 못하면 이
+ * 디스크는 파티션 디바이스 없이 디스크 전체 노드 하나로만
  * 다뤄지게 된다.
  * 동작 단계(GPT 이중화 복구의 핵심 로직): (1) force_gpt가 꺼져 있으면 LBA 0의
  * protective/hybrid MBR을 읽어 is_pmbr_valid()로 검사, 무효면 즉시 fail
@@ -986,26 +1097,28 @@ static int find_valid_gpt(struct parsed_partitions *state, gpt_header **gpt,
 	legacy_mbr *legacymbr; /* [한국어] LBA 0을 읽어들일 protective/hybrid MBR 버퍼 - force_gpt가 꺼져 있을 때만 할당/사용 */
 	struct gendisk *disk = state->disk; /* [한국어] state가 가리키는 gendisk를 지역 변수로 캐시 - 이후 disk->fops, get_capacity(), last_lba() 등에서 반복 참조 */
 	const struct block_device_operations *fops = disk->fops; /* [한국어] 드라이버별 블록 디바이스 연산 테이블 - alternative_gpt_sector 콜백이 있는지 확인하는 데 사용 */
-	sector_t total_sectors = get_capacity(state->disk); /* NVMe namespace 총 512바이트 섹터 수 (queue 논리 블록 크기와 무관) */
-	u64 lastlba; /* NVMe 논리 블록 기준 마지막 LBA */
+	sector_t total_sectors = get_capacity(state->disk); /* [한국어] 디스크 용량을 512바이트 커널 섹터 개수로 표현한 값. is_pmbr_valid()에 넘기는데, MBR의 size_in_lba가 512바이트 단위이기 때문이다 - 논리 블록 단위인 lastlba와 혼동하면 안 된다. */
+	u64 lastlba; /* [한국어] 논리 블록 단위의 마지막 LBA. 백업 GPT의 위치이자 is_gpt_valid()에 넘길 범위 상한이다. */
 
 	if (!ptes) /* [한국어] 호출자 프로그래밍 오류 방어: 출력 인자가 없으면 아무 것도 채울 수 없으므로 즉시 실패 */
 		return 0; /* [한국어] 아직 아무 자원도 할당하지 않았으므로 정리 없이 바로 반환 가능 */
 
-	lastlba = last_lba(state->disk); /* alternate GPT 위치 및 범위 검증 기준 */
-	/* force_gpt 미설정 시 LBA 0의 protective MBR부터 검사 */
-        if (!force_gpt) { /* 기본 동작: LBA 0 pMBR부터 확인, NVMe 보호 MBR 없으면 GPT 스캔 중단 */
+	lastlba = last_lba(state->disk); /* [한국어] 사양상 백업 GPT가 놓이는 자리. 아래에서 alternate 탐색 위치이자 compare_gpts()의 대조 기준으로 쓰인다. */
+	/* [한국어] 기본 경로에서는 pMBR 관문을 먼저 통과해야 한다. GPT가 아닌
+	 * 디스크에서 LBA 1을 GPT 헤더로 해석하려는 헛수고와, 그로 인한 오탐을
+	 * 막기 위해서다. force_gpt가 켜져 있으면 이 관문을 통째로 건너뛴다. */
+        if (!force_gpt) {
 		/* This will be added to the EFI Spec. per Intel after v1.02. */
-		legacymbr = kzalloc_obj(*legacymbr); /* legacy_mbr 구조체 크기만큼 0으로 할당 (GPT protective MBR용) */
-		if (!legacymbr) /* LBA 0 읽기 버퍼 할당 실패, NVMe 파티션 스캔 전체 중단 */
+		legacymbr = kzalloc_obj(*legacymbr); /* [한국어] kzalloc(0으로 초기화)을 쓰는 이유: read_lba()가 실패해도 버퍼에 이전 힙 내용이 남지 않아, is_pmbr_valid()의 시그니처 검사가 확실히 실패하도록 만들기 위해서다. */
+		if (!legacymbr) /* [한국어] 할당 실패 */
 			goto fail; /* [한국어] 메모리 부족으로 pMBR 검사조차 시작할 수 없음 - pgpt/agpt 등은 아직 NULL이므로 fail 라벨에서 kfree(NULL)로 안전하게 정리됨 */
 
-		/* LBA 0: legacy/protective MBR 읽기 (NVMe 첫 512바이트) */
-		read_lba(state, 0, (u8 *)legacymbr, sizeof(*legacymbr)); /* LBA 0: NVMe Read로 512바이트 pMBR/legacy MBR 읽기, 실패 반환값 무시(이후 is_pmbr_valid에서 signature로 거름) */
-		good_pmbr = is_pmbr_valid(legacymbr, total_sectors); /* pMBR 시그니처/보호 파티션 검증, hybrid MBR 반환 가능 */
-		kfree(legacymbr); /* MBR 버퍼 해제 */
+		/* [한국어] LBA 0의 첫 512바이트를 읽어 legacy/protective MBR로 해석한다. */
+		read_lba(state, 0, (u8 *)legacymbr, sizeof(*legacymbr)); /* [한국어] 반환값을 일부러 무시한다. 위에서 0으로 초기화해 두었으므로, 읽기가 실패하면 시그니처가 0이 되어 어차피 is_pmbr_valid()에서 걸러진다. */
+		good_pmbr = is_pmbr_valid(legacymbr, total_sectors); /* [한국어] 0 / PROTECTIVE / HYBRID 중 하나를 받는다. 아래에서는 0인지 여부만 보고, 종류는 pr_debug 문구를 고르는 데만 쓴다. */
+		kfree(legacymbr); /* [한국어] 판정이 끝났으므로 즉시 반납한다. 이후 경로가 길어 여기서 놓치면 실패 경로마다 해제 코드를 중복해야 한다. */
 
-		if (!good_pmbr) /* pMBR invalid 시 GPT 스캔 중단, msdos_partition()이 legacy MBR 처리 */
+		if (!good_pmbr) /* [한국어] pMBR이 없으면 GPT 디스크가 아니다. 여기서 실패를 돌려주면 core.c의 프로버 목록이 다음 후보(msdos 등)로 넘어가, 레거시 MBR로 다시 해석하게 된다. */
 			goto fail; /* [한국어] GPT의 필수 전제 조건(유효한 protective/hybrid MBR)이 없으므로 GPT일 리가 없다고 판정 - primary/alternate GPT는 시도조차 하지 않음 */
 
 		pr_debug("Device has a %s MBR\n",
@@ -1013,35 +1126,45 @@ static int find_valid_gpt(struct parsed_partitions *state, gpt_header **gpt,
 						"protective" : "hybrid");
 	}
 
-	/* LBA 1: primary GPT 헤더/엔트리 읽기 및 검증 */
-	good_pgpt = is_gpt_valid(state, GPT_PRIMARY_PARTITION_TABLE_LBA, /* LBA 1: primary GPT 헤더+PTE 읽기 및 검증, NVMe Read 1회 + PTE 연속 읽기 */
+	/* [한국어] 1순위: LBA 1의 primary GPT. 성공하면 pgpt/pptes가 채워진다. */
+	good_pgpt = is_gpt_valid(state, GPT_PRIMARY_PARTITION_TABLE_LBA,
 				 &pgpt, &pptes);
-	/* primary가 유효하면 primary가 가리키는 alternate LBA에서 alternate GPT 검증 */
-        if (good_pgpt) /* primary 유효할 때만 alternate 자동 검증, fallback 최소화 */
-		good_agpt = is_gpt_valid(state, /* primary 헤더의 alternate_lba 필드로 alternate GPT 읽기 (보통 NVMe 마지막 LBA) */
+	/* [한국어] primary가 유효할 때만 백업도 읽어 본다. 이때 위치는 lastlba가
+	 * 아니라 primary가 스스로 적어 둔 alternate_lba를 따르는데, 두 값이
+	 * 어긋난 상황(디스크 크기 변경 등)은 아래 compare_gpts()가 경고로 알린다. */
+        if (good_pgpt)
+		good_agpt = is_gpt_valid(state, /* [한국어] 백업 헤더는 여기서 검증만 하고, 실제 파티션 정보는 primary 쪽을 쓴다. */
 					 le64_to_cpu(pgpt->alternate_lba),
 					 &agpt, &aptes);
-	/* primary 없고 force_gpt 시 마지막 LBA에서 alternate GPT 직접 검증 */
-        if (!good_agpt && force_gpt) /* primary 손상 + force_gpt 시 마지막 LBA에서 alternate 직접 탐색 */
-                good_agpt = is_gpt_valid(state, lastlba, &agpt, &aptes); /* NVMe namespace 마지막 LBA에서 alternate GPT 읽기 */
+	/* [한국어] 2순위: primary가 깨졌을 때의 폴백. 사양이 정한 자리(마지막
+	 * LBA)에서 백업 헤더를 직접 찾는다. force_gpt 조건이 붙어 있는 이유는,
+	 * 이 지점에 오는 경우 pMBR 검사도 이미 건너뛴 상태여서 GPT가 아닌
+	 * 디스크의 마지막 섹터를 헤더로 오인할 위험이 있기 때문이다. */
+        if (!good_agpt && force_gpt)
+                good_agpt = is_gpt_valid(state, lastlba, &agpt, &aptes);
 
-	/* block_device_operations.alternative_gpt_sector가 제공하면 사용 (일부 NVMe/SCSI 장치) */
-	if (!good_agpt && force_gpt && fops->alternative_gpt_sector) { /* 일부 NVMe/SCSI 드라이버가 alternative_gpt_sector 콜백 제공 (추정) */
-		sector_t agpt_sector;
-		int err;
+	/* [한국어] 3순위: 드라이버가 알려 주는 위치. 장치가 보고하는 용량과
+	 * 실제 백업 GPT 위치가 어긋나는 경우(호스트가 보는 크기와 다른 크기로
+	 * 파티셔닝된 디스크 등) 드라이버가 콜백으로 올바른 섹터를 알려 줄 수 있다. */
+	if (!good_agpt && force_gpt && fops->alternative_gpt_sector) {
+		sector_t agpt_sector; /* [한국어] 드라이버가 채워 줄 백업 GPT 섹터 번호 */
+		int err; /* [한국어] 콜백 성공 여부(0이면 agpt_sector가 유효) */
 
-		err = fops->alternative_gpt_sector(disk, &agpt_sector); /* 드라이버별 alternate GPT 섹터 힌트 획득 */
-		if (!err) /* 힌트 획득 성공 시에만 alternate GPT 재검증 */
-			good_agpt = is_gpt_valid(state, agpt_sector, /* alternative_gpt_sector 힌트 위치에서 NVMe Read로 GPT 검증 */
+		err = fops->alternative_gpt_sector(disk, &agpt_sector); /* [한국어] 드라이버별 힌트 조회. 콜백은 선택 사항이라 위에서 존재 여부를 먼저 확인했다. */
+		/* [한국어] 힌트를 얻은 경우에만 시도한다. 실패했다면 agpt_sector는
+		 * 초기화되지 않은 스택 값이므로 절대 사용해서는 안 된다. 힌트
+		 * 위치라 해도 검증을 건너뛰지는 않는다. */
+		if (!err)
+			good_agpt = is_gpt_valid(state, agpt_sector,
 						 &agpt, &aptes);
 	}
 
         /* The obviously unsuccessful case */
-        if (!good_pgpt && !good_agpt) /* primary/alternate 모두 invalid: NVMe GPT 메타데이터 손상, 스캔 실패 */
+        if (!good_pgpt && !good_agpt) /* [한국어] 이중화의 두 사본이 모두 무너진 경우 */
                 goto fail; /* [한국어] 위에서 시도한 모든 경로(primary, primary가 가리키는 alternate, force_gpt의 마지막 LBA, 드라이버 힌트)가 전부 실패 - 더 이상 시도할 위치가 없으므로 최종 포기 */
 
 	/* primary/alternate GPT 헤더 상호 비교 */
-        compare_gpts(pgpt, agpt, lastlba); /* primary/alternate 헤더 상호 검증, 불일치 시 경고 (NVMe media 데이터 일관성 문제) */
+        compare_gpts(pgpt, agpt, lastlba); /* [한국어] 진단 전용 호출. 반환값이 없고 스캔 결과에도 영향을 주지 않으므로, 여기서 어떤 경고가 나와도 아래 채택 로직은 그대로 진행된다. */
 
         /* The good cases */
         if (good_pgpt) { /* primary GPT 우선 사용 */
@@ -1049,7 +1172,7 @@ static int find_valid_gpt(struct parsed_partitions *state, gpt_header **gpt,
                 *ptes = pptes; /* primary PTE 배열 결과 반환 */
                 kfree(agpt); /* alternate GPT 헤더 메모리 정리 */
                 kfree(aptes); /* alternate PTE 배열 메모리 정리 */
-		if (!good_agpt) /* alternate 손상 경고, NVMe media 백업 헤더 손상 가능 */
+		if (!good_agpt) /* [한국어] primary만으로도 동작에는 지장이 없지만, 백업이 깨진 상태를 방치하면 다음 사고 때 복구 수단이 없으므로 사용자에게 알린다. */
                         pr_warn("Alternate GPT is invalid, using primary GPT.\n");
                 return 1; /* [한국어] primary가 유효하므로 이를 채택해 성공 반환 - alternate 손상 여부와 무관하게 primary만으로 충분 (단, 위 pr_warn으로 사용자에게는 알림) */
         }
@@ -1058,6 +1181,8 @@ static int find_valid_gpt(struct parsed_partitions *state, gpt_header **gpt,
                 *ptes = aptes; /* alternate PTE 배열 결과 반환 */
                 kfree(pgpt); /* primary GPT 헤더 메모리 정리 */
                 kfree(pptes); /* primary PTE 배열 메모리 정리 */
+		/* [한국어] 여기는 조용히 넘어가지 않고 항상 경고한다. 백업으로
+		 * 동작 중이라는 사실은 사용자가 반드시 알아야 할 상태이기 때문이다. */
 		pr_warn("Primary GPT is invalid, using alternate GPT.\n");
                 return 1; /* [한국어] GPT 이중화 복구의 핵심 순간: primary가 무효였지만 alternate(backup)가 유효하므로 이를 채택해 성공 반환 - 이것이 GPT가 MBR 대비 갖는 핵심 내결함성(fault tolerance) */
         }
@@ -1083,8 +1208,8 @@ static int find_valid_gpt(struct parsed_partitions *state, gpt_header **gpt,
  *       널 종료용), efi_partition()에서는 state->parts[i+1].info.volname을 전달한다.
  * @return: 없음(void). 결과는 @out 버퍼에 직접 기록된다.
  *
- * GPT 파티션 이름(partition_name)은 UTF-16LE로 저장되어 있다. NVMe SSD는 이
- * 이름과 무관하게 I/O를 처리하지만, 커널은 이를 볼륨 레이블로 노출한다.
+ * GPT 파티션 이름(partition_name)은 UTF-16LE 36코드 유닛으로 저장된다.
+ * 커널은 이를 파티션의 볼륨 레이블(/sys/.../partition 관련 속성)로 노출한다.
  * "나이브(naive)"하다는 것은 정식 유니코드 정규화나 다국어 변환 없이, 각
  * UTF-16 코드 유닛의 하위 7비트만 취해 ASCII 문자로 취급한다는 뜻이다 -
  * ASCII 범위를 벗어나는 문자(한글, 한자 등)는 원래 값과 무관한 엉뚱한
@@ -1139,13 +1264,14 @@ static void utf16_le_to_7bit(const __le16 *in, unsigned int size, u8 *out)
  *          실패 시에도 0을 반환) - 오래된 문서 주석이 구현 변경을 따라가지
  *          못한 사례로 보인다(추정).
  *
- * check.c에서 파티션 테이블 탐색기로 호출된다. (msdos_partition()이 LBA 0의
- * legacy MBR을 먼저 처리한 뒤, 이 함수가 protective MBR + GPT를 처리한다.)
- * find_valid_gpt()로 헤더와 PTE를 얻은 뒤, 각 파티션의 starting_lba와
- * ending_lba를 이용해 put_partition()으로 blk_mq가 인식할 수 있는 파티션
- * 범위를 등록한다. 이후 NVMe I/O는 submit_bio -> blk_mq_submit_bio ->
- * blk_mq_get_request -> nvme_queue_rq -> nvme_submit_cmd(doorbell) 경로를
- * 거쳐 각 파티션의 SLBA에 맞는 SQ/CQ 명령으로 변환된다.
+ * core.c의 check_partition()이 check_part[] 순서대로 프로버를 호출하다가
+ * 이 함수에 닿는다. 배열에서 이 함수는 msdos_partition()보다 "앞"에 있는데
+ * (core.c의 "this must come before msdos" 주석 참조), GPT 디스크가 호환성을
+ * 위해 보호 MBR도 함께 갖고 있어서 msdos가 먼저 매칭되면 GPT를 통째로
+ * 놓치기 때문이다. find_valid_gpt()로 헤더와 PTE를 얻은 뒤, 각 파티션의
+ * starting_lba/ending_lba를 커널 섹터 단위로 환산해 put_partition()으로
+ * state->parts[]에 적재한다. 실제 block_device 생성과 /dev 노드 노출은
+ * 이 함수가 1을 반환한 뒤 core.c의 blk_add_partitions()가 수행한다.
  * Returns: -1(읽기 실패), 0(해당 없음), 1(성공).
  * 동작 단계: (1) find_valid_gpt()로 유효한 GPT 헤더+PTE 확보, 실패 시
  * 자원 정리 후 0 반환 (2) num_partition_entries(및 state->limit-1) 만큼
@@ -1187,65 +1313,93 @@ int efi_partition(struct parsed_partitions *state)
 	gpt_header *gpt = NULL; /* find_valid_gpt에서 할당된 primary/alternate 헤더 */
 	gpt_entry *ptes = NULL; /* find_valid_gpt에서 할당된 PTE 배열 */
 	u32 i; /* PTE 배열 인덱스 */
-	/* 커널 섹터(512B) 기준으로 변환할 때 사용하는 계수 (NVMe 4K 시 8) */
-	unsigned ssz = queue_logical_block_size(state->disk->queue) / 512; /* NVMe 논리 블록당 512바이트 섹터 수: 4K 포맷 시 8, put_partition에 커널 섹터 단위로 변환 */
+	/* [한국어] 논리 블록 -> 커널 섹터 환산 계수. GPT의 LBA는 논리 블록
+	 * 단위인데 put_partition()은 512바이트 섹터 단위를 받으므로, 아래에서
+	 * start/size에 이 값을 곱해 넘긴다. 512바이트 디스크면 1이라 무변환. */
+	unsigned ssz = queue_logical_block_size(state->disk->queue) / 512; /* [한국어] 4Kn 디스크면 8이 된다. 이 곱셈을 빠뜨리면 파티션 시작 위치가 실제의 1/8 지점으로 잡혀 엉뚱한 영역이 노출된다. */
 
 	/* find_valid_gpt()가 실패하면 GPT 파티션이 아님 (msdos_partition()이 처리할 수도 있음) */
-	if (!find_valid_gpt(state, &gpt, &ptes) || !gpt || !ptes) { /* GPT 메타데이터 읽기/검증 실패, NVMe namespace 전체로 사용하거나 msdos_partition fallback */
-		kfree(gpt); /* 실패 시 GPT 헤더 메모리 정리 */
-		kfree(ptes); /* 실패 시 PTE 메모리 정리, GPT 파티션 없음 반환(0) */
+	if (!find_valid_gpt(state, &gpt, &ptes) || !gpt || !ptes) { /* [한국어] 반환값 외에 두 포인터도 함께 확인하는 이중 방어. find_valid_gpt()는 성공 시 반드시 둘 다 채우지만, 여기서 한 번 더 보고 들어가야 아래 루프가 NULL 역참조 걱정 없이 돌 수 있다. */
+		kfree(gpt); /* [한국어] 실패 경로에서는 이미 NULL이지만, kfree(NULL)이 안전하므로 조건 없이 호출해 코드를 단순화한다. */
+		kfree(ptes); /* [한국어] 위와 동일 */
 		return 0; /* [한국어] "이 디스크는 GPT가 아니다"라는 정상 판정 - check.c가 msdos_partition() 등 다른 포맷 프로버로 계속 진행 */
 	}
 
 	pr_debug("GUID Partition Table is valid!  Yea!\n");
 
 	/* gpt_header.num_partition_entries만큼 파티션 엔트리 순회 */
-	for (i = 0; i < le32_to_cpu(gpt->num_partition_entries) && i < state->limit-1; i++) { /* num_partition_entries(보통 128)만큼 순회, state->limit은 커널 파티션 개수 한계; GPT는 MBR extended partition chain이 없어 재귀적 NVMe Read가 불필요 */
-		struct partition_meta_info *info; /* 파티션 메타정보 저장 포인터 */
-		unsigned label_max; /* 볼륨 이름 최대 길이 */
-		/* gpt_entry.starting_lba/ending_lba: NVMe Read/Write의 SLBA 범위 */
-		u64 start = le64_to_cpu(ptes[i].starting_lba); /* 오프셋 0x20: 파티션 시작 LBA, NVMe Read/Write SLBA 계산 기준 */
-		u64 size = le64_to_cpu(ptes[i].ending_lba) - /* 오프셋 0x28: 파티션 크기(LBA 개수), ending_lba 포함이므로 +1 */
-			   le64_to_cpu(ptes[i].starting_lba) + 1ULL;
+	/* [한국어] 배열 인덱스 i가 그대로 파티션 번호 i+1이 된다. 종료 조건이
+	 * 두 개인데, 앞은 헤더가 자칭하는 엔트리 개수이고 뒤의 state->limit는
+	 * 커널이 이 디스크에 만들 수 있는 파티션 수 상한이다. 후자가 없으면
+	 * 큰 num_partition_entries를 적은 디스크가 parts[] 배열 밖을 넘어
+	 * 쓰게 된다(-1은 parts[0]이 디스크 전체용으로 예약되어 있기 때문). */
+	for (i = 0; i < le32_to_cpu(gpt->num_partition_entries) && i < state->limit-1; i++) {
+		struct partition_meta_info *info; /* [한국어] UUID와 볼륨 라벨을 담을 parts[] 슬롯의 메타정보 영역 포인터 */
+		unsigned label_max; /* [한국어] 볼륨 라벨로 복사할 최대 문자 수(양쪽 버퍼 중 작은 쪽) */
+		u64 start = le64_to_cpu(ptes[i].starting_lba); /* [한국어] 오프셋 0x20. 온디스크 리틀엔디안 64비트를 호스트 순서로. */
+		u64 size = le64_to_cpu(ptes[i].ending_lba) - /* [한국어] 오프셋 0x28. ending_lba는 마지막 블록을 "포함"하는 값이라(반열림 구간이 아님) */
+			   le64_to_cpu(ptes[i].starting_lba) + 1ULL; /* [한국어] 크기를 얻으려면 +1이 필요하다. 이 +1을 빼먹으면 모든 파티션이 한 블록씩 짧아진다. */
 
-		if (!is_pte_valid(&ptes[i], last_lba(state->disk))) /* NVMe namespace 범위 밖 또는 unused GUID 파티션 스킵 */
+		/* [한국어] 유효성 검사를 크기 계산 뒤에 두어도 순서상 무해하다(무효면
+		 * 계산 결과를 쓰지 않고 건너뛴다). 다만 start > end인 엔트리는
+		 * is_pte_valid()가 걸러 주지 않아 size가 언더플로된 거대한 값이 될 수
+		 * 있다. put_partition() 자체는 슬롯 번호만 보고 값을 그대로 저장하므로,
+		 * 그런 항목은 나중에 core.c의 blk_add_partition()이 디스크 용량(EOD)과
+		 * 대조해 경고를 남기며 걸러낸다. */
+		if (!is_pte_valid(&ptes[i], last_lba(state->disk)))
 			continue; /* [한국어] 이 인덱스는 파티션 번호(i+1)만 건너뛰고 다음 엔트리로 - state->parts[i+1]은 채워지지 않은 채로 남는다(파티션 번호에 구멍이 생길 수 있음, GPT 스펙상 정상) */
 
-		/* start/size를 커널 섹터 단위로 변환하여 blk_mq 파티션 등록 */
-		put_partition(state, i+1, start * ssz, size * ssz); /* blk_mq 파티션 등록: partno=i+1, start/size를 커널 섹터 단위로 변환 -> gendisk partition table에 추가 -> /dev/nvmeXnYpZ 생성 (추정) */
+		/* [한국어] 검출 결과를 state->parts[i+1]에 적재한다. 실제
+		 * block_device 생성은 이 함수가 1을 반환한 뒤 core.c의
+		 * blk_add_partitions()가 담당한다. */
+		put_partition(state, i+1, start * ssz, size * ssz); /* [한국어] 여기서 논리 블록을 512바이트 섹터로 환산해 넘긴다. put_partition()(check.h)은 슬롯 번호가 state->limit 미만인지만 확인하고 값을 그대로 저장할 뿐, 디스크 용량 검사는 하지 않는다. */
 
 		/* If this is a RAID volume, tell md */
 		/* gpt_entry.partition_type_guid: Linux RAID GUID 확인 */
-		if (!efi_guidcmp(ptes[i].partition_type_guid, PARTITION_LINUX_RAID_GUID)) /* 오프셋 0x00: Linux RAID GUID면 md 스캔 표시, NVMe 위에 md/raid 구축 시 사용 */
-			state->parts[i + 1].flags = ADDPART_FLAG_RAID; /* RAID 파티션 플래그 설정 */
+		if (!efi_guidcmp(ptes[i].partition_type_guid, PARTITION_LINUX_RAID_GUID)) /* [한국어] 오프셋 0x00의 타입 GUID가 Linux RAID(a19d880f-05fc-4d3b-a006-743f0f84911e)인지 본다. efi_guidcmp()는 일치할 때 0이므로 조건에 부정이 붙는다. */
+			state->parts[i + 1].flags = ADDPART_FLAG_RAID; /* [한국어] core.c의 blk_add_partition()이 이 플래그를 보고 md_autodetect_dev()를 불러, 부팅 시 RAID 어레이 자동 조립 대상으로 등록한다. */
 
 		/* parsed_partitions.parts[]: 파티션 메타정보 저장 */
-		info = &state->parts[i + 1].info; /* 파티션 메타정보 포인터 획득 */
-		/* gpt_entry.unique_partition_guid: 파티션 UUID로 노출 */
-		efi_guid_to_str(&ptes[i].unique_partition_guid, info->uuid); /* 오프셋 0x10: 파티션 unique GUID를 문자열 UUID로 변환, /dev/disk/by-partuuid 심볼릭 링크 생성 기반 (추정) */
+		info = &state->parts[i + 1].info; /* [한국어] put_partition()이 이미 자리를 잡아 둔 슬롯의 메타정보 영역 */
+		/* [한국어] 타입 GUID(파티션 용도)와 달리 unique GUID는 파티션마다
+		 * 고유한 식별자다. 문자열로 변환해 두면 udev가 이를 읽어
+		 * /dev/disk/by-partuuid/ 심볼릭 링크를 만든다. */
+		efi_guid_to_str(&ptes[i].unique_partition_guid, info->uuid); /* [한국어] 오프셋 0x10. GUID의 앞 세 필드는 리틀엔디안 정수, 뒤 두 필드는 바이트 배열이라는 혼합 규칙을 efi_guid_to_str()이 처리한다. */
 
 		/* Naively convert UTF16-LE to 7 bits. */
 		/* gpt_entry.partition_name: UTF-16LE 볼륨 이름을 7비트 ASCII로 변환 */
-		label_max = min(ARRAY_SIZE(info->volname) - 1, /* 볼륨 이름 최대 길이 제한 */
+		/* [한국어] 두 버퍼 중 작은 쪽에 맞춘다. -1은 utf16_le_to_7bit()가
+		 * out[size]에 널 종료를 쓰기 때문에 남겨 두는 자리다. 이 계산을
+		 * 틀리면 volname 배열 바로 뒤를 1바이트 덮어쓴다. */
+		label_max = min(ARRAY_SIZE(info->volname) - 1,
 				ARRAY_SIZE(ptes[i].partition_name));
-		utf16_le_to_7bit(ptes[i].partition_name, label_max, info->volname); /* 오프셋 0x38: UTF-16LE partition_name을 volname으로 변환, /dev/disk/by-label 노출 기반 (추정) */
-		state->parts[i + 1].has_info = true; /* 메타정보 유효 표시 */
+		utf16_le_to_7bit(ptes[i].partition_name, label_max, info->volname); /* [한국어] 오프셋 0x38의 UTF-16LE 36코드 유닛 이름을 7비트로 눌러 담는다. partition_name은 널 종료가 보장되지 않으므로 길이를 명시해 넘긴다. */
+		state->parts[i + 1].has_info = true; /* [한국어] uuid/volname을 채웠다는 표시. core.c는 이 플래그가 서 있을 때만 메타정보를 block_device로 복사한다. */
 	}
-	kfree(ptes); /* 파티션 등록 완료 후 PTE 메모리 해제 */
-	kfree(gpt); /* 파티션 등록 완료 후 GPT 헤더 메모리 해제 */
+	kfree(ptes); /* [한국어] 필요한 값은 모두 state->parts[]로 복사했으므로 원본 배열은 여기서 반납한다. */
+	kfree(gpt); /* [한국어] 헤더도 마찬가지. 이 함수가 반환한 뒤에는 GPT 원본이 메모리에 남지 않는다. */
 	seq_buf_puts(&state->pp_buf, "\n"); /* [한국어] /proc/partitions 등에 출력되는 파티션 요약 문자열 버퍼(pp_buf)에 개행 추가 - 다른 포맷 프로버들과 동일한 규약(각 프로버가 자신의 출력 끝에 개행을 남김) */
 	return 1; /* [한국어] GPT 파티션을 성공적으로 찾아 전부 등록했음을 check.c에 알림 - 이후 다른 포맷 프로버는 시도되지 않는다 */
 }
 
-/* NVMe 관점 핵심 요약
- * - 이 파일은 NVMe SSD namespace의 LBA 공간을 GPT 파티션으로 분할하고,
- *   각 파티션의 start/size를 blk_mq 구조에 등록하는 관문이다.
- * - read_lba()는 GPT LBA(512바이트 기반)를 커널 섹터 번호로 변환한 뒤
- *   read_part_sector()를 통해 NVMe Read 명령으로 디스크를 읽는다. (추정)
- * - find_valid_gpt()에서 primary/alternate GPT 헤더와 PTE의 CRC32를 검증하며,
- *   NVMe 메타데이터 무결성 문제를 조기에 감지한다.
- * - efi_partition()은 check.c -> msdos_partition() 다음에 호출되어,
- *   protective MBR을 가진 NVMe 디스크의 GPT 파티션을 최종 등록한다.
- * - 등록된 파티션은 이후 submit_bio -> ... -> nvme_queue_rq 경로에서
- *   NVMe SQ/CQ 명령의 SLBA 기준으로 변환되어 doorbell을 통해 SSD로 전달된다.
+/* [한국어] 이 파일 전체를 관통하는 요점 정리
+ * - 파티션 파서는 장치 종류(NVMe/SATA/virtio/loop 등)와 무관하다. 이 파일이
+ *   보는 것은 오직 "논리 블록 크기"와 "총 용량", 그리고 디스크에 적힌
+ *   바이트뿐이며, 실제 읽기는 read_part_sector()가 페이지 캐시를 통해
+ *   처리하므로 어느 드라이버가 아래에 있는지는 알 필요도 없다.
+ * - 단위가 두 종류라는 점이 반복해서 등장한다. GPT의 LBA는 논리 블록 단위,
+ *   블록 계층의 섹터는 항상 512바이트다. read_lba()에서 한 번(입력 방향),
+ *   efi_partition()의 ssz에서 한 번(출력 방향) 환산이 일어난다.
+ * - 온디스크 표현은 전부 리틀엔디안이라 모든 다바이트 필드 접근에
+ *   le16/le32/le64_to_cpu()가 붙는다. 예외는 GUID로, 바이트 배열이라
+ *   efi_guidcmp()가 원시 바이트를 그대로 비교한다.
+ * - 신뢰의 순서가 곧 코드의 순서다: pMBR 관문 -> 헤더 시그니처 -> 헤더 크기
+ *   상·하한 -> 헤더 CRC -> my_lba -> usable 범위 -> 엔트리 크기 -> 배열
+ *   크기 -> 배열 CRC. 앞 단계를 통과하기 전의 필드 값은 믿지 않는다.
+ * - 이중화 복구: primary가 깨지면 백업 헤더로 폴백하고, 둘 다 살아 있으면
+ *   compare_gpts()가 교차 비교해 경고만 남긴다. 커널은 어느 경우에도 디스크를
+ *   고쳐 쓰지 않는다(파티션 스캔은 읽기 전용이어야 한다).
+ * - 프로버 순서상 efi_partition()은 msdos_partition()보다 "먼저" 호출된다
+ *   (block/partitions/core.c의 check_part[] 참조). GPT 디스크는 호환성을 위해
+ *   보호 MBR도 함께 갖고 있어, msdos가 먼저 매칭되면 GPT를 놓치기 때문이다.
  */
