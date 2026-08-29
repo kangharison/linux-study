@@ -33,7 +33,8 @@
  *     → submit_bio() / submit_bio_noacct()                   ← block/blk-core.c
  *     → blk_mq_submit_bio() → blk_rq_bio_prep()
  *       → __bio_integrity_action()                           ← blk-mq.c ↔ 이 파일
- *     → nvme_queue_rq() → nvme_map_data()/nvme_setup_cmd()    ← drivers/nvme/host/pci.c (추정)
+ *     → nvme_queue_rq() → nvme_setup_cmd() → nvme_map_data()
+ *       → nvme_map_metadata()                                ← drivers/nvme/host/pci.c
  *     → NVMe 컨트롤러 SQ(Submission Queue)
  *       → PRACT/PRCHK 비트에 따라 컨트롤러가 PI 생성/검증 수행
  *     → NVMe CQ(Completion Queue) → nvme_complete_rq() → bio_endio()
@@ -43,7 +44,7 @@
  * 할당 가능)에서 주로 실행되며, bio_integrity_advance()/bio_integrity_trim()은
  * blk-mq의 분할·병합·완료 경로를 통해 소프트/하드 IRQ 컨텍스트에서도 호출될
  * 수 있다(완료 처리는 NVMe 인터럽트 핸들러 → softirq 경로를 거치는 경우가
- * 많다, 추정).
+ * 많다).
  *
  * === 타 모듈과의 연결 ===
  * 의존 모듈:
@@ -62,8 +63,12 @@
  *   - block/bio.c                   : struct bio, bio_alloc()/bio_endio()/
  *     bio_split() — 이 파일의 모든 함수는 bio->bi_integrity를 다루므로 bio
  *     생명주기(할당→분할→완료→해제)와 반드시 동기화되어야 한다.
- *   - drivers/nvme/host/pci.c       : nvme_map_metadata()/nvme_setup_cmd()
- *     (추정) — bip_vec을 NVMe metadata SGL/PRP 엔트리로 변환해 DMA 매핑.
+ *   - drivers/nvme/host/pci.c       : nvme_map_metadata()(pci.c:1790)가
+ *     bip_vec을 실제 DMA 주소로 변환한다. 세그먼트가 하나뿐이면
+ *     nvme_pci_setup_meta_mptr()로 SQE의 MPTR 필드에 단일 주소를 넣고,
+ *     여러 개면 nvme_pci_setup_meta_iter()로 메타데이터 SGL을 구성한다.
+ *     PCIe NVMe에서 max_integrity_segments가 SGL 지원 시
+ *     NVME_MAX_META_SEGS, 아니면 1인 이유가 이 두 경로의 차이다.
  *
  * 데이터 흐름:
  *   사용자 metadata 버퍼(iov_iter) 또는 파일시스템 PI 생성기
@@ -148,8 +153,8 @@
  *     와 bip_set_seed()가 bi_sector를 RefTag seed로 설정, bio_integrity_advance()가
  *     부분 완료 시 bi_sector/bi_size를 전진.
  *   읽는 자: bio_integrity_trim()이 bi_size를 재계산해 clone bio에 맞추고,
- *     NVMe 드라이버(nvme_map_metadata() 등, 추정)가 bi_sector를 RefTag 초기값
- *     으로 사용한다.
+ *     NVMe 경로에서는 nvme_setup_rw()가 이 값을 기반으로 SQE의 reftag
+ *     필드를 채운다(core.c의 set_ref_tag 경로).
  *   값 범위: bi_sector는 SLBA(Starting LBA) 단위 섹터 번호, bi_size는
  *     0 ~ bio 전체 metadata 바이트 수.
  *   동기화: 하나의 bio는 한 시점에 하나의 I/O 경로(submit 또는 completion)
@@ -162,7 +167,8 @@
  *     bio_integrity_add_page()가 세그먼트 추가 시마다 증가, bio_integrity_copy_user()
  *     가 bounce 버퍼 사용 후 원본 세그먼트 수로 재설정.
  *   읽는 자: bio_integrity_add_page()가 병합/segment 한도 검사에 사용하고,
- *     NVMe 드라이버가 metadata SGL/PRP 엔트리 수 결정에 사용한다(추정).
+ *     NVMe에서는 nvme_map_metadata()가 이 개수로 MPTR 단일 주소 경로와
+ *     메타데이터 SGL 경로 중 하나를 고른다.
  *   값 범위: 0 ~ bip_max_vcnt.
  *   동기화: bio를 소유한 스레드에서만 갱신되므로 별도 동기화가 불필요하다.
  *
@@ -189,7 +195,12 @@
  *     BIP_MEMPOOL을, bio_integrity_copy_user()가 BIP_COPY_USER를 설정한다.
  *   읽는 자: bio_integrity_free_buf()가 BIP_MEMPOOL로 회수 경로를 선택하고,
  *     bio_integrity_unmap_user()가 BIP_COPY_USER로 uncopy 필요 여부를 판단하며,
- *     NVMe 드라이버가 BIP_CHECK_* 비트로 PRCHK 설정을 구성한다(추정).
+ *     NVMe에서는 nvme_setup_rw()(core.c)가 이 비트들을 그대로 SQE의
+ *     PRINFO 필드로 옮긴다:
+ *       BIP_CHECK_GUARD  → NVME_RW_PRINFO_PRCHK_GUARD
+ *       BIP_CHECK_REFTAG → NVME_RW_PRINFO_PRCHK_REF
+ *       BIP_CHECK_APPTAG → NVME_RW_PRINFO_PRCHK_APP
+ *     즉 이 플래그가 "컨트롤러에게 무엇을 검증하라고 지시할지"를 결정한다.
  *   값 범위: 위 enum bip_flags 값들의 OR 조합. clone 시에는 BIP_CLONE_FLAGS로
  *     마스킹된 부분집합만 전파된다.
  *   동기화: bio를 소유한 스레드에서만 수정되므로 별도 락이 불필요하다.
@@ -199,11 +210,12 @@
  *     상위 계층(파일시스템/애플리케이션)이 자유롭게 정의해 사용할 수 있는 태그.
  *   설정자: bio_uio_meta_to_bip()가 uio_meta->app_tag로부터 복사하고,
  *     bio_integrity_clone()이 원본 bip_src->app_tag를 그대로 복제한다.
- *   읽는 자: NVMe 드라이버가 커맨드의 App Tag 필드 구성 시 참조한다(추정).
- *     PRACT=0(host가 이미 PI를 채운 경우)이면 컨트롤러가 이 값을 비교
- *     검증에 사용할 수 있다(추정).
- *   값 범위: 0 ~ 0xFFFF. 스펙에 따라 특정 값(예: 0xFFFF)이 "검사 생략"
- *     와일드카드로 예약되기도 한다(NVMe/SCSI 세부 스펙 상이, 추정).
+ *   읽는 자: NVMe에서는 nvme_setup_rw()가 BIP_CHECK_APPTAG가 설정된 경우
+ *     PRINFO의 PRCHK_APP 비트를 세우고 이 값을 apptag 필드에 실어 보낸다.
+ *     그러면 컨트롤러가 매체의 App Tag와 이 값을 대조해 검증한다.
+ *   값 범위: 0 ~ 0xFFFF. NVMe 사양에서 App Tag가 0xFFFF이면 해당 논리 블록의
+ *     PI 검사를 생략하라는 뜻이며(T10 DIF도 동일 관례), 초기화되지 않은
+ *     블록을 읽을 때 오탐을 막는 데 쓰인다.
  *   동기화: bio를 소유한 스레드에서만 설정되므로 별도 락이 불필요하다.
  *
  * bip_vec
@@ -213,13 +225,14 @@
  *     멤버(bia->bvecs[])를 가리키도록 설정하거나, bio_integrity_clone()이
  *     원본의 포인터를 그대로 공유하도록 설정한다.
  *   읽는 자: bio_integrity_add_page()/bvec_from_pages()가 세그먼트를 채우고,
- *     NVMe 드라이버가 DMA 매핑(metadata SGL/PRP 구성)에 사용하며(추정),
+ *     NVMe에서는 nvme_map_metadata()가 이 배열을 순회하며 DMA 매핑을 수행하고,
  *     bio_integrity_uncopy_user()가 원본 사용자 bvec 복원에 사용한다.
  *   값 범위: 유효한 bio_vec 배열 포인터(NULL 불가). 단 bip_max_vcnt == 0인
  *     clone은 원본과 포인터를 공유한다.
  *   동기화: 클론된 bio들이 이 포인터를 공유할 수 있으므로, 원본 bio가 clone
- *     보다 먼저 해제되어서는 안 된다(clone은 참조만 가지며 소유권은 원본에
- *     있다고 추정됨).
+ *     보다 먼저 해제되어서는 안 된다. bio_integrity_clone()이 bip_max_vcnt를
+ *     0으로 두는 것이 "이 배열의 소유권이 없다"는 표시이며,
+ *     bio_integrity_free()가 그 값을 보고 해제를 건너뛴다.
  * ----------------------------------------------------------------------------
  */
 
@@ -254,7 +267,9 @@ struct bio_integrity_alloc {
 	 * 읽는 자: bio_integrity_add_page()/bio_integrity_init_user() 등이
 	 *   bip->bip_vec을 통해 이 배열 원소에 페이지/길이/오프셋을 채운다.
 	 * 값 범위: 원소 0개(clone 시 nr_vecs=0으로 별도 배열 없이 원본 공유) ~
-	 *   nr_vecs개의 bio_vec. NVMe SGL/PRP 세그먼트 하나하나에 대응한다(추정).
+	 *   nr_vecs개의 bio_vec. NVMe에서는 nvme_map_metadata()가 이 배열을 순회해
+ *   메타데이터 SGL 디스크립터를 만들거나(여러 개인 경우), 단일 MPTR
+ *   주소로 변환한다(하나뿐인 경우).
 	 * 동기화: bip 필드와 동일하게 해당 bio를 다루는 단일 컨텍스트에서만
 	 *   접근되므로 별도 락이 필요 없다. */
 };
@@ -273,7 +288,8 @@ static mempool_t integrity_buf_pool;
  * 동기화: mempool 자체가 내부 스핀락으로 동시 접근을 보호하므로, 이 파일의
  *   호출자는 별도 락 없이 mempool_alloc()/mempool_free()를 호출해도 된다.
  *   NVMe I/O 경로에서 GFP_NOIO/GFP_NOFS로도 항상 진행이 보장되도록 하는
- *   안전망 역할이다(추정). */
+ *   안전망 역할이다 — mempool은 예약된 최소 개수를 미리 확보해 두므로
+ *   메모리가 고갈되어도 진행 중인 I/O가 완료될 만큼은 항상 할당된다. */
 
 /*
  * [한국어]
@@ -303,7 +319,10 @@ static bool bi_offload_capable(struct blk_integrity *bi)
 {
 	/* [한국어] metadata_size(네임스페이스 포맷상 전체 metadata 바이트 수)와
 	 * pi_tuple_size(PI 8바이트 tuple 크기)가 정확히 일치하면 metadata 버퍼 전체가
-	 * PI이므로 NVMe 컨트롤러의 PRCHK/PRACT offload가 가능하다(추정). */
+	 * PI이므로 컨트롤러에 검증/생성을 통째로 맡길 수 있다.
+	 * 반대로 metadata_size > pi_tuple_size이면 PI 8바이트 외에 사용자/제조사
+	 * 전용 영역이 섞여 있어, 그 부분은 호스트가 직접 채워야 하므로 완전
+	 * offload가 불가능하다. */
 	return bi->metadata_size == bi->pi_tuple_size;
 }
 
@@ -325,7 +344,7 @@ static bool bi_offload_capable(struct blk_integrity *bi)
  * 결과를 조합해 READ는 검증 필요 여부를, WRITE는 생성 필요 여부를 판단한다.
  * 이 함수는 순수 판정 함수로 상태를 변경하지 않으며, submit_bio 경로의 태스크
  * 컨텍스트에서 매 bio마다 호출되므로 재진입에 안전해야 한다(락 없음, 부수효과
- * 없음). 상위 호출자는 blk-mq/NVMe 드라이버의 nvme_setup_cmd() 계열이며(추정),
+ * 없음). 상위 호출자는 blk-mq의 무결성 준비 경로이며,
  * 반환된 비트에 따라 실제 버퍼 준비(bio_integrity_alloc_buf() 등)를 이어서
  * 수행한다. bio_has_crypt_ctx()로 감지되는 암호화 컨텍스트와의 동시 사용은
  * 현재 지원되지 않으므로 WARN_ON_ONCE로 경고 후 0(처리 없음)을 반환한다.
@@ -389,7 +408,7 @@ unsigned int __bio_integrity_action(struct bio *bio)
 		 * 위해, host가 직접 PI를 생성하지 않는 경로에서는 버퍼를 0으로
 		 * 채워야 한다 — NVMe WRITE에서 metadata 버퍼가 쓰레기 값이면 SSD
 		 * 측 Guard 검증이 예기치 않게 실패하거나, 임의 커널 데이터가
-		 * 디스크에 영구 기록되는 정보 유출이 발생할 수 있다(추정). */
+		 * 디스크에 영구 기록되는 정보 유출이 발생할 수 있다. */
 		if (bi->flags & BLK_INTEGRITY_NOGENERATE) {
 			/* [한국어] "생성하지 않음" 프로파일: 컨트롤러가 대신 PI를
 			 * 만들 수 있는지(offload 가능 여부)를 확인한다. */
@@ -398,13 +417,14 @@ unsigned int __bio_integrity_action(struct bio *bio)
 				 * AppTag/RefTag를 전부 생성하므로 host는 아무 것도 안 함. */
 				return 0;
 			/* [한국어] offload 불가: host는 버퍼만 0으로 채우고(BI_ACT_ZERO)
-			 * 실제 PI 생성은 여전히 컨트롤러에 위임한다(추정 — metadata_size
-			 * 초과분이 있는 포맷일 가능성). */
+			 * 실제 PI 생성은 여전히 컨트롤러에 위임한다. 이 경로에 오는 것은
+			 * metadata_size > pi_tuple_size, 즉 PI 외 영역이 있는 포맷이라
+			 * bi_offload_capable()이 거짓이 된 경우다. */
 			return BI_ACT_BUFFER | BI_ACT_ZERO;
 		}
 
 		/* [한국어] metadata_size가 pi_tuple_size보다 크면, metadata 안에
-		 * PI 8바이트 외의 사용자/제조사 전용 영역이 섞여 있다는 뜻이다(추정).
+		 * PI 8바이트 외의 사용자/제조사 전용 영역이 섞여 있다는 뜻이다.
 		 * 이 경우 host가 PI 부분은 체크섬 생성(BI_ACT_CHECK)하면서, 나머지
 		 * 비-PI 영역은 커널 정보 유출 방지를 위해 0으로 채워야(BI_ACT_ZERO)
 		 * 한다. */
@@ -438,7 +458,7 @@ EXPORT_SYMBOL_GPL(__bio_integrity_action);	/* [한국어] blk-mq.c 등 다른 �
  * bio_sectors(bio)에 해당하는 metadata 바이트 수만큼 커널 메모리를 확보해
  * bip->bip_vec[0]에 단일 세그먼트로 연결하는 것이 이 함수의 목적이다. NVMe
  * WRITE/READ의 metadata SGL/PRP는 데이터 버퍼와 별도로 구성되므로, 여기서
- * 확보한 버퍼가 그 metadata pointer가 되는 실제 물리 페이지다(추정). 먼저
+ * 확보한 버퍼가 그 metadata pointer가 되는 실제 물리 페이지다. 먼저
  * direct reclaim을 끈 kmalloc()으로 빠른 경로를 시도하고, 실패하면(고메모리
  * 압박 상황) integrity_buf_pool mempool에서 페이지를 꺼내는 2단계 전략을
  * 사용한다 — NVMe I/O 제출 경로(예: nvme_queue_rq())에서 reclaim에 의한 지연
@@ -448,7 +468,7 @@ EXPORT_SYMBOL_GPL(__bio_integrity_action);	/* [한국어] blk-mq.c 등 다른 �
  * reclaim 재진입은 없지만, 메모리 회수(reclaim) 자체는 발생할 수 있다.
  *
  * 호출 체인:
- *   nvme_setup_cmd (또는 유사 draiver 경로, 추정) → [bio_integrity_alloc_buf]
+ *   __bio_integrity_action (block/bio-integrity-auto.c:635) → [bio_integrity_alloc_buf]
  *   → kmalloc / mempool_alloc → bvec_set_page
  */
 void bio_integrity_alloc_buf(struct bio *bio, bool zero_buffer)
@@ -473,7 +493,7 @@ void bio_integrity_alloc_buf(struct bio *bio, bool zero_buffer)
 	 * OOM killer 유발(__GFP_NOMEMALLOC/__GFP_NORETRY)과 경고 로그(__GFP_NOWARN)를
 	 * 억제해 "실패해도 즉시 반환"하는 저비용 빠른 경로로 시도한다. NVMe I/O
 	 * 경로에서는 GFP_NOIO를 유지해야 nvme_queue_rq → doorbell 제출이 reclaim
-	 * 대기로 지연되지 않는다(추정). */
+	 * 대기로 지연되지 않는다. */
 	buf = kmalloc(len, (gfp & ~__GFP_DIRECT_RECLAIM) |
 			__GFP_NOMEMALLOC | __GFP_NORETRY | __GFP_NOWARN);
 	if (unlikely(!buf)) {
@@ -531,11 +551,13 @@ void bio_integrity_alloc_buf(struct bio *bio, bool zero_buffer)
  * mempool 예약분 고갈로 이어질 수 있다. NVMe 관점에서는 완료(CQ) 처리 후
  * bio_endio() 경로를 통해 metadata 버퍼를 회수하는 정리 단계에서 호출된다
  * (blk_mq_complete_request → nvme_complete_rq → bio_endio → ... →
- * bio_integrity_free_buf, 추정). 이 함수는 완료 컨텍스트(태스크 또는
+ * bio_integrity_free_buf). 이 함수는 완료 컨텍스트(태스크 또는
  * 소프트 IRQ)에서 호출될 수 있으며, 자체적으로 락을 잡지 않는다.
  *
  * 호출 체인:
- *   bio_endio (추정) → [bio_integrity_free_buf] → kfree / mempool_free
+ *   bio_endio → bio_integrity_endio → bio_integrity_verify_fn
+ *     (block/bio-integrity-auto.c:298) → [bio_integrity_free_buf]
+ *     → kfree / mempool_free
  */
 void bio_integrity_free_buf(struct bio_integrity_payload *bip)
 {
@@ -566,13 +588,16 @@ void bio_integrity_free_buf(struct bio_integrity_payload *bip)
  * BLK_INTEGRITY_REF_TAG 여부)만 보고 표준적인 BIP_CHECK_* 플래그 조합과
  * RefTag seed를 설정하는 "기본값 설정" 헬퍼다. bio 시작 섹터(bi_iter.bi_sector)를
  * RefTag seed로 사용하는데, 이는 NVMe PI Type 1/2/3 스펙에서 RefTag가 SLBA와
- * 연동되는 일반적인 규약을 따른 것이다(추정). csum_type이 설정되어 있으면
+ * 연동되는 규약을 따른 것이다. NVMe PI Type 1/2에서 RefTag는 각 논리 블록의
+ * LBA 하위 32비트와 일치해야 하고, Type 3은 검사하지 않는다.
+ * csum_type이 설정되어 있으면
  * Guard 검증을(추가로 IP 체크섬 타입이면 BIP_IP_CHECKSUM도), REF_TAG 플래그가
  * 있으면 RefTag 검증을 활성화한다. 이 함수는 태스크 컨텍스트에서 bio 준비
  * 단계에 1회 호출되는 것이 일반적이며 락이 필요 없다.
  *
  * 호출 체인:
- *   (파일시스템/블록 계층의 PI 준비 경로, 추정) → [bio_integrity_setup_default]
+ *   blk_mq_submit_bio → bio_integrity_prep → __bio_integrity_action
+ *     (block/bio-integrity-auto.c:647) → [bio_integrity_setup_default]
  *   → bip_set_seed
  */
 void bio_integrity_setup_default(struct bio *bio)
@@ -619,14 +644,15 @@ void bio_integrity_setup_default(struct bio *bio)
  * REQ_INTEGRITY 플래그와 bi_integrity 포인터를 제거해 "이 bio는 더 이상
  * integrity metadata를 갖지 않는다"는 상태로 되돌리는 것이 목적이다. 이
  * 함수는 bio_integrity_copy_user()의 실패 경로 및 일반적인 bio 소멸 경로
- * (bio_free() 계열, 추정)에서 호출된다. NVMe 관점에서는 REQ_INTEGRITY가
+ * (bio_uninit(), block/bio.c:515)에서 호출된다. NVMe 관점에서는 REQ_INTEGRITY가
  * 클리어되면 NVMe 드라이버가 이 bio에서 유래한 request를 metadata 없는
  * 일반 명령으로 취급하게 된다. 별도 락 없이 bio를 소유한 컨텍스트에서만
  * 호출되어야 한다(다른 스레드가 동시에 이 bio의 bi_integrity를 사용 중이면
  * use-after-free 위험이 있다).
  *
  * 호출 체인:
- *   bio_integrity_copy_user (실패 시) / bio 해제 경로(추정) → [bio_integrity_free]
+ *   bio_uninit (block/bio.c:515) 또는 bio_integrity_unmap_user
+ *     (block/bio-integrity.c:1110) → [bio_integrity_free]
  *   → kfree
  */
 void bio_integrity_free(struct bio *bio)
@@ -660,7 +686,7 @@ void bio_integrity_free(struct bio *bio)
  * blk-mq/NVMe 드라이버가 인식할 수 있게 한다. blk-mq는 REQ_INTEGRITY가
  * 설정된 request에 대해 integrity_segments 한도를 별도로 계산하고, NVMe
  * 드라이버는 명령어 조립 시 metadata 버퍼를 첨부해야 한다는 신호로
- * 해석한다(추정). 이 함수는 태스크 컨텍스트에서 1회성으로 실행되며 락이
+ * 해석한다. 이 함수는 태스크 컨텍스트에서 1회성으로 실행되며 락이
  * 필요 없다.
  *
  * 호출 체인:
@@ -738,7 +764,9 @@ struct bio_integrity_payload *bio_integrity_alloc(struct bio *bio,
 	/* [한국어] 암호화(bio_has_crypt_ctx)와 integrity를 동시에 요청하는 것은
 	 * 현재 지원하지 않는다 — 체크섬 계산이 암호문 기준인지 평문 기준인지
 	 * 모호해지므로, NVMe End-to-end PI와 inline encryption은 컨트롤러
-	 * capability에 따라 상호 배타적으로 취급된다(추정). */
+	 * 이 둘은 상호 배타적으로 취급된다. 인라인 암호화는 데이터를 변환하는데,
+	 * PI는 변환 전 데이터에 대해 계산되어야 할지 후에 계산되어야 할지가
+	 * 계층 간에 합의되어 있지 않기 때문이다. */
 	if (WARN_ON_ONCE(bio_has_crypt_ctx(bio)))
 		return ERR_PTR(-EOPNOTSUPP);	/* [한국어] 지원하지 않는 조합 — 즉시 실패 반환 */
 
@@ -804,7 +832,7 @@ static void bio_integrity_unpin_bvec(struct bio_vec *bv, int nr_vecs)
  * 함수의 목적이다. NVMe CQ(Completion Queue)에서 상태가 성공이면, 컨트롤러가
  * 반환한 PI metadata를 사용자 공간에 전달해야 하므로 이 함수는
  * bio_integrity_map_user() → ... → nvme_complete_rq() 경로의 완료 처리
- * 단계에서 READ 방향으로만 호출된다(추정). 복사가 끝나면 원본 사용자
+ * 단계에서 READ 방향으로만 호출된다. 복사가 끝나면 원본 사용자
  * 페이지의 pin을 해제해 참조 카운트를 정리한다.
  *
  * 호출 체인:
@@ -860,10 +888,12 @@ static void bio_integrity_uncopy_user(struct bio_integrity_payload *bip)
  * 이미 사용자 데이터를 복사해 두었으므로 바로 kfree()만 한다. bounce가
  * 아니었다면 사용자 페이지를 직접 pin해서 썼던 것이므로 pin만 해제한다.
  * 이 함수는 NVMe completion(CQ) 처리 이후 사용자 공간 I/O(io_uring
- * passthrough, nvme-cli 등)를 완료 처리하는 경로에서 호출된다(추정).
+ * passthrough, nvme-cli 등)를 완료 처리하는 경로에서 호출된다.
  *
  * 호출 체인:
- *   nvme_complete_rq (추정) → [bio_integrity_unmap_user]
+ *   nvme_complete_rq → blk_mq_end_request → (passthrough 완료 콜백)
+ *     → blk_rq_unmap_user (block/blk-map.c:1440)
+ *     → [bio_integrity_unmap_user]
  *   → bio_integrity_uncopy_user / bio_integrity_unpin_bvec
  */
 void bio_integrity_unmap_user(struct bio *bio)
@@ -913,12 +943,14 @@ void bio_integrity_unmap_user(struct bio *bio)
  * 인접하면 별도 슬롯을 늘리지 않고 병합(merge)해 NVMe metadata SGL/PRP의
  * 세그먼트 수를 최소화하고, 그렇지 않으면 새 슬롯에 추가한다. 컨트롤러의
  * max_integrity_segments 한도, zone device(pmem/ZNS) pgmap 일치 여부, SG
- * gap 제약(PRP list 정렬 요구사항, 추정)을 모두 검사해 하나라도 위반하면
+ * gap 제약(virt_boundary_mask — NVMe PRP 모드에서는 4KiB 페이지 정렬)을
+ * 모두 검사해 하나라도 위반하면
  * 추가를 거부(0 반환)한다. 이 함수는 bio를 조립 중인 태스크 컨텍스트에서
  * 세그먼트 개수만큼 반복 호출되는 것이 일반적이다.
  *
  * 호출 체인:
- *   bio_integrity_copy_user / bio_integrity_prep(추정) → [bio_integrity_add_page]
+ *   bio_integrity_init_user (block/bio-integrity.c:1092) 및
+ *   bio_integrity_copy_user → [bio_integrity_add_page]
  *   → bvec_try_merge_hw_page / bvec_set_page
  */
 int bio_integrity_add_page(struct bio *bio, struct page *page,
@@ -942,7 +974,7 @@ int bio_integrity_add_page(struct bio *bio, struct page *page,
 		 */
 		/* [한국어] zone device(pmem/zoned) 페이지들이 서로 다른 pgmap(페이지
 		 * 소유 매핑 도메인)에 속하면 물리적으로 인접해도 병합할 수 없다 —
-		 * NVMe ZNS/PMem + PI 조합 사용 시 주의가 필요한 지점(추정). */
+		 * pmem처럼 ZONE_DEVICE 페이지를 metadata 버퍼로 쓰는 경우에 걸린다. */
 		if (!zone_device_pages_have_same_pgmap(bv->bv_page, page))
 			return 0;	/* [한국어] pgmap 불일치 — 병합 불가, 이 페이지는 추가 거부 */
 
@@ -972,7 +1004,8 @@ int bio_integrity_add_page(struct bio *bio, struct page *page,
 		/* [한국어] 큐가 SG(scatter-gather) gap을 지원하지 않는데 이 페이지를
 		 * 추가하면 이전 세그먼트와 사이에 gap이 생기는 경우 — NVMe PRP
 		 * list는 흔히 페이지 정렬/연속성을 요구하므로 이런 gap을 허용하지
-		 * 않는 컨트롤러가 있다(추정). */
+		 * 않는다. NVMe PRP 모드가 정확히 이 경우로, PRP2 이후 엔트리는 페이지
+		 * 오프셋 0에서 시작해야 하므로 gap이 있으면 표현할 수 없다. */
 		if (bvec_gap_to_prev(&q->limits, bv, offset))
 			return 0;	/* [한국어] gap 발생 — 추가 거부 */
 	}
@@ -1117,7 +1150,7 @@ free_buf:
  * 사용되며, 사용자가 직접 pin한 페이지를 그대로 bip_vec에 등록해 복사
  * 오버헤드를 없앤다. NVMe 관점에서는 nvme-cli passthrough 등에서 사용자가
  * 직접 할당한 metadata 버퍼가 곧바로 NVMe metadata SGL/PRP로 사용되는
- * 경로에 해당한다(추정). 이 함수는 태스크 컨텍스트에서 호출되며 별도
+ * 경로에 해당한다. 이 함수는 태스크 컨텍스트에서 호출되며 별도
  * 정리 로직이 없다(bio_integrity_alloc 실패 시 그대로 오류 전파).
  *
  * 호출 체인:
@@ -1164,7 +1197,7 @@ static int bio_integrity_init_user(struct bio *bio, struct bio_vec *bvec,
  * 합쳐 세그먼트 수를 줄인다. 병합되어 대표 bvec에 흡수된 페이지는
  * unpin_user_page()로 개별 pin을 즉시 낮추는데(대표 페이지의 pin은 유지),
  * 이는 folio 참조 카운트 체계에서 이러한 정리가 안전하다는 가정 하에
- * 이루어진다(추정). 순수 계산/변환 함수로 락이 없으며 재진입에 안전하다.
+ * 이루어진다. 순수 계산/변환 함수로 락이 없으며 재진입에 안전하다.
  *
  * 호출 체인:
  *   bio_integrity_map_user → [bvec_from_pages] → page_folio / unpin_user_page /
@@ -1218,7 +1251,8 @@ static unsigned int bvec_from_pages(struct bio_vec *bvec, struct page **pages,
 		 */
 		/* [한국어] peer-to-peer DMA 페이지(다른 PCIe 장치의 BAR/CMB 메모리)가
 		 * 섞여 있으면 이후 merge/재배치 정책이 달라져야 하므로 플래그로
-		 * 상위 호출자에게 알린다 — NVMe CMB/P2P 경로 관련(추정). */
+		 * 상위 호출자에게 알린다. P2PDMA 메모리는 일반 메모리와 DMA 매핑 방식이
+		 * 달라(버스 주소 vs IOVA) 한 요청에 섞을 수 없기 때문이다. */
 		if (is_pci_p2pdma_page(pages[i]))
 			*is_p2p = true;
 
@@ -1254,7 +1288,8 @@ static unsigned int bvec_from_pages(struct bio_vec *bvec, struct page **pages,
  * 접근하므로 페이지 폴트가 발생할 수 있다.
  *
  * 호출 체인:
- *   nvme_setup_cmd (io_uring/passthrough 경로, 추정) → [bio_integrity_map_user]
+ *   blk_rq_integrity_map_user (block/blk-integrity.c:395, nvme-cli 등의
+ *     passthrough ioctl 경로) → [bio_integrity_map_user]
  *   → iov_iter_extract_pages → bvec_from_pages
  *   → bio_integrity_copy_user / bio_integrity_init_user
  */
@@ -1285,7 +1320,7 @@ int bio_integrity_map_user(struct bio *bio, struct iov_iter *iter)
 	if (bytes >> SECTOR_SHIFT > queue_max_hw_sectors(q))
 		return -E2BIG;
 
-	/* [한국어] 사용자 iterator를 표현하는 데 필요한 최대 페이지 수 추정 —
+	/* [한국어] 사용자 iterator를 표현하는 데 필요한 최대 페이지 수를 미리 센다 —
 	 * BIO_MAX_VECS+1까지만 세어 상한 초과를 빠르게 감지. */
 	nr_vecs = iov_iter_npages(iter, BIO_MAX_VECS + 1);
 	if (nr_vecs > BIO_MAX_VECS)
@@ -1305,12 +1340,14 @@ int bio_integrity_map_user(struct bio *bio, struct iov_iter *iter)
 	 */
 	/* [한국어] DMA alignment/padding 요구사항을 사용자 iterator가 만족하지
 	 * 못하면(비트마스크 AND 결과가 0이 아니면) bounce 버퍼로 복사해야 한다 —
-	 * NVMe PRP는 일반적으로 4K 정렬 및 특정 경계 제한이 있다(추정). */
+	 * NVMe PRP 모드는 4KiB 페이지 정렬을 요구하므로 어긋난 사용자 버퍼는
+	 * 그대로 매핑할 수 없다. */
 	copy = iov_iter_alignment(iter) &
 			blk_lim_dma_alignment_and_pad(&q->limits);
 
 	/* [한국어] 큐가 PCI peer-to-peer DMA를 지원하면 추출 시 P2P 페이지도
-	 * 허용하도록 플래그 추가 — NVMe CMB/P2P metadata 경로 지원(추정). */
+	 * 허용하도록 플래그 추가. 이 플래그가 없으면 iov_iter가 장치 메모리
+	 * 페이지를 거부한다. */
 	if (blk_queue_pci_p2pdma(q))
 		extraction_flags |= ITER_ALLOW_P2PDMA;
 
@@ -1399,7 +1436,8 @@ static void bio_uio_meta_to_bip(struct bio *bio, struct uio_meta *meta)
 		bip->bip_flags |= BIP_CHECK_REFTAG;
 
 	/* [한국어] Application Tag 값 자체를 그대로 복사 — NVMe 커맨드의 App Tag
-	 * 필드 구성에 사용될 값(추정). */
+	 * 필드 구성에 사용될 값. nvme_setup_rw()가 BIP_CHECK_APPTAG와 함께
+	 * SQE의 apptag 필드로 옮긴다. */
 	bip->app_tag = meta->app_tag;
 }
 
@@ -1424,7 +1462,8 @@ static void bio_uio_meta_to_bip(struct bio *bio, struct uio_meta *meta)
  * 인터페이스에서 반복 호출되는 것을 전제로 설계되었다.
  *
  * 호출 체인:
- *   (io_uring PI passthrough 반복 호출, 추정) → [bio_integrity_map_iter]
+ *   blk_rq_integrity_map_user (nvme-cli/io_uring passthrough)
+ *     → [bio_integrity_map_iter]
  *   → bio_integrity_map_user → bio_uio_meta_to_bip
  */
 int bio_integrity_map_iter(struct bio *bio, struct uio_meta *meta)
@@ -1480,7 +1519,7 @@ int bio_integrity_map_iter(struct bio *bio, struct uio_meta *meta)
 		 * pick the right sector.
 		 */
 		/* [한국어] seed를 다음 bio의 시작 RefTag로 전진 — NVMe PI Type 1/2/3
-		 * 모두에서 RefTag는 섹터/interval 단위로 증가한다는 규약을 따른다(추정). */
+		 * 모두에서 RefTag는 interval(논리 블록) 단위로 1씩 증가한다. */
 		meta->seed += bio_integrity_intervals(bi, bio_sectors(bio));
 	}
 	return ret;	/* [한국어] map_user()의 성공/실패 코드를 그대로 호출자에게 전달 */
@@ -1508,12 +1547,13 @@ int bio_integrity_map_iter(struct bio *bio, struct uio_meta *meta)
  * 완료된 데이터 바이트 수만큼 metadata iterator도 같은 비율로 전진시켜야
  * 다음 완료 처리 시 올바른 위치의 metadata를 가리키게 된다. bi_sector(RefTag
  * seed)도 완료된 섹터 수만큼 전진시켜, NVMe 컨트롤러가 partial completion
- * 이후에도 다음 섹터에 대한 Reference Tag를 올바르게 이어받도록 한다(추정).
+ * 이후에도 다음 섹터에 대한 Reference Tag를 올바르게 이어받도록 한다.
  * 이 함수는 blk-mq의 완료 처리 경로에서 호출되므로 소프트/하드 IRQ
  * 컨텍스트에서 실행될 수 있다.
  *
  * 호출 체인:
- *   blk_update_request (추정) → [bio_integrity_advance] → bvec_iter_advance
+ *   blk_update_request → bio_advance → bio_advance_iter
+ *     (block/bio.c:3033) → [bio_integrity_advance] → bvec_iter_advance
  */
 void bio_integrity_advance(struct bio *bio, unsigned int bytes_done)
 {
@@ -1526,7 +1566,9 @@ void bio_integrity_advance(struct bio *bio, unsigned int bytes_done)
 
 	/* [한국어] 완료된 데이터 바이트 수만큼 RefTag seed(bi_sector)를 전진 —
 	 * NVMe 컨트롤러가 partial completion 후에도 다음 섹터의 Reference Tag가
-	 * 올바르게 이어지도록 하기 위함(추정). */
+	 * 올바르게 이어지도록 하기 위함이다. RefTag는 논리 블록마다 1씩 증가하는
+	 * 값이므로, 앞부분을 소비했으면 seed도 그만큼 전진해야 남은 부분의
+	 * 기대 RefTag가 맞는다. */
 	bip->bip_iter.bi_sector += bio_integrity_intervals(bi, bytes_done >> 9);
 	/* [한국어] metadata iterator 자체(bi_size/bi_idx/bi_bvec_done)도 방금 계산한
 	 * bytes만큼 전진 — 다음 부분 완료 처리 시 정확한 위치를 가리키게 한다. */
@@ -1556,7 +1598,8 @@ void bio_integrity_advance(struct bio *bio, unsigned int bytes_done)
  * bio 분할 직후 호출되는 것이 일반적이다.
  *
  * 호출 체인:
- *   bio_split (추정) → [bio_integrity_trim] → bio_integrity_bytes
+ *   bio_split (block/bio.c:3464) / bio_trim (block/bio.c:3520)
+ *     → [bio_integrity_trim] → bio_integrity_bytes
  */
 void bio_integrity_trim(struct bio *bio)
 {
@@ -1601,11 +1644,12 @@ EXPORT_SYMBOL(bio_integrity_trim);	/* [한국어] block layer 내부 분할 경�
  * app_tag를 그대로 복사하고, bip_flags는 BIP_CLONE_FLAGS로 마스킹해 클론에도
  * 의미 있는 검증/체크섬 관련 플래그만 전파한다(예: BIP_MEMPOOL처럼 원본의
  * 버퍼 소유권과 관련된 플래그는 전파하지 않아야 이중 해제를 피할 수 있다,
- * 추정). NVMe 관점에서는 request split/clone 후에도 동일한 RefTag seed와
+ * 공유한다). NVMe 관점에서는 request split/clone 후에도 동일한 RefTag seed와
  * Guard/AppTag 검증 설정이 유지되어야 컨트롤러 검증이 일관되게 동작한다.
  *
  * 호출 체인:
- *   bio_clone_fast (추정) → [bio_integrity_clone] → bio_integrity_alloc
+ *   __bio_clone (block/bio.c:1707) → [bio_integrity_clone]
+ *     → bio_integrity_alloc
  */
 int bio_integrity_clone(struct bio *bio, struct bio *bio_src,
 			gfp_t gfp_mask)
