@@ -10,14 +10,34 @@
  * "devmaj:devmin target=<usec>" 형식으로 특정 블록 장치에 대한 지연 목표를
  * cgroup 단위로 설정하며, 이 파일이 런타임에 목표를 집행한다.
  *
+ * === 목표 지연을 지키는 방식 ===
+ * 핵심은 "위반한 cgroup을 조이는 것"이 아니라 "위반한 cgroup의 경쟁자를
+ * 조이는 것"이다. io.latency는 상한(limit)이 아니라 보호(protection) 장치라서,
+ * A가 목표를 못 지키면 A를 더 느리게 만들 이유가 없다 — 큐를 함께 쓰는
+ * 다른 그룹이 물러나야 A가 목표를 회복한다. 그래서 위반이 감지되면 자기
+ * max_depth를 건드리는 게 아니라, 부모가 들고 있는 공유 카운터
+ * child_latency_info.scale_cookie를 한 단계 내린다. 같은 부모 아래 모든
+ * 자식은 submit 때마다 check_scale_change()에서 이 쿠키를 자기 로컬 사본과
+ * 비교하고, 내려갔으면 각자 max_depth를 절반으로 줄인다(올라갔으면 qd/16씩
+ * 늘린다). 절반씩 줄이고 1/16씩 늘리는 비대칭은 의도된 것으로, 위반에는
+ * 즉시 반응하고 회복은 천천히 해서 스로틀이 진동하지 않게 한다.
+ * 쿠키를 내린 그룹은 scale_grp/scale_lat에 "이번 스로틀의 책임자"로 기록되며,
+ * 그 책임자가 다시 목표를 만족하기 전까지는 아무도 쿠키를 올릴 수 없다.
+ * max_depth가 1까지 내려가도 부족하면 두 번째 수단으로 넘어간다: 그 그룹의
+ * IO가 우선순위 역전을 피하려고 root cgroup 명의로 발행되는 경우(REQ_META,
+ * REQ_SWAP)에는 depth를 줄여 봐야 소용이 없으므로, blkcg_add_delay()로
+ * "빚"을 쌓아 두었다가 그 태스크가 유저스페이스로 돌아갈 때 실제로 재운다.
+ *
  * === 전체 아키텍처에서의 위치 ===
  * block layer IO 흐름에서 submit_bio -> blk_mq_submit_bio -> rq_qos_throttle()
- * 단계에서 blkcg_iolatency_throttle()이 호출된다. 이 시점은 NVMe SQ doorbell
- * 발행 이전으로, rq-qos가 bio 흐름을 차단하거나 통과시키는 게이트 역할을 한다.
- * bio 완료 후 ISR/softirq 경로에서 rq_qos_done_bio() -> blkcg_iolatency_done_bio()
- * 가 호출되어 지연을 측정하고 통계를 갱신한다. cgroup 계층(root까지 순회)마다
- * 독립적인 max_depth와 통계 윈도우를 가지며, 하위 cgroup의 위반이 상위에 전파된다.
- * 실행 컨텍스트: submit 경로는 사용자 태스크 컨텍스트, done_bio는 softirq/IRQ 컨텍스트.
+ * 단계에서 blkcg_iolatency_throttle()이 호출된다. request가 할당되기도 전,
+ * bio 단계에서 개입하므로 여기서 재우는 태스크는 태그나 드라이버 자원을
+ * 붙들고 있지 않다. bio 완료 후 rq_qos_done_bio() -> blkcg_iolatency_done_bio()
+ * 가 호출되어 지연을 측정하고 통계를 갱신한다. 두 콜백 모두 bio->bi_blkg에서
+ * 시작해 root까지 계층을 거슬러 올라가며 각 노드에 대해 같은 작업을 반복한다 —
+ * 목표가 설정된 노드가 계층 어디에 있든 통계가 누락되지 않게 하기 위해서다.
+ * 실행 컨텍스트: submit 경로는 사용자 태스크 컨텍스트(sleep 가능),
+ * done_bio는 softirq/IRQ 컨텍스트일 수 있어 sleep 금지.
  *
  * === 타 모듈과의 연결 ===
  * - block/blk-rq-qos.h: rq_qos, rq_qos_ops, rq_qos_wait() — QoS 프레임워크 기반.
@@ -30,8 +50,9 @@
  * - linux/sched/loadavg.h: calc_load() — CPU load average와 동일한 지수이동평균
  *   알고리즘으로 HDD IO 지연 장기 추세를 추적.
  * - 데이터 흐름: bio → (submit 경로에서 blkcg_iolatency_throttle이 max_depth 체크)
- *   → NVMe SQ doorbell → NVMe CQ 완료 → blkcg_iolatency_done_bio → 지연 통계 갱신
- *   → iolatency_check_latencies → scale_cookie_change → 자식 cgroup max_depth 조정.
+ *   → 장치 발행/완료 → blkcg_iolatency_done_bio → per-CPU 지연 통계 갱신
+ *   → (윈도우 만료 시) iolatency_check_latencies → 부모 scale_cookie 조정
+ *   → 형제 cgroup들의 check_scale_change → 각자 max_depth 조정.
  *
  * === 주요 함수/구조체 요약 ===
  * blkcg_iolatency_throttle()  — bio 제출 시 cgroup 계층을 순회하며 max_depth 대기.
@@ -108,7 +129,7 @@
  *
  * Copyright (C) 2018 Josef Bacik
  */
-#include <linux/kernel.h> /* [한국어] 커널 기본 타입/매크로(min/max, u64 등). NVMe driver와 공유되는 기초 정의 */
+#include <linux/kernel.h> /* [한국어] 커널 기본 타입/매크로(min/max, u64, div64_u64 등). 이 파일의 통계 계산이 64비트 나눗셈을 쓴다 */
 #include <linux/blk_types.h> /* [한국어] bio, request op 플래그(REQ_SWAP/REQ_META 등) 정의. 이 bio가 어떤 특성의
 			       * IO인지(스왑/메타데이터) 판별하는 데 사용 */
 #include <linux/backing-dev.h> /* [한국어] backing_dev_info 관련 정의. block layer의 writeback/dirty 상태
@@ -127,17 +148,22 @@
 				  * 발생시키지는 않지만 block core 공통 헤더로 포함된다 */
 #include <linux/blk-mq.h> /* [한국어] blk_mq_freeze_queue/unfreeze_queue, hctx 관련 정의. enabled 플래그
 			    * 토글 시 큐를 안전하게 멈추기 위해 필요 */
-#include "blk-rq-qos.h" /* rq_qos_ops, rq_qos_wait. NVMe bio path 상단 콜백 등록 */
-#include "blk-stat.h" /* blk_rq_stat. NVMe 완료 시각 통계 */
-#include "blk-cgroup.h" /* blkcg_gq, blkg_policy_data. NVMe cgroup 계층 탐색 */
-#include "blk.h" /* blk_queue_rot, QUEUE_FLAG_*. NVMe queue 상태/플래그 */
+#include "blk-rq-qos.h" /* [한국어] rq_qos_ops(.throttle/.done_bio/.exit)와 rq_wait/rq_qos_wait().
+			 * 이 파일은 rq_qos 체인의 한 노드로 등록된다 */
+#include "blk-stat.h" /* [한국어] blk_rq_stat — 회전식 미디어 모드에서 평균/표본수 기반 지연 통계에 사용 */
+#include "blk-cgroup.h" /* [한국어] blkcg_gq(= (cgroup, 디스크) 쌍)와 blkg_policy_data.
+			 * 계층을 root까지 거슬러 올라가는 순회의 기반 자료구조 */
+#include "blk.h" /* [한국어] blk_queue_rot()(회전식 여부 판별 → ssd 플래그 결정),
+		 * nr_requests 등 큐 상태 접근 */
 
 #define DEFAULT_SCALE_COOKIE 1000000U
-/* DEFAULT_SCALE_COOKIE: scale_cookie의 기본값. 이 값이면 NVMe SQ depth
- * 조정이 없는 상태. */
+/* DEFAULT_SCALE_COOKIE: scale_cookie의 기본값이자 상한. 이 값이면 스로틀이 전혀
+ * 걸려 있지 않은 상태이고, 여기서 얼마나 내려와 있는지(DEFAULT - 현재값)가
+ * 곧 "현재 얼마나 조여져 있는가"의 척도로 쓰인다. 100만이라는 큰 값을 쓰는
+ * 이유는 qd/16 같은 작은 폭으로도 여러 단계를 표현할 해상도가 필요해서다. */
 
-static struct blkcg_policy blkcg_policy_iolatency; /* blkcg policy 등록자. NVMe 디스크마다 적용 */
-struct iolatency_grp; /* 전방 선언. NVMe cgroup당 지연 제어 객체 */
+static struct blkcg_policy blkcg_policy_iolatency; /* [한국어] blkcg 정책 등록자. cgroup 계층 각 노드에 iolatency_grp을 붙이는 주체 */
+struct iolatency_grp; /* [한국어] 전방 선언 — (cgroup, 디스크) 쌍마다 하나씩 존재하는 지연 제어 객체 */
 
 struct blk_iolatency {
 	struct rq_qos rqos;
@@ -149,9 +175,9 @@ struct blk_iolatency {
 	 *          submit 경로(blkcg_iolatency_throttle)와 완료 경로
 	 *          (blkcg_iolatency_done_bio)에서 매 bio마다 이 경로로 접근한다.
 	 * 값 범위: rq_qos_add() 성공 이후 유효. .throttle/.done_bio/.exit 콜백이
-	 *          blkcg_iolatency_ops로 고정되어 NVMe submit_bio 경로 상단에서
+	 *          blkcg_iolatency_ops로 고정되어 submit_bio 경로에서
 	 *          훅 지점을 제공한다. 실제 completion은 bio 계층에서 일어나므로,
-	 *          NVMe CQ 인터럽트 처리보다 한 단계 위에서 연결된다.
+	 *          bio 완료 처리 경로와 연결된다.
 	 * 동기화: 큐(disk) 생명주기와 함께 관리되며, rq_qos 리스트 자체의 조작은
 	 *         q->rq_qos_mutex로 보호된다(blk-rq-qos.c 참고). */
 	struct timer_list timer;
@@ -222,7 +248,7 @@ static inline struct blk_iolatency *BLKIOLATENCY(struct rq_qos *rqos)
 {
 	return container_of(rqos, struct blk_iolatency, rqos);
 	/* [한국어] rqos 필드의 오프셋만큼 주소를 빼서 blk_iolatency 시작 주소를 계산.
-	 * NVMe queue(gendisk)당 하나씩 존재하는 iolatency 인스턴스를 얻는다. */
+	 * gendisk당 하나씩 존재하는 iolatency 인스턴스를 얻는다. */
 }
 
 struct child_latency_info {
@@ -234,7 +260,7 @@ struct child_latency_info {
 	 *          감싸고, iolatency_clear_scaling()이 target 변경 시 리셋할 때도 사용.
 	 * 값 범위: 잠김/풀림 두 상태.
 	 * 동기화: irqsave 변형을 사용하는 이유는 blkcg_iolatency_done_bio()가
-	 *         IRQ/softirq 컨텍스트(NVMe CQ 완료 처리 경로)에서 호출될 수 있어
+	 *         IRQ/softirq 컨텍스트(bio 완료 처리 경로)에서 호출될 수 있어
 	 *         일반 spin_lock()만 쓰면 자기 자신과 데드락이 발생하기 때문이다. */
 
 	/* Last time we adjusted the scale of everybody. */
@@ -246,8 +272,8 @@ struct child_latency_info {
 	 *          이내 재조정을 막는 디바운스 기준으로 비교하고, blkiolatency_timer_fn()이
 	 *          5초 이상 경과 시 scale_grp을 지우는 기준으로 사용.
 	 * 값 범위: 0(미조정) 또는 blk_time_get_ns() 스케일의 절대 시각.
-	 * 동기화: lock으로 보호되는 영역 내에서만 읽고 쓴다. NVMe SQ depth가
-	 *         너무 자주 출렁이지 않도록 하는 디바운스 타이머 역할. */
+	 * 동기화: lock으로 보호되는 영역 내에서만 읽고 쓴다. max_depth가
+	 *         너무 자주 출렁이지 않도록 하는 디바운스 기준 역할. */
 
 	/* The latency that we missed. */
 	u64 scale_lat;
@@ -298,15 +324,20 @@ struct child_latency_info {
 	 * 읽는 자: 모든 자식의 check_scale_change()가 atomic_read()로 자신의 로컬
 	 *          사본(iolat->scale_cookie)과 비교해 증가/감소 방향을 판단.
 	 * 값 범위: 0 ~ DEFAULT_SCALE_COOKIE(1,000,000) 부근. DEFAULT_SCALE_COOKIE이면
-	 *          제한 없음(NVMe SQ depth 무제한), 작을수록 강한 스로틀을 의미.
+	 *          제한 없음(max_depth를 줄일 이유가 없음), 작을수록 강한 스로틀을 의미.
 	 * 동기화: atomic_t 및 atomic_try_cmpxchg(check_scale_change)로 다수의 자식
 	 *         cgroup이 동시에 submit 경로에서 이 값을 읽고 자신의 사본을
 	 *         갱신해도 안전하다. */
 };
 
+/* [한국어] percentile_stats — 비회전식 미디어에서 쓰는 "몇 %가 목표를 놓쳤나" 방식의
+ * 통계. 평균이 아니라 위반 건수 비율을 보는 이유는, 쓰기가 유난히 빨리 끝나는
+ * 장치에서 평균만 보면 소수의 느린 읽기가 평균에 묻혀 실제 압박을 놓치기
+ * 때문이다(파일 상단 원문 주석의 설명). 필드가 두 개뿐이라 완료 경로에서
+ * 갱신 비용이 사실상 증가 연산 두 번으로 끝난다. */
 struct percentile_stats {
 	u64 total;
-	/* [한국어] NVMe SSD 모드에서 이 cgroup의 전체 완료 IO 개수 (CQ 항목 수).
+	/* [한국어] 비회전식(ssd=true) 모드에서 이 cgroup의 전체 완료 IO 개수.
 	 * 설정자: latency_stat_record_time()에서 per-CPU stat에 1씩 증가.
 	 * 읽는 자: latency_sum_ok()에서 miss 허용 threshold(total/10) 계산에 사용.
 	 *         latency_stat_samples()에서 샘플 수로 반환.
@@ -322,13 +353,15 @@ struct percentile_stats {
 	 * 동기화: total과 동일 — per-CPU 쓰기, preempt_disable 하에 집계. */
 };
 
+/* [한국어] 아래 union은 ssd 플래그 하나로 두 통계 방식을 배타적으로 고른다.
+ * 이 구조체가 per-CPU 배열로 CPU 수만큼 복제되기 때문에 크기가 곧 비용이다. */
 struct latency_stat {
 /* [한국어] latency_stat: iolatency_grp->ssd 플래그에 따라 두 통계 방식 중
  * 하나만 유효하게 사용하는 union. 두 방식을 함께 사용하지 않으므로 메모리를
  * 공유해도 되며, 이는 per-CPU 배열(iolat->stats)의 크기를 절반으로 줄인다. */
 	union {
 		struct percentile_stats ps;
-		/* [한국어] percentile_stats: NVMe SSD 등 비회전식(non-rotational) 미디어용.
+		/* [한국어] percentile_stats: 비회전식(non-rotational) 미디어용.
 		 * 설정자/읽는 자: iolat->ssd == true일 때만 latency_stat_init/sum/
 		 *          record_time/samples/ok 계열 헬퍼가 이 멤버를 사용.
 		 * 값 범위: total/missed 카운터 쌍(struct percentile_stats 정의 참고).
@@ -338,13 +371,19 @@ struct latency_stat {
 		/* [한국어] blk_rq_stat: HDD 등 회전식(rotational) 미디어용 평균/분산 통계
 		 * (block/blk-stat.h 정의, 커널 공통 IO 통계 헬퍼).
 		 * 설정자/읽는 자: iolat->ssd == false일 때만 blk_rq_stat_init/add/sum이
-		 *          이 멤버를 사용. NVMe는 통상 ssd=true이므로 이 경로는 거의
+		 *          이 멤버를 사용. SSD류는 ssd=true이므로 이 경로는 거의
 		 *          사용되지 않는다(HDD 백엔드를 가진 blk-iolatency 사용자용).
 		 * 값 범위: mean/nr_samples 등(blk_rq_stat 정의 참고).
 		 * 동기화: ps와 동일 — union 멤버는 상호 배타적으로만 사용된다. */
 	};
 };
 
+/* [한국어] iolatency_grp — (cgroup, 디스크) 쌍 하나에 대한 이 정책의 전체 상태.
+ * blkcg 코어가 계층의 각 노드마다 하나씩 붙여 주며(pd_alloc/pd_init),
+ * 목표 지연(min_lat_nsec), 집행 수단(max_depth, rq_wait), 관측 수단
+ * (per-CPU stats, cur_stat), 그리고 자기 자식들을 조율하기 위한 공유 상태
+ * (child_lat)를 한 덩어리로 들고 있다. 목표가 설정되지 않은 노드도 객체는
+ * 존재하며(min_lat_nsec==0), 통계 순회의 통과 지점 역할만 한다. */
 struct iolatency_grp {
 	struct blkg_policy_data pd;
 	/* [한국어] blkcg policy 공통 헤더(block/blk-cgroup.h). 이 필드를 통해
@@ -368,9 +407,9 @@ struct iolatency_grp {
 	 *          iolatency_check_latencies()/iolatency_ssd_stat()이
 	 *          for_each_online_cpu()로 전체 CPU를 순회하며 합산 후 리셋.
 	 * 값 범위: 각 온라인 CPU마다 독립된 struct latency_stat 인스턴스.
-	 *          NVMe 완료 인터럽트가 어느 CPU에서 처리되는지에 따라 값이
+	 *          완료 인터럽트가 어느 CPU에서 처리되는지에 따라 값이
 	 *          분산되어 쌓인다 — 완료가 어느 CPU에서 처리되는지에 따라 갈리며,
-	 *          NVMe에서는 MSI-X affinity가 그것을 결정한다.
+	 *          보통 인터럽트 affinity 설정이 그것을 결정한다.
 	 * 동기화: per-CPU 변수 자체가 CPU 간 경쟁을 없애며, get_cpu_ptr()은
 	 *         호출 동안 preemption을 비활성화해 같은 CPU 내 마이그레이션을
 	 *         막는다. 집계 측은 preempt_disable()로 순회 중 CPU 이동을 막는다. */
@@ -398,7 +437,7 @@ struct iolatency_grp {
 	 * 동기화: 별도 락 없음 — 포인터 자체는 iolatency_pd_init() 이후 불변. */
 	unsigned int max_depth;
 	/* [한국어] 이 cgroup이 동시에 inflight로 가질 수 있는 최대 IO 수.
-	 * NVMe SQ(Submission Queue) 깊이 제한에 해당하는 소프트웨어 상의 값이다.
+	 * 장치 큐 깊이와는 무관한, 이 cgroup 전용의 순수 소프트웨어 상한이다.
 	 * 설정자: iolatency_pd_init()이 UINT_MAX(무제한)로 초기화. scale_change()가
 	 *         scale up/down 시 조정하고, check_scale_change()가 DEFAULT_SCALE_COOKIE
 	 *         복귀 시 UINT_MAX로 되돌린다.
@@ -449,7 +488,7 @@ struct iolatency_grp {
 	 * 읽는 자: iolatency_record_time()이 통계 기록 여부/root 대납 시 delay 계산에,
 	 *          latency_stat_record_time()이 SSD miss 판정 기준으로,
 	 *          check_scale_change()가 scale_lat과 비교해 자신이 영향받는지 판단.
-	 * 값 범위: 0(비활성, 이 cgroup은 목표 없음) 또는 양수 nsec 값. NVMe SSD의
+	 * 값 범위: 0(비활성, 이 cgroup은 목표 없음) 또는 양수 nsec 값. 빠른 장치의
 	 *          전형적 목표는 수백 us ~ 수 ms 수준이다.
 	 * 동기화: 별도 락 없이 갱신 — 갱신 시점에 iolatency_clear_scaling()으로
 	 *         관련 scale 상태를 함께 리셋해 일관성을 맞춘다. */
@@ -461,7 +500,7 @@ struct iolatency_grp {
 	 * 읽는 자: blkcg_iolatency_done_bio()가 윈도우 만료 판정에,
 	 *          iolat_update_total_lat_avg()가 decay 계수 선택에 사용.
 	 * 값 범위: BLKIOLATENCY_MIN_WIN_SIZE(100ms) ~ BLKIOLATENCY_MAX_WIN_SIZE(1s).
-	 *          NVMe SSD처럼 목표 지연이 매우 짧아도 최소 100ms는 보장해
+	 *          목표 지연이 매우 짧아도 최소 100ms는 보장해
 	 *          충분한 샘플을 모은다.
 	 * 동기화: min_lat_nsec과 동일한 시점에 갱신되며 별도 락 불필요. */
 
@@ -470,7 +509,7 @@ struct iolatency_grp {
 	/* [한국어] calc_load()(linux/sched/loadavg.h, CPU load average와 동일한
 	 * 지수 이동 평균 알고리즘) 기반 HDD 모드 전용 장기 평균 지연.
 	 * 설정자: iolat_update_total_lat_avg()가 매 윈도우마다 calc_load()로 갱신
-	 *         (ssd == true인 NVMe/SSD에서는 조기 반환하여 갱신되지 않음).
+	 *         (ssd == true이면 조기 반환하여 갱신되지 않음).
 	 * 읽는 자: iolatency_pd_stat()이 디버그 통계(avg_lat)로 seq_file에 출력.
 	 * 값 범위: 0 ~ 임의의 nsec 값. HDD의 완만한 지연 추세를 반영.
 	 * 동기화: iolatency_check_latencies() 호출 경로(child_lat.lock 보호 구간)
@@ -487,14 +526,14 @@ struct iolatency_grp {
 	 * 동기화: 부모의 child_lat.lock 보호 구간 내에서만 갱신. */
 
 	bool ssd;
-	/* [한국어] 이 cgroup이 속한 큐가 비회전식 미디어(SSD/NVMe)인지 여부.
+	/* [한국어] 이 cgroup이 속한 큐가 비회전식 미디어인지 여부.
 	 * 설정자: iolatency_pd_init()이 !blk_queue_rot(blkg->q)로 1회 결정
 	 *         (이후 변경되지 않음).
 	 * 읽는 자: latency_stat_init/sum/record_time/samples, latency_sum_ok,
 	 *          iolat_update_total_lat_avg, iolatency_pd_stat 등 거의 모든
 	 *          통계 헬퍼가 분기 조건으로 사용 — true면 percentile(missed/total
 	 *          비율) 방식, false면 평균(mean) 방식.
-	 * 값 범위: true(NVMe 등 SSD, percentile 방식) / false(HDD, 평균 방식).
+	 * 값 범위: true(SSD 등, percentile 방식) / false(회전식, 평균 방식).
 	 * 동기화: 초기화 후 불변이므로 락 불필요. */
 	struct child_latency_info child_lat;
 	/* [한국어] 이 cgroup이 "부모" 입장에서 자신의 직계 자식들의 scale 상태를
@@ -510,7 +549,7 @@ struct iolatency_grp {
 };
 
 #define BLKIOLATENCY_MIN_WIN_SIZE (100 * NSEC_PER_MSEC)
-/* [한국어] 통계 윈도우의 최소 크기(100ms). NVMe SSD처럼 목표 지연이 매우 짧을 때도
+/* [한국어] [한국어] 통계 윈도우의 최소 크기(100ms). 목표 지연이 매우 짧을 때도
  * 이보다 작은 윈도우는 표본이 너무 적어 통계적으로 의미가 없어질 수 있어 하한을 둔다. */
 #define BLKIOLATENCY_MAX_WIN_SIZE NSEC_PER_SEC
 /* [한국어] 통계 윈도우의 최대 크기(1초). 이보다 큰 윈도우는 SLO 위반을 감지하고
@@ -625,7 +664,7 @@ static inline struct blkcg_gq *lat_to_blkg(struct iolatency_grp *iolat)
  * @return: 없음(void).
  *
  * ssd(비회전식 미디어) 여부에 따라 두 union 멤버 중 실제 사용 중인 쪽만
- * 초기화한다. NVMe SSD는 percentile_stats(total/missed 카운터 쌍)를,
+ * 초기화한다. 비회전식은 percentile_stats(total/missed 카운터 쌍)를,
  * HDD는 blk_rq_stat_init()으로 평균/분산 통계를 초기화한다. 새 통계
  * 윈도우를 시작하기 전(iolatency_pd_init, iolatency_check_latencies)이나
  * per-CPU 배열을 처음 할당한 직후(iolatency_pd_alloc 이후) 호출되어
@@ -640,14 +679,16 @@ static inline void latency_stat_init(struct iolatency_grp *iolat,
 				     struct latency_stat *stat)
 {
 	if (iolat->ssd) {
+		/* [한국어] 비회전식: 완료 건수 카운터를 0으로 리셋. 윈도우마다 통계를
+		 * 통째로 비우는 이유는, 이 판정이 '지금까지 누적'이 아니라
+		 * '최근 한 윈도우 동안'의 상태를 봐야 하기 때문이다 */
 		stat->ps.total = 0;
-		/* [한국어] NVMe SSD: 완료된 CQ(Completion Queue) 항목 수 카운터를 0으로 리셋 */
 		stat->ps.missed = 0;
-		/* [한국어] NVMe SSD: 목표 지연(min_lat_nsec)을 초과한 완료 수 카운터를 0으로 리셋 */
+		/* [한국어] 비회전식: 목표 지연(min_lat_nsec)을 초과한 완료 수 카운터를 0으로 리셋 */
 	} else
 		blk_rq_stat_init(&stat->rqs);
 		/* [한국어] HDD: 평균/분산 통계 버퍼를 0으로 초기화(block/blk-stat.c 구현).
-		 * NVMe(ssd==true) 경로에서는 이 분기를 타지 않는다. */
+		 * ssd==true 경로에서는 이 분기를 타지 않는다. */
 }
 
 /*
@@ -660,7 +701,7 @@ static inline void latency_stat_init(struct iolatency_grp *iolat,
  * @return: 없음(void). 결과는 sum에 누적된다(sum = sum + stat).
  *
  * per-CPU로 분산 기록된 통계를 하나의 윈도우 집계로 병합할 때 사용된다.
- * NVMe SSD는 missed/total을 단순 누적하고, HDD는 blk_rq_stat_sum()으로
+ * 비회전식은 missed/total을 단순 누적하고, 회전식은 blk_rq_stat_sum()으로
  * 평균/분산을 통계적으로 병합한다(단순 합산이 아니라 표본 수 가중 병합).
  *
  * 호출 체인:
@@ -671,14 +712,16 @@ static inline void latency_stat_sum(struct iolatency_grp *iolat,
 				    struct latency_stat *stat)
 {
 	if (iolat->ssd) {
+		/* [한국어] percentile 방식은 단순 카운터라 그냥 더하면 된다 —
+		 * 평균처럼 표본 수 가중이 필요 없다 */
 		sum->ps.total += stat->ps.total;
-		/* [한국어] NVMe: 여러 CPU에서 각각 집계된 완료(CQ) 카운트를 합산.
+		/* [한국어] 여러 CPU에서 각각 집계된 완료 카운트를 합산.
 		 * CPU별로 쌓인 값을 하나의 전역 합계로 모으는 단계다. */
 		sum->ps.missed += stat->ps.missed;
-		/* [한국어] NVMe: 여러 CPU에서 각각 집계된 min_lat_nsec 초과 완료 수를 합산 */
+		/* [한국어] 여러 CPU에서 각각 집계된 min_lat_nsec 초과 완료 수를 합산 */
 	} else
 		blk_rq_stat_sum(&sum->rqs, &stat->rqs);
-		/* [한국어] HDD: 평균 통계를 표본 수 가중으로 병합. NVMe SSD 경로와는 무관 */
+		/* [한국어] 회전식: 평균 통계를 표본 수 가중으로 병합 (ssd 경로와는 배타적) */
 }
 
 /*
@@ -696,12 +739,12 @@ static inline void latency_stat_sum(struct iolatency_grp *iolat,
  * get_cpu_ptr()로 현재 실행 중인 CPU 전용 슬롯을 얻어 preemption을 끈 채
  * 갱신함으로써, 같은 CPU 내에서의 갱신 도중 다른 태스크로 선점되어 슬롯이
  * 바뀌는 것을 막는다(다른 CPU와의 경쟁은애초에 슬롯이 분리되어 있어 발생하지
- * 않는다). NVMe SSD는 req_time이 min_lat_nsec(목표 지연) 이상이면 missed를
+ * 않는다). 비회전식은 req_time이 min_lat_nsec(목표 지연) 이상이면 missed를
  * 증가시켜 SLO 위반 여부를 기록하고, 항상 total을 증가시킨다. 이 missed/total
  * 비율이 이후 latency_sum_ok()의 판단 근거가 된다. HDD는 blk_rq_stat_add()로
  * 평균/분산 계산에 표본을 추가한다.
  * 실행 컨텍스트: blkcg_iolatency_done_bio()의 완료 경로(통상 softirq/IRQ
- * 컨텍스트 — NVMe라면 CQ 인터럽트 처리에서 이어진 bio 완료 시점)에서 호출된다.
+ * 컨텍스트 — 장치 완료 인터럽트에서 이어진 bio 완료 시점)에서 호출된다.
  *
  * 호출 체인:
  *   blkcg_iolatency_done_bio() → iolatency_record_time() → [latency_stat_record_time]
@@ -714,16 +757,18 @@ static inline void latency_stat_record_time(struct iolatency_grp *iolat,
 	 * 비활성화한다. 이 사이 다른 CPU로 마이그레이션되면 잘못된 CPU의 카운터를
 	 * 갱신하게 되므로 반드시 필요하다. */
 	if (iolat->ssd) {
+		/* [한국어] 비회전식: 목표 지연(SLO)을 초과했으므로 miss 카운터 증가.
+		 * 이 비율이 10%를 넘으면 latency_sum_ok()가 false를 반환해 scale down 트리거가 됨.
+		 * '>='인 이유: 목표와 정확히 같은 시간이 걸린 IO도 목표를 지킨 것으로
+		 * 쳐 주지 않는다 — 경계에서 관대하게 굴면 목표가 사실상 목표+1이 된다 */
 		if (req_time >= iolat->min_lat_nsec)
 			stat->ps.missed++;
-		/* [한국어] NVMe SSD: 목표 지연(SLO)을 초과했으므로 miss 카운터 증가.
-		 * 이 비율이 10%를 넘으면 latency_sum_ok()가 false를 반환해 scale down 트리거가 됨 */
 		stat->ps.total++;
-		/* [한국어] NVMe SSD: 총 완료 카운터 증가. total이 여전히 0이면
+		/* [한국어] 비회전식: 총 완료 카운터 증가. total이 여전히 0이면
 		 * latency_sum_ok()에서 threshold가 1로 보정되어 division-by-zero를 피한다 */
 	} else
 		blk_rq_stat_add(&stat->rqs, req_time);
-		/* [한국어] HDD: 평균/분산 계산기에 req_time 표본 추가. NVMe path에서는 사용 안 함 */
+		/* [한국어] 회전식: 평균/분산 계산기에 req_time 표본 추가 (ssd 경로에서는 사용 안 함) */
 	put_cpu_ptr(stat);
 	/* [한국어] get_cpu_ptr()로 비활성화했던 preemption을 복원. 짧은 임계 구역
 	 * 동안만 마이그레이션을 막는 표준 per-CPU 접근 패턴이다. */
@@ -738,7 +783,7 @@ static inline void latency_stat_record_time(struct iolatency_grp *iolat,
  * @return: true면 SLO 만족(스로틀 유지/완화 검토 가능), false면 SLO 위반
  *          (scale down 검토 대상).
  *
- * NVMe SSD는 missed(SLO 초과 건수)가 total(전체 건수)의 10% 미만이면 OK로
+ * 비회전식은 missed(SLO 초과 건수)가 total(전체 건수)의 10% 미만이면 OK로
  * 판단하는 percentile 기반 판정을 쓴다. total이 10 미만이라 10%가 1보다
  * 작아지는 경우에도 threshold를 최소 1로 강제해, IO가 거의 없는 상황에서
  * 단 한 번의 miss로 성급하게 scale down되지 않게 한다(그러나 여전히 miss가
@@ -752,18 +797,21 @@ static inline bool latency_sum_ok(struct iolatency_grp *iolat,
 				  struct latency_stat *stat)
 {
 	if (iolat->ssd) {
+		/* [한국어] total의 10%를 miss 허용 임계값으로 계산. SLO 위반율이
+		 * 10% 미만이면 OK로 간주한다는 설계다 — 목표 지연을 100% 지키라고
+		 * 요구하면 꼬리 지연 한 건에도 스로틀이 걸려 실용성이 없어진다.
+		 * div64_u64를 쓰는 이유는 32비트 아키텍처에서 u64 나눗셈이
+		 * 컴파일되지 않기 때문(커널은 libgcc를 링크하지 않는다) */
 		u64 thresh = div64_u64(stat->ps.total, 10);
-		/* [한국어] NVMe: total의 10%를 miss 허용 임계값으로 계산. SLO 위반율이
-		 * 10% 미만이면 OK로 간주한다는 설계다 */
 		thresh = max(thresh, 1ULL);
 		/* [한국어] total이 0~9여서 계산된 threshold가 0이면 1로 강제.
-		 * NVMe IO가 극히 적을 때도 판정 로직이 division 결과 0으로 인해
+		 * IO가 극히 적을 때도 판정 로직이 division 결과 0으로 인해
 		 * 무의미해지는 것을 막는다 */
 		return stat->ps.missed < thresh;
 		/* [한국어] missed가 threshold 미만이면 SLO 만족(true), 이상이면 위반(false) */
 	}
 	return stat->rqs.mean <= iolat->min_lat_nsec;
-	/* [한국어] HDD: 평균 지연이 목표(min_lat_nsec) 이하이면 OK. NVMe SSD는
+	/* [한국어] 회전식: 평균 지연이 목표(min_lat_nsec) 이하이면 OK. 비회전식은
 	 * percentile 방식을 쓰므로 이 줄에 도달하지 않는다 */
 }
 
@@ -773,7 +821,7 @@ static inline bool latency_sum_ok(struct iolatency_grp *iolat,
  *
  * @iolat: ssd 플래그 판별용 iolatency_grp.
  * @stat: 표본 수를 조회할 대상 latency_stat.
- * @return: NVMe SSD는 total(완료 건수), HDD는 rqs.nr_samples.
+ * @return: 비회전식은 total(완료 건수), 회전식은 rqs.nr_samples.
  *
  * check_scale_change()의 5% 기여도 판정, iolatency_check_latencies()의
  * BLKIOLATENCY_MIN_GOOD_SAMPLES(5개) 최소 표본 판정 등, "이 cgroup이 최근
@@ -785,11 +833,11 @@ static inline bool latency_sum_ok(struct iolatency_grp *iolat,
 static inline u64 latency_stat_samples(struct iolatency_grp *iolat,
 				       struct latency_stat *stat)
 {
-	if (iolat->ssd)
+	if (iolat->ssd) /* [한국어] 두 모드가 '표본 수'를 서로 다른 필드에 들고 있어 이 래퍼가 필요하다 */
 		return stat->ps.total;
-		/* [한국어] NVMe SSD: 완료된 건수(total)를 그대로 표본 수로 사용 */
+		/* [한국어] 비회전식: 완료된 건수(total)를 그대로 표본 수로 사용 */
 	return stat->rqs.nr_samples;
-	/* [한국어] HDD: blk_rq_stat이 자체적으로 관리하는 표본 수. NVMe path와 무관 */
+	/* [한국어] 회전식: blk_rq_stat이 자체적으로 관리하는 표본 수 (ssd 경로와는 배타적) */
 }
 
 /*
@@ -804,7 +852,7 @@ static inline u64 latency_stat_samples(struct iolatency_grp *iolat,
  * sched/loadavg.h)을 재사용해, 매 윈도우의 평균 지연(stat->rqs.mean)을
  * 장기 추세(lat_avg)에 반영한다. 윈도우 크기(cur_win_nsec)에 따라 decay
  * 계수(iolatency_exp_factors[])를 다르게 선택해, "1분 ~ 2.5분" 정도의
- * 반감기를 갖도록 설계되었다(주석 원문 참고). NVMe SSD는 percentile 방식을
+ * 반감기를 갖도록 설계되었다(주석 원문 참고). 비회전식은 percentile 방식을
  * 쓰므로 이 함수는 아무 일도 하지 않고 조기 반환한다.
  *
  * 호출 체인:
@@ -813,11 +861,11 @@ static inline u64 latency_stat_samples(struct iolatency_grp *iolat,
 static inline void iolat_update_total_lat_avg(struct iolatency_grp *iolat,
 					      struct latency_stat *stat)
 {
-	int exp_idx;
+	int exp_idx; /* [한국어] 아래에서 고를 감쇠 상수(EMA 계수) 테이블 인덱스 */
 
-	if (iolat->ssd)
+	if (iolat->ssd) /* [한국어] percentile 모드에는 장기 평균이라는 개념 자체가 없다 */
 		return;
-		/* [한국어] NVMe SSD는 percentile(missed/total) 방식으로 판단하므로
+		/* [한국어] 비회전식은 percentile(missed/total) 방식으로 판단하므로
 		 * 장기 평균(lat_avg) 갱신이 불필요 — 즉시 반환 */
 
 	/*
@@ -832,7 +880,7 @@ static inline void iolat_update_total_lat_avg(struct iolatency_grp *iolat,
 				  BLKIOLATENCY_EXP_BUCKET_SIZE));
 	/* [한국어] 현재 윈도우 크기(cur_win_nsec)를 BLKIOLATENCY_EXP_BUCKET_SIZE
 	 * 단위로 나눠 decay 계수 배열의 인덱스를 선택. 상한을 NR_EXP_FACTORS-1로
-	 * 클램프해 배열 범위를 벗어나지 않게 한다. (HDD 전용 경로이므로 NVMe에서는
+	 * 클램프해 배열 범위를 벗어나지 않게 한다. (회전식 전용 경로이므로 ssd 모드에서는
 	 * 도달하지 않음) */
 	iolat->lat_avg = calc_load(iolat->lat_avg,
 				   iolatency_exp_factors[exp_idx],
@@ -855,8 +903,8 @@ static inline void iolat_update_total_lat_avg(struct iolatency_grp *iolat,
  * rq_qos_wait()(block/blk-rq-qos.c)의 프레임워크 계약: acquire_inflight_cb가
  * 실패해 대기열에 들어갔던 요청이 깨어날 때(다시 시도하기 위해), 이미
  * iolat_acquire_inflight()가 낙관적으로 증가시켰을 수 있는 inflight를 원복하기
- * 위해 호출된다. 대기 시도 자체는 SQ(Submission Queue) 슬롯을 차지하지
- * 않았던 것으로 간주해야 하므로 감소 후 다른 대기자를 깨운다.
+ * 위해 호출된다. 대기하다 취소된 요청은 아직 아무것도 발행하지
+ * 않았으므로 in-flight로 세면 안 되고, 그래서 감소 후 다른 대기자를 깨운다.
  * 실행 컨텍스트: rq_qos_wait() 내부 루프에서 호출되며, 제출 태스크 컨텍스트에서
  * 실행된다.
  *
@@ -875,7 +923,7 @@ static void iolat_cleanup_cb(struct rq_wait *rqw, void *private_data)
 
 /*
  * [한국어]
- * iolat_acquire_inflight - max_depth(SQ depth 상당) 여유가 있으면 inflight
+ * iolat_acquire_inflight - max_depth 여유가 있으면 inflight
  * 슬롯을 획득 시도하는 rq_qos_wait() 콜백.
  *
  * @rqw: 이 cgroup의 iolat->rq_wait.
@@ -894,10 +942,13 @@ static void iolat_cleanup_cb(struct rq_wait *rqw, void *private_data)
 static bool iolat_acquire_inflight(struct rq_wait *rqw, void *private_data)
 {
 	struct iolatency_grp *iolat = private_data;
+	/* [한국어] max_depth를 매번 다시 읽는 것이 중요하다 — 대기 중에도
+	 * check_scale_change()가 이 값을 늘려 줄 수 있고, 그러면 잠들었던
+	 * 태스크가 깨어나 그 자리에서 통과하게 된다 */
 	return rq_wait_inc_below(rqw, iolat->max_depth);
 	/* [한국어] atomic_cmpxchg() 루프 기반으로 inflight < max_depth이면 슬롯을
-	 * 획득(inflight++, true). NVMe SQ가 꽉 찬 것과 유사한 상태(max_depth
-	 * 도달)이면 false를 반환해 rq_qos_wait()가 이 bio를 대기시킨다 */
+	 * 획득(inflight++, true). 한도에 도달했으면(max_depth
+	 * 이상) false를 반환해 rq_qos_wait()가 이 bio를 대기시킨다 */
 }
 
 /*
@@ -939,6 +990,9 @@ static void __blkcg_iolatency_throttle(struct rq_qos *rqos,
 				       bool use_memdelay)
 {
 	struct rq_wait *rqw = &iolat->rq_wait;
+	/* [한국어] atomic_read인 이유: use_delay는 완료 경로(blkcg_add_delay)와
+	 * 타이머(blkiolatency_timer_fn)가 락 없이 갱신하는 값이라, 여기서는
+	 * 찢어지지 않은 스냅샷 하나만 얻으면 충분하다 */
 	unsigned use_delay = atomic_read(&lat_to_blkg(iolat)->use_delay);
 	/* [한국어] 이 blkcg에 현재 누적된 지연 사용량(use_delay 카운트)을 읽는다.
 	 * max_depth가 1까지 줄었는데도 더 스로틀해야 할 때 이 카운트가 커진다 */
@@ -946,7 +1000,7 @@ static void __blkcg_iolatency_throttle(struct rq_qos *rqos,
 	if (use_delay)
 		blkcg_schedule_throttle(rqos->disk, use_memdelay);
 		/* [한국어] use_delay > 0이면 memory.delay 서브시스템에 지연 예약
-		 * (linux/memcontrol.h). SQ depth를 더 줄일 수 없을 때 사용자 공간
+		 * (linux/memcontrol.h). max_depth를 더 줄일 수 없을 때 사용자 공간
 		 * 반환 시점에 직접 지연을 부과하는 2차 스로틀 수단 */
 
 	/*
@@ -960,10 +1014,13 @@ static void __blkcg_iolatency_throttle(struct rq_qos *rqos,
 		atomic_inc(&rqw->inflight);
 		/* [한국어] root 발행(우선순위 역전 방지) 또는 OOM kill 시그널 대기 중이면
 		 * 대기 없이 즉시 inflight 슬롯을 강제로 차지하고 진행시킨다.
-		 * 실제 NVMe 태그/CID 할당은 이후 하위 계층(blk-mq)에서 이뤄진다 */
+		 * 실제 request/태그 할당은 이후 하위 계층(blk-mq)에서 이뤄진다 */
 		return;
 	}
 
+	/* [한국어] 여기서 잠드는 것이 이 정책의 유일한 '직접적인' 스로틀 행위다.
+	 * 지연을 인위적으로 넣는 게 아니라, 동시 진행 bio 수를 묶어 두면
+	 * 장치 큐에서의 경쟁이 줄고 그 결과로 지연이 내려간다 */
 	rq_qos_wait(rqw, iolat, iolat_acquire_inflight, iolat_cleanup_cb);
 	/* [한국어] max_depth 여유가 생길 때까지 잠들어 기다린다(iolat_acquire_inflight가
 	 * true를 반환할 때까지). 이 대기 시간만큼 bio 제출이 늦춰져 평균 완료
@@ -987,7 +1044,7 @@ static void __blkcg_iolatency_throttle(struct rq_qos *rqos,
  * @return: 계산된 변화량. 단, 최소 1은 보장(0이 되어 변화가 없어지는 것 방지).
  *
  * scale up은 1/16씩 천천히, scale down은 1/4씩 빠르게 조정되도록 시프트양을
- * 다르게 두어 비대칭 반응 곡선을 만든다. 이는 "SQ(Submission Queue) depth를
+ * 다르게 두어 비대칭 반응 곡선을 만든다. 이는 "허용 깊이를
  * 기본 무제한에서 목표치까지는 빠르게 줄이되, 회복은 신중하게 조금씩"이라는
  * 설계 의도를 구현한 것이다(원문 주석 "Change the queue depth..." 참고).
  *
@@ -999,7 +1056,7 @@ static inline unsigned long scale_amount(unsigned long qd, bool up)
 	return max(up ? qd >> SCALE_UP_FACTOR : qd >> SCALE_DOWN_FACTOR, 1UL);
 	/* [한국어] up이면 qd/16, 아니면 qd/4를 계산하고 최소 1UL로 하한을 둔다.
 	 * qd가 매우 작을 때(시프트 결과가 0) 변화량이 완전히 사라지는 것을 방지 —
-	 * NVMe SQ depth가 아주 얕아도 scale이 계속 진행될 수 있게 함 */
+	 * nr_requests가 아주 작아도(qd/16 = 0) scale이 멈추지 않게 함 */
 }
 
 /*
@@ -1016,7 +1073,7 @@ static inline unsigned long scale_amount(unsigned long qd, bool up)
  * scale_cookie_change - 부모 child_latency_info.scale_cookie를 한 단계
  * 증가/감소시켜 자식들에게 scale 방향을 전파할 준비를 한다.
  *
- * @blkiolat: 큐 전체 nr_requests(SQ depth 상한 근사치)를 얻기 위한 blk_iolatency.
+ * @blkiolat: 큐 전체 nr_requests(스케일 폭 계산의 기준값)를 얻기 위한 blk_iolatency.
  * @lat_info: 조정 대상 scale_cookie를 담고 있는 부모의 child_latency_info.
  * @up: true면 scale up(qd/16씩 증가 방향), false면 scale down(qd/4씩 감소 방향).
  * @return: 없음(void). lat_info->scale_cookie가 갱신된다.
@@ -1041,8 +1098,9 @@ static void scale_cookie_change(struct blk_iolatency *blkiolat,
 				bool up)
 {
 	unsigned long qd = blkiolat->rqos.disk->queue->nr_requests;
-	/* [한국어] 큐 전체 nr_requests를 SQ depth 상한 근사치로 사용. 실제 NVMe
-	 * 하드웨어 큐 깊이는 이보다 작을 수 있다(소프트웨어 상한일 뿐) */
+	/* [한국어] 큐 전체 nr_requests를 스케일 폭의 기준으로 삼는다. 하드웨어
+	 * 큐 깊이가 아니라 blk-mq가 허용하는 소프트웨어 request 수이며,
+	 * 여기서는 "이 큐의 규모"를 나타내는 척도로만 쓰인다 */
 	unsigned long scale = scale_amount(qd, up);
 	/* [한국어] 이번에 적용할 변화 폭(up이면 qd/16, down이면 qd/4) 계산 */
 	unsigned long old = atomic_read(&lat_info->scale_cookie);
@@ -1052,17 +1110,20 @@ static void scale_cookie_change(struct blk_iolatency *blkiolat,
 	 * 기준으로 사용 */
 	unsigned long diff = 0;
 
+	/* [한국어] 현재 쿠키가 DEFAULT보다 낮다면(스로틀 중이라면) 그 차이(diff)를
+	 * "현재 얼마나 스로틀되어 있는가"의 척도로 계산. DEFAULT 이상이면 diff=0 유지.
+	 * 이 diff 하나로 아래의 모든 완급 조절 분기가 갈린다 — 이미 깊이 눌려 있으면
+	 * 조심스럽게, 얕게 눌려 있으면 정상 폭으로 움직인다 */
 	if (old < DEFAULT_SCALE_COOKIE)
 		diff = DEFAULT_SCALE_COOKIE - old;
-	/* [한국어] 현재 쿠키가 DEFAULT보다 낮다면(스로틀 중이라면) 그 차이(diff)를
-	 * "현재 얼마나 스로틀되어 있는가"의 척도로 계산. DEFAULT 이상이면 diff=0 유지 */
 
 	if (up) {
-		if (scale + old > DEFAULT_SCALE_COOKIE)
-			atomic_set(&lat_info->scale_cookie,
-				   DEFAULT_SCALE_COOKIE);
 		/* [한국어] scale만큼 더하면 DEFAULT를 넘어서는 경우: DEFAULT로 클램프해
-		 * 오버슈트 없이 정확히 "제한 없음" 상태로 복귀 */
+		 * 오버슈트 없이 정확히 "제한 없음" 상태로 복귀. DEFAULT를 넘겨 두면
+		 * 다음 scale down이 실제 효과를 내기까지 헛돌게 된다 */
+		if (scale + old > DEFAULT_SCALE_COOKIE)
+			atomic_set(&lat_info->scale_cookie, /* [한국어] 덧셈 대신 set — 넘침 없이 정확히 상한에 안착시킨다 */
+				   DEFAULT_SCALE_COOKIE);
 		else if (diff > qd)
 			atomic_inc(&lat_info->scale_cookie);
 		/* [한국어] 아직 스로틀 양(diff)이 qd보다 크게 남아있다면(많이 눌려있는
@@ -1080,8 +1141,9 @@ static void scale_cookie_change(struct blk_iolatency *blkiolat,
 		 * with jagged workloads but can still unthrottle once pressure
 		 * has sufficiently dissipated.
 		 */
-		if (diff > qd) {
-			if (diff < max_scale)
+		if (diff > qd) { /* [한국어] 이미 꽤 눌려 있는 구간 — 여기서 또 scale만큼 내리면
+				  * 구덩이가 너무 깊어져 압력이 사라진 뒤에도 회복에 한참 걸린다 */
+			if (diff < max_scale) /* [한국어] qd*2가 사실상의 바닥 — 이 아래로는 더 내리지 않는다 */
 				atomic_dec(&lat_info->scale_cookie);
 			/* [한국어] 이미 상당히 스로틀 중(diff > qd)이지만 아직
 			 * max_scale(qd*2) 미만이라면 1만큼만 추가로 조심스럽게 감소.
@@ -1105,7 +1167,7 @@ static void scale_cookie_change(struct blk_iolatency *blkiolat,
  */
 /*
  * [한국어]
- * scale_change - 한 cgroup(iolatency_grp)의 max_depth(SQ depth 상당)를
+ * scale_change - 한 cgroup(iolatency_grp)의 max_depth를
  * 실제로 증가 또는 감소시킨다.
  *
  * @iolat: max_depth를 변경할 대상 iolatency_grp.
@@ -1119,7 +1181,7 @@ static void scale_cookie_change(struct blk_iolatency *blkiolat,
  * 해소). 그렇지 않고 아직 큐 상한(qd) 미만이면 scale만큼 늘리고 상한으로
  * 클램프한 뒤, rq_wait에서 대기 중이던 bio들을 모두 깨워 재시도시킨다.
  * scale down 경로는 max_depth를 절반으로 급격히 줄이되 1 미만으로는
- * 내려가지 않게 한다(SQ가 완전히 막히지는 않도록).
+ * 내려가지 않게 한다(완전히 막아 버리면 forward progress가 사라지므로).
  * 실행 컨텍스트: check_scale_change()의 호출 경로와 동일(submit 경로,
  * 태스크 컨텍스트).
  *
@@ -1129,7 +1191,7 @@ static void scale_cookie_change(struct blk_iolatency *blkiolat,
 static void scale_change(struct iolatency_grp *iolat, bool up)
 {
 	unsigned long qd = iolat->blkiolat->rqos.disk->queue->nr_requests;
-	/* [한국어] 큐 전체 nr_requests를 SQ depth 상한으로 가져옴 */
+	/* [한국어] max_depth의 상한으로 큐 전체 nr_requests를 사용 — 그 이상은 의미가 없다 */
 	unsigned long scale = scale_amount(qd, up);
 	/* [한국어] 이번에 적용할 변화 폭 계산 */
 	unsigned long old = iolat->max_depth;
@@ -1166,7 +1228,7 @@ static void scale_change(struct iolatency_grp *iolat, bool up)
 		/* [한국어] scale down은 완만한 scale 값 대신 절반으로 가파르게 감소
 		 * — "기본 무제한에서 목표까지 빠르게 줄인다"는 설계 의도 그대로 */
 		iolat->max_depth = max(old, 1UL);
-		/* [한국어] 0이 되지 않도록 최소 1로 하한을 둔다. SQ가 완전히
+		/* [한국어] 0이 되지 않도록 최소 1로 하한을 둔다. 큐가 완전히
 		 * 막히면 그 cgroup은 영원히 IO를 낼 수 없게 되므로 방지 */
 	}
 }
@@ -1202,13 +1264,16 @@ static void scale_change(struct iolatency_grp *iolat, bool up)
  */
 static void check_scale_change(struct iolatency_grp *iolat)
 {
-	struct iolatency_grp *parent;
-	struct child_latency_info *lat_info;
-	unsigned int cur_cookie;
+	struct iolatency_grp *parent; /* [한국어] 공유 쿠키를 들고 있는 쪽 — 판단 기준은 전부 부모에 있다 */
+	struct child_latency_info *lat_info; /* [한국어] 부모가 자식들을 조율하려고 들고 있는 공유 상태 */
+	unsigned int cur_cookie; /* [한국어] 부모의 '지금' 값 */
 	unsigned int our_cookie = atomic_read(&iolat->scale_cookie);
-	/* [한국어] 자신이 마지막으로 관찰했던 부모 scale_cookie 값(로컬 사본) */
-	u64 scale_lat;
-	int direction = 0;
+	/* [한국어] 자신이 마지막으로 관찰했던 부모 scale_cookie 값(로컬 사본).
+	 * 절대값이 아니라 '이전에 본 값과의 차이'로 방향을 정하기 때문에,
+	 * 자식마다 이 사본을 따로 들고 있어야 한 번의 변화가 자식마다
+	 * 정확히 한 번씩만 반영된다 */
+	u64 scale_lat; /* [한국어] 이번 스로틀의 근거가 된 목표 지연 — 자신이 원인인지 판별하는 데 쓴다 */
+	int direction = 0; /* [한국어] -1=조여라, +1=풀어라, 0=변화 없음 */
 
 	parent = blkg_to_lat(lat_to_blkg(iolat)->parent);
 	/* [한국어] 부모 cgroup의 iolatency_grp을 획득. scale 전파는 부모→자식
@@ -1219,8 +1284,10 @@ static void check_scale_change(struct iolatency_grp *iolat)
 	 * scale_cookie 자체가 없다 — 즉시 반환 */
 
 	lat_info = &parent->child_lat;
+	/* [한국어] 락 없이 원자적으로만 읽는다 — 이 경로는 모든 bio 제출마다
+	 * 실행되는 hot path라 스핀락을 잡을 수 없다. 값이 한 틱 낡아도
+	 * 다음 제출에서 따라잡으므로 문제되지 않는다 */
 	cur_cookie = atomic_read(&lat_info->scale_cookie);
-	/* [한국어] 부모가 관리하는 최신 scale_cookie 값을 읽는다 */
 	scale_lat = READ_ONCE(lat_info->scale_lat);
 	/* [한국어] 부모가 기록한 "이번 scale down의 근거가 된 목표 지연" 값을
 	 * READ_ONCE로 읽어 컴파일러의 재배치/캐싱 최적화를 방지(다른 CPU의
@@ -1247,6 +1314,10 @@ static void check_scale_change(struct iolatency_grp *iolat)
 	if (direction < 0 && iolat->min_lat_nsec) {
 		u64 samples_thresh;
 
+		/* [한국어] 아래 두 검사(원인 판별 + 5% 기여도)는 "누가 이 스로틀의
+		 * 대가를 치러야 하는가"를 고르는 부분이다. 쿠키는 형제 전체에게
+		 * 뿌려지지만, 실제로 물러나야 하는 것은 원인 제공자보다 느슨한
+		 * 목표를 가졌고 IO도 실제로 많이 낸 그룹뿐이다 */
 		if (!scale_lat || iolat->min_lat_nsec <= scale_lat)
 			return;
 		/* [한국어] scale_lat이 아직 설정되지 않았거나(0), 자신의 목표 지연이
@@ -1260,8 +1331,11 @@ static void check_scale_change(struct iolatency_grp *iolat)
 		 * scale down event.
 		 */
 		samples_thresh = lat_info->nr_samples * 5;
+		/* [한국어] 부모 전체 자식 샘플 수의 5%를 임계값으로 계산(최소 1).
+		 * *5 후 /100 순서인 이유는 정수 나눗셈에서 먼저 나누면 nr_samples가
+		 * 100 미만일 때 전부 0이 되어 버리기 때문이다. max(1ULL, ...)은
+		 * 임계값 0으로 인해 모든 그룹이 무조건 통과하는 것을 막는다 */
 		samples_thresh = max(1ULL, div64_u64(samples_thresh, 100));
-		/* [한국어] 부모 전체 자식 샘플 수의 5%를 임계값으로 계산(최소 1) */
 		if (iolat->nr_samples <= samples_thresh)
 			return;
 		/* [한국어] 자신의 최근 기여도가 전체의 5% 이하라면, 다른 cgroup의
@@ -1274,16 +1348,19 @@ static void check_scale_change(struct iolatency_grp *iolat)
 		return;
 	}
 	/* [한국어] max_depth가 이미 최솟값(1)인데 추가로 scale down하라는
-	 * 지시라면, SQ depth로는 더 표현할 수 없으므로 blkcg_use_delay()로
+	 * 지시라면, max_depth로는 더 표현할 수 없으므로 blkcg_use_delay()로
 	 * memory.delay 서브시스템에 지연 부채를 쌓아 사용자 공간 반환 시점에서
 	 * 대신 지연을 부과한다(2차 스로틀 수단) */
 
 	/* We're back to the default cookie, unthrottle all the things. */
 	if (cur_cookie == DEFAULT_SCALE_COOKIE) {
 		blkcg_clear_delay(lat_to_blkg(iolat));
-		iolat->max_depth = UINT_MAX;
 		/* [한국어] scale_cookie가 DEFAULT로 완전히 복귀했으므로 지연 부채를
-		 * 모두 지우고 max_depth를 무제한(UINT_MAX)으로 되돌린다 */
+		 * 모두 지우고 max_depth를 무제한(UINT_MAX)으로 되돌린다.
+		 * 점진적으로 늘려 가는 대신 한 번에 UINT_MAX로 놓는 이유는,
+		 * 쿠키가 DEFAULT라는 것이 곧 "제한이 필요 없다"는 확정 신호이고
+		 * 그 상태에서 유한한 상한을 유지하면 순손해이기 때문이다 */
+		iolat->max_depth = UINT_MAX;
 		wake_up_all(&iolat->rq_wait.wait);
 		/* [한국어] 제한이 완전히 풀렸으므로 대기 중인 모든 bio를 깨운다 */
 		return;
@@ -1345,13 +1422,15 @@ static void blkcg_iolatency_throttle(struct rq_qos *rqos, struct bio *bio)
 		/* [한국어] blkg->parent가 있는 동안(= blkg가 root가 아닌 동안) 반복 —
 		 * root cgroup 자신은 스로틀 대상이 아니므로 루프 조건에서 자연히 제외 */
 		struct iolatency_grp *iolat = blkg_to_lat(blkg);
-		if (!iolat) {
-			blkg = blkg->parent;
-			/* [한국어] 이 blkg에 iolatency policy data가 아직 없으면(비활성)
-			 * 이 노드는 건너뛰고 한 단계 위 부모로 이동해 계속 순회 */
+		/* [한국어] 이 blkg에 iolatency policy data가 아직 없으면(비활성)
+		 * 이 노드는 건너뛰고 한 단계 위 부모로 이동해 계속 순회 */
+		if (!iolat) { /* [한국어] 정책이 붙지 않은 중간 노드도 계층에 섞여 있을 수 있다 */
+			blkg = blkg->parent; /* [한국어] 건너뛰되 순회는 계속 — 위쪽에 목표를 가진 조상이 있을 수 있다 */
 			continue;
 		}
 
+		/* [한국어] 스로틀 여부를 판단하기 '전에' 먼저 쿠키를 반영한다.
+		 * 그래야 방금 형제가 일으킨 변화가 이번 bio부터 곧바로 적용된다 */
 		check_scale_change(iolat);
 		/* [한국어] 부모로부터 전파된 scale_cookie 변화를 이 노드에 반영.
 		 * submit 시점마다(매 bio) 최신 스로틀 목표를 따라가기 위함 */
@@ -1385,8 +1464,8 @@ static void blkcg_iolatency_throttle(struct rq_qos *rqos, struct bio *bio)
  * now가 start 이하이면(시각 역전 — IRQ 지연, 타이머 오차 등으로 발생 가능한
  * 비정상 값) 통계를 왜곡하지 않도록 조용히 무시한다. 정상적인 경우
  * req_time(=now-start)을 계산하는데, 이는 이 bio가 블록 계층에 제출된
- * 순간부터 완료 처리 시점까지의 전체 경과 시간이다(NVMe라면 SQ doorbell
- * 발행 이전 시점부터 CQ 완료 처리까지에 근접, block layer 오버헤드까지 포함).
+ * 순간부터 완료 처리 시점까지의 전체 경과 시간이다. 장치가 실제로 명령을
+ * 처리한 시간뿐 아니라 그 앞뒤의 블록 계층 체류 시간까지 포함한다.
  * issue_as_root인 bio는 원래 소유 cgroup의 통계에 포함시키면 실제보다 지연이
  * 낮게 보이는 왜곡(root가 우선권을 가지므로 더 빠르게 처리됨)이 생기므로,
  * 이 bio가 통계에 반영되는 대신 min_lat_nsec에 못 미친 부족분만큼
@@ -1405,17 +1484,19 @@ static void iolatency_record_time(struct iolatency_grp *iolat, u64 start,
 {
 	u64 req_time;
 
+	/* [한국어] 시각 역전(now <= start)은 비정상 값이므로 통계를 오염시키지
+	 * 않도록 아무 것도 기록하지 않고 반환. 부호 없는 뺄셈이라 그대로 두면
+	 * 거대한 양수 지연으로 둔갑해 즉시 SLO 위반으로 오판된다 */
 	if (now <= start)
 		return;
-	/* [한국어] 시각 역전(now <= start)은 비정상 값이므로 통계를 오염시키지
-	 * 않도록 아무 것도 기록하지 않고 반환 */
 
 	req_time = now - start;
 	/* [한국어] bio->issue_time_ns부터 현재까지의 경과 시간을 계산한다.
 	 * 주의: 이 값은 "장치가 커맨드를 처리한 시간"이 아니라 "블록 계층에
 	 * 진입한 시점부터 완료까지"의 전체 지연이다. 따라서 큐 대기 시간,
-	 * 스케줄러 지연, 스로틀 대기가 모두 포함되며 NVMe 드라이버가 SQ doorbell을
-	 * 친 뒤 CQ 완료를 받기까지의 순수 장치 지연보다 넓은 범위다.
+	 * 스케줄러 지연, 스로틀 대기가 모두 포함된다. 즉 장치가 명령을 받은 뒤
+	 * 완료를 보고하기까지의 순수 장치 지연보다 훨씬 넓은 범위이며,
+	 * "이 cgroup의 IO가 체감상 얼마나 느렸는가"에 더 가깝다.
 	 * blk-iolatency의 목표가 "cgroup이 체감하는 지연"을 제어하는 것이므로
 	 * 이 넓은 범위가 오히려 올바른 측정 대상이다. */
 
@@ -1441,13 +1522,13 @@ static void iolatency_record_time(struct iolatency_grp *iolat, u64 start,
 	 * 아래는 "자기 자신이 정상적으로 발행한 IO"만 도달하는 경로다 */
 
 	latency_stat_record_time(iolat, req_time);
-	/* [한국어] per-CPU 통계에 이번 IO의 지연을 기록. NVMe SSD면 missed/total
+	/* [한국어] per-CPU 통계에 이번 IO의 지연을 기록. 비회전식이면 missed/total
 	 * 카운터, HDD면 평균/분산 통계에 반영된다 */
 }
 
 #define BLKIOLATENCY_MIN_ADJUST_TIME (500 * NSEC_PER_MSEC)
 /* [한국어] scale_cookie 재조정 사이에 강제되는 최소 간격(500ms). 너무 자주
- * scale up/down이 반복되면 워크로드가 요동칠 때마다 SQ depth가 출렁여
+ * scale up/down이 반복되면 워크로드가 요동칠 때마다 max_depth가 출렁여
  * 오히려 성능이 불안정해지므로, 이 값으로 디바운스한다. */
 #define BLKIOLATENCY_MIN_GOOD_SAMPLES 5
 /* [한국어] scale up(회복)을 허용하기 위한 최소 "양호한" 표본 수. IO가 너무
@@ -1493,23 +1574,24 @@ static void iolatency_record_time(struct iolatency_grp *iolat, u64 start,
 static void iolatency_check_latencies(struct iolatency_grp *iolat, u64 now)
 {
 	struct blkcg_gq *blkg = lat_to_blkg(iolat);
-	struct iolatency_grp *parent;
-	struct child_latency_info *lat_info;
-	struct latency_stat stat;
-	unsigned long flags;
-	int cpu;
+	struct iolatency_grp *parent; /* [한국어] 쿠키를 실제로 조정할 대상은 자신이 아니라 부모다 */
+	struct child_latency_info *lat_info; /* [한국어] 부모의 공유 조율 상태 (스핀락으로 보호) */
+	struct latency_stat stat; /* [한국어] 이번 윈도우의 per-CPU 합계를 담을 스택 버퍼 */
+	unsigned long flags; /* [한국어] spin_lock_irqsave가 저장/복원할 인터럽트 상태 */
+	int cpu; /* [한국어] 온라인 CPU 순회 인덱스 */
 
+	/* [한국어] 집계용 임시 stat을 0으로 초기화 — 스택 변수라 반드시 명시적으로 비워야 한다 */
 	latency_stat_init(iolat, &stat);
-	/* [한국어] 집계용 임시 stat을 0으로 초기화 */
 	preempt_disable();
 	/* [한국어] per-CPU 슬롯을 순회하는 동안 현재 CPU에서 밀려나 다른 CPU로
 	 * 이동하는 것을 막아, per_cpu_ptr()로 얻은 포인터들이 순회 내내
 	 * 일관되게 "논리적으로 각 CPU 전용"임을 보장 */
-	for_each_online_cpu(cpu) {
+	for_each_online_cpu(cpu) { /* [한국어] online만 도는 이유: offline CPU의 슬롯에는
+				    * 이 윈도우 동안 새로 쌓인 것이 없다 */
 		struct latency_stat *s;
-		s = per_cpu_ptr(iolat->stats, cpu);
-		/* [한국어] cpu번 CPU 전용 슬롯 포인터 획득. NVMe CQ 완료 인터럽트가
+		/* [한국어] cpu번 CPU 전용 슬롯 포인터 획득. 완료 인터럽트가
 		 * 도달한 CPU별로 쌓인 값을 하나씩 꺼내는 단계 */
+		s = per_cpu_ptr(iolat->stats, cpu);
 		latency_stat_sum(iolat, &stat, s);
 		/* [한국어] 이 CPU 슬롯의 값을 stat에 누적 */
 		latency_stat_init(iolat, s);
@@ -1520,17 +1602,18 @@ static void iolatency_check_latencies(struct iolatency_grp *iolat, u64 now)
 	/* [한국어] 순회가 끝났으므로 preemption 재활성화 */
 
 	parent = blkg_to_lat(blkg->parent);
+	/* [한국어] 부모의 iolatency_grp을 얻을 수 없으면(자신이 root거나 초기화
+	 * 순서상 부모 pd가 아직 없음) scale 판단 자체가 불가능하므로 반환.
+	 * 주의: 위의 per-CPU 수집은 이미 끝났으므로 통계는 정상적으로 비워진다 */
 	if (!parent)
 		return;
-	/* [한국어] 부모의 iolatency_grp을 얻을 수 없으면(자신이 root거나 초기화
-	 * 순서상 부모 pd가 아직 없음) scale 판단 자체가 불가능하므로 반환 */
 
 	lat_info = &parent->child_lat;
 	/* [한국어] 이후 scale_cookie 조정에 사용할 부모의 공유 상태 포인터 확보 */
 
 	iolat_update_total_lat_avg(iolat, &stat);
 	/* [한국어] HDD 모드일 때만 장기 평균(lat_avg)을 이번 윈도우 값으로 갱신
-	 * (NVMe/SSD는 함수 내부에서 조기 반환) */
+	 * (비회전식은 함수 내부에서 조기 반환) */
 
 	/* Everything is ok and we don't need to adjust the scale. */
 	if (latency_sum_ok(iolat, &stat) &&
@@ -1568,14 +1651,17 @@ static void iolatency_check_latencies(struct iolatency_grp *iolat, u64 now)
 
 	if (latency_sum_ok(iolat, &iolat->cur_stat) &&
 	    latency_sum_ok(iolat, &stat)) {
+		/* [한국어] "직전 누적 + 이번 윈도우" 모두 SLO를 만족하더라도 표본이
+		 * 5개 미만이면 신뢰할 수 없으므로 scale up을 보류 — IO가 거의 없는
+		 * 구간의 "좋아 보이는" 통계로 스로틀을 풀면, 부하가 돌아오는 순간
+		 * 다시 위반이 나서 진동한다 */
 		if (latency_stat_samples(iolat, &iolat->cur_stat) <
 		    BLKIOLATENCY_MIN_GOOD_SAMPLES)
-			goto out;
-		/* [한국어] "직전 누적 + 이번 윈도우" 모두 SLO를 만족하더라도 표본이
-		 * 5개 미만이면 신뢰할 수 없으므로 scale up을 보류 */
-		if (lat_info->scale_grp == iolat) {
-			lat_info->last_scale_event = now;
-			scale_cookie_change(iolat->blkiolat, lat_info, true);
+			goto out; /* [한국어] 락을 잡은 채로 왔으므로 반드시 out 라벨을 거쳐 해제해야 한다 */
+		if (lat_info->scale_grp == iolat) { /* [한국어] 스로틀을 시작시킨 당사자만 그것을 풀 수 있다 —
+						     * 아무나 풀면 원인 그룹이 아직 목표를 못 지키는데도 압력이 사라진다 */
+			lat_info->last_scale_event = now; /* [한국어] 디바운스 시각 갱신: 최소 500ms 간격 유지 */
+			scale_cookie_change(iolat->blkiolat, lat_info, true); /* [한국어] 형제들에게 "풀어도 된다"를 전파 */
 		}
 		/* [한국어] 자신이 이전 scale down의 책임자(scale_grp)였고, 이제
 		 * 충분한 표본과 함께 SLO를 만족하므로 회복(scale up)을 시작.
@@ -1584,8 +1670,14 @@ static void iolatency_check_latencies(struct iolatency_grp *iolat, u64 now)
 	} else if (lat_info->scale_lat == 0 ||
 		   lat_info->scale_lat >= iolat->min_lat_nsec) {
 		lat_info->last_scale_event = now;
+		/* [한국어] 책임자를 교체하는 조건: 아직 아무도 없거나(!scale_grp),
+		 * 기존 책임자보다 내 목표가 더 엄격한 경우. 가장 엄격한 목표를
+		 * 기준으로 삼아야 check_scale_change()의 "나는 원인이 아니다" 판별이
+		 * 올바르게 동작한다 */
 		if (!lat_info->scale_grp ||
 		    lat_info->scale_lat > iolat->min_lat_nsec) {
+			/* [한국어] READ_ONCE(check_scale_change)와 짝을 맞춘 WRITE_ONCE —
+			 * 그쪽은 락 없이 읽으므로 컴파일러가 쪼개거나 재배치하면 안 된다 */
 			WRITE_ONCE(lat_info->scale_lat, iolat->min_lat_nsec);
 			/* [한국어] scale_lat을 자신의 (더 엄격한) 목표 지연으로 갱신.
 			 * WRITE_ONCE로 check_scale_change()의 READ_ONCE와 짝을 맞춰
@@ -1634,7 +1726,7 @@ out:
  * iolatency_check_latencies()를 호출해 scale 조정 여부를 판단한다. 마지막으로
  * inflight 감소를 대기 중인 submitter에게 wake_up()으로 알린다.
  * 실행 컨텍스트: bio 완료 경로 — 블록 계층 softirq 또는 완료 인터럽트 문맥에서
- * 호출될 수 있다(NVMe라면 CQ 처리와 연결되는 지점). 이 때문에 이 함수가
+ * 호출될 수 있다(장치 완료 인터럽트에서 이어지는 지점). 이 때문에 이 함수가
  * 호출하는 iolatency_check_latencies()의 락 획득도 irqsave 변형을 사용한다.
  * 호출자(caller): rq_qos_done_bio() → blkcg_iolatency_ops.done_bio.
  * 호출 대상(callee): iolatency_record_time(), iolatency_check_latencies().
@@ -1646,12 +1738,13 @@ out:
 static void blkcg_iolatency_done_bio(struct rq_qos *rqos, struct bio *bio)
 {
 	struct blkcg_gq *blkg;
-	struct rq_wait *rqw;
-	struct iolatency_grp *iolat;
-	u64 window_start;
-	u64 now;
-	bool issue_as_root = bio_issue_as_root_blkg(bio);
-	int inflight = 0;
+	struct rq_wait *rqw; /* [한국어] 계층 각 노드의 inflight 카운터/대기열 */
+	struct iolatency_grp *iolat; /* [한국어] 순회 중인 노드의 정책 데이터 */
+	u64 window_start; /* [한국어] 이 노드의 현재 통계 윈도우 시작 시각 */
+	u64 now; /* [한국어] 계층 전체에 대해 한 번만 읽는 기준 시각 */
+	bool issue_as_root = bio_issue_as_root_blkg(bio); /* [한국어] throttle 때와 같은 판정을 다시 해야
+							   * inflight 증감이 대칭을 이룬다 */
+	int inflight = 0; /* [한국어] 감소 후 남은 in-flight 수 — 깨울지 판단하는 데 쓴다 */
 
 	blkg = bio->bi_blkg;
 	/* [한국어] 이 bio가 속한 (cgroup, 디스크) 조합. 이후 계층을 거슬러 오르는
@@ -1680,14 +1773,18 @@ static void blkcg_iolatency_done_bio(struct rq_qos *rqos, struct bio *bio)
 	 * 순회 동안 일관된 기준시각을 사용 */
 	while (blkg && blkg->parent) {
 		iolat = blkg_to_lat(blkg);
-		if (!iolat) {
+		/* [한국어] 이 노드에 policy data가 없으면 건너뛰고 부모로 이동.
+		 * throttle 경로도 동일하게 건너뛰었으므로 증감이 어긋나지 않는다 */
+		if (!iolat) { /* [한국어] 정책이 붙지 않은 노드 */
 			blkg = blkg->parent;
-			/* [한국어] 이 노드에 policy data가 없으면 건너뛰고 부모로 이동 */
 			continue;
 		}
-		rqw = &iolat->rq_wait;
 		/* [한국어] 이 cgroup의 inflight 카운터/대기열 포인터 확보 */
+		rqw = &iolat->rq_wait;
 
+		/* [한국어] dec 후 값을 함께 받는 이유: 감소와 "지금 몇 개 남았나"를
+		 * 따로 읽으면 그 사이에 다른 CPU가 값을 바꿔, 깨울지 판단하는 근거가
+		 * 실제 상태와 어긋난다 */
 		inflight = atomic_dec_return(&rqw->inflight);
 		/* [한국어] 완료된 IO 한 건만큼 inflight를 원자적으로 감소시키고
 		 * 감소 후의 값을 반환받는다(제출 시 iolat_acquire_inflight/
@@ -1775,11 +1872,11 @@ static void blkcg_iolatency_exit(struct rq_qos *rqos)
 static const struct rq_qos_ops blkcg_iolatency_ops = {
 	.throttle = blkcg_iolatency_throttle,
 	/* [한국어] submit_bio -> blk_mq_submit_bio 경로 상단, rq_qos_throttle()에서
-	 * 호출되는 제출 시점 콜백. NVMe doorbell(SQ tail 갱신)이 나가기 전에
+	 * 호출되는 제출 시점 콜백. bio가 request로 바뀌기도 전에
 	 * 지연 제어(대기)를 수행하는 지점 */
 	.done_bio = blkcg_iolatency_done_bio,
 	/* [한국어] bio 완료 시 rq_qos_done_bio()를 통해 호출되는 완료 시점 콜백.
-	 * NVMe CQ(Completion Queue) 처리 경로와 연결되는 지점 */
+	 * bio 완료 처리 경로와 연결되는 지점 */
 	.exit = blkcg_iolatency_exit,
 	/* [한국어] 큐/디스크 해제 시 rq_qos_del() 경로에서 호출되어 blk_iolatency를
 	 * 정리하는 콜백 */
@@ -1816,53 +1913,61 @@ static const struct rq_qos_ops blkcg_iolatency_ops = {
  */
 static void blkiolatency_timer_fn(struct timer_list *t)
 {
-	struct blk_iolatency *blkiolat = timer_container_of(blkiolat, t,
-							    timer);
 	/* [한국어] timer_list 임베디드 필드로부터 상위 blk_iolatency 구조체를 역참조 */
-	struct blkcg_gq *blkg;
-	struct cgroup_subsys_state *pos_css;
+	struct blk_iolatency *blkiolat = timer_container_of(blkiolat, t,
+							    timer); /* [한국어] container_of 계열 — 타이머 API가 넘겨주는 건 임베디드 필드 주소뿐이다 */
+	struct blkcg_gq *blkg; /* [한국어] 트리 순회 커서 */
+	struct cgroup_subsys_state *pos_css; /* [한국어] blkg_for_each_descendant_pre가 요구하는 cgroup 순회 상태 */
+	/* [한국어] 이번 회복 검토 전체에 사용할 기준 시각. 노드마다 다시 읽으면
+	 * 앞쪽 노드와 뒤쪽 노드가 서로 다른 기준으로 판정되어 일관성이 깨진다 */
 	u64 now = blk_time_get_ns();
-	/* [한국어] 이번 회복 검토 전체에 사용할 기준 시각 */
 
-	rcu_read_lock();
 	/* [한국어] blkg_for_each_descendant_pre()가 cgroup 트리를 RCU로 순회하므로,
 	 * queue freeze 없이도 blkcg_gq 트리 구조 자체의 존재를 안전하게 참조하기
-	 * 위해 RCU read-side critical section 진입 */
+	 * 위해 RCU read-side critical section 진입. 타이머 컨텍스트라 sleep이
+	 * 불가능해 mutex 같은 무거운 동기화는 애초에 선택지가 아니다 */
+	rcu_read_lock();
 	blkg_for_each_descendant_pre(blkg, pos_css,
 				     blkiolat->rqos.disk->queue->root_blkg) {
 		/* [한국어] root_blkg를 루트로 모든 자손 blkcg_gq를 전위 순회 — 이 큐에
 		 * 속한 모든 cgroup의 scale_cookie 상태를 회복 기회로 검토 */
-		struct iolatency_grp *iolat;
-		struct child_latency_info *lat_info;
-		unsigned long flags;
-		u64 cookie;
+		struct iolatency_grp *iolat; /* [한국어] 이 노드의 정책 데이터 */
+		struct child_latency_info *lat_info; /* [한국어] 이 노드가 '부모로서' 자식들에게 들려주는 공유 상태 */
+		unsigned long flags; /* [한국어] irqsave용 인터럽트 상태 */
+		u64 cookie; /* [한국어] 이 노드가 자식들에게 지시 중인 현재 쿠키 값 */
 
 		/*
 		 * We could be exiting, don't access the pd unless we have a
 		 * ref on the blkg.
 		 */
+		/* [한국어] blkg 참조 카운트 획득 실패는 이 blkg가 해제 진행 중이라는
+		 * 뜻이므로, pd 등 내부 데이터에 접근하지 않고 건너뛴다. RCU만으로는
+		 * 트리 구조의 존재만 보장될 뿐 pd의 수명은 보장되지 않는다 */
 		if (!blkg_tryget(blkg))
 			continue;
-		/* [한국어] blkg 참조 카운트 획득 실패는 이 blkg가 해제 진행 중이라는
-		 * 뜻이므로, pd 등 내부 데이터에 접근하지 않고 건너뛴다 */
 
-		iolat = blkg_to_lat(blkg);
-		if (!iolat)
-			goto next;
+		iolat = blkg_to_lat(blkg); /* [한국어] 순회는 blkcg 트리 전체를 돌지만, 정책이 붙은 노드만 처리 대상이다 */
+		if (!iolat) /* [한국어] 정책이 붙지 않은 노드 */
+			goto next; /* [한국어] tryget으로 올린 참조가 있으므로 continue가 아니라 next로 가서 put해야 한다 */
 		/* [한국어] 이 cgroup에 iolatency policy data가 없으면(비활성) 처리할
 		 * 것이 없으므로 참조만 반환하고 다음으로 이동 */
 
 		lat_info = &iolat->child_lat;
+		/* [한국어] 이 cgroup이 "부모"로서 관리 중인 scale_cookie를 읽는다.
+		 * 락 없이 먼저 읽어서, 손댈 필요가 없는 대다수 노드에 대해
+		 * 스핀락 획득 자체를 피한다 */
 		cookie = atomic_read(&lat_info->scale_cookie);
-		/* [한국어] 이 cgroup이 "부모"로서 관리 중인 scale_cookie를 읽는다 */
 
-		if (cookie >= DEFAULT_SCALE_COOKIE)
-			goto next;
+		if (cookie >= DEFAULT_SCALE_COOKIE) /* [한국어] 이 노드는 자식들을 조이고 있지 않다 =
+						     * 이 타이머가 해 줄 회복 작업이 없다 */
+			goto next; /* [한국어] 락도 잡기 전이므로 참조만 반환하면 된다 */
 		/* [한국어] 이미 DEFAULT 이상이면(자식들에게 스로틀을 지시하고 있지
 		 * 않으면) 회복할 것이 없으므로 건너뛴다 */
 
-		spin_lock_irqsave(&lat_info->lock, flags);
-		if (lat_info->last_scale_event >= now)
+		spin_lock_irqsave(&lat_info->lock, flags); /* [한국어] irqsave: 이 락은 완료 경로(IRQ 컨텍스트일 수 있음)와
+							    * 공유되므로 같은 CPU의 인터럽트로 재진입하면 데드락이다 */
+		if (lat_info->last_scale_event >= now) /* [한국어] 시각 역전 방어 — 아래 뺄셈이 부호 없는 연산이라
+							* 역전 상태로 계산하면 거대한 양수가 나온다 */
 			goto next_lock;
 		/* [한국어] last_scale_event가 now 이상이면 시각이 역전된 상황(타이머
 		 * 지연/재스케줄로 이례적으로 이 콜백이 너무 이르게 실행된 경우)이므로
@@ -1872,7 +1977,8 @@ static void blkiolatency_timer_fn(struct timer_list *t)
 		 * We scaled down but don't have a scale_grp, scale up and carry
 		 * on.
 		 */
-		if (lat_info->scale_grp == NULL) {
+		if (lat_info->scale_grp == NULL) { /* [한국어] 조인 상태인데 책임자가 없다 = 아무도 회복을 시작해 줄 수 없다.
+						    * 이 타이머가 없으면 그 상태로 영원히 갇힌다 */
 			scale_cookie_change(iolat->blkiolat, lat_info, true);
 			goto next_lock;
 		}
@@ -1895,10 +2001,11 @@ static void blkiolatency_timer_fn(struct timer_list *t)
 next_lock:
 		spin_unlock_irqrestore(&lat_info->lock, flags);
 next:
+		/* [한국어] blkg_tryget()으로 획득한 참조를 반환. 모든 이탈 경로가
+		 * 이 라벨로 모이므로 참조 누수가 생기지 않는다 */
 		blkg_put(blkg);
-		/* [한국어] blkg_tryget()으로 획득한 참조를 반환 */
 	}
-	rcu_read_unlock();
+	rcu_read_unlock(); /* [한국어] 트리 순회 종료 — 이 시점 이후 blkg 포인터는 더 이상 유효를 보장받지 못한다 */
 }
 
 /**
@@ -1952,9 +2059,9 @@ next:
 static void blkiolatency_enable_work_fn(struct work_struct *work)
 {
 	struct blk_iolatency *blkiolat = container_of(work, struct blk_iolatency,
-						      enable_work);
+						      enable_work); /* [한국어] work 구조체 주소 → 그것을 품은 blk_iolatency 복원 */
 	/* [한국어] work 필드 오프셋으로 상위 blk_iolatency 역참조 */
-	bool enabled;
+	bool enabled; /* [한국어] "있어야 할" 상태. 현재 반영된 blkiolat->enabled와 비교해 차이가 있을 때만 움직인다 */
 
 	/*
 	 * There can only be one instance of this function running for @blkiolat
@@ -1965,26 +2072,30 @@ static void blkiolatency_enable_work_fn(struct work_struct *work)
 	 * Also, we know @blkiolat is safe to access as ->enable_work is flushed
 	 * in blkcg_iolatency_exit().
 	 */
+	/* [한국어] enable_cnt(0보다 크면 true로 암묵 변환)를 읽어 "있어야 할" 상태를 결정.
+	 * 이 워커는 카운터가 오르내린 '횟수'를 따라가지 않고 마지막 값만 본다 —
+	 * 위 원문 주석이 말하듯 최신 값 한 번 반영이면 충분하기 때문이다 */
 	enabled = atomic_read(&blkiolat->enable_cnt);
-	/* [한국어] enable_cnt(0보다 크면 true로 암묵 변환)를 읽어 "있어야 할" 상태를 결정 */
-	if (enabled != blkiolat->enabled) {
+	if (enabled != blkiolat->enabled) { /* [한국어] 상태가 이미 맞으면 freeze를 건너뛴다 —
+					     * freeze는 in-flight IO를 전부 기다리는, 이 파일에서 가장 비싼 연산이다 */
 		/* [한국어] 목표 상태(enabled)와 현재 반영된 상태(blkiolat->enabled)가
 		 * 다를 때만 무거운 freeze 작업을 수행 — 불필요한 freeze 반복 방지 */
 		struct request_queue *q = blkiolat->rqos.disk->queue;
 		/* [한국어] 플래그 조작 대상이 될 request_queue 포인터 캐싱 */
 		unsigned int memflags;
 
-		memflags = blk_mq_freeze_queue(blkiolat->rqos.disk->queue);
 		/* [한국어] 큐를 freeze해 새 IO 진입을 막고 기존 inflight IO가 모두
-		 * 완료될 때까지 대기. 이 상태에서만 enabled를 안전하게 뒤집을 수
-		 * 있다(누수 없는 카운팅 보장). memflags는 이후 unfreeze 시 이전
-		 * memalloc 상태를 복원하기 위한 값 */
+		 * 완료될 때까지 대기. 이걸 하지 않고 스위치를 뒤집으면, throttle에서
+		 * inflight를 올린 bio가 done에서 꺼진 스위치를 만나 감소되지 않고
+		 * 카운터가 영구히 새어 나간다. 그래서 freeze가 필수다 */
+		memflags = blk_mq_freeze_queue(blkiolat->rqos.disk->queue);
+		/* [한국어] memflags는 이후 unfreeze 시 이전 memalloc 상태를 복원하기 위한 값 */
 		blkiolat->enabled = enabled;
 		/* [한국어] freeze된 상태에서 실제 마스터 스위치를 목표값으로 전환.
 		 * 이 순간 진행 중인 inflight IO가 없으므로 카운트 불일치가 생기지 않음 */
-		if (enabled)
+		if (enabled) /* [한국어] 켜질 때: 완료 경로에서 지연을 계산하려면 제출 시각이 필요하다 */
 			blk_queue_flag_set(QUEUE_FLAG_BIO_ISSUE_TIME, q);
-		else
+		else /* [한국어] 꺼질 때: 아무도 읽지 않을 시각을 매 bio마다 기록하는 비용을 없앤다 */
 			blk_queue_flag_clear(QUEUE_FLAG_BIO_ISSUE_TIME, q);
 		/* [한국어] QUEUE_FLAG_BIO_ISSUE_TIME: bio 제출 시각(issue_time_ns)을
 		 * 기록할지 여부를 제어하는 큐 플래그. enabled=true일 때만 이 시각을
@@ -2017,23 +2128,27 @@ static void blkiolatency_enable_work_fn(struct work_struct *work)
  */
 static int blk_iolatency_init(struct gendisk *disk)
 {
-	struct blk_iolatency *blkiolat;
-	int ret;
+	struct blk_iolatency *blkiolat; /* [한국어] 이 디스크 전체에 하나뿐인 정책 인스턴스 */
+	int ret; /* [한국어] 아래 두 등록 단계 각각의 실패를 서로 다른 라벨로 되감기 위해 필요 */
 
+	/* [한국어] 0 초기화 할당 — enabled/enable_cnt가 0이어야 "아직 아무 cgroup도
+	 * 목표를 설정하지 않음"이라는 초기 상태가 성립한다 */
 	blkiolat = kzalloc_obj(*blkiolat);
-	if (!blkiolat)
-		return -ENOMEM;
-	/* [한국어] 이 디스크의 blk_iolatency 인스턴스 할당 실패 시 -ENOMEM으로 즉시 반환 */
+	if (!blkiolat) /* [한국어] 메모리 부족 */
+		return -ENOMEM; /* [한국어] 아직 아무것도 등록하지 않았으므로 되돌릴 것이 없다 */
 
+	/* [한국어] RQ_QOS_LATENCY 슬롯으로 체인에 끼워 넣는다. 슬롯 id가 정책마다
+	 * 고정이라 wbt/iocost와 순서가 섞이지 않고, 같은 정책이 두 번 등록되는
+	 * 일도 없다 */
 	ret = rq_qos_add(&blkiolat->rqos, disk, RQ_QOS_LATENCY,
-			 &blkcg_iolatency_ops);
-	if (ret)
+			 &blkcg_iolatency_ops); /* [한국어] 이 시점부터 콜백이 실제 IO 경로에서 호출될 수 있다 */
+	if (ret) /* [한국어] 같은 슬롯에 이미 등록되어 있거나 디스크가 정리 중인 경우 */
 		goto err_free;
 	/* [한국어] rq_qos 프레임워크에 이 정책을 RQ_QOS_LATENCY 슬롯으로 등록.
 	 * 이후 submit/complete 경로에서 blkcg_iolatency_ops의 콜백이 호출된다.
 	 * 실패 시 방금 할당한 blkiolat만 해제하면 되므로 err_free로 이동 */
 	ret = blkcg_activate_policy(disk, &blkcg_policy_iolatency);
-	if (ret)
+	if (ret) /* [한국어] 여기서 실패하면 rq_qos는 이미 체인에 걸린 상태다 — 반드시 먼저 떼어내야 한다 */
 		goto err_qos_del;
 	/* [한국어] blkcg 코어에 이 policy를 활성화 — 이 디스크에 이미 존재하는
 	 * 모든 cgroup에 대해 iolatency_pd_alloc()/iolatency_pd_init()이 호출되어
@@ -2049,7 +2164,7 @@ static int blk_iolatency_init(struct gendisk *disk)
 
 	return 0;
 
-err_qos_del:
+err_qos_del: /* [한국어] 되감기 순서는 등록 순서의 역순 — rq_qos를 먼저 떼고 메모리를 나중에 푼다 */
 	rq_qos_del(&blkiolat->rqos);
 	/* [한국어] blkcg_activate_policy() 실패 시 앞서 등록한 rq_qos를 제거해
 	 * 콜백이 더 이상 호출되지 않게 정리 */
@@ -2097,7 +2212,7 @@ static void iolatency_set_min_lat_nsec(struct blkcg_gq *blkg, u64 val)
 	/* [한국어] 목표 지연(SLO) 설정. 0이면 이 cgroup의 io.latency 제어 비활성화 */
 	iolat->cur_win_nsec = max_t(u64, val << 4, BLKIOLATENCY_MIN_WIN_SIZE);
 	/* [한국어] 목표 지연의 16배 또는 최소 윈도우(100ms) 중 큰 값을 통계 윈도우로
-	 * 선택. 목표가 매우 짧아(NVMe SSD처럼) 16배도 100ms에 못 미치면 최소값이
+	 * 선택. 목표가 매우 짧아 그 16배도 100ms에 못 미치면 최소값이
 	 * 적용되어 충분한 샘플 수를 확보한다 */
 	iolat->cur_win_nsec = min_t(u64, iolat->cur_win_nsec,
 				    BLKIOLATENCY_MAX_WIN_SIZE);
@@ -2105,8 +2220,12 @@ static void iolatency_set_min_lat_nsec(struct blkcg_gq *blkg, u64 val)
 	 * 위해 윈도우가 1초를 넘지 않게 한다 */
 
 	if (!oldval && val) {
-		if (atomic_inc_return(&blkiolat->enable_cnt) == 1)
-			schedule_work(&blkiolat->enable_work);
+		if (atomic_inc_return(&blkiolat->enable_cnt) == 1) /* [한국어] "0 → 1" 전이를 잡아내는 관용구.
+								    * inc 후 read가 아니라 inc_return이어야 두 CPU가 동시에
+								    * 켜도 정확히 한 쪽만 1을 보게 된다 */
+			schedule_work(&blkiolat->enable_work); /* [한국어] freeze가 필요한 작업이라 여기서 직접 하지 않고
+								* workqueue로 미룬다 — 여기는 sysfs write 경로이고
+								* 락을 쥔 채 freeze를 기다릴 수 없다 */
 		/* [한국어] enable_cnt를 증가시킨 결과가 정확히 1이라면(즉 이 증가가
 		 * "0에서 1로"의 전이였다면) 이 큐에서 최초로 활성화된 cgroup이므로
 		 * enable_work를 예약해 마스터 스위치를 켠다 */
@@ -2154,13 +2273,16 @@ static void iolatency_clear_scaling(struct blkcg_gq *blkg)
 		/* [한국어] 부모가 있을 때만(즉 blkg가 root가 아닐 때만) 부모의 child_lat을
 		 * 리셋할 대상이 존재한다 */
 		struct iolatency_grp *iolat = blkg_to_lat(blkg->parent);
-		struct child_latency_info *lat_info;
-		if (!iolat)
+		struct child_latency_info *lat_info; /* [한국어] 리셋 대상은 '부모가 자식들에게 지시하던' 상태다 */
+		if (!iolat) /* [한국어] 부모에 정책 데이터가 없으면 지울 상태도 없다 */
 			return;
 		/* [한국어] 부모에 아직 iolatency policy data가 없으면(비활성) 리셋할
 		 * 것이 없으므로 반환 */
 
 		lat_info = &iolat->child_lat;
+		/* [한국어] 목표가 바뀌면 그 목표를 근거로 내려졌던 판단(scale_grp,
+		 * scale_lat, 쿠키)이 전부 무효가 된다. 그래서 부분 수정이 아니라
+		 * 통째로 초기 상태로 되돌린다 */
 		spin_lock(&lat_info->lock);
 		/* [한국어] 이 함수는 프로세스 컨텍스트(sysfs write)에서만 호출되므로
 		 * irqsave 없이 일반 spin_lock()으로 충분(완료 경로의 irqsave 잠금과는
@@ -2217,11 +2339,11 @@ static ssize_t iolatency_set_limit(struct kernfs_open_file *of, char *buf,
 	struct blkcg *blkcg = css_to_blkcg(of_css(of));
 	/* [한국어] 이 파일을 연 cgroup의 css로부터 blkcg 획득 */
 	struct blkcg_gq *blkg;
-	struct blkg_conf_ctx ctx;
+	struct blkg_conf_ctx ctx; /* [한국어] "devmaj:devmin key=val" 형식을 단계적으로 소비하는 파서 상태 */
 	struct iolatency_grp *iolat;
-	char *p, *tok;
-	u64 lat_val = 0;
-	u64 oldval;
+	char *p, *tok; /* [한국어] strsep용 커서와 현재 토큰 */
+	u64 lat_val = 0; /* [한국어] 기본값 0 = "max"(제한 없음)와 같은 의미 */
+	u64 oldval; /* [한국어] 변경 전 목표 — 실제로 값이 바뀌었을 때만 scale 상태를 리셋하기 위해 필요 */
 	int ret;
 
 	blkg_conf_init(&ctx, buf);
@@ -2269,16 +2391,18 @@ static ssize_t iolatency_set_limit(struct kernfs_open_file *of, char *buf,
 		char key[16];
 		char val[21];	/* 18446744073709551616 */
 
+		/* [한국어] 폭 지정자(%15, %20)가 필수다 — 없으면 사용자 문자열로
+		 * 스택 버퍼를 넘길 수 있다. key/val 크기가 각각 16/21인 것과 짝이 맞는다 */
 		if (sscanf(tok, "%15[^=]=%20s", key, val) != 2)
-			goto out;
+			goto out; /* [한국어] ret는 위에서 이미 -EINVAL로 세팅되어 있다 */
 		/* [한국어] "key=value" 형식으로 파싱 실패(형식이 다르거나 값이 없음)
 		 * 하면 -EINVAL로 즉시 종료 */
 
 		if (!strcmp(key, "target")) {
 			u64 v;
 
-			if (!strcmp(val, "max"))
-				lat_val = 0;
+			if (!strcmp(val, "max")) /* [한국어] 사용자 인터페이스상의 "제한 없음" 표기 */
+				lat_val = 0; /* [한국어] 내부적으로는 목표 0이 곧 비활성이다 */
 			/* [한국어] "max"는 "제한 없음"을 의미 — target을 0(비활성)으로 설정 */
 			else if (sscanf(val, "%llu", &v) == 1)
 				lat_val = v * NSEC_PER_USEC;
@@ -2294,7 +2418,7 @@ static ssize_t iolatency_set_limit(struct kernfs_open_file *of, char *buf,
 
 	/* Walk up the tree to see if our new val is lower than it should be. */
 	blkg = ctx.blkg;
-	oldval = iolat->min_lat_nsec;
+	oldval = iolat->min_lat_nsec; /* [한국어] 같은 값을 다시 써도 scale 상태를 날리지 않도록, 반영 전에 보관 */
 	/* [한국어] 변경 전/후를 비교하기 위해 현재 값을 저장 */
 
 	iolatency_set_min_lat_nsec(blkg, lat_val);
@@ -2388,7 +2512,7 @@ static int iolatency_print_limit(struct seq_file *sf, void *v)
  *
  * 모든 온라인 CPU의 per-CPU 통계를 임시로 합산해(원본 슬롯은 리셋하지
  * 않음 — iolatency_check_latencies()와 달리 순수 조회용) missed/total과
- * 현재 max_depth(SQ depth)를 사람이 읽을 수 있는 형식으로 출력한다.
+ * 현재 max_depth를 사람이 읽을 수 있는 형식으로 출력한다.
  * max_depth가 UINT_MAX(무제한)이면 "depth=max"로, 아니면 실제 숫자로 표시한다.
  * 실행 컨텍스트: iolatency_pd_stat() 호출 경로와 동일(디버그 인터페이스 read 경로).
  *
@@ -2463,7 +2587,7 @@ static void iolatency_pd_stat(struct blkg_policy_data *pd, struct seq_file *s)
 
 	if (iolat->ssd)
 		return iolatency_ssd_stat(iolat, s);
-		/* [한국어] SSD/NVMe 모드는 missed/total/depth 형식의 percentile 통계로
+		/* [한국어] 비회전식 모드는 missed/total/depth 형식의 percentile 통계로
 		 * 위임 출력 */
 
 	avg_lat = div64_u64(iolat->lat_avg, NSEC_PER_USEC);
@@ -2510,19 +2634,21 @@ static struct blkg_policy_data *iolatency_pd_alloc(struct gendisk *disk,
 {
 	struct iolatency_grp *iolat;
 
+	/* [한국어] 디스크의 NUMA 노드에 맞춰 iolatency_grp 전체를 0으로 할당.
+	 * node_id를 지정하는 이유는 이 구조체를 만지는 쪽이 대체로 그 디스크의
+	 * 인터럽트/완료 처리가 도는 노드이기 때문이다 */
 	iolat = kzalloc_node(sizeof(*iolat), gfp, disk->node_id);
 	if (!iolat)
-		return NULL;
-	/* [한국어] 디스크의 NUMA 노드에 맞춰 iolatency_grp 전체를 0으로 할당.
-	 * 실패 시 -ENOMEM에 해당하는 NULL 반환(blkcg 코어가 처리) */
+		return NULL; /* [한국어] blkcg 코어가 이 NULL을 -ENOMEM으로 해석한다 */
+	/* [한국어] 통계는 완료 경로에서 매 bio마다 갱신되므로 공유 카운터로 두면
+	 * 캐시 라인 경합이 그대로 IO 지연이 된다. 그래서 per-CPU로 흩어 두고
+	 * 윈도우 만료 시점에만 한 번 모은다 */
 	iolat->stats = __alloc_percpu_gfp(sizeof(struct latency_stat),
 				       __alignof__(struct latency_stat), gfp);
-	if (!iolat->stats) {
-		kfree(iolat);
+	if (!iolat->stats) { /* [한국어] per-CPU 할당 실패 */
+		kfree(iolat); /* [한국어] 앞서 잡은 본체를 먼저 되돌린다 — 여기서 빠뜨리면 누수다 */
 		return NULL;
 	}
-	/* [한국어] per-CPU 통계 배열 할당 실패 시, 이미 할당했던 iolat 본체도
-	 * 함께 해제해 메모리 누수 없이 NULL 반환 */
 	return &iolat->pd;
 	/* [한국어] blkcg 코어는 pd 포인터만 알면 되므로 iolat 내부의 pd 필드
 	 * 주소를 반환 — 이후 pd_to_lat()으로 역참조 가능 */
@@ -2537,7 +2663,7 @@ static struct blkg_policy_data *iolatency_pd_alloc(struct gendisk *disk,
  * @return: 없음(void).
  *
  * blk_queue_rot()으로 이 큐가 회전식 미디어(HDD)인지 확인해 ssd 플래그를
- * 결정한다(NVMe/SSD는 non-rotational이므로 ssd=true). 모든 possible CPU의
+ * 결정한다(non-rotational이면 ssd=true). 모든 possible CPU의
  * per-CPU 통계 슬롯과 cur_stat을 0으로 초기화하고, rq_wait/child_lat.lock을
  * 초기화한다. max_depth는 UINT_MAX(무제한)로 시작해, 실제 제한은 이후 SLO
  * 위반이 감지될 때 scale down을 통해 걸리게 된다. window_start를 현재
@@ -2568,15 +2694,17 @@ static void iolatency_pd_init(struct blkg_policy_data *pd)
 	/* [한국어] 첫 통계 윈도우의 시작 시각으로 사용할 현재 시각 */
 	int cpu;
 
+	/* [한국어] 이 값은 여기서 딱 한 번 정해지고 이후 바뀌지 않는다. latency_stat이
+	 * union이라 도중에 뒤집히면 이미 쌓인 통계를 다른 타입으로 해석하게 된다 */
 	iolat->ssd = !blk_queue_rot(blkg->q);
-	/* [한국어] blk_queue_rot()이 false(회전하지 않는 미디어, 즉 SSD/NVMe)이면
+	/* [한국어] blk_queue_rot()이 false(회전하지 않는 미디어)이면
 	 * ssd=true로 설정해 percentile(missed/total) 방식을 쓰게 한다. HDD면
 	 * ssd=false로 평균(mean) 방식을 사용 */
 
-	for_each_possible_cpu(cpu) {
+	for_each_possible_cpu(cpu) { /* [한국어] online이 아니라 possible을 도는 것이 핵심 */
 		struct latency_stat *stat;
-		stat = per_cpu_ptr(iolat->stats, cpu);
-		latency_stat_init(iolat, stat);
+		stat = per_cpu_ptr(iolat->stats, cpu); /* [한국어] 아직 켜지지 않은 CPU의 슬롯도 주소는 유효하다 */
+		latency_stat_init(iolat, stat); /* [한국어] ssd 플래그를 이미 정한 뒤라 올바른 union 멤버가 초기화된다 */
 	}
 	/* [한국어] 아직 온라인이 아닌 CPU(hotplug로 나중에 켜질 수 있는 CPU)까지
 	 * 포함해 모든 possible CPU의 슬롯을 미리 0으로 초기화 — 나중에 온라인화될
@@ -2589,7 +2717,7 @@ static void iolatency_pd_init(struct blkg_policy_data *pd)
 	spin_lock_init(&iolat->child_lat.lock);
 	/* [한국어] 이 노드가 "부모"로서 가질 child_lat 보호 락 초기화 */
 	iolat->max_depth = UINT_MAX;
-	/* [한국어] 초기에는 SQ depth 제한 없음 — 실제 제한은 SLO 위반 감지 후에만 걸림 */
+	/* [한국어] 초기에는 깊이 제한 없음(UINT_MAX) — 실제 제한은 SLO 위반이 관측된 뒤에만 걸린다 */
 	iolat->blkiolat = blkiolat;
 	/* [한국어] 큐 전체 상태에 대한 역참조 저장 */
 	iolat->cur_win_nsec = 100 * NSEC_PER_MSEC;
@@ -2607,6 +2735,9 @@ static void iolatency_pd_init(struct blkg_policy_data *pd)
 		/* [한국어] 부모가 존재하고, 부모의 iolatency policy data가 이미
 		 * 초기화되어 있다면(리스트 순회 순서상 부모가 먼저 init된 경우) */
 		struct iolatency_grp *parent = blkg_to_lat(blkg->parent);
+		/* [한국어] DEFAULT로 시작하면 안 된다 — 부모가 이미 조이고 있는 중에
+		 * 새 자식만 "제한 없음"에서 출발하면, 첫 비교에서 쿠키가 내려간 것으로
+		 * 보여 혼자 두 배로 조여지거나 반대로 형제들과 어긋난다 */
 		atomic_set(&iolat->scale_cookie,
 			   atomic_read(&parent->child_lat.scale_cookie));
 		/* [한국어] 부모가 현재 자식들에게 지시 중인 scale_cookie를 그대로
@@ -2674,8 +2805,9 @@ static void iolatency_pd_offline(struct blkg_policy_data *pd)
 static void iolatency_pd_free(struct blkg_policy_data *pd)
 {
 	struct iolatency_grp *iolat = pd_to_lat(pd);
+	/* [한국어] 해제 순서는 할당의 역순. 여기 도달했다는 것은 offline을 이미
+	 * 거쳐 이 pd를 참조하는 IO 경로가 없다는 뜻이다 */
 	free_percpu(iolat->stats);
-	/* [한국어] per-CPU 통계 배열 해제 */
 	kfree(iolat);
 	/* [한국어] iolatency_grp 본체 해제 */
 }
@@ -2758,17 +2890,28 @@ module_init(iolatency_init);
  * (블록 계층 초기화 순서에 맞춰 자동 실행되는 매크로) */
 module_exit(iolatency_exit);
 /* [한국어] 모듈 언로드 시 iolatency_exit()을 호출하도록 등록 */
-/* NVMe 관점 핵심 요약
+/* [한국어] === 핵심 요약: io.latency가 실제로 하는 일 ===
  *
- * - io.latency는 blk_mq_submit_bio -> blk_mq_get_request ->
- *   nvme_queue_rq -> nvme_submit_cmd(doorbell) 경로 상단에서 bio 단위
- *   평균 지연을 제어한다.
- * - NVMe SSD(ssd=true)는 missed/total percentile로, HDD는 평균(mean)으로
- *   목표 지연을 판단한다.
- * - max_depth는 NVMe SQ(submission queue) 깊이에 대응하며, 지연 위반 시
- *   scale down되어 큐가 짧아지고, 완화 시 scale up된다.
- * - max_depth가 1에 도달해도 지연이 초과되면 blkcg_use_delay()를 통해
- *   사용자 공간 반환에 추가 지연을 유발한다.
- * - block/blk-rq-qos.h의 rq_qos_ops 프레임워크 기반이며, block/blk-wbt.c와
- *   유사한 위치에서 동작한다.
+ * - 개입 지점은 bio다. blk_mq_submit_bio가 request를 얻기 전에
+ *   rq_qos_throttle → blkcg_iolatency_throttle이 불리므로, 여기서 재우는
+ *   태스크는 태그도 드라이버 자원도 잡고 있지 않다. 측정하는 지연 역시
+ *   장치 지연이 아니라 bio가 블록 계층에 머문 전체 시간이다.
+ * - 판정 방식은 미디어 특성에 따라 둘로 갈린다. 비회전식(ssd=true)은
+ *   목표 초과 건수 비율(missed/total < 10%)로, 회전식은 윈도우 평균으로
+ *   본다. 쓰기가 유난히 빨리 끝나는 장치에서 평균만 보면 실제 압박을
+ *   과소평가하기 때문이다(파일 상단 원문 주석 참조).
+ * - 집행 수단 1: max_depth. 기본값은 UINT_MAX(무제한)이고, 위반이 관측된
+ *   뒤에야 값이 생긴다. 이건 하드웨어 큐 깊이가 아니라 이 cgroup이 동시에
+ *   띄울 수 있는 bio 수에 대한 순수 소프트웨어 상한이다.
+ * - 전파 방식: 위반한 그룹이 자기를 조이는 게 아니라, 부모의 공유
+ *   scale_cookie를 내려 같은 부모 아래 형제들을 조인다. io.latency가
+ *   상한이 아니라 보호 장치이기 때문이다. 절반씩 줄이고 1/16씩 늘리는
+ *   비대칭 덕에 위반에는 빠르게, 회복에는 느리게 반응한다.
+ * - 집행 수단 2: max_depth가 1까지 갔는데도 부족하고, 그 IO가 우선순위
+ *   역전을 피하려 root 명의로 발행되는 종류(REQ_META/REQ_SWAP)라면 깊이
+ *   조절이 통하지 않는다. 이때는 blkcg_add_delay()로 빚을 쌓아 두었다가
+ *   해당 태스크가 유저스페이스로 복귀할 때 실제로 재운다.
+ * - 죽어가는 태스크(fatal_signal_pending)와 root 명의 발행은 스로틀을
+ *   우회한다 — 전자는 OOM 회복을 늦추지 않기 위해, 후자는 우선순위 역전을
+ *   만들지 않기 위해서다.
  */

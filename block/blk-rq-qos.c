@@ -19,8 +19,8 @@
  *   [bio 제출] blk_mq_submit_bio → rq_qos_throttle(__rq_qos_throttle) [진입 쓰로틀]
  *            → blk_mq_get_request → rq_qos_track(__rq_qos_track) [bio-rq 매핑]
  *   [bio 병합] blk_attempt_bio_merge → rq_qos_merge(__rq_qos_merge) [병합 통보]
- *   [SQ 발행] blk_mq_dispatch_rq_list → rq_qos_issue(__rq_qos_issue) [발행 직전]
- *   [CQ 완료] blk_mq_complete_request → rq_qos_done(__rq_qos_done) [완료 정산]
+  *   [드라이버 발행] blk_mq_dispatch_rq_list → rq_qos_issue(__rq_qos_issue) [발행 직전]
+  *   [완료]         blk_mq_complete_request → rq_qos_done(__rq_qos_done) [완료 정산]
  *   [bio 완료] bio_endio → rq_qos_done_bio(__rq_qos_done_bio) [bio 레벨 정산]
  *   [재배열]   blk_mq_requeue_request → rq_qos_requeue(__rq_qos_requeue) [budget 반납]
  *   [오류정리] blk_mq_end_request(error) → rq_qos_cleanup(__rq_qos_cleanup) [상태 복구]
@@ -165,11 +165,11 @@ void __rq_qos_cleanup(struct rq_qos *rqos, struct bio *bio)
  * @rq:   완료된 request. done 콜백이 이 request에 할당된 비용·budget을 회수.
  * @return: 없음 (void).
  *
- * blk_mq_complete_request()에서 CQ entry 처리 후 호출된다. 각 플러그인은 done에서
+ * blk_mq_complete_request()에서 드라이버가 완료를 보고한 뒤 호출된다. 각 플러그인은 done에서
  * inflight 카운터를 감소시키고, waitqueue에 대기 중인 태스크를 깨운다.
  * wbt의 경우 done에서 wbt_rqw_done()이 호출되어 inflight를 감소하고
  * wake_up_nr(&rq_wait->wait, 1)로 대기 중인 bio 제출 경로를 깨운다.
- * 실행 컨텍스트: softirq 또는 IRQ(CQ 처리 경로). ops->done은 atomic 연산만 사용해야 함.
+ * 실행 컨텍스트: softirq 또는 하드 IRQ(완료 처리 경로). ops->done은 atomic 연산만 사용해야 함.
  *
  * 호출 체인:
  *   blk_mq_complete_request → rq_qos_done (inline) → [이 함수] → ops->done
@@ -186,16 +186,16 @@ void __rq_qos_done(struct rq_qos *rqos, struct request *rq)
 
 /*
  * [한국어]
- * __rq_qos_issue - request가 SQ에 발행되기 직전 모든 QoS 플러그인의 issue 콜백을 순회 호출.
+ * __rq_qos_issue - request가 드라이버에 발행되기 직전 모든 QoS 플러그인의 issue 콜백을 순회 호출.
  *
  * @rqos: 체인의 첫 번째 QoS 플러그인.
  * @rq:   발행(issue)될 request. issue 콜백이 이 시점을 기록하거나 상태를 갱신.
  * @return: 없음 (void).
  *
- * blk_mq_dispatch_rq_list()에서 실제로 드라이버 큐(SQ)에 request를 진입시키기 직전에
- * 호출된다. throttle에서 예약한 budget이 실제 SQ 진입으로 이어지는 시점을 플러그인에
+ * blk_mq_dispatch_rq_list()에서 실제로 드라이버에 request를 넘기기 직전에
+ * 호출된다. throttle에서 예약한 budget이 실제 발행으로 이어지는 시점을 플러그인에
  * 알려줘 더 정밀한 비용 계산이나 타이밍 측정이 가능하게 한다.
- * 실행 컨텍스트: kworker/softirq(dispatch 경로). ops->issue는 짧고 빠야야 함.
+ * 실행 컨텍스트: kworker/softirq(dispatch 경로). ops->issue는 sleep 없이 짧게 끝나야 함.
  *
  * 호출 체인:
  *   blk_mq_dispatch_rq_list → rq_qos_issue (inline) → [이 함수] → ops->issue
@@ -204,7 +204,7 @@ void __rq_qos_issue(struct rq_qos *rqos, struct request *rq)
 {
 	do {
 		if (rqos->ops->issue)             /* [한국어] issue 콜백 존재 확인 */
-			rqos->ops->issue(rqos, rq);   /* [한국어] SQ 진입 시점 통보: 타이밍 기록이나 상태 갱신 */
+			rqos->ops->issue(rqos, rq);   /* [한국어] 드라이버 발행 시점 통보: 타이밍 기록이나 상태 갱신 */
 		rqos = rqos->next;                /* [한국어] 다음 플러그인 순회 */
 	} while (rqos);
 }
@@ -218,7 +218,8 @@ void __rq_qos_issue(struct rq_qos *rqos, struct request *rq)
  * @rq:   재배열될 request. requeue 콜백이 이 request에 사용된 budget을 원상복구.
  * @return: 없음 (void).
  *
- * blk_mq_requeue_request()에서 nvme_queue_rq()가 BLK_STS_RESOURCE를 반환하거나
+ * blk_mq_requeue_request()에서 드라이버의 ->queue_rq()가 BLK_STS_RESOURCE(자원 부족)를
+ * 반환하거나
  * 다른 이유로 request를 재배열할 때 호출된다. throttle/issue에서 할당된 budget이
  * 아직 완료되지 않은 채로 requeue되므로, 각 플러그인이 해당 budget을 되돌려야
  * forward progress가 보장된다.
@@ -231,7 +232,7 @@ void __rq_qos_requeue(struct rq_qos *rqos, struct request *rq)
 {
 	do {
 		if (rqos->ops->requeue)             /* [한국어] requeue 콜백 존재 확인 */
-			rqos->ops->requeue(rqos, rq);   /* [한국어] SQ 진입 실패한 request의 budget 반납 및
+			rqos->ops->requeue(rqos, rq);   /* [한국어] 발행에 실패해 되돌아온 request의 budget 반납 및
 			                                 *         waiter 깨우기 */
 		rqos = rqos->next;                  /* [한국어] 다음 플러그인 순회 */
 	} while (rqos);
@@ -420,15 +421,15 @@ bool rq_depth_calc_max_depth(struct rq_depth *rqd)
 	 * since the device can't have more than that in flight. If we're
 	 * scaling down, then keep a setting of 1/1/1.
 	 */
-	if (rqd->queue_depth == 1) {  /* [한국어] 하드웨어 queue depth가 1인 특수 디바이스:
-	                               *         고속 SSD를 NVMe-oF 등 depth=1 설정으로 사용하는 경우 */
-		if (rqd->scale_step > 0)
+	if (rqd->queue_depth == 1) {  /* [한국어] 한 번에 한 건만 받는 장치(구형 ATA, 일부 가상/루프백 장치 등).
+	                               *         지수적 스케일링 공식이 의미가 없어 아예 따로 처리한다. */
+		if (rqd->scale_step > 0) /* [한국어] 축소 방향으로 가고 있으면 더 줄일 곳이 1밖에 없다 */
 			rqd->max_depth = 1;  /* [한국어] 지연 악화로 scale_down 중이면 max_depth도 1로 고정 */
 		else {
-			rqd->max_depth = 2;  /* [한국어] 기본/scale_up 시 max_depth=2: 현재 CQ 처리 중에도
-			                      *         다음 request가 준비될 수 있게 '파이프라인' 효과 제공.
-			                      *         하드웨어는 실제로 1개만 in-flight이지만 소프트웨어는
-			                      *         2개까지 준비하여 처리량 향상 */
+			rqd->max_depth = 2;  /* [한국어] 굳이 2를 주는 이유: 한 건이 완료되는 순간 다음 한 건이
+			                      *         이미 소프트웨어 큐에 서 있어야 장치가 놀지 않는다.
+			                      *         하드웨어에 실제로 실리는 건 여전히 1개지만,
+			                      *         '완료 → 다음 발행' 사이의 공백이 사라진다. */
 			ret = true;          /* [한국어] depth=2가 이 장치의 사실상 최대 한도: 확장 불가 신호 */
 		}
 	} else {
@@ -449,7 +450,9 @@ bool rq_depth_calc_max_depth(struct rq_depth *rqd)
 			 *         min(31, scale_step)으로 시프트 오버플로우 방지.
 			 *         +1은 최솟값 보장(depth가 1 미만이 되지 않도록). */
 			depth = 1 + ((depth - 1) >> min(31, rqd->scale_step));
-		else if (rqd->scale_step < 0) {
+		else if (rqd->scale_step < 0) { /* [한국어] 음수 step은 '기본값보다 더 열어도 되는 상태' —
+						 * wbt에서는 읽기가 하나도 없어 보호할 대상이 없을 때만 여기에 온다.
+						 * 이때는 기본 depth를 넘어서 확장하므로 하드웨어 상한 검사가 필요하다. */
 			/* [한국어] 처리량 개선 필요(scale_up 단계) 시 max_depth를 지수적으로 확장:
 			 *         depth-1을 (-scale_step)만큼 왼쪽 시프트 → 두 배씩 증가. */
 			unsigned int maxd = 3 * rqd->queue_depth / 4;
@@ -538,12 +541,14 @@ bool rq_depth_scale_down(struct rq_depth *rqd, bool hard_throttle)
 	                            *         이 조건이 없으면 scale_step이 무한히 증가할 수 있음 */
 		return false;
 
-	if (rqd->scale_step < 0 && hard_throttle)
+	if (rqd->scale_step < 0 && hard_throttle) /* [한국어] '기본보다 더 열어 둔 상태'에서 실제 지연 위반이 관측된 경우.
+						   * 한 단계씩 되감으면 위반이 여러 윈도우 동안 계속되므로,
+						   * 확장분을 통째로 취소해 곧바로 기본 상태로 되돌린다. */
 		/* [한국어] 현재 확장 상태(scale_step<0)에서 강력 쓰로틀 요청:
 		 *         scale_step을 즉시 0으로 리셋하여 기본 depth로 복귀.
 		 *         점진적 축소 대신 즉각적인 정책 복귀가 필요한 심각한 지연 위반 상황. */
 		rqd->scale_step = 0;
-	else
+	else /* [한국어] 그 외(이미 기본/축소 구간이거나 soft 요청)는 한 단계씩만 조인다 */
 		rqd->scale_step++;  /* [한국어] 점진적 축소: scale_step 1 증가 → max_depth 절반 감소.
 		                      *         작은 지연 증가에는 점진적으로 반응하여 과잉 반응 방지 */
 

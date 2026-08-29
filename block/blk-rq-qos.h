@@ -629,6 +629,8 @@ void rq_qos_del(struct rq_qos *rqos);
  *   전혀 쓰지 않으므로(vtime 기반 자체 디베이트) 이 타입의 구현체가 없다.
  */
 typedef bool (acquire_inflight_cb_t)(struct rq_wait *rqw, void *private_data);
+/* [한국어] 반환값이 void인 이유: 이 콜백은 '실패할 수 있는 반납'이 아니라 이미 확정된
+ * 초과 획득분을 되돌리는 것뿐이라, 호출자가 확인할 결과가 없다. */
 typedef void (cleanup_cb_t)(struct rq_wait *rqw, void *private_data);
 
 /*
@@ -944,8 +946,11 @@ static inline void rq_qos_done_bio(struct bio *bio)
 	struct request_queue *q;	/* [한국어] bio가 실제로 속한(throttle 시점과 다를 수
 					 * 있는) request_queue를 담을 지역 변수 */
 
-	if (!bio->bi_bdev || (!bio_flagged(bio, BIO_QOS_THROTTLED) &&
-			     !bio_flagged(bio, BIO_QOS_MERGED)))
+	if (!bio->bi_bdev || (!bio_flagged(bio, BIO_QOS_THROTTLED) && /* [한국어] bdev 조회(포인터 역참조 2회)를 하기
+								       * 전에 플래그부터 본다 — bio_endio()는 극도로
+								       * 빈번한 경로라 캐시 미스 하나가 비싸다 */
+			     !bio_flagged(bio, BIO_QOS_MERGED))) /* [한국어] throttle을 거쳤거나 merge 통보를 받은 bio만
+								  * 정산할 상태를 갖는다. 둘 다 아니면 정산할 것이 없다 */
 		/* [한국어] bdev가 아예 없거나(디바이스에 매핑되지 않은 bio), 이 bio가
 		 * throttle도 merge도 거치지 않았다면 QoS와 전혀 무관 — 아래의 큐 조회
 		 * 자체가 불필요하므로 조기 반환 */
