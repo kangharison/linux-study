@@ -836,47 +836,95 @@ static int blkdev_zone_reset_all(struct block_device *bdev)
 int blkdev_zone_mgmt(struct block_device *bdev, enum req_op op,
 		     sector_t sector, sector_t nr_sectors)
 {
-	sector_t zone_sectors = bdev_zone_sectors(bdev); // NVMe ZNS zone size (queue limits.chunk_sectors)
-	sector_t capacity = bdev_nr_sectors(bdev); // NVMe namespace capacity
-	sector_t end_sector = sector + nr_sectors; // 작업할 zone 범위의 exclusive 끝 sector
+	/* [한국어] zone 하나의 크기(섹터). NVMe ZNS에서는 Identify Namespace의
+	 * LBA Format Extension이 보고한 Zone Size(zsze)를 zns.c가 섹터로 변환해
+	 * lim->chunk_sectors에 넣어 둔 값이다. 이 크기 단위로 루프를 돌며 zone마다
+	 * 하나씩 bio를 만든다. */
+	sector_t zone_sectors = bdev_zone_sectors(bdev);
+	/* [한국어] 네임스페이스 전체 용량(섹터). 요청 범위가 이를 넘는지 검증하고,
+	 * "마지막 zone은 더 작을 수 있다"는 예외 판정에도 쓴다. */
+	sector_t capacity = bdev_nr_sectors(bdev);
+	/* [한국어] 작업 범위의 끝(exclusive). sector <= x < end_sector 반개구간이다. */
+	sector_t end_sector = sector + nr_sectors;
+	/* [한국어] blk_next_bio()가 체인으로 이어 붙일 bio. NULL로 시작해 첫 반복에서
+	 * 새로 할당되고, 이후 반복에서는 그 bio에 사슬로 연결된다. */
 	struct bio *bio = NULL;
 	int ret = 0;
 
-	if (!bdev_is_zoned(bdev)) // ZNS가 아닌 블록 장치는 zone management 불가
+	/* [한국어] 검증 1 — zoned 장치인가. 일반 NVMe 네임스페이스(Zoned Namespace
+	 * Command Set을 쓰지 않는)에는 zone 개념이 없어 이 연산을 보낼 수 없다. */
+	if (!bdev_is_zoned(bdev))
 		return -EOPNOTSUPP;
 
-	if (bdev_read_only(bdev)) // read-only namespace이면 NVMe command 발행 전 차단
+	/* [한국어] 검증 2 — 읽기 전용 장치. zone reset/open/close/finish는 모두
+	 * 장치 상태를 바꾸는 연산이므로 RO 장치에서는 거부한다. 커맨드를 보내
+	 * 컨트롤러가 거부하게 두는 것보다 여기서 막는 편이 빠르고 명확하다. */
+	if (bdev_read_only(bdev))
 		return -EPERM;
 
-	if (!op_is_zone_mgmt(op)) // zone mgmt op인지 검증 (reset/open/close/finish)
+	/* [한국어] 검증 3 — 실제로 zone management 연산인가.
+	 * REQ_OP_ZONE_RESET / OPEN / CLOSE / FINISH만 통과한다. 이들은 최종적으로
+	 * nvme_setup_zone_mgmt_send()에서 NVMe Zone Management Send(옵코드 0x79)의
+	 * Zone Send Action(ZSA) 필드로 변환된다. */
+	if (!op_is_zone_mgmt(op))
 		return -EOPNOTSUPP;
 
-	if (end_sector <= sector || end_sector > capacity) // NVMe namespace capacity 범위 검증
+	/* [한국어] 검증 4 — 범위가 유효한가. end_sector <= sector는 nr_sectors가
+	 * 0이거나 오버플로가 난 경우이고, > capacity는 네임스페이스 밖이다. */
+	if (end_sector <= sector || end_sector > capacity)
 		/* Out of range */
 		return -EINVAL;
 
 	/* Check alignment (handle eventual smaller last zone) */
-	if (!bdev_is_zone_start(bdev, sector)) // zone 시작 경계 정렬 검증; 잘못된 ZID 명령 방지
+	/* [한국어] 검증 5 — 시작이 zone 경계인가. ZNS의 Zone Management Send는
+	 * SLBA로 zone을 지정하는데, 그 값이 zone 시작 LBA와 정확히 일치해야 한다.
+	 * zone 중간 주소를 보내면 컨트롤러가 Invalid Field로 거부한다. */
+	if (!bdev_is_zone_start(bdev, sector))
 		return -EINVAL;
 
-	if (!bdev_is_zone_start(bdev, nr_sectors) && end_sector != capacity) // 마지막 zone을 제외한 크기는 zone size 배수여야 함
+	/* [한국어] 검증 6 — 길이가 zone 크기의 배수인가. 다만 마지막 zone은 예외다.
+	 * ZNS에서 네임스페이스 용량이 zone 크기의 정확한 배수가 아니면 마지막
+	 * zone이 잘려 더 작아질 수 있는데(영문 주석의 "eventual smaller last zone"),
+	 * 그 경우 end_sector == capacity이면 정렬 요구를 면제한다. */
+	if (!bdev_is_zone_start(bdev, nr_sectors) && end_sector != capacity)
 		return -EINVAL;
 
 	/*
 	 * In the case of a zone reset operation over all zones, use
 	 * REQ_OP_ZONE_RESET_ALL.
 	 */
-	if (op == REQ_OP_ZONE_RESET && sector == 0 && nr_sectors == capacity) // 전체 디스크 reset 시 NVMe Reset All command로 최적화
+	/* [한국어] 전체 범위 reset이면 zone마다 커맨드를 보내는 대신 단일
+	 * REQ_OP_ZONE_RESET_ALL로 최적화한다. NVMe ZNS는 Zone Management Send의
+	 * Select All(SELECT ALL) 비트를 지원해, 커맨드 하나로 모든 zone을 리셋할 수
+	 * 있다. zone이 수천 개인 대용량 SSD에서 이 차이는 매우 크다 —
+	 * 커맨드 수천 개 대 하나다. */
+	if (op == REQ_OP_ZONE_RESET && sector == 0 && nr_sectors == capacity)
 		return blkdev_zone_reset_all(bdev);
-		// 전체 zone reset은 NVMe Reset All command로 매핑
 
+	/* [한국어] 일반 경로 — 지정된 범위의 zone을 하나씩 순회하며 bio를 만든다.
+	 * ZNS의 Zone Management Send는 커맨드 하나가 zone 하나만 대상으로 하므로
+	 * (Select All을 쓰지 않는 한) 범위 전체를 한 번에 보낼 수 없다. */
 	while (sector < end_sector) {
-		bio = blk_next_bio(bio, bdev, 0, op | REQ_SYNC, GFP_KERNEL); // zone 단위로 BIO 생성 -> zone마다 NVMe SQ entry 소비
-		bio->bi_iter.bi_sector = sector; // 각 zone의 시작 sector 설정 (ZNS Zone Identifier 기반)
-		sector += zone_sectors; // 다음 zone으로 이동; NVMe Zone Management Send 범위 축적
+		/* [한국어] blk_next_bio()는 bio가 NULL이면 새로 할당하고, 아니면
+		 * 기존 bio에 사슬(bi_next)로 이어 붙인다. 이렇게 모아 두었다가
+		 * 루프가 끝난 뒤 한 번에 제출해, zone마다 제출/대기를 반복하는
+		 * 왕복 비용을 없앤다.
+		 * REQ_SYNC를 붙이는 이유: 호출자(주로 사용자 ioctl 또는 파일시스템의
+		 * 명시적 zone 관리)가 완료를 기다리고 있으므로 지연에 민감하다. */
+		bio = blk_next_bio(bio, bdev, 0, op | REQ_SYNC, GFP_KERNEL);
+		/* [한국어] 이 bio가 대상으로 삼을 zone의 시작 섹터. 데이터 전송이
+		 * 없으므로 bi_size는 0으로 남고, 이 위치 값만이 커맨드의 SLBA가 된다. */
+		bio->bi_iter.bi_sector = sector;
+		/* [한국어] 다음 zone으로 전진. 마지막 zone이 더 작더라도 end_sector
+		 * 조건이 루프를 정확히 끝내므로 문제없다. */
+		sector += zone_sectors;
 
 		/* This may take a while, so be nice to others */
-		cond_resched(); // 오랜 zone loop 중 선점 양보; NVMe ISR/completion 처리 허용
+		/* [한국어] zone이 수천 개면 이 루프가 길어져 다른 태스크를 굶길 수 있다.
+		 * cond_resched()로 선점 지점을 만들어, 필요하면 스케줄러가 CPU를
+		 * 회수하게 한다. 여기서 잠들어도 아직 bio를 제출하지 않았으므로
+		 * I/O 진행에는 영향이 없다. */
+		cond_resched();
 	}
 
 	trace_blkdev_zone_mgmt(bio, nr_sectors);
@@ -1055,27 +1103,65 @@ int blkdev_report_zones_ioctl(struct block_device *bdev, unsigned int cmd,
 static int blkdev_reset_zone(struct block_device *bdev, blk_mode_t mode,
 			     struct blk_zone_range *zrange)
 {
+	/* [한국어] 페이지 캐시 무효화 범위를 바이트 단위로 표현할 변수.
+	 * 블록 계층은 섹터, 페이지 캐시는 바이트를 쓰므로 변환이 필요하다. */
 	loff_t start, end;
+	/* [한국어] 기본값을 -EINVAL로 두어, 범위 검증에 실패해 out_unlock으로
+	 * 점프하면 자연히 이 값이 반환되게 한다. 검증 분기마다 대입을
+	 * 반복하지 않는 커널의 흔한 패턴이다. */
 	int ret = -EINVAL;
 
-	inode_lock(bdev->bd_mapping->host); // 파일시스템 쓰기와 reset 동작 직렬화
-	filemap_invalidate_lock(bdev->bd_mapping); // reset 구간의 page cache를 무효화
-	if (zrange->sector + zrange->nr_sectors <= zrange->sector || // 오버플로 또는 0 길이 검사
-	    zrange->sector + zrange->nr_sectors > get_capacity(bdev->bd_disk)) // capacity 초과 검사
+	/* [한국어] ★ 두 겹의 락이 필요한 이유 ★
+	 * zone reset은 그 범위의 데이터를 통째로 없애는 파괴적 연산이다.
+	 * 그런데 페이지 캐시에 그 영역의 옛 내용이 남아 있으면, reset 이후에도
+	 * 읽기가 캐시를 맞혀 "이미 사라진 데이터"를 돌려준다. 그래서 커맨드를
+	 * 보내기 전에 캐시를 비워야 하고, 비우는 동안 새 I/O가 다시 캐시를
+	 * 채우지 못하게 막아야 한다.
+	 *
+	 * inode_lock — 이 블록 장치에 대한 write(2)/read(2)를 직렬화한다.
+	 * 사용자가 reset과 동시에 쓰기를 하는 상황을 막는다. */
+	inode_lock(bdev->bd_mapping->host);
+	/* [한국어] filemap_invalidate_lock — 페이지 캐시 채우기(page fault를 통한
+	 * read-ahead 포함)를 막는다. inode_lock만으로는 mmap 경로를 막지 못하므로
+	 * 두 락이 모두 필요하다. */
+	filemap_invalidate_lock(bdev->bd_mapping);
+	/* [한국어] 범위 검증. 첫 조건은 오버플로와 길이 0을 동시에 잡는다 —
+	 * nr_sectors가 0이면 합이 그대로라 <=가 성립하고, 오버플로가 나면 합이
+	 * 작아져 역시 성립한다. 둘째 조건은 네임스페이스 범위를 벗어나는 경우다.
+	 * 락을 잡은 뒤에 검증하는 이유는 get_capacity()가 동시에 바뀔 수 있기
+	 * 때문이다(온라인 리사이즈). */
+	if (zrange->sector + zrange->nr_sectors <= zrange->sector ||
+	    zrange->sector + zrange->nr_sectors > get_capacity(bdev->bd_disk))
 		/* Out of range */
-		// [한국어] 범위를 벗어난 reset 요청 - NVMe command 발행 전 조기 차단하고 lock만 정리
 		goto out_unlock;
 
-	start = zrange->sector << SECTOR_SHIFT; // sector -> byte offset 변환 (truncate 범위 시작)
-	end = ((zrange->sector + zrange->nr_sectors) << SECTOR_SHIFT) - 1; // truncate 범위의 마지막 byte(inclusive)
+	/* [한국어] 섹터를 바이트로 변환한다(<< 9). 페이지 캐시 API가 바이트
+	 * 오프셋을 받기 때문이다. */
+	start = zrange->sector << SECTOR_SHIFT;
+	/* [한국어] 끝 오프셋은 inclusive다 — truncate_bdev_range()의 계약이
+	 * [start, end] 닫힌 구간이므로 -1을 해야 한다. 이 -1을 빠뜨리면 다음
+	 * zone의 첫 바이트까지 무효화해 무관한 캐시를 날린다. */
+	end = ((zrange->sector + zrange->nr_sectors) << SECTOR_SHIFT) - 1;
 
-	ret = truncate_bdev_range(bdev, mode, start, end); // reset할 구간의 캐시된 데이터 truncate
-	if (ret) // truncate 실패(예: 매핑된 페이지 잠금 등) 시 NVMe reset을 시도하지 않고 즉시 실패
+	/* [한국어] 해당 범위의 페이지 캐시를 버린다. 더티 페이지가 있으면
+	 * write-back하지 않고 버리는데, 어차피 reset으로 사라질 데이터이기
+	 * 때문이다. 매핑된 페이지가 있어 버릴 수 없으면 실패한다. */
+	ret = truncate_bdev_range(bdev, mode, start, end);
+	/* [한국어] 캐시를 비우지 못했다면 reset을 진행하면 안 된다. 진행하면
+	 * 장치의 데이터는 사라졌는데 캐시에는 남아 있는 불일치 상태가 된다. */
+	if (ret)
 		goto out_unlock;
 
-	ret = blkdev_zone_mgmt(bdev, REQ_OP_ZONE_RESET, zrange->sector, // NVMe Zone Management Send(Reset) 실행
+	/* [한국어] 이제 안전하게 zone reset을 발행한다. blkdev_zone_mgmt()가
+	 * 정렬 검증을 다시 하고 zone마다 bio를 만들어, 최종적으로
+	 * nvme_setup_zone_mgmt_send()에서 Zone Management Send(0x79)의
+	 * ZSA=Reset Zone으로 변환된다. 성공하면 해당 zone들의 write pointer가
+	 * zone 시작으로 되돌아가 처음부터 다시 쓸 수 있게 된다. */
+	ret = blkdev_zone_mgmt(bdev, REQ_OP_ZONE_RESET, zrange->sector,
 			       zrange->nr_sectors);
 out_unlock:
+	/* [한국어] 획득의 역순으로 해제한다. 이 시점부터 다시 페이지 캐시가
+	 * 채워질 수 있고, 그때는 장치에서 새로 읽으므로 올바른(리셋된) 내용을 본다. */
 	filemap_invalidate_unlock(bdev->bd_mapping);
 	inode_unlock(bdev->bd_mapping->host);
 	return ret;
@@ -1113,39 +1199,72 @@ out_unlock:
 int blkdev_zone_mgmt_ioctl(struct block_device *bdev, blk_mode_t mode,
 			   unsigned int cmd, unsigned long arg)
 {
+	/* [한국어] 사용자 공간 포인터. __user 어노테이션은 sparse에게 "이 주소는
+	 * 직접 역참조하면 안 되고 copy_from_user 계열을 거쳐야 한다"고 알린다. */
 	void __user *argp = (void __user *)arg;
+	/* [한국어] 사용자가 지정한 zone 범위(시작 섹터 + 섹터 수). 커널 스택에
+	 * 복사해 쓴다 — 사용자 메모리를 그대로 참조하면 검증과 사용 사이에
+	 * 값이 바뀌는 TOCTOU 취약점이 된다. */
 	struct blk_zone_range zrange;
+	/* [한국어] ioctl 명령을 블록 계층 연산 코드로 변환한 결과. */
 	enum req_op op;
 
+	/* [한국어] 인자 포인터가 NULL이면 범위를 알 수 없다. */
 	if (!argp)
 		return -EINVAL;
 
-	if (!bdev_is_zoned(bdev)) // ZNS 디바이스인지 재확인
+	/* [한국어] zoned 장치가 아니면 이 ioctl 자체가 의미가 없다. -ENOTTY는
+	 * "이 장치는 그런 ioctl을 지원하지 않는다"는 관용적 반환값이다. */
+	if (!bdev_is_zoned(bdev))
 		return -ENOTTY;
 
-	if (!(mode & BLK_OPEN_WRITE)) // 쓰기 권한 없으면 NVMe command 발행 전 차단
+	/* [한국어] zone 관리 연산은 모두 장치 상태를 바꾸므로 쓰기 권한이 필요하다.
+	 * 읽기 전용으로 연 fd로는 zone을 리셋할 수 없어야 한다. */
+	if (!(mode & BLK_OPEN_WRITE))
 		return -EBADF;
 
-	if (copy_from_user(&zrange, argp, sizeof(struct blk_zone_range))) // 사용자로부터 zone 범위 복사
+	/* [한국어] 사용자 구조체를 커널 스택으로 복사한다. 실패는 잘못된
+	 * 사용자 주소를 뜻하므로 -EFAULT. */
+	if (copy_from_user(&zrange, argp, sizeof(struct blk_zone_range)))
 		return -EFAULT;
 
+	/* [한국어] ioctl 명령을 NVMe ZNS의 Zone Send Action으로 이어지는 블록 계층
+	 * 연산 코드로 변환한다. 최종 변환은 nvme_setup_zone_mgmt_send()가 한다. */
 	switch (cmd) {
 	case BLKRESETZONE:
-		return blkdev_reset_zone(bdev, mode, &zrange); // Reset 후 NVMe ZNS zone WP를 0으로 되돌림
+		/* [한국어] Reset은 별도 함수로 처리한다. 단순히 커맨드를 보내는 것에
+		 * 더해, 해당 범위의 페이지 캐시를 무효화해야 하기 때문이다 —
+		 * zone을 리셋하면 그 안의 데이터가 사라지는데 캐시에 옛 내용이
+		 * 남아 있으면 이후 읽기가 유령 데이터를 돌려준다.
+		 * ZNS 관점: write pointer가 zone 시작으로 되돌아가 처음부터 다시
+		 * 쓸 수 있게 된다(NVME_ZONE_RESET). */
+		return blkdev_reset_zone(bdev, mode, &zrange);
 	case BLKOPENZONE:
-		op = REQ_OP_ZONE_OPEN; // NVMe Zone Management Send(Open)에 대응
+		/* [한국어] Explicit Open — zone을 명시적으로 열어 둔다. 컨트롤러가
+		 * 그 zone에 쓰기 버퍼를 미리 할당해 첫 쓰기 지연을 줄인다.
+		 * 다만 동시에 열 수 있는 zone 수(max_open_zones)에 한계가 있다. */
+		op = REQ_OP_ZONE_OPEN;
 		break;
 	case BLKCLOSEZONE:
-		op = REQ_OP_ZONE_CLOSE; // NVMe Zone Management Send(Close)에 대응
+		/* [한국어] Close — 열린 zone을 닫아 자원을 반납한다. write pointer는
+		 * 그대로 유지되어 나중에 이어서 쓸 수 있다. max_open_zones 한계에
+		 * 걸릴 때 쓰지 않는 zone을 정리하는 용도다. */
+		op = REQ_OP_ZONE_CLOSE;
 		break;
 	case BLKFINISHZONE:
-		op = REQ_OP_ZONE_FINISH; // NVMe Zone Management Send(Finish)에 대응
+		/* [한국어] Finish — zone을 강제로 FULL 상태로 만든다. 남은 공간을
+		 * 포기하는 대신 그 zone을 "쓰기 완료" 상태로 확정해, 이후 리셋
+		 * 대상으로 관리하기 쉽게 한다. */
+		op = REQ_OP_ZONE_FINISH;
 		break;
 	default:
+		/* [한국어] 알 수 없는 명령. */
 		return -ENOTTY;
 	}
 
-	return blkdev_zone_mgmt(bdev, op, zrange.sector, zrange.nr_sectors); // 지정 범위의 NVMe Zone Management Send command 발행
+	/* [한국어] 지정 범위의 zone들에 대해 선택된 관리 연산을 발행한다.
+	 * blkdev_zone_mgmt()가 정렬 검증과 zone 단위 bio 생성을 담당한다. */
+	return blkdev_zone_mgmt(bdev, op, zrange.sector, zrange.nr_sectors);
 }
 
 /*
@@ -1821,15 +1940,33 @@ static void disk_zone_wplug_set_wp_offset(struct gendisk *disk,
  */
 static unsigned int blk_zone_wp_offset(struct blk_zone *zone)
 {
+	/* [한국어] ZNS zone 상태 기계에 따라 write pointer의 유효성이 달라진다.
+	 * 각 상태의 의미(NVMe ZNS 사양):
+	 *   EMPTY      - 한 번도 쓰지 않았거나 리셋된 zone. WP = zone 시작.
+	 *   IMP_OPEN   - 쓰기가 발생해 컨트롤러가 암묵적으로 연 상태.
+	 *   EXP_OPEN   - 호스트가 Zone Management Send(Open)로 명시적으로 연 상태.
+	 *   CLOSED     - 열렸다가 닫힌 상태. WP는 유지되어 이어 쓸 수 있다.
+	 *   FULL       - WP가 zone capacity에 도달. 더 쓸 수 없고 리셋만 가능.
+	 *   NOT_WP     - conventional zone. 순차 제약이 없어 WP 개념 자체가 없다.
+	 *   OFFLINE    - 매체 문제로 사용 불가. 리셋해도 복구되지 않는다.
+	 *   READONLY   - 읽기만 가능. 쓰기 불가.
+	 * ACTIVE는 커널이 IMP_OPEN/EXP_OPEN/CLOSED를 1바이트 캐시에 축약해
+	 * 저장할 때 쓰는 내부 표현이다(blk_zone_set_cond 참고). */
 	switch (zone->cond) {
 	case BLK_ZONE_COND_IMP_OPEN:
 	case BLK_ZONE_COND_EXP_OPEN:
 	case BLK_ZONE_COND_CLOSED:
 	case BLK_ZONE_COND_ACTIVE:
-		return zone->wp - zone->start; // open/active zone의 WP는 zone 시작 + wp_offset
-		// ZNS active/open zone의 WP는 start + wp_offset
+		/* [한국어] 쓰기가 진행 중이거나 중단된 zone들 — WP가 유효하다.
+		 * 절대 LBA인 zone->wp에서 zone 시작을 빼 "zone 안에서의 오프셋"으로
+		 * 바꾼다. 커널이 오프셋으로 다루는 이유는 zone 번호와 오프셋을
+		 * 분리해야 zone 경계 계산이 단순해지기 때문이다. */
+		return zone->wp - zone->start;
 	case BLK_ZONE_COND_EMPTY:
-		return 0; // EMPTY zone의 WP는 zone 시작과 동일
+		/* [한국어] 빈 zone — WP가 zone 시작에 있으므로 오프셋은 0이다.
+		 * 컨트롤러가 보고한 zone->wp를 빼서 계산해도 같지만, 명시적으로
+		 * 0을 돌려주는 편이 의도가 분명하다. */
+		return 0;
 	case BLK_ZONE_COND_FULL:
 	case BLK_ZONE_COND_NOT_WP:
 	case BLK_ZONE_COND_OFFLINE:
@@ -1839,7 +1976,13 @@ static unsigned int blk_zone_wp_offset(struct blk_zone *zone)
 		 * Conventional, full, offline and read-only zones do not have
 		 * a valid write pointer.
 		 */
-		return UINT_MAX; // conventional/full/offline/readonly zone은 유효 WP 없음
+		/* [한국어] WP가 의미 없는 상태들. UINT_MAX를 "유효하지 않음"의
+		 * sentinel로 쓴다 — 0을 쓰면 "zone 시작"이라는 유효한 오프셋과
+		 * 구분되지 않기 때문이다. 호출자는 이 값을 보고 해당 zone에
+		 * 순차 쓰기를 시도하지 않는다.
+		 * FULL이 여기 포함되는 것에 주의: WP가 capacity에 도달해 "더 쓸 수
+		 * 없다"는 뜻이므로, 추적할 다음 쓰기 위치가 존재하지 않는다. */
+		return UINT_MAX;
 	}
 }
 
@@ -2264,27 +2407,55 @@ int blkdev_report_zones_cached(struct block_device *bdev, sector_t sector,
 			unsigned int nr_zones, report_zones_cb cb, void *data)
 {
 	struct gendisk *disk = bdev->bd_disk;
-	sector_t capacity = get_capacity(disk); // NVMe namespace capacity
-	sector_t zone_sectors = bdev_zone_sectors(bdev); // ZNS zone size
+	/* [한국어] 네임스페이스 전체 용량(섹터). 순회 종료 조건으로 쓴다. */
+	sector_t capacity = get_capacity(disk);
+	/* [한국어] zone 하나의 크기. NVMe ZNS의 Zone Size(zsze)에서 유래한다. */
+	sector_t zone_sectors = bdev_zone_sectors(bdev);
+	/* [한국어] 지금까지 콜백에 넘긴 zone 개수. 반환값이자 사용자 배열 인덱스다. */
 	unsigned int idx = 0;
+	/* [한국어] 캐시에서 재구성한 zone descriptor를 담을 스택 버퍼.
+	 * zone 하나씩 채워 콜백에 넘기므로 배열이 필요 없다. */
 	struct blk_zone zone;
 	int ret;
 
-	if (!cb || !bdev_is_zoned(bdev) || // callback 필수; ZNS zone descriptor를 사용자에게 전달
+	/* [한국어] 콜백이 없으면 결과를 전달할 방법이 없고, zoned 장치가 아니면
+	 * zone 자체가 없다. report_zones 연산이 없는 것은 드라이버 버그이므로
+	 * WARN_ON_ONCE로 알린다. */
+	if (!cb || !bdev_is_zoned(bdev) ||
 	    WARN_ON_ONCE(!disk->fops->report_zones))
 		return -EOPNOTSUPP;
 
-	if (!nr_zones || sector >= capacity) // report할 zone이 없거나 용량 초과시 no-op
+	/* [한국어] 요청 개수가 0이거나 시작 위치가 용량 밖이면 보고할 것이 없다.
+	 * 오류가 아니라 "0개를 보고했다"이므로 0을 반환한다. */
+	if (!nr_zones || sector >= capacity)
 		return 0;
 
-	if (!blkdev_has_cached_report_zones(bdev)) { // cached path 사용 불가 시 NVMe command로 fallback
+	/* [한국어] ★ 이 함수의 핵심 분기 ★
+	 * 커널은 zone write plug와 zones_cond 배열로 각 zone의 상태와 write
+	 * pointer를 추적하고 있어, 대부분의 경우 장치에 Report Zones 커맨드를
+	 * 보내지 않고도 답할 수 있다. 커맨드 왕복(수십~수백 마이크로초)을
+	 * 통째로 없애는 최적화다.
+	 *
+	 * 다만 캐시를 신뢰할 수 없는 경우가 있다. 위쪽 영문 주석이 설명하듯,
+	 * 장치가 Zone Append를 네이티브 지원하면 커널이 write plug를 쓰지 않고
+	 * 장치가 직접 쓸 위치를 정하므로, 커널이 추적하던 WP가 실제와 어긋난다.
+	 * 그때는 실제 커맨드로 확인해야 한다. */
+	if (!blkdev_has_cached_report_zones(bdev)) {
+		/* [한국어] 실제 Report Zones 커맨드로 우회한다. report_active=true는
+		 * open/closed 계열을 ACTIVE로 축약해, 캐시 경로와 같은 형태로
+		 * 사용자에게 보이도록 표현을 통일한다. */
 		struct blk_report_zones_args args = {
+			/* [한국어] 사용자가 넘긴 콜백을 그대로 전달 */
 			.cb = cb,
+			/* [한국어] 콜백에 함께 넘길 컨텍스트 */
 			.data = data,
+			/* [한국어] open/closed → ACTIVE 축약 활성화 */
 			.report_active = true,
 		};
 
-		return blkdev_do_report_zones(bdev, sector, nr_zones, &args); // report_zones op (nvme_report_zones) 호출
+		/* [한국어] disk->fops->report_zones == nvme_report_zones로 이어져
+		 * NVMe Zone Management Receive(옵코드 0x7A) 커맨드가 발행된다. */
+		return blkdev_do_report_zones(bdev, sector, nr_zones, &args);
 	}
 
 	for (sector = bdev_zone_start(bdev, sector); // zone 단위로 순회; 캐시 유효하면 NVMe SQ/CID 사용 안 함
@@ -4319,16 +4490,28 @@ static int blk_revalidate_conv_zone(struct blk_zone *zone, unsigned int idx,
 {
 	struct gendisk *disk = args->disk;
 
-	if (zone->capacity != zone->len) { // conventional zone은 capacity == len이어야 함
+	/* [한국어] conventional zone은 순차 쓰기 제약이 없는 일반 영역이라
+	 * write pointer 개념이 없다. 따라서 "쓸 수 있는 용량(capacity)"이 곧
+	 * "zone 전체 길이(len)"여야 한다. 둘이 다르다면 컨트롤러가 zone 타입을
+	 * 잘못 보고했거나 응답 해석이 틀린 것이다.
+	 * (sequential zone에서는 capacity < len이 정상이다 — zone 끝부분이
+	 *  메타데이터나 예비 영역으로 쓰여 실제 쓰기 가능 용량이 더 작을 수 있다.) */
+	if (zone->capacity != zone->len) {
 		pr_warn("%s: Invalid conventional zone capacity\n",
 			disk->disk_name);
 		return -ENODEV;
 	}
 
-	if (disk_zone_is_last(disk, zone)) // 마지막 conventional zone 처리
-		args->last_zone_capacity = zone->capacity; // 마지막 zone capacity 기록
+	/* [한국어] 마지막 zone이면 그 capacity를 따로 기록해 둔다. 마지막 zone은
+	 * 크기가 다를 수 있어(네임스페이스 용량이 zone 크기의 배수가 아닌 경우)
+	 * 일괄 계산에서 제외하고 개별 값을 보관해야 한다. */
+	if (disk_zone_is_last(disk, zone))
+		args->last_zone_capacity = zone->capacity;
 
-	args->nr_conv_zones++; // conventional zone 개수 증가
+	/* [한국어] conventional zone 개수를 누적한다. 재검증이 끝난 뒤
+	 * (전체 zone 수 - 이 값)으로 sequential zone 수를 구해, zone write plug
+	 * 해시 크기 등 자원을 그에 맞춰 잡는다. */
+	args->nr_conv_zones++;
 
 	return 0;
 }
@@ -4443,19 +4626,35 @@ static int blk_revalidate_seq_zone(struct blk_zone *zone, unsigned int idx,
 static int blk_revalidate_zone_cb(struct blk_zone *zone, unsigned int idx,
 				  void *data)
 {
+	/* [한국어] 콜백에 넘어온 불투명 포인터를 재검증 컨텍스트로 되돌린다.
+	 * 이 구조체에 "지금까지 몇 섹터까지 확인했는가(sector)", "conventional
+	 * zone이 몇 개였는가" 같은 누적 상태가 들어 있어, 콜백이 여러 번
+	 * 불려도 이어서 검증할 수 있다. */
 	struct blk_revalidate_zone_args *args = data;
 	struct gendisk *disk = args->disk;
+	/* [한국어] 기준 zone 크기. NVMe ZNS에서는 zns.c가 Identify Namespace의
+	 * Zone Size(zsze)를 섹터로 변환해 chunk_sectors에 넣어 둔 값이며,
+	 * 아래에서 "모든 zone이 이 크기인가"를 검증하는 기준이 된다. */
 	sector_t zone_sectors = disk->queue->limits.chunk_sectors;
 	int ret;
 
 	/* Check for bad zones and holes in the zone report */
-	if (zone->start != args->sector) { // ZNS zone layout은 연속적이어야 함 (gap 불가)
+	/* [한국어] 검증 1 — zone 사이에 구멍이 없는가.
+	 * args->sector는 "직전 zone이 끝난 위치 = 이번 zone이 시작해야 할 위치"다.
+	 * ZNS 네임스페이스는 LBA 공간 전체가 zone으로 빈틈없이 덮여야 하므로,
+	 * 어긋나면 컨트롤러의 Report Zones 응답이 잘못되었거나 커널이 응답을
+	 * 잘못 해석한 것이다. 어느 쪽이든 이 상태로 I/O를 진행하면 zone 경계를
+	 * 잘못 계산해 데이터가 깨지므로 장치를 포기한다. */
+	if (zone->start != args->sector) {
 		pr_warn("%s: Zone gap at sectors %llu..%llu\n",
 			disk->disk_name, args->sector, zone->start);
 		return -ENODEV;
 	}
 
-	if (zone->start >= get_capacity(disk) || !zone->len) { // zone 시작/길이가 capacity 범위를 벗어나면 비정상
+	/* [한국어] 검증 2 — zone이 네임스페이스 안에 있고 길이가 0이 아닌가.
+	 * start가 capacity 이상이면 존재할 수 없는 위치이고, len == 0인 zone은
+	 * 아래의 나눗셈/경계 계산에서 0으로 나누기나 무한 루프를 유발한다. */
+	if (zone->start >= get_capacity(disk) || !zone->len) {
 		pr_warn("%s: Invalid zone start %llu, length %llu\n",
 			disk->disk_name, zone->start, zone->len);
 		return -ENODEV;
@@ -4465,8 +4664,12 @@ static int blk_revalidate_zone_cb(struct blk_zone *zone, unsigned int idx,
 	 * All zones must have the same size, with the exception on an eventual
 	 * smaller last zone.
 	 */
-	if (!disk_zone_is_last(disk, zone)) { // 마지막 zone을 제외한 모든 zone은 동일 크기
-		if (zone->len != zone_sectors) { // zone size 불일치 시 ZNS namespace 무효
+	/* [한국어] 검증 3 — 크기 균일성. 영문 주석대로 마지막 zone만 예외다.
+	 * 커널의 zone 번호 계산(sector >> zone_shift 또는 나눗셈)이 "모든 zone이
+	 * 같은 크기"를 전제하므로, 중간에 크기가 다른 zone이 있으면 zone 번호를
+	 * 잘못 계산해 엉뚱한 zone에 쓰게 된다. */
+	if (!disk_zone_is_last(disk, zone)) {
+		if (zone->len != zone_sectors) {
 			pr_warn("%s: Invalid zoned device with non constant zone size\n",
 				disk->disk_name);
 			return -ENODEV;
