@@ -150,8 +150,10 @@
  *    remaining_size()가 -ERANGE로 조기 실패시켜 버퍼 오버런을 방지한다.
  *  - 설정자: 이 상수. 읽는 자: opal_send_cmd/opal_recv_cmd가 send_recv에
  *    넘기는 전송 길이, remaining_size()의 잔여 용량 계산, 각종 memset 크기.
- *  - NVMe 관점: 이 크기가 Security Send/Receive의 데이터 전송 길이(바이트)로
- *    그대로 하드웨어에 전달된다. */
+ *  - 전송 계층 관점: 유효 바이트 수가 아니라 이 고정 크기가 그대로 전송
+ *    길이로 넘어간다(opal_send_cmd/opal_recv_cmd는 cmd->pos를 쓰지 않는다).
+ *    유효 범위는 헤더 안의 length 필드들이 알려 주므로 뒤쪽 0 패딩은
+ *    TPer가 무시한다. */
 #define MAX_TOKS 64
 /* [한국어] 하나의 응답에서 파싱해 보관할 수 있는 토큰(opal_resp_tok)의 최대
  * 개수. parsed_resp.toks[] 배열 크기로 쓰인다.
@@ -218,7 +220,6 @@ struct opal_step {
 	 * 동기화: 단일 스레드가 dev_lock을 쥔 채 순차 실행하므로 별도 보호 불필요. */
 };
 
-typedef int (cont_fn)(struct opal_dev *dev);
 /* [한국어] "continuation 함수" 타입 별칭 — Security Send로 명령을 보낸 뒤
  * Security Receive로 응답이 도착했을 때 그 응답을 파싱·해석하는 후처리 콜백의
  * 시그니처를 정의한다.
@@ -228,12 +229,13 @@ typedef int (cont_fn)(struct opal_dev *dev);
  *  @dev: 송수신을 마친 opal_dev — resp 버퍼와 parsed 결과가 채워진 상태.
  *  @return: 0=응답 정상, 음수 errno=응답 파싱/상태 오류.
  *  읽는 자: opal_send_recv()가 이 타입의 인자를 받아 호출한다. */
+typedef int (cont_fn)(struct opal_dev *dev);
 
+/* [한국어] 파싱된 atom 하나의 인코딩 "폭(width) 클래스"를 나타내는 열거형.
+ * opal_proto.h의 atom 헤더 비트 패턴(TINY/SHORT/MEDIUM/LONG_ATOM_*)을
+ * 디코딩한 결과를 opal_resp_tok.width에 이 값으로 기록해, 나중에 토큰
+ * 원본 바이트를 다시 해석할 때 몇 바이트 헤더/페이로드였는지 구분한다. */
 enum opal_atom_width {
-	/* [한국어] 파싱된 atom 하나의 인코딩 "폭(width) 클래스"를 나타내는 열거형.
-	 * opal_proto.h의 atom 헤더 비트 패턴(TINY/SHORT/MEDIUM/LONG_ATOM_*)을
-	 * 디코딩한 결과를 opal_resp_tok.width에 이 값으로 기록해, 나중에 토큰
-	 * 원본 바이트를 다시 해석할 때 몇 바이트 헤더/페이로드였는지 구분한다. */
 	OPAL_WIDTH_TINY,
 	/* [한국어] Tiny atom — 헤더 1바이트가 곧 데이터(하위 6비트)인 가장 작은 폭.
 	 * 값 0~63(부호 있으면 -32~31)의 소형 정수. 별도 payload 바이트가 없다. */
@@ -523,11 +525,11 @@ struct opal_dev {
  *  설정자: 이 상수 테이블(불변). 읽는 자: 명령 조립 전반. const라 읽기 전용. */
 static const u8 opaluid[][OPAL_UID_LENGTH] = {
 	/* users */
+	/* [한국어] SMUID(Security Manager UID) — 세션 개설 이전 단계에서
+	 * StartSession Call의 대상으로 쓰는 최상위 관리 UID. 마지막 바이트
+	 * 0xff가 이 특수 관리 오브젝트를 표시. */
 	[OPAL_SMUID_UID] =
 		{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff },
-		/* [한국어] SMUID(Security Manager UID) — 세션 개설 이전 단계에서
-		 * StartSession Call의 대상으로 쓰는 최상위 관리 UID. 마지막 바이트
-		 * 0xff가 이 특수 관리 오브젝트를 표시. */
 	[OPAL_THISSP_UID] =
 		{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01 },
 		/* [한국어] ThisSP — "현재 열려 있는 SP 자기 자신"을 가리키는 상대
@@ -679,10 +681,10 @@ static const u8 opaluid[][OPAL_UID_LENGTH] = {
  *    Properties/StartSession은 세션 관리자(SMU) 메소드라 0x000000...0xff0N 형태.
  *  설정자: 이 상수 테이블(불변). 읽는 자: 각 메소드 호출 조립 함수. */
 static const u8 opalmethod[][OPAL_METHOD_LENGTH] = {
+	/* [한국어] Properties — 세션 직후 호스트/TPer 통신 파라미터를 교환하는
+	 * 세션관리자 메소드(0xff01). */
 	[OPAL_PROPERTIES] =
 		{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0x01 },
-		/* [한국어] Properties — 세션 직후 호스트/TPer 통신 파라미터를 교환하는
-		 * 세션관리자 메소드(0xff01). */
 	[OPAL_STARTSESSION] =
 		{ 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0x02 },
 		/* [한국어] StartSession — 지정 SP에 세션을 여는 세션관리자 메소드
@@ -851,10 +853,10 @@ static const char *opal_error_to_human(int error)
 		 * 문자열로 분기한다. */
 		return "Failed";
 
+	/* [한국어] 인덱스가 배열 크기 이상이거나 음수면 배열 범위 밖 접근이
+	 * 되므로, 안전을 위해 미상 오류로 처리한다. ARRAY_SIZE는 컴파일 타임에
+	 * 배열 원소 수를 계산하는 매크로. */
 	if (error >= ARRAY_SIZE(opal_errors) || error < 0)
-		/* [한국어] 인덱스가 배열 크기 이상이거나 음수면 배열 범위 밖 접근이
-		 * 되므로, 안전을 위해 미상 오류로 처리한다. ARRAY_SIZE는 컴파일 타임에
-		 * 배열 원소 수를 계산하는 매크로. */
 		return "Unknown Error";
 
 	/* [한국어] 정상 범위(0..18)의 코드는 그대로 테이블을 인덱싱해 대응 문자열을
@@ -953,11 +955,6 @@ static int update_sed_opal_key(const char *desc, u_char *key_data, int keylen)
 		 * 상태(모듈 초기화 실패 등)라면 저장할 곳 자체가 없으므로 조기 반환. */
 		return -ENOKEY;
 
-	kr = key_create_or_update(make_key_ref(sed_opal_keyring, true), "user",
-				  desc, (const void *)key_data, keylen,
-				  KEY_USR_VIEW | KEY_USR_SEARCH | KEY_USR_WRITE,
-				  KEY_ALLOC_NOT_IN_QUOTA | KEY_ALLOC_BUILT_IN |
-					KEY_ALLOC_BYPASS_RESTRICTION);
 	/* [한국어] "user" 키 타입으로 desc 이름의 키를 sed_opal_keyring 아래에
 	 * 생성(없으면)하거나 갱신(있으면)한다.
 	 *  - make_key_ref(sed_opal_keyring, true): 두 번째 인자 true는 이
@@ -970,9 +967,14 @@ static int update_sed_opal_key(const char *desc, u_char *key_data, int keylen)
 	 *    내장 키로 표시.
 	 *  - KEY_ALLOC_BYPASS_RESTRICTION: keyring에 걸릴 수 있는 추가 제약을
 	 *    우회 — 신뢰된 커널 내부 경로이므로 허용된다. */
+	kr = key_create_or_update(make_key_ref(sed_opal_keyring, true), "user",
+				  desc, (const void *)key_data, keylen,
+				  KEY_USR_VIEW | KEY_USR_SEARCH | KEY_USR_WRITE,
+				  KEY_ALLOC_NOT_IN_QUOTA | KEY_ALLOC_BUILT_IN |
+					KEY_ALLOC_BYPASS_RESTRICTION);
+	/* [한국어] kr이 에러를 인코딩한 포인터라면 실패로 간주하고 로그 후
+	 * 그 에러를 그대로 전파한다. */
 	if (IS_ERR(kr)) {
-		/* [한국어] kr이 에러를 인코딩한 포인터라면 실패로 간주하고 로그 후
-		 * 그 에러를 그대로 전파한다. */
 		pr_err("Error adding SED key (%ld)\n", PTR_ERR(kr));
 		/* [한국어] 에러 포인터에서 실제 long 타입 errno를 추출해 로그로
 		 * 남겨, keyring 조작이 왜 실패했는지 진단 정보를 제공한다. */
@@ -1035,46 +1037,50 @@ static int read_sed_opal_key(const char *key_name, u_char *buffer, int buflen)
 		/* [한국어] 전역 keyring이 없으면 검색 자체가 불가능하므로 조기 반환. */
 		return -ENOKEY;
 
+	/* [한국어] sed_opal_keyring 아래에서 타입이 &key_type_user("user" 타입)
+	 * 이고 description이 key_name과 같은 키를 찾는다. 이름 비교는 언제나
+	 * 완전 일치이며, 마지막 인자 true는 keyring_search()의 recurse
+	 * 파라미터 — 이 keyring이 다른 keyring을 품고 있으면 그 안까지
+	 * 재귀적으로 내려가 찾으라는 뜻이다. sed_opal_keyring은 중첩 keyring을
+	 * 담지 않으므로 실질적인 차이는 없고, 커널 내부 호출의 관례값이다.
+	 * (include/linux/key.h가 이 트리에 없어 시그니처를 파일로 확인하지는
+	 * 못했다.) */
 	kref = keyring_search(make_key_ref(sed_opal_keyring, true),
 			      &key_type_user, key_name, true);
-	/* [한국어] sed_opal_keyring 아래에서 타입이 &key_type_user("user" 타입)
-	 * 이고 이름이 key_name과 일치하는 키를 검색한다. 마지막 true는 "부분
-	 * 일치가 아닌 정확한 이름 매치를 요구"하는 옵션(추정, keyring_search의
-	 * strict match 플래그). */
 
+	/* [한국어] 검색 실패(해당 이름의 키가 없거나 권한 문제 등) — 그
+	 * 에러를 그대로 호출자에게 전파한다. */
 	if (IS_ERR(kref))
-		/* [한국어] 검색 실패(해당 이름의 키가 없거나 권한 문제 등) — 그
-		 * 에러를 그대로 호출자에게 전파한다. */
 		return PTR_ERR(kref);
 
-	key = key_ref_to_ptr(kref);
 	/* [한국어] key_ref_t(포인터+플래그 인코딩)에서 순수 struct key 포인터만
 	 * 추출한다. */
-	down_read(&key->sem);
+	key = key_ref_to_ptr(kref);
 	/* [한국어] 이 키에 대한 읽기 세마포어 획득 — key->datalen/key->type->read
 	 * 등 키 내부 상태를 읽는 동안 다른 스레드의 키 폐기/갱신과 경쟁하지
 	 * 않도록 보호한다(다른 읽기와는 동시 허용, 쓰기와는 배타). */
-	ret = key_validate(key);
+	down_read(&key->sem);
 	/* [한국어] 이 키가 아직 유효한지(만료되지 않았는지, 폐기(revoke)되지
 	 * 않았는지 등) 검사 — 0이면 유효, 음수면 사용 불가 상태. */
+	ret = key_validate(key);
+	/* [한국어] 키가 유효할 때만 실제 데이터를 읽는다. */
 	if (ret == 0) {
-		/* [한국어] 키가 유효할 때만 실제 데이터를 읽는다. */
 		if (buflen > key->datalen)
 			/* [한국어] 호출자가 요청한 버퍼 크기가 실제 키 길이보다
 			 * 크면, 실제 키 길이만큼만 복사하도록 buflen을 줄인다
 			 * (버퍼 오버리드/불필요한 패딩 방지). */
 			buflen = key->datalen;
 
-		ret = key->type->read(key, (char *)buffer, buflen);
 		/* [한국어] "user" 키 타입이 제공하는 read 콜백을 통해 실제 페이로드
 		 * 바이트를 buffer로 복사한다. 반환값은 실제로 복사된 바이트 수. */
+		ret = key->type->read(key, (char *)buffer, buflen);
 	}
-	up_read(&key->sem);
 	/* [한국어] 앞서 획득한 읽기 세마포어 해제. */
+	up_read(&key->sem);
 
-	key_ref_put(kref);
 	/* [한국어] keyring_search()가 잡은 참조 카운트를 해제 — 이 함수가 키를
 	 * 계속 붙잡고 있지 않도록 정리한다. */
+	key_ref_put(kref);
 
 	return ret;
 	/* [한국어] 성공 시 읽은 바이트 수, 실패 시 key_validate()가 반환한 음수
@@ -1086,8 +1092,9 @@ static int read_sed_opal_key(const char *key_name, u_char *buffer, int buflen)
  * opal_get_key - 유저가 넘긴 struct opal_key를 "즉시 사용 가능한 PIN 바이트열"
  * 형태로 정규화한다.
  *
- * @dev: 이 요청이 속한 opal_dev(현재 구현에서는 사용되지 않지만 향후 드라이브별
- *       정책 확장을 위해 시그니처에 유지되는 것으로 보인다, 추정).
+ * @dev: 이 요청이 속한 opal_dev. 함수 본문에서 한 번도 참조되지 않는다 —
+ *       호출부가 opal_get_key(dev, &x->key) 형태로 통일되어 있어 시그니처만
+ *       맞춰 둔 인자다. 유지되는 이유는 원본 코드에 설명이 없다.
  * @key: 유저스페이스 ioctl에서 copy_from_user된 struct opal_key. 함수가 성공
  *       하면 key->key/key->key_len이 실제 PIN 값으로 채워지고 key->key_type이
  *       OPAL_INCLUDED로 갱신된다(호출자 소유 구조체를 in-place로 정규화).
@@ -1138,10 +1145,10 @@ static int opal_get_key(struct opal_dev *dev, struct opal_key *key)
 		 * 뜻 — key->key에 이미 값이 있으므로 추가 조회 없이 그대로 사용
 		 * 가능. 아무 동작도 필요 없어 break만 한다. */
 		break;
+	/* [한국어] 유저가 "값 대신 keyring에서 찾아라"라고 지정한 경우 —
+	 * 실제 PIN 바이트를 keyring에서 읽어와야 한다. */
 	case OPAL_KEYRING:
 		/* the key is in the keyring */
-		/* [한국어] 유저가 "값 대신 keyring에서 찾아라"라고 지정한 경우 —
-		 * 실제 PIN 바이트를 keyring에서 읽어와야 한다. */
 		ret = read_sed_opal_key(OPAL_AUTH_KEY, key->key, OPAL_KEY_MAX);
 		/* [한국어] 고정 이름 OPAL_AUTH_KEY("opal-boot-pin")로 keyring을
 		 * 검색해 최대 OPAL_KEY_MAX(256)바이트까지 key->key 버퍼에 복사.
@@ -1157,14 +1164,14 @@ static int opal_get_key(struct opal_dev *dev, struct opal_key *key)
 				ret = -ENOSPC;
 				goto error;
 			}
-			key->key_len = ret;
 			/* [한국어] 실제로 읽은 바이트 수를 key_len에 기록해,
 			 * 이후 코드가 key->key[0..key_len)만 유효한 PIN으로
 			 * 취급하도록 한다. */
-			key->key_type = OPAL_INCLUDED;
+			key->key_len = ret;
 			/* [한국어] 이제 key->key에 실제 값이 채워졌으므로 타입을
 			 * OPAL_INCLUDED로 바꿔, 이 함수를 다시 거치지 않고도
 			 * 후속 코드가 "이미 포함된 키"로 취급하게 한다. */
+			key->key_type = OPAL_INCLUDED;
 		}
 		break;
 	default:
@@ -1173,17 +1180,17 @@ static int opal_get_key(struct opal_dev *dev, struct opal_key *key)
 		ret = -EINVAL;
 		break;
 	}
+	/* [한국어] 위 switch에서 어느 경로든 음수(errno)가 설정됐다면
+	 * 즉시 에러 처리 경로로 넘어간다. */
 	if (ret < 0)
-		/* [한국어] 위 switch에서 어느 경로든 음수(errno)가 설정됐다면
-		 * 즉시 에러 처리 경로로 넘어간다. */
 		goto error;
 
 	/* must have a PEK by now or it's an error */
+	/* [한국어] 여기까지 왔는데도 최종적으로 "포함된 키"가 아니거나
+	 * 길이가 0이면(PEK, Password Encryption Key에 해당하는 실제 PIN이
+	 * 준비되지 않았다는 뜻) 논리적 모순 상태 — 방어적으로 다시 한 번
+	 * 검사해 -EINVAL 처리한다. */
 	if (key->key_type != OPAL_INCLUDED || key->key_len == 0) {
-		/* [한국어] 여기까지 왔는데도 최종적으로 "포함된 키"가 아니거나
-		 * 길이가 0이면(PEK, Password Encryption Key에 해당하는 실제 PIN이
-		 * 준비되지 않았다는 뜻) 논리적 모순 상태 — 방어적으로 다시 한 번
-		 * 검사해 -EINVAL 처리한다. */
 		ret = -EINVAL;
 		goto error;
 	}
@@ -1458,9 +1465,9 @@ static bool check_sum(const void *data)
 		return false;
 	}
 
-	pr_debug("Number of locking objects: %d\n", nlo);
 	/* [한국어] 정상 케이스에서도 몇 개의 locking object가 있는지 디버그
 	 * 로그로 남겨 둔다(진단 편의). */
+	pr_debug("Number of locking objects: %d\n", nlo);
 
 	return true;
 	/* [한국어] 1개 이상 존재 — SUM 기능 사용 가능. */
@@ -1548,11 +1555,12 @@ static u16 get_comid_v200(const void *data)
  * 무엇을 넘기는지)을 한곳에 모아 나머지 코드가 전송 세부사항을 몰라도
  * 되게 한다.
  * 동작: dev->send_recv(data, comid, secp, buffer, len, send)를 send=true로
- * 호출 — data는 드라이버 컨텍스트(NVMe면 컨트롤러 핸들), comid는 SPSP
- * (Security Protocol Specific) 필드에 실릴 통신 채널 식별자, TCG_SECP_01은
- * Security Protocol 필드 값, dev->cmd/IO_BUFFER_LENGTH가 실제 페이로드와
- * 길이다. NVMe 드라이브라면 이 콜백 내부에서 Security Send Admin 명령
- * (opcode 0x81)이 발행되어 PRP/SGL로 이 버퍼가 DMA 전송된다.
+ * 호출 — data는 init_opal_dev() 때 드라이버가 넘긴 불투명 컨텍스트, comid는
+ * SPSP(Security Protocol Specific) 필드에 실릴 통신 채널 식별자, TCG_SECP_01은
+ * Security Protocol 필드 값, dev->cmd/IO_BUFFER_LENGTH가 페이로드와 길이다.
+ * 콜백 안에서 무슨 명령이 나가는지는 전적으로 드라이버 몫이다(NVMe
+ * 드라이버라면 nvme_sec_submit()이 Security Send Admin 명령 opcode 0x81을
+ * 발행한다).
  * 실행 컨텍스트: 프로세스 컨텍스트, dev_lock을 쥔 상태. send_recv 구현이
  * 완료를 기다리는 블로킹 호출일 수 있어 슬립 가능해야 한다.
  * 호출자: opal_send_recv()가 송수신 시퀀스의 첫 단계로 호출.
@@ -1566,13 +1574,18 @@ static u16 get_comid_v200(const void *data)
  */
 static int opal_send_cmd(struct opal_dev *dev)
 {
+	/* [한국어] 전송 콜백을 send=true(마지막 인자)로 호출 — "이 버퍼를
+	 * 드라이브로 보내라"는 방향 지정이다. TCG_SECP_01은 Security Protocol
+	 * 번호(정상 ComPacket 트래픽 전용), dev->comid는 SPSP 필드에 실릴
+	 * 통신 채널 식별자, dev->cmd는 cmd_finalize()가 3단 헤더까지 다 채워
+	 * 둔 요청 바이트열이다.
+	 * 길이로 유효 바이트 수(cmd->pos)가 아니라 항상 IO_BUFFER_LENGTH
+	 * 전체를 넘기는 점에 유의 — 유효 길이는 헤더 안의 length 필드들이
+	 * 이미 알려 주므로, 전송 계층은 고정 크기 버퍼를 통째로 실어 보내고
+	 * 뒤쪽 0 패딩은 TPer가 무시한다. */
 	return dev->send_recv(dev->data, dev->comid, TCG_SECP_01,
-			      dev->cmd, IO_BUFFER_LENGTH,  /* NVMe Security Send payload */
+			      dev->cmd, IO_BUFFER_LENGTH,
 			      true);
-	/* [한국어] send=true로 호출 — "이 버퍼를 드라이브로 보내라"는 방향을
-	 * 지정한다. comid는 SPSP 필드, TCG_SECP_01은 Security Protocol 필드에
-	 * 해당하는 값으로 하위 드라이버가 SECURITY PROTOCOL OUT 계열 명령의
-	 * CDW10을 구성할 때 사용한다. */
 }
 
 /*
@@ -1588,9 +1601,8 @@ static int opal_send_cmd(struct opal_dev *dev)
  * 명령이라 하나로 합쳐지지 않는다).
  * 동작: 동일한 dev->send_recv 콜백을 send=false로 호출해 "드라이브로부터
  * 읽어오라"는 방향을 지정하고, dev->resp/IO_BUFFER_LENGTH를 수신 버퍼로
- * 넘긴다. NVMe 드라이브라면 콜백 내부에서 Security Receive Admin 명령
- * (opcode 0x82)이 발행되어 컨트롤러가 채운 데이터가 PRP/SGL을 통해 이
- * 버퍼로 DMA된다.
+ * 넘긴다. NVMe 드라이버라면 콜백 내부에서 Security Receive Admin 명령
+ * (opcode 0x82)이 발행된다.
  * 실행 컨텍스트: 프로세스 컨텍스트, dev_lock 하, 블로킹 가능.
  * 호출자: opal_send_recv()(1차 수신), opal_recv_check()(outstandingData가
  * 남아있을 때 반복 폴링).
@@ -1603,12 +1615,15 @@ static int opal_send_cmd(struct opal_dev *dev)
  */
 static int opal_recv_cmd(struct opal_dev *dev)
 {
+	/* [한국어] 같은 콜백을 send=false로 호출 — 이번에는 dev->resp를 TPer가
+	 * 채워 줄 수신 버퍼로 넘긴다. comid/secp를 송신 때와 동일하게 유지해야
+	 * 방금 보낸 요청과 같은 통신 채널의 응답을 받는다.
+	 * 여기서도 길이는 항상 IO_BUFFER_LENGTH 고정이다 — 응답이 얼마나 올지
+	 * 미리 알 수 없으므로 버퍼 전체를 내주고, 실제로 얼마가 유효한지는
+	 * 받아 온 헤더의 length 필드로 판단한다. */
 	return dev->send_recv(dev->data, dev->comid, TCG_SECP_01,
-			      dev->resp, IO_BUFFER_LENGTH,  /* NVMe Security Receive buffer */
+			      dev->resp, IO_BUFFER_LENGTH,
 			      false);
-	/* [한국어] send=false로 호출 — "드라이브로부터 받아오라"는 방향. 같은
-	 * comid/secp를 사용해 방금 보낸 요청과 동일한 통신 채널의 응답임을
-	 * 보장한다. */
 }
 
 /*
@@ -1657,28 +1672,28 @@ static int opal_recv_check(struct opal_dev *dev)
 	 * 반환값으로 사용. */
 
 	do {
-		pr_debug("Sent OPAL command: outstanding=%d, minTransfer=%d\n",
-			 hdr->cp.outstandingData,
-			 hdr->cp.minTransfer);
 		/* [한국어] 매 라운드마다 ComPacket 헤더의 두 필드를 로그로 남겨
 		 * 진행 상황을 추적할 수 있게 한다(빅엔디안 값 그대로 출력되므로
 		 * 사람이 읽을 땐 바이트 순서에 유의해야 함 — 진단 목적이라 값
 		 * 자체의 정확한 십진 해석보다는 0 여부 판단이 핵심). */
+		pr_debug("Sent OPAL command: outstanding=%d, minTransfer=%d\n",
+			 hdr->cp.outstandingData,
+			 hdr->cp.minTransfer);
 
+		/* [한국어] outstandingData==0(TPer가 넘길 데이터를 다
+		 * 줬음) 이거나 minTransfer!=0(TPer가 아직 최소 전송
+		 * 단위를 채울 준비가 안 되어 있어 더 기다려도 무의미)
+		 * 이면 폴링을 멈추고 지금 가진 응답을 그대로 쓴다. */
 		if (hdr->cp.outstandingData == 0 ||
 		    hdr->cp.minTransfer != 0)
-			/* [한국어] outstandingData==0(TPer가 넘길 데이터를 다
-			 * 줬음) 이거나 minTransfer!=0(TPer가 아직 최소 전송
-			 * 단위를 채울 준비가 안 되어 있어 더 기다려도 무의미)
-			 * 이면 폴링을 멈추고 지금 가진 응답을 그대로 쓴다. */
 			return 0;
 
-		memset(buffer, 0, buflen);
 		/* [한국어] 다음 수신 전 버퍼를 0으로 초기화 — 이전 라운드의
 		 * 잔여 바이트가 새 응답과 섞여 오해석되는 것을 방지. */
-		ret = opal_recv_cmd(dev);
+		memset(buffer, 0, buflen);
 		/* [한국어] 아직 못 받은 잔여 데이터를 마저 받기 위해 Security
 		 * Receive를 한 번 더 발행. */
+		ret = opal_recv_cmd(dev);
 	} while (!ret);
 	/* [한국어] opal_recv_cmd()가 성공(0)하는 한 계속 반복 — 실패(!ret이
 	 * false, 즉 ret!=0)하면 루프를 빠져나간다. */
@@ -1731,20 +1746,20 @@ static int opal_send_recv(struct opal_dev *dev, cont_fn *cont)
 		/* [한국어] 송신 자체가 실패하면 이후 수신/후처리는 의미가 없으므로
 		 * 즉시 반환. */
 		return ret;
-	ret = opal_recv_cmd(dev);
 	/* [한국어] 2단계: 1차 응답 수신. */
+	ret = opal_recv_cmd(dev);
+	/* [한국어] 수신 실패 시 즉시 반환. */
 	if (ret)
-		/* [한국어] 수신 실패 시 즉시 반환. */
 		return ret;
-	ret = opal_recv_check(dev);
 	/* [한국어] 3단계: 응답이 잘렸다면(outstandingData>0) 완전히 받을
 	 * 때까지 추가 폴링. */
+	ret = opal_recv_check(dev);
+	/* [한국어] 폴링 중 실패 시 즉시 반환. */
 	if (ret)
-		/* [한국어] 폴링 중 실패 시 즉시 반환. */
 		return ret;
-	return cont(dev);
 	/* [한국어] 4단계: 응답이 완전히 확보된 뒤에야 명령별 후처리 콜백을
 	 * 호출해 그 결과(0 또는 errno)를 그대로 최종 반환값으로 사용. */
+	return cont(dev);
 }
 
 /*
@@ -1923,10 +1938,10 @@ static int execute_steps(struct opal_dev *dev,
 		 * 상태이므로 정리할 것 없이 바로 에러를 반환. */
 		return error;
 
+	/* [한국어] steps[0]부터 순서대로, 배열 끝까지 하나씩 실행한다.
+	 * OPAL 절차는 순서가 중요하므로(예: 세션을 먼저 열어야 그 다음
+	 * 인증/설정 스텝이 유효) 반드시 앞에서부터 순차 실행해야 한다. */
 	for (state = 0; state < n_steps; state++) {
-		/* [한국어] steps[0]부터 순서대로, 배열 끝까지 하나씩 실행한다.
-		 * OPAL 절차는 순서가 중요하므로(예: 세션을 먼저 열어야 그 다음
-		 * 인증/설정 스텝이 유효) 반드시 앞에서부터 순차 실행해야 한다. */
 		error = execute_step(dev, &steps[state], state);
 		/* [한국어] state번째 스텝을 실행하고 실패 시 진단 로그를 남기는
 		 * 래퍼 호출. */
@@ -2177,10 +2192,10 @@ static int opal_discovery0_end(struct opal_dev *dev, void *data)
 				 * OR로 켜서, 이후 opal_lock_unlock 등이
 				 * SUM 전용 경로를 선택할 근거로 삼는다. */
 			break;
+		/* [한국어] Geometry Feature(0x0003) — Locking Range
+		 * 정렬 요건(align/lowest_lba/logical_block_size)을
+		 * 담고 있다. */
 		case FC_GEOMETRY:
-			/* [한국어] Geometry Feature(0x0003) — Locking Range
-			 * 정렬 요건(align/lowest_lba/logical_block_size)을
-			 * 담고 있다. */
 			check_geometry(dev, body);
 			/* [한국어] bool을 반환하지 않고 dev의 align/
 			 * lowest_lba/logical_block_size/align_required
@@ -2188,11 +2203,11 @@ static int opal_discovery0_end(struct opal_dev *dev, void *data)
 			 * 완료) — 반환값이 void라 별도 대입 없이 부수효과로만
 			 * 상태를 갱신한다. */
 			break;
+		/* [한국어] Locking Feature(0x0002) — 잠금 관련 다섯
+		 * 개의 독립된 상태 비트(지원/활성화/잠김/MBR활성/
+		 * MBR완료)를 한꺼번에 담고 있어 다섯 번의 개별 검사로
+		 * 나눠 처리한다. */
 		case FC_LOCKING:
-			/* [한국어] Locking Feature(0x0002) — 잠금 관련 다섯
-			 * 개의 독립된 상태 비트(지원/활성화/잠김/MBR활성/
-			 * MBR완료)를 한꺼번에 담고 있어 다섯 번의 개별 검사로
-			 * 나눠 처리한다. */
 			if (check_lcksuppt(body->features))
 				/* [한국어] LOCKING_SUPPORTED_MASK(bit0) —
 				 * Locking SP 자체의 존재 여부. */
@@ -2220,23 +2235,23 @@ static int opal_discovery0_end(struct opal_dev *dev, void *data)
 				dev->flags |= OPAL_FL_MBR_DONE;
 				/* [한국어] 완료 상태면 플래그 비트를 켠다. */
 			break;
+		/* [한국어] Enterprise SSC feature(0x0100)와 DataStore
+		 * feature(0x0202)는 두 코드를 하나의 분기로 묶어
+		 * "값은 확인하되 dev 상태에는 반영하지 않는" 무시
+		 * 처리 — Opal SSC 경로에서는 이 두 feature가 별도
+		 * 동작을 바꾸지 않기 때문(원본 영어 주석 참고). */
 		case FC_ENTERPRISE:
 		case FC_DATASTORE:
 			/* some ignored properties */
-			/* [한국어] Enterprise SSC feature(0x0100)와 DataStore
-			 * feature(0x0202)는 두 코드를 하나의 분기로 묶어
-			 * "값은 확인하되 dev 상태에는 반영하지 않는" 무시
-			 * 처리 — Opal SSC 경로에서는 이 두 feature가 별도
-			 * 동작을 바꾸지 않기 때문(원본 영어 주석 참고). */
 			pr_debug("Found OPAL feature description: %d\n",
 				 be16_to_cpu(body->code));
 			/* [한국어] 그래도 어떤 feature를 만났는지는 디버그
 			 * 로그로 남겨 Discovery 응답 전체를 추적할 수 있게
 			 * 한다. */
 			break;
+		/* [한국어] Opal v1.00 Feature(0x0200) — 구버전 Opal
+		 * 프로파일 전용 ComID를 담고 있다. */
 		case FC_OPALV100:
-			/* [한국어] Opal v1.00 Feature(0x0200) — 구버전 Opal
-			 * 프로파일 전용 ComID를 담고 있다. */
 			comid = get_comid_v100(body->features);
 			/* [한국어] Phase 1에서 주석 완료된 헬퍼로 v1.00
 			 * 레이아웃의 baseComID를 읽어 지역 변수 comid에
@@ -2246,25 +2261,25 @@ static int opal_discovery0_end(struct opal_dev *dev, void *data)
 			 * 아래 최종 검사에서 이 플래그가 없으면 -EOPNOTSUPP
 			 * 처리된다. */
 			break;
+		/* [한국어] Opal v2.00 Feature(0x0203) — 현재 대부분의
+		 * SED가 따르는 최신 프로파일의 ComID. v1.00과 v2.00이
+		 * 둘 다 있으면(이론상) 나중에 순회되는 쪽 값으로
+		 * comid가 덮어써진다 — 순회 순서는 드라이브가 응답에
+		 * 나열한 순서를 따른다. */
 		case FC_OPALV200:
-			/* [한국어] Opal v2.00 Feature(0x0203) — 현재 대부분의
-			 * SED가 따르는 최신 프로파일의 ComID. v1.00과 v2.00이
-			 * 둘 다 있으면(이론상) 나중에 순회되는 쪽 값으로
-			 * comid가 덮어써진다 — 순회 순서는 드라이브가 응답에
-			 * 나열한 순서를 따른다. */
 			comid = get_comid_v200(body->features);
 			/* [한국어] v2.00 레이아웃의 baseComID를 읽어 comid에
 			 * 저장. */
 			found_com_id = true;
 			/* [한국어] ComID 확보 표시. */
 			break;
+		/* [한국어] GCC 확장 문법인 range case — 0xbfff부터
+		 * 0xffff 사이의 모든 code 값을 한 분기로 묶는다. 이
+		 * 구간은 TCG가 벤더 고유(vendor-specific) 확장용으로
+		 * 예약해 둔 영역이라 커널이 해석할 표준 레이아웃이
+		 * 없으므로 조용히 건너뛴다. */
 		case 0xbfff ... 0xffff:
 			/* vendor specific, just ignore */
-			/* [한국어] GCC 확장 문법인 range case — 0xbfff부터
-			 * 0xffff 사이의 모든 code 값을 한 분기로 묶는다. 이
-			 * 구간은 TCG가 벤더 고유(vendor-specific) 확장용으로
-			 * 예약해 둔 영역이라 커널이 해석할 표준 레이아웃이
-			 * 없으므로 조용히 건너뛴다. */
 			break;
 		default:
 			/* [한국어] 위 어떤 case에도 해당하지 않는 code —
@@ -2306,10 +2321,10 @@ static int opal_discovery0_end(struct opal_dev *dev, void *data)
 		pr_debug("Device doesn't support single user mode\n");
 
 
+	/* [한국어] OPAL v1.00/v2.00 feature 중 어느 것도 찾지 못해
+	 * comid가 확정되지 않은 경우 — 이 드라이브와는 세션을 열
+	 * 방법이 없으므로 실패 처리한다. */
 	if (!found_com_id) {
-		/* [한국어] OPAL v1.00/v2.00 feature 중 어느 것도 찾지 못해
-		 * comid가 확정되지 않은 경우 — 이 드라이브와는 세션을 열
-		 * 방법이 없으므로 실패 처리한다. */
 		pr_debug("Could not find OPAL comid for device. Returning early\n");
 		/* [한국어] 조기 반환 사유를 로그로 남긴다. */
 		return -EOPNOTSUPP;
@@ -2384,19 +2399,19 @@ static int opal_discovery0(struct opal_dev *dev, void *data)
 	 * 가능하도록 규정해 두었기 때문에 세션 없이도 이 값으로 통신할 수
 	 * 있다. */
 	ret = opal_recv_cmd(dev);
-	/* [한국어] Security Receive(NVMe라면 opcode 0x82)를 1회 수행해
-	 * 드라이브가 갖고 있던 Discovery 0 응답을 dev->resp로 가져온다 —
-	 * Discovery는 별도 요청(Send) 없이 항상 조회 가능한 정보라
-	 * opal_send_cmd() 호출이 선행되지 않는다. */
+	/* [한국어] 수신 방향 전송만 1회 수행해 드라이브가 항상 준비해 두는
+	 * Discovery 0 응답을 dev->resp로 가져온다 — Discovery는 요청
+	 * 페이로드가 없는 유일한 절차라, 이 파일에서 opal_send_cmd() 없이
+	 * opal_recv_cmd()만 부르는 곳도 여기뿐이다. */
 	if (ret)
 		/* [한국어] 수신 자체가 실패하면(하드웨어 오류 등) 파싱할
 		 * 데이터가 없으므로 바로 반환. */
 		return ret;
 
-	return opal_discovery0_end(dev, data);
 	/* [한국어] 수신된 원시 바이트열의 실제 파싱과 dev->flags/comid
 	 * 갱신은 opal_discovery0_end()에 위임 — data(유저 출력 버퍼
 	 * 포인터 또는 NULL)를 그대로 전달한다. */
+	return opal_discovery0_end(dev, data);
 }
 
 /*
@@ -2433,16 +2448,16 @@ static int opal_discovery0(struct opal_dev *dev, void *data)
 static int opal_discovery0_step(struct opal_dev *dev)
 {
 	const struct opal_step discovery0_step = {
+		/* [한국어] Discovery 절차를 execute_step()이 이해하는 균일한
+		 * "함수 포인터 + 인자" 형태로 감싼 지역(스택) opal_step —
+		 * fn=opal_discovery0, arg=NULL(유저 출력 버퍼 불필요, 능력 판별
+		 * 전용). */
 		opal_discovery0, NULL
 	};
-	/* [한국어] Discovery 절차를 execute_step()이 이해하는 균일한
-	 * "함수 포인터 + 인자" 형태로 감싼 지역(스택) opal_step —
-	 * fn=opal_discovery0, arg=NULL(유저 출력 버퍼 불필요, 능력 판별
-	 * 전용). */
 
-	return execute_step(dev, &discovery0_step, 0);
 	/* [한국어] 이 한 스텝만 실행 — 세 번째 인자 0은 로깅용 인덱스일 뿐,
 	 * execute_step()이 실패 시 "Step 0"으로 로그를 남기는 데만 쓰인다. */
+	return execute_step(dev, &discovery0_step, 0);
 }
 
 /*
@@ -2528,10 +2543,10 @@ static bool can_add(int *err, struct opal_dev *cmd, size_t len)
 		 * 않기 위함. */
 		return false;
 
+	/* [한국어] 남은 버퍼 용량이 이번에 필요한 len바이트보다
+	 * 작으면 실제 오버플로 상황 — 여기서 처음으로 에러가
+	 * 기록된다. */
 	if (remaining_size(cmd) < len) {
-		/* [한국어] 남은 버퍼 용량이 이번에 필요한 len바이트보다
-		 * 작으면 실제 오버플로 상황 — 여기서 처음으로 에러가
-		 * 기록된다. */
 		pr_debug("Error adding %zu bytes: end of buffer.\n", len);
 		/* [한국어] 몇 바이트를 추가하려다 실패했는지 진단 로그로
 		 * 남긴다. */
@@ -2592,10 +2607,10 @@ static void add_token_u8(int *err, struct opal_dev *cmd, u8 tok)
 		 * (can_add가 false) 버퍼를 건드리지 않고 즉시 반환. */
 		return;
 
-	cmd->cmd[cmd->pos++] = tok;
 	/* [한국어] 현재 쓰기 위치(cmd->pos)에 tok 1바이트를 기록한 뒤 pos를
 	 * 1 증가시켜 다음 호출이 그 다음 칸에 쓰도록 전진 — 후위 증가라
 	 * 대입은 증가 전의 인덱스에 적용된다. */
+	cmd->cmd[cmd->pos++] = tok;
 }
 
 /*
@@ -2614,9 +2629,12 @@ static void add_token_u8(int *err, struct opal_dev *cmd, u8 tok)
  *       Atom 경로로 분기되었어야 한다 — 이 함수 자체는 len을 검증하지
  *       않고 마스킹만 한다.
  * @return: 없음(void) — 내부적으로 지역 err 변수를 만들어 add_token_u8()에
- *          넘기지만, 그 결과를 호출자에게 돌려주지 않는다(원본 코드의 설계 —
- *          Short Atom 헤더 자체는 항상 1바이트라 실패 가능성이 낮다고 보고
- *          단순화한 것으로 보인다, 추정).
+ *          넘기지만 그 결과를 호출자에게 돌려주지 않는다. 다만 버퍼가 가득 찼을
+ *          때의 실패가 완전히 유실되지는 않는다: add_token_u8()이 실패하면
+ *          cmd->pos를 전진시키지 않으므로, 뒤이어 payload를 쓰는
+ *          add_token_bytestring()이 같은 이유로 다시 실패하고 그쪽 err는
+ *          호출자에게 전달된다. 이 함수가 void인 이유 자체는 원본 코드에
+ *          설명이 없다.
  *
  * 왜 필요한가: TCG Core Spec 2.01 3.2.2.1 Data Type이 정의하는 Short Atom
  * 헤더는 한 바이트 안에 "이게 Short Atom이다"라는 식별 비트, bytestring
@@ -2986,14 +3004,14 @@ static void add_token_bytestring(int *err, struct opal_dev *cmd,
 		/* [한국어] 헤더조차 못 썼다는 뜻(버퍼 공간 부족) — *err에
 		 * 이미 -ERANGE가 기록되어 있으므로 추가 처리 없이 반환. */
 		return;
-	memcpy(start, bytestring, len);
 	/* [한국어] 원본 bytestring의 len바이트를 헤더 바로 뒤 위치(start)로
 	 * 그대로 복사 — 엔디안 변환이 필요 없는 순수 바이트열이므로
 	 * memcpy로 충분하다. */
-	cmd->pos += len;
+	memcpy(start, bytestring, len);
 	/* [한국어] 커서를 payload 길이만큼 전진 — add_bytestring_header()가
 	 * 헤더만큼은 이미 pos를 옮겨 두었으므로, 여기서 나머지 len을 더해야
 	 * 다음 토큰이 정확히 이 데이터 뒤에서 시작한다. */
+	cmd->pos += len;
 }
 
 /*
@@ -3447,29 +3465,29 @@ static const struct opal_resp_tok *response_get_token(
 		return ERR_PTR(-EINVAL);
 	}
 
+	/* [한국어] 요청한 인덱스가 실제로 파싱된 토큰 개수보다 크거나
+	 * 같으면 toks[] 배열의 유효 범위(0..num-1)를 벗어난 접근이
+	 * 된다 — 배열 밖 메모리를 읽지 않도록 미리 차단. */
 	if (n >= resp->num) {
-		/* [한국어] 요청한 인덱스가 실제로 파싱된 토큰 개수보다 크거나
-		 * 같으면 toks[] 배열의 유효 범위(0..num-1)를 벗어난 접근이
-		 * 된다 — 배열 밖 메모리를 읽지 않도록 미리 차단. */
 		pr_debug("Token number doesn't exist: %d, resp: %d\n",
 			 n, resp->num);
 		return ERR_PTR(-EINVAL);
 	}
 
-	tok = &resp->toks[n];
 	/* [한국어] 인덱스가 유효하므로 n번째 토큰 기술자의 주소를 취한다
 	 * (값 복사가 아니라 응답 버퍼를 가리키는 포인터 획득 — 제로카피). */
+	tok = &resp->toks[n];
+	/* [한국어] len이 0이라는 것은 파서가 이 슬롯에 아무 것도 기록
+	 * 하지 못했거나 손상된 상태를 의미 — 정상적으로 파싱된 토큰은
+	 * 항상 len>=1(최소 구조 토큰 1바이트)이어야 하므로 방어적으로
+	 * 거부한다. */
 	if (tok->len == 0) {
-		/* [한국어] len이 0이라는 것은 파서가 이 슬롯에 아무 것도 기록
-		 * 하지 못했거나 손상된 상태를 의미 — 정상적으로 파싱된 토큰은
-		 * 항상 len>=1(최소 구조 토큰 1바이트)이어야 하므로 방어적으로
-		 * 거부한다. */
 		pr_debug("Token length must be non-zero\n");
 		return ERR_PTR(-EINVAL);
 	}
 
-	return tok;
 	/* [한국어] 모든 검사를 통과한 유효 토큰 포인터를 반환. */
+	return tok;
 }
 
 /*
@@ -3950,52 +3968,52 @@ static int response_parse(const u8 *buf, size_t length,
 		 * 수 없다. */
 		return -EFAULT;
 
-	hdr = (struct opal_header *)buf;
 	/* [한국어] buf 시작 주소를 3단 헤더 구조체로 재해석 — buf의 맨 앞이
 	 * 항상 opal_header 레이아웃이라는 이 파일 전체의 불변조건에 의존. */
-	pos = buf;
+	hdr = (struct opal_header *)buf;
 	/* [한국어] 스캔 커서를 일단 버퍼 맨 앞으로 초기화. */
-	pos += sizeof(*hdr);
+	pos = buf;
 	/* [한국어] 3단 헤더 전체 크기만큼 전진시켜, 순수 토큰 스트림이
 	 * 시작되는 위치로 커서를 이동. */
+	pos += sizeof(*hdr);
 
-	clen = be32_to_cpu(hdr->cp.length);
 	/* [한국어] ComPacket 헤더의 length 필드(빅엔디안)를 호스트 엔디안
 	 * u32로 변환 — ComPacket 헤더 이후 전체 바이트 수. */
-	plen = be32_to_cpu(hdr->pkt.length);
+	clen = be32_to_cpu(hdr->cp.length);
 	/* [한국어] Packet 헤더의 length 필드 변환 — Packet 헤더 이후(=
 	 * SubPacket 헤더+payload) 바이트 수. */
-	slen = be32_to_cpu(hdr->subpkt.length);
+	plen = be32_to_cpu(hdr->pkt.length);
 	/* [한국어] SubPacket 헤더의 length 필드 변환 — 이 값이 바로 아래
 	 * while 루프가 훑을 "순수 토큰 스트림" 바이트 수(total의 초기값). */
-	pr_debug("Response size: cp: %u, pkt: %u, subpkt: %u\n",
-		 clen, plen, slen);
+	slen = be32_to_cpu(hdr->subpkt.length);
 	/* [한국어] 세 length 값을 디버그 로그로 남겨 응답 크기 이상 유무를
 	 * 커널 로그에서 바로 확인할 수 있게 한다. */
+	pr_debug("Response size: cp: %u, pkt: %u, subpkt: %u\n",
+		 clen, plen, slen);
 
+	/* [한국어] 세 length 필드 중 하나라도 0이면(정상 응답이라면
+	 * 반드시 양수) 헤더가 손상되었거나 아직 채워지지 않은
+	 * 상태이고, slen이 "버퍼 전체 크기 - 헤더 크기"보다 크면
+	 * SubPacket이 버퍼 뒤로 넘치는 값을 주장하는 것 — 두 경우 모두
+	 * 이후 while 루프에서 버퍼 밖을 읽게 될 위험한 상태이므로
+	 * 여기서 미리 차단한다. */
 	if (clen == 0 || plen == 0 || slen == 0 ||
 	    slen > IO_BUFFER_LENGTH - sizeof(*hdr)) {
-		/* [한국어] 세 length 필드 중 하나라도 0이면(정상 응답이라면
-		 * 반드시 양수) 헤더가 손상되었거나 아직 채워지지 않은
-		 * 상태이고, slen이 "버퍼 전체 크기 - 헤더 크기"보다 크면
-		 * SubPacket이 버퍼 뒤로 넘치는 값을 주장하는 것 — 두 경우 모두
-		 * 이후 while 루프에서 버퍼 밖을 읽게 될 위험한 상태이므로
-		 * 여기서 미리 차단한다. */
+		/* [한국어] 어떤 값이 문제였는지 진단 로그로 남긴다. */
 		pr_debug("Bad header length. cp: %u, pkt: %u, subpkt: %u\n",
 			 clen, plen, slen);
-		/* [한국어] 어떤 값이 문제였는지 진단 로그로 남긴다. */
-		print_buffer(pos, sizeof(*hdr));
 		/* [한국어] 헤더 영역 원시 바이트를 덤프해 실제로 어떤 바이트가
 		 * 수신되었는지 디버깅 시 확인할 수 있게 한다. */
-		return -EINVAL;
+		print_buffer(pos, sizeof(*hdr));
 		/* [한국어] 손상된 응답으로 판단해 파싱을 포기하고 잘못된 인자
 		 * 에러를 반환. */
+		return -EINVAL;
 	}
 
+	/* [한국어] 헤더만큼 전진시킨 pos가 이미 버퍼 끝(buf+length)을
+	 * 넘었다면(즉 length 인자 자체가 sizeof(*hdr)보다 작게
+	 * 잘못 전달된 경우) 이후 어떤 스캔도 버퍼 밖 접근이 된다. */
 	if (pos > buf + length)
-		/* [한국어] 헤더만큼 전진시킨 pos가 이미 버퍼 끝(buf+length)을
-		 * 넘었다면(즉 length 인자 자체가 sizeof(*hdr)보다 작게
-		 * 잘못 전달된 경우) 이후 어떤 스캔도 버퍼 밖 접근이 된다. */
 		return -EFAULT;
 		/* [한국어] 잘못된 주소 범위이므로 즉시 실패 반환. */
 
@@ -4019,33 +4037,33 @@ static int response_parse(const u8 *buf, size_t length,
 			/* [한국어] 헤더 바이트가 TINY_ATOM_BYTE(0x7F) 이하 —
 			 * 최상위 비트가 0인 Tiny Atom 범위. */
 			token_length = response_parse_tiny(iter, pos);
+		/* [한국어] SHORT_ATOM_BYTE(0xBF) 이하(그리고 Tiny
+		 * 범위보다 큼) — Short Atom 범위. */
 		else if (pos[0] <= SHORT_ATOM_BYTE) /* short atom */
-			/* [한국어] SHORT_ATOM_BYTE(0xBF) 이하(그리고 Tiny
-			 * 범위보다 큼) — Short Atom 범위. */
 			token_length = response_parse_short(iter, pos);
+		/* [한국어] MEDIUM_ATOM_BYTE(0xDF) 이하 — Medium Atom
+		 * 범위. */
 		else if (pos[0] <= MEDIUM_ATOM_BYTE) /* medium atom */
-			/* [한국어] MEDIUM_ATOM_BYTE(0xDF) 이하 — Medium Atom
-			 * 범위. */
 			token_length = response_parse_medium(iter, pos);
+		/* [한국어] LONG_ATOM_BYTE(0xE3) 이하 — Long Atom
+		 * 범위. */
 		else if (pos[0] <= LONG_ATOM_BYTE) /* long atom */
-			/* [한국어] LONG_ATOM_BYTE(0xE3) 이하 — Long Atom
-			 * 범위. */
 			token_length = response_parse_long(iter, pos);
+		/* [한국어] 정확히 0xFF — atom도 구조 토큰도 아닌
+		 * "값 없음" 특수 바이트(optional 파라미터 생략 표시).
+		 * 전담 디코더 없이 길이 1만 바로 확정. */
 		else if (pos[0] == EMPTY_ATOM_BYTE) /* empty atom */
-			/* [한국어] 정확히 0xFF — atom도 구조 토큰도 아닌
-			 * "값 없음" 특수 바이트(optional 파라미터 생략 표시).
-			 * 전담 디코더 없이 길이 1만 바로 확정. */
 			token_length = 1;
+		/* [한국어] 위 어느 atom 범위에도, EMPTY_ATOM_BYTE에도
+		 * 해당하지 않는 나머지(0xE4~0xFE) — StartList/EndList/
+		 * Call 등 구조 토큰. */
 		else /* TOKEN */
-			/* [한국어] 위 어느 atom 범위에도, EMPTY_ATOM_BYTE에도
-			 * 해당하지 않는 나머지(0xE4~0xFE) — StartList/EndList/
-			 * Call 등 구조 토큰. */
 			token_length = response_parse_token(iter, pos);
 
+		/* [한국어] 디코더가 음수를 반환했다면(현재는
+		 * response_parse_short의 8바이트 초과 정수 검사만
+		 * 이 경로를 탄다) 더 이상 스트림을 신뢰할 수 없다. */
 		if (token_length < 0)
-			/* [한국어] 디코더가 음수를 반환했다면(현재는
-			 * response_parse_short의 8바이트 초과 정수 검사만
-			 * 이 경로를 탄다) 더 이상 스트림을 신뢰할 수 없다. */
 			return token_length;
 			/* [한국어] 그 에러 코드를 그대로 호출자에게 전파 —
 			 * resp->num은 갱신하지 않고 종료. */
@@ -4150,30 +4168,34 @@ static size_t response_get_string(const struct parsed_resp *resp, int n,
 		 * 더 진행할 수 없다. */
 		return 0;
 
+	/* [한국어] 이 토큰이 파싱 단계에서 bytestring으로 분류되지
+	 * 않았다면(정수나 구조 토큰이었다면) 문자열로 읽을 수 없다. */
 	if (tok->type != OPAL_DTA_TOKENID_BYTESTRING) {
-		/* [한국어] 이 토큰이 파싱 단계에서 bytestring으로 분류되지
-		 * 않았다면(정수나 구조 토큰이었다면) 문자열로 읽을 수 없다. */
 		pr_debug("Token is not a byte string!\n");
 		/* [한국어] 타입 불일치를 진단 로그로 남긴다. */
 		return 0;
 	}
 
+	/* [한국어] 파싱 시점에 기록해 둔 atom 폭(width)으로 분기해, payload가
+	 * 시작하기까지 건너뛸 헤더 바이트 수(skip)를 정한다. 폭마다 헤더
+	 * 길이가 다르기 때문에 이 값 없이는 bytestring의 첫 바이트 위치를
+	 * 계산할 수 없다. */
 	switch (tok->width) {
+	/* [한국어] Tiny/Short Atom은 헤더가 정확히 1바이트이므로 두
+	 * 케이스를 묶어 처리 — 다만 실제로 bytestring이 TINY 폭으로
+	 * 인코딩되는 경우는 없고(Tiny는 데이터=헤더라 bytestring
+	 * 개념 자체가 없음) Short가 일반적이다. */
 	case OPAL_WIDTH_TINY:
 	case OPAL_WIDTH_SHORT:
-		/* [한국어] Tiny/Short Atom은 헤더가 정확히 1바이트이므로 두
-		 * 케이스를 묶어 처리 — 다만 실제로 bytestring이 TINY 폭으로
-		 * 인코딩되는 경우는 없고(Tiny는 데이터=헤더라 bytestring
-		 * 개념 자체가 없음) Short가 일반적이다. */
 		skip = 1;
 		break;
+	/* [한국어] Medium Atom은 헤더가 2바이트(식별+길이 상위 3비트,
+	 * 길이 하위 8비트). */
 	case OPAL_WIDTH_MEDIUM:
-		/* [한국어] Medium Atom은 헤더가 2바이트(식별+길이 상위 3비트,
-		 * 길이 하위 8비트). */
 		skip = 2;
 		break;
+	/* [한국어] Long Atom은 헤더가 4바이트(식별 1 + 길이 24비트). */
 	case OPAL_WIDTH_LONG:
-		/* [한국어] Long Atom은 헤더가 4바이트(식별 1 + 길이 24비트). */
 		skip = 4;
 		break;
 	default:
@@ -4239,29 +4261,29 @@ static u64 response_get_u64(const struct parsed_resp *resp, int n)
 		/* [한국어] 인덱스가 범위를 벗어났거나 resp가 NULL이었던 경우. */
 		return 0;
 
+	/* [한국어] 파싱 단계에서 부호 없는 정수로 분류되지 않았다면
+	 * (bytestring/signed/구조 토큰이었다면) 이 함수의 대상이
+	 * 아니다. */
 	if (tok->type != OPAL_DTA_TOKENID_UINT) {
-		/* [한국어] 파싱 단계에서 부호 없는 정수로 분류되지 않았다면
-		 * (bytestring/signed/구조 토큰이었다면) 이 함수의 대상이
-		 * 아니다. */
 		pr_debug("Token is not unsigned int: %d\n", tok->type);
 		/* [한국어] 실제 타입 값을 로그로 남겨 어떤 토큰이었는지
 		 * 추적할 수 있게 한다. */
 		return 0;
 	}
 
+	/* [한국어] Medium/Long 폭의 UINT는 response_parse_medium/long이
+	 * stored.u를 채우지 않으므로(타입만 표시), 여기서 값을
+	 * 반환하면 미초기화 값을 돌려주게 된다 — 그래서 TINY/SHORT
+	 * 폭만 신뢰 가능한 것으로 제한한다. */
 	if (tok->width != OPAL_WIDTH_TINY && tok->width != OPAL_WIDTH_SHORT) {
-		/* [한국어] Medium/Long 폭의 UINT는 response_parse_medium/long이
-		 * stored.u를 채우지 않으므로(타입만 표시), 여기서 값을
-		 * 반환하면 미초기화 값을 돌려주게 된다 — 그래서 TINY/SHORT
-		 * 폭만 신뢰 가능한 것으로 제한한다. */
 		pr_debug("Atom is not short or tiny: %d\n", tok->width);
 		/* [한국어] 실제 width 값을 로그로 남긴다. */
 		return 0;
 	}
 
-	return tok->stored.u;
 	/* [한국어] 파싱 시점에 response_parse_tiny/short가 이미 빅엔디안→
 	 * 호스트 정수로 변환해 캐시해 둔 값을 그대로 반환 — 재디코딩 불필요. */
+	return tok->stored.u;
 }
 
 /*
@@ -4367,33 +4389,33 @@ static u8 response_status(const struct parsed_resp *resp)
 		 * 검사 없이 곧장 성공으로 간주. */
 		return 0;
 
+	/* [한국어] STARTLIST+상태+예약2+ENDLIST = 최소 5개 토큰이
+	 * 필요한데 그보다 적으면 상태 목록 자체가 존재하지 않는
+	 * 형식임을 뜻한다. */
 	if (resp->num < 5)
-		/* [한국어] STARTLIST+상태+예약2+ENDLIST = 최소 5개 토큰이
-		 * 필요한데 그보다 적으면 상태 목록 자체가 존재하지 않는
-		 * 형식임을 뜻한다. */
 		return DTAERROR_NO_METHOD_STATUS;
 
-	tok = response_get_token(resp, resp->num - 5);
 	/* [한국어] 끝에서 5번째 위치(상태 목록이 정상이라면 STARTLIST가
 	 * 와야 할 자리)의 토큰을 가져온다. */
+	tok = response_get_token(resp, resp->num - 5);
+	/* [한국어] 그 자리가 STARTLIST가 아니면 기대한 상태 목록
+	 * 레이아웃이 아니므로 신뢰할 수 없는 형식. */
 	if (!response_token_matches(tok, OPAL_STARTLIST))
-		/* [한국어] 그 자리가 STARTLIST가 아니면 기대한 상태 목록
-		 * 레이아웃이 아니므로 신뢰할 수 없는 형식. */
 		return DTAERROR_NO_METHOD_STATUS;
 
-	tok = response_get_token(resp, resp->num - 1);
 	/* [한국어] 응답의 마지막 토큰(상태 목록을 닫는 ENDLIST가 와야 할
 	 * 자리)을 가져온다. */
+	tok = response_get_token(resp, resp->num - 1);
+	/* [한국어] 마지막 토큰이 ENDLIST가 아니면 상태 목록이
+	 * 제대로 닫히지 않은 손상된 응답. */
 	if (!response_token_matches(tok, OPAL_ENDLIST))
-		/* [한국어] 마지막 토큰이 ENDLIST가 아니면 상태 목록이
-		 * 제대로 닫히지 않은 손상된 응답. */
 		return DTAERROR_NO_METHOD_STATUS;
 
-	return response_get_u64(resp, resp->num - 4);
 	/* [한국어] 두 경계(STARTLIST/ENDLIST)가 모두 확인되었으므로, 그
 	 * 사이 끝에서 4번째 위치(실제 상태 코드 자리)를 부호 없는 정수로
 	 * 읽어 반환 — 0이면 성공, 양수면 opal_errors[]로 해석 가능한 오류
 	 * 코드. */
+	return response_get_u64(resp, resp->num - 4);
 }
 
 /* Parses and checks for errors */
@@ -4636,17 +4658,17 @@ static int start_opal_session_cont(struct opal_dev *dev)
 		 * 추출할 응답을 신뢰할 수 없으므로 즉시 전파. */
 		return error;
 
-	hsn = response_get_u64(&dev->parsed, 4);
 	/* [한국어] 응답 토큰 스트림의 5번째(인덱스 4) 토큰을 Host Session
 	 * Number로 해석 — StartSession 응답의 고정 위치 규약. */
-	tsn = response_get_u64(&dev->parsed, 5);
+	hsn = response_get_u64(&dev->parsed, 4);
 	/* [한국어] 6번째(인덱스 5) 토큰을 TPer Session Number로 해석. */
+	tsn = response_get_u64(&dev->parsed, 5);
 
+	/* [한국어] hsn이 요청 시 실었던 고정값(0x41)과 다르거나, tsn이
+	 * 호스트 세션 번호 공간(< 4096)에 속해 TPer 자체 세션과
+	 * 혼동될 수 있는 값이면 이 응답을 신뢰할 수 없다 — TPer가
+	 * 엉뚱한 세션을 열어줬거나 응답이 손상/위조되었을 가능성. */
 	if (hsn != GENERIC_HOST_SESSION_NUM || tsn < FIRST_TPER_SESSION_NUM) {
-		/* [한국어] hsn이 요청 시 실었던 고정값(0x41)과 다르거나, tsn이
-		 * 호스트 세션 번호 공간(< 4096)에 속해 TPer 자체 세션과
-		 * 혼동될 수 있는 값이면 이 응답을 신뢰할 수 없다 — TPer가
-		 * 엉뚱한 세션을 열어줬거나 응답이 손상/위조되었을 가능성. */
 		pr_debug("Couldn't authenticate session\n");
 		/* [한국어] 진단 로그. */
 		return -EPERM;
@@ -4960,9 +4982,9 @@ static int generic_get_columns(struct opal_dev *dev, const u8 *table,
 		 * 공간 부족 등)했다면 더 진행할 필요 없이 즉시 반환. */
 		return err;
 
-	return finalize_and_send(dev, parse_and_check_status);
 	/* [한국어] 명령을 마감하고 송수신, 응답은 parse_and_check_status()로
 	 * 파싱/상태 검사까지 마쳐 dev->parsed에 결과를 남긴다. */
+	return finalize_and_send(dev, parse_and_check_status);
 }
 
 /*
@@ -5231,33 +5253,33 @@ static int get_active_key_cont(struct opal_dev *dev)
 		 * 신뢰할 수 있는 응답이 없다. */
 		return error;
 
-	keylen = response_get_string(&dev->parsed, 4, &activekey);
 	/* [한국어] Get 응답 CellBlock의 값 위치(토큰 인덱스 4)를 bytestring
 	 * 으로 해석 — ActiveKey 컬럼의 실제 UID 값이 여기 담겨 있다. */
+	keylen = response_get_string(&dev->parsed, 4, &activekey);
+	/* [한국어] response_get_string()이 실패하면(토큰이 bytestring
+	 * 타입이 아니었거나 인덱스가 범위 밖) activekey가 NULL로
+	 * 남는다 — 응답 형식이 기대와 다르다는 뜻. */
 	if (!activekey) {
-		/* [한국어] response_get_string()이 실패하면(토큰이 bytestring
-		 * 타입이 아니었거나 인덱스가 범위 밖) activekey가 NULL로
-		 * 남는다 — 응답 형식이 기대와 다르다는 뜻. */
+		/* [한국어] 함수 이름과 함께 실패를 진단 로그로 남긴다. */
 		pr_debug("%s: Couldn't extract the Activekey from the response\n",
 			 __func__);
-		/* [한국어] 함수 이름과 함께 실패를 진단 로그로 남긴다. */
-		return OPAL_INVAL_PARAM;
 		/* [한국어] opal_proto.h의 TCG 상태 코드 12(잘못된 파라미터)에
 		 * 대응하는 값을 반환. */
+		return OPAL_INVAL_PARAM;
 	}
 
-	dev->prev_data = kmemdup(activekey, keylen, GFP_KERNEL);
 	/* [한국어] 응답 버퍼(다음 명령 조립 시 덮어써질 임시 버퍼)를 그대로
 	 * 참조하지 않도록, ActiveKey UID를 별도 힙 메모리로 복사해 다음
 	 * 스텝(gen_key)까지 살아남게 한다. */
+	dev->prev_data = kmemdup(activekey, keylen, GFP_KERNEL);
 
+	/* [한국어] kmemdup() 실패(메모리 부족)면 더 진행할 수 없다. */
 	if (!dev->prev_data)
-		/* [한국어] kmemdup() 실패(메모리 부족)면 더 진행할 수 없다. */
 		return -ENOMEM;
 
-	dev->prev_d_len = keylen;
 	/* [한국어] 복사된 데이터의 길이를 함께 기록 — gen_key()가 이 길이만큼만
 	 * 지역 uid 버퍼로 복사한다. */
+	dev->prev_d_len = keylen;
 
 	return 0;
 	/* [한국어] ActiveKey UID가 dev->prev_data/dev->prev_d_len에 성공적으로
@@ -5325,19 +5347,19 @@ static int get_active_key(struct opal_dev *dev, void *data)
 		 * 반환. */
 		return err;
 
-	err = generic_get_column(dev, uid, OPAL_ACTIVEKEY);
 	/* [한국어] 그 range 오브젝트의 ActiveKey 컬럼을 Get으로 조회 —
 	 * 내부에서 조립부터 송수신, parse_and_check_status까지 이미
 	 * 완료된다. */
+	err = generic_get_column(dev, uid, OPAL_ACTIVEKEY);
+	/* [한국어] Get 호출 자체가 실패하면 응답에서 값을 추출할
+	 * 수 없으므로 즉시 반환. */
 	if (err)
-		/* [한국어] Get 호출 자체가 실패하면 응답에서 값을 추출할
-		 * 수 없으므로 즉시 반환. */
 		return err;
 
-	return get_active_key_cont(dev);
 	/* [한국어] 방금 받은 응답에서 ActiveKey UID 값을 실제로 추출해
 	 * dev->prev_data에 저장 — 이 반환값이 이 opal_step의 최종 결과가
 	 * 된다. */
+	return get_active_key_cont(dev);
 }
 
 /*
@@ -5445,27 +5467,27 @@ static int generic_table_write_data(struct opal_dev *dev, const u64 data,
 		return err;
 	}
 
-	len = response_get_u64(&dev->parsed, 4);
 	/* [한국어] Get 응답의 값 위치(토큰 인덱스 4)에서 테이블 전체 크기를
 	 * 꺼낸다. */
+	len = response_get_u64(&dev->parsed, 4);
+	/* [한국어] size 자체가 테이블 크기를 넘거나, offset+size가
+	 * len을 넘는지를 "offset > len - size" 형태(뺄셈 방향)로
+	 * 검사해 offset+size 덧셈 시 발생할 수 있는 오버플로를
+	 * 피한다. */
 	if (size > len || offset > len - size) {
-		/* [한국어] size 자체가 테이블 크기를 넘거나, offset+size가
-		 * len을 넘는지를 "offset > len - size" 형태(뺄셈 방향)로
-		 * 검사해 offset+size 덧셈 시 발생할 수 있는 오버플로를
-		 * 피한다. */
-		pr_debug("Does not fit in the table (%llu vs. %llu)\n",
-			  offset + size, len);
 		/* [한국어] 요청한 [offset, offset+size) 구간과 테이블
 		 * 전체 크기(len)를 함께 로그로 남긴다. */
-		return -ENOSPC;
+		pr_debug("Does not fit in the table (%llu vs. %llu)\n",
+			  offset + size, len);
 		/* [한국어] 공간 부족(요청 범위가 테이블 밖) 에러. */
+		return -ENOSPC;
 	}
 
 	/* do the actual transmission(s) */
+	/* [한국어] 아직 전송하지 못한 바이트가 남아 있는 동안
+	 * 반복 — 한 번의 Set 호출로 다 못 담으면 여러 번 나눠
+	 * 보낸다. */
 	while (off < size) {
-		/* [한국어] 아직 전송하지 못한 바이트가 남아 있는 동안
-		 * 반복 — 한 번의 Set 호출로 다 못 담으면 여러 번 나눠
-		 * 보낸다. */
 		err = cmd_start(dev, uid, opalmethod[OPAL_SET]);
 		/* [한국어] 이번 조각을 위한 새 Set 메소드 호출을 조립
 		 * 시작. */
@@ -5513,11 +5535,11 @@ static int generic_table_write_data(struct opal_dev *dev, const u64 data,
 			 * 이전에 이미 에러가 누적된 경우) 더 진행할 수 없다. */
 			break;
 
+		/* [한국어] 유저스페이스 버퍼(src+off부터 len바이트)를
+		 * 커널 명령 버퍼(dst)로 직접 복사 — 실패하면(잘못된
+		 * 유저 포인터, 페이지 폴트 불가 등) 더 이상 신뢰할
+		 * 수 있는 데이터가 없다. */
 		if (copy_from_user(dst, src + off, len)) {
-			/* [한국어] 유저스페이스 버퍼(src+off부터 len바이트)를
-			 * 커널 명령 버퍼(dst)로 직접 복사 — 실패하면(잘못된
-			 * 유저 포인터, 페이지 폴트 불가 등) 더 이상 신뢰할
-			 * 수 있는 데이터가 없다. */
 			err = -EFAULT;
 			/* [한국어] 유저 메모리 접근 실패를 나타내는 표준
 			 * errno로 기록. */
@@ -5538,22 +5560,22 @@ static int generic_table_write_data(struct opal_dev *dev, const u64 data,
 			 * 있었다면 이번 조각 전송을 포기. */
 			break;
 
-		err = finalize_and_send(dev, parse_and_check_status);
 		/* [한국어] 이번 조각에 대한 Set 호출을 마감하고 실제로
 		 * 전송·응답 검사까지 수행. */
+		err = finalize_and_send(dev, parse_and_check_status);
+		/* [한국어] 전송 자체가 실패하면 더 이상의 조각도
+		 * 시도하지 않고 중단. */
 		if (err)
-			/* [한국어] 전송 자체가 실패하면 더 이상의 조각도
-			 * 시도하지 않고 중단. */
 			break;
 
-		off += len;
 		/* [한국어] 이번에 성공적으로 보낸 만큼 누적 진행량을
 		 * 전진시켜 다음 반복(또는 종료 조건)에 반영. */
+		off += len;
 	}
 
-	return err;
 	/* [한국어] 마지막으로 관찰된 에러 코드(모든 조각이 성공했다면 0,
 	 * 중간에 실패했다면 그 실패의 errno)를 반환. */
+	return err;
 }
 
 /*
@@ -5798,25 +5820,25 @@ static int setup_enable_range(struct opal_dev *dev, void *data)
 		/* [한국어] UID 조립 실패 시 즉시 반환. */
 		return err;
 
+	/* [한국어] Global Range라면 전용 래퍼로 위임 — 현재 상태를
+	 * 항상 미잠금으로 고정하는 정책이 적용된다. */
 	if (lr == 0)
-		/* [한국어] Global Range라면 전용 래퍼로 위임 — 현재 상태를
-		 * 항상 미잠금으로 고정하는 정책이 적용된다. */
 		err = enable_global_lr(dev, uid, setup);
 	else
 		/* [한국어] 개별 range는 generic_lr_enable_disable()을 직접
 		 * 호출 — rl=wl=0으로 마찬가지로 미잠금 상태에서 시작. */
 		err = generic_lr_enable_disable(dev, uid, !!setup->RLE, !!setup->WLE, 0, 0);
+	/* [한국어] 위 두 경로 중 어느 쪽이든 명령 조립 자체가
+	 * 실패했다면 전송할 것이 없다. */
 	if (err) {
-		/* [한국어] 위 두 경로 중 어느 쪽이든 명령 조립 자체가
-		 * 실패했다면 전송할 것이 없다. */
 		pr_debug("Failed to create enable lr command.\n");
 		/* [한국어] 실패를 진단 로그로 남긴다. */
 		return err;
 	}
 
-	return finalize_and_send(dev, parse_and_check_status);
 	/* [한국어] 조립된 Set 명령을 실제로 전송하고, 응답을
 	 * parse_and_check_status()로 파싱/상태 검사한 결과를 반환. */
+	return finalize_and_send(dev, parse_and_check_status);
 }
 
 /*
@@ -5885,52 +5907,52 @@ static int setup_locking_range_start_length(struct opal_dev *dev, void *data)
 		/* [한국어] UID 조립 실패 시 즉시 반환. */
 		return err;
 
-	err = cmd_start(dev, uid, opalmethod[OPAL_SET]);
 	/* [한국어] 그 range 오브젝트를 대상으로 OPAL_SET 메소드 호출 조립
 	 * 시작. */
+	err = cmd_start(dev, uid, opalmethod[OPAL_SET]);
 
-	add_token_u8(&err, dev, OPAL_STARTNAME);
 	/* [한국어] Set의 유일한 이름-값 쌍("Values") 시작. */
-	add_token_u8(&err, dev, OPAL_VALUES);
-	/* [한국어] 파라미터 이름 "Values". */
-	add_token_u8(&err, dev, OPAL_STARTLIST);
-	/* [한국어] 기록할 컬럼 이름-값 쌍들의 목록 시작. */
-
 	add_token_u8(&err, dev, OPAL_STARTNAME);
+	/* [한국어] 파라미터 이름 "Values". */
+	add_token_u8(&err, dev, OPAL_VALUES);
+	/* [한국어] 기록할 컬럼 이름-값 쌍들의 목록 시작. */
+	add_token_u8(&err, dev, OPAL_STARTLIST);
+
 	/* [한국어] 첫 번째 컬럼 이름-값 쌍 시작. */
-	add_token_u8(&err, dev, OPAL_RANGESTART);
+	add_token_u8(&err, dev, OPAL_STARTNAME);
 	/* [한국어] 컬럼 이름 "RangeStart". */
-	add_token_u64(&err, dev, setup->range_start);
+	add_token_u8(&err, dev, OPAL_RANGESTART);
 	/* [한국어] 이 range가 시작되는 LBA 값 — 유저가 이미 정렬을 맞춰
 	 * 전달했다고 가정. */
-	add_token_u8(&err, dev, OPAL_ENDNAME);
+	add_token_u64(&err, dev, setup->range_start);
 	/* [한국어] RangeStart 이름-값 쌍 종료. */
+	add_token_u8(&err, dev, OPAL_ENDNAME);
 
-	add_token_u8(&err, dev, OPAL_STARTNAME);
 	/* [한국어] 두 번째 컬럼 이름-값 쌍 시작. */
-	add_token_u8(&err, dev, OPAL_RANGELENGTH);
+	add_token_u8(&err, dev, OPAL_STARTNAME);
 	/* [한국어] 컬럼 이름 "RangeLength". */
-	add_token_u64(&err, dev, setup->range_length);
+	add_token_u8(&err, dev, OPAL_RANGELENGTH);
 	/* [한국어] 이 range의 길이(블록 수). */
-	add_token_u8(&err, dev, OPAL_ENDNAME);
+	add_token_u64(&err, dev, setup->range_length);
 	/* [한국어] RangeLength 이름-값 쌍 종료. */
-
-	add_token_u8(&err, dev, OPAL_ENDLIST);
-	/* [한국어] 컬럼 이름-값 쌍 목록을 닫음. */
 	add_token_u8(&err, dev, OPAL_ENDNAME);
-	/* [한국어] Values 이름-값 쌍 자체를 닫음. */
 
+	/* [한국어] 컬럼 이름-값 쌍 목록을 닫음. */
+	add_token_u8(&err, dev, OPAL_ENDLIST);
+	/* [한국어] Values 이름-값 쌍 자체를 닫음. */
+	add_token_u8(&err, dev, OPAL_ENDNAME);
+
+	/* [한국어] 지금까지의 add_token_* 호출 중 하나라도 실패했다면
+	 * (버퍼 공간 부족 등) 전송할 수 없다. */
 	if (err) {
-		/* [한국어] 지금까지의 add_token_* 호출 중 하나라도 실패했다면
-		 * (버퍼 공간 부족 등) 전송할 수 없다. */
 		pr_debug("Error building Setup Locking RangeStartLength command.\n");
 		/* [한국어] 실패를 진단 로그로 남긴다. */
 		return err;
 	}
 
-	return finalize_and_send(dev, parse_and_check_status);
 	/* [한국어] 조립된 Set 명령을 실제로 전송하고, 응답을
 	 * parse_and_check_status()로 파싱/상태 검사한 결과를 반환. */
+	return finalize_and_send(dev, parse_and_check_status);
 }
 
 /*
@@ -6009,54 +6031,54 @@ static int response_get_column(const struct parsed_resp *resp,
 		 * 그 에러를 그대로 전파. */
 		return PTR_ERR(tok);
 
+	/* [한국어] 이 자리가 StartName이 아니면 CellBlock 결과의
+	 * 반복 그룹 경계가 예상과 어긋난 것 — 응답 형식을 신뢰할 수
+	 * 없다. */
 	if (!response_token_matches(tok, OPAL_STARTNAME)) {
-		/* [한국어] 이 자리가 StartName이 아니면 CellBlock 결과의
-		 * 반복 그룹 경계가 예상과 어긋난 것 — 응답 형식을 신뢰할 수
-		 * 없다. */
 		pr_debug("Unexpected response token type %d.\n", n);
 		/* [한국어] 어느 인덱스에서 어긋났는지 로그로 남긴다. */
 		return OPAL_INVAL_PARAM;
 	}
-	n++;
 	/* [한국어] StartName 확인 후 다음 자리(컬럼 번호 echo)로 전진. */
+	n++;
 
+	/* [한국어] 이 자리에 echo된 컬럼 번호가 호출자가 기대한
+	 * column과 다르면, 드라이브가 다른 순서로 응답했거나 응답이
+	 * 손상된 것 — 값을 잘못된 컬럼으로 착각해 반환하면 안 되므로
+	 * 즉시 실패 처리. */
 	if (response_get_u64(resp, n) != column) {
-		/* [한국어] 이 자리에 echo된 컬럼 번호가 호출자가 기대한
-		 * column과 다르면, 드라이브가 다른 순서로 응답했거나 응답이
-		 * 손상된 것 — 값을 잘못된 컬럼으로 착각해 반환하면 안 되므로
-		 * 즉시 실패 처리. */
-		pr_debug("Token %d does not match expected column %llu.\n",
-			 n, column);
 		/* [한국어] 어긋난 인덱스와 기대했던 컬럼 번호를 로그로
 		 * 남긴다. */
+		pr_debug("Token %d does not match expected column %llu.\n",
+			 n, column);
 		return OPAL_INVAL_PARAM;
 	}
-	n++;
 	/* [한국어] 컬럼 번호 확인 후 다음 자리(실제 값)로 전진. */
+	n++;
 
-	val = response_get_u64(resp, n);
 	/* [한국어] 이 컬럼의 실제 값을 부호 없는 정수로 읽어 임시 변수에
 	 * 보관 — 아직 *value에는 대입하지 않는다(뒤의 EndName 검증까지
 	 * 통과해야 확정). */
-	n++;
+	val = response_get_u64(resp, n);
 	/* [한국어] 값 확인 후 다음 자리(EndName)로 전진. */
+	n++;
 
-	tok = response_get_token(resp, n);
 	/* [한국어] 이 그룹을 닫는 EndName이 와야 할 자리의 토큰을 가져온다. */
+	tok = response_get_token(resp, n);
+	/* [한국어] 인덱스가 범위를 벗어났다면 에러를 그대로 전파. */
 	if (IS_ERR(tok))
-		/* [한국어] 인덱스가 범위를 벗어났다면 에러를 그대로 전파. */
 		return PTR_ERR(tok);
 
+	/* [한국어] 이 자리가 EndName이 아니면 그룹이 예상한 4토큰
+	 * 형식으로 닫히지 않은 것. */
 	if (!response_token_matches(tok, OPAL_ENDNAME)) {
-		/* [한국어] 이 자리가 EndName이 아니면 그룹이 예상한 4토큰
-		 * 형식으로 닫히지 않은 것. */
 		pr_debug("Unexpected response token type %d.\n", n);
 		/* [한국어] 어긋난 인덱스를 로그로 남긴다. */
 		return OPAL_INVAL_PARAM;
 	}
-	n++;
 	/* [한국어] EndName 확인 후 다음 자리(다음 컬럼 그룹의 시작, 또는
 	 * 컬럼이 이게 마지막이라면 CellBlock을 닫는 ENDLIST들)로 전진. */
+	n++;
 
 	*value = val;
 	/* [한국어] 4토큰 그룹 전체 검증을 통과했으므로 이제 호출자의 출력
@@ -6159,91 +6181,96 @@ static int locking_range_status(struct opal_dev *dev, void *data)
 		/* [한국어] UID 조립 실패 시 즉시 반환. */
 		return err;
 
-	err = generic_get_columns(dev, lr_buffer, OPAL_RANGESTART,
-				  OPAL_WRITELOCKED);
 	/* [한국어] RangeStart(0x03)부터 WriteLocked(0x08)까지 연속된 6개
 	 * 컬럼을 단 한 번의 Get 호출로 조회 — 응답은 dev->parsed에 채워짐. */
+	err = generic_get_columns(dev, lr_buffer, OPAL_RANGESTART,
+				  OPAL_WRITELOCKED);
+	/* [한국어] Get 호출 자체가 실패하면 아래 컬럼별 추출을
+	 * 시도할 수 없다. */
 	if (err) {
-		/* [한국어] Get 호출 자체가 실패하면 아래 컬럼별 추출을
-		 * 시도할 수 없다. */
+		/* [한국어] 어느 range 번호의 어느 컬럼 범위 조회가 실패했는지
+		 * 로그로 남긴다. */
 		pr_debug("Couldn't get lr %u table columns %d to %d.\n",
 			 lrst->session.opal_key.lr, OPAL_RANGESTART,
 			 OPAL_WRITELOCKED);
-		/* [한국어] 어느 range 번호의 어느 컬럼 범위 조회가 실패했는지
-		 * 로그로 남긴다. */
 		return err;
 	}
 
 	/* range start */
-	err = response_get_column(&dev->parsed, &tok_n, OPAL_RANGESTART,
-				  &lrst->range_start);
 	/* [한국어] 첫 번째 컬럼 그룹(RangeStart)을 검증하며 읽어
 	 * lrst->range_start에 직접 저장 — 성공 시 tok_n이 다음 그룹
 	 * 위치로 전진. */
+	err = response_get_column(&dev->parsed, &tok_n, OPAL_RANGESTART,
+				  &lrst->range_start);
+	/* [한국어] 형식 불일치 등으로 실패하면 즉시 반환한다. 아래 다섯 개의
+	 * response_get_column() 호출도 모두 같은 이유로 실패 즉시 반환하는데,
+	 * 이는 tok_n이 "다음 컬럼 그룹의 시작"을 가리키는 누적 커서이기
+	 * 때문이다 — 한 그룹의 형식이 어긋난 순간 커서 위치의 의미가 사라져
+	 * 이후 컬럼을 읽어도 엉뚱한 토큰을 그 컬럼의 값으로 착각하게 된다.
+	 * (같은 이유가 반복되므로 아래 다섯 곳에는 이 설명을 되풀이하지
+	 * 않는다.) */
 	if (err)
-		/* [한국어] 형식 불일치 등으로 실패하면 즉시 반환(이후 컬럼도
-		 * 신뢰할 수 없다고 간주). */
 		return err;
 
 	/* range length */
-	err = response_get_column(&dev->parsed, &tok_n, OPAL_RANGELENGTH,
-				  &lrst->range_length);
 	/* [한국어] 두 번째 컬럼 그룹(RangeLength)을 읽어 lrst->range_length에
 	 * 저장. */
+	err = response_get_column(&dev->parsed, &tok_n, OPAL_RANGELENGTH,
+				  &lrst->range_length);
 	if (err)
 		return err;
 
 	/* RLE */
-	err = response_get_column(&dev->parsed, &tok_n, OPAL_READLOCKENABLED,
-				  &resp);
 	/* [한국어] 세 번째 컬럼 그룹(ReadLockEnabled)을 원시 정수로 resp에
 	 * 임시 저장. */
+	err = response_get_column(&dev->parsed, &tok_n, OPAL_READLOCKENABLED,
+				  &resp);
 	if (err)
 		return err;
 
-	lrst->RLE = !!resp;
 	/* [한국어] resp(0 또는 1이어야 할 정수)를 !!으로 정규화해 bool
 	 * 필드 lrst->RLE에 확정 저장. */
+	lrst->RLE = !!resp;
 
 	/* WLE */
+	/* [한국어] 네 번째 컬럼 그룹(WriteLockEnabled)을 resp에 임시 저장. */
 	err = response_get_column(&dev->parsed, &tok_n, OPAL_WRITELOCKENABLED,
 				  &resp);
-	/* [한국어] 네 번째 컬럼 그룹(WriteLockEnabled)을 resp에 임시 저장. */
 	if (err)
 		return err;
 
-	lrst->WLE = !!resp;
 	/* [한국어] resp를 bool로 정규화해 lrst->WLE에 저장. */
+	lrst->WLE = !!resp;
 
 	/* read locked */
-	err = response_get_column(&dev->parsed, &tok_n, OPAL_READLOCKED, &resp);
 	/* [한국어] 다섯 번째 컬럼 그룹(ReadLocked — 현재 실제 읽기 잠금
 	 * 상태)을 resp에 임시 저장. */
+	err = response_get_column(&dev->parsed, &tok_n, OPAL_READLOCKED, &resp);
 	if (err)
 		return err;
 
-	rlocked = !!resp;
 	/* [한국어] resp를 bool로 정규화 — lrst 필드가 아니라 아래 l_state
 	 * 계산 전용 지역 변수에만 저장(유저에게는 read/write 개별 플래그가
 	 * 아니라 통합된 l_state로 노출되므로). */
+	rlocked = !!resp;
 
 	/* write locked */
-	err = response_get_column(&dev->parsed, &tok_n, OPAL_WRITELOCKED, &resp);
 	/* [한국어] 여섯 번째(마지막) 컬럼 그룹(WriteLocked)을 resp에 임시
 	 * 저장. */
+	err = response_get_column(&dev->parsed, &tok_n, OPAL_WRITELOCKED, &resp);
 	if (err)
 		return err;
 
-	wlocked = !!resp;
 	/* [한국어] resp를 bool로 정규화해 wlocked에 저장. */
+	wlocked = !!resp;
 
 	/* opal_lock_state can not map 'read locked' only state. */
-	lrst->l_state = OPAL_RW;
 	/* [한국어] 기본값으로 "읽기/쓰기 모두 허용" 상태를 가정 — 아래
 	 * 조건들에 해당하지 않으면(즉 rlocked도 wlocked도 아니면) 이 값이
 	 * 그대로 유지된다. */
+	lrst->l_state = OPAL_RW;
+	/* [한국어] 읽기와 쓰기가 모두 잠긴 경우 — 완전 잠김. */
 	if (rlocked && wlocked)
-		/* [한국어] 읽기와 쓰기가 모두 잠긴 경우 — 완전 잠김. */
 		lrst->l_state = OPAL_LK;
 		/* [한국어] 완전 잠김 상태로 확정. */
 	else if (wlocked)
@@ -6373,12 +6400,12 @@ static int start_generic_opal_session(struct opal_dev *dev,
 		 * 세션 — 추가 인증 파라미터 없이 바로 진행. C_PIN_MSID를
 		 * 읽는 등 인증이 필요 없는 초기 단계 메소드 호출용. */
 		break;
+	/* [한국어] PIN 인증이 필요한 세 Authority — Admin1(Locking SP
+	 * 관리자), SID(Admin SP 소유자), PSID(비상 복구 주체) 중 어느
+	 * 것이든 같은 HostChallenge/HostSignAuth 패턴을 따른다. */
 	case OPAL_ADMIN1_UID:
 	case OPAL_SID_UID:
 	case OPAL_PSID_UID:
-		/* [한국어] PIN 인증이 필요한 세 Authority — Admin1(Locking SP
-		 * 관리자), SID(Admin SP 소유자), PSID(비상 복구 주체) 중 어느
-		 * 것이든 같은 HostChallenge/HostSignAuth 패턴을 따른다. */
 		add_token_u8(&err, dev, OPAL_STARTNAME);
 		/* [한국어] 첫 번째 이름-값 쌍 시작 — 이름은 다음 줄의 0
 		 * (HostChallenge). */
@@ -6462,10 +6489,10 @@ static int start_generic_opal_session(struct opal_dev *dev,
  */
 static int start_anybodyASP_opal_session(struct opal_dev *dev, void *data)
 {
-	return start_generic_opal_session(dev, OPAL_ANYBODY_UID,
-					  OPAL_ADMINSP_UID, NULL, 0);
 	/* [한국어] Anybody Authority + Admin SP + PIN 없음으로 고정 호출 —
 	 * 반환값을 그대로 호출자(execute_steps)에게 전달. */
+	return start_generic_opal_session(dev, OPAL_ANYBODY_UID,
+					  OPAL_ADMINSP_UID, NULL, 0);
 }
 
 /*
@@ -6494,9 +6521,9 @@ static int start_anybodyASP_opal_session(struct opal_dev *dev, void *data)
  */
 static int start_anybodyLSP_opal_session(struct opal_dev *dev, void *data)
 {
+	/* [한국어] Anybody Authority + Locking SP + PIN 없음으로 고정 호출. */
 	return start_generic_opal_session(dev, OPAL_ANYBODY_UID,
 					  OPAL_LOCKINGSP_UID, NULL, 0);
-	/* [한국어] Anybody Authority + Locking SP + PIN 없음으로 고정 호출. */
 }
 
 /*
@@ -6764,39 +6791,39 @@ static int start_auth_opal_session(struct opal_dev *dev, void *data)
 		 * 실패했다면 명령 조립을 시작하지 않고 즉시 반환. */
 		return err;
 
-	err = cmd_start(dev, opaluid[OPAL_SMUID_UID],
-			opalmethod[OPAL_STARTSESSION]);
 	/* [한국어] SMUID를 향해 StartSession 메소드 호출 CALL 토큰 조립
 	 * 시작. */
+	err = cmd_start(dev, opaluid[OPAL_SMUID_UID],
+			opalmethod[OPAL_STARTSESSION]);
 
-	add_token_u64(&err, dev, hsn);
 	/* [한국어] 첫 인자 — Host Session Number. */
+	add_token_u64(&err, dev, hsn);
+	/* [한국어] 두 번째 인자 — 대상 SP는 항상 Locking SP로 고정. */
 	add_token_bytestring(&err, dev, opaluid[OPAL_LOCKINGSP_UID],
 			     OPAL_UID_LENGTH);
-	/* [한국어] 두 번째 인자 — 대상 SP는 항상 Locking SP로 고정. */
-	add_token_u8(&err, dev, 1);
 	/* [한국어] 세 번째 인자 — Write 플래그 1(참). */
-	add_token_u8(&err, dev, OPAL_STARTNAME);
+	add_token_u8(&err, dev, 1);
 	/* [한국어] HostChallenge 이름-값 쌍 시작. */
-	add_token_u8(&err, dev, 0);
-	/* [한국어] 파라미터 이름 0=HostChallenge. */
-	add_token_bytestring(&err, dev, key, keylen);
-	/* [한국어] HostChallenge 값 — 사용자 PIN. */
-	add_token_u8(&err, dev, OPAL_ENDNAME);
-	/* [한국어] HostChallenge 이름-값 쌍 종료. */
 	add_token_u8(&err, dev, OPAL_STARTNAME);
+	/* [한국어] 파라미터 이름 0=HostChallenge. */
+	add_token_u8(&err, dev, 0);
+	/* [한국어] HostChallenge 값 — 사용자 PIN. */
+	add_token_bytestring(&err, dev, key, keylen);
+	/* [한국어] HostChallenge 이름-값 쌍 종료. */
+	add_token_u8(&err, dev, OPAL_ENDNAME);
 	/* [한국어] HostSignAuth 이름-값 쌍 시작. */
-	add_token_u8(&err, dev, 3);
+	add_token_u8(&err, dev, OPAL_STARTNAME);
 	/* [한국어] 파라미터 이름 3=HostSignAuth. */
-	add_token_bytestring(&err, dev, lk_ul_user, OPAL_UID_LENGTH);
+	add_token_u8(&err, dev, 3);
 	/* [한국어] HostSignAuth 값 — 위에서 동적으로 결정한 Admin1 또는
 	 * User1..9 UID. */
-	add_token_u8(&err, dev, OPAL_ENDNAME);
+	add_token_bytestring(&err, dev, lk_ul_user, OPAL_UID_LENGTH);
 	/* [한국어] HostSignAuth 이름-값 쌍 종료. */
+	add_token_u8(&err, dev, OPAL_ENDNAME);
 
+	/* [한국어] 위 add_token_* 호출 중 하나라도 실패했다면 명령이
+	 * 불완전하므로 전송하지 않는다. */
 	if (err) {
-		/* [한국어] 위 add_token_* 호출 중 하나라도 실패했다면 명령이
-		 * 불완전하므로 전송하지 않는다. */
 		pr_debug("Error building STARTSESSION command.\n");
 		/* [한국어] 진단 로그. */
 		return err;
@@ -8020,20 +8047,20 @@ static int add_user_to_lr_ace(struct opal_dev *dev, void *data)
 	/* [한국어] opal_step.data로 전달된, 추가로 권한을 위임할 대상/range
 	 * 정보. */
 	const u8 users[] = {
+		/* [한국어] ACE의 새 boolean 식에 OR로 묶일 두 Authority — Admin1은
+		 * 관리 권한 보존을 위해 항상 포함, who는 이번에 새로 위임받는 User. */
 		OPAL_ADMIN1,
 		lkul->session.who
 	};
-	/* [한국어] ACE의 새 boolean 식에 OR로 묶일 두 Authority — Admin1은
-	 * 관리 권한 보존을 위해 항상 포함, who는 이번에 새로 위임받는 User. */
 
+	/* [한국어] range 컬럼 전체(RangeStart~ActiveKey)를 아우르는 ACE를
+	 * "Admin1 OR who"로 재설정. */
 	err = set_lr_boolean_ace(dev, OPAL_LOCKINGRANGE_ACE_START_TO_KEY,
 				 lkul->session.opal_key.lr, users,
 				 ARRAY_SIZE(users));
-	/* [한국어] range 컬럼 전체(RangeStart~ActiveKey)를 아우르는 ACE를
-	 * "Admin1 OR who"로 재설정. */
 
+	/* [한국어] ACE Set 명령 조립 자체가 실패한 경우. */
 	if (err) {
-		/* [한국어] ACE Set 명령 조립 자체가 실패한 경우. */
 		pr_debug("Error building add user to locking ranges ACEs.\n");
 		/* [한국어] 진단 로그. */
 		return err;
@@ -8049,8 +8076,8 @@ static int add_user_to_lr_ace(struct opal_dev *dev, void *data)
  * [한국어]
  * lock_unlock_locking_range - 비-SUM(일반 ACE 기반) 모드에서, 특정 Locking
  * Range의 ReadLocked/WriteLocked 컬럼을 요청한 잠금 상태(l_state)에 맞는
- * 값으로 Set하는 opal_step 콜백. IOC_OPAL_LOCK_UNLOCK ioctl이 최종적으로
- * NVMe SED 컨트롤러의 LBA 접근 정책을 바꾸는 실질적인 지점이다.
+ * 값으로 Set하는 opal_step 콜백. IOC_OPAL_LOCK_UNLOCK ioctl 전체에서
+ * 드라이브의 LBA 접근 정책을 실제로 바꾸는 유일한 지점이다.
  *
  * @dev: 명령을 조립할 세션 컨텍스트 — 직전 스텝 start_auth_opal_session()이
  *       add_user_to_lr()로 이 range의 RDLOCKED/WRLOCKED ACE에 등록된
@@ -8067,7 +8094,7 @@ static int add_user_to_lr_ace(struct opal_dev *dev, void *data)
  * "실제 접근 가능 여부"는 ReadLocked/WriteLocked 두 컬럼의 조합으로
  * 결정된다(둘 다 0=읽기/쓰기 모두 허용, write만 1=읽기 전용, 둘 다 1=완전
  * 잠금). 유저스페이스가 요청한 OPAL_RO/RW/LK를 그 두 비트 조합으로 번역해
- * NVMe SED 컨트롤러에 실제로 전달하는 것이 이 함수의 역할이다.
+ * TPer에 실제로 전달하는 것이 이 함수의 역할이다.
  * 동작 단계: (1) build_locking_range()로 session.opal_key.lr에 대응하는
  * range 오브젝트 UID를 lr_buffer에 조립 — 실패(-ERANGE 미만 반환)하면 즉시
  * -ERANGE, (2) l_state에 따라 read_locked/write_locked 두 지역 변수를 결정하는
@@ -8081,9 +8108,9 @@ static int add_user_to_lr_ace(struct opal_dev *dev, void *data)
  * to_lr_ace() 등과 달리 여기서는 ACE(누가 바꿀 수 있는지)가 아니라 컬럼의
  * "실제 값"(현재 잠김 여부 자체)을 Set한다는 점에 유의, (5) 값 목록/Values
  * 이름-값 쌍을 닫음, (6) 누적된 err가 있으면 진단 로그 후 반환, (7) 없으면
- * finalize_and_send()로 마감/송수신 — 이 Set이 드라이브에 반영되면 컨트롤러가
- * 해당 LBA 범위로 향하는 이후 NVMe read/write 명령의 허용 여부를 즉시
- * 바꾼다.
+ * finalize_and_send()로 마감/송수신 — 이 Set이 드라이브에 반영되는 즉시
+ * 해당 LBA 범위로 향하는 이후 읽기/쓰기의 허용 여부가 바뀐다(잠금 판정은
+ * 드라이브 펌웨어가 하므로 호스트 쪽 상태와 무관하게 곧바로 적용된다).
  * 실행 컨텍스트: 프로세스 컨텍스트, dev_lock 하 — opal_step 배열의 한 스텝.
  * 호출자: execute_steps()(__opal_lock_unlock()의 unlock_steps —
  * start_auth_opal_session 다음, sum이 거짓일 때 선택되는 경로).
@@ -8096,7 +8123,7 @@ static int add_user_to_lr_ace(struct opal_dev *dev, void *data)
  * 호출 체인:
  *   execute_steps() → [lock_unlock_locking_range] → build_locking_range()
  *   → cmd_start() → add_token_u8() → finalize_and_send()
- *   → parse_and_check_status() → (드라이브가 NVMe read/write 접근 정책 갱신)
+ *   → parse_and_check_status() → (TPer가 해당 range의 접근 정책 갱신)
  */
 static int lock_unlock_locking_range(struct opal_dev *dev, void *data)
 {
@@ -8127,18 +8154,18 @@ static int lock_unlock_locking_range(struct opal_dev *dev, void *data)
 		write_locked = 1;
 		/* [한국어] WriteLocked=1(쓰기 거부) 유지. */
 		break;
+	/* [한국어] 읽기/쓰기 모두 허용 요청. */
 	case OPAL_RW:
-		/* [한국어] 읽기/쓰기 모두 허용 요청. */
 		read_locked = 0;
 		/* [한국어] ReadLocked=0. */
 		write_locked = 0;
 		/* [한국어] WriteLocked=0. */
 		break;
+	/* [한국어] 완전 잠금 요청 — read_locked/write_locked가 이미
+	 * 1/1로 초기화되어 있으므로 별도 대입 없이 그대로 사용
+	 * (원본 영어 주석 참고). */
 	case OPAL_LK:
 		/* vars are initialized to locked */
-		/* [한국어] 완전 잠금 요청 — read_locked/write_locked가 이미
-		 * 1/1로 초기화되어 있으므로 별도 대입 없이 그대로 사용
-		 * (원본 영어 주석 참고). */
 		break;
 	default:
 		/* [한국어] OPAL_RO/RW/LK 어느 것도 아닌 알 수 없는 값 —
@@ -8195,8 +8222,8 @@ static int lock_unlock_locking_range(struct opal_dev *dev, void *data)
 
 	return finalize_and_send(dev, parse_and_check_status);
 	/* [한국어] 명령을 마감하고 실제로 송수신 — 이 Set이 드라이브에
-	 * 도달하면 컨트롤러가 해당 LBA 범위의 NVMe read/write 접근 허용
-	 * 여부를 즉시 갱신한다. */
+	 * 도달하면 TPer가 해당 LBA 범위의 읽기/쓰기 허용 여부를 즉시
+	 * 갱신한다. */
 }
 
 
@@ -8229,9 +8256,9 @@ static int lock_unlock_locking_range(struct opal_dev *dev, void *data)
  * 동작 단계: (1) clear_opal_cmd()+set_comid()를 먼저 직접 호출해 두지만,
  * 뒤이어 (7)에서 호출하는 generic_lr_enable_disable() 내부의 cmd_start()가
  * 다시 clear_opal_cmd()/set_comid()를 호출해 이 두 줄의 효과를 그대로
- * 덮어쓴다 — 코드상으로는 관측 가능한 차이를 만들지 않는 것으로 보이는
- * 중복 호출이다(원본 코드 그대로 유지, 이유는 불명 — 과거 리팩터링의
- * 흔적으로 추정), (2) build_locking_range()로 range UID 조립 — 실패 시
+ * 덮어쓴다 — 즉 관측 가능한 차이를 만들지 않는 중복 호출이다(원본 코드에
+ * 이 중복에 대한 설명은 없다), (2) build_locking_range()로 range UID 조립 —
+ * 실패 시
  * -ERANGE, (3) l_state에 따라 read_locked/write_locked 결정 — switch 로직은
  * lock_unlock_locking_range()와 동일(OPAL_RO/RW/LK 분기, 그 외 OPAL_INVAL_
  * PARAM), (4) generic_lr_enable_disable(dev, lr_buffer, 1, 1, read_locked,
@@ -8289,16 +8316,16 @@ static int lock_unlock_locking_range_sum(struct opal_dev *dev, void *data)
 		write_locked = 1;
 		/* [한국어] WriteLocked=1(쓰기 거부) 유지. */
 		break;
+	/* [한국어] 읽기/쓰기 모두 허용 요청. */
 	case OPAL_RW:
-		/* [한국어] 읽기/쓰기 모두 허용 요청. */
 		read_locked = 0;
 		/* [한국어] ReadLocked=0. */
 		write_locked = 0;
 		/* [한국어] WriteLocked=0. */
 		break;
+	/* [한국어] 완전 잠금 요청 — 초기값(1/1)을 그대로 사용. */
 	case OPAL_LK:
 		/* vars are initialized to locked */
-		/* [한국어] 완전 잠금 요청 — 초기값(1/1)을 그대로 사용. */
 		break;
 	default:
 		/* [한국어] 알 수 없는 l_state 값. */
@@ -8409,20 +8436,20 @@ static int activate_lsp(struct opal_dev *dev, void *data)
 			 * 반환. */
 			return err;
 
-		add_token_u8(&err, dev, OPAL_STARTNAME);
 		/* [한국어] SUM 파라미터 이름-값 쌍 시작. */
-		add_token_u64(&err, dev, OPAL_SUM_SET_LIST);
+		add_token_u8(&err, dev, OPAL_STARTNAME);
 		/* [한국어] 파라미터 이름 OPAL_SUM_SET_LIST(0x060000) — "이
 		 * range 목록을 SUM 대상으로 지정한다"는 뜻의 SUM 전용
 		 * 이름. */
+		add_token_u64(&err, dev, OPAL_SUM_SET_LIST);
 
-		add_token_u8(&err, dev, OPAL_STARTLIST);
 		/* [한국어] range UID들의 목록 시작. */
-		add_token_bytestring(&err, dev, user_lr, OPAL_UID_LENGTH);
+		add_token_u8(&err, dev, OPAL_STARTLIST);
 		/* [한국어] 첫 번째 range(lr[0])의 UID를 목록에 추가. */
+		add_token_bytestring(&err, dev, user_lr, OPAL_UID_LENGTH);
+		/* [한국어] 두 번째 range부터 num_lrs개까지 순회하며
+		 * 목록에 계속 추가. */
 		for (i = 1; i < opal_act->num_lrs; i++) {
-			/* [한국어] 두 번째 range부터 num_lrs개까지 순회하며
-			 * 목록에 계속 추가. */
 			user_lr[7] = opal_act->lr[i];
 			/* [한국어] user_lr의 마지막 바이트(range 번호 자리)만
 			 * lr[i]로 덮어써 재사용 — 모든 개별 range UID가 앞
@@ -8569,17 +8596,17 @@ static int reactivate_lsp(struct opal_dev *dev, void *data)
 			/* [한국어] 조립 실패 — 즉시 그 errno 반환. */
 			return err;
 
-		add_token_u8(&err, dev, OPAL_STARTNAME);
 		/* [한국어] SUM 파라미터 이름-값 쌍 시작. */
-		add_token_u64(&err, dev, OPAL_SUM_SET_LIST);
+		add_token_u8(&err, dev, OPAL_STARTNAME);
 		/* [한국어] 파라미터 이름 OPAL_SUM_SET_LIST. */
+		add_token_u64(&err, dev, OPAL_SUM_SET_LIST);
 
-		add_token_u8(&err, dev, OPAL_STARTLIST);
 		/* [한국어] range UID들의 목록 시작. */
-		add_token_bytestring(&err, dev, user_lr, OPAL_UID_LENGTH);
+		add_token_u8(&err, dev, OPAL_STARTLIST);
 		/* [한국어] 첫 번째 range(lr[0])의 UID를 목록에 추가. */
+		add_token_bytestring(&err, dev, user_lr, OPAL_UID_LENGTH);
+		/* [한국어] 두 번째 range부터 num_lrs개까지 순회. */
 		for (i = 1; i < opal_react->num_lrs; i++) {
-			/* [한국어] 두 번째 range부터 num_lrs개까지 순회. */
 			user_lr[7] = opal_react->lr[i];
 			/* [한국어] 마지막 바이트만 lr[i]로 덮어써 재사용. */
 			add_token_bytestring(&err, dev, user_lr, OPAL_UID_LENGTH);
@@ -8695,16 +8722,17 @@ static int get_lsp_lifecycle(struct opal_dev *dev, void *data)
 		 * 응답을 신뢰할 수 없으므로 즉시 전파. */
 		return err;
 
-	lc_status = response_get_u64(&dev->parsed, 4);
 	/* 0x08 is Manufactured Inactive */
 	/* 0x09 is Manufactured */
 	/* [한국어] 응답 토큰 인덱스 4(Get 응답의 고정 위치)에서 LifeCycle
-	 * 값을 정수로 추출 — 위 원본 영어 주석이 두 상태값(0x08/0x09)의
-	 * 의미를 설명. */
+	 * 값을 정수로 추출 — 위 두 줄의 원본 영어 주석이 이 값이 가질 수
+	 * 있는 두 상태(0x08=Manufactured-Inactive, 0x09=Manufactured)를
+	 * 설명한다. */
+	lc_status = response_get_u64(&dev->parsed, 4);
+	/* [한국어] 0x08(Manufactured-Inactive)이 아니면 — 이미
+	 * Activate되어 있거나(0x09) 응답이 예상 밖 값인 비정상
+	 * 상황. */
 	if (lc_status != OPAL_MANUFACTURED_INACTIVE) {
-		/* [한국어] 0x08(Manufactured-Inactive)이 아니면 — 이미
-		 * Activate되어 있거나(0x09) 응답이 예상 밖 값인 비정상
-		 * 상황. */
 		pr_debug("Couldn't determine the status of the Lifecycle state\n");
 		/* [한국어] 진단 로그. */
 		return -ENODEV;
@@ -8788,12 +8816,12 @@ static int get_msid_cpin_pin(struct opal_dev *dev, void *data)
 		 * 전파. */
 		return err;
 
-	strlen = response_get_string(&dev->parsed, 4, &msid_pin);
 	/* [한국어] 응답 토큰 인덱스 4에서 bytestring payload의 시작 주소와
 	 * 길이를 꺼냄 — 실패 시 msid_pin은 NULL, strlen은 0. */
+	strlen = response_get_string(&dev->parsed, 4, &msid_pin);
+	/* [한국어] payload를 문자열/바이트열로 추출하지 못한 경우
+	 * (예: 이 토큰이 bytestring이 아니었던 비정상 응답). */
 	if (!msid_pin) {
-		/* [한국어] payload를 문자열/바이트열로 추출하지 못한 경우
-		 * (예: 이 토큰이 bytestring이 아니었던 비정상 응답). */
 		pr_debug("Couldn't extract MSID_CPIN from response\n");
 		/* [한국어] 진단 로그. */
 		return OPAL_INVAL_PARAM;
@@ -8814,11 +8842,11 @@ static int get_msid_cpin_pin(struct opal_dev *dev, void *data)
 		 * 전달할 수 없으므로 실패 처리. */
 		return -ENOMEM;
 
-	dev->prev_d_len = strlen;
 	/* [한국어] 복사된 MSID PIN의 길이를 함께 저장 — 다음 스텝
 	 * (start_SIDASP_opal_session)이 dev->prev_data를 PIN 바이트열로,
 	 * dev->prev_d_len을 그 길이로 사용해 SID 인증 HostChallenge를
 	 * 구성한다. */
+	dev->prev_d_len = strlen;
 
 	return 0;
 	/* [한국어] MSID PIN을 성공적으로 읽어 dev->prev_data/prev_d_len에
@@ -8949,17 +8977,17 @@ static int read_table_data_cont(struct opal_dev *dev)
 		 * 신뢰할 수 있는 응답이 없다. */
 		return err;
 
-	dev->prev_d_len = response_get_string(&dev->parsed, 1, &data_read);
 	/* [한국어] 바이트 테이블 Get 응답의 토큰 인덱스 1(컬럼 이름-값 쌍이
 	 * 없는 단순 형식이라 값이 이 위치에 옴)에서 bytestring payload의
 	 * 길이를 꺼내 바로 dev->prev_d_len에 기록. */
-	dev->prev_data = (void *)data_read;
+	dev->prev_d_len = response_get_string(&dev->parsed, 1, &data_read);
 	/* [한국어] 같은 호출이 돌려준 payload 시작 주소를 dev->prev_data에
 	 * 저장 — read_table_data()가 이 두 필드를 이용해 유저 버퍼로
 	 * copy_to_user() 한다. */
+	dev->prev_data = (void *)data_read;
+	/* [한국어] response_get_string()이 NULL을 돌려줬다면(토큰이
+	 * bytestring이 아니었던 비정상 응답) 더 이상 진행할 수 없다. */
 	if (!dev->prev_data) {
-		/* [한국어] response_get_string()이 NULL을 돌려줬다면(토큰이
-		 * bytestring이 아니었던 비정상 응답) 더 이상 진행할 수 없다. */
 		pr_debug("%s: Couldn't read data from the table.\n", __func__);
 		/* [한국어] 실패한 함수 이름(%s, __func__)과 함께 진단 로그. */
 		return OPAL_INVAL_PARAM;
@@ -8983,7 +9011,7 @@ static int read_table_data_cont(struct opal_dev *dev)
  * IO_BUFFER_LENGTH(2048바이트)에서 opal_header(ComPacket+Packet+
  * SubPacket, 56바이트)와 CellBlock 응답을 감싸는 구조 토큰들의 오버헤드
  * (11바이트, StartList/StartName/EndName/EndList 등)를 뺀 나머지가 한 번의
- * Get(=NVMe Security Receive 한 번의 왕복)으로 실을 수 있는 실제 데이터의
+ * Get(송신 1회 + 수신 1회의 왕복)으로 실을 수 있는 실제 데이터의
  * 최대 바이트 수다. read_table_data()는 요청한 read_size가 이 값을 넘으면
  * 여러 번의 Get으로 나눠 보낸다. */
 #define OPAL_MAX_READ_TABLE (0x7BD)
@@ -9075,10 +9103,14 @@ static int read_table_data(struct opal_dev *dev, void *data)
 	 * 조회 결과). len: 이번 반복에서 실제로 읽을 조각의 길이. */
 	u64 offset = read_tbl->offset, read_size = read_tbl->size - 1;
 	/* [한국어] offset: 유저가 지정한 테이블 내 절대 시작 오프셋을 지역
-	 * 변수로 캐시. read_size: 유저가 지정한 size에서 1을 뺀 값 — size는
-	 * 유저 버퍼가 결과 뒤에 NUL 종단자를 붙일 여유까지 포함해 지정한다고
-	 * 간주되므로, 드라이브에서 실제로 읽어야 할 바이트 수는 그보다 1
-	 * 작다(추정, 아래 dev->prev_d_len > len+1 검사와 짝을 이룸). */
+	 * 변수로 캐시. read_size: 유저가 지정한 size에서 1을 뺀 값 — 이 -1의
+	 * 근거는 아래 루프 안의 원본 영어 주석 "len+1: This includes the NULL
+	 * terminator at the end"다. 즉 TPer가 돌려주는 바이트열에는 NUL 종단자
+	 * 1바이트가 함께 딸려 오므로, 유저가 잡아 준 size 버퍼에 그것까지
+	 * 담으려면 실제로 요청할 데이터는 size-1바이트여야 한다.
+	 * 주의: size가 0이면 이 뺄셈이 u64에서 언더플로해 거대한 값이 되지만,
+	 * 호출자 opal_generic_read_write_table()이 !rw_tbl->size를 미리 걸러
+	 * 0을 여기까지 내려보내지 않는다. */
 	u8 __user *dst;
 	/* [한국어] read_tbl->data를 유저스페이스 포인터로 재해석해 담을
 	 * 변수 — 매 반복 copy_to_user()의 목적지 계산에 사용. */
@@ -9095,27 +9127,27 @@ static int read_table_data(struct opal_dev *dev, void *data)
 		return err;
 	}
 
-	table_len = response_get_u64(&dev->parsed, 4);
 	/* [한국어] Get 응답의 값 위치(토큰 인덱스 4)에서 테이블 전체 크기를
 	 * 꺼낸다. */
+	table_len = response_get_u64(&dev->parsed, 4);
 
 	/* Check if the user is trying to read from the table limits */
+	/* [한국어] read_size 자체가 테이블 크기를 넘거나, offset+
+	 * read_size가 table_len을 넘는지를 "offset > table_len -
+	 * read_size" 형태(뺄셈 방향)로 검사해 덧셈 시 발생할 수 있는
+	 * 정수 오버플로를 피한다. */
 	if (read_size > table_len || offset > table_len - read_size) {
-		/* [한국어] read_size 자체가 테이블 크기를 넘거나, offset+
-		 * read_size가 table_len을 넘는지를 "offset > table_len -
-		 * read_size" 형태(뺄셈 방향)로 검사해 덧셈 시 발생할 수 있는
-		 * 정수 오버플로를 피한다. */
-		pr_debug("Read size exceeds the Table size limits (%llu vs. %llu)\n",
-			  offset + read_size, table_len);
 		/* [한국어] 요청한 [offset, offset+read_size) 구간과 테이블
 		 * 전체 크기(table_len)를 함께 로그로 남긴다. */
-		return -EINVAL;
+		pr_debug("Read size exceeds the Table size limits (%llu vs. %llu)\n",
+			  offset + read_size, table_len);
 		/* [한국어] 잘못된 인자(범위 초과) errno. */
+		return -EINVAL;
 	}
 
+	/* [한국어] 아직 다 읽지 못한 바이트가 남아 있는 동안 반복 —
+	 * 한 번의 Get으로 다 못 받으면 여러 번 나눠 요청한다. */
 	while (off < read_size) {
-		/* [한국어] 아직 다 읽지 못한 바이트가 남아 있는 동안 반복 —
-		 * 한 번의 Get으로 다 못 받으면 여러 번 나눠 요청한다. */
 		err = cmd_start(dev, read_tbl->table_uid, opalmethod[OPAL_GET]);
 		/* [한국어] 이번 조각을 위한 새 Get 메소드 호출을 조립 시작 —
 		 * 대상은 read_tbl->table_uid(유저 지정 바이트 테이블). */
@@ -9178,44 +9210,44 @@ static int read_table_data(struct opal_dev *dev, void *data)
 			break;
 
 		/* len+1: This includes the NULL terminator at the end*/
+		/* [한국어] 드라이브가 돌려준 바이트 수(prev_d_len)가
+		 * 요청한 len보다 많이(NUL 종단자 1바이트를 감안해도)
+		 * 크면 비정상 응답 — 유저 버퍼 오버플로를 막기 위해
+		 * 여기서 즉시 중단. */
 		if (dev->prev_d_len > len + 1) {
-			/* [한국어] 드라이브가 돌려준 바이트 수(prev_d_len)가
-			 * 요청한 len보다 많이(NUL 종단자 1바이트를 감안해도)
-			 * 크면 비정상 응답 — 유저 버퍼 오버플로를 막기 위해
-			 * 여기서 즉시 중단. */
 			err = -EOVERFLOW;
 			/* [한국어] 응답 크기 이상(overflow) errno. */
 			break;
 		}
 
-		dst = (u8 __user *)(uintptr_t)read_tbl->data;
 		/* [한국어] ioctl로 전달된 u64 값을 유저스페이스 포인터로
 		 * 재해석 — 매 반복 다시 계산하지만 read_tbl->data 자체는
 		 * 불변이므로 항상 같은 베이스 주소. */
+		dst = (u8 __user *)(uintptr_t)read_tbl->data;
+		/* [한국어] 커널이 읽어온 데이터(dev->prev_data,
+		 * dev->prev_d_len바이트)를 유저 버퍼의 누적 오프셋
+		 * (dst+off)에 복사 — 실패하면(잘못된 유저 포인터 등)
+		 * 더 이상 신뢰할 수 있는 목적지가 없다. */
 		if (copy_to_user(dst + off, dev->prev_data, dev->prev_d_len)) {
-			/* [한국어] 커널이 읽어온 데이터(dev->prev_data,
-			 * dev->prev_d_len바이트)를 유저 버퍼의 누적 오프셋
-			 * (dst+off)에 복사 — 실패하면(잘못된 유저 포인터 등)
-			 * 더 이상 신뢰할 수 있는 목적지가 없다. */
 			pr_debug("Error copying data to userspace\n");
 			/* [한국어] 진단 로그. */
 			err = -EFAULT;
 			/* [한국어] 유저 메모리 접근 실패 errno. */
 			break;
 		}
-		dev->prev_data = NULL;
 		/* [한국어] 이번 조각의 응답 데이터를 다 소비했으므로 포인터를
 		 * NULL로 되돌려, 다음 반복이 실수로 이전 값을 재사용하지 않게
 		 * 방어. */
+		dev->prev_data = NULL;
 
-		off += len;
 		/* [한국어] 이번에 성공적으로 읽어 복사한 만큼 누적 진행량을
 		 * 전진시켜 다음 반복(또는 종료 조건)에 반영. */
+		off += len;
 	}
 
-	return err;
 	/* [한국어] 마지막으로 관찰된 에러 코드(모든 조각이 성공했다면 마지막
 	 * 반복의 0, 중간에 실패했다면 그 실패의 errno)를 반환. */
+	return err;
 }
 
 /*
@@ -9289,10 +9321,10 @@ static int end_opal_session(struct opal_dev *dev, void *data)
 		 * 보낼 것이 없으므로 더 진행하지 않는다. */
 		return err;
 
-	return finalize_and_send(dev, end_session_cont);
 	/* [한국어] cmd_finalize()로 3단 헤더 길이 필드를 채운 뒤 실제
 	 * 송수신 — 응답은 end_session_cont()가 처리해 hsn/tsn을 리셋하고
 	 * 상태 코드를 검사한 결과를 그대로 반환. */
+	return finalize_and_send(dev, end_session_cont);
 }
 
 /*
@@ -9342,15 +9374,15 @@ static int end_opal_session(struct opal_dev *dev, void *data)
 static int end_opal_session_error(struct opal_dev *dev)
 {
 	const struct opal_step error_end_session = {
+		/* [한국어] fn=end_opal_session, data는 명시하지 않아 0(NULL)으로
+		 * 초기화되는 지역 opal_step 리터럴 — end_opal_session()은 data를
+		 * 쓰지 않으므로 안전하다. */
 		end_opal_session,
 	};
-	/* [한국어] fn=end_opal_session, data는 명시하지 않아 0(NULL)으로
-	 * 초기화되는 지역 opal_step 리터럴 — end_opal_session()은 data를
-	 * 쓰지 않으므로 안전하다. */
 
-	return execute_step(dev, &error_end_session, 0);
 	/* [한국어] Discovery0을 다시 거치지 않는 execute_step() 단일 실행
 	 * 헬퍼로 곧장 EndSession을 보낸다 — stepIndex=0은 로그용일 뿐. */
+	return execute_step(dev, &error_end_session, 0);
 }
 
 /*
@@ -9522,18 +9554,18 @@ static int check_opal_support(struct opal_dev *dev)
 static void clean_opal_dev(struct opal_dev *dev)
 {
 
-	struct opal_suspend_data *suspend, *next;
 	/* [한국어] suspend: 현재 순회 중인 노드. next: list_del()로 suspend를
 	 * 끊어내기 전에 미리 저장해 두는 다음 노드 — list_for_each_entry_safe
 	 * 가 이 두 변수를 이용해 "순회 중 삭제"를 안전하게 만든다. */
+	struct opal_suspend_data *suspend, *next;
 
-	mutex_lock(&dev->dev_lock);
 	/* [한국어] 리스트 조작(list_del/kfree) 동안 다른 스레드의 리스트
 	 * 접근(추가/순회)을 배제. */
+	mutex_lock(&dev->dev_lock);
+	/* [한국어] dev->unlk_lst에 매달린 모든 struct opal_suspend_data
+	 * 노드를 node 필드를 통해 순회 — 삭제-안전(safe) 버전이라
+	 * 몸체 안에서 suspend를 free해도 순회가 깨지지 않는다. */
 	list_for_each_entry_safe(suspend, next, &dev->unlk_lst, node) {
-		/* [한국어] dev->unlk_lst에 매달린 모든 struct opal_suspend_data
-		 * 노드를 node 필드를 통해 순회 — 삭제-안전(safe) 버전이라
-		 * 몸체 안에서 suspend를 free해도 순회가 깨지지 않는다. */
 		list_del(&suspend->node);
 		/* [한국어] 이 노드를 dev->unlk_lst에서 분리 — 분리 후에는
 		 * 이 포인터가 더 이상 리스트의 일원이 아니므로 안전하게
@@ -9560,10 +9592,11 @@ static void clean_opal_dev(struct opal_dev *dev)
  * opal_dev가 들고 있던 cmd/resp DMA-가능 버퍼, suspend 시 재-unlock을
  * 위해 저장해 둔 리스트, opal_dev 구조체 자체를 모두 정리하지 않으면
  * 메모리가 영구히 누수된다. init_opal_dev()가 만든 자원의 역순(대략)으로
- * 해제하는 짝 함수가 필요하다. 원본 영어 코드에는 세션을 먼저 명시적으로
- * 닫는 절차가 없는데, 이는 통상 상위 드라이버가 디바이스를 내리기 전에
- * 이미 필요한 정리를 마쳤다고 가정하기 때문으로 보인다(추정 — 이 함수
- * 자체는 EndSession을 보내지 않는다).
+ * 해제하는 짝 함수가 필요하다. 이 함수는 EndSession을 보내지 않는다 —
+ * 호출되는 시점은 디바이스가 이미 사라지는 중이라 TPer에게 보낼 수 있는
+ * 것이 없고, 각 opal_* 진입점이 정상 경로에서 이미 end_opal_session
+ * 스텝으로 세션을 닫아 두기 때문이다. 남아 있던 세션은 드라이브 전원이
+ * 끊기거나 다음 부팅의 Discovery 시점에 자연히 사라진다.
  * 동작 단계: (1) dev가 NULL이면(애초에 init_opal_dev가 실패해 아무것도
  * 만들어지지 않았거나, 드라이버가 조건부로 호출하는 경우) 아무 것도 하지
  * 않고 즉시 반환 — 이중 free/NULL 역참조 방지, (2)
@@ -9590,19 +9623,19 @@ void free_opal_dev(struct opal_dev *dev)
 		 * 해제할 대상이 아예 없으므로 안전하게 조기 반환. */
 		return;
 
-	clean_opal_dev(dev);
 	/* [한국어] suspend 리스트(unlk_lst)에 남아있는 모든 노드를 먼저
 	 * 해제 — opal_dev 자체를 kfree하기 전에 그 안의 리스트 헤드가
 	 * 가리키던 노드들을 잃어버리지(누수) 않게 함. */
-	kfree(dev->resp);
+	clean_opal_dev(dev);
 	/* [한국어] Security Receive 응답 버퍼(IO_BUFFER_LENGTH바이트)를
 	 * 해제. */
-	kfree(dev->cmd);
+	kfree(dev->resp);
 	/* [한국어] Security Send 송신 버퍼(IO_BUFFER_LENGTH바이트)를
 	 * 해제. */
-	kfree(dev);
+	kfree(dev->cmd);
 	/* [한국어] opal_dev 구조체 자신을 마지막으로 해제 — 이 시점 이후
 	 * dev 포인터는 무효(dangling)이므로 호출자가 재사용하면 안 된다. */
+	kfree(dev);
 }
 EXPORT_SYMBOL(free_opal_dev);
 /* [한국어] free_opal_dev()를 커널 심볼 테이블에 공개(GPL 여부 무관 심볼)
@@ -9698,10 +9731,13 @@ struct opal_dev *init_opal_dev(void *data, sec_send_recv *send_recv)
 	 * Presumably DMA-able buffers must be cache-aligned. Kmalloc makes
 	 * sure the allocated buffer is DMA-safe in that regard.
 	 */
-	/* [한국어] 위 원본 영어 주석: dev->cmd/resp는 하드웨어(NVMe 컨트롤러
-	 * 등)가 DMA로 직접 읽고 쓰는 버퍼라고 추정되며, kmalloc()이 반환하는
-	 * 메모리는 캐시 라인 정렬을 보장하므로 별도의 페이지 정렬 할당자
-	 * 없이도 DMA에 안전하다는 전제를 깔고 있다. */
+	/* [한국어] 위 원본 영어 주석의 뜻: "DMA 가능한 버퍼는 아마도 캐시
+	 * 라인 정렬이 필요할 텐데, kmalloc()이 그 점은 보장해 준다."
+	 * 원문이 "Presumably"로 시작하는 데서 보이듯 커널 개발자 자신도
+	 * 단정하지 않은 전제다 — 이 버퍼가 실제로 DMA되는지는 하위 드라이버의
+	 * sec_send_recv 구현에 달려 있고 sed-opal 코어는 그것을 알지 못한다.
+	 * 확실한 것은 kmalloc이 물리적으로 연속인 메모리를 준다는 점이며,
+	 * vmalloc이었다면 어떤 DMA 경로에서도 곧장 문제가 된다. */
 	dev->cmd = kmalloc(IO_BUFFER_LENGTH, GFP_KERNEL);
 	/* [한국어] 송신 버퍼를 IO_BUFFER_LENGTH(2048)바이트, GFP_KERNEL(슬립
 	 * 가능)로 할당 — 이후 clear_opal_cmd()가 매 명령마다 이 버퍼 전체를
@@ -9711,36 +9747,36 @@ struct opal_dev *init_opal_dev(void *data, sec_send_recv *send_recv)
 		 * 남아있으므로 err_free_dev로 이동해 그것만 해제. */
 		goto err_free_dev;
 
-	dev->resp = kmalloc(IO_BUFFER_LENGTH, GFP_KERNEL);
 	/* [한국어] 수신 버퍼도 동일한 크기/플래그로 할당. */
+	dev->resp = kmalloc(IO_BUFFER_LENGTH, GFP_KERNEL);
+	/* [한국어] resp 버퍼 할당 실패 — 이 시점까지 dev와 dev->cmd가
+	 * 이미 할당되어 있으므로 err_free_cmd로 이동해 cmd부터
+	 * 역순으로 해제. */
 	if (!dev->resp)
-		/* [한국어] resp 버퍼 할당 실패 — 이 시점까지 dev와 dev->cmd가
-		 * 이미 할당되어 있으므로 err_free_cmd로 이동해 cmd부터
-		 * 역순으로 해제. */
 		goto err_free_cmd;
 
-	INIT_LIST_HEAD(&dev->unlk_lst);
 	/* [한국어] suspend 시 재-unlock 정보를 매달 리스트 헤드를 "자기
 	 * 자신을 가리키는" 빈 리스트로 초기화 — 아직 아무 노드도 없음. */
-	mutex_init(&dev->dev_lock);
+	INIT_LIST_HEAD(&dev->unlk_lst);
 	/* [한국어] 이 드라이브에 대한 모든 OPAL 명령 시퀀스를 직렬화할
 	 * 뮤텍스를 초기화 — 이후 모든 opal_* 진입점이 이 락을 잡고 나서
 	 * cmd/resp/hsn/tsn 등을 건드린다. */
-	dev->flags = 0;
+	mutex_init(&dev->dev_lock);
 	/* [한국어] 아직 Discovery를 하지 않았으므로 지원/잠금 관련 플래그를
 	 * 모두 꺼진 상태로 시작 — 아래 check_opal_support()가 실제 값을
 	 * 채운다. */
-	dev->data = data;
+	dev->flags = 0;
 	/* [한국어] 드라이버가 넘긴 불투명 컨텍스트(예: struct nvme_ctrl*)를
 	 * 그대로 저장 — send_recv 콜백이 호출될 때마다 이 값이 그대로
 	 * 전달된다. */
-	dev->send_recv = send_recv;
+	dev->data = data;
 	/* [한국어] 드라이버가 제공한 전송 콜백을 저장 — 이후 opal_send_cmd()/
 	 * opal_recv_cmd()가 dev->send_recv(dev->data, ...)로 호출한다. */
+	dev->send_recv = send_recv;
+	/* [한국어] Discovery 0을 실제로 수행해 이 드라이브가 TCG
+	 * Opal SED가 맞는지 확인 — 0이 아니면 통신 실패이거나
+	 * OPAL을 지원하지 않는 드라이브라는 뜻. */
 	if (check_opal_support(dev) != 0) {
-		/* [한국어] Discovery 0을 실제로 수행해 이 드라이브가 TCG
-		 * Opal SED가 맞는지 확인 — 0이 아니면 통신 실패이거나
-		 * OPAL을 지원하지 않는 드라이브라는 뜻. */
 		pr_debug("Opal is not supported on this device\n");
 		/* [한국어] 진단 로그 — 이 함수가 NULL을 반환하는 흔한
 		 * 정상적 사유(단지 OPAL이 없는 드라이브)임을 기록. */
@@ -9871,34 +9907,34 @@ static int opal_secure_erase_locking_range(struct opal_dev *dev,
 		 * 자체는 컨트롤러가 강제 종료하지 않으므로(REVERT류와 달리)
 		 * 명시적 EndSession이 필요하다. */
 	};
-	int ret;
 	/* [한국어] opal_get_key()/execute_steps()의 반환값을 담아 그대로
 	 * 호출자에게 전달할 변수. */
+	int ret;
 
-	ret = opal_get_key(dev, &opal_session->opal_key);
 	/* [한국어] 유저가 넘긴 PIN 표현(직접 포함 또는 keyring 이름)을
 	 * "즉시 사용 가능한 PIN 바이트열"로 정규화 — 성공 시
 	 * opal_session->opal_key.key/key_len이 실제 PIN으로 채워진다. */
+	ret = opal_get_key(dev, &opal_session->opal_key);
+	/* [한국어] PIN 정규화 자체가 실패했다면(잘못된 key_type, 빈
+	 * PIN, keyring 조회 실패 등) 세션을 열 수조차 없으므로 락을
+	 * 잡기 전에 즉시 반환. */
 	if (ret)
-		/* [한국어] PIN 정규화 자체가 실패했다면(잘못된 key_type, 빈
-		 * PIN, keyring 조회 실패 등) 세션을 열 수조차 없으므로 락을
-		 * 잡기 전에 즉시 반환. */
 		return ret;
-	mutex_lock(&dev->dev_lock);
 	/* [한국어] 이 opal_dev의 cmd/resp 버퍼와 세션 상태(hsn/tsn/prev_data)를
 	 * 다른 동시 ioctl 호출로부터 보호 — 하나의 드라이브에 대해 한 번에
 	 * 하나의 OPAL 절차만 진행되도록 직렬화한다. */
-	setup_opal_dev(dev);
+	mutex_lock(&dev->dev_lock);
 	/* [한국어] tsn/hsn/prev_data를 "세션 없음"/"이전 스텝 데이터 없음"
 	 * 초기 상태로 리셋 — 이전 ioctl 호출이 비정상 종료했더라도 이번
 	 * 절차가 깨끗한 상태에서 시작하도록 보장. */
-	ret = execute_steps(dev, erase_steps, ARRAY_SIZE(erase_steps));
+	setup_opal_dev(dev);
 	/* [한국어] Discovery 0을 먼저 실행한 뒤 erase_steps 4단계를 순서대로
 	 * 실행 — 어느 단계든 실패하면 그 시점까지 이미 세션이 열렸는지에
 	 * 따라 필요시 EndSession으로 정리한 뒤 최초 에러를 반환. */
-	mutex_unlock(&dev->dev_lock);
+	ret = execute_steps(dev, erase_steps, ARRAY_SIZE(erase_steps));
 	/* [한국어] 절차가 성공/실패와 무관하게 완전히 끝났으므로 락 해제 —
 	 * 다음 ioctl 호출이 이 opal_dev를 사용할 수 있게 한다. */
+	mutex_unlock(&dev->dev_lock);
 
 	return ret;
 	/* [한국어] execute_steps()의 결과(0=성공, 음수=실패)를 그대로
@@ -9961,39 +9997,39 @@ static int opal_secure_erase_locking_range(struct opal_dev *dev,
 static int opal_get_discv(struct opal_dev *dev, struct opal_discovery *discv)
 {
 	const struct opal_step discovery0_step = {
-		opal_discovery0, discv
 		/* [한국어] fn=opal_discovery0, data=discv(유저 출력 버퍼
 		 * 기술자) — 단일 스텝으로 execute_step()에 그대로 전달되어,
 		 * opal_discovery0_end()가 discv->data/size를 이용해
 		 * copy_to_user()를 수행하게 된다. */
+		opal_discovery0, discv
 	};
-	int ret;
 	/* [한국어] execute_step()의 반환값을 담을 변수. */
+	int ret;
 
-	mutex_lock(&dev->dev_lock);
 	/* [한국어] Discovery 요청/응답 동안 dev->cmd/resp 버퍼를 다른 ioctl
 	 * 호출과 공유하지 않도록 보호. */
-	setup_opal_dev(dev);
+	mutex_lock(&dev->dev_lock);
 	/* [한국어] tsn/hsn/prev_data를 "세션 없음" 초기 상태로 리셋 — Discovery
 	 * 자체는 세션이 필요 없지만 다른 opal_* 진입점과 동일한 진입 절차를
 	 * 따른다. */
-	ret = execute_step(dev, &discovery0_step, 0);
+	setup_opal_dev(dev);
 	/* [한국어] Discovery 0 스텝 하나만 실행 — Discovery는 세션과 무관하게
 	 * 조회 가능하므로 execute_steps()처럼 Discovery를 이중으로 실행할
 	 * 필요가 없다(discovery0_step 자체가 곧 그 Discovery). stepIndex
 	 * 인자 0은 로그용일 뿐. */
-	mutex_unlock(&dev->dev_lock);
+	ret = execute_step(dev, &discovery0_step, 0);
 	/* [한국어] 성공/실패와 무관하게 절차가 끝났으므로 락 해제. */
+	mutex_unlock(&dev->dev_lock);
+	/* [한국어] Discovery 자체가 실패했다면(버퍼 오버플로, 드라이브
+	 * 미지원 등) 돌려줄 유효한 길이가 없으므로 에러를 그대로
+	 * 반환. */
 	if (ret)
-		/* [한국어] Discovery 자체가 실패했다면(버퍼 오버플로, 드라이브
-		 * 미지원 등) 돌려줄 유효한 길이가 없으므로 에러를 그대로
-		 * 반환. */
 		return ret;
-	return discv->size; /* modified to actual length of data */
 	/* [한국어] opal_discovery0_end()가 이미 discv->size를 min(유저 버퍼
 	 * 크기, 실제 응답 길이)로 덮어써 두었다 — 그 값을 함수 반환값으로도
 	 * 사용해, 호출자가 실제로 몇 바이트가 복사됐는지 반환값만으로도 알 수
 	 * 있게 한다(원본 영어 주석이 이 관례를 명시). */
+	return discv->size; /* modified to actual length of data */
 }
 
 /*
@@ -10066,27 +10102,27 @@ static int opal_revertlsp(struct opal_dev *dev, struct opal_revert_lsp *rev)
 		 * 호출. revert_lsp() 내부에서 rev->options의 OPAL_PRESERVE 비트를
 		 * 검사해 Global Range 키 보존 여부를 TRUE/FALSE로 인코딩한다. */
 	};
-	int ret;
 	/* [한국어] opal_get_key()/execute_steps()의 반환값을 담는 변수. */
+	int ret;
 
-	ret = opal_get_key(dev, &rev->key);
 	/* [한국어] rev->key(Admin1 PIN 자격 증명)를 "즉시 사용 가능한 PIN
 	 * 바이트열" 형태로 정규화. */
+	ret = opal_get_key(dev, &rev->key);
+	/* [한국어] PIN 정규화 실패 — 세션을 열 수 없으므로 락을 잡기
+	 * 전에 즉시 반환. */
 	if (ret)
-		/* [한국어] PIN 정규화 실패 — 세션을 열 수 없으므로 락을 잡기
-		 * 전에 즉시 반환. */
 		return ret;
-	mutex_lock(&dev->dev_lock);
 	/* [한국어] 이 opal_dev의 세션 상태를 다른 동시 ioctl 호출로부터
 	 * 보호. */
-	setup_opal_dev(dev);
+	mutex_lock(&dev->dev_lock);
 	/* [한국어] tsn/hsn/prev_data를 초기 상태로 리셋해 이전 호출의 잔여
 	 * 상태가 섞이지 않게 함. */
-	ret = execute_steps(dev, steps, ARRAY_SIZE(steps));
+	setup_opal_dev(dev);
 	/* [한국어] Discovery 0을 먼저 실행한 뒤 steps 2단계(세션 시작 →
 	 * RevertSP)를 순차 실행. */
-	mutex_unlock(&dev->dev_lock);
+	ret = execute_steps(dev, steps, ARRAY_SIZE(steps));
 	/* [한국어] 절차 완료 후 락 해제. */
+	mutex_unlock(&dev->dev_lock);
 
 	return ret;
 	/* [한국어] execute_steps()의 결과를 그대로 호출자에게 전달. */
@@ -10155,26 +10191,26 @@ static int opal_erase_locking_range(struct opal_dev *dev,
 		/* [한국어] 3단계 — 세션을 정상 종료해 TPer 측 세션 자원을
 		 * 반납. */
 	};
-	int ret;
 	/* [한국어] opal_get_key()/execute_steps()의 반환값을 담는 변수. */
+	int ret;
 
-	ret = opal_get_key(dev, &opal_session->opal_key);
 	/* [한국어] opal_session->opal_key(PIN 표현)를 즉시 사용 가능한
 	 * 바이트열로 정규화. */
+	ret = opal_get_key(dev, &opal_session->opal_key);
+	/* [한국어] PIN 정규화 실패 — 세션을 열 수 없으므로 즉시
+	 * 반환. */
 	if (ret)
-		/* [한국어] PIN 정규화 실패 — 세션을 열 수 없으므로 즉시
-		 * 반환. */
 		return ret;
-	mutex_lock(&dev->dev_lock);
 	/* [한국어] 이 opal_dev의 세션 상태를 다른 동시 ioctl 호출로부터
 	 * 보호. */
-	setup_opal_dev(dev);
+	mutex_lock(&dev->dev_lock);
 	/* [한국어] tsn/hsn/prev_data를 초기 상태로 리셋. */
-	ret = execute_steps(dev, erase_steps, ARRAY_SIZE(erase_steps));
+	setup_opal_dev(dev);
 	/* [한국어] Discovery 0 이후 erase_steps 3단계(인증 → Erase → 세션
 	 * 종료)를 순차 실행. */
-	mutex_unlock(&dev->dev_lock);
+	ret = execute_steps(dev, erase_steps, ARRAY_SIZE(erase_steps));
 	/* [한국어] 절차 완료 후 락 해제. */
+	mutex_unlock(&dev->dev_lock);
 
 	return ret;
 	/* [한국어] execute_steps()의 결과를 그대로 호출자에게 전달. */
@@ -10214,9 +10250,9 @@ static int opal_erase_locking_range(struct opal_dev *dev,
  * (세션 열기 → set_mbr_done → 세션 닫기)로 MBRDone을 목표값으로 맞추고,
  * 이어서 (세션 열기 → set_mbr_enable_disable → 세션 닫기)로 MBREnable도
  * 같은 목표값으로 맞춘다 — 하나의 세션에서 두 Set을 연달아 보내지 않고
- * 컬럼마다 별도 세션 사이클로 감싸는 이유는 코드에서 명시적으로 설명되지
- * 않으나, 각 Set을 독립적으로 인증·완료·종료시켜 한쪽이 실패해도 나머지
- * 세션 상태에 영향을 주지 않게 하려는 방어적 설계로 보인다(추정), (6)
+ * 컬럼마다 별도 세션 사이클로 감싸는 이유는 원본 코드에 설명이 없다.
+ * 관측 가능한 결과만 말하면, 앞 세션의 Set이 실패하면 execute_steps()가
+ * 거기서 중단되므로 뒤 세션은 아예 열리지 않는다, (6)
  * dev_lock 해제, (7) 결과 반환.
  * 실행 컨텍스트: 프로세스 컨텍스트, dev_lock 하 — execute_steps() 내부
  * 각 스텝이 Security Send/Receive로 블로킹 가능.
@@ -10239,17 +10275,17 @@ static int opal_erase_locking_range(struct opal_dev *dev,
 static int opal_enable_disable_shadow_mbr(struct opal_dev *dev,
 					  struct opal_mbr_data *opal_mbr)
 {
-	u8 enable_disable = opal_mbr->enable_disable == OPAL_MBR_ENABLE ?
-		OPAL_TRUE : OPAL_FALSE;
 	/* [한국어] 유저 필드(OPAL_MBR_ENABLE=0x0/OPAL_MBR_DISABLE=0x01)를
 	 * OPAL 프로토콜 boolean(OPAL_TRUE/OPAL_FALSE)으로 변환 — 이 하나의
 	 * 값이 아래 두 Set 스텝(MBRDone, MBREnable) 모두에 공유되어 두
 	 * 컬럼을 같은 목표 상태로 맞춘다. */
+	u8 enable_disable = opal_mbr->enable_disable == OPAL_MBR_ENABLE ?
+		OPAL_TRUE : OPAL_FALSE;
 
+	/* [한국어] Discovery 0 다음에 실행될 6단계 절차 — (세션 열기,
+	 * MBRDone Set, 세션 닫기)와 (세션 열기, MBREnable Set, 세션
+	 * 닫기) 두 사이클을 순서대로 반복한다. */
 	const struct opal_step mbr_steps[] = {
-		/* [한국어] Discovery 0 다음에 실행될 6단계 절차 — (세션 열기,
-		 * MBRDone Set, 세션 닫기)와 (세션 열기, MBREnable Set, 세션
-		 * 닫기) 두 사이클을 순서대로 반복한다. */
 		{ start_admin1LSP_opal_session, &opal_mbr->key },
 		/* [한국어] 1단계 — 첫 번째 세션: Locking SP에 Admin1 권한으로
 		 * 인증. */
@@ -10268,32 +10304,32 @@ static int opal_enable_disable_shadow_mbr(struct opal_dev *dev,
 		{ end_opal_session, }
 		/* [한국어] 6단계 — 두 번째 세션 종료. */
 	};
-	int ret;
 	/* [한국어] 검증/opal_get_key()/execute_steps()의 반환값을 담는 변수. */
+	int ret;
 
+	/* [한국어] 유저가 준 enable_disable 값이 enum opal_mbr의 두
+	 * 유효값(ENABLE=0x0, DISABLE=0x01) 어느 쪽도 아니면 잘못된
+	 * ioctl 인자 — 세션조차 열지 않고 -EINVAL로 조기 거부. */
 	if (opal_mbr->enable_disable != OPAL_MBR_ENABLE &&
 	    opal_mbr->enable_disable != OPAL_MBR_DISABLE)
-		/* [한국어] 유저가 준 enable_disable 값이 enum opal_mbr의 두
-		 * 유효값(ENABLE=0x0, DISABLE=0x01) 어느 쪽도 아니면 잘못된
-		 * ioctl 인자 — 세션조차 열지 않고 -EINVAL로 조기 거부. */
 		return -EINVAL;
 
-	ret = opal_get_key(dev, &opal_mbr->key);
 	/* [한국어] opal_mbr->key(Admin1 PIN)를 즉시 사용 가능한 바이트열로
 	 * 정규화. */
+	ret = opal_get_key(dev, &opal_mbr->key);
+	/* [한국어] PIN 정규화 실패 — 즉시 반환. */
 	if (ret)
-		/* [한국어] PIN 정규화 실패 — 즉시 반환. */
 		return ret;
-	mutex_lock(&dev->dev_lock);
 	/* [한국어] 이 opal_dev의 세션 상태를 다른 동시 ioctl 호출로부터
 	 * 보호. */
-	setup_opal_dev(dev);
+	mutex_lock(&dev->dev_lock);
 	/* [한국어] tsn/hsn/prev_data를 초기 상태로 리셋. */
-	ret = execute_steps(dev, mbr_steps, ARRAY_SIZE(mbr_steps));
+	setup_opal_dev(dev);
 	/* [한국어] Discovery 0 이후 mbr_steps 6단계(MBRDone 세션 사이클 →
 	 * MBREnable 세션 사이클)를 순차 실행. */
-	mutex_unlock(&dev->dev_lock);
+	ret = execute_steps(dev, mbr_steps, ARRAY_SIZE(mbr_steps));
 	/* [한국어] 절차 완료 후 락 해제. */
+	mutex_unlock(&dev->dev_lock);
 
 	return ret;
 	/* [한국어] execute_steps()의 결과를 그대로 호출자에게 전달. */
@@ -10348,15 +10384,15 @@ static int opal_enable_disable_shadow_mbr(struct opal_dev *dev,
 static int opal_set_mbr_done(struct opal_dev *dev,
 			     struct opal_mbr_done *mbr_done)
 {
-	u8 mbr_done_tf = mbr_done->done_flag == OPAL_MBR_DONE ?
-		OPAL_TRUE : OPAL_FALSE;
 	/* [한국어] 유저 필드(OPAL_MBR_DONE=0x01/OPAL_MBR_NOT_DONE=0x0)를 OPAL
 	 * 프로토콜 boolean(OPAL_TRUE/OPAL_FALSE)으로 변환 — set_mbr_done()
 	 * 스텝에 그대로 전달될 값. */
+	u8 mbr_done_tf = mbr_done->done_flag == OPAL_MBR_DONE ?
+		OPAL_TRUE : OPAL_FALSE;
 
+	/* [한국어] Discovery 0 다음에 실행될 3단계 절차 — 인증 →
+	 * MBRDone Set → 세션 종료. */
 	const struct opal_step mbr_steps[] = {
-		/* [한국어] Discovery 0 다음에 실행될 3단계 절차 — 인증 →
-		 * MBRDone Set → 세션 종료. */
 		{ start_admin1LSP_opal_session, &mbr_done->key },
 		/* [한국어] 1단계 — Locking SP에 Admin1 권한(mbr_done->key의
 		 * PIN)으로 인증 세션을 연다. */
@@ -10367,32 +10403,32 @@ static int opal_set_mbr_done(struct opal_dev *dev,
 		{ end_opal_session, }
 		/* [한국어] 3단계 — 세션을 정상 종료. */
 	};
-	int ret;
 	/* [한국어] 검증/opal_get_key()/execute_steps()의 반환값을 담는 변수. */
+	int ret;
 
+	/* [한국어] done_flag가 enum opal_mbr_done_flag의 두 유효값
+	 * (DONE=0x01, NOT_DONE=0x0) 어느 쪽도 아니면 잘못된 ioctl
+	 * 인자 — 세션을 열지 않고 -EINVAL로 조기 거부. */
 	if (mbr_done->done_flag != OPAL_MBR_DONE &&
 	    mbr_done->done_flag != OPAL_MBR_NOT_DONE)
-		/* [한국어] done_flag가 enum opal_mbr_done_flag의 두 유효값
-		 * (DONE=0x01, NOT_DONE=0x0) 어느 쪽도 아니면 잘못된 ioctl
-		 * 인자 — 세션을 열지 않고 -EINVAL로 조기 거부. */
 		return -EINVAL;
 
-	ret = opal_get_key(dev, &mbr_done->key);
 	/* [한국어] mbr_done->key(Admin1 PIN)를 즉시 사용 가능한 바이트열로
 	 * 정규화. */
+	ret = opal_get_key(dev, &mbr_done->key);
+	/* [한국어] PIN 정규화 실패 — 즉시 반환. */
 	if (ret)
-		/* [한국어] PIN 정규화 실패 — 즉시 반환. */
 		return ret;
-	mutex_lock(&dev->dev_lock);
 	/* [한국어] 이 opal_dev의 세션 상태를 다른 동시 ioctl 호출로부터
 	 * 보호. */
-	setup_opal_dev(dev);
+	mutex_lock(&dev->dev_lock);
 	/* [한국어] tsn/hsn/prev_data를 초기 상태로 리셋. */
-	ret = execute_steps(dev, mbr_steps, ARRAY_SIZE(mbr_steps));
+	setup_opal_dev(dev);
 	/* [한국어] Discovery 0 이후 mbr_steps 3단계(인증 → MBRDone Set →
 	 * 세션 종료)를 순차 실행. */
-	mutex_unlock(&dev->dev_lock);
+	ret = execute_steps(dev, mbr_steps, ARRAY_SIZE(mbr_steps));
 	/* [한국어] 절차 완료 후 락 해제. */
+	mutex_unlock(&dev->dev_lock);
 
 	return ret;
 	/* [한국어] execute_steps()의 결과를 그대로 호출자에게 전달. */
@@ -10472,32 +10508,32 @@ static int opal_write_shadow_mbr(struct opal_dev *dev,
 		{ end_opal_session, }
 		/* [한국어] 3단계 — 세션을 정상 종료. */
 	};
-	int ret;
 	/* [한국어] opal_get_key()/execute_steps()의 반환값을 담는 변수. */
+	int ret;
 
+	/* [한국어] 이번 호출로 쓸 바이트가 없다면(유저스페이스가 빈
+	 * 조각을 보냈거나 청크 순회를 마무리하는 경우) 세션을 열
+	 * 필요조차 없이 곧바로 성공으로 처리 — 하드웨어에 아무 명령도
+	 * 보내지 않는다. */
 	if (info->size == 0)
-		/* [한국어] 이번 호출로 쓸 바이트가 없다면(유저스페이스가 빈
-		 * 조각을 보냈거나 청크 순회를 마무리하는 경우) 세션을 열
-		 * 필요조차 없이 곧바로 성공으로 처리 — 하드웨어에 아무 명령도
-		 * 보내지 않는다. */
 		return 0;
 
-	ret = opal_get_key(dev, &info->key);
 	/* [한국어] info->key(Admin1 PIN)를 즉시 사용 가능한 바이트열로
 	 * 정규화. */
+	ret = opal_get_key(dev, &info->key);
+	/* [한국어] PIN 정규화 실패 — 즉시 반환. */
 	if (ret)
-		/* [한국어] PIN 정규화 실패 — 즉시 반환. */
 		return ret;
-	mutex_lock(&dev->dev_lock);
 	/* [한국어] 이 opal_dev의 세션 상태를 다른 동시 ioctl 호출로부터
 	 * 보호. */
-	setup_opal_dev(dev);
+	mutex_lock(&dev->dev_lock);
 	/* [한국어] tsn/hsn/prev_data를 초기 상태로 리셋. */
-	ret = execute_steps(dev, mbr_steps, ARRAY_SIZE(mbr_steps));
+	setup_opal_dev(dev);
 	/* [한국어] Discovery 0 이후 mbr_steps 3단계(인증 → 청크 쓰기 → 세션
 	 * 종료)를 순차 실행. */
-	mutex_unlock(&dev->dev_lock);
+	ret = execute_steps(dev, mbr_steps, ARRAY_SIZE(mbr_steps));
 	/* [한국어] 절차 완료 후 락 해제. */
+	mutex_unlock(&dev->dev_lock);
 
 	return ret;
 	/* [한국어] execute_steps()의 결과를 그대로 호출자에게 전달. */
@@ -10538,9 +10574,13 @@ static int opal_write_shadow_mbr(struct opal_dev *dev,
  * 할당 실패 시 -ENOMEM 즉시 반환, (3) suspend->unlk = *lk_unlk로 유저 요청
  * 구조체 전체를 통째로 복사 — opal_get_key()를 거치지 않으므로 PIN이 아직
  * OPAL_KEYRING(이름 참조)일 수도, OPAL_INCLUDED(실제 바이트)일 수도 있는
- * "원본 그대로"의 값이 저장된다는 점에 유의(추정: 실제 정규화는 이후
- * opal_unlock_from_suspend()가 재실행할 때 다시 opal_get_key() 등을 거쳐
- * 이뤄질 것으로 보인다), (4) suspend->lr = lk_unlk->session.opal_key.lr로
+ * "원본 그대로"의 값이 저장된다는 점에 유의. 중요: 이 정규화 누락은 뒤에서
+ * 보완되지 않는다 — opal_unlock_from_suspend()도 opal_get_key()를 호출하지
+ * 않고 저장된 값을 그대로 __opal_lock_unlock()에 넘기므로, key_type이
+ * OPAL_KEYRING인 채로 저장되면 resume 시 keyring 조회가 일어나지 않아
+ * 빈 PIN으로 인증을 시도하게 된다. 즉 IOC_OPAL_SAVE는 유저가 실제 PIN
+ * 바이트(OPAL_INCLUDED)를 함께 넘겼을 때만 의도대로 동작한다,
+ * (4) suspend->lr = lk_unlk->session.opal_key.lr로
  * 이 레코드가 담당하는 range 번호를 별도 필드에도 복제 — add_suspend_info()
  * 가 이 lr로 기존 레코드와의 중복(같은 range 재등록)을 검사한다, (5)
  * dev_lock을 잡고 (6) setup_opal_dev()로 세션 상태 초기화(이 함수는 세션을
@@ -10578,28 +10618,28 @@ static int opal_save(struct opal_dev *dev, struct opal_lock_unlock *lk_unlk)
 		 * 없으므로 더 진행할 수 없다. */
 		return -ENOMEM;
 
-	suspend->unlk = *lk_unlk;
 	/* [한국어] 유저가 넘긴 unlock 요청 구조체 전체(session/l_state/flags)를
 	 * 통째로 값 복사 — 이후 opal_unlock_from_suspend()가 이 사본을 그대로
 	 * 재실행에 사용한다. */
-	suspend->lr = lk_unlk->session.opal_key.lr;
+	suspend->unlk = *lk_unlk;
 	/* [한국어] 대상 Locking Range 번호를 별도 필드에도 기록 — 위 unlk 안에도
 	 * 같은 값이 들어있지만, add_suspend_info()의 중복 검사(iter->lr ==
 	 * sus->lr)가 구조체 깊숙이 들어가지 않고 바로 비교할 수 있도록 얕은
 	 * 위치에 복제해 둔다. */
+	suspend->lr = lk_unlk->session.opal_key.lr;
 
-	mutex_lock(&dev->dev_lock);
 	/* [한국어] dev->unlk_lst를 다른 동시 ioctl 호출(다른 opal_save,
 	 * opal_unlock_from_suspend, clean_opal_dev 등)로부터 보호. */
-	setup_opal_dev(dev);
+	mutex_lock(&dev->dev_lock);
 	/* [한국어] tsn/hsn/prev_data를 초기 상태로 리셋 — 이 함수는 세션을
 	 * 열지 않지만, 다른 모든 opal_* 진입점과 동일한 진입 절차를 따라
 	 * 일관성을 유지한다. */
-	add_suspend_info(dev, suspend);
+	setup_opal_dev(dev);
 	/* [한국어] 같은 lr을 가진 기존 레코드가 있으면 제거·해제한 뒤, 새
 	 * suspend 레코드를 dev->unlk_lst 끝에 추가(upsert). */
-	mutex_unlock(&dev->dev_lock);
+	add_suspend_info(dev, suspend);
 	/* [한국어] 리스트 조작이 끝났으므로 락 해제. */
+	mutex_unlock(&dev->dev_lock);
 
 	return 0;
 	/* [한국어] 리스트 삽입은 실패할 수 없는 연산이므로 항상 성공(0)을
@@ -10693,15 +10733,15 @@ static int opal_add_user_to_lr(struct opal_dev *dev,
 		{ end_opal_session, }
 		/* [한국어] 4단계 — 세션을 정상 종료. */
 	};
-	int ret;
 	/* [한국어] 검증/opal_get_key()/execute_steps()의 반환값을 담는
 	 * 변수. */
+	int ret;
 
+	/* [한국어] 이 ioctl에서 l_state는 "위임할 권한 종류"를 고르는
+	 * 선택 기준이므로 OPAL_RO/RW 둘 중 하나여야 한다 — OPAL_LK
+	 * 등 다른 값은 이 맥락에서 의미가 없어 거부. */
 	if (lk_unlk->l_state != OPAL_RO &&
 	    lk_unlk->l_state != OPAL_RW) {
-		/* [한국어] 이 ioctl에서 l_state는 "위임할 권한 종류"를 고르는
-		 * 선택 기준이므로 OPAL_RO/RW 둘 중 하나여야 한다 — OPAL_LK
-		 * 등 다른 값은 이 맥락에서 의미가 없어 거부. */
 		pr_debug("Locking state was not RO or RW\n");
 		/* [한국어] 어떤 값이 잘못됐는지 진단 로그로 남김. */
 		return -EINVAL;
@@ -10739,16 +10779,16 @@ static int opal_add_user_to_lr(struct opal_dev *dev,
 	if (ret)
 		/* [한국어] PIN 정규화 실패 — 즉시 반환. */
 		return ret;
-	mutex_lock(&dev->dev_lock);
 	/* [한국어] 이 opal_dev의 세션 상태를 다른 동시 ioctl 호출로부터
 	 * 보호. */
-	setup_opal_dev(dev);
+	mutex_lock(&dev->dev_lock);
 	/* [한국어] tsn/hsn/prev_data를 초기 상태로 리셋. */
-	ret = execute_steps(dev, steps, ARRAY_SIZE(steps));
+	setup_opal_dev(dev);
 	/* [한국어] Discovery 0 이후 steps 4단계(인증 → 두 ACE 갱신 → 세션
 	 * 종료)를 순차 실행. */
-	mutex_unlock(&dev->dev_lock);
+	ret = execute_steps(dev, steps, ARRAY_SIZE(steps));
 	/* [한국어] 절차 완료 후 락 해제. */
+	mutex_unlock(&dev->dev_lock);
 
 	return ret;
 	/* [한국어] execute_steps()의 결과를 그대로 호출자에게 전달. */
@@ -10843,10 +10883,10 @@ static int opal_reverttper(struct opal_dev *dev, struct opal_key *opal, bool psi
 		 * 메소드는 파라미터가 없음) — Admin SP 전체를 REVERT해 드라이브
 		 * 전체가 공장 출하 상태로 되돌아간다. */
 	};
+	/* [한국어] PSID 경로(psid==true) — Discovery 0 다음에 실행될
+	 * 2단계: PSID 인증 → REVERT. revert_steps와 골격은 동일하고
+	 * 세션을 여는 Authority만 다르다. */
 	const struct opal_step psid_revert_steps[] = {
-		/* [한국어] PSID 경로(psid==true) — Discovery 0 다음에 실행될
-		 * 2단계: PSID 인증 → REVERT. revert_steps와 골격은 동일하고
-		 * 세션을 여는 Authority만 다르다. */
 		{ start_PSID_opal_session, opal },
 		/* [한국어] 1단계 — Admin SP에 PSID Authority(드라이브 라벨에
 		 * 인쇄된 값, opal->key/key_len)로 인증 세션을 연다 — SID/
@@ -10855,28 +10895,28 @@ static int opal_reverttper(struct opal_dev *dev, struct opal_key *opal, bool psi
 		/* [한국어] 2단계 — revert_steps와 동일하게 REVERT 호출. */
 	};
 
-	int ret;
 	/* [한국어] opal_get_key()/execute_steps()의 반환값을 담아 최종
 	 * 결과로 사용할 변수. */
+	int ret;
 
-	ret = opal_get_key(dev, opal);
 	/* [한국어] opal(SID 또는 PSID PIN 표현)을 즉시 사용 가능한
 	 * 바이트열로 정규화 — 어느 쪽 Authority인지는 이 시점에서는 상관
 	 * 없고, 이후 psid 분기가 어떤 세션 시작 함수를 쓸지만 결정한다. */
+	ret = opal_get_key(dev, opal);
 
+	/* [한국어] PIN 정규화 실패 — 세션을 열 수 없으므로 즉시
+	 * 반환. */
 	if (ret)
-		/* [한국어] PIN 정규화 실패 — 세션을 열 수 없으므로 즉시
-		 * 반환. */
 		return ret;
-	mutex_lock(&dev->dev_lock);
 	/* [한국어] 이 opal_dev의 세션 상태를 다른 동시 ioctl 호출로부터
 	 * 보호 — REVERT처럼 파괴적인 연산이 다른 진행 중인 절차와 뒤섞이면
 	 * 안 되므로 특히 중요하다. */
-	setup_opal_dev(dev);
+	mutex_lock(&dev->dev_lock);
 	/* [한국어] tsn/hsn/prev_data를 초기 상태로 리셋. */
+	setup_opal_dev(dev);
+	/* [한국어] 유저가 IOC_OPAL_PSID_REVERT_TPR을 요청한 경우 —
+	 * 비상 복구 경로. */
 	if (psid)
-		/* [한국어] 유저가 IOC_OPAL_PSID_REVERT_TPR을 요청한 경우 —
-		 * 비상 복구 경로. */
 		ret = execute_steps(dev, psid_revert_steps,
 				    ARRAY_SIZE(psid_revert_steps));
 		/* [한국어] Discovery 0 이후 PSID 인증 → REVERT 2단계 실행. */
@@ -10974,9 +11014,9 @@ static int __opal_lock_unlock(struct opal_dev *dev,
 		{ end_opal_session, }
 		/* [한국어] 3단계 — 세션 종료(EndOfSession 토큰 전송). */
 	};
+	/* [한국어] Single User Mode 잠금/해제 절차 — 골격은 동일하고
+	 * 가운데 스텝만 SUM 전용 콜백으로 교체. */
 	const struct opal_step unlock_sum_steps[] = {
-		/* [한국어] Single User Mode 잠금/해제 절차 — 골격은 동일하고
-		 * 가운데 스텝만 SUM 전용 콜백으로 교체. */
 		{ start_auth_opal_session, &lk_unlk->session },
 		/* [한국어] 1단계 — session.sum이 참이므로 start_auth_opal_session()
 		 * 내부에서 build_locking_user()로 이 range 전담 User UID를
@@ -10989,9 +11029,9 @@ static int __opal_lock_unlock(struct opal_dev *dev,
 		/* [한국어] 3단계 — 세션 종료. */
 	};
 
+	/* [한국어] 유저가 이 range를 SUM으로 설정했다고 알려온
+	 * 경우(opal_session_info.sum) — SUM 전용 스텝 배열 선택. */
 	if (lk_unlk->session.sum)
-		/* [한국어] 유저가 이 range를 SUM으로 설정했다고 알려온
-		 * 경우(opal_session_info.sum) — SUM 전용 스텝 배열 선택. */
 		return execute_steps(dev, unlock_sum_steps,
 				     ARRAY_SIZE(unlock_sum_steps));
 		/* [한국어] Discovery0 + 3스텝(SUM 인증 → SUM Set → 종료)
@@ -11062,8 +11102,8 @@ static int __opal_set_mbr_done(struct opal_dev *dev, struct opal_key *key)
 		/* [한국어] 3단계 — 세션 종료. */
 	};
 
-	return execute_steps(dev, mbrdone_step, ARRAY_SIZE(mbrdone_step));
 	/* [한국어] Discovery0 + 3스텝 실행 결과를 그대로 반환. */
+	return execute_steps(dev, mbrdone_step, ARRAY_SIZE(mbrdone_step));
 }
 
 /*
@@ -11357,14 +11397,14 @@ static int opal_take_ownership(struct opal_dev *dev, struct opal_key *opal)
 		{ end_opal_session, }
 		/* [한국어] 6단계 — 세션을 정상 종료. */
 	};
-	int ret;
 	/* [한국어] 각 하위 호출(opal_get_key/execute_steps)의 반환값을 담아
 	 * 최종 결과로 쓰이는 변수. */
+	int ret;
 
+	/* [한국어] 드라이버가 아직 init_opal_dev()로 opal_dev를
+	 * 만들지 않았거나 잘못 넘긴 경우 — 이 함수의 나머지 로직은
+	 * dev의 필드를 그대로 역참조하므로 반드시 먼저 검사해야 한다. */
 	if (!dev)
-		/* [한국어] 드라이버가 아직 init_opal_dev()로 opal_dev를
-		 * 만들지 않았거나 잘못 넘긴 경우 — 이 함수의 나머지 로직은
-		 * dev의 필드를 그대로 역참조하므로 반드시 먼저 검사해야 한다. */
 		return -ENODEV;
 		/* [한국어] "이 디바이스에는 대응하는 OPAL 컨텍스트가 없다"는
 		 * 뜻의 errno. */
@@ -11375,17 +11415,17 @@ static int opal_take_ownership(struct opal_dev *dev, struct opal_key *opal)
 	if (ret)
 		/* [한국어] PIN 정규화 실패 — 세션을 열 필요조차 없다. */
 		return ret;
-	mutex_lock(&dev->dev_lock);
 	/* [한국어] 이 opal_dev의 세션 상태를 다른 동시 ioctl 호출로부터 보호 —
 	 * 소유권 취득처럼 드라이브 전체의 인증 기반을 바꾸는 연산은 특히
 	 * 다른 절차와 겹치면 안 된다. */
-	setup_opal_dev(dev);
+	mutex_lock(&dev->dev_lock);
 	/* [한국어] tsn/hsn/prev_data를 초기 상태로 리셋. */
-	ret = execute_steps(dev, owner_steps, ARRAY_SIZE(owner_steps));
+	setup_opal_dev(dev);
 	/* [한국어] Discovery0 + 6단계(Anybody 세션 → MSID 조회 → 종료 → SID
 	 * 세션 → PIN 교체 → 종료)를 순차 실행. */
-	mutex_unlock(&dev->dev_lock);
+	ret = execute_steps(dev, owner_steps, ARRAY_SIZE(owner_steps));
 	/* [한국어] 절차 완료 후 락 해제. */
+	mutex_unlock(&dev->dev_lock);
 
 	return ret;
 	/* [한국어] execute_steps()의 결과를 그대로 호출자에게 전달 — 0이면
@@ -11459,32 +11499,32 @@ static int opal_activate_lsp(struct opal_dev *dev,
 		{ end_opal_session, }
 		/* [한국어] 4단계 — 세션 종료. */
 	};
-	int ret;
 	/* [한국어] 각 하위 호출의 반환값을 담아 최종 결과로 쓰이는 변수. */
+	int ret;
 
+	/* [한국어] SUM으로 활성화하겠다면서 range 개수가 0이거나
+	 * (지정한 range가 하나도 없음) OPAL_MAX_LRS(9)를 초과하는
+	 * (activate_lsp()가 순회할 lr[] 배열 상한을 넘는) 잘못된
+	 * 요청 — 드라이브에 보내기 전에 커널에서 조기 검증. */
 	if (opal_lr_act->sum &&
 	    (!opal_lr_act->num_lrs || opal_lr_act->num_lrs > OPAL_MAX_LRS))
-		/* [한국어] SUM으로 활성화하겠다면서 range 개수가 0이거나
-		 * (지정한 range가 하나도 없음) OPAL_MAX_LRS(9)를 초과하는
-		 * (activate_lsp()가 순회할 lr[] 배열 상한을 넘는) 잘못된
-		 * 요청 — 드라이브에 보내기 전에 커널에서 조기 검증. */
 		return -EINVAL;
 
-	ret = opal_get_key(dev, &opal_lr_act->key);
 	/* [한국어] SID PIN을 실제로 사용 가능한 바이트열로 정규화. */
+	ret = opal_get_key(dev, &opal_lr_act->key);
+	/* [한국어] 정규화 실패 — 세션을 열 필요조차 없다. */
 	if (ret)
-		/* [한국어] 정규화 실패 — 세션을 열 필요조차 없다. */
 		return ret;
-	mutex_lock(&dev->dev_lock);
 	/* [한국어] 이 opal_dev의 세션 상태를 다른 동시 ioctl 호출로부터
 	 * 보호. */
-	setup_opal_dev(dev);
+	mutex_lock(&dev->dev_lock);
 	/* [한국어] tsn/hsn/prev_data를 초기 상태로 리셋. */
-	ret = execute_steps(dev, active_steps, ARRAY_SIZE(active_steps));
+	setup_opal_dev(dev);
 	/* [한국어] Discovery0 + 4단계(SID 세션 → lifecycle 확인 → Activate →
 	 * 종료)를 순차 실행. */
-	mutex_unlock(&dev->dev_lock);
+	ret = execute_steps(dev, active_steps, ARRAY_SIZE(active_steps));
 	/* [한국어] 절차 완료 후 락 해제. */
+	mutex_unlock(&dev->dev_lock);
 
 	return ret;
 	/* [한국어] execute_steps()의 결과를 그대로 호출자에게 전달 — 0이면
@@ -11556,8 +11596,8 @@ static int opal_reactivate_lsp(struct opal_dev *dev,
 		 * 스스로 끊으므로 이 배열에는 end_opal_session 스텝을 넣지
 		 * 않는다는 설명. */
 	};
-	int ret;
 	/* [한국어] 각 하위 호출의 반환값을 담아 최종 결과로 쓰이는 변수. */
+	int ret;
 
 	/* use either 'entire_table' parameter or set of locking ranges */
 	/* [한국어] 원본 영어 주석 — entire_table과 개별 range 목록(num_lrs)은
@@ -11569,21 +11609,21 @@ static int opal_reactivate_lsp(struct opal_dev *dev,
 		 * 전에 커널에서 조기 검증. */
 		return -EINVAL;
 
-	ret = opal_get_key(dev, &opal_lr_react->key);
 	/* [한국어] Admin1 PIN을 실제로 사용 가능한 바이트열로 정규화. */
+	ret = opal_get_key(dev, &opal_lr_react->key);
+	/* [한국어] 정규화 실패 — 세션을 열 필요조차 없다. */
 	if (ret)
-		/* [한국어] 정규화 실패 — 세션을 열 필요조차 없다. */
 		return ret;
-	mutex_lock(&dev->dev_lock);
 	/* [한국어] 이 opal_dev의 세션 상태를 다른 동시 ioctl 호출로부터
 	 * 보호. */
-	setup_opal_dev(dev);
+	mutex_lock(&dev->dev_lock);
 	/* [한국어] tsn/hsn/prev_data를 초기 상태로 리셋. */
-	ret = execute_steps(dev, active_steps, ARRAY_SIZE(active_steps));
+	setup_opal_dev(dev);
 	/* [한국어] Discovery0 + 2단계(Admin1 세션 → Reactivate)를 순차
 	 * 실행. */
-	mutex_unlock(&dev->dev_lock);
+	ret = execute_steps(dev, active_steps, ARRAY_SIZE(active_steps));
 	/* [한국어] 절차 완료 후 락 해제. */
+	mutex_unlock(&dev->dev_lock);
 
 	return ret;
 	/* [한국어] execute_steps()의 결과를 그대로 호출자에게 전달. */
@@ -11668,22 +11708,22 @@ static int opal_setup_locking_range(struct opal_dev *dev,
 		{ end_opal_session, }
 		/* [한국어] 3단계 — 세션 종료. */
 	};
-	int ret;
 	/* [한국어] 각 하위 호출의 반환값을 담아 최종 결과로 쓰이는 변수. */
+	int ret;
 
-	ret = opal_get_key(dev, &opal_lrs->session.opal_key);
 	/* [한국어] PIN을 실제로 사용 가능한 바이트열로 정규화. */
+	ret = opal_get_key(dev, &opal_lrs->session.opal_key);
+	/* [한국어] 정규화 실패 — 세션을 열 필요조차 없다. */
 	if (ret)
-		/* [한국어] 정규화 실패 — 세션을 열 필요조차 없다. */
 		return ret;
-	mutex_lock(&dev->dev_lock);
 	/* [한국어] 이 opal_dev의 세션 상태를 다른 동시 ioctl 호출로부터
 	 * 보호. */
-	setup_opal_dev(dev);
+	mutex_lock(&dev->dev_lock);
 	/* [한국어] tsn/hsn/prev_data를 초기 상태로 리셋. */
+	setup_opal_dev(dev);
+	/* [한국어] 대상이 Global Range(lr==0) — 위치/크기 Set이
+	 * 불필요한 짧은 경로. */
 	if (opal_lrs->session.opal_key.lr == 0)
-		/* [한국어] 대상이 Global Range(lr==0) — 위치/크기 Set이
-		 * 불필요한 짧은 경로. */
 		ret = execute_steps(dev, lr_global_steps, ARRAY_SIZE(lr_global_steps));
 		/* [한국어] Discovery0 + 3단계(세션 → Enable Set → 종료) 실행. */
 	else
@@ -11754,8 +11794,8 @@ static int opal_setup_locking_range_start_length(struct opal_dev *dev,
 		{ end_opal_session, }
 		/* [한국어] 3단계 — 세션 종료. */
 	};
-	int ret;
 	/* [한국어] 각 하위 호출의 반환값을 담아 최종 결과로 쓰이는 변수. */
+	int ret;
 
 	/* we can not set global locking range offset or length */
 	/* [한국어] 원본 영어 주석 — Global Range의 오프셋/길이는 Set 대상이
@@ -11765,21 +11805,21 @@ static int opal_setup_locking_range_start_length(struct opal_dev *dev,
 		 * 고정 범위이므로 이 ioctl의 대상이 될 수 없다. */
 		return -EINVAL;
 
-	ret = opal_get_key(dev, &opal_lrs->session.opal_key);
 	/* [한국어] PIN을 실제로 사용 가능한 바이트열로 정규화. */
+	ret = opal_get_key(dev, &opal_lrs->session.opal_key);
+	/* [한국어] 정규화 실패 — 세션을 열 필요조차 없다. */
 	if (ret)
-		/* [한국어] 정규화 실패 — 세션을 열 필요조차 없다. */
 		return ret;
-	mutex_lock(&dev->dev_lock);
 	/* [한국어] 이 opal_dev의 세션 상태를 다른 동시 ioctl 호출로부터
 	 * 보호. */
-	setup_opal_dev(dev);
+	mutex_lock(&dev->dev_lock);
 	/* [한국어] tsn/hsn/prev_data를 초기 상태로 리셋. */
-	ret = execute_steps(dev, lr_steps, ARRAY_SIZE(lr_steps));
+	setup_opal_dev(dev);
 	/* [한국어] Discovery0 + 3단계(세션 → 위치/크기 Set → 종료)를 순차
 	 * 실행. */
-	mutex_unlock(&dev->dev_lock);
+	ret = execute_steps(dev, lr_steps, ARRAY_SIZE(lr_steps));
 	/* [한국어] 절차 완료 후 락 해제. */
+	mutex_unlock(&dev->dev_lock);
 
 	return ret;
 	/* [한국어] execute_steps()의 결과를 그대로 호출자에게 전달. */
@@ -11838,24 +11878,24 @@ static int opal_enable_disable_range(struct opal_dev *dev,
 		{ end_opal_session, }
 		/* [한국어] 3단계 — 세션 종료. */
 	};
-	int ret;
 	/* [한국어] 각 하위 호출의 반환값을 담아 최종 결과로 쓰이는 변수. */
+	int ret;
 
-	ret = opal_get_key(dev, &opal_lrs->session.opal_key);
 	/* [한국어] PIN을 실제로 사용 가능한 바이트열로 정규화. */
+	ret = opal_get_key(dev, &opal_lrs->session.opal_key);
+	/* [한국어] 정규화 실패 — 세션을 열 필요조차 없다. */
 	if (ret)
-		/* [한국어] 정규화 실패 — 세션을 열 필요조차 없다. */
 		return ret;
-	mutex_lock(&dev->dev_lock);
 	/* [한국어] 이 opal_dev의 세션 상태를 다른 동시 ioctl 호출로부터
 	 * 보호. */
-	setup_opal_dev(dev);
+	mutex_lock(&dev->dev_lock);
 	/* [한국어] tsn/hsn/prev_data를 초기 상태로 리셋. */
-	ret = execute_steps(dev, lr_steps, ARRAY_SIZE(lr_steps));
+	setup_opal_dev(dev);
 	/* [한국어] Discovery0 + 3단계(세션 → Enable Set → 종료)를 순차
 	 * 실행. */
-	mutex_unlock(&dev->dev_lock);
+	ret = execute_steps(dev, lr_steps, ARRAY_SIZE(lr_steps));
 	/* [한국어] 절차 완료 후 락 해제. */
+	mutex_unlock(&dev->dev_lock);
 
 	return ret;
 	/* [한국어] execute_steps()의 결과를 그대로 호출자에게 전달. */
@@ -11936,21 +11976,21 @@ static int opal_locking_range_status(struct opal_dev *dev,
 		{ end_opal_session, }
 		/* [한국어] 3단계 — 세션 종료. */
 	};
-	int ret;
 	/* [한국어] execute_steps()의 반환값을 담아 이후 copy_to_user() 성공
 	 * 여부와 함께 최종 결과를 결정하는 변수. */
+	int ret;
 
-	mutex_lock(&dev->dev_lock);
 	/* [한국어] 이 opal_dev의 세션 상태를 다른 동시 ioctl 호출로부터
 	 * 보호. */
-	setup_opal_dev(dev);
+	mutex_lock(&dev->dev_lock);
 	/* [한국어] tsn/hsn/prev_data를 초기 상태로 리셋. */
-	ret = execute_steps(dev, lr_steps, ARRAY_SIZE(lr_steps));
+	setup_opal_dev(dev);
 	/* [한국어] Discovery0 + 3단계(세션 → 상태 조회 → 종료)를 순차
 	 * 실행 — 성공하면 opal_lrst가 최신 드라이브 상태로 채워진다. */
-	mutex_unlock(&dev->dev_lock);
+	ret = execute_steps(dev, lr_steps, ARRAY_SIZE(lr_steps));
 	/* [한국어] 절차 완료 후 락 해제 — 아래 copy_to_user()는 락 밖에서
 	 * 수행. */
+	mutex_unlock(&dev->dev_lock);
 
 	/* skip session info when copying back to uspace */
 	/* [한국어] 원본 영어 주석 — session 필드는 유저가 이미 아는 요청
@@ -12057,33 +12097,33 @@ static int opal_set_new_pw(struct opal_dev *dev, struct opal_new_pw *opal_pw)
 		{ end_opal_session, }
 		/* [한국어] 3단계 — EndOfSession 전송으로 세션 종료. */
 	};
-	int ret;
 	/* [한국어] execute_steps() 결과, 이어서 sed_write_key()/
 	 * update_sed_opal_key()의 반환값으로 재사용되는 공용 변수. */
+	int ret;
 
+	/* [한국어] 인증 주체(session.who)와 변경 대상(new_user_pw.who)
+	 * 둘 다 enum opal_user의 최댓값 OPAL_USER9(9) 이하인지 검사 —
+	 * 이 범위를 벗어나면 이후 set_new_pw()의 C_PIN UID 계산이
+	 * 정의되지 않은 값을 만들어낼 수 있으므로 여기서 조기 거부. */
 	if (opal_pw->session.who > OPAL_USER9  ||
 	    opal_pw->new_user_pw.who > OPAL_USER9)
-		/* [한국어] 인증 주체(session.who)와 변경 대상(new_user_pw.who)
-		 * 둘 다 enum opal_user의 최댓값 OPAL_USER9(9) 이하인지 검사 —
-		 * 이 범위를 벗어나면 이후 set_new_pw()의 C_PIN UID 계산이
-		 * 정의되지 않은 값을 만들어낼 수 있으므로 여기서 조기 거부. */
 		return -EINVAL;
 
-	mutex_lock(&dev->dev_lock);
 	/* [한국어] 이 드라이브의 명령 시퀀스를 다른 동시 ioctl로부터 보호. */
-	setup_opal_dev(dev);
+	mutex_lock(&dev->dev_lock);
 	/* [한국어] tsn/hsn/prev_data를 "세션 없음" 초기 상태로 리셋. */
-	ret = execute_steps(dev, pw_steps, ARRAY_SIZE(pw_steps));
+	setup_opal_dev(dev);
 	/* [한국어] Discovery0 + 위 3스텝을 순차 실행 — 성공하면 드라이브 상의
 	 * 실제 PIN이 이미 바뀐 상태. */
-	mutex_unlock(&dev->dev_lock);
+	ret = execute_steps(dev, pw_steps, ARRAY_SIZE(pw_steps));
 	/* [한국어] 절차 완료 후 즉시 락 해제 — 아래 키 저장소/keyring 갱신은
 	 * dev_lock 없이 수행. */
+	mutex_unlock(&dev->dev_lock);
 
+	/* [한국어] PIN 변경 자체가 실패했으면(인증 실패, 통신 오류 등)
+	 * 아직 바뀌지 않은 값을 캐시에 반영할 이유가 없으므로 그
+	 * errno를 즉시 반환. */
 	if (ret)
-		/* [한국어] PIN 변경 자체가 실패했으면(인증 실패, 통신 오류 등)
-		 * 아직 바뀌지 않은 값을 캐시에 반영할 이유가 없으므로 그
-		 * errno를 즉시 반환. */
 		return ret;
 
 	/* update keyring and key store with new password */
@@ -12196,21 +12236,21 @@ static int opal_set_new_sid_pw(struct opal_dev *dev, struct opal_new_pw *opal_pw
 		/* [한국어] 3단계 — EndOfSession 전송으로 세션 종료. */
 	};
 
+	/* [한국어] 이 ioctl 경로는 dev 자체의 NULL 여부를 직접 검사한다
+	 * (opal_set_new_pw()에는 이 검사가 없음 — sed_ioctl()이 이미
+	 * dev NULL 체크를 하므로 사실상 도달 불가능한 방어적 코드이나,
+	 * 원본 그대로 유지). */
 	if (!dev)
-		/* [한국어] 이 ioctl 경로는 dev 자체의 NULL 여부를 직접 검사한다
-		 * (opal_set_new_pw()에는 이 검사가 없음 — sed_ioctl()이 이미
-		 * dev NULL 체크를 하므로 사실상 도달 불가능한 방어적 코드이나,
-		 * 원본 그대로 유지). */
 		return -ENODEV;
 
-	mutex_lock(&dev->dev_lock);
 	/* [한국어] 이 드라이브의 명령 시퀀스를 다른 동시 ioctl로부터 보호. */
-	setup_opal_dev(dev);
+	mutex_lock(&dev->dev_lock);
 	/* [한국어] tsn/hsn/prev_data를 "세션 없음" 초기 상태로 리셋. */
-	ret = execute_steps(dev, pw_steps, ARRAY_SIZE(pw_steps));
+	setup_opal_dev(dev);
 	/* [한국어] Discovery0 + 위 3스텝을 순차 실행. */
-	mutex_unlock(&dev->dev_lock);
+	ret = execute_steps(dev, pw_steps, ARRAY_SIZE(pw_steps));
 	/* [한국어] 절차 완료 후 락 해제. */
+	mutex_unlock(&dev->dev_lock);
 
 	return ret;
 	/* [한국어] execute_steps()의 결과를 그대로 호출자에게 전달 — PIN 변경
@@ -12286,9 +12326,9 @@ static int opal_activate_user(struct opal_dev *dev,
 		{ end_opal_session, }
 		/* [한국어] 3단계 — EndOfSession 전송으로 세션 종료. */
 	};
-	int ret;
 	/* [한국어] opal_get_key()/execute_steps() 결과를 담아 그대로 돌려줄
 	 * 공용 변수. */
+	int ret;
 
 	/* We can't activate Admin1 it's active as manufactured */
 	/* [한국어] 원본 영어 주석 — Admin1은 드라이브 제조 시점부터 이미
@@ -12313,15 +12353,15 @@ static int opal_activate_user(struct opal_dev *dev,
 		/* [한국어] PIN 정규화 실패(알 수 없는 key_type, keyring에 항목
 		 * 없음 등) — 세션을 열 수 없으므로 즉시 반환. */
 		return ret;
-	mutex_lock(&dev->dev_lock);
 	/* [한국어] 이 드라이브의 명령 시퀀스를 다른 동시 ioctl로부터 보호. */
-	setup_opal_dev(dev);
+	mutex_lock(&dev->dev_lock);
 	/* [한국어] tsn/hsn/prev_data를 "세션 없음" 초기 상태로 리셋. */
-	ret = execute_steps(dev, act_steps, ARRAY_SIZE(act_steps));
+	setup_opal_dev(dev);
 	/* [한국어] Discovery0 + 위 3스텝을 순차 실행 — 성공하면 대상 User가
 	 * 이제 자신의 PIN으로 인증 가능해진다. */
-	mutex_unlock(&dev->dev_lock);
+	ret = execute_steps(dev, act_steps, ARRAY_SIZE(act_steps));
 	/* [한국어] 절차 완료 후 락 해제. */
+	mutex_unlock(&dev->dev_lock);
 
 	return ret;
 	/* [한국어] execute_steps()의 결과를 그대로 호출자에게 전달. */
@@ -12381,8 +12421,9 @@ static int opal_activate_user(struct opal_dev *dev,
  * suspend->unlk.session.opal_key는 opal_save() 저장 시점의 값을 아무
  * 변환 없이 그대로 쓰므로, 이 자동 재-unlock이 실제로 성공하려면 저장
  * 당시 opal_key.key_type이 이미 OPAL_INCLUDED(keyring 참조가 아닌 실제
- * PIN 바이트)였어야 한다는 암묵적 전제가 있다(추정: OPAL_KEYRING 타입
- * 그대로 저장됐다면 이 경로에서는 keyring이 해석되지 않는다), (7)
+ * PIN 바이트)였어야 한다는 암묵적 전제가 있다 — 이 경로에는 keyring을
+ * 조회하는 코드가 없으므로 OPAL_KEYRING 타입으로 저장된 키는 해석되지
+ * 않는다, (7)
  * 실패하면(ret!=0) 어떤 range/모드였는지 pr_debug로 남기고 was_failure를
  * true로, (8) dev->flags에 OPAL_FL_MBR_ENABLED가 서 있으면(Discovery가
  * 이 드라이브의 Shadow MBR 기능이 활성 상태임을 이미 알려준 경우)
@@ -12431,24 +12472,24 @@ bool opal_unlock_from_suspend(struct opal_dev *dev)
 		 * 없으므로 조기 반환. */
 		return false;
 
+	/* [한국어] Discovery 결과 이 드라이브가 OPAL을 지원하지 않는
+	 * 것으로 판명된 경우 — unlk_lst가 애초에 채워질 수 없었으므로
+	 * 순회할 필요가 없다. */
 	if (!(dev->flags & OPAL_FL_SUPPORTED))
-		/* [한국어] Discovery 결과 이 드라이브가 OPAL을 지원하지 않는
-		 * 것으로 판명된 경우 — unlk_lst가 애초에 채워질 수 없었으므로
-		 * 순회할 필요가 없다. */
 		return false;
 
-	mutex_lock(&dev->dev_lock);
 	/* [한국어] resume 경로에서의 재-unlock 시퀀스 전체를 다른 동시 ioctl
 	 * (예: 우연히 겹치는 IOC_OPAL_SAVE/LOCK_UNLOCK)로부터 보호. */
-	setup_opal_dev(dev);
+	mutex_lock(&dev->dev_lock);
 	/* [한국어] tsn/hsn/prev_data를 "세션 없음" 초기 상태로 리셋 — 첫
 	 * range 시도를 위한 준비. */
+	setup_opal_dev(dev);
 
+	/* [한국어] add_suspend_info()가 upsert해 둔 struct
+	 * opal_suspend_data 노드들을 리스트 순서대로(등록/갱신된
+	 * 순서) 순회 — 각 노드가 서로 다른 Locking Range 하나씩을
+	 * 담당한다. */
 	list_for_each_entry(suspend, &dev->unlk_lst, node) {
-		/* [한국어] add_suspend_info()가 upsert해 둔 struct
-		 * opal_suspend_data 노드들을 리스트 순서대로(등록/갱신된
-		 * 순서) 순회 — 각 노드가 서로 다른 Locking Range 하나씩을
-		 * 담당한다. */
 		dev->tsn = 0;
 		/* [한국어] 이번 range 시도 전 TPer 세션 번호를 다시 "세션
 		 * 없음"으로 강제 리셋 — 직전 range의 세션 종료가 정상적으로
@@ -12494,14 +12535,14 @@ bool opal_unlock_from_suspend(struct opal_dev *dev)
 				pr_debug("Failed to set MBR Done in S3 resume\n");
 		}
 	}
-	mutex_unlock(&dev->dev_lock);
 	/* [한국어] 모든 range 순회가 끝난 뒤 락 해제. */
+	mutex_unlock(&dev->dev_lock);
 
-	return was_failure;
 	/* [한국어] 순회 중 __opal_lock_unlock() 실패가 하나라도 있었는지
 	 * 여부를 호출자(PM resume 콜백)에게 알린다 — true면 호출자가 로그를
 	 * 남기거나 사용자에게 알릴 수 있으나, 이 함수 자체는 이를 다시
 	 * 재시도하지 않는다. */
+	return was_failure;
 }
 EXPORT_SYMBOL(opal_unlock_from_suspend);
 /* [한국어] 이 심볼을 커널 심볼 테이블에 등록해, sed-opal이 별도 모듈로
@@ -12563,15 +12604,15 @@ static int opal_read_table(struct opal_dev *dev,
 		/* [한국어] 3단계 — EndOfSession 전송으로 세션 종료. */
 	};
 
+	/* [한국어] 유저가 읽을 바이트를 0으로 요청 — 실제로 읽을 것이
+	 * 없으므로 세션 개설 자체가 낭비. */
 	if (!rw_tbl->size)
-		/* [한국어] 유저가 읽을 바이트를 0으로 요청 — 실제로 읽을 것이
-		 * 없으므로 세션 개설 자체가 낭비. */
 		return 0;
 
-	return execute_steps(dev, read_table_steps,
-			     ARRAY_SIZE(read_table_steps));
 	/* [한국어] Discovery0 + 위 3스텝을 순차 실행한 결과를 그대로 호출자
 	 * (opal_generic_read_write_table())에게 전달. */
+	return execute_steps(dev, read_table_steps,
+			     ARRAY_SIZE(read_table_steps));
 }
 
 /*
@@ -12625,15 +12666,15 @@ static int opal_write_table(struct opal_dev *dev,
 		/* [한국어] 3단계 — EndOfSession 전송으로 세션 종료. */
 	};
 
+	/* [한국어] 유저가 기록할 바이트를 0으로 요청 — 실제로 쓸 것이
+	 * 없으므로 세션 개설 자체가 낭비. */
 	if (!rw_tbl->size)
-		/* [한국어] 유저가 기록할 바이트를 0으로 요청 — 실제로 쓸 것이
-		 * 없으므로 세션 개설 자체가 낭비. */
 		return 0;
 
-	return execute_steps(dev, write_table_steps,
-			     ARRAY_SIZE(write_table_steps));
 	/* [한국어] Discovery0 + 위 3스텝을 순차 실행한 결과를 그대로 호출자
 	 * (opal_generic_read_write_table())에게 전달. */
+	return execute_steps(dev, write_table_steps,
+			     ARRAY_SIZE(write_table_steps));
 }
 
 /*
@@ -12704,27 +12745,32 @@ static int opal_generic_read_write_table(struct opal_dev *dev,
 	if (ret)
 		/* [한국어] PIN 정규화 실패 — 세션을 열 수 없으므로 즉시 반환. */
 		return ret;
-	mutex_lock(&dev->dev_lock);
 	/* [한국어] 이 드라이브의 명령 시퀀스를 다른 동시 ioctl로부터 보호. */
-	setup_opal_dev(dev);
+	mutex_lock(&dev->dev_lock);
 	/* [한국어] tsn/hsn/prev_data를 "세션 없음" 초기 상태로 리셋. */
+	setup_opal_dev(dev);
 
-	bit_set = fls64(rw_tbl->flags) - 1;
 	/* [한국어] fls64("find last set bit", 64비트 버전)는 가장 높은 자리의
 	 * 1비트 위치를 1-based로 반환(0이면 입력이 0). 여기서 1을 빼 0-based
 	 * 인덱스로 변환 — OPAL_TABLE_READ=1(0b01)이면 0, OPAL_TABLE_WRITE=2
 	 * (0b10)이면 1이 되어 각각 enum opal_table_ops의 OPAL_READ_TABLE(0)/
 	 * OPAL_WRITE_TABLE(1)과 정확히 일치한다. flags==0이면 -1이 되어 아래
 	 * 두 case 어디에도 속하지 않는다. */
+	bit_set = fls64(rw_tbl->flags) - 1;
+	/* [한국어] 위에서 구한 0-based 비트 인덱스로 방향을 분기한다. flags에
+	 * 두 비트가 동시에 서 있으면 fls64()가 상위 비트만 보므로 쓰기가
+	 * 우선하고, flags가 0이면 bit_set이 -1이 되어 default로 떨어진다. */
 	switch (bit_set) {
+	/* [한국어] 유저가 OPAL_TABLE_READ 비트를 세팅한 경우 —
+	 * "읽기" 방향 처리로 분기. */
 	case OPAL_READ_TABLE:
-		/* [한국어] 유저가 OPAL_TABLE_READ 비트를 세팅한 경우 —
-		 * "읽기" 방향 처리로 분기. */
+		/* [한국어] 세션 개설부터 청크 반복 읽기, copy_to_user까지
+		 * opal_read_table()이 모두 수행하고 결과 errno만 돌려준다. */
 		ret = opal_read_table(dev, rw_tbl);
 		break;
+	/* [한국어] 유저가 OPAL_TABLE_WRITE 비트를 세팅한 경우 —
+	 * "쓰기" 방향 처리로 분기. */
 	case OPAL_WRITE_TABLE:
-		/* [한국어] 유저가 OPAL_TABLE_WRITE 비트를 세팅한 경우 —
-		 * "쓰기" 방향 처리로 분기. */
 		ret = opal_write_table(dev, rw_tbl);
 		break;
 	default:
@@ -12739,8 +12785,8 @@ static int opal_generic_read_write_table(struct opal_dev *dev,
 		break;
 	}
 
-	mutex_unlock(&dev->dev_lock);
 	/* [한국어] 어느 분기로 갔든 절차가 끝났으므로 락 해제. */
+	mutex_unlock(&dev->dev_lock);
 
 	return ret;
 	/* [한국어] 선택된 분기의 결과(또는 -EINVAL)를 그대로 호출자에게
@@ -13081,9 +13127,9 @@ static int get_sum_ranges(struct opal_dev *dev, void *data)
 		 * 그 에러를 전파. */
 		return PTR_ERR(tok);
 
+	/* [한국어] 이 자리가 StartName 구조 토큰이 아니면 CellBlock 결과의
+	 * 형식이 예상과 어긋난 것 — 이후 파싱을 신뢰할 수 없다. */
 	if (!response_token_matches(tok, OPAL_STARTNAME)) {
-		/* [한국어] 이 자리가 StartName 구조 토큰이 아니면 CellBlock 결과의
-		 * 형식이 예상과 어긋난 것 — 이후 파싱을 신뢰할 수 없다. */
 		pr_debug("Unexpected response token type %d.\n", tok_n);
 		/* [한국어] 어느 인덱스에서 어긋났는지 로그로 남긴다. */
 		return OPAL_INVAL_PARAM;
@@ -13101,13 +13147,13 @@ static int get_sum_ranges(struct opal_dev *dev, void *data)
 		/* [한국어] 어긋난 인덱스와 기대했던 컬럼 번호를 로그로 남긴다. */
 		return OPAL_INVAL_PARAM;
 	}
-	tok_n++;
 	/* [한국어] 컬럼 번호 확인 후 다음 자리(실제 값 — 목록 또는 단일 UID)로
 	 * 전진. */
+	tok_n++;
 
-	tok = response_get_token(&dev->parsed, tok_n);
 	/* [한국어] SetList 값 자리의 토큰을 가져온다 — 아래에서 이 토큰이
 	 * STARTLIST인지 아닌지로 두 형태를 구분한다. */
+	tok = response_get_token(&dev->parsed, tok_n);
 	if (IS_ERR(tok))
 		return PTR_ERR(tok);
 
@@ -13140,10 +13186,10 @@ static int get_sum_ranges(struct opal_dev *dev, void *data)
 		if (IS_ERR(tok))
 			return PTR_ERR(tok);
 
+		/* [한국어] 현재 토큰이 ENDLIST가 아닌 동안(즉 아직 목록
+		 * 안의 UID 원소를 가리키는 동안) 반복 — ENDLIST를 만나면
+		 * 목록 끝. */
 		while (!response_token_matches(tok, OPAL_ENDLIST)) {
-			/* [한국어] 현재 토큰이 ENDLIST가 아닌 동안(즉 아직 목록
-			 * 안의 UID 원소를 가리키는 동안) 반복 — ENDLIST를 만나면
-			 * 목록 끝. */
 			lr_uid_len = response_get_string(&dev->parsed, tok_n, &lr_uid);
 			/* [한국어] 이 자리의 토큰을 bytestring으로 해석해 UID
 			 * payload 시작 주소(lr_uid)와 길이(lr_uid_len)를 꺼낸다. */
@@ -13155,10 +13201,10 @@ static int get_sum_ranges(struct opal_dev *dev, void *data)
 				return OPAL_INVAL_PARAM;
 			}
 
+			/* [한국어] 이 UID가 Global Locking Range UID와
+			 * 다르면(memcmp 결과 0이 아니면) 개별(비전역) range를
+			 * 가리키는 UID — 아래에서 그 range 번호를 추출한다. */
 			if (memcmp(lr_uid, opaluid[OPAL_LOCKINGRANGE_GLOBAL], OPAL_UID_LENGTH)) {
-				/* [한국어] 이 UID가 Global Locking Range UID와
-				 * 다르면(memcmp 결과 0이 아니면) 개별(비전역) range를
-				 * 가리키는 UID — 아래에서 그 range 번호를 추출한다. */
 				if (lr_uid[5] != LOCKING_RANGE_NON_GLOBAL) {
 					/* [한국어] 비전역 Locking Range UID는 관례상
 					 * 5번째 바이트(0-indexed)가 항상
@@ -13168,23 +13214,23 @@ static int get_sum_ranges(struct opal_dev *dev, void *data)
 						 lr_uid[5]);
 					return OPAL_INVAL_PARAM;
 				}
-				sranges->lr[sranges->num_lrs++] = lr_uid[7];
 				/* [한국어] UID의 마지막 바이트(7번째)가 곧 이
 				 * 드라이브 안에서의 range 번호(1..OPAL_MAX_LRS-1)
 				 * — sranges->lr[] 배열에 추가하고 num_lrs를
 				 * 후위 증가로 함께 늘린다. */
+				sranges->lr[sranges->num_lrs++] = lr_uid[7];
+			/* [한국어] Global Range UID와 정확히 일치하면
+			 * (전역 range 자체가 SUM 목록에 포함된 드문
+			 * 경우) range 번호를 관례상 0으로 기록. */
 			} else
-				/* [한국어] Global Range UID와 정확히 일치하면
-				 * (전역 range 자체가 SUM 목록에 포함된 드문
-				 * 경우) range 번호를 관례상 0으로 기록. */
 				sranges->lr[sranges->num_lrs++] = 0;
 
-			tok_n++;
 			/* [한국어] 이번 UID 처리 완료 — 목록의 다음 원소(또는
 			 * ENDLIST) 자리로 전진. */
-			tok = response_get_token(&dev->parsed, tok_n);
+			tok_n++;
 			/* [한국어] 다음 자리의 토큰을 가져와 while 조건 재평가에
 			 * 사용. */
+			tok = response_get_token(&dev->parsed, tok_n);
 			if (IS_ERR(tok))
 				return PTR_ERR(tok);
 		}
@@ -13204,10 +13250,10 @@ static int get_sum_ranges(struct opal_dev *dev, void *data)
 			return OPAL_INVAL_PARAM;
 		}
 
+		/* [한국어] 이 UID가 OPAL_LOCKING_TABLE UID와 다르면(memcmp
+		 * 결과가 0이 아니면) 원본 주석이 말한 "유일한 대안"이라는
+		 * 전제가 깨진 것 — 알 수 없는 UID이므로 신뢰할 수 없다. */
 		if (memcmp(lr_uid, opaluid[OPAL_LOCKING_TABLE], OPAL_UID_LENGTH)) {
-			/* [한국어] 이 UID가 OPAL_LOCKING_TABLE UID와 다르면(memcmp
-			 * 결과가 0이 아니면) 원본 주석이 말한 "유일한 대안"이라는
-			 * 전제가 깨진 것 — 알 수 없는 UID이므로 신뢰할 수 없다. */
 			pr_debug("Unexpected response UID.\n");
 			return OPAL_INVAL_PARAM;
 		}
@@ -13235,27 +13281,27 @@ static int get_sum_ranges(struct opal_dev *dev, void *data)
 	if (IS_ERR(tok))
 		return PTR_ERR(tok);
 
+	/* [한국어] 이 자리가 EndName이 아니면 이름-값 쌍이 예상한 형식으로
+	 * 닫히지 않은 것. */
 	if (!response_token_matches(tok, OPAL_ENDNAME)) {
-		/* [한국어] 이 자리가 EndName이 아니면 이름-값 쌍이 예상한 형식으로
-		 * 닫히지 않은 것. */
 		pr_debug("Unexpected response token type %d.\n", tok_n);
 		return OPAL_INVAL_PARAM;
 	}
-	tok_n++;
 	/* [한국어] EndName 확인 후 다음 컬럼 그룹(OPAL_SUM_RANGE_POLICY의
 	 * StartName)이 와야 할 자리로 전진. */
+	tok_n++;
 
-	err = response_get_column(&dev->parsed, &tok_n, OPAL_SUM_RANGE_POLICY, &val);
 	/* [한국어] 두 번째 컬럼(OPAL_SUM_RANGE_POLICY)을 (StartName, 컬럼번호,
 	 * 값, EndName) 4토큰 그룹으로 검증하며 읽어 val에 저장 — 성공 시 tok_n도
 	 * 함께 전진(이 함수에서는 더 이상 쓰이지 않지만 관례상 갱신됨). */
+	err = response_get_column(&dev->parsed, &tok_n, OPAL_SUM_RANGE_POLICY, &val);
+	/* [한국어] 형식 불일치 등으로 실패하면 즉시 반환. */
 	if (err)
-		/* [한국어] 형식 불일치 등으로 실패하면 즉시 반환. */
 		return err;
 
-	sranges->range_policy = val ? 1 : 0;
 	/* [한국어] 원시 정수 val(0 또는 그 외 값)을 삼항 연산자로 0/1 boolean에
 	 * 대응시켜 sranges->range_policy에 확정 저장. */
+	sranges->range_policy = val ? 1 : 0;
 
 	return 0;
 	/* [한국어] SetList와 RangePolicy 두 컬럼 모두 성공적으로 파싱되어
@@ -13319,11 +13365,11 @@ static int opal_get_sum_ranges(struct opal_dev *dev, struct opal_sum_ranges *opa
 			       void __user *data)
 {
 	const struct opal_step admin_steps[] = {
-		{ start_admin1LSP_opal_session, &opal_sum_rngs->key },
 		/* [한국어] 1단계 — Locking SP에 Admin1 권한으로 인증 세션을 연다.
 		 * &opal_sum_rngs->key(유저가 IOC_OPAL_GET_SUM_STATUS 인자로 넘긴
 		 * PIN)를 그대로 인자로 전달 — key_len이 0이 아니므로 이 배열이
 		 * 선택된 것이다. */
+		{ start_admin1LSP_opal_session, &opal_sum_rngs->key },
 		{ get_sum_ranges, opal_sum_rngs },
 		/* [한국어] 2단계 — 열린 세션 위에서 LockingInfo 테이블의
 		 * SetList/RangePolicy 컬럼을 읽어 opal_sum_rngs를 채운다. */
@@ -13343,20 +13389,20 @@ static int opal_get_sum_ranges(struct opal_dev *dev, struct opal_sum_ranges *opa
 		{ end_opal_session, }
 		/* [한국어] 3단계 — 세션 정상 종료. */
 	};
-	int ret;
 	/* [한국어] execute_steps()가 돌려주는 스텝 체인 전체의 최종 반환값 —
 	 * 이 함수 자신의 반환값으로도 재사용된다(copy_to_user() 실패 시에만
 	 * -EFAULT로 덮어써짐). */
+	int ret;
 
-	mutex_lock(&dev->dev_lock);
 	/* [한국어] 이 SUM 조회 시퀀스 전체(세션 열기→읽기→닫기)를 같은
 	 * 드라이브에 대한 다른 opal_* ioctl과 직렬화. */
-	setup_opal_dev(dev);
+	mutex_lock(&dev->dev_lock);
 	/* [한국어] hsn/tsn 등 세션 관련 필드를 "세션 없음" 초기 상태로
 	 * 리셋 — 이전 ioctl이 세션을 비정상 종료했을 가능성에 대비. */
+	setup_opal_dev(dev);
+	/* [한국어] 유저가 0바이트보다 긴 PIN을 제공한 경우 — 더 강한
+	 * 인증(Admin1)이 가능하므로 이를 우선 사용. */
 	if (opal_sum_rngs->key.key_len)
-		/* [한국어] 유저가 0바이트보다 긴 PIN을 제공한 경우 — 더 강한
-		 * 인증(Admin1)이 가능하므로 이를 우선 사용. */
 		/* Use Admin1 session (authenticated by PIN) to retrieve LockingInfo columns */
 		ret = execute_steps(dev, admin_steps, ARRAY_SIZE(admin_steps));
 		/* [한국어] admin_steps[] 3단계를 순차 실행 — 실패 시 즉시
@@ -13433,20 +13479,24 @@ static int opal_get_sum_ranges(struct opal_dev *dev, struct opal_sum_ranges *opa
  * 분해)와 request_code(항상 OPAL_STACK_RESET=0x0002)를 채움 — cmd_finalize()가
  * 만드는 일반적인 ComPacket/Packet/SubPacket 3단 헤더가 전혀 아닌, STACK_RESET
  * 전용의 훨씬 단순한 고정 레이아웃, (3) dev->send_recv()로 이 요청을
- * TCG_SECP_02(Opal이 쓰는 Security Protocol)로 전송(is_send=true) — 실패하면
+ * TCG_SECP_02(ComID 관리 요청 전용 Security Protocol — 정상 트래픽의
+ * TCG_SECP_01과 다르다)로 전송(is_send=true) — 실패하면
  * 에러 로그를 남기고 out으로, (4) dev->resp(수신 버퍼)를 0으로 지우고
  * dev->send_recv()를 이번엔 수신 방향(is_send=false)으로 호출해 TPer 응답을
  * 폴링 — 실패하면 역시 out으로, (5) 응답을 struct opal_stack_reset_response로
- * 재해석해 data_length가 정확히 4바이트가 아니면(TPer가 아직 리셋을 끝내지
- * 못해 완전한 응답을 채우지 못한 상태로 추정) -EBUSY, (6) data_length가
+ * 재해석해 data_length가 정확히 4바이트가 아니면 -EBUSY — 4는 뒤이은
+ * response 필드 하나의 크기이므로, 그보다 짧다는 것은 TPer가 결과 코드를
+ * 아직 채우지 못했다는 뜻이고 커널은 이를 "리셋 진행 중"으로 읽는다,
+ * (6) data_length가
  * 정상이면 response 필드(TPer가 돌려주는 실제 결과 코드)를 검사 — 0이 아니면
  * 리셋 자체가 TPer 쪽에서 실패한 것으로 보고 -EIO, (7) out 레이블에서
  * dev_lock을 풀고 ret을 반환.
  * 실행 컨텍스트: 프로세스 컨텍스트(ioctl 시스템 콜) — dev_lock으로 보호되어
  * 같은 드라이브에 대한 다른 opal_* ioctl과 동시에 실행되지 않는다.
  * 호출자: sed_ioctl()의 IOC_OPAL_STACK_RESET case.
- * 호출 대상: dev->send_recv()(구체적 구현은 드라이버별 sec_send_recv 콜백,
- * NVMe라면 Security Send/Receive Admin 명령으로 이어짐 — 추정), cpu_to_be32(),
+ * 호출 대상: dev->send_recv()(구체적 구현은 드라이버별 sec_send_recv 콜백 —
+ * NVMe 드라이버라면 nvme_sec_submit/nvme_sec_recv를 거쳐 Security Send/
+ * Receive Admin 명령이 된다), cpu_to_be32(),
  * be16_to_cpu(), be32_to_cpu().
  * 에러 경로: 두 번의 dev->send_recv() 호출 중 어느 하나라도 실패하면 그
  * errno를 담아 즉시 out으로 점프, 응답 길이/내용 검증 실패는 각각 -EBUSY/
@@ -13492,17 +13542,21 @@ static int opal_stack_reset(struct opal_dev *dev)
 	/* [한국어] 요청 코드를 항상 OPAL_STACK_RESET(0x0002)으로 고정 —
 	 * cpu_to_be32()로 호스트 엔디안을 와이어의 빅엔디안으로 변환. */
 
-	ret = dev->send_recv(dev->data, dev->comid, TCG_SECP_02,  /* stack reset용 보안 프로토콜 */
+	/* [한국어] 조립한 STACK_RESET 요청을 전송(마지막 인자 true = 송신
+	 * 방향). Security Protocol 번호가 여기서만 TCG_SECP_02(=2)인 점이
+	 * 핵심이다 — 정상 ComPacket 트래픽은 전부 TCG_SECP_01을 쓰고 이
+	 * 함수만 프로토콜 2를 쓴다. TCG가 ComID 관리 요청(STACK_RESET 등)을
+	 * 별도 프로토콜 번호로 분리해 두었기 때문이며, 그래서 이 요청은
+	 * ComPacket/Packet/SubPacket 3단 헤더도 쓰지 않는다.
+	 * SPSP에는 여느 때처럼 dev->comid가 실린다.
+	 * IO_BUFFER_LENGTH 전체를 넘기지만 실제 유효 바이트는
+	 * struct opal_stack_reset 크기뿐이며 나머지는 위 memset()이 0으로
+	 * 채워 두었다. */
+	ret = dev->send_recv(dev->data, dev->comid, TCG_SECP_02,
 			     dev->cmd, IO_BUFFER_LENGTH, true);
-	/* [한국어] 조립한 STACK_RESET 요청을 TCG_SECP_02(=2, TCG Storage/Opal이
-	 * 쓰는 Security Protocol) 값과 dev->comid로 지정한 SPSP(Security
-	 * Protocol Specific)를 실어 전송 — 마지막 인자 true는 "송신
-	 * 방향(is_send)"을 뜻한다. IO_BUFFER_LENGTH 전체를 넘기지만 실제
-	 * 유효 바이트는 struct opal_stack_reset 크기만큼뿐이며 나머지는 위
-	 * memset()으로 0이 채워진 상태다. */
+	/* [한국어] 전송 자체가 실패한 경우(드라이버 콜백이 음수 반환)
+	 * — 요청이 나가지 못했으니 응답을 기다릴 이유가 없다. */
 	if (ret) {
-		/* [한국어] 전송 자체(예: NVMe Security Send Admin 명령)가
-		 * 실패한 경우 — 응답을 기다릴 이유가 없다. */
 		pr_debug("Error sending stack reset: %d\n", ret);
 		/* [한국어] 진단 로그. */
 		goto out;
@@ -13519,21 +13573,21 @@ static int opal_stack_reset(struct opal_dev *dev)
 	 * 인자 false)으로 호출 — TPer가 채워 넣은 STACK_RESET 응답을
 	 * dev->resp에 받아 온다. */
 	if (ret) {
-		/* [한국어] 수신 단계(예: NVMe Security Receive Admin 명령)
-		 * 자체가 실패한 경우. */
+		/* [한국어] 수신 단계가 실패한 경우 — 요청은 나갔지만 결과를
+		 * 확인할 수 없어 리셋 성공 여부가 미확정으로 남는다. */
 		pr_debug("Error receiving stack reset response: %d\n", ret);
 		goto out;
 	}
 
-	resp = (struct opal_stack_reset_response *)dev->resp;
 	/* [한국어] 받아 온 dev->resp를 struct opal_stack_reset_response
 	 * 포인터로 재해석 — 이후 resp->필드 읽기가 곧 이 버퍼의 해당
 	 * 오프셋을 읽는 것과 같다. */
+	resp = (struct opal_stack_reset_response *)dev->resp;
+	/* [한국어] data_length(응답 중 response 필드 뒤에 이어지는
+	 * 유효 데이터 길이)가 정확히 4바이트(response 필드 하나 크기)가
+	 * 아니면, TPer가 리셋 처리를 아직 끝내지 못해 완전한 응답을
+	 * 채우지 못한 것으로 해석한다. */
 	if (be16_to_cpu(resp->data_length) != 4) {
-		/* [한국어] data_length(응답 중 response 필드 뒤에 이어지는
-		 * 유효 데이터 길이)가 정확히 4바이트(response 필드 하나 크기)가
-		 * 아니면, TPer가 리셋 처리를 아직 끝내지 못해 완전한 응답을
-		 * 채우지 못한 것으로 해석한다. */
 		pr_debug("Stack reset pending\n");
 		/* [한국어] 진단 로그 — "아직 진행 중"이라는 상태를 명시. */
 		ret = -EBUSY;
@@ -13541,9 +13595,9 @@ static int opal_stack_reset(struct opal_dev *dev)
 		 * 다시 시도하라"는 의미를 전달. */
 		goto out;
 	}
+	/* [한국어] TPer가 돌려준 실제 리셋 결과 코드가 0(성공)이 아니면
+	 * 리셋 자체가 TPer 내부에서 실패로 처리된 것. */
 	if (be32_to_cpu(resp->response) != 0) {
-		/* [한국어] TPer가 돌려준 실제 리셋 결과 코드가 0(성공)이 아니면
-		 * 리셋 자체가 TPer 내부에서 실패로 처리된 것. */
 		pr_debug("Stack reset failed: %u\n", be32_to_cpu(resp->response));
 		/* [한국어] 실패 코드 값을 그대로 로그에 남겨 원인 추적에
 		 * 활용할 수 있게 한다. */
@@ -13687,12 +13741,12 @@ int sed_ioctl(struct opal_dev *dev, unsigned int cmd, void __user *arg)
 		 * 세팅하지 않음). */
 		return -EOPNOTSUPP;
 
+	/* [한국어] cmd 값 자체에 인코딩된 방향 비트를 검사 —
+	 * _IOW(...)로 정의된 IOC_OPAL_* 매크로(유저→커널 데이터
+	 * 전달이 필요한 대다수 명령)만 이 분기로 들어온다.
+	 * _IOR(...)로 정의된 GET_STATUS/GET_LR_STATUS/GET_GEOMETRY류는
+	 * IOC_IN이 없어 이 블록을 건너뛴다. */
 	if (cmd & IOC_IN) {
-		/* [한국어] cmd 값 자체에 인코딩된 방향 비트를 검사 —
-		 * _IOW(...)로 정의된 IOC_OPAL_* 매크로(유저→커널 데이터
-		 * 전달이 필요한 대다수 명령)만 이 분기로 들어온다.
-		 * _IOR(...)로 정의된 GET_STATUS/GET_LR_STATUS/GET_GEOMETRY류는
-		 * IOC_IN이 없어 이 블록을 건너뛴다. */
 		p = memdup_user(arg, _IOC_SIZE(cmd));
 		/* [한국어] cmd 인코딩에서 뽑아낸 페이로드 크기(_IOC_SIZE)만큼
 		 * 유저 버퍼 arg를 커널 메모리로 통째로 복제 — 이 한 번의
@@ -13716,180 +13770,180 @@ int sed_ioctl(struct opal_dev *dev, unsigned int cmd, void __user *arg)
 		 * 한다. */
 		ret = opal_save(dev, p);
 		break;
+	/* [한국어] struct opal_lock_unlock 인자 — 지정한 Locking
+	 * Range를 즉시 OPAL_RW/OPAL_RO/OPAL_LK 중 하나로 잠그거나
+	 * 푸는, 이 서브시스템에서 가장 자주 쓰이는 대화형(interactive)
+	 * 명령. */
 	case IOC_OPAL_LOCK_UNLOCK:
-		/* [한국어] struct opal_lock_unlock 인자 — 지정한 Locking
-		 * Range를 즉시 OPAL_RW/OPAL_RO/OPAL_LK 중 하나로 잠그거나
-		 * 푸는, 이 서브시스템에서 가장 자주 쓰이는 대화형(interactive)
-		 * 명령. */
 		ret = opal_lock_unlock(dev, p);
 		break;
+	/* [한국어] struct opal_key 인자 — 공장 기본 MSID PIN으로
+	 * Admin SP에 인증한 뒤 SID의 PIN을 유저가 지정한 값으로
+	 * 바꿔, 이 드라이브를 처음으로 "소유(take ownership)"하는
+	 * 절차의 진입점. */
 	case IOC_OPAL_TAKE_OWNERSHIP:
-		/* [한국어] struct opal_key 인자 — 공장 기본 MSID PIN으로
-		 * Admin SP에 인증한 뒤 SID의 PIN을 유저가 지정한 값으로
-		 * 바꿔, 이 드라이브를 처음으로 "소유(take ownership)"하는
-		 * 절차의 진입점. */
 		ret = opal_take_ownership(dev, p);
 		break;
+	/* [한국어] struct opal_lr_act 인자 — Manufactured-Inactive
+	 * 상태의 Locking SP를 Activate해 Locking Range/PIN 테이블을
+	 * 실제로 쓸 수 있는 상태로 전이시키고, 필요 시 SUM(Single
+	 * User Mode) 대상 range 목록도 함께 지정한다. */
 	case IOC_OPAL_ACTIVATE_LSP:
-		/* [한국어] struct opal_lr_act 인자 — Manufactured-Inactive
-		 * 상태의 Locking SP를 Activate해 Locking Range/PIN 테이블을
-		 * 실제로 쓸 수 있는 상태로 전이시키고, 필요 시 SUM(Single
-		 * User Mode) 대상 range 목록도 함께 지정한다. */
 		ret = opal_activate_lsp(dev, p);
 		break;
+	/* [한국어] struct opal_new_pw 인자 — 세션을 여는 인증
+	 * 주체(session)와, PIN을 실제로 바꿀 대상 사용자(new_user_pw)를
+	 * 분리해 지정할 수 있는 범용 "비밀번호 변경" 명령. */
 	case IOC_OPAL_SET_PW:
-		/* [한국어] struct opal_new_pw 인자 — 세션을 여는 인증
-		 * 주체(session)와, PIN을 실제로 바꿀 대상 사용자(new_user_pw)를
-		 * 분리해 지정할 수 있는 범용 "비밀번호 변경" 명령. */
 		ret = opal_set_new_pw(dev, p);
 		break;
+	/* [한국어] struct opal_session_info 인자 — Locking SP 안의
+	 * 특정 User(N) Authority를 Activate해, 그 사용자가 자신에게
+	 * 배정된 Locking Range를 스스로 관리할 수 있게 한다. */
 	case IOC_OPAL_ACTIVATE_USR:
-		/* [한국어] struct opal_session_info 인자 — Locking SP 안의
-		 * 특정 User(N) Authority를 Activate해, 그 사용자가 자신에게
-		 * 배정된 Locking Range를 스스로 관리할 수 있게 한다. */
 		ret = opal_activate_user(dev, p);
 		break;
+	/* [한국어] struct opal_key 인자 — SID 권한으로 Admin
+	 * SP(사실상 드라이브 전체)를 공장 출하 상태로 되돌린다.
+	 * 세 번째 인자 false가 "PSID가 아니라 일반 SID 경로"임을
+	 * opal_reverttper()에 알려준다. */
 	case IOC_OPAL_REVERT_TPR:
-		/* [한국어] struct opal_key 인자 — SID 권한으로 Admin
-		 * SP(사실상 드라이브 전체)를 공장 출하 상태로 되돌린다.
-		 * 세 번째 인자 false가 "PSID가 아니라 일반 SID 경로"임을
-		 * opal_reverttper()에 알려준다. */
 		ret = opal_reverttper(dev, p, false);
 		break;
+	/* [한국어] struct opal_user_lr_setup 인자 — 새 Locking
+	 * Range의 RangeStart/RangeLength와 ReadLockEnabled/
+	 * WriteLockEnabled 정책을 한 번에 Set한다. */
 	case IOC_OPAL_LR_SETUP:
-		/* [한국어] struct opal_user_lr_setup 인자 — 새 Locking
-		 * Range의 RangeStart/RangeLength와 ReadLockEnabled/
-		 * WriteLockEnabled 정책을 한 번에 Set한다. */
 		ret = opal_setup_locking_range(dev, p);
 		break;
+	/* [한국어] struct opal_lock_unlock 인자 — 지정한 User
+	 * Authority에게 특정 Locking Range를 read 또는 write 잠금
+	 * 해제할 수 있는 ACE(접근 제어) 권한을 추가로 부여한다. */
 	case IOC_OPAL_ADD_USR_TO_LR:
-		/* [한국어] struct opal_lock_unlock 인자 — 지정한 User
-		 * Authority에게 특정 Locking Range를 read 또는 write 잠금
-		 * 해제할 수 있는 ACE(접근 제어) 권한을 추가로 부여한다. */
 		ret = opal_add_user_to_lr(dev, p);
 		break;
+	/* [한국어] struct opal_mbr_data 인자 — MBRControl 테이블의
+	 * MBREnable 컬럼을 켜거나 꺼서 Shadow MBR(pre-boot 인증
+	 * 이미지) 기능 자체를 활성/비활성화한다. */
 	case IOC_OPAL_ENABLE_DISABLE_MBR:
-		/* [한국어] struct opal_mbr_data 인자 — MBRControl 테이블의
-		 * MBREnable 컬럼을 켜거나 꺼서 Shadow MBR(pre-boot 인증
-		 * 이미지) 기능 자체를 활성/비활성화한다. */
 		ret = opal_enable_disable_shadow_mbr(dev, p);
 		break;
+	/* [한국어] struct opal_mbr_done 인자 — MBRControl 테이블의
+	 * MBRDone 컬럼을 세팅해, pre-boot 인증 절차가 끝났으니 이제
+	 * 실제 MBR/데이터 영역을 노출해도 됨을 TPer에 알린다. */
 	case IOC_OPAL_MBR_DONE:
-		/* [한국어] struct opal_mbr_done 인자 — MBRControl 테이블의
-		 * MBRDone 컬럼을 세팅해, pre-boot 인증 절차가 끝났으니 이제
-		 * 실제 MBR/데이터 영역을 노출해도 됨을 TPer에 알린다. */
 		ret = opal_set_mbr_done(dev, p);
 		break;
+	/* [한국어] struct opal_shadow_mbr 인자 — 유저가 지정한
+	 * 버퍼(offset/size)의 내용을 Shadow MBR 테이블에 Set 방식으로
+	 * 기록해 pre-boot 인증 프로그램(PBA) 이미지를 실제로
+	 * 채워 넣는다. */
 	case IOC_OPAL_WRITE_SHADOW_MBR:
-		/* [한국어] struct opal_shadow_mbr 인자 — 유저가 지정한
-		 * 버퍼(offset/size)의 내용을 Shadow MBR 테이블에 Set 방식으로
-		 * 기록해 pre-boot 인증 프로그램(PBA) 이미지를 실제로
-		 * 채워 넣는다. */
 		ret = opal_write_shadow_mbr(dev, p);
 		break;
+	/* [한국어] struct opal_session_info 인자 — 지정한 Locking
+	 * Range에 대해 Erase 메소드를 호출해 그 range의 암호화 키를
+	 * 폐기(crypto erase)하지만 range 설정 자체는 남긴다. */
 	case IOC_OPAL_ERASE_LR:
-		/* [한국어] struct opal_session_info 인자 — 지정한 Locking
-		 * Range에 대해 Erase 메소드를 호출해 그 range의 암호화 키를
-		 * 폐기(crypto erase)하지만 range 설정 자체는 남긴다. */
 		ret = opal_erase_locking_range(dev, p);
 		break;
+	/* [한국어] struct opal_session_info 인자 — GenKey 메소드로
+	 * 해당 range의 Active Key 자체를 새로 교체해 이전 데이터를
+	 * 복호화 불가능하게 만드는, ERASE_LR보다 더 근본적인 삭제
+	 * 방식. */
 	case IOC_OPAL_SECURE_ERASE_LR:
-		/* [한국어] struct opal_session_info 인자 — GenKey 메소드로
-		 * 해당 range의 Active Key 자체를 새로 교체해 이전 데이터를
-		 * 복호화 불가능하게 만드는, ERASE_LR보다 더 근본적인 삭제
-		 * 방식. */
 		ret = opal_secure_erase_locking_range(dev, p);
 		break;
+	/* [한국어] struct opal_key 인자 — REVERT_TPR과 동일한
+	 * opal_reverttper()를 재사용하되, 세 번째 인자를 true로 넘겨
+	 * "PSID(드라이브 라벨의 비상 복구 코드)를 사용하는 최후의
+	 * 수단 경로"임을 알린다 — SID/PIN을 모두 잊었을 때 유일한
+	 * 탈출구. */
 	case IOC_OPAL_PSID_REVERT_TPR:
-		/* [한국어] struct opal_key 인자 — REVERT_TPR과 동일한
-		 * opal_reverttper()를 재사용하되, 세 번째 인자를 true로 넘겨
-		 * "PSID(드라이브 라벨의 비상 복구 코드)를 사용하는 최후의
-		 * 수단 경로"임을 알린다 — SID/PIN을 모두 잊었을 때 유일한
-		 * 탈출구. */
 		ret = opal_reverttper(dev, p, true);
 		break;
+	/* [한국어] struct opal_read_write_table 인자 — flags에 따라
+	 * 내부적으로 임의의 테이블 UID를 대상으로 Get 또는 Set을
+	 * 수행하는 범용 저수준 통로 — 위의 특화된 ioctl들이 다루지
+	 * 않는 테이블(예: DataStore)에 접근할 때 쓰인다. */
 	case IOC_OPAL_GENERIC_TABLE_RW:
-		/* [한국어] struct opal_read_write_table 인자 — flags에 따라
-		 * 내부적으로 임의의 테이블 UID를 대상으로 Get 또는 Set을
-		 * 수행하는 범용 저수준 통로 — 위의 특화된 ioctl들이 다루지
-		 * 않는 테이블(예: DataStore)에 접근할 때 쓰인다. */
 		ret = opal_generic_read_write_table(dev, p);
 		break;
+	/* [한국어] struct opal_status(_IOR) 인자 — IOC_IN이 없으므로
+	 * p 대신 원시 유저 포인터 arg를 그대로 전달, Discovery를
+	 * 재실행해 얻은 dev->flags(SUPPORTED/LOCKING_SUPPORTED/LOCKED/
+	 * MBR_ENABLED 등)를 copy_to_user()로 돌려준다. */
 	case IOC_OPAL_GET_STATUS:
-		/* [한국어] struct opal_status(_IOR) 인자 — IOC_IN이 없으므로
-		 * p 대신 원시 유저 포인터 arg를 그대로 전달, Discovery를
-		 * 재실행해 얻은 dev->flags(SUPPORTED/LOCKING_SUPPORTED/LOCKED/
-		 * MBR_ENABLED 등)를 copy_to_user()로 돌려준다. */
 		ret = opal_get_status(dev, arg);
 		break;
+	/* [한국어] struct opal_lr_status(_IOW+_IOR 혼합 사용) 인자 —
+	 * p로 조회 대상 range 번호를 입력받고, arg로 그 range의
+	 * RangeStart/RangeLength/RLE/WLE/l_state를 유저에게 돌려준다
+	 * (opal_locking_range_status()가 내부적으로 p와 arg 모두를
+	 * 사용). */
 	case IOC_OPAL_GET_LR_STATUS:
-		/* [한국어] struct opal_lr_status(_IOW+_IOR 혼합 사용) 인자 —
-		 * p로 조회 대상 range 번호를 입력받고, arg로 그 range의
-		 * RangeStart/RangeLength/RLE/WLE/l_state를 유저에게 돌려준다
-		 * (opal_locking_range_status()가 내부적으로 p와 arg 모두를
-		 * 사용). */
 		ret = opal_locking_range_status(dev, p, arg);
 		break;
+	/* [한국어] struct opal_geometry(_IOR) 인자 — Discovery의
+	 * Geometry Feature Descriptor에서 이미 파싱해 둔 정렬
+	 * 제약(align/logical_block_size/lowest_lba 등)을 dev
+	 * 필드로부터 그대로 복사해 arg로 돌려준다. */
 	case IOC_OPAL_GET_GEOMETRY:
-		/* [한국어] struct opal_geometry(_IOR) 인자 — Discovery의
-		 * Geometry Feature Descriptor에서 이미 파싱해 둔 정렬
-		 * 제약(align/logical_block_size/lowest_lba 등)을 dev
-		 * 필드로부터 그대로 복사해 arg로 돌려준다. */
 		ret = opal_get_geometry(dev, arg);
 		break;
+	/* [한국어] struct opal_revert_lsp 인자 — Admin SP 전체가
+	 * 아니라 Locking SP 하나만 RevertSP하며, options에
+	 * OPAL_PRESERVE 비트를 실어 Global Range 키만은 보존할지
+	 * 선택할 수 있다. */
 	case IOC_OPAL_REVERT_LSP:
-		/* [한국어] struct opal_revert_lsp 인자 — Admin SP 전체가
-		 * 아니라 Locking SP 하나만 RevertSP하며, options에
-		 * OPAL_PRESERVE 비트를 실어 Global Range 키만은 보존할지
-		 * 선택할 수 있다. */
 		ret = opal_revertlsp(dev, p);
 		break;
+	/* [한국어] struct opal_discovery 인자 — Level 0 Discovery의
+	 * 원본 응답 바이트열 전체(가공 없이)를 유저가 지정한 버퍼로
+	 * 그대로 복사해 주는, 디버깅/고급 도구용 저수준 통로. */
 	case IOC_OPAL_DISCOVERY:
-		/* [한국어] struct opal_discovery 인자 — Level 0 Discovery의
-		 * 원본 응답 바이트열 전체(가공 없이)를 유저가 지정한 버퍼로
-		 * 그대로 복사해 주는, 디버깅/고급 도구용 저수준 통로. */
 		ret = opal_get_discv(dev, p);
 		break;
+	/* [한국어] struct opal_new_pw 인자 — SET_PW와 달리 SID
+	 * Authority의 PIN만을 특정해 바꾸며, 성공 시
+	 * update_sed_opal_key()로 커널 자체 keyring(sed_opal_keyring)에도
+	 * 새 PIN을 반영해 이후 자동 unlock 경로가 최신 값을 쓰게
+	 * 한다. */
 	case IOC_OPAL_SET_SID_PW:
-		/* [한국어] struct opal_new_pw 인자 — SET_PW와 달리 SID
-		 * Authority의 PIN만을 특정해 바꾸며, 성공 시
-		 * update_sed_opal_key()로 커널 자체 keyring(sed_opal_keyring)에도
-		 * 새 PIN을 반영해 이후 자동 unlock 경로가 최신 값을 쓰게
-		 * 한다. */
 		ret = opal_set_new_sid_pw(dev, p);
 		break;
+	/* [한국어] struct opal_lr_act 인자 — 이미 Activate된 Locking
+	 * SP를 RevertSP+Activate를 합친 효과로 재설정해, 사용자
+	 * 목록/range 구성을 초기 매개변수로 다시 세팅한다. */
 	case IOC_OPAL_REACTIVATE_LSP:
-		/* [한국어] struct opal_lr_act 인자 — 이미 Activate된 Locking
-		 * SP를 RevertSP+Activate를 합친 효과로 재설정해, 사용자
-		 * 목록/range 구성을 초기 매개변수로 다시 세팅한다. */
 		ret = opal_reactivate_lsp(dev, p);
 		break;
+	/* [한국어] struct opal_user_lr_setup 인자 — LR_SETUP과 달리
+	 * RangeStart/RangeLength "만" Set하고 RLE/WLE 정책은 건드리지
+	 * 않는, 더 좁은 범위의 range 크기 조정 전용 명령. */
 	case IOC_OPAL_LR_SET_START_LEN:
-		/* [한국어] struct opal_user_lr_setup 인자 — LR_SETUP과 달리
-		 * RangeStart/RangeLength "만" Set하고 RLE/WLE 정책은 건드리지
-		 * 않는, 더 좁은 범위의 range 크기 조정 전용 명령. */
 		ret = opal_setup_locking_range_start_length(dev, p);
 		break;
+	/* [한국어] struct opal_user_lr_setup 인자 — 특정 range의
+	 * ReadLockEnabled/WriteLockEnabled 두 정책 비트만 갱신해
+	 * 잠금 기능 자체를 켜거나 끈다(실제 RangeStart/Length는
+	 * 그대로 유지). */
 	case IOC_OPAL_ENABLE_DISABLE_LR:
-		/* [한국어] struct opal_user_lr_setup 인자 — 특정 range의
-		 * ReadLockEnabled/WriteLockEnabled 두 정책 비트만 갱신해
-		 * 잠금 기능 자체를 켜거나 끈다(실제 RangeStart/Length는
-		 * 그대로 유지). */
 		ret = opal_enable_disable_range(dev, p);
 		break;
+	/* [한국어] struct opal_sum_ranges(_IOW+_IOR 혼합) 인자 — p로
+	 * 조회에 쓸 PIN(선택적)을 입력받고, arg로 SUM 대상 Locking
+	 * Range 목록/정책을 돌려준다(이번 Phase에서 주석 처리한
+	 * opal_get_sum_ranges()/get_sum_ranges()가 처리). */
 	case IOC_OPAL_GET_SUM_STATUS:
-		/* [한국어] struct opal_sum_ranges(_IOW+_IOR 혼합) 인자 — p로
-		 * 조회에 쓸 PIN(선택적)을 입력받고, arg로 SUM 대상 Locking
-		 * Range 목록/정책을 돌려준다(이번 Phase에서 주석 처리한
-		 * opal_get_sum_ranges()/get_sum_ranges()가 처리). */
 		ret = opal_get_sum_ranges(dev, p, arg);
 		break;
+	/* [한국어] 인자 없음(_IO, p/arg 모두 사용 안 함) — 현재
+	 * dev->comid에 결부된 통신 스택을 opal_stack_reset()으로 강제
+	 * 초기화. IOC_IN이 없는 명령이므로 이 case에서는 p가 아예
+	 * 만들어지지 않았을 수 있는데, 애초에 opal_stack_reset(dev)이
+	 * p를 쓰지 않으므로 무관하다. */
 	case IOC_OPAL_STACK_RESET:
-		/* [한국어] 인자 없음(_IO, p/arg 모두 사용 안 함) — 현재
-		 * dev->comid에 결부된 통신 스택을 opal_stack_reset()으로 강제
-		 * 초기화. IOC_IN이 없는 명령이므로 이 case에서는 p가 아예
-		 * 만들어지지 않았을 수 있는데, 애초에 opal_stack_reset(dev)이
-		 * p를 쓰지 않으므로 무관하다. */
 		ret = opal_stack_reset(dev);
 		break;
 
@@ -13902,16 +13956,16 @@ int sed_ioctl(struct opal_dev *dev, unsigned int cmd, void __user *arg)
 		break;
 	}
 
+	/* [한국어] 이 명령이 memdup_user()로 p를 할당했던 그 IOC_IN
+	 * 조건을 동일하게 다시 검사 — p가 실제로 할당되었을 때만
+	 * 해제를 시도한다. */
 	if (cmd & IOC_IN)
-		/* [한국어] 이 명령이 memdup_user()로 p를 할당했던 그 IOC_IN
-		 * 조건을 동일하게 다시 검사 — p가 실제로 할당되었을 때만
-		 * 해제를 시도한다. */
 		kfree(p);
 		/* [한국어] switch 안에서 p(PIN 등 민감 데이터를 담았을 수
 		 * 있는 커널 복사본)를 다 쓴 뒤이므로 안전하게 해제 — 별도의
 		 * 민감 정보 제로화(memzero_explicit 등)는 하지 않고 일반
-		 * kfree()만 수행한다는 점에 유의(추정: 슬랩 재할당 시점까지는
-		 * 메모리에 잔존할 수 있음). */
+		 * kfree()만 수행한다는 점에 유의 — 해제된 슬랩 객체는 다음
+		 * 할당자가 덮어쓸 때까지 PIN 바이트를 그대로 담고 있게 된다. */
 	return ret;
 	/* [한국어] switch에서 결정된 개별 opal_* 핸들러의 반환값(또는
 	 * default 분기의 -ENOTTY)을 그대로 유저에게 돌려준다. */
@@ -14050,7 +14104,8 @@ late_initcall(sed_opal_init);
  * 링크되는 내장(built-in) 코드이기 때문이다(module_init은 loadable module
  * 빌드 시 모듈 로드 시점 실행으로, built-in 빌드 시에는 initcall로 치환되는
  * 매크로일 뿐 이 파일 자체는 module_exit도 MODULE_LICENSE도 갖지 않는다).
- * keyring 서브시스템(그리고 keyring이 의존하는 VFS/보안 서브시스템)이 이미
- * 초기화를 마친 뒤에 keyring_alloc()을 호출해야 안전하므로, 커널 부팅
- * 시퀀스에서 상대적으로 늦은 late_initcall 우선순위 그룹을 선택해 이런 초기
- * 부팅 단계 의존성 문제를 피한다(추정 — 원본 코드에 별도 설명 주석은 없음). */
+ * keyring_alloc()은 key 서브시스템이 이미 초기화를 마친 뒤에만 호출할 수
+ * 있는데, key 서브시스템 자체가 initcall로 올라온다. late_initcall은
+ * 그보다 뒤에 도는 우선순위 그룹이라 이 순서 의존을 자연히 만족시킨다.
+ * (원본 코드에 이 선택을 설명하는 주석은 없으므로, 위 설명은 initcall
+ * 우선순위 규칙에서 도출한 것이다.) */
