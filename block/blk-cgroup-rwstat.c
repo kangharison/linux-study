@@ -54,7 +54,7 @@
  * 커맨드를 쓰기 이전, 공통 blk-mq 계층에서 헤더의 인라인 함수
  * blkg_rwstat_add()가 이미 방향별 값을 누적해 둔 뒤이므로, 이 파일의
  * 함수들은 NVMe 드라이버를 직접 호출하지도, NVMe로부터 직접 호출되지도
- * 않는 순수 소프트웨어 회계/출력 계층이다(추정 아님 — 실제 호출자는
+ * 않는 순수 소프트웨어 회계/출력 계층이다(실제 호출자는
  * 위에 명시한 bfq-cgroup.c/blk-throttle.c 코드로 확인됨).
  *
  * === 타 모듈과의 연결 ===
@@ -160,7 +160,7 @@
  *   호출자인 throtl_pd_alloc()/bfqg_stats_init()이 blkcg_activate_policy()
  *   / bfq_pd_alloc()로부터 전달받은 gfp를 그대로 넘기며, 이 경로는
  *   보통 잠들 수 있는(sleep 가능) 프로세스 컨텍스트이므로 실제로는
- *   GFP_KERNEL 계열이 흔히 쓰인다(추정).
+ *   GFP_KERNEL 계열이 흔히 쓰인다.
  * @return: 0이면 성공. percpu_counter_init_many()가 실패(-ENOMEM 등)를
  *   반환하면 그 값을 그대로 돌려주며, 이 경우 aux_cnt는 초기화되지
  *   않은 채로 함수가 종료된다 — 호출자(throtl_pd_alloc/bfqg_stats_init)
@@ -225,7 +225,7 @@ EXPORT_SYMBOL_GPL(blkg_rwstat_init);
  * @rwstat: 해제할 대상 struct blkg_rwstat 포인터. blkg_rwstat_init()과
  *   반드시 짝을 이루어야 하는 생성자/소멸자 대칭 관계다.
  * @return: 없음(void). percpu_counter_destroy_many()는 실패할 수 없는
- *   해제 연산이라고 추정된다(메모리 해제는 일반적으로 실패 경로가
+ *   해제 연산이다(메모리 해제는 실패 경로가
  *   없음).
  *
  * blkg_rwstat_init()에서 percpu_counter_init_many()로 할당했던 CPU별
@@ -250,7 +250,7 @@ EXPORT_SYMBOL_GPL(blkg_rwstat_init);
 void blkg_rwstat_exit(struct blkg_rwstat *rwstat)
 /* [한국어] @rwstat: 해제할 blkg_rwstat 인스턴스 - 이 호출 이후 해당 인스턴스에 대한 blkg_rwstat_add()/read() 등은 이미 해제된 percpu 메모리를 건드리므로 절대 호출되어서는 안 됨(use-after-free 방지는 호출자의 책임) */
 {
-	/* per-CPU 카운터 해제: 이후 blkg_rwstat_add() 호출은 불가능해진다(추정) */
+	/* [한국어] per-CPU 카운터 해제 — 이후 이 rwstat에 blkg_rwstat_add()를 호출하면 안 된다 */
 	percpu_counter_destroy_many(rwstat->cpu_cnt, BLKG_RWSTAT_NR);
 	/* [한국어] rwstat->cpu_cnt[0..BLKG_RWSTAT_NR-1] 배열의 percpu_counter BLKG_RWSTAT_NR(5)개를 한 번에 해제 - blkg_rwstat_init()의 percpu_counter_init_many()와 정확히 짝을 이루는 해제 호출. aux_cnt는 atomic64_t라 별도 percpu 메모리를 갖지 않으므로 여기서 해제할 대상이 없음(단순 정수 필드라 rwstat 자체를 담은 policy_data가 kfree될 때 함께 사라짐) */
 }
@@ -282,7 +282,7 @@ EXPORT_SYMBOL_GPL(blkg_rwstat_exit);
  * @return: 이 blkg가 출력한 R+W+DISCARD 총합(u64). blkg_prfill_rwstat()
  *   같은 상위 prfill 콜백이 그대로 반환값으로 전달하며,
  *   blkcg_print_blkgs()는 이 반환값을 각 blkg별 결과로 취급한다(용도는
- *   호출자에 따라 다를 수 있음, 추정).
+ *   호출자에 따라 다를 수 있다).
  *
  * 이 함수는 이미 방향별로 채워진 스냅숏(cnt[BLKG_RWSTAT_NR])을 받아
  * "Read/Write/Sync/Async/Discard" 각 줄 + "Total" 한 줄을 사람이 읽을
@@ -310,7 +310,7 @@ EXPORT_SYMBOL_GPL(blkg_rwstat_exit);
  *   bfqg_prfill_rwstat_recursive() 계열 -> [__blkg_prfill_rwstat] ->
  *   blkg_dev_name() / seq_printf()
  *
- * NVMe 연결(추정): 사용자가 /sys/fs/cgroup/.../blkio.throttle.io_service_bytes
+ * NVMe 연결: 사용자가 /sys/fs/cgroup/.../blkio.throttle.io_service_bytes
  * 등을 읽을 때 namespace/디바이스별 Read/Write/Discard 바이트(또는
  * 요청 수) 합계가 최종 텍스트로 변환되는 지점이다.
  */
@@ -329,7 +329,7 @@ u64 __blkg_prfill_rwstat(struct seq_file *sf, struct blkg_policy_data *pd,
 		[BLKG_RWSTAT_ASYNC]	= "Async",
 		/* [한국어] REQ_SYNC 미설정(비동기 제출)의 누적값 레이블 - SYNC와 상호 배타적인 짝 */
 		[BLKG_RWSTAT_DISCARD]	= "Discard",
-		/* [한국어] NVMe Dataset Management/Deallocate(옵코드 0x09, TRIM 계열) 방향의 누적값 레이블(추정) */
+		/* [한국어] discard 방향의 누적값 레이블. NVMe에서는 Dataset Management(0x09)로 변환된다 */
 	};
 	const char *dname = blkg_dev_name(pd->blkg); /* [한국어] pd가 속한 blkcg_gq(pd->blkg)로부터 블록 디바이스의 표시 이름(예: "nvme0n1")을 얻음 - blk-cgroup.c/blkg_dev_name() 참고, 디바이스가 아직 probe 중이거나 이미 제거된 경우 NULL을 반환할 수 있음 */
 	u64 v;
@@ -385,7 +385,7 @@ EXPORT_SYMBOL_GPL(__blkg_prfill_rwstat);
  *   오프셋. 정책마다 policy_data 레이아웃이 다르므로, 어떤 rwstat
  *   필드를 읽을지는 이 오프셋으로 지정한다 — 호출자가 보통
  *   offsetof(struct throtl_grp, stat_bytes)처럼 offsetof()로 계산해
- *   넘긴다(추정).
+ *   넘긴다.
  * @return: __blkg_prfill_rwstat()의 반환값을 그대로 전달(R+W+D 합계).
  *
  * 이 함수는 "오프셋으로 필드를 찾아 읽고 -> 포맷팅"까지 한 번에

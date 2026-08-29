@@ -378,7 +378,8 @@ EXPORT_SYMBOL(file_bdev);
  * 실행 컨텍스트: 프로세스 컨텍스트(주로 close/discard 등 동기 경로). 함수
  * 시작 시 락 없는 상태로 들어와서, 함수 종료 시에도 락 없는 상태로 나간다
  * (내부적으로 lock/unlock 을 짝을 맞춰 반복).
- * 호출자: 이 조각 범위 밖의 bdev.c 코드(추정: 디바이스를 닫거나 크기 변경을
+ * 호출자: 같은 파일의 bdev_release() 계열 종료 경로(block/bdev.c:3435).
+ *   (디바이스를 닫거나 크기 변경을
  *         감지해 캐시를 무효화하기 직전의 경로)에서, dirty 메타데이터가 남은
  *         채로 캐시를 버리는 것을 막기 위해 호출.
  * 피호출자: BD_INODE(), write_inode_now(), pr_warn_ratelimited().
@@ -388,7 +389,8 @@ EXPORT_SYMBOL(file_bdev);
  * 방법이 없다.
  *
  * 호출 체인:
- *   (추정) bdev 종료/무효화 경로(이 조각 밖) → [bdev_write_inode] → write_inode_now() → NVMe Write/Flush 커맨드 제출
+ *   bdev 종료 경로(block/bdev.c:3435) → [bdev_write_inode] → write_inode_now()
+ *     → 파일시스템 없는 bdev inode의 메타데이터 writeback
  */
 
 static void bdev_write_inode(struct block_device *bdev)
@@ -439,13 +441,14 @@ static void bdev_write_inode(struct block_device *bdev)
  * dirty 여부와 상관없이 잘라낸다.
  * 실행 컨텍스트: 프로세스 컨텍스트, 별도의 락을 이 함수 자신이 잡지는 않는다
  * (truncate_inode_pages() 내부에서 필요한 mapping 락을 처리).
- * 호출자: 이 조각 범위 밖의 디스크 제거/미디어 변경 경로(추정: 파티션 재검사,
+ * 호출자: block/bdev.c:873(디바이스 종료 경로)과 set_blocksize() 경로.
+ *   (파티션 재검사,
  *         del_gendisk() 계열, 또는 미디어 체인지 처리).
  * 피호출자: mapping_empty(), invalidate_bh_lrus(), truncate_inode_pages().
  * 에러 경로: 없음(반환형 void) - 캐시 제거는 항상 성공한다고 가정한다.
  *
  * 호출 체인:
- *   (추정) 디스크 제거/미디어 변경 경로(이 조각 밖) → [kill_bdev] → truncate_inode_pages()
+ *   bdev 종료 / set_blocksize (block/bdev.c) → [kill_bdev] → truncate_inode_pages()
  */
 
 /* Kill _all_ buffers and pagecache , dirty or not.. */
@@ -488,14 +491,17 @@ static void kill_bdev(struct block_device *bdev)
  * invalidate_mapping_pages() 내부적으로 건너뛰므로 안전하다.
  * 실행 컨텍스트: 프로세스 컨텍스트, 이 함수 자체는 락을 잡지 않는다(호출하는
  * 각 헬퍼 내부에서 필요한 락을 처리).
- * 호출자: EXPORT_SYMBOL 이므로 커널 전역/모듈에서 폭넓게 호출(추정: 미디어
+ * 호출자: EXPORT_SYMBOL 이므로 커널 전역/모듈에서 폭넓게 호출된다.
+ *   이 파일 안에서는 block/bdev.c:5775(디바이스 사망 처리)에서 호출한다.
+ *   (미디어
  *         변경 감지, MD/DM 리사이즈 등, 이 조각 밖).
  * 피호출자: invalidate_bh_lrus(), lru_add_drain_all(), invalidate_mapping_pages().
  * 에러 경로: 없음(반환형 void) - 무효화 가능한 페이지만 선택적으로 처리하므로
  * 실패 개념이 없다.
  *
  * 호출 체인:
- *   (추정) 미디어 변경/리사이즈 감지 경로(이 조각 밖) → [invalidate_bdev] → invalidate_mapping_pages()
+ *   디바이스 사망/미디어 변경 감지 경로(block/bdev.c:5775 등)
+ *     → [invalidate_bdev] → invalidate_mapping_pages()
  */
 
 /* Invalidate clean unused buffers and pagecache. */
@@ -562,7 +568,8 @@ EXPORT_SYMBOL(invalidate_bdev);
  * 실행 컨텍스트: 프로세스 컨텍스트(ioctl 처리 등 동기 경로), 이 함수 자체는
  * 락을 직접 잡지 않고 bd_prepare_to_claim()/bd_abort_claiming() 내부의
  * bd_holder 관련 보호에 의존한다.
- * 호출자: (추정) BLKDISCARD/BLKZEROOUT 계열 블록 디바이스 ioctl 핸들러, 그리고
+ * 호출자: block/ioctl.c의 BLKDISCARD/BLKZEROOUT 핸들러와
+ *   block/blk-zoned.c:1072(zone reset), 그리고
  *         fallocate() 로 구멍을 뚫는(hole-punch) 블록 디바이스 파일 연산
  *         경로(이 조각 밖).
  * 피호출자: bd_prepare_to_claim(), truncate_inode_pages_range(),
@@ -571,7 +578,8 @@ EXPORT_SYMBOL(invalidate_bdev);
  * invalidate_inode_pages2_range() 의 반환값을 그대로 호출자에게 돌려준다.
  *
  * 호출 체인:
- *   (추정) BLKDISCARD/BLKZEROOUT ioctl 또는 fallocate hole-punch(이 조각 밖)
+ *   BLKDISCARD/BLKZEROOUT ioctl(block/ioctl.c) 또는
+ *   blkdev_zone_mgmt_ioctl(block/blk-zoned.c:1072)
  *   → [truncate_bdev_range] → truncate_inode_pages_range() 또는(폴백)
  *   invalidate_inode_pages2_range()
  */
@@ -649,7 +657,8 @@ invalidate:
  * 실행 컨텍스트: 프로세스 컨텍스트(디바이스 open 경로), 락 불필요 - 이
  * 시점에는 아직 다른 코드가 이 bdev 의 i_blkbits 를 동시에 바꿀 수 없다고
  * 가정(open 시퀀스 상에서 단독 소유).
- * 호출자: (추정) bdev_alloc() 또는 blkdev_get_whole() 계열의 bdev 최초
+ * 호출자: block/bdev.c:3583(디스크 전체 bdev)과 block/bdev.c:3722(파티션 bdev)의
+ *   bdev 최초
  *         open/초기화 경로(이 조각 밖).
  * 피호출자: bdev_logical_block_size(), i_size_read(), BD_INODE(),
  *          blksize_bits(), mapping_set_folio_min_order(), get_order().
@@ -657,7 +666,8 @@ invalidate:
  * 경우 최초 bsize 그대로 유지).
  *
  * 호출 체인:
- *   (추정) bdev_alloc()/blkdev_get_whole()(이 조각 밖) → [set_init_blocksize] → mapping_set_folio_min_order()
+ *   bdev 최초 개방 경로(block/bdev.c:3583, 3722)
+ *     → [set_init_blocksize] → mapping_set_folio_min_order()
  */
 
 static void set_init_blocksize(struct block_device *bdev)
@@ -719,7 +729,7 @@ static void set_init_blocksize(struct block_device *bdev)
  * Region Page)/SGL(Scatter-Gather List) 정렬이나 섹터 어드레싱이 깨질 수
  * 있으므로 반드시 거부해야 한다.
  * 실행 컨텍스트: 프로세스 컨텍스트, 락 불필요(순수 값 비교).
- * 호출자: set_blocksize()(이 조각 밖, 추정: fs/buffer.c 또는 bdev.c 의 다른
+ * 호출자: set_blocksize()(같은 파일, fs/buffer.c 또는 bdev.c 의 다른
  *         위치) 및 버퍼 헤드를 쓰지 않는 파일시스템이 자신의 블록 크기를 정할
  *         때 직접 호출(EXPORT_SYMBOL_GPL 이므로 GPL 호환 모듈만 호출 가능).
  * 피호출자: blk_validate_block_size(), bdev_logical_block_size().
@@ -1192,7 +1202,8 @@ EXPORT_SYMBOL(sync_blockdev);
  * sync_blockdev() 이 매핑 전체를 대상으로 하는 반면, 이 함수는 특정 바이트 범위만
  * 골라 writeback 하고 싶을 때 사용한다(예: O_DIRECT 와 버퍼드 I/O 를 섞어 쓰는
  * 파일시스템이 특정 구간만 동기화해야 할 때). NVMe 관점에서는 range 단위 flush
- * 커맨드가 NVMe 표준 명령셋에 별도로 존재하지 않으므로(추정), 커널은 해당 범위에
+ * 커맨드는 NVMe 명령셋에 존재하지 않는다 — Flush(옵코드 0x00)는 네임스페이스
+ * 전체를 대상으로 하며 LBA 범위 인자를 갖지 않는다. 따라서 커널은 해당 범위에
  * 걸친 dirty 페이지들에 대해서만 일반 Write 커맨드를 발행하고 그 완료를 기다리는
  * 방식으로 range flush 를 흉내낸다.
  * 동작: filemap_write_and_wait_range() 한 줄로 위임 - 내부적으로 해당 범위의 dirty
@@ -1211,7 +1222,7 @@ int sync_blockdev_range(struct block_device *bdev, loff_t lstart, loff_t lend)
 	return filemap_write_and_wait_range(bdev->bd_mapping,
 		// [한국어] bdev 의 address_space 에서 [lstart, lend] 범위에 해당하는 dirty
 		// 페이지만 골라 writeback 을 수행하고, 그 범위의 writeback 완료까지 대기한다.
-		// NVMe 표준 명령셋에는 range 단위 flush 커맨드가 없으므로(추정), 이 범위에
+		// NVMe Flush(0x00)는 범위 인자가 없어 네임스페이스 전체를 플러시하므로, 이 범위에
 		// 걸친 Write 커맨드들의 완료로 range flush 효과를 대신한다.
 			lstart, lend);
 			// [한국어] 플러시할 바이트 범위의 시작/끝 오프셋을 그대로 전달한다.
