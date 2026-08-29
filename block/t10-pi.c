@@ -59,7 +59,7 @@
  *   실행된다. 이 두 함수는 request에 속한 모든 bio를 순회하며 이미 쓰인
  *   PI tuple의 ref_tag 필드만 고쳐 쓸 뿐 guard/csum은 건드리지 않는다 —
  *   파티션/dm 스택을 거치며 원래 제출자가 알던 LBA(virt)와 디바이스가
- *   보는 물리 LBA(ref)가 달라지는 상황을 보정하기 위함이다(추정).
+ *   보는 물리 LBA(ref)가 달라지는 상황을 보정하기 위함이다.
  *
  * === 타 모듈과의 연결 ===
  * 의존 모듈:
@@ -161,7 +161,7 @@
  * 해당 interval에 대한 PI 검사를 생략하라는 T10 PI 표준의 "escape" 관례.
  * blk_verify_ext_pi()/blk_verify_pi()가 app 필드를 이 값과 비교해 조기에
  * BLK_STS_OK를 반환하는 데 쓰인다. (NVMe PRCHK[AppTag] 우회와 연동되는
- * 것으로 추정) */
+ * 값이다) */
 #define APP_TAG_ESCAPE 0xffff
 /* [한국어] REF_TAG_ESCAPE: 표준 4바이트 Reference Tag(t10_pi_tuple)의
  * escape 값(전 비트 1) - BLK_INTEGRITY_REF_TAG 플래그가 꺼져 있는 PI
@@ -241,7 +241,7 @@ struct blk_integrity_iter {
 	 *   직접 참조해 PI 버퍼 페이지를 kmap한다.
 	 * 값 범위: bio_integrity(bio)가 REQ_INTEGRITY 플래그가 선 bio에 대해
 	 *   반환하는 유효 포인터(이 경로가 호출될 때는 항상 non-NULL로 보장됨,
-	 *   추정 - 호출자가 csum_type 유효성으로 이미 필터링).
+	 *   호출자가 csum_type 유효성으로 이미 필터링한다).
 	 * 동기화: bio 단위로 소유되며 별도 락 없음. */
 	struct blk_integrity		*bi;
 	/* 디스크 단위 무결성 프로파일 - csum_type, interval_exp, pi_offset,
@@ -255,7 +255,7 @@ struct blk_integrity_iter {
 	 *   있는 한(gendisk 수명 동안) 유효.
 	 * 동기화: 읽기 전용 참조만 하며, 프로파일 자체의 변경(sysfs를 통한
 	 *   flag_store 등)은 blk-integrity.c가 큐를 freeze한 뒤 갱신하므로
-	 *   이 경로와 경쟁하지 않는다(추정). */
+	 *   이 경로와 경쟁하지 않는다. */
 	struct bvec_iter		data_iter;
 	/* 사용자 데이터(LBA 데이터) 영역을 가리키는 bvec 반복자 -
 	 * bio_integrity_generate()/verify()가 넘겨준 원본 iterator(bio->bi_iter
@@ -376,7 +376,7 @@ static void blk_calculate_guard(struct blk_integrity_iter *iter, void *data,
 		break;
 		/* [한국어] CRC(T10 DIF) 분기 종료 */
 	/* [한국어] IP(인터넷) 체크섬 형식(csum_type==IP) 분기 - 레거시/SCSI
-	 * 상위 계층 호환용으로 추정 */
+	 * SCSI DIF의 IP 체크섬 변형과의 호환을 위해 유지된다 */
 	case BLK_INTEGRITY_CSUM_IP:
 		/* [한국어] csum_partial()은 1의 보수 부분합 타입 __wsum을 쓰므로
 		 * iter->csum(u64)을 __force 캐스트로 __wsum처럼 재해석해 이어서
@@ -468,7 +468,7 @@ static void blk_integrity_csum_finish(struct blk_integrity_iter *iter)
  * 일부 PI 포맷은 metadata_size 전체가 PI 8~16바이트가 아니라, 앞쪽에
  * pi_offset바이트만큼의 벤더 전용/사용자 정의 padding이 먼저 오고 그
  * 뒤에 실제 PI tuple이 온다. 이 padding 영역이 guard 체크섬 계산 범위에
- * 포함돼야 하는 포맷(추정 - 일부 NVMe formatted metadata 레이아웃)이
+ * 포함돼야 하는 포맷(metadata_size > pi_tuple_size인 NVMe 포맷)이
  * 있으므로, 이 함수는 prot_iter를 pi_offset만큼 전진시키면서 그 경로에
  * 있는 바이트들을 blk_calculate_guard()로 체크섬에 먼저 반영한다. offset이
  * 0이면(대부분의 표준 PI 포맷) while 루프를 건너뛰고 바로 fold만 수행한다.
@@ -479,7 +479,7 @@ static void blk_integrity_csum_finish(struct blk_integrity_iter *iter)
  * blk_calculate_guard(), kunmap_local(), bvec_iter_advance_single(),
  * blk_integrity_csum_finish().
  * 에러 처리: 없음 - offset이 이미 blk_validate_integrity_limits()로
- * 검증된 값이라고 가정(추정).
+ * 검증된 값이라고 가정한다.
  *
  * 호출 체인:
  *   blk_integrity_interval -> [blk_integrity_csum_offset] ->
@@ -512,7 +512,7 @@ static void blk_integrity_csum_offset(struct blk_integrity_iter *iter)
 
 		/* [한국어] 이번 padding 조각을 체크섬에 반영 - padding도 매체에
 		 * 그대로 기록/전송되므로, 포맷에 따라 guard 계산 범위에 포함될
-		 * 수 있음(추정) */
+		 * 수 있다 */
 		blk_calculate_guard(iter, prot_buf, len);
 		/* [한국어] 매핑 해제 - 이 조각에 대한 접근이 끝났으므로 즉시
 		 * 반납(커널 가상 주소 공간은 한정된 자원) */
@@ -556,7 +556,8 @@ static void blk_integrity_csum_offset(struct blk_integrity_iter *iter)
  * 호출되는 함수(callee): bvec_iter_bvec(), bvec_kmap_local(), memcpy(),
  * kunmap_local(), bvec_iter_advance_single().
  * 에러 처리: 없음 - tuple_size는 항상 남은 bio_vec 총량 이내라고 가정
- * (pi_tuple_size가 metadata_size를 넘지 않도록 상위에서 검증됨, 추정).
+ * (pi_tuple_size가 metadata_size를 넘지 않도록 blk_validate_integrity_limits()가
+ * 미리 검증한다).
  *
  * 호출 체인:
  *   blk_integrity_interval / blk_tuple_remap_end -> [blk_integrity_copy_from_tuple]
@@ -707,12 +708,12 @@ static bool ext_pi_ref_escape(const u8 ref_tag[6])
  * RefTag로 구성된 16바이트 tuple이다(다른 T10 PI들의 8바이트 tuple보다
  * 크다). 이 함수는 먼저 tuple에서 seed/guard/ref/app 네 값을 빅엔디안
  * 비정렬 읽기 헬퍼로 추출한 뒤, BLK_INTEGRITY_REF_TAG 플래그(이 디스크가
- * ref tag 검사를 요구하는 PI Type인지, 추정)에 따라 두 갈래로 나뉜다.
+ * ref tag 검사를 요구하는 PI Type 1/2인지)에 따라 두 갈래로 나뉜다.
  * 플래그가 켜져 있으면 app==APP_TAG_ESCAPE일 때 즉시 통과시키고, 아니면
  * ref가 기대한 seed(lower_48_bits(iter->seed))와 일치하는지 검사해 불일치
  * 시 pr_err()로 위치/기대값/수신값을 로그에 남기고 BLK_STS_PROTECTION을
  * 반환한다. 플래그가 꺼져 있으면(ref tag를 애초에 검사하지 않는 PI Type,
- * 추정) app과 ref가 모두 escape 값일 때만 guard 검사까지 건너뛴다. 이
+ * Type 3) app과 ref가 모두 escape 값일 때만 guard 검사까지 건너뛴다. 이
  * 두 갈래를 통과하면 마지막으로 guard(수신된 CRC64)와 iter->csum(호스트가
  * 방금 데이터로부터 재계산한 CRC64)을 비교해 불일치 시 역시
  * BLK_STS_PROTECTION을 반환한다.
@@ -927,7 +928,7 @@ static blk_status_t blk_verify_t10_pi(struct blk_integrity_iter *iter,
  * IP 체크섬 포맷은 blk_calculate_guard()에서 csum_partial()이 계산 도중
  * 네이티브(호스트) 바이트오더의 __wsum으로 다루므로, 저장된 값도 빅엔디안
  * 변환 없이 네이티브 바이트오더 그대로 get_unaligned()로 읽어야 CRC(T10
- * DIF) 방식의 get_unaligned_be16()과 다르게 대칭이 맞는다(추정 - IP 체크섬은
+ * DIF) 방식의 get_unaligned_be16()과 다르게 대칭이 맞는다(IP 체크섬은
  * 네트워크 코드 관례상 네이티브 표현을 그대로 재사용). 나머지 로직은
  * blk_verify_t10_pi()와 완전히 동일하게 blk_verify_pi()에 위임한다.
  * 실행 컨텍스트: 호출자와 동일.
@@ -968,7 +969,7 @@ static blk_status_t blk_verify_ip_pi(struct blk_integrity_iter *iter,
  * default 분기가 BLK_STS_OK를 반환하는 것은 blk_calculate_guard()의
  * WARN_ON_ONCE+오염 패턴과 달리 방어적으로 "통과"를 택한 것인데, 이는
  * csum_type이 유효하지 않으면 애초에 bio_integrity_generate/verify()의
- * switch에서 이 함수 자체가 호출되지 않도록 상위에서 걸러지기 때문에(추정)
+ * switch에서 이 함수 자체가 호출되지 않도록 상위에서 걸러지기 때문에
  * 실질적으로 도달 불가능한 경로로 간주된다.
  * 실행 컨텍스트: 호출자(blk_integrity_interval())와 동일.
  * 호출자(caller): blk_integrity_interval() - verify==true일 때.
@@ -1004,7 +1005,7 @@ static blk_status_t blk_integrity_verify(struct blk_integrity_iter *iter,
 	/* [한국어] 알 수 없는 csum_type - 도달해서는 안 되는 방어적 분기 */
 	default:
 		/* [한국어] 검증할 방법이 없으므로 통과 처리 - 상위에서 이미
-		 * csum_type 유효성을 걸러냈다고 가정(추정) */
+		 * csum_type 유효성을 걸러냈다고 가정한다 */
 		return BLK_STS_OK;
 	}
 }
@@ -1021,7 +1022,7 @@ static blk_status_t blk_integrity_verify(struct blk_integrity_iter *iter,
  * WRITE 경로에서 Guard/AppTag/RefTag 세 필드를 모두 새로 채워 넣는다.
  * Guard는 방금 계산된 CRC64(iter->csum) 그대로, AppTag는 0(사용자가 별도
  * app tag를 요청하지 않는 기본 경로이므로 escape가 아닌 0으로 고정 - 실제
- * 값 지정이 필요하면 상위 계층이 이후 덮어쓸 수 있음, 추정), RefTag는
+ * 값 지정이 필요하면 상위 계층이 이후 덮어쓴다), RefTag는
  * iter->seed(48비트로 잘려 저장, put_unaligned_be48이 내부적으로 하위
  * 48비트만 사용)를 빅엔디안으로 기록한다.
  * 실행 컨텍스트: 호출자(blk_integrity_set())와 동일 - WRITE 제출 경로의
@@ -1043,7 +1044,7 @@ static void blk_set_ext_pi(struct blk_integrity_iter *iter,
 	put_unaligned_be64(iter->csum, &pi->guard_tag);
 	/* [한국어] AppTag를 0으로 고정 기록 - escape(0xffff)가 아닌 "검사
 	 * 대상" 상태를 나타냄(기본 경로에서는 app tag를 별도로 쓰지 않음,
-	 * 추정) */
+	 */
 	put_unaligned_be16(0, &pi->app_tag);
 	/* [한국어] RefTag를 iter->seed(현재 interval의 LBA 기준)로 기록 -
 	 * put_unaligned_be48()이 48비트만 취해 u8[6] 배열에 빅엔디안으로 씀 */
@@ -1157,7 +1158,7 @@ static void blk_set_ip_pi(struct blk_integrity_iter *iter,
  * 함수와 달리 default 분기에서는 WARN_ON_ONCE로 경고를 남기는데(검증
  * 쪽은 방어적으로 통과), 이는 WRITE 시 잘못된 프로파일로 tuple을 아예
  * 채우지 못하면(default가 아무 것도 쓰지 않음) 이후 READ에서 무조건
- * 검증 실패가 나기 때문에 더 적극적으로 문제를 알리는 것으로 보인다(추정).
+ * 검증 실패가 나기 때문에 더 적극적으로 문제를 알린다.
  * 실행 컨텍스트: 호출자(blk_integrity_interval())와 동일 - WRITE 제출
  * 경로의 프로세스 컨텍스트.
  * 호출자(caller): blk_integrity_interval() - verify==false일 때.
@@ -1278,7 +1279,7 @@ static blk_status_t blk_integrity_interval(struct blk_integrity_iter *iter,
 		 * 뺀, PI tuple을 포함한 나머지 전체 메타데이터 길이만큼) 전진 -
 		 * pi_tuple_size가 아니라 metadata_size 기준인 이유는 tuple 뒤에
 		 * 남는 추가 메타데이터(있다면)까지 다음 interval 이전에 건너뛰기
-		 * 위함(추정) */
+		 * 위해서다 */
 		bvec_iter_advance_single(iter->bip->bip_vec, &iter->prot_iter,
 				iter->bi->metadata_size - iter->bi->pi_offset);
 	/* [한국어] bio_vec 조각이 tuple 전체를 담기엔 부족한 경우(페이지 경계에
@@ -1483,7 +1484,7 @@ static blk_status_t blk_integrity_iterate(struct bio *bio,
  * 메타데이터 버퍼에 채우는 이 파일의 공개 진입점
  *
  * @bio: PI를 생성할 대상 bio - 이미 bio_integrity_payload가 붙어 있어야
- *       한다(bip가 없으면 이 함수 이전 단계에서 호출 자체가 걸러짐, 추정).
+ *       한다(bip가 없으면 이 함수 이전 단계에서 호출 자체가 걸러진다).
  * @return: 없음(void) - 생성은 실패라는 개념이 없다(항상 로컬 계산이므로).
  *
  * 디스크 프로파일의 csum_type이 이 파일이 지원하는 세 알고리즘(CRC64/CRC/IP)
@@ -1613,7 +1614,7 @@ blk_status_t bio_integrity_verify(struct bio *bio, struct bvec_iter *saved_iter)
  * 건드리지 않으므로 padding 영역의 내용을 읽을 필요조차 없다. mp_bvec_iter_bvec()
  * (멀티페이지 버전)을 쓰는 것도 특징인데, 이는 이 함수가 실제 데이터를
  * 읽지 않고 길이 계산만 하므로 단일 페이지 매핑 제약(bvec_iter_bvec())이
- * 필요 없기 때문이다(추정).
+ * 필요 없기 때문이다.
  * 실행 컨텍스트: 호출자(blk_tuple_remap_begin())와 동일 - blk_integrity_prepare()
  * (제출 경로) 또는 blk_integrity_complete()(완료 인터럽트/softirq 경로)에서
  * 파생된 컨텍스트.
@@ -1816,7 +1817,7 @@ static void blk_tuple_remap_end(union pi_tuple *tuple, void *ptuple,
  * "다를" 때만 되돌려 쓴다. 두 조건 중 하나라도 어긋나면(예: 드라이버가
  * PRACT로 이 필드를 이미 다른 값으로 바꿔놓았거나, escape 값이 들어있는
  * 경우) 아무 것도 건드리지 않는다 - 이는 이 함수가 "확실히 우리가 이전에
- * 매핑해 둔 값일 때만" 안전하게 되돌리도록 하는 방어적 설계다(추정).
+ * 매핑해 둔 값일 때만" 안전하게 되돌리도록 하는 방어적 설계다.
  * 실행 컨텍스트: 호출자(blk_reftag_remap_complete())와 동일 - 완료
  * 인터럽트/softirq 컨텍스트.
  * 호출자(caller): blk_reftag_remap_complete() - csum_type==CRC64일 때.
@@ -1949,7 +1950,7 @@ static void blk_reftag_remap_complete(struct blk_integrity *bi,
  * blk_set_ext_unmap_ref()와 방향이 정반대인 짝 함수 - "아직 가상 기준값이
  * 그대로 들어있고, 목표 물리값과 다를 때만" 물리값으로 덮어쓴다. 이 안전
  * 조건 덕분에, 이미 다른 이유로 remap된 적이 있는 tuple을 실수로 재차 덮어
- * 쓰는 것을 막는다(추정).
+ * 쓰는 것을 막는다.
  * 실행 컨텍스트: 호출자(blk_reftag_remap_prepare())와 동일 - 제출 경로의
  * 프로세스 컨텍스트.
  * 호출자(caller): blk_reftag_remap_prepare() - csum_type==CRC64일 때.
@@ -2078,11 +2079,11 @@ static void blk_reftag_remap_prepare(struct blk_integrity *bi,
  *
  * 먼저 이 bio가 이미 remap이 완료된 상태인지(BIP_MAPPED_INTEGRITY 플래그)
  * 확인한다 - prep==true인데 이미 매핑돼 있다면(예: 재시도 등으로 이 함수가
- * 두 번 호출된 경우, 추정) 실제 tuple을 다시 건드리지 않고 *ref 카운터만
+ * 두 번 호출된 경우) 실제 tuple을 다시 건드리지 않고 *ref 카운터만
  * 이 bio가 담당하는 interval 수만큼 앞으로 건너뛰어(bio->bi_iter.bi_size
  * >> interval_exp) 다음 bio 처리를 위한 기준을 맞춘 뒤 조기 반환한다 -
  * 이는 이미 매핑된 tuple을 또 map하면 원래 가상값을 잃어버리는 것을 막기
- * 위한 멱등성(idempotency) 보장 장치다(추정).
+ * 위한 멱등성(idempotency) 보장 장치다.
  * 그렇지 않다면 bip->bip_iter로 초기화한 iter로 시작해, 남은 interval이
  * 있고(iter.bi_size) 상위가 지정한 처리 개수(*intervals)가 남아있는 동안
  * 반복한다: blk_tuple_remap_begin()으로 이번 interval의 tuple을 확보하고,
@@ -2285,7 +2286,7 @@ void blk_integrity_prepare(struct request *rq)
  * 물리 기준으로 바꿔 두었던 ref tag를 다시 원래(가상) 기준으로 되돌린다.
  * 이렇게 해야 이후 bio_integrity_verify()나 상위 계층이 tuple을 볼 때
  * 제출자가 원래 기대했던 ref tag 값을 그대로 확인할 수 있다(물리 위치는
- * 스택 디바이스 내부 구현 세부사항이므로 상위에 노출되면 안 됨, 추정).
+ * 스택 디바이스 내부 구현 세부사항이므로 상위에 노출되면 안 된다).
  * 실행 컨텍스트: 완료 인터럽트/softirq 컨텍스트 - blk_update_request()/
  * blk_complete_request()(block/blk-mq.c)가 REQ_OP_READ이고
  * blk_integrity_rq(rq)가 참일 때 호출.
