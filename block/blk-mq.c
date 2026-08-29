@@ -1099,35 +1099,70 @@ static struct request *blk_mq_rq_ctx_init(struct blk_mq_alloc_data *data,
 	 * 전원 상태 확인 로직을 건너뛸 수 있다. */
 	if (data->flags & BLK_MQ_REQ_PM)
 		data->rq_flags |= RQF_PM;
-	/* [한국어] rq_flags: RQF_IO_STAT, RQF_USE_SCHED, RQF_PM 등 복합 플래그 */
-	/* [한국어] rq_flags: RQF_IO_STAT, RQF_USE_SCHED, RQF_PM 등 복합 플래그.
-	 * passthrough/flush/poll 등 특수 명령 구분에 사용 */
+	/* [한국어] 누적된 rq_flags를 확정한다. RQF_IO_STAT(통계 집계 대상),
+	 * RQF_USE_SCHED(스케줄러 경유), RQF_PM(전원 관리 명령이라 큐가 suspend
+	 * 상태여도 통과), RQF_SCHED_TAGS, RQF_RESV 등이 여기 담긴다. 이후
+	 * 제출·완료 경로의 거의 모든 분기가 이 필드를 본다. */
 	rq->rq_flags = data->rq_flags;
 
+	/* [한국어] ★ 태그 이중 구조 ★
+	 * blk-mq는 두 종류의 태그를 쓴다:
+	 *   internal_tag(스케줄러 태그) - 큐에 담아 두기 위한 논리적 슬롯.
+	 *     드라이버 태그보다 넉넉하게(보통 2배) 잡아 스케줄러가 재정렬할
+	 *     여지를 만든다. 하드웨어와는 무관한 번호다.
+	 *   tag(드라이버 태그)          - 실제 하드웨어 슬롯. NVMe에서는 이 번호가
+	 *     그대로 커맨드의 CID(Command Identifier)가 되어, SQ에 실린 커맨드와
+	 *     CQ로 돌아온 완료를 짝짓는다.
+	 * 스케줄러가 있으면 지금은 internal_tag만 잡고, 드라이버 태그는 실제
+	 * dispatch 직전에 따로 획득한다. 그래야 귀한 하드웨어 슬롯이 큐에서
+	 * 대기하는 동안 낭비되지 않는다. */
 	if (data->rq_flags & RQF_SCHED_TAGS) {
+		/* [한국어] 드라이버 태그는 아직 없음 — dispatch 시점에 채워진다. */
 		rq->tag = BLK_MQ_NO_TAG;
-		/* [한국어] scheduler 경로: internal_tag 가 CID(SQ slot) 역할 */
+		/* [한국어] 방금 획득한 것은 스케줄러 태그다. */
 		rq->internal_tag = tag;
 	} else {
-		/* [한국어] scheduler 없음: tag 가 직접 NVMe CID 역할 */
+		/* [한국어] 스케줄러가 없으면(NVMe 기본 "none") 처음부터 드라이버 태그를
+		 * 잡는다. 이 번호가 곧 NVMe CID다. */
 		rq->tag = tag;
-		/* [한국어] scheduler 미사용 시 internal_tag 는 쓰이지 않음 */
+		/* [한국어] 스케줄러 태그는 쓰지 않으므로 무효값으로 둔다. */
 		rq->internal_tag = BLK_MQ_NO_TAG;
 	}
+	/* [한국어] 타임아웃 값 0 = "큐 기본값(q->rq_timeout)을 쓰라". 드라이버가
+	 * 특정 명령에만 다른 타임아웃을 주고 싶으면 제출 전에 덮어쓴다. NVMe는
+	 * admin 명령과 I/O 명령에 서로 다른 타임아웃(admin_timeout / io_timeout
+	 * 모듈 파라미터)을 적용한다. */
 	rq->timeout = 0;
 
+	/* [한국어] 통계를 누적할 파티션(block_device). 아직 미정이며
+	 * blk_account_io_start()가 bio의 bi_bdev를 보고 채운다. */
 	rq->part = NULL;
+	/* [한국어] I/O가 실제로 장치에 발행된 시각. blk_mq_start_request()가
+	 * 채우며, start_time_ns(할당 시각)와 구분된다 — 둘의 차이가 "큐에서
+	 * 대기한 시간"이다. */
 	rq->io_start_time_ns = 0;
-	/* [한국어] rq->part: NVMe namespace 의 block_device — 파티션/통계 집계에 사용 */
+	/* [한국어] 통계용 섹터 수 스냅숏. 부분 완료로 blk_rq_sectors()가 줄어들어도
+	 * 원래 크기를 알 수 있도록 blk_mq_start_request()가 따로 보관한다. */
 	rq->stats_sectors = 0;
+	/* [한국어] 물리 세그먼트 수 — NVMe PRP 엔트리 또는 SGL 디스크립터 개수의
+	 * 근거가 된다. bio가 붙을 때 blk_mq_bio_to_request()가 채운다. */
 	rq->nr_phys_segments = 0;
-	/* [한국어] nr_phys_segments: NVMe PRP/SGL 엔트리 수 계산의 기초 데이터 */
+	/* [한국어] 무결성(PI) 메타데이터용 세그먼트 수. NVMe에서 메타데이터는
+	 * 데이터와 별도의 포인터(MPTR 또는 메타데이터 SGL)로 전달되므로
+	 * 카운터가 분리되어 있다. */
 	rq->nr_integrity_segments = 0;
+	/* [한국어] 완료 콜백. passthrough나 flush 상태 기계가 자기 후처리를
+	 * 등록하며, 일반 bio 기반 I/O에서는 NULL로 남아 bio_endio 경로를 탄다. */
 	rq->end_io = NULL;
-	/* [한국어] end_io: NVMe 명령 완료 콜백(nvme_complete_rq 등) 등록 전 초기화 */
+	/* [한국어] 완료 콜백에 넘길 사용자 데이터 포인터. */
 	rq->end_io_data = NULL;
 
+	/* [한국어] 인라인 암호화 관련 필드(키, DUN, keyslot)를 기본값으로 초기화한다.
+	 * 재사용된 request에 이전 I/O의 키가 남아 있으면 잘못된 키로 암복호하게
+	 * 되므로 반드시 필요하다. */
 	blk_crypto_rq_set_defaults(rq);
+	/* [한국어] 큐 삽입용 리스트 헤드를 자기 자신을 가리키는 빈 상태로 만든다.
+	 * 재사용 시 이전 리스트의 잔재가 남아 있으면 삽입할 때 리스트가 꼬인다. */
 	INIT_LIST_HEAD(&rq->queuelist);
 	/* tag was already set */
 	/* [한국어] deadline 0: timeout 타이머 재설정 전 초기 상태 */
@@ -1179,11 +1214,20 @@ static inline struct request *
 __blk_mq_alloc_requests_batch(struct blk_mq_alloc_data *data)
 {
 	/* [한국어] 배치 할당 결과 변수들 */
+	/* [한국어] tag = 이번에 처리 중인 태그 번호(= NVMe CID 후보),
+	 * tag_offset = 이번 배치가 시작하는 태그 번호. sbitmap이 연속 구간을
+	 * 통째로 잡아 주므로 시작 번호 + 비트 위치로 실제 번호를 구한다. */
 	unsigned int tag, tag_offset;
+	/* [한국어] 태그 번호로 request 객체를 찾을 수 있는 태그 세트. 스케줄러
+	 * 태그인지 드라이버 태그인지에 따라 다른 세트를 가리킨다. */
 	struct blk_mq_tags *tags;
 	struct request *rq;
-	/* [한국어] 한 번의 blk_mq_get_tags 호출로 얻은 tag 비트마스크 */
+	/* [한국어] 한 번의 blk_mq_get_tags() 호출로 얻은 태그들의 비트마스크.
+	 * 비트 하나가 태그 하나에 대응하며, unsigned long이므로 64비트 시스템에서
+	 * 한 번에 최대 64개까지 잡을 수 있다. */
 	unsigned long tag_mask;
+	/* [한국어] i = 비트마스크 순회 인덱스, nr = 지금까지 실제로 확보한 태그 수.
+	 * nr이 목표(data->nr_tags)에 도달하거나 태그가 고갈될 때까지 반복한다. */
 	int i, nr = 0;     /* nr: 이번 배치에서 할당한 총 tag 수 */
 
 	do {
@@ -1237,13 +1281,53 @@ __blk_mq_alloc_requests_batch(struct blk_mq_alloc_data *data)
 	return rq_list_pop(data->cached_rqs);
 }
 
+/*
+ * [한국어]
+ * blk_mq_limit_depth - 태그 할당 전에 스케줄러의 깊이 제한 정책을 적용
+ *
+ * @data: 할당 컨텍스트. rq_flags에 RQF_SCHED_TAGS/RQF_USE_SCHED를 추가하고,
+ *        스케줄러가 shallow_depth를 설정할 수 있다.
+ * @return: 없음
+ *
+ * === 왜 깊이를 제한하는가 ===
+ * 태그를 선착순으로 나눠 주면 문제가 생긴다. 백그라운드의 대량 비동기 쓰기
+ * (페이지 캐시 write-back)가 태그를 전부 점유하면, 사용자가 기다리고 있는
+ * 동기 읽기가 태그를 못 얻어 굶는다. 장치는 여전히 바쁘지만 체감 응답성은
+ * 무너진다.
+ * 그래서 스케줄러는 "비동기 요청은 전체 깊이의 일부까지만"이라는 제한을 둔다.
+ * mq-deadline의 dd_limit_depth()가 async 요청에 dd->async_depth를 적용하는 것이
+ * 그 예다. 이 제한은 sbitmap의 shallow_depth 기능으로 구현되어, 태그를 잡을 때
+ * 비트맵의 앞부분만 쓰도록 강제한다.
+ *
+ * === 제외되는 요청들 ===
+ * flush와 passthrough는 제한 대상이 아니다. 둘 다 "사용자나 파일시스템이
+ * 명시적으로 지금 필요하다고 요구한" 명령이라 지연시킬 이유가 없고, 개수도
+ * 적어 태그를 독점할 위험이 없다. NVMe의 admin 명령과 nvme-cli passthrough가
+ * 여기 해당한다.
+ *
+ * 실행 컨텍스트: 태그 할당 직전(프로세스 컨텍스트).
+ *
+ * 호출 체인:
+ *   __blk_mq_alloc_requests → [blk_mq_limit_depth]
+ *     → blk_mq_tag_busy (스케줄러 없을 때)
+ *     → ops->limit_depth (dd_limit_depth / bfq_limit_depth)
+ */
 static void blk_mq_limit_depth(struct blk_mq_alloc_data *data)
 {
+	/* [한국어] 스케줄러 콜백 테이블. 스케줄러가 있을 때만 사용한다. */
 	struct elevator_mq_ops *ops;
 
 	/* If no I/O scheduler has been configured, don't limit requests */
+	/* [한국어] 스케줄러가 없으면(NVMe 기본 "none") 제한할 주체가 없다.
+	 * 태그 풀 전체를 선착순으로 쓴다. NVMe에서 이것이 문제가 되지 않는 이유는
+	 * 하드웨어 큐가 여러 개라 한 CPU의 대량 쓰기가 다른 CPU의 읽기를
+	 * 직접 막지 않고, 태그 수(보통 1024)도 넉넉하기 때문이다. */
 	if (!data->q->elevator) {
-		/* [한국어] elevator 미사용: NVMe SQ depth 전체를 tag 할당 허용 */
+		/* [한국어] 이 하드웨어 큐가 활성 상태임을 표시한다. 여러 큐가 태그
+		 * 풀을 공유하는 구성(BLK_MQ_F_TAG_QUEUE_SHARED)에서, 활성 큐 수로
+		 * 나눠 각 큐가 공평한 몫만 쓰도록 하는 근거가 된다. NVMe PCIe는
+		 * 큐마다 독립 태그 풀을 가지므로 이 계산이 의미를 갖지 않지만,
+		 * 태그를 공유하는 fabrics 구성에서는 중요하다. */
 		blk_mq_tag_busy(data->hctx);
 		return;
 	}
@@ -1259,22 +1343,40 @@ static void blk_mq_limit_depth(struct blk_mq_alloc_data *data)
 	 * Flush/passthrough requests are special and go directly to the
 	 * dispatch list, they are not subject to the async_depth limit.
 	 */
+	/* [한국어] flush와 passthrough는 깊이 제한에서 면제한다(위 함수 주석 참고).
+	 * cmd_flags에서 연산 코드만 추출해 비교하는 이유는 상위 비트에 FUA 등
+	 * 다른 플래그가 섞여 있기 때문이다. 여기서 반환하면 RQF_USE_SCHED가
+	 * 설정되지 않아, 이 요청은 스케줄러를 거치지 않고 hctx->dispatch로
+	 * 직행하게 된다. */
 	if ((data->cmd_flags & REQ_OP_MASK) == REQ_OP_FLUSH ||
 	    blk_op_is_passthrough(data->cmd_flags))
-		/* [한국어] flush/passthrough: async_depth 제한 예외 (NVMe admin/vendor 명령 포함) */
 		return;
 
+	/* [한국어] 여기 도달한 요청은 일반 I/O이므로 예약 태그를 요구해서는 안 된다.
+	 * 예약 태그는 flush나 복구용 명령을 위한 것인데, 그것들은 위에서 이미
+	 * 반환되었기 때문이다. 위반은 호출자의 논리 오류이므로 경고를 남긴다. */
 	WARN_ON_ONCE(data->flags & BLK_MQ_REQ_RESERVED);
-	/* [한국어] RQF_USE_SCHED: NVMe IO scheduler(예: mq-deadline, bfq) 경유 표시 */
+	/* [한국어] "이 request는 스케줄러를 경유한다"고 표시한다. 이 플래그가 있으면
+	 * blk_mq_submit_bio()가 직접 발행 대신 스케줄러 삽입 경로를 택하고,
+	 * 완료 시에도 스케줄러에 통지가 간다. */
 	data->rq_flags |= RQF_USE_SCHED;
 
 	/*
 	 * By default, sync requests have no limit, and async requests are
 	 * limited to async_depth.
 	 */
+	/* [한국어] 스케줄러의 콜백 테이블을 꺼낸다. */
 	ops = &data->q->elevator->type->ops;
+	/* [한국어] limit_depth 콜백이 있으면 호출해 스케줄러가 data->shallow_depth를
+	 * 설정하게 한다. 위 영문 주석이 밝힌 기본 정책은 "동기 요청은 무제한,
+	 * 비동기 요청은 async_depth까지"다.
+	 *   mq-deadline: dd_limit_depth()가 async 요청에 dd->async_depth 적용.
+	 *     그 값은 /sys/.../iosched/async_depth로 조정 가능하다.
+	 *   BFQ        : bfq_limit_depth()가 프로세스별 상태까지 반영해 더 정교하게
+	 *     제한한다.
+	 * 콜백이 없는 스케줄러(kyber 등)는 자체 방식으로 지연을 제어하므로
+	 * 태그 단계의 제한이 필요 없다. */
 	if (ops->limit_depth)
-		/* [한국어] limit_depth(): scheduler 가 NVMe SQ depth/queue depth 정책 적용 */
 		ops->limit_depth(data->cmd_flags, data);
 }
 
@@ -1624,15 +1726,32 @@ struct request *blk_mq_alloc_request(struct request_queue *q, blk_opf_t opf,
 	/* [한국어] 먼저 plug cache 에서 재사용 가능한 NVMe request 탐색 */
 	rq = blk_mq_alloc_cached_request(q, opf, flags);
 	if (!rq) {
+		/* [한국어] 캐시가 비었거나 조건이 맞지 않았다 — 정식 할당 경로로 간다.
+		 * 할당 파라미터를 구조체에 모아 __blk_mq_alloc_requests()에 넘긴다. */
 		struct blk_mq_alloc_data data = {
+			/* [한국어] 태그를 잡을 대상 큐. */
 			.q		= q,
+			/* [한국어] NOWAIT/RESERVED 등 호출자가 지정한 동작 플래그를 그대로 전달. */
 			.flags		= flags,
+			/* [한국어] 0 = 깊이 제한 없음. bio 경로에서는 스케줄러가 async 쓰기를
+			 * 억제하려고 0이 아닌 값을 넣기도 하지만, passthrough는 사용자가
+			 * 명시적으로 보낸 명령이라 인위적으로 제한하지 않는다. */
 			.shallow_depth	= 0,
+			/* [한국어] 연산 플래그. passthrough라면 REQ_OP_DRV_IN/OUT이며,
+			 * 이 값으로 default/read/poll 중 어느 hctx 타입을 쓸지 결정된다. */
 			.cmd_flags	= opf,
+			/* [한국어] 초기 rq_flags. 스케줄러 사용 여부(RQF_SCHED_TAGS),
+			 * 예약 태그 여부(RQF_RESV) 등이 할당 함수 내부에서 채워진다. */
 			.rq_flags	= 0,
+			/* [한국어] 1개만 할당한다. 여기는 bio 제출 경로가 아니라 단건
+			 * 명령 경로이므로 배치 할당의 이득이 없다. */
 			.nr_tags	= 1,
+			/* [한국어] 캐시에 여분을 쌓지 않는다(nr_tags가 1이므로 의미도 없다). */
 			.cached_rqs	= NULL,
+			/* [한국어] NULL → 현재 CPU 기준으로 소프트웨어 컨텍스트를 자동 선택. */
 			.ctx		= NULL,
+			/* [한국어] NULL → ctx와 cmd_flags로부터 하드웨어 큐를 자동 선택.
+			 * 특정 큐를 지정해야 하면 blk_mq_alloc_request_hctx()를 쓴다. */
 			.hctx		= NULL
 		};
 		int ret;
@@ -1675,32 +1794,87 @@ out_queue_exit:
 EXPORT_SYMBOL(blk_mq_alloc_request);
 
 /*
- * blk_mq_alloc_request_hctx: 특정 hctx(특정 NVMe SQ) 에 바인딩된
- *   request 를 할당.
- *   NVMe 관점: 특정 nvme_queue 의 SQ slot 을 직접 지정하여
- *   affinity 를 강제할 때 사용.
+ * [한국어]
+ * blk_mq_alloc_request_hctx - 하드웨어 큐를 명시적으로 지정해 request를 할당
+ *
+ * @q:        대상 request_queue
+ * @opf:      연산 플래그
+ * @flags:    반드시 BLK_MQ_REQ_NOWAIT와 BLK_MQ_REQ_RESERVED를 모두 포함해야 한다.
+ * @hctx_idx: 사용할 하드웨어 큐 인덱스. NVMe에서는 특정 SQ/CQ 쌍을 지정하는 것.
+ * @return: 지정한 큐에 묶인 request. 실패 시 ERR_PTR
+ *          (-EINVAL 플래그 오류, -EIO 인덱스 범위 초과,
+ *           -EXDEV 그 큐가 어떤 CPU에도 매핑되지 않음, -EWOULDBLOCK 태그 없음)
+ *
+ * === 왜 큐를 직접 골라야 하는 경우가 있는가 ===
+ * 보통은 blk-mq가 현재 CPU를 기준으로 큐를 자동 선택하는 것이 최적이다.
+ * 그런데 "이 큐를 통해서만 보낼 수 있는 명령"이 존재한다. 대표적인 예가
+ * NVMe over Fabrics의 연결 설정이다 — nvmf_connect_io_queue()가 각 I/O 큐마다
+ * Connect 커맨드를 보내야 하는데, 그 커맨드는 반드시 대상 큐 자신을 통해
+ * 나가야 큐가 활성화된다. 자동 선택에 맡기면 엉뚱한 큐로 나가 버린다.
+ *
+ * === NOWAIT + RESERVED를 강제하는 이유 ===
+ * 위 영문 주석이 설명하는 바가 핵심이다. 태그 할당기가 잠들어 대기하면,
+ * 깨어났을 때 다른 CPU에서 실행될 수 있고 그 결과 다른 하드웨어 큐의 태그를
+ * 받게 된다. 그러면 "특정 큐 지정"이라는 목적 자체가 무너진다.
+ * 이 드문 용도를 위해 태그 할당기를 복잡하게 만드는 대신, 호출자에게
+ * NOWAIT(잠들지 않음)를 강제해 문제를 원천 차단했다.
+ * RESERVED를 함께 요구하는 것은, 이런 연결/복구용 명령이 일반 I/O가 태그를
+ * 모두 소진한 상황에서도 반드시 나갈 수 있어야 하기 때문이다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. NOWAIT이므로 잠들지 않는다.
+ *
+ * 에러 경로: 모든 실패가 ERR_PTR로 반환된다. 특히 -EXDEV는 "이 큐는 지금
+ * 어떤 온라인 CPU에도 매핑되어 있지 않다"는 뜻으로, 호출자(fabrics 연결 코드)는
+ * 그 큐를 건너뛰라는 신호로 해석한다. CPU 핫플러그로 큐가 고립될 수 있어
+ * 정상적으로 발생할 수 있는 상황이다.
+ *
+ * 호출 체인:
+ *   nvmf_connect_io_queue (drivers/nvme/host/fabrics.c)
+ *     → [blk_mq_alloc_request_hctx]
+ *       → blk_queue_enter → blk_mq_get_tag → blk_mq_rq_ctx_init
  */
 struct request *blk_mq_alloc_request_hctx(struct request_queue *q,
 	blk_opf_t opf, blk_mq_req_flags_t flags, unsigned int hctx_idx)
 {
+	/* [한국어] 할당 파라미터. hctx는 NULL로 시작하지만 아래에서 hctx_idx로
+	 * 직접 지정한 큐를 넣는다 — 이 함수의 핵심 차이점이다. */
 	struct blk_mq_alloc_data data = {
+		/* [한국어] 대상 큐. */
 		.q		= q,
+		/* [한국어] NOWAIT|RESERVED가 반드시 포함되어야 한다(아래에서 검증). */
 		.flags		= flags,
+		/* [한국어] 깊이 제한 없음 — 연결/복구용 명령을 인위적으로 막지 않는다. */
 		.shallow_depth	= 0,
+		/* [한국어] 연산 플래그. fabrics Connect는 REQ_OP_DRV_OUT을 쓴다. */
 		.cmd_flags	= opf,
+		/* [한국어] 아래에서 RQF_SCHED_TAGS / RQF_RESV가 추가된다. */
 		.rq_flags	= 0,
+		/* [한국어] 단건 할당. */
 		.nr_tags	= 1,
+		/* [한국어] plug 캐시를 쓰지 않는다 — 특정 큐 바인딩이 목적이므로
+		 * 캐시에서 꺼낸 임의의 큐 소속 request는 쓸 수 없다. */
 		.cached_rqs	= NULL,
+		/* [한국어] 아래에서 hctx의 cpumask에 속한 CPU로 직접 설정한다. */
 		.ctx		= NULL,
+		/* [한국어] 아래에서 q->queue_hw_ctx[hctx_idx]로 직접 설정한다. */
 		.hctx		= NULL
 	};
+	/* [한국어] 할당에 걸린 시간을 재기 위한 시작 시각. 0이면 측정하지 않는다. */
 	u64 alloc_time_ns = 0;
 	struct request *rq;
+	/* [한국어] 지정한 하드웨어 큐를 담당하는 CPU 중 하나. 소프트웨어 컨텍스트를
+	 * 고르는 데 쓴다. */
 	unsigned int cpu;
+	/* [한국어] 획득한 태그 번호 = NVMe Command ID. */
 	unsigned int tag;
 	int ret;
 
 	/* alloc_time includes depth and tag waits */
+	/* [한국어] QUEUE_FLAG_RQ_ALLOC_TIME이 켜진 큐(주로 blk-iocost 사용 시)에서만
+	 * 할당 시작 시각을 기록한다. 이 시각을 기준으로 삼는 이유는 영문 주석대로
+	 * "큐 깊이 제한과 태그 대기에 쓴 시간"까지 I/O 지연에 포함시키기 위해서다.
+	 * 태그를 못 얻어 기다린 시간도 사용자 입장에서는 I/O 지연이기 때문이다.
+	 * 플래그가 꺼져 있으면 clock 읽기 비용(수십 ns)조차 아낀다. */
 	if (blk_queue_rq_alloc_time(q))
 		alloc_time_ns = blk_time_get_ns();
 
@@ -1719,6 +1893,8 @@ struct request *blk_mq_alloc_request_hctx(struct request_queue *q,
 	if (hctx_idx >= q->nr_hw_queues)
 		return ERR_PTR(-EIO);
 
+	/* [한국어] 큐 사용 참조를 획득한다. 이후 모든 실패 경로는 out_queue_exit로
+	 * 가서 이 참조를 반납해야 한다. */
 	ret = blk_queue_enter(q, flags);
 	if (ret)
 		return ERR_PTR(ret);
@@ -1727,26 +1903,47 @@ struct request *blk_mq_alloc_request_hctx(struct request_queue *q,
 	 * Check if the hardware context is actually mapped to anything.
 	 * If not tell the caller that it should skip this queue.
 	 */
+	/* [한국어] 이 지점 이후의 실패는 모두 -EXDEV로 보고한다. 미리 설정해 두고
+	 * goto로 빠지는 커널의 흔한 오류 처리 관용구다. */
 	ret = -EXDEV;
-	/* [한국어] q->queue_hw_ctx[hctx_idx]: 직접 지정한 NVMe SQ(hctx) */
+	/* [한국어] 요청받은 인덱스의 하드웨어 컨텍스트를 꺼낸다. NVMe에서 이
+	 * hctx의 driver_data에는 해당 nvme_queue(SQ/CQ 쌍) 포인터가 들어 있다. */
 	data.hctx = q->queue_hw_ctx[hctx_idx];
+	/* [한국어] 이 하드웨어 큐에 매핑된 CPU가 하나라도 있는지 확인한다.
+	 * CPU 핫플러그로 이 큐를 담당하던 CPU들이 전부 오프라인되면 매핑이 비어
+	 * 있을 수 있다. 그런 큐로 명령을 보내면 완료 인터럽트를 받을 CPU가 없어
+	 * 영원히 대기하게 되므로, 호출자에게 건너뛰라고 알린다. */
 	if (!blk_mq_hw_queue_mapped(data.hctx))
 		goto out_queue_exit;
-	/* [한국어] hctx->cpumask 에서 online CPU 선택: 제출 CPU 결정 */
+	/* [한국어] 이 하드웨어 큐를 담당하는 CPU들 중 지금 온라인인 첫 번째를 고른다.
+	 * cpumask_first_and는 두 마스크의 교집합에서 최소 비트 번호를 돌려준다. */
 	cpu = cpumask_first_and(data.hctx->cpumask, cpu_online_mask);
+	/* [한국어] nr_cpu_ids 이상이면 "교집합이 비었다"는 뜻 — 매핑은 있지만
+	 * 그 CPU들이 모두 오프라인이다. 위와 같은 이유로 -EXDEV. */
 	if (cpu >= nr_cpu_ids)
 		goto out_queue_exit;
+	/* [한국어] 고른 CPU의 소프트웨어 컨텍스트를 가져온다. 현재 실행 중인 CPU가
+	 * 아니라 "그 큐에 속한" CPU를 쓰는 것이 이 함수의 특징이다. */
 	data.ctx = __blk_mq_get_ctx(q, cpu);
 
 	if (q->elevator)
-		/* [한국어] elevator 있으면 scheduler tag(RQF_SCHED_TAGS) 경유 */
+		/* [한국어] 스케줄러가 붙어 있으면 스케줄러 태그를 쓴다. 실제 드라이버
+		 * 태그(NVMe CID)는 dispatch 시점에 따로 획득한다. */
 		data.rq_flags |= RQF_SCHED_TAGS;
 	else
+		/* [한국어] 스케줄러가 없으면 드라이버 태그를 직접 쓴다. blk_mq_tag_busy()는
+		 * 이 하드웨어 큐가 활성 상태임을 표시해, 여러 큐가 태그 풀을 공유할 때
+		 * (BLK_MQ_F_TAG_QUEUE_SHARED) 공평하게 나눠 갖도록 한다. */
 		blk_mq_tag_busy(data.hctx);
 
+	/* [한국어] 예약 태그 영역을 쓰겠다고 표시한다. 위에서 이 플래그를 강제했으므로
+	 * 이 조건은 항상 참이지만, 플래그 전달 경로를 명시적으로 남겨 둔 것이다.
+	 * 예약 태그는 일반 I/O가 태그를 모두 소진해도 연결/복구 명령이 나갈 수 있게
+	 * 남겨 둔 몫이다. */
 	if (flags & BLK_MQ_REQ_RESERVED)
 		data.rq_flags |= RQF_RESV;
 
+	/* [한국어] 이후 실패는 -EWOULDBLOCK(태그 없음)으로 보고한다. */
 	ret = -EWOULDBLOCK;
 	/* [한국어] blk_mq_get_tag: 특정 NVMe SQ 의 빈 CID sbitmap 슬롯 확보 */
 	tag = blk_mq_get_tag(&data);
@@ -1755,17 +1952,32 @@ struct request *blk_mq_alloc_request_hctx(struct request_queue *q,
 	if (!(data.rq_flags & RQF_SCHED_TAGS))
 		/* [한국어] driver tag 이면 active CID 카운트 증가 (scheduler tag 는 별도 계산) */
 		blk_mq_inc_active_requests(data.hctx);
+	/* [한국어] 획득한 태그로 request 구조체를 초기화한다. blk_mq_tags_from_data()는
+	 * 스케줄러 태그 세트와 드라이버 태그 세트 중 이번에 쓴 쪽을 골라 준다.
+	 * 이 함수 안에서 rq->mq_hctx = data.hctx가 설정되어, 우리가 지정한
+	 * 하드웨어 큐에 request가 확정적으로 묶인다. */
 	rq = blk_mq_rq_ctx_init(&data, blk_mq_tags_from_data(&data), tag);
+	/* [한국어] 위에서 기록한 할당 시작 시각을 request에 반영한다. 측정을 안 했다면
+	 * 0이 들어가고, 그때는 이 함수가 현재 시각을 대신 채운다. */
 	blk_mq_rq_time_init(rq, alloc_time_ns);
-	/* [한국어] __data_len = 0: passthrough/admin request 데이터 필드 초기화 */
+	/* [한국어] 아래 네 줄은 bio 없는 request의 공통 초기화다(blk_mq_alloc_request와
+	 * 동일). 데이터 길이 0 — 아직 버퍼가 붙지 않았다. */
 	rq->__data_len = 0;
+	/* [한국어] 세그먼트 정렬 요약 비트 초기화(버퍼가 없으니 제약 없음). */
 	rq->phys_gap_bit = 0;
+	/* [한국어] 시작 섹터를 -1로 두어 "설정되지 않음"을 표시한다. */
 	rq->__sector = (sector_t) -1;
+	/* [한국어] bio 사슬을 비운다. */
 	rq->bio = rq->biotail = NULL;
 	return rq;
 
 out_queue_exit:
+	/* [한국어] 공통 실패 처리 — 위에서 획득한 큐 사용 참조를 반납한다.
+	 * 반납하지 않으면 참조가 새어 이후 컨트롤러 리셋이나 장치 제거가
+	 * 영원히 완료되지 않는다. */
 	blk_queue_exit(q);
+	/* [한국어] 미리 설정해 둔 오류 코드(-EXDEV 또는 -EWOULDBLOCK)를
+	 * ERR_PTR로 감싸 반환한다. */
 	return ERR_PTR(ret);
 }
 EXPORT_SYMBOL_GPL(blk_mq_alloc_request_hctx);
@@ -1930,44 +2142,165 @@ void blk_mq_free_plug_rqs(struct blk_plug *plug)
 		blk_mq_free_request(rq);
 }
 
+/*
+ * [한국어]
+ * blk_dump_rq_flags - request의 내부 상태를 커널 로그에 덤프(디버깅용)
+ *
+ * @rq:  덤프할 request
+ * @msg: 로그 앞에 붙일 문맥 문자열(예: "request botched")
+ * @return: 없음
+ *
+ * 블록 계층의 불변식이 깨졌을 때 무엇이 잘못됐는지 남기는 진단 도구다.
+ * 정상 경로에서는 절대 호출되지 않으며, blk_update_request()의 정합성 검사가
+ * 실패하거나 드라이버가 이상 상태를 발견했을 때만 실행된다.
+ *
+ * 출력하는 세 줄의 의미:
+ *   1행 - 어느 장치의 request이고 cmd_flags(연산 종류 + REQ_* 플래그)가 무엇인가
+ *   2행 - 시작 섹터와 전체/현재 섹터 수. nr != cnr이면 부분 완료 중이라는 뜻
+ *   3행 - bio 사슬의 head/tail 포인터와 남은 바이트 수
+ *
+ * NVMe 디버깅에서의 쓰임: 커맨드가 이상하게 실패할 때 이 덤프의 sector와
+ * cmd_flags를 nvme_setup_cmd()가 만든 SLBA/opcode와 대조하면, 블록 계층에서
+ * 이미 잘못된 것인지 드라이버 변환에서 잘못된 것인지 구분할 수 있다.
+ *
+ * 실행 컨텍스트: 어디서든(오류 경로). printk는 IRQ 컨텍스트에서도 안전하다.
+ *
+ * 호출 체인:
+ *   blk_update_request (정합성 검사 실패) → [blk_dump_rq_flags]
+ */
 void blk_dump_rq_flags(struct request *rq, char *msg)
 {
+	/* [한국어] 1행 — 문맥 메시지, 디스크 이름, cmd_flags(16진수).
+	 * disk가 NULL일 수 있는 이유: 아직 디스크에 연결되지 않은 큐(부팅 중)나
+	 * 디스크 없이 큐만 있는 경우(fabrics admin 큐)가 존재한다. 삼항 연산자로
+	 * "?"를 대신 출력해 NULL 역참조를 피한다.
+	 * __force는 sparse 정적 분석기에게 blk_opf_t(비트 타입)를 정수로 캐스팅하는
+	 * 것이 의도된 것임을 알려 경고를 억제한다. */
 	printk(KERN_INFO "%s: dev %s: flags=%llx\n", msg,
 		rq->q->disk ? rq->q->disk->disk_name : "?",
 		(__force unsigned long long) rq->cmd_flags);
 
+	/* [한국어] 2행 — 위치와 크기.
+	 *   blk_rq_pos          : 시작 섹터(512B 단위). NVMe SLBA로 변환될 값.
+	 *   blk_rq_sectors      : request 전체에 남은 섹터 수
+	 *   blk_rq_cur_sectors  : 현재 첫 bio에 남은 섹터 수
+	 * 두 값이 다르면 여러 bio가 붙어 있거나 부분 완료가 진행 중이라는 뜻이다.
+	 * "전체 < 현재"라는 모순이 보이면 그것이 바로 버그의 증거다. */
 	printk(KERN_INFO "  sector %llu, nr/cnr %u/%u\n",
 	       (unsigned long long)blk_rq_pos(rq),
 	       blk_rq_sectors(rq), blk_rq_cur_sectors(rq));
+	/* [한국어] 3행 — bio 사슬의 양 끝 포인터와 남은 바이트 수.
+	 * 포인터를 그대로 찍는 이유는 crash 덤프나 다른 로그의 포인터와
+	 * 대조해 같은 bio인지 확인하기 위해서다. bio == biotail이면 bio가
+	 * 하나뿐이고, bio == NULL인데 len != 0이면 심각한 불일치다. */
 	printk(KERN_INFO "  bio %p, biotail %p, len %u\n",
 	       rq->bio, rq->biotail, blk_rq_bytes(rq));
 }
 EXPORT_SYMBOL(blk_dump_rq_flags);
 
+/*
+ * [한국어]
+ * blk_account_io_completion - 완료된 바이트 수를 파티션 통계에 누적
+ *
+ * @req:   완료 처리 중인 request
+ * @bytes: 이번에 완료된 바이트 수(부분 완료면 그 일부)
+ * @return: 없음
+ *
+ * /proc/diskstats의 "읽은 섹터 수 / 쓴 섹터 수" 항목을 갱신한다. iostat의
+ * rkB/s와 wkB/s가 이 값의 시간당 변화율로 계산되므로, NVMe 대역폭 측정의
+ * 최종 근거가 되는 지점이다.
+ *
+ * 부분 완료마다 호출되기 때문에 "실제로 전송이 끝난 만큼"만 정확히 누적된다.
+ * request 단위로 한 번에 세면 부분 완료 상황에서 과대 계상된다.
+ *
+ * 실행 컨텍스트: 완료 경로 — 하드 IRQ이거나 softirq일 수 있다.
+ * part_stat_lock()은 preempt_disable() 수준의 per-CPU 보호라 IRQ 컨텍스트에서도
+ * 안전하다.
+ *
+ * 호출 체인:
+ *   blk_update_request / blk_complete_request → [blk_account_io_completion]
+ */
 static void blk_account_io_completion(struct request *req, unsigned int bytes)
 {
+	/* [한국어] 통계 대상 request인지 확인한다. nvme-cli의 passthrough처럼
+	 * 디스크 통계에 넣으면 안 되는 요청에는 이 플래그가 없다. */
 	if (req->rq_flags & RQF_IO_STAT) {
-		/* [한국어] RQF_IO_STAT: IO 통계 수집 요청 — NVMe namespace 별 sectors 완료량 기록 */
+		/* [한국어] 통계 그룹 인덱스를 구한다. STAT_READ / STAT_WRITE /
+		 * STAT_DISCARD / STAT_FLUSH 중 하나로, 이 인덱스 덕분에 iostat이
+		 * 읽기와 쓰기를 분리해 보여줄 수 있다. */
 		const int sgrp = op_stat_group(req_op(req));
 
+		/* [한국어] per-CPU 통계 영역 보호(내부적으로 preempt_disable). */
 		part_stat_lock();
-		/* [한국어] part_stat_add(sectors): NVMe namespace 에 완료한 sector 수 누적 */
+		/* [한국어] 완료 섹터 수를 누적한다. bytes >> 9는 바이트를 512B 섹터로
+		 * 변환하는 것으로, 4Kn NVMe라도 통계는 항상 512B 단위다.
+		 * req->part는 이 I/O가 향한 파티션의 통계 블록이며, 파티션 통계는
+		 * 상위 디스크 통계에도 함께 반영된다. */
 		part_stat_add(req->part, sectors[sgrp], bytes >> 9);
 		part_stat_unlock();
 	}
 }
 
+/*
+ * [한국어]
+ * blk_print_req_error - I/O 실패를 사람이 읽을 수 있는 형태로 커널 로그에 출력
+ *
+ * @req:    실패한 request
+ * @status: 실패 원인을 나타내는 blk_status_t
+ * @return: 없음
+ *
+ * dmesg에서 흔히 보는 다음과 같은 줄을 만드는 함수다:
+ *   "critical medium error, dev nvme0n1, sector 12345678 op 0x0:(READ)
+ *    flags 0x0 phys_seg 4 prio class 0"
+ *
+ * === printk_ratelimited를 쓰는 이유 ===
+ * NVMe 컨트롤러가 오동작하거나 링크가 끊기면 진행 중인 수백~수천 개의 커맨드가
+ * 한꺼번에 실패한다. 일반 printk로는 로그가 폭주해 정작 중요한 첫 오류가
+ * 스크롤로 밀려나고, 로그 출력 자체가 CPU를 잡아먹어 복구가 늦어진다.
+ * ratelimited 변형은 기본적으로 5초에 10줄로 제한하고 초과분은
+ * "callbacks suppressed"로 요약한다.
+ *
+ * === 각 필드를 출력하는 이유 ===
+ *   status  - 실패 종류(medium error / I/O error / target 없음 ...).
+ *             NVMe에서는 nvme_error_status()가 CQ 엔트리의 Status Field를
+ *             변환한 결과이므로, 이 문자열을 역추적하면 컨트롤러가 보낸
+ *             원래 상태 코드를 짐작할 수 있다.
+ *   sector  - 실패한 위치. 반복 실패 시 특정 LBA에 집중되는지(매체 불량)
+ *             흩어지는지(컨트롤러/링크 문제)로 원인을 구분한다.
+ *   op      - 읽기인지 쓰기인지. 읽기만 실패하면 매체 문제일 가능성이 높다.
+ *   flags   - FUA, PREFLUSH, RAHEAD 등. read-ahead 실패는 무해할 수 있다.
+ *   phys_seg- 세그먼트 수. 특정 세그먼트 수 이상에서만 실패하면 드라이버의
+ *             PRP/SGL 구성이나 IOMMU 매핑을 의심할 근거가 된다.
+ *   prio    - I/O 우선순위 클래스.
+ *
+ * 실행 컨텍스트: 완료 경로(IRQ 가능). printk는 IRQ에서도 안전하다.
+ *
+ * 호출 체인:
+ *   blk_update_request (오류이면서 조용히 하라는 지시가 없을 때)
+ *     → [blk_print_req_error]
+ */
 static void blk_print_req_error(struct request *req, blk_status_t status)
 {
+	/* [한국어] 속도 제한이 걸린 오류 로그 출력. 포맷 문자열이 두 줄로
+	 * 나뉘어 있지만 C의 인접 문자열 리터럴 연결로 한 줄이 된다. */
 	printk_ratelimited(KERN_ERR
 		"%s error, dev %s, sector %llu op 0x%x:(%s) flags 0x%x "
 		"phys_seg %u prio class %u\n",
+		/* [한국어] blk_status_t를 "critical medium error" 같은 문자열로 변환. */
 		blk_status_to_str(status),
+		/* [한국어] 디스크 이름. 아직 디스크가 없는 큐면 "?"를 출력한다. */
 		req->q->disk ? req->q->disk->disk_name : "?",
+		/* [한국어] 실패한 시작 섹터와 연산 코드(숫자). */
 		blk_rq_pos(req), (__force u32)req_op(req),
+		/* [한국어] 같은 연산 코드를 "READ"/"WRITE" 같은 문자열로도 함께 출력해
+		 * 사람이 16진수를 해석하지 않아도 되게 한다. */
 		blk_op_str(req_op(req)),
+		/* [한국어] cmd_flags에서 연산 코드 비트를 제외한 나머지 플래그.
+		 * REQ_OP_MASK를 반전해 AND하면 FUA/PREFLUSH/RAHEAD 등만 남는다. */
 		(__force u32)(req->cmd_flags & ~REQ_OP_MASK),
+		/* [한국어] 물리 세그먼트 수 = NVMe PRP/SGL 디스크립터 개수. */
 		req->nr_phys_segments,
+		/* [한국어] I/O 우선순위에서 클래스 부분(RT/BE/IDLE)만 추출. */
 		IOPRIO_PRIO_CLASS(req_get_ioprio(req)));
 }
 
@@ -1975,20 +2308,63 @@ static void blk_print_req_error(struct request *req, blk_status_t status)
  * Fully end IO on a request. Does not support partial completions, or
  * errors.
  */
+/*
+ * [한국어]
+ * blk_complete_request - 오류 없는 전체 완료를 위한 빠른 경로
+ *
+ * @req: 성공적으로 완료된 request
+ * @return: 없음
+ *
+ * === 왜 blk_update_request()와 별도로 존재하는가 ===
+ * blk_update_request()는 부분 완료, 오류 전파, 세그먼트 재계산, mixed merge
+ * 처리 등 모든 경우를 다루느라 무겁다. 그런데 NVMe 같은 장치의 압도적
+ * 다수 완료는 "오류 없이 전부 끝남"이라는 가장 단순한 경우다.
+ * 이 함수는 그 경우만 처리하는 대신 다음을 통째로 생략한다:
+ *   - 바이트 배분 계산(어차피 전부이므로 min() 불필요)
+ *   - 오류 상태 전파(오류가 없으므로)
+ *   - __data_len/__sector 갱신과 세그먼트 재계산(남는 것이 없으므로)
+ *   - 정합성 검사
+ * 위 영문 주석의 "Does not support partial completions, or errors"가 이 계약이다.
+ * 호출자 blk_mq_end_request()가 error == BLK_STS_OK인지 확인하고 이쪽으로 보낸다.
+ *
+ * NVMe 관점: CQ 인터럽트 하나에 여러 커맨드가 성공 완료로 들어오는 상황에서,
+ * 이 빠른 경로가 완료 처리 비용을 눈에 띄게 줄인다. 완료 경로의 CPU 비용은
+ * 곧 IOPS 한계이므로 의미 있는 최적화다.
+ *
+ * 실행 컨텍스트: 완료 경로(하드 IRQ 또는 softirq/IPI 이후).
+ *
+ * 호출 체인:
+ *   nvme_irq → nvme_handle_cqe → blk_mq_complete_request
+ *     → nvme_pci_complete_rq → nvme_complete_rq → blk_mq_end_request
+ *     → [blk_complete_request] → bio_endio
+ */
 static void blk_complete_request(struct request *req)
 {
+	/* [한국어] blk-flush 상태 기계가 관리하는 request인지 확인한다. 그렇다면
+	 * 아래에서 bio_endio()를 건너뛴다 — 데이터는 전송됐어도 POST_FLUSH가
+	 * 남아 지속성이 아직 보장되지 않았기 때문이다. */
 	const bool is_flush = (req->rq_flags & RQF_FLUSH_SEQ) != 0;
+	/* [한국어] 전체 완료이므로 "완료 바이트 = request 전체 크기"다. 부분 완료를
+	 * 지원하지 않으므로 인자로 받지 않고 여기서 직접 구한다. */
 	int total_bytes = blk_rq_bytes(req);
+	/* [한국어] bio 사슬의 머리. 아래 루프가 이 포인터부터 순회한다. */
 	struct bio *bio = req->bio;
 
+	/* [한국어] blktrace 완료 이벤트 기록. 상태는 무조건 BLK_STS_OK다
+	 * (이 함수는 성공 경로 전용이므로). */
 	trace_block_rq_complete(req, BLK_STS_OK, total_bytes);
 
-	/* [한국어] bio 가 없으면 상위 계층에 전달할 데이터 없음 (NVMe passthrough 등) */
+	/* [한국어] bio가 없는 request — nvme-cli passthrough처럼 커널이 직접 만든
+	 * 명령이거나, 데이터 없는 flush다. 상위에 알릴 bio가 없으므로 여기서 끝낸다.
+	 * 완료 통지는 rq->end_io 콜백이나 동기 대기자가 따로 받는다. */
 	if (!bio)
 		return;
 
+	/* [한국어] 읽기이면서 무결성(PI) 메타데이터가 붙어 있으면 검증 후처리를 한다.
+	 * 쓰기는 제출 전에 PI를 생성하므로 완료 시 할 일이 없고, 읽기만 완료 후
+	 * 검증이 필요하다. 오류 검사가 없는 이유는 이 함수가 성공 경로 전용이기
+	 * 때문이다(blk_update_request는 error == BLK_STS_OK 조건을 추가로 본다). */
 	if (blk_integrity_rq(req) && req_op(req) == REQ_OP_READ)
-		/* [한국어] READ + integrity: NVMe PI(Protection Information) 완료 처리 */
 		blk_integrity_complete(req, total_bytes);
 
 	/*
@@ -1999,21 +2375,37 @@ static void blk_complete_request(struct request *req)
 	 * (bio_endio 이전에 반납해야 상위 레이어의 evict_key 와 race 방지) */
 	blk_crypto_rq_put_keyslot(req);
 
+	/* [한국어] 전송 완료 섹터 수를 파티션 통계에 누적한다(iostat의 rkB/s, wkB/s). */
 	blk_account_io_completion(req, total_bytes);
 
+	/* [한국어] bio 사슬을 끝까지 순회하며 전부 완료시킨다. blk_update_request()의
+	 * 루프와 달리 바이트를 배분하지 않고 무조건 전부 끝내므로 훨씬 단순하다.
+	 * do-while인 이유: 위에서 bio != NULL을 이미 확인했으므로 첫 반복이 항상 유효하다. */
 	do {
-		/* [한국어] request 에 연결된 모든 bio 를 순회하며 완료 처리 */
+		/* [한국어] 다음 bio 포인터를 먼저 저장한다. bio_endio()가 호출되면
+		 * 그 bio는 해제될 수 있어 이후 bi_next를 읽으면 use-after-free다.
+		 * 이 한 줄이 순회의 안전을 보장하는 핵심이다. */
 		struct bio *next = bio->bi_next;
 
 		/* Completion has already been traced */
+		/* [한국어] request 단위 완료를 위에서 이미 기록했으므로, bio_endio()가
+		 * bio 단위로 다시 기록하지 않도록 플래그를 지운다. blkparse 출력에
+		 * 같은 완료가 중복으로 나타나는 것을 막는다. */
 		bio_clear_flag(bio, BIO_TRACE_COMPLETION);
 
+		/* [한국어] Zone Append였다면 장치가 실제로 기록한 LBA를 bio에 반영한다.
+		 * ZNS에서 쓸 위치는 장치가 정하므로, 상위가 "어디에 쓰였는지" 알려면
+		 * 완료 시점에 결과 LBA를 되돌려 주어야 한다. */
 		if (blk_req_bio_is_zone_append(req, bio))
 			blk_zone_append_update_request_bio(req, bio);
 
+		/* [한국어] flush 시퀀스 중이 아니라면 bio를 최종 완료시킨다. bi_end_io
+		 * 콜백이 실행되어 파일시스템의 완료 처리나 대기 프로세스 깨우기가 일어난다.
+		 * flush 시퀀스 중이라면 blk-flush 상태 기계가 전 단계를 마친 뒤 직접
+		 * 완료시키므로 여기서는 건너뛴다. */
 		if (!is_flush)
-			/* [한국어] flush sequence 가 아닌 경우 bio_endio 로 상위 계층에 완료 전달 */
 			bio_endio(bio);
+		/* [한국어] 미리 저장해 둔 다음 bio로 이동. */
 		bio = next;
 	} while (bio);
 
@@ -2022,10 +2414,18 @@ static void blk_complete_request(struct request *req)
 	 * can find how many bytes remain in the request
 	 * later.
 	 */
+	/* [한국어] end_io 콜백이 없는 request만 카운터를 초기화한다.
+	 * 왜 조건이 붙는가: end_io 콜백을 가진 request(주로 passthrough나 flush
+	 * 상태 기계)는 콜백 안에서 blk_rq_bytes()로 "얼마나 전송됐는지"를 읽어야
+	 * 하는 경우가 있다. 미리 0으로 지워 버리면 그 정보가 사라진다.
+	 * 콜백이 없다면 아무도 읽지 않으므로, 위 영문 주석대로 스택형 드라이버가
+	 * "남은 바이트 0"을 보고 완료를 판단할 수 있도록 깨끗이 비운다. */
 	if (!req->end_io) {
+		/* [한국어] bio 사슬 포인터를 끊는다. bio들은 이미 전부 완료되어
+		 * 해제되었을 수 있으므로 남겨 두면 위험한 dangling 포인터가 된다. */
 		req->bio = NULL;
-		/* [한국어] 완료 후 request 의 데이터/sector 카운터 초기화
-		 * (stacking driver 가 재사용 시 잔여 데이터 없음을 확인) */
+		/* [한국어] 남은 데이터 길이를 0으로. blk_rq_bytes()가 0을 반환하게 되어
+		 * "더 처리할 것이 없다"는 계약이 성립한다. */
 		req->__data_len = 0;
 	}
 }
@@ -2357,10 +2757,19 @@ static inline void blk_account_io_done(struct request *req, u64 now)
 	 */
 	/* [한국어] RQF_IO_STAT 있고 RQF_FLUSH_SEQ 없는 일반 NVMe IO 만 통계 집계 */
 	if ((req->rq_flags & (RQF_IO_STAT|RQF_FLUSH_SEQ)) == RQF_IO_STAT) {
+		/* [한국어] 읽기/쓰기/discard/flush를 구분하는 통계 그룹 인덱스. */
 		const int sgrp = op_stat_group(req_op(req));
 
+		/* [한국어] per-CPU 통계 보호(preempt_disable 수준). */
 		part_stat_lock();
+		/* [한국어] io_ticks 갱신 — "장치가 바빴던 시간"을 밀리초 단위로 누적한다.
+		 * iostat의 %util이 이 값에서 계산된다. 세 번째 인자 true는 "완료
+		 * 시점"임을 뜻해, in_flight가 0이 되는 순간까지를 바쁜 구간으로 계산한다.
+		 * NVMe처럼 큐 깊이가 깊은 장치에서 %util은 포화도를 뜻하지 않는다는
+		 * 점에 주의해야 한다 — 커맨드 하나만 진행 중이어도 100%로 표시된다. */
 		update_io_ticks(req->part, jiffies, true);
+		/* [한국어] 완료된 I/O 개수를 센다. iostat의 r/s, w/s가 이 값이며,
+		 * 곧 NVMe IOPS다. */
 		part_stat_inc(req->part, ios[sgrp]);
 		/* [한국어] nsecs[sgrp]: 완료까지 소요된 ns 누적 — NVMe IO latency 히스토그램 */
 		part_stat_add(req->part, nsecs[sgrp], now - req->start_time_ns);
@@ -2371,14 +2780,49 @@ static inline void blk_account_io_done(struct request *req, u64 now)
 	}
 }
 
+/*
+ * [한국어]
+ * blk_rq_passthrough_stats - passthrough 명령을 디스크 통계에 넣어도 되는지 판단
+ *
+ * @req: 검사할 passthrough request
+ * @return: true = 통계에 반영, false = 제외
+ *
+ * === 왜 이런 판단이 필요한가 ===
+ * passthrough 명령(nvme-cli의 ioctl 등)은 원래 통계에 넣지 않는 것이 기본이다.
+ * Identify나 Get Log Page 같은 관리 명령까지 "읽기 I/O"로 집계되면 iostat이
+ * 실제 데이터 전송량을 왜곡해 보여주기 때문이다.
+ * 그런데 nvme-cli로 대량의 읽기/쓰기를 수행하는 경우(예: 벤치마크 도구가
+ * passthrough로 I/O를 내는 경우)에는 통계에 잡혀야 유용하다. 그래서
+ * 큐 단위 옵션(/sys/block/nvme0n1/queue/iostats_passthrough)을 켜면
+ * "데이터 전송처럼 보이는" 명령만 골라 집계한다.
+ *
+ * === 네 단계 필터 ===
+ * 실제 데이터 접근인지 판별할 확실한 방법이 없으므로(커널은 벤더 고유
+ * 명령이 무엇을 하는지 알 수 없다) 휴리스틱을 쓴다. 위 영문 주석이 그 한계를
+ * 솔직히 밝히고 있다: "We don't know what a passthrough command does, but we
+ * know the payload size and data direction."
+ *
+ * NVMe가 특별히 언급되는 이유: 대부분의 드라이버는 passthrough request에
+ * bi_bdev를 설정하지 않는데, NVMe 드라이버는 설정한다. 그래서 이 기능이
+ * 실질적으로 NVMe에서만 동작한다.
+ *
+ * 실행 컨텍스트: I/O 제출 경로(blk_account_io_start 안).
+ *
+ * 호출 체인:
+ *   blk_mq_start_request → blk_account_io_start → [blk_rq_passthrough_stats]
+ */
 static inline bool blk_rq_passthrough_stats(struct request *req)
 {
 	struct bio *bio = req->bio;
 
+	/* [한국어] 필터 1 — 큐에서 이 기능이 켜져 있는가.
+	 * 기본값은 꺼짐이며, sysfs의 iostats_passthrough로 켤 수 있다. */
 	if (!blk_queue_passthrough_stat(req->q))
 		return false;
 
 	/* Requests without a bio do not transfer data. */
+	/* [한국어] 필터 2 — bio가 있는가. bio가 없다는 것은 데이터 버퍼가 없다는
+	 * 뜻이고, 그런 명령(Flush, Format 등)은 전송량이 0이라 집계할 것이 없다. */
 	if (!bio)
 		return false;
 
@@ -2387,6 +2831,9 @@ static inline bool blk_rq_passthrough_stats(struct request *req)
 	 * bio to track stats. Most drivers do not set the bdev for passthrough
 	 * requests, but nvme is one that will set it.
 	 */
+	/* [한국어] 필터 3 — 어느 블록 장치의 통계에 넣을지 알 수 있는가.
+	 * 통계는 block_device 단위로 누적되므로 대상이 없으면 기록할 곳이 없다.
+	 * 영문 주석대로 NVMe 드라이버만 passthrough에서 bi_bdev를 채워 준다. */
 	if (!bio->bi_bdev)
 		return false;
 
@@ -2396,8 +2843,17 @@ static inline bool blk_rq_passthrough_stats(struct request *req)
 	 * block size filters out most commands with payloads that don't
 	 * represent sector access.
 	 */
+	/* [한국어] 필터 4 — 전송 크기가 논리 블록의 배수인가.
+	 * 이것이 핵심 휴리스틱이다. 실제 데이터 읽기/쓰기라면 반드시 논리 블록
+	 * (NVMe LBAF의 LBADS, 보통 512 또는 4096B) 단위여야 한다. 반면 Identify는
+	 * 4096B로 우연히 맞을 수 있지만 Get Log Page나 벤더 명령은 임의 크기라
+	 * 대개 걸러진다. 완벽하지는 않지만 "대부분(most commands)"을 거른다는
+	 * 영문 주석의 표현이 이 한계를 정확히 인정하고 있다.
+	 * AND 마스크로 나머지를 구하는 것은 블록 크기가 항상 2의 거듭제곱이라
+	 * 가능한 최적화다. */
 	if (blk_rq_bytes(req) & (bdev_logical_block_size(bio->bi_bdev) - 1))
 		return false;
+	/* [한국어] 네 필터를 모두 통과 — 데이터 접근으로 간주해 통계에 반영한다. */
 	return true;
 }
 
@@ -2408,9 +2864,16 @@ static inline void blk_account_io_start(struct request *req)
 	/* [한국어] IO 통계 미수집 queue (blk_queue_io_stat 미설정): account 생략 */
 	if (!blk_queue_io_stat(req->q))
 		return;
+	/* [한국어] passthrough인데 위 휴리스틱을 통과하지 못하면 통계에서 제외한다.
+	 * 일반 I/O(bio에서 만들어진 request)는 이 조건에 걸리지 않고 항상 집계된다. */
 	if (blk_rq_is_passthrough(req) && !blk_rq_passthrough_stats(req))
 		return;
 
+	/* [한국어] "이 request는 통계 대상"이라고 표시한다. 완료 시점의
+	 * blk_account_io_done()과 blk_account_io_completion()이 이 플래그를 보고
+	 * 집계 여부를 결정하므로, 제출과 완료의 짝이 반드시 맞아야 한다.
+	 * 표시하지 않으면 in_flight 증가와 감소가 어긋나 iostat이 영원히
+	 * "처리 중"으로 표시된다. */
 	req->rq_flags |= RQF_IO_STAT;
 	/* [한국어] start_time_ns: NVMe 명령 제출 시각 — IO latency 측정 시작점 */
 	req->start_time_ns = blk_time_get_ns();
@@ -2421,26 +2884,71 @@ static inline void blk_account_io_start(struct request *req)
 	 * generated by the state machine in blk-flush.c is cloned onto the
 	 * lower device by dm-multipath we can get here without a bio.
 	 */
+	/* [한국어] 통계를 누적할 대상 block_device를 정한다. bio가 있으면 그
+	 * bio가 향한 파티션(bi_bdev)에 기록해, 파티션별 통계가 정확히 분리된다. */
 	if (req->bio)
-		/* [한국어] bio->bi_bdev: NVMe namespace block_device 와 연결 */
 		req->part = req->bio->bi_bdev;
 	else
+		/* [한국어] bio가 없는 예외 상황 — 위 영문 주석이 설명하는 유일한 경우다.
+		 * blk-flush 상태 기계가 만든 flush 명령을 dm-multipath가 하위 장치로
+		 * 복제할 때 bio 없는 request가 여기 도달할 수 있다. 그때는 파티션을
+		 * 특정할 수 없으므로 디스크 전체(part0)에 기록한다. */
 		req->part = req->q->disk->part0;
 
+	/* [한국어] per-CPU 통계 보호. */
 	part_stat_lock();
+	/* [한국어] io_ticks 갱신. 세 번째 인자 false는 "제출 시점"을 뜻하며,
+	 * 이때부터 장치가 바쁜 것으로 계산되기 시작한다. 완료 시점의 true 호출과
+	 * 짝을 이뤄 바쁜 구간의 길이를 만든다. */
 	update_io_ticks(req->part, jiffies, false);
-	/* [한국어] in_flight 증가: NVMe SQ 에 진입한 CID 반영 */
+	/* [한국어] in_flight 증가 — "지금 장치에서 처리 중인 요청 수". NVMe 관점에서는
+	 * SQ에 제출되어 아직 CQ로 완료가 돌아오지 않은 커맨드 수에 해당한다.
+	 * iostat의 aqu-sz(평균 큐 깊이)가 이 값에서 나온다.
+	 * 읽기(0)/쓰기(1) 슬롯을 op_is_write()로 구분한다.
+	 * _local_ 접두사는 원자적 연산 없이 per-CPU 카운터를 직접 조작한다는
+	 * 뜻으로, 제출 경로의 비용을 최소화한다(읽을 때 전 CPU를 합산한다). */
 	part_stat_local_inc(req->part, in_flight[op_is_write(req_op(req))]);
 	part_stat_unlock();
 }
 
+/*
+ * [한국어]
+ * __blk_mq_end_request_acct - request 완료 시 세 종류의 계정 처리를 묶어 수행
+ *
+ * @rq:  완료된 request
+ * @now: 완료 시각(ns). 호출자가 한 번 측정해 넘겨 여러 소비자가 공유한다.
+ * @return: 없음
+ *
+ * @now를 인자로 받는 이유가 중요하다. 아래 세 소비자가 각자 시각을 읽으면
+ * blk_time_get_ns()를 세 번 호출하게 되는데, 완료 경로는 IOPS만큼 실행되는
+ * 극한 핫패스라 이 비용이 무시할 수 없다. 게다가 각자 다른 시각을 쓰면
+ * 통계 간 미세한 불일치가 생긴다. 한 번 재서 공유하는 것이 빠르고 정확하다.
+ *
+ * 세 소비자:
+ *   1) blk_stat_add            - 지연 시간 히스토그램. blk-wbt가 쓰기 지연을
+ *      제어하고 blk-iolatency가 목표 지연을 지키는 근거가 된다.
+ *   2) blk_mq_sched_completed_request - 스케줄러에게 완료 통지. mq-deadline이
+ *      다음 배치를 시작하거나, BFQ가 서비스 시간을 청구하는 데 쓴다.
+ *   3) blk_account_io_done     - /proc/diskstats 갱신(iostat의 근거).
+ *
+ * 실행 컨텍스트: 완료 경로(하드 IRQ 또는 softirq/IPI 이후).
+ *
+ * 호출 체인:
+ *   blk_mq_end_request / blk_mq_end_request_batch
+ *     → [__blk_mq_end_request_acct]
+ */
 static inline void __blk_mq_end_request_acct(struct request *rq, u64 now)
 {
+	/* [한국어] RQF_STATS는 "이 request의 지연 시간을 통계에 넣으라"는 표시다.
+	 * QUEUE_FLAG_STATS가 켜진 큐(blk-wbt나 blk-iolatency가 활성화된 경우)에서만
+	 * 설정되므로, 아무도 지연 통계를 필요로 하지 않으면 이 비용조차 들지 않는다. */
 	if (rq->rq_flags & RQF_STATS)
-		/* [한국어] RQF_STATS: NVMe IO latency histogram/blktrace 기록 */
 		blk_stat_add(rq, now);
 
+	/* [한국어] 스케줄러에 완료를 알린다. 스케줄러가 없으면(NVMe 기본 "none")
+	 * 내부에서 즉시 반환하는 저비용 경로다. */
 	blk_mq_sched_completed_request(rq, now);
+	/* [한국어] 디스크 통계를 마감한다 — 완료 개수, 누적 지연, in_flight 감소. */
 	blk_account_io_done(rq, now);
 }
 

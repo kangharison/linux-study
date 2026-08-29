@@ -156,13 +156,47 @@ struct bio_alloc_cache {
  *   동기화: __read_mostly 섹션에 배치되어 CPU 캐시 상주; 초기화 후 읽기 전용.
  */
 static struct biovec_slab {
+	/* [한국어] 이 슬랩이 담당하는 bio_vec 배열의 원소 개수(상한).
+	 * 설정자: 아래 초기화 리스트에서 컴파일 타임에 고정.
+	 * 읽는 자: bvec_alloc()/bvec_free()가 슬랩 크기를 되돌려 계산할 때,
+	 *   그리고 bio_alloc_bioset()이 bi_max_vecs를 정할 때 참조한다.
+	 * 값 범위: 16 / 64 / 128 / BIO_MAX_VECS(=256) 네 단계.
+	 * 동기화: 부팅 시 한 번만 쓰이고 이후 읽기 전용이라 락이 필요 없다. */
 	int nr_vecs;
+	/* [한국어] slab 캐시 이름. /proc/slabinfo와 slabtop에 이 이름으로 나타나
+	 * 어느 크기 등급이 얼마나 쓰이는지 관찰할 수 있다.
+	 * 설정자: 아래 초기화 리스트(컴파일 타임 문자열 리터럴).
+	 * 읽는 자: biovec_init_pool()의 kmem_cache_create(). */
 	char *name;
+	/* [한국어] 실제 slab 캐시 포인터. NULL이면 아직 생성되지 않은 상태다.
+	 * 설정자: 부팅 시 biovec_init_pool()이 kmem_cache_create() 결과를 대입.
+	 * 읽는 자: bvec_alloc()이 kmem_cache_alloc(), bvec_free()가
+	 *   kmem_cache_free()를 호출할 때.
+	 * 동기화: 초기화 이후 변하지 않으므로 락 없이 읽어도 안전하다. */
 	struct kmem_cache *slab;
+	/* [한국어] __read_mostly: 이 배열을 "거의 읽기만 하는" 데이터 섹션에 배치한다.
+	 * 자주 쓰이는 다른 변수와 같은 캐시 라인에 놓이면, 그 변수가 갱신될 때마다
+	 * 이 배열까지 캐시에서 무효화되어(false sharing) 성능이 떨어진다. 별도
+	 * 섹션에 모아 두면 그런 간섭이 사라진다. bio 할당은 I/O마다 일어나는
+	 * 핫패스라 이 배치가 의미 있다. */
 } bvec_slabs[] __read_mostly = {
+	/* [한국어] 크기 등급을 4단계로 나눈 이유: 모든 bio에 최대 크기(256개) 배열을
+	 * 주면 대부분을 낭비하고, 정확한 크기마다 캐시를 만들면 캐시가 너무 많아진다.
+	 * 4단계는 메모리 낭비(최악 4배)와 캐시 종류 수 사이의 타협점이다.
+	 *
+	 * 16개 = 최대 64KiB(4KiB 페이지 기준) I/O. 파일시스템의 일반적인 읽기/쓰기와
+	 * 페이지 캐시 write-back 대부분이 이 등급에 들어간다. */
 	{ .nr_vecs = 16, .name = "biovec-16" },
+	/* [한국어] 64개 = 최대 256KiB. 대용량 순차 I/O나 read-ahead가 여기 해당한다. */
 	{ .nr_vecs = 64, .name = "biovec-64" },
+	/* [한국어] 128개 = 최대 512KiB. NVMe의 max_segments가 SGL 모드에서 256이므로,
+	 * 이 등급을 넘어서면 blk-merge.c의 bio_split_rw()가 분할할 가능성이 높아진다. */
 	{ .nr_vecs = 128, .name = "biovec-128" },
+	/* [한국어] BIO_MAX_VECS(=256) = bio 하나가 가질 수 있는 최대 segment 수.
+	 * 흩어진 사용자 버퍼를 O_DIRECT로 제출하는 경우 등 극단적 스캐터에서 쓰인다.
+	 * 이 값이 NVMe의 NVME_MAX_SEGS(4096/16 = 256)와 같은 것은 우연이 아니라,
+	 * 양쪽 모두 "4KiB 페이지 하나에 들어가는 디스크립터 수"라는 같은 제약에서
+	 * 나온 값이기 때문이다. */
 	{ .nr_vecs = BIO_MAX_VECS, .name = "biovec-max" },
 };
 
@@ -507,7 +541,7 @@ static void bio_free(struct bio *bio)  // NVMe 완료 후 bio 메모리를 풀�
 	struct bio_set *bs = bio->bi_pool;  // bio_set/mempool: NVMe doorbell 경로 메모리 보장
 	void *p = bio;
 
-	WARN_ON_ONCE(!bs);  // NVMe 명령/상태 불변조건 위반 방지용 assert
+	WARN_ON_ONCE(!bs);
 	WARN_ON_ONCE(bio->bi_max_vecs > BIO_MAX_VECS);  // bio당 segment 수: NVMe PRP list/SGL 길이에 영향
 
 	bio_uninit(bio);  // cgroup/integrity/crypto 정리: NVMe 완료 후 자원 해제
@@ -623,20 +657,53 @@ EXPORT_SYMBOL(bio_init);  // bio 필드 초기화: SLBA/length/OPC/PRP-SGL 기�
  * 호출 체인:
  *   bio_reuse() → [bio_reset()] → bio_uninit() + memset + bio_associate_blkg()
  */
-void bio_reset(struct bio *bio, struct block_device *bdev, blk_opf_t opf)  // bio 재사용: 동일 PRP/SGL 버퍼로 새 NVMe 명령 구성(추정)
+void bio_reset(struct bio *bio, struct block_device *bdev, blk_opf_t opf)
 {
+	/* [한국어] bvec 배열 포인터를 대피시킨다. 아래 memset이 이 필드까지 0으로
+	 * 만들어 버리는데, 배열 자체는 별도로 할당된 메모리(또는 bio 뒤에 붙은
+	 * 인라인 영역)라 포인터를 잃으면 접근할 방법이 사라진다. memset 직후
+	 * 곧바로 복원하는 이유가 이것이다. */
 	struct bio_vec          *bv = bio->bi_io_vec;
 
-	bio_uninit(bio);  // cgroup/integrity/crypto 정리: NVMe 완료 후 자원 해제
-	memset(bio, 0, BIO_RESET_BYTES);  // bio 상태 초기화: NVMe 명령 재사용 시 이전 상태 제거
-	atomic_set(&bio->__bi_remaining, 1);	// bio_chain 시 분할된 NVMe 명령 카운트
+	/* [한국어] bio가 붙들고 있던 외부 참조들을 먼저 놓는다: cgroup(blkg) 참조,
+	 * 무결성 페이로드, 인라인 암호화 컨텍스트. memset보다 먼저 해야 하는
+	 * 이유가 명확하다 — 0으로 덮은 뒤에는 어떤 참조를 갖고 있었는지 알 수
+	 * 없어 영구적인 참조 누수가 된다. */
+	bio_uninit(bio);
+	/* [한국어] bio 구조체의 앞부분을 0으로 초기화한다. 전체가 아니라
+	 * BIO_RESET_BYTES까지만 지우는 것이 핵심이다. 이 상수는
+	 * offsetof(struct bio, bi_max_vecs)로 정의되어 있어, 그 뒤에 오는
+	 * bi_max_vecs / bi_pool / bi_inline_vecs 같은 "할당 시점에 정해져
+	 * 재사용해도 변하지 않는" 필드들은 보존된다.
+	 * 이 경계 덕분에 bio를 해제·재할당하지 않고도 깨끗한 상태로 되돌릴 수 있다. */
+	memset(bio, 0, BIO_RESET_BYTES);
+	/* [한국어] 완료 카운터를 1로 되돌린다. __bi_remaining은 "이 bio가 완료되기
+	 * 위해 남은 완료 횟수"로, bio_chain()으로 자식 bio를 매달 때마다 증가한다.
+	 * 1이 기본값인 이유는 자기 자신의 완료 한 번을 뜻하기 때문이다.
+	 * 0으로 두면 첫 bio_endio()에서 카운터가 음수가 되어 완료 처리가 깨진다. */
+	atomic_set(&bio->__bi_remaining, 1);
+	/* [한국어] 대피시켜 둔 bvec 배열 포인터를 복원한다. 이 한 줄 덕분에
+	 * bio_reuse()가 데이터 버퍼를 그대로 물려받을 수 있다. */
 	bio->bi_io_vec = bv;
-	bio->bi_bdev = bdev;  // NVMe namespace/block device 선택
-	if (bio->bi_bdev)  // NVMe namespace/block device 선택
-		bio_associate_blkg(bio);  // cgroup 연결: NVMe blk-cgroup throttling/latency 우선순위 반영
-	bio->bi_opf = opf;  // NVMe OPC로 매핑되는 operation/flags
+	/* [한국어] 대상 블록 장치를 설정한다. NVMe라면 /dev/nvme0n1 같은
+	 * 네임스페이스의 block_device이며, 여기서 request_queue와 queue_limits가
+	 * 유도되어 이후 분할·병합 판정의 기준이 된다. */
+	bio->bi_bdev = bdev;
+	/* [한국어] 장치가 지정된 경우에만 cgroup 연결을 다시 맺는다. bio_uninit()이
+	 * 앞서 blkg 참조를 놓았으므로 여기서 새로 잡아야 한다. NULL 장치
+	 * (bio_reset(bio, NULL, ...))에서는 어느 cgroup에 속하는지 알 수 없어
+	 * 건너뛴다. */
+	if (bio->bi_bdev)
+		/* [한국어] 현재 태스크의 cgroup에 이 bio를 연결한다. 이 연결이 있어야
+		 * blk-throttle의 대역폭 제한과 blk-iocost의 가중치 배분이 올바른
+		 * cgroup에 청구된다. */
+		bio_associate_blkg(bio);
+	/* [한국어] 새 연산 플래그를 설정한다. 이 값이 나중에 nvme_setup_cmd()에서
+	 * NVMe opcode(Read 0x02 / Write 0x01 / Flush 0x00 등)로 변환된다.
+	 * memset 이후에 설정하는 순서가 중요하다 — 먼저 설정하면 지워진다. */
+	bio->bi_opf = opf;
 }
-EXPORT_SYMBOL(bio_reset);  // bio 재사용: 동일 PRP/SGL 버퍼로 새 NVMe 명령 구성(추정)
+EXPORT_SYMBOL(bio_reset);
 
 /**
  * bio_reuse - reuse a bio with the payload left intact
@@ -671,24 +738,58 @@ EXPORT_SYMBOL(bio_reset);  // bio 재사용: 동일 PRP/SGL 버퍼로 새 NVMe �
  * 호출 체인:
  *   상위 레이어(raid/dm) → [bio_reuse()] → bio_reset()
  */
-void bio_reuse(struct bio *bio, blk_opf_t opf)  // payload 유지 재사용: OPC만 Read/Write 전환해 NVMe SQ에 재제출(추정)
+void bio_reuse(struct bio *bio, blk_opf_t opf)
 {
-	unsigned short vcnt = bio->bi_vcnt, i;  // NVMe 명령의 PRP entry/SGL segment 개수 집계
-	bio_end_io_t *end_io = bio->bi_end_io;  // NVMe CQ 처리기와 연결된 상위 완료 콜백
-	void *private = bio->bi_private;  // NVMe 완료 콜백용 private 데이터(예: completion 구조체)
+	/* [한국어] bio_reset()이 지워 버릴 값들을 미리 스택에 대피시킨다.
+	 * vcnt = bvec 개수. 이것을 보존하는 것이 이 함수의 핵심이다 — 데이터
+	 * 버퍼(bi_io_vec 배열)는 그대로 두고 "몇 개가 유효한지"만 복원하면
+	 * 같은 메모리를 다시 쓸 수 있다. i는 아래 루프의 인덱스. */
+	unsigned short vcnt = bio->bi_vcnt, i;
+	/* [한국어] 완료 콜백. 읽기와 쓰기가 같은 완료 처리를 공유하는 경우가
+	 * 많아 보존한다. */
+	bio_end_io_t *end_io = bio->bi_end_io;
+	/* [한국어] 완료 콜백에 넘길 컨텍스트 포인터(주로 completion 구조체나
+	 * 상위 자료구조). end_io와 짝이므로 함께 보존한다. */
+	void *private = bio->bi_private;
 
-	WARN_ON_ONCE(bio_flagged(bio, BIO_CLONED));  // clone된 bio: PRP/SGL 원본을 공유하므로 중간 수정 불가
-	WARN_ON_ONCE(bio_integrity(bio));  // NVMe PI/DIF 보호 정보 처리: PRP/SGL과 함께 보호 정보가 일치해야 컨트롤러가 명령을 수락함
-	WARN_ON_ONCE(bio_has_crypt_ctx(bio));  // NVMe 명령/상태 불변조건 위반 방지용 assert
+	/* [한국어] 불변식 1 — 복제된 bio는 재사용할 수 없다. BIO_CLONED bio는
+	 * bi_io_vec 배열을 원본과 "공유"하므로, 여기서 크기를 다시 계산하면
+	 * 원본이 보는 상태와 어긋난다. */
+	WARN_ON_ONCE(bio_flagged(bio, BIO_CLONED));
+	/* [한국어] 불변식 2 — 무결성(PI) 페이로드가 붙어 있으면 안 된다.
+	 * 위 영문 주석이 밝히듯 아직 지원하지 않는다. PI는 LBA와 연동된 reftag를
+	 * 담고 있어, 다른 위치로 쓰려면 메타데이터를 다시 만들어야 하기 때문이다. */
+	WARN_ON_ONCE(bio_integrity(bio));
+	/* [한국어] 불변식 3 — 인라인 암호화 컨텍스트도 마찬가지다. DUN이 LBA에
+	 * 연동되므로 위치가 바뀌면 IV가 달라져야 한다. */
+	WARN_ON_ONCE(bio_has_crypt_ctx(bio));
 
-	bio_reset(bio, bio->bi_bdev, opf);  // bio 재사용: 동일 PRP/SGL 버퍼로 새 NVMe 명령 구성(추정)
+	/* [한국어] bio를 초기 상태로 되돌린다. 같은 장치(bi_bdev)를 유지하고
+	 * 새 연산 플래그(opf)를 적용한다. 이 호출로 bi_iter, bi_vcnt, bi_end_io,
+	 * bi_private가 전부 0/NULL이 되므로, 위에서 대피시킨 값들을 아래에서
+	 * 되돌려 놓아야 한다.
+	 * 주의: bi_io_vec 배열 "내용"은 bio_reset()이 건드리지 않는다. 그래서
+	 * 데이터 버퍼가 그대로 살아남는 것이 이 함수가 성립하는 근거다. */
+	bio_reset(bio, bio->bi_bdev, opf);
+	/* [한국어] 보존된 bvec들의 길이를 모두 더해 bi_size를 복원한다.
+	 * bio_reset()이 bi_iter를 통째로 0으로 만들었으므로 직접 다시 세야 한다.
+	 * 이 값이 나중에 nvme_setup_rw()에서 NLB(Number of Logical Blocks)로
+	 * 변환된다. */
 	for (i = 0; i < vcnt; i++)
-		bio->bi_iter.bi_size += bio->bi_io_vec[i].bv_len;  // NVMe 명령의 NLB(Length)로 변환됨
-	bio->bi_vcnt = vcnt;  // NVMe 명령의 PRP entry/SGL segment 개수 집계
-	bio->bi_private = private;  // NVMe 완료 콜백용 private 데이터(예: completion 구조체)
-	bio->bi_end_io = end_io;  // NVMe CQ 처리기와 연결된 상위 완료 콜백
+		bio->bi_iter.bi_size += bio->bi_io_vec[i].bv_len;
+	/* [한국어] 유효 bvec 개수를 복원한다. 이 값이 곧 물리 세그먼트 수의
+	 * 상한이 되어 PRP/SGL 디스크립터 개수에 영향을 준다. */
+	bio->bi_vcnt = vcnt;
+	/* [한국어] 완료 컨텍스트를 복원한다. end_io보다 먼저 복원하는 순서에
+	 * 특별한 의미는 없다(이 bio는 아직 제출되지 않아 완료가 발생할 수 없다). */
+	bio->bi_private = private;
+	/* [한국어] 완료 콜백을 복원한다. 이제 이 bio는 새 opf로 제출될 준비가 되었다.
+	 * 전형적 용도: 어떤 위치를 읽어 온 bio를 그대로 REQ_OP_WRITE로 바꿔
+	 * 다른 위치에 쓰는 복사 경로(dm/md의 미러링, 리커버리). 버퍼를 새로
+	 * 할당하고 복사하는 비용이 통째로 사라진다. */
+	bio->bi_end_io = end_io;
 }
-EXPORT_SYMBOL_GPL(bio_reuse);  // payload 유지 재사용: OPC만 Read/Write 전환해 NVMe SQ에 재제출(추정)
+EXPORT_SYMBOL_GPL(bio_reuse);
 
 /*
  * [한국어]
@@ -1082,7 +1183,7 @@ struct bio *bio_alloc_bioset(struct block_device *bdev, unsigned short nr_vecs, 
 
 	/* should not use nobvec bioset for nr_vecs > 0 */
 	if (WARN_ON_ONCE(!mempool_initialized(&bs->bvec_pool) && nr_vecs > 0))  // mempool 초기화: NVMe bio 할당 보장 풀 구성
-		return NULL;  // 할당 실패: NVMe doorbell 경로에서 NULL 반환(추정)
+		return NULL;
 
 	gfp = try_alloc_gfp(gfp);
 	if (bs->cache && nr_vecs <= BIO_INLINE_VECS) {
@@ -1090,11 +1191,31 @@ struct bio *bio_alloc_bioset(struct block_device *bdev, unsigned short nr_vecs, 
 		 * Set REQ_ALLOC_CACHE even if no cached bio is available to
 		 * return the allocated bio to the percpu cache when done.
 		 */
-		opf |= REQ_ALLOC_CACHE;	// NVMe 고속 경로 재할당을 위해 per-CPU cache 사용
-		bio = bio_alloc_percpu_cache(bs);  // per-CPU bio cache: NVMe 고속 경로 재할당 지연 감소
+		/* [한국어] REQ_ALLOC_CACHE를 세워 "이 bio는 완료 시 per-CPU 캐시로
+		 * 돌려보내라"고 표시한다. 위 영문 주석이 밝히듯, 지금 캐시가 비어
+		 * 있어 슬랩에서 할당하더라도 이 플래그는 설정한다 — 반납 경로를
+		 * 캐시 쪽으로 유도해 다음 할당을 빠르게 만들기 위해서다. */
+		opf |= REQ_ALLOC_CACHE;
+		/* [한국어] per-CPU 캐시에서 bio를 꺼낸다. 락도 원자적 연산도 없이
+		 * 자기 CPU의 리스트에서 pop하는 것이라 슬랩 할당보다 훨씬 빠르다.
+		 * 캐시가 비었으면 NULL을 반환하고, 아래에서 슬랩으로 폴백한다.
+		 * NVMe처럼 초당 수십만 개의 bio를 만드는 워크로드에서 이 캐시가
+		 * 할당 비용을 크게 줄인다. */
+		bio = bio_alloc_percpu_cache(bs);
 	} else {
-		opf &= ~REQ_ALLOC_CACHE;  // per-CPU cache 사용: NVMe doorbell latency에 민감한 재할당 경로 가속(추정)
-		p = kmem_cache_alloc(bs->bio_slab, gfp);  // NVMe 핫패스 bio 할당: 빠른 재사용을 위해 슬랩에서 획득
+		/* [한국어] REQ_ALLOC_CACHE를 "지운다". 이 경로는 캐시를 쓸 수 없는
+		 * 경우이기 때문이다 — bio_set에 캐시가 없거나(bs->cache == NULL),
+		 * 요청한 bvec 수가 인라인 한도(BIO_INLINE_VECS)를 넘어 캐시된
+		 * 고정 크기 bio로는 담을 수 없다.
+		 * 플래그를 반드시 지워야 하는 이유: 호출자가 opf에 이미 이 비트를
+		 * 켜서 넘겼을 수 있는데, 그대로 두면 완료 시 bio_put()이 캐시로
+		 * 반납을 시도해 크기가 맞지 않는 객체가 캐시에 섞여 들어간다. */
+		opf &= ~REQ_ALLOC_CACHE;
+		/* [한국어] 슬랩 캐시에서 직접 할당한다. bs->bio_slab의 오브젝트 크기는
+		 * front_pad + sizeof(bio) + back_pad이므로, 반환된 p에 front_pad를
+		 * 더해야 bio 본체 위치가 된다(아래 줄). front_pad에는 드라이버 전용
+		 * 데이터가 들어가는데, NVMe의 경우 struct nvme_iod가 이 자리를 쓴다. */
+		p = kmem_cache_alloc(bs->bio_slab, gfp);
 		if (p)
 			bio = p + bs->front_pad;
 	}
@@ -1120,7 +1241,7 @@ struct bio *bio_alloc_bioset(struct block_device *bdev, unsigned short nr_vecs, 
 		 * allocations just go back to the slab allocation.
 		 */
 		if (!(saved_gfp & __GFP_DIRECT_RECLAIM))
-			return NULL;  // 할당 실패: NVMe doorbell 경로에서 NULL 반환(추정)
+			return NULL;
 
 		punt_bios_to_rescuer(bs);  // 교착 상태 회피: NVMe 제출 경로를 workqueue로 우회
 
@@ -1128,7 +1249,11 @@ struct bio *bio_alloc_bioset(struct block_device *bdev, unsigned short nr_vecs, 
 		 * Don't rob the mempools by returning to the per-CPU cache if
 		 * we're tight on memory.
 		 */
-		opf &= ~REQ_ALLOC_CACHE;  // per-CPU cache 사용: NVMe doorbell latency에 민감한 재할당 경로 가속(추정)
+		/* [한국어] 메모리 압박으로 폴백 경로에 들어섰다. 위 영문 주석대로
+		 * "메모리가 빠듯할 때 per-CPU 캐시로 반납해 mempool을 축내지 않도록"
+		 * 플래그를 지운다. 이 bio는 완료 시 캐시가 아니라 mempool로 직접
+		 * 돌아가, 다른 스레드가 mempool에서 할당받을 수 있게 된다. */
+		opf &= ~REQ_ALLOC_CACHE;
 
 		p = mempool_alloc(&bs->bio_pool, saved_gfp);	// mempool 보장: NVMe 제출이 영구 블록되지 않음
 		bio = p + bs->front_pad;
@@ -1186,7 +1311,7 @@ struct bio *bio_kmalloc(unsigned short nr_vecs, gfp_t gfp_mask)
 	struct bio *bio;
 
 	if (nr_vecs > BIO_MAX_INLINE_VECS)
-		return NULL;  // 할당 실패: NVMe doorbell 경로에서 NULL 반환(추정)
+		return NULL;
 	return kmalloc(sizeof(*bio) + nr_vecs * sizeof(struct bio_vec),
 			gfp_mask);
 }
@@ -1532,7 +1657,11 @@ void bio_put(struct bio *bio)  // NVMe CID 회수/CQ 처리 완료 후 bio 참�
 			return;
 	}
 	if (bio->bi_opf & REQ_ALLOC_CACHE)	// NVMe 완료 후 cache로 회수하여 재할당 지연 감소
-		bio_put_percpu_cache(bio);  // per-CPU cache로 bio 회수: NVMe doorbell latency 민감 경로(추정)
+		/* [한국어] per-CPU 캐시로 반납한다. 슬랩/mempool로 돌려보내는 것보다
+		 * 훨씬 싸고, 같은 CPU에서 곧 이어질 다음 bio 할당이 이 객체를 바로
+		 * 재사용한다. 초당 수십만 bio를 만드는 NVMe 워크로드에서 할당·해제
+		 * 비용을 눈에 띄게 줄여 준다. */
+		bio_put_percpu_cache(bio);
 	else
 		bio_free(bio);  // NVMe 완료 후 bio 메모리를 풀로 반환
 }
@@ -1573,11 +1702,11 @@ static int __bio_clone(struct bio *bio, struct bio *bio_src, gfp_t gfp)
 	}
 
 	if (bio_crypt_clone(bio, bio_src, gfp) < 0)  // NVMe inline crypto/Opal: PRP/SGL 데이터와 암호화 컨텍스트가 nvme_queue_rq에서 연결됨
-		return -ENOMEM;  // 메모리 부족: NVMe 명령 제출 전 abort(추정)
+		return -ENOMEM;
 	if (bio_integrity(bio_src) &&  // NVMe PI/DIF 보호 정보 처리: PRP/SGL과 함께 보호 정보가 일치해야 컨트롤러가 명령을 수락함
 	    bio_integrity_clone(bio, bio_src, gfp) < 0)
-		return -ENOMEM;  // 메모리 부족: NVMe 명령 제출 전 abort(추정)
-	return 0;  // 정상 완료: NVMe 처리 흐름 계속
+		return -ENOMEM;
+	return 0;
 }
 
 /**
@@ -1620,11 +1749,11 @@ struct bio *bio_alloc_clone(struct block_device *bdev, struct bio *bio_src,  // 
 
 	bio = bio_alloc_bioset(bdev, 0, bio_src->bi_opf, gfp, bs);  // NVMe OPC로 매핑되는 operation/flags
 	if (!bio)
-		return NULL;  // 할당 실패: NVMe doorbell 경로에서 NULL 반환(추정)
+		return NULL;
 
 	if (__bio_clone(bio, bio_src, gfp) < 0) {
 		bio_put(bio);  // NVMe CID 회수/CQ 처리 완료 후 bio 참조 해제
-		return NULL;  // 할당 실패: NVMe doorbell 경로에서 NULL 반환(추정)
+		return NULL;
 	}
 	bio->bi_io_vec = bio_src->bi_io_vec;
 
@@ -1702,10 +1831,10 @@ EXPORT_SYMBOL(bio_init_clone);  // caller 제공 메모리 clone: NVMe 메타데
 static inline bool bio_full(struct bio *bio, unsigned len)  // bio가 가득 찼는지 확인: NVMe segment/MDTS 한도 초과 신호
 {
 	if (bio->bi_vcnt >= bio->bi_max_vecs)	// NVMe segment 한도 초과 시 새 bio 필요
-		return true;  // 조건 만족: NVMe 분기/병합/완료 판정
+		return true;
 	if (bio->bi_iter.bi_size > BIO_MAX_SIZE - len)	// NVMe 최대 전송 크기 초과 방지
-		return true;  // 조건 만족: NVMe 분기/병합/완료 판정
-	return false;  // 조건 불만족: NVMe 분기/병합/완료 판정
+		return true;
+	return false;
 }
 
 /*
@@ -1734,19 +1863,19 @@ static bool bvec_try_merge_page(struct bio_vec *bv, struct page *page,  // 물�
 	phys_addr_t page_addr = page_to_phys(page);  // 페이지 물리 주소 -> NVMe DMA/PRP 주소 변환
 
 	if (vec_end_addr + 1 != page_addr + off)
-		return false;  // 조건 불만족: NVMe 분기/병합/완료 판정
+		return false;
 	if (xen_domain() && !xen_biovec_phys_mergeable(bv, page))	// XEN 하이퍼바이저 환경에서 NVMe DMA 안전성
-		return false;  // 조건 불만족: NVMe 분기/병합/완료 판정
+		return false;
 
 	if ((vec_end_addr & PAGE_MASK) != ((page_addr + off) & PAGE_MASK)) {	// 페이지 경계를 넘는 NVMe PRP 병합 시 주의
 		if (IS_ENABLED(CONFIG_KMSAN))
-			return false;  // 조건 불만족: NVMe 분기/병합/완료 판정
+			return false;
 		if (bv->bv_page + bv_end / PAGE_SIZE != page + off / PAGE_SIZE)
-			return false;  // 조건 불만족: NVMe 분기/병합/완료 판정
+			return false;
 	}
 
 	bv->bv_len += len;
-	return true;  // 조건 만족: NVMe 분기/병합/완료 판정
+	return true;
 }
 
 /*
@@ -1785,9 +1914,9 @@ bool bvec_try_merge_hw_page(struct request_queue *q, struct bio_vec *bv,  // 물
 	phys_addr_t addr2 = page_to_phys(page) + offset + len - 1;  // 페이지 물리 주소 -> NVMe DMA/PRP 주소 변환
 
 	if ((addr1 | mask) != (addr2 | mask))
-		return false;  // 조건 불만족: NVMe 분기/병합/완료 판정
+		return false;
 	if (len > queue_max_segment_size(q) - bv->bv_len)
-		return false;  // 조건 불만족: NVMe 분기/병합/완료 판정
+		return false;
 	return bvec_try_merge_page(bv, page, len, offset);  // 물리 인접 페이지 병합: PRP list 길이를 줄여 NVMe 명령 오버헤드 감소
 }
 
@@ -1827,8 +1956,21 @@ void __bio_add_page(struct bio *bio, struct page *page,  // bio_vec 추가: NVMe
 	WARN_ON_ONCE(bio_flagged(bio, BIO_CLONED));  // clone된 bio: PRP/SGL 원본을 공유하므로 중간 수정 불가
 	WARN_ON_ONCE(bio_full(bio, len));  // bio가 가득 찼는지 확인: NVMe segment/MDTS 한도 초과 신호
 
-	if (is_pci_p2pdma_page(page))	// NVMe P2PDMA/CMB 페이지: 병합 금지
-		bio->bi_opf |= REQ_NOMERGE;  // NVMe merge 금지: P2PDMA/CMB나 특수 버퍼에서 PRP/SGL 단순화(추정)
+	/* [한국어] 이 페이지가 PCI P2PDMA(peer-to-peer DMA) 메모리인지 검사한다.
+	 * NVMe에서는 컨트롤러의 CMB(Controller Memory Buffer)나 다른 PCIe 장치의
+	 * BAR 영역이 여기 해당한다 — 데이터가 시스템 RAM을 거치지 않고 장치끼리
+	 * 직접 오가는 경로다. */
+	if (is_pci_p2pdma_page(page))
+		/* [한국어] P2PDMA 페이지가 섞이면 병합을 금지한다.
+		 * 이유: DMA 매핑 방식 자체가 다르다. 일반 시스템 메모리는
+		 * dma_map_phys()로 IOVA를 얻지만, P2PDMA 메모리는
+		 * pci_p2pdma_bus_addr_map()으로 PCI 버스 주소를 직접 계산한다
+		 * (block/blk-mq-dma.c의 blk_dma_map_bus 참고).
+		 * 한 request 안에 두 종류가 섞이면 세그먼트마다 매핑 방식을 바꿔야
+		 * 하는데, blk_dma_map_iter_start()는 request 단위로 한 번만 P2PDMA
+		 * 여부를 판정하므로 그런 혼합을 처리할 수 없다. 그래서 애초에
+		 * 병합되지 않도록 막는다. */
+		bio->bi_opf |= REQ_NOMERGE;
 
 	bvec_set_page(&bio->bi_io_vec[bio->bi_vcnt], page, len, off);	// bio_vec 추가 -> 후속 PRP/SGL 변환
 	bio->bi_iter.bi_size += len;  // NVMe 명령의 NLB(Length)로 변환됨
@@ -1846,11 +1988,53 @@ EXPORT_SYMBOL_GPL(__bio_add_page);  // bio_vec 추가: NVMe DMA descriptor 구�
  * is available for the added data.  No merging into an existing segment
  * will be performed.
  */
-void bio_add_virt_nofail(struct bio *bio, void *vaddr, unsigned len)  // 커널 가상 주소를 bio에 추가: NVMe PRP/SGL로 변환
+/*
+ * [한국어]
+ * bio_add_virt_nofail - 커널 직접 매핑(lowmem) 주소를 bio에 세그먼트로 추가
+ *
+ * @bio:   대상 bio
+ * @vaddr: 추가할 데이터의 커널 가상 주소. 반드시 직접 매핑 영역(kmalloc,
+ *         페이지 할당자 등에서 얻은 주소)이어야 한다. vmalloc 주소는 물리적으로
+ *         연속이 아니라 virt_to_page()가 잘못된 결과를 준다.
+ * @len:   길이. 페이지 경계를 넘어도 되지만, 그 경우 물리적 연속성은 호출자가
+ *         보장해야 한다(직접 매핑이므로 보장된다).
+ * @return: 없음
+ *
+ * === 이름의 "nofail"이 뜻하는 것 ===
+ * 이 함수는 실패를 반환하지 않는다. 대신 호출자가 "bvec 자리가 남아 있음"을
+ * 미리 보장해야 한다는 계약을 진다(영문 주석의 "The caller must have ensure
+ * a segment is available"). 자리가 없으면 __bio_add_page() 안의
+ * WARN_ON_ONCE(bio_full(...))가 경고를 남기고 자료구조가 손상된다.
+ * 이런 설계를 택한 이유는 호출자들이 대개 bio를 방금 자기가 할당해 크기를
+ * 정확히 알고 있는 커널 내부 코드라, 매번 반환값을 검사하는 것이 불필요한
+ * 잡음이기 때문이다.
+ *
+ * === 어디에 쓰이는가 ===
+ * 커널이 스스로 만든 버퍼를 장치에 보낼 때다. NVMe 경로에서는 nvme-cli가
+ * 아닌 드라이버 내부 명령(로그 페이지 조회, 펌웨어 이미지 전송 등)이
+ * blk_rq_map_kern() 경유로 이 함수에 도달한다.
+ * 병합 시도를 하지 않는(No merging) 이유도 같다 — 호출자가 세그먼트 배치를
+ * 이미 계획했으므로 커널이 임의로 합치면 그 계획이 어긋난다.
+ *
+ * 실행 컨텍스트: 태스크 컨텍스트. 할당이나 대기가 없어 원자적 컨텍스트에서도
+ * 안전하지만, 관례상 제출 준비 단계에서 호출된다.
+ *
+ * 호출 체인:
+ *   blk_rq_map_kern / 드라이버 내부 명령 준비 → [bio_add_virt_nofail]
+ *     → __bio_add_page → bvec_set_page
+ */
+void bio_add_virt_nofail(struct bio *bio, void *vaddr, unsigned len)
 {
-	__bio_add_page(bio, virt_to_page(vaddr), len, offset_in_page(vaddr));  // bio_vec 추가: NVMe DMA descriptor 구성의 시작점
+	/* [한국어] 가상 주소를 (page, offset) 쌍으로 분해해 bvec 하나를 추가한다.
+	 *   virt_to_page(vaddr)     - 직접 매핑 주소에서 struct page를 얻는다.
+	 *                             단순한 오프셋 산술이라 매우 저렴하다.
+	 *   offset_in_page(vaddr)   - 페이지 안에서의 오프셋(하위 12비트).
+	 * bio_vec은 (page, offset, len) 삼중항이므로 이 분해가 필요하다.
+	 * 결과 bvec는 나중에 blk-mq-dma.c에서 DMA 주소로 변환되어 NVMe PRP
+	 * 엔트리나 SGL 디스크립터가 된다. */
+	__bio_add_page(bio, virt_to_page(vaddr), len, offset_in_page(vaddr));
 }
-EXPORT_SYMBOL_GPL(bio_add_virt_nofail);  // 커널 가상 주소를 bio에 추가: NVMe PRP/SGL로 변환
+EXPORT_SYMBOL_GPL(bio_add_virt_nofail);
 
 /**
  *	bio_add_page	-	attempt to add page(s) to bio
@@ -1887,17 +2071,17 @@ int bio_add_page(struct bio *bio, struct page *page,  // 사용자/커널 페이
 		 unsigned int len, unsigned int offset)
 {
 	if (WARN_ON_ONCE(bio_flagged(bio, BIO_CLONED)))  // clone된 bio: PRP/SGL 원본을 공유하므로 중간 수정 불가
-		return 0;  // 정상 완료: NVMe 처리 흐름 계속
-	if (WARN_ON_ONCE(len == 0))  // NVMe 명령/상태 불변조건 위반 방지용 assert
-		return 0;  // 정상 완료: NVMe 처리 흐름 계속
+		return 0;
+	if (WARN_ON_ONCE(len == 0))
+		return 0;
 	if (bio->bi_iter.bi_size > BIO_MAX_SIZE - len)	// NVMe 최대 전송 크기 초과 방지
-		return 0;  // 정상 완료: NVMe 처리 흐름 계속
+		return 0;
 
 	if (bio->bi_vcnt > 0) {  // NVMe 명령의 PRP entry/SGL segment 개수 집계
 		struct bio_vec *bv = &bio->bi_io_vec[bio->bi_vcnt - 1];  // NVMe 명령의 PRP entry/SGL segment 개수 집계
 
 		if (!zone_device_pages_have_same_pgmap(bv->bv_page, page))
-			return 0;  // 정상 완료: NVMe 처리 흐름 계속
+			return 0;
 
 		if (bvec_try_merge_page(bv, page, len, offset)) {  // 물리 인접 페이지 병합: PRP list 길이를 줄여 NVMe 명령 오버헤드 감소
 			bio->bi_iter.bi_size += len;  // NVMe 명령의 NLB(Length)로 변환됨
@@ -1906,7 +2090,7 @@ int bio_add_page(struct bio *bio, struct page *page,  // 사용자/커널 페이
 	}
 
 	if (bio->bi_vcnt >= bio->bi_max_vecs)	// NVMe segment 한도 초과 시 새 bio 필요
-		return 0;  // 정상 완료: NVMe 처리 흐름 계속
+		return 0;
 	__bio_add_page(bio, page, len, offset);  // bio_vec 추가: NVMe DMA descriptor 구성의 시작점
 	return len;
 }
@@ -1935,7 +2119,7 @@ void bio_add_folio_nofail(struct bio *bio, struct folio *folio, size_t len,
 {
 	unsigned long nr = off / PAGE_SIZE;
 
-	WARN_ON_ONCE(len > BIO_MAX_SIZE);  // NVMe 명령/상태 불변조건 위반 방지용 assert
+	WARN_ON_ONCE(len > BIO_MAX_SIZE);
 	__bio_add_page(bio, folio_page(folio, nr), len, off % PAGE_SIZE);  // bio_vec 추가: NVMe DMA descriptor 구성의 시작점
 }
 EXPORT_SYMBOL_GPL(bio_add_folio_nofail);
@@ -1979,7 +2163,7 @@ bool bio_add_folio(struct bio *bio, struct folio *folio, size_t len,  // folio �
 	unsigned long nr = off / PAGE_SIZE;
 
 	if (len > BIO_MAX_SIZE)
-		return false;  // 조건 불만족: NVMe 분기/병합/완료 판정
+		return false;
 	return bio_add_page(bio, folio_page(folio, nr), len, off % PAGE_SIZE) > 0;  // 사용자/커널 페이지를 bio에 추가 -> NVMe PRP/SGL 후보
 }
 EXPORT_SYMBOL(bio_add_folio);  // folio 페이지를 bio에 추가: NVMe PRP/SGL segment 후보
@@ -2024,7 +2208,7 @@ unsigned int bio_add_vmalloc_chunk(struct bio *bio, void *vaddr, unsigned len)
 
 	len = min(len, PAGE_SIZE - offset);
 	if (bio_add_page(bio, vmalloc_to_page(vaddr), len, offset) < len)  // 사용자/커널 페이지를 bio에 추가 -> NVMe PRP/SGL 후보
-		return 0;  // 정상 완료: NVMe 처리 흐름 계속
+		return 0;
 	if (op_is_write(bio_op(bio)))
 		flush_kernel_vmap_range(vaddr, len);  // vmap 범위 flush: NVMe DMA 일관성 유지
 	return len;
@@ -2069,12 +2253,12 @@ bool bio_add_vmalloc(struct bio *bio, void *vaddr, unsigned int len)  // vmalloc
 		unsigned int added = bio_add_vmalloc_chunk(bio, vaddr, len);
 
 		if (!added)
-			return false;  // 조건 불만족: NVMe 분기/병합/완료 판정
+			return false;
 		vaddr += added;
 		len -= added;
 	} while (len);
 
-	return true;  // 조건 만족: NVMe 분기/병합/완료 판정
+	return true;
 }
 EXPORT_SYMBOL_GPL(bio_add_vmalloc);  // vmalloc 영역을 bio에 추가: NVMe DMA를 위해 페이지 매핑
 
@@ -2173,7 +2357,7 @@ static int bio_iov_iter_align_down(struct bio *bio, struct iov_iter *iter,
 	size_t nbytes = bio->bi_iter.bi_size & len_align_mask;  // NVMe 명령의 NLB(Length)로 변환됨
 
 	if (!nbytes)
-		return 0;  // 정상 완료: NVMe 처리 흐름 계속
+		return 0;
 
 	iov_iter_revert(iter, nbytes);
 	bio->bi_iter.bi_size -= nbytes;  // NVMe 명령의 NLB(Length)로 변환됨
@@ -2194,7 +2378,7 @@ static int bio_iov_iter_align_down(struct bio *bio, struct iov_iter *iter,
 
 	if (!bio->bi_vcnt)  // NVMe 명령의 PRP entry/SGL segment 개수 집계
 		return -EFAULT;
-	return 0;  // 정상 완료: NVMe 처리 흐름 계속
+	return 0;
 }
 
 /**
@@ -2249,13 +2433,21 @@ int bio_iov_iter_get_pages(struct bio *bio, struct iov_iter *iter,  // 사용자
 	if (iov_iter_is_bvec(iter)) {
 		bio_iov_bvec_set(bio, iter);
 		iov_iter_advance(iter, bio->bi_iter.bi_size);  // NVMe 명령의 NLB(Length)로 변환됨
-		return 0;  // 정상 완료: NVMe 처리 흐름 계속
+		return 0;
 	}
 
 	if (iov_iter_extract_will_pin(iter))  // 사용자 페이지 pin 여부: NVMe DMA 안전성 판단
 		bio_set_flag(bio, BIO_PAGE_PINNED);	// 사용자 페이지 pin: NVMe DMA 안전 보장
-	if (bio->bi_bdev && blk_queue_pci_p2pdma(bio->bi_bdev->bd_disk->queue))  // NVMe namespace/block device 선택
-		flags |= ITER_ALLOW_P2PDMA;  // NVMe CMB/P2PDMA 경로에서 사용자 페이지 매핑 허용(추정)
+	/* [한국어] 대상 장치가 P2PDMA를 지원한다고 큐에 표시했는지 확인한다.
+	 * NVMe PCIe 드라이버는 CMB를 쓸 수 있을 때 QUEUE_FLAG_PCI_P2PDMA를 세운다. */
+	if (bio->bi_bdev && blk_queue_pci_p2pdma(bio->bi_bdev->bd_disk->queue))
+		/* [한국어] 사용자 iov에서 페이지를 추출할 때 P2PDMA 페이지를 허용한다.
+		 * 이 플래그가 없으면 iov_iter가 장치 메모리 페이지를 거부한다 —
+		 * 대상 장치가 그런 페이지로 DMA할 수 있는지 모르는 상태에서 통과시키면
+		 * 매핑 단계에서 실패하기 때문이다. 큐가 지원을 선언했으므로 허용한다.
+		 * 이 경로가 열려야 사용자 공간이 다른 PCIe 장치(GPU 등)의 메모리를
+		 * O_DIRECT 버퍼로 직접 넘겨 시스템 RAM 복사를 건너뛸 수 있다. */
+		flags |= ITER_ALLOW_P2PDMA;
 
 	do {
 		ssize_t ret;
@@ -2271,8 +2463,13 @@ int bio_iov_iter_get_pages(struct bio *bio, struct iov_iter *iter,  // 사용자
 		bio->bi_iter.bi_size += ret;  // NVMe 명령의 NLB(Length)로 변환됨
 	} while (iov_iter_count(iter) && !bio_full(bio, 0));  // bio가 가득 찼는지 확인: NVMe segment/MDTS 한도 초과 신호
 
-	if (is_pci_p2pdma_page(bio->bi_io_vec->bv_page))	// NVMe P2PDMA 경로에서는 REQ_NOMERGE 유지
-		bio->bi_opf |= REQ_NOMERGE;  // NVMe merge 금지: P2PDMA/CMB나 특수 버퍼에서 PRP/SGL 단순화(추정)
+	/* [한국어] 추출된 첫 페이지가 P2PDMA 메모리이면 이 bio 전체를 병합 금지로
+	 * 표시한다. 첫 페이지만 검사하는 것으로 충분한 이유: iov_iter가 한 번의
+	 * 추출에서 P2PDMA 페이지와 일반 페이지를 섞지 않기 때문이다(섞이면
+	 * 추출 단계에서 끊긴다). 병합을 막는 이유는 __bio_add_page()의 경우와
+	 * 같다 — 매핑 방식이 다른 두 종류의 메모리를 한 request에 담을 수 없다. */
+	if (is_pci_p2pdma_page(bio->bi_io_vec->bv_page))
+		bio->bi_opf |= REQ_NOMERGE;
 	return bio_iov_iter_align_down(bio, iter, len_align_mask);
 }
 
@@ -2366,7 +2563,12 @@ static int bio_iov_iter_bounce_write(struct bio *bio, struct iov_iter *iter,
 		if (bio->bi_iter.bi_size > BIO_MAX_SIZE - this_len)  // NVMe 명령의 NLB(Length)로 변환됨
 			break;
 
-		folio = folio_alloc_greedy(GFP_KERNEL, &this_len);	// NVMe DMA에 적합한 정렬된 bounce buffer 할당(추정)
+		/* [한국어] 남은 길이(this_len)만큼을 담을 수 있는 가장 큰 folio를 잡는다.
+		 * 큰 folio 하나 = 물리적으로 연속된 큰 영역 = 세그먼트 하나이므로,
+		 * 결과적으로 NVMe PRP 엔트리나 SGL 디스크립터 개수가 줄어든다.
+		 * 실패하면 folio_alloc_greedy()가 크기를 절반씩 줄여 재시도하고,
+		 * 실제로 잡은 크기를 this_len에 되돌려 준다(in/out 파라미터). */
+		folio = folio_alloc_greedy(GFP_KERNEL, &this_len);
 		if (!folio)
 			break;
 		bio_add_folio_nofail(bio, folio, this_len, 0);
@@ -2381,8 +2583,8 @@ static int bio_iov_iter_bounce_write(struct bio *bio, struct iov_iter *iter,
 	} while (total_len && bio->bi_vcnt < bio->bi_max_vecs);  // bio당 segment 수: NVMe PRP list/SGL 길이에 영향
 
 	if (!bio->bi_iter.bi_size)  // NVMe 명령의 NLB(Length)로 변환됨
-		return -ENOMEM;  // 메모리 부족: NVMe 명령 제출 전 abort(추정)
-	return 0;  // 정상 완료: NVMe 처리 흐름 계속
+		return -ENOMEM;
+	return 0;
 }
 
 /*
@@ -2406,9 +2608,12 @@ static int bio_iov_iter_bounce_read(struct bio *bio, struct iov_iter *iter,
 	size_t len = min3(iov_iter_count(iter), maxlen, SZ_1M);
 	struct folio *folio;
 
-	folio = folio_alloc_greedy(GFP_KERNEL, &len);  // NVMe DMA 적합한 정렬된 bounce buffer 할당(추정)
+	/* [한국어] 요청 길이(len)를 담을 수 있는 가장 큰 folio를 잡는다. 위와 같은
+	 * 이유로 큰 덩어리일수록 세그먼트 수가 줄어 NVMe 커맨드 구성이 단순해진다.
+	 * len은 실제로 확보된 크기로 갱신되어 반환된다. */
+	folio = folio_alloc_greedy(GFP_KERNEL, &len);
 	if (!folio)
-		return -ENOMEM;  // 메모리 부족: NVMe 명령 제출 전 abort(추정)
+		return -ENOMEM;
 
 	do {
 		ssize_t ret;
@@ -2435,7 +2640,7 @@ static int bio_iov_iter_bounce_read(struct bio *bio, struct iov_iter *iter,
 	bvec_set_folio(&bio->bi_io_vec[0], folio, bio->bi_iter.bi_size, 0);  // folio를 bio_vec에 등록: NVMe PRP/SGL segment 후보
 	if (iov_iter_extract_will_pin(iter))  // 사용자 페이지 pin 여부: NVMe DMA 안전성 판단
 		bio_set_flag(bio, BIO_PAGE_PINNED);	// 사용자 페이지 pin: NVMe DMA 안전 보장
-	return 0;  // 정상 완료: NVMe 처리 흐름 계속
+	return 0;
 }
 
 /**
@@ -2555,11 +2760,58 @@ static void bio_iov_iter_unbounce_read(struct bio *bio, bool is_error,
  * Copies data back for reads, and marks the original folios dirty if
  * requested and then frees the bounce buffer.
  */
+/*
+ * [한국어]
+ * bio_iov_iter_unbounce - bounce buffer I/O의 뒷정리(읽기면 되복사, 쓰기면 해제)
+ *
+ * @bio:        완료된 bounce bio (bi_io_vec에 바운스 folio들이 들어 있다)
+ * @is_error:   I/O가 실패했는가. true면 바운스 버퍼의 내용이 신뢰할 수 없으므로
+ *              사용자 버퍼로 되복사하지 않는다.
+ * @mark_dirty: 되복사한 사용자 folio를 dirty로 표시할지 여부.
+ * @return: 없음
+ *
+ * === bounce buffer가 필요한 이유 ===
+ * O_DIRECT는 원래 사용자 버퍼를 그대로 DMA 대상으로 삼는다. 그런데 커널이
+ * 데이터를 "읽어야만" 하는 경우가 있다 — 체크섬 계산(무결성 검증)이나 압축,
+ * 암호화 같은 변환이다. 사용자 버퍼는 DMA가 진행되는 동안에도 다른 스레드가
+ * 자유롭게 수정할 수 있어(TOCTOU), 커널이 계산한 체크섬과 실제로 장치에
+ * 기록된 내용이 달라질 수 있다.
+ * 그래서 커널 소유의 임시 버퍼로 한 번 복사한 뒤 그것을 DMA 대상으로 삼는다.
+ * 이것이 bounce buffer이고, 이 함수는 그 뒷정리를 담당한다.
+ *
+ * === 방향에 따라 할 일이 다른 이유 ===
+ *   쓰기(WRITE): 사용자 → 바운스 복사는 제출 전에 이미 끝났다. 완료 후에는
+ *     바운스 folio를 해제하기만 하면 된다.
+ *   읽기(READ) : 장치 → 바운스로 데이터가 들어왔으므로, 이제 바운스 →
+ *     사용자 버퍼로 되복사해야 한다. 그 후 folio 해제와 dirty 표시까지
+ *     처리해야 하므로 별도 함수로 분리되어 있다.
+ *
+ * NVMe 관점: 바운스 버퍼는 folio_alloc_greedy()로 최대한 큰 연속 영역을 잡으므로
+ * 세그먼트 수가 줄어 PRP/SGL 디스크립터가 단순해진다. 사용자 버퍼가 잘게
+ * 흩어져 있을 때는 오히려 바운스 쪽이 커맨드 구성에 유리할 수도 있다.
+ *
+ * 실행 컨텍스트: 태스크 컨텍스트. 되복사에 페이지 매핑이 필요할 수 있어
+ * IRQ 컨텍스트에서 호출해서는 안 된다.
+ *
+ * 호출 체인:
+ *   direct I/O 구현(fs/direct-io.c, iomap) 완료 처리
+ *     → [bio_iov_iter_unbounce]
+ *       → bio_free_folios (쓰기) / bio_iov_iter_unbounce_read (읽기)
+ */
 void bio_iov_iter_unbounce(struct bio *bio, bool is_error, bool mark_dirty)
 {
+	/* [한국어] 쓰기였다면 데이터는 이미 장치로 나갔다. 바운스 folio들을
+	 * 해제하는 것으로 끝난다. is_error와 mark_dirty는 쓰기에서 의미가 없어
+	 * 사용되지 않는다(실패해도 해제는 똑같이 해야 하고, 커널 소유 버퍼라
+	 * dirty 표시 대상이 아니다). */
 	if (op_is_write(bio_op(bio)))
 		bio_free_folios(bio);
 	else
+		/* [한국어] 읽기였다면 장치가 바운스 버퍼에 채워 준 데이터를 사용자
+		 * folio로 되복사해야 한다. is_error가 true면 복사를 건너뛰고
+		 * (쓰레기 데이터를 사용자에게 주면 안 된다) 해제만 하며,
+		 * mark_dirty가 true면 되복사한 사용자 folio를 dirty로 표시해
+		 * 이후 페이지 회수 시 잃어버리지 않게 한다. */
 		bio_iov_iter_unbounce_read(bio, is_error, mark_dirty);
 }
 
@@ -2747,7 +2999,7 @@ int bdev_rw_virt(struct block_device *bdev, sector_t sector, void *data,
 	struct bio bio;
 	int error;
 
-	if (WARN_ON_ONCE(is_vmalloc_addr(data)))  // NVMe 명령/상태 불변조건 위반 방지용 assert
+	if (WARN_ON_ONCE(is_vmalloc_addr(data)))
 		return -EIO;  // I/O 오류: NVMe 명령 제출/완료 실패 전파
 
 	bio_init(&bio, bdev, &bv, 1, op);  // bio 필드 초기화: SLBA/length/OPC/PRP-SGL 기반 준비
@@ -3056,16 +3308,16 @@ static inline bool bio_remaining_done(struct bio *bio)  // 모든 NVMe 하위 �
 	 * we always end io on the first invocation.
 	 */
 	if (!bio_flagged(bio, BIO_CHAIN))
-		return true;  // 조건 만족: NVMe 분기/병합/완료 판정
+		return true;
 
 	BUG_ON(atomic_read(&bio->__bi_remaining) <= 0);  // NVMe bio 참조/remaining 상태 확인
 
 	if (atomic_dec_and_test(&bio->__bi_remaining)) {  // NVMe completion 순서 보장: 마지막 하위 bio 완료 시 부모로 전파
 		bio_clear_flag(bio, BIO_CHAIN);
-		return true;  // 조건 만족: NVMe 분기/병합/완료 판정
+		return true;
 	}
 
-	return false;  // 조건 불만족: NVMe 분기/병합/완료 판정
+	return false;
 }
 
 /**
@@ -3189,9 +3441,9 @@ struct bio *bio_split(struct bio *bio, int sectors,  // NVMe MDTS/segment 한도
 {
 	struct bio *split;
 
-	if (WARN_ON_ONCE(sectors <= 0))  // NVMe 명령/상태 불변조건 위반 방지용 assert
+	if (WARN_ON_ONCE(sectors <= 0))
 		return ERR_PTR(-EINVAL);  // 오류 포인터 반환: NVMe 분할/clone 실패 전파
-	if (WARN_ON_ONCE(sectors >= bio_sectors(bio)))  // NVMe 명령/상태 불변조건 위반 방지용 assert
+	if (WARN_ON_ONCE(sectors >= bio_sectors(bio)))
 		return ERR_PTR(-EINVAL);  // 오류 포인터 반환: NVMe 분할/clone 실패 전파
 
 	/* Zone append commands cannot be split */
@@ -3253,7 +3505,7 @@ void bio_trim(struct bio *bio, sector_t offset, sector_t size)
 	if (WARN_ON_ONCE(bio->bi_opf & REQ_ATOMIC && size))  // NVMe atomic write 단위: 분할/trim 불가
 		return;
 
-	if (WARN_ON_ONCE(offset > BIO_MAX_SECTORS || size > BIO_MAX_SECTORS ||  // NVMe 명령/상태 불변조건 위반 방지용 assert
+	if (WARN_ON_ONCE(offset > BIO_MAX_SECTORS || size > BIO_MAX_SECTORS ||
 			 offset + size > bio_sectors(bio)))
 		return;
 
@@ -3398,7 +3650,7 @@ int bioset_init(struct bio_set *bs,  // bio_set 초기화: NVMe 제출에 사용
 
 	bs->bio_slab = bio_find_or_create_slab(bs);  // bio slab 공유/생성: NVMe bio 할당 성능에 영향
 	if (!bs->bio_slab)
-		return -ENOMEM;  // 메모리 부족: NVMe 명령 제출 전 abort(추정)
+		return -ENOMEM;
 
 	if (mempool_init_slab_pool(&bs->bio_pool, pool_size, bs->bio_slab))  // mempool 초기화: NVMe bio 할당 보장 풀 구성
 		goto bad;  // 초기화 실패: NVMe bio pool 사용 불가 처리
@@ -3420,10 +3672,10 @@ int bioset_init(struct bio_set *bs,  // bio_set 초기화: NVMe 제출에 사용
 		cpuhp_state_add_instance_nocalls(CPUHP_BIO_DEAD, &bs->cpuhp_dead);
 	}
 
-	return 0;  // 정상 완료: NVMe 처리 흐름 계속
+	return 0;
 bad:
 	bioset_exit(bs);  // bio_set 해제: NVMe 제출 풀 정리
-	return -ENOMEM;  // 메모리 부족: NVMe 명령 제출 전 abort(추정)
+	return -ENOMEM;
 }
 EXPORT_SYMBOL(bioset_init);  // bio_set 초기화: NVMe 제출에 사용되는 전역/드라이버 풀 생성
 
@@ -3466,7 +3718,7 @@ static int __init init_bio(void)  // bio 서브시스템 초기화: NVMe 드라�
 			BIOSET_NEED_BVECS | BIOSET_PERCPU_CACHE))
 		panic("bio: can't allocate bios\n");
 
-	return 0;  // 정상 완료: NVMe 처리 흐름 계속
+	return 0;
 }
 subsys_initcall(init_bio);  // bio 서브시스템 초기화: NVMe 드라이버보다 먼저 준비되어야 함
 
