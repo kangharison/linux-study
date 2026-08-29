@@ -479,7 +479,16 @@ static void blk_zone_set_cond(u8 *zones_cond, unsigned int zno,
 	case BLK_ZONE_COND_IMP_OPEN:
 	case BLK_ZONE_COND_EXP_OPEN:
 	case BLK_ZONE_COND_CLOSED:
-		zones_cond[zno] = BLK_ZONE_COND_ACTIVE; // implicit/explicit open/closed 상태를 active로 축소하여 cached report 단순화
+		/* [한국어] "쓰기가 시작되었고 아직 안 끝난" 세 상태를 ACTIVE 하나로
+		 * 축약한다. 셋의 차이(컨트롤러가 암묵적으로 열었는가, 호스트가 명시적으로
+		 * 열었는가, 열렸다가 닫혔는가)는 컨트롤러의 자원 관리 관점에서는
+		 * 중요하지만, 커널이 캐시로 답할 때는 "WP가 zone 중간 어딘가에 있다"는
+		 * 사실만 알면 충분하다.
+		 * 이렇게 축약하면 세 상태를 구분할 때 필요한 추가 정보를 저장하지 않아도
+		 * 되고, 무엇보다 캐시가 실제와 어긋날 위험이 줄어든다 — 컨트롤러가
+		 * IMP_OPEN↔CLOSED를 자체 판단으로 오갈 수 있는데 커널은 그 전이를
+		 * 알 수 없기 때문이다. 어차피 구분할 수 없는 것은 저장하지 않는다. */
+		zones_cond[zno] = BLK_ZONE_COND_ACTIVE;
 		return;
 	case BLK_ZONE_COND_NOT_WP:
 	case BLK_ZONE_COND_EMPTY:
@@ -487,7 +496,10 @@ static void blk_zone_set_cond(u8 *zones_cond, unsigned int zno,
 	case BLK_ZONE_COND_OFFLINE:
 	case BLK_ZONE_COND_READONLY:
 	default:
-		zones_cond[zno] = cond; // conventional/empty/full/offline/readonly는 그대로 유지
+		/* [한국어] 나머지 상태는 그대로 저장한다. 이들은 커널이 전이를 정확히
+		 * 알 수 있거나(EMPTY←reset, FULL←WP가 capacity 도달) 아예 변하지
+		 * 않는(NOT_WP/OFFLINE/READONLY) 상태라, 캐시가 실제와 어긋날 일이 없다. */
+		zones_cond[zno] = cond;
 		return;
 	}
 }
@@ -523,24 +535,44 @@ static void disk_zone_set_cond(struct gendisk *disk, sector_t sector,
 {
 	u8 *zones_cond;
 
-	rcu_read_lock(); // zones_cond 포인터가 revalidate 중 바뀌는 것을 보호
-	zones_cond = rcu_dereference(disk->zones_cond); // RCU read-side에서 zone condition cache 포인터 snapshot 획득
+	/* [한국어] RCU 읽기 구간 진입. disk->zones_cond 배열은 zone 재검증
+	 * (blk_revalidate_disk_zones)에서 통째로 교체될 수 있는데, 그때 옛 배열을
+	 * 즉시 해제하면 지금 읽고 있는 쪽이 해제된 메모리를 만진다.
+	 * 재검증 쪽이 kfree_rcu로 유예 해제하고 이쪽이 RCU 읽기 구간에 있으면
+	 * 그 use-after-free가 방지된다. */
+	rcu_read_lock();
+	/* [한국어] 포인터를 한 번만 읽어 지역 변수에 스냅숏한다. rcu_dereference는
+	 * 컴파일러/CPU가 이 로드를 이후 역참조보다 뒤로 미루지 못하게 막는
+	 * 의존성 배리어를 포함한다(Alpha 등 약한 메모리 모델 대응). */
+	zones_cond = rcu_dereference(disk->zones_cond);
 	if (zones_cond) {
-		unsigned int zno = disk_zone_no(disk, sector); // sector로부터 NVMe ZNS Zone Identifier(ZID) 계산
+		/* [한국어] 섹터 주소를 zone 번호로 변환한다. 모든 zone이 같은 크기라는
+		 * 전제(blk_revalidate_zone_cb가 검증) 덕분에 단순 나눗셈/시프트로 끝난다.
+		 * 이 번호가 곧 NVMe ZNS의 Zone Identifier에 대응한다. */
+		unsigned int zno = disk_zone_no(disk, sector);
 
 		/*
 		 * The condition of a conventional, readonly and offline zones
 		 * never changes, so do nothing if the target zone is in one of
 		 * these conditions.
 		 */
-		switch (zones_cond[zno]) { // conventional/readonly/offline zone의 cond는 변경 불가
+		/* [한국어] 현재 캐시된 상태를 보고 갱신할지 결정한다. */
+		switch (zones_cond[zno]) {
 		case BLK_ZONE_COND_NOT_WP:
-		// conventional/readonly/offline zone의 cond는 변하지 않으므로 무시
 		case BLK_ZONE_COND_READONLY:
 		case BLK_ZONE_COND_OFFLINE:
+			/* [한국어] 이 세 상태는 영구적이다.
+			 *   NOT_WP   - conventional zone. 타입 자체가 바뀌지 않는다.
+			 *   READONLY - 매체가 읽기 전용으로 전이되면 되돌아오지 않는다.
+			 *   OFFLINE  - 매체 결함. 리셋해도 복구되지 않는다.
+			 * 따라서 갱신 요청이 와도 무시한다. 이 검사가 없으면 잘못된
+			 * 갱신이 영구 상태를 덮어써, 이후 쓰기가 실패할 zone에
+			 * 계속 시도하게 된다. */
 			break;
 		default:
-			blk_zone_set_cond(zones_cond, zno, cond); // 커널 캐시의 ZNS zone state 갱신
+			/* [한국어] 그 외(EMPTY/ACTIVE/FULL)는 정상적으로 전이하는
+			 * 상태이므로 새 값으로 갱신한다. */
+			blk_zone_set_cond(zones_cond, zno, cond);
 			break;
 		}
 	}
@@ -1031,46 +1063,87 @@ static int blkdev_copy_zone_to_user(struct blk_zone *zone, unsigned int idx,
 int blkdev_report_zones_ioctl(struct block_device *bdev, unsigned int cmd,
 		unsigned long arg)
 {
+	/* [한국어] 사용자 공간 인자 포인터. __user는 sparse에게 "직접 역참조 금지"를
+	 * 알리는 어노테이션이다. */
 	void __user *argp = (void __user *)arg;
+	/* [한국어] 콜백에 넘길 컨텍스트. zone descriptor를 사용자 버퍼 어디에 쓸지를
+	 * 담는다(아래 args.zones 설정 참고). */
 	struct zone_report_args args;
+	/* [한국어] 사용자가 넘긴 요청 헤더를 커널 스택으로 복사해 담을 구조체.
+	 * 요청 시에는 "어디서부터 몇 개"를 담고, 응답 시에는 "실제 몇 개"를 담아
+	 * 되돌려 준다. */
 	struct blk_zone_report rep;
 	int ret;
 
-	if (!argp) // ioctl 인자 포인터 NULL 검증
+	/* [한국어] 인자 포인터가 없으면 요청 내용을 읽을 수 없다. */
+	if (!argp)
 		return -EINVAL;
 
-	if (!bdev_is_zoned(bdev)) // ZNS 디바이스가 아니면 ioctl 미지원
+	/* [한국어] zoned 장치가 아니면 zone 개념 자체가 없다. -ENOTTY는
+	 * "이 장치는 그 ioctl을 모른다"는 관용적 반환값이다. */
+	if (!bdev_is_zoned(bdev))
 		return -ENOTTY;
 
-	if (copy_from_user(&rep, argp, sizeof(struct blk_zone_report))) // 사용자로부터 blk_zone_report 구조체 복사
+	/* [한국어] 요청 헤더를 커널 스택으로 복사한다. 사용자 메모리를 직접 참조하면
+	 * 검증 후 사용 전에 값이 바뀌는 TOCTOU가 된다. */
+	if (copy_from_user(&rep, argp, sizeof(struct blk_zone_report)))
 		return -EFAULT;
 
-	if (!rep.nr_zones) // 요청 zone 수가 0이면 의미 없음
+	/* [한국어] 0개를 요청하는 것은 의미가 없다. */
+	if (!rep.nr_zones)
 		return -EINVAL;
 
+	/* [한국어] ★ 사용자 버퍼 레이아웃 ★
+	 * BLKREPORTZONE의 사용자 버퍼는 "헤더 + zone descriptor 배열"이 연속으로
+	 * 놓인 형태다. 따라서 배열의 시작은 헤더 크기만큼 뒤다. 콜백
+	 * blkdev_copy_zone_to_user()가 이 주소를 기준으로 인덱스만큼 떨어진 곳에
+	 * 각 descriptor를 쓴다. */
 	args.zones = argp + sizeof(struct blk_zone_report);
 
 	switch (cmd) {
 	case BLKREPORTZONE:
-		ret = blkdev_report_zones(bdev, rep.sector, rep.nr_zones, // uncached path: NVMe Report Zones command 발행
+		/* [한국어] 구버전 ioctl — 항상 장치에 실제 Report Zones 커맨드를 보낸다.
+		 * NVMe에서는 nvme_report_zones()를 거쳐 Zone Management Receive
+		 * (옵코드 0x7A)가 발행된다. 정확하지만 커맨드 왕복 비용이 든다. */
+		ret = blkdev_report_zones(bdev, rep.sector, rep.nr_zones,
 					  blkdev_copy_zone_to_user, &args);
 		break;
 	case BLKREPORTZONEV2:
-		if (rep.flags & ~BLK_ZONE_REPV2_INPUT_FLAGS) // 허용되지 않은 report flags 거부
+		/* [한국어] 확장 플래그 검증 — 커널이 아는 입력 플래그 외의 비트가
+		 * 켜져 있으면 거부한다. 미래에 추가될 플래그를 지금 커널이 조용히
+		 * 무시하면, 사용자 공간이 그 기능이 동작한다고 오해하기 때문이다.
+		 * 이런 엄격한 검증이 ABI 확장을 안전하게 만든다. */
+		if (rep.flags & ~BLK_ZONE_REPV2_INPUT_FLAGS)
 			return -EINVAL;
-		ret = blkdev_report_zones_cached(bdev, rep.sector, rep.nr_zones, // cached path: 커널 캐시로 NVMe command 왕복 회피
+		/* [한국어] 신버전 ioctl — 커널이 유지하는 zone 상태 캐시(zones_cond +
+		 * zone write plug)로 답할 수 있으면 장치 커맨드를 아예 보내지 않는다.
+		 * zone이 수천 개인 장치에서 전체 report를 반복 호출하는
+		 * 워크로드(파일시스템의 주기적 zone 상태 확인)에서 효과가 크다. */
+		ret = blkdev_report_zones_cached(bdev, rep.sector, rep.nr_zones,
 					 blkdev_copy_zone_to_user, &args);
 		break;
 	default:
 		return -EINVAL;
 	}
 
-	if (ret < 0) // NVMe command 실패 시 즉시 사용자에게 전파
+	/* [한국어] 음수는 오류. 이 시점에는 이미 일부 descriptor가 사용자 버퍼에
+	 * 쓰였을 수 있지만, nr_zones를 갱신하지 않고 오류를 반환하므로 사용자는
+	 * 그 내용을 유효하다고 보지 않는다. */
+	if (ret < 0)
 		return ret;
 
-	rep.nr_zones = ret; // 실제 report된 zone descriptor 개수 기록
+	/* [한국어] 반환값은 "실제로 보고한 zone 개수"다. 요청보다 적을 수 있다 —
+	 * 네임스페이스 끝에 도달했거나 장치가 그만큼만 보고한 경우다.
+	 * 사용자는 이 값을 보고 배열을 몇 개까지 읽을지 판단한다. */
+	rep.nr_zones = ret;
+	/* [한국어] BLK_ZONE_REP_CAPACITY 플래그를 세워 "각 descriptor의 capacity
+	 * 필드가 유효하다"고 알린다. 예전 인터페이스에는 capacity가 없었기에
+	 * 이 플래그로 구분한다. ZNS에서 capacity < len인 zone이 정상이므로
+	 * 이 값이 있어야 사용자가 실제 쓸 수 있는 용량을 안다. */
 	rep.flags = BLK_ZONE_REP_CAPACITY;
-	if (copy_to_user(argp, &rep, sizeof(struct blk_zone_report))) // 사용자 공간에 결과 헤더 복사
+	/* [한국어] 갱신된 헤더를 사용자 버퍼 앞부분에 되쓴다. descriptor 배열은
+	 * 콜백이 이미 채워 두었으므로 헤더만 갱신하면 된다. */
+	if (copy_to_user(argp, &rep, sizeof(struct blk_zone_report)))
 		return -EFAULT;
 	return 0;
 }
@@ -2548,22 +2621,44 @@ static void blk_zone_reset_bio_endio(struct bio *bio)
  */
 static void blk_zone_reset_all_bio_endio(struct bio *bio)
 {
-	struct gendisk *disk = bio->bi_bdev->bd_disk; // Reset All 완료된 BIO의 gendisk
-	sector_t capacity = get_capacity(disk); // NVMe namespace capacity
+	struct gendisk *disk = bio->bi_bdev->bd_disk;
+	/* [한국어] 네임스페이스 전체 용량. 아래에서 모든 zone을 순회하는 종료 조건. */
+	sector_t capacity = get_capacity(disk);
 	struct blk_zone_wplug *zwplug;
+	/* [한국어] spin_lock_irqsave가 저장/복원할 인터럽트 상태. 이 함수는 완료
+	 * 콜백이라 하드 IRQ 컨텍스트일 수 있어, 단순 spin_lock으로는 부족하다. */
 	unsigned long flags;
 	sector_t sector;
 	unsigned int i;
 
-	if (atomic_read(&disk->nr_zone_wplugs)) { // 활성 plug가 있을 때만 전체 순회
+	/* [한국어] ★ 빠른 경로 ★
+	 * 활성 zone write plug가 하나도 없으면 해시 전체 순회를 건너뛴다.
+	 * 해시 버킷이 수백 개일 수 있는데 완료 콜백(IRQ 컨텍스트일 수 있음)에서
+	 * 전부 도는 것은 비싸다. 원자적 카운터 한 번 읽기로 그 비용을 없앤다.
+	 * plug는 "부분적으로 쓰인 zone"에만 만들어지므로, 순차 쓰기 후 리셋하는
+	 * 전형적 워크로드에서는 이 카운터가 0인 경우가 많다. */
+	if (atomic_read(&disk->nr_zone_wplugs)) {
 		/* Update the condition of all zone write plugs. */
+		/* [한국어] 해시 테이블과 그 안의 plug들이 순회 도중 해제되지 않도록
+		 * RCU 읽기 구간을 연다. plug 해제는 kfree_rcu로 유예된다. */
 		rcu_read_lock();
-		for (i = 0; i < disk_zone_wplugs_hash_size(disk); i++) { // 모든 hash bucket을 순회하며 plug 상태 갱신
-			hlist_for_each_entry_rcu(zwplug, // 각 bucket의 충돌 체인을 RCU-safe하게 순회
+		/* [한국어] 모든 해시 버킷을 순회한다. Reset All은 zone 하나가 아니라
+		 * 전체를 되돌리므로, 예외 없이 모든 plug의 WP를 손봐야 한다. */
+		for (i = 0; i < disk_zone_wplugs_hash_size(disk); i++) {
+			/* [한국어] 버킷 하나의 충돌 체인을 RCU 안전 방식으로 순회한다.
+			 * _rcu 변형은 포인터 로드에 의존성 배리어를 넣어, 리스트에 막
+			 * 추가된 노드의 내용이 아직 보이지 않는 상황을 방지한다. */
+			hlist_for_each_entry_rcu(zwplug,
 						 &disk->zone_wplugs_hash[i],
 						 node) {
-				spin_lock_irqsave(&zwplug->lock, flags); // plug별 WP 갱신 직렬화
-				disk_zone_wplug_set_wp_offset(disk, zwplug, 0); // Reset All로 모든 plug의 WP를 0으로 초기화
+				/* [한국어] plug별 락. WP 갱신은 제출 경로와 완료 경로가
+				 * 동시에 만질 수 있어 직렬화가 필요하다. irqsave인 이유는
+				 * 위 flags 선언 설명 참고. */
+				spin_lock_irqsave(&zwplug->lock, flags);
+				/* [한국어] WP 오프셋을 0으로 — "이 zone은 이제 비었고
+				 * 처음부터 쓸 수 있다"는 뜻이다. 이것이 커널이 추적하는
+				 * 상태와 리셋된 장치 상태를 다시 일치시킨다. */
+				disk_zone_wplug_set_wp_offset(disk, zwplug, 0);
 				spin_unlock_irqrestore(&zwplug->lock, flags);
 			}
 		}
@@ -2571,11 +2666,20 @@ static void blk_zone_reset_all_bio_endio(struct bio *bio)
 	}
 
 	/* Update the cached zone conditions. */
-	for (sector = 0; sector < capacity; // capacity 전체를 순회하며 zones_cond 초기화
+	/* [한국어] zone 상태 캐시도 전부 EMPTY로 되돌린다. plug는 "부분적으로 쓰인
+	 * zone"에만 있지만 zones_cond 배열은 모든 zone을 담으므로, 위 순회와 별도로
+	 * 전체를 돌아야 한다. zone 크기 단위로 전진하며 각 zone의 대표 섹터를 넘긴다. */
+	for (sector = 0; sector < capacity;
 	     sector += bdev_zone_sectors(bio->bi_bdev))
-		disk_zone_set_cond(disk, sector, BLK_ZONE_COND_EMPTY); // 모든 zone을 EMPTY로 표시
-	clear_bit(GD_ZONE_APPEND_USED, &disk->state); // Reset All 후 native zone append 사용 기록 클리어
-	// reset all 후 zone append 사용 기록 클리어
+		disk_zone_set_cond(disk, sector, BLK_ZONE_COND_EMPTY);
+	/* [한국어] Zone Append 사용 이력을 초기화한다.
+	 * 이 비트가 서 있으면 blkdev_has_cached_report_zones()가 거짓이 되어
+	 * 캐시 대신 실제 Report Zones 커맨드를 쓰게 된다 — 네이티브 Zone Append는
+	 * 장치가 쓸 위치를 정하므로 커널 추적이 어긋나기 때문이다.
+	 * 그런데 Reset All로 모든 zone이 EMPTY가 되면 그 어긋남이 사라진다.
+	 * 지금 상태는 커널이 정확히 아는 상태이므로, 비트를 지워 다시 캐시 경로를
+	 * 쓸 수 있게 한다. 리셋 이후 다시 Zone Append가 발행되면 그때 다시 세워진다. */
+	clear_bit(GD_ZONE_APPEND_USED, &disk->state);
 }
 
 /*
@@ -3152,47 +3256,85 @@ static bool blk_zone_wplug_handle_write(struct bio *bio, unsigned int nr_segs)
 	 * zone finish operations. In such case, fail the BIO to signal this
 	 * invalid usage.
 	 */
-	if (zwplug->flags & BLK_ZONE_WPLUG_DEAD) { // DEAD zone은 추가 NVMe CID 할당을 허용하지 않음
+	/* [한국어] DEAD로 표시된 plug — 위 영문 주석이 설명하듯 이는 사용자 오류의
+	 * 신호다. zone이 FULL이 된 뒤에도 쓰거나, reset/finish와 동기화하지 않고
+	 * 쓴 경우다. 이런 요청을 진행시키면 zone write pointer 규칙을 어겨
+	 * 컨트롤러가 거부하거나 데이터가 엉뚱한 곳에 쓰인다. 여기서 명시적으로
+	 * 실패시켜 사용자가 버그를 발견하게 한다. */
+	if (zwplug->flags & BLK_ZONE_WPLUG_DEAD) {
 		spin_unlock_irqrestore(&zwplug->lock, flags);
+		/* [한국어] 조회 시 올린 참조를 반납한다. */
 		disk_put_zone_wplug(zwplug);
 		bio_io_error(bio);
+		/* [한국어] true = "이 bio는 내가 처리했다(끝냈다)". 호출자는 더 이상
+		 * 이 bio를 제출하지 않는다. */
 		return true;
 	}
 
 	/* Indicate that this BIO is being handled using zone write plugging. */
-	bio_set_flag(bio, BIO_ZONE_WRITE_PLUGGING); // 이 BIO가 zone plug 관리 대상임을 표시
+	/* [한국어] 이 bio가 zone write plug의 관리를 받는다고 표시한다.
+	 * 이 플래그는 완료 경로에서도 확인되어(blk_zone_write_plug_bio_endio),
+	 * 완료 시 WP를 전진시키고 대기 중인 다음 bio를 풀어 주는 처리로 이어진다.
+	 * blk-merge.c가 이 플래그를 보고 front merge를 금지하는 것도 같은 이유다. */
+	bio_set_flag(bio, BIO_ZONE_WRITE_PLUGGING);
 
 	/*
 	 * Add REQ_NOWAIT BIOs to the plug list to ensure that we will not see a
 	 * BLK_STS_AGAIN failure if we let the caller submit the BIO.
 	 */
-	if (bio->bi_opf & REQ_NOWAIT) { // REQ_NOWAIT BIO는 직접 제출하지 않고 queue에 넣음
-		bio->bi_opf &= ~REQ_NOWAIT; // plug 남 나이므로 NOWAIT flag 제거
+	/* [한국어] REQ_NOWAIT bio의 특수 처리.
+	 * 그대로 제출하게 두면 하위 계층에서 자원이 없을 때 BLK_STS_AGAIN으로
+	 * 실패할 수 있는데, zone 순차 쓰기에서는 그 실패가 치명적이다 —
+	 * 이 bio가 실패하고 다음 bio가 성공하면 write pointer 순서가 깨진다.
+	 * 그래서 NOWAIT을 벗기고 plug 큐에 넣어, 워커가 나중에 블로킹 가능한
+	 * 컨텍스트에서 순서대로 제출하게 한다. */
+	if (bio->bi_opf & REQ_NOWAIT) {
+		/* [한국어] 워커가 제출할 것이므로 NOWAIT 의미가 사라진다. 남겨 두면
+		 * 워커 제출에서도 AGAIN이 날 수 있다. */
+		bio->bi_opf &= ~REQ_NOWAIT;
 		goto queue_bio;
-		// NOWAIT BIO는 queue에 넣어 later submit
 	}
 
 	/*
 	 * For rotational devices, we will use the gendisk zone write plugs
 	 * work instead of the per zone write plug BIO work, so queue the BIO.
 	 */
-	if (blk_queue_zoned_qd1_writes(disk->queue)) // 회전형 장치(qd1 writes)는 별도 worker 사용
+	/* [한국어] SMR HDD처럼 회전 매체인 zoned 장치는 큐 깊이 1로 쓰기를
+	 * 직렬화해야 한다(동시에 여러 쓰기를 보내면 헤드가 오가며 순서가 뒤집힐
+	 * 수 있다). 그런 장치는 zone별 워커가 아니라 디스크 전역 워커 하나로
+	 * 모든 쓰기를 처리하므로, 여기서는 큐에만 넣고 돌아간다.
+	 * NVMe ZNS는 이 경로에 해당하지 않는다 — 회전 매체가 아니므로 zone별로
+	 * 병렬 제출이 가능하다. */
+	if (blk_queue_zoned_qd1_writes(disk->queue))
 		goto queue_bio;
-		// 회전형(qd1) 장치는 전용 worker queue 사용
 
 	/* If the zone is already plugged, add the BIO to the BIO plug list. */
-	if (zwplug->flags & BLK_ZONE_WPLUG_PLUGGED) // 이미 다른 write가 진행 중이면 BIO를 queue
+	/* [한국어] ★ 순차성 보장의 핵심 ★
+	 * 이 zone에 이미 진행 중인 쓰기가 있으면(PLUGGED), 새 bio를 바로 제출하면
+	 * 안 된다. 두 쓰기가 동시에 나가면 완료 순서를 보장할 수 없고, ZNS는
+	 * write pointer 위치에만 쓸 수 있으므로 순서가 뒤바뀌면 뒤의 것이
+	 * Zone Invalid Write로 실패한다.
+	 * 그래서 대기 큐에 넣어 두고, 앞선 쓰기가 완료될 때 워커가 꺼내 제출한다.
+	 * 즉 "zone 하나에 한 번에 쓰기 하나"라는 직렬화가 이 한 줄로 성립한다. */
+	if (zwplug->flags & BLK_ZONE_WPLUG_PLUGGED)
 		goto queue_bio;
 
-	if (!blk_zone_wplug_prepare_bio(zwplug, bio)) { // WP/full/정렬 조건 미충족 시 doorbell 전 실패
+	/* [한국어] 지금 바로 제출할 수 있는 상황이다. 제출 전에 마지막 검증:
+	 * bio의 시작 위치가 현재 write pointer와 일치하는가, zone capacity를
+	 * 넘지 않는가, zone_write_granularity에 정렬되었는가.
+	 * 여기서 걸러야 잘못된 커맨드가 SQ에 실리는 것을 막을 수 있다 —
+	 * 장치까지 갔다가 실패하면 왕복 지연만 낭비된다. */
+	if (!blk_zone_wplug_prepare_bio(zwplug, bio)) {
 		spin_unlock_irqrestore(&zwplug->lock, flags);
 		bio_io_error(bio);
-		// WP/full/정렬 오류 시 doorbell 전 빠른 실패
 		return true;
 	}
 
 	/* Otherwise, plug and let the caller submit the BIO. */
-	zwplug->flags |= BLK_ZONE_WPLUG_PLUGGED; // 현재 zone에 진행 중인 write가 있음을 표시
+	/* [한국어] PLUGGED 표시를 세워 "이 zone은 지금 쓰기가 진행 중"임을 알린다.
+	 * 이 시점 이후 같은 zone에 오는 bio는 위의 PLUGGED 검사에 걸려 큐로 간다.
+	 * 완료 시점에 이 플래그가 지워지고 대기 중인 bio가 풀린다. */
+	zwplug->flags |= BLK_ZONE_WPLUG_PLUGGED;
 
 	spin_unlock_irqrestore(&zwplug->lock, flags);
 
@@ -3942,54 +4084,110 @@ void disk_init_zone_resources(struct gendisk *disk)
 static int disk_alloc_zone_resources(struct gendisk *disk,
 				     unsigned int pool_size)
 {
-	unsigned int i; // hash bucket 초기화 loop index
-	int ret = -ENOMEM; // 자원 할당 실패 시 반환값
-	atomic_set(&disk->nr_zone_wplugs, 0); // 활성 zone plug 개수 0으로 초기화
+	unsigned int i;
+	/* [한국어] 기본 반환값을 -ENOMEM으로 두어, 아래 goto 라벨로 빠지는 대부분의
+	 * 실패 경로에서 별도 대입 없이 이 값이 반환되게 한다. kthread_create만
+	 * 예외적으로 다른 오류 코드를 줄 수 있어 그때만 덮어쓴다. */
+	int ret = -ENOMEM;
+	/* [한국어] 활성 plug 개수 카운터를 0으로 시작한다. 이 값은
+	 * blk_zone_reset_all_bio_endio()의 빠른 경로 판정에 쓰인다. */
+	atomic_set(&disk->nr_zone_wplugs, 0);
+	/* [한국어] ★ 해시 크기 결정 ★
+	 * pool_size(동시에 열 수 있는 zone 수)를 담을 만한 2의 거듭제곱을 고르되,
+	 * BLK_ZONE_WPLUG_MAX_HASH_BITS(9비트 = 512버킷)로 상한을 둔다.
+	 * ilog2(pool_size) + 1은 pool_size보다 크거나 같은 최소 2의 거듭제곱의
+	 * 비트 수다 — 버킷당 평균 체인 길이를 1 근처로 유지해 조회를 O(1)로 만든다.
+	 * 상한을 두는 이유: NVMe ZNS 컨트롤러가 수만 개의 open zone을 허용하더라도
+	 * 실제로 동시에 쓰이는 zone은 훨씬 적어, 512버킷이면 충분하고 그 이상은
+	 * 메모리 낭비다. */
 	disk->zone_wplugs_hash_bits =
-		min(ilog2(pool_size) + 1, BLK_ZONE_WPLUG_MAX_HASH_BITS); // hash bucket 수를 512개(9 bits)로 제한
+		min(ilog2(pool_size) + 1, BLK_ZONE_WPLUG_MAX_HASH_BITS);
 
+	/* [한국어] 해시 버킷 배열을 0으로 초기화해 할당한다. */
 	disk->zone_wplugs_hash =
 		kzalloc_objs(struct hlist_head,
-			     disk_zone_wplugs_hash_size(disk)); // zone plug hash table 메모리 할당
-	if (!disk->zone_wplugs_hash) // 해시 배열 할당 실패 - 아직 아무 자원도 안 만들었으니 바로 반환
+			     disk_zone_wplugs_hash_size(disk));
+	/* [한국어] 첫 단계 실패 — 아직 아무 자원도 잡지 않았으므로 되돌릴 것이
+	 * 없다. goto 없이 바로 반환한다. */
+	if (!disk->zone_wplugs_hash)
 		return -ENOMEM;
 
-	for (i = 0; i < disk_zone_wplugs_hash_size(disk); i++) // 모든 hash bucket head 초기화
+	/* [한국어] 각 버킷의 리스트 헤드를 초기화한다. kzalloc이 0으로 채웠지만
+	 * hlist_head의 "빈 상태"는 first == NULL이라 결과적으로 같다 — 그래도
+	 * 명시적으로 초기화해 자료구조의 계약을 코드로 드러낸다. */
+	for (i = 0; i < disk_zone_wplugs_hash_size(disk); i++)
 		INIT_HLIST_HEAD(&disk->zone_wplugs_hash[i]);
 
+	/* [한국어] plug 객체 전용 mempool을 만든다. 일반 kmalloc이 아니라
+	 * mempool을 쓰는 이유가 중요하다: plug 할당은 쓰기 I/O 제출 경로에서
+	 * 일어나는데, 메모리 부족 상황에서 그 할당이 실패하면 write-back이
+	 * 진행되지 못하고, write-back이 멈추면 메모리가 회수되지 않아 시스템이
+	 * 교착에 빠진다. mempool은 pool_size개를 미리 확보해 두어 그 상황에서도
+	 * 최소한의 진행을 보장한다. */
 	disk->zone_wplugs_pool = mempool_create_kmalloc_pool(pool_size,
-						sizeof(struct blk_zone_wplug)); // max_open/active_zones 기반 plug mempool 생성
-	if (!disk->zone_wplugs_pool) // mempool 생성 실패 - 방금 만든 해시 테이블을 해제해야 함
+						sizeof(struct blk_zone_wplug));
+	if (!disk->zone_wplugs_pool)
 		goto free_hash;
 
+	/* [한국어] 이 디스크 전용 워크큐. plug에 대기 중인 bio를 나중에 제출하는
+	 * 작업이 여기서 실행된다.
+	 *   WQ_MEM_RECLAIM - mempool과 같은 이유. 메모리 회수 경로의 write-back이
+	 *     이 워커를 기다리므로, 전용 rescuer 스레드가 있어야 교착을 피한다.
+	 *   WQ_HIGHPRI     - 대기 중인 zone 쓰기는 이미 지연된 상태다. 일반
+	 *     우선순위로 두면 그 지연이 더 커진다.
+	 *   max_active = pool_size - 동시에 실행될 워커 수를 open zone 수만큼
+	 *     허용해, 서로 다른 zone의 쓰기가 병렬로 진행되게 한다. */
 	disk->zone_wplugs_wq =
 		alloc_workqueue("%s_zwplugs", WQ_MEM_RECLAIM | WQ_HIGHPRI,
-				pool_size, disk->disk_name); // per-disk 고우선순위 workqueue 할당
-	if (!disk->zone_wplugs_wq) // workqueue 생성 실패 - 해시+mempool을 함께 해제해야 함
+				pool_size, disk->disk_name);
+	if (!disk->zone_wplugs_wq)
 		goto destroy_pool;
 
+	/* [한국어] 워크큐와 별개로 전용 커널 스레드도 만든다. 회전 매체 zoned
+	 * 장치(SMR HDD)는 큐 깊이 1로 쓰기를 완전히 직렬화해야 하는데, 워크큐는
+	 * 여러 워커가 병렬 실행될 수 있어 그 보장을 할 수 없다. 스레드 하나가
+	 * 모든 쓰기를 순서대로 내보내는 방식이 필요하다.
+	 * NVMe ZNS는 이 스레드를 쓰지 않지만, 코드 경로를 단순하게 유지하기 위해
+	 * 장치 종류와 무관하게 생성해 둔다. */
 	disk->zone_wplugs_worker =
 		kthread_create(disk_zone_wplugs_worker, disk,
-			       "%s_zwplugs_worker", disk->disk_name); // 회전형(qd1 writes) 장치용 커널 스레드 생성
-	if (IS_ERR(disk->zone_wplugs_worker)) { // 스레드 생성 실패 - 에러 코드를 보존하고 지금까지의 자원을 모두 해제
-		ret = PTR_ERR(disk->zone_wplugs_worker); // kthread_create 실패 원인 코드를 반환값으로 보존
-		disk->zone_wplugs_worker = NULL; // 실패한 포인터를 NULL로 정리 (dangling 방지)
+			       "%s_zwplugs_worker", disk->disk_name);
+	if (IS_ERR(disk->zone_wplugs_worker)) {
+		/* [한국어] kthread_create는 NULL이 아니라 ERR_PTR로 실패를 알린다.
+		 * 그 안의 오류 코드(-ENOMEM일 수도, -EINTR일 수도)를 그대로 전달하기
+		 * 위해 기본값 -ENOMEM을 덮어쓴다. */
+		ret = PTR_ERR(disk->zone_wplugs_worker);
+		/* [한국어] ERR_PTR 값이 남아 있으면 이후 정리 코드가 그것을 유효
+		 * 포인터로 오인해 역참조할 수 있다. NULL로 지워 둔다. */
+		disk->zone_wplugs_worker = NULL;
 		goto destroy_wq;
 	}
-	wake_up_process(disk->zone_wplugs_worker); // zone plug worker 실행 시작
+	/* [한국어] kthread_create는 스레드를 만들되 실행하지는 않는다.
+	 * wake_up_process로 명시적으로 깨워야 동작을 시작한다. 이렇게 분리된
+	 * 이유는 생성과 시작 사이에 스레드 속성(CPU affinity 등)을 설정할 수
+	 * 있게 하기 위해서다. */
+	wake_up_process(disk->zone_wplugs_worker);
 
 	return 0;
 
+	/* [한국어] ★ 역순 해제 사다리 ★
+	 * 각 라벨은 "그 단계 직전까지 성공한 자원"만 정리하고 아래로 흘러내린다.
+	 * 실패 지점마다 정리 코드를 중복 작성하지 않는 커널의 표준 패턴이다.
+	 * 포인터를 NULL로 지우는 것도 중요하다 — 이 함수가 실패해도 gendisk는
+	 * 살아 있고, 나중에 정리 경로가 이 필드들을 다시 볼 수 있기 때문이다. */
 destroy_wq:
-	destroy_workqueue(disk->zone_wplugs_wq); // workqueue 해제
-	disk->zone_wplugs_wq = NULL; // workqueue 포인터 NULL화
+	destroy_workqueue(disk->zone_wplugs_wq);
+	disk->zone_wplugs_wq = NULL;
 destroy_pool:
-	mempool_destroy(disk->zone_wplugs_pool); // mempool 해제
-	disk->zone_wplugs_pool = NULL; // mempool 포인터 NULL화
+	mempool_destroy(disk->zone_wplugs_pool);
+	disk->zone_wplugs_pool = NULL;
 free_hash:
-	kfree(disk->zone_wplugs_hash); // hash table 메모리 해제
-	disk->zone_wplugs_hash = NULL; // hash table 포인터 NULL화
-	disk->zone_wplugs_hash_bits = 0; // hash bits 0으로 초기화
+	kfree(disk->zone_wplugs_hash);
+	disk->zone_wplugs_hash = NULL;
+	/* [한국어] 해시 비트 수도 0으로 되돌린다. 이 값이 남아 있으면
+	 * disk_zone_wplugs_hash_size()가 0이 아닌 크기를 반환해, 해제된
+	 * 배열을 순회하려는 코드가 생길 수 있다. */
+	disk->zone_wplugs_hash_bits = 0;
 	return ret;
 }
 
