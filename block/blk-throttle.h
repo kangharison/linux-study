@@ -11,9 +11,10 @@
  * struct throtl_grp)와 상태 플래그(enum tg_state_flags), 그리고 블록 레이어
  * 제출 경로에서 인라인으로 즉시 판단해야 하는 헬퍼 함수들
  * (pd_to_tg(), blkg_to_tg(), blk_throtl_activated(), blk_should_throtl(),
- * blk_throtl_bio())을 정의한다. bio가 blk-mq를 거쳐 NVMe SQ(Submission
- * Queue) doorbell을 울리기 전, cgroup별 bps(bytes per second)/iops(IO per
- * second) 상한을 검사·집계하기 위한 공용 타입 정의 지점이다.
+ * blk_throtl_bio())을 정의한다. bio가 request로 바뀌어 드라이버에 넘어가기
+ * 전 단계에서, cgroup별 bps(bytes per second)/iops(IO per second) 상한을
+ * 검사·집계하기 위한 공용 타입 정의 지점이다. 이 계층은 하위 장치가 무엇인지
+ * 전혀 참조하지 않는 일반 블록 계층 코드다.
  * CONFIG_BLK_DEV_THROTTLING이 꺼진 커널에서는 동일한 이름의 no-op 인라인
  * stub을 제공해 호출부(blk-mq, block/blk-core.c 등)가 #ifdef 분기 없이
  * 동일한 API를 쓸 수 있게 한다.
@@ -27,8 +28,7 @@
  *         → __blk_throtl_bio()        (blk-throttle.c 구현, 본 헤더는 선언만 보유)
  *           [제한 초과 시 throtl_grp 큐에 보관 후 pending_timer 대기]
  *           → (blk-throttle.c의 디스패치 경로를 거쳐) submit_bio_noacct_nocheck()
- *             → blk_mq_submit_bio() 재진입 → blk_mq_get_request()
- *               → nvme_queue_rq() → nvme_submit_cmd(doorbell)
+ *             → blk_mq_submit_bio() 재진입 → request 할당 → 드라이버 queue_rq()
  * 실행 컨텍스트: 이 헤더의 인라인 함수들은 submit_bio()를 호출하는 임의의
  * 프로세스/커널 스레드 컨텍스트에서 실행된다 (인터럽트 컨텍스트 아님).
  * 별도의 락을 걸지 않고 bio->bi_blkg, bio->bi_opf 등 bio 자체의 불변 필드만
@@ -46,8 +46,8 @@
  *   blk_throtl_cancel_bios(), extern blkcg_policy_throtl의 실제 구현을 담고
  *   있으며, throtl_data 등 이 헤더에 없는 내부 전용 자료구조도 함께 정의한다.
  * - blk-mq / block core (blk-mq.c, blk-core.c): blk_throtl_bio()를
- *   submit_bio() 경로 초입에서 호출해 NVMe SQ 진입 전에 이 헤더의 판단
- *   로직을 통과시킨다.
+ *   submit_bio() 경로 초입에서 호출해, bio가 request로 변환되기 전에 이
+ *   헤더의 판단 로직을 통과시킨다.
  * - cgroupfs (io.max, blkio.throttle.*): 사용자 공간에서 설정한 bps/iops
  *   상한이 blk-throttle.c의 tg_set_conf() 등을 통해 여기 정의된
  *   throtl_grp.bps[]/iops[]에 기록된다 (이 헤더는 그 저장소 타입만 정의).
@@ -107,16 +107,16 @@
  */
 
 /*
- * NVMe 동작 연결 (struct throtl_qnode) - 개요:
- *  - node: service_queue->queued[]에 연결되어 parent/self 간 디스패치 순서를
- *    관리한다. NVMe SQ에 들어가기 전에 여러 cgroup의 bio 순서를 round-robin으로
- *    보장한다.
- *  - bios_bps: bps 제한에 의해 대기 중인 bio들이다. NVMe 입장에서는 아직
- *    blk_mq_get_request()를 거쳐 struct request로 변환되지 않은, SQ doorbell
- *    이전 단계의 요청들이다 (추정).
- *  - bios_iops: iops 제한에 의해 대기 중인 bio들이다. NVMe SQ에 들어갈
- *    명령 개수(CID 소비량)를 조절하기 위해 사용된다.
- *  - tg: 이 qnode가 속한 throtl_grp(cgroup)을 가리킨다.
+ * [한국어] struct throtl_qnode 개요:
+ *  - node: service_queue->queued[]에 연결되는 고리. 이 리스트에 올라 있는
+ *    동안만 "활성 출처"로 취급되며, 꺼낼 때마다 꼬리로 돌려져 형제 cgroup
+ *    간 round-robin이 성립한다.
+ *  - bios_bps: 아직 bps 관문을 통과하지 못해 대기 중인 bio들.
+ *  - bios_iops: bps는 통과했고 iops 관문만 남은 bio들. 두 관문의 대기열을
+ *    나눠 두어야 각 관문이 자기 줄의 선두만 보고 판정할 수 있고, 이미 bps를
+ *    통과한 bio(분할되어 되돌아온 것 등)가 bps 줄에 다시 서지 않는다.
+ *  - tg: 이 qnode가 속한 throtl_grp(cgroup)을 가리킨다. qnode가 활성화되어
+ *    있는 동안 이 tg의 blkg 참조를 하나 붙들고 있다.
  * 필드별 상세(설정자/읽는 자/값 범위/동기화)는 각 필드 아래 개별 주석 참고.
  */
 struct throtl_qnode {
@@ -135,7 +135,7 @@ struct throtl_qnode {
 	 *   조작된다 (throtl_grp/tg 단위가 아니라 전역 queue 단위 락). */
 
 	struct bio_list		bios_bps;	/* queued bios for bps limit */
-	/* [한국어] bps(대역폭) 제한에 걸려 아직 NVMe SQ 방향으로 전진하지 못한
+	/* [한국어] bps(대역폭) 제한에 걸려 아직 하위 계층으로 전진하지 못한
 	 * bio들의 연결 리스트. 이 리스트에 있다는 것은 아직
 	 * throtl_charge_bps_bio()로 bps 사용량이 차감되지 않았다는 뜻이다.
 	 * 설정자: throtl_qnode_add_bio()가 BIO_TG_BPS_THROTTLED/BIO_BPS_THROTTLED
@@ -153,7 +153,7 @@ struct throtl_qnode {
 	 * 설정자: throtl_qnode_add_bio()가 위 플래그가 설정된 bio를 이 리스트에
 	 *   추가.
 	 * 읽는 자: throtl_peek_queued()/throtl_pop_queued()가 항상 이 리스트를
-	 *   먼저 확인해 NVMe SQ로 내보낼 다음 bio를 고른다 (iops 큐 우선 원칙).
+	 *   먼저 확인해 하위 계층으로 내보낼 다음 bio를 고른다 (iops 큐 우선 원칙).
 	 * 값 범위: bios_bps와 동일하게 FIFO bio_list.
 	 * 동기화: queue_lock 보유 상태에서만 조작. */
 
@@ -172,16 +172,17 @@ struct throtl_qnode {
 };
 
 /*
- * NVMe 동작 연결 (struct throtl_service_queue) - 개요:
+ * [한국어] struct throtl_service_queue 개요:
  *  - parent_sq: 계층적 cgroup 트리에서 부모 service_queue를 가리킨다. bio는
- *    leaf에서 root로 거슬러 올라가 최종적으로 request_queue에 도달한 뒤
- *    nvme_queue_rq()가 호출된다.
- *  - queued[2]: READ/WRITE별 throtl_qnode 연결 리스트. NVMe SQ 유입 순서를
- *    round-robin으로 유지하여 특정 cgroup이 SQ를 독점하는 기아를 방지한다.
- *  - nr_queued_bps[2]/nr_queued_iops[2]: NVMe SQ로 아직 본류에 태우지 못한
- *    bio/바이트 수를 카운트한다.
+ *    말단 cgroup에서 루트로 한 칸씩 올라가며 각 계층의 제한을 다시 받고,
+ *    루트(parent_sq == NULL)에 닿아야 비로소 발행 대상이 된다.
+ *  - queued[2]: READ/WRITE별 throtl_qnode 연결 리스트. 꺼낼 때마다 qnode를
+ *    꼬리로 돌려 형제 cgroup 간 round-robin을 만들고, 한 그룹이 큐를
+ *    독점해 나머지가 굶는 상황을 막는다.
+ *  - nr_queued_bps[2]/nr_queued_iops[2]: 각 관문에서 대기 중인 bio 개수.
+ *    두 값의 합(sq_queued())이 "이 방향에 대기가 있는가"의 판단 근거다.
  *  - pending_tree: 활성화된 throtl_grp을 disptime 기준으로 정렬한 RB 트리.
- *    NVMe SQ에 진입할 다음 후보 그룹을 시간 순서로 선택할 때 사용된다.
+ *    다음에 디스패치할 후보 그룹을 시간 순서로 선택할 때 사용된다.
  *  - first_pending_disptime/pending_timer: 가장 먼저 throttle이 풀릴 그룹의
  *    시점을 관리하며, 타이머가 만료되면 blk_throtl_dispatch_work_fn()을
  *    통해 bio를 다시 blk_mq_submit_bio() 경로로 복귀시킨다.
@@ -192,7 +193,7 @@ struct throtl_service_queue {
 	/* [한국어] 계층적 cgroup 트리에서 한 단계 위(부모)의 service_queue.
 	 * bio는 leaf(자식) tg의 service_queue에서 시작해 이 포인터를 따라
 	 * 한 레벨씩 위로 디스패치되며, 최상위(=throtl_data.service_queue,
-	 * parent_sq == NULL)에 도달해야 비로소 NVMe SQ 방향 경로로 넘어간다.
+	 * parent_sq == NULL)에 도달해야 비로소 실제 발행 경로로 넘어간다.
 	 * 설정자: throtl_pd_init()에서 v1(cgroup1)이면 항상 td->service_queue로,
 	 *   v2(cgroup2, default hierarchy)면 부모 blkg의 tg->service_queue로
 	 *   1회 설정 (cgroup 계층 이동 없이는 이후 불변).
@@ -210,7 +211,7 @@ struct throtl_service_queue {
 	/* [한국어] READ(=queued[0])/WRITE(=queued[1]) 방향별로, 이 service_queue에
 	 * 매달린 throtl_qnode들의 연결 리스트 헤드. 여러 cgroup(local 또는 자식)
 	 * 에서 온 qnode가 이 리스트에 나란히 매달리고, 리스트 순서(round-robin)
-	 * 대로 하나씩 꺼내져 NVMe SQ 방향으로 전진한다.
+	 * 대로 하나씩 꺼내져 하위 계층으로 전진한다.
 	 * 설정자: throtl_qnode_add_bio()가 qnode를 처음 활성화할 때
 	 *   list_add_tail()로 추가.
 	 * 읽는 자: throtl_peek_queued()/throtl_pop_queued()가 list_first_entry()로
@@ -227,8 +228,8 @@ struct throtl_service_queue {
 	 * 설정자: throtl_qnode_add_bio()(+1), throtl_pop_queued()(-1).
 	 * 읽는 자: sq_queued()가 nr_queued_bps[rw] + nr_queued_iops[rw]로
 	 *   "이 방향에 대기 중인 bio가 있는지"를 판단할 때 사용.
-	 * 값 범위: 0 이상. NVMe 관점에서는 아직 SQ에 올리지 못한 대역폭 제한
-	 *   bio 수이며, 값이 클수록 해당 cgroup의 대역폭 부채가 크다.
+	 * 값 범위: 0 이상. 아직 bps 관문을 통과하지 못한 bio 수이며, 값이
+	 *   클수록 그 방향의 대역폭 예산이 부족하다는 뜻이다.
 	 * 동기화: queue_lock 보호. */
 
 	unsigned int		nr_queued_iops[2];	/* number of queued iops bios */
@@ -236,8 +237,7 @@ struct throtl_service_queue {
 	 * throtl_qnode.bios_iops 리스트들의 합계와 일치.
 	 * 설정자: throtl_qnode_add_bio()(+1), throtl_pop_queued()(-1).
 	 * 읽는 자: sq_queued(), throtl_dispatch_tg()의 종료 조건 판단 등.
-	 * 값 범위: 0 이상. NVMe SQ에 아직 못 올린, 초당 명령 수 제한에 걸린
-	 *   bio 수.
+	 * 값 범위: 0 이상. bps는 통과했지만 iops 관문에서 대기 중인 bio 수.
 	 * 동기화: queue_lock 보호. */
 
 	/*
@@ -248,8 +248,9 @@ struct throtl_service_queue {
 	/* [한국어] 이 service_queue의 직계 자식 throtl_grp 중, 대기 중인 bio가
 	 * 있어 향후 disptime에 디스패치되어야 하는 tg들을 disptime 오름차순으로
 	 * 정렬한 RB 트리 (rb_root_cached라 leftmost를 O(1)에 조회 가능).
-	 * NVMe 관점에서는 "다음에 SQ로 bio를 내보낼 후보 cgroup을 시간순으로
-	 * 골라내는" 스케줄링 자료구조다.
+	 * "다음에 bio를 내보낼 후보 cgroup을 시간순으로 골라내는" 스케줄링
+	 * 자료구조이며, 정렬돼 있기 때문에 최좌단이 아직 때가 아니면 나머지도
+	 * 볼 필요 없이 순회를 끝낼 수 있다.
 	 * 설정자: tg_service_queue_add()가 tg->disptime을 key로 삽입,
 	 *   throtl_rb_erase()가 제거.
 	 * 읽는 자: throtl_rb_first()가 leftmost(가장 이른 disptime) tg를 조회해
@@ -271,7 +272,7 @@ struct throtl_service_queue {
 	/* [한국어] pending_tree에서 disptime이 가장 이른(leftmost) tg의 disptime
 	 * 값을 캐시해 둔 것. pending_timer를 이 값으로 arm하여, 실제로 그
 	 * jiffies에 도달했을 때만 타이머 콜백(throtl_pending_timer_fn())이
-	 * 깨어나 NVMe SQ 방향 디스패치를 재개하게 한다.
+	 * 깨어나 디스패치를 재개하게 한다.
 	 * 설정자: update_min_dispatch_time()이 throtl_rb_first() 결과로 갱신.
 	 * 읽는 자: throtl_schedule_next_dispatch()가 jiffies와 비교해 아직
 	 *   미래인지 확인 후 throtl_schedule_pending_timer()에 전달.
@@ -283,9 +284,10 @@ struct throtl_service_queue {
 	/* [한국어] first_pending_disptime 시각에 만료되도록 예약되는 커널
 	 * 타이머. 콜백은 throtl_pending_timer_fn()이며, 이 함수가 disptime이
 	 * 도래한 tg들을 순회해 bio를 상위 service_queue로 전달하고 필요하면
-	 * blk_throtl_dispatch_work_fn() workqueue를 깨워 NVMe SQ 방향으로
-	 * 최종 전달한다. 즉 이 타이머가 "NVMe doorbell을 강제로 지연시키는"
-	 * 소프트웨어 카운트다운 역할을 한다.
+	 * blk_throtl_dispatch_work_fn() workqueue를 깨워 실제 발행까지 이어진다.
+	 * 붙잡아 둔 bio를 다시 흐르게 하는 유일한 시동 장치이며, 이것이 없으면
+	 * 제한에 걸린 bio는 다음 bio가 제출될 때까지 아무도 깨워 주지 않는다.
+	 * sq마다 타이머는 최대 하나만 살아 있다(mod_timer로 시각만 갱신).
 	 * 설정자: throtl_service_queue_init()에서 timer_setup()으로 핸들러 등록,
 	 *   throtl_schedule_pending_timer()에서 mod_timer()로 만료 시각 갱신.
 	 * 읽는 자: 커널 타이머 서브시스템이 만료 시 콜백을 softirq 컨텍스트에서
@@ -296,11 +298,17 @@ struct throtl_service_queue {
 	 *   timer_delete_sync()로 동기적으로 정지시켜 use-after-free를 방지. */
 };
 
+/* [한국어] throtl_grp.flags에 담기는 상태 비트들.
+ * 네 비트 모두 원자적 비트 연산이 아니라 평범한 OR/AND-NOT 대입으로 다뤄지며,
+ * 그 안전성은 전적으로 queue_lock에 의존한다. 성격이 둘로 나뉘는데,
+ * PENDING/CANCELING은 지속 상태이고 WAS_EMPTY/IOPS_WAS_EMPTY는 세우고 곧
+ * 소비해 지우는 1회성 신호다. */
 enum tg_state_flags {
 	THROTL_TG_PENDING		= 1 << 0,	/* on parent's pending tree */
 	/* [한국어] 이 tg가 현재 부모 service_queue의 pending_tree(RB 트리)에
-	 * 삽입되어 있어, disptime이 되면 NVMe SQ 방향으로 디스패치될 예정임을
-	 * 나타낸다. 중복 삽입 방지 가드로도 쓰인다.
+	 * 삽입되어 있어, disptime이 되면 디스패치될 예정임을 나타낸다.
+	 * 트리에 없는 노드를 rb_erase하면 엉뚱한 링크를 건드리게 되므로,
+	 * 삽입/삭제 양쪽의 가드 역할을 겸한다.
 	 * 설정: throtl_enqueue_tg()가 pending_tree에 처음 삽입할 때 OR로 설정.
 	 * 해제: throtl_dequeue_tg()가 pending_tree에서 제거할 때 AND-NOT으로
 	 *   클리어 (tg의 두 방향 큐가 모두 비었거나 flush될 때 호출됨).
@@ -352,35 +360,40 @@ enum tg_state_flags {
 };
 
 /*
- * NVMe 동작 연결 (struct throtl_grp) - 개요:
- *  - pd: blk-cgroup policy data. blkg_to_tg() 등에서 throtl_grp으로 변환할
- *    때 사용되며, blk-cgroup 계층과 NVMe queue를 연결한다.
- *  - rb_node: service_queue->pending_tree에 연결될 때 사용.
- *  - td: 이 그룹이 속한 throtl_data(하나의 request_queue/namespace 단위).
- *    NVMe에서는 보통 하나의 nvme_ns queue에 대응된다 (추정).
- *  - service_queue: 이 cgroup의 자체 서비스 큐. 자식 그룹이나 직접 도착한
- *    bio를 NVMe SQ 이전에 임시 대기시킨다.
- *  - qnode_on_self[2]/qnode_on_parent[2]: 자체/부모 service_queue에 bio를
- *    분리 큐잉하여 round-robin으로 디스패치할 수 있게 한다.
- *  - disptime: 이 그룹의 throttle이 풀리고 NVMe SQ로 bio를 낼 수 있는
- *    예상 시점(jiffies)이다.
- *  - flags: THROTL_TG_PENDING 등 상태. NVMe SQ 진행 가능 시점을 스케줄링
- *    하는 데 참조된다.
+ * [한국어] struct throtl_grp 개요 - (cgroup, 디스크) 한 쌍의 스로틀 상태:
+ *  - pd: blk-cgroup 정책 프레임워크의 공용 헤더. 반드시 첫 멤버여야
+ *    container_of 기반 변환(pd_to_tg/blkg_to_tg)이 성립한다.
+ *  - rb_node: 부모 service_queue의 pending_tree에 매달릴 때 쓰는 노드.
+ *  - td: 이 그룹이 속한 throtl_data. gendisk 하나(= request_queue 하나)에
+ *    대응하며, 장치 종류와는 무관하다.
+ *  - service_queue: 이 cgroup이 '부모'로서 자식들의 bio를 받아 두는 큐이자,
+ *    이 cgroup에 직접 도착한 bio가 대기하는 곳.
+ *  - qnode_on_self[2]/qnode_on_parent[2]: 자기 큐용/부모 큐용 대기 슬롯.
+ *    슬롯을 분리해야 부모가 자식별로 돌아가며 꺼내는 round-robin이 된다.
+ *  - disptime: 이 그룹이 다음 bio를 낼 수 있게 되는 절대 시각(jiffies).
+ *    pending_tree의 정렬 키이며, 최좌단 그룹의 값이 타이머 만료 시각이 된다.
+ *  - flags: THROTL_TG_PENDING 등 상태 비트(위 enum 참고).
  *  - has_rules_bps[2]/has_rules_iops[2]: READ/WRITE 방향에 bps/IOPS 규칙이
  *    있는지 표시. 있을 때만 blk_should_throtl()에서 제한을 검사한다.
- *  - bps[2]/iops[2]: 설정된 bps/IOPS 상한값. NVMe SQ로의 바이트/명령
+ *  - bps[2]/iops[2]: 설정된 bps/IOPS 상한값. 하위 계층으로의 바이트/IO
  *    유입률을 이 값 이하로 억제한다.
  *  - bytes_disp[2]/io_disp[2]: 현재 슬라이스에서 이미 디스패치된
  *    바이트/IO 수. 설정이 변경되면 carryover를 음수로 반영하여 새로운
  *    bps/iops 기준에서 대기 시간을 재계산한다.
- *  - last_check_time: 마지막으로 rate limit을 점검한 시간.
+ *  - last_check_time: 현재 코드에서 아무 곳에서도 읽거나 쓰지 않는 필드
+ *    (해당 필드 주석 참고).
  *  - slice_start[2]/slice_end[2]: 현재 제한 윈도우의 시작/종료 시점.
- *  - stat_bytes/stat_ios: blk-cgroup-rwstat 기반 통계. NVMe namespace별
- *    READ/WRITE 바이트 및 IO 개수를 cgroup별로 집계한다.
+ *    예산은 저장되지 않고 "(jiffies - slice_start) × 상한 - 사용량"으로
+ *    그때그때 계산된다.
+ *  - stat_bytes/stat_ios: blk-cgroup-rwstat 기반 통계. cgroupfs로 노출되는
+ *    조회용 값이며 rate 판정에는 쓰이지 않는다.
  * 필드별 상세(설정자/읽는 자/값 범위/동기화)는 각 필드 아래 개별 주석 참고.
  */
 struct throtl_grp {
 	/* must be the first member */
+	/* [한국어] 아래 pd는 반드시 첫 멤버여야 한다 - blk-cgroup 코어는 이
+	 * 구조체를 pd 주소로만 다루고, pd_to_tg()는 오프셋 0을 전제로 원래
+	 * 구조체를 되찾기 때문이다. 순서를 바꾸면 조용히 잘못된 주소를 얻는다. */
 	struct blkg_policy_data pd;
 	/* [한국어] blk-cgroup 정책 프레임워크의 공용 policy-data 헤더.
 	 * struct throtl_grp을 blkcg_policy_throtl에 대한 per-blkg private
@@ -398,7 +411,7 @@ struct throtl_grp {
 	/* active throtl group service_queue member */
 	struct rb_node rb_node;
 	/* [한국어] 부모 service_queue의 pending_tree(RB 트리)에 이 tg를
-	 * 연결하는 노드. disptime을 key로 정렬되어, "다음에 NVMe SQ로 bio를
+	 * 연결하는 노드. disptime을 key로 정렬되어, "다음에 하위 계층으로 bio를
 	 * 내보낼 후보"를 시간 순으로 찾는 데 쓰인다.
 	 * 설정자: tg_service_queue_add()가 rb_link_node()+rb_insert_color_cached()
 	 *   로 삽입.
@@ -412,7 +425,7 @@ struct throtl_grp {
 	/* throtl_data this group belongs to */
 	struct throtl_data *td;
 	/* [한국어] 이 tg가 속한 request_queue 전체의 throtl_data(제어 최상위
-	 * 컨텍스트)를 가리키는 역참조 포인터. NVMe 관점에서는 하나의 namespace
+	 * 컨텍스트)를 가리키는 역참조 포인터. 하나의 gendisk
 	 * request_queue에 대응하는 throttle 컨트롤러 인스턴스.
 	 * 설정자: throtl_pd_init()이 blkg->q->td로부터 1회 설정 (이후 불변;
 	 *   cgroup을 다른 디스크로 옮기는 기능은 없음).
@@ -479,7 +492,7 @@ struct throtl_grp {
 	 * key to sort active groups in service tree.
 	 */
 	unsigned long disptime;
-	/* [한국어] 이 tg가 다음 bio를 NVMe SQ 방향으로 내보낼 수 있게 되는
+	/* [한국어] 이 tg가 다음 bio를 하위 계층으로 내보낼 수 있게 되는
 	 * 예상 시각(jiffies 절대값). tg_dispatch_time()이 계산한
 	 * "READ/WRITE 중 더 짧은 대기 시간"을 현재 jiffies에 더해 산출하며,
 	 * 부모 service_queue.pending_tree의 정렬 key로 쓰인다.
@@ -510,7 +523,7 @@ struct throtl_grp {
 	/* [한국어] READ(=[0])/WRITE(=[1])별로, 이 tg 자신 또는 조상(부모) 중
 	 * 누군가에게 bps 제한이 설정되어 있는지를 나타내는 캐시된 불리언.
 	 * false면 blk_should_throtl()(본 헤더 하단)이 bps 검사 자체를
-	 * 생략하고 곧바로 NVMe SQ 경로를 통과시킨다 (제한이 전혀 없는 cgroup의
+	 * 생략하고 곧바로 스로틀 검사를 통과시킨다 (제한이 전혀 없는 cgroup의
 	 * 오버헤드를 없애기 위한 최적화).
 	 * 설정자: tg_update_has_rules()가 tg_bps_limit(tg, rw) != U64_MAX
 	 *   또는 부모의 has_rules_bps[rw]를 OR 조건으로 계산.
@@ -531,7 +544,7 @@ struct throtl_grp {
 	/* bytes per second rate limits */
 	uint64_t bps[2];
 	/* [한국어] READ(=[0])/WRITE(=[1])별로 설정된 초당 바이트 수 상한.
-	 * NVMe 관점에서는 이 방향으로 SQ에 올라가는 데이터의 초당 총량을
+	 * 이 방향으로 하위 계층에 내려보내는 데이터의 초당 총량을
 	 * 이 값 이하로 억제하겠다는 사용자 설정값이다.
 	 * 설정자: tg_set_conf()가 cgroupfs(io.max, blkio.throttle.*)에 쓰인
 	 *   값을 sscanf()로 파싱해 이 필드에 직접 대입 (of_cft(of)->private
@@ -547,8 +560,10 @@ struct throtl_grp {
 
 	/* IOPS limits */
 	unsigned int iops[2];
-	/* [한국어] READ/WRITE별로 설정된 초당 IO(명령) 수 상한. NVMe 관점에서는
-	 * 이 방향의 SQ 진입 명령 개수(CID 소비 속도)를 이 값 이하로 제한한다.
+	/* [한국어] READ/WRITE별로 설정된 초당 IO 개수 상한. bio 크기와 무관하게
+	 * 개수만 세므로, 4KB 랜덤 IO와 1MB 순차 IO가 여기서는 똑같이 1로 계산된다.
+	 * bps 상한과는 독립적으로 적용되며, 둘 다 걸려 있으면 먼저 막히는 쪽이
+	 * 실제 대기 시간을 결정한다.
 	 * 설정자/읽는 자/동기화: bps[2]와 동일한 경로(tg_set_conf(),
 	 *   tg_iops_limit(), tg_dispatch_iops_time())를 iops 버전으로 사용.
 	 * 값 범위: 0은 UINT_MAX(무제한)로 변환되어 저장; 초기값은
@@ -564,7 +579,7 @@ struct throtl_grp {
 	 */
 	int64_t bytes_disp[2];
 	/* [한국어] READ/WRITE별로 "현재 slice_start[rw]~slice_end[rw] 윈도우
-	 * 안에서 이미 NVMe SQ 쪽으로 디스패치된 바이트 수" 누적값. bps 판정
+	 * 안에서 이미 하위 계층으로 디스패치된 바이트 수" 누적값. bps 판정
 	 * (tg_dispatch_bps_time())이 "bytes_disp[rw] + 이번 bio 크기가
 	 * bps_limit * 경과시간/HZ를 넘는가"를 검사하는 기준이 된다.
 	 * carryover 매커니즘: 설정이 도중에 바뀌면(__tg_update_carryover())
@@ -589,13 +604,12 @@ struct throtl_grp {
 	 * 값 범위: int이므로 이 필드도 carryover 대입 시 음수가 될 수 있음. */
 
 	unsigned long last_check_time;
-	/* [한국어] 이름과 타입(jiffies 단위 시각)으로 보아 "마지막으로 rate
-	 * limit 상태를 점검한 시각"을 기록하기 위한 필드로 보이나, 이 저장소의
-	 * block/blk-throttle.c 구현에서는 이 필드를 읽거나 쓰는 코드가
-	 * 발견되지 않는다 (grep 결과 선언부 외 참조 없음). 과거 버전의 slice
-	 * 갱신 로직에서 쓰였던 흔적이 구조체 정의에만 남아 있는 것으로 추정되며,
-	 * 현재는 사실상 사용되지 않는 필드다 (추정 - 실제 상위 커널 변경
-	 * 이력 확인 필요).
+	/* [한국어] 이 저장소의 block/ 전체를 검색해도 이 필드를 읽거나 쓰는 코드가
+	 * 없다 - 선언은 여기 하나뿐이고 참조가 전혀 없다(확인 결과). 따라서 현재
+	 * 코드에서는 아무 역할도 하지 않으며, 값도 kzalloc 이후 0으로 남는다.
+	 * 이름과 타입(jiffies 시각)으로 보아 "마지막으로 rate limit을 점검한 시각"을
+	 * 담으려던 것으로 읽히지만, 어느 시점에 왜 남게 되었는지는 이 트리의
+	 * 소스만으로는 확인할 수 없다(커밋 이력 확인 필요).
 	 * 동기화: (미사용) 사용된다면 queue_lock 보호가 필요할 위치. */
 
 	/* When did we start a new slice */
@@ -603,7 +617,7 @@ struct throtl_grp {
 	/* [한국어] READ/WRITE별로 "현재 rate-limit 슬라이스가 시작된 시각"
 	 * (jiffies). bps/iops 사용량(bytes_disp/io_disp)은 이 시각부터 누적된
 	 * 값이며, 슬라이스가 리셋되면(throtl_trim_slice() 등) 이 값도 함께
-	 * 전진한다. NVMe 관점에서는 "지금 이 순간의 평균 처리율을 계산하는
+	 * 전진한다. "지금 이 순간의 평균 처리율을 계산하는
 	 * 분모가 되는 시간 윈도우의 시작점".
 	 * 설정자: throtl_start_new_slice()/throtl_start_new_slice_with_credit()
 	 *   (새 슬라이스 시작), throtl_trim_slice()(경과된 배수만큼 전진).
@@ -646,6 +660,10 @@ struct throtl_grp {
 	 * 읽는 자/값 범위/동기화: stat_bytes와 동일. */
 };
 
+/* [한국어] 아래 extern은 정의가 아니라 선언이다. 실체(콜백 테이블 전체)는
+ * blk-throttle.c에 있고, 이 헤더의 인라인 함수들(blkg_to_tg 등)이
+ * blkg_to_pd()/blkcg_policy_enabled()에 "어느 정책인지"를 넘기기 위한
+ * 식별자로만 필요하기 때문에 여기서는 이름만 노출한다. */
 extern struct blkcg_policy blkcg_policy_throtl;
 /* [한국어] blk-throttle 정책을 blkcg(cgroup 블록 IO 컨트롤러) 프레임워크에
  * 등록하기 위한 blkcg_policy 서술자. 실제 정의와 pd_alloc_fn/pd_init_fn/
@@ -745,7 +763,7 @@ static inline struct throtl_grp *blkg_to_tg(struct blkcg_gq *blkg)
  * blk_throtl_exit - (CONFIG_BLK_DEV_THROTTLING=n 빌드) throttle 자원 해제
  * no-op 버전.
  *
- * @disk: 해제 대상 gendisk (NVMe namespace 등). 이 빌드에서는 사용하지 않음.
+ * @disk: 해제 대상 gendisk . 이 빌드에서는 사용하지 않음.
  * @return: 없음 (void)
  *
  * blk-throttle 기능 자체가 커널 설정에서 빠진 빌드에서는 q->td가 존재할 수
@@ -783,7 +801,7 @@ static inline void blk_throtl_exit(struct gendisk *disk) { }
  *
  * 호출 체인:
  *   blk_mq_submit_bio() → [blk_throtl_bio] (no-op, false 반환)
- *     → 곧바로 blk_mq_get_request() → nvme_queue_rq()로 진행
+ *     → 곧바로 request 할당과 드라이버 제출로 진행
  */
 static inline bool blk_throtl_bio(struct bio *bio) { return false; }
 
@@ -814,7 +832,7 @@ static inline void blk_throtl_cancel_bios(struct gendisk *disk) { }
  * blk_throtl_exit - gendisk에 연결된 blk-throttle 상태(throtl_data)를
  * 해제한다 (선언; 실제 구현은 blk-throttle.c).
  *
- * @disk: 해제 대상 gendisk. NVMe에서는 하나의 namespace에 대응.
+ * @disk: 해제 대상 gendisk (디스크 전체; 파티션 단위가 아니다).
  * @return: 없음 (void)
  *
  * del_gendisk()가 디스크를 시스템에서 제거할 때 호출되어, 이 disk의
@@ -877,7 +895,7 @@ bool __blk_throtl_bio(struct bio *bio);
  * blk_throtl_cancel_bios - 이 gendisk에 대해 throtl 큐에 대기 중인 모든
  * bio를 강제로 흘려보낸다 (취소 경로; 선언, 실제 구현은 blk-throttle.c).
  *
- * @disk: 대상 gendisk. NVMe controller reset, surprise removal, namespace
+ * @disk: 대상 gendisk. 컨트롤러 리셋, 갑작스러운 장치 분리, 디스크
  *        teardown 등으로 더 이상 정상적인 rate-limit 스케줄링을 기다릴 수
  *        없는 상황에서 호출된다.
  * @return: 없음 (void)
@@ -889,8 +907,8 @@ bool __blk_throtl_bio(struct bio *bio);
  * 보낸다.
  * 실행 컨텍스트: 프로세스 컨텍스트 (장치 제거/에러 처리 경로);
  * queue_lock을 잡고 진행.
- * 호출자: NVMe 등 블록 드라이버의 장치 제거/리셋 처리 경로 (예:
- *   nvme_remove()류에서 남은 IO를 정리하는 단계, 이 헤더 밖).
+ * 호출자: del_gendisk() 및 그것을 부르는 드라이버의 장치 제거 경로
+ *   (남은 IO를 정리하는 단계, 이 헤더 밖).
  * 호출 대상(blk-throttle.c 내부): tg_flush_bios() 등.
  * 에러 경로: 없음 (실패 없이 항상 큐를 비움).
  *
@@ -905,7 +923,7 @@ void blk_throtl_cancel_bios(struct gendisk *disk);
  * blk_throtl_activated - 이 request_queue에서 blk-throttle 정책이 실제로
  * 활성화되어 있는지 확인한다.
  *
- * @q: 확인 대상 request_queue (NVMe에서는 namespace의 큐).
+ * @q: 확인 대상 request_queue.
  * @return: true면 이 큐의 bio들이 blk_should_throtl()/__blk_throtl_bio()의
  *          검사 대상이 됨; false면 throttle 모듈이 아예 붙어 있지 않거나
  *          정책이 꺼져 있어 무조건 통과.
@@ -936,9 +954,9 @@ static inline bool blk_throtl_activated(struct request_queue *q)
 	 * blkcg_policy_enabled() guarantees that the policy is activated
 	 * in the request_queue.
 	 */
-	/* q->td != NULL: NVMe queue가 throtl_data를 갖춰 Sq/Cq와 연결된 상태. */
+	/* [한국어] q->td != NULL: 이 디스크에 대해 blk_throtl_init()이 한 번이라도 실행됐다는 뜻. */
 	return q->td != NULL && blkcg_policy_enabled(q, &blkcg_policy_throtl);
-	/* blkcg_policy_enabled: cgroup policy이 켜져 있어야만 NVMe 유입 제한 활성. */
+	/* [한국어] 두 조건을 모두 봐야 하는 이유: td 할당과 정책 활성화는 blk_throtl_init() 안에서 순차로 일어나고, 정책 등록이 실패하면 td는 다시 NULL로 되돌려진다. 둘 중 하나만 보면 그 중간 상태를 잘못 판정한다. */
 }
 
 /*
@@ -973,42 +991,46 @@ static inline bool blk_throtl_activated(struct request_queue *q)
  */
 static inline bool blk_should_throtl(struct bio *bio)
 {
-	struct throtl_grp *tg;		/* bio가 속한 cgroup의 throtl_grp (NVMe SQ 진입 관문). */
-	int rw = bio_data_dir(bio);	/* READ/WRITE -> NVMe opcode방향(NVME_CMD_READ/WRITE)과 CID 소비 분리. */
+	struct throtl_grp *tg;		/* [한국어] 이 bio가 속한 cgroup의 스로틀 상태. 아래에서 규칙 유무와 통계 누적에 쓰인다. */
+	int rw = bio_data_dir(bio);	/* [한국어] 읽기/쓰기 규칙이 완전히 분리돼 있어 방향을 먼저 확정한다. */
 
-	if (!blk_throtl_activated(bio->bi_bdev->bd_queue))
-		/* throtl 비활성 시 bio는 nvme_queue_rq()로 직행 -> doorbell 가능. */
+	if (!blk_throtl_activated(bio->bi_bdev->bd_queue)) /* [한국어] 가장 싼 검사를 맨 앞에 둔다 */
+		/* [한국어] 이 디스크에 스로틀 계층 자체가 없다(아무도 제한을 건 적이 없다).
+		 * 가장 흔한 경우이자 가장 싼 검사라 맨 앞에 둔다 - tg를 얻기도 전에 빠져나간다. */
 		return false;
 
-	tg = blkg_to_tg(bio->bi_blkg);	/* blk-cgroup 계층에서 이 bio의 throtl_grp 획득. */
+	tg = blkg_to_tg(bio->bi_blkg);	/* [한국어] bio에 붙어 있는 blkg에서 이 정책의 데이터를 꺼낸다. */
 	/* v1 cgroup 계층에서만 bio별 통계를 직접 누적한다 (v2는 blkg 기반). */
 	if (!cgroup_subsys_on_dfl(io_cgrp_subsys)) {
 		/* 동일 bio의 바이트 통계가 중복 집계되지 않도록 플래그를 검사한다. */
 		if (!bio_flagged(bio, BIO_CGROUP_ACCT)) {
-			bio_set_flag(bio, BIO_CGROUP_ACCT);	/* NVMe: bio당 한 번만 계산하여 PRP/SGL 길이 중복 방지. */
-			blkg_rwstat_add(&tg->stat_bytes, bio->bi_opf,
-					bio->bi_iter.bi_size);
-			/* NVMe: bi_size는 향후 PRP/SGL entry 개수와 doorbell batch 크기에 영향. */
+			bio_set_flag(bio, BIO_CGROUP_ACCT);	/* [한국어] 이 함수는 같은 bio에 대해 여러 번 불릴 수 있다(스로틀에 걸렸다 풀려 재제출되는 경우 등). 플래그가 없으면 그때마다 바이트가 중복 누적된다. */
+			blkg_rwstat_add(&tg->stat_bytes, bio->bi_opf, /* [한국어] bi_opf에 방향과 sync 여부가 들어 있어, rwstat이 그 값만 보고 어느 칸에 더할지 정한다. */
+					bio->bi_iter.bi_size); /* [한국어] 현재 남은 전송 크기. 분할 전 원본 크기가 아니라 '이 bio가 실제로 나르는 양'이다. */
+			/* [한국어] percpu 카운터라 락 없이 더해도 안전하며, 읽을 때 합산한다. */
 		}
-		/* IO 개수를 누적하여 NVMe SQ로 유입될 명령 수 추이를 측정한다. */
+		/* [한국어] 개수 통계는 중복 방지 플래그 없이 매번 1씩 더한다 - 바이트와 달리
+		 * 재제출된 bio도 '한 번 더 제출된 IO'로 세는 것이 v1의 기존 동작이다. */
 		blkg_rwstat_add(&tg->stat_ios, bio->bi_opf, 1);
-		/* NVMe: 명령 1개는 CID 1개와 tag 1개를 소모 -> queue depth 추이 반영. */
 	}
 
 	/* iops limit is always counted */
 	/* IOPS 규칙이 있으면 반드시 throtl 판단을 수행한다. */
 	if (tg->has_rules_iops[rw])
-		/* NVMe: iops 상한이 설정된 방향 -> SQ CID 유입률 제어 필요. */
+		/* [한국어] iops는 '조건 없이' 다시 검사한다. bps와 달리 통과 사실을 bio에
+		 * 기록해 두는 플래그가 없고, 개수 회계는 bio가 실제로 나갈 때 한 번만
+		 * 이뤄지므로 여기서 걸러 버리면 셀 기회를 잃는다. */
 		return true;
 
 	/* bps 규칙이 있고 아직 bps 제한 큐를 거치지 않은 bio만 다시 검사한다. */
 	if (tg->has_rules_bps[rw] && !bio_flagged(bio, BIO_BPS_THROTTLED))
-		/* NVMe: bps 제한 -> DMA/PRP/SGL로 전송될 총 바이트량 제어; 중복 큐잉 방지 플래그 확인. */
+		/* [한국어] bps는 이미 통과한 bio를 다시 보내면 자기가 낸 사용량 때문에
+		 * 스스로 막히는 자기 봉쇄가 생긴다. 그래서 통과 표식이 없는 bio만 통과시킨다. */
 		return true;
 
 	return false;
-	/* [한국어] iops/bps 규칙이 모두 없거나 bps는 이미 통과했으면, 이 bio는
-	 * 더 검사할 필요 없이 곧바로 NVMe 방향으로 진행. */
+	/* [한국어] iops/bps 규칙이 모두 없거나 bps는 이미 통과했으면, 무거운
+	 * __blk_throtl_bio()를 부를 이유가 없다 - 그대로 제출 경로를 계속 간다. */
 }
 
 /*
@@ -1043,7 +1065,7 @@ static inline bool blk_throtl_bio(struct bio *bio)
 	 * block throttling takes effect if the policy is activated
 	 * in the bio's request_queue.
 	 */
-	/* 제한 조건을 만족하지 않으면 NVMe 경로로 통과시킨다. */
+	/* [한국어] 사전 필터를 통과하지 못했으면 스로틀 판정 없이 그대로 진행시킨다. */
 	if (!blk_should_throtl(bio))
 		return false;
 		/* [한국어] 검사 결과 제한 대상이 아니므로 __blk_throtl_bio() 호출
@@ -1055,19 +1077,20 @@ static inline bool blk_throtl_bio(struct bio *bio)
 #endif /* CONFIG_BLK_DEV_THROTTLING */
 
 /*
- * NVMe 관점 핵심 요약
+ * [한국어] 헤더 요약
  *
- * - blk-throttle은 submit_bio() -> blk_mq_submit_bio() -> blk_mq_get_request()
- *   -> nvme_queue_rq() -> nvme_submit_cmd(doorbell) 사이에서 bps/IOPS 기반으로
- *   NVMe SQ 유입량을 제어하는 소프트웨어 관문이다.
- * - struct throtl_grp/service_queue/qnode는 cgroup별 대기 bio를 NVMe 명령
- *   변환 이전에 관리하며, round-robin으로 여러 그룹 간 기아를 방지한다.
- * - blk_should_throtl()은 IOPS 규칙을 항상 검사하고, bps 규칙은
- *   BIO_BPS_THROTTLED 플래그를 확인하여 중복 큐잉을 피한다.
- * - blk_throtl_dispatch_work_fn() 등을 통해 제한을 통과한 bio는 다시
- *   submit_bio_noacct_nocheck() -> blk_mq_submit_bio() 경로로 재진입한다.
- * - 이 헤더는 blk-cgroup-rwstat.h의 blkg_rwstat 기반을 사용하고,
- *   blk-throttle.c에서 실제 큐잉/디스패치 로직이 구현된다.
+ * - blk-throttle은 submit_bio() → blk_mq_submit_bio() 초입에서, bio가 아직
+ *   request로 변환되기 전에 개입해 cgroup별 bps/IOPS 상한을 적용하는 일반
+ *   블록 계층 관문이다. 하위 장치 종류에 의존하는 코드는 없다.
+ * - struct throtl_grp/service_queue/qnode는 cgroup 트리를 그대로 반영한
+ *   대기 구조이며, qnode를 출처별로 분리해 형제 그룹 간 round-robin을 만든다.
+ * - blk_should_throtl()은 __blk_throtl_bio()의 락/트리 비용을 지불할 가치가
+ *   있는 bio만 걸러내는 저비용 사전 필터다. iops 규칙은 항상 재검사하고,
+ *   bps 규칙은 BIO_BPS_THROTTLED가 없을 때만 재검사한다.
+ * - 제한을 통과한(또는 대기 후 풀려난) bio는 blk_throtl_dispatch_work_fn()에서
+ *   submit_bio_noacct_nocheck()로 제출 경로에 다시 들어간다.
+ * - 이 헤더는 blk-cgroup-rwstat.h의 blkg_rwstat를 사용하며, 실제 큐잉/디스패치
+ *   로직은 blk-throttle.c에 있다.
  */
 
 #endif
