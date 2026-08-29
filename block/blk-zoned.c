@@ -4626,12 +4626,22 @@ unfreeze:
 static int blk_revalidate_zone_cond(struct blk_zone *zone, unsigned int idx,
 				    struct blk_revalidate_zone_args *args)
 {
+	/* [한국어] 검증할 zone 상태를 지역 변수로 꺼낸다. 아래 switch와 오류
+	 * 메시지에서 여러 번 쓰이므로 매번 구조체를 역참조하지 않는다. */
 	enum blk_zone_cond cond = zone->cond;
 
 	/* Check that the zone condition is consistent with the zone type. */
+	/* [한국어] ★ zone 타입과 상태의 정합성 검증 ★
+	 * ZNS 사양상 zone 타입과 가질 수 있는 상태는 짝이 정해져 있다. 컨트롤러가
+	 * 이 짝을 어겨 보고했다면 Report Zones 응답이 손상되었거나 커널이 잘못
+	 * 해석한 것이고, 그 상태로 진행하면 커널이 zone을 잘못 다루게 된다.
+	 * 그래서 재검증 단계에서 걸러 장치 자체를 포기한다. */
 	switch (cond) {
 	case BLK_ZONE_COND_NOT_WP:
-		if (zone->type != BLK_ZONE_TYPE_CONVENTIONAL) // conventional zone은 반드시 NOT_WP 조건이어야 함
+		/* [한국어] NOT_WP("write pointer 없음")는 conventional zone만 가질 수
+		 * 있다. sequential zone은 정의상 write pointer를 갖기 때문이다.
+		 * sequential인데 NOT_WP라면 타입이나 상태 중 하나가 틀린 것이다. */
+		if (zone->type != BLK_ZONE_TYPE_CONVENTIONAL)
 			goto invalid_condition;
 		break;
 	case BLK_ZONE_COND_IMP_OPEN:
@@ -4641,20 +4651,33 @@ static int blk_revalidate_zone_cond(struct blk_zone *zone, unsigned int idx,
 	case BLK_ZONE_COND_FULL:
 	case BLK_ZONE_COND_OFFLINE:
 	case BLK_ZONE_COND_READONLY:
-		if (zone->type != BLK_ZONE_TYPE_SEQWRITE_REQ) // sequential zone은 active/open/closed/empty/full/offline/readonly 조건이어야 함
+		/* [한국어] 반대로 이 일곱 상태는 모두 write pointer의 존재를 전제하므로
+		 * sequential write required zone만 가질 수 있다.
+		 * 왜 conventional zone이 EMPTY나 FULL일 수 없는가: conventional zone은
+		 * 아무 데나 덮어쓸 수 있어 "비었다/꽉 찼다"는 개념 자체가 없다.
+		 * OFFLINE/READONLY도 ZNS 사양에서는 sequential zone의 상태로만
+		 * 정의되어 있다. */
+		if (zone->type != BLK_ZONE_TYPE_SEQWRITE_REQ)
 			goto invalid_condition;
 		break;
 	default:
+		/* [한국어] 커널이 아는 어떤 상태에도 해당하지 않는 값이다. 미래 사양의
+		 * 새 상태이거나 응답 손상이며, 어느 쪽이든 안전하게 다룰 수 없다. */
 		pr_warn("%s: Invalid zone condition 0x%X\n",
 			args->disk->disk_name, cond);
 		return -ENODEV;
 	}
 
-	blk_zone_set_cond(args->zones_cond, idx, cond); // 검증된 condition을 zones_cond cache에 기록
+	/* [한국어] 검증을 통과한 상태를 캐시 배열에 기록한다. 여기서 open 계열은
+	 * ACTIVE로 축약된다(blk_zone_set_cond 참고). 이 초기값이 이후
+	 * blkdev_report_zones_cached()가 커맨드 없이 답하는 근거가 된다. */
+	blk_zone_set_cond(args->zones_cond, idx, cond);
 
 	return 0;
 
 invalid_condition:
+	/* [한국어] 타입-상태 불일치. 어떤 조합이 문제였는지 둘 다 찍어야 원인을
+	 * 추적할 수 있으므로 cond와 type을 함께 출력한다. */
 	pr_warn("%s: Invalid zone condition 0x%x for type 0x%x\n",
 		args->disk->disk_name, cond, zone->type);
 
@@ -4890,22 +4913,41 @@ static int blk_revalidate_zone_cb(struct blk_zone *zone, unsigned int idx,
 		return ret;
 
 	/* Check zone type */
+	/* [한국어] zone 타입별로 검증을 위임한다. 두 타입만 지원한다. */
 	switch (zone->type) {
 	case BLK_ZONE_TYPE_CONVENTIONAL:
-		ret = blk_revalidate_conv_zone(zone, idx, args); // conventional zone 처리
+		/* [한국어] 순차 제약이 없는 일반 영역. capacity == len 검증과
+		 * 개수 집계만 하면 된다 — write pointer를 추적할 필요가 없다.
+		 * NVMe ZNS에서 conventional zone은 선택 사항이며, 있으면 보통
+		 * 네임스페이스 앞부분에 메타데이터 용도로 배치된다. */
+		ret = blk_revalidate_conv_zone(zone, idx, args);
 		break;
 	case BLK_ZONE_TYPE_SEQWRITE_REQ:
-		ret = blk_revalidate_seq_zone(zone, idx, args); // sequential zone 처리 및 WP 추적 plug 생성
+		/* [한국어] 순차 쓰기 필수 zone — ZNS의 본체다. capacity 균일성을
+		 * 검증하고, 이미 부분적으로 쓰인 zone이면 write pointer를 추적할
+		 * plug를 미리 만들어 둔다. 재검증 직후 첫 쓰기가 오기 전에 WP를
+		 * 알고 있어야 순차성 검사를 할 수 있기 때문이다. */
+		ret = blk_revalidate_seq_zone(zone, idx, args);
 		break;
 	case BLK_ZONE_TYPE_SEQWRITE_PREF:
 	default:
+		/* [한국어] SEQWRITE_PREF("순차 쓰기 권장")는 지원하지 않는다.
+		 * 이 타입은 ZBC/ZAC(SMR HDD) 사양에는 있지만 "순차로 쓰면 좋고
+		 * 아니어도 동작한다"는 모호한 의미라, 커널이 write pointer를
+		 * 추적해야 할지 말지가 정해지지 않는다. NVMe ZNS는 이 타입을
+		 * 정의하지 않으므로 NVMe에서는 나타나지 않는다.
+		 * 명시적으로 거부해, 어중간하게 지원하다 데이터를 잃는 것을 막는다. */
 		pr_warn("%s: Invalid zone type 0x%x at sectors %llu\n",
 			disk->disk_name, (int)zone->type, zone->start);
 		ret = -ENODEV;
 	}
 
-	if (!ret) // 검증 성공 시 다음 예상 zone 시작 위치로 이동
-		args->sector += zone->len; // 다음 zone 시작 sector 갱신
+	/* [한국어] 이 zone까지 검증에 성공했으면 "다음 zone이 시작해야 할 위치"를
+	 * 전진시킨다. 다음 콜백 호출에서 이 값과 zone->start를 비교해 zone 사이에
+	 * 구멍이 없는지 확인한다(함수 앞부분의 gap 검사).
+	 * 실패했다면 전진시키지 않는데, 어차피 호출자가 순회를 중단하기 때문이다. */
+	if (!ret)
+		args->sector += zone->len;
 
 	return ret;
 }
@@ -4972,58 +5014,101 @@ int blk_revalidate_disk_zones(struct gendisk *disk)
 	};
 	int ret = -ENOMEM;
 
-	if (WARN_ON_ONCE(!blk_queue_is_zoned(q))) // zoned queue가 아니면 zone 자원 할당 불가
+	/* [한국어] 드라이버가 zoned로 표시하지 않은 큐에 이 함수를 부른 것은
+	 * 드라이버 버그다. WARN_ON_ONCE로 스택 트레이스를 남겨 어느 드라이버인지
+	 * 알 수 있게 한다. */
+	if (WARN_ON_ONCE(!blk_queue_is_zoned(q)))
 		return -EIO;
 
-	if (!capacity) // 용량이 0이면 ZNS namespace로 취급 불가
+	/* [한국어] 용량이 0이면 zone을 하나도 만들 수 없다. 네임스페이스가 아직
+	 * 준비되지 않았거나(NVMe에서 Identify가 실패해 capacity 0으로 남은 경우)
+	 * 이미 제거되는 중이다. */
+	if (!capacity)
 		return -ENODEV;
 
 	/*
 	 * Checks that the device driver indicated a valid zone size and that
 	 * the max zone append limit is set.
 	 */
-	if (!zone_sectors || !is_power_of_2(zone_sectors)) { // ZNS는 zone size가 2의 거듭제곱이어야 함
+	/* [한국어] ★ zone 크기가 2의 거듭제곱이어야 하는 이유 ★
+	 * 커널은 섹터 주소에서 zone 번호를 구할 때 나눗셈 대신 시프트를 쓴다
+	 * (disk_zone_no). 이 최적화가 성립하려면 zone 크기가 2의 거듭제곱이어야
+	 * 한다. I/O 제출 경로마다 64비트 나눗셈을 하는 것은 비싸기 때문에 이
+	 * 제약을 두고, 만족하지 못하는 장치는 아예 거부한다.
+	 * NVMe ZNS 사양은 Zone Size를 2의 거듭제곱으로 강제하지 않지만, 실제
+	 * 제품은 거의 모두 그렇게 만든다. 예외적인 장치는 여기서 걸린다. */
+	if (!zone_sectors || !is_power_of_2(zone_sectors)) {
 		pr_warn("%s: Invalid non power of two zone size (%llu)\n",
 			disk->disk_name, zone_sectors);
 		return -ENODEV;
-		// NVMe ZNS는 zone size가 2의 거듭제곱이어야 함
 	}
 
 	/*
 	 * Ensure that all memory allocations in this context are done as if
 	 * GFP_NOIO was specified.
 	 */
-	noio_flag = memalloc_noio_save(); // 재검증 중 모든 메모리 할당을 NOIO로 처리
-	ret = disk_revalidate_zone_resources(disk, &args); // zone plug/hash/mempool 자원 준비
+	/* [한국어] 이 구간의 모든 메모리 할당에 GFP_NOIO를 강제한다.
+	 * 이유: 재검증은 장치가 아직 준비되지 않은 상태에서 실행되는데, 여기서
+	 * 할당이 메모리 회수를 유발하고 그 회수가 이 장치로의 write-back을
+	 * 필요로 하면 자기 자신을 기다리는 교착이 된다.
+	 * 각 할당마다 GFP_NOIO를 넘기는 대신 태스크 단위로 설정하는 이유는,
+	 * 이 아래 호출 체인이 깊어(report_zones → 드라이버 → 하위 할당) 모든
+	 * 지점에 플래그를 전달하기가 현실적으로 불가능하기 때문이다. */
+	noio_flag = memalloc_noio_save();
+	/* [한국어] zones_cond 배열과 (blk-mq 기반이거나 zone append 에뮬레이션이
+	 * 필요하면) plug 해시/mempool/워크큐를 준비한다. */
+	ret = disk_revalidate_zone_resources(disk, &args);
 	if (ret) {
+		/* [한국어] 실패 시에도 NOIO 상태는 반드시 복원해야 한다. 복원하지
+		 * 않으면 이 태스크가 이후 영원히 I/O 없는 할당만 하게 된다. */
 		memalloc_noio_restore(noio_flag);
 		return ret;
 	}
 
-	ret = disk->fops->report_zones(disk, 0, UINT_MAX, &rep_args); // 전체 zone descriptor를 NVMe Report Zones로 획득
-	// NVMe ZNS Report Zones로 전체 zone descriptor 획득
-	if (!ret) { // 디바이스가 zone을 report하지 않으면 비정상
+	/* [한국어] ★ 실제 장치 질의 ★
+	 * 0번 섹터부터 UINT_MAX개(사실상 전부)의 zone을 보고받는다. NVMe에서는
+	 * nvme_report_zones()로 이어져 Zone Management Receive(옵코드 0x7A)
+	 * 커맨드가 발행되고, 응답의 zone descriptor마다 blk_revalidate_zone_cb()가
+	 * 호출되어 검증과 상태 캐시 구축이 이뤄진다.
+	 * zone이 수만 개면 이 호출 하나가 상당히 오래 걸린다 — 드라이버가 내부적으로
+	 * 여러 번의 커맨드로 나눠 받는다. */
+	ret = disk->fops->report_zones(disk, 0, UINT_MAX, &rep_args);
+	/* [한국어] 0은 "zone을 하나도 보고하지 않았다"는 뜻이다. zoned라고 선언한
+	 * 장치가 zone이 없다는 것은 모순이므로 오류로 바꾼다. 음수는 이미 오류이니
+	 * 그대로 둔다. */
+	if (!ret) {
 		pr_warn("%s: No zones reported\n", disk->disk_name);
 		ret = -ENODEV;
 	}
+	/* [한국어] 장치 질의가 끝났으므로 NOIO 상태를 원복한다. 아래 정리 코드는
+	 * 일반 할당 컨텍스트에서 실행해도 안전하다. */
 	memalloc_noio_restore(noio_flag);
 
-	if (ret <= 0) // report_zones 실패 시 자원 해제
+	if (ret <= 0)
 		goto free_resources;
 
 	/*
 	 * If zones where reported, make sure that the entire disk capacity
 	 * has been checked.
 	 */
-	if (args.sector != capacity) { // report된 zone들이 전체 capacity를 커버해야 함
+	/* [한국어] 최종 정합성 검사 — 보고된 zone들이 네임스페이스 전체를 덮었는가.
+	 * args.sector는 콜백이 zone마다 전진시킨 "다음 예상 위치"이므로, 정상이면
+	 * 마지막에 정확히 capacity와 같아야 한다.
+	 * 작다면 뒷부분 zone을 보고받지 못한 것이고, 그 영역에 I/O가 가면 커널이
+	 * zone 정보 없이 처리하게 되어 위험하다. 개별 zone 검증(gap 검사)은
+	 * 통과했더라도 이 전체 검사가 마지막 안전망 역할을 한다. */
+	if (args.sector != capacity) {
 		pr_warn("%s: Missing zones from sector %llu\n",
 			disk->disk_name, args.sector);
 		ret = -ENODEV;
 		goto free_resources;
-		// report된 zone이 전체 capacity를 커버해야 유효
 	}
 
-	ret = disk_update_zone_resources(disk, &args); // disk 구조체와 queue limits를 갱신
+	/* [한국어] 모든 검증 통과 — 수집한 정보(zone 개수, conventional zone 수,
+	 * zone capacity 등)를 gendisk와 queue_limits에 반영해 실제로 사용 가능한
+	 * 상태로 만든다. 이 함수가 성공해야 비로소 I/O가 zone 규칙을 지키며
+	 * 흐를 수 있다. */
+	ret = disk_update_zone_resources(disk, &args);
 	if (ret)
 		goto free_resources;
 
