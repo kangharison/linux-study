@@ -35,14 +35,50 @@
  * 제출 -> submit_bio_noacct() -> blk_zone_plug_bio()(이 파일)가 zone write
  * plug에 태워 순서를 강제 -> plug가 풀리면(즉시 또는 workqueue/kthread를
  * 통해 지연) 원래의 제출 경로로 복귀 -> blk_mq_submit_bio() ->
- * (NVMe라면) nvme_queue_rq() -> nvme_submit_cmd()가 SQ에 커맨드를 채우고
- * 도어벨(doorbell)을 울린다. 관리 명령 경로는: ioctl(BLKRESETZONE 등)이나
+ * mq_ops->queue_rq (함수 포인터를 통한 간접 호출. NVMe PCIe라면
+ * nvme_queue_rq() — drivers/nvme/host/pci.c). 블록 계층이 nvme_* 함수를
+ * 직접 부르는 곳은 한 군데도 없고, 오직 이 간접 호출로만 드라이버에
+ * 닿는다. 관리 명령 경로는: ioctl(BLKRESETZONE 등)이나
  * blkdev_zone_mgmt() 호출자가 REQ_OP_ZONE_* BIO를 만들어
  * submit_bio_wait()로 동기 제출 -> 완료 시 blk_zone_mgmt_bio_endio()(이
  * 파일)가 캐시된 WP/zone condition을 갱신한다. zone 정보 조회 경로는:
  * blkdev_report_zones()/blkdev_report_zones_cached()가
- * disk->fops->report_zones (예: NVMe의 nvme_report_zones)를 호출하거나,
- * 커널이 캐시한 zone condition/WP만으로 응답한다.
+ * disk->fops->report_zones (NVMe라면 drivers/nvme/host/core.c의 static
+ * nvme_report_zones(), 멀티패스라면 nvme_ns_head_report_zones())를
+ * 호출하거나, 커널이 캐시한 zone condition/WP만으로 응답한다.
+ *
+ * === NVMe ZNS 접점 (drivers/nvme/host/zns.c 및 core.c에서 확인한 사실) ===
+ * 이 파일이 만들어 내는 REQ_OP_ZONE_* 연산은 NVMe ZNS 커맨드로 다음과 같이
+ * 1:1 대응한다 (drivers/nvme/host/core.c nvme_setup_cmd()의 switch 문과
+ * drivers/nvme/host/zns.c nvme_setup_zone_mgmt_send(), 그리고
+ * include/linux/nvme.h enum nvme_zone_mgmt_action에서 확인):
+ *   REQ_OP_ZONE_RESET / REQ_OP_ZONE_RESET_ALL -> Zone Management Send
+ *       (오프코드 0x79), ZSA(Zone Send Action) = NVME_ZONE_RESET = 0x4.
+ *       RESET_ALL은 추가로 c->zms.select_all = 1을 세팅한다.
+ *   REQ_OP_ZONE_OPEN   -> 0x79, ZSA = NVME_ZONE_OPEN   = 0x3 (Explicit Open)
+ *   REQ_OP_ZONE_CLOSE  -> 0x79, ZSA = NVME_ZONE_CLOSE  = 0x1
+ *   REQ_OP_ZONE_FINISH -> 0x79, ZSA = NVME_ZONE_FINISH = 0x2
+ *   (NVME_ZONE_OFFLINE = 0x5는 커널 블록 계층에 대응 REQ_OP_가 없다.)
+ * REQ_OP_ZONE_APPEND는 NVMe에서 **에뮬레이션되지 않는다**. core.c의
+ * nvme_setup_cmd()가 nvme_setup_rw(ns, req, cmd, nvme_cmd_zone_append)를
+ * 불러 native Zone Append(오프코드 0x7D)로 내려보낸다. 근거: zns.c의
+ * nvme_update_zone_info()가 lim->max_hw_zone_append_sectors를
+ * ctrl->max_zone_append(0이 아닌 값)로 채우는데,
+ * queue_emulates_zone_append()(include/linux/blkdev.h)는 이 값이 0일 때만
+ * 참이기 때문이다. 따라서 이 파일의 zone append 에뮬레이션 경로
+ * (BIO_EMULATES_ZONE_APPEND)는 NVMe ZNS가 아니라 max_hw_zone_append_sectors
+ * 를 채우지 않는 장치(SCSI/ZBC SMR HDD, 일부 device-mapper 타깃 등)를 위한
+ * 것이다. 단, NVMe도 zone write plug 자체는 그대로 사용한다 — 순차 쓰기
+ * 규칙은 native append 여부와 무관하게 일반 WRITE에 적용되기 때문이다.
+ * Report Zones는 이 파일의 blk_revalidate_disk_zones()/blkdev_report_zones()
+ * 가 disk->fops->report_zones를 타고 zns.c의 nvme_ns_report_zones()에
+ * 도달하며, 거기서 Zone Management Receive(오프코드 0x7A, ZRA =
+ * NVME_ZRA_ZONE_REPORT = 0, ZRASF = NVME_ZRASF_ZONE_REPORT_ALL = 0)로
+ * 존 디스크립터를 읽어 struct blk_zone으로 변환해 콜백한다. 존 크기는
+ * zns.c nvme_query_zone_info()가 Identify Namespace(CSI=ZNS)의
+ * lbafe[].zsze에서 얻으며, is_power_of_2() 검사를 통과하지 못하면
+ * -ENODEV로 거부한다 — 즉 NVMe ZNS의 zone size는 항상 2의 거듭제곱이고,
+ * 이 파일의 zone_size_log2 시프트 최적화 경로가 항상 성립한다.
  *
  * === 타 모듈과의 연결 ===
  * 이 파일은 block/blk-mq.c(요청 기반 제출/완료 경로), block/blk-mq.h,
@@ -205,8 +241,9 @@ struct blk_zone_wplug {
 	 * INIT_WORK()로 초기화.
 	 * 읽는 자: disk_zone_wplug_schedule_work()가 disk->zone_wplugs_wq에
 	 * queue_work()로 스케줄; 실행되면 disk_zone_wplug_submit_bio() ->
-	 * blk_mq_submit_bio() -> nvme_queue_rq()로 이어져 실제 NVMe SQ에
-	 * 커맨드가 들어간다.
+	 * blk_mq_submit_bio() -> mq_ops->queue_rq(함수 포인터 간접 호출)로
+	 * 이어져 드라이버가 커맨드를 조립한다. NVMe PCIe라면 그 구현이
+	 * nvme_queue_rq()다.
 	 * 값 범위: process context에서만 실행되는 콜백 — 인터럽트 컨텍스트가
 	 * 아니므로 GFP_KERNEL/mutex 등을 안전하게 쓸 수 있다.
 	 * 동기화: workqueue 코어가 중복 스케줄을 막아주며, 스케줄 시 plug
@@ -341,9 +378,9 @@ static inline bool disk_need_zone_resources(struct gendisk *disk)
 	 * handling zone write ordering and do not need zone resources, unless
 	 * the driver requires zone append emulation.
 	 */
-	return queue_is_mq(disk->queue) ||
-		queue_emulates_zone_append(disk->queue); // zone append emulation path: DM이나 SW ZNS emulation에서 사용
-	// request 기반 NVMe ZNS 또는 zone append 에뮬레이션 필요 시 plug 사용
+	return queue_is_mq(disk->queue) || /* [한국어] request 기반(blk-mq) 장치는 무조건 zone 자원이 필요하다. NVMe ZNS는 여기에 해당 — 블록 계층이 WP 순서를 대신 강제해 준다 */
+		queue_emulates_zone_append(disk->queue); /* [한국어] BIO 기반 장치라도 zone append 에뮬레이션(max_hw_zone_append_sectors==0)이 필요하면 plug 자원을 만든다. NVMe ZNS는 zns.c가 이 값을 0이 아닌 값으로 채우므로 이 조건에는 걸리지 않는다 */
+	/* [한국어] 두 조건 중 하나라도 참이면 zone_wplugs_hash/pool/워커를 할당한다 */
 }
 
 /*
@@ -386,7 +423,7 @@ static inline unsigned int disk_zone_wplugs_hash_size(struct gendisk *disk)
  *    active users (code context or BIOs and requests in flight). This flag is
  *    set when a zone is reset, finished or becomes full.
  */
-#define BLK_ZONE_WPLUG_PLUGGED		(1U << 0) // 해당 zone에 진행/대기 중인 write가 있음 -> NVMe WP 순서 직렬화
+#define BLK_ZONE_WPLUG_PLUGGED		(1U << 0) /* [한국어] 이 zone에 이미 제출된(또는 대기 중인) write가 있음. 이 비트가 서 있는 동안 같은 zone의 새 write는 대기열로만 들어간다 — 존당 한 번에 하나라는 직렬화 규칙의 실체 */
 #define BLK_ZONE_WPLUG_NEED_WP_UPDATE	(1U << 1) // write 오류 등으로 WP를 잃음; 다음 Report Zones로 복구 필요
 #define BLK_ZONE_WPLUG_DEAD		(1U << 2) // zone이 full/reset/finish 상태; 추가 write/CID 할당 차단
 /*
@@ -437,7 +474,7 @@ const char *blk_zone_cond_str(enum blk_zone_cond zone_cond)
 	if (zone_cond < ARRAY_SIZE(zone_cond_name) && zone_cond_name[zone_cond]) // ZNS Zone State 값의 범위 및 NULL 검증
 		zone_cond_str = zone_cond_name[zone_cond]; // dmesg/trace에서 ZNS zone condition 문자열로 변환
 
-	return zone_cond_str;
+	return zone_cond_str; /* [한국어] 매칭 실패 시 "UNKNOWN"이 그대로 반환된다 — 로그 출력용이므로 에러가 아니라 안전한 기본값 */
 }
 EXPORT_SYMBOL_GPL(blk_zone_cond_str);
 
@@ -475,10 +512,10 @@ static void blk_zone_set_cond(u8 *zones_cond, unsigned int zno,
 	if (!zones_cond) // zones_cond 배열이 아직 없으면 아무것도 하지 않음 (초기화 경로)
 		return;
 
-	switch (cond) {
-	case BLK_ZONE_COND_IMP_OPEN:
-	case BLK_ZONE_COND_EXP_OPEN:
-	case BLK_ZONE_COND_CLOSED:
+	switch (cond) { /* [한국어] 저장할 값을 결정하기 위해 새 condition 값으로 분기 */
+	case BLK_ZONE_COND_IMP_OPEN: /* [한국어] 컨트롤러가 write를 받고 암묵적으로 연 zone (ZNS Zone State 0x2) */
+	case BLK_ZONE_COND_EXP_OPEN: /* [한국어] 호스트가 REQ_OP_ZONE_OPEN(ZSA=0x3)으로 명시적으로 연 zone (ZNS Zone State 0x3) */
+	case BLK_ZONE_COND_CLOSED: /* [한국어] 열렸다가 닫힌 zone — WP는 유지된다 (ZNS Zone State 0x4) */
 		/* [한국어] "쓰기가 시작되었고 아직 안 끝난" 세 상태를 ACTIVE 하나로
 		 * 축약한다. 셋의 차이(컨트롤러가 암묵적으로 열었는가, 호스트가 명시적으로
 		 * 열었는가, 열렸다가 닫혔는가)는 컨트롤러의 자원 관리 관점에서는
@@ -490,12 +527,12 @@ static void blk_zone_set_cond(u8 *zones_cond, unsigned int zno,
 		 * 알 수 없기 때문이다. 어차피 구분할 수 없는 것은 저장하지 않는다. */
 		zones_cond[zno] = BLK_ZONE_COND_ACTIVE;
 		return;
-	case BLK_ZONE_COND_NOT_WP:
-	case BLK_ZONE_COND_EMPTY:
-	case BLK_ZONE_COND_FULL:
-	case BLK_ZONE_COND_OFFLINE:
-	case BLK_ZONE_COND_READONLY:
-	default:
+	case BLK_ZONE_COND_NOT_WP: /* [한국어] conventional zone — WP 개념 자체가 없다 */
+	case BLK_ZONE_COND_EMPTY: /* [한국어] WP가 zone 시작에 있다 (reset 직후) */
+	case BLK_ZONE_COND_FULL: /* [한국어] WP가 zone capacity에 도달해 더는 쓸 수 없다 */
+	case BLK_ZONE_COND_OFFLINE: /* [한국어] 매체 결함 등으로 접근 불가 — 되돌아오지 않는 상태 */
+	case BLK_ZONE_COND_READONLY: /* [한국어] 읽기 전용으로 전이됨 — 되돌아오지 않는 상태 */
+	default: /* [한국어] 커널이 모르는 값이 와도 그대로 저장해 두면 이후 리포트에서 원인을 추적할 수 있다 */
 		/* [한국어] 나머지 상태는 그대로 저장한다. 이들은 커널이 전이를 정확히
 		 * 알 수 있거나(EMPTY←reset, FULL←WP가 capacity 도달) 아예 변하지
 		 * 않는(NOT_WP/OFFLINE/READONLY) 상태라, 캐시가 실제와 어긋날 일이 없다. */
@@ -545,7 +582,7 @@ static void disk_zone_set_cond(struct gendisk *disk, sector_t sector,
 	 * 컴파일러/CPU가 이 로드를 이후 역참조보다 뒤로 미루지 못하게 막는
 	 * 의존성 배리어를 포함한다(Alpha 등 약한 메모리 모델 대응). */
 	zones_cond = rcu_dereference(disk->zones_cond);
-	if (zones_cond) {
+	if (zones_cond) { /* [한국어] 재검증(blk_revalidate_disk_zones) 전이거나 conventional-only 장치면 배열이 NULL일 수 있다 — 그때는 캐시할 곳이 없으므로 조용히 건너뛴다 */
 		/* [한국어] 섹터 주소를 zone 번호로 변환한다. 모든 zone이 같은 크기라는
 		 * 전제(blk_revalidate_zone_cb가 검증) 덕분에 단순 나눗셈/시프트로 끝난다.
 		 * 이 번호가 곧 NVMe ZNS의 Zone Identifier에 대응한다. */
@@ -558,9 +595,9 @@ static void disk_zone_set_cond(struct gendisk *disk, sector_t sector,
 		 */
 		/* [한국어] 현재 캐시된 상태를 보고 갱신할지 결정한다. */
 		switch (zones_cond[zno]) {
-		case BLK_ZONE_COND_NOT_WP:
-		case BLK_ZONE_COND_READONLY:
-		case BLK_ZONE_COND_OFFLINE:
+		case BLK_ZONE_COND_NOT_WP: /* [한국어] conventional zone — 타입이 바뀌지 않으므로 갱신 불필요 */
+		case BLK_ZONE_COND_READONLY: /* [한국어] 읽기 전용 전이는 비가역 — 덮어쓰면 안 된다 */
+		case BLK_ZONE_COND_OFFLINE: /* [한국어] 오프라인 전이도 비가역 — reset으로도 복구되지 않는다 */
 			/* [한국어] 이 세 상태는 영구적이다.
 			 *   NOT_WP   - conventional zone. 타입 자체가 바뀌지 않는다.
 			 *   READONLY - 매체가 읽기 전용으로 전이되면 되돌아오지 않는다.
@@ -576,7 +613,7 @@ static void disk_zone_set_cond(struct gendisk *disk, sector_t sector,
 			break;
 		}
 	}
-	rcu_read_unlock();
+	rcu_read_unlock(); /* [한국어] RCU 읽기 구간 종료 — 이 시점 이후로는 zones_cond 스냅숏 포인터를 만지면 안 된다 */
 }
 
 /**
@@ -616,10 +653,10 @@ static void disk_zone_set_cond(struct gendisk *disk, sector_t sector,
  */
 bool bdev_zone_is_seq(struct block_device *bdev, sector_t sector)
 {
-	struct gendisk *disk = bdev->bd_disk; // NVMe namespace를 나타내는 gendisk 획득
+	struct gendisk *disk = bdev->bd_disk; /* [한국어] 이 block_device가 속한 gendisk. zones_cond 캐시가 여기 매달려 있다 (NVMe라면 네임스페이스의 디스크) */
 	unsigned int zno = disk_zone_no(disk, sector); // 대상 sector가 속한 ZID 계산
-	bool is_seq = false;
-	u8 *zones_cond;
+	bool is_seq = false; /* [한국어] 기본값 false — zoned가 아니거나 캐시가 없으면 "순차 쓰기 필수 아님"으로 보수적으로 답한다 */
+	u8 *zones_cond; /* [한국어] RCU로 스냅숏할 zone condition 캐시 배열 포인터(zone당 1바이트) */
 
 	if (!bdev_is_zoned(bdev)) // zoned 디바이스가 아니면 ZNS 판정 없이 false 반환
 		return false;
@@ -628,9 +665,9 @@ bool bdev_zone_is_seq(struct block_device *bdev, sector_t sector)
 	zones_cond = rcu_dereference(disk->zones_cond); // RCU pointer로 zone condition cache 접근
 	if (zones_cond && zno < disk->nr_zones) // ZID가 전체 zone 수 이내인지 검증
 		is_seq = zones_cond[zno] != BLK_ZONE_COND_NOT_WP; // NOT_WP가 아니면 sequential write required zone (ZNS)
-	rcu_read_unlock();
+	rcu_read_unlock(); /* [한국어] 값(bool)만 뽑아 왔으므로 여기서 읽기 구간을 닫아도 안전하다 */
 
-	return is_seq;
+	return is_seq; /* [한국어] 호출자는 이 값이 true일 때만 zone write plug 직렬화 경로를 태운다 */
 }
 EXPORT_SYMBOL_GPL(bdev_zone_is_seq);
 
@@ -721,14 +758,13 @@ static int blkdev_do_report_zones(struct block_device *bdev, sector_t sector,
 {
 	struct gendisk *disk = bdev->bd_disk;
 
-	if (!bdev_is_zoned(bdev) || WARN_ON_ONCE(!disk->fops->report_zones)) // NVMe ZNS 드라이버는 report_zones op를 구현해야 함
-	// NVMe ZNS는 report_zones op를 구현해야 함
-		return -EOPNOTSUPP;
+	if (!bdev_is_zoned(bdev) || WARN_ON_ONCE(!disk->fops->report_zones)) /* [한국어] zoned 장치라면 드라이버가 report_zones 훅을 반드시 구현해야 한다. NVMe는 core.c의 nvme_bdev_ops.report_zones = nvme_report_zones로 등록한다 */
+		return -EOPNOTSUPP; /* [한국어] zoned가 아니거나 드라이버 훅이 없으면 zone 리포트라는 개념이 성립하지 않는다 */
 
-	if (!nr_zones || sector >= get_capacity(disk)) // 요청 범위가 비었거나 용량 초과시 NVMe command 불필요
+	if (!nr_zones || sector >= get_capacity(disk)) /* [한국어] 요청 개수가 0이거나 시작 섹터가 용량 밖이면 물어볼 것이 없으므로 장치에 커맨드를 보내지 않고 0개 보고로 끝낸다 */
 		return 0;
 
-	return disk->fops->report_zones(disk, sector, nr_zones, args); // nvme_report_zones() 호출 -> SQ/CID 할당 및 CQ 수신
+	return disk->fops->report_zones(disk, sector, nr_zones, args); /* [한국어] 드라이버 훅을 통한 간접 호출. NVMe면 nvme_report_zones() → nvme_ns_report_zones()가 Zone Management Receive(0x7A)를 nvme_submit_sync_cmd()로 동기 발행하고, 받은 디스크립터마다 args->cb를 부른다 */
 }
 
 /**
@@ -780,12 +816,12 @@ static int blkdev_do_report_zones(struct block_device *bdev, sector_t sector,
 int blkdev_report_zones(struct block_device *bdev, sector_t sector,
 			unsigned int nr_zones, report_zones_cb cb, void *data)
 {
-	struct blk_report_zones_args args = { // 사용자 콜백을 report_zones 인자에 연결
-		.cb = cb, // private data; NVMe ZNS zone descriptor가 전달될 context
-		.data = data,
+	struct blk_report_zones_args args = { /* [한국어] 드라이버의 report_zones 훅에 넘길 인자 묶음을 스택에 구성 */
+		.cb = cb, /* [한국어] zone 하나를 파싱할 때마다 불릴 호출자 콜백. NVMe에서는 zns.c nvme_zone_parse_entry()가 struct blk_zone을 채운 뒤 disk_report_zone()을 거쳐 이 cb에 도달한다 */
+		.data = data, /* [한국어] 콜백에 그대로 전달되는 호출자 private 포인터(ioctl 버퍼, 재검증 상태 등) */
 	};
 
-	return blkdev_do_report_zones(bdev, sector, nr_zones, &args); // blkdev_do_report_zones() 경유로 NVMe command 발행
+	return blkdev_do_report_zones(bdev, sector, nr_zones, &args); /* [한국어] 공통 구현으로 위임 — 최종적으로 disk->fops->report_zones를 통해 드라이버(NVMe면 Zone Management Receive 0x7A)에 도달 */
 }
 EXPORT_SYMBOL_GPL(blkdev_report_zones);
 
@@ -805,7 +841,10 @@ EXPORT_SYMBOL_GPL(blkdev_report_zones);
  * 호출자: blkdev_zone_mgmt() — sector==0 && nr_sectors==capacity인
  * REQ_OP_ZONE_RESET 요청을 최적화하는 특수 경로로만 호출.
  * 피호출자: bio_init(), submit_bio_wait() → blk_mq_submit_bio() →
- * nvme_queue_rq() → nvme_submit_cmd(doorbell).
+ * mq_ops->queue_rq(간접 호출; NVMe PCIe면 nvme_queue_rq). NVMe에서는
+ * nvme_setup_cmd()가 REQ_OP_ZONE_RESET_ALL을 Zone Management Send
+ * (0x79) + ZSA=NVME_ZONE_RESET(0x4) + select_all=1로 조립한다
+ * (drivers/nvme/host/zns.c nvme_setup_zone_mgmt_send).
  * 에러 경로: submit_bio_wait()가 반환하는 값을 그대로 호출자에 전달.
  *
  * 호출 체인:
@@ -817,8 +856,8 @@ static int blkdev_zone_reset_all(struct block_device *bdev)
 	struct bio bio;
 
 	bio_init(&bio, bdev, NULL, 0, REQ_OP_ZONE_RESET_ALL | REQ_SYNC); // REQ_OP_ZONE_RESET_ALL을 태운 단일 BIO 생성
-	trace_blkdev_zone_mgmt(&bio, 0);
-	return submit_bio_wait(&bio); // NVMe Reset All command가 완료될 때까지 동기 대기
+	trace_blkdev_zone_mgmt(&bio, 0); /* [한국어] ftrace/perf 관측점. nr_sectors를 0으로 넘기는 이유는 이 연산이 특정 범위가 아니라 디스크 전체를 대상으로 하기 때문 */
+	return submit_bio_wait(&bio); /* [한국어] 스택에 만든 BIO를 제출하고 완료까지 블로킹 대기한다. NVMe라면 Zone Management Send(0x79, ZSA=RESET, select_all=1) 커맨드 하나의 완료를 기다리는 것이다 */
 }
 
 /**
@@ -856,8 +895,11 @@ static int blkdev_zone_reset_all(struct block_device *bdev)
  * 있어 cond_resched()로 협조적 스케줄링을 명시적으로 양보한다.
  * 호출자: blkdev_zone_mgmt_ioctl()(BLKRESETZONE 등)과 blkdev_reset_zone().
  * 피호출자: blkdev_zone_reset_all(), blk_next_bio(), submit_bio_wait() →
- * blk_mq_submit_bio() → nvme_queue_rq() → nvme_submit_cmd(doorbell, SQ,
- * CID) — 이 파일이 강제한 zone 정렬 규칙을 지킨 커맨드만 여기까지 도달.
+ * blk_mq_submit_bio() → mq_ops->queue_rq(간접 호출; NVMe PCIe면
+ * nvme_queue_rq) — 이 파일이 강제한 zone 정렬 규칙을 지킨 커맨드만
+ * 여기까지 도달한다. NVMe에서는 각 BIO가 Zone Management Send(0x79)
+ * 커맨드 하나가 되며, ZSA 필드에 op별 액션값(RESET=0x4/OPEN=0x3/
+ * CLOSE=0x1/FINISH=0x2)이 들어간다.
  * 에러 경로: read-only/zoned 아님/범위 초과/정렬 오류는 BIO를 만들기 전에
  * 조기 반환; 제출 후 실패는 submit_bio_wait()의 반환값을 그대로 전달.
  *
@@ -881,7 +923,7 @@ int blkdev_zone_mgmt(struct block_device *bdev, enum req_op op,
 	/* [한국어] blk_next_bio()가 체인으로 이어 붙일 bio. NULL로 시작해 첫 반복에서
 	 * 새로 할당되고, 이후 반복에서는 그 bio에 사슬로 연결된다. */
 	struct bio *bio = NULL;
-	int ret = 0;
+	int ret = 0; /* [한국어] 반환값 누산기. 검증 실패 시 조기 반환에 쓰이고, 정상 경로에서는 submit_bio_wait()의 결과로 덮어써진다 */
 
 	/* [한국어] 검증 1 — zoned 장치인가. 일반 NVMe 네임스페이스(Zoned Namespace
 	 * Command Set을 쓰지 않는)에는 zone 개념이 없어 이 연산을 보낼 수 없다. */
@@ -895,9 +937,13 @@ int blkdev_zone_mgmt(struct block_device *bdev, enum req_op op,
 		return -EPERM;
 
 	/* [한국어] 검증 3 — 실제로 zone management 연산인가.
-	 * REQ_OP_ZONE_RESET / OPEN / CLOSE / FINISH만 통과한다. 이들은 최종적으로
-	 * nvme_setup_zone_mgmt_send()에서 NVMe Zone Management Send(옵코드 0x79)의
-	 * Zone Send Action(ZSA) 필드로 변환된다. */
+	 * op_is_zone_mgmt()는 REQ_OP_ZONE_RESET / RESET_ALL / OPEN / CLOSE /
+	 * FINISH 다섯 가지에만 참을 돌려준다. NVMe에서는 이들이 모두
+	 * drivers/nvme/host/zns.c의 nvme_setup_zone_mgmt_send()를 거쳐 Zone
+	 * Management Send(오프코드 0x79) 하나로 조립되고, 어떤 동작인지는
+	 * ZSA(Zone Send Action) 필드로 구분된다 —
+	 * RESET=0x4 / OPEN=0x3 / CLOSE=0x1 / FINISH=0x2, RESET_ALL은 RESET에
+	 * select_all=1을 더한 것(include/linux/nvme.h enum nvme_zone_mgmt_action). */
 	if (!op_is_zone_mgmt(op))
 		return -EOPNOTSUPP;
 
@@ -959,9 +1005,9 @@ int blkdev_zone_mgmt(struct block_device *bdev, enum req_op op,
 		cond_resched();
 	}
 
-	trace_blkdev_zone_mgmt(bio, nr_sectors);
-	ret = submit_bio_wait(bio); // 모든 zone management BIO가 NVMe 완료될 때까지 대기
-	bio_put(bio); // BIO 참조 해제; NVMe completion 후 메모리 반환
+	trace_blkdev_zone_mgmt(bio, nr_sectors); /* [한국어] 체인으로 묶인 zone 관리 BIO 무리를 제출하기 직전에 한 번만 트레이스 — 범위(nr_sectors)까지 기록해 어느 zone 구간이었는지 사후 추적 가능 */
+	ret = submit_bio_wait(bio); // 모든 zone management BIO가 완료될 때까지 동기 대기 (NVMe면 Zone Management Send 0x79 커맨드들의 완료)
+	bio_put(bio); /* [한국어] blk_next_bio()로 체인처럼 이어 붙인 BIO 무리의 참조를 반납한다. 완료를 이미 기다렸으므로 여기서 안전하게 해제된다 */
 
 	return ret;
 }
@@ -1016,7 +1062,7 @@ static int blkdev_copy_zone_to_user(struct blk_zone *zone, unsigned int idx,
 	struct zone_report_args *args = data;
 
 	if (copy_to_user(&args->zones[idx], zone, sizeof(struct blk_zone))) // 커널의 ZNS zone descriptor를 사용자 공간 ioctl 버퍼로 복사
-		return -EFAULT;
+		return -EFAULT; /* [한국어] 사용자 포인터가 무효/미매핑이면 copy_to_user가 실패한다. 음수를 반환하면 report_zones 루프가 즉시 중단되고 이 값이 ioctl 반환값이 된다 */
 	return 0;
 }
 
@@ -1073,7 +1119,7 @@ int blkdev_report_zones_ioctl(struct block_device *bdev, unsigned int cmd,
 	 * 요청 시에는 "어디서부터 몇 개"를 담고, 응답 시에는 "실제 몇 개"를 담아
 	 * 되돌려 준다. */
 	struct blk_zone_report rep;
-	int ret;
+	int ret; /* [한국어] blkdev_report_zones()가 돌려준 "실제로 보고된 zone 개수"(>=0) 또는 음수 errno를 담는다 */
 
 	/* [한국어] 인자 포인터가 없으면 요청 내용을 읽을 수 없다. */
 	if (!argp)
@@ -1100,15 +1146,15 @@ int blkdev_report_zones_ioctl(struct block_device *bdev, unsigned int cmd,
 	 * 각 descriptor를 쓴다. */
 	args.zones = argp + sizeof(struct blk_zone_report);
 
-	switch (cmd) {
-	case BLKREPORTZONE:
+	switch (cmd) { /* [한국어] 같은 핸들러가 두 세대의 report ioctl을 처리하므로 명령 번호로 분기 */
+	case BLKREPORTZONE: /* [한국어] v1 ioctl — 항상 장치에 직접 물어본다 */
 		/* [한국어] 구버전 ioctl — 항상 장치에 실제 Report Zones 커맨드를 보낸다.
 		 * NVMe에서는 nvme_report_zones()를 거쳐 Zone Management Receive
 		 * (옵코드 0x7A)가 발행된다. 정확하지만 커맨드 왕복 비용이 든다. */
 		ret = blkdev_report_zones(bdev, rep.sector, rep.nr_zones,
 					  blkdev_copy_zone_to_user, &args);
 		break;
-	case BLKREPORTZONEV2:
+	case BLKREPORTZONEV2: /* [한국어] v2 ioctl — 플래그 필드가 추가되어 캐시 응답을 허용한다 */
 		/* [한국어] 확장 플래그 검증 — 커널이 아는 입력 플래그 외의 비트가
 		 * 켜져 있으면 거부한다. 미래에 추가될 플래그를 지금 커널이 조용히
 		 * 무시하면, 사용자 공간이 그 기능이 동작한다고 오해하기 때문이다.
@@ -1123,7 +1169,7 @@ int blkdev_report_zones_ioctl(struct block_device *bdev, unsigned int cmd,
 					 blkdev_copy_zone_to_user, &args);
 		break;
 	default:
-		return -EINVAL;
+		return -EINVAL; /* [한국어] 이 핸들러는 위 두 명령만 받도록 blkdev_ioctl에서 라우팅되므로, 여기 도달하면 라우팅 버그다 */
 	}
 
 	/* [한국어] 음수는 오류. 이 시점에는 이미 일부 descriptor가 사용자 버퍼에
@@ -1236,8 +1282,8 @@ out_unlock:
 	/* [한국어] 획득의 역순으로 해제한다. 이 시점부터 다시 페이지 캐시가
 	 * 채워질 수 있고, 그때는 장치에서 새로 읽으므로 올바른(리셋된) 내용을 본다. */
 	filemap_invalidate_unlock(bdev->bd_mapping);
-	inode_unlock(bdev->bd_mapping->host);
-	return ret;
+	inode_unlock(bdev->bd_mapping->host); /* [한국어] 획득 순서(inode_lock -> filemap_invalidate_lock)의 역순으로 마지막에 inode 락 해제 — 락 순서 역전으로 인한 교착을 피하기 위한 관례 */
+	return ret; /* [한국어] blkdev_zone_mgmt()의 결과(0 또는 음수 errno)를 그대로 ioctl 반환값으로 전달 */
 }
 
 /*
@@ -1312,19 +1358,19 @@ int blkdev_zone_mgmt_ioctl(struct block_device *bdev, blk_mode_t mode,
 		 * ZNS 관점: write pointer가 zone 시작으로 되돌아가 처음부터 다시
 		 * 쓸 수 있게 된다(NVME_ZONE_RESET). */
 		return blkdev_reset_zone(bdev, mode, &zrange);
-	case BLKOPENZONE:
+	case BLKOPENZONE: /* [한국어] NVMe로는 Zone Management Send(0x79) + ZSA=NVME_ZONE_OPEN(0x3)로 나간다 */
 		/* [한국어] Explicit Open — zone을 명시적으로 열어 둔다. 컨트롤러가
 		 * 그 zone에 쓰기 버퍼를 미리 할당해 첫 쓰기 지연을 줄인다.
 		 * 다만 동시에 열 수 있는 zone 수(max_open_zones)에 한계가 있다. */
 		op = REQ_OP_ZONE_OPEN;
 		break;
-	case BLKCLOSEZONE:
+	case BLKCLOSEZONE: /* [한국어] NVMe로는 Zone Management Send(0x79) + ZSA=NVME_ZONE_CLOSE(0x1)로 나간다 */
 		/* [한국어] Close — 열린 zone을 닫아 자원을 반납한다. write pointer는
 		 * 그대로 유지되어 나중에 이어서 쓸 수 있다. max_open_zones 한계에
 		 * 걸릴 때 쓰지 않는 zone을 정리하는 용도다. */
 		op = REQ_OP_ZONE_CLOSE;
 		break;
-	case BLKFINISHZONE:
+	case BLKFINISHZONE: /* [한국어] NVMe로는 Zone Management Send(0x79) + ZSA=NVME_ZONE_FINISH(0x2)로 나간다 */
 		/* [한국어] Finish — zone을 강제로 FULL 상태로 만든다. 남은 공간을
 		 * 포기하는 대신 그 zone을 "쓰기 완료" 상태로 확정해, 이후 리셋
 		 * 대상으로 관리하기 쉽게 한다. */
@@ -1425,9 +1471,9 @@ static bool disk_insert_zone_wplug(struct gendisk *disk,
 				   struct blk_zone_wplug *zwplug)
 {
 	struct blk_zone_wplug *zwplg;
-	unsigned long flags;
-	u8 *zones_cond;
-	unsigned int idx =
+	unsigned long flags; /* [한국어] spin_lock_irqsave가 저장할 인터럽트 플래그. plug 해시는 완료 인터럽트/softirq 문맥에서도 만져지므로 IRQ를 끈 채 잡아야 한다 */
+	u8 *zones_cond; /* [한국어] disk->zones_cond(zone당 1바이트 condition 캐시) 스냅숏. 최초 재검증 중에는 아직 NULL일 수 있다 */
+	unsigned int idx = /* [한국어] 이 plug가 들어갈 해시 버킷 번호 */
 		hash_32(zwplug->zone_no, disk->zone_wplugs_hash_bits); // ZID를 hash bucket index로 매핑
 
 	/*
@@ -1440,7 +1486,7 @@ static bool disk_insert_zone_wplug(struct gendisk *disk,
 		if (zwplg->zone_no == zwplug->zone_no) { // 이미 동일 ZID에 plug가 있으면 삽입 실패
 		// 동일 ZID plug가 이미 있으면 삽입 실패
 			spin_unlock_irqrestore(&disk->zone_wplugs_hash_lock, // hash lock 해제 후 재시도 또는 실패
-					       flags);
+					       flags); /* [한국어] 저장해 둔 IRQ 상태를 원복 — 중첩 호출에서 이전에 이미 IRQ가 꺼져 있었다면 그대로 꺼진 채로 둔다 */
 			return false;
 		}
 	}
@@ -1452,10 +1498,10 @@ static bool disk_insert_zone_wplug(struct gendisk *disk,
 	 * necessarilly in the active condition.
 	 */
 	zones_cond = rcu_dereference_check(disk->zones_cond, // hash lock을 보유한 상태에서 zones_cond 포인터 접근
-				lockdep_is_held(&disk->zone_wplugs_hash_lock));
+				lockdep_is_held(&disk->zone_wplugs_hash_lock)); /* [한국어] RCU read lock 대신 이 spinlock이 갱신자를 배제한다는 사실을 lockdep에 알려 주는 조건식 — 없으면 "RCU 보호 없이 역참조" 경고가 뜬다 */
 	if (zones_cond) // 재검증 완료 후라면 zones_cond에서 초기 condition 복사
-		zwplug->cond = zones_cond[zwplug->zone_no]; // ZNS Report Zones로 얻은 zone state를 plug에 반영
-	else
+		zwplug->cond = zones_cond[zwplug->zone_no]; // Report Zones로 얻어 캐시해 둔 zone state를 plug 초기값으로 반영
+	else /* [한국어] 배열이 아직 없다 == 최초 blk_revalidate_disk_zones() 진행 중 == 이 plug는 "쓰기가 진행 중인 zone"에만 만들어지므로 ACTIVE가 확정적이다 */
 		// 첫 재검증이라 zones_cond 없음 -> ACTIVE로 처리
 		zwplug->cond = BLK_ZONE_COND_ACTIVE;
 
@@ -1494,21 +1540,21 @@ static struct blk_zone_wplug *disk_get_hashed_zone_wplug(struct gendisk *disk,
 {
 	unsigned int zno = disk_zone_no(disk, sector); // 대상 sector의 ZID
 	unsigned int idx = hash_32(zno, disk->zone_wplugs_hash_bits); // ZID로 hash bucket 선택
-	struct blk_zone_wplug *zwplug;
+	struct blk_zone_wplug *zwplug; /* [한국어] 조회 결과로 반환할 plug 포인터. 해시 체인 순회 중 임시 커서로도 쓰인다 */
 
 	rcu_read_lock(); // lock-free hash lookup을 위한 RCU read lock
 
 	hlist_for_each_entry_rcu(zwplug, &disk->zone_wplugs_hash[idx], node) { // 해당 bucket의 충돌 체인 탐색
 		if (zwplug->zone_no == zno && // 동일 ZID이면서 아직 해제되지 않은 plug 참조 획득
-		    refcount_inc_not_zero(&zwplug->ref)) {
+		    refcount_inc_not_zero(&zwplug->ref)) { /* [한국어] 0에서 1로 올리지 않는 원자 증가. 이미 0이면(=해제 확정) 실패를 돌려주므로, 해제 중인 plug를 되살리는 use-after-free를 막는다 */
 			rcu_read_unlock(); // plug를 찾으면 RCU read unlock
-			return zwplug;
+			return zwplug; /* [한국어] 참조를 하나 든 채로 반환 — 호출자는 반드시 disk_put_zone_wplug()로 돌려줘야 한다 */
 		}
 	}
 
 	rcu_read_unlock(); // plug를 찾지 못하면 RCU read unlock
 
-	return NULL;
+	return NULL; /* [한국어] 해당 zone에 진행 중인 쓰기가 없다는 뜻 — 호출자는 필요하면 새 plug를 할당한다 */
 }
 
 /*
@@ -1535,7 +1581,7 @@ static inline struct blk_zone_wplug *disk_get_zone_wplug(struct gendisk *disk,
 							 sector_t sector)
 {
 	if (!atomic_read(&disk->nr_zone_wplugs)) // 활성 plug가 없으면 lookup 생략
-		return NULL;
+		return NULL; /* [한국어] 대부분의 zone은 EMPTY/FULL이라 plug가 없다. 해시 계산+RCU 진입 비용조차 아끼는 빠른 경로 */
 
 	return disk_get_hashed_zone_wplug(disk, sector); // hash table에서 ZID에 해당하는 plug 검색
 }
@@ -1562,8 +1608,8 @@ static inline struct blk_zone_wplug *disk_get_zone_wplug(struct gendisk *disk,
  */
 static void disk_free_zone_wplug_rcu(struct rcu_head *rcu_head)
 {
-	struct blk_zone_wplug *zwplug =
-		container_of(rcu_head, struct blk_zone_wplug, rcu_head);
+	struct blk_zone_wplug *zwplug = /* [한국어] RCU 콜백은 rcu_head 포인터만 받으므로, 구조체 내 오프셋을 빼서 감싸는 blk_zone_wplug의 시작 주소를 복원한다 */
+		container_of(rcu_head, struct blk_zone_wplug, rcu_head); /* [한국어] rcu_head는 구조체 중간에 박혀 있으므로 container_of가 오프셋을 빼서 원래 객체 주소를 얻는다 */
 
 	mempool_free(zwplug, zwplug->disk->zone_wplugs_pool); // RCU grace period 종료 후 plug를 bounded mempool에 반환
 }
@@ -1598,21 +1644,21 @@ static void disk_free_zone_wplug_rcu(struct rcu_head *rcu_head)
 static void disk_free_zone_wplug(struct blk_zone_wplug *zwplug)
 {
 	struct gendisk *disk = zwplug->disk;
-	unsigned long flags;
+	unsigned long flags; /* [한국어] zone_wplugs_hash_lock을 IRQ-safe하게 잡기 위한 플래그 저장소. 이 락은 I/O 완료(softirq) 문맥에서도 잡히므로 spin_lock_irqsave가 필수다 */
 
 	WARN_ON_ONCE(!(zwplug->flags & BLK_ZONE_WPLUG_DEAD)); // DEAD flag가 설정된 plug만 해제 가능
 	WARN_ON_ONCE(zwplug->flags & BLK_ZONE_WPLUG_PLUGGED); // PLUGGED 상태에서 해제하면 대기 BIO 유실 위험
 	WARN_ON_ONCE(!bio_list_empty(&zwplug->bio_list)); // 해제 전 plug list에 남아있는 BIO가 없어야 함
 
 	spin_lock_irqsave(&disk->zone_wplugs_hash_lock, flags); // zones_cond 및 hash list 갱신 직렬화
-	blk_zone_set_cond(rcu_dereference_check(disk->zones_cond,
-				lockdep_is_held(&disk->zone_wplugs_hash_lock)),
+	blk_zone_set_cond(rcu_dereference_check(disk->zones_cond, /* [한국어] plug가 사라져도 zone 상태 정보가 유실되지 않도록, 마지막 condition을 zone당 1바이트 캐시 배열로 되돌려 쓴다 */
+				lockdep_is_held(&disk->zone_wplugs_hash_lock)), /* [한국어] hash_lock이 갱신자를 배제하므로 RCU read lock 없이 역참조해도 안전하다고 lockdep에 알린다 */
 			  zwplug->zone_no, zwplug->cond); // plug의 최종 condition을 커널 캐시에 기록
 	hlist_del_init_rcu(&zwplug->node); // hash chain에서 제거; RCU reader는 grace period 동안 계속 볼 수 있음
 	atomic_dec(&disk->nr_zone_wplugs); // 활성 plug 개수 감소
-	spin_unlock_irqrestore(&disk->zone_wplugs_hash_lock, flags);
+	spin_unlock_irqrestore(&disk->zone_wplugs_hash_lock, flags); /* [한국어] 캐시 기록 + unlink + 카운터 감소를 하나의 임계구역으로 묶어 끝냈으므로 해제 */
 
-	call_rcu(&zwplug->rcu_head, disk_free_zone_wplug_rcu);
+	call_rcu(&zwplug->rcu_head, disk_free_zone_wplug_rcu); /* [한국어] 즉시 free하지 않고 RCU grace period 이후로 미룬다 — hlist_for_each_entry_rcu()로 이 체인을 순회 중인 reader가 아직 이 노드를 밟고 있을 수 있기 때문 */
 }
 
 /*
@@ -1640,7 +1686,7 @@ static void disk_free_zone_wplug(struct blk_zone_wplug *zwplug)
 static inline void disk_put_zone_wplug(struct blk_zone_wplug *zwplug)
 {
 	if (refcount_dec_and_test(&zwplug->ref)) // 마지막 참조 해제 시 RCU deferred free 시작
-		disk_free_zone_wplug(zwplug);
+		disk_free_zone_wplug(zwplug); /* [한국어] 카운트가 0이 된 경우에만 실제 해제 — 해시 unlink와 call_rcu 예약을 수행한다 */
 }
 
 /*
@@ -1675,15 +1721,15 @@ static void disk_mark_zone_wplug_dead(struct blk_zone_wplug *zwplug)
 {
 	lockdep_assert_held(&zwplug->lock);
 
-	if (!(zwplug->flags & BLK_ZONE_WPLUG_DEAD)) {
+	if (!(zwplug->flags & BLK_ZONE_WPLUG_DEAD)) { /* [한국어] 이미 DEAD면 초기 참조를 두 번 반환하게 되므로 반드시 한 번만 통과시켜야 한다 */
 		zwplug->flags |= BLK_ZONE_WPLUG_DEAD; // zone이 full/empty/reset/finish 상태임을 표시
 		disk_put_zone_wplug(zwplug); // hash table에 들어갈 때 획득한 초기 reference 해제
 		// DEAD 설정 후 초기 ref 해제로 최종 제거 가능
 	}
 }
 
-static bool disk_zone_wplug_submit_bio(struct gendisk *disk,
-				       struct blk_zone_wplug *zwplug);
+static bool disk_zone_wplug_submit_bio(struct gendisk *disk, /* [한국어] bio_work 콜백이 이 함수를 부르는데 정의는 아래쪽에 있어 전방 선언이 필요하다 */
+				       struct blk_zone_wplug *zwplug); /* [한국어] 인자: 대상 gendisk와 해당 zone의 write plug */
 
 /*
  * [한국어]
@@ -1714,7 +1760,7 @@ static bool disk_zone_wplug_submit_bio(struct gendisk *disk,
 static void blk_zone_wplug_bio_work(struct work_struct *work)
 {
 	struct blk_zone_wplug *zwplug =
-		container_of(work, struct blk_zone_wplug, bio_work);
+		container_of(work, struct blk_zone_wplug, bio_work); /* [한국어] work_struct는 plug 구조체에 내장돼 있으므로 container_of로 소유 plug를 복원한다 */
 
 	disk_zone_wplug_submit_bio(zwplug->disk, zwplug); // workqueue에서 plug list의 다음 BIO를 제출 경로로 복귀
 
@@ -1760,35 +1806,33 @@ static void blk_zone_wplug_bio_work(struct work_struct *work)
 static struct blk_zone_wplug *disk_get_or_alloc_zone_wplug(struct gendisk *disk,
 					sector_t sector, gfp_t gfp_mask)
 {
-	unsigned int zno = disk_zone_no(disk, sector); // BIO가 속한 ZNS zone의 ZID
-	struct blk_zone_wplug *zwplug;
+	unsigned int zno = disk_zone_no(disk, sector); // BIO가 속한 zone의 번호(NVMe ZNS라면 Zone Identifier에 해당)
+	struct blk_zone_wplug *zwplug; /* [한국어] 찾았거나 새로 만든 plug를 담을 포인터 */
 
-again:
+again: /* [한국어] 삽입 경쟁에서 졌을 때 되돌아오는 재시도 지점 */
 	zwplug = disk_get_zone_wplug(disk, sector); // 기존 plug가 있으면 재사용
-	if (zwplug)
-		return zwplug;
+	if (zwplug) /* [한국어] 이미 이 zone에 쓰기가 진행 중이었다는 뜻 — 참조가 하나 증가된 상태로 돌아온다 */
+		return zwplug; /* [한국어] 새로 할당할 필요 없이 그대로 사용 */
 
 	/*
 	 * Allocate and initialize a zone write plug with an extra reference
 	 * so that it is not freed when the zone write plug becomes idle without
 	 * the zone being full.
 	 */
-	zwplug = mempool_alloc(disk->zone_wplugs_pool, gfp_mask); // max_open/active_zones 기반 bounded pool에서 plug 할당 (GFP_NOIO)
-	if (!zwplug)
-		return NULL;
+	zwplug = mempool_alloc(disk->zone_wplugs_pool, gfp_mask); /* [한국어] 일반 kmalloc이 아니라 mempool을 쓰는 이유: 쓰기 경로에서 메모리 회수(reclaim)를 유발하면 그 회수가 다시 쓰기를 필요로 해 교착이 된다. mempool은 pool_size = max(max_open_zones, max_active_zones)개를 미리 확보해 둔다(disk_alloc_zone_resources 참조) */
+	if (!zwplug) /* [한국어] GFP_NOWAIT 등으로 불린 경우 mempool이 비어 실패할 수 있다 */
+		return NULL; /* [한국어] GFP_NOWAIT 등으로 불린 경우에는 실패할 수 있다. 호출자는 BIO를 bio_wouldblock_error()로 되돌린다 */
 
 	INIT_HLIST_NODE(&zwplug->node); // hash chain 초기화
-	refcount_set(&zwplug->ref, 2); // ref=2: hash table + 현재 호출자; NVMe request ref 모델과 유사
-	// 초기 ref 2: hash table + 현재 사용자
-	spin_lock_init(&zwplug->lock); // zone 단위 spinlock 초기화; SQ doorbell 직렬화 기반
+	refcount_set(&zwplug->ref, 2); /* [한국어] 초기 참조를 2로 잡는다: (1) 해시 테이블이 들고 있는 참조, (2) 지금 이 함수를 부른 쪽에 넘겨줄 참조. 1로 두면 호출자가 참조를 반환하는 순간 zone이 full도 아닌데 plug가 사라진다 */
+	spin_lock_init(&zwplug->lock); /* [한국어] 이 plug(=하나의 zone)에 대한 모든 조작을 직렬화하는 zone 단위 락. bio_list, wp_offset, flags를 만질 때 반드시 잡아야 한다 */
 	zwplug->flags = 0; // PLUGGED/NEED_WP_UPDATE/DEAD bit 초기화
 	zwplug->zone_no = zno; // plug가 관리하는 ZID 설정
-	zwplug->wp_offset = bdev_offset_from_zone_start(disk->part0, sector); // 현재 BIO sector로부터 zone 내 WP offset 초기화
-	// 현재 sector로부터 zone 시작까지 offset -> WP 초기 위치
+	zwplug->wp_offset = bdev_offset_from_zone_start(disk->part0, sector); /* [한국어] write pointer의 초기 추정값 = 이 BIO의 시작 섹터가 zone 시작에서 떨어진 거리. "이 zone에 지금 막 쓰려는 위치가 곧 WP"라는 가정인데, 순차 쓰기 규칙상 이 가정이 틀리면 어차피 장치가 거부하므로 안전하다 */
 	bio_list_init(&zwplug->bio_list); // 순차 쓰기 대기 BIO list 초기화
 	INIT_WORK(&zwplug->bio_work, blk_zone_wplug_bio_work); // plug 풀림 시 비동기 제출할 work_struct 초기화
 	INIT_LIST_HEAD(&zwplug->entry); // qd1 worker list node 초기화
-	zwplug->disk = disk; // NVMe namespace gendisk 역참조 설정
+	zwplug->disk = disk; /* [한국어] plug에서 소유 gendisk로 되돌아가는 역참조. RCU 해제 콜백과 워커가 disk->zone_wplugs_pool 등에 접근할 때 필요하다 */
 
 	/*
 	 * Insert the new zone write plug in the hash table. This can fail only
@@ -1797,10 +1841,10 @@ again:
 	 */
 	if (!disk_insert_zone_wplug(disk, zwplug)) { // 다른 CPU가 먼저 삽입했으면 재시도
 		mempool_free(zwplug, disk->zone_wplugs_pool); // 경쟁 실패 시 할당한 plug를 pool에 즉시 반환
-		goto again;
+		goto again; /* [한국어] 아직 해시에 publish되지 않았으므로 RCU 유예 없이 바로 반환해도 안전하다. 다시 조회하면 이번에는 상대가 넣은 plug를 찾게 된다 */
 	}
 
-	return zwplug;
+	return zwplug; /* [한국어] 참조 2개 중 하나를 호출자에게 넘긴다(나머지 하나는 해시가 보유) */
 }
 
 /*
@@ -1837,11 +1881,11 @@ static inline void blk_zone_wplug_bio_io_error(struct blk_zone_wplug *zwplug,
 	struct request_queue *q = zwplug->disk->queue;
 
 	bio_clear_flag(bio, BIO_ZONE_WRITE_PLUGGING); // BIO가 더 이상 zone plug 제어 대상이 아님을 표시
-	bio_io_error(bio); // NVMe command 없이 BIO 완료를 I/O error로 처리
+	bio_io_error(bio); /* [한국어] 드라이버에 내려보내지 않고 여기서 BLK_STS_IOERR로 완료시킨다 — 커맨드도 태그도 소비되지 않는다 */
 	disk_put_zone_wplug(zwplug); // BIO가 소유하던 plug reference 해제
 	// BIO 추가 시 증가시킨 q_usage_counter 해제
 	/* Drop the reference taken by disk_zone_wplug_add_bio(). */
-	blk_queue_exit(q); // plug 시점에 증가시킨 q_usage_counter 해제; NVMe queue exit과 동일
+	blk_queue_exit(q); /* [한국어] disk_zone_wplug_add_bio()가 plug에 넣을 때 미리 잡아 둔 q_usage_counter 참조를 반납한다. 이 참조는 원래 blk_mq_submit_bio()가 재사용할 예정이었지만, 제출하지 않고 실패시켰으므로 여기서 직접 되돌려야 큐 freeze가 영원히 막히지 않는다 */
 }
 
 /*
@@ -1876,17 +1920,17 @@ static inline void blk_zone_wplug_bio_io_error(struct blk_zone_wplug *zwplug,
 static void disk_zone_wplug_abort(struct blk_zone_wplug *zwplug)
 {
 	struct gendisk *disk = zwplug->disk;
-	struct bio *bio;
+	struct bio *bio; /* [한국어] 팝해 낸 BIO를 담을 임시 커서. 대기열을 비울 때까지 반복 사용된다 */
 
-	lockdep_assert_held(&zwplug->lock);
+	lockdep_assert_held(&zwplug->lock); /* [한국어] zwplug->lock을 이미 쥔 상태에서만 불려야 한다는 계약을 lockdep으로 강제 — bio_list와 flags를 만지기 때문 */
 
 	if (bio_list_empty(&zwplug->bio_list)) // abort할 대기 BIO가 없으면 즉시 반환
 		return;
 
 	pr_warn_ratelimited("%s: zone %u: Aborting plugged BIOs\n", // plug된 BIO들을 강제 실패시킴을 기록
-			    zwplug->disk->disk_name, zwplug->zone_no);
-	while ((bio = bio_list_pop(&zwplug->bio_list))) // NVMe SQ/CID를 소비하지 않고 plug list의 BIO들을 모두 실패 처리
-		blk_zone_wplug_bio_io_error(zwplug, bio);
+			    zwplug->disk->disk_name, zwplug->zone_no); /* [한국어] 어느 디스크의 몇 번 zone인지 남긴다. ratelimited인 이유는 zone 하나가 통째로 실패하면 이 경로가 폭주할 수 있기 때문 */
+	while ((bio = bio_list_pop(&zwplug->bio_list))) /* [한국어] 대기열이 빌 때까지 앞에서부터 하나씩 꺼내 실패 처리한다. 아직 드라이버에 내려간 적이 없는 BIO들이다 */
+		blk_zone_wplug_bio_io_error(zwplug, bio); /* [한국어] 각 BIO에서 BIO_ZONE_WRITE_PLUGGING을 지우고 bio_io_error()로 완료 — 아직 드라이버에 내려간 적이 없으므로 태그(NVMe Command ID)도 커맨드도 소비되지 않았다 */
 
 	zwplug->flags &= ~BLK_ZONE_WPLUG_PLUGGED; // 더 이상 대기 BIO가 없으면 PLUGGED 상태 클리어
 
@@ -1897,11 +1941,11 @@ static void disk_zone_wplug_abort(struct blk_zone_wplug *zwplug)
 	 */
 	if (blk_queue_zoned_qd1_writes(disk->queue)) { // 회전형(qd1 writes) 장치용 worker list 사용 여부
 		spin_lock(&disk->zone_wplugs_list_lock); // qd1 worker list 동기화
-		if (!list_empty(&zwplug->entry)) {
+		if (!list_empty(&zwplug->entry)) { /* [한국어] 이 plug가 qd1 워커의 처리 대기 리스트에 올라가 있는 경우에만 제거한다 */
 			list_del_init(&zwplug->entry); // active plug list에서 제거
 			disk_put_zone_wplug(zwplug); // worker list에 추가할 때 획득한 reference 해제
 		}
-		spin_unlock(&disk->zone_wplugs_list_lock);
+		spin_unlock(&disk->zone_wplugs_list_lock); /* [한국어] qd1 워커 리스트 갱신 완료. 이 락은 zwplug->lock 안쪽에서 잡히는 중첩 락이므로 항상 이 순서를 지켜야 교착이 없다 */
 	}
 }
 
@@ -1938,7 +1982,7 @@ static void disk_zone_wplug_update_cond(struct gendisk *disk,
 		zwplug->cond = BLK_ZONE_COND_FULL; // ZNS FULL 상태로 전이
 	else if (!zwplug->wp_offset) // WP offset이 0인지 검사
 		zwplug->cond = BLK_ZONE_COND_EMPTY; // ZNS EMPTY 상태로 전이
-	else
+	else /* [한국어] WP가 0도 아니고 capacity도 아니면 zone 중간까지 쓴 상태 — 캐시 정책상 IMP_OPEN/EXP_OPEN/CLOSED를 구분하지 않고 ACTIVE로 뭉뚱그린다 */
 		zwplug->cond = BLK_ZONE_COND_ACTIVE; // 그 외에는 ZNS ACTIVE 상태로 유지
 }
 
@@ -2025,25 +2069,25 @@ static unsigned int blk_zone_wp_offset(struct blk_zone *zone)
 	 *   READONLY   - 읽기만 가능. 쓰기 불가.
 	 * ACTIVE는 커널이 IMP_OPEN/EXP_OPEN/CLOSED를 1바이트 캐시에 축약해
 	 * 저장할 때 쓰는 내부 표현이다(blk_zone_set_cond 참고). */
-	switch (zone->cond) {
-	case BLK_ZONE_COND_IMP_OPEN:
-	case BLK_ZONE_COND_EXP_OPEN:
-	case BLK_ZONE_COND_CLOSED:
-	case BLK_ZONE_COND_ACTIVE:
+	switch (zone->cond) { /* [한국어] 이 switch가 곧 존 상태 기계의 판정부 — 상태별로 WP를 신뢰할 수 있는지가 갈린다 */
+	case BLK_ZONE_COND_IMP_OPEN: /* [한국어] 컨트롤러가 write를 받아 암묵적으로 연 zone */
+	case BLK_ZONE_COND_EXP_OPEN: /* [한국어] 호스트가 Zone Management Send(ZSA=0x3)로 명시적으로 연 zone */
+	case BLK_ZONE_COND_CLOSED: /* [한국어] 열렸다 닫힌 zone — WP는 보존되므로 이어 쓸 수 있다 */
+	case BLK_ZONE_COND_ACTIVE: /* [한국어] 위 세 상태를 1바이트 캐시로 축약했을 때 쓰는 커널 내부 표현 */
 		/* [한국어] 쓰기가 진행 중이거나 중단된 zone들 — WP가 유효하다.
 		 * 절대 LBA인 zone->wp에서 zone 시작을 빼 "zone 안에서의 오프셋"으로
 		 * 바꾼다. 커널이 오프셋으로 다루는 이유는 zone 번호와 오프셋을
 		 * 분리해야 zone 경계 계산이 단순해지기 때문이다. */
 		return zone->wp - zone->start;
-	case BLK_ZONE_COND_EMPTY:
+	case BLK_ZONE_COND_EMPTY: /* [한국어] reset 직후이거나 한 번도 쓴 적 없는 zone */
 		/* [한국어] 빈 zone — WP가 zone 시작에 있으므로 오프셋은 0이다.
 		 * 컨트롤러가 보고한 zone->wp를 빼서 계산해도 같지만, 명시적으로
 		 * 0을 돌려주는 편이 의도가 분명하다. */
 		return 0;
-	case BLK_ZONE_COND_FULL:
-	case BLK_ZONE_COND_NOT_WP:
-	case BLK_ZONE_COND_OFFLINE:
-	case BLK_ZONE_COND_READONLY:
+	case BLK_ZONE_COND_FULL: /* [한국어] WP가 capacity에 도달 — 더 쓸 수 없으므로 추적할 다음 쓰기 위치가 없다 */
+	case BLK_ZONE_COND_NOT_WP: /* [한국어] conventional zone — 순차 제약이 없어 WP 개념 자체가 없다 */
+	case BLK_ZONE_COND_OFFLINE: /* [한국어] 매체 결함으로 접근 불가 */
+	case BLK_ZONE_COND_READONLY: /* [한국어] 읽기 전용 전이 — 쓰기 불가 */
 	default:
 		/*
 		 * Conventional, full, offline and read-only zones do not have
@@ -2091,17 +2135,17 @@ static unsigned int disk_zone_wplug_sync_wp_offset(struct gendisk *disk,
 	unsigned int wp_offset = blk_zone_wp_offset(zone); // ZNS zone descriptor로부터 512B sector 단위 wp_offset 산출
 
 	zwplug = disk_get_zone_wplug(disk, zone->start); // 해당 zone의 plug가 있으면 WP 동기화
-	if (zwplug) {
-		unsigned long flags;
+	if (zwplug) { /* [한국어] plug가 없다 == 이 zone에 진행 중인 쓰기가 없다 == 동기화할 캐시 WP도 없다 */
+		unsigned long flags; /* [한국어] plug 락은 I/O 완료(softirq) 문맥에서도 잡히므로 IRQ 상태 저장이 필요하다 */
 
 		spin_lock_irqsave(&zwplug->lock, flags); // plug의 WP와 cond를 직렬화하여 갱신
 		if (zwplug->flags & BLK_ZONE_WPLUG_NEED_WP_UPDATE) // write 오류 등으로 WP 불확실할 때만 동기화
 			disk_zone_wplug_set_wp_offset(disk, zwplug, wp_offset); // Report Zones 결과로 WP를 갱신하고 대기 BIO abort
-		spin_unlock_irqrestore(&zwplug->lock, flags);
+		spin_unlock_irqrestore(&zwplug->lock, flags); /* [한국어] WP/cond 갱신을 하나의 임계구역으로 마치고 해제 */
 		disk_put_zone_wplug(zwplug); // 조회용 reference 해제
 	}
 
-	return wp_offset;
+	return wp_offset; /* [한국어] 호출자(disk_report_zone 등)에게는 plug 유무와 무관하게 리포트에서 계산한 WP 오프셋을 돌려준다 */
 }
 
 /**
@@ -2157,11 +2201,11 @@ int disk_report_zone(struct gendisk *disk, struct blk_zone *zone,
 		 * for a cached report. So collapse the implicit open, explicit
 		 * open and closed conditions into the active zone condition.
 		 */
-		switch (zone->cond) {
-		case BLK_ZONE_COND_IMP_OPEN:
-		case BLK_ZONE_COND_EXP_OPEN:
-		case BLK_ZONE_COND_CLOSED:
-			zone->cond = BLK_ZONE_COND_ACTIVE;
+		switch (zone->cond) { /* [한국어] 캐시 응답을 흉내 내야 하므로 세분화된 open 계열 상태를 한 덩어리로 접는다 */
+		case BLK_ZONE_COND_IMP_OPEN: /* [한국어] 컨트롤러가 암묵적으로 연 상태 */
+		case BLK_ZONE_COND_EXP_OPEN: /* [한국어] 호스트가 명시적으로 연 상태 */
+		case BLK_ZONE_COND_CLOSED: /* [한국어] 열렸다 닫힌 상태 */
+			zone->cond = BLK_ZONE_COND_ACTIVE; /* [한국어] 세 상태 모두 “WP가 zone 중간에 있다”로만 보고한다 — 캐시 경로와 결과 형식을 일치시키기 위함 */
 			break;
 		default:
 			break;
@@ -2172,7 +2216,7 @@ int disk_report_zone(struct gendisk *disk, struct blk_zone *zone,
 		disk_zone_wplug_sync_wp_offset(disk, zone); // Report Zones로 얻은 WP를 plug에 반영
 
 	if (args && args->cb) // 사용자 콜백이 있으면 zone descriptor 전달
-		return args->cb(zone, idx, args->data); // NVMe ZNS zone 정보를 상위 계층으로 전달
+		return args->cb(zone, idx, args->data); /* [한국어] 채워진 struct blk_zone을 호출자 콜백에 넘긴다. 음수를 돌려주면 드라이버 쪽 순회가 중단된다 */
 
 	return 0;
 }
@@ -2236,17 +2280,17 @@ static int blkdev_report_zone_fallback(struct block_device *bdev,
 				       sector_t sector, struct blk_zone *zone)
 {
 	struct blk_report_zones_args args = {
-		.cb = blkdev_report_zone_cb,
-		.data = zone,
-		.report_active = true,
+		.cb = blkdev_report_zone_cb, /* [한국어] 한 zone만 받아 struct blk_zone에 복사하는 내부 콜백 */
+		.data = zone, /* [한국어] 콜백이 결과를 채워 넣을 목적지 버퍼(호출자의 스택 zone) */
+		.report_active = true, /* [한국어] open 계열을 ACTIVE로 접어 달라고 요청 — 캐시 응답과 형식을 맞추기 위함 */
 	};
-	int error;
+	int error; /* [한국어] blkdev_do_report_zones()의 반환값: 보고된 zone 개수(>=0) 또는 음수 errno */
 
-	error = blkdev_do_report_zones(bdev, sector, 1, &args); // NVMe Report Zones를 한 zone만큼 fallback 실행
-	if (error < 0) // NVMe command 실패 시 오류 반환
-		return error;
+	error = blkdev_do_report_zones(bdev, sector, 1, &args); /* [한국어] 딱 한 zone만 장치에 직접 물어본다. NVMe라면 Zone Management Receive(0x7A) 한 번 */
+	if (error < 0) /* [한국어] 전송/드라이버 오류는 그대로 전달 */
+		return error; /* [한국어] blkdev_do_report_zones()가 음수를 돌려주면 드라이버/전송 오류이므로 그대로 전달 */
 	if (error == 0) // 디바이스가 zone을 report하지 않으면 I/O error
-		return -EIO;
+		return -EIO; /* [한국어] 0개 보고 == 존재해야 할 zone을 장치가 보고하지 않음. 정상 값이 아니므로 I/O 오류로 승격 */
 	return 0;
 }
 
@@ -2339,30 +2383,30 @@ int blkdev_get_zone_info(struct block_device *bdev, sector_t sector,
 {
 	struct gendisk *disk = bdev->bd_disk;
 	sector_t zone_sectors = bdev_zone_sectors(bdev); // ZNS zone 크기(chunk_sectors)로 zone 범위 계산
-	struct blk_zone_wplug *zwplug;
-	unsigned long flags;
-	u8 *zones_cond;
+	struct blk_zone_wplug *zwplug; /* [한국어] 해당 zone에 진행 중인 쓰기가 있으면 그 plug에서 최신 WP를 얻는다 */
+	unsigned long flags; /* [한국어] plug 락을 IRQ-safe하게 잡기 위한 플래그 저장소 */
+	u8 *zones_cond; /* [한국어] RCU로 스냅숏할 zone condition 캐시 배열 */
 
 	if (!bdev_is_zoned(bdev)) // ZNS가 아니면 zone info 조회 불가
-		return -EOPNOTSUPP;
+		return -EOPNOTSUPP; /* [한국어] zoned 장치가 아니면 zone이라는 개념 자체가 없다 */
 
-	if (sector >= get_capacity(disk)) // NVMe namespace capacity 초과 검증
-		return -EINVAL;
+	if (sector >= get_capacity(disk)) /* [한국어] 디스크 용량 밖 섹터는 어떤 zone에도 속하지 않는다 */
+		return -EINVAL; /* [한국어] 네임스페이스/디스크 용량을 넘어선 섹터는 어떤 zone에도 속하지 않는다 */
 
 	memset(zone, 0, sizeof(*zone)); // 반환할 zone descriptor 초기화
 	sector = bdev_zone_start(bdev, sector); // sector를 zone 시작으로 정렬
 
-	if (!blkdev_has_cached_report_zones(bdev)) // cached report를 사용할 수 없으면 NVMe command로 fallback
-		return blkdev_report_zone_fallback(bdev, sector, zone); // NVMe Report Zones를 한 zone 조회
+	if (!blkdev_has_cached_report_zones(bdev)) /* [한국어] native zone append를 이미 쓴 적이 있으면 커널 WP 추적이 실제와 어긋나므로 캐시로 답할 수 없다 */
+		return blkdev_report_zone_fallback(bdev, sector, zone); /* [한국어] 장치에 직접 물어보는 경로로 우회 */
 
-	rcu_read_lock(); // zones_cond read-side RCU lock
+	rcu_read_lock(); /* [한국어] zones_cond 배열은 재검증 때 통째로 교체되고 kfree_rcu로 유예 해제되므로, 읽는 동안 RCU 구간에 있어야 use-after-free가 없다 */
 	zones_cond = rcu_dereference(disk->zones_cond); // zone condition cache 포인터 snapshot
 	if (!disk->zone_wplugs_hash || !zones_cond) { // plug hash나 condition cache가 준비되지 않았으면 fallback
-		rcu_read_unlock();
-		return blkdev_report_zone_fallback(bdev, sector, zone);
+		rcu_read_unlock(); /* [한국어] 폴백 경로로 나가기 전에 RCU 읽기 구간을 반드시 닫는다 — 폴백은 블로킹 가능한 동기 I/O라 RCU 안에서 하면 안 된다 */
+		return blkdev_report_zone_fallback(bdev, sector, zone); /* [한국어] 캐시 자료구조가 아직 준비되지 않았으면 장치에 직접 물어본다 */
 	}
 	zone->cond = zones_cond[disk_zone_no(disk, sector)]; // cache에서 ZNS zone condition 읽기
-	rcu_read_unlock();
+	rcu_read_unlock(); /* [한국어] 캐시에서 1바이트만 복사해 왔으므로 여기서 읽기 구간을 닫아도 안전하다 */
 
 	zone->start = sector; // zone 시작 sector 설정
 	zone->len = zone_sectors; // zone 길이 설정
@@ -2387,12 +2431,12 @@ int blkdev_get_zone_info(struct block_device *bdev, sector_t sector,
 	zone->type = BLK_ZONE_TYPE_SEQWRITE_REQ; // sequential write required zone type 지정
 	if (disk_zone_is_last(disk, zone)) // 마지막 zone인지 확인
 		zone->capacity = disk->last_zone_capacity; // 마지막 zone은 축소된 capacity 사용
-	else
+	else /* [한국어] 마지막 zone이 아니면 모든 zone이 같은 capacity를 가진다(재검증 때 검증됨) */
 		zone->capacity = disk->zone_capacity; // 일반 zone은 zone_capacity 사용
 		// ZNS sequential write required zone 설정
 
 	if (zone->cond == BLK_ZONE_COND_READONLY || // readonly/offline zone은 쓰기 불가
-	    zone->cond == BLK_ZONE_COND_OFFLINE) {
+	    zone->cond == BLK_ZONE_COND_OFFLINE) { /* [한국어] READONLY 또는 OFFLINE — 둘 다 비가역이며 WP를 추적할 의미가 없다 */
 		zone->wp = ULLONG_MAX; // 유효하지 않은 WP 표시
 		return 0;
 	}
@@ -2404,10 +2448,10 @@ int blkdev_get_zone_info(struct block_device *bdev, sector_t sector,
 	 * Otherwise, if we have a zone write plug, use it.
 	 */
 	zwplug = disk_get_zone_wplug(disk, sector); // 해당 zone의 plug 조회; 없으면 empty/full로 간주
-	if (!zwplug) {
+	if (!zwplug) { /* [한국어] plug가 없다 == 대기 중인 쓰기도, 추적 중인 WP도 없다 == FULL이거나 EMPTY 둘 중 하나 */
 		if (zone->cond == BLK_ZONE_COND_FULL) // plug가 없고 FULL이면 WP를 ULLONG_MAX로
 			zone->wp = ULLONG_MAX; // FULL zone은 추가 쓰기 불가
-		else
+		else /* [한국어] FULL이 아니면 EMPTY다. reset 직후이므로 WP는 zone 시작과 같다 */
 			zone->wp = sector; // EMPTY이면 WP는 zone 시작
 		return 0;
 		// plug 없으면 FULL 또는 EMPTY
@@ -2415,15 +2459,15 @@ int blkdev_get_zone_info(struct block_device *bdev, sector_t sector,
 
 	spin_lock_irqsave(&zwplug->lock, flags); // plug의 WP 상태를 직렬화
 	if (zwplug->flags & BLK_ZONE_WPLUG_NEED_WP_UPDATE) { // WP 불확실 시 cached report를 신뢰할 수 없음
-		spin_unlock_irqrestore(&zwplug->lock, flags);
+		spin_unlock_irqrestore(&zwplug->lock, flags); /* [한국어] 플러그 상태 확인이 끝났으므로 락 해제. 이후 폴백은 블로킹 가능하므로 락 밖에서 해야 한다 */
 		disk_put_zone_wplug(zwplug); // fallback 전 plug 조회 reference 해제
-// NVMe Report Zones로 정확한 WP 재확인
-		// WP 불확실 시 NVMe Report Zones로 fallback
+		/* [한국어] WP 추적이 어긋난 상태라 캐시로는 답할 수 없다. 실제
+		 * Report Zones를 발행해 정확한 WP를 받아 온다. */
 		return blkdev_report_zone_fallback(bdev, sector, zone);
 	}
 	zone->cond = zwplug->cond; // plug의 condition을 zone descriptor에 반영
 	zone->wp = sector + zwplug->wp_offset; // plug wp_offset으로부터 ZNS write pointer 계산
-	spin_unlock_irqrestore(&zwplug->lock, flags);
+	spin_unlock_irqrestore(&zwplug->lock, flags); /* [한국어] cond와 wp를 원자적으로 한 쌍으로 읽어냈으므로 임계구역 종료 */
 
 	disk_put_zone_wplug(zwplug); // 조회용 reference 해제
 
@@ -2489,7 +2533,7 @@ int blkdev_report_zones_cached(struct block_device *bdev, sector_t sector,
 	/* [한국어] 캐시에서 재구성한 zone descriptor를 담을 스택 버퍼.
 	 * zone 하나씩 채워 콜백에 넘기므로 배열이 필요 없다. */
 	struct blk_zone zone;
-	int ret;
+	int ret; /* [한국어] blkdev_get_zone_info()와 사용자 콜백의 반환값을 받아 루프 조기 종료 여부를 판단하는 변수 */
 
 	/* [한국어] 콜백이 없으면 결과를 전달할 방법이 없고, zoned 장치가 아니면
 	 * zone 자체가 없다. report_zones 연산이 없는 것은 드라이버 버그이므로
@@ -2531,9 +2575,9 @@ int blkdev_report_zones_cached(struct block_device *bdev, sector_t sector,
 		return blkdev_do_report_zones(bdev, sector, nr_zones, &args);
 	}
 
-	for (sector = bdev_zone_start(bdev, sector); // zone 단위로 순회; 캐시 유효하면 NVMe SQ/CID 사용 안 함
-	     sector < capacity && idx < nr_zones;
-	     sector += zone_sectors, idx++) {
+	for (sector = bdev_zone_start(bdev, sector); /* [한국어] 요청 섹터가 속한 zone의 시작으로 정렬한 뒤 zone 단위로 전진한다. 이 루프는 전부 커널 캐시만 읽으므로 장치 커맨드가 한 번도 나가지 않는다 */
+	     sector < capacity && idx < nr_zones; /* [한국어] 디스크 끝에 닿거나 요청한 개수를 다 채우면 종료 */
+	     sector += zone_sectors, idx++) { /* [한국어] zone 크기(= chunk_sectors)만큼 전진해 다음 zone의 시작 섹터로 이동 */
 		ret = blkdev_get_zone_info(bdev, sector, &zone); // 커널 캐시에서 zone 정보 조회
 		if (ret) // 캐시 조회 실패(fallback 포함) 시 루프를 중단하고 에러 전파
 			return ret;
@@ -2543,7 +2587,7 @@ int blkdev_report_zones_cached(struct block_device *bdev, sector_t sector,
 			return ret;
 	}
 
-	return idx;
+	return idx; /* [한국어] 실제로 보고한 zone 개수를 반환. 요청보다 적을 수 있다(디스크 끝 도달) */
 }
 EXPORT_SYMBOL_GPL(blkdev_report_zones_cached);
 
@@ -2573,9 +2617,9 @@ EXPORT_SYMBOL_GPL(blkdev_report_zones_cached);
  */
 static void blk_zone_reset_bio_endio(struct bio *bio)
 {
-	struct gendisk *disk = bio->bi_bdev->bd_disk; // 완료된 BIO의 NVMe namespace gendisk
-	sector_t sector = bio->bi_iter.bi_sector; // 완료된 BIO의 시작 sector로 ZID 식별
-	struct blk_zone_wplug *zwplug;
+	struct gendisk *disk = bio->bi_bdev->bd_disk; /* [한국어] 완료된 BIO가 향했던 gendisk (NVMe라면 네임스페이스의 디스크) */
+	sector_t sector = bio->bi_iter.bi_sector; // 완료된 BIO의 시작 sector로 zone 번호 식별
+	struct blk_zone_wplug *zwplug; /* [한국어] 이 zone에 아직 살아 있는 write plug가 있는지 확인하기 위한 포인터 */
 
 	/*
 	 * If we have a zone write plug, set its write pointer offset to 0.
@@ -2584,13 +2628,13 @@ static void blk_zone_reset_bio_endio(struct bio *bio)
 	 * writes failing anyway.
 	 */
 	zwplug = disk_get_zone_wplug(disk, sector); // 해당 ZID의 plug 조회
-	if (zwplug) {
-		unsigned long flags;
+	if (zwplug) { /* [한국어] plug가 있다 == 이 zone에 쓰기가 진행 중이었다. WP 캐시와 대기 BIO를 정리해야 한다 */
+		unsigned long flags; /* [한국어] 완료 콜백은 하드 IRQ 문맥일 수 있어 irqsave가 필요하다 */
 
-		spin_lock_irqsave(&zwplug->lock, flags);
+		spin_lock_irqsave(&zwplug->lock, flags); /* [한국어] WP 갱신과 대기 BIO abort를 하나의 임계구역으로 묶는다 */
 		disk_zone_wplug_set_wp_offset(disk, zwplug, 0); // Reset 완료 후 WP를 0으로 동기화
-		spin_unlock_irqrestore(&zwplug->lock, flags);
-		disk_put_zone_wplug(zwplug);
+		spin_unlock_irqrestore(&zwplug->lock, flags); /* [한국어] set_wp_offset(0)이 대기 BIO abort까지 마쳤으므로 임계구역 종료 */
+		disk_put_zone_wplug(zwplug); /* [한국어] disk_get_zone_wplug()로 얻은 조회 참조를 반환. 이 시점에 마지막 참조였다면 plug가 해제된다 */
 	} else {
 		disk_zone_set_cond(disk, sector, BLK_ZONE_COND_EMPTY); // plug가 없으면 zones_cond를 EMPTY로 갱신
 	}
@@ -2624,12 +2668,12 @@ static void blk_zone_reset_all_bio_endio(struct bio *bio)
 	struct gendisk *disk = bio->bi_bdev->bd_disk;
 	/* [한국어] 네임스페이스 전체 용량. 아래에서 모든 zone을 순회하는 종료 조건. */
 	sector_t capacity = get_capacity(disk);
-	struct blk_zone_wplug *zwplug;
+	struct blk_zone_wplug *zwplug; /* [한국어] 해시 순회 커서. 모든 활성 plug의 WP를 0으로 되돌리는 데 쓰인다 */
 	/* [한국어] spin_lock_irqsave가 저장/복원할 인터럽트 상태. 이 함수는 완료
 	 * 콜백이라 하드 IRQ 컨텍스트일 수 있어, 단순 spin_lock으로는 부족하다. */
 	unsigned long flags;
-	sector_t sector;
-	unsigned int i;
+	sector_t sector; /* [한국어] zones_cond 배열을 전부 EMPTY로 되돌릴 때 zone 시작 섹터를 옮겨 가는 커서 */
+	unsigned int i; /* [한국어] 해시 버킷 인덱스 */
 
 	/* [한국어] ★ 빠른 경로 ★
 	 * 활성 zone write plug가 하나도 없으면 해시 전체 순회를 건너뛴다.
@@ -2659,10 +2703,10 @@ static void blk_zone_reset_all_bio_endio(struct bio *bio)
 				 * 처음부터 쓸 수 있다"는 뜻이다. 이것이 커널이 추적하는
 				 * 상태와 리셋된 장치 상태를 다시 일치시킨다. */
 				disk_zone_wplug_set_wp_offset(disk, zwplug, 0);
-				spin_unlock_irqrestore(&zwplug->lock, flags);
+				spin_unlock_irqrestore(&zwplug->lock, flags); /* [한국어] plug 하나의 WP 갱신을 마쳤으므로 해제. 다음 plug로 넘어간다 */
 			}
 		}
-		rcu_read_unlock();
+		rcu_read_unlock(); /* [한국어] 해시 순회가 끝났으므로 RCU 읽기 구간 종료 — 이후로는 plug 포인터를 만지면 안 된다 */
 	}
 
 	/* Update the cached zone conditions. */
@@ -2670,8 +2714,8 @@ static void blk_zone_reset_all_bio_endio(struct bio *bio)
 	 * zone"에만 있지만 zones_cond 배열은 모든 zone을 담으므로, 위 순회와 별도로
 	 * 전체를 돌아야 한다. zone 크기 단위로 전진하며 각 zone의 대표 섹터를 넘긴다. */
 	for (sector = 0; sector < capacity;
-	     sector += bdev_zone_sectors(bio->bi_bdev))
-		disk_zone_set_cond(disk, sector, BLK_ZONE_COND_EMPTY);
+	     sector += bdev_zone_sectors(bio->bi_bdev)) /* [한국어] zone 크기만큼 전진. bdev_zone_sectors()는 queue_limits.chunk_sectors를 읽는다 */
+		disk_zone_set_cond(disk, sector, BLK_ZONE_COND_EMPTY); /* [한국어] Reset All 이후 모든 zone은 WP가 시작으로 되돌아간 EMPTY 상태다 */
 	/* [한국어] Zone Append 사용 이력을 초기화한다.
 	 * 이 비트가 서 있으면 blkdev_has_cached_report_zones()가 거짓이 되어
 	 * 캐시 대신 실제 Report Zones 커맨드를 쓰게 된다 — 네이티브 Zone Append는
@@ -2706,9 +2750,9 @@ static void blk_zone_reset_all_bio_endio(struct bio *bio)
 static void blk_zone_finish_bio_endio(struct bio *bio)
 {
 	struct block_device *bdev = bio->bi_bdev; // Finish 완료된 BIO의 block_device
-	struct gendisk *disk = bdev->bd_disk;
+	struct gendisk *disk = bdev->bd_disk; /* [한국어] 해당 block_device가 속한 gendisk — plug 해시와 zones_cond 캐시가 여기 매달려 있다 */
 	sector_t sector = bio->bi_iter.bi_sector; // 완료된 BIO의 시작 sector
-	struct blk_zone_wplug *zwplug;
+	struct blk_zone_wplug *zwplug; /* [한국어] Finish 대상 zone의 write plug(있을 수도, 없을 수도 있다) */
 
 	/*
 	 * If we have a zone write plug, set its write pointer offset to the
@@ -2717,14 +2761,14 @@ static void blk_zone_finish_bio_endio(struct bio *bio)
 	 * result in the writes failing anyway.
 	 */
 	zwplug = disk_get_zone_wplug(disk, sector); // 해당 ZID의 plug 조회
-	if (zwplug) {
-		unsigned long flags;
+	if (zwplug) { /* [한국어] plug가 있다 == 이 zone에 쓰기가 진행 중이었다. WP를 FULL로 밀고 대기 BIO를 정리한다 */
+		unsigned long flags; /* [한국어] 완료 콜백은 하드 IRQ 문맥일 수 있으므로 irqsave 사용 */
 
-		spin_lock_irqsave(&zwplug->lock, flags);
+		spin_lock_irqsave(&zwplug->lock, flags); /* [한국어] WP 갱신과 대기 BIO abort를 하나의 임계구역으로 묶는다 */
 		disk_zone_wplug_set_wp_offset(disk, zwplug, // Finish 완료 후 WP를 zone 크기로 설정 (FULL)
-					      bdev_zone_sectors(bdev));
-		spin_unlock_irqrestore(&zwplug->lock, flags);
-		disk_put_zone_wplug(zwplug);
+					      bdev_zone_sectors(bdev)); /* [한국어] WP를 zone 크기로 밀면 disk_zone_wplug_update_cond()가 이를 FULL로 판정한다 */
+		spin_unlock_irqrestore(&zwplug->lock, flags); /* [한국어] FULL 전이 처리가 끝났으므로 임계구역 종료 */
+		disk_put_zone_wplug(zwplug); /* [한국어] 조회 참조 반환. FULL이 되면서 초기 참조도 이미 반환됐다면 여기서 plug가 해제된다 */
 	} else {
 		disk_zone_set_cond(disk, sector, BLK_ZONE_COND_FULL); // plug가 없으면 zones_cond를 FULL로 갱신
 	}
@@ -2757,18 +2801,18 @@ static void blk_zone_finish_bio_endio(struct bio *bio)
 void blk_zone_mgmt_bio_endio(struct bio *bio)
 {
 	/* If the BIO failed, we have nothing to do. */
-	if (bio->bi_status != BLK_STS_OK) // NVMe Zone Management Send 실패 시 WP 캐시를 갱신하지 않음
+	if (bio->bi_status != BLK_STS_OK) /* [한국어] 관리 명령이 실패했다면 장치 쪽 zone 상태는 바뀌지 않았다. 캐시를 갱신하면 오히려 실제와 어긋나므로 아무것도 하지 않는다 (NVMe라면 Zone Management Send 0x79가 에러 상태로 완료된 경우) */
 		return;
 
-	switch (bio_op(bio)) {
+	switch (bio_op(bio)) { /* [한국어] 완료된 관리 명령의 종류에 따라 갱신해야 할 캐시 상태가 다르다 */
 	case REQ_OP_ZONE_RESET: // Reset 완료 후 WP 캐시 동기화
-		blk_zone_reset_bio_endio(bio);
+		blk_zone_reset_bio_endio(bio); /* [한국어] WP를 0으로, condition을 EMPTY로 */
 		return;
 	case REQ_OP_ZONE_RESET_ALL: // Reset All 완료 후 전체 WP/condition 초기화
-		blk_zone_reset_all_bio_endio(bio);
+		blk_zone_reset_all_bio_endio(bio); /* [한국어] 모든 zone의 WP를 0으로, 모든 condition을 EMPTY로 */
 		return;
 	case REQ_OP_ZONE_FINISH: // Finish 완료 후 zone을 FULL로 표시
-		blk_zone_finish_bio_endio(bio);
+		blk_zone_finish_bio_endio(bio); /* [한국어] WP를 zone 크기로, condition을 FULL로 */
 		return;
 	default:
 		return;
@@ -2814,11 +2858,11 @@ static void disk_zone_wplug_schedule_work(struct gendisk *disk,
 	 * blk_zone_wplug_bio_work() will release the reference we take here,
 	 * and we also drop this reference if the work is already scheduled.
 	 */
-	WARN_ON_ONCE(!(zwplug->flags & BLK_ZONE_WPLUG_PLUGGED));
-	WARN_ON_ONCE(blk_queue_zoned_qd1_writes(disk->queue));
+	WARN_ON_ONCE(!(zwplug->flags & BLK_ZONE_WPLUG_PLUGGED)); /* [한국어] PLUGGED가 아닌 plug에 후속 제출을 예약하면 순차 보장이 깨진다 — 호출 규약 위반을 잡는 검사 */
+	WARN_ON_ONCE(blk_queue_zoned_qd1_writes(disk->queue)); /* [한국어] qd1 장치는 workqueue가 아니라 단일 워커 스레드 경로를 쓴다. 여기 오면 경로 선택 버그 */
 	refcount_inc(&zwplug->ref); // work 실행 전 plug가 해제되지 않도록 reference 추가
-	if (!queue_work(disk->zone_wplugs_wq, &zwplug->bio_work)) // process context workqueue에 제출; NVMe ISR과는 별개 스케줄링
-		disk_put_zone_wplug(zwplug); // 이미 큐에 있으면 즉시 reference 해제
+	if (!queue_work(disk->zone_wplugs_wq, &zwplug->bio_work)) /* [한국어] 다음 BIO 제출을 프로세스 컨텍스트 워커로 넘긴다. 이 함수 자체는 완료 콜백(IRQ/softirq)에서 불릴 수 있는데, blk_mq_submit_bio()는 잠들 수 있어 그 자리에서 바로 제출할 수 없기 때문이다. false 반환은 "이미 큐에 들어 있음"을 뜻한다 */
+		disk_put_zone_wplug(zwplug); /* [한국어] 이미 예약돼 있으면 위에서 올린 참조가 짝을 잃으므로 즉시 되돌린다 — 그 예약된 work가 실행될 때 자기 몫의 참조를 반환할 것이다 */
 }
 
 /*
@@ -2860,7 +2904,7 @@ static inline void disk_zone_wplug_add_bio(struct gendisk *disk,
 	 * blk-mq devices and dropped when the BIO is failed and after
 	 * it is issued in the case of BIO-based devices.
 	 */
-	percpu_ref_get(&bio->bi_bdev->bd_disk->queue->q_usage_counter); // BIO 제출 시 blk-mq/NVMe queue 사용을 위한 q_usage_counter 획득
+	percpu_ref_get(&bio->bi_bdev->bd_disk->queue->q_usage_counter); /* [한국어] BIO가 plug에서 대기하는 동안 큐가 freeze/해제되지 못하게 사용 참조를 하나 더 잡아 둔다. 나중에 blk_mq_submit_bio()가 이 참조를 그대로 재사용하므로 이중 획득이 아니다 */
 
 	/*
 	 * The BIO is being plugged and thus will have to wait for the on-going
@@ -2873,7 +2917,7 @@ static inline void disk_zone_wplug_add_bio(struct gendisk *disk,
 	 * Reuse the poll cookie field to store the number of segments when
 	 * split to the hardware limits.
 	 */
-	bio->__bi_nr_segments = nr_segs; // BIO segment 수를 poll cookie 필드에 저장; 이후 request PRP/SGL 구성에 활용 (추정)
+	bio->__bi_nr_segments = nr_segs; /* [한국어] plug에 넣기 전에 이미 계산해 둔 세그먼트 수를 BIO에 실어 둔다. polled I/O를 못 쓰게 만든 참에 poll cookie 필드를 재활용하는 것. 나중에 plug가 풀려 blk_mq_submit_bio()로 되돌아갈 때 그쪽이 bio_zone_write_plugging(bio) 분기에서 이 값을 그대로 읽어(block/blk-mq.c:7188) 분할/세그먼트 계산을 다시 하지 않는다 */
 
 	/*
 	 * We always receive BIOs after they are split and ready to be issued.
@@ -2882,8 +2926,8 @@ static inline void disk_zone_wplug_add_bio(struct gendisk *disk,
 	 * at the tail of the list to preserve the sequential write order.
 	 */
 	bio_list_add(&zwplug->bio_list, bio); // BIO를 tail에 추가하여 ZNS WP 순서 유지
-	trace_disk_zone_wplug_add_bio(zwplug->disk->queue, zwplug->zone_no,
-				      bio->bi_iter.bi_sector, bio_sectors(bio));
+	trace_disk_zone_wplug_add_bio(zwplug->disk->queue, zwplug->zone_no, /* [한국어] 이 zone의 대기열에 BIO가 하나 추가됐음을 ftrace에 남긴다 — plug 깊이와 지연을 사후 분석하는 주 수단 */
+				      bio->bi_iter.bi_sector, bio_sectors(bio)); /* [한국어] 어느 섹터에 몇 섹터짜리 쓰기가 대기 중인지 기록 */
 
 	/*
 	 * If we are using the disk zone write plugs worker instead of the per
@@ -2894,11 +2938,11 @@ static inline void disk_zone_wplug_add_bio(struct gendisk *disk,
 	 */
 	if (blk_queue_zoned_qd1_writes(disk->queue)) { // 회전형(qd1 writes) 장치는 전역 worker list 사용
 		spin_lock(&disk->zone_wplugs_list_lock); // active plug list 보호 spinlock
-		if (list_empty(&zwplug->entry)) {
+		if (list_empty(&zwplug->entry)) { /* [한국어] 아직 워커 리스트에 없을 때만 넣는다. 이미 있으면 참조를 또 올려 누수를 만들게 된다 */
 			list_add_tail(&zwplug->entry, &disk->zone_wplugs_list); // qd1 worker가 처리할 plug list에 추가
 			refcount_inc(&zwplug->ref); // worker list에 남아있는 동안 plug 유지
 		}
-		spin_unlock(&disk->zone_wplugs_list_lock);
+		spin_unlock(&disk->zone_wplugs_list_lock); /* [한국어] 워커 리스트 갱신 완료. 이 락은 zwplug->lock 안쪽에서 잡히는 중첩 락 */
 	}
 }
 
@@ -2940,9 +2984,9 @@ static inline void disk_zone_wplug_add_bio(struct gendisk *disk,
  */
 void blk_zone_write_plug_bio_merged(struct bio *bio)
 {
-	struct gendisk *disk = bio->bi_bdev->bd_disk; // BIO가 속한 NVMe namespace gendisk
-	struct blk_zone_wplug *zwplug;
-	unsigned long flags;
+	struct gendisk *disk = bio->bi_bdev->bd_disk; /* [한국어] BIO가 향하는 gendisk (NVMe라면 네임스페이스의 디스크) */
+	struct blk_zone_wplug *zwplug; /* [한국어] 병합된 BIO가 속한 zone의 write plug */
+	unsigned long flags; /* [한국어] plug 락을 IRQ-safe하게 잡기 위한 플래그 저장소 */
 
 	/*
 	 * If the BIO was already plugged, then we were called through
@@ -2963,13 +3007,13 @@ void blk_zone_write_plug_bio_merged(struct bio *bio)
 	 * plug. So this should not fail.
 	 */
 	zwplug = disk_get_zone_wplug(disk, bio->bi_iter.bi_sector); // merge 대상 zone의 plug 획득
-	if (WARN_ON_ONCE(!zwplug))
+	if (WARN_ON_ONCE(!zwplug)) /* [한국어] 병합이 성립하려면 이미 이 zone에 request와 BIO가 최소 하나씩 걸려 있어야 하므로 plug가 없을 수 없다 */
 		return;
 
-	spin_lock_irqsave(&zwplug->lock, flags);
+	spin_lock_irqsave(&zwplug->lock, flags); /* [한국어] wp_offset 전진과 cond 재계산을 한 임계구역으로 묶는다 */
 	zwplug->wp_offset += bio_sectors(bio); // 병합된 BIO만큼 WP 전진 -> NVMe command 수 감소
 	disk_zone_wplug_update_cond(disk, zwplug); // WP 변화에 따른 EMPTY/FULL/ACTIVE 상태 갱신
-	spin_unlock_irqrestore(&zwplug->lock, flags);
+	spin_unlock_irqrestore(&zwplug->lock, flags); /* [한국어] WP 갱신 완료. 참조는 반환하지 않는다 — 이 BIO의 완료 경로가 나중에 반환한다 */
 }
 
 /*
@@ -3010,12 +3054,12 @@ void blk_zone_write_plug_bio_merged(struct bio *bio)
 void blk_zone_write_plug_init_request(struct request *req)
 {
 	sector_t req_back_sector = blk_rq_pos(req) + blk_rq_sectors(req); // request tail sector; back merge 연속성 판단
-	struct request_queue *q = req->q; // request_queue (NVMe namespace queue) 참조
-	struct gendisk *disk = q->disk;
-	struct blk_zone_wplug *zwplug =
+	struct request_queue *q = req->q; /* [한국어] 이 request가 속한 큐. nomerges 플래그 확인과 q_usage_counter 반납에 쓴다 */
+	struct gendisk *disk = q->disk; /* [한국어] plug 해시와 zone 자원이 매달린 gendisk */
+	struct blk_zone_wplug *zwplug = /* [한국어] 이 request가 다루는 zone의 write plug. 참조가 하나 증가된 채로 돌아온다 */
 		disk_get_zone_wplug(disk, blk_rq_pos(req)); // request 위치의 ZID에 해당하는 plug 획득
-	unsigned long flags;
-	struct bio *bio;
+	unsigned long flags; /* [한국어] plug 락을 IRQ-safe하게 잡기 위한 플래그 저장소 */
+	struct bio *bio; /* [한국어] 대기열에서 하나씩 꺼내 볼 BIO 커서 */
 
 	if (WARN_ON_ONCE(!zwplug)) // request가 반드시 zone plug를 가져야 함
 		return;
@@ -3027,7 +3071,7 @@ void blk_zone_write_plug_init_request(struct request *req)
 	 */
 	req->rq_flags |= RQF_ZONE_WRITE_PLUGGING; // 완료 시 plug reference 해제를 요청에 표시
 
-	if (blk_queue_nomerges(q)) // NVMe queue limits가 merge를 금지한 경우 조기 반환
+	if (blk_queue_nomerges(q)) /* [한국어] /sys/block/<disk>/queue/nomerges로 병합이 꺼져 있으면 아래 병합 루프를 통째로 건너뛴다. 큐 플래그이지 장치 한계가 아니다 */
 		return;
 
 	/*
@@ -3037,31 +3081,31 @@ void blk_zone_write_plug_init_request(struct request *req)
 	spin_lock_irqsave(&zwplug->lock, flags); // plug의 BIO list와 WP 직렬화
 	while (!disk_zone_wplug_is_full(disk, zwplug)) { // zone이 full이 아닐 때까지 plug list의 BIO를 request에 병합
 		bio = bio_list_peek(&zwplug->bio_list); // 가장 오래된 대기 BIO 확인
-		if (!bio)
+		if (!bio) /* [한국어] 대기열이 비었으면 더 병합할 것이 없다 */
 			break;
 
 		if (bio->bi_iter.bi_sector != req_back_sector || // BIO 시작 sector가 request tail과 연속되는지 검사
-		    !blk_rq_merge_ok(req, bio)) // (추정) queue limits/integrity/crypto/discard 호환성 검사 (NVMe command 구성 조건)
+		    !blk_rq_merge_ok(req, bio)) /* [한국어] 섹터가 이어지더라도 두 요청을 한 커맨드로 합쳐도 되는지 별도 확인이 필요하다(플래그/무결성/암호화 컨텍스트 등이 서로 달라 합칠 수 없는 경우). 조건이 맞지 않으면 병합을 멈춘다 */
 			break;
 
 		WARN_ON_ONCE(bio_op(bio) != REQ_OP_WRITE_ZEROES && // merge된 BIO는 segment 정보를 가지고 있어야 함
-			     !bio->__bi_nr_segments);
+			     !bio->__bi_nr_segments); /* [한국어] WRITE_ZEROES는 데이터 세그먼트가 없어 예외이고, 그 외에는 add_bio 시점에 세그먼트 수를 실어 두었어야 한다 */
 
 		bio_list_pop(&zwplug->bio_list); // 순서대로 BIO를 꺼내 back merge 시도
-		if (bio_attempt_back_merge(req, bio, bio->__bi_nr_segments) != // (추정) request bio list 확장; 이후 NVMe PRP/SGL 항목으로 변환
-		    BIO_MERGE_OK) {
-			bio_list_add_head(&zwplug->bio_list, bio);
+		if (bio_attempt_back_merge(req, bio, bio->__bi_nr_segments) != /* [한국어] 대기 중이던 BIO를 진행 중인 request 뒤에 이어 붙인다. 성공하면 커맨드 하나로 더 많은 섹터를 내보내게 되어 왕복 횟수가 줄어든다. 미리 저장해 둔 세그먼트 수를 넘겨 재계산을 피한다 */
+		    BIO_MERGE_OK) { /* [한국어] 병합 실패 — 세그먼트/섹터 한도에 걸린 경우 */
+			bio_list_add_head(&zwplug->bio_list, bio); /* [한국어] 이미 pop한 BIO를 대기열 맨 앞으로 되돌려 순서를 보존한다. 순차 쓰기 규칙상 순서가 바뀌면 안 된다 */
 			break;
 		}
 
 		/* Drop the reference taken by disk_zone_wplug_add_bio(). */
-		blk_queue_exit(q); // plug 시점에 잡았던 q_usage_counter 해제; NVMe queue exit
+		blk_queue_exit(q); /* [한국어] 이 BIO는 독립된 request가 되지 않고 기존 request에 흡수되었으므로, plug에 넣을 때 잡아 둔 q_usage_counter 참조가 갈 곳이 없다. 여기서 반납한다 */
 		zwplug->wp_offset += bio_sectors(bio); // 병합된 BIO 크기만큼 WP 전진
-		disk_zone_wplug_update_cond(disk, zwplug);
+		disk_zone_wplug_update_cond(disk, zwplug); /* [한국어] WP가 움직였으니 EMPTY/ACTIVE/FULL을 다시 판정한다 */
 
 		req_back_sector += bio_sectors(bio); // request tail sector 갱신; 다음 merge 연속성 확인
 	}
-	spin_unlock_irqrestore(&zwplug->lock, flags);
+	spin_unlock_irqrestore(&zwplug->lock, flags); /* [한국어] 병합 루프가 끝났으므로 plug 락 해제 */
 }
 
 /*
@@ -3106,9 +3150,9 @@ void blk_zone_write_plug_init_request(struct request *req)
 static bool blk_zone_wplug_prepare_bio(struct blk_zone_wplug *zwplug,
 				       struct bio *bio)
 {
-	struct gendisk *disk = bio->bi_bdev->bd_disk; // BIO의 NVMe namespace gendisk
+	struct gendisk *disk = bio->bi_bdev->bd_disk; // BIO가 향하는 gendisk (NVMe라면 네임스페이스의 디스크)
 
-	lockdep_assert_held(&zwplug->lock);
+	lockdep_assert_held(&zwplug->lock); /* [한국어] wp_offset과 flags를 읽고 쓰므로 반드시 plug 락 안에서 불려야 한다는 계약을 lockdep으로 강제 */
 
 	/*
 	 * If we lost track of the zone write pointer due to a write error,
@@ -3117,7 +3161,7 @@ static bool blk_zone_wplug_prepare_bio(struct blk_zone_wplug *zwplug,
 	 * user did not do that as we cannot handle emulated zone append
 	 * otherwise.
 	 */
-	if (zwplug->flags & BLK_ZONE_WPLUG_NEED_WP_UPDATE) // WP를 잃어버린 상태면 CID/SQ 소비 전 빠르게 실패
+	if (zwplug->flags & BLK_ZONE_WPLUG_NEED_WP_UPDATE) /* [한국어] 앞선 쓰기가 실패해 커널이 추적하던 WP가 실제와 어긋난 상태. 이 상태에서 순차 쓰기를 이어 보내면 반드시 실패하므로, 드라이버에 내려보내기 전에 여기서 끊는다. 사용자가 report zones/reset/finish로 WP를 복구해야 풀린다 */
 		return false;
 
 	/*
@@ -3125,40 +3169,37 @@ static bool blk_zone_wplug_prepare_bio(struct blk_zone_wplug *zwplug,
 	 * We know such BIO will fail, and that would potentially overflow our
 	 * write pointer offset beyond the end of the zone.
 	 */
-	if (disk_zone_wplug_is_full(disk, zwplug)) // FULL zone 쓰기는 ZNS에서 무조건 실패; doorbell 차단
+	if (disk_zone_wplug_is_full(disk, zwplug)) /* [한국어] 이미 WP가 capacity에 도달한 zone. 어차피 장치가 거부할 뿐 아니라, 그냥 진행하면 아래 wp_offset 전진이 zone 끝을 넘어 오버플로한다 */
 		return false;
 
-	if (bio_op(bio) == REQ_OP_ZONE_APPEND) {
+	if (bio_op(bio) == REQ_OP_ZONE_APPEND) { /* [한국어] 여기 도달하는 zone append는 "에뮬레이션이 필요한 장치"의 것뿐이다 — blk_zone_plug_bio()가 bdev_emulates_zone_append()가 거짓이면(NVMe ZNS가 이 경우) native 경로로 먼저 빼내기 때문이다. 즉 이 분기는 max_hw_zone_append_sectors를 채우지 않는 장치용이다 */
 		/*
 		 * Use a regular write starting at the current write pointer.
 		 * Similarly to native zone append operations, do not allow
 		 * merging.
 		 */
 		bio->bi_opf &= ~REQ_OP_MASK; // zone append를 REQ_OP_WRITE로 변환
-		bio->bi_opf |= REQ_OP_WRITE | REQ_NOMERGE; // NVMe command merge 방지 (REQ_NOMERGE); ZNS atomic append 보장
-		bio->bi_iter.bi_sector += zwplug->wp_offset; // zone 내 상대 sector에 WP offset을 더해 NVMe SLBA 계산
-		// zone 상대 sector에 WP offset 더해 절대 WP 주소 계산
+		bio->bi_opf |= REQ_OP_WRITE | REQ_NOMERGE; /* [한국어] 일반 WRITE로 바꾸되 병합은 금지한다. append는 "이 BIO가 정확히 어느 위치에 쓰였는지"를 호출자에게 돌려줘야 하는데, 다른 BIO와 합쳐지면 그 경계가 사라져 위치를 보고할 수 없기 때문이다. native zone append도 같은 이유로 병합 대상이 아니다 */
+		bio->bi_iter.bi_sector += zwplug->wp_offset; /* [한국어] append BIO는 zone 시작 섹터를 담고 오므로, 커널이 추적 중인 WP 오프셋을 더해 실제로 쓸 절대 섹터를 확정한다. 장치가 위치를 정해 주던 일을 커널이 대신하는 것이 바로 "에뮬레이션"의 실체다 */
 
 		/*
 		 * Remember that this BIO is in fact a zone append operation
 		 * so that we can restore its operation code on completion.
 		 */
-		bio_set_flag(bio, BIO_EMULATES_ZONE_APPEND); // 완료 시 op 코드를 ZONE_APPEND로 복원하기 위한 표시
-		// 완료 시 op 코드를 ZONE_APPEND로 복원하기 위해 표시
+		bio_set_flag(bio, BIO_EMULATES_ZONE_APPEND); /* [한국어] 방금 WRITE로 바꿔치기했다는 사실을 BIO에 기록해 둔다. 완료 시 blk_zone_write_plug_bio_endio()가 이 플래그를 보고 op 코드를 REQ_OP_ZONE_APPEND로 되돌려, 호출자에게는 처음부터 append였던 것처럼 보이게 한다 */
 	} else {
 		/*
 		 * Check for non-sequential writes early as we know that BIOs
 		 * with a start sector not unaligned to the zone write pointer
 		 * will fail.
 		 */
-		if (bio_offset_from_zone_start(bio) != zwplug->wp_offset) // WP와 정렬되지 않은 쓰기는 ZNS 위반; NVMe command 발행 전 차단
-		// 비순차 쓰기 사전 차단
+		if (bio_offset_from_zone_start(bio) != zwplug->wp_offset) /* [한국어] 순차 쓰기 필수 zone의 핵심 규칙: 쓰기는 정확히 WP 위치에서 시작해야 한다. 어긋나면 장치가 거부할 것이 확실하므로 드라이버에 내려보내기 전에 여기서 실패시킨다 */
 			return false;
 	}
 
 	/* Advance the zone write pointer offset. */
-	zwplug->wp_offset += bio_sectors(bio); // BIO 크기만큼 WP 전진; doorbell보다 먼저 host 측 mirror 갱신
-	disk_zone_wplug_update_cond(disk, zwplug);
+	zwplug->wp_offset += bio_sectors(bio); /* [한국어] 실제 제출보다 먼저 커널 쪽 WP를 전진시킨다. 그래야 뒤이어 도착하는 BIO가 "그 다음 위치"에 정렬되었는지 즉시 판정할 수 있다. 제출이 실패하면 NEED_WP_UPDATE가 서고 이 값은 report zones로 다시 맞춰진다 */
+	disk_zone_wplug_update_cond(disk, zwplug); /* [한국어] WP가 움직였으니 EMPTY/ACTIVE/FULL 재판정 — capacity에 닿았으면 여기서 FULL이 된다 */
 
 	return true;
 }
@@ -3196,20 +3237,21 @@ static bool blk_zone_wplug_prepare_bio(struct blk_zone_wplug *zwplug,
  * wake_up_process().
  * 에러 경로: 경계 위반/할당 실패/DEAD plug/WP 검증 실패는 각각
  * bio_io_error() 또는 bio_wouldblock_error()로 즉시 완료 처리하고
- * true 반환 — 이 모든 경로에서 NVMe SQ/CID는 전혀 소비되지 않는다.
+ * true 반환 — 이 경로들은 blk_mq_submit_bio()에 도달하지 않으므로
+ * 드라이버 태그(blk-mq tag == NVMe Command ID)도 소비되지 않는다.
  *
  * 호출 체인:
  *   blk_zone_plug_bio() → [blk_zone_wplug_handle_write] →
  *   disk_zone_wplug_add_bio() 또는 (즉시 제출) blk_mq_submit_bio() →
- *   nvme_queue_rq() → nvme_submit_cmd(doorbell, SQ, CID)
+ *   mq_ops->queue_rq (간접 호출; NVMe PCIe면 nvme_queue_rq)
  */
 static bool blk_zone_wplug_handle_write(struct bio *bio, unsigned int nr_segs)
 {
-	struct gendisk *disk = bio->bi_bdev->bd_disk; // BIO의 NVMe namespace gendisk
-	sector_t sector = bio->bi_iter.bi_sector; // BIO 시작 sector (ZNS zone 내 위치)
-	struct blk_zone_wplug *zwplug;
+	struct gendisk *disk = bio->bi_bdev->bd_disk; /* [한국어] BIO가 향하는 gendisk (NVMe라면 네임스페이스의 디스크) */
+	sector_t sector = bio->bi_iter.bi_sector; // BIO 시작 sector — 이 값으로 소속 zone을 역산한다
+	struct blk_zone_wplug *zwplug; /* [한국어] 이 write가 향하는 zone의 write plug */
 	gfp_t gfp_mask = GFP_NOIO; // NOIO 기본값; REQ_NOWAIT 요청시 NOWAIT로 전환
-	unsigned long flags;
+	unsigned long flags; /* [한국어] plug 락을 IRQ-safe하게 잡기 위한 플래그 저장소 */
 
 	/*
 	 * BIOs must be fully contained within a zone so that we use the correct
@@ -3219,9 +3261,8 @@ static bool blk_zone_wplug_handle_write(struct bio *bio, unsigned int nr_segs)
 	 * BIO-based devices, it is the responsibility of the driver to split
 	 * the bio before submitting it.
 	 */
-	if (WARN_ON_ONCE(bio_straddles_zones(bio))) { // ZNS는 단일 command가 zone 경계를 넘을 수 없음
-	// NVMe ZNS는 zone 경계를 넘는 BIO를 허용하지 않음
-		bio_io_error(bio); // 잘못된 BIO를 NVMe SQ에 넣기 전 즉시 I/O error
+	if (WARN_ON_ONCE(bio_straddles_zones(bio))) { /* [한국어] 하나의 쓰기는 zone 하나 안에 담겨야 한다. blk-mq 경로에서는 chunk_sectors(=zone 크기) 기반 분할이 이미 끝난 뒤이므로 여기 걸리면 상위 계층 버그다 */
+		bio_io_error(bio); /* [한국어] zone 경계를 넘는 BIO는 어느 zone의 WP로도 판정할 수 없으므로 드라이버에 보내기 전에 실패시킨다 */
 		return true;
 	}
 
@@ -3230,7 +3271,7 @@ static bool blk_zone_wplug_handle_write(struct bio *bio, unsigned int nr_segs)
 	// conventional zone은 WP 제약 없이 바로 제출
 		/* Zone append to conventional zones is not allowed. */
 		if (bio_op(bio) == REQ_OP_ZONE_APPEND) { // conventional zone에 zone append는 ZNS에서 금지
-			bio_io_error(bio);
+			bio_io_error(bio); /* [한국어] conventional zone은 WP가 없어 "다음 쓰기 위치"라는 개념 자체가 없다. append는 그 위치를 장치가 정해 주는 연산이므로 성립할 수 없어 즉시 실패시킨다 */
 			return true;
 		}
 		return false;
@@ -3240,10 +3281,10 @@ static bool blk_zone_wplug_handle_write(struct bio *bio, unsigned int nr_segs)
 		gfp_mask = GFP_NOWAIT; // plug 할당도 non-blocking으로 시도
 
 	zwplug = disk_get_or_alloc_zone_wplug(disk, sector, gfp_mask); // 해당 ZID에 대한 plug 검색 또는 새로 할당
-	if (!zwplug) {
+	if (!zwplug) { /* [한국어] plug 할당 실패 — 메모리 부족 상황 */
 		if (bio->bi_opf & REQ_NOWAIT) // REQ_NOWAIT이고 할당 실패 시 -EAGAIN
 			bio_wouldblock_error(bio); // 호출자에게 non-blocking retry 가능을 알림
-		else
+		else /* [한국어] NOWAIT이 아니었는데도 실패했다면 재시도해도 나아질 것이 없다 */
 			bio_io_error(bio); // 일반적인 할당 실패는 I/O error
 		return true;
 	}
@@ -3265,7 +3306,7 @@ static bool blk_zone_wplug_handle_write(struct bio *bio, unsigned int nr_segs)
 		spin_unlock_irqrestore(&zwplug->lock, flags);
 		/* [한국어] 조회 시 올린 참조를 반납한다. */
 		disk_put_zone_wplug(zwplug);
-		bio_io_error(bio);
+		bio_io_error(bio); /* [한국어] DEAD plug에 도착한 쓰기는 진행시킬 방법이 없으므로 실패 처리 */
 		/* [한국어] true = "이 bio는 내가 처리했다(끝냈다)". 호출자는 더 이상
 		 * 이 bio를 제출하지 않는다. */
 		return true;
@@ -3292,7 +3333,7 @@ static bool blk_zone_wplug_handle_write(struct bio *bio, unsigned int nr_segs)
 		/* [한국어] 워커가 제출할 것이므로 NOWAIT 의미가 사라진다. 남겨 두면
 		 * 워커 제출에서도 AGAIN이 날 수 있다. */
 		bio->bi_opf &= ~REQ_NOWAIT;
-		goto queue_bio;
+		goto queue_bio; /* [한국어] NOWAIT 쓰기는 지금 zone이 비어 있더라도 무조건 대기열로 보낸다. 즉시 제출했다가 AGAIN으로 실패하면 뒤따르는 쓰기와 순서가 뒤바뀌기 때문 */
 	}
 
 	/*
@@ -3303,8 +3344,10 @@ static bool blk_zone_wplug_handle_write(struct bio *bio, unsigned int nr_segs)
 	 * 직렬화해야 한다(동시에 여러 쓰기를 보내면 헤드가 오가며 순서가 뒤집힐
 	 * 수 있다). 그런 장치는 zone별 워커가 아니라 디스크 전역 워커 하나로
 	 * 모든 쓰기를 처리하므로, 여기서는 큐에만 넣고 돌아간다.
-	 * NVMe ZNS는 이 경로에 해당하지 않는다 — 회전 매체가 아니므로 zone별로
-	 * 병렬 제출이 가능하다. */
+	 * NVMe ZNS는 보통 이 경로에 해당하지 않는다: QUEUE_FLAG_ZONED_QD1_WRITES는
+	 * blk-sysfs.c의 등록 경로에서 "blk-mq + 회전형(blk_queue_rot) + zoned"일 때만
+	 * 기본으로 켜지고, NVMe SSD는 회전형이 아니기 때문이다(사용자가
+	 * /sys/block/<disk>/queue/zoned_qd1_writes로 강제할 수는 있다). */
 	if (blk_queue_zoned_qd1_writes(disk->queue))
 		goto queue_bio;
 
@@ -3326,7 +3369,7 @@ static bool blk_zone_wplug_handle_write(struct bio *bio, unsigned int nr_segs)
 	 * 장치까지 갔다가 실패하면 왕복 지연만 낭비된다. */
 	if (!blk_zone_wplug_prepare_bio(zwplug, bio)) {
 		spin_unlock_irqrestore(&zwplug->lock, flags);
-		bio_io_error(bio);
+		bio_io_error(bio); /* [한국어] WP 불일치/FULL zone/WP 추적 상실 중 하나. 어느 쪽이든 장치에 보내도 실패가 확정이므로 드라이버까지 가지 않고 여기서 끝낸다 */
 		return true;
 	}
 
@@ -3336,24 +3379,24 @@ static bool blk_zone_wplug_handle_write(struct bio *bio, unsigned int nr_segs)
 	 * 완료 시점에 이 플래그가 지워지고 대기 중인 bio가 풀린다. */
 	zwplug->flags |= BLK_ZONE_WPLUG_PLUGGED;
 
-	spin_unlock_irqrestore(&zwplug->lock, flags);
+	spin_unlock_irqrestore(&zwplug->lock, flags); /* [한국어] plug 상태 갱신을 마쳤으므로 해제. 실제 제출은 호출자(submit_bio_noacct)가 락 밖에서 이어서 한다 */
 
 	return false;
 
-queue_bio:
+queue_bio: /* [한국어] 즉시 제출할 수 없어 대기열에 적재하는 경로 */
 	disk_zone_wplug_add_bio(disk, zwplug, bio, nr_segs); // 대기 BIO를 plug list에 추가
 
 	if (!(zwplug->flags & BLK_ZONE_WPLUG_PLUGGED)) { // plug가 새로 활성화된 경우에만 깨움
-		zwplug->flags |= BLK_ZONE_WPLUG_PLUGGED;
+		zwplug->flags |= BLK_ZONE_WPLUG_PLUGGED; /* [한국어] 이제부터 이 zone은 "제출 중" 상태 — 뒤이어 오는 쓰기는 모두 대기열로 간다. 이것이 존당 한 번에 하나만 내보내는 직렬화의 핵심 */
 		if (blk_queue_zoned_qd1_writes(disk->queue)) // qd1 worker에게 새 work가 있음을 알림
-			wake_up_process(disk->zone_wplugs_worker);
-		else
+			wake_up_process(disk->zone_wplugs_worker); /* [한국어] qd1 장치는 전용 단일 워커 스레드를 깨워 처리한다 */
+		else /* [한국어] qd1이 아니면 여러 zone을 병렬로 진행할 수 있으므로 plug별 workqueue를 쓴다 */
 			disk_zone_wplug_schedule_work(disk, zwplug); // per-zone workqueue에 제출하여 순차적으로 제출
 	}
 
-	spin_unlock_irqrestore(&zwplug->lock, flags);
+	spin_unlock_irqrestore(&zwplug->lock, flags); /* [한국어] 대기열 적재와 워커 기동까지 마쳤으므로 해제 */
 
-	return true;
+	return true; /* [한국어] true = "이 BIO는 내가 맡았다". 호출자는 제출하지 않고 그대로 돌아간다 — 실제 제출은 나중에 워커가 순서대로 한다 */
 }
 
 /*
@@ -3390,9 +3433,9 @@ queue_bio:
  */
 static void blk_zone_wplug_handle_native_zone_append(struct bio *bio)
 {
-	struct gendisk *disk = bio->bi_bdev->bd_disk; // BIO의 NVMe namespace gendisk
-	struct blk_zone_wplug *zwplug;
-	unsigned long flags;
+	struct gendisk *disk = bio->bi_bdev->bd_disk; /* [한국어] BIO가 향하는 gendisk (NVMe라면 네임스페이스의 디스크) */
+	struct blk_zone_wplug *zwplug; /* [한국어] native zone append 대상 zone의 write plug */
+	unsigned long flags; /* [한국어] plug 락을 IRQ-safe하게 잡기 위한 플래그 저장소 */
 
 	if (!test_bit(GD_ZONE_APPEND_USED, &disk->state)) // native zone append 첫 사용 시 플래그 설정
 		set_bit(GD_ZONE_APPEND_USED, &disk->state); // cached report가 WP를 신뢰할 수 없게 됨을 표시
@@ -3423,15 +3466,15 @@ static void blk_zone_wplug_handle_native_zone_append(struct bio *bio)
 	 * operations and regular write operations.
 	 */
 	if (!bio_list_empty(&zwplug->bio_list)) { // native append와 일반 write 혼합 시 대기 BIO들은 순서 보장 불가
-		pr_warn_ratelimited("%s: zone %u: Invalid mix of zone append and regular writes\n",
-				    disk->disk_name, zwplug->zone_no);
+		pr_warn_ratelimited("%s: zone %u: Invalid mix of zone append and regular writes\n", /* [한국어] 어느 디스크의 몇 번 zone에서 잘못된 혼용이 일어났는지 남긴다 */
+				    disk->disk_name, zwplug->zone_no); /* [한국어] 어느 디스크의 몇 번 zone에서 잘못된 혼용이 일어났는지 남긴다 */
 		disk_zone_wplug_abort(zwplug); // 혼합 사용 시 plug된 일반 write BIO들을 강제 실패
 		// native append와 일반 write 혼합 시 plug abort
 	}
-	disk_mark_zone_wplug_dead(zwplug); // plug를 제거하여 메모리 누수 방지
-	spin_unlock_irqrestore(&zwplug->lock, flags);
+	disk_mark_zone_wplug_dead(zwplug); /* [한국어] plug를 DEAD로 표시하고 해시가 들고 있던 초기 참조를 반납한다. 이 zone은 앞으로 native append로만 쓰일 것이므로 커널이 WP를 추적할 이유가 없다. 반드시 위의 abort 뒤에 와야 한다 — 먼저 제거하면 disk_get_zone_wplug()가 NULL을 돌려주게 되어 대기 중이던 BIO를 아무도 제출하지 않게 된다 */
+	spin_unlock_irqrestore(&zwplug->lock, flags); /* [한국어] abort와 DEAD 표시를 하나의 임계구역으로 마쳤으므로 해제 */
 
-	disk_put_zone_wplug(zwplug);
+	disk_put_zone_wplug(zwplug); /* [한국어] 조회 참조 반환. 초기 참조는 이미 위에서 반납됐으므로 대개 여기서 실제 해제(call_rcu 예약)로 이어진다 */
 }
 
 /*
@@ -3464,7 +3507,7 @@ static bool blk_zone_wplug_handle_zone_mgmt(struct bio *bio)
 		 * Zone reset and zone finish operations do not apply to
 		 * conventional zones.
 		 */
-		bio_io_error(bio); // 잘못된 zone에 대한 NVMe command 발행 전 차단
+		bio_io_error(bio); /* [한국어] conventional zone에는 WP가 없어 reset/finish가 정의되지 않는다. 드라이버에 보내기 전에 실패시킨다 */
 		return true;
 	}
 
@@ -3524,8 +3567,8 @@ static bool blk_zone_wplug_handle_zone_mgmt(struct bio *bio)
  *
  * 호출 체인:
  *   submit_bio_noacct() → [blk_zone_plug_bio] →
- *   blk_zone_wplug_handle_write() → blk_mq_submit_bio() → nvme_queue_rq()
- *   → nvme_submit_cmd(doorbell, SQ, CID)
+ *   blk_zone_wplug_handle_write() → blk_mq_submit_bio() →
+ *   mq_ops->queue_rq (간접 호출; NVMe PCIe면 nvme_queue_rq)
  */
 bool blk_zone_plug_bio(struct bio *bio, unsigned int nr_segs)
 {
@@ -3551,22 +3594,22 @@ bool blk_zone_plug_bio(struct bio *bio, unsigned int nr_segs)
 	 * operations. It is the responsibility of the user to not issue reset
 	 * and finish commands when write operations are in flight.
 	 */
-	switch (bio_op(bio)) {
-	case REQ_OP_ZONE_APPEND:
-		if (!bdev_emulates_zone_append(bdev)) { // NVMe ZNS가 native zone append를 지원하는 경우
-			blk_zone_wplug_handle_native_zone_append(bio); // plug 없이 직접 NVMe SQ로 제출
-			return false;
+	switch (bio_op(bio)) { /* [한국어] BIO의 연산 종류에 따라 zone write plug를 태울지, plug 없이 통과시킬지 갈린다 */
+	case REQ_OP_ZONE_APPEND: /* [한국어] zone append — 장치가 native로 지원하면 plug를 쓰지 않는다 */
+		if (!bdev_emulates_zone_append(bdev)) { /* [한국어] max_hw_zone_append_sectors가 0이 아니면 장치가 append를 직접 지원한다는 뜻. NVMe ZNS는 zns.c nvme_update_zone_info()가 이 값을 채우므로 항상 이 분기로 온다 */
+			blk_zone_wplug_handle_native_zone_append(bio); /* [한국어] 남아 있던 plug만 정리하고 BIO 자체는 건드리지 않는다 — 쓸 위치는 장치가 정하므로 커널이 직렬화할 이유가 없다. NVMe에서는 이 BIO가 그대로 Zone Append(0x7D) 커맨드가 된다 */
+			return false; /* [한국어] false = "내가 처리하지 않았다". 호출자가 평소대로 제출을 이어 간다 */
 		}
 		fallthrough; // emulation이 필요하면 write/zone-append 동일 경로로 처리
-	case REQ_OP_WRITE:
-	case REQ_OP_WRITE_ZEROES:
+	case REQ_OP_WRITE: /* [한국어] 일반 순차 쓰기 — 반드시 plug를 거쳐 WP 순서를 강제한다 */
+	case REQ_OP_WRITE_ZEROES: /* [한국어] write zeroes도 WP를 전진시키는 쓰기이므로 동일하게 직렬화 대상 */
 		return blk_zone_wplug_handle_write(bio, nr_segs); // write/write-zeroes는 WP serialization을 거침
-	case REQ_OP_ZONE_RESET: // NVMe Zone Management Send(Reset) 명령
-	case REQ_OP_ZONE_FINISH: // NVMe Zone Management Send(Finish) 명령
-	case REQ_OP_ZONE_RESET_ALL: // NVMe Zone Management Send(Reset All) 명령
-		return blk_zone_wplug_handle_zone_mgmt(bio); // zone management 명령은 plug 없이 제출
+	case REQ_OP_ZONE_RESET: /* [한국어] NVMe: Zone Management Send(0x79) + ZSA=NVME_ZONE_RESET(0x4) */
+	case REQ_OP_ZONE_FINISH: /* [한국어] NVMe: Zone Management Send(0x79) + ZSA=NVME_ZONE_FINISH(0x2) */
+	case REQ_OP_ZONE_RESET_ALL: /* [한국어] NVMe: 같은 0x79에 select_all=1을 세팅 — zone 개수만큼 커맨드를 반복하지 않아도 된다 */
+		return blk_zone_wplug_handle_zone_mgmt(bio); /* [한국어] 관리 명령은 장치가 원자적으로 처리하므로 직렬화가 불필요하다. 최소한의 사전 검증만 하고 통과시킨다 */
 	default:
-		return false;
+		return false; /* [한국어] 읽기 등 나머지 연산은 zone 규칙과 무관하므로 손대지 않는다 */
 	}
 
 	return false;
@@ -3614,17 +3657,17 @@ static void disk_zone_wplug_unplug_bio(struct gendisk *disk,
 	 * if we have one.
 	 */
 	if (bio_list_empty(&zwplug->bio_list)) // 더 이상 대기 BIO가 없으면 PLUGGED 해제
-		zwplug->flags &= ~BLK_ZONE_WPLUG_PLUGGED; // plug 해제로 다음 write가 NVMe SQ로 진입 가능
+		zwplug->flags &= ~BLK_ZONE_WPLUG_PLUGGED; /* [한국어] "제출 중" 표시를 내린다. 이제 이 zone에 대해 다음 쓰기 하나를 내보낼 수 있다 — 존당 한 번에 하나라는 규칙이 여기서 다시 열린다 */
 
 	if (blk_queue_zoned_qd1_writes(disk->queue)) // qd1 회전형 장치용 completion 신호
-		complete(&disk->zone_wplugs_worker_bio_done); // BIO 완료를 worker에게 알림
-	else if (!bio_list_empty(&zwplug->bio_list)) // NVMe/SSD 경로에서는 남은 BIO를 workqueue로 재스케줄
+		complete(&disk->zone_wplugs_worker_bio_done); /* [한국어] 단일 워커 스레드가 "직전 BIO가 끝날 때까지" 기다리고 있다. 깨워서 다음 zone을 처리하게 한다 */
+	else if (!bio_list_empty(&zwplug->bio_list)) /* [한국어] 여러 zone을 병렬 처리하는 장치에서는 이 zone에 남은 대기 BIO가 있을 때만 워크를 예약한다 */
 		disk_zone_wplug_schedule_work(disk, zwplug); // 다음 BIO 제출을 workqueue에 예약
 
-	if (!zwplug->wp_offset || disk_zone_wplug_is_full(disk, zwplug)) // WP가 경계에 도달하면 zone을 더 이상 사용하지 않음
-		disk_mark_zone_wplug_dead(zwplug); // DEAD 표시로 추가 CID 할당 차단
+	if (!zwplug->wp_offset || disk_zone_wplug_is_full(disk, zwplug)) /* [한국어] WP가 zone 시작(EMPTY)이거나 capacity(FULL)에 닿았다 == 더 추적할 중간 상태가 없다 */
+		disk_mark_zone_wplug_dead(zwplug); /* [한국어] plug를 거둬들여 메모리와 해시 엔트리를 되돌린다. 상태는 zones_cond 캐시 1바이트로 충분히 표현된다 */
 
-	spin_unlock_irqrestore(&zwplug->lock, flags);
+	spin_unlock_irqrestore(&zwplug->lock, flags); /* [한국어] 완료 후처리(WP 전진, 다음 BIO 예약, DEAD 판정)를 하나의 임계구역으로 마쳤으므로 해제 */
 }
 
 /*
@@ -3663,8 +3706,8 @@ void blk_zone_append_update_request_bio(struct request *rq, struct bio *bio)
 	 * the original BIO sector so that blk_zone_write_plug_bio_endio() can
 	 * lookup the zone write plug.
 	 */
-	bio->bi_iter.bi_sector = rq->__sector; // NVMe ZNS zone append가 실제 기록한 LBA를 BIO issuer에게 반환
-	trace_blk_zone_append_update_request_bio(rq);
+	bio->bi_iter.bi_sector = rq->__sector; /* [한국어] zone append의 핵심 반환값: "어디에 쓰였는가". 드라이버가 완료 시 request의 __sector에 실제 기록 위치를 채워 두면, 여기서 BIO의 iter로 옮겨 제출자에게 돌려준다. NVMe에서는 drivers/nvme/host/core.c의 nvme_end_req_zoned()가 완료 결과(nvme_req(req)->result.u64)에 실려 온 LBA를 nvme_lba_to_sect()로 변환해 req->__sector에 넣는다 — 그 값이 여기로 흘러온다 */
+	trace_blk_zone_append_update_request_bio(rq); /* [한국어] 요청이 실제로 기록된 위치를 ftrace에 남긴다 — append의 반환 LBA를 사후 검증하는 데 쓰인다 */
 }
 
 /*
@@ -3703,12 +3746,12 @@ void blk_zone_append_update_request_bio(struct request *rq, struct bio *bio)
  */
 void blk_zone_write_plug_bio_endio(struct bio *bio)
 {
-	struct gendisk *disk = bio->bi_bdev->bd_disk; // 완료된 BIO의 NVMe namespace gendisk
-	struct blk_zone_wplug *zwplug = // BIO sector로 ZID에 해당하는 plug 조회
-		disk_get_zone_wplug(disk, bio->bi_iter.bi_sector);
-	unsigned long flags;
+	struct gendisk *disk = bio->bi_bdev->bd_disk; /* [한국어] 완료된 BIO가 향했던 gendisk (NVMe라면 네임스페이스의 디스크) */
+	struct blk_zone_wplug *zwplug = // BIO sector로 소속 zone의 plug 조회
+		disk_get_zone_wplug(disk, bio->bi_iter.bi_sector); /* [한국어] 완료 BIO의 시작 섹터로 소속 zone을 역산해 plug를 찾는다. 에뮬레이션 append도 원래 섹터를 유지하므로 조회가 성립한다 */
+	unsigned long flags; /* [한국어] plug 락을 IRQ-safe하게 잡기 위한 플래그 저장소. 완료 콜백은 하드 IRQ 문맥일 수 있다 */
 
-	if (WARN_ON_ONCE(!zwplug))
+	if (WARN_ON_ONCE(!zwplug)) /* [한국어] plug 경로로 나간 BIO는 완료 시점까지 반드시 plug 참조를 하나 들고 있으므로, 없으면 참조 관리 버그다 */
 		return; // plug를 찾지 못하면 상태 동기화 불가
 
 	/* Make sure we do not see this BIO again by clearing the plug flag. */
@@ -3720,7 +3763,7 @@ void blk_zone_write_plug_bio_endio(struct bio *bio)
 	 */
 	if (bio_flagged(bio, BIO_EMULATES_ZONE_APPEND)) { // emulation으로 WRITE로 변환되었던 BIO 복원
 		bio->bi_opf &= ~REQ_OP_MASK; // op 코드를 다시 ZONE_APPEND로 설정
-		bio->bi_opf |= REQ_OP_ZONE_APPEND;
+		bio->bi_opf |= REQ_OP_ZONE_APPEND; /* [한국어] 제출 직전에 WRITE로 바꿔치기했던 op 코드를 원래대로 되돌린다 — 제출자에게는 처음부터 append였던 것처럼 보인다 */
 		bio_clear_flag(bio, BIO_EMULATES_ZONE_APPEND); // emulation 표시 제거
 	}
 
@@ -3728,11 +3771,11 @@ void blk_zone_write_plug_bio_endio(struct bio *bio)
 	 * If the BIO failed, abort all plugged BIOs and mark the plug as
 	 * needing a write pointer update.
 	 */
-	if (bio->bi_status != BLK_STS_OK) { // NVMe command 실패 시 plug 상태 복구 필요
+	if (bio->bi_status != BLK_STS_OK) { /* [한국어] 쓰기가 실패하면 장치의 WP가 전진했는지 알 수 없다. 커널이 미리 전진시켜 둔 wp_offset은 이제 신뢰할 수 없으므로, 뒤따르는 대기 BIO를 모두 버리고 WP 재조회가 필요하다고 표시한다 */
 		spin_lock_irqsave(&zwplug->lock, flags); // plug와 BIO list 직렬화
 		disk_zone_wplug_abort(zwplug); // 실패한 write 이후 대기 BIO들을 모두 abort
 		zwplug->flags |= BLK_ZONE_WPLUG_NEED_WP_UPDATE; // WP 불확실 상태 표시; 다음 Report Zones로 동기화
-		spin_unlock_irqrestore(&zwplug->lock, flags);
+		spin_unlock_irqrestore(&zwplug->lock, flags); /* [한국어] 대기 BIO abort와 NEED_WP_UPDATE 표시를 하나의 임계구역으로 마쳤으므로 해제 */
 	}
 
 	/* Drop the reference we took when the BIO was issued. */
@@ -3778,11 +3821,11 @@ void blk_zone_write_plug_bio_endio(struct bio *bio)
  */
 void blk_zone_write_plug_finish_request(struct request *req)
 {
-	struct gendisk *disk = req->q->disk; // request의 NVMe namespace gendisk
-	struct blk_zone_wplug *zwplug;
+	struct gendisk *disk = req->q->disk; /* [한국어] 이 request가 향했던 gendisk (NVMe라면 네임스페이스의 디스크) */
+	struct blk_zone_wplug *zwplug; /* [한국어] 이 request가 다루던 zone의 write plug */
 
 	zwplug = disk_get_zone_wplug(disk, req->__sector); // request sector로 ZID에 해당하는 plug 조회
-	if (WARN_ON_ONCE(!zwplug))
+	if (WARN_ON_ONCE(!zwplug)) /* [한국어] RQF_ZONE_WRITE_PLUGGING이 서 있는 request는 반드시 plug 참조를 들고 있으므로, 없으면 참조 관리 버그다 */
 		return;
 
 	req->rq_flags &= ~RQF_ZONE_WRITE_PLUGGING; // request의 zone plug 처리 완료 표시 제거
@@ -3835,16 +3878,16 @@ void blk_zone_write_plug_finish_request(struct request *req)
  *
  * 호출 체인:
  *   disk_zone_wplugs_worker() / blk_zone_wplug_bio_work() →
- *   [disk_zone_wplug_submit_bio] → blk_mq_submit_bio() → nvme_queue_rq()
- *   → nvme_submit_cmd(doorbell, SQ, CID)
+ *   [disk_zone_wplug_submit_bio] → blk_mq_submit_bio() →
+ *   mq_ops->queue_rq (간접 호출; NVMe PCIe면 nvme_queue_rq)
  */
 static bool disk_zone_wplug_submit_bio(struct gendisk *disk,
 				       struct blk_zone_wplug *zwplug)
 {
 	struct block_device *bdev; // 제출할 BIO의 block_device
-	unsigned long flags;
-	struct bio *bio;
-	bool prepared;
+	unsigned long flags; /* [한국어] plug 락을 IRQ-safe하게 잡기 위한 플래그 저장소 */
+	struct bio *bio; /* [한국어] 대기열에서 꺼낸, 이번에 제출할 BIO */
+	bool prepared; /* [한국어] WP 정렬/FULL 검증 결과. 실패면 제출하지 않고 실패 처리한다 */
 
 	/*
 	 * Submit the next plugged BIO. If we do not have any, clear
@@ -3853,21 +3896,21 @@ static bool disk_zone_wplug_submit_bio(struct gendisk *disk,
 again:
 	spin_lock_irqsave(&zwplug->lock, flags); // plug와 BIO list 직렬화
 	bio = bio_list_pop(&zwplug->bio_list); // FIFO 순서로 다음 BIO를 꺼냄
-	if (!bio) {
+	if (!bio) { /* [한국어] 대기열이 비었다 == 이 zone에 더 보낼 쓰기가 없다 */
 		zwplug->flags &= ~BLK_ZONE_WPLUG_PLUGGED; // 대기 BIO가 없으면 PLUGGED 상태 클리어
-		spin_unlock_irqrestore(&zwplug->lock, flags);
+		spin_unlock_irqrestore(&zwplug->lock, flags); /* [한국어] PLUGGED 해제까지 마쳤으므로 락 해제 */
 		return false;
 	}
 
-	trace_blk_zone_wplug_bio(zwplug->disk->queue, zwplug->zone_no,
-				 bio->bi_iter.bi_sector, bio_sectors(bio));
+	trace_blk_zone_wplug_bio(zwplug->disk->queue, zwplug->zone_no, /* [한국어] 어느 zone의 어떤 BIO가 실제로 풀려 나가는지 ftrace에 남긴다 — 대기 시간 분석의 기준점 */
+				 bio->bi_iter.bi_sector, bio_sectors(bio)); /* [한국어] 제출되는 섹터 위치와 길이를 기록 */
 
 	prepared = blk_zone_wplug_prepare_bio(zwplug, bio); // WP/full/정렬 검증; 실패하면 abort
-	spin_unlock_irqrestore(&zwplug->lock, flags);
+	spin_unlock_irqrestore(&zwplug->lock, flags); /* [한국어] 검증까지 락 안에서 끝내고 해제한다. 실제 제출은 잠들 수 있으므로 반드시 락 밖에서 해야 한다 */
 
-	if (!prepared) {
-		blk_zone_wplug_bio_io_error(zwplug, bio); // 검증 실패 시 NVMe command 없이 BIO error
-		goto again;
+	if (!prepared) { /* [한국어] 검증 실패 — 이 BIO는 보낼 수 없다 */
+		blk_zone_wplug_bio_io_error(zwplug, bio); /* [한국어] 드라이버에 내려가기 전에 실패시키므로 태그도 커맨드도 소비되지 않는다 */
+		goto again; /* [한국어] 실패한 BIO는 버리고 대기열의 다음 BIO로 재시도한다. 하나가 실패했다고 zone 전체를 멈추지는 않는다 */
 	}
 
 	/*
@@ -3884,8 +3927,8 @@ again:
 		bdev->bd_disk->fops->submit_bio(bio); // BIO-based driver 경로로 제출
 		blk_queue_exit(bdev->bd_disk->queue); // BIO-based driver 완료 후 q_usage_counter 해제
 	} else {
-		blk_mq_submit_bio(bio); // blk-mq 경로 -> nvme_queue_rq -> nvme_submit_cmd(doorbell, SQ, CID)
-		// blk-mq 경로: NVMe SQ/CID 할당으로 이어짐
+		blk_mq_submit_bio(bio); // request 기반(blk-mq) 장치: 여기서 request+태그를 할당하고 mq_ops->queue_rq로 드라이버에 넘긴다
+		// blk-mq 경로 — 할당되는 blk-mq 태그가 NVMe에서는 그대로 Command ID(CID)가 된다
 	}
 
 	return true;
@@ -3919,12 +3962,12 @@ static struct blk_zone_wplug *disk_get_zone_wplugs_work(struct gendisk *disk)
 
 	spin_lock_irq(&disk->zone_wplugs_list_lock); // active plug list 보호
 	zwplug = list_first_entry_or_null(&disk->zone_wplugs_list, // 처리할 다음 zone plug 선택
-					  struct blk_zone_wplug, entry);
-	if (zwplug)
+					  struct blk_zone_wplug, entry); /* [한국어] entry 필드로 연결된 리스트이므로 그 오프셋을 빼서 plug 시작 주소를 얻는다 */
+	if (zwplug) /* [한국어] 리스트가 비어 있으면 NULL — 처리할 일이 없다는 뜻 */
 		list_del_init(&zwplug->entry); // worker가 가져간 plug를 list에서 제거
-	spin_unlock_irq(&disk->zone_wplugs_list_lock);
+	spin_unlock_irq(&disk->zone_wplugs_list_lock); /* [한국어] 리스트에서 떼어내는 것까지가 임계구역이다. 이후 처리는 락 밖에서 한다 */
 
-	return zwplug;
+	return zwplug; /* [한국어] 리스트가 들고 있던 참조를 그대로 워커에게 넘긴다. 워커가 처리 후 반환한다 */
 }
 
 /*
@@ -3960,24 +4003,24 @@ static struct blk_zone_wplug *disk_get_zone_wplugs_work(struct gendisk *disk)
 static int disk_zone_wplugs_worker(void *data)
 {
 	struct gendisk *disk = data;
-	struct blk_zone_wplug *zwplug;
-	unsigned int noio_flag;
+	struct blk_zone_wplug *zwplug; /* [한국어] 이번 회차에 처리할 zone의 write plug */
+	unsigned int noio_flag; /* [한국어] memalloc_noio_save()가 돌려준 이전 플래그. 종료 시 원복해야 한다 */
 
 	noio_flag = memalloc_noio_save(); // memory allocation을 NOIO 모드로 제한
 	set_user_nice(current, MIN_NICE); // worker 스레드 우선순위 최고로 설정
-	set_freezable();
+	set_freezable(); /* [한국어] 이 스레드를 시스템 suspend/hibernate의 freeze 대상에 등록한다. 그래야 서스펜드 도중 I/O를 계속 내보내지 않는다 */
 
-	for (;;) {
+	for (;;) { /* [한국어] 스레드가 멈출 때까지 도는 메인 루프 */
 		set_current_state(TASK_INTERRUPTIBLE | TASK_FREEZABLE); // 작업이 있을 때까지 interruptible sleep
 
 		zwplug = disk_get_zone_wplugs_work(disk); // 처리할 zone plug가 있는지 확인
-		if (zwplug) {
+		if (zwplug) { /* [한국어] 처리할 zone이 있으면 그 zone의 대기열을 끝까지 비운다 */
 			/*
 			 * Process all BIOs of this zone write plug and then
 			 * drop the reference we took when adding the zone write
 			 * plug to the active list.
 			 */
-			set_current_state(TASK_RUNNING);
+			set_current_state(TASK_RUNNING); /* [한국어] 실제 작업을 시작하므로 잠들 준비 상태를 취소한다 */
 			while (disk_zone_wplug_submit_bio(disk, zwplug)) // 해당 zone의 plug list를 모두 소진할 때까지 제출
 				blk_wait_io(&disk->zone_wplugs_worker_bio_done); // BIO 하나 완료될 때까지 대기 (회전형 qd1 모델)
 			disk_put_zone_wplug(zwplug); // worker list에서 제거할 때 획득한 reference 해제
@@ -3989,19 +4032,19 @@ static int disk_zone_wplugs_worker(void *data)
 		 * for zone write plugs work again as a newly submitted BIO
 		 * might have added a zone write plug to the work list.
 		 */
-		if (get_current_state() == TASK_RUNNING) {
-			try_to_freeze();
+		if (get_current_state() == TASK_RUNNING) { /* [한국어] 누군가 이미 상태를 RUNNING으로 바꿨다 == 그 사이 새 작업이 들어왔다. 잠들지 않고 루프를 다시 돈다 */
+			try_to_freeze(); /* [한국어] suspend 요청이 있으면 여기서 얼어붙는다 */
 		} else {
-			if (kthread_should_stop()) {
-				set_current_state(TASK_RUNNING);
+			if (kthread_should_stop()) { /* [한국어] 디스크가 사라져 kthread_stop()이 불린 경우 */
+				set_current_state(TASK_RUNNING); /* [한국어] 잠들 준비 상태를 풀고 루프를 빠져나간다 */
 				break;
 			}
-			schedule();
+			schedule(); /* [한국어] 작업이 없고 종료 요청도 없으므로 실제로 잠든다. 새 BIO가 오면 wake_up_process()가 깨운다 */
 		}
 	}
 
-	WARN_ON_ONCE(!list_empty(&disk->zone_wplugs_list));
-	memalloc_noio_restore(noio_flag);
+	WARN_ON_ONCE(!list_empty(&disk->zone_wplugs_list)); /* [한국어] 종료 시점에 처리하지 못한 zone이 남아 있으면 참조가 새는 것이므로 경고 */
+	memalloc_noio_restore(noio_flag); /* [한국어] 스레드 종료 전에 NOIO 컨텍스트를 원복한다 */
 
 	return 0;
 }
@@ -4126,8 +4169,8 @@ static int disk_alloc_zone_resources(struct gendisk *disk,
 	 * 최소한의 진행을 보장한다. */
 	disk->zone_wplugs_pool = mempool_create_kmalloc_pool(pool_size,
 						sizeof(struct blk_zone_wplug));
-	if (!disk->zone_wplugs_pool)
-		goto free_hash;
+	if (!disk->zone_wplugs_pool) /* [한국어] mempool 생성 실패 — 여기서부터는 이미 만든 해시를 되돌려야 한다 */
+		goto free_hash; /* [한국어] 역순 해제 사다리로 진입해 해시만 정리한다 */
 
 	/* [한국어] 이 디스크 전용 워크큐. plug에 대기 중인 bio를 나중에 제출하는
 	 * 작업이 여기서 실행된다.
@@ -4140,8 +4183,8 @@ static int disk_alloc_zone_resources(struct gendisk *disk,
 	disk->zone_wplugs_wq =
 		alloc_workqueue("%s_zwplugs", WQ_MEM_RECLAIM | WQ_HIGHPRI,
 				pool_size, disk->disk_name);
-	if (!disk->zone_wplugs_wq)
-		goto destroy_pool;
+	if (!disk->zone_wplugs_wq) /* [한국어] 워크큐 생성 실패 */
+		goto destroy_pool; /* [한국어] 해시 + mempool을 되돌린다 */
 
 	/* [한국어] 워크큐와 별개로 전용 커널 스레드도 만든다. 회전 매체 zoned
 	 * 장치(SMR HDD)는 큐 깊이 1로 쓰기를 완전히 직렬화해야 하는데, 워크큐는
@@ -4152,7 +4195,7 @@ static int disk_alloc_zone_resources(struct gendisk *disk,
 	disk->zone_wplugs_worker =
 		kthread_create(disk_zone_wplugs_worker, disk,
 			       "%s_zwplugs_worker", disk->disk_name);
-	if (IS_ERR(disk->zone_wplugs_worker)) {
+	if (IS_ERR(disk->zone_wplugs_worker)) { /* [한국어] kthread_create는 NULL이 아니라 ERR_PTR로 실패를 알리므로 IS_ERR로 검사해야 한다 */
 		/* [한국어] kthread_create는 NULL이 아니라 ERR_PTR로 실패를 알린다.
 		 * 그 안의 오류 코드(-ENOMEM일 수도, -EINTR일 수도)를 그대로 전달하기
 		 * 위해 기본값 -ENOMEM을 덮어쓴다. */
@@ -4160,7 +4203,7 @@ static int disk_alloc_zone_resources(struct gendisk *disk,
 		/* [한국어] ERR_PTR 값이 남아 있으면 이후 정리 코드가 그것을 유효
 		 * 포인터로 오인해 역참조할 수 있다. NULL로 지워 둔다. */
 		disk->zone_wplugs_worker = NULL;
-		goto destroy_wq;
+		goto destroy_wq; /* [한국어] 해시 + mempool + 워크큐를 모두 되돌린다 */
 	}
 	/* [한국어] kthread_create는 스레드를 만들되 실행하지는 않는다.
 	 * wake_up_process로 명시적으로 깨워야 동작을 시작한다. 이렇게 분리된
@@ -4177,13 +4220,13 @@ static int disk_alloc_zone_resources(struct gendisk *disk,
 	 * 살아 있고, 나중에 정리 경로가 이 필드들을 다시 볼 수 있기 때문이다. */
 destroy_wq:
 	destroy_workqueue(disk->zone_wplugs_wq);
-	disk->zone_wplugs_wq = NULL;
+	disk->zone_wplugs_wq = NULL; /* [한국어] 해제한 포인터를 지워 이후 정리 경로가 두 번 해제하지 않게 한다 */
 destroy_pool:
-	mempool_destroy(disk->zone_wplugs_pool);
-	disk->zone_wplugs_pool = NULL;
+	mempool_destroy(disk->zone_wplugs_pool); /* [한국어] 미리 확보해 둔 plug 원소들을 반환하고 풀 자체를 없앤다 */
+	disk->zone_wplugs_pool = NULL; /* [한국어] 해제한 포인터를 지워 두 번 해제를 막는다 */
 free_hash:
-	kfree(disk->zone_wplugs_hash);
-	disk->zone_wplugs_hash = NULL;
+	kfree(disk->zone_wplugs_hash); /* [한국어] 해시 버킷 배열 반환 */
+	disk->zone_wplugs_hash = NULL; /* [한국어] 해제한 포인터를 지워 두 번 해제를 막는다 */
 	/* [한국어] 해시 비트 수도 0으로 되돌린다. 이 값이 남아 있으면
 	 * disk_zone_wplugs_hash_size()가 0이 아닌 크기를 반환해, 해제된
 	 * 배열을 순회하려는 코드가 생길 수 있다. */
@@ -4221,7 +4264,7 @@ free_hash:
 static void disk_destroy_zone_wplugs_hash_table(struct gendisk *disk)
 {
 	struct blk_zone_wplug *zwplug;
-	unsigned int i;
+	unsigned int i; /* [한국어] 해시 버킷 인덱스 */
 
 	if (!disk->zone_wplugs_hash) // hash table이 없으면 할당된 것도 없음
 		return;
@@ -4230,17 +4273,17 @@ static void disk_destroy_zone_wplugs_hash_table(struct gendisk *disk)
 	for (i = 0; i < disk_zone_wplugs_hash_size(disk); i++) { // 모든 hash bucket을 순회하며 plug 정리
 		while (!hlist_empty(&disk->zone_wplugs_hash[i])) { // bucket에 남은 plug가 있을 때까지 반복
 			zwplug = hlist_entry(disk->zone_wplugs_hash[i].first, // bucket의 첫 번째 plug entry 획득
-					     struct blk_zone_wplug, node);
+					     struct blk_zone_wplug, node); /* [한국어] node 필드로 체인에 걸려 있으므로 그 오프셋을 빼서 plug 시작 주소를 얻는다 */
 			spin_lock_irq(&zwplug->lock); // plug 상태 변경 직렬화
 			disk_mark_zone_wplug_dead(zwplug); // DEAD 표시 및 hash ref 해제
-			spin_unlock_irq(&zwplug->lock);
+			spin_unlock_irq(&zwplug->lock); /* [한국어] DEAD 표시로 해시 참조가 반납되면 plug가 체인에서 빠진다. 그래서 while 조건이 언젠가 거짓이 된다 */
 		}
 	}
 
 	WARN_ON_ONCE(atomic_read(&disk->nr_zone_wplugs)); // 모든 plug가 정리되었는지 검증
 	kfree(disk->zone_wplugs_hash); // hash table 메모리 해제
-	disk->zone_wplugs_hash = NULL;
-	disk->zone_wplugs_hash_bits = 0;
+	disk->zone_wplugs_hash = NULL; /* [한국어] 해제한 포인터를 지워 이후 조회 경로가 해제된 배열을 보지 못하게 한다 */
+	disk->zone_wplugs_hash_bits = 0; /* [한국어] 비트 수도 0으로 되돌린다. 남아 있으면 hash_size()가 0이 아닌 값을 돌려줘 해제된 배열을 순회하려 들 수 있다 */
 
 	/*
 	 * Wait for the zone write plugs to be RCU-freed before destroying the
@@ -4248,7 +4291,7 @@ static void disk_destroy_zone_wplugs_hash_table(struct gendisk *disk)
 	 */
 	rcu_barrier(); // RCU read-side가 모두 종료될 때까지 대기
 	mempool_destroy(disk->zone_wplugs_pool); // plug mempool 해제
-	disk->zone_wplugs_pool = NULL;
+	disk->zone_wplugs_pool = NULL; /* [한국어] 해제한 포인터를 지워 두 번 해제를 막는다 */
 }
 
 /*
@@ -4281,8 +4324,8 @@ static void disk_set_zones_cond_array(struct gendisk *disk, u8 *zones_cond)
 
 	spin_lock_irqsave(&disk->zone_wplugs_hash_lock, flags); // zones_cond 포인터 교체 직렬화
 	zones_cond = rcu_replace_pointer(disk->zones_cond, zones_cond, // RCU로 새로운 zone condition cache publish
-				lockdep_is_held(&disk->zone_wplugs_hash_lock));
-	spin_unlock_irqrestore(&disk->zone_wplugs_hash_lock, flags);
+				lockdep_is_held(&disk->zone_wplugs_hash_lock)); /* [한국어] hash_lock이 갱신자를 배제한다는 사실을 lockdep에 알린다 */
+	spin_unlock_irqrestore(&disk->zone_wplugs_hash_lock, flags); /* [한국어] 포인터 교체가 끝났으므로 해제. 실제 해제는 락 밖에서 RCU로 미룬다 */
 
 	kfree_rcu_mightsleep(zones_cond); // 오래된 zones_cond 배열을 RCU grace period 후 해제
 }
@@ -4317,12 +4360,12 @@ static void disk_set_zones_cond_array(struct gendisk *disk, u8 *zones_cond)
 void disk_free_zone_resources(struct gendisk *disk)
 {
 	if (disk->zone_wplugs_worker) // qd1 worker 커널 스레드 종료
-		kthread_stop(disk->zone_wplugs_worker);
+		kthread_stop(disk->zone_wplugs_worker); /* [한국어] 워커를 먼저 멈춰야 이후 자원 해제 중에 plug를 만지는 쪽이 없어진다 */
 	WARN_ON_ONCE(!list_empty(&disk->zone_wplugs_list)); // 남은 active plug가 없어야 함
 
-	if (disk->zone_wplugs_wq) {
+	if (disk->zone_wplugs_wq) { /* [한국어] 워크큐가 만들어져 있었던 경우에만 정리 */
 		destroy_workqueue(disk->zone_wplugs_wq); // per-disk workqueue 제거
-		disk->zone_wplugs_wq = NULL;
+		disk->zone_wplugs_wq = NULL; /* [한국어] 해제한 포인터를 지워 두 번 해제를 막는다 */
 	}
 
 	disk_destroy_zone_wplugs_hash_table(disk); // 모든 zone plug 및 hash table 제거
@@ -4450,18 +4493,18 @@ static int disk_revalidate_zone_resources(struct gendisk *disk,
 				struct blk_revalidate_zone_args *args)
 {
 	struct queue_limits *lim = &disk->queue->limits; // queue limits (chunk_sectors, max_open/active_zones)
-	unsigned int pool_size;
+	unsigned int pool_size; /* [한국어] plug mempool과 워크큐 동시성 한도로 쓸 크기. 아래에서 open/active zone 한도로부터 산정한다 */
 	int ret = 0; // 재검증 결과 코드
 
 	args->disk = disk; // 이후 콜백들이 disk_name 등 disk 전역 상태에 접근할 수 있도록 역참조 저장
-	args->nr_zones =
+	args->nr_zones = /* [한국어] 전체 용량을 zone 크기로 나눠 zone 개수를 구한다. NVMe라면 chunk_sectors는 Identify NS(ZNS)의 lbafe[].zsze에서 온 값이다 */
 		DIV_ROUND_UP_ULL(get_capacity(disk), lim->chunk_sectors); // capacity / chunk_sectors로 ZNS 총 zone 수 계산
 	// ZNS namespace 총 zone 수 = capacity / chunk_sectors
 
 	/* Cached zone conditions: 1 byte per zone */
 	args->zones_cond = kzalloc(args->nr_zones, GFP_NOIO); // zone마다 1바이트 condition cache 할당 (ZNS zone state 배열)
-	if (!args->zones_cond)
-		return -ENOMEM;
+	if (!args->zones_cond) /* [한국어] 1바이트 x zone 개수 배열 할당 실패 */
+		return -ENOMEM; /* [한국어] 이 배열 없이는 캐시 기반 report를 할 수 없으므로 재검증 자체를 실패시킨다 */
 
 	if (!disk_need_zone_resources(disk)) // BIO 기반이며 zone append 에뮬레이션도 불필요하면 plug 자원 자체가 필요 없음
 		return 0; // zones_cond 캐시만으로 충분 - 여기서 조기 반환
@@ -4472,13 +4515,13 @@ static int disk_revalidate_zone_resources(struct gendisk *disk,
 	 */
 	pool_size = max(lim->max_open_zones, lim->max_active_zones); // open/active zone 한도를 plug pool 크기로 산정
 	if (!pool_size) // 디바이스가 한도를 광고하지 않은 경우
-		pool_size =
+		pool_size = /* [한국어] 장치가 한도를 광고하지 않았으므로 기본값을 쓴다 */
 		// open/active zone 한도를 반영한 plug pool 크기
 			min(BLK_ZONE_WPLUG_DEFAULT_POOL_SIZE, args->nr_zones); // 기본 128 또는 seq zone 수 중 작은 값 사용
 
 	if (!disk->zone_wplugs_hash) { // plug hash가 아직 없을 때만 자원 할당
 		ret = disk_alloc_zone_resources(disk, pool_size); // hash/mempool/workqueue/worker 생성
-		if (ret)
+		if (ret) /* [한국어] plug 자원 할당 실패 */
 			kfree(args->zones_cond); // 자원 할당 실패 시 condition cache 해제
 	}
 
@@ -4524,29 +4567,29 @@ static int disk_revalidate_zone_resources(struct gendisk *disk,
 static int disk_update_zone_resources(struct gendisk *disk,
 				      struct blk_revalidate_zone_args *args)
 {
-	struct request_queue *q = disk->queue; // gendisk의 request_queue (NVMe namespace queue)
+	struct request_queue *q = disk->queue; /* [한국어] limits 갱신과 freeze/unfreeze의 대상 큐 */
 	unsigned int nr_seq_zones; // sequential zone 개수
 	unsigned int pool_size, memflags; // mempool resize 및 queue freeze 보관용
-	struct queue_limits lim;
-	int ret = 0; // 갱신할 queue_limits 사본
+	struct queue_limits lim; /* [한국어] 갱신할 queue_limits 사본. 곧바로 q->limits를 고치지 않고 사본에 모아 두었다가 마지막에 한 번에 커밋한다 — 중간 상태가 다른 CPU에 보이지 않게 하기 위함 */
+	int ret = 0; /* [한국어] 커밋 결과. 0이 아니면 아래 unfreeze 라벨에서 zone 자원을 전부 되돌린다 */
 
 	lim = queue_limits_start_update(q); // atomic queue limits 갱신 시작
 
-	memflags = blk_mq_freeze_queue(q); // NVMe command 제출과의 경쟁을 막기 위해 queue freeze
+	memflags = blk_mq_freeze_queue(q); /* [한국어] 진행 중인 I/O가 모두 끝나고 새 I/O가 들어오지 못하게 큐를 얼린다. nr_zones/zone_capacity/zones_cond를 바꾸는 동안 제출 경로가 그 값들을 읽으면 안 되기 때문 */
 
 	disk->nr_zones = args->nr_zones; // disk의 전체 zone 수 설정
 	if (args->nr_conv_zones >= disk->nr_zones) { // conventional zone 수가 전체 zone 수 이상이면 비정상
-		queue_limits_cancel_update(q);
-		pr_warn("%s: Invalid number of conventional zones %u / %u\n",
-			disk->disk_name, args->nr_conv_zones, disk->nr_zones);
-		ret = -ENODEV;
-		goto unfreeze;
+		queue_limits_cancel_update(q); /* [한국어] 커밋하지 않을 것이므로 사본 갱신을 취소해 잠금/상태를 되돌린다 */
+		pr_warn("%s: Invalid number of conventional zones %u / %u\n", /* [한국어] conventional zone이 전체 zone 수 이상이라는 것은 리포트가 모순됐다는 뜻 */
+			disk->disk_name, args->nr_conv_zones, disk->nr_zones); /* [한국어] 어느 디스크에서 몇 개 대 몇 개로 어긋났는지 남긴다 */
+		ret = -ENODEV; /* [한국어] 장치 자체가 쓸 수 없는 상태이므로 ENODEV로 거부한다 */
+		goto unfreeze; /* [한국어] 큐를 녹이고 자원을 되돌리는 공통 출구로 점프 */
 	}
 
 	disk->zone_capacity = args->zone_capacity; // 일반 ZNS zone capacity 설정
 	disk->last_zone_capacity = args->last_zone_capacity; // 마지막 ZNS zone capacity 설정
 	disk_set_zones_cond_array(disk, args->zones_cond); // 새 zone condition cache publish
-	args->zones_cond = NULL;
+	args->zones_cond = NULL; /* [한국어] 소유권이 disk로 넘어갔으므로 args 쪽 포인터를 지운다. 남겨 두면 실패 경로에서 두 번 해제된다 */
 
 	/*
 	 * Some devices can advertise zone resource limits that are larger than
@@ -4562,7 +4605,7 @@ static int disk_update_zone_resources(struct gendisk *disk,
 		lim.max_active_zones = 0; // 무제한으로 설정
 
 	if (!disk->zone_wplugs_pool) // plug pool이 없으면 limits만 갱신
-		goto commit;
+		goto commit; /* [한국어] plug 자원이 없는 장치는 mempool 크기 조정이 무의미하므로 커밋만 하고 끝낸다 */
 
 	/*
 	 * If the device has no limit on the maximum number of open and active
@@ -4581,18 +4624,18 @@ static int disk_update_zone_resources(struct gendisk *disk,
 	if (!lim.max_open_zones && !lim.max_active_zones) { // open/active 한도가 모두 없는 경우
 		if (pool_size < nr_seq_zones) // pool 크기가 sequential zone 수보다 작으면
 			lim.max_open_zones = pool_size; // max_open_zones를 pool 크기로 제한
-		else
+		else /* [한국어] pool이 seq zone 전부를 감당할 수 있으면 굳이 한도를 만들어 사용자를 제약할 필요가 없다 */
 			lim.max_open_zones = 0; // 그렇지 않으면 한도 없음
 	}
 
 commit:
-	ret = queue_limits_commit_update(q, &lim); // 새 queue limits를 blk-mq 및 NVMe driver에 반영
+	ret = queue_limits_commit_update(q, &lim); /* [한국어] 사본에 모아 둔 변경을 q->limits에 한 번에 반영한다. 여기서 검증에 걸리면(예: 다른 limits와 모순) 음수가 돌아온다 */
 
 unfreeze:
 	if (ret) // limits 갱신 실패 시 모든 zone 자원 해제
-		disk_free_zone_resources(disk);
+		disk_free_zone_resources(disk); /* [한국어] 커밋이 실패하면 방금 만든 zone 자원은 쓸 수 없으므로 전부 되돌린다 */
 
-	blk_mq_unfreeze_queue(q, memflags); // queue freeze 해제; NVMe I/O 재개
+	blk_mq_unfreeze_queue(q, memflags); /* [한국어] 큐를 다시 녹여 I/O 제출을 재개시킨다. 성공/실패 어느 쪽이든 반드시 지나가야 하는 지점 */
 
 	return ret;
 }
@@ -4644,13 +4687,13 @@ static int blk_revalidate_zone_cond(struct blk_zone *zone, unsigned int idx,
 		if (zone->type != BLK_ZONE_TYPE_CONVENTIONAL)
 			goto invalid_condition;
 		break;
-	case BLK_ZONE_COND_IMP_OPEN:
-	case BLK_ZONE_COND_EXP_OPEN:
-	case BLK_ZONE_COND_CLOSED:
-	case BLK_ZONE_COND_EMPTY:
-	case BLK_ZONE_COND_FULL:
-	case BLK_ZONE_COND_OFFLINE:
-	case BLK_ZONE_COND_READONLY:
+	case BLK_ZONE_COND_IMP_OPEN: /* [한국어] 컨트롤러가 write를 받아 암묵적으로 연 상태 */
+	case BLK_ZONE_COND_EXP_OPEN: /* [한국어] 호스트가 Zone Management Send(ZSA=0x3)로 명시적으로 연 상태 */
+	case BLK_ZONE_COND_CLOSED: /* [한국어] 열렸다가 닫힌 상태 — WP는 보존된다 */
+	case BLK_ZONE_COND_EMPTY: /* [한국어] WP가 zone 시작에 있는 상태 */
+	case BLK_ZONE_COND_FULL: /* [한국어] WP가 capacity에 도달한 상태 */
+	case BLK_ZONE_COND_OFFLINE: /* [한국어] 매체 결함으로 접근 불가 */
+	case BLK_ZONE_COND_READONLY: /* [한국어] 읽기 전용으로 전이된 상태 */
 		/* [한국어] 반대로 이 일곱 상태는 모두 write pointer의 존재를 전제하므로
 		 * sequential write required zone만 가질 수 있다.
 		 * 왜 conventional zone이 EMPTY나 FULL일 수 없는가: conventional zone은
@@ -4665,7 +4708,7 @@ static int blk_revalidate_zone_cond(struct blk_zone *zone, unsigned int idx,
 		 * 새 상태이거나 응답 손상이며, 어느 쪽이든 안전하게 다룰 수 없다. */
 		pr_warn("%s: Invalid zone condition 0x%X\n",
 			args->disk->disk_name, cond);
-		return -ENODEV;
+		return -ENODEV; /* [한국어] 커널이 안전하게 다룰 수 없는 상태값이므로 장치 자체를 포기한다 */
 	}
 
 	/* [한국어] 검증을 통과한 상태를 캐시 배열에 기록한다. 여기서 open 계열은
@@ -4681,7 +4724,7 @@ invalid_condition:
 	pr_warn("%s: Invalid zone condition 0x%x for type 0x%x\n",
 		args->disk->disk_name, cond, zone->type);
 
-	return -ENODEV;
+	return -ENODEV; /* [한국어] 타입과 상태의 조합이 모순이므로 이 장치를 zoned로 받아들이지 않는다 */
 }
 
 /*
@@ -4719,8 +4762,8 @@ static int blk_revalidate_conv_zone(struct blk_zone *zone, unsigned int idx,
 	 *  메타데이터나 예비 영역으로 쓰여 실제 쓰기 가능 용량이 더 작을 수 있다.) */
 	if (zone->capacity != zone->len) {
 		pr_warn("%s: Invalid conventional zone capacity\n",
-			disk->disk_name);
-		return -ENODEV;
+			disk->disk_name); /* [한국어] 어느 디스크에서 발생했는지 남긴다 */
+		return -ENODEV; /* [한국어] capacity != len인 conventional zone은 리포트가 모순된 것이므로 거부 */
 	}
 
 	/* [한국어] 마지막 zone이면 그 capacity를 따로 기록해 둔다. 마지막 zone은
@@ -4769,8 +4812,8 @@ static int blk_revalidate_seq_zone(struct blk_zone *zone, unsigned int idx,
 				   struct blk_revalidate_zone_args *args)
 {
 	struct gendisk *disk = args->disk;
-	struct blk_zone_wplug *zwplug;
-	unsigned int wp_offset;
+	struct blk_zone_wplug *zwplug; /* [한국어] 부분적으로 쓰인 zone에 새로 만들 write plug */
+	unsigned int wp_offset; /* [한국어] 이 zone의 WP가 zone 시작에서 떨어진 거리(섹터). 0이면 EMPTY, capacity 이상이면 FULL */
 
 	/*
 	 * Remember the capacity of the first sequential zone and check
@@ -4778,13 +4821,13 @@ static int blk_revalidate_seq_zone(struct blk_zone *zone, unsigned int idx,
 	 * smaller.
 	 */
 	if (!args->zone_capacity) // 첫 sequential zone의 capacity를 표준으로 삼음
-		args->zone_capacity = zone->capacity;
+		args->zone_capacity = zone->capacity; /* [한국어] 첫 sequential zone의 capacity를 기준값으로 삼는다. 이후 모든 zone이 이 값과 같아야 한다 */
 	if (disk_zone_is_last(disk, zone)) { // 마지막 zone은 더 작을 수 있음
-		args->last_zone_capacity = zone->capacity;
+		args->last_zone_capacity = zone->capacity; /* [한국어] 마지막 zone만은 더 작을 수 있으므로 별도로 보관한다 */
 	} else if (zone->capacity != args->zone_capacity) { // 가변 zone capacity는 ZNS 규격 위반
-		pr_warn("%s: Invalid variable zone capacity\n",
-			disk->disk_name);
-		return -ENODEV;
+		pr_warn("%s: Invalid variable zone capacity\n", /* [한국어] 중간 zone의 capacity가 제각각이면 커널의 zone 산술(번호 = 섹터 / zone 크기)이 성립하지 않는다 */
+			disk->disk_name); /* [한국어] 어느 디스크에서 발생했는지 남긴다 */
+		return -ENODEV; /* [한국어] 가변 capacity 장치는 지원하지 않으므로 거부 */
 	}
 
 	/*
@@ -4802,7 +4845,7 @@ static int blk_revalidate_seq_zone(struct blk_zone *zone, unsigned int idx,
 
 	zwplug = disk_get_or_alloc_zone_wplug(disk, zone->wp, GFP_NOIO); // 중간 WP를 가진 zone에 plug 생성
 	if (!zwplug) // plug 할당 실패 시 메모리 부족
-		return -ENOMEM;
+		return -ENOMEM; /* [한국어] plug 할당 실패 — 재검증 전체를 실패시켜 자원을 되돌리게 한다 */
 	disk_put_zone_wplug(zwplug); // 생성용 reference 해제
 
 	return 0;
@@ -4852,12 +4895,12 @@ static int blk_revalidate_zone_cb(struct blk_zone *zone, unsigned int idx,
 	 * zone이 몇 개였는가" 같은 누적 상태가 들어 있어, 콜백이 여러 번
 	 * 불려도 이어서 검증할 수 있다. */
 	struct blk_revalidate_zone_args *args = data;
-	struct gendisk *disk = args->disk;
+	struct gendisk *disk = args->disk; /* [한국어] 재검증 진행 상태(다음 기대 섹터, 누적 개수 등)를 담고 있는 gendisk */
 	/* [한국어] 기준 zone 크기. NVMe ZNS에서는 zns.c가 Identify Namespace의
 	 * Zone Size(zsze)를 섹터로 변환해 chunk_sectors에 넣어 둔 값이며,
 	 * 아래에서 "모든 zone이 이 크기인가"를 검증하는 기준이 된다. */
 	sector_t zone_sectors = disk->queue->limits.chunk_sectors;
-	int ret;
+	int ret; /* [한국어] 하위 검증 함수들의 결과 코드 */
 
 	/* Check for bad zones and holes in the zone report */
 	/* [한국어] 검증 1 — zone 사이에 구멍이 없는가.
@@ -4868,8 +4911,8 @@ static int blk_revalidate_zone_cb(struct blk_zone *zone, unsigned int idx,
 	 * 잘못 계산해 데이터가 깨지므로 장치를 포기한다. */
 	if (zone->start != args->sector) {
 		pr_warn("%s: Zone gap at sectors %llu..%llu\n",
-			disk->disk_name, args->sector, zone->start);
-		return -ENODEV;
+			disk->disk_name, args->sector, zone->start); /* [한국어] 어느 위치에서 몇 섹터만큼 구멍이 생겼는지 남긴다 */
+		return -ENODEV; /* [한국어] LBA 공간에 구멍이 있으면 zone 번호 계산이 어긋나므로 장치를 포기한다 */
 	}
 
 	/* [한국어] 검증 2 — zone이 네임스페이스 안에 있고 길이가 0이 아닌가.
@@ -4877,8 +4920,8 @@ static int blk_revalidate_zone_cb(struct blk_zone *zone, unsigned int idx,
 	 * 아래의 나눗셈/경계 계산에서 0으로 나누기나 무한 루프를 유발한다. */
 	if (zone->start >= get_capacity(disk) || !zone->len) {
 		pr_warn("%s: Invalid zone start %llu, length %llu\n",
-			disk->disk_name, zone->start, zone->len);
-		return -ENODEV;
+			disk->disk_name, zone->start, zone->len); /* [한국어] 문제가 된 zone의 시작과 길이를 남긴다 */
+		return -ENODEV; /* [한국어] 용량 밖이거나 길이 0인 zone은 이후 산술을 깨뜨리므로 거부 */
 	}
 
 	/*
@@ -4891,25 +4934,25 @@ static int blk_revalidate_zone_cb(struct blk_zone *zone, unsigned int idx,
 	 * 잘못 계산해 엉뚱한 zone에 쓰게 된다. */
 	if (!disk_zone_is_last(disk, zone)) {
 		if (zone->len != zone_sectors) {
-			pr_warn("%s: Invalid zoned device with non constant zone size\n",
-				disk->disk_name);
-			return -ENODEV;
+			pr_warn("%s: Invalid zoned device with non constant zone size\n", /* [한국어] 중간 zone의 크기가 기준과 다르면 "섹터 / zone 크기 = zone 번호" 공식이 무너진다 */
+				disk->disk_name); /* [한국어] 어느 디스크에서 발생했는지 남긴다 */
+			return -ENODEV; /* [한국어] 크기가 균일하지 않은 장치는 지원하지 않는다 */
 		}
 	} else if (zone->len > zone_sectors) { // 마지막 zone은 표준 크기를 초과할 수 없음
-		pr_warn("%s: Invalid zoned device with larger last zone size\n",
-			disk->disk_name);
-		return -ENODEV;
+		pr_warn("%s: Invalid zoned device with larger last zone size\n", /* [한국어] 마지막 zone은 작을 수는 있어도 클 수는 없다 */
+			disk->disk_name); /* [한국어] 어느 디스크에서 발생했는지 남긴다 */
+		return -ENODEV; /* [한국어] 마지막 zone이 기준보다 크면 리포트가 모순된 것이므로 거부 */
 	}
 
 	if (!zone->capacity || zone->capacity > zone->len) { // zone capacity는 0보다 크고 zone len 이하여야 함
-		pr_warn("%s: Invalid zone capacity\n",
-			disk->disk_name);
-		return -ENODEV;
+		pr_warn("%s: Invalid zone capacity\n", /* [한국어] capacity는 0보다 크고 zone 길이 이하여야 한다 */
+			disk->disk_name); /* [한국어] 어느 디스크에서 발생했는지 남긴다 */
+		return -ENODEV; /* [한국어] 쓸 수 있는 용량이 정의되지 않은 zone은 다룰 수 없다 */
 	}
 
 	/* Check zone condition */
 	ret = blk_revalidate_zone_cond(zone, idx, args); // zone condition 일관성 검증
-	if (ret)
+	if (ret) /* [한국어] condition 검증에서 실패하면 그 오류 코드를 그대로 전달한다 */
 		return ret;
 
 	/* Check zone type */
@@ -4918,28 +4961,33 @@ static int blk_revalidate_zone_cb(struct blk_zone *zone, unsigned int idx,
 	case BLK_ZONE_TYPE_CONVENTIONAL:
 		/* [한국어] 순차 제약이 없는 일반 영역. capacity == len 검증과
 		 * 개수 집계만 하면 된다 — write pointer를 추적할 필요가 없다.
-		 * NVMe ZNS에서 conventional zone은 선택 사항이며, 있으면 보통
-		 * 네임스페이스 앞부분에 메타데이터 용도로 배치된다. */
+		 * 주의: 리눅스 NVMe 드라이버는 이 타입을 만들지 않는다.
+		 * drivers/nvme/host/zns.c의 nvme_zone_parse_entry()가
+		 * (entry->zt & 0xf) != NVME_ZONE_TYPE_SEQWRITE_REQ(0x2)인 존을
+		 * -EINVAL로 거부하기 때문이다. 즉 이 분기는 SCSI/ZBC(SMR HDD)나
+		 * device-mapper 타깃처럼 conventional zone을 보고하는 장치용이다. */
 		ret = blk_revalidate_conv_zone(zone, idx, args);
 		break;
-	case BLK_ZONE_TYPE_SEQWRITE_REQ:
+	case BLK_ZONE_TYPE_SEQWRITE_REQ: /* [한국어] 순차 쓰기 필수 zone — NVMe ZNS에서 나타나는 유일한 타입 */
 		/* [한국어] 순차 쓰기 필수 zone — ZNS의 본체다. capacity 균일성을
 		 * 검증하고, 이미 부분적으로 쓰인 zone이면 write pointer를 추적할
 		 * plug를 미리 만들어 둔다. 재검증 직후 첫 쓰기가 오기 전에 WP를
 		 * 알고 있어야 순차성 검사를 할 수 있기 때문이다. */
 		ret = blk_revalidate_seq_zone(zone, idx, args);
 		break;
-	case BLK_ZONE_TYPE_SEQWRITE_PREF:
-	default:
+	case BLK_ZONE_TYPE_SEQWRITE_PREF: /* [한국어] 순차 쓰기 "권장" zone — 지원하지 않는다 */
+	default: /* [한국어] 커널이 모르는 타입값 */
 		/* [한국어] SEQWRITE_PREF("순차 쓰기 권장")는 지원하지 않는다.
 		 * 이 타입은 ZBC/ZAC(SMR HDD) 사양에는 있지만 "순차로 쓰면 좋고
 		 * 아니어도 동작한다"는 모호한 의미라, 커널이 write pointer를
-		 * 추적해야 할지 말지가 정해지지 않는다. NVMe ZNS는 이 타입을
-		 * 정의하지 않으므로 NVMe에서는 나타나지 않는다.
+		 * 추적해야 할지 말지가 정해지지 않는다. include/linux/nvme.h에는
+		 * NVME_ZONE_TYPE_SEQWRITE_REQ(0x2) 하나만 정의되어 있고, zns.c의
+		 * nvme_zone_parse_entry()가 그 외 타입을 모두 -EINVAL로 거부하므로
+		 * NVMe 경로에서는 이 분기에 도달할 수 없다.
 		 * 명시적으로 거부해, 어중간하게 지원하다 데이터를 잃는 것을 막는다. */
 		pr_warn("%s: Invalid zone type 0x%x at sectors %llu\n",
 			disk->disk_name, (int)zone->type, zone->start);
-		ret = -ENODEV;
+		ret = -ENODEV; /* [한국어] 지원하지 않는 타입이 하나라도 있으면 이 장치를 zoned로 받아들이지 않는다 */
 	}
 
 	/* [한국어] 이 zone까지 검증에 성공했으면 "다음 zone이 시작해야 할 위치"를
@@ -4986,33 +5034,39 @@ static int blk_revalidate_zone_cb(struct blk_zone *zone, unsigned int idx,
  * memalloc_noio_save/restore로 GFP_NOIO를 강제한다.
  * 실행 컨텍스트: 프로세스 컨텍스트 — BIO 기반 드라이버도 큐를 안전하게
  * freeze할 수만 있으면 사용 가능(커널 문서 명시).
- * 호출자: 드라이버의 probe/재검증 경로(NVMe라면 nvme_revalidate_zones
- * 계열).
+ * 호출자: 드라이버의 probe/네임스페이스 재검증 경로. NVMe에서는
+ * drivers/nvme/host/core.c의 nvme_update_ns_info_block()이
+ * blk_queue_is_zoned(ns->queue)일 때 blk_revalidate_disk_zones(ns->disk)
+ * 를 직접 호출한다(core.c:2858 부근).
  * 피호출자: disk_revalidate_zone_resources(), disk->fops->report_zones()
- * → nvme_report_zones(), disk_update_zone_resources(),
- * disk_free_zone_resources()(실패 시 정리).
+ * → NVMe면 core.c의 static nvme_report_zones() → zns.c의
+ * nvme_ns_report_zones()(Zone Management Receive 0x7A로 존 디스크립터
+ * 수신), disk_update_zone_resources(), disk_free_zone_resources()(실패
+ * 시 정리).
  * 에러 경로: zoned 큐가 아니거나 capacity/zone_sectors가 무효하면 조기
  * 반환; report_zones 실패나 zone 누락, limits 커밋 실패는 모두
  * free_resources 라벨로 모여 disk_free_zone_resources()로 자원을
  * 되돌린 뒤 에러를 반환.
  *
  * 호출 체인:
- *   nvme_revalidate_zones() 등 드라이버 → [blk_revalidate_disk_zones] →
- *   disk->fops->report_zones() → nvme_report_zones() →
- *   blk_revalidate_zone_cb() → disk_update_zone_resources()
+ *   nvme_update_ns_info_block() 등 드라이버 →
+ *   [blk_revalidate_disk_zones] → disk->fops->report_zones() →
+ *   (NVMe) nvme_report_zones() → nvme_ns_report_zones() →
+ *   disk_report_zone() → blk_revalidate_zone_cb() →
+ *   disk_update_zone_resources()
  */
 int blk_revalidate_disk_zones(struct gendisk *disk)
 {
 	struct request_queue *q = disk->queue; // gendisk의 request_queue
-	sector_t zone_sectors = q->limits.chunk_sectors; // ZNS zone size
-	sector_t capacity = get_capacity(disk); // NVMe namespace capacity
+	sector_t zone_sectors = q->limits.chunk_sectors; /* [한국어] zoned 장치에서 chunk_sectors는 곧 zone size(섹터 단위). NVMe는 zns.c nvme_update_zone_info()에서 lim->chunk_sectors = nvme_lba_to_sect(head, zi->zone_size)로 채운다 */
+	sector_t capacity = get_capacity(disk); /* [한국어] 디스크 전체 용량(512B 섹터). 모든 zone이 이 용량을 빈틈없이 덮는지 마지막에 검증한다 */
 	struct blk_revalidate_zone_args args = { }; // 모든 필드 0/NULL로 초기화 - sector 커서와 zones_cond 등은 콜백이 채워나감
-	unsigned int memflags, noio_flag;
-	struct blk_report_zones_args rep_args = {
+	unsigned int memflags, noio_flag; /* [한국어] memflags: 큐 freeze 상태 저장용. noio_flag: memalloc_noio_save()가 돌려준 이전 플래그 */
+	struct blk_report_zones_args rep_args = { /* [한국어] 드라이버의 report_zones 훅에 넘길 인자 묶음 */
 		.cb = blk_revalidate_zone_cb, // report_zones가 zone마다 부를 검증 콜백 등록
 		.data = &args, // 콜백에 진행 상태(args)를 전달하기 위한 연결
 	};
-	int ret = -ENOMEM;
+	int ret = -ENOMEM; /* [한국어] 기본값을 -ENOMEM으로 둬서, 자원 할당 전에 빠져나가는 경로가 있어도 의미 있는 오류가 남게 한다 */
 
 	/* [한국어] 드라이버가 zoned로 표시하지 않은 큐에 이 함수를 부른 것은
 	 * 드라이버 버그다. WARN_ON_ONCE로 스택 트레이스를 남겨 어느 드라이버인지
@@ -5020,9 +5074,8 @@ int blk_revalidate_disk_zones(struct gendisk *disk)
 	if (WARN_ON_ONCE(!blk_queue_is_zoned(q)))
 		return -EIO;
 
-	/* [한국어] 용량이 0이면 zone을 하나도 만들 수 없다. 네임스페이스가 아직
-	 * 준비되지 않았거나(NVMe에서 Identify가 실패해 capacity 0으로 남은 경우)
-	 * 이미 제거되는 중이다. */
+	/* [한국어] 용량이 0이면 zone을 하나도 만들 수 없다. 장치가 아직 준비되지
+	 * 않았거나 이미 제거되는 중이라는 뜻이므로 조기 반환한다. */
 	if (!capacity)
 		return -ENODEV;
 
@@ -5035,12 +5088,17 @@ int blk_revalidate_disk_zones(struct gendisk *disk)
 	 * (disk_zone_no). 이 최적화가 성립하려면 zone 크기가 2의 거듭제곱이어야
 	 * 한다. I/O 제출 경로마다 64비트 나눗셈을 하는 것은 비싸기 때문에 이
 	 * 제약을 두고, 만족하지 못하는 장치는 아예 거부한다.
-	 * NVMe ZNS 사양은 Zone Size를 2의 거듭제곱으로 강제하지 않지만, 실제
-	 * 제품은 거의 모두 그렇게 만든다. 예외적인 장치는 여기서 걸린다. */
+	 * NVMe의 경우 이 검사에 걸릴 일이 없다 — drivers/nvme/host/zns.c의
+	 * nvme_query_zone_info()가 Identify Namespace(CSI=ZNS)에서 읽은
+	 * lbafe[lbaf].zsze에 이미 is_power_of_2() 검사를 걸어, 통과하지 못하면
+	 * "invalid zone size" 경고와 함께 -ENODEV로 네임스페이스를 거부하기
+	 * 때문이다. 즉 블록 계층까지 올라오는 NVMe ZNS 네임스페이스의 zone
+	 * 크기는 항상 2의 거듭제곱이고, disk_zone_no()의 시프트 최적화가 늘
+	 * 성립한다. 이 검사는 다른 종류의 zoned 장치를 위한 방어선이다. */
 	if (!zone_sectors || !is_power_of_2(zone_sectors)) {
 		pr_warn("%s: Invalid non power of two zone size (%llu)\n",
-			disk->disk_name, zone_sectors);
-		return -ENODEV;
+			disk->disk_name, zone_sectors); /* [한국어] 어느 디스크의 zone 크기가 문제였는지 남긴다 */
+		return -ENODEV; /* [한국어] 시프트 최적화가 성립하지 않는 장치는 지원하지 않는다 */
 	}
 
 	/*
@@ -5058,7 +5116,7 @@ int blk_revalidate_disk_zones(struct gendisk *disk)
 	/* [한국어] zones_cond 배열과 (blk-mq 기반이거나 zone append 에뮬레이션이
 	 * 필요하면) plug 해시/mempool/워크큐를 준비한다. */
 	ret = disk_revalidate_zone_resources(disk, &args);
-	if (ret) {
+	if (ret) { /* [한국어] 해시/mempool/워크큐/zones_cond 준비 실패 */
 		/* [한국어] 실패 시에도 NOIO 상태는 반드시 복원해야 한다. 복원하지
 		 * 않으면 이 태스크가 이후 영원히 I/O 없는 할당만 하게 된다. */
 		memalloc_noio_restore(noio_flag);
@@ -5067,9 +5125,11 @@ int blk_revalidate_disk_zones(struct gendisk *disk)
 
 	/* [한국어] ★ 실제 장치 질의 ★
 	 * 0번 섹터부터 UINT_MAX개(사실상 전부)의 zone을 보고받는다. NVMe에서는
-	 * nvme_report_zones()로 이어져 Zone Management Receive(옵코드 0x7A)
-	 * 커맨드가 발행되고, 응답의 zone descriptor마다 blk_revalidate_zone_cb()가
-	 * 호출되어 검증과 상태 캐시 구축이 이뤄진다.
+	 * core.c의 static nvme_report_zones() → zns.c의 nvme_ns_report_zones()로
+	 * 이어져 Zone Management Receive(오프코드 0x7A, ZRA=NVME_ZRA_ZONE_REPORT,
+	 * ZRASF=NVME_ZRASF_ZONE_REPORT_ALL) 커맨드가 발행되고, 응답의 zone
+	 * descriptor마다 nvme_zone_parse_entry() → disk_report_zone() →
+	 * blk_revalidate_zone_cb()가 호출되어 검증과 상태 캐시 구축이 이뤄진다.
 	 * zone이 수만 개면 이 호출 하나가 상당히 오래 걸린다 — 드라이버가 내부적으로
 	 * 여러 번의 커맨드로 나눠 받는다. */
 	ret = disk->fops->report_zones(disk, 0, UINT_MAX, &rep_args);
@@ -5078,14 +5138,14 @@ int blk_revalidate_disk_zones(struct gendisk *disk)
 	 * 그대로 둔다. */
 	if (!ret) {
 		pr_warn("%s: No zones reported\n", disk->disk_name);
-		ret = -ENODEV;
+		ret = -ENODEV; /* [한국어] 보고된 zone이 0개면 zoned 선언과 모순이므로 오류로 승격한다 */
 	}
 	/* [한국어] 장치 질의가 끝났으므로 NOIO 상태를 원복한다. 아래 정리 코드는
 	 * 일반 할당 컨텍스트에서 실행해도 안전하다. */
 	memalloc_noio_restore(noio_flag);
 
-	if (ret <= 0)
-		goto free_resources;
+	if (ret <= 0) /* [한국어] 0 이하 == 보고 실패 또는 zone 없음 */
+		goto free_resources; /* [한국어] 준비했던 자원을 되돌리는 공통 출구로 점프 */
 
 	/*
 	 * If zones where reported, make sure that the entire disk capacity
@@ -5099,9 +5159,9 @@ int blk_revalidate_disk_zones(struct gendisk *disk)
 	 * 통과했더라도 이 전체 검사가 마지막 안전망 역할을 한다. */
 	if (args.sector != capacity) {
 		pr_warn("%s: Missing zones from sector %llu\n",
-			disk->disk_name, args.sector);
-		ret = -ENODEV;
-		goto free_resources;
+			disk->disk_name, args.sector); /* [한국어] 어느 위치부터 zone 정보가 비었는지 남긴다 */
+		ret = -ENODEV; /* [한국어] 용량 전체가 zone으로 덮이지 않으면 그 영역의 I/O를 안전하게 다룰 수 없다 */
+		goto free_resources; /* [한국어] 자원 정리 경로로 점프 */
 	}
 
 	/* [한국어] 모든 검증 통과 — 수집한 정보(zone 개수, conventional zone 수,
@@ -5109,13 +5169,13 @@ int blk_revalidate_disk_zones(struct gendisk *disk)
 	 * 상태로 만든다. 이 함수가 성공해야 비로소 I/O가 zone 규칙을 지키며
 	 * 흐를 수 있다. */
 	ret = disk_update_zone_resources(disk, &args);
-	if (ret)
-		goto free_resources;
+	if (ret) /* [한국어] 어느 디스크의 재검증이 실패했는지 한 줄로 남긴다 — 위의 구체적 경고와 짝을 이룬다 */
+		goto free_resources; /* [한국어] queue_limits 커밋에 실패했으므로 자원 정리 경로로 점프 */
 
 	return 0;
 
 free_resources:
-	pr_warn("%s: failed to revalidate zones\n", disk->disk_name);
+	pr_warn("%s: failed to revalidate zones\n", disk->disk_name); /* [한국어] 어느 디스크의 재검증이 실패했는지 한 줄로 남긴다 — 위의 구체적 경고와 짝을 이룬다 */
 
 	kfree(args.zones_cond); // 할당된 zones_cond 메모리 해제
 	memflags = blk_mq_freeze_queue(q); // 자원 해제 중 queue freeze
@@ -5176,13 +5236,13 @@ int blk_zone_issue_zeroout(struct block_device *bdev, sector_t sector,
 			   sector_t nr_sects, gfp_t gfp_mask)
 {
 	struct gendisk *disk = bdev->bd_disk; // target block_device
-	int ret;
+	int ret; /* [한국어] blkdev_issue_zeroout()의 결과. -EOPNOTSUPP면 하드웨어 오프로드가 없다는 뜻이라 폴백 경로로 간다 */
 
 	if (WARN_ON_ONCE(!bdev_is_zoned(bdev))) // zoned 장치가 아니면 zeroout 의미 없음
-		return -EIO;
+		return -EIO; /* [한국어] zoned가 아닌 장치에 이 함수를 부른 것은 호출자 버그 */
 
 	ret = blkdev_issue_zeroout(bdev, sector, nr_sects, gfp_mask, // hardware offload zeroout 시도
-				   BLKDEV_ZERO_NOFALLBACK);
+				   BLKDEV_ZERO_NOFALLBACK); /* [한국어] NOFALLBACK — write zeroes 커맨드로만 시도하고, 지원하지 않으면 zero-page 쓰기로 대체하지 말라는 뜻 */
 	if (ret != -EOPNOTSUPP) // hardware offload 성공/다른 오류는 즉시 반환
 		return ret;
 
@@ -5192,7 +5252,7 @@ int blk_zone_issue_zeroout(struct block_device *bdev, sector_t sector,
 	 * pointer to the correct current value.
 	 */
 	ret = disk->fops->report_zones(disk, sector, 1, NULL); // zeroout 실패로 WP가 어긋났을 때 Report Zones로 재확인
-	if (ret != 1)
+	if (ret != 1) /* [한국어] 한 zone을 요청했으니 정확히 1이 돌아와야 한다. 그 외는 리포트 실패 */
 		return ret < 0 ? ret : -EIO; // Report Zones 결과가 비정상이면 오류 반환
 	// zeroout 실패로 WP 어긋남 -> Report Zones로 재확인
 
@@ -5234,10 +5294,10 @@ static void queue_zone_wplug_show(struct blk_zone_wplug *zwplug,
 				  struct seq_file *m)
 {
 	unsigned int zwp_wp_offset, zwp_flags;
-	unsigned int zwp_zone_no, zwp_ref;
-	unsigned int zwp_bio_list_size;
-	enum blk_zone_cond zwp_cond;
-	unsigned long flags;
+	unsigned int zwp_zone_no, zwp_ref; /* [한국어] zone 번호와 참조 카운트를 담을 스냅숏 변수. 락 안에서 한 번에 읽어 락 밖에서 출력한다 */
+	unsigned int zwp_bio_list_size; /* [한국어] 대기 중인 BIO 개수 스냅숏 */
+	enum blk_zone_cond zwp_cond; /* [한국어] zone condition 스냅숏 */
+	unsigned long flags; /* [한국어] plug 락을 IRQ-safe하게 잡기 위한 플래그 저장소 */
 
 	spin_lock_irqsave(&zwplug->lock, flags); // 아래 필드들을 일관된 스냅샷으로 읽기 위해 잠금
 	zwp_zone_no = zwplug->zone_no; // debugfs 출력용 ZID(zone 번호) 스냅샷
@@ -5248,10 +5308,10 @@ static void queue_zone_wplug_show(struct blk_zone_wplug *zwplug,
 	zwp_bio_list_size = bio_list_size(&zwplug->bio_list); // debugfs 출력용 대기 중인 BIO 개수 스냅샷
 	spin_unlock_irqrestore(&zwplug->lock, flags); // 스냅샷 완료 후 즉시 잠금 해제 - seq_printf는 락 밖에서 수행
 
-	seq_printf(m,
-		"Zone no: %u, flags: 0x%x, ref: %u, cond: %s, wp ofst: %u, pending BIO: %u\n",
-		zwp_zone_no, zwp_flags, zwp_ref, blk_zone_cond_str(zwp_cond),
-		zwp_wp_offset, zwp_bio_list_size);
+	seq_printf(m, /* [한국어] seq_printf는 내부에서 잠들 수 있으므로 반드시 락 밖에서 호출해야 한다 */
+		"Zone no: %u, flags: 0x%x, ref: %u, cond: %s, wp ofst: %u, pending BIO: %u\n", /* [한국어] plug 하나의 상태를 한 줄로 요약한 debugfs 출력 포맷 */
+		zwp_zone_no, zwp_flags, zwp_ref, blk_zone_cond_str(zwp_cond), /* [한국어] 앞서 락 안에서 떠 둔 값들만 사용해 일관된 한 시점의 스냅숏을 보여준다 */
+		zwp_wp_offset, zwp_bio_list_size); /* [한국어] WP 오프셋과 대기 BIO 개수 — 이 두 값이 zone 직렬화 상태를 진단하는 핵심 지표다 */
 }
 
 /*
@@ -5280,9 +5340,9 @@ static void queue_zone_wplug_show(struct blk_zone_wplug *zwplug,
 int queue_zone_wplugs_show(void *data, struct seq_file *m)
 {
 	struct request_queue *q = data;
-	struct gendisk *disk = q->disk;
-	struct blk_zone_wplug *zwplug;
-	unsigned int i;
+	struct gendisk *disk = q->disk; /* [한국어] plug 해시가 매달린 gendisk */
+	struct blk_zone_wplug *zwplug; /* [한국어] 해시 순회 커서 */
+	unsigned int i; /* [한국어] 해시 버킷 인덱스 */
 
 	if (!disk->zone_wplugs_hash) // plug hash가 없으면 debugfs에 아무것도 출력하지 않음
 		return 0;
@@ -5290,9 +5350,9 @@ int queue_zone_wplugs_show(void *data, struct seq_file *m)
 	rcu_read_lock(); // RCU read-side로 plug hash 순회
 	for (i = 0; i < disk_zone_wplugs_hash_size(disk); i++) // 모든 hash bucket 순회
 		hlist_for_each_entry_rcu(zwplug, &disk->zone_wplugs_hash[i], // 각 bucket의 충돌 체인 순회
-					 node)
+					 node) /* [한국어] node 필드로 체인에 연결되어 있음을 매크로에 알려 준다 */
 			queue_zone_wplug_show(zwplug, m); // debugfs에 plug 상태 출력
-	rcu_read_unlock();
+	rcu_read_unlock(); /* [한국어] 순회가 끝났으므로 RCU 읽기 구간 종료 */
 
 	return 0;
 }
