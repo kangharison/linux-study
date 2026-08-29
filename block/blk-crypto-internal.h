@@ -230,7 +230,8 @@ extern const struct blk_crypto_mode blk_crypto_modes[];
  * /sys/block/<disk>/queue/crypto/ 경로에서 확인할 수 있도록 sysfs 속성
  * 그룹을 등록한다. 실제 속성 정의는 block/blk-crypto-sysfs.c에 있다.
  * 실행 컨텍스트: 디스크 등록(add_disk) 경로의 프로세스 컨텍스트.
- * caller: add_disk() -> disk_add_events() 계열 초기화 경로(추정).
+ * caller: 드라이버가 인라인 암호화 프로파일을 등록할 때(blk_crypto_register,
+ * block/blk-crypto-profile.c). 이 트리에서 실제로 등록하는 블록 드라이버는 없다.
  * callee: kobject_init_and_add(), sysfs_create_group() 등(구현부에서 호출).
  * 에러 처리: 실패 시 디스크 등록 자체가 실패하거나 sysfs 노드 없이 진행될 수 있음.
  *
@@ -248,7 +249,7 @@ int blk_crypto_sysfs_register(struct gendisk *disk);
  *
  * blk_crypto_sysfs_register()로 만든 sysfs 그룹을 디스크 제거 시점에 정리한다.
  * 실행 컨텍스트: 디스크 해제(del_gendisk) 경로의 프로세스 컨텍스트.
- * caller: del_gendisk() 계열 정리 경로(추정).
+ * caller: 큐 해제 경로. 등록한 드라이버가 없으면 호출되지 않는다.
  * callee: kobject_put() 등 sysfs 해제 API(구현부에서 호출).
  *
  * 호출 체인:
@@ -294,7 +295,8 @@ void bio_crypt_dun_increment(u64 dun[BLK_CRYPTO_DUN_ARRAY_SIZE],
  * 하나의 SQ(Submission Queue) 엔트리에 두 개의 서로 다른 keyslot을 지정할
  * 방법이 없으므로 반드시 이 시점에 걸러야 한다.
  * 실행 컨텍스트: 프로세스 컨텍스트(제출 경로) 또는 blk-mq softirq(병합 경로).
- * caller: blk_mq_submit_bio() -> blk_crypto_rq_bio_prep() 이전 단계(추정).
+ * caller: submit_bio 경로에서 bio에 암호화 컨텍스트가 붙어 있을 때
+ * (block/blk-crypto.c의 __blk_crypto_bio_prep 경유).
  * callee: 없음(비교 연산 위주).
  *
  * 호출 체인:
@@ -344,7 +346,7 @@ bool bio_crypt_ctx_mergeable(struct bio_crypt_ctx *bc1, unsigned int bc1_bytes,
  * NVMe 연결점: back merge가 성립하면 새 커맨드를 추가로 SQ에 넣는 대신 기존
  * request의 섹터 범위만 확장하면 되므로, doorbell(큐 알림) 횟수가 줄어든다.
  * 실행 컨텍스트: blk-mq/블록 계층의 bio 병합 경로(프로세스 또는 softirq).
- * caller: blk_attempt_bio_merge()(block/blk-merge.c, 추정).
+ * caller: ll_back_merge_fn() / ll_front_merge_fn() (block/blk-merge.c).
  * callee: bio_crypt_ctx_mergeable().
  *
  * 호출 체인:
@@ -374,7 +376,7 @@ static inline bool bio_crypt_ctx_back_mergeable(struct request *req,
  * 이후 blk_crypto_rq_get_keyslot()이 여전히 동일 키를 사용해도 되는지의
  * 근거가 되는 검사이다.
  * 실행 컨텍스트: blk-mq/블록 계층의 bio 병합 경로.
- * caller: blk_attempt_bio_merge()(block/blk-merge.c, 추정).
+ * caller: ll_back_merge_fn() / ll_front_merge_fn() (block/blk-merge.c).
  * callee: bio_crypt_ctx_mergeable().
  *
  * 호출 체인:
@@ -405,7 +407,7 @@ static inline bool bio_crypt_ctx_front_mergeable(struct request *req,
  * 더 많은 섹터가 매핑되며, 이미 확보된 keyslot(req->crypt_keyslot)이 그대로
  * 재사용되어 추가 keyslot 프로그래밍 비용이 들지 않는다.
  * 실행 컨텍스트: I/O 스케줄러/plug 병합 경로(프로세스 컨텍스트, 주로 blk_finish_plug 등).
- * caller: blk_attempt_plug_merge()(block/blk-merge.c, 추정).
+ * caller: blk_rq_merge_ok() (block/blk-merge.c).
  * callee: bio_crypt_ctx_mergeable().
  *
  * 호출 체인:
@@ -432,7 +434,7 @@ static inline bool bio_crypt_ctx_merge_rq(struct request *req,
  * 막을 수 있다. NVMe 연결점: crypt_ctx가 NULL이면 이 request는 평문 I/O로
  * 취급되어 nvme_queue_rq()가 암호화 관련 필드를 채우지 않는다.
  * 실행 컨텍스트: request 할당 경로의 프로세스 또는 softirq 컨텍스트.
- * caller: blk_mq_get_request()(block/blk-mq.c, 추정).
+ * caller: blk_mq_rq_ctx_init() (block/blk-mq.c) — request 초기화 시 항상 호출.
  * callee: 없음(단순 대입).
  *
  * 호출 체인:
@@ -511,7 +513,8 @@ static inline bool blk_crypto_rq_has_keyslot(struct request *rq)
  * 컨트롤러 고유 inline encryption 필드)로 변환되어 SQ 엔트리에 실린다.
  * 실행 컨텍스트: 프로세스 컨텍스트(제출 경로), keyslot 부족 시 대기(sleep)할 수 있음.
  * caller: __blk_crypto_rq_get_keyslot()(block/blk-crypto.c).
- * callee: profile->ll_ops.keyslot_program() 등 드라이버 콜백(추정, blk-crypto-profile.c 경유).
+ * callee: blk_crypto_get_keyslot() (block/blk-crypto-profile.c)를 거쳐
+ * profile->ll_ops.keyslot_program() 드라이버 콜백.
  * 에러 처리: keyslot이 모두 사용 중이면 idle이 생길 때까지 대기하거나 실패를 반환.
  *
  * 호출 체인:
@@ -558,7 +561,8 @@ void blk_crypto_put_keyslot(struct blk_crypto_keyslot *slot);
  * 다른 목적으로 그 keyslot 번호를 재사용해도 이전 키가 남아있지 않다.
  * 실행 컨텍스트: 프로세스 컨텍스트(ioctl 처리 경로), 슬립 가능.
  * caller: blk_crypto_evict_key()(공개 API, block/blk-crypto.c).
- * callee: profile->ll_ops.keyslot_evict() 등 드라이버 콜백(추정).
+ * callee: __blk_crypto_evict_key() (block/blk-crypto-profile.c)를 거쳐
+ * profile->ll_ops.keyslot_evict() 드라이버 콜백.
  *
  * 호출 체인:
  *   blk_crypto_evict_key() -> [__blk_crypto_evict_key] -> (드라이버 keyslot_evict)
@@ -604,7 +608,7 @@ bool __blk_crypto_cfg_supported(struct blk_crypto_profile *profile,
  * NVMe 연결점: 사용자공간이 NVMe SED(Self-Encrypting Drive)의 키를 추가/제거/
  *              검증하는 시스템 콜이 이 함수를 거쳐 최종적으로 keyslot과 매핑된다.
  * 실행 컨텍스트: 사용자 프로세스의 ioctl() 시스템 콜 컨텍스트, 슬립 가능.
- * caller: block_ioctl()/blkdev_ioctl() 계열 디스패처(추정).
+ * caller: fscrypt 등 상위 계층이 키를 폐기할 때.
  * callee: 드라이버/profile의 wrapped key 관련 콜백(구현부 참고).
  * 에러 처리: 지원하지 않는 cmd이면 -ENOTTY, 인자 검증 실패 시 -EINVAL 등을 반환.
  *
@@ -627,7 +631,7 @@ int blk_crypto_ioctl(struct block_device *bdev, unsigned int cmd,
  * false를 반환하여 상위 호출자가 blk_crypto_fallback_bio_prep()(소프트웨어
  * 경로)으로 우회하도록 유도한다.
  * 실행 컨텍스트: bio 제출 경로의 프로세스 컨텍스트.
- * caller: __blk_crypto_submit_bio()(block/blk-crypto.c, 추정).
+ * caller: block/blk-crypto.c의 bio 제출 준비 경로.
  * callee: blk_crypto_config_supported_natively() -> __blk_crypto_cfg_supported().
  *
  * 호출 체인:
@@ -953,7 +957,7 @@ void __bio_crypt_free_ctx(struct bio *bio);
  *
  * bio에 crypt_ctx가 있을 때만 실제 해제 함수를 호출한다.
  * 실행 컨텍스트: bio 해제 경로 어디서든 호출 가능.
- * caller: bio 해제 관련 코드(block/bio.c, 추정).
+ * caller: bio_uninit() (block/bio.c) — bio가 해제될 때 암호화 컨텍스트 정리.
  * callee: __bio_crypt_free_ctx().
  *
  * 호출 체인:
@@ -981,7 +985,8 @@ static inline void bio_crypt_free_ctx(struct bio *bio)
  * NVMe 연결점: front merge 이후 rq의 시작 DUN이 bio의 DUN과 같아야, SQ에
  * 삽입될 최종 커맨드의 IV가 실제 물리 데이터 위치와 일치한다.
  * 실행 컨텍스트: blk-mq/블록 계층의 bio 병합 경로.
- * caller: blk_attempt_bio_merge()(block/blk-merge.c, front merge 성립 시, 추정).
+ * caller: bio_attempt_front_merge() (block/blk-merge.c) — front merge로
+ * request의 시작 LBA가 앞당겨질 때 DUN 기준점도 함께 앞당긴다.
  * callee: 없음(memcpy 직접 수행).
  *
  * 호출 체인:
@@ -1044,7 +1049,8 @@ blk_status_t __blk_crypto_rq_get_keyslot(struct request *rq);
  * NVMe 연결점: BLK_STS_OK가 아니면 NVMe 커맨드를 SQ에 넣기 전에 request가
  * 실패로 처리되어 상위(파일시스템 등)에 에러가 반환된다.
  * 실행 컨텍스트: request 제출 경로의 프로세스 컨텍스트.
- * caller: blk_mq_get_request() 이후 큐 제출 직전 경로(추정) -> nvme_queue_rq() 이전.
+ * caller: blk_mq_submit_bio() (block/blk-mq.c) — request를 만든 직후,
+ * 드라이버로 내려보내기 전에 keyslot을 확보한다.
  * callee: blk_crypto_rq_is_encrypted(), __blk_crypto_rq_get_keyslot().
  * 에러 처리: 실패 시 BLK_STS_* 값을 그대로 호출자에 전파.
  *
@@ -1091,7 +1097,8 @@ void __blk_crypto_rq_put_keyslot(struct request *rq);
  * CONFIG_BLK_INLINE_ENCRYPTION이 꺼진 빌드에서는 blk_crypto_rq_has_keyslot()이
  * 항상 false이므로 이 안의 호출이 죽은 코드로 제거된다.
  * 실행 컨텍스트: request 완료 경로(blk_mq_end_request 등), 인터럽트 컨텍스트 가능.
- * caller: blk_mq_end_request()(block/blk-mq.c, 추정).
+ * caller: blk_update_request() / blk_complete_request() (block/blk-mq.c).
+ * 마지막 bio_endio() 전에 반드시 반납해야 상위의 키 폐기와 경쟁하지 않는다.
  * callee: blk_crypto_rq_has_keyslot(), __blk_crypto_rq_put_keyslot().
  *
  * 호출 체인:
@@ -1134,7 +1141,7 @@ void __blk_crypto_free_request(struct request *rq);
  * 암호화된 request에 대해서만 정리 로직을 호출한다. 평문 request는 애초에
  * crypt_ctx/crypt_keyslot이 없으므로 정리할 것이 없다.
  * 실행 컨텍스트: request 해제 경로 어디서든(blk_mq_free_request 등).
- * caller: blk_mq_free_request()(block/blk-mq.c, 추정).
+ * caller: __blk_mq_free_request() (block/blk-mq.c) — request 해제 시 정리.
  * callee: blk_crypto_rq_is_encrypted(), __blk_crypto_free_request().
  *
  * 호출 체인:
@@ -1200,7 +1207,7 @@ int __blk_crypto_rq_bio_prep(struct request *rq, struct bio *bio,
  * -> SQ 제출(doorbell) 경로에서 NVMe 컨트롤러가 사용할 keyslot/DUN 정보가
  * 최종 확정된다.
  * 실행 컨텍스트: blk_mq_submit_bio() 등 request-bio 결합 경로의 프로세스 컨텍스트.
- * caller: blk_mq_get_request()/blk_mq_submit_bio() 계열(추정).
+ * caller: blk_mq_rq_ctx_init() (block/blk-mq.c) — request 초기화 시 항상 호출.
  * callee: bio_has_crypt_ctx(), __blk_crypto_rq_bio_prep().
  *
  * 호출 체인:
@@ -1269,7 +1276,7 @@ bool blk_crypto_fallback_bio_prep(struct bio *bio);
  * NVMe 연결점: NVMe SED가 지원하지 않는 cipher 모드라도 커널 crypto API가
  * 지원하면 이 함수를 통해 소프트웨어로 처리할 수 있는 준비를 갖춘다.
  * 실행 컨텍스트: 프로세스 컨텍스트(키 최초 사용 시점), 슬립 가능(메모리 할당).
- * caller: blk_crypto_start_using_key()(공개 API, block/blk-crypto.c 경유, 추정).
+ * caller: blk_crypto_start_using_key() (block/blk-crypto.c 공개 API).
  * callee: crypto_alloc_skcipher() 등(구현부 참고).
  * 에러 처리: 해당 cipher_str을 crypto API가 지원하지 않으면 -ENOPKG 반환.
  *
@@ -1290,7 +1297,7 @@ int blk_crypto_fallback_start_using_mode(enum blk_crypto_mode_num mode_num);
  * NVMe 연결점: 하드웨어 keyslot 축출(__blk_crypto_evict_key)과 나란히 호출되어,
  * native/fallback 두 경로 모두에서 키 흔적을 지운다.
  * 실행 컨텍스트: 프로세스 컨텍스트(키 폐기 요청 경로), 슬립 가능.
- * caller: blk_crypto_evict_key()(공개 API, block/blk-crypto.c 경유, 추정).
+ * caller: blk_crypto_evict_key() (block/blk-crypto.c 공개 API).
  * callee: crypto_free_skcipher() 등(구현부 참고).
  *
  * 호출 체인:

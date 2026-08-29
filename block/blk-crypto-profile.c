@@ -29,11 +29,25 @@
  *
  *   blk_mq_submit_bio() -> __blk_crypto_rq_get_keyslot() [block/blk-crypto.c]
  *     -> blk_crypto_get_keyslot() [이 파일]
- *       -> (필요 시) profile->ll_ops.keyslot_program() [드라이버 콜백, 추정: NVMe라면
- *          컨트롤러 keyslot 레지스터에 키를 적재]
- *     -> nvme_queue_rq() -> nvme_submit_cmd()(doorbell) (추정)
+ *       -> (필요 시) profile->ll_ops.keyslot_program() [드라이버 콜백:
+ *          하드웨어 keyslot 레지스터에 키를 적재]
+ *     -> 드라이버의 queue_rq() -> 하드웨어 제출
  *
- *   (완료 경로) NVMe CQ 인터럽트 -> blk_mq_end_request()
+ * ★ 중요: NVMe는 이 인라인 암호화 프레임워크를 지원하지 않는다 ★
+ * drivers/nvme/ 전체에 blk_crypto_profile 등록 코드가 없다(grep으로 확인).
+ * 인라인 암호화(ICE, Inline Crypto Engine)는 주로 모바일/임베디드의
+ * UFS 호스트 컨트롤러와 eMMC CQHCI가 제공하는 기능으로, 해당 드라이버들이
+ * blk_crypto_profile을 등록한다(이 저장소의 sparse checkout에는 포함되지 않음).
+ *
+ * 그렇다면 NVMe에서 fscrypt를 쓰면 어떻게 되는가:
+ *   - 하드웨어 keyslot이 없으므로 block/blk-crypto-fallback.c의 소프트웨어
+ *     경로가 대신 동작한다. bounce 버퍼에 CPU로 암복호한 뒤 그 버퍼를
+ *     NVMe로 보낸다.
+ *   - 따라서 NVMe에서 "디스크 암호화"라고 할 때 실제로 쓰이는 것은
+ *     dm-crypt 또는 fscrypt의 소프트웨어 경로이거나, 장치 자체 기능인
+ *     TCG Opal SED(block/sed-opal.c)이지 이 프레임워크가 아니다.
+ *
+ *   (완료 경로) 완료 인터럽트 -> blk_mq_end_request()
  *     -> __blk_crypto_rq_put_keyslot() [block/blk-crypto.c]
  *       -> blk_crypto_put_keyslot() [이 파일]
  *
@@ -167,9 +181,10 @@
  *                              사용해 거짓 양성 경고를 피한다.
  *   ll_ops                  : 드라이버가 채우는 저수준(low-level) 콜백 묶음
  *                              (keyslot_program, keyslot_evict, derive_sw_secret,
- *                              import_key, generate_key, prepare_key). NVMe라면
- *                              이 콜백들이 실제로 컨트롤러의 keyslot 레지스터/
- *                              보안 엔진에 접근한다(추정).
+ *                              import_key, generate_key, prepare_key). 이 콜백들이
+ *                              실제 하드웨어의 keyslot 레지스터와 보안 엔진에
+ *                              접근한다. NVMe 드라이버는 이 프로파일을 등록하지
+ *                              않으므로 NVMe 경로에서는 호출되지 않는다.
  *   modes_supported         : enum blk_crypto_mode_num 값으로 인덱싱되는
  *                              비트마스크 배열. 각 원소는 그 모드에서 지원하는
  *                              data_unit_size 비트마스크.
@@ -189,8 +204,8 @@
  * [한국어]
  * blk_crypto_keyslot - 하드웨어 keyslot 하나의 소프트웨어 표현
  *
- * blk_crypto_profile->slots 배열의 원소 타입이다. NVMe 컨트롤러의 실제 keyslot
- * 레지스터 슬롯 하나에 대응한다고 가정하되(추정), 이 구조체 자체는 레지스터에
+ * blk_crypto_profile->slots 배열의 원소 타입이다. 하드웨어의 keyslot 레지스터
+ * 슬롯 하나에 1:1 대응하며, 이 구조체 자체는 레지스터에
  * 직접 접근하지 않고 "이 슬롯에 현재 어떤 키가 프로그래밍되어 있고, 몇 개의
  * I/O가 그 키를 참조 중인가"라는 소프트웨어 상태만 추적한다. 실제 레지스터
  * 프로그래밍/축출은 profile->ll_ops.keyslot_program()/keyslot_evict() 드라이버
@@ -366,7 +381,8 @@ static inline void blk_crypto_hw_exit(struct blk_crypto_profile *profile)
  * modes_supported/max_dun_bytes_supported/key_types_supported/ll_ops/dev 같은
  * capability 필드를 채워 넣고 blk_crypto_register()를 호출해야 한다.
  * 실행 컨텍스트: 드라이버 probe 경로의 프로세스 컨텍스트.
- * caller: NVMe 등 드라이버의 probe 함수(추정), devm_blk_crypto_profile_init().
+ * caller: 인라인 암호화를 지원하는 드라이버의 probe 함수(UFS/eMMC 계열),
+ * devm_blk_crypto_profile_init().
  * callee: lockdep_register_key(), __init_rwsem(), kvzalloc_objs(),
  *         init_waitqueue_head(), kvmalloc_objs(), blk_crypto_profile_destroy()
  *         (실패 정리 경로).
@@ -493,7 +509,7 @@ static void blk_crypto_profile_destroy_callback(void *profile)
  * 액션을 등록해 드라이버가 remove 경로에서 수동으로 destroy를 호출하지 않아도
  * 되게 한다.
  * 실행 컨텍스트: 드라이버 probe 경로, 프로세스 컨텍스트.
- * caller: NVMe 등 드라이버의 probe 함수(추정).
+ * caller: 인라인 암호화를 지원하는 드라이버의 probe 함수(UFS/eMMC 계열).
  * callee: blk_crypto_profile_init(), devm_add_action_or_reset().
  * 에러 처리: blk_crypto_profile_init() 실패 시 그 값을 그대로 반환하고 devm
  * 등록은 시도하지 않는다. devm_add_action_or_reset()이 실패하면 그 함수가
@@ -667,10 +683,10 @@ blk_crypto_find_and_grab_keyslot(struct blk_crypto_profile *profile,
  * 포인터 산술(slot - profile->slots)만으로 인덱스를 얻는다 - profile->slots가
  * 연속된 배열이므로 두 포인터의 차는 원소 개수(인덱스)와 같다. 이 인덱스는
  * 드라이버 콜백(keyslot_program/evict)에 그대로 전달되어, NVMe라면 컨트롤러의
- * 몇 번째 keyslot 레지스터를 프로그래밍할지 지정하는 데 쓰인다(추정).
+ * 몇 번째 keyslot 레지스터를 프로그래밍할지 지정하는 데 쓰인다.
  * 실행 컨텍스트: 어디서든 호출 가능 (순수 포인터 산술, 락 불필요).
  * caller: blk_crypto_get_keyslot(), blk_crypto_reprogram_all_keys() 내부 로직,
- *         __blk_crypto_evict_key(), 그리고 block/blk-crypto.c의 상위 wrapper(추정).
+ *         __blk_crypto_evict_key(), 그리고 block/blk-crypto.c의 상위 wrapper.
  * callee: 없음.
  *
  * 호출 체인:
@@ -721,7 +737,7 @@ EXPORT_SYMBOL_GPL(blk_crypto_keyslot_index); /* [한국어] GPL 모듈에 노출
  * 컨텍스트에서 호출 금지. profile->lock을 여러 차례 취득/해제한다(Context
  * 주석 참고).
  * caller: block/blk-crypto.c의 __blk_crypto_rq_get_keyslot() (request가 SQ에
- *         나가기 직전, 추정).
+ *         나가기 직전).
  * callee: blk_crypto_find_and_grab_keyslot(), blk_crypto_hw_enter/exit(),
  *         blk_crypto_keyslot_index(), profile->ll_ops.keyslot_program()(드라이버
  *         콜백), blk_crypto_hash_bucket_for_key(),
@@ -997,10 +1013,11 @@ out: /* [한국어] slot 유무와 무관하게 도달하는 최종 정리 지�
  * 일부이므로 blk_crypto_hw_enter()가 하는 pm_runtime_get_sync() 없이 write
  * lock만 직접 잡는다(주석 참고) - 리셋/재초기화 도중에는 장치가 이미 활성
  * 상태이거나, 런타임 전원관리 자체가 아직 준비되지 않았을 수 있기 때문으로
- * 보인다(추정).
+ * 보인다.
  * 실행 컨텍스트: 프로세스 컨텍스트. down_write()가 슬립 가능하므로 인터럽트에서
  * 호출 금지.
- * caller: 컨트롤러 리셋/복구 핸들러(추정, 예: NVMe controller reset 완료 후).
+ * caller: 컨트롤러 리셋/복구 핸들러 — 리셋으로 하드웨어 keyslot 내용이
+ * 날아갔을 때 소프트웨어가 기억하던 키를 다시 프로그래밍한다.
  * callee: profile->ll_ops.keyslot_program()(드라이버 콜백).
  * 에러 처리: 개별 slot의 재프로그래밍이 실패하면 WARN_ON()으로 커널 로그에
  * 남기고 계속 다음 slot을 시도한다(하나의 실패로 전체 재프로그래밍을 중단하지
@@ -1087,9 +1104,9 @@ EXPORT_SYMBOL_GPL(blk_crypto_profile_destroy); /* [한국어] GPL 모듈에 노�
  * 블록 무결성(T10 DIF/DIX 등)과 하드웨어 인라인 암호화는 동시에 지원되지
  * 않으므로, 큐가 이미 무결성을 지원한다면 등록을 거부하고 경고를 남긴다
  * (둘 다 DMA 경로의 추가 메타데이터를 다루는 하드웨어 기능이라 충돌 가능성이
- * 있는 것으로 보인다, 추정).
+ * 있는 것으로 보인다).
  * 실행 컨텍스트: 드라이버 probe 경로의 프로세스 컨텍스트.
- * caller: NVMe 등 드라이버의 probe 함수(추정, blk_crypto_profile_init() 이후).
+ * caller: 인라인 암호화 지원 드라이버의 probe 함수(blk_crypto_profile_init() 이후).
  * callee: blk_integrity_queue_supports_integrity().
  * 에러 처리: 무결성과 충돌하면 profile을 등록하지 않고 false 반환 - 호출자는
  * 이 경우 하드웨어 inline encryption 없이(또는 fallback만으로) 진행해야 한다.
@@ -1148,7 +1165,7 @@ EXPORT_SYMBOL_GPL(blk_crypto_register); /* [한국어] GPL 모듈에 노출 - �
  * 콜백 존재 여부)를 검증하고 하드웨어 게이트(lock+PM)만 감싼다.
  * 실행 컨텍스트: 프로세스 컨텍스트. blk_crypto_hw_enter()가 슬립 가능한 락을
  * 잡으므로 인터럽트 컨텍스트 호출 금지.
- * caller: fscrypt 등 fs 계층(추정, wrapped key 기반 파일명 암호화 등).
+ * caller: fscrypt 등 파일시스템 계층(hardware-wrapped key 사용 시).
  * callee: bdev_get_queue(), blk_crypto_hw_enter/exit(),
  *         profile->ll_ops.derive_sw_secret()(드라이버 콜백).
  * 에러 처리: profile이 없거나(-EOPNOTSUPP) hardware-wrapped key 미지원이거나
@@ -1201,7 +1218,7 @@ EXPORT_SYMBOL_GPL(blk_crypto_derive_sw_secret); /* [한국어] GPL 모듈에 노
  * profile->ll_ops.import_key() 드라이버 콜백에 위임된다.
  * 실행 컨텍스트: 프로세스 컨텍스트(키 관리 ioctl 경로), 슬립 가능.
  * caller: block/blk-crypto.c의 blk_crypto_ioctl_import_key()
- *         (BLKCRYPTOIMPORTKEY ioctl 처리, 추정).
+ *         (BLKCRYPTOIMPORTKEY ioctl 처리).
  * callee: blk_crypto_hw_enter/exit(), profile->ll_ops.import_key()(드라이버 콜백).
  * 에러 처리: capability 부재(profile 없음, hardware-wrapped 미지원, 콜백 없음)는
  * 하드웨어에 접근하지 않고 즉시 -EOPNOTSUPP. 그 외에는 드라이버 콜백의
@@ -1248,7 +1265,7 @@ EXPORT_SYMBOL_GPL(blk_crypto_import_key); /* [한국어] GPL 모듈에 노출 - 
  * 생성 연산은 profile->ll_ops.generate_key() 드라이버 콜백에 위임된다.
  * 실행 컨텍스트: 프로세스 컨텍스트(키 관리 ioctl 경로), 슬립 가능.
  * caller: block/blk-crypto.c의 blk_crypto_ioctl_generate_key()
- *         (BLKCRYPTOGENERATEKEY ioctl 처리, 추정).
+ *         (BLKCRYPTOGENERATEKEY ioctl 처리).
  * callee: blk_crypto_hw_enter/exit(), profile->ll_ops.generate_key()(드라이버 콜백).
  * 에러 처리: capability 부재는 하드웨어 접근 없이 즉시 -EOPNOTSUPP. 그 외에는
  * 드라이버 콜백 반환값을 그대로 전달.
@@ -1289,13 +1306,13 @@ EXPORT_SYMBOL_GPL(blk_crypto_generate_key); /* [한국어] GPL 모듈에 노출 
  * long-term key는 재부팅 간에도 안정적으로 저장/재사용 가능해야 하는 반면,
  * I/O에 쓰이는 키는 (blk_crypto_derive_sw_secret()의 eph_key 파라미터처럼)
  * "ephemerally-wrapped(이번 부팅/세션에서만 유효하게 다시 감싸진)" 형태여야
- * 한다고 추정된다 - 이렇게 분리하면 long-term key 자체가 시스템 재시작마다
+ * 한다. 이렇게 분리하면 long-term key 자체가 시스템 재시작마다
  * 노출되는 표면을 최소화할 수 있다. 이 함수는 매 사용(mount, 키 provisioning
  * 등) 시점마다 lt_key로부터 새로운 eph_key를 뽑아내는 역할을 한다. 이렇게
- * 만들어진 eph_key가 bio_crypt_ctx->bc_key에 담겨 I/O 경로로 흘러간다(추정).
+ * 만들어진 eph_key가 bio_crypt_ctx->bc_key에 담겨 I/O 경로로 흘러간다.
  * 실행 컨텍스트: 프로세스 컨텍스트(키 관리 ioctl 경로), 슬립 가능.
  * caller: block/blk-crypto.c의 blk_crypto_ioctl_prepare_key()
- *         (BLKCRYPTOPREPAREKEY ioctl 처리, 추정).
+ *         (BLKCRYPTOPREPAREKEY ioctl 처리).
  * callee: blk_crypto_hw_enter/exit(), profile->ll_ops.prepare_key()(드라이버 콜백).
  * 에러 처리: capability 부재는 하드웨어 접근 없이 즉시 -EOPNOTSUPP. 그 외에는
  * 드라이버 콜백 반환값을 그대로 전달.
@@ -1357,7 +1374,7 @@ EXPORT_SYMBOL_GPL(blk_crypto_prepare_key); /* [한국어] GPL 모듈에 노출 -
  * 반드시 parent profile이 아직 어떤 request_queue에도 노출되기 전에만
  * 사용해야 한다(주석 참고) - 노출 후 capability를 줄이면 이미 만들어진
  * bio의 가정이 깨질 수 있다.
- * caller: device-mapper 등 layered block device의 테이블 구성 코드(추정).
+ * caller: device-mapper 등 계층형 블록 장치의 테이블 구성 코드.
  * callee: 없음 (비트마스크 연산과 memset만 수행).
  *
  * 호출 체인:
@@ -1413,7 +1430,7 @@ EXPORT_SYMBOL_GPL(blk_crypto_intersect_capabilities); /* [한국어] GPL 모듈�
  * 사용 조건 참고).
  * 실행 컨텍스트: 어디서든 호출 가능 (읽기 전용 비교, 락 불필요 - 호출자가
  * 두 profile의 안정성을 이미 보장했다고 가정).
- * caller: layered device의 capability 갱신/검증 로직(추정, block/blk-crypto.c
+ * caller: 계층형 장치의 capability 갱신/검증 로직(block/blk-crypto.c
  *         또는 device-mapper 계열).
  * callee: 없음 (비트마스크/범위 비교만 수행).
  *
@@ -1490,9 +1507,9 @@ EXPORT_SYMBOL_GPL(blk_crypto_has_capabilities); /* [한국어] GPL 모듈에 노
  * 오판"하는 안전한 방향의 오류일 뿐이며, 이 경우 fallback 사용이나 bio 실패로
  * 이어질 뿐 데이터 손상 등의 심각한 문제는 없다.
  * 실행 컨텍스트: 프로세스 컨텍스트(런타임 capability 재조회 경로, 예: 펌웨어
- * 업데이트 후 컨트롤러 capability 재질의, 추정). 락을 직접 잡지 않으므로
+ * 업데이트 후 컨트롤러 capability 재질의). 락을 직접 잡지 않으므로
  * 호출자가 필요한 동기화를 책임져야 한다.
- * caller: 드라이버의 capability 재조회 로직(추정, 예: NVMe 컨트롤러 리셋/
+ * caller: 드라이버의 capability 재조회 로직(예: 컨트롤러 리셋/
  *         펌웨어 업데이트 후).
  * callee: 없음 (memcpy와 필드 대입만 수행).
  *

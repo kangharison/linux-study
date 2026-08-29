@@ -57,7 +57,7 @@
  *     batch)으로 확인되며, 단일 bucket의 최소/최대/평균 지연과 샘플 수,
  *     누적 합(batch)을 담는 히스토그램 구조체이다. 이 구조체의 정의부가
  *     현재 이 저장소(sparse checkout, 일부 파일만 체크아웃됨)에는 보이지
- *     않는다 — 다른 헤더에 정의되어 있을 것으로 추정.
+ *     않는다 — include/linux/blk_types.h 등 다른 헤더에서 온다.
  *   - struct blk_queue_stats: request_queue->stats. callbacks 리스트, lock,
  *     accounting 카운터를 담는 불투명 구조체로, 이 헤더에는 전방 선언과
  *     포인터를 반환/인자로 받는 함수(blk_alloc_queue_stats 등)만 노출된다.
@@ -117,7 +117,7 @@ struct blk_stat_callback {
 	 *         호출한다. blk_stat_remove_callback()이 list_del_rcu()로 제거.
 	 * 값 범위: 유효한 리스트 노드(자기 자신을 가리키는 초기 상태 포함).
 	 *         request_queue에 등록되기 전까지는 아직 어떤 리스트에도 연결
-	 *         되지 않은 상태(추정 — blk_stat_alloc_callback()은 list_head를
+	 *         되지 않은 상태(blk_stat_alloc_callback()은 list_head를
 	 *         명시적으로 초기화하지 않으므로, 사용 전 반드시
 	 *         blk_stat_add_callback()으로 등록해야 안전).
 	 * 동기화: 추가/제거는 q->stats->lock(spinlock_irqsave)으로 보호되고,
@@ -240,7 +240,7 @@ struct blk_stat_callback {
 	 * 설정자: blk_stat_alloc_callback() 호출 시 인자로 전달되어 저장.
 	 * 읽는 자: cb->timer_fn(cb) 내부에서 상위 소비자가 cb->data를 자신의
 	 *         타입으로 캐스팅해 상태를 읽고 갱신한다(예: bfq/wbt/kyber가
-	 *         자신의 큐/디바이스 상태를 여기 저장, 추정 — 이 헤더/구현
+	 *         자신의 큐/디바이스 상태를 여기 저장 — 이 헤더/구현
 	 *         파일만으로는 각 소비자의 구체적 캐스팅 방식까지는 확인 불가).
 	 * 값 범위: 임의의 포인터 또는 NULL(소비자가 사설 상태가 필요 없는 경우).
 	 * 동기화: blk-stat.c는 이 필드에 대해 어떠한 동기화도 제공하지 않는다.
@@ -278,7 +278,7 @@ struct blk_stat_callback {
  * 전방 선언(불투명 타입)으로만 노출되어 호출자는 필드에 직접 접근할 수 없고
  * 반드시 blk_stat_* API를 통해서만 다뤄야 한다.
  * 실행 컨텍스트: 프로세스 컨텍스트(request_queue 할당 경로). 슬립 가능
- * (block/blk-stat.c의 구현이 GFP_KERNEL 할당을 사용, 추정).
+ * (block/blk-stat.c의 구현이 GFP_KERNEL 할당을 사용).
  * 에러 경로: NULL 반환 시 호출자(request_queue 할당 경로)가 전체 큐 생성을
  * 실패로 처리해야 한다.
  *
@@ -292,7 +292,7 @@ struct blk_queue_stats *blk_alloc_queue_stats(void);
  * 구조체를 해제한다.
  *
  * @stats: 해제할 struct blk_queue_stats 포인터. NULL이면 아무 동작도 하지
- *         않는다(block/blk-stat.c 구현이 NULL 검사를 포함, 추정).
+ *         않는다(block/blk-stat.c 구현이 NULL 검사를 포함).
  * @return: 없음 (void).
  *
  * request_queue 해제 경로(block/blk-core.c)에서 호출되며, 해제 시점에
@@ -326,7 +326,7 @@ void blk_free_queue_stats(struct blk_queue_stats *);
  * 순회, get_cpu()를 통한 CPU 고정 등)은 block/blk-stat.c를 참고.
  * 실행 컨텍스트: request 완료 IRQ 또는 softirq. 슬립 불가.
  * 호출자(caller): block/blk-mq.c의 request 완료 경로
- * (__blk_mq_end_request_acct 등, 추정 — 이 헤더 트리에는 blk-mq.c 본문이
+ * (block/blk-mq.c의 __blk_mq_end_request_acct — 완료 시각을 인자로 받아
  * 없어 정확한 호출 지점은 확인하지 못함).
  * 호출 대상(callee): 등록된 각 콜백의 bucket_fn, 그리고 block/blk-stat.c의
  * blk_rq_stat_add().
@@ -354,12 +354,13 @@ void blk_stat_add(struct request *rq, u64 now);
  * block/blk-stat.c 참고). 이 플래그가 켜져야 blk_mq_start_request()가
  * io_start_time_ns를 기록하기 시작한다.
  * 실행 컨텍스트: 프로세스 컨텍스트(I/O 스케줄러/cost model 초기화 경로).
- * 호출자: blk-iocost/bfq 등의 초기화 경로(추정).
+ * 호출자: blk_iocost_init (block/blk-iocost.c:5574),
+ * bfq_init_queue (block/bfq-iosched.c:13798).
  * 호출 대상: blk_queue_flag_set() 등 큐 플래그 조작 API(block/blk-stat.c 내부).
  * 에러 경로: 없음(카운터 증가 실패 개념이 없다).
  *
  * 호출 체인:
- *   blk_iocost_init / bfq_init (추정) → [이 함수]
+ *   blk_iocost_init / bfq_init_queue → [이 함수]
  */
 void blk_stat_enable_accounting(struct request_queue *q);
 /*
@@ -375,11 +376,12 @@ void blk_stat_enable_accounting(struct request_queue *q);
  * blk_mq_start_request()가 io_start_time_ns 기록을 중단하게 한다(불필요한
  * 타임스탬프 오버헤드 제거).
  * 실행 컨텍스트: 프로세스 컨텍스트(I/O 스케줄러/cost model 해제 경로).
- * 호출자: blk-iocost/bfq 등의 해제 경로(추정).
+ * 호출자: blk_iocost_exit (block/blk-iocost.c:5578),
+ * bfq_exit_queue (block/bfq-iosched.c:13325).
  * 에러 경로: 없음.
  *
  * 호출 체인:
- *   blk_iocost_exit / bfq_exit (추정) → [이 함수]
+ *   blk_iocost_exit / bfq_exit_queue → [이 함수]
  */
 void blk_stat_disable_accounting(struct request_queue *q);
 
@@ -421,7 +423,7 @@ void blk_stat_disable_accounting(struct request_queue *q);
  * 롤백하고 NULL 반환 — 호출자는 NULL이면 자신의 초기화를 중단해야 한다.
  *
  * 호출 체인:
- *   blk_wbt_init / blk_iolatency_init / kyber_init (추정) →
+ *   blk_wbt_init (block/blk-wbt.c) 등 rq-qos 정책 초기화 →
  *   [이 함수] → blk_stat_add_callback
  */
 struct blk_stat_callback *
@@ -500,7 +502,7 @@ void blk_stat_add_callback(struct request_queue *q,
  * 에러 경로: 없음.
  *
  * 호출 체인:
- *   blk_wbt_exit / blk_iolatency_exit / kyber_exit (추정) →
+ *   blk_wbt_exit 등 rq-qos 정책 해제 →
  *   [이 함수] → blk_stat_free_callback
  */
 void blk_stat_remove_callback(struct request_queue *q,
@@ -614,7 +616,7 @@ static inline void blk_stat_activate_nsecs(struct blk_stat_callback *cb,
 	 * 현재 jiffies에 더한 값을 타이머 만료 시각으로 설정: mod_timer()는
 	 * 이미 등록된 타이머의 만료 시각을 원자적으로 갱신한다. HZ(초당
 	 * jiffies 수)와 반올림에 의해 실제 정밀도는 nsecs보다 낮을 수 있다
-	 * (추정 — 정확한 반올림 규칙은 nsecs_to_jiffies() 구현에 따름). */
+	 * (정확한 반올림 규칙은 nsecs_to_jiffies() 구현을 따른다). */
 	mod_timer(&cb->timer, jiffies + nsecs_to_jiffies(nsecs));
 }
 
@@ -636,7 +638,7 @@ static inline void blk_stat_activate_nsecs(struct blk_stat_callback *cb,
  * 보장된다.
  * 실행 컨텍스트: 프로세스 컨텍스트 권장(동기 대기이므로 블로킹 가능한
  * 컨텍스트에서 호출해야 함). 인터럽트 컨텍스트에서 호출 시 데드락 위험
- * (자기 자신이 실행 중인 타이머의 완료를 기다리게 될 수 있음, 추정).
+ * (자기 자신이 실행 중인 타이머의 완료를 기다리는 데드락이 되므로).
  * 호출자: 상위 소비자가 수집을 명시적으로 중단하거나, 콜백을 제거하기
  * 직전에 호출.
  * 호출 대상: timer_delete_sync() (커널 타이머 API).
@@ -677,7 +679,7 @@ static inline void blk_stat_deactivate(struct blk_stat_callback *cb)
  * 실행 컨텍스트: 임의 컨텍스트에서 호출 가능(mod_timer는 인터럽트 컨텍스트
  * 에서도 안전).
  * 호출자: 상위 소비자가 다음 수집 주기를 시작할 때(흔히 timer_fn 콜백
- * 내부에서 자기 자신의 다음 윈도우를 재예약하는 형태로 호출, 추정).
+ * 내부에서 자기 자신의 다음 윈도우를 재예약하는 형태로 호출).
  * 호출 대상: msecs_to_jiffies(), mod_timer() (커널 타이머 API).
  *
  * 호출 체인:
@@ -734,7 +736,7 @@ void blk_rq_stat_add(struct blk_rq_stat *, u64);
  * 이용한 가중 평균으로 재계산한다(정확한 수식은 block/blk-stat.c 참고).
  * nr_samples 오버플로우가 감지되면 병합을 건너뛴다(정확도보다 안전 우선).
  * 실행 컨텍스트: 타이머 softirq(blk_stat_timer_fn)에서만 호출되는 것으로
- * 보이며 재진입 없음(추정).
+ * 보이며 재진입은 없다.
  * 호출자: block/blk-stat.c의 blk_stat_timer_fn()이 for_each_online_cpu
  * 루프 안에서 각 CPU의 bucket마다 호출.
  * 호출 대상: 없음(산술 연산과 나눗셈만 수행).

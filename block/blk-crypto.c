@@ -21,21 +21,32 @@
  * 이 파일은 블록 계층 I/O 경로에서 submit_bio()와 blk_mq_submit_bio() 사이에
  * 위치한다. 구체적인 호출 체인은 다음과 같다:
  *
- *   [native 경로]
+ *   [native 경로 — 하드웨어 인라인 암호화 엔진이 있는 장치]
  *   fs/fscrypt → bio_crypt_set_ctx() → submit_bio()
  *     → __blk_crypto_submit_bio()  [이 파일]
- *       → blk_mq_submit_bio() → blk_mq_get_request()
+ *       → blk_mq_submit_bio()
  *         → __blk_crypto_rq_get_keyslot() [이 파일]
- *           → nvme_queue_rq() → nvme_submit_cmd(doorbell)
+ *           → 드라이버의 queue_rq() → 하드웨어가 전송 중 암복호 수행
  *
- *   [fallback 경로]
+ *   [fallback 경로 — 인라인 엔진이 없는 장치]
  *   __blk_crypto_submit_bio() [이 파일]
  *     → blk_crypto_fallback_bio_prep() [block/blk-crypto-fallback.c]
- *       → (crypto API로 소프트웨어 암호화/복호화)
- *         → 재submit → blk_mq_submit_bio → nvme_queue_rq → doorbell
+ *       → (crypto API로 CPU가 bounce 버퍼에 암복호)
+ *         → 재submit → blk_mq_submit_bio → 드라이버 queue_rq
+ *
+ * ★ NVMe와 이 파일의 관계 ★
+ * NVMe 드라이버는 blk_crypto_profile을 등록하지 않는다(drivers/nvme/ 전체에
+ * 관련 코드 없음). 인라인 암호화 엔진(ICE)은 주로 모바일/임베디드의 UFS
+ * 호스트 컨트롤러와 eMMC CQHCI가 제공하는 기능이다.
+ * 따라서 NVMe 장치에서 fscrypt를 사용하면 항상 위의 [fallback 경로]를 타며,
+ * CPU가 bounce 버퍼에 암복호한 결과를 NVMe로 전송한다. 이 파일의 keyslot
+ * 관련 함수들은 NVMe 경로에서 "fallback keyslot"(소프트웨어 키 슬롯)을
+ * 다루게 되고, 하드웨어 레지스터에는 접근하지 않는다.
+ * (NVMe에서 흔히 쓰는 장치 측 암호화는 별개의 기능인 TCG Opal SED이며,
+ *  block/sed-opal.c가 담당한다.)
  *
  * 실행 컨텍스트: 주요 함수들은 프로세스 컨텍스트(file I/O path)에서 실행되며,
- * keyslot 반환 및 crypt_ctx 해제는 인터럽트 컨텍스트(NVMe CQ 핸들러)에서도 호출될 수 있다.
+ * keyslot 반환 및 crypt_ctx 해제는 완료 인터럽트 컨텍스트에서도 호출될 수 있다.
  *
  * === 타 모듈과의 연결 ===
  * 의존하는 모듈:
@@ -438,7 +449,7 @@ bool bio_crypt_dun_is_contiguous(const struct bio_crypt_ctx *bc,
  *          false = 키 불일치 -> 병합 불가
  *
  * bc_key 포인터를 직접 비교하여 동일 키인지 판단한다. 같은 키여야
- * NVMe 컨트롤러의 동일 keyslot으로 처리할 수 있어 bio 병합이 의미있다.
+ * 동일한 keyslot으로 처리할 수 있어 bio 병합이 의미 있다.
  * 실행 컨텍스트: 프로세스 컨텍스트 (bio merge 결정 경로)
  * caller: bio_crypt_ctx_mergeable(), bio_crypt_rq_ctx_compatible()
  * callee: 없음
@@ -464,7 +475,7 @@ static bool bio_crypt_ctx_compatible(struct bio_crypt_ctx *bc1,
  * @return: true = 호환 (같은 키 또는 둘 다 비암호화); false = 불호환
  *
  * blk_mq bio merge 경로에서 기존 request에 새 bio를 병합할 때 암호화 키가
- * 동일한지 확인한다. 다른 키면 NVMe 컨트롤러가 다른 keyslot을 요구하므로 불가.
+ * 동일한지 확인한다. 다른 키면 다른 keyslot이 필요하므로 병합할 수 없다.
  * 실행 컨텍스트: 프로세스 컨텍스트 (blk_mq_submit_bio의 merge attempt)
  * caller: blk_mq_bio_fits_rq() 등 merge 결정 함수
  * callee: bio_crypt_ctx_compatible()
@@ -505,7 +516,7 @@ bool bio_crypt_rq_ctx_compatible(struct request *rq, struct bio *bio)
 bool bio_crypt_ctx_mergeable(struct bio_crypt_ctx *bc1, unsigned int bc1_bytes,
 			     struct bio_crypt_ctx *bc2)
 {
-	if (!bio_crypt_ctx_compatible(bc1, bc2)) /* [한국어] 키 불일치 또는 암호화 유무 불일치; NVMe keyslot 불일치로 병합 불가 */
+	if (!bio_crypt_ctx_compatible(bc1, bc2)) /* [한국어] 키 불일치 또는 암호화 유무 불일치 — 하나의 keyslot으로 처리할 수 없어 병합 불가 */
 		return false; /* [한국어] 조기 반환: 키 레벨에서 이미 병합 거부 */
 
 	return !bc1 || bio_crypt_dun_is_contiguous(bc1, bc1_bytes, bc2->bc_dun); /* [한국어] bc1==NULL이면 둘 다 비암호화이므로 DUN 검사 없이 true; 암호화된 경우 DUN 연속성까지 확인 */
@@ -529,13 +540,15 @@ bool bio_crypt_ctx_mergeable(struct bio_crypt_ctx *bc1, unsigned int bc1_bytes,
  *
  * 호출 체인:
  *   blk_mq_get_request() → [__blk_crypto_rq_get_keyslot]
- *     → blk_crypto_get_keyslot() → (NVMe 드라이버 콜백)
+ *     → blk_crypto_get_keyslot() → (드라이버 keyslot_program 콜백,
+ *       NVMe에서는 fallback 프로파일이므로 소프트웨어 슬롯)
  */
 blk_status_t __blk_crypto_rq_get_keyslot(struct request *rq)
 {
 	return blk_crypto_get_keyslot(rq->q->crypto_profile,
 				      rq->crypt_ctx->bc_key,
-				      &rq->crypt_keyslot); /* [한국어] q->crypto_profile: NVMe 컨트롤러의 keyslot 관리자;
+				      &rq->crypt_keyslot); /* [한국어] q->crypto_profile: 이 큐의 keyslot 관리자.
+								   * NVMe에서는 blk-crypto-fallback이 등록한 소프트웨어 프로파일이다;
 				                              bc_key: 프로그래밍할 키;
 				                              &rq->crypt_keyslot: 할당된 슬롯 핸들 저장 위치;
 				                              실패 시 BLK_STS_RESOURCE로 request 재큐 */
@@ -556,7 +569,7 @@ blk_status_t __blk_crypto_rq_get_keyslot(struct request *rq)
  * callee: blk_crypto_put_keyslot() (block/blk-crypto-profile.c)
  *
  * 호출 체인:
- *   NVMe CQ 핸들러 → blk_mq_free_request() → [__blk_crypto_rq_put_keyslot]
+ *   완료 인터럽트 핸들러 → blk_mq_free_request() → [__blk_crypto_rq_put_keyslot]
  *     → blk_crypto_put_keyslot()
  */
 void __blk_crypto_rq_put_keyslot(struct request *rq)
@@ -586,7 +599,7 @@ void __blk_crypto_rq_put_keyslot(struct request *rq)
 void __blk_crypto_free_request(struct request *rq)
 {
 	/* The keyslot, if one was needed, should have been released earlier. */
-	if (WARN_ON_ONCE(rq->crypt_keyslot)) /* [한국어] keyslot이 아직 해제 안됨 = 커널 버그; NVMe I/O 완료 경로에서 put_keyslot이 누락된 상황 */
+	if (WARN_ON_ONCE(rq->crypt_keyslot)) /* [한국어] keyslot이 아직 해제되지 않았다 = 커널 버그. 완료 경로에서 put_keyslot이 누락된 상황 */
 		__blk_crypto_rq_put_keyslot(rq); /* [한국어] 안전망: 누락된 keyslot 강제 반환; 이후 동일 슬롯에 다른 키가 프로그래밍되기 전에 정리 */
 
 	mempool_free(rq->crypt_ctx, bio_crypt_ctx_pool); /* [한국어] bio에서 복제된 crypt_ctx를 mempool에 반환; 다음 bio_crypt_set_ctx()에서 재사용 */
@@ -906,7 +919,7 @@ int blk_crypto_start_using_key(struct block_device *bdev,
  * @key:  제거할 blk_crypto_key; 이후 메모리 해제 전에 호출 필수
  * @return: void; 에러는 pr_warn_ratelimited로 로깅만 하고 호출자에게 전달하지 않음
  *
- * NVMe 컨트롤러의 hardware keyslot 또는 software fallback keyslot에서 키를
+ * 하드웨어 keyslot 또는 software fallback keyslot에서 키를
  * 제거한다. 이 함수는 슬립할 수 있으며, 해당 키를 사용하는 모든 I/O가 완료된
  * 후에만 호출해야 한다. 키를 사용한 모든 block_device에 대해 각각 호출해야 한다.
  * 에러 발생 시에도 키는 keyslot 관리 구조에서 unlink되므로 호출자는 key memory를
@@ -922,7 +935,7 @@ int blk_crypto_start_using_key(struct block_device *bdev,
 void blk_crypto_evict_key(struct block_device *bdev,
 			  const struct blk_crypto_key *key)
 {
-	struct request_queue *q = bdev_get_queue(bdev); /* [한국어] NVMe namespace의 request_queue 획득; q->crypto_profile을 통해 keyslot 관리 접근 */
+	struct request_queue *q = bdev_get_queue(bdev); /* [한국어] 대상 블록 장치의 request_queue 획득; q->crypto_profile로 keyslot 관리에 접근 */
 	int err; /* [한국어] evict 결과 저장; 에러 시 pr_warn 후 무시 (호출자 요구사항) */
 
 	if (blk_crypto_config_supported_natively(bdev, &key->crypto_cfg)) /* [한국어] native hw crypto 사용 중인지 확인; 경로에 따라 다른 evict 함수 호출 */
