@@ -149,6 +149,26 @@ static inline struct blkcg_gq *tg_to_blkg(struct throtl_grp *tg)
  * Return the throtl_grp @sq belongs to.  If @sq is the top-level one
  * embedded in throtl_data, %NULL is returned.
  */
+/*
+ * [한국어]
+ * sq_to_tg - service queue에서 그것을 품고 있는 throtl_grp를 역산
+ *
+ * @sq: 대상 service queue
+ * @return: 이 sq를 내장한 throtl_grp. 최상위(throtl_data 내장) sq면 NULL.
+ *
+ * blk-throttle은 cgroup 계층 구조를 그대로 반영한 service queue 트리를 만든다.
+ * 트리의 내부 노드는 throtl_grp(cgroup 하나)에 내장된 sq이고, 루트는
+ * throtl_data(디스크 하나)에 내장된 sq다. 두 경우를 구분하는 방법이
+ * parent_sq의 유무다 — 루트에는 부모가 없다.
+ *
+ * container_of는 "구조체 멤버의 주소에서 그 구조체 자체의 주소를 빼내는"
+ * 커널 관용구로, 순수한 컴파일 타임 오프셋 뺄셈이라 비용이 없다.
+ *
+ * 실행 컨텍스트: 어디서든(순수 포인터 산술). 락 불필요.
+ *
+ * 호출 체인:
+ *   sq_to_td / throtl_pending_timer_fn 등 → [sq_to_tg]
+ */
 static struct throtl_grp *sq_to_tg(struct throtl_service_queue *sq)
 {
 	if (sq && sq->parent_sq) /* [한국어] service_queue가 throtl_grp에 내장된 경우 NVMe 제어 흐름의 하위 cgroup 반환 */
@@ -163,6 +183,26 @@ static struct throtl_grp *sq_to_tg(struct throtl_service_queue *sq)
  *
  * A service_queue can be embedded in either a throtl_grp or throtl_data.
  * Determine the associated throtl_data accordingly and return it.
+ */
+/*
+ * [한국어]
+ * sq_to_td - service queue에서 그것이 속한 디스크 단위 throtl_data를 찾는다
+ *
+ * @sq: 대상 service queue
+ * @return: 이 sq가 속한 throtl_data (항상 유효, NULL 아님)
+ *
+ * sq_to_tg()와 달리 이 함수는 반드시 유효한 값을 돌려준다. 모든 service
+ * queue는 어떤 디스크에 속하기 때문이다. 두 경로로 나뉜다:
+ *   - 내부 노드(throtl_grp 내장)면 그 그룹이 가리키는 tg->td
+ *   - 루트(throtl_data 내장)면 container_of로 직접 역산
+ *
+ * throtl_data는 디스크 하나의 스로틀 상태 전체(전역 타이머, 큐 등)를 담으므로,
+ * 트리 어느 지점에서든 여기 도달할 수 있어야 한다.
+ *
+ * 실행 컨텍스트: 어디서든(순수 포인터 산술). 락 불필요.
+ *
+ * 호출 체인:
+ *   throtl_schedule_pending_timer 등 → [sq_to_td] → sq_to_tg
  */
 static struct throtl_data *sq_to_td(struct throtl_service_queue *sq)
 {

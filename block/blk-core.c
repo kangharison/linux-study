@@ -895,6 +895,24 @@ EXPORT_SYMBOL(blk_get_queue);
 
 static DECLARE_FAULT_ATTR(fail_make_request);
 
+/*
+ * [한국어]
+ * setup_fail_make_request - 커널 부팅 파라미터 "fail_make_request=" 파서
+ *
+ * @str: 부팅 커맨드라인에서 "fail_make_request=" 뒤에 온 문자열
+ * @return: setup_fault_attr()의 결과(성공 1, 실패 0)
+ *
+ * fault injection 프레임워크의 표준 파라미터 형식
+ * (확률<interval>,<times>,<space>,<verbose>)을 파싱해 전역 fail_make_request
+ * 속성에 채운다. 부팅 시점에 이미 I/O 실패 주입을 켜 두고 싶을 때 쓴다.
+ *
+ * 실행 컨텍스트: 부팅 초기(__setup 매크로가 등록한 파라미터 핸들러).
+ * 이 시점에는 아직 대부분의 커널 서브시스템이 초기화되지 않았으므로
+ * 단순 파싱만 수행한다.
+ *
+ * 호출 체인:
+ *   커널 부팅 파라미터 파서 → [setup_fail_make_request] → setup_fault_attr
+ */
 static int __init setup_fail_make_request(char *str)
 {
 	return setup_fault_attr(&fail_make_request, str);
@@ -919,6 +937,30 @@ bool should_fail_request(struct block_device *part, unsigned int bytes)
 	       should_fail(&fail_make_request, bytes); /* [한국어] fault injection 프레임워크로 실패 여부 결정 */
 }
 
+/*
+ * [한국어]
+ * fail_make_request_debugfs - fault injection 제어 파일을 debugfs에 노출
+ *
+ * @return: 0 성공, 음수 errno 실패
+ *
+ * /sys/kernel/debug/fail_make_request/ 아래에 probability, times, interval,
+ * verbose 같은 조정 파일을 만든다. 이것으로 실행 중에 I/O 실패 주입 확률을
+ * 바꿀 수 있다.
+ *
+ * 실제로 특정 장치에 실패를 주입하려면 두 가지가 모두 필요하다:
+ *   1) 여기서 만든 debugfs 파일로 확률 설정
+ *   2) 대상 장치에 BD_MAKE_IT_FAIL 플래그 설정
+ *      (/sys/block/nvme0n1/make-it-fail에 1을 쓴다)
+ * should_fail_request()가 두 조건을 함께 확인한다.
+ *
+ * NVMe 오류 처리 경로(nvme_decide_disposition의 재시도 로직, 멀티패스
+ * 경로 전환)를 실제 하드웨어 고장 없이 시험하는 데 쓴다.
+ *
+ * 실행 컨텍스트: late_initcall — debugfs가 마운트 가능해진 이후의 부팅 후반.
+ *
+ * 호출 체인:
+ *   late_initcall → [fail_make_request_debugfs] → fault_create_debugfs_attr
+ */
 static int __init fail_make_request_debugfs(void)
 {
 	struct dentry *dir = fault_create_debugfs_attr("fail_make_request",

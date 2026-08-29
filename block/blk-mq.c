@@ -2746,6 +2746,30 @@ bool blk_update_request(struct request *req, blk_status_t error,
 }
 EXPORT_SYMBOL_GPL(blk_update_request);
 
+/*
+ * [한국어]
+ * blk_account_io_done - request가 완전히 끝났을 때 디스크 통계를 마감
+ *
+ * @req: 완료된 request
+ * @now: 완료 시각(ns). 호출자가 한 번 측정해 공유한다.
+ * @return: 없음
+ *
+ * blk_account_io_completion()이 "전송량"을 누적했다면, 이 함수는 "요청 하나가
+ * 끝났다"는 사건을 기록한다. 세 가지를 갱신한다:
+ *   ios[]      - 완료된 I/O 개수 → iostat의 r/s, w/s (즉 IOPS)
+ *   nsecs[]    - 누적 서비스 시간 → iostat의 r_await, w_await 계산 근거
+ *   in_flight  - 처리 중인 요청 수 감소 → iostat의 aqu-sz
+ *
+ * RQF_FLUSH_SEQ를 제외하는 이유는 위 영문 주석이 설명한다: blk-flush 상태
+ * 기계가 만든 내부 flush request는 사용자가 발행한 I/O가 아니라 그것을
+ * 처리하기 위한 보조 요청이다. 이를 따로 세면 같은 논리적 I/O가 두 번
+ * 집계되어 IOPS가 부풀려진다. 원래 request만 세면 충분하다.
+ *
+ * 실행 컨텍스트: 완료 경로(하드 IRQ 또는 softirq/IPI 이후).
+ *
+ * 호출 체인:
+ *   blk_mq_end_request → __blk_mq_end_request_acct → [blk_account_io_done]
+ */
 static inline void blk_account_io_done(struct request *req, u64 now)
 {
 	trace_block_io_done(req);
@@ -2857,6 +2881,29 @@ static inline bool blk_rq_passthrough_stats(struct request *req)
 	return true;
 }
 
+/*
+ * [한국어]
+ * blk_account_io_start - request가 장치로 나갈 때 디스크 통계를 시작
+ *
+ * @req: 발행 직전의 request
+ * @return: 없음
+ *
+ * 이 함수가 하는 일은 세 가지다:
+ *   1) 이 request를 통계 대상으로 표시(RQF_IO_STAT) — 완료 시점의 함수들이
+ *      이 플래그를 보고 집계 여부를 결정하므로, 제출과 완료가 반드시 짝을
+ *      이뤄야 in_flight가 어긋나지 않는다.
+ *   2) 시작 시각 기록 — 완료 시각과의 차이가 곧 서비스 시간(iostat의 await).
+ *   3) in_flight 증가와 io_ticks 갱신 — "지금부터 장치가 바쁘다"는 표시.
+ *
+ * passthrough를 조건부로 제외하는 정책은 blk_rq_passthrough_stats()가 판단한다.
+ *
+ * 실행 컨텍스트: 제출 경로. blk_mq_start_request()에서 호출되므로 드라이버로
+ * 내려보내기 직전이다.
+ *
+ * 호출 체인:
+ *   blk_mq_start_request → [blk_account_io_start]
+ *     → blk_rq_passthrough_stats / update_io_ticks
+ */
 static inline void blk_account_io_start(struct request *req)
 {
 	trace_block_io_start(req);
@@ -8732,6 +8779,34 @@ static void blk_mq_map_swqueue(struct request_queue *q)
  * Caller needs to ensure that we're either frozen/quiesced, or that
  * the queue isn't live yet.
  */
+/*
+ * [한국어]
+ * queue_set_hctx_shared - 큐의 모든 hctx에 "태그 공유" 상태를 전파
+ *
+ * @q:      대상 request_queue
+ * @shared: true면 태그 풀을 다른 큐와 공유하는 상태로 전환
+ * @return: 없음
+ *
+ * === 태그 공유란 ===
+ * 하나의 blk_mq_tag_set을 여러 request_queue가 함께 쓰는 구성이 있다.
+ * NVMe에서는 컨트롤러 하나에 네임스페이스가 여러 개일 때가 그렇다 —
+ * /dev/nvme0n1, /dev/nvme0n2가 같은 컨트롤러의 태그 풀(= CID 공간)을 나눠 쓴다.
+ * 이때 한 네임스페이스가 태그를 독점하면 다른 쪽이 굶으므로, 활성 큐 수로
+ * 나눠 각자의 몫만 쓰게 제한해야 한다. BLK_MQ_F_TAG_QUEUE_SHARED가 그
+ * 제한 로직(blk_mq_tag_busy/idle, hctx_may_queue)을 활성화하는 스위치다.
+ *
+ * 이 함수는 tag_set에 큐가 추가/제거되어 공유 여부가 바뀔 때, 그 사실을
+ * 큐에 속한 모든 hctx에 반영한다.
+ *
+ * unshared로 갈 때 blk_mq_tag_idle()을 먼저 부르는 순서가 중요하다.
+ * 활성 큐 카운터를 정리하지 않고 플래그만 지우면, 그 카운터가 영원히
+ * 남아 다음에 다시 공유 상태가 될 때 잘못된 몫 계산이 이뤄진다.
+ *
+ * 실행 컨텍스트: tag_set 변경 경로(프로세스 컨텍스트). 큐가 freeze된 상태.
+ *
+ * 호출 체인:
+ *   blk_mq_update_tag_set_shared → [queue_set_hctx_shared] → blk_mq_tag_idle
+ */
 static void queue_set_hctx_shared(struct request_queue *q, bool shared)
 {
 	struct blk_mq_hw_ctx *hctx;
@@ -9042,14 +9117,45 @@ struct gendisk *__blk_mq_alloc_disk(struct blk_mq_tag_set *set,
 }
 EXPORT_SYMBOL(__blk_mq_alloc_disk);
 
+/*
+ * [한국어]
+ * blk_mq_alloc_disk_for_queue - 이미 존재하는 큐에 gendisk를 추가로 붙인다
+ *
+ * @q:       이미 만들어져 있는 request_queue
+ * @lkclass: lockdep 검증용 lock class key
+ * @return: 새 gendisk, 실패 시 NULL
+ *
+ * __blk_mq_alloc_disk()가 "큐와 디스크를 함께 만드는" 함수라면, 이쪽은
+ * "큐는 이미 있고 디스크만 새로 붙이는" 경우를 위한 것이다.
+ *
+ * 언제 필요한가: 하나의 request_queue에 여러 gendisk가 붙는 구성이다.
+ * NVMe 멀티패스(CONFIG_NVME_MULTIPATH)가 대표적인데, 여러 경로로 보이는
+ * 같은 네임스페이스를 하나의 /dev/nvmeXnY로 노출할 때 큐와 디스크의
+ * 생명주기가 분리된다.
+ *
+ * 참조 관리가 이 함수의 핵심이다. 디스크가 큐를 참조하므로 blk_get_queue()로
+ * 참조를 올리고, 디스크 할당에 실패하면 반드시 되돌려야 한다. 이 짝이
+ * 어긋나면 큐가 영원히 해제되지 않거나(누수) 너무 일찍 해제된다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트(드라이버 초기화).
+ *
+ * 호출 체인:
+ *   드라이버(예: NVMe 멀티패스 헤드 디스크 생성) → [blk_mq_alloc_disk_for_queue]
+ *     → blk_get_queue → __alloc_disk_node
+ */
 struct gendisk *blk_mq_alloc_disk_for_queue(struct request_queue *q,
 		struct lock_class_key *lkclass)
 {
 	struct gendisk *disk;
 
+	/* [한국어] 큐 참조를 올린다. 실패하면 큐가 이미 죽어가는 중이므로 포기한다. */
 	if (!blk_get_queue(q))
 		return NULL;
+	/* [한국어] gendisk를 할당한다. NUMA_NO_NODE는 특정 노드를 지정하지 않고
+	 * 커널에 맡긴다는 뜻으로, 큐와 달리 디스크 구조체는 I/O 핫패스에서
+	 * 접근되지 않아 노드 지역성이 중요하지 않다. */
 	disk = __alloc_disk_node(q, NUMA_NO_NODE, lkclass);
+	/* [한국어] 할당 실패 — 위에서 올린 참조를 반드시 되돌린다. */
 	if (!disk)
 		blk_put_queue(q);
 	return disk;

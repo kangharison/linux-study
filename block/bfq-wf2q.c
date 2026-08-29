@@ -122,88 +122,88 @@ static int bfq_gt(u64 a, u64 b)
 	return (s64)(a - b) > 0; /* a-b를 부호있는 64비트로 재해석: 양수면 a가 b보다 "이후" 시점(wraparound에 안전) */
 }
 
+/*
+ * [한국어]
+ * bfq_root_active_entity - active tree의 루트 노드에 대응하는
+ *   bfq_entity를 반환한다(rb-tree 루트를 entity로 캐스팅하는 헬퍼).
+ *
+ * @tree: 조회할 active tree(struct rb_root, 보통 &st->active).
+ * @return: 트리 루트에 위치한 bfq_entity 포인터. 이 함수는 tree가
+ *   비어있지 않다는 것을 호출자가 이미 보장했다고 가정하며(빈 트리에서
+ *   호출하면 rb_entry가 NULL 포인터에 대해 container_of 연산을 수행해
+ *   미정의 동작이 됨), 실제로 유일한 호출자인 bfq_calc_vtime_jump()가
+ *   호출 전에 RB_EMPTY_ROOT() 검사를 이미 마친 뒤에만 호출한다.
+ *
+ * rb-tree 자체는 "루트가 최소 finish를 가진 노드"라는 보장을 하지
+ * 않지만(rb-tree는 삽입 키인 finish로 균형을 잡을 뿐), 이 함수가
+ * 실제로 쓰이는 목적은 min_start 캐시를 읽기 위함이다: 트리의 루트는
+ * 전체 서브트리를 대표하므로, 루트의 min_start 필드가 곧 트리
+ * 전체에서 가장 이른 start를 가진 entity의 값과 같다(augmented
+ * rb-tree 불변식). bfqd->lock 하에서 호출된다.
+ *
+ * 호출 체인:
+ *   bfq_calc_vtime_jump() -> [bfq_root_active_entity] -> (하위 호출 없음)
+ */
 static struct bfq_entity *bfq_root_active_entity(struct rb_root *tree)
 {
-	/*
-	 * [한국어]
-	 * bfq_root_active_entity - active tree의 루트 노드에 대응하는
-	 *   bfq_entity를 반환한다(rb-tree 루트를 entity로 캐스팅하는 헬퍼).
-	 *
-	 * @tree: 조회할 active tree(struct rb_root, 보통 &st->active).
-	 * @return: 트리 루트에 위치한 bfq_entity 포인터. 이 함수는 tree가
-	 *   비어있지 않다는 것을 호출자가 이미 보장했다고 가정하며(빈 트리에서
-	 *   호출하면 rb_entry가 NULL 포인터에 대해 container_of 연산을 수행해
-	 *   미정의 동작이 됨), 실제로 유일한 호출자인 bfq_calc_vtime_jump()가
-	 *   호출 전에 RB_EMPTY_ROOT() 검사를 이미 마친 뒤에만 호출한다.
-	 *
-	 * rb-tree 자체는 "루트가 최소 finish를 가진 노드"라는 보장을 하지
-	 * 않지만(rb-tree는 삽입 키인 finish로 균형을 잡을 뿐), 이 함수가
-	 * 실제로 쓰이는 목적은 min_start 캐시를 읽기 위함이다: 트리의 루트는
-	 * 전체 서브트리를 대표하므로, 루트의 min_start 필드가 곧 트리
-	 * 전체에서 가장 이른 start를 가진 entity의 값과 같다(augmented
-	 * rb-tree 불변식). bfqd->lock 하에서 호출된다.
-	 *
-	 * 호출 체인:
-	 *   bfq_calc_vtime_jump() -> [bfq_root_active_entity] -> (하위 호출 없음)
-	 */
 	struct rb_node *node = tree->rb_node; /* rb_root의 최상위 rb_node(루트) 포인터를 꺼냄 */
 
 	return rb_entry(node, struct bfq_entity, rb_node); /* container_of 매크로로 rb_node를 감싸는 bfq_entity를 역산해 반환 */
 }
 
+/*
+ * [한국어]
+ * bfq_class_idx - entity가 어느 ioprio_class(RT/BE/IDLE)에 속하는지
+ *   판단해 sched_data->service_tree[] 배열의 인덱스로 변환한다.
+ *
+ * @entity: 인덱스를 구할 대상 entity(leaf bfq_queue 또는 non-leaf
+ *   bfq_group을 감싼 entity 모두 가능).
+ * @return: 0(RT) / 1(BE) / 2(IDLE) 중 하나의 배열 인덱스.
+ *
+ * entity가 leaf(bfq_entity_to_bfqq()가 NULL이 아닌 값을 반환)라면
+ * 그 bfq_queue의 ioprio_class(IOPRIO_CLASS_RT=1/BE=2/IDLE=3)에서 1을
+ * 빼 0 기반 배열 인덱스로 만든다. entity가 non-leaf(cgroup을 감싼
+ * bfq_group의 entity)라면 개별 request의 ioprio_class 개념이 없으므로
+ * BFQ_DEFAULT_GRP_CLASS(기본값 IOPRIO_CLASS_BE)를 사용해 그룹 전체를
+ * Best-Effort 클래스 트리에 배치한다. 이 인덱스는 이후
+ * bfq_entity_service_tree()가 sched_data->service_tree[idx]를 골라
+ * entity가 어느 rb-tree 쌍(active/idle)에서 스케줄링될지 결정하는
+ * 데 직접 쓰인다. bfqd->lock 하에서 호출.
+ *
+ * 호출 체인:
+ *   bfq_entity_service_tree()/bfq_update_next_in_service() 등
+ *   -> [bfq_class_idx] -> bfq_entity_to_bfqq()
+ */
 static unsigned int bfq_class_idx(struct bfq_entity *entity)
 {
-	/*
-	 * [한국어]
-	 * bfq_class_idx - entity가 어느 ioprio_class(RT/BE/IDLE)에 속하는지
-	 *   판단해 sched_data->service_tree[] 배열의 인덱스로 변환한다.
-	 *
-	 * @entity: 인덱스를 구할 대상 entity(leaf bfq_queue 또는 non-leaf
-	 *   bfq_group을 감싼 entity 모두 가능).
-	 * @return: 0(RT) / 1(BE) / 2(IDLE) 중 하나의 배열 인덱스.
-	 *
-	 * entity가 leaf(bfq_entity_to_bfqq()가 NULL이 아닌 값을 반환)라면
-	 * 그 bfq_queue의 ioprio_class(IOPRIO_CLASS_RT=1/BE=2/IDLE=3)에서 1을
-	 * 빼 0 기반 배열 인덱스로 만든다. entity가 non-leaf(cgroup을 감싼
-	 * bfq_group의 entity)라면 개별 request의 ioprio_class 개념이 없으므로
-	 * BFQ_DEFAULT_GRP_CLASS(기본값 IOPRIO_CLASS_BE)를 사용해 그룹 전체를
-	 * Best-Effort 클래스 트리에 배치한다. 이 인덱스는 이후
-	 * bfq_entity_service_tree()가 sched_data->service_tree[idx]를 골라
-	 * entity가 어느 rb-tree 쌍(active/idle)에서 스케줄링될지 결정하는
-	 * 데 직접 쓰인다. bfqd->lock 하에서 호출.
-	 *
-	 * 호출 체인:
-	 *   bfq_entity_service_tree()/bfq_update_next_in_service() 등
-	 *   -> [bfq_class_idx] -> bfq_entity_to_bfqq()
-	 */
 	struct bfq_queue *bfqq = bfq_entity_to_bfqq(entity); /* leaf면 대응 bfq_queue를, non-leaf(그룹)면 NULL을 얻음 */
 
 	return bfqq ? bfqq->ioprio_class - 1 : /* leaf: ioprio_class(1~3)를 0-based 인덱스(0~2)로 변환 */
 		BFQ_DEFAULT_GRP_CLASS - 1; /* non-leaf(그룹 entity): 기본 그룹 클래스(BE)의 인덱스를 사용 */
 }
 
+/*
+ * [한국어]
+ * bfq_tot_busy_queues - 세 ioprio_class(RT/BE/IDLE)를 합친 전체
+ *   busy(=대기 request를 가진) bfq_queue의 총 개수를 반환한다.
+ *
+ * @bfqd: 디바이스 전역 스케줄러 상태.
+ * @return: bfqd->busy_queues[0]+[1]+[2]의 합.
+ *
+ * bfqd->busy_queues[]는 bfq_add_bfqq_busy()/bfq_del_bfqq_busy()가
+ * 큐의 ioprio_class별로 증감시키는 카운터 배열이다. 이 함수는 그
+ * 세 값을 단순 합산해 "지금 스케줄러에 서비스를 기다리는 큐가
+ * 하나라도 있는가"를 판단하는 데 쓰이며, 0이면 bfq_get_next_queue()가
+ * 곧바로 NULL을 반환하도록 하는 빠른 종료 조건이 된다. 순수 읽기
+ * 연산이라 자체적으로 락을 잡지 않지만, 호출자는 통상 bfqd->lock을
+ * 쥔 상태에서 호출한다.
+ *
+ * 호출 체인:
+ *   bfq_get_next_queue()/elevator의 has_work 판단 로직 등
+ *   -> [bfq_tot_busy_queues] -> (하위 호출 없음, 배열 합산)
+ */
 unsigned int bfq_tot_busy_queues(struct bfq_data *bfqd)
 {
-	/*
-	 * [한국어]
-	 * bfq_tot_busy_queues - 세 ioprio_class(RT/BE/IDLE)를 합친 전체
-	 *   busy(=대기 request를 가진) bfq_queue의 총 개수를 반환한다.
-	 *
-	 * @bfqd: 디바이스 전역 스케줄러 상태.
-	 * @return: bfqd->busy_queues[0]+[1]+[2]의 합.
-	 *
-	 * bfqd->busy_queues[]는 bfq_add_bfqq_busy()/bfq_del_bfqq_busy()가
-	 * 큐의 ioprio_class별로 증감시키는 카운터 배열이다. 이 함수는 그
-	 * 세 값을 단순 합산해 "지금 스케줄러에 서비스를 기다리는 큐가
-	 * 하나라도 있는가"를 판단하는 데 쓰이며, 0이면 bfq_get_next_queue()가
-	 * 곧바로 NULL을 반환하도록 하는 빠른 종료 조건이 된다. 순수 읽기
-	 * 연산이라 자체적으로 락을 잡지 않지만, 호출자는 통상 bfqd->lock을
-	 * 쥔 상태에서 호출한다.
-	 *
-	 * 호출 체인:
-	 *   bfq_get_next_queue()/elevator의 has_work 판단 로직 등
-	 *   -> [bfq_tot_busy_queues] -> (하위 호출 없음, 배열 합산)
-	 */
 	return bfqd->busy_queues[0] + bfqd->busy_queues[1] + /* RT(0)와 BE(1) 클래스의 busy 큐 수를 더함 */
 		bfqd->busy_queues[2]; /* IDLE(2) 클래스의 busy 큐 수까지 더해 전체 합을 완성 */
 }
@@ -491,27 +491,27 @@ static bool bfq_no_longer_next_in_service(struct bfq_entity *entity)
 	return false; /* active 자식이 둘 이상 남아 있으므로 그룹은 여전히 유효한 next_in_service 후보 */
 }
 
+/*
+ * [한국어]
+ * bfq_inc_active_entities - entity가 새로 active tree에 들어갈 때,
+ *   그 부모 bfq_group의 active_entities 카운터를 1 증가시킨다.
+ *
+ * @entity: 방금 active tree에 삽입된 entity.
+ * @return: 없음(void).
+ *
+ * active_entities는 bfq_no_longer_next_in_service()가 "그룹에 active
+ * 자식이 몇 개 남았는지"를 O(1)로 판단하기 위해 유지하는 캐시
+ * 카운터다. entity->sched_data는 entity가 스케줄링되는 계층 노드를
+ * 가리키며, 이를 소유한 bfq_group을 container_of로 얻은 뒤, 그
+ * 그룹이 root_group이 아닌 경우에만 카운트를 올린다(루트 그룹은
+ * active_entities를 사용하는 next_in_service 최적화 대상이 아니므로
+ * 카운트할 필요가 없다). bfqd->lock 하에서 호출.
+ *
+ * 호출 체인:
+ *   bfq_active_insert() -> [bfq_inc_active_entities] -> (하위 호출 없음)
+ */
 static void bfq_inc_active_entities(struct bfq_entity *entity)
 {
-	/*
-	 * [한국어]
-	 * bfq_inc_active_entities - entity가 새로 active tree에 들어갈 때,
-	 *   그 부모 bfq_group의 active_entities 카운터를 1 증가시킨다.
-	 *
-	 * @entity: 방금 active tree에 삽입된 entity.
-	 * @return: 없음(void).
-	 *
-	 * active_entities는 bfq_no_longer_next_in_service()가 "그룹에 active
-	 * 자식이 몇 개 남았는지"를 O(1)로 판단하기 위해 유지하는 캐시
-	 * 카운터다. entity->sched_data는 entity가 스케줄링되는 계층 노드를
-	 * 가리키며, 이를 소유한 bfq_group을 container_of로 얻은 뒤, 그
-	 * 그룹이 root_group이 아닌 경우에만 카운트를 올린다(루트 그룹은
-	 * active_entities를 사용하는 next_in_service 최적화 대상이 아니므로
-	 * 카운트할 필요가 없다). bfqd->lock 하에서 호출.
-	 *
-	 * 호출 체인:
-	 *   bfq_active_insert() -> [bfq_inc_active_entities] -> (하위 호출 없음)
-	 */
 	struct bfq_sched_data *sd = entity->sched_data; /* entity가 스케줄링되는 sched_data(=부모 그룹의 sched_data) */
 	struct bfq_group *bfqg = container_of(sd, struct bfq_group, sched_data); /* 그 sched_data를 소유한 bfq_group 역산 */
 
@@ -519,22 +519,22 @@ static void bfq_inc_active_entities(struct bfq_entity *entity)
 		bfqg->active_entities++; /* 이 그룹에 새로 active 자식이 하나 늘었음을 반영 */
 }
 
+/*
+ * [한국어]
+ * bfq_dec_active_entities - entity가 active tree에서 빠질 때, 그
+ *   부모 bfq_group의 active_entities 카운터를 1 감소시킨다
+ *   (bfq_inc_active_entities()의 역연산).
+ *
+ * @entity: 방금 active tree에서 제거된 entity.
+ * @return: 없음(void).
+ *
+ * bfqd->lock 하에서 호출.
+ *
+ * 호출 체인:
+ *   bfq_active_extract() -> [bfq_dec_active_entities] -> (하위 호출 없음)
+ */
 static void bfq_dec_active_entities(struct bfq_entity *entity)
 {
-	/*
-	 * [한국어]
-	 * bfq_dec_active_entities - entity가 active tree에서 빠질 때, 그
-	 *   부모 bfq_group의 active_entities 카운터를 1 감소시킨다
-	 *   (bfq_inc_active_entities()의 역연산).
-	 *
-	 * @entity: 방금 active tree에서 제거된 entity.
-	 * @return: 없음(void).
-	 *
-	 * bfqd->lock 하에서 호출.
-	 *
-	 * 호출 체인:
-	 *   bfq_active_extract() -> [bfq_dec_active_entities] -> (하위 호출 없음)
-	 */
 	struct bfq_sched_data *sd = entity->sched_data; /* entity의 부모 sched_data */
 	struct bfq_group *bfqg = container_of(sd, struct bfq_group, sched_data); /* 이를 소유한 bfq_group 역산 */
 
@@ -550,61 +550,61 @@ static void bfq_dec_active_entities(struct bfq_entity *entity)
  * (bfq_update_next_in_service, bfq_active_insert/extract 등)의 코드를
  * #ifdef 없이 그대로 재사용할 수 있다. */
 
+/*
+ * [한국어]
+ * bfq_update_parent_budget (cgroup 미지원 빌드용 스텁) - 계층이
+ *   없으므로 부모 budget 전파 자체가 존재하지 않아 항상 false.
+ *
+ * @next_in_service: 사용되지 않음(계층이 없어 부모가 없음).
+ * @return: 항상 false(상위 재계산이 필요한 경우가 있을 수 없음).
+ *
+ * 호출 체인:
+ *   bfq_update_next_in_service() -> [bfq_update_parent_budget(stub)]
+ */
 static bool bfq_update_parent_budget(struct bfq_entity *next_in_service)
 {
-	/*
-	 * [한국어]
-	 * bfq_update_parent_budget (cgroup 미지원 빌드용 스텁) - 계층이
-	 *   없으므로 부모 budget 전파 자체가 존재하지 않아 항상 false.
-	 *
-	 * @next_in_service: 사용되지 않음(계층이 없어 부모가 없음).
-	 * @return: 항상 false(상위 재계산이 필요한 경우가 있을 수 없음).
-	 *
-	 * 호출 체인:
-	 *   bfq_update_next_in_service() -> [bfq_update_parent_budget(stub)]
-	 */
 	return false; /* 계층 자체가 없으므로 "부모 budget 변경"이라는 개념이 성립하지 않음 */
 }
 
+/*
+ * [한국어]
+ * bfq_no_longer_next_in_service (cgroup 미지원 빌드용 스텁) - 계층이
+ *   1단계(루트)뿐이므로 모든 entity가 사실상 leaf처럼 취급되어
+ *   항상 true.
+ *
+ * @entity: 사용되지 않음.
+ * @return: 항상 true(entity는 항상 즉시 active tree에서 추출되어야 함).
+ *
+ * 호출 체인:
+ *   bfq_get_next_queue() -> [bfq_no_longer_next_in_service(stub)]
+ */
 static bool bfq_no_longer_next_in_service(struct bfq_entity *entity)
 {
-	/*
-	 * [한국어]
-	 * bfq_no_longer_next_in_service (cgroup 미지원 빌드용 스텁) - 계층이
-	 *   1단계(루트)뿐이므로 모든 entity가 사실상 leaf처럼 취급되어
-	 *   항상 true.
-	 *
-	 * @entity: 사용되지 않음.
-	 * @return: 항상 true(entity는 항상 즉시 active tree에서 추출되어야 함).
-	 *
-	 * 호출 체인:
-	 *   bfq_get_next_queue() -> [bfq_no_longer_next_in_service(stub)]
-	 */
 	return true; /* 그룹 계층이 없어 "그룹에 다른 active 자식이 남는" 경우 자체가 없으므로 항상 추출 대상 */
 }
 
+/*
+ * [한국어]
+ * bfq_inc_active_entities (cgroup 미지원 빌드용 스텁) - 카운트할
+ *   bfq_group 자체가 없으므로 아무 동작도 하지 않는다.
+ *
+ * @entity: 사용되지 않음.
+ * @return: 없음(void).
+ */
 static void bfq_inc_active_entities(struct bfq_entity *entity)
 {
-	/*
-	 * [한국어]
-	 * bfq_inc_active_entities (cgroup 미지원 빌드용 스텁) - 카운트할
-	 *   bfq_group 자체가 없으므로 아무 동작도 하지 않는다.
-	 *
-	 * @entity: 사용되지 않음.
-	 * @return: 없음(void).
-	 */
 } /* [한국어] 빈 함수 본문: cgroup 계층이 없어 active_entities 카운터 자체가 무의미함 */
 
+/*
+ * [한국어]
+ * bfq_dec_active_entities (cgroup 미지원 빌드용 스텁) - 위와 대칭적인
+ *   이유로 아무 동작도 하지 않는다.
+ *
+ * @entity: 사용되지 않음.
+ * @return: 없음(void).
+ */
 static void bfq_dec_active_entities(struct bfq_entity *entity)
 {
-	/*
-	 * [한국어]
-	 * bfq_dec_active_entities (cgroup 미지원 빌드용 스텁) - 위와 대칭적인
-	 *   이유로 아무 동작도 하지 않는다.
-	 *
-	 * @entity: 사용되지 않음.
-	 * @return: 없음(void).
-	 */
 } /* [한국어] 빈 함수 본문: 감소시킬 active_entities 카운터가 없음 */
 
 #endif /* CONFIG_BFQ_GROUP_IOSCHED */
@@ -1199,29 +1199,29 @@ static unsigned short bfq_weight_to_ioprio(int weight)
 		     IOPRIO_NR_LEVELS - weight / BFQ_WEIGHT_CONVERSION_COEFF); /* weight를 배율로 나눠 레벨 스케일로 되돌린 뒤 반전 */
 }
 
+/*
+ * [한국어]
+ * bfq_get_entity - entity가 leaf(bfq_queue)라면 그 큐에 대한
+ *   "서비스 참조 카운트(service reference)"를 하나 얻는다
+ *   (bfqq->ref를 증가).
+ *
+ * @entity: 참조를 얻을 entity(leaf가 아니면 아무 동작도 하지 않음).
+ * @return: 없음(void).
+ *
+ * entity가 active tree에 삽입되어 스케줄링 대상이 되는 순간, 그
+ * bfq_queue는 "스케줄러가 아직 이 큐를 참조하고 있다"는 사실을
+ * ref 카운트로 보장받아야 한다 - 그렇지 않으면 이 큐를 참조하던
+ * 마지막 프로세스가 사라져도 스케줄러가 계속 붙잡고 있는 큐가
+ * 조기에 해제(free)되어 use-after-free가 발생할 수 있다. 이 참조는
+ * 나중에 entity가 서비스 트리를 완전히 떠날 때(bfq_forget_entity())
+ * bfq_put_queue()로 반납된다. leaf일 때만 bfq_log_bfqq()로 참조
+ * 카운트 변화를 디버그 트레이스에 남긴다. bfqd->lock 하에서 호출.
+ *
+ * 호출 체인:
+ *   __bfq_activate_entity() -> [bfq_get_entity] -> bfq_log_bfqq()
+ */
 static void bfq_get_entity(struct bfq_entity *entity)
 {
-	/*
-	 * [한국어]
-	 * bfq_get_entity - entity가 leaf(bfq_queue)라면 그 큐에 대한
-	 *   "서비스 참조 카운트(service reference)"를 하나 얻는다
-	 *   (bfqq->ref를 증가).
-	 *
-	 * @entity: 참조를 얻을 entity(leaf가 아니면 아무 동작도 하지 않음).
-	 * @return: 없음(void).
-	 *
-	 * entity가 active tree에 삽입되어 스케줄링 대상이 되는 순간, 그
-	 * bfq_queue는 "스케줄러가 아직 이 큐를 참조하고 있다"는 사실을
-	 * ref 카운트로 보장받아야 한다 - 그렇지 않으면 이 큐를 참조하던
-	 * 마지막 프로세스가 사라져도 스케줄러가 계속 붙잡고 있는 큐가
-	 * 조기에 해제(free)되어 use-after-free가 발생할 수 있다. 이 참조는
-	 * 나중에 entity가 서비스 트리를 완전히 떠날 때(bfq_forget_entity())
-	 * bfq_put_queue()로 반납된다. leaf일 때만 bfq_log_bfqq()로 참조
-	 * 카운트 변화를 디버그 트레이스에 남긴다. bfqd->lock 하에서 호출.
-	 *
-	 * 호출 체인:
-	 *   __bfq_activate_entity() -> [bfq_get_entity] -> bfq_log_bfqq()
-	 */
 	struct bfq_queue *bfqq = bfq_entity_to_bfqq(entity); /* leaf라면 대응하는 bfq_queue, 아니면 NULL */
 
 	if (bfqq) { /* leaf(실제 프로세스 큐)일 때만 참조 카운트 개념이 적용됨 */
@@ -1517,28 +1517,28 @@ static void bfq_forget_idle(struct bfq_service_tree *st)
 		bfq_put_idle_entity(st, first_idle); /* 그 entity 하나만 idle tree에서 완전히 제거(점진적 청소) */
 }
 
+/*
+ * [한국어]
+ * bfq_entity_service_tree - entity->sched_data->service_tree[] 배열에서
+ *   entity의 ioprio_class에 맞는 슬롯을 찾아 반환한다.
+ *
+ * @entity: 조회할 entity.
+ * @return: entity가 속해야 할 &sched_data->service_tree[idx] 포인터.
+ *
+ * bfq_class_idx()로 RT/BE/IDLE 중 어느 배열 인덱스인지 계산한 뒤,
+ * entity->sched_data(entity가 스케줄링되는 계층 노드)의
+ * service_tree 배열에서 그 인덱스의 슬롯을 골라 반환하는 단순
+ * 인덱싱 헬퍼다. entity가 활성화/비활성화/재큐잉될 때마다 "지금
+ * 어느 rb-tree 쌍(active/idle)을 조작해야 하는지"를 결정하는
+ * 진입점 역할을 한다. bfqd->lock 하에서 호출.
+ *
+ * 호출 체인:
+ *   bfq_activate_requeue_entity()/__bfq_deactivate_entity()/
+ *   __bfq_requeue_entity() 등 -> [bfq_entity_service_tree] ->
+ *   bfq_class_idx()
+ */
 struct bfq_service_tree *bfq_entity_service_tree(struct bfq_entity *entity)
 {
-	/*
-	 * [한국어]
-	 * bfq_entity_service_tree - entity->sched_data->service_tree[] 배열에서
-	 *   entity의 ioprio_class에 맞는 슬롯을 찾아 반환한다.
-	 *
-	 * @entity: 조회할 entity.
-	 * @return: entity가 속해야 할 &sched_data->service_tree[idx] 포인터.
-	 *
-	 * bfq_class_idx()로 RT/BE/IDLE 중 어느 배열 인덱스인지 계산한 뒤,
-	 * entity->sched_data(entity가 스케줄링되는 계층 노드)의
-	 * service_tree 배열에서 그 인덱스의 슬롯을 골라 반환하는 단순
-	 * 인덱싱 헬퍼다. entity가 활성화/비활성화/재큐잉될 때마다 "지금
-	 * 어느 rb-tree 쌍(active/idle)을 조작해야 하는지"를 결정하는
-	 * 진입점 역할을 한다. bfqd->lock 하에서 호출.
-	 *
-	 * 호출 체인:
-	 *   bfq_activate_requeue_entity()/__bfq_deactivate_entity()/
-	 *   __bfq_requeue_entity() 등 -> [bfq_entity_service_tree] ->
-	 *   bfq_class_idx()
-	 */
 	struct bfq_sched_data *sched_data = entity->sched_data; /* entity가 스케줄링되는 계층 노드(3개 클래스별 트리를 보유) */
 	unsigned int idx = bfq_class_idx(entity); /* entity의 ioprio_class에 해당하는 배열 인덱스(0=RT/1=BE/2=IDLE) */
 
@@ -2141,31 +2141,31 @@ static void __bfq_requeue_entity(struct bfq_entity *entity)
 	bfq_update_fin_time_enqueue(entity, st, false); /* 새 F_i를 계산하고(backshift 없이) active tree에 다시 삽입 */
 }
 
+/*
+ * [한국어]
+ * __bfq_activate_requeue_entity - entity의 현재 상태를 보고
+ *   "진짜 활성화"와 "재큐잉/재배치" 중 어느 경로로 처리할지
+ *   분기하는 라우터 함수.
+ *
+ * @entity: 대상 entity.
+ * @non_blocking_wait_rq: 진짜 활성화 경로로 갈 경우
+ *   __bfq_activate_entity()에 그대로 전달될 latency 최적화 힌트.
+ * @return: 없음(void).
+ *
+ * entity가 지금 서비스 중이거나(sched_data->in_service_entity ==
+ * entity) 이미 active tree 위에 있다면(entity->tree == &st->active)
+ * __bfq_requeue_entity()로 재큐잉/재배치를 수행한다. 그렇지 않다면
+ * (서비스 중도 아니고 active tree에도 없다면 = 완전히 idle이었다가
+ * 지금 처음 활성화되는 것) __bfq_activate_entity()로 진짜 활성화를
+ * 수행한다. bfqd->lock 하에서 호출.
+ *
+ * 호출 체인:
+ *   bfq_activate_requeue_entity() -> [__bfq_activate_requeue_entity]
+ *   -> __bfq_requeue_entity() 또는 __bfq_activate_entity()
+ */
 static void __bfq_activate_requeue_entity(struct bfq_entity *entity,
 					  bool non_blocking_wait_rq)
 {
-	/*
-	 * [한국어]
-	 * __bfq_activate_requeue_entity - entity의 현재 상태를 보고
-	 *   "진짜 활성화"와 "재큐잉/재배치" 중 어느 경로로 처리할지
-	 *   분기하는 라우터 함수.
-	 *
-	 * @entity: 대상 entity.
-	 * @non_blocking_wait_rq: 진짜 활성화 경로로 갈 경우
-	 *   __bfq_activate_entity()에 그대로 전달될 latency 최적화 힌트.
-	 * @return: 없음(void).
-	 *
-	 * entity가 지금 서비스 중이거나(sched_data->in_service_entity ==
-	 * entity) 이미 active tree 위에 있다면(entity->tree == &st->active)
-	 * __bfq_requeue_entity()로 재큐잉/재배치를 수행한다. 그렇지 않다면
-	 * (서비스 중도 아니고 active tree에도 없다면 = 완전히 idle이었다가
-	 * 지금 처음 활성화되는 것) __bfq_activate_entity()로 진짜 활성화를
-	 * 수행한다. bfqd->lock 하에서 호출.
-	 *
-	 * 호출 체인:
-	 *   bfq_activate_requeue_entity() -> [__bfq_activate_requeue_entity]
-	 *   -> __bfq_requeue_entity() 또는 __bfq_activate_entity()
-	 */
 	struct bfq_service_tree *st = bfq_entity_service_tree(entity); /* entity의 ioprio_class에 해당하는 service_tree(active tree 소속 판정에 사용) */
 
 	if (entity->sched_data->in_service_entity == entity || /* entity가 지금 이 레벨에서 서비스 중이거나 */
@@ -2528,27 +2528,27 @@ static u64 bfq_calc_vtime_jump(struct bfq_service_tree *st)
 	return st->vtime; /* 이미 eligible한 entity가 존재하므로(현재 vtime이 충분히 전진해 있으므로) 점프 불필요 */
 }
 
+/*
+ * [한국어]
+ * bfq_update_vtime - service_tree의 vtime을 new_value로 전진시키되,
+ *   실제로 전진하는 경우에만 부수효과(idle tree 정리)를 수행한다.
+ *
+ * @st: 갱신 대상 bfq_service_tree.
+ * @new_value: bfq_calc_vtime_jump() 등이 계산한 목표 vtime.
+ * @return: 없음(void).
+ *
+ * vtime은 서비스가 진행되며 계속 증가하기만 하는 논리 시계이므로,
+ * new_value가 현재 vtime보다 실제로 클 때만(역행 금지) 갱신을
+ * 수행한다. 갱신한 경우에는 vtime이 앞으로 튀었으므로 이제 만료
+ * 조건(finish <= vtime)을 만족하게 된 idle entity가 있을 수
+ * 있어, bfq_forget_idle()을 호출해 정리한다. bfqd->lock 하에서 호출.
+ *
+ * 호출 체인:
+ *   __bfq_lookup_next_entity() -> [bfq_update_vtime] ->
+ *   bfq_forget_idle()
+ */
 static void bfq_update_vtime(struct bfq_service_tree *st, u64 new_value)
 {
-	/*
-	 * [한국어]
-	 * bfq_update_vtime - service_tree의 vtime을 new_value로 전진시키되,
-	 *   실제로 전진하는 경우에만 부수효과(idle tree 정리)를 수행한다.
-	 *
-	 * @st: 갱신 대상 bfq_service_tree.
-	 * @new_value: bfq_calc_vtime_jump() 등이 계산한 목표 vtime.
-	 * @return: 없음(void).
-	 *
-	 * vtime은 서비스가 진행되며 계속 증가하기만 하는 논리 시계이므로,
-	 * new_value가 현재 vtime보다 실제로 클 때만(역행 금지) 갱신을
-	 * 수행한다. 갱신한 경우에는 vtime이 앞으로 튀었으므로 이제 만료
-	 * 조건(finish <= vtime)을 만족하게 된 idle entity가 있을 수
-	 * 있어, bfq_forget_idle()을 호출해 정리한다. bfqd->lock 하에서 호출.
-	 *
-	 * 호출 체인:
-	 *   __bfq_lookup_next_entity() -> [bfq_update_vtime] ->
-	 *   bfq_forget_idle()
-	 */
 	if (new_value > st->vtime) { /* 목표값이 현재 vtime보다 실제로 미래일 때만(vtime은 역행하지 않음) */
 		st->vtime = new_value; /* vtime을 목표값까지 전진 */
 		bfq_forget_idle(st); /* 전진으로 인해 이제 만료 조건을 만족한 idle entity가 있으면 정리 */
@@ -2818,31 +2818,31 @@ static struct bfq_entity *bfq_lookup_next_entity(struct bfq_sched_data *sd,
 	return entity; /* 우선순위 규칙에 따라 선택된 entity(모든 클래스가 비었으면 NULL) */
 }
 
+/*
+ * [한국어]
+ * next_queue_may_preempt - 루트 그룹 레벨에서 next_in_service가
+ *   현재 in_service_entity와 다른지(=선점 여지가 있는지) 확인한다.
+ *
+ * @bfqd: 디바이스 전역 상태.
+ * @return: true이면 지금 서비스 중인 것과 다른, 더 유리한 후보가
+ *   대기 중임을 의미(선점을 고려해야 함). false이면 지금 서비스
+ *   중인 것 자체가 이미 최선의 후보.
+ *
+ * 루트 그룹의 sched_data는 장치 전체에서 단 하나이며, 그
+ * next_in_service가 in_service_entity와 다르다는 것은 "지금
+ * 서비스 중인 것보다 finish가 더 작은(더 급한) entity가 이미
+ * 대기 중"이라는 뜻이다. 이는 새로 활성화된 높은 우선순위 큐가
+ * 있을 때 즉시 선점(현재 서비스를 중단하고 그 큐로 전환)할지
+ * 판단하는 BFQ 상위 로직(bfq_bfqq_expire() 등)의 게이트 조건으로
+ * 쓰인다. 단순 포인터 비교이므로 락 없이도 안전하지만, 필드 자체가
+ * bfqd->lock으로 보호되므로 통상 그 락 하에서 호출된다.
+ *
+ * 호출 체인:
+ *   bfq_bfqq_expire()/새 큐 활성화 경로(bfq-iosched.c) ->
+ *   [next_queue_may_preempt] -> (하위 호출 없음, 포인터 비교만)
+ */
 bool next_queue_may_preempt(struct bfq_data *bfqd)
 {
-	/*
-	 * [한국어]
-	 * next_queue_may_preempt - 루트 그룹 레벨에서 next_in_service가
-	 *   현재 in_service_entity와 다른지(=선점 여지가 있는지) 확인한다.
-	 *
-	 * @bfqd: 디바이스 전역 상태.
-	 * @return: true이면 지금 서비스 중인 것과 다른, 더 유리한 후보가
-	 *   대기 중임을 의미(선점을 고려해야 함). false이면 지금 서비스
-	 *   중인 것 자체가 이미 최선의 후보.
-	 *
-	 * 루트 그룹의 sched_data는 장치 전체에서 단 하나이며, 그
-	 * next_in_service가 in_service_entity와 다르다는 것은 "지금
-	 * 서비스 중인 것보다 finish가 더 작은(더 급한) entity가 이미
-	 * 대기 중"이라는 뜻이다. 이는 새로 활성화된 높은 우선순위 큐가
-	 * 있을 때 즉시 선점(현재 서비스를 중단하고 그 큐로 전환)할지
-	 * 판단하는 BFQ 상위 로직(bfq_bfqq_expire() 등)의 게이트 조건으로
-	 * 쓰인다. 단순 포인터 비교이므로 락 없이도 안전하지만, 필드 자체가
-	 * bfqd->lock으로 보호되므로 통상 그 락 하에서 호출된다.
-	 *
-	 * 호출 체인:
-	 *   bfq_bfqq_expire()/새 큐 활성화 경로(bfq-iosched.c) ->
-	 *   [next_queue_may_preempt] -> (하위 호출 없음, 포인터 비교만)
-	 */
 	struct bfq_sched_data *sd = &bfqd->root_group->sched_data; /* 계층의 최상위(루트 그룹) sched_data */
 
 	return sd->next_in_service != sd->in_service_entity; /* 캐시된 다음 후보와 현재 서비스 중인 entity가 다르면 선점 여지가 있음 */
@@ -3052,59 +3052,59 @@ bool __bfq_bfqd_reset_in_service(struct bfq_data *bfqd)
 	return false; /* bfqq가 아직 다른 참조로 살아있거나, 애초에 트리/서비스에서 완전히 벗어나지 않았음 */
 }
 
+/*
+ * [한국어]
+ * bfq_deactivate_bfqq - bfq_queue를 감싸는 leaf entity에 대해
+ *   bfq_deactivate_entity()를 호출하는 얇은 래퍼(bfq_queue 레벨의
+ *   공개 API).
+ *
+ * @bfqd: 디바이스 전역 상태(현재 구현에서는 직접 사용되지 않고
+ *   시그니처 일관성을 위해 유지됨).
+ * @bfqq: 비활성화할 큐.
+ * @ins_into_idle_tree: idle tree 보관 허용 여부.
+ * @expiration: 만료 경로 여부.
+ * @return: 없음(void).
+ *
+ * bfqd->lock 하에서 호출.
+ *
+ * 호출 체인:
+ *   bfq_bfqq_expire()/bfq_del_bfqq_busy()(bfq-iosched.c 등) ->
+ *   [bfq_deactivate_bfqq] -> bfq_deactivate_entity()
+ */
 void bfq_deactivate_bfqq(struct bfq_data *bfqd, struct bfq_queue *bfqq,
 			 bool ins_into_idle_tree, bool expiration)
 {
-	/*
-	 * [한국어]
-	 * bfq_deactivate_bfqq - bfq_queue를 감싸는 leaf entity에 대해
-	 *   bfq_deactivate_entity()를 호출하는 얇은 래퍼(bfq_queue 레벨의
-	 *   공개 API).
-	 *
-	 * @bfqd: 디바이스 전역 상태(현재 구현에서는 직접 사용되지 않고
-	 *   시그니처 일관성을 위해 유지됨).
-	 * @bfqq: 비활성화할 큐.
-	 * @ins_into_idle_tree: idle tree 보관 허용 여부.
-	 * @expiration: 만료 경로 여부.
-	 * @return: 없음(void).
-	 *
-	 * bfqd->lock 하에서 호출.
-	 *
-	 * 호출 체인:
-	 *   bfq_bfqq_expire()/bfq_del_bfqq_busy()(bfq-iosched.c 등) ->
-	 *   [bfq_deactivate_bfqq] -> bfq_deactivate_entity()
-	 */
 	struct bfq_entity *entity = &bfqq->entity; /* bfqq를 감싸는 leaf entity */
 
 	bfq_deactivate_entity(entity, ins_into_idle_tree, expiration); /* entity 레벨의 실제 비활성화(및 상위 전파)를 위임 */
 }
 
 
+/*
+ * [한국어]
+ * bfq_activate_bfqq - bfq_queue를 감싸는 leaf entity에 대해
+ *   bfq_activate_requeue_entity()를 호출해 active tree에 삽입하는
+ *   bfq_queue 레벨의 공개 API.
+ *
+ * @bfqd: 디바이스 전역 상태(직접 사용되지 않고 시그니처 일관성
+ *   유지용).
+ * @bfqq: 활성화할 큐.
+ * @return: 없음(void).
+ *
+ * bfq_bfqq_non_blocking_wait_rq()로 이 큐가 "request를 기다리며
+ * 막 활성화되는" seeky-latency 최적화 대상인지 확인해
+ * non_blocking_wait_rq 인자로 전달하고, requeue/expiration은
+ * 항상 false로 호출한다(진짜 새 활성화이지 재큐잉이 아니므로).
+ * 활성화 후에는 bfq_clear_bfqq_non_blocking_wait_rq()로 그
+ * 플래그를 클리어해 다음 활성화 때 다시 명시적으로 설정되도록 한다.
+ * bfqd->lock 하에서 호출.
+ *
+ * 호출 체인:
+ *   bfq_add_bfqq_busy()/bfq_requeue_bfqq() -> [bfq_activate_bfqq]
+ *   -> bfq_activate_requeue_entity()
+ */
 void bfq_activate_bfqq(struct bfq_data *bfqd, struct bfq_queue *bfqq)
 {
-	/*
-	 * [한국어]
-	 * bfq_activate_bfqq - bfq_queue를 감싸는 leaf entity에 대해
-	 *   bfq_activate_requeue_entity()를 호출해 active tree에 삽입하는
-	 *   bfq_queue 레벨의 공개 API.
-	 *
-	 * @bfqd: 디바이스 전역 상태(직접 사용되지 않고 시그니처 일관성
-	 *   유지용).
-	 * @bfqq: 활성화할 큐.
-	 * @return: 없음(void).
-	 *
-	 * bfq_bfqq_non_blocking_wait_rq()로 이 큐가 "request를 기다리며
-	 * 막 활성화되는" seeky-latency 최적화 대상인지 확인해
-	 * non_blocking_wait_rq 인자로 전달하고, requeue/expiration은
-	 * 항상 false로 호출한다(진짜 새 활성화이지 재큐잉이 아니므로).
-	 * 활성화 후에는 bfq_clear_bfqq_non_blocking_wait_rq()로 그
-	 * 플래그를 클리어해 다음 활성화 때 다시 명시적으로 설정되도록 한다.
-	 * bfqd->lock 하에서 호출.
-	 *
-	 * 호출 체인:
-	 *   bfq_add_bfqq_busy()/bfq_requeue_bfqq() -> [bfq_activate_bfqq]
-	 *   -> bfq_activate_requeue_entity()
-	 */
 	struct bfq_entity *entity = &bfqq->entity; /* bfqq를 감싸는 leaf entity */
 
 	bfq_activate_requeue_entity(entity, bfq_bfqq_non_blocking_wait_rq(bfqq), /* seeky-latency 최적화 힌트를 그대로 전달 */
@@ -3112,63 +3112,63 @@ void bfq_activate_bfqq(struct bfq_data *bfqd, struct bfq_queue *bfqq)
 	bfq_clear_bfqq_non_blocking_wait_rq(bfqq); /* 힌트 플래그를 소비했으므로 클리어(다음번엔 다시 명시적으로 설정돼야 함) */
 }
 
+/*
+ * [한국어]
+ * bfq_requeue_bfqq - 이미 알고 있던 bfq_queue를 다시 서비스 트리에
+ *   넣는(재큐잉하는) bfq_queue 레벨의 공개 API.
+ *
+ * @bfqd: 디바이스 전역 상태(직접 사용되지 않고 시그니처 일관성
+ *   유지용).
+ * @bfqq: 재큐잉할 큐.
+ * @expiration: 방금 만료 처리를 거친 뒤의 재큐잉인지 여부.
+ * @return: 없음(void).
+ *
+ * non_blocking_wait_rq는 항상 false로(재큐잉은 새 request를
+ * 기다리던 seeky 큐의 첫 활성화가 아니므로 해당 최적화가 무의미),
+ * requeue는 "이 큐가 지금 in-service인지"를 그대로 전달한다 -
+ * in-service인 큐가 재큐잉되는 것은 만료로 인한 것이므로 그
+ * 상위 조상들도 강제로 재큐잉돼야 함을 뜻하기 때문(원본 주석의
+ * requeue 정의 참고). bfqd->lock 하에서 호출.
+ *
+ * 호출 체인:
+ *   bfq_bfqq_expire()(bfq-iosched.c) -> [bfq_requeue_bfqq] ->
+ *   bfq_activate_requeue_entity()
+ */
 void bfq_requeue_bfqq(struct bfq_data *bfqd, struct bfq_queue *bfqq,
 		      bool expiration)
 {
-	/*
-	 * [한국어]
-	 * bfq_requeue_bfqq - 이미 알고 있던 bfq_queue를 다시 서비스 트리에
-	 *   넣는(재큐잉하는) bfq_queue 레벨의 공개 API.
-	 *
-	 * @bfqd: 디바이스 전역 상태(직접 사용되지 않고 시그니처 일관성
-	 *   유지용).
-	 * @bfqq: 재큐잉할 큐.
-	 * @expiration: 방금 만료 처리를 거친 뒤의 재큐잉인지 여부.
-	 * @return: 없음(void).
-	 *
-	 * non_blocking_wait_rq는 항상 false로(재큐잉은 새 request를
-	 * 기다리던 seeky 큐의 첫 활성화가 아니므로 해당 최적화가 무의미),
-	 * requeue는 "이 큐가 지금 in-service인지"를 그대로 전달한다 -
-	 * in-service인 큐가 재큐잉되는 것은 만료로 인한 것이므로 그
-	 * 상위 조상들도 강제로 재큐잉돼야 함을 뜻하기 때문(원본 주석의
-	 * requeue 정의 참고). bfqd->lock 하에서 호출.
-	 *
-	 * 호출 체인:
-	 *   bfq_bfqq_expire()(bfq-iosched.c) -> [bfq_requeue_bfqq] ->
-	 *   bfq_activate_requeue_entity()
-	 */
 	struct bfq_entity *entity = &bfqq->entity; /* bfqq를 감싸는 leaf entity */
 
 	bfq_activate_requeue_entity(entity, false, /* 재큐잉이므로 non_blocking_wait_rq 최적화는 적용하지 않음 */
 				    bfqq == bfqd->in_service_queue, expiration); /* requeue 플래그는 "지금 이 큐가 in-service인가"로 결정 */
 }
 
+/*
+ * [한국어]
+ * bfq_add_bfqq_in_groups_with_pending_reqs - bfqq가 pending
+ *   request를 처음 갖게 될 때, 그 소속 그룹을
+ *   bfqd->num_groups_with_pending_reqs 집계에 반영한다.
+ *
+ * @bfqq: 대상 큐.
+ * @return: 없음(void).
+ *
+ * entity->in_groups_with_pending_reqs 플래그로 "이미 집계에
+ * 반영됐는지"를 추적해 중복 카운트를 막는다: 아직 반영되지
+ * 않았다면 플래그를 true로 세우고, bfqq_group(bfqq)->
+ * num_queues_with_pending_reqs를 증가시키되 그 증가 "전" 값이
+ * 0이었다면(이 그룹에 pending 큐가 이번이 처음이라면)
+ * bfqd->num_groups_with_pending_reqs까지 함께 증가시킨다 -
+ * 즉 그룹 단위 카운트는 "그 그룹에 pending 큐가 하나라도
+ * 있는가"만 반영하는 근사(0/1) 카운트다. CONFIG_BFQ_GROUP_IOSCHED가
+ * 꺼진 빌드에서는 그룹 개념이 없어 함수 본문 전체가 비활성화된다.
+ * bfqd->lock 하에서 호출.
+ *
+ * 호출 체인:
+ *   request 삽입 경로(bfq-iosched.c) ->
+ *   [bfq_add_bfqq_in_groups_with_pending_reqs] -> bfqq_group()
+ */
 void bfq_add_bfqq_in_groups_with_pending_reqs(struct bfq_queue *bfqq)
 {
-	/*
-	 * [한국어]
-	 * bfq_add_bfqq_in_groups_with_pending_reqs - bfqq가 pending
-	 *   request를 처음 갖게 될 때, 그 소속 그룹을
-	 *   bfqd->num_groups_with_pending_reqs 집계에 반영한다.
-	 *
-	 * @bfqq: 대상 큐.
-	 * @return: 없음(void).
-	 *
-	 * entity->in_groups_with_pending_reqs 플래그로 "이미 집계에
-	 * 반영됐는지"를 추적해 중복 카운트를 막는다: 아직 반영되지
-	 * 않았다면 플래그를 true로 세우고, bfqq_group(bfqq)->
-	 * num_queues_with_pending_reqs를 증가시키되 그 증가 "전" 값이
-	 * 0이었다면(이 그룹에 pending 큐가 이번이 처음이라면)
-	 * bfqd->num_groups_with_pending_reqs까지 함께 증가시킨다 -
-	 * 즉 그룹 단위 카운트는 "그 그룹에 pending 큐가 하나라도
-	 * 있는가"만 반영하는 근사(0/1) 카운트다. CONFIG_BFQ_GROUP_IOSCHED가
-	 * 꺼진 빌드에서는 그룹 개념이 없어 함수 본문 전체가 비활성화된다.
-	 * bfqd->lock 하에서 호출.
-	 *
-	 * 호출 체인:
-	 *   request 삽입 경로(bfq-iosched.c) ->
-	 *   [bfq_add_bfqq_in_groups_with_pending_reqs] -> bfqq_group()
-	 */
 #ifdef CONFIG_BFQ_GROUP_IOSCHED
 	struct bfq_entity *entity = &bfqq->entity; /* bfqq를 감싸는 leaf entity(in_groups_with_pending_reqs 플래그 보유) */
 
@@ -3180,29 +3180,29 @@ void bfq_add_bfqq_in_groups_with_pending_reqs(struct bfq_queue *bfqq)
 #endif
 }
 
+/*
+ * [한국어]
+ * bfq_del_bfqq_in_groups_with_pending_reqs - bfqq의 pending
+ *   request가 모두 사라졌을 때 그룹의 pending 집계에서 제외한다
+ *   (bfq_add_bfqq_in_groups_with_pending_reqs()의 역연산).
+ *
+ * @bfqq: 대상 큐.
+ * @return: 없음(void).
+ *
+ * entity->in_groups_with_pending_reqs가 true(이미 집계에 반영돼
+ * 있음)일 때만 플래그를 false로 내리고, 그룹의
+ * num_queues_with_pending_reqs를 감소시키되 그 감소 "후" 값이
+ * 0이 됐다면(이 그룹에 pending 큐가 이제 하나도 없다면)
+ * bfqd->num_groups_with_pending_reqs도 함께 감소시킨다.
+ * CONFIG_BFQ_GROUP_IOSCHED가 꺼진 빌드에서는 본문 전체가
+ * 비활성화된다. bfqd->lock 하에서 호출.
+ *
+ * 호출 체인:
+ *   request 완료/제거 경로(bfq-iosched.c) ->
+ *   [bfq_del_bfqq_in_groups_with_pending_reqs] -> bfqq_group()
+ */
 void bfq_del_bfqq_in_groups_with_pending_reqs(struct bfq_queue *bfqq)
 {
-	/*
-	 * [한국어]
-	 * bfq_del_bfqq_in_groups_with_pending_reqs - bfqq의 pending
-	 *   request가 모두 사라졌을 때 그룹의 pending 집계에서 제외한다
-	 *   (bfq_add_bfqq_in_groups_with_pending_reqs()의 역연산).
-	 *
-	 * @bfqq: 대상 큐.
-	 * @return: 없음(void).
-	 *
-	 * entity->in_groups_with_pending_reqs가 true(이미 집계에 반영돼
-	 * 있음)일 때만 플래그를 false로 내리고, 그룹의
-	 * num_queues_with_pending_reqs를 감소시키되 그 감소 "후" 값이
-	 * 0이 됐다면(이 그룹에 pending 큐가 이제 하나도 없다면)
-	 * bfqd->num_groups_with_pending_reqs도 함께 감소시킨다.
-	 * CONFIG_BFQ_GROUP_IOSCHED가 꺼진 빌드에서는 본문 전체가
-	 * 비활성화된다. bfqd->lock 하에서 호출.
-	 *
-	 * 호출 체인:
-	 *   request 완료/제거 경로(bfq-iosched.c) ->
-	 *   [bfq_del_bfqq_in_groups_with_pending_reqs] -> bfqq_group()
-	 */
 #ifdef CONFIG_BFQ_GROUP_IOSCHED
 	struct bfq_entity *entity = &bfqq->entity; /* bfqq를 감싸는 leaf entity */
 

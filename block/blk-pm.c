@@ -157,6 +157,36 @@
  *    The block layer runtime PM is request based, so only works for drivers
  *    that use request as their IO unit instead of those directly use bio's.
  */
+/*
+ * [한국어]
+ * blk_pm_runtime_init - request_queue를 런타임 전원 관리(runtime PM) 대상으로 등록
+ *
+ * @q:   등록할 request_queue
+ * @dev: 이 큐를 소유한 장치. NVMe PCIe라면 nvme_dev의 pci_dev에 대응한다.
+ * @return: 없음
+ *
+ * === 블록 계층 runtime PM이란 ===
+ * 장치가 일정 시간 놀고 있으면 저전력 상태로 내리고, 새 I/O가 오면 다시
+ * 깨우는 기능이다. 문제는 "지금 정말 놀고 있는가"를 블록 계층만이 알 수
+ * 있다는 점이다 — 큐에 대기 중인 request가 있는데 장치를 재우면 그 I/O가
+ * 영원히 완료되지 않는다. 그래서 블록 계층이 q->nr_pending을 추적하며
+ * suspend 가부를 판단하는 훅을 제공한다.
+ *
+ * 위 영문 주석이 밝히는 중요한 한계: 이 기능은 request 기반이라 bio를 직접
+ * 처리하는 드라이버(예: 일부 가상 블록 장치)에서는 동작하지 않는다.
+ * NVMe는 blk-mq 기반이므로 대상이 된다.
+ *
+ * autosuspend delay를 -1로 두는 이유도 중요하다. 이 함수는 "관리할 준비"만
+ * 하고 실제 자동 suspend는 켜지 않는다. 드라이버가 자신의 정책에 맞는 지연
+ * 값을 sysfs나 코드로 설정해야 비로소 동작한다 — 블록 계층이 임의로 장치를
+ * 재우기 시작하면 곤란하기 때문이다.
+ *
+ * 실행 컨텍스트: 드라이버 probe 경로(프로세스 컨텍스트).
+ *
+ * 호출 체인:
+ *   드라이버 probe → [blk_pm_runtime_init]
+ *     → pm_runtime_set_autosuspend_delay / pm_runtime_use_autosuspend
+ */
 void blk_pm_runtime_init(struct request_queue *q, struct device *dev)
 {
 	q->dev = dev;
@@ -272,6 +302,34 @@ EXPORT_SYMBOL(blk_pm_runtime_init);
  * Return:
  *    0		- OK to runtime suspend the device
  *    -EBUSY	- Device should not be runtime suspended
+ */
+/*
+ * [한국어]
+ * blk_pre_runtime_suspend - 장치를 재워도 되는지 블록 계층 관점에서 판정
+ *
+ * @q: 판정 대상 request_queue
+ * @return: 0 = suspend 진행 가능, -EBUSY = 아직 처리 중인 I/O가 있어 불가
+ *
+ * 드라이버의 runtime_suspend 콜백이 실제로 장치를 재우기 "전에" 호출해,
+ * 블록 계층에 남은 I/O가 없는지 확인받는다.
+ *
+ * 판정 방식이 흥미롭다. 단순히 카운터를 세는 것이 아니라 큐를 freeze한 뒤
+ * percpu_ref 값을 확인한다. freeze는 새 I/O 진입을 막으므로, 그 상태에서
+ * 참조가 남아 있다면 "진행 중인 I/O가 실제로 있다"는 뜻이 확정된다.
+ * 카운터만 읽으면 읽는 순간과 판정 사이에 새 I/O가 들어올 수 있어 경쟁이
+ * 발생한다.
+ *
+ * -EBUSY를 반환하면 PM 코어가 suspend를 취소하고, 나중에 다시 시도한다.
+ *
+ * NVMe 관점: 이 판정을 통과해야 nvme_suspend()가 컨트롤러를 저전력 상태
+ * (APST 또는 D3)로 내릴 수 있다. 진행 중인 커맨드가 있는데 컨트롤러를
+ * 내리면 그 커맨드는 완료되지 않고 타임아웃으로 이어진다.
+ *
+ * 실행 컨텍스트: PM 코어의 프로세스 컨텍스트. 큐 freeze가 잠들 수 있다.
+ *
+ * 호출 체인:
+ *   PM 코어 → 드라이버의 runtime_suspend → [blk_pre_runtime_suspend]
+ *     → blk_freeze_queue_start / blk_mq_unfreeze_queue
  */
 int blk_pre_runtime_suspend(struct request_queue *q)
 {
