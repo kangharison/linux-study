@@ -9008,9 +9008,9 @@ static void blk_mq_map_swqueue(struct request_queue *q)
 	/* [한국어] i는 두 용도로 쓰인다 — 앞의 hctx 순회 인덱스이자 뒤의 CPU 번호다.
 	 * unsigned long인 이유는 cpumask 관련 매크로가 그 타입을 요구하기 때문이다. */
 	unsigned long i;
-	struct blk_mq_hw_ctx *hctx;
-	struct blk_mq_ctx *ctx;
-	struct blk_mq_tag_set *set = q->tag_set;
+	struct blk_mq_hw_ctx *hctx;	/* [한국어] 1단계 순회에서 쓸 hctx 커서 */
+	struct blk_mq_ctx *ctx;	/* [한국어] 2단계에서 CPU 별 sw 큐를 가리킬 커서 */
+	struct blk_mq_tag_set *set = q->tag_set;	/* [한국어] 맵 정보(map[type].mq_map[cpu])의 원천 — 드라이버가 map_queues 로 채워 둔 것이다 */
 
 	/* [한국어] ★ 1단계: 기존 매핑을 모두 지운다 ★
 	 * 이 함수는 최초 생성뿐 아니라 CPU 핫플러그나 큐 수 변경으로 재호출된다.
@@ -9040,7 +9040,7 @@ static void blk_mq_map_swqueue(struct request_queue *q)
 		 * 락 없이 독립적으로 쓰인다 — 이것이 blk-mq가 제출 경로의 락 경합을
 		 * 없앤 핵심 구조다. */
 		ctx = per_cpu_ptr(q->queue_ctx, i);
-		for (j = 0; j < set->nr_maps; j++) {
+		for (j = 0; j < set->nr_maps; j++) {	/* [한국어] 이 CPU 에 대해 DEFAULT/READ/POLL 각 맵을 차례로 처리 */
 			/* [한국어] 이 타입에 배정된 하드웨어 큐가 하나도 없는 경우.
 			 * NVMe에서 write_queues=0이면 READ 맵이, poll_queues=0이면
 			 * POLL 맵이 이 상태가 된다. 그런 타입의 요청은 DEFAULT 큐로
@@ -9049,12 +9049,12 @@ static void blk_mq_map_swqueue(struct request_queue *q)
 			 * 확인하지 않고 ctx->hctxs[type]을 바로 쓸 수 있다. */
 			if (!set->map[j].nr_queues) {
 				ctx->hctxs[j] = blk_mq_map_queue_type(q,
-						HCTX_TYPE_DEFAULT, i);
+						HCTX_TYPE_DEFAULT, i);	/* [한국어] DEFAULT 맵의 hctx 를 폴백으로 채운다 */
 				continue;
 			}
-			hctx_idx = set->map[j].mq_map[i];
+			hctx_idx = set->map[j].mq_map[i];	/* [한국어] 드라이버의 map_queues 콜백이 채워 둔 "CPU i 가 맵 j 에서 쓸 hctx 번호". NVMe 라면 nvme_pci_map_queues 가 MSI-X affinity 를 보고 채운 값이다 */
 			/* unmapped hw queue can be remapped after CPU topo changed */
-			if (!set->tags[hctx_idx] &&
+			if (!set->tags[hctx_idx] &&	/* [한국어] 그 hctx 번호에 태그 풀이 아직 없고(CPU 토폴로지 변경으로 새로 매핑된 경우) */
 			    /* [한국어] tag 할당 실패: hctx[0] 에 fallback 매핑 */
 			    !__blk_mq_alloc_map_and_rqs(set, hctx_idx)) {
 				/*
@@ -9063,10 +9063,10 @@ static void blk_mq_map_swqueue(struct request_queue *q)
 				 * case, remap the current ctx to hctx[0] which
 				 * is guaranteed to always have tags allocated
 				 */
-				set->map[j].mq_map[i] = 0;
+				set->map[j].mq_map[i] = 0;	/* [한국어] 태그 풀을 못 만들었으므로 이 CPU 를 hctx 0 으로 되돌린다 — hctx 0 은 절대 해제되지 않아 언제나 유효한 폴백이다 */
 			}
 
-			hctx = blk_mq_map_queue_type(q, j, i);
+			hctx = blk_mq_map_queue_type(q, j, i);	/* [한국어] 확정된 매핑으로 실제 hctx 포인터를 조회 */
 			/* [한국어] ctx->hctxs[j]: 이 CPU 가 type j 로 사용할 hctx(NVMe SQ) */
 			ctx->hctxs[j] = hctx;
 			/*
@@ -9080,7 +9080,7 @@ static void blk_mq_map_swqueue(struct request_queue *q)
 
 			/* [한국어] hctx->cpumask 에 이 CPU 추가: SQ IRQ affinity 기반 */
 			cpumask_set_cpu(i, hctx->cpumask);
-			hctx->type = j;
+			hctx->type = j;	/* [한국어] 이 hctx 가 어떤 맵 타입에 속하는지 기록 — 완료·삽입 경로가 ctx->rq_lists[type] 인덱싱에 쓴다 */
 			/* [한국어] ctx->index_hw[j]: 이 CPU 가 hctx->ctxs[] 에서 몇 번째인지 */
 			ctx->index_hw[hctx->type] = hctx->nr_ctx;
 			/* [한국어] hctx->ctxs[nr_ctx++] 에 이 ctx 등록 */
@@ -9090,7 +9090,7 @@ static void blk_mq_map_swqueue(struct request_queue *q)
 			 * If the nr_ctx type overflows, we have exceeded the
 			 * amount of sw queues we can support.
 			 */
-			BUG_ON(!hctx->nr_ctx);
+			BUG_ON(!hctx->nr_ctx);	/* [한국어] 방금 증가시켰으니 0 일 수 없다. 0 이면 nr_ctx 가 오버플로했다는 뜻이고(위 영문 주석), 그대로 두면 배열 범위를 벗어나므로 즉시 멈춘다 */
 		}
 
 		/* [한국어] 남은 type(j..HCTX_MAX_TYPES) 은 모두 DEFAULT hctx 로 설정 */
@@ -9099,14 +9099,14 @@ static void blk_mq_map_swqueue(struct request_queue *q)
 					HCTX_TYPE_DEFAULT, i);
 	}
 
-	queue_for_each_hw_ctx(q, hctx, i) {
-		int cpu;
+	queue_for_each_hw_ctx(q, hctx, i) {	/* [한국어] 2단계 — 매핑이 끝난 뒤 각 hctx 를 활성/비활성으로 확정한다 */
+		int cpu;	/* [한국어] isolated CPU 를 걸러내는 아래 루프의 순회 변수 */
 
 		/*
 		 * If no software queues are mapped to this hardware queue,
 		 * disable it and free the request entries.
 		 */
-		if (!hctx->nr_ctx) {
+		if (!hctx->nr_ctx) {	/* [한국어] 이 hctx 에 매핑된 sw 큐가 하나도 없는가 — 쓰이지 않는 하드웨어 큐라는 뜻이다 */
 			/* [한국어] sw queue 가 없는 NVMe SQ: tag pool 해제 후 비활성화.
 			 * hctx[0] 는 fallback 으로 보존 */
 			/* Never unmap queue 0.  We need it as a
@@ -9116,13 +9116,13 @@ static void blk_mq_map_swqueue(struct request_queue *q)
 			if (i)
 				__blk_mq_free_map_and_rqs(set, i);
 
-			hctx->tags = NULL;
+			hctx->tags = NULL;	/* [한국어] 태그 풀 연결을 끊어 이 hctx 를 비활성으로 만든다 */
 			continue;
 		}
 
 		/* [한국어] 활성화된 hctx 에 tag pool 연결 */
 		hctx->tags = set->tags[i];
-		WARN_ON(!hctx->tags);
+		WARN_ON(!hctx->tags);	/* [한국어] 여기까지 왔다면 태그 풀이 반드시 있어야 한다 — 없으면 위쪽 할당 로직에 구멍이 있다는 뜻이다 */
 
 		/*
 		 * Set the map size to the number of mapped software queues.
@@ -9138,13 +9138,13 @@ static void blk_mq_map_swqueue(struct request_queue *q)
 		 * FIXME: cpuset should propagate further changes to isolated CPUs
 		 * here.
 		 */
-		rcu_read_lock();
+		rcu_read_lock();	/* [한국어] cpu_is_isolated() 가 cpuset 자료구조를 읽으므로 RCU 읽기 구간이 필요하다 */
 		/* [한국어] isolated CPU 는 kblockd 스케줄링 방지를 위해 cpumask 제외 */
 		for_each_cpu(cpu, hctx->cpumask) {
 			if (cpu_is_isolated(cpu))
-				cpumask_clear_cpu(cpu, hctx->cpumask);
+				cpumask_clear_cpu(cpu, hctx->cpumask);	/* [한국어] isolated CPU 를 cpumask 에서 뺀다 — 그 CPU 에 kblockd 워커를 예약하면 격리 목적이 깨진다. 단, 그 CPU 가 I/O 를 제출하는 것 자체는 막지 않는다 */
 		}
-		rcu_read_unlock();
+		rcu_read_unlock();	/* [한국어] 순회가 끝났으므로 RCU 읽기 구간 해제 */
 
 		/*
 		 * Initialize batch roundrobin counts
@@ -9191,16 +9191,16 @@ static void blk_mq_map_swqueue(struct request_queue *q)
 static void queue_set_hctx_shared(struct request_queue *q, bool shared)
 {
 	struct blk_mq_hw_ctx *hctx;
-	unsigned long i;
+	unsigned long i;	/* [한국어] queue_for_each_hw_ctx 순회 인덱스 */
 
-	queue_for_each_hw_ctx(q, hctx, i) {
-		if (shared) {
+	queue_for_each_hw_ctx(q, hctx, i) {	/* [한국어] 이 큐의 모든 하드웨어 큐에 같은 모드를 적용 */
+		if (shared) {	/* [한국어] 공유 모드로 바꾸는가 */
 			/* [한국어] shared 전환: BLK_MQ_F_TAG_QUEUE_SHARED 플래그 설정 */
 			hctx->flags |= BLK_MQ_F_TAG_QUEUE_SHARED;
 		} else {
 			/* [한국어] unshared 전환: tag idle 후 플래그 제거 */
 			blk_mq_tag_idle(hctx);
-			hctx->flags &= ~BLK_MQ_F_TAG_QUEUE_SHARED;
+			hctx->flags &= ~BLK_MQ_F_TAG_QUEUE_SHARED;	/* [한국어] 공유 해제 — 이제 이 hctx 가 태그 풀을 독점하므로 공유 시의 몫 제한(hctx_may_queue)을 걷어낸다 */
 		}
 	}
 }
@@ -9219,15 +9219,15 @@ static void blk_mq_update_tag_set_shared(struct blk_mq_tag_set *set,
 					 bool shared)
 {
 	struct request_queue *q;
-	unsigned int memflags;
+	unsigned int memflags;	/* [한국어] blk_mq_freeze_queue 가 저장해 주는 memalloc_noio 상태 — unfreeze 에 그대로 돌려줘야 한다 */
 
-	lockdep_assert_held(&set->tag_list_lock);
+	lockdep_assert_held(&set->tag_list_lock);	/* [한국어] 호출자가 tag_list_lock 을 쥐고 있어야 한다 — 순회 중 리스트가 바뀌면 안 되기 때문이다 */
 
-	list_for_each_entry(q, &set->tag_list, tag_set_list) {
+	list_for_each_entry(q, &set->tag_list, tag_set_list) {	/* [한국어] 이 tag set 을 공유하는 모든 큐(NVMe 라면 한 컨트롤러의 전 네임스페이스)를 순회 */
 		/* [한국어] queue freeze: in-flight request 완료 대기 후 shared 전환 */
 		memflags = blk_mq_freeze_queue(q);
-		queue_set_hctx_shared(q, shared);
-		blk_mq_unfreeze_queue(q, memflags);
+		queue_set_hctx_shared(q, shared);	/* [한국어] 이 큐의 모든 hctx 에 공유 플래그를 적용. freeze 중이라 in-flight 요청이 없어 안전하다 */
+		blk_mq_unfreeze_queue(q, memflags);	/* [한국어] 변경이 끝났으므로 즉시 unfreeze — 큐 하나씩 처리해 전체 정지 시간을 줄인다 */
 	}
 }
 
@@ -9244,16 +9244,16 @@ static void blk_mq_del_queue_tag_set(struct request_queue *q)
 {
 	struct blk_mq_tag_set *set = q->tag_set;
 
-	mutex_lock(&set->tag_list_lock);
+	mutex_lock(&set->tag_list_lock);	/* [한국어] tag_list 수정과 shared 전환을 직렬화하는 뮤텍스 */
 	/* [한국어] RCU list 제거: 이후 readers 는 이 q 를 보지 못함 */
 	list_del_rcu(&q->tag_set_list);
-	if (list_is_singular(&set->tag_list)) {
+	if (list_is_singular(&set->tag_list)) {	/* [한국어] 제거하고 나면 큐가 하나만 남는가 — 즉 공유할 상대가 사라지는가 */
 		/* just transitioned to unshared */
 		/* [한국어] 1개만 남음: unshared 로 전환 (CID pool 분리) */
 		set->flags &= ~BLK_MQ_F_TAG_QUEUE_SHARED;
-		blk_mq_update_tag_set_shared(set, false);
+		blk_mq_update_tag_set_shared(set, false);	/* [한국어] 남은 하나가 태그 풀을 독점하게 만든다 */
 	}
-	mutex_unlock(&set->tag_list_lock);
+	mutex_unlock(&set->tag_list_lock);	/* [한국어] 리스트 수정과 모드 전환이 끝났으므로 뮤텍스 해제 */
 }
 
 /*
@@ -9274,19 +9274,19 @@ static void blk_mq_add_queue_tag_set(struct blk_mq_tag_set *set,
 	/*
 	 * Check to see if we're transitioning to shared (from 1 to 2 queues).
 	 */
-	if (!list_empty(&set->tag_list) &&
-	    !(set->flags & BLK_MQ_F_TAG_QUEUE_SHARED)) {
+	if (!list_empty(&set->tag_list) &&	/* [한국어] 이미 등록된 큐가 있고(즉 이번이 두 번째 이상이고) */
+	    !(set->flags & BLK_MQ_F_TAG_QUEUE_SHARED)) {	/* [한국어] 아직 공유 모드가 아니면 — 1개에서 2개로 넘어가는 전환 시점이다 */
 		/* [한국어] 1→2 queue 전환: shared 모드 활성화 */
 		set->flags |= BLK_MQ_F_TAG_QUEUE_SHARED;
-		blk_mq_update_tag_set_shared(set, true);
+		blk_mq_update_tag_set_shared(set, true);	/* [한국어] 기존 큐들에도 공유 플래그를 소급 적용한다 */
 	}
-	if (set->flags & BLK_MQ_F_TAG_QUEUE_SHARED)
+	if (set->flags & BLK_MQ_F_TAG_QUEUE_SHARED)	/* [한국어] 이미 공유 모드였거나 방금 전환되었으면 */
 		/* [한국어] 이미 shared 면 새 queue 에도 플래그 설정 */
 		queue_set_hctx_shared(q, true);
 	/* [한국어] RCU list 추가: reader 는 이 시점부터 새 q 를 볼 수 있음 */
 	list_add_tail_rcu(&q->tag_set_list, &set->tag_list);
 
-	mutex_unlock(&set->tag_list_lock);
+	mutex_unlock(&set->tag_list_lock);	/* [한국어] 리스트 추가와 모드 전환이 끝났으므로 뮤텍스 해제 */
 }
 
 /* All allocations will be freed in release handler of q->mq_kobj */
@@ -9303,32 +9303,32 @@ static void blk_mq_add_queue_tag_set(struct blk_mq_tag_set *set,
 static int blk_mq_alloc_ctxs(struct request_queue *q)
 {
 	struct blk_mq_ctxs *ctxs;
-	int cpu;
+	int cpu;	/* [한국어] for_each_possible_cpu 순회 변수 */
 
 	/* [한국어] blk_mq_ctxs: kobject + per-CPU queue_ctx 를 묶는 컨테이너 */
 	ctxs = kzalloc_obj(*ctxs);
-	if (!ctxs)
-		return -ENOMEM;
+	if (!ctxs)	/* [한국어] 컨테이너 할당 실패 */
+		return -ENOMEM;	/* [한국어] 아직 잡은 것이 없으므로 그대로 실패 반환 */
 
 	/* [한국어] alloc_percpu: 각 CPU 에 독립적인 blk_mq_ctx 할당 */
 	ctxs->queue_ctx = alloc_percpu(struct blk_mq_ctx);
-	if (!ctxs->queue_ctx)
-		goto fail;
+	if (!ctxs->queue_ctx)	/* [한국어] per-CPU 영역 할당 실패 */
+		goto fail;	/* [한국어] 컨테이너부터 되돌리는 경로로 */
 
 	/* [한국어] 각 CPU ctx 에 컨테이너 역참조 등록 */
 	for_each_possible_cpu(cpu) {
 		struct blk_mq_ctx *ctx = per_cpu_ptr(ctxs->queue_ctx, cpu);
-		ctx->ctxs = ctxs;
+		ctx->ctxs = ctxs;	/* [한국어] ctx 에서 컨테이너(그리고 그 kobject)를 거슬러 올라갈 수 있게 한다 — sysfs 경로에서 필요하다 */
 	}
 
 	/* [한국어] q->mq_kobj: sysfs kobject. q->queue_ctx: per-CPU ctx 배열 */
 	q->mq_kobj = &ctxs->kobj;
-	q->queue_ctx = ctxs->queue_ctx;
+	q->queue_ctx = ctxs->queue_ctx;	/* [한국어] 이후 제출 경로가 per_cpu_ptr(q->queue_ctx, cpu) 로 자기 CPU 의 sw 큐를 O(1) 로 찾는다 */
 
 	return 0;
  fail:
-	kfree(ctxs);
-	return -ENOMEM;
+	kfree(ctxs);	/* [한국어] per-CPU 할당에 실패했으므로 컨테이너만 되돌린다 */
+	return -ENOMEM;	/* [한국어] 이 함수의 실패 원인은 메모리 부족뿐이다 */
 }
 
 /*
@@ -9350,7 +9350,7 @@ static int blk_mq_alloc_ctxs(struct request_queue *q)
 void blk_mq_release(struct request_queue *q)
 {
 	struct blk_mq_hw_ctx *hctx, *next;
-	unsigned long i;
+	unsigned long i;	/* [한국어] queue_for_each_hw_ctx 순회 인덱스 */
 
 	/* [한국어] 모든 hctx 가 unused_hctx_list 에 있어야 함 (exit_hw_queues 완료 확인) */
 	queue_for_each_hw_ctx(q, hctx, i)
@@ -9360,7 +9360,7 @@ void blk_mq_release(struct request_queue *q)
 	/* [한국어] unused_hctx_list 의 모든 hctx kobject 해제 */
 	list_for_each_entry_safe(hctx, next, &q->unused_hctx_list, hctx_list) {
 		list_del_init(&hctx->hctx_list);
-		kobject_put(&hctx->kobj);
+		kobject_put(&hctx->kobj);	/* [한국어] kobject 참조를 내린다 — 마지막 참조였다면 release 핸들러가 hctx 메모리를 실제로 해제한다 */
 	}
 
 	/* [한국어] queue_hw_ctx[]: hctx 포인터 배열 해제 */
@@ -9390,28 +9390,28 @@ struct request_queue *blk_mq_alloc_queue(struct blk_mq_tag_set *set,
 		struct queue_limits *lim, void *queuedata)
 {
 	struct queue_limits default_lim = { };
-	struct request_queue *q;
-	int ret;
+	struct request_queue *q;	/* [한국어] 생성 중인 request_queue */
+	int ret;	/* [한국어] blk_mq_init_allocated_queue 의 결과 코드 */
 
-	if (!lim)
-		lim = &default_lim;
+	if (!lim)	/* [한국어] 호출자가 limits 를 주지 않았으면 */
+		lim = &default_lim;	/* [한국어] 스택의 빈 기본값을 쓴다 — 이후 드라이버가 queue_limits 갱신 API 로 실제 값을 채운다 */
 	/* [한국어] IO_STAT: iostat/cgroup accounting, NOWAIT: REQ_NOWAIT 지원 */
 	lim->features |= BLK_FEAT_IO_STAT | BLK_FEAT_NOWAIT;
-	if (set->nr_maps > HCTX_TYPE_POLL)
+	if (set->nr_maps > HCTX_TYPE_POLL)	/* [한국어] POLL 맵까지 만들 만큼 맵이 많은가(nr_maps > 2) */
 		/* [한국어] POLL queue 포함 시 polling 완료 지원 활성화 */
 		lim->features |= BLK_FEAT_POLL;
 
-	q = blk_alloc_queue(lim, set->numa_node);
-	if (IS_ERR(q))
-		return q;
+	q = blk_alloc_queue(lim, set->numa_node);	/* [한국어] 큐 뼈대 할당 — 아직 hctx 나 tag 연결은 없다 */
+	if (IS_ERR(q))	/* [한국어] 큐 할당 실패 */
+		return q;	/* [한국어] ERR_PTR 를 그대로 전달 */
 	/* [한국어] queuedata: nvme_ns 구조체 — nvme_queue_rq 에서 역참조 */
 	q->queuedata = queuedata;
-	ret = blk_mq_init_allocated_queue(set, q);
-	if (ret) {
-		blk_put_queue(q);
-		return ERR_PTR(ret);
+	ret = blk_mq_init_allocated_queue(set, q);	/* [한국어] hctx 배열 생성, CPU↔큐 매핑, tag set 등록까지 여기서 이뤄진다 */
+	if (ret) {	/* [한국어] 초기화 실패 */
+		blk_put_queue(q);	/* [한국어] 큐 참조를 내려 해제 경로로 보낸다 */
+		return ERR_PTR(ret);	/* [한국어] 오류 코드를 ERR_PTR 로 포장해 반환 */
 	}
-	return q;
+	return q;	/* [한국어] 즉시 I/O 를 받을 수 있는 큐 반환 */
 }
 EXPORT_SYMBOL(blk_mq_alloc_queue);
 
@@ -9440,9 +9440,9 @@ EXPORT_SYMBOL(blk_mq_alloc_queue);
 void blk_mq_destroy_queue(struct request_queue *q)
 {
 	WARN_ON_ONCE(!queue_is_mq(q));
-	WARN_ON_ONCE(blk_queue_registered(q));
+	WARN_ON_ONCE(blk_queue_registered(q));	/* [한국어] 아직 sysfs 에 등록된 상태로 파괴하면 안 된다 — 등록 해제가 선행되어야 한다 */
 
-	might_sleep();
+	might_sleep();	/* [한국어] 아래에서 freeze 대기와 SRCU 동기화로 잠들 수 있음을 명시 */
 
 	/* [한국어] DYING: 이후 새 IO 는 모두 -ENODEV 로 실패 */
 	blk_queue_flag_set(QUEUE_FLAG_DYING, q);
@@ -9479,22 +9479,22 @@ struct gendisk *__blk_mq_alloc_disk(struct blk_mq_tag_set *set,
 		struct lock_class_key *lkclass)
 {
 	struct request_queue *q;
-	struct gendisk *disk;
+	struct gendisk *disk;	/* [한국어] 생성한 큐에 붙일 gendisk */
 
 	/* [한국어] request_queue 생성: hctx/tag_set 연결 완료 */
 	q = blk_mq_alloc_queue(set, lim, queuedata);
-	if (IS_ERR(q))
-		return ERR_CAST(q);
+	if (IS_ERR(q))	/* [한국어] 큐 생성 실패 */
+		return ERR_CAST(q);	/* [한국어] ERR_PTR 를 gendisk 포인터 타입으로 바꿔 전달 */
 
 	/* [한국어] gendisk 할당: /dev 노드 생성 준비 */
 	disk = __alloc_disk_node(q, set->numa_node, lkclass);
-	if (!disk) {
-		blk_mq_destroy_queue(q);
-		blk_put_queue(q);
-		return ERR_PTR(-ENOMEM);
+	if (!disk) {	/* [한국어] gendisk 할당 실패 */
+		blk_mq_destroy_queue(q);	/* [한국어] 큐를 DYING 으로 만들고 in-flight 를 배출 */
+		blk_put_queue(q);	/* [한국어] 큐 참조를 내려 실제 해제로 보낸다 */
+		return ERR_PTR(-ENOMEM);	/* [한국어] 이 경로의 실패 원인은 메모리 부족뿐이다 */
 	}
-	set_bit(GD_OWNS_QUEUE, &disk->state);
-	return disk;
+	set_bit(GD_OWNS_QUEUE, &disk->state);	/* [한국어] gendisk 가 큐의 수명을 소유한다고 표시 — 이후 del_gendisk 가 큐까지 정리한다 */
+	return disk;	/* [한국어] NVMe 라면 이 gendisk 가 /dev/nvme0n1 로 노출된다 */
 }
 EXPORT_SYMBOL(__blk_mq_alloc_disk);
 
@@ -9539,7 +9539,7 @@ struct gendisk *blk_mq_alloc_disk_for_queue(struct request_queue *q,
 	/* [한국어] 할당 실패 — 위에서 올린 참조를 반드시 되돌린다. */
 	if (!disk)
 		blk_put_queue(q);
-	return disk;
+	return disk;	/* [한국어] 큐와 디스크가 연결된 gendisk 반환 */
 }
 EXPORT_SYMBOL(blk_mq_alloc_disk_for_queue);
 

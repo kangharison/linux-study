@@ -1207,6 +1207,9 @@ void blk_mq_free_sched_res_batch(struct xarray *elv_tbl,
 	/* [한국어] lockdep: update_nr_hwq_lock write lock 보유 확인 — 미보유 시 커널 경고 */
 	lockdep_assert_held_write(&set->update_nr_hwq_lock);
 
+	/* [한국어] 이 태그 세트를 공유하는 모든 request_queue를 순회한다.
+	 * NVMe라면 한 컨트롤러의 모든 네임스페이스(nvme0n1, nvme0n2, ...)가
+	 * tag_set 하나를 공유하므로 그 큐들이 전부 여기에 걸린다. */
 	list_for_each_entry(q, &set->tag_list, tag_set_list) {
 		/*
 		 * Accessing q->elevator without holding q->elevator_lock is
@@ -1215,10 +1218,17 @@ void blk_mq_free_sched_res_batch(struct xarray *elv_tbl,
 		 * acquires the same lock but in the reader context) can't run
 		 * concurrently.
 		 */
-		/* [한국어] elevator가 있는 NVMe queue만 해제 대상; 없는 queue("none" 스케줄러)는 건너뜀 */
+		/* [한국어] 스케줄러가 붙은 큐만 해제 대상이다. "none"인 큐(멀티큐
+		 * NVMe의 기본 상태)는 애초에 자원을 잡지 않았으므로 건너뛴다.
+		 * 위 영문 주석대로, update_nr_hwq_lock을 쓰기 모드로 쥐고 있으면
+		 * elevator_lock 없이 q->elevator를 읽어도 안전하다 — 스케줄러를
+		 * 바꾸는 쪽은 같은 락을 읽기 모드로 잡아야 해서 동시에 못 돈다. */
 		if (q->elevator) {
 			/* [한국어] xa_load(): queue->id를 키로 변경 컨텍스트 찾기 */
 			ctx = xa_load(elv_tbl, q->id);
+			/* [한국어] 스케줄러가 붙은 큐라면 blk_mq_alloc_sched_ctx_batch()가
+			 * 반드시 ctx를 만들어 두었어야 한다. 없다는 것은 두 함수가 보는
+			 * 큐 목록이 어긋났다는 뜻이라 프로그래밍 오류다. */
 			if (!ctx) {
 				/* [한국어] elv_tbl에 없으면 프로그래밍 오류 — WARN 후 다음 queue 처리 */
 				WARN_ON_ONCE(1);
@@ -1282,8 +1292,10 @@ int blk_mq_alloc_sched_ctx_batch(struct xarray *elv_tbl,
 	list_for_each_entry(q, &set->tag_list, tag_set_list) {
 		/* [한국어] kzalloc_obj: elv_change_ctx 구조체를 zero-init으로 할당 */
 		ctx = kzalloc_obj(struct elv_change_ctx);
+		/* [한국어] 할당 실패 — 여기서 롤백하지 않는다. */
 		if (!ctx)
-			/* [한국어] 메모리 부족: 이미 할당된 ctx는 호출자가 blk_mq_free_sched_ctx_batch()로 해제 */
+			/* [한국어] 이미 삽입된 ctx들은 호출자가
+			 * blk_mq_free_sched_ctx_batch()로 한꺼번에 정리한다. */
 			return -ENOMEM;
 
 		/* [한국어] xa_insert(): q->id를 키로 ctx를 elv_tbl에 삽입;
@@ -1300,7 +1312,7 @@ int blk_mq_alloc_sched_ctx_batch(struct xarray *elv_tbl,
  * [한국어]
  * blk_mq_alloc_sched_tags - 스케줄러 태그 풀(elevator_tags) 할당
  *
- * @set:          NVMe 장치 blk_mq_tag_set
+ * @set:          대상 blk_mq_tag_set. 태그 공유 여부(flags)와 queue_depth를 여기서 읽는다
  * @nr_hw_queues: 하드웨어 큐(hctx) 수
  * @nr_requests:  스케줄러가 대기시켜 둘 수 있는 최대 request 수.
  *               호출자 blk_mq_alloc_sched_res()가 blk_mq_default_nr_requests(set)
@@ -1313,12 +1325,13 @@ int blk_mq_alloc_sched_ctx_batch(struct xarray *elv_tbl,
  * 이 태그는 드라이버 태그와 완전히 별개이며, NVMe Command ID가 아니다
  * (CID로 쓰이는 것은 dispatch 시점에 따로 잡는 드라이버 태그다).
  * shared tags 모드면 모든 hctx가 tags[0] 하나를 공유하고(MAX_SCHED_RQ 한도),
- * per-SQ 모드면 hctx별로 독립된 tag map을 nr_requests 크기로 할당한다.
+ * 비공유 모드면 하드웨어 큐별로 독립된 tag map을 nr_requests 크기로 할당한다.
  * 할당 실패 시 out_unwind 경로에서 이미 할당된 tag map을 역순으로 해제한다.
  *
  * 구조체 field 역할:
- *   et->nr_requests:  이 elevator_tags가 관리하는 최대 request 수 (SQ depth와 맞춤)
- *   et->nr_hw_queues: hctx(하드웨어 큐) 수; per-SQ 모드에서 해제 루프 상한
+ *   et->nr_requests:  이 태그 풀이 담을 수 있는 최대 request 수.
+ *                     blk_mq_init_sched()가 이 값을 q->nr_requests에 반영한다
+ *   et->nr_hw_queues: hctx(하드웨어 큐) 수; 비공유 모드에서 해제 루프 상한
  *   et->tags[i]:      i번째 hctx용 blk_mq_tags (tag bitmap + request pool)
  *
  * 호출 체인:
@@ -1328,8 +1341,10 @@ int blk_mq_alloc_sched_ctx_batch(struct xarray *elv_tbl,
 struct elevator_tags *blk_mq_alloc_sched_tags(struct blk_mq_tag_set *set,
 		unsigned int nr_hw_queues, unsigned int nr_requests)
 {
-	/* [한국어] nr_tags: 할당할 tag map 수 — shared면 1, per-SQ면 nr_hw_queues */
+	/* [한국어] nr_tags: 할당할 tag map 개수 — 태그 공유 모드면 1, 아니면 nr_hw_queues */
 	unsigned int nr_tags;
+	/* [한국어] tags[] 순회 인덱스. 실패 시 out_unwind에서 이 값으로 롤백
+	 * 범위를 정하므로, 루프 밖에서 선언해야 한다(C89 스타일 유지). */
 	int i;
 	/* [한국어] et: 반환할 elevator_tags (nr_hw_queues, nr_requests, tags[] 보관) */
 	struct elevator_tags *et;
@@ -1339,48 +1354,67 @@ struct elevator_tags *blk_mq_alloc_sched_tags(struct blk_mq_tag_set *set,
 
 	/* [한국어] shared tags 모드: 모든 하드웨어 큐가 태그 풀 하나를 공유 → tag map 1개만 필요 */
 	if (blk_mq_is_shared_tags(set->flags))
+		/* [한국어] 공유 모드에서는 태그 맵 하나를 모든 하드웨어 큐가 함께 쓴다.
+		 * tags[0]에만 담고 나머지 인덱스는 쓰지 않는다. */
 		nr_tags = 1;
+	/* [한국어] NVMe를 포함한 대부분의 장치가 이쪽 — 하드웨어 큐마다 독립 태그 맵. */
 	else
-		/* [한국어] per-SQ: 각 hctx(하드웨어 큐)마다 독립 tag map → nr_hw_queues개 필요 */
+		/* [한국어] 비공유 모드: 하드웨어 큐마다 독립 tag map이 필요하다.
+		 * NVMe가 이쪽이며, 하드웨어 큐 수만큼 배열이 만들어진다 */
 		nr_tags = nr_hw_queues;
 
 	/* [한국어] kmalloc_flex: elevator_tags + tags[nr_tags] flexible array 한 번에 할당 */
 	et = kmalloc_flex(*et, tags, nr_tags, gfp);
+	/* [한국어] 실패해도 경고를 내지 않는다(__GFP_NOWARN). 스케줄러 부착은
+	 * 실패해도 "none"으로 계속 동작하는 선택적 기능이기 때문이다. */
 	if (!et)
+		/* [한국어] 아직 아무 tag map도 잡지 않았으므로 그냥 반환. */
 		return NULL;
 
-	/* [한국어] nr_requests: scheduler가 관리할 최대 request 수 기록 (SQ depth와 연동) */
+	/* [한국어] nr_requests 기록. 나중에 blk_mq_init_sched()가 q->nr_requests로 복사해,
+	 * 디스패치 루프의 max_dispatch 상한으로도 쓰인다 */
 	et->nr_requests = nr_requests;
 	/* [한국어] nr_hw_queues: 해제 시 루프 상한으로 사용 */
 	et->nr_hw_queues = nr_hw_queues;
 
+	/* [한국어] 위에서 정한 nr_tags에 맞춰 실제 태그 맵을 만든다. 두 모드의
+	 * 차이가 크기 인자에서도 드러난다 — 공유 모드는 MAX_SCHED_RQ(= 16*128
+	 * = 2048)라는 전역 상한을 쓰고, 비공유 모드는 큐별 nr_requests를 쓴다. */
 	if (blk_mq_is_shared_tags(set->flags)) {
 		/* Shared tags are stored at index 0 in @tags. */
 		/* [한국어] 공유 tag map: BLK_MQ_NO_HCTX_IDX = 특정 hctx 미귀속; MAX_SCHED_RQ = 공유 pool 최대 크기 */
 		et->tags[0] = blk_mq_alloc_map_and_rqs(set, BLK_MQ_NO_HCTX_IDX,
 					MAX_SCHED_RQ);
+		/* [한국어] 공유 모드에서는 tag map이 하나뿐이라 롤백할 것이 없다. */
 		if (!et->tags[0])
 			/* [한국어] 할당 실패: et만 해제 후 NULL 반환 */
 			goto out;
 	} else {
-		/* [한국어] per-SQ: 각 hctx i에 대해 nr_requests 크기의 독립 tag map 할당 */
+		/* [한국어] 비공유 모드: 하드웨어 큐 i마다 nr_requests 크기의 독립 tag map을 만든다 */
 		for (i = 0; i < et->nr_hw_queues; i++) {
 			et->tags[i] = blk_mq_alloc_map_and_rqs(set, i,
+					/* [한국어] 이 하드웨어 큐가 담을 수 있는 대기 request 수. */
 					et->nr_requests);
+			/* [한국어] 중간에 실패하면 앞서 성공한 0..i-1을 되돌려야 한다. */
 			if (!et->tags[i])
 				/* [한국어] i번째 실패: 0~i-1 tag map 롤백 필요 */
 				goto out_unwind;
 		}
 	}
 
+	/* [한국어] 모든 tag map 준비 완료 — 호출자가 res->et에 담아 두었다가
+	 * elevator_alloc()에서 eq->et로 연결한다. */
 	return et;
 out_unwind:
-	/* [한국어] out_unwind: 실패 직전까지 할당된 per-SQ tag map을 역순으로 해제 */
+	/* [한국어] out_unwind: 실패 직전까지 성공했던 tag map들을 역순으로 되돌린다.
+	 * --i 로 시작하는 이유: 실패한 i번째는 할당되지 않았으므로 그 앞부터 지운다 */
 	while (--i >= 0)
 		blk_mq_free_map_and_rqs(set, et->tags[i], i);
 out:
 	/* [한국어] elevator_tags 구조체 자체 해제 */
 	kfree(et);
+	/* [한국어] 두 실패 경로(out, out_unwind)가 여기서 만나 NULL을 반환한다.
+	 * 호출자 blk_mq_alloc_sched_res()가 -ENOMEM으로 바꿔 위로 올린다. */
 	return NULL;
 }
 
@@ -1395,7 +1429,9 @@ out:
  * @return:       0 = 성공; -ENOMEM = 메모리 부족
  *
  * elevator 전환 시 새 elevator를 위해 필요한 자원(tag pool + private data)을 미리 할당한다.
- * blk_mq_default_nr_requests(set)으로 SQ depth 기본값을 계산해 tag pool 크기를 결정한다.
+ * blk_mq_default_nr_requests(set) = 2 * min(set->queue_depth, 128)로 태그 풀 크기를
+ * 결정한다. 큐 깊이가 큰 NVMe에서는 이 값이 256으로 고정되므로, 스케줄러가
+ * 대기시킬 수 있는 request 수가 드라이버 태그 수보다 오히려 적어진다.
  * private data 할당 실패 시 이미 할당한 tag pool을 롤백한다.
  */
 int blk_mq_alloc_sched_res(struct request_queue *q,
@@ -1403,22 +1439,32 @@ int blk_mq_alloc_sched_res(struct request_queue *q,
 		struct elevator_resources *res,
 		unsigned int nr_hw_queues)
 {
-	/* [한국어] set: NVMe 장치 blk_mq_tag_set — shared tags 여부, default nr_requests 값 보유 */
+	/* [한국어] set: 이 큐가 속한 blk_mq_tag_set — 태그 공유 여부와 queue_depth 보유 */
 	struct blk_mq_tag_set *set = q->tag_set;
 
-	/* [한국어] blk_mq_default_nr_requests(set): tagset 기반 SQ depth 기본값으로 tag pool 크기 결정 */
+	/* [한국어] blk_mq_default_nr_requests(set) = 2 * min(set->queue_depth, BLKDEV_DEFAULT_RQ=128).
+	 * 2배로 잡는 이유는 스케줄러가 재정렬할 여유를 주기 위해서지만, 128 상한 때문에
+	 * 큐 깊이가 큰 장치에서는 256으로 잘린다 */
 	res->et = blk_mq_alloc_sched_tags(set, nr_hw_queues,
 			blk_mq_default_nr_requests(set));
+	/* [한국어] 태그 풀이 없으면 스케줄러를 붙일 수 없다. */
 	if (!res->et)
-		/* [한국어] tag pool 할당 실패: 스케줄러 태그 풀 없음 → 전환 불가 */
+		/* [한국어] 전환을 포기한다. 호출자(elevator_change)는 이 시점에
+		 * 아직 큐를 얼리지도 않았으므로 되돌릴 것이 없다. */
 		return -ENOMEM;
 
 	/* [한국어] blk_mq_alloc_sched_data(): elevator_type->ops.alloc_data()로 private 구조체 할당
 	 * (mq-deadline: dd_per_prio 배열; BFQ: bfq_data; kyber: kyber_queue) */
 	res->data = blk_mq_alloc_sched_data(q, type);
+	/* [한국어] 이 함수는 NULL이 아니라 ERR_PTR을 돌려주므로 IS_ERR로 검사한다.
+	 * (스케줄러에 따라 사설 데이터가 없어 NULL을 정상 반환할 수 있어,
+	 *  NULL 검사로는 성공과 실패를 구분할 수 없기 때문이다.) */
 	if (IS_ERR(res->data)) {
 		/* [한국어] private data 실패: 이미 할당한 et(tag pool) 롤백 */
 		blk_mq_free_sched_tags(res->et, set);
+		/* [한국어] IS_ERR로 받은 실제 에러 코드 대신 -ENOMEM으로 통일한다.
+		 * 이 경로의 실패 원인은 사실상 메모리 부족뿐이고, 호출자도
+		 * 성공/실패만 구분하기 때문이다. */
 		return -ENOMEM;
 	}
 
@@ -1430,7 +1476,7 @@ int blk_mq_alloc_sched_res(struct request_queue *q,
  * blk_mq_alloc_sched_res_batch - tagset의 모든 queue에 elevator 자원 일괄 할당
  *
  * @elv_tbl:      queue id → elv_change_ctx xarray (blk_mq_alloc_sched_ctx_batch로 미리 준비)
- * @set:          NVMe 장치 blk_mq_tag_set
+ * @set:          대상 blk_mq_tag_set. 태그 공유 여부(flags)와 queue_depth를 여기서 읽는다
  * @nr_hw_queues: 새 하드웨어 큐 개수 (스케줄러 태그 배열 길이 결정)
  * @return:       0 = 성공; 음수 = 오류 (할당된 자원은 out_unwind에서 자동 해제)
  *
@@ -1441,8 +1487,10 @@ int blk_mq_alloc_sched_res(struct request_queue *q,
 int blk_mq_alloc_sched_res_batch(struct xarray *elv_tbl,
 		struct blk_mq_tag_set *set, unsigned int nr_hw_queues)
 {
+	/* [한국어] elv_tbl에서 꺼낸 큐별 전환 컨텍스트. */
 	struct elv_change_ctx *ctx;
-	/* [한국어] 순회 및 롤백에 사용할 request_queue 포인터 */
+	/* [한국어] 순회 커서. 실패 시 이 포인터가 "실패한 큐"를 가리킨 채로
+	 * out_unwind에 도달하고, _continue_reverse가 그 지점부터 거꾸로 돈다. */
 	struct request_queue *q;
 	/* [한국어] 초기값 -ENOMEM: queue가 없거나 첫 번째 queue에서 실패 시 이 값 반환 */
 	int ret = -ENOMEM;
@@ -1450,6 +1498,9 @@ int blk_mq_alloc_sched_res_batch(struct xarray *elv_tbl,
 	/* [한국어] update_nr_hwq_lock write lock 보유 확인 */
 	lockdep_assert_held_write(&set->update_nr_hwq_lock);
 
+	/* [한국어] 이 태그 세트를 공유하는 모든 큐를 순회한다. 하드웨어 큐 수가
+	 * 바뀌면 그 태그 세트를 쓰는 모든 큐의 스케줄러 자원을 새 크기로 다시
+	 * 잡아야 하기 때문이다. */
 	list_for_each_entry(q, &set->tag_list, tag_set_list) {
 		/*
 		 * Accessing q->elevator without holding q->elevator_lock is
@@ -1458,19 +1509,27 @@ int blk_mq_alloc_sched_res_batch(struct xarray *elv_tbl,
 		 * acquires the same lock but in the reader context) can't run
 		 * concurrently.
 		 */
-		/* [한국어] elevator가 있는 queue만 tag pool/private data 할당 */
+		/* [한국어] 스케줄러가 붙은 큐만 대상. "none"인 큐(멀티큐 NVMe의
+		 * 기본 상태)는 잡을 자원이 없다. */
 		if (q->elevator) {
 			/* [한국어] xa_load(): 이 queue의 elv_change_ctx 조회 */
 			ctx = xa_load(elv_tbl, q->id);
+			/* [한국어] WARN_ON_ONCE를 조건식 안에 둔 관용구 — 경고를 남기면서
+			 * 동시에 그 조건으로 분기한다. */
 			if (WARN_ON_ONCE(!ctx)) {
 				/* [한국어] ctx가 없으면 alloc_sched_ctx_batch와 불일치 — 프로그래밍 오류 */
+				/* [한국어] "그런 컨텍스트가 없다"를 -ENOENT로 알린다.
+				 * -ENOMEM과 구분해야 원인을 추적할 수 있다. */
 				ret = -ENOENT;
+				/* [한국어] 이미 자원을 잡은 앞쪽 큐들을 되돌리러 간다. */
 				goto out_unwind;
 			}
 
 			/* [한국어] 이 queue의 elevator type으로 tag pool + private data 할당 */
 			ret = blk_mq_alloc_sched_res(q, q->elevator->type,
 					&ctx->res, nr_hw_queues);
+			/* [한국어] 한 큐라도 실패하면 전체를 되돌린다. 일부만 새 크기로
+			 * 바뀐 중간 상태를 남기면 hctx 배열과 태그 배열의 길이가 어긋난다. */
 			if (ret)
 				/* [한국어] 할당 실패: 이미 할당된 다른 queue들 롤백 */
 				goto out_unwind;
@@ -1483,6 +1542,8 @@ out_unwind:
 	list_for_each_entry_continue_reverse(q, &set->tag_list, tag_set_list) {
 		if (q->elevator) {
 			ctx = xa_load(elv_tbl, q->id);
+			/* [한국어] 롤백 경로에서는 ctx가 없어도 경고하지 않고 조용히
+			 * 넘어간다 — 이미 에러 처리 중이라 추가 경고가 소음이 된다. */
 			if (ctx)
 				/* [한국어] 성공적으로 할당했던 자원 해제 */
 				blk_mq_free_sched_res(&ctx->res,

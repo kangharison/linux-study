@@ -1722,7 +1722,7 @@ subsys_initcall(bio_integrity_initfn);	/* [한국어] 다른 서브시스템(blo
  * NVMe 관점 핵심 요약
  * ============================================================================
  * - 이 파일은 submit_bio -> blk_mq_submit_bio -> blk_mq_get_request
- *   -> nvme_queue_rq -> nvme_submit_cmd(doorbell) 경로에서, 데이터와 함께
+ *   -> mq_ops->queue_rq (간접 호출; NVMe PCIe 면 nvme_queue_rq -> nvme_sq_copy_cmd -> nvme_write_sq_db) 경로에서, 데이터와 함께
  *   전달되는 T10 DIF/DIX 형식의 integrity 메타데이터(Guard/AppTag/RefTag)를
  *   bio 단위로 관리한다.
  * - NVMe namespace format에 의해 결정된 metadata_size/pi_tuple_size를

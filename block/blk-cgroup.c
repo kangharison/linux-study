@@ -3583,65 +3583,103 @@ unlock:
 
 /*
  * [한국어]
- * blkcg_css_online - cgroup online 콜백
+ * blkcg_css_online - cgroup 이 사용 가능해질 때 불리는 콜백
  *
- * 호출 경로: cgroup online -> blkcg_css_online()
- * NVMe 연결점: 부모 cgroup 을 pin 하여 offline 이 항상 root 방향으로
- *   진행되도록 한다. NVMe IO 흐름에서 cgroup 계층의 수명을 안정적으로 만든다.
+ * @css: 온라인 처리할 cgroup 의 css.
+ * @return: 0(성공만 가능). 음수를 반환하면 cgroup 생성이 실패한다.
+ *
+ * 하는 일은 단 하나 — 부모의 online_pin 을 잡는 것이다.
+ * 왜 필요한가: 소멸이 항상 잎에서 뿌리 방향으로 일어나야 한다. 부모가
+ * 자식보다 먼저 오프라인되면, 자식 blkg 가 참조하는 부모 blkg 가 먼저
+ * 사라져 계층 통계/제한이 깨진다. 자식이 부모의 pin 을 하나 잡고 있으면
+ * 부모의 pin 카운트가 0 이 될 수 없어 그 순서가 강제된다.
+ * 이 pin 은 자식이 정리될 때 blkcg_unpin_online() 의 부모 순회 루프가 놓는다.
+ *
+ * 실행 컨텍스트: mkdir(cgroup) 경로(프로세스 컨텍스트).
+ *
+ * 호출 체인:
+ *   cgroup 코어 → [blkcg_css_online] → blkcg_pin_online(parent)
  */
-
 static int blkcg_css_online(struct cgroup_subsys_state *css)
 {
+	/* [한국어] 이 cgroup 의 부모 blkcg. 루트라면 NULL 이다. */
 	struct blkcg *parent = blkcg_parent(css_to_blkcg(css));
-	/* [한국어] 부모 cgroup */
 
 	/*
 	 * blkcg_pin_online() is used to delay blkcg offline so that blkgs
 	 * don't go offline while cgwbs are still active on them.  Pin the
 	 * parent so that offline always happens towards the root.
 	 */
+	/* [한국어] 루트에는 부모가 없으므로 건너뛴다. */
 	if (parent)
-	/* [한국어] 부모 online_pin 증가; NVMe cgroup 계층 수명 안정성 확보 */
 		blkcg_pin_online(&parent->css);
+	/* [한국어] 실패할 수 있는 작업이 없으므로 항상 성공. */
 	return 0;
 }
 
 /*
  * [한국어]
- * blkg_init_queue - request_queue 의 blkcg 관련 필드 초기화
+ * blkg_init_queue - request_queue 안의 blkcg 관련 필드를 초기 상태로 만든다
  *
- * 호출 경로: blk_alloc_queue() -> blkg_init_queue()
- * NVMe 연결점: NVMe namespace 의 request_queue 가 생성될 때 blkg_list 와
- *   blkcg_mutex 를 초기화한다. 이후 blkcg_init_disk() 에서 root blkg 가
- *   이 queue 에 연결된다.
+ * @q: 갓 할당된 request_queue.
+ * @return: 없음.
+ *
+ * blkg 는 (blkcg, queue) 쌍이므로 큐 쪽에도 blkg 를 매달 자리가 필요하다.
+ * 이 함수는 그 자리(blkg_list)와, blkg 해제/정책 비활성화를 직렬화하는
+ * 뮤텍스만 준비한다. 실제 blkg(루트 blkg 포함)는 gendisk 가 붙는
+ * blkcg_init_disk() 시점에 만들어진다 — 큐가 디스크보다 먼저 존재할 수 있어
+ * 두 단계로 나뉘어 있다.
+ *
+ * 실행 컨텍스트: 큐 할당 경로(프로세스 컨텍스트). 아직 아무도 이 큐를
+ * 볼 수 없으므로 동기화가 필요 없다.
+ *
+ * 호출 체인:
+ *   blk_alloc_queue() → [blkg_init_queue]
  */
-
 void blkg_init_queue(struct request_queue *q)
 {
+	/* [한국어] 이 큐에 붙을 blkg 들을 잇는 리스트 헤드. blkg_create() 가 추가하고
+	 * blkg_free_workfn() 이 제거한다. queue_lock 으로 보호된다. */
 	INIT_LIST_HEAD(&q->blkg_list);
-	/* [한국어] 이 queue 의 blkg list 초기화 */
+	/* [한국어] blkg_free_workfn() 의 pd 해제와 blkcg_deactivate_policy() 사이를
+	 * 직렬화하는 뮤텍스. blkg_conf_prep() 도 이 락을 쓴다. */
 	mutex_init(&q->blkcg_mutex);
-	/* [한국어] blkg 생성/해제와 policy deactivate 동기화 mutex 초기화 */
 }
 
 /*
  * [한국어]
- * blkcg_init_disk - 디스크별 root blkg 생성
+ * blkcg_init_disk - 디스크에 blkcg 기반을 세운다(= 루트 blkg 를 만든다)
  *
- * 호출 경로: disk setup -> blkcg_init_disk()
- * NVMe 연결점: NVMe namespace(gendisk)가 생길 때 root cgroup 에 대한 blkg
- *   를 생성해 q->root_blkg 를 설정한다. 이후 bio 의 cgroup context 는 이
- *   root_blkg 를 기준으로 트리를 탐색한다.
+ * @disk: 새로 등장한 gendisk.
+ * @return: 0 성공, 음수 errno(-ENOMEM, blkg_create 실패 코드).
+ *
+ * 왜 루트 blkg 를 미리 만드는가: blkg_lookup_create() 는 생성에 실패하면
+ * "가장 가까운 조상 blkg" 로 되돌아가는데, 그 최후의 보루가 q->root_blkg 다.
+ * 이것만은 메모리 압박 상황에서도 반드시 존재해야 하므로, 디스크가 등장하는
+ * 시점(아직 IO 가 없어 GFP_KERNEL 을 쓸 수 있는 시점)에 미리 만들어 둔다.
+ *
+ * rebind 대기(wait_var_event)가 필요한 이유는 아래 영문 주석 그대로다:
+ * SCSI 처럼 큐를 디스크 간에 재사용하는 경우, 이전 디스크의 blkg 정리가
+ * 비동기(disk_release → blkcg_exit_disk)라 아직 끝나지 않았을 수 있다.
+ * 그 상태에서 새로 만들면 같은 queue id 슬롯이 blkcg->blkg_tree 에 남아 있어
+ * radix_tree_insert() 가 -EEXIST 로 실패한다. 그래서 root_blkg 가 NULL 이
+ * 되기를(= 이전 정리 완료를) 기다린다.
+ *
+ * 실행 컨텍스트: 디스크 등록 경로(프로세스 컨텍스트). wait_var_event 와
+ * GFP_KERNEL 때문에 잠들 수 있어야 한다.
+ *
+ * 호출 체인:
+ *   add_disk()/디스크 초기화 → [blkcg_init_disk] → blkg_alloc() → blkg_create()
  */
-
 int blkcg_init_disk(struct gendisk *disk)
 {
+	/* [한국어] blkg 가 실제로 붙는 대상. */
 	struct request_queue *q = disk->queue;
-	/* [한국어] root blkg 를 생성할 NVMe request_queue */
+	/* [한국어] new_blkg 는 미리 할당해 둘 blkg, blkg 는 등록 결과. */
 	struct blkcg_gq *new_blkg, *blkg;
-	/* [한국어] 새 blkg 및 등록 결과 */
+	/* [한국어] radix_tree_preload 를 성공적으로 했는지. 성공했을 때만
+	 * 짝이 되는 preload_end 를 불러야 한다. */
 	bool preloaded;
-	/* [한국어] radix tree preload 상태 */
 
 	/*
 	 * If the queue is shared across disk rebind (e.g., SCSI), the
@@ -3653,63 +3691,82 @@ int blkcg_init_disk(struct gendisk *disk)
 	 * blkg_create() will fail with -EEXIST because the old entries
 	 * still occupy the same queue id slot in blkcg->blkg_tree.
 	 */
+	/* [한국어] 조건이 참이 될 때까지 잠들며 기다린다. 깨우는 쪽은
+	 * blkg_destroy_all() 끝의 wake_up_var(&q->root_blkg) 다.
+	 * READ_ONCE 로 읽는 이유는 다른 CPU 가 쓰는 값을 컴파일러가
+	 * 루프 밖으로 끌어내 캐싱하지 못하게 하기 위함이다. */
 	wait_var_event(&q->root_blkg, !READ_ONCE(q->root_blkg));
-	/* [한국어] 이전 disk 의 root_blkg 정리가 끝날 때까지 대기; NVMe namespace rebind 안전성 */
-	/* [한국어] 이전 disk 의 root_blkg 정리가 끝날 때까지 대기 */
 
+	/* [한국어] 루트 cgroup 용 blkg 를 미리 만든다. 아직 락 밖이라
+	 * GFP_KERNEL 로 넉넉하게 할당할 수 있다. */
 	new_blkg = blkg_alloc(&blkcg_root, disk, GFP_KERNEL);
-	/* [한국어] root cgroup 용 blkg 할당 */
 	if (!new_blkg)
-	/* [한국어] root blkg 할당 실패 시 NVMe namespace 초기화 실패 */
+		/* [한국어] 루트 blkg 없이는 이 디스크에서 blkcg 를 쓸 수 없다. */
 		return -ENOMEM;
 
+	/* [한국어] radix tree 삽입은 스핀락 안에서 일어나 할당을 할 수 없으므로,
+	 * 미리 per-CPU 캐시에 노드를 채워 둔다. 반환값 0 이 성공이라 ! 로 뒤집어
+	 * preloaded 에 담는다. 성공 시 preemption 이 꺼진 상태가 된다. */
 	preloaded = !radix_tree_preload(GFP_KERNEL);
-	/* [한국어] radix tree 삽입을 위한 preload 수행 */
 
 	/* Make sure the root blkg exists. */
 	/* spin_lock_irq can serve as RCU read-side critical section. */
+	/* [한국어] blkg_create() 가 요구하는 락. 영문 주석대로 spin_lock_irq 구간은
+	 * RCU read-side 로도 동작하므로 안에서 blkg_lookup() 을 불러도 안전하다. */
 	spin_lock_irq(&q->queue_lock);
-	/* [한국어] queue_lock 획득 */
+	/* [한국어] 미리 만든 new_blkg 를 넘겨 등록만 시킨다.
+	 * 성공/실패와 무관하게 new_blkg 는 blkg_create 가 소비한다. */
 	blkg = blkg_create(&blkcg_root, disk, new_blkg);
-	/* [한국어] root blkg 생성 및 등록 */
 	if (IS_ERR(blkg))
-	/* [한국어] root blkg 생성 실패 */
 		goto err_unlock;
+	/* [한국어] 큐가 루트 blkg 를 직접 가리키게 한다. blkg_lookup() 이
+	 * 루트를 radix tree 없이 곧바로 찾는 지름길이자, 생성 실패 시의 대체값이다. */
 	q->root_blkg = blkg;
-	/* [한국어] queue 의 root blkg 설정; bio 제출의 최종 fallback */
 	spin_unlock_irq(&q->queue_lock);
 
+	/* [한국어] preload 를 했다면 반드시 닫아 preemption 을 되살린다. */
 	if (preloaded)
-	/* [한국어] radix tree preload 종료 */
 		radix_tree_preload_end();
 
 	return 0;
 
 err_unlock:
-	/* [한국어] queue_lock 해제 */
+	/* [한국어] 실패 경로도 락과 preload 를 정확히 되돌린다. */
 	spin_unlock_irq(&q->queue_lock);
 	if (preloaded)
-	/* [한국어] 실패 시에도 preload 종료 */
 		radix_tree_preload_end();
+	/* [한국어] blkg_create 가 포인터에 실어 보낸 오류 코드를 꺼내 반환한다. */
 	return PTR_ERR(blkg);
 }
 
 /*
  * [한국어]
- * blkcg_exit_disk - 디스크 제거 시 blkcg 자원 정리
+ * blkcg_exit_disk - 디스크가 사라질 때 blkcg 관련 자원을 모두 정리한다
  *
- * 호출 경로: disk_release() -> blkcg_exit_disk()
- * NVMe 연결점: NVMe namespace 가 사라지면 모든 blkg 를 제거하고 throtl
- *   자원도 정리한다. q->root_blkg 가 NULL 이 될 때까지 후속 disk rebind 는
- *   대기한다.
+ * @disk: 제거되는 gendisk.
+ * @return: 없음.
+ *
+ * blkcg_init_disk() 의 반대편이다. 이 디스크 큐에 붙어 있던 모든 blkg 를
+ * 지우고(2차원 격자에서 이 장치의 "열" 전체), 내장 정책인 blk-throttle 의
+ * 디스크 단위 자원도 정리한다.
+ *
+ * blkg_destroy_all() 이 끝나면서 q->root_blkg 가 NULL 이 되고
+ * wake_up_var 가 호출되므로, 같은 큐를 재사용하려고 기다리던
+ * blkcg_init_disk() 가 깨어난다.
+ *
+ * 실행 컨텍스트: 디스크 해제 경로(disk_release, 프로세스 컨텍스트).
+ * blkg_destroy_all() 이 cond_resched() 를 부르므로 잠들 수 있어야 한다.
+ *
+ * 호출 체인:
+ *   disk_release() → [blkcg_exit_disk] → blkg_destroy_all() / blk_throtl_exit()
  */
-
 void blkcg_exit_disk(struct gendisk *disk)
 {
+	/* [한국어] 이 디스크 큐의 blkg 를 전부 제거하고 정책 활성 비트를 지운다. */
 	blkg_destroy_all(disk);
-	/* [한국어] 모든 blkg 제거; NVMe queue 의 cgroup 분류 체계 소멸 */
+	/* [한국어] blk-throttle 이 디스크 단위로 들고 있던 자원(타이머, 서비스 큐 등)
+	 * 을 정리한다. blkg 의 pd 해제와는 별개인 디스크 레벨 정리다. */
 	blk_throtl_exit(disk);
-	/* [한국어] throtl 자원 정리; NVMe queue depth throttle 상태 해제 */
 }
 
 /*
@@ -3809,29 +3866,55 @@ EXPORT_SYMBOL_GPL(io_cgrp_subsys);
  */
 /*
  * [한국어]
- * blkcg_activate_policy - gendisk 에 blkcg 정책 활성화
+ * blkcg_activate_policy - 한 디스크의 모든 blkg 에 정책 데이터(pd)를 붙인다
  *
- * 호출 경로: elevator/throtl 등록 -> blkcg_activate_policy()
- * NVMe 연결점: NVMe queue 에 BFQ/throtl/ioprio 같은 정책을 적용한다.
- *   queue 를 freeze(blk_mq_freeze_queue) 한 상태에서 모든 기존 blkg 에
- *   pd_alloc_fn() 으로 정책 데이터를 할당한다. NVMe IO 경로는 이후
- *   blkg->pd[plid] 를 통해 정책 상태를 참조한다.
+ * @disk: 정책을 켤 대상 디스크.
+ * @pol:  켤 정책. 이미 blkcg_policy_register() 로 plid 를 배정받은 상태여야 한다.
+ * @return: 0 성공, -EINVAL(콜백 누락), -ENOMEM(할당 실패).
+ *
+ * === 정책 등록 구조에서 이 함수의 위치 ===
+ *   blkcg_policy_register(pol)   : 전역 등록. pol->plid 배정. (시스템에 1회)
+ *   blkcg_activate_policy(disk,pol): 이 디스크의 blkg 들에 pd 부착. (디스크마다)
+ * 즉 plid 는 "정책의 전역 번호" 이고, 그 번호가 곧 blkg->pd[] 의 슬롯 번호다.
+ * 이 함수가 끝나면 q->blkcg_pols 의 plid 비트가 서고, 그때부터
+ * blkcg_policy_enabled(q, pol) 이 참이 되어 정책이 blkg->pd[plid] 를 쓸 수 있다.
+ *
+ * === 왜 큐를 freeze 하는가 ===
+ * 위 영문 주석대로, freeze 로 IO 경로가 blkg 에 접근하지 못하게 만든 상태에서
+ * pd 를 채운다. 그래야 "pd 가 절반만 채워진 blkg" 를 IO 경로가 보지 않는다.
+ * 각 blkg 갱신은 queue_lock 과 blkcg->lock 두 개로 보호되므로, 이후 어느 한쪽
+ * 락만 쥐고 blkcg_policy_enabled() 를 확인하면 pd 역참조가 안전하다.
+ *
+ * === GFP_NOWAIT → GFP_KERNEL 재시도 패턴 ===
+ * blkg 목록 순회는 스핀락 안에서 해야 하므로 우선 GFP_NOWAIT 로 시도한다.
+ * 실패하면 그 blkg 의 참조를 잡아 두고(pinned_blkg) 락을 푼 뒤 GFP_KERNEL 로
+ * 미리 할당(pd_prealloc)해 두고 retry 라벨로 되돌아간다. 다시 순회하다가
+ * 그 blkg 를 만나면 준비해 둔 pd 를 쓴다. 참조를 잡는 이유는 락을 놓은 사이
+ * 그 blkg 가 사라질 수 있기 때문이다.
+ *
+ * 실행 컨텍스트: GFP_KERNEL 문맥(프로세스 컨텍스트, 잠들 수 있음).
+ * 호출자가 활성/비활성과 정책 등록/해제 사이의 직렬화를 책임진다(영문 주석).
+ *
+ * 호출 체인:
+ *   blk_throtl_init() / iocost·iolatency 초기화 / elevator 전환
+ *     → [blkcg_activate_policy] → pol->pd_alloc_fn/pd_init_fn/pd_online_fn
  */
-
 int blkcg_activate_policy(struct gendisk *disk, const struct blkcg_policy *pol)
 {
+	/* [한국어] blkg 들이 매달린 큐. */
 	struct request_queue *q = disk->queue;
-	/* [한국어] 정책을 활성화할 NVMe request_queue */
+	/* [한국어] 락 밖에서 GFP_KERNEL 로 미리 만들어 둔 pd. NULL 이면 없음. */
 	struct blkg_policy_data *pd_prealloc = NULL;
-	/* [한국어] GFP_KERNEL 로 미리 할당한 pd; 락 해제 후 재시도용 */
+	/* [한국어] blkg 는 순회 커서, pinned_blkg 는 "이 blkg 용으로 prealloc 했다" 는
+	 * 표시이자 그 blkg 가 사라지지 않게 잡아 둔 참조. */
 	struct blkcg_gq *blkg, *pinned_blkg = NULL;
-	/* [한국어] 순회 중인 blkg 및 미리 할당된 blkg */
+	/* [한국어] freeze 가 돌려주는 memalloc 범위 상태. unfreeze 에 그대로 넘긴다. */
 	unsigned int memflags;
-	/* [한국어] blk_mq_freeze_queue 의 memalloc 상태 저장 */
+	/* [한국어] 최종 반환값. */
 	int ret;
 
+	/* [한국어] 이미 이 디스크에서 켜져 있으면 할 일이 없다(멱등). */
 	if (blkcg_policy_enabled(q, pol))
-	/* [한국어] 이미 활성화된 정책은 중복 활성화하지 않음 */
 		return 0;
 
 	/*
@@ -3839,139 +3922,153 @@ int blkcg_activate_policy(struct gendisk *disk, const struct blkcg_policy *pol)
 	 * for example, ioprio. Such policy will work on blkcg level, not disk
 	 * level, and don't need to be activated.
 	 */
+	/* [한국어] 위 영문 주석대로 blk-ioprio 처럼 디스크 단위 pd 가 필요 없는 정책도
+	 * 등록될 수 있다. 그런 정책은 애초에 이 함수를 부르면 안 되므로,
+	 * alloc/free 콜백이 없는데 활성화를 시도하면 논리 오류로 잡는다.
+	 * 둘 중 하나만 있는 경우도 누수/이중 해제를 부르므로 함께 검사한다. */
 	if (WARN_ON_ONCE(!pol->pd_alloc_fn || !pol->pd_free_fn))
-	/* [한국어] alloc/free 함수 쌍이 맞아야 메모리 누수/부패 방지 */
 		return -EINVAL;
 
+	/* [한국어] blk-mq 큐라면 freeze 해서 IO 경로가 blkg 를 만지지 못하게 한다.
+	 * (bio 기반 드라이버 등 queue_is_mq 가 아닌 큐는 freeze 대상이 아니다.) */
 	if (queue_is_mq(q))
-	/* [한국어] NVMe queue freeze 해제 */
-	/* [한국어] NVMe 는 일반적으로 blk-mq 이므로 queue freeze */
 		memflags = blk_mq_freeze_queue(q);
-		/* [한국어] blk-mq queue freeze; NVMe IO 제출/완료 일시 정지 */
 retry:
+	/* [한국어] blkg_list 순회와 pd 부착은 queue_lock 아래에서. */
 	spin_lock_irq(&q->queue_lock);
-	/* [한국어] queue_lock 획득; blkg_list 순회 보호 */
 
 	/* blkg_list is pushed at the head, reverse walk to initialize parents first */
+	/* [한국어] blkg_create() 가 list_add(head)로 앞에 넣으므로, 리스트 앞쪽이
+	 * 나중에 만들어진(= 더 깊은 자손) blkg 다. 역순으로 돌면 부모가 먼저
+	 * 처리되어, 정책 init 콜백이 부모 pd 를 참조할 수 있게 된다. */
 	list_for_each_entry_reverse(blkg, &q->blkg_list, q_node) {
-	/* [한국어] 부모 blkg 부터 먼저 초기화하기 위해 역순 순회 */
+		/* [한국어] 이 blkg 에 붙일 정책 데이터. */
 		struct blkg_policy_data *pd;
-		/* [한국어] 할당될 정책별 private data */
 
+		/* [한국어] retry 로 되돌아온 경우 이미 처리한 blkg 가 있으므로 건너뛴다. */
 		if (blkg->pd[pol->plid])
-		/* [한국어] 이미 pd 가 있으면 스킵 */
 			continue;
 
 		/* If prealloc matches, use it; otherwise try GFP_NOWAIT */
+		/* [한국어] 직전 회차에 이 blkg 때문에 락을 풀고 준비해 둔 pd 가 있으면 그것을 쓴다. */
 		if (blkg == pinned_blkg) {
-		/* [한국어] 미리 GFP_KERNEL 로 할당해 둔 pd 사용 */
 			pd = pd_prealloc;
+			/* [한국어] 소유권을 넘겼으므로 표식을 비운다(아래 out 에서 이중 해제 방지). */
 			pd_prealloc = NULL;
 		} else {
+			/* [한국어] 스핀락 안이라 잠들 수 없다. 실패해도 되는 빠른 할당을 시도. */
 			pd = pol->pd_alloc_fn(disk, blkg->blkcg,
-		/* [한국어] 락을 잡은 상태에서 빠른 pd 할당 시도 */
 					      GFP_NOWAIT);
 		}
 
+		/* [한국어] 빠른 할당이 실패했다 — 락을 풀고 제대로 할당해 오는 경로. */
 		if (!pd) {
-		/* [한국어] GFP_NOWAIT 실패; 락을 풀고 GFP_KERNEL 로 재시도 */
 			/*
 			 * GFP_NOWAIT failed.  Free the existing one and
 			 * prealloc for @blkg w/ GFP_KERNEL.
 			 */
+			/* [한국어] 이전 회차에서 잡아 둔 다른 blkg 의 참조를 먼저 놓는다.
+			 * 한 번에 하나만 pin 한다는 규칙을 유지하기 위함. */
 			if (pinned_blkg)
-			/* [한국어] 이전 pinned blkg 참조 반낑 */
 				blkg_put(pinned_blkg);
+			/* [한국어] 락을 놓는 동안 이 blkg 가 해제되지 않도록 참조를 잡는다. */
 			blkg_get(blkg);
-			/* [한국어] 현재 blkg 참조 획득; 락 해제 후에도 유효 */
 			pinned_blkg = blkg;
 
-			/* [한국어] 락 해제 후 이 blkg 용 pd 를 재할당 */
+			/* [한국어] 이제 잠들 수 있는 할당을 하기 위해 락을 놓는다.
+			 * 이 순간 blkg_list 가 바뀔 수 있어 아래에서 retry 로 처음부터 다시 돈다. */
 			spin_unlock_irq(&q->queue_lock);
-			/* [한국어] GFP_KERNEL 할당을 위해 queue_lock 해제 */
 
+			/* [한국어] 쓰이지 못하고 남아 있던 prealloc 이 있으면 버린다
+			 * (다른 blkg 용으로 만든 것이라 재사용할 수 없다). */
 			if (pd_prealloc)
-			/* [한국어] 이전 prealloc 해제 */
 				pol->pd_free_fn(pd_prealloc);
+			/* [한국어] 이번엔 GFP_KERNEL 로 확실하게 할당한다. */
 			pd_prealloc = pol->pd_alloc_fn(disk, blkg->blkcg,
-			/* [한국어] GFP_KERNEL 로 pd 재할당 */
 						       GFP_KERNEL);
+			/* [한국어] 성공하면 락을 다시 잡고 처음부터 순회한다.
+			 * 이미 pd 가 붙은 blkg 는 위의 continue 로 걸러진다. */
 			if (pd_prealloc)
-			/* [한국어] 성공하면 다시 queue_lock 잡고 등록 */
 				goto retry;
 			else
+				/* [한국어] GFP_KERNEL 로도 실패 — 전부 되돌린다. */
 				goto enomem;
 		}
 
+		/* [한국어] pd 를 blkg 에 붙이는 동안 blkcg 쪽 자료구조와도 배타적이어야 한다.
+		 * 잠금 순서는 여기서도 queue_lock → blkcg->lock. */
 		spin_lock(&blkg->blkcg->lock);
-		/* [한국어] blkg 등록/online 시 blkcg lock 추가 획득 */
 
+		/* [한국어] pd → blkg 역참조. */
 		pd->blkg = blkg;
-		/* [한국어] pd 가 역참조할 blkg 설정 */
+		/* [한국어] 자기 슬롯 번호 기록. */
 		pd->plid = pol->plid;
-		/* [한국어] policy id 설정 */
+		/* [한국어] 슬롯에 꽂는다. 이 대입 이후 정책 코드가 pd 를 볼 수 있다. */
 		blkg->pd[pol->plid] = pd;
-		/* [한국어] blkg 에 정책 데이터 연결; nvme_queue_rq() 에서 참조 가능 */
 
+		/* [한국어] 정책이 기본값을 세팅할 기회(선택 콜백). */
 		if (pol->pd_init_fn)
-		/* [한국어] pd 초기화 콜백 */
 			pol->pd_init_fn(pd);
 
+		/* [한국어] 정책이 실제 동작을 시작할 준비를 하는 단계(선택 콜백). */
 		if (pol->pd_online_fn)
-		/* [한국어] pd online 콜백; IO 경로 활성화 */
 			pol->pd_online_fn(pd);
+		/* [한국어] 사용 가능 표시. blkg_destroy() 가 이 플래그를 보고 offline 을 부른다. */
 		pd->online = true;
-		/* [한국어] pd online 상태 표시 */
 
 		spin_unlock(&blkg->blkcg->lock);
 	}
 
+	/* [한국어] 모든 blkg 에 pd 가 붙었으므로 이 큐에서 정책을 "켜짐" 으로 표시한다.
+	 * 이 비트가 서야 blkcg_policy_enabled() 가 참이 되고, 이후 새로 만들어지는
+	 * blkg 도 blkg_alloc() 에서 이 정책의 pd 를 함께 할당받는다.
+	 * __set_bit 은 비원자적 버전이며, queue_lock 이 배타성을 보장한다. */
 	__set_bit(pol->plid, q->blkcg_pols);
-	/* [한국어] 이 queue(NVMe namespace)에서 해당 cgroup 정책 활성화 표시 */
-	/* [한국어] 이 queue 에서 해당 cgroup 정책 활성화 표시 */
 	ret = 0;
 
 	spin_unlock_irq(&q->queue_lock);
-	/* [한국어] queue_lock 해제 */
 out:
+	/* [한국어] freeze 했다면 반드시 짝을 맞춰 푼다. */
 	if (queue_is_mq(q))
 		blk_mq_unfreeze_queue(q, memflags);
-	/* [한국어] queue freeze 해제; NVMe IO 제출/완료 재개 */
+	/* [한국어] 마지막까지 잡고 있던 blkg 참조 반납. */
 	if (pinned_blkg)
-	/* [한국어] pinned blkg 참조 반낑 */
 		blkg_put(pinned_blkg);
+	/* [한국어] 쓰이지 않고 남은 prealloc 이 있으면 해제(성공 경로에서도 남을 수 있다). */
 	if (pd_prealloc)
-	/* [한국어] 미사용 prealloc pd 해제 */
 		pol->pd_free_fn(pd_prealloc);
 	return ret;
 
 enomem:
 	/* alloc failed, take down everything */
+	/* [한국어] 부분 활성화 상태를 남기면 안 되므로, 이미 붙인 pd 를 전부 떼어낸다.
+	 * q->blkcg_pols 비트는 아직 세우지 않았으므로 따로 지울 필요가 없다. */
 	spin_lock_irq(&q->queue_lock);
-	/* [한국어] 할당 실패 시 롤백; queue_lock 재획득 */
+	/* [한국어] 여기서는 순서가 중요하지 않아 정순으로 훑는다. */
 	list_for_each_entry(blkg, &q->blkg_list, q_node) {
-	/* [한국어] 이미 추가된 pd 들을 정순으로 제거 */
+		/* [한국어] blkg 마다 소유 cgroup 의 락을 잡아야 한다. */
 		struct blkcg *blkcg = blkg->blkcg;
+		/* [한국어] 떼어낼 pd. */
 		struct blkg_policy_data *pd;
 
 		spin_lock(&blkcg->lock);
-		/* [한국어] blkcg lock 획득 */
+		/* [한국어] 이 blkg 에 이 정책의 pd 가 붙어 있는지 확인. */
 		pd = blkg->pd[pol->plid];
-		/* [한국어] 제거할 정책 데이터 */
 		if (pd) {
+			/* [한국어] online 까지 갔던 pd 만 offline 콜백을 부른다. */
 			if (pd->online && pol->pd_offline_fn)
-		/* [한국어] online 상태면 offline 처리 */
 				pol->pd_offline_fn(pd);
+			/* [한국어] 플래그를 내리고, */
 			pd->online = false;
-		/* [한국어] pd offline 표시 */
+			/* [한국어] 정책이 할당한 메모리를 반납하고, */
 			pol->pd_free_fn(pd);
-		/* [한국어] pd 메모리 해제 */
+			/* [한국어] 슬롯을 비운다. 이 순서를 지켜야 이중 해제가 없다. */
 			blkg->pd[pol->plid] = NULL;
-		/* [한국어] blkg 에서 pd 연결 제거; nvme_queue_rq() 가 참조하지 않음 */
 		}
 		spin_unlock(&blkcg->lock);
 	}
 	spin_unlock_irq(&q->queue_lock);
+	/* [한국어] 실패 원인을 기록하고 공통 정리(out)로 합류한다. */
 	ret = -ENOMEM;
 	goto out;
 }
@@ -4682,7 +4779,7 @@ EXPORT_SYMBOL_GPL(bio_associate_blkg_from_css);
  * NVMe 연결점: NVMe IO 제출의 시작점에서 bio 가 속한 cgroup 을 결정한다.
  *   passthrough IO 는 제외한다. 이 함수 이후 bio 는
  *   submit_bio -> bio_associate_blkg -> blk_mq_submit_bio ->
- *   blk_mq_get_request -> nvme_queue_rq -> nvme_submit_cmd(doorbell) 의
+ *   blk_mq_get_request -> mq_ops->queue_rq (간접 호출; NVMe PCIe 면 nvme_queue_rq -> nvme_sq_copy_cmd -> nvme_write_sq_db) 의
  *   경로를 타게 된다.
  */
 
@@ -4879,7 +4976,7 @@ MODULE_PARM_DESC(blkcg_debug_stats, "True if you want debug stats, false if not"
  *
  * - block/blk-cgroup.c 는 NVMe IO 경로의 최상단에서 bio(request) 가 어느
  *   cgroup 에 속하는지를 결정하고, blk-mq/NVMe 드라이버(nvme_queue_rq,
- *   nvme_submit_cmd, doorbell)로 전달되는 cgroup context(bi_blkg)를 관리한다.
+ *   nvme_sq_copy_cmd/nvme_write_sq_db, doorbell)로 전달되는 cgroup context(bi_blkg)를 관리한다.
  * - per-cpu blkg_iostat_set 과 lockless list(lhead)를 통해 NVMe SSD 의
  *   멀티코어 CQ 완료를 저렴하게 집계하며, cgroup 별 read/write/discard
  *   통계와 use_delay/delay_nsec 기반 스로틀링을 지원한다.

@@ -31,7 +31,7 @@
  *     - kyber_insert_requests: request를 kcq/domain 대기열에 삽입
  *     - kyber_dispatch_request: domain_tokens 획득 후 hctx dispatch 리스트에 request 선택
  *        ↓  dispatch된 request
- *   nvme_queue_rq → nvme_submit_cmd → NVMe SQ tail 업데이트 (doorbell)
+ *   nvme_queue_rq → nvme_sq_copy_cmd/nvme_write_sq_db → NVMe SQ tail 업데이트 (doorbell)
  *        ↓  NVMe SSD 처리 완료 후 CQ entry 생성
  *   nvme_irq → nvme_complete_rq → blk_mq_end_request
  *        ↓  kyber_completed_request: per-cpu latency histogram 기록
@@ -49,7 +49,7 @@
  * - NVMe 드라이버(drivers/nvme/host/pci.c 등)는 blk-mq를 통해 이 스케줄러를
  *   간접적으로 사용한다. nvme_queue_rq가 Kyber가 선택한 request를 받아 SQ에
  *   삽입한다.
- * - 데이터 흐름: bio→kcq.rq_list→khd.rqs[]→dispatch→nvme_submit_cmd.
+ * - 데이터 흐름: bio→kcq.rq_list→khd.rqs[]→dispatch→nvme_sq_copy_cmd/nvme_write_sq_db.
  *   완료 지연은 CQ ISR → per_cpu(cpu_latency) → kyber_timer_fn → domain_tokens
  *   피드백 루프로 흐른다.
  * - 공유 자료구조: kyber_queue_data(request_queue별), kyber_hctx_data(hctx별),
@@ -101,7 +101,7 @@ enum {
 	KYBER_WRITE,		/* [한국어] REQ_OP_WRITE 요청 — NVME_CMD_WRITE에 매핑.
 				 * 목표 지연 10ms, 최대 in-flight depth 128, batch 크기 8.
 				 * write amplification / buffer flush를 고려해 read보다 작게 설정. */
-	KYBER_DISCARD,		/* [한국어] REQ_OP_DISCARD 요청 — NVME_CMD_DSM(Dataset Management)/TRIM에 매핑.
+	KYBER_DISCARD,		/* [한국어] REQ_OP_DISCARD 요청 — nvme_cmd_dsm(0x09)(Dataset Management)/TRIM에 매핑.
 				 * 목표 지연 5s, 최대 in-flight depth 64, batch 크기 1.
 				 * SSD 내부 GC 부하를 유발하므로 가장 보수적으로 제한. */
 	KYBER_OTHER,		/* [한국어] REQ_OP_FLUSH, vendor-specific, admin passthrough 등 기타.
@@ -358,7 +358,7 @@ struct kyber_ctx_queue {
  *        bio/request를 받는다.
  *   - domain_tokens[KYBER_NUM_DOMAINS]: 도메인별 NVMe "in-flight 명령 수"
  *     한도를 나타내는 token pool. token을 획득해야 request가 dispatch되어
- *     nvme_submit_cmd(doorbell)로 이어질 수 있다. 이 token이 NVMe SQ의
+ *     nvme_sq_copy_cmd → nvme_write_sq_db (SQ 기록 후 doorbell)로 이어질 수 있다. 이 token이 NVMe SQ의
  *     실제 CID/entry 가용 개수보다 더 제한적으로 동작하여 Kyber의 스로틀링
  *     포인트가 된다.
  *   - cpu_latency: per-cpu 완료 지연 히스토그램. NVMe ISR 경로에서 업데이트.
@@ -602,8 +602,8 @@ static int kyber_domain_wake(wait_queue_entry_t *wait, unsigned mode, int flags,
  * latency_target을 두므로, 모든 진입 경로(merge/insert/dispatch/completed)에서
  * 동일한 분류 기준이 필요하다. 이 함수가 그 단일 진실 공급원(single source of
  * truth) 역할을 하여, 어디서 호출되어도 같은 request가 항상 같은 도메인으로
- * 분류되도록 보장한다. opcode에 따라 이후 NVMe 명령(NVME_CMD_READ,
- * NVME_CMD_WRITE, NVME_CMD_DSM 등)으로 변환될 그룹을 사전 분류하는 셈이다.
+ * 분류되도록 보장한다. opcode에 따라 이후 NVMe 명령(nvme_cmd_read(0x02),
+ * nvme_cmd_write(0x01), nvme_cmd_dsm(0x09) 등)으로 변환될 그룹을 사전 분류하는 셈이다.
  * 프로세스 컨텍스트(bio 제출)와 softirq 컨텍스트(완료 처리) 양쪽에서 모두
  * 호출되지만, 순수 함수(부작용 없음)이므로 재진입/동시 호출에 안전하다.
  *
@@ -617,13 +617,13 @@ static unsigned int kyber_sched_domain(blk_opf_t opf)
 	/* bio->bi_opf 하위 REQ_OP_MASK만 남겨 NVMe 명령 유형과 1:1 매핑할 opcode 추출 */
 	switch (opf & REQ_OP_MASK) {
 	case REQ_OP_READ:
-		return KYBER_READ;	/* NVME_CMD_READ 그룹: SQ CID/도메인 토큰을 read pool에서 할당 */
+		return KYBER_READ;	/* nvme_cmd_read(0x02) 그룹: SQ CID/도메인 토큰을 read pool에서 할당 */
 	case REQ_OP_WRITE:
-		return KYBER_WRITE;	/* NVME_CMD_WRITE 그룹: write pool에서 토큰 및 SQ 진행 자리 할당 */
+		return KYBER_WRITE;	/* nvme_cmd_write(0x01) 그룹: write pool에서 토큰 및 SQ 진행 자리 할당 */
 	case REQ_OP_DISCARD:
-		return KYBER_DISCARD;	/* NVME_CMD_DSM/TRIM 그룹: discard 전용 queue depth/token 사용 */
+		return KYBER_DISCARD;	/* nvme_cmd_dsm(0x09)/TRIM 그룹: discard 전용 queue depth/token 사용 */
 	default:
-		return KYBER_OTHER;	/* NVME_CMD_FLUSH, vendor, admin passthrough 등 기타 명령 */
+		return KYBER_OTHER;	/* nvme_cmd_flush(0x00), vendor, admin passthrough 등 기타 명령 */
 	}
 }
 
@@ -1858,7 +1858,7 @@ static int kyber_get_domain_token(struct kyber_queue_data *kqd,
  * 중요 — 토큰이 없을 땐 request를 kcq에 그대로 둬서 병합 가능성을
  * 보존한다). 두 경로 모두 token을 못 얻으면 trace_kyber_throttled로
  * throttling 이벤트를 남기고 그 사실을 알린다(디버깅/모니터링용). 반환된
- * request는 곧 nvme_queue_rq() → nvme_submit_cmd()(NVMe doorbell/SQ tail
+ * request는 곧 nvme_queue_rq() → nvme_sq_copy_cmd/nvme_write_sq_db()(NVMe doorbell/SQ tail
  * 갱신)로 이어진다. 호출자가 이미 khd->lock을 쥐고 있어 재진입 없음.
  *
  * 호출 체인:
@@ -1892,7 +1892,7 @@ kyber_dispatch_cur_domain(struct kyber_queue_data *kqd,
 			khd->batching++;	/* 현재 도메인 연속 dispatch 카운트 증가 */
 			rq_set_domain_token(rq, nr);	/* request에 NVMe SQ 진행 token 기록 */
 			list_del_init(&rq->queuelist);	/* [한국어] rqs 대기열에서 제거하고 자기참조로 재초기화 - 이 request는 이제 dispatch 소유로 전환 */
-			return rq;	/* 반환된 rq는 nvme_queue_rq -> nvme_submit_cmd(doorbell)로 전달됨 */
+			return rq;	/* 반환된 rq는 mq_ops->queue_rq (간접 호출; NVMe PCIe 면 nvme_queue_rq -> nvme_sq_copy_cmd -> nvme_write_sq_db)로 전달됨 */
 		} else {	/* [한국어] token 획득 실패 - 이 도메인의 NVMe in-flight 한도가 이미 가득 참 */
 			trace_kyber_throttled(kqd->dev,
 					      kyber_domain_names[khd->cur_domain]);	/* [한국어] ftrace/perf에 throttle 이벤트 기록 - 관찰자가 어느 도메인이 언제 막혔는지 확인 가능 */
@@ -1933,7 +1933,7 @@ kyber_dispatch_cur_domain(struct kyber_queue_data *kqd,
  * batching을 리셋하고 다음 도메인부터 KYBER_NUM_DOMAINS바퀴를 순회하며
  * dispatch 가능한 도메인을 찾는다 — 이 라운드로빈이 read/write/discard/
  * other 사이의 공정성을 보장하고 한 도메인의 SQ 독점을 막는다. 반환된
- * request는 곧 nvme_queue_rq() → nvme_submit_cmd(NVMe doorbell 갱신)로
+ * request는 곧 nvme_queue_rq() → nvme_sq_copy_cmd/nvme_write_sq_db(NVMe doorbell 갱신)로
  * 이어진다. khd->lock으로 이 hctx에 대한 dispatch 시도 전체를 직렬화한다.
  *
  * 호출 체인:
@@ -2280,7 +2280,7 @@ static struct elevator_type kyber_sched = {
 	.ops = {
 		/* NVMe 관점 콜백 흐름:
 		 *   bio 제출: bio_merge -> prepare_request -> insert_requests
-		 *   dispatch:  has_work -> dispatch_request -> nvme_queue_rq -> nvme_submit_cmd
+		 *   dispatch:  has_work -> dispatch_request -> nvme_queue_rq -> nvme_sq_copy_cmd/nvme_write_sq_db
 		 *   완료:      nvme_irq -> completed_request -> finish_request
 		 *   제한:      limit_depth(async), depth_updated
 		 */
@@ -2367,7 +2367,7 @@ MODULE_DESCRIPTION("Kyber I/O scheduler");	/* [한국어] modinfo에 표시될 �
  *    in-flight 명령 수를 token으로 제한하는 latency 기반 queue depth 조절
  *    스케줄러이다.
  *  - 흐름: blk_mq_submit_bio -> blk_mq_get_request -> kyber_dispatch_request
- *    -> nvme_queue_rq -> nvme_submit_cmd(doorbell/SQ tail/CID 할당)
+ *    -> nvme_queue_rq -> nvme_sq_copy_cmd/nvme_write_sq_db(doorbell/SQ tail/CID 할당)
  *  - NVMe CQ 완료 시 kyber_completed_request()가 latency를 per-cpu
  *    histogram에 기록하고, 타이머가 이를 집계하여 domain_tokens의 깊이를
  *    늘리거나 줄인다.

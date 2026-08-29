@@ -43,7 +43,7 @@
  *                              request 선택 후 hctx의 디스패치 리스트로 반환
  *        ↓  선택된 request
  *   blk_mq_dispatch_rq_list() → q->mq_ops->queue_rq (예: nvme_queue_rq)
- *        ↓                                         → nvme_submit_cmd (SQ doorbell)
+ *        ↓                                         → nvme_sq_copy_cmd/nvme_write_sq_db (SQ doorbell)
  *   드라이버/디바이스 처리 완료 (NVMe CQ 인터럽트 등)
  *        ↓
  *   blk_mq_complete_request() → ops.finish_request=dd_finish_request

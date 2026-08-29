@@ -2827,23 +2827,30 @@ EXPORT_SYMBOL_GPL(bio_add_folio_nofail);
  *
  * len > BIO_MAX_SIZE이면 즉시 false를 반환한다.
  * 그 외에는 bio_add_page()를 위임하며, 0이면 false 반환.
+ * folio 를 쓰는 파일시스템은 folio 안의 페이지를 하나씩 bio_add_page 하는 대신
+ * 이 함수로 한 번에 붙일 수 있다. folio 내부는 물리적으로 연속이므로
+ * 여러 페이지를 하나의 bvec 으로 표현할 수 있기 때문이다.
+ *
  * 실행 컨텍스트: 태스크 컨텍스트.
- * 호출자: 파일 시스템 write/read 경로
- * NVMe 연결: folio 내 page → bio_vec bv_page → nvme_queue_rq()에서 PRP/SGL entry 구성.
+ * 호출자: folio 기반 파일시스템의 read/write 경로(iomap 등).
  *
  * 호출 체인:
  *   fs write path → [bio_add_folio()] → bio_add_page() → __bio_add_page()
  */
-bool bio_add_folio(struct bio *bio, struct folio *folio, size_t len,  // folio 페이지를 bio에 추가: NVMe PRP/SGL segment 후보
+bool bio_add_folio(struct bio *bio, struct folio *folio, size_t len,
 		   size_t off)
 {
-	unsigned long nr = off / PAGE_SIZE;
+	unsigned long nr = off / PAGE_SIZE;	/* [한국어] off 가 PAGE_SIZE 를 넘으면 folio 의 첫 페이지가 아니라
+	                                     * nr 번째 페이지가 bvec 의 시작 페이지가 된다(위 영문 주석). */
 
-	if (len > BIO_MAX_SIZE)
+	if (len > BIO_MAX_SIZE)	/* [한국어] bvec 하나가 bio 전체 한계를 넘을 수는 없다.
+	                         * 4GiB 이상 folio 를 지원하지 않는다는 문서상 제약과 같은 뿌리. */
 		return false;
-	return bio_add_page(bio, folio_page(folio, nr), len, off % PAGE_SIZE) > 0;  // 사용자/커널 페이지를 bio에 추가 -> NVMe PRP/SGL 후보
+	return bio_add_page(bio, folio_page(folio, nr), len, off % PAGE_SIZE) > 0;	/* [한국어] folio 좌표를 (page, 페이지 내 오프셋)로
+	                                                                             * 정규화해 위임하고, 반환된 바이트 수를 bool 로 바꾼다.
+	                                                                             * bio_add_page 는 전부-아니면-전무라 >0 이면 전부 성공이다. */
 }
-EXPORT_SYMBOL(bio_add_folio);  // folio 페이지를 bio에 추가: NVMe PRP/SGL segment 후보
+EXPORT_SYMBOL(bio_add_folio);	/* [한국어] folio 기반 파일시스템 모듈용 */
 
 /**
  * bio_add_vmalloc_chunk - add a vmalloc chunk (single page) to a bio
@@ -2870,25 +2877,39 @@ EXPORT_SYMBOL(bio_add_folio);  // folio 페이지를 bio에 추가: NVMe PRP/SGL
  *
  * vmalloc 주소는 페이지 경계를 넘어 연속적이지 않을 수 있으므로,
  * 현재 페이지 내에서만 추가하고 그 이상은 bio_add_vmalloc()이 반복 호출한다.
- * 쓰기 I/O이면 flush_kernel_vmap_range()로 CPU 캐시를 flush하여 NVMe DMA 일관성을 보장한다.
- * 읽기 I/O는 완료 핸들러에서 invalidate_kernel_vmap_range()를 호출해야 한다.
- * 실행 컨텍스트: 태스크 컨텍스트 (I/O 구성 경로).
- * 호출자: bio_add_vmalloc()
- * NVMe 연결: vmalloc_to_page()로 얻은 물리 페이지가 NVMe PRP/SGL entry가 됨.
+ * 캐시 일관성 문제: vmalloc 영역은 물리 페이지에 **두 번째 가상 주소**를 붙인 것이다.
+ * VIVT/VIPT aliasing 캐시를 가진 아키텍처(일부 ARM, PA-RISC 등)에서는 같은 물리
+ * 메모리에 대해 가상 주소마다 별개의 캐시 라인이 생길 수 있다. 그래서
+ *   - 쓰기(장치로 나감): flush_kernel_vmap_range() 로 CPU 캐시를 메모리에 내려야
+ *     장치 DMA 가 최신 데이터를 읽는다. → 이 함수가 해 준다.
+ *   - 읽기(장치가 씀): 완료 후 invalidate_kernel_vmap_range() 로 낡은 캐시 라인을
+ *     버려야 CPU 가 DMA 결과를 본다. → 완료 시점을 아는 **호출자**의 몫이다
+ *     (위 영문 주석이 명시).
+ * x86 처럼 캐시가 물리 태그 기반인 아키텍처에서는 두 함수 모두 no-op 이다.
+ *
+ * 실행 컨텍스트: 태스크 컨텍스트(I/O 구성 경로).
+ * 호출자: bio_add_vmalloc(), block/blk-map.c 의 blk_rq_map_kern().
  *
  * 호출 체인:
  *   bio_add_vmalloc() → [bio_add_vmalloc_chunk()] → vmalloc_to_page() + bio_add_page()
  */
 unsigned int bio_add_vmalloc_chunk(struct bio *bio, void *vaddr, unsigned len)
 {
-	unsigned int offset = offset_in_page(vaddr);
+	unsigned int offset = offset_in_page(vaddr);	/* [한국어] 페이지 안에서의 시작 위치(하위 12비트) */
 
-	len = min(len, PAGE_SIZE - offset);
-	if (bio_add_page(bio, vmalloc_to_page(vaddr), len, offset) < len)  // 사용자/커널 페이지를 bio에 추가 -> NVMe PRP/SGL 후보
+	len = min(len, PAGE_SIZE - offset);	/* [한국어] **한 페이지 안으로 잘라낸다**. 이것이 이 함수의 핵심 제약이다.
+	                                     * vmalloc 영역은 가상 주소만 연속이고 물리 페이지는 흩어져 있으므로,
+	                                     * 페이지 경계를 넘는 순간 물리적 연속성이 깨진다.
+	                                     * 한 bvec 은 물리 연속 영역만 표현할 수 있으므로 여기서 끊어야 한다. */
+	if (bio_add_page(bio, vmalloc_to_page(vaddr), len, offset) < len)	/* [한국어] vmalloc_to_page() 는 커널 페이지 테이블을
+	                                                                     * 실제로 walk 해서 물리 페이지를 찾는다
+	                                                                     * (virt_to_page 같은 단순 산술로는 불가능하다).
+	                                                                     * bio 가 가득 차 0 이 돌아오면 아래에서 0 을 반환한다. */
 		return 0;
-	if (op_is_write(bio_op(bio)))
-		flush_kernel_vmap_range(vaddr, len);  // vmap 범위 flush: NVMe DMA 일관성 유지
-	return len;
+	if (op_is_write(bio_op(bio)))	/* [한국어] 데이터가 CPU → 장치 방향일 때만 */
+		flush_kernel_vmap_range(vaddr, len);	/* [한국어] 이 vmap 별칭 주소에 대한 CPU 캐시를 메모리로 내린다.
+		                                         * 하지 않으면 장치가 옛 데이터를 DMA 로 읽어 간다. */
+	return len;	/* [한국어] 실제로 붙인 바이트 수(요청보다 적을 수 있다 — 페이지 경계에서 잘렸으므로) */
 }
 EXPORT_SYMBOL_GPL(bio_add_vmalloc_chunk);
 
@@ -2914,30 +2935,36 @@ EXPORT_SYMBOL_GPL(bio_add_vmalloc_chunk);
  * @len:   추가할 전체 바이트 수
  * @return: true 전체 추가 성공; false bio에 bvec 슬롯이 부족하여 중단
  *
- * bio_add_vmalloc_chunk()를 반복 호출하여 페이지 단위로 분리해 추가한다.
- * vmalloc은 물리적으로 비연속이므로 페이지 단위로 PRP/SGL entry를 구성해야 한다.
- * 쓰기 I/O의 경우 각 청크마다 flush_kernel_vmap_range()가 호출된다.
- * 실행 컨텍스트: 태스크 컨텍스트 (I/O 구성 경로).
- * 호출자: 커널 내부에서 vmalloc 버퍼로 direct I/O를 구성하는 코드
- * NVMe 연결: vmalloc 영역의 각 물리 페이지가 별도의 NVMe PRP/SGL entry가 됨.
+ * bio_add_vmalloc_chunk() 를 반복 호출해 페이지 단위로 잘라 넣는다.
+ * vmalloc 영역은 가상 주소만 연속이고 물리 페이지는 흩어져 있으므로, 결과적으로
+ * len 바이트가 최대 (len/PAGE_SIZE + 1) 개의 bvec 으로 나뉜다. 물리 연속 버퍼보다
+ * 세그먼트가 훨씬 많아지므로 큰 vmalloc 버퍼를 그대로 I/O 에 쓰는 것은 비싸다.
+ *
+ * 실패 시 주의: 중간에 bio 가 차서 false 를 반환하면 **이미 붙인 앞부분은 그대로
+ * 남는다**. 되돌리지 않으므로 호출자가 그 bio 를 폐기하거나 부분 처리해야 한다.
+ *
+ * 실행 컨텍스트: 태스크 컨텍스트(I/O 구성 경로).
+ * 호출자: block/blk-map.c 의 blk_rq_map_kern() — 커널 버퍼가 vmalloc 주소일 때.
  *
  * 호출 체인:
- *   커널 I/O path → [bio_add_vmalloc()] → bio_add_vmalloc_chunk() × N
+ *   blk_rq_map_kern() → [bio_add_vmalloc()] → bio_add_vmalloc_chunk() × N
  */
-bool bio_add_vmalloc(struct bio *bio, void *vaddr, unsigned int len)  // vmalloc 영역을 bio에 추가: NVMe DMA를 위해 페이지 매핑
+bool bio_add_vmalloc(struct bio *bio, void *vaddr, unsigned int len)
 {
-	do {
-		unsigned int added = bio_add_vmalloc_chunk(bio, vaddr, len);
+	do {	/* [한국어] do-while 인 이유: len 은 호출 시점에 0 이 아님이 전제라
+	         * 최소 한 번은 chunk 추가를 시도한다. */
+		unsigned int added = bio_add_vmalloc_chunk(bio, vaddr, len);	/* [한국어] 현재 페이지 안에서 붙일 수 있는 만큼만 붙인다 */
 
-		if (!added)
+		if (!added)	/* [한국어] 0 = bio 에 자리가 없다. 더 진행해도 소용없다. */
 			return false;
-		vaddr += added;
-		len -= added;
-	} while (len);
+		vaddr += added;	/* [한국어] 가상 주소를 붙인 만큼 전진. 다음 반복은 다음 페이지의 시작이 된다
+		                 * (chunk 가 항상 페이지 경계에서 끊기므로). */
+		len -= added;	/* [한국어] 남은 길이 감소. added 는 항상 len 이하라 언더플로 없음. */
+	} while (len);	/* [한국어] 다 붙일 때까지 반복 */
 
-	return true;
+	return true;	/* [한국어] 요청 범위 전체를 bio 에 담았다 */
 }
-EXPORT_SYMBOL_GPL(bio_add_vmalloc);  // vmalloc 영역을 bio에 추가: NVMe DMA를 위해 페이지 매핑
+EXPORT_SYMBOL_GPL(bio_add_vmalloc);	/* [한국어] vmalloc 버퍼로 I/O 를 구성하는 커널 코드용 */
 
 /*
  * [한국어]
@@ -2946,31 +2973,58 @@ EXPORT_SYMBOL_GPL(bio_add_vmalloc);  // vmalloc 영역을 bio에 추가: NVMe DM
  * @bio:        해제할 bio
  * @mark_dirty: true이면 각 folio를 dirty로 마킹한 후 unpin (읽기 완료 후 사용)
  *
- * bio_for_each_folio_all()로 모든 folio를 순회하며 unpin_user_folio()를 호출한다.
- * mark_dirty=true이면 folio_lock() + folio_mark_dirty() + folio_unlock() 후 unpin.
- * NVMe 읽기 완료 후 사용자 페이지에 데이터가 기록되었으므로 dirty 마킹이 필요하다.
- * 실행 컨텍스트: 태스크 컨텍스트 또는 완료 워크큐 (bio_dirty_fn).
- * 호출자: bio_release_pages() 매크로, bio_dirty_fn()
- * NVMe 연결: NVMe DMA가 완료된 사용자 페이지의 get_user_pages() pin을 해제하는 단계.
+ * ── 왜 "핀(pin)"이 필요한가 ────────────────────────────────────────────
+ * Direct I/O 는 사용자 공간 페이지를 장치 DMA 의 목적지/출발지로 그대로 쓴다.
+ * 그런데 그 사이 커널의 메모리 관리자가 그 페이지를 **다른 물리 주소로 옮길 수**
+ * 있다(페이지 마이그레이션, 메모리 컴팩션, swap-out). 그러면 장치는 이미
+ * 예전 물리 주소로 DMA 를 진행 중이라 엉뚱한 메모리를 덮어쓰게 된다.
+ * 일반적인 페이지 참조 카운트(get_page)만으로는 이동을 막지 못한다 — 참조가 있어도
+ * 마이그레이션은 참조를 새 페이지로 옮기며 진행할 수 있기 때문이다.
+ * 그래서 DMA 대상 페이지에는 **FOLL_PIN 방식의 핀**(pin_user_pages 계열)을 건다.
+ * 핀이 걸린 페이지는 이동·회수 대상에서 제외되어 물리 주소가 고정된다.
+ * 이 핀은 I/O 가 끝나면 반드시 풀어야 하며(unpin_user_*), 그 일을 하는 것이 이 함수다.
+ * 핀을 실제로 걸었는지 여부는 bio 의 BIO_PAGE_PINNED 플래그가 기억한다.
+ *
+ * ── mark_dirty 가 필요한 이유 ───────────────────────────────────────────
+ * 읽기(장치 → 메모리) DMA 는 CPU 를 거치지 않고 페이지 내용을 바꾼다. 따라서
+ * MM 은 그 페이지가 더러워졌다는 것을 모른다. 파일 매핑 페이지라면 그대로
+ * 회수되어 변경분이 사라질 수 있으므로, 완료 후 명시적으로 dirty 로 표시해야 한다.
+ * 쓰기(메모리 → 장치)에는 필요 없다 — 내용이 바뀌지 않았으므로.
+ *
+ * 실행 컨텍스트: 태스크 컨텍스트 또는 워크큐(bio_dirty_fn).
+ *   folio_lock() 이 잠들 수 있으므로 **IRQ 컨텍스트에서는 호출 금지**다.
+ *   그래서 mark_dirty 가 필요한 완료 경로는 bio_check_pages_dirty() 가
+ *   워크큐로 미루는 구조를 취한다.
+ * 호출자: bio_release_pages() 인라인 래퍼(BIO_PAGE_PINNED 검사 포함), bio_dirty_fn().
  *
  * 호출 체인:
- *   bio_endio() → bio_release_pages() → [__bio_release_pages()] → unpin_user_folio()
+ *   bio_endio()/DIO 완료 → bio_release_pages() → [__bio_release_pages()] → unpin_user_folio()
  */
 void __bio_release_pages(struct bio *bio, bool mark_dirty)
 {
-	struct folio_iter fi;
+	struct folio_iter fi;	/* [한국어] folio 단위 순회 커서. 같은 folio 에 속한 연속 bvec 을
+	                         * 하나로 묶어 돌려주므로 unpin 호출 횟수가 줄어든다. */
 
-	bio_for_each_folio_all(fi, bio) {  // bio_vec(bvec) 순회: NVMe PRP entry/SGL segment를 구성하는 단위
-		size_t nr_pages;
+	bio_for_each_folio_all(fi, bio) {	/* [한국어] bi_iter 가 아니라 **bi_io_vec 배열 전체**를 돈다(_all 접미사).
+	                                     * 완료 시점에는 bi_iter 가 이미 끝까지 전진해 비어 있으므로,
+	                                     * 붙였던 모든 페이지를 회수하려면 배열 전체를 봐야 한다. */
+		size_t nr_pages;	/* [한국어] 이 folio 안에서 실제로 걸쳐 있는 페이지 수 */
 
-		if (mark_dirty) {
-			folio_lock(fi.folio);
-			folio_mark_dirty(fi.folio);
+		if (mark_dirty) {	/* [한국어] 읽기 DMA 완료 경로에서만 true */
+			folio_lock(fi.folio);	/* [한국어] dirty 표시는 folio 상태·매핑을 건드리므로 folio 락이 필요하다.
+			                         * **여기서 잠들 수 있다** — 이 함수를 IRQ 컨텍스트에서 부르면 안 되는 이유. */
+			folio_mark_dirty(fi.folio);	/* [한국어] DMA 로 바뀐 내용이 write-back 대상이 되도록 표시 */
 			folio_unlock(fi.folio);
 		}
-		nr_pages = (fi.offset + fi.length - 1) / PAGE_SIZE -
-			   fi.offset / PAGE_SIZE + 1;
-		unpin_user_folio(fi.folio, nr_pages);
+		nr_pages = (fi.offset + fi.length - 1) / PAGE_SIZE -	/* [한국어] 마지막 바이트가 속한 페이지 인덱스 */
+			   fi.offset / PAGE_SIZE + 1;	/* [한국어] 빼기 첫 바이트가 속한 페이지 인덱스, 더하기 1 = 걸친 페이지 수.
+			                                 * 단순히 length/PAGE_SIZE 로 계산하면 안 된다 —
+			                                 * offset 때문에 시작이 페이지 중간일 수 있어
+			                                 * 같은 길이라도 걸치는 페이지 수가 달라지기 때문이다.
+			                                 * -1 은 "끝 다음"이 아니라 "마지막 바이트"를 보게 만든다. */
+		unpin_user_folio(fi.folio, nr_pages);	/* [한국어] 걸어 둔 핀을 그 개수만큼 되돌린다.
+		                                         * 핀 카운트는 페이지 단위로 잡혔으므로 개수를 정확히 맞춰야 하며,
+		                                         * 적게 풀면 그 페이지는 영원히 이동 불가 상태로 남는다. */
 	}
 }
 EXPORT_SYMBOL_GPL(__bio_release_pages);
@@ -2982,19 +3036,25 @@ EXPORT_SYMBOL_GPL(__bio_release_pages);
  * @bio:  설정 대상 bio (bi_max_vecs == 0이어야 함)
  * @iter: ITER_BVEC 타입의 iov_iter; 내부 bvec 배열이 bio에 직접 연결됨
  *
- * iter의 bvec 포인터를 bio->bi_io_vec로 직접 설정하여 복사 없이 공유한다.
- * BIO_CLONED 플래그를 설정하므로 bio_put() 시 bi_io_vec를 해제하지 않는다.
- * bi_bvec_done에 iter->iov_offset을 설정하여 bvec 내 부분 소비 위치를 보존한다.
- * 실행 컨텍스트: 태스크 컨텍스트 (io_uring / direct I/O 경로).
- * 호출자: bio_iov_iter_get_pages() — ITER_BVEC 타입 iter 처리 시
- * NVMe 연결: iter의 bvec가 곧 NVMe PRP/SGL entry의 원본 페이지 목록이 됨.
+ * ITER_BVEC 타입의 iov_iter 는 이미 (page, offset, len) 배열을 들고 있다. 그것은
+ * bio_vec 과 같은 형태이므로, 페이지를 새로 pin 하거나 복사할 필요 없이 **배열을
+ * 그대로 가리키기만** 하면 된다. io_uring 의 등록 버퍼(fixed buffer)나 루프 장치처럼
+ * 커널이 이미 참조를 붙들고 있는 버퍼가 여기 해당한다.
+ *
+ * 수명 규약(위 bio_iov_iter_get_pages 영문 주석): 이 bio 는 배열을 소유하지 않으므로,
+ * kiocb 발행자가 I/O 완료(->ki_complete)까지 그 bvec 과 페이지를 살려 둬야 한다.
+ *
+ * 실행 컨텍스트: 태스크 컨텍스트(io_uring / Direct I/O 제출 경로).
+ * 호출자: bio_iov_iter_get_pages() — iov_iter_is_bvec(iter) 인 경우.
  *
  * 호출 체인:
  *   bio_iov_iter_get_pages() → [bio_iov_bvec_set()] → BIO_CLONED 설정
  */
 void bio_iov_bvec_set(struct bio *bio, const struct iov_iter *iter)
 {
-	WARN_ON_ONCE(bio->bi_max_vecs);  // bio당 segment 수: NVMe PRP list/SGL 길이에 영향
+	WARN_ON_ONCE(bio->bi_max_vecs);	/* [한국어] 이 bio 는 bvec 배열을 할당받지 않은 상태여야 한다(bi_max_vecs == 0).
+	                                 * 자기 배열이 있는데 여기서 포인터를 덮어쓰면 그 배열이 미아가 되어 누수된다.
+	                                 * 호출자는 bio_alloc(bdev, 0, ...) 로 슬롯 0 개짜리 bio 를 만들어 넘겨야 한다. */
 
 	bio->bi_io_vec = (struct bio_vec *)iter->bvec;
 	bio->bi_iter.bi_idx = 0;
@@ -3088,35 +3148,61 @@ static int bio_iov_iter_align_down(struct bio *bio, struct iov_iter *iter,
  * @len_align_mask: 정렬 마스크 (0이면 임의 길이 허용)
  * @return: 0 성공; 음수 에러 코드
  *
- * BVEC 기반 iter: bio_iov_bvec_set()으로 직접 설정.
- * 사용자 메모리 iter: iov_iter_extract_bvecs()로 페이지를 pin하고 bio_vec 배열에 채움.
- * BIO_PAGE_PINNED: 페이지가 pin되었을 때 설정; 완료 후 호출자가 해제해야 함.
- * P2PDMA 지원: bi_bdev의 큐가 P2PDMA를 지원하면 ITER_ALLOW_P2PDMA 설정.
- * 실행 컨텍스트: 태스크 컨텍스트 (DIO 제출 경로).
- * 호출자: kiocb 기반 DIO (파일 시스템 direct_IO)
- * NVMe 연결: 추출된 사용자 페이지 → bio_vec → nvme_map_data() → PRP/SGL → NVMe DMA.
+ * ── 두 갈래 ────────────────────────────────────────────────────────────
+ *   (a) ITER_BVEC : 이미 페이지 배열이 있다 → bio_iov_bvec_set() 으로 가리키기만 한다.
+ *                   핀도 걸지 않고 참조도 잡지 않는다(BIO_PAGE_PINNED 미설정).
+ *   (b) 사용자 메모리 : iov_iter_extract_bvecs() 로 페이지를 **핀하고** bvec 을 채운다.
+ *                   이때 BIO_PAGE_PINNED 를 세워 "완료 시 unpin 이 필요하다"를 기록한다.
+ *
+ * ── BIO_PAGE_PINNED 의 의미 ─────────────────────────────────────────────
+ * 이 플래그는 "이 bio 의 페이지들은 FOLL_PIN 으로 고정되어 있으니 완료 후
+ * 반드시 풀어야 한다"는 표시다. 완료 경로의 bio_release_pages() 가 이 플래그를
+ * 보고 __bio_release_pages() 를 부를지 결정한다. 플래그가 없는데 unpin 하면
+ * 남의 핀을 푸는 것이고, 플래그가 있는데 unpin 하지 않으면 그 페이지는
+ * 영원히 마이그레이션·회수 불가 상태로 남는다(사실상 메모리 누수).
+ * 설정 근거는 iov_iter_extract_will_pin(iter) 하나뿐이다 — iter 종류에 따라
+ * 추출이 실제로 핀을 잡는지(사용자 메모리) 아닌지(커널 bvec/kvec)가 갈린다.
+ *
+ * 반환 규약(위 영문 주석): 요청한 만큼 다 담는 것을 보장하지 않는다.
+ * 담을 수 있는 만큼만 담고 0 을 반환하며, **한 페이지도 못 담았을 때만** 에러다.
+ * 호출자는 iter 에 남은 양을 보고 다음 bio 를 만들어 이어 간다.
+ *
+ * 실행 컨텍스트: 태스크 컨텍스트(페이지 핀이 잠들 수 있다).
+ * 호출자: kiocb 기반 Direct I/O (block/fops.c, fs/iomap/direct-io.c 등).
  *
  * 호출 체인:
- *   kiocb DIO → [bio_iov_iter_get_pages()] → iov_iter_extract_bvecs() → NVMe 제출
+ *   DIO 제출 → [bio_iov_iter_get_pages()] → iov_iter_extract_bvecs()
+ *            → (완료 시) bio_release_pages() → __bio_release_pages() → unpin
  */
-int bio_iov_iter_get_pages(struct bio *bio, struct iov_iter *iter,  // 사용자 페이지 pin/mapping: NVMe DMA를 위해 커널이 페이지를 고정
+int bio_iov_iter_get_pages(struct bio *bio, struct iov_iter *iter,
 			   unsigned len_align_mask)
 {
-	iov_iter_extraction_t flags = 0;
+	iov_iter_extraction_t flags = 0;	/* [한국어] 추출 동작 옵션. 지금은 ITER_ALLOW_P2PDMA 하나만 쓴다. */
 
-	if (WARN_ON_ONCE(bio_flagged(bio, BIO_CLONED)))  // clone된 bio: PRP/SGL 원본을 공유하므로 중간 수정 불가
-		return -EIO;  // I/O 오류: NVMe 명령 제출/완료 실패 전파
+	if (WARN_ON_ONCE(bio_flagged(bio, BIO_CLONED)))	/* [한국어] 클론은 bvec 배열을 원본과 공유하므로
+	                                                 * 여기에 페이지를 채워 넣으면 원본 데이터가 오염된다. */
+		return -EIO;
 
-	if (iov_iter_is_bvec(iter)) {
-		bio_iov_bvec_set(bio, iter);
-		iov_iter_advance(iter, bio->bi_iter.bi_size);  // NVMe 명령의 NLB(Length)로 변환됨
+	if (iov_iter_is_bvec(iter)) {	/* [한국어] 갈래 (a): 커널이 이미 페이지 배열을 들고 있는 경우 */
+		bio_iov_bvec_set(bio, iter);	/* [한국어] 복사·핀 없이 배열 포인터만 물려받는다 */
+		iov_iter_advance(iter, bio->bi_iter.bi_size);	/* [한국어] iter 를 소비한 만큼 전진시켜, 호출자가
+		                                                 * "얼마나 처리했는지"를 iter 로 알 수 있게 한다.
+		                                                 * bio_iov_bvec_set 이 iter 전체를 가져갔으므로 그만큼 밀어 준다. */
 		return 0;
 	}
 
-	if (iov_iter_extract_will_pin(iter))  // 사용자 페이지 pin 여부: NVMe DMA 안전성 판단
-		bio_set_flag(bio, BIO_PAGE_PINNED);	// 사용자 페이지 pin: NVMe DMA 안전 보장
-	/* [한국어] 대상 장치가 P2PDMA를 지원한다고 큐에 표시했는지 확인한다.
-	 * NVMe PCIe 드라이버는 CMB를 쓸 수 있을 때 QUEUE_FLAG_PCI_P2PDMA를 세운다. */
+	if (iov_iter_extract_will_pin(iter))	/* [한국어] 이 iter 종류에서 추출이 실제로 페이지 핀을 잡는가.
+	                                         * 사용자 메모리(ITER_UBUF/ITER_IOVEC)면 true,
+	                                         * 커널 주소(ITER_KVEC)면 false 다. */
+		bio_set_flag(bio, BIO_PAGE_PINNED);	/* [한국어] **완료 시 unpin 해야 함**을 bio 에 기록한다.
+		                                         * 추출을 시작하기 **전에** 세우는 것이 중요하다 —
+		                                         * 아래 루프가 중간에 실패해 일부만 핀된 상태로 빠져나가도
+		                                         * 완료 경로가 그 일부를 회수할 수 있어야 하기 때문이다. */
+	/* [한국어] 대상 장치의 큐가 P2PDMA 를 지원한다고 선언했는지 확인한다.
+	 * NVMe 에서는 nvme_pci_supports_pci_p2pdma() 가 dma_pci_p2pdma_supported(dev->dev)
+	 * 를 그대로 돌려주고(drivers/nvme/host/pci.c:4483), core.c:4600 에서 그 결과가
+	 * lim.features |= BLK_FEAT_PCI_P2PDMA 로 큐 능력에 반영된다.
+	 * 즉 "이 컨트롤러의 DMA 경로가 peer-to-peer 전송을 감당할 수 있는가"가 기준이다. */
 	if (bio->bi_bdev && blk_queue_pci_p2pdma(bio->bi_bdev->bd_disk->queue))
 		/* [한국어] 사용자 iov에서 페이지를 추출할 때 P2PDMA 페이지를 허용한다.
 		 * 이 플래그가 없으면 iov_iter가 장치 메모리 페이지를 거부한다 —
@@ -3536,7 +3622,7 @@ static void bio_wait_end_io(struct bio *bio)
  * 실행 컨텍스트: 태스크 컨텍스트 (블록 대기 가능).
  * 호출자: submit_bio_wait(), bio_submit_or_kill()
  * NVMe 연결: submit_bio() → blk_mq_submit_bio() → nvme_queue_rq() →
- *            nvme_submit_cmd(doorbell) 후 CQ 수신까지 blk_wait_io()로 블록.
+ *            nvme_sq_copy_cmd → nvme_write_sq_db (SQ 기록 후 doorbell) 후 CQ 수신까지 blk_wait_io()로 블록.
  *
  * 호출 체인:
  *   submit_bio_wait() → [bio_await()] → submit_bio() → (NVMe CQ) → bio_wait_end_io() → blk_wait_io() 반환
@@ -3553,7 +3639,7 @@ void bio_await(struct bio *bio, void *priv,  // bio 제출 후 완료 대기: su
 	if (submit)
 		submit(bio, priv);
 	else
-		submit_bio(bio);  // bio -> block 레이어 -> blk-mq -> nvme_queue_rq -> nvme_submit_cmd(doorbell)
+		submit_bio(bio);  // bio -> block 레이어 -> blk-mq -> mq_ops->queue_rq (간접 호출; NVMe PCIe 면 nvme_queue_rq -> nvme_sq_copy_cmd -> nvme_write_sq_db)
 	blk_wait_io(&done);  // NVMe CQ 수신까지 동기 대기
 }
 EXPORT_SYMBOL_GPL(bio_await);  // bio 제출 후 완료 대기: submit_bio -> blk-mq -> nvme_queue_rq -> doorbell -> CQ
@@ -4026,10 +4112,10 @@ static inline bool bio_remaining_done(struct bio *bio)  // 모든 NVMe 하위 �
  *   7. 최종 bi_end_io() 호출.
  * 실행 컨텍스트: 하드 IRQ 컨텍스트 포함 (NVMe CQ 처리기에서 직접 호출 가능).
  * 호출자: blk_mq_end_request() (NVMe 완료 경로)
- * NVMe 연결: nvme_process_cq() → nvme_complete_rq() → blk_mq_end_request() → [bio_endio()].
+ * NVMe 연결: nvme_poll_cq() → nvme_complete_rq() → blk_mq_end_request() → [bio_endio()].
  *
  * 호출 체인:
- *   nvme_process_cq() → blk_mq_end_request() → [bio_endio()] → bi_end_io()
+ *   nvme_poll_cq() → blk_mq_end_request() → [bio_endio()] → bi_end_io()
  */
 void bio_endio(struct bio *bio)  // NVMe CQ 수신 후 상위 레이어로 completion 전파
 {
@@ -4448,10 +4534,10 @@ subsys_initcall(init_bio);  // bio 서브시스템 초기화: NVMe 드라이버�
  * - bio는 파일 시스템부터 NVMe SQ doorbell까지 I/O를 운송하는 핵심 컨테이너이며,
  *   bi_iter는 SLBA/length, bi_io_vec은 PRP/SGL로 변환된다.
  * - submit_bio() -> blk_mq_submit_bio() -> blk_mq_get_request() ->
- *   nvme_queue_rq() -> nvme_submit_cmd(doorbell) 호출 연쇄를 통해 NVMe SQ에 CID가 할당된다.
+ *   nvme_queue_rq() -> nvme_sq_copy_cmd → nvme_write_sq_db (SQ 기록 후 doorbell) 호출 연쇄를 통해 NVMe SQ에 CID가 할당된다.
  * - bio_split()과 bio_chain()은 NVMe MDTS, segment 한도, zone append/atomic
  *   write 제약을 준수하면서도 대용량 I/O를 여러 명령으로 쪼개는 데 사용된다.
- * - bio_endio()는 nvme_process_cq() -> nvme_complete_rq() 이후에 호출되며,
+ * - bio_endio()는 nvme_poll_cq() -> nvme_complete_rq() 이후에 호출되며,
  *   bio_chain으로 묶인 모든 하위 bio가 완료된 뒤에야 상위 완료 콜백이 실행된다.
  * - bio_alloc_bioset()/bio_put()의 per-CPU cache와 mempool/rescuer 메커니즘은
  *   메모리 부족 상황에서도 NVMe doorbell 제출이 정지하지 않도록 보장한다.

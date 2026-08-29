@@ -5328,11 +5328,14 @@ static void ioc_rqos_exit(struct rq_qos *rqos)
 
 	blkcg_deactivate_policy(rqos->disk, &blkcg_policy_iocost);	/* blk-cgroup에서 iocost 분리 */
 
-	spin_lock_irq(&ioc->lock);
-	ioc->running = IOC_STOP;	/* 제어 타이머 정지 예고 */
-	spin_unlock_irq(&ioc->lock);
+	spin_lock_irq(&ioc->lock);	/* [한국어] running 갱신을 타이머 콜백과 직렬화한다 */
+	ioc->running = IOC_STOP;	/* [한국어] 정지 예고. 이미 실행 중인 ioc_timer_fn()은 이 값을 보고
+					 * 다음 주기를 예약하지 않고 조용히 끝난다(스스로 재무장하지 않음) */
+	spin_unlock_irq(&ioc->lock);	/* [한국어] 아래 timer_shutdown_sync()가 잠들 수 있으므로 락을 먼저 푼다 */
 
-	timer_shutdown_sync(&ioc->timer);	/* 제어 주기 타이머 동기 종료 */
+	timer_shutdown_sync(&ioc->timer);	/* [한국어] 실행 중인 타이머 콜백이 끝날 때까지 기다리고, 이후 재무장도 영구 차단한다.
+						 * 이 동기 대기가 없으면 아래 free_percpu/kfree 이후에도 콜백이 살아 있어
+						 * use-after-free가 된다. 잠들 수 있으므로 반드시 락 밖에서 호출해야 한다 */
 	free_percpu(ioc->pcpu_stat);	/* [한국어] per-CPU 완료/대기 통계 메모리 해제 */
 	kfree(ioc);	/* [한국어] iocost 컨트롤러 구조체 해제 */
 }
@@ -5388,16 +5391,16 @@ static const struct rq_qos_ops ioc_rqos_ops = {
  */
 static int blk_iocost_init(struct gendisk *disk)
 {
-	struct ioc *ioc;
-	int i, cpu, ret;
+	struct ioc *ioc;	/* [한국어] 새로 만들 장치별 컨트롤러 */
+	int i, cpu, ret;	/* [한국어] i=missed[] 인덱스, cpu=per-CPU 초기화 순회 변수, ret=에러 코드 */
 
 	ioc = kzalloc_obj(*ioc);	/* 장치당 하나의 iocost 컨트롤러 */
 	if (!ioc)
-		return -ENOMEM;
+		return -ENOMEM;	/* [한국어] 할당 실패 — 아직 아무것도 등록하지 않았으므로 되돌릴 것이 없다 */
 
 	ioc->pcpu_stat = alloc_percpu(struct ioc_pcpu_stat);	/* per-CPU 완료 지연/rq_wait 통계 */
 	if (!ioc->pcpu_stat) {
-		kfree(ioc);
+		kfree(ioc);	/* [한국어] 앞서 할당한 ioc를 되돌린다(역순 정리) */
 		return -ENOMEM;
 	}
 
@@ -5405,14 +5408,16 @@ static int blk_iocost_init(struct gendisk *disk)
 	for_each_possible_cpu(cpu) {
 		struct ioc_pcpu_stat *ccs = per_cpu_ptr(ioc->pcpu_stat, cpu);
 
-		for (i = 0; i < ARRAY_SIZE(ccs->missed); i++) {
+		for (i = 0; i < ARRAY_SIZE(ccs->missed); i++) {	/* [한국어] missed[]는 read/write 두 칸. ARRAY_SIZE로 크기를 박아 두지 않는다 */
 			local_set(&ccs->missed[i].nr_met, 0);	/* [한국어] latency QoS 달성 카운트 초기화 */
 			local_set(&ccs->missed[i].nr_missed, 0);	/* [한국어] latency QoS 미달 카운트 초기화 */
 		}
-		local64_set(&ccs->rq_wait_ns, 0);		/* rq_wait_ns 0 */
+		local64_set(&ccs->rq_wait_ns, 0);		/* [한국어] rq 대기 누계도 0으로. alloc_percpu는 0으로 초기화된 메모리를 주지만,
+								 * local_t/local64_t는 아키텍처별 표현이 있을 수 있어 전용 API로 설정한다 */
 	}
 
-	spin_lock_init(&ioc->lock);
+	spin_lock_init(&ioc->lock);	/* [한국어] 장치 전역 락 초기화. 아래 seqcount_spinlock_init()이 이 락을 inner lock으로 참조하므로
+					 * 반드시 그보다 먼저 초기화되어야 한다 */
 	timer_setup(&ioc->timer, ioc_timer_fn, 0);	/* 제어 주기 타이머 핸들러 등록 */
 	INIT_LIST_HEAD(&ioc->active_iocgs);	/* 활성 cgroup 목록 초기화 */
 
@@ -5424,10 +5429,11 @@ static int blk_iocost_init(struct gendisk *disk)
 	atomic64_set(&ioc->cur_period, 0);	/* 제어 주기 번호 0 */
 	atomic_set(&ioc->hweight_gen, 0);	/* hweight 캐시 세대 0 */
 
-	spin_lock_irq(&ioc->lock);
+	spin_lock_irq(&ioc->lock);	/* [한국어] 아직 아무도 이 ioc를 볼 수 없지만, ioc_refresh_params_disk()가
+					 * lockdep_assert 및 락 보유를 전제로 작성되어 있어 규약대로 잡는다 */
 	ioc->autop_idx = AUTOP_INVALID;	/* [한국어] autop 인덱스를 무효 상태로 초기화: refresh 강제 실행 */
 	ioc_refresh_params_disk(ioc, true, disk);	/* [한국어] disk queue depth 확인 후 autop 프로파일 선택 */
-	spin_unlock_irq(&ioc->lock);
+	spin_unlock_irq(&ioc->lock);	/* [한국어] 파라미터 초기화 완료 */
 
 	/*
 	 * rqos must be added before activation to allow ioc_pd_init() to
@@ -5438,19 +5444,19 @@ static int blk_iocost_init(struct gendisk *disk)
 	ret = rq_qos_add(&ioc->rqos, disk, RQ_QOS_COST, &ioc_rqos_ops);	/* [한국어] 이 요청 큐의 rq_qos 체인에 RQ_QOS_COST id로 삽입 —
 											 * 이후 rq_qos_throttle()/rq_qos_done() 훅이 ioc_rqos_ops를 통해 이 파일로 들어온다 */
 	if (ret)
-		goto err_free_ioc;
+		goto err_free_ioc;	/* [한국어] rq_qos 등록 실패 — 아직 체인에 없으므로 메모리만 해제하면 된다 */
 
 	ret = blkcg_activate_policy(disk, &blkcg_policy_iocost);	/* blk-cgroup과 연결: cgroup별 vtime 예산 할당 */
 	if (ret)
-		goto err_del_qos;
-	return 0;
+		goto err_del_qos;	/* [한국어] 정책 활성화 실패 — 앞서 넣은 rq_qos부터 빼내야 한다(역순 정리) */
+	return 0;	/* [한국어] 성공. 이제 이 장치의 모든 bio가 ioc_rqos_throttle()을 거친다 */
 
 err_del_qos:
-	rq_qos_del(&ioc->rqos);
+	rq_qos_del(&ioc->rqos);	/* [한국어] rq_qos 체인에서 제거. 이 시점 이후로는 새 bio가 들어오지 않는다 */
 err_free_ioc:
-	free_percpu(ioc->pcpu_stat);
-	kfree(ioc);
-	return ret;
+	free_percpu(ioc->pcpu_stat);	/* [한국어] per-CPU 통계 해제 */
+	kfree(ioc);	/* [한국어] 컨트롤러 구조체 해제. 여기까지 왔다면 이 장치에 iocost는 없는 상태다 */
+	return ret;	/* [한국어] rq_qos_add 또는 blkcg_activate_policy가 준 errno를 그대로 전파 */
 }
 
 /*
@@ -5525,16 +5531,16 @@ static struct blkg_policy_data *ioc_pd_alloc(struct gendisk *disk,
 		struct blkcg *blkcg, gfp_t gfp)
 {
 	int levels = blkcg->css.cgroup->level + 1;	/* [한국어] root(0)부터 이 cgroup까지의 계층 수 */
-	struct ioc_gq *iocg;
+	struct ioc_gq *iocg;	/* [한국어] 새로 만들 (장치 × cgroup) 상태 구조체 */
 
 	iocg = kzalloc_node(struct_size(iocg, ancestors, levels), gfp,	/* cgroup 계층 깊이만큼 조상 포인터 할당 */
 			    disk->node_id);			/* 장치 NUMA node에 맞춤 메모리 할당 */
 	if (!iocg)
-		return NULL;
+		return NULL;	/* [한국어] NULL을 돌려주면 blkg 생성이 -ENOMEM으로 실패한다 */
 
 	iocg->pcpu_stat = alloc_percpu_gfp(struct iocg_pcpu_stat, gfp);	/* cgroup별 per-CPU 사용량 */
 	if (!iocg->pcpu_stat) {
-		kfree(iocg);
+		kfree(iocg);	/* [한국어] 앞서 할당한 iocg를 되돌린다 */
 		return NULL;
 	}
 
@@ -5565,28 +5571,30 @@ static struct blkg_policy_data *ioc_pd_alloc(struct gendisk *disk,
 static void ioc_pd_init(struct blkg_policy_data *pd)
 {
 	struct ioc_gq *iocg = pd_to_iocg(pd);
-	struct blkcg_gq *blkg = pd_to_blkg(&iocg->pd);
-	struct ioc *ioc = q_to_ioc(blkg->q);
-	struct ioc_now now;
-	struct blkcg_gq *tblkg;
-	unsigned long flags;
+	struct blkcg_gq *blkg = pd_to_blkg(&iocg->pd);	/* [한국어] policy data에서 소유 blkg 역참조 — cgroup 계층 정보를 얻기 위해 필요 */
+	struct ioc *ioc = q_to_ioc(blkg->q);	/* [한국어] 요청 큐의 rq_qos 체인에서 RQ_QOS_COST 항목을 찾아 ioc를 얻는다.
+						 * blk_iocost_init()이 rq_qos_add를 먼저 한 이유가 바로 이 조회 때문이다 */
+	struct ioc_now now;	/* [한국어] 초기 vtime을 현재 장치 가상 시각으로 맞추기 위한 스냅샷 */
+	struct blkcg_gq *tblkg;	/* [한국어] ancestors[]를 채우며 위로 거슬러 올라갈 순회 포인터 */
+	unsigned long flags;	/* [한국어] spin_lock_irqsave용 인터럽트 상태 저장 */
 
-	ioc_now(ioc, &now);
+	ioc_now(ioc, &now);	/* [한국어] 현재 장치 vtime(vnow)을 읽는다 */
 
-	iocg->ioc = ioc;
+	iocg->ioc = ioc;	/* [한국어] 역참조 캐시 — 이후 모든 경로가 iocg->ioc로 컨트롤러에 접근한다 */
 	atomic64_set(&iocg->vtime, now.vnow);	/* atomic: 초기 issued vtime을 현재 vnow로 */
 	atomic64_set(&iocg->done_vtime, now.vnow);	/* atomic: 초기 completed vtime 동기화 */
 	atomic64_set(&iocg->active_period, atomic64_read(&ioc->cur_period));	/* atomic: 현재 제어 주기로 활성 스탬프 */
-	INIT_LIST_HEAD(&iocg->active_list);
-	INIT_LIST_HEAD(&iocg->walk_list);
-	INIT_LIST_HEAD(&iocg->surplus_list);
+	INIT_LIST_HEAD(&iocg->active_list);	/* [한국어] ioc->active_iocgs에 연결될 링크. 빈 상태 = 아직 비활성 */
+	INIT_LIST_HEAD(&iocg->walk_list);	/* [한국어] 통계/기부 순회용 링크. 빈 상태가 "미방문"을 뜻하므로 초기화가 필수다 */
+	INIT_LIST_HEAD(&iocg->surplus_list);	/* [한국어] 기부자 목록용 링크. ioc_timer_fn()의 WARN_ON_ONCE가 이 초기 상태를 전제한다 */
 	iocg->hweight_active = WEIGHT_ONE;	/* 단일 cgroup 시 100% hweight_active */
 	iocg->hweight_inuse = WEIGHT_ONE;	/* 단일 cgroup 시 100% hweight_inuse(사용 비율) */
 
-	init_waitqueue_head(&iocg->waitq);
+	init_waitqueue_head(&iocg->waitq);	/* [한국어] 예산 부족 발행자들이 잠들 대기열과 그 내부 스핀락 초기화 */
 	hrtimer_setup(&iocg->waitq_timer, iocg_waitq_timer_fn, CLOCK_MONOTONIC, HRTIMER_MODE_ABS);	/* vtime 예산 회복 monotonic 타이머 */
 
-	iocg->level = blkg->blkcg->css.cgroup->level;
+	iocg->level = blkg->blkcg->css.cgroup->level;	/* [한국어] cgroup 트리 깊이(root=0)를 그대로 가져온다.
+							 * ancestors[level]이 자기 자신이 되며, 이후 불변이다 */
 
 	for (tblkg = blkg; tblkg; tblkg = tblkg->parent) {	/* blk-cgroup 계층을 따라 조상 ioc_gq 포인터 저장 */
 		struct ioc_gq *tiocg = blkg_to_iocg(tblkg);		/* 조상 cgroup의 vtime 예산 상태 */

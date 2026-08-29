@@ -927,7 +927,7 @@ struct blk_mq_alloc_data {
 	blk_opf_t cmd_flags;
 	/* [한국어] 이 request가 수행할 연산(REQ_OP_READ/WRITE 등)과 부가
 	 * 플래그(REQ_POLLED 등) — blk_mq_get_hctx_type()이 이 값으로 hctx
-	 * 유형을 결정하고, 드라이버가 이를 NVMe opcode(NVME_CMD_READ/WRITE
+	 * 유형을 결정하고, 드라이버가 이를 NVMe opcode(nvme_cmd_read(0x02)/WRITE
 	 * 등)로 변환한다.
 	 * 설정자: 호출자가 bio->bi_opf 등에서 그대로 복사.
 	 * 읽는 자: blk_mq_map_queue()/blk_mq_get_hctx_type() (hctx 결정),

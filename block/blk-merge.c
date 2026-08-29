@@ -1926,7 +1926,7 @@ static void blk_rq_set_mixed_merge(struct request *rq)
  *   REQ_FAILFAST_TRANSPORT - 전송 계층 오류(PCIe 링크 다운, TCP 연결 끊김 등)
  *   REQ_FAILFAST_DRIVER    - 드라이버 내부 오류
  * NVMe에서는 drivers/nvme/host/core.c의 nvme_decide_disposition()이 이 플래그를
- * 확인해 재시도(NVME_RETRY) 대신 즉시 실패(NVME_COMPLETE)를 선택한다.
+ * 확인해 재시도(enum nvme_disposition 의 RETRY) 대신 즉시 완료(COMPLETE)를 선택한다.
  *
  * === read-ahead를 무조건 failfast로 만드는 이유 ===
  * read-ahead(REQ_RAHEAD)는 "혹시 필요할지 모르니 미리 읽어 두는" 투기적 I/O다.
