@@ -531,7 +531,10 @@ unlock:
  *
  * async_depth는 I/O 스케줄러(mq-deadline 등)가 비동기(non-sync) write에
  * 적용하는 소프트 큐 깊이 상한으로, 동기 read/write에 SQ 슬롯을 더 많이
- * 남겨두기 위한 튜닝 값이다(추정). q->elevator_lock으로 보호된다.
+ * 남겨두기 위한 튜닝 값이다. 백그라운드 write-back이 스케줄러 태그를 모두
+ * 점유하면 사용자가 기다리는 동기 읽기가 굶기 때문이다(자세한 배경은
+ * block/blk-mq.c의 blk_mq_limit_depth() 주석 참고).
+ * q->elevator_lock으로 보호된다.
  * 실행 컨텍스트: sysfs read(2) 프로세스 컨텍스트.
  * 호출자: queue_async_depth_entry.show를 통해 queue_attr_show().
  * 피호출자: queue_var_show().
@@ -646,8 +649,12 @@ queue_async_depth_store(struct gendisk *disk, const char *page, size_t count)
  *
  * read_ahead_kb는 VFS/페이지 캐시가 순차 읽기를 감지했을 때 미리 읽어들이는
  * 바이트 수(KB 단위)를 제어한다. NVMe SSD는 회전식 디스크와 달리 탐색
- * 비용이 없어 readahead의 이득이 상대적으로 작을 수 있지만, 큰 순차 읽기의
- * SQ 오버헤드를 줄이는 데는 여전히 유효하다(추정).
+ * 비용이 없어 "탐색 회피" 목적의 readahead 이득은 사라졌다. 그럼에도 여전히
+ * 유효한 이유는 다른 데 있다: 큰 요청 하나가 작은 요청 여러 개보다 커맨드 수와
+ * doorbell 횟수를 줄이고, 애플리케이션이 다음 블록을 요청하기 전에 미리 읽어
+ * 두면 왕복 지연(수 마이크로초)을 감출 수 있기 때문이다.
+ * 다만 과도한 readahead는 쓰지 않을 데이터로 대역폭과 페이지 캐시를 낭비하므로,
+ * NVMe에서는 회전 디스크만큼 큰 값을 쓰지 않는 것이 보통이다.
  * 실행 컨텍스트: sysfs read(2) 프로세스 컨텍스트. limits_lock으로 보호되는
  *   이유는 ra_pages가 보통 queue_limits_commit_update()에서 함께 계산되기
  *   때문(아래 queue_ra_store 원본 영어 주석 참고).
@@ -761,8 +768,12 @@ static ssize_t queue_##_field##_show(struct gendisk *disk, char *page)	\
 }
 
 /*
- * max_segments: bio가 나뉠 수 있는 최대 세그먼트(불연속 메모리 조각) 수 -
- *   NVMe PRP list/SGL 엔트리 상한과 연결(추정).
+ * max_segments: request 하나가 가질 수 있는 최대 세그먼트(연속 물리 메모리
+ *   조각) 수. NVMe PCIe에서는 nvme_probe()가 NVME_MAX_SEGS =
+ *   NVME_CTRL_PAGE_SIZE / sizeof(struct nvme_sgl_desc) = 4096/16 = 256으로
+ *   설정한다(drivers/nvme/host/pci.c:128). 즉 SGL 디스크립터 페이지 한 장에
+ *   들어가는 개수가 상한이다. PRP 모드에서는 링크 리스트로 확장 가능해
+ *   이 값이 직접 제약이 되지 않는다.
  */
 QUEUE_SYSFS_LIMIT_SHOW(max_segments)
 /* max_discard_segments: Deallocate(Trim) 명령 하나에 포함 가능한 range 세그먼트 수 상한. */
@@ -771,9 +782,15 @@ QUEUE_SYSFS_LIMIT_SHOW(max_discard_segments)
 QUEUE_SYSFS_LIMIT_SHOW(max_integrity_segments)
 /* max_segment_size: 세그먼트 하나(연속 물리 메모리 조각)의 최대 바이트 크기. */
 QUEUE_SYSFS_LIMIT_SHOW(max_segment_size)
-/* max_write_streams: FDP(Flexible Data Placement) 등 다중 쓰기 스트림 지원 개수(추정). */
+/* max_write_streams: 장치가 지원하는 쓰기 스트림 개수. 같은 수명(lifetime)의
+ * 데이터를 같은 물리 블록에 모으도록 힌트를 주는 기능으로, NVMe에서는
+ * Streams Directive의 Stream Identifier나 FDP(Flexible Data Placement)의
+ * Placement Handle에 대응한다. 스트림을 잘 나누면 GC 시 함께 무효화되는
+ * 데이터가 같은 블록에 모여 쓰기 증폭(WAF)이 줄어든다. 0이면 미지원. */
 QUEUE_SYSFS_LIMIT_SHOW(max_write_streams)
-/* write_stream_granularity: 쓰기 스트림에 요구되는 정렬/크기 단위(추정). */
+/* write_stream_granularity: 스트림 하나에 기록할 때 권장되는 크기 단위(바이트).
+ * 이 단위보다 작게 나눠 쓰면 장치가 스트림을 효과적으로 분리하지 못한다.
+ * 파일시스템이 스트림별 쓰기를 이 크기에 맞춰 모으는 근거로 쓴다. */
 QUEUE_SYSFS_LIMIT_SHOW(write_stream_granularity)
 /* logical_block_size: NVMe LBA(Logical Block Address) 데이터 크기 - 보통 512B/4096B. */
 QUEUE_SYSFS_LIMIT_SHOW(logical_block_size)
@@ -801,11 +818,11 @@ QUEUE_SYSFS_LIMIT_SHOW(max_open_zones)
 /* max_active_zones: ZNS에서 동시에 Active 상태로 유지 가능한 zone 개수 상한. */
 QUEUE_SYSFS_LIMIT_SHOW(max_active_zones)
 /*
- * atomic_write_unit_min: NVMe FAW(원자적 쓰기) 최소 보장 단위(섹터 등가 필드지만
+ * atomic_write_unit_min: NVMe 원자적 쓰기(NAWUPF 유래) 최소 보장 단위(섹터 등가 필드지만
  *   이 매크로로는 원시 값 그대로 노출).
  */
 QUEUE_SYSFS_LIMIT_SHOW(atomic_write_unit_min)
-/* atomic_write_unit_max: NVMe FAW 최대 보장 단위. */
+/* atomic_write_unit_max: NVMe 원자적 쓰기(NAWUPF 유래) 최대 보장 단위. */
 QUEUE_SYSFS_LIMIT_SHOW(atomic_write_unit_max)
 
 /*
@@ -839,7 +856,7 @@ QUEUE_SYSFS_LIMIT_SHOW_SECTORS_TO_BYTES(max_write_zeroes_sectors)
 QUEUE_SYSFS_LIMIT_SHOW_SECTORS_TO_BYTES(max_hw_wzeroes_unmap_sectors)
 /* max_wzeroes_unmap_sectors: 사용자가 sysfs로 설정 가능한 Write Zeroes unmap 범위. */
 QUEUE_SYSFS_LIMIT_SHOW_SECTORS_TO_BYTES(max_wzeroes_unmap_sectors)
-/* atomic_write_max_sectors: NVMe FAW(원자적 쓰기) 최대 보장 범위. */
+/* atomic_write_max_sectors: NVMe 원자적 쓰기(NAWUPF 유래) 최대 보장 범위. */
 QUEUE_SYSFS_LIMIT_SHOW_SECTORS_TO_BYTES(atomic_write_max_sectors)
 /* atomic_write_boundary_sectors: 원자적 쓰기가 걸치면 안 되는 경계 간격. */
 QUEUE_SYSFS_LIMIT_SHOW_SECTORS_TO_BYTES(atomic_write_boundary_sectors)
@@ -913,7 +930,11 @@ QUEUE_SYSFS_SHOW_CONST(poll_delay, -1)
  *
  * 사용자는 discard_max_hw_bytes(하드웨어 최대치)를 넘지 않는 범위에서 실제
  * 적용할 max_user_discard_sectors를 줄일 수 있다. NVMe Deallocate(Trim)
- * 명령이 한 번에 처리할 range 크기를 제한하는 용도(추정).
+ * 명령 하나가 한 번에 처리할 LBA 범위 크기를 제한하는 용도다.
+ * 큰 discard 하나가 컨트롤러를 오래 붙잡으면 그 동안 다른 I/O의 지연이
+ * 커지므로, 지연에 민감한 워크로드에서 이 값을 낮춰 쪼개 보내게 만든다.
+ * 하드웨어 상한(max_hw_discard_sectors, NVMe DMRSL 유래)보다 크게는
+ * 설정할 수 없고 낮추기만 가능하다.
  * 실행 컨텍스트: sysfs write(2) 프로세스 컨텍스트, q->limits_lock 보유 상태로
  *   호출됨(queue_attr_store가 queue_limits_start_update()로 미리 잠금).
  * 호출자: queue_max_discard_sectors_entry.store_limit을 통해 queue_attr_store().
@@ -972,8 +993,12 @@ static int queue_max_discard_sectors_store(struct gendisk *disk,
  * @return: 성공 시 0, 실패 시 -EINVAL.
  *
  * 다른 discard 계열과 달리 임의 값이 아니라 "0 아니면 하드웨어 최대치"만
- * 허용한다 - NVMe Write Zeroes 명령에 Deallocate 비트를 함께 세팅할지
- * 여부를 사실상 on/off로만 제어한다는 뜻(추정).
+ * 허용한다. 이 속성이 제어하는 것은 "Write Zeroes를 수행할 때 해당 영역을
+ * 할당 해제(deallocate)까지 할 것인가"라는 이분법적 정책이기 때문이다.
+ * NVMe에서는 Write Zeroes(opcode 0x08) 커맨드의 DEAC 비트에 대응하며,
+ * 켜면 0을 실제로 기록하는 대신 매핑을 해제해 훨씬 빠르고 매체 수명에도
+ * 유리하지만, 장치가 이후 그 영역을 0으로 돌려준다는 보장(DLFEAT)이 있어야
+ * 안전하다. 중간값에 의미가 없으므로 0 아니면 하드웨어 최대치만 받는다.
  * 실행 컨텍스트: sysfs write(2), q->limits_lock 보유 상태.
  * 호출자: queue_max_wzeroes_unmap_sectors_entry.store_limit을 통해 queue_attr_store().
  * 피호출자: queue_var_store().
@@ -1023,7 +1048,10 @@ static int queue_max_wzeroes_unmap_sectors_store(struct gendisk *disk,
  * max_sectors_kb는 NVMe가 한 request/명령으로 전송 가능한 최대 크기를
  * 사용자공간에서 하향 조정하는 통로다 - MDTS(하드웨어 상한)보다 작은 값으로
  * 설정하면 PRP/SGL 리스트를 더 짧게 준비해도 되지만, 큰 순차 I/O를 더 잘게
- * 쪼개야 하므로 처리량과 지연시간의 트레이드오프가 생긴다(추정). 값 자체의
+ * 쪼개야 하므로 처리량과 지연시간의 트레이드오프가 생긴다. 값을 낮추면
+ * 개별 커맨드의 서비스 시간이 짧아져 지연 편차(tail latency)가 줄지만,
+ * 같은 데이터를 옮기는 데 더 많은 커맨드와 doorbell이 필요해 CPU 사용률과
+ * 최대 처리량이 나빠진다. 값 자체의
  * 상한 검증(하드웨어 max_hw_sectors 초과 금지 등)은 이 함수가 아니라 이후
  * blk_validate_limits()(commit 단계)에서 수행된다.
  * 실행 컨텍스트: sysfs write(2), q->limits_lock 보유 상태.
@@ -1141,7 +1169,11 @@ static int queue_##_name##_store(struct gendisk *disk,			\
 QUEUE_SYSFS_FEATURE(rotational, BLK_FEAT_ROTATIONAL)
 /*
  * add_random: BLK_FEAT_ADD_RANDOM - 이 장치의 I/O 완료 타이밍을 커널 엔트로피 풀에
- *   기여할지 여부. NVMe는 타이밍이 예측 가능해 보통 끄는 것이 권장됨(추정).
+ *   기여할지 여부. 회전 디스크 시절에는 탐색 시간의 물리적 변동이 좋은
+ *   엔트로피원이었지만, NVMe SSD는 완료 타이밍이 결정론적에 가까워
+ *   엔트로피 품질이 낮고, 오히려 완료 경로마다 엔트로피 풀 갱신 비용이
+ *   더해져 IOPS를 깎는다. 그래서 대부분의 배포판이 NVMe에 대해 udev 규칙으로
+ *   이 값을 0으로 설정한다.
  */
 QUEUE_SYSFS_FEATURE(add_random, BLK_FEAT_ADD_RANDOM)
 /* iostats: BLK_FEAT_IO_STAT - /proc/diskstats 등 I/O 통계 수집 활성화 여부. */
@@ -1444,8 +1476,10 @@ static int queue_iostats_passthrough_store(struct gendisk *disk,
  *
  * QUEUE_FLAG_NOMERGES와 QUEUE_FLAG_NOXMERGES 두 비트를 조합해 0(모든 병합
  * 허용)/1(간단한 일방향 병합만 금지)/2(모든 병합 금지) 세 상태로 인코딩한다.
- * NVMe에서 병합을 억제하면 SQ 엔트리당 더 단순한 단일 bio 구조를 유지할 수
- * 있지만 대신 더 많은 명령을 제출해야 한다(추정).
+ * 병합을 억제하면 병합 판정에 드는 CPU 비용이 사라지는 대신 커맨드 수가
+ * 늘어난다. 순수 랜덤 워크로드처럼 병합이 거의 성공하지 않는 경우에는
+ * 판정 자체가 낭비이므로 끄는 편이 빠를 수 있고, 순차 워크로드에서는
+ * 반대로 큰 손해다. 즉 워크로드 특성에 따라 선택하는 튜너블이다.
  * 실행 컨텍스트: sysfs read(2), QUEUE_RW_ENTRY로 등록되어 별도 락 없이 호출됨.
  * 호출자: queue_nomerges_entry.show를 통해 queue_attr_show().
  * 피호출자: blk_queue_nomerges(), blk_queue_noxmerges(), queue_var_show().
@@ -1616,8 +1650,22 @@ queue_rq_affinity_store(struct gendisk *disk, const char *page, size_t count)
 	 * don't grab any lock while updating these flags.
 	 */
 	/*
-	 * 값 2: 완료 처리를 요청 CPU와 반드시 일치시키도록 강제(SAME_COMP+SAME_FORCE 모두 설정) -
-	 *   NVMe CQ 인터럽트 핸들러가 제출 CPU와 같은 코어에서 실행되도록 강제(추정).
+	 * 값 2: SAME_COMP와 SAME_FORCE를 모두 설정해, 완료 처리를 "요청을 제출한
+	 *   바로 그 CPU"에서 수행하도록 강제한다.
+	 *
+	 *   세 값의 차이:
+	 *     0 - 인터럽트를 받은 CPU에서 그대로 완료 처리. 가장 저렴하지만
+	 *         제출 CPU와 다르면 request/bio 캐시 라인이 CPU 간 이동한다.
+	 *     1 (SAME_COMP) - 제출 CPU와 "같은 그룹"(보통 같은 물리 코어의
+	 *         하이퍼스레드 형제)이면 그대로 처리하고, 아니면 IPI를 보내
+	 *         제출 CPU로 넘긴다.
+	 *     2 (+SAME_FORCE) - 그룹 여부를 따지지 않고 반드시 제출 CPU로 넘긴다.
+	 *
+	 *   NVMe에서 이 설정의 효과는 제한적이다. blk_mq_map_swqueue()가 이미
+	 *   MSI-X affinity를 따라 CPU↔큐를 정렬해 두어, 대개 완료 인터럽트가
+	 *   제출 CPU로 오기 때문이다. 큐 수가 CPU 수보다 적어 여러 CPU가 한 큐를
+	 *   공유하는 구성에서만 의미가 생기며, 그때도 IPI 비용과 캐시 지역성
+	 *   이득을 저울질해야 한다.
 	 */
 	if (val == 2) {
 		/* 완료-요청 CPU 일치 정책 켬. */
@@ -1784,8 +1832,16 @@ static ssize_t queue_io_timeout_store(struct gendisk *disk, const char *page,
 		return -EINVAL;
 
 	/*
-	 * 밀리초를 jiffies로 환산해 큐 전체 타임아웃을 갱신 - 이후 NVMe 명령이 이 시간을
-	 *   넘기면 nvme_timeout → nvme_abort_req → doorbell 경로로 복구가 시작된다(추정).
+	 * 밀리초를 jiffies로 환산해 큐 전체 타임아웃을 갱신한다. 이후 이 시간을
+	 * 넘긴 request는 blk_mq_timeout_work → blk_mq_rq_timed_out을 거쳐
+	 * q->mq_ops->timeout 콜백으로 넘어간다. NVMe PCIe에서 그 콜백은
+	 * drivers/nvme/host/pci.c의 nvme_timeout()이며, 다음 순서로 복구를 시도한다:
+	 *   1) CSTS 레지스터를 읽어 컨트롤러 상태(CFS: Controller Fatal Status,
+	 *      NSSRO 등)를 확인한다.
+	 *   2) 컨트롤러가 살아 있고 첫 타임아웃이면 Abort admin 커맨드를 보내
+	 *      해당 CID만 취소를 시도한다.
+	 *   3) Abort가 실패하거나 컨트롤러가 치명적 상태면 nvme_dev_disable()로
+	 *      컨트롤러를 정지시키고 reset_work를 예약해 전체 리셋으로 넘어간다.
 	 */
 	blk_queue_rq_timeout(q, msecs_to_jiffies(val));
 
@@ -1804,7 +1860,13 @@ static ssize_t queue_io_timeout_store(struct gendisk *disk, const char *page,
  * NVMe VWC(Volatile Write Cache) feature 비트를 사람이 읽기 쉬운 문자열로
  * 변환한다. write back이면 컨트롤러가 캐시에 쓴 뒤 즉시 완료를 보고할 수
  * 있고(FLUSH/FUA로 영속성을 보장해야 함), write through면 매 쓰기가 곧바로
- * 비휘발성 매체까지 도달함을 의미한다(추정).
+ * 비휘발성 매체까지 도달함을 의미한다.
+ * NVMe에서 이 값의 근거는 Identify Controller의 VWC(Volatile Write Cache)
+ * 필드다. VWC 비트가 서 있으면 컨트롤러에 휘발성 쓰기 캐시가 있다는 뜻이고,
+ * 커널은 BLK_FEAT_WRITE_CACHE와 BLK_FEAT_FUA를 세워 파일시스템이 fsync 시
+ * Flush(opcode 0x00) 커맨드나 FUA 비트를 쓰도록 한다
+ * (drivers/nvme/host/core.c). VWC가 없으면 캐시 자체가 없으므로
+ * 모든 쓰기가 완료 시점에 이미 영속적이다.
  * 실행 컨텍스트: sysfs read(2), QUEUE_LIM_RW_ENTRY로 등록되어 limits_lock 보유 상태.
  * 호출자: queue_wc_entry.show_limit을 통해 queue_attr_show().
  * 피호출자: blk_queue_write_cache(), sysfs_emit().
@@ -1837,8 +1899,14 @@ static ssize_t queue_wc_show(struct gendisk *disk, char *page)
  *
  * "write back"만 캐시를 켜는 것으로 처리하고, "write through"/"none"은
  * 둘 다 캐시를 끄는 것으로 동일하게 처리한다(별칭). 그 외 문자열은 거부.
- * NVMe에서 캐시를 끄면(BLK_FLAG_WRITE_CACHE_DISABLED 설정) FLUSH/FUA 처리
- * 로직이 더 이상 컨트롤러 VWC 플러시를 요구하지 않게 될 수 있다(추정).
+ * 캐시를 끄면(BLK_FLAG_WRITE_CACHE_DISABLED 설정) block/blk-flush.c의 상태
+ * 기계가 PREFLUSH/POSTFLUSH 단계를 건너뛰어, 파일시스템의 fsync가 실제
+ * Flush 커맨드를 발생시키지 않는다.
+ * 주의: 이것은 커널 쪽 정책만 바꾸는 것이지 컨트롤러의 VWC를 실제로 끄는
+ * 것이 아니다. 장치에 휘발성 캐시가 여전히 있는데 이 값을 write through로
+ * 바꾸면, 전원 손실 시 fsync가 성공했다고 보고된 데이터를 잃을 수 있다.
+ * 실제로 컨트롤러 캐시를 끄려면 NVMe Set Features의 Volatile Write Cache
+ * (FID 0x06)를 써야 한다.
  * 실행 컨텍스트: sysfs write(2), q->limits_lock 보유 상태.
  * 호출자: queue_wc_entry.store_limit을 통해 queue_attr_store().
  * 피호출자: strncmp().
@@ -2006,7 +2074,7 @@ QUEUE_LIM_RW_ENTRY(queue_max_discard_sectors, "discard_max_bytes");
 /* discard_zeroes_data: deprecated 고정값 0(자체 락 없음, RO). */
 QUEUE_RO_ENTRY(queue_discard_zeroes_data, "discard_zeroes_data");
 
-/* atomic_write_max_bytes: NVMe FAW 최대 보장 범위(queue_limits 기반, RO). */
+/* atomic_write_max_bytes: NVMe 원자적 쓰기(NAWUPF 유래) 최대 보장 범위(queue_limits 기반, RO). */
 QUEUE_LIM_RO_ENTRY(queue_atomic_write_max_sectors, "atomic_write_max_bytes");
 /*
  * atomic_write_boundary_bytes: 원자적 쓰기 경계 간격(queue_limits 기반, RO) -
@@ -2015,9 +2083,9 @@ QUEUE_LIM_RO_ENTRY(queue_atomic_write_max_sectors, "atomic_write_max_bytes");
 QUEUE_LIM_RO_ENTRY(queue_atomic_write_boundary_sectors,
 /* 매크로 인자(문자열 리터럴) 연속. */
 		"atomic_write_boundary_bytes");
-/* atomic_write_unit_max_bytes: NVMe FAW 최대 보장 단위(queue_limits 기반, RO). */
+/* atomic_write_unit_max_bytes: NVMe 원자적 쓰기(NAWUPF 유래) 최대 보장 단위(queue_limits 기반, RO). */
 QUEUE_LIM_RO_ENTRY(queue_atomic_write_unit_max, "atomic_write_unit_max_bytes");
-/* atomic_write_unit_min_bytes: NVMe FAW 최소 보장 단위(queue_limits 기반, RO). */
+/* atomic_write_unit_min_bytes: NVMe 원자적 쓰기(NAWUPF 유래) 최소 보장 단위(queue_limits 기반, RO). */
 QUEUE_LIM_RO_ENTRY(queue_atomic_write_unit_min, "atomic_write_unit_min_bytes");
 
 /* write_same_max_bytes: deprecated 고정값 0(자체 락 없음, RO). */
@@ -2504,8 +2572,9 @@ static umode_t queue_attr_visible(struct kobject *kobj, const struct attribute *
  *
  * legacy(bio 기반) 큐에는 blk-mq 전용 속성 전체를 숨기고, blk-mq 큐라도
  * 드라이버가 타임아웃 콜백(q->mq_ops->timeout)을 등록하지 않았다면
- * io_timeout 파일만 별도로 숨긴다 - NVMe는 항상 타임아웃 콜백을 등록하므로
- * (nvme_timeout) 이 조건에 걸리지 않는다(추정).
+ * io_timeout 파일만 별도로 숨긴다. NVMe는 모든 트랜스포트가 이 콜백을
+ * 등록하므로(pci.c의 nvme_timeout, tcp.c의 nvme_tcp_timeout, rdma.c의
+ * nvme_rdma_timeout) 이 조건에 걸리지 않고 io_timeout이 항상 노출된다.
  * 실행 컨텍스트: sysfs 디렉터리 population 시점.
  * 호출자: kobject/sysfs core가 attribute_group.is_visible_const로 호출.
  * 피호출자: container_of(), queue_is_mq().
@@ -2984,7 +3053,10 @@ int blk_register_queue(struct gendisk *disk)
 	if (queue_is_mq(q))
 		/*
 		 * 기본 I/O 스케줄러 연결(none 또는 드라이버/커널 설정에 따른 mq-deadline 등) -
-		 *   NVMe는 보통 대기시간이 매우 낮아 none이 기본으로 선택되는 경우가 많다(추정).
+		 *   NVMe가 보통 none이 되는 이유는 elevator_set_default()의 조건
+		 *   (nr_hw_queues == 1 || shared tags)에 걸리지 않기 때문이다.
+		 *   멀티큐 장치에서는 스케줄러의 큐 전역 락이 CPU 간 경합을 만들어
+		 *   재정렬 이득보다 손해가 크다(block/elevator.c 참고).
 		 */
 		elevator_set_default(q);
 

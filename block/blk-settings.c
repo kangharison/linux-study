@@ -55,7 +55,7 @@
  * blk_validate_integrity_limits() — NVMe DIF/DIX PI 조합의 유효성 검사 및 dma_alignment
  *                                   보강. metadata_size, csum_type, interval_exp 검증.
  * blk_validate_zoned_limits()    — NVMe ZNS의 zone_append_sectors 최종 한도 결정.
- * blk_validate_atomic_write_limits() — NVMe FAW(원자적 쓰기) 단위 검증 및 정규화.
+ * blk_validate_atomic_write_limits() — NVMe 원자적 쓰기(NAWUPF/NABSPF 유래) 단위 검증 및 정규화.
  */
 #include <linux/kernel.h>
 #include <linux/module.h>
@@ -82,7 +82,10 @@
  *   rq_timeout: NVMe command timeout 후 abort/reset 처리 기준(밀리초).
  *   limits: queue_limits. NVMe Identify/Controller capability가 저장됨.
  *   tags/tag_set: blk-mq tag ↔ NVMe CID/SQ slot 매핑을 위한 자료구조.
- *   (추정) bdi: read-ahead, writeback 시 NVMe optimal I/O 크기 힌트 반영.
+ *   bdi: backing_dev_info. blk_apply_bdi_limits()가 lim->io_opt와
+ *        lim->max_sectors를 각각 bdi->ra_pages(read-ahead 크기)와
+ *        bdi->io_pages(writeback 한 번에 내보낼 페이지 수)로 변환해 넣는다.
+ *        즉 큐 한계가 페이지 캐시의 선반입/기록 정책으로 전파되는 통로다.
  */
 /*
  * [한국어]
@@ -195,7 +198,7 @@ void blk_set_stacking_limits(struct queue_limits *lim)
 	lim->max_hw_zone_append_sectors = UINT_MAX;
 	/* 사용자 sysfs 설정 가능한 Deallocate 상한 준비. */
 	lim->max_user_discard_sectors = UINT_MAX;
-	/* NVMe FAW(원자적 쓰기) 하드웨어 최대 상한 준비. */
+	/* NVMe 원자적 쓰기(NAWUPF 유래)의 하드웨어 최대 상한 준비. */
 	lim->atomic_write_hw_max = UINT_MAX;
 }
 EXPORT_SYMBOL(blk_set_stacking_limits);
@@ -209,8 +212,14 @@ EXPORT_SYMBOL(blk_set_stacking_limits);
  *   lim->io_opt는 NVMe 컨트롤러가 권장하는 최적 I/O 크기(Optimal Write Size 등).
  *   bdi->ra_pages, bdi->io_pages가 이 값을 반영하면 NVMe SQ 엔트리 효율과
  *   read-ahead 적중률이 개선된다.
- *   (추정) NVMe SSD는 회전식 디스크와 달리 BLK_FEAT_ROTATIONAL이 꺼져 있으므로
- *   io_opt가 0이면 max_sectors 기반의 큰 read-ahead를 사용하지 않는다.
+ *   NVMe SSD는 기본적으로 BLK_FEAT_ROTATIONAL이 꺼져 있다 —
+ *   drivers/nvme/host/core.c는 info->is_rotational일 때만(즉 컨트롤러가
+ *   스스로 회전 매체라고 보고한 드문 경우에만) 이 플래그를 세운다.
+ *   따라서 일반적인 NVMe SSD는 아래의 "회전 매체 fallback" 경로를 타지 않고,
+ *   io_opt가 0이면 ra_pages가 VM_READAHEAD_PAGES 기본값에 머문다.
+ *   회전 디스크에만 큰 fallback read-ahead를 주는 이유는, 탐색 비용이 큰
+ *   매체에서는 넉넉히 미리 읽는 편이 거의 항상 이득이기 때문이다.
+ *   NVMe는 탐색이 없어 과도한 선반입이 오히려 대역폭 낭비가 된다.
  */
 /*
  * [한국어]
@@ -490,12 +499,30 @@ static int blk_validate_integrity_limits(struct queue_limits *lim)
 	 * multiple bio_vecs.  For those, enforce alignment so that those are
 	 * never generated, and that each buffer is aligned as expected.
 	 *
-	 * NVMe: PRP/SGL 엔트리가 interval 경계를 넘지 않도록 dma_alignment를
-	 * 보강한다. (추정) 컨트롤러가 SPLIT_INTERVAL_CAPABLE을 선언하지 않은 경우
-	 * block layer가 미리 정렬된 버퍼만 생성하게 만든다.
+	 * [한국어] 무결성 "interval"은 체크섬 하나가 보호하는 데이터 구간
+	 * (보통 논리 블록 하나, 512B 또는 4096B)이다. 일부 I/O 컨트롤러는 이
+	 * 구간이 두 개의 bio_vec에 걸쳐 있으면 체크섬을 계산하지 못한다 —
+	 * 하드웨어가 한 세그먼트 안에서만 검사 엔진을 돌릴 수 있기 때문이다.
+	 *
+	 * BLK_SPLIT_INTERVAL_CAPABLE은 "우리 하드웨어는 걸쳐 있어도 처리할 수
+	 * 있다"고 드라이버가 선언하는 플래그다. 이 트리에서 이를 세우는 것은
+	 * drivers/block/ublk_drv.c(사용자 공간 블록 드라이버)뿐이며, NVMe 드라이버는
+	 * 세우지 않는다. 따라서 PI를 쓰는 NVMe 구성에서는 아래 정렬 강화가 항상
+	 * 적용된다.
+	 *
+	 * 정렬을 강화하면 bio_split_io_at()의 start_align_mask/len_align_mask
+	 * 검사가 더 엄격해져, 애초에 interval을 가로지르는 bvec 조합이 만들어지지
+	 * 않는다. 즉 "나중에 처리하지 못할 요청을 미리 차단"하는 방식이다.
 	 */
-	/* NVMe DIF: interval 경계가 bio_vec를 넘지 않도록 dma_alignment 강화. */
+	/* [한국어] 조건: 하드웨어가 걸침을 감당하지 못하고(!CAPABLE), 실제로
+	 * 체크섬을 쓰는 경우(csum_type != 0). 체크섬이 없으면 interval 개념
+	 * 자체가 무의미하므로 정렬을 강화할 이유가 없다. */
 	if (!(bi->flags & BLK_SPLIT_INTERVAL_CAPABLE) && bi->csum_type) {
+		/* [한국어] dma_alignment를 interval 크기 - 1로 끌어올린다.
+		 * interval_exp가 9(512B)면 511, 12(4096B)면 4095가 되어, 모든 bvec의
+		 * 시작 오프셋과 길이가 그 단위에 맞아야만 통과하게 된다.
+		 * max()를 쓰는 이유: 기존 dma_alignment(NVMe는 3)가 더 엄격할 수도
+		 * 있으므로 둘 중 강한 쪽을 택해 양쪽 제약을 모두 만족시킨다. */
 		lim->dma_alignment = max(lim->dma_alignment,
 					(1U << bi->interval_exp) - 1);
 	}
@@ -522,9 +549,28 @@ static int blk_validate_integrity_limits(struct queue_limits *lim)
  * so we assume that we can fit in at least PAGE_SIZE in a segment, apart from
  * the first and last segments.
  *
- * NVMe atomic write: 컨트롤러가 FUA/FAW(Firmware Activation Without Reset) 등을
- * 통해 보장하는 원자적 쓰기 단위를 계산할 때 사용된다. (추정) NVMe FAW 단위는
- * 보통 power-of-2이며, PRP/SGL segment 수와 LBA 정렬을 동시에 만족해야 한다.
+ * [한국어] NVMe에서 원자적 쓰기 보장의 근거는 Identify Namespace의 다음
+ * 필드들이다(drivers/nvme/host/core.c:nvme_configure_atomic_write 참고):
+ *   NAWUPF (Namespace Atomic Write Unit Power Fail)
+ *     - 전원 손실 시에도 찢어지지 않음이 보장되는 최대 쓰기 단위.
+ *       atomic_write_hw_max = (NAWUPF + 1) × logical_block_size 로 변환된다.
+ *   NABSPF (Namespace Atomic Boundary Size Power Fail)
+ *     - 이 경계를 걸치면 원자성이 깨지는 주소 경계.
+ *       atomic_write_hw_boundary가 된다.
+ *   AWUPF (컨트롤러 단위 값)
+ *     - 커널은 이 값을 무시하고 NAWUPF만 신뢰한다("AWUPF ignored, only
+ *       NAWUPF accepted" 경고를 남긴다).
+ *
+ * 주의: FUA(Force Unit Access)나 FAW(Firmware Activation Without Reset)는
+ * 원자적 쓰기와 무관한 별개의 기능이다. FUA는 휘발성 캐시를 건너뛰고 매체에
+ * 기록하라는 "지속성" 요구이고, FAW는 펌웨어 갱신 절차에 관한 것이다.
+ * 여기서 다루는 것은 "찢어지지 않음(non-torn)"이라는 원자성 보장이다.
+ *
+ * 이 함수가 계산하는 것은 그런 하드웨어 한계와 별개로, "bio 하나에 확실히
+ * 담을 수 있는 바이트 수"라는 소프트웨어 측 상한이다. 아래 영문 주석대로
+ * 원자적 쓰기는 단일 벡터(ITER_UBUF)로 들어온다고 가정하므로, 첫 세그먼트와
+ * 마지막 세그먼트를 뺀 나머지는 최소 PAGE_SIZE씩 담을 수 있다고 보수적으로
+ * 계산한다.
  */
 /*
  * [한국어]
@@ -569,7 +615,7 @@ static unsigned int blk_queue_max_guaranteed_bio(struct queue_limits *lim)
 
 /*
  * [한국어]
- * blk_atomic_writes_update_limits - NVMe FAW(원자적 쓰기) 최종 한도 계산
+ * blk_atomic_writes_update_limits - NVMe 원자적 쓰기(NAWUPF/NABSPF 유래) 최종 한도 계산
  *
  * @lim: atomic_write_hw_* (드라이버가 채운 하드웨어 원본 값) 필드를 읽어
  *     atomic_write_max_sectors/unit_min/unit_max/boundary_sectors(블록
@@ -595,7 +641,7 @@ static unsigned int blk_queue_max_guaranteed_bio(struct queue_limits *lim)
  */
 static void blk_atomic_writes_update_limits(struct queue_limits *lim)
 {
-	/* NVMe FAW 단위는 MDTS와 보장 bio 크기 중 작은 값으로 제한. */
+	/* 원자적 쓰기 단위는 MDTS(max_hw_sectors)와 bio가 보장하는 크기 중 작은 값으로 제한. */
 	unsigned int unit_limit = min(lim->max_hw_sectors << SECTOR_SHIFT,
 					blk_queue_max_guaranteed_bio(lim));
 
@@ -703,7 +749,7 @@ static bool blk_valid_atomic_writes_boundary(unsigned int chunk_sectors,
 static void blk_validate_atomic_write_limits(struct queue_limits *lim)
 {
 	unsigned int boundary_sectors; /* NVMe atomic boundary를 섹터 단위로 담을 지역 변수. */
-	/* NVMe FAW를 섹터 단위로 변환. */
+	/* 원자적 쓰기 최대 바이트(NAWUPF 유래)를 섹터 단위로 변환. */
 	unsigned int atomic_write_hw_max_sectors =
 			lim->atomic_write_hw_max >> SECTOR_SHIFT;
 
@@ -740,7 +786,7 @@ static void blk_validate_atomic_write_limits(struct queue_limits *lim)
 			 lim->atomic_write_hw_max))
 		goto unsupported;
 
-	/* NVMe FAW는 chunk_sectors(RAID stripe)를 초과할 수 없음. */
+	/* 원자적 쓰기 최대 크기는 chunk_sectors(NVMe NOIOB / ZNS zone 크기 / RAID stripe)를 초과할 수 없음. */
 	if (WARN_ON_ONCE(lim->chunk_sectors &&
 			atomic_write_hw_max_sectors > lim->chunk_sectors))
 		goto unsupported;
@@ -750,7 +796,7 @@ static void blk_validate_atomic_write_limits(struct queue_limits *lim)
 
 	/* boundary가 설정된 컨트롤러(0이 아니면)만 아래 추가 정렬 검사를 수행. */
 	if (boundary_sectors) {
-		/* NVMe atomic boundary는 FAW 이상이어야 함. */
+		/* 원자 경계(NABSPF 유래)는 원자적 쓰기 최대 크기 이상이어야 함. */
 		if (WARN_ON_ONCE(lim->atomic_write_hw_max >
 				 lim->atomic_write_hw_boundary))
 			goto unsupported;
@@ -817,10 +863,13 @@ unsupported:
  *   max_segment_size: 단일 PRP/SGL 엔트리가 가리킬 수 있는 최대 바이트.
  *   seg_boundary_mask/virt_boundary_mask: 연속 PRP/SGL 엔트리가 넘지 말아야 할
  *     물리/가상 주소 경계.
- *   dma_alignment: DMA 엔진이 요구하는 시작 주소 정렬(보통 512B).
+ *   dma_alignment: DMA 엔진이 요구하는 시작 주소 정렬 마스크. NVMe는 3(4바이트)을
+ *     쓴다 — 사양이 데이터 포인터의 하위 2비트를 0으로 요구하기 때문이다
+ *     (drivers/nvme/host/core.c: lim->dma_alignment = 3).
  *   features: BLK_FEAT_POLL/NOWAIT/FUA/ZONED/ATOMIC_WRITES 등 NVMe capability.
  *   discard_*: NVMe Deallocate/DSM 명령의 granularities.
- *   atomic_write_*: NVMe FAW/FUA 기반 원자 쓰기 단위(컨트롤러 종속).
+ *   atomic_write_*: NVMe 원자적 쓰기 단위. Identify Namespace의 NAWUPF(최대 단위)와
+ *     NABSPF(경계)에서 유도된다. FUA(지속성)와는 무관한 별개 개념.
  *   integrity: NVMe DIF/DIX 형식의 end-to-end data protection 설정.
  *
  * [한국어 보강]
@@ -1090,7 +1139,7 @@ int blk_validate_limits(struct queue_limits *lim)
 	if (!(lim->features & BLK_FEAT_WRITE_CACHE))
 		lim->features &= ~BLK_FEAT_FUA;
 
-	/* NVMe FAW(원자적 쓰기) 한도를 검증/정규화 - 실패해도 atomic_write_*가
+	/* NVMe 원자적 쓰기(NAWUPF/NABSPF) 한도를 검증/정규화 - 실패해도 atomic_write_*가
 	 * 0으로 클리어될 뿐 이 함수 자체를 실패시키지 않는다(void 반환). */
 	blk_validate_atomic_write_limits(lim);
 
@@ -1475,7 +1524,7 @@ static bool blk_stack_atomic_writes_tail(struct queue_limits *t,
 	if (t->atomic_write_hw_unit_max < b->atomic_write_hw_unit_min)
 		return false;
 
-	/* NVMe 멀티 장치 스택 시 FAW/unit는 교차 병합. */
+	/* 멀티 장치 스택 시 원자적 쓰기 최대치/단위는 교차 병합. */
 	t->atomic_write_hw_max = min(t->atomic_write_hw_max,
 				b->atomic_write_hw_max);
 	t->atomic_write_hw_unit_min = max(t->atomic_write_hw_unit_min,
@@ -1545,7 +1594,7 @@ static void blk_stack_atomic_writes_chunk_sectors(struct queue_limits *t)
 	/* NVMe unit_min은 unit_max를 초과할 수 없도록 보정. */
 	t->atomic_write_hw_unit_min = min(t->atomic_write_hw_unit_min,
 					  t->atomic_write_hw_unit_max);
-	/* NVMe FAW는 chunk_bytes 이하로 제한. */
+	/* 원자적 쓰기 최대치는 chunk_bytes 이하로 제한. */
 	t->atomic_write_hw_max = min(t->atomic_write_hw_max, chunk_bytes);
 }
 
@@ -1914,7 +1963,7 @@ int blk_stack_limits(struct queue_limits *t, struct queue_limits *b,
 		t->zone_write_granularity = 0;
 		t->max_zone_append_sectors = 0;
 	}
-	/* atomic write(FAW) 한도는 별도 서브함수로 위임해 병합/호환성 검사. */
+	/* 원자적 쓰기 한도는 별도 서브함수로 위임해 병합/호환성 검사. */
 	blk_stack_atomic_writes_limits(t, b, start);
 
 	/* misalignment가 하나라도 있었으면 -1, 완전히 호환되면 0을 반환. */
