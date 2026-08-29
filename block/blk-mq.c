@@ -7017,40 +7017,72 @@ void blk_mq_submit_bio(struct bio *bio)
 	 * number of poll queues, so the checks for alignment and poll support
 	 * have to be done with queue usage counter held.
 	 */
+	/* [한국어] 정렬 검증. 위 영문 주석이 밝히듯 이 검사가 q_usage_counter를
+	 * 쥔 뒤에 와야 하는 이유가 있다 — 장치 재구성으로 논리 블록 크기가
+	 * 바뀔 수 있는데, 참조를 잡기 전에 검사하면 검사와 사용 사이에 기준이
+	 * 달라진다.
+	 * 정렬 위반은 분할로도 고칠 수 없는 오류다(어떻게 나눠도 시작이나 길이가
+	 * 어긋난 채로 남는다). O_DIRECT 사용자가 정렬되지 않은 버퍼나 오프셋을
+	 * 넘겼을 때 여기 도달하며, 최종적으로 EIO가 전달된다. */
 	if (unlikely(bio_unaligned(bio, q))) {
-		/* [한국어] NVMe LBA/length 정렬 위반: EIO 반환 후 종료 */
 		bio_io_error(bio);
 		goto queue_exit;
 	}
 
+	/* [한국어] 폴링 요청인데 이 큐에 폴링 전용 하드웨어 큐가 없는 경우.
+	 * NVMe에서 poll 큐는 nvme 모듈의 poll_queues 파라미터로 만들어지며,
+	 * 인터럽트를 쓰지 않고 io_uring의 IOPOLL이 직접 CQ를 돌며 완료를
+	 * 수거한다. 그 큐가 없으면 폴링 자체가 불가능하므로 명시적으로 거부한다.
+	 * 이 검사도 큐 참조 하에 있어야 한다 — 재구성으로 poll 큐 수가 0이
+	 * 될 수 있기 때문이다. */
 	if ((bio->bi_opf & REQ_POLLED) && !blk_mq_can_poll(q)) {
-		/* [한국어] REQ_POLLED 요청인데 poll 큐 없음: ENOTSUPP 반환 */
 		bio->bi_status = BLK_STS_NOTSUPP;
 		bio_endio(bio);
 		goto queue_exit;
 	}
 
-	/* [한국어] __bio_split_to_limits: NVMe max_sectors/max_segments 제한에 맞게
-	 * bio 를 분할. 분할된 경우 원본 bio 는 체인에 연결되고 첫 조각이 반환됨 */
+	/* [한국어] ★ 분할 지점 ★
+	 * queue_limits를 초과하는 bio를 장치가 받을 수 있는 크기로 자른다.
+	 * NVMe에서 그 한계는 MDTS 유래 max_sectors, NVME_MAX_SEGS(256) 유래
+	 * max_segments, PRP 모드의 virt_boundary_mask(4KiB)다.
+	 * 반환값은 "이번에 처리할 앞부분"이고, 뒷부분은 이 함수 안에서 이미
+	 * 큐 입구로 재제출되어 나중에 같은 경로를 다시 탄다.
+	 * nr_segs에 세그먼트 수가 채워져 나오는데, 이 값이 곧 PRP 엔트리 또는
+	 * SGL 디스크립터 개수가 된다(자세한 내용은 block/blk-merge.c). */
 	bio = __bio_split_to_limits(bio, &q->limits, &nr_segs);
 	if (!bio)
-		/* [한국어] 분할 자체가 실패 (메모리 등): 이미 에러 처리됨 */
+		/* [한국어] 분할 불가(정렬 위반, 원자적 쓰기, NOWAIT 등)로 이미
+		 * bio_endio까지 끝난 상태다. 우리가 할 일이 없다. */
 		goto queue_exit;
 
-	/* [한국어] NVMe PI (Protection Information): T10 DIF/DIX 무결성 메타데이터 준비 */
+	/* [한국어] 무결성(T10 PI / NVMe End-to-End Data Protection) 준비.
+	 * bio_integrity_action()이 "이 bio에 무엇을 해야 하는가"를 판정한다 —
+	 * 버퍼만 할당할지, 0으로 채울지, 체크섬까지 생성할지. 그 판정은
+	 * 장치가 PI를 offload할 수 있는지(metadata_size == pi_tuple_size)에
+	 * 달려 있다. 0이면 할 일이 없어 호출조차 하지 않는다. */
 	integrity_action = bio_integrity_action(bio);
 	if (integrity_action)
 		bio_integrity_prep(bio, integrity_action);
 
-	/* [한국어] bio_issue 통계 초기화 (cgroup IO accounting 기준 시각 등) */
+	/* [한국어] bio에 발행 시각과 크기를 새긴다. blk-throttle과 blk-iolatency가
+	 * 이 값을 기준으로 지연을 측정하므로, 병합이나 분할보다 먼저 찍어야
+	 * "사용자가 요청한 시점"이 정확히 기록된다. */
 	blk_mq_bio_issue_init(q, bio);
+	/* [한국어] ★ 병합 시도 ★
+	 * plug 리스트나 스케줄러의 기존 request에 이 bio를 붙일 수 있는지 본다.
+	 * 성공하면 새 request도 새 태그(NVMe CID)도 필요 없다 — 기존 커맨드의
+	 * NLB만 늘어난다. 순차 워크로드에서 이 경로의 적중률이 매우 높아,
+	 * 같은 대역폭을 훨씬 적은 커맨드로 달성하게 해 준다. */
 	if (blk_mq_attempt_bio_merge(q, bio, nr_segs))
-		/* [한국어] bio 가 기존 request 에 merge 성공: 새 CID 불필요, 즉시 반환 */
 		goto queue_exit;
 
+	/* [한국어] ZNS 순차 쓰기 존에 대한 쓰기라면 zone write plug의 관리를
+	 * 받아야 한다. 그 zone에 이미 진행 중인 쓰기가 있으면 true를 반환하는데,
+	 * 이는 "실패"가 아니라 "plug가 이 bio를 큐에 넣고 나중에 제출하겠다"는
+	 * 뜻이다. 그래야 zone write pointer 순서가 지켜진다.
+	 * 이 처리가 병합 시도 "뒤"에 오는 이유: 병합에 성공했다면 기존 request가
+	 * 이미 plug의 관리를 받고 있어 새로 등록할 필요가 없다. */
 	if (bio_needs_zone_write_plugging(bio)) {
-		/* [한국어] zoned NVMe sequential write zone: zone write plug 에 등록.
-		 * 이 zone 에 이미 진행 중인 write 가 있으면 true 반환 → 대기 */
 		if (blk_zone_plug_bio(bio, nr_segs))
 			goto queue_exit;
 	}
@@ -7621,14 +7653,33 @@ static struct blk_mq_tags *blk_mq_alloc_rq_map(struct blk_mq_tag_set *set,
 	if (!tags)
 		return NULL;
 
-	/* [한국어] tags->rqs[i]: CID i 를 현재 사용 중인 request 역참조 테이블 */
+	/* [한국어] ★ rqs[]와 static_rqs[] 두 배열이 왜 따로 있는가 ★
+	 * static_rqs[i] - 태그 i에 "영구히" 배정된 request 객체. 큐 생성 시
+	 *   한 번 할당해 두고 큐가 사라질 때까지 바뀌지 않는다.
+	 * rqs[i]       - 태그 i를 "지금 쓰고 있는" request. 보통 static_rqs[i]와
+	 *   같지만, 완료 처리 중에는 NULL로 지워질 수 있다.
+	 *
+	 * 이 구분이 필요한 이유는 완료 경로의 경쟁 때문이다. NVMe 완료
+	 * 인터럽트는 CQ 엔트리의 CID만 받아 blk_mq_tag_to_rq()로 request를
+	 * 역참조하는데, 그 순간 태그가 이미 해제되어 다른 I/O에 재할당되었다면
+	 * 엉뚱한 request를 완료 처리하게 된다. rqs[]를 별도로 두고 완료 시
+	 * 지우면, 그런 늦은 완료(장치가 중복 CQ 엔트리를 보내는 경우 등)를
+	 * NULL로 걸러낼 수 있다.
+	 *
+	 * GFP 플래그 조합의 의미:
+	 *   GFP_NOIO       - 이 할당이 I/O를 유발하면 안 된다(큐 초기화 중이라
+	 *                    자기 자신을 기다리는 교착 위험).
+	 *   __GFP_NOWARN   - 실패해도 커널 로그에 경고를 남기지 않는다. 아래
+	 *                    호출자가 더 작은 크기로 재시도하는 경로가 있어,
+	 *                    중간 실패는 정상적인 흐름이기 때문이다.
+	 *   __GFP_NORETRY  - 회수를 반복하며 매달리지 않고 빨리 실패한다.
+	 *                    같은 이유로 실패가 치명적이지 않다. */
 	tags->rqs = kcalloc_node(nr_tags, sizeof(struct request *),
 				 GFP_NOIO | __GFP_NOWARN | __GFP_NORETRY,
 				 node);
 	if (!tags->rqs)
 		goto err_free_tags;
 
-	/* [한국어] tags->static_rqs[i]: CID i 에 고정 배치된 request 객체 포인터 */
 	tags->static_rqs = kcalloc_node(nr_tags, sizeof(struct request *),
 					GFP_NOIO | __GFP_NOWARN | __GFP_NORETRY,
 					node);
@@ -7662,8 +7713,12 @@ static int blk_mq_init_request(struct blk_mq_tag_set *set, struct request *rq,
 {
 	int ret;
 
+	/* [한국어] 드라이버가 request당 자기 데이터를 초기화할 기회를 준다.
+	 * NVMe PCIe에서는 nvme_init_request()가 호출되어, request 뒤에 붙은
+	 * struct nvme_iod(blk_mq_rq_to_pdu로 접근)를 준비하고 해당 nvme_queue
+	 * 포인터를 심는다. 이 초기화가 큐 생성 시점에 한 번만 이뤄지므로,
+	 * I/O 핫패스에서는 이미 준비된 구조체를 쓰기만 하면 된다. */
 	if (set->ops->init_request) {
-		/* [한국어] nvme_init_request: NVMe submission queue entry 메모리 초기화 */
 		ret = set->ops->init_request(set, rq, hctx_idx, node);
 		if (ret)
 			return ret;
@@ -8643,16 +8698,27 @@ static void __blk_mq_free_map_and_rqs(struct blk_mq_tag_set *set,
  */
 static void blk_mq_map_swqueue(struct request_queue *q)
 {
+	/* [한국어] j = 큐 타입 인덱스(DEFAULT/READ/POLL), hctx_idx = 매핑 테이블에서
+	 * 읽은 하드웨어 큐 번호. */
 	unsigned int j, hctx_idx;
+	/* [한국어] i는 두 용도로 쓰인다 — 앞의 hctx 순회 인덱스이자 뒤의 CPU 번호다.
+	 * unsigned long인 이유는 cpumask 관련 매크로가 그 타입을 요구하기 때문이다. */
 	unsigned long i;
 	struct blk_mq_hw_ctx *hctx;
 	struct blk_mq_ctx *ctx;
 	struct blk_mq_tag_set *set = q->tag_set;
 
+	/* [한국어] ★ 1단계: 기존 매핑을 모두 지운다 ★
+	 * 이 함수는 최초 생성뿐 아니라 CPU 핫플러그나 큐 수 변경으로 재호출된다.
+	 * 그때 옛 매핑이 남아 있으면 이제는 이 큐를 쓰지 않는 CPU가 cpumask에
+	 * 남아, dispatch가 엉뚱한 CPU로 워커를 예약하게 된다. */
 	queue_for_each_hw_ctx(q, hctx, i) {
-		/* [한국어] 재매핑 전 초기화: cpumask/nr_ctx/dispatch_from 클리어 */
+		/* [한국어] 이 하드웨어 큐를 쓰는 CPU 집합을 비운다. */
 		cpumask_clear(hctx->cpumask);
+		/* [한국어] 매달린 소프트웨어 큐 개수를 0으로. 아래 루프가 다시 센다. */
 		hctx->nr_ctx = 0;
+		/* [한국어] 라운드로빈 dispatch의 다음 시작 위치도 초기화한다.
+		 * 옛 포인터가 남으면 재구성 후 존재하지 않는 ctx를 가리킬 수 있다. */
 		hctx->dispatch_from = NULL;
 	}
 
@@ -8661,12 +8727,23 @@ static void blk_mq_map_swqueue(struct request_queue *q)
 	 *
 	 * If the cpu isn't present, the cpu is mapped to first hctx.
 	 */
+	/* [한국어] ★ 2단계: 모든 CPU에 대해 타입별 매핑을 채운다 ★
+	 * for_each_possible_cpu는 지금 오프라인인 CPU까지 포함한다. 나중에
+	 * 온라인될 CPU도 매핑을 갖고 있어야, 그 CPU가 살아나는 순간 바로
+	 * I/O를 낼 수 있기 때문이다. */
 	for_each_possible_cpu(i) {
-		/* [한국어] 이 CPU 의 per-CPU ctx 를 가져옴 */
+		/* [한국어] 이 CPU 전용 소프트웨어 큐. per-CPU 변수이므로 다른 CPU와
+		 * 락 없이 독립적으로 쓰인다 — 이것이 blk-mq가 제출 경로의 락 경합을
+		 * 없앤 핵심 구조다. */
 		ctx = per_cpu_ptr(q->queue_ctx, i);
 		for (j = 0; j < set->nr_maps; j++) {
+			/* [한국어] 이 타입에 배정된 하드웨어 큐가 하나도 없는 경우.
+			 * NVMe에서 write_queues=0이면 READ 맵이, poll_queues=0이면
+			 * POLL 맵이 이 상태가 된다. 그런 타입의 요청은 DEFAULT 큐로
+			 * 보내야 하므로, 미리 DEFAULT의 hctx를 채워 둔다.
+			 * 이렇게 해 두면 제출 경로가 "타입별 큐가 있는가"를 매번
+			 * 확인하지 않고 ctx->hctxs[type]을 바로 쓸 수 있다. */
 			if (!set->map[j].nr_queues) {
-				/* [한국어] 이 type(j)에 queue 없음: DEFAULT hctx 로 fallback */
 				ctx->hctxs[j] = blk_mq_map_queue_type(q,
 						HCTX_TYPE_DEFAULT, i);
 				continue;
