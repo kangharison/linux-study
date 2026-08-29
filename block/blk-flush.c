@@ -10,17 +10,53 @@
  * 묶어 발행하는 더블 버퍼링 기법(flush_pending_idx / flush_running_idx)을
  * 구현한다. 상위로부터 PREFLUSH/FUA 요청이 내려오는 모든 경로의 관문이다.
  *
+ * === 이 상태 기계를 켜고 끄는 스위치: NVMe VWC (실물 확인) ===
+ * 이 파일 전체가 하는 일은 결국 두 개의 큐 기능 비트에 좌우된다:
+ *   BLK_FEAT_WRITE_CACHE — 장치에 휘발성 쓰기 캐시가 있는가
+ *   BLK_FEAT_FUA         — 장치가 쓰기 명령 하나로 내구성을 보장할 수 있는가
+ * NVMe 는 이 두 비트를 다음 코드로 한꺼번에 정한다(core.c):
+ *
+ *   ctrl->vwc = id->vwc;                       // Identify Controller 의 VWC 필드
+ *   info->no_vwc = id->nsfeat & NVME_NS_VWC_NOT_PRESENT;   // 네임스페이스별 무효화
+ *   if ((ns->ctrl->vwc & NVME_CTRL_VWC_PRESENT) && !info->no_vwc)
+ *           lim.features |= BLK_FEAT_WRITE_CACHE | BLK_FEAT_FUA;
+ *   else
+ *           lim.features &= ~(BLK_FEAT_WRITE_CACHE | BLK_FEAT_FUA);
+ *
+ * 여기서 읽어야 할 중요한 사실이 둘 있다.
+ * (1) NVMe 에서 WRITE_CACHE 와 FUA 는 **함께 켜지고 함께 꺼진다.** 따라서
+ *     blk_insert_flush() 의 `(REQ_FUA && !supports_fua) → POSTFLUSH` 분기는
+ *     NVMe 에서는 사실상 발생하지 않는다. 그 분기는 FUA 없이 캐시만 있는
+ *     장치(일부 SCSI/MMC 등)를 위한 것이다.
+ * (2) 전력 손실 보호(PLP)를 갖춘 엔터프라이즈 SSD 처럼 VWC 를 광고하지 않는
+ *     장치에서는 blk_queue_write_cache()가 거짓이 되어 policy 가 0 이 되고,
+ *     Flush 요청이 **명령을 하나도 발행하지 않고** blk_mq_end_request(rq, 0)
+ *     으로 즉시 끝난다. fsync 비용이 장치에 따라 극단적으로 달라지는 이유가
+ *     바로 이 지점이다.
+ *
+ * 실제 발행되는 명령:
+ *   PREFLUSH/POSTFLUSH → nvme_setup_flush(): opcode = nvme_cmd_flush (0x00),
+ *                        nsid 만 채우고 나머지 SQE 는 0. 데이터 전송 없음.
+ *   DATA(FUA)          → nvme_setup_rw(): `if (req->cmd_flags & REQ_FUA)
+ *                        control |= NVME_RW_FUA;` — 별도 명령이 아니라
+ *                        Write 명령의 control 필드 비트다.
+ *
  * === 전체 아키텍처에서의 위치 ===
- * 커널 블록 계층 실행 흐름에서 blk-mq (request 할당·dispatch) 바로 아래에
- * 위치하며, NVMe 드라이버(nvme_queue_rq) 직전 계층이다:
+ * blk-mq 의 요청 삽입 경로 안에 끼어 있다. 주의: 이 파일은 드라이버를
+ * 직접 부르지 않는다. 아래 화살표 중 드라이버로 넘어가는 단계는 전부
+ * mq_ops->queue_rq 함수 포인터를 통한 간접 호출이다.
  *   submit_bio
  *     → blk_mq_submit_bio (block/blk-mq.c)
  *       → blk_insert_flush (이 파일: REQ_PREFLUSH/FUA 시퀀스 결정)
- *         → blk_kick_flush (이 파일: NVMe Flush 명령 발행)
- *           → blk_mq_kick_requeue_list → nvme_queue_rq → doorbell
- *   NVMe CQ 완료: nvme_complete_rq → flush_end_io (이 파일: 다음 단계 전이)
- * 실행 컨텍스트: 커널 소프트웨어(submit 경로)와 NVMe CQ 인터럽트/폴링 양쪽
- * 에서 호출된다. fq->mq_flush_lock 으로 두 경로의 경쟁을 직렬화한다.
+ *         → blk_kick_flush (이 파일: flush_rq 를 하나 만들어 대기열에 넣음)
+ *           → blk_mq_run_hw_queue / blk_mq_kick_requeue_list
+ *             → blk_mq_dispatch_rq_list → mq_ops->queue_rq
+ *                                         (NVMe PCIe 라면 nvme_queue_rq)
+ *   완료: 장치 완료 → blk_mq_end_request → rq->end_io = flush_end_io
+ *         (이 파일: 다음 단계 전이)
+ * 실행 컨텍스트: 제출 경로(프로세스 컨텍스트)와 완료 경로(인터럽트에서
+ * 시작해 IPI/softirq 로 넘어갈 수 있음) 양쪽에서 진입한다. 그래서
+ * fq->mq_flush_lock 은 반드시 irqsave 계열로 잡는다.
  *
  * === 타 모듈과의 연결 ===
  * 의존하는 모듈:
@@ -34,24 +70,24 @@
  * 데이터 흐름:
  *   blk_insert_flush (분해·상태머신 진입)
  *     → fq->flush_queue[pending_idx] (PRE/POSTFLUSH 대기열)
- *     → blk_kick_flush → flush_rq → NVMe SQ → CQ
+ *     → blk_kick_flush → flush_rq → 디스패치 → 완료
  *     → flush_end_io → blk_flush_complete_seq (다음 단계)
  *     → blk_mq_end_request (bio 최종 완료)
  *
  * === 주요 함수/구조체 요약 ===
  * blk_insert_flush()        : PREFLUSH/FUA 요청을 분석해 시퀀스 결정, 상태머신 진입
- * blk_kick_flush()          : 조건 충족 시 pending 대기열을 하나의 NVMe Flush로 발행
+ * blk_kick_flush()          : 조건 충족 시 pending 대기열을 하나의 Flush 로 묶어 발행
  * blk_flush_complete_seq()  : 시퀀스 단계 완료 기록 + 다음 단계 전이
- * flush_end_io()            : NVMe CQ에서 Flush 완료 시 호출되는 completion handler
- * mq_flush_data_end_io()    : NVMe Write(FUA) DATA 완료 시 POSTFLUSH 전이
+ * flush_end_io()            : Flush 요청 완료 시 불리는 end_io 콜백 — 여기서 다음 단계로 전이한다
+ * mq_flush_data_end_io()    : DATA 단계 완료 시 POSTFLUSH 또는 DONE 으로 전이
  * blk_alloc_flush_queue()   : per-hctx flush 상태머신 자료구조 할당·초기화
  * struct blk_flush_queue (blk.h):
  *   mq_flush_lock           : flush 상태머신 직렬화 spinlock (IRQ-safe)
  *   flush_queue[2]          : 더블 버퍼 PRE/POSTFLUSH 대기열
  *   flush_pending_idx       : 현재 대기 중인 버퍼 인덱스
- *   flush_running_idx       : 현재 in-flight NVMe Flush가 묶인 버퍼 인덱스
+ *   flush_running_idx       : 현재 발행되어 진행 중인 Flush 에 묶인 버퍼 인덱스
  *   flush_data_in_flight    : DATA(FUA Write) in-flight 요청 수 (C2 조건용)
- *   flush_rq                : NVMe Flush 명령에 재활용되는 날것의 request
+ *   flush_rq                : 큐마다 하나씩 미리 잡아 두고 Flush 발행 때마다 재활용하는 전용 request
  */
 
 /*
@@ -133,7 +169,7 @@
  * 주요 자료구조와 NVMe 연결:
  *
  * struct blk_flush_queue (block/blk.h):
- *   - mq_flush_lock: NVMe SQ/CQ 경쟁 상태 보호 (per-hctx flush 동기화)
+ *   - mq_flush_lock: 제출 경로와 완료 경로가 같은 상태 기계를 건드리므로 필요한 직렬화 (per-hctx)
  *   - flush_pending_idx/running_idx: 더블 버퍼링 인덱스.
  *     NVMe Flush 명령은 한 번에 하나만 in-flight 가능하도록 관리.
  *   - flush_queue[2]: PRE/POSTFLUSH 대기열. 같은 NVMe Flush 명령으로
@@ -153,9 +189,9 @@
 /* PREFLUSH/FUA sequences */
 /* [한국어] NVMe Flush/FUA 시퀀스 단계를 나타내는 비트마스크 상수 */
 enum {
-	REQ_FSEQ_PREFLUSH	= (1 << 0), /* [한국어] pre-flushing 진행 중: NVMe Flush 명령(Opcode 0x00)이 SQ→CQ */
-	REQ_FSEQ_DATA		= (1 << 1), /* [한국어] data write 진행 중: NVMe Write(FUA 포함) 명령이 SQ→CQ */
-	REQ_FSEQ_POSTFLUSH	= (1 << 2), /* [한국어] post-flushing 진행 중: FUA 미지원 시 Write 후 추가 NVMe Flush */
+	REQ_FSEQ_PREFLUSH	= (1 << 0), /* [한국어] pre-flushing 진행 중: Flush 명령이 진행 중 (NVMe 라면 opcode 0x00) */
+	REQ_FSEQ_DATA		= (1 << 1), /* [한국어] data write 진행 중: 데이터 쓰기가 진행 중 (FUA 비트가 실렸을 수 있다) */
+	REQ_FSEQ_POSTFLUSH	= (1 << 2), /* [한국어] post-flushing 진행 중: FUA 미지원 장치에서 Write 뒤에 덧붙이는 Flush. NVMe 는 WRITE_CACHE 와 FUA 가 함께 켜지므로 이 단계에 거의 오지 않는다 */
 	REQ_FSEQ_DONE		= (1 << 3), /* [한국어] 시퀀스 완료: 에러 발생 시에도 이 상태로 즉시 전이 */
 
 	REQ_FSEQ_ACTIONS	= REQ_FSEQ_PREFLUSH | REQ_FSEQ_DATA |
@@ -182,8 +218,8 @@ static void blk_kick_flush(struct request_queue *q,
  * @return: ctx가 매핑된 hctx의 struct blk_flush_queue 포인터
  *
  * blk_mq_ctx는 per-CPU 소프트웨어 큐이고, blk_mq_map_queue(REQ_OP_FLUSH)
- * 로 해당 CPU의 FLUSH 전용 hctx(NVMe SQ/CQ 쌍)를 얻는다. flush 상태머신은
- * per-hctx로 분리되어 있어 서로 다른 NVMe SQ/CQ 쌍이 독립적으로 flush를
+ * 로 해당 CPU 에 매핑된 FLUSH 용 hctx 를 얻는다. flush 상태머신은
+ * per-hctx로 분리되어 있어 서로 다른 하드웨어 큐가 독립적으로 flush 를
  * 관리할 수 있다. NULL을 반환하는 경우는 없다(hctx는 항상 fq를 갖는다).
  * 실행 컨텍스트: submit 경로(blk_insert_flush)와 CQ 완료 경로(flush_end_io)
  * 양쪽에서 호출된다.
@@ -195,7 +231,7 @@ static void blk_kick_flush(struct request_queue *q,
 static inline struct blk_flush_queue *
 blk_get_flush_queue(struct blk_mq_ctx *ctx)
 {
-	return blk_mq_map_queue(REQ_OP_FLUSH, ctx)->fq; /* [한국어] REQ_OP_FLUSH로 매핑된 hctx를 얻어 fq 반환: NVMe SQ/CQ 쌍 단위로 flush 상태 분리 */
+	return blk_mq_map_queue(REQ_OP_FLUSH, ctx)->fq; /* [한국어] REQ_OP_FLUSH로 매핑된 hctx를 얻어 fq 반환: 하드웨어 큐 단위로 flush 상태 분리 */
 }
 
 /*
@@ -245,7 +281,7 @@ static void blk_flush_restore_request(struct request *rq)
 	 * complete the bio again.  @rq->biotail is guaranteed to equal the
 	 * original @rq->bio.  Restore it.
 	 */
-	rq->bio = rq->biotail;		/* [한국어] NVMe FUA Write 완료 후 bio 재설정: 상위 bio submitter에게 최종 완료를 알릴 수 있도록 */
+	rq->bio = rq->biotail;		/* [한국어] 완료 후 bio 포인터 재설정: 상위 bio submitter에게 최종 완료를 알릴 수 있도록 */
 	if (rq->bio)
 		rq->__sector = rq->bio->bi_iter.bi_sector; /* [한국어] bio의 시작 sector 복원: 상위 계층의 sector 정보를 request와 동기화 */
 
@@ -256,7 +292,7 @@ static void blk_flush_restore_request(struct request *rq)
 
 /*
  * [한국어]
- * blk_account_io_flush - NVMe Flush 명령 완료 통계 기록
+ * blk_account_io_flush - Flush 완료 통계 기록
  *
  * @rq: 방금 완료된 flush_rq (NVMe Flush 명령에 사용된 request)
  *
@@ -272,9 +308,9 @@ static void blk_account_io_flush(struct request *rq)
 	struct block_device *part = rq->q->disk->part0; /* [한국어] 디스크 파티션 0(전체 디스크) 통계 객체 */
 
 	part_stat_lock(); /* [한국어] per-CPU 통계 직렬화 시작 */
-	part_stat_inc(part, ios[STAT_FLUSH]); /* [한국어] NVMe Flush 명령 완료 횟수 증가: /sys/block/<dev>/stat의 flush 항목에 반영 */
+	part_stat_inc(part, ios[STAT_FLUSH]); /* [한국어] Flush 완료 횟수 증가: /sys/block/<dev>/stat의 flush 항목에 반영 */
 	part_stat_add(part, nsecs[STAT_FLUSH],
-		      blk_time_get_ns() - rq->start_time_ns); /* [한국어] NVMe Flush 완료 지연 누적: blk_kick_flush 발행 시각(start_time_ns)부터 CQ 완료까지 */
+		      blk_time_get_ns() - rq->start_time_ns); /* [한국어] Flush 지연 누적: blk_kick_flush 발행 시각(start_time_ns)부터 CQ 완료까지 */
 	part_stat_unlock(); /* [한국어] per-CPU 통계 직렬화 종료 */
 }
 
@@ -290,7 +326,9 @@ static void blk_account_io_flush(struct request *rq)
  * rq가 seq 단계를 마쳤음을 rq->flush.seq에 기록하고, 다음에 수행해야 할
  * 단계로 전이시킨다. 에러가 있으면 남은 단계를 건너뛰고 즉시 DONE으로 간다.
  * PRE/POSTFLUSH 단계는 pending 대기열에 넣어 blk_kick_flush로 묶어 발행하고,
- * DATA 단계는 requeue_list로 옮겨 nvme_queue_rq에서 NVMe Write/FUA로 처리한다.
+ * DATA 단계는 requeue_list 로 옮겨 일반 쓰기와 같은 경로로 디스패치된다.
+ * NVMe 라면 nvme_setup_rw() 가 REQ_FUA 를 Write 명령의 control 필드
+ * NVME_RW_FUA 비트로 옮겨 담는다 — 별도 명령이 아니다.
  * fq->mq_flush_lock을 보유한 상태에서 호출되어야 한다(IRQ disabled).
  *
  * 호출 체인:
@@ -312,7 +350,7 @@ static void blk_flush_complete_seq(struct request *rq,
 	if (likely(!error))
 		seq = blk_flush_cur_seq(rq); /* [한국어] 에러 없으면 다음 단계 계산: PREFLUSH→DATA→POSTFLUSH→DONE 중 현재 미완료 최하위 단계 */
 	else
-		seq = REQ_FSEQ_DONE; /* [한국어] 에러 발생 시 즉시 DONE: 남은 NVMe Flush/Write 단계를 모두 건너뜀 */
+		seq = REQ_FSEQ_DONE; /* [한국어] 에러 발생 시 즉시 DONE: 남은 단계를 모두 건너뛴다 */
 
 	switch (seq) {
 	case REQ_FSEQ_PREFLUSH:
@@ -326,9 +364,9 @@ static void blk_flush_complete_seq(struct request *rq,
 	case REQ_FSEQ_DATA:
 		fq->flush_data_in_flight++; /* [한국어] NVMe Write(FUA) 발행 예정이므로 in-flight DATA 카운트 증가: C2에서 POSTFLUSH 지연 여부 판단 */
 		spin_lock(&q->requeue_lock); /* [한국어] requeue_list 보호: NVMe dispatch 경로(blk_mq_run_hw_queue)와 경쟁 */
-		list_move(&rq->queuelist, &q->requeue_list); /* [한국어] flush 시퀀스 DATA 단계를 requeue_list로 이동: nvme_queue_rq에서 NVMe Write/FUA로 처리 */
+		list_move(&rq->queuelist, &q->requeue_list); /* [한국어] flush 시퀀스의 DATA 단계를 requeue_list 로 이동 — 이제부터는 평범한 쓰기 요청과 같은 경로를 탄다 */
 		spin_unlock(&q->requeue_lock);
-		blk_mq_kick_requeue_list(q); /* [한국어] hardware queue 깨우기: hctx->run_work 예약 → nvme_queue_rq → doorbell 경로 */
+		blk_mq_kick_requeue_list(q); /* [한국어] hardware queue 깨우기 — requeue_list 에 넣기만 해서는 아무도 가져가지 않으므로 디스패치를 명시적으로 예약한다 */
 		break;
 
 	case REQ_FSEQ_DONE:
@@ -359,7 +397,7 @@ static void blk_flush_complete_seq(struct request *rq,
  * flush_end_io - NVMe Flush 명령(REQ_OP_FLUSH) CQ 완료 핸들러
  *
  * @flush_rq: NVMe Flush 명령에 사용된 flush_rq (blk_kick_flush가 발행한 것)
- * @error: NVMe CQ에서 얻은 완료 상태 (BLK_STS_OK이면 정상)
+ * @error: 장치가 보고한 완료 상태 (BLK_STS_OK이면 정상)
  * @iob: completion batch (현재 이 함수에서는 미사용)
  * @return: RQ_END_IO_NONE (flush_rq를 free하지 않고 재활용하므로)
  *
@@ -368,11 +406,12 @@ static void blk_flush_complete_seq(struct request *rq,
  * 2. NVMe Flush 완료 통계 기록 (blk_account_io_flush)
  * 3. flush_rq를 IDLE 상태로 전환하고 tag/internal_tag를 반납
  * 4. running 대기열에 묶인 PRE/POSTFLUSH 요청을 순회해 다음 단계로 전이
- * 실행 컨텍스트: NVMe CQ 인터럽트/polling 완료 경로.
+ * 실행 컨텍스트: 완료 경로. 장치 인터럽트에서 시작하지만 IPI/softirq 로 넘어갈 수 있어
+ * 어느 쪽이든 잠들 수 없다고 보고 락을 irqsave 로 잡는다.
  * fq->mq_flush_lock을 IRQ disabled로 보유하므로 blk_insert_flush와 직렬화.
  *
  * 호출 체인:
- *   nvme_poll_cq → nvme_process_cq → nvme_complete_rq
+ *   장치 완료 → blk_mq_end_request → rq->end_io
  *     → blk_mq_complete_request → [flush_end_io]
  *     → blk_flush_complete_seq → (다음 단계)
  */
@@ -387,53 +426,62 @@ static enum rq_end_io_ret flush_end_io(struct request *flush_rq,
 	struct blk_flush_queue *fq = blk_get_flush_queue(flush_rq->mq_ctx); /* [한국어] flush_rq의 mq_ctx에서 per-hctx flush 상태머신 획득 */
 
 	/* release the tag's ownership to the req cloned from */
-	spin_lock_irqsave(&fq->mq_flush_lock, flags); /* [한국어] per-hctx flush 상태 보호: NVMe CQ 완료와 blk_insert_flush 간 경쟁 직렬화 */
+	spin_lock_irqsave(&fq->mq_flush_lock, flags); /* [한국어] per-hctx flush 상태 보호: 완료 경로와 제출 경로(blk_insert_flush) 간 경쟁 직렬화 */
 
 	if (!req_ref_put_and_test(flush_rq)) {
-		/* [한국어] flush_rq의 마지막 참조자가 아님: timeout 경로에서도 호출되므로 use-after-free 방지 */
-		fq->rq_status = error; /* [한국어] 보류 에러 저장: 마지막 참조 해제 시 이 status를 사용해 NVMe 에러 전파 */
+		/* [한국어] flush_rq 는 큐당 하나뿐이고 재활용되기 때문에, 완료 경로와 타임아웃
+		 * 경로가 **동시에** 이 함수에 들어올 수 있다. 둘 중 나중에 도착한 쪽만
+		 * 실제 정리를 수행해야 한다 — 참조 카운트로 그 "마지막 한 명"을 가린다.
+		 * 먼저 도착한 쪽은 자기가 본 에러만 fq->rq_status 에 남기고 물러난다.
+		 * 이 검사를 빼면 두 경로가 같은 flush_rq 를 두 번 정리해 use-after-free 가 난다. */
+		fq->rq_status = error; /* [한국어] 내가 본 에러를 남겨 둔다. 나는 물러나지만 이 에러는 잃으면 안 되고,
+					 * 마지막에 도착하는 쪽이 아래에서 이 값을 집어 최종 결과로 삼는다.
+					 * 원래 주석: 마지막 참조 해제 시 이 status를 사용해 NVMe 에러 전파 */
 		spin_unlock_irqrestore(&fq->mq_flush_lock, flags);
 		return RQ_END_IO_NONE;
 	}
 
-	blk_account_io_flush(flush_rq); /* [한국어] NVMe Flush 명령 완료 통계 기록: ios[STAT_FLUSH] + nsecs[STAT_FLUSH] 갱신 */
+	blk_account_io_flush(flush_rq); /* [한국어] Flush 완료 통계 기록: ios[STAT_FLUSH] + nsecs[STAT_FLUSH] 갱신 */
 	/*
 	 * Flush request has to be marked as IDLE when it is really ended
 	 * because its .end_io() is called from timeout code path too for
 	 * avoiding use-after-free.
 	 */
-	WRITE_ONCE(flush_rq->state, MQ_RQ_IDLE); /* [한국어] WRITE_ONCE: NVMe timeout 경로가 state를 보고 flush_rq가 재활용 가능함을 인지하도록 */
+	WRITE_ONCE(flush_rq->state, MQ_RQ_IDLE); /* [한국어] WRITE_ONCE 로 쓰는 이유: 타임아웃 경로가 락 없이 이 state 를 읽어 flush_rq 가 재활용 가능함을 인지하도록 */
 	if (fq->rq_status != BLK_STS_OK) {
 		/* [한국어] 이전에 보류된 에러가 있으면: refcount 경쟁에서 먼저 도착한 에러를 최종 반영 */
-		error = fq->rq_status; /* [한국어] 보류 에러를 최종 error로 채택: NVMe flush 결과를 대기 요청들에게 전파 */
-		fq->rq_status = BLK_STS_OK; /* [한국어] 보류 상태 초기화: 다음 NVMe Flush 명령 사이클을 위해 리셋 */
+		error = fq->rq_status; /* [한국어] 보류 에러를 최종 error로 채택: flush 결과를 대기 중이던 요청들에게 전파 */
+		fq->rq_status = BLK_STS_OK; /* [한국어] 보류 상태 초기화: 다음 Flush 사이클을 위해 리셋 */
 	}
 
 	if (!q->elevator) {
 		flush_rq->tag = BLK_MQ_NO_TAG; /* [한국어] non-scheduler 모드: blk_kick_flush에서 first_rq에서 빌린 tag 반납, sbitmap 슬롯 재사용 가능 */
 	} else {
-		blk_mq_put_driver_tag(flush_rq); /* [한국어] scheduler 모드: hardware driver tag(NVMe SQ slot) 반납 → 다음 NVMe 명령에서 slot 재활용 */
+		blk_mq_put_driver_tag(flush_rq); /* [한국어] scheduler 모드: 드라이버 태그 반납 → 다른 요청이 이 태그를 다시 쓸 수 있게 됨. 재활용 */
 		flush_rq->internal_tag = BLK_MQ_NO_TAG; /* [한국어] scheduler internal tag 반납: scheduler tag bitmap 해제 */
 	}
 
-	running = &fq->flush_queue[fq->flush_running_idx]; /* [한국어] flush_running_idx 버퍼: 방금 완료된 NVMe Flush에 묶인 PRE/POSTFLUSH 요청 리스트 */
-	BUG_ON(fq->flush_pending_idx == fq->flush_running_idx); /* [한국어] 양쪽 idx가 같으면 NVMe Flush in-flight 상태 위반: C1 조건 파괴, 즉시 패닉 */
+	running = &fq->flush_queue[fq->flush_running_idx]; /* [한국어] 방금 끝난 Flush 하나에 묶여 있던 요청들 전부.
+					 * 이 파일의 최적화가 결실을 맺는 지점이다 — 명령은 하나만 나갔는데
+					 * 여기 매달린 요청은 여럿일 수 있고, 그 전부가 한꺼번에 다음 단계로 간다.
+					 * 원래 주석: 방금 완료된 NVMe Flush에 묶인 PRE/POSTFLUSH 요청 리스트 */
+	BUG_ON(fq->flush_pending_idx == fq->flush_running_idx); /* [한국어] 양쪽 idx 가 같다면 in-flight Flush 가 없다는 뜻이므로 여기 올 수 없다 — 상태 기계 위반: C1 조건 파괴, 즉시 패닉 */
 
 	/* account completion of the flush request */
-	fq->flush_running_idx ^= 1; /* [한국어] running_idx 토글: 완료된 NVMe Flush 버퍼를 해제하고, 다음 대기 요청이 들어올 빈 슬롯이 됨 */
+	fq->flush_running_idx ^= 1; /* [한국어] running_idx 토글 — 이 시점부터 pending_idx == running_idx 가 되어 C1 이 열리고 다음 Flush 발행이 가능해진다. 대기 요청이 들어올 빈 슬롯이 됨 */
 
 	/* and push the waiting requests to the next stage */
 	list_for_each_entry_safe(rq, n, running, queuelist) {
-		/* [한국어] 완료된 NVMe Flush에 묶인 모든 PRE/POSTFLUSH 요청을 다음 단계로 전이 */
+		/* [한국어] 이 Flush 하나에 묶여 있던 PRE/POSTFLUSH 요청 전부를 다음 단계로 전이시킨다 */
 		unsigned int seq = blk_flush_cur_seq(rq); /* [한국어] 각 요청의 다음 단계: PREFLUSH 완료→DATA, POSTFLUSH 완료→DONE */
 
 		BUG_ON(seq != REQ_FSEQ_PREFLUSH && seq != REQ_FSEQ_POSTFLUSH); /* [한국어] running 리스트에는 PRE/POSTFLUSH 요청만 있어야 함: 다른 단계면 state machine 버그 */
 		list_del_init(&rq->queuelist); /* [한국어] running 리스트에서 제거: 이후 blk_flush_complete_seq에서 다음 리스트/경로로 이동 */
-		blk_flush_complete_seq(rq, fq, seq, error); /* [한국어] PREFLUSH완료→DATA(NVMe Write/FUA), POSTFLUSH완료→DONE(최종 완료 보고) */
+		blk_flush_complete_seq(rq, fq, seq, error); /* [한국어] PREFLUSH 완료→DATA, POSTFLUSH 완료→DONE(최종 완료 보고) */
 	}
 
 	spin_unlock_irqrestore(&fq->mq_flush_lock, flags);
-	return RQ_END_IO_NONE; /* [한국어] flush_rq는 free 하지 않고 blk_flush_queue에서 재활용: blk_kick_flush가 다음 NVMe Flush에 같은 rq를 사용 */
+	return RQ_END_IO_NONE; /* [한국어] flush_rq는 free 하지 않고 blk_flush_queue 가 계속 들고 있다가 다음 발행에 재사용한다. 원래 주석: blk_kick_flush가 다음 NVMe Flush에 같은 rq를 사용 */
 }
 
 /*
@@ -444,7 +492,7 @@ static enum rq_end_io_ret flush_end_io(struct request *flush_rq,
  * @return: true이면 NVMe Flush 명령용 flush_rq, false이면 일반 request
  *
  * rq->end_io가 flush_end_io를 가리키면 blk_kick_flush가 발행한 flush_rq다.
- * NVMe 드라이버(nvme_queue_rq)는 flush_rq를 일반 데이터 경로와 동일하게
+ * 드라이버는 flush_rq 를 일반 요청과 똑같이
  * 처리하지만, 완료 시 flush_end_io가 호출되어 상태머신 전이가 일어난다.
  *
  * 호출 체인:
@@ -468,31 +516,43 @@ bool is_flush_rq(struct request *rq)
  * C1: 이미 NVMe Flush in-flight이면 skip (pending_idx == running_idx)
  * C2: DATA(FUA Write) in-flight이 있으면 POSTFLUSH 지연
  * C3: FLUSH_PENDING_TIMEOUT 초과 대기 중이면 C2 무시하고 강제 발행
- * 발행 시 first_rq의 mq_ctx/mq_hctx/tag를 flush_rq에 복사해 NVMe SQ 경로를
+ * 발행 시 first_rq의 mq_ctx/mq_hctx/tag를 flush_rq 에 복사해 디스패치 경로를
  * 빌린다. fq->mq_flush_lock을 보유한 상태에서 호출되어야 한다.
  *
  * 호출 체인:
  *   blk_flush_complete_seq → [blk_kick_flush]
- *     → blk_mq_kick_requeue_list → nvme_queue_rq → doorbell
+ *     → blk_mq_kick_requeue_list → (dispatch) → mq_ops->queue_rq
  */
 static void blk_kick_flush(struct request_queue *q, struct blk_flush_queue *fq,
 			   blk_opf_t flags)
 {
 	struct list_head *pending = &fq->flush_queue[fq->flush_pending_idx]; /* [한국어] 현재 NVMe Flush 명령 발행 후보 대기열: pending_idx 버퍼 */
-	struct request *first_rq =
+	struct request *first_rq =		/* [한국어] 대기열 맨 앞 요청. 이 하나가 flush_rq 에게 mq_ctx/mq_hctx/tag 를 빌려 준다.
+						 * "빌린다"는 표현이 정확한 이유: flush_rq 는 자기 태그를 따로 얻지 않고,
+						 * first_rq 가 flush 완료를 기다리며 멈춰 있는 동안 그 태그를 대신 쓴다.
+						 * 둘이 동시에 인플라이트일 수 없으므로 충돌하지 않는다. */
 		list_first_entry(pending, struct request, queuelist); /* [한국어] 대기열의 첫 번째 요청: flush_rq에 빌려줄 mq_hctx/mq_ctx/tag 제공자 */
 	struct request *flush_rq = fq->flush_rq; /* [한국어] per-hctx NVMe Flush 명령 전용 request: blk_alloc_flush_queue에서 사전 할당된 재사용 rq */
 
 	/* C1 described at the top of this file */
 	if (fq->flush_pending_idx != fq->flush_running_idx || list_empty(pending))
-		/* [한국어] C1: NVMe Flush in-flight(pending!=running) 이거나 대기열이 비어있으면 발행 금지 */
+		/* [한국어] C1 — 두 인덱스가 다르다는 것은 곧 "Flush 가 이미 하나 떠 있다"는 뜻이다.
+		 * 이 파일이 인덱스 두 개로 in-flight 여부를 표현하는 이유: 별도의 bool 을 두는 대신
+		 * 대기 버퍼와 발행 버퍼를 번갈아 쓰면(더블 버퍼링), Flush 가 떠 있는 동안 새로 들어온
+		 * 요청들이 다른 버퍼에 자연스럽게 쌓여 다음 Flush 한 번으로 함께 처리된다.
+		 * 즉 이 조건은 단순한 배제가 아니라 배칭 그 자체다.
+		 * pending 이 비었으면 발행할 것이 없으므로 역시 반환. */
 		return;
 
 	/* C2 and C3 */
-	if (fq->flush_data_in_flight &&
-	    time_before(jiffies,
+	if (fq->flush_data_in_flight &&			/* [한국어] C2 — 아직 끝나지 않은 데이터 쓰기가 있다 */
+	    time_before(jiffies,			/* [한국어] C3 — 그리고 기다린 지 아직 오래되지 않았다 */
 			fq->flush_pending_since + FLUSH_PENDING_TIMEOUT))
-		/* [한국어] C2: FUA Write in-flight 있고 C3 timeout(5*HZ) 미초과 → POSTFLUSH 지연: 공유 PREFLUSH 최적화 */
+		/* [한국어] 일부러 늦추는 구간이다. 지금 당장 Flush 를 쏘면 진행 중인 데이터 쓰기는
+		 * 그 Flush 에 포함되지 않아, 그것들을 위해 곧 또 한 번 Flush 를 쏴야 한다.
+		 * 조금 기다렸다가 한 번에 묶는 편이 총 Flush 횟수를 줄인다.
+		 * 다만 무한정 기다리면 지연이 늘어나므로 C3(FLUSH_PENDING_TIMEOUT)가 상한을 준다.
+		 * 처리량과 지연 사이의 명시적 절충이며, 이 파일에서 유일하게 "시간"을 보는 곳이다. */
 		return;
 
 	fq->flush_pending_idx ^= 1; /* [한국어] pending_idx 토글: 이제 pending_idx != running_idx → NVMe Flush in-flight 표시, 반대편이 새 대기열 */
@@ -507,36 +567,37 @@ static void blk_kick_flush(struct request_queue *q, struct blk_flush_queue *fq,
 	 * In case of IO scheduler, flush rq need to borrow scheduler tag
 	 * just for cheating put/get driver tag.
 	 */
-	flush_rq->mq_ctx = first_rq->mq_ctx; /* [한국어] NVMe SQ/CQ에 연결될 소프트웨어 컨텍스트 복사: CPU→hctx 매핑 상속 */
-	flush_rq->mq_hctx = first_rq->mq_hctx; /* [한국어] NVMe SQ/CQ 쌍(hctx) 상속: doorbell 주소와 CQ 인터럽트 벡터 결정 */
+	flush_rq->mq_ctx = first_rq->mq_ctx; /* [한국어] 소프트웨어 컨텍스트(제출 CPU) 복사 — flush_rq 는 원래 어느 CPU 것도 아니므로 첫 요청의 것을 물려받는다 */
+	flush_rq->mq_hctx = first_rq->mq_hctx; /* [한국어] 하드웨어 큐(hctx) 상속. NVMe PCIe 에서 hctx 는 SQ/CQ 한 쌍에 대응하므로,
+						 * 이 선택이 곧 어느 doorbell 을 울리고 어느 MSI-X 벡터로 완료를 받을지를 정한다 */
 
-	if (!q->elevator)
-		flush_rq->tag = first_rq->tag; /* [한국어] non-scheduler: first_rq의 NVMe SQ 슬롯(CID)을 flush_rq에 빌림. first_rq는 flush 완료까지 stall */
-	else
+	if (!q->elevator)				/* [한국어] 스케줄러가 없으면 요청이 드라이버 태그를 직접 들고 있다 */
+		flush_rq->tag = first_rq->tag; /* [한국어] non-scheduler: first_rq 의 드라이버 태그를 flush_rq 가 빌려 쓴다. flush_rq 는 자기 태그를 따로 얻지 않는다. first_rq는 flush 완료까지 stall */
+	else						/* [한국어] 스케줄러가 있으면 요청이 든 것은 스케줄러 태그이고, 드라이버 태그는 디스패치 직전에 따로 얻는다 */
 		flush_rq->internal_tag = first_rq->internal_tag; /* [한국어] scheduler: first_rq의 scheduler internal_tag를 빌림. blk_mq_get_driver_tag에서 실제 NVMe 슬롯 획득 */
 
-	flush_rq->cmd_flags = REQ_OP_FLUSH | REQ_PREFLUSH; /* [한국어] NVMe Flush 명령(Opcode 0x00)으로 설정: nvme_queue_rq에서 nvme_setup_flush()로 처리 */
+	flush_rq->cmd_flags = REQ_OP_FLUSH | REQ_PREFLUSH; /* [한국어] 이 요청은 데이터 없는 순수 배리어다. NVMe 라면 nvme_setup_flush() 가 opcode 0x00(nvme_cmd_flush)과 nsid 만 채운 SQE 로 만든다 */
 	flush_rq->cmd_flags |= (flags & REQ_DRV) | (flags & REQ_FAILFAST_MASK); /* [한국어] 원 요청의 driver 플래그와 failfast 정책 상속: NVMe 타임아웃/중단 동작에 영향 */
 	flush_rq->rq_flags |= RQF_FLUSH_SEQ; /* [한국어] flush 시퀀스 요청 표시: req_bio_endio에서 bio 최종 완료를 지연시키는 역할 */
-	flush_rq->end_io = flush_end_io; /* [한국어] NVMe CQ 완료 시 flush_end_io 호출: nvme_complete_request → rq->end_io → flush_end_io */
+	flush_rq->end_io = flush_end_io; /* [한국어] 완료 시 blk_mq_end_request 가 rq->end_io 를 부르고, 그 경로로 상태 기계가 다음 단계로 넘어간다 */
 	/*
 	 * Order WRITE ->end_io and WRITE rq->ref, and its pair is the one
 	 * implied in refcount_inc_not_zero() called from
 	 * blk_mq_find_and_get_req(), which orders WRITE/READ flush_rq->ref
 	 * and READ flush_rq->end_io
 	 */
-	smp_wmb(); /* memory barrier: end_io/rq_flags/tag 쓰기가 refcount 관찰 전에 NVMe CQ/timeout 경로에 보이도록 */
+	smp_wmb(); /* memory barrier: end_io/rq_flags/tag 쓰기가 refcount 관찰 전에 완료·타임아웃 경로에서 보이도록 */
 	req_ref_set(flush_rq, 1); /* flush_rq 참조 카운트 설정: timeout 경로에서도 안전한 completion 처리 */
 
 	/*
 	 * requeue_list/flush_list로 넣어 blk_mq_run_hw_queue를 통해
-	 * nvme_queue_rq -> nvme_submit_cmd(doorbell) 경로로 진입.
+	 * mq_ops->queue_rq 간접 호출을 통해 드라이버로 내려간다.
 	 */
 	spin_lock(&q->requeue_lock); /* flush_list 보호: NVMe dispatch 경로와 동기화 */
-	list_add_tail(&flush_rq->queuelist, &q->flush_list); /* flush_rq를 hardware queue의 flush_list에 추가: nvme_queue_rq에서 REQ_OP_FLUSH로 NVMe Flush 명령 생성 */
+	list_add_tail(&flush_rq->queuelist, &q->flush_list); /* flush_rq를 hardware queue의 flush_list에 추가: 디스패치되면 REQ_OP_FLUSH 로서 드라이버에 전달된다 명령 생성 */
 	spin_unlock(&q->requeue_lock);
 
-	blk_mq_kick_requeue_list(q); /* [한국어] hardware queue 깨우기: flush_list에 추가한 flush_rq를 nvme_queue_rq → doorbell 경로로 전달 */
+	blk_mq_kick_requeue_list(q); /* [한국어] hardware queue 깨우기: flush_list 에 넣기만 해서는 아무도 가져가지 않으므로 디스패치를 명시적으로 예약한다 */
 }
 
 /*
@@ -544,20 +605,21 @@ static void blk_kick_flush(struct request_queue *q, struct blk_flush_queue *fq,
  * mq_flush_data_end_io - NVMe Write/FUA DATA 단계 완료 핸들러
  *
  * @rq: NVMe Write(FUA) 명령이 완료된 request
- * @error: NVMe CQ 완료 상태 (BLK_STS_OK이면 정상)
+ * @error: 완료 상태 (BLK_STS_OK 이면 정상)
  * @iob: completion batch (이 함수에서는 미사용)
  * @return: RQ_END_IO_NONE (request를 free하지 않음)
  *
  * blk_rq_init_flush에서 rq->end_io를 이 함수로 교체했으므로, FUA Write가
- * NVMe CQ를 통해 완료되면 이 함수가 호출된다. 처리 순서:
+ * 데이터 쓰기가 완료되면 이 함수가 호출된다. 처리 순서:
  * 1. scheduler 모드이면 NVMe driver tag 반납
  * 2. flush_data_in_flight 감소 (C2 조건 해제)
  * 3. blk_flush_complete_seq(REQ_FSEQ_DATA)로 POSTFLUSH/DONE 전이
  * 4. hctx 재시작 (blk_mq_sched_restart)
- * 실행 컨텍스트: NVMe CQ 인터럽트/polling 완료 경로.
+ * 실행 컨텍스트: 완료 경로. 장치 인터럽트에서 시작하지만 IPI/softirq 로 넘어갈 수 있어
+ * 어느 쪽이든 잠들 수 없다고 보고 락을 irqsave 로 잡는다.
  *
  * 호출 체인:
- *   nvme_poll_cq → nvme_process_cq → nvme_complete_rq
+ *   장치 완료 → blk_mq_end_request → rq->end_io
  *     → blk_mq_complete_request → [mq_flush_data_end_io]
  *     → blk_flush_complete_seq(DATA) → blk_kick_flush
  */
@@ -566,13 +628,13 @@ static enum rq_end_io_ret mq_flush_data_end_io(struct request *rq,
 					       const struct io_comp_batch *iob)
 {
 	struct request_queue *q = rq->q; /* [한국어] 요청이 속한 request_queue */
-	struct blk_mq_hw_ctx *hctx = rq->mq_hctx; /* [한국어] NVMe SQ/CQ 쌍: DATA 완료 후 이 hctx를 재시작해 후속 NVMe 명령 허용 */
+	struct blk_mq_hw_ctx *hctx = rq->mq_hctx; /* [한국어] DATA 완료 후 이 hctx 를 재시작한다 — flush 대기 때문에 멈춰 세웠던 디스패치를 다시 연다 */
 	struct blk_mq_ctx *ctx = rq->mq_ctx; /* [한국어] 요청이 제출된 per-CPU 소프트웨어 컨텍스트 */
 	unsigned long flags; /* [한국어] spin_lock_irqsave 플래그 */
 	struct blk_flush_queue *fq = blk_get_flush_queue(ctx); /* [한국어] hctx에서 per-hctx flush 상태머신 획득 */
 
 	if (q->elevator) {
-		WARN_ON(rq->tag < 0); /* [한국어] scheduler 모드에서 driver tag가 음수면 NVMe SQ slot 누수 경고 */
+		WARN_ON(rq->tag < 0); /* [한국어] 스케줄러 모드에서 드라이버 태그가 음수면 태그 회계가 깨진 것 */
 		blk_mq_put_driver_tag(rq); /* [한국어] NVMe hardware tag(SQ 슬롯) 반납: 완료된 Write의 CID를 sbitmap에 반환 */
 	}
 
@@ -648,7 +710,7 @@ bool blk_insert_flush(struct request *rq)
 {
 	struct request_queue *q = rq->q; /* [한국어] 요청이 속한 request_queue: q->limits에서 NVMe VWC/FUA 지원 여부 확인 */
 	struct blk_flush_queue *fq = blk_get_flush_queue(rq->mq_ctx); /* [한국어] 요청이 매핑된 hctx의 flush 상태머신 */
-	bool supports_fua = q->limits.features & BLK_FEAT_FUA; /* [한국어] NVMe 컨트롤러 FUA 지원 여부: BLK_FEAT_FUA는 nvme_id_ctrl.vwc 기반으로 설정 */
+	bool supports_fua = q->limits.features & BLK_FEAT_FUA; /* [한국어] 장치가 FUA 를 지원하는가. NVMe 는 이 비트를 BLK_FEAT_WRITE_CACHE 와 함께 VWC 로부터 설정하므로 둘이 항상 같이 켜진다 */
 	unsigned int policy = 0; /* [한국어] 실행해야 할 시퀀스 단계 마스크: REQ_FSEQ_* 조합으로 결정 */
 
 	/* FLUSH/FUA request must never be merged */
@@ -683,35 +745,56 @@ bool blk_insert_flush(struct request *rq)
 	 */
 	rq->cmd_flags |= REQ_SYNC; /* [한국어] REQ_PREFLUSH/FUA 제거 보정: sync 요청으로 표시해 scheduler/stat 계산에서 누락 방지 */
 
+	/* [한국어] 여기서 policy 네 갈래가 이 파일의 전부다. 각 갈래의 반환값이
+	 * 서로 다른 의미를 갖는다는 점에 주의:
+	 *   true  = "이 요청은 내가 삼켰다. 호출자는 잊어라."
+	 *   false = "나는 손대지 않았다. 평소대로 디스패치하라."
+	 * 상태 기계에 들어가는 것은 true 를 돌려주는 두 갈래뿐이다. */
 	switch (policy) {
-	case 0:
+	case 0:					/* [한국어] 할 일 없음 — 데이터도 없고 캐시도 없다 */
 		/*
 		 * An empty flush handed down from a stacking driver may
 		 * translate into nothing if the underlying device does not
 		 * advertise a write-back cache.  In this case, simply
 		 * complete the request.
 		 */
-		blk_mq_end_request(rq, 0); /* [한국어] NVMe VWC 없음: Flush 불필요, 상위에 즉시 완료 보고 */
-		return true; /* [한국어] flush 상태머신이 요청을 소비함: caller는 추가 dispatch 없음 */
-	case REQ_FSEQ_DATA:
+		blk_mq_end_request(rq, 0); /* [한국어] 장치에 명령을 하나도 보내지 않고 성공으로 끝낸다.
+					 * NVMe 에서 이 경로에 들어오는 대표적인 경우가 VWC 를 광고하지 않는
+					 * 엔터프라이즈 SSD(전력 손실 보호 내장)다 — 캐시가 휘발성이 아니니
+					 * 배출할 것이 없고, Flush 는 정의상 이미 만족되어 있다.
+					 * fsync 비용이 장치에 따라 극단적으로 갈리는 지점이 바로 여기다. */
+		return true; /* [한국어] 요청을 소비했다 — 호출자는 추가 디스패치를 하지 않는다 */
+	case REQ_FSEQ_DATA:			/* [한국어] 데이터는 있는데 앞뒤로 Flush 가 필요 없다 */
 		/*
 		 * If there's data, but no flush is necessary, the request can
 		 * be processed directly without going through flush machinery.
 		 * Queue for normal execution.
 		 */
-		return false; /* [한국어] 데이터만 있고 flush 불필요: 일반 NVMe Write/FUA Write 경로로 dispatch */
-	case REQ_FSEQ_DATA | REQ_FSEQ_POSTFLUSH:
+		return false; /* [한국어] 상태 기계를 아예 거치지 않고 평범한 쓰기로 내보낸다.
+			   * REQ_FUA 가 남아 있다면 드라이버가 그것을 그대로 쓰기 명령에 실어 보낸다
+			   * (NVMe: nvme_setup_rw 의 control |= NVME_RW_FUA). 명령 하나로 끝나는
+			   * 가장 빠른 길이며, FUA 를 지원하는 장치에서 이 경로가 중요한 이유다. */
+	case REQ_FSEQ_DATA | REQ_FSEQ_POSTFLUSH:	/* [한국어] 쓰고 나서 Flush 로 마무리해야 하는 경우 (FUA 미지원 장치) */
 		/*
 		 * Initialize the flush fields and completion handler to trigger
 		 * the post flush, and then just pass the command on.
 		 */
 		blk_rq_init_flush(rq); /* [한국어] flush 시퀀스 등록: DATA 완료 후 mq_flush_data_end_io → POSTFLUSH */
-		rq->flush.seq |= REQ_FSEQ_PREFLUSH; /* [한국어] PREFLUSH 단계가 없는 경우 완료 마킹: blk_flush_cur_seq가 DATA를 첫 단계로 반환하도록 */
+		rq->flush.seq |= REQ_FSEQ_PREFLUSH; /* [한국어] 하지도 않을 PREFLUSH 를 "이미 끝난 것"으로 표시해 둔다.
+					 * blk_flush_cur_seq() 가 seq 에서 가장 낮은 미완료 비트를 다음 단계로 고르기
+					 * 때문에, 건너뛸 단계는 미리 완료로 칠해 두어야 DATA 부터 시작한다.
+					 * 아래 default 갈래가 ~policy 를 통째로 넘기는 것도 같은 기법이다.
+					 * 원래 주석: blk_flush_cur_seq가 DATA를 첫 단계로 반환하도록 */
 		spin_lock_irq(&fq->mq_flush_lock);
-		fq->flush_data_in_flight++; /* [한국어] NVMe Write 발행 전 in-flight 선증가: C2 조건(POSTFLUSH 지연)이 즉시 적용되도록 */
+		fq->flush_data_in_flight++; /* [한국어] 쓰기를 내보내기 **전에** 미리 센다. 순서가 중요하다 —
+					 * 내보낸 뒤에 세면 그 사이에 blk_kick_flush() 가 C2 를 통과해
+					 * 이 쓰기를 포함하지 않은 Flush 를 쏴 버릴 수 있다.
+					 * 원래 주석: C2 조건(POSTFLUSH 지연)이 즉시 적용되도록 */
 		spin_unlock_irq(&fq->mq_flush_lock);
-		return false; /* [한국어] NVMe Write를 일반 경로로 dispatch: 완료 후 mq_flush_data_end_io에서 POSTFLUSH 전이 */
-	default:
+		return false; /* [한국어] 쓰기 자체는 평범한 경로로 내보낸다. 다만 위에서 end_io 를
+			   * mq_flush_data_end_io 로 바꿔 두었으므로, 완료가 돌아오는 순간
+			   * 상태 기계가 이어받아 POSTFLUSH 로 넘어간다. */
+	default:				/* [한국어] PREFLUSH 가 필요한 모든 조합 — 상태 기계를 처음부터 태운다 */
 		/*
 		 * Mark the request as part of a flush sequence and submit it
 		 * for further processing to the flush state machine.
@@ -719,7 +802,9 @@ bool blk_insert_flush(struct request *rq)
 		blk_rq_init_flush(rq); /* [한국어] flush 시퀀스 등록: PREFLUSH → DATA → POSTFLUSH 전체 경로 */
 		spin_lock_irq(&fq->mq_flush_lock);
 		/* [한국어] 실행하지 않는 단계(~policy)를 이미 완료한 것처럼 마킹 후 현재 첫 단계로 전이 */
-		blk_flush_complete_seq(rq, fq, REQ_FSEQ_ACTIONS & ~policy, 0);
+		blk_flush_complete_seq(rq, fq, REQ_FSEQ_ACTIONS & ~policy, 0);	/* [한국어] "policy 에 없는 단계는 전부 이미 끝난 것으로 쳐라"를
+									 * 한 번의 호출로 표현한 것이다. 그러면 함수 내부의 다음 단계 계산이
+									 * 자동으로 policy 의 첫 단계를 가리키게 되어, 진입점을 따로 분기할 필요가 없다. */
 		spin_unlock_irq(&fq->mq_flush_lock);
 		return true; /* [한국어] flush 상태머신이 요청을 소비함: PREFLUSH부터 시작 */
 	}
@@ -730,12 +815,12 @@ bool blk_insert_flush(struct request *rq)
  * blkdev_issue_flush - 상위 계층/사용자공간의 명시적 flush 요청 처리
  *
  * @bdev: flush를 발행할 블록 디바이스
- * @return: 0이면 성공, 음수이면 에러 (NVMe CQ 에러 코드 변환)
+ * @return: 0이면 성공, 음수이면 에러
  *
  * fsync, fdatasync, sync 등 상위 계층에서 명시적 flush가 필요할 때 호출된다.
  * 내부적으로 REQ_OP_WRITE | REQ_PREFLUSH bio를 생성해 submit_bio_wait로
- * 동기 대기한다. blk_insert_flush에서 이 bio가 NVMe Flush 명령으로 변환되어
- * NVMe CQ 완료까지 caller가 블록된다.
+ * 동기 대기한다. blk_insert_flush 가 이 bio 를 상태 기계에 태우고, 최종적으로 드라이버가 Flush 명령으로 만든다. NVMe 라면 opcode 0x00. 이어서
+ * 완료까지 호출자가 블록된다.
  *
  * 호출 체인:
  *   fsync/sync → [blkdev_issue_flush]
@@ -759,7 +844,7 @@ EXPORT_SYMBOL(blkdev_issue_flush);
  * @flags: kzalloc_node에 전달할 GFP 플래그
  * @return: 초기화된 blk_flush_queue 포인터, 실패 시 NULL
  *
- * 각 NVMe SQ/CQ 쌍(hctx)마다 독립적인 flush 상태머신이 필요하므로
+ * 각 하드웨어 큐(hctx)마다 독립적인 flush 상태머신이 필요하므로
  * per-hctx로 할당된다. flush_rq는 NVMe Flush 명령용으로 재활용되는
  * request로, cmd_size만큼의 드라이버 사설 공간을 포함한다.
  * flush_queue[0/1]은 더블 버퍼링 PRE/POSTFLUSH 대기열이다.
@@ -777,7 +862,7 @@ struct blk_flush_queue *blk_alloc_flush_queue(int node, int cmd_size,
 	if (!fq)
 		goto fail; /* [한국어] 메모리 부족: fq 할당 실패 */
 
-	spin_lock_init(&fq->mq_flush_lock); /* [한국어] per-hctx flush lock 초기화: NVMe CQ 완료/timeout/blk_insert_flush 간 직렬화 */
+	spin_lock_init(&fq->mq_flush_lock); /* [한국어] per-hctx flush lock 초기화: 완료/타임아웃/제출 세 경로 간 직렬화 */
 
 	rq_sz = round_up(rq_sz + cmd_size, cache_line_size()); /* [한국어] request + driver cmd_size를 캐시 라인 단위로 정렬: false sharing 방지 */
 	fq->flush_rq = kzalloc_node(rq_sz, flags, node); /* [한국어] NVMe Flush 명령 재활용 request 할당: blk_kick_flush가 이 rq를 반복 사용 */
@@ -864,7 +949,7 @@ EXPORT_SYMBOL_GPL(blk_mq_hctx_set_fq_lock_class);
  * - 이 파일은 REQ_PREFLUSH/REQ_FUA를 NVMe Flush 명령(Opcode 0x00)과
  *   NVMe Write(FUA) 명령으로 분해/시퀀싱하는 블록 계층의 핵심 변환기이다.
  *
- * - struct blk_flush_queue는 per-hctx(NVMe SQ/CQ 쌍 단위)로 존재하며,
+ * - struct blk_flush_queue는 per-hctx 로 존재하며 (NVMe PCIe 라면 SQ/CQ 쌍 단위),
  *   flush_pending_idx/running_idx 더블 버퍼링을 통해 동시에 하나의
  *   NVMe Flush 명령만 in-flight되도록 보장한다.
  *
