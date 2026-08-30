@@ -203,7 +203,18 @@ int ioprio_check_cap(int ioprio)
 	int level = IOPRIO_PRIO_LEVEL(ioprio);	/* [한국어] ioprio 값의 하위 3비트(IOPRIO_LEVEL_NR_BITS=3)에서 클래스 내부 우선순위 레벨(0~7)을 추출 - 값이 작을수록 우선순위가 높다 */
 
 	switch (class) {	/* [한국어] 추출한 클래스 값에 따라 필요한 권한/유효성 검사가 서로 다르므로 분기 */
-		/* [한국어] RT(Real Time) 클래스 요청 - BFQ/mq-deadline 스케줄러에서 가장 높은 서비스 등급이며 다른 프로세스의 I/O를 상시 선점할 수 있으므로, 아무나 자칭할 수 없도록 별도 capability 검사가 필요하다. NVMe 컨트롤러가 WRR(Weighted Round Robin) Arbitration을 지원한다면 궁극적으로 Urgent/High 큐 힌트로 이어질 가능성이 있다(추정) */
+		/* [한국어] RT(Real Time) 클래스 요청 — BFQ/mq-deadline 스케줄러에서 가장 높은
+		 * 서비스 등급이며 다른 프로세스의 I/O 를 상시 선점할 수 있으므로, 아무나
+		 * 자칭할 수 없도록 별도 capability 검사가 필요하다.
+		 *
+		 * 이 우선순위가 장치까지 전달되지는 않는다는 점을 분명히 해 둔다.
+		 * NVMe 스펙에는 WRR(Weighted Round Robin) Arbitration 이 있지만 리눅스
+		 * 드라이버는 그것을 쓰지 않는다 — nvme_enable_ctrl() 이 CC 레지스터에
+		 *     ctrl->ctrl_config |= NVME_CC_AMS_RR | NVME_CC_SHN_NONE;
+		 * 로 **단순 라운드로빈(AMS=RR)** 을 고정 설정한다(core.c:2630).
+		 * 게다가 drivers/nvme/ 전체에 rq->ioprio 나 IOPRIO_* 를 읽는 코드가 없다.
+		 * 따라서 ioprio 는 블록 계층의 I/O 스케줄러 단계까지만 영향을 주고,
+		 * 명령이 컨트롤러에 도달한 뒤에는 아무 차이도 만들지 않는다. */
 		case IOPRIO_CLASS_RT:
 			/*
 			 * Originally this only checked for CAP_SYS_ADMIN,

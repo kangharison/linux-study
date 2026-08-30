@@ -1695,7 +1695,8 @@ long blkdev_ioctl(struct file *file, unsigned cmd, unsigned long arg)
 
 	if (!bdev->bd_disk->fops->ioctl) /* [한국어] 여기까지 왔다는 것은 이 파일이 이 cmd를 전혀 모른다는 뜻 - 드라이버가 자체 ioctl 콜백을 등록했는지 확인 */
 		return -ENOTTY; /* [한국어] 드라이버도 처리할 수 없음 - Inappropriate ioctl for device */
-	return bdev->bd_disk->fops->ioctl(bdev, mode, cmd, arg); /* [한국어] 드라이버의 fops->ioctl 콜백으로 최종 위임. NVMe 는 여기서 NVME_IOCTL_* 계열(패스스루 등)을 처리한다. 원래 주석: vendor/passthrough ioctl 등이 여기서 처리됨(추정) */
+	return bdev->bd_disk->fops->ioctl(bdev, mode, cmd, arg); /* [한국어] 드라이버의 fops->ioctl 콜백으로 최종 위임. NVMe 는 여기서 NVME_IOCTL_* 계열(패스스루 등)을 처리한다. 구체적으로는 NVME_IOCTL_ADMIN_CMD, NVME_IOCTL_IO_CMD, NVME_IOCTL_SUBMIT_IO 와
+						 * io_uring 패스스루(NVME_URING_CMD_*)가 여기로 들어온다 */
 }
 
 #ifdef CONFIG_COMPAT
