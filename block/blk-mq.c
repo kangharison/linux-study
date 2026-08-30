@@ -10109,9 +10109,11 @@ out_unwind:
 	while (--i >= 0)
 		__blk_mq_free_map_and_rqs(set, i);
 
+	/* [한국어] 공유 pool 도 이 함수가 만들었으므로 함께 되돌린다.
+	 * 위 루프는 큐별 pool 만 지우므로 별도 필드인 이쪽은 따로 정리해야 한다. */
 	if (blk_mq_is_shared_tags(set->flags)) {
 		blk_mq_free_map_and_rqs(set, set->shared_tags,
-					BLK_MQ_NO_HCTX_IDX);
+					BLK_MQ_NO_HCTX_IDX);	/* [한국어] 특정 hctx 에 속하지 않는다는 뜻의 표식 인덱스 */
 	}
 
 	return -ENOMEM;
@@ -10542,7 +10544,8 @@ out_free_mq_map:
 		set->map[i].mq_map = NULL;
 	}
 	kfree(set->tags);
-	set->tags = NULL;
+	set->tags = NULL;	/* [한국어] 해제 후 NULL 로 비운다. 이 라벨은 초기화 실패 경로라
+				 * 호출자가 이어서 정리 함수를 부를 수 있고, 남은 포인터는 이중 해제가 된다 */
 out_cleanup_tags_srcu:
 	cleanup_srcu_struct(&set->tags_srcu);
 out_cleanup_srcu:

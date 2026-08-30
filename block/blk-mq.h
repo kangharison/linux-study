@@ -1221,8 +1221,10 @@ static inline struct sbq_wait_state *bt_wait_ptr(struct sbitmap_queue *bt,
 						 struct blk_mq_hw_ctx *hctx)
 {
 	if (!hctx)
-		return &bt->ws[0];
-	return sbq_wait_ptr(bt, &hctx->wait_index);
+		return &bt->ws[0];	/* [한국어] hctx 가 없는 호출자(예약 태그 경로 등)는 분산할 근거가 없으므로 0번 대기열을 쓴다 */
+	return sbq_wait_ptr(bt, &hctx->wait_index);	/* [한국어] hctx 마다 wait_index 를 따로 두고 그것을 돌려 가며
+						 * 서로 다른 대기열을 고른다. 모두가 한 대기열에 몰리면 태그 하나가
+						 * 반납될 때마다 그 줄 전체가 깨어나 thundering herd 가 된다. */
 }
 
 /*
@@ -1366,8 +1368,10 @@ static inline bool blk_mq_is_shared_tags(unsigned int flags)
 static inline struct blk_mq_tags *blk_mq_tags_from_data(struct blk_mq_alloc_data *data)
 {
 	if (data->rq_flags & RQF_SCHED_TAGS)
-		return data->hctx->sched_tags;
-	return data->hctx->tags;
+		return data->hctx->sched_tags;	/* [한국어] 스케줄러가 붙어 있으면 먼저 잡는 것은 스케줄러 태그다.
+					 * 드라이버 태그는 실제로 장치로 내려보내기 직전에 따로 얻는다 */
+	return data->hctx->tags;	/* [한국어] 스케줄러가 없으면 처음부터 드라이버 태그를 잡는다.
+				 * 이 태그가 곧 NVMe CID 의 하위 12비트가 된다 */
 }
 
 /*
@@ -1626,7 +1630,9 @@ static inline void __blk_mq_sub_active_requests(struct blk_mq_hw_ctx *hctx,
 	if (blk_mq_is_shared_tags(hctx->flags))
 		atomic_sub(val, &hctx->queue->nr_active_requests_shared_tags);
 	else
-		atomic_sub(val, &hctx->nr_active);
+		atomic_sub(val, &hctx->nr_active);	/* [한국어] 비공유 구성에서는 hctx 자기 카운터를 줄인다.
+						 * 공유 구성(위 분기)은 큐 단위 카운터를 쓰는데, 그래야 같은 tag set 을
+						 * 공유하는 큐들의 사용량을 한데 모아 공정 분배를 판정할 수 있다 */
 }
 
 /*
@@ -1681,7 +1687,9 @@ static inline void blk_mq_sub_active_requests(struct blk_mq_hw_ctx *hctx,
 					      int val)
 {
 	if (hctx->flags & BLK_MQ_F_TAG_QUEUE_SHARED)
-		__blk_mq_sub_active_requests(hctx, val);
+		__blk_mq_sub_active_requests(hctx, val);	/* [한국어] 공유 구성일 때만 센다.
+					 * 비공유면 이 큐가 태그 풀을 독점하므로 사용량을 추적할 이유가 없고,
+					 * 원자적 연산 비용만 든다 — 핫패스에서 그 비용을 아끼려는 조건이다 */
 }
 
 /*
@@ -1713,8 +1721,10 @@ static inline void blk_mq_dec_active_requests(struct blk_mq_hw_ctx *hctx)
 static inline int __blk_mq_active_requests(struct blk_mq_hw_ctx *hctx)
 {
 	if (blk_mq_is_shared_tags(hctx->flags))
-		return atomic_read(&hctx->queue->nr_active_requests_shared_tags);
-	return atomic_read(&hctx->nr_active);
+		return atomic_read(&hctx->queue->nr_active_requests_shared_tags);	/* [한국어] 공유 구성: 큐 전체의 사용량 */
+	return atomic_read(&hctx->nr_active);	/* [한국어] 비공유 구성: 이 hctx 의 사용량.
+					 * 두 경우가 서로 다른 카운터를 읽으므로, 값을 비교할 때는
+					 * 같은 구성 안에서만 의미가 있다 */
 }
 
 /*
@@ -1774,7 +1784,9 @@ static inline void blk_mq_put_driver_tag(struct request *rq)
 	if (rq->tag == BLK_MQ_NO_TAG || rq->internal_tag == BLK_MQ_NO_TAG)
 		return;
 
-	__blk_mq_put_driver_tag(rq->mq_hctx, rq);
+	__blk_mq_put_driver_tag(rq->mq_hctx, rq);	/* [한국어] rq->mq_hctx 에서 hctx 를 꺼내 실제 반납으로 넘긴다.
+					 * 이 래퍼가 존재하는 이유: 호출자 대부분이 hctx 를 따로 들고 있지 않고,
+					 * request 에 이미 붙어 있는 것을 쓰면 되기 때문이다 */
 }
 
 /*

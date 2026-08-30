@@ -730,7 +730,10 @@ static int calculate_percentile(struct kyber_queue_data *kqd,
 			    kyber_latency_type_names[type], percentile,
 			    bucket + 1, 1 << KYBER_LATENCY_SHIFT, samples);
 
-	return bucket;
+	return bucket;	/* [한국어] 목표 백분위수가 속한 버킷의 인덱스.
+			 * 호출자는 이 값을 기준 버킷과 비교해 도메인 깊이를 올릴지 내릴지 정한다.
+			 * 값 자체가 지연(ns)이 아니라 로그 스케일 버킷 번호라는 점에 주의 —
+			 * 버킷 하나가 2배 구간을 덮으므로 인덱스 1 차이가 곧 지연 2배 차이다. */
 }
 
 /*

@@ -4714,7 +4714,10 @@ static inline struct blkcg_gq *blkg_tryget_closest(struct bio *bio,
 	}
 	rcu_read_unlock();
 
-	return ret_blkg;
+	return ret_blkg;	/* [한국어] 요청한 그 blkg 이거나, 참조를 잡지 못해 거슬러 올라간 조상 blkg 다.
+				 * 결코 NULL 이 아니다 — 최악의 경우 루트 blkg 가 반환되므로,
+				 * 호출자는 NULL 검사 없이 곧장 이 포인터로 회계를 이어 갈 수 있다.
+				 * 정확도를 조금 희생하고 IO 경로에 분기 하나를 없앤 절충이다. */
 }
 
 /**

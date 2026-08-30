@@ -1424,6 +1424,9 @@ struct bio *bio_split_to_limits(struct bio *bio)
 	unsigned int nr_segs;
 
 	return __bio_split_to_limits(bio, bdev_limits(bio->bi_bdev), &nr_segs);
+	/* [한국어] 공개 API 판은 세그먼트 수를 돌려받지 않고 버린다(지역 변수 nr_segs).
+	 * 스택형 드라이버(dm/md)는 그 값을 쓸 데가 없고, 필요한 blk-mq 내부 경로는
+	 * __bio_split_to_limits() 를 직접 부르기 때문이다. */
 }
 EXPORT_SYMBOL(bio_split_to_limits);
 

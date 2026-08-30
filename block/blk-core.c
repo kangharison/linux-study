@@ -985,10 +985,15 @@ bool should_fail_request(struct block_device *part, unsigned int bytes)
  */
 static int __init fail_make_request_debugfs(void)
 {
+	/* [한국어] fault injection 용 debugfs 노드를 만든다.
+	 * /sys/kernel/debug/fail_make_request/ 아래에 확률·횟수 등을 조절하는 파일이 생기고,
+	 * 여기에 값을 넣으면 should_fail_bio() 가 일부러 bio 를 실패시킨다 —
+	 * 상위 계층의 에러 처리 경로를 실제 장치 고장 없이 시험하기 위한 장치다. */
 	struct dentry *dir = fault_create_debugfs_attr("fail_make_request",
 						NULL, &fail_make_request);
 
-	return PTR_ERR_OR_ZERO(dir);
+	return PTR_ERR_OR_ZERO(dir);	/* [한국어] debugfs 생성 실패는 치명적이지 않다(디버그 기능일 뿐이다).
+					 * 그래도 오류를 삼키지 않고 그대로 전파해, 커널이 초기화 실패를 기록하게 둔다. */
 }
 
 late_initcall(fail_make_request_debugfs);
