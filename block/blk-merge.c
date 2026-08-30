@@ -1389,8 +1389,12 @@ struct bio *bio_split_write_zeroes(struct bio *bio,
 	if (!max_sectors)
 		return bio;
 	if (bio_sectors(bio) <= max_sectors)
-		return bio;
-	return bio_submit_split(bio, max_sectors);
+		return bio;	/* [한국어] 한도 안이면 쪼갤 것이 없다 — 원본을 그대로 돌려준다.
+				 * 이 함수의 반환 규약은 "제출할 bio"이지 "잘라낸 조각"이 아니다 */
+	return bio_submit_split(bio, max_sectors);	/* [한국어] 넘으면 앞부분만 잘라 반환하고, 남은 뒷부분은
+					 * bio_submit_split() 이 현재 태스크의 bio_list 에 되돌려 놓아
+					 * submit_bio_noacct 루프가 다음 회차에 다시 처리한다.
+					 * 재귀가 아니라 반복으로 처리하는 이유는 스택 깊이를 제한하기 위해서다 */
 }
 
 /*
@@ -1997,14 +2001,21 @@ static inline void blk_update_mixed_merge(struct request *req,
 		struct bio *bio, bool front_merge)
 {
 	if (req->rq_flags & RQF_MIXED_MERGE) {
+		/* [한국어] read-ahead 는 "있으면 좋고 없으면 그만"인 투기적 읽기다.
+		 * 실패했을 때 재시도로 시간을 쓰는 것은 손해이므로, 병합되는 시점에
+		 * failfast 세 비트를 모두 세워 즉시 실패하도록 만든다.
+		 * 어차피 그 데이터가 정말 필요해지면 그때 일반 읽기로 다시 요청된다. */
 		if (bio->bi_opf & REQ_RAHEAD)
 			bio->bi_opf |= REQ_FAILFAST_MASK;
 
 		/* front merge인 경우 req의 failfast 플래그를 새 bio의 값으로
 		 * 갱신. 이 값은 이후 NVMe abort/retry 경로에서 사용된다. */
 		if (front_merge) {
-			req->cmd_flags &= ~REQ_FAILFAST_MASK;
-			req->cmd_flags |= bio->bi_opf & REQ_FAILFAST_MASK;
+			req->cmd_flags &= ~REQ_FAILFAST_MASK;	/* [한국어] 기존 값을 먼저 지운다 */
+			req->cmd_flags |= bio->bi_opf & REQ_FAILFAST_MASK;	/* [한국어] 새 bio 의 값으로 교체.
+						 * front merge 는 이 bio 가 request 의 새로운 선두가 된다는 뜻이라,
+						 * request 의 대표 플래그도 그것을 따라야 한다.
+						 * (back merge 에는 이 처리가 없다 — 선두가 바뀌지 않기 때문이다.) */
 		}
 	}
 }
@@ -3027,9 +3038,12 @@ bool blk_attempt_plug_merge(struct request_queue *q, struct bio *bio,
 	 * 단계의 request는 아직 elevator에 삽입되지 않았고, 큐 락 밖에서는 elevator에
 	 * 안전하게 접근할 수 없으므로 스케줄러에게 물을 수 없다. */
 	rq = plug->mq_list.tail;
-	if (rq->q == q)
+	if (rq->q == q)		/* [한국어] 같은 큐의 요청일 때만 병합을 시도한다.
+				 * plug 는 여러 장치의 요청을 한 리스트에 섞어 담을 수 있어 이 확인이 필요하다 */
 		return blk_attempt_bio_merge(q, rq, bio, nr_segs, false) ==
-			BIO_MERGE_OK;
+			BIO_MERGE_OK;	/* [한국어] BIO_MERGE_OK 만 성공으로 친다.
+					 * BIO_MERGE_FAILED/NONE 은 둘 다 "이 bio 는 아직 살아 있다"는 뜻이라
+					 * 호출자가 정상 제출 경로로 이어 가야 한다 */
 	/* [한국어] tail이 다른 큐의 request이고, 이 plug에 여러 큐가 섞여 있지도
 	 * 않다면(multiple_queues == false) 리스트 전체가 다른 큐 것이므로 즉시 포기.
 	 * 이 플래그가 순회 비용을 아끼는 빠른 판별자 역할을 한다. */
