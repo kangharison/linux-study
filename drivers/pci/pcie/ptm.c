@@ -49,7 +49,7 @@
  * If the next upstream device supports PTM, return it; otherwise return
  * NULL.  PTM Messages are local, so both link partners must support it.
  */
-static struct pci_dev *pci_upstream_ptm(struct pci_dev *dev)
+static struct pci_dev *pci_upstream_ptm(struct pci_dev *dev) /* NVMe: NVMe 장치의 상위 PTM 지원 장치를 찾는다. */
 {
 	struct pci_dev *ups = pci_upstream_bridge(dev); /* NVMe: NVMe 장치의 직속 상위 PCIe bridge(Root Port 또는 Switch Downstream)를 가져온다. */
 
@@ -79,7 +79,7 @@ static struct pci_dev *pci_upstream_ptm(struct pci_dev *dev)
  * Find the PTM Capability (if present) and extract the information we need
  * to use it.
  */
-void pci_ptm_init(struct pci_dev *dev)
+void pci_ptm_init(struct pci_dev *dev) /* NVMe: NVMe 장치의 PTM capability를 초기화한다. */
 {
 	u16 ptm; /* NVMe: PTM 확장 capability 레지스터의 오프셋을 저장할 변수. */
 	u32 cap; /* NVMe: PTM Capability 레지스터(DWORD) 값을 읽을 변수. */
@@ -134,7 +134,7 @@ void pci_ptm_init(struct pci_dev *dev)
  *   시스템 suspend 전에 NVMe 장치의 PTM Control 레지스터 값을 저장한다.
  *   resume 후 pci_restore_ptm_state()로 복원할 때 사용된다.
  */
-void pci_save_ptm_state(struct pci_dev *dev)
+void pci_save_ptm_state(struct pci_dev *dev) /* NVMe: NVMe 장치의 PTM 상태를 suspend 전에 저장한다. */
 {
 	u16 ptm = dev->ptm_cap; /* NVMe: NVMe 장치에 기록된 PTM capability 오프셋을 가져온다. */
 	struct pci_cap_saved_state *save_state; /* NVMe: 저장 상태 구조체 포인터. */
@@ -156,7 +156,7 @@ void pci_save_ptm_state(struct pci_dev *dev)
  *   시스템 resume 시 저장했던 PTM Control 레지스터 값을 NVMe 장치에
  *   복원하여 PTM 동작을 suspend 이전 상태로 되돌린다.
  */
-void pci_restore_ptm_state(struct pci_dev *dev)
+void pci_restore_ptm_state(struct pci_dev *dev) /* NVMe: NVMe 장치의 PTM 상태를 resume 시 복원한다. */
 {
 	u16 ptm = dev->ptm_cap; /* NVMe: NVMe 장치의 PTM capability 오프셋. */
 	struct pci_cap_saved_state *save_state; /* NVMe: 저장된 capability 상태 포인터. */
@@ -180,7 +180,7 @@ void pci_restore_ptm_state(struct pci_dev *dev)
  *   pci_enable_ptm()에서 담당한다.
  */
 /* Enable PTM in the Control register if possible */
-static int __pci_enable_ptm(struct pci_dev *dev)
+static int __pci_enable_ptm(struct pci_dev *dev) /* NVMe: NVMe 장치의 PTM Control 레지스터를 실제로 설정한다. */
 {
 	u16 ptm = dev->ptm_cap; /* NVMe: NVMe 장치의 PTM capability 오프셋. */
 	u32 ctrl; /* NVMe: PTM Control 레지스터 값을 조작할 변수. */
@@ -233,7 +233,7 @@ static int __pci_enable_ptm(struct pci_dev *dev)
  * Return: zero if successful, or -EINVAL if @dev lacks a PTM Capability or
  * is not a PTM Root and lacks an upstream path of PTM-enabled devices.
  */
-int pci_enable_ptm(struct pci_dev *dev)
+int pci_enable_ptm(struct pci_dev *dev) /* NVMe: NVMe 장치에서 PTM을 활성화하고 상위 경로도 enable한다. */
 {
 	int rc; /* NVMe: 하위/자신 enable 결과를 저장할 변수. */
 	char clock_desc[8]; /* NVMe: granularity를 사람이 읽을 문자열로 변환할 버퍼. */
@@ -292,7 +292,7 @@ EXPORT_SYMBOL(pci_enable_ptm); /* NVMe: pci_enable_ptm를 외부 모듈(NVMe 드
  *   PTM Control 레지스터의 Enable/Root 비트를 클리어하여 NVMe 장치의 PTM을
  *   비활성화한다. 참조 카운트는 호출자가 관리한다.
  */
-static void __pci_disable_ptm(struct pci_dev *dev)
+static void __pci_disable_ptm(struct pci_dev *dev) /* NVMe: NVMe 장치의 PTM Control 레지스터를 끈다. */
 {
 	u16 ptm = dev->ptm_cap; /* NVMe: NVMe 장치의 PTM capability 오프셋. */
 	u32 ctrl; /* NVMe: PTM Control 레지스터 값. */
@@ -317,7 +317,7 @@ static void __pci_disable_ptm(struct pci_dev *dev)
  *
  * Disable Precision Time Measurement for @dev.
  */
-void pci_disable_ptm(struct pci_dev *dev)
+void pci_disable_ptm(struct pci_dev *dev) /* NVMe: NVMe 장치의 PTM을 비활성화하고 상위 장치로 전파한다. */
 {
 	struct pci_dev *parent; /* NVMe: 상위 PTM 장치 포인터. */
 
@@ -339,7 +339,7 @@ EXPORT_SYMBOL(pci_disable_ptm); /* NVMe: NVMe 드라이버 등에서 pci_disable
  * Disable PTM, but preserve dev->ptm_enable_cnt so we silently re-enable it on
  * resume if necessary.
  */
-void pci_suspend_ptm(struct pci_dev *dev)
+void pci_suspend_ptm(struct pci_dev *dev) /* NVMe: NVMe 장치의 PTM을 suspend 시 일시적으로 끈다. */
 {
 	if (atomic_read(&dev->ptm_enable_cnt)) /* NVMe: NVMe 장치가 PTM enable 상태이면 */
 		__pci_disable_ptm(dev); /* NVMe: PTM Control 레지스터를 끄되 카운트는 유지한다. */
@@ -350,7 +350,7 @@ void pci_suspend_ptm(struct pci_dev *dev)
  *   시스템 resume 경로에서 NVMe 장치의 PTM을 다시 활성화한다.
  */
 /* If PTM was enabled before suspend, re-enable it when resuming */
-void pci_resume_ptm(struct pci_dev *dev)
+void pci_resume_ptm(struct pci_dev *dev) /* NVMe: NVMe 장치의 PTM을 resume 시 다시 켠다. */
 {
 	if (atomic_read(&dev->ptm_enable_cnt)) /* NVMe: suspend 전에 PTM이 enable되어 있었으면 */
 		__pci_enable_ptm(dev); /* NVMe: PTM Control 레지스터를 다시 설정한다. */
@@ -360,7 +360,7 @@ void pci_resume_ptm(struct pci_dev *dev)
  * pcie_ptm_enabled:
  *   NVMe 장치(또는 상위 장치)에서 PTM이 현재 enable되어 있는지 확인한다.
  */
-bool pcie_ptm_enabled(struct pci_dev *dev)
+bool pcie_ptm_enabled(struct pci_dev *dev) /* NVMe: NVMe 장치에서 PTM enable 여부를 반환한다. */
 {
 	if (!dev) /* NVMe: 장치 포인터가 NULL이면 */
 		return false; /* NVMe: PTM 활성화 여부는 false로 처리한다. */
@@ -377,8 +377,8 @@ EXPORT_SYMBOL(pcie_ptm_enabled); /* NVMe: 외부에서 PTM 활성화 여부를 �
  *   모드를 "auto" 또는 "manual"로 설정한다. NVMe 입장에서는 PTM 동작에 대한
  *   디버깅/테스트 인터페이스로 볼 수 있다.
  */
-static ssize_t context_update_write(struct file *file, const char __user *ubuf,
-				     size_t count, loff_t *ppos)
+static ssize_t context_update_write(struct file *file, const char __user *ubuf, /* NVMe: debugfs 쓰기 콜백 함수 선언. */
+				     size_t count, loff_t *ppos) /* NVMe: 사용자 버퍼/오프셋 인자. */
 {
 	struct pci_ptm_debugfs *ptm_debugfs = file->private_data; /* NVMe: debugfs 파일에 등록된 PTM debugfs 구조체를 가져온다. */
 	char buf[7]; /* NVMe: 사용자 공간에서 복사해 올 짧은 버퍼("auto\0", "manual\0" 등). */
@@ -418,8 +418,8 @@ static ssize_t context_update_write(struct file *file, const char __user *ubuf,
  *   debugfs에서 현재 PTM context update 모드를 읽어 "auto\n" 또는 "manual\n"으로
  *   사용자 공간에 반환한다.
  */
-static ssize_t context_update_read(struct file *file, char __user *ubuf,
-				    size_t count, loff_t *ppos)
+static ssize_t context_update_read(struct file *file, char __user *ubuf, /* NVMe: debugfs 읽기 콜백 함수 선언. */
+				    size_t count, loff_t *ppos) /* NVMe: 사용자 버퍼/오프셋 인자. */
 {
 	struct pci_ptm_debugfs *ptm_debugfs = file->private_data; /* NVMe: debugfs private data에서 PTM debugfs 구조체를 얻는다. */
 	char buf[8]; /* Extra space for NULL termination at the end */ /* NVMe: 모드 문자열을 담을 버퍼("manual\n\0" 등). */
@@ -441,18 +441,18 @@ static ssize_t context_update_read(struct file *file, char __user *ubuf,
 	return simple_read_from_buffer(ubuf, count, ppos, buf, pos); /* NVMe: 사용자 버퍼로 문자열을 복사하고 읽은 바이트 수를 반환한다. */
 }
 
-static const struct file_operations context_update_fops = {
+static const struct file_operations context_update_fops = { /* NVMe: context_update debugfs 파일 연산 구조체. */
 	.open = simple_open, /* NVMe: debugfs 파일 open 시 단순히 private_data를 설정한다. */
 	.read = context_update_read, /* NVMe: 파일 읽기 시 context_update_read를 호출한다. */
 	.write = context_update_write, /* NVMe: 파일 쓰기 시 context_update_write를 호출한다. */
-};
+}; /* NVMe: context_update_fops 정의 종료. */
 
 /*
  * context_valid_get:
  *   debugfs에서 현재 PTM context가 유효한지 여부를 0/1로 읽는다.
  *   NVMe 입장에서는 PTM 동작 상태를 모니터링할 수 있는 디버깅 수단이다.
  */
-static int context_valid_get(void *data, u64 *val)
+static int context_valid_get(void *data, u64 *val) /* NVMe: PTM context valid 상태를 debugfs에서 읽는다. */
 {
 	struct pci_ptm_debugfs *ptm_debugfs = data; /* NVMe: debugfs attribute의 private data를 PTM debugfs 구조체로 변환한다. */
 	bool valid; /* NVMe: context valid 상태를 받을 변수. */
@@ -476,7 +476,7 @@ static int context_valid_get(void *data, u64 *val)
  * context_valid_set:
  *   debugfs를 통해 PTM context valid 상태를 0 또는 1로 설정한다.
  */
-static int context_valid_set(void *data, u64 val)
+static int context_valid_set(void *data, u64 val) /* NVMe: PTM context valid 상태를 debugfs를 통해 설정한다. */
 {
 	struct pci_ptm_debugfs *ptm_debugfs = data; /* NVMe: debugfs attribute의 private data. */
 	int ret; /* NVMe: 콜백 결과를 저장할 변수. */
@@ -491,7 +491,7 @@ static int context_valid_set(void *data, u64 val)
 	return ret; /* NVMe: 콜백 결과를 반환한다. */
 }
 
-DEFINE_DEBUGFS_ATTRIBUTE(context_valid_fops, context_valid_get,
+DEFINE_DEBUGFS_ATTRIBUTE(context_valid_fops, context_valid_get, /* NVMe: context_valid debugfs read/write 함수를 연결한다. */
 			 context_valid_set, "%llu\n"); /* NVMe: context_valid의 debugfs attribute를 등록한다. */
 
 /*
@@ -499,7 +499,7 @@ DEFINE_DEBUGFS_ATTRIBUTE(context_valid_fops, context_valid_get,
  *   debugfs에서 PTM Local Clock 값을 읽어온다. NVMe 장치의 로컬 타임스탬프
  *   디버깅에 활용될 수 있다.
  */
-static int local_clock_get(void *data, u64 *val)
+static int local_clock_get(void *data, u64 *val) /* NVMe: PTM Local Clock 값을 debugfs에서 읽는다. */
 {
 	struct pci_ptm_debugfs *ptm_debugfs = data; /* NVMe: private data를 PTM debugfs 구조체로 변환. */
 	u64 clock; /* NVMe: Local Clock 값을 저장할 변수. */
@@ -523,7 +523,7 @@ DEFINE_DEBUGFS_ATTRIBUTE(local_clock_fops, local_clock_get, NULL, "%llu\n"); /* 
  * master_clock_get:
  *   debugfs에서 PTM Master Clock 값을 읽어온다.
  */
-static int master_clock_get(void *data, u64 *val)
+static int master_clock_get(void *data, u64 *val) /* NVMe: PTM Master Clock 값을 debugfs에서 읽는다. */
 {
 	struct pci_ptm_debugfs *ptm_debugfs = data; /* NVMe: private data. */
 	u64 clock; /* NVMe: Master Clock 값 저장. */
@@ -548,7 +548,7 @@ DEFINE_DEBUGFS_ATTRIBUTE(master_clock_fops, master_clock_get, NULL, "%llu\n"); /
  *   debugfs에서 PTM t1 timestamp를 읽어온다. t1은 PTM 메시지 교환 과정에서
  *   측정되는 타임스탬프 중 하나다.
  */
-static int t1_get(void *data, u64 *val)
+static int t1_get(void *data, u64 *val) /* NVMe: PTM t1 timestamp를 debugfs에서 읽는다. */
 {
 	struct pci_ptm_debugfs *ptm_debugfs = data; /* NVMe: private data. */
 	u64 clock; /* NVMe: t1 timestamp 값 저장. */
@@ -572,7 +572,7 @@ DEFINE_DEBUGFS_ATTRIBUTE(t1_fops, t1_get, NULL, "%llu\n"); /* NVMe: t1 debugfs a
  * t2_get:
  *   debugfs에서 PTM t2 timestamp를 읽어온다.
  */
-static int t2_get(void *data, u64 *val)
+static int t2_get(void *data, u64 *val) /* NVMe: PTM t2 timestamp를 debugfs에서 읽는다. */
 {
 	struct pci_ptm_debugfs *ptm_debugfs = data; /* NVMe: private data. */
 	u64 clock; /* NVMe: t2 timestamp 값 저장. */
@@ -596,7 +596,7 @@ DEFINE_DEBUGFS_ATTRIBUTE(t2_fops, t2_get, NULL, "%llu\n"); /* NVMe: t2 debugfs a
  * t3_get:
  *   debugfs에서 PTM t3 timestamp를 읽어온다.
  */
-static int t3_get(void *data, u64 *val)
+static int t3_get(void *data, u64 *val) /* NVMe: PTM t3 timestamp를 debugfs에서 읽는다. */
 {
 	struct pci_ptm_debugfs *ptm_debugfs = data; /* NVMe: private data. */
 	u64 clock; /* NVMe: t3 timestamp 값 저장. */
@@ -620,7 +620,7 @@ DEFINE_DEBUGFS_ATTRIBUTE(t3_fops, t3_get, NULL, "%llu\n"); /* NVMe: t3 debugfs a
  * t4_get:
  *   debugfs에서 PTM t4 timestamp를 읽어온다.
  */
-static int t4_get(void *data, u64 *val)
+static int t4_get(void *data, u64 *val) /* NVMe: PTM t4 timestamp를 debugfs에서 읽는다. */
 {
 	struct pci_ptm_debugfs *ptm_debugfs = data; /* NVMe: private data. */
 	u64 clock; /* NVMe: t4 timestamp 값 저장. */
@@ -647,7 +647,7 @@ DEFINE_DEBUGFS_ATTRIBUTE(t4_fops, t4_get, NULL, "%llu\n"); /* NVMe: t4 debugfs a
  *   debugfs 항목만 노출한다.
  */
 #define pcie_ptm_create_debugfs_file(pdata, mode, attr)			\
-	do {								\
+	do {									\
 		/* NVMe: visible 콜백이 있고 해당 attribute를 노출해야 할 때만 */	\
 		if (ops->attr##_visible && ops->attr##_visible(pdata))		\
 			/* NVMe: debugfs에 attr 이름의 파일을 생성한다. */		\
@@ -673,8 +673,8 @@ DEFINE_DEBUGFS_ATTRIBUTE(t4_fops, t4_get, NULL, "%llu\n"); /* NVMe: t4 debugfs a
  *
  * Return: Pointer to 'struct pci_ptm_debugfs' if success, NULL otherwise.
  */
-struct pci_ptm_debugfs *pcie_ptm_create_debugfs(struct device *dev, void *pdata,
-			  const struct pcie_ptm_ops *ops)
+struct pci_ptm_debugfs *pcie_ptm_create_debugfs(struct device *dev, void *pdata, /* NVMe: PTM debugfs 생성 함수 선언. */
+			  const struct pcie_ptm_ops *ops) /* NVMe: PTM callback 구조체 인자. */
 {
 	struct pci_ptm_debugfs *ptm_debugfs; /* NVMe: 생성할 PTM debugfs 구조체 포인터. */
 	char *dirname; /* NVMe: debugfs 디렉터리 이름 문자열. */
@@ -728,7 +728,7 @@ EXPORT_SYMBOL_GPL(pcie_ptm_create_debugfs); /* NVMe: 외부 모듈에서 debugfs
  * pcie_ptm_destroy_debugfs() - Destroy debugfs entries for the PTM context
  * @ptm_debugfs: Pointer to the PTM debugfs struct
  */
-void pcie_ptm_destroy_debugfs(struct pci_ptm_debugfs *ptm_debugfs)
+void pcie_ptm_destroy_debugfs(struct pci_ptm_debugfs *ptm_debugfs) /* NVMe: PTM debugfs 항목을 제거한다. */
 {
 	if (!ptm_debugfs) /* NVMe: NULL 포인터이면 */
 		return; /* NVMe: 아무 것도 하지 않는다. */

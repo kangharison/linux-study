@@ -48,17 +48,17 @@
  * ===================================================================
  */
 
-#include <linux/bitfield.h>
-#include <linux/bits.h>
-#include <linux/log2.h>
-#include <linux/pci.h>
-#include <linux/sizes.h>
-#include <linux/slab.h>
-#include <linux/export.h>
-#include <linux/string.h>
-#include <linux/delay.h>
-#include <asm/div64.h>
-#include "pci.h"
+#include <linux/bitfield.h> /* NVMe: linux/bitfield.h 헤더 포함. */
+#include <linux/bits.h> /* NVMe: linux/bits.h 헤더 포함. */
+#include <linux/log2.h> /* NVMe: linux/log2.h 헤더 포함. */
+#include <linux/pci.h> /* NVMe: linux/pci.h 헤더 포함. */
+#include <linux/sizes.h> /* NVMe: linux/sizes.h 헤더 포함. */
+#include <linux/slab.h> /* NVMe: linux/slab.h 헤더 포함. */
+#include <linux/export.h> /* NVMe: linux/export.h 헤더 포함. */
+#include <linux/string.h> /* NVMe: linux/string.h 헤더 포함. */
+#include <linux/delay.h> /* NVMe: linux/delay.h 헤더 포함. */
+#include <asm/div64.h> /* NVMe: asm/div64.h 헤더 포함. */
+#include "pci.h" /* NVMe: pci.h 헤더 포함. */
 
 #define VIRTFN_ID_LEN	17	/* "virtfn%u\0" for 2^32 - 1 */ /* NVMe: VF sysfs 심볼릭 링크 이름 버퍼 길이 정의. */
 
@@ -67,26 +67,26 @@
  *   주어진 VF ID가 위치할 버스 번호를 산출한다.
  *   NVMe: NVMe PF가 VF를 생성/관리할 때 이 함수가 호출된다.
  */
-int pci_iov_virtfn_bus(struct pci_dev *dev, int vf_id)
-{
+int pci_iov_virtfn_bus(struct pci_dev *dev, int vf_id) /* NVMe: VF 버스 번호 계산. 함수 정의. */
+{ /* NVMe: 블록 시작. */
 	if (!dev->is_physfn) /* NVMe: PF가 아니면. */
 		return -EINVAL; /* NVMe: 잘못된 인자. */
 	return dev->bus->number + ((dev->devfn + dev->sriov->offset + /* NVMe: PF의 버스 번호에 VF offset/stride로 계산된 버스 오프셋을 더해 VF 버스 번호 산출. */
-				    dev->sriov->stride * vf_id) >> 8);
-}
+				    dev->sriov->stride * vf_id) >> 8); /* NVMe: SR-IOV 관련 연산. */
+} /* NVMe: 블록 종료. */
 
 /*
  * pci_iov_virtfn_devfn:
  *   주어진 VF ID의 devfn(Device/Function) 번호를 산출한다.
  *   NVMe: NVMe PF가 VF를 생성/관리할 때 이 함수가 호출된다.
  */
-int pci_iov_virtfn_devfn(struct pci_dev *dev, int vf_id)
-{
+int pci_iov_virtfn_devfn(struct pci_dev *dev, int vf_id) /* NVMe: VF devfn 계산. 함수 정의. */
+{ /* NVMe: 블록 시작. */
 	if (!dev->is_physfn) /* NVMe: PF가 아니면. */
 		return -EINVAL; /* NVMe: 잘못된 인자. */
 	return (dev->devfn + dev->sriov->offset + /* NVMe: PF devfn에 offset과 stride*vf_id를 더해 VF devfn 산출. */
-		dev->sriov->stride * vf_id) & 0xff;
-}
+		dev->sriov->stride * vf_id) & 0xff; /* NVMe: SR-IOV 관련 연산. */
+} /* NVMe: 블록 종료. */
 EXPORT_SYMBOL_GPL(pci_iov_virtfn_devfn); /* NVMe: 심볼 외부 공개. */
 
 /*
@@ -94,8 +94,8 @@ EXPORT_SYMBOL_GPL(pci_iov_virtfn_devfn); /* NVMe: 심볼 외부 공개. */
  *   VF 디바이스로부터 PF 기준 VF 인덱스를 계산한다.
  *   NVMe: NVMe PF가 VF를 생성/관리할 때 이 함수가 호출된다.
  */
-int pci_iov_vf_id(struct pci_dev *dev)
-{
+int pci_iov_vf_id(struct pci_dev *dev) /* NVMe: 함수 정의 시작. */
+{ /* NVMe: 블록 시작. */
 	struct pci_dev *pf; /* NVMe: PF 디바이스 포인터 선언. */
 
 	if (!dev->is_virtfn) /* NVMe: VF가 아니면 drvdata 획득 불가. */
@@ -103,9 +103,9 @@ int pci_iov_vf_id(struct pci_dev *dev)
 
 	pf = pci_physfn(dev); /* NVMe: VF에 대응하는 PF 획득. */
 	return (pci_dev_id(dev) - (pci_dev_id(pf) + pf->sriov->offset)) / /* NVMe: VF의 PCI ID에서 PF 기준 offset/stride로 VF 인덱스 계산. */
-	       pf->sriov->stride;
-}
-EXPORT_SYMBOL_GPL(pci_iov_vf_id);
+	       pf->sriov->stride; /* NVMe: SR-IOV 관련 연산. */
+} /* NVMe: 블록 종료. */
+EXPORT_SYMBOL_GPL(pci_iov_vf_id); /* NVMe: 심볼 외부 공개. */
 
 /**
  * pci_iov_get_pf_drvdata - Return the drvdata of a PF
@@ -123,18 +123,18 @@ EXPORT_SYMBOL_GPL(pci_iov_vf_id);
  * The PF driver must call pci_disable_sriov() before it begins to destroy the
  * drvdata.
  */
-void *pci_iov_get_pf_drvdata(struct pci_dev *dev, struct pci_driver *pf_driver)
-{
+void *pci_iov_get_pf_drvdata(struct pci_dev *dev, struct pci_driver *pf_driver) /* NVMe: PF drvdata 획득. 함수 정의. */
+{ /* NVMe: 블록 시작. */
 	struct pci_dev *pf_dev; /* NVMe: PF 디바이스 포인터 선언. */
 
 	if (!dev->is_virtfn) /* NVMe: VF가 아니면 drvdata 획득 불가. */
-		return ERR_PTR(-EINVAL);
+		return ERR_PTR(-EINVAL); /* NVMe: ERR_PTR(-EINVAL) 반환. */
 	pf_dev = dev->physfn; /* NVMe: VF가 가리키는 PF 포인터 사용. */
 	if (pf_dev->driver != pf_driver) /* NVMe: PF가 기대한 드라이버에 바인딩되어 있는지 확인. */
-		return ERR_PTR(-EINVAL);
+		return ERR_PTR(-EINVAL); /* NVMe: ERR_PTR(-EINVAL) 반환. */
 	return pci_get_drvdata(pf_dev); /* NVMe: PF 드라이버의 private 데이터 반환. */
-}
-EXPORT_SYMBOL_GPL(pci_iov_get_pf_drvdata);
+} /* NVMe: 블록 종료. */
+EXPORT_SYMBOL_GPL(pci_iov_get_pf_drvdata); /* NVMe: 심볼 외부 공개. */
 
 /*
  * Per SR-IOV spec sec 3.3.10 and 3.3.11, First VF Offset and VF Stride may
@@ -142,14 +142,14 @@ EXPORT_SYMBOL_GPL(pci_iov_get_pf_drvdata);
  *
  * Update iov->offset and iov->stride when NumVFs is written.
  */
-static inline void pci_iov_set_numvfs(struct pci_dev *dev, int nr_virtfn)
-{
-	struct pci_sriov *iov = dev->sriov;
+static inline void pci_iov_set_numvfs(struct pci_dev *dev, int nr_virtfn) /* NVMe: NumVFs 레지스터 설정. 함수 정의. */
+{ /* NVMe: 블록 시작. */
+	struct pci_sriov *iov = dev->sriov; /* NVMe: PF의 SR-IOV 구조체 포인터 변수 선언. */
 
 	pci_write_config_word(dev, iov->pos + PCI_SRIOV_NUM_VF, nr_virtfn); /* NVMe: NumVFs 레지스터에 요청된 VF 수 기록. */
 	pci_read_config_word(dev, iov->pos + PCI_SRIOV_VF_OFFSET, &iov->offset); /* NVMe: VF Offset 레지스터를 읽어 캐시. */
 	pci_read_config_word(dev, iov->pos + PCI_SRIOV_VF_STRIDE, &iov->stride); /* NVMe: VF Stride 레지스터를 읽어 캐시. */
-}
+} /* NVMe: 블록 종료. */
 
 /*
  * The PF consumes one bus number.  NumVFs, First VF Offset, and VF Stride
@@ -163,9 +163,9 @@ static inline void pci_iov_set_numvfs(struct pci_dev *dev, int nr_virtfn)
  *   가능한 최대 VF 수에 필요한 버스 개수를 예측한다.
  *   NVMe: NVMe PF가 VF를 생성/관리할 때 이 함수가 호출된다.
  */
-static int compute_max_vf_buses(struct pci_dev *dev)
-{
-	struct pci_sriov *iov = dev->sriov;
+static int compute_max_vf_buses(struct pci_dev *dev) /* NVMe: 함수 정의 시작. */
+{ /* NVMe: 블록 시작. */
+	struct pci_sriov *iov = dev->sriov; /* NVMe: PF의 SR-IOV 구조체 포인터 변수 선언. */
 	int nr_virtfn, busnr, rc = 0; /* NVMe: VF 개수, 버스 번호, 결과 변수 초기화. */
 
 	for (nr_virtfn = iov->total_VFs; nr_virtfn; nr_virtfn--) { /* NVMe: 최대 VF 수부터 1까지 역순으로 시뮬레이션. */
@@ -173,20 +173,20 @@ static int compute_max_vf_buses(struct pci_dev *dev)
 		if (!iov->offset || (nr_virtfn > 1 && !iov->stride)) { /* NVMe: offset이 0이거나 다수 VF 시 stride가 0이면 오류. */
 			rc = -EIO; /* NVMe: I/O 오류. */
 			goto out; /* NVMe: 정리 루틴으로 이동. */
-		}
+		} /* NVMe: 블록 종료. */
 
 		busnr = pci_iov_virtfn_bus(dev, nr_virtfn - 1); /* NVMe: 현재 nr_virtfn일 때 마지막 VF의 버스 번호 계산. */
 		if (busnr > iov->max_VF_buses) /* NVMe: 최대 필요 버스 번호 갱신. */
 			iov->max_VF_buses = busnr; /* NVMe: 최대 VF 버스 번호 저장. */
-	}
+	} /* NVMe: 블록 종료. */
 
 out: /* NVMe: 루프 종료 후 정리 레이블. */
 	pci_iov_set_numvfs(dev, 0); /* NVMe: NumVFs 0. */
 	return rc; /* NVMe: 오류 반환. */
-}
+} /* NVMe: 블록 종료. */
 
-static struct pci_bus *virtfn_add_bus(struct pci_bus *bus, int busnr)
-{
+static struct pci_bus *virtfn_add_bus(struct pci_bus *bus, int busnr) /* NVMe: VF용 PCI 버스 추가/검색. 함수 정의. */
+{ /* NVMe: 블록 시작. */
 	struct pci_bus *child; /* NVMe: 하위 버스 포인터 선언. */
 
 	if (bus->number == busnr) /* NVMe: 현재 버스가 요청 번호와 같으면 그대로 사용. */
@@ -203,70 +203,70 @@ static struct pci_bus *virtfn_add_bus(struct pci_bus *bus, int busnr)
 	pci_bus_insert_busn_res(child, busnr, busnr); /* NVMe: 새 버스의 bus 번호 리소스를 등록. */
 
 	return child; /* NVMe: 기존 버스 반환. */
-}
+} /* NVMe: 블록 종료. */
 
 /*
  * virtfn_remove_bus:
  *   VF 버스를 제거한다.
  *   NVMe: NVMe PF가 VF를 생성/관리할 때 이 함수가 호출된다.
  */
-static void virtfn_remove_bus(struct pci_bus *physbus, struct pci_bus *virtbus)
-{
+static void virtfn_remove_bus(struct pci_bus *physbus, struct pci_bus *virtbus) /* NVMe: VF 버스 제거. 함수 정의. */
+{ /* NVMe: 블록 시작. */
 	if (physbus != virtbus && list_empty(&virtbus->devices)) /* NVMe: 물리 버스와 다르고 장치가 비었을 때만 제거. */
 		pci_remove_bus(virtbus); /* NVMe: 빈 VF 버스 제거. */
-}
+} /* NVMe: 블록 종료. */
 
 /*
  * pci_iov_resource_size:
  *   지정한 리소스 번호의 VF BAR 크기를 반환한다.
  *   NVMe: NVMe PF가 VF를 생성/관리할 때 이 함수가 호출된다.
  */
-resource_size_t pci_iov_resource_size(struct pci_dev *dev, int resno)
-{
+resource_size_t pci_iov_resource_size(struct pci_dev *dev, int resno) /* NVMe: VF BAR 크기 획득. 함수 정의. */
+{ /* NVMe: 블록 시작. */
 	if (!dev->is_physfn) /* NVMe: PF가 아니면. */
 		return 0; /* NVMe: 후보 없음. */
 
 	return dev->sriov->barsz[pci_resource_num_to_vf_bar(resno)]; /* NVMe: 리소스 번호를 VF BAR 인덱스로 변환해 크기 반환. */
-}
+} /* NVMe: 블록 종료. */
 
 /*
  * pci_iov_resource_set_size:
  *   VF BAR의 소프트웨어 크기를 갱신한다.
  *   NVMe: NVMe PF가 VF를 생성/관리할 때 이 함수가 호출된다.
  */
-void pci_iov_resource_set_size(struct pci_dev *dev, int resno, int size)
-{
+void pci_iov_resource_set_size(struct pci_dev *dev, int resno, int size) /* NVMe: 함수 정의 시작. */
+{ /* NVMe: 블록 시작. */
 	if (!pci_resource_is_iov(resno)) { /* NVMe: IOV 리소스가 아니면. */
 		pci_warn(dev, "%s is not an IOV resource\n", /* NVMe: 경고 메시지 출력. */
 			 pci_resource_name(dev, resno)); /* NVMe: 리소스 이름 포함. */
 		return; /* NVMe: 조기 반환. */
-	}
+	} /* NVMe: 블록 종료. */
 
 	resno = pci_resource_num_to_vf_bar(resno); /* NVMe: VF BAR 인덱스로 변환. */
 	dev->sriov->barsz[resno] = pci_rebar_size_to_bytes(size); /* NVMe: spec encoding 크기를 바이트로 변환해 저장. */
-}
+} /* NVMe: 블록 종료. */
 
 /*
  * pci_iov_is_memory_decoding_enabled:
  *   SR-IOV Memory Space Enable 비트를 읽는다.
  *   NVMe: NVMe PF가 VF를 생성/관리할 때 이 함수가 호출된다.
  */
-bool pci_iov_is_memory_decoding_enabled(struct pci_dev *dev)
-{
+bool pci_iov_is_memory_decoding_enabled(struct pci_dev *dev) /* NVMe: 메모리 디코딩 활성화 여부 확인. 함수 정의. */
+{ /* NVMe: 블록 시작. */
 	u16 cmd; /* NVMe: control. */
 
 	pci_read_config_word(dev, dev->sriov->pos + PCI_SRIOV_CTRL, &cmd); /* NVMe: SR-IOV Control 레지스터 읽기. */
 
 	return cmd & PCI_SRIOV_CTRL_MSE; /* NVMe: Memory Space Enable 비트 반환. */
-}
+} /* NVMe: 블록 종료. */
 
 /*
  * pci_read_vf_config_common:
  *   VF0의 공통 설정값을 읽어 PF sriov 구조체에 저장한다.
  *   NVMe: NVMe PF가 VF를 생성/관리할 때 이 함수가 호출된다.
  */
-static void pci_read_vf_config_common(struct pci_dev *virtfn)
-{
+static void pci_read_vf_config_common(struct pci_dev *virtfn) /* NVMe: VF0 공통 설정 읽기. 함수 정의. */
+{ /* NVMe: 블록 시작. */
 	struct pci_dev *physfn = virtfn->physfn; /* NVMe: VF의 PF 포인터 획득. */
 
 	/*
@@ -286,16 +286,16 @@ static void pci_read_vf_config_common(struct pci_dev *virtfn)
 			     &physfn->sriov->subsystem_vendor); /* NVMe: PF sriov 구조체에 서브시스템 벤더 저장. */
 	pci_read_config_word(virtfn, PCI_SUBSYSTEM_ID, /* NVMe: 서브시스템 디바이스 ID 읽기. */
 			     &physfn->sriov->subsystem_device); /* NVMe: PF sriov 구조체에 서브시스템 디바이스 저장. */
-}
+} /* NVMe: 블록 종료. */
 
 /*
  * pci_iov_sysfs_link:
  *   PF와 VF 간 sysfs 심볼릭 링크를 생성한다.
  *   NVMe: NVMe PF가 VF를 생성/관리할 때 이 함수가 호출된다.
  */
-int pci_iov_sysfs_link(struct pci_dev *dev,
-		struct pci_dev *virtfn, int id)
-{
+int pci_iov_sysfs_link(struct pci_dev *dev, /* NVMe: PF-VF sysfs 링크 생성. 함수 정의. */
+		struct pci_dev *virtfn, int id) /* NVMe: 함수 매개변수 선언. */
+{ /* NVMe: 블록 시작. */
 	char buf[VIRTFN_ID_LEN]; /* NVMe: 링크 이름 버퍼. */
 	int rc; /* NVMe: 결과. */
 
@@ -315,7 +315,7 @@ failed1: /* NVMe: VF 제거 레이블. */
 	sysfs_remove_link(&dev->dev.kobj, buf); /* NVMe: PF에서 VF로의 링크 제거. */
 failed: /* NVMe: 초기화 실패 레이블. */
 	return rc; /* NVMe: 오류 반환. */
-}
+} /* NVMe: 블록 종료. */
 
 #ifdef CONFIG_PCI_MSI /* NVMe: MSI 설정 시 total_msix 속성 추가. */
 /*
@@ -323,10 +323,10 @@ failed: /* NVMe: 초기화 실패 레이블. */
  *   PF가 VF에 할당 가능한 총 MSI-X 벡터 수를 sysfs에 노출한다.
  *   NVMe: NVMe PF가 VF를 생성/관리할 때 이 함수가 호출된다.
  */
-static ssize_t sriov_vf_total_msix_show(struct device *dev,
-					struct device_attribute *attr,
-					char *buf)
-{
+static ssize_t sriov_vf_total_msix_show(struct device *dev, /* NVMe: VF당 총 MSI-X 수 sysfs 읽기. 함수 정의. */
+					struct device_attribute *attr, /* NVMe: 함수 매개변수 선언. */
+					char *buf) /* NVMe: 함수 매개변수 선언. */
+{ /* NVMe: 블록 시작. */
 	struct pci_dev *pdev = to_pci_dev(dev); /* NVMe: pci_dev 변환. */
 	u32 vf_total_msix = 0; /* NVMe: MSI-X 총계 초기화. */
 
@@ -338,7 +338,7 @@ static ssize_t sriov_vf_total_msix_show(struct device *dev,
 unlock: /* NVMe: 락 해제 레이블. */
 	device_unlock(dev); /* NVMe: 디바이스 락 해제. */
 	return sysfs_emit(buf, "%u\n", vf_total_msix); /* NVMe: sysfs 버퍼에 값 기록. */
-}
+} /* NVMe: 블록 종료. */
 static DEVICE_ATTR_RO(sriov_vf_total_msix); /* NVMe: 읽기 전용 속성 정의. */
 
 /*
@@ -346,10 +346,10 @@ static DEVICE_ATTR_RO(sriov_vf_total_msix); /* NVMe: 읽기 전용 속성 정의
  *   VF당 MSI-X 벡터 개수를 변경하는 sysfs 쓰기 핸들러다.
  *   NVMe: NVMe PF가 VF를 생성/관리할 때 이 함수가 호출된다.
  */
-static ssize_t sriov_vf_msix_count_store(struct device *dev,
-					 struct device_attribute *attr,
-					 const char *buf, size_t count)
-{
+static ssize_t sriov_vf_msix_count_store(struct device *dev, /* NVMe: VF당 MSI-X 개수 sysfs 쓰기. 함수 정의. */
+					 struct device_attribute *attr, /* NVMe: 함수 매개변수 선언. */
+					 const char *buf, size_t count) /* NVMe: 함수 매개변수 선언. */
+{ /* NVMe: 블록 시작. */
 	struct pci_dev *vf_dev = to_pci_dev(dev); /* NVMe: sysfs device에서 VF pci_dev 변환. */
 	struct pci_dev *pdev = pci_physfn(vf_dev); /* NVMe: VF의 PF 획득. */
 	int val, ret = 0; /* NVMe: 입력값과 결과 변수. */
@@ -364,7 +364,7 @@ static ssize_t sriov_vf_msix_count_store(struct device *dev,
 	if (!pdev->driver || !pdev->driver->sriov_set_msix_vec_count) { /* NVMe: PF 드라이버 콜백 존재 여부 확인. */
 		ret = -EOPNOTSUPP; /* NVMe: 지원하지 않음. */
 		goto err_pdev; /* NVMe: PF 락 해제 경로. */
-	}
+	} /* NVMe: 블록 종료. */
 
 	device_lock(&vf_dev->dev); /* NVMe: VF 디바이스 락. */
 	if (vf_dev->driver) { /* NVMe: VF에 이미 드라이버가 바인딩되어 있으면 변경 불가. */
@@ -375,7 +375,7 @@ static ssize_t sriov_vf_msix_count_store(struct device *dev,
 		 */
 		ret = -EBUSY; /* NVMe: 바쁨. */
 		goto err_dev; /* NVMe: VF 락 해제 경로. */
-	}
+	} /* NVMe: 블록 종료. */
 
 	ret = pdev->driver->sriov_set_msix_vec_count(vf_dev, val); /* NVMe: PF 드라이버에게 VF MSI-X 개수 변경 요청. */
 
@@ -384,7 +384,7 @@ err_dev: /* NVMe: VF 락 해제 레이블. */
 err_pdev: /* NVMe: PF 락 해제 레이블. */
 	device_unlock(&pdev->dev); /* NVMe: 락 해제. */
 	return ret ? : count; /* NVMe: 오류 시 ret, 아니면 기록된 바이트 수 반환. */
-}
+} /* NVMe: 블록 종료. */
 static DEVICE_ATTR_WO(sriov_vf_msix_count); /* NVMe: 쓰기 전용 속성 정의. */
 #endif /* NVMe: CONFIG_PCI_MSI 블록 종료. */
 
@@ -393,11 +393,11 @@ static struct attribute *sriov_vf_dev_attrs[] = { /* NVMe: VF sysfs 속성 테�
 	&dev_attr_sriov_vf_msix_count.attr, /* NVMe: VF당 MSI-X 개수 속성 추가. */
 #endif /* NVMe: CONFIG_PCI_MSI 블록 종료. */
 	NULL, /* NVMe: 테이블 끝. */
-};
+}; /* NVMe: 구조체/배열 정의 종료. */
 
-static umode_t sriov_vf_attrs_are_visible(struct kobject *kobj,
-					  struct attribute *a, int n)
-{
+static umode_t sriov_vf_attrs_are_visible(struct kobject *kobj, /* NVMe: VF sysfs 속성 가시성 결정. 함수 정의. */
+					  struct attribute *a, int n) /* NVMe: 함수 매개변수 선언. */
+{ /* NVMe: 블록 시작. */
 	struct device *dev = kobj_to_dev(kobj); /* NVMe: kobject에서 device 변환. */
 	struct pci_dev *pdev = to_pci_dev(dev); /* NVMe: pci_dev 변환. */
 
@@ -405,17 +405,17 @@ static umode_t sriov_vf_attrs_are_visible(struct kobject *kobj,
 		return 0; /* NVMe: 후보 없음. */
 
 	return a->mode; /* NVMe: 속성 모드 반환. */
-}
+} /* NVMe: 블록 종료. */
 
 const struct attribute_group sriov_vf_dev_attr_group = { /* NVMe: VF sysfs 속성 그룹. */
 	.attrs = sriov_vf_dev_attrs, /* NVMe: 속성 테이블 연결. */
 	.is_visible = sriov_vf_attrs_are_visible, /* NVMe: 가시성 콜백 연결. */
-};
+}; /* NVMe: 구조체/배열 정의 종료. */
 
-static struct pci_dev *pci_iov_scan_device(struct pci_dev *dev, int id,
-					   struct pci_bus *bus)
-{
-	struct pci_sriov *iov = dev->sriov;
+static struct pci_dev *pci_iov_scan_device(struct pci_dev *dev, int id, /* NVMe: VF pci_dev 스캔/할당. 함수 정의. */
+					   struct pci_bus *bus) /* NVMe: 함수 매개변수 선언. */
+{ /* NVMe: 블록 시작. */
+	struct pci_sriov *iov = dev->sriov; /* NVMe: PF의 SR-IOV 구조체 포인터 변수 선언. */
 	struct pci_dev *virtfn; /* NVMe: 제거할 VF 포인터. */
 	int rc; /* NVMe: 결과. */
 
@@ -439,18 +439,18 @@ static struct pci_dev *pci_iov_scan_device(struct pci_dev *dev, int id,
 		pci_bus_put(virtfn->bus); /* NVMe: 버스 참조 감소. */
 		kfree(virtfn); /* NVMe: VF 구조체 해제. */
 		return ERR_PTR(rc); /* NVMe: 오류 포인터 반환. */
-	}
+	} /* NVMe: 블록 종료. */
 
 	return virtfn; /* NVMe: 초기화된 VF 반환. */
-}
+} /* NVMe: 블록 종료. */
 
 /*
  * pci_iov_add_virtfn:
  *   지정 ID의 VF를 실제 PCI 계층에 추가한다.
  *   NVMe: NVMe PF가 VF를 생성/관리할 때 이 함수가 호출된다.
  */
-int pci_iov_add_virtfn(struct pci_dev *dev, int id)
-{
+int pci_iov_add_virtfn(struct pci_dev *dev, int id) /* NVMe: VF 추가. 함수 정의. */
+{ /* NVMe: 블록 시작. */
 	struct pci_bus *bus; /* NVMe: VF 버스 포인터. */
 	struct pci_dev *virtfn; /* NVMe: 제거할 VF 포인터. */
 	struct resource *res; /* NVMe: 리소스 포인터. */
@@ -461,13 +461,13 @@ int pci_iov_add_virtfn(struct pci_dev *dev, int id)
 	if (!bus) { /* NVMe: 버스 없음 실패. */
 		rc = -ENOMEM; /* NVMe: 메모리 부족 오류. */
 		goto failed; /* NVMe: 정리. */
-	}
+	} /* NVMe: 블록 종료. */
 
 	virtfn = pci_iov_scan_device(dev, id, bus); /* NVMe: VF pci_dev 생성. */
 	if (IS_ERR(virtfn)) { /* NVMe: 생성 오류 검사. */
 		rc = PTR_ERR(virtfn); /* NVMe: 오류 코드 추출. */
 		goto failed0; /* NVMe: 버스 제거 경로. */
-	}
+	} /* NVMe: 블록 종료. */
 
 	virtfn->dev.parent = dev->dev.parent; /* NVMe: VF의 부모 device를 PF와 동일하게 설정. */
 	virtfn->multifunction = 0; /* NVMe: VF는 멀티펑션 아님. */
@@ -485,7 +485,7 @@ int pci_iov_add_virtfn(struct pci_dev *dev, int id)
 				   res->start + size * id, size); /* NVMe: PF IOV 영역 내 VF id에 해당하는 오프셋 할당. */
 		rc = request_resource(res, &virtfn->resource[i]); /* NVMe: 리소스 트리에 VF BAR 등록. */
 		BUG_ON(rc); /* NVMe: 등록 실패 시 패닉. */
-	}
+	} /* NVMe: 블록 종료. */
 
 	pci_device_add(virtfn, virtfn->bus); /* NVMe: VF를 PCI 코어에 등록. */
 	rc = pci_iov_sysfs_link(dev, virtfn, id); /* NVMe: PF-VF sysfs 링크 생성. */
@@ -504,15 +504,15 @@ failed0: /* NVMe: 버스 제거 레이블. */
 failed: /* NVMe: 초기화 실패 레이블. */
 
 	return rc; /* NVMe: 오류 반환. */
-}
+} /* NVMe: 블록 종료. */
 
 /*
  * pci_iov_remove_virtfn:
  *   지정 ID의 VF를 PCI 계층에서 제거한다.
  *   NVMe: NVMe PF가 VF를 생성/관리할 때 이 함수가 호출된다.
  */
-void pci_iov_remove_virtfn(struct pci_dev *dev, int id)
-{
+void pci_iov_remove_virtfn(struct pci_dev *dev, int id) /* NVMe: VF 제거. 함수 정의. */
+{ /* NVMe: 블록 시작. */
 	char buf[VIRTFN_ID_LEN]; /* NVMe: 링크 이름 버퍼. */
 	struct pci_dev *virtfn; /* NVMe: 제거할 VF 포인터. */
 
@@ -538,31 +538,31 @@ void pci_iov_remove_virtfn(struct pci_dev *dev, int id)
 	/* balance pci_get_domain_bus_and_slot() */
 	pci_dev_put(virtfn); /* NVMe: pci_get_domain_bus_and_slot 참조 감소. */
 	pci_dev_put(dev); /* NVMe: PF 참조 감소. */
-}
+} /* NVMe: 블록 종료. */
 
 /*
  * sriov_totalvfs_show:
  *   totalvfs sysfs 속성의 읽기 핸들러다.
  *   NVMe: NVMe PF가 VF를 생성/관리할 때 이 함수가 호출된다.
  */
-static ssize_t sriov_totalvfs_show(struct device *dev,
-				   struct device_attribute *attr,
-				   char *buf)
-{
+static ssize_t sriov_totalvfs_show(struct device *dev, /* NVMe: totalvfs sysfs 읽기. 함수 정의. */
+				   struct device_attribute *attr, /* NVMe: 함수 매개변수 선언. */
+				   char *buf) /* NVMe: 함수 매개변수 선언. */
+{ /* NVMe: 블록 시작. */
 	struct pci_dev *pdev = to_pci_dev(dev); /* NVMe: pci_dev 변환. */
 
 	return sysfs_emit(buf, "%u\n", pci_sriov_get_totalvfs(pdev)); /* NVMe: totalvfs 값 출력. */
-}
+} /* NVMe: 블록 종료. */
 
 /*
  * sriov_numvfs_show:
  *   numvfs sysfs 속성의 읽기 핸들러다.
  *   NVMe: NVMe PF가 VF를 생성/관리할 때 이 함수가 호출된다.
  */
-static ssize_t sriov_numvfs_show(struct device *dev,
-				 struct device_attribute *attr,
-				 char *buf)
-{
+static ssize_t sriov_numvfs_show(struct device *dev, /* NVMe: numvfs sysfs 읽기. 함수 정의. */
+				 struct device_attribute *attr, /* NVMe: 함수 매개변수 선언. */
+				 char *buf) /* NVMe: 함수 매개변수 선언. */
+{ /* NVMe: 블록 시작. */
 	struct pci_dev *pdev = to_pci_dev(dev); /* NVMe: pci_dev 변환. */
 	u16 num_vfs; /* NVMe: 요청 VF 수 변수. */
 
@@ -572,7 +572,7 @@ static ssize_t sriov_numvfs_show(struct device *dev,
 	device_unlock(&pdev->dev); /* NVMe: 락 해제. */
 
 	return sysfs_emit(buf, "%u\n", num_vfs); /* NVMe: 값 출력. */
-}
+} /* NVMe: 블록 종료. */
 
 /*
  * num_vfs > 0; number of VFs to enable
@@ -586,10 +586,10 @@ static ssize_t sriov_numvfs_show(struct device *dev,
  *   numvfs sysfs 속성의 쓰기 핸들러로 VF 활성화/비활성화를 제어한다.
  *   NVMe: NVMe PF가 VF를 생성/관리할 때 이 함수가 호출된다.
  */
-static ssize_t sriov_numvfs_store(struct device *dev,
-				  struct device_attribute *attr,
-				  const char *buf, size_t count)
-{
+static ssize_t sriov_numvfs_store(struct device *dev, /* NVMe: numvfs sysfs 쓰기. 함수 정의. */
+				  struct device_attribute *attr, /* NVMe: 함수 매개변수 선언. */
+				  const char *buf, size_t count) /* NVMe: 함수 매개변수 선언. */
+{ /* NVMe: 블록 시작. */
 	struct pci_dev *pdev = to_pci_dev(dev); /* NVMe: pci_dev 변환. */
 	int ret = 0; /* NVMe: 결과 초기화. */
 	u16 num_vfs; /* NVMe: 요청 VF 수 변수. */
@@ -610,14 +610,14 @@ static ssize_t sriov_numvfs_store(struct device *dev,
 		pci_info(pdev, "no driver bound to device; cannot configure SR-IOV\n"); /* NVMe: 안내 메시지. */
 		ret = -ENOENT; /* NVMe: 드라이버 없음 오류. */
 		goto exit; /* NVMe: 종료. */
-	}
+	} /* NVMe: 블록 종료. */
 
 	/* is PF driver loaded w/callback */
 	if (!pdev->driver->sriov_configure) { /* NVMe: PF 드라이버가 SR-IOV 콜백 미제공. */
 		pci_info(pdev, "driver does not support SR-IOV configuration via sysfs\n"); /* NVMe: 안내 메시지. */
 		ret = -ENOENT; /* NVMe: 드라이버 없음 오류. */
 		goto exit; /* NVMe: 종료. */
-	}
+	} /* NVMe: 블록 종료. */
 
 	if (num_vfs == 0) { /* NVMe: 비활성화 요청. */
 		/* disable VFs */
@@ -625,7 +625,7 @@ static ssize_t sriov_numvfs_store(struct device *dev,
 		ret = pdev->driver->sriov_configure(pdev, 0); /* NVMe: PF 드라이버에게 SR-IOV 비활성화 요청. */
 		pci_unlock_rescan_remove(); /* NVMe: 락 해제. */
 		goto exit; /* NVMe: 종료. */
-	}
+	} /* NVMe: 블록 종료. */
 
 	/* enable VFs */
 	if (pdev->sriov->num_VFs) { /* NVMe: 이미 VF가 활성화되어 있으면. */
@@ -633,7 +633,7 @@ static ssize_t sriov_numvfs_store(struct device *dev,
 			 pdev->sriov->num_VFs, num_vfs); /* NVMe: 인자. */
 		ret = -EBUSY; /* NVMe: 바쁨. */
 		goto exit; /* NVMe: 종료. */
-	}
+	} /* NVMe: 블록 종료. */
 
 	pci_lock_rescan_remove(); /* NVMe: 버스 재스캔/제거 락. */
 	ret = pdev->driver->sriov_configure(pdev, num_vfs); /* NVMe: PF 드라이버에게 활성화 요청. */
@@ -652,73 +652,73 @@ exit: /* NVMe: 종료 레이블. */
 		return ret; /* NVMe: 오류 코드 반환. */
 
 	return count; /* NVMe: 기록된 바이트 수 반환. */
-}
+} /* NVMe: 블록 종료. */
 
 /*
  * sriov_offset_show:
  *   sriov_offset sysfs 읽기 핸들러다.
  *   NVMe: NVMe PF가 VF를 생성/관리할 때 이 함수가 호출된다.
  */
-static ssize_t sriov_offset_show(struct device *dev,
-				 struct device_attribute *attr,
-				 char *buf)
-{
+static ssize_t sriov_offset_show(struct device *dev, /* NVMe: offset sysfs 읽기. 함수 정의. */
+				 struct device_attribute *attr, /* NVMe: 함수 매개변수 선언. */
+				 char *buf) /* NVMe: 함수 매개변수 선언. */
+{ /* NVMe: 블록 시작. */
 	struct pci_dev *pdev = to_pci_dev(dev); /* NVMe: pci_dev 변환. */
 
 	return sysfs_emit(buf, "%u\n", pdev->sriov->offset); /* NVMe: VF offset 출력. */
-}
+} /* NVMe: 블록 종료. */
 
 /*
  * sriov_stride_show:
  *   sriov_stride sysfs 읽기 핸들러다.
  *   NVMe: NVMe PF가 VF를 생성/관리할 때 이 함수가 호출된다.
  */
-static ssize_t sriov_stride_show(struct device *dev,
-				 struct device_attribute *attr,
-				 char *buf)
-{
+static ssize_t sriov_stride_show(struct device *dev, /* NVMe: stride sysfs 읽기. 함수 정의. */
+				 struct device_attribute *attr, /* NVMe: 함수 매개변수 선언. */
+				 char *buf) /* NVMe: 함수 매개변수 선언. */
+{ /* NVMe: 블록 시작. */
 	struct pci_dev *pdev = to_pci_dev(dev); /* NVMe: pci_dev 변환. */
 
 	return sysfs_emit(buf, "%u\n", pdev->sriov->stride); /* NVMe: VF stride 출력. */
-}
+} /* NVMe: 블록 종료. */
 
 /*
  * sriov_vf_device_show:
  *   VF device ID sysfs 읽기 핸들러다.
  *   NVMe: NVMe PF가 VF를 생성/관리할 때 이 함수가 호출된다.
  */
-static ssize_t sriov_vf_device_show(struct device *dev,
-				    struct device_attribute *attr,
-				    char *buf)
-{
+static ssize_t sriov_vf_device_show(struct device *dev, /* NVMe: VF device ID sysfs 읽기. 함수 정의. */
+				    struct device_attribute *attr, /* NVMe: 함수 매개변수 선언. */
+				    char *buf) /* NVMe: 함수 매개변수 선언. */
+{ /* NVMe: 블록 시작. */
 	struct pci_dev *pdev = to_pci_dev(dev); /* NVMe: pci_dev 변환. */
 
 	return sysfs_emit(buf, "%x\n", pdev->sriov->vf_device); /* NVMe: VF device ID 출력. */
-}
+} /* NVMe: 블록 종료. */
 
 /*
  * sriov_drivers_autoprobe_show:
  *   drivers_autoprobe sysfs 읽기 핸들러다.
  *   NVMe: NVMe PF가 VF를 생성/관리할 때 이 함수가 호출된다.
  */
-static ssize_t sriov_drivers_autoprobe_show(struct device *dev,
-					    struct device_attribute *attr,
-					    char *buf)
-{
+static ssize_t sriov_drivers_autoprobe_show(struct device *dev, /* NVMe: drivers_autoprobe sysfs 읽기. 함수 정의. */
+					    struct device_attribute *attr, /* NVMe: 함수 매개변수 선언. */
+					    char *buf) /* NVMe: 함수 매개변수 선언. */
+{ /* NVMe: 블록 시작. */
 	struct pci_dev *pdev = to_pci_dev(dev); /* NVMe: pci_dev 변환. */
 
 	return sysfs_emit(buf, "%u\n", pdev->sriov->drivers_autoprobe); /* NVMe: drivers_autoprobe 출력. */
-}
+} /* NVMe: 블록 종료. */
 
 /*
  * sriov_drivers_autoprobe_store:
  *   drivers_autoprobe sysfs 쓰기 핸들러다.
  *   NVMe: NVMe PF가 VF를 생성/관리할 때 이 함수가 호출된다.
  */
-static ssize_t sriov_drivers_autoprobe_store(struct device *dev,
-					     struct device_attribute *attr,
-					     const char *buf, size_t count)
-{
+static ssize_t sriov_drivers_autoprobe_store(struct device *dev, /* NVMe: drivers_autoprobe sysfs 쓰기. 함수 정의. */
+					     struct device_attribute *attr, /* NVMe: 함수 매개변수 선언. */
+					     const char *buf, size_t count) /* NVMe: 함수 매개변수 선언. */
+{ /* NVMe: 블록 시작. */
 	struct pci_dev *pdev = to_pci_dev(dev); /* NVMe: pci_dev 변환. */
 	bool drivers_autoprobe; /* NVMe: 자동 탐색 플래그. */
 
@@ -728,7 +728,7 @@ static ssize_t sriov_drivers_autoprobe_store(struct device *dev,
 	pdev->sriov->drivers_autoprobe = drivers_autoprobe; /* NVMe: 자동 탐색 설정 저장. */
 
 	return count; /* NVMe: 기록된 바이트 수 반환. */
-}
+} /* NVMe: 블록 종료. */
 
 static DEVICE_ATTR_RO(sriov_totalvfs); /* NVMe: 속성 정의. */
 static DEVICE_ATTR_RW(sriov_numvfs); /* NVMe: 속성 정의. */
@@ -748,41 +748,41 @@ static struct attribute *sriov_pf_dev_attrs[] = { /* NVMe: PF sysfs 속성 테�
 	&dev_attr_sriov_vf_total_msix.attr, /* NVMe: vf_total_msix 속성. */
 #endif /* NVMe: CONFIG_PCI_MSI 블록 종료. */
 	NULL, /* NVMe: 테이블 끝. */
-};
+}; /* NVMe: 구조체/배열 정의 종료. */
 
-static umode_t sriov_pf_attrs_are_visible(struct kobject *kobj,
-					  struct attribute *a, int n)
-{
+static umode_t sriov_pf_attrs_are_visible(struct kobject *kobj, /* NVMe: PF sysfs 속성 가시성 결정. 함수 정의. */
+					  struct attribute *a, int n) /* NVMe: 함수 매개변수 선언. */
+{ /* NVMe: 블록 시작. */
 	struct device *dev = kobj_to_dev(kobj); /* NVMe: kobject에서 device 변환. */
 
 	if (!dev_is_pf(dev)) /* NVMe: PF가 아니면 속성 비가시. */
 		return 0; /* NVMe: 후보 없음. */
 
 	return a->mode; /* NVMe: 속성 모드 반환. */
-}
+} /* NVMe: 블록 종료. */
 
 const struct attribute_group sriov_pf_dev_attr_group = { /* NVMe: PF sysfs 속성 그룹. */
 	.attrs = sriov_pf_dev_attrs, /* NVMe: PF 속성 테이블 연결. */
 	.is_visible = sriov_pf_attrs_are_visible, /* NVMe: 가시성 콜백 연결. */
-};
+}; /* NVMe: 구조체/배열 정의 종료. */
 
-int __weak pcibios_sriov_enable(struct pci_dev *pdev, u16 num_vfs)
-{
+int __weak pcibios_sriov_enable(struct pci_dev *pdev, u16 num_vfs) /* NVMe: 플랫폼별 SR-IOV 활성화 후킹. 함수 정의. */
+{ /* NVMe: 블록 시작. */
 	return 0; /* NVMe: 후보 없음. */
-}
+} /* NVMe: 블록 종료. */
 
-int __weak pcibios_sriov_disable(struct pci_dev *pdev)
-{
+int __weak pcibios_sriov_disable(struct pci_dev *pdev) /* NVMe: 플랫폼별 SR-IOV 비활성화 후킹. 함수 정의. */
+{ /* NVMe: 블록 시작. */
 	return 0; /* NVMe: 후보 없음. */
-}
+} /* NVMe: 블록 종료. */
 
 /*
  * sriov_add_vfs:
  *   요청된 수만큼 VF를 생성한다.
  *   NVMe: NVMe PF가 VF를 생성/관리할 때 이 함수가 호출된다.
  */
-static int sriov_add_vfs(struct pci_dev *dev, u16 num_vfs)
-{
+static int sriov_add_vfs(struct pci_dev *dev, u16 num_vfs) /* NVMe: VF 생성. 함수 정의. */
+{ /* NVMe: 블록 시작. */
 	unsigned int i; /* NVMe: 반복 변수. */
 	int rc; /* NVMe: 결과. */
 
@@ -793,29 +793,29 @@ static int sriov_add_vfs(struct pci_dev *dev, u16 num_vfs)
 		rc = pci_iov_add_virtfn(dev, i); /* NVMe: 각 VF 추가. */
 		if (rc) /* NVMe: 계산 실패. */
 			goto failed; /* NVMe: 정리. */
-	}
+	} /* NVMe: 블록 종료. */
 	return 0; /* NVMe: 후보 없음. */
 failed: /* NVMe: 초기화 실패 레이블. */
 	while (i--) /* NVMe: 이까지 추가된 VF를 역순으로 제거. */
 		pci_iov_remove_virtfn(dev, i); /* NVMe: VF 제거. */
 
 	return rc; /* NVMe: 오류 반환. */
-}
+} /* NVMe: 블록 종료. */
 
 /*
  * sriov_enable:
  *   SR-IOV를 활성화하고 VF들을 노출한다.
  *   NVMe: NVMe PF가 VF를 생성/관리할 때 이 함수가 호출된다.
  */
-static int sriov_enable(struct pci_dev *dev, int nr_virtfn)
-{
+static int sriov_enable(struct pci_dev *dev, int nr_virtfn) /* NVMe: SR-IOV 활성화. 함수 정의. */
+{ /* NVMe: 블록 시작. */
 	int rc; /* NVMe: 결과. */
 	int i; /* NVMe: 반복 변수. */
 	int nres; /* NVMe: 할당된 리소스 개수. */
 	u16 initial; /* NVMe: Initial VF 수. */
 	struct resource *res; /* NVMe: 리소스 포인터. */
 	struct pci_dev *pdev; /* NVMe: 버스상 다른 PF 포인터. */
-	struct pci_sriov *iov = dev->sriov;
+	struct pci_sriov *iov = dev->sriov; /* NVMe: PF의 SR-IOV 구조체 포인터 변수 선언. */
 	int bars = 0; /* NVMe: 활성화할 BAR 비트마스크. */
 	int bus; /* NVMe: 마지막 VF 버스 번호. */
 
@@ -845,23 +845,23 @@ static int sriov_enable(struct pci_dev *dev, int nr_virtfn)
 			continue; /* NVMe: 다음 장치. */
 		if (res->parent) /* NVMe: 리소스가 할당되었으면. */
 			nres++; /* NVMe: 유효 리소스 카운트 증가. */
-	}
+	} /* NVMe: 블록 종료. */
 	if (nres != iov->nres) { /* NVMe: 할당된 리소스 수가 초기화 때와 다름. */
 		pci_err(dev, "not enough MMIO resources for SR-IOV\n"); /* NVMe: MMIO 부족 오류 메시지. */
 		return -ENOMEM; /* NVMe: 메모리 부족. */
-	}
+	} /* NVMe: 블록 종료. */
 
 	bus = pci_iov_virtfn_bus(dev, nr_virtfn - 1); /* NVMe: 마지막 VF 버스 번호. */
 	if (bus > dev->bus->busn_res.end) { /* NVMe: 버스 번호가 부모 버스 범위를 초과. */
 		pci_err(dev, "can't enable %d VFs (bus %02x out of range of %pR)\n", /* NVMe: 오류 메시지. */
 			nr_virtfn, bus, &dev->bus->busn_res); /* NVMe: 인자. */
 		return -ENOMEM; /* NVMe: 메모리 부족. */
-	}
+	} /* NVMe: 블록 종료. */
 
 	if (pci_enable_resources(dev, bars)) { /* NVMe: PF의 IOV BAR 리소스 활성화. */
 		pci_err(dev, "SR-IOV: IOV BARS not allocated\n"); /* NVMe: 오류 메시지. */
 		return -ENOMEM; /* NVMe: 메모리 부족. */
-	}
+	} /* NVMe: 블록 종료. */
 
 	if (iov->link != dev->devfn) { /* NVMe: dep_link 제거. */
 		pdev = pci_get_slot(dev->bus, iov->link); /* NVMe: 의존 PF 디바이스 획득. */
@@ -871,14 +871,14 @@ static int sriov_enable(struct pci_dev *dev, int nr_virtfn)
 		if (!pdev->is_physfn) { /* NVMe: 의존 대상이 PF가 아니면. */
 			pci_dev_put(pdev); /* NVMe: 의존 PF 참조 감소. */
 			return -ENOSYS; /* NVMe: PF가 아니면 불가. */
-		}
+		} /* NVMe: 블록 종료. */
 
 		rc = sysfs_create_link(&dev->dev.kobj, /* NVMe: 의존 PF와의 sysfs 링크 생성. */
 					&pdev->dev.kobj, "dep_link"); /* NVMe: dep_link 이름. */
 		pci_dev_put(pdev); /* NVMe: 의존 PF 참조 감소. */
 		if (rc) /* NVMe: 계산 실패. */
 			return rc; /* NVMe: 오류 반환. */
-	}
+	} /* NVMe: 블록 종료. */
 
 	iov->initial_VFs = initial; /* NVMe: Initial VF 수 저장. */
 	if (nr_virtfn < initial) /* NVMe: 요청한 수가 initial보다 작으면. */
@@ -888,7 +888,7 @@ static int sriov_enable(struct pci_dev *dev, int nr_virtfn)
 	if (rc) { /* NVMe: 계산 실패. */
 		pci_err(dev, "failure %d from pcibios_sriov_enable()\n", rc); /* NVMe: 오류 메시지. */
 		goto err_pcibios; /* NVMe: 활성화 롤백. */
-	}
+	} /* NVMe: 블록 종료. */
 
 	pci_iov_set_numvfs(dev, nr_virtfn); /* NVMe: NumVFs 레지스터 설정. */
 	iov->ctrl |= PCI_SRIOV_CTRL_VFE | PCI_SRIOV_CTRL_MSE; /* NVMe: VF Enable 및 Memory Space Enable 설정. */
@@ -920,30 +920,30 @@ err_pcibios: /* NVMe: 롤백 레이블. */
 
 	pci_iov_set_numvfs(dev, 0); /* NVMe: NumVFs 0. */
 	return rc; /* NVMe: 오류 반환. */
-}
+} /* NVMe: 블록 종료. */
 
 /*
  * sriov_del_vfs:
  *   활성화된 모든 VF를 제거한다.
  *   NVMe: NVMe PF가 VF를 생성/관리할 때 이 함수가 호출된다.
  */
-static void sriov_del_vfs(struct pci_dev *dev)
-{
-	struct pci_sriov *iov = dev->sriov;
+static void sriov_del_vfs(struct pci_dev *dev) /* NVMe: VF 제거. 함수 정의. */
+{ /* NVMe: 블록 시작. */
+	struct pci_sriov *iov = dev->sriov; /* NVMe: PF의 SR-IOV 구조체 포인터 변수 선언. */
 	int i; /* NVMe: 반복 변수. */
 
 	for (i = 0; i < iov->num_VFs; i++) /* NVMe: 활성화된 VF 모두 제거. */
 		pci_iov_remove_virtfn(dev, i); /* NVMe: VF 제거. */
-}
+} /* NVMe: 블록 종료. */
 
 /*
  * sriov_disable:
  *   SR-IOV를 비활성화한다.
  *   NVMe: NVMe PF가 VF를 생성/관리할 때 이 함수가 호출된다.
  */
-static void sriov_disable(struct pci_dev *dev)
-{
-	struct pci_sriov *iov = dev->sriov;
+static void sriov_disable(struct pci_dev *dev) /* NVMe: SR-IOV 비활성화. 함수 정의. */
+{ /* NVMe: 블록 시작. */
+	struct pci_sriov *iov = dev->sriov; /* NVMe: PF의 SR-IOV 구조체 포인터 변수 선언. */
 
 	if (!iov->num_VFs) /* NVMe: 활성화된 VF가 없으면. */
 		return; /* NVMe: 조기 반환. */
@@ -962,15 +962,15 @@ static void sriov_disable(struct pci_dev *dev)
 
 	iov->num_VFs = 0; /* NVMe: 활성화 카운트 0. */
 	pci_iov_set_numvfs(dev, 0); /* NVMe: NumVFs 0. */
-}
+} /* NVMe: 블록 종료. */
 
 /*
  * sriov_init:
  *   SR-IOV 능력을 초기화하고 VF 리소스를 계산한다.
  *   NVMe: NVMe PF가 VF를 생성/관리할 때 이 함수가 호출된다.
  */
-static int sriov_init(struct pci_dev *dev, int pos)
-{
+static int sriov_init(struct pci_dev *dev, int pos) /* NVMe: SR-IOV capability 초기화. 함수 정의. */
+{ /* NVMe: 블록 시작. */
 	int i, bar64; /* NVMe: 반복 및 64비트 BAR 플래그. */
 	int rc; /* NVMe: 결과. */
 	int nres; /* NVMe: 할당된 리소스 개수. */
@@ -986,7 +986,7 @@ static int sriov_init(struct pci_dev *dev, int pos)
 	if (ctrl & PCI_SRIOV_CTRL_VFE) { /* NVMe: 이미 VF Enable이면 복원 불필요. */
 		pci_write_config_word(dev, pos + PCI_SRIOV_CTRL, 0); /* NVMe: SR-IOV Control 0으로 클리어. */
 		ssleep(1); /* NVMe: 하드웨어 비활성화 대기. */
-	}
+	} /* NVMe: 블록 종료. */
 
 	ctrl = 0; /* NVMe: control 초기화. */
 	list_for_each_entry(pdev, &dev->bus->devices, bus_list) /* NVMe: 동일 버스의 다른 PF 검색. */
@@ -1043,14 +1043,14 @@ found: /* NVMe: PF 검색 완료 레이블. */
 		if (resource_size(res) & (PAGE_SIZE - 1)) { /* NVMe: PAGE 정렬되지 않음. */
 			rc = -EIO; /* NVMe: I/O 오류. */
 			goto failed; /* NVMe: 정리. */
-		}
+		} /* NVMe: 블록 종료. */
 		iov->barsz[i] = resource_size(res); /* NVMe: VF BAR 개별 크기 저장. */
 		resource_set_size(res, resource_size(res) * total); /* NVMe: total VF 수만큼 전체 리소스 크기 확장. */
 		pci_info(dev, "%s %pR: contains BAR %d for %d VFs\n", /* NVMe: 정보 메시지. */
 			 res_name, res, i, total); /* NVMe: 메시지 인자. */
 		i += bar64; /* NVMe: 64비트 BAR이면 다음 인덱스 스킵. */
 		nres++; /* NVMe: 유효 리소스 카운트 증가. */
-	}
+	} /* NVMe: 블록 종료. */
 
 	iov->pos = pos; /* NVMe: SR-IOV capability 위치 저장. */
 	iov->nres = nres; /* NVMe: 유효 리소스 수 저장. */
@@ -1087,19 +1087,19 @@ failed: /* NVMe: 초기화 실패 레이블. */
 	for (i = 0; i < PCI_SRIOV_NUM_BARS; i++) { /* NVMe: VF BAR 복원 루프. */
 		res = &dev->resource[pci_resource_num_from_vf_bar(i)]; /* NVMe: VF BAR 리소스. */
 		res->flags = 0; /* NVMe: 리소스 플래그 클리어. */
-	}
+	} /* NVMe: 블록 종료. */
 
 	kfree(iov); /* NVMe: 구조체 해제. */
 	return rc; /* NVMe: 오류 반환. */
-}
+} /* NVMe: 블록 종료. */
 
 /*
  * sriov_release:
  *   SR-IOV 구조체를 해제한다.
  *   NVMe: NVMe PF가 VF를 생성/관리할 때 이 함수가 호출된다.
  */
-static void sriov_release(struct pci_dev *dev)
-{
+static void sriov_release(struct pci_dev *dev) /* NVMe: SR-IOV 구조체 해제. 함수 정의. */
+{ /* NVMe: 블록 시작. */
 	BUG_ON(dev->sriov->num_VFs); /* NVMe: VF가 남아 있으면 패닉. */
 
 	if (dev != dev->sriov->dev) /* NVMe: 의존 PF가 자신이 아니면. */
@@ -1107,15 +1107,15 @@ static void sriov_release(struct pci_dev *dev)
 
 	kfree(dev->sriov); /* NVMe: SR-IOV 구조체 메모리 해제. */
 	dev->sriov = NULL; /* NVMe: 포인터 클리어. */
-}
+} /* NVMe: 블록 종료. */
 
 /*
  * sriov_restore_vf_rebar_state:
  *   VF Resizable BAR 상태를 복원한다.
  *   NVMe: NVMe PF가 VF를 생성/관리할 때 이 함수가 호출된다.
  */
-static void sriov_restore_vf_rebar_state(struct pci_dev *dev)
-{
+static void sriov_restore_vf_rebar_state(struct pci_dev *dev) /* NVMe: VF REBAR 상태 복원. 함수 정의. */
+{ /* NVMe: 블록 시작. */
 	unsigned int pos, nbars, i; /* NVMe: capability 위치, BAR 개수, 반복. */
 	u32 ctrl; /* NVMe: REBAR control 값. */
 
@@ -1135,19 +1135,19 @@ static void sriov_restore_vf_rebar_state(struct pci_dev *dev)
 		ctrl &= ~PCI_VF_REBAR_CTRL_BAR_SIZE; /* NVMe: 크기 필드 클리어. */
 		ctrl |= FIELD_PREP(PCI_VF_REBAR_CTRL_BAR_SIZE, size); /* NVMe: 새 크기 기록. */
 		pci_write_config_dword(dev, pos + PCI_VF_REBAR_CTRL, ctrl); /* NVMe: REBAR control 레지스터 쓰기. */
-	}
-}
+	} /* NVMe: 블록 종료. */
+} /* NVMe: 블록 종료. */
 
 /*
  * sriov_restore_state:
  *   suspend/resume 후 SR-IOV 레지스터 상태를 복원한다.
  *   NVMe: NVMe PF가 VF를 생성/관리할 때 이 함수가 호출된다.
  */
-static void sriov_restore_state(struct pci_dev *dev)
-{
+static void sriov_restore_state(struct pci_dev *dev) /* NVMe: SR-IOV 레지스터 상태 복원. 함수 정의. */
+{ /* NVMe: 블록 시작. */
 	int i; /* NVMe: 반복 변수. */
 	u16 ctrl; /* NVMe: control 값. */
-	struct pci_sriov *iov = dev->sriov;
+	struct pci_sriov *iov = dev->sriov; /* NVMe: PF의 SR-IOV 구조체 포인터 변수 선언. */
 
 	pci_read_config_word(dev, iov->pos + PCI_SRIOV_CTRL, &ctrl); /* NVMe: 현재 control 읽기. */
 	if (ctrl & PCI_SRIOV_CTRL_VFE) /* NVMe: 이미 VF Enable이면 복원 불필요. */
@@ -1169,7 +1169,7 @@ static void sriov_restore_state(struct pci_dev *dev)
 	pci_write_config_word(dev, iov->pos + PCI_SRIOV_CTRL, iov->ctrl); /* NVMe: control 복원. */
 	if (iov->ctrl & PCI_SRIOV_CTRL_VFE) /* NVMe: VF Enable 상태였으면. */
 		msleep(100); /* NVMe: 안정화 대기. */
-}
+} /* NVMe: 블록 종료. */
 
 /**
  * pci_iov_init - initialize the IOV capability
@@ -1182,8 +1182,8 @@ static void sriov_restore_state(struct pci_dev *dev)
  *   PCI IOV 능력을 초기화한다.
  *   NVMe: NVMe PF가 VF를 생성/관리할 때 이 함수가 호출된다.
  */
-int pci_iov_init(struct pci_dev *dev)
-{
+int pci_iov_init(struct pci_dev *dev) /* NVMe: 함수 정의 시작. */
+{ /* NVMe: 블록 시작. */
 	int pos; /* NVMe: capability 위치. */
 
 	if (!pci_is_pcie(dev)) /* NVMe: PCIe가 아니면 SR-IOV 없음. */
@@ -1194,7 +1194,7 @@ int pci_iov_init(struct pci_dev *dev)
 		return sriov_init(dev, pos); /* NVMe: 초기화 함수 호출. */
 
 	return -ENODEV; /* NVMe: 장치 없음. */
-}
+} /* NVMe: 블록 종료. */
 
 /**
  * pci_iov_release - release resources used by the IOV capability
@@ -1205,11 +1205,11 @@ int pci_iov_init(struct pci_dev *dev)
  *   PF의 IOV 리소스를 해제한다.
  *   NVMe: NVMe PF가 VF를 생성/관리할 때 이 함수가 호출된다.
  */
-void pci_iov_release(struct pci_dev *dev)
-{
+void pci_iov_release(struct pci_dev *dev) /* NVMe: 함수 정의 시작. */
+{ /* NVMe: 블록 시작. */
 	if (dev->is_physfn) /* NVMe: PF일 때만. */
 		sriov_release(dev); /* NVMe: SR-IOV 구조체 해제. */
-}
+} /* NVMe: 블록 종료. */
 
 /**
  * pci_iov_remove - clean up SR-IOV state after PF driver is detached
@@ -1220,9 +1220,9 @@ void pci_iov_release(struct pci_dev *dev)
  *   PF 드라이버 detach 후 SR-IOV 상태를 정리한다.
  *   NVMe: NVMe PF가 VF를 생성/관리할 때 이 함수가 호출된다.
  */
-void pci_iov_remove(struct pci_dev *dev)
-{
-	struct pci_sriov *iov = dev->sriov;
+void pci_iov_remove(struct pci_dev *dev) /* NVMe: 함수 정의 시작. */
+{ /* NVMe: 블록 시작. */
+	struct pci_sriov *iov = dev->sriov; /* NVMe: PF의 SR-IOV 구조체 포인터 변수 선언. */
 
 	if (!dev->is_physfn) /* NVMe: PF가 아니면. */
 		return; /* NVMe: 조기 반환. */
@@ -1230,7 +1230,7 @@ void pci_iov_remove(struct pci_dev *dev)
 	iov->driver_max_VFs = iov->total_VFs; /* NVMe: 드라이버 제한을 total로 복원. */
 	if (iov->num_VFs) /* NVMe: VF가 남아 있으면. */
 		pci_warn(dev, "driver left SR-IOV enabled after remove\n"); /* NVMe: 경고. */
-}
+} /* NVMe: 블록 종료. */
 
 /**
  * pci_iov_update_resource - update a VF BAR
@@ -1244,8 +1244,8 @@ void pci_iov_remove(struct pci_dev *dev)
  *   VF BAR 리소스를 갱신한다.
  *   NVMe: NVMe PF가 VF를 생성/관리할 때 이 함수가 호출된다.
  */
-void pci_iov_update_resource(struct pci_dev *dev, int resno)
-{
+void pci_iov_update_resource(struct pci_dev *dev, int resno) /* NVMe: VF BAR 리소스 갱신. 함수 정의. */
+{ /* NVMe: 블록 시작. */
 	struct pci_sriov *iov = dev->is_physfn ? dev->sriov : NULL; /* NVMe: PF인 경우에만 구조체 획득. */
 	struct resource *res = pci_resource_n(dev, resno); /* NVMe: 갱신 대상 리소스. */
 	int vf_bar = pci_resource_num_to_vf_bar(resno); /* NVMe: VF BAR 인덱스. */
@@ -1267,7 +1267,7 @@ void pci_iov_update_resource(struct pci_dev *dev, int resno)
 		dev_WARN(&dev->dev, "can't update enabled VF BAR%d %pR\n", /* NVMe: 경고. */
 			 vf_bar, res); /* NVMe: 인자. */
 		return; /* NVMe: 조기 반환. */
-	}
+	} /* NVMe: 블록 종료. */
 
 	/*
 	 * Ignore unimplemented BARs, unused resource slots for 64-bit
@@ -1292,14 +1292,14 @@ void pci_iov_update_resource(struct pci_dev *dev, int resno)
 	if (res->flags & IORESOURCE_MEM_64) { /* NVMe: 64비트 BAR이면. */
 		new = region.start >> 16 >> 16; /* NVMe: 상위 32비트 추출. */
 		pci_write_config_dword(dev, reg + 4, new); /* NVMe: BAR 상위 32비트 쓰기. */
-	}
-}
+	} /* NVMe: 블록 종료. */
+} /* NVMe: 블록 종료. */
 
-resource_size_t __weak pcibios_iov_resource_alignment(struct pci_dev *dev,
-						      int resno)
-{
+resource_size_t __weak pcibios_iov_resource_alignment(struct pci_dev *dev, /* NVMe: 플랫폼별 VF BAR 정렬값 후킹. 함수 정의. */
+						      int resno) /* NVMe: 함수 매개변수 선언. */
+{ /* NVMe: 블록 시작. */
 	return pci_iov_resource_size(dev, resno); /* NVMe: VF BAR 크기를 기본 정렬값으로 반환. */
-}
+} /* NVMe: 블록 종료. */
 
 /**
  * pci_sriov_resource_alignment - get resource alignment for VF BAR
@@ -1316,10 +1316,10 @@ resource_size_t __weak pcibios_iov_resource_alignment(struct pci_dev *dev,
  *   VF BAR 정렬값을 반환한다.
  *   NVMe: NVMe PF가 VF를 생성/관리할 때 이 함수가 호출된다.
  */
-resource_size_t pci_sriov_resource_alignment(struct pci_dev *dev, int resno)
-{
+resource_size_t pci_sriov_resource_alignment(struct pci_dev *dev, int resno) /* NVMe: 함수 정의 시작. */
+{ /* NVMe: 블록 시작. */
 	return pcibios_iov_resource_alignment(dev, resno); /* NVMe: 플랫폼 정렬값 반환. */
-}
+} /* NVMe: 블록 종료. */
 
 /**
  * pci_restore_iov_state - restore the state of the IOV capability
@@ -1330,13 +1330,13 @@ resource_size_t pci_sriov_resource_alignment(struct pci_dev *dev, int resno)
  *   IOV 상태를 복원한다.
  *   NVMe: NVMe PF가 VF를 생성/관리할 때 이 함수가 호출된다.
  */
-void pci_restore_iov_state(struct pci_dev *dev)
-{
+void pci_restore_iov_state(struct pci_dev *dev) /* NVMe: 함수 정의 시작. */
+{ /* NVMe: 블록 시작. */
 	if (dev->is_physfn) { /* NVMe: PF일 때만. */
 		sriov_restore_vf_rebar_state(dev); /* NVMe: VF REBAR 상태 복원. */
 		sriov_restore_state(dev); /* NVMe: SR-IOV 레지스터 상태 복원. */
-	}
-}
+	} /* NVMe: 블록 종료. */
+} /* NVMe: 블록 종료. */
 
 /**
  * pci_vf_drivers_autoprobe - set PF property drivers_autoprobe for VFs
@@ -1348,11 +1348,11 @@ void pci_restore_iov_state(struct pci_dev *dev)
  *   VF 드라이버 자동 탐색 여부를 설정한다.
  *   NVMe: NVMe PF가 VF를 생성/관리할 때 이 함수가 호출된다.
  */
-void pci_vf_drivers_autoprobe(struct pci_dev *dev, bool auto_probe)
-{
+void pci_vf_drivers_autoprobe(struct pci_dev *dev, bool auto_probe) /* NVMe: 함수 정의 시작. */
+{ /* NVMe: 블록 시작. */
 	if (dev->is_physfn) /* NVMe: PF일 때만. */
 		dev->sriov->drivers_autoprobe = auto_probe; /* NVMe: 자동 탐색 플래그 갱신. */
-}
+} /* NVMe: 블록 종료. */
 
 /**
  * pci_iov_bus_range - find bus range used by Virtual Function
@@ -1366,8 +1366,8 @@ void pci_vf_drivers_autoprobe(struct pci_dev *dev, bool auto_probe)
  *   해당 버스에서 VF가 사용할 최대 버스 범위를 계산한다.
  *   NVMe: NVMe PF가 VF를 생성/관리할 때 이 함수가 호출된다.
  */
-int pci_iov_bus_range(struct pci_bus *bus)
-{
+int pci_iov_bus_range(struct pci_bus *bus) /* NVMe: VF용 최대 버스 범위 계산. 함수 정의. */
+{ /* NVMe: 블록 시작. */
 	int max = 0; /* NVMe: 최대 버스 초기화. */
 	struct pci_dev *dev; /* NVMe: 버스상 PF 순회용. */
 
@@ -1376,10 +1376,10 @@ int pci_iov_bus_range(struct pci_bus *bus)
 			continue; /* NVMe: 다음 장치. */
 		if (dev->sriov->max_VF_buses > max) /* NVMe: 최대값 갱신. */
 			max = dev->sriov->max_VF_buses; /* NVMe: 최대 VF 버스 저장. */
-	}
+	} /* NVMe: 블록 종료. */
 
 	return max ? max - bus->number : 0; /* NVMe: 현재 버스를 제외한 추가 버스 수 반환. */
-}
+} /* NVMe: 블록 종료. */
 
 /**
  * pci_enable_sriov - enable the SR-IOV capability
@@ -1393,15 +1393,15 @@ int pci_iov_bus_range(struct pci_bus *bus)
  *   SR-IOV를 활성화하는 외부 인터페이스다.
  *   NVMe: NVMe PF가 VF를 생성/관리할 때 이 함수가 호출된다.
  */
-int pci_enable_sriov(struct pci_dev *dev, int nr_virtfn)
-{
+int pci_enable_sriov(struct pci_dev *dev, int nr_virtfn) /* NVMe: SR-IOV 활성화. 함수 정의. */
+{ /* NVMe: 블록 시작. */
 	might_sleep(); /* NVMe: 수면 가능 표시. */
 
 	if (!dev->is_physfn) /* NVMe: PF가 아니면. */
 		return -ENOSYS; /* NVMe: PF가 아니면 불가. */
 
 	return sriov_enable(dev, nr_virtfn); /* NVMe: 낮부 활성화 함수 호출. */
-}
+} /* NVMe: 블록 종료. */
 EXPORT_SYMBOL_GPL(pci_enable_sriov); /* NVMe: 심볼 외부 공개. */
 
 /**
@@ -1413,15 +1413,15 @@ EXPORT_SYMBOL_GPL(pci_enable_sriov); /* NVMe: 심볼 외부 공개. */
  *   SR-IOV를 비활성화하는 외부 인터페이스다.
  *   NVMe: NVMe PF가 VF를 생성/관리할 때 이 함수가 호출된다.
  */
-void pci_disable_sriov(struct pci_dev *dev)
-{
+void pci_disable_sriov(struct pci_dev *dev) /* NVMe: SR-IOV 비활성화. 함수 정의. */
+{ /* NVMe: 블록 시작. */
 	might_sleep(); /* NVMe: 수면 가능 표시. */
 
 	if (!dev->is_physfn) /* NVMe: PF가 아니면. */
 		return; /* NVMe: 조기 반환. */
 
 	sriov_disable(dev); /* NVMe: SR-IOV 비활성화. */
-}
+} /* NVMe: 블록 종료. */
 EXPORT_SYMBOL_GPL(pci_disable_sriov); /* NVMe: 심볼 외부 공개. */
 
 /**
@@ -1435,13 +1435,13 @@ EXPORT_SYMBOL_GPL(pci_disable_sriov); /* NVMe: 심볼 외부 공개. */
  *   PF에 연결된 VF 개수를 반환한다.
  *   NVMe: NVMe PF가 VF를 생성/관리할 때 이 함수가 호출된다.
  */
-int pci_num_vf(struct pci_dev *dev)
-{
+int pci_num_vf(struct pci_dev *dev) /* NVMe: 함수 정의 시작. */
+{ /* NVMe: 블록 시작. */
 	if (!dev->is_physfn) /* NVMe: PF가 아니면. */
 		return 0; /* NVMe: 후보 없음. */
 
 	return dev->sriov->num_VFs; /* NVMe: 활성 VF 수 반환. */
-}
+} /* NVMe: 블록 종료. */
 EXPORT_SYMBOL_GPL(pci_num_vf); /* NVMe: 심볼 외부 공개. */
 
 /**
@@ -1456,8 +1456,8 @@ EXPORT_SYMBOL_GPL(pci_num_vf); /* NVMe: 심볼 외부 공개. */
  *   게스트에 할당된 VF 개수를 반환한다.
  *   NVMe: NVMe PF가 VF를 생성/관리할 때 이 함수가 호출된다.
  */
-int pci_vfs_assigned(struct pci_dev *dev)
-{
+int pci_vfs_assigned(struct pci_dev *dev) /* NVMe: 게스트에 할당된 VF 수 확인. 함수 정의. */
+{ /* NVMe: 블록 시작. */
 	struct pci_dev *vfdev; /* NVMe: VF 순회용 포인터. */
 	unsigned int vfs_assigned = 0; /* NVMe: 할당 카운트 초기화. */
 	unsigned short dev_id; /* NVMe: VF device ID. */
@@ -1484,10 +1484,10 @@ int pci_vfs_assigned(struct pci_dev *dev)
 			vfs_assigned++; /* NVMe: 카운트 증가. */
 
 		vfdev = pci_get_device(dev->vendor, dev_id, vfdev); /* NVMe: 다음 일치 장치 검색. */
-	}
+	} /* NVMe: 블록 종료. */
 
 	return vfs_assigned; /* NVMe: 할당된 VF 수 반환. */
-}
+} /* NVMe: 블록 종료. */
 EXPORT_SYMBOL_GPL(pci_vfs_assigned); /* NVMe: 심볼 외부 공개. */
 
 /**
@@ -1508,8 +1508,8 @@ EXPORT_SYMBOL_GPL(pci_vfs_assigned); /* NVMe: 심볼 외부 공개. */
  *   드라이버가 사용할 최대 VF 수를 제한한다.
  *   NVMe: NVMe PF가 VF를 생성/관리할 때 이 함수가 호출된다.
  */
-int pci_sriov_set_totalvfs(struct pci_dev *dev, u16 numvfs)
-{
+int pci_sriov_set_totalvfs(struct pci_dev *dev, u16 numvfs) /* NVMe: 최대 VF 수 제한. 함수 정의. */
+{ /* NVMe: 블록 시작. */
 	if (!dev->is_physfn) /* NVMe: PF가 아니면. */
 		return -ENOSYS; /* NVMe: PF가 아니면 불가. */
 
@@ -1522,7 +1522,7 @@ int pci_sriov_set_totalvfs(struct pci_dev *dev, u16 numvfs)
 
 	dev->sriov->driver_max_VFs = numvfs; /* NVMe: 드라이버 최대 VF 수 제한. */
 	return 0; /* NVMe: 후보 없음. */
-}
+} /* NVMe: 블록 종료. */
 EXPORT_SYMBOL_GPL(pci_sriov_set_totalvfs); /* NVMe: 심볼 외부 공개. */
 
 /**
@@ -1538,13 +1538,13 @@ EXPORT_SYMBOL_GPL(pci_sriov_set_totalvfs); /* NVMe: 심볼 외부 공개. */
  *   현재 드라이버가 노출하는 totalvfs 값을 반환한다.
  *   NVMe: NVMe PF가 VF를 생성/관리할 때 이 함수가 호출된다.
  */
-int pci_sriov_get_totalvfs(struct pci_dev *dev)
-{
+int pci_sriov_get_totalvfs(struct pci_dev *dev) /* NVMe: totalvfs 값 획득. 함수 정의. */
+{ /* NVMe: 블록 시작. */
 	if (!dev->is_physfn) /* NVMe: PF가 아니면. */
 		return 0; /* NVMe: 후보 없음. */
 
 	return dev->sriov->driver_max_VFs; /* NVMe: 드라이버가 노출하는 totalvfs 반환. */
-}
+} /* NVMe: 블록 종료. */
 EXPORT_SYMBOL_GPL(pci_sriov_get_totalvfs); /* NVMe: 심볼 외부 공개. */
 
 /**
@@ -1561,8 +1561,8 @@ EXPORT_SYMBOL_GPL(pci_sriov_get_totalvfs); /* NVMe: 심볼 외부 공개. */
  *   별도 PF 준비 없이 SR-IOV를 활성화/비활성화한다.
  *   NVMe: NVMe PF가 VF를 생성/관리할 때 이 함수가 호출된다.
  */
-int pci_sriov_configure_simple(struct pci_dev *dev, int nr_virtfn)
-{
+int pci_sriov_configure_simple(struct pci_dev *dev, int nr_virtfn) /* NVMe: SR-IOV 활성화/비활성화 헬퍼. 함수 정의. */
+{ /* NVMe: 블록 시작. */
 	int rc; /* NVMe: 결과. */
 
 	might_sleep(); /* NVMe: 수면 가능 표시. */
@@ -1573,19 +1573,19 @@ int pci_sriov_configure_simple(struct pci_dev *dev, int nr_virtfn)
 	if (pci_vfs_assigned(dev)) { /* NVMe: VF가 게스트에 할당 중이면. */
 		pci_warn(dev, "Cannot modify SR-IOV while VFs are assigned\n"); /* NVMe: 경고. */
 		return -EPERM; /* NVMe: 권한 없음. */
-	}
+	} /* NVMe: 블록 종료. */
 
 	if (nr_virtfn == 0) { /* NVMe: 비활성화 요청. */
 		sriov_disable(dev); /* NVMe: SR-IOV 비활성화. */
 		return 0; /* NVMe: 후보 없음. */
-	}
+	} /* NVMe: 블록 종료. */
 
 	rc = sriov_enable(dev, nr_virtfn); /* NVMe: 활성화 시도. */
 	if (rc < 0) /* NVMe: 실패. */
 		return rc; /* NVMe: 오류 반환. */
 
 	return nr_virtfn; /* NVMe: 활성화된 VF 수 반환. */
-}
+} /* NVMe: 블록 종료. */
 EXPORT_SYMBOL_GPL(pci_sriov_configure_simple); /* NVMe: 심볼 외부 공개. */
 
 /**
@@ -1607,8 +1607,8 @@ EXPORT_SYMBOL_GPL(pci_sriov_configure_simple); /* NVMe: 심볼 외부 공개. */
  *   VF Resizable BAR의 크기를 변경한다.
  *   NVMe: NVMe PF가 VF를 생성/관리할 때 이 함수가 호출된다.
  */
-int pci_iov_vf_bar_set_size(struct pci_dev *dev, int resno, int size)
-{
+int pci_iov_vf_bar_set_size(struct pci_dev *dev, int resno, int size) /* NVMe: VF REBAR 크기 설정. 함수 정의. */
+{ /* NVMe: 블록 시작. */
 	if (!pci_resource_is_iov(resno)) /* NVMe: IOV 리소스가 아니면. */
 		return -EINVAL; /* NVMe: 잘못된 인자. */
 
@@ -1619,7 +1619,7 @@ int pci_iov_vf_bar_set_size(struct pci_dev *dev, int resno, int size)
 		return -EINVAL; /* NVMe: 잘못된 인자. */
 
 	return pci_rebar_set_size(dev, resno, size); /* NVMe: REBAR 크기 설정. */
-}
+} /* NVMe: 블록 종료. */
 EXPORT_SYMBOL_GPL(pci_iov_vf_bar_set_size); /* NVMe: 심볼 외부 공개. */
 
 /**
@@ -1639,8 +1639,8 @@ EXPORT_SYMBOL_GPL(pci_iov_vf_bar_set_size); /* NVMe: 심볼 외부 공개. */
  *   주어진 VF 수에 맞는 VF BAR 크기 후보 집합을 반환한다.
  *   NVMe: NVMe PF가 VF를 생성/관리할 때 이 함수가 호출된다.
  */
-u32 pci_iov_vf_bar_get_sizes(struct pci_dev *dev, int resno, int num_vfs)
-{
+u32 pci_iov_vf_bar_get_sizes(struct pci_dev *dev, int resno, int num_vfs) /* NVMe: VF BAR 크기 후보 집합 획득. 함수 정의. */
+{ /* NVMe: 블록 시작. */
 	u64 vf_len = pci_resource_len(dev, resno); /* NVMe: PF IOV 리소스 전체 길이. */
 	u64 sizes; /* NVMe: 후보 크기 비트마스크. */
 
@@ -1651,5 +1651,5 @@ u32 pci_iov_vf_bar_get_sizes(struct pci_dev *dev, int resno, int num_vfs)
 	sizes = (roundup_pow_of_two(vf_len + 1) - 1) >> ilog2(SZ_1M); /* NVMe: 1MB 단위 후보 집합 생성. */
 
 	return sizes & pci_rebar_get_possible_sizes(dev, resno); /* NVMe: 가능한 크기와 교집합 반환. */
-}
+} /* NVMe: 블록 종료. */
 EXPORT_SYMBOL_GPL(pci_iov_vf_bar_get_sizes); /* NVMe: 심볼 외부 공개. */

@@ -34,19 +34,19 @@
  * ===================================================================
  */
 
-#define dev_fmt(fmt) "DOE: " fmt
+#define dev_fmt(fmt) "DOE: " fmt	/* NVMe: 디버그 메시지 접두사를 'DOE: '로 설정한다. */
 
-#include <linux/bitfield.h>
-#include <linux/delay.h>
-#include <linux/device.h>
-#include <linux/jiffies.h>
-#include <linux/mutex.h>
-#include <linux/pci.h>
-#include <linux/pci-doe.h>
-#include <linux/sysfs.h>
-#include <linux/workqueue.h>
+#include <linux/bitfield.h>	/* NVMe: linux/bitfield.h 헤더를 포함한다. */
+#include <linux/delay.h>	/* NVMe: linux/delay.h 헤더를 포함한다. */
+#include <linux/device.h>	/* NVMe: linux/device.h 헤더를 포함한다. */
+#include <linux/jiffies.h>	/* NVMe: linux/jiffies.h 헤더를 포함한다. */
+#include <linux/mutex.h>	/* NVMe: linux/mutex.h 헤더를 포함한다. */
+#include <linux/pci.h>	/* NVMe: linux/pci.h 헤더를 포함한다. */
+#include <linux/pci-doe.h>	/* NVMe: linux/pci-doe.h 헤더를 포함한다. */
+#include <linux/sysfs.h>	/* NVMe: linux/sysfs.h 헤더를 포함한다. */
+#include <linux/workqueue.h>	/* NVMe: linux/workqueue.h 헤더를 포함한다. */
 
-#include "pci.h"
+#include "pci.h"	/* NVMe: pci.h 헤더를 포함한다. */
 
 /* Timeout of 1 second from 6.30.2 Operation, PCI Spec r6.0 */
 #define PCI_DOE_TIMEOUT HZ	/* NVMe: DOE 작업 타임아웃을 1초(HZ)로 정의한다. */
@@ -129,32 +129,32 @@ struct pci_doe_task {	/* NVMe: NVMe 측에서 제출하는 하나의 DOE 요청/
  *   PCI-SIG DOE Discovery feature를 통해 사용자공간(nvme-cli 등)에서
  *   장치가 지원하는 DOE feature 목록을 확인할 수 있게 한다.
  */
-static ssize_t doe_discovery_show(struct device *dev,
-				  struct device_attribute *attr,
-				  char *buf)
-{
+static ssize_t doe_discovery_show(struct device *dev,	/* NVMe: doe_discovery_show() 함수 정의를 시작한다. */
+				  struct device_attribute *attr,	/* NVMe: 매개변수 attr를 선언한다. */
+				  char *buf)	/* NVMe: 매개변수 buf를 선언한다. */
+{	/* NVMe: 함수 본문을 시작한다. */
 	return sysfs_emit(buf, "0001:00\n");	/* NVMe: DOE Discovery sysfs 항목을 "0001:00"으로 노출한다. */
-}
+}	/* NVMe: 함수 정의를 마친다. */
 static DEVICE_ATTR_RO(doe_discovery);	/* NVMe: doe_discovery sysfs 속성을 읽기 전용으로 정의한다. */
 
 static struct attribute *pci_doe_sysfs_feature_attrs[] = {	/* NVMe: 변수를 선언한다. */
 	&dev_attr_doe_discovery.attr,	/* NVMe: doe_discovery 속성을 그룹에 포함한다. */
-	NULL
+	NULL	/* NVMe: 속성 배열의 끝을 표시한다. */
 };	/* NVMe: 구조체/공용체/열거형 정의를 마친다. */
 
-static bool pci_doe_features_sysfs_group_visible(struct kobject *kobj)
-{
+static bool pci_doe_features_sysfs_group_visible(struct kobject *kobj)	/* NVMe: pci_doe_features_sysfs_group_visible() 함수 정의를 시작한다. */
+{	/* NVMe: 함수 본문을 시작한다. */
 	struct pci_dev *pdev = to_pci_dev(kobj_to_dev(kobj));	/* NVMe: 값을 설정한다: struct pci_dev *pdev. */
 
 	return !xa_empty(&pdev->doe_mbs);	/* NVMe: NVMe 장치에 DOE mailbox가 있을 때만 그룹을 노출한다. */
-}
+}	/* NVMe: 함수 정의를 마친다. */
 DEFINE_SIMPLE_SYSFS_GROUP_VISIBLE(pci_doe_features_sysfs)	/* NVMe: sysfs 그룹 가시성 매크로를 정의한다. */
 
 const struct attribute_group pci_doe_sysfs_group = {	/* NVMe: 변수를 선언한다. */
 	.name	    = "doe_features",	/* NVMe: 멤버 name을(를) 초기화한다. */
 	.attrs	    = pci_doe_sysfs_feature_attrs,	/* NVMe: 멤버 attrs을(를) 초기화한다. */
 	.is_visible = SYSFS_GROUP_VISIBLE(pci_doe_features_sysfs),	/* NVMe: 멤버 is_visible을(를) 초기화한다. */
-};
+};	/* NVMe: 구조체/공용체/열거형 정의를 마친다. */
 
 
 /*
@@ -163,12 +163,12 @@ const struct attribute_group pci_doe_sysfs_group = {	/* NVMe: 변수를 선언�
  *   사용자공간에서 /sys/bus/pci/devices/.../doe_features/ 아래 파일로
  *   NVMe 컨트롤러가 지원하는 DOE 기능을 확인하는 데 사용된다.
  */
-static ssize_t pci_doe_sysfs_feature_show(struct device *dev,
-					  struct device_attribute *attr,
-					  char *buf)
-{
+static ssize_t pci_doe_sysfs_feature_show(struct device *dev,	/* NVMe: pci_doe_sysfs_feature_show() 함수 정의를 시작한다. */
+					  struct device_attribute *attr,	/* NVMe: 매개변수 attr를 선언한다. */
+					  char *buf)	/* NVMe: 매개변수 buf를 선언한다. */
+{	/* NVMe: 함수 본문을 시작한다. */
 	return sysfs_emit(buf, "%s\n", attr->attr.name);	/* NVMe: 개별 DOE feature 이름을 sysfs 버퍼에 출력한다. */
-}
+}	/* NVMe: 함수 정의를 마친다. */
 
 
 /*
@@ -177,9 +177,9 @@ static ssize_t pci_doe_sysfs_feature_show(struct device *dev,
  *   nvme_remove/hotplug 시 pci_doe_sysfs_teardown()을 통해 호출되어
  *   사용자공간 인터페이스를 정리한다.
  */
-static void pci_doe_sysfs_feature_remove(struct pci_dev *pdev,
-					 struct pci_doe_mb *doe_mb)
-{
+static void pci_doe_sysfs_feature_remove(struct pci_dev *pdev,	/* NVMe: pci_doe_sysfs_feature_remove() 함수 정의를 시작한다. */
+					 struct pci_doe_mb *doe_mb)	/* NVMe: 매개변수 doe_mb를 선언한다. */
+{	/* NVMe: 함수 본문을 시작한다. */
 	struct device_attribute *attrs = doe_mb->sysfs_attrs;	/* NVMe: 값을 설정한다: struct device_attribute *attrs. */
 	struct device *dev = &pdev->dev;	/* NVMe: 값을 설정한다: struct device *dev. */
 	unsigned long i;	/* NVMe: 변수를 선언한다. */
@@ -192,11 +192,11 @@ static void pci_doe_sysfs_feature_remove(struct pci_dev *pdev,
 	xa_for_each(&doe_mb->feats, i, entry) {	/* NVMe: 함수/매크로 xa_for_each()를 호출한다. */
 		if (attrs[i].show)	/* NVMe: 조건을 검사한다: (attrs[i].show. */
 			sysfs_remove_file_from_group(&dev->kobj, &attrs[i].attr,	/* NVMe: 함수/매크로 sysfs_remove_file_from_group()를 호출한다. */
-						     pci_doe_sysfs_group.name);
+						     pci_doe_sysfs_group.name);	/* NVMe: sysfs_remove_file_from_group() 호출의 인자를 계속한다. */
 		kfree(attrs[i].attr.name);	/* NVMe: 함수/매크로 kfree()를 호출한다. */
-	}
+	}	/* NVMe: 제어문/블록을 마친다. */
 	kfree(attrs);	/* NVMe: 함수/매크로 kfree()를 호출한다. */
-}
+}	/* NVMe: 함수 정의를 마친다. */
 
 
 /*
@@ -205,9 +205,9 @@ static void pci_doe_sysfs_feature_remove(struct pci_dev *pdev,
  *   discovery feature는 별도의 doe_discovery 항목으로 처리되며, 나머지는
  *   "VID:TYPE" 형태의 파일로 노출되어 관리 도구에서 확인할 수 있다.
  */
-static int pci_doe_sysfs_feature_populate(struct pci_dev *pdev,
-					  struct pci_doe_mb *doe_mb)
-{
+static int pci_doe_sysfs_feature_populate(struct pci_dev *pdev,	/* NVMe: pci_doe_sysfs_feature_populate() 함수 정의를 시작한다. */
+					  struct pci_doe_mb *doe_mb)	/* NVMe: 매개변수 doe_mb를 선언한다. */
+{	/* NVMe: 함수 본문을 시작한다. */
 	struct device *dev = &pdev->dev;	/* NVMe: 값을 설정한다: struct device *dev. */
 	struct device_attribute *attrs;	/* NVMe: 변수를 선언한다. */
 	unsigned long num_features = 0;	/* NVMe: 값을 설정한다: unsigned long num_features. */
@@ -223,7 +223,7 @@ static int pci_doe_sysfs_feature_populate(struct pci_dev *pdev,
 	if (!attrs) {	/* NVMe: 조건을 검사한다: (!attrs) {. */
 		pci_warn(pdev, "Failed allocating the device_attribute array\n");	/* NVMe: 함수/매크로 pci_warn()를 호출한다. */
 		return -ENOMEM;	/* NVMe: 결과 -ENOMEM를 반환한다. */
-	}
+	}	/* NVMe: 제어문/블록을 마친다. */
 
 	doe_mb->sysfs_attrs = attrs;	/* NVMe: 값을 설정한다: doe_mb->sysfs_attrs. */
 	xa_for_each(&doe_mb->feats, i, entry) {	/* NVMe: 함수/매크로 xa_for_each()를 호출한다. */
@@ -232,45 +232,45 @@ static int pci_doe_sysfs_feature_populate(struct pci_dev *pdev,
 		type = xa_to_value(entry) & 0xFF;	/* NVMe: 값을 설정한다: type. */
 
 		if (vid == PCI_VENDOR_ID_PCI_SIG &&	/* NVMe: 조건을 검사한다: (vid == PCI_VENDOR_ID_PCI_SIG &&. */
-		    type == PCI_DOE_FEATURE_DISCOVERY) {
+		    type == PCI_DOE_FEATURE_DISCOVERY) {	/* NVMe: if 조건식을 계속한다. */
 
 			/*
 			 * DOE Discovery, manually displayed by
 			 * `dev_attr_doe_discovery`
 			 */
 			continue;	/* NVMe: 다음 반복으로 넘어간다. */
-		}
+		}	/* NVMe: 제어문/블록을 마친다. */
 
 		attrs[i].attr.name = kasprintf(GFP_KERNEL,	/* NVMe: 값을 설정한다: attrs[i].attr.name. */
-					       "%04lx:%02lx", vid, type);
+					       "%04lx:%02lx", vid, type);	/* NVMe: kasprintf() 호출의 인자를 계속한다. */
 		if (!attrs[i].attr.name) {	/* NVMe: 조건을 검사한다: (!attrs[i].attr.name) {. */
 			ret = -ENOMEM;	/* NVMe: 값을 설정한다: ret. */
 			pci_warn(pdev, "Failed allocating the attribute name\n");	/* NVMe: 함수/매크로 pci_warn()를 호출한다. */
 			goto fail;	/* NVMe: 레이블 fail로 이동한다. */
-		}
+		}	/* NVMe: 제어문/블록을 마친다. */
 
 		attrs[i].attr.mode = 0444;	/* NVMe: 값을 설정한다: attrs[i].attr.mode. */
 		attrs[i].show = pci_doe_sysfs_feature_show;	/* NVMe: 값을 설정한다: attrs[i].show. */
 
 		ret = sysfs_add_file_to_group(&dev->kobj, &attrs[i].attr,	/* NVMe: 값을 설정한다: ret. */
-					      pci_doe_sysfs_group.name);
+					      pci_doe_sysfs_group.name);	/* NVMe: sysfs_add_file_to_group() 호출의 인자를 계속한다. */
 		if (ret) {	/* NVMe: 조건을 검사한다: (ret) {. */
 			attrs[i].show = NULL;	/* NVMe: 값을 설정한다: attrs[i].show. */
 			if (ret != -EEXIST) {	/* NVMe: 조건을 검사한다: (ret != -EEXIST) {. */
 				pci_warn(pdev, "Failed adding %s to sysfs group\n",	/* NVMe: 함수/매크로 pci_warn()를 호출한다. */
-					 attrs[i].attr.name);
+					 attrs[i].attr.name);	/* NVMe: pci_warn() 호출의 인자를 계속한다. */
 				goto fail;	/* NVMe: 레이블 fail로 이동한다. */
 			} else	/* NVMe: else 분기로 넘어간다. */
 				kfree(attrs[i].attr.name);	/* NVMe: 함수/매크로 kfree()를 호출한다. */
-		}
-	}
+		}	/* NVMe: 제어문/블록을 마친다. */
+	}	/* NVMe: 제어문/블록을 마친다. */
 
 	return 0;	/* NVMe: 결과 0를 반환한다. */
 
 fail:	/* NVMe: 코드 레이블을 정의한다. */
 	pci_doe_sysfs_feature_remove(pdev, doe_mb);	/* NVMe: 함수/매크로 pci_doe_sysfs_feature_remove()를 호출한다. */
 	return ret;	/* NVMe: 결과 ret를 반환한다. */
-}
+}	/* NVMe: 함수 정의를 마친다. */
 
 
 /*
@@ -279,14 +279,14 @@ fail:	/* NVMe: 코드 레이블을 정의한다. */
  *   장치 제거 단계에서 사용자공간이 DOE feature 정보를 더 이상 볼 수 없도록
  *   정리한다.
  */
-void pci_doe_sysfs_teardown(struct pci_dev *pdev)
-{
+void pci_doe_sysfs_teardown(struct pci_dev *pdev)	/* NVMe: pci_doe_sysfs_teardown() 함수 정의를 시작한다. */
+{	/* NVMe: 함수 본문을 시작한다. */
 	struct pci_doe_mb *doe_mb;	/* NVMe: 변수를 선언한다. */
 	unsigned long index;	/* NVMe: 변수를 선언한다. */
 
 	xa_for_each(&pdev->doe_mbs, index, doe_mb)	/* NVMe: 함수/매크로 xa_for_each()를 호출한다. */
 		pci_doe_sysfs_feature_remove(pdev, doe_mb);	/* NVMe: 함수/매크로 pci_doe_sysfs_feature_remove()를 호출한다. */
-}
+}	/* NVMe: 함수 정의를 마친다. */
 
 
 /*
@@ -295,8 +295,8 @@ void pci_doe_sysfs_teardown(struct pci_dev *pdev)
  *   생성된 /sys/bus/pci/devices/.../doe_features 항목은 nvme-cli 등이
  *   NVMe 컨트롤러의 DOE capability를 확인하는 데 사용된다.
  */
-void pci_doe_sysfs_init(struct pci_dev *pdev)
-{
+void pci_doe_sysfs_init(struct pci_dev *pdev)	/* NVMe: pci_doe_sysfs_init() 함수 정의를 시작한다. */
+{	/* NVMe: 함수 본문을 시작한다. */
 	struct pci_doe_mb *doe_mb;	/* NVMe: 변수를 선언한다. */
 	unsigned long index;	/* NVMe: 변수를 선언한다. */
 	int ret;	/* NVMe: 변수를 선언한다. */
@@ -305,8 +305,8 @@ void pci_doe_sysfs_init(struct pci_dev *pdev)
 		ret = pci_doe_sysfs_feature_populate(pdev, doe_mb);	/* NVMe: 값을 설정한다: ret. */
 		if (ret)	/* NVMe: 조건을 검사한다: (ret. */
 			return;	/* NVMe: 함수에서 반환한다. */
-	}
-}
+	}	/* NVMe: 제어문/블록을 마친다. */
+}	/* NVMe: 함수 정의를 마친다. */
 #endif	/* NVMe: 조걸 컴파일 블록을 끝낸다. */
 
 
@@ -316,14 +316,14 @@ void pci_doe_sysfs_init(struct pci_dev *pdev)
  *   DOE 상태 머신이 폴링 중 firmware나 다른 주체에 의한 충돌을 감지하면
  *   작업을 중단하기 위해 이 대기를 사용한다.
  */
-static int pci_doe_wait(struct pci_doe_mb *doe_mb, unsigned long timeout)
-{
+static int pci_doe_wait(struct pci_doe_mb *doe_mb, unsigned long timeout)	/* NVMe: pci_doe_wait() 함수 정의를 시작한다. */
+{	/* NVMe: 함수 본문을 시작한다. */
 	if (wait_event_timeout(doe_mb->wq,	/* NVMe: 조건을 검사한다: (wait_event_timeout(doe_mb->wq,. */
-			       test_bit(PCI_DOE_FLAG_CANCEL, &doe_mb->flags),
-			       timeout))
+			       test_bit(PCI_DOE_FLAG_CANCEL, &doe_mb->flags),	/* NVMe: if 조건식을 계속한다. */
+			       timeout))	/* NVMe: test_bit() 호출의 인자를 계속한다. */
 		return -EIO;	/* NVMe: 결과 -EIO를 반환한다. */
 	return 0;	/* NVMe: 결과 0를 반환한다. */
-}
+}	/* NVMe: 함수 정의를 마친다. */
 
 
 /*
@@ -331,13 +331,13 @@ static int pci_doe_wait(struct pci_doe_mb *doe_mb, unsigned long timeout)
  *   NVMe 장치의 DOE 제어 레지스터(PCI_DOE_CTRL)에 값을 기록한다.
  *   GO/ABORT 비트를 설정하여 DOE 데이터 객체 교환을 시작하거나 중단한다.
  */
-static void pci_doe_write_ctrl(struct pci_doe_mb *doe_mb, u32 val)
-{
+static void pci_doe_write_ctrl(struct pci_doe_mb *doe_mb, u32 val)	/* NVMe: pci_doe_write_ctrl() 함수 정의를 시작한다. */
+{	/* NVMe: 함수 본문을 시작한다. */
 	struct pci_dev *pdev = doe_mb->pdev;	/* NVMe: 값을 설정한다: struct pci_dev *pdev. */
 	int offset = doe_mb->cap_offset;	/* NVMe: 값을 설정한다: int offset. */
 
 	pci_write_config_dword(pdev, offset + PCI_DOE_CTRL, val);	/* NVMe: 함수/매크로 pci_write_config_dword()를 호출한다. */
-}
+}	/* NVMe: 함수 정의를 마친다. */
 
 
 /*
@@ -346,8 +346,8 @@ static void pci_doe_write_ctrl(struct pci_doe_mb *doe_mb, u32 val)
  *   probe 시 메일박스 초기화는 물론, 장치 분리(hotplug)나 오류 복구 시
  *   진행 중인 DOE 교환을 정리하는 데 필수적이다.
  */
-static int pci_doe_abort(struct pci_doe_mb *doe_mb)
-{
+static int pci_doe_abort(struct pci_doe_mb *doe_mb)	/* NVMe: pci_doe_abort() 함수 정의를 시작한다. */
+{	/* NVMe: 함수 본문을 시작한다. */
 	struct pci_dev *pdev = doe_mb->pdev;	/* NVMe: 값을 설정한다: struct pci_dev *pdev. */
 	int offset = doe_mb->cap_offset;	/* NVMe: 값을 설정한다: int offset. */
 	unsigned long timeout_jiffies;	/* NVMe: 변수를 선언한다. */
@@ -368,7 +368,7 @@ static int pci_doe_abort(struct pci_doe_mb *doe_mb)
 
 		/* Abort success! */
 		if (!FIELD_GET(PCI_DOE_STATUS_ERROR, val) &&	/* NVMe: 조건을 검사한다: (!FIELD_GET(PCI_DOE_STATUS_ERROR, val) &&. */
-		    !FIELD_GET(PCI_DOE_STATUS_BUSY, val))
+		    !FIELD_GET(PCI_DOE_STATUS_BUSY, val))	/* NVMe: if 조건식을 계속한다. */
 			return 0;	/* NVMe: 결과 0를 반환한다. */
 
 	} while (!time_after(jiffies, timeout_jiffies));	/* NVMe: do-while 조건을 검사한다. */
@@ -376,7 +376,7 @@ static int pci_doe_abort(struct pci_doe_mb *doe_mb)
 	/* Abort has timed out and the MB is dead */
 	pci_err(pdev, "[%x] ABORT timed out\n", offset);	/* NVMe: 함수/매크로 pci_err()를 호출한다. */
 	return -EIO;	/* NVMe: 결과 -EIO를 반환한다. */
-}
+}	/* NVMe: 함수 정의를 마친다. */
 
 
 /*
@@ -385,9 +385,9 @@ static int pci_doe_abort(struct pci_doe_mb *doe_mb)
  *   전송한다. Busy/Error 상태를 확인하고, 헤더와 payload를 DWORD 단위로
  *   기록한 뒤 GO 비트를 설정한다.
  */
-static int pci_doe_send_req(struct pci_doe_mb *doe_mb,
-			    struct pci_doe_task *task)
-{
+static int pci_doe_send_req(struct pci_doe_mb *doe_mb,	/* NVMe: pci_doe_send_req() 함수 정의를 시작한다. */
+			    struct pci_doe_task *task)	/* NVMe: 매개변수 task를 선언한다. */
+{	/* NVMe: 함수 본문을 시작한다. */
 	struct pci_dev *pdev = doe_mb->pdev;	/* NVMe: 값을 설정한다: struct pci_dev *pdev. */
 	int offset = doe_mb->cap_offset;	/* NVMe: 값을 설정한다: int offset. */
 	unsigned long timeout_jiffies;	/* NVMe: 변수를 선언한다. */
@@ -411,7 +411,7 @@ static int pci_doe_send_req(struct pci_doe_mb *doe_mb,
 	do {	/* NVMe: do-while 루프 본문을 시작한다. */
 		pci_read_config_dword(pdev, offset + PCI_DOE_STATUS, &val);	/* NVMe: 함수/매크로 pci_read_config_dword()를 호출한다. */
 	} while (FIELD_GET(PCI_DOE_STATUS_BUSY, val) &&	/* NVMe: do-while 조건을 검사한다. */
-		 !time_after(jiffies, timeout_jiffies));
+		 !time_after(jiffies, timeout_jiffies));	/* NVMe: while 조건식을 계속한다. */
 
 	if (FIELD_GET(PCI_DOE_STATUS_BUSY, val))	/* NVMe: 조건을 검사한다: (FIELD_GET(PCI_DOE_STATUS_BUSY, val). */
 		return -EBUSY;	/* NVMe: 결과 -EBUSY를 반환한다. */
@@ -428,16 +428,16 @@ static int pci_doe_send_req(struct pci_doe_mb *doe_mb,
 
 	/* Write DOE Header */
 	val = FIELD_PREP(PCI_DOE_DATA_OBJECT_HEADER_1_VID, task->feat.vid) |	/* NVMe: 값을 설정한다: val. */
-		FIELD_PREP(PCI_DOE_DATA_OBJECT_HEADER_1_TYPE, task->feat.type);
+		FIELD_PREP(PCI_DOE_DATA_OBJECT_HEADER_1_TYPE, task->feat.type);	/* NVMe: FIELD_PREP() 호출의 인자를 계속한다. */
 	pci_write_config_dword(pdev, offset + PCI_DOE_WRITE, val);	/* NVMe: 함수/매크로 pci_write_config_dword()를 호출한다. */
 	pci_write_config_dword(pdev, offset + PCI_DOE_WRITE,	/* NVMe: 함수/매크로 pci_write_config_dword()를 호출한다. */
-			       FIELD_PREP(PCI_DOE_DATA_OBJECT_HEADER_2_LENGTH,
-					  length));
+			       FIELD_PREP(PCI_DOE_DATA_OBJECT_HEADER_2_LENGTH,	/* NVMe: pci_write_config_dword() 호출의 인자를 계속한다. */
+					  length));	/* NVMe: FIELD_PREP() 호출의 인자를 계속한다. */
 
 	/* Write payload */
 	for (i = 0; i < task->request_pl_sz / sizeof(__le32); i++)	/* NVMe: 반복문을 순회한다. */
 		pci_write_config_dword(pdev, offset + PCI_DOE_WRITE,	/* NVMe: 함수/매크로 pci_write_config_dword()를 호출한다. */
-				       le32_to_cpu(task->request_pl[i]));
+				       le32_to_cpu(task->request_pl[i]));	/* NVMe: pci_write_config_dword() 호출의 인자를 계속한다. */
 
 	/* Write last payload dword */
 	remainder = task->request_pl_sz % sizeof(__le32);	/* NVMe: 값을 설정한다: remainder. */
@@ -446,12 +446,12 @@ static int pci_doe_send_req(struct pci_doe_mb *doe_mb,
 		memcpy(&val, &task->request_pl[i], remainder);	/* NVMe: 함수/매크로 memcpy()를 호출한다. */
 		le32_to_cpus(&val);	/* NVMe: 함수/매크로 le32_to_cpus()를 호출한다. */
 		pci_write_config_dword(pdev, offset + PCI_DOE_WRITE, val);	/* NVMe: 함수/매크로 pci_write_config_dword()를 호출한다. */
-	}
+	}	/* NVMe: 제어문/블록을 마친다. */
 
 	pci_doe_write_ctrl(doe_mb, PCI_DOE_CTRL_GO);	/* NVMe: GO 비트를 설정해 DOE 데이터 교환을 시작한다. */
 
 	return 0;	/* NVMe: 결과 0를 반환한다. */
-}
+}	/* NVMe: 함수 정의를 마친다. */
 
 
 /*
@@ -459,8 +459,8 @@ static int pci_doe_send_req(struct pci_doe_mb *doe_mb,
  *   NVMe 장치가 DOE 응답 데이터 객체를 준비했는지 PCI_DOE_STATUS 레지스터의
  *   Data Object Ready 비트를 읽어 확인한다.
  */
-static bool pci_doe_data_obj_ready(struct pci_doe_mb *doe_mb)
-{
+static bool pci_doe_data_obj_ready(struct pci_doe_mb *doe_mb)	/* NVMe: pci_doe_data_obj_ready() 함수 정의를 시작한다. */
+{	/* NVMe: 함수 본문을 시작한다. */
 	struct pci_dev *pdev = doe_mb->pdev;	/* NVMe: 값을 설정한다: struct pci_dev *pdev. */
 	int offset = doe_mb->cap_offset;	/* NVMe: 값을 설정한다: int offset. */
 	u32 val;	/* NVMe: 변수를 선언한다. */
@@ -469,7 +469,7 @@ static bool pci_doe_data_obj_ready(struct pci_doe_mb *doe_mb)
 	if (FIELD_GET(PCI_DOE_STATUS_DATA_OBJECT_READY, val))	/* NVMe: 조건을 검사한다: (FIELD_GET(PCI_DOE_STATUS_DATA_OBJECT_READY, val). */
 		return true;	/* NVMe: 결과 true를 반환한다. */
 	return false;	/* NVMe: 결과 false를 반환한다. */
-}
+}	/* NVMe: 함수 정의를 마친다. */
 
 
 /*
@@ -478,8 +478,8 @@ static bool pci_doe_data_obj_ready(struct pci_doe_mb *doe_mb)
  *   헤더(VID/type/length)를 검증하고, 사용자가 요청한 크기만큼 payload를
  *   복사하며 초과 데이터는 flush한다.
  */
-static int pci_doe_recv_resp(struct pci_doe_mb *doe_mb, struct pci_doe_task *task)
-{
+static int pci_doe_recv_resp(struct pci_doe_mb *doe_mb, struct pci_doe_task *task)	/* NVMe: pci_doe_recv_resp() 함수 정의를 시작한다. */
+{	/* NVMe: 함수 본문을 시작한다. */
 	size_t length, payload_length, remainder, received;	/* NVMe: 변수를 선언한다. */
 	struct pci_dev *pdev = doe_mb->pdev;	/* NVMe: 값을 설정한다: struct pci_dev *pdev. */
 	int offset = doe_mb->cap_offset;	/* NVMe: 값을 설정한다: int offset. */
@@ -489,13 +489,13 @@ static int pci_doe_recv_resp(struct pci_doe_mb *doe_mb, struct pci_doe_task *tas
 	/* Read the first dword to get the feature */
 	pci_read_config_dword(pdev, offset + PCI_DOE_READ, &val);	/* NVMe: 함수/매크로 pci_read_config_dword()를 호출한다. */
 	if ((FIELD_GET(PCI_DOE_DATA_OBJECT_HEADER_1_VID, val) != task->feat.vid) ||	/* NVMe: 조건을 검사한다: ((FIELD_GET(PCI_DOE_DATA_OBJECT_HEADER_1_VID, val) != task->feat.vid) ||. */
-	    (FIELD_GET(PCI_DOE_DATA_OBJECT_HEADER_1_TYPE, val) != task->feat.type)) {
+	    (FIELD_GET(PCI_DOE_DATA_OBJECT_HEADER_1_TYPE, val) != task->feat.type)) {	/* NVMe: if 조건식을 계속한다. */
 		dev_err_ratelimited(&pdev->dev, "[%x] expected [VID, Feature] = [%04x, %02x], got [%04x, %02x]\n",	/* NVMe: 함수/매크로 dev_err_ratelimited()를 호출한다. */
-				    doe_mb->cap_offset, task->feat.vid, task->feat.type,
-				    FIELD_GET(PCI_DOE_DATA_OBJECT_HEADER_1_VID, val),
-				    FIELD_GET(PCI_DOE_DATA_OBJECT_HEADER_1_TYPE, val));
+				    doe_mb->cap_offset, task->feat.vid, task->feat.type,	/* NVMe: dev_err_ratelimited() 호출의 인자를 계속한다. */
+				    FIELD_GET(PCI_DOE_DATA_OBJECT_HEADER_1_VID, val),	/* NVMe: 식을 계속한다. */
+				    FIELD_GET(PCI_DOE_DATA_OBJECT_HEADER_1_TYPE, val));	/* NVMe: FIELD_GET() 호출의 인자를 계속한다. */
 		return -EIO;	/* NVMe: 결과 -EIO를 반환한다. */
-	}
+	}	/* NVMe: 제어문/블록을 마친다. */
 
 	pci_write_config_dword(pdev, offset + PCI_DOE_READ, 0);	/* NVMe: 함수/매크로 pci_write_config_dword()를 호출한다. */
 	/* Read the second dword to get the length */
@@ -523,16 +523,16 @@ static int pci_doe_recv_resp(struct pci_doe_mb *doe_mb, struct pci_doe_task *tas
 		received = length * sizeof(__le32);	/* NVMe: 값을 설정한다: received. */
 		payload_length = length;	/* NVMe: 값을 설정한다: payload_length. */
 		remainder = sizeof(__le32);	/* NVMe: 값을 설정한다: remainder. */
-	}
+	}	/* NVMe: 제어문/블록을 마친다. */
 
 	if (payload_length) {	/* NVMe: 조건을 검사한다: (payload_length) {. */
 		/* Read all payload dwords except the last */
 		for (; i < payload_length - 1; i++) {	/* NVMe: 반복문을 순회한다. */
 			pci_read_config_dword(pdev, offset + PCI_DOE_READ,	/* NVMe: 함수/매크로 pci_read_config_dword()를 호출한다. */
-					      &val);
+					      &val);	/* NVMe: pci_read_config_dword() 호출의 인자를 계속한다. */
 			task->response_pl[i] = cpu_to_le32(val);	/* NVMe: 값을 설정한다: task->response_pl[i]. */
 			pci_write_config_dword(pdev, offset + PCI_DOE_READ, 0);	/* NVMe: 함수/매크로 pci_write_config_dword()를 호출한다. */
-		}
+		}	/* NVMe: 제어문/블록을 마친다. */
 
 		/* Read last payload dword */
 		pci_read_config_dword(pdev, offset + PCI_DOE_READ, &val);	/* NVMe: 함수/매크로 pci_read_config_dword()를 호출한다. */
@@ -543,13 +543,13 @@ static int pci_doe_recv_resp(struct pci_doe_mb *doe_mb, struct pci_doe_task *tas
 			return -EIO;	/* NVMe: 결과 -EIO를 반환한다. */
 		pci_write_config_dword(pdev, offset + PCI_DOE_READ, 0);	/* NVMe: 함수/매크로 pci_write_config_dword()를 호출한다. */
 		i++;	/* NVMe: 값을 증가시킨다: i. */
-	}
+	}	/* NVMe: 제어문/블록을 마친다. */
 
 	/* Flush excess length */
 	for (; i < length; i++) {	/* NVMe: 반복문을 순회한다. */
 		pci_read_config_dword(pdev, offset + PCI_DOE_READ, &val);	/* NVMe: 함수/매크로 pci_read_config_dword()를 호출한다. */
 		pci_write_config_dword(pdev, offset + PCI_DOE_READ, 0);	/* NVMe: 함수/매크로 pci_write_config_dword()를 호출한다. */
-	}
+	}	/* NVMe: 제어문/블록을 마친다. */
 
 	/* Final error check to pick up on any since Data Object Ready */
 	pci_read_config_dword(pdev, offset + PCI_DOE_STATUS, &val);	/* NVMe: 함수/매크로 pci_read_config_dword()를 호출한다. */
@@ -557,7 +557,7 @@ static int pci_doe_recv_resp(struct pci_doe_mb *doe_mb, struct pci_doe_task *tas
 		return -EIO;	/* NVMe: 결과 -EIO를 반환한다. */
 
 	return received;	/* NVMe: 결과 received를 반환한다. */
-}
+}	/* NVMe: 함수 정의를 마친다. */
 
 
 /*
@@ -565,12 +565,12 @@ static int pci_doe_recv_resp(struct pci_doe_mb *doe_mb, struct pci_doe_task *tas
  *   NVMe 측에 제출된 DOE 태스크의 결과를 기록하고 완료 콜백을 호출한다.
  *   동기 호출이라면 completion을 wake하여 NVMe 호출자가 깨어나게 한다.
  */
-static void signal_task_complete(struct pci_doe_task *task, int rv)
-{
+static void signal_task_complete(struct pci_doe_task *task, int rv)	/* NVMe: signal_task_complete() 함수 정의를 시작한다. */
+{	/* NVMe: 함수 본문을 시작한다. */
 	task->rv = rv;	/* NVMe: 값을 설정한다: task->rv. */
 	destroy_work_on_stack(&task->work);	/* NVMe: 함수/매크로 destroy_work_on_stack()를 호출한다. */
 	task->complete(task);	/* NVMe: 함수/매크로 complete()를 호출한다. */
-}
+}	/* NVMe: 함수 정의를 마친다. */
 
 
 /*
@@ -579,8 +579,8 @@ static void signal_task_complete(struct pci_doe_task *task, int rv)
  *   실패하면 해당 mailbox를 dead로 표시한다. 이후 새로운 DOE 요청은
  *   차단되어 NVMe 호스트가 깨진 mailbox를 계속 사용하지 않도록 한다.
  */
-static void signal_task_abort(struct pci_doe_task *task, int rv)
-{
+static void signal_task_abort(struct pci_doe_task *task, int rv)	/* NVMe: signal_task_abort() 함수 정의를 시작한다. */
+{	/* NVMe: 함수 본문을 시작한다. */
 	struct pci_doe_mb *doe_mb = task->doe_mb;	/* NVMe: 값을 설정한다: struct pci_doe_mb *doe_mb. */
 	struct pci_dev *pdev = doe_mb->pdev;	/* NVMe: 값을 설정한다: struct pci_dev *pdev. */
 
@@ -590,11 +590,11 @@ static void signal_task_abort(struct pci_doe_task *task, int rv)
 		 *	- no more submissions
 		 */
 		pci_err(pdev, "[%x] Abort failed marking mailbox dead\n",	/* NVMe: 함수/매크로 pci_err()를 호출한다. */
-			doe_mb->cap_offset);
+			doe_mb->cap_offset);	/* NVMe: pci_err() 호출의 인자를 계속한다. */
 		set_bit(PCI_DOE_FLAG_DEAD, &doe_mb->flags);	/* NVMe: mailbox를 dead로 표시하여 새 제출을 차단한다. */
-	}
+	}	/* NVMe: 제어문/블록을 마친다. */
 	signal_task_complete(task, rv);	/* NVMe: 함수/매크로 signal_task_complete()를 호출한다. */
-}
+}	/* NVMe: 함수 정의를 마친다. */
 
 
 /*
@@ -603,10 +603,10 @@ static void signal_task_abort(struct pci_doe_task *task, int rv)
  *   요청 전송 -> 응답 폴링 -> 응답 수신 -> 완료 시그널의 전체 흐름을
  *   담당하며, timeout/오류 시 abort를 수행한다.
  */
-static void doe_statemachine_work(struct work_struct *work)
-{
+static void doe_statemachine_work(struct work_struct *work)	/* NVMe: doe_statemachine_work() 함수 정의를 시작한다. */
+{	/* NVMe: 함수 본문을 시작한다. */
 	struct pci_doe_task *task = container_of(work, struct pci_doe_task,	/* NVMe: 값을 설정한다: struct pci_doe_task *task. */
-						 work);
+						 work);	/* NVMe: container_of() 호출의 인자를 계속한다. */
 	struct pci_doe_mb *doe_mb = task->doe_mb;	/* NVMe: 값을 설정한다: struct pci_doe_mb *doe_mb. */
 	struct pci_dev *pdev = doe_mb->pdev;	/* NVMe: 값을 설정한다: struct pci_dev *pdev. */
 	int offset = doe_mb->cap_offset;	/* NVMe: 값을 설정한다: int offset. */
@@ -617,7 +617,7 @@ static void doe_statemachine_work(struct work_struct *work)
 	if (test_bit(PCI_DOE_FLAG_DEAD, &doe_mb->flags)) {	/* NVMe: 조건을 검사한다: (test_bit(PCI_DOE_FLAG_DEAD, &doe_mb->flags)) {. */
 		signal_task_complete(task, -EIO);	/* NVMe: 함수/매크로 signal_task_complete()를 호출한다. */
 		return;	/* NVMe: 함수에서 반환한다. */
-	}
+	}	/* NVMe: 제어문/블록을 마친다. */
 
 	/* Send request */
 	rc = pci_doe_send_req(doe_mb, task);	/* NVMe: 값을 설정한다: rc. */
@@ -631,10 +631,10 @@ static void doe_statemachine_work(struct work_struct *work)
 		 */
 		if (rc == -EBUSY)	/* NVMe: 조건을 검사한다: (rc == -EBUSY. */
 			dev_err_ratelimited(&pdev->dev, "[%x] busy detected; another entity is sending conflicting requests\n",	/* NVMe: 함수/매크로 dev_err_ratelimited()를 호출한다. */
-					    offset);
+					    offset);	/* NVMe: dev_err_ratelimited() 호출의 인자를 계속한다. */
 		signal_task_abort(task, rc);	/* NVMe: 함수/매크로 signal_task_abort()를 호출한다. */
 		return;	/* NVMe: 함수에서 반환한다. */
-	}
+	}	/* NVMe: 제어문/블록을 마친다. */
 
 	timeout_jiffies = jiffies + PCI_DOE_TIMEOUT;	/* NVMe: 값을 설정한다: timeout_jiffies. */
 	/* Poll for response */
@@ -643,29 +643,29 @@ retry_resp:	/* NVMe: 코드 레이블을 정의한다. */
 	if (FIELD_GET(PCI_DOE_STATUS_ERROR, val)) {	/* NVMe: 조건을 검사한다: (FIELD_GET(PCI_DOE_STATUS_ERROR, val)) {. */
 		signal_task_abort(task, -EIO);	/* NVMe: 함수/매크로 signal_task_abort()를 호출한다. */
 		return;	/* NVMe: 함수에서 반환한다. */
-	}
+	}	/* NVMe: 제어문/블록을 마친다. */
 
 	if (!FIELD_GET(PCI_DOE_STATUS_DATA_OBJECT_READY, val)) {	/* NVMe: 조건을 검사한다: (!FIELD_GET(PCI_DOE_STATUS_DATA_OBJECT_READY, val)) {. */
 		if (time_after(jiffies, timeout_jiffies)) {	/* NVMe: 조건을 검사한다: (time_after(jiffies, timeout_jiffies)) {. */
 			signal_task_abort(task, -EIO);	/* NVMe: 함수/매크로 signal_task_abort()를 호출한다. */
 			return;	/* NVMe: 함수에서 반환한다. */
-		}
+		}	/* NVMe: 제어문/블록을 마친다. */
 		rc = pci_doe_wait(doe_mb, PCI_DOE_POLL_INTERVAL);	/* NVMe: 값을 설정한다: rc. */
 		if (rc) {	/* NVMe: 조건을 검사한다: (rc) {. */
 			signal_task_abort(task, rc);	/* NVMe: 함수/매크로 signal_task_abort()를 호출한다. */
 			return;	/* NVMe: 함수에서 반환한다. */
-		}
+		}	/* NVMe: 제어문/블록을 마친다. */
 		goto retry_resp;	/* NVMe: 레이블 retry_resp로 이동한다. */
-	}
+	}	/* NVMe: 제어문/블록을 마친다. */
 
 	rc  = pci_doe_recv_resp(doe_mb, task);	/* NVMe: 값을 설정한다: rc. */
 	if (rc < 0) {	/* NVMe: 조건을 검사한다: (rc < 0) {. */
 		signal_task_abort(task, rc);	/* NVMe: 함수/매크로 signal_task_abort()를 호출한다. */
 		return;	/* NVMe: 함수에서 반환한다. */
-	}
+	}	/* NVMe: 제어문/블록을 마친다. */
 
 	signal_task_complete(task, rc);	/* NVMe: 함수/매크로 signal_task_complete()를 호출한다. */
-}
+}	/* NVMe: 함수 정의를 마친다. */
 
 
 /*
@@ -674,10 +674,10 @@ retry_resp:	/* NVMe: 코드 레이블을 정의한다. */
  *   NVMe 호스트가 wait_for_completion()으로 대기 중인 completion 객체를
  *   시그널링하여 결과를 반환한다.
  */
-static void pci_doe_task_complete(struct pci_doe_task *task)
-{
+static void pci_doe_task_complete(struct pci_doe_task *task)	/* NVMe: pci_doe_task_complete() 함수 정의를 시작한다. */
+{	/* NVMe: 함수 본문을 시작한다. */
 	complete(task->private);	/* NVMe: 동기 대기 중인 completion 객체를 시그널링한다. */
-}
+}	/* NVMe: 함수 정의를 마친다. */
 
 
 /*
@@ -686,21 +686,21 @@ static void pci_doe_task_complete(struct pci_doe_task *task)
  *   pci_doe_cache_features()에서 반복 호출되어 NVMe 컨트롤러가 지원하는
  *   vendor/type 조합 목록을 구성한다.
  */
-static int pci_doe_discovery(struct pci_doe_mb *doe_mb, u8 capver, u8 *index, u16 *vid,
-			     u8 *feature)
-{
+static int pci_doe_discovery(struct pci_doe_mb *doe_mb, u8 capver, u8 *index, u16 *vid,	/* NVMe: pci_doe_discovery() 함수 정의를 시작한다. */
+			     u8 *feature)	/* NVMe: 매개변수 feature를 선언한다. */
+{	/* NVMe: 함수 본문을 시작한다. */
 	u32 request_pl = FIELD_PREP(PCI_DOE_DATA_OBJECT_DISC_REQ_3_INDEX,	/* NVMe: 값을 설정한다: u32 request_pl. */
-				    *index) |
-			 FIELD_PREP(PCI_DOE_DATA_OBJECT_DISC_REQ_3_VER,
-				    (capver >= 2) ? 2 : 0);
+				    *index) |	/* NVMe: FIELD_PREP() 호출의 인자를 계속한다. */
+			 FIELD_PREP(PCI_DOE_DATA_OBJECT_DISC_REQ_3_VER,	/* NVMe: 식을 계속한다. */
+				    (capver >= 2) ? 2 : 0);	/* NVMe: FIELD_PREP() 호출의 인자를 계속한다. */
 	__le32 request_pl_le = cpu_to_le32(request_pl);	/* NVMe: 값을 설정한다: __le32 request_pl_le. */
 	__le32 response_pl_le;	/* NVMe: 변수를 선언한다. */
 	u32 response_pl;	/* NVMe: 변수를 선언한다. */
 	int rc;	/* NVMe: 변수를 선언한다. */
 
 	rc = pci_doe(doe_mb, PCI_VENDOR_ID_PCI_SIG, PCI_DOE_FEATURE_DISCOVERY,	/* NVMe: 값을 설정한다: rc. */
-		     &request_pl_le, sizeof(request_pl_le),
-		     &response_pl_le, sizeof(response_pl_le));
+		     &request_pl_le, sizeof(request_pl_le),	/* NVMe: pci_doe() 호출의 인자를 계속한다. */
+		     &response_pl_le, sizeof(response_pl_le));	/* NVMe: sizeof() 호출의 인자를 계속한다. */
 	if (rc < 0)	/* NVMe: 조건을 검사한다: (rc < 0. */
 		return rc;	/* NVMe: 결과 rc를 반환한다. */
 
@@ -710,12 +710,12 @@ static int pci_doe_discovery(struct pci_doe_mb *doe_mb, u8 capver, u8 *index, u1
 	response_pl = le32_to_cpu(response_pl_le);	/* NVMe: 값을 설정한다: response_pl. */
 	*vid = FIELD_GET(PCI_DOE_DATA_OBJECT_DISC_RSP_3_VID, response_pl);	/* NVMe: 값을 설정한다: *vid. */
 	*feature = FIELD_GET(PCI_DOE_DATA_OBJECT_DISC_RSP_3_TYPE,	/* NVMe: 값을 설정한다: *feature. */
-			      response_pl);
+			      response_pl);	/* NVMe: FIELD_GET() 호출의 인자를 계속한다. */
 	*index = FIELD_GET(PCI_DOE_DATA_OBJECT_DISC_RSP_3_NEXT_INDEX,	/* NVMe: 값을 설정한다: *index. */
-			   response_pl);
+			   response_pl);	/* NVMe: FIELD_GET() 호출의 인자를 계속한다. */
 
 	return 0;	/* NVMe: 결과 0를 반환한다. */
-}
+}	/* NVMe: 함수 정의를 마친다. */
 
 
 /*
@@ -723,10 +723,10 @@ static int pci_doe_discovery(struct pci_doe_mb *doe_mb, u8 capver, u8 *index, u1
  *   NVMe 장치의 DOE feature 식별자(vendor ID + type)를 xarray에 저장할 값으로
  *   인코딩한다.
  */
-static void *pci_doe_xa_feat_entry(u16 vid, u8 type)
-{
+static void *pci_doe_xa_feat_entry(u16 vid, u8 type)	/* NVMe: pci_doe_xa_feat_entry() 함수 정의를 시작한다. */
+{	/* NVMe: 함수 본문을 시작한다. */
 	return xa_mk_value((vid << 8) | type);	/* NVMe: VID와 type을 하나의 xarray 값으로 인코딩하여 반환한다. */
-}
+}	/* NVMe: 함수 정의를 마친다. */
 
 
 /*
@@ -735,8 +735,8 @@ static void *pci_doe_xa_feat_entry(u16 vid, u8 type)
  *   xarray에 캐시한다. 이 목록은 이후 NVMe 관련 코드가 DOE feature 사용 전
  *   pci_doe_supports_feat()로 지원 여부를 빠르게 확인하는 데 쓰인다.
  */
-static int pci_doe_cache_features(struct pci_doe_mb *doe_mb)
-{
+static int pci_doe_cache_features(struct pci_doe_mb *doe_mb)	/* NVMe: pci_doe_cache_features() 함수 정의를 시작한다. */
+{	/* NVMe: 함수 본문을 시작한다. */
 	u8 index = 0;	/* NVMe: 값을 설정한다: u8 index. */
 	u8 xa_idx = 0;	/* NVMe: 값을 설정한다: u8 xa_idx. */
 	u32 hdr = 0;	/* NVMe: 값을 설정한다: u32 hdr. */
@@ -749,22 +749,22 @@ static int pci_doe_cache_features(struct pci_doe_mb *doe_mb)
 		u8 type;	/* NVMe: 변수를 선언한다. */
 
 		rc = pci_doe_discovery(doe_mb, PCI_EXT_CAP_VER(hdr), &index,	/* NVMe: 값을 설정한다: rc. */
-				       &vid, &type);
+				       &vid, &type);	/* NVMe: pci_doe_discovery() 호출의 인자를 계속한다. */
 		if (rc)	/* NVMe: 조건을 검사한다: (rc. */
 			return rc;	/* NVMe: 결과 rc를 반환한다. */
 
 		pci_dbg(doe_mb->pdev,	/* NVMe: 함수/매크로 pci_dbg()를 호출한다. */
-			"[%x] Found feature %d vid: %x type: %x\n",
-			doe_mb->cap_offset, xa_idx, vid, type);
+			"[%x] Found feature %d vid: %x type: %x\n",	/* NVMe: pci_dbg() 호출의 인자를 계속한다. */
+			doe_mb->cap_offset, xa_idx, vid, type);	/* NVMe: 식을 계속한다. */
 
 		rc = xa_insert(&doe_mb->feats, xa_idx++,	/* NVMe: 값을 설정한다: rc. */
-			       pci_doe_xa_feat_entry(vid, type), GFP_KERNEL);
+			       pci_doe_xa_feat_entry(vid, type), GFP_KERNEL);	/* NVMe: xa_insert() 호출의 인자를 계속한다. */
 		if (rc)	/* NVMe: 조건을 검사한다: (rc. */
 			return rc;	/* NVMe: 결과 rc를 반환한다. */
 	} while (index);	/* NVMe: do-while 조건을 검사한다. */
 
 	return 0;	/* NVMe: 결과 0를 반환한다. */
-}
+}	/* NVMe: 함수 정의를 마친다. */
 
 
 /*
@@ -773,15 +773,15 @@ static int pci_doe_cache_features(struct pci_doe_mb *doe_mb)
  *   작업을 모두 취소한다. DEAD/CANCEL 플래그를 설정하고 대기 중인 work를
  *   깨워 정리한다.
  */
-static void pci_doe_cancel_tasks(struct pci_doe_mb *doe_mb)
-{
+static void pci_doe_cancel_tasks(struct pci_doe_mb *doe_mb)	/* NVMe: pci_doe_cancel_tasks() 함수 정의를 시작한다. */
+{	/* NVMe: 함수 본문을 시작한다. */
 	/* Stop all pending work items from starting */
 	set_bit(PCI_DOE_FLAG_DEAD, &doe_mb->flags);	/* NVMe: mailbox를 dead로 표시하여 새 제출을 차단한다. */
 
 	/* Cancel an in progress work item, if necessary */
 	set_bit(PCI_DOE_FLAG_CANCEL, &doe_mb->flags);	/* NVMe: 현재 진행 중인 DOE 작업 취소 플래그를 설정한다. */
 	wake_up(&doe_mb->wq);	/* NVMe: 취소를 대기하는 work를 깨운다. */
-}
+}	/* NVMe: 함수 정의를 마친다. */
 
 /**
  * pci_doe_create_mb() - Create a DOE mailbox object
@@ -802,9 +802,9 @@ static void pci_doe_cancel_tasks(struct pci_doe_mb *doe_mb)
  *   메모리 할당, workqueue 생성, abort로 리셋, feature 캐시까지 수행하며
  *   성공하면 NVMe pci_dev->doe_mbs에 등록된다.
  */
-static struct pci_doe_mb *pci_doe_create_mb(struct pci_dev *pdev,
-					    u16 cap_offset)
-{
+static struct pci_doe_mb *pci_doe_create_mb(struct pci_dev *pdev,	/* NVMe: pci_doe_create_mb() 함수 정의를 시작한다. */
+					    u16 cap_offset)	/* NVMe: 매개변수 cap_offset를 선언한다. */
+{	/* NVMe: 함수 본문을 시작한다. */
 	struct pci_doe_mb *doe_mb;	/* NVMe: 변수를 선언한다. */
 	int rc;	/* NVMe: 변수를 선언한다. */
 
@@ -818,23 +818,23 @@ static struct pci_doe_mb *pci_doe_create_mb(struct pci_dev *pdev,
 	xa_init(&doe_mb->feats);	/* NVMe: feature xarray를 초기화한다. */
 
 	doe_mb->work_queue = alloc_ordered_workqueue("%s %s DOE [%x]", 0,	/* NVMe: 값을 설정한다: doe_mb->work_queue. */
-						dev_bus_name(&pdev->dev),
-						pci_name(pdev),
-						doe_mb->cap_offset);
+						dev_bus_name(&pdev->dev),	/* NVMe: alloc_ordered_workqueue() 호출의 인자를 계속한다. */
+						pci_name(pdev),	/* NVMe: dev_bus_name() 호출의 인자를 계속한다. */
+						doe_mb->cap_offset);	/* NVMe: pci_name() 호출의 인자를 계속한다. */
 	if (!doe_mb->work_queue) {	/* NVMe: 조건을 검사한다: (!doe_mb->work_queue) {. */
 		pci_err(pdev, "[%x] failed to allocate work queue\n",	/* NVMe: 함수/매크로 pci_err()를 호출한다. */
-			doe_mb->cap_offset);
+			doe_mb->cap_offset);	/* NVMe: pci_err() 호출의 인자를 계속한다. */
 		rc = -ENOMEM;	/* NVMe: 값을 설정한다: rc. */
 		goto err_free;	/* NVMe: 레이블 err_free로 이동한다. */
-	}
+	}	/* NVMe: 제어문/블록을 마친다. */
 
 	/* Reset the mailbox by issuing an abort */
 	rc = pci_doe_abort(doe_mb);	/* NVMe: 값을 설정한다: rc. */
 	if (rc) {	/* NVMe: 조건을 검사한다: (rc) {. */
 		pci_err(pdev, "[%x] failed to reset mailbox with abort command : %d\n",	/* NVMe: 함수/매크로 pci_err()를 호출한다. */
-			doe_mb->cap_offset, rc);
+			doe_mb->cap_offset, rc);	/* NVMe: pci_err() 호출의 인자를 계속한다. */
 		goto err_destroy_wq;	/* NVMe: 레이블 err_destroy_wq로 이동한다. */
-	}
+	}	/* NVMe: 제어문/블록을 마친다. */
 
 	/*
 	 * The state machine and the mailbox should be in sync now;
@@ -843,9 +843,9 @@ static struct pci_doe_mb *pci_doe_create_mb(struct pci_dev *pdev,
 	rc = pci_doe_cache_features(doe_mb);	/* NVMe: 값을 설정한다: rc. */
 	if (rc) {	/* NVMe: 조건을 검사한다: (rc) {. */
 		pci_err(pdev, "[%x] failed to cache features : %d\n",	/* NVMe: 함수/매크로 pci_err()를 호출한다. */
-			doe_mb->cap_offset, rc);
+			doe_mb->cap_offset, rc);	/* NVMe: pci_err() 호출의 인자를 계속한다. */
 		goto err_cancel;	/* NVMe: 레이블 err_cancel로 이동한다. */
-	}
+	}	/* NVMe: 제어문/블록을 마친다. */
 
 	return doe_mb;	/* NVMe: 결과 doe_mb를 반환한다. */
 
@@ -857,7 +857,7 @@ err_destroy_wq:	/* NVMe: 코드 레이블을 정의한다. */
 err_free:	/* NVMe: 코드 레이블을 정의한다. */
 	kfree(doe_mb);	/* NVMe: 함수/매크로 kfree()를 호출한다. */
 	return ERR_PTR(rc);	/* NVMe: 결과 ERR_PTR(rc)를 반환한다. */
-}
+}	/* NVMe: 함수 정의를 마친다. */
 
 /**
  * pci_doe_destroy_mb() - Destroy a DOE mailbox object
@@ -873,13 +873,13 @@ err_free:	/* NVMe: 코드 레이블을 정의한다. */
  *   pending 작업 취소, feature xarray 제거, workqueue 파괴, 메모리 반납을
  *   순서대로 수행한다.
  */
-static void pci_doe_destroy_mb(struct pci_doe_mb *doe_mb)
-{
+static void pci_doe_destroy_mb(struct pci_doe_mb *doe_mb)	/* NVMe: pci_doe_destroy_mb() 함수 정의를 시작한다. */
+{	/* NVMe: 함수 본문을 시작한다. */
 	pci_doe_cancel_tasks(doe_mb);	/* NVMe: 함수/매크로 pci_doe_cancel_tasks()를 호출한다. */
 	xa_destroy(&doe_mb->feats);	/* NVMe: 함수/매크로 xa_destroy()를 호출한다. */
 	destroy_workqueue(doe_mb->work_queue);	/* NVMe: 함수/매크로 destroy_workqueue()를 호출한다. */
 	kfree(doe_mb);	/* NVMe: 함수/매크로 kfree()를 호출한다. */
-}
+}	/* NVMe: 함수 정의를 마친다. */
 
 /**
  * pci_doe_supports_feat() - Return if the DOE instance supports the given
@@ -896,8 +896,8 @@ static void pci_doe_destroy_mb(struct pci_doe_mb *doe_mb)
  *   NVMe 장치의 특정 DOE mailbox가 지정한 vendor/type feature를 지원하는지
  *   확인한다. PCI-SIG DOE Discovery는 항상 지원되는 것으로 처리한다.
  */
-static bool pci_doe_supports_feat(struct pci_doe_mb *doe_mb, u16 vid, u8 type)
-{
+static bool pci_doe_supports_feat(struct pci_doe_mb *doe_mb, u16 vid, u8 type)	/* NVMe: pci_doe_supports_feat() 함수 정의를 시작한다. */
+{	/* NVMe: 함수 본문을 시작한다. */
 	unsigned long index;	/* NVMe: 변수를 선언한다. */
 	void *entry;	/* NVMe: 변수를 선언한다. */
 
@@ -910,7 +910,7 @@ static bool pci_doe_supports_feat(struct pci_doe_mb *doe_mb, u16 vid, u8 type)
 			return true;	/* NVMe: 결과 true를 반환한다. */
 
 	return false;	/* NVMe: 결과 false를 반환한다. */
-}
+}	/* NVMe: 함수 정의를 마친다. */
 
 /**
  * pci_doe_submit_task() - Submit a task to be processed by the state machine
@@ -938,9 +938,9 @@ static bool pci_doe_supports_feat(struct pci_doe_mb *doe_mb, u16 vid, u8 type)
  *   workqueue에 제출한다. 지원 feature 검사와 mailbox 상태(DEAD) 검사 후
  *   비동기 상태 머신 work를 예약한다.
  */
-static int pci_doe_submit_task(struct pci_doe_mb *doe_mb,
-			       struct pci_doe_task *task)
-{
+static int pci_doe_submit_task(struct pci_doe_mb *doe_mb,	/* NVMe: pci_doe_submit_task() 함수 정의를 시작한다. */
+			       struct pci_doe_task *task)	/* NVMe: 매개변수 task를 선언한다. */
+{	/* NVMe: 함수 본문을 시작한다. */
 	if (!pci_doe_supports_feat(doe_mb, task->feat.vid, task->feat.type))	/* NVMe: 조건을 검사한다: (!pci_doe_supports_feat(doe_mb, task->feat.vid, task->feat.type). */
 		return -EINVAL;	/* NVMe: 결과 -EINVAL를 반환한다. */
 
@@ -951,7 +951,7 @@ static int pci_doe_submit_task(struct pci_doe_mb *doe_mb,
 	INIT_WORK_ONSTACK(&task->work, doe_statemachine_work);	/* NVMe: 스택 work를 DOE 상태 머신 핸들러로 초기화한다. */
 	queue_work(doe_mb->work_queue, &task->work);	/* NVMe: DOE 상태 머신 workqueue에 태스크를 예약한다. */
 	return 0;	/* NVMe: 결과 0를 반환한다. */
-}
+}	/* NVMe: 함수 정의를 마친다. */
 
 /**
  * pci_doe() - Perform Data Object Exchange
@@ -988,10 +988,10 @@ static int pci_doe_submit_task(struct pci_doe_mb *doe_mb,
  *   요청 payload를 전송하고 응답이 도착할 때까지 sleep하며, 수신된
  *   응답 길이(또는 음수 errno)를 반환한다.
  */
-int pci_doe(struct pci_doe_mb *doe_mb, u16 vendor, u8 type,
-	    const void *request, size_t request_sz,
-	    void *response, size_t response_sz)
-{
+int pci_doe(struct pci_doe_mb *doe_mb, u16 vendor, u8 type,	/* NVMe: pci_doe() 함수 정의를 시작한다. */
+	    const void *request, size_t request_sz,	/* NVMe: 매개변수 request_sz를 선언한다. */
+	    void *response, size_t response_sz)	/* NVMe: 매개변수 response_sz를 선언한다. */
+{	/* NVMe: 함수 본문을 시작한다. */
 	DECLARE_COMPLETION_ONSTACK(c);	/* NVMe: 동기 DOE 완료를 기다릴 completion을 선언한다. */
 	struct pci_doe_task task = {	/* NVMe: 변수를 선언한다. */
 		.feat.vid = vendor,	/* NVMe: 값을 설정한다: .feat.vid. */
@@ -1002,7 +1002,7 @@ int pci_doe(struct pci_doe_mb *doe_mb, u16 vendor, u8 type,
 		.response_pl_sz = response_sz,	/* NVMe: 멤버 response_pl_sz을(를) 초기화한다. */
 		.complete = pci_doe_task_complete,	/* NVMe: 멤버 complete을(를) 초기화한다. */
 		.private = &c,	/* NVMe: 멤버 private을(를) 초기화한다. */
-	};
+	};	/* NVMe: 구조체/공용체/열거형 정의를 마친다. */
 	int rc;	/* NVMe: 변수를 선언한다. */
 
 	rc = pci_doe_submit_task(doe_mb, &task);	/* NVMe: 값을 설정한다: rc. */
@@ -1012,7 +1012,7 @@ int pci_doe(struct pci_doe_mb *doe_mb, u16 vendor, u8 type,
 	wait_for_completion(&c);	/* NVMe: DOE 교환이 끝날 때까지 동기 대기한다. */
 
 	return task.rv;	/* NVMe: DOE 교환 결과(길이 또는 오류)를 반환한다. */
-}
+}	/* NVMe: 함수 정의를 마친다. */
 EXPORT_SYMBOL_GPL(pci_doe);	/* NVMe: pci_doe 심볼을 GPL 모듈에 난중한다. */
 
 /**
@@ -1033,9 +1033,9 @@ EXPORT_SYMBOL_GPL(pci_doe);	/* NVMe: pci_doe 심볼을 GPL 모듈에 난중한�
  *   mailbox를 반환한다. NVMe 관련 보안/인증 코드가 사용할 mailbox를
  *   찾을 때 사용된다.
  */
-struct pci_doe_mb *pci_find_doe_mailbox(struct pci_dev *pdev, u16 vendor,
-					u8 type)
-{
+struct pci_doe_mb *pci_find_doe_mailbox(struct pci_dev *pdev, u16 vendor,	/* NVMe: pci_find_doe_mailbox() 함수 정의를 시작한다. */
+					u8 type)	/* NVMe: 매개변수 type를 선언한다. */
+{	/* NVMe: 함수 본문을 시작한다. */
 	struct pci_doe_mb *doe_mb;	/* NVMe: 변수를 선언한다. */
 	unsigned long index;	/* NVMe: 변수를 선언한다. */
 
@@ -1044,7 +1044,7 @@ struct pci_doe_mb *pci_find_doe_mailbox(struct pci_dev *pdev, u16 vendor,
 			return doe_mb;	/* NVMe: 결과 doe_mb를 반환한다. */
 
 	return NULL;	/* NVMe: 결과 NULL를 반환한다. */
-}
+}	/* NVMe: 함수 정의를 마친다. */
 EXPORT_SYMBOL_GPL(pci_find_doe_mailbox);	/* NVMe: pci_find_doe_mailbox 심볼을 GPL 모듈에 난중한다. */
 
 
@@ -1054,8 +1054,8 @@ EXPORT_SYMBOL_GPL(pci_find_doe_mailbox);	/* NVMe: pci_find_doe_mailbox 심볼을
  *   찾고 각각에 대한 mailbox를 생성한다. 생성된 mailbox는 sysfs를 통해
  *   NVMe 사용자공간 도구에 노출될 수 있다.
  */
-void pci_doe_init(struct pci_dev *pdev)
-{
+void pci_doe_init(struct pci_dev *pdev)	/* NVMe: pci_doe_init() 함수 정의를 시작한다. */
+{	/* NVMe: 함수 본문을 시작한다. */
 	struct pci_doe_mb *doe_mb;	/* NVMe: 변수를 선언한다. */
 	u16 offset = 0;	/* NVMe: 값을 설정한다: u16 offset. */
 	int rc;	/* NVMe: 변수를 선언한다. */
@@ -1063,22 +1063,22 @@ void pci_doe_init(struct pci_dev *pdev)
 	xa_init(&pdev->doe_mbs);	/* NVMe: NVMe pci_dev의 DOE mailbox 컬렉션(xarray)을 초기화한다. */
 
 	while ((offset = pci_find_next_ext_capability(pdev, offset,	/* NVMe: 조건이 참인 동안 반복한다. */
-						      PCI_EXT_CAP_ID_DOE))) {
+						      PCI_EXT_CAP_ID_DOE))) {	/* NVMe: while 조건식을 계속한다. */
 		doe_mb = pci_doe_create_mb(pdev, offset);	/* NVMe: 값을 설정한다: doe_mb. */
 		if (IS_ERR(doe_mb)) {	/* NVMe: 조건을 검사한다: (IS_ERR(doe_mb)) {. */
 			pci_err(pdev, "[%x] failed to create mailbox: %ld\n",	/* NVMe: 함수/매크로 pci_err()를 호출한다. */
-				offset, PTR_ERR(doe_mb));
+				offset, PTR_ERR(doe_mb));	/* NVMe: pci_err() 호출의 인자를 계속한다. */
 			continue;	/* NVMe: 다음 반복으로 넘어간다. */
-		}
+		}	/* NVMe: 제어문/블록을 마친다. */
 
 		rc = xa_insert(&pdev->doe_mbs, offset, doe_mb, GFP_KERNEL);	/* NVMe: 값을 설정한다: rc. */
 		if (rc) {	/* NVMe: 조건을 검사한다: (rc) {. */
 			pci_err(pdev, "[%x] failed to insert mailbox: %d\n",	/* NVMe: 함수/매크로 pci_err()를 호출한다. */
-				offset, rc);
+				offset, rc);	/* NVMe: pci_err() 호출의 인자를 계속한다. */
 			pci_doe_destroy_mb(doe_mb);	/* NVMe: 함수/매크로 pci_doe_destroy_mb()를 호출한다. */
-		}
-	}
-}
+		}	/* NVMe: 제어문/블록을 마친다. */
+	}	/* NVMe: 제어문/블록을 마친다. */
+}	/* NVMe: 함수 정의를 마친다. */
 
 
 /*
@@ -1086,8 +1086,8 @@ void pci_doe_init(struct pci_dev *pdev)
  *   NVMe 장치 제거 시 모든 DOE mailbox를 파괴하고 pci_dev->doe_mbs
  *   컬렉션을 제거한다.
  */
-void pci_doe_destroy(struct pci_dev *pdev)
-{
+void pci_doe_destroy(struct pci_dev *pdev)	/* NVMe: pci_doe_destroy() 함수 정의를 시작한다. */
+{	/* NVMe: 함수 본문을 시작한다. */
 	struct pci_doe_mb *doe_mb;	/* NVMe: 변수를 선언한다. */
 	unsigned long index;	/* NVMe: 변수를 선언한다. */
 
@@ -1095,7 +1095,7 @@ void pci_doe_destroy(struct pci_dev *pdev)
 		pci_doe_destroy_mb(doe_mb);	/* NVMe: 함수/매크로 pci_doe_destroy_mb()를 호출한다. */
 
 	xa_destroy(&pdev->doe_mbs);	/* NVMe: NVMe pci_dev의 mailbox 컬렉션을 제거한다. */
-}
+}	/* NVMe: 함수 정의를 마친다. */
 
 
 /*
@@ -1104,11 +1104,11 @@ void pci_doe_destroy(struct pci_dev *pdev)
  *   pending/in-progress 작업을 즉시 취소한다. 장치가 응답하지 않는 상황에서
  *   무한 대기를 방지한다.
  */
-void pci_doe_disconnected(struct pci_dev *pdev)
-{
+void pci_doe_disconnected(struct pci_dev *pdev)	/* NVMe: pci_doe_disconnected() 함수 정의를 시작한다. */
+{	/* NVMe: 함수 본문을 시작한다. */
 	struct pci_doe_mb *doe_mb;	/* NVMe: 변수를 선언한다. */
 	unsigned long index;	/* NVMe: 변수를 선언한다. */
 
 	xa_for_each(&pdev->doe_mbs, index, doe_mb)	/* NVMe: 함수/매크로 xa_for_each()를 호출한다. */
 		pci_doe_cancel_tasks(doe_mb);	/* NVMe: 함수/매크로 pci_doe_cancel_tasks()를 호출한다. */
-}
+}	/* NVMe: 함수 정의를 마친다. */

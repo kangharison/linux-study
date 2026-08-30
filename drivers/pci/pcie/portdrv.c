@@ -36,11 +36,11 @@
  *   nvme_probe() -> pci_enable_device(pdev) -> ...
  *   pcie_portdrv_probe() [이 파일]
  *     -> pcie_port_device_register()
- *        -> get_port_device_capability()    /* RP/DSP 서비스 마스크 생성 */
- *        -> pcie_init_service_irqs()        /* 서비스용 MSI/MSI-X/INTx 할당 */
+ *        -> get_port_device_capability()    — RP/DSP 서비스 마스크 생성
+ *        -> pcie_init_service_irqs()        — 서비스용 MSI/MSI-X/INTx 할당
  *           -> pcie_port_enable_irq_vec()
- *              -> pcie_message_numbers()    /* PME/AER/DPC 벡터 번호 읽기 */
- *        -> pcie_device_init()              /* 서비스별 pcie_device 생성 */
+ *              -> pcie_message_numbers()    — PME/AER/DPC 벡터 번호 읽기
+ *        -> pcie_device_init()              — 서비스별 pcie_device 생성
  *   이후 AER/DPC 서비스 드라이버가 로드되어 NVMe 장치 오류 발생 시
  *   포트 서비스가 먼저 감지하고, 필요 시 NVMe의 .err_handler 콜백을
  *   통해 복구(retry/reset)를 수행한다.
@@ -81,7 +81,7 @@ struct portdrv_service_data { /* NVMe: 포트 서비스 검색 시 드라이버/
 	struct pcie_port_service_driver *drv; /* NVMe: 검색된 포트 서비스 드라이버 포인터 */
 	struct device *dev; /* NVMe: 검색된 서비스 장치(device) 포인터 */
 	u32 service; /* NVMe: 찾으려는 서비스 마스크(PME/AER/DPC 등) */
-};
+}; /* NVMe: 포트 서비스 검색용 임시 구조체 정의 끝. */
 
 /**
  * release_pcie_device - free PCI Express port service device structure
@@ -95,10 +95,10 @@ struct portdrv_service_data { /* NVMe: 포트 서비스 검색 시 드라이버/
  *   pcie_device 구조체를 해제한다. NVMe와 연결된 포트 서비스(AER/DPC 등)
  *   장치가 제거될 때 호출된다.
  */
-static void release_pcie_device(struct device *dev)
-{
+static void release_pcie_device(struct device *dev) /* NVMe: pcie_device 해제 함수 정의. */
+{ /* NVMe: release_pcie_device 함수 본문 시작. */
 	kfree(to_pcie_device(dev)); /* NVMe: device 포인터를 pcie_device로 변환 후 동적 메모리 해제. */
-}
+} /* NVMe: release_pcie_device 함수 끝. */
 
 /*
  * Fill in *pme, *aer, *dpc with the relevant Interrupt Message Numbers if
@@ -112,9 +112,9 @@ static void release_pcie_device(struct device *dev)
  *   에서 AER/DPC 이벤트를 NVMe로 연결할 때 사용할 인터럽트 벡터를
  *   결정한다.
  */
-static int pcie_message_numbers(struct pci_dev *dev, int mask,
-				u32 *pme, u32 *aer, u32 *dpc)
-{
+static int pcie_message_numbers(struct pci_dev *dev, int mask, /* NVMe: 포트 서비스별 Interrupt Message Number와 필요 벡터 수 계산 함수. */
+				u32 *pme, u32 *aer, u32 *dpc) /* NVMe: pme/aer/dpc 출력 포인터(각 서비스 IRQ 번호 저장). */
+{ /* NVMe: pcie_message_numbers 함수 본문 시작. */
 	u32 nvec = 0, pos; /* NVMe: nvec은 필요 벡터 수, pos는 확장 캐퍼빌리티 오프셋 */
 	u16 reg16; /* NVMe: 16비트 PCIe 캐퍼빌리티/확장 레지스터 읽기 버퍼 */
 
@@ -125,39 +125,39 @@ static int pcie_message_numbers(struct pci_dev *dev, int mask,
 	 * 7.8.2, 7.10.10, 7.31.2.
 	 */
 
-	if (mask & (PCIE_PORT_SERVICE_PME | PCIE_PORT_SERVICE_HP |
+	if (mask & (PCIE_PORT_SERVICE_PME | PCIE_PORT_SERVICE_HP | /* NVMe: PME/HP/BWCTRL 서비스 중 하나라도 활성화된 경우 조건. */
 		    PCIE_PORT_SERVICE_BWCTRL)) { /* NVMe: PME/HP/BWCTRL 중 하나라도 활성화되면 공용 PCIe 캐퍼빌리티 IRQ 번호를 읽는다. */
 		pcie_capability_read_word(dev, PCI_EXP_FLAGS, &reg16); /* NVMe: PCIe 캐퍼빌리티 레지스터(PCI_EXP_FLAGS)에서 IRQ 필드 읽기. */
 		*pme = FIELD_GET(PCI_EXP_FLAGS_IRQ, reg16); /* NVMe: PCIe 캐퍼빌리티의 Interrupt Message Number 추출. */
 		nvec = *pme + 1; /* NVMe: 0번부터 pme번까지 사용하므로 총 pme+1개 벡터 필요. */
-	}
+	} /* NVMe: PME/HP/BWCTL IRQ 번호 읽기 블록 끝. */
 
-#ifdef CONFIG_PCIEAER
+#ifdef CONFIG_PCIEAER /* NVMe: AER 서비스 빌드 시에만 컴파일. */
 	if (mask & PCIE_PORT_SERVICE_AER) { /* NVMe: AER 서비스가 활성화된 경우(NVMe 오류 감지 경로). */
 		u32 reg32; /* NVMe: AER 레지스터 32비트 읽기 버퍼 */
 
 		pos = dev->aer_cap; /* NVMe: pci_dev에 캐시된 AER 확장 캐퍼빌리티 오프셋 획득. */
 		if (pos) { /* NVMe: AER 캐퍼빌리티가 존재할 때만 진행. */
-			pci_read_config_dword(dev, pos + PCI_ERR_ROOT_STATUS,
+			pci_read_config_dword(dev, pos + PCI_ERR_ROOT_STATUS, /* NVMe: Root Error Status 레지스터에서 AER IRQ 필드 읽기. */
 				      &reg32); /* NVMe: Root Error Status 레지스터에서 AER IRQ 필드 읽기. */
 			*aer = FIELD_GET(PCI_ERR_ROOT_AER_IRQ, reg32); /* NVMe: AER Interrupt Message Number 추출. */
 			nvec = max(nvec, *aer + 1); /* NVMe: PME 벡터 수와 AER 벡터 수 중 큰 값을 필요 벡터 수로 갱신. */
-		}
-	}
-#endif
+		} /* NVMe: AER IRQ 번호 읽기 블록 끝. */
+	} /* NVMe: AER 서비스 처리 블록 끝. */
+#endif /* NVMe: CONFIG_PCIEAER 조결부 컴파일 끝. */
 
 	if (mask & PCIE_PORT_SERVICE_DPC) { /* NVMe: DPC 서비스가 활성화된 경우(NVMe 링크 다운/서프라이즈 제거 보호). */
 		pos = pci_find_ext_capability(dev, PCI_EXT_CAP_ID_DPC); /* NVMe: DPC 확장 캐퍼빌리티 오프셋 탐색. */
 		if (pos) { /* NVMe: DPC 캐퍼빌리티가 존재할 때만 진행. */
-			pci_read_config_word(dev, pos + PCI_EXP_DPC_CAP,
+			pci_read_config_word(dev, pos + PCI_EXP_DPC_CAP, /* NVMe: DPC Capability 레지스터에서 IRQ 필드 읽기. */
 				     &reg16); /* NVMe: DPC Capability 레지스터 읽기. */
 			*dpc = FIELD_GET(PCI_EXP_DPC_IRQ, reg16); /* NVMe: DPC Interrupt Message Number 추출. */
 			nvec = max(nvec, *dpc + 1); /* NVMe: 필요 벡터 수를 DPC 기준으로 갱신. */
-		}
-	}
+		} /* NVMe: DPC IRQ 번호 읽기 블록 끝. */
+	} /* NVMe: DPC 서비스 처리 블록 끝. */
 
 	return nvec; /* NVMe: PME/AER/DPC 중 가장 큰 Message Number에 기반한 총 벡터 수 반환. */
-}
+} /* NVMe: pcie_message_numbers 함수 끝. */
 
 /**
  * pcie_port_enable_irq_vec - try to set up MSI-X or MSI as interrupt mode
@@ -175,13 +175,13 @@ static int pcie_message_numbers(struct pci_dev *dev, int mask,
  *   별도의 pci_dev이므로 각자의 MSI/MSI-X 공간을 사용하지만, 시스템
  *   전체 벡터 자원 부족 시 NVMe 할당에 간접 영향을 줄 수 있다.
  */
-static int pcie_port_enable_irq_vec(struct pci_dev *dev, int *irqs, int mask)
-{
+static int pcie_port_enable_irq_vec(struct pci_dev *dev, int *irqs, int mask) /* NVMe: PCIe 포트에 MSI/MSI-X 벡터 할당 및 서비스 IRQ 연결 함수. */
+{ /* NVMe: pcie_port_enable_irq_vec 함수 본문 시작. */
 	int nr_entries, nvec, pcie_irq; /* NVMe: nr_entries=할당받은 벡터 수, nvec=실제 필요 수, pcie_irq=공유 IRQ 임시 변수 */
 	u32 pme = 0, aer = 0, dpc = 0; /* NVMe: 각 서비스의 Interrupt Message Number 저장 변수 */
 
 	/* Allocate the maximum possible number of MSI/MSI-X vectors */
-	nr_entries = pci_alloc_irq_vectors(dev, 1, PCIE_PORT_MAX_MSI_ENTRIES,
+	nr_entries = pci_alloc_irq_vectors(dev, 1, PCIE_PORT_MAX_MSI_ENTRIES, /* NVMe: 1~32개 MSI/MSI-X 벡터 최대 할당 시도. */
 			PCI_IRQ_MSIX | PCI_IRQ_MSI); /* NVMe: 포트에 대해 1~32개 MSI/MSI-X 벡터 우선 최대 할당 시도. */
 	if (nr_entries < 0) /* NVMe: 벡터 할당 실패 시(음수는 에러 코드) */
 		return nr_entries; /* NVMe: 에러 코드를 그대로 반환. */
@@ -191,7 +191,7 @@ static int pcie_port_enable_irq_vec(struct pci_dev *dev, int *irqs, int mask)
 	if (nvec > nr_entries) { /* NVMe: 실제 필요 수가 할당받은 수보다 많으면 재할당 불가. */
 		pci_free_irq_vectors(dev); /* NVMe: 기존 벡터 해제. */
 		return -EIO; /* NVMe: I/O 오류 반환. */
-	}
+	} /* NVMe: 초과 할당 재조정 블록 끝. */
 
 	/*
 	 * If we allocated more than we need, free them and reallocate fewer.
@@ -207,20 +207,20 @@ static int pcie_port_enable_irq_vec(struct pci_dev *dev, int *irqs, int mask)
 	if (nvec != nr_entries) { /* NVMe: 초과 할당된 경우 줄여서 재할당. */
 		pci_free_irq_vectors(dev); /* NVMe: 기존 벡터 해제. */
 
-		nr_entries = pci_alloc_irq_vectors(dev, nvec, nvec,
+		nr_entries = pci_alloc_irq_vectors(dev, nvec, nvec, /* NVMe: 필요한 nvec개만 정확히 재할당. */
 				PCI_IRQ_MSIX | PCI_IRQ_MSI); /* NVMe: 정확히 nvec개만 재할당. */
 		if (nr_entries < 0) /* NVMe: 재할당 실패 시 */
 			return nr_entries; /* NVMe: 에러 코드 반환. */
-	}
+	} /* NVMe: 벡터 재할당 블록 끝. */
 
 	/* PME, hotplug and bandwidth notification share an MSI/MSI-X vector */
-	if (mask & (PCIE_PORT_SERVICE_PME | PCIE_PORT_SERVICE_HP |
+	if (mask & (PCIE_PORT_SERVICE_PME | PCIE_PORT_SERVICE_HP | /* NVMe: PME/HP/BWCTRL이 같은 IRQ를 공유하는지 확인. */
 		    PCIE_PORT_SERVICE_BWCTRL)) { /* NVMe: PME/HP/BWCTRL은 동일한 PCIe 캐퍼빌리티 IRQ를 공유. */
 		pcie_irq = pci_irq_vector(dev, pme); /* NVMe: pme 번째 MSI/MSI-X 벡터의 Linux IRQ 번호 획득. */
 		irqs[PCIE_PORT_SERVICE_PME_SHIFT] = pcie_irq; /* NVMe: PME 서비스 IRQ 배열에 저장. */
 		irqs[PCIE_PORT_SERVICE_HP_SHIFT] = pcie_irq; /* NVMe: HP 서비스도 동일 IRQ 사용. */
 		irqs[PCIE_PORT_SERVICE_BWCTRL_SHIFT] = pcie_irq; /* NVMe: BWCTRL 서비스도 동일 IRQ 사용. */
-	}
+	} /* NVMe: PME/HP/BWCTRL IRQ 공유 설정 블록 끝. */
 
 	if (mask & PCIE_PORT_SERVICE_AER) /* NVMe: AER 서비스가 활성화된 경우 */
 		irqs[PCIE_PORT_SERVICE_AER_SHIFT] = pci_irq_vector(dev, aer); /* NVMe: aer 번째 벡터의 IRQ 번호를 AER 서비스에 저장. */
@@ -229,7 +229,7 @@ static int pcie_port_enable_irq_vec(struct pci_dev *dev, int *irqs, int mask)
 		irqs[PCIE_PORT_SERVICE_DPC_SHIFT] = pci_irq_vector(dev, dpc); /* NVMe: dpc 번째 벡터의 IRQ 번호를 DPC 서비스에 저장. */
 
 	return 0; /* NVMe: MSI/MSI-X 벡터 설정 성공. */
-}
+} /* NVMe: pcie_port_enable_irq_vec 함수 끝. */
 
 /**
  * pcie_init_service_irqs - initialize irqs for PCI Express port services
@@ -246,8 +246,8 @@ static int pcie_port_enable_irq_vec(struct pci_dev *dev, int *irqs, int mask)
  *   MSI/MSI-X가 아닌 레거시 INTx로 동작하면 AER/DPC 지연/공유로 인해
  *   NVMe 오류 복구 응답 시간이 길어질 수 있다.
  */
-static int pcie_init_service_irqs(struct pci_dev *dev, int *irqs, int mask)
-{
+static int pcie_init_service_irqs(struct pci_dev *dev, int *irqs, int mask) /* NVMe: PCIe 포트 서비스 IRQ 초기화 함수(MSI/MSI-X 우선, INTx 폴back). */
+{ /* NVMe: pcie_init_service_irqs 함수 본문 시작. */
 	int ret, i; /* NVMe: ret는 INTx 할당 결과, i는 루프 인덱스 */
 
 	for (i = 0; i < PCIE_PORT_DEVICE_MAXSERVICES; i++) /* NVMe: PME/AER/HP/DPC/BWCTRL 5개 서비스 IRQ를 -1(미할당)로 초기화. */
@@ -265,7 +265,7 @@ static int pcie_init_service_irqs(struct pci_dev *dev, int *irqs, int mask)
 	if (pcie_port_enable_irq_vec(dev, irqs, mask) == 0) /* NVMe: MSI/MSI-X 벡터 할당 시도. */
 		return 0; /* NVMe: MSI/MSI-X 성공 시 0 반환. */
 
-intx_irq:
+intx_irq: /* NVMe: INTx 인터럽트 폴back 레이블. */
 	/* fall back to INTX IRQ */
 	ret = pci_alloc_irq_vectors(dev, 1, 1, PCI_IRQ_INTX); /* NVMe: 레거시 INTx 방식으로 1개 벡터만 할당. */
 	if (ret < 0) /* NVMe: INTx 할당 실패 시 */
@@ -275,7 +275,7 @@ intx_irq:
 		irqs[i] = pci_irq_vector(dev, 0); /* NVMe: INTx의 유일한 벡터(0번) IRQ 번호 저장. */
 
 	return 0; /* NVMe: INTx 폴back 성공. */
-}
+} /* NVMe: pcie_init_service_irqs 함수 끝. */
 
 /**
  * get_port_device_capability - discover capabilities of a PCI Express port
@@ -294,8 +294,8 @@ intx_irq:
  *   포트 서비스가 활성화될지 결정하므로, NVMe의 AER/DPC/HP/BWCTRL 지원
  *   여부와 직결된다.
  */
-static int get_port_device_capability(struct pci_dev *dev)
-{
+static int get_port_device_capability(struct pci_dev *dev) /* NVMe: PCIe 포트가 지원하는 서비스 마스크 탐색 함수. */
+{ /* NVMe: get_port_device_capability 함수 본문 시작. */
 	struct pci_host_bridge *host = pci_find_host_bridge(dev->bus); /* NVMe: 포트가 속한 host bridge(RC 일부) 획득. */
 	int services = 0; /* NVMe: 활성화할 서비스 마스크 초기화. */
 
@@ -311,17 +311,17 @@ static int get_port_device_capability(struct pci_dev *dev)
 		 * to handle them.
 		 */
 		if (!IS_ENABLED(CONFIG_HOTPLUG_PCI_PCIE)) /* NVMe: HP 서비스 드라이버가 빌드되지 않은 경우 */
-			pcie_capability_clear_word(dev, PCI_EXP_SLTCTL,
+			pcie_capability_clear_word(dev, PCI_EXP_SLTCTL, /* NVMe: Slot Control 레지스터에서 HP 인터럽트 비트 클리어. */
 				PCI_EXP_SLTCTL_CCIE | PCI_EXP_SLTCTL_HPIE); /* NVMe: BIOS가 켠 HP 인터럽트를 미리 끔(드라이버 없이 폭증 방지). */
-	}
+	} /* NVMe: HP 인터럽트 미리 끄기 블록 끝. */
 
-#ifdef CONFIG_PCIEAER
+#ifdef CONFIG_PCIEAER /* NVMe: AER 서비스 빌드 시에만 컴파일. */
 	if ((pci_pcie_type(dev) == PCI_EXP_TYPE_ROOT_PORT || /* NVMe: Root Port에서 AER 이벤트 수신. */
              pci_pcie_type(dev) == PCI_EXP_TYPE_RC_EC) && /* NVMe: Root Complex Event Collector도 AER 가능. */
 	    dev->aer_cap && pci_aer_available() && /* NVMe: AER 캐퍼빌리티 존재 및 플랫폼 AER 사용 가능. */
 	    (pcie_ports_native || host->native_aer)) /* NVMe: native AER 사용 정책 확인. */
 		services |= PCIE_PORT_SERVICE_AER; /* NVMe: NVMe 장치 오류(UE/CE) 보고 경로인 AER 서비스 활성화. */
-#endif
+#endif /* NVMe: CONFIG_PCIEAER 조결부 컴파일 끝. */
 
 	/* Root Ports and Root Complex Event Collectors may generate PMEs */
 	if ((pci_pcie_type(dev) == PCI_EXP_TYPE_ROOT_PORT || /* NVMe: Root Port에서 PME 수신. */
@@ -335,7 +335,7 @@ static int get_port_device_capability(struct pci_dev *dev)
 		 * necessary).
 		 */
 		pcie_pme_interrupt_enable(dev, false); /* NVMe: PME 서비스 드라이버가 직접 제어하기 전까지 PME 인터럽트 끔. */
-	}
+	} /* NVMe: PME 서비스 활성화 블록 끝. */
 
 	/*
 	 * With dpc-native, allow Linux to use DPC even if it doesn't have
@@ -355,10 +355,10 @@ static int get_port_device_capability(struct pci_dev *dev)
 		if (linkcap & PCI_EXP_LNKCAP_LBNC && /* NVMe: Link Bandwidth Notification Capability 지원 여부. */
 		    hweight8(dev->supported_speeds) > 1) /* NVMe: 둘 이상의 링크 속도(Gen3/4/5 등)를 지원하면. */
 			services |= PCIE_PORT_SERVICE_BWCTRL; /* NVMe: NVMe 대역폭 변경 알림을 위한 BWCTRL 서비스 활성화. */
-	}
+	} /* NVMe: BWCTRL 서비스 활성화 블록 끝. */
 
 	return services; /* NVMe: 탐지된 포트 서비스 마스크 반환. */
-}
+} /* NVMe: get_port_device_capability 함수 끝. */
 
 /**
  * pcie_device_init - allocate and initialize PCI Express port service device
@@ -372,8 +372,8 @@ static int get_port_device_capability(struct pci_dev *dev)
  *   할당/초기화하고 driver core에 등록한다. NVMe 상위 포트의 AER/DPC 등
  *   서비스 드라이버가 이 device에 bind되어 동작한다.
  */
-static int pcie_device_init(struct pci_dev *pdev, int service, int irq)
-{
+static int pcie_device_init(struct pci_dev *pdev, int service, int irq) /* NVMe: 포트 서비스별 pcie_device 할당/초기화/등록 함수. */
+{ /* NVMe: pcie_device_init 함수 본문 시작. */
 	int retval; /* NVMe: device_register 결과 저장. */
 	struct pcie_device *pcie; /* NVMe: 생성할 포트 서비스 장치 객체. */
 	struct device *device; /* NVMe: pcie 남장기 device 객체 포인터. */
@@ -389,8 +389,8 @@ static int pcie_device_init(struct pci_dev *pdev, int service, int irq)
 	device = &pcie->device; /* NVMe: pcie_device 내 device 구조체 포인터 획득. */
 	device->bus = &pcie_port_bus_type; /* NVMe: "pci_express" 버스에 속하도록 설정. */
 	device->release = release_pcie_device;	/* callback to free pcie dev */
-	dev_set_name(device, "%s:pcie%03x",
-		     pci_name(pdev),
+	dev_set_name(device, "%s:pcie%03x", /* NVMe: 서비스 장치 이름 포맷 지정. */
+		     pci_name(pdev), /* NVMe: 부모 PCIe 포트 이름 인자. */
 		     get_descriptor_id(pci_pcie_type(pdev), service)); /* NVMe: "0000:00:01.0:pcie001" 형태의 고유 이름 생성. */
 	device->parent = &pdev->dev; /* NVMe: 포트의 pci_dev.device를 부모로 설정해 sysfs 계층 구성. */
 	device_enable_async_suspend(device); /* NVMe: 비동기 suspend 지원 설정. */
@@ -399,12 +399,12 @@ static int pcie_device_init(struct pci_dev *pdev, int service, int irq)
 	if (retval) { /* NVMe: 등록 실패 시 */
 		put_device(device); /* NVMe: 참조 카운트 감소로 메모리 해제 유도. */
 		return retval; /* NVMe: 에러 코드 반환. */
-	}
+	} /* NVMe: device_register 실패 처리 블록 끝. */
 
 	pm_runtime_no_callbacks(device); /* NVMe: 서비스 장치 자체의 런타임 콜백은 사용하지 않음. */
 
 	return 0; /* NVMe: 서비스 장치 초기화 및 등록 성공. */
-}
+} /* NVMe: pcie_device_init 함수 끝. */
 
 /**
  * pcie_port_device_register - register PCI Express port
@@ -419,8 +419,8 @@ static int pcie_device_init(struct pci_dev *pdev, int service, int irq)
  *   NVMe SSD가 연결된 Root Port나 Switch Downstream Port에서 이 함수가
  *   호출되며, NVMe의 AER/DPC/HP/BWCTRL/PME 인프라가 여기서 준비된다.
  */
-static int pcie_port_device_register(struct pci_dev *dev)
-{
+static int pcie_port_device_register(struct pci_dev *dev) /* NVMe: PCIe 포트 활성화 및 서비스 등록 함수. */
+{ /* NVMe: pcie_port_device_register 함수 본문 시작. */
 	int status, capabilities, i, nr_service; /* NVMe: status=결과, capabilities=서비스 마스크, i=루프, nr_service=등록 성공 수 */
 	int irqs[PCIE_PORT_DEVICE_MAXSERVICES]; /* NVMe: PME/AER/HP/DPC/BWCTRL 각각의 IRQ 번호 배열. */
 
@@ -447,7 +447,7 @@ static int pcie_port_device_register(struct pci_dev *dev)
 		capabilities &= PCIE_PORT_SERVICE_HP; /* NVMe: HP 서비스만 남기고 다른 서비스 마스크 제거. */
 		if (!capabilities) /* NVMe: HP도 비활성화 상태면 */
 			goto error_disable; /* NVMe: 포트 비활성화로 이동. */
-	}
+	} /* NVMe: IRQ 초기화 실패 처리 블록 끝. */
 
 	/* Allocate child services if any */
 	status = -ENODEV; /* NVMe: 아직 등록된 서비스가 없을 때 사용할 에러 코드 설정. */
@@ -458,18 +458,18 @@ static int pcie_port_device_register(struct pci_dev *dev)
 			continue; /* NVMe: 다음 서비스로 진행. */
 		if (!pcie_device_init(dev, service, irqs[i])) /* NVMe: 서비스 장치 생성/등록 시도. */
 			nr_service++; /* NVMe: 성공 시 등록 카운트 증가. */
-	}
+	} /* NVMe: 서비스 장치 등록 루프 끝. */
 	if (!nr_service) /* NVMe: 한 개의 서비스도 등록하지 못했으면 */
 		goto error_cleanup_irqs; /* NVMe: IRQ 정리 후 비활성화. */
 
 	return 0; /* NVMe: 포트 등록 및 서비스 초기화 완료. */
 
-error_cleanup_irqs:
+error_cleanup_irqs: /* NVMe: IRQ 정리 후 비활성화 레이블. */
 	pci_free_irq_vectors(dev); /* NVMe: 할당된 MSI/MSI-X/INTx 벡터 해제. */
-error_disable:
+error_disable: /* NVMe: 포트 비활성화 레이블. */
 	pci_disable_device(dev); /* NVMe: 포트 장치 비활성화. */
 	return status; /* NVMe: 실패 코드 반환. */
-}
+} /* NVMe: pcie_port_device_register 함수 끝. */
 
 typedef int (*pcie_callback_t)(struct pcie_device *); /* NVMe: pcie_device를 인자로 받는 서비스 드라이버 콜백 함수 포인터 타입. */
 
@@ -480,8 +480,8 @@ typedef int (*pcie_callback_t)(struct pcie_device *); /* NVMe: pcie_device를 �
  *   slot_reset 콜백이 중요한데, AER/DPC 복구 과정에서 하위 서비스의
  *   slot_reset이 NVMe 엔드포인트 복구와 연동될 수 있다.
  */
-static int pcie_port_device_iter(struct device *dev, void *data)
-{
+static int pcie_port_device_iter(struct device *dev, void *data) /* NVMe: 포트 하위 서비스 드라이버 콜백 순회 함수. */
+{ /* NVMe: pcie_port_device_iter 함수 본문 시작. */
 	struct pcie_port_service_driver *service_driver; /* NVMe: 현재 장치에 바인딩된 서비스 드라이버. */
 	size_t offset = *(size_t *)data; /* NVMe: service_driver 구조체 내 콜백 함수 포인터 오프셋. */
 	pcie_callback_t cb; /* NVMe: 호출할 실제 콜백 함수 포인터. */
@@ -491,11 +491,11 @@ static int pcie_port_device_iter(struct device *dev, void *data)
 		cb = *(pcie_callback_t *)((void *)service_driver + offset); /* NVMe: 오프셋 위치의 콜백 포인터 추출. */
 		if (cb) /* NVMe: 콜백이 등록되어 있으면 */
 			return cb(to_pcie_device(dev)); /* NVMe: pcie_device로 변환 후 콜백 호출. */
-	}
+	} /* NVMe: 콜백 호출 블록 끝. */
 	return 0; /* NVMe: 조건 미해당 또는 콜백 미등록 시 0 반환. */
-}
+} /* NVMe: pcie_port_device_iter 함수 끝. */
 
-#ifdef CONFIG_PM
+#ifdef CONFIG_PM /* NVMe: 전원 관리(PM) 지원 시에만 컴파일. */
 /**
  * pcie_port_device_suspend - suspend port services associated with a PCIe port
  * @dev: PCI Express port to handle
@@ -506,11 +506,11 @@ static int pcie_port_device_iter(struct device *dev, void *data)
  *   시스템 suspend 전환 시 상위 포트 서비스(AER/DPC/PME)도 같이
  *   suspend되어 전원 상태 전환이 일관되게 이루어진다.
  */
-static int pcie_port_device_suspend(struct device *dev)
-{
+static int pcie_port_device_suspend(struct device *dev) /* NVMe: 포트 하위 서비스 suspend 콜백 순회 함수. */
+{ /* NVMe: pcie_port_device_suspend 함수 본문 시작. */
 	size_t off = offsetof(struct pcie_port_service_driver, suspend); /* NVMe: service_driver->suspend 멤버의 오프셋 계산. */
 	return device_for_each_child(dev, &off, pcie_port_device_iter); /* NVMe: 포트의 모든 자식 pcie_device에 대해 suspend 콜백 호출. */
-}
+} /* NVMe: pcie_port_device_suspend 함수 끝. */
 
 /*
  * pcie_port_device_resume_noirq:
@@ -518,11 +518,11 @@ static int pcie_port_device_suspend(struct device *dev)
  *   NVMe 장치 복구 시 인터럽트가 아직 복원되지 않은 단계에서 포트 AER/DPC
  *   상태를 먼저 복구해야 한다.
  */
-static int pcie_port_device_resume_noirq(struct device *dev)
-{
+static int pcie_port_device_resume_noirq(struct device *dev) /* NVMe: 포트 하위 서비스 resume_noirq 콜백 순회 함수. */
+{ /* NVMe: pcie_port_device_resume_noirq 함수 본문 시작. */
 	size_t off = offsetof(struct pcie_port_service_driver, resume_noirq); /* NVMe: resume_noirq 멤버 오프셋. */
 	return device_for_each_child(dev, &off, pcie_port_device_iter); /* NVMe: 하위 서비스의 resume_noirq 콜백 순회 호출. */
-}
+} /* NVMe: pcie_port_device_resume_noirq 함수 끝. */
 
 /**
  * pcie_port_device_resume - resume port services associated with a PCIe port
@@ -534,11 +534,11 @@ static int pcie_port_device_resume_noirq(struct device *dev)
  *   resume된 후 상위 포트의 PME/AER/DPC 서비스도 정상 동작 상태로
  *   복귀시킨다.
  */
-static int pcie_port_device_resume(struct device *dev)
-{
+static int pcie_port_device_resume(struct device *dev) /* NVMe: 포트 하위 서비스 resume 콜백 순회 함수. */
+{ /* NVMe: pcie_port_device_resume 함수 본문 시작. */
 	size_t off = offsetof(struct pcie_port_service_driver, resume); /* NVMe: resume 멤버 오프셋. */
 	return device_for_each_child(dev, &off, pcie_port_device_iter); /* NVMe: 하위 서비스의 resume 콜백 순회 호출. */
-}
+} /* NVMe: pcie_port_device_resume 함수 끝. */
 
 /**
  * pcie_port_device_runtime_suspend - runtime suspend port services
@@ -551,11 +551,11 @@ static int pcie_port_device_resume(struct device *dev)
  *   일시적으로 중단될 수 있으므로 NVMe의 ASPM/runtime PM 정책과
  *   연동된다.
  */
-static int pcie_port_device_runtime_suspend(struct device *dev)
-{
+static int pcie_port_device_runtime_suspend(struct device *dev) /* NVMe: 포트 하위 서비스 runtime_suspend 콜백 순회 함수. */
+{ /* NVMe: pcie_port_device_runtime_suspend 함수 본문 시작. */
 	size_t off = offsetof(struct pcie_port_service_driver, runtime_suspend); /* NVMe: runtime_suspend 멤버 오프셋. */
 	return device_for_each_child(dev, &off, pcie_port_device_iter); /* NVMe: 하위 서비스의 runtime_suspend 콜백 순회 호출. */
-}
+} /* NVMe: pcie_port_device_runtime_suspend 함수 끝. */
 
 /**
  * pcie_port_device_runtime_resume - runtime resume port services
@@ -567,24 +567,24 @@ static int pcie_port_device_runtime_suspend(struct device *dev)
  *   resume 시킨다. PME/AER/DPC 인터럽트 경로가 다시 활성화되어 NVMe
  *   이벤트 처리가 재개된다.
  */
-static int pcie_port_device_runtime_resume(struct device *dev)
-{
+static int pcie_port_device_runtime_resume(struct device *dev) /* NVMe: 포트 하위 서비스 runtime_resume 콜백 순회 함수. */
+{ /* NVMe: pcie_port_device_runtime_resume 함수 본문 시작. */
 	size_t off = offsetof(struct pcie_port_service_driver, runtime_resume); /* NVMe: runtime_resume 멤버 오프셋. */
 	return device_for_each_child(dev, &off, pcie_port_device_iter); /* NVMe: 하위 서비스의 runtime_resume 콜백 순회 호출. */
-}
-#endif /* PM */
+} /* NVMe: pcie_port_device_runtime_resume 함수 끝. */
+#endif /* PM */ /* NVMe: CONFIG_PM 조결부 컴파일 끝. */
 
 /*
  * remove_iter:
  *   포트의 자식 pcie_device들을 unregister한다. NVMe 상위 포트가
  *   제거될 때 AER/DPC/HP 등 서비스 장치를 먼저 정리한다.
  */
-static int remove_iter(struct device *dev, void *data)
-{
+static int remove_iter(struct device *dev, void *data) /* NVMe: 포트 하위 pcie_device unregister 순회 콜백. */
+{ /* NVMe: remove_iter 함수 본문 시작. */
 	if (dev->bus == &pcie_port_bus_type) /* NVMe: pcie_port_bus_type에 속한 서비스 장치인지 확인. */
 		device_unregister(dev); /* NVMe: 해당 서비스 장치를 driver core에서 제거. */
 	return 0; /* NVMe: 순회 계속. */
-}
+} /* NVMe: remove_iter 함수 끝. */
 
 /*
  * find_service_iter:
@@ -592,8 +592,8 @@ static int remove_iter(struct device *dev, void *data)
  *   NVMe 장치와 연결된 포트에서 AER/DPC/PME 서비스 장치를 검색할 때
  *   사용된다.
  */
-static int find_service_iter(struct device *device, void *data)
-{
+static int find_service_iter(struct device *device, void *data) /* NVMe: 특정 서비스 타입의 pcie_device 검색 순회 콜백. */
+{ /* NVMe: find_service_iter 함수 본문 시작. */
 	struct pcie_port_service_driver *service_driver; /* NVMe: 현재 장치에 바인딩된 서비스 드라이버. */
 	struct portdrv_service_data *pdrvs; /* NVMe: 검색 조건/결과를 담은 콜백 데이터. */
 	u32 service; /* NVMe: 찾으려는 서비스 마스크. */
@@ -607,11 +607,11 @@ static int find_service_iter(struct device *device, void *data)
 			pdrvs->drv = service_driver; /* NVMe: 결과 구조체에 드라이버 저장. */
 			pdrvs->dev = device; /* NVMe: 결과 구조체에 장치 저장. */
 			return 1; /* NVMe: 검색 성공, 순회 중단. */
-		}
-	}
+		} /* NVMe: 서비스 타입 일치 처리 블록 끝. */
+	} /* NVMe: pcie_port_bus_type 장치 확인 블록 끝. */
 
 	return 0; /* NVMe: 일치하지 않으면 계속 순회. */
-}
+} /* NVMe: find_service_iter 함수 끝. */
 
 /**
  * pcie_port_find_device - find the struct device
@@ -626,9 +626,9 @@ static int find_service_iter(struct device *device, void *data)
  *   struct device를 반환한다. 서비스 드라이버가 등록된 상태인지 확인하거나
  *   장치 간 참조를 맺을 때 사용된다.
  */
-struct device *pcie_port_find_device(struct pci_dev *dev,
-			      u32 service)
-{
+struct device *pcie_port_find_device(struct pci_dev *dev, /* NVMe: 포트에서 지정 서비스의 struct device 검색 함수. */
+			      u32 service) /* NVMe: 검색할 서비스 마스크 인자. */
+{ /* NVMe: pcie_port_find_device 함수 본문 시작. */
 	struct device *device; /* NVMe: 검색 결과 장치 포인터. */
 	struct portdrv_service_data pdrvs; /* NVMe: 검색용 임시 데이터 구조체. */
 
@@ -638,7 +638,7 @@ struct device *pcie_port_find_device(struct pci_dev *dev,
 
 	device = pdrvs.dev; /* NVMe: 검색된 장치 포인터 획득. */
 	return device; /* NVMe: 일치하는 서비스 장치 반환(없으면 NULL). */
-}
+} /* NVMe: pcie_port_find_device 함수 끝. */
 EXPORT_SYMBOL_GPL(pcie_port_find_device); /* NVMe: pcie_port_find_device를 GPL 모듈에 심볼 남장기. */
 
 /**
@@ -654,11 +654,11 @@ EXPORT_SYMBOL_GPL(pcie_port_find_device); /* NVMe: pcie_port_find_device를 GPL 
  *   NVMe 장치가 제거되거나 상위 포트 드라이버가 unload될 때 AER/DPC/PME
  *   서비스를 정리한다.
  */
-static void pcie_port_device_remove(struct pci_dev *dev)
-{
+static void pcie_port_device_remove(struct pci_dev *dev) /* NVMe: 포트 서비스 장치 제거 및 IRQ 해제 함수. */
+{ /* NVMe: pcie_port_device_remove 함수 본문 시작. */
 	device_for_each_child(&dev->dev, NULL, remove_iter); /* NVMe: 포트의 모든 자식 pcie_device 제거. */
 	pci_free_irq_vectors(dev); /* NVMe: 포트에 할당된 MSI/MSI-X/INTx 벡터 모두 해제. */
-}
+} /* NVMe: pcie_port_device_remove 함수 끝. */
 
 /*
  * pcie_port_bus_match:
@@ -666,20 +666,20 @@ static void pcie_port_device_remove(struct pci_dev *dev)
  *   pcie_port_service_driver의 서비스/포트 타입이 일치하는지 검사한다.
  *   NVMe 상위 포트의 AER 서비스 장치는 AER 서비스 드라이버와만 매칭된다.
  */
-static int pcie_port_bus_match(struct device *dev, const struct device_driver *drv)
-{
+static int pcie_port_bus_match(struct device *dev, const struct device_driver *drv) /* NVMe: pcie_port_bus_type match 콜백 함수. */
+{ /* NVMe: pcie_port_bus_match 함수 본문 시작. */
 	struct pcie_device *pciedev = to_pcie_device(dev); /* NVMe: device를 pcie_device로 변환. */
 	const struct pcie_port_service_driver *driver = to_service_driver(drv); /* NVMe: device_driver를 서비스 드라이버로 변환. */
 
 	if (driver->service != pciedev->service) /* NVMe: 드라이버와 장치의 서비스 타입이 다른면 매칭 실패. */
 		return 0; /* NVMe: 매칭 실패. */
 
-	if (driver->port_type != PCIE_ANY_PORT &&
+	if (driver->port_type != PCIE_ANY_PORT && /* NVMe: 드라이버가 특정 포트 타입 전용인지 확인. */
 	    driver->port_type != pci_pcie_type(pciedev->port)) /* NVMe: 드라이버가 특정 포트 타입 전용이고 현재 포트 타입과 다른면. */
 		return 0; /* NVMe: 포트 타입 불일치로 매칭 실패. */
 
 	return 1; /* NVMe: 서비스 및 포트 타입이 일치하면 매칭 성공. */
-}
+} /* NVMe: pcie_port_bus_match 함수 끝. */
 
 /**
  * pcie_port_bus_probe - probe driver for given PCI Express port service
@@ -695,8 +695,8 @@ static int pcie_port_bus_match(struct device *dev, const struct device_driver *d
  *   포트에서 AER/DPC/PME/HP/BWCTRL 서비스 드라이버가 로드될 때 이
  *   함수를 통해 초기화된다.
  */
-static int pcie_port_bus_probe(struct device *dev)
-{
+static int pcie_port_bus_probe(struct device *dev) /* NVMe: pcie_port_bus_type probe 콜백 함수. */
+{ /* NVMe: pcie_port_bus_probe 함수 본문 시작. */
 	struct pcie_device *pciedev; /* NVMe: probe 대상 pcie_device. */
 	struct pcie_port_service_driver *driver; /* NVMe: 매칭된 서비스 드라이버. */
 	int status; /* NVMe: probe 콜백 결과. */
@@ -712,7 +712,7 @@ static int pcie_port_bus_probe(struct device *dev)
 
 	get_device(dev); /* NVMe: probe 성공 시 장치 참조 카운트 증가(드라이버가 사용 중임을 표시). */
 	return 0; /* NVMe: probe 성공. */
-}
+} /* NVMe: pcie_port_bus_probe 함수 끝. */
 
 /**
  * pcie_port_bus_remove - detach driver from given PCI Express port service
@@ -728,8 +728,8 @@ static int pcie_port_bus_probe(struct device *dev)
  *   NVMe 상위 포트 서비스 드라이버가 제거될 때 호출된다. AER/DPC/PME
  *   등의 remove 콜백을 통해 인터럽트/상태 머신을 정리한다.
  */
-static void pcie_port_bus_remove(struct device *dev)
-{
+static void pcie_port_bus_remove(struct device *dev) /* NVMe: pcie_port_bus_type remove 콜백 함수. */
+{ /* NVMe: pcie_port_bus_remove 함수 본문 시작. */
 	struct pcie_device *pciedev; /* NVMe: 제거 대상 pcie_device. */
 	struct pcie_port_service_driver *driver; /* NVMe: 바인딩된 서비스 드라이버. */
 
@@ -739,14 +739,14 @@ static void pcie_port_bus_remove(struct device *dev)
 		driver->remove(pciedev); /* NVMe: 서비스별 remove 콜백 호출. */
 
 	put_device(dev); /* NVMe: probe 때 증가시킨 참조 카운트 감소. */
-}
+} /* NVMe: pcie_port_bus_remove 함수 끝. */
 
 const struct bus_type pcie_port_bus_type = { /* NVMe: "pci_express" 버스 타입 정의. */
 	.name = "pci_express", /* NVMe: sysfs에서 보이는 버스 이름. */
 	.match = pcie_port_bus_match, /* NVMe: 서비스/포트 타입 기반 match 함수. */
 	.probe = pcie_port_bus_probe, /* NVMe: 드라이버 probe 진입점. */
 	.remove = pcie_port_bus_remove, /* NVMe: 드라이버 remove 진입점. */
-};
+}; /* NVMe: pcie_port_bus_type 구조체 정의 끝. */
 
 /**
  * pcie_port_service_register - register PCI Express port service driver
@@ -758,8 +758,8 @@ const struct bus_type pcie_port_bus_type = { /* NVMe: "pci_express" 버스 타�
  *   등록한다. NVMe 엔드포인트의 오류 처리/전원 관리/핫플러그를 담당할
  *   포트 서비스 드라이버들이 이 함수를 통해 등록된다.
  */
-int pcie_port_service_register(struct pcie_port_service_driver *new)
-{
+int pcie_port_service_register(struct pcie_port_service_driver *new) /* NVMe: PCIe 포트 서비스 드라이버 등록 함수. */
+{ /* NVMe: pcie_port_service_register 함수 본문 시작. */
 	if (pcie_ports_disabled) /* NVMe: 커널 옵션 "pcie_ports=compat"로 포트 서비스가 비활성화된 경우. */
 		return -ENODEV; /* NVMe: 등록 거부. */
 
@@ -767,7 +767,7 @@ int pcie_port_service_register(struct pcie_port_service_driver *new)
 	new->driver.bus = &pcie_port_bus_type; /* NVMe: 등록 대상 버스를 pcie_port_bus_type으로 지정. */
 
 	return driver_register(&new->driver); /* NVMe: driver core에 서비스 드라이버 등록. */
-}
+} /* NVMe: pcie_port_service_register 함수 끝. */
 
 /**
  * pcie_port_service_unregister - unregister PCI Express port service driver
@@ -778,10 +778,10 @@ int pcie_port_service_register(struct pcie_port_service_driver *new)
  *   등록된 포트 서비스 드라이버를 해제한다. NVMe 상위 포트의 AER/DPC
  *   처리 능력이 제거될 때 사용된다.
  */
-void pcie_port_service_unregister(struct pcie_port_service_driver *drv)
-{
+void pcie_port_service_unregister(struct pcie_port_service_driver *drv) /* NVMe: PCIe 포트 서비스 드라이버 등록 해제 함수. */
+{ /* NVMe: pcie_port_service_unregister 함수 본문 시작. */
 	driver_unregister(&drv->driver); /* NVMe: driver core에서 서비스 드라이버 등록 해제. */
-}
+} /* NVMe: pcie_port_service_unregister 함수 끝. */
 
 /* If this switch is set, PCIe port native services should not be enabled. */
 bool pcie_ports_disabled; /* NVMe: "pcie_ports=compat" 시 true, 모든 포트 native 서비스 비활성화. */
@@ -805,8 +805,8 @@ bool pcie_ports_dpc_native; /* NVMe: "pcie_ports=dpc-native" 시 true, DPC 서�
  *   설정한다. NVMe 시스템에서 AER/DPC/PME 동작 방식을 사용자가 제어할
  *   수 있는 진입점이다.
  */
-static int __init pcie_port_setup(char *str)
-{
+static int __init pcie_port_setup(char *str) /* NVMe: "pcie_ports=" 커널 부팅 파라미터 파싱 함수. */
+{ /* NVMe: pcie_port_setup 함수 본문 시작. */
 	if (!strncmp(str, "compat", 6)) /* NVMe: "compat" 옵션 시. */
 		pcie_ports_disabled = true; /* NVMe: 모든 native 포트 서비스 비활성화. */
 	else if (!strncmp(str, "native", 6)) /* NVMe: "native" 옵션 시. */
@@ -815,40 +815,40 @@ static int __init pcie_port_setup(char *str)
 		pcie_ports_dpc_native = true; /* NVMe: DPC 서비스를 플랫폼 권한 없이도 사용. */
 
 	return 1; /* NVMe: __setup 핸들러 성공 반환. */
-}
+} /* NVMe: pcie_port_setup 함수 끝. */
 __setup("pcie_ports=", pcie_port_setup); /* NVMe: "pcie_ports=" 커널 파라미터 등록. */
 
 /* global data */
 
-#ifdef CONFIG_PM
+#ifdef CONFIG_PM /* NVMe: 전원 관리(PM) 지원 시에만 컴파일. */
 /*
  * pcie_port_runtime_suspend:
  *   포트의 런타임 suspend 조건을 확인하고 하위 서비스의 runtime_suspend
  *   를 호출한다. NVMe 장치가 D3cold로 들어갈 때 상위 포트도 D3로
  *   진입 가능한지 판단한다.
  */
-static int pcie_port_runtime_suspend(struct device *dev)
-{
+static int pcie_port_runtime_suspend(struct device *dev) /* NVMe: 포트 런타임 suspend 조건 확인 및 하위 서비스 호출 함수. */
+{ /* NVMe: pcie_port_runtime_suspend 함수 본문 시작. */
 	if (!to_pci_dev(dev)->bridge_d3) /* NVMe: 포트가 D3 상태로 전환 가능한 bridge_d3 플래그가 꺼져 있으면. */
 		return -EBUSY; /* NVMe: 런타임 suspend 불가. */
 
 	return pcie_port_device_runtime_suspend(dev); /* NVMe: 하위 서비스 런타임 suspend 수행. */
-}
+} /* NVMe: pcie_port_runtime_suspend 함수 끝. */
 
 /*
  * pcie_port_runtime_idle:
  *   런타임 PM idle 콜백. bridge_d3가 true일 때만 idle 허용. NVMe의
  *   ASPM/런타임 전원 관리와 연동된다.
  */
-static int pcie_port_runtime_idle(struct device *dev)
-{
+static int pcie_port_runtime_idle(struct device *dev) /* NVMe: 포트 런타임 idle 판단 함수. */
+{ /* NVMe: pcie_port_runtime_idle 함수 본문 시작. */
 	/*
 	 * Assume the PCI core has set bridge_d3 whenever it thinks the port
 	 * should be good to go to D3.  Everything else, including moving
 	 * the port to D3, is handled by the PCI core.
 	 */
 	return to_pci_dev(dev)->bridge_d3 ? 0 : -EBUSY; /* NVMe: bridge_d3가 설정되어 있으면 idle 진입 허용, 아니면 거부. */
-}
+} /* NVMe: pcie_port_runtime_idle 함수 끝. */
 
 static const struct dev_pm_ops pcie_portdrv_pm_ops = { /* NVMe: PCIe 포트 드라이버의 전원 관리 ops 구조체. */
 	.suspend	= pcie_port_device_suspend, /* NVMe: 시스템 suspend 시 하위 서비스 suspend 호출. */
@@ -862,14 +862,14 @@ static const struct dev_pm_ops pcie_portdrv_pm_ops = { /* NVMe: PCIe 포트 드�
 	.runtime_suspend = pcie_port_runtime_suspend, /* NVMe: 런타임 suspend 진입. */
 	.runtime_resume	= pcie_port_device_runtime_resume, /* NVMe: 런타임 resume 진입. */
 	.runtime_idle	= pcie_port_runtime_idle, /* NVMe: 런타임 idle 판단. */
-};
+}; /* NVMe: pcie_portdrv_pm_ops 구조체 정의 끝. */
 
 #define PCIE_PORTDRV_PM_OPS	(&pcie_portdrv_pm_ops) /* NVMe: PM ops 매크로 정의. */
 
-#else /* !PM */
+#else /* !PM */ /* NVMe: PM 미지원 시 대체 매크로 정의 분기. */
 
 #define PCIE_PORTDRV_PM_OPS	NULL /* NVMe: PM 미지원 시 NULL. */
-#endif /* !PM */
+#endif /* !PM */ /* NVMe: CONFIG_PM 조결부 컴파일 끝. */
 
 /*
  * pcie_portdrv_probe - Probe PCI-Express port devices
@@ -886,9 +886,9 @@ static const struct dev_pm_ops pcie_portdrv_pm_ops = { /* NVMe: PCIe 포트 드�
  *   활성화되고, NVMe의 오류 처리 및 전원/핫플러그/대역폭 관리가
  *   가능해진다.
  */
-static int pcie_portdrv_probe(struct pci_dev *dev,
-				const struct pci_device_id *id)
-{
+static int pcie_portdrv_probe(struct pci_dev *dev, /* NVMe: PCIe 포트 드라이버 probe 함수. */
+				const struct pci_device_id *id) /* NVMe: 매칭된 PCI 장치 ID 테이블 포인터 인자. */
+{ /* NVMe: pcie_portdrv_probe 함수 본문 시작. */
 	int type = pci_pcie_type(dev); /* NVMe: 현재 포트의 PCIe 포트 타입(RP/USP/DSP/RCEC) 획득. */
 	int status; /* NVMe: 등록 결과 저장. */
 
@@ -908,7 +908,7 @@ static int pcie_portdrv_probe(struct pci_dev *dev,
 
 	pci_save_state(dev); /* NVMe: 포트의 현재 PCI 설정 상태 저장(suspend/resume 복구용). */
 
-	dev_pm_set_driver_flags(&dev->dev, DPM_FLAG_NO_DIRECT_COMPLETE |
+	dev_pm_set_driver_flags(&dev->dev, DPM_FLAG_NO_DIRECT_COMPLETE | /* NVMe: 직접 complete 금지 플래그 설정. */
 					   DPM_FLAG_SMART_SUSPEND); /* NVMe: 런타임 PM 플래그 설정(직접 complete 금지, smart suspend 사용). */
 
 	if (pci_bridge_d3_possible(dev)) { /* NVMe: 포트가 D3 상태 전환을 지원하면. */
@@ -922,44 +922,44 @@ static int pcie_portdrv_probe(struct pci_dev *dev,
 		pm_runtime_mark_last_busy(&dev->dev); /* NVMe: 마지막 활동 시점 갱신. */
 		pm_runtime_put_autosuspend(&dev->dev); /* NVMe: autosuspend 참조 카운트 반납. */
 		pm_runtime_allow(&dev->dev); /* NVMe: 런타임 PM 허용. */
-	}
+	} /* NVMe: D3 지원 시 런타임 PM 초기화 블록 끝. */
 
 	return 0; /* NVMe: PCIe 포트 probe 성공. */
-}
+} /* NVMe: pcie_portdrv_probe 함수 끝. */
 
 /*
  * pcie_portdrv_remove:
  *   PCIe 포트 드라이버가 제거될 때 호출된다. NVMe 상위 포트에서
  *   AER/DPC/PME/HP/BWCTRL 서비스를 정리하고 포트를 비활성화한다.
  */
-static void pcie_portdrv_remove(struct pci_dev *dev)
-{
+static void pcie_portdrv_remove(struct pci_dev *dev) /* NVMe: PCIe 포트 드라이버 remove 함수. */
+{ /* NVMe: pcie_portdrv_remove 함수 본문 시작. */
 	if (pci_bridge_d3_possible(dev)) { /* NVMe: 런타임 PM이 활성화된 포트인 경우. */
 		pm_runtime_forbid(&dev->dev); /* NVMe: 추가 런타임 suspend 금지. */
 		pm_runtime_get_noresume(&dev->dev); /* NVMe: 런타임 resume 없이 참조 획득. */
 		pm_runtime_dont_use_autosuspend(&dev->dev); /* NVMe: autosuspend 비활성화. */
-	}
+	} /* NVMe: 런타임 PM 정리 블록 끝. */
 
 	pcie_port_device_remove(dev); /* NVMe: 하위 서비스 장치 제거 및 IRQ 벡터 해제. */
 
 	pci_disable_device(dev); /* NVMe: 포트 장치 비활성화. */
-}
+} /* NVMe: pcie_portdrv_remove 함수 끝. */
 
 /*
  * pcie_portdrv_shutdown:
  *   시스템 종료 시 PCIe 포트의 서비스들을 정리한다. NVMe 장치가
  *   종료 중에도 상위 포트의 AER/DPC 등이 안전하게 정리되어야 한다.
  */
-static void pcie_portdrv_shutdown(struct pci_dev *dev)
-{
+static void pcie_portdrv_shutdown(struct pci_dev *dev) /* NVMe: PCIe 포트 드라이버 shutdown 함수. */
+{ /* NVMe: pcie_portdrv_shutdown 함수 본문 시작. */
 	if (pci_bridge_d3_possible(dev)) { /* NVMe: 런타임 PM이 활성화된 포트인 경우. */
 		pm_runtime_forbid(&dev->dev); /* NVMe: 런타임 suspend 금지. */
 		pm_runtime_get_noresume(&dev->dev); /* NVMe: 참조 획득. */
 		pm_runtime_dont_use_autosuspend(&dev->dev); /* NVMe: autosuspend 중지. */
-	}
+	} /* NVMe: 런타임 PM 정리 블록 끝. */
 
 	pcie_port_device_remove(dev); /* NVMe: 포트 서비스 장치 및 IRQ 정리. */
-}
+} /* NVMe: pcie_portdrv_shutdown 함수 끝. */
 
 /*
  * pcie_portdrv_error_detected:
@@ -968,13 +968,13 @@ static void pcie_portdrv_shutdown(struct pci_dev *dev)
  *   판단한다. 이 결과는 PCI core의 error recovery 흐름을 타고 NVMe의
  *   .error_detected 콜백으로 연결될 수 있다.
  */
-static pci_ers_result_t pcie_portdrv_error_detected(struct pci_dev *dev,
-					pci_channel_state_t error)
-{
+static pci_ers_result_t pcie_portdrv_error_detected(struct pci_dev *dev, /* NVMe: 포트 드라이버 AER error_detected 콜백 함수. */
+					pci_channel_state_t error) /* NVMe: PCIe 채널 상태 인자. */
+{ /* NVMe: pcie_portdrv_error_detected 함수 본문 시작. */
 	if (error == pci_channel_io_frozen) /* NVMe: PCIe 채널이 frozen 상태이면. */
 		return PCI_ERS_RESULT_NEED_RESET; /* NVMe: slot reset 필요를 알림. */
 	return PCI_ERS_RESULT_CAN_RECOVER; /* NVMe: 그 외에는 복구 가능으로 판단. */
-}
+} /* NVMe: pcie_portdrv_error_detected 함수 끝. */
 
 /*
  * pcie_portdrv_slot_reset:
@@ -983,14 +983,14 @@ static pci_ers_result_t pcie_portdrv_error_detected(struct pci_dev *dev,
  *   AER/DPC 복구 과정에서 상위 포트가 먼저 reset되고 이후 NVMe의
  *   .slot_reset가 호출될 수 있다.
  */
-static pci_ers_result_t pcie_portdrv_slot_reset(struct pci_dev *dev)
-{
+static pci_ers_result_t pcie_portdrv_slot_reset(struct pci_dev *dev) /* NVMe: 포트 드라이버 AER slot_reset 콜백 함수. */
+{ /* NVMe: pcie_portdrv_slot_reset 함수 본문 시작. */
 	size_t off = offsetof(struct pcie_port_service_driver, slot_reset); /* NVMe: slot_reset 콜백 오프셋 계산. */
 	device_for_each_child(&dev->dev, &off, pcie_port_device_iter); /* NVMe: 하위 AER/DPC/PME 등 서비스의 slot_reset 호출. */
 
 	pci_restore_state(dev); /* NVMe: 포트의 PCI 설정 상태 복원. */
 	return PCI_ERS_RESULT_RECOVERED; /* NVMe: 포트 복구 완료 보고. */
-}
+} /* NVMe: pcie_portdrv_slot_reset 함수 끝. */
 
 /*
  * pcie_portdrv_mmio_enabled:
@@ -998,10 +998,10 @@ static pci_ers_result_t pcie_portdrv_slot_reset(struct pci_dev *dev)
  *   NVMe의 MMIO(bar/doorbell) 접근이 재개되기 전 포트가 먼저
  *   복구되었음을 나타낸다.
  */
-static pci_ers_result_t pcie_portdrv_mmio_enabled(struct pci_dev *dev)
-{
+static pci_ers_result_t pcie_portdrv_mmio_enabled(struct pci_dev *dev) /* NVMe: 포트 드라이버 AER mmio_enabled 콜백 함수. */
+{ /* NVMe: pcie_portdrv_mmio_enabled 함수 본문 시작. */
 	return PCI_ERS_RESULT_RECOVERED; /* NVMe: MMIO 활성화 후 복구된 것으로 간주. */
-}
+} /* NVMe: pcie_portdrv_mmio_enabled 함수 끝. */
 
 /*
  * LINUX Device Driver Model
@@ -1014,13 +1014,13 @@ static const struct pci_device_id port_pci_ids[] = { /* NVMe: pcie_portdriver가
 	/* handle any Root Complex Event Collector */
 	{ PCI_DEVICE_CLASS(((PCI_CLASS_SYSTEM_RCEC << 8) | 0x00), ~0) }, /* NVMe: RCEC(08:07) 매칭. */
 	{ }, /* NVMe: 테이블 종료 마커. */
-};
+}; /* NVMe: port_pci_ids 배열 정의 끝. */
 
 static const struct pci_error_handlers pcie_portdrv_err_handler = { /* NVMe: 포트 드라이버의 AER/ERR 핸들러 등록. */
 	.error_detected = pcie_portdrv_error_detected, /* NVMe: 오류 감지 콜백. */
 	.slot_reset = pcie_portdrv_slot_reset, /* NVMe: 슬롯 리셋 콜백. */
 	.mmio_enabled = pcie_portdrv_mmio_enabled, /* NVMe: MMIO 재활성화 콜백. */
-};
+}; /* NVMe: pcie_portdrv_err_handler 구조체 정의 끝. */
 
 static struct pci_driver pcie_portdriver = { /* NVMe: PCIe 포트 드라이버 구조체. */
 	.name		= "pcieport", /* NVMe: 드라이버 이름("pcieport"). */
@@ -1035,7 +1035,7 @@ static struct pci_driver pcie_portdriver = { /* NVMe: PCIe 포트 드라이버 �
 	.driver_managed_dma = true, /* NVMe: 드라이버가 직접 DMA 일관성을 관리. */
 
 	.driver.pm	= PCIE_PORTDRV_PM_OPS, /* NVMe: 전원 관리 ops 연결. */
-};
+}; /* NVMe: pcie_portdriver 구조체 정의 끝. */
 
 /*
  * dmi_pcie_pme_disable_msi:
@@ -1043,29 +1043,29 @@ static struct pci_driver pcie_portdriver = { /* NVMe: PCIe 포트 드라이버 �
  *   시스템에서 PME MSI가 buggy하여 NVMe resume 이벤트가 누락될 수
  *   있으므로 INTx 폴back이 필요하다.
  */
-static int __init dmi_pcie_pme_disable_msi(const struct dmi_system_id *d)
-{
-	pr_notice("%s detected: will not use MSI for PCIe PME signaling\n",
+static int __init dmi_pcie_pme_disable_msi(const struct dmi_system_id *d) /* NVMe: DMI 매칭 시 PME MSI 비활성화 콜백 함수. */
+{ /* NVMe: dmi_pcie_pme_disable_msi 함수 본문 시작. */
+	pr_notice("%s detected: will not use MSI for PCIe PME signaling\n", /* NVMe: PME MSI 비활성화 알림 메시지 출력. */
 		  d->ident); /* NVMe: DMI 식별 문자열과 함께 PME MSI 비활성화 알림 출력. */
 	pcie_pme_disable_msi(); /* NVMe: PME MSI 비활성화 플래그 설정. */
 	return 0; /* NVMe: DMI 콜백 성공 반환. */
-}
+} /* NVMe: dmi_pcie_pme_disable_msi 함수 끝. */
 
 static const struct dmi_system_id pcie_portdrv_dmi_table[] __initconst = { /* NVMe: DMI 기반 quirks 테이블. */
 	/*
 	 * Boxes that should not use MSI for PCIe PME signaling.
 	 */
-	{
+	{ /* NVMe: MSI Wind U-100 DMI 엔트리 시작. */
 	 .callback = dmi_pcie_pme_disable_msi, /* NVMe: 매칭 시 PME MSI 비활성화 콜백 실행. */
 	 .ident = "MSI Wind U-100", /* NVMe: 시스템 식별 이름. */
-	 .matches = {
-		     DMI_MATCH(DMI_SYS_VENDOR,
+	 .matches = { /* NVMe: DMI 매칭 조건 배열 시작. */
+		     DMI_MATCH(DMI_SYS_VENDOR, /* NVMe: 시스템 벤더 매칭 조건. */
 				"MICRO-STAR INTERNATIONAL CO., LTD"), /* NVMe: 제조사 매칭 조건. */
 		     DMI_MATCH(DMI_PRODUCT_NAME, "U-100"), /* NVMe: 제품명 매칭 조건. */
-		     },
-	 },
+		     }, /* NVMe: DMI 매칭 조건 배열 끝. */
+	 }, /* NVMe: MSI Wind U-100 DMI 엔트리 끝. */
 	 {} /* NVMe: 테이블 종료 마커. */
-};
+}; /* NVMe: pcie_portdrv_dmi_table 배열 정의 끝. */
 
 /*
  * pcie_init_services:
@@ -1073,14 +1073,14 @@ static const struct dmi_system_id pcie_portdrv_dmi_table[] __initconst = { /* NV
  *   NVMe 엔드포인트의 오류/전원/핫플러그/대역폭 처리를 담당할
  *   인프라가 여기서 준비된다.
  */
-static void __init pcie_init_services(void)
-{
+static void __init pcie_init_services(void) /* NVMe: PCIe 포트 서비스 하위 드라이버 초기화 함수. */
+{ /* NVMe: pcie_init_services 함수 본문 시작. */
 	pcie_aer_init(); /* NVMe: AER 서비스 초기화(NVMe Uncorrectable/Correctable Error 처리 준비). */
 	pcie_pme_init(); /* NVMe: PME 서비스 초기화(NVMe 저전력 resume 이벤트 처리 준비). */
 	pcie_dpc_init(); /* NVMe: DPC 서비스 초기화(NVMe 서프라이즈 제거/오류 억제 준비). */
 	pcie_bwctrl_init(); /* NVMe: BWCTRL 서비스 초기화(NVMe 링크 대역폭 변경 알림 준비). */
 	pcie_hp_init(); /* NVMe: HP 서비스 초기화(NVMe 핫 추가/제거 준비). */
-}
+} /* NVMe: pcie_init_services 함수 끝. */
 
 /*
  * pcie_portdrv_init:
@@ -1088,8 +1088,8 @@ static void __init pcie_init_services(void)
  *   장치가 연결될 PCIe 포트들을 발견하고, 각 포트의 서비스(AER/DPC/PME
  *   /HP/BWCTRL)를 활성화하는 전체 흐름의 시작점이다.
  */
-static int __init pcie_portdrv_init(void)
-{
+static int __init pcie_portdrv_init(void) /* NVMe: PCIe 포트 버스 드라이버 초기화 함수. */
+{ /* NVMe: pcie_portdrv_init 함수 본문 시작. */
 	if (pcie_ports_disabled) /* NVMe: "pcie_ports=compat"로 포트 서비스가 비활성화된 경우. */
 		return -EACCES; /* NVMe: 접근 거부 에러로 초기화 중단. */
 
@@ -1097,5 +1097,5 @@ static int __init pcie_portdrv_init(void)
 	dmi_check_system(pcie_portdrv_dmi_table); /* NVMe: DMI quirks 적용(필요 시 PME MSI 비활성화). */
 
 	return pci_register_driver(&pcie_portdriver); /* NVMe: pcie_portdriver를 PCI 코어에 등록, 포트 탐색 시작. */
-}
+} /* NVMe: pcie_portdrv_init 함수 끝. */
 device_initcall(pcie_portdrv_init); /* NVMe: 장치 초기화 단계에서 pcie_portdrv_init 자동 실행. */

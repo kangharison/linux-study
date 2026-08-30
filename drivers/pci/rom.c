@@ -55,8 +55,8 @@
  *   MMIO(BAR0/1) 간 주소 디코더를 공유하므로 NVMe 레지스터 접근에
  *   영향을 줄 수 있음에 주의해야 한다.
  */
-int pci_enable_rom(struct pci_dev *pdev)
-{
+int pci_enable_rom(struct pci_dev *pdev) /* NVMe: NVMe SSD 등 PCI 장치의 ROM BAR 디코딩을 활성화하는 함수 진입점 */
+{ /* NVMe: pci_enable_rom 함수 본문 시작: ROM BAR enable 및 주소 복원 */
 	struct resource *res = &pdev->resource[PCI_ROM_RESOURCE]; /* NVMe: NVMe 장치의 ROM 리소스(PCI_ROM_RESOURCE, 일반적으로 리소스 6번) 포인터 획득 */
 	struct pci_bus_region region; /* NVMe: CPU 물리 주소를 PCI bus 주소로 변환한 결과를 담을 임시 구조체 */
 	u32 rom_addr; /* NVMe: ROM BAR에 쓸 32비트 구성 레지스터 값 */
@@ -79,7 +79,7 @@ int pci_enable_rom(struct pci_dev *pdev)
 	rom_addr |= region.start | PCI_ROM_ADDRESS_ENABLE; /* NVMe: bus 시작 주소와 ROM enable 비트를 OR하여 새 ROM BAR 값 구성 */
 	pci_write_config_dword(pdev, pdev->rom_base_reg, rom_addr); /* NVMe: 구성된 주소/enable 값을 NVMe 장치의 ROM BAR에 기록하여 ROM 디코딩 활성화 */
 	return 0; /* NVMe: ROM BAR enable 성공 */
-}
+} /* NVMe: pci_enable_rom 함수 본문 종료 */
 EXPORT_SYMBOL_GPL(pci_enable_rom); /* NVMe: GPL 모듈에서 pci_enable_rom 심볼을 사용할 수 있도록 나이출 */
 
 /**
@@ -95,8 +95,8 @@ EXPORT_SYMBOL_GPL(pci_enable_rom); /* NVMe: GPL 모듈에서 pci_enable_rom 심�
  *   ROM 이미지를 다 읽은 후 또는 ROM 매핑 해제 시 호출되어, ROM이
  *   NVMe BAR 접근이나 다른 리소스와 충돌하지 않도록 한다.
  */
-void pci_disable_rom(struct pci_dev *pdev)
-{
+void pci_disable_rom(struct pci_dev *pdev) /* NVMe: NVMe SSD 등의 ROM BAR 디코딩을 비활성화하는 함수 진입점 */
+{ /* NVMe: pci_disable_rom 함수 본문 시작: ROM BAR enable 비트 클리어 */
 	struct resource *res = &pdev->resource[PCI_ROM_RESOURCE]; /* NVMe: NVMe 장치의 ROM 리소스 포인터 획득 */
 	u32 rom_addr; /* NVMe: ROM BAR 구성 레지스터 값을 읽어올 변수 */
 
@@ -106,7 +106,7 @@ void pci_disable_rom(struct pci_dev *pdev)
 	pci_read_config_dword(pdev, pdev->rom_base_reg, &rom_addr); /* NVMe: NVMe 장치의 ROM BAR 현재 값 읽기 */
 	rom_addr &= ~PCI_ROM_ADDRESS_ENABLE; /* NVMe: ROM enable 비트만 클리어하여 ROM 주소 디코딩을 끔 */
 	pci_write_config_dword(pdev, pdev->rom_base_reg, rom_addr); /* NVMe: enable 비트가 꺼진 값을 ROM BAR에 기록 */
-}
+} /* NVMe: pci_disable_rom 함수 본문 종료 */
 EXPORT_SYMBOL_GPL(pci_disable_rom); /* NVMe: GPL 모듈에서 pci_disable_rom 심볼 노출 */
 
 /**
@@ -127,9 +127,9 @@ EXPORT_SYMBOL_GPL(pci_disable_rom); /* NVMe: GPL 모듈에서 pci_disable_rom �
  *   수 있으므로, 헤더(0xAA55), PCIR 시그네처, 이미지 길이 필드를 검사해
  *   진짜 크기를 찾는다. /sys/.../rom 읽기 시 copy_to_user에 직접 영향.
  */
-static size_t pci_get_rom_size(struct pci_dev *pdev, void __iomem *rom,
-			       size_t size)
-{
+static size_t pci_get_rom_size(struct pci_dev *pdev, void __iomem *rom, /* NVMe: NVMe 장치의 ROM 이미지 중 실제 유효 크기를 계산하는 정적 함수 선언 */
+			       size_t size) /* NVMe: ROM 매핑 윈도우 전체 크기(바이트) */
+{ /* NVMe: pci_get_rom_size 함수 본문 시작: ROM 헤더/PCIR 파싱 */
 	void __iomem *image; /* NVMe: 현재 검사 중인 ROM 이미지 시작 주소 포인터 */
 	int last_image; /* NVMe: 현재 이미지가 ROM 체인의 마지막 이미지인지 표시(0x80 비트) */
 	unsigned int length; /* NVMe: 현재 ROM 이미지의 길이(512바이트 단위) */
@@ -149,7 +149,7 @@ static size_t pci_get_rom_size(struct pci_dev *pdev, void __iomem *rom,
 			pci_info(pdev, "Invalid PCI ROM data signature: expecting 0x52494350, got %#010x\n",
 				 readl(pds)); /* NVMe: PCIR 시그네처 불일치 시 NVMe 장치 로그 출력 */
 			break; /* NVMe: 잘못된 ROM 데이터 구조이므로 루프 종료 */
-		}
+		} /* NVMe: PCIR 시그네처 검증 if 블록 종료 */
 		last_image = readb(pds + 21) & 0x80; /* NVMe: PCIR 오프셋 21의 최상위 비트로 마지막 이미지 여부 확인 */
 		length = readw(pds + 16); /* NVMe: PCIR 오프셋 16에서 이미지 길이(512바이트 블록 수) 읽기 */
 		image += length * 512; /* NVMe: 다음 ROM 이미지 위치로 포인터 이동 */
@@ -160,14 +160,14 @@ static size_t pci_get_rom_size(struct pci_dev *pdev, void __iomem *rom,
 			if (readw(image) != 0xAA55) { /* NVMe: 다음 이미지의 헤더 시그네처가 올바른지 검사 */
 				pci_info(pdev, "No more image in the PCI ROM\n"); /* NVMe: 연쇄된 다음 ROM 이미지가 없음을 로그 기록 */
 				break; /* NVMe: 더 이상 이미지가 없으므로 루프 종료 */
-			}
-		}
+			} /* NVMe: 다음 이미지 헤더 검증 if 블록 종료 */
+		} /* NVMe: 마지막 이미지가 아닐 때만 실행되는 if 블록 종료 */
 	} while (length && !last_image); /* NVMe: 길이가 0이 아니고 마지막 이미지가 아닐 때까지 다음 이미지로 진행 */
 
 	/* never return a size larger than the PCI resource window */
 	/* there are known ROMs that get the size wrong */
 	return min((size_t)(image - rom), size); /* NVMe: 계산된 이미지 누적 크기와 PCI 윈도우 크기 중 작은 값을 반환(잘못된 ROM 길이 대비) */
-}
+} /* NVMe: pci_get_rom_size 함수 본문 종료: 실제 ROM 이미지 크기 반환 */
 
 /**
  * pci_map_rom - map a PCI ROM to kernel space
@@ -188,8 +188,8 @@ static size_t pci_get_rom_size(struct pci_dev *pdev, void __iomem *rom,
  *   필요 시 ROM BAR에 주소를 할당하고, ROM 디코딩을 활성화한 뒤
  *   ioremap()으로 커널에 매핑한다.
  */
-void __iomem *pci_map_rom(struct pci_dev *pdev, size_t *size)
-{
+void __iomem *pci_map_rom(struct pci_dev *pdev, size_t *size) /* NVMe: NVMe 장치의 ROM을 커널 가상 주소 공간에 매핑하는 함수 진입점 */
+{ /* NVMe: pci_map_rom 함수 본문 시작: 주소 할당, ROM enable, ioremap 수행 */
 	struct resource *res = &pdev->resource[PCI_ROM_RESOURCE]; /* NVMe: NVMe 장치의 ROM 리소스 포인터 획득 */
 	loff_t start; /* NVMe: ROM 리소스의 bus/물리 시작 주소를 담을 변수 */
 	void __iomem *rom; /* NVMe: ioremap 결과 커널 가상 주소 포인터 */
@@ -222,14 +222,14 @@ void __iomem *pci_map_rom(struct pci_dev *pdev, size_t *size)
 
 	return rom; /* NVMe: 커널 가상 주소로 매핑된 NVMe ROM 이미지 포인터 반환 */
 
-invalid_rom:
+invalid_rom: /* NVMe: ROM 이미지가 유효하지 않을 때 iounmap 후 정리하는 오류 처리 레이블 */
 	iounmap(rom); /* NVMe: 잘못된 ROM이므로 앞서 매핑한 가상 주소 해제 */
-err_ioremap:
+err_ioremap: /* NVMe: ioremap 실패 시 ROM BAR enable 상태를 복원하는 오류 처리 레이블 */
 	/* restore enable if ioremap fails */
 	if (!(res->flags & IORESOURCE_ROM_ENABLE)) /* NVMe: 매핑 전에 ROM이 이미 활성화된 상태가 아니었다면 */
 		pci_disable_rom(pdev); /* NVMe: ioremap 실패로 인해 켰던 ROM BAR를 다시 끔(상태 복원) */
 	return NULL; /* NVMe: ROM 매핑 최종 실패를 NULL로 알림 */
-}
+} /* NVMe: pci_map_rom 함수 본문 종료 */
 EXPORT_SYMBOL(pci_map_rom); /* NVMe: pci_map_rom 심볼을 모듈에 노출 */
 
 /**
@@ -245,8 +245,8 @@ EXPORT_SYMBOL(pci_map_rom); /* NVMe: pci_map_rom 심볼을 모듈에 노출 */
  *   해제한다. /sys/.../rom 사용 종료, 드라이버 종료, 핫플러그 제거
  *   등에서 호출되며, ROM BAR enable 상태를 원래대로 복원한다.
  */
-void pci_unmap_rom(struct pci_dev *pdev, void __iomem *rom)
-{
+void pci_unmap_rom(struct pci_dev *pdev, void __iomem *rom) /* NVMe: pci_map_rom()으로 매핑한 NVMe 장치 ROM을 해제하는 함수 진입점 */
+{ /* NVMe: pci_unmap_rom 함수 본문 시작: iounmap 및 ROM BAR 상태 복원 */
 	struct resource *res = &pdev->resource[PCI_ROM_RESOURCE]; /* NVMe: NVMe 장치의 ROM 리소스 포인터 획득 */
 
 	iounmap(rom); /* NVMe: 커널 가상 주소 매핑을 해제하여 해당 주소 공간 반납 */
@@ -254,5 +254,5 @@ void pci_unmap_rom(struct pci_dev *pdev, void __iomem *rom)
 	/* Disable again before continuing */
 	if (!(res->flags & IORESOURCE_ROM_ENABLE)) /* NVMe: 매핑 전 ROM이 enable 상태가 아니었다면(임시로 켰던 경우) */
 		pci_disable_rom(pdev); /* NVMe: ROM BAR 디코딩을 다시 비활성화하여 NVMe 장치 상태 복원 */
-}
+} /* NVMe: pci_unmap_rom 함수 본문 종료 */
 EXPORT_SYMBOL(pci_unmap_rom); /* NVMe: pci_unmap_rom 심볼을 모듈에 노출 */

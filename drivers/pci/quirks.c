@@ -45,38 +45,38 @@
  * file, where their drivers can use them.
  */
 
-#include <linux/aer.h>
-#include <linux/align.h>
-#include <linux/bitfield.h>
-#include <linux/types.h>
-#include <linux/kernel.h>
-#include <linux/export.h>
-#include <linux/pci.h>
+#include <linux/aer.h> /* NVMe: aer.h 헤더 포함 (PCIe/NVMe 제어). */
+#include <linux/align.h> /* NVMe: align.h 헤더 포함 (PCIe/NVMe 제어). */
+#include <linux/bitfield.h> /* NVMe: bitfield.h 헤더 포함 (PCIe/NVMe 제어). */
+#include <linux/types.h> /* NVMe: types.h 헤더 포함 (PCIe/NVMe 제어). */
+#include <linux/kernel.h> /* NVMe: kernel.h 헤더 포함 (PCIe/NVMe 제어). */
+#include <linux/export.h> /* NVMe: export.h 헤더 포함 (PCIe/NVMe 제어). */
+#include <linux/pci.h> /* NVMe: pci.h 헤더 포함 (PCIe/NVMe 제어). */
 #include <linux/isa-dma.h> /* isa_dma_bridge_buggy */
-#include <linux/init.h>
-#include <linux/iommu.h>
-#include <linux/delay.h>
-#include <linux/acpi.h>
-#include <linux/dmi.h>
-#include <linux/ioport.h>
-#include <linux/sched.h>
-#include <linux/ktime.h>
-#include <linux/mm.h>
-#include <linux/nvme.h>
-#include <linux/platform_data/x86/apple.h>
-#include <linux/pm_runtime.h>
-#include <linux/sizes.h>
-#include <linux/suspend.h>
-#include <linux/switchtec.h>
-#include "pci.h"
+#include <linux/init.h> /* NVMe: init.h 헤더 포함 (PCIe/NVMe 제어). */
+#include <linux/iommu.h> /* NVMe: iommu.h 헤더 포함 (PCIe/NVMe 제어). */
+#include <linux/delay.h> /* NVMe: delay.h 헤더 포함 (PCIe/NVMe 제어). */
+#include <linux/acpi.h> /* NVMe: acpi.h 헤더 포함 (PCIe/NVMe 제어). */
+#include <linux/dmi.h> /* NVMe: dmi.h 헤더 포함 (PCIe/NVMe 제어). */
+#include <linux/ioport.h> /* NVMe: ioport.h 헤더 포함 (PCIe/NVMe 제어). */
+#include <linux/sched.h> /* NVMe: sched.h 헤더 포함 (PCIe/NVMe 제어). */
+#include <linux/ktime.h> /* NVMe: ktime.h 헤더 포함 (PCIe/NVMe 제어). */
+#include <linux/mm.h> /* NVMe: mm.h 헤더 포함 (PCIe/NVMe 제어). */
+#include <linux/nvme.h> /* NVMe: nvme.h 헤더 포함 (PCIe/NVMe 제어). */
+#include <linux/platform_data/x86/apple.h> /* NVMe: apple.h 헤더 포함 (PCIe/NVMe 제어). */
+#include <linux/pm_runtime.h> /* NVMe: pm_runtime.h 헤더 포함 (PCIe/NVMe 제어). */
+#include <linux/sizes.h> /* NVMe: sizes.h 헤더 포함 (PCIe/NVMe 제어). */
+#include <linux/suspend.h> /* NVMe: suspend.h 헤더 포함 (PCIe/NVMe 제어). */
+#include <linux/switchtec.h> /* NVMe: switchtec.h 헤더 포함 (PCIe/NVMe 제어). */
+#include "pci.h" /* NVMe: pci.h 헤더 포함 (PCIe/NVMe 제어). */
 
-static bool pcie_lbms_seen(struct pci_dev *dev, u16 lnksta)
-{
-	if (test_bit(PCI_LINK_LBMS_SEEN, &dev->priv_flags))
-		return true;
+static bool pcie_lbms_seen(struct pci_dev *dev, u16 lnksta) /* NVMe: pcie_lbms_seen() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	if (test_bit(PCI_LINK_LBMS_SEEN, &dev->priv_flags)) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return true; /* NVMe: true 값을 반환. */
 
-	return lnksta & PCI_EXP_LNKSTA_LBMS;
-}
+	return lnksta & PCI_EXP_LNKSTA_LBMS; /* NVMe: lnksta & PCI_EXP_LNKSTA_LBMS 값을 반환. */
+} /* NVMe: 코드 블록/구조체 종료. */
 
 /*
  * Retrain the link of a downstream PCIe port by hand if necessary.
@@ -134,12 +134,12 @@ static bool pcie_lbms_seen(struct pci_dev *dev, u16 lnksta)
  *   제한되면 NVMe 성능/안정성이 크게 저하된다. 이 함수는 NVMe가 연결된
  *   경로의 PCIe 링크를 복구하는 핵심 보조 함수다.
  */
-int pcie_failed_link_retrain(struct pci_dev *dev)
-{
+int pcie_failed_link_retrain(struct pci_dev *dev) /* NVMe: pcie_failed_link_retrain() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
 	static const struct pci_device_id ids[] = { /* NVMe: ASMedia ASM2824 스위치 등 링크 트레이닝 버그가 있는 디바이스 목록. */
 		{ PCI_VDEVICE(ASMEDIA, 0x2824) }, /* ASMedia ASM2824 */
-		{}
-	};
+		{} /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+	}; /* NVMe: 코드 블록/구조체 종료. */
 	u16 lnksta, lnkctl2; /* NVMe: 링크 상태(LNKSTA)와 링크 제어2(LNKCTL2) 레지스터 값. */
 	int ret = -ENOTTY; /* NVMe: 기본적으로 quirk가 필요 없음을 나타내는 반환값. */
 
@@ -155,15 +155,15 @@ int pcie_failed_link_retrain(struct pci_dev *dev)
 
 		pcie_capability_read_word(dev, PCI_EXP_LNKCTL2, &oldlnkctl2); /* NVMe: 현재 LNKCTL2 값을 읽어 두고. */
 		ret = pcie_set_target_speed(dev, PCIE_SPEED_2_5GT, false); /* NVMe: 안정적인 2.5GT/s로 강제 낮춰 링크 트레이닝 재시도. */
-		if (ret) {
-			pci_info(dev, "retraining failed\n");
+		if (ret) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+			pci_info(dev, "retraining failed\n"); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
 			pcie_set_target_speed(dev, PCIE_LNKCTL2_TLS2SPEED(oldlnkctl2), /* NVMe: 재시도 실패 시 원래 속도로 복원. */
 					      true); /* NVMe: 원래 Target Link Speed로 복원 후 종료. */
 			return ret; /* NVMe: 0이면 성공, -ENOTTY면 quirk 불필요. */
-		}
+		} /* NVMe: 코드 블록/구조체 종료. */
 
 		pcie_capability_read_word(dev, PCI_EXP_LNKSTA, &lnksta); /* NVMe: 현재 링크 상태 읽기(Data Link Layer Link Active 등 확인). */
-	}
+	} /* NVMe: 코드 블록/구조체 종료. */
 
 	pcie_capability_read_word(dev, PCI_EXP_LNKCTL2, &lnkctl2); /* NVMe: 최종적으로 설정된 LNKCTL2 값을 확인. */
 
@@ -175,36 +175,36 @@ int pcie_failed_link_retrain(struct pci_dev *dev)
 		pci_info(dev, "removing 2.5GT/s downstream link speed restriction\n"); /* NVMe: NVMe 성능을 위해 최대 지원 속도로 복원 시도. */
 		pcie_capability_read_dword(dev, PCI_EXP_LNKCAP, &lnkcap); /* NVMe: 장치가 지원하는 최대 링크 속도 읽기. */
 		ret = pcie_set_target_speed(dev, PCIE_LNKCAP_SLS2SPEED(lnkcap), false); /* NVMe: NVMe 성능을 위해 최대 지원 속도로 복원. */
-		if (ret) {
-			pci_info(dev, "retraining failed\n");
+		if (ret) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+			pci_info(dev, "retraining failed\n"); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
 			return ret; /* NVMe: 0이면 성공, -ENOTTY면 quirk 불필요. */
-		}
-	}
+		} /* NVMe: 코드 블록/구조체 종료. */
+	} /* NVMe: 코드 블록/구조체 종료. */
 
 	return ret; /* NVMe: 0이면 성공, -ENOTTY면 quirk 불필요. */
-}
+} /* NVMe: 코드 블록/구조체 종료. */
 
-static ktime_t fixup_debug_start(struct pci_dev *dev,
-				 void (*fn)(struct pci_dev *dev))
-{
-	if (initcall_debug)
-		pci_info(dev, "calling  %pS @ %i\n", fn, task_pid_nr(current));
+static ktime_t fixup_debug_start(struct pci_dev *dev, /* NVMe: fixup_debug_start() 함수 정의/매개변수 선언. */
+				 void (*fn)(struct pci_dev *dev)) /* NVMe: void() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	if (initcall_debug) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pci_info(dev, "calling  %pS @ %i\n", fn, task_pid_nr(current)); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
 
-	return ktime_get();
-}
+	return ktime_get(); /* NVMe: ktime_get() 값을 반환. */
+} /* NVMe: 코드 블록/구조체 종료. */
 
-static void fixup_debug_report(struct pci_dev *dev, ktime_t calltime,
-			       void (*fn)(struct pci_dev *dev))
-{
-	ktime_t delta, rettime;
-	unsigned long long duration;
+static void fixup_debug_report(struct pci_dev *dev, ktime_t calltime, /* NVMe: fixup_debug_report() 함수 정의/매개변수 선언. */
+			       void (*fn)(struct pci_dev *dev)) /* NVMe: void() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	ktime_t delta, rettime; /* NVMe: rettime 변수 선언. */
+	unsigned long long duration; /* NVMe: duration 변수 선언. */
 
-	rettime = ktime_get();
-	delta = ktime_sub(rettime, calltime);
-	duration = (unsigned long long) ktime_to_ns(delta) >> 10;
-	if (initcall_debug || duration > 10000)
-		pci_info(dev, "%pS took %lld usecs\n", fn, duration);
-}
+	rettime = ktime_get(); /* NVMe: ktime_get() 호출 (NVMe/PCIe 동작). */
+	delta = ktime_sub(rettime, calltime); /* NVMe: ktime_sub() 호출 (NVMe/PCIe 동작). */
+	duration = (unsigned long long) ktime_to_ns(delta) >> 10; /* NVMe: ktime_to_ns() 호출 (NVMe/PCIe 동작). */
+	if (initcall_debug || duration > 10000) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pci_info(dev, "%pS took %lld usecs\n", fn, duration); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
 
 /*
  * pci_do_fixups:
@@ -213,9 +213,9 @@ static void fixup_debug_report(struct pci_dev *dev, ktime_t calltime,
  *   PCI_CLASS_STORAGE_EXPRESS 클래스와 vendor/device ID로 매칭되어
  *   nvme_disable_and_flr 같은 NVMe 전용 quirk가 적용된다.
  */
-static void pci_do_fixups(struct pci_dev *dev, struct pci_fixup *f,
-			  struct pci_fixup *end)
-{
+static void pci_do_fixups(struct pci_dev *dev, struct pci_fixup *f, /* NVMe: pci_do_fixups() 함수 정의/매개변수 선언. */
+			  struct pci_fixup *end) /* NVMe: 구조체/공용체/열거형 정의. */
+{ /* NVMe: 코드 블록 시작. */
 	ktime_t calltime; /* NVMe: quirk 실행 시간 측정용. */
 
 	for (; f < end; f++) /* NVMe: 등록된 fixup 배열을 끝까지 순회. */
@@ -226,35 +226,35 @@ static void pci_do_fixups(struct pci_dev *dev, struct pci_fixup *f,
 		    (f->device == dev->device || /* NVMe: device ID 매칭(예: 0xa804). */
 		     f->device == (u16) PCI_ANY_ID)) { /* NVMe: 또는 모든 device에 적용. */
 			void (*hook)(struct pci_dev *dev); /* NVMe: 호출할 quirk 함수 포인터. */
-#ifdef CONFIG_HAVE_ARCH_PREL32_RELOCATIONS
+#ifdef CONFIG_HAVE_ARCH_PREL32_RELOCATIONS /* NVMe: 조걶 컴파일 ifdef 분기 (NVMe/PCIe 기능 선택). */
 			hook = offset_to_ptr(&f->hook_offset); /* NVMe: relocatable 빌드에서는 offset 기반 함수 주소 해석. */
-#else
+#else /* NVMe: 조걶 컴파일 else 분기 (NVMe/PCIe 기능 선택). */
 			hook = f->hook; /* NVMe: 일반 빌드에서는 직접 함수 포인터 사용. */
-#endif
+#endif /* NVMe: 조걶 컴파일 endif 분기 (NVMe/PCIe 기능 선택). */
 			calltime = fixup_debug_start(dev, hook); /* NVMe: 디버깅용 시작 시각 기록. */
 			hook(dev); /* NVMe: 매칭된 quirk 함수 실행(예: NVMe 리셋 quirk). */
 			fixup_debug_report(dev, calltime, hook); /* NVMe: 실행 시간 보고. */
-		}
-}
+		} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
 
-extern struct pci_fixup __start_pci_fixups_early[];
-extern struct pci_fixup __end_pci_fixups_early[];
-extern struct pci_fixup __start_pci_fixups_header[];
-extern struct pci_fixup __end_pci_fixups_header[];
-extern struct pci_fixup __start_pci_fixups_final[];
-extern struct pci_fixup __end_pci_fixups_final[];
-extern struct pci_fixup __start_pci_fixups_enable[];
-extern struct pci_fixup __end_pci_fixups_enable[];
-extern struct pci_fixup __start_pci_fixups_resume[];
-extern struct pci_fixup __end_pci_fixups_resume[];
-extern struct pci_fixup __start_pci_fixups_resume_early[];
-extern struct pci_fixup __end_pci_fixups_resume_early[];
-extern struct pci_fixup __start_pci_fixups_suspend[];
-extern struct pci_fixup __end_pci_fixups_suspend[];
-extern struct pci_fixup __start_pci_fixups_suspend_late[];
-extern struct pci_fixup __end_pci_fixups_suspend_late[];
+extern struct pci_fixup __start_pci_fixups_early[]; /* NVMe: __start_pci_fixups_early 변수 선언. */
+extern struct pci_fixup __end_pci_fixups_early[]; /* NVMe: __end_pci_fixups_early 변수 선언. */
+extern struct pci_fixup __start_pci_fixups_header[]; /* NVMe: __start_pci_fixups_header 변수 선언. */
+extern struct pci_fixup __end_pci_fixups_header[]; /* NVMe: __end_pci_fixups_header 변수 선언. */
+extern struct pci_fixup __start_pci_fixups_final[]; /* NVMe: __start_pci_fixups_final 변수 선언. */
+extern struct pci_fixup __end_pci_fixups_final[]; /* NVMe: __end_pci_fixups_final 변수 선언. */
+extern struct pci_fixup __start_pci_fixups_enable[]; /* NVMe: __start_pci_fixups_enable 변수 선언. */
+extern struct pci_fixup __end_pci_fixups_enable[]; /* NVMe: __end_pci_fixups_enable 변수 선언. */
+extern struct pci_fixup __start_pci_fixups_resume[]; /* NVMe: __start_pci_fixups_resume 변수 선언. */
+extern struct pci_fixup __end_pci_fixups_resume[]; /* NVMe: __end_pci_fixups_resume 변수 선언. */
+extern struct pci_fixup __start_pci_fixups_resume_early[]; /* NVMe: __start_pci_fixups_resume_early 변수 선언. */
+extern struct pci_fixup __end_pci_fixups_resume_early[]; /* NVMe: __end_pci_fixups_resume_early 변수 선언. */
+extern struct pci_fixup __start_pci_fixups_suspend[]; /* NVMe: __start_pci_fixups_suspend 변수 선언. */
+extern struct pci_fixup __end_pci_fixups_suspend[]; /* NVMe: __end_pci_fixups_suspend 변수 선언. */
+extern struct pci_fixup __start_pci_fixups_suspend_late[]; /* NVMe: __start_pci_fixups_suspend_late 변수 선언. */
+extern struct pci_fixup __end_pci_fixups_suspend_late[]; /* NVMe: __end_pci_fixups_suspend_late 변수 선언. */
 
-static bool pci_apply_fixup_final_quirks;
+static bool pci_apply_fixup_final_quirks; /* NVMe: pci_apply_fixup_final_quirks 변수 선언. */
 
 /*
  * pci_fixup_device:
@@ -263,101 +263,101 @@ static bool pci_apply_fixup_final_quirks;
  *   suspend/resume 단계에서 이 함수를 거쳐 ASPM/MSI/PME/리셋 quirk를
  *   자동으로 받는다.
  */
-void pci_fixup_device(enum pci_fixup_pass pass, struct pci_dev *dev)
-{
+void pci_fixup_device(enum pci_fixup_pass pass, struct pci_dev *dev) /* NVMe: pci_fixup_device() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
 	struct pci_fixup *start, *end; /* NVMe: 현재 pass의 fixup 배열 시작/끝. */
 
 	switch (pass) { /* NVMe: pass별로 적용할 quirk 배열을 선택. */
 	case pci_fixup_early: /* NVMe: 초기 PCI scan 직후 적용. */
-		start = __start_pci_fixups_early;
-		end = __end_pci_fixups_early;
-		break;
+		start = __start_pci_fixups_early; /* NVMe: start 변수에 값 대입. */
+		end = __end_pci_fixups_early; /* NVMe: end 변수에 값 대입. */
+		break; /* NVMe: 반복문/분기 종료. */
 
 	case pci_fixup_header: /* NVMe: config header 파싱 후 적용. */
-		start = __start_pci_fixups_header;
-		end = __end_pci_fixups_header;
-		break;
+		start = __start_pci_fixups_header; /* NVMe: start 변수에 값 대입. */
+		end = __end_pci_fixups_header; /* NVMe: end 변수에 값 대입. */
+		break; /* NVMe: 반복문/분기 종료. */
 
 	case pci_fixup_final: /* NVMe: 장치 초기화 마지막 단계(대부분의 quirk). */
 		if (!pci_apply_fixup_final_quirks) /* NVMe: final quirk 적용 플래그가 꺼져 있으면 스킵. */
-			return;
-		start = __start_pci_fixups_final;
-		end = __end_pci_fixups_final;
-		break;
+			return; /* NVMe: 함수 종료 및 반환. */
+		start = __start_pci_fixups_final; /* NVMe: start 변수에 값 대입. */
+		end = __end_pci_fixups_final; /* NVMe: end 변수에 값 대입. */
+		break; /* NVMe: 반복문/분기 종료. */
 
 	case pci_fixup_enable: /* NVMe: pci_enable_device() 시점, NVMe에 매우 중요. */
-		start = __start_pci_fixups_enable;
-		end = __end_pci_fixups_enable;
-		break;
+		start = __start_pci_fixups_enable; /* NVMe: start 변수에 값 대입. */
+		end = __end_pci_fixups_enable; /* NVMe: end 변수에 값 대입. */
+		break; /* NVMe: 반복문/분기 종료. */
 
 	case pci_fixup_resume: /* NVMe: 시스템 resume 시 적용. */
-		start = __start_pci_fixups_resume;
-		end = __end_pci_fixups_resume;
-		break;
+		start = __start_pci_fixups_resume; /* NVMe: start 변수에 값 대입. */
+		end = __end_pci_fixups_resume; /* NVMe: end 변수에 값 대입. */
+		break; /* NVMe: 반복문/분기 종료. */
 
 	case pci_fixup_resume_early: /* NVMe: early resume 단계. */
-		start = __start_pci_fixups_resume_early;
-		end = __end_pci_fixups_resume_early;
-		break;
+		start = __start_pci_fixups_resume_early; /* NVMe: start 변수에 값 대입. */
+		end = __end_pci_fixups_resume_early; /* NVMe: end 변수에 값 대입. */
+		break; /* NVMe: 반복문/분기 종료. */
 
 	case pci_fixup_suspend: /* NVMe: 시스템 suspend 직전 적용. */
-		start = __start_pci_fixups_suspend;
-		end = __end_pci_fixups_suspend;
-		break;
+		start = __start_pci_fixups_suspend; /* NVMe: start 변수에 값 대입. */
+		end = __end_pci_fixups_suspend; /* NVMe: end 변수에 값 대입. */
+		break; /* NVMe: 반복문/분기 종료. */
 
 	case pci_fixup_suspend_late: /* NVMe: suspend 최종 단계. */
-		start = __start_pci_fixups_suspend_late;
-		end = __end_pci_fixups_suspend_late;
-		break;
+		start = __start_pci_fixups_suspend_late; /* NVMe: start 변수에 값 대입. */
+		end = __end_pci_fixups_suspend_late; /* NVMe: end 변수에 값 대입. */
+		break; /* NVMe: 반복문/분기 종료. */
 
 	default: /* NVMe: 정의되지 않은 pass는 무시. */
 		/* stupid compiler warning, you would think with an enum... */
-		return;
-	}
+		return; /* NVMe: 함수 종료 및 반환. */
+	} /* NVMe: 코드 블록/구조체 종료. */
 	pci_do_fixups(dev, start, end); /* NVMe: 선택한 pass의 quirk를 순회하며 현재 NVMe 장치에 적용. */
-}
-EXPORT_SYMBOL(pci_fixup_device);
+} /* NVMe: 코드 블록/구조체 종료. */
+EXPORT_SYMBOL(pci_fixup_device); /* NVMe: EXPORT_SYMBOL() 호출 (NVMe/PCIe 동작). */
 
-static int __init pci_apply_final_quirks(void)
-{
-	struct pci_dev *dev = NULL;
-	u8 cls = 0;
-	u8 tmp;
+static int __init pci_apply_final_quirks(void) /* NVMe: pci_apply_final_quirks() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	struct pci_dev *dev = NULL; /* NVMe: dev 변수에 값 대입. */
+	u8 cls = 0; /* NVMe: cls 변수에 값 대입. */
+	u8 tmp; /* NVMe: tmp 변수 선언. */
 
-	if (pci_cache_line_size)
-		pr_info("PCI: CLS %u bytes\n", pci_cache_line_size << 2);
+	if (pci_cache_line_size) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pr_info("PCI: CLS %u bytes\n", pci_cache_line_size << 2); /* NVMe: pr_info() 호출 (NVMe/PCIe 동작). */
 
-	pci_apply_fixup_final_quirks = true;
-	for_each_pci_dev(dev) {
-		pci_fixup_device(pci_fixup_final, dev);
+	pci_apply_fixup_final_quirks = true; /* NVMe: pci_apply_fixup_final_quirks 변수에 값 대입. */
+	for_each_pci_dev(dev) { /* NVMe: for_each_pci_dev() 함수 정의/매개변수 선언. */
+		pci_fixup_device(pci_fixup_final, dev); /* NVMe: pci_fixup_device() 호출 (NVMe/PCIe 동작). */
 		/*
 		 * If arch hasn't set it explicitly yet, use the CLS
 		 * value shared by all PCI devices.  If there's a
 		 * mismatch, fall back to the default value.
 		 */
-		if (!pci_cache_line_size) {
-			pci_read_config_byte(dev, PCI_CACHE_LINE_SIZE, &tmp);
-			if (!cls)
-				cls = tmp;
-			if (!tmp || cls == tmp)
-				continue;
+		if (!pci_cache_line_size) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+			pci_read_config_byte(dev, PCI_CACHE_LINE_SIZE, &tmp); /* NVMe: pci_read_config_byte() 호출 (NVMe/PCIe 동작). */
+			if (!cls) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+				cls = tmp; /* NVMe: cls 변수에 값 대입. */
+			if (!tmp || cls == tmp) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+				continue; /* NVMe: 다음 반복 계속. */
 
-			pci_info(dev, "CLS mismatch (%u != %u), using %u bytes\n",
-			         cls << 2, tmp << 2,
-				 pci_dfl_cache_line_size << 2);
-			pci_cache_line_size = pci_dfl_cache_line_size;
-		}
-	}
+			pci_info(dev, "CLS mismatch (%u != %u), using %u bytes\n", /* NVMe: ! 변수에 값 대입. */
+			         cls << 2, tmp << 2, /* NVMe: 인자/초기자 나열 (연속). */
+				 pci_dfl_cache_line_size << 2); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+			pci_cache_line_size = pci_dfl_cache_line_size; /* NVMe: pci_cache_line_size 변수에 값 대입. */
+		} /* NVMe: 코드 블록/구조체 종료. */
+	} /* NVMe: 코드 블록/구조체 종료. */
 
-	if (!pci_cache_line_size) {
-		pr_info("PCI: CLS %u bytes, default %u\n", cls << 2,
-			pci_dfl_cache_line_size << 2);
-		pci_cache_line_size = cls ? cls : pci_dfl_cache_line_size;
-	}
+	if (!pci_cache_line_size) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pr_info("PCI: CLS %u bytes, default %u\n", cls << 2, /* NVMe: pr_info() 함수 정의/매개변수 선언. */
+			pci_dfl_cache_line_size << 2); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+		pci_cache_line_size = cls ? cls : pci_dfl_cache_line_size; /* NVMe: pci_cache_line_size 변수에 값 대입. */
+	} /* NVMe: 코드 블록/구조체 종료. */
 
-	return 0;
-}
-fs_initcall_sync(pci_apply_final_quirks);
+	return 0; /* NVMe: 0 값을 반환. */
+} /* NVMe: 코드 블록/구조체 종료. */
+fs_initcall_sync(pci_apply_final_quirks); /* NVMe: fs_initcall_sync() 호출 (NVMe/PCIe 동작). */
 
 /*
  * Decoding should be disabled for a PCI device during BAR sizing to avoid
@@ -365,46 +365,46 @@ fs_initcall_sync(pci_apply_final_quirks);
  * key system devices. For devices that need to have mmio decoding always-on,
  * we need to set the dev->mmio_always_on bit.
  */
-static void quirk_mmio_always_on(struct pci_dev *dev)
-{
-	dev->mmio_always_on = 1;
-}
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_ANY_ID, PCI_ANY_ID,
-				PCI_CLASS_BRIDGE_HOST, 8, quirk_mmio_always_on);
+static void quirk_mmio_always_on(struct pci_dev *dev) /* NVMe: quirk_mmio_always_on() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	dev->mmio_always_on = 1; /* NVMe: mmio_always_on 변수에 값 대입. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_ANY_ID, PCI_ANY_ID, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+				PCI_CLASS_BRIDGE_HOST, 8, quirk_mmio_always_on); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
 /*
  * The Mellanox Tavor device gives false positive parity errors.  Disable
  * parity error reporting.
  */
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_MELLANOX, PCI_DEVICE_ID_MELLANOX_TAVOR, pci_disable_parity);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_MELLANOX, PCI_DEVICE_ID_MELLANOX_TAVOR_BRIDGE, pci_disable_parity);
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_MELLANOX, PCI_DEVICE_ID_MELLANOX_TAVOR, pci_disable_parity); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_MELLANOX, PCI_DEVICE_ID_MELLANOX_TAVOR_BRIDGE, pci_disable_parity); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
 
 /*
  * Deal with broken BIOSes that neglect to enable passive release,
  * which can cause problems in combination with the 82441FX/PPro MTRRs
  */
-static void quirk_passive_release(struct pci_dev *dev)
-{
-	struct pci_dev *d = NULL;
-	unsigned char dlc;
+static void quirk_passive_release(struct pci_dev *dev) /* NVMe: quirk_passive_release() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	struct pci_dev *d = NULL; /* NVMe: d 변수에 값 대입. */
+	unsigned char dlc; /* NVMe: dlc 변수 선언. */
 
 	/*
 	 * We have to make sure a particular bit is set in the PIIX3
 	 * ISA bridge, so we have to go out and find it.
 	 */
-	while ((d = pci_get_device(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82371SB_0, d))) {
-		pci_read_config_byte(d, 0x82, &dlc);
-		if (!(dlc & 1<<1)) {
-			pci_info(d, "PIIX3: Enabling Passive Release\n");
-			dlc |= 1<<1;
-			pci_write_config_byte(d, 0x82, dlc);
-		}
-	}
-}
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82441,	quirk_passive_release);
-DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82441,	quirk_passive_release);
+	while ((d = pci_get_device(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82371SB_0, d))) { /* NVMe: 반복 처리 (NVMe/PCIe 레지스터/장치 순회). */
+		pci_read_config_byte(d, 0x82, &dlc); /* NVMe: pci_read_config_byte() 호출 (NVMe/PCIe 동작). */
+		if (!(dlc & 1<<1)) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+			pci_info(d, "PIIX3: Enabling Passive Release\n"); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
+			dlc |= 1<<1; /* NVMe: | 변수에 값 대입. */
+			pci_write_config_byte(d, 0x82, dlc); /* NVMe: pci_write_config_byte() 호출 (NVMe/PCIe 동작). */
+		} /* NVMe: 코드 블록/구조체 종료. */
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82441,	quirk_passive_release); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82441,	quirk_passive_release); /* NVMe: DECLARE_PCI_FIXUP_RESUME() 호출 (NVMe/PCIe 동작). */
 
-#ifdef CONFIG_X86_32
+#ifdef CONFIG_X86_32 /* NVMe: 조걶 컴파일 ifdef 분기 (NVMe/PCIe 기능 선택). */
 /*
  * The VIA VP2/VP3/MVP3 seem to have some 'features'. There may be a
  * workaround but VIA don't answer queries. If you happen to have good
@@ -413,83 +413,83 @@ DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82441,	quirk_p
  * This appears to be BIOS not version dependent. So presumably there is a
  * chipset level fix.
  */
-static void quirk_isa_dma_hangs(struct pci_dev *dev)
-{
-	if (!isa_dma_bridge_buggy) {
-		isa_dma_bridge_buggy = 1;
-		pci_info(dev, "Activating ISA DMA hang workarounds\n");
-	}
-}
+static void quirk_isa_dma_hangs(struct pci_dev *dev) /* NVMe: quirk_isa_dma_hangs() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	if (!isa_dma_bridge_buggy) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		isa_dma_bridge_buggy = 1; /* NVMe: isa_dma_bridge_buggy 변수에 값 대입. */
+		pci_info(dev, "Activating ISA DMA hang workarounds\n"); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
 /*
  * It's not totally clear which chipsets are the problematic ones.  We know
  * 82C586 and 82C596 variants are affected.
  */
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_82C586_0,	quirk_isa_dma_hangs);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_82C596,	quirk_isa_dma_hangs);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,    PCI_DEVICE_ID_INTEL_82371SB_0,  quirk_isa_dma_hangs);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_AL,	PCI_DEVICE_ID_AL_M1533,		quirk_isa_dma_hangs);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_NEC,	PCI_DEVICE_ID_NEC_CBUS_1,	quirk_isa_dma_hangs);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_NEC,	PCI_DEVICE_ID_NEC_CBUS_2,	quirk_isa_dma_hangs);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_NEC,	PCI_DEVICE_ID_NEC_CBUS_3,	quirk_isa_dma_hangs);
-#endif
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_82C586_0,	quirk_isa_dma_hangs); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_82C596,	quirk_isa_dma_hangs); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,    PCI_DEVICE_ID_INTEL_82371SB_0,  quirk_isa_dma_hangs); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_AL,	PCI_DEVICE_ID_AL_M1533,		quirk_isa_dma_hangs); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_NEC,	PCI_DEVICE_ID_NEC_CBUS_1,	quirk_isa_dma_hangs); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_NEC,	PCI_DEVICE_ID_NEC_CBUS_2,	quirk_isa_dma_hangs); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_NEC,	PCI_DEVICE_ID_NEC_CBUS_3,	quirk_isa_dma_hangs); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+#endif /* NVMe: 조걶 컴파일 endif 분기 (NVMe/PCIe 기능 선택). */
 
-#ifdef CONFIG_HAS_IOPORT
+#ifdef CONFIG_HAS_IOPORT /* NVMe: 조걶 컴파일 ifdef 분기 (NVMe/PCIe 기능 선택). */
 /*
  * Intel NM10 "Tiger Point" LPC PM1a_STS.BM_STS must be clear
  * for some HT machines to use C4 w/o hanging.
  */
-static void quirk_tigerpoint_bm_sts(struct pci_dev *dev)
-{
-	u32 pmbase;
-	u16 pm1a;
+static void quirk_tigerpoint_bm_sts(struct pci_dev *dev) /* NVMe: quirk_tigerpoint_bm_sts() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	u32 pmbase; /* NVMe: pmbase 변수 선언. */
+	u16 pm1a; /* NVMe: pm1a 변수 선언. */
 
-	pci_read_config_dword(dev, 0x40, &pmbase);
-	pmbase = pmbase & 0xff80;
-	pm1a = inw(pmbase);
+	pci_read_config_dword(dev, 0x40, &pmbase); /* NVMe: pci_read_config_dword() 호출 (NVMe/PCIe 동작). */
+	pmbase = pmbase & 0xff80; /* NVMe: pmbase 변수에 값 대입. */
+	pm1a = inw(pmbase); /* NVMe: inw() 호출 (NVMe/PCIe 동작). */
 
-	if (pm1a & 0x10) {
-		pci_info(dev, FW_BUG "Tiger Point LPC.BM_STS cleared\n");
-		outw(0x10, pmbase);
-	}
-}
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_TGP_LPC, quirk_tigerpoint_bm_sts);
-#endif
+	if (pm1a & 0x10) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pci_info(dev, FW_BUG "Tiger Point LPC.BM_STS cleared\n"); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
+		outw(0x10, pmbase); /* NVMe: outw() 호출 (NVMe/PCIe 동작). */
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_TGP_LPC, quirk_tigerpoint_bm_sts); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+#endif /* NVMe: 조걶 컴파일 endif 분기 (NVMe/PCIe 기능 선택). */
 
 /* Chipsets where PCI->PCI transfers vanish or hang */
-static void quirk_nopcipci(struct pci_dev *dev)
-{
-	if ((pci_pci_problems & PCIPCI_FAIL) == 0) {
-		pci_info(dev, "Disabling direct PCI/PCI transfers\n");
-		pci_pci_problems |= PCIPCI_FAIL;
-	}
-}
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_SI,	PCI_DEVICE_ID_SI_5597,		quirk_nopcipci);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_SI,	PCI_DEVICE_ID_SI_496,		quirk_nopcipci);
+static void quirk_nopcipci(struct pci_dev *dev) /* NVMe: quirk_nopcipci() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	if ((pci_pci_problems & PCIPCI_FAIL) == 0) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pci_info(dev, "Disabling direct PCI/PCI transfers\n"); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
+		pci_pci_problems |= PCIPCI_FAIL; /* NVMe: | 변수에 값 대입. */
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_SI,	PCI_DEVICE_ID_SI_5597,		quirk_nopcipci); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_SI,	PCI_DEVICE_ID_SI_496,		quirk_nopcipci); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
 
-static void quirk_nopciamd(struct pci_dev *dev)
-{
-	u8 rev;
-	pci_read_config_byte(dev, 0x08, &rev);
-	if (rev == 0x13) {
+static void quirk_nopciamd(struct pci_dev *dev) /* NVMe: quirk_nopciamd() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	u8 rev; /* NVMe: rev 변수 선언. */
+	pci_read_config_byte(dev, 0x08, &rev); /* NVMe: pci_read_config_byte() 호출 (NVMe/PCIe 동작). */
+	if (rev == 0x13) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
 		/* Erratum 24 */
-		pci_info(dev, "Chipset erratum: Disabling direct PCI/AGP transfers\n");
-		pci_pci_problems |= PCIAGP_FAIL;
-	}
-}
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_AMD,	PCI_DEVICE_ID_AMD_8151_0,	quirk_nopciamd);
+		pci_info(dev, "Chipset erratum: Disabling direct PCI/AGP transfers\n"); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
+		pci_pci_problems |= PCIAGP_FAIL; /* NVMe: | 변수에 값 대입. */
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_AMD,	PCI_DEVICE_ID_AMD_8151_0,	quirk_nopciamd); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
 
 /* Triton requires workarounds to be used by the drivers */
-static void quirk_triton(struct pci_dev *dev)
-{
-	if ((pci_pci_problems&PCIPCI_TRITON) == 0) {
-		pci_info(dev, "Limiting direct PCI/PCI transfers\n");
-		pci_pci_problems |= PCIPCI_TRITON;
-	}
-}
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82437,	quirk_triton);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82437VX,	quirk_triton);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82439,	quirk_triton);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82439TX,	quirk_triton);
+static void quirk_triton(struct pci_dev *dev) /* NVMe: quirk_triton() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	if ((pci_pci_problems&PCIPCI_TRITON) == 0) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pci_info(dev, "Limiting direct PCI/PCI transfers\n"); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
+		pci_pci_problems |= PCIPCI_TRITON; /* NVMe: | 변수에 값 대입. */
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82437,	quirk_triton); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82437VX,	quirk_triton); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82439,	quirk_triton); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82439TX,	quirk_triton); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
 
 /*
  * VIA Apollo KT133 needs PCI latency patch
@@ -501,34 +501,34 @@ DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82439TX,	quirk_
  * Updated based on further information from the site and also on
  * information provided by VIA
  */
-static void quirk_vialatency(struct pci_dev *dev)
-{
-	struct pci_dev *p;
-	u8 busarb;
+static void quirk_vialatency(struct pci_dev *dev) /* NVMe: quirk_vialatency() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	struct pci_dev *p; /* NVMe: p 변수 선언. */
+	u8 busarb; /* NVMe: busarb 변수 선언. */
 
 	/*
 	 * Ok, we have a potential problem chipset here. Now see if we have
 	 * a buggy southbridge.
 	 */
-	p = pci_get_device(PCI_VENDOR_ID_VIA, PCI_DEVICE_ID_VIA_82C686, NULL);
-	if (p != NULL) {
+	p = pci_get_device(PCI_VENDOR_ID_VIA, PCI_DEVICE_ID_VIA_82C686, NULL); /* NVMe: pci_get_device() 호출 (NVMe/PCIe 동작). */
+	if (p != NULL) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
 
 		/*
 		 * 0x40 - 0x4f == 686B, 0x10 - 0x2f == 686A;
 		 * thanks Dan Hollis.
 		 * Check for buggy part revisions
 		 */
-		if (p->revision < 0x40 || p->revision > 0x42)
-			goto exit;
-	} else {
-		p = pci_get_device(PCI_VENDOR_ID_VIA, PCI_DEVICE_ID_VIA_8231, NULL);
+		if (p->revision < 0x40 || p->revision > 0x42) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+			goto exit; /* NVMe: exit 레이블로 제어 이동. */
+	} else { /* NVMe: 제어문 블록 시작. */
+		p = pci_get_device(PCI_VENDOR_ID_VIA, PCI_DEVICE_ID_VIA_8231, NULL); /* NVMe: pci_get_device() 호출 (NVMe/PCIe 동작). */
 		if (p == NULL)	/* No problem parts */
-			goto exit;
+			goto exit; /* NVMe: exit 레이블로 제어 이동. */
 
 		/* Check for buggy part revisions */
-		if (p->revision < 0x10 || p->revision > 0x12)
-			goto exit;
-	}
+		if (p->revision < 0x10 || p->revision > 0x12) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+			goto exit; /* NVMe: exit 레이블로 제어 이동. */
+	} /* NVMe: 코드 블록/구조체 종료. */
 
 	/*
 	 * Ok we have the problem. Now set the PCI master grant to occur
@@ -542,160 +542,160 @@ static void quirk_vialatency(struct pci_dev *dev)
 	 * corruption without SB Live! but with things like 3 UDMA IDE
 	 * controllers. So we ignore that bit of the VIA recommendation..
 	 */
-	pci_read_config_byte(dev, 0x76, &busarb);
+	pci_read_config_byte(dev, 0x76, &busarb); /* NVMe: pci_read_config_byte() 호출 (NVMe/PCIe 동작). */
 
 	/*
 	 * Set bit 4 and bit 5 of byte 76 to 0x01
 	 * "Master priority rotation on every PCI master grant"
 	 */
-	busarb &= ~(1<<5);
-	busarb |= (1<<4);
-	pci_write_config_byte(dev, 0x76, busarb);
-	pci_info(dev, "Applying VIA southbridge workaround\n");
-exit:
-	pci_dev_put(p);
-}
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_8363_0,	quirk_vialatency);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_8371_1,	quirk_vialatency);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_8361,		quirk_vialatency);
+	busarb &= ~(1<<5); /* NVMe: & 변수에 값 대입. */
+	busarb |= (1<<4); /* NVMe: | 변수에 값 대입. */
+	pci_write_config_byte(dev, 0x76, busarb); /* NVMe: pci_write_config_byte() 호출 (NVMe/PCIe 동작). */
+	pci_info(dev, "Applying VIA southbridge workaround\n"); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
+exit: /* NVMe: exit 레이블 (NVMe 초기화/오류 복구 경로). */
+	pci_dev_put(p); /* NVMe: pci_dev_put() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_8363_0,	quirk_vialatency); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_8371_1,	quirk_vialatency); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_8361,		quirk_vialatency); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
 /* Must restore this on a resume from RAM */
-DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_8363_0,	quirk_vialatency);
-DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_8371_1,	quirk_vialatency);
-DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_8361,		quirk_vialatency);
+DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_8363_0,	quirk_vialatency); /* NVMe: DECLARE_PCI_FIXUP_RESUME() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_8371_1,	quirk_vialatency); /* NVMe: DECLARE_PCI_FIXUP_RESUME() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_8361,		quirk_vialatency); /* NVMe: DECLARE_PCI_FIXUP_RESUME() 호출 (NVMe/PCIe 동작). */
 
 /* VIA Apollo VP3 needs ETBF on BT848/878 */
-static void quirk_viaetbf(struct pci_dev *dev)
-{
-	if ((pci_pci_problems&PCIPCI_VIAETBF) == 0) {
-		pci_info(dev, "Limiting direct PCI/PCI transfers\n");
-		pci_pci_problems |= PCIPCI_VIAETBF;
-	}
-}
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_82C597_0,	quirk_viaetbf);
+static void quirk_viaetbf(struct pci_dev *dev) /* NVMe: quirk_viaetbf() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	if ((pci_pci_problems&PCIPCI_VIAETBF) == 0) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pci_info(dev, "Limiting direct PCI/PCI transfers\n"); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
+		pci_pci_problems |= PCIPCI_VIAETBF; /* NVMe: | 변수에 값 대입. */
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_82C597_0,	quirk_viaetbf); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
 
-static void quirk_vsfx(struct pci_dev *dev)
-{
-	if ((pci_pci_problems&PCIPCI_VSFX) == 0) {
-		pci_info(dev, "Limiting direct PCI/PCI transfers\n");
-		pci_pci_problems |= PCIPCI_VSFX;
-	}
-}
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_82C576,	quirk_vsfx);
+static void quirk_vsfx(struct pci_dev *dev) /* NVMe: quirk_vsfx() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	if ((pci_pci_problems&PCIPCI_VSFX) == 0) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pci_info(dev, "Limiting direct PCI/PCI transfers\n"); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
+		pci_pci_problems |= PCIPCI_VSFX; /* NVMe: | 변수에 값 대입. */
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_82C576,	quirk_vsfx); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
 
 /*
  * ALi Magik requires workarounds to be used by the drivers that DMA to AGP
  * space. Latency must be set to 0xA and Triton workaround applied too.
  * [Info kindly provided by ALi]
  */
-static void quirk_alimagik(struct pci_dev *dev)
-{
-	if ((pci_pci_problems&PCIPCI_ALIMAGIK) == 0) {
-		pci_info(dev, "Limiting direct PCI/PCI transfers\n");
-		pci_pci_problems |= PCIPCI_ALIMAGIK|PCIPCI_TRITON;
-	}
-}
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_AL,	PCI_DEVICE_ID_AL_M1647,		quirk_alimagik);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_AL,	PCI_DEVICE_ID_AL_M1651,		quirk_alimagik);
+static void quirk_alimagik(struct pci_dev *dev) /* NVMe: quirk_alimagik() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	if ((pci_pci_problems&PCIPCI_ALIMAGIK) == 0) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pci_info(dev, "Limiting direct PCI/PCI transfers\n"); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
+		pci_pci_problems |= PCIPCI_ALIMAGIK|PCIPCI_TRITON; /* NVMe: | 변수에 값 대입. */
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_AL,	PCI_DEVICE_ID_AL_M1647,		quirk_alimagik); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_AL,	PCI_DEVICE_ID_AL_M1651,		quirk_alimagik); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
 
 /* Natoma has some interesting boundary conditions with Zoran stuff at least */
-static void quirk_natoma(struct pci_dev *dev)
-{
-	if ((pci_pci_problems&PCIPCI_NATOMA) == 0) {
-		pci_info(dev, "Limiting direct PCI/PCI transfers\n");
-		pci_pci_problems |= PCIPCI_NATOMA;
-	}
-}
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82441,	quirk_natoma);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82443LX_0,	quirk_natoma);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82443LX_1,	quirk_natoma);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82443BX_0,	quirk_natoma);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82443BX_1,	quirk_natoma);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82443BX_2,	quirk_natoma);
+static void quirk_natoma(struct pci_dev *dev) /* NVMe: quirk_natoma() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	if ((pci_pci_problems&PCIPCI_NATOMA) == 0) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pci_info(dev, "Limiting direct PCI/PCI transfers\n"); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
+		pci_pci_problems |= PCIPCI_NATOMA; /* NVMe: | 변수에 값 대입. */
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82441,	quirk_natoma); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82443LX_0,	quirk_natoma); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82443LX_1,	quirk_natoma); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82443BX_0,	quirk_natoma); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82443BX_1,	quirk_natoma); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82443BX_2,	quirk_natoma); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
 
 /*
  * This chip can cause PCI parity errors if config register 0xA0 is read
  * while DMAs are occurring.
  */
-static void quirk_citrine(struct pci_dev *dev)
-{
-	dev->cfg_size = 0xA0;
-}
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_IBM,	PCI_DEVICE_ID_IBM_CITRINE,	quirk_citrine);
+static void quirk_citrine(struct pci_dev *dev) /* NVMe: quirk_citrine() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	dev->cfg_size = 0xA0; /* NVMe: cfg_size 변수에 값 대입. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_IBM,	PCI_DEVICE_ID_IBM_CITRINE,	quirk_citrine); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
 
 /*
  * This chip can cause bus lockups if config addresses above 0x600
  * are read or written.
  */
-static void quirk_nfp6000(struct pci_dev *dev)
-{
-	dev->cfg_size = 0x600;
-}
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_NETRONOME,	PCI_DEVICE_ID_NETRONOME_NFP4000,	quirk_nfp6000);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_NETRONOME,	PCI_DEVICE_ID_NETRONOME_NFP6000,	quirk_nfp6000);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_NETRONOME,	PCI_DEVICE_ID_NETRONOME_NFP5000,	quirk_nfp6000);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_NETRONOME,	PCI_DEVICE_ID_NETRONOME_NFP6000_VF,	quirk_nfp6000);
+static void quirk_nfp6000(struct pci_dev *dev) /* NVMe: quirk_nfp6000() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	dev->cfg_size = 0x600; /* NVMe: cfg_size 변수에 값 대입. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_NETRONOME,	PCI_DEVICE_ID_NETRONOME_NFP4000,	quirk_nfp6000); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_NETRONOME,	PCI_DEVICE_ID_NETRONOME_NFP6000,	quirk_nfp6000); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_NETRONOME,	PCI_DEVICE_ID_NETRONOME_NFP5000,	quirk_nfp6000); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_NETRONOME,	PCI_DEVICE_ID_NETRONOME_NFP6000_VF,	quirk_nfp6000); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
 
 /*  On IBM Crocodile ipr SAS adapters, expand BAR to system page size */
-static void quirk_extend_bar_to_page(struct pci_dev *dev)
-{
-	int i;
+static void quirk_extend_bar_to_page(struct pci_dev *dev) /* NVMe: quirk_extend_bar_to_page() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	int i; /* NVMe: i 변수 선언. */
 
-	for (i = 0; i < PCI_STD_NUM_BARS; i++) {
-		struct resource *r = &dev->resource[i];
-		const char *r_name = pci_resource_name(dev, i);
+	for (i = 0; i < PCI_STD_NUM_BARS; i++) { /* NVMe: 반복 처리 (NVMe/PCIe 레지스터/장치 순회). */
+		struct resource *r = &dev->resource[i]; /* NVMe: r 변수에 값 대입. */
+		const char *r_name = pci_resource_name(dev, i); /* NVMe: pci_resource_name() 호출 (NVMe/PCIe 동작). */
 
-		if (r->flags & IORESOURCE_MEM && resource_size(r) < PAGE_SIZE) {
-			resource_set_range(r, 0, PAGE_SIZE);
-			r->flags |= IORESOURCE_UNSET;
-			pci_info(dev, "%s %pR: expanded to page size\n",
-				 r_name, r);
-		}
-	}
-}
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_IBM, 0x034a, quirk_extend_bar_to_page);
+		if (r->flags & IORESOURCE_MEM && resource_size(r) < PAGE_SIZE) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+			resource_set_range(r, 0, PAGE_SIZE); /* NVMe: resource_set_range() 호출 (NVMe/PCIe 동작). */
+			r->flags |= IORESOURCE_UNSET; /* NVMe: | 변수에 값 대입. */
+			pci_info(dev, "%s %pR: expanded to page size\n", /* NVMe: pci_info() 함수 정의/매개변수 선언. */
+				 r_name, r); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+		} /* NVMe: 코드 블록/구조체 종료. */
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_IBM, 0x034a, quirk_extend_bar_to_page); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
 
 /*
  * S3 868 and 968 chips report region size equal to 32M, but they decode 64M.
  * If it's needed, re-allocate the region.
  */
-static void quirk_s3_64M(struct pci_dev *dev)
-{
-	struct resource *r = &dev->resource[0];
+static void quirk_s3_64M(struct pci_dev *dev) /* NVMe: quirk_s3_64M() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	struct resource *r = &dev->resource[0]; /* NVMe: r 변수에 값 대입. */
 
-	if (!IS_ALIGNED(r->start, SZ_64M) || resource_size(r) != SZ_64M) {
-		r->flags |= IORESOURCE_UNSET;
-		resource_set_range(r, 0, SZ_64M);
-	}
-}
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_S3,	PCI_DEVICE_ID_S3_868,		quirk_s3_64M);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_S3,	PCI_DEVICE_ID_S3_968,		quirk_s3_64M);
+	if (!IS_ALIGNED(r->start, SZ_64M) || resource_size(r) != SZ_64M) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		r->flags |= IORESOURCE_UNSET; /* NVMe: | 변수에 값 대입. */
+		resource_set_range(r, 0, SZ_64M); /* NVMe: resource_set_range() 호출 (NVMe/PCIe 동작). */
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_S3,	PCI_DEVICE_ID_S3_868,		quirk_s3_64M); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_S3,	PCI_DEVICE_ID_S3_968,		quirk_s3_64M); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
 
-static void quirk_io(struct pci_dev *dev, int pos, unsigned int size,
-		     const char *name)
-{
-	u32 region;
-	struct pci_bus_region bus_region;
-	struct resource *res = pci_resource_n(dev, pos);
-	const char *res_name = pci_resource_name(dev, pos);
+static void quirk_io(struct pci_dev *dev, int pos, unsigned int size, /* NVMe: quirk_io() 함수 정의/매개변수 선언. */
+		     const char *name) /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+{ /* NVMe: 코드 블록 시작. */
+	u32 region; /* NVMe: region 변수 선언. */
+	struct pci_bus_region bus_region; /* NVMe: bus_region 변수 선언. */
+	struct resource *res = pci_resource_n(dev, pos); /* NVMe: pci_resource_n() 호출 (NVMe/PCIe 동작). */
+	const char *res_name = pci_resource_name(dev, pos); /* NVMe: pci_resource_name() 호출 (NVMe/PCIe 동작). */
 
-	pci_read_config_dword(dev, PCI_BASE_ADDRESS_0 + (pos << 2), &region);
+	pci_read_config_dword(dev, PCI_BASE_ADDRESS_0 + (pos << 2), &region); /* NVMe: pci_read_config_dword() 호출 (NVMe/PCIe 동작). */
 
-	if (!region)
-		return;
+	if (!region) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
 
-	res->name = pci_name(dev);
-	res->flags = region & ~PCI_BASE_ADDRESS_IO_MASK;
-	res->flags |=
-		(IORESOURCE_IO | IORESOURCE_PCI_FIXED | IORESOURCE_SIZEALIGN);
-	region &= ~(size - 1);
+	res->name = pci_name(dev); /* NVMe: pci_name() 호출 (NVMe/PCIe 동작). */
+	res->flags = region & ~PCI_BASE_ADDRESS_IO_MASK; /* NVMe: flags 변수에 값 대입. */
+	res->flags |= /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+		(IORESOURCE_IO | IORESOURCE_PCI_FIXED | IORESOURCE_SIZEALIGN); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+	region &= ~(size - 1); /* NVMe: & 변수에 값 대입. */
 
 	/* Convert from PCI bus to resource space */
-	bus_region.start = region;
-	bus_region.end = region + size - 1;
-	pcibios_bus_to_resource(dev->bus, res, &bus_region);
+	bus_region.start = region; /* NVMe: start 변수에 값 대입. */
+	bus_region.end = region + size - 1; /* NVMe: end 변수에 값 대입. */
+	pcibios_bus_to_resource(dev->bus, res, &bus_region); /* NVMe: pcibios_bus_to_resource() 호출 (NVMe/PCIe 동작). */
 
-	pci_info(dev, FW_BUG "%s %pR: %s quirk\n", res_name, res, name);
-}
+	pci_info(dev, FW_BUG "%s %pR: %s quirk\n", res_name, res, name); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
 
 /*
  * Some CS5536 BIOSes (for example, the Soekris NET5501 board w/ comBIOS
@@ -706,40 +706,40 @@ static void quirk_io(struct pci_dev *dev, int pos, unsigned int size,
  * CS553x's ISA PCI BARs may also be read-only (ref:
  * https://bugzilla.kernel.org/show_bug.cgi?id=85991 - Comment #4 forward).
  */
-static void quirk_cs5536_vsa(struct pci_dev *dev)
-{
-	static char *name = "CS5536 ISA bridge";
+static void quirk_cs5536_vsa(struct pci_dev *dev) /* NVMe: quirk_cs5536_vsa() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	static char *name = "CS5536 ISA bridge"; /* NVMe: name 변수에 값 대입. */
 
-	if (pci_resource_len(dev, 0) != 8) {
+	if (pci_resource_len(dev, 0) != 8) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
 		quirk_io(dev, 0,   8, name);	/* SMB */
 		quirk_io(dev, 1, 256, name);	/* GPIO */
 		quirk_io(dev, 2,  64, name);	/* MFGPT */
-		pci_info(dev, "%s bug detected (incorrect header); workaround applied\n",
-			 name);
-	}
-}
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_CS5536_ISA, quirk_cs5536_vsa);
+		pci_info(dev, "%s bug detected (incorrect header); workaround applied\n", /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
+			 name); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_CS5536_ISA, quirk_cs5536_vsa); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
 
-static void quirk_io_region(struct pci_dev *dev, int port,
-			    unsigned int size, int nr, const char *name)
-{
-	u16 region;
-	struct pci_bus_region bus_region;
-	struct resource *res = pci_resource_n(dev, nr);
+static void quirk_io_region(struct pci_dev *dev, int port, /* NVMe: quirk_io_region() 함수 정의/매개변수 선언. */
+			    unsigned int size, int nr, const char *name) /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+{ /* NVMe: 코드 블록 시작. */
+	u16 region; /* NVMe: region 변수 선언. */
+	struct pci_bus_region bus_region; /* NVMe: bus_region 변수 선언. */
+	struct resource *res = pci_resource_n(dev, nr); /* NVMe: pci_resource_n() 호출 (NVMe/PCIe 동작). */
 
-	pci_read_config_word(dev, port, &region);
-	region &= ~(size - 1);
+	pci_read_config_word(dev, port, &region); /* NVMe: pci_read_config_word() 호출 (NVMe/PCIe 동작). */
+	region &= ~(size - 1); /* NVMe: & 변수에 값 대입. */
 
-	if (!region)
-		return;
+	if (!region) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
 
-	res->name = pci_name(dev);
-	res->flags = IORESOURCE_IO;
+	res->name = pci_name(dev); /* NVMe: pci_name() 호출 (NVMe/PCIe 동작). */
+	res->flags = IORESOURCE_IO; /* NVMe: flags 변수에 값 대입. */
 
 	/* Convert from PCI bus to resource space */
-	bus_region.start = region;
-	bus_region.end = region + size - 1;
-	pcibios_bus_to_resource(dev->bus, res, &bus_region);
+	bus_region.start = region; /* NVMe: start 변수에 값 대입. */
+	bus_region.end = region + size - 1; /* NVMe: end 변수에 값 대입. */
+	pcibios_bus_to_resource(dev->bus, res, &bus_region); /* NVMe: pcibios_bus_to_resource() 호출 (NVMe/PCIe 동작). */
 
 	/*
 	 * "res" is typically a bridge window resource that's not being
@@ -747,22 +747,22 @@ static void quirk_io_region(struct pci_dev *dev, int port,
 	 * non-standard resource.  Printing "nr" or pci_resource_name() of
 	 * it doesn't really make sense.
 	 */
-	if (!pci_claim_resource(dev, nr))
-		pci_info(dev, "quirk: %pR claimed by %s\n", res, name);
-}
+	if (!pci_claim_resource(dev, nr)) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pci_info(dev, "quirk: %pR claimed by %s\n", res, name); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
 
 /*
  * ATI Northbridge setups MCE the processor if you even read somewhere
  * between 0x3b0->0x3bb or read 0x3d3
  */
-static void quirk_ati_exploding_mce(struct pci_dev *dev)
-{
-	pci_info(dev, "ATI Northbridge, reserving I/O ports 0x3b0 to 0x3bb\n");
+static void quirk_ati_exploding_mce(struct pci_dev *dev) /* NVMe: quirk_ati_exploding_mce() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	pci_info(dev, "ATI Northbridge, reserving I/O ports 0x3b0 to 0x3bb\n"); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
 	/* Mae rhaid i ni beidio ag edrych ar y lleoliadiau I/O hyn */
-	request_region(0x3b0, 0x0C, "RadeonIGP");
-	request_region(0x3d3, 0x01, "RadeonIGP");
-}
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI,	PCI_DEVICE_ID_ATI_RS100,   quirk_ati_exploding_mce);
+	request_region(0x3b0, 0x0C, "RadeonIGP"); /* NVMe: request_region() 호출 (NVMe/PCIe 동작). */
+	request_region(0x3d3, 0x01, "RadeonIGP"); /* NVMe: request_region() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI,	PCI_DEVICE_ID_ATI_RS100,   quirk_ati_exploding_mce); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
 
 /*
  * In the AMD NL platform, this device ([1022:7912]) has a class code of
@@ -775,22 +775,22 @@ DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI,	PCI_DEVICE_ID_ATI_RS100,   quirk_ati_
  * defines as "USB device (not host controller)". The dwc3 driver can then
  * claim it based on its Vendor and Device ID.
  */
-static void quirk_amd_dwc_class(struct pci_dev *pdev)
-{
-	u32 class = pdev->class;
+static void quirk_amd_dwc_class(struct pci_dev *pdev) /* NVMe: quirk_amd_dwc_class() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	u32 class = pdev->class; /* NVMe: class 변수에 값 대입. */
 
-	if (class != PCI_CLASS_SERIAL_USB_DEVICE) {
+	if (class != PCI_CLASS_SERIAL_USB_DEVICE) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
 		/* Use "USB Device (not host controller)" class */
-		pdev->class = PCI_CLASS_SERIAL_USB_DEVICE;
-		pci_info(pdev,
-			"PCI class overridden (%#08x -> %#08x) so dwc3 driver can claim this instead of xhci\n",
-			class, pdev->class);
-	}
-}
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_NL_USB,
-		quirk_amd_dwc_class);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_VANGOGH_USB,
-		quirk_amd_dwc_class);
+		pdev->class = PCI_CLASS_SERIAL_USB_DEVICE; /* NVMe: class 변수에 값 대입. */
+		pci_info(pdev, /* NVMe: pci_info() 함수 정의/매개변수 선언. */
+			"PCI class overridden (%#08x -> %#08x) so dwc3 driver can claim this instead of xhci\n", /* NVMe: overridden() 함수 정의/매개변수 선언. */
+			class, pdev->class); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_NL_USB, /* NVMe: DECLARE_PCI_FIXUP_HEADER() 함수 정의/매개변수 선언. */
+		quirk_amd_dwc_class); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_VANGOGH_USB, /* NVMe: DECLARE_PCI_FIXUP_HEADER() 함수 정의/매개변수 선언. */
+		quirk_amd_dwc_class); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
 /*
  * Synopsys USB 3.x host HAPS platform has a class code of
@@ -799,23 +799,23 @@ DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_VANGOGH_USB,
  * PCI_CLASS_SERIAL_USB_DEVICE to prevent the xhci-pci driver from claiming
  * them.
  */
-static void quirk_synopsys_haps(struct pci_dev *pdev)
-{
-	u32 class = pdev->class;
+static void quirk_synopsys_haps(struct pci_dev *pdev) /* NVMe: quirk_synopsys_haps() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	u32 class = pdev->class; /* NVMe: class 변수에 값 대입. */
 
-	switch (pdev->device) {
-	case PCI_DEVICE_ID_SYNOPSYS_HAPSUSB3:
-	case PCI_DEVICE_ID_SYNOPSYS_HAPSUSB3_AXI:
-	case PCI_DEVICE_ID_SYNOPSYS_HAPSUSB31:
-		pdev->class = PCI_CLASS_SERIAL_USB_DEVICE;
-		pci_info(pdev, "PCI class overridden (%#08x -> %#08x) so dwc3 driver can claim this instead of xhci\n",
-			 class, pdev->class);
-		break;
-	}
-}
-DECLARE_PCI_FIXUP_CLASS_HEADER(PCI_VENDOR_ID_SYNOPSYS, PCI_ANY_ID,
-			       PCI_CLASS_SERIAL_USB_XHCI, 0,
-			       quirk_synopsys_haps);
+	switch (pdev->device) { /* NVMe: switch 다중 분기 처리. */
+	case PCI_DEVICE_ID_SYNOPSYS_HAPSUSB3: /* NVMe: switch case PCI_DEVICE_ID_SYNOPSYS_HAPSUSB3 처리. */
+	case PCI_DEVICE_ID_SYNOPSYS_HAPSUSB3_AXI: /* NVMe: switch case PCI_DEVICE_ID_SYNOPSYS_HAPSUSB3_AXI 처리. */
+	case PCI_DEVICE_ID_SYNOPSYS_HAPSUSB31: /* NVMe: switch case PCI_DEVICE_ID_SYNOPSYS_HAPSUSB31 처리. */
+		pdev->class = PCI_CLASS_SERIAL_USB_DEVICE; /* NVMe: class 변수에 값 대입. */
+		pci_info(pdev, "PCI class overridden (%#08x -> %#08x) so dwc3 driver can claim this instead of xhci\n", /* NVMe: pci_info() 함수 정의/매개변수 선언. */
+			 class, pdev->class); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+		break; /* NVMe: 반복문/분기 종료. */
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_CLASS_HEADER(PCI_VENDOR_ID_SYNOPSYS, PCI_ANY_ID, /* NVMe: DECLARE_PCI_FIXUP_CLASS_HEADER() 함수 정의/매개변수 선언. */
+			       PCI_CLASS_SERIAL_USB_XHCI, 0, /* NVMe: 인자/초기자 나열 (연속). */
+			       quirk_synopsys_haps); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
 /*
  * Let's make the southbridge information explicit instead of having to
@@ -827,64 +827,64 @@ DECLARE_PCI_FIXUP_CLASS_HEADER(PCI_VENDOR_ID_SYNOPSYS, PCI_ANY_ID,
  *	0xE0 (64 bytes of ACPI registers)
  *	0xE2 (32 bytes of SMB registers)
  */
-static void quirk_ali7101_acpi(struct pci_dev *dev)
-{
-	quirk_io_region(dev, 0xE0, 64, PCI_BRIDGE_RESOURCES, "ali7101 ACPI");
-	quirk_io_region(dev, 0xE2, 32, PCI_BRIDGE_RESOURCES+1, "ali7101 SMB");
-}
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_AL,	PCI_DEVICE_ID_AL_M7101,		quirk_ali7101_acpi);
+static void quirk_ali7101_acpi(struct pci_dev *dev) /* NVMe: quirk_ali7101_acpi() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	quirk_io_region(dev, 0xE0, 64, PCI_BRIDGE_RESOURCES, "ali7101 ACPI"); /* NVMe: quirk_io_region() 호출 (NVMe/PCIe 동작). */
+	quirk_io_region(dev, 0xE2, 32, PCI_BRIDGE_RESOURCES+1, "ali7101 SMB"); /* NVMe: quirk_io_region() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_AL,	PCI_DEVICE_ID_AL_M7101,		quirk_ali7101_acpi); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
 
-static void piix4_io_quirk(struct pci_dev *dev, const char *name, unsigned int port, unsigned int enable)
-{
-	u32 devres;
-	u32 mask, size, base;
+static void piix4_io_quirk(struct pci_dev *dev, const char *name, unsigned int port, unsigned int enable) /* NVMe: piix4_io_quirk() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	u32 devres; /* NVMe: devres 변수 선언. */
+	u32 mask, size, base; /* NVMe: base 변수 선언. */
 
-	pci_read_config_dword(dev, port, &devres);
-	if ((devres & enable) != enable)
-		return;
-	mask = (devres >> 16) & 15;
-	base = devres & 0xffff;
-	size = 16;
-	for (;;) {
-		unsigned int bit = size >> 1;
-		if ((bit & mask) == bit)
-			break;
-		size = bit;
-	}
+	pci_read_config_dword(dev, port, &devres); /* NVMe: pci_read_config_dword() 호출 (NVMe/PCIe 동작). */
+	if ((devres & enable) != enable) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
+	mask = (devres >> 16) & 15; /* NVMe: mask 변수에 값 대입. */
+	base = devres & 0xffff; /* NVMe: base 변수에 값 대입. */
+	size = 16; /* NVMe: size 변수에 값 대입. */
+	for (;;) { /* NVMe: 반복 처리 (NVMe/PCIe 레지스터/장치 순회). */
+		unsigned int bit = size >> 1; /* NVMe: bit 변수에 값 대입. */
+		if ((bit & mask) == bit) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+			break; /* NVMe: 반복문/분기 종료. */
+		size = bit; /* NVMe: size 변수에 값 대입. */
+	} /* NVMe: 코드 블록/구조체 종료. */
 	/*
 	 * For now we only print it out. Eventually we'll want to
 	 * reserve it (at least if it's in the 0x1000+ range), but
 	 * let's get enough confirmation reports first.
 	 */
-	base &= -size;
-	pci_info(dev, "%s PIO at %04x-%04x\n", name, base, base + size - 1);
-}
+	base &= -size; /* NVMe: & 변수에 값 대입. */
+	pci_info(dev, "%s PIO at %04x-%04x\n", name, base, base + size - 1); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
 
-static void piix4_mem_quirk(struct pci_dev *dev, const char *name, unsigned int port, unsigned int enable)
-{
-	u32 devres;
-	u32 mask, size, base;
+static void piix4_mem_quirk(struct pci_dev *dev, const char *name, unsigned int port, unsigned int enable) /* NVMe: piix4_mem_quirk() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	u32 devres; /* NVMe: devres 변수 선언. */
+	u32 mask, size, base; /* NVMe: base 변수 선언. */
 
-	pci_read_config_dword(dev, port, &devres);
-	if ((devres & enable) != enable)
-		return;
-	base = devres & 0xffff0000;
-	mask = (devres & 0x3f) << 16;
-	size = 128 << 16;
-	for (;;) {
-		unsigned int bit = size >> 1;
-		if ((bit & mask) == bit)
-			break;
-		size = bit;
-	}
+	pci_read_config_dword(dev, port, &devres); /* NVMe: pci_read_config_dword() 호출 (NVMe/PCIe 동작). */
+	if ((devres & enable) != enable) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
+	base = devres & 0xffff0000; /* NVMe: base 변수에 값 대입. */
+	mask = (devres & 0x3f) << 16; /* NVMe: mask 변수에 값 대입. */
+	size = 128 << 16; /* NVMe: size 변수에 값 대입. */
+	for (;;) { /* NVMe: 반복 처리 (NVMe/PCIe 레지스터/장치 순회). */
+		unsigned int bit = size >> 1; /* NVMe: bit 변수에 값 대입. */
+		if ((bit & mask) == bit) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+			break; /* NVMe: 반복문/분기 종료. */
+		size = bit; /* NVMe: size 변수에 값 대입. */
+	} /* NVMe: 코드 블록/구조체 종료. */
 
 	/*
 	 * For now we only print it out. Eventually we'll want to
 	 * reserve it, but let's get enough confirmation reports first.
 	 */
-	base &= -size;
-	pci_info(dev, "%s MMIO at %04x-%04x\n", name, base, base + size - 1);
-}
+	base &= -size; /* NVMe: & 변수에 값 대입. */
+	pci_info(dev, "%s MMIO at %04x-%04x\n", name, base, base + size - 1); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
 
 /*
  * PIIX4 ACPI: Two IO regions pointed to by longwords at
@@ -892,56 +892,56 @@ static void piix4_mem_quirk(struct pci_dev *dev, const char *name, unsigned int 
  *	0x90 (16 bytes of SMB registers)
  * and a few strange programmable PIIX4 device resources.
  */
-static void quirk_piix4_acpi(struct pci_dev *dev)
-{
-	u32 res_a;
+static void quirk_piix4_acpi(struct pci_dev *dev) /* NVMe: quirk_piix4_acpi() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	u32 res_a; /* NVMe: res_a 변수 선언. */
 
-	quirk_io_region(dev, 0x40, 64, PCI_BRIDGE_RESOURCES, "PIIX4 ACPI");
-	quirk_io_region(dev, 0x90, 16, PCI_BRIDGE_RESOURCES+1, "PIIX4 SMB");
+	quirk_io_region(dev, 0x40, 64, PCI_BRIDGE_RESOURCES, "PIIX4 ACPI"); /* NVMe: quirk_io_region() 호출 (NVMe/PCIe 동작). */
+	quirk_io_region(dev, 0x90, 16, PCI_BRIDGE_RESOURCES+1, "PIIX4 SMB"); /* NVMe: quirk_io_region() 호출 (NVMe/PCIe 동작). */
 
 	/* Device resource A has enables for some of the other ones */
-	pci_read_config_dword(dev, 0x5c, &res_a);
+	pci_read_config_dword(dev, 0x5c, &res_a); /* NVMe: pci_read_config_dword() 호출 (NVMe/PCIe 동작). */
 
-	piix4_io_quirk(dev, "PIIX4 devres B", 0x60, 3 << 21);
-	piix4_io_quirk(dev, "PIIX4 devres C", 0x64, 3 << 21);
+	piix4_io_quirk(dev, "PIIX4 devres B", 0x60, 3 << 21); /* NVMe: piix4_io_quirk() 호출 (NVMe/PCIe 동작). */
+	piix4_io_quirk(dev, "PIIX4 devres C", 0x64, 3 << 21); /* NVMe: piix4_io_quirk() 호출 (NVMe/PCIe 동작). */
 
 	/* Device resource D is just bitfields for static resources */
 
 	/* Device 12 enabled? */
-	if (res_a & (1 << 29)) {
-		piix4_io_quirk(dev, "PIIX4 devres E", 0x68, 1 << 20);
-		piix4_mem_quirk(dev, "PIIX4 devres F", 0x6c, 1 << 7);
-	}
+	if (res_a & (1 << 29)) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		piix4_io_quirk(dev, "PIIX4 devres E", 0x68, 1 << 20); /* NVMe: piix4_io_quirk() 호출 (NVMe/PCIe 동작). */
+		piix4_mem_quirk(dev, "PIIX4 devres F", 0x6c, 1 << 7); /* NVMe: piix4_mem_quirk() 호출 (NVMe/PCIe 동작). */
+	} /* NVMe: 코드 블록/구조체 종료. */
 	/* Device 13 enabled? */
-	if (res_a & (1 << 30)) {
-		piix4_io_quirk(dev, "PIIX4 devres G", 0x70, 1 << 20);
-		piix4_mem_quirk(dev, "PIIX4 devres H", 0x74, 1 << 7);
-	}
-	piix4_io_quirk(dev, "PIIX4 devres I", 0x78, 1 << 20);
-	piix4_io_quirk(dev, "PIIX4 devres J", 0x7c, 1 << 20);
-}
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82371AB_3,	quirk_piix4_acpi);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82443MX_3,	quirk_piix4_acpi);
+	if (res_a & (1 << 30)) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		piix4_io_quirk(dev, "PIIX4 devres G", 0x70, 1 << 20); /* NVMe: piix4_io_quirk() 호출 (NVMe/PCIe 동작). */
+		piix4_mem_quirk(dev, "PIIX4 devres H", 0x74, 1 << 7); /* NVMe: piix4_mem_quirk() 호출 (NVMe/PCIe 동작). */
+	} /* NVMe: 코드 블록/구조체 종료. */
+	piix4_io_quirk(dev, "PIIX4 devres I", 0x78, 1 << 20); /* NVMe: piix4_io_quirk() 호출 (NVMe/PCIe 동작). */
+	piix4_io_quirk(dev, "PIIX4 devres J", 0x7c, 1 << 20); /* NVMe: piix4_io_quirk() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82371AB_3,	quirk_piix4_acpi); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82443MX_3,	quirk_piix4_acpi); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
 
-#define ICH_PMBASE	0x40
-#define ICH_ACPI_CNTL	0x44
-#define  ICH4_ACPI_EN	0x10
-#define  ICH6_ACPI_EN	0x80
-#define ICH4_GPIOBASE	0x58
-#define ICH4_GPIO_CNTL	0x5c
-#define  ICH4_GPIO_EN	0x10
-#define ICH6_GPIOBASE	0x48
-#define ICH6_GPIO_CNTL	0x4c
-#define  ICH6_GPIO_EN	0x10
+#define ICH_PMBASE	0x40 /* NVMe: ICH_PMBASE 매크로/상수 정의 (NVMe/PCIe). */
+#define ICH_ACPI_CNTL	0x44 /* NVMe: ICH_ACPI_CNTL 매크로/상수 정의 (NVMe/PCIe). */
+#define  ICH4_ACPI_EN	0x10 /* NVMe: ICH4_ACPI_EN 매크로/상수 정의 (NVMe/PCIe). */
+#define  ICH6_ACPI_EN	0x80 /* NVMe: ICH6_ACPI_EN 매크로/상수 정의 (NVMe/PCIe). */
+#define ICH4_GPIOBASE	0x58 /* NVMe: ICH4_GPIOBASE 매크로/상수 정의 (NVMe/PCIe). */
+#define ICH4_GPIO_CNTL	0x5c /* NVMe: ICH4_GPIO_CNTL 매크로/상수 정의 (NVMe/PCIe). */
+#define  ICH4_GPIO_EN	0x10 /* NVMe: ICH4_GPIO_EN 매크로/상수 정의 (NVMe/PCIe). */
+#define ICH6_GPIOBASE	0x48 /* NVMe: ICH6_GPIOBASE 매크로/상수 정의 (NVMe/PCIe). */
+#define ICH6_GPIO_CNTL	0x4c /* NVMe: ICH6_GPIO_CNTL 매크로/상수 정의 (NVMe/PCIe). */
+#define  ICH6_GPIO_EN	0x10 /* NVMe: ICH6_GPIO_EN 매크로/상수 정의 (NVMe/PCIe). */
 
 /*
  * ICH4, ICH4-M, ICH5, ICH5-M ACPI: Three IO regions pointed to by longwords at
  *	0x40 (128 bytes of ACPI, GPIO & TCO registers)
  *	0x58 (64 bytes of GPIO I/O space)
  */
-static void quirk_ich4_lpc_acpi(struct pci_dev *dev)
-{
-	u8 enable;
+static void quirk_ich4_lpc_acpi(struct pci_dev *dev) /* NVMe: quirk_ich4_lpc_acpi() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	u8 enable; /* NVMe: enable 변수 선언. */
 
 	/*
 	 * The check for PCIBIOS_MIN_IO is to ensure we won't create a conflict
@@ -950,147 +950,147 @@ static void quirk_ich4_lpc_acpi(struct pci_dev *dev)
 	 * here is really at that address.  This happens on boards with broken
 	 * BIOSes.
 	 */
-	pci_read_config_byte(dev, ICH_ACPI_CNTL, &enable);
-	if (enable & ICH4_ACPI_EN)
-		quirk_io_region(dev, ICH_PMBASE, 128, PCI_BRIDGE_RESOURCES,
-				 "ICH4 ACPI/GPIO/TCO");
+	pci_read_config_byte(dev, ICH_ACPI_CNTL, &enable); /* NVMe: pci_read_config_byte() 호출 (NVMe/PCIe 동작). */
+	if (enable & ICH4_ACPI_EN) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		quirk_io_region(dev, ICH_PMBASE, 128, PCI_BRIDGE_RESOURCES, /* NVMe: quirk_io_region() 함수 정의/매개변수 선언. */
+				 "ICH4 ACPI/GPIO/TCO"); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
-	pci_read_config_byte(dev, ICH4_GPIO_CNTL, &enable);
-	if (enable & ICH4_GPIO_EN)
-		quirk_io_region(dev, ICH4_GPIOBASE, 64, PCI_BRIDGE_RESOURCES+1,
-				"ICH4 GPIO");
-}
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,    PCI_DEVICE_ID_INTEL_82801AA_0,		quirk_ich4_lpc_acpi);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,    PCI_DEVICE_ID_INTEL_82801AB_0,		quirk_ich4_lpc_acpi);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,    PCI_DEVICE_ID_INTEL_82801BA_0,		quirk_ich4_lpc_acpi);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,    PCI_DEVICE_ID_INTEL_82801BA_10,	quirk_ich4_lpc_acpi);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,    PCI_DEVICE_ID_INTEL_82801CA_0,		quirk_ich4_lpc_acpi);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,    PCI_DEVICE_ID_INTEL_82801CA_12,	quirk_ich4_lpc_acpi);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,    PCI_DEVICE_ID_INTEL_82801DB_0,		quirk_ich4_lpc_acpi);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,    PCI_DEVICE_ID_INTEL_82801DB_12,	quirk_ich4_lpc_acpi);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,    PCI_DEVICE_ID_INTEL_82801EB_0,		quirk_ich4_lpc_acpi);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,    PCI_DEVICE_ID_INTEL_ESB_1,		quirk_ich4_lpc_acpi);
+	pci_read_config_byte(dev, ICH4_GPIO_CNTL, &enable); /* NVMe: pci_read_config_byte() 호출 (NVMe/PCIe 동작). */
+	if (enable & ICH4_GPIO_EN) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		quirk_io_region(dev, ICH4_GPIOBASE, 64, PCI_BRIDGE_RESOURCES+1, /* NVMe: quirk_io_region() 함수 정의/매개변수 선언. */
+				"ICH4 GPIO"); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,    PCI_DEVICE_ID_INTEL_82801AA_0,		quirk_ich4_lpc_acpi); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,    PCI_DEVICE_ID_INTEL_82801AB_0,		quirk_ich4_lpc_acpi); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,    PCI_DEVICE_ID_INTEL_82801BA_0,		quirk_ich4_lpc_acpi); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,    PCI_DEVICE_ID_INTEL_82801BA_10,	quirk_ich4_lpc_acpi); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,    PCI_DEVICE_ID_INTEL_82801CA_0,		quirk_ich4_lpc_acpi); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,    PCI_DEVICE_ID_INTEL_82801CA_12,	quirk_ich4_lpc_acpi); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,    PCI_DEVICE_ID_INTEL_82801DB_0,		quirk_ich4_lpc_acpi); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,    PCI_DEVICE_ID_INTEL_82801DB_12,	quirk_ich4_lpc_acpi); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,    PCI_DEVICE_ID_INTEL_82801EB_0,		quirk_ich4_lpc_acpi); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,    PCI_DEVICE_ID_INTEL_ESB_1,		quirk_ich4_lpc_acpi); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
 
-static void ich6_lpc_acpi_gpio(struct pci_dev *dev)
-{
-	u8 enable;
+static void ich6_lpc_acpi_gpio(struct pci_dev *dev) /* NVMe: ich6_lpc_acpi_gpio() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	u8 enable; /* NVMe: enable 변수 선언. */
 
-	pci_read_config_byte(dev, ICH_ACPI_CNTL, &enable);
-	if (enable & ICH6_ACPI_EN)
-		quirk_io_region(dev, ICH_PMBASE, 128, PCI_BRIDGE_RESOURCES,
-				 "ICH6 ACPI/GPIO/TCO");
+	pci_read_config_byte(dev, ICH_ACPI_CNTL, &enable); /* NVMe: pci_read_config_byte() 호출 (NVMe/PCIe 동작). */
+	if (enable & ICH6_ACPI_EN) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		quirk_io_region(dev, ICH_PMBASE, 128, PCI_BRIDGE_RESOURCES, /* NVMe: quirk_io_region() 함수 정의/매개변수 선언. */
+				 "ICH6 ACPI/GPIO/TCO"); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
-	pci_read_config_byte(dev, ICH6_GPIO_CNTL, &enable);
-	if (enable & ICH6_GPIO_EN)
-		quirk_io_region(dev, ICH6_GPIOBASE, 64, PCI_BRIDGE_RESOURCES+1,
-				"ICH6 GPIO");
-}
+	pci_read_config_byte(dev, ICH6_GPIO_CNTL, &enable); /* NVMe: pci_read_config_byte() 호출 (NVMe/PCIe 동작). */
+	if (enable & ICH6_GPIO_EN) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		quirk_io_region(dev, ICH6_GPIOBASE, 64, PCI_BRIDGE_RESOURCES+1, /* NVMe: quirk_io_region() 함수 정의/매개변수 선언. */
+				"ICH6 GPIO"); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+} /* NVMe: 코드 블록/구조체 종료. */
 
-static void ich6_lpc_generic_decode(struct pci_dev *dev, unsigned int reg,
-				    const char *name, int dynsize)
-{
-	u32 val;
-	u32 size, base;
+static void ich6_lpc_generic_decode(struct pci_dev *dev, unsigned int reg, /* NVMe: ich6_lpc_generic_decode() 함수 정의/매개변수 선언. */
+				    const char *name, int dynsize) /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+{ /* NVMe: 코드 블록 시작. */
+	u32 val; /* NVMe: val 변수 선언. */
+	u32 size, base; /* NVMe: base 변수 선언. */
 
-	pci_read_config_dword(dev, reg, &val);
+	pci_read_config_dword(dev, reg, &val); /* NVMe: pci_read_config_dword() 호출 (NVMe/PCIe 동작). */
 
 	/* Enabled? */
-	if (!(val & 1))
-		return;
-	base = val & 0xfffc;
-	if (dynsize) {
+	if (!(val & 1)) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
+	base = val & 0xfffc; /* NVMe: base 변수에 값 대입. */
+	if (dynsize) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
 		/*
 		 * This is not correct. It is 16, 32 or 64 bytes depending on
 		 * register D31:F0:ADh bits 5:4.
 		 *
 		 * But this gets us at least _part_ of it.
 		 */
-		size = 16;
-	} else {
-		size = 128;
-	}
-	base &= ~(size-1);
+		size = 16; /* NVMe: size 변수에 값 대입. */
+	} else { /* NVMe: 제어문 블록 시작. */
+		size = 128; /* NVMe: size 변수에 값 대입. */
+	} /* NVMe: 코드 블록/구조체 종료. */
+	base &= ~(size-1); /* NVMe: & 변수에 값 대입. */
 
 	/*
 	 * Just print it out for now. We should reserve it after more
 	 * debugging.
 	 */
-	pci_info(dev, "%s PIO at %04x-%04x\n", name, base, base+size-1);
-}
+	pci_info(dev, "%s PIO at %04x-%04x\n", name, base, base+size-1); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
 
-static void quirk_ich6_lpc(struct pci_dev *dev)
-{
+static void quirk_ich6_lpc(struct pci_dev *dev) /* NVMe: quirk_ich6_lpc() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
 	/* Shared ACPI/GPIO decode with all ICH6+ */
-	ich6_lpc_acpi_gpio(dev);
+	ich6_lpc_acpi_gpio(dev); /* NVMe: ich6_lpc_acpi_gpio() 호출 (NVMe/PCIe 동작). */
 
 	/* ICH6-specific generic IO decode */
-	ich6_lpc_generic_decode(dev, 0x84, "LPC Generic IO decode 1", 0);
-	ich6_lpc_generic_decode(dev, 0x88, "LPC Generic IO decode 2", 1);
-}
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_ICH6_0, quirk_ich6_lpc);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_ICH6_1, quirk_ich6_lpc);
+	ich6_lpc_generic_decode(dev, 0x84, "LPC Generic IO decode 1", 0); /* NVMe: ich6_lpc_generic_decode() 호출 (NVMe/PCIe 동작). */
+	ich6_lpc_generic_decode(dev, 0x88, "LPC Generic IO decode 2", 1); /* NVMe: ich6_lpc_generic_decode() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_ICH6_0, quirk_ich6_lpc); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_ICH6_1, quirk_ich6_lpc); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
 
-static void ich7_lpc_generic_decode(struct pci_dev *dev, unsigned int reg,
-				    const char *name)
-{
-	u32 val;
-	u32 mask, base;
+static void ich7_lpc_generic_decode(struct pci_dev *dev, unsigned int reg, /* NVMe: ich7_lpc_generic_decode() 함수 정의/매개변수 선언. */
+				    const char *name) /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+{ /* NVMe: 코드 블록 시작. */
+	u32 val; /* NVMe: val 변수 선언. */
+	u32 mask, base; /* NVMe: base 변수 선언. */
 
-	pci_read_config_dword(dev, reg, &val);
+	pci_read_config_dword(dev, reg, &val); /* NVMe: pci_read_config_dword() 호출 (NVMe/PCIe 동작). */
 
 	/* Enabled? */
-	if (!(val & 1))
-		return;
+	if (!(val & 1)) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
 
 	/* IO base in bits 15:2, mask in bits 23:18, both are dword-based */
-	base = val & 0xfffc;
-	mask = (val >> 16) & 0xfc;
-	mask |= 3;
+	base = val & 0xfffc; /* NVMe: base 변수에 값 대입. */
+	mask = (val >> 16) & 0xfc; /* NVMe: mask 변수에 값 대입. */
+	mask |= 3; /* NVMe: | 변수에 값 대입. */
 
 	/*
 	 * Just print it out for now. We should reserve it after more
 	 * debugging.
 	 */
-	pci_info(dev, "%s PIO at %04x (mask %04x)\n", name, base, mask);
-}
+	pci_info(dev, "%s PIO at %04x (mask %04x)\n", name, base, mask); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
 
 /* ICH7-10 has the same common LPC generic IO decode registers */
-static void quirk_ich7_lpc(struct pci_dev *dev)
-{
+static void quirk_ich7_lpc(struct pci_dev *dev) /* NVMe: quirk_ich7_lpc() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
 	/* We share the common ACPI/GPIO decode with ICH6 */
-	ich6_lpc_acpi_gpio(dev);
+	ich6_lpc_acpi_gpio(dev); /* NVMe: ich6_lpc_acpi_gpio() 호출 (NVMe/PCIe 동작). */
 
 	/* And have 4 ICH7+ generic decodes */
-	ich7_lpc_generic_decode(dev, 0x84, "ICH7 LPC Generic IO decode 1");
-	ich7_lpc_generic_decode(dev, 0x88, "ICH7 LPC Generic IO decode 2");
-	ich7_lpc_generic_decode(dev, 0x8c, "ICH7 LPC Generic IO decode 3");
-	ich7_lpc_generic_decode(dev, 0x90, "ICH7 LPC Generic IO decode 4");
-}
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_ICH7_0, quirk_ich7_lpc);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_ICH7_1, quirk_ich7_lpc);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_ICH7_31, quirk_ich7_lpc);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_ICH8_0, quirk_ich7_lpc);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_ICH8_2, quirk_ich7_lpc);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_ICH8_3, quirk_ich7_lpc);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_ICH8_1, quirk_ich7_lpc);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_ICH8_4, quirk_ich7_lpc);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_ICH9_2, quirk_ich7_lpc);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_ICH9_4, quirk_ich7_lpc);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_ICH9_7, quirk_ich7_lpc);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_ICH9_8, quirk_ich7_lpc);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,   PCI_DEVICE_ID_INTEL_ICH10_1, quirk_ich7_lpc);
+	ich7_lpc_generic_decode(dev, 0x84, "ICH7 LPC Generic IO decode 1"); /* NVMe: ich7_lpc_generic_decode() 호출 (NVMe/PCIe 동작). */
+	ich7_lpc_generic_decode(dev, 0x88, "ICH7 LPC Generic IO decode 2"); /* NVMe: ich7_lpc_generic_decode() 호출 (NVMe/PCIe 동작). */
+	ich7_lpc_generic_decode(dev, 0x8c, "ICH7 LPC Generic IO decode 3"); /* NVMe: ich7_lpc_generic_decode() 호출 (NVMe/PCIe 동작). */
+	ich7_lpc_generic_decode(dev, 0x90, "ICH7 LPC Generic IO decode 4"); /* NVMe: ich7_lpc_generic_decode() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_ICH7_0, quirk_ich7_lpc); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_ICH7_1, quirk_ich7_lpc); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_ICH7_31, quirk_ich7_lpc); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_ICH8_0, quirk_ich7_lpc); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_ICH8_2, quirk_ich7_lpc); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_ICH8_3, quirk_ich7_lpc); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_ICH8_1, quirk_ich7_lpc); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_ICH8_4, quirk_ich7_lpc); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_ICH9_2, quirk_ich7_lpc); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_ICH9_4, quirk_ich7_lpc); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_ICH9_7, quirk_ich7_lpc); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_ICH9_8, quirk_ich7_lpc); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,   PCI_DEVICE_ID_INTEL_ICH10_1, quirk_ich7_lpc); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
 
 /*
  * VIA ACPI: One IO region pointed to by longword at
  *	0x48 or 0x20 (256 bytes of ACPI registers)
  */
-static void quirk_vt82c586_acpi(struct pci_dev *dev)
-{
-	if (dev->revision & 0x10)
-		quirk_io_region(dev, 0x48, 256, PCI_BRIDGE_RESOURCES,
-				"vt82c586 ACPI");
-}
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_82C586_3,	quirk_vt82c586_acpi);
+static void quirk_vt82c586_acpi(struct pci_dev *dev) /* NVMe: quirk_vt82c586_acpi() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	if (dev->revision & 0x10) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		quirk_io_region(dev, 0x48, 256, PCI_BRIDGE_RESOURCES, /* NVMe: quirk_io_region() 함수 정의/매개변수 선언. */
+				"vt82c586 ACPI"); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_82C586_3,	quirk_vt82c586_acpi); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
 
 /*
  * VIA VT82C686 ACPI: Three IO region pointed to by (long)words at
@@ -1098,51 +1098,51 @@ DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_82C586_3,	quirk_vt
  *	0x70 (128 bytes of hardware monitoring register)
  *	0x90 (16 bytes of SMB registers)
  */
-static void quirk_vt82c686_acpi(struct pci_dev *dev)
-{
-	quirk_vt82c586_acpi(dev);
+static void quirk_vt82c686_acpi(struct pci_dev *dev) /* NVMe: quirk_vt82c686_acpi() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	quirk_vt82c586_acpi(dev); /* NVMe: quirk_vt82c586_acpi() 호출 (NVMe/PCIe 동작). */
 
-	quirk_io_region(dev, 0x70, 128, PCI_BRIDGE_RESOURCES+1,
-				 "vt82c686 HW-mon");
+	quirk_io_region(dev, 0x70, 128, PCI_BRIDGE_RESOURCES+1, /* NVMe: quirk_io_region() 함수 정의/매개변수 선언. */
+				 "vt82c686 HW-mon"); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
-	quirk_io_region(dev, 0x90, 16, PCI_BRIDGE_RESOURCES+2, "vt82c686 SMB");
-}
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_82C686_4,	quirk_vt82c686_acpi);
+	quirk_io_region(dev, 0x90, 16, PCI_BRIDGE_RESOURCES+2, "vt82c686 SMB"); /* NVMe: quirk_io_region() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_82C686_4,	quirk_vt82c686_acpi); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
 
 /*
  * VIA VT8235 ISA Bridge: Two IO regions pointed to by words at
  *	0x88 (128 bytes of power management registers)
  *	0xd0 (16 bytes of SMB registers)
  */
-static void quirk_vt8235_acpi(struct pci_dev *dev)
-{
-	quirk_io_region(dev, 0x88, 128, PCI_BRIDGE_RESOURCES, "vt8235 PM");
-	quirk_io_region(dev, 0xd0, 16, PCI_BRIDGE_RESOURCES+1, "vt8235 SMB");
-}
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_8235,	quirk_vt8235_acpi);
+static void quirk_vt8235_acpi(struct pci_dev *dev) /* NVMe: quirk_vt8235_acpi() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	quirk_io_region(dev, 0x88, 128, PCI_BRIDGE_RESOURCES, "vt8235 PM"); /* NVMe: quirk_io_region() 호출 (NVMe/PCIe 동작). */
+	quirk_io_region(dev, 0xd0, 16, PCI_BRIDGE_RESOURCES+1, "vt8235 SMB"); /* NVMe: quirk_io_region() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_8235,	quirk_vt8235_acpi); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
 
 /*
  * TI XIO2000a PCIe-PCI Bridge erroneously reports it supports fast
  * back-to-back: Disable fast back-to-back on the secondary bus segment
  */
-static void quirk_xio2000a(struct pci_dev *dev)
-{
-	struct pci_dev *pdev;
-	u16 command;
+static void quirk_xio2000a(struct pci_dev *dev) /* NVMe: quirk_xio2000a() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	struct pci_dev *pdev; /* NVMe: pdev 변수 선언. */
+	u16 command; /* NVMe: command 변수 선언. */
 
-	pci_warn(dev, "TI XIO2000a quirk detected; secondary bus fast back-to-back transfers disabled\n");
-	list_for_each_entry(pdev, &dev->subordinate->devices, bus_list) {
-		pci_read_config_word(pdev, PCI_COMMAND, &command);
-		if (command & PCI_COMMAND_FAST_BACK)
-			pci_write_config_word(pdev, PCI_COMMAND, command & ~PCI_COMMAND_FAST_BACK);
-	}
-}
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_TI, PCI_DEVICE_ID_TI_XIO2000A,
-			quirk_xio2000a);
+	pci_warn(dev, "TI XIO2000a quirk detected; secondary bus fast back-to-back transfers disabled\n"); /* NVMe: pci_warn() 호출 (NVMe/PCIe 동작). */
+	list_for_each_entry(pdev, &dev->subordinate->devices, bus_list) { /* NVMe: list_for_each_entry() 함수 정의/매개변수 선언. */
+		pci_read_config_word(pdev, PCI_COMMAND, &command); /* NVMe: pci_read_config_word() 호출 (NVMe/PCIe 동작). */
+		if (command & PCI_COMMAND_FAST_BACK) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+			pci_write_config_word(pdev, PCI_COMMAND, command & ~PCI_COMMAND_FAST_BACK); /* NVMe: pci_write_config_word() 호출 (NVMe/PCIe 동작). */
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_TI, PCI_DEVICE_ID_TI_XIO2000A, /* NVMe: DECLARE_PCI_FIXUP_FINAL() 함수 정의/매개변수 선언. */
+			quirk_xio2000a); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
-#ifdef CONFIG_X86_IO_APIC
+#ifdef CONFIG_X86_IO_APIC /* NVMe: 조걶 컴파일 ifdef 분기 (NVMe/PCIe 기능 선택). */
 
-#include <asm/io_apic.h>
+#include <asm/io_apic.h> /* NVMe: io_apic.h 헤더 포함 (PCIe/NVMe 제어). */
 
 /*
  * VIA 686A/B: If an IO-APIC is active, we need to route all on-chip
@@ -1151,23 +1151,23 @@ DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_TI, PCI_DEVICE_ID_TI_XIO2000A,
  * TODO: When we have device-specific interrupt routers, this code will go
  * away from quirks.
  */
-static void quirk_via_ioapic(struct pci_dev *dev)
-{
-	u8 tmp;
+static void quirk_via_ioapic(struct pci_dev *dev) /* NVMe: quirk_via_ioapic() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	u8 tmp; /* NVMe: tmp 변수 선언. */
 
-	if (nr_ioapics < 1)
+	if (nr_ioapics < 1) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
 		tmp = 0;    /* nothing routed to external APIC */
-	else
+	else /* NVMe: 조걶 분기 대안 경로. */
 		tmp = 0x1f; /* all known bits (4-0) routed to external APIC */
 
-	pci_info(dev, "%s VIA external APIC routing\n",
-		 tmp ? "Enabling" : "Disabling");
+	pci_info(dev, "%s VIA external APIC routing\n", /* NVMe: pci_info() 함수 정의/매개변수 선언. */
+		 tmp ? "Enabling" : "Disabling"); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
 	/* Offset 0x58: External APIC IRQ output control */
-	pci_write_config_byte(dev, 0x58, tmp);
-}
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_82C686,	quirk_via_ioapic);
-DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_82C686,	quirk_via_ioapic);
+	pci_write_config_byte(dev, 0x58, tmp); /* NVMe: pci_write_config_byte() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_82C686,	quirk_via_ioapic); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_82C686,	quirk_via_ioapic); /* NVMe: DECLARE_PCI_FIXUP_RESUME_EARLY() 호출 (NVMe/PCIe 동작). */
 
 /*
  * VIA 8237: Some BIOSes don't set the 'Bypass APIC De-Assert Message' Bit.
@@ -1175,19 +1175,19 @@ DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_82C686,	quir
  * Set this bit to get rid of cycle wastage.
  * Otherwise uncritical.
  */
-static void quirk_via_vt8237_bypass_apic_deassert(struct pci_dev *dev)
-{
-	u8 misc_control2;
-#define BYPASS_APIC_DEASSERT 8
+static void quirk_via_vt8237_bypass_apic_deassert(struct pci_dev *dev) /* NVMe: quirk_via_vt8237_bypass_apic_deassert() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	u8 misc_control2; /* NVMe: misc_control2 변수 선언. */
+#define BYPASS_APIC_DEASSERT 8 /* NVMe: BYPASS_APIC_DEASSERT 매크로/상수 정의 (NVMe/PCIe). */
 
-	pci_read_config_byte(dev, 0x5B, &misc_control2);
-	if (!(misc_control2 & BYPASS_APIC_DEASSERT)) {
-		pci_info(dev, "Bypassing VIA 8237 APIC De-Assert Message\n");
-		pci_write_config_byte(dev, 0x5B, misc_control2|BYPASS_APIC_DEASSERT);
-	}
-}
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_8237,		quirk_via_vt8237_bypass_apic_deassert);
-DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_8237,		quirk_via_vt8237_bypass_apic_deassert);
+	pci_read_config_byte(dev, 0x5B, &misc_control2); /* NVMe: pci_read_config_byte() 호출 (NVMe/PCIe 동작). */
+	if (!(misc_control2 & BYPASS_APIC_DEASSERT)) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pci_info(dev, "Bypassing VIA 8237 APIC De-Assert Message\n"); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
+		pci_write_config_byte(dev, 0x5B, misc_control2|BYPASS_APIC_DEASSERT); /* NVMe: pci_write_config_byte() 호출 (NVMe/PCIe 동작). */
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_8237,		quirk_via_vt8237_bypass_apic_deassert); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_8237,		quirk_via_vt8237_bypass_apic_deassert); /* NVMe: DECLARE_PCI_FIXUP_RESUME_EARLY() 호출 (NVMe/PCIe 동작). */
 
 /*
  * The AMD IO-APIC can hang the box when an APIC IRQ is masked.
@@ -1198,40 +1198,40 @@ DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_8237,		quirk
  * noapic specified. For the moment we assume it's the erratum. We may be wrong
  * of course. However the advice is demonstrably good even if so.
  */
-static void quirk_amd_ioapic(struct pci_dev *dev)
-{
-	if (dev->revision >= 0x02) {
-		pci_warn(dev, "I/O APIC: AMD Erratum #22 may be present. In the event of instability try\n");
-		pci_warn(dev, "        : booting with the \"noapic\" option\n");
-	}
-}
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_AMD,	PCI_DEVICE_ID_AMD_VIPER_7410,	quirk_amd_ioapic);
+static void quirk_amd_ioapic(struct pci_dev *dev) /* NVMe: quirk_amd_ioapic() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	if (dev->revision >= 0x02) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pci_warn(dev, "I/O APIC: AMD Erratum #22 may be present. In the event of instability try\n"); /* NVMe: pci_warn() 호출 (NVMe/PCIe 동작). */
+		pci_warn(dev, "        : booting with the \"noapic\" option\n"); /* NVMe: pci_warn() 호출 (NVMe/PCIe 동작). */
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_AMD,	PCI_DEVICE_ID_AMD_VIPER_7410,	quirk_amd_ioapic); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
 #endif /* CONFIG_X86_IO_APIC */
 
-#if defined(CONFIG_ARM64) && defined(CONFIG_PCI_ATS)
+#if defined(CONFIG_ARM64) && defined(CONFIG_PCI_ATS) /* NVMe: 조걶 컴파일 if 분기 (NVMe/PCIe 기능 선택). */
 
-static void quirk_cavium_sriov_rnm_link(struct pci_dev *dev)
-{
+static void quirk_cavium_sriov_rnm_link(struct pci_dev *dev) /* NVMe: quirk_cavium_sriov_rnm_link() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
 	/* Fix for improper SR-IOV configuration on Cavium cn88xx RNM device */
-	if (dev->subsystem_device == 0xa118)
-		dev->sriov->link = dev->devfn;
-}
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_CAVIUM, 0xa018, quirk_cavium_sriov_rnm_link);
-#endif
+	if (dev->subsystem_device == 0xa118) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		dev->sriov->link = dev->devfn; /* NVMe: link 변수에 값 대입. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_CAVIUM, 0xa018, quirk_cavium_sriov_rnm_link); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+#endif /* NVMe: 조걶 컴파일 endif 분기 (NVMe/PCIe 기능 선택). */
 
 /*
  * Some settings of MMRBC can lead to data corruption so block changes.
  * See AMD 8131 HyperTransport PCI-X Tunnel Revision Guide
  */
-static void quirk_amd_8131_mmrbc(struct pci_dev *dev)
-{
-	if (dev->subordinate && dev->revision <= 0x12) {
-		pci_info(dev, "AMD8131 rev %x detected; disabling PCI-X MMRBC\n",
-			 dev->revision);
-		dev->subordinate->bus_flags |= PCI_BUS_FLAGS_NO_MMRBC;
-	}
-}
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_8131_BRIDGE, quirk_amd_8131_mmrbc);
+static void quirk_amd_8131_mmrbc(struct pci_dev *dev) /* NVMe: quirk_amd_8131_mmrbc() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	if (dev->subordinate && dev->revision <= 0x12) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pci_info(dev, "AMD8131 rev %x detected; disabling PCI-X MMRBC\n", /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
+			 dev->revision); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+		dev->subordinate->bus_flags |= PCI_BUS_FLAGS_NO_MMRBC; /* NVMe: | 변수에 값 대입. */
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_8131_BRIDGE, quirk_amd_8131_mmrbc); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
 
 /*
  * FIXME: it is questionable that quirk_via_acpi() is needed.  It shows up
@@ -1240,58 +1240,58 @@ DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_8131_BRIDGE, quirk_
  * of the ACPI SCI interrupt is only done for convenience.
  *	-jgarzik
  */
-static void quirk_via_acpi(struct pci_dev *d)
-{
-	u8 irq;
+static void quirk_via_acpi(struct pci_dev *d) /* NVMe: quirk_via_acpi() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	u8 irq; /* NVMe: irq 변수 선언. */
 
 	/* VIA ACPI device: SCI IRQ line in PCI config byte 0x42 */
-	pci_read_config_byte(d, 0x42, &irq);
-	irq &= 0xf;
-	if (irq && (irq != 2))
-		d->irq = irq;
-}
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_82C586_3,	quirk_via_acpi);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_82C686_4,	quirk_via_acpi);
+	pci_read_config_byte(d, 0x42, &irq); /* NVMe: pci_read_config_byte() 호출 (NVMe/PCIe 동작). */
+	irq &= 0xf; /* NVMe: & 변수에 값 대입. */
+	if (irq && (irq != 2)) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		d->irq = irq; /* NVMe: irq 변수에 값 대입. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_82C586_3,	quirk_via_acpi); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_82C686_4,	quirk_via_acpi); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
 
 /* VIA bridges which have VLink */
-static int via_vlink_dev_lo = -1, via_vlink_dev_hi = 18;
+static int via_vlink_dev_lo = -1, via_vlink_dev_hi = 18; /* NVMe: via_vlink_dev_lo 변수에 값 대입. */
 
-static void quirk_via_bridge(struct pci_dev *dev)
-{
+static void quirk_via_bridge(struct pci_dev *dev) /* NVMe: quirk_via_bridge() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
 	/* See what bridge we have and find the device ranges */
-	switch (dev->device) {
-	case PCI_DEVICE_ID_VIA_82C686:
+	switch (dev->device) { /* NVMe: switch 다중 분기 처리. */
+	case PCI_DEVICE_ID_VIA_82C686: /* NVMe: switch case PCI_DEVICE_ID_VIA_82C686 처리. */
 		/*
 		 * The VT82C686 is special; it attaches to PCI and can have
 		 * any device number. All its subdevices are functions of
 		 * that single device.
 		 */
-		via_vlink_dev_lo = PCI_SLOT(dev->devfn);
-		via_vlink_dev_hi = PCI_SLOT(dev->devfn);
-		break;
-	case PCI_DEVICE_ID_VIA_8237:
-	case PCI_DEVICE_ID_VIA_8237A:
-		via_vlink_dev_lo = 15;
-		break;
-	case PCI_DEVICE_ID_VIA_8235:
-		via_vlink_dev_lo = 16;
-		break;
-	case PCI_DEVICE_ID_VIA_8231:
-	case PCI_DEVICE_ID_VIA_8233_0:
-	case PCI_DEVICE_ID_VIA_8233A:
-	case PCI_DEVICE_ID_VIA_8233C_0:
-		via_vlink_dev_lo = 17;
-		break;
-	}
-}
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_82C686,	quirk_via_bridge);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_8231,		quirk_via_bridge);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_8233_0,	quirk_via_bridge);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_8233A,	quirk_via_bridge);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_8233C_0,	quirk_via_bridge);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_8235,		quirk_via_bridge);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_8237,		quirk_via_bridge);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_8237A,	quirk_via_bridge);
+		via_vlink_dev_lo = PCI_SLOT(dev->devfn); /* NVMe: PCI_SLOT() 호출 (NVMe/PCIe 동작). */
+		via_vlink_dev_hi = PCI_SLOT(dev->devfn); /* NVMe: PCI_SLOT() 호출 (NVMe/PCIe 동작). */
+		break; /* NVMe: 반복문/분기 종료. */
+	case PCI_DEVICE_ID_VIA_8237: /* NVMe: switch case PCI_DEVICE_ID_VIA_8237 처리. */
+	case PCI_DEVICE_ID_VIA_8237A: /* NVMe: switch case PCI_DEVICE_ID_VIA_8237A 처리. */
+		via_vlink_dev_lo = 15; /* NVMe: via_vlink_dev_lo 변수에 값 대입. */
+		break; /* NVMe: 반복문/분기 종료. */
+	case PCI_DEVICE_ID_VIA_8235: /* NVMe: switch case PCI_DEVICE_ID_VIA_8235 처리. */
+		via_vlink_dev_lo = 16; /* NVMe: via_vlink_dev_lo 변수에 값 대입. */
+		break; /* NVMe: 반복문/분기 종료. */
+	case PCI_DEVICE_ID_VIA_8231: /* NVMe: switch case PCI_DEVICE_ID_VIA_8231 처리. */
+	case PCI_DEVICE_ID_VIA_8233_0: /* NVMe: switch case PCI_DEVICE_ID_VIA_8233_0 처리. */
+	case PCI_DEVICE_ID_VIA_8233A: /* NVMe: switch case PCI_DEVICE_ID_VIA_8233A 처리. */
+	case PCI_DEVICE_ID_VIA_8233C_0: /* NVMe: switch case PCI_DEVICE_ID_VIA_8233C_0 처리. */
+		via_vlink_dev_lo = 17; /* NVMe: via_vlink_dev_lo 변수에 값 대입. */
+		break; /* NVMe: 반복문/분기 종료. */
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_82C686,	quirk_via_bridge); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_8231,		quirk_via_bridge); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_8233_0,	quirk_via_bridge); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_8233A,	quirk_via_bridge); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_8233C_0,	quirk_via_bridge); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_8235,		quirk_via_bridge); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_8237,		quirk_via_bridge); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_8237A,	quirk_via_bridge); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
 
 /*
  * quirk_via_vlink		-	VIA VLink IRQ number update
@@ -1304,50 +1304,50 @@ DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_8237A,	quirk_via_b
  * We only do this on systems where a VIA south bridge was detected, and
  * only for VIA devices on the motherboard (see quirk_via_bridge above).
  */
-static void quirk_via_vlink(struct pci_dev *dev)
-{
-	u8 irq, new_irq;
+static void quirk_via_vlink(struct pci_dev *dev) /* NVMe: quirk_via_vlink() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	u8 irq, new_irq; /* NVMe: new_irq 변수 선언. */
 
 	/* Check if we have VLink at all */
-	if (via_vlink_dev_lo == -1)
-		return;
+	if (via_vlink_dev_lo == -1) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
 
-	new_irq = dev->irq;
+	new_irq = dev->irq; /* NVMe: new_irq 변수에 값 대입. */
 
 	/* Don't quirk interrupts outside the legacy IRQ range */
-	if (!new_irq || new_irq > 15)
-		return;
+	if (!new_irq || new_irq > 15) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
 
 	/* Internal device ? */
-	if (dev->bus->number != 0 || PCI_SLOT(dev->devfn) > via_vlink_dev_hi ||
-	    PCI_SLOT(dev->devfn) < via_vlink_dev_lo)
-		return;
+	if (dev->bus->number != 0 || PCI_SLOT(dev->devfn) > via_vlink_dev_hi || /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+	    PCI_SLOT(dev->devfn) < via_vlink_dev_lo) /* NVMe: PCI_SLOT() 함수 정의/매개변수 선언. */
+		return; /* NVMe: 함수 종료 및 반환. */
 
 	/*
 	 * This is an internal VLink device on a PIC interrupt. The BIOS
 	 * ought to have set this but may not have, so we redo it.
 	 */
-	pci_read_config_byte(dev, PCI_INTERRUPT_LINE, &irq);
-	if (new_irq != irq) {
-		pci_info(dev, "VIA VLink IRQ fixup, from %d to %d\n",
-			irq, new_irq);
+	pci_read_config_byte(dev, PCI_INTERRUPT_LINE, &irq); /* NVMe: pci_read_config_byte() 호출 (NVMe/PCIe 동작). */
+	if (new_irq != irq) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pci_info(dev, "VIA VLink IRQ fixup, from %d to %d\n", /* NVMe: pci_info() 함수 정의/매개변수 선언. */
+			irq, new_irq); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 		udelay(15);	/* unknown if delay really needed */
-		pci_write_config_byte(dev, PCI_INTERRUPT_LINE, new_irq);
-	}
-}
-DECLARE_PCI_FIXUP_ENABLE(PCI_VENDOR_ID_VIA, PCI_ANY_ID, quirk_via_vlink);
+		pci_write_config_byte(dev, PCI_INTERRUPT_LINE, new_irq); /* NVMe: pci_write_config_byte() 호출 (NVMe/PCIe 동작). */
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_ENABLE(PCI_VENDOR_ID_VIA, PCI_ANY_ID, quirk_via_vlink); /* NVMe: DECLARE_PCI_FIXUP_ENABLE() 호출 (NVMe/PCIe 동작). */
 
 /*
  * VIA VT82C598 has its device ID settable and many BIOSes set it to the ID
  * of VT82C597 for backward compatibility.  We need to switch it off to be
  * able to recognize the real type of the chip.
  */
-static void quirk_vt82c598_id(struct pci_dev *dev)
-{
-	pci_write_config_byte(dev, 0xfc, 0);
-	pci_read_config_word(dev, PCI_DEVICE_ID, &dev->device);
-}
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_82C597_0,	quirk_vt82c598_id);
+static void quirk_vt82c598_id(struct pci_dev *dev) /* NVMe: quirk_vt82c598_id() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	pci_write_config_byte(dev, 0xfc, 0); /* NVMe: pci_write_config_byte() 호출 (NVMe/PCIe 동작). */
+	pci_read_config_word(dev, PCI_DEVICE_ID, &dev->device); /* NVMe: pci_read_config_word() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_82C597_0,	quirk_vt82c598_id); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
 
 /*
  * CardBus controllers have a legacy base address that enables them to
@@ -1355,14 +1355,14 @@ DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_82C597_0,	quirk_vt
  * even if the Linux CardBus driver is not loaded, because the Linux i82365
  * driver does not (and should not) handle CardBus.
  */
-static void quirk_cardbus_legacy(struct pci_dev *dev)
-{
-	pci_write_config_dword(dev, PCI_CB_LEGACY_MODE_BASE, 0);
-}
-DECLARE_PCI_FIXUP_CLASS_FINAL(PCI_ANY_ID, PCI_ANY_ID,
-			PCI_CLASS_BRIDGE_CARDBUS, 8, quirk_cardbus_legacy);
-DECLARE_PCI_FIXUP_CLASS_RESUME_EARLY(PCI_ANY_ID, PCI_ANY_ID,
-			PCI_CLASS_BRIDGE_CARDBUS, 8, quirk_cardbus_legacy);
+static void quirk_cardbus_legacy(struct pci_dev *dev) /* NVMe: quirk_cardbus_legacy() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	pci_write_config_dword(dev, PCI_CB_LEGACY_MODE_BASE, 0); /* NVMe: pci_write_config_dword() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_CLASS_FINAL(PCI_ANY_ID, PCI_ANY_ID, /* NVMe: DECLARE_PCI_FIXUP_CLASS_FINAL() 함수 정의/매개변수 선언. */
+			PCI_CLASS_BRIDGE_CARDBUS, 8, quirk_cardbus_legacy); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_CLASS_RESUME_EARLY(PCI_ANY_ID, PCI_ANY_ID, /* NVMe: DECLARE_PCI_FIXUP_CLASS_RESUME_EARLY() 함수 정의/매개변수 선언. */
+			PCI_CLASS_BRIDGE_CARDBUS, 8, quirk_cardbus_legacy); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
 /*
  * Following the PCI ordering rules is optional on the AMD762. I'm not sure
@@ -1371,21 +1371,21 @@ DECLARE_PCI_FIXUP_CLASS_RESUME_EARLY(PCI_ANY_ID, PCI_ANY_ID,
  * To be fair to AMD, it follows the spec by default, it's BIOS people who
  * turn it off!
  */
-static void quirk_amd_ordering(struct pci_dev *dev)
-{
-	u32 pcic;
-	pci_read_config_dword(dev, 0x4C, &pcic);
-	if ((pcic & 6) != 6) {
-		pcic |= 6;
-		pci_warn(dev, "BIOS failed to enable PCI standards compliance; fixing this error\n");
-		pci_write_config_dword(dev, 0x4C, pcic);
-		pci_read_config_dword(dev, 0x84, &pcic);
+static void quirk_amd_ordering(struct pci_dev *dev) /* NVMe: quirk_amd_ordering() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	u32 pcic; /* NVMe: pcic 변수 선언. */
+	pci_read_config_dword(dev, 0x4C, &pcic); /* NVMe: pci_read_config_dword() 호출 (NVMe/PCIe 동작). */
+	if ((pcic & 6) != 6) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pcic |= 6; /* NVMe: | 변수에 값 대입. */
+		pci_warn(dev, "BIOS failed to enable PCI standards compliance; fixing this error\n"); /* NVMe: pci_warn() 호출 (NVMe/PCIe 동작). */
+		pci_write_config_dword(dev, 0x4C, pcic); /* NVMe: pci_write_config_dword() 호출 (NVMe/PCIe 동작). */
+		pci_read_config_dword(dev, 0x84, &pcic); /* NVMe: pci_read_config_dword() 호출 (NVMe/PCIe 동작). */
 		pcic |= (1 << 23);	/* Required in this mode */
-		pci_write_config_dword(dev, 0x84, pcic);
-	}
-}
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_AMD,	PCI_DEVICE_ID_AMD_FE_GATE_700C, quirk_amd_ordering);
-DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_AMD,	PCI_DEVICE_ID_AMD_FE_GATE_700C, quirk_amd_ordering);
+		pci_write_config_dword(dev, 0x84, pcic); /* NVMe: pci_write_config_dword() 호출 (NVMe/PCIe 동작). */
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_AMD,	PCI_DEVICE_ID_AMD_FE_GATE_700C, quirk_amd_ordering); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_AMD,	PCI_DEVICE_ID_AMD_FE_GATE_700C, quirk_amd_ordering); /* NVMe: DECLARE_PCI_FIXUP_RESUME_EARLY() 호출 (NVMe/PCIe 동작). */
 
 /*
  * DreamWorks-provided workaround for Dunord I-3000 problem
@@ -1394,36 +1394,36 @@ DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_AMD,	PCI_DEVICE_ID_AMD_FE_GATE_700C
  * it.  We force a larger allocation to ensure that nothing gets put too
  * close to it.
  */
-static void quirk_dunord(struct pci_dev *dev)
-{
-	struct resource *r = &dev->resource[1];
+static void quirk_dunord(struct pci_dev *dev) /* NVMe: quirk_dunord() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	struct resource *r = &dev->resource[1]; /* NVMe: r 변수에 값 대입. */
 
-	r->flags |= IORESOURCE_UNSET;
-	resource_set_range(r, 0, SZ_16M);
-}
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_DUNORD,	PCI_DEVICE_ID_DUNORD_I3000,	quirk_dunord);
+	r->flags |= IORESOURCE_UNSET; /* NVMe: | 변수에 값 대입. */
+	resource_set_range(r, 0, SZ_16M); /* NVMe: resource_set_range() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_DUNORD,	PCI_DEVICE_ID_DUNORD_I3000,	quirk_dunord); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
 
 /*
  * i82380FB mobile docking controller: its PCI-to-PCI bridge is subtractive
  * decoding (transparent), and does indicate this in the ProgIf.
  * Unfortunately, the ProgIf value is wrong - 0x80 instead of 0x01.
  */
-static void quirk_transparent_bridge(struct pci_dev *dev)
-{
-	dev->transparent = 1;
-}
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82380FB,	quirk_transparent_bridge);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_TOSHIBA,	0x605,	quirk_transparent_bridge);
+static void quirk_transparent_bridge(struct pci_dev *dev) /* NVMe: quirk_transparent_bridge() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	dev->transparent = 1; /* NVMe: transparent 변수에 값 대입. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82380FB,	quirk_transparent_bridge); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_TOSHIBA,	0x605,	quirk_transparent_bridge); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
 
 /*
  * Enabling Link Bandwidth Management Interrupts (BW notifications) can cause
  * boot hangs on P45.
  */
-static void quirk_p45_bw_notifications(struct pci_dev *dev)
-{
-	dev->no_bw_notif = 1;
-}
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x2e21, quirk_p45_bw_notifications);
+static void quirk_p45_bw_notifications(struct pci_dev *dev) /* NVMe: quirk_p45_bw_notifications() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	dev->no_bw_notif = 1; /* NVMe: no_bw_notif 변수에 값 대입. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x2e21, quirk_p45_bw_notifications); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
 
 /*
  * Common misconfiguration of the MediaGX/Geode PCI master that will reduce
@@ -1431,125 +1431,125 @@ DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x2e21, quirk_p45_bw_notifications
  * found at http://www.national.com/analog for info on what these bits do.
  * <christer@weinigel.se>
  */
-static void quirk_mediagx_master(struct pci_dev *dev)
-{
-	u8 reg;
+static void quirk_mediagx_master(struct pci_dev *dev) /* NVMe: quirk_mediagx_master() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	u8 reg; /* NVMe: reg 변수 선언. */
 
-	pci_read_config_byte(dev, 0x41, &reg);
-	if (reg & 2) {
-		reg &= ~2;
-		pci_info(dev, "Fixup for MediaGX/Geode Slave Disconnect Boundary (0x41=0x%02x)\n",
-			 reg);
-		pci_write_config_byte(dev, 0x41, reg);
-	}
-}
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_CYRIX,	PCI_DEVICE_ID_CYRIX_PCI_MASTER, quirk_mediagx_master);
-DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_CYRIX,	PCI_DEVICE_ID_CYRIX_PCI_MASTER, quirk_mediagx_master);
+	pci_read_config_byte(dev, 0x41, &reg); /* NVMe: pci_read_config_byte() 호출 (NVMe/PCIe 동작). */
+	if (reg & 2) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		reg &= ~2; /* NVMe: & 변수에 값 대입. */
+		pci_info(dev, "Fixup for MediaGX/Geode Slave Disconnect Boundary (0x41=0x%02x)\n", /* NVMe: x41 변수에 값 대입. */
+			 reg); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+		pci_write_config_byte(dev, 0x41, reg); /* NVMe: pci_write_config_byte() 호출 (NVMe/PCIe 동작). */
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_CYRIX,	PCI_DEVICE_ID_CYRIX_PCI_MASTER, quirk_mediagx_master); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_CYRIX,	PCI_DEVICE_ID_CYRIX_PCI_MASTER, quirk_mediagx_master); /* NVMe: DECLARE_PCI_FIXUP_RESUME() 호출 (NVMe/PCIe 동작). */
 
 /*
  * Ensure C0 rev restreaming is off. This is normally done by the BIOS but
  * in the odd case it is not the results are corruption hence the presence
  * of a Linux check.
  */
-static void quirk_disable_pxb(struct pci_dev *pdev)
-{
-	u16 config;
+static void quirk_disable_pxb(struct pci_dev *pdev) /* NVMe: quirk_disable_pxb() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	u16 config; /* NVMe: config 변수 선언. */
 
 	if (pdev->revision != 0x04)		/* Only C0 requires this */
-		return;
-	pci_read_config_word(pdev, 0x40, &config);
-	if (config & (1<<6)) {
-		config &= ~(1<<6);
-		pci_write_config_word(pdev, 0x40, config);
-		pci_info(pdev, "C0 revision 450NX. Disabling PCI restreaming\n");
-	}
-}
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82454NX,	quirk_disable_pxb);
-DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82454NX,	quirk_disable_pxb);
+		return; /* NVMe: 함수 종료 및 반환. */
+	pci_read_config_word(pdev, 0x40, &config); /* NVMe: pci_read_config_word() 호출 (NVMe/PCIe 동작). */
+	if (config & (1<<6)) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		config &= ~(1<<6); /* NVMe: & 변수에 값 대입. */
+		pci_write_config_word(pdev, 0x40, config); /* NVMe: pci_write_config_word() 호출 (NVMe/PCIe 동작). */
+		pci_info(pdev, "C0 revision 450NX. Disabling PCI restreaming\n"); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82454NX,	quirk_disable_pxb); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82454NX,	quirk_disable_pxb); /* NVMe: DECLARE_PCI_FIXUP_RESUME_EARLY() 호출 (NVMe/PCIe 동작). */
 
-static void quirk_amd_ide_mode(struct pci_dev *pdev)
-{
+static void quirk_amd_ide_mode(struct pci_dev *pdev) /* NVMe: quirk_amd_ide_mode() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
 	/* set SBX00/Hudson-2 SATA in IDE mode to AHCI mode */
-	u8 tmp;
+	u8 tmp; /* NVMe: tmp 변수 선언. */
 
-	pci_read_config_byte(pdev, PCI_CLASS_DEVICE, &tmp);
-	if (tmp == 0x01) {
-		pci_read_config_byte(pdev, 0x40, &tmp);
-		pci_write_config_byte(pdev, 0x40, tmp|1);
-		pci_write_config_byte(pdev, 0x9, 1);
-		pci_write_config_byte(pdev, 0xa, 6);
-		pci_write_config_byte(pdev, 0x40, tmp);
+	pci_read_config_byte(pdev, PCI_CLASS_DEVICE, &tmp); /* NVMe: pci_read_config_byte() 호출 (NVMe/PCIe 동작). */
+	if (tmp == 0x01) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pci_read_config_byte(pdev, 0x40, &tmp); /* NVMe: pci_read_config_byte() 호출 (NVMe/PCIe 동작). */
+		pci_write_config_byte(pdev, 0x40, tmp|1); /* NVMe: pci_write_config_byte() 호출 (NVMe/PCIe 동작). */
+		pci_write_config_byte(pdev, 0x9, 1); /* NVMe: pci_write_config_byte() 호출 (NVMe/PCIe 동작). */
+		pci_write_config_byte(pdev, 0xa, 6); /* NVMe: pci_write_config_byte() 호출 (NVMe/PCIe 동작). */
+		pci_write_config_byte(pdev, 0x40, tmp); /* NVMe: pci_write_config_byte() 호출 (NVMe/PCIe 동작). */
 
-		pdev->class = PCI_CLASS_STORAGE_SATA_AHCI;
-		pci_info(pdev, "set SATA to AHCI mode\n");
-	}
-}
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_IXP600_SATA, quirk_amd_ide_mode);
-DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_IXP600_SATA, quirk_amd_ide_mode);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_IXP700_SATA, quirk_amd_ide_mode);
-DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_IXP700_SATA, quirk_amd_ide_mode);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_HUDSON2_SATA_IDE, quirk_amd_ide_mode);
-DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_HUDSON2_SATA_IDE, quirk_amd_ide_mode);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_AMD, 0x7900, quirk_amd_ide_mode);
-DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_AMD, 0x7900, quirk_amd_ide_mode);
+		pdev->class = PCI_CLASS_STORAGE_SATA_AHCI; /* NVMe: class 변수에 값 대입. */
+		pci_info(pdev, "set SATA to AHCI mode\n"); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_IXP600_SATA, quirk_amd_ide_mode); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_IXP600_SATA, quirk_amd_ide_mode); /* NVMe: DECLARE_PCI_FIXUP_RESUME_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_IXP700_SATA, quirk_amd_ide_mode); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_IXP700_SATA, quirk_amd_ide_mode); /* NVMe: DECLARE_PCI_FIXUP_RESUME_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_HUDSON2_SATA_IDE, quirk_amd_ide_mode); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_HUDSON2_SATA_IDE, quirk_amd_ide_mode); /* NVMe: DECLARE_PCI_FIXUP_RESUME_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_AMD, 0x7900, quirk_amd_ide_mode); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_AMD, 0x7900, quirk_amd_ide_mode); /* NVMe: DECLARE_PCI_FIXUP_RESUME_EARLY() 호출 (NVMe/PCIe 동작). */
 
 /* Serverworks CSB5 IDE does not fully support native mode */
-static void quirk_svwks_csb5ide(struct pci_dev *pdev)
-{
-	u8 prog;
-	pci_read_config_byte(pdev, PCI_CLASS_PROG, &prog);
-	if (prog & 5) {
-		prog &= ~5;
-		pdev->class &= ~5;
-		pci_write_config_byte(pdev, PCI_CLASS_PROG, prog);
+static void quirk_svwks_csb5ide(struct pci_dev *pdev) /* NVMe: quirk_svwks_csb5ide() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	u8 prog; /* NVMe: prog 변수 선언. */
+	pci_read_config_byte(pdev, PCI_CLASS_PROG, &prog); /* NVMe: pci_read_config_byte() 호출 (NVMe/PCIe 동작). */
+	if (prog & 5) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		prog &= ~5; /* NVMe: & 변수에 값 대입. */
+		pdev->class &= ~5; /* NVMe: & 변수에 값 대입. */
+		pci_write_config_byte(pdev, PCI_CLASS_PROG, prog); /* NVMe: pci_write_config_byte() 호출 (NVMe/PCIe 동작). */
 		/* PCI layer will sort out resources */
-	}
-}
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_SERVERWORKS, PCI_DEVICE_ID_SERVERWORKS_CSB5IDE, quirk_svwks_csb5ide);
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_SERVERWORKS, PCI_DEVICE_ID_SERVERWORKS_CSB5IDE, quirk_svwks_csb5ide); /* NVMe: DECLARE_PCI_FIXUP_EARLY() 호출 (NVMe/PCIe 동작). */
 
 /* Intel 82801CAM ICH3-M datasheet says IDE modes must be the same */
-static void quirk_ide_samemode(struct pci_dev *pdev)
-{
-	u8 prog;
+static void quirk_ide_samemode(struct pci_dev *pdev) /* NVMe: quirk_ide_samemode() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	u8 prog; /* NVMe: prog 변수 선언. */
 
-	pci_read_config_byte(pdev, PCI_CLASS_PROG, &prog);
+	pci_read_config_byte(pdev, PCI_CLASS_PROG, &prog); /* NVMe: pci_read_config_byte() 호출 (NVMe/PCIe 동작). */
 
-	if (((prog & 1) && !(prog & 4)) || ((prog & 4) && !(prog & 1))) {
-		pci_info(pdev, "IDE mode mismatch; forcing legacy mode\n");
-		prog &= ~5;
-		pdev->class &= ~5;
-		pci_write_config_byte(pdev, PCI_CLASS_PROG, prog);
-	}
-}
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82801CA_10, quirk_ide_samemode);
+	if (((prog & 1) && !(prog & 4)) || ((prog & 4) && !(prog & 1))) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pci_info(pdev, "IDE mode mismatch; forcing legacy mode\n"); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
+		prog &= ~5; /* NVMe: & 변수에 값 대입. */
+		pdev->class &= ~5; /* NVMe: & 변수에 값 대입. */
+		pci_write_config_byte(pdev, PCI_CLASS_PROG, prog); /* NVMe: pci_write_config_byte() 호출 (NVMe/PCIe 동작). */
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82801CA_10, quirk_ide_samemode); /* NVMe: DECLARE_PCI_FIXUP_EARLY() 호출 (NVMe/PCIe 동작). */
 
 /* Some ATA devices break if put into D3 */
-static void quirk_no_ata_d3(struct pci_dev *pdev)
-{
-	pdev->dev_flags |= PCI_DEV_FLAGS_NO_D3;
-}
+static void quirk_no_ata_d3(struct pci_dev *pdev) /* NVMe: quirk_no_ata_d3() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	pdev->dev_flags |= PCI_DEV_FLAGS_NO_D3; /* NVMe: | 변수에 값 대입. */
+} /* NVMe: 코드 블록/구조체 종료. */
 /* Quirk the legacy ATA devices only. The AHCI ones are ok */
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_SERVERWORKS, PCI_ANY_ID,
-				PCI_CLASS_STORAGE_IDE, 8, quirk_no_ata_d3);
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_ATI, PCI_ANY_ID,
-				PCI_CLASS_STORAGE_IDE, 8, quirk_no_ata_d3);
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_SERVERWORKS, PCI_ANY_ID, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+				PCI_CLASS_STORAGE_IDE, 8, quirk_no_ata_d3); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_ATI, PCI_ANY_ID, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+				PCI_CLASS_STORAGE_IDE, 8, quirk_no_ata_d3); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 /* ALi loses some register settings that we cannot then restore */
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_AL, PCI_ANY_ID,
-				PCI_CLASS_STORAGE_IDE, 8, quirk_no_ata_d3);
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_AL, PCI_ANY_ID, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+				PCI_CLASS_STORAGE_IDE, 8, quirk_no_ata_d3); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 /* VIA comes back fine but we need to keep it alive or ACPI GTM failures
    occur when mode detecting */
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_VIA, PCI_ANY_ID,
-				PCI_CLASS_STORAGE_IDE, 8, quirk_no_ata_d3);
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_VIA, PCI_ANY_ID, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+				PCI_CLASS_STORAGE_IDE, 8, quirk_no_ata_d3); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
 /*
  * This was originally an Alpha-specific thing, but it really fits here.
  * The i82375 PCI/EISA bridge appears as non-classified. Fix that.
  */
-static void quirk_eisa_bridge(struct pci_dev *dev)
-{
-	dev->class = PCI_CLASS_BRIDGE_EISA << 8;
-}
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82375,	quirk_eisa_bridge);
+static void quirk_eisa_bridge(struct pci_dev *dev) /* NVMe: quirk_eisa_bridge() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	dev->class = PCI_CLASS_BRIDGE_EISA << 8; /* NVMe: class 변수에 값 대입. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82375,	quirk_eisa_bridge); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
 
 /*
  * On ASUS P4B boards, the SMBus PCI Device within the ICH2/4 southbridge
@@ -1576,106 +1576,106 @@ DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82375,	quirk_e
  * are about to add an entry in the table below, please first disassemble
  * the DSDT and double-check that there is no code accessing the SMBus.
  */
-static int asus_hides_smbus;
+static int asus_hides_smbus; /* NVMe: asus_hides_smbus 변수 선언. */
 
-static void asus_hides_smbus_hostbridge(struct pci_dev *dev)
-{
-	if (unlikely(dev->subsystem_vendor == PCI_VENDOR_ID_ASUSTEK)) {
-		if (dev->device == PCI_DEVICE_ID_INTEL_82845_HB)
-			switch (dev->subsystem_device) {
+static void asus_hides_smbus_hostbridge(struct pci_dev *dev) /* NVMe: asus_hides_smbus_hostbridge() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	if (unlikely(dev->subsystem_vendor == PCI_VENDOR_ID_ASUSTEK)) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		if (dev->device == PCI_DEVICE_ID_INTEL_82845_HB) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+			switch (dev->subsystem_device) { /* NVMe: switch 다중 분기 처리. */
 			case 0x8025: /* P4B-LX */
 			case 0x8070: /* P4B */
 			case 0x8088: /* P4B533 */
 			case 0x1626: /* L3C notebook */
-				asus_hides_smbus = 1;
-			}
-		else if (dev->device == PCI_DEVICE_ID_INTEL_82845G_HB)
-			switch (dev->subsystem_device) {
+				asus_hides_smbus = 1; /* NVMe: asus_hides_smbus 변수에 값 대입. */
+			} /* NVMe: 코드 블록/구조체 종료. */
+		else if (dev->device == PCI_DEVICE_ID_INTEL_82845G_HB) /* NVMe: 조걶 분기 대안 경로. */
+			switch (dev->subsystem_device) { /* NVMe: switch 다중 분기 처리. */
 			case 0x80b1: /* P4GE-V */
 			case 0x80b2: /* P4PE */
 			case 0x8093: /* P4B533-V */
-				asus_hides_smbus = 1;
-			}
-		else if (dev->device == PCI_DEVICE_ID_INTEL_82850_HB)
-			switch (dev->subsystem_device) {
+				asus_hides_smbus = 1; /* NVMe: asus_hides_smbus 변수에 값 대입. */
+			} /* NVMe: 코드 블록/구조체 종료. */
+		else if (dev->device == PCI_DEVICE_ID_INTEL_82850_HB) /* NVMe: 조걶 분기 대안 경로. */
+			switch (dev->subsystem_device) { /* NVMe: switch 다중 분기 처리. */
 			case 0x8030: /* P4T533 */
-				asus_hides_smbus = 1;
-			}
-		else if (dev->device == PCI_DEVICE_ID_INTEL_7205_0)
-			switch (dev->subsystem_device) {
+				asus_hides_smbus = 1; /* NVMe: asus_hides_smbus 변수에 값 대입. */
+			} /* NVMe: 코드 블록/구조체 종료. */
+		else if (dev->device == PCI_DEVICE_ID_INTEL_7205_0) /* NVMe: 조걶 분기 대안 경로. */
+			switch (dev->subsystem_device) { /* NVMe: switch 다중 분기 처리. */
 			case 0x8070: /* P4G8X Deluxe */
-				asus_hides_smbus = 1;
-			}
-		else if (dev->device == PCI_DEVICE_ID_INTEL_E7501_MCH)
-			switch (dev->subsystem_device) {
+				asus_hides_smbus = 1; /* NVMe: asus_hides_smbus 변수에 값 대입. */
+			} /* NVMe: 코드 블록/구조체 종료. */
+		else if (dev->device == PCI_DEVICE_ID_INTEL_E7501_MCH) /* NVMe: 조걶 분기 대안 경로. */
+			switch (dev->subsystem_device) { /* NVMe: switch 다중 분기 처리. */
 			case 0x80c9: /* PU-DLS */
-				asus_hides_smbus = 1;
-			}
-		else if (dev->device == PCI_DEVICE_ID_INTEL_82855GM_HB)
-			switch (dev->subsystem_device) {
+				asus_hides_smbus = 1; /* NVMe: asus_hides_smbus 변수에 값 대입. */
+			} /* NVMe: 코드 블록/구조체 종료. */
+		else if (dev->device == PCI_DEVICE_ID_INTEL_82855GM_HB) /* NVMe: 조걶 분기 대안 경로. */
+			switch (dev->subsystem_device) { /* NVMe: switch 다중 분기 처리. */
 			case 0x1751: /* M2N notebook */
 			case 0x1821: /* M5N notebook */
 			case 0x1897: /* A6L notebook */
-				asus_hides_smbus = 1;
-			}
-		else if (dev->device == PCI_DEVICE_ID_INTEL_82855PM_HB)
-			switch (dev->subsystem_device) {
+				asus_hides_smbus = 1; /* NVMe: asus_hides_smbus 변수에 값 대입. */
+			} /* NVMe: 코드 블록/구조체 종료. */
+		else if (dev->device == PCI_DEVICE_ID_INTEL_82855PM_HB) /* NVMe: 조걶 분기 대안 경로. */
+			switch (dev->subsystem_device) { /* NVMe: switch 다중 분기 처리. */
 			case 0x184b: /* W1N notebook */
 			case 0x186a: /* M6Ne notebook */
-				asus_hides_smbus = 1;
-			}
-		else if (dev->device == PCI_DEVICE_ID_INTEL_82865_HB)
-			switch (dev->subsystem_device) {
+				asus_hides_smbus = 1; /* NVMe: asus_hides_smbus 변수에 값 대입. */
+			} /* NVMe: 코드 블록/구조체 종료. */
+		else if (dev->device == PCI_DEVICE_ID_INTEL_82865_HB) /* NVMe: 조걶 분기 대안 경로. */
+			switch (dev->subsystem_device) { /* NVMe: switch 다중 분기 처리. */
 			case 0x80f2: /* P4P800-X */
-				asus_hides_smbus = 1;
-			}
-		else if (dev->device == PCI_DEVICE_ID_INTEL_82915GM_HB)
-			switch (dev->subsystem_device) {
+				asus_hides_smbus = 1; /* NVMe: asus_hides_smbus 변수에 값 대입. */
+			} /* NVMe: 코드 블록/구조체 종료. */
+		else if (dev->device == PCI_DEVICE_ID_INTEL_82915GM_HB) /* NVMe: 조걶 분기 대안 경로. */
+			switch (dev->subsystem_device) { /* NVMe: switch 다중 분기 처리. */
 			case 0x1882: /* M6V notebook */
 			case 0x1977: /* A6VA notebook */
-				asus_hides_smbus = 1;
-			}
-	} else if (unlikely(dev->subsystem_vendor == PCI_VENDOR_ID_HP)) {
-		if (dev->device ==  PCI_DEVICE_ID_INTEL_82855PM_HB)
-			switch (dev->subsystem_device) {
+				asus_hides_smbus = 1; /* NVMe: asus_hides_smbus 변수에 값 대입. */
+			} /* NVMe: 코드 블록/구조체 종료. */
+	} else if (unlikely(dev->subsystem_vendor == PCI_VENDOR_ID_HP)) { /* NVMe: 제어문 블록 시작. */
+		if (dev->device ==  PCI_DEVICE_ID_INTEL_82855PM_HB) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+			switch (dev->subsystem_device) { /* NVMe: switch 다중 분기 처리. */
 			case 0x088C: /* HP Compaq nc8000 */
 			case 0x0890: /* HP Compaq nc6000 */
-				asus_hides_smbus = 1;
-			}
-		else if (dev->device == PCI_DEVICE_ID_INTEL_82865_HB)
-			switch (dev->subsystem_device) {
+				asus_hides_smbus = 1; /* NVMe: asus_hides_smbus 변수에 값 대입. */
+			} /* NVMe: 코드 블록/구조체 종료. */
+		else if (dev->device == PCI_DEVICE_ID_INTEL_82865_HB) /* NVMe: 조걶 분기 대안 경로. */
+			switch (dev->subsystem_device) { /* NVMe: switch 다중 분기 처리. */
 			case 0x12bc: /* HP D330L */
 			case 0x12bd: /* HP D530 */
 			case 0x006a: /* HP Compaq nx9500 */
-				asus_hides_smbus = 1;
-			}
-		else if (dev->device == PCI_DEVICE_ID_INTEL_82875_HB)
-			switch (dev->subsystem_device) {
+				asus_hides_smbus = 1; /* NVMe: asus_hides_smbus 변수에 값 대입. */
+			} /* NVMe: 코드 블록/구조체 종료. */
+		else if (dev->device == PCI_DEVICE_ID_INTEL_82875_HB) /* NVMe: 조걶 분기 대안 경로. */
+			switch (dev->subsystem_device) { /* NVMe: switch 다중 분기 처리. */
 			case 0x12bf: /* HP xw4100 */
-				asus_hides_smbus = 1;
-			}
-	} else if (unlikely(dev->subsystem_vendor == PCI_VENDOR_ID_SAMSUNG)) {
-		if (dev->device ==  PCI_DEVICE_ID_INTEL_82855PM_HB)
-			switch (dev->subsystem_device) {
+				asus_hides_smbus = 1; /* NVMe: asus_hides_smbus 변수에 값 대입. */
+			} /* NVMe: 코드 블록/구조체 종료. */
+	} else if (unlikely(dev->subsystem_vendor == PCI_VENDOR_ID_SAMSUNG)) { /* NVMe: 제어문 블록 시작. */
+		if (dev->device ==  PCI_DEVICE_ID_INTEL_82855PM_HB) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+			switch (dev->subsystem_device) { /* NVMe: switch 다중 분기 처리. */
 			case 0xC00C: /* Samsung P35 notebook */
-				asus_hides_smbus = 1;
-		}
-	} else if (unlikely(dev->subsystem_vendor == PCI_VENDOR_ID_COMPAQ)) {
-		if (dev->device == PCI_DEVICE_ID_INTEL_82855PM_HB)
-			switch (dev->subsystem_device) {
+				asus_hides_smbus = 1; /* NVMe: asus_hides_smbus 변수에 값 대입. */
+		} /* NVMe: 코드 블록/구조체 종료. */
+	} else if (unlikely(dev->subsystem_vendor == PCI_VENDOR_ID_COMPAQ)) { /* NVMe: 제어문 블록 시작. */
+		if (dev->device == PCI_DEVICE_ID_INTEL_82855PM_HB) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+			switch (dev->subsystem_device) { /* NVMe: switch 다중 분기 처리. */
 			case 0x0058: /* Compaq Evo N620c */
-				asus_hides_smbus = 1;
-			}
-		else if (dev->device == PCI_DEVICE_ID_INTEL_82810_IG3)
-			switch (dev->subsystem_device) {
+				asus_hides_smbus = 1; /* NVMe: asus_hides_smbus 변수에 값 대입. */
+			} /* NVMe: 코드 블록/구조체 종료. */
+		else if (dev->device == PCI_DEVICE_ID_INTEL_82810_IG3) /* NVMe: 조걶 분기 대안 경로. */
+			switch (dev->subsystem_device) { /* NVMe: switch 다중 분기 처리. */
 			case 0xB16C: /* Compaq Deskpro EP 401963-001 (PCA# 010174) */
 				/* Motherboard doesn't have Host bridge
 				 * subvendor/subdevice IDs, therefore checking
 				 * its on-board VGA controller */
-				asus_hides_smbus = 1;
-			}
-		else if (dev->device == PCI_DEVICE_ID_INTEL_82801DB_2)
-			switch (dev->subsystem_device) {
+				asus_hides_smbus = 1; /* NVMe: asus_hides_smbus 변수에 값 대입. */
+			} /* NVMe: 코드 블록/구조체 종료. */
+		else if (dev->device == PCI_DEVICE_ID_INTEL_82801DB_2) /* NVMe: 조걶 분기 대안 경로. */
+			switch (dev->subsystem_device) { /* NVMe: switch 다중 분기 처리. */
 			case 0x00b8: /* Compaq Evo D510 CMT */
 			case 0x00b9: /* Compaq Evo D510 SFF */
 			case 0x00ba: /* Compaq Evo D510 USDT */
@@ -1684,136 +1684,136 @@ static void asus_hides_smbus_hostbridge(struct pci_dev *dev)
 				 * controller is disabled if an AGP card is
 				 * inserted, therefore checking USB UHCI
 				 * Controller #1 */
-				asus_hides_smbus = 1;
-			}
-		else if (dev->device == PCI_DEVICE_ID_INTEL_82815_CGC)
-			switch (dev->subsystem_device) {
+				asus_hides_smbus = 1; /* NVMe: asus_hides_smbus 변수에 값 대입. */
+			} /* NVMe: 코드 블록/구조체 종료. */
+		else if (dev->device == PCI_DEVICE_ID_INTEL_82815_CGC) /* NVMe: 조걶 분기 대안 경로. */
+			switch (dev->subsystem_device) { /* NVMe: switch 다중 분기 처리. */
 			case 0x001A: /* Compaq Deskpro EN SSF P667 815E */
 				/* Motherboard doesn't have host bridge
 				 * subvendor/subdevice IDs, therefore checking
 				 * its on-board VGA controller */
-				asus_hides_smbus = 1;
-			}
-	}
-}
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82845_HB,	asus_hides_smbus_hostbridge);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82845G_HB,	asus_hides_smbus_hostbridge);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82850_HB,	asus_hides_smbus_hostbridge);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82865_HB,	asus_hides_smbus_hostbridge);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82875_HB,	asus_hides_smbus_hostbridge);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_7205_0,	asus_hides_smbus_hostbridge);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_E7501_MCH,	asus_hides_smbus_hostbridge);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82855PM_HB,	asus_hides_smbus_hostbridge);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82855GM_HB,	asus_hides_smbus_hostbridge);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82915GM_HB, asus_hides_smbus_hostbridge);
+				asus_hides_smbus = 1; /* NVMe: asus_hides_smbus 변수에 값 대입. */
+			} /* NVMe: 코드 블록/구조체 종료. */
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82845_HB,	asus_hides_smbus_hostbridge); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82845G_HB,	asus_hides_smbus_hostbridge); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82850_HB,	asus_hides_smbus_hostbridge); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82865_HB,	asus_hides_smbus_hostbridge); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82875_HB,	asus_hides_smbus_hostbridge); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_7205_0,	asus_hides_smbus_hostbridge); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_E7501_MCH,	asus_hides_smbus_hostbridge); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82855PM_HB,	asus_hides_smbus_hostbridge); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82855GM_HB,	asus_hides_smbus_hostbridge); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82915GM_HB, asus_hides_smbus_hostbridge); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
 
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82810_IG3,	asus_hides_smbus_hostbridge);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82801DB_2,	asus_hides_smbus_hostbridge);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82815_CGC,	asus_hides_smbus_hostbridge);
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82810_IG3,	asus_hides_smbus_hostbridge); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82801DB_2,	asus_hides_smbus_hostbridge); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82815_CGC,	asus_hides_smbus_hostbridge); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
 
-static void asus_hides_smbus_lpc(struct pci_dev *dev)
-{
-	u16 val;
+static void asus_hides_smbus_lpc(struct pci_dev *dev) /* NVMe: asus_hides_smbus_lpc() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	u16 val; /* NVMe: val 변수 선언. */
 
-	if (likely(!asus_hides_smbus))
-		return;
+	if (likely(!asus_hides_smbus)) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
 
-	pci_read_config_word(dev, 0xF2, &val);
-	if (val & 0x8) {
-		pci_write_config_word(dev, 0xF2, val & (~0x8));
-		pci_read_config_word(dev, 0xF2, &val);
-		if (val & 0x8)
-			pci_info(dev, "i801 SMBus device continues to play 'hide and seek'! 0x%x\n",
-				 val);
-		else
-			pci_info(dev, "Enabled i801 SMBus device\n");
-	}
-}
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82801AA_0,	asus_hides_smbus_lpc);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82801DB_0,	asus_hides_smbus_lpc);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82801BA_0,	asus_hides_smbus_lpc);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82801CA_0,	asus_hides_smbus_lpc);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82801CA_12,	asus_hides_smbus_lpc);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82801DB_12,	asus_hides_smbus_lpc);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82801EB_0,	asus_hides_smbus_lpc);
-DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82801AA_0,	asus_hides_smbus_lpc);
-DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82801DB_0,	asus_hides_smbus_lpc);
-DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82801BA_0,	asus_hides_smbus_lpc);
-DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82801CA_0,	asus_hides_smbus_lpc);
-DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82801CA_12,	asus_hides_smbus_lpc);
-DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82801DB_12,	asus_hides_smbus_lpc);
-DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82801EB_0,	asus_hides_smbus_lpc);
+	pci_read_config_word(dev, 0xF2, &val); /* NVMe: pci_read_config_word() 호출 (NVMe/PCIe 동작). */
+	if (val & 0x8) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pci_write_config_word(dev, 0xF2, val & (~0x8)); /* NVMe: pci_write_config_word() 호출 (NVMe/PCIe 동작). */
+		pci_read_config_word(dev, 0xF2, &val); /* NVMe: pci_read_config_word() 호출 (NVMe/PCIe 동작). */
+		if (val & 0x8) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+			pci_info(dev, "i801 SMBus device continues to play 'hide and seek'! 0x%x\n", /* NVMe: pci_info() 함수 정의/매개변수 선언. */
+				 val); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+		else /* NVMe: 조걶 분기 대안 경로. */
+			pci_info(dev, "Enabled i801 SMBus device\n"); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82801AA_0,	asus_hides_smbus_lpc); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82801DB_0,	asus_hides_smbus_lpc); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82801BA_0,	asus_hides_smbus_lpc); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82801CA_0,	asus_hides_smbus_lpc); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82801CA_12,	asus_hides_smbus_lpc); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82801DB_12,	asus_hides_smbus_lpc); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82801EB_0,	asus_hides_smbus_lpc); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82801AA_0,	asus_hides_smbus_lpc); /* NVMe: DECLARE_PCI_FIXUP_RESUME_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82801DB_0,	asus_hides_smbus_lpc); /* NVMe: DECLARE_PCI_FIXUP_RESUME_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82801BA_0,	asus_hides_smbus_lpc); /* NVMe: DECLARE_PCI_FIXUP_RESUME_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82801CA_0,	asus_hides_smbus_lpc); /* NVMe: DECLARE_PCI_FIXUP_RESUME_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82801CA_12,	asus_hides_smbus_lpc); /* NVMe: DECLARE_PCI_FIXUP_RESUME_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82801DB_12,	asus_hides_smbus_lpc); /* NVMe: DECLARE_PCI_FIXUP_RESUME_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_82801EB_0,	asus_hides_smbus_lpc); /* NVMe: DECLARE_PCI_FIXUP_RESUME_EARLY() 호출 (NVMe/PCIe 동작). */
 
 /* It appears we just have one such device. If not, we have a warning */
-static void __iomem *asus_rcba_base;
-static void asus_hides_smbus_lpc_ich6_suspend(struct pci_dev *dev)
-{
-	u32 rcba;
+static void __iomem *asus_rcba_base; /* NVMe: asus_rcba_base 변수 선언. */
+static void asus_hides_smbus_lpc_ich6_suspend(struct pci_dev *dev) /* NVMe: asus_hides_smbus_lpc_ich6_suspend() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	u32 rcba; /* NVMe: rcba 변수 선언. */
 
-	if (likely(!asus_hides_smbus))
-		return;
-	WARN_ON(asus_rcba_base);
+	if (likely(!asus_hides_smbus)) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
+	WARN_ON(asus_rcba_base); /* NVMe: WARN_ON() 호출 (NVMe/PCIe 동작). */
 
-	pci_read_config_dword(dev, 0xF0, &rcba);
+	pci_read_config_dword(dev, 0xF0, &rcba); /* NVMe: pci_read_config_dword() 호출 (NVMe/PCIe 동작). */
 	/* use bits 31:14, 16 kB aligned */
-	asus_rcba_base = ioremap(rcba & 0xFFFFC000, 0x4000);
-	if (asus_rcba_base == NULL)
-		return;
-}
+	asus_rcba_base = ioremap(rcba & 0xFFFFC000, 0x4000); /* NVMe: ioremap() 호출 (NVMe/PCIe 동작). */
+	if (asus_rcba_base == NULL) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
+} /* NVMe: 코드 블록/구조체 종료. */
 
-static void asus_hides_smbus_lpc_ich6_resume_early(struct pci_dev *dev)
-{
-	u32 val;
+static void asus_hides_smbus_lpc_ich6_resume_early(struct pci_dev *dev) /* NVMe: asus_hides_smbus_lpc_ich6_resume_early() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	u32 val; /* NVMe: val 변수 선언. */
 
-	if (likely(!asus_hides_smbus || !asus_rcba_base))
-		return;
+	if (likely(!asus_hides_smbus || !asus_rcba_base)) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
 
 	/* read the Function Disable register, dword mode only */
-	val = readl(asus_rcba_base + 0x3418);
+	val = readl(asus_rcba_base + 0x3418); /* NVMe: readl() 호출 (NVMe/PCIe 동작). */
 
 	/* enable the SMBus device */
-	writel(val & 0xFFFFFFF7, asus_rcba_base + 0x3418);
-}
+	writel(val & 0xFFFFFFF7, asus_rcba_base + 0x3418); /* NVMe: writel() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
 
-static void asus_hides_smbus_lpc_ich6_resume(struct pci_dev *dev)
-{
-	if (likely(!asus_hides_smbus || !asus_rcba_base))
-		return;
+static void asus_hides_smbus_lpc_ich6_resume(struct pci_dev *dev) /* NVMe: asus_hides_smbus_lpc_ich6_resume() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	if (likely(!asus_hides_smbus || !asus_rcba_base)) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
 
-	iounmap(asus_rcba_base);
-	asus_rcba_base = NULL;
-	pci_info(dev, "Enabled ICH6/i801 SMBus device\n");
-}
+	iounmap(asus_rcba_base); /* NVMe: iounmap() 호출 (NVMe/PCIe 동작). */
+	asus_rcba_base = NULL; /* NVMe: asus_rcba_base 변수에 값 대입. */
+	pci_info(dev, "Enabled ICH6/i801 SMBus device\n"); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
 
-static void asus_hides_smbus_lpc_ich6(struct pci_dev *dev)
-{
-	asus_hides_smbus_lpc_ich6_suspend(dev);
-	asus_hides_smbus_lpc_ich6_resume_early(dev);
-	asus_hides_smbus_lpc_ich6_resume(dev);
-}
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_ICH6_1,	asus_hides_smbus_lpc_ich6);
-DECLARE_PCI_FIXUP_SUSPEND(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_ICH6_1,	asus_hides_smbus_lpc_ich6_suspend);
-DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_ICH6_1,	asus_hides_smbus_lpc_ich6_resume);
-DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_ICH6_1,	asus_hides_smbus_lpc_ich6_resume_early);
+static void asus_hides_smbus_lpc_ich6(struct pci_dev *dev) /* NVMe: asus_hides_smbus_lpc_ich6() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	asus_hides_smbus_lpc_ich6_suspend(dev); /* NVMe: asus_hides_smbus_lpc_ich6_suspend() 호출 (NVMe/PCIe 동작). */
+	asus_hides_smbus_lpc_ich6_resume_early(dev); /* NVMe: asus_hides_smbus_lpc_ich6_resume_early() 호출 (NVMe/PCIe 동작). */
+	asus_hides_smbus_lpc_ich6_resume(dev); /* NVMe: asus_hides_smbus_lpc_ich6_resume() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_ICH6_1,	asus_hides_smbus_lpc_ich6); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_SUSPEND(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_ICH6_1,	asus_hides_smbus_lpc_ich6_suspend); /* NVMe: DECLARE_PCI_FIXUP_SUSPEND() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_ICH6_1,	asus_hides_smbus_lpc_ich6_resume); /* NVMe: DECLARE_PCI_FIXUP_RESUME() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_ICH6_1,	asus_hides_smbus_lpc_ich6_resume_early); /* NVMe: DECLARE_PCI_FIXUP_RESUME_EARLY() 호출 (NVMe/PCIe 동작). */
 
 /* SiS 96x south bridge: BIOS typically hides SMBus device...  */
-static void quirk_sis_96x_smbus(struct pci_dev *dev)
-{
-	u8 val = 0;
-	pci_read_config_byte(dev, 0x77, &val);
-	if (val & 0x10) {
-		pci_info(dev, "Enabling SiS 96x SMBus\n");
-		pci_write_config_byte(dev, 0x77, val & ~0x10);
-	}
-}
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_SI,	PCI_DEVICE_ID_SI_961,		quirk_sis_96x_smbus);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_SI,	PCI_DEVICE_ID_SI_962,		quirk_sis_96x_smbus);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_SI,	PCI_DEVICE_ID_SI_963,		quirk_sis_96x_smbus);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_SI,	PCI_DEVICE_ID_SI_LPC,		quirk_sis_96x_smbus);
-DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_SI,	PCI_DEVICE_ID_SI_961,		quirk_sis_96x_smbus);
-DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_SI,	PCI_DEVICE_ID_SI_962,		quirk_sis_96x_smbus);
-DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_SI,	PCI_DEVICE_ID_SI_963,		quirk_sis_96x_smbus);
-DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_SI,	PCI_DEVICE_ID_SI_LPC,		quirk_sis_96x_smbus);
+static void quirk_sis_96x_smbus(struct pci_dev *dev) /* NVMe: quirk_sis_96x_smbus() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	u8 val = 0; /* NVMe: val 변수에 값 대입. */
+	pci_read_config_byte(dev, 0x77, &val); /* NVMe: pci_read_config_byte() 호출 (NVMe/PCIe 동작). */
+	if (val & 0x10) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pci_info(dev, "Enabling SiS 96x SMBus\n"); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
+		pci_write_config_byte(dev, 0x77, val & ~0x10); /* NVMe: pci_write_config_byte() 호출 (NVMe/PCIe 동작). */
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_SI,	PCI_DEVICE_ID_SI_961,		quirk_sis_96x_smbus); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_SI,	PCI_DEVICE_ID_SI_962,		quirk_sis_96x_smbus); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_SI,	PCI_DEVICE_ID_SI_963,		quirk_sis_96x_smbus); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_SI,	PCI_DEVICE_ID_SI_LPC,		quirk_sis_96x_smbus); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_SI,	PCI_DEVICE_ID_SI_961,		quirk_sis_96x_smbus); /* NVMe: DECLARE_PCI_FIXUP_RESUME_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_SI,	PCI_DEVICE_ID_SI_962,		quirk_sis_96x_smbus); /* NVMe: DECLARE_PCI_FIXUP_RESUME_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_SI,	PCI_DEVICE_ID_SI_963,		quirk_sis_96x_smbus); /* NVMe: DECLARE_PCI_FIXUP_RESUME_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_SI,	PCI_DEVICE_ID_SI_LPC,		quirk_sis_96x_smbus); /* NVMe: DECLARE_PCI_FIXUP_RESUME_EARLY() 호출 (NVMe/PCIe 동작). */
 
 /*
  * ... This is further complicated by the fact that some SiS96x south
@@ -1823,31 +1823,31 @@ DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_SI,	PCI_DEVICE_ID_SI_LPC,		quirk_si
  *
  * We can also enable the sis96x bit in the discovery register..
  */
-#define SIS_DETECT_REGISTER 0x40
+#define SIS_DETECT_REGISTER 0x40 /* NVMe: SIS_DETECT_REGISTER 매크로/상수 정의 (NVMe/PCIe). */
 
-static void quirk_sis_503(struct pci_dev *dev)
-{
-	u8 reg;
-	u16 devid;
+static void quirk_sis_503(struct pci_dev *dev) /* NVMe: quirk_sis_503() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	u8 reg; /* NVMe: reg 변수 선언. */
+	u16 devid; /* NVMe: devid 변수 선언. */
 
-	pci_read_config_byte(dev, SIS_DETECT_REGISTER, &reg);
-	pci_write_config_byte(dev, SIS_DETECT_REGISTER, reg | (1 << 6));
-	pci_read_config_word(dev, PCI_DEVICE_ID, &devid);
-	if (((devid & 0xfff0) != 0x0960) && (devid != 0x0018)) {
-		pci_write_config_byte(dev, SIS_DETECT_REGISTER, reg);
-		return;
-	}
+	pci_read_config_byte(dev, SIS_DETECT_REGISTER, &reg); /* NVMe: pci_read_config_byte() 호출 (NVMe/PCIe 동작). */
+	pci_write_config_byte(dev, SIS_DETECT_REGISTER, reg | (1 << 6)); /* NVMe: pci_write_config_byte() 호출 (NVMe/PCIe 동작). */
+	pci_read_config_word(dev, PCI_DEVICE_ID, &devid); /* NVMe: pci_read_config_word() 호출 (NVMe/PCIe 동작). */
+	if (((devid & 0xfff0) != 0x0960) && (devid != 0x0018)) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pci_write_config_byte(dev, SIS_DETECT_REGISTER, reg); /* NVMe: pci_write_config_byte() 호출 (NVMe/PCIe 동작). */
+		return; /* NVMe: 함수 종료 및 반환. */
+	} /* NVMe: 코드 블록/구조체 종료. */
 
 	/*
 	 * Ok, it now shows up as a 96x.  Run the 96x quirk by hand in case
 	 * it has already been processed.  (Depends on link order, which is
 	 * apparently not guaranteed)
 	 */
-	dev->device = devid;
-	quirk_sis_96x_smbus(dev);
-}
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_SI,	PCI_DEVICE_ID_SI_503,		quirk_sis_503);
-DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_SI,	PCI_DEVICE_ID_SI_503,		quirk_sis_503);
+	dev->device = devid; /* NVMe: device 변수에 값 대입. */
+	quirk_sis_96x_smbus(dev); /* NVMe: quirk_sis_96x_smbus() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_SI,	PCI_DEVICE_ID_SI_503,		quirk_sis_503); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_SI,	PCI_DEVICE_ID_SI_503,		quirk_sis_503); /* NVMe: DECLARE_PCI_FIXUP_RESUME_EARLY() 호출 (NVMe/PCIe 동작). */
 
 /*
  * On ASUS A8V and A8V Deluxe boards, the onboard AC97 audio controller
@@ -1855,172 +1855,172 @@ DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_SI,	PCI_DEVICE_ID_SI_503,		quirk_si
  * present. This patch, tweaking the VT8237 ISA bridge, enables them.
  * -- bjd
  */
-static void asus_hides_ac97_lpc(struct pci_dev *dev)
-{
-	u8 val;
-	int asus_hides_ac97 = 0;
+static void asus_hides_ac97_lpc(struct pci_dev *dev) /* NVMe: asus_hides_ac97_lpc() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	u8 val; /* NVMe: val 변수 선언. */
+	int asus_hides_ac97 = 0; /* NVMe: asus_hides_ac97 변수에 값 대입. */
 
-	if (likely(dev->subsystem_vendor == PCI_VENDOR_ID_ASUSTEK)) {
-		if (dev->device == PCI_DEVICE_ID_VIA_8237)
-			asus_hides_ac97 = 1;
-	}
+	if (likely(dev->subsystem_vendor == PCI_VENDOR_ID_ASUSTEK)) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		if (dev->device == PCI_DEVICE_ID_VIA_8237) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+			asus_hides_ac97 = 1; /* NVMe: asus_hides_ac97 변수에 값 대입. */
+	} /* NVMe: 코드 블록/구조체 종료. */
 
-	if (!asus_hides_ac97)
-		return;
+	if (!asus_hides_ac97) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
 
-	pci_read_config_byte(dev, 0x50, &val);
-	if (val & 0xc0) {
-		pci_write_config_byte(dev, 0x50, val & (~0xc0));
-		pci_read_config_byte(dev, 0x50, &val);
-		if (val & 0xc0)
-			pci_info(dev, "Onboard AC97/MC97 devices continue to play 'hide and seek'! 0x%x\n",
-				 val);
-		else
-			pci_info(dev, "Enabled onboard AC97/MC97 devices\n");
-	}
-}
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_8237, asus_hides_ac97_lpc);
-DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_8237, asus_hides_ac97_lpc);
+	pci_read_config_byte(dev, 0x50, &val); /* NVMe: pci_read_config_byte() 호출 (NVMe/PCIe 동작). */
+	if (val & 0xc0) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pci_write_config_byte(dev, 0x50, val & (~0xc0)); /* NVMe: pci_write_config_byte() 호출 (NVMe/PCIe 동작). */
+		pci_read_config_byte(dev, 0x50, &val); /* NVMe: pci_read_config_byte() 호출 (NVMe/PCIe 동작). */
+		if (val & 0xc0) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+			pci_info(dev, "Onboard AC97/MC97 devices continue to play 'hide and seek'! 0x%x\n", /* NVMe: pci_info() 함수 정의/매개변수 선언. */
+				 val); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+		else /* NVMe: 조걶 분기 대안 경로. */
+			pci_info(dev, "Enabled onboard AC97/MC97 devices\n"); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_8237, asus_hides_ac97_lpc); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_VIA,	PCI_DEVICE_ID_VIA_8237, asus_hides_ac97_lpc); /* NVMe: DECLARE_PCI_FIXUP_RESUME_EARLY() 호출 (NVMe/PCIe 동작). */
 
-#if defined(CONFIG_ATA) || defined(CONFIG_ATA_MODULE)
+#if defined(CONFIG_ATA) || defined(CONFIG_ATA_MODULE) /* NVMe: 조걶 컴파일 if 분기 (NVMe/PCIe 기능 선택). */
 
 /*
  * If we are using libata we can drive this chip properly but must do this
  * early on to make the additional device appear during the PCI scanning.
  */
-static void quirk_jmicron_ata(struct pci_dev *pdev)
-{
-	u32 conf1, conf5, class;
-	u8 hdr;
+static void quirk_jmicron_ata(struct pci_dev *pdev) /* NVMe: quirk_jmicron_ata() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	u32 conf1, conf5, class; /* NVMe: class 변수 선언. */
+	u8 hdr; /* NVMe: hdr 변수 선언. */
 
 	/* Only poke fn 0 */
-	if (PCI_FUNC(pdev->devfn))
-		return;
+	if (PCI_FUNC(pdev->devfn)) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
 
-	pci_read_config_dword(pdev, 0x40, &conf1);
-	pci_read_config_dword(pdev, 0x80, &conf5);
+	pci_read_config_dword(pdev, 0x40, &conf1); /* NVMe: pci_read_config_dword() 호출 (NVMe/PCIe 동작). */
+	pci_read_config_dword(pdev, 0x80, &conf5); /* NVMe: pci_read_config_dword() 호출 (NVMe/PCIe 동작). */
 
 	conf1 &= ~0x00CFF302; /* Clear bit 1, 8, 9, 12-19, 22, 23 */
 	conf5 &= ~(1 << 24);  /* Clear bit 24 */
 
-	switch (pdev->device) {
+	switch (pdev->device) { /* NVMe: switch 다중 분기 처리. */
 	case PCI_DEVICE_ID_JMICRON_JMB360: /* SATA single port */
 	case PCI_DEVICE_ID_JMICRON_JMB362: /* SATA dual ports */
 	case PCI_DEVICE_ID_JMICRON_JMB364: /* SATA dual ports */
 		/* The controller should be in single function ahci mode */
 		conf1 |= 0x0002A100; /* Set 8, 13, 15, 17 */
-		break;
+		break; /* NVMe: 반복문/분기 종료. */
 
-	case PCI_DEVICE_ID_JMICRON_JMB365:
-	case PCI_DEVICE_ID_JMICRON_JMB366:
+	case PCI_DEVICE_ID_JMICRON_JMB365: /* NVMe: switch case PCI_DEVICE_ID_JMICRON_JMB365 처리. */
+	case PCI_DEVICE_ID_JMICRON_JMB366: /* NVMe: switch case PCI_DEVICE_ID_JMICRON_JMB366 처리. */
 		/* Redirect IDE second PATA port to the right spot */
-		conf5 |= (1 << 24);
-		fallthrough;
-	case PCI_DEVICE_ID_JMICRON_JMB361:
-	case PCI_DEVICE_ID_JMICRON_JMB363:
-	case PCI_DEVICE_ID_JMICRON_JMB369:
+		conf5 |= (1 << 24); /* NVMe: | 변수에 값 대입. */
+		fallthrough; /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+	case PCI_DEVICE_ID_JMICRON_JMB361: /* NVMe: switch case PCI_DEVICE_ID_JMICRON_JMB361 처리. */
+	case PCI_DEVICE_ID_JMICRON_JMB363: /* NVMe: switch case PCI_DEVICE_ID_JMICRON_JMB363 처리. */
+	case PCI_DEVICE_ID_JMICRON_JMB369: /* NVMe: switch case PCI_DEVICE_ID_JMICRON_JMB369 처리. */
 		/* Enable dual function mode, AHCI on fn 0, IDE fn1 */
 		/* Set the class codes correctly and then direct IDE 0 */
 		conf1 |= 0x00C2A1B3; /* Set 0, 1, 4, 5, 7, 8, 13, 15, 17, 22, 23 */
-		break;
+		break; /* NVMe: 반복문/분기 종료. */
 
-	case PCI_DEVICE_ID_JMICRON_JMB368:
+	case PCI_DEVICE_ID_JMICRON_JMB368: /* NVMe: switch case PCI_DEVICE_ID_JMICRON_JMB368 처리. */
 		/* The controller should be in single function IDE mode */
 		conf1 |= 0x00C00000; /* Set 22, 23 */
-		break;
-	}
+		break; /* NVMe: 반복문/분기 종료. */
+	} /* NVMe: 코드 블록/구조체 종료. */
 
-	pci_write_config_dword(pdev, 0x40, conf1);
-	pci_write_config_dword(pdev, 0x80, conf5);
+	pci_write_config_dword(pdev, 0x40, conf1); /* NVMe: pci_write_config_dword() 호출 (NVMe/PCIe 동작). */
+	pci_write_config_dword(pdev, 0x80, conf5); /* NVMe: pci_write_config_dword() 호출 (NVMe/PCIe 동작). */
 
 	/* Update pdev accordingly */
-	pci_read_config_byte(pdev, PCI_HEADER_TYPE, &hdr);
-	pdev->hdr_type = hdr & PCI_HEADER_TYPE_MASK;
-	pdev->multifunction = FIELD_GET(PCI_HEADER_TYPE_MFD, hdr);
+	pci_read_config_byte(pdev, PCI_HEADER_TYPE, &hdr); /* NVMe: pci_read_config_byte() 호출 (NVMe/PCIe 동작). */
+	pdev->hdr_type = hdr & PCI_HEADER_TYPE_MASK; /* NVMe: hdr_type 변수에 값 대입. */
+	pdev->multifunction = FIELD_GET(PCI_HEADER_TYPE_MFD, hdr); /* NVMe: FIELD_GET() 호출 (NVMe/PCIe 동작). */
 
-	pci_read_config_dword(pdev, PCI_CLASS_REVISION, &class);
-	pdev->class = class >> 8;
-}
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_JMICRON, PCI_DEVICE_ID_JMICRON_JMB360, quirk_jmicron_ata);
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_JMICRON, PCI_DEVICE_ID_JMICRON_JMB361, quirk_jmicron_ata);
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_JMICRON, PCI_DEVICE_ID_JMICRON_JMB362, quirk_jmicron_ata);
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_JMICRON, PCI_DEVICE_ID_JMICRON_JMB363, quirk_jmicron_ata);
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_JMICRON, PCI_DEVICE_ID_JMICRON_JMB364, quirk_jmicron_ata);
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_JMICRON, PCI_DEVICE_ID_JMICRON_JMB365, quirk_jmicron_ata);
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_JMICRON, PCI_DEVICE_ID_JMICRON_JMB366, quirk_jmicron_ata);
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_JMICRON, PCI_DEVICE_ID_JMICRON_JMB368, quirk_jmicron_ata);
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_JMICRON, PCI_DEVICE_ID_JMICRON_JMB369, quirk_jmicron_ata);
-DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_JMICRON, PCI_DEVICE_ID_JMICRON_JMB360, quirk_jmicron_ata);
-DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_JMICRON, PCI_DEVICE_ID_JMICRON_JMB361, quirk_jmicron_ata);
-DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_JMICRON, PCI_DEVICE_ID_JMICRON_JMB362, quirk_jmicron_ata);
-DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_JMICRON, PCI_DEVICE_ID_JMICRON_JMB363, quirk_jmicron_ata);
-DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_JMICRON, PCI_DEVICE_ID_JMICRON_JMB364, quirk_jmicron_ata);
-DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_JMICRON, PCI_DEVICE_ID_JMICRON_JMB365, quirk_jmicron_ata);
-DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_JMICRON, PCI_DEVICE_ID_JMICRON_JMB366, quirk_jmicron_ata);
-DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_JMICRON, PCI_DEVICE_ID_JMICRON_JMB368, quirk_jmicron_ata);
-DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_JMICRON, PCI_DEVICE_ID_JMICRON_JMB369, quirk_jmicron_ata);
+	pci_read_config_dword(pdev, PCI_CLASS_REVISION, &class); /* NVMe: pci_read_config_dword() 호출 (NVMe/PCIe 동작). */
+	pdev->class = class >> 8; /* NVMe: class 변수에 값 대입. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_JMICRON, PCI_DEVICE_ID_JMICRON_JMB360, quirk_jmicron_ata); /* NVMe: DECLARE_PCI_FIXUP_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_JMICRON, PCI_DEVICE_ID_JMICRON_JMB361, quirk_jmicron_ata); /* NVMe: DECLARE_PCI_FIXUP_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_JMICRON, PCI_DEVICE_ID_JMICRON_JMB362, quirk_jmicron_ata); /* NVMe: DECLARE_PCI_FIXUP_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_JMICRON, PCI_DEVICE_ID_JMICRON_JMB363, quirk_jmicron_ata); /* NVMe: DECLARE_PCI_FIXUP_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_JMICRON, PCI_DEVICE_ID_JMICRON_JMB364, quirk_jmicron_ata); /* NVMe: DECLARE_PCI_FIXUP_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_JMICRON, PCI_DEVICE_ID_JMICRON_JMB365, quirk_jmicron_ata); /* NVMe: DECLARE_PCI_FIXUP_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_JMICRON, PCI_DEVICE_ID_JMICRON_JMB366, quirk_jmicron_ata); /* NVMe: DECLARE_PCI_FIXUP_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_JMICRON, PCI_DEVICE_ID_JMICRON_JMB368, quirk_jmicron_ata); /* NVMe: DECLARE_PCI_FIXUP_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_JMICRON, PCI_DEVICE_ID_JMICRON_JMB369, quirk_jmicron_ata); /* NVMe: DECLARE_PCI_FIXUP_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_JMICRON, PCI_DEVICE_ID_JMICRON_JMB360, quirk_jmicron_ata); /* NVMe: DECLARE_PCI_FIXUP_RESUME_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_JMICRON, PCI_DEVICE_ID_JMICRON_JMB361, quirk_jmicron_ata); /* NVMe: DECLARE_PCI_FIXUP_RESUME_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_JMICRON, PCI_DEVICE_ID_JMICRON_JMB362, quirk_jmicron_ata); /* NVMe: DECLARE_PCI_FIXUP_RESUME_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_JMICRON, PCI_DEVICE_ID_JMICRON_JMB363, quirk_jmicron_ata); /* NVMe: DECLARE_PCI_FIXUP_RESUME_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_JMICRON, PCI_DEVICE_ID_JMICRON_JMB364, quirk_jmicron_ata); /* NVMe: DECLARE_PCI_FIXUP_RESUME_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_JMICRON, PCI_DEVICE_ID_JMICRON_JMB365, quirk_jmicron_ata); /* NVMe: DECLARE_PCI_FIXUP_RESUME_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_JMICRON, PCI_DEVICE_ID_JMICRON_JMB366, quirk_jmicron_ata); /* NVMe: DECLARE_PCI_FIXUP_RESUME_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_JMICRON, PCI_DEVICE_ID_JMICRON_JMB368, quirk_jmicron_ata); /* NVMe: DECLARE_PCI_FIXUP_RESUME_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_JMICRON, PCI_DEVICE_ID_JMICRON_JMB369, quirk_jmicron_ata); /* NVMe: DECLARE_PCI_FIXUP_RESUME_EARLY() 호출 (NVMe/PCIe 동작). */
 
-#endif
+#endif /* NVMe: 조걶 컴파일 endif 분기 (NVMe/PCIe 기능 선택). */
 
-static void quirk_jmicron_async_suspend(struct pci_dev *dev)
-{
-	if (dev->multifunction) {
-		device_disable_async_suspend(&dev->dev);
-		pci_info(dev, "async suspend disabled to avoid multi-function power-on ordering issue\n");
-	}
-}
-DECLARE_PCI_FIXUP_CLASS_FINAL(PCI_VENDOR_ID_JMICRON, PCI_ANY_ID, PCI_CLASS_STORAGE_IDE, 8, quirk_jmicron_async_suspend);
-DECLARE_PCI_FIXUP_CLASS_FINAL(PCI_VENDOR_ID_JMICRON, PCI_ANY_ID, PCI_CLASS_STORAGE_SATA_AHCI, 0, quirk_jmicron_async_suspend);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_JMICRON, 0x2362, quirk_jmicron_async_suspend);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_JMICRON, 0x236f, quirk_jmicron_async_suspend);
+static void quirk_jmicron_async_suspend(struct pci_dev *dev) /* NVMe: quirk_jmicron_async_suspend() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	if (dev->multifunction) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		device_disable_async_suspend(&dev->dev); /* NVMe: device_disable_async_suspend() 호출 (NVMe/PCIe 동작). */
+		pci_info(dev, "async suspend disabled to avoid multi-function power-on ordering issue\n"); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_CLASS_FINAL(PCI_VENDOR_ID_JMICRON, PCI_ANY_ID, PCI_CLASS_STORAGE_IDE, 8, quirk_jmicron_async_suspend); /* NVMe: DECLARE_PCI_FIXUP_CLASS_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_CLASS_FINAL(PCI_VENDOR_ID_JMICRON, PCI_ANY_ID, PCI_CLASS_STORAGE_SATA_AHCI, 0, quirk_jmicron_async_suspend); /* NVMe: DECLARE_PCI_FIXUP_CLASS_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_JMICRON, 0x2362, quirk_jmicron_async_suspend); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_JMICRON, 0x236f, quirk_jmicron_async_suspend); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
 
-#ifdef CONFIG_X86_IO_APIC
-static void quirk_alder_ioapic(struct pci_dev *pdev)
-{
-	int i;
+#ifdef CONFIG_X86_IO_APIC /* NVMe: 조걶 컴파일 ifdef 분기 (NVMe/PCIe 기능 선택). */
+static void quirk_alder_ioapic(struct pci_dev *pdev) /* NVMe: quirk_alder_ioapic() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	int i; /* NVMe: i 변수 선언. */
 
-	if ((pdev->class >> 8) != 0xff00)
-		return;
+	if ((pdev->class >> 8) != 0xff00) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
 
 	/*
 	 * The first BAR is the location of the IO-APIC... we must
 	 * not touch this (and it's already covered by the fixmap), so
 	 * forcibly insert it into the resource tree.
 	 */
-	if (pci_resource_start(pdev, 0) && pci_resource_len(pdev, 0))
-		insert_resource(&iomem_resource, &pdev->resource[0]);
+	if (pci_resource_start(pdev, 0) && pci_resource_len(pdev, 0)) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		insert_resource(&iomem_resource, &pdev->resource[0]); /* NVMe: insert_resource() 호출 (NVMe/PCIe 동작). */
 
 	/*
 	 * The next five BARs all seem to be rubbish, so just clean
 	 * them out.
 	 */
-	for (i = 1; i < PCI_STD_NUM_BARS; i++)
-		memset(&pdev->resource[i], 0, sizeof(pdev->resource[i]));
-}
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_EESSC,	quirk_alder_ioapic);
-#endif
+	for (i = 1; i < PCI_STD_NUM_BARS; i++) /* NVMe: 반복 처리 (NVMe/PCIe 레지스터/장치 순회). */
+		memset(&pdev->resource[i], 0, sizeof(pdev->resource[i])); /* NVMe: memset() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_EESSC,	quirk_alder_ioapic); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+#endif /* NVMe: 조걶 컴파일 endif 분기 (NVMe/PCIe 기능 선택). */
 
-static void quirk_no_msi(struct pci_dev *dev)
-{
-	pci_info(dev, "avoiding MSI to work around a hardware defect\n");
-	dev->no_msi = 1;
-}
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x4386, quirk_no_msi);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x4387, quirk_no_msi);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x4388, quirk_no_msi);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x4389, quirk_no_msi);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x438a, quirk_no_msi);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x438b, quirk_no_msi);
+static void quirk_no_msi(struct pci_dev *dev) /* NVMe: quirk_no_msi() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	pci_info(dev, "avoiding MSI to work around a hardware defect\n"); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
+	dev->no_msi = 1; /* NVMe: no_msi 변수에 값 대입. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x4386, quirk_no_msi); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x4387, quirk_no_msi); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x4388, quirk_no_msi); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x4389, quirk_no_msi); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x438a, quirk_no_msi); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x438b, quirk_no_msi); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
 
-static void quirk_pcie_mch(struct pci_dev *pdev)
-{
-	pdev->no_msi = 1;
-}
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_E7520_MCH,	quirk_pcie_mch);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_E7320_MCH,	quirk_pcie_mch);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_E7525_MCH,	quirk_pcie_mch);
+static void quirk_pcie_mch(struct pci_dev *pdev) /* NVMe: quirk_pcie_mch() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	pdev->no_msi = 1; /* NVMe: no_msi 변수에 값 대입. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_E7520_MCH,	quirk_pcie_mch); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_E7320_MCH,	quirk_pcie_mch); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_E7525_MCH,	quirk_pcie_mch); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
 
-DECLARE_PCI_FIXUP_CLASS_FINAL(PCI_VENDOR_ID_HUAWEI, 0x1610, PCI_CLASS_BRIDGE_PCI, 8, quirk_pcie_mch);
+DECLARE_PCI_FIXUP_CLASS_FINAL(PCI_VENDOR_ID_HUAWEI, 0x1610, PCI_CLASS_BRIDGE_PCI, 8, quirk_pcie_mch); /* NVMe: DECLARE_PCI_FIXUP_CLASS_FINAL() 호출 (NVMe/PCIe 동작). */
 
 /*
  * HiSilicon KunPeng920 and KunPeng930 have devices appear as PCI but are
@@ -2034,109 +2034,109 @@ DECLARE_PCI_FIXUP_CLASS_FINAL(PCI_VENDOR_ID_HUAWEI, 0x1610, PCI_CLASS_BRIDGE_PCI
  * even when a "PCI" device turns out to be a regular old SoC device
  * dressed up as a RCiEP and normal rules don't apply.
  */
-static void quirk_huawei_pcie_sva(struct pci_dev *pdev)
-{
-	struct property_entry properties[] = {
-		PROPERTY_ENTRY_BOOL("dma-can-stall"),
-		{},
-	};
+static void quirk_huawei_pcie_sva(struct pci_dev *pdev) /* NVMe: quirk_huawei_pcie_sva() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	struct property_entry properties[] = { /* NVMe: properties[] 변수에 값 대입. */
+		PROPERTY_ENTRY_BOOL("dma-can-stall"), /* NVMe: PROPERTY_ENTRY_BOOL() 함수 정의/매개변수 선언. */
+		{}, /* NVMe: 인자/초기자 나열 (연속). */
+	}; /* NVMe: 코드 블록/구조체 종료. */
 
-	if (pdev->revision != 0x21 && pdev->revision != 0x30)
-		return;
+	if (pdev->revision != 0x21 && pdev->revision != 0x30) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
 
-	pdev->pasid_no_tlp = 1;
+	pdev->pasid_no_tlp = 1; /* NVMe: pasid_no_tlp 변수에 값 대입. */
 
 	/*
 	 * Set the dma-can-stall property on ACPI platforms. Device tree
 	 * can set it directly.
 	 */
-	if (!pdev->dev.of_node &&
-	    device_create_managed_software_node(&pdev->dev, properties, NULL))
-		pci_warn(pdev, "could not add stall property");
-}
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_HUAWEI, 0xa250, quirk_huawei_pcie_sva);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_HUAWEI, 0xa251, quirk_huawei_pcie_sva);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_HUAWEI, 0xa255, quirk_huawei_pcie_sva);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_HUAWEI, 0xa256, quirk_huawei_pcie_sva);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_HUAWEI, 0xa258, quirk_huawei_pcie_sva);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_HUAWEI, 0xa259, quirk_huawei_pcie_sva);
+	if (!pdev->dev.of_node && /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+	    device_create_managed_software_node(&pdev->dev, properties, NULL)) /* NVMe: device_create_managed_software_node() 함수 정의/매개변수 선언. */
+		pci_warn(pdev, "could not add stall property"); /* NVMe: pci_warn() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_HUAWEI, 0xa250, quirk_huawei_pcie_sva); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_HUAWEI, 0xa251, quirk_huawei_pcie_sva); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_HUAWEI, 0xa255, quirk_huawei_pcie_sva); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_HUAWEI, 0xa256, quirk_huawei_pcie_sva); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_HUAWEI, 0xa258, quirk_huawei_pcie_sva); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_HUAWEI, 0xa259, quirk_huawei_pcie_sva); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
 
 /*
  * It's possible for the MSI to get corrupted if SHPC and ACPI are used
  * together on certain PXH-based systems.
  */
-static void quirk_pcie_pxh(struct pci_dev *dev)
-{
-	dev->no_msi = 1;
-	pci_warn(dev, "PXH quirk detected; SHPC device MSI disabled\n");
-}
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_PXHD_0,	quirk_pcie_pxh);
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_PXHD_1,	quirk_pcie_pxh);
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_PXH_0,	quirk_pcie_pxh);
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_PXH_1,	quirk_pcie_pxh);
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_PXHV,	quirk_pcie_pxh);
+static void quirk_pcie_pxh(struct pci_dev *dev) /* NVMe: quirk_pcie_pxh() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	dev->no_msi = 1; /* NVMe: no_msi 변수에 값 대입. */
+	pci_warn(dev, "PXH quirk detected; SHPC device MSI disabled\n"); /* NVMe: pci_warn() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_PXHD_0,	quirk_pcie_pxh); /* NVMe: DECLARE_PCI_FIXUP_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_PXHD_1,	quirk_pcie_pxh); /* NVMe: DECLARE_PCI_FIXUP_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_PXH_0,	quirk_pcie_pxh); /* NVMe: DECLARE_PCI_FIXUP_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_PXH_1,	quirk_pcie_pxh); /* NVMe: DECLARE_PCI_FIXUP_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_PXHV,	quirk_pcie_pxh); /* NVMe: DECLARE_PCI_FIXUP_EARLY() 호출 (NVMe/PCIe 동작). */
 
 /*
  * Some Intel PCI Express chipsets have trouble with downstream device
  * power management.
  */
-static void quirk_intel_pcie_pm(struct pci_dev *dev)
-{
-	pci_pm_d3hot_delay = 120;
-	dev->no_d1d2 = 1;
-}
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	0x25e2, quirk_intel_pcie_pm);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	0x25e3, quirk_intel_pcie_pm);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	0x25e4, quirk_intel_pcie_pm);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	0x25e5, quirk_intel_pcie_pm);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	0x25e6, quirk_intel_pcie_pm);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	0x25e7, quirk_intel_pcie_pm);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	0x25f7, quirk_intel_pcie_pm);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	0x25f8, quirk_intel_pcie_pm);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	0x25f9, quirk_intel_pcie_pm);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	0x25fa, quirk_intel_pcie_pm);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	0x2601, quirk_intel_pcie_pm);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	0x2602, quirk_intel_pcie_pm);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	0x2603, quirk_intel_pcie_pm);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	0x2604, quirk_intel_pcie_pm);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	0x2605, quirk_intel_pcie_pm);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	0x2606, quirk_intel_pcie_pm);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	0x2607, quirk_intel_pcie_pm);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	0x2608, quirk_intel_pcie_pm);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	0x2609, quirk_intel_pcie_pm);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	0x260a, quirk_intel_pcie_pm);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	0x260b, quirk_intel_pcie_pm);
+static void quirk_intel_pcie_pm(struct pci_dev *dev) /* NVMe: quirk_intel_pcie_pm() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	pci_pm_d3hot_delay = 120; /* NVMe: pci_pm_d3hot_delay 변수에 값 대입. */
+	dev->no_d1d2 = 1; /* NVMe: no_d1d2 변수에 값 대입. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	0x25e2, quirk_intel_pcie_pm); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	0x25e3, quirk_intel_pcie_pm); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	0x25e4, quirk_intel_pcie_pm); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	0x25e5, quirk_intel_pcie_pm); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	0x25e6, quirk_intel_pcie_pm); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	0x25e7, quirk_intel_pcie_pm); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	0x25f7, quirk_intel_pcie_pm); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	0x25f8, quirk_intel_pcie_pm); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	0x25f9, quirk_intel_pcie_pm); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	0x25fa, quirk_intel_pcie_pm); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	0x2601, quirk_intel_pcie_pm); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	0x2602, quirk_intel_pcie_pm); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	0x2603, quirk_intel_pcie_pm); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	0x2604, quirk_intel_pcie_pm); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	0x2605, quirk_intel_pcie_pm); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	0x2606, quirk_intel_pcie_pm); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	0x2607, quirk_intel_pcie_pm); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	0x2608, quirk_intel_pcie_pm); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	0x2609, quirk_intel_pcie_pm); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	0x260a, quirk_intel_pcie_pm); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	0x260b, quirk_intel_pcie_pm); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
 
-static void quirk_d3hot_delay(struct pci_dev *dev, unsigned int delay)
-{
-	if (dev->d3hot_delay >= delay)
-		return;
+static void quirk_d3hot_delay(struct pci_dev *dev, unsigned int delay) /* NVMe: quirk_d3hot_delay() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	if (dev->d3hot_delay >= delay) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
 
-	dev->d3hot_delay = delay;
-	pci_info(dev, "extending delay after power-on from D3hot to %d msec\n",
-		 dev->d3hot_delay);
-}
+	dev->d3hot_delay = delay; /* NVMe: d3hot_delay 변수에 값 대입. */
+	pci_info(dev, "extending delay after power-on from D3hot to %d msec\n", /* NVMe: pci_info() 함수 정의/매개변수 선언. */
+		 dev->d3hot_delay); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+} /* NVMe: 코드 블록/구조체 종료. */
 
-static void quirk_radeon_pm(struct pci_dev *dev)
-{
-	if (dev->subsystem_vendor == PCI_VENDOR_ID_APPLE &&
-	    dev->subsystem_device == 0x00e2)
-		quirk_d3hot_delay(dev, 20);
-}
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x6741, quirk_radeon_pm);
+static void quirk_radeon_pm(struct pci_dev *dev) /* NVMe: quirk_radeon_pm() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	if (dev->subsystem_vendor == PCI_VENDOR_ID_APPLE && /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+	    dev->subsystem_device == 0x00e2) /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+		quirk_d3hot_delay(dev, 20); /* NVMe: quirk_d3hot_delay() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x6741, quirk_radeon_pm); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
 
 /*
  * NVIDIA Ampere-based HDA controllers can wedge the whole device if a bus
  * reset is performed too soon after transition to D0, extend d3hot_delay
  * to previous effective default for all NVIDIA HDA controllers.
  */
-static void quirk_nvidia_hda_pm(struct pci_dev *dev)
-{
-	quirk_d3hot_delay(dev, 20);
-}
-DECLARE_PCI_FIXUP_CLASS_FINAL(PCI_VENDOR_ID_NVIDIA, PCI_ANY_ID,
-			      PCI_CLASS_MULTIMEDIA_HD_AUDIO, 8,
-			      quirk_nvidia_hda_pm);
+static void quirk_nvidia_hda_pm(struct pci_dev *dev) /* NVMe: quirk_nvidia_hda_pm() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	quirk_d3hot_delay(dev, 20); /* NVMe: quirk_d3hot_delay() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_CLASS_FINAL(PCI_VENDOR_ID_NVIDIA, PCI_ANY_ID, /* NVMe: DECLARE_PCI_FIXUP_CLASS_FINAL() 함수 정의/매개변수 선언. */
+			      PCI_CLASS_MULTIMEDIA_HD_AUDIO, 8, /* NVMe: 인자/초기자 나열 (연속). */
+			      quirk_nvidia_hda_pm); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
 /*
  * Ryzen5/7 XHCI controllers fail upon resume from runtime suspend or s2idle.
@@ -2147,37 +2147,37 @@ DECLARE_PCI_FIXUP_CLASS_FINAL(PCI_VENDOR_ID_NVIDIA, PCI_ANY_ID,
  * remain on in D3hot state. The D3hot-to-D0 transition then requires an
  * extended delay in order to succeed.
  */
-static void quirk_ryzen_xhci_d3hot(struct pci_dev *dev)
-{
-	quirk_d3hot_delay(dev, 20);
-}
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_AMD, 0x15e0, quirk_ryzen_xhci_d3hot);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_AMD, 0x15e1, quirk_ryzen_xhci_d3hot);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_AMD, 0x1639, quirk_ryzen_xhci_d3hot);
+static void quirk_ryzen_xhci_d3hot(struct pci_dev *dev) /* NVMe: quirk_ryzen_xhci_d3hot() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	quirk_d3hot_delay(dev, 20); /* NVMe: quirk_d3hot_delay() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_AMD, 0x15e0, quirk_ryzen_xhci_d3hot); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_AMD, 0x15e1, quirk_ryzen_xhci_d3hot); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_AMD, 0x1639, quirk_ryzen_xhci_d3hot); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
 
-#ifdef CONFIG_X86_IO_APIC
-static int dmi_disable_ioapicreroute(const struct dmi_system_id *d)
-{
-	noioapicreroute = 1;
-	pr_info("%s detected: disable boot interrupt reroute\n", d->ident);
+#ifdef CONFIG_X86_IO_APIC /* NVMe: 조걶 컴파일 ifdef 분기 (NVMe/PCIe 기능 선택). */
+static int dmi_disable_ioapicreroute(const struct dmi_system_id *d) /* NVMe: dmi_disable_ioapicreroute() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	noioapicreroute = 1; /* NVMe: noioapicreroute 변수에 값 대입. */
+	pr_info("%s detected: disable boot interrupt reroute\n", d->ident); /* NVMe: pr_info() 호출 (NVMe/PCIe 동작). */
 
-	return 0;
-}
+	return 0; /* NVMe: 0 값을 반환. */
+} /* NVMe: 코드 블록/구조체 종료. */
 
-static const struct dmi_system_id boot_interrupt_dmi_table[] = {
+static const struct dmi_system_id boot_interrupt_dmi_table[] = { /* NVMe: boot_interrupt_dmi_table[] 변수에 값 대입. */
 	/*
 	 * Systems to exclude from boot interrupt reroute quirks
 	 */
-	{
-		.callback = dmi_disable_ioapicreroute,
-		.ident = "ASUSTek Computer INC. M2N-LR",
-		.matches = {
-			DMI_MATCH(DMI_SYS_VENDOR, "ASUSTek Computer INC."),
-			DMI_MATCH(DMI_PRODUCT_NAME, "M2N-LR"),
-		},
-	},
-	{}
-};
+	{ /* NVMe: 코드 블록 시작. */
+		.callback = dmi_disable_ioapicreroute, /* NVMe: callback 변수에 값 대입. */
+		.ident = "ASUSTek Computer INC. M2N-LR", /* NVMe: ident 변수에 값 대입. */
+		.matches = { /* NVMe: matches 변수에 값 대입. */
+			DMI_MATCH(DMI_SYS_VENDOR, "ASUSTek Computer INC."), /* NVMe: DMI_MATCH() 함수 정의/매개변수 선언. */
+			DMI_MATCH(DMI_PRODUCT_NAME, "M2N-LR"), /* NVMe: DMI_MATCH() 함수 정의/매개변수 선언. */
+		}, /* NVMe: 인자/초기자 나열 (연속). */
+	}, /* NVMe: 인자/초기자 나열 (연속). */
+	{} /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+}; /* NVMe: 코드 블록/구조체 종료. */
 
 /*
  * Boot interrupts on some chipsets cannot be turned off. For these chipsets,
@@ -2185,32 +2185,32 @@ static const struct dmi_system_id boot_interrupt_dmi_table[] = {
  * that a PCI device's interrupt handler is installed on the boot interrupt
  * line instead.
  */
-static void quirk_reroute_to_boot_interrupts_intel(struct pci_dev *dev)
-{
-	dmi_check_system(boot_interrupt_dmi_table);
-	if (noioapicquirk || noioapicreroute)
-		return;
+static void quirk_reroute_to_boot_interrupts_intel(struct pci_dev *dev) /* NVMe: quirk_reroute_to_boot_interrupts_intel() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	dmi_check_system(boot_interrupt_dmi_table); /* NVMe: dmi_check_system() 호출 (NVMe/PCIe 동작). */
+	if (noioapicquirk || noioapicreroute) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
 
-	dev->irq_reroute_variant = INTEL_IRQ_REROUTE_VARIANT;
-	pci_info(dev, "rerouting interrupts for [%04x:%04x]\n",
-		 dev->vendor, dev->device);
-}
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_80333_0,	quirk_reroute_to_boot_interrupts_intel);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_80333_1,	quirk_reroute_to_boot_interrupts_intel);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_ESB2_0,	quirk_reroute_to_boot_interrupts_intel);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_PXH_0,	quirk_reroute_to_boot_interrupts_intel);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_PXH_1,	quirk_reroute_to_boot_interrupts_intel);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_PXHV,	quirk_reroute_to_boot_interrupts_intel);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_80332_0,	quirk_reroute_to_boot_interrupts_intel);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_80332_1,	quirk_reroute_to_boot_interrupts_intel);
-DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_80333_0,	quirk_reroute_to_boot_interrupts_intel);
-DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_80333_1,	quirk_reroute_to_boot_interrupts_intel);
-DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_ESB2_0,	quirk_reroute_to_boot_interrupts_intel);
-DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_PXH_0,	quirk_reroute_to_boot_interrupts_intel);
-DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_PXH_1,	quirk_reroute_to_boot_interrupts_intel);
-DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_PXHV,	quirk_reroute_to_boot_interrupts_intel);
-DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_80332_0,	quirk_reroute_to_boot_interrupts_intel);
-DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_80332_1,	quirk_reroute_to_boot_interrupts_intel);
+	dev->irq_reroute_variant = INTEL_IRQ_REROUTE_VARIANT; /* NVMe: irq_reroute_variant 변수에 값 대입. */
+	pci_info(dev, "rerouting interrupts for [%04x:%04x]\n", /* NVMe: pci_info() 함수 정의/매개변수 선언. */
+		 dev->vendor, dev->device); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_80333_0,	quirk_reroute_to_boot_interrupts_intel); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_80333_1,	quirk_reroute_to_boot_interrupts_intel); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_ESB2_0,	quirk_reroute_to_boot_interrupts_intel); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_PXH_0,	quirk_reroute_to_boot_interrupts_intel); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_PXH_1,	quirk_reroute_to_boot_interrupts_intel); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_PXHV,	quirk_reroute_to_boot_interrupts_intel); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_80332_0,	quirk_reroute_to_boot_interrupts_intel); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_80332_1,	quirk_reroute_to_boot_interrupts_intel); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_80333_0,	quirk_reroute_to_boot_interrupts_intel); /* NVMe: DECLARE_PCI_FIXUP_RESUME() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_80333_1,	quirk_reroute_to_boot_interrupts_intel); /* NVMe: DECLARE_PCI_FIXUP_RESUME() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_ESB2_0,	quirk_reroute_to_boot_interrupts_intel); /* NVMe: DECLARE_PCI_FIXUP_RESUME() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_PXH_0,	quirk_reroute_to_boot_interrupts_intel); /* NVMe: DECLARE_PCI_FIXUP_RESUME() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_PXH_1,	quirk_reroute_to_boot_interrupts_intel); /* NVMe: DECLARE_PCI_FIXUP_RESUME() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_PXHV,	quirk_reroute_to_boot_interrupts_intel); /* NVMe: DECLARE_PCI_FIXUP_RESUME() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_80332_0,	quirk_reroute_to_boot_interrupts_intel); /* NVMe: DECLARE_PCI_FIXUP_RESUME() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_80332_1,	quirk_reroute_to_boot_interrupts_intel); /* NVMe: DECLARE_PCI_FIXUP_RESUME() 호출 (NVMe/PCIe 동작). */
 
 /*
  * On some chipsets we can disable the generation of legacy INTx boot
@@ -2232,52 +2232,52 @@ DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_80332_1,	quirk
  * Core IO on Xeon Scalable, see Intel order no 610950.
  */
 #define INTEL_6300_IOAPIC_ABAR		0x40	/* Bus 0, Dev 29, Func 5 */
-#define INTEL_6300_DISABLE_BOOT_IRQ	(1<<14)
+#define INTEL_6300_DISABLE_BOOT_IRQ	(1<<14) /* NVMe: INTEL_6300_DISABLE_BOOT_IRQ 매크로/상수 정의 (NVMe/PCIe). */
 
 #define INTEL_CIPINTRC_CFG_OFFSET	0x14C	/* Bus 0, Dev 5, Func 0 */
-#define INTEL_CIPINTRC_DIS_INTX_ICH	(1<<25)
+#define INTEL_CIPINTRC_DIS_INTX_ICH	(1<<25) /* NVMe: INTEL_CIPINTRC_DIS_INTX_ICH 매크로/상수 정의 (NVMe/PCIe). */
 
-static void quirk_disable_intel_boot_interrupt(struct pci_dev *dev)
-{
-	u16 pci_config_word;
-	u32 pci_config_dword;
+static void quirk_disable_intel_boot_interrupt(struct pci_dev *dev) /* NVMe: quirk_disable_intel_boot_interrupt() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	u16 pci_config_word; /* NVMe: pci_config_word 변수 선언. */
+	u32 pci_config_dword; /* NVMe: pci_config_dword 변수 선언. */
 
-	if (noioapicquirk)
-		return;
+	if (noioapicquirk) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
 
-	switch (dev->device) {
-	case PCI_DEVICE_ID_INTEL_ESB_10:
-		pci_read_config_word(dev, INTEL_6300_IOAPIC_ABAR,
-				     &pci_config_word);
-		pci_config_word |= INTEL_6300_DISABLE_BOOT_IRQ;
-		pci_write_config_word(dev, INTEL_6300_IOAPIC_ABAR,
-				      pci_config_word);
-		break;
+	switch (dev->device) { /* NVMe: switch 다중 분기 처리. */
+	case PCI_DEVICE_ID_INTEL_ESB_10: /* NVMe: switch case PCI_DEVICE_ID_INTEL_ESB_10 처리. */
+		pci_read_config_word(dev, INTEL_6300_IOAPIC_ABAR, /* NVMe: pci_read_config_word() 함수 정의/매개변수 선언. */
+				     &pci_config_word); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+		pci_config_word |= INTEL_6300_DISABLE_BOOT_IRQ; /* NVMe: | 변수에 값 대입. */
+		pci_write_config_word(dev, INTEL_6300_IOAPIC_ABAR, /* NVMe: pci_write_config_word() 함수 정의/매개변수 선언. */
+				      pci_config_word); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+		break; /* NVMe: 반복문/분기 종료. */
 	case 0x3c28:	/* Xeon E5 1600/2600/4600	*/
 	case 0x0e28:	/* Xeon E5/E7 V2		*/
 	case 0x2f28:	/* Xeon E5/E7 V3,V4		*/
 	case 0x6f28:	/* Xeon D-1500			*/
 	case 0x2034:	/* Xeon Scalable Family		*/
-		pci_read_config_dword(dev, INTEL_CIPINTRC_CFG_OFFSET,
-				      &pci_config_dword);
-		pci_config_dword |= INTEL_CIPINTRC_DIS_INTX_ICH;
-		pci_write_config_dword(dev, INTEL_CIPINTRC_CFG_OFFSET,
-				       pci_config_dword);
-		break;
-	default:
-		return;
-	}
-	pci_info(dev, "disabled boot interrupts on device [%04x:%04x]\n",
-		 dev->vendor, dev->device);
-}
+		pci_read_config_dword(dev, INTEL_CIPINTRC_CFG_OFFSET, /* NVMe: pci_read_config_dword() 함수 정의/매개변수 선언. */
+				      &pci_config_dword); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+		pci_config_dword |= INTEL_CIPINTRC_DIS_INTX_ICH; /* NVMe: | 변수에 값 대입. */
+		pci_write_config_dword(dev, INTEL_CIPINTRC_CFG_OFFSET, /* NVMe: pci_write_config_dword() 함수 정의/매개변수 선언. */
+				       pci_config_dword); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+		break; /* NVMe: 반복문/분기 종료. */
+	default: /* NVMe: default 레이블 (NVMe 초기화/오류 복구 경로). */
+		return; /* NVMe: 함수 종료 및 반환. */
+	} /* NVMe: 코드 블록/구조체 종료. */
+	pci_info(dev, "disabled boot interrupts on device [%04x:%04x]\n", /* NVMe: pci_info() 함수 정의/매개변수 선언. */
+		 dev->vendor, dev->device); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+} /* NVMe: 코드 블록/구조체 종료. */
 /*
  * Device 29 Func 5 Device IDs of IO-APIC
  * containing ABAR—APIC1 Alternate Base Address Register
  */
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_ESB_10,
-		quirk_disable_intel_boot_interrupt);
-DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_ESB_10,
-		quirk_disable_intel_boot_interrupt);
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_ESB_10, /* NVMe: DECLARE_PCI_FIXUP_FINAL() 함수 정의/매개변수 선언. */
+		quirk_disable_intel_boot_interrupt); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_ESB_10, /* NVMe: DECLARE_PCI_FIXUP_RESUME() 함수 정의/매개변수 선언. */
+		quirk_disable_intel_boot_interrupt); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
 /*
  * Device 5 Func 0 Device IDs of Core IO modules/hubs
@@ -2286,57 +2286,57 @@ DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_INTEL,	PCI_DEVICE_ID_INTEL_ESB_10,
  * Device IDs obtained from volume 2 datasheets of commented
  * families above.
  */
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	0x3c28,
-		quirk_disable_intel_boot_interrupt);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	0x0e28,
-		quirk_disable_intel_boot_interrupt);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	0x2f28,
-		quirk_disable_intel_boot_interrupt);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	0x6f28,
-		quirk_disable_intel_boot_interrupt);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	0x2034,
-		quirk_disable_intel_boot_interrupt);
-DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_INTEL,	0x3c28,
-		quirk_disable_intel_boot_interrupt);
-DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_INTEL,	0x0e28,
-		quirk_disable_intel_boot_interrupt);
-DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_INTEL,	0x2f28,
-		quirk_disable_intel_boot_interrupt);
-DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_INTEL,	0x6f28,
-		quirk_disable_intel_boot_interrupt);
-DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_INTEL,	0x2034,
-		quirk_disable_intel_boot_interrupt);
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	0x3c28, /* NVMe: DECLARE_PCI_FIXUP_FINAL() 함수 정의/매개변수 선언. */
+		quirk_disable_intel_boot_interrupt); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	0x0e28, /* NVMe: DECLARE_PCI_FIXUP_FINAL() 함수 정의/매개변수 선언. */
+		quirk_disable_intel_boot_interrupt); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	0x2f28, /* NVMe: DECLARE_PCI_FIXUP_FINAL() 함수 정의/매개변수 선언. */
+		quirk_disable_intel_boot_interrupt); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	0x6f28, /* NVMe: DECLARE_PCI_FIXUP_FINAL() 함수 정의/매개변수 선언. */
+		quirk_disable_intel_boot_interrupt); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL,	0x2034, /* NVMe: DECLARE_PCI_FIXUP_FINAL() 함수 정의/매개변수 선언. */
+		quirk_disable_intel_boot_interrupt); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_INTEL,	0x3c28, /* NVMe: DECLARE_PCI_FIXUP_RESUME() 함수 정의/매개변수 선언. */
+		quirk_disable_intel_boot_interrupt); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_INTEL,	0x0e28, /* NVMe: DECLARE_PCI_FIXUP_RESUME() 함수 정의/매개변수 선언. */
+		quirk_disable_intel_boot_interrupt); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_INTEL,	0x2f28, /* NVMe: DECLARE_PCI_FIXUP_RESUME() 함수 정의/매개변수 선언. */
+		quirk_disable_intel_boot_interrupt); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_INTEL,	0x6f28, /* NVMe: DECLARE_PCI_FIXUP_RESUME() 함수 정의/매개변수 선언. */
+		quirk_disable_intel_boot_interrupt); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_INTEL,	0x2034, /* NVMe: DECLARE_PCI_FIXUP_RESUME() 함수 정의/매개변수 선언. */
+		quirk_disable_intel_boot_interrupt); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
 /* Disable boot interrupts on HT-1000 */
-#define BC_HT1000_FEATURE_REG		0x64
-#define BC_HT1000_PIC_REGS_ENABLE	(1<<0)
-#define BC_HT1000_MAP_IDX		0xC00
-#define BC_HT1000_MAP_DATA		0xC01
+#define BC_HT1000_FEATURE_REG		0x64 /* NVMe: BC_HT1000_FEATURE_REG 매크로/상수 정의 (NVMe/PCIe). */
+#define BC_HT1000_PIC_REGS_ENABLE	(1<<0) /* NVMe: BC_HT1000_PIC_REGS_ENABLE 매크로/상수 정의 (NVMe/PCIe). */
+#define BC_HT1000_MAP_IDX		0xC00 /* NVMe: BC_HT1000_MAP_IDX 매크로/상수 정의 (NVMe/PCIe). */
+#define BC_HT1000_MAP_DATA		0xC01 /* NVMe: BC_HT1000_MAP_DATA 매크로/상수 정의 (NVMe/PCIe). */
 
-static void quirk_disable_broadcom_boot_interrupt(struct pci_dev *dev)
-{
-	u32 pci_config_dword;
-	u8 irq;
+static void quirk_disable_broadcom_boot_interrupt(struct pci_dev *dev) /* NVMe: quirk_disable_broadcom_boot_interrupt() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	u32 pci_config_dword; /* NVMe: pci_config_dword 변수 선언. */
+	u8 irq; /* NVMe: irq 변수 선언. */
 
-	if (noioapicquirk)
-		return;
+	if (noioapicquirk) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
 
-	pci_read_config_dword(dev, BC_HT1000_FEATURE_REG, &pci_config_dword);
-	pci_write_config_dword(dev, BC_HT1000_FEATURE_REG, pci_config_dword |
-			BC_HT1000_PIC_REGS_ENABLE);
+	pci_read_config_dword(dev, BC_HT1000_FEATURE_REG, &pci_config_dword); /* NVMe: pci_read_config_dword() 호출 (NVMe/PCIe 동작). */
+	pci_write_config_dword(dev, BC_HT1000_FEATURE_REG, pci_config_dword | /* NVMe: pci_write_config_dword() 함수 정의/매개변수 선언. */
+			BC_HT1000_PIC_REGS_ENABLE); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
-	for (irq = 0x10; irq < 0x10 + 32; irq++) {
-		outb(irq, BC_HT1000_MAP_IDX);
-		outb(0x00, BC_HT1000_MAP_DATA);
-	}
+	for (irq = 0x10; irq < 0x10 + 32; irq++) { /* NVMe: 반복 처리 (NVMe/PCIe 레지스터/장치 순회). */
+		outb(irq, BC_HT1000_MAP_IDX); /* NVMe: outb() 호출 (NVMe/PCIe 동작). */
+		outb(0x00, BC_HT1000_MAP_DATA); /* NVMe: outb() 호출 (NVMe/PCIe 동작). */
+	} /* NVMe: 코드 블록/구조체 종료. */
 
-	pci_write_config_dword(dev, BC_HT1000_FEATURE_REG, pci_config_dword);
+	pci_write_config_dword(dev, BC_HT1000_FEATURE_REG, pci_config_dword); /* NVMe: pci_write_config_dword() 호출 (NVMe/PCIe 동작). */
 
-	pci_info(dev, "disabled boot interrupts on device [%04x:%04x]\n",
-		 dev->vendor, dev->device);
-}
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_SERVERWORKS,   PCI_DEVICE_ID_SERVERWORKS_HT1000SB,	quirk_disable_broadcom_boot_interrupt);
-DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_SERVERWORKS,   PCI_DEVICE_ID_SERVERWORKS_HT1000SB,	quirk_disable_broadcom_boot_interrupt);
+	pci_info(dev, "disabled boot interrupts on device [%04x:%04x]\n", /* NVMe: pci_info() 함수 정의/매개변수 선언. */
+		 dev->vendor, dev->device); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_SERVERWORKS,   PCI_DEVICE_ID_SERVERWORKS_HT1000SB,	quirk_disable_broadcom_boot_interrupt); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_SERVERWORKS,   PCI_DEVICE_ID_SERVERWORKS_HT1000SB,	quirk_disable_broadcom_boot_interrupt); /* NVMe: DECLARE_PCI_FIXUP_RESUME() 호출 (NVMe/PCIe 동작). */
 
 /* Disable boot interrupts on AMD and ATI chipsets */
 
@@ -2345,54 +2345,54 @@ DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_SERVERWORKS,   PCI_DEVICE_ID_SERVERWORKS_
  * rev. A0 and B0, NOIOAMODE needs to be disabled anyway to fix IO-APIC mode
  * (due to an erratum).
  */
-#define AMD_813X_MISC			0x40
-#define AMD_813X_NOIOAMODE		(1<<0)
-#define AMD_813X_REV_B1			0x12
-#define AMD_813X_REV_B2			0x13
+#define AMD_813X_MISC			0x40 /* NVMe: AMD_813X_MISC 매크로/상수 정의 (NVMe/PCIe). */
+#define AMD_813X_NOIOAMODE		(1<<0) /* NVMe: AMD_813X_NOIOAMODE 매크로/상수 정의 (NVMe/PCIe). */
+#define AMD_813X_REV_B1			0x12 /* NVMe: AMD_813X_REV_B1 매크로/상수 정의 (NVMe/PCIe). */
+#define AMD_813X_REV_B2			0x13 /* NVMe: AMD_813X_REV_B2 매크로/상수 정의 (NVMe/PCIe). */
 
-static void quirk_disable_amd_813x_boot_interrupt(struct pci_dev *dev)
-{
-	u32 pci_config_dword;
+static void quirk_disable_amd_813x_boot_interrupt(struct pci_dev *dev) /* NVMe: quirk_disable_amd_813x_boot_interrupt() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	u32 pci_config_dword; /* NVMe: pci_config_dword 변수 선언. */
 
-	if (noioapicquirk)
-		return;
-	if ((dev->revision == AMD_813X_REV_B1) ||
-	    (dev->revision == AMD_813X_REV_B2))
-		return;
+	if (noioapicquirk) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
+	if ((dev->revision == AMD_813X_REV_B1) || /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+	    (dev->revision == AMD_813X_REV_B2)) /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+		return; /* NVMe: 함수 종료 및 반환. */
 
-	pci_read_config_dword(dev, AMD_813X_MISC, &pci_config_dword);
-	pci_config_dword &= ~AMD_813X_NOIOAMODE;
-	pci_write_config_dword(dev, AMD_813X_MISC, pci_config_dword);
+	pci_read_config_dword(dev, AMD_813X_MISC, &pci_config_dword); /* NVMe: pci_read_config_dword() 호출 (NVMe/PCIe 동작). */
+	pci_config_dword &= ~AMD_813X_NOIOAMODE; /* NVMe: & 변수에 값 대입. */
+	pci_write_config_dword(dev, AMD_813X_MISC, pci_config_dword); /* NVMe: pci_write_config_dword() 호출 (NVMe/PCIe 동작). */
 
-	pci_info(dev, "disabled boot interrupts on device [%04x:%04x]\n",
-		 dev->vendor, dev->device);
-}
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_AMD,	PCI_DEVICE_ID_AMD_8131_BRIDGE,	quirk_disable_amd_813x_boot_interrupt);
-DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_AMD,	PCI_DEVICE_ID_AMD_8131_BRIDGE,	quirk_disable_amd_813x_boot_interrupt);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_AMD,	PCI_DEVICE_ID_AMD_8132_BRIDGE,	quirk_disable_amd_813x_boot_interrupt);
-DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_AMD,	PCI_DEVICE_ID_AMD_8132_BRIDGE,	quirk_disable_amd_813x_boot_interrupt);
+	pci_info(dev, "disabled boot interrupts on device [%04x:%04x]\n", /* NVMe: pci_info() 함수 정의/매개변수 선언. */
+		 dev->vendor, dev->device); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_AMD,	PCI_DEVICE_ID_AMD_8131_BRIDGE,	quirk_disable_amd_813x_boot_interrupt); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_AMD,	PCI_DEVICE_ID_AMD_8131_BRIDGE,	quirk_disable_amd_813x_boot_interrupt); /* NVMe: DECLARE_PCI_FIXUP_RESUME() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_AMD,	PCI_DEVICE_ID_AMD_8132_BRIDGE,	quirk_disable_amd_813x_boot_interrupt); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_AMD,	PCI_DEVICE_ID_AMD_8132_BRIDGE,	quirk_disable_amd_813x_boot_interrupt); /* NVMe: DECLARE_PCI_FIXUP_RESUME() 호출 (NVMe/PCIe 동작). */
 
-#define AMD_8111_PCI_IRQ_ROUTING	0x56
+#define AMD_8111_PCI_IRQ_ROUTING	0x56 /* NVMe: AMD_8111_PCI_IRQ_ROUTING 매크로/상수 정의 (NVMe/PCIe). */
 
-static void quirk_disable_amd_8111_boot_interrupt(struct pci_dev *dev)
-{
-	u16 pci_config_word;
+static void quirk_disable_amd_8111_boot_interrupt(struct pci_dev *dev) /* NVMe: quirk_disable_amd_8111_boot_interrupt() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	u16 pci_config_word; /* NVMe: pci_config_word 변수 선언. */
 
-	if (noioapicquirk)
-		return;
+	if (noioapicquirk) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
 
-	pci_read_config_word(dev, AMD_8111_PCI_IRQ_ROUTING, &pci_config_word);
-	if (!pci_config_word) {
-		pci_info(dev, "boot interrupts on device [%04x:%04x] already disabled\n",
-			 dev->vendor, dev->device);
-		return;
-	}
-	pci_write_config_word(dev, AMD_8111_PCI_IRQ_ROUTING, 0);
-	pci_info(dev, "disabled boot interrupts on device [%04x:%04x]\n",
-		 dev->vendor, dev->device);
-}
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_AMD,   PCI_DEVICE_ID_AMD_8111_SMBUS,	quirk_disable_amd_8111_boot_interrupt);
-DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_AMD,   PCI_DEVICE_ID_AMD_8111_SMBUS,	quirk_disable_amd_8111_boot_interrupt);
+	pci_read_config_word(dev, AMD_8111_PCI_IRQ_ROUTING, &pci_config_word); /* NVMe: pci_read_config_word() 호출 (NVMe/PCIe 동작). */
+	if (!pci_config_word) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pci_info(dev, "boot interrupts on device [%04x:%04x] already disabled\n", /* NVMe: pci_info() 함수 정의/매개변수 선언. */
+			 dev->vendor, dev->device); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+		return; /* NVMe: 함수 종료 및 반환. */
+	} /* NVMe: 코드 블록/구조체 종료. */
+	pci_write_config_word(dev, AMD_8111_PCI_IRQ_ROUTING, 0); /* NVMe: pci_write_config_word() 호출 (NVMe/PCIe 동작). */
+	pci_info(dev, "disabled boot interrupts on device [%04x:%04x]\n", /* NVMe: pci_info() 함수 정의/매개변수 선언. */
+		 dev->vendor, dev->device); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_AMD,   PCI_DEVICE_ID_AMD_8111_SMBUS,	quirk_disable_amd_8111_boot_interrupt); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_AMD,   PCI_DEVICE_ID_AMD_8111_SMBUS,	quirk_disable_amd_8111_boot_interrupt); /* NVMe: DECLARE_PCI_FIXUP_RESUME() 호출 (NVMe/PCIe 동작). */
 #endif /* CONFIG_X86_IO_APIC */
 
 /*
@@ -2400,18 +2400,18 @@ DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_AMD,   PCI_DEVICE_ID_AMD_8111_SMBUS,	quir
  * but the PIO transfers won't work if BAR0 falls at the odd 8 bytes.
  * Re-allocate the region if needed...
  */
-static void quirk_tc86c001_ide(struct pci_dev *dev)
-{
-	struct resource *r = &dev->resource[0];
+static void quirk_tc86c001_ide(struct pci_dev *dev) /* NVMe: quirk_tc86c001_ide() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	struct resource *r = &dev->resource[0]; /* NVMe: r 변수에 값 대입. */
 
-	if (r->start & 0x8) {
-		r->flags |= IORESOURCE_UNSET;
-		resource_set_range(r, 0, SZ_16);
-	}
-}
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_TOSHIBA_2,
-			 PCI_DEVICE_ID_TOSHIBA_TC86C001_IDE,
-			 quirk_tc86c001_ide);
+	if (r->start & 0x8) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		r->flags |= IORESOURCE_UNSET; /* NVMe: | 변수에 값 대입. */
+		resource_set_range(r, 0, SZ_16); /* NVMe: resource_set_range() 호출 (NVMe/PCIe 동작). */
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_TOSHIBA_2, /* NVMe: DECLARE_PCI_FIXUP_HEADER() 함수 정의/매개변수 선언. */
+			 PCI_DEVICE_ID_TOSHIBA_TC86C001_IDE, /* NVMe: 인자/초기자 나열 (연속). */
+			 quirk_tc86c001_ide); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
 /*
  * PLX PCI 9050 PCI Target bridge controller has an erratum that prevents the
@@ -2420,25 +2420,25 @@ DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_TOSHIBA_2,
  * The BAR0 or BAR1 region may be disabled (size 0) or enabled (size 128).
  * Re-allocate the regions to a 256-byte boundary if necessary.
  */
-static void quirk_plx_pci9050(struct pci_dev *dev)
-{
-	unsigned int bar;
+static void quirk_plx_pci9050(struct pci_dev *dev) /* NVMe: quirk_plx_pci9050() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	unsigned int bar; /* NVMe: bar 변수 선언. */
 
 	/* Fixed in revision 2 (PCI 9052). */
-	if (dev->revision >= 2)
-		return;
-	for (bar = 0; bar <= 1; bar++)
-		if (pci_resource_len(dev, bar) == 0x80 &&
-		    (pci_resource_start(dev, bar) & 0x80)) {
-			struct resource *r = &dev->resource[bar];
-			pci_info(dev, "Re-allocating PLX PCI 9050 BAR %u to length 256 to avoid bit 7 bug\n",
-				 bar);
-			r->flags |= IORESOURCE_UNSET;
-			resource_set_range(r, 0, SZ_256);
-		}
-}
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_PLX, PCI_DEVICE_ID_PLX_9050,
-			 quirk_plx_pci9050);
+	if (dev->revision >= 2) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
+	for (bar = 0; bar <= 1; bar++) /* NVMe: 반복 처리 (NVMe/PCIe 레지스터/장치 순회). */
+		if (pci_resource_len(dev, bar) == 0x80 && /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		    (pci_resource_start(dev, bar) & 0x80)) { /* NVMe: pci_resource_start() 함수 정의/매개변수 선언. */
+			struct resource *r = &dev->resource[bar]; /* NVMe: r 변수에 값 대입. */
+			pci_info(dev, "Re-allocating PLX PCI 9050 BAR %u to length 256 to avoid bit 7 bug\n", /* NVMe: pci_info() 함수 정의/매개변수 선언. */
+				 bar); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+			r->flags |= IORESOURCE_UNSET; /* NVMe: | 변수에 값 대입. */
+			resource_set_range(r, 0, SZ_256); /* NVMe: resource_set_range() 호출 (NVMe/PCIe 동작). */
+		} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_PLX, PCI_DEVICE_ID_PLX_9050, /* NVMe: DECLARE_PCI_FIXUP_HEADER() 함수 정의/매개변수 선언. */
+			 quirk_plx_pci9050); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 /*
  * The following Meilhaus (vendor ID 0x1402) device IDs (amongst others)
  * may be using the PLX PCI 9050: 0x0630, 0x0940, 0x0950, 0x0960, 0x100b,
@@ -2448,13 +2448,13 @@ DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_PLX, PCI_DEVICE_ID_PLX_9050,
  * Currently, device IDs 0x2000 and 0x2600 are used by the Comedi "me_daq"
  * driver.
  */
-DECLARE_PCI_FIXUP_HEADER(0x1402, 0x2000, quirk_plx_pci9050);
-DECLARE_PCI_FIXUP_HEADER(0x1402, 0x2600, quirk_plx_pci9050);
+DECLARE_PCI_FIXUP_HEADER(0x1402, 0x2000, quirk_plx_pci9050); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(0x1402, 0x2600, quirk_plx_pci9050); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
 
-static void quirk_netmos(struct pci_dev *dev)
-{
-	unsigned int num_parallel = (dev->subsystem_device & 0xf0) >> 4;
-	unsigned int num_serial = dev->subsystem_device & 0xf;
+static void quirk_netmos(struct pci_dev *dev) /* NVMe: quirk_netmos() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	unsigned int num_parallel = (dev->subsystem_device & 0xf0) >> 4; /* NVMe: num_parallel 변수에 값 대입. */
+	unsigned int num_serial = dev->subsystem_device & 0xf; /* NVMe: num_serial 변수에 값 대입. */
 
 	/*
 	 * These Netmos parts are multiport serial devices with optional
@@ -2466,53 +2466,53 @@ static void quirk_netmos(struct pci_dev *dev)
 	 * The subdevice ID is of the form 0x00PS, where <P> is the number
 	 * of parallel ports and <S> is the number of serial ports.
 	 */
-	switch (dev->device) {
-	case PCI_DEVICE_ID_NETMOS_9835:
+	switch (dev->device) { /* NVMe: switch 다중 분기 처리. */
+	case PCI_DEVICE_ID_NETMOS_9835: /* NVMe: switch case PCI_DEVICE_ID_NETMOS_9835 처리. */
 		/* Well, this rule doesn't hold for the following 9835 device */
-		if (dev->subsystem_vendor == PCI_VENDOR_ID_IBM &&
-				dev->subsystem_device == 0x0299)
-			return;
-		fallthrough;
-	case PCI_DEVICE_ID_NETMOS_9735:
-	case PCI_DEVICE_ID_NETMOS_9745:
-	case PCI_DEVICE_ID_NETMOS_9845:
-	case PCI_DEVICE_ID_NETMOS_9855:
-		if (num_parallel) {
-			pci_info(dev, "Netmos %04x (%u parallel, %u serial); changing class SERIAL to OTHER (use parport_serial)\n",
-				dev->device, num_parallel, num_serial);
-			dev->class = (PCI_CLASS_COMMUNICATION_OTHER << 8) |
-			    (dev->class & 0xff);
-		}
-	}
-}
-DECLARE_PCI_FIXUP_CLASS_HEADER(PCI_VENDOR_ID_NETMOS, PCI_ANY_ID,
-			 PCI_CLASS_COMMUNICATION_SERIAL, 8, quirk_netmos);
+		if (dev->subsystem_vendor == PCI_VENDOR_ID_IBM && /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+				dev->subsystem_device == 0x0299) /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+			return; /* NVMe: 함수 종료 및 반환. */
+		fallthrough; /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+	case PCI_DEVICE_ID_NETMOS_9735: /* NVMe: switch case PCI_DEVICE_ID_NETMOS_9735 처리. */
+	case PCI_DEVICE_ID_NETMOS_9745: /* NVMe: switch case PCI_DEVICE_ID_NETMOS_9745 처리. */
+	case PCI_DEVICE_ID_NETMOS_9845: /* NVMe: switch case PCI_DEVICE_ID_NETMOS_9845 처리. */
+	case PCI_DEVICE_ID_NETMOS_9855: /* NVMe: switch case PCI_DEVICE_ID_NETMOS_9855 처리. */
+		if (num_parallel) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+			pci_info(dev, "Netmos %04x (%u parallel, %u serial); changing class SERIAL to OTHER (use parport_serial)\n", /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
+				dev->device, num_parallel, num_serial); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+			dev->class = (PCI_CLASS_COMMUNICATION_OTHER << 8) | /* NVMe: class 변수에 값 대입. */
+			    (dev->class & 0xff); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+		} /* NVMe: 코드 블록/구조체 종료. */
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_CLASS_HEADER(PCI_VENDOR_ID_NETMOS, PCI_ANY_ID, /* NVMe: DECLARE_PCI_FIXUP_CLASS_HEADER() 함수 정의/매개변수 선언. */
+			 PCI_CLASS_COMMUNICATION_SERIAL, 8, quirk_netmos); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
-static void quirk_e100_interrupt(struct pci_dev *dev)
-{
-	u16 command, pmcsr;
-	u8 __iomem *csr;
-	u8 cmd_hi;
+static void quirk_e100_interrupt(struct pci_dev *dev) /* NVMe: quirk_e100_interrupt() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	u16 command, pmcsr; /* NVMe: pmcsr 변수 선언. */
+	u8 __iomem *csr; /* NVMe: csr 변수 선언. */
+	u8 cmd_hi; /* NVMe: cmd_hi 변수 선언. */
 
-	switch (dev->device) {
+	switch (dev->device) { /* NVMe: switch 다중 분기 처리. */
 	/* PCI IDs taken from drivers/net/e100.c */
-	case 0x1029:
-	case 0x1030 ... 0x1034:
-	case 0x1038 ... 0x103E:
-	case 0x1050 ... 0x1057:
-	case 0x1059:
-	case 0x1064 ... 0x106B:
-	case 0x1091 ... 0x1095:
-	case 0x1209:
-	case 0x1229:
-	case 0x2449:
-	case 0x2459:
-	case 0x245D:
-	case 0x27DC:
-		break;
-	default:
-		return;
-	}
+	case 0x1029: /* NVMe: switch case 0x1029 처리. */
+	case 0x1030 ... 0x1034: /* NVMe: switch case 0x1030 ... 0x1034 처리. */
+	case 0x1038 ... 0x103E: /* NVMe: switch case 0x1038 ... 0x103E 처리. */
+	case 0x1050 ... 0x1057: /* NVMe: switch case 0x1050 ... 0x1057 처리. */
+	case 0x1059: /* NVMe: switch case 0x1059 처리. */
+	case 0x1064 ... 0x106B: /* NVMe: switch case 0x1064 ... 0x106B 처리. */
+	case 0x1091 ... 0x1095: /* NVMe: switch case 0x1091 ... 0x1095 처리. */
+	case 0x1209: /* NVMe: switch case 0x1209 처리. */
+	case 0x1229: /* NVMe: switch case 0x1229 처리. */
+	case 0x2449: /* NVMe: switch case 0x2449 처리. */
+	case 0x2459: /* NVMe: switch case 0x2459 처리. */
+	case 0x245D: /* NVMe: switch case 0x245D 처리. */
+	case 0x27DC: /* NVMe: switch case 0x27DC 처리. */
+		break; /* NVMe: 반복문/분기 종료. */
+	default: /* NVMe: default 레이블 (NVMe 초기화/오류 복구 경로). */
+		return; /* NVMe: 함수 종료 및 반환. */
+	} /* NVMe: 코드 블록/구조체 종료. */
 
 	/*
 	 * Some firmware hands off the e100 with interrupts enabled,
@@ -2521,38 +2521,38 @@ static void quirk_e100_interrupt(struct pci_dev *dev)
 	 * disable all e100 interrupts here.  The driver will
 	 * re-enable them when it's ready.
 	 */
-	pci_read_config_word(dev, PCI_COMMAND, &command);
+	pci_read_config_word(dev, PCI_COMMAND, &command); /* NVMe: pci_read_config_word() 호출 (NVMe/PCIe 동작). */
 
-	if (!(command & PCI_COMMAND_MEMORY) || !pci_resource_start(dev, 0))
-		return;
+	if (!(command & PCI_COMMAND_MEMORY) || !pci_resource_start(dev, 0)) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
 
 	/*
 	 * Check that the device is in the D0 power state. If it's not,
 	 * there is no point to look any further.
 	 */
-	if (dev->pm_cap) {
-		pci_read_config_word(dev, dev->pm_cap + PCI_PM_CTRL, &pmcsr);
-		if ((pmcsr & PCI_PM_CTRL_STATE_MASK) != PCI_D0)
-			return;
-	}
+	if (dev->pm_cap) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pci_read_config_word(dev, dev->pm_cap + PCI_PM_CTRL, &pmcsr); /* NVMe: pci_read_config_word() 호출 (NVMe/PCIe 동작). */
+		if ((pmcsr & PCI_PM_CTRL_STATE_MASK) != PCI_D0) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+			return; /* NVMe: 함수 종료 및 반환. */
+	} /* NVMe: 코드 블록/구조체 종료. */
 
 	/* Convert from PCI bus to resource space.  */
-	csr = ioremap(pci_resource_start(dev, 0), 8);
-	if (!csr) {
-		pci_warn(dev, "Can't map e100 registers\n");
-		return;
-	}
+	csr = ioremap(pci_resource_start(dev, 0), 8); /* NVMe: ioremap() 호출 (NVMe/PCIe 동작). */
+	if (!csr) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pci_warn(dev, "Can't map e100 registers\n"); /* NVMe: pci_warn() 호출 (NVMe/PCIe 동작). */
+		return; /* NVMe: 함수 종료 및 반환. */
+	} /* NVMe: 코드 블록/구조체 종료. */
 
-	cmd_hi = readb(csr + 3);
-	if (cmd_hi == 0) {
-		pci_warn(dev, "Firmware left e100 interrupts enabled; disabling\n");
-		writeb(1, csr + 3);
-	}
+	cmd_hi = readb(csr + 3); /* NVMe: readb() 호출 (NVMe/PCIe 동작). */
+	if (cmd_hi == 0) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pci_warn(dev, "Firmware left e100 interrupts enabled; disabling\n"); /* NVMe: pci_warn() 호출 (NVMe/PCIe 동작). */
+		writeb(1, csr + 3); /* NVMe: writeb() 호출 (NVMe/PCIe 동작). */
+	} /* NVMe: 코드 블록/구조체 종료. */
 
-	iounmap(csr);
-}
-DECLARE_PCI_FIXUP_CLASS_FINAL(PCI_VENDOR_ID_INTEL, PCI_ANY_ID,
-			PCI_CLASS_NETWORK_ETHERNET, 8, quirk_e100_interrupt);
+	iounmap(csr); /* NVMe: iounmap() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_CLASS_FINAL(PCI_VENDOR_ID_INTEL, PCI_ANY_ID, /* NVMe: DECLARE_PCI_FIXUP_CLASS_FINAL() 함수 정의/매개변수 선언. */
+			PCI_CLASS_NETWORK_ETHERNET, 8, quirk_e100_interrupt); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
 /*
  * The 82575 and 82598 may experience data corruption issues when transitioning
@@ -2565,24 +2565,24 @@ DECLARE_PCI_FIXUP_CLASS_FINAL(PCI_VENDOR_ID_INTEL, PCI_ANY_ID,
  *   연결된 경로에서 L0s가 활성화되면 I/O 완료 시간 불규칙성이나 성능 저하를
  *   유발하므로, 해당 장치에서 L0s capability를 제거한다.
  */
-static void quirk_disable_aspm_l0s(struct pci_dev *dev)
-{
+static void quirk_disable_aspm_l0s(struct pci_dev *dev) /* NVMe: quirk_disable_aspm_l0s() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
 	pcie_aspm_remove_cap(dev, PCI_EXP_LNKCAP_ASPM_L0S); /* NVMe: 현재 장치의 ASPM L0s capability를 제거. */
-}
+} /* NVMe: 코드 블록/구조체 종료. */
 DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x10a7, quirk_disable_aspm_l0s); /* NVMe: Intel 82575/82598 등에서 L0s quirk 등록. */
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x10a9, quirk_disable_aspm_l0s);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x10b6, quirk_disable_aspm_l0s);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x10c6, quirk_disable_aspm_l0s);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x10c7, quirk_disable_aspm_l0s);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x10c8, quirk_disable_aspm_l0s);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x10d6, quirk_disable_aspm_l0s);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x10db, quirk_disable_aspm_l0s);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x10dd, quirk_disable_aspm_l0s);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x10e1, quirk_disable_aspm_l0s);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x10ec, quirk_disable_aspm_l0s);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x10f1, quirk_disable_aspm_l0s);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x10f4, quirk_disable_aspm_l0s);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x1508, quirk_disable_aspm_l0s);
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x10a9, quirk_disable_aspm_l0s); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x10b6, quirk_disable_aspm_l0s); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x10c6, quirk_disable_aspm_l0s); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x10c7, quirk_disable_aspm_l0s); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x10c8, quirk_disable_aspm_l0s); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x10d6, quirk_disable_aspm_l0s); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x10db, quirk_disable_aspm_l0s); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x10dd, quirk_disable_aspm_l0s); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x10e1, quirk_disable_aspm_l0s); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x10ec, quirk_disable_aspm_l0s); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x10f1, quirk_disable_aspm_l0s); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x10f4, quirk_disable_aspm_l0s); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x1508, quirk_disable_aspm_l0s); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
 
 /*
  * quirk_disable_aspm_l0s_l1:
@@ -2591,11 +2591,11 @@ DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x1508, quirk_disable_aspm_l0s);
  *   upstream Root Port에서 AER timeout이 발생하고, 이는 NVMe I/O timeout
  *   으로 이어질 수 있다. 전원 효율 대신 안정성을 우선한다.
  */
-static void quirk_disable_aspm_l0s_l1(struct pci_dev *dev)
-{
+static void quirk_disable_aspm_l0s_l1(struct pci_dev *dev) /* NVMe: quirk_disable_aspm_l0s_l1() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
 	pcie_aspm_remove_cap(dev, /* NVMe: L0s와 L1 ASPM capability를 동시에 제거. */
 			     PCI_EXP_LNKCAP_ASPM_L0S | PCI_EXP_LNKCAP_ASPM_L1); /* NVMe: L0s 및 L1 capability 비트. */
-}
+} /* NVMe: 코드 블록/구조체 종료. */
 
 /*
  * ASM1083/1085 PCIe-PCI bridge devices cause AER timeout errors on the
@@ -2623,45 +2623,45 @@ DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_HUAWEI, 0x1105, quirk_disable_aspm_l0s_l1
  *   트리에서 사라지거나 성능이 저하될 수 있으므로, 해당 플래그를 설정해
  *   core가 비트를 클리어하도록 한다.
  */
-static void quirk_enable_clear_retrain_link(struct pci_dev *dev)
-{
+static void quirk_enable_clear_retrain_link(struct pci_dev *dev) /* NVMe: quirk_enable_clear_retrain_link() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
 	dev->clear_retrain_link = 1; /* NVMe: link retrain 비트 수동 클리어 활성화. */
 	pci_info(dev, "Enable PCIe Retrain Link quirk\n"); /* NVMe: dmesg에 quirk 적용 기록. */
-}
+} /* NVMe: 코드 블록/구조체 종료. */
 DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_PERICOM, 0xe110, quirk_enable_clear_retrain_link); /* NVMe: Pericom PI7C9X110/111/130 브리지에 대해 early 단계에서 적용. */
 DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_PERICOM, 0xe111, quirk_enable_clear_retrain_link); /* NVMe: Pericom PI7C9X110/111/130 브리지에 대해 early 단계에서 적용. */
 DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_PERICOM, 0xe130, quirk_enable_clear_retrain_link); /* NVMe: Pericom PI7C9X110/111/130 브리지에 대해 early 단계에서 적용. */
 
-static void fixup_rev1_53c810(struct pci_dev *dev)
-{
-	u32 class = dev->class;
+static void fixup_rev1_53c810(struct pci_dev *dev) /* NVMe: fixup_rev1_53c810() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	u32 class = dev->class; /* NVMe: class 변수에 값 대입. */
 
 	/*
 	 * rev 1 ncr53c810 chips don't set the class at all which means
 	 * they don't get their resources remapped. Fix that here.
 	 */
-	if (class)
-		return;
+	if (class) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
 
-	dev->class = PCI_CLASS_STORAGE_SCSI << 8;
-	pci_info(dev, "NCR 53c810 rev 1 PCI class overridden (%#08x -> %#08x)\n",
-		 class, dev->class);
-}
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_NCR, PCI_DEVICE_ID_NCR_53C810, fixup_rev1_53c810);
+	dev->class = PCI_CLASS_STORAGE_SCSI << 8; /* NVMe: class 변수에 값 대입. */
+	pci_info(dev, "NCR 53c810 rev 1 PCI class overridden (%#08x -> %#08x)\n", /* NVMe: pci_info() 함수 정의/매개변수 선언. */
+		 class, dev->class); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_NCR, PCI_DEVICE_ID_NCR_53C810, fixup_rev1_53c810); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
 
 /* Enable 1k I/O space granularity on the Intel P64H2 */
-static void quirk_p64h2_1k_io(struct pci_dev *dev)
-{
-	u16 en1k;
+static void quirk_p64h2_1k_io(struct pci_dev *dev) /* NVMe: quirk_p64h2_1k_io() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	u16 en1k; /* NVMe: en1k 변수 선언. */
 
-	pci_read_config_word(dev, 0x40, &en1k);
+	pci_read_config_word(dev, 0x40, &en1k); /* NVMe: pci_read_config_word() 호출 (NVMe/PCIe 동작). */
 
-	if (en1k & 0x200) {
-		pci_info(dev, "Enable I/O Space to 1KB granularity\n");
-		dev->io_window_1k = 1;
-	}
-}
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x1460, quirk_p64h2_1k_io);
+	if (en1k & 0x200) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pci_info(dev, "Enable I/O Space to 1KB granularity\n"); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
+		dev->io_window_1k = 1; /* NVMe: io_window_1k 변수에 값 대입. */
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x1460, quirk_p64h2_1k_io); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
 
 /*
  * Under some circumstances, AER is not linked with extended capabilities.
@@ -2675,24 +2675,24 @@ DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x1460, quirk_p64h2_1k_io);
  *   NVIDIA CK804 칩셋에서 AER extended capability가 연결되지 않으면
  *   NVMe 장치의 PCIe 오류가 감춰져 예기치 않은 I/O 장애로 이어질 수 있다.
  */
-static void quirk_nvidia_ck804_pcie_aer_ext_cap(struct pci_dev *dev)
-{
+static void quirk_nvidia_ck804_pcie_aer_ext_cap(struct pci_dev *dev) /* NVMe: quirk_nvidia_ck804_pcie_aer_ext_cap() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
 	uint8_t b; /* NVMe: chip-specific 컨트롤 레지스터 값. */
 
 	if (pci_read_config_byte(dev, 0xf41, &b) == 0) { /* NVMe: 0xf41 레지스터에서 AER 연결 제어 비트를 읽는다. */
 		if (!(b & 0x20)) { /* NVMe: AER 연결 비트(0x20)가 꺼져 있으면 켠다. */
 			pci_write_config_byte(dev, 0xf41, b | 0x20); /* NVMe: AER extended capability 연결 활성화. */
 			pci_info(dev, "Linking AER extended capability\n"); /* NVMe: dmesg에 AER 연결 기록. */
-		}
-	}
-}
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_NVIDIA,  PCI_DEVICE_ID_NVIDIA_CK804_PCIE,
-			quirk_nvidia_ck804_pcie_aer_ext_cap);
-DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_NVIDIA,  PCI_DEVICE_ID_NVIDIA_CK804_PCIE,
-			quirk_nvidia_ck804_pcie_aer_ext_cap);
+		} /* NVMe: 코드 블록/구조체 종료. */
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_NVIDIA,  PCI_DEVICE_ID_NVIDIA_CK804_PCIE, /* NVMe: DECLARE_PCI_FIXUP_FINAL() 함수 정의/매개변수 선언. */
+			quirk_nvidia_ck804_pcie_aer_ext_cap); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_NVIDIA,  PCI_DEVICE_ID_NVIDIA_CK804_PCIE, /* NVMe: DECLARE_PCI_FIXUP_RESUME_EARLY() 함수 정의/매개변수 선언. */
+			quirk_nvidia_ck804_pcie_aer_ext_cap); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
-static void quirk_via_cx700_pci_parking_caching(struct pci_dev *dev)
-{
+static void quirk_via_cx700_pci_parking_caching(struct pci_dev *dev) /* NVMe: quirk_via_cx700_pci_parking_caching() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
 	/*
 	 * Disable PCI Bus Parking and PCI Master read caching on CX700
 	 * which causes unspecified timing errors with a VT6212L on the PCI
@@ -2704,61 +2704,61 @@ static void quirk_via_cx700_pci_parking_caching(struct pci_dev *dev)
 	 */
 
 	/* Count VT6212L instances */
-	struct pci_dev *p = pci_get_device(PCI_VENDOR_ID_VIA,
-		PCI_DEVICE_ID_VIA_8235_USB_2, NULL);
-	uint8_t b;
+	struct pci_dev *p = pci_get_device(PCI_VENDOR_ID_VIA, /* NVMe: p 변수에 값 대입. */
+		PCI_DEVICE_ID_VIA_8235_USB_2, NULL); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+	uint8_t b; /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
 	/*
 	 * p should contain the first (internal) VT6212L -- see if we have
 	 * an external one by searching again.
 	 */
-	p = pci_get_device(PCI_VENDOR_ID_VIA, PCI_DEVICE_ID_VIA_8235_USB_2, p);
-	if (!p)
-		return;
-	pci_dev_put(p);
+	p = pci_get_device(PCI_VENDOR_ID_VIA, PCI_DEVICE_ID_VIA_8235_USB_2, p); /* NVMe: pci_get_device() 호출 (NVMe/PCIe 동작). */
+	if (!p) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
+	pci_dev_put(p); /* NVMe: pci_dev_put() 호출 (NVMe/PCIe 동작). */
 
-	if (pci_read_config_byte(dev, 0x76, &b) == 0) {
-		if (b & 0x40) {
+	if (pci_read_config_byte(dev, 0x76, &b) == 0) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		if (b & 0x40) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
 			/* Turn off PCI Bus Parking */
-			pci_write_config_byte(dev, 0x76, b ^ 0x40);
+			pci_write_config_byte(dev, 0x76, b ^ 0x40); /* NVMe: pci_write_config_byte() 호출 (NVMe/PCIe 동작). */
 
-			pci_info(dev, "Disabling VIA CX700 PCI parking\n");
-		}
-	}
+			pci_info(dev, "Disabling VIA CX700 PCI parking\n"); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
+		} /* NVMe: 코드 블록/구조체 종료. */
+	} /* NVMe: 코드 블록/구조체 종료. */
 
-	if (pci_read_config_byte(dev, 0x72, &b) == 0) {
-		if (b != 0) {
+	if (pci_read_config_byte(dev, 0x72, &b) == 0) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		if (b != 0) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
 			/* Turn off PCI Master read caching */
-			pci_write_config_byte(dev, 0x72, 0x0);
+			pci_write_config_byte(dev, 0x72, 0x0); /* NVMe: pci_write_config_byte() 호출 (NVMe/PCIe 동작). */
 
 			/* Set PCI Master Bus time-out to "1x16 PCLK" */
-			pci_write_config_byte(dev, 0x75, 0x1);
+			pci_write_config_byte(dev, 0x75, 0x1); /* NVMe: pci_write_config_byte() 호출 (NVMe/PCIe 동작). */
 
 			/* Disable "Read FIFO Timer" */
-			pci_write_config_byte(dev, 0x77, 0x0);
+			pci_write_config_byte(dev, 0x77, 0x0); /* NVMe: pci_write_config_byte() 호출 (NVMe/PCIe 동작). */
 
-			pci_info(dev, "Disabling VIA CX700 PCI caching\n");
-		}
-	}
-}
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_VIA, 0x324e, quirk_via_cx700_pci_parking_caching);
+			pci_info(dev, "Disabling VIA CX700 PCI caching\n"); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
+		} /* NVMe: 코드 블록/구조체 종료. */
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_VIA, 0x324e, quirk_via_cx700_pci_parking_caching); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
 
-static void quirk_brcm_5719_limit_mrrs(struct pci_dev *dev)
-{
-	u32 rev;
+static void quirk_brcm_5719_limit_mrrs(struct pci_dev *dev) /* NVMe: quirk_brcm_5719_limit_mrrs() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	u32 rev; /* NVMe: rev 변수 선언. */
 
-	pci_read_config_dword(dev, 0xf4, &rev);
+	pci_read_config_dword(dev, 0xf4, &rev); /* NVMe: pci_read_config_dword() 호출 (NVMe/PCIe 동작). */
 
 	/* Only CAP the MRRS if the device is a 5719 A0 */
-	if (rev == 0x05719000) {
-		int readrq = pcie_get_readrq(dev);
-		if (readrq > 2048)
-			pcie_set_readrq(dev, 2048);
-	}
-}
-DECLARE_PCI_FIXUP_ENABLE(PCI_VENDOR_ID_BROADCOM,
-			 PCI_DEVICE_ID_TIGON3_5719,
-			 quirk_brcm_5719_limit_mrrs);
+	if (rev == 0x05719000) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		int readrq = pcie_get_readrq(dev); /* NVMe: pcie_get_readrq() 호출 (NVMe/PCIe 동작). */
+		if (readrq > 2048) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+			pcie_set_readrq(dev, 2048); /* NVMe: pcie_set_readrq() 호출 (NVMe/PCIe 동작). */
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_ENABLE(PCI_VENDOR_ID_BROADCOM, /* NVMe: DECLARE_PCI_FIXUP_ENABLE() 함수 정의/매개변수 선언. */
+			 PCI_DEVICE_ID_TIGON3_5719, /* NVMe: 인자/초기자 나열 (연속). */
+			 quirk_brcm_5719_limit_mrrs); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
 /*
  * Originally in EDAC sources for i82875P: Intel tells BIOS developers to
@@ -2766,21 +2766,21 @@ DECLARE_PCI_FIXUP_ENABLE(PCI_VENDOR_ID_BROADCOM,
  * DRBs - this is where we expose device 6.
  * http://www.x86-secret.com/articles/tweak/pat/patsecrets-2.htm
  */
-static void quirk_unhide_mch_dev6(struct pci_dev *dev)
-{
-	u8 reg;
+static void quirk_unhide_mch_dev6(struct pci_dev *dev) /* NVMe: quirk_unhide_mch_dev6() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	u8 reg; /* NVMe: reg 변수 선언. */
 
-	if (pci_read_config_byte(dev, 0xF4, &reg) == 0 && !(reg & 0x02)) {
-		pci_info(dev, "Enabling MCH 'Overflow' Device\n");
-		pci_write_config_byte(dev, 0xF4, reg | 0x02);
-	}
-}
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82865_HB,
-			quirk_unhide_mch_dev6);
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82875_HB,
-			quirk_unhide_mch_dev6);
+	if (pci_read_config_byte(dev, 0xF4, &reg) == 0 && !(reg & 0x02)) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pci_info(dev, "Enabling MCH 'Overflow' Device\n"); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
+		pci_write_config_byte(dev, 0xF4, reg | 0x02); /* NVMe: pci_write_config_byte() 호출 (NVMe/PCIe 동작). */
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82865_HB, /* NVMe: DECLARE_PCI_FIXUP_EARLY() 함수 정의/매개변수 선언. */
+			quirk_unhide_mch_dev6); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82875_HB, /* NVMe: DECLARE_PCI_FIXUP_EARLY() 함수 정의/매개변수 선언. */
+			quirk_unhide_mch_dev6); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
-#ifdef CONFIG_PCI_MSI
+#ifdef CONFIG_PCI_MSI /* NVMe: 조걶 컴파일 ifdef 분기 (NVMe/PCIe 기능 선택). */
 /*
  * Some chipsets do not support MSI. We cannot easily rely on setting
  * PCI_BUS_FLAGS_NO_MSI in its bus flags because there are actually some
@@ -2795,20 +2795,20 @@ DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82875_HB,
  *   지원하지 않으므로 MSI/MSI-X 모두 INTx로 fallback된다. 이 경우 NVMe
  *   성능이 크게 저하될 수 있으나, 하드웨어 버그를 회피하기 위해 필요하다.
  */
-static void quirk_disable_all_msi(struct pci_dev *dev)
-{
+static void quirk_disable_all_msi(struct pci_dev *dev) /* NVMe: quirk_disable_all_msi() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
 	pci_no_msi(); /* NVMe: 시스템 전체 MSI 사용 중지. */
 	pci_warn(dev, "MSI quirk detected; MSI disabled\n"); /* NVMe: dmesg 경고. */
-}
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_SERVERWORKS, PCI_DEVICE_ID_SERVERWORKS_GCNB_LE, quirk_disable_all_msi);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RS400_200, quirk_disable_all_msi);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RS480, quirk_disable_all_msi);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_VIA, PCI_DEVICE_ID_VIA_VT3336, quirk_disable_all_msi);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_VIA, PCI_DEVICE_ID_VIA_VT3351, quirk_disable_all_msi);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_VIA, PCI_DEVICE_ID_VIA_VT3364, quirk_disable_all_msi);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_VIA, PCI_DEVICE_ID_VIA_8380_0, quirk_disable_all_msi);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_SI, 0x0761, quirk_disable_all_msi);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_SAMSUNG, 0xa5e3, quirk_disable_all_msi);
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_SERVERWORKS, PCI_DEVICE_ID_SERVERWORKS_GCNB_LE, quirk_disable_all_msi); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RS400_200, quirk_disable_all_msi); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_RS480, quirk_disable_all_msi); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_VIA, PCI_DEVICE_ID_VIA_VT3336, quirk_disable_all_msi); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_VIA, PCI_DEVICE_ID_VIA_VT3351, quirk_disable_all_msi); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_VIA, PCI_DEVICE_ID_VIA_VT3364, quirk_disable_all_msi); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_VIA, PCI_DEVICE_ID_VIA_8380_0, quirk_disable_all_msi); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_SI, 0x0761, quirk_disable_all_msi); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_SAMSUNG, 0xa5e3, quirk_disable_all_msi); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
 
 /* Disable MSI on chipsets that are known to not support it */
 /*
@@ -2819,17 +2819,17 @@ DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_SAMSUNG, 0xa5e3, quirk_disable_all_msi);
  *   이 quirk가 적용된 버스에 NVMe를 연결하면 큐당 인터럽트 분리가
  *   불가능해져 성능이 제한된다.
  */
-static void quirk_disable_msi(struct pci_dev *dev)
-{
+static void quirk_disable_msi(struct pci_dev *dev) /* NVMe: quirk_disable_msi() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
 	if (dev->subordinate) { /* NVMe: 브리지가 하위 버스를 가지고 있을 때만 적용. */
 		pci_warn(dev, "MSI quirk detected; subordinate MSI disabled\n"); /* NVMe: 하위 버스 MSI 비활성화 경고. */
 		dev->subordinate->bus_flags |= PCI_BUS_FLAGS_NO_MSI; /* NVMe: 하위 버스 플래그에 NO_MSI 설정. */
-	}
-}
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_8131_BRIDGE, quirk_disable_msi);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_VIA, 0xa238, quirk_disable_msi);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x5a3f, quirk_disable_msi);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_RDC, 0x1031, quirk_disable_msi);
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_8131_BRIDGE, quirk_disable_msi); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_VIA, 0xa238, quirk_disable_msi); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x5a3f, quirk_disable_msi); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_RDC, 0x1031, quirk_disable_msi); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
 
 /*
  * The APC bridge device in AMD 780 family northbridges has some random
@@ -2837,122 +2837,122 @@ DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_RDC, 0x1031, quirk_disable_msi);
  * we use the possible vendor/device IDs of the host bridge for the
  * declared quirk, and search for the APC bridge by slot number.
  */
-static void quirk_amd_780_apc_msi(struct pci_dev *host_bridge)
-{
-	struct pci_dev *apc_bridge;
+static void quirk_amd_780_apc_msi(struct pci_dev *host_bridge) /* NVMe: quirk_amd_780_apc_msi() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	struct pci_dev *apc_bridge; /* NVMe: apc_bridge 변수 선언. */
 
-	apc_bridge = pci_get_slot(host_bridge->bus, PCI_DEVFN(1, 0));
-	if (apc_bridge) {
-		if (apc_bridge->device == 0x9602)
-			quirk_disable_msi(apc_bridge);
-		pci_dev_put(apc_bridge);
-	}
-}
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_AMD, 0x9600, quirk_amd_780_apc_msi);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_AMD, 0x9601, quirk_amd_780_apc_msi);
+	apc_bridge = pci_get_slot(host_bridge->bus, PCI_DEVFN(1, 0)); /* NVMe: pci_get_slot() 호출 (NVMe/PCIe 동작). */
+	if (apc_bridge) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		if (apc_bridge->device == 0x9602) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+			quirk_disable_msi(apc_bridge); /* NVMe: quirk_disable_msi() 호출 (NVMe/PCIe 동작). */
+		pci_dev_put(apc_bridge); /* NVMe: pci_dev_put() 호출 (NVMe/PCIe 동작). */
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_AMD, 0x9600, quirk_amd_780_apc_msi); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_AMD, 0x9601, quirk_amd_780_apc_msi); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
 
 /*
  * Go through the list of HyperTransport capabilities and return 1 if a HT
  * MSI capability is found and enabled.
  */
-static int msi_ht_cap_enabled(struct pci_dev *dev)
-{
-	int pos, ttl = PCI_FIND_CAP_TTL;
+static int msi_ht_cap_enabled(struct pci_dev *dev) /* NVMe: msi_ht_cap_enabled() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	int pos, ttl = PCI_FIND_CAP_TTL; /* NVMe: ttl 변수에 값 대입. */
 
-	pos = pci_find_ht_capability(dev, HT_CAPTYPE_MSI_MAPPING);
-	while (pos && ttl--) {
-		u8 flags;
+	pos = pci_find_ht_capability(dev, HT_CAPTYPE_MSI_MAPPING); /* NVMe: pci_find_ht_capability() 호출 (NVMe/PCIe 동작). */
+	while (pos && ttl--) { /* NVMe: 반복 처리 (NVMe/PCIe 레지스터/장치 순회). */
+		u8 flags; /* NVMe: flags 변수 선언. */
 
-		if (pci_read_config_byte(dev, pos + HT_MSI_FLAGS,
-					 &flags) == 0) {
-			pci_info(dev, "Found %s HT MSI Mapping\n",
-				flags & HT_MSI_FLAGS_ENABLE ?
-				"enabled" : "disabled");
-			return (flags & HT_MSI_FLAGS_ENABLE) != 0;
-		}
+		if (pci_read_config_byte(dev, pos + HT_MSI_FLAGS, /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+					 &flags) == 0) { /* NVMe: 제어문 블록 시작. */
+			pci_info(dev, "Found %s HT MSI Mapping\n", /* NVMe: pci_info() 함수 정의/매개변수 선언. */
+				flags & HT_MSI_FLAGS_ENABLE ? /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+				"enabled" : "disabled"); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+			return (flags & HT_MSI_FLAGS_ENABLE) != 0; /* NVMe: (flags & HT_MSI_FLAGS_ENABLE) != 0 값을 반환. */
+		} /* NVMe: 코드 블록/구조체 종료. */
 
-		pos = pci_find_next_ht_capability(dev, pos,
-						  HT_CAPTYPE_MSI_MAPPING);
-	}
-	return 0;
-}
+		pos = pci_find_next_ht_capability(dev, pos, /* NVMe: pos 변수에 값 대입. */
+						  HT_CAPTYPE_MSI_MAPPING); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+	} /* NVMe: 코드 블록/구조체 종료. */
+	return 0; /* NVMe: 0 값을 반환. */
+} /* NVMe: 코드 블록/구조체 종료. */
 
 /* Check the HyperTransport MSI mapping to know whether MSI is enabled or not */
-static void quirk_msi_ht_cap(struct pci_dev *dev)
-{
-	if (!msi_ht_cap_enabled(dev))
-		quirk_disable_msi(dev);
-}
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_SERVERWORKS, PCI_DEVICE_ID_SERVERWORKS_HT2000_PCIE,
-			quirk_msi_ht_cap);
+static void quirk_msi_ht_cap(struct pci_dev *dev) /* NVMe: quirk_msi_ht_cap() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	if (!msi_ht_cap_enabled(dev)) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		quirk_disable_msi(dev); /* NVMe: quirk_disable_msi() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_SERVERWORKS, PCI_DEVICE_ID_SERVERWORKS_HT2000_PCIE, /* NVMe: DECLARE_PCI_FIXUP_FINAL() 함수 정의/매개변수 선언. */
+			quirk_msi_ht_cap); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
 /*
  * The nVidia CK804 chipset may have 2 HT MSI mappings.  MSI is supported
  * if the MSI capability is set in any of these mappings.
  */
-static void quirk_nvidia_ck804_msi_ht_cap(struct pci_dev *dev)
-{
-	struct pci_dev *pdev;
+static void quirk_nvidia_ck804_msi_ht_cap(struct pci_dev *dev) /* NVMe: quirk_nvidia_ck804_msi_ht_cap() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	struct pci_dev *pdev; /* NVMe: pdev 변수 선언. */
 
 	/*
 	 * Check HT MSI cap on this chipset and the root one.  A single one
 	 * having MSI is enough to be sure that MSI is supported.
 	 */
-	pdev = pci_get_slot(dev->bus, 0);
-	if (!pdev)
-		return;
-	if (!msi_ht_cap_enabled(pdev))
-		quirk_msi_ht_cap(dev);
-	pci_dev_put(pdev);
-}
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_CK804_PCIE,
-			quirk_nvidia_ck804_msi_ht_cap);
+	pdev = pci_get_slot(dev->bus, 0); /* NVMe: pci_get_slot() 호출 (NVMe/PCIe 동작). */
+	if (!pdev) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
+	if (!msi_ht_cap_enabled(pdev)) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		quirk_msi_ht_cap(dev); /* NVMe: quirk_msi_ht_cap() 호출 (NVMe/PCIe 동작). */
+	pci_dev_put(pdev); /* NVMe: pci_dev_put() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_NVIDIA, PCI_DEVICE_ID_NVIDIA_CK804_PCIE, /* NVMe: DECLARE_PCI_FIXUP_FINAL() 함수 정의/매개변수 선언. */
+			quirk_nvidia_ck804_msi_ht_cap); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
 /* Force enable MSI mapping capability on HT bridges */
-static void ht_enable_msi_mapping(struct pci_dev *dev)
-{
-	int pos, ttl = PCI_FIND_CAP_TTL;
+static void ht_enable_msi_mapping(struct pci_dev *dev) /* NVMe: ht_enable_msi_mapping() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	int pos, ttl = PCI_FIND_CAP_TTL; /* NVMe: ttl 변수에 값 대입. */
 
-	pos = pci_find_ht_capability(dev, HT_CAPTYPE_MSI_MAPPING);
-	while (pos && ttl--) {
-		u8 flags;
+	pos = pci_find_ht_capability(dev, HT_CAPTYPE_MSI_MAPPING); /* NVMe: pci_find_ht_capability() 호출 (NVMe/PCIe 동작). */
+	while (pos && ttl--) { /* NVMe: 반복 처리 (NVMe/PCIe 레지스터/장치 순회). */
+		u8 flags; /* NVMe: flags 변수 선언. */
 
-		if (pci_read_config_byte(dev, pos + HT_MSI_FLAGS,
-					 &flags) == 0) {
-			pci_info(dev, "Enabling HT MSI Mapping\n");
+		if (pci_read_config_byte(dev, pos + HT_MSI_FLAGS, /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+					 &flags) == 0) { /* NVMe: 제어문 블록 시작. */
+			pci_info(dev, "Enabling HT MSI Mapping\n"); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
 
-			pci_write_config_byte(dev, pos + HT_MSI_FLAGS,
-					      flags | HT_MSI_FLAGS_ENABLE);
-		}
-		pos = pci_find_next_ht_capability(dev, pos,
-						  HT_CAPTYPE_MSI_MAPPING);
-	}
-}
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_SERVERWORKS,
-			 PCI_DEVICE_ID_SERVERWORKS_HT1000_PXB,
-			 ht_enable_msi_mapping);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_8132_BRIDGE,
-			 ht_enable_msi_mapping);
+			pci_write_config_byte(dev, pos + HT_MSI_FLAGS, /* NVMe: pci_write_config_byte() 함수 정의/매개변수 선언. */
+					      flags | HT_MSI_FLAGS_ENABLE); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+		} /* NVMe: 코드 블록/구조체 종료. */
+		pos = pci_find_next_ht_capability(dev, pos, /* NVMe: pos 변수에 값 대입. */
+						  HT_CAPTYPE_MSI_MAPPING); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_SERVERWORKS, /* NVMe: DECLARE_PCI_FIXUP_HEADER() 함수 정의/매개변수 선언. */
+			 PCI_DEVICE_ID_SERVERWORKS_HT1000_PXB, /* NVMe: 인자/초기자 나열 (연속). */
+			 ht_enable_msi_mapping); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_8132_BRIDGE, /* NVMe: DECLARE_PCI_FIXUP_HEADER() 함수 정의/매개변수 선언. */
+			 ht_enable_msi_mapping); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
 /*
  * The P5N32-SLI motherboards from Asus have a problem with MSI
  * for the MCP55 NIC. It is not yet determined whether the MSI problem
  * also affects other devices. As for now, turn off MSI for this device.
  */
-static void nvenet_msi_disable(struct pci_dev *dev)
-{
-	const char *board_name = dmi_get_system_info(DMI_BOARD_NAME);
+static void nvenet_msi_disable(struct pci_dev *dev) /* NVMe: nvenet_msi_disable() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	const char *board_name = dmi_get_system_info(DMI_BOARD_NAME); /* NVMe: dmi_get_system_info() 호출 (NVMe/PCIe 동작). */
 
-	if (board_name &&
-	    (strstr(board_name, "P5N32-SLI PREMIUM") ||
-	     strstr(board_name, "P5N32-E SLI"))) {
-		pci_info(dev, "Disabling MSI for MCP55 NIC on P5N32-SLI\n");
-		dev->no_msi = 1;
-	}
-}
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_NVIDIA,
-			PCI_DEVICE_ID_NVIDIA_NVENET_15,
-			nvenet_msi_disable);
+	if (board_name && /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+	    (strstr(board_name, "P5N32-SLI PREMIUM") || /* NVMe: strstr() 함수 정의/매개변수 선언. */
+	     strstr(board_name, "P5N32-E SLI"))) { /* NVMe: strstr() 함수 정의/매개변수 선언. */
+		pci_info(dev, "Disabling MSI for MCP55 NIC on P5N32-SLI\n"); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
+		dev->no_msi = 1; /* NVMe: no_msi 변수에 값 대입. */
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_NVIDIA, /* NVMe: DECLARE_PCI_FIXUP_EARLY() 함수 정의/매개변수 선언. */
+			PCI_DEVICE_ID_NVIDIA_NVENET_15, /* NVMe: 인자/초기자 나열 (연속). */
+			nvenet_msi_disable); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
 /*
  * PCIe spec r6.0 sec 6.1.4.3 says that if MSI/MSI-X is enabled, the device
@@ -2971,57 +2971,57 @@ DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_NVIDIA,
  *   NVMe: Tegra 플랫폼의 NVMe 장치는 endpoint MSI/MSI-X는 정상 사용 가능하지만,
  *   Root Port의 PME/AER 이벤트 처리 경로가 INTx 기반으로 동작함을 의미한다.
  */
-static void pci_quirk_nvidia_tegra_disable_rp_msi(struct pci_dev *dev)
-{
+static void pci_quirk_nvidia_tegra_disable_rp_msi(struct pci_dev *dev) /* NVMe: pci_quirk_nvidia_tegra_disable_rp_msi() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
 	dev->no_msi = 1; /* NVMe: 해당 Root Port에서 MSI 비활성화 플래그 설정. */
-}
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_NVIDIA, 0x1ad0,
-			      PCI_CLASS_BRIDGE_PCI, 8,
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_NVIDIA, 0x1ad0, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+			      PCI_CLASS_BRIDGE_PCI, 8, /* NVMe: 인자/초기자 나열 (연속). */
 			      pci_quirk_nvidia_tegra_disable_rp_msi); /* NVMe: Tegra Root Port에 대해 early 단계에서 MSI disable. */
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_NVIDIA, 0x1ad1,
-			      PCI_CLASS_BRIDGE_PCI, 8,
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_NVIDIA, 0x1ad1, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+			      PCI_CLASS_BRIDGE_PCI, 8, /* NVMe: 인자/초기자 나열 (연속). */
 			      pci_quirk_nvidia_tegra_disable_rp_msi); /* NVMe: Tegra Root Port에 대해 early 단계에서 MSI disable. */
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_NVIDIA, 0x1ad2,
-			      PCI_CLASS_BRIDGE_PCI, 8,
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_NVIDIA, 0x1ad2, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+			      PCI_CLASS_BRIDGE_PCI, 8, /* NVMe: 인자/초기자 나열 (연속). */
 			      pci_quirk_nvidia_tegra_disable_rp_msi); /* NVMe: Tegra Root Port에 대해 early 단계에서 MSI disable. */
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_NVIDIA, 0x0bf0,
-			      PCI_CLASS_BRIDGE_PCI, 8,
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_NVIDIA, 0x0bf0, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+			      PCI_CLASS_BRIDGE_PCI, 8, /* NVMe: 인자/초기자 나열 (연속). */
 			      pci_quirk_nvidia_tegra_disable_rp_msi); /* NVMe: Tegra Root Port에 대해 early 단계에서 MSI disable. */
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_NVIDIA, 0x0bf1,
-			      PCI_CLASS_BRIDGE_PCI, 8,
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_NVIDIA, 0x0bf1, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+			      PCI_CLASS_BRIDGE_PCI, 8, /* NVMe: 인자/초기자 나열 (연속). */
 			      pci_quirk_nvidia_tegra_disable_rp_msi); /* NVMe: Tegra Root Port에 대해 early 단계에서 MSI disable. */
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_NVIDIA, 0x0e1c,
-			      PCI_CLASS_BRIDGE_PCI, 8,
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_NVIDIA, 0x0e1c, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+			      PCI_CLASS_BRIDGE_PCI, 8, /* NVMe: 인자/초기자 나열 (연속). */
 			      pci_quirk_nvidia_tegra_disable_rp_msi); /* NVMe: Tegra Root Port에 대해 early 단계에서 MSI disable. */
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_NVIDIA, 0x0e1d,
-			      PCI_CLASS_BRIDGE_PCI, 8,
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_NVIDIA, 0x0e1d, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+			      PCI_CLASS_BRIDGE_PCI, 8, /* NVMe: 인자/초기자 나열 (연속). */
 			      pci_quirk_nvidia_tegra_disable_rp_msi); /* NVMe: Tegra Root Port에 대해 early 단계에서 MSI disable. */
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_NVIDIA, 0x0e12,
-			      PCI_CLASS_BRIDGE_PCI, 8,
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_NVIDIA, 0x0e12, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+			      PCI_CLASS_BRIDGE_PCI, 8, /* NVMe: 인자/초기자 나열 (연속). */
 			      pci_quirk_nvidia_tegra_disable_rp_msi); /* NVMe: Tegra Root Port에 대해 early 단계에서 MSI disable. */
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_NVIDIA, 0x0e13,
-			      PCI_CLASS_BRIDGE_PCI, 8,
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_NVIDIA, 0x0e13, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+			      PCI_CLASS_BRIDGE_PCI, 8, /* NVMe: 인자/초기자 나열 (연속). */
 			      pci_quirk_nvidia_tegra_disable_rp_msi); /* NVMe: Tegra Root Port에 대해 early 단계에서 MSI disable. */
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_NVIDIA, 0x0fae,
-			      PCI_CLASS_BRIDGE_PCI, 8,
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_NVIDIA, 0x0fae, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+			      PCI_CLASS_BRIDGE_PCI, 8, /* NVMe: 인자/초기자 나열 (연속). */
 			      pci_quirk_nvidia_tegra_disable_rp_msi); /* NVMe: Tegra Root Port에 대해 early 단계에서 MSI disable. */
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_NVIDIA, 0x0faf,
-			      PCI_CLASS_BRIDGE_PCI, 8,
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_NVIDIA, 0x0faf, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+			      PCI_CLASS_BRIDGE_PCI, 8, /* NVMe: 인자/초기자 나열 (연속). */
 			      pci_quirk_nvidia_tegra_disable_rp_msi); /* NVMe: Tegra Root Port에 대해 early 단계에서 MSI disable. */
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_NVIDIA, 0x10e5,
-			      PCI_CLASS_BRIDGE_PCI, 8,
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_NVIDIA, 0x10e5, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+			      PCI_CLASS_BRIDGE_PCI, 8, /* NVMe: 인자/초기자 나열 (연속). */
 			      pci_quirk_nvidia_tegra_disable_rp_msi); /* NVMe: Tegra Root Port에 대해 early 단계에서 MSI disable. */
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_NVIDIA, 0x10e6,
-			      PCI_CLASS_BRIDGE_PCI, 8,
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_NVIDIA, 0x10e6, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+			      PCI_CLASS_BRIDGE_PCI, 8, /* NVMe: 인자/초기자 나열 (연속). */
 			      pci_quirk_nvidia_tegra_disable_rp_msi); /* NVMe: Tegra Root Port에 대해 early 단계에서 MSI disable. */
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_NVIDIA, 0x229a,
-			      PCI_CLASS_BRIDGE_PCI, 8,
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_NVIDIA, 0x229a, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+			      PCI_CLASS_BRIDGE_PCI, 8, /* NVMe: 인자/초기자 나열 (연속). */
 			      pci_quirk_nvidia_tegra_disable_rp_msi); /* NVMe: Tegra Root Port에 대해 early 단계에서 MSI disable. */
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_NVIDIA, 0x229c,
-			      PCI_CLASS_BRIDGE_PCI, 8,
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_NVIDIA, 0x229c, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+			      PCI_CLASS_BRIDGE_PCI, 8, /* NVMe: 인자/초기자 나열 (연속). */
 			      pci_quirk_nvidia_tegra_disable_rp_msi); /* NVMe: Tegra Root Port에 대해 early 단계에서 MSI disable. */
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_NVIDIA, 0x229e,
-			      PCI_CLASS_BRIDGE_PCI, 8,
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_NVIDIA, 0x229e, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+			      PCI_CLASS_BRIDGE_PCI, 8, /* NVMe: 인자/초기자 나열 (연속). */
 			      pci_quirk_nvidia_tegra_disable_rp_msi); /* NVMe: Tegra Root Port에 대해 early 단계에서 MSI disable. */
 
 /*
@@ -3034,329 +3034,329 @@ DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_NVIDIA, 0x229e,
  * properly, so let's make sure that we have it set correctly.
  * Note that this is an undocumented register.
  */
-static void nvbridge_check_legacy_irq_routing(struct pci_dev *dev)
-{
-	u32 cfg;
+static void nvbridge_check_legacy_irq_routing(struct pci_dev *dev) /* NVMe: nvbridge_check_legacy_irq_routing() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	u32 cfg; /* NVMe: cfg 변수 선언. */
 
-	if (!pci_find_capability(dev, PCI_CAP_ID_HT))
-		return;
+	if (!pci_find_capability(dev, PCI_CAP_ID_HT)) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
 
-	pci_read_config_dword(dev, 0x74, &cfg);
+	pci_read_config_dword(dev, 0x74, &cfg); /* NVMe: pci_read_config_dword() 호출 (NVMe/PCIe 동작). */
 
-	if (cfg & ((1 << 2) | (1 << 15))) {
-		pr_info("Rewriting IRQ routing register on MCP55\n");
-		cfg &= ~((1 << 2) | (1 << 15));
-		pci_write_config_dword(dev, 0x74, cfg);
-	}
-}
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_NVIDIA,
-			PCI_DEVICE_ID_NVIDIA_MCP55_BRIDGE_V0,
-			nvbridge_check_legacy_irq_routing);
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_NVIDIA,
-			PCI_DEVICE_ID_NVIDIA_MCP55_BRIDGE_V4,
-			nvbridge_check_legacy_irq_routing);
+	if (cfg & ((1 << 2) | (1 << 15))) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pr_info("Rewriting IRQ routing register on MCP55\n"); /* NVMe: pr_info() 호출 (NVMe/PCIe 동작). */
+		cfg &= ~((1 << 2) | (1 << 15)); /* NVMe: & 변수에 값 대입. */
+		pci_write_config_dword(dev, 0x74, cfg); /* NVMe: pci_write_config_dword() 호출 (NVMe/PCIe 동작). */
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_NVIDIA, /* NVMe: DECLARE_PCI_FIXUP_EARLY() 함수 정의/매개변수 선언. */
+			PCI_DEVICE_ID_NVIDIA_MCP55_BRIDGE_V0, /* NVMe: 인자/초기자 나열 (연속). */
+			nvbridge_check_legacy_irq_routing); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_NVIDIA, /* NVMe: DECLARE_PCI_FIXUP_EARLY() 함수 정의/매개변수 선언. */
+			PCI_DEVICE_ID_NVIDIA_MCP55_BRIDGE_V4, /* NVMe: 인자/초기자 나열 (연속). */
+			nvbridge_check_legacy_irq_routing); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
-static int ht_check_msi_mapping(struct pci_dev *dev)
-{
-	int pos, ttl = PCI_FIND_CAP_TTL;
-	int found = 0;
+static int ht_check_msi_mapping(struct pci_dev *dev) /* NVMe: ht_check_msi_mapping() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	int pos, ttl = PCI_FIND_CAP_TTL; /* NVMe: ttl 변수에 값 대입. */
+	int found = 0; /* NVMe: found 변수에 값 대입. */
 
 	/* Check if there is HT MSI cap or enabled on this device */
-	pos = pci_find_ht_capability(dev, HT_CAPTYPE_MSI_MAPPING);
-	while (pos && ttl--) {
-		u8 flags;
+	pos = pci_find_ht_capability(dev, HT_CAPTYPE_MSI_MAPPING); /* NVMe: pci_find_ht_capability() 호출 (NVMe/PCIe 동작). */
+	while (pos && ttl--) { /* NVMe: 반복 처리 (NVMe/PCIe 레지스터/장치 순회). */
+		u8 flags; /* NVMe: flags 변수 선언. */
 
-		if (found < 1)
-			found = 1;
-		if (pci_read_config_byte(dev, pos + HT_MSI_FLAGS,
-					 &flags) == 0) {
-			if (flags & HT_MSI_FLAGS_ENABLE) {
-				if (found < 2) {
-					found = 2;
-					break;
-				}
-			}
-		}
-		pos = pci_find_next_ht_capability(dev, pos,
-						  HT_CAPTYPE_MSI_MAPPING);
-	}
+		if (found < 1) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+			found = 1; /* NVMe: found 변수에 값 대입. */
+		if (pci_read_config_byte(dev, pos + HT_MSI_FLAGS, /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+					 &flags) == 0) { /* NVMe: 제어문 블록 시작. */
+			if (flags & HT_MSI_FLAGS_ENABLE) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+				if (found < 2) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+					found = 2; /* NVMe: found 변수에 값 대입. */
+					break; /* NVMe: 반복문/분기 종료. */
+				} /* NVMe: 코드 블록/구조체 종료. */
+			} /* NVMe: 코드 블록/구조체 종료. */
+		} /* NVMe: 코드 블록/구조체 종료. */
+		pos = pci_find_next_ht_capability(dev, pos, /* NVMe: pos 변수에 값 대입. */
+						  HT_CAPTYPE_MSI_MAPPING); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+	} /* NVMe: 코드 블록/구조체 종료. */
 
-	return found;
-}
+	return found; /* NVMe: found 값을 반환. */
+} /* NVMe: 코드 블록/구조체 종료. */
 
-static int host_bridge_with_leaf(struct pci_dev *host_bridge)
-{
-	struct pci_dev *dev;
-	int pos;
-	int i, dev_no;
-	int found = 0;
+static int host_bridge_with_leaf(struct pci_dev *host_bridge) /* NVMe: host_bridge_with_leaf() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	struct pci_dev *dev; /* NVMe: dev 변수 선언. */
+	int pos; /* NVMe: pos 변수 선언. */
+	int i, dev_no; /* NVMe: dev_no 변수 선언. */
+	int found = 0; /* NVMe: found 변수에 값 대입. */
 
-	dev_no = host_bridge->devfn >> 3;
-	for (i = dev_no + 1; i < 0x20; i++) {
-		dev = pci_get_slot(host_bridge->bus, PCI_DEVFN(i, 0));
-		if (!dev)
-			continue;
+	dev_no = host_bridge->devfn >> 3; /* NVMe: dev_no 변수에 값 대입. */
+	for (i = dev_no + 1; i < 0x20; i++) { /* NVMe: 반복 처리 (NVMe/PCIe 레지스터/장치 순회). */
+		dev = pci_get_slot(host_bridge->bus, PCI_DEVFN(i, 0)); /* NVMe: pci_get_slot() 호출 (NVMe/PCIe 동작). */
+		if (!dev) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+			continue; /* NVMe: 다음 반복 계속. */
 
 		/* found next host bridge? */
-		pos = pci_find_ht_capability(dev, HT_CAPTYPE_SLAVE);
-		if (pos != 0) {
-			pci_dev_put(dev);
-			break;
-		}
+		pos = pci_find_ht_capability(dev, HT_CAPTYPE_SLAVE); /* NVMe: pci_find_ht_capability() 호출 (NVMe/PCIe 동작). */
+		if (pos != 0) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+			pci_dev_put(dev); /* NVMe: pci_dev_put() 호출 (NVMe/PCIe 동작). */
+			break; /* NVMe: 반복문/분기 종료. */
+		} /* NVMe: 코드 블록/구조체 종료. */
 
-		if (ht_check_msi_mapping(dev)) {
-			found = 1;
-			pci_dev_put(dev);
-			break;
-		}
-		pci_dev_put(dev);
-	}
+		if (ht_check_msi_mapping(dev)) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+			found = 1; /* NVMe: found 변수에 값 대입. */
+			pci_dev_put(dev); /* NVMe: pci_dev_put() 호출 (NVMe/PCIe 동작). */
+			break; /* NVMe: 반복문/분기 종료. */
+		} /* NVMe: 코드 블록/구조체 종료. */
+		pci_dev_put(dev); /* NVMe: pci_dev_put() 호출 (NVMe/PCIe 동작). */
+	} /* NVMe: 코드 블록/구조체 종료. */
 
-	return found;
-}
+	return found; /* NVMe: found 값을 반환. */
+} /* NVMe: 코드 블록/구조체 종료. */
 
 #define PCI_HT_CAP_SLAVE_CTRL0     4    /* link control */
 #define PCI_HT_CAP_SLAVE_CTRL1     8    /* link control to */
 
-static int is_end_of_ht_chain(struct pci_dev *dev)
-{
-	int pos, ctrl_off;
-	int end = 0;
-	u16 flags, ctrl;
+static int is_end_of_ht_chain(struct pci_dev *dev) /* NVMe: is_end_of_ht_chain() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	int pos, ctrl_off; /* NVMe: ctrl_off 변수 선언. */
+	int end = 0; /* NVMe: end 변수에 값 대입. */
+	u16 flags, ctrl; /* NVMe: ctrl 변수 선언. */
 
-	pos = pci_find_ht_capability(dev, HT_CAPTYPE_SLAVE);
+	pos = pci_find_ht_capability(dev, HT_CAPTYPE_SLAVE); /* NVMe: pci_find_ht_capability() 호출 (NVMe/PCIe 동작). */
 
-	if (!pos)
-		goto out;
+	if (!pos) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		goto out; /* NVMe: out 레이블로 제어 이동. */
 
-	pci_read_config_word(dev, pos + PCI_CAP_FLAGS, &flags);
+	pci_read_config_word(dev, pos + PCI_CAP_FLAGS, &flags); /* NVMe: pci_read_config_word() 호출 (NVMe/PCIe 동작). */
 
-	ctrl_off = ((flags >> 10) & 1) ?
-			PCI_HT_CAP_SLAVE_CTRL0 : PCI_HT_CAP_SLAVE_CTRL1;
-	pci_read_config_word(dev, pos + ctrl_off, &ctrl);
+	ctrl_off = ((flags >> 10) & 1) ? /* NVMe: ctrl_off 변수에 값 대입. */
+			PCI_HT_CAP_SLAVE_CTRL0 : PCI_HT_CAP_SLAVE_CTRL1; /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+	pci_read_config_word(dev, pos + ctrl_off, &ctrl); /* NVMe: pci_read_config_word() 호출 (NVMe/PCIe 동작). */
 
-	if (ctrl & (1 << 6))
-		end = 1;
+	if (ctrl & (1 << 6)) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		end = 1; /* NVMe: end 변수에 값 대입. */
 
-out:
-	return end;
-}
+out: /* NVMe: out 레이블 (NVMe 초기화/오류 복구 경로). */
+	return end; /* NVMe: end 값을 반환. */
+} /* NVMe: 코드 블록/구조체 종료. */
 
-static void nv_ht_enable_msi_mapping(struct pci_dev *dev)
-{
-	struct pci_dev *host_bridge;
-	int pos;
-	int i, dev_no;
-	int found = 0;
+static void nv_ht_enable_msi_mapping(struct pci_dev *dev) /* NVMe: nv_ht_enable_msi_mapping() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	struct pci_dev *host_bridge; /* NVMe: host_bridge 변수 선언. */
+	int pos; /* NVMe: pos 변수 선언. */
+	int i, dev_no; /* NVMe: dev_no 변수 선언. */
+	int found = 0; /* NVMe: found 변수에 값 대입. */
 
-	dev_no = dev->devfn >> 3;
-	for (i = dev_no; i >= 0; i--) {
-		host_bridge = pci_get_slot(dev->bus, PCI_DEVFN(i, 0));
-		if (!host_bridge)
-			continue;
+	dev_no = dev->devfn >> 3; /* NVMe: dev_no 변수에 값 대입. */
+	for (i = dev_no; i >= 0; i--) { /* NVMe: 반복 처리 (NVMe/PCIe 레지스터/장치 순회). */
+		host_bridge = pci_get_slot(dev->bus, PCI_DEVFN(i, 0)); /* NVMe: pci_get_slot() 호출 (NVMe/PCIe 동작). */
+		if (!host_bridge) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+			continue; /* NVMe: 다음 반복 계속. */
 
-		pos = pci_find_ht_capability(host_bridge, HT_CAPTYPE_SLAVE);
-		if (pos != 0) {
-			found = 1;
-			break;
-		}
-		pci_dev_put(host_bridge);
-	}
+		pos = pci_find_ht_capability(host_bridge, HT_CAPTYPE_SLAVE); /* NVMe: pci_find_ht_capability() 호출 (NVMe/PCIe 동작). */
+		if (pos != 0) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+			found = 1; /* NVMe: found 변수에 값 대입. */
+			break; /* NVMe: 반복문/분기 종료. */
+		} /* NVMe: 코드 블록/구조체 종료. */
+		pci_dev_put(host_bridge); /* NVMe: pci_dev_put() 호출 (NVMe/PCIe 동작). */
+	} /* NVMe: 코드 블록/구조체 종료. */
 
-	if (!found)
-		return;
+	if (!found) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
 
 	/* don't enable end_device/host_bridge with leaf directly here */
-	if (host_bridge == dev && is_end_of_ht_chain(host_bridge) &&
-	    host_bridge_with_leaf(host_bridge))
-		goto out;
+	if (host_bridge == dev && is_end_of_ht_chain(host_bridge) && /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+	    host_bridge_with_leaf(host_bridge)) /* NVMe: host_bridge_with_leaf() 함수 정의/매개변수 선언. */
+		goto out; /* NVMe: out 레이블로 제어 이동. */
 
 	/* root did that ! */
-	if (msi_ht_cap_enabled(host_bridge))
-		goto out;
+	if (msi_ht_cap_enabled(host_bridge)) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		goto out; /* NVMe: out 레이블로 제어 이동. */
 
-	ht_enable_msi_mapping(dev);
+	ht_enable_msi_mapping(dev); /* NVMe: ht_enable_msi_mapping() 호출 (NVMe/PCIe 동작). */
 
-out:
-	pci_dev_put(host_bridge);
-}
+out: /* NVMe: out 레이블 (NVMe 초기화/오류 복구 경로). */
+	pci_dev_put(host_bridge); /* NVMe: pci_dev_put() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
 
-static void ht_disable_msi_mapping(struct pci_dev *dev)
-{
-	int pos, ttl = PCI_FIND_CAP_TTL;
+static void ht_disable_msi_mapping(struct pci_dev *dev) /* NVMe: ht_disable_msi_mapping() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	int pos, ttl = PCI_FIND_CAP_TTL; /* NVMe: ttl 변수에 값 대입. */
 
-	pos = pci_find_ht_capability(dev, HT_CAPTYPE_MSI_MAPPING);
-	while (pos && ttl--) {
-		u8 flags;
+	pos = pci_find_ht_capability(dev, HT_CAPTYPE_MSI_MAPPING); /* NVMe: pci_find_ht_capability() 호출 (NVMe/PCIe 동작). */
+	while (pos && ttl--) { /* NVMe: 반복 처리 (NVMe/PCIe 레지스터/장치 순회). */
+		u8 flags; /* NVMe: flags 변수 선언. */
 
-		if (pci_read_config_byte(dev, pos + HT_MSI_FLAGS,
-					 &flags) == 0) {
-			pci_info(dev, "Disabling HT MSI Mapping\n");
+		if (pci_read_config_byte(dev, pos + HT_MSI_FLAGS, /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+					 &flags) == 0) { /* NVMe: 제어문 블록 시작. */
+			pci_info(dev, "Disabling HT MSI Mapping\n"); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
 
-			pci_write_config_byte(dev, pos + HT_MSI_FLAGS,
-					      flags & ~HT_MSI_FLAGS_ENABLE);
-		}
-		pos = pci_find_next_ht_capability(dev, pos,
-						  HT_CAPTYPE_MSI_MAPPING);
-	}
-}
+			pci_write_config_byte(dev, pos + HT_MSI_FLAGS, /* NVMe: pci_write_config_byte() 함수 정의/매개변수 선언. */
+					      flags & ~HT_MSI_FLAGS_ENABLE); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+		} /* NVMe: 코드 블록/구조체 종료. */
+		pos = pci_find_next_ht_capability(dev, pos, /* NVMe: pos 변수에 값 대입. */
+						  HT_CAPTYPE_MSI_MAPPING); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
 
-static void __nv_msi_ht_cap_quirk(struct pci_dev *dev, int all)
-{
-	struct pci_dev *host_bridge;
-	int pos;
-	int found;
+static void __nv_msi_ht_cap_quirk(struct pci_dev *dev, int all) /* NVMe: __nv_msi_ht_cap_quirk() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	struct pci_dev *host_bridge; /* NVMe: host_bridge 변수 선언. */
+	int pos; /* NVMe: pos 변수 선언. */
+	int found; /* NVMe: found 변수 선언. */
 
-	if (!pci_msi_enabled())
-		return;
+	if (!pci_msi_enabled()) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
 
 	/* check if there is HT MSI cap or enabled on this device */
-	found = ht_check_msi_mapping(dev);
+	found = ht_check_msi_mapping(dev); /* NVMe: ht_check_msi_mapping() 호출 (NVMe/PCIe 동작). */
 
 	/* no HT MSI CAP */
-	if (found == 0)
-		return;
+	if (found == 0) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
 
 	/*
 	 * HT MSI mapping should be disabled on devices that are below
 	 * a non-HyperTransport host bridge. Locate the host bridge.
 	 */
-	host_bridge = pci_get_domain_bus_and_slot(pci_domain_nr(dev->bus), 0,
-						  PCI_DEVFN(0, 0));
-	if (host_bridge == NULL) {
-		pci_warn(dev, "nv_msi_ht_cap_quirk didn't locate host bridge\n");
-		return;
-	}
+	host_bridge = pci_get_domain_bus_and_slot(pci_domain_nr(dev->bus), 0, /* NVMe: host_bridge 변수에 값 대입. */
+						  PCI_DEVFN(0, 0)); /* NVMe: PCI_DEVFN() 호출 (NVMe/PCIe 동작). */
+	if (host_bridge == NULL) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pci_warn(dev, "nv_msi_ht_cap_quirk didn't locate host bridge\n"); /* NVMe: pci_warn() 호출 (NVMe/PCIe 동작). */
+		return; /* NVMe: 함수 종료 및 반환. */
+	} /* NVMe: 코드 블록/구조체 종료. */
 
-	pos = pci_find_ht_capability(host_bridge, HT_CAPTYPE_SLAVE);
-	if (pos != 0) {
+	pos = pci_find_ht_capability(host_bridge, HT_CAPTYPE_SLAVE); /* NVMe: pci_find_ht_capability() 호출 (NVMe/PCIe 동작). */
+	if (pos != 0) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
 		/* Host bridge is to HT */
-		if (found == 1) {
+		if (found == 1) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
 			/* it is not enabled, try to enable it */
-			if (all)
-				ht_enable_msi_mapping(dev);
-			else
-				nv_ht_enable_msi_mapping(dev);
-		}
-		goto out;
-	}
+			if (all) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+				ht_enable_msi_mapping(dev); /* NVMe: ht_enable_msi_mapping() 호출 (NVMe/PCIe 동작). */
+			else /* NVMe: 조걶 분기 대안 경로. */
+				nv_ht_enable_msi_mapping(dev); /* NVMe: nv_ht_enable_msi_mapping() 호출 (NVMe/PCIe 동작). */
+		} /* NVMe: 코드 블록/구조체 종료. */
+		goto out; /* NVMe: out 레이블로 제어 이동. */
+	} /* NVMe: 코드 블록/구조체 종료. */
 
 	/* HT MSI is not enabled */
-	if (found == 1)
-		goto out;
+	if (found == 1) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		goto out; /* NVMe: out 레이블로 제어 이동. */
 
 	/* Host bridge is not to HT, disable HT MSI mapping on this device */
-	ht_disable_msi_mapping(dev);
+	ht_disable_msi_mapping(dev); /* NVMe: ht_disable_msi_mapping() 호출 (NVMe/PCIe 동작). */
 
-out:
-	pci_dev_put(host_bridge);
-}
+out: /* NVMe: out 레이블 (NVMe 초기화/오류 복구 경로). */
+	pci_dev_put(host_bridge); /* NVMe: pci_dev_put() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
 
-static void nv_msi_ht_cap_quirk_all(struct pci_dev *dev)
-{
-	return __nv_msi_ht_cap_quirk(dev, 1);
-}
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_AL, PCI_ANY_ID, nv_msi_ht_cap_quirk_all);
-DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_AL, PCI_ANY_ID, nv_msi_ht_cap_quirk_all);
+static void nv_msi_ht_cap_quirk_all(struct pci_dev *dev) /* NVMe: nv_msi_ht_cap_quirk_all() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	return __nv_msi_ht_cap_quirk(dev, 1); /* NVMe: __nv_msi_ht_cap_quirk(dev, 1) 값을 반환. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_AL, PCI_ANY_ID, nv_msi_ht_cap_quirk_all); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_AL, PCI_ANY_ID, nv_msi_ht_cap_quirk_all); /* NVMe: DECLARE_PCI_FIXUP_RESUME_EARLY() 호출 (NVMe/PCIe 동작). */
 
-static void nv_msi_ht_cap_quirk_leaf(struct pci_dev *dev)
-{
-	return __nv_msi_ht_cap_quirk(dev, 0);
-}
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_NVIDIA, PCI_ANY_ID, nv_msi_ht_cap_quirk_leaf);
-DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_NVIDIA, PCI_ANY_ID, nv_msi_ht_cap_quirk_leaf);
+static void nv_msi_ht_cap_quirk_leaf(struct pci_dev *dev) /* NVMe: nv_msi_ht_cap_quirk_leaf() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	return __nv_msi_ht_cap_quirk(dev, 0); /* NVMe: __nv_msi_ht_cap_quirk(dev, 0) 값을 반환. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_NVIDIA, PCI_ANY_ID, nv_msi_ht_cap_quirk_leaf); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_NVIDIA, PCI_ANY_ID, nv_msi_ht_cap_quirk_leaf); /* NVMe: DECLARE_PCI_FIXUP_RESUME_EARLY() 호출 (NVMe/PCIe 동작). */
 
-static void quirk_msi_intx_disable_bug(struct pci_dev *dev)
-{
-	dev->dev_flags |= PCI_DEV_FLAGS_MSI_INTX_DISABLE_BUG;
-}
+static void quirk_msi_intx_disable_bug(struct pci_dev *dev) /* NVMe: quirk_msi_intx_disable_bug() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	dev->dev_flags |= PCI_DEV_FLAGS_MSI_INTX_DISABLE_BUG; /* NVMe: | 변수에 값 대입. */
+} /* NVMe: 코드 블록/구조체 종료. */
 
-static void quirk_msi_intx_disable_ati_bug(struct pci_dev *dev)
-{
-	struct pci_dev *p;
+static void quirk_msi_intx_disable_ati_bug(struct pci_dev *dev) /* NVMe: quirk_msi_intx_disable_ati_bug() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	struct pci_dev *p; /* NVMe: p 변수 선언. */
 
 	/*
 	 * SB700 MSI issue will be fixed at HW level from revision A21;
 	 * we need check PCI REVISION ID of SMBus controller to get SB700
 	 * revision.
 	 */
-	p = pci_get_device(PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_SBX00_SMBUS,
-			   NULL);
-	if (!p)
-		return;
+	p = pci_get_device(PCI_VENDOR_ID_ATI, PCI_DEVICE_ID_ATI_SBX00_SMBUS, /* NVMe: p 변수에 값 대입. */
+			   NULL); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+	if (!p) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
 
-	if ((p->revision < 0x3B) && (p->revision >= 0x30))
-		dev->dev_flags |= PCI_DEV_FLAGS_MSI_INTX_DISABLE_BUG;
-	pci_dev_put(p);
-}
+	if ((p->revision < 0x3B) && (p->revision >= 0x30)) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		dev->dev_flags |= PCI_DEV_FLAGS_MSI_INTX_DISABLE_BUG; /* NVMe: | 변수에 값 대입. */
+	pci_dev_put(p); /* NVMe: pci_dev_put() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
 
-static void quirk_msi_intx_disable_qca_bug(struct pci_dev *dev)
-{
+static void quirk_msi_intx_disable_qca_bug(struct pci_dev *dev) /* NVMe: quirk_msi_intx_disable_qca_bug() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
 	/* AR816X/AR817X/E210X MSI is fixed at HW level from revision 0x18 */
-	if (dev->revision < 0x18) {
-		pci_info(dev, "set MSI_INTX_DISABLE_BUG flag\n");
-		dev->dev_flags |= PCI_DEV_FLAGS_MSI_INTX_DISABLE_BUG;
-	}
-}
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_BROADCOM,
-			PCI_DEVICE_ID_TIGON3_5780,
-			quirk_msi_intx_disable_bug);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_BROADCOM,
-			PCI_DEVICE_ID_TIGON3_5780S,
-			quirk_msi_intx_disable_bug);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_BROADCOM,
-			PCI_DEVICE_ID_TIGON3_5714,
-			quirk_msi_intx_disable_bug);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_BROADCOM,
-			PCI_DEVICE_ID_TIGON3_5714S,
-			quirk_msi_intx_disable_bug);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_BROADCOM,
-			PCI_DEVICE_ID_TIGON3_5715,
-			quirk_msi_intx_disable_bug);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_BROADCOM,
-			PCI_DEVICE_ID_TIGON3_5715S,
-			quirk_msi_intx_disable_bug);
+	if (dev->revision < 0x18) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pci_info(dev, "set MSI_INTX_DISABLE_BUG flag\n"); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
+		dev->dev_flags |= PCI_DEV_FLAGS_MSI_INTX_DISABLE_BUG; /* NVMe: | 변수에 값 대입. */
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_BROADCOM, /* NVMe: DECLARE_PCI_FIXUP_FINAL() 함수 정의/매개변수 선언. */
+			PCI_DEVICE_ID_TIGON3_5780, /* NVMe: 인자/초기자 나열 (연속). */
+			quirk_msi_intx_disable_bug); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_BROADCOM, /* NVMe: DECLARE_PCI_FIXUP_FINAL() 함수 정의/매개변수 선언. */
+			PCI_DEVICE_ID_TIGON3_5780S, /* NVMe: 인자/초기자 나열 (연속). */
+			quirk_msi_intx_disable_bug); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_BROADCOM, /* NVMe: DECLARE_PCI_FIXUP_FINAL() 함수 정의/매개변수 선언. */
+			PCI_DEVICE_ID_TIGON3_5714, /* NVMe: 인자/초기자 나열 (연속). */
+			quirk_msi_intx_disable_bug); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_BROADCOM, /* NVMe: DECLARE_PCI_FIXUP_FINAL() 함수 정의/매개변수 선언. */
+			PCI_DEVICE_ID_TIGON3_5714S, /* NVMe: 인자/초기자 나열 (연속). */
+			quirk_msi_intx_disable_bug); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_BROADCOM, /* NVMe: DECLARE_PCI_FIXUP_FINAL() 함수 정의/매개변수 선언. */
+			PCI_DEVICE_ID_TIGON3_5715, /* NVMe: 인자/초기자 나열 (연속). */
+			quirk_msi_intx_disable_bug); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_BROADCOM, /* NVMe: DECLARE_PCI_FIXUP_FINAL() 함수 정의/매개변수 선언. */
+			PCI_DEVICE_ID_TIGON3_5715S, /* NVMe: 인자/초기자 나열 (연속). */
+			quirk_msi_intx_disable_bug); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x4390,
-			quirk_msi_intx_disable_ati_bug);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x4391,
-			quirk_msi_intx_disable_ati_bug);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x4392,
-			quirk_msi_intx_disable_ati_bug);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x4393,
-			quirk_msi_intx_disable_ati_bug);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x4394,
-			quirk_msi_intx_disable_ati_bug);
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x4390, /* NVMe: DECLARE_PCI_FIXUP_FINAL() 함수 정의/매개변수 선언. */
+			quirk_msi_intx_disable_ati_bug); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x4391, /* NVMe: DECLARE_PCI_FIXUP_FINAL() 함수 정의/매개변수 선언. */
+			quirk_msi_intx_disable_ati_bug); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x4392, /* NVMe: DECLARE_PCI_FIXUP_FINAL() 함수 정의/매개변수 선언. */
+			quirk_msi_intx_disable_ati_bug); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x4393, /* NVMe: DECLARE_PCI_FIXUP_FINAL() 함수 정의/매개변수 선언. */
+			quirk_msi_intx_disable_ati_bug); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x4394, /* NVMe: DECLARE_PCI_FIXUP_FINAL() 함수 정의/매개변수 선언. */
+			quirk_msi_intx_disable_ati_bug); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x4373,
-			quirk_msi_intx_disable_bug);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x4374,
-			quirk_msi_intx_disable_bug);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x4375,
-			quirk_msi_intx_disable_bug);
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x4373, /* NVMe: DECLARE_PCI_FIXUP_FINAL() 함수 정의/매개변수 선언. */
+			quirk_msi_intx_disable_bug); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x4374, /* NVMe: DECLARE_PCI_FIXUP_FINAL() 함수 정의/매개변수 선언. */
+			quirk_msi_intx_disable_bug); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x4375, /* NVMe: DECLARE_PCI_FIXUP_FINAL() 함수 정의/매개변수 선언. */
+			quirk_msi_intx_disable_bug); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATTANSIC, 0x1062,
-			quirk_msi_intx_disable_bug);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATTANSIC, 0x1063,
-			quirk_msi_intx_disable_bug);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATTANSIC, 0x2060,
-			quirk_msi_intx_disable_bug);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATTANSIC, 0x2062,
-			quirk_msi_intx_disable_bug);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATTANSIC, 0x1073,
-			quirk_msi_intx_disable_bug);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATTANSIC, 0x1083,
-			quirk_msi_intx_disable_bug);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATTANSIC, 0x1090,
-			quirk_msi_intx_disable_qca_bug);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATTANSIC, 0x1091,
-			quirk_msi_intx_disable_qca_bug);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATTANSIC, 0x10a0,
-			quirk_msi_intx_disable_qca_bug);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATTANSIC, 0x10a1,
-			quirk_msi_intx_disable_qca_bug);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATTANSIC, 0xe091,
-			quirk_msi_intx_disable_qca_bug);
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATTANSIC, 0x1062, /* NVMe: DECLARE_PCI_FIXUP_FINAL() 함수 정의/매개변수 선언. */
+			quirk_msi_intx_disable_bug); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATTANSIC, 0x1063, /* NVMe: DECLARE_PCI_FIXUP_FINAL() 함수 정의/매개변수 선언. */
+			quirk_msi_intx_disable_bug); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATTANSIC, 0x2060, /* NVMe: DECLARE_PCI_FIXUP_FINAL() 함수 정의/매개변수 선언. */
+			quirk_msi_intx_disable_bug); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATTANSIC, 0x2062, /* NVMe: DECLARE_PCI_FIXUP_FINAL() 함수 정의/매개변수 선언. */
+			quirk_msi_intx_disable_bug); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATTANSIC, 0x1073, /* NVMe: DECLARE_PCI_FIXUP_FINAL() 함수 정의/매개변수 선언. */
+			quirk_msi_intx_disable_bug); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATTANSIC, 0x1083, /* NVMe: DECLARE_PCI_FIXUP_FINAL() 함수 정의/매개변수 선언. */
+			quirk_msi_intx_disable_bug); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATTANSIC, 0x1090, /* NVMe: DECLARE_PCI_FIXUP_FINAL() 함수 정의/매개변수 선언. */
+			quirk_msi_intx_disable_qca_bug); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATTANSIC, 0x1091, /* NVMe: DECLARE_PCI_FIXUP_FINAL() 함수 정의/매개변수 선언. */
+			quirk_msi_intx_disable_qca_bug); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATTANSIC, 0x10a0, /* NVMe: DECLARE_PCI_FIXUP_FINAL() 함수 정의/매개변수 선언. */
+			quirk_msi_intx_disable_qca_bug); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATTANSIC, 0x10a1, /* NVMe: DECLARE_PCI_FIXUP_FINAL() 함수 정의/매개변수 선언. */
+			quirk_msi_intx_disable_qca_bug); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATTANSIC, 0xe091, /* NVMe: DECLARE_PCI_FIXUP_FINAL() 함수 정의/매개변수 선언. */
+			quirk_msi_intx_disable_qca_bug); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
 /*
  * Amazon's Annapurna Labs 1c36:0031 Root Ports don't support MSI-X, so it
@@ -3368,13 +3368,13 @@ DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATTANSIC, 0xe091,
  * The 0031 device id is reused for other non Root Port device types,
  * therefore the quirk is registered for the PCI_CLASS_BRIDGE_PCI class.
  */
-static void quirk_al_msi_disable(struct pci_dev *dev)
-{
-	dev->no_msi = 1;
-	pci_warn(dev, "Disabling MSI/MSI-X\n");
-}
-DECLARE_PCI_FIXUP_CLASS_FINAL(PCI_VENDOR_ID_AMAZON_ANNAPURNA_LABS, 0x0031,
-			      PCI_CLASS_BRIDGE_PCI, 8, quirk_al_msi_disable);
+static void quirk_al_msi_disable(struct pci_dev *dev) /* NVMe: quirk_al_msi_disable() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	dev->no_msi = 1; /* NVMe: no_msi 변수에 값 대입. */
+	pci_warn(dev, "Disabling MSI/MSI-X\n"); /* NVMe: pci_warn() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_CLASS_FINAL(PCI_VENDOR_ID_AMAZON_ANNAPURNA_LABS, 0x0031, /* NVMe: DECLARE_PCI_FIXUP_CLASS_FINAL() 함수 정의/매개변수 선언. */
+			      PCI_CLASS_BRIDGE_PCI, 8, quirk_al_msi_disable); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 #endif /* CONFIG_PCI_MSI */
 
 /*
@@ -3384,11 +3384,11 @@ DECLARE_PCI_FIXUP_CLASS_FINAL(PCI_VENDOR_ID_AMAZON_ANNAPURNA_LABS, 0x0031,
  * allocate resources when hotplug device is inserted and PCI bus is
  * rescanned.
  */
-static void quirk_hotplug_bridge(struct pci_dev *dev)
-{
-	dev->is_hotplug_bridge = 1;
-}
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_HINT, 0x0020, quirk_hotplug_bridge);
+static void quirk_hotplug_bridge(struct pci_dev *dev) /* NVMe: quirk_hotplug_bridge() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	dev->is_hotplug_bridge = 1; /* NVMe: is_hotplug_bridge 변수에 값 대입. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_HINT, 0x0020, quirk_hotplug_bridge); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
 
 /*
  * This is a quirk for the Ricoh MMC controller found as a part of some
@@ -3415,51 +3415,51 @@ DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_HINT, 0x0020, quirk_hotplug_bridge);
  * other PCI functions shift up one level, e.g. function #2 becomes function
  * #1, and this will confuse the PCI core.
  */
-#ifdef CONFIG_MMC_RICOH_MMC
-static void ricoh_mmc_fixup_rl5c476(struct pci_dev *dev)
-{
-	u8 write_enable;
-	u8 write_target;
-	u8 disable;
+#ifdef CONFIG_MMC_RICOH_MMC /* NVMe: 조걶 컴파일 ifdef 분기 (NVMe/PCIe 기능 선택). */
+static void ricoh_mmc_fixup_rl5c476(struct pci_dev *dev) /* NVMe: ricoh_mmc_fixup_rl5c476() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	u8 write_enable; /* NVMe: write_enable 변수 선언. */
+	u8 write_target; /* NVMe: write_target 변수 선언. */
+	u8 disable; /* NVMe: disable 변수 선언. */
 
 	/*
 	 * Disable via CardBus interface
 	 *
 	 * This must be done via function #0
 	 */
-	if (PCI_FUNC(dev->devfn))
-		return;
+	if (PCI_FUNC(dev->devfn)) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
 
-	pci_read_config_byte(dev, 0xB7, &disable);
-	if (disable & 0x02)
-		return;
+	pci_read_config_byte(dev, 0xB7, &disable); /* NVMe: pci_read_config_byte() 호출 (NVMe/PCIe 동작). */
+	if (disable & 0x02) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
 
-	pci_read_config_byte(dev, 0x8E, &write_enable);
-	pci_write_config_byte(dev, 0x8E, 0xAA);
-	pci_read_config_byte(dev, 0x8D, &write_target);
-	pci_write_config_byte(dev, 0x8D, 0xB7);
-	pci_write_config_byte(dev, 0xB7, disable | 0x02);
-	pci_write_config_byte(dev, 0x8E, write_enable);
-	pci_write_config_byte(dev, 0x8D, write_target);
+	pci_read_config_byte(dev, 0x8E, &write_enable); /* NVMe: pci_read_config_byte() 호출 (NVMe/PCIe 동작). */
+	pci_write_config_byte(dev, 0x8E, 0xAA); /* NVMe: pci_write_config_byte() 호출 (NVMe/PCIe 동작). */
+	pci_read_config_byte(dev, 0x8D, &write_target); /* NVMe: pci_read_config_byte() 호출 (NVMe/PCIe 동작). */
+	pci_write_config_byte(dev, 0x8D, 0xB7); /* NVMe: pci_write_config_byte() 호출 (NVMe/PCIe 동작). */
+	pci_write_config_byte(dev, 0xB7, disable | 0x02); /* NVMe: pci_write_config_byte() 호출 (NVMe/PCIe 동작). */
+	pci_write_config_byte(dev, 0x8E, write_enable); /* NVMe: pci_write_config_byte() 호출 (NVMe/PCIe 동작). */
+	pci_write_config_byte(dev, 0x8D, write_target); /* NVMe: pci_write_config_byte() 호출 (NVMe/PCIe 동작). */
 
-	pci_notice(dev, "proprietary Ricoh MMC controller disabled (via CardBus function)\n");
-	pci_notice(dev, "MMC cards are now supported by standard SDHCI controller\n");
-}
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_RICOH, PCI_DEVICE_ID_RICOH_RL5C476, ricoh_mmc_fixup_rl5c476);
-DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_RICOH, PCI_DEVICE_ID_RICOH_RL5C476, ricoh_mmc_fixup_rl5c476);
+	pci_notice(dev, "proprietary Ricoh MMC controller disabled (via CardBus function)\n"); /* NVMe: pci_notice() 호출 (NVMe/PCIe 동작). */
+	pci_notice(dev, "MMC cards are now supported by standard SDHCI controller\n"); /* NVMe: pci_notice() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_RICOH, PCI_DEVICE_ID_RICOH_RL5C476, ricoh_mmc_fixup_rl5c476); /* NVMe: DECLARE_PCI_FIXUP_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_RICOH, PCI_DEVICE_ID_RICOH_RL5C476, ricoh_mmc_fixup_rl5c476); /* NVMe: DECLARE_PCI_FIXUP_RESUME_EARLY() 호출 (NVMe/PCIe 동작). */
 
-static void ricoh_mmc_fixup_r5c832(struct pci_dev *dev)
-{
-	u8 write_enable;
-	u8 disable;
+static void ricoh_mmc_fixup_r5c832(struct pci_dev *dev) /* NVMe: ricoh_mmc_fixup_r5c832() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	u8 write_enable; /* NVMe: write_enable 변수 선언. */
+	u8 disable; /* NVMe: disable 변수 선언. */
 
 	/*
 	 * Disable via FireWire interface
 	 *
 	 * This must be done via function #0
 	 */
-	if (PCI_FUNC(dev->devfn))
-		return;
+	if (PCI_FUNC(dev->devfn)) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
 	/*
 	 * RICOH 0xe822 and 0xe823 SD/MMC card readers fail to recognize
 	 * certain types of SD/MMC cards. Lowering the SD base clock
@@ -3472,43 +3472,43 @@ static void ricoh_mmc_fixup_r5c832(struct pci_dev *dev)
 	 * 0xf9  - Key register for 0x150
 	 * 0xfc  - key register for 0xe1
 	 */
-	if (dev->device == PCI_DEVICE_ID_RICOH_R5CE822 ||
-	    dev->device == PCI_DEVICE_ID_RICOH_R5CE823) {
-		pci_write_config_byte(dev, 0xf9, 0xfc);
-		pci_write_config_byte(dev, 0x150, 0x10);
-		pci_write_config_byte(dev, 0xf9, 0x00);
-		pci_write_config_byte(dev, 0xfc, 0x01);
-		pci_write_config_byte(dev, 0xe1, 0x32);
-		pci_write_config_byte(dev, 0xfc, 0x00);
+	if (dev->device == PCI_DEVICE_ID_RICOH_R5CE822 || /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+	    dev->device == PCI_DEVICE_ID_RICOH_R5CE823) { /* NVMe: 제어문 블록 시작. */
+		pci_write_config_byte(dev, 0xf9, 0xfc); /* NVMe: pci_write_config_byte() 호출 (NVMe/PCIe 동작). */
+		pci_write_config_byte(dev, 0x150, 0x10); /* NVMe: pci_write_config_byte() 호출 (NVMe/PCIe 동작). */
+		pci_write_config_byte(dev, 0xf9, 0x00); /* NVMe: pci_write_config_byte() 호출 (NVMe/PCIe 동작). */
+		pci_write_config_byte(dev, 0xfc, 0x01); /* NVMe: pci_write_config_byte() 호출 (NVMe/PCIe 동작). */
+		pci_write_config_byte(dev, 0xe1, 0x32); /* NVMe: pci_write_config_byte() 호출 (NVMe/PCIe 동작). */
+		pci_write_config_byte(dev, 0xfc, 0x00); /* NVMe: pci_write_config_byte() 호출 (NVMe/PCIe 동작). */
 
-		pci_notice(dev, "MMC controller base frequency changed to 50Mhz.\n");
-	}
+		pci_notice(dev, "MMC controller base frequency changed to 50Mhz.\n"); /* NVMe: pci_notice() 호출 (NVMe/PCIe 동작). */
+	} /* NVMe: 코드 블록/구조체 종료. */
 
-	pci_read_config_byte(dev, 0xCB, &disable);
+	pci_read_config_byte(dev, 0xCB, &disable); /* NVMe: pci_read_config_byte() 호출 (NVMe/PCIe 동작). */
 
-	if (disable & 0x02)
-		return;
+	if (disable & 0x02) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
 
-	pci_read_config_byte(dev, 0xCA, &write_enable);
-	pci_write_config_byte(dev, 0xCA, 0x57);
-	pci_write_config_byte(dev, 0xCB, disable | 0x02);
-	pci_write_config_byte(dev, 0xCA, write_enable);
+	pci_read_config_byte(dev, 0xCA, &write_enable); /* NVMe: pci_read_config_byte() 호출 (NVMe/PCIe 동작). */
+	pci_write_config_byte(dev, 0xCA, 0x57); /* NVMe: pci_write_config_byte() 호출 (NVMe/PCIe 동작). */
+	pci_write_config_byte(dev, 0xCB, disable | 0x02); /* NVMe: pci_write_config_byte() 호출 (NVMe/PCIe 동작). */
+	pci_write_config_byte(dev, 0xCA, write_enable); /* NVMe: pci_write_config_byte() 호출 (NVMe/PCIe 동작). */
 
-	pci_notice(dev, "proprietary Ricoh MMC controller disabled (via FireWire function)\n");
-	pci_notice(dev, "MMC cards are now supported by standard SDHCI controller\n");
+	pci_notice(dev, "proprietary Ricoh MMC controller disabled (via FireWire function)\n"); /* NVMe: pci_notice() 호출 (NVMe/PCIe 동작). */
+	pci_notice(dev, "MMC cards are now supported by standard SDHCI controller\n"); /* NVMe: pci_notice() 호출 (NVMe/PCIe 동작). */
 
-}
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_RICOH, PCI_DEVICE_ID_RICOH_R5C832, ricoh_mmc_fixup_r5c832);
-DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_RICOH, PCI_DEVICE_ID_RICOH_R5C832, ricoh_mmc_fixup_r5c832);
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_RICOH, PCI_DEVICE_ID_RICOH_R5CE822, ricoh_mmc_fixup_r5c832);
-DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_RICOH, PCI_DEVICE_ID_RICOH_R5CE822, ricoh_mmc_fixup_r5c832);
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_RICOH, PCI_DEVICE_ID_RICOH_R5CE823, ricoh_mmc_fixup_r5c832);
-DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_RICOH, PCI_DEVICE_ID_RICOH_R5CE823, ricoh_mmc_fixup_r5c832);
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_RICOH, PCI_DEVICE_ID_RICOH_R5C832, ricoh_mmc_fixup_r5c832); /* NVMe: DECLARE_PCI_FIXUP_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_RICOH, PCI_DEVICE_ID_RICOH_R5C832, ricoh_mmc_fixup_r5c832); /* NVMe: DECLARE_PCI_FIXUP_RESUME_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_RICOH, PCI_DEVICE_ID_RICOH_R5CE822, ricoh_mmc_fixup_r5c832); /* NVMe: DECLARE_PCI_FIXUP_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_RICOH, PCI_DEVICE_ID_RICOH_R5CE822, ricoh_mmc_fixup_r5c832); /* NVMe: DECLARE_PCI_FIXUP_RESUME_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_RICOH, PCI_DEVICE_ID_RICOH_R5CE823, ricoh_mmc_fixup_r5c832); /* NVMe: DECLARE_PCI_FIXUP_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_RICOH, PCI_DEVICE_ID_RICOH_R5CE823, ricoh_mmc_fixup_r5c832); /* NVMe: DECLARE_PCI_FIXUP_RESUME_EARLY() 호출 (NVMe/PCIe 동작). */
 #endif /*CONFIG_MMC_RICOH_MMC*/
 
-#ifdef CONFIG_DMAR_TABLE
-#define VTUNCERRMSK_REG	0x1ac
-#define VTD_MSK_SPEC_ERRORS	(1 << 31)
+#ifdef CONFIG_DMAR_TABLE /* NVMe: 조걶 컴파일 ifdef 분기 (NVMe/PCIe 기능 선택). */
+#define VTUNCERRMSK_REG	0x1ac /* NVMe: VTUNCERRMSK_REG 매크로/상수 정의 (NVMe/PCIe). */
+#define VTD_MSK_SPEC_ERRORS	(1 << 31) /* NVMe: VTD_MSK_SPEC_ERRORS 매크로/상수 정의 (NVMe/PCIe). */
 /*
  * This is a quirk for masking VT-d spec-defined errors to platform error
  * handling logic. Without this, platforms using Intel 7500, 5500 chipsets
@@ -3519,44 +3519,44 @@ DECLARE_PCI_FIXUP_RESUME_EARLY(PCI_VENDOR_ID_RICOH, PCI_DEVICE_ID_RICOH_R5CE823,
  * VT-d spec-related errors are already handled by the VT-d OS code, so no
  * need to report the same error through other channels.
  */
-static void vtd_mask_spec_errors(struct pci_dev *dev)
-{
-	u32 word;
+static void vtd_mask_spec_errors(struct pci_dev *dev) /* NVMe: vtd_mask_spec_errors() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	u32 word; /* NVMe: word 변수 선언. */
 
-	pci_read_config_dword(dev, VTUNCERRMSK_REG, &word);
-	pci_write_config_dword(dev, VTUNCERRMSK_REG, word | VTD_MSK_SPEC_ERRORS);
-}
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x342e, vtd_mask_spec_errors);
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x3c28, vtd_mask_spec_errors);
-#endif
+	pci_read_config_dword(dev, VTUNCERRMSK_REG, &word); /* NVMe: pci_read_config_dword() 호출 (NVMe/PCIe 동작). */
+	pci_write_config_dword(dev, VTUNCERRMSK_REG, word | VTD_MSK_SPEC_ERRORS); /* NVMe: pci_write_config_dword() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x342e, vtd_mask_spec_errors); /* NVMe: DECLARE_PCI_FIXUP_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x3c28, vtd_mask_spec_errors); /* NVMe: DECLARE_PCI_FIXUP_EARLY() 호출 (NVMe/PCIe 동작). */
+#endif /* NVMe: 조걶 컴파일 endif 분기 (NVMe/PCIe 기능 선택). */
 
-static void fixup_ti816x_class(struct pci_dev *dev)
-{
-	u32 class = dev->class;
+static void fixup_ti816x_class(struct pci_dev *dev) /* NVMe: fixup_ti816x_class() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	u32 class = dev->class; /* NVMe: class 변수에 값 대입. */
 
 	/* TI 816x devices do not have class code set when in PCIe boot mode */
-	dev->class = PCI_CLASS_MULTIMEDIA_VIDEO << 8;
-	pci_info(dev, "PCI class overridden (%#08x -> %#08x)\n",
-		 class, dev->class);
-}
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_TI, 0xb800,
-			      PCI_CLASS_NOT_DEFINED, 8, fixup_ti816x_class);
+	dev->class = PCI_CLASS_MULTIMEDIA_VIDEO << 8; /* NVMe: class 변수에 값 대입. */
+	pci_info(dev, "PCI class overridden (%#08x -> %#08x)\n", /* NVMe: pci_info() 함수 정의/매개변수 선언. */
+		 class, dev->class); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_TI, 0xb800, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+			      PCI_CLASS_NOT_DEFINED, 8, fixup_ti816x_class); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
 /*
  * Some PCIe devices do not work reliably with the claimed maximum
  * payload size supported.
  */
-static void fixup_mpss_256(struct pci_dev *dev)
-{
+static void fixup_mpss_256(struct pci_dev *dev) /* NVMe: fixup_mpss_256() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
 	dev->pcie_mpss = 1; /* 256 bytes */
-}
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_SOLARFLARE,
-			PCI_DEVICE_ID_SOLARFLARE_SFC4000A_0, fixup_mpss_256);
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_SOLARFLARE,
-			PCI_DEVICE_ID_SOLARFLARE_SFC4000A_1, fixup_mpss_256);
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_SOLARFLARE,
-			PCI_DEVICE_ID_SOLARFLARE_SFC4000B, fixup_mpss_256);
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_ASMEDIA, 0x0612, fixup_mpss_256);
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_SOLARFLARE, /* NVMe: DECLARE_PCI_FIXUP_EARLY() 함수 정의/매개변수 선언. */
+			PCI_DEVICE_ID_SOLARFLARE_SFC4000A_0, fixup_mpss_256); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_SOLARFLARE, /* NVMe: DECLARE_PCI_FIXUP_EARLY() 함수 정의/매개변수 선언. */
+			PCI_DEVICE_ID_SOLARFLARE_SFC4000A_1, fixup_mpss_256); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_SOLARFLARE, /* NVMe: DECLARE_PCI_FIXUP_EARLY() 함수 정의/매개변수 선언. */
+			PCI_DEVICE_ID_SOLARFLARE_SFC4000B, fixup_mpss_256); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_ASMEDIA, 0x0612, fixup_mpss_256); /* NVMe: DECLARE_PCI_FIXUP_EARLY() 호출 (NVMe/PCIe 동작). */
 
 /*
  * Intel 5000 and 5100 Memory controllers have an erratum with read completion
@@ -3566,91 +3566,91 @@ DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_ASMEDIA, 0x0612, fixup_mpss_256);
  * coalescing must be disabled.  Unfortunately, it cannot be re-enabled because
  * it is possible to hotplug a device with MPS of 256B.
  */
-static void quirk_intel_mc_errata(struct pci_dev *dev)
-{
-	int err;
-	u16 rcc;
+static void quirk_intel_mc_errata(struct pci_dev *dev) /* NVMe: quirk_intel_mc_errata() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	int err; /* NVMe: err 변수 선언. */
+	u16 rcc; /* NVMe: rcc 변수 선언. */
 
-	if (pcie_bus_config == PCIE_BUS_TUNE_OFF ||
-	    pcie_bus_config == PCIE_BUS_DEFAULT)
-		return;
+	if (pcie_bus_config == PCIE_BUS_TUNE_OFF || /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+	    pcie_bus_config == PCIE_BUS_DEFAULT) /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+		return; /* NVMe: 함수 종료 및 반환. */
 
 	/*
 	 * Intel erratum specifies bits to change but does not say what
 	 * they are.  Keeping them magical until such time as the registers
 	 * and values can be explained.
 	 */
-	err = pci_read_config_word(dev, 0x48, &rcc);
-	if (err) {
-		pci_err(dev, "Error attempting to read the read completion coalescing register\n");
-		return;
-	}
+	err = pci_read_config_word(dev, 0x48, &rcc); /* NVMe: pci_read_config_word() 호출 (NVMe/PCIe 동작). */
+	if (err) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pci_err(dev, "Error attempting to read the read completion coalescing register\n"); /* NVMe: pci_err() 호출 (NVMe/PCIe 동작). */
+		return; /* NVMe: 함수 종료 및 반환. */
+	} /* NVMe: 코드 블록/구조체 종료. */
 
-	if (!(rcc & (1 << 10)))
-		return;
+	if (!(rcc & (1 << 10))) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
 
-	rcc &= ~(1 << 10);
+	rcc &= ~(1 << 10); /* NVMe: & 변수에 값 대입. */
 
-	err = pci_write_config_word(dev, 0x48, rcc);
-	if (err) {
-		pci_err(dev, "Error attempting to write the read completion coalescing register\n");
-		return;
-	}
+	err = pci_write_config_word(dev, 0x48, rcc); /* NVMe: pci_write_config_word() 호출 (NVMe/PCIe 동작). */
+	if (err) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pci_err(dev, "Error attempting to write the read completion coalescing register\n"); /* NVMe: pci_err() 호출 (NVMe/PCIe 동작). */
+		return; /* NVMe: 함수 종료 및 반환. */
+	} /* NVMe: 코드 블록/구조체 종료. */
 
-	pr_info_once("Read completion coalescing disabled due to hardware erratum relating to 256B MPS\n");
-}
+	pr_info_once("Read completion coalescing disabled due to hardware erratum relating to 256B MPS\n"); /* NVMe: pr_info_once() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
 /* Intel 5000 series memory controllers and ports 2-7 */
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x25c0, quirk_intel_mc_errata);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x25d0, quirk_intel_mc_errata);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x25d4, quirk_intel_mc_errata);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x25d8, quirk_intel_mc_errata);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x25e2, quirk_intel_mc_errata);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x25e3, quirk_intel_mc_errata);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x25e4, quirk_intel_mc_errata);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x25e5, quirk_intel_mc_errata);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x25e6, quirk_intel_mc_errata);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x25e7, quirk_intel_mc_errata);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x25f7, quirk_intel_mc_errata);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x25f8, quirk_intel_mc_errata);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x25f9, quirk_intel_mc_errata);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x25fa, quirk_intel_mc_errata);
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x25c0, quirk_intel_mc_errata); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x25d0, quirk_intel_mc_errata); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x25d4, quirk_intel_mc_errata); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x25d8, quirk_intel_mc_errata); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x25e2, quirk_intel_mc_errata); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x25e3, quirk_intel_mc_errata); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x25e4, quirk_intel_mc_errata); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x25e5, quirk_intel_mc_errata); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x25e6, quirk_intel_mc_errata); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x25e7, quirk_intel_mc_errata); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x25f7, quirk_intel_mc_errata); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x25f8, quirk_intel_mc_errata); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x25f9, quirk_intel_mc_errata); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x25fa, quirk_intel_mc_errata); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
 /* Intel 5100 series memory controllers and ports 2-7 */
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x65c0, quirk_intel_mc_errata);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x65e2, quirk_intel_mc_errata);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x65e3, quirk_intel_mc_errata);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x65e4, quirk_intel_mc_errata);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x65e5, quirk_intel_mc_errata);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x65e6, quirk_intel_mc_errata);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x65e7, quirk_intel_mc_errata);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x65f7, quirk_intel_mc_errata);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x65f8, quirk_intel_mc_errata);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x65f9, quirk_intel_mc_errata);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x65fa, quirk_intel_mc_errata);
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x65c0, quirk_intel_mc_errata); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x65e2, quirk_intel_mc_errata); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x65e3, quirk_intel_mc_errata); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x65e4, quirk_intel_mc_errata); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x65e5, quirk_intel_mc_errata); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x65e6, quirk_intel_mc_errata); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x65e7, quirk_intel_mc_errata); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x65f7, quirk_intel_mc_errata); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x65f8, quirk_intel_mc_errata); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x65f9, quirk_intel_mc_errata); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x65fa, quirk_intel_mc_errata); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
 
 /*
  * Ivytown NTB BAR sizes are misreported by the hardware due to an erratum.
  * To work around this, query the size it should be configured to by the
  * device and modify the resource end to correspond to this new size.
  */
-static void quirk_intel_ntb(struct pci_dev *dev)
-{
-	int rc;
-	u8 val;
+static void quirk_intel_ntb(struct pci_dev *dev) /* NVMe: quirk_intel_ntb() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	int rc; /* NVMe: rc 변수 선언. */
+	u8 val; /* NVMe: val 변수 선언. */
 
-	rc = pci_read_config_byte(dev, 0x00D0, &val);
-	if (rc)
-		return;
+	rc = pci_read_config_byte(dev, 0x00D0, &val); /* NVMe: pci_read_config_byte() 호출 (NVMe/PCIe 동작). */
+	if (rc) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
 
-	resource_set_size(&dev->resource[2], (resource_size_t)1 << val);
+	resource_set_size(&dev->resource[2], (resource_size_t)1 << val); /* NVMe: resource_set_size() 호출 (NVMe/PCIe 동작). */
 
-	rc = pci_read_config_byte(dev, 0x00D1, &val);
-	if (rc)
-		return;
+	rc = pci_read_config_byte(dev, 0x00D1, &val); /* NVMe: pci_read_config_byte() 호출 (NVMe/PCIe 동작). */
+	if (rc) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
 
-	resource_set_size(&dev->resource[4], (resource_size_t)1 << val);
-}
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x0e08, quirk_intel_ntb);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x0e0d, quirk_intel_ntb);
+	resource_set_size(&dev->resource[4], (resource_size_t)1 << val); /* NVMe: resource_set_size() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x0e08, quirk_intel_ntb); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x0e0d, quirk_intel_ntb); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
 
 /*
  * Some BIOS implementations leave the Intel GPU interrupts enabled, even
@@ -3664,84 +3664,84 @@ DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x0e0d, quirk_intel_ntb);
  * Fix it by disabling the still enabled interrupts.  This resolves crashes
  * often seen on monitor unplug.
  */
-#define I915_DEIER_REG 0x4400c
-static void disable_igfx_irq(struct pci_dev *dev)
-{
-	void __iomem *regs = pci_iomap(dev, 0, 0);
-	if (regs == NULL) {
-		pci_warn(dev, "igfx quirk: Can't iomap PCI device\n");
-		return;
-	}
+#define I915_DEIER_REG 0x4400c /* NVMe: I915_DEIER_REG 매크로/상수 정의 (NVMe/PCIe). */
+static void disable_igfx_irq(struct pci_dev *dev) /* NVMe: disable_igfx_irq() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	void __iomem *regs = pci_iomap(dev, 0, 0); /* NVMe: pci_iomap() 호출 (NVMe/PCIe 동작). */
+	if (regs == NULL) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pci_warn(dev, "igfx quirk: Can't iomap PCI device\n"); /* NVMe: pci_warn() 호출 (NVMe/PCIe 동작). */
+		return; /* NVMe: 함수 종료 및 반환. */
+	} /* NVMe: 코드 블록/구조체 종료. */
 
 	/* Check if any interrupt line is still enabled */
-	if (readl(regs + I915_DEIER_REG) != 0) {
-		pci_warn(dev, "BIOS left Intel GPU interrupts enabled; disabling\n");
+	if (readl(regs + I915_DEIER_REG) != 0) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pci_warn(dev, "BIOS left Intel GPU interrupts enabled; disabling\n"); /* NVMe: pci_warn() 호출 (NVMe/PCIe 동작). */
 
-		writel(0, regs + I915_DEIER_REG);
-	}
+		writel(0, regs + I915_DEIER_REG); /* NVMe: writel() 호출 (NVMe/PCIe 동작). */
+	} /* NVMe: 코드 블록/구조체 종료. */
 
-	pci_iounmap(dev, regs);
-}
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x0042, disable_igfx_irq);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x0046, disable_igfx_irq);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x004a, disable_igfx_irq);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x0102, disable_igfx_irq);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x0106, disable_igfx_irq);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x010a, disable_igfx_irq);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x0152, disable_igfx_irq);
+	pci_iounmap(dev, regs); /* NVMe: pci_iounmap() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x0042, disable_igfx_irq); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x0046, disable_igfx_irq); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x004a, disable_igfx_irq); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x0102, disable_igfx_irq); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x0106, disable_igfx_irq); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x010a, disable_igfx_irq); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x0152, disable_igfx_irq); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
 
 /*
  * PCI devices which are on Intel chips can skip the 10ms delay
  * before entering D3 mode.
  */
-static void quirk_remove_d3hot_delay(struct pci_dev *dev)
-{
-	dev->d3hot_delay = 0;
-}
+static void quirk_remove_d3hot_delay(struct pci_dev *dev) /* NVMe: quirk_remove_d3hot_delay() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	dev->d3hot_delay = 0; /* NVMe: d3hot_delay 변수에 값 대입. */
+} /* NVMe: 코드 블록/구조체 종료. */
 /* C600 Series devices do not need 10ms d3hot_delay */
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x0412, quirk_remove_d3hot_delay);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x0c00, quirk_remove_d3hot_delay);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x0c0c, quirk_remove_d3hot_delay);
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x0412, quirk_remove_d3hot_delay); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x0c00, quirk_remove_d3hot_delay); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x0c0c, quirk_remove_d3hot_delay); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
 /* Lynxpoint-H PCH devices do not need 10ms d3hot_delay */
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x8c02, quirk_remove_d3hot_delay);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x8c18, quirk_remove_d3hot_delay);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x8c1c, quirk_remove_d3hot_delay);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x8c20, quirk_remove_d3hot_delay);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x8c22, quirk_remove_d3hot_delay);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x8c26, quirk_remove_d3hot_delay);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x8c2d, quirk_remove_d3hot_delay);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x8c31, quirk_remove_d3hot_delay);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x8c3a, quirk_remove_d3hot_delay);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x8c3d, quirk_remove_d3hot_delay);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x8c4e, quirk_remove_d3hot_delay);
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x8c02, quirk_remove_d3hot_delay); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x8c18, quirk_remove_d3hot_delay); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x8c1c, quirk_remove_d3hot_delay); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x8c20, quirk_remove_d3hot_delay); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x8c22, quirk_remove_d3hot_delay); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x8c26, quirk_remove_d3hot_delay); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x8c2d, quirk_remove_d3hot_delay); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x8c31, quirk_remove_d3hot_delay); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x8c3a, quirk_remove_d3hot_delay); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x8c3d, quirk_remove_d3hot_delay); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x8c4e, quirk_remove_d3hot_delay); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
 /* Intel Cherrytrail devices do not need 10ms d3hot_delay */
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x2280, quirk_remove_d3hot_delay);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x2298, quirk_remove_d3hot_delay);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x229c, quirk_remove_d3hot_delay);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x22b0, quirk_remove_d3hot_delay);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x22b5, quirk_remove_d3hot_delay);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x22b7, quirk_remove_d3hot_delay);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x22b8, quirk_remove_d3hot_delay);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x22d8, quirk_remove_d3hot_delay);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x22dc, quirk_remove_d3hot_delay);
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x2280, quirk_remove_d3hot_delay); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x2298, quirk_remove_d3hot_delay); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x229c, quirk_remove_d3hot_delay); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x22b0, quirk_remove_d3hot_delay); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x22b5, quirk_remove_d3hot_delay); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x22b7, quirk_remove_d3hot_delay); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x22b8, quirk_remove_d3hot_delay); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x22d8, quirk_remove_d3hot_delay); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x22dc, quirk_remove_d3hot_delay); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
 
 /*
  * Some devices may pass our check in pci_intx_mask_supported() if
  * PCI_COMMAND_INTX_DISABLE works though they actually do not properly
  * support this feature.
  */
-static void quirk_broken_intx_masking(struct pci_dev *dev)
-{
-	dev->broken_intx_masking = 1;
-}
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_CHELSIO, 0x0030,
-			quirk_broken_intx_masking);
+static void quirk_broken_intx_masking(struct pci_dev *dev) /* NVMe: quirk_broken_intx_masking() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	dev->broken_intx_masking = 1; /* NVMe: broken_intx_masking 변수에 값 대입. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_CHELSIO, 0x0030, /* NVMe: DECLARE_PCI_FIXUP_FINAL() 함수 정의/매개변수 선언. */
+			quirk_broken_intx_masking); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 DECLARE_PCI_FIXUP_FINAL(0x1814, 0x0601, /* Ralink RT2800 802.11n PCI */
-			quirk_broken_intx_masking);
+			quirk_broken_intx_masking); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 DECLARE_PCI_FIXUP_FINAL(0x1b7c, 0x0004, /* Ceton InfiniTV4 */
-			quirk_broken_intx_masking);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_CREATIVE, PCI_DEVICE_ID_CREATIVE_20K2,
-			quirk_broken_intx_masking);
+			quirk_broken_intx_masking); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_CREATIVE, PCI_DEVICE_ID_CREATIVE_20K2, /* NVMe: DECLARE_PCI_FIXUP_FINAL() 함수 정의/매개변수 선언. */
+			quirk_broken_intx_masking); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
 /*
  * Realtek RTL8169 PCI Gigabit Ethernet Controller (rev 10)
@@ -3749,49 +3749,49 @@ DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_CREATIVE, PCI_DEVICE_ID_CREATIVE_20K2,
  *
  * RTL8110SC - Fails under PCI device assignment using DisINTx masking.
  */
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_REALTEK, 0x8169,
-			quirk_broken_intx_masking);
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_REALTEK, 0x8169, /* NVMe: DECLARE_PCI_FIXUP_FINAL() 함수 정의/매개변수 선언. */
+			quirk_broken_intx_masking); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
 /*
  * Intel i40e (XL710/X710) 10/20/40GbE NICs all have broken INTx masking,
  * DisINTx can be set but the interrupt status bit is non-functional.
  */
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x1572, quirk_broken_intx_masking);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x1574, quirk_broken_intx_masking);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x1580, quirk_broken_intx_masking);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x1581, quirk_broken_intx_masking);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x1583, quirk_broken_intx_masking);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x1584, quirk_broken_intx_masking);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x1585, quirk_broken_intx_masking);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x1586, quirk_broken_intx_masking);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x1587, quirk_broken_intx_masking);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x1588, quirk_broken_intx_masking);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x1589, quirk_broken_intx_masking);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x158a, quirk_broken_intx_masking);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x158b, quirk_broken_intx_masking);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x37d0, quirk_broken_intx_masking);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x37d1, quirk_broken_intx_masking);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x37d2, quirk_broken_intx_masking);
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x1572, quirk_broken_intx_masking); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x1574, quirk_broken_intx_masking); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x1580, quirk_broken_intx_masking); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x1581, quirk_broken_intx_masking); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x1583, quirk_broken_intx_masking); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x1584, quirk_broken_intx_masking); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x1585, quirk_broken_intx_masking); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x1586, quirk_broken_intx_masking); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x1587, quirk_broken_intx_masking); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x1588, quirk_broken_intx_masking); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x1589, quirk_broken_intx_masking); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x158a, quirk_broken_intx_masking); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x158b, quirk_broken_intx_masking); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x37d0, quirk_broken_intx_masking); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x37d1, quirk_broken_intx_masking); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x37d2, quirk_broken_intx_masking); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
 
-static u16 mellanox_broken_intx_devs[] = {
-	PCI_DEVICE_ID_MELLANOX_HERMON_SDR,
-	PCI_DEVICE_ID_MELLANOX_HERMON_DDR,
-	PCI_DEVICE_ID_MELLANOX_HERMON_QDR,
-	PCI_DEVICE_ID_MELLANOX_HERMON_DDR_GEN2,
-	PCI_DEVICE_ID_MELLANOX_HERMON_QDR_GEN2,
-	PCI_DEVICE_ID_MELLANOX_HERMON_EN,
-	PCI_DEVICE_ID_MELLANOX_HERMON_EN_GEN2,
-	PCI_DEVICE_ID_MELLANOX_CONNECTX_EN,
-	PCI_DEVICE_ID_MELLANOX_CONNECTX_EN_T_GEN2,
-	PCI_DEVICE_ID_MELLANOX_CONNECTX_EN_GEN2,
-	PCI_DEVICE_ID_MELLANOX_CONNECTX_EN_5_GEN2,
-	PCI_DEVICE_ID_MELLANOX_CONNECTX2,
-	PCI_DEVICE_ID_MELLANOX_CONNECTX3,
-	PCI_DEVICE_ID_MELLANOX_CONNECTX3_PRO,
-};
+static u16 mellanox_broken_intx_devs[] = { /* NVMe: mellanox_broken_intx_devs[] 변수에 값 대입. */
+	PCI_DEVICE_ID_MELLANOX_HERMON_SDR, /* NVMe: 인자/초기자 나열 (연속). */
+	PCI_DEVICE_ID_MELLANOX_HERMON_DDR, /* NVMe: 인자/초기자 나열 (연속). */
+	PCI_DEVICE_ID_MELLANOX_HERMON_QDR, /* NVMe: 인자/초기자 나열 (연속). */
+	PCI_DEVICE_ID_MELLANOX_HERMON_DDR_GEN2, /* NVMe: 인자/초기자 나열 (연속). */
+	PCI_DEVICE_ID_MELLANOX_HERMON_QDR_GEN2, /* NVMe: 인자/초기자 나열 (연속). */
+	PCI_DEVICE_ID_MELLANOX_HERMON_EN, /* NVMe: 인자/초기자 나열 (연속). */
+	PCI_DEVICE_ID_MELLANOX_HERMON_EN_GEN2, /* NVMe: 인자/초기자 나열 (연속). */
+	PCI_DEVICE_ID_MELLANOX_CONNECTX_EN, /* NVMe: 인자/초기자 나열 (연속). */
+	PCI_DEVICE_ID_MELLANOX_CONNECTX_EN_T_GEN2, /* NVMe: 인자/초기자 나열 (연속). */
+	PCI_DEVICE_ID_MELLANOX_CONNECTX_EN_GEN2, /* NVMe: 인자/초기자 나열 (연속). */
+	PCI_DEVICE_ID_MELLANOX_CONNECTX_EN_5_GEN2, /* NVMe: 인자/초기자 나열 (연속). */
+	PCI_DEVICE_ID_MELLANOX_CONNECTX2, /* NVMe: 인자/초기자 나열 (연속). */
+	PCI_DEVICE_ID_MELLANOX_CONNECTX3, /* NVMe: 인자/초기자 나열 (연속). */
+	PCI_DEVICE_ID_MELLANOX_CONNECTX3_PRO, /* NVMe: 인자/초기자 나열 (연속). */
+}; /* NVMe: 코드 블록/구조체 종료. */
 
-#define CONNECTX_4_CURR_MAX_MINOR 99
-#define CONNECTX_4_INTX_SUPPORT_MINOR 14
+#define CONNECTX_4_CURR_MAX_MINOR 99 /* NVMe: CONNECTX_4_CURR_MAX_MINOR 매크로/상수 정의 (NVMe/PCIe). */
+#define CONNECTX_4_INTX_SUPPORT_MINOR 14 /* NVMe: CONNECTX_4_INTX_SUPPORT_MINOR 매크로/상수 정의 (NVMe/PCIe). */
 
 /*
  * Check ConnectX-4/LX FW version to see if it supports legacy interrupts.
@@ -3799,92 +3799,92 @@ static u16 mellanox_broken_intx_devs[] = {
  * FW minor > 99 means older FW version format and no INTx masking support.
  * FW minor < 14 means new FW version format and no INTx masking support.
  */
-static void mellanox_check_broken_intx_masking(struct pci_dev *pdev)
-{
-	__be32 __iomem *fw_ver;
-	u16 fw_major;
-	u16 fw_minor;
-	u16 fw_subminor;
-	u32 fw_maj_min;
-	u32 fw_sub_min;
-	int i;
+static void mellanox_check_broken_intx_masking(struct pci_dev *pdev) /* NVMe: mellanox_check_broken_intx_masking() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	__be32 __iomem *fw_ver; /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+	u16 fw_major; /* NVMe: fw_major 변수 선언. */
+	u16 fw_minor; /* NVMe: fw_minor 변수 선언. */
+	u16 fw_subminor; /* NVMe: fw_subminor 변수 선언. */
+	u32 fw_maj_min; /* NVMe: fw_maj_min 변수 선언. */
+	u32 fw_sub_min; /* NVMe: fw_sub_min 변수 선언. */
+	int i; /* NVMe: i 변수 선언. */
 
-	for (i = 0; i < ARRAY_SIZE(mellanox_broken_intx_devs); i++) {
-		if (pdev->device == mellanox_broken_intx_devs[i]) {
-			pdev->broken_intx_masking = 1;
-			return;
-		}
-	}
+	for (i = 0; i < ARRAY_SIZE(mellanox_broken_intx_devs); i++) { /* NVMe: 반복 처리 (NVMe/PCIe 레지스터/장치 순회). */
+		if (pdev->device == mellanox_broken_intx_devs[i]) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+			pdev->broken_intx_masking = 1; /* NVMe: broken_intx_masking 변수에 값 대입. */
+			return; /* NVMe: 함수 종료 및 반환. */
+		} /* NVMe: 코드 블록/구조체 종료. */
+	} /* NVMe: 코드 블록/구조체 종료. */
 
 	/*
 	 * Getting here means Connect-IB cards and up. Connect-IB has no INTx
 	 * support so shouldn't be checked further
 	 */
-	if (pdev->device == PCI_DEVICE_ID_MELLANOX_CONNECTIB)
-		return;
+	if (pdev->device == PCI_DEVICE_ID_MELLANOX_CONNECTIB) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
 
-	if (pdev->device != PCI_DEVICE_ID_MELLANOX_CONNECTX4 &&
-	    pdev->device != PCI_DEVICE_ID_MELLANOX_CONNECTX4_LX)
-		return;
+	if (pdev->device != PCI_DEVICE_ID_MELLANOX_CONNECTX4 && /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+	    pdev->device != PCI_DEVICE_ID_MELLANOX_CONNECTX4_LX) /* NVMe: ! 변수에 값 대입. */
+		return; /* NVMe: 함수 종료 및 반환. */
 
 	/* For ConnectX-4 and ConnectX-4LX, need to check FW support */
-	if (pci_enable_device_mem(pdev)) {
-		pci_warn(pdev, "Can't enable device memory\n");
-		return;
-	}
+	if (pci_enable_device_mem(pdev)) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pci_warn(pdev, "Can't enable device memory\n"); /* NVMe: pci_warn() 호출 (NVMe/PCIe 동작). */
+		return; /* NVMe: 함수 종료 및 반환. */
+	} /* NVMe: 코드 블록/구조체 종료. */
 
-	fw_ver = ioremap(pci_resource_start(pdev, 0), 4);
-	if (!fw_ver) {
-		pci_warn(pdev, "Can't map ConnectX-4 initialization segment\n");
-		goto out;
-	}
+	fw_ver = ioremap(pci_resource_start(pdev, 0), 4); /* NVMe: ioremap() 호출 (NVMe/PCIe 동작). */
+	if (!fw_ver) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pci_warn(pdev, "Can't map ConnectX-4 initialization segment\n"); /* NVMe: pci_warn() 호출 (NVMe/PCIe 동작). */
+		goto out; /* NVMe: out 레이블로 제어 이동. */
+	} /* NVMe: 코드 블록/구조체 종료. */
 
 	/* Reading from resource space should be 32b aligned */
-	fw_maj_min = ioread32be(fw_ver);
-	fw_sub_min = ioread32be(fw_ver + 1);
-	fw_major = fw_maj_min & 0xffff;
-	fw_minor = fw_maj_min >> 16;
-	fw_subminor = fw_sub_min & 0xffff;
-	if (fw_minor > CONNECTX_4_CURR_MAX_MINOR ||
-	    fw_minor < CONNECTX_4_INTX_SUPPORT_MINOR) {
-		pci_warn(pdev, "ConnectX-4: FW %u.%u.%u doesn't support INTx masking, disabling. Please upgrade FW to %d.14.1100 and up for INTx support\n",
-			 fw_major, fw_minor, fw_subminor, pdev->device ==
-			 PCI_DEVICE_ID_MELLANOX_CONNECTX4 ? 12 : 14);
-		pdev->broken_intx_masking = 1;
-	}
+	fw_maj_min = ioread32be(fw_ver); /* NVMe: ioread32be() 호출 (NVMe/PCIe 동작). */
+	fw_sub_min = ioread32be(fw_ver + 1); /* NVMe: ioread32be() 호출 (NVMe/PCIe 동작). */
+	fw_major = fw_maj_min & 0xffff; /* NVMe: fw_major 변수에 값 대입. */
+	fw_minor = fw_maj_min >> 16; /* NVMe: fw_minor 변수에 값 대입. */
+	fw_subminor = fw_sub_min & 0xffff; /* NVMe: fw_subminor 변수에 값 대입. */
+	if (fw_minor > CONNECTX_4_CURR_MAX_MINOR || /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+	    fw_minor < CONNECTX_4_INTX_SUPPORT_MINOR) { /* NVMe: 제어문 블록 시작. */
+		pci_warn(pdev, "ConnectX-4: FW %u.%u.%u doesn't support INTx masking, disabling. Please upgrade FW to %d.14.1100 and up for INTx support\n", /* NVMe: pci_warn() 함수 정의/매개변수 선언. */
+			 fw_major, fw_minor, fw_subminor, pdev->device == /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+			 PCI_DEVICE_ID_MELLANOX_CONNECTX4 ? 12 : 14); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+		pdev->broken_intx_masking = 1; /* NVMe: broken_intx_masking 변수에 값 대입. */
+	} /* NVMe: 코드 블록/구조체 종료. */
 
-	iounmap(fw_ver);
+	iounmap(fw_ver); /* NVMe: iounmap() 호출 (NVMe/PCIe 동작). */
 
-out:
-	pci_disable_device(pdev);
-}
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_MELLANOX, PCI_ANY_ID,
-			mellanox_check_broken_intx_masking);
+out: /* NVMe: out 레이블 (NVMe 초기화/오류 복구 경로). */
+	pci_disable_device(pdev); /* NVMe: pci_disable_device() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_MELLANOX, PCI_ANY_ID, /* NVMe: DECLARE_PCI_FIXUP_FINAL() 함수 정의/매개변수 선언. */
+			mellanox_check_broken_intx_masking); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
-static void quirk_no_bus_reset(struct pci_dev *dev)
-{
-	dev->dev_flags |= PCI_DEV_FLAGS_NO_BUS_RESET;
-}
+static void quirk_no_bus_reset(struct pci_dev *dev) /* NVMe: quirk_no_bus_reset() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	dev->dev_flags |= PCI_DEV_FLAGS_NO_BUS_RESET; /* NVMe: | 변수에 값 대입. */
+} /* NVMe: 코드 블록/구조체 종료. */
 
 /*
  * After asserting Secondary Bus Reset to downstream devices via a GB10
  * Root Port, the link may not retrain correctly.
  * https://lore.kernel.org/r/20251113084441.2124737-1-Johnny-CC.Chang@mediatek.com
  */
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_NVIDIA, 0x22CE, quirk_no_bus_reset);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_NVIDIA, 0x22D0, quirk_no_bus_reset);
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_NVIDIA, 0x22CE, quirk_no_bus_reset); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_NVIDIA, 0x22D0, quirk_no_bus_reset); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
 
 /*
  * Some NVIDIA GPU devices do not work with bus reset, SBR needs to be
  * prevented for those affected devices.
  */
-static void quirk_nvidia_no_bus_reset(struct pci_dev *dev)
-{
-	if ((dev->device & 0xffc0) == 0x2340)
-		quirk_no_bus_reset(dev);
-}
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_NVIDIA, PCI_ANY_ID,
-			 quirk_nvidia_no_bus_reset);
+static void quirk_nvidia_no_bus_reset(struct pci_dev *dev) /* NVMe: quirk_nvidia_no_bus_reset() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	if ((dev->device & 0xffc0) == 0x2340) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		quirk_no_bus_reset(dev); /* NVMe: quirk_no_bus_reset() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_NVIDIA, PCI_ANY_ID, /* NVMe: DECLARE_PCI_FIXUP_HEADER() 함수 정의/매개변수 선언. */
+			 quirk_nvidia_no_bus_reset); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
 /*
  * Some Atheros AR9xxx and QCA988x chips do not behave after a bus reset.
@@ -3893,19 +3893,19 @@ DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_NVIDIA, PCI_ANY_ID,
  * and typically causes the system to hang or reset when access is attempted.
  * https://lore.kernel.org/r/20140923210318.498dacbd@dualc.maya.org/
  */
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_ATHEROS, 0x0030, quirk_no_bus_reset);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_ATHEROS, 0x0032, quirk_no_bus_reset);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_ATHEROS, 0x003c, quirk_no_bus_reset);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_ATHEROS, 0x0033, quirk_no_bus_reset);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_ATHEROS, 0x0034, quirk_no_bus_reset);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_ATHEROS, 0x003e, quirk_no_bus_reset);
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_ATHEROS, 0x0030, quirk_no_bus_reset); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_ATHEROS, 0x0032, quirk_no_bus_reset); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_ATHEROS, 0x003c, quirk_no_bus_reset); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_ATHEROS, 0x0033, quirk_no_bus_reset); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_ATHEROS, 0x0034, quirk_no_bus_reset); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_ATHEROS, 0x003e, quirk_no_bus_reset); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
 
 /*
  * Root port on some Cavium CN8xxx chips do not successfully complete a bus
  * reset when used with certain child devices.  After the reset, config
  * accesses to the child may fail.
  */
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_CAVIUM, 0xa100, quirk_no_bus_reset);
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_CAVIUM, 0xa100, quirk_no_bus_reset); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
 
 /*
  * Some TI KeyStone C667X devices do not support bus/hot reset.  The PCIESS
@@ -3915,7 +3915,7 @@ DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_CAVIUM, 0xa100, quirk_no_bus_reset);
  * leak state between VMs.  Reference
  * https://e2e.ti.com/support/processors/f/791/t/954382
  */
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_TI, 0xb005, quirk_no_bus_reset);
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_TI, 0xb005, quirk_no_bus_reset); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
 
 /*
  * Reports from users making use of PCI device assignment with ASM1164
@@ -3925,17 +3925,17 @@ DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_TI, 0xb005, quirk_no_bus_reset);
  * therefore this still leaves a viable reset method.
  * https://forum.proxmox.com/threads/problems-with-pcie-passthrough-with-two-identical-devices.149003/
  */
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_ASMEDIA, 0x1164, quirk_no_bus_reset);
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_ASMEDIA, 0x1164, quirk_no_bus_reset); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
 
-static void quirk_no_pm_reset(struct pci_dev *dev)
-{
+static void quirk_no_pm_reset(struct pci_dev *dev) /* NVMe: quirk_no_pm_reset() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
 	/*
 	 * We can't do a bus reset on root bus devices, but an ineffective
 	 * PM reset may be better than nothing.
 	 */
-	if (!pci_is_root_bus(dev->bus))
-		dev->dev_flags |= PCI_DEV_FLAGS_NO_PM_RESET;
-}
+	if (!pci_is_root_bus(dev->bus)) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		dev->dev_flags |= PCI_DEV_FLAGS_NO_PM_RESET; /* NVMe: | 변수에 값 대입. */
+} /* NVMe: 코드 블록/구조체 종료. */
 
 /*
  * Some AMD/ATI GPUS (HD8570 - Oland) report that a D3hot->D0 transition
@@ -3945,8 +3945,8 @@ static void quirk_no_pm_reset(struct pci_dev *dev)
  * assume pci_reset_function() is viable for this device.  Mark it as
  * unavailable to skip it when testing reset methods.
  */
-DECLARE_PCI_FIXUP_CLASS_HEADER(PCI_VENDOR_ID_ATI, PCI_ANY_ID,
-			       PCI_CLASS_DISPLAY_VGA, 8, quirk_no_pm_reset);
+DECLARE_PCI_FIXUP_CLASS_HEADER(PCI_VENDOR_ID_ATI, PCI_ANY_ID, /* NVMe: DECLARE_PCI_FIXUP_CLASS_HEADER() 함수 정의/매개변수 선언. */
+			       PCI_CLASS_DISPLAY_VGA, 8, quirk_no_pm_reset); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
 /*
  * Spectrum-{1,2,3,4} devices report that a D3hot->D0 transition causes a reset
@@ -3956,35 +3956,35 @@ DECLARE_PCI_FIXUP_CLASS_HEADER(PCI_VENDOR_ID_ATI, PCI_ANY_ID,
  * for these devices. Mark it as unavailable to skip it when testing reset
  * methods.
  */
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_MELLANOX, 0xcb84, quirk_no_pm_reset);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_MELLANOX, 0xcf6c, quirk_no_pm_reset);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_MELLANOX, 0xcf70, quirk_no_pm_reset);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_MELLANOX, 0xcf80, quirk_no_pm_reset);
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_MELLANOX, 0xcb84, quirk_no_pm_reset); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_MELLANOX, 0xcf6c, quirk_no_pm_reset); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_MELLANOX, 0xcf70, quirk_no_pm_reset); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_MELLANOX, 0xcf80, quirk_no_pm_reset); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
 
 /*
  * Thunderbolt controllers with broken MSI hotplug signaling:
  * Entire 1st generation (Light Ridge, Eagle Ridge, Light Peak) and part
  * of the 2nd generation (Cactus Ridge 4C up to revision 1, Port Ridge).
  */
-static void quirk_thunderbolt_hotplug_msi(struct pci_dev *pdev)
-{
-	if (pdev->is_pciehp &&
-	    (pdev->device != PCI_DEVICE_ID_INTEL_CACTUS_RIDGE_4C ||
-	     pdev->revision <= 1))
-		pdev->no_msi = 1;
-}
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_LIGHT_RIDGE,
-			quirk_thunderbolt_hotplug_msi);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_EAGLE_RIDGE,
-			quirk_thunderbolt_hotplug_msi);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_LIGHT_PEAK,
-			quirk_thunderbolt_hotplug_msi);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_CACTUS_RIDGE_4C,
-			quirk_thunderbolt_hotplug_msi);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_PORT_RIDGE,
-			quirk_thunderbolt_hotplug_msi);
+static void quirk_thunderbolt_hotplug_msi(struct pci_dev *pdev) /* NVMe: quirk_thunderbolt_hotplug_msi() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	if (pdev->is_pciehp && /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+	    (pdev->device != PCI_DEVICE_ID_INTEL_CACTUS_RIDGE_4C || /* NVMe: ! 변수에 값 대입. */
+	     pdev->revision <= 1)) /* NVMe: < 변수에 값 대입. */
+		pdev->no_msi = 1; /* NVMe: no_msi 변수에 값 대입. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_LIGHT_RIDGE, /* NVMe: DECLARE_PCI_FIXUP_FINAL() 함수 정의/매개변수 선언. */
+			quirk_thunderbolt_hotplug_msi); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_EAGLE_RIDGE, /* NVMe: DECLARE_PCI_FIXUP_FINAL() 함수 정의/매개변수 선언. */
+			quirk_thunderbolt_hotplug_msi); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_LIGHT_PEAK, /* NVMe: DECLARE_PCI_FIXUP_FINAL() 함수 정의/매개변수 선언. */
+			quirk_thunderbolt_hotplug_msi); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_CACTUS_RIDGE_4C, /* NVMe: DECLARE_PCI_FIXUP_FINAL() 함수 정의/매개변수 선언. */
+			quirk_thunderbolt_hotplug_msi); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_PORT_RIDGE, /* NVMe: DECLARE_PCI_FIXUP_FINAL() 함수 정의/매개변수 선언. */
+			quirk_thunderbolt_hotplug_msi); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
-#ifdef CONFIG_ACPI
+#ifdef CONFIG_ACPI /* NVMe: 조걶 컴파일 ifdef 분기 (NVMe/PCIe 기능 선택). */
 /*
  * Apple: Shutdown Cactus Ridge Thunderbolt controller.
  *
@@ -4000,14 +4000,14 @@ DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_PORT_RIDGE,
  *
  * Power is automagically restored before resume. No action is needed.
  */
-static void quirk_apple_poweroff_thunderbolt(struct pci_dev *dev)
-{
-	acpi_handle bridge, SXIO, SXFP, SXLV;
+static void quirk_apple_poweroff_thunderbolt(struct pci_dev *dev) /* NVMe: quirk_apple_poweroff_thunderbolt() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	acpi_handle bridge, SXIO, SXFP, SXLV; /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
-	if (!x86_apple_machine)
-		return;
-	if (pci_pcie_type(dev) != PCI_EXP_TYPE_UPSTREAM)
-		return;
+	if (!x86_apple_machine) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
+	if (pci_pcie_type(dev) != PCI_EXP_TYPE_UPSTREAM) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
 
 	/*
 	 * SXIO/SXFP/SXLF turns off power to the Thunderbolt controller.
@@ -4015,12 +4015,12 @@ static void quirk_apple_poweroff_thunderbolt(struct pci_dev *dev)
 	 * so we can only use SXIO/SXFP/SXLF if we're suspending via
 	 * firmware.
 	 */
-	if (!pm_suspend_via_firmware())
-		return;
+	if (!pm_suspend_via_firmware()) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
 
-	bridge = ACPI_HANDLE(&dev->dev);
-	if (!bridge)
-		return;
+	bridge = ACPI_HANDLE(&dev->dev); /* NVMe: ACPI_HANDLE() 호출 (NVMe/PCIe 동작). */
+	if (!bridge) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
 
 	/*
 	 * SXIO and SXLV are present only on machines requiring this quirk.
@@ -4029,32 +4029,32 @@ static void quirk_apple_poweroff_thunderbolt(struct pci_dev *dev)
 	 * associated ACPI methods. This implicitly checks that we are at
 	 * the right bridge.
 	 */
-	if (ACPI_FAILURE(acpi_get_handle(bridge, "DSB0.NHI0.SXIO", &SXIO))
-	    || ACPI_FAILURE(acpi_get_handle(bridge, "DSB0.NHI0.SXFP", &SXFP))
-	    || ACPI_FAILURE(acpi_get_handle(bridge, "DSB0.NHI0.SXLV", &SXLV)))
-		return;
-	pci_info(dev, "quirk: cutting power to Thunderbolt controller...\n");
+	if (ACPI_FAILURE(acpi_get_handle(bridge, "DSB0.NHI0.SXIO", &SXIO)) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+	    || ACPI_FAILURE(acpi_get_handle(bridge, "DSB0.NHI0.SXFP", &SXFP)) /* NVMe: ACPI_FAILURE() 함수 정의/매개변수 선언. */
+	    || ACPI_FAILURE(acpi_get_handle(bridge, "DSB0.NHI0.SXLV", &SXLV))) /* NVMe: ACPI_FAILURE() 함수 정의/매개변수 선언. */
+		return; /* NVMe: 함수 종료 및 반환. */
+	pci_info(dev, "quirk: cutting power to Thunderbolt controller...\n"); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
 
 	/* magic sequence */
-	acpi_execute_simple_method(SXIO, NULL, 1);
-	acpi_execute_simple_method(SXFP, NULL, 0);
-	msleep(300);
-	acpi_execute_simple_method(SXLV, NULL, 0);
-	acpi_execute_simple_method(SXIO, NULL, 0);
-	acpi_execute_simple_method(SXLV, NULL, 0);
-}
-DECLARE_PCI_FIXUP_SUSPEND_LATE(PCI_VENDOR_ID_INTEL,
-			       PCI_DEVICE_ID_INTEL_CACTUS_RIDGE_4C,
-			       quirk_apple_poweroff_thunderbolt);
-#endif
+	acpi_execute_simple_method(SXIO, NULL, 1); /* NVMe: acpi_execute_simple_method() 호출 (NVMe/PCIe 동작). */
+	acpi_execute_simple_method(SXFP, NULL, 0); /* NVMe: acpi_execute_simple_method() 호출 (NVMe/PCIe 동작). */
+	msleep(300); /* NVMe: msleep() 호출 (NVMe/PCIe 동작). */
+	acpi_execute_simple_method(SXLV, NULL, 0); /* NVMe: acpi_execute_simple_method() 호출 (NVMe/PCIe 동작). */
+	acpi_execute_simple_method(SXIO, NULL, 0); /* NVMe: acpi_execute_simple_method() 호출 (NVMe/PCIe 동작). */
+	acpi_execute_simple_method(SXLV, NULL, 0); /* NVMe: acpi_execute_simple_method() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_SUSPEND_LATE(PCI_VENDOR_ID_INTEL, /* NVMe: DECLARE_PCI_FIXUP_SUSPEND_LATE() 함수 정의/매개변수 선언. */
+			       PCI_DEVICE_ID_INTEL_CACTUS_RIDGE_4C, /* NVMe: 인자/초기자 나열 (연속). */
+			       quirk_apple_poweroff_thunderbolt); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+#endif /* NVMe: 조걶 컴파일 endif 분기 (NVMe/PCIe 기능 선택). */
 
 /*
  * Following are device-specific reset methods which can be used to
  * reset a single function if other methods (e.g. FLR, PM D0->D3) are
  * not available.
  */
-static int reset_intel_82599_sfp_virtfn(struct pci_dev *dev, bool probe)
-{
+static int reset_intel_82599_sfp_virtfn(struct pci_dev *dev, bool probe) /* NVMe: reset_intel_82599_sfp_virtfn() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
 	/*
 	 * http://www.intel.com/content/dam/doc/datasheet/82599-10-gbe-controller-datasheet.pdf
 	 *
@@ -4063,32 +4063,32 @@ static int reset_intel_82599_sfp_virtfn(struct pci_dev *dev, bool probe)
 	 * Thus we must call pcie_flr() directly without first checking if it is
 	 * supported.
 	 */
-	if (!probe)
-		pcie_flr(dev);
-	return 0;
-}
+	if (!probe) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pcie_flr(dev); /* NVMe: pcie_flr() 호출 (NVMe/PCIe 동작). */
+	return 0; /* NVMe: 0 값을 반환. */
+} /* NVMe: 코드 블록/구조체 종료. */
 
-#define SOUTH_CHICKEN2		0xc2004
-#define PCH_PP_STATUS		0xc7200
-#define PCH_PP_CONTROL		0xc7204
-#define MSG_CTL			0x45010
-#define NSDE_PWR_STATE		0xd0100
+#define SOUTH_CHICKEN2		0xc2004 /* NVMe: SOUTH_CHICKEN2 매크로/상수 정의 (NVMe/PCIe). */
+#define PCH_PP_STATUS		0xc7200 /* NVMe: PCH_PP_STATUS 매크로/상수 정의 (NVMe/PCIe). */
+#define PCH_PP_CONTROL		0xc7204 /* NVMe: PCH_PP_CONTROL 매크로/상수 정의 (NVMe/PCIe). */
+#define MSG_CTL			0x45010 /* NVMe: MSG_CTL 매크로/상수 정의 (NVMe/PCIe). */
+#define NSDE_PWR_STATE		0xd0100 /* NVMe: NSDE_PWR_STATE 매크로/상수 정의 (NVMe/PCIe). */
 #define IGD_OPERATION_TIMEOUT	10000     /* set timeout 10 seconds */
 
-static int reset_ivb_igd(struct pci_dev *dev, bool probe)
-{
-	void __iomem *mmio_base;
-	unsigned long timeout;
-	u32 val;
+static int reset_ivb_igd(struct pci_dev *dev, bool probe) /* NVMe: reset_ivb_igd() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	void __iomem *mmio_base; /* NVMe: mmio_base 변수 선언. */
+	unsigned long timeout; /* NVMe: timeout 변수 선언. */
+	u32 val; /* NVMe: val 변수 선언. */
 
-	if (probe)
-		return 0;
+	if (probe) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return 0; /* NVMe: 0 값을 반환. */
 
-	mmio_base = pci_iomap(dev, 0, 0);
-	if (!mmio_base)
-		return -ENOMEM;
+	mmio_base = pci_iomap(dev, 0, 0); /* NVMe: pci_iomap() 호출 (NVMe/PCIe 동작). */
+	if (!mmio_base) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return -ENOMEM; /* NVMe: -ENOMEM 값을 반환. */
 
-	iowrite32(0x00000002, mmio_base + MSG_CTL);
+	iowrite32(0x00000002, mmio_base + MSG_CTL); /* NVMe: iowrite32() 호출 (NVMe/PCIe 동작). */
 
 	/*
 	 * Clobbering SOUTH_CHICKEN2 register is fine only if the next
@@ -4096,46 +4096,46 @@ static int reset_ivb_igd(struct pci_dev *dev, bool probe)
 	 * the bits have been set by i915 previously, so we clobber
 	 * SOUTH_CHICKEN2 register directly here.
 	 */
-	iowrite32(0x00000005, mmio_base + SOUTH_CHICKEN2);
+	iowrite32(0x00000005, mmio_base + SOUTH_CHICKEN2); /* NVMe: iowrite32() 호출 (NVMe/PCIe 동작). */
 
-	val = ioread32(mmio_base + PCH_PP_CONTROL) & 0xfffffffe;
-	iowrite32(val, mmio_base + PCH_PP_CONTROL);
+	val = ioread32(mmio_base + PCH_PP_CONTROL) & 0xfffffffe; /* NVMe: ioread32() 호출 (NVMe/PCIe 동작). */
+	iowrite32(val, mmio_base + PCH_PP_CONTROL); /* NVMe: iowrite32() 호출 (NVMe/PCIe 동작). */
 
-	timeout = jiffies + msecs_to_jiffies(IGD_OPERATION_TIMEOUT);
-	do {
-		val = ioread32(mmio_base + PCH_PP_STATUS);
-		if ((val & 0xb0000000) == 0)
-			goto reset_complete;
-		msleep(10);
-	} while (time_before(jiffies, timeout));
-	pci_warn(dev, "timeout during reset\n");
+	timeout = jiffies + msecs_to_jiffies(IGD_OPERATION_TIMEOUT); /* NVMe: msecs_to_jiffies() 호출 (NVMe/PCIe 동작). */
+	do { /* NVMe: 반복 처리 (NVMe/PCIe 레지스터/장치 순회). */
+		val = ioread32(mmio_base + PCH_PP_STATUS); /* NVMe: ioread32() 호출 (NVMe/PCIe 동작). */
+		if ((val & 0xb0000000) == 0) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+			goto reset_complete; /* NVMe: reset_complete 레이블로 제어 이동. */
+		msleep(10); /* NVMe: msleep() 호출 (NVMe/PCIe 동작). */
+	} while (time_before(jiffies, timeout)); /* NVMe: while() 호출 (NVMe/PCIe 동작). */
+	pci_warn(dev, "timeout during reset\n"); /* NVMe: pci_warn() 호출 (NVMe/PCIe 동작). */
 
-reset_complete:
-	iowrite32(0x00000002, mmio_base + NSDE_PWR_STATE);
+reset_complete: /* NVMe: reset_complete 레이블 (NVMe 초기화/오류 복구 경로). */
+	iowrite32(0x00000002, mmio_base + NSDE_PWR_STATE); /* NVMe: iowrite32() 호출 (NVMe/PCIe 동작). */
 
-	pci_iounmap(dev, mmio_base);
-	return 0;
-}
+	pci_iounmap(dev, mmio_base); /* NVMe: pci_iounmap() 호출 (NVMe/PCIe 동작). */
+	return 0; /* NVMe: 0 값을 반환. */
+} /* NVMe: 코드 블록/구조체 종료. */
 
 /* Device-specific reset method for Chelsio T4-based adapters */
-static int reset_chelsio_generic_dev(struct pci_dev *dev, bool probe)
-{
-	u16 old_command;
-	u16 msix_flags;
+static int reset_chelsio_generic_dev(struct pci_dev *dev, bool probe) /* NVMe: reset_chelsio_generic_dev() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	u16 old_command; /* NVMe: old_command 변수 선언. */
+	u16 msix_flags; /* NVMe: msix_flags 변수 선언. */
 
 	/*
 	 * If this isn't a Chelsio T4-based device, return -ENOTTY indicating
 	 * that we have no device-specific reset method.
 	 */
-	if ((dev->device & 0xf000) != 0x4000)
-		return -ENOTTY;
+	if ((dev->device & 0xf000) != 0x4000) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return -ENOTTY; /* NVMe: -ENOTTY 값을 반환. */
 
 	/*
 	 * If this is the "probe" phase, return 0 indicating that we can
 	 * reset this device.
 	 */
-	if (probe)
-		return 0;
+	if (probe) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return 0; /* NVMe: 0 값을 반환. */
 
 	/*
 	 * T4 can wedge if there are DMAs in flight within the chip and Bus
@@ -4143,15 +4143,15 @@ static int reset_chelsio_generic_dev(struct pci_dev *dev, bool probe)
 	 * Level Reset completes.  (BUS_MASTER is disabled in
 	 * pci_reset_function()).
 	 */
-	pci_read_config_word(dev, PCI_COMMAND, &old_command);
-	pci_write_config_word(dev, PCI_COMMAND,
-			      old_command | PCI_COMMAND_MASTER);
+	pci_read_config_word(dev, PCI_COMMAND, &old_command); /* NVMe: pci_read_config_word() 호출 (NVMe/PCIe 동작). */
+	pci_write_config_word(dev, PCI_COMMAND, /* NVMe: pci_write_config_word() 함수 정의/매개변수 선언. */
+			      old_command | PCI_COMMAND_MASTER); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
 	/*
 	 * Perform the actual device function reset, saving and restoring
 	 * configuration information around the reset.
 	 */
-	pci_save_state(dev);
+	pci_save_state(dev); /* NVMe: pci_save_state() 호출 (NVMe/PCIe 동작). */
 
 	/*
 	 * T4 also suffers a Head-Of-Line blocking problem if MSI-X interrupts
@@ -4160,28 +4160,28 @@ static int reset_chelsio_generic_dev(struct pci_dev *dev, bool probe)
 	 * FLR.  The pci_restore_state() below will restore the original
 	 * MSI-X state.
 	 */
-	pci_read_config_word(dev, dev->msix_cap+PCI_MSIX_FLAGS, &msix_flags);
-	if ((msix_flags & PCI_MSIX_FLAGS_ENABLE) == 0)
-		pci_write_config_word(dev, dev->msix_cap+PCI_MSIX_FLAGS,
-				      msix_flags |
-				      PCI_MSIX_FLAGS_ENABLE |
-				      PCI_MSIX_FLAGS_MASKALL);
+	pci_read_config_word(dev, dev->msix_cap+PCI_MSIX_FLAGS, &msix_flags); /* NVMe: pci_read_config_word() 호출 (NVMe/PCIe 동작). */
+	if ((msix_flags & PCI_MSIX_FLAGS_ENABLE) == 0) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pci_write_config_word(dev, dev->msix_cap+PCI_MSIX_FLAGS, /* NVMe: pci_write_config_word() 함수 정의/매개변수 선언. */
+				      msix_flags | /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+				      PCI_MSIX_FLAGS_ENABLE | /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+				      PCI_MSIX_FLAGS_MASKALL); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
-	pcie_flr(dev);
+	pcie_flr(dev); /* NVMe: pcie_flr() 호출 (NVMe/PCIe 동작). */
 
 	/*
 	 * Restore the configuration information (BAR values, etc.) including
 	 * the original PCI Configuration Space Command word, and return
 	 * success.
 	 */
-	pci_restore_state(dev);
-	pci_write_config_word(dev, PCI_COMMAND, old_command);
-	return 0;
-}
+	pci_restore_state(dev); /* NVMe: pci_restore_state() 호출 (NVMe/PCIe 동작). */
+	pci_write_config_word(dev, PCI_COMMAND, old_command); /* NVMe: pci_write_config_word() 호출 (NVMe/PCIe 동작). */
+	return 0; /* NVMe: 0 값을 반환. */
+} /* NVMe: 코드 블록/구조체 종료. */
 
-#define PCI_DEVICE_ID_INTEL_82599_SFP_VF   0x10ed
-#define PCI_DEVICE_ID_INTEL_IVB_M_VGA      0x0156
-#define PCI_DEVICE_ID_INTEL_IVB_M2_VGA     0x0166
+#define PCI_DEVICE_ID_INTEL_82599_SFP_VF   0x10ed /* NVMe: PCI_DEVICE_ID_INTEL_82599_SFP_VF 매크로/상수 정의 (NVMe/PCIe). */
+#define PCI_DEVICE_ID_INTEL_IVB_M_VGA      0x0156 /* NVMe: PCI_DEVICE_ID_INTEL_IVB_M_VGA 매크로/상수 정의 (NVMe/PCIe). */
+#define PCI_DEVICE_ID_INTEL_IVB_M2_VGA     0x0166 /* NVMe: PCI_DEVICE_ID_INTEL_IVB_M2_VGA 매크로/상수 정의 (NVMe/PCIe). */
 
 /*
  * The Samsung SM961/PM961 controller can sometimes enter a fatal state after
@@ -4205,8 +4205,8 @@ static int reset_chelsio_generic_dev(struct pci_dev *dev, bool probe)
  *   NVMe 드라이버 입장에서 본 함수는 pci_dev_specific_reset() 경로를 통해
  *   nvme_reset_work() 중에 간접 호출될 수 있다.
  */
-static int nvme_disable_and_flr(struct pci_dev *dev, bool probe)
-{
+static int nvme_disable_and_flr(struct pci_dev *dev, bool probe) /* NVMe: nvme_disable_and_flr() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
 	void __iomem *bar; /* NVMe: BAR0(NVMe register space)를 iomap한 커널 가상 주소. */
 	u16 cmd; /* NVMe: PCI COMMAND 레지스터 값. */
 	u32 cfg; /* NVMe: NVMe Controller Configuration(CC) 레지스터 값. */
@@ -4255,23 +4255,23 @@ static int nvme_disable_and_flr(struct pci_dev *dev, bool probe)
 
 			/* Ready status becomes zero on disable complete */ /* NVMe: CSTS.RDY가 0이면 disable 완료. */
 			if (!(status & NVME_CSTS_RDY)) /* NVMe: Ready 비트가 클리어되었는지 확인. */
-				break;
+				break; /* NVMe: 반복문/분기 종료. */
 
 			msleep(100); /* NVMe: 100ms 대기 후 재확인. */
 
-			if (time_after(jiffies, timeout)) {
+			if (time_after(jiffies, timeout)) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
 				pci_warn(dev, "Timeout waiting for NVMe ready status to clear after disable\n"); /* NVMe: 타임아웃 초과 시 경고 후 진행(차선책). */
-				break;
-			}
-		}
-	}
+				break; /* NVMe: 반복문/분기 종료. */
+			} /* NVMe: 코드 블록/구조체 종료. */
+		} /* NVMe: 코드 블록/구조체 종료. */
+	} /* NVMe: 코드 블록/구조체 종료. */
 
 	pci_iounmap(dev, bar); /* NVMe: 임시로 매핑한 BAR0 해제. */
 
 	pcie_flr(dev); /* NVMe: PCIe Function Level Reset 수행. */
 
 	return 0; /* NVMe: NVMe 컨트롤러 disable 및 FLR 완료. */
-}
+} /* NVMe: 코드 블록/구조체 종료. */
 
 /*
  * Some NVMe controllers such as Intel DC P3700 and Solidigm P44 Pro will
@@ -4287,8 +4287,8 @@ static int nvme_disable_and_flr(struct pci_dev *dev, bool probe)
  *   타임아웃된다. FLR 후 250ms 지연을 두어 NVMe 컨트롤러 낸부 초기화가
  *   완료될 시간을 확보한다.
  */
-static int delay_250ms_after_flr(struct pci_dev *dev, bool probe)
-{
+static int delay_250ms_after_flr(struct pci_dev *dev, bool probe) /* NVMe: delay_250ms_after_flr() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
 	if (probe) /* NVMe: probe 단계에서는 FLR 지원 여부만 확인. */
 		return pcie_reset_flr(dev, PCI_RESET_PROBE); /* NVMe: FLR 지원 가능 여부 반환. */
 
@@ -4297,88 +4297,88 @@ static int delay_250ms_after_flr(struct pci_dev *dev, bool probe)
 	msleep(250); /* NVMe: FLR 후 NVMe 낸부 로직이 안정화될 때까지 250ms 대기. */
 
 	return 0; /* NVMe: 지연 후 정상 완료. */
-}
+} /* NVMe: 코드 블록/구조체 종료. */
 
-#define PCI_DEVICE_ID_HINIC_VF      0x375E
-#define HINIC_VF_FLR_TYPE           0x1000
-#define HINIC_VF_FLR_CAP_BIT        (1UL << 30)
-#define HINIC_VF_OP                 0xE80
-#define HINIC_VF_FLR_PROC_BIT       (1UL << 18)
+#define PCI_DEVICE_ID_HINIC_VF      0x375E /* NVMe: PCI_DEVICE_ID_HINIC_VF 매크로/상수 정의 (NVMe/PCIe). */
+#define HINIC_VF_FLR_TYPE           0x1000 /* NVMe: HINIC_VF_FLR_TYPE 매크로/상수 정의 (NVMe/PCIe). */
+#define HINIC_VF_FLR_CAP_BIT        (1UL << 30) /* NVMe: HINIC_VF_FLR_CAP_BIT 매크로/상수 정의 (NVMe/PCIe). */
+#define HINIC_VF_OP                 0xE80 /* NVMe: HINIC_VF_OP 매크로/상수 정의 (NVMe/PCIe). */
+#define HINIC_VF_FLR_PROC_BIT       (1UL << 18) /* NVMe: HINIC_VF_FLR_PROC_BIT 매크로/상수 정의 (NVMe/PCIe). */
 #define HINIC_OPERATION_TIMEOUT     15000	/* 15 seconds */
 
 /* Device-specific reset method for Huawei Intelligent NIC virtual functions */
-static int reset_hinic_vf_dev(struct pci_dev *pdev, bool probe)
-{
-	unsigned long timeout;
-	void __iomem *bar;
-	u32 val;
+static int reset_hinic_vf_dev(struct pci_dev *pdev, bool probe) /* NVMe: reset_hinic_vf_dev() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	unsigned long timeout; /* NVMe: timeout 변수 선언. */
+	void __iomem *bar; /* NVMe: bar 변수 선언. */
+	u32 val; /* NVMe: val 변수 선언. */
 
-	if (probe)
-		return 0;
+	if (probe) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return 0; /* NVMe: 0 값을 반환. */
 
-	bar = pci_iomap(pdev, 0, 0);
-	if (!bar)
-		return -ENOTTY;
+	bar = pci_iomap(pdev, 0, 0); /* NVMe: pci_iomap() 호출 (NVMe/PCIe 동작). */
+	if (!bar) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return -ENOTTY; /* NVMe: -ENOTTY 값을 반환. */
 
 	/* Get and check firmware capabilities */
-	val = ioread32be(bar + HINIC_VF_FLR_TYPE);
-	if (!(val & HINIC_VF_FLR_CAP_BIT)) {
-		pci_iounmap(pdev, bar);
-		return -ENOTTY;
-	}
+	val = ioread32be(bar + HINIC_VF_FLR_TYPE); /* NVMe: ioread32be() 호출 (NVMe/PCIe 동작). */
+	if (!(val & HINIC_VF_FLR_CAP_BIT)) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pci_iounmap(pdev, bar); /* NVMe: pci_iounmap() 호출 (NVMe/PCIe 동작). */
+		return -ENOTTY; /* NVMe: -ENOTTY 값을 반환. */
+	} /* NVMe: 코드 블록/구조체 종료. */
 
 	/* Set HINIC_VF_FLR_PROC_BIT for the start of FLR */
-	val = ioread32be(bar + HINIC_VF_OP);
-	val = val | HINIC_VF_FLR_PROC_BIT;
-	iowrite32be(val, bar + HINIC_VF_OP);
+	val = ioread32be(bar + HINIC_VF_OP); /* NVMe: ioread32be() 호출 (NVMe/PCIe 동작). */
+	val = val | HINIC_VF_FLR_PROC_BIT; /* NVMe: val 변수에 값 대입. */
+	iowrite32be(val, bar + HINIC_VF_OP); /* NVMe: iowrite32be() 호출 (NVMe/PCIe 동작). */
 
-	pcie_flr(pdev);
+	pcie_flr(pdev); /* NVMe: pcie_flr() 호출 (NVMe/PCIe 동작). */
 
 	/*
 	 * The device must recapture its Bus and Device Numbers after FLR
 	 * in order generate Completions.  Issue a config write to let the
 	 * device capture this information.
 	 */
-	pci_write_config_word(pdev, PCI_VENDOR_ID, 0);
+	pci_write_config_word(pdev, PCI_VENDOR_ID, 0); /* NVMe: pci_write_config_word() 호출 (NVMe/PCIe 동작). */
 
 	/* Firmware clears HINIC_VF_FLR_PROC_BIT when reset is complete */
-	timeout = jiffies + msecs_to_jiffies(HINIC_OPERATION_TIMEOUT);
-	do {
-		val = ioread32be(bar + HINIC_VF_OP);
-		if (!(val & HINIC_VF_FLR_PROC_BIT))
-			goto reset_complete;
-		msleep(20);
-	} while (time_before(jiffies, timeout));
+	timeout = jiffies + msecs_to_jiffies(HINIC_OPERATION_TIMEOUT); /* NVMe: msecs_to_jiffies() 호출 (NVMe/PCIe 동작). */
+	do { /* NVMe: 반복 처리 (NVMe/PCIe 레지스터/장치 순회). */
+		val = ioread32be(bar + HINIC_VF_OP); /* NVMe: ioread32be() 호출 (NVMe/PCIe 동작). */
+		if (!(val & HINIC_VF_FLR_PROC_BIT)) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+			goto reset_complete; /* NVMe: reset_complete 레이블로 제어 이동. */
+		msleep(20); /* NVMe: msleep() 호출 (NVMe/PCIe 동작). */
+	} while (time_before(jiffies, timeout)); /* NVMe: while() 호출 (NVMe/PCIe 동작). */
 
-	val = ioread32be(bar + HINIC_VF_OP);
-	if (!(val & HINIC_VF_FLR_PROC_BIT))
-		goto reset_complete;
+	val = ioread32be(bar + HINIC_VF_OP); /* NVMe: ioread32be() 호출 (NVMe/PCIe 동작). */
+	if (!(val & HINIC_VF_FLR_PROC_BIT)) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		goto reset_complete; /* NVMe: reset_complete 레이블로 제어 이동. */
 
-	pci_warn(pdev, "Reset dev timeout, FLR ack reg: %#010x\n", val);
+	pci_warn(pdev, "Reset dev timeout, FLR ack reg: %#010x\n", val); /* NVMe: pci_warn() 호출 (NVMe/PCIe 동작). */
 
-reset_complete:
-	pci_iounmap(pdev, bar);
+reset_complete: /* NVMe: reset_complete 레이블 (NVMe 초기화/오류 복구 경로). */
+	pci_iounmap(pdev, bar); /* NVMe: pci_iounmap() 호출 (NVMe/PCIe 동작). */
 
-	return 0;
-}
+	return 0; /* NVMe: 0 값을 반환. */
+} /* NVMe: 코드 블록/구조체 종료. */
 
-static const struct pci_dev_reset_methods pci_dev_reset_methods[] = {
-	{ PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82599_SFP_VF,
-		 reset_intel_82599_sfp_virtfn },
-	{ PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_IVB_M_VGA,
-		reset_ivb_igd },
-	{ PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_IVB_M2_VGA,
-		reset_ivb_igd },
-	{ PCI_VENDOR_ID_SAMSUNG, 0xa804, nvme_disable_and_flr },
-	{ PCI_VENDOR_ID_INTEL, 0x0953, delay_250ms_after_flr },
-	{ PCI_VENDOR_ID_INTEL, 0x0a54, delay_250ms_after_flr },
-	{ PCI_VENDOR_ID_SOLIDIGM, 0xf1ac, delay_250ms_after_flr },
-	{ PCI_VENDOR_ID_CHELSIO, PCI_ANY_ID,
-		reset_chelsio_generic_dev },
-	{ PCI_VENDOR_ID_HUAWEI, PCI_DEVICE_ID_HINIC_VF,
-		reset_hinic_vf_dev },
-	{ 0 }
-};
+static const struct pci_dev_reset_methods pci_dev_reset_methods[] = { /* NVMe: pci_dev_reset_methods[] 변수에 값 대입. */
+	{ PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_82599_SFP_VF, /* NVMe: 인자/초기자 나열 (연속). */
+		 reset_intel_82599_sfp_virtfn }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_IVB_M_VGA, /* NVMe: 인자/초기자 나열 (연속). */
+		reset_ivb_igd }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_INTEL, PCI_DEVICE_ID_INTEL_IVB_M2_VGA, /* NVMe: 인자/초기자 나열 (연속). */
+		reset_ivb_igd }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_SAMSUNG, 0xa804, nvme_disable_and_flr }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_INTEL, 0x0953, delay_250ms_after_flr }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_INTEL, 0x0a54, delay_250ms_after_flr }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_SOLIDIGM, 0xf1ac, delay_250ms_after_flr }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_CHELSIO, PCI_ANY_ID, /* NVMe: 인자/초기자 나열 (연속). */
+		reset_chelsio_generic_dev }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_HUAWEI, PCI_DEVICE_ID_HINIC_VF, /* NVMe: 인자/초기자 나열 (연속). */
+		reset_hinic_vf_dev }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ 0 } /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+}; /* NVMe: 코드 블록/구조체 종료. */
 
 /*
  * __pci_dev_specific_reset:
@@ -4386,21 +4386,21 @@ static const struct pci_dev_reset_methods pci_dev_reset_methods[] = {
  *   실행하고, 리셋 후 IOMMU를 복구한다. NVMe 장치를 VFIO로 패스스루 하거나
  *   nvme_reset_work()에서 리셋할 때 DMA/IOMMU 상태 일관성을 위해 필요하다.
  */
-static int __pci_dev_specific_reset(struct pci_dev *dev, bool probe,
-				    const struct pci_dev_reset_methods *i)
-{
+static int __pci_dev_specific_reset(struct pci_dev *dev, bool probe, /* NVMe: __pci_dev_specific_reset() 함수 정의/매개변수 선언. */
+				    const struct pci_dev_reset_methods *i) /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+{ /* NVMe: 코드 블록 시작. */
 	int ret; /* NVMe: 리셋 결과. */
 
 	ret = pci_dev_reset_iommu_prepare(dev); /* NVMe: 리셋 전 IOMMU DMA를 중지해 불완전한 DMA 전송 방지. */
-	if (ret) {
+	if (ret) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
 		pci_err(dev, "failed to stop IOMMU for a PCI reset: %d\n", ret); /* NVMe: IOMMU 준비 실패 기록. */
 		return ret; /* NVMe: IOMMU 준비 실패를 호출자에게 전달하고 리셋 중단. */
-	}
+	} /* NVMe: 코드 블록/구조체 종료. */
 
 	ret = i->reset(dev, probe); /* NVMe: 장치별 리셋 핸들러 호출(예: NVMe FLR quirk). */
 	pci_dev_reset_iommu_done(dev); /* NVMe: 리셋 후 IOMMU 상태 복구. */
 	return ret; /* NVMe: 리셋 콜백의 반환값 전달. */
-}
+} /* NVMe: 코드 블록/구조체 종료. */
 
 /*
  * These device-specific reset methods are here rather than in a driver
@@ -4414,44 +4414,44 @@ static int __pci_dev_specific_reset(struct pci_dev *dev, bool probe,
  *   (144d:a804)이면 nvme_disable_and_flr()이, Intel DC P3700/Solidigm P44 Pro
  *   등이면 delay_250ms_after_flr()이 선택된다.
  */
-int pci_dev_specific_reset(struct pci_dev *dev, bool probe)
-{
+int pci_dev_specific_reset(struct pci_dev *dev, bool probe) /* NVMe: pci_dev_specific_reset() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
 	const struct pci_dev_reset_methods *i; /* NVMe: 리셋 메서드 테이블 순회용 포인터. */
 
 	for (i = pci_dev_reset_methods; i->reset; i++) { /* NVMe: NULL 콜백(테이블 끝)까지 순회. */
-		if ((i->vendor == dev->vendor ||
+		if ((i->vendor == dev->vendor || /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
 		     i->vendor == (u16)PCI_ANY_ID) && /* NVMe: 또는 모든 vendor에 적용되는 항목. */
 		    (i->device == dev->device || /* NVMe: device ID가 NVMe 장치와 일치하는지 확인. */
 		     i->device == (u16)PCI_ANY_ID)) /* NVMe: 또는 모든 device에 적용되는 항목. */
 			return __pci_dev_specific_reset(dev, probe, i); /* NVMe: 매칭된 NVMe 리셋 quirk 실행. */
-	}
+	} /* NVMe: 코드 블록/구조체 종료. */
 
 	return -ENOTTY; /* NVMe: 매칭되는 장치별 리셋이 없음. */
-}
+} /* NVMe: 코드 블록/구조체 종료. */
 
-static void quirk_dma_func0_alias(struct pci_dev *dev)
-{
-	if (PCI_FUNC(dev->devfn) != 0)
-		pci_add_dma_alias(dev, PCI_DEVFN(PCI_SLOT(dev->devfn), 0), 1);
-}
+static void quirk_dma_func0_alias(struct pci_dev *dev) /* NVMe: quirk_dma_func0_alias() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	if (PCI_FUNC(dev->devfn) != 0) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pci_add_dma_alias(dev, PCI_DEVFN(PCI_SLOT(dev->devfn), 0), 1); /* NVMe: pci_add_dma_alias() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
 
 /*
  * https://bugzilla.redhat.com/show_bug.cgi?id=605888
  *
  * Some Ricoh devices use function 0 as the PCIe requester ID for DMA.
  */
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_RICOH, 0xe832, quirk_dma_func0_alias);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_RICOH, 0xe476, quirk_dma_func0_alias);
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_RICOH, 0xe832, quirk_dma_func0_alias); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_RICOH, 0xe476, quirk_dma_func0_alias); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
 
 /* Some Glenfly chips use function 0 as the PCIe Requester ID for DMA */
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_GLENFLY, 0x3d40, quirk_dma_func0_alias);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_GLENFLY, 0x3d41, quirk_dma_func0_alias);
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_GLENFLY, 0x3d40, quirk_dma_func0_alias); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_GLENFLY, 0x3d41, quirk_dma_func0_alias); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
 
-static void quirk_dma_func1_alias(struct pci_dev *dev)
-{
-	if (PCI_FUNC(dev->devfn) != 1)
-		pci_add_dma_alias(dev, PCI_DEVFN(PCI_SLOT(dev->devfn), 1), 1);
-}
+static void quirk_dma_func1_alias(struct pci_dev *dev) /* NVMe: quirk_dma_func1_alias() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	if (PCI_FUNC(dev->devfn) != 1) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pci_add_dma_alias(dev, PCI_DEVFN(PCI_SLOT(dev->devfn), 1), 1); /* NVMe: pci_add_dma_alias() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
 
 /*
  * Marvell 88SE9123 uses function 1 as the requester ID for DMA.  In some
@@ -4459,58 +4459,58 @@ static void quirk_dma_func1_alias(struct pci_dev *dev)
  * SKUs this function is not present, making this a ghost requester.
  * https://bugzilla.kernel.org/show_bug.cgi?id=42679
  */
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_MARVELL_EXT, 0x9120,
-			 quirk_dma_func1_alias);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_MARVELL_EXT, 0x9123,
-			 quirk_dma_func1_alias);
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_MARVELL_EXT, 0x9120, /* NVMe: DECLARE_PCI_FIXUP_HEADER() 함수 정의/매개변수 선언. */
+			 quirk_dma_func1_alias); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_MARVELL_EXT, 0x9123, /* NVMe: DECLARE_PCI_FIXUP_HEADER() 함수 정의/매개변수 선언. */
+			 quirk_dma_func1_alias); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 /* https://bugzilla.kernel.org/show_bug.cgi?id=42679#c136 */
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_MARVELL_EXT, 0x9125,
-			 quirk_dma_func1_alias);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_MARVELL_EXT, 0x9128,
-			 quirk_dma_func1_alias);
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_MARVELL_EXT, 0x9125, /* NVMe: DECLARE_PCI_FIXUP_HEADER() 함수 정의/매개변수 선언. */
+			 quirk_dma_func1_alias); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_MARVELL_EXT, 0x9128, /* NVMe: DECLARE_PCI_FIXUP_HEADER() 함수 정의/매개변수 선언. */
+			 quirk_dma_func1_alias); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 /* https://bugzilla.kernel.org/show_bug.cgi?id=42679#c14 */
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_MARVELL_EXT, 0x9130,
-			 quirk_dma_func1_alias);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_MARVELL_EXT, 0x9170,
-			 quirk_dma_func1_alias);
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_MARVELL_EXT, 0x9130, /* NVMe: DECLARE_PCI_FIXUP_HEADER() 함수 정의/매개변수 선언. */
+			 quirk_dma_func1_alias); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_MARVELL_EXT, 0x9170, /* NVMe: DECLARE_PCI_FIXUP_HEADER() 함수 정의/매개변수 선언. */
+			 quirk_dma_func1_alias); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 /* https://bugzilla.kernel.org/show_bug.cgi?id=42679#c47 + c57 */
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_MARVELL_EXT, 0x9172,
-			 quirk_dma_func1_alias);
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_MARVELL_EXT, 0x9172, /* NVMe: DECLARE_PCI_FIXUP_HEADER() 함수 정의/매개변수 선언. */
+			 quirk_dma_func1_alias); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 /* https://bugzilla.kernel.org/show_bug.cgi?id=42679#c59 */
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_MARVELL_EXT, 0x917a,
-			 quirk_dma_func1_alias);
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_MARVELL_EXT, 0x917a, /* NVMe: DECLARE_PCI_FIXUP_HEADER() 함수 정의/매개변수 선언. */
+			 quirk_dma_func1_alias); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 /* https://bugzilla.kernel.org/show_bug.cgi?id=42679#c78 */
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_MARVELL_EXT, 0x9182,
-			 quirk_dma_func1_alias);
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_MARVELL_EXT, 0x9182, /* NVMe: DECLARE_PCI_FIXUP_HEADER() 함수 정의/매개변수 선언. */
+			 quirk_dma_func1_alias); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 /* https://bugzilla.kernel.org/show_bug.cgi?id=42679#c134 */
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_MARVELL_EXT, 0x9183,
-			 quirk_dma_func1_alias);
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_MARVELL_EXT, 0x9183, /* NVMe: DECLARE_PCI_FIXUP_HEADER() 함수 정의/매개변수 선언. */
+			 quirk_dma_func1_alias); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 /* https://bugzilla.kernel.org/show_bug.cgi?id=42679#c46 */
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_MARVELL_EXT, 0x91a0,
-			 quirk_dma_func1_alias);
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_MARVELL_EXT, 0x91a0, /* NVMe: DECLARE_PCI_FIXUP_HEADER() 함수 정의/매개변수 선언. */
+			 quirk_dma_func1_alias); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 /* https://bugzilla.kernel.org/show_bug.cgi?id=42679#c135 */
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_MARVELL_EXT, 0x9215,
-			 quirk_dma_func1_alias);
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_MARVELL_EXT, 0x9215, /* NVMe: DECLARE_PCI_FIXUP_HEADER() 함수 정의/매개변수 선언. */
+			 quirk_dma_func1_alias); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 /* https://bugzilla.kernel.org/show_bug.cgi?id=42679#c127 */
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_MARVELL_EXT, 0x9220,
-			 quirk_dma_func1_alias);
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_MARVELL_EXT, 0x9220, /* NVMe: DECLARE_PCI_FIXUP_HEADER() 함수 정의/매개변수 선언. */
+			 quirk_dma_func1_alias); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 /* https://bugzilla.kernel.org/show_bug.cgi?id=42679#c49 */
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_MARVELL_EXT, 0x9230,
-			 quirk_dma_func1_alias);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_MARVELL_EXT, 0x9235,
-			 quirk_dma_func1_alias);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_TTI, 0x0642,
-			 quirk_dma_func1_alias);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_TTI, 0x0645,
-			 quirk_dma_func1_alias);
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_MARVELL_EXT, 0x9230, /* NVMe: DECLARE_PCI_FIXUP_HEADER() 함수 정의/매개변수 선언. */
+			 quirk_dma_func1_alias); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_MARVELL_EXT, 0x9235, /* NVMe: DECLARE_PCI_FIXUP_HEADER() 함수 정의/매개변수 선언. */
+			 quirk_dma_func1_alias); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_TTI, 0x0642, /* NVMe: DECLARE_PCI_FIXUP_HEADER() 함수 정의/매개변수 선언. */
+			 quirk_dma_func1_alias); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_TTI, 0x0645, /* NVMe: DECLARE_PCI_FIXUP_HEADER() 함수 정의/매개변수 선언. */
+			 quirk_dma_func1_alias); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 /* https://bugs.gentoo.org/show_bug.cgi?id=497630 */
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_JMICRON,
-			 PCI_DEVICE_ID_JMICRON_JMB388_ESD,
-			 quirk_dma_func1_alias);
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_JMICRON, /* NVMe: DECLARE_PCI_FIXUP_HEADER() 함수 정의/매개변수 선언. */
+			 PCI_DEVICE_ID_JMICRON_JMB388_ESD, /* NVMe: 인자/초기자 나열 (연속). */
+			 quirk_dma_func1_alias); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 /* https://bugzilla.kernel.org/show_bug.cgi?id=42679#c117 */
 DECLARE_PCI_FIXUP_HEADER(0x1c28, /* Lite-On */
 			 0x0122, /* Plextor M6E (Marvell 88SS9183)*/
-			 quirk_dma_func1_alias);
+			 quirk_dma_func1_alias); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
 /*
  * Some devices DMA with the wrong devfn, not just the wrong function.
@@ -4527,25 +4527,25 @@ DECLARE_PCI_FIXUP_HEADER(0x1c28, /* Lite-On */
  * appears to be the DMA engine, which therefore needs to become a DMA
  * alias for the device.
  */
-static const struct pci_device_id fixed_dma_alias_tbl[] = {
-	{ PCI_DEVICE_SUB(PCI_VENDOR_ID_ADAPTEC2, 0x0285,
+static const struct pci_device_id fixed_dma_alias_tbl[] = { /* NVMe: fixed_dma_alias_tbl[] 변수에 값 대입. */
+	{ PCI_DEVICE_SUB(PCI_VENDOR_ID_ADAPTEC2, 0x0285, /* NVMe: PCI_DEVICE_SUB() 함수 정의/매개변수 선언. */
 			 PCI_VENDOR_ID_ADAPTEC2, 0x02bb), /* Adaptec 3405 */
-	  .driver_data = PCI_DEVFN(1, 0) },
-	{ PCI_DEVICE_SUB(PCI_VENDOR_ID_ADAPTEC2, 0x0285,
+	  .driver_data = PCI_DEVFN(1, 0) }, /* NVMe: driver_data 변수에 값 대입. */
+	{ PCI_DEVICE_SUB(PCI_VENDOR_ID_ADAPTEC2, 0x0285, /* NVMe: PCI_DEVICE_SUB() 함수 정의/매개변수 선언. */
 			 PCI_VENDOR_ID_ADAPTEC2, 0x02bc), /* Adaptec 3805 */
-	  .driver_data = PCI_DEVFN(1, 0) },
-	{ 0 }
-};
+	  .driver_data = PCI_DEVFN(1, 0) }, /* NVMe: driver_data 변수에 값 대입. */
+	{ 0 } /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+}; /* NVMe: 코드 블록/구조체 종료. */
 
-static void quirk_fixed_dma_alias(struct pci_dev *dev)
-{
-	const struct pci_device_id *id;
+static void quirk_fixed_dma_alias(struct pci_dev *dev) /* NVMe: quirk_fixed_dma_alias() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	const struct pci_device_id *id; /* NVMe: id 변수 선언. */
 
-	id = pci_match_id(fixed_dma_alias_tbl, dev);
-	if (id)
-		pci_add_dma_alias(dev, id->driver_data, 1);
-}
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_ADAPTEC2, 0x0285, quirk_fixed_dma_alias);
+	id = pci_match_id(fixed_dma_alias_tbl, dev); /* NVMe: pci_match_id() 호출 (NVMe/PCIe 동작). */
+	if (id) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pci_add_dma_alias(dev, id->driver_data, 1); /* NVMe: pci_add_dma_alias() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_ADAPTEC2, 0x0285, quirk_fixed_dma_alias); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
 
 /*
  * A few PCIe-to-PCI bridges fail to expose a PCIe capability, resulting in
@@ -4556,25 +4556,25 @@ DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_ADAPTEC2, 0x0285, quirk_fixed_dma_alias);
  * is for a non-root, non-PCIe bridge where the upstream device is PCIe and
  * is not a PCIe-to-PCI bridge, then @pdev is actually a PCIe-to-PCI bridge.
  */
-static void quirk_use_pcie_bridge_dma_alias(struct pci_dev *pdev)
-{
-	if (!pci_is_root_bus(pdev->bus) &&
-	    pdev->hdr_type == PCI_HEADER_TYPE_BRIDGE &&
-	    !pci_is_pcie(pdev) && pci_is_pcie(pdev->bus->self) &&
-	    pci_pcie_type(pdev->bus->self) != PCI_EXP_TYPE_PCI_BRIDGE)
-		pdev->dev_flags |= PCI_DEV_FLAG_PCIE_BRIDGE_ALIAS;
-}
+static void quirk_use_pcie_bridge_dma_alias(struct pci_dev *pdev) /* NVMe: quirk_use_pcie_bridge_dma_alias() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	if (!pci_is_root_bus(pdev->bus) && /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+	    pdev->hdr_type == PCI_HEADER_TYPE_BRIDGE && /* NVMe: 논리 연산 연속. */
+	    !pci_is_pcie(pdev) && pci_is_pcie(pdev->bus->self) && /* NVMe: pci_is_pcie() 함수 정의/매개변수 선언. */
+	    pci_pcie_type(pdev->bus->self) != PCI_EXP_TYPE_PCI_BRIDGE) /* NVMe: ! 변수에 값 대입. */
+		pdev->dev_flags |= PCI_DEV_FLAG_PCIE_BRIDGE_ALIAS; /* NVMe: | 변수에 값 대입. */
+} /* NVMe: 코드 블록/구조체 종료. */
 /* ASM1083/1085, https://bugzilla.kernel.org/show_bug.cgi?id=44881#c46 */
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_ASMEDIA, 0x1080,
-			 quirk_use_pcie_bridge_dma_alias);
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_ASMEDIA, 0x1080, /* NVMe: DECLARE_PCI_FIXUP_HEADER() 함수 정의/매개변수 선언. */
+			 quirk_use_pcie_bridge_dma_alias); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 /* Tundra 8113, https://bugzilla.kernel.org/show_bug.cgi?id=44881#c43 */
-DECLARE_PCI_FIXUP_HEADER(0x10e3, 0x8113, quirk_use_pcie_bridge_dma_alias);
+DECLARE_PCI_FIXUP_HEADER(0x10e3, 0x8113, quirk_use_pcie_bridge_dma_alias); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
 /* ITE 8892, https://bugzilla.kernel.org/show_bug.cgi?id=73551 */
-DECLARE_PCI_FIXUP_HEADER(0x1283, 0x8892, quirk_use_pcie_bridge_dma_alias);
+DECLARE_PCI_FIXUP_HEADER(0x1283, 0x8892, quirk_use_pcie_bridge_dma_alias); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
 /* ITE 8893 has the same problem as the 8892 */
-DECLARE_PCI_FIXUP_HEADER(0x1283, 0x8893, quirk_use_pcie_bridge_dma_alias);
+DECLARE_PCI_FIXUP_HEADER(0x1283, 0x8893, quirk_use_pcie_bridge_dma_alias); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
 /* Intel 82801, https://bugzilla.kernel.org/show_bug.cgi?id=44881#c49 */
-DECLARE_PCI_FIXUP_HEADER(0x8086, 0x244e, quirk_use_pcie_bridge_dma_alias);
+DECLARE_PCI_FIXUP_HEADER(0x8086, 0x244e, quirk_use_pcie_bridge_dma_alias); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
 
 /*
  * MIC x200 NTB forwards PCIe traffic using multiple alien RIDs. They have to
@@ -4582,14 +4582,14 @@ DECLARE_PCI_FIXUP_HEADER(0x8086, 0x244e, quirk_use_pcie_bridge_dma_alias);
  * when IOMMU is enabled. Following devfns have to match RIT-LUT table
  * programmed in the EEPROM.
  */
-static void quirk_mic_x200_dma_alias(struct pci_dev *pdev)
-{
-	pci_add_dma_alias(pdev, PCI_DEVFN(0x10, 0x0), 1);
-	pci_add_dma_alias(pdev, PCI_DEVFN(0x11, 0x0), 1);
-	pci_add_dma_alias(pdev, PCI_DEVFN(0x12, 0x3), 1);
-}
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x2260, quirk_mic_x200_dma_alias);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x2264, quirk_mic_x200_dma_alias);
+static void quirk_mic_x200_dma_alias(struct pci_dev *pdev) /* NVMe: quirk_mic_x200_dma_alias() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	pci_add_dma_alias(pdev, PCI_DEVFN(0x10, 0x0), 1); /* NVMe: pci_add_dma_alias() 호출 (NVMe/PCIe 동작). */
+	pci_add_dma_alias(pdev, PCI_DEVFN(0x11, 0x0), 1); /* NVMe: pci_add_dma_alias() 호출 (NVMe/PCIe 동작). */
+	pci_add_dma_alias(pdev, PCI_DEVFN(0x12, 0x3), 1); /* NVMe: pci_add_dma_alias() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x2260, quirk_mic_x200_dma_alias); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x2264, quirk_mic_x200_dma_alias); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
 
 /*
  * Intel Visual Compute Accelerator (VCA) is a family of PCIe add-in devices
@@ -4605,139 +4605,139 @@ DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x2264, quirk_mic_x200_dma_alias);
  * and computational unit sides.  The VCA devices have up to five functions
  * (four for DMA channels and one additional).
  */
-static void quirk_pex_vca_alias(struct pci_dev *pdev)
-{
-	const unsigned int num_pci_slots = 0x20;
-	unsigned int slot;
+static void quirk_pex_vca_alias(struct pci_dev *pdev) /* NVMe: quirk_pex_vca_alias() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	const unsigned int num_pci_slots = 0x20; /* NVMe: num_pci_slots 변수에 값 대입. */
+	unsigned int slot; /* NVMe: slot 변수 선언. */
 
-	for (slot = 0; slot < num_pci_slots; slot++)
-		pci_add_dma_alias(pdev, PCI_DEVFN(slot, 0x0), 5);
-}
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x2954, quirk_pex_vca_alias);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x2955, quirk_pex_vca_alias);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x2956, quirk_pex_vca_alias);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x2958, quirk_pex_vca_alias);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x2959, quirk_pex_vca_alias);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x295A, quirk_pex_vca_alias);
+	for (slot = 0; slot < num_pci_slots; slot++) /* NVMe: 반복 처리 (NVMe/PCIe 레지스터/장치 순회). */
+		pci_add_dma_alias(pdev, PCI_DEVFN(slot, 0x0), 5); /* NVMe: pci_add_dma_alias() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x2954, quirk_pex_vca_alias); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x2955, quirk_pex_vca_alias); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x2956, quirk_pex_vca_alias); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x2958, quirk_pex_vca_alias); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x2959, quirk_pex_vca_alias); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x295A, quirk_pex_vca_alias); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
 
 /*
  * The IOMMU and interrupt controller on Broadcom Vulcan/Cavium ThunderX2 are
  * associated not at the root bus, but at a bridge below. This quirk avoids
  * generating invalid DMA aliases.
  */
-static void quirk_bridge_cavm_thrx2_pcie_root(struct pci_dev *pdev)
-{
-	pdev->dev_flags |= PCI_DEV_FLAGS_BRIDGE_XLATE_ROOT;
-}
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_BROADCOM, 0x9000,
-				quirk_bridge_cavm_thrx2_pcie_root);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_BROADCOM, 0x9084,
-				quirk_bridge_cavm_thrx2_pcie_root);
+static void quirk_bridge_cavm_thrx2_pcie_root(struct pci_dev *pdev) /* NVMe: quirk_bridge_cavm_thrx2_pcie_root() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	pdev->dev_flags |= PCI_DEV_FLAGS_BRIDGE_XLATE_ROOT; /* NVMe: | 변수에 값 대입. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_BROADCOM, 0x9000, /* NVMe: DECLARE_PCI_FIXUP_HEADER() 함수 정의/매개변수 선언. */
+				quirk_bridge_cavm_thrx2_pcie_root); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_BROADCOM, 0x9084, /* NVMe: DECLARE_PCI_FIXUP_HEADER() 함수 정의/매개변수 선언. */
+				quirk_bridge_cavm_thrx2_pcie_root); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
 /*
  * AST1150 doesn't use a real PCI bus and always forwards the requester ID
  * from downstream devices.
  */
-static void quirk_aspeed_pci_bridge_no_alias(struct pci_dev *pdev)
-{
-	pdev->dev_flags |= PCI_DEV_FLAGS_PCI_BRIDGE_NO_ALIAS;
-}
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_ASPEED, 0x1150, quirk_aspeed_pci_bridge_no_alias);
+static void quirk_aspeed_pci_bridge_no_alias(struct pci_dev *pdev) /* NVMe: quirk_aspeed_pci_bridge_no_alias() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	pdev->dev_flags |= PCI_DEV_FLAGS_PCI_BRIDGE_NO_ALIAS; /* NVMe: | 변수에 값 대입. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_ASPEED, 0x1150, quirk_aspeed_pci_bridge_no_alias); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
 
 /*
  * Intersil/Techwell TW686[4589]-based video capture cards have an empty (zero)
  * class code.  Fix it.
  */
-static void quirk_tw686x_class(struct pci_dev *pdev)
-{
-	u32 class = pdev->class;
+static void quirk_tw686x_class(struct pci_dev *pdev) /* NVMe: quirk_tw686x_class() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	u32 class = pdev->class; /* NVMe: class 변수에 값 대입. */
 
 	/* Use "Multimedia controller" class */
-	pdev->class = (PCI_CLASS_MULTIMEDIA_OTHER << 8) | 0x01;
-	pci_info(pdev, "TW686x PCI class overridden (%#08x -> %#08x)\n",
-		 class, pdev->class);
-}
-DECLARE_PCI_FIXUP_CLASS_EARLY(0x1797, 0x6864, PCI_CLASS_NOT_DEFINED, 8,
-			      quirk_tw686x_class);
-DECLARE_PCI_FIXUP_CLASS_EARLY(0x1797, 0x6865, PCI_CLASS_NOT_DEFINED, 8,
-			      quirk_tw686x_class);
-DECLARE_PCI_FIXUP_CLASS_EARLY(0x1797, 0x6868, PCI_CLASS_NOT_DEFINED, 8,
-			      quirk_tw686x_class);
-DECLARE_PCI_FIXUP_CLASS_EARLY(0x1797, 0x6869, PCI_CLASS_NOT_DEFINED, 8,
-			      quirk_tw686x_class);
+	pdev->class = (PCI_CLASS_MULTIMEDIA_OTHER << 8) | 0x01; /* NVMe: class 변수에 값 대입. */
+	pci_info(pdev, "TW686x PCI class overridden (%#08x -> %#08x)\n", /* NVMe: pci_info() 함수 정의/매개변수 선언. */
+		 class, pdev->class); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_CLASS_EARLY(0x1797, 0x6864, PCI_CLASS_NOT_DEFINED, 8, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+			      quirk_tw686x_class); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_CLASS_EARLY(0x1797, 0x6865, PCI_CLASS_NOT_DEFINED, 8, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+			      quirk_tw686x_class); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_CLASS_EARLY(0x1797, 0x6868, PCI_CLASS_NOT_DEFINED, 8, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+			      quirk_tw686x_class); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_CLASS_EARLY(0x1797, 0x6869, PCI_CLASS_NOT_DEFINED, 8, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+			      quirk_tw686x_class); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
 /*
  * Some devices have problems with Transaction Layer Packets with the Relaxed
  * Ordering Attribute set.  Such devices should mark themselves and other
  * device drivers should check before sending TLPs with RO set.
  */
-static void quirk_relaxedordering_disable(struct pci_dev *dev)
-{
-	dev->dev_flags |= PCI_DEV_FLAGS_NO_RELAXED_ORDERING;
-	pci_info(dev, "Disable Relaxed Ordering Attributes to avoid PCIe Completion erratum\n");
-}
+static void quirk_relaxedordering_disable(struct pci_dev *dev) /* NVMe: quirk_relaxedordering_disable() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	dev->dev_flags |= PCI_DEV_FLAGS_NO_RELAXED_ORDERING; /* NVMe: | 변수에 값 대입. */
+	pci_info(dev, "Disable Relaxed Ordering Attributes to avoid PCIe Completion erratum\n"); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
 
 /*
  * Intel Xeon processors based on Broadwell/Haswell microarchitecture Root
  * Complex have a Flow Control Credit issue which can cause performance
  * problems with Upstream Transaction Layer Packets with Relaxed Ordering set.
  */
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x6f01, PCI_CLASS_NOT_DEFINED, 8,
-			      quirk_relaxedordering_disable);
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x6f02, PCI_CLASS_NOT_DEFINED, 8,
-			      quirk_relaxedordering_disable);
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x6f03, PCI_CLASS_NOT_DEFINED, 8,
-			      quirk_relaxedordering_disable);
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x6f04, PCI_CLASS_NOT_DEFINED, 8,
-			      quirk_relaxedordering_disable);
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x6f05, PCI_CLASS_NOT_DEFINED, 8,
-			      quirk_relaxedordering_disable);
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x6f06, PCI_CLASS_NOT_DEFINED, 8,
-			      quirk_relaxedordering_disable);
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x6f07, PCI_CLASS_NOT_DEFINED, 8,
-			      quirk_relaxedordering_disable);
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x6f08, PCI_CLASS_NOT_DEFINED, 8,
-			      quirk_relaxedordering_disable);
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x6f09, PCI_CLASS_NOT_DEFINED, 8,
-			      quirk_relaxedordering_disable);
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x6f0a, PCI_CLASS_NOT_DEFINED, 8,
-			      quirk_relaxedordering_disable);
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x6f0b, PCI_CLASS_NOT_DEFINED, 8,
-			      quirk_relaxedordering_disable);
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x6f0c, PCI_CLASS_NOT_DEFINED, 8,
-			      quirk_relaxedordering_disable);
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x6f0d, PCI_CLASS_NOT_DEFINED, 8,
-			      quirk_relaxedordering_disable);
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x6f0e, PCI_CLASS_NOT_DEFINED, 8,
-			      quirk_relaxedordering_disable);
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x2f01, PCI_CLASS_NOT_DEFINED, 8,
-			      quirk_relaxedordering_disable);
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x2f02, PCI_CLASS_NOT_DEFINED, 8,
-			      quirk_relaxedordering_disable);
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x2f03, PCI_CLASS_NOT_DEFINED, 8,
-			      quirk_relaxedordering_disable);
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x2f04, PCI_CLASS_NOT_DEFINED, 8,
-			      quirk_relaxedordering_disable);
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x2f05, PCI_CLASS_NOT_DEFINED, 8,
-			      quirk_relaxedordering_disable);
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x2f06, PCI_CLASS_NOT_DEFINED, 8,
-			      quirk_relaxedordering_disable);
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x2f07, PCI_CLASS_NOT_DEFINED, 8,
-			      quirk_relaxedordering_disable);
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x2f08, PCI_CLASS_NOT_DEFINED, 8,
-			      quirk_relaxedordering_disable);
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x2f09, PCI_CLASS_NOT_DEFINED, 8,
-			      quirk_relaxedordering_disable);
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x2f0a, PCI_CLASS_NOT_DEFINED, 8,
-			      quirk_relaxedordering_disable);
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x2f0b, PCI_CLASS_NOT_DEFINED, 8,
-			      quirk_relaxedordering_disable);
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x2f0c, PCI_CLASS_NOT_DEFINED, 8,
-			      quirk_relaxedordering_disable);
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x2f0d, PCI_CLASS_NOT_DEFINED, 8,
-			      quirk_relaxedordering_disable);
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x2f0e, PCI_CLASS_NOT_DEFINED, 8,
-			      quirk_relaxedordering_disable);
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x6f01, PCI_CLASS_NOT_DEFINED, 8, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+			      quirk_relaxedordering_disable); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x6f02, PCI_CLASS_NOT_DEFINED, 8, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+			      quirk_relaxedordering_disable); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x6f03, PCI_CLASS_NOT_DEFINED, 8, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+			      quirk_relaxedordering_disable); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x6f04, PCI_CLASS_NOT_DEFINED, 8, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+			      quirk_relaxedordering_disable); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x6f05, PCI_CLASS_NOT_DEFINED, 8, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+			      quirk_relaxedordering_disable); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x6f06, PCI_CLASS_NOT_DEFINED, 8, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+			      quirk_relaxedordering_disable); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x6f07, PCI_CLASS_NOT_DEFINED, 8, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+			      quirk_relaxedordering_disable); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x6f08, PCI_CLASS_NOT_DEFINED, 8, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+			      quirk_relaxedordering_disable); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x6f09, PCI_CLASS_NOT_DEFINED, 8, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+			      quirk_relaxedordering_disable); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x6f0a, PCI_CLASS_NOT_DEFINED, 8, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+			      quirk_relaxedordering_disable); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x6f0b, PCI_CLASS_NOT_DEFINED, 8, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+			      quirk_relaxedordering_disable); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x6f0c, PCI_CLASS_NOT_DEFINED, 8, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+			      quirk_relaxedordering_disable); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x6f0d, PCI_CLASS_NOT_DEFINED, 8, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+			      quirk_relaxedordering_disable); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x6f0e, PCI_CLASS_NOT_DEFINED, 8, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+			      quirk_relaxedordering_disable); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x2f01, PCI_CLASS_NOT_DEFINED, 8, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+			      quirk_relaxedordering_disable); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x2f02, PCI_CLASS_NOT_DEFINED, 8, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+			      quirk_relaxedordering_disable); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x2f03, PCI_CLASS_NOT_DEFINED, 8, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+			      quirk_relaxedordering_disable); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x2f04, PCI_CLASS_NOT_DEFINED, 8, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+			      quirk_relaxedordering_disable); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x2f05, PCI_CLASS_NOT_DEFINED, 8, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+			      quirk_relaxedordering_disable); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x2f06, PCI_CLASS_NOT_DEFINED, 8, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+			      quirk_relaxedordering_disable); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x2f07, PCI_CLASS_NOT_DEFINED, 8, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+			      quirk_relaxedordering_disable); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x2f08, PCI_CLASS_NOT_DEFINED, 8, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+			      quirk_relaxedordering_disable); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x2f09, PCI_CLASS_NOT_DEFINED, 8, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+			      quirk_relaxedordering_disable); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x2f0a, PCI_CLASS_NOT_DEFINED, 8, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+			      quirk_relaxedordering_disable); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x2f0b, PCI_CLASS_NOT_DEFINED, 8, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+			      quirk_relaxedordering_disable); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x2f0c, PCI_CLASS_NOT_DEFINED, 8, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+			      quirk_relaxedordering_disable); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x2f0d, PCI_CLASS_NOT_DEFINED, 8, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+			      quirk_relaxedordering_disable); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x2f0e, PCI_CLASS_NOT_DEFINED, 8, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+			      quirk_relaxedordering_disable); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
 /*
  * The AMD ARM A1100 (aka "SEATTLE") SoC has a bug in its PCIe Root Complex
@@ -4748,12 +4748,12 @@ DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, 0x2f0e, PCI_CLASS_NOT_DEFINED
  * November 10, 2010).  As a result, on this platform we can't use Relaxed
  * Ordering for Upstream TLPs.
  */
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_AMD, 0x1a00, PCI_CLASS_NOT_DEFINED, 8,
-			      quirk_relaxedordering_disable);
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_AMD, 0x1a01, PCI_CLASS_NOT_DEFINED, 8,
-			      quirk_relaxedordering_disable);
-DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_AMD, 0x1a02, PCI_CLASS_NOT_DEFINED, 8,
-			      quirk_relaxedordering_disable);
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_AMD, 0x1a00, PCI_CLASS_NOT_DEFINED, 8, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+			      quirk_relaxedordering_disable); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_AMD, 0x1a01, PCI_CLASS_NOT_DEFINED, 8, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+			      quirk_relaxedordering_disable); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_AMD, 0x1a02, PCI_CLASS_NOT_DEFINED, 8, /* NVMe: DECLARE_PCI_FIXUP_CLASS_EARLY() 함수 정의/매개변수 선언. */
+			      quirk_relaxedordering_disable); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
 /*
  * Per PCIe r3.0, sec 2.2.9, "Completion headers must supply the same
@@ -4778,39 +4778,39 @@ DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_AMD, 0x1a02, PCI_CLASS_NOT_DEFINED, 
  * Attributes, so we're safe waiting till after any Configuration Space
  * accesses to do the Root Port fixup.
  */
-static void quirk_disable_root_port_attributes(struct pci_dev *pdev)
-{
-	struct pci_dev *root_port = pcie_find_root_port(pdev);
+static void quirk_disable_root_port_attributes(struct pci_dev *pdev) /* NVMe: quirk_disable_root_port_attributes() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	struct pci_dev *root_port = pcie_find_root_port(pdev); /* NVMe: pcie_find_root_port() 호출 (NVMe/PCIe 동작). */
 
-	if (!root_port) {
-		pci_warn(pdev, "PCIe Completion erratum may cause device errors\n");
-		return;
-	}
+	if (!root_port) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pci_warn(pdev, "PCIe Completion erratum may cause device errors\n"); /* NVMe: pci_warn() 호출 (NVMe/PCIe 동작). */
+		return; /* NVMe: 함수 종료 및 반환. */
+	} /* NVMe: 코드 블록/구조체 종료. */
 
-	pci_info(root_port, "Disabling No Snoop/Relaxed Ordering Attributes to avoid PCIe Completion erratum in %s\n",
-		 dev_name(&pdev->dev));
-	pcie_capability_clear_word(root_port, PCI_EXP_DEVCTL,
-				   PCI_EXP_DEVCTL_RELAX_EN |
-				   PCI_EXP_DEVCTL_NOSNOOP_EN);
-}
+	pci_info(root_port, "Disabling No Snoop/Relaxed Ordering Attributes to avoid PCIe Completion erratum in %s\n", /* NVMe: pci_info() 함수 정의/매개변수 선언. */
+		 dev_name(&pdev->dev)); /* NVMe: dev_name() 호출 (NVMe/PCIe 동작). */
+	pcie_capability_clear_word(root_port, PCI_EXP_DEVCTL, /* NVMe: pcie_capability_clear_word() 함수 정의/매개변수 선언. */
+				   PCI_EXP_DEVCTL_RELAX_EN | /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+				   PCI_EXP_DEVCTL_NOSNOOP_EN); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+} /* NVMe: 코드 블록/구조체 종료. */
 
 /*
  * The Chelsio T5 chip fails to copy TLP Attributes from a Request to the
  * Completion it generates.
  */
-static void quirk_chelsio_T5_disable_root_port_attributes(struct pci_dev *pdev)
-{
+static void quirk_chelsio_T5_disable_root_port_attributes(struct pci_dev *pdev) /* NVMe: quirk_chelsio_T5_disable_root_port_attributes() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
 	/*
 	 * This mask/compare operation selects for Physical Function 4 on a
 	 * T5.  We only need to fix up the Root Port once for any of the
 	 * PFs.  PF[0..3] have PCI Device IDs of 0x50xx, but PF4 is uniquely
 	 * 0x54xx so we use that one.
 	 */
-	if ((pdev->device & 0xff00) == 0x5400)
-		quirk_disable_root_port_attributes(pdev);
-}
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_CHELSIO, PCI_ANY_ID,
-			 quirk_chelsio_T5_disable_root_port_attributes);
+	if ((pdev->device & 0xff00) == 0x5400) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		quirk_disable_root_port_attributes(pdev); /* NVMe: quirk_disable_root_port_attributes() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_CHELSIO, PCI_ANY_ID, /* NVMe: DECLARE_PCI_FIXUP_HEADER() 함수 정의/매개변수 선언. */
+			 quirk_chelsio_T5_disable_root_port_attributes); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
 /*
  * pci_acs_ctrl_enabled - compare desired ACS controls with those provided
@@ -4823,12 +4823,12 @@ DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_CHELSIO, PCI_ANY_ID,
  * in @acs_ctrl_ena, i.e., the device provides all the access controls the
  * caller desires.  Return 0 otherwise.
  */
-static int pci_acs_ctrl_enabled(u16 acs_ctrl_req, u16 acs_ctrl_ena)
-{
-	if ((acs_ctrl_req & acs_ctrl_ena) == acs_ctrl_req)
-		return 1;
-	return 0;
-}
+static int pci_acs_ctrl_enabled(u16 acs_ctrl_req, u16 acs_ctrl_ena) /* NVMe: pci_acs_ctrl_enabled() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	if ((acs_ctrl_req & acs_ctrl_ena) == acs_ctrl_req) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return 1; /* NVMe: 1 값을 반환. */
+	return 0; /* NVMe: 0 값을 반환. */
+} /* NVMe: 코드 블록/구조체 종료. */
 
 /*
  * AMD has indicated that the devices below do not support peer-to-peer
@@ -4855,38 +4855,38 @@ static int pci_acs_ctrl_enabled(u16 acs_ctrl_req, u16 acs_ctrl_ena)
  * 1022:780f [AMD] FCH PCI Bridge
  * 1022:7809 [AMD] FCH USB OHCI Controller
  */
-static int pci_quirk_amd_sb_acs(struct pci_dev *dev, u16 acs_flags)
-{
-#ifdef CONFIG_ACPI
-	struct acpi_table_header *header = NULL;
-	acpi_status status;
+static int pci_quirk_amd_sb_acs(struct pci_dev *dev, u16 acs_flags) /* NVMe: pci_quirk_amd_sb_acs() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+#ifdef CONFIG_ACPI /* NVMe: 조걶 컴파일 ifdef 분기 (NVMe/PCIe 기능 선택). */
+	struct acpi_table_header *header = NULL; /* NVMe: header 변수에 값 대입. */
+	acpi_status status; /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
 	/* Targeting multifunction devices on the SB (appears on root bus) */
-	if (!dev->multifunction || !pci_is_root_bus(dev->bus))
-		return -ENODEV;
+	if (!dev->multifunction || !pci_is_root_bus(dev->bus)) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return -ENODEV; /* NVMe: -ENODEV 값을 반환. */
 
 	/* The IVRS table describes the AMD IOMMU */
-	status = acpi_get_table("IVRS", 0, &header);
-	if (ACPI_FAILURE(status))
-		return -ENODEV;
+	status = acpi_get_table("IVRS", 0, &header); /* NVMe: acpi_get_table() 호출 (NVMe/PCIe 동작). */
+	if (ACPI_FAILURE(status)) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return -ENODEV; /* NVMe: -ENODEV 값을 반환. */
 
-	acpi_put_table(header);
+	acpi_put_table(header); /* NVMe: acpi_put_table() 호출 (NVMe/PCIe 동작). */
 
 	/* Filter out flags not applicable to multifunction */
-	acs_flags &= (PCI_ACS_RR | PCI_ACS_CR | PCI_ACS_EC | PCI_ACS_DT);
+	acs_flags &= (PCI_ACS_RR | PCI_ACS_CR | PCI_ACS_EC | PCI_ACS_DT); /* NVMe: & 변수에 값 대입. */
 
-	return pci_acs_ctrl_enabled(acs_flags, PCI_ACS_RR | PCI_ACS_CR);
-#else
-	return -ENODEV;
-#endif
-}
+	return pci_acs_ctrl_enabled(acs_flags, PCI_ACS_RR | PCI_ACS_CR); /* NVMe: pci_acs_ctrl_enabled(acs_flags, PCI_A... 값을 반환. */
+#else /* NVMe: 조걶 컴파일 else 분기 (NVMe/PCIe 기능 선택). */
+	return -ENODEV; /* NVMe: -ENODEV 값을 반환. */
+#endif /* NVMe: 조걶 컴파일 endif 분기 (NVMe/PCIe 기능 선택). */
+} /* NVMe: 코드 블록/구조체 종료. */
 
-static bool pci_quirk_cavium_acs_match(struct pci_dev *dev)
-{
-	if (!pci_is_pcie(dev) || pci_pcie_type(dev) != PCI_EXP_TYPE_ROOT_PORT)
-		return false;
+static bool pci_quirk_cavium_acs_match(struct pci_dev *dev) /* NVMe: pci_quirk_cavium_acs_match() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	if (!pci_is_pcie(dev) || pci_pcie_type(dev) != PCI_EXP_TYPE_ROOT_PORT) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return false; /* NVMe: false 값을 반환. */
 
-	switch (dev->device) {
+	switch (dev->device) { /* NVMe: switch 다중 분기 처리. */
 	/*
 	 * Effectively selects all downstream ports for whole ThunderX1
 	 * (which represents 8 SoCs).
@@ -4894,16 +4894,16 @@ static bool pci_quirk_cavium_acs_match(struct pci_dev *dev)
 	case 0xa000 ... 0xa7ff: /* ThunderX1 */
 	case 0xaf84:  /* ThunderX2 */
 	case 0xb884:  /* ThunderX3 */
-		return true;
-	default:
-		return false;
-	}
-}
+		return true; /* NVMe: true 값을 반환. */
+	default: /* NVMe: default 레이블 (NVMe 초기화/오류 복구 경로). */
+		return false; /* NVMe: false 값을 반환. */
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
 
-static int pci_quirk_cavium_acs(struct pci_dev *dev, u16 acs_flags)
-{
-	if (!pci_quirk_cavium_acs_match(dev))
-		return -ENOTTY;
+static int pci_quirk_cavium_acs(struct pci_dev *dev, u16 acs_flags) /* NVMe: pci_quirk_cavium_acs() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	if (!pci_quirk_cavium_acs_match(dev)) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return -ENOTTY; /* NVMe: -ENOTTY 값을 반환. */
 
 	/*
 	 * Cavium Root Ports don't advertise an ACS capability.  However,
@@ -4913,47 +4913,47 @@ static int pci_quirk_cavium_acs(struct pci_dev *dev, u16 acs_flags)
 	 * hardware implements and enables equivalent ACS functionality for
 	 * these flags.
 	 */
-	return pci_acs_ctrl_enabled(acs_flags,
-		PCI_ACS_SV | PCI_ACS_RR | PCI_ACS_CR | PCI_ACS_UF);
-}
+	return pci_acs_ctrl_enabled(acs_flags, /* NVMe: pci_acs_ctrl_enabled(acs_flags, 값을 반환. */
+		PCI_ACS_SV | PCI_ACS_RR | PCI_ACS_CR | PCI_ACS_UF); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+} /* NVMe: 코드 블록/구조체 종료. */
 
-static int pci_quirk_xgene_acs(struct pci_dev *dev, u16 acs_flags)
-{
+static int pci_quirk_xgene_acs(struct pci_dev *dev, u16 acs_flags) /* NVMe: pci_quirk_xgene_acs() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
 	/*
 	 * X-Gene Root Ports matching this quirk do not allow peer-to-peer
 	 * transactions with others, allowing masking out these bits as if they
 	 * were unimplemented in the ACS capability.
 	 */
-	return pci_acs_ctrl_enabled(acs_flags,
-		PCI_ACS_SV | PCI_ACS_RR | PCI_ACS_CR | PCI_ACS_UF);
-}
+	return pci_acs_ctrl_enabled(acs_flags, /* NVMe: pci_acs_ctrl_enabled(acs_flags, 값을 반환. */
+		PCI_ACS_SV | PCI_ACS_RR | PCI_ACS_CR | PCI_ACS_UF); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+} /* NVMe: 코드 블록/구조체 종료. */
 
 /*
  * Many Zhaoxin Root Ports and Switch Downstream Ports have no ACS capability.
  * But the implementation could block peer-to-peer transactions between them
  * and provide ACS-like functionality.
  */
-static int pci_quirk_zhaoxin_pcie_ports_acs(struct pci_dev *dev, u16 acs_flags)
-{
-	if (!pci_is_pcie(dev) ||
-	    ((pci_pcie_type(dev) != PCI_EXP_TYPE_ROOT_PORT) &&
-	     (pci_pcie_type(dev) != PCI_EXP_TYPE_DOWNSTREAM)))
-		return -ENOTTY;
+static int pci_quirk_zhaoxin_pcie_ports_acs(struct pci_dev *dev, u16 acs_flags) /* NVMe: pci_quirk_zhaoxin_pcie_ports_acs() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	if (!pci_is_pcie(dev) || /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+	    ((pci_pcie_type(dev) != PCI_EXP_TYPE_ROOT_PORT) && /* NVMe: ! 변수에 값 대입. */
+	     (pci_pcie_type(dev) != PCI_EXP_TYPE_DOWNSTREAM))) /* NVMe: ! 변수에 값 대입. */
+		return -ENOTTY; /* NVMe: -ENOTTY 값을 반환. */
 
 	/*
 	 * Future Zhaoxin Root Ports and Switch Downstream Ports will
 	 * implement ACS capability in accordance with the PCIe Spec.
 	 */
-	switch (dev->device) {
-	case 0x0710 ... 0x071e:
-	case 0x0721:
-	case 0x0723 ... 0x0752:
-		return pci_acs_ctrl_enabled(acs_flags,
-			PCI_ACS_SV | PCI_ACS_RR | PCI_ACS_CR | PCI_ACS_UF);
-	}
+	switch (dev->device) { /* NVMe: switch 다중 분기 처리. */
+	case 0x0710 ... 0x071e: /* NVMe: switch case 0x0710 ... 0x071e 처리. */
+	case 0x0721: /* NVMe: switch case 0x0721 처리. */
+	case 0x0723 ... 0x0752: /* NVMe: switch case 0x0723 ... 0x0752 처리. */
+		return pci_acs_ctrl_enabled(acs_flags, /* NVMe: pci_acs_ctrl_enabled(acs_flags, 값을 반환. */
+			PCI_ACS_SV | PCI_ACS_RR | PCI_ACS_CR | PCI_ACS_UF); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+	} /* NVMe: 코드 블록/구조체 종료. */
 
-	return false;
-}
+	return false; /* NVMe: false 값을 반환. */
+} /* NVMe: 코드 블록/구조체 종료. */
 
 /*
  * Many Intel PCH Root Ports do provide ACS-like features to disable peer
@@ -4961,60 +4961,60 @@ static int pci_quirk_zhaoxin_pcie_ports_acs(struct pci_dev *dev, u16 acs_flags)
  * actual PCIe ACS capability.  This is the list of device IDs known to fall
  * into that category as provided by Intel in Red Hat bugzilla 1037684.
  */
-static const u16 pci_quirk_intel_pch_acs_ids[] = {
+static const u16 pci_quirk_intel_pch_acs_ids[] = { /* NVMe: pci_quirk_intel_pch_acs_ids[] 변수에 값 대입. */
 	/* Ibexpeak PCH */
-	0x3b42, 0x3b43, 0x3b44, 0x3b45, 0x3b46, 0x3b47, 0x3b48, 0x3b49,
-	0x3b4a, 0x3b4b, 0x3b4c, 0x3b4d, 0x3b4e, 0x3b4f, 0x3b50, 0x3b51,
+	0x3b42, 0x3b43, 0x3b44, 0x3b45, 0x3b46, 0x3b47, 0x3b48, 0x3b49, /* NVMe: 인자/초기자 나열 (연속). */
+	0x3b4a, 0x3b4b, 0x3b4c, 0x3b4d, 0x3b4e, 0x3b4f, 0x3b50, 0x3b51, /* NVMe: 인자/초기자 나열 (연속). */
 	/* Cougarpoint PCH */
-	0x1c10, 0x1c11, 0x1c12, 0x1c13, 0x1c14, 0x1c15, 0x1c16, 0x1c17,
-	0x1c18, 0x1c19, 0x1c1a, 0x1c1b, 0x1c1c, 0x1c1d, 0x1c1e, 0x1c1f,
+	0x1c10, 0x1c11, 0x1c12, 0x1c13, 0x1c14, 0x1c15, 0x1c16, 0x1c17, /* NVMe: 인자/초기자 나열 (연속). */
+	0x1c18, 0x1c19, 0x1c1a, 0x1c1b, 0x1c1c, 0x1c1d, 0x1c1e, 0x1c1f, /* NVMe: 인자/초기자 나열 (연속). */
 	/* Pantherpoint PCH */
-	0x1e10, 0x1e11, 0x1e12, 0x1e13, 0x1e14, 0x1e15, 0x1e16, 0x1e17,
-	0x1e18, 0x1e19, 0x1e1a, 0x1e1b, 0x1e1c, 0x1e1d, 0x1e1e, 0x1e1f,
+	0x1e10, 0x1e11, 0x1e12, 0x1e13, 0x1e14, 0x1e15, 0x1e16, 0x1e17, /* NVMe: 인자/초기자 나열 (연속). */
+	0x1e18, 0x1e19, 0x1e1a, 0x1e1b, 0x1e1c, 0x1e1d, 0x1e1e, 0x1e1f, /* NVMe: 인자/초기자 나열 (연속). */
 	/* Lynxpoint-H PCH */
-	0x8c10, 0x8c11, 0x8c12, 0x8c13, 0x8c14, 0x8c15, 0x8c16, 0x8c17,
-	0x8c18, 0x8c19, 0x8c1a, 0x8c1b, 0x8c1c, 0x8c1d, 0x8c1e, 0x8c1f,
+	0x8c10, 0x8c11, 0x8c12, 0x8c13, 0x8c14, 0x8c15, 0x8c16, 0x8c17, /* NVMe: 인자/초기자 나열 (연속). */
+	0x8c18, 0x8c19, 0x8c1a, 0x8c1b, 0x8c1c, 0x8c1d, 0x8c1e, 0x8c1f, /* NVMe: 인자/초기자 나열 (연속). */
 	/* Lynxpoint-LP PCH */
-	0x9c10, 0x9c11, 0x9c12, 0x9c13, 0x9c14, 0x9c15, 0x9c16, 0x9c17,
-	0x9c18, 0x9c19, 0x9c1a, 0x9c1b,
+	0x9c10, 0x9c11, 0x9c12, 0x9c13, 0x9c14, 0x9c15, 0x9c16, 0x9c17, /* NVMe: 인자/초기자 나열 (연속). */
+	0x9c18, 0x9c19, 0x9c1a, 0x9c1b, /* NVMe: 인자/초기자 나열 (연속). */
 	/* Wildcat PCH */
-	0x9c90, 0x9c91, 0x9c92, 0x9c93, 0x9c94, 0x9c95, 0x9c96, 0x9c97,
-	0x9c98, 0x9c99, 0x9c9a, 0x9c9b,
+	0x9c90, 0x9c91, 0x9c92, 0x9c93, 0x9c94, 0x9c95, 0x9c96, 0x9c97, /* NVMe: 인자/초기자 나열 (연속). */
+	0x9c98, 0x9c99, 0x9c9a, 0x9c9b, /* NVMe: 인자/초기자 나열 (연속). */
 	/* Patsburg (X79) PCH */
-	0x1d10, 0x1d12, 0x1d14, 0x1d16, 0x1d18, 0x1d1a, 0x1d1c, 0x1d1e,
+	0x1d10, 0x1d12, 0x1d14, 0x1d16, 0x1d18, 0x1d1a, 0x1d1c, 0x1d1e, /* NVMe: 인자/초기자 나열 (연속). */
 	/* Wellsburg (X99) PCH */
-	0x8d10, 0x8d11, 0x8d12, 0x8d13, 0x8d14, 0x8d15, 0x8d16, 0x8d17,
-	0x8d18, 0x8d19, 0x8d1a, 0x8d1b, 0x8d1c, 0x8d1d, 0x8d1e,
+	0x8d10, 0x8d11, 0x8d12, 0x8d13, 0x8d14, 0x8d15, 0x8d16, 0x8d17, /* NVMe: 인자/초기자 나열 (연속). */
+	0x8d18, 0x8d19, 0x8d1a, 0x8d1b, 0x8d1c, 0x8d1d, 0x8d1e, /* NVMe: 인자/초기자 나열 (연속). */
 	/* Lynx Point (9 series) PCH */
-	0x8c90, 0x8c92, 0x8c94, 0x8c96, 0x8c98, 0x8c9a, 0x8c9c, 0x8c9e,
-};
+	0x8c90, 0x8c92, 0x8c94, 0x8c96, 0x8c98, 0x8c9a, 0x8c9c, 0x8c9e, /* NVMe: 인자/초기자 나열 (연속). */
+}; /* NVMe: 코드 블록/구조체 종료. */
 
-static bool pci_quirk_intel_pch_acs_match(struct pci_dev *dev)
-{
-	int i;
+static bool pci_quirk_intel_pch_acs_match(struct pci_dev *dev) /* NVMe: pci_quirk_intel_pch_acs_match() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	int i; /* NVMe: i 변수 선언. */
 
 	/* Filter out a few obvious non-matches first */
-	if (!pci_is_pcie(dev) || pci_pcie_type(dev) != PCI_EXP_TYPE_ROOT_PORT)
-		return false;
+	if (!pci_is_pcie(dev) || pci_pcie_type(dev) != PCI_EXP_TYPE_ROOT_PORT) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return false; /* NVMe: false 값을 반환. */
 
-	for (i = 0; i < ARRAY_SIZE(pci_quirk_intel_pch_acs_ids); i++)
-		if (pci_quirk_intel_pch_acs_ids[i] == dev->device)
-			return true;
+	for (i = 0; i < ARRAY_SIZE(pci_quirk_intel_pch_acs_ids); i++) /* NVMe: 반복 처리 (NVMe/PCIe 레지스터/장치 순회). */
+		if (pci_quirk_intel_pch_acs_ids[i] == dev->device) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+			return true; /* NVMe: true 값을 반환. */
 
-	return false;
-}
+	return false; /* NVMe: false 값을 반환. */
+} /* NVMe: 코드 블록/구조체 종료. */
 
-static int pci_quirk_intel_pch_acs(struct pci_dev *dev, u16 acs_flags)
-{
-	if (!pci_quirk_intel_pch_acs_match(dev))
-		return -ENOTTY;
+static int pci_quirk_intel_pch_acs(struct pci_dev *dev, u16 acs_flags) /* NVMe: pci_quirk_intel_pch_acs() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	if (!pci_quirk_intel_pch_acs_match(dev)) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return -ENOTTY; /* NVMe: -ENOTTY 값을 반환. */
 
-	if (dev->dev_flags & PCI_DEV_FLAGS_ACS_ENABLED_QUIRK)
-		return pci_acs_ctrl_enabled(acs_flags,
-			PCI_ACS_SV | PCI_ACS_RR | PCI_ACS_CR | PCI_ACS_UF);
+	if (dev->dev_flags & PCI_DEV_FLAGS_ACS_ENABLED_QUIRK) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return pci_acs_ctrl_enabled(acs_flags, /* NVMe: pci_acs_ctrl_enabled(acs_flags, 값을 반환. */
+			PCI_ACS_SV | PCI_ACS_RR | PCI_ACS_CR | PCI_ACS_UF); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
-	return pci_acs_ctrl_enabled(acs_flags, 0);
-}
+	return pci_acs_ctrl_enabled(acs_flags, 0); /* NVMe: pci_acs_ctrl_enabled(acs_flags, 0) 값을 반환. */
+} /* NVMe: 코드 블록/구조체 종료. */
 
 /*
  * These QCOM Root Ports do provide ACS-like features to disable peer
@@ -5026,11 +5026,11 @@ static int pci_quirk_intel_pch_acs(struct pci_dev *dev, u16 acs_flags)
  * Port to pass traffic to another Root Port.  All PCIe transactions are
  * terminated inside the Root Port.
  */
-static int pci_quirk_qcom_rp_acs(struct pci_dev *dev, u16 acs_flags)
-{
-	return pci_acs_ctrl_enabled(acs_flags,
-		PCI_ACS_SV | PCI_ACS_RR | PCI_ACS_CR | PCI_ACS_UF);
-}
+static int pci_quirk_qcom_rp_acs(struct pci_dev *dev, u16 acs_flags) /* NVMe: pci_quirk_qcom_rp_acs() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	return pci_acs_ctrl_enabled(acs_flags, /* NVMe: pci_acs_ctrl_enabled(acs_flags, 값을 반환. */
+		PCI_ACS_SV | PCI_ACS_RR | PCI_ACS_CR | PCI_ACS_UF); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+} /* NVMe: 코드 블록/구조체 종료. */
 
 /*
  * Each of these NXP Root Ports is in a Root Complex with a unique segment
@@ -5038,16 +5038,16 @@ static int pci_quirk_qcom_rp_acs(struct pci_dev *dev, u16 acs_flags)
  * and validate bus numbers in requests, but does not provide an ACS
  * capability.
  */
-static int pci_quirk_nxp_rp_acs(struct pci_dev *dev, u16 acs_flags)
-{
-	return pci_acs_ctrl_enabled(acs_flags,
-		PCI_ACS_SV | PCI_ACS_RR | PCI_ACS_CR | PCI_ACS_UF);
-}
+static int pci_quirk_nxp_rp_acs(struct pci_dev *dev, u16 acs_flags) /* NVMe: pci_quirk_nxp_rp_acs() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	return pci_acs_ctrl_enabled(acs_flags, /* NVMe: pci_acs_ctrl_enabled(acs_flags, 값을 반환. */
+		PCI_ACS_SV | PCI_ACS_RR | PCI_ACS_CR | PCI_ACS_UF); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+} /* NVMe: 코드 블록/구조체 종료. */
 
-static int pci_quirk_al_acs(struct pci_dev *dev, u16 acs_flags)
-{
-	if (pci_pcie_type(dev) != PCI_EXP_TYPE_ROOT_PORT)
-		return -ENOTTY;
+static int pci_quirk_al_acs(struct pci_dev *dev, u16 acs_flags) /* NVMe: pci_quirk_al_acs() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	if (pci_pcie_type(dev) != PCI_EXP_TYPE_ROOT_PORT) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return -ENOTTY; /* NVMe: -ENOTTY 값을 반환. */
 
 	/*
 	 * Amazon's Annapurna Labs root ports don't include an ACS capability,
@@ -5057,10 +5057,10 @@ static int pci_quirk_al_acs(struct pci_dev *dev, u16 acs_flags)
 	 *
 	 * Additionally, the root ports cannot send traffic to each other.
 	 */
-	acs_flags &= ~(PCI_ACS_SV | PCI_ACS_RR | PCI_ACS_CR | PCI_ACS_UF);
+	acs_flags &= ~(PCI_ACS_SV | PCI_ACS_RR | PCI_ACS_CR | PCI_ACS_UF); /* NVMe: & 변수에 값 대입. */
 
-	return acs_flags ? 0 : 1;
-}
+	return acs_flags ? 0 : 1; /* NVMe: acs_flags ? 0 : 1 값을 반환. */
+} /* NVMe: 코드 블록/구조체 종료. */
 
 /*
  * Sunrise Point PCH root ports implement ACS, but unfortunately as shown in
@@ -5107,46 +5107,46 @@ static int pci_quirk_al_acs(struct pci_dev *dev, u16 acs_flags)
  * [6] https://www.intel.com/content/www/us/en/processors/core/7th-gen-core-family-mobile-u-y-processor-lines-i-o-spec-update.html
  * [7] https://www.intel.com/content/www/us/en/processors/core/7th-gen-core-family-mobile-u-y-processor-lines-i-o-datasheet-vol-1.html
  */
-static bool pci_quirk_intel_spt_pch_acs_match(struct pci_dev *dev)
-{
-	if (!pci_is_pcie(dev) || pci_pcie_type(dev) != PCI_EXP_TYPE_ROOT_PORT)
-		return false;
+static bool pci_quirk_intel_spt_pch_acs_match(struct pci_dev *dev) /* NVMe: pci_quirk_intel_spt_pch_acs_match() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	if (!pci_is_pcie(dev) || pci_pcie_type(dev) != PCI_EXP_TYPE_ROOT_PORT) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return false; /* NVMe: false 값을 반환. */
 
-	switch (dev->device) {
+	switch (dev->device) { /* NVMe: switch 다중 분기 처리. */
 	case 0xa110 ... 0xa11f: case 0xa167 ... 0xa16a: /* Sunrise Point */
 	case 0xa290 ... 0xa29f: case 0xa2e7 ... 0xa2ee: /* Union Point */
 	case 0x9d10 ... 0x9d1b: /* 7th & 8th Gen Mobile */
-		return true;
-	}
+		return true; /* NVMe: true 값을 반환. */
+	} /* NVMe: 코드 블록/구조체 종료. */
 
-	return false;
-}
+	return false; /* NVMe: false 값을 반환. */
+} /* NVMe: 코드 블록/구조체 종료. */
 
-#define INTEL_SPT_ACS_CTRL (PCI_ACS_CAP + 4)
+#define INTEL_SPT_ACS_CTRL (PCI_ACS_CAP + 4) /* NVMe: INTEL_SPT_ACS_CTRL 매크로/상수 정의 (NVMe/PCIe). */
 
-static int pci_quirk_intel_spt_pch_acs(struct pci_dev *dev, u16 acs_flags)
-{
-	int pos;
-	u32 cap, ctrl;
+static int pci_quirk_intel_spt_pch_acs(struct pci_dev *dev, u16 acs_flags) /* NVMe: pci_quirk_intel_spt_pch_acs() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	int pos; /* NVMe: pos 변수 선언. */
+	u32 cap, ctrl; /* NVMe: ctrl 변수 선언. */
 
-	if (!pci_quirk_intel_spt_pch_acs_match(dev))
-		return -ENOTTY;
+	if (!pci_quirk_intel_spt_pch_acs_match(dev)) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return -ENOTTY; /* NVMe: -ENOTTY 값을 반환. */
 
-	pos = dev->acs_cap;
-	if (!pos)
-		return -ENOTTY;
+	pos = dev->acs_cap; /* NVMe: pos 변수에 값 대입. */
+	if (!pos) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return -ENOTTY; /* NVMe: -ENOTTY 값을 반환. */
 
 	/* see pci_acs_flags_enabled() */
-	pci_read_config_dword(dev, pos + PCI_ACS_CAP, &cap);
-	acs_flags &= (cap | PCI_ACS_EC);
+	pci_read_config_dword(dev, pos + PCI_ACS_CAP, &cap); /* NVMe: pci_read_config_dword() 호출 (NVMe/PCIe 동작). */
+	acs_flags &= (cap | PCI_ACS_EC); /* NVMe: & 변수에 값 대입. */
 
-	pci_read_config_dword(dev, pos + INTEL_SPT_ACS_CTRL, &ctrl);
+	pci_read_config_dword(dev, pos + INTEL_SPT_ACS_CTRL, &ctrl); /* NVMe: pci_read_config_dword() 호출 (NVMe/PCIe 동작). */
 
-	return pci_acs_ctrl_enabled(acs_flags, ctrl);
-}
+	return pci_acs_ctrl_enabled(acs_flags, ctrl); /* NVMe: pci_acs_ctrl_enabled(acs_flags, ctrl) 값을 반환. */
+} /* NVMe: 코드 블록/구조체 종료. */
 
-static int pci_quirk_mf_endpoint_acs(struct pci_dev *dev, u16 acs_flags)
-{
+static int pci_quirk_mf_endpoint_acs(struct pci_dev *dev, u16 acs_flags) /* NVMe: pci_quirk_mf_endpoint_acs() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
 	/*
 	 * SV, TB, and UF are not relevant to multifunction endpoints.
 	 *
@@ -5156,48 +5156,48 @@ static int pci_quirk_mf_endpoint_acs(struct pci_dev *dev, u16 acs_flags)
 	 * perform peer-to-peer with other functions, allowing us to mask out
 	 * these bits as if they were unimplemented in the ACS capability.
 	 */
-	return pci_acs_ctrl_enabled(acs_flags,
-		PCI_ACS_SV | PCI_ACS_TB | PCI_ACS_RR |
-		PCI_ACS_CR | PCI_ACS_UF | PCI_ACS_DT);
-}
+	return pci_acs_ctrl_enabled(acs_flags, /* NVMe: pci_acs_ctrl_enabled(acs_flags, 값을 반환. */
+		PCI_ACS_SV | PCI_ACS_TB | PCI_ACS_RR | /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+		PCI_ACS_CR | PCI_ACS_UF | PCI_ACS_DT); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+} /* NVMe: 코드 블록/구조체 종료. */
 
-static int pci_quirk_rciep_acs(struct pci_dev *dev, u16 acs_flags)
-{
+static int pci_quirk_rciep_acs(struct pci_dev *dev, u16 acs_flags) /* NVMe: pci_quirk_rciep_acs() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
 	/*
 	 * Intel RCiEP's are required to allow p2p only on translated
 	 * addresses.  Refer to Intel VT-d specification, r3.1, sec 3.16,
 	 * "Root-Complex Peer to Peer Considerations".
 	 */
-	if (pci_pcie_type(dev) != PCI_EXP_TYPE_RC_END)
-		return -ENOTTY;
+	if (pci_pcie_type(dev) != PCI_EXP_TYPE_RC_END) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return -ENOTTY; /* NVMe: -ENOTTY 값을 반환. */
 
-	return pci_acs_ctrl_enabled(acs_flags,
-		PCI_ACS_SV | PCI_ACS_RR | PCI_ACS_CR | PCI_ACS_UF);
-}
+	return pci_acs_ctrl_enabled(acs_flags, /* NVMe: pci_acs_ctrl_enabled(acs_flags, 값을 반환. */
+		PCI_ACS_SV | PCI_ACS_RR | PCI_ACS_CR | PCI_ACS_UF); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+} /* NVMe: 코드 블록/구조체 종료. */
 
-static int pci_quirk_brcm_acs(struct pci_dev *dev, u16 acs_flags)
-{
+static int pci_quirk_brcm_acs(struct pci_dev *dev, u16 acs_flags) /* NVMe: pci_quirk_brcm_acs() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
 	/*
 	 * iProc PAXB Root Ports don't advertise an ACS capability, but
 	 * they do not allow peer-to-peer transactions between Root Ports.
 	 * Allow each Root Port to be in a separate IOMMU group by masking
 	 * SV/RR/CR/UF bits.
 	 */
-	return pci_acs_ctrl_enabled(acs_flags,
-		PCI_ACS_SV | PCI_ACS_RR | PCI_ACS_CR | PCI_ACS_UF);
-}
+	return pci_acs_ctrl_enabled(acs_flags, /* NVMe: pci_acs_ctrl_enabled(acs_flags, 값을 반환. */
+		PCI_ACS_SV | PCI_ACS_RR | PCI_ACS_CR | PCI_ACS_UF); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+} /* NVMe: 코드 블록/구조체 종료. */
 
-static int pci_quirk_loongson_acs(struct pci_dev *dev, u16 acs_flags)
-{
+static int pci_quirk_loongson_acs(struct pci_dev *dev, u16 acs_flags) /* NVMe: pci_quirk_loongson_acs() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
 	/*
 	 * Loongson PCIe Root Ports don't advertise an ACS capability, but
 	 * they do not allow peer-to-peer transactions between Root Ports.
 	 * Allow each Root Port to be in a separate IOMMU group by masking
 	 * SV/RR/CR/UF bits.
 	 */
-	return pci_acs_ctrl_enabled(acs_flags,
-		PCI_ACS_SV | PCI_ACS_RR | PCI_ACS_CR | PCI_ACS_UF);
-}
+	return pci_acs_ctrl_enabled(acs_flags, /* NVMe: pci_acs_ctrl_enabled(acs_flags, 값을 반환. */
+		PCI_ACS_SV | PCI_ACS_RR | PCI_ACS_CR | PCI_ACS_UF); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+} /* NVMe: 코드 블록/구조체 종료. */
 
 /*
  * Wangxun 40G/25G/10G/1G NICs have no ACS capability, but on
@@ -5208,190 +5208,190 @@ static int pci_quirk_loongson_acs(struct pci_dev *dev, u16 acs_flags)
  * RP1000/RP2000 10G NICs(sp).
  * FF5xxx 40G/25G/10G NICs(aml).
  */
-static int  pci_quirk_wangxun_nic_acs(struct pci_dev *dev, u16 acs_flags)
-{
-	switch (dev->device) {
+static int  pci_quirk_wangxun_nic_acs(struct pci_dev *dev, u16 acs_flags) /* NVMe: pci_quirk_wangxun_nic_acs() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	switch (dev->device) { /* NVMe: switch 다중 분기 처리. */
 	case 0x0100 ... 0x010F: /* EM */
 	case 0x1001: case 0x2001: /* SP */
 	case 0x5010: case 0x5025: case 0x5040: /* AML */
 	case 0x5110: case 0x5125: case 0x5140: /* AML */
-		return pci_acs_ctrl_enabled(acs_flags,
-			PCI_ACS_SV | PCI_ACS_RR | PCI_ACS_CR | PCI_ACS_UF);
-	}
+		return pci_acs_ctrl_enabled(acs_flags, /* NVMe: pci_acs_ctrl_enabled(acs_flags, 값을 반환. */
+			PCI_ACS_SV | PCI_ACS_RR | PCI_ACS_CR | PCI_ACS_UF); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+	} /* NVMe: 코드 블록/구조체 종료. */
 
-	return false;
-}
+	return false; /* NVMe: false 값을 반환. */
+} /* NVMe: 코드 블록/구조체 종료. */
 
-static const struct pci_dev_acs_enabled {
-	u16 vendor;
-	u16 device;
-	int (*acs_enabled)(struct pci_dev *dev, u16 acs_flags);
-} pci_dev_acs_enabled[] = {
-	{ PCI_VENDOR_ID_ATI, 0x4385, pci_quirk_amd_sb_acs },
-	{ PCI_VENDOR_ID_ATI, 0x439c, pci_quirk_amd_sb_acs },
-	{ PCI_VENDOR_ID_ATI, 0x4383, pci_quirk_amd_sb_acs },
-	{ PCI_VENDOR_ID_ATI, 0x439d, pci_quirk_amd_sb_acs },
-	{ PCI_VENDOR_ID_ATI, 0x4384, pci_quirk_amd_sb_acs },
-	{ PCI_VENDOR_ID_ATI, 0x4399, pci_quirk_amd_sb_acs },
-	{ PCI_VENDOR_ID_AMD, 0x780f, pci_quirk_amd_sb_acs },
-	{ PCI_VENDOR_ID_AMD, 0x7809, pci_quirk_amd_sb_acs },
-	{ PCI_VENDOR_ID_SOLARFLARE, 0x0903, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_SOLARFLARE, 0x0923, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_SOLARFLARE, 0x0A03, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_INTEL, 0x10C6, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_INTEL, 0x10DB, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_INTEL, 0x10DD, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_INTEL, 0x10E1, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_INTEL, 0x10F1, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_INTEL, 0x10F7, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_INTEL, 0x10F8, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_INTEL, 0x10F9, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_INTEL, 0x10FA, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_INTEL, 0x10FB, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_INTEL, 0x10FC, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_INTEL, 0x1507, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_INTEL, 0x1514, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_INTEL, 0x151C, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_INTEL, 0x1529, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_INTEL, 0x152A, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_INTEL, 0x154D, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_INTEL, 0x154F, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_INTEL, 0x1551, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_INTEL, 0x1558, pci_quirk_mf_endpoint_acs },
+static const struct pci_dev_acs_enabled { /* NVMe: 제어문 블록 시작. */
+	u16 vendor; /* NVMe: vendor 변수 선언. */
+	u16 device; /* NVMe: device 변수 선언. */
+	int (*acs_enabled)(struct pci_dev *dev, u16 acs_flags); /* NVMe: int() 호출 (NVMe/PCIe 동작). */
+} pci_dev_acs_enabled[] = { /* NVMe: pci_dev_acs_enabled[] 변수에 값 대입. */
+	{ PCI_VENDOR_ID_ATI, 0x4385, pci_quirk_amd_sb_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_ATI, 0x439c, pci_quirk_amd_sb_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_ATI, 0x4383, pci_quirk_amd_sb_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_ATI, 0x439d, pci_quirk_amd_sb_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_ATI, 0x4384, pci_quirk_amd_sb_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_ATI, 0x4399, pci_quirk_amd_sb_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_AMD, 0x780f, pci_quirk_amd_sb_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_AMD, 0x7809, pci_quirk_amd_sb_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_SOLARFLARE, 0x0903, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_SOLARFLARE, 0x0923, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_SOLARFLARE, 0x0A03, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_INTEL, 0x10C6, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_INTEL, 0x10DB, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_INTEL, 0x10DD, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_INTEL, 0x10E1, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_INTEL, 0x10F1, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_INTEL, 0x10F7, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_INTEL, 0x10F8, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_INTEL, 0x10F9, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_INTEL, 0x10FA, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_INTEL, 0x10FB, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_INTEL, 0x10FC, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_INTEL, 0x1507, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_INTEL, 0x1514, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_INTEL, 0x151C, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_INTEL, 0x1529, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_INTEL, 0x152A, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_INTEL, 0x154D, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_INTEL, 0x154F, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_INTEL, 0x1551, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_INTEL, 0x1558, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
 	/* 82580 */
-	{ PCI_VENDOR_ID_INTEL, 0x1509, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_INTEL, 0x150E, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_INTEL, 0x150F, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_INTEL, 0x1510, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_INTEL, 0x1511, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_INTEL, 0x1516, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_INTEL, 0x1527, pci_quirk_mf_endpoint_acs },
+	{ PCI_VENDOR_ID_INTEL, 0x1509, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_INTEL, 0x150E, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_INTEL, 0x150F, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_INTEL, 0x1510, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_INTEL, 0x1511, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_INTEL, 0x1516, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_INTEL, 0x1527, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
 	/* 82576 */
-	{ PCI_VENDOR_ID_INTEL, 0x10C9, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_INTEL, 0x10E6, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_INTEL, 0x10E7, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_INTEL, 0x10E8, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_INTEL, 0x150A, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_INTEL, 0x150D, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_INTEL, 0x1518, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_INTEL, 0x1526, pci_quirk_mf_endpoint_acs },
+	{ PCI_VENDOR_ID_INTEL, 0x10C9, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_INTEL, 0x10E6, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_INTEL, 0x10E7, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_INTEL, 0x10E8, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_INTEL, 0x150A, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_INTEL, 0x150D, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_INTEL, 0x1518, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_INTEL, 0x1526, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
 	/* 82575 */
-	{ PCI_VENDOR_ID_INTEL, 0x10A7, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_INTEL, 0x10A9, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_INTEL, 0x10D6, pci_quirk_mf_endpoint_acs },
+	{ PCI_VENDOR_ID_INTEL, 0x10A7, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_INTEL, 0x10A9, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_INTEL, 0x10D6, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
 	/* I350 */
-	{ PCI_VENDOR_ID_INTEL, 0x1521, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_INTEL, 0x1522, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_INTEL, 0x1523, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_INTEL, 0x1524, pci_quirk_mf_endpoint_acs },
+	{ PCI_VENDOR_ID_INTEL, 0x1521, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_INTEL, 0x1522, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_INTEL, 0x1523, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_INTEL, 0x1524, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
 	/* 82571 (Quads omitted due to non-ACS switch) */
-	{ PCI_VENDOR_ID_INTEL, 0x105E, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_INTEL, 0x105F, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_INTEL, 0x1060, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_INTEL, 0x10D9, pci_quirk_mf_endpoint_acs },
+	{ PCI_VENDOR_ID_INTEL, 0x105E, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_INTEL, 0x105F, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_INTEL, 0x1060, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_INTEL, 0x10D9, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
 	/* I219 */
-	{ PCI_VENDOR_ID_INTEL, 0x15b7, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_INTEL, 0x15b8, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_INTEL, PCI_ANY_ID, pci_quirk_rciep_acs },
+	{ PCI_VENDOR_ID_INTEL, 0x15b7, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_INTEL, 0x15b8, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_INTEL, PCI_ANY_ID, pci_quirk_rciep_acs }, /* NVMe: 인자/초기자 나열 (연속). */
 	/* QCOM QDF2xxx root ports */
-	{ PCI_VENDOR_ID_QCOM, 0x0400, pci_quirk_qcom_rp_acs },
-	{ PCI_VENDOR_ID_QCOM, 0x0401, pci_quirk_qcom_rp_acs },
+	{ PCI_VENDOR_ID_QCOM, 0x0400, pci_quirk_qcom_rp_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_QCOM, 0x0401, pci_quirk_qcom_rp_acs }, /* NVMe: 인자/초기자 나열 (연속). */
 	/* QCOM SA8775P root port */
-	{ PCI_VENDOR_ID_QCOM, 0x0115, pci_quirk_qcom_rp_acs },
+	{ PCI_VENDOR_ID_QCOM, 0x0115, pci_quirk_qcom_rp_acs }, /* NVMe: 인자/초기자 나열 (연속). */
 	/* QCOM Hamoa root port */
-	{ PCI_VENDOR_ID_QCOM, 0x0111, pci_quirk_qcom_rp_acs },
+	{ PCI_VENDOR_ID_QCOM, 0x0111, pci_quirk_qcom_rp_acs }, /* NVMe: 인자/초기자 나열 (연속). */
 	/* QCOM Glymur root port */
-	{ PCI_VENDOR_ID_QCOM, 0x0120, pci_quirk_qcom_rp_acs },
+	{ PCI_VENDOR_ID_QCOM, 0x0120, pci_quirk_qcom_rp_acs }, /* NVMe: 인자/초기자 나열 (연속). */
 	/* HXT SD4800 root ports. The ACS design is same as QCOM QDF2xxx */
-	{ PCI_VENDOR_ID_HXT, 0x0401, pci_quirk_qcom_rp_acs },
+	{ PCI_VENDOR_ID_HXT, 0x0401, pci_quirk_qcom_rp_acs }, /* NVMe: 인자/초기자 나열 (연속). */
 	/* Intel PCH root ports */
-	{ PCI_VENDOR_ID_INTEL, PCI_ANY_ID, pci_quirk_intel_pch_acs },
-	{ PCI_VENDOR_ID_INTEL, PCI_ANY_ID, pci_quirk_intel_spt_pch_acs },
+	{ PCI_VENDOR_ID_INTEL, PCI_ANY_ID, pci_quirk_intel_pch_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_INTEL, PCI_ANY_ID, pci_quirk_intel_spt_pch_acs }, /* NVMe: 인자/초기자 나열 (연속). */
 	{ 0x19a2, 0x710, pci_quirk_mf_endpoint_acs }, /* Emulex BE3-R */
 	{ 0x10df, 0x720, pci_quirk_mf_endpoint_acs }, /* Emulex Skyhawk-R */
 	/* Cavium ThunderX */
-	{ PCI_VENDOR_ID_CAVIUM, PCI_ANY_ID, pci_quirk_cavium_acs },
+	{ PCI_VENDOR_ID_CAVIUM, PCI_ANY_ID, pci_quirk_cavium_acs }, /* NVMe: 인자/초기자 나열 (연속). */
 	/* Cavium multi-function devices */
-	{ PCI_VENDOR_ID_CAVIUM, 0xA026, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_CAVIUM, 0xA059, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_CAVIUM, 0xA060, pci_quirk_mf_endpoint_acs },
+	{ PCI_VENDOR_ID_CAVIUM, 0xA026, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_CAVIUM, 0xA059, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_CAVIUM, 0xA060, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
 	/* APM X-Gene */
-	{ PCI_VENDOR_ID_AMCC, 0xE004, pci_quirk_xgene_acs },
+	{ PCI_VENDOR_ID_AMCC, 0xE004, pci_quirk_xgene_acs }, /* NVMe: 인자/초기자 나열 (연속). */
 	/* Ampere Computing */
-	{ PCI_VENDOR_ID_AMPERE, 0xE005, pci_quirk_xgene_acs },
-	{ PCI_VENDOR_ID_AMPERE, 0xE006, pci_quirk_xgene_acs },
-	{ PCI_VENDOR_ID_AMPERE, 0xE007, pci_quirk_xgene_acs },
-	{ PCI_VENDOR_ID_AMPERE, 0xE008, pci_quirk_xgene_acs },
-	{ PCI_VENDOR_ID_AMPERE, 0xE009, pci_quirk_xgene_acs },
-	{ PCI_VENDOR_ID_AMPERE, 0xE00A, pci_quirk_xgene_acs },
-	{ PCI_VENDOR_ID_AMPERE, 0xE00B, pci_quirk_xgene_acs },
-	{ PCI_VENDOR_ID_AMPERE, 0xE00C, pci_quirk_xgene_acs },
+	{ PCI_VENDOR_ID_AMPERE, 0xE005, pci_quirk_xgene_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_AMPERE, 0xE006, pci_quirk_xgene_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_AMPERE, 0xE007, pci_quirk_xgene_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_AMPERE, 0xE008, pci_quirk_xgene_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_AMPERE, 0xE009, pci_quirk_xgene_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_AMPERE, 0xE00A, pci_quirk_xgene_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_AMPERE, 0xE00B, pci_quirk_xgene_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_AMPERE, 0xE00C, pci_quirk_xgene_acs }, /* NVMe: 인자/초기자 나열 (연속). */
 	/* Broadcom multi-function device */
-	{ PCI_VENDOR_ID_BROADCOM, 0x16D7, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_BROADCOM, 0x1750, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_BROADCOM, 0x1751, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_BROADCOM, 0x1752, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_BROADCOM, 0x1760, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_BROADCOM, 0x1761, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_BROADCOM, 0x1762, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_BROADCOM, 0x1763, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_BROADCOM, 0xD714, pci_quirk_brcm_acs },
+	{ PCI_VENDOR_ID_BROADCOM, 0x16D7, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_BROADCOM, 0x1750, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_BROADCOM, 0x1751, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_BROADCOM, 0x1752, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_BROADCOM, 0x1760, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_BROADCOM, 0x1761, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_BROADCOM, 0x1762, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_BROADCOM, 0x1763, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_BROADCOM, 0xD714, pci_quirk_brcm_acs }, /* NVMe: 인자/초기자 나열 (연속). */
 	/* Loongson PCIe Root Ports */
-	{ PCI_VENDOR_ID_LOONGSON, 0x3C09, pci_quirk_loongson_acs },
-	{ PCI_VENDOR_ID_LOONGSON, 0x3C19, pci_quirk_loongson_acs },
-	{ PCI_VENDOR_ID_LOONGSON, 0x3C29, pci_quirk_loongson_acs },
-	{ PCI_VENDOR_ID_LOONGSON, 0x7A09, pci_quirk_loongson_acs },
-	{ PCI_VENDOR_ID_LOONGSON, 0x7A19, pci_quirk_loongson_acs },
-	{ PCI_VENDOR_ID_LOONGSON, 0x7A29, pci_quirk_loongson_acs },
-	{ PCI_VENDOR_ID_LOONGSON, 0x7A39, pci_quirk_loongson_acs },
-	{ PCI_VENDOR_ID_LOONGSON, 0x7A49, pci_quirk_loongson_acs },
-	{ PCI_VENDOR_ID_LOONGSON, 0x7A59, pci_quirk_loongson_acs },
-	{ PCI_VENDOR_ID_LOONGSON, 0x7A69, pci_quirk_loongson_acs },
+	{ PCI_VENDOR_ID_LOONGSON, 0x3C09, pci_quirk_loongson_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_LOONGSON, 0x3C19, pci_quirk_loongson_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_LOONGSON, 0x3C29, pci_quirk_loongson_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_LOONGSON, 0x7A09, pci_quirk_loongson_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_LOONGSON, 0x7A19, pci_quirk_loongson_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_LOONGSON, 0x7A29, pci_quirk_loongson_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_LOONGSON, 0x7A39, pci_quirk_loongson_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_LOONGSON, 0x7A49, pci_quirk_loongson_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_LOONGSON, 0x7A59, pci_quirk_loongson_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_LOONGSON, 0x7A69, pci_quirk_loongson_acs }, /* NVMe: 인자/초기자 나열 (연속). */
 	/* Amazon Annapurna Labs */
-	{ PCI_VENDOR_ID_AMAZON_ANNAPURNA_LABS, 0x0031, pci_quirk_al_acs },
+	{ PCI_VENDOR_ID_AMAZON_ANNAPURNA_LABS, 0x0031, pci_quirk_al_acs }, /* NVMe: 인자/초기자 나열 (연속). */
 	/* Zhaoxin multi-function devices */
-	{ PCI_VENDOR_ID_ZHAOXIN, 0x3038, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_ZHAOXIN, 0x3104, pci_quirk_mf_endpoint_acs },
-	{ PCI_VENDOR_ID_ZHAOXIN, 0x9083, pci_quirk_mf_endpoint_acs },
+	{ PCI_VENDOR_ID_ZHAOXIN, 0x3038, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_ZHAOXIN, 0x3104, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_ZHAOXIN, 0x9083, pci_quirk_mf_endpoint_acs }, /* NVMe: 인자/초기자 나열 (연속). */
 	/* NXP root ports, xx=16, 12, or 08 cores */
 	/* LX2xx0A : without security features + CAN-FD */
-	{ PCI_VENDOR_ID_NXP, 0x8d81, pci_quirk_nxp_rp_acs },
-	{ PCI_VENDOR_ID_NXP, 0x8da1, pci_quirk_nxp_rp_acs },
-	{ PCI_VENDOR_ID_NXP, 0x8d83, pci_quirk_nxp_rp_acs },
+	{ PCI_VENDOR_ID_NXP, 0x8d81, pci_quirk_nxp_rp_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_NXP, 0x8da1, pci_quirk_nxp_rp_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_NXP, 0x8d83, pci_quirk_nxp_rp_acs }, /* NVMe: 인자/초기자 나열 (연속). */
 	/* LX2xx0C : security features + CAN-FD */
-	{ PCI_VENDOR_ID_NXP, 0x8d80, pci_quirk_nxp_rp_acs },
-	{ PCI_VENDOR_ID_NXP, 0x8da0, pci_quirk_nxp_rp_acs },
-	{ PCI_VENDOR_ID_NXP, 0x8d82, pci_quirk_nxp_rp_acs },
+	{ PCI_VENDOR_ID_NXP, 0x8d80, pci_quirk_nxp_rp_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_NXP, 0x8da0, pci_quirk_nxp_rp_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_NXP, 0x8d82, pci_quirk_nxp_rp_acs }, /* NVMe: 인자/초기자 나열 (연속). */
 	/* LX2xx0E : security features + CAN */
-	{ PCI_VENDOR_ID_NXP, 0x8d90, pci_quirk_nxp_rp_acs },
-	{ PCI_VENDOR_ID_NXP, 0x8db0, pci_quirk_nxp_rp_acs },
-	{ PCI_VENDOR_ID_NXP, 0x8d92, pci_quirk_nxp_rp_acs },
+	{ PCI_VENDOR_ID_NXP, 0x8d90, pci_quirk_nxp_rp_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_NXP, 0x8db0, pci_quirk_nxp_rp_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_NXP, 0x8d92, pci_quirk_nxp_rp_acs }, /* NVMe: 인자/초기자 나열 (연속). */
 	/* LX2xx0N : without security features + CAN */
-	{ PCI_VENDOR_ID_NXP, 0x8d91, pci_quirk_nxp_rp_acs },
-	{ PCI_VENDOR_ID_NXP, 0x8db1, pci_quirk_nxp_rp_acs },
-	{ PCI_VENDOR_ID_NXP, 0x8d93, pci_quirk_nxp_rp_acs },
+	{ PCI_VENDOR_ID_NXP, 0x8d91, pci_quirk_nxp_rp_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_NXP, 0x8db1, pci_quirk_nxp_rp_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_NXP, 0x8d93, pci_quirk_nxp_rp_acs }, /* NVMe: 인자/초기자 나열 (연속). */
 	/* LX2xx2A : without security features + CAN-FD */
-	{ PCI_VENDOR_ID_NXP, 0x8d89, pci_quirk_nxp_rp_acs },
-	{ PCI_VENDOR_ID_NXP, 0x8da9, pci_quirk_nxp_rp_acs },
-	{ PCI_VENDOR_ID_NXP, 0x8d8b, pci_quirk_nxp_rp_acs },
+	{ PCI_VENDOR_ID_NXP, 0x8d89, pci_quirk_nxp_rp_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_NXP, 0x8da9, pci_quirk_nxp_rp_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_NXP, 0x8d8b, pci_quirk_nxp_rp_acs }, /* NVMe: 인자/초기자 나열 (연속). */
 	/* LX2xx2C : security features + CAN-FD */
-	{ PCI_VENDOR_ID_NXP, 0x8d88, pci_quirk_nxp_rp_acs },
-	{ PCI_VENDOR_ID_NXP, 0x8da8, pci_quirk_nxp_rp_acs },
-	{ PCI_VENDOR_ID_NXP, 0x8d8a, pci_quirk_nxp_rp_acs },
+	{ PCI_VENDOR_ID_NXP, 0x8d88, pci_quirk_nxp_rp_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_NXP, 0x8da8, pci_quirk_nxp_rp_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_NXP, 0x8d8a, pci_quirk_nxp_rp_acs }, /* NVMe: 인자/초기자 나열 (연속). */
 	/* LX2xx2E : security features + CAN */
-	{ PCI_VENDOR_ID_NXP, 0x8d98, pci_quirk_nxp_rp_acs },
-	{ PCI_VENDOR_ID_NXP, 0x8db8, pci_quirk_nxp_rp_acs },
-	{ PCI_VENDOR_ID_NXP, 0x8d9a, pci_quirk_nxp_rp_acs },
+	{ PCI_VENDOR_ID_NXP, 0x8d98, pci_quirk_nxp_rp_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_NXP, 0x8db8, pci_quirk_nxp_rp_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_NXP, 0x8d9a, pci_quirk_nxp_rp_acs }, /* NVMe: 인자/초기자 나열 (연속). */
 	/* LX2xx2N : without security features + CAN */
-	{ PCI_VENDOR_ID_NXP, 0x8d99, pci_quirk_nxp_rp_acs },
-	{ PCI_VENDOR_ID_NXP, 0x8db9, pci_quirk_nxp_rp_acs },
-	{ PCI_VENDOR_ID_NXP, 0x8d9b, pci_quirk_nxp_rp_acs },
+	{ PCI_VENDOR_ID_NXP, 0x8d99, pci_quirk_nxp_rp_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_NXP, 0x8db9, pci_quirk_nxp_rp_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_NXP, 0x8d9b, pci_quirk_nxp_rp_acs }, /* NVMe: 인자/초기자 나열 (연속). */
 	/* Zhaoxin Root/Downstream Ports */
-	{ PCI_VENDOR_ID_ZHAOXIN, PCI_ANY_ID, pci_quirk_zhaoxin_pcie_ports_acs },
+	{ PCI_VENDOR_ID_ZHAOXIN, PCI_ANY_ID, pci_quirk_zhaoxin_pcie_ports_acs }, /* NVMe: 인자/초기자 나열 (연속). */
 	/* Wangxun nics */
-	{ PCI_VENDOR_ID_WANGXUN, PCI_ANY_ID, pci_quirk_wangxun_nic_acs },
-	{ 0 }
-};
+	{ PCI_VENDOR_ID_WANGXUN, PCI_ANY_ID, pci_quirk_wangxun_nic_acs }, /* NVMe: 인자/초기자 나열 (연속). */
+	{ 0 } /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+}; /* NVMe: 코드 블록/구조체 종료. */
 
 /*
  * pci_dev_specific_acs_enabled - check whether device provides ACS controls
@@ -5404,10 +5404,10 @@ static const struct pci_dev_acs_enabled {
  *   0:		Device does not provide all the desired controls
  *   >0:	Device provides all the controls in @acs_flags
  */
-int pci_dev_specific_acs_enabled(struct pci_dev *dev, u16 acs_flags)
-{
-	const struct pci_dev_acs_enabled *i;
-	int ret;
+int pci_dev_specific_acs_enabled(struct pci_dev *dev, u16 acs_flags) /* NVMe: pci_dev_specific_acs_enabled() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	const struct pci_dev_acs_enabled *i; /* NVMe: i 변수 선언. */
+	int ret; /* NVMe: ret 변수 선언. */
 
 	/*
 	 * Allow devices that do not expose standard PCIe ACS capabilities
@@ -5415,58 +5415,58 @@ int pci_dev_specific_acs_enabled(struct pci_dev *dev, u16 acs_flags)
 	 * devices which do not allow internal peer-to-peer between functions,
 	 * but do not implement PCIe ACS may wish to return true here.
 	 */
-	for (i = pci_dev_acs_enabled; i->acs_enabled; i++) {
-		if ((i->vendor == dev->vendor ||
-		     i->vendor == (u16)PCI_ANY_ID) &&
-		    (i->device == dev->device ||
-		     i->device == (u16)PCI_ANY_ID)) {
-			ret = i->acs_enabled(dev, acs_flags);
-			if (ret >= 0)
-				return ret;
-		}
-	}
+	for (i = pci_dev_acs_enabled; i->acs_enabled; i++) { /* NVMe: 반복 처리 (NVMe/PCIe 레지스터/장치 순회). */
+		if ((i->vendor == dev->vendor || /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		     i->vendor == (u16)PCI_ANY_ID) && /* NVMe: 논리 연산 연속. */
+		    (i->device == dev->device || /* NVMe: 논리 연산 연속. */
+		     i->device == (u16)PCI_ANY_ID)) { /* NVMe: 제어문 블록 시작. */
+			ret = i->acs_enabled(dev, acs_flags); /* NVMe: acs_enabled() 호출 (NVMe/PCIe 동작). */
+			if (ret >= 0) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+				return ret; /* NVMe: ret 값을 반환. */
+		} /* NVMe: 코드 블록/구조체 종료. */
+	} /* NVMe: 코드 블록/구조체 종료. */
 
-	return -ENOTTY;
-}
+	return -ENOTTY; /* NVMe: -ENOTTY 값을 반환. */
+} /* NVMe: 코드 블록/구조체 종료. */
 
 /* Config space offset of Root Complex Base Address register */
-#define INTEL_LPC_RCBA_REG 0xf0
+#define INTEL_LPC_RCBA_REG 0xf0 /* NVMe: INTEL_LPC_RCBA_REG 매크로/상수 정의 (NVMe/PCIe). */
 /* 31:14 RCBA address */
-#define INTEL_LPC_RCBA_MASK 0xffffc000
+#define INTEL_LPC_RCBA_MASK 0xffffc000 /* NVMe: INTEL_LPC_RCBA_MASK 매크로/상수 정의 (NVMe/PCIe). */
 /* RCBA Enable */
-#define INTEL_LPC_RCBA_ENABLE (1 << 0)
+#define INTEL_LPC_RCBA_ENABLE (1 << 0) /* NVMe: INTEL_LPC_RCBA_ENABLE 매크로/상수 정의 (NVMe/PCIe). */
 
 /* Backbone Scratch Pad Register */
-#define INTEL_BSPR_REG 0x1104
+#define INTEL_BSPR_REG 0x1104 /* NVMe: INTEL_BSPR_REG 매크로/상수 정의 (NVMe/PCIe). */
 /* Backbone Peer Non-Posted Disable */
-#define INTEL_BSPR_REG_BPNPD (1 << 8)
+#define INTEL_BSPR_REG_BPNPD (1 << 8) /* NVMe: INTEL_BSPR_REG_BPNPD 매크로/상수 정의 (NVMe/PCIe). */
 /* Backbone Peer Posted Disable */
-#define INTEL_BSPR_REG_BPPD  (1 << 9)
+#define INTEL_BSPR_REG_BPPD  (1 << 9) /* NVMe: INTEL_BSPR_REG_BPPD 매크로/상수 정의 (NVMe/PCIe). */
 
 /* Upstream Peer Decode Configuration Register */
-#define INTEL_UPDCR_REG 0x1014
+#define INTEL_UPDCR_REG 0x1014 /* NVMe: INTEL_UPDCR_REG 매크로/상수 정의 (NVMe/PCIe). */
 /* 5:0 Peer Decode Enable bits */
-#define INTEL_UPDCR_REG_MASK 0x3f
+#define INTEL_UPDCR_REG_MASK 0x3f /* NVMe: INTEL_UPDCR_REG_MASK 매크로/상수 정의 (NVMe/PCIe). */
 
-static int pci_quirk_enable_intel_lpc_acs(struct pci_dev *dev)
-{
-	u32 rcba, bspr, updcr;
-	void __iomem *rcba_mem;
+static int pci_quirk_enable_intel_lpc_acs(struct pci_dev *dev) /* NVMe: pci_quirk_enable_intel_lpc_acs() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	u32 rcba, bspr, updcr; /* NVMe: updcr 변수 선언. */
+	void __iomem *rcba_mem; /* NVMe: rcba_mem 변수 선언. */
 
 	/*
 	 * Read the RCBA register from the LPC (D31:F0).  PCH root ports
 	 * are D28:F* and therefore get probed before LPC, thus we can't
 	 * use pci_get_slot()/pci_read_config_dword() here.
 	 */
-	pci_bus_read_config_dword(dev->bus, PCI_DEVFN(31, 0),
-				  INTEL_LPC_RCBA_REG, &rcba);
-	if (!(rcba & INTEL_LPC_RCBA_ENABLE))
-		return -EINVAL;
+	pci_bus_read_config_dword(dev->bus, PCI_DEVFN(31, 0), /* NVMe: pci_bus_read_config_dword() 함수 정의/매개변수 선언. */
+				  INTEL_LPC_RCBA_REG, &rcba); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+	if (!(rcba & INTEL_LPC_RCBA_ENABLE)) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return -EINVAL; /* NVMe: -EINVAL 값을 반환. */
 
-	rcba_mem = ioremap(rcba & INTEL_LPC_RCBA_MASK,
-				   PAGE_ALIGN(INTEL_UPDCR_REG));
-	if (!rcba_mem)
-		return -ENOMEM;
+	rcba_mem = ioremap(rcba & INTEL_LPC_RCBA_MASK, /* NVMe: rcba_mem 변수에 값 대입. */
+				   PAGE_ALIGN(INTEL_UPDCR_REG)); /* NVMe: PAGE_ALIGN() 호출 (NVMe/PCIe 동작). */
+	if (!rcba_mem) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return -ENOMEM; /* NVMe: -ENOMEM 값을 반환. */
 
 	/*
 	 * The BSPR can disallow peer cycles, but it's set by soft strap and
@@ -5475,29 +5475,29 @@ static int pci_quirk_enable_intel_lpc_acs(struct pci_dev *dev)
 	 * the UPDCR to disable peer decodes for each port.  This provides the
 	 * PCIe ACS equivalent of PCI_ACS_RR | PCI_ACS_CR | PCI_ACS_UF
 	 */
-	bspr = readl(rcba_mem + INTEL_BSPR_REG);
-	bspr &= INTEL_BSPR_REG_BPNPD | INTEL_BSPR_REG_BPPD;
-	if (bspr != (INTEL_BSPR_REG_BPNPD | INTEL_BSPR_REG_BPPD)) {
-		updcr = readl(rcba_mem + INTEL_UPDCR_REG);
-		if (updcr & INTEL_UPDCR_REG_MASK) {
-			pci_info(dev, "Disabling UPDCR peer decodes\n");
-			updcr &= ~INTEL_UPDCR_REG_MASK;
-			writel(updcr, rcba_mem + INTEL_UPDCR_REG);
-		}
-	}
+	bspr = readl(rcba_mem + INTEL_BSPR_REG); /* NVMe: readl() 호출 (NVMe/PCIe 동작). */
+	bspr &= INTEL_BSPR_REG_BPNPD | INTEL_BSPR_REG_BPPD; /* NVMe: & 변수에 값 대입. */
+	if (bspr != (INTEL_BSPR_REG_BPNPD | INTEL_BSPR_REG_BPPD)) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		updcr = readl(rcba_mem + INTEL_UPDCR_REG); /* NVMe: readl() 호출 (NVMe/PCIe 동작). */
+		if (updcr & INTEL_UPDCR_REG_MASK) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+			pci_info(dev, "Disabling UPDCR peer decodes\n"); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
+			updcr &= ~INTEL_UPDCR_REG_MASK; /* NVMe: & 변수에 값 대입. */
+			writel(updcr, rcba_mem + INTEL_UPDCR_REG); /* NVMe: writel() 호출 (NVMe/PCIe 동작). */
+		} /* NVMe: 코드 블록/구조체 종료. */
+	} /* NVMe: 코드 블록/구조체 종료. */
 
-	iounmap(rcba_mem);
-	return 0;
-}
+	iounmap(rcba_mem); /* NVMe: iounmap() 호출 (NVMe/PCIe 동작). */
+	return 0; /* NVMe: 0 값을 반환. */
+} /* NVMe: 코드 블록/구조체 종료. */
 
 /* Miscellaneous Port Configuration register */
-#define INTEL_MPC_REG 0xd8
+#define INTEL_MPC_REG 0xd8 /* NVMe: INTEL_MPC_REG 매크로/상수 정의 (NVMe/PCIe). */
 /* MPC: Invalid Receive Bus Number Check Enable */
-#define INTEL_MPC_REG_IRBNCE (1 << 26)
+#define INTEL_MPC_REG_IRBNCE (1 << 26) /* NVMe: INTEL_MPC_REG_IRBNCE 매크로/상수 정의 (NVMe/PCIe). */
 
-static void pci_quirk_enable_intel_rp_mpc_acs(struct pci_dev *dev)
-{
-	u32 mpc;
+static void pci_quirk_enable_intel_rp_mpc_acs(struct pci_dev *dev) /* NVMe: pci_quirk_enable_intel_rp_mpc_acs() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	u32 mpc; /* NVMe: mpc 변수 선언. */
 
 	/*
 	 * When enabled, the IRBNCE bit of the MPC register enables the
@@ -5505,13 +5505,13 @@ static void pci_quirk_enable_intel_rp_mpc_acs(struct pci_dev *dev)
 	 * ensures that requester IDs fall within the bus number range
 	 * of the bridge.  Enable if not already.
 	 */
-	pci_read_config_dword(dev, INTEL_MPC_REG, &mpc);
-	if (!(mpc & INTEL_MPC_REG_IRBNCE)) {
-		pci_info(dev, "Enabling MPC IRBNCE\n");
-		mpc |= INTEL_MPC_REG_IRBNCE;
-		pci_write_config_word(dev, INTEL_MPC_REG, mpc);
-	}
-}
+	pci_read_config_dword(dev, INTEL_MPC_REG, &mpc); /* NVMe: pci_read_config_dword() 호출 (NVMe/PCIe 동작). */
+	if (!(mpc & INTEL_MPC_REG_IRBNCE)) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pci_info(dev, "Enabling MPC IRBNCE\n"); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
+		mpc |= INTEL_MPC_REG_IRBNCE; /* NVMe: | 변수에 값 대입. */
+		pci_write_config_word(dev, INTEL_MPC_REG, mpc); /* NVMe: pci_write_config_word() 호출 (NVMe/PCIe 동작). */
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
 
 /*
  * Currently this quirk does the equivalent of
@@ -5520,135 +5520,135 @@ static void pci_quirk_enable_intel_rp_mpc_acs(struct pci_dev *dev)
  * TODO: This quirk also needs to do equivalent of PCI_ACS_TB,
  * if dev->external_facing || dev->untrusted
  */
-static int pci_quirk_enable_intel_pch_acs(struct pci_dev *dev)
-{
-	if (!pci_quirk_intel_pch_acs_match(dev))
-		return -ENOTTY;
+static int pci_quirk_enable_intel_pch_acs(struct pci_dev *dev) /* NVMe: pci_quirk_enable_intel_pch_acs() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	if (!pci_quirk_intel_pch_acs_match(dev)) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return -ENOTTY; /* NVMe: -ENOTTY 값을 반환. */
 
-	if (pci_quirk_enable_intel_lpc_acs(dev)) {
-		pci_warn(dev, "Failed to enable Intel PCH ACS quirk\n");
-		return 0;
-	}
+	if (pci_quirk_enable_intel_lpc_acs(dev)) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pci_warn(dev, "Failed to enable Intel PCH ACS quirk\n"); /* NVMe: pci_warn() 호출 (NVMe/PCIe 동작). */
+		return 0; /* NVMe: 0 값을 반환. */
+	} /* NVMe: 코드 블록/구조체 종료. */
 
-	pci_quirk_enable_intel_rp_mpc_acs(dev);
+	pci_quirk_enable_intel_rp_mpc_acs(dev); /* NVMe: pci_quirk_enable_intel_rp_mpc_acs() 호출 (NVMe/PCIe 동작). */
 
-	dev->dev_flags |= PCI_DEV_FLAGS_ACS_ENABLED_QUIRK;
+	dev->dev_flags |= PCI_DEV_FLAGS_ACS_ENABLED_QUIRK; /* NVMe: | 변수에 값 대입. */
 
-	pci_info(dev, "Intel PCH root port ACS workaround enabled\n");
+	pci_info(dev, "Intel PCH root port ACS workaround enabled\n"); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
 
-	return 0;
-}
+	return 0; /* NVMe: 0 값을 반환. */
+} /* NVMe: 코드 블록/구조체 종료. */
 
-static int pci_quirk_enable_intel_spt_pch_acs(struct pci_dev *dev)
-{
-	int pos;
-	u32 cap, ctrl;
+static int pci_quirk_enable_intel_spt_pch_acs(struct pci_dev *dev) /* NVMe: pci_quirk_enable_intel_spt_pch_acs() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	int pos; /* NVMe: pos 변수 선언. */
+	u32 cap, ctrl; /* NVMe: ctrl 변수 선언. */
 
-	if (!pci_quirk_intel_spt_pch_acs_match(dev))
-		return -ENOTTY;
+	if (!pci_quirk_intel_spt_pch_acs_match(dev)) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return -ENOTTY; /* NVMe: -ENOTTY 값을 반환. */
 
-	pos = dev->acs_cap;
-	if (!pos)
-		return -ENOTTY;
+	pos = dev->acs_cap; /* NVMe: pos 변수에 값 대입. */
+	if (!pos) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return -ENOTTY; /* NVMe: -ENOTTY 값을 반환. */
 
-	pci_read_config_dword(dev, pos + PCI_ACS_CAP, &cap);
-	pci_read_config_dword(dev, pos + INTEL_SPT_ACS_CTRL, &ctrl);
+	pci_read_config_dword(dev, pos + PCI_ACS_CAP, &cap); /* NVMe: pci_read_config_dword() 호출 (NVMe/PCIe 동작). */
+	pci_read_config_dword(dev, pos + INTEL_SPT_ACS_CTRL, &ctrl); /* NVMe: pci_read_config_dword() 호출 (NVMe/PCIe 동작). */
 
-	ctrl |= (cap & PCI_ACS_SV);
-	ctrl |= (cap & PCI_ACS_RR);
-	ctrl |= (cap & PCI_ACS_CR);
-	ctrl |= (cap & PCI_ACS_UF);
+	ctrl |= (cap & PCI_ACS_SV); /* NVMe: | 변수에 값 대입. */
+	ctrl |= (cap & PCI_ACS_RR); /* NVMe: | 변수에 값 대입. */
+	ctrl |= (cap & PCI_ACS_CR); /* NVMe: | 변수에 값 대입. */
+	ctrl |= (cap & PCI_ACS_UF); /* NVMe: | 변수에 값 대입. */
 
-	if (pci_ats_disabled() || dev->external_facing || dev->untrusted)
-		ctrl |= (cap & PCI_ACS_TB);
+	if (pci_ats_disabled() || dev->external_facing || dev->untrusted) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		ctrl |= (cap & PCI_ACS_TB); /* NVMe: | 변수에 값 대입. */
 
-	pci_write_config_dword(dev, pos + INTEL_SPT_ACS_CTRL, ctrl);
+	pci_write_config_dword(dev, pos + INTEL_SPT_ACS_CTRL, ctrl); /* NVMe: pci_write_config_dword() 호출 (NVMe/PCIe 동작). */
 
-	pci_info(dev, "Intel SPT PCH root port ACS workaround enabled\n");
+	pci_info(dev, "Intel SPT PCH root port ACS workaround enabled\n"); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
 
-	return 0;
-}
+	return 0; /* NVMe: 0 값을 반환. */
+} /* NVMe: 코드 블록/구조체 종료. */
 
-static int pci_quirk_disable_intel_spt_pch_acs_redir(struct pci_dev *dev)
-{
-	int pos;
-	u32 cap, ctrl;
+static int pci_quirk_disable_intel_spt_pch_acs_redir(struct pci_dev *dev) /* NVMe: pci_quirk_disable_intel_spt_pch_acs_redir() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	int pos; /* NVMe: pos 변수 선언. */
+	u32 cap, ctrl; /* NVMe: ctrl 변수 선언. */
 
-	if (!pci_quirk_intel_spt_pch_acs_match(dev))
-		return -ENOTTY;
+	if (!pci_quirk_intel_spt_pch_acs_match(dev)) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return -ENOTTY; /* NVMe: -ENOTTY 값을 반환. */
 
-	pos = dev->acs_cap;
-	if (!pos)
-		return -ENOTTY;
+	pos = dev->acs_cap; /* NVMe: pos 변수에 값 대입. */
+	if (!pos) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return -ENOTTY; /* NVMe: -ENOTTY 값을 반환. */
 
-	pci_read_config_dword(dev, pos + PCI_ACS_CAP, &cap);
-	pci_read_config_dword(dev, pos + INTEL_SPT_ACS_CTRL, &ctrl);
+	pci_read_config_dword(dev, pos + PCI_ACS_CAP, &cap); /* NVMe: pci_read_config_dword() 호출 (NVMe/PCIe 동작). */
+	pci_read_config_dword(dev, pos + INTEL_SPT_ACS_CTRL, &ctrl); /* NVMe: pci_read_config_dword() 호출 (NVMe/PCIe 동작). */
 
-	ctrl &= ~(PCI_ACS_RR | PCI_ACS_CR | PCI_ACS_EC);
+	ctrl &= ~(PCI_ACS_RR | PCI_ACS_CR | PCI_ACS_EC); /* NVMe: & 변수에 값 대입. */
 
-	pci_write_config_dword(dev, pos + INTEL_SPT_ACS_CTRL, ctrl);
+	pci_write_config_dword(dev, pos + INTEL_SPT_ACS_CTRL, ctrl); /* NVMe: pci_write_config_dword() 호출 (NVMe/PCIe 동작). */
 
-	pci_info(dev, "Intel SPT PCH root port workaround: disabled ACS redirect\n");
+	pci_info(dev, "Intel SPT PCH root port workaround: disabled ACS redirect\n"); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
 
-	return 0;
-}
+	return 0; /* NVMe: 0 값을 반환. */
+} /* NVMe: 코드 블록/구조체 종료. */
 
-static const struct pci_dev_acs_ops {
-	u16 vendor;
-	u16 device;
-	int (*enable_acs)(struct pci_dev *dev);
-	int (*disable_acs_redir)(struct pci_dev *dev);
-} pci_dev_acs_ops[] = {
-	{ PCI_VENDOR_ID_INTEL, PCI_ANY_ID,
-	    .enable_acs = pci_quirk_enable_intel_pch_acs,
-	},
-	{ PCI_VENDOR_ID_INTEL, PCI_ANY_ID,
-	    .enable_acs = pci_quirk_enable_intel_spt_pch_acs,
-	    .disable_acs_redir = pci_quirk_disable_intel_spt_pch_acs_redir,
-	},
-};
+static const struct pci_dev_acs_ops { /* NVMe: 제어문 블록 시작. */
+	u16 vendor; /* NVMe: vendor 변수 선언. */
+	u16 device; /* NVMe: device 변수 선언. */
+	int (*enable_acs)(struct pci_dev *dev); /* NVMe: int() 호출 (NVMe/PCIe 동작). */
+	int (*disable_acs_redir)(struct pci_dev *dev); /* NVMe: int() 호출 (NVMe/PCIe 동작). */
+} pci_dev_acs_ops[] = { /* NVMe: pci_dev_acs_ops[] 변수에 값 대입. */
+	{ PCI_VENDOR_ID_INTEL, PCI_ANY_ID, /* NVMe: 인자/초기자 나열 (연속). */
+	    .enable_acs = pci_quirk_enable_intel_pch_acs, /* NVMe: enable_acs 변수에 값 대입. */
+	}, /* NVMe: 인자/초기자 나열 (연속). */
+	{ PCI_VENDOR_ID_INTEL, PCI_ANY_ID, /* NVMe: 인자/초기자 나열 (연속). */
+	    .enable_acs = pci_quirk_enable_intel_spt_pch_acs, /* NVMe: enable_acs 변수에 값 대입. */
+	    .disable_acs_redir = pci_quirk_disable_intel_spt_pch_acs_redir, /* NVMe: disable_acs_redir 변수에 값 대입. */
+	}, /* NVMe: 인자/초기자 나열 (연속). */
+}; /* NVMe: 코드 블록/구조체 종료. */
 
-int pci_dev_specific_enable_acs(struct pci_dev *dev)
-{
-	const struct pci_dev_acs_ops *p;
-	int i, ret;
+int pci_dev_specific_enable_acs(struct pci_dev *dev) /* NVMe: pci_dev_specific_enable_acs() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	const struct pci_dev_acs_ops *p; /* NVMe: p 변수 선언. */
+	int i, ret; /* NVMe: ret 변수 선언. */
 
-	for (i = 0; i < ARRAY_SIZE(pci_dev_acs_ops); i++) {
-		p = &pci_dev_acs_ops[i];
-		if ((p->vendor == dev->vendor ||
-		     p->vendor == (u16)PCI_ANY_ID) &&
-		    (p->device == dev->device ||
-		     p->device == (u16)PCI_ANY_ID) &&
-		    p->enable_acs) {
-			ret = p->enable_acs(dev);
-			if (ret >= 0)
-				return ret;
-		}
-	}
+	for (i = 0; i < ARRAY_SIZE(pci_dev_acs_ops); i++) { /* NVMe: 반복 처리 (NVMe/PCIe 레지스터/장치 순회). */
+		p = &pci_dev_acs_ops[i]; /* NVMe: p 변수에 값 대입. */
+		if ((p->vendor == dev->vendor || /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		     p->vendor == (u16)PCI_ANY_ID) && /* NVMe: 논리 연산 연속. */
+		    (p->device == dev->device || /* NVMe: 논리 연산 연속. */
+		     p->device == (u16)PCI_ANY_ID) && /* NVMe: 논리 연산 연속. */
+		    p->enable_acs) { /* NVMe: 제어문 블록 시작. */
+			ret = p->enable_acs(dev); /* NVMe: enable_acs() 호출 (NVMe/PCIe 동작). */
+			if (ret >= 0) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+				return ret; /* NVMe: ret 값을 반환. */
+		} /* NVMe: 코드 블록/구조체 종료. */
+	} /* NVMe: 코드 블록/구조체 종료. */
 
-	return -ENOTTY;
-}
+	return -ENOTTY; /* NVMe: -ENOTTY 값을 반환. */
+} /* NVMe: 코드 블록/구조체 종료. */
 
-int pci_dev_specific_disable_acs_redir(struct pci_dev *dev)
-{
-	const struct pci_dev_acs_ops *p;
-	int i, ret;
+int pci_dev_specific_disable_acs_redir(struct pci_dev *dev) /* NVMe: pci_dev_specific_disable_acs_redir() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	const struct pci_dev_acs_ops *p; /* NVMe: p 변수 선언. */
+	int i, ret; /* NVMe: ret 변수 선언. */
 
-	for (i = 0; i < ARRAY_SIZE(pci_dev_acs_ops); i++) {
-		p = &pci_dev_acs_ops[i];
-		if ((p->vendor == dev->vendor ||
-		     p->vendor == (u16)PCI_ANY_ID) &&
-		    (p->device == dev->device ||
-		     p->device == (u16)PCI_ANY_ID) &&
-		    p->disable_acs_redir) {
-			ret = p->disable_acs_redir(dev);
-			if (ret >= 0)
-				return ret;
-		}
-	}
+	for (i = 0; i < ARRAY_SIZE(pci_dev_acs_ops); i++) { /* NVMe: 반복 처리 (NVMe/PCIe 레지스터/장치 순회). */
+		p = &pci_dev_acs_ops[i]; /* NVMe: p 변수에 값 대입. */
+		if ((p->vendor == dev->vendor || /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		     p->vendor == (u16)PCI_ANY_ID) && /* NVMe: 논리 연산 연속. */
+		    (p->device == dev->device || /* NVMe: 논리 연산 연속. */
+		     p->device == (u16)PCI_ANY_ID) && /* NVMe: 논리 연산 연속. */
+		    p->disable_acs_redir) { /* NVMe: 제어문 블록 시작. */
+			ret = p->disable_acs_redir(dev); /* NVMe: disable_acs_redir() 호출 (NVMe/PCIe 동작). */
+			if (ret >= 0) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+				return ret; /* NVMe: ret 값을 반환. */
+		} /* NVMe: 코드 블록/구조체 종료. */
+	} /* NVMe: 코드 블록/구조체 종료. */
 
-	return -ENOTTY;
-}
+	return -ENOTTY; /* NVMe: -ENOTTY 값을 반환. */
+} /* NVMe: 코드 블록/구조체 종료. */
 
 /*
  * The PCI capabilities list for Intel DH895xCC VFs (device ID 0x0443) with
@@ -5657,29 +5657,29 @@ int pci_dev_specific_disable_acs_redir(struct pci_dev *dev)
  * the PCIe Capability Structure but is incorrectly hardwired as 0 terminating
  * the list.
  */
-static void quirk_intel_qat_vf_cap(struct pci_dev *pdev)
-{
-	int pos, i = 0, ret;
-	u8 next_cap;
-	u16 reg16, *cap;
-	struct pci_cap_saved_state *state;
+static void quirk_intel_qat_vf_cap(struct pci_dev *pdev) /* NVMe: quirk_intel_qat_vf_cap() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	int pos, i = 0, ret; /* NVMe: i 변수에 값 대입. */
+	u8 next_cap; /* NVMe: next_cap 변수 선언. */
+	u16 reg16, *cap; /* NVMe: cap 변수 선언. */
+	struct pci_cap_saved_state *state; /* NVMe: state 변수 선언. */
 
 	/* Bail if the hardware bug is fixed */
-	if (pdev->pcie_cap || pci_find_capability(pdev, PCI_CAP_ID_EXP))
-		return;
+	if (pdev->pcie_cap || pci_find_capability(pdev, PCI_CAP_ID_EXP)) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
 
 	/* Bail if MSI Capability Structure is not found for some reason */
-	pos = pci_find_capability(pdev, PCI_CAP_ID_MSI);
-	if (!pos)
-		return;
+	pos = pci_find_capability(pdev, PCI_CAP_ID_MSI); /* NVMe: pci_find_capability() 호출 (NVMe/PCIe 동작). */
+	if (!pos) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
 
 	/*
 	 * Bail if Next Capability pointer in the MSI Capability Structure
 	 * is not the expected incorrect 0x00.
 	 */
-	pci_read_config_byte(pdev, pos + 1, &next_cap);
-	if (next_cap)
-		return;
+	pci_read_config_byte(pdev, pos + 1, &next_cap); /* NVMe: pci_read_config_byte() 호출 (NVMe/PCIe 동작). */
+	if (next_cap) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
 
 	/*
 	 * PCIe Capability Structure is expected to be at 0x50 and should
@@ -5689,49 +5689,49 @@ static void quirk_intel_qat_vf_cap(struct pci_dev *pdev)
 	 * to correctly set kernel data structures which have already been
 	 * set incorrectly due to the hardware bug.
 	 */
-	pos = 0x50;
-	pci_read_config_word(pdev, pos, &reg16);
-	if (reg16 == (0x0000 | PCI_CAP_ID_EXP)) {
-		u32 status;
-#ifndef PCI_EXP_SAVE_REGS
-#define PCI_EXP_SAVE_REGS     7
-#endif
-		int size = PCI_EXP_SAVE_REGS * sizeof(u16);
+	pos = 0x50; /* NVMe: pos 변수에 값 대입. */
+	pci_read_config_word(pdev, pos, &reg16); /* NVMe: pci_read_config_word() 호출 (NVMe/PCIe 동작). */
+	if (reg16 == (0x0000 | PCI_CAP_ID_EXP)) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		u32 status; /* NVMe: status 변수 선언. */
+#ifndef PCI_EXP_SAVE_REGS /* NVMe: 조걶 컴파일 ifndef 분기 (NVMe/PCIe 기능 선택). */
+#define PCI_EXP_SAVE_REGS     7 /* NVMe: PCI_EXP_SAVE_REGS 매크로/상수 정의 (NVMe/PCIe). */
+#endif /* NVMe: 조걶 컴파일 endif 분기 (NVMe/PCIe 기능 선택). */
+		int size = PCI_EXP_SAVE_REGS * sizeof(u16); /* NVMe: sizeof() 호출 (NVMe/PCIe 동작). */
 
-		pdev->pcie_cap = pos;
-		pci_read_config_word(pdev, pos + PCI_EXP_FLAGS, &reg16);
-		pdev->pcie_flags_reg = reg16;
-		pci_read_config_word(pdev, pos + PCI_EXP_DEVCAP, &reg16);
-		pdev->pcie_mpss = reg16 & PCI_EXP_DEVCAP_PAYLOAD;
+		pdev->pcie_cap = pos; /* NVMe: pcie_cap 변수에 값 대입. */
+		pci_read_config_word(pdev, pos + PCI_EXP_FLAGS, &reg16); /* NVMe: pci_read_config_word() 호출 (NVMe/PCIe 동작). */
+		pdev->pcie_flags_reg = reg16; /* NVMe: pcie_flags_reg 변수에 값 대입. */
+		pci_read_config_word(pdev, pos + PCI_EXP_DEVCAP, &reg16); /* NVMe: pci_read_config_word() 호출 (NVMe/PCIe 동작). */
+		pdev->pcie_mpss = reg16 & PCI_EXP_DEVCAP_PAYLOAD; /* NVMe: pcie_mpss 변수에 값 대입. */
 
-		pdev->cfg_size = PCI_CFG_SPACE_EXP_SIZE;
-		ret = pci_read_config_dword(pdev, PCI_CFG_SPACE_SIZE, &status);
-		if ((ret != PCIBIOS_SUCCESSFUL) || (PCI_POSSIBLE_ERROR(status)))
-			pdev->cfg_size = PCI_CFG_SPACE_SIZE;
+		pdev->cfg_size = PCI_CFG_SPACE_EXP_SIZE; /* NVMe: cfg_size 변수에 값 대입. */
+		ret = pci_read_config_dword(pdev, PCI_CFG_SPACE_SIZE, &status); /* NVMe: pci_read_config_dword() 호출 (NVMe/PCIe 동작). */
+		if ((ret != PCIBIOS_SUCCESSFUL) || (PCI_POSSIBLE_ERROR(status))) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+			pdev->cfg_size = PCI_CFG_SPACE_SIZE; /* NVMe: cfg_size 변수에 값 대입. */
 
-		if (pci_find_saved_cap(pdev, PCI_CAP_ID_EXP))
-			return;
+		if (pci_find_saved_cap(pdev, PCI_CAP_ID_EXP)) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+			return; /* NVMe: 함수 종료 및 반환. */
 
 		/* Save PCIe cap */
-		state = kzalloc(sizeof(*state) + size, GFP_KERNEL);
-		if (!state)
-			return;
+		state = kzalloc(sizeof(*state) + size, GFP_KERNEL); /* NVMe: kzalloc() 호출 (NVMe/PCIe 동작). */
+		if (!state) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+			return; /* NVMe: 함수 종료 및 반환. */
 
-		state->cap.cap_nr = PCI_CAP_ID_EXP;
-		state->cap.cap_extended = 0;
-		state->cap.size = size;
-		cap = (u16 *)&state->cap.data[0];
-		pcie_capability_read_word(pdev, PCI_EXP_DEVCTL, &cap[i++]);
-		pcie_capability_read_word(pdev, PCI_EXP_LNKCTL, &cap[i++]);
-		pcie_capability_read_word(pdev, PCI_EXP_SLTCTL, &cap[i++]);
-		pcie_capability_read_word(pdev, PCI_EXP_RTCTL,  &cap[i++]);
-		pcie_capability_read_word(pdev, PCI_EXP_DEVCTL2, &cap[i++]);
-		pcie_capability_read_word(pdev, PCI_EXP_LNKCTL2, &cap[i++]);
-		pcie_capability_read_word(pdev, PCI_EXP_SLTCTL2, &cap[i++]);
-		hlist_add_head(&state->next, &pdev->saved_cap_space);
-	}
-}
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x443, quirk_intel_qat_vf_cap);
+		state->cap.cap_nr = PCI_CAP_ID_EXP; /* NVMe: cap_nr 변수에 값 대입. */
+		state->cap.cap_extended = 0; /* NVMe: cap_extended 변수에 값 대입. */
+		state->cap.size = size; /* NVMe: size 변수에 값 대입. */
+		cap = (u16 *)&state->cap.data[0]; /* NVMe: cap 변수에 값 대입. */
+		pcie_capability_read_word(pdev, PCI_EXP_DEVCTL, &cap[i++]); /* NVMe: pcie_capability_read_word() 호출 (NVMe/PCIe 동작). */
+		pcie_capability_read_word(pdev, PCI_EXP_LNKCTL, &cap[i++]); /* NVMe: pcie_capability_read_word() 호출 (NVMe/PCIe 동작). */
+		pcie_capability_read_word(pdev, PCI_EXP_SLTCTL, &cap[i++]); /* NVMe: pcie_capability_read_word() 호출 (NVMe/PCIe 동작). */
+		pcie_capability_read_word(pdev, PCI_EXP_RTCTL,  &cap[i++]); /* NVMe: pcie_capability_read_word() 호출 (NVMe/PCIe 동작). */
+		pcie_capability_read_word(pdev, PCI_EXP_DEVCTL2, &cap[i++]); /* NVMe: pcie_capability_read_word() 호출 (NVMe/PCIe 동작). */
+		pcie_capability_read_word(pdev, PCI_EXP_LNKCTL2, &cap[i++]); /* NVMe: pcie_capability_read_word() 호출 (NVMe/PCIe 동작). */
+		pcie_capability_read_word(pdev, PCI_EXP_SLTCTL2, &cap[i++]); /* NVMe: pcie_capability_read_word() 호출 (NVMe/PCIe 동작). */
+		hlist_add_head(&state->next, &pdev->saved_cap_space); /* NVMe: hlist_add_head() 호출 (NVMe/PCIe 동작). */
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x443, quirk_intel_qat_vf_cap); /* NVMe: DECLARE_PCI_FIXUP_EARLY() 호출 (NVMe/PCIe 동작). */
 
 /*
  * FLR may cause the following to devices to hang:
@@ -5744,124 +5744,124 @@ DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x443, quirk_intel_qat_vf_cap);
  * Intel 82579V Gigabit Ethernet Controller 0x1503
  * Mediatek MT7922 802.11ax PCI Express Wireless Network Adapter
  */
-static void quirk_no_flr(struct pci_dev *dev)
-{
-	dev->dev_flags |= PCI_DEV_FLAGS_NO_FLR_RESET;
-}
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_AMD, 0x1487, quirk_no_flr);
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_AMD, 0x148c, quirk_no_flr);
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_AMD, 0x149c, quirk_no_flr);
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_AMD, 0x7901, quirk_no_flr);
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_AMD, 0x1502, quirk_no_flr);
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_AMD, 0x17f0, quirk_no_flr);
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x1502, quirk_no_flr);
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x1503, quirk_no_flr);
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_MEDIATEK, 0x0616, quirk_no_flr);
+static void quirk_no_flr(struct pci_dev *dev) /* NVMe: quirk_no_flr() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	dev->dev_flags |= PCI_DEV_FLAGS_NO_FLR_RESET; /* NVMe: | 변수에 값 대입. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_AMD, 0x1487, quirk_no_flr); /* NVMe: DECLARE_PCI_FIXUP_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_AMD, 0x148c, quirk_no_flr); /* NVMe: DECLARE_PCI_FIXUP_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_AMD, 0x149c, quirk_no_flr); /* NVMe: DECLARE_PCI_FIXUP_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_AMD, 0x7901, quirk_no_flr); /* NVMe: DECLARE_PCI_FIXUP_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_AMD, 0x1502, quirk_no_flr); /* NVMe: DECLARE_PCI_FIXUP_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_AMD, 0x17f0, quirk_no_flr); /* NVMe: DECLARE_PCI_FIXUP_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x1502, quirk_no_flr); /* NVMe: DECLARE_PCI_FIXUP_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x1503, quirk_no_flr); /* NVMe: DECLARE_PCI_FIXUP_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_MEDIATEK, 0x0616, quirk_no_flr); /* NVMe: DECLARE_PCI_FIXUP_EARLY() 호출 (NVMe/PCIe 동작). */
 
 /* FLR may cause the SolidRun SNET DPU (rev 0x1) to hang */
-static void quirk_no_flr_snet(struct pci_dev *dev)
-{
-	if (dev->revision == 0x1)
-		quirk_no_flr(dev);
-}
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_SOLIDRUN, 0x1000, quirk_no_flr_snet);
+static void quirk_no_flr_snet(struct pci_dev *dev) /* NVMe: quirk_no_flr_snet() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	if (dev->revision == 0x1) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		quirk_no_flr(dev); /* NVMe: quirk_no_flr() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_SOLIDRUN, 0x1000, quirk_no_flr_snet); /* NVMe: DECLARE_PCI_FIXUP_EARLY() 호출 (NVMe/PCIe 동작). */
 
-static void quirk_no_ext_tags(struct pci_dev *pdev)
-{
-	struct pci_host_bridge *bridge = pci_find_host_bridge(pdev->bus);
+static void quirk_no_ext_tags(struct pci_dev *pdev) /* NVMe: quirk_no_ext_tags() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	struct pci_host_bridge *bridge = pci_find_host_bridge(pdev->bus); /* NVMe: pci_find_host_bridge() 호출 (NVMe/PCIe 동작). */
 
-	if (!bridge)
-		return;
+	if (!bridge) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
 
-	bridge->no_ext_tags = 1;
-	pci_info(pdev, "disabling Extended Tags (this device can't handle them)\n");
+	bridge->no_ext_tags = 1; /* NVMe: no_ext_tags 변수에 값 대입. */
+	pci_info(pdev, "disabling Extended Tags (this device can't handle them)\n"); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
 
-	pci_walk_bus(bridge->bus, pci_configure_extended_tags, NULL);
-}
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_3WARE, 0x1004, quirk_no_ext_tags);
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_3WARE, 0x1005, quirk_no_ext_tags);
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_SERVERWORKS, 0x0132, quirk_no_ext_tags);
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_SERVERWORKS, 0x0140, quirk_no_ext_tags);
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_SERVERWORKS, 0x0141, quirk_no_ext_tags);
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_SERVERWORKS, 0x0142, quirk_no_ext_tags);
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_SERVERWORKS, 0x0144, quirk_no_ext_tags);
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_SERVERWORKS, 0x0420, quirk_no_ext_tags);
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_SERVERWORKS, 0x0422, quirk_no_ext_tags);
+	pci_walk_bus(bridge->bus, pci_configure_extended_tags, NULL); /* NVMe: pci_walk_bus() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_3WARE, 0x1004, quirk_no_ext_tags); /* NVMe: DECLARE_PCI_FIXUP_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_3WARE, 0x1005, quirk_no_ext_tags); /* NVMe: DECLARE_PCI_FIXUP_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_SERVERWORKS, 0x0132, quirk_no_ext_tags); /* NVMe: DECLARE_PCI_FIXUP_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_SERVERWORKS, 0x0140, quirk_no_ext_tags); /* NVMe: DECLARE_PCI_FIXUP_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_SERVERWORKS, 0x0141, quirk_no_ext_tags); /* NVMe: DECLARE_PCI_FIXUP_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_SERVERWORKS, 0x0142, quirk_no_ext_tags); /* NVMe: DECLARE_PCI_FIXUP_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_SERVERWORKS, 0x0144, quirk_no_ext_tags); /* NVMe: DECLARE_PCI_FIXUP_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_SERVERWORKS, 0x0420, quirk_no_ext_tags); /* NVMe: DECLARE_PCI_FIXUP_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_SERVERWORKS, 0x0422, quirk_no_ext_tags); /* NVMe: DECLARE_PCI_FIXUP_EARLY() 호출 (NVMe/PCIe 동작). */
 
-#ifdef CONFIG_PCI_ATS
-static void quirk_no_ats(struct pci_dev *pdev)
-{
-	pci_info(pdev, "disabling ATS\n");
-	pdev->ats_cap = 0;
-}
+#ifdef CONFIG_PCI_ATS /* NVMe: 조걶 컴파일 ifdef 분기 (NVMe/PCIe 기능 선택). */
+static void quirk_no_ats(struct pci_dev *pdev) /* NVMe: quirk_no_ats() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	pci_info(pdev, "disabling ATS\n"); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
+	pdev->ats_cap = 0; /* NVMe: ats_cap 변수에 값 대입. */
+} /* NVMe: 코드 블록/구조체 종료. */
 
 /*
  * Some devices require additional driver setup to enable ATS.  Don't use
  * ATS for those devices as ATS will be enabled before the driver has had a
  * chance to load and configure the device.
  */
-static void quirk_amd_harvest_no_ats(struct pci_dev *pdev)
-{
-	if (pdev->device == 0x15d8) {
-		if (pdev->revision == 0xcf &&
-		    pdev->subsystem_vendor == 0xea50 &&
-		    (pdev->subsystem_device == 0xce19 ||
-		     pdev->subsystem_device == 0xcc10 ||
-		     pdev->subsystem_device == 0xcc08))
-			quirk_no_ats(pdev);
-	} else {
-		quirk_no_ats(pdev);
-	}
-}
+static void quirk_amd_harvest_no_ats(struct pci_dev *pdev) /* NVMe: quirk_amd_harvest_no_ats() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	if (pdev->device == 0x15d8) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		if (pdev->revision == 0xcf && /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		    pdev->subsystem_vendor == 0xea50 && /* NVMe: 논리 연산 연속. */
+		    (pdev->subsystem_device == 0xce19 || /* NVMe: 논리 연산 연속. */
+		     pdev->subsystem_device == 0xcc10 || /* NVMe: 논리 연산 연속. */
+		     pdev->subsystem_device == 0xcc08)) /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+			quirk_no_ats(pdev); /* NVMe: quirk_no_ats() 호출 (NVMe/PCIe 동작). */
+	} else { /* NVMe: 제어문 블록 시작. */
+		quirk_no_ats(pdev); /* NVMe: quirk_no_ats() 호출 (NVMe/PCIe 동작). */
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
 
 /* AMD Stoney platform GPU */
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x98e4, quirk_amd_harvest_no_ats);
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x98e4, quirk_amd_harvest_no_ats); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
 /* AMD Iceland dGPU */
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x6900, quirk_amd_harvest_no_ats);
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x6900, quirk_amd_harvest_no_ats); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
 /* AMD Navi10 dGPU */
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x7310, quirk_amd_harvest_no_ats);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x7312, quirk_amd_harvest_no_ats);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x7318, quirk_amd_harvest_no_ats);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x7319, quirk_amd_harvest_no_ats);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x731a, quirk_amd_harvest_no_ats);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x731b, quirk_amd_harvest_no_ats);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x731e, quirk_amd_harvest_no_ats);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x731f, quirk_amd_harvest_no_ats);
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x7310, quirk_amd_harvest_no_ats); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x7312, quirk_amd_harvest_no_ats); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x7318, quirk_amd_harvest_no_ats); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x7319, quirk_amd_harvest_no_ats); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x731a, quirk_amd_harvest_no_ats); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x731b, quirk_amd_harvest_no_ats); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x731e, quirk_amd_harvest_no_ats); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x731f, quirk_amd_harvest_no_ats); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
 /* AMD Navi14 dGPU */
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x7340, quirk_amd_harvest_no_ats);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x7341, quirk_amd_harvest_no_ats);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x7347, quirk_amd_harvest_no_ats);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x734f, quirk_amd_harvest_no_ats);
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x7340, quirk_amd_harvest_no_ats); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x7341, quirk_amd_harvest_no_ats); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x7347, quirk_amd_harvest_no_ats); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x734f, quirk_amd_harvest_no_ats); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
 /* AMD Raven platform iGPU */
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x15d8, quirk_amd_harvest_no_ats);
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ATI, 0x15d8, quirk_amd_harvest_no_ats); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
 
 /*
  * Intel IPU E2000 revisions before C0 implement incorrect endianness
  * in ATS Invalidate Request message body. Disable ATS for those devices.
  */
-static void quirk_intel_e2000_no_ats(struct pci_dev *pdev)
-{
-	if (pdev->revision < 0x20)
-		quirk_no_ats(pdev);
-}
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x1451, quirk_intel_e2000_no_ats);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x1452, quirk_intel_e2000_no_ats);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x1453, quirk_intel_e2000_no_ats);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x1454, quirk_intel_e2000_no_ats);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x1455, quirk_intel_e2000_no_ats);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x1457, quirk_intel_e2000_no_ats);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x1459, quirk_intel_e2000_no_ats);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x145a, quirk_intel_e2000_no_ats);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x145c, quirk_intel_e2000_no_ats);
+static void quirk_intel_e2000_no_ats(struct pci_dev *pdev) /* NVMe: quirk_intel_e2000_no_ats() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	if (pdev->revision < 0x20) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		quirk_no_ats(pdev); /* NVMe: quirk_no_ats() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x1451, quirk_intel_e2000_no_ats); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x1452, quirk_intel_e2000_no_ats); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x1453, quirk_intel_e2000_no_ats); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x1454, quirk_intel_e2000_no_ats); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x1455, quirk_intel_e2000_no_ats); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x1457, quirk_intel_e2000_no_ats); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x1459, quirk_intel_e2000_no_ats); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x145a, quirk_intel_e2000_no_ats); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_INTEL, 0x145c, quirk_intel_e2000_no_ats); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
 #endif /* CONFIG_PCI_ATS */
 
 /* Freescale PCIe doesn't support MSI in RC mode */
-static void quirk_fsl_no_msi(struct pci_dev *pdev)
-{
-	if (pci_pcie_type(pdev) == PCI_EXP_TYPE_ROOT_PORT)
-		pdev->no_msi = 1;
-}
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_FREESCALE, PCI_ANY_ID, quirk_fsl_no_msi);
+static void quirk_fsl_no_msi(struct pci_dev *pdev) /* NVMe: quirk_fsl_no_msi() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	if (pci_pcie_type(pdev) == PCI_EXP_TYPE_ROOT_PORT) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pdev->no_msi = 1; /* NVMe: no_msi 변수에 값 대입. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_FREESCALE, PCI_ANY_ID, quirk_fsl_no_msi); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
 
 /*
  * Although not allowed by the spec, some multi-function devices have
@@ -5871,62 +5871,62 @@ DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_FREESCALE, PCI_ANY_ID, quirk_fsl_no_msi);
  * dependency.  Runtime PM is allowed by default on the consumer to prevent
  * it from permanently keeping the supplier awake.
  */
-static void pci_create_device_link(struct pci_dev *pdev, unsigned int consumer,
-				   unsigned int supplier, unsigned int class,
-				   unsigned int class_shift)
-{
-	struct pci_dev *supplier_pdev;
+static void pci_create_device_link(struct pci_dev *pdev, unsigned int consumer, /* NVMe: pci_create_device_link() 함수 정의/매개변수 선언. */
+				   unsigned int supplier, unsigned int class, /* NVMe: 인자/초기자 나열 (연속). */
+				   unsigned int class_shift) /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+{ /* NVMe: 코드 블록 시작. */
+	struct pci_dev *supplier_pdev; /* NVMe: supplier_pdev 변수 선언. */
 
-	if (PCI_FUNC(pdev->devfn) != consumer)
-		return;
+	if (PCI_FUNC(pdev->devfn) != consumer) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
 
-	supplier_pdev = pci_get_domain_bus_and_slot(pci_domain_nr(pdev->bus),
-				pdev->bus->number,
-				PCI_DEVFN(PCI_SLOT(pdev->devfn), supplier));
-	if (!supplier_pdev || (supplier_pdev->class >> class_shift) != class) {
-		pci_dev_put(supplier_pdev);
-		return;
-	}
+	supplier_pdev = pci_get_domain_bus_and_slot(pci_domain_nr(pdev->bus), /* NVMe: supplier_pdev 변수에 값 대입. */
+				pdev->bus->number, /* NVMe: 인자/초기자 나열 (연속). */
+				PCI_DEVFN(PCI_SLOT(pdev->devfn), supplier)); /* NVMe: PCI_DEVFN() 호출 (NVMe/PCIe 동작). */
+	if (!supplier_pdev || (supplier_pdev->class >> class_shift) != class) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pci_dev_put(supplier_pdev); /* NVMe: pci_dev_put() 호출 (NVMe/PCIe 동작). */
+		return; /* NVMe: 함수 종료 및 반환. */
+	} /* NVMe: 코드 블록/구조체 종료. */
 
-	if (device_link_add(&pdev->dev, &supplier_pdev->dev,
-			    DL_FLAG_STATELESS | DL_FLAG_PM_RUNTIME))
-		pci_info(pdev, "D0 power state depends on %s\n",
-			 pci_name(supplier_pdev));
-	else
-		pci_err(pdev, "Cannot enforce power dependency on %s\n",
-			pci_name(supplier_pdev));
+	if (device_link_add(&pdev->dev, &supplier_pdev->dev, /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+			    DL_FLAG_STATELESS | DL_FLAG_PM_RUNTIME)) /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+		pci_info(pdev, "D0 power state depends on %s\n", /* NVMe: pci_info() 함수 정의/매개변수 선언. */
+			 pci_name(supplier_pdev)); /* NVMe: pci_name() 호출 (NVMe/PCIe 동작). */
+	else /* NVMe: 조걶 분기 대안 경로. */
+		pci_err(pdev, "Cannot enforce power dependency on %s\n", /* NVMe: pci_err() 함수 정의/매개변수 선언. */
+			pci_name(supplier_pdev)); /* NVMe: pci_name() 호출 (NVMe/PCIe 동작). */
 
-	pm_runtime_allow(&pdev->dev);
-	pci_dev_put(supplier_pdev);
-}
+	pm_runtime_allow(&pdev->dev); /* NVMe: pm_runtime_allow() 호출 (NVMe/PCIe 동작). */
+	pci_dev_put(supplier_pdev); /* NVMe: pci_dev_put() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
 
 /*
  * Create device link for GPUs with integrated HDA controller for streaming
  * audio to attached displays.
  */
-static void quirk_gpu_hda(struct pci_dev *hda)
-{
-	pci_create_device_link(hda, 1, 0, PCI_BASE_CLASS_DISPLAY, 16);
-}
-DECLARE_PCI_FIXUP_CLASS_FINAL(PCI_VENDOR_ID_ATI, PCI_ANY_ID,
-			      PCI_CLASS_MULTIMEDIA_HD_AUDIO, 8, quirk_gpu_hda);
-DECLARE_PCI_FIXUP_CLASS_FINAL(PCI_VENDOR_ID_AMD, PCI_ANY_ID,
-			      PCI_CLASS_MULTIMEDIA_HD_AUDIO, 8, quirk_gpu_hda);
-DECLARE_PCI_FIXUP_CLASS_FINAL(PCI_VENDOR_ID_NVIDIA, PCI_ANY_ID,
-			      PCI_CLASS_MULTIMEDIA_HD_AUDIO, 8, quirk_gpu_hda);
+static void quirk_gpu_hda(struct pci_dev *hda) /* NVMe: quirk_gpu_hda() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	pci_create_device_link(hda, 1, 0, PCI_BASE_CLASS_DISPLAY, 16); /* NVMe: pci_create_device_link() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_CLASS_FINAL(PCI_VENDOR_ID_ATI, PCI_ANY_ID, /* NVMe: DECLARE_PCI_FIXUP_CLASS_FINAL() 함수 정의/매개변수 선언. */
+			      PCI_CLASS_MULTIMEDIA_HD_AUDIO, 8, quirk_gpu_hda); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_CLASS_FINAL(PCI_VENDOR_ID_AMD, PCI_ANY_ID, /* NVMe: DECLARE_PCI_FIXUP_CLASS_FINAL() 함수 정의/매개변수 선언. */
+			      PCI_CLASS_MULTIMEDIA_HD_AUDIO, 8, quirk_gpu_hda); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_CLASS_FINAL(PCI_VENDOR_ID_NVIDIA, PCI_ANY_ID, /* NVMe: DECLARE_PCI_FIXUP_CLASS_FINAL() 함수 정의/매개변수 선언. */
+			      PCI_CLASS_MULTIMEDIA_HD_AUDIO, 8, quirk_gpu_hda); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
 /*
  * Create device link for GPUs with integrated USB xHCI Host
  * controller to VGA.
  */
-static void quirk_gpu_usb(struct pci_dev *usb)
-{
-	pci_create_device_link(usb, 2, 0, PCI_BASE_CLASS_DISPLAY, 16);
-}
-DECLARE_PCI_FIXUP_CLASS_FINAL(PCI_VENDOR_ID_NVIDIA, PCI_ANY_ID,
-			      PCI_CLASS_SERIAL_USB, 8, quirk_gpu_usb);
-DECLARE_PCI_FIXUP_CLASS_FINAL(PCI_VENDOR_ID_ATI, PCI_ANY_ID,
-			      PCI_CLASS_SERIAL_USB, 8, quirk_gpu_usb);
+static void quirk_gpu_usb(struct pci_dev *usb) /* NVMe: quirk_gpu_usb() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	pci_create_device_link(usb, 2, 0, PCI_BASE_CLASS_DISPLAY, 16); /* NVMe: pci_create_device_link() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_CLASS_FINAL(PCI_VENDOR_ID_NVIDIA, PCI_ANY_ID, /* NVMe: DECLARE_PCI_FIXUP_CLASS_FINAL() 함수 정의/매개변수 선언. */
+			      PCI_CLASS_SERIAL_USB, 8, quirk_gpu_usb); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_CLASS_FINAL(PCI_VENDOR_ID_ATI, PCI_ANY_ID, /* NVMe: DECLARE_PCI_FIXUP_CLASS_FINAL() 함수 정의/매개변수 선언. */
+			      PCI_CLASS_SERIAL_USB, 8, quirk_gpu_usb); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
 /*
  * Create device link for GPUs with integrated Type-C UCSI controller
@@ -5934,47 +5934,47 @@ DECLARE_PCI_FIXUP_CLASS_FINAL(PCI_VENDOR_ID_ATI, PCI_ANY_ID,
  * so using UNKNOWN class for now and it will be updated when UCSI
  * over PCI gets a class code.
  */
-#define PCI_CLASS_SERIAL_UNKNOWN	0x0c80
-static void quirk_gpu_usb_typec_ucsi(struct pci_dev *ucsi)
-{
-	pci_create_device_link(ucsi, 3, 0, PCI_BASE_CLASS_DISPLAY, 16);
-}
-DECLARE_PCI_FIXUP_CLASS_FINAL(PCI_VENDOR_ID_NVIDIA, PCI_ANY_ID,
-			      PCI_CLASS_SERIAL_UNKNOWN, 8,
-			      quirk_gpu_usb_typec_ucsi);
-DECLARE_PCI_FIXUP_CLASS_FINAL(PCI_VENDOR_ID_ATI, PCI_ANY_ID,
-			      PCI_CLASS_SERIAL_UNKNOWN, 8,
-			      quirk_gpu_usb_typec_ucsi);
+#define PCI_CLASS_SERIAL_UNKNOWN	0x0c80 /* NVMe: PCI_CLASS_SERIAL_UNKNOWN 매크로/상수 정의 (NVMe/PCIe). */
+static void quirk_gpu_usb_typec_ucsi(struct pci_dev *ucsi) /* NVMe: quirk_gpu_usb_typec_ucsi() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	pci_create_device_link(ucsi, 3, 0, PCI_BASE_CLASS_DISPLAY, 16); /* NVMe: pci_create_device_link() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_CLASS_FINAL(PCI_VENDOR_ID_NVIDIA, PCI_ANY_ID, /* NVMe: DECLARE_PCI_FIXUP_CLASS_FINAL() 함수 정의/매개변수 선언. */
+			      PCI_CLASS_SERIAL_UNKNOWN, 8, /* NVMe: 인자/초기자 나열 (연속). */
+			      quirk_gpu_usb_typec_ucsi); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_CLASS_FINAL(PCI_VENDOR_ID_ATI, PCI_ANY_ID, /* NVMe: DECLARE_PCI_FIXUP_CLASS_FINAL() 함수 정의/매개변수 선언. */
+			      PCI_CLASS_SERIAL_UNKNOWN, 8, /* NVMe: 인자/초기자 나열 (연속). */
+			      quirk_gpu_usb_typec_ucsi); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
 /*
  * Enable the NVIDIA GPU integrated HDA controller if the BIOS left it
  * disabled.  https://devtalk.nvidia.com/default/topic/1024022
  */
-static void quirk_nvidia_hda(struct pci_dev *gpu)
-{
-	u8 hdr_type;
-	u32 val;
+static void quirk_nvidia_hda(struct pci_dev *gpu) /* NVMe: quirk_nvidia_hda() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	u8 hdr_type; /* NVMe: hdr_type 변수 선언. */
+	u32 val; /* NVMe: val 변수 선언. */
 
 	/* There was no integrated HDA controller before MCP89 */
-	if (gpu->device < PCI_DEVICE_ID_NVIDIA_GEFORCE_320M)
-		return;
+	if (gpu->device < PCI_DEVICE_ID_NVIDIA_GEFORCE_320M) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
 
 	/* Bit 25 at offset 0x488 enables the HDA controller */
-	pci_read_config_dword(gpu, 0x488, &val);
-	if (val & BIT(25))
-		return;
+	pci_read_config_dword(gpu, 0x488, &val); /* NVMe: pci_read_config_dword() 호출 (NVMe/PCIe 동작). */
+	if (val & BIT(25)) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
 
-	pci_info(gpu, "Enabling HDA controller\n");
-	pci_write_config_dword(gpu, 0x488, val | BIT(25));
+	pci_info(gpu, "Enabling HDA controller\n"); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
+	pci_write_config_dword(gpu, 0x488, val | BIT(25)); /* NVMe: pci_write_config_dword() 호출 (NVMe/PCIe 동작). */
 
 	/* The GPU becomes a multi-function device when the HDA is enabled */
-	pci_read_config_byte(gpu, PCI_HEADER_TYPE, &hdr_type);
-	gpu->multifunction = FIELD_GET(PCI_HEADER_TYPE_MFD, hdr_type);
-}
-DECLARE_PCI_FIXUP_CLASS_HEADER(PCI_VENDOR_ID_NVIDIA, PCI_ANY_ID,
-			       PCI_BASE_CLASS_DISPLAY, 16, quirk_nvidia_hda);
-DECLARE_PCI_FIXUP_CLASS_RESUME_EARLY(PCI_VENDOR_ID_NVIDIA, PCI_ANY_ID,
-			       PCI_BASE_CLASS_DISPLAY, 16, quirk_nvidia_hda);
+	pci_read_config_byte(gpu, PCI_HEADER_TYPE, &hdr_type); /* NVMe: pci_read_config_byte() 호출 (NVMe/PCIe 동작). */
+	gpu->multifunction = FIELD_GET(PCI_HEADER_TYPE_MFD, hdr_type); /* NVMe: FIELD_GET() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_CLASS_HEADER(PCI_VENDOR_ID_NVIDIA, PCI_ANY_ID, /* NVMe: DECLARE_PCI_FIXUP_CLASS_HEADER() 함수 정의/매개변수 선언. */
+			       PCI_BASE_CLASS_DISPLAY, 16, quirk_nvidia_hda); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_CLASS_RESUME_EARLY(PCI_VENDOR_ID_NVIDIA, PCI_ANY_ID, /* NVMe: DECLARE_PCI_FIXUP_CLASS_RESUME_EARLY() 함수 정의/매개변수 선언. */
+			       PCI_BASE_CLASS_DISPLAY, 16, quirk_nvidia_hda); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
 /*
  * Some IDT switches incorrectly flag an ACS Source Validation error on
@@ -5998,14 +5998,14 @@ DECLARE_PCI_FIXUP_CLASS_RESUME_EARLY(PCI_VENDOR_ID_NVIDIA, PCI_ANY_ID,
  * write, and the issue affects resets of the switch as well as enumeration,
  * so disable use of ACS SV for these devices altogether.
  */
-void pci_disable_broken_acs_cap(struct pci_dev *pdev)
-{
-	if (pdev->vendor == PCI_VENDOR_ID_IDT &&
-	    (pdev->device == 0x80b5 || pdev->device == 0x8090)) {
-		pci_info(pdev, "Disabling broken ACS SV; downstream device isolation reduced\n");
-		pdev->acs_capabilities &= ~PCI_ACS_SV;
-	}
-}
+void pci_disable_broken_acs_cap(struct pci_dev *pdev) /* NVMe: pci_disable_broken_acs_cap() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	if (pdev->vendor == PCI_VENDOR_ID_IDT && /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+	    (pdev->device == 0x80b5 || pdev->device == 0x8090)) { /* NVMe: 제어문 블록 시작. */
+		pci_info(pdev, "Disabling broken ACS SV; downstream device isolation reduced\n"); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
+		pdev->acs_capabilities &= ~PCI_ACS_SV; /* NVMe: & 변수에 값 대입. */
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
 
 /*
  * Microsemi Switchtec NTB uses devfn proxy IDs to move TLPs between
@@ -6014,82 +6014,85 @@ void pci_disable_broken_acs_cap(struct pci_dev *pdev)
  * ports. Therefore, all proxy IDs must be aliased to the NTB device
  * to permit access when the IOMMU is turned on.
  */
-static void quirk_switchtec_ntb_dma_alias(struct pci_dev *pdev)
-{
-	void __iomem *mmio;
-	struct ntb_info_regs __iomem *mmio_ntb;
-	struct ntb_ctrl_regs __iomem *mmio_ctrl;
-	u64 partition_map;
-	u8 partition;
-	int pp;
+static void quirk_switchtec_ntb_dma_alias(struct pci_dev *pdev) /* NVMe: quirk_switchtec_ntb_dma_alias() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	void __iomem *mmio; /* NVMe: mmio 변수 선언. */
+	struct ntb_info_regs __iomem *mmio_ntb; /* NVMe: mmio_ntb 변수 선언. */
+	struct ntb_ctrl_regs __iomem *mmio_ctrl; /* NVMe: mmio_ctrl 변수 선언. */
+	u64 partition_map; /* NVMe: partition_map 변수 선언. */
+	u8 partition; /* NVMe: partition 변수 선언. */
+	int pp; /* NVMe: pp 변수 선언. */
 
-	if (pci_enable_device(pdev)) {
-		pci_err(pdev, "Cannot enable Switchtec device\n");
-		return;
-	}
+	if (pci_enable_device(pdev)) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pci_err(pdev, "Cannot enable Switchtec device\n"); /* NVMe: pci_err() 호출 (NVMe/PCIe 동작). */
+		return; /* NVMe: 함수 종료 및 반환. */
+	} /* NVMe: 코드 블록/구조체 종료. */
 
-	mmio = pci_iomap(pdev, 0, 0);
-	if (mmio == NULL) {
-		pci_disable_device(pdev);
-		pci_err(pdev, "Cannot iomap Switchtec device\n");
-		return;
-	}
+	mmio = pci_iomap(pdev, 0, 0); /* NVMe: pci_iomap() 호출 (NVMe/PCIe 동작). */
+	if (mmio == NULL) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pci_disable_device(pdev); /* NVMe: pci_disable_device() 호출 (NVMe/PCIe 동작). */
+		pci_err(pdev, "Cannot iomap Switchtec device\n"); /* NVMe: pci_err() 호출 (NVMe/PCIe 동작). */
+		return; /* NVMe: 함수 종료 및 반환. */
+	} /* NVMe: 코드 블록/구조체 종료. */
 
-	pci_info(pdev, "Setting Switchtec proxy ID aliases\n");
+	pci_info(pdev, "Setting Switchtec proxy ID aliases\n"); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
 
-	mmio_ntb = mmio + SWITCHTEC_GAS_NTB_OFFSET;
-	mmio_ctrl = (void __iomem *) mmio_ntb + SWITCHTEC_NTB_REG_CTRL_OFFSET;
+	mmio_ntb = mmio + SWITCHTEC_GAS_NTB_OFFSET; /* NVMe: mmio_ntb 변수에 값 대입. */
+	mmio_ctrl = (void __iomem *) mmio_ntb + SWITCHTEC_NTB_REG_CTRL_OFFSET; /* NVMe: mmio_ctrl 변수에 값 대입. */
 
-	partition = ioread8(&mmio_ntb->partition_id);
+	partition = ioread8(&mmio_ntb->partition_id); /* NVMe: ioread8() 호출 (NVMe/PCIe 동작). */
 
-	partition_map = ioread32(&mmio_ntb->ep_map);
-	partition_map |= ((u64) ioread32(&mmio_ntb->ep_map + 4)) << 32;
-	partition_map &= ~(1ULL << partition);
+	partition_map = ioread32(&mmio_ntb->ep_map); /* NVMe: ioread32() 호출 (NVMe/PCIe 동작). */
+	partition_map |= ((u64) ioread32(&mmio_ntb->ep_map + 4)) << 32; /* NVMe: ioread32() 호출 (NVMe/PCIe 동작). */
+	partition_map &= ~(1ULL << partition); /* NVMe: & 변수에 값 대입. */
 
-	for (pp = 0; pp < (sizeof(partition_map) * 8); pp++) {
-		struct ntb_ctrl_regs __iomem *mmio_peer_ctrl;
-		u32 table_sz = 0;
-		int te;
+	for (pp = 0; pp < (sizeof(partition_map) * 8); pp++) { /* NVMe: 반복 처리 (NVMe/PCIe 레지스터/장치 순회). */
+		struct ntb_ctrl_regs __iomem *mmio_peer_ctrl; /* NVMe: mmio_peer_ctrl 변수 선언. */
+		u32 table_sz = 0; /* NVMe: table_sz 변수에 값 대입. */
+		int te; /* NVMe: te 변수 선언. */
 
-		if (!(partition_map & (1ULL << pp)))
-			continue;
+		if (!(partition_map & (1ULL << pp))) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+			continue; /* NVMe: 다음 반복 계속. */
 
-		pci_dbg(pdev, "Processing partition %d\n", pp);
+		pci_dbg(pdev, "Processing partition %d\n", pp); /* NVMe: pci_dbg() 호출 (NVMe/PCIe 동작). */
 
-		mmio_peer_ctrl = &mmio_ctrl[pp];
+		mmio_peer_ctrl = &mmio_ctrl[pp]; /* NVMe: mmio_peer_ctrl 변수에 값 대입. */
 
-		table_sz = ioread16(&mmio_peer_ctrl->req_id_table_size);
-		if (!table_sz) {
-			pci_warn(pdev, "Partition %d table_sz 0\n", pp);
-			continue;
-		}
+		table_sz = ioread16(&mmio_peer_ctrl->req_id_table_size); /* NVMe: ioread16() 호출 (NVMe/PCIe 동작). */
+		if (!table_sz) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+			pci_warn(pdev, "Partition %d table_sz 0\n", pp); /* NVMe: pci_warn() 호출 (NVMe/PCIe 동작). */
+			continue; /* NVMe: 다음 반복 계속. */
+		} /* NVMe: 코드 블록/구조체 종료. */
 
-		if (table_sz > 512) {
-			pci_warn(pdev,
-				 "Invalid Switchtec partition %d table_sz %d\n",
-				 pp, table_sz);
-			continue;
-		}
+		if (table_sz > 512) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+			pci_warn(pdev, /* NVMe: pci_warn() 함수 정의/매개변수 선언. */
+				 "Invalid Switchtec partition %d table_sz %d\n", /* NVMe: 인자/초기자 나열 (연속). */
+				 pp, table_sz); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+			continue; /* NVMe: 다음 반복 계속. */
+		} /* NVMe: 코드 블록/구조체 종료. */
 
-		for (te = 0; te < table_sz; te++) {
-			u32 rid_entry;
-			u8 devfn;
+		for (te = 0; te < table_sz; te++) { /* NVMe: 반복 처리 (NVMe/PCIe 레지스터/장치 순회). */
+			u32 rid_entry; /* NVMe: rid_entry 변수 선언. */
+			u8 devfn; /* NVMe: devfn 변수 선언. */
 
-			rid_entry = ioread32(&mmio_peer_ctrl->req_id_table[te]);
-			devfn = (rid_entry >> 1) & 0xFF;
-			pci_dbg(pdev,
-				"Aliasing Partition %d Proxy ID %02x.%d\n",
-				pp, PCI_SLOT(devfn), PCI_FUNC(devfn));
-			pci_add_dma_alias(pdev, devfn, 1);
-		}
-	}
+			rid_entry = ioread32(&mmio_peer_ctrl->req_id_table[te]); /* NVMe: ioread32() 호출 (NVMe/PCIe 동작). */
+			devfn = (rid_entry >> 1) & 0xFF; /* NVMe: devfn 변수에 값 대입. */
+			pci_dbg(pdev, /* NVMe: pci_dbg() 함수 정의/매개변수 선언. */
+				"Aliasing Partition %d Proxy ID %02x.%d\n", /* NVMe: 인자/초기자 나열 (연속). */
+				pp, PCI_SLOT(devfn), PCI_FUNC(devfn)); /* NVMe: PCI_SLOT() 호출 (NVMe/PCIe 동작). */
+			pci_add_dma_alias(pdev, devfn, 1); /* NVMe: pci_add_dma_alias() 호출 (NVMe/PCIe 동작). */
+		} /* NVMe: 코드 블록/구조체 종료. */
+	} /* NVMe: 코드 블록/구조체 종료. */
 
-	pci_iounmap(pdev, mmio);
-	pci_disable_device(pdev);
-}
+	pci_iounmap(pdev, mmio); /* NVMe: pci_iounmap() 호출 (NVMe/PCIe 동작). */
+	pci_disable_device(pdev); /* NVMe: pci_disable_device() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
+/* [한국어] Microsemi Switchtec PCIe 스위치용 quirk 등록 매크로.
+ * 주의: 줄 끝 백슬래시는 매크로 연속을 뜻하며 **그 줄의 마지막 문자여야 한다.**
+ * 뒤에 주석이나 공백이 오면 연속이 끊겨 컴파일 오류가 난다. */
 #define SWITCHTEC_QUIRK(vid) \
 	DECLARE_PCI_FIXUP_CLASS_FINAL(PCI_VENDOR_ID_MICROSEMI, vid, \
-		PCI_CLASS_BRIDGE_OTHER, 8, quirk_switchtec_ntb_dma_alias)
+		PCI_CLASS_BRIDGE_OTHER, 8, quirk_switchtec_ntb_dma_alias) /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
 SWITCHTEC_QUIRK(0x8531);  /* PFX 24xG3 */
 SWITCHTEC_QUIRK(0x8532);  /* PFX 32xG3 */
@@ -6185,9 +6188,11 @@ SWITCHTEC_QUIRK(0x5552);  /* PAXA 52XG5 */
 SWITCHTEC_QUIRK(0x5536);  /* PAXA 36XG5 */
 SWITCHTEC_QUIRK(0x5528);  /* PAXA 28XG5 */
 
+/* [한국어] Switchtec PCI100x 계열용 quirk 등록 매크로. 위와 같은 이유로
+ * 줄 끝 백슬래시 뒤에는 아무것도 올 수 없다. */
 #define SWITCHTEC_PCI100X_QUIRK(vid) \
 	DECLARE_PCI_FIXUP_CLASS_FINAL(PCI_VENDOR_ID_EFAR, vid, \
-		PCI_CLASS_BRIDGE_OTHER, 8, quirk_switchtec_ntb_dma_alias)
+		PCI_CLASS_BRIDGE_OTHER, 8, quirk_switchtec_ntb_dma_alias) /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 SWITCHTEC_PCI100X_QUIRK(0x1001);  /* PCI1001XG4 */
 SWITCHTEC_PCI100X_QUIRK(0x1002);  /* PCI1002XG4 */
 SWITCHTEC_PCI100X_QUIRK(0x1003);  /* PCI1003XG4 */
@@ -6202,14 +6207,14 @@ SWITCHTEC_PCI100X_QUIRK(0x1006);  /* PCI1006XG4 */
  * side of the NTB.  Alias all possible IDs to the NTB to permit access when
  * the IOMMU is turned on.
  */
-static void quirk_plx_ntb_dma_alias(struct pci_dev *pdev)
-{
-	pci_info(pdev, "Setting PLX NTB proxy ID aliases\n");
+static void quirk_plx_ntb_dma_alias(struct pci_dev *pdev) /* NVMe: quirk_plx_ntb_dma_alias() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	pci_info(pdev, "Setting PLX NTB proxy ID aliases\n"); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
 	/* PLX NTB may use all 256 devfns */
-	pci_add_dma_alias(pdev, 0, 256);
-}
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_PLX, 0x87b0, quirk_plx_ntb_dma_alias);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_PLX, 0x87b1, quirk_plx_ntb_dma_alias);
+	pci_add_dma_alias(pdev, 0, 256); /* NVMe: pci_add_dma_alias() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_PLX, 0x87b0, quirk_plx_ntb_dma_alias); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_PLX, 0x87b1, quirk_plx_ntb_dma_alias); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
 
 /*
  * On Lenovo Thinkpad P50 SKUs with a Nvidia Quadro M1000M, the BIOS does
@@ -6227,47 +6232,47 @@ DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_PLX, 0x87b1, quirk_plx_ntb_dma_alias);
  * doesn't occur.  Fortunately the GPU advertises NoReset+ when in this
  * mode, so we can detect that and avoid resetting it.
  */
-static void quirk_reset_lenovo_thinkpad_p50_nvgpu(struct pci_dev *pdev)
-{
-	void __iomem *map;
-	int ret;
+static void quirk_reset_lenovo_thinkpad_p50_nvgpu(struct pci_dev *pdev) /* NVMe: quirk_reset_lenovo_thinkpad_p50_nvgpu() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	void __iomem *map; /* NVMe: map 변수 선언. */
+	int ret; /* NVMe: ret 변수 선언. */
 
-	if (pdev->subsystem_vendor != PCI_VENDOR_ID_LENOVO ||
-	    pdev->subsystem_device != 0x222e ||
-	    !pci_reset_supported(pdev))
-		return;
+	if (pdev->subsystem_vendor != PCI_VENDOR_ID_LENOVO || /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+	    pdev->subsystem_device != 0x222e || /* NVMe: ! 변수에 값 대입. */
+	    !pci_reset_supported(pdev)) /* NVMe: pci_reset_supported() 함수 정의/매개변수 선언. */
+		return; /* NVMe: 함수 종료 및 반환. */
 
-	if (pci_enable_device_mem(pdev))
-		return;
+	if (pci_enable_device_mem(pdev)) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
 
 	/*
 	 * Based on nvkm_device_ctor() in
 	 * drivers/gpu/drm/nouveau/nvkm/engine/device/base.c
 	 */
-	map = pci_iomap(pdev, 0, 0x23000);
-	if (!map) {
-		pci_err(pdev, "Can't map MMIO space\n");
-		goto out_disable;
-	}
+	map = pci_iomap(pdev, 0, 0x23000); /* NVMe: pci_iomap() 호출 (NVMe/PCIe 동작). */
+	if (!map) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pci_err(pdev, "Can't map MMIO space\n"); /* NVMe: pci_err() 호출 (NVMe/PCIe 동작). */
+		goto out_disable; /* NVMe: out_disable 레이블로 제어 이동. */
+	} /* NVMe: 코드 블록/구조체 종료. */
 
 	/*
 	 * Make sure the GPU looks like it's been POSTed before resetting
 	 * it.
 	 */
-	if (ioread32(map + 0x2240c) & 0x2) {
-		pci_info(pdev, FW_BUG "GPU left initialized by EFI, resetting\n");
-		ret = pci_reset_bus(pdev);
-		if (ret < 0)
-			pci_err(pdev, "Failed to reset GPU: %d\n", ret);
-	}
+	if (ioread32(map + 0x2240c) & 0x2) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pci_info(pdev, FW_BUG "GPU left initialized by EFI, resetting\n"); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
+		ret = pci_reset_bus(pdev); /* NVMe: pci_reset_bus() 호출 (NVMe/PCIe 동작). */
+		if (ret < 0) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+			pci_err(pdev, "Failed to reset GPU: %d\n", ret); /* NVMe: pci_err() 호출 (NVMe/PCIe 동작). */
+	} /* NVMe: 코드 블록/구조체 종료. */
 
-	iounmap(map);
-out_disable:
-	pci_disable_device(pdev);
-}
-DECLARE_PCI_FIXUP_CLASS_FINAL(PCI_VENDOR_ID_NVIDIA, 0x13b1,
-			      PCI_CLASS_DISPLAY_VGA, 8,
-			      quirk_reset_lenovo_thinkpad_p50_nvgpu);
+	iounmap(map); /* NVMe: iounmap() 호출 (NVMe/PCIe 동작). */
+out_disable: /* NVMe: out_disable 레이블 (NVMe 초기화/오류 복구 경로). */
+	pci_disable_device(pdev); /* NVMe: pci_disable_device() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_CLASS_FINAL(PCI_VENDOR_ID_NVIDIA, 0x13b1, /* NVMe: DECLARE_PCI_FIXUP_CLASS_FINAL() 함수 정의/매개변수 선언. */
+			      PCI_CLASS_DISPLAY_VGA, 8, /* NVMe: 인자/초기자 나열 (연속). */
+			      quirk_reset_lenovo_thinkpad_p50_nvgpu); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
 /*
  * Device [1b21:2142]
@@ -6280,11 +6285,11 @@ DECLARE_PCI_FIXUP_CLASS_FINAL(PCI_VENDOR_ID_NVIDIA, 0x13b1,
  *   절전에서 깨어나는 데 사용된다. D0에서 PME가 동작하지 않으면 NVMe
  *   런타임 전환 시 wake 이벤트를 놓칠 수 있으므로 해당 비트를 비활성화.
  */
-static void pci_fixup_no_d0_pme(struct pci_dev *dev)
-{
+static void pci_fixup_no_d0_pme(struct pci_dev *dev) /* NVMe: pci_fixup_no_d0_pme() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
 	pci_info(dev, "PME# does not work under D0, disabling it\n"); /* NVMe: dmesg에 D0 PME 버그 기록. */
 	dev->pme_support &= ~(PCI_PM_CAP_PME_D0 >> PCI_PM_CAP_PME_SHIFT); /* NVMe: D0 상태의 PME 지원 비트만 클리어. */
-}
+} /* NVMe: 코드 블록/구조체 종료. */
 DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ASMEDIA, 0x2142, pci_fixup_no_d0_pme); /* NVMe: ASMedia 2142 장치에 최종 초기화 단계에서 적용. */
 
 /*
@@ -6305,24 +6310,24 @@ DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_ASMEDIA, 0x2142, pci_fixup_no_d0_pme); /* 
  *   NVMe의 절전/인터럽트 동작에도 영향을 줄 수 있으므로 트리 전체의
  *   안정성을 위해 처리한다.
  */
-static void pci_fixup_no_msi_no_pme(struct pci_dev *dev)
-{
-#ifdef CONFIG_PCI_MSI
+static void pci_fixup_no_msi_no_pme(struct pci_dev *dev) /* NVMe: pci_fixup_no_msi_no_pme() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+#ifdef CONFIG_PCI_MSI /* NVMe: 조걶 컴파일 ifdef 분기 (NVMe/PCIe 기능 선택). */
 	pci_info(dev, "MSI is not implemented on this device, disabling it\n"); /* NVMe: MSI 미구현 기록. */
 	dev->no_msi = 1; /* NVMe: MSI 비활성화(해당 장치에 대해). */
-#endif
+#endif /* NVMe: 조걶 컴파일 endif 분기 (NVMe/PCIe 기능 선택). */
 	pci_info(dev, "PME# is unreliable, disabling it\n"); /* NVMe: PME 신뢰성 문제 기록. */
 	dev->pme_support = 0; /* NVMe: 모든 전원 상태의 PME 지원 제거. */
-}
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_PERICOM, 0x400e, pci_fixup_no_msi_no_pme);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_PERICOM, 0x400f, pci_fixup_no_msi_no_pme);
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_PERICOM, 0x400e, pci_fixup_no_msi_no_pme); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_PERICOM, 0x400f, pci_fixup_no_msi_no_pme); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
 
-static void apex_pci_fixup_class(struct pci_dev *pdev)
-{
-	pdev->class = (PCI_CLASS_SYSTEM_OTHER << 8) | pdev->class;
-}
-DECLARE_PCI_FIXUP_CLASS_HEADER(0x1ac1, 0x089a,
-			       PCI_CLASS_NOT_DEFINED, 8, apex_pci_fixup_class);
+static void apex_pci_fixup_class(struct pci_dev *pdev) /* NVMe: apex_pci_fixup_class() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	pdev->class = (PCI_CLASS_SYSTEM_OTHER << 8) | pdev->class; /* NVMe: class 변수에 값 대입. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_CLASS_HEADER(0x1ac1, 0x089a, /* NVMe: DECLARE_PCI_FIXUP_CLASS_HEADER() 함수 정의/매개변수 선언. */
+			       PCI_CLASS_NOT_DEFINED, 8, apex_pci_fixup_class); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
 /*
  * Pericom PI7C9X2G404/PI7C9X2G304/PI7C9X2G303 switch erratum E5 -
@@ -6333,73 +6338,73 @@ DECLARE_PCI_FIXUP_CLASS_HEADER(0x1ac1, 0x089a,
  * buffer until CPLD packet. The workaround is to use the switch in store and
  * forward mode.
  */
-#define PI7C9X2Gxxx_MODE_REG		0x74
-#define PI7C9X2Gxxx_STORE_FORWARD_MODE	BIT(0)
-static void pci_fixup_pericom_acs_store_forward(struct pci_dev *pdev)
-{
-	struct pci_dev *upstream;
-	u16 val;
+#define PI7C9X2Gxxx_MODE_REG		0x74 /* NVMe: PI7C9X2Gxxx_MODE_REG 매크로/상수 정의 (NVMe/PCIe). */
+#define PI7C9X2Gxxx_STORE_FORWARD_MODE	BIT(0) /* NVMe: PI7C9X2Gxxx_STORE_FORWARD_MODE 매크로/상수 정의 (NVMe/PCIe). */
+static void pci_fixup_pericom_acs_store_forward(struct pci_dev *pdev) /* NVMe: pci_fixup_pericom_acs_store_forward() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	struct pci_dev *upstream; /* NVMe: upstream 변수 선언. */
+	u16 val; /* NVMe: val 변수 선언. */
 
 	/* Downstream ports only */
-	if (pci_pcie_type(pdev) != PCI_EXP_TYPE_DOWNSTREAM)
-		return;
+	if (pci_pcie_type(pdev) != PCI_EXP_TYPE_DOWNSTREAM) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
 
 	/* Check for ACS P2P Request Redirect use */
-	if (!pdev->acs_cap)
-		return;
-	pci_read_config_word(pdev, pdev->acs_cap + PCI_ACS_CTRL, &val);
-	if (!(val & PCI_ACS_RR))
-		return;
+	if (!pdev->acs_cap) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
+	pci_read_config_word(pdev, pdev->acs_cap + PCI_ACS_CTRL, &val); /* NVMe: pci_read_config_word() 호출 (NVMe/PCIe 동작). */
+	if (!(val & PCI_ACS_RR)) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
 
-	upstream = pci_upstream_bridge(pdev);
-	if (!upstream)
-		return;
+	upstream = pci_upstream_bridge(pdev); /* NVMe: pci_upstream_bridge() 호출 (NVMe/PCIe 동작). */
+	if (!upstream) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
 
-	pci_read_config_word(upstream, PI7C9X2Gxxx_MODE_REG, &val);
-	if (!(val & PI7C9X2Gxxx_STORE_FORWARD_MODE)) {
-		pci_info(upstream, "Setting PI7C9X2Gxxx store-forward mode to avoid ACS erratum\n");
-		pci_write_config_word(upstream, PI7C9X2Gxxx_MODE_REG, val |
-				      PI7C9X2Gxxx_STORE_FORWARD_MODE);
-	}
-}
+	pci_read_config_word(upstream, PI7C9X2Gxxx_MODE_REG, &val); /* NVMe: pci_read_config_word() 호출 (NVMe/PCIe 동작). */
+	if (!(val & PI7C9X2Gxxx_STORE_FORWARD_MODE)) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pci_info(upstream, "Setting PI7C9X2Gxxx store-forward mode to avoid ACS erratum\n"); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
+		pci_write_config_word(upstream, PI7C9X2Gxxx_MODE_REG, val | /* NVMe: pci_write_config_word() 함수 정의/매개변수 선언. */
+				      PI7C9X2Gxxx_STORE_FORWARD_MODE); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
 /*
  * Apply fixup on enable and on resume, in order to apply the fix up whenever
  * ACS configuration changes or switch mode is reset
  */
-DECLARE_PCI_FIXUP_ENABLE(PCI_VENDOR_ID_PERICOM, 0x2404,
-			 pci_fixup_pericom_acs_store_forward);
-DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_PERICOM, 0x2404,
-			 pci_fixup_pericom_acs_store_forward);
-DECLARE_PCI_FIXUP_ENABLE(PCI_VENDOR_ID_PERICOM, 0x2304,
-			 pci_fixup_pericom_acs_store_forward);
-DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_PERICOM, 0x2304,
-			 pci_fixup_pericom_acs_store_forward);
-DECLARE_PCI_FIXUP_ENABLE(PCI_VENDOR_ID_PERICOM, 0x2303,
-			 pci_fixup_pericom_acs_store_forward);
-DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_PERICOM, 0x2303,
-			 pci_fixup_pericom_acs_store_forward);
-DECLARE_PCI_FIXUP_ENABLE(PCI_VENDOR_ID_PERICOM, 0xb404,
-			 pci_fixup_pericom_acs_store_forward);
-DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_PERICOM, 0xb404,
-			 pci_fixup_pericom_acs_store_forward);
+DECLARE_PCI_FIXUP_ENABLE(PCI_VENDOR_ID_PERICOM, 0x2404, /* NVMe: DECLARE_PCI_FIXUP_ENABLE() 함수 정의/매개변수 선언. */
+			 pci_fixup_pericom_acs_store_forward); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_PERICOM, 0x2404, /* NVMe: DECLARE_PCI_FIXUP_RESUME() 함수 정의/매개변수 선언. */
+			 pci_fixup_pericom_acs_store_forward); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_ENABLE(PCI_VENDOR_ID_PERICOM, 0x2304, /* NVMe: DECLARE_PCI_FIXUP_ENABLE() 함수 정의/매개변수 선언. */
+			 pci_fixup_pericom_acs_store_forward); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_PERICOM, 0x2304, /* NVMe: DECLARE_PCI_FIXUP_RESUME() 함수 정의/매개변수 선언. */
+			 pci_fixup_pericom_acs_store_forward); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_ENABLE(PCI_VENDOR_ID_PERICOM, 0x2303, /* NVMe: DECLARE_PCI_FIXUP_ENABLE() 함수 정의/매개변수 선언. */
+			 pci_fixup_pericom_acs_store_forward); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_PERICOM, 0x2303, /* NVMe: DECLARE_PCI_FIXUP_RESUME() 함수 정의/매개변수 선언. */
+			 pci_fixup_pericom_acs_store_forward); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_ENABLE(PCI_VENDOR_ID_PERICOM, 0xb404, /* NVMe: DECLARE_PCI_FIXUP_ENABLE() 함수 정의/매개변수 선언. */
+			 pci_fixup_pericom_acs_store_forward); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+DECLARE_PCI_FIXUP_RESUME(PCI_VENDOR_ID_PERICOM, 0xb404, /* NVMe: DECLARE_PCI_FIXUP_RESUME() 함수 정의/매개변수 선언. */
+			 pci_fixup_pericom_acs_store_forward); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
 
-static void nvidia_ion_ahci_fixup(struct pci_dev *pdev)
-{
-	pdev->dev_flags |= PCI_DEV_FLAGS_HAS_MSI_MASKING;
-}
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_NVIDIA, 0x0ab8, nvidia_ion_ahci_fixup);
+static void nvidia_ion_ahci_fixup(struct pci_dev *pdev) /* NVMe: nvidia_ion_ahci_fixup() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	pdev->dev_flags |= PCI_DEV_FLAGS_HAS_MSI_MASKING; /* NVMe: | 변수에 값 대입. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_NVIDIA, 0x0ab8, nvidia_ion_ahci_fixup); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
 
-static void rom_bar_overlap_defect(struct pci_dev *dev)
-{
-	pci_info(dev, "working around ROM BAR overlap defect\n");
-	dev->rom_bar_overlap = 1;
-}
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x1533, rom_bar_overlap_defect);
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x1536, rom_bar_overlap_defect);
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x1537, rom_bar_overlap_defect);
-DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x1538, rom_bar_overlap_defect);
+static void rom_bar_overlap_defect(struct pci_dev *dev) /* NVMe: rom_bar_overlap_defect() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	pci_info(dev, "working around ROM BAR overlap defect\n"); /* NVMe: pci_info() 호출 (NVMe/PCIe 동작). */
+	dev->rom_bar_overlap = 1; /* NVMe: rom_bar_overlap 변수에 값 대입. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x1533, rom_bar_overlap_defect); /* NVMe: DECLARE_PCI_FIXUP_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x1536, rom_bar_overlap_defect); /* NVMe: DECLARE_PCI_FIXUP_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x1537, rom_bar_overlap_defect); /* NVMe: DECLARE_PCI_FIXUP_EARLY() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x1538, rom_bar_overlap_defect); /* NVMe: DECLARE_PCI_FIXUP_EARLY() 호출 (NVMe/PCIe 동작). */
 
-#ifdef CONFIG_PCIEASPM
+#ifdef CONFIG_PCIEASPM /* NVMe: 조걶 컴파일 ifdef 분기 (NVMe/PCIe 기능 선택). */
 /*
  * Several Intel DG2 graphics devices advertise that they can only tolerate
  * 1us latency when transitioning from L1 to L0, which may prevent ASPM L1
@@ -6407,88 +6412,88 @@ DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_INTEL, 0x1538, rom_bar_overlap_defect);
  * latency.  Override their Device Capabilities value to allow ASPM L1 to
  * be enabled.
  */
-static void aspm_l1_acceptable_latency(struct pci_dev *dev)
-{
-	u32 l1_lat = FIELD_GET(PCI_EXP_DEVCAP_L1, dev->devcap);
+static void aspm_l1_acceptable_latency(struct pci_dev *dev) /* NVMe: aspm_l1_acceptable_latency() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	u32 l1_lat = FIELD_GET(PCI_EXP_DEVCAP_L1, dev->devcap); /* NVMe: FIELD_GET() 호출 (NVMe/PCIe 동작). */
 
-	if (l1_lat < 7) {
-		dev->devcap |= FIELD_PREP(PCI_EXP_DEVCAP_L1, 7);
-		pci_info(dev, "ASPM: overriding L1 acceptable latency from %#x to 0x7\n",
-			 l1_lat);
-	}
-}
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x4f80, aspm_l1_acceptable_latency);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x4f81, aspm_l1_acceptable_latency);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x4f82, aspm_l1_acceptable_latency);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x4f83, aspm_l1_acceptable_latency);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x4f84, aspm_l1_acceptable_latency);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x4f85, aspm_l1_acceptable_latency);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x4f86, aspm_l1_acceptable_latency);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x4f87, aspm_l1_acceptable_latency);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x4f88, aspm_l1_acceptable_latency);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x5690, aspm_l1_acceptable_latency);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x5691, aspm_l1_acceptable_latency);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x5692, aspm_l1_acceptable_latency);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x5693, aspm_l1_acceptable_latency);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x5694, aspm_l1_acceptable_latency);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x5695, aspm_l1_acceptable_latency);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x56a0, aspm_l1_acceptable_latency);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x56a1, aspm_l1_acceptable_latency);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x56a2, aspm_l1_acceptable_latency);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x56a3, aspm_l1_acceptable_latency);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x56a4, aspm_l1_acceptable_latency);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x56a5, aspm_l1_acceptable_latency);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x56a6, aspm_l1_acceptable_latency);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x56b0, aspm_l1_acceptable_latency);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x56b1, aspm_l1_acceptable_latency);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x56c0, aspm_l1_acceptable_latency);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x56c1, aspm_l1_acceptable_latency);
-#endif
+	if (l1_lat < 7) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		dev->devcap |= FIELD_PREP(PCI_EXP_DEVCAP_L1, 7); /* NVMe: FIELD_PREP() 호출 (NVMe/PCIe 동작). */
+		pci_info(dev, "ASPM: overriding L1 acceptable latency from %#x to 0x7\n", /* NVMe: pci_info() 함수 정의/매개변수 선언. */
+			 l1_lat); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x4f80, aspm_l1_acceptable_latency); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x4f81, aspm_l1_acceptable_latency); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x4f82, aspm_l1_acceptable_latency); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x4f83, aspm_l1_acceptable_latency); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x4f84, aspm_l1_acceptable_latency); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x4f85, aspm_l1_acceptable_latency); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x4f86, aspm_l1_acceptable_latency); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x4f87, aspm_l1_acceptable_latency); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x4f88, aspm_l1_acceptable_latency); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x5690, aspm_l1_acceptable_latency); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x5691, aspm_l1_acceptable_latency); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x5692, aspm_l1_acceptable_latency); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x5693, aspm_l1_acceptable_latency); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x5694, aspm_l1_acceptable_latency); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x5695, aspm_l1_acceptable_latency); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x56a0, aspm_l1_acceptable_latency); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x56a1, aspm_l1_acceptable_latency); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x56a2, aspm_l1_acceptable_latency); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x56a3, aspm_l1_acceptable_latency); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x56a4, aspm_l1_acceptable_latency); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x56a5, aspm_l1_acceptable_latency); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x56a6, aspm_l1_acceptable_latency); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x56b0, aspm_l1_acceptable_latency); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x56b1, aspm_l1_acceptable_latency); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x56c0, aspm_l1_acceptable_latency); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x56c1, aspm_l1_acceptable_latency); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+#endif /* NVMe: 조걶 컴파일 endif 분기 (NVMe/PCIe 기능 선택). */
 
-#ifdef CONFIG_PCIE_DPC
+#ifdef CONFIG_PCIE_DPC /* NVMe: 조걶 컴파일 ifdef 분기 (NVMe/PCIe 기능 선택). */
 /*
  * Intel Ice Lake, Tiger Lake and Alder Lake BIOS has a bug that clears
  * the DPC RP PIO Log Size of the integrated Thunderbolt PCIe Root
  * Ports.
  */
-static void dpc_log_size(struct pci_dev *dev)
-{
-	u16 dpc, val;
+static void dpc_log_size(struct pci_dev *dev) /* NVMe: dpc_log_size() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	u16 dpc, val; /* NVMe: val 변수 선언. */
 
-	dpc = pci_find_ext_capability(dev, PCI_EXT_CAP_ID_DPC);
-	if (!dpc)
-		return;
+	dpc = pci_find_ext_capability(dev, PCI_EXT_CAP_ID_DPC); /* NVMe: pci_find_ext_capability() 호출 (NVMe/PCIe 동작). */
+	if (!dpc) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
 
-	pci_read_config_word(dev, dpc + PCI_EXP_DPC_CAP, &val);
-	if (!(val & PCI_EXP_DPC_CAP_RP_EXT))
-		return;
+	pci_read_config_word(dev, dpc + PCI_EXP_DPC_CAP, &val); /* NVMe: pci_read_config_word() 호출 (NVMe/PCIe 동작). */
+	if (!(val & PCI_EXP_DPC_CAP_RP_EXT)) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
 
-	if (FIELD_GET(PCI_EXP_DPC_RP_PIO_LOG_SIZE, val) == 0) {
-		pci_info(dev, "Overriding RP PIO Log Size to %d\n",
-			 PCIE_STD_NUM_TLP_HEADERLOG);
-		dev->dpc_rp_log_size = PCIE_STD_NUM_TLP_HEADERLOG;
-	}
-}
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x461f, dpc_log_size);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x462f, dpc_log_size);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x463f, dpc_log_size);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x466e, dpc_log_size);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x8a1d, dpc_log_size);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x8a1f, dpc_log_size);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x8a21, dpc_log_size);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x8a23, dpc_log_size);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x9a23, dpc_log_size);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x9a25, dpc_log_size);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x9a27, dpc_log_size);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x9a29, dpc_log_size);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x9a2b, dpc_log_size);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x9a2d, dpc_log_size);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x9a2f, dpc_log_size);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x9a31, dpc_log_size);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0xa72f, dpc_log_size);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0xa73f, dpc_log_size);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0xa76e, dpc_log_size);
-#endif
+	if (FIELD_GET(PCI_EXP_DPC_RP_PIO_LOG_SIZE, val) == 0) { /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		pci_info(dev, "Overriding RP PIO Log Size to %d\n", /* NVMe: pci_info() 함수 정의/매개변수 선언. */
+			 PCIE_STD_NUM_TLP_HEADERLOG); /* NVMe: 코드 실행 (NVMe/PCIe 경로). */
+		dev->dpc_rp_log_size = PCIE_STD_NUM_TLP_HEADERLOG; /* NVMe: dpc_rp_log_size 변수에 값 대입. */
+	} /* NVMe: 코드 블록/구조체 종료. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x461f, dpc_log_size); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x462f, dpc_log_size); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x463f, dpc_log_size); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x466e, dpc_log_size); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x8a1d, dpc_log_size); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x8a1f, dpc_log_size); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x8a21, dpc_log_size); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x8a23, dpc_log_size); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x9a23, dpc_log_size); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x9a25, dpc_log_size); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x9a27, dpc_log_size); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x9a29, dpc_log_size); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x9a2b, dpc_log_size); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x9a2d, dpc_log_size); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x9a2f, dpc_log_size); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x9a31, dpc_log_size); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0xa72f, dpc_log_size); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0xa73f, dpc_log_size); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0xa76e, dpc_log_size); /* NVMe: DECLARE_PCI_FIXUP_HEADER() 호출 (NVMe/PCIe 동작). */
+#endif /* NVMe: 조걶 컴파일 endif 분기 (NVMe/PCIe 기능 선택). */
 
 /*
  * For a PCI device with multiple downstream devices, its driver may use
@@ -6498,10 +6503,10 @@ DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0xa76e, dpc_log_size);
  * before driver probing, it might need to add a device tree node as the final
  * fixup.
  */
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_XILINX, 0x5020, of_pci_make_dev_node);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_XILINX, 0x5021, of_pci_make_dev_node);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_REDHAT, 0x0005, of_pci_make_dev_node);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_EFAR, 0x9660, of_pci_make_dev_node);
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_XILINX, 0x5020, of_pci_make_dev_node); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_XILINX, 0x5021, of_pci_make_dev_node); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_REDHAT, 0x0005, of_pci_make_dev_node); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_EFAR, 0x9660, of_pci_make_dev_node); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
 
 /*
  * Devices known to require a longer delay before first config space access
@@ -6509,28 +6514,28 @@ DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_EFAR, 0x9660, of_pci_make_dev_node);
  *
  * VideoPropulsion (aka Genroco) Torrent QN16e MPEG QAM Modulator
  */
-static void pci_fixup_d3cold_delay_1sec(struct pci_dev *pdev)
-{
-	pdev->d3cold_delay = 1000;
-}
-DECLARE_PCI_FIXUP_FINAL(0x5555, 0x0004, pci_fixup_d3cold_delay_1sec);
+static void pci_fixup_d3cold_delay_1sec(struct pci_dev *pdev) /* NVMe: pci_fixup_d3cold_delay_1sec() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	pdev->d3cold_delay = 1000; /* NVMe: d3cold_delay 변수에 값 대입. */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_FINAL(0x5555, 0x0004, pci_fixup_d3cold_delay_1sec); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
 
-#ifdef CONFIG_PCIEAER
-static void pci_mask_replay_timer_timeout(struct pci_dev *pdev)
-{
-	struct pci_dev *parent = pci_upstream_bridge(pdev);
-	u32 val;
+#ifdef CONFIG_PCIEAER /* NVMe: 조걶 컴파일 ifdef 분기 (NVMe/PCIe 기능 선택). */
+static void pci_mask_replay_timer_timeout(struct pci_dev *pdev) /* NVMe: pci_mask_replay_timer_timeout() 함수 정의/매개변수 선언. */
+{ /* NVMe: 코드 블록 시작. */
+	struct pci_dev *parent = pci_upstream_bridge(pdev); /* NVMe: pci_upstream_bridge() 호출 (NVMe/PCIe 동작). */
+	u32 val; /* NVMe: val 변수 선언. */
 
-	if (!parent || !parent->aer_cap)
-		return;
+	if (!parent || !parent->aer_cap) /* NVMe: 조건 분기 (NVMe/PCIe 상태 검사). */
+		return; /* NVMe: 함수 종료 및 반환. */
 
-	pci_info(parent, "mask Replay Timer Timeout Correctable Errors due to %s hardware defect",
-		 pci_name(pdev));
+	pci_info(parent, "mask Replay Timer Timeout Correctable Errors due to %s hardware defect", /* NVMe: pci_info() 함수 정의/매개변수 선언. */
+		 pci_name(pdev)); /* NVMe: pci_name() 호출 (NVMe/PCIe 동작). */
 
-	pci_read_config_dword(parent, parent->aer_cap + PCI_ERR_COR_MASK, &val);
-	val |= PCI_ERR_COR_REP_TIMER;
-	pci_write_config_dword(parent, parent->aer_cap + PCI_ERR_COR_MASK, val);
-}
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_GLI, 0x9750, pci_mask_replay_timer_timeout);
-DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_GLI, 0x9755, pci_mask_replay_timer_timeout);
-#endif
+	pci_read_config_dword(parent, parent->aer_cap + PCI_ERR_COR_MASK, &val); /* NVMe: pci_read_config_dword() 호출 (NVMe/PCIe 동작). */
+	val |= PCI_ERR_COR_REP_TIMER; /* NVMe: | 변수에 값 대입. */
+	pci_write_config_dword(parent, parent->aer_cap + PCI_ERR_COR_MASK, val); /* NVMe: pci_write_config_dword() 호출 (NVMe/PCIe 동작). */
+} /* NVMe: 코드 블록/구조체 종료. */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_GLI, 0x9750, pci_mask_replay_timer_timeout); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_GLI, 0x9755, pci_mask_replay_timer_timeout); /* NVMe: DECLARE_PCI_FIXUP_FINAL() 호출 (NVMe/PCIe 동작). */
+#endif /* NVMe: 조걶 컴파일 endif 분기 (NVMe/PCIe 기능 선택). */

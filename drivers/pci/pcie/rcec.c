@@ -44,11 +44,11 @@
  * ===================================================================
  */
 
-#include <linux/kernel.h>
-#include <linux/pci.h>
-#include <linux/pci_regs.h>
+#include <linux/kernel.h>	/* NVMe: 커널 기본 매크로 및 함수 선언 헤더. */
+#include <linux/pci.h>		/* NVMe: PCI 디바이스 구조체와 PCIe 타입/상태 상수 정의. */
+#include <linux/pci_regs.h>	/* NVMe: PCI Express 확장 capability 레지스터 오프셋 정의. */
 
-#include "../pci.h"
+#include "../pci.h"		/* NVMe: PCI core 내부 함수 및 rcec_ea 구조체 선언. */
 
 /*
  * walk_rcec_data:
@@ -56,11 +56,11 @@
  *   NVMe 관련 처리 시 이 구조체를 통해 대상 RCEC, 사용자 콜백, 콜백 데이터를
  *   전달한다.
  */
-struct walk_rcec_data {
+struct walk_rcec_data {							/* NVMe: RCEC 순회에 필요한 콜백/데이터 컨텍스트 구조체 정의 시작. */
 	struct pci_dev *rcec;			/* NVMe: 순회 대상 RCEC 디바이스 포인터. */
 	int (*user_callback)(struct pci_dev *dev, void *data);	/* NVMe: 각 RCiEP(NVMe 포함)마다 호출할 사용자 콜백 함수 포인터. */
 	void *user_data;			/* NVMe: 사용자 콜백에 전달할 컨텍스트 데이터. */
-};
+};									/* NVMe: walk_rcec_data 구조체 정의 끝. */
 
 /*
  * rcec_assoc_rciep:
@@ -68,8 +68,8 @@ struct walk_rcec_data {
  *   있는지 판단한다. NVMe 장치가 RCiEP로 노출된 경우, 해당 NVMe가 어떤
  *   RCEC의 이벤트를 수신하는지 결정할 때 이 함수가 사용된다.
  */
-static bool rcec_assoc_rciep(struct pci_dev *rcec, struct pci_dev *rciep)
-{
+static bool rcec_assoc_rciep(struct pci_dev *rcec, struct pci_dev *rciep)	/* NVMe: RCEC와 NVMe RCiEP의 연관 여부를 판단하는 함수 선언. */
+{									/* NVMe: rcec_assoc_rciep 함수 본문 시작. */
 	unsigned long bitmap = rcec->rcec_ea->bitmap;			/* NVMe: RCEC가 관리하는 RCiEP 비트맵을 읽어온다. */
 	unsigned int devn;						/* NVMe: 비트맵에서 검사할 장치 번호 변수. */
 
@@ -83,7 +83,7 @@ static bool rcec_assoc_rciep(struct pci_dev *rcec, struct pci_dev *rciep)
 			return true;					/* NVMe: 연관된 RCiEP로 판정한다. */
 
 	return false;								/* NVMe: 비트맵에도 없고 같은 bus도 아니면 연관되지 않음. */
-}
+}										/* NVMe: rcec_assoc_rciep 함수 끝. */
 
 /*
  * link_rcec_helper:
@@ -92,20 +92,20 @@ static bool rcec_assoc_rciep(struct pci_dev *rcec, struct pci_dev *rciep)
  *   PME/AER/EDR 처리 시 어떤 RCEC가 이 NVMe의 이벤트를 담당하는지
  *   빠르게 찾을 수 있게 한다.
  */
-static int link_rcec_helper(struct pci_dev *dev, void *data)
-{
+static int link_rcec_helper(struct pci_dev *dev, void *data)			/* NVMe: pci_walk_bus()가 각 장치를 순회할 때 호출되는 RCEC 연결 콜백 선언. */
+{										/* NVMe: link_rcec_helper 함수 본문 시작. */
 	struct walk_rcec_data *rcec_data = data;			/* NVMe: walk_rcec_data 컨텍스트를 data에서 꺼낸다. */
 	struct pci_dev *rcec = rcec_data->rcec;			/* NVMe: 연결하려는 대상 RCEC 디바이스. */
 
 	if ((pci_pcie_type(dev) == PCI_EXP_TYPE_RC_END) &&		/* NVMe: 현재 장치가 Root Complex Integrated Endpoint(RCiEP)인지 확인, 일부 NVMe는 이 타입이다. */
 	    rcec_assoc_rciep(rcec, dev)) {				/* NVMe: 해당 NVMe RCiEP가 대상 RCEC와 연관되어 있는지 검사. */
 		dev->rcec = rcec;					/* NVMe: NVMe pci_dev의 rcec 포인터를 연결, 에러/전원 이벤트 라우팅에 사용. */
-		pci_dbg(dev, "PME & error events signaled via %s\n",
+		pci_dbg(dev, "PME & error events signaled via %s\n",		/* NVMe: NVMe 장치의 PME 및 에러 이벤트 보고 경로를 디버그 로그에 출력. */
 			pci_name(rcec));				/* NVMe: NVMe의 PME 및 에러 이벤트가 어떤 RCEC로 보고되는지 디버그 로그 출력. */
-	}
+	}										/* NVMe: RCiEP 조건 블록 종료. */
 
 	return 0;								/* NVMe: 순회를 계속 진행하기 위해 0 반환. */
-}
+}										/* NVMe: link_rcec_helper 함수 끝. */
 
 /*
  * walk_rcec_helper:
@@ -113,8 +113,8 @@ static int link_rcec_helper(struct pci_dev *dev, void *data)
  *   연관된 NVMe RCiEP를 발견하면 사용자가 등록한 콜백(예: AER/EDR 복구
  *   루틴)을 호출한다.
  */
-static int walk_rcec_helper(struct pci_dev *dev, void *data)
-{
+static int walk_rcec_helper(struct pci_dev *dev, void *data)			/* NVMe: pcie_walk_rcec()가 각 장치마다 호출하는 사용자 콜백 래퍼 선언. */
+{										/* NVMe: walk_rcec_helper 함수 본문 시작. */
 	struct walk_rcec_data *rcec_data = data;			/* NVMe: walk context를 data에서 꺼낸다. */
 	struct pci_dev *rcec = rcec_data->rcec;			/* NVMe: 순회 기준이 되는 RCEC. */
 
@@ -123,7 +123,7 @@ static int walk_rcec_helper(struct pci_dev *dev, void *data)
 		rcec_data->user_callback(dev, rcec_data->user_data);	/* NVMe: 연관된 NVMe에 대해 사용자 콜백(예: EDR 복구)을 호출한다. */
 
 	return 0;								/* NVMe: 정상 반환, 순회 계속. */
-}
+}										/* NVMe: walk_rcec_helper 함수 끝. */
 
 /*
  * walk_rcec:
@@ -131,9 +131,9 @@ static int walk_rcec_helper(struct pci_dev *dev, void *data)
  *   NVMe 관점에서는 RCEC가 담당하는 NVMe 장치들을 찾아 콜백을 적용하는
  *   핵심 루프이다.
  */
-static void walk_rcec(int (*cb)(struct pci_dev *dev, void *data),
+static void walk_rcec(int (*cb)(struct pci_dev *dev, void *data),		/* NVMe: RCEC와 연관된 NVMe RCiEP를 순회하며 콜백을 호출하는 함수 선언. */
 		      void *userdata)
-{
+{										/* NVMe: walk_rcec 함수 본문 시작. */
 	struct walk_rcec_data *rcec_data = userdata;			/* NVMe: 사용자가 전달한 walk context 포인터. */
 	struct pci_dev *rcec = rcec_data->rcec;			/* NVMe: 순회 기준 RCEC. */
 	u8 nextbusn, lastbusn;						/* NVMe: RCEC가 커버하는 bus 번호 범위 변수. */
@@ -164,8 +164,8 @@ static void walk_rcec(int (*cb)(struct pci_dev *dev, void *data),
 
 		/* Find RCiEP devices on the given bus ranges */
 		pci_walk_bus(bus, cb, rcec_data);			/* NVMe: 발견한 bus 위에서 NVMe RCiEP를 모두 순회한다. */
-	}
-}
+	}										/* NVMe: 추가 bus 범위 순회 루프 종료. */
+}										/* NVMe: walk_rcec 함수 끝. */
 
 /**
  * pcie_link_rcec - Link RCiEP devices associated with RCEC.
@@ -179,8 +179,8 @@ static void walk_rcec(int (*cb)(struct pci_dev *dev, void *data),
  *   pci_dev->rcec 포인터에 연결한다. NVMe 장치가 RCiEP로 존재할 경우
  *   이 링크를 통해 NVMe의 PME/AER/EDR 이벤트가 올바른 RCEC로 라우팅된다.
  */
-void pcie_link_rcec(struct pci_dev *rcec)
-{
+void pcie_link_rcec(struct pci_dev *rcec)					/* NVMe: 주어진 RCEC와 연관된 NVMe RCiEP들을 링크하는 함수 선언. */
+{										/* NVMe: pcie_link_rcec 함수 본문 시작. */
 	struct walk_rcec_data rcec_data;				/* NVMe: 순회에 사용할 로컬 컨텍스트 구조체. */
 
 	if (!rcec->rcec_ea)							/* NVMe: RCEC associativity 정보가 없으면 */
@@ -191,7 +191,7 @@ void pcie_link_rcec(struct pci_dev *rcec)
 	rcec_data.user_data = NULL;					/* NVMe: 사용자 데이터도 사용하지 않음. */
 
 	walk_rcec(link_rcec_helper, &rcec_data);			/* NVMe: RCEC 연결 헬퍼를 순회하며 NVMe RCiEP들을 연결. */
-}
+}										/* NVMe: pcie_link_rcec 함수 끝. */
 
 /**
  * pcie_walk_rcec - Walk RCiEP devices associating with RCEC and call callback.
@@ -210,9 +210,9 @@ void pcie_link_rcec(struct pci_dev *rcec)
  *   경로에서, RCEC에 연결된 NVMe 장치들에 대해 복구 콜백을 실행할 때
  *   사용된다.
  */
-void pcie_walk_rcec(struct pci_dev *rcec, int (*cb)(struct pci_dev *, void *),
+void pcie_walk_rcec(struct pci_dev *rcec, int (*cb)(struct pci_dev *, void *),	/* NVMe: RCEC 아래 연관된 NVMe RCiEP마다 콜백을 호출하는 함수 선언. */
 		    void *userdata)
-{
+{										/* NVMe: pcie_walk_rcec 함수 본문 시작. */
 	struct walk_rcec_data rcec_data;				/* NVMe: 순회 컨텍스트 구조체. */
 
 	if (!rcec->rcec_ea)							/* NVMe: RCEC associativity capability가 없으면 */
@@ -223,7 +223,7 @@ void pcie_walk_rcec(struct pci_dev *rcec, int (*cb)(struct pci_dev *, void *),
 	rcec_data.user_data = userdata;					/* NVMe: 콜백에 전달할 컨텍스트(예: EDR 상태) 저장. */
 
 	walk_rcec(walk_rcec_helper, &rcec_data);			/* NVMe: 연관된 NVMe RCiEP를 찾아 사용자 콜백을 실행. */
-}
+}										/* NVMe: pcie_walk_rcec 함수 끝. */
 
 /*
  * pci_rcec_init:
@@ -232,8 +232,8 @@ void pcie_walk_rcec(struct pci_dev *rcec, int (*cb)(struct pci_dev *, void *),
  *   RCEC 자체가 먼저 초기화되어야 하며, 이 함수는 device probe 시
  *   호출된다.
  */
-void pci_rcec_init(struct pci_dev *dev)
-{
+void pci_rcec_init(struct pci_dev *dev)						/* NVMe: RCEC 장치를 초기화하고 RCiEP(NVMe) associativity를 파싱하는 함수 선언. */
+{										/* NVMe: pci_rcec_init 함수 본문 시작. */
 	struct rcec_ea *rcec_ea;					/* NVMe: RCEC associativity 정보를 저장할 구조체 포인터. */
 	u32 rcec, hdr, busn;						/* NVMe: RCEC 확장 capability 오프셋, 헤더, BUSN 레지스터 값. */
 	u8 ver;								/* NVMe: RCEC 확장 capability 버전. */
@@ -250,7 +250,7 @@ void pci_rcec_init(struct pci_dev *dev)
 	if (!rcec_ea)								/* NVMe: 메모리 할당 실패 시 */
 		return;								/* NVMe: RCEC 초기화를 중단, NVMe RCiEP 연결 불가. */
 
-	pci_read_config_dword(dev, rcec + PCI_RCEC_RCIEP_BITMAP,
+	pci_read_config_dword(dev, rcec + PCI_RCEC_RCIEP_BITMAP,	/* NVMe: RCEC RCIEP Bitmap 레지스터를 PCI config space에서 읽기 시작. */
 			      &rcec_ea->bitmap);					/* NVMe: RCIEP Bitmap 레지스터를 읽어, 동일 bus 내 연관 RCiEP(NVMe) 비트맵 저장. */
 
 	/* Check whether RCEC BUSN register is present */
@@ -260,14 +260,14 @@ void pci_rcec_init(struct pci_dev *dev)
 		pci_read_config_dword(dev, rcec + PCI_RCEC_BUSN, &busn);	/* NVMe: RCEC BUSN 레지스터 값을 읽는다. */
 		rcec_ea->nextbusn = PCI_RCEC_BUSN_NEXT(busn);		/* NVMe: RCEC가 커버하는 시작 bus 번호 저장. */
 		rcec_ea->lastbusn = PCI_RCEC_BUSN_LAST(busn);		/* NVMe: RCEC가 커버하는 마지막 bus 번호 저장. */
-	} else {
+	} else {							/* NVMe: BUSN 레지스터가 없는 구버전 RCEC용 else 분기. */
 		/* Avoid later ver check by setting nextbusn */
 		rcec_ea->nextbusn = 0xff;				/* NVMe: BUSN 레지스터가 없음을 표시하기 위해 시작 bus를 0xff로 설정. */
 		rcec_ea->lastbusn = 0x00;				/* NVMe: 마지막 bus를 0x00으로 설정하여 추가 bus 순회를 막는다. */
-	}
+	}									/* NVMe: RCEC BUSN 레지스터 존재 여부에 따른 분기 종료. */
 
 	dev->rcec_ea = rcec_ea;						/* NVMe: RCEC pci_dev에 파싱한 associativity 정보를 연결, 이후 NVMe RCiEP 링크에 사용. */
-}
+}										/* NVMe: pci_rcec_init 함수 끝. */
 
 /*
  * pci_rcec_exit:
@@ -275,8 +275,8 @@ void pci_rcec_init(struct pci_dev *dev)
  *   NVMe RCiEP가 제거되거나 hot-unplug되기 전에 RCEC 정리가 필요한 경우
  *   호출된다.
  */
-void pci_rcec_exit(struct pci_dev *dev)
-{
+void pci_rcec_exit(struct pci_dev *dev)						/* NVMe: RCEC 제거 시 associativity 자원을 정리하는 함수 선언. */
+{										/* NVMe: pci_rcec_exit 함수 본문 시작. */
 	kfree(dev->rcec_ea);						/* NVMe: RCEC associativity 구조체 메모리 해제. */
 	dev->rcec_ea = NULL;						/* NVMe: 포인터를 NULL로 설정해 dangling reference 방지. */
-}
+}										/* NVMe: pci_rcec_exit 함수 끝. */

@@ -64,8 +64,8 @@
  *   NVMe SSD가 IOMMU 그룹에 등록되기 전에 PCI probe 단계에서 먼저
  *   호출되어, 추후 IOMMU가 ATS 활성화 여부를 판단할 수 있게 한다.
  */
-void pci_ats_init(struct pci_dev *dev)
-{
+void pci_ats_init(struct pci_dev *dev) /* NVMe: 장치의 ATS capability 초기화 함수 선언 */
+{ /* NVMe: pci_ats_init 함수 본문 시작 */
 	int pos; /* NVMe: ATS 확장 capability의 config space 오프셋을 저장할 변수 */
 
 	if (pci_ats_disabled()) /* NVMe: 커널 옵션/커맨드라인에서 ATS가 비활성화된 경우 */
@@ -76,7 +76,7 @@ void pci_ats_init(struct pci_dev *dev)
 		return; /* NVMe: NVMe 장치가 ATS를 지원하지 않는 것으로 처리하고 종료. */
 
 	dev->ats_cap = pos; /* NVMe: 찾은 ATS capability 오프셋을 NVMe 장치 구조체에 기록. */
-}
+} /* NVMe: pci_ats_init 함수 본문 종료 */
 
 /**
  * pci_ats_supported - check if the device can use ATS
@@ -92,14 +92,14 @@ void pci_ats_init(struct pci_dev *dev)
  *   경우에만 true를 반환한다. 신뢰할 수 없는 다운스트림 포트 뒤의
  *   NVMe 장치는 ATS를 사용할 수 없어 DMA 보안이 유지된다.
  */
-bool pci_ats_supported(struct pci_dev *dev)
-{
+bool pci_ats_supported(struct pci_dev *dev) /* NVMe: 장치의 ATS 지원 여부 확인 함수 선언 */
+{ /* NVMe: pci_ats_supported 함수 본문 시작 */
 	if (!dev->ats_cap) /* NVMe: ATS capability가 초기화되지 않았거나 지원되지 않으면 */
 		return false; /* NVMe: ATS 사용 불가. */
 
 	return (dev->untrusted == 0); /* NVMe: 장치가 신뢰할 수 있는 경로에 있을 때만 true. */
-}
-EXPORT_SYMBOL_GPL(pci_ats_supported);
+} /* NVMe: pci_ats_supported 함수 종료. */
+EXPORT_SYMBOL_GPL(pci_ats_supported); /* NVMe: NVMe 드라이버 등이 ATS 지원 여부를 조회할 수 있도록 심볼 노출. */
 
 /**
  * pci_prepare_ats - Setup the PS for ATS
@@ -118,8 +118,8 @@ EXPORT_SYMBOL_GPL(pci_ats_supported);
  *   NVMe 컨트롤러에서 VF들이 PF와 동일한 STU로 ATS를 공유할 수 있도록
  *   준비하는 단계다.
  */
-int pci_prepare_ats(struct pci_dev *dev, int ps)
-{
+int pci_prepare_ats(struct pci_dev *dev, int ps) /* NVMe: PF/VF의 ATS STU 준비 함수 선언 */
+{ /* NVMe: pci_prepare_ats 함수 본문 시작 */
 	u16 ctrl; /* NVMe: ATS Control 레지스터 값을 조합할 변수 */
 
 	if (!pci_ats_supported(dev)) /* NVMe: NVMe 장치가 ATS를 지원하지 않으면 */
@@ -138,8 +138,8 @@ int pci_prepare_ats(struct pci_dev *dev, int ps)
 	ctrl = PCI_ATS_CTRL_STU(dev->ats_stu - PCI_ATS_MIN_STU); /* NVMe: STU 값을 ATS Control 레지스터의 STU 필드로 변환. */
 	pci_write_config_word(dev, dev->ats_cap + PCI_ATS_CTRL, ctrl); /* NVMe: ATS Control 레지스터에 STU 기록. */
 	return 0; /* NVMe: STU 준비 완료. */
-}
-EXPORT_SYMBOL_GPL(pci_prepare_ats);
+} /* NVMe: pci_prepare_ats 함수 종료. */
+EXPORT_SYMBOL_GPL(pci_prepare_ats); /* NVMe: SR-IOV NVMe PF의 ATS STU 설정 인터페이스를 모듈에 노출. */
 
 /**
  * pci_enable_ats - enable the ATS capability
@@ -154,8 +154,8 @@ EXPORT_SYMBOL_GPL(pci_prepare_ats);
  *   또는 SR-IOV PF/VF를 attach할 때 호출하며, DMA 주소 변환 가속을
  *   시작한다. VF는 PF와 동일한 STU를 사용해야만 활성화된다.
  */
-int pci_enable_ats(struct pci_dev *dev, int ps)
-{
+int pci_enable_ats(struct pci_dev *dev, int ps) /* NVMe: 장치의 ATS 활성화 함수 선언 */
+{ /* NVMe: pci_enable_ats 함수 본문 시작 */
 	u16 ctrl; /* NVMe: ATS Control 레지스터에 쓸 값 */
 	struct pci_dev *pdev; /* NVMe: VF인 경우 해당 PF를 가리킬 포인터 */
 
@@ -180,13 +180,13 @@ int pci_enable_ats(struct pci_dev *dev, int ps)
 	} else { /* NVMe: PF 또는 물리 NVMe 장치인 경우 */
 		dev->ats_stu = ps; /* NVMe: 장치 구조체에 STU 저장. */
 		ctrl |= PCI_ATS_CTRL_STU(dev->ats_stu - PCI_ATS_MIN_STU); /* NVMe: Control 값에 STU 필드 추가. */
-	}
+	} /* NVMe: VF/PF STU 설정 조걸문 블록 종료 */
 	pci_write_config_word(dev, dev->ats_cap + PCI_ATS_CTRL, ctrl); /* NVMe: ATS Control 레지스터에 Enable+STU 기록. */
 
 	dev->ats_enabled = 1; /* NVMe: 소프트웨어 상태에서 ATS 활성화 표시. */
 	return 0; /* NVMe: ATS 활성화 성공. */
-}
-EXPORT_SYMBOL_GPL(pci_enable_ats);
+} /* NVMe: pci_enable_ats 함수 종료. */
+EXPORT_SYMBOL_GPL(pci_enable_ats); /* NVMe: IOMMU/NVMe 드라이버가 ATS 활성화 함수를 사용할 수 있도록 심볼 노출. */
 
 /**
  * pci_disable_ats - disable the ATS capability
@@ -198,8 +198,8 @@ EXPORT_SYMBOL_GPL(pci_enable_ats);
  *   상태 변경, 또는 DPC/AER 복구 등에서 호출되어 엔드포인트의 translation
  *   cache를 더 이상 사용하지 않도록 만든다.
  */
-void pci_disable_ats(struct pci_dev *dev)
-{
+void pci_disable_ats(struct pci_dev *dev) /* NVMe: 장치의 ATS 비활성화 함수 선언 */
+{ /* NVMe: pci_disable_ats 함수 본문 시작 */
 	u16 ctrl; /* NVMe: 현재 ATS Control 레지스터 값을 읽어올 변수 */
 
 	if (WARN_ON(!dev->ats_enabled)) /* NVMe: ATS가 꺼진 상태에서 비활성화하면 경고. */
@@ -210,8 +210,8 @@ void pci_disable_ats(struct pci_dev *dev)
 	pci_write_config_word(dev, dev->ats_cap + PCI_ATS_CTRL, ctrl); /* NVMe: ATS를 하드웨어적으로 비활성화. */
 
 	dev->ats_enabled = 0; /* NVMe: 소프트웨어 상태에서 ATS 비활성화 표시. */
-}
-EXPORT_SYMBOL_GPL(pci_disable_ats);
+} /* NVMe: pci_disable_ats 함수 종료. */
+EXPORT_SYMBOL_GPL(pci_disable_ats); /* NVMe: NVMe 장치 제거 시 ATS 비활성화 함수를 모듈에 노출. */
 
 /*
  * pci_restore_ats_state:
@@ -219,8 +219,8 @@ EXPORT_SYMBOL_GPL(pci_disable_ats);
  *   저장필 STU와 Enable 비트를 다시 ATS Control 레지스터에 기록하여
  *   DMA 주소 변환 가속을 재개한다.
  */
-void pci_restore_ats_state(struct pci_dev *dev)
-{
+void pci_restore_ats_state(struct pci_dev *dev) /* NVMe: 장치의 ATS 상태 복원 함수 선언 */
+{ /* NVMe: pci_restore_ats_state 함수 본문 시작 */
 	u16 ctrl; /* NVMe: 복원할 ATS Control 레지스터 값 */
 
 	if (!dev->ats_enabled) /* NVMe: 이전에 ATS가 활성화되어 있지 않았으면 */
@@ -230,7 +230,7 @@ void pci_restore_ats_state(struct pci_dev *dev)
 	if (!dev->is_virtfn) /* NVMe: VF가 아닌 PF/물리 NVMe 장치에 대해서만 */
 		ctrl |= PCI_ATS_CTRL_STU(dev->ats_stu - PCI_ATS_MIN_STU); /* NVMe: 저장필 STU 필드도 복원. */
 	pci_write_config_word(dev, dev->ats_cap + PCI_ATS_CTRL, ctrl); /* NVMe: ATS Control 레지스터 복원 기록. */
-}
+} /* NVMe: pci_restore_ats_state 함수 본문 종료 */
 
 /**
  * pci_ats_queue_depth - query the ATS Invalidate Queue Depth
@@ -250,8 +250,8 @@ void pci_restore_ats_state(struct pci_dev *dev)
  *   깊이를 조회한다. IOMMU가 NVMe translation cache를 무효화할 때 한
  *   번에 몇 개의 invalidate 요청을 발행할 수 있는지 판단하는 데 사용된다.
  */
-int pci_ats_queue_depth(struct pci_dev *dev)
-{
+int pci_ats_queue_depth(struct pci_dev *dev) /* NVMe: 장치의 ATS Invalidate Queue Depth 조회 함수 선언 */
+{ /* NVMe: pci_ats_queue_depth 함수 본문 시작 */
 	u16 cap; /* NVMe: ATS Capability 레지스터 값 */
 
 	if (!dev->ats_cap) /* NVMe: ATS capability가 없으면 */
@@ -262,7 +262,7 @@ int pci_ats_queue_depth(struct pci_dev *dev)
 
 	pci_read_config_word(dev, dev->ats_cap + PCI_ATS_CAP, &cap); /* NVMe: ATS Capability 레지스터에서 Queue Depth 필드 읽기. */
 	return PCI_ATS_CAP_QDEP(cap) ? PCI_ATS_CAP_QDEP(cap) : PCI_ATS_MAX_QDEP; /* NVMe: 0이면 최대 32개로 해석, 아니면 실제 값 반환. */
-}
+} /* NVMe: pci_ats_queue_depth 함수 종료. */
 
 /**
  * pci_ats_page_aligned - Return Page Aligned Request bit status.
@@ -281,8 +281,8 @@ int pci_ats_queue_depth(struct pci_dev *dev)
  *   정렬되는지 확인한다. NVMe DMA 요청이 페이지 정렬될 때 IOMMU의
  *   translation 처리와 Invalidation 범위 계산이 단순화된다.
  */
-int pci_ats_page_aligned(struct pci_dev *pdev)
-{
+int pci_ats_page_aligned(struct pci_dev *pdev) /* NVMe: 장치의 페이지 정렬 DMA 여부 확인 함수 선언 */
+{ /* NVMe: pci_ats_page_aligned 함수 본문 시작 */
 	u16 cap; /* NVMe: ATS Capability 레지스터 값 */
 
 	if (!pdev->ats_cap) /* NVMe: ATS capability가 없으면 */
@@ -294,9 +294,9 @@ int pci_ats_page_aligned(struct pci_dev *pdev)
 		return 1; /* NVMe: NVMe 장치의 주소가 4KB 정렬됨을 보장. */
 
 	return 0; /* NVMe: 페이지 정렬 보장 없음. */
-}
+} /* NVMe: pci_ats_page_aligned 함수 종료. */
 
-#ifdef CONFIG_PCI_PRI
+#ifdef CONFIG_PCI_PRI /* NVMe: PRI(Page Request Interface) 기능이 커널 설정에 포함된 경우에만 컴파일. */
 /*
  * pci_pri_init:
  *   NVMe 장치의 PRI(Page Request Interface) 확장 capability를 탐색하고
@@ -304,8 +304,8 @@ int pci_ats_page_aligned(struct pci_dev *pdev)
  *   때 페이지를 요청하는 메커니즘으로, ATS와 함께 사용되어 고급 IOMMU
  *   DMA 매니지먼트를 가능하게 한다.
  */
-void pci_pri_init(struct pci_dev *pdev)
-{
+void pci_pri_init(struct pci_dev *pdev) /* NVMe: 장치의 PRI capability 초기화 함수 선언 */
+{ /* NVMe: pci_pri_init 함수 본문 시작 */
 	u16 status; /* NVMe: PRI Status 레지스터 값 */
 
 	pdev->pri_cap = pci_find_ext_capability(pdev, PCI_EXT_CAP_ID_PRI); /* NVMe: PRI Extended Capability 위치 검색. */
@@ -316,7 +316,7 @@ void pci_pri_init(struct pci_dev *pdev)
 	pci_read_config_word(pdev, pdev->pri_cap + PCI_PRI_STATUS, &status); /* NVMe: PRI Status 레지스터 읽기. */
 	if (status & PCI_PRI_STATUS_PASID) /* NVMe: PRG Response에 PASID가 필요한지 여부 확인. */
 		pdev->pasid_required = 1; /* NVMe: PASID 필요 플래그 설정. */
-}
+} /* NVMe: pci_pri_init 함수 종료. */
 
 /**
  * pci_enable_pri - Enable PRI capability
@@ -331,8 +331,8 @@ void pci_pri_init(struct pci_dev *pdev)
  *   demand-paging 기반 DMA를 허용할 때 호출하며, 동시에 처리할 수 있는
  *   outstanding page request 수를 설정한다.
  */
-int pci_enable_pri(struct pci_dev *pdev, u32 reqs)
-{
+int pci_enable_pri(struct pci_dev *pdev, u32 reqs) /* NVMe: 장치의 PRI 활성화 함수 선언 */
+{ /* NVMe: pci_enable_pri 함수 본문 시작 */
 	u16 control, status; /* NVMe: PRI Control/Status 레지스터 값 */
 	u32 max_requests; /* NVMe: 하드웨어가 지원하는 최대 page request 수 */
 	int pri = pdev->pri_cap; /* NVMe: PRI capability 오프셋 복사 */
@@ -346,7 +346,7 @@ int pci_enable_pri(struct pci_dev *pdev, u32 reqs)
 		if (pci_physfn(pdev)->pri_enabled) /* NVMe: PF가 PRI를 이미 활성화했는지 확인. */
 			return 0; /* NVMe: PF의 PRI가 공유되므로 성공 처리. */
 		return -EINVAL; /* NVMe: PF에서 PRI가 켜지지 않았으면 VF 활성화 불가. */
-	}
+	} /* NVMe: VF PRI 공유 조걸문 블록 종료 */
 
 	if (WARN_ON(pdev->pri_enabled)) /* NVMe: PRI가 이미 활성화되어 있으면 경고. */
 		return -EBUSY; /* NVMe: busy 상태 반환. */
@@ -369,7 +369,7 @@ int pci_enable_pri(struct pci_dev *pdev, u32 reqs)
 	pdev->pri_enabled = 1; /* NVMe: 소프트웨어 상태에서 PRI 활성화 표시. */
 
 	return 0; /* NVMe: PRI 활성화 성공. */
-}
+} /* NVMe: pci_enable_pri 함수 본문 종료 */
 
 /**
  * pci_disable_pri - Disable PRI capability
@@ -382,8 +382,8 @@ int pci_enable_pri(struct pci_dev *pdev, u32 reqs)
  *   NVMe 장치의 PRI를 비활성화한다. NVMe 장치 제거, IOMMU detach, 또는
  *   전원 관리 시 호출되어 더 이상 페이지 요청을 받지 않도록 한다.
  */
-void pci_disable_pri(struct pci_dev *pdev)
-{
+void pci_disable_pri(struct pci_dev *pdev) /* NVMe: 장치의 PRI 비활성화 함수 선언 */
+{ /* NVMe: pci_disable_pri 함수 본문 시작 */
 	u16 control; /* NVMe: PRI Control 레지스터 값 */
 	int pri = pdev->pri_cap; /* NVMe: PRI capability 오프셋 */
 
@@ -402,8 +402,8 @@ void pci_disable_pri(struct pci_dev *pdev)
 	pci_write_config_word(pdev, pri + PCI_PRI_CTRL, control); /* NVMe: PRI 하드웨어 비활성화. */
 
 	pdev->pri_enabled = 0; /* NVMe: 소프트웨어 상태에서 PRI 비활성화 표시. */
-}
-EXPORT_SYMBOL_GPL(pci_disable_pri);
+} /* NVMe: pci_disable_pri 함수 본문 종료 */
+EXPORT_SYMBOL_GPL(pci_disable_pri); /* NVMe: NVMe/IOMMU 드라이버가 pci_disable_pri 심볼을 참조할 수 있도록 EXPORT */
 
 /**
  * pci_restore_pri_state - Restore PRI
@@ -414,8 +414,8 @@ EXPORT_SYMBOL_GPL(pci_disable_pri);
  *   NVMe 장치의 PRI 상태를 suspend/resume 또는 AER 복구 후에 복원한다.
  *   할당된 outstanding request 수와 Enable 비트를 다시 설정한다.
  */
-void pci_restore_pri_state(struct pci_dev *pdev)
-{
+void pci_restore_pri_state(struct pci_dev *pdev) /* NVMe: 장치의 PRI 상태 복원 함수 선언 */
+{ /* NVMe: pci_restore_pri_state 함수 본문 시작 */
 	u16 control = PCI_PRI_CTRL_ENABLE; /* NVMe: PRI Enable 비트로 초기화. */
 	u32 reqs = pdev->pri_reqs_alloc; /* NVMe: 이전에 할당된 request 수를 복원. */
 	int pri = pdev->pri_cap; /* NVMe: PRI capability 오프셋 */
@@ -431,7 +431,7 @@ void pci_restore_pri_state(struct pci_dev *pdev)
 
 	pci_write_config_dword(pdev, pri + PCI_PRI_ALLOC_REQ, reqs); /* NVMe: Allocated Request 수 복원. */
 	pci_write_config_word(pdev, pri + PCI_PRI_CTRL, control); /* NVMe: PRI Enable 복원. */
-}
+} /* NVMe: pci_restore_pri_state 함수 본문 종료 */
 
 /**
  * pci_reset_pri - Resets device's PRI state
@@ -445,8 +445,8 @@ void pci_restore_pri_state(struct pci_dev *pdev)
  *   NVMe 장치의 PRI 상태를 리셋한다. PRI가 비활성화된 상태에서만 호출할
  *   수 있으며, 페이지 요청 상태 머신을 초기화한다.
  */
-int pci_reset_pri(struct pci_dev *pdev)
-{
+int pci_reset_pri(struct pci_dev *pdev) /* NVMe: 장치의 PRI 상태 리셋 함수 선언 */
+{ /* NVMe: pci_reset_pri 함수 본문 시작 */
 	u16 control; /* NVMe: PRI Control 레지스터에 쓸 Reset 값 */
 	int pri = pdev->pri_cap; /* NVMe: PRI capability 오프셋 */
 
@@ -463,7 +463,7 @@ int pci_reset_pri(struct pci_dev *pdev)
 	pci_write_config_word(pdev, pri + PCI_PRI_CTRL, control); /* NVMe: PRI 상태 머신 리셋 기록. */
 
 	return 0; /* NVMe: PRI 리셋 성공. */
-}
+} /* NVMe: pci_reset_pri 함수 본문 종료 */
 
 /**
  * pci_prg_resp_pasid_required - Return PRG Response PASID Required bit
@@ -478,13 +478,13 @@ int pci_reset_pri(struct pci_dev *pdev)
  *   확인한다. PASID를 사용하는 NVMe DMA 스트림이 있을 때 PRG 응답에 PASID를
  *   포함해야 하는지 판단한다.
  */
-int pci_prg_resp_pasid_required(struct pci_dev *pdev)
-{
+int pci_prg_resp_pasid_required(struct pci_dev *pdev) /* NVMe: PRI 응답에 PASID 필요 여부 확인 함수 선언 */
+{ /* NVMe: pci_prg_resp_pasid_required 함수 본문 시작 */
 	if (pdev->is_virtfn) /* NVMe: VF인 경우 */
 		pdev = pci_physfn(pdev); /* NVMe: PASID 요구 여부는 PF에서 결정하므로 PF로 전환. */
 
 	return pdev->pasid_required; /* NVMe: PASID 필요 여부 반환. */
-}
+} /* NVMe: pci_prg_resp_pasid_required 함수 본문 종료 */
 
 /**
  * pci_pri_supported - Check if PRI is supported.
@@ -497,17 +497,17 @@ int pci_prg_resp_pasid_required(struct pci_dev *pdev)
  *   NVMe 장치(또는 SR-IOV PF)가 PRI capability를 가지고 있는지 확인한다.
  *   VF는 PF의 PRI capability를 공유하므로 PF의 capability를 참조한다.
  */
-bool pci_pri_supported(struct pci_dev *pdev)
-{
+bool pci_pri_supported(struct pci_dev *pdev) /* NVMe: 장치(또는 PF)의 PRI 지원 여부 확인 함수 선언 */
+{ /* NVMe: pci_pri_supported 함수 본문 시작 */
 	/* VFs share the PF PRI */
 	if (pci_physfn(pdev)->pri_cap) /* NVMe: 물리 Function(PF)에 PRI capability가 있으면 */
 		return true; /* NVMe: PRI 지원으로 간주(VF 포함). */
 	return false; /* NVMe: PRI 미지원. */
-}
-EXPORT_SYMBOL_GPL(pci_pri_supported);
+} /* NVMe: pci_pri_supported 함수 본문 종료 */
+EXPORT_SYMBOL_GPL(pci_pri_supported); /* NVMe: NVMe/IOMMU 드라이버가 PRI 지원 여부를 조회할 수 있도록 심볼 노출. */
 #endif /* CONFIG_PCI_PRI */
 
-#ifdef CONFIG_PCI_PASID
+#ifdef CONFIG_PCI_PASID /* NVMe: PASID 기능이 커널 설정에 포함된 경우에만 컴파일. */
 /*
  * pci_pasid_init:
  *   NVMe 장치의 PASID(Process Address Space ID) 확장 capability를 탐색하고
@@ -515,10 +515,10 @@ EXPORT_SYMBOL_GPL(pci_pri_supported);
  *   공간을 동시에 사용할 수 있게 하여 멀티큐 NVMe 및 가상화 환경에서
  *   세밀한 주소 공간 분리를 지원한다.
  */
-void pci_pasid_init(struct pci_dev *pdev)
-{
+void pci_pasid_init(struct pci_dev *pdev) /* NVMe: 장치의 PASID capability 초기화 함수 선언 */
+{ /* NVMe: pci_pasid_init 함수 본문 시작 */
 	pdev->pasid_cap = pci_find_ext_capability(pdev, PCI_EXT_CAP_ID_PASID); /* NVMe: PASID Extended Capability 위치 검색. */
-}
+} /* NVMe: pci_pasid_init 함수 종료. */
 
 /**
  * pci_enable_pasid - Enable the PASID capability
@@ -535,8 +535,8 @@ void pci_pasid_init(struct pci_dev *pdev)
  *   여러 PASID를 사용하는 DMA를 허용할 때 호출한다. VF는 PF의 PASID
  *   설정을 공유한다.
  */
-int pci_enable_pasid(struct pci_dev *pdev, int features)
-{
+int pci_enable_pasid(struct pci_dev *pdev, int features) /* NVMe: 장치의 PASID 활성화 함수 선언 */
+{ /* NVMe: pci_enable_pasid 함수 본문 시작 */
 	u16 control, supported; /* NVMe: PASID Control/Capability 레지스터 값 */
 	int pasid = pdev->pasid_cap; /* NVMe: PASID capability 오프셋 */
 
@@ -548,7 +548,7 @@ int pci_enable_pasid(struct pci_dev *pdev, int features)
 		if (pci_physfn(pdev)->pasid_enabled) /* NVMe: PF가 PASID를 활성화했는지 확인. */
 			return 0; /* NVMe: PF PASID가 공유되므로 성공. */
 		return -EINVAL; /* NVMe: PF에서 PASID가 켜지지 않았으면 VF도 불가. */
-	}
+	} /* NVMe: VF PASID 공유 조걸문 블록 종료 */
 
 	if (WARN_ON(pdev->pasid_enabled)) /* NVMe: PASID가 이미 활성화되어 있으면 경고. */
 		return -EBUSY; /* NVMe: busy 오류 반환. */
@@ -577,8 +577,8 @@ int pci_enable_pasid(struct pci_dev *pdev, int features)
 	pdev->pasid_enabled = 1; /* NVMe: 소프트웨어 상태에서 PASID 활성화 표시. */
 
 	return 0; /* NVMe: PASID 활성화 성공. */
-}
-EXPORT_SYMBOL_GPL(pci_enable_pasid);
+} /* NVMe: pci_enable_pasid 함수 종료. */
+EXPORT_SYMBOL_GPL(pci_enable_pasid); /* NVMe: NVMe/IOMMU 드라이버가 PASID 활성화 함수를 사용할 수 있도록 심볼 노출. */
 
 /**
  * pci_disable_pasid - Disable the PASID capability
@@ -589,8 +589,8 @@ EXPORT_SYMBOL_GPL(pci_enable_pasid);
  *   NVMe 장치의 PASID 기능을 비활성화한다. NVMe 장치 제거, IOMMU detach,
  *   또는 PASID DMA 스트림 정리 시 호출된다.
  */
-void pci_disable_pasid(struct pci_dev *pdev)
-{
+void pci_disable_pasid(struct pci_dev *pdev) /* NVMe: 장치의 PASID 비활성화 함수 선언 */
+{ /* NVMe: pci_disable_pasid 함수 본문 시작 */
 	u16 control = 0; /* NVMe: PASID Control 레지스터를 0으로 만들 값 */
 	int pasid = pdev->pasid_cap; /* NVMe: PASID capability 오프셋 */
 
@@ -607,8 +607,8 @@ void pci_disable_pasid(struct pci_dev *pdev)
 	pci_write_config_word(pdev, pasid + PCI_PASID_CTRL, control); /* NVMe: PASID Control 레지스터를 0으로 써서 비활성화. */
 
 	pdev->pasid_enabled = 0; /* NVMe: 소프트웨어 상태에서 PASID 비활성화 표시. */
-}
-EXPORT_SYMBOL_GPL(pci_disable_pasid);
+} /* NVMe: pci_disable_pasid 함수 종료. */
+EXPORT_SYMBOL_GPL(pci_disable_pasid); /* NVMe: NVMe 드라이버가 PASID 비활성화 함수를 사용할 수 있도록 심볼 노출. */
 
 /**
  * pci_restore_pasid_state - Restore PASID capabilities
@@ -620,8 +620,8 @@ EXPORT_SYMBOL_GPL(pci_disable_pasid);
  *   Enable 비트와 이전에 저장필 features를 PASID Control 레지스터에
  *   다시 기록한다.
  */
-void pci_restore_pasid_state(struct pci_dev *pdev)
-{
+void pci_restore_pasid_state(struct pci_dev *pdev) /* NVMe: 장치의 PASID 상태 복원 함수 선언 */
+{ /* NVMe: pci_restore_pasid_state 함수 본문 시작 */
 	u16 control; /* NVMe: 복원할 PASID Control 레지스터 값 */
 	int pasid = pdev->pasid_cap; /* NVMe: PASID capability 오프셋 */
 
@@ -636,7 +636,7 @@ void pci_restore_pasid_state(struct pci_dev *pdev)
 
 	control = PCI_PASID_CTRL_ENABLE | pdev->pasid_features; /* NVMe: Enable 비트와 저장필 features 조합. */
 	pci_write_config_word(pdev, pasid + PCI_PASID_CTRL, control); /* NVMe: PASID Control 레지스터 복원. */
-}
+} /* NVMe: pci_restore_pasid_state 함수 종료. */
 
 /**
  * pci_pasid_features - Check which PASID features are supported
@@ -654,8 +654,8 @@ void pci_restore_pasid_state(struct pci_dev *pdev)
  *   조회한다. IOMMU가 NVMe PASID 테이블을 구성할 때 허용할 권한을
  *   결정하는 데 사용된다.
  */
-int pci_pasid_features(struct pci_dev *pdev)
-{
+int pci_pasid_features(struct pci_dev *pdev) /* NVMe: 장치의 PASID 지원 features 조회 함수 선언 */
+{ /* NVMe: pci_pasid_features 함수 본문 시작 */
 	u16 supported; /* NVMe: PASID Capability 레지스터 값 */
 	int pasid; /* NVMe: PASID capability 오프셋 */
 
@@ -671,8 +671,8 @@ int pci_pasid_features(struct pci_dev *pdev)
 	supported &= PCI_PASID_CAP_EXEC | PCI_PASID_CAP_PRIV; /* NVMe: Exec/Priv 기능 비트만 마스킹. */
 
 	return supported; /* NVMe: 지원하는 PASID feature 마스크 반환. */
-}
-EXPORT_SYMBOL_GPL(pci_pasid_features);
+} /* NVMe: pci_pasid_features 함수 종료. */
+EXPORT_SYMBOL_GPL(pci_pasid_features); /* NVMe: NVMe/IOMMU 드라이버가 PASID 부가 기능을 조회할 수 있도록 심볼 노출. */
 
 /**
  * pci_max_pasids - Get maximum number of PASIDs supported by device
@@ -687,8 +687,8 @@ EXPORT_SYMBOL_GPL(pci_pasid_features);
  *   컨트롤러의 큐 수와 연동하여 IOMMU가 할당할 PASID 범위를 결정할 때
  *   사용된다.
  */
-int pci_max_pasids(struct pci_dev *pdev)
-{
+int pci_max_pasids(struct pci_dev *pdev) /* NVMe: 장치의 최대 PASID 개수 조회 함수 선언 */
+{ /* NVMe: pci_max_pasids 함수 본문 시작 */
 	u16 supported; /* NVMe: PASID Capability 레지스터 값 */
 	int pasid; /* NVMe: PASID capability 오프셋 */
 
@@ -702,8 +702,8 @@ int pci_max_pasids(struct pci_dev *pdev)
 	pci_read_config_word(pdev, pasid + PCI_PASID_CAP, &supported); /* NVMe: PASID Capability 레지스터 읽기. */
 
 	return (1 << FIELD_GET(PCI_PASID_CAP_WIDTH, supported)); /* NVMe: PASID width 필드를 비트 수로 변환하여 최대 PASID 수 반환. */
-}
-EXPORT_SYMBOL_GPL(pci_max_pasids);
+} /* NVMe: pci_max_pasids 함수 종료. */
+EXPORT_SYMBOL_GPL(pci_max_pasids); /* NVMe: NVMe 드라이버가 사용 가능한 PASID 개수를 조회할 수 있도록 심볼 노출. */
 
 /**
  * pci_pasid_status - Check the PASID status
@@ -723,8 +723,8 @@ EXPORT_SYMBOL_GPL(pci_max_pasids);
  *   Privileged 비트를 반환한다. IOMMU가 NVMe PASID 설정이 올바르게
  *   적용되었는지 검증할 때 사용된다.
  */
-int pci_pasid_status(struct pci_dev *pdev)
-{
+int pci_pasid_status(struct pci_dev *pdev) /* NVMe: 장치의 PASID 상태 조회 함수 선언 */
+{ /* NVMe: pci_pasid_status 함수 본문 시작 */
 	int pasid; /* NVMe: PASID capability 오프셋 */
 	u16 ctrl; /* NVMe: PASID Control 레지스터 값 */
 
@@ -737,10 +737,10 @@ int pci_pasid_status(struct pci_dev *pdev)
 
 	pci_read_config_word(pdev, pasid + PCI_PASID_CTRL, &ctrl); /* NVMe: PASID Control 레지스터 읽기. */
 
-	ctrl &= PCI_PASID_CTRL_ENABLE | PCI_PASID_CTRL_EXEC |
+	ctrl &= PCI_PASID_CTRL_ENABLE | PCI_PASID_CTRL_EXEC | /* NVMe: PASID Control 상태 비트 AND 마스크 연속 줄 */
 		PCI_PASID_CTRL_PRIV; /* NVMe: Enable/Exec/Priv 비트만 추출. */
 
 	return ctrl; /* NVMe: 현재 PASID 상태 마스크 반환. */
-}
-EXPORT_SYMBOL_GPL(pci_pasid_status);
+} /* NVMe: pci_pasid_status 함수 종료. */
+EXPORT_SYMBOL_GPL(pci_pasid_status); /* NVMe: NVMe 드라이버가 PASID 활성화 상태를 확인할 수 있도록 심볼 노출. */
 #endif /* CONFIG_PCI_PASID */

@@ -39,7 +39,10 @@
  *   - pcie_set_target_speed(): NVMe 장치 아래 링크 속도를 요청 속도로
  *     변경(예: cooling policy 또는 사용자 sysfs 요청)
  *   - pcie_update_link_speed(): 변경된 링크 속도를 bus->cur_bus_speed에
- *     반영, NVMe 드라이버에서 pci_get_max_link_speed() 등으로 확인 가능
+ *     반영. 현재 링크 속도를 조회하는 실제 API 는 pcie_get_speed_cap()(pci.c:3681 등)
+ *     이며, pci_get_max_link_speed() 라는 함수는 커널에 존재하지 않는다.
+ *     참고로 drivers/nvme/ 에는 이들을 호출하는 코드가 없다 — NVMe 드라이버는
+ *     링크 속도를 직접 확인하지 않고, 대역폭 변화는 이 파일이 알아서 처리한다
  *
  * 본 파일은 PCIe native hotplug, PTM(Precision Time Measurement), DOE,
  * ROM 등과 직접 연관되지는 않지만, NVMe SSD의 PCIe link 품질/속도를

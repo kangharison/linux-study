@@ -42,7 +42,7 @@
  * ===================================================================
  */
 
-#define dev_fmt(fmt) "PME: " fmt
+#define dev_fmt(fmt) "PME: " fmt /* NVMe: PME 로그 메시지 접두사 정의. */
 
 #include <linux/bitfield.h> /* NVMe: PME Requester ID 필드 추출에 사용하는 FIELD_GET 매크로 포함. */
 #include <linux/pci.h> /* NVMe: PCIe capability, pm_request_resume, pci_check_pme_status 등 선언 포함. */
@@ -66,12 +66,12 @@
 bool pcie_pme_msi_disabled; /* NVMe: PME 시 MSI 사용 금지 boot 옵션 저장 변수. false면 MSI 가능. */
 
 static int __init pcie_pme_setup(char *str) /* NVMe: 커널 부팅 파라미터 "pcie_pme=" 처리 함수. */
-{
+{ /* NVMe: boot 파라미터 처리 함수 본문 시작. */
 	if (!strncmp(str, "nomsi", 5)) /* NVMe: 인자가 "nomsi"면 MSI 기반 PME 비활성화. */
 		pcie_pme_msi_disabled = true; /* NVMe: INTx 전용으로 강제하여 일부 NVMe wakeup 문제 회피. */
 
 	return 1; /* NVMe: 파라미터 소비 완료를 커널에 알림. */
-}
+} /* NVMe: boot 파라미터 처리 함수 본문 끝. */
 __setup("pcie_pme=", pcie_pme_setup); /* NVMe: 부팅 시 "pcie_pme=" 옵션 등록. */
 
 /*
@@ -80,12 +80,12 @@ __setup("pcie_pme=", pcie_pme_setup); /* NVMe: 부팅 시 "pcie_pme=" 옵션 등
  *   NVMe 장치가 연결된 Root Port의 PME 인터럽트, workqueue, lock 상태를
  *   관리한다. NVMe wakeup 이벤트는 이 구조체를 통해 처리된다.
  */
-struct pcie_pme_service_data {
+struct pcie_pme_service_data { /* NVMe: PME 서비스별 런타임 데이터 구조체 정의 시작. */
 	spinlock_t lock; /* NVMe: 인터럽트 핸들러와 work 함수 간 동기화용 spinlock. */
 	struct pcie_device *srv; /* NVMe: 이 PME 서비스에 해당하는 PCIe 포트 장치. */
 	struct work_struct work; /* NVMe: 인터럽트 컨텍스트에서 뒤늦게 PME를 처리할 work item. */
 	bool noirq; /* If set, keep the PME interrupt disabled. */ /* NVMe: suspend/resume 중 PME 인터럽트 일시 정지 플래그. */
-};
+}; /* NVMe: PME 서비스 데이터 구조체 정의 끝. */
 
 /*
  * pcie_pme_interrupt_enable:
@@ -100,14 +100,14 @@ struct pcie_pme_service_data {
  * @enable: Enable or disable the interrupt.
  */
 void pcie_pme_interrupt_enable(struct pci_dev *dev, bool enable) /* NVMe: PME 인터럽트 활성/비활성 함수. */
-{
+{ /* NVMe: PME 인터럽트 활성/비활성 함수 본문 시작. */
 	if (enable) /* NVMe: enable이 true면 PME 인터럽트를 켠다. */
 		pcie_capability_set_word(dev, PCI_EXP_RTCTL, /* NVMe: Root Control 레지스터의 PMEIE 비트를 set. */
-					 PCI_EXP_RTCTL_PMEIE);
+					 PCI_EXP_RTCTL_PMEIE); /* NVMe: Root Control 레지스터의 PMEIE 마스크(활성화 인자). */
 	else /* NVMe: enable이 false면 PME 인터럽트를 끈다. */
 		pcie_capability_clear_word(dev, PCI_EXP_RTCTL, /* NVMe: Root Control 레지스터의 PMEIE 비트를 clear. */
-					   PCI_EXP_RTCTL_PMEIE);
-}
+					   PCI_EXP_RTCTL_PMEIE); /* NVMe: Root Control 레지스터의 PMEIE 마스크(비활성화 인자). */
+} /* NVMe: PME 인터럽트 활성/비활성 함수 본문 끝. */
 
 /*
  * pcie_pme_walk_bus:
@@ -124,7 +124,7 @@ void pcie_pme_interrupt_enable(struct pci_dev *dev, bool enable) /* NVMe: PME �
  * Scan given PCI bus and all buses under it for devices asserting PME#.
  */
 static bool pcie_pme_walk_bus(struct pci_bus *bus) /* NVMe: bus 트리를 순회하며 PME 소스를 찾는 함수. */
-{
+{ /* NVMe: bus 트리 PME 탐색 함수 본문 시작. */
 	struct pci_dev *dev; /* NVMe: 현재 검사 중인 PCI 장치. */
 	bool ret = false; /* NVMe: PME 소스 발견 여부(초기 false). */
 
@@ -137,14 +137,14 @@ static bool pcie_pme_walk_bus(struct pci_bus *bus) /* NVMe: bus 트리를 순회
 			pci_wakeup_event(dev); /* NVMe: 전원 관리 이벤트를 wakeup core에 알림. */
 			pm_request_resume(&dev->dev); /* NVMe: 해당 장치의 resume 작업을 요청(NVMe의 .resume 연결). */
 			ret = true; /* NVMe: PME 소스를 찾았음을 표시. */
-		}
+		} /* NVMe: if 블록 끝(레거시 장치 PME 처리). */
 
 		if (dev->subordinate && pcie_pme_walk_bus(dev->subordinate)) /* NVMe: 하위 bus가 있으면 재귀 탐색. */
 			ret = true; /* NVMe: 하위 bus에서 PME를 찾으면 ret을 true로 유지. */
-	}
+	} /* NVMe: list_for_each_entry 루프 끝. */
 
 	return ret; /* NVMe: 이 bus 트리에서 PME 소스 발견 여부 반환. */
-}
+} /* NVMe: bus 트리 PME 탐색 함수 본문 끝. */
 
 /*
  * pcie_pme_from_pci_bridge:
@@ -162,7 +162,7 @@ static bool pcie_pme_walk_bus(struct pci_bus *bus) /* NVMe: bus 트리를 순회
  * of device/function number 0 on its secondary bus.
  */
 static bool pcie_pme_from_pci_bridge(struct pci_bus *bus, u8 devfn) /* NVMe: PCIe-PCI bridge에서 온 PME인지 확인. */
-{
+{ /* NVMe: PCIe-PCI bridge PME 확인 함수 본문 시작. */
 	struct pci_dev *dev; /* NVMe: bridge 장치 포인터. */
 	bool found = false; /* NVMe: PME 소스 발견 여부. */
 
@@ -178,11 +178,11 @@ static bool pcie_pme_from_pci_bridge(struct pci_bus *bus, u8 devfn) /* NVMe: PCI
 		if (pcie_pme_walk_bus(bus)) /* NVMe: bridge 아래 bus를 순회하며 PME 소스 탐색. */
 			found = true; /* NVMe: 하위 레거시 장치에서 PME 발견. */
 		up_read(&pci_bus_sem); /* NVMe: bus 트리 읽기 락 해제. */
-	}
+	} /* NVMe: if 블록 끝(bridge 확인 및 하위 탐색). */
 
 	pci_dev_put(dev); /* NVMe: bridge 장치 참조 카운트 감소. */
 	return found; /* NVMe: PCIe-PCI bridge에서 온 PME 여부 반환. */
-}
+} /* NVMe: PCIe-PCI bridge PME 확인 함수 본문 끝. */
 
 /*
  * pcie_pme_handle_request:
@@ -198,7 +198,7 @@ static bool pcie_pme_from_pci_bridge(struct pci_bus *bus, u8 devfn) /* NVMe: PCI
  * @req_id: PCIe Requester ID of the device that generated the PME.
  */
 static void pcie_pme_handle_request(struct pci_dev *port, u16 req_id) /* NVMe: PME Requester ID를 해석해 실제 장치를 찾아 처리. */
-{
+{ /* NVMe: PME Requester ID 처리 함수 본문 시작. */
 	u8 busnr = req_id >> 8, devfn = req_id & 0xff; /* NVMe: Requester ID에서 bus 번호와 device/function 분리. */
 	struct pci_bus *bus; /* NVMe: PME 소스가 속한 bus 포인터. */
 	struct pci_dev *dev; /* NVMe: PME를 발생시킨 장치 후보. */
@@ -212,7 +212,7 @@ static void pcie_pme_handle_request(struct pci_dev *port, u16 req_id) /* NVMe: P
 		if (pci_check_pme_status(port)) { /* NVMe: Root Port의 PME status 확인. */
 			pm_request_resume(&port->dev); /* NVMe: Root Port resume 요청. */
 			found = true; /* NVMe: Root Port가 PME 소스임. */
-		} else {
+		} else { /* NVMe: Root Port가 PME status가 아닌 경우로 분기. */
 			/*
 			 * Apparently, the root port generated the PME on behalf
 			 * of a non-PCIe device downstream.  If this is done by
@@ -224,9 +224,9 @@ static void pcie_pme_handle_request(struct pci_dev *port, u16 req_id) /* NVMe: P
 			down_read(&pci_bus_sem); /* NVMe: 하위 bus 탐색을 위해 읽기 락 획득. */
 			found = pcie_pme_walk_bus(port->subordinate); /* NVMe: Root Port 하위 bus에서 PME 소스 탐색. */
 			up_read(&pci_bus_sem); /* NVMe: bus 트리 읽기 락 해제. */
-		}
+		} /* NVMe: Root Port 처리 if 블록 끝. */
 		goto out; /* NVMe: Root Port 처리 완료 후 종료 지점으로 이동. */
-	}
+	} /* NVMe: Root Port 자체 PME 확인 분기 끝. */
 
 	/* Second, find the bus the source device is on. */
 	bus = pci_find_bus(pci_domain_nr(port->bus), busnr); /* NVMe: Requester ID의 bus 번호에 해당하는 pci_bus 구조체 탐색. */
@@ -245,9 +245,9 @@ static void pcie_pme_handle_request(struct pci_dev *port, u16 req_id) /* NVMe: P
 		if (dev->devfn == devfn) { /* NVMe: Requester ID의 devfn과 일치하는 장치를 찾음. */
 			found = true; /* NVMe: 후보 장치 발견. */
 			break; /* NVMe: 순회 종료. */
-		}
+		} /* NVMe: devfn 일치 장치 찾기 if 블록 끝. */
 		pci_dev_put(dev); /* NVMe: 일치하지 않으면 참조 카운트 감소. */
-	}
+	} /* NVMe: list_for_each_entry 루프 끝. */
 	up_read(&pci_bus_sem); /* NVMe: bus 트리 읽기 락 해제. */
 
 	if (found) { /* NVMe: devfn이 일치하는 장치가 bus에 존재하면. */
@@ -259,7 +259,7 @@ static void pcie_pme_handle_request(struct pci_dev *port, u16 req_id) /* NVMe: P
 
 			pci_wakeup_event(dev); /* NVMe: 장치의 wakeup 이벤트를 등록. */
 			pm_request_resume(&dev->dev); /* NVMe: 장치 resume 스케줄(NVMe pdev면 nvme_resume 연결). */
-		}
+		} /* NVMe: PME status 확인 if 블록 끝. */
 		pci_dev_put(dev); /* NVMe: 후보 장치 참조 카운트 감소. */
 	} else if (devfn) { /* NVMe: 장치가 없고 devfn이 0이 아니면 bridge 변환 가능성 재시도. */
 		/*
@@ -267,15 +267,15 @@ static void pcie_pme_handle_request(struct pci_dev *port, u16 req_id) /* NVMe: P
 		 * assuming that the PME was reported by a PCIe-PCI bridge that
 		 * used devfn different from zero.
 		 */
-		pci_info(port, "interrupt generated for non-existent device %02x:%02x.%d\n",
+		pci_info(port, "interrupt generated for non-existent device %02x:%02x.%d\n", /* NVMe: 존재하지 않는 장치에 대한 PME 발생 시 경고 로그 출력. */
 			 busnr, PCI_SLOT(devfn), PCI_FUNC(devfn)); /* NVMe: 존재하지 않는 장치에 대한 PME 로그 출력. */
 		found = pcie_pme_from_pci_bridge(bus, 0); /* NVMe: bridge가 devfn 0으로 PME를 본 경우로 재시도. */
-	}
+	} /* NVMe: else if 블록 끝(bridge 변환 재시도). */
 
- out:
+ out: /* NVMe: PME 처리 함수 공통 종료 레이블. */
 	if (!found) /* NVMe: 끝까지 PME 소스를 찾지 못하면. */
 		pci_info(port, "Spurious native interrupt!\n"); /* NVMe: 허위 인터럽트 로그 출력. */
-}
+} /* NVMe: PME Requester ID 처리 함수 본문 끝. */
 
 /*
  * pcie_pme_work_fn:
@@ -288,9 +288,9 @@ static void pcie_pme_handle_request(struct pci_dev *port, u16 req_id) /* NVMe: P
  * @work: Work structure giving access to service data.
  */
 static void pcie_pme_work_fn(struct work_struct *work) /* NVMe: PME 처리 work 핸들러. */
-{
+{ /* NVMe: PME work 핸들러 본문 시작. */
 	struct pcie_pme_service_data *data = /* NVMe: work 구조체에서 PME 서비스 데이터를 얻는다. */
-			container_of(work, struct pcie_pme_service_data, work);
+			container_of(work, struct pcie_pme_service_data, work); /* NVMe: work 구조체에서 pcie_pme_service_data 포인터 추출. */
 	struct pci_dev *port = data->srv->port; /* NVMe: 이 PME 서비스가 달린 Root Port/Event Collector. */
 	u32 rtsta; /* NVMe: Root Status 레지스터 값. */
 
@@ -313,11 +313,11 @@ static void pcie_pme_work_fn(struct work_struct *work) /* NVMe: PME 처리 work 
 
 			spin_unlock_irq(&data->lock); /* NVMe: PME 소스 탐색 중 lock을 잠시 해제(블로킹 가능). */
 			pcie_pme_handle_request(port, /* NVMe: Requester ID를 추출해 실제 PME 소스 처리. */
-				    FIELD_GET(PCI_EXP_RTSTA_PME_RQ_ID, rtsta));
+				    FIELD_GET(PCI_EXP_RTSTA_PME_RQ_ID, rtsta)); /* NVMe: rtsta에서 PME Requester ID 필드 값 추출. */
 			spin_lock_irq(&data->lock); /* NVMe: 다시 lock 획득 및 인터럽트 비활성화. */
 
 			continue; /* NVMe: 다음 PME가 있는지 다시 확인. */
-		}
+		} /* NVMe: if 블록 끝(PME status 처리). */
 
 		/* No need to loop if there are no more PMEs pending. */
 		if (!(rtsta & PCI_EXP_RTSTA_PENDING)) /* NVMe: 추가 PME pending 비트가 없으면. */
@@ -326,13 +326,13 @@ static void pcie_pme_work_fn(struct work_struct *work) /* NVMe: PME 처리 work 
 		spin_unlock_irq(&data->lock); /* NVMe: pending 동안 다른 CPU가 PME를 처리할 수 있도록 lock 해제. */
 		cpu_relax(); /* NVMe: 짧은 busy-wait로 pending 비트 변화를 기다림. */
 		spin_lock_irq(&data->lock); /* NVMe: 다시 lock 획득 후 루프 재개. */
-	}
+	} /* NVMe: for 루프 끝. */
 
 	if (!data->noirq) /* NVMe: 아직 noirq 상태가 아니면. */
 		pcie_pme_interrupt_enable(port, true); /* NVMe: 추가 PME 수신을 위해 Root Port PME 인터럽트 재활성화. */
 
 	spin_unlock_irq(&data->lock); /* NVMe: 서비스 lock 해제 및 인터럽트 복원. */
-}
+} /* NVMe: PME work 핸들러 본문 끝. */
 
 /*
  * pcie_pme_irq:
@@ -346,7 +346,7 @@ static void pcie_pme_work_fn(struct work_struct *work) /* NVMe: PME 처리 work 
  * @context: Interrupt context pointer.
  */
 static irqreturn_t pcie_pme_irq(int irq, void *context) /* NVMe: Root Port PME 인터럽트 핸들러. */
-{
+{ /* NVMe: PME 인터럽트 핸들러 본문 시작. */
 	struct pci_dev *port; /* NVMe: PME를 받은 Root Port/Event Collector. */
 	struct pcie_pme_service_data *data; /* NVMe: 이 IRQ에 대응하는 PME 서비스 데이터. */
 	u32 rtsta; /* NVMe: Root Status 레지스터 값. */
@@ -361,7 +361,7 @@ static irqreturn_t pcie_pme_irq(int irq, void *context) /* NVMe: Root Port PME �
 	if (PCI_POSSIBLE_ERROR(rtsta) || !(rtsta & PCI_EXP_RTSTA_PME)) { /* NVMe: 읽기 에러이거나 PME 비트가 꺼져 있으면. */
 		spin_unlock_irqrestore(&data->lock, flags); /* NVMe: lock 해제 및 인터럽트 복원. */
 		return IRQ_NONE; /* NVMe: 이 IRQ는 PME가 아니므로 처리하지 않음. */
-	}
+	} /* NVMe: if 블록 끝(허위 인터럽트 판단). */
 
 	pcie_pme_interrupt_enable(port, false); /* NVMe: work 처리 전까지 추가 PME 인터럽트 비활성화. */
 	spin_unlock_irqrestore(&data->lock, flags); /* NVMe: lock 해제. */
@@ -370,7 +370,7 @@ static irqreturn_t pcie_pme_irq(int irq, void *context) /* NVMe: Root Port PME �
 	schedule_work(&data->work); /* NVMe: 프로세스 컨텍스트에서 PME 처리할 work 예약. */
 
 	return IRQ_HANDLED; /* NVMe: PME IRQ를 처리했음을 반환. */
-}
+} /* NVMe: PME 인터럽트 핸들러 본문 끝. */
 
 /*
  * pcie_pme_can_wakeup:
@@ -384,10 +384,10 @@ static irqreturn_t pcie_pme_irq(int irq, void *context) /* NVMe: Root Port PME �
  * @ign: Ignored.
  */
 static int pcie_pme_can_wakeup(struct pci_dev *dev, void *ign) /* NVMe: 장치를 wakeup 가능으로 표시. */
-{
+{ /* NVMe: wakeup capability 설정 콜백 본문 시작. */
 	device_set_wakeup_capable(&dev->dev, true); /* NVMe: dev->power.can_wakeup 플래그를 true로 설정. */
 	return 0; /* NVMe: pci_walk_bus 콜백의 성공 반환값. */
-}
+} /* NVMe: wakeup capability 설정 콜백 본문 끝. */
 
 /*
  * pcie_pme_mark_devices:
@@ -404,14 +404,14 @@ static int pcie_pme_can_wakeup(struct pci_dev *dev, void *ign) /* NVMe: 장치�
  * set the flag indicating that it can signal run-time wake-up events.
  */
 static void pcie_pme_mark_devices(struct pci_dev *port) /* NVMe: 포트 아래 장치들의 wakeup capability 설정. */
-{
+{ /* NVMe: 포트 아래 장치 wakeup 마킹 함수 본문 시작. */
 	pcie_pme_can_wakeup(port, NULL); /* NVMe: Root Port/Event Collector 자신을 wakeup 가능으로 설정. */
 
 	if (pci_pcie_type(port) == PCI_EXP_TYPE_RC_EC) /* NVMe: 포트가 Root Complex Event Collector인 경우. */
 		pcie_walk_rcec(port, pcie_pme_can_wakeup, NULL); /* NVMe: RCEC 아래 통합 엔드포인트들을 마킹. */
 	else if (port->subordinate) /* NVMe: 일반 Root Port이고 하위 bus가 있으면. */
 		pci_walk_bus(port->subordinate, pcie_pme_can_wakeup, NULL); /* NVMe: 하위 bus의 모든 장치(NVMe 포함)를 마킹. */
-}
+} /* NVMe: 포트 아래 장치 wakeup 마킹 함수 본문 끝. */
 
 /*
  * pcie_pme_probe:
@@ -425,7 +425,7 @@ static void pcie_pme_mark_devices(struct pci_dev *port) /* NVMe: 포트 아래 �
  * @srv: PCIe service to initialize.
  */
 static int pcie_pme_probe(struct pcie_device *srv) /* NVMe: PME 서비스를 PCIe 포트에 등록. */
-{
+{ /* NVMe: PME 서비스 probe 함수 본문 시작. */
 	struct pci_dev *port = srv->port; /* NVMe: 서비스가 달릴 PCIe 포트 장치. */
 	struct pcie_pme_service_data *data; /* NVMe: PME 서비스 런타임 데이터. */
 	int type = pci_pcie_type(port); /* NVMe: 포트의 PCIe 타입(RC_EC 또는 Root Port). */
@@ -452,14 +452,14 @@ static int pcie_pme_probe(struct pcie_device *srv) /* NVMe: PME 서비스를 PCI
 	if (ret) { /* NVMe: IRQ 등록 실패 시. */
 		kfree(data); /* NVMe: 할당한 서비스 데이터 해제. */
 		return ret; /* NVMe: 오류 코드 반환. */
-	}
+	} /* NVMe: request_irq 실패 처리 블록 끝. */
 
 	pci_info(port, "Signaling with IRQ %d\n", srv->irq); /* NVMe: PME IRQ 번호를 로그로 출력. */
 
 	pcie_pme_mark_devices(port); /* NVMe: 포트 아래 NVMe 등 모든 장치를 wakeup capable로 설정. */
 	pcie_pme_interrupt_enable(port, true); /* NVMe: PME 인터럽트 활성화로 NVMe wakeup 이벤트 수신 준비. */
 	return 0; /* NVMe: PME 서비스 등록 성공. */
-}
+} /* NVMe: PME 서비스 probe 함수 본문 끝. */
 
 /*
  * pcie_pme_check_wakeup:
@@ -468,7 +468,7 @@ static int pcie_pme_probe(struct pcie_device *srv) /* NVMe: PME 서비스를 PCI
  *   wakeup 소스인 경우 enable_irq_wake()을 호출해야 하는지 판단.
  */
 static bool pcie_pme_check_wakeup(struct pci_bus *bus) /* NVMe: bus 트리에 wakeup 가능한 장치가 있는지 확인. */
-{
+{ /* NVMe: bus 트리 wakeup 확인 함수 본문 시작. */
 	struct pci_dev *dev; /* NVMe: 현재 검사 중인 장치. */
 
 	if (!bus) /* NVMe: bus 포인터가 NULL이면. */
@@ -480,22 +480,22 @@ static bool pcie_pme_check_wakeup(struct pci_bus *bus) /* NVMe: bus 트리에 wa
 			return true; /* NVMe: wakeup 소스 존재. */
 
 	return false; /* NVMe: 이 bus 트리에 wakeup 소스 없음. */
-}
+} /* NVMe: bus 트리 wakeup 확인 함수 본문 끝. */
 
 /*
  * pcie_pme_disable_interrupt:
  *   PME 인터럽트를 비활성화하고 noirq 플래그를 설정한다.
  *   NVMe 시스템 suspend 진입 시 PME 서비스를 일시 정지할 때 사용.
  */
-static void pcie_pme_disable_interrupt(struct pci_dev *port,
+static void pcie_pme_disable_interrupt(struct pci_dev *port, /* NVMe: PME 인터럽트 비활성화 함수 선언(인자 목록 계속). */
 				       struct pcie_pme_service_data *data) /* NVMe: PME 인터럽트를 끄고 noirq 상태로 전환. */
-{
+{ /* NVMe: PME 인터럽트 비활성화 함수 본문 시작. */
 	spin_lock_irq(&data->lock); /* NVMe: 서비스 데이터 lock 획득 및 인터럽트 비활성화. */
 	pcie_pme_interrupt_enable(port, false); /* NVMe: Root Port PME 인터럽트 비활성화. */
 	pcie_clear_root_pme_status(port); /* NVMe: pending 중인 PME status를 clear. */
 	data->noirq = true; /* NVMe: suspend/noirq 단계임을 표시. */
 	spin_unlock_irq(&data->lock); /* NVMe: lock 해제 및 인터럽트 복원. */
-}
+} /* NVMe: PME 인터럽트 비활성화 함수 본문 끝. */
 
 /*
  * pcie_pme_suspend:
@@ -509,7 +509,7 @@ static void pcie_pme_disable_interrupt(struct pci_dev *port,
  * @srv: PCIe service device to suspend.
  */
 static int pcie_pme_suspend(struct pcie_device *srv) /* NVMe: 시스템 suspend 시 PME 서비스 정지. */
-{
+{ /* NVMe: PME 서비스 suspend 함수 본문 시작. */
 	struct pcie_pme_service_data *data = get_service_data(srv); /* NVMe: PME 서비스 데이터 획득. */
 	struct pci_dev *port = srv->port; /* NVMe: 해당 PCIe 포트 장치. */
 	bool wakeup; /* NVMe: wakeup 소스 존재 여부. */
@@ -517,23 +517,23 @@ static int pcie_pme_suspend(struct pcie_device *srv) /* NVMe: 시스템 suspend 
 
 	if (device_may_wakeup(&port->dev)) { /* NVMe: Root Port/Event Collector 자신이 wakeup 가능하면. */
 		wakeup = true; /* NVMe: wakeup 소스로 간주. */
-	} else {
+	} else { /* NVMe: Root Port가 wakeup 가능하지 않은 경우로 분기. */
 		down_read(&pci_bus_sem); /* NVMe: 하위 bus 트리를 안전하게 탐색. */
 		wakeup = pcie_pme_check_wakeup(port->subordinate); /* NVMe: 하위 NVMe 등 wakeup 가능 장치가 있는지 확인. */
 		up_read(&pci_bus_sem); /* NVMe: bus 트리 읽기 락 해제. */
-	}
+	} /* NVMe: Root Port wakeup 가능성 분기 끝. */
 	if (wakeup) { /* NVMe: wakeup 소스가 있으면. */
 		ret = enable_irq_wake(srv->irq); /* NVMe: PME IRQ를 시스템 wakeup IRQ로 설정. */
 		if (!ret) /* NVMe: 성공하면. */
 			return 0; /* NVMe: 인터럽트는 계속 활성화된 채 suspend 완료. */
-	}
+	} /* NVMe: if (wakeup) 블록 끝. */
 
 	pcie_pme_disable_interrupt(port, data); /* NVMe: wakeup이 아니면 PME 인터럽트를 끈다. */
 
 	synchronize_irq(srv->irq); /* NVMe: 진행 중인 PME 인터럽트 핸들러가 끝날 때까지 대기. */
 
 	return 0; /* NVMe: PME 서비스 suspend 완료. */
-}
+} /* NVMe: PME 서비스 suspend 함수 본문 끝. */
 
 /*
  * pcie_pme_resume:
@@ -546,7 +546,7 @@ static int pcie_pme_suspend(struct pcie_device *srv) /* NVMe: 시스템 suspend 
  * @srv: PCIe service device to resume.
  */
 static int pcie_pme_resume(struct pcie_device *srv) /* NVMe: 시스템 resume 시 PME 서비스 복구. */
-{
+{ /* NVMe: PME 서비스 resume 함수 본문 시작. */
 	struct pcie_pme_service_data *data = get_service_data(srv); /* NVMe: PME 서비스 데이터 획득. */
 
 	spin_lock_irq(&data->lock); /* NVMe: 서비스 데이터 lock 획득. */
@@ -558,11 +558,11 @@ static int pcie_pme_resume(struct pcie_device *srv) /* NVMe: 시스템 resume �
 		data->noirq = false; /* NVMe: noirq 상태 해제. */
 	} else { /* NVMe: wakeup IRQ로 유지 중이었다면. */
 		disable_irq_wake(srv->irq); /* NVMe: 시스템 wakeup IRQ 등록을 해제. */
-	}
+	} /* NVMe: else 블록 끝(wakeup IRQ 해제). */
 	spin_unlock_irq(&data->lock); /* NVMe: 서비스 데이터 lock 해제. */
 
 	return 0; /* NVMe: PME 서비스 resume 완료. */
-}
+} /* NVMe: PME 서비스 resume 함수 본문 끝. */
 
 /*
  * pcie_pme_remove:
@@ -575,14 +575,14 @@ static int pcie_pme_resume(struct pcie_device *srv) /* NVMe: 시스템 resume �
  * @srv: PCIe service device to remove.
  */
 static void pcie_pme_remove(struct pcie_device *srv) /* NVMe: PME 서비스 제거. */
-{
+{ /* NVMe: PME 서비스 remove 함수 본문 시작. */
 	struct pcie_pme_service_data *data = get_service_data(srv); /* NVMe: PME 서비스 데이터 획득. */
 
 	pcie_pme_disable_interrupt(srv->port, data); /* NVMe: PME 인터럽트 비활성화 및 noirq 설정. */
 	free_irq(srv->irq, srv); /* NVMe: 등록된 PME IRQ 핸들러 해제. */
 	cancel_work_sync(&data->work); /* NVMe: pending 또는 실행 중인 PME work가 끝날 때까지 대기 후 취소. */
 	kfree(data); /* NVMe: PME 서비스 데이터 메모리 해제. */
-}
+} /* NVMe: PME 서비스 remove 함수 본문 끝. */
 
 /*
  * pcie_pme_driver:
@@ -590,7 +590,7 @@ static void pcie_pme_remove(struct pcie_device *srv) /* NVMe: PME 서비스 제�
  *   NVMe 장치가 연결된 Root Port에 대해 PME 서비스를 등록하고,
  *   probe/suspend/resume/remove 콜백을 제공한다.
  */
-static struct pcie_port_service_driver pcie_pme_driver = {
+static struct pcie_port_service_driver pcie_pme_driver = { /* NVMe: PCIe 포트 서비스 드라이버 구조체 초기화 시작. */
 	.name		= "pcie_pme", /* NVMe: PME 서비스 드라이버 이름. */
 	.port_type	= PCIE_ANY_PORT, /* NVMe: 등록 시 모든 포트 타입 후보(실제 probe에서 제한). */
 	.service	= PCIE_PORT_SERVICE_PME, /* NVMe: PCIe 포트 서비스 종류를 PME로 지정. */
@@ -599,7 +599,7 @@ static struct pcie_port_service_driver pcie_pme_driver = {
 	.suspend	= pcie_pme_suspend, /* NVMe: 시스템 suspend 콜백. */
 	.resume		= pcie_pme_resume, /* NVMe: 시스템 resume 콜백. */
 	.remove		= pcie_pme_remove, /* NVMe: 서비스 제거 콜백. */
-};
+}; /* NVMe: PCIe 포트 서비스 드라이버 구조체 초기화 끝. */
 
 /*
  * pcie_pme_init:
@@ -611,6 +611,6 @@ static struct pcie_port_service_driver pcie_pme_driver = {
  * pcie_pme_init - Register the PCIe PME service driver.
  */
 int __init pcie_pme_init(void) /* NVMe: PME 포트 서비스 드라이버 등록. */
-{
+{ /* NVMe: PME 포트 서비스 드라이버 등록 함수 본문 시작. */
 	return pcie_port_service_register(&pcie_pme_driver); /* NVMe: PCIe 포트 서비스 등록(성공/실패 반환). */
-}
+} /* NVMe: PME 포트 서비스 드라이버 등록 함수 본문 끝. */

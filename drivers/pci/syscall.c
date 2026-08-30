@@ -18,7 +18,7 @@
  *     BAR, Capabilities 등)를 사용자 공간 유틸리티(lspci/setpci 등)가
  *     읽고 쓸 수 있는 통로를 제공한다.
  *   - 커널 낸 NVMe 드라이버(drivers/nvme/host/pci.c)는 직접 이
- *     시스템 콜을 호출하지 않고, 대신 pci_read_config_*/pci_write_config_*
+ *     시스템 콜을 호출하지 않고, 대신 pci_read_config_ 계열과 pci_write_config_ 계열
  *     계열 함수를 사용한다. 그러나 본 파일이 제공하는 권한 검사와
  *     config access 인터페이스는 NVMe 장치의 config space 탐색/진단에
  *     사용된다.
@@ -55,7 +55,7 @@ SYSCALL_DEFINE5(pciconfig_read,	/* NVMe: pciconfig_read 시스템 콜 정의(5�
 		unsigned long, off,	/* NVMe: config space 내 바이트 오프셋 */
 		unsigned long, len,	/* NVMe: 읽을 바이트 수(1/2/4) */
 		void __user *, buf)	/* NVMe: 사용자 공간 결과 버퍼 */
-{
+{	/* NVMe: pciconfig_read 시스템 콜 본문 시작 */
 	struct pci_dev *dev;	/* NVMe: 탐색/접근 대상 PCI 장치(NVMe SSD 등) 구조체 */
 	u8 byte;		/* NVMe: 1바이트 config read 결과 */
 	u16 word;		/* NVMe: 2바이트 config read 결과 */
@@ -85,7 +85,7 @@ SYSCALL_DEFINE5(pciconfig_read,	/* NVMe: pciconfig_read 시스템 콜 정의(5�
 	default:		/* NVMe: 1/2/4 외 길이 처리 */
 		err = -EINVAL;	/* NVMe: 1/2/4 바이트 외 요청은 잘못된 인자 */
 		goto error;	/* NVMe: 에러 처리로 이동 */
-	}
+	}			/* NVMe: 요청 길이별 config read 분기 종료 */
 
 	err = -EIO;		/* NVMe: config access 하드웨어 오류 시 반환값 */
 	if (cfg_ret)		/* NVMe: pci_user_read_*가 실패하면 */
@@ -101,7 +101,7 @@ SYSCALL_DEFINE5(pciconfig_read,	/* NVMe: pciconfig_read 시스템 콜 정의(5�
 	case 4:		/* NVMe: 4바이트 결과 복사 분기 */
 		err = put_user(dword, (u32 __user *)buf);	/* NVMe: 4바이트 결과를 사용자 공간에 기록 */
 		break;		/* NVMe: 4바이트 복사 분기 종료 */
-	}
+	}			/* NVMe: 사용자 공간 결과 복사 switch 종료 */
 	pci_dev_put(dev);	/* NVMe: NVMe 장치 참조 카운트 감소 */
 	return err;		/* NVMe: 성공(0) 또는 put_user 실패 코드 반환 */
 
@@ -119,10 +119,10 @@ error:				/* NVMe: 공통 에러 처리 레이블 */
 	case 4:		/* NVMe: 4바이트 에러 마커 분기 */
 		put_user(-1, (u32 __user *)buf);	/* NVMe: 4바이트 에러 마커 기록 */
 		break;		/* NVMe: 4바이트 에러 마커 분기 종료 */
-	}
+	}			/* NVMe: 에러 마커 복사 switch 종료 */
 	pci_dev_put(dev);	/* NVMe: 검색한 NVMe 장치 참조 해제(NULL이면 무시) */
 	return err;		/* NVMe: 에러 코드 반환 */
-}
+}			/* NVMe: pciconfig_read 시스템 콜 종료 */
 
 /*
  * pciconfig_write:
@@ -138,7 +138,7 @@ SYSCALL_DEFINE5(pciconfig_write,	/* NVMe: pciconfig_write 시스템 콜 정의(5
 		unsigned long, off,	/* NVMe: config space 내 바이트 오프셋 */
 		unsigned long, len,	/* NVMe: 쓸 바이트 수(1/2/4) */
 		void __user *, buf)	/* NVMe: 사용자 공간 원본 버퍼 */
-{
+{	/* NVMe: pciconfig_write 시스템 콜 본문 시작 */
 	struct pci_dev *dev;	/* NVMe: 쓰기 대상 PCI 장치(NVMe SSD) 구조체 */
 	u8 byte;		/* NVMe: 1바이트 쓰기 값 */
 	u16 word;		/* NVMe: 2바이트 쓰기 값 */
@@ -181,10 +181,10 @@ SYSCALL_DEFINE5(pciconfig_write,	/* NVMe: pciconfig_write 시스템 콜 정의(5
 			err = -EIO;	/* NVMe: I/O 에러 변환 */
 		break;		/* NVMe: 4바이트 쓰기 분기 종료 */
 
-	default:
+	default:		/* NVMe: 1/2/4 외 길이 처리 */
 		err = -EINVAL;	/* NVMe: 허용되지 않는 길이 */
 		break;		/* NVMe: -EINVAL 반환 준비 */
-	}
+	}			/* NVMe: 요청 길이별 config write 분기 종료 */
 	pci_dev_put(dev);	/* NVMe: NVMe 장치 참조 해제 */
 	return err;		/* NVMe: 성공(0) 또는 에러 코드 반환 */
-}
+}			/* NVMe: pciconfig_write 시스템 콜 종료 */

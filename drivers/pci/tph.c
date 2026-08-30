@@ -51,9 +51,9 @@
 
 /* System-wide TPH disabled */
 /* NVMe: 커널 파라미터 "notph"로 전역 TPH 사용을 끌 때 설정되는 플래그 */
-static bool pci_tph_disabled;
+static bool pci_tph_disabled;			/* NVMe: "notph" 지정 시 NVMe 장치의 TPH 요청을 전역 차단 */
 
-#ifdef CONFIG_ACPI
+#ifdef CONFIG_ACPI				/* NVMe: ACPI _DSM 기반 ST 획득을 커널 설정에 따라 컴파일 */
 /*
  * The st_info struct defines the Steering Tag (ST) info returned by the
  * firmware PCI ACPI _DSM method (rev=0x7, func=0xF, "_DSM to Query Cache
@@ -76,8 +76,8 @@ static bool pci_tph_disabled;
  * 대한 캐시 근접성 힌트를 운영체제가 아닌 firmware/ACPI에서 제공할 때
  * 사용된다.
  */
-union st_info {
-	struct {
+union st_info {				/* NVMe: ACPI _DSM ST 정보를 담는 공용체 정의 */
+	struct {				/* NVMe: 64bit 비트필드 레이아웃 */
 		u64 vm_st_valid : 1;     /* NVMe: volatile 메모리용 8bit ST 유효 비트 */
 		u64 vm_xst_valid : 1;    /* NVMe: volatile 메모리용 16bit 확장 ST 유효 비트 */
 		u64 vm_ph_ignore : 1;    /* NVMe: volatile 메모리에서 PH 무시 여부(0이면 PH 제공 필요) */
@@ -90,9 +90,9 @@ union st_info {
 		u64 rsvd2 : 5;           /* NVMe: ACPI 규격 예약 필드 */
 		u64 pm_st : 8;           /* NVMe: persistent 메모리용 8bit Steering Tag */
 		u64 pm_xst : 16;         /* NVMe: persistent 메모리용 16bit 확장 ST */
-	};
+	};					/* NVMe: 비트필드 구조체 끝 */
 	u64 value;                     /* NVMe: _DSM 반환 64bit 원시값 전체 접근용 */
-};
+};					/* NVMe: st_info 공용체 끝 */
 
 /*
  * tph_extract_tag:
@@ -100,40 +100,40 @@ union st_info {
  *   Steering Tag를 추출한다. NVMe 큐-CPU affinity 설정 시 특정 CPU에
  *   대응하는 ST 값을 얻는 데 사용된다.
  */
-static u16 tph_extract_tag(enum tph_mem_type mem_type, u8 req_type,
-			   union st_info *info)
-{
+static u16 tph_extract_tag(enum tph_mem_type mem_type, u8 req_type,	/* NVMe: 메모리 타입과 TPH 요청 형식 입력 */
+			   union st_info *info)			/* NVMe: ACPI _DSM 반환 ST 정보 구조체 */
+{						/* NVMe: tph_extract_tag 함수 본문 시작 */
 	switch (req_type) {            /* NVMe: 장치가 지원하는 TPH 요청 형식(8bit/16bit)에 따라 분기 */
 	case PCI_TPH_REQ_TPH_ONLY: /* 8-bit tag */
 		switch (mem_type) {    /* NVMe: 대상 메모리 타입(volatile/persistent)에 따라 분기 */
-		case TPH_MEM_TYPE_VM:
+		case TPH_MEM_TYPE_VM:			/* NVMe: volatile 메모리 대상 케이스 */
 			if (info->vm_st_valid)      /* NVMe: volatile ST가 유효한지 확인 */
 				return info->vm_st; /* NVMe: NVMe DMA 대상 volatile 메모리의 8bit ST 반환 */
 			break;                      /* NVMe: ST가 유효하지 않으면 다음 case 탐색 종료 */
-		case TPH_MEM_TYPE_PM:
+		case TPH_MEM_TYPE_PM:			/* NVMe: persistent 메모리 대상 케이스 */
 			if (info->pm_st_valid)      /* NVMe: persistent ST가 유효한지 확인 */
 				return info->pm_st; /* NVMe: persistent 메모리용 8bit ST 반환 */
 			break;                      /* NVMe: ST가 유효하지 않으면 분기 종료 */
-		}
+		}					/* NVMe: 8bit TPH volatile/persistent switch 종료 */
 		break;                          /* NVMe: 8bit TPH 요청 처리 완료, 상위 switch 종료 */
 	case PCI_TPH_REQ_EXT_TPH: /* 16-bit tag */
 		switch (mem_type) {    /* NVMe: 확장 TPH(16bit)용 ST 선택 */
-		case TPH_MEM_TYPE_VM:
+		case TPH_MEM_TYPE_VM:			/* NVMe: volatile 메모리 대상 케이스(16bit) */
 			if (info->vm_xst_valid)     /* NVMe: volatile 확장 ST 유효성 검사 */
 				return info->vm_xst;/* NVMe: volatile 메모리용 16bit ST 반환 */
 			break;                      /* NVMe: 유효하지 않으면 분기 종료 */
-		case TPH_MEM_TYPE_PM:
+		case TPH_MEM_TYPE_PM:			/* NVMe: persistent 메모리 대상 케이스(16bit) */
 			if (info->pm_xst_valid)     /* NVMe: persistent 확장 ST 유효성 검사 */
 				return info->pm_xst;/* NVMe: persistent 메모리용 16bit ST 반환 */
 			break;                      /* NVMe: 유효하지 않으면 분기 종료 */
-		}
+		}					/* NVMe: 16bit TPH volatile/persistent switch 종료 */
 		break;                          /* NVMe: 16bit TPH 요청 처리 완료 */
-	default:
+	default:					/* NVMe: 정의되지 않은 요청 형식 케이스 */
 		return 0;                       /* NVMe: 알 수 없는 req_type이면 ST 0 반환(힌트 없음) */
-	}
+	}						/* NVMe: TPH 요청 형식 switch 종료 */
 
 	return 0;                              /* NVMe: 유효한 ST를 찾지 못하면 0 반환 */
-}
+}							/* NVMe: tph_extract_tag 함수 종료 */
 
 #define TPH_ST_DSM_FUNC_INDEX	0xF        /* NVMe: ACPI _DSM 함수 인덱스 0xF(Cache Locality TPH Features) */
 /*
@@ -142,9 +142,9 @@ static u16 tph_extract_tag(enum tph_mem_type mem_type, u8 req_type,
  *   가져온다. NVMe 드라이버가 큐를 특정 CPU에 바인딩할 때, 해당 CPU로
  *   향하는 DMA 트랜잭션의 캐시 근접성 힌트를 firmware에서 얻는 통로다.
  */
-static acpi_status tph_invoke_dsm(acpi_handle handle, u32 cpu_uid,
-				  union st_info *st_out)
-{
+static acpi_status tph_invoke_dsm(acpi_handle handle, u32 cpu_uid,	/* NVMe: ACPI 핸들과 대상 CPU UID 입력 */
+				  union st_info *st_out)			/* NVMe: _DSM 결과를 저장할 ST 정보 구조체 */
+{						/* NVMe: tph_invoke_dsm 함수 본문 시작 */
 	union acpi_object arg3[3], in_obj, *out_obj; /* NVMe: _DSM 인자/반환 객체 */
 
 	if (!acpi_check_dsm(handle, &pci_acpi_dsm_guid, 7,     /* NVMe: rev 7 _DSM에서 함수 0xF를 지원하는지 확인 */
@@ -168,22 +168,22 @@ static acpi_status tph_invoke_dsm(acpi_handle handle, u32 cpu_uid,
 	in_obj.package.elements = arg3;                 /* NVMe: 패키지 원소 배열 연결 */
 
 	out_obj = acpi_evaluate_dsm(handle, &pci_acpi_dsm_guid, 7,  /* NVMe: ACPI _DSM 실제 평가 */
-				    TPH_ST_DSM_FUNC_INDEX, &in_obj);
+				    TPH_ST_DSM_FUNC_INDEX, &in_obj);		/* NVMe: 함수 인덱스 0xF와 인자 패키지 전달 */
 	if (!out_obj)                                   /* NVMe: _DSM 평가 결과가 없으면 */
 		return AE_ERROR;                        /* NVMe: ACPI 오류 반환 */
 
 	if (out_obj->type != ACPI_TYPE_BUFFER) {        /* NVMe: 반환값이 8바이트 버퍼가 아니면 */
 		ACPI_FREE(out_obj);                     /* NVMe: 반환 객체 메모리 해제 */
 		return AE_ERROR;                        /* NVMe: 형식 오류 반환 */
-	}
+	}						/* NVMe: 반환값 버퍼 형식 검사 if 블록 종료 */
 
 	st_out->value = *((u64 *)(out_obj->buffer.pointer)); /* NVMe: 버퍼에서 64bit ST 정보를 공용체로 복사 */
 
 	ACPI_FREE(out_obj);                             /* NVMe: ACPI 반환 객체 메모리 해제 */
 
 	return AE_OK;                                   /* NVMe: ST 획득 성공 */
-}
-#endif
+}							/* NVMe: tph_invoke_dsm 함수 종료 */
+#endif									/* NVMe: ACPI _DSM 관련 코드 컴파일 종료 */
 
 /* Update the TPH Requester Enable field of TPH Control Register */
 /*
@@ -191,8 +191,8 @@ static acpi_status tph_invoke_dsm(acpi_handle handle, u32 cpu_uid,
  *   TPH Control Register의 Requester Enable 필드를 갱신한다. NVMe 장치의
  *   TPH 요청 기능을 켜거나 끄거나, 8bit/16bit 요청 형식을 선택할 때 사용.
  */
-static void set_ctrl_reg_req_en(struct pci_dev *pdev, u8 req_type)
-{
+static void set_ctrl_reg_req_en(struct pci_dev *pdev, u8 req_type)	/* NVMe: TPH 요청 활성화/형식을 설정할 NVMe pdev */
+{						/* NVMe: set_ctrl_reg_req_en 함수 본문 시작 */
 	u32 reg;                                        /* NVMe: TPH Control 레지스터 값 */
 
 	pci_read_config_dword(pdev, pdev->tph_cap + PCI_TPH_CTRL, &reg); /* NVMe: NVMe pdev의 TPH Control 레지스터 읽기 */
@@ -201,7 +201,7 @@ static void set_ctrl_reg_req_en(struct pci_dev *pdev, u8 req_type)
 	reg |= FIELD_PREP(PCI_TPH_CTRL_REQ_EN_MASK, req_type); /* NVMe: 새로운 요청 형식(비활성/8bit/16bit) 기록 */
 
 	pci_write_config_dword(pdev, pdev->tph_cap + PCI_TPH_CTRL, reg); /* NVMe: 갱신된 값을 NVMe pdev config space에 기록 */
-}
+}							/* NVMe: set_ctrl_reg_req_en 함수 종료 */
 
 /*
  * get_st_modes:
@@ -209,15 +209,15 @@ static void set_ctrl_reg_req_en(struct pci_dev *pdev, u8 req_type)
  *   No ST) 비트를 TPH Capability 레지스터에서 읽어온다. pcie_enable_tph()
  *   에서 요청 mode가 지원되는지 검증할 때 사용.
  */
-static u8 get_st_modes(struct pci_dev *pdev)
-{
+static u8 get_st_modes(struct pci_dev *pdev)		/* NVMe: 지원 ST mode를 조회할 NVMe pdev */
+{						/* NVMe: get_st_modes 함수 본문 시작 */
 	u32 reg;                                        /* NVMe: TPH Capability 레지스터 값 */
 
 	pci_read_config_dword(pdev, pdev->tph_cap + PCI_TPH_CAP, &reg); /* NVMe: NVMe pdev의 TPH Capability 읽기 */
 	reg &= PCI_TPH_CAP_ST_NS | PCI_TPH_CAP_ST_IV | PCI_TPH_CAP_ST_DS; /* NVMe: ST mode 지원 비트만 마스크 */
 
 	return reg;                                     /* NVMe: 지원되는 ST mode 비트 반환 */
-}
+}							/* NVMe: get_st_modes 함수 종료 */
 
 /**
  * pcie_tph_get_st_table_loc - Return the device's ST table location
@@ -234,15 +234,15 @@ static u8 get_st_modes(struct pci_dev *pdev)
  *   MSI-X table)을 반환한다. NVMe가 MSI-X 벡터별로 ST를 설정할지, 아니면
  *   장치 고유 table을 사용할지 결정하는 데 필요.
  */
-u32 pcie_tph_get_st_table_loc(struct pci_dev *pdev)
-{
+u32 pcie_tph_get_st_table_loc(struct pci_dev *pdev)	/* NVMe: ST table 위치를 조회할 NVMe pdev */
+{						/* NVMe: pcie_tph_get_st_table_loc 함수 본문 시작 */
 	u32 reg;                                        /* NVMe: TPH Capability 레지스터 값 */
 
 	pci_read_config_dword(pdev, pdev->tph_cap + PCI_TPH_CAP, &reg); /* NVMe: NVMe pdev의 TPH Capability 읽기 */
 
 	return FIELD_GET(PCI_TPH_CAP_LOC_MASK, reg);    /* NVMe: LOC(Location) 필드 추출하여 반환 */
-}
-EXPORT_SYMBOL(pcie_tph_get_st_table_loc);
+}							/* NVMe: pcie_tph_get_st_table_loc 함수 종료 */
+EXPORT_SYMBOL(pcie_tph_get_st_table_loc);			/* NVMe: NVMe 드라이버 등에서 ST table 위치 조회 심볼 노출 */
 
 /*
  * Return the size of ST table. If ST table is not in TPH Requester Extended
@@ -253,8 +253,8 @@ EXPORT_SYMBOL(pcie_tph_get_st_table_loc);
  *   TPH capability 공간 내 ST table의 항목 개수를 반환한다. NVMe 큐/벡터
  *   개수에 맞춰 ST entry를 설정할 때 경계를 확인하는 데 사용.
  */
-u16 pcie_tph_get_st_table_size(struct pci_dev *pdev)
-{
+u16 pcie_tph_get_st_table_size(struct pci_dev *pdev)	/* NVMe: ST table 크기를 조회할 NVMe pdev */
+{						/* NVMe: pcie_tph_get_st_table_size 함수 본문 시작 */
 	u32 reg;                                        /* NVMe: TPH Capability 레지스터 값 */
 	u32 loc;                                        /* NVMe: ST table 위치 */
 
@@ -269,8 +269,8 @@ u16 pcie_tph_get_st_table_size(struct pci_dev *pdev)
 	pci_read_config_dword(pdev, pdev->tph_cap + PCI_TPH_CAP, &reg); /* NVMe: TPH Capability 다시 읽기 */
 
 	return FIELD_GET(PCI_TPH_CAP_ST_MASK, reg) + 1; /* NVMe: ST table size 필드 + 1이 실제 항목 수 */
-}
-EXPORT_SYMBOL(pcie_tph_get_st_table_size);
+}							/* NVMe: pcie_tph_get_st_table_size 함수 종료 */
+EXPORT_SYMBOL(pcie_tph_get_st_table_size);			/* NVMe: NVMe 드라이버 등에서 ST table 크기 조회 심볼 노출 */
 
 /* Return device's Root Port completer capability */
 /*
@@ -279,8 +279,8 @@ EXPORT_SYMBOL(pcie_tph_get_st_table_size);
  *   16bit)을 지원하는지 조회한다. device와 Root Port capability의 교집합을
  *   통해 실제 사용 가능한 req_type을 결정.
  */
-static u8 get_rp_completer_type(struct pci_dev *pdev)
-{
+static u8 get_rp_completer_type(struct pci_dev *pdev)	/* NVMe: Root Port TPH completer 능력을 조회할 NVMe pdev */
+{						/* NVMe: get_rp_completer_type 함수 본문 시작 */
 	struct pci_dev *rp;                             /* NVMe: NVMe 장치가 연결된 Root Port */
 	u32 reg;                                        /* NVMe: Root Port DEVCAP2 레지스터 값 */
 	int ret;                                        /* NVMe: 레지스터 읽기 결과 */
@@ -294,7 +294,7 @@ static u8 get_rp_completer_type(struct pci_dev *pdev)
 		return 0;                               /* NVMe: capability 정보를 얻을 수 없음 */
 
 	return FIELD_GET(PCI_EXP_DEVCAP2_TPH_COMP_MASK, reg); /* NVMe: Root Port TPH Completer 필드 반환 */
-}
+}							/* NVMe: get_rp_completer_type 함수 종료 */
 
 /* Write tag to ST table - Return 0 if OK, otherwise -errno */
 /*
@@ -303,8 +303,8 @@ static u8 get_rp_completer_type(struct pci_dev *pdev)
  *   기록한다. NVMe가 특정 큐/인터럽트에 해당하는 ST 값을 하드웨어에
  *   반영할 때 사용.
  */
-static int write_tag_to_st_table(struct pci_dev *pdev, int index, u16 tag)
-{
+static int write_tag_to_st_table(struct pci_dev *pdev, int index, u16 tag)	/* NVMe: ST table에 기록할 NVMe pdev, 인덱스, Steering Tag */
+{						/* NVMe: write_tag_to_st_table 함수 본문 시작 */
 	int st_table_size;                              /* NVMe: ST table 총 항목 수 */
 	int offset;                                     /* NVMe: config space 내 기록할 오프셋 */
 
@@ -316,7 +316,7 @@ static int write_tag_to_st_table(struct pci_dev *pdev, int index, u16 tag)
 	offset = pdev->tph_cap + PCI_TPH_BASE_SIZEOF + index * sizeof(u16); /* NVMe: 기본 capability 크기 + 인덱스 * 2byte로 config space 오프셋 계산 */
 
 	return pci_write_config_word(pdev, offset, tag); /* NVMe: 계산된 오프셋에 16bit ST 기록 */
-}
+}							/* NVMe: write_tag_to_st_table 함수 종료 */
 
 /**
  * pcie_tph_get_cpu_st() - Retrieve Steering Tag for a target memory associated
@@ -337,10 +337,10 @@ static int write_tag_to_st_table(struct pci_dev *pdev, int index, u16 tag)
  *   획득한다. NVMe 드라이버가 큐를 특정 CPU에 affinity할 때, 해당 CPU로
  *   향하는 DMA 트랜잭션에 사용할 ST 값을 얻는 NVMe-직접 관련 인터페이스.
  */
-int pcie_tph_get_cpu_st(struct pci_dev *pdev, enum tph_mem_type mem_type,
-			unsigned int cpu, u16 *tag)
-{
-#ifdef CONFIG_ACPI
+int pcie_tph_get_cpu_st(struct pci_dev *pdev, enum tph_mem_type mem_type,	/* NVMe: NVMe pdev와 대상 메모리 타입 입력 */
+			unsigned int cpu, u16 *tag)			/* NVMe: 대상 CPU와 ST 반환 버퍼 */
+{						/* NVMe: pcie_tph_get_cpu_st 함수 본문 시작 */
+#ifdef CONFIG_ACPI						/* NVMe: ACPI 지원 시에만 _DSM 기반 ST 획득 코드 컴파일 */
 	struct pci_dev *rp;                             /* NVMe: NVMe 장치의 Root Port */
 	acpi_handle rp_acpi_handle;                     /* NVMe: Root Port bridge의 ACPI 핸들 */
 	union st_info info;                             /* NVMe: _DSM 반환 ST 정보 */
@@ -360,20 +360,20 @@ int pcie_tph_get_cpu_st(struct pci_dev *pdev, enum tph_mem_type mem_type,
 	if (tph_invoke_dsm(rp_acpi_handle, cpu_uid, &info) != AE_OK) { /* NVMe: ACPI _DSM으로 ST 정보 획득 시도 */
 		*tag = 0;                               /* NVMe: 획득 실패 시 tag를 0으로 설정 */
 		return -EINVAL;                         /* NVMe: ST 획득 실패 오류 반환 */
-	}
+	}						/* NVMe: _DSM ST 획득 if 블록 종료 */
 
 	*tag = tph_extract_tag(mem_type, pdev->tph_req_type, &info); /* NVMe: 메모리 타입과 요청 형식에 맞는 ST 추출 */
 
-	pci_dbg(pdev, "get steering tag: mem_type=%s, cpu=%d, tag=%#04x\n",
-		(mem_type == TPH_MEM_TYPE_VM) ? "volatile" : "persistent",
+	pci_dbg(pdev, "get steering tag: mem_type=%s, cpu=%d, tag=%#04x\n",	/* NVMe: dmesg에 ST 획득 디버그 로그 출력 시작 */
+		(mem_type == TPH_MEM_TYPE_VM) ? "volatile" : "persistent",	/* NVMe: 메모리 타입에 따른 로그 문자열 선택 */
 		cpu, *tag);                             /* NVMe: dmesg에 ST 획득 로그 기록(NVMe 디버깅 시 유용) */
 
 	return 0;                                       /* NVMe: ST 획득 성공 */
-#else
+#else							/* NVMe: ACPI를 지원하지 않는 커널 빌드 분기 */
 	return -ENODEV;                                 /* NVMe: ACPI 미지원 시 ST 획득 불가 */
-#endif
-}
-EXPORT_SYMBOL(pcie_tph_get_cpu_st);
+#endif							/* NVMe: ACPI _DSM ST 획득 코드 컴파일 종료 */
+}							/* NVMe: pcie_tph_get_cpu_st 함수 종료 */
+EXPORT_SYMBOL(pcie_tph_get_cpu_st);			/* NVMe: NVMe 드라이버 등에서 CPU별 ST 획득 심볼 노출 */
 
 /**
  * pcie_tph_set_st_entry() - Set Steering Tag in the ST table entry
@@ -393,8 +393,8 @@ EXPORT_SYMBOL(pcie_tph_get_cpu_st);
  *   인덱스에 Steering Tag를 기록한다. NVMe 큐/MSI-X 벡터와 CPU/NUMA 노드
  *   간 스티어링 정책을 하드웨어에 반영하는 핵심 함수.
  */
-int pcie_tph_set_st_entry(struct pci_dev *pdev, unsigned int index, u16 tag)
-{
+int pcie_tph_set_st_entry(struct pci_dev *pdev, unsigned int index, u16 tag)	/* NVMe: ST를 기록할 NVMe pdev, table 인덱스, Steering Tag */
+{						/* NVMe: pcie_tph_set_st_entry 함수 본문 시작 */
 	u32 loc;                                        /* NVMe: ST table 위치 */
 	int err = 0;                                    /* NVMe: 오류 코드 초기화 */
 
@@ -419,29 +419,29 @@ int pcie_tph_set_st_entry(struct pci_dev *pdev, unsigned int index, u16 tag)
 	loc = FIELD_PREP(PCI_TPH_CAP_LOC_MASK, loc);    /* NVMe: LOC 필드 값을 PCI_TPH_LOC_* 상수와 일치시킴 */
 
 	switch (loc) {                                  /* NVMe: ST table 위치에 따라 기록 경로 선택 */
-	case PCI_TPH_LOC_MSIX:
+	case PCI_TPH_LOC_MSIX:				/* NVMe: ST table이 MSI-X table에 위치한 케이스 */
 		err = pci_msix_write_tph_tag(pdev, index, tag); /* NVMe: MSI-X table의 해당 entry에 ST 기록(NVMe MSI-X 벡터별 ST) */
 		break;                                      /* NVMe: MSI-X 경로 처리 완료 */
-	case PCI_TPH_LOC_CAP:
+	case PCI_TPH_LOC_CAP:				/* NVMe: ST table이 TPH capability 공간에 위치한 케이스 */
 		err = write_tag_to_st_table(pdev, index, tag); /* NVMe: TPH Extended Capability 공간의 ST table에 기록 */
 		break;                                      /* NVMe: capability 경로 처리 완료 */
-	default:
+	default:					/* NVMe: 알 수 없는 ST table 위치 케이스 */
 		err = -EINVAL;                              /* NVMe: 알 수 없는 위치이면 오류 */
-	}
+	}						/* NVMe: ST table 위치 switch 종료 */
 
 	if (err) {                                      /* NVMe: ST 기록에 실패하면 */
 		pcie_disable_tph(pdev);                 /* NVMe: 안전을 위해 TPH를 완전히 비활성화 */
 		return err;                             /* NVMe: 오류 코드 반환 */
-	}
+	}						/* NVMe: err 처리 if 블록 종료 */
 
 	set_ctrl_reg_req_en(pdev, pdev->tph_req_type);  /* NVMe: ST 갱신 완료 후 TPH 요청을 다시 활성화(8bit/16bit) */
 
-	pci_dbg(pdev, "set steering tag: %s table, index=%d, tag=%#04x\n",
+	pci_dbg(pdev, "set steering tag: %s table, index=%d, tag=%#04x\n",	/* NVMe: dmesg에 ST 설정 디버그 로그 출력 시작 */
 		(loc == PCI_TPH_LOC_MSIX) ? "MSI-X" : "ST", index, tag); /* NVMe: NVMe dmesg에 ST 설정 로그 기록 */
 
 	return 0;                                       /* NVMe: ST entry 설정 성공 */
-}
-EXPORT_SYMBOL(pcie_tph_set_st_entry);
+}							/* NVMe: pcie_tph_set_st_entry 함수 종료 */
+EXPORT_SYMBOL(pcie_tph_set_st_entry);			/* NVMe: NVMe 드라이버 등에서 ST entry 설정 심볼 노출 */
 
 /**
  * pcie_disable_tph - Turn off TPH support for device
@@ -454,8 +454,8 @@ EXPORT_SYMBOL(pcie_tph_set_st_entry);
  *   NVMe 장치의 TPH를 완전히 끈다. NVMe 드라이버가 큐 초기화 실패, quirk,
  *   오류 복구, 또는 드라이버 unload 시 TPH 관련 리소스를 정리할 때 호출.
  */
-void pcie_disable_tph(struct pci_dev *pdev)
-{
+void pcie_disable_tph(struct pci_dev *pdev)		/* NVMe: TPH를 비활성화할 NVMe pdev */
+{						/* NVMe: pcie_disable_tph 함수 본문 시작 */
 	if (!pdev->tph_cap)                             /* NVMe: TPH capability가 없는 NVMe 장치면 */
 		return;                                 /* NVMe: 아무 작업도 하지 않음 */
 
@@ -467,8 +467,8 @@ void pcie_disable_tph(struct pci_dev *pdev)
 	pdev->tph_mode = 0;                             /* NVMe: 저장된 ST mode 초기화 */
 	pdev->tph_req_type = 0;                         /* NVMe: 저장된 요청 형식 초기화 */
 	pdev->tph_enabled = 0;                          /* NVMe: TPH 활성화 플래그 해제 */
-}
-EXPORT_SYMBOL(pcie_disable_tph);
+}							/* NVMe: pcie_disable_tph 함수 종료 */
+EXPORT_SYMBOL(pcie_disable_tph);				/* NVMe: NVMe 드라이버 등에서 TPH 비활성화 심볼 노출 */
 
 /**
  * pcie_enable_tph - Enable TPH support for device using a specific ST mode
@@ -492,8 +492,8 @@ EXPORT_SYMBOL(pcie_disable_tph);
  *   설정 전에 호출되어, NVMe endpoint와 Root Port가 모두 지원하는 요청
  *   형식(8bit/16bit TPH)과 mode를 결정.
  */
-int pcie_enable_tph(struct pci_dev *pdev, int mode)
-{
+int pcie_enable_tph(struct pci_dev *pdev, int mode)	/* NVMe: TPH를 활성화할 NVMe pdev와 ST mode */
+{						/* NVMe: pcie_enable_tph 함수 본문 시작 */
 	u32 reg;                                        /* NVMe: TPH Control/Capability 레지스터 값 */
 	u8 dev_modes;                                   /* NVMe: NVMe 장치가 지원하는 ST mode */
 	u8 rp_req_type;                                 /* NVMe: Root Port가 지원하는 TPH completer 형식 */
@@ -529,7 +529,7 @@ int pcie_enable_tph(struct pci_dev *pdev, int mode)
 
 		/* Final req_type is the smallest value of two */
 		pdev->tph_req_type = min(pdev->tph_req_type, rp_req_type); /* NVMe: endpoint와 Root Port 중 능력이 낮은 쪽으로 제한 */
-	}
+	}						/* NVMe: Root Port completer capability 검사 if 블록 종료 */
 
 	if (pdev->tph_req_type == PCI_TPH_REQ_DISABLE)  /* NVMe: 양쪽 모두 TPH를 지원하지 않으면 */
 		return -EINVAL;                         /* NVMe: 활성화할 수 없음 */
@@ -548,8 +548,8 @@ int pcie_enable_tph(struct pci_dev *pdev, int mode)
 	pdev->tph_enabled = 1;                          /* NVMe: TPH 활성화 플래그 설정 */
 
 	return 0;                                       /* NVMe: TPH 활성화 성공 */
-}
-EXPORT_SYMBOL(pcie_enable_tph);
+}							/* NVMe: pcie_enable_tph 함수 종료 */
+EXPORT_SYMBOL(pcie_enable_tph);				/* NVMe: NVMe 드라이버 등에서 TPH 활성화 심볼 노출 */
 
 /*
  * pci_restore_tph_state:
@@ -558,8 +558,8 @@ EXPORT_SYMBOL(pcie_enable_tph);
  *   resume 등 NVMe가 재초기화될 때 큐-CPU affinity 성능을 유지하기 위해
  *   PCI core가 호출한다.
  */
-void pci_restore_tph_state(struct pci_dev *pdev)
-{
+void pci_restore_tph_state(struct pci_dev *pdev)		/* NVMe: TPH 상태를 복원할 NVMe pdev */
+{						/* NVMe: pci_restore_tph_state 함수 본문 시작 */
 	struct pci_cap_saved_state *save_state;         /* NVMe: 저장된 TPH capability 상태 버퍼 */
 	int num_entries, i, offset;                     /* NVMe: ST table 항목 수, 루프 변수, 오프셋 */
 	u16 *st_entry;                                  /* NVMe: ST table 항목을 가리키는 포인터 */
@@ -583,10 +583,10 @@ void pci_restore_tph_state(struct pci_dev *pdev)
 	num_entries = pcie_tph_get_st_table_size(pdev); /* NVMe: 복원할 ST 항목 개수 산출 */
 	for (i = 0; i < num_entries; i++) {             /* NVMe: 모든 ST table 항목을 순회하며 복원 */
 		pci_write_config_word(pdev, pdev->tph_cap + offset, /* NVMe: 해당 오프셋에 저장된 ST 기록 */
-			      *st_entry++);
+			      *st_entry++);			/* NVMe: 다음 ST 항목으로 포인터 이동 */
 		offset += sizeof(u16);                      /* NVMe: 다음 16bit ST 항목 위치로 이동 */
-	}
-}
+	}						/* NVMe: ST table 복원 for 루프 종료 */
+}							/* NVMe: pci_restore_tph_state 함수 종료 */
 
 /*
  * pci_save_tph_state:
@@ -594,8 +594,8 @@ void pci_restore_tph_state(struct pci_dev *pdev)
  *   저장한다. NVMe가 다시 켜질 때 pci_restore_tph_state()로 복원되어
  *   큐-CPU affinity 및 TPH 스티어링 설정이 유지된다.
  */
-void pci_save_tph_state(struct pci_dev *pdev)
-{
+void pci_save_tph_state(struct pci_dev *pdev)		/* NVMe: TPH 상태를 저장할 NVMe pdev */
+{						/* NVMe: pci_save_tph_state 함수 본문 시작 */
 	struct pci_cap_saved_state *save_state;         /* NVMe: 저장용 TPH capability 상태 버퍼 */
 	int num_entries, i, offset;                     /* NVMe: ST table 항목 수, 루프 변수, 오프셋 */
 	u16 *st_entry;                                  /* NVMe: ST table 항목 저장 포인터 */
@@ -621,10 +621,10 @@ void pci_save_tph_state(struct pci_dev *pdev)
 	num_entries = pcie_tph_get_st_table_size(pdev); /* NVMe: 저장할 ST 항목 개수 */
 	for (i = 0; i < num_entries; i++) {             /* NVMe: 모든 ST 항목을 순회하며 저장 */
 		pci_read_config_word(pdev, pdev->tph_cap + offset, /* NVMe: 현재 ST entry 값 읽기 */
-			     st_entry++);
+			     st_entry++);			/* NVMe: 다음 ST 항목 저장 위치로 포인터 이동 */
 		offset += sizeof(u16);                      /* NVMe: 다음 16bit ST 항목 위치로 이동 */
-	}
-}
+	}						/* NVMe: ST table 저장 for 루프 종료 */
+}							/* NVMe: pci_save_tph_state 함수 종료 */
 
 /*
  * pci_no_tph:
@@ -632,12 +632,12 @@ void pci_save_tph_state(struct pci_dev *pdev)
  *   NVMe 장치도 TPH 요청을 하지 않게 되어, TPH 관련 호환성/안정성 문제를
  *   회피할 수 있다(성능은 저하될 수 있음).
  */
-void pci_no_tph(void)
-{
+void pci_no_tph(void)					/* NVMe: "notph" 파라미터 처리 진입점 */
+{						/* NVMe: pci_no_tph 함수 본문 시작 */
 	pci_tph_disabled = true;                        /* NVMe: 전역 TPH 비활성화 플래그 설정 */
 
 	pr_info("PCIe TPH is disabled\n");              /* NVMe: 커널 로그에 TPH 비활성화 메시지 출력 */
-}
+}							/* NVMe: pci_no_tph 함수 종료 */
 
 /*
  * pci_tph_init:
@@ -646,8 +646,8 @@ void pci_no_tph(void)
  *   tph_cap 필드가 설정되며, 이후 NVMe 드라이버가 TPH를 활용할 수
  *   있는 기반이 마련된다.
  */
-void pci_tph_init(struct pci_dev *pdev)
-{
+void pci_tph_init(struct pci_dev *pdev)			/* NVMe: TPH capability를 초기화할 NVMe pdev */
+{						/* NVMe: pci_tph_init 함수 본문 시작 */
 	int num_entries;                                /* NVMe: ST table 항목 개수 */
 	u32 save_size;                                  /* NVMe: 저장 버퍼 크기(Control register + ST table) */
 
@@ -658,4 +658,4 @@ void pci_tph_init(struct pci_dev *pdev)
 	num_entries = pcie_tph_get_st_table_size(pdev); /* NVMe: TPH capability에 기록된 ST table 크기 획득 */
 	save_size = sizeof(u32) + num_entries * sizeof(u16); /* NVMe: Control register 4byte + ST entry당 2byte 크기 계산 */
 	pci_add_ext_cap_save_buffer(pdev, PCI_EXT_CAP_ID_TPH, save_size); /* NVMe: suspend/reset 복원용 저장 버퍼 등록 */
-}
+}							/* NVMe: pci_tph_init 함수 종료 */

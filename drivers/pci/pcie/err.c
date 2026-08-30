@@ -63,9 +63,9 @@
  *   NVMe가 연결된 하위 트리에 여러 endpoint/bridge가 있을 때 각 장치의
  *   복구 의견을 하나로 모아 recovery 정책을 결정한다.
  */
-static pci_ers_result_t merge_result(enum pci_ers_result orig,
-				  enum pci_ers_result new)
-{
+static pci_ers_result_t merge_result(enum pci_ers_result orig, /* NVMe: 기존 복구 투표 결과. */
+				  enum pci_ers_result new) /* NVMe: 새로 들어온 복구 투표 결과. */
+{ /* NVMe: merge_result 함수 본문 시작. */
 	if (new == PCI_ERS_RESULT_NO_AER_DRIVER) /* NVMe: 새 투표가 AER 드라이버 부재면 즉시 해당 값 반환. */
 		return PCI_ERS_RESULT_NO_AER_DRIVER; /* NVMe: 하위 트리 중 AER 처리 주체가 없음을 보고. */
 
@@ -83,10 +83,10 @@ static pci_ers_result_t merge_result(enum pci_ers_result orig,
 		break; /* NVMe: switch 문 종료. */
 	default: /* NVMe: 그 외 상태는 변경하지 않는다. */
 		break; /* NVMe: 아무 동작 없이 종료. */
-	}
+	} /* NVMe: switch 문 종료. */
 
 	return orig; /* NVMe: 병합된 최종 복구 결과를 반환. */
-}
+} /* NVMe: merge_result 함수 종료. */
 
 /*
  * report_error_detected:
@@ -94,10 +94,10 @@ static pci_ers_result_t merge_result(enum pci_ers_result orig,
  *   NVMe endpoint의 pci_dev에 대해 nvme_error_detected()가 호출되는
  *   진입점이며, pci_channel_state_t 상태를 NVMe 드라이버에 전달한다.
  */
-static int report_error_detected(struct pci_dev *dev,
-				 pci_channel_state_t state,
-				 enum pci_ers_result *result)
-{
+static int report_error_detected(struct pci_dev *dev, /* NVMe: 오류를 보고할 대상 PCI 장치(NVMe 장치). */
+				 pci_channel_state_t state, /* NVMe: 전달할 I/O 채널 상태. */
+				 enum pci_ers_result *result) /* NVMe: 누적 복구 결과를 저장할 포인터. */
+{ /* NVMe: report_error_detected 함수 본문 시작. */
 	struct pci_driver *pdrv; /* NVMe: dev에 바인딩된 PCI 드라이버 포인터(NVMe 드라이버). */
 	pci_ers_result_t vote; /* NVMe: 현재 장치의 복구 투표 결과. */
 	const struct pci_error_handlers *err_handler; /* NVMe: 드라이버가 등록한 error handlers. */
@@ -107,10 +107,10 @@ static int report_error_detected(struct pci_dev *dev,
 	if (pci_dev_is_disconnected(dev)) { /* NVMe: 이미 disconnect 처리된 장치이면. */
 		vote = PCI_ERS_RESULT_DISCONNECT; /* NVMe: disconnect 투표. */
 	} else if (!pci_dev_set_io_state(dev, state)) { /* NVMe: 장치의 I/O 상태 전환이 불가능하면. */
-		pci_info(dev, "can't recover (state transition %u -> %u invalid)\n",
+		pci_info(dev, "can't recover (state transition %u -> %u invalid)\n", /* NVMe: 상태 전환 실패 로그 출력 시작. */
 			dev->error_state, state); /* NVMe: 상태 전환 실패 로그 출력. */
 		vote = PCI_ERS_RESULT_NONE; /* NVMe: 복구 의견 없음. */
-	} else if (!pdrv || !pdrv->err_handler ||
+	} else if (!pdrv || !pdrv->err_handler || /* NVMe: 드라이버나 error handler가 없는 경우 분기. */
 		   !pdrv->err_handler->error_detected) { /* NVMe: 드라이버나 error_detected 콜백이 없으면. */
 		/*
 		 * If any device in the subtree does not have an error_detected
@@ -123,58 +123,62 @@ static int report_error_detected(struct pci_dev *dev,
 			pci_info(dev, "can't recover (no error_detected callback)\n"); /* NVMe: 콜백 부재 로그. */
 		} else { /* NVMe: bridge인 경우는 투표 없이 넘어간다. */
 			vote = PCI_ERS_RESULT_NONE; /* NVMe: bridge는 NONE 투표. */
-		}
+		} /* NVMe: endpoint/bridge 구분 분기 종료. */
 	} else { /* NVMe: NVMe처럼 error_detected 콜백을 등록한 endpoint. */
 		err_handler = pdrv->err_handler; /* NVMe: 드라이버의 error handler 테이블 획득. */
 		vote = err_handler->error_detected(dev, state); /* NVMe: NVMe의 nvme_error_detected() 호출, 상태 반영. */
-	}
+	} /* NVMe: 조걸문 분기 종료. */
 	pci_uevent_ers(dev, vote); /* NVMe: 사용자 공간에 error recovery 상태 uevent 전달. */
 	*result = merge_result(*result, vote); /* NVMe: 현재 투표를 전체 결과에 병합. */
 	device_unlock(&dev->dev); /* NVMe: 장치 lock 해제. */
 	return 0; /* NVMe: report 함수는 0을 반환. */
-}
+} /* NVMe: report_error_detected 함수 종료. */
 
 /*
  * pci_pm_runtime_get_sync:
  *   복구 절차 중 bridge 아래 모든 장치의 runtime PM 참조 카운트를 증가시켜
  *   복구 중 장치가 suspend되지 않도록 한다. NVMe도 이 순회에서 활성화된다.
  */
-static int pci_pm_runtime_get_sync(struct pci_dev *pdev, void *data)
-{
+static int pci_pm_runtime_get_sync(struct pci_dev *pdev, /* NVMe: runtime PM을 증가시킬 PCI 장치. */
+				   void *data) /* NVMe: 콜백에 전달된 사용자 데이터(미사용). */
+{ /* NVMe: pci_pm_runtime_get_sync 함수 본문 시작. */
 	pm_runtime_get_sync(&pdev->dev); /* NVMe: pdev의 runtime PM 사용 카운트를 증가시킨다. */
 	return 0; /* NVMe: 성공적으로 참조를 증가. */
-}
+} /* NVMe: pci_pm_runtime_get_sync 함수 종료. */
 
 /*
  * pci_pm_runtime_put:
  *   복구 완료 후 bridge 아래 모든 장치의 runtime PM 참조를 감소시킨다.
  *   NVMe의 전원 상태도 원래대로 돌아갈 수 있게 한다.
  */
-static int pci_pm_runtime_put(struct pci_dev *pdev, void *data)
-{
+static int pci_pm_runtime_put(struct pci_dev *pdev, /* NVMe: runtime PM을 감소시킬 PCI 장치. */
+				void *data) /* NVMe: 콜백에 전달된 사용자 데이터(미사용). */
+{ /* NVMe: pci_pm_runtime_put 함수 본문 시작. */
 	pm_runtime_put(&pdev->dev); /* NVMe: pdev의 runtime PM 참조 카운트를 감소시킨다. */
 	return 0; /* NVMe: 성공적으로 참조를 감소. */
-}
+} /* NVMe: pci_pm_runtime_put 함수 종료. */
 
 /*
  * report_frozen_detected:
  *   pci_channel_io_frozen 상태에서 report_error_detected()를 호출한다.
  *   NVMe가 frozen 상태로 오류를 감지하면 controller reset이 필요하다.
  */
-static int report_frozen_detected(struct pci_dev *dev, void *data)
-{
+static int report_frozen_detected(struct pci_dev *dev, /* NVMe: 순회 중인 PCI 장치(NVMe 포함). */
+				  void *data) /* NVMe: 누적 복구 결과 포인터. */
+{ /* NVMe: report_frozen_detected 함수 본문 시작. */
 	return report_error_detected(dev, pci_channel_io_frozen, data); /* NVMe: frozen 상태로 error_detected 브로드캐스트. */
-}
+} /* NVMe: report_frozen_detected 함수 종료. */
 
 /*
  * report_normal_detected:
  *   pci_channel_io_normal 상태에서 report_error_detected()를 호출한다.
  *   NVMe는 normal 상태에서 CAN_RECOVER를 반환할 수 있다.
  */
-static int report_normal_detected(struct pci_dev *dev, void *data)
-{
+static int report_normal_detected(struct pci_dev *dev, /* NVMe: 순회 중인 PCI 장치(NVMe 포함). */
+				  void *data) /* NVMe: 누적 복구 결과 포인터. */
+{ /* NVMe: report_normal_detected 함수 본문 시작. */
 	return report_error_detected(dev, pci_channel_io_normal, data); /* NVMe: normal 상태로 error_detected 브로드캐스트. */
-}
+} /* NVMe: report_normal_detected 함수 종료. */
 
 /*
  * report_perm_failure_detected:
@@ -182,8 +186,9 @@ static int report_normal_detected(struct pci_dev *dev, void *data)
  *   disconnect uevent를 발생시킨다. NVMe 장치를 더 이상 사용할 수 없게 된
  *   경우에 해당한다.
  */
-static int report_perm_failure_detected(struct pci_dev *dev, void *data)
-{
+static int report_perm_failure_detected(struct pci_dev *dev, /* NVMe: 영구 오류를 통보할 대상 PCI 장치(NVMe 포함). */
+				      void *data) /* NVMe: 콜백에 전달된 사용자 데이터(미사용). */
+{ /* NVMe: report_perm_failure_detected 함수 본문 시작. */
 	struct pci_driver *pdrv; /* NVMe: dev에 바인딩된 PCI 드라이버. */
 	const struct pci_error_handlers *err_handler; /* NVMe: 드라이버의 error handlers. */
 
@@ -194,11 +199,11 @@ static int report_perm_failure_detected(struct pci_dev *dev, void *data)
 
 	err_handler = pdrv->err_handler; /* NVMe: error handler 테이블 획득. */
 	err_handler->error_detected(dev, pci_channel_io_perm_failure); /* NVMe: NVMe에 영구 오류 통보. */
-out:
+out: /* NVMe: 콜백 부재 시 공통 후처리 레이블. */
 	pci_uevent_ers(dev, PCI_ERS_RESULT_DISCONNECT); /* NVMe: 사용자 공간에 disconnect uevent 전송. */
 	device_unlock(&dev->dev); /* NVMe: 장치 lock 해제. */
 	return 0; /* NVMe: report 함수는 0 반환. */
-}
+} /* NVMe: report_perm_failure_detected 함수 종료. */
 
 /*
  * report_mmio_enabled:
@@ -206,8 +211,9 @@ out:
  *   NVMe는 현재 이 콜백을 등록하지 않으므로, 이 단계는 주로 bridge나
  *   다른 endpoint를 대상으로 한다.
  */
-static int report_mmio_enabled(struct pci_dev *dev, void *data)
-{
+static int report_mmio_enabled(struct pci_dev *dev, /* NVMe: 순회 중인 PCI 장치(NVMe 포함). */
+				 void *data) /* NVMe: 누적 복구 결과 포인터. */
+{ /* NVMe: report_mmio_enabled 함수 본문 시작. */
 	struct pci_driver *pdrv; /* NVMe: dev에 바인딩된 PCI 드라이버. */
 	pci_ers_result_t vote, *result = data; /* NVMe: 현재 투표 및 누적 결과 포인터. */
 	const struct pci_error_handlers *err_handler; /* NVMe: 드라이버의 error handlers. */
@@ -220,18 +226,19 @@ static int report_mmio_enabled(struct pci_dev *dev, void *data)
 	err_handler = pdrv->err_handler; /* NVMe: error handler 테이블 획득. */
 	vote = err_handler->mmio_enabled(dev); /* NVMe: mmio_enabled 콜백 호출(현재 NVMe는 NULL). */
 	*result = merge_result(*result, vote); /* NVMe: 투표 결과 병합. */
-out:
+out: /* NVMe: mmio_enabled 후처리 레이블. */
 	device_unlock(&dev->dev); /* NVMe: 장치 lock 해제. */
 	return 0; /* NVMe: report 함수는 0 반환. */
-}
+} /* NVMe: report_mmio_enabled 함수 종료. */
 
 /*
  * report_slot_reset:
  *   slot reset 단계에서 각 장치의 slot_reset 콜백을 호출한다.
  *   NVMe의 nvme_slot_reset()가 이 시점에 호출되어 controller를 재시작한다.
  */
-static int report_slot_reset(struct pci_dev *dev, void *data)
-{
+static int report_slot_reset(struct pci_dev *dev, /* NVMe: 순회 중인 PCI 장치(NVMe 포함). */
+				void *data) /* NVMe: 누적 복구 결과 포인터. */
+{ /* NVMe: report_slot_reset 함수 본문 시작. */
 	struct pci_driver *pdrv; /* NVMe: dev에 바인딩된 PCI 드라이버. */
 	pci_ers_result_t vote, *result = data; /* NVMe: 현재 투표 및 누적 결과 포인터. */
 	const struct pci_error_handlers *err_handler; /* NVMe: 드라이버의 error handlers. */
@@ -245,18 +252,19 @@ static int report_slot_reset(struct pci_dev *dev, void *data)
 	err_handler = pdrv->err_handler; /* NVMe: error handler 테이블 획득. */
 	vote = err_handler->slot_reset(dev); /* NVMe: NVMe의 nvme_slot_reset() 호출. */
 	*result = merge_result(*result, vote); /* NVMe: 투표 결과 병합. */
-out:
+out: /* NVMe: slot_reset 후처리 레이블. */
 	device_unlock(&dev->dev); /* NVMe: 장치 lock 해제. */
 	return 0; /* NVMe: report 함수는 0 반환. */
-}
+} /* NVMe: report_slot_reset 함수 종료. */
 
 /*
  * report_resume:
  *   recovery 성공 후 각 장치의 resume 콜백을 호출한다.
  *   NVMe의 nvme_error_resume()가 이 시점에 호출되어 reset work를 기다린다.
  */
-static int report_resume(struct pci_dev *dev, void *data)
-{
+static int report_resume(struct pci_dev *dev, /* NVMe: 순회 중인 PCI 장치(NVMe 포함). */
+			       void *data) /* NVMe: 누적 복구 결과 포인터. */
+{ /* NVMe: report_resume 함수 본문 시작. */
 	struct pci_driver *pdrv; /* NVMe: dev에 바인딩된 PCI 드라이버. */
 	const struct pci_error_handlers *err_handler; /* NVMe: 드라이버의 error handlers. */
 
@@ -268,11 +276,11 @@ static int report_resume(struct pci_dev *dev, void *data)
 
 	err_handler = pdrv->err_handler; /* NVMe: error handler 테이블 획득. */
 	err_handler->resume(dev); /* NVMe: NVMe의 nvme_error_resume() 호출. */
-out:
+out: /* NVMe: resume 후처리 레이블. */
 	pci_uevent_ers(dev, PCI_ERS_RESULT_RECOVERED); /* NVMe: 사용자 공간에 recovered uevent 전송. */
 	device_unlock(&dev->dev); /* NVMe: 장치 lock 해제. */
 	return 0; /* NVMe: report 함수는 0 반환. */
-}
+} /* NVMe: report_resume 함수 종료. */
 
 /**
  * pci_walk_bridge - walk bridges potentially AER affected
@@ -294,15 +302,15 @@ out:
  *   일반 Endpoint이면 상위 bridge의 subordinate bus를 순회하며 NVMe에도
  *   callback이 전달된다.
  */
-static void pci_walk_bridge(struct pci_dev *bridge,
-			    int (*cb)(struct pci_dev *, void *),
-			    void *userdata)
-{
+static void pci_walk_bridge(struct pci_dev *bridge, /* NVMe: 복구 메시지를 전파할 기준 bridge/장치. */
+			    int (*cb)(struct pci_dev *, void *), /* NVMe: 각 장치에 호출할 콜백 함수. */
+			    void *userdata) /* NVMe: 콜백에 전달할 사용자 데이터(누적 결과 등). */
+{ /* NVMe: pci_walk_bridge 함수 본문 시작. */
 	if (bridge->subordinate) /* NVMe: bridge에 하위 bus가 있으면(예: Root Port). */
 		pci_walk_bus(bridge->subordinate, cb, userdata); /* NVMe: 하위 bus의 모든 장치(NVMe 포함)에 callback 호출. */
 	else /* NVMe: 하위 bus가 없는 RCEC/RCiEP 등. */
 		cb(bridge, userdata); /* NVMe: bridge 장치 자체에 callback 호출. */
-}
+} /* NVMe: pci_walk_bridge 함수 종료. */
 
 /*
  * pcie_do_recovery:
@@ -310,10 +318,10 @@ static void pci_walk_bridge(struct pci_dev *bridge,
  *   NVMe endpoint에서 오류가 감지되거나 상위 Port에서 오류가 전파되면
  *   이 함수가 NVMe의 error handlers를 단계적으로 호출하여 복구를 시도한다.
  */
-pci_ers_result_t pcie_do_recovery(struct pci_dev *dev,
-		pci_channel_state_t state,
-		pci_ers_result_t (*reset_subordinates)(struct pci_dev *pdev))
-{
+pci_ers_result_t pcie_do_recovery(struct pci_dev *dev, /* NVMe: 오류를 감지한 PCIe 장치. */
+		pci_channel_state_t state, /* NVMe: 오류 채널 상태(frozen/normal 등). */
+		pci_ers_result_t (*reset_subordinates)(struct pci_dev *pdev)) /* NVMe: 하위 장치를 reset하는 콜백 함수. */
+{ /* NVMe: pcie_do_recovery 함수 본문 시작. */
 	int type = pci_pcie_type(dev); /* NVMe: 오류를 감지한 PCIe 장치의 타입(Root Port, Endpoint 등) 획득. */
 	struct pci_dev *bridge; /* NVMe: 복구 메시지를 브로드캐스트할 기준 bridge/장치. */
 	pci_ers_result_t status = PCI_ERS_RESULT_CAN_RECOVER; /* NVMe: 초기 복구 상태는 복구 가능으로 설정. */
@@ -348,15 +356,15 @@ pci_ers_result_t pcie_do_recovery(struct pci_dev *dev,
 		status = PCI_ERS_RESULT_RECOVERED; /* NVMe: 일단 복구된 것으로 간주. */
 		pci_dbg(bridge, "broadcast mmio_enabled message\n"); /* NVMe: mmio_enabled 브로드캐스트 디버그 로그. */
 		pci_walk_bridge(bridge, report_mmio_enabled, &status); /* NVMe: mmio_enabled 단계 수행(NVMe는 보통 스킵). */
-	}
+	} /* NVMe: CAN_RECOVER 분기 종료. */
 
 	if (status == PCI_ERS_RESULT_NEED_RESET || /* NVMe: NVMe가 NEED_RESET을 반환했거나. */
 	    state == pci_channel_io_frozen) { /* NVMe: 채널이 frozen이면 강제 reset. */
 		if (reset_subordinates(bridge) != PCI_ERS_RESULT_RECOVERED) { /* NVMe: 하위 장치 reset이 실패하면. */
 			pci_warn(bridge, "subordinate device reset failed\n"); /* NVMe: reset 실패 경고. */
 			goto failed; /* NVMe: 복구 실패 경로로 이동. */
-		}
-	}
+		} /* NVMe: reset_subordinates 실패 분기 종료. */
+	} /* NVMe: NEED_RESET/frozen 분기 종료. */
 
 	if (status == PCI_ERS_RESULT_NEED_RESET) { /* NVMe: 여전히 reset이 필요하면. */
 		/*
@@ -367,7 +375,7 @@ pci_ers_result_t pcie_do_recovery(struct pci_dev *dev,
 		status = PCI_ERS_RESULT_RECOVERED; /* NVMe: slot_reset 전에 recovered로 상태 전환. */
 		pci_dbg(bridge, "broadcast slot_reset message\n"); /* NVMe: slot_reset 브로드캐스트 디버그 로그. */
 		pci_walk_bridge(bridge, report_slot_reset, &status); /* NVMe: NVMe의 nvme_slot_reset() 호출. */
-	}
+	} /* NVMe: NEED_RESET 분기 종료. */
 
 	if (status != PCI_ERS_RESULT_RECOVERED) /* NVMe: 복구되지 않았으면. */
 		goto failed; /* NVMe: 복구 실패 경로로 이동. */
@@ -384,14 +392,14 @@ pci_ers_result_t pcie_do_recovery(struct pci_dev *dev,
 	if (host->native_aer || pcie_ports_native) { /* NVMe: 커널이 AER을 제어 중이면. */
 		pcie_clear_device_status(dev); /* NVMe: 오류를 감지한 장치의 PCIe device status 레지스터 클리어. */
 		pci_aer_clear_nonfatal_status(dev); /* NVMe: AER non-fatal status 레지스터 클리어. */
-	}
+	} /* NVMe: AER status 클리어 분기 종료. */
 
 	pci_walk_bridge(bridge, pci_pm_runtime_put, NULL); /* NVMe: bridge 아래 장치들의 runtime PM 참조 감소. */
 
 	pci_info(bridge, "device recovery successful\n"); /* NVMe: 복구 성공 정보 로그. */
 	return status; /* NVMe: 최종 복구 상태 반환. */
 
-failed:
+failed: /* NVMe: 복구 실패 시 점프하는 레이블. */
 	pci_walk_bridge(bridge, pci_pm_runtime_put, NULL); /* NVMe: 실패 시에도 runtime PM 참조 감소. */
 
 	pci_walk_bridge(bridge, report_perm_failure_detected, NULL); /* NVMe: 영구 오류로 처리, NVMe disconnect uevent 발생. */
@@ -399,4 +407,4 @@ failed:
 	pci_info(bridge, "device recovery failed\n"); /* NVMe: 복구 실패 정보 로그. */
 
 	return status; /* NVMe: 실패 상태 반환. */
-}
+} /* NVMe: pcie_do_recovery 함수 종료. */

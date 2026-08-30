@@ -276,8 +276,8 @@ void pci_restore_aspm_l1ss_state(struct pci_dev *pdev) /* NVMe: pci_restore_aspm
 #define MODULE_PARAM_PREFIX "pcie_aspm." /* NVMe: 모듈 매개변수 접두사를 pcie_aspm.으로 지정 */
 
 /* Note: these are not register definitions */
-#define PCIE_LINK_STATE_L0S_UP	BIT(0)	/* Upstream direction L0s state */
-#define PCIE_LINK_STATE_L0S_DW	BIT(1)	/* Downstream direction L0s state */
+#define PCIE_LINK_STATE_L0S_UP	BIT(0)	/* Upstream direction L0s state */ /* NVMe: upstream(NVMe -> Root) L0s 상태 비트; DMA write 완료 후 링크 저전력 진입 가능 */
+#define PCIE_LINK_STATE_L0S_DW	BIT(1)	/* Downstream direction L0s state */ /* NVMe: downstream(Root -> NVMe) L0s 상태 비트; doorbell/명령 전송 후 링크 저전력 진입 가능 */
 static_assert(PCIE_LINK_STATE_L0S == (PCIE_LINK_STATE_L0S_UP | PCIE_LINK_STATE_L0S_DW)); /* NVMe: static_assert() 함수 호출 */
 
 #define PCIE_LINK_STATE_L1_SS_PCIPM	(PCIE_LINK_STATE_L1_1_PCIPM | /* NVMe: PCI-PM L1 substates 묶음 마스크 정의 */ \
@@ -318,25 +318,24 @@ static_assert(PCIE_LINK_STATE_L0S == (PCIE_LINK_STATE_L0S_UP | PCIE_LINK_STATE_L
  *     타이밍에 미세한 영향을 줄 수 있다(추정).
  */
 struct pcie_link_state { /* NVMe: 코드 라인 실행 */
-	struct pci_dev *pdev;		/* Upstream component of the Link */
-	struct pci_dev *downstream;	/* Downstream component, function 0 */
-	struct pcie_link_state *root;	/* pointer to the root port link */
-	struct pcie_link_state *parent;	/* pointer to the parent Link state */
-	struct list_head sibling;	/* node in link_list */
+	struct pci_dev *pdev;		/* Upstream component of the Link */ /* NVMe: 링크 upstream 포트(보통 Root Port); NVMe DMA TLP가 거슬러 올라가는 첫 관문 */
+	struct pci_dev *downstream;	/* Downstream component, function 0 */ /* NVMe: 링크 downstream function 0; NVMe endpoint가 연결된 포트 */
+	struct pcie_link_state *root;	/* pointer to the root port link */ /* NVMe: Root Port link_state; 전체 경로의 latency/ASPM 갱신 시 기준점 */
+	struct pcie_link_state *parent;	/* pointer to the parent Link state */ /* NVMe: 상위 링크 상태; Switch 아래 NVMe일 때 상위 ASPM 경로 참조 */
+	struct list_head sibling;	/* node in link_list */ /* NVMe: ASPM 링크 전역 리스트의 노드; 시스템 내 모든 NVMe 링크 순회용 */
 
 	/* ASPM state */
-	u32 aspm_support:7;		/* Supported ASPM state */
-	u32 aspm_enabled:7;		/* Enabled ASPM state */
-	u32 aspm_capable:7;		/* Capable ASPM state with latency */
-	u32 aspm_default:7;		/* Default ASPM state by BIOS or
-					   override */ /* NVMe: 코드 라인 실행 */
-	u32 aspm_disable:7;		/* Disabled ASPM state */
+	u32 aspm_support:7;		/* Supported ASPM state */ /* NVMe: 링크 양단이 지원하는 ASPM L0s/L1/L1SS 비트; NVMe 장치 DEVCAP 기반 */
+	u32 aspm_enabled:7;		/* Enabled ASPM state */ /* NVMe: 현재 PCIe LNKCTL에 설정된 ASPM 상태; NVMe DMA/MSI-X 지연에 직접 영향 */
+	u32 aspm_capable:7;		/* Capable ASPM state with latency */ /* NVMe: latency 검사를 통과한 실제 사용 가능 ASPM 상태; NVMe acceptable latency 제약 반영 */
+	u32 aspm_default:7;		/* Default ASPM state by BIOS or override */ /* NVMe: BIOS/초기화 기본 ASPM 상태; NVMe 장치에 최초 적용되는 링크 전원 정책 */
+	u32 aspm_disable:7;		/* Disabled ASPM state */ /* NVMe: SW/HW적으로 금지된 ASPM 상태 비트; pci_disable_link_state()로 NVMe 성능 보장 시 설정 */
 
 	/* Clock PM state */
-	u32 clkpm_capable:1;		/* Clock PM capable? */
-	u32 clkpm_enabled:1;		/* Current Clock PM state */
-	u32 clkpm_default:1;		/* Default Clock PM state by BIOS */
-	u32 clkpm_disable:1;		/* Clock PM disabled */
+	u32 clkpm_capable:1;		/* Clock PM capable? */ /* NVMe: CLKREQ# 기반 clock power management 지원 여부; NVMe DMA 타이밍 미세 영향 */
+	u32 clkpm_enabled:1;		/* Current Clock PM state */ /* NVMe: 현재 CLKPM 활성화 상태; REFCLK gate로 인한 NVMe register 접근 지연 가능 */
+	u32 clkpm_default:1;		/* Default Clock PM state by BIOS */ /* NVMe: BIOS 설정 CLKPM 초기 상태; NVMe 장치 공통 clock 전원 관리 기준 */
+	u32 clkpm_disable:1;		/* Clock PM disabled */ /* NVMe: SW/HW적으로 CLKPM 금지 플래그; NVMe 고성능 모드에서 종종 set */
 }; /* NVMe: 코드 라인 실행 */
 
 static bool aspm_disabled, aspm_force; /* NVMe: 지역/전역 변수 선언 */
@@ -344,10 +343,10 @@ static bool aspm_support_enabled = true; /* NVMe: 지역/전역 변수 선언 */
 static DEFINE_MUTEX(aspm_lock); /* NVMe: DEFINE_MUTEX() 함수 호출 */
 static LIST_HEAD(link_list); /* NVMe: LIST_HEAD() 함수 호출 */
 
-#define POLICY_DEFAULT 0	/* BIOS default setting */
-#define POLICY_PERFORMANCE 1	/* high performance */
-#define POLICY_POWERSAVE 2	/* high power saving */
-#define POLICY_POWER_SUPERSAVE 3 /* possibly even more power saving */
+#define POLICY_DEFAULT 0	/* BIOS default setting */ /* NVMe: BIOS ASPM 설정을 그대로 따름; NVMe 장치의 초기 링크 전원 정책 유지 */
+#define POLICY_PERFORMANCE 1	/* high performance */ /* NVMe: 고성능 정책; NVMe DMA/MSI-X 지연 최소화를 위해 ASPM 억제 */
+#define POLICY_POWERSAVE 2	/* high power saving */ /* NVMe: 고절전 정책; NVMe idle 시 L0s/L1/L1SS 진입으로 전력 절감 */
+#define POLICY_POWER_SUPERSAVE 3 /* possibly even more power saving */ /* NVMe: 초고절전 정책; NVMe 링크를 가장 낮은 전력 상태로 유도 */
 
 #ifdef CONFIG_PCIEASPM_PERFORMANCE /* NVMe: 전처리 조건: CONFIG_PCIEASPM_PERFORMANCE 정의 시 컴파일 */
 static int aspm_policy = POLICY_PERFORMANCE; /* NVMe: 지역/전역 변수 선언 */
@@ -582,7 +581,7 @@ static u32 calc_l0s_latency(u32 lnkcap) /* NVMe: calc_l0s_latency() 함수 정�
 	u32 encoding = FIELD_GET(PCI_EXP_LNKCAP_L0SEL, lnkcap); /* NVMe: 비트 필드 값 추출 */
 
 	if (encoding == 0x7) /* NVMe: 조건 검사 (참이면 아래 블록 실행) */
-		return 5 * NSEC_PER_USEC;	/* > 4us */
+		return 5 * NSEC_PER_USEC;	/* > 4us */ /* NVMe: L0s exit latency >4us 코딩값; NVMe DMA 응답 지연 상한 */
 	return (64 << encoding); /* NVMe: 값 반환 및 함수 종료 */
 } /* NVMe: 블록/함수 종료 */
 
@@ -602,7 +601,7 @@ static u32 calc_l1_latency(u32 lnkcap) /* NVMe: calc_l1_latency() 함수 정의 
 	u32 encoding = FIELD_GET(PCI_EXP_LNKCAP_L1EL, lnkcap); /* NVMe: 비트 필드 값 추출 */
 
 	if (encoding == 0x7) /* NVMe: 조건 검사 (참이면 아래 블록 실행) */
-		return 65 * NSEC_PER_USEC;	/* > 64us */
+		return 65 * NSEC_PER_USEC;	/* > 64us */ /* NVMe: L1 exit latency >64us 코딩값; NVMe MSI-X 단발 호출 지연 상한 */
 	return NSEC_PER_USEC << encoding; /* NVMe: 값 반환 및 함수 종료 */
 } /* NVMe: 블록/함수 종료 */
 

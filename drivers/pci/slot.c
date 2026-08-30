@@ -51,13 +51,13 @@ EXPORT_SYMBOL_GPL(pci_slots_kset);	/* NVMe: 핫플러그 드라이버 등 외부
  *   NVMe 관점에서 /sys/bus/pci/slots/<slot>/address, max_bus_speed,
  *   cur_bus_speed 등을 읽을 때 이 함수가 호출된다.
  */
-static ssize_t pci_slot_attr_show(struct kobject *kobj,
-				struct attribute *attr, char *buf)
-{
+static ssize_t pci_slot_attr_show(struct kobject *kobj,	/* NVMe: slot sysfs 속성 읽기 콜백: kobject 인자 */
+				struct attribute *attr, char *buf)	/* NVMe: 읽을 attribute와 사용자 공간 버퍼 */
+{	/* NVMe: slot sysfs show 콜백 본문 시작 */
 	struct pci_slot *slot = to_pci_slot(kobj);	/* NVMe: kobject에서 pci_slot 구조체 획득 */
 	struct pci_slot_attribute *attribute = to_pci_slot_attr(attr);	/* NVMe: 일반 attribute를 pci_slot_attribute로 변환 */
 	return attribute->show ? attribute->show(slot, buf) : -EIO;	/* NVMe: show 콜백이 있으면 호출, 없으면 I/O 오류 반환 */
-}
+}	/* NVMe: slot sysfs show 콜백 종료 */
 
 /*
  * pci_slot_attr_store:
@@ -65,18 +65,18 @@ static ssize_t pci_slot_attr_show(struct kobject *kobj,
  *   NVMe 관점에서 /sys/bus/pci/slots/<slot>/power 또는 attention 등
  *   쓰기 가능 속성에 값을 쓸 때 사용될 수 있다.
  */
-static ssize_t pci_slot_attr_store(struct kobject *kobj,
-			struct attribute *attr, const char *buf, size_t len)
-{
+static ssize_t pci_slot_attr_store(struct kobject *kobj,	/* NVMe: slot sysfs 속성 쓰기 콜백: kobject 인자 */
+			struct attribute *attr, const char *buf, size_t len)	/* NVMe: attribute, 쓰기 데이터 및 길이 */
+{	/* NVMe: slot sysfs store 콜백 본문 시작 */
 	struct pci_slot *slot = to_pci_slot(kobj);	/* NVMe: kobject로부터 pci_slot 획득 */
 	struct pci_slot_attribute *attribute = to_pci_slot_attr(attr);	/* NVMe: slot 속성 구조체로 변환 */
 	return attribute->store ? attribute->store(slot, buf, len) : -EIO;	/* NVMe: store 콜백이 있으면 호출, 없으면 I/O 오류 반환 */
-}
+}	/* NVMe: slot sysfs store 콜백 종료 */
 
-static const struct sysfs_ops pci_slot_sysfs_ops = {
+static const struct sysfs_ops pci_slot_sysfs_ops = {	/* NVMe: slot kobject의 sysfs_ops 정의 */
 	.show = pci_slot_attr_show,	/* NVMe: sysfs 읽기 시 pci_slot_attr_show 사용 */
 	.store = pci_slot_attr_store,	/* NVMe: sysfs 쓰기 시 pci_slot_attr_store 사용 */
-};
+};	/* NVMe: sysfs_ops 구조체 정의 종료 */
 
 /*
  * address_read_file:
@@ -84,10 +84,10 @@ static const struct sysfs_ops pci_slot_sysfs_ops = {
  *   출력 형식은 dddd:bb 또는 dddd:bb:dd이며, NVMe 장치가 연결된
  *   PCIe slot의 domain/bus/device 주소를 식별하는 데 사용된다.
  */
-static ssize_t address_read_file(struct pci_slot *slot, char *buf)
-{
+static ssize_t address_read_file(struct pci_slot *slot, char *buf)	/* NVMe: slot의 sysfs 'address' 읽기 함수: NVMe 장치 PCIe 위치 반환 */
+{	/* NVMe: slot address sysfs 읽기 본문 시작 */
 	if (slot->number == 0xff)	/* NVMe: placeholder slot(-1이 저장된 경우)인지 확인 */
-		return sysfs_emit(buf, "%04x:%02x\n",
+		return sysfs_emit(buf, "%04x:%02x\n",	/* NVMe: domain:bus 형식으로 slot 주소 반환 */
 				  pci_domain_nr(slot->bus),	/* NVMe: slot이 속한 PCI domain 번호 출력 */
 				  slot->bus->number);	/* NVMe: slot이 속한 bus 번호 출력 */
 
@@ -96,15 +96,15 @@ static ssize_t address_read_file(struct pci_slot *slot, char *buf)
 	 * multiple devices per slot emit 0 for the device number.
 	 */
 	if (slot->number == PCI_SLOT_ALL_DEVICES)	/* NVMe: PCIe 핫플러그용 bus-wide slot인지 확인(ARI 등 다중 function 포함) */
-		return sysfs_emit(buf, "%04x:%02x:00\n",
+		return sysfs_emit(buf, "%04x:%02x:00\n",	/* NVMe: bus-wide slot은 device 00으로 주소 반환 */
 				  pci_domain_nr(slot->bus),	/* NVMe: NVMe slot의 domain 번호 */
 				  slot->bus->number);	/* NVMe: NVMe slot의 bus 번호, device는 00으로 고정(레거시 ABI) */
 
-	return sysfs_emit(buf, "%04x:%02x:%02x\n",
+	return sysfs_emit(buf, "%04x:%02x:%02x\n",	/* NVMe: domain:bus:device 형식으로 NVMe 장치 주소 반환 */
 			  pci_domain_nr(slot->bus),	/* NVMe: NVMe 장치가 연결된 PCI domain */
 			  slot->bus->number,	/* NVMe: NVMe 장치가 연결된 bus 번호 */
 			  slot->number);	/* NVMe: NVMe endpoint의 device 번호(slot 번호) */
-}
+}	/* NVMe: address 읽기 함수 종료 */
 
 /*
  * bus_speed_read:
@@ -112,30 +112,30 @@ static ssize_t address_read_file(struct pci_slot *slot, char *buf)
  *   sysfs 버퍼에 기록한다.
  *   NVMe 장치의 성능 디버깅이나 링크 협상 상태 확인에 사용된다.
  */
-static ssize_t bus_speed_read(enum pci_bus_speed speed, char *buf)
-{
+static ssize_t bus_speed_read(enum pci_bus_speed speed, char *buf)	/* NVMe: PCIe 속도 enum을 sysfs 문자열로 변환하는 헬퍼 함수 */
+{	/* NVMe: bus speed 변환 헬퍼 본문 시작 */
 	return sysfs_emit(buf, "%s\n", pci_speed_string(speed));	/* NVMe: 속도 enum을 사람이 읽을 수 있는 문자열로 출력 */
-}
+}	/* NVMe: bus_speed_read 헬퍼 종료 */
 
 /*
  * max_speed_read_file:
  *   slot이 지원하는 최대 PCIe 링크 속도(max_bus_speed)를 sysfs에 노출한다.
  *   NVMe SSD의 최대 성능을 제한하는 물리적 링크 속도를 확인할 수 있다.
  */
-static ssize_t max_speed_read_file(struct pci_slot *slot, char *buf)
-{
+static ssize_t max_speed_read_file(struct pci_slot *slot, char *buf)	/* NVMe: slot의 최대 PCIe 링크 속도 sysfs 노출 함수 */
+{	/* NVMe: max speed 읽기 본문 시작 */
 	return bus_speed_read(slot->bus->max_bus_speed, buf);	/* NVMe: slot bus의 최대 링크 속도 출력 */
-}
+}	/* NVMe: max_speed_read_file 종료 */
 
 /*
  * cur_speed_read_file:
  *   slot의 현재 PCIe 링크 속도(cur_bus_speed)를 sysfs에 노출한다.
  *   NVMe 장치가 현재 실제로 협상한 링크 속도를 확인할 때 사용된다.
  */
-static ssize_t cur_speed_read_file(struct pci_slot *slot, char *buf)
-{
+static ssize_t cur_speed_read_file(struct pci_slot *slot, char *buf)	/* NVMe: slot의 현재 PCIe 링크 속도 sysfs 노출 함수 */
+{	/* NVMe: current speed 읽기 본문 시작 */
 	return bus_speed_read(slot->bus->cur_bus_speed, buf);	/* NVMe: slot bus의 현재 링크 속도 출력 */
-}
+}	/* NVMe: cur_speed_read_file 종료 */
 
 /*
  * pci_slot_release:
@@ -143,12 +143,12 @@ static ssize_t cur_speed_read_file(struct pci_slot *slot, char *buf)
  *   NVMe 장치가 slot에 연결되어 있었다면 dev->slot을 NULL로 지우고,
  *   slot 구조체와 bus 참조를 정리한다.
  */
-static void pci_slot_release(struct kobject *kobj)
-{
+static void pci_slot_release(struct kobject *kobj)	/* NVMe: slot 해제 콜백: NVMe 장치의 slot 참조 정리 */
+{	/* NVMe: slot release 콜백 본문 시작 */
 	struct pci_dev *dev;	/* NVMe: slot에 속한 NVMe 등 PCI 장치를 순회할 포인터 */
 	struct pci_slot *slot = to_pci_slot(kobj);	/* NVMe: kobject에서 pci_slot 구조체 복원 */
 
-	dev_dbg(&slot->bus->dev, "dev %02x, released physical slot %s\n",
+	dev_dbg(&slot->bus->dev, "dev %02x, released physical slot %s\n",	/* NVMe: slot 해제 시 디버그 로그 출력 */
 		slot->number, pci_slot_name(slot));	/* NVMe: slot 해제 디버그 메시지 출력 */
 
 	down_read(&pci_bus_sem);	/* NVMe: bus 장치 리스트 읽기 잠금 획득 */
@@ -162,28 +162,28 @@ static void pci_slot_release(struct kobject *kobj)
 	pci_bus_put(slot->bus);	/* NVMe: slot이 참조하던 bus의 참조 카운트 감소 */
 
 	kfree(slot);	/* NVMe: slot 구조체 메모리 해제 */
-}
+}	/* NVMe: pci_slot_release 종료 */
 
-static struct pci_slot_attribute pci_slot_attr_address =
+static struct pci_slot_attribute pci_slot_attr_address =	/* NVMe: NVMe slot 주소 sysfs 속성 정의 */
 	__ATTR(address, S_IRUGO, address_read_file, NULL);	/* NVMe: 'address' 읽기 전용 속성 정의 */
-static struct pci_slot_attribute pci_slot_attr_max_speed =
+static struct pci_slot_attribute pci_slot_attr_max_speed =	/* NVMe: NVMe slot 최대 링크 속도 sysfs 속성 정의 */
 	__ATTR(max_bus_speed, S_IRUGO, max_speed_read_file, NULL);	/* NVMe: 'max_bus_speed' 읽기 전용 속성 정의 */
-static struct pci_slot_attribute pci_slot_attr_cur_speed =
+static struct pci_slot_attribute pci_slot_attr_cur_speed =	/* NVMe: NVMe slot 현재 링크 속도 sysfs 속성 정의 */
 	__ATTR(cur_bus_speed, S_IRUGO, cur_speed_read_file, NULL);	/* NVMe: 'cur_bus_speed' 읽기 전용 속성 정의 */
 
-static struct attribute *pci_slot_default_attrs[] = {
+static struct attribute *pci_slot_default_attrs[] = {	/* NVMe: slot 생성 시 등록할 기본 sysfs 속성 배열 */
 	&pci_slot_attr_address.attr,	/* NVMe: address 속성을 기본 그룹에 등록 */
 	&pci_slot_attr_max_speed.attr,	/* NVMe: max_bus_speed 속성을 기본 그룹에 등록 */
 	&pci_slot_attr_cur_speed.attr,	/* NVMe: cur_bus_speed 속성을 기본 그룹에 등록 */
 	NULL,	/* NVMe: 속성 배열 종료 표시 */
-};
+};	/* NVMe: 기본 slot 속성 배열 종료 */
 ATTRIBUTE_GROUPS(pci_slot_default);	/* NVMe: pci_slot_default_groups 생성 */
 
-static const struct kobj_type pci_slot_ktype = {
+static const struct kobj_type pci_slot_ktype = {	/* NVMe: slot kobject 타입 정의(sysfs 동작 등록) */
 	.sysfs_ops = &pci_slot_sysfs_ops,	/* NVMe: slot sysfs read/write 콜백 등록 */
 	.release = &pci_slot_release,	/* NVMe: slot 해제 시 pci_slot_release 호출 */
 	.default_groups = pci_slot_default_groups,	/* NVMe: slot 생성 시 기본 속성 그룹 연결 */
-};
+};	/* NVMe: slot kobj_type 정의 종료 */
 
 /*
  * make_slot_name:
@@ -191,8 +191,8 @@ static const struct kobj_type pci_slot_ktype = {
  *   유일한 이름을 생성한다. 이름 충돌 시 "name-N" 형식으로 rename한다.
  *   NVMe SSD가 연결된 slot의 sysfs 이름이 결정되는 지점이다.
  */
-static char *make_slot_name(const char *name)
-{
+static char *make_slot_name(const char *name)	/* NVMe: NVMe slot의 유일한 sysfs 이름을 생성하는 함수 */
+{	/* NVMe: 유일한 slot 이름 생성 본문 시작 */
 	char *new_name;		/* NVMe: 최종 생성될 slot 이름 문자열 */
 	int len, max, dup;	/* NVMe: 문자열 길이, 최대 중복 허용치, 중복 카운터 */
 
@@ -222,12 +222,12 @@ static char *make_slot_name(const char *name)
 			new_name = kmalloc(len, GFP_KERNEL);	/* NVMe: 더 큰 버퍼 할당 */
 			if (!new_name)	/* NVMe: 메모리 할당 실패 확인 */
 				break;	/* NVMe: 루프 종료, NULL은 아래서 반환 */
-		}
+		}	/* NVMe: 메모리 재할당 if 블록 종료 */
 		sprintf(new_name, "%s-%d", name, dup++);	/* NVMe: "name-N" 형식으로 이름 생성 후 번호 증가 */
-	}
+	}	/* NVMe: 이름 충돌 해결 루프 종료 */
 
 	return new_name;	/* NVMe: 유일한 slot 이름 반환(실패 시 NULL) */
-}
+}	/* NVMe: make_slot_name 종료 */
 
 /*
  * rename_slot:
@@ -235,8 +235,8 @@ static char *make_slot_name(const char *name)
  *   NVMe 장치가 연결된 slot의 이름이 핫플러그 드라이버에 의해
  *   업데이트될 때 사용될 수 있다.
  */
-static int rename_slot(struct pci_slot *slot, const char *name)
-{
+static int rename_slot(struct pci_slot *slot, const char *name)	/* NVMe: NVMe slot의 sysfs 이름을 변경하는 함수 */
+{	/* NVMe: slot 이름 변경 본문 시작 */
 	int result = 0;	/* NVMe: 이름 변경 결과(0은 성공) */
 	char *slot_name;	/* NVMe: 새로 할당된 유일한 slot 이름 */
 
@@ -251,7 +251,7 @@ static int rename_slot(struct pci_slot *slot, const char *name)
 	kfree(slot_name);	/* NVMe: 임시 이름 버퍼 해제 */
 
 	return result;	/* NVMe: rename 결과 반환 */
-}
+}	/* NVMe: rename_slot 종료 */
 
 /*
  * pci_dev_assign_slot:
@@ -259,8 +259,8 @@ static int rename_slot(struct pci_slot *slot, const char *name)
  *   NVMe probe 시 pci_dev 구조체가 초기화된 후 이 함수를 통해 해당 장치의
  *   slot 링크가 복원된다.
  */
-void pci_dev_assign_slot(struct pci_dev *dev)
-{
+void pci_dev_assign_slot(struct pci_dev *dev)	/* NVMe: NVMe pci_dev에 해당 slot을 연결하는 함수 */
+{	/* NVMe: pci_dev에 slot 할당 본문 시작 */
 	struct pci_slot *slot;	/* NVMe: 탐색 중인 pci_slot 포인터 */
 
 	mutex_lock(&pci_slot_mutex);	/* NVMe: slot 리스트 보호 뮤텍스 획득 */
@@ -269,7 +269,7 @@ void pci_dev_assign_slot(struct pci_dev *dev)
 		    PCI_SLOT(dev->devfn) == slot->number)	/* NVMe: 장치의 device 번호와 slot 번호가 일치하면 */
 			dev->slot = slot;	/* NVMe: NVMe 장치가 이 slot을 가리키도록 설정 */
 	mutex_unlock(&pci_slot_mutex);	/* NVMe: slot 뮤텍스 해제 */
-}
+}	/* NVMe: pci_dev_assign_slot 종료 */
 
 /*
  * get_slot:
@@ -277,8 +277,8 @@ void pci_dev_assign_slot(struct pci_dev *dev)
  *   pci_create_slot() 내에서 재사용할 slot을 검색할 때 사용된다.
  *   호출자는 pci_slot_mutex를 이미 보유하고 있어야 한다.
  */
-static struct pci_slot *get_slot(struct pci_bus *parent, int slot_nr)
-{
+static struct pci_slot *get_slot(struct pci_bus *parent, int slot_nr)	/* NVMe: parent bus에서 기존 slot을 찾아 참조 증가 */
+{	/* NVMe: 기존 slot 검색 본문 시작 */
 	struct pci_slot *slot;	/* NVMe: 탐색 중인 slot 포인터 */
 
 	/* We already hold pci_slot_mutex */
@@ -286,10 +286,10 @@ static struct pci_slot *get_slot(struct pci_bus *parent, int slot_nr)
 		if (slot->number == slot_nr) {	/* NVMe: 동일 slot 번호를 찾으면 */
 			kobject_get(&slot->kobj);	/* NVMe: slot kobject 참조 카운트 증가 */
 			return slot;	/* NVMe: 기존 slot 반환 */
-		}
+		}	/* NVMe: slot 검색 if 블록 종료 */
 
 	return NULL;	/* NVMe: 해당 slot이 없으면 NULL 반환 */
-}
+}	/* NVMe: get_slot 종료 */
 
 /**
  * pci_create_slot - create or increment refcount for physical PCI slot
@@ -346,10 +346,10 @@ static struct pci_slot *get_slot(struct pci_bus *parent, int slot_nr)
  *   NVMe 장치가 연결될 PCIe slot이 이 함수를 통해 sysfs에 등록되며,
  *   NVMe probe 전에 slot 리소스가 준비되어 있어야 한다.
  */
-struct pci_slot *pci_create_slot(struct pci_bus *parent, int slot_nr,
-				 const char *name,
-				 struct hotplug_slot *hotplug)
-{
+struct pci_slot *pci_create_slot(struct pci_bus *parent, int slot_nr,	/* NVMe: NVMe 장치가 연결될 PCIe slot을 생성 또는 참조 증가 */
+				 const char *name,	/* NVMe: sysfs에 노출할 slot 이름 */
+				 struct hotplug_slot *hotplug)	/* NVMe: 핫플러그 드라이버 컨텍스트(NULL 가능) */
+{	/* NVMe: slot 생성/참조 증가 본문 시작 */
 	struct pci_dev *dev;	/* NVMe: slot에 매칭할 bus 상의 PCI 장치 */
 	struct pci_slot *slot;	/* NVMe: 생성 또는 재사용될 pci_slot */
 	int err = 0;	/* NVMe: 오류 코드 초기화 */
@@ -370,20 +370,20 @@ struct pci_slot *pci_create_slot(struct pci_bus *parent, int slot_nr,
 			if (slot->hotplug) {	/* NVMe: 이미 다른 핫플러그 드라이버가 점유 중이면 */
 				err = -EBUSY;	/* NVMe: busy 오류 설정 */
 				goto put_slot;	/* NVMe: 참조 감소 후 오류 처리 */
-			}
+			}	/* NVMe: 이미 점유된 핫플러그 slot 처리 블록 종료 */
 			err = rename_slot(slot, name);	/* NVMe: slot 이름을 새 핫플러그 이름으로 변경 */
 			if (err)	/* NVMe: rename 실패 시 */
 				goto put_slot;	/* NVMe: 참조 감소 후 오류 처리 */
-		}
+		}	/* NVMe: rename 오류 처리 블록 종료 */
 		goto out;	/* NVMe: 기존 slot 반환(참조 증가된 상태) */
-	}
+	}	/* NVMe: 기존 slot 재사용 분기 종료 */
 
-placeholder:
+placeholder:	/* NVMe: 기존 slot 검색 없이 새 placeholder slot을 생성하는 진입점 */
 	slot = kzalloc_obj(*slot);	/* NVMe: pci_slot 구조체 0 초기화 후 할당 */
 	if (!slot) {	/* NVMe: 메모리 할당 실패 확인 */
 		err = -ENOMEM;	/* NVMe: 메모리 부족 오류 설정 */
 		goto err;	/* NVMe: 오류 처리 경로로 이동 */
-	}
+	}	/* NVMe: kzalloc_obj 실패 처리 블록 종료 */
 
 	slot->bus = pci_bus_get(parent);	/* NVMe: parent bus 참조 카운트 증가 및 연결 */
 	slot->number = slot_nr;	/* NVMe: slot 번호 저장(NVMe device 번호 또는 ALL_DEVICES) */
@@ -396,12 +396,12 @@ placeholder:
 		pci_bus_put(slot->bus);	/* NVMe: 이전에 증가시킨 bus 참조 감소 */
 		kfree(slot);	/* NVMe: 할당한 slot 구조체 해제 */
 		goto err;	/* NVMe: 오류 처리 경로로 이동 */
-	}
+	}	/* NVMe: slot 이름 생성 실패 처리 블록 종료 */
 
 	INIT_LIST_HEAD(&slot->list);	/* NVMe: slot 리스트 노드 초기화 */
 	list_add(&slot->list, &parent->slots);	/* NVMe: parent bus의 slot 리스트에 추가 */
 
-	err = kobject_init_and_add(&slot->kobj, &pci_slot_ktype, NULL,
+	err = kobject_init_and_add(&slot->kobj, &pci_slot_ktype, NULL,	/* NVMe: slot kobject를 초기화하고 sysfs에 등록 */
 				   "%s", slot_name);	/* NVMe: slot kobject 초기화 및 /sys/bus/pci/slots/<name> 등록 */
 	if (err)	/* NVMe: kobject 등록 실패 확인 */
 		goto put_slot;	/* NVMe: slot 참조를 감소시켜 해제 유도 */
@@ -413,20 +413,20 @@ placeholder:
 			dev->slot = slot;	/* NVMe: NVMe 등 장치가 이 slot을 가리키도록 연결 */
 	up_read(&pci_bus_sem);	/* NVMe: bus 장치 리스트 읽기 잠금 해제 */
 
-	dev_dbg(&parent->dev, "dev %02x, created physical slot %s\n",
+	dev_dbg(&parent->dev, "dev %02x, created physical slot %s\n",	/* NVMe: slot 생성 완료 디버그 로그 출력 */
 		slot_nr, pci_slot_name(slot));	/* NVMe: slot 생성 완료 디버그 로그 */
 
-out:
+out:	/* NVMe: pci_create_slot 공통 반환 레이블 */
 	kfree(slot_name);	/* NVMe: 임시 slot 이름 버퍼 해제(성공/실패 모두) */
 	mutex_unlock(&pci_slot_mutex);	/* NVMe: slot 뮤텍스 해제 */
 	return slot;	/* NVMe: 생성되거나 참조 증가된 slot 반환 */
 
-put_slot:
+put_slot:	/* NVMe: kobject 등록 후 오류 시 slot 참조 감소 레이블 */
 	kobject_put(&slot->kobj);	/* NVMe: kobject 참조 감소 -> release 또는 카운트 감소 */
-err:
+err:	/* NVMe: 초기 할당 단계 오류 처리 레이블 */
 	slot = ERR_PTR(err);	/* NVMe: 오류 포인터로 변환 */
 	goto out;	/* NVMe: 공통 반환 경로로 이동 */
-}
+}	/* NVMe: pci_create_slot 종료 */
 EXPORT_SYMBOL_GPL(pci_create_slot);	/* NVMe: 핫플러그/EDR 등 외부 모듈에서 pci_create_slot 호출 가능 */
 
 /**
@@ -443,15 +443,15 @@ EXPORT_SYMBOL_GPL(pci_create_slot);	/* NVMe: 핫플러그/EDR 등 외부 모듈�
  *   통해 메모리가 해제된다. NVMe 장치 제거(hot-unplug, EDR, 사용자 공간
  *   remove) 시 연결된 slot이 정리되는 경로이다.
  */
-void pci_destroy_slot(struct pci_slot *slot)
-{
-	dev_dbg(&slot->bus->dev, "dev %02x, dec refcount to %d\n",
+void pci_destroy_slot(struct pci_slot *slot)	/* NVMe: NVMe slot의 참조 카운트를 감소시키는 함수 */
+{	/* NVMe: slot 참조 감소 본문 시작 */
+	dev_dbg(&slot->bus->dev, "dev %02x, dec refcount to %d\n",	/* NVMe: slot 참조 카운트 감소 전 디버그 로그 출력 */
 		slot->number, kref_read(&slot->kobj.kref) - 1);	/* NVMe: 참조 카운트 감소 전 디버그 로그 */
 
 	mutex_lock(&pci_slot_mutex);	/* NVMe: slot 제거 보호 뮤텍스 획득 */
 	kobject_put(&slot->kobj);	/* NVMe: slot kobject 참조 감소(마지막이면 release 호출) */
 	mutex_unlock(&pci_slot_mutex);	/* NVMe: slot 뮤텍스 해제 */
-}
+}	/* NVMe: pci_destroy_slot 종료 */
 EXPORT_SYMBOL_GPL(pci_destroy_slot);	/* NVMe: 핫플러그/EDR 등 외부 모듈에서 pci_destroy_slot 호출 가능 */
 
 /*
@@ -460,18 +460,18 @@ EXPORT_SYMBOL_GPL(pci_destroy_slot);	/* NVMe: 핫플러그/EDR 등 외부 모듈
  *   /sys/bus/pci/slots 디렉터리를 생성한다. 이후 NVMe 장치의 slot이
  *   이 kset 아래에 등록된다.
  */
-static int pci_slot_init(void)
-{
+static int pci_slot_init(void)	/* NVMe: PCI slot 서브시스템 초기화 함수(NVMe sysfs 등록 전 준비) */
+{	/* NVMe: slot 서브시스템 초기화 본문 시작 */
 	struct kset *pci_bus_kset;	/* NVMe: /sys/bus/pci의 kset */
 
 	pci_bus_kset = bus_get_kset(&pci_bus_type);	/* NVMe: pci_bus_type의 kset 획득 */
-	pci_slots_kset = kset_create_and_add("slots", NULL,
+	pci_slots_kset = kset_create_and_add("slots", NULL,	/* NVMe: /sys/bus/pci/slots 디렉터리 생성 */
 					    &pci_bus_kset->kobj);	/* NVMe: /sys/bus/pci/slots kset 생성 및 등록 */
 	if (!pci_slots_kset) {	/* NVMe: kset 생성 실패 확인 */
 		pr_err("PCI: Slot initialization failure\n");	/* NVMe: 초기화 실패 메시지 출력 */
 		return -ENOMEM;	/* NVMe: 메모리 부족 오류 반환 */
-	}
+	}	/* NVMe: kset 생성 실패 처리 블록 종료 */
 	return 0;	/* NVMe: slot 서브시스템 초기화 성공 */
-}
+}	/* NVMe: pci_slot_init 종료 */
 
 subsys_initcall(pci_slot_init);	/* NVMe: 커널 서브시스템 초기화 단계에서 pci_slot_init 실행 */

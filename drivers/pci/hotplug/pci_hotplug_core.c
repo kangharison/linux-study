@@ -13,30 +13,35 @@
  *   Greg Kroah-Hartman <greg@kroah.com>
  *   Scott Murray <scottm@somanetworks.com>
  */
+/* NVMe: PCIe 핫플러그 코어; NVMe SSD의 물리적 삽입/제거, 슬롯 전원 제어, */
+/* NVMe: 링크 상태 변화 처리의 기반이 되는 계층임 */
 
-#include <linux/module.h>
-#include <linux/moduleparam.h>
-#include <linux/kernel.h>
-#include <linux/types.h>
-#include <linux/kobject.h>
-#include <linux/sysfs.h>
-#include <linux/init.h>
-#include <linux/pci.h>
-#include <linux/pci_hotplug.h>
-#include "../pci.h"
-#include "cpci_hotplug.h"
+#include <linux/module.h>		/* NVMe: nvme-pci 등 PCIe 엔드포인트 드라이버와 동적으로 로드/해제됨 */
+#include <linux/moduleparam.h>		/* NVMe: debug 파라미터로 NVMe 핫플러그 시나리오 진단 가능 */
+#include <linux/kernel.h>		/* NVMe: 커널 기반 헤더; 핫플러그 이벤트는 NVMe reset/workqueue와 연결됨 */
+#include <linux/types.h>		/* NVMe: u8/u32 등 PCIe/NVMe 레지스터 폭과 일치 */
+#include <linux/kobject.h>		/* NVMe: sysfs 노드로 NVMe 슬롯 상태를 사용자공간에 노출 */
+#include <linux/sysfs.h>		/* NVMe: power/attention/presence 파일을 통해 NVMe 장치 생명주기 제어 */
+#include <linux/init.h>			/* NVMe: 부팅 시점에 PCIe 핫플러그 서브시스템 초기화 */
+#include <linux/pci.h>			/* NVMe: pci_dev, pci_bus 등 NVMe가 의존하는 PCIe 객체 정의 */
+#include <linux/pci_hotplug.h>		/* NVMe: hotplug_slot_ops 콜백이 NVMe remove/probe와 직접 연계 */
+#include "../pci.h"			/* NVMe: PCI_LINK_* 비트 등 PCIe 내집 플래그 공유 */
+#include "cpci_hotplug.h"		/* NVMe: CompactPCI 핫플러그 확장; 일부 NVMe 백플레인에서 사용 */
 
-#define MY_NAME	"pci_hotplug"
+#define MY_NAME	"pci_hotplug"		/* NVMe: dmesg에서 NVMe 핫플러그 이벤트 추적용 식별자 */
 
+/* NVMe: 디버그 출력 매크로; NVMe AER/핫플러그 디버깅 시 유용 */
 #define dbg(fmt, arg...) do { if (debug) printk(KERN_DEBUG "%s: %s: " fmt, MY_NAME, __func__, ## arg); } while (0)
-#define err(format, arg...) printk(KERN_ERR "%s: " format, MY_NAME, ## arg)
-#define info(format, arg...) printk(KERN_INFO "%s: " format, MY_NAME, ## arg)
-#define warn(format, arg...) printk(KERN_WARNING "%s: " format, MY_NAME, ## arg)
+#define err(format, arg...) printk(KERN_ERR "%s: " format, MY_NAME, ## arg)	/* NVMe: NVMe 장치 제거/등록 실패 시 오류 기록 */
+#define info(format, arg...) printk(KERN_INFO "%s: " format, MY_NAME, ## arg)	/* NVMe: 슬롯 상태 전환 정보 기록 */
+#define warn(format, arg...) printk(KERN_WARNING "%s: " format, MY_NAME, ## arg)	/* NVMe: 예상치 못한 핫플러그 상태 변화 경고 */
 
 /* local variables */
-static bool debug;
+static bool debug;			/* NVMe: NVMe 핫플러그/링크 변경 디버깅 활성화 여부 */
 
 /* Weee, fun with macros... */
+/* NVMe: GET_STATUS 매크로는 핫플러그 슬롯 상태를 sysfs read 콜백에 노출; */
+/* NVMe: NVMe 장치가 탑재된 슬롯의 power/attention/latch/adapter 상태 확인에 사용 */
 #define GET_STATUS(name, type)	\
 static int get_##name(struct hotplug_slot *slot, type *value)		\
 {									\
@@ -47,170 +52,170 @@ static int get_##name(struct hotplug_slot *slot, type *value)		\
 	return retval;							\
 }
 
-GET_STATUS(power_status, u8)
-GET_STATUS(attention_status, u8)
-GET_STATUS(latch_status, u8)
-GET_STATUS(adapter_status, u8)
+GET_STATUS(power_status, u8)		/* NVMe: 슬롯 전원 상태; 0이면 NVMe 장치가 꺼질 수 있음 */
+GET_STATUS(attention_status, u8)	/* NVMe: 슬롯 주시(Attention) LED 상태 */
+GET_STATUS(latch_status, u8)		/* NVMe: NVMe 캐리어 래치 상태; 안전 제거 여부 확인 */
+GET_STATUS(adapter_status, u8)		/* NVMe: 슬롯에 NVMe 어댑터(모듈) 존재 여부 */
 
-static ssize_t power_read_file(struct pci_slot *pci_slot, char *buf)
+static ssize_t power_read_file(struct pci_slot *pci_slot, char *buf)	/* NVMe: sysfs에서 NVMe 슬롯 전원 상태 읽기 */
 {
-	int retval;
-	u8 value;
+	int retval;			/* NVMe: 핫플러그 콜백 반환값; 실패 시 NVMe 상태 확인 실패 */
+	u8 value;			/* NVMe: 1바이트 전원 상태; NVMe 장치 on/off 표시 */
 
-	retval = get_power_status(pci_slot->hotplug, &value);
-	if (retval)
+	retval = get_power_status(pci_slot->hotplug, &value);		/* NVMe: NVMe 슬롯의 실제 전원 상태 획득 */
+	if (retval)			/* NVMe: 상태 읽기 실패 시 NVMe 사용자공간 도구에 오류 반환 */
 		return retval;
 
-	return sysfs_emit(buf, "%d\n", value);
+	return sysfs_emit(buf, "%d\n", value);	/* NVMe: 사용자공간(nvme-cli 등)이 읽을 0/1 문자열 출력 */
 }
 
 static ssize_t power_write_file(struct pci_slot *pci_slot, const char *buf,
-				size_t count)
+				size_t count)					/* NVMe: sysfs로 NVMe 슬롯 전원 on/off 명령 수신 */
 {
-	struct hotplug_slot *slot = pci_slot->hotplug;
-	unsigned long lpower;
-	u8 power;
-	int retval = 0;
+	struct hotplug_slot *slot = pci_slot->hotplug;			/* NVMe: 이 슬롯에 연결된 NVMe 장치 제어 구조체 */
+	unsigned long lpower;		/* NVMe: 사용자공간에서 전달된 전원 값(문자열->정수) */
+	u8 power;			/* NVMe: 실제 8비트 전원 명령 */
+	int retval = 0;			/* NVMe: enable/disable_slot 콜백 결과 */
 
-	lpower = simple_strtoul(buf, NULL, 10);
-	power = (u8)(lpower & 0xff);
-	dbg("power = %d\n", power);
+	lpower = simple_strtoul(buf, NULL, 10);				/* NVMe: "0"/"1" 문자열을 정수로 변환 */
+	power = (u8)(lpower & 0xff);		/* NVMe: 하위 8비트만 사용; 불필요한 상위 비트 마스크 */
+	dbg("power = %d\n", power);	/* NVMe: NVMe 슬롯 전원 명령 디버깅 */
 
-	switch (power) {
+	switch (power) {		/* NVMe: 0=슬롯 off(NVMe 제거), 1=슬롯 on(NVMe 재열거) */
 	case 0:
-		if (slot->ops->disable_slot)
+		if (slot->ops->disable_slot)		/* NVMe: 등록된 disable 콜백이 있으면 NVMe 전원 차단 */
 			retval = slot->ops->disable_slot(slot);
 		break;
 
 	case 1:
-		if (slot->ops->enable_slot)
+		if (slot->ops->enable_slot)		/* NVMe: 등록된 enable 콜백이 있으면 NVMe 전원 공급 및 재열거 */
 			retval = slot->ops->enable_slot(slot);
 		break;
 
 	default:
-		err("Illegal value specified for power\n");
+		err("Illegal value specified for power\n");	/* NVMe: 잘못된 전원 값; NVMe 슬롯 손상 방지를 위해 거부 */
 		retval = -EINVAL;
 	}
 
-	if (retval)
+	if (retval)			/* NVMe: enable/disable 실패 시 NVMe 상태 전이 중단 */
 		return retval;
-	return count;
+	return count;			/* NVMe: 성공 시 쓰인 바이트 수 반환 */
 }
 
-static struct pci_slot_attribute hotplug_slot_attr_power = {
-	.attr = {.name = "power", .mode = S_IFREG | S_IRUGO | S_IWUSR},
-	.show = power_read_file,
-	.store = power_write_file
+static struct pci_slot_attribute hotplug_slot_attr_power = {	/* NVMe: /sys/bus/pci/slots/.../power 파일 속성 */
+	.attr = {.name = "power", .mode = S_IFREG | S_IRUGO | S_IWUSR},	/* NVMe: 루트 권한으로 NVMe 슬롯 전원 제어 */
+	.show = power_read_file,	/* NVMe: 현재 전원 상태 조회 */
+	.store = power_write_file	/* NVMe: 전원 on/off 쓰기; NVMe 장치 제거/삽입 트리거 */
 };
 
-static ssize_t attention_read_file(struct pci_slot *pci_slot, char *buf)
+static ssize_t attention_read_file(struct pci_slot *pci_slot, char *buf)	/* NVMe: 슬롯 attention LED 상태 읽기(교체 안내용) */
 {
 	int retval;
 	u8 value;
 
-	retval = get_attention_status(pci_slot->hotplug, &value);
+	retval = get_attention_status(pci_slot->hotplug, &value);	/* NVMe: NVMe 슬롯 attention 상태 획득 */
 	if (retval)
 		return retval;
 
-	return sysfs_emit(buf, "%d\n", value);
+	return sysfs_emit(buf, "%d\n", value);	/* NVMe: LED 상태를 사용자공간에 노출 */
 }
 
 static ssize_t attention_write_file(struct pci_slot *pci_slot, const char *buf,
-				    size_t count)
+				    size_t count)				/* NVMe: attention LED 켜기/끄기; NVMe 모듈 교체 시각 신호 */
 {
-	struct hotplug_slot *slot = pci_slot->hotplug;
-	const struct hotplug_slot_ops *ops = slot->ops;
-	unsigned long lattention;
-	u8 attention;
+	struct hotplug_slot *slot = pci_slot->hotplug;			/* NVMe: 대상 NVMe 슬롯 */
+	const struct hotplug_slot_ops *ops = slot->ops;			/* NVMe: vendor-specific attention 콜백 */
+	unsigned long lattention;	/* NVMe: 사용자공간 attention 값 */
+	u8 attention;			/* NVMe: 8비트 attention 명령 */
 	int retval = 0;
 
 	lattention = simple_strtoul(buf, NULL, 10);
-	attention = (u8)(lattention & 0xff);
-	dbg(" - attention = %d\n", attention);
+	attention = (u8)(lattention & 0xff);	/* NVMe: 하위 8비트만 유효 */
+	dbg(" - attention = %d\n", attention);	/* NVMe: attention 설정 디버깅 */
 
-	if (ops->set_attention_status)
+	if (ops->set_attention_status)		/* NVMe: 백플레인 LED 제어; NVMe 교체 안내용 */
 		retval = ops->set_attention_status(slot, attention);
 
-	if (retval)
+	if (retval)			/* NVMe: LED 제어 실패 시 사용자공간에 오류 반환 */
 		return retval;
 	return count;
 }
 
-static struct pci_slot_attribute hotplug_slot_attr_attention = {
+static struct pci_slot_attribute hotplug_slot_attr_attention = {	/* NVMe: /sys/.../attention 파일 속성 */
 	.attr = {.name = "attention", .mode = S_IFREG | S_IRUGO | S_IWUSR},
 	.show = attention_read_file,
 	.store = attention_write_file
 };
 
-static ssize_t latch_read_file(struct pci_slot *pci_slot, char *buf)
+static ssize_t latch_read_file(struct pci_slot *pci_slot, char *buf)	/* NVMe: NVMe 캐리어 래치 상태 조회(안전 제거 가능 여부) */
 {
 	int retval;
 	u8 value;
 
-	retval = get_latch_status(pci_slot->hotplug, &value);
+	retval = get_latch_status(pci_slot->hotplug, &value);		/* NVMe: 래치 잠금/해제 상태 획득 */
 	if (retval)
 		return retval;
 
-	return sysfs_emit(buf, "%d\n", value);
+	return sysfs_emit(buf, "%d\n", value);	/* NVMe: 사용자공간이 안전 제거 가능성 판단 */
 }
 
-static struct pci_slot_attribute hotplug_slot_attr_latch = {
+static struct pci_slot_attribute hotplug_slot_attr_latch = {	/* NVMe: /sys/.../latch 파일(읽기 전용) */
 	.attr = {.name = "latch", .mode = S_IFREG | S_IRUGO},
 	.show = latch_read_file,
 };
 
-static ssize_t presence_read_file(struct pci_slot *pci_slot, char *buf)
+static ssize_t presence_read_file(struct pci_slot *pci_slot, char *buf)	/* NVMe: 슬롯에 NVMe 모듈이 물리적으로 존재하는지 조회 */
 {
 	int retval;
 	u8 value;
 
-	retval = get_adapter_status(pci_slot->hotplug, &value);
+	retval = get_adapter_status(pci_slot->hotplug, &value);		/* NVMe: presence 핀 또는 SEL 상태 획득 */
 	if (retval)
 		return retval;
 
-	return sysfs_emit(buf, "%d\n", value);
+	return sysfs_emit(buf, "%d\n", value);	/* NVMe: "1"이면 NVMe 장치 탑재, "0"이면 미탑재 */
 }
 
-static struct pci_slot_attribute hotplug_slot_attr_presence = {
+static struct pci_slot_attribute hotplug_slot_attr_presence = {	/* NVMe: /sys/.../adapter 파일 속성 */
 	.attr = {.name = "adapter", .mode = S_IFREG | S_IRUGO},
 	.show = presence_read_file,
 };
 
 static ssize_t test_write_file(struct pci_slot *pci_slot, const char *buf,
-			       size_t count)
+			       size_t count)					/* NVMe: 하드웨어 자가진단 명령; NVMe 슬롯 회로/링크 검사 */
 {
-	struct hotplug_slot *slot = pci_slot->hotplug;
-	unsigned long ltest;
-	u32 test;
+	struct hotplug_slot *slot = pci_slot->hotplug;			/* NVMe: 진단 대상 NVMe 슬롯 */
+	unsigned long ltest;		/* NVMe: 테스트 번호(벤더별) */
+	u32 test;			/* NVMe: 32비트 테스트 코드 */
 	int retval = 0;
 
 	ltest = simple_strtoul(buf, NULL, 10);
-	test = (u32)(ltest & 0xffffffff);
-	dbg("test = %d\n", test);
+	test = (u32)(ltest & 0xffffffff);	/* NVMe: 32비트로 마스크 */
+	dbg("test = %d\n", test);	/* NVMe: 테스트 명령 로깅 */
 
-	if (slot->ops->hardware_test)
+	if (slot->ops->hardware_test)		/* NVMe: 컨트롤러별 진동/링크/전원 테스트 수행 */
 		retval = slot->ops->hardware_test(slot, test);
 
-	if (retval)
+	if (retval)			/* NVMe: 자가진단 실패 시 NVMe 장치 신뢰성 확인 필요 */
 		return retval;
 	return count;
 }
 
-static struct pci_slot_attribute hotplug_slot_attr_test = {
+static struct pci_slot_attribute hotplug_slot_attr_test = {	/* NVMe: /sys/.../test 파일 속성 */
 	.attr = {.name = "test", .mode = S_IFREG | S_IRUGO | S_IWUSR},
 	.store = test_write_file
 };
 
-static bool has_power_file(struct hotplug_slot *slot)
+static bool has_power_file(struct hotplug_slot *slot)	/* NVMe: NVMe 슬롯 전원 제어 sysfs 노드 생성 여부 */
 {
-	if ((slot->ops->enable_slot) ||
-	    (slot->ops->disable_slot) ||
-	    (slot->ops->get_power_status))
+	if ((slot->ops->enable_slot) ||	/* NVMe: 전원 on 콜백 존재 시 */
+	    (slot->ops->disable_slot) ||	/* NVMe: 전원 off 콜백 존재 시 */
+	    (slot->ops->get_power_status))	/* NVMe: 상태 조회 콜백 존재 시 */
 		return true;
 	return false;
 }
 
-static bool has_attention_file(struct hotplug_slot *slot)
+static bool has_attention_file(struct hotplug_slot *slot)	/* NVMe: attention LED sysfs 노드 생성 여부 */
 {
 	if ((slot->ops->set_attention_status) ||
 	    (slot->ops->get_attention_status))
@@ -218,119 +223,119 @@ static bool has_attention_file(struct hotplug_slot *slot)
 	return false;
 }
 
-static bool has_latch_file(struct hotplug_slot *slot)
+static bool has_latch_file(struct hotplug_slot *slot)	/* NVMe: NVMe 캐리어 래치 sysfs 노드 생성 여부 */
 {
 	if (slot->ops->get_latch_status)
 		return true;
 	return false;
 }
 
-static bool has_adapter_file(struct hotplug_slot *slot)
+static bool has_adapter_file(struct hotplug_slot *slot)	/* NVMe: NVMe 모듈 탑재 여부 sysfs 노드 생성 기준 */
 {
 	if (slot->ops->get_adapter_status)
 		return true;
 	return false;
 }
 
-static bool has_test_file(struct hotplug_slot *slot)
+static bool has_test_file(struct hotplug_slot *slot)	/* NVMe: 하드웨어 자가진단 sysfs 노드 생성 여부 */
 {
 	if (slot->ops->hardware_test)
 		return true;
 	return false;
 }
 
-static int fs_add_slot(struct hotplug_slot *slot, struct pci_slot *pci_slot)
+static int fs_add_slot(struct hotplug_slot *slot, struct pci_slot *pci_slot)	/* NVMe: NVMe 슬롯 sysfs 인터페이스 생성 */
 {
-	struct kobject *kobj;
-	int retval = 0;
+	struct kobject *kobj;		/* NVMe: 핫플러그 모듈의 kobject; NVMe 모듈과의 sysfs 링크용 */
+	int retval = 0;			/* NVMe: sysfs 파일 생성 누적 결과 */
 
 	/* Create symbolic link to the hotplug driver module */
-	kobj = kset_find_obj(module_kset, slot->mod_name);
-	if (kobj) {
-		retval = sysfs_create_link(&pci_slot->kobj, kobj, "module");
+	kobj = kset_find_obj(module_kset, slot->mod_name);		/* NVMe: 핫플러그 백엔드 모듈(nvme 관련 확장 포함) 검색 */
+	if (kobj) {			/* NVMe: 모듈이 로드되어 있으면 */
+		retval = sysfs_create_link(&pci_slot->kobj, kobj, "module");	/* NVMe: /sys/.../slot/module 링크 생성; NVMe 관리 도구가 드라이버 식별 */
 		if (retval)
 			dev_err(&pci_slot->bus->dev,
-				"Error creating sysfs link (%d)\n", retval);
-		kobject_put(kobj);
+				"Error creating sysfs link (%d)\n", retval);	/* NVMe: 링크 실패 기록; NVMe 슬롯 탐색에 영향 */
+		kobject_put(kobj);	/* NVMe: kset_find_obj에서 증가한 참조 카운트 해제 */
 	}
 
-	if (has_power_file(slot)) {
+	if (has_power_file(slot)) {	/* NVMe: NVMe 슬롯 전원 제어 파일 추가 */
 		retval = sysfs_create_file(&pci_slot->kobj,
 					   &hotplug_slot_attr_power.attr);
-		if (retval)
+		if (retval)		/* NVMe: power 파일 생성 실패 시 롤백 */
 			goto exit_power;
 	}
 
-	if (has_attention_file(slot)) {
+	if (has_attention_file(slot)) {	/* NVMe: attention LED 파일 추가 */
 		retval = sysfs_create_file(&pci_slot->kobj,
 					   &hotplug_slot_attr_attention.attr);
 		if (retval)
 			goto exit_attention;
 	}
 
-	if (has_latch_file(slot)) {
+	if (has_latch_file(slot)) {	/* NVMe: 래치 상태 파일 추가 */
 		retval = sysfs_create_file(&pci_slot->kobj,
 					   &hotplug_slot_attr_latch.attr);
 		if (retval)
 			goto exit_latch;
 	}
 
-	if (has_adapter_file(slot)) {
+	if (has_adapter_file(slot)) {	/* NVMe: NVMe 모듈 presence 파일 추가 */
 		retval = sysfs_create_file(&pci_slot->kobj,
 					   &hotplug_slot_attr_presence.attr);
 		if (retval)
 			goto exit_adapter;
 	}
 
-	if (has_test_file(slot)) {
+	if (has_test_file(slot)) {	/* NVMe: 하드웨어 자가진단 파일 추가 */
 		retval = sysfs_create_file(&pci_slot->kobj,
 					   &hotplug_slot_attr_test.attr);
 		if (retval)
 			goto exit_test;
 	}
 
-	goto exit;
+	goto exit;			/* NVMe: 모든 sysfs 파일 생성 성공 */
 
-exit_test:
+exit_test:				/* NVMe: test 파일 롤백: presence 파일 제거 */
 	if (has_adapter_file(slot))
 		sysfs_remove_file(&pci_slot->kobj,
 				  &hotplug_slot_attr_presence.attr);
-exit_adapter:
+exit_adapter:				/* NVMe: adapter 롤백: latch 파일 제거 */
 	if (has_latch_file(slot))
 		sysfs_remove_file(&pci_slot->kobj, &hotplug_slot_attr_latch.attr);
-exit_latch:
+exit_latch:				/* NVMe: latch 롤백: attention 파일 제거 */
 	if (has_attention_file(slot))
 		sysfs_remove_file(&pci_slot->kobj,
 				  &hotplug_slot_attr_attention.attr);
-exit_attention:
+exit_attention:			/* NVMe: attention 롤백: power 파일 제거 */
 	if (has_power_file(slot))
 		sysfs_remove_file(&pci_slot->kobj, &hotplug_slot_attr_power.attr);
-exit_power:
+exit_power:				/* NVMe: power 롤백: module 심볼릭 링크 제거 */
 	sysfs_remove_link(&pci_slot->kobj, "module");
 exit:
-	return retval;
+	return retval;			/* NVMe: 0이면 sysfs 인터페이스 준비 완료, 아니면 NVMe 슬롯 노출 실패 */
 }
 
-static void fs_remove_slot(struct hotplug_slot *slot, struct pci_slot *pci_slot)
+static void fs_remove_slot(struct hotplug_slot *slot, struct pci_slot *pci_slot)	/* NVMe: NVMe 슬롯 sysfs 인터페이스 제거(제거 전 NVMe 리소스 정리의 전단계) */
 {
-	if (has_power_file(slot))
+	if (has_power_file(slot))	/* NVMe: power 파일 제거; 이후 사용자공간 전원 제어 불가 */
 		sysfs_remove_file(&pci_slot->kobj, &hotplug_slot_attr_power.attr);
 
-	if (has_attention_file(slot))
+	if (has_attention_file(slot))	/* NVMe: attention 파일 제거 */
 		sysfs_remove_file(&pci_slot->kobj,
 				  &hotplug_slot_attr_attention.attr);
 
-	if (has_latch_file(slot))
+	if (has_latch_file(slot))	/* NVMe: latch 파일 제거 */
 		sysfs_remove_file(&pci_slot->kobj, &hotplug_slot_attr_latch.attr);
 
-	if (has_adapter_file(slot))
+	if (has_adapter_file(slot))	/* NVMe: presence 파일 제거 */
 		sysfs_remove_file(&pci_slot->kobj,
 				  &hotplug_slot_attr_presence.attr);
 
-	if (has_test_file(slot))
+	if (has_test_file(slot))	/* NVMe: test 파일 제거 */
 		sysfs_remove_file(&pci_slot->kobj, &hotplug_slot_attr_test.attr);
 
-	sysfs_remove_link(&pci_slot->kobj, "module");
+	sysfs_remove_link(&pci_slot->kobj, "module");	/* NVMe: 모듈 링크 제거 */
 }
 
 /**
@@ -348,23 +353,24 @@ static void fs_remove_slot(struct hotplug_slot *slot, struct pci_slot *pci_slot)
  *
  * Returns 0 if successful, anything else for an error.
  */
+/* NVMe: NVMe SSD가 탑재될 PCIe 슬롯을 커널과 사용자공간에 동시 등록 */
 int __pci_hp_register(struct hotplug_slot *slot, struct pci_bus *bus,
 		      int devnr, const char *name,
 		      struct module *owner, const char *mod_name)
 {
-	int result;
+	int result;			/* NVMe: 등록 결과; 실패 시 NVMe 장치가 이 슬롯에서 검출되지 않음 */
 
-	result = __pci_hp_initialize(slot, bus, devnr, name, owner, mod_name);
-	if (result)
+	result = __pci_hp_initialize(slot, bus, devnr, name, owner, mod_name);	/* NVMe: pci_slot 할당 및 hotplug_slot 연결 */
+	if (result)			/* NVMe: 초기화 실패 시 NVMe 열거 경로가 생기지 않음 */
 		return result;
 
-	result = pci_hp_add(slot);
-	if (result)
+	result = pci_hp_add(slot);	/* NVMe: sysfs/uevent로 슬롯 공개; NVMe 장치 삽입 이벤트 통지 */
+	if (result)			/* NVMe: 공개 실패 시 할당한 pci_slot 파괴 */
 		pci_hp_destroy(slot);
 
 	return result;
 }
-EXPORT_SYMBOL_GPL(__pci_hp_register);
+EXPORT_SYMBOL_GPL(__pci_hp_register);	/* NVMe: PCIe 핫플러그 백엔드 모듈에서 참조; NVMe 관련 SBR/링크 제어와 연결 */
 
 /**
  * __pci_hp_initialize - prepare hotplug slot for in-kernel use
@@ -382,34 +388,35 @@ EXPORT_SYMBOL_GPL(__pci_hp_register);
  *
  * Returns 0 on success or a negative int on error.
  */
+/* NVMe: NVMe 장치가 연결될 슬롯의 커널 내 부 구조체 초기화 */
 int __pci_hp_initialize(struct hotplug_slot *slot, struct pci_bus *bus,
 			int devnr, const char *name, struct module *owner,
 			const char *mod_name)
 {
-	struct pci_slot *pci_slot;
+	struct pci_slot *pci_slot;	/* NVMe: PCI 코어의 슬롯 객체; NVMe 열거 시 bus/devfn과 매핑 */
 
-	if (slot == NULL)
+	if (slot == NULL)		/* NVMe: NULL slot 방어; NVMe 슬롯 등록 오류 조기 검출 */
 		return -ENODEV;
-	if (slot->ops == NULL)
+	if (slot->ops == NULL)		/* NVMe: hotplug ops 누락 시 NVMe 제어 불가 */
 		return -EINVAL;
 
-	slot->owner = owner;
-	slot->mod_name = mod_name;
+	slot->owner = owner;		/* NVMe: 모듈 소유자 기록; 모듈 언로드 시 NVMe 슬롯 보호 */
+	slot->mod_name = mod_name;	/* NVMe: 모듈 이름; sysfs module 링크 생성에 사용 */
 
 	/*
 	 * No problems if we call this interface from both ACPI_PCI_SLOT
 	 * driver and call it here again. If we've already created the
 	 * pci_slot, the interface will simply bump the refcount.
 	 */
-	pci_slot = pci_create_slot(bus, devnr, name, slot);
-	if (IS_ERR(pci_slot))
+	pci_slot = pci_create_slot(bus, devnr, name, slot);		/* NVMe: PCI 버스/슬롯 번호에 해당하는 pci_slot 생성/참조증가; NVMe 디바이스의 부모 슬롯 */
+	if (IS_ERR(pci_slot))		/* NVMe: 슬롯 생성 실패 시 NVMe 열거 실패 */
 		return PTR_ERR(pci_slot);
 
-	slot->pci_slot = pci_slot;
-	pci_slot->hotplug = slot;
+	slot->pci_slot = pci_slot;	/* NVMe: hotplug_slot -> pci_slot 역참조 */
+	pci_slot->hotplug = slot;	/* NVMe: pci_slot -> hotplug_slot 역참조; NVMe 장치가 이 슬롯의 핫플러그 특성 상속 */
 	return 0;
 }
-EXPORT_SYMBOL_GPL(__pci_hp_initialize);
+EXPORT_SYMBOL_GPL(__pci_hp_initialize);	/* NVMe: 핫플러그 백엔드(Native/ACPI/CPCI)에서 호출; NVMe 슬롯 준비 공유 */
 
 /**
  * pci_hp_add - publish hotplug slot to user space
@@ -421,24 +428,25 @@ EXPORT_SYMBOL_GPL(__pci_hp_initialize);
  *
  * Returns 0 on success or a negative int on error.
  */
+/* NVMe: 준비된 NVMe 슬롯을 sysfs와 uevent로 사용자공간에 공개 */
 int pci_hp_add(struct hotplug_slot *slot)
 {
-	struct pci_slot *pci_slot;
-	int result;
+	struct pci_slot *pci_slot;	/* NVMe: 공개할 PCI 슬롯 객체 */
+	int result;			/* NVMe: sysfs 생성/uevent 전송 결과 */
 
-	if (WARN_ON(!slot))
+	if (WARN_ON(!slot))		/* NVMe: NULL slot 버그 조기 감지 */
 		return -EINVAL;
 
-	pci_slot = slot->pci_slot;
+	pci_slot = slot->pci_slot;	/* NVMe: slot에서 pci_slot 획득 */
 
-	result = fs_add_slot(slot, pci_slot);
-	if (result)
+	result = fs_add_slot(slot, pci_slot);	/* NVMe: power/attention/presence 등 NVMe 제어 sysfs 파일 생성 */
+	if (result)			/* NVMe: sysfs 생성 실패 시 사용자공간에 슬롯 미노출 */
 		return result;
 
-	kobject_uevent(&pci_slot->kobj, KOBJ_ADD);
+	kobject_uevent(&pci_slot->kobj, KOBJ_ADD);	/* NVMe: 슬롯 추가 uevent 발생; udev가 NVMe 슬롯 symlink/권한 설정 */
 	return 0;
 }
-EXPORT_SYMBOL_GPL(pci_hp_add);
+EXPORT_SYMBOL_GPL(pci_hp_add);	/* NVMe: 핫플러그 드라이버가 NVMe 슬롯 공개 시 사용 */
 
 /**
  * pci_hp_deregister - deregister a hotplug_slot with the PCI hotplug subsystem
@@ -447,12 +455,13 @@ EXPORT_SYMBOL_GPL(pci_hp_add);
  * The @slot must have been registered with the pci hotplug subsystem
  * previously with a call to pci_hp_register().
  */
+/* NVMe: NVMe 슬롯을 사용자공간에서 숨기고 커널 리소스 해제; 장치 제거 시 호출 */
 void pci_hp_deregister(struct hotplug_slot *slot)
 {
-	pci_hp_del(slot);
-	pci_hp_destroy(slot);
+	pci_hp_del(slot);		/* NVMe: sysfs/uevent 제거; NVMe 관리 도구에서 슬롯 사라짐 */
+	pci_hp_destroy(slot);		/* NVMe: pci_slot 파괴; NVMe 장치와의 슬롯 연결 제거 */
 }
-EXPORT_SYMBOL_GPL(pci_hp_deregister);
+EXPORT_SYMBOL_GPL(pci_hp_deregister);	/* NVMe: 핫플러그 백엔드가 NVMe 슬롯 폐기 시 사용 */
 
 /**
  * pci_hp_del - unpublish hotplug slot from user space
@@ -460,14 +469,15 @@ EXPORT_SYMBOL_GPL(pci_hp_deregister);
  *
  * Remove a hotplug slot's sysfs interface.
  */
+/* NVMe: NVMe 슬롯의 sysfs 인터페이스만 제거(커널 내 슬롯은 유지) */
 void pci_hp_del(struct hotplug_slot *slot)
 {
-	if (WARN_ON(!slot))
+	if (WARN_ON(!slot))		/* NVMe: NULL slot 버그 감지 */
 		return;
 
-	fs_remove_slot(slot, slot->pci_slot);
+	fs_remove_slot(slot, slot->pci_slot);	/* NVMe: power/attention 등 파일 제거; 사용자공간에서 NVMe 전원 조작 차단 */
 }
-EXPORT_SYMBOL_GPL(pci_hp_del);
+EXPORT_SYMBOL_GPL(pci_hp_del);	/* NVMe: NVMe 장치 surprise removal 직전 sysfs 노드 정리용 */
 
 /**
  * pci_hp_destroy - remove hotplug slot from in-kernel use
@@ -478,16 +488,19 @@ EXPORT_SYMBOL_GPL(pci_hp_del);
  * unique name.  The driver no longer needs to handle a ->reset_slot callback
  * from this point on.
  */
+/* NVMe: NVMe 슬롯의 커널 내 객체를 완전히 파괴; 이후 reset_slot 콜백 불필요 */
 void pci_hp_destroy(struct hotplug_slot *slot)
 {
-	struct pci_slot *pci_slot = slot->pci_slot;
+	struct pci_slot *pci_slot = slot->pci_slot;	/* NVMe: 파괴할 pci_slot */
 
-	slot->pci_slot = NULL;
-	pci_slot->hotplug = NULL;
-	pci_destroy_slot(pci_slot);
+	slot->pci_slot = NULL;		/* NVMe: hotplug_slot에서 pci_slot 연결 해제 */
+	pci_slot->hotplug = NULL;	/* NVMe: pci_slot에서 hotplug 정보 제거 */
+	pci_destroy_slot(pci_slot);	/* NVMe: pci_slot 메모리 해제 및 참조 카운트 정리; NVMe 부모 개체 정리 */
 }
-EXPORT_SYMBOL_GPL(pci_hp_destroy);
+EXPORT_SYMBOL_GPL(pci_hp_destroy);	/* NVMe: NVMe 슬롯 최종 폐기 경로 */
 
+/* NVMe: 링크 상태 급변(Secondary Bus Reset, D3cold, firmware update 등)을 */
+/* NVMe: 동기화하기 위한 대기 큐; NVMe surprise removal/reset 시 spurious event 억제 */
 static DECLARE_WAIT_QUEUE_HEAD(pci_hp_link_change_wq);
 
 /**
@@ -507,10 +520,11 @@ static DECLARE_WAIT_QUEUE_HEAD(pci_hp_link_change_wq);
  * which are not hotplug-capable, in which case it has no effect because
  * no hotplug driver is bound to the bridge.
  */
+/* NVMe: NVMe 장치 하위 버스에서 의도적인 링크 변화 구간 시작 표시(예: SBR) */
 void pci_hp_ignore_link_change(struct pci_dev *pdev)
 {
-	set_bit(PCI_LINK_CHANGING, &pdev->priv_flags);
-	smp_mb__after_atomic(); /* pairs with implied barrier of wait_event() */
+	set_bit(PCI_LINK_CHANGING, &pdev->priv_flags);		/* NVMe: 링크 변화 중 플래그 설정; NVMe AER/핫플러그 쓰레드가 무시하도록 */
+	smp_mb__after_atomic();		/* NVMe: wait_event와 메모리 배리어 쌍; NVMe 핫플러그 쓰레드가 최신 값 관측 */
 }
 
 /**
@@ -520,12 +534,13 @@ void pci_hp_ignore_link_change(struct pci_dev *pdev)
  * Mark the end of a code section causing spurious link changes on the
  * Secondary Bus of @pdev.  Must be paired with pci_hp_ignore_link_change().
  */
+/* NVMe: 의도적 링크 변화 구간 종료; NVMe 장치가 다시 안정적 링크 상태로 전이 */
 void pci_hp_unignore_link_change(struct pci_dev *pdev)
 {
-	set_bit(PCI_LINK_CHANGED, &pdev->priv_flags);
-	mb(); /* ensure pci_hp_spurious_link_change() sees either bit set */
-	clear_bit(PCI_LINK_CHANGING, &pdev->priv_flags);
-	wake_up_all(&pci_hp_link_change_wq);
+	set_bit(PCI_LINK_CHANGED, &pdev->priv_flags);		/* NVMe: 링크 변경 발생 기록; spurious 여부 판단용 */
+	mb();				/* NVMe: 플래그 변경이 pci_hp_spurious_link_change()에 보이도록 */
+	clear_bit(PCI_LINK_CHANGING, &pdev->priv_flags);	/* NVMe: 링크 변화 구간 종료 */
+	wake_up_all(&pci_hp_link_change_wq);	/* NVMe: 대기 중인 NVMe 핫플러그 쓰레드 깨움 */
 }
 
 /**
@@ -549,31 +564,33 @@ void pci_hp_unignore_link_change(struct pci_dev *pdev)
  * executing concurrently, but at least once since the last invocation of this
  * function.
  */
+/* NVMe: NVMe 버스 링크 변화가 SBR/D3cold 등 의도적 동작에 의한 것인지 판별 */
 bool pci_hp_spurious_link_change(struct pci_dev *pdev)
 {
-	wait_event(pci_hp_link_change_wq,
+	wait_event(pci_hp_link_change_wq,	/* NVMe: 의도적 링크 변화 구간 종료까지 대기; NVMe reset 중 이벤트 억제 */
 		   !test_bit(PCI_LINK_CHANGING, &pdev->priv_flags));
 
-	return test_and_clear_bit(PCI_LINK_CHANGED, &pdev->priv_flags);
+	return test_and_clear_bit(PCI_LINK_CHANGED, &pdev->priv_flags);	/* NVMe: 의도적 변화가 있었으면 true 반환 후 플래그 클리어 */
 }
 
-static int __init pci_hotplug_init(void)
+static int __init pci_hotplug_init(void)	/* NVMe: PCIe 핫플러그 서브시스템 부팅 초기화 */
 {
-	int result;
+	int result;			/* NVMe: cpci_hotplug_init 결과; NVMe 백플레인 초기화 성공 여부 */
 
-	result = cpci_hotplug_init(debug);
-	if (result) {
+	result = cpci_hotplug_init(debug);	/* NVMe: CompactPCI 핫플러그 초기화; 일부 NVMe 서버 플랫폼에서 사용 */
+	if (result) {			/* NVMe: 초기화 실패 시 NVMe 핫플러그 기능 사용 불가 */
 		err("cpci_hotplug_init with error %d\n", result);
 		return result;
 	}
 
-	return result;
+	return result;			/* NVMe: 성공 시 0 반환 */
 }
-device_initcall(pci_hotplug_init);
+device_initcall(pci_hotplug_init);	/* NVMe: 장치 초기화 단계에서 실행; NVMe 드라이버보다 먼저 준비 */
 
 /*
  * not really modular, but the easiest way to keep compat with existing
  * bootargs behaviour is to continue using module_param here.
  */
+/* NVMe: debug 파라미터; NVMe 핫플러그/링크 이벤트 상세 로그 활성화 */
 module_param(debug, bool, 0644);
-MODULE_PARM_DESC(debug, "Debugging mode enabled or not");
+MODULE_PARM_DESC(debug, "Debugging mode enabled or not");	/* NVMe: debug 모드 설명; NVMe 장치 문제 추적 시 참조 */
