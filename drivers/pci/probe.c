@@ -896,7 +896,6 @@ out:
 	 * BAR 인덱스를 두 칸 전진시키게 한다. 32비트면 0. */
 }
 
-/* PCI/NVMe: 표준 BAR 6개 일괄 읽기. NVMe PCIe 엔드포인트 리소스 획득 */
 /*
  * [한국어]
  * pci_read_bases - 한 장치의 모든 BAR(및 옵션 ROM BAR)를 읽어 리소스로 만든다
@@ -2160,507 +2159,740 @@ static unsigned char agp_speeds[] = {
 };
 
 /*
- * agp_speed() - AGP 상태 비트를 enum pci_bus_speed로 변환
+ * [한국어]
+ * agp_speed - AGP 상태 비트 조합을 AGP 속도 등급으로 변환한다
  *
- * NVMe 연결: NVMe 장치는 AGP를 사용하지 않으므로 직접 관련 없음.
+ * @agp3:    AGP 3.0 모드 비트(0 이 아니면 3.0). 호출자가 agpstat & 8 을 넘긴다.
+ * @agpstat: 속도 지원 비트 3개(하위 3비트).
+ * @return: AGP_UNKNOWN/AGP_1X/2X/4X/8X 중 하나.
+ *
+ * 왜 필요한가: AGP 는 같은 비트가 1.0 모드와 3.0 모드에서 다른 배속을 뜻한다.
+ * 예를 들어 비트 2 는 1.0 에서 4x, 3.0 에서 8x 다. 그 이중 의미를 인덱스
+ * 보정으로 처리한다. AGP 는 PCIe 이전 그래픽 버스라 NVMe 와 무관하며,
+ * 오래된 시스템 지원을 위해 남은 코드다.
+ *
+ * 실행 컨텍스트: 순수 함수.
+ *
+ * 호출 체인:
+ *   pci_set_bus_speed() → [agp_speed] → agp_speeds[]
  */
-/* PCI/NVMe: agp_speed 함수 정의 */
 static enum pci_bus_speed agp_speed(int agp3, int agpstat)
 {
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
 	int index = 0;
+	/* [한국어] agp_speeds[] 표의 인덱스. 0 = AGP_UNKNOWN 이 기본값 */
 
-	/* PCI/NVMe: 조걸 분기, 플래그/비트 마스크 검사 */
 	if (agpstat & 4)
-		index = 3; /* PCI/NVMe: AGP 4x 또는 AGP3 8x */
-	/* PCI/NVMe: 추가 조걸 분기 */
+		index = 3;
+	/* [한국어] 최상위 지원 비트가 켜져 있으면 가장 빠른 등급.
+	 * 1.0 모드에서 4x, 3.0 모드에서는 아래 보정으로 8x 가 된다. */
 	else if (agpstat & 2)
-		index = 2; /* PCI/NVMe: AGP 2x 또는 AGP3 4x */
-	/* PCI/NVMe: 추가 조걸 분기 */
+		index = 2;
+	/* [한국어] 중간 등급 — 1.0 에서 2x, 3.0 에서 4x */
 	else if (agpstat & 1)
-		index = 1; /* PCI/NVMe: AGP 1x 또는 AGP3 1x */
-	/* PCI/NVMe: 조걸 분기의 else 경로 */
+		index = 1;
+	/* [한국어] 최저 등급 — 1.0 에서 1x */
 	else
 		goto out;
+	/* [한국어] 어떤 속도 비트도 켜져 있지 않다 = 알 수 없음(index 0 유지) */
 
-	/* PCI/NVMe: 조걸 분기, 조건에 따른 실행 경로 선택 */
 	if (agp3) {
-		index += 2; /* PCI/NVMe: AGP3 모드 시 속도 등급 보정 */
-		/* PCI/NVMe: 조걸 분기, 값 일치 여부 검사 */
+		/* [한국어] AGP 3.0 모드에서는 같은 비트가 두 배속을 뜻한다 */
+		index += 2;
+		/* [한국어] 등급을 두 칸 올려 1x→4x, 2x→8x 로 보정 */
 		if (index == 5)
-			index = 0; /* PCI/NVMe: 유효하지 않은 조합을 UNKNOWN으로 */
+			index = 0;
+		/* [한국어] index 3(=4x 자리) + 2 = 5 는 표 범위(0~4) 밖이다.
+		 * 스펙상 나올 수 없는 조합이므로 UNKNOWN 으로 되돌린다. */
 	}
 
  out:
-	return agp_speeds[index]; /* PCI/NVMe: AGP 속도 enum 반환 */
+	return agp_speeds[index];
+	/* [한국어] 표 룩업 결과 반환 */
 }
 
 /*
- * pci_set_bus_speed() - 버스의 최대/현재 속도를 bridge capability에서 읽음
+ * [한국어]
+ * pci_set_bus_speed - 버스의 최대/현재 동작 속도를 상위 브리지에서 알아낸다
  *
- * NVMe 연결: NVMe SSD가 연결된 PCIe 링크의 속도는 DMA throughput과
- * 직결된다. 이 함수는 AGP/PCI-X/PCIe capability를 순회하며 버스 속도를
- * 결정. PCIe의 경우 LNKCAP/LNKSTA를 통해 link speed를 읽는다.
+ * @bus: 속도를 채울 버스. bus->self 가 이 버스로 내려오는 브리지다.
+ * @return: 없음. 결과는 bus->max_bus_speed / bus->cur_bus_speed 에 기록된다.
+ *
+ * 왜 필요한가: 버스의 속도는 버스 자신이 아니라 그 버스로 이어지는 링크의
+ * 성질이다. 그래서 상위 브리지의 capability(AGP / PCI-X / PCIe)를 순서대로
+ * 찾아보고 처음 맞는 것으로 속도를 결정한다. 결과는 sysfs 의
+ * max_bus_speed/cur_bus_speed 로 노출된다.
+ *
+ * capability 를 찾는 방식: pci_find_capability() 는 Status 레지스터(0x06)의
+ * CAP_LIST 비트를 확인한 뒤 Capabilities Pointer(header type 0/1 은 0x34,
+ * CardBus 는 0x14)에서 시작해, 각 항목의 [ID, Next] 2바이트를 읽으며 링크를
+ * 따라간다. 무한 루프 방지는 TTL 48회 제한이며,
+ * drivers/pci/pci.h 의 PCI_FIND_NEXT_CAP 매크로에 구현되어 있다.
+ *
+ * NVMe 접점: NVMe SSD 가 붙은 버스라면 PCIe 분기를 타며, LNKCAP 의
+ * Supported Link Speeds 가 최대 속도, LNKSTA 의 Current Link Speed 가
+ * 현재 속도가 된다. 이 값이 SSD 의 실효 대역폭 상한을 결정한다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥의 버스 스캔 경로. config 읽기만 수행한다.
+ *
+ * 호출 체인:
+ *   pci_alloc_child_bus() → [pci_set_bus_speed]
+ *     → pci_find_capability(), pcie_capability_read_dword(), pcie_update_link_speed()
  */
-/* PCI/NVMe: pci_set_bus_speed 함수 정의 */
 static void pci_set_bus_speed(struct pci_bus *bus)
 {
-	struct pci_dev *bridge = bus->self; /* PCI/NVMe: 이 버스를 만든 bridge 장치 */
-	/* PCI/NVMe: pos 변수 선언/초기화: config space 오프셋. NVMe capability/BAR 위치 */
+	struct pci_dev *bridge = bus->self;
+	/* [한국어] 이 버스의 상위 브리지. 링크 속도 정보는 여기에 있다 */
 	int pos;
+	/* [한국어] 찾은 capability 의 config space 오프셋. 0 이면 없음 */
 
-	pos = pci_find_capability(bridge, PCI_CAP_ID_AGP); /* PCI/NVMe: AGP capability 위치 탐색 */
-	/* PCI/NVMe: 조걸 분기, NULL/0/미설정 여부 검사 */
+	pos = pci_find_capability(bridge, PCI_CAP_ID_AGP);
+	/* [한국어] AGP capability(ID 0x02)를 capability 링크에서 찾는다 */
 	if (!pos)
-		pos = pci_find_capability(bridge, PCI_CAP_ID_AGP3); /* PCI/NVMe: AGP3 capability 탐색 */
-	/* PCI/NVMe: 조걸 분기, 조건에 따른 실행 경로 선택 */
+		pos = pci_find_capability(bridge, PCI_CAP_ID_AGP3);
+	/* [한국어] 없으면 AGP 3.0 전용 capability(ID 0x0e)도 찾아본다 */
 	if (pos) {
-		/* PCI/NVMe: 지역 변수 선언 및 초기화 */
+		/* [한국어] AGP 브리지인 경우 */
 		u32 agpstat, agpcmd;
+		/* [한국어] agpstat = 하드웨어가 지원하는 속도, agpcmd = 현재 설정된 속도 */
 
-		pci_read_config_dword(bridge, pos + PCI_AGP_STATUS, &agpstat); /* PCI/NVMe: AGP 상태 레지스터 읽기 */
-		bus->max_bus_speed = agp_speed(agpstat & 8, agpstat & 7); /* PCI/NVMe: AGP 최대 속도 산출 */
+		pci_read_config_dword(bridge, pos + PCI_AGP_STATUS, &agpstat);
+		/* [한국어] capability 시작 오프셋 + PCI_AGP_STATUS = AGP Status 레지스터.
+		 * capability 안의 필드는 항상 "capability 시작 + 상대 오프셋"으로 접근한다. */
+		bus->max_bus_speed = agp_speed(agpstat & 8, agpstat & 7);
+		/* [한국어] 비트3 = AGP 3.0 모드 여부, 하위 3비트 = 지원 속도.
+		 * 지원하는 최고 속도가 곧 최대 버스 속도다. */
 
-		pci_read_config_dword(bridge, pos + PCI_AGP_COMMAND, &agpcmd); /* PCI/NVMe: AGP command 레지스터 읽기 */
-		bus->cur_bus_speed = agp_speed(agpstat & 8, agpcmd & 7); /* PCI/NVMe: AGP 현재 속도 산출 */
+		pci_read_config_dword(bridge, pos + PCI_AGP_COMMAND, &agpcmd);
+		/* [한국어] AGP Command 레지스터 — 실제로 협상된 동작 속도 */
+		bus->cur_bus_speed = agp_speed(agpstat & 8, agpcmd & 7);
+		/* [한국어] 모드 비트는 status 쪽 것을 그대로 쓰고, 속도 비트만
+		 * command 쪽에서 가져와 현재 속도를 구한다. */
 	}
 
-	pos = pci_find_capability(bridge, PCI_CAP_ID_PCIX); /* PCI/NVMe: PCI-X capability 위치 탐색 */
-	/* PCI/NVMe: 조걸 분기, 조건에 따른 실행 경로 선택 */
+	pos = pci_find_capability(bridge, PCI_CAP_ID_PCIX);
+	/* [한국어] PCI-X capability(ID 0x07) 탐색 */
 	if (pos) {
-		/* PCI/NVMe: 지역 변수 선언 및 초기화 */
+		/* [한국어] PCI-X 브리지인 경우 */
 		u16 status;
-		/* PCI/NVMe: max 변수 선언/초기화: 최대 bus 번호/값. NVMe 하위 버스 범위 */
+		/* [한국어] PCI-X Bridge Secondary Status 레지스터 값 */
 		enum pci_bus_speed max;
+		/* [한국어] 계산한 최대 속도 */
 
-		/* PCI/NVMe: PCI config space 16-bit 읽기. COMMAND/STATUS 등 워드 단위 접근 */
-		pci_read_config_word(bridge, pos + PCI_X_BRIDGE_SSTATUS, /* PCI/NVMe: PCI config space 읽기. NVMe capability/CSR 탐색 */
-				     &status); /* PCI/NVMe: PCI-X bridge secondary status 읽기 */
+		pci_read_config_word(bridge, pos + PCI_X_BRIDGE_SSTATUS,
+				     &status);
+		/* [한국어] secondary(아래쪽) 버스의 상태 — 이 버스의 성질이다.
+		 * primary 쪽이 아니라 secondary 를 읽는 것이 핵심이다. */
 
-		if (status & PCI_X_SSTATUS_533MHZ) { /* PCI/NVMe: 533MHz PCI-X */
-			/* PCI/NVMe: 변수에 값 할당: max */
+		if (status & PCI_X_SSTATUS_533MHZ) {
 			max = PCI_SPEED_133MHz_PCIX_533;
-		} else if (status & PCI_X_SSTATUS_266MHZ) { /* PCI/NVMe: 266MHz PCI-X */
-			/* PCI/NVMe: 변수에 값 할당: max */
+			/* [한국어] 533MHz 등급 지원 비트 */
+		} else if (status & PCI_X_SSTATUS_266MHZ) {
 			max = PCI_SPEED_133MHz_PCIX_266;
-		} else if (status & PCI_X_SSTATUS_133MHZ) { /* PCI/NVMe: 133MHz PCI-X */
-			/* PCI/NVMe: 조걸 분기, 값 일치 여부 검사 */
+			/* [한국어] 266MHz 등급 */
+		} else if (status & PCI_X_SSTATUS_133MHZ) {
+			/* [한국어] 133MHz 등급 — PCI-X 버전에 따라 ECC 유무가 갈린다 */
 			if ((status & PCI_X_SSTATUS_VERS) == PCI_X_SSTATUS_V2)
-				/* PCI/NVMe: 변수에 값 할당: max */
 				max = PCI_SPEED_133MHz_PCIX_ECC;
-			/* PCI/NVMe: 조걸 분기의 else 경로 */
+			/* [한국어] PCI-X 2.0 은 ECC 를 쓴다 */
 			else
-				/* PCI/NVMe: 변수에 값 할당: max */
 				max = PCI_SPEED_133MHz_PCIX;
-		/* PCI/NVMe: 후속 코드 동작 수행 */
+			/* [한국어] PCI-X 1.0 */
 		} else {
-			max = PCI_SPEED_66MHz_PCIX; /* PCI/NVMe: 기본 66MHz PCI-X */
+			max = PCI_SPEED_66MHz_PCIX;
+			/* [한국어] 어떤 고속 비트도 없으면 최저 등급 66MHz */
 		}
 
-		bus->max_bus_speed = max; /* PCI/NVMe: PCI-X 최대 속도 기록 */
-		/* PCI/NVMe: 구조체 필드에 값 저장: bus->cur_bus_speed */
+		bus->max_bus_speed = max;
+		/* [한국어] 최대 속도 기록 */
 		bus->cur_bus_speed =
-			pcix_bus_speed[FIELD_GET(PCI_X_SSTATUS_FREQ, status)]; /* PCI/NVMe: PCI-X 현재 속도 기록 */
+			pcix_bus_speed[FIELD_GET(PCI_X_SSTATUS_FREQ, status)];
+		/* [한국어] 현재 동작 주파수는 상태 레지스터의 FREQ 필드에 코드로
+		 * 들어 있으므로, 앞서 정의한 pcix_bus_speed[] 표로 변환한다. */
 
 		return;
+		/* [한국어] PCI-X 이면 PCIe 일 수 없으므로 여기서 끝낸다 */
 	}
 
-	if (pci_is_pcie(bridge)) { /* PCI/NVMe: PCIe bridge이면 LNKCAP/LNKSTA 기반 속도 설정; NVMe 링크 속도 결정 */
-		/* PCI/NVMe: 지역 변수 선언 및 초기화 */
+	if (pci_is_pcie(bridge)) {
+		/* [한국어] PCIe 브리지 — NVMe SSD 가 붙는 현대적인 경로다.
+		 * pci_is_pcie() 는 set_pcie_port_type() 이 채워 둔
+		 * dev->pcie_cap 이 0 이 아닌지를 본다. */
 		u32 linkcap;
+		/* [한국어] Link Capabilities 레지스터 값 */
 
-		/* PCI/NVMe: PCIe capability 4바이트 읽기 */
 		pcie_capability_read_dword(bridge, PCI_EXP_LNKCAP, &linkcap);
-		/* PCI/NVMe: 구조체 필드에 비트 마스크 적용: bus->max_bus_speed */
+		/* [한국어] PCIe capability 안의 Link Capabilities.
+		 * pcie_capability_* 계열은 dev->pcie_cap 을 기준으로 오프셋을
+		 * 자동 계산해 주는 접근자다. */
 		bus->max_bus_speed = pcie_link_speed[linkcap & PCI_EXP_LNKCAP_SLS];
+		/* [한국어] SLS(Supported Link Speeds) 필드는 LNKCAP 의 하위 4비트다.
+		 * 그 코드를 pcie_link_speed[] 표로 옮겨 최대 속도를 얻는다.
+		 * NVMe SSD 라면 이 값이 Gen3(8 GT/s)나 Gen4(16 GT/s) 등이 된다. */
 
-		/* PCI/NVMe: 현재 링크 속도 갱신 */
 		pcie_update_link_speed(bus, PCIE_ADD_BUS);
+		/* [한국어] 현재 협상된 속도는 LNKSTA 를 읽어야 알 수 있으므로
+		 * 전용 함수에 맡긴다. PCIE_ADD_BUS 는 "버스를 새로 추가하며
+		 * 처음 읽는 것"이라는 이유 표시로, 불필요한 변경 알림을 막는다. */
 	}
 }
 
 /*
- * pci_host_bridge_msi_domain() - host bridge에 연결된 MSI/MSI-X IRQ domain 탐색
+ * [한국어]
+ * pci_host_bridge_msi_domain - 이 버스가 쓸 MSI irq_domain 을 여러 경로로 찾는다
  *
- * NVMe 연결: NVMe 컨트롤러의 per-queue MSI-X 인터럽트는 이 IRQ domain을
- * 통해 Linux irq 번호로 매핑. Interrupt remapping, vCPU affinity, IRQ
- * delivery 모드가 domain에 의해 결정되므로 NVMe I/O completion 지연과
- * 관련.
+ * @bus: 루트 버스(또는 도메인을 물려받을 버스).
+ * @return: 찾은 irq_domain. 못 찾으면 NULL(그 경우 MSI 를 쓸 수 없다).
+ *
+ * 왜 필요한가: MSI/MSI-X 는 "장치가 특정 주소에 특정 값을 써서 인터럽트를
+ * 발생시키는" 방식이라, 그 주소/값을 만들어 주고 리눅스 IRQ 번호로 이어 주는
+ * irq_domain 이 필요하다. 그 도메인이 어디서 오는지는 플랫폼마다 달라서
+ * 네 가지 경로를 순서대로 시도한다:
+ *   1) 호스트 컨트롤러 드라이버가 직접 설정해 둔 것
+ *   2) Device Tree 의 msi-parent 연결
+ *   3) ACPI(IORT 등)가 기술한 매핑
+ *   4) firmware node 로 직접 조회
+ *
+ * NVMe 접점: NVMe 는 큐마다 MSI-X 벡터를 하나씩 쓰려 하며
+ * (drivers/nvme/host/pci.c 의 pci_alloc_irq_vectors_affinity 호출),
+ * 그 벡터들은 결국 여기서 찾은 도메인에서 할당된다. 도메인이 없으면
+ * 레거시 INTx 로 떨어진다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥의 루트 버스 등록 경로.
+ *
+ * 호출 체인:
+ *   pci_set_bus_msi_domain() → [pci_host_bridge_msi_domain]
+ *     → dev_get_msi_domain(), pci_host_bridge_of/acpi_msi_domain(),
+ *       irq_find_matching_fwnode()
  */
-/* PCI/NVMe: 호스트 브리지 MSI 도메인 획득 */
 static struct irq_domain *pci_host_bridge_msi_domain(struct pci_bus *bus)
 {
-	/* PCI/NVMe: 후속 코드 동작 수행 */
 	struct irq_domain *d;
+	/* [한국어] 찾은 도메인을 담을 변수. 못 찾으면 NULL 그대로 반환된다 */
 
 	/* If the host bridge driver sets a MSI domain of the bridge, use it */
-	d = dev_get_msi_domain(bus->bridge); /* PCI/NVMe: host bridge device에 직접 등록된 MSI domain 우선 사용 */
+	d = dev_get_msi_domain(bus->bridge);
+	/* [한국어] 1순위: 호스트 컨트롤러 드라이버가 자신의 device 에 직접
+	 * 붙여 둔 도메인. 드라이버가 명시했다면 그것이 가장 정확하다. */
 
 	/*
 	 * Any firmware interface that can resolve the msi_domain
 	 * should be called from here.
 	 */
-	/* PCI/NVMe: 조걸 분기, NULL/0/미설정 여부 검사 */
 	if (!d)
-		d = pci_host_bridge_of_msi_domain(bus); /* PCI/NVMe: device tree에서 MSI domain 탐색 */
-	/* PCI/NVMe: 조걸 분기, NULL/0/미설정 여부 검사 */
+		d = pci_host_bridge_of_msi_domain(bus);
+	/* [한국어] 2순위: Device Tree 의 msi-parent 프로퍼티를 따라간다.
+	 * CONFIG_OF 가 없으면 NULL 을 돌려주는 빈 함수다. */
 	if (!d)
-		d = pci_host_bridge_acpi_msi_domain(bus); /* PCI/NVMe: ACPI MADT/MSI mapping에서 domain 탐색 */
+		d = pci_host_bridge_acpi_msi_domain(bus);
+	/* [한국어] 3순위: ACPI 기반 시스템(IORT 등)의 매핑에서 찾는다 */
 
 	/*
 	 * If no IRQ domain was found via the OF tree, try looking it up
 	 * directly through the fwnode_handle.
 	 */
-	/* PCI/NVMe: 조걸 분기, NULL/0/미설정 여부 검사 */
 	if (!d) {
-		struct fwnode_handle *fwnode = pci_root_bus_fwnode(bus); /* PCI/NVMe: root bus의 firmware node 획득 */
+		/* [한국어] 4순위: 위 경로가 모두 실패한 경우의 마지막 시도 */
+		struct fwnode_handle *fwnode = pci_root_bus_fwnode(bus);
+		/* [한국어] 루트 버스에 대응하는 펌웨어 노드(DT 노드든 ACPI 핸들이든
+		 * 공통 추상화). 아키텍처가 제공하지 않으면 NULL. */
 
-		/* PCI/NVMe: 조걸 분기, 조건에 따른 실행 경로 선택 */
 		if (fwnode)
-			/* PCI/NVMe: fwnode로 IRQ domain 검색 */
 			d = irq_find_matching_fwnode(fwnode,
-						     DOMAIN_BUS_PCI_MSI); /* PCI/NVMe: firmware node로부터 PCI MSI domain 검색 */
+						     DOMAIN_BUS_PCI_MSI);
+		/* [한국어] 그 펌웨어 노드에 등록된 도메인 중 "PCI MSI 용"
+		 * (DOMAIN_BUS_PCI_MSI 토큰)인 것을 찾는다. 같은 노드에 여러
+		 * 종류의 도메인이 붙을 수 있어 토큰으로 구분한다. */
 	}
 
-	return d; /* PCI/NVMe: 찾은 MSI IRQ domain 반환; 없으면 NULL */
+	return d;
+	/* [한국어] 네 경로 모두 실패하면 NULL — 이 버스에서는 MSI 를 못 쓴다 */
 }
 
 /*
- * pci_set_bus_msi_domain() - 버스 device에 MSI domain 연결
+ * [한국어]
+ * pci_set_bus_msi_domain - 버스에 MSI 도메인을 정해 붙인다
  *
- * NVMe 연결: NVMe 컨트롤러가 연결된 버스의 MSI domain을 결정. SR-IOV
- * virtual bus를 포함해 상위 bridge의 MSI domain을 따라 올라가고, 없으면
- * host bridge의 domain을 상속.
+ * @bus: 도메인을 정할 버스.
+ * @return: 없음. 결과는 bus->dev 의 msi_domain 필드에 기록된다.
+ *
+ * 왜 필요한가: MSI 도메인은 트리를 따라 상속된다. 어떤 브리지가 자기만의
+ * 도메인을 갖고 있으면(예: 인터럽트 리매핑을 하는 스위치, VMD 같은 장치)
+ * 그 아래 버스는 그 도메인을 써야 한다. 그래서 위로 올라가며 처음 만나는
+ * 브리지의 도메인을 쓰고, 끝까지 없으면 루트에서 새로 찾는다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥의 버스 생성 경로.
+ *
+ * 호출 체인:
+ *   pci_register_host_bridge()/pci_alloc_child_bus() → [pci_set_bus_msi_domain]
+ *     → dev_get_msi_domain(), pci_host_bridge_msi_domain(), dev_set_msi_domain()
  */
-/* PCI/NVMe: pci_set_bus_msi_domain 함수 정의 */
 static void pci_set_bus_msi_domain(struct pci_bus *bus)
 {
-	/* PCI/NVMe: 후속 코드 동작 수행 */
 	struct irq_domain *d;
-	/* PCI/NVMe: 후속 코드 동작 수행 */
+	/* [한국어] 결정된 도메인 */
 	struct pci_bus *b;
+	/* [한국어] 위로 거슬러 올라가는 커서. 루프 종료 후에도 쓰이므로
+	 * 루프 밖에 선언되어 있다(루트 버스를 가리킨 채 끝난다). */
 
 	/*
 	 * The bus can be a root bus, a subordinate bus, or a virtual bus
 	 * created by an SR-IOV device.  Walk up to the first bridge device
 	 * found or derive the domain from the host bridge.
 	 */
-	for (b = bus, d = NULL; !d && !pci_is_root_bus(b); b = b->parent) { /* PCI/NVMe: root bus에 도달하거나 MSI domain을 찾을 때까지 상위로 이동 */
-		/* PCI/NVMe: 조걸 분기, 값 크기 비교 */
+	for (b = bus, d = NULL; !d && !pci_is_root_bus(b); b = b->parent) {
+		/* [한국어] 도메인을 찾았거나 루트 버스에 닿으면 멈춘다.
+		 * 위 영어 주석대로 대상 버스는 루트, 하위 버스, SR-IOV 가 만든
+		 * 가상 버스 중 어느 것이든 될 수 있어 일반적인 상향 순회가 필요하다. */
 		if (b->self)
-			d = dev_get_msi_domain(&b->self->dev); /* PCI/NVMe: bridge device에 설정된 MSI domain 확인; NVMe VF의 경우 PF 경로 */
+			d = dev_get_msi_domain(&b->self->dev);
+		/* [한국어] b->self 는 이 버스로 내려오는 브리지 장치.
+		 * 그 장치에 개별 MSI 도메인이 붙어 있으면 그것을 쓴다.
+		 * SR-IOV 가상 버스처럼 self 가 없는 경우를 위해 NULL 검사가 있다. */
 	}
 
-	/* PCI/NVMe: 조걸 분기, NULL/0/미설정 여부 검사 */
 	if (!d)
-		d = pci_host_bridge_msi_domain(b); /* PCI/NVMe: 상위에서 domain을 찾지 못하면 host bridge의 domain 사용 */
+		d = pci_host_bridge_msi_domain(b);
+	/* [한국어] 중간 브리지에서 못 찾았다 — 이때 b 는 루트 버스다.
+	 * 루트에서 펌웨어/드라이버 경로로 도메인을 찾는다. */
 
-	dev_set_msi_domain(&bus->dev, d); /* PCI/NVMe: 버스 device의 MSI domain 설정; 이 버스의 NVMe 장치가 상속 */
+	dev_set_msi_domain(&bus->dev, d);
+	/* [한국어] 버스 device 에 도메인을 기록한다. 이후 이 버스에 붙는 장치들이
+	 * pci_dev_msi_domain() 을 통해 이 값을 물려받는다.
+	 * NVMe 컨트롤러의 MSI-X 벡터도 이 도메인에서 나온다. */
 }
 
 /*
- * pci_preserve_config() - firmware가 설정한 PCI 리소스를 그대로 유지할지 결정
+ * [한국어]
+ * pci_preserve_config - 펌웨어가 배치해 둔 리소스 설정을 그대로 둘지 판단한다
  *
- * NVMe 연결: true이면 kernel이 BAR/버스 번호를 재할당하지 않고 firmware
- * 설정을 존중. NVMe BAR의 물리 주소가 부팅 후 변경되지 않으므로
- * nvme_probe에서 보는 pci_resource_start() 값이 firmware가 배치한 값과
- * 동일.
+ * @host_bridge: 판단 대상 호스트 브리지.
+ * @return: true 면 커널이 BAR/브리지 창을 재배정하지 않고 펌웨어 설정을
+ *          존중한다. false 면 필요에 따라 재배정할 수 있다.
+ *
+ * 왜 필요한가: 보통 커널은 리소스를 자유롭게 재배정하지만, 그러면 안 되는
+ * 경우가 있다. 예를 들어 펌웨어가 이미 특정 주소를 전제로 다른 설정을 해
+ * 두었거나, 재배정 도중 화면 출력이 끊기면 곤란한 상황이다. 그런 요구는
+ * ACPI 의 _DSM 이나 DT 프로퍼티로 전달되며, 이 함수가 두 경로를 확인한다.
+ *
+ * NVMe 접점: true 이면 NVMe 컨트롤러의 BAR0 주소가 부팅 시 펌웨어가 정한
+ * 값 그대로 유지되므로, 드라이버가 보는 pci_resource_start(pdev, 0) 이
+ * 펌웨어 배치와 일치한다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥의 루트 버스 등록 경로.
+ *
+ * 호출 체인:
+ *   pci_register_host_bridge() → [pci_preserve_config]
+ *     → pci_acpi_preserve_config(), of_pci_preserve_config()
  */
-/* PCI/NVMe: pci_preserve_config 함수 정의 */
 static bool pci_preserve_config(struct pci_host_bridge *host_bridge)
 {
-	if (pci_acpi_preserve_config(host_bridge)) /* PCI/NVMe: ACPI _OSC 등에서 config preserve 요청 시 true */
-		/* PCI/NVMe: 참 반환 */
+	if (pci_acpi_preserve_config(host_bridge))
 		return true;
+	/* [한국어] ACPI 경로에서 "설정을 보존하라"고 지시했으면 즉시 true.
+	 * CONFIG_ACPI 가 없으면 false 를 돌려주는 빈 함수다. */
 
-	/* PCI/NVMe: 조걸 분기, 값 크기 비교 */
 	if (host_bridge->dev.parent && host_bridge->dev.parent->of_node)
-		return of_pci_preserve_config(host_bridge->dev.parent->of_node); /* PCI/NVMe: device tree에서 preserve 속성 확인 */
+		return of_pci_preserve_config(host_bridge->dev.parent->of_node);
+	/* [한국어] DT 시스템: 부모 device 에 연결된 DT 노드가 있으면 그 노드의
+	 * 프로퍼티를 확인한다. 두 조건을 모두 검사하는 것은 부모가 없거나
+	 * DT 노드가 없는 구성(순수 ACPI 등)에서 NULL 역참조를 피하기 위해서다. */
 
-	return false; /* PCI/NVMe: 기본적으로 firmware 설정을 유지하지 않고 kernel이 재할당 가능 */
+	return false;
+	/* [한국어] 아무 지시도 없으면 기본값 — 커널이 필요하면 재배정한다 */
 }
 
 /*
- * pci_register_host_bridge() - host bridge를 PCI 코어에 등록하고 root bus 생성
+ * [한국어]
+ * pci_register_host_bridge - 호스트 브리지를 등록하고 그 아래 루트 버스를 만든다
  *
- * NVMe 연결: NVMe 컨트롤러가 연결될 root bus가 여기서 만들어지고,
- * bridge의 windows(MEM/IO/BUS 리소스)가 bus resources로 추가된다.
- * MSI domain, NUMA node, preserve_config 등 NVMe 동작에 영향을 주는
- * 설정이 이루어진다.
+ * @bridge: 호스트 컨트롤러 드라이버가 채워 놓은 pci_host_bridge.
+ *          busnr(루트 버스 번호), ops(config 접근 함수), windows(주소 창 목록),
+ *          sysdata 가 이미 설정되어 있어야 한다.
+ * @return: 0 이면 성공. -ENOMEM(메모리 부족), -EEXIST(같은 도메인/버스 번호가
+ *          이미 등록됨), 그 밖에 device_add/register 가 준 음수 errno.
+ *
+ * 왜 필요한가: PCI 열거의 출발점이다. 이 함수가 끝나야 비로소
+ *  - struct pci_bus 하나가 만들어져 sysfs 에 /sys/class/pci_bus/0000:00 로 보이고
+ *  - 호스트 브리지가 기술한 주소 창들이 그 버스의 리소스 목록에 올라가며
+ *  - MSI 도메인과 NUMA 노드가 정해지고
+ *  - 전역 pci_root_buses 목록에 들어간다.
+ * 그다음 호출자가 pci_scan_child_bus() 로 실제 장치 스캔을 시작한다.
+ *
+ * 창(window) 목록을 임시로 옮기는 이유: device_add() 가 실패하면 되돌려야 하고,
+ * 성공한 뒤에는 인접한 창을 병합해서 다시 넣기 때문이다. 그 사이 구간에서
+ * bridge->windows 는 비어 있다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥. 마지막에 pci_bus_sem 을 쓰기 모드로 잡아
+ * 전역 루트 버스 목록을 갱신한다.
+ *
+ * 호출 체인:
+ *   pci_host_probe()/pci_scan_root_bus_bridge() → [pci_register_host_bridge]
+ *     → pci_alloc_bus(), device_add(), device_register(),
+ *       pci_bus_add_resource(), pci_bus_insert_busn_res()
  */
-/* PCI/NVMe: pci_register_host_bridge 함수 정의 */
 static int pci_register_host_bridge(struct pci_host_bridge *bridge)
 {
-	/* PCI/NVMe: 변수에 값 할당: struct device *parent */
 	struct device *parent = bridge->dev.parent;
-	/* PCI/NVMe: 후속 코드 동작 수행 */
+	/* [한국어] 호스트 컨트롤러 device(플랫폼 장치 등). 없을 수도 있다 */
 	struct resource_entry *window, *next, *n;
-	/* PCI/NVMe: 후속 코드 동작 수행 */
+	/* [한국어] 창 목록 순회용 커서들. n 은 _safe 순회에서 다음 항목을 미리
+	 * 보관해 현재 항목을 지워도 안전하게 하는 용도다. */
 	struct pci_bus *bus, *b;
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
+	/* [한국어] bus = 새로 만들 루트 버스, b = 중복 검사에서 찾은 기존 버스 */
 	resource_size_t offset, next_offset;
-	/* PCI/NVMe: LIST_HEAD 함수 호출 */
+	/* [한국어] 창의 CPU 주소 - 버스 주소 차이(오프셋). 병합 가능 판정에 쓴다 */
 	LIST_HEAD(resources);
-	/* PCI/NVMe: 후속 코드 동작 수행 */
+	/* [한국어] bridge->windows 를 잠시 옮겨 둘 지역 리스트 머리 */
 	struct resource *res, *next_res;
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
+	/* [한국어] 병합 검사에서 비교할 두 창의 리소스 */
 	bool bus_registered = false;
-	/* PCI/NVMe: 후속 코드 동작 수행 */
+	/* [한국어] bus->dev 를 device_register() 까지 진행했는지 표시.
+	 * 오류 경로에서 put_device 를 쓸지 kfree 를 쓸지 가르는 기준이다. */
 	char addr[64], *fmt;
-	/* PCI/NVMe: 후속 코드 동작 수행 */
+	/* [한국어] 로그에 덧붙일 "(bus address [...])" 문자열과 그 포맷 */
 	const char *name;
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
+	/* [한국어] 등록된 버스 device 의 이름("0000:00" 형태) */
 	int err;
+	/* [한국어] 오류 코드 */
 
-	bus = pci_alloc_bus(NULL); /* PCI/NVMe: root bus용 pci_bus 할당 */
-	if (!bus) /* PCI/NVMe: 메모리 부족 시 -ENOMEM */
-		/* PCI/NVMe: 오류 코드 반환: -ENOMEM */
+	bus = pci_alloc_bus(NULL);
+	/* [한국어] 루트 버스이므로 부모 버스는 NULL */
+	if (!bus)
 		return -ENOMEM;
+	/* [한국어] 메모리 부족 — 아직 아무것도 등록하지 않았으므로 그냥 반환 */
 
-	bridge->bus = bus; /* PCI/NVMe: host bridge가 생성한 root bus 연결 */
+	bridge->bus = bus;
+	/* [한국어] 브리지가 자기 루트 버스를 가리키게 한다(양방향 연결의 한쪽) */
 
-	bus->sysdata = bridge->sysdata; /* PCI/NVMe: platform-specific sysdata 연결 */
-	bus->ops = bridge->ops; /* PCI/NVMe: PCI config space access ops 연결 */
-	bus->number = bus->busn_res.start = bridge->busnr; /* PCI/NVMe: root bus 번호 설정 */
-/* PCI/NVMe: 컴파일 조건: CONFIG_PCI_DOMAINS_GENERIC 정의 시 포함 */
+	bus->sysdata = bridge->sysdata;
+	/* [한국어] 아키텍처/컨트롤러 전용 데이터 포인터. config 접근 함수가
+	 * 이것을 통해 하드웨어에 접근한다. */
+	bus->ops = bridge->ops;
+	/* [한국어] 이 버스의 config space 읽기/쓰기 함수 집합(struct pci_ops).
+	 * 이후 모든 pci_read_config_* 가 결국 여기로 내려간다. */
+	bus->number = bus->busn_res.start = bridge->busnr;
+	/* [한국어] 루트 버스 번호를 두 곳에 동시에 설정. number 는 config 주소에
+	 * 쓰는 값이고, busn_res.start 는 버스 번호 리소스 구간의 시작이다. */
 #ifdef CONFIG_PCI_DOMAINS_GENERIC
-	/* PCI/NVMe: 조걸 분기, 값 일치 여부 검사 */
+	/* [한국어] 도메인 번호를 커널 공통 로직이 관리하는 구성일 때만 */
 	if (bridge->domain_nr == PCI_DOMAIN_NR_NOT_SET)
-		bus->domain_nr = pci_bus_find_domain_nr(bus, parent); /* PCI/NVMe: domain 번호 동적 할당; NUMA/RC별 NVMe 구분 */
-	/* PCI/NVMe: 조걸 분기의 else 경로 */
+		bus->domain_nr = pci_bus_find_domain_nr(bus, parent);
+	/* [한국어] 컨트롤러가 도메인 번호를 지정하지 않았으면 커널이 찾아/할당한다 */
 	else
-		bus->domain_nr = bridge->domain_nr; /* PCI/NVMe: 미리 지정된 domain 번호 사용 */
-	/* PCI/NVMe: 조걸 분기, 값 크기 비교 */
+		bus->domain_nr = bridge->domain_nr;
+	/* [한국어] 지정했으면 그대로 사용 */
 	if (bus->domain_nr < 0) {
-		/* PCI/NVMe: 변수에 값 할당: err */
+		/* [한국어] 음수는 오류 코드다(도메인 번호 고갈 등) */
 		err = bus->domain_nr;
-		/* PCI/NVMe: 오류 처리/종료 지점으로 이동: free */
 		goto free;
+		/* [한국어] 아직 아무것도 등록 전이므로 free 경로로 */
 	}
-/* PCI/NVMe: 컴파일 조건 종료 */
 #endif
 
-	/* PCI/NVMe: 버스 검색 */
 	b = pci_find_bus(pci_domain_nr(bus), bridge->busnr);
-	/* PCI/NVMe: 조걸 분기, 조건에 따른 실행 경로 선택 */
+	/* [한국어] 같은 도메인에 같은 번호의 버스가 이미 있는지 확인 */
 	if (b) {
 		/* Ignore it if we already got here via a different bridge */
-		dev_dbg(&b->dev, "bus already known\n"); /* PCI/NVMe: 동일 domain/bus의 중복 bridge이면 무시 */
-		/* PCI/NVMe: 변수에 값 할당: err */
+		dev_dbg(&b->dev, "bus already known\n");
+		/* [한국어] 같은 루트 버스를 서로 다른 펌웨어 서술(ACPI 와 DT 등)로
+		 * 두 번 등록하려는 경우다. 두 번째 시도는 조용히 거절한다. */
 		err = -EEXIST;
-		/* PCI/NVMe: 오류 처리/종료 지점으로 이동: free */
 		goto free;
 	}
 
-	/* PCI/NVMe: 장치 이름 설정 */
 	dev_set_name(&bridge->dev, "pci%04x:%02x", pci_domain_nr(bus),
-		     bridge->busnr); /* PCI/NVMe: host bridge device 이름 설정 */
+		     bridge->busnr);
+	/* [한국어] 호스트 브리지 device 이름 — "pci0000:00" 형태.
+	 * device_add() 전에 이름이 정해져 있어야 한다. */
 
-	err = pcibios_root_bridge_prepare(bridge); /* PCI/NVMe: 아키텍처별 root bridge 준비 */
-	/* PCI/NVMe: 조걸 분기, 조건에 따른 실행 경로 선택 */
+	err = pcibios_root_bridge_prepare(bridge);
+	/* [한국어] 아키텍처별 사전 준비 훅(기본은 0 을 돌려주는 __weak 함수).
+	 * x86/ACPI 는 여기서 NUMA 노드 등을 채운다. */
 	if (err)
-		/* PCI/NVMe: 오류 처리/종료 지점으로 이동: free */
 		goto free;
+	/* [한국어] 준비 실패 — 아직 등록 전이므로 free 로 */
 
 	/* Temporarily move resources off the list */
-	list_splice_init(&bridge->windows, &resources); /* PCI/NVMe: bridge window를 임시 리스트로 이동 */
-	err = device_add(&bridge->dev); /* PCI/NVMe: host bridge device를 device model에 추가 */
-	/* PCI/NVMe: 조걸 분기, 조건에 따른 실행 경로 선택 */
+	list_splice_init(&bridge->windows, &resources);
+	/* [한국어] 창 목록을 통째로 지역 리스트로 옮기고 원본은 비운다.
+	 * 아래에서 병합·검사한 뒤 유효한 것만 되돌려 놓는다. */
+	err = device_add(&bridge->dev);
+	/* [한국어] 호스트 브리지를 드라이버 모델에 등록. 이 시점부터 sysfs 에
+	 * 보이고, 실패 시에는 put_device 가 아니라 free 경로로 간다
+	 * (device_add 가 실패하면 참조가 늘지 않았기 때문). */
 	if (err)
-		/* PCI/NVMe: 오류 처리/종료 지점으로 이동: free */
 		goto free;
 
-	bus->bridge = get_device(&bridge->dev); /* PCI/NVMe: bus가 host bridge device를 참조 */
-	device_enable_async_suspend(bus->bridge); /* PCI/NVMe: 비동기 suspend 활성화 */
-	pci_set_bus_of_node(bus); /* PCI/NVMe: device tree node 연결 */
-	pci_set_bus_msi_domain(bus); /* PCI/NVMe: root bus의 MSI domain 설정; 하위 NVMe 장치 상속 */
-	/* PCI/NVMe: 조걸 분기, 값 크기 비교 */
+	bus->bridge = get_device(&bridge->dev);
+	/* [한국어] 버스가 브리지 device 참조를 하나 잡는다.
+	 * release_pcibus_dev() 의 put_device(pci_bus->bridge) 와 짝이다. */
+	device_enable_async_suspend(bus->bridge);
+	/* [한국어] 시스템 절전 시 이 device 의 suspend/resume 을 다른 device 와
+	 * 병렬로 수행하도록 허용해 절전 진입/복귀 시간을 줄인다. */
+	pci_set_bus_of_node(bus);
+	/* [한국어] DT 노드를 버스에 연결(CONFIG_OF 없으면 빈 함수) */
+	pci_set_bus_msi_domain(bus);
+	/* [한국어] 이 루트 버스의 MSI 도메인을 결정한다. 아래에 붙을 모든 장치,
+	 * NVMe 컨트롤러를 포함해, 이 도메인에서 MSI-X 벡터를 받게 된다. */
 	if (bridge->msi_domain && !dev_get_msi_domain(&bus->dev) &&
-	    /* PCI/NVMe: OF MSI map 존재 여부 확인 */
 	    !pci_host_of_has_msi_map(parent))
-		bus->bus_flags |= PCI_BUS_FLAGS_NO_MSI; /* PCI/NVMe: MSI domain이 없으면 bus에 MSI 불가 표시; NVMe MSI-X 사용 불가 */
+		bus->bus_flags |= PCI_BUS_FLAGS_NO_MSI;
+	/* [한국어] 세 조건이 모두 참일 때만 "이 버스는 MSI 불가"로 표시한다.
+	 * (1) 컨트롤러가 MSI 도메인이 필요하다고 선언했는데,
+	 * (2) 방금 결정한 도메인이 실제로는 NULL 이고,
+	 * (3) DT 의 msi-map 으로도 도메인을 찾을 수 없다면
+	 * MSI 를 쓸 방법이 없다. 이 플래그가 서면 그 아래 장치는 MSI/MSI-X 를
+	 * 할당받지 못하고 레거시 INTx 로 떨어진다. */
 
-	/* PCI/NVMe: 조걸 분기, NULL/0/미설정 여부 검사 */
 	if (!parent)
-		set_dev_node(bus->bridge, pcibus_to_node(bus)); /* PCI/NVMe: NUMA node 설정; NVMe locality에 영향 */
+		set_dev_node(bus->bridge, pcibus_to_node(bus));
+	/* [한국어] 부모 device 가 없으면 NUMA 노드를 상속받을 곳이 없으므로,
+	 * 아키텍처가 제공하는 pcibus_to_node() 로 직접 설정한다. */
 
-	bus->dev.class = &pcibus_class; /* PCI/NVMe: bus device class 설정 */
-	bus->dev.parent = bus->bridge; /* PCI/NVMe: bus device의 부모를 host bridge로 */
+	bus->dev.class = &pcibus_class;
+	/* [한국어] 파일 앞부분에서 정의한 클래스에 소속시킨다.
+	 * 소멸자(release_pcibus_dev)와 sysfs 속성이 여기서 온다. */
+	bus->dev.parent = bus->bridge;
+	/* [한국어] sysfs 상에서 버스를 호스트 브리지 아래에 놓는다 */
 
-	dev_set_name(&bus->dev, "%04x:%02x", pci_domain_nr(bus), bus->number); /* PCI/NVMe: bus device 이름 설정; 예: 0000:00 */
-	name = dev_name(&bus->dev); /* PCI/NVMe: 설정된 이름 포인터 획득 */
+	dev_set_name(&bus->dev, "%04x:%02x", pci_domain_nr(bus), bus->number);
+	/* [한국어] "0000:00" 형태의 버스 이름 */
+	name = dev_name(&bus->dev);
+	/* [한국어] 아래 로그에서 재사용할 이름 포인터 */
 
-	err = device_register(&bus->dev); /* PCI/NVMe: bus device 등록 */
-	bus_registered = true; /* PCI/NVMe: bus 등록 완료 플래그 설정 */
-	/* PCI/NVMe: 조걸 분기, 조건에 따른 실행 경로 선택 */
+	err = device_register(&bus->dev);
+	/* [한국어] 버스 device 등록(initialize + add). 여기서부터는 실패해도
+	 * 객체가 refcount 로 관리되므로 kfree 가 아니라 put_device 로 정리한다. */
+	bus_registered = true;
+	/* [한국어] err 와 무관하게 세운다 — device_register 는 실패해도 내부적으로
+	 * device_initialize 를 마친 상태라, 정리는 반드시 put_device 여야 한다. */
 	if (err)
-		/* PCI/NVMe: 오류 처리/종료 지점으로 이동: unregister */
 		goto unregister;
 
-	pcibios_add_bus(bus); /* PCI/NVMe: 아키텍처별 bus 추가 처리 */
+	pcibios_add_bus(bus);
+	/* [한국어] 아키텍처별 버스 추가 훅(기본은 빈 __weak 함수) */
 
-	/* PCI/NVMe: 조걸 분기, 값 크기 비교 */
 	if (bus->ops->add_bus) {
-		err = bus->ops->add_bus(bus); /* PCI/NVMe: platform-specific bus 추가 콜백 */
-		/* PCI/NVMe: 조걸 분기, 값 크기 비교 */
+		/* [한국어] 컨트롤러 드라이버가 버스 추가 시 할 일을 등록해 두었으면 */
+		err = bus->ops->add_bus(bus);
 		if (WARN_ON(err < 0))
-			/* PCI/NVMe: 장치 오류 메시지 출력 */
 			dev_err(&bus->dev, "failed to add bus: %d\n", err);
+		/* [한국어] 실패해도 등록을 되돌리지는 않는다. 심각한 문제이므로
+		 * WARN_ON 으로 스택 트레이스를 남겨 원인 추적을 돕는다. */
 	}
 
 	/* Create legacy_io and legacy_mem files for this bus */
-	pci_create_legacy_files(bus); /* PCI/NVMe: 레거시 I/O/MEM sysfs 파일 생성 */
+	pci_create_legacy_files(bus);
+	/* [한국어] /sys/.../legacy_io, legacy_mem 파일 생성. 사용자 공간이
+	 * 레거시 ISA 영역에 접근할 수 있게 하는 구식 인터페이스다. */
 
-	/* PCI/NVMe: 조걸 분기, 조건에 따른 실행 경로 선택 */
 	if (parent)
-		dev_info(parent, "PCI host bridge to bus %s\n", name); /* PCI/NVMe: parent device에 host bridge 정보 출력 */
-	/* PCI/NVMe: 조걸 분기의 else 경로 */
+		dev_info(parent, "PCI host bridge to bus %s\n", name);
+	/* [한국어] 부모 device 문맥으로 로그 — 어느 컨트롤러인지 함께 보인다 */
 	else
-		pr_info("PCI host bridge to bus %s\n", name); /* PCI/NVMe: parent 없이 host bridge 정보 출력 */
+		pr_info("PCI host bridge to bus %s\n", name);
+	/* [한국어] 부모가 없으면 일반 printk 로 */
 
-	/* PCI/NVMe: 조걸 분기, 값 일치 여부 검사 */
 	if (nr_node_ids > 1 && pcibus_to_node(bus) == NUMA_NO_NODE)
-		dev_warn(&bus->dev, "Unknown NUMA node; performance will be reduced\n"); /* PCI/NVMe: NUMA node 미지정 시 성능 경고; NVMe latency에 영향 */
+		dev_warn(&bus->dev, "Unknown NUMA node; performance will be reduced\n");
+	/* [한국어] NUMA 시스템인데 이 버스가 어느 노드에 속하는지 모르는 경우.
+	 * 그러면 커널이 DMA 버퍼와 인터럽트 처리 CPU 를 장치와 같은 노드에
+	 * 몰아 줄 수 없어, 원격 노드 접근으로 지연이 늘어난다. NVMe 처럼
+	 * DMA 량이 많은 장치에서 특히 체감되므로 경고한다. */
 
 	/* Check if the boot configuration by FW needs to be preserved */
-	bridge->preserve_config = pci_preserve_config(bridge); /* PCI/NVMe: firmware config 유지 여부 결정; NVMe BAR 재할당 여부 */
+	bridge->preserve_config = pci_preserve_config(bridge);
+	/* [한국어] 펌웨어가 배치한 BAR/창 설정을 보존할지 여부를 기록.
+	 * setup-bus.c 가 재배정 여부를 판단할 때 이 값을 본다. */
 
 	/* Coalesce contiguous windows */
-	resource_list_for_each_entry_safe(window, n, &resources) { /* PCI/NVMe: 인접한 address window를 병합 */
-		if (list_is_last(&window->node, &resources)) /* PCI/NVMe: 마지막 entry이면 더 병합할 것이 없음 */
+	resource_list_for_each_entry_safe(window, n, &resources) {
+		/* [한국어] 인접하고 성질이 같은 창들을 하나로 합친다. 컨트롤러
+		 * 드라이버나 펌웨어가 같은 영역을 여러 조각으로 기술하는 경우가
+		 * 있는데, 합쳐 두면 큰 BAR 를 배치할 여지가 생긴다. */
+		if (list_is_last(&window->node, &resources))
 			break;
+		/* [한국어] 마지막 항목은 뒤에 이어 붙일 것이 없다 */
 
-		next = list_next_entry(window, node); /* PCI/NVMe: 다음 window entry 획득 */
-		offset = window->offset; /* PCI/NVMe: 현재 window의 CPU↔bus 오프셋 */
-		res = window->res; /* PCI/NVMe: 현재 window의 resource */
-		next_offset = next->offset; /* PCI/NVMe: 다음 window의 오프셋 */
-		next_res = next->res; /* PCI/NVMe: 다음 window의 resource */
+		next = list_next_entry(window, node);
+		/* [한국어] 바로 다음 창 */
+		offset = window->offset;
+		/* [한국어] 현재 창의 CPU-버스 주소 오프셋 */
+		res = window->res;
+		/* [한국어] 현재 창의 리소스 */
+		next_offset = next->offset;
+		/* [한국어] 다음 창의 오프셋 */
+		next_res = next->res;
+		/* [한국어] 다음 창의 리소스 */
 
-		if (res->flags != next_res->flags || offset != next_offset) /* PCI/NVMe: type이나 오프셋이 다륾면 병합 불가 */
+		if (res->flags != next_res->flags || offset != next_offset)
 			continue;
+		/* [한국어] 종류(IO/MEM/prefetch)나 주소 변환 오프셋이 다르면
+		 * 합칠 수 없다. 합치면 주소 변환이 깨진다. */
 
-		if (res->end + 1 == next_res->start) { /* PCI/NVMe: 인접하면 두 window를 하나로 병합 */
-			/* PCI/NVMe: 구조체 필드에 값 저장: next_res->start */
+		if (res->end + 1 == next_res->start) {
+			/* [한국어] 현재 창의 끝 바로 다음이 다음 창의 시작 = 딱 붙어 있다 */
 			next_res->start = res->start;
-			/* PCI/NVMe: 구조체 필드에 값 저장: res->flags */
+			/* [한국어] 다음 창을 앞으로 늘려 현재 창을 흡수한다 */
 			res->flags = res->start = res->end = 0;
+			/* [한국어] 흡수된 창은 전부 0 으로 만들어 "빈 항목" 표시.
+			 * 실제 제거는 아래 두 번째 순회에서 한다. */
 		}
 	}
 
 	/* Add initial resources to the bus */
-	resource_list_for_each_entry_safe(window, n, &resources) { /* PCI/NVMe: 임시 리스트의 window를 bus resources로 이동 */
-		/* PCI/NVMe: 변수에 값 할당: offset */
+	resource_list_for_each_entry_safe(window, n, &resources) {
+		/* [한국어] 이제 살아남은 창들을 버스의 리소스로 등록한다 */
 		offset = window->offset;
-		/* PCI/NVMe: 변수에 값 할당: res */
+		/* [한국어] 주소 변환 오프셋 */
 		res = window->res;
-		if (!res->flags && !res->start && !res->end) { /* PCI/NVMe: 병합으로 제거된 빈 entry는 해제 */
-			/* PCI/NVMe: 리소스 해제 */
+		/* [한국어] 창의 리소스 */
+		if (!res->flags && !res->start && !res->end) {
+			/* [한국어] 위 병합 단계에서 0 으로 만든 빈 항목 */
 			release_resource(res);
-			/* PCI/NVMe: resource_list_destroy_entry 함수 호출 */
+			/* [한국어] 리소스 트리에서 떼어 낸다 */
 			resource_list_destroy_entry(window);
+			/* [한국어] 목록 항목과 리소스 메모리를 해제 */
 			continue;
 		}
 
-		list_move_tail(&window->node, &bridge->windows); /* PCI/NVMe: 유효한 window를 bridge->windows로 복원 */
+		list_move_tail(&window->node, &bridge->windows);
+		/* [한국어] 유효한 창은 임시 리스트에서 bridge->windows 로 되돌린다.
+		 * 브리지가 해제될 때 pci_free_resource_list 로 정리된다. */
 
-		/* PCI/NVMe: 조걸 분기, 플래그/비트 마스크 검사 */
 		if (res->flags & IORESOURCE_BUS)
-			pci_bus_insert_busn_res(bus, bus->number, res->end); /* PCI/NVMe: BUS 리소스이면 버스 번호 범위 등록 */
-		/* PCI/NVMe: 조걸 분기의 else 경로 */
+			pci_bus_insert_busn_res(bus, bus->number, res->end);
+		/* [한국어] 버스 번호 축의 리소스는 별도 처리 — 이 루트 버스가
+		 * 담당할 버스 번호 구간을 도메인 리소스 트리에 등록한다. */
 		else
-			pci_bus_add_resource(bus, res); /* PCI/NVMe: MEM/IO 리소스를 bus resources에 추가; NVMe BAR 할당 기준 */
+			pci_bus_add_resource(bus, res);
+		/* [한국어] MEM/IO 창은 버스의 사용 가능 리소스 목록에 넣는다.
+		 * 이 목록이 곧 "이 버스 아래 장치의 BAR 를 배치할 수 있는 범위"이며,
+		 * NVMe 컨트롤러의 BAR0 도 결국 이 안에서 주소를 받는다. */
 
-		/* PCI/NVMe: 조걸 분기, 조건에 따른 실행 경로 선택 */
 		if (offset) {
-			/* PCI/NVMe: 조걸 분기, 값 일치 여부 검사 */
+			/* [한국어] CPU 주소와 버스 주소가 다른 플랫폼이면, 로그에
+			 * 버스 주소도 함께 보여 주는 것이 진단에 도움이 된다. */
 			if (resource_type(res) == IORESOURCE_IO)
-				/* PCI/NVMe: 변수에 값 할당: fmt */
 				fmt = " (bus address [%#06llx-%#06llx])";
-			/* PCI/NVMe: 조걸 분기의 else 경로 */
+			/* [한국어] I/O 는 보통 16비트라 6자리로 충분 */
 			else
-				/* PCI/NVMe: 변수에 값 할당: fmt */
 				fmt = " (bus address [%#010llx-%#010llx])";
+			/* [한국어] MEM 은 32비트 폭에 맞춰 10자리 */
 
-			/* PCI/NVMe: 문자열 포맷 출력 */
 			snprintf(addr, sizeof(addr), fmt,
-				 /* PCI/NVMe: 후속 코드 동작 수행 */
 				 (unsigned long long)(res->start - offset),
-				 (unsigned long long)(res->end - offset)); /* PCI/NVMe: bus 주소 범위를 문자열로 변환 */
-		/* PCI/NVMe: 후속 코드 동작 수행 */
+				 (unsigned long long)(res->end - offset));
+			/* [한국어] CPU 주소에서 오프셋을 빼면 버스 주소가 된다 */
 		} else
-			addr[0] = '\0'; /* PCI/NVMe: 오프셋이 0이면 bus 주주 문자열 생략 */
+			addr[0] = '\0';
+		/* [한국어] 오프셋이 0 이면 두 주소가 같으므로 덧붙일 문자열 없음 */
 
-		dev_info(&bus->dev, "root bus resource %pR%s\n", res, addr); /* PCI/NVMe: root bus 리소스 정보 로깅 */
+		dev_info(&bus->dev, "root bus resource %pR%s\n", res, addr);
+		/* [한국어] "root bus resource [mem 0x...-0x...]" 형태로 로그 */
 	}
 
-	of_pci_make_host_bridge_node(bridge); /* PCI/NVMe: device tree에서 host bridge node 생성/연결 */
+	of_pci_make_host_bridge_node(bridge);
+	/* [한국어] DT 에 이 호스트 브리지 노드가 없으면 동적으로 만들어 준다
+	 * (ACPI 시스템에서 DT 소비자와 호환을 맞추는 경우 등). */
 
-	down_write(&pci_bus_sem); /* PCI/NVMe: root bus 리스트 쓰기 잠금 */
-	list_add_tail(&bus->node, &pci_root_buses); /* PCI/NVMe: 전역 root bus 리스트에 추가 */
-	up_write(&pci_bus_sem); /* PCI/NVMe: 잠금 해제 */
+	down_write(&pci_bus_sem);
+	/* [한국어] 전역 루트 버스 목록을 보호하는 읽기/쓰기 세마포어를 쓰기
+	 * 모드로 잡는다. 다른 CPU 가 동시에 목록을 순회/수정하는 것을 막는다. */
+	list_add_tail(&bus->node, &pci_root_buses);
+	/* [한국어] 이제 이 루트 버스가 공식적으로 시스템의 일부가 된다 */
+	up_write(&pci_bus_sem);
+	/* [한국어] 락 해제 */
 
-	/* PCI/NVMe: 정상 종료 및 반환 */
 	return 0;
+	/* [한국어] 성공. 호출자는 이어서 pci_scan_child_bus() 로 장치를 훑는다 */
 
 unregister:
-	/* PCI/NVMe: bridge device reference count 감소, 0이면 메모리 해제 */
+	/* [한국어] device_register(&bus->dev) 이후에 실패한 경우의 정리 경로 */
 	put_device(&bridge->dev);
-	/* PCI/NVMe: 장치 제거 */
+	/* [한국어] 위에서 get_device 로 잡은 브리지 참조를 놓는다 */
 	device_del(&bridge->dev);
+	/* [한국어] device_add 로 올려 둔 브리지를 sysfs 에서 내린다 */
 free:
-/* PCI/NVMe: 컴파일 조건: CONFIG_PCI_DOMAINS_GENERIC 정의 시 포함 */
+	/* [한국어] 브리지 등록 전(또는 위 unregister 를 거친 뒤)의 공통 정리 */
 #ifdef CONFIG_PCI_DOMAINS_GENERIC
-	/* PCI/NVMe: 조걸 분기, 값 일치 여부 검사 */
 	if (bridge->domain_nr == PCI_DOMAIN_NR_NOT_SET)
-		pci_bus_release_domain_nr(parent, bus->domain_nr); /* PCI/NVMe: 동적 할당 domain 번호 반납 */
-/* PCI/NVMe: 컴파일 조건 종료 */
+		pci_bus_release_domain_nr(parent, bus->domain_nr);
+	/* [한국어] 우리가 동적으로 받은 도메인 번호였다면 반납한다.
+	 * 컨트롤러가 지정해 준 번호였다면 우리 것이 아니므로 건드리지 않는다. */
 #endif
-	/* PCI/NVMe: 조걸 분기, 조건에 따른 실행 경로 선택 */
 	if (bus_registered)
-		put_device(&bus->dev); /* PCI/NVMe: 등록된 bus device 참조 감소 */
-	/* PCI/NVMe: 조걸 분기의 else 경로 */
+		put_device(&bus->dev);
+	/* [한국어] device_register 를 거쳤으면 refcount 로 관리되므로
+	 * put_device 를 써야 한다(소멸자가 kfree 를 대신 해 준다). */
 	else
-		kfree(bus); /* PCI/NVMe: 등록되지 않았으면 메모리 직접 해제 */
+		kfree(bus);
+	/* [한국어] 아직 등록 전이면 드라이버 모델이 모르는 순수 메모리라
+	 * 직접 kfree 한다. 이 둘을 혼동하면 이중 해제나 누수가 난다. */
 
-	/* PCI/NVMe: 결과 반환: err */
 	return err;
+	/* [한국어] 실패 코드를 그대로 상위(pci_host_probe 등)로 전달 */
 }
 
 /*
- * pci_bridge_child_ext_cfg_accessible() - 브리지 하위 버스에서 4KB extended
- *                                          config space 접근 가능 여부 판단
+ * [한국어]
+ * pci_bridge_child_ext_cfg_accessible - 브리지 아래 버스에서 확장 config 접근이 되는가
  *
- * NVMe 연결: NVMe PCIe 컨트롤러는 4KB extended config space에 MSI-X,
- * AER, LTR 등의 capability를 가진다. 이 함수가 false를 반환하면 하위
- * 버스의 장치들은 256B standard config space만 접근 가능하며, NVMe
- * MSI-X capability(offset 0x100 이상)를 읽을 수 없게 된다.
+ * @bridge: 검사할 브리지 장치.
+ * @return: true 면 자식 버스의 장치들도 4KB 확장 config space(오프셋
+ *          0x100~0xfff)에 접근할 수 있다. false 면 표준 256바이트만 가능하다.
+ *
+ * 왜 필요한가: PCI 의 원래 config space 는 256바이트였고, PCIe 가 4KB 로
+ * 확장했다. 그런데 확장 영역에 접근하려면 경로 전체가 그 방식을 지원해야
+ * 한다. 중간에 구식 PCI 브리지가 끼어 있으면, 그 아래 장치의 확장 영역은
+ * 읽을 수 없다. 확장 영역에는 AER, LTR, SR-IOV, ARI, DEV3 같은
+ * "Extended Capability" 들이 놓이므로, 접근 가능 여부가 그 기능들의
+ * 사용 가능 여부를 결정한다.
+ * (주의: MSI-X 는 확장 capability 가 아니라 표준 capability ID 0x11 이므로
+ *  256바이트 영역 안에 있다. 확장 접근이 막혀도 MSI-X 자체는 쓸 수 있다.)
+ *
+ * 판정 순서:
+ *  1) 상위 버스에서 이미 막혀 있으면 아래도 당연히 막혀 있다.
+ *  2) 양쪽이 모두 PCIe 인 포트(Root Port, 스위치 상/하향 포트)면 통과.
+ *  3) 그 밖의 브리지는 PCI-X Mode 2(266/533MHz)를 지원할 때만 가능하다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥, config 읽기만 수행.
+ *
+ * 호출 체인:
+ *   pci_alloc_child_bus() → [pci_bridge_child_ext_cfg_accessible]
+ *     → pci_find_capability(), pci_read_config_dword()
  */
-/* PCI/NVMe: pci_bridge_child_ext_cfg_accessible 함수 정의 */
 static bool pci_bridge_child_ext_cfg_accessible(struct pci_dev *bridge)
 {
-	/* PCI/NVMe: pos 변수 선언/초기화: config space 오프셋. NVMe capability/BAR 위치 */
 	int pos;
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
+	/* [한국어] PCI-X capability 의 config 오프셋. 0 이면 없음 */
 	u32 status;
+	/* [한국어] PCI-X Status 레지스터 값 */
 
 	/*
 	 * If extended config space isn't accessible on a bridge's primary
 	 * bus, we certainly can't access it on the secondary bus.
 	 */
-	if (bridge->bus->bus_flags & PCI_BUS_FLAGS_NO_EXTCFG) /* PCI/NVMe: 상위 버스에서 extended config가 불가능하면 하위도 불가 */
-		/* PCI/NVMe: 거짓 반환 */
+	if (bridge->bus->bus_flags & PCI_BUS_FLAGS_NO_EXTCFG)
 		return false;
+	/* [한국어] 이 브리지가 붙어 있는 버스(primary) 자체가 확장 접근 불가면,
+	 * 브리지에 도달하는 트랜잭션부터 확장 오프셋을 전달할 수 없다.
+	 * 따라서 그 아래는 볼 것도 없이 불가다. */
 
 	/*
 	 * PCIe Root Ports and switch ports are PCIe on both sides, so if
 	 * extended config space is accessible on the primary, it's also
 	 * accessible on the secondary.
 	 */
-	if (pci_is_pcie(bridge) && /* PCI/NVMe: PCIe bridge이고 */
-	    (pci_pcie_type(bridge) == PCI_EXP_TYPE_ROOT_PORT || /* PCI/NVMe: Root Port이거나 */
-	     pci_pcie_type(bridge) == PCI_EXP_TYPE_UPSTREAM || /* PCI/NVMe: Switch Upstream Port이거나 */
-	     pci_pcie_type(bridge) == PCI_EXP_TYPE_DOWNSTREAM)) /* PCI/NVMe: Switch Downstream Port이면 */
-		return true; /* PCI/NVMe: extended config space 접근 가능; NVMe MSI-X/AER/LTR 접근 가능 */
+	if (pci_is_pcie(bridge) &&
+	    (pci_pcie_type(bridge) == PCI_EXP_TYPE_ROOT_PORT ||
+	     pci_pcie_type(bridge) == PCI_EXP_TYPE_UPSTREAM ||
+	     pci_pcie_type(bridge) == PCI_EXP_TYPE_DOWNSTREAM))
+		return true;
+	/* [한국어] 이 세 종류는 위아래가 모두 PCIe 링크다. PCIe 는 config 요청에
+	 * 12비트 레지스터 번호를 실어 보내므로 4KB 전체가 자연스럽게 전달된다.
+	 * NVMe SSD 는 보통 Root Port 나 스위치 하향 포트 바로 아래에 붙으므로
+	 * 이 분기에서 true 가 되어, AER/LTR 같은 확장 capability 를 쓸 수 있다. */
 
 	/*
 	 * For the other bridge types:
@@ -2670,207 +2902,347 @@ static bool pci_bridge_child_ext_cfg_accessible(struct pci_dev *bridge)
 	 * extended config space on the secondary side is only accessible
 	 * if the bridge supports PCI-X Mode 2.
 	 */
-	pos = pci_find_capability(bridge, PCI_CAP_ID_PCIX); /* PCI/NVMe: PCI-X capability 탐색 */
-	/* PCI/NVMe: 조걸 분기, NULL/0/미설정 여부 검사 */
+	pos = pci_find_capability(bridge, PCI_CAP_ID_PCIX);
+	/* [한국어] PCI-X capability(ID 0x07)를 찾는다. 없으면 순수 구식 PCI
+	 * 브리지이므로 확장 접근이 불가능하다. */
 	if (!pos)
-		/* PCI/NVMe: 거짓 반환 */
 		return false;
 
-	pci_read_config_dword(bridge, pos + PCI_X_STATUS, &status); /* PCI/NVMe: PCI-X status 레지스터 읽기 */
-	return status & (PCI_X_STATUS_266MHZ | PCI_X_STATUS_533MHZ); /* PCI/NVMe: PCI-X 266/533MHz 지원 시 extended config 접근 가능 */
+	pci_read_config_dword(bridge, pos + PCI_X_STATUS, &status);
+	/* [한국어] PCI-X Status 레지스터 읽기 */
+	return status & (PCI_X_STATUS_266MHZ | PCI_X_STATUS_533MHZ);
+	/* [한국어] 266MHz 또는 533MHz 지원 = PCI-X Mode 2 지원이라는 뜻이고,
+	 * Mode 2 부터 확장 config 전달이 규정되어 있다. 둘 중 하나라도 켜져
+	 * 있으면 0 이 아닌 값이 되어 true 로 해석된다. */
 }
 
 /*
- * pci_alloc_child_bus() - parent bus 아래 새로운 하위 PCI 버스 할당
+ * [한국어]
+ * pci_alloc_child_bus - 브리지 아래에 새 자식 버스를 만들어 등록한다
  *
- * NVMe 연결: NVMe SSD가 연결될 수 있는 하위 PCIe 버스(예: Root Port
- * 아래의 bus)가 여기서 생성. ops, bus_flags, MSI domain, NUMA node,
- * extended config 접근성 등을 부모로부터 상속받는다.
+ * @parent: 브리지가 붙어 있는 상위 버스.
+ * @bridge: 이 자식 버스를 만들어 내는 브리지 장치. SR-IOV 가상 버스처럼
+ *          실제 브리지가 없는 경우 NULL 이 올 수 있다.
+ * @busnr:  이 자식 버스에 배정할 secondary 버스 번호.
+ * @return: 등록까지 마친 pci_bus. 실패하면 NULL.
+ *
+ * 왜 필요한가: 브리지를 발견해 그 아래로 재귀 하강하려면 먼저 "아래 버스"를
+ * 표현하는 객체가 있어야 한다. 이 함수는 부모로부터 상속할 것(config 접근
+ * 함수, 버스 플래그, sysdata)을 물려주고, 브리지로부터 알아낼 것(속도,
+ * 확장 config 가능 여부, 창 리소스)을 채운 뒤 드라이버 모델에 등록한다.
+ *
+ * 상속되는 것 중 중요한 것: bus_flags 는 PCI_BUS_FLAGS_NO_MSI /
+ * NO_EXTCFG 같은 제약을 아래로 전파한다. 상위에서 막힌 기능은 아래에서도
+ * 쓸 수 없기 때문이다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥의 버스 스캔 경로.
+ *
+ * 호출 체인:
+ *   pci_scan_bridge_extend() → pci_add_new_bus() → [pci_alloc_child_bus]
+ *     → pci_alloc_bus(), pci_set_bus_speed(), device_register()
  */
-/* PCI/NVMe: 자식 버스 할당 */
 static struct pci_bus *pci_alloc_child_bus(struct pci_bus *parent,
-					   /* PCI/NVMe: 후속 코드 동작 수행 */
 					   struct pci_dev *bridge, int busnr)
 {
-	/* PCI/NVMe: 후속 코드 동작 수행 */
 	struct pci_bus *child;
-	/* PCI/NVMe: 후속 코드 동작 수행 */
+	/* [한국어] 만들 자식 버스 */
 	struct pci_host_bridge *host;
-	/* PCI/NVMe: i 변수 선언/초기화: 반복 인덱스. NVMe BAR/버스/슬롯 순회 */
+	/* [한국어] 이 트리의 루트 호스트 브리지 — child_ops 확인용 */
 	int i;
-	/* PCI/NVMe: ret 변수 선언/초기화: 반환값 변수. NVMe 초기화 성공/실패 상태 */
+	/* [한국어] 브리지 창 슬롯 순회 인덱스 */
 	int ret;
+	/* [한국어] 하위 호출의 성공/실패 코드 */
 
 	/* Allocate a new bus and inherit stuff from the parent */
-	child = pci_alloc_bus(parent); /* PCI/NVMe: 부모 bus로부터 상속하여 자식 bus 할당 */
-	if (!child) /* PCI/NVMe: 할당 실패 시 NULL 반환 */
-		/* PCI/NVMe: NULL 반환(메모리/리소스 부족 또는 초기화 실패) */
+	child = pci_alloc_bus(parent);
+	/* [한국어] 리스트 초기화와 도메인 번호 상속까지 수행 */
+	if (!child)
 		return NULL;
+	/* [한국어] 메모리 부족 — 호출자가 스캔을 포기한다 */
 
-	child->parent = parent; /* PCI/NVMe: 부모 bus 포인터 설정 */
-	child->sysdata = parent->sysdata; /* PCI/NVMe: platform sysdata 상속 */
-	child->bus_flags = parent->bus_flags; /* PCI/NVMe: bus flags 상속; NO_MSI/NO_EXTCFG 등 NVMe 기능 제한 전파 */
+	child->parent = parent;
+	/* [한국어] 트리에서 위로 올라갈 수 있는 링크 */
+	child->sysdata = parent->sysdata;
+	/* [한국어] config 접근 함수가 쓰는 컨트롤러 전용 데이터를 그대로 물려받는다 */
+	child->bus_flags = parent->bus_flags;
+	/* [한국어] NO_MSI / NO_EXTCFG 같은 제약을 아래로 전파.
+	 * 상위에서 MSI 를 못 쓰면 아래 NVMe 도 MSI-X 를 못 쓴다. */
 
-	host = pci_find_host_bridge(parent); /* PCI/NVMe: 부모 버스의 host bridge 획득 */
-	/* PCI/NVMe: 조걸 분기, 값 크기 비교 */
+	host = pci_find_host_bridge(parent);
+	/* [한국어] 트리를 거슬러 올라가 루트의 호스트 브리지를 찾는다 */
 	if (host->child_ops)
-		child->ops = host->child_ops; /* PCI/NVMe: host bridge가 지정한 child_ops 사용 */
-	/* PCI/NVMe: 조걸 분기의 else 경로 */
+		child->ops = host->child_ops;
+	/* [한국어] 일부 컨트롤러는 루트 버스와 그 아래 버스에서 config 접근
+	 * 방식이 다르다(예: 루트는 전용 레지스터, 아래는 ECAM). 그런 경우
+	 * 호스트 브리지가 child_ops 를 따로 지정해 둔다. */
 	else
-		child->ops = parent->ops; /* PCI/NVMe: 부모 bus의 config access ops 상속 */
+		child->ops = parent->ops;
+	/* [한국어] 지정이 없으면 부모와 같은 접근 방식을 쓴다 */
 
 	/*
 	 * Initialize some portions of the bus device, but don't register
 	 * it now as the parent is not properly set up yet.
 	 */
-	child->dev.class = &pcibus_class; /* PCI/NVMe: bus device class 설정 */
-	dev_set_name(&child->dev, "%04x:%02x", pci_domain_nr(child), busnr); /* PCI/NVMe: 자식 bus device 이름 설정; 예: 0000:01 */
+	child->dev.class = &pcibus_class;
+	/* [한국어] 버스 클래스 소속 — 소멸자와 sysfs 속성이 여기서 온다 */
+	dev_set_name(&child->dev, "%04x:%02x", pci_domain_nr(child), busnr);
+	/* [한국어] "0000:01" 형태의 이름. 등록 전에 정해 두어야 한다 */
 
 	/* Set up the primary, secondary and subordinate bus numbers */
-	child->number = child->busn_res.start = busnr; /* PCI/NVMe: secondary bus 번호 설정 */
-	child->primary = parent->busn_res.start; /* PCI/NVMe: primary bus 번호 설정 */
-	child->busn_res.end = 0xff; /* PCI/NVMe: subordinate bus 번호를 최대 0xff로 초기화 */
+	child->number = child->busn_res.start = busnr;
+	/* [한국어] 이 버스의 번호 = 브리지의 secondary 버스 번호.
+	 * config 주소에 쓰는 값과 버스 번호 리소스의 시작을 함께 설정한다. */
+	child->primary = parent->busn_res.start;
+	/* [한국어] 브리지의 primary(윗쪽) 버스 번호 = 부모 버스의 번호 */
+	child->busn_res.end = 0xff;
+	/* [한국어] subordinate 는 아직 모른다. 일단 최대값으로 열어 두고,
+	 * 아래를 다 훑은 뒤 pci_scan_bridge_extend() 가 실제 최대 버스 번호로
+	 * 좁힌다. 이렇게 해야 스캔 도중 아래쪽 버스로 가는 config 요청이
+	 * 브리지에서 막히지 않는다. */
 
-	if (!bridge) { /* PCI/NVMe: bridge가 없으면 root bus의 가상 자식으로 취급 */
-		/* PCI/NVMe: child->dev.parent 설정: 부모 device(NVMe PCIe 계층) */
+	if (!bridge) {
+		/* [한국어] 브리지 장치 없이 만들어지는 버스(SR-IOV 가상 버스 등).
+		 * 창이나 링크 속도 같은 개념이 없으므로 아래 처리를 모두 건너뛴다. */
 		child->dev.parent = parent->bridge;
-		/* PCI/NVMe: 오류 처리/종료 지점으로 이동: add_dev */
+		/* [한국어] sysfs 부모는 부모 버스의 브리지 device 로 둔다 */
 		goto add_dev;
 	}
 
-	child->self = bridge; /* PCI/NVMe: 이 버스를 만든 bridge pci_dev 설정 */
-	child->bridge = get_device(&bridge->dev); /* PCI/NVMe: bridge device 참조 증가 */
-	child->dev.parent = child->bridge; /* PCI/NVMe: bus device의 부모를 bridge로 설정 */
-	pci_set_bus_of_node(child); /* PCI/NVMe: device tree node 연결 */
-	pci_set_bus_speed(child); /* PCI/NVMe: 버스 속도 설정; NVMe 링크 속도 반영 */
+	child->self = bridge;
+	/* [한국어] 이 버스로 내려오는 브리지 장치를 기억.
+	 * 이후 pci_read_bridge_bases() 등이 이 포인터로 브리지에 접근한다. */
+	child->bridge = get_device(&bridge->dev);
+	/* [한국어] 브리지 device 참조를 하나 잡는다. release_pcibus_dev() 의
+	 * put_device(pci_bus->bridge) 와 짝을 이룬다. */
+	child->dev.parent = child->bridge;
+	/* [한국어] sysfs 계층에서 이 버스를 브리지 아래에 놓는다 */
+	pci_set_bus_of_node(child);
+	/* [한국어] DT 노드 연결(CONFIG_OF 없으면 빈 함수) */
+	pci_set_bus_speed(child);
+	/* [한국어] 브리지의 링크 capability 를 읽어 이 버스의 최대/현재 속도를
+	 * 채운다. NVMe SSD 가 붙을 버스라면 여기서 Gen 세대가 정해진다. */
 
 	/*
 	 * Check whether extended config space is accessible on the child
 	 * bus.  Note that we currently assume it is always accessible on
 	 * the root bus.
 	 */
-	if (!pci_bridge_child_ext_cfg_accessible(bridge)) { /* PCI/NVMe: extended config 접근 불가 시 */
-		child->bus_flags |= PCI_BUS_FLAGS_NO_EXTCFG; /* PCI/NVMe: bus flag에 extended config 불가 표시; NVMe MSI-X capability 접근 제한 */
-		/* PCI/NVMe: pci_info() 진단 메시지 출력. NVMe 초기화/리소스 상태 기록 */
-		pci_info(child, "extended config space not accessible\n"); /* PCI/NVMe: 진단/오류/경고 메시지 출력 */
+	if (!pci_bridge_child_ext_cfg_accessible(bridge)) {
+		/* [한국어] 이 아래로는 4KB 확장 config 를 볼 수 없는 경우 */
+		child->bus_flags |= PCI_BUS_FLAGS_NO_EXTCFG;
+		/* [한국어] 플래그를 세워 두면 pci_cfg_space_size() 가 이 아래
+		 * 장치들의 cfg_size 를 256 으로 제한하고, 확장 capability 탐색이
+		 * 시도조차 되지 않는다. */
+		pci_info(child, "extended config space not accessible\n");
+		/* [한국어] 왜 AER 등이 안 붙는지 진단할 수 있도록 로그를 남긴다 */
 	}
 
 	/* Set up default resource pointers and names */
-	for (i = 0; i < PCI_BRIDGE_RESOURCE_NUM; i++) { /* PCI/NVMe: bridge의 I/O/MEM/PREF MEM resource 포인터 연결 */
-		/* PCI/NVMe: 구조체 필드에 비트 마스크 적용: child->resource[i] */
+	for (i = 0; i < PCI_BRIDGE_RESOURCE_NUM; i++) {
+		/* [한국어] 자식 버스의 창 슬롯을 브리지의 창 리소스에 연결한다.
+		 * pci_read_bridge_bases() 가 하는 것과 같은 포인터 공유이며,
+		 * 여기서는 이름까지 붙여 준다. */
 		child->resource[i] = &bridge->resource[PCI_BRIDGE_RESOURCES+i];
-		/* PCI/NVMe: 구조체 필드에 값 저장: child->resource[i]->name */
+		/* [한국어] 브리지 pci_dev 의 창 리소스를 그대로 가리킨다 */
 		child->resource[i]->name = child->name;
+		/* [한국어] /proc/iomem 등에 버스 이름으로 표시되게 한다 */
 	}
-	bridge->subordinate = child; /* PCI/NVMe: bridge가 이 child bus를 하위로 가리킴 */
+	bridge->subordinate = child;
+	/* [한국어] 브리지가 자기 아래 버스를 가리키게 한다. 이 필드가 0 이 아닌
+	 * 것이 곧 "이 장치는 브리지이고 아래 버스가 이미 만들어졌다"는 표시라,
+	 * pci_scan_bridge_extend() 가 재스캔 여부를 판단할 때 확인한다. */
 
 add_dev:
-	pci_set_bus_msi_domain(child); /* PCI/NVMe: 자식 bus의 MSI domain 설정; NVMe MSI-X 상속 */
-	ret = device_register(&child->dev); /* PCI/NVMe: 자식 bus device 등록 */
-	/* PCI/NVMe: 조걸 분기, 값 크기 비교 */
+	/* [한국어] 브리지 유무와 무관한 공통 등록 절차 */
+	pci_set_bus_msi_domain(child);
+	/* [한국어] MSI 도메인 결정 — 위로 올라가며 찾거나 루트에서 상속.
+	 * 이 버스에 붙을 NVMe 컨트롤러의 MSI-X 벡터가 이 도메인에서 나온다. */
+	ret = device_register(&child->dev);
+	/* [한국어] 드라이버 모델에 버스 device 등록. 이 시점부터 sysfs 에 보인다 */
 	if (WARN_ON(ret < 0)) {
-		put_device(&child->dev); /* PCI/NVMe: 등록 실패 시 device 참조 감소 */
-		/* PCI/NVMe: NULL 반환(메모리/리소스 부족 또는 초기화 실패) */
+		/* [한국어] 등록 실패는 정상 동작에서 일어나지 않으므로 경고와 함께
+		 * 스택 트레이스를 남긴다 */
+		put_device(&child->dev);
+		/* [한국어] device_register 는 실패해도 초기화는 끝난 상태라
+		 * kfree 가 아니라 put_device 로 정리해야 한다(소멸자가 kfree 수행) */
 		return NULL;
 	}
 
-	pcibios_add_bus(child); /* PCI/NVMe: 아키텍처별 자식 bus 추가 처리 */
+	pcibios_add_bus(child);
+	/* [한국어] 아키텍처별 버스 추가 훅 */
 
-	/* PCI/NVMe: 조걸 분기, 값 크기 비교 */
 	if (child->ops->add_bus) {
-		ret = child->ops->add_bus(child); /* PCI/NVMe: platform-specific bus 추가 콜백 */
-		/* PCI/NVMe: 조걸 분기, 값 크기 비교 */
+		/* [한국어] 컨트롤러 드라이버가 버스 추가 콜백을 등록했으면 호출 */
+		ret = child->ops->add_bus(child);
 		if (WARN_ON(ret < 0))
-			/* PCI/NVMe: 장치 오류 메시지 출력 */
 			dev_err(&child->dev, "failed to add bus: %d\n", ret);
+		/* [한국어] 실패해도 등록을 되돌리지는 않고 경고만 남긴다 */
 	}
 
 	/* Create legacy_io and legacy_mem files for this bus */
-	pci_create_legacy_files(child); /* PCI/NVMe: 레거시 I/O/MEM sysfs 파일 생성 */
+	pci_create_legacy_files(child);
+	/* [한국어] 레거시 I/O/MEM sysfs 파일 생성 */
 
-	return child; /* PCI/NVMe: 초기화된 자식 bus 반환 */
+	return child;
+	/* [한국어] 이제 이 버스에 대해 pci_scan_child_bus_extend() 를 돌릴 수 있다 */
 }
 
 /*
- * pci_add_new_bus() - parent bus 아래 새로운 하위 버스를 할당하고 연결
+ * [한국어]
+ * pci_add_new_bus - 자식 버스를 만들고 부모의 자식 목록에 매단다
  *
- * NVMe 연결: bridge 뒤의 NVMe SSD가 위치할 하위 버스를 PCI 트리에
- * 추가. pci_bus_sem으로 트리 동시 수정을 보호.
+ * @parent: 상위 버스.
+ * @dev:    이 버스를 만드는 브리지 장치(없으면 NULL).
+ * @busnr:  배정할 secondary 버스 번호.
+ * @return: 만들어진 자식 버스, 실패 시 NULL.
+ *
+ * 왜 필요한가: pci_alloc_child_bus() 는 객체를 만들어 등록만 하고 트리에
+ * 연결하지는 않는다. 트리 연결은 전역적으로 보이는 변경이라 락이 필요한데,
+ * 그 락 구간을 이 얇은 래퍼가 담당한다. 외부(핫플러그 드라이버 등)에서
+ * 쓰는 공개 API 이기도 하다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥. pci_bus_sem 을 쓰기 모드로 잠시 잡는다.
+ *
+ * 호출 체인:
+ *   pci_scan_bridge_extend() → [pci_add_new_bus] → pci_alloc_child_bus()
  */
-/* PCI/NVMe: 새 버스 추가 */
 struct pci_bus *pci_add_new_bus(struct pci_bus *parent, struct pci_dev *dev,
-				/* PCI/NVMe: 후속 코드 동작 수행 */
 				int busnr)
 {
-	/* PCI/NVMe: 후속 코드 동작 수행 */
 	struct pci_bus *child;
+	/* [한국어] 만들어진 자식 버스 */
 
-	child = pci_alloc_child_bus(parent, dev, busnr); /* PCI/NVMe: 지정 bus 번호로 자식 bus 할당 */
-	if (child) { /* PCI/NVMe: 할당 성공 시 parent의 children 리스트에 추가 */
-		down_write(&pci_bus_sem); /* PCI/NVMe: bus tree 쓰기 잠금 */
-		list_add_tail(&child->node, &parent->children); /* PCI/NVMe: 부모의 하위 버스 리스트에 연결 */
-		up_write(&pci_bus_sem); /* PCI/NVMe: 잠금 해제 */
+	child = pci_alloc_child_bus(parent, dev, busnr);
+	/* [한국어] 할당 + 초기화 + device 등록까지 수행 */
+	if (child) {
+		/* [한국어] 성공했을 때만 트리에 연결한다 */
+		down_write(&pci_bus_sem);
+		/* [한국어] 버스 트리를 보호하는 세마포어를 쓰기 모드로 획득.
+		 * 목록을 순회하는 다른 코드(sysfs, 전원 관리)와의 경쟁을 막는다. */
+		list_add_tail(&child->node, &parent->children);
+		/* [한국어] 부모의 자식 목록 끝에 매단다. 버스 번호 순서대로
+		 * 스캔하므로 tail 에 붙이면 자연히 번호 순으로 정렬된다. */
+		up_write(&pci_bus_sem);
+		/* [한국어] 락 해제 */
 	}
-	return child; /* PCI/NVMe: 생성된 자식 bus 또는 NULL 반환 */
+	return child;
+	/* [한국어] 실패했으면 NULL 그대로 — 호출자가 브리지 아래 스캔을 포기한다 */
 }
-/* PCI/NVMe: EXPORT_SYMBOL 함수 호출 */
-EXPORT_SYMBOL(pci_add_new_bus); /* PCI/NVMe: 심볼 외부 낸출. nvme-pci 등 모듈에서 참조 가능 */
+EXPORT_SYMBOL(pci_add_new_bus);
+/* [한국어] 일부 핫플러그/컨트롤러 드라이버가 모듈에서 호출하므로 공개 */
 
 /*
- * pci_enable_rrs_sv() - Root Port의 Configuration RRS Software Visibility 활성화
+ * [한국어]
+ * pci_enable_rrs_sv - Root Port 의 "RRS 소프트웨어 가시성"을 켠다
  *
- * NVMe 연결: RRS(Retry Request Status)는 장치가 준비되지 않았을 때
- * config read가 retry됨을 알리는 메커니즘. Software visibility를
- * 활성화하면 OS가 retry 상태를 직접 관찰할 수 있어, NVMe 컨트롤러의
- * config space 접근 대기 시간을 더 정확히 제어할 수 있다.
+ * @pdev: Root Port 장치.
+ * @return: 없음. 성공하면 pdev->config_rrs_sv 가 1 이 된다.
+ *
+ * RRS(Configuration Request Retry Status)란: 전원이 막 들어온 장치는 아직
+ * config 요청에 답할 준비가 되지 않을 수 있다. 그때 장치는 "지금은 안 되니
+ * 나중에 다시 요청하라"는 RRS 응답을 보낸다. 기본 동작에서는 Root Port 가
+ * 이 재시도를 하드웨어에서 알아서 반복하므로 소프트웨어는 그저 오래 걸린다고
+ * 느낄 뿐이다.
+ *
+ * 소프트웨어 가시성을 켜면: Root Port 가 재시도를 감추는 대신, Vendor ID
+ * 읽기에 대해 0x0001 이라는 특별한 값을 돌려준다. 그러면 커널이
+ * "장치는 있는데 아직 준비가 안 됐다"를 직접 구별할 수 있어,
+ * pci_bus_wait_rrs() 가 적절히 기다렸다가 재시도할 수 있다.
+ *
+ * 왜 중요한가: 이 값이 없으면 커널은 "응답 없음(0xFFFF)"과 "아직 준비 안 됨"을
+ * 구별하지 못한다. 특히 부팅 직후나 핫플러그 직후의 NVMe SSD 처럼 초기화에
+ * 시간이 걸리는 장치가 열거에서 누락되는 것을 막아 준다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥. Root Port 를 발견한 직후 한 번 실행된다.
+ *
+ * 호출 체인:
+ *   pci_setup_device()(Root Port 판정 후) → [pci_enable_rrs_sv]
+ *     → pcie_capability_read_word()/set_word()
  */
-/* PCI/NVMe: pci_enable_rrs_sv 함수 정의 */
 static void pci_enable_rrs_sv(struct pci_dev *pdev)
 {
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
 	u16 root_cap = 0;
+	/* [한국어] Root Capabilities 레지스터 값. 읽기 실패 시에도 0 이 남아
+	 * 아래 검사가 자연히 거짓이 되도록 0 으로 초기화한다. */
 
 	/* Enable Configuration RRS Software Visibility if supported */
-	pcie_capability_read_word(pdev, PCI_EXP_RTCAP, &root_cap); /* PCI/NVMe: Root Capabilities 레지스터 읽기 */
-	if (root_cap & PCI_EXP_RTCAP_RRS_SV) { /* PCI/NVMe: RRS Software Visibility 지원 여부 확인 */
-		/* PCI/NVMe: PCIe capability 비트 설정 */
+	pcie_capability_read_word(pdev, PCI_EXP_RTCAP, &root_cap);
+	/* [한국어] PCIe capability 의 Root Capabilities 레지스터.
+	 * Root Port 에만 존재하는 레지스터다. */
+	if (root_cap & PCI_EXP_RTCAP_RRS_SV) {
+		/* [한국어] 이 Root Port 가 RRS 소프트웨어 가시성을 지원하는 경우 */
 		pcie_capability_set_word(pdev, PCI_EXP_RTCTL,
-					 PCI_EXP_RTCTL_RRS_SVE); /* PCI/NVMe: RRS Software Visibility Enable bit 설정 */
-		pdev->config_rrs_sv = 1; /* PCI/NVMe: pci_dev에 RRS SV 활성화 표시 */
+					 PCI_EXP_RTCTL_RRS_SVE);
+		/* [한국어] Root Control 레지스터의 활성화 비트를 켠다.
+		 * set_word 는 읽기-수정-쓰기를 원자적으로 처리해 다른 비트를
+		 * 건드리지 않는다. */
+		pdev->config_rrs_sv = 1;
+		/* [한국어] 커널 측에도 기록. pci_bus_generic_read_dev_vendor_id()
+		 * 가 이 값을 보고 0x0001 을 "준비 중"으로 해석할지 결정한다. */
 	}
 }
 
-/* PCI/NVMe: 하위 버스 재귀 스캔(확장 버스 분배) */
 static unsigned int pci_scan_child_bus_extend(struct pci_bus *bus,
-					      /* PCI/NVMe: 후속 코드 동작 수행 */
 					      unsigned int available_buses);
+/* [한국어] 전방 선언. pci_scan_bridge_extend() 와 서로를 호출하는 상호
+ * 재귀 구조라, 한쪽을 먼저 선언해 두어야 컴파일이 된다.
+ * 이 상호 재귀가 곧 PCI 트리의 깊이 우선 하강이다:
+ *   버스 스캔 → 브리지 발견 → 브리지 아래 버스 스캔 → … */
 
 /*
- * pbus_validate_busn() - 하위 버스 번호 범위가 상위 버스 범위 내에 있는지 검증
+ * [한국어]
+ * pbus_validate_busn - 이 버스의 번호 구간이 상위 브리지들의 구간 안에 있는지 검증
  *
- * NVMe 연결: NVMe SSD가 연결된 하위 버스의 busn_res가 상위 bridge의
- * secondary/subordinate 범위를 벗어나면 config cycle이 도달하지 못해
- * NVMe 장치에 접근할 수 없게 된다.
+ * @bus: 검증할 버스.
+ * @return: 없음. 문제가 있으면 로그로 경고만 하고 넘어간다.
+ *
+ * 왜 필요한가: config 트랜잭션은 브리지들을 거쳐 내려간다. 각 브리지는
+ * 자기 secondary~subordinate 구간에 속하는 버스 번호만 아래로 전달한다.
+ * 따라서 어떤 버스의 번호 구간이 조상 브리지 중 하나의 구간을 벗어나면,
+ * 그 버스의 장치에는 config 요청이 도달하지 못해 완전히 접근 불가가 된다.
+ * 이 함수는 뿌리까지 올라가며 그 포함 관계를 확인한다.
+ *
+ * 왜 경고만 하는가: 이 상황은 버스 번호가 모자라거나 펌웨어 설정이 이상할 때
+ * 생긴다. 커널이 여기서 할 수 있는 복구가 없으므로, 왜 장치가 안 보이는지
+ * 진단할 단서를 남기는 것이 목적이다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥의 스캔 경로.
+ *
+ * 호출 체인:
+ *   pci_scan_bridge_extend() → [pbus_validate_busn]
  */
-/* PCI/NVMe: bus 번호 리소스 유효성 검사. 핫플러그/새 NVMe 장치용 번호 여유 확보 */
-/* PCI/NVMe: pbus_validate_busn 함수 정의 */
 void pbus_validate_busn(struct pci_bus *bus)
 {
-	struct pci_bus *upstream = bus->parent; /* PCI/NVMe: 직계 상위 버스 */
-	struct pci_dev *bridge = bus->self; /* PCI/NVMe: 이 버스를 만든 bridge 장치 */
+	struct pci_bus *upstream = bus->parent;
+	/* [한국어] 한 단계 위 버스부터 검사를 시작한다 */
+	struct pci_dev *bridge = bus->self;
+	/* [한국어] 경고 로그를 어느 브리지 문맥으로 남길지 정하는 데 쓴다 */
 
 	/* Check that all devices are accessible */
-	while (upstream->parent) { /* PCI/NVMe: root bus에 도달할 때까지 상위 버스를 따라 검증 */
-		if ((bus->busn_res.end > upstream->busn_res.end) || /* PCI/NVMe: 하위 subordinate가 상위 subordinate보다 크면 오류 */
-		    (bus->number > upstream->busn_res.end) || /* PCI/NVMe: 하위 secondary가 상위 subordinate보다 크면 오류 */
-		    (bus->number < upstream->number) || /* PCI/NVMe: 하위 secondary가 상위 secondary보다 작으면 오류 */
-		    (bus->busn_res.end < upstream->number)) { /* PCI/NVMe: 하위 subordinate가 상위 secondary보다 작으면 오류 */
-			/* PCI/NVMe: pci_info() 진단 메시지 출력. NVMe 초기화/리소스 상태 기록 */
+	while (upstream->parent) {
+		/* [한국어] 루트 버스(parent 가 NULL)에 닿을 때까지 거슬러 올라간다.
+		 * 루트 버스 자신은 위에 브리지가 없어 검사 대상이 아니다. */
+		if ((bus->busn_res.end > upstream->busn_res.end) ||
+		    (bus->number > upstream->busn_res.end) ||
+		    (bus->number < upstream->number) ||
+		    (bus->busn_res.end < upstream->number)) {
+			/* [한국어] 네 조건은 "[bus.number, bus.busn_res.end] 구간이
+			 * [upstream.number, upstream.busn_res.end] 안에 완전히 들어가는가"를
+			 * 부정한 것이다. 순서대로:
+			 *  - 내 subordinate 가 상위 subordinate 를 넘음
+			 *  - 내 secondary 가 상위 subordinate 를 넘음
+			 *  - 내 secondary 가 상위 secondary 보다 작음
+			 *  - 내 subordinate 가 상위 secondary 보다 작음
+			 * 하나라도 참이면 포함 관계가 깨진 것이다. */
 			pci_info(bridge, "devices behind bridge are unusable because %pR cannot be assigned for them\n",
-				 &bus->busn_res); /* PCI/NVMe: 범위가 잘못되면 bridge 뒤 장치(NVMe 포함) 사용 불가 경고 */
+				 &bus->busn_res);
+			/* [한국어] 이 브리지 아래 장치(NVMe SSD 포함)에 config 요청이
+			 * 도달하지 못한다는 경고. 어떤 구간이 문제인지 함께 찍는다. */
 			break;
+			/* [한국어] 한 번 어긋나면 더 위를 봐도 의미가 없다 */
 		}
-		upstream = upstream->parent; /* PCI/NVMe: 한 단계 더 상위 버스로 이동 */
+		upstream = upstream->parent;
+		/* [한국어] 다음 조상으로 이동 */
 	}
 }
 
@@ -2886,45 +3258,73 @@ void pbus_validate_busn(struct pci_bus *bus)
  * and @sub.  Otherwise return false.
  */
 /*
- * pci_ea_fixed_busnrs() - Enhanced Allocation capability에서 고정된 secondary/
- *                         subordinate bus 번호 읽기
+ * [한국어]
+ * pci_ea_fixed_busnrs - EA capability 가 지정한 고정 버스 번호를 읽는다
  *
- * NVMe 연결: EA capability는 firmware가 미리 할당한 bus 번호를
- * 알려준다. NVMe SSD가 연결될 하위 버스 번호가 EA에 의해 고정되어
- * 있으면 kernel은 이를 존중하여 할당해야 한다.
+ * @dev: 검사할 브리지.
+ * @sec: 성공 시 EA 가 지정한 secondary 버스 번호가 기록된다.
+ * @sub: 성공 시 EA 가 지정한 subordinate 버스 번호가 기록된다.
+ * @return: 유효한 고정 번호를 찾으면 true, 아니면 false(그 경우 @sec/@sub 는
+ *          건드리지 않는다).
+ *
+ * EA(Enhanced Allocation)란: 보통 BAR 와 버스 번호는 소프트웨어가 자유롭게
+ * 배정하지만, 일부 하드웨어(특히 SoC 내장 장치)는 주소와 버스 번호가 물리적으로
+ * 고정되어 있어 바꿀 수 없다. EA capability(ID 0x14)는 그런 고정값을
+ * 소프트웨어에 알려 주는 수단이다.
+ *
+ * 왜 필요한가: 브리지의 secondary/subordinate 를 커널이 임의로 배정해 버리면
+ * 고정 하드웨어와 어긋나 그 아래가 전부 접근 불가가 된다. 그래서
+ * pci_scan_bridge_extend() 는 번호를 배정하기 전에 이 함수로 고정값이 있는지
+ * 먼저 확인한다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥, config 읽기만 수행.
+ *
+ * 호출 체인:
+ *   pci_scan_bridge_extend() → [pci_ea_fixed_busnrs] → pci_find_capability()
  */
-/* PCI/NVMe: Enhanced Allocation 고정 bus 번호 파싱. NVMe SR-IOV VF bus 배치에 영향 */
-/* PCI/NVMe: pci_ea_fixed_busnrs 함수 정의 */
 bool pci_ea_fixed_busnrs(struct pci_dev *dev, u8 *sec, u8 *sub)
 {
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
 	int ea, offset;
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
+	/* [한국어] ea = EA capability 시작 오프셋, offset = 첫 엔트리 위치 */
 	u32 dw;
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
+	/* [한국어] 버스 번호 필드가 들어 있는 4바이트 */
 	u8 ea_sec, ea_sub;
+	/* [한국어] 추출한 secondary/subordinate 번호. 유효성 검사를 통과한
+	 * 뒤에만 호출자 버퍼에 기록한다. */
 
-	if (dev->hdr_type != PCI_HEADER_TYPE_BRIDGE) /* PCI/NVMe: bridge가 아니면 bus 번호가 없음 */
-		/* PCI/NVMe: 거짓 반환 */
+	if (dev->hdr_type != PCI_HEADER_TYPE_BRIDGE)
 		return false;
+	/* [한국어] header type 1(브리지)이 아니면 secondary/subordinate 개념 자체가
+	 * 없다. 일반 장치(type 0)나 CardBus(type 2)는 대상이 아니다. */
 
 	/* find PCI EA capability in list */
-	ea = pci_find_capability(dev, PCI_CAP_ID_EA); /* PCI/NVMe: EA capability offset 탐색 */
-	if (!ea) /* PCI/NVMe: EA capability가 없으면 고정 bus 번호 없음 */
-		/* PCI/NVMe: 거짓 반환 */
+	ea = pci_find_capability(dev, PCI_CAP_ID_EA);
+	/* [한국어] capability 링크를 따라가 EA(ID 0x14)를 찾는다 */
+	if (!ea)
 		return false;
+	/* [한국어] EA 가 없으면 고정 번호도 없다 — 커널이 자유롭게 배정하면 된다 */
 
-	offset = ea + PCI_EA_FIRST_ENT; /* PCI/NVMe: EA의 첫 번째 entry offset 계산 */
-	pci_read_config_dword(dev, offset, &dw); /* PCI/NVMe: EA entry에서 bus 번호 필드가 포함된 dword 읽기 */
-	ea_sec = FIELD_GET(PCI_EA_SEC_BUS_MASK, dw); /* PCI/NVMe: secondary bus 번호 추출 */
-	ea_sub = FIELD_GET(PCI_EA_SUB_BUS_MASK, dw); /* PCI/NVMe: subordinate bus 번호 추출 */
-	if (ea_sec  == 0 || ea_sub < ea_sec) /* PCI/NVMe: secondary가 0이거나 subordinate이 더 작으면 무효 */
-		/* PCI/NVMe: 거짓 반환 */
+	offset = ea + PCI_EA_FIRST_ENT;
+	/* [한국어] EA capability 헤더 다음의 첫 엔트리 위치.
+	 * 브리지용 EA 는 첫 엔트리의 dword 에 버스 번호를 담는다. */
+	pci_read_config_dword(dev, offset, &dw);
+	/* [한국어] 그 dword 를 읽는다 */
+	ea_sec = FIELD_GET(PCI_EA_SEC_BUS_MASK, dw);
+	/* [한국어] 마스크로 secondary 버스 번호 필드만 추출 */
+	ea_sub = FIELD_GET(PCI_EA_SUB_BUS_MASK, dw);
+	/* [한국어] subordinate 버스 번호 필드 추출 */
+	if (ea_sec  == 0 || ea_sub < ea_sec)
 		return false;
+	/* [한국어] 정합성 검사. secondary 가 0 이면(= 루트 버스 번호) 브리지 아래
+	 * 버스로는 있을 수 없는 값이고, subordinate < secondary 는 빈 구간이라
+	 * 역시 무효다. 둘 중 하나라도 걸리면 EA 값을 믿지 않는다. */
 
-	*sec = ea_sec; /* PCI/NVMe: 호출자에게 secondary bus 번호 반환 */
-	*sub = ea_sub; /* PCI/NVMe: 호출자에게 subordinate bus 번호 반환 */
-	return true; /* PCI/NVMe: 고정 bus 번호 존재 */
+	*sec = ea_sec;
+	/* [한국어] 검증을 통과했으므로 호출자에게 전달 */
+	*sub = ea_sub;
+	/* [한국어] 마찬가지 */
+	return true;
+	/* [한국어] 호출자는 이 값을 그대로 브리지에 프로그래밍한다 */
 }
 
 /*
@@ -2950,110 +3350,160 @@ bool pci_ea_fixed_busnrs(struct pci_dev *dev, u8 *sec, u8 *sub)
  *
  * Return: New subordinate number covering all buses behind this bridge.
  */
-/* PCI/NVMe: 브리지 뒤편 버스 확장 스캔 */
+/*
+ * [한국어]
+ * pci_scan_bridge_extend - 브리지에 버스 번호를 배정하고 그 아래를 재귀 스캔한다
+ *
+ * @bus:             이 브리지가 붙어 있는 부모 버스.
+ * @dev:             브리지 장치 자신.
+ * @max:             지금까지 사용된 가장 큰 버스 번호.
+ * @available_buses: 이 브리지와 그 아래에 쓸 수 있는 여분 버스 개수.
+ *                   핫플러그로 나중에 장치가 더 꽂힐 것에 대비해 미리 남겨 두는
+ *                   예비분이다. 0 이면 최소한만 쓴다.
+ * @pass:            0 = 펌웨어가 이미 설정해 둔 브리지만 처리, 1 = 번호를 새로
+ *                   배정해야 하는 브리지 처리.
+ * @return: 이 브리지 아래 전체를 포함하는 새로운 최대 버스 번호(subordinate).
+ *
+ * 왜 두 번 도는가(2-pass): 버스 번호는 시스템 전체에서 유일해야 한다. 펌웨어가
+ * 이미 번호를 넣어 둔 브리지와 커널이 새로 번호를 매길 브리지가 섞여 있을 때,
+ * 순서 없이 처리하면 새로 매긴 번호가 기존 번호와 겹칠 수 있다. 그래서
+ * pass 0 에서 기존 설정을 모두 파악해 max 를 확정한 뒤, pass 1 에서 그 위쪽
+ * 번호부터 새로 배정한다. 위 영어 주석이 설명하는 그대로다.
+ *
+ * 재귀 구조: 이 함수는 자식 버스를 만든 뒤 pci_scan_child_bus_extend() 를
+ * 부르고, 그 함수는 다시 브리지를 만날 때마다 이 함수를 부른다. 이 상호
+ * 재귀가 PCI 트리 전체의 깊이 우선 순회를 이룬다.
+ *
+ * subordinate 를 두 번 쓰는 이유: 자식 버스를 스캔하기 전에는 아래에 버스가
+ * 몇 개나 있을지 모른다. 그래서 일단 0xff(최대)로 열어 두어 config 요청이
+ * 아래로 전달되게 하고, 스캔이 끝난 뒤 실제 최대 번호로 좁혀 쓴다.
+ *
+ * NVMe 접점: NVMe SSD 가 Root Port 나 PCIe 스위치 아래에 있으면, 그 포트에
+ * 대해 이 함수가 실행되어야 SSD 가 붙은 버스가 존재하게 되고 비로소
+ * pci_scan_slot() 이 그 SSD 를 발견할 수 있다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥. 시작과 끝에서 runtime PM 참조를 잡고 놓아
+ * 스캔 동안 브리지가 절전 상태로 들어가지 않게 한다.
+ *
+ * 호출 체인:
+ *   pci_scan_child_bus_extend() → [pci_scan_bridge_extend]
+ *     → pci_add_new_bus() → pci_scan_child_bus_extend() → …(재귀)
+ */
 static int pci_scan_bridge_extend(struct pci_bus *bus, struct pci_dev *dev,
-				  /* PCI/NVMe: max 변수 선언/초기화: 최대 bus 번호/값. NVMe 하위 버스 범위 */
 				  int max, unsigned int available_buses,
-				  /* PCI/NVMe: 후속 코드 동작 수행 */
 				  int pass)
 {
-	/* PCI/NVMe: 후속 코드 동작 수행 */
 	struct pci_bus *child;
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
+	/* [한국어] 이 브리지 아래의 자식 버스 */
 	u32 buses;
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
+	/* [한국어] offset 0x18 의 4바이트 — primary/secondary/subordinate/
+	 * secondary latency timer 를 한꺼번에 담는다. */
 	u16 bctl;
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
+	/* [한국어] Bridge Control 레지스터(0x3e) 원본. 스캔 중 잠시 바꿨다가
+	 * out 레이블에서 반드시 복원한다. */
 	u8 primary, secondary, subordinate;
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
+	/* [한국어] 브리지에서 읽어 낸 현재 버스 번호 3종 */
 	int broken = 0;
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
+	/* [한국어] 펌웨어가 넣어 둔 설정이 앞뒤가 맞지 않아 무시해야 하는지 표시 */
 	bool fixed_buses;
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
+	/* [한국어] EA capability 가 버스 번호를 고정해 두었는지 */
 	u8 fixed_sec, fixed_sub;
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
+	/* [한국어] EA 가 지정한 고정 secondary/subordinate 번호 */
 	int next_busnr;
+	/* [한국어] 이 브리지 아래 버스에 새로 배정할 번호 */
 
 	/*
 	 * Make sure the bridge is powered on to be able to access config
 	 * space of devices below it.
 	 */
-	/* PCI/NVMe: 런타임 PM 레퍼런스 획득 */
 	pm_runtime_get_sync(&dev->dev);
+	/* [한국어] 브리지를 D0(동작 상태)로 올리고 그 상태를 유지시킨다.
+	 * 절전 상태의 브리지는 아래로 config 요청을 전달하지 않으므로,
+	 * 이것을 빼먹으면 아래 장치가 통째로 안 보인다. _sync 는 전원이
+	 * 실제로 올라올 때까지 기다린다는 뜻이다. */
 
-	/* PCI/NVMe: PCI config space 32-bit 읽기. NVMe capability/CSR 접근 기본 단위 */
-	pci_read_config_dword(dev, PCI_PRIMARY_BUS, &buses); /* PCI/NVMe: PCI config space 읽기. NVMe capability/CSR 탐색 */
-	/* PCI/NVMe: FIELD_GET 함수 호출 */
+	pci_read_config_dword(dev, PCI_PRIMARY_BUS, &buses);
+	/* [한국어] offset 0x18 — 버스 번호 3종을 한 번에 읽는다 */
 	primary = FIELD_GET(PCI_PRIMARY_BUS_MASK, buses);
-	/* PCI/NVMe: FIELD_GET 함수 호출 */
+	/* [한국어] 마스크 0x000000ff — 브리지의 윗쪽 버스 번호 */
 	secondary = FIELD_GET(PCI_SECONDARY_BUS_MASK, buses);
-	/* PCI/NVMe: FIELD_GET 함수 호출 */
+	/* [한국어] 마스크 0x0000ff00 — 브리지 바로 아래 버스 번호 */
 	subordinate = FIELD_GET(PCI_SUBORDINATE_BUS_MASK, buses);
+	/* [한국어] 마스크 0x00ff0000 — 이 브리지 아래에 존재하는 최대 버스 번호 */
 
-	/* PCI/NVMe: 디버그 메시지 출력 */
-	pci_dbg(dev, "scanning [bus %02x-%02x] behind bridge, pass %d\n", /* PCI/NVMe: 진단/오류/경고 메시지 출력 */
-		/* PCI/NVMe: 후속 코드 동작 수행 */
+	pci_dbg(dev, "scanning [bus %02x-%02x] behind bridge, pass %d\n",
 		secondary, subordinate, pass);
+	/* [한국어] 현재 브리지가 주장하는 구간과 몇 번째 패스인지 디버그 로그 */
 
-	/* PCI/NVMe: 조걸 분기, NULL/0/미설정 여부 검사 */
 	if (!primary && (primary != bus->number) && secondary && subordinate) {
-		/* PCI/NVMe: pci_warn() 경고 메시지 출력. NVMe 성능/호환성 문제 알림 */
-		pci_warn(dev, "Primary bus is hard wired to 0\n"); /* PCI/NVMe: 진단/오류/경고 메시지 출력 */
-		/* PCI/NVMe: 변수에 값 할당: primary */
+		pci_warn(dev, "Primary bus is hard wired to 0\n");
 		primary = bus->number;
+		/* [한국어] primary 가 0 으로 하드와이어된 브리지 quirk.
+		 * 실제 부모 버스 번호가 0 이 아닌데도 브리지는 0 만 보고한다.
+		 * secondary/subordinate 는 정상값이 들어 있으므로, primary 만
+		 * 실제 부모 버스 번호로 바로잡아 아래 정합성 검사를 통과시킨다. */
 	}
 
 	/* Check if setup is sensible at all */
-	/* PCI/NVMe: 조걸 분기, NVMe 장치 상태/플래그에 따른 경로 선택 */
 	if (!pass &&
-	    /* PCI/NVMe: 비트 연산으로 값 설정/마스크: (primary ! */
 	    (primary != bus->number || secondary <= bus->number ||
-	     /* PCI/NVMe: 후속 코드 동작 수행 */
 	     secondary > subordinate)) {
-		/* PCI/NVMe: pci_info() 진단 메시지 출력. NVMe 초기화/리소스 상태 기록 */
-		pci_info(dev, "bridge configuration invalid ([bus %02x-%02x]), reconfiguring\n", /* PCI/NVMe: 진단/오류/경고 메시지 출력 */
-			 /* PCI/NVMe: 후속 코드 동작 수행 */
+		/* [한국어] pass 0(기존 설정 존중)에서만 검사한다. 세 조건은
+		 * 펌웨어 설정이 물리적으로 말이 되는지 보는 것이다:
+		 *  - primary 가 실제 부모 버스 번호와 다르다
+		 *  - secondary 가 부모 번호보다 크지 않다(아래 버스는 반드시 큰 번호)
+		 *  - secondary 가 subordinate 보다 크다(빈 구간)
+		 * 하나라도 걸리면 그 설정을 믿을 수 없다. */
+		pci_info(dev, "bridge configuration invalid ([bus %02x-%02x]), reconfiguring\n",
 			 secondary, subordinate);
-		/* PCI/NVMe: 변수에 값 할당: broken */
 		broken = 1;
+		/* [한국어] 이 표시가 서면 아래에서 "펌웨어 설정 무시, 새로 배정"
+		 * 경로(else 분기)로 간다. */
 	}
 
 	/*
 	 * Disable Master-Abort Mode during probing to avoid reporting of
 	 * bus errors in some architectures.
 	 */
-	/* PCI/NVMe: PCI config space 16-bit 읽기. COMMAND/STATUS 등 워드 단위 접근 */
-	pci_read_config_word(dev, PCI_BRIDGE_CONTROL, &bctl); /* PCI/NVMe: PCI config space 읽기. NVMe capability/CSR 탐색 */
-	/* PCI/NVMe: PCI config space 16-bit 쓰기. COMMAND decode/MSE/IOSE 비트 제어 */
-	pci_write_config_word(dev, PCI_BRIDGE_CONTROL, /* PCI/NVMe: PCI config space 쓰기. NVMe 레지스터/비트 제어 */
-			      /* PCI/NVMe: 후속 코드 동작 수행 */
+	pci_read_config_word(dev, PCI_BRIDGE_CONTROL, &bctl);
+	/* [한국어] Bridge Control(0x3e) 원본 백업 — out 에서 복원한다 */
+	pci_write_config_word(dev, PCI_BRIDGE_CONTROL,
 			      bctl & ~PCI_BRIDGE_CTL_MASTER_ABORT);
+	/* [한국어] Master Abort 보고 비트(0x20)를 끈다. 스캔은 본질적으로
+	 * "없는 장치에 말을 걸어 보는" 일이라 master abort 가 대량으로 발생하는데,
+	 * 그것을 오류로 보고하면 아키텍처에 따라 머신 체크나 NMI 로 이어질 수 있다.
+	 * 스캔이 끝나면 원래대로 되돌린다. */
 
-	/* PCI/NVMe: 조걸 분기, 조건에 따른 실행 경로 선택 */
 	if (pci_is_cardbus_bridge(dev)) {
-		/* PCI/NVMe: CardBus 브리지 확장 스캔 */
+		/* [한국어] header type 2(CardBus)는 버스 번호 필드 위치와 창 구조가
+		 * 완전히 달라 전용 함수가 처리한다. 위 영어 주석대로 CardBus
+		 * 아래는 여기서 스캔하지 않고 CardBus 드라이버가 담당한다. */
 		max = pci_cardbus_scan_bridge_extend(bus, dev, buses, max,
-						     /* PCI/NVMe: 후속 코드 동작 수행 */
 						     available_buses,
-						     /* PCI/NVMe: 후속 코드 동작 수행 */
 						     pass);
 		goto out;
+		/* [한국어] 공통 마무리(레지스터 복원, PM 반납)로 */
 	}
 
-	/* PCI/NVMe: 조걸 분기, 조건에 따른 실행 경로 선택 */
 	if ((secondary || subordinate) &&
-	    /* PCI/NVMe: 모든 버스 수동 할당 여부 */
 	    !pcibios_assign_all_busses() && !broken) {
-		/* PCI/NVMe: 지역 변수 선언 및 초기화 */
+		/* [한국어] 경로 A: 펌웨어 설정을 그대로 존중한다.
+		 * 세 조건이 모두 필요하다:
+		 *  - 버스 번호가 실제로 설정되어 있고(둘 중 하나라도 0 이 아님)
+		 *  - 아키텍처가 "모든 버스 번호를 커널이 다시 매긴다"고 하지 않았고
+		 *  - 위 정합성 검사를 통과했다. */
 		unsigned int cmax, buses;
+		/* [한국어] cmax = 자식 스캔이 돌려준 실제 최대 버스 번호,
+		 * buses = 이 브리지에 허용된 버스 개수(바깥 buses 를 가린다). */
 
 		/*
 		 * Bus already configured by firmware, process it in the
 		 * first pass and just note the configuration.
 		 */
-		/* PCI/NVMe: 조걸 분기, 조건에 따른 실행 경로 선택 */
 		if (pass)
 			goto out;
+		/* [한국어] 이미 설정된 브리지는 pass 0 에서만 다룬다.
+		 * pass 1 에 또 들어오면 중복 처리이므로 그냥 나간다. */
 
 		/*
 		 * The bus might already exist for two reasons: Either we
@@ -3061,49 +3511,53 @@ static int pci_scan_bridge_extend(struct pci_bus *bus, struct pci_dev *dev,
 		 * more than one bridge. The second case can happen with
 		 * the i450NX chipset.
 		 */
-		/* PCI/NVMe: 버스 검색 */
 		child = pci_find_bus(pci_domain_nr(bus), secondary);
-		/* PCI/NVMe: 조걸 분기, NULL/0/미설정 여부 검사 */
+		/* [한국어] 그 번호의 버스가 이미 있는지 확인. 위 영어 주석이 든
+		 * 두 가지 이유(재스캔, i450NX 처럼 한 버스가 두 브리지로 도달)가
+		 * 있어 중복 생성을 피해야 한다. */
 		if (!child) {
-			/* PCI/NVMe: 새 버스 추가 */
+			/* [한국어] 없으면 새로 만든다 */
 			child = pci_add_new_bus(bus, dev, secondary);
-			/* PCI/NVMe: 조걸 분기, NULL/0/미설정 여부 검사 */
 			if (!child)
 				goto out;
-			/* PCI/NVMe: 구조체 필드에 값 저장: child->primary */
+			/* [한국어] 생성 실패(메모리 부족) — 아래를 포기한다 */
 			child->primary = primary;
-			/* PCI/NVMe: bus 번호 리소스 삽입 */
+			/* [한국어] 위에서 보정한 primary 를 기록 */
 			pci_bus_insert_busn_res(child, secondary, subordinate);
-			/* PCI/NVMe: 구조체 필드에 값 저장: child->bridge_ctl */
+			/* [한국어] 펌웨어가 정한 구간을 그대로 버스 번호 리소스로 등록 */
 			child->bridge_ctl = bctl;
+			/* [한국어] 원본 Bridge Control 을 버스에 기억시킨다.
+			 * 나중에 secondary bus reset 등에서 기준값으로 쓴다. */
 		}
 
-		/* PCI/NVMe: 변수에 값 할당: buses */
 		buses = subordinate - secondary;
-		/* PCI/NVMe: 하위 버스 재귀 스캔(확장 버스 분배) */
+		/* [한국어] 펌웨어가 이 브리지 아래에 허용한 여분 버스 개수 */
 		cmax = pci_scan_child_bus_extend(child, buses);
-		/* PCI/NVMe: 조걸 분기, 값 크기 비교 */
+		/* [한국어] ★재귀 하강★ — 자식 버스를 훑는다. 그 안에서 또 브리지를
+		 * 만나면 이 함수가 다시 불린다. 반환값은 실제로 쓰인 최대 버스 번호. */
 		if (cmax > subordinate)
-			/* PCI/NVMe: pci_warn() 경고 메시지 출력. NVMe 성능/호환성 문제 알림 */
-			pci_warn(dev, "bridge has subordinate %02x but max busn %02x\n", /* PCI/NVMe: 진단/오류/경고 메시지 출력 */
-				 /* PCI/NVMe: 후속 코드 동작 수행 */
+			pci_warn(dev, "bridge has subordinate %02x but max busn %02x\n",
 				 subordinate, cmax);
+		/* [한국어] 실제로 필요한 번호가 펌웨어가 허용한 구간을 넘었다.
+		 * 그러면 넘어간 버스의 장치들은 접근 불가다(브리지가 전달하지 않는다).
+		 * 펌웨어 설정을 존중하는 경로라 고치지 않고 경고만 남긴다. */
 
 		/* Subordinate should equal child->busn_res.end */
-		/* PCI/NVMe: 조걸 분기, 값 크기 비교 */
 		if (subordinate > max)
-			/* PCI/NVMe: 변수에 값 할당: max */
 			max = subordinate;
-	/* PCI/NVMe: 후속 코드 동작 수행 */
+		/* [한국어] 전체 최대 버스 번호를 갱신. 펌웨어가 정한 subordinate 을
+		 * 그대로 인정하므로 cmax 가 아니라 subordinate 을 쓴다. */
 	} else {
+		/* [한국어] 경로 B: 커널이 버스 번호를 새로 배정한다.
+		 * (설정이 없거나, 아키텍처가 전부 재배정하라고 했거나, broken 이거나) */
 
 		/*
 		 * We need to assign a number to this bus which we always
 		 * do in the second pass.
 		 */
-		/* PCI/NVMe: 조걸 분기, NULL/0/미설정 여부 검사 */
 		if (!pass) {
-			/* PCI/NVMe: 조걸 분기, 조건에 따른 실행 경로 선택 */
+			/* [한국어] pass 0 에서는 배정하지 않는다. 기존 설정을 모두
+			 * 파악한 뒤(= max 확정 후) pass 1 에서 그 위 번호를 쓴다. */
 			if (pcibios_assign_all_busses() || broken)
 
 				/*
@@ -3114,108 +3568,126 @@ static int pci_scan_bridge_extend(struct pci_bus *bus, struct pci_dev *dev,
 				 * bridges programmed with overlapping bus
 				 * ranges.
 				 */
-				/* PCI/NVMe: PCI config space 32-bit 쓰기. BAR/capability 레지스터 제어 */
-				pci_write_config_dword(dev, PCI_PRIMARY_BUS, /* PCI/NVMe: PCI config space 쓰기. NVMe 레지스터/비트 제어 */
-						       /* PCI/NVMe: 후속 코드 동작 수행 */
+				pci_write_config_dword(dev, PCI_PRIMARY_BUS,
 						       buses & PCI_SEC_LATENCY_TIMER_MASK);
+			/* [한국어] 버스 번호 3종을 모두 0 으로 만들고 latency timer
+			 * 필드(0xff000000)만 보존한다. 번호가 0 이면 브리지가 어떤
+			 * config 요청도 아래로 전달하지 않는다. 위 영어 주석대로,
+			 * pass 1 에서 새 번호를 배정하는 동안 기존의 겹치는 설정이
+			 * 남아 있어 충돌하는 것을 막기 위한 조치다. */
 			goto out;
 		}
 
 		/* Clear errors */
-		/* PCI/NVMe: PCI config space 16-bit 쓰기. COMMAND decode/MSE/IOSE 비트 제어 */
-		pci_write_config_word(dev, PCI_STATUS, 0xffff); /* PCI/NVMe: PCI config space 쓰기. NVMe 레지스터/비트 제어 */
+		pci_write_config_word(dev, PCI_STATUS, 0xffff);
+		/* [한국어] Status 레지스터(0x06)의 오류 비트를 지운다.
+		 * PCI 의 오류 상태 비트는 W1C(1 을 쓰면 지워짐)라, 0xffff 를 쓰면
+		 * 켜져 있던 모든 오류 비트가 정리된다. 지금까지의 탐색 과정에서
+		 * 쌓인 master abort 흔적을 없애는 것이다. */
 
 		/* Read bus numbers from EA Capability (if present) */
-		/* PCI/NVMe: pci_ea_fixed_busnrs 함수 호출 */
 		fixed_buses = pci_ea_fixed_busnrs(dev, &fixed_sec, &fixed_sub);
-		/* PCI/NVMe: 조걸 분기, 조건에 따른 실행 경로 선택 */
+		/* [한국어] 하드웨어가 버스 번호를 고정해 두었는지 먼저 확인 */
 		if (fixed_buses)
-			/* PCI/NVMe: 변수에 값 할당: next_busnr */
 			next_busnr = fixed_sec;
-		/* PCI/NVMe: 조걸 분기의 else 경로 */
+		/* [한국어] 고정값이 있으면 반드시 그것을 써야 한다 */
 		else
-			/* PCI/NVMe: 변수에 값 할당: next_busnr */
 			next_busnr = max + 1;
+		/* [한국어] 없으면 지금까지 쓰인 최대 번호 다음 번호를 쓴다 */
 
 		/*
 		 * Prevent assigning a bus number that already exists.
 		 * This can happen when a bridge is hot-plugged, so in this
 		 * case we only re-scan this bus.
 		 */
-		/* PCI/NVMe: 버스 검색 */
 		child = pci_find_bus(pci_domain_nr(bus), next_busnr);
-		/* PCI/NVMe: 조걸 분기, NULL/0/미설정 여부 검사 */
+		/* [한국어] 그 번호가 이미 쓰이고 있는지 확인.
+		 * 위 영어 주석대로 핫플러그 상황에서 생길 수 있다. */
 		if (!child) {
-			/* PCI/NVMe: 새 버스 추가 */
 			child = pci_add_new_bus(bus, dev, next_busnr);
-			/* PCI/NVMe: 조걸 분기, NULL/0/미설정 여부 검사 */
 			if (!child)
 				goto out;
-			/* PCI/NVMe: bus 번호 리소스 삽입 */
+			/* [한국어] 생성 실패 시 아래 스캔 포기 */
 			pci_bus_insert_busn_res(child, next_busnr,
-						/* PCI/NVMe: 후속 코드 동작 수행 */
 						bus->busn_res.end);
+			/* [한국어] 끝을 부모의 subordinate 까지 최대로 열어 둔다.
+			 * 아래에 버스가 몇 개나 있을지 아직 모르기 때문이다.
+			 * 스캔 후 pci_bus_update_busn_res_end() 로 좁힌다. */
 		}
-		/* PCI/NVMe: 카운터 증감 */
 		max++;
-		/* PCI/NVMe: 조걸 분기, 조건에 따른 실행 경로 선택 */
+		/* [한국어] 방금 번호 하나를 소비했다 */
 		if (available_buses)
-			/* PCI/NVMe: 카운터 증감 */
 			available_buses--;
+		/* [한국어] 예비분에서도 하나 차감. 0 이면 더 뺄 것이 없다 */
 
-		/* PCI/NVMe: 비트 연산으로 값 설정/마스크: buses */
 		buses = (buses & PCI_SEC_LATENCY_TIMER_MASK) |
-			/* PCI/NVMe: FIELD_PREP 함수 호출 */
 			FIELD_PREP(PCI_PRIMARY_BUS_MASK, child->primary) |
-			/* PCI/NVMe: FIELD_PREP 함수 호출 */
 			FIELD_PREP(PCI_SECONDARY_BUS_MASK, child->busn_res.start) |
-			/* PCI/NVMe: FIELD_PREP 함수 호출 */
 			FIELD_PREP(PCI_SUBORDINATE_BUS_MASK, child->busn_res.end);
+		/* [한국어] 새 버스 번호 3종을 하나의 dword 로 조립한다.
+		 * latency timer 필드는 원본에서 보존하고, 나머지 세 바이트만
+		 * FIELD_PREP 으로 각자 자리에 채운다.
+		 * subordinate 에는 아직 넉넉한 값(부모의 끝)이 들어간다 — 아래를
+		 * 훑는 동안 config 요청이 막히지 않게 하기 위함이다. */
 
 		/* We need to blast all three values with a single write */
-		/* PCI/NVMe: PCI config space 32-bit 쓰기. BAR/capability 레지스터 제어 */
-		pci_write_config_dword(dev, PCI_PRIMARY_BUS, buses); /* PCI/NVMe: PCI config space 쓰기. NVMe 레지스터/비트 제어 */
+		pci_write_config_dword(dev, PCI_PRIMARY_BUS, buses);
+		/* [한국어] 세 값을 한 번의 dword 쓰기로 동시에 반영한다.
+		 * 바이트 단위로 나눠 쓰면 중간 상태에서 브리지가 모순된 구간을
+		 * 갖게 되어(예: secondary > subordinate) 그 순간의 config 요청이
+		 * 엉뚱하게 처리될 수 있다. 위 영어 주석의 "blast ... with a single
+		 * write" 가 그 뜻이다. */
 
-		/* PCI/NVMe: 구조체 필드에 값 저장: child->bridge_ctl */
 		child->bridge_ctl = bctl;
-		/* PCI/NVMe: 하위 버스 재귀 스캔(확장 버스 분배) */
+		/* [한국어] 원본 Bridge Control 을 버스에 기억시킨다 */
 		max = pci_scan_child_bus_extend(child, available_buses);
+		/* [한국어] ★재귀 하강★ — 새로 만든 버스를 훑는다. 남은 예비 버스
+		 * 개수를 함께 넘겨 아래 핫플러그 브리지들이 나눠 갖게 한다.
+		 * 반환값이 이 아래 전체를 포함하는 실제 최대 버스 번호다. */
 
 		/*
 		 * Set subordinate bus number to its real value.
 		 * If fixed subordinate bus number exists from EA
 		 * capability then use it.
 		 */
-		/* PCI/NVMe: 조걸 분기, 조건에 따른 실행 경로 선택 */
 		if (fixed_buses)
-			/* PCI/NVMe: 변수에 값 할당: max */
 			max = fixed_sub;
-		/* PCI/NVMe: bus 번호 리소스 끝 갱신 */
+		/* [한국어] EA 고정값이 있으면 실제 스캔 결과보다 그것이 우선이다.
+		 * 하드웨어가 그렇게 배선되어 있기 때문이다. */
 		pci_bus_update_busn_res_end(child, max);
-		/* PCI/NVMe: PCI config space 8-bit 쓰기. latency timer, cache line 등 설정 */
-		pci_write_config_byte(dev, PCI_SUBORDINATE_BUS, max); /* PCI/NVMe: PCI config space 쓰기. NVMe 레지스터/비트 제어 */
+		/* [한국어] 커널 쪽 버스 번호 리소스의 끝을 실제 값으로 좁힌다.
+		 * 위에서 최대로 열어 두었던 것을 여기서 확정한다. */
+		pci_write_config_byte(dev, PCI_SUBORDINATE_BUS, max);
+		/* [한국어] 하드웨어 쪽 subordinate(0x1a)도 실제 값으로 좁힌다.
+		 * 이제 이 브리지는 딱 필요한 구간의 요청만 아래로 전달한다. */
 	}
-	/* PCI/NVMe: 문자열 포맷 출력(길이 제한) */
 	scnprintf(child->name, sizeof(child->name), "PCI Bus %04x:%02x",
-		  /* PCI/NVMe: PCI 도메인 번호 획득 */
 		  pci_domain_nr(bus), child->number);
+	/* [한국어] 버스 이름을 "PCI Bus 0000:01" 형태로 만든다.
+	 * 이 이름은 앞서 pci_alloc_child_bus() 에서 창 리소스의 이름으로도
+	 * 연결해 두었으므로 /proc/iomem 에 그대로 나타난다. */
 
-	/* PCI/NVMe: pbus_validate_busn 함수 호출 */
 	pbus_validate_busn(child);
+	/* [한국어] 배정 결과가 조상 브리지들의 구간 안에 들어가는지 확인.
+	 * 어긋나면 경고 로그를 남긴다. */
 
 out:
 	/* Clear errors in the Secondary Status Register */
-	/* PCI/NVMe: PCI config space 16-bit 쓰기. COMMAND decode/MSE/IOSE 비트 제어 */
-	pci_write_config_word(dev, PCI_SEC_STATUS, 0xffff); /* PCI/NVMe: PCI config space 쓰기. NVMe 레지스터/비트 제어 */
+	pci_write_config_word(dev, PCI_SEC_STATUS, 0xffff);
+	/* [한국어] Secondary Status(0x1e)의 오류 비트를 W1C 로 모두 지운다.
+	 * 아래쪽 버스를 훑는 동안 없는 장치에 말을 걸어 쌓인 흔적을 치운다. */
 
-	/* PCI/NVMe: PCI config space 16-bit 쓰기. COMMAND decode/MSE/IOSE 비트 제어 */
-	pci_write_config_word(dev, PCI_BRIDGE_CONTROL, bctl); /* PCI/NVMe: PCI config space 쓰기. NVMe 레지스터/비트 제어 */
+	pci_write_config_word(dev, PCI_BRIDGE_CONTROL, bctl);
+	/* [한국어] 앞에서 Master Abort 보고를 끄려고 바꿨던 Bridge Control 을
+	 * 원본으로 되돌린다. 모든 반환 경로가 이 레이블을 지나므로 복원이 보장된다. */
 
-	/* PCI/NVMe: 런타임 PM 레퍼런스 반납 */
 	pm_runtime_put(&dev->dev);
+	/* [한국어] 스캔 시작에서 잡은 runtime PM 참조를 놓는다. 이제 브리지는
+	 * 유휴 상태가 되면 절전으로 내려갈 수 있다. */
 
-	/* PCI/NVMe: 결과 반환: max */
 	return max;
+	/* [한국어] 이 브리지 아래 전체를 포함하는 최대 버스 번호.
+	 * 호출자 pci_scan_child_bus_extend() 가 다음 브리지 처리에 이어 쓴다. */
 }
 
 /*
@@ -3238,285 +3710,479 @@ out:
  * Return: New subordinate number covering all buses behind this bridge.
  */
 /*
- * pci_scan_bridge() - bridge 뒤의 버스를 스캔(확장 옵션 없음)
+ * pci_scan_bridge() - Scan buses behind a bridge
+ * @bus: Parent bus the bridge is on
+ * @dev: Bridge itself
+ * @max: Starting subordinate number of buses behind this bridge
+ * @pass: Either %0 (scan already configured bridges) or %1 (scan bridges
+ *        that need to be reconfigured.
  *
- * NVMe 연결: available_buses=0으로 bridge 뒤를 스캔. NVMe SSD가
- * 연결된 downstream port를 탐색할 때 사용.
+ * If it's a bridge, configure it and scan the bus behind it.
+ * For CardBus bridges, we don't scan behind as the devices will
+ * be handled by the bridge driver itself.
+ *
+ * We need to process bridges in two passes -- first we scan those
+ * already configured by the BIOS and after we are done with all of
+ * them, we proceed to assigning numbers to the remaining buses in
+ * order to avoid overlaps between old and new bus numbers.
+ *
+ * Return: New subordinate number covering all buses behind this bridge.
  */
-/* PCI/NVMe: PCI 브리지 뒤쪽 버스/장치 탐색. NVMe SSD가 Switch/Root Port 뒤에 있을 때 호출 */
-/* PCI/NVMe: pci_scan_bridge 함수 정의 */
+/*
+ * [한국어]
+ * pci_scan_bridge - 브리지 아래를 스캔하는 공개 API (예비 버스 없이)
+ *
+ * @bus:  브리지가 붙어 있는 부모 버스.
+ * @dev:  브리지 장치.
+ * @max:  지금까지 쓰인 최대 버스 번호.
+ * @pass: 0 = 이미 설정된 브리지 처리, 1 = 번호를 새로 배정할 브리지 처리.
+ * @return: 이 브리지 아래를 포함하는 새 최대 버스 번호.
+ *
+ * 왜 필요한가: pci_scan_bridge_extend() 의 available_buses 인자를 0 으로
+ * 고정한 래퍼다. 핫플러그용 예비 버스 번호를 남기지 않는, 가장 단순한 형태의
+ * 스캔이며 외부 모듈에 공개된 인터페이스이기도 하다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   외부 호출자 → [pci_scan_bridge] → pci_scan_bridge_extend()
+ */
 int pci_scan_bridge(struct pci_bus *bus, struct pci_dev *dev, int max, int pass)
 {
-	return pci_scan_bridge_extend(bus, dev, max, 0, pass); /* PCI/NVMe: 추가 available_buses 없이 bridge 스캔 */
+	return pci_scan_bridge_extend(bus, dev, max, 0, pass);
+	/* [한국어] available_buses = 0 — 예비분을 남기지 않는다 */
 }
-/* PCI/NVMe: EXPORT_SYMBOL 함수 호출 */
-EXPORT_SYMBOL(pci_scan_bridge); /* PCI/NVMe: 심볼 외부 낸출. nvme-pci 등 모듈에서 참조 가능 */
+EXPORT_SYMBOL(pci_scan_bridge);
+/* [한국어] 모듈에서 호출할 수 있도록 공개 */
 
 /*
  * Read interrupt line and base address registers.
  * The architecture-dependent code can tweak these, of course.
  */
-/* PCI/NVMe: pci_read_irq 함수 정의 */
+/*
+ * [한국어]
+ * pci_read_irq - 레거시 INTx 인터럽트 정보를 config space 에서 읽는다
+ *
+ * @dev: 대상 장치.
+ * @return: 없음. dev->pin 과 dev->irq 가 채워진다.
+ *
+ * 왜 필요한가: MSI/MSI-X 이전의 PCI 는 INTA#~INTD# 라는 네 개의 물리 신호선을
+ * 공유해 인터럽트를 전달했다. 그 정보가 config space 의 두 바이트에 있다:
+ *   0x3d PCI_INTERRUPT_PIN  : 이 함수(function)가 어느 핀을 쓰는가.
+ *                             0 = 인터럽트 안 씀, 1 = INTA#, 2 = INTB#, 3 = INTC#, 4 = INTD#.
+ *                             하드웨어가 배선한 값이라 읽기 전용이다.
+ *   0x3c PCI_INTERRUPT_LINE : 그 핀이 어느 인터럽트 컨트롤러 입력에 연결되는가.
+ *                             하드웨어가 아니라 펌웨어가 써 넣는 "메모"에 가깝다.
+ *
+ * NVMe 접점: NVMe 컨트롤러는 실제로는 MSI-X 를 쓰지만(그 벡터는
+ * pci_alloc_irq_vectors_affinity() 가 따로 할당한다), 스펙상 INTx 도 지원해야
+ * 하므로 여기서 읽은 값이 dev->irq 의 초기값이 된다. MSI-X 를 활성화하면
+ * 드라이버는 pci_irq_vector() 로 얻은 벡터를 쓰고 이 값은 쓰이지 않는다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥, pci_setup_device() 안에서 호출.
+ *
+ * 호출 체인:
+ *   pci_setup_device() → [pci_read_irq] → pci_read_config_byte()
+ */
 static void pci_read_irq(struct pci_dev *dev)
 {
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
 	unsigned char irq;
+	/* [한국어] 핀 번호와 라인 번호를 차례로 담는 임시 변수(재사용) */
 
 	/* VFs are not allowed to use INTx, so skip the config reads */
-	/* PCI/NVMe: 조걸 분기, 값 크기 비교 */
 	if (dev->is_virtfn) {
-		/* PCI/NVMe: 구조체 필드에 값 저장: dev->pin */
+		/* [한국어] SR-IOV 가상 함수는 스펙상 INTx 를 쓸 수 없다(MSI/MSI-X 전용).
+		 * config 를 읽어 봐야 의미 없는 값이므로 0 으로 확정한다. */
 		dev->pin = 0;
-		/* PCI/NVMe: 구조체 필드에 값 저장: dev->irq */
+		/* [한국어] 인터럽트 핀 없음 */
 		dev->irq = 0;
+		/* [한국어] 레거시 IRQ 번호 없음 */
 		return;
 	}
 
-	/* PCI/NVMe: PCI config space 8-bit 읽기. secondary/subordinate bus 등 바이트 접근 */
-	pci_read_config_byte(dev, PCI_INTERRUPT_PIN, &irq); /* PCI/NVMe: PCI config space 읽기. NVMe capability/CSR 탐색 */
-	/* PCI/NVMe: 구조체 필드에 값 저장: dev->pin */
+	pci_read_config_byte(dev, PCI_INTERRUPT_PIN, &irq);
+	/* [한국어] offset 0x3d — 이 함수가 쓰는 INTx 핀(0~4). 읽기 전용 */
 	dev->pin = irq;
-	/* PCI/NVMe: 조걸 분기, 조건에 따른 실행 경로 선택 */
+	/* [한국어] pci_dev 에 기록. 0 이면 INTx 를 쓰지 않는 장치다 */
 	if (irq)
-		/* PCI/NVMe: PCI config space 8-bit 읽기. secondary/subordinate bus 등 바이트 접근 */
-		pci_read_config_byte(dev, PCI_INTERRUPT_LINE, &irq); /* PCI/NVMe: PCI config space 읽기. NVMe capability/CSR 탐색 */
-	/* PCI/NVMe: 구조체 필드에 값 저장: dev->irq */
+		pci_read_config_byte(dev, PCI_INTERRUPT_LINE, &irq);
+	/* [한국어] 핀을 쓰는 장치일 때만 라인 번호(0x3c)를 읽는다.
+	 * 핀이 0 이면 라인 값에 의미가 없어 읽지 않고, 위에서 읽은 0 이
+	 * 그대로 아래 대입에 쓰인다. */
 	dev->irq = irq;
+	/* [한국어] 라인 번호(또는 핀이 0 일 때는 0)를 초기 IRQ 로 기록한다.
+	 * 아키텍처 코드가 나중에 이 값을 실제 리눅스 IRQ 번호로 바꿔 놓는다. */
 }
 
-/* PCI/NVMe: PCIe port type(RP/EP/UP/DP) 식별. NVMe SSD의 upstream/downstream 관계 파악 */
-/* PCI/NVMe: set_pcie_port_type 함수 정의 */
+/*
+ * [한국어]
+ * set_pcie_port_type - PCIe capability 를 찾아 장치의 포트 종류와 성질을 확정한다
+ *
+ * @pdev: 대상 장치.
+ * @return: 없음. pdev->pcie_cap, pcie_flags_reg, devcap, pcie_mpss,
+ *          link_active_reporting, aspm_*_support 가 채워진다.
+ *
+ * 왜 필요한가: 이후 PCI 코드 전체가 "이 장치가 PCIe 인가, 그렇다면 어떤
+ * 종류의 포트인가"를 끊임없이 묻는다(pci_is_pcie(), pci_pcie_type()).
+ * 그 판단의 근거가 되는 pdev->pcie_cap(PCIe capability 의 config 오프셋)과
+ * pcie_flags_reg 를 여기서 한 번 읽어 캐시해 둔다. pcie_cap 이 0 이 아니면
+ * PCIe 장치라는 뜻이다.
+ *
+ * 포트 종류(PCI_EXP_TYPE_*): Endpoint, Root Port, Switch Upstream/Downstream,
+ * PCIe-to-PCI 브리지, RC Event Collector 등. NVMe SSD 는 Endpoint 다.
+ *
+ * capability 를 찾는 방식: pci_find_capability(pdev, PCI_CAP_ID_EXP) 는
+ * Status 레지스터의 CAP_LIST 비트를 확인한 뒤 Capabilities Pointer(0x34)에서
+ * 시작해 각 항목의 [ID, Next] 를 따라가며 ID 0x10(PCI_CAP_ID_EXP)을 찾는다.
+ * 무한 루프는 TTL 48회로 끊는다(drivers/pci/pci.h 의 PCI_FIND_NEXT_CAP).
+ *
+ * 마지막의 타입 보정: 일부 하드웨어가 자신을 상향/하향 포트로 잘못 보고한다.
+ * 부모와의 관계로 그 모순을 잡아낸다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥, pci_setup_device() 안에서 호출.
+ *
+ * 호출 체인:
+ *   pci_setup_device() → [set_pcie_port_type]
+ *     → pci_find_capability(), pci_enable_rrs_sv(), pci_upstream_bridge()
+ */
 void set_pcie_port_type(struct pci_dev *pdev)
 {
-	/* PCI/NVMe: pos 변수 선언/초기화: config space 오프셋. NVMe capability/BAR 위치 */
 	int pos;
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
+	/* [한국어] PCIe capability 의 config space 오프셋. 0 이면 PCIe 가 아니다 */
 	u16 reg16;
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
+	/* [한국어] PCIe Capabilities 레지스터(포트 타입과 버전이 들어 있다) */
 	u32 reg32;
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
+	/* [한국어] Link Capabilities 레지스터 값 */
 	int type;
-	/* PCI/NVMe: 후속 코드 동작 수행 */
+	/* [한국어] 이 장치가 보고한 포트 종류 */
 	struct pci_dev *parent;
+	/* [한국어] 상위 브리지 — 타입 모순 검사에 쓴다 */
 
-	/* PCI/NVMe: PCI capability 위치 탐색 */
-	pos = pci_find_capability(pdev, PCI_CAP_ID_EXP); /* PCI/NVMe: NVMe MSI-X/PCIe/AER capability 탐색 */
-	/* PCI/NVMe: 조걸 분기, NULL/0/미설정 여부 검사 */
+	pos = pci_find_capability(pdev, PCI_CAP_ID_EXP);
+	/* [한국어] PCIe capability(ID 0x10)를 capability 링크에서 찾는다 */
 	if (!pos)
 		return;
+	/* [한국어] 없으면 구식 PCI 장치다. pcie_cap 이 0 으로 남아
+	 * pci_is_pcie() 가 false 를 돌려주게 된다. */
 
-	/* PCI/NVMe: 구조체 필드에 값 저장: pdev->pcie_cap */
 	pdev->pcie_cap = pos;
-	/* PCI/NVMe: PCI config space 16-bit 읽기. COMMAND/STATUS 등 워드 단위 접근 */
-	pci_read_config_word(pdev, pos + PCI_EXP_FLAGS, &reg16); /* PCI/NVMe: PCI config space 읽기. NVMe capability/CSR 탐색 */
-	/* PCI/NVMe: 구조체 필드에 값 저장: pdev->pcie_flags_reg */
+	/* [한국어] 오프셋을 캐시. 이후 pcie_capability_read_*() 가 이 값을
+	 * 기준으로 레지스터 위치를 계산하므로, 매번 링크를 다시 걷지 않아도 된다. */
+	pci_read_config_word(pdev, pos + PCI_EXP_FLAGS, &reg16);
+	/* [한국어] capability 시작 + PCI_EXP_FLAGS = PCIe Capabilities 레지스터.
+	 * 하위 4비트가 capability 버전, 그 위 4비트가 Device/Port Type 이다. */
 	pdev->pcie_flags_reg = reg16;
+	/* [한국어] 캐시. pci_pcie_type() 이 이 값에서 타입 필드를 뽑아 쓴다 */
 
-	/* PCI/NVMe: PCIe 포트 타입 획득 */
 	type = pci_pcie_type(pdev);
-	/* PCI/NVMe: 조걸 분기, 값 일치 여부 검사 */
+	/* [한국어] 방금 캐시한 값에서 포트 종류를 추출 */
 	if (type == PCI_EXP_TYPE_ROOT_PORT)
-		/* PCI/NVMe: Configuration RRS Software Visibility 활성화 */
 		pci_enable_rrs_sv(pdev);
+	/* [한국어] Root Port 에만 존재하는 Root Capabilities/Control 을 다루므로
+	 * 여기서만 RRS 소프트웨어 가시성을 켠다. 이것이 켜져야 아래 장치가
+	 * "준비 중"인지 "없는" 것인지 구별할 수 있다. */
 
-	/* PCI/NVMe: PCI config space 32-bit 읽기. NVMe capability/CSR 접근 기본 단위 */
-	pci_read_config_dword(pdev, pos + PCI_EXP_DEVCAP, &pdev->devcap); /* PCI/NVMe: PCI config space 읽기. NVMe capability/CSR 탐색 */
-	/* PCI/NVMe: FIELD_GET 함수 호출 */
+	pci_read_config_dword(pdev, pos + PCI_EXP_DEVCAP, &pdev->devcap);
+	/* [한국어] Device Capabilities — 최대 페이로드, FLR 지원 여부 등이 들어 있다.
+	 * 통째로 캐시해 두고 필요한 비트를 그때그때 뽑아 쓴다. */
 	pdev->pcie_mpss = FIELD_GET(PCI_EXP_DEVCAP_PAYLOAD, pdev->devcap);
+	/* [한국어] MPSS(Max Payload Size Supported). 이 장치가 감당할 수 있는
+	 * TLP 페이로드 크기 코드(0=128B, 1=256B, … 각 단계마다 2배).
+	 * pci_configure_mps() 가 트리 전체의 최솟값에 맞춰 실제 MPS 를 정할 때
+	 * 이 값을 근거로 쓴다. NVMe 의 DMA 전송 효율에 직접 영향을 준다. */
 
-	/* PCI/NVMe: PCIe capability 4바이트 읽기 */
 	pcie_capability_read_dword(pdev, PCI_EXP_LNKCAP, &reg32);
-	/* PCI/NVMe: 조걸 분기, 플래그/비트 마스크 검사 */
+	/* [한국어] Link Capabilities — 속도, 폭, ASPM 지원 여부가 들어 있다 */
 	if (reg32 & PCI_EXP_LNKCAP_DLLLARC)
-		/* PCI/NVMe: 구조체 필드에 값 저장: pdev->link_active_reporting */
 		pdev->link_active_reporting = 1;
+	/* [한국어] DLL Link Active Reporting Capable 비트.
+	 * 이 기능이 있으면 링크가 실제로 살아났는지를 Link Status 의
+	 * Data Link Layer Link Active 비트로 확인할 수 있다. 핫플러그나 리셋 후
+	 * "언제까지 기다려야 하는가"를 추측이 아니라 사실로 알 수 있게 해 준다. */
 
-/* PCI/NVMe: 컴파일 조건: CONFIG_PCIEASPM 정의 시 포함 */
 #ifdef CONFIG_PCIEASPM
-	/* PCI/NVMe: 조걸 분기, 플래그/비트 마스크 검사 */
+	/* [한국어] ASPM(Active State Power Management) 지원이 빌드에 포함될 때만.
+	 * ASPM 은 링크가 유휴일 때 저전력 상태(L0s/L1)로 내리는 기능으로,
+	 * NVMe 의 APST(장치 내부 전력 상태 전환)와는 다른 층위다 —
+	 * ASPM 은 "링크"의 절전, APST 는 "컨트롤러"의 절전이다. */
 	if (reg32 & PCI_EXP_LNKCAP_ASPM_L0S)
-		/* PCI/NVMe: 구조체 필드에 값 저장: pdev->aspm_l0s_support */
 		pdev->aspm_l0s_support = 1;
-	/* PCI/NVMe: 조걸 분기, 플래그/비트 마스크 검사 */
+	/* [한국어] L0s(빠른 복귀, 얕은 절전) 지원 여부 기록 */
 	if (reg32 & PCI_EXP_LNKCAP_ASPM_L1)
-		/* PCI/NVMe: 구조체 필드에 값 저장: pdev->aspm_l1_support */
 		pdev->aspm_l1_support = 1;
-/* PCI/NVMe: 컴파일 조건 종료 */
+	/* [한국어] L1(더 깊은 절전, 복귀 지연 큼) 지원 여부 기록.
+	 * NVMe 지연에 민감한 환경에서 L1 이 문제가 되는 경우가 있어
+	 * 이 정보가 정책 결정의 근거가 된다. */
 #endif
 
-	/* PCI/NVMe: 상위 브리지 획득 */
 	parent = pci_upstream_bridge(pdev);
-	/* PCI/NVMe: 조걸 분기, NULL/0/미설정 여부 검사 */
+	/* [한국어] 이 장치의 상위 브리지(루트 버스의 장치라면 NULL) */
 	if (!parent)
 		return;
+	/* [한국어] 부모가 없으면 아래의 모순 검사를 할 수 없다 */
 
 	/*
 	 * Some systems do not identify their upstream/downstream ports
 	 * correctly so detect impossible configurations here and correct
 	 * the port type accordingly.
 	 */
-	/* PCI/NVMe: 조걸 분기, 값 일치 여부 검사 */
 	if (type == PCI_EXP_TYPE_DOWNSTREAM) {
 		/*
 		 * If pdev claims to be downstream port but the parent
 		 * device is also downstream port assume pdev is actually
 		 * upstream port.
 		 */
-		/* PCI/NVMe: 조걸 분기, 조건에 따른 실행 경로 선택 */
 		if (pcie_downstream_port(parent)) {
-			/* PCI/NVMe: pci_info() 진단 메시지 출력. NVMe 초기화/리소스 상태 기록 */
+			/* [한국어] 하향 포트 바로 아래에 또 하향 포트가 올 수는 없다.
+			 * 스위치 구조는 반드시 "하향 포트 → 상향 포트 → 하향 포트들"
+			 * 순서이므로, 이 장치는 사실 상향 포트다. */
 			pci_info(pdev, "claims to be downstream port but is acting as upstream port, correcting type\n");
-			/* PCI/NVMe: 구조체 필드에 비트 마스크 적용: pdev->pcie_flags_reg & */
 			pdev->pcie_flags_reg &= ~PCI_EXP_FLAGS_TYPE;
-			/* PCI/NVMe: 구조체 필드에 값 저장: pdev->pcie_flags_reg | */
+			/* [한국어] 캐시한 값에서 타입 필드만 지운다.
+			 * 하드웨어 레지스터가 아니라 커널 캐시만 고치는 것이다. */
 			pdev->pcie_flags_reg |= PCI_EXP_TYPE_UPSTREAM;
+			/* [한국어] 올바른 타입으로 덮어쓴다 */
 		}
-	/* PCI/NVMe: if 함수 호출 */
 	} else if (type == PCI_EXP_TYPE_UPSTREAM) {
 		/*
 		 * If pdev claims to be upstream port but the parent
 		 * device is also upstream port assume pdev is actually
 		 * downstream port.
 		 */
-		/* PCI/NVMe: 조걸 분기, 값 일치 여부 검사 */
 		if (pci_pcie_type(parent) == PCI_EXP_TYPE_UPSTREAM) {
-			/* PCI/NVMe: pci_info() 진단 메시지 출력. NVMe 초기화/리소스 상태 기록 */
+			/* [한국어] 상향 포트 아래에 또 상향 포트가 올 수도 없다.
+			 * 상향 포트의 자식은 하향 포트여야 한다. */
 			pci_info(pdev, "claims to be upstream port but is acting as downstream port, correcting type\n");
-			/* PCI/NVMe: 구조체 필드에 비트 마스크 적용: pdev->pcie_flags_reg & */
 			pdev->pcie_flags_reg &= ~PCI_EXP_FLAGS_TYPE;
-			/* PCI/NVMe: 구조체 필드에 값 저장: pdev->pcie_flags_reg | */
+			/* [한국어] 타입 필드 제거 */
 			pdev->pcie_flags_reg |= PCI_EXP_TYPE_DOWNSTREAM;
+			/* [한국어] 하향 포트로 정정. 이 보정이 없으면 아래에서
+			 * 확장 config 접근 판정이나 ASPM 정책이 어긋난다. */
 		}
 	}
 }
 
 /*
- * set_pcie_hotplug_bridge() - PCIe hotplug capability 지원 여부를 표시
+ * [한국어]
+ * set_pcie_hotplug_bridge - 이 포트가 핫플러그 슬롯을 가졌는지 표시한다
  *
- * NVMe 연결: NVMe SSD가 hotplug slot에 연결된 경우(예: U.2/U.3
- * 백플레인), 이 함수가 bridge에 hotplug 플래그를 설정. 이후 PCI
- * hotplug 이벤트가 발생하면 nvme_remove_work 등을 통해 NVMe 드라이버가
- * 정리된다.
+ * @pdev: 검사할 포트(보통 Root Port 나 스위치 하향 포트).
+ * @return: 없음. 조건이 맞으면 pdev->is_hotplug_bridge 와 is_pciehp 가 1 이 된다.
+ *
+ * 왜 필요한가: 핫플러그 가능한 포트는 지금 아래가 비어 있어도 나중에 장치가
+ * 꽂힐 수 있다. 그래서 버스 번호와 주소 창을 여유 있게 남겨 두어야 하며
+ * (pci_scan_child_bus_extend 의 available_buses 분배), pciehp 드라이버가
+ * 그 포트에 붙어 슬롯 이벤트를 처리해야 한다. 이 플래그가 그 판단의 근거다.
+ *
+ * NVMe 접점: U.2/U.3 백플레인의 NVMe 베이가 대표적인 핫플러그 슬롯이다.
+ * 이 플래그가 서야 SSD 를 뽑고 꽂는 것이 커널에 이벤트로 전달된다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥, pci_setup_device() 안에서 호출.
+ *
+ * 호출 체인:
+ *   pci_setup_device() → [set_pcie_hotplug_bridge]
+ *     → pcie_capability_read_dword()
  */
-/* PCI/NVMe: 핫플러그 브리지 플래그 설정. NVMe 핫플러그 이벤트 처리 준비 */
-/* PCI/NVMe: set_pcie_hotplug_bridge 함수 정의 */
 void set_pcie_hotplug_bridge(struct pci_dev *pdev)
 {
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
 	u32 reg32;
+	/* [한국어] Slot Capabilities 레지스터 값 */
 
-	pcie_capability_read_dword(pdev, PCI_EXP_SLTCAP, &reg32); /* PCI/NVMe: Slot Capabilities 레지스터 읽기 */
-	if (reg32 & PCI_EXP_SLTCAP_HPC) /* PCI/NVMe: Hot-Plug Controller가 slot에 내장되어 있으면 */
-		pdev->is_hotplug_bridge = pdev->is_pciehp = 1; /* PCI/NVMe: bridge에 hotplug 지원 표시 */
+	pcie_capability_read_dword(pdev, PCI_EXP_SLTCAP, &reg32);
+	/* [한국어] PCIe capability 안의 Slot Capabilities.
+	 * 슬롯이 있는 포트에만 의미가 있다. */
+	if (reg32 & PCI_EXP_SLTCAP_HPC)
+		pdev->is_hotplug_bridge = pdev->is_pciehp = 1;
+	/* [한국어] HPC(Hot-Plug Capable) 비트가 서 있으면 두 플래그를 함께 세운다.
+	 * is_hotplug_bridge = PCI 코어가 리소스를 여유 있게 잡을 근거,
+	 * is_pciehp        = pciehp 드라이버가 이 포트를 맡을 근거. */
 }
 
 /*
- * set_pcie_thunderbolt() - Thunderbolt 컨트롤러 하위 장치 여부 표시
+ * [한국어]
+ * set_pcie_thunderbolt - 이 장치가 Thunderbolt 컨트롤러의 일부인지 표시한다
  *
- * NVMe 연결: Thunderbolt 도킹이나 외장 NVMe 케이스가 연결된 경우,
- * 해당 PCIe 장치들은 is_thunderbolt=1로 표시되어 보안/전원 정책이
- * 다르게 적용될 수 있다.
+ * @dev: 대상 장치.
+ * @return: 없음. 해당하면 dev->is_thunderbolt 가 1 이 된다.
+ *
+ * 왜 필요한가: Thunderbolt 는 PCIe 를 케이블 밖으로 터널링하는 기술이라,
+ * 사용자가 임의의 장치를 물리적으로 꽂을 수 있다. 그런 경로의 장치는
+ * DMA 공격 위험이 있어 IOMMU 정책을 더 엄격히 적용해야 한다. 그 판단의
+ * 재료로 쓰인다.
+ *
+ * 검출 방법: Intel 이 정의한 Vendor-Specific capability(VSEC)의 존재로
+ * 판별한다. 표준 필드로는 Thunderbolt 여부를 알 수 없어 벤더 확장을 본다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥, pci_setup_device() 안에서 호출.
+ *
+ * 호출 체인:
+ *   pci_setup_device() → [set_pcie_thunderbolt] → pci_find_vsec_capability()
  */
-/* PCI/NVMe: set_pcie_thunderbolt 함수 정의 */
 static void set_pcie_thunderbolt(struct pci_dev *dev)
 {
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
 	u16 vsec;
+	/* [한국어] 찾은 VSEC 의 config 오프셋. 0 이면 없음 */
 
 	/* Is the device part of a Thunderbolt controller? */
-	vsec = pci_find_vsec_capability(dev, PCI_VENDOR_ID_INTEL, PCI_VSEC_ID_INTEL_TBT); /* PCI/NVMe: Intel Thunderbolt vendor-specific capability 탐색 */
-	/* PCI/NVMe: 조걸 분기, 조건에 따른 실행 경로 선택 */
+	vsec = pci_find_vsec_capability(dev, PCI_VENDOR_ID_INTEL, PCI_VSEC_ID_INTEL_TBT);
+	/* [한국어] 벤더 ID(Intel)와 VSEC ID(Thunderbolt) 조합으로 찾는다.
+	 * VSEC 는 확장 capability 영역에 있으므로 확장 config 접근이 가능해야 한다. */
 	if (vsec)
-		dev->is_thunderbolt = 1; /* PCI/NVMe: Thunderbolt 계열 장치로 표시 */
+		dev->is_thunderbolt = 1;
+	/* [한국어] 존재하면 Thunderbolt 계열로 표시.
+	 * IOMMU/보안 정책과 아래 set_pcie_untrusted() 판단에 쓰인다. */
 }
 
 /*
- * set_pcie_cxl() - CXL(Compute Express Link) 장치 여부 표시
+ * [한국어]
+ * set_pcie_cxl - 이 포트/장치가 CXL 프로토콜로 동작 중인지 표시한다
  *
- * NVMe 연결: CXL 메모리 확장 장치나 CXL 2.0/3.0 기반 NVMe가 연결된
- * 경우 is_cxl 플래그가 설정. 이 플래그는 DMA coherence, 리소스 할당,
- * 전원 관리 정책에 영향을 줄 수 있다.
+ * @dev: 대상 장치.
+ * @return: 없음. dev->is_cxl 이 갱신된다.
+ *
+ * CXL 이란: 같은 PCIe 물리 링크 위에서 다른 프로토콜(CXL.cache/CXL.mem)을
+ * 흘려보내는 기술이다. 링크가 어떤 프로토콜로 학습(training)되었는지는
+ * 부팅 때 정해지므로, config 로 물어봐야 알 수 있다.
+ *
+ * 왜 부모부터 갱신하는가: 대체 프로토콜 학습 결과는 링크 단위로 정해지고
+ * 나중에 바뀔 수 있다. 자식의 상태를 판단하기 전에 위쪽 링크 상태를 먼저
+ * 최신화해야 트리 전체가 일관된다. 그래서 상위로 재귀한다(재귀 깊이는
+ * PCI 트리 깊이만큼으로, 실제 하드웨어에서는 몇 단계에 불과하다).
+ *
+ * 실행 컨텍스트: 프로세스 문맥, config 읽기만 수행.
+ *
+ * 호출 체인:
+ *   pci_setup_device() → [set_pcie_cxl] → (상위로 재귀) → pci_find_dvsec_capability()
  */
-/* PCI/NVMe: set_pcie_cxl 함수 정의 */
 static void set_pcie_cxl(struct pci_dev *dev)
 {
-	/* PCI/NVMe: 후속 코드 동작 수행 */
 	struct pci_dev *bridge;
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
+	/* [한국어] 상위 브리지 — 먼저 갱신할 대상 */
 	u16 dvsec, cap;
+	/* [한국어] dvsec = CXL DVSEC 의 오프셋, cap = Flexbus Port Status 값 */
 
-	if (!pci_is_pcie(dev)) /* PCI/NVMe: PCIe 장치가 아니면 CXL 불가 */
+	if (!pci_is_pcie(dev))
 		return;
+	/* [한국어] CXL 은 PCIe 링크 위에서만 성립한다. 구식 PCI 장치는 대상 아님 */
 
 	/*
 	 * Update parent's CXL state because alternate protocol training
 	 * may have changed
 	 */
-	bridge = pci_upstream_bridge(dev); /* PCI/NVMe: 상위 bridge 획득 */
-	/* PCI/NVMe: 조걸 분기, 조건에 따른 실행 경로 선택 */
+	bridge = pci_upstream_bridge(dev);
+	/* [한국어] 상위 브리지 획득(루트 버스 장치면 NULL) */
 	if (bridge)
-		set_pcie_cxl(bridge); /* PCI/NVMe: 상위 bridge의 CXL 상태 재귀 갱신 */
+		set_pcie_cxl(bridge);
+	/* [한국어] 위로 재귀해 조상들의 CXL 상태를 먼저 최신화한다.
+	 * 루트에 닿으면 bridge 가 NULL 이 되어 재귀가 끝난다. */
 
-	/* PCI/NVMe: Designated vendor-specific extended capability 탐색 */
 	dvsec = pci_find_dvsec_capability(dev, PCI_VENDOR_ID_CXL,
-					  PCI_DVSEC_CXL_FLEXBUS_PORT); /* PCI/NVMe: CXL Designated Vendor-Specific Extended Capability 탐색 */
-	if (!dvsec) /* PCI/NVMe: CXL DVSEC가 없으면 CXL 장치 아님 */
+					  PCI_DVSEC_CXL_FLEXBUS_PORT);
+	/* [한국어] DVSEC(Designated Vendor-Specific Extended Capability) 중
+	 * CXL 컨소시엄의 Flexbus Port 항목을 찾는다. DVSEC 는 확장 config
+	 * 영역(0x100 이상)에 있다. */
+	if (!dvsec)
 		return;
+	/* [한국어] 없으면 CXL 장치가 아니다. is_cxl 은 기존 값 그대로 둔다 */
 
-	/* PCI/NVMe: PCI config space 16-bit 읽기. COMMAND/STATUS 등 워드 단위 접근 */
-	pci_read_config_word(dev, dvsec + PCI_DVSEC_CXL_FLEXBUS_PORT_STATUS, /* PCI/NVMe: PCI config space 읽기. NVMe capability/CSR 탐색 */
-			     &cap); /* PCI/NVMe: CXL Flexbus Port Status 읽기 */
+	pci_read_config_word(dev, dvsec + PCI_DVSEC_CXL_FLEXBUS_PORT_STATUS,
+			     &cap);
+	/* [한국어] Flexbus Port Status — 이 링크가 실제로 어떤 CXL 하위
+	 * 프로토콜로 동작 중인지를 알려 준다 */
 
-	dev->is_cxl = FIELD_GET(PCI_DVSEC_CXL_FLEXBUS_PORT_STATUS_CACHE, cap) || /* PCI/NVMe: CXL cache 기능 지원 시 */
-		FIELD_GET(PCI_DVSEC_CXL_FLEXBUS_PORT_STATUS_MEM, cap); /* PCI/NVMe: CXL memory 기능 지원 시 */
+	dev->is_cxl = FIELD_GET(PCI_DVSEC_CXL_FLEXBUS_PORT_STATUS_CACHE, cap) ||
+		FIELD_GET(PCI_DVSEC_CXL_FLEXBUS_PORT_STATUS_MEM, cap);
+	/* [한국어] CXL.cache 또는 CXL.mem 중 하나라도 활성이면 CXL 로 판정한다.
+	 * (CXL.io 만 쓰는 경우는 사실상 일반 PCIe 와 같으므로 제외한다.)
+	 * 매번 새로 계산해 덮어쓰므로, 프로토콜이 재학습되면 값이 갱신된다. */
 
 }
 
 /*
- * set_pcie_untrusted() - 외부/제거 가능한 PCIe 장치를 untrusted로 표시
+ * [한국어]
+ * set_pcie_untrusted - 외부에서 꽂힌 장치를 "신뢰할 수 없음"으로 표시한다
  *
- * NVMe 연결: 외장 NVMe enclosure나 Thunderbolt NVMe 같은 removable
- * 장치는 untrusted로 표시되어 DMA attack 방지를 위한 IOMMU/ATS 정책이
- * 적용될 수 있다.
+ * @dev: 대상 장치.
+ * @return: 없음. 해당하면 dev->untrusted 가 true 가 된다.
+ *
+ * 왜 필요한가: PCIe 장치는 DMA 로 시스템 메모리에 직접 접근할 수 있다.
+ * 사용자가 임의로 꽂을 수 있는 포트(Thunderbolt 등)에 악의적 장치를 연결하면
+ * 메모리를 통째로 읽어 갈 수 있다(DMA 공격). untrusted 로 표시된 장치는
+ * IOMMU 가 엄격한 매핑을 강제하고, ATS(Address Translation Services) 같은
+ * "장치가 주소 변환을 캐시하는" 기능을 허용하지 않는다.
+ *
+ * 상속 규칙: 신뢰할 수 없는 브리지 아래는 전부 신뢰할 수 없다. 중간에
+ * 안전한 장치를 끼워 넣어 우회할 수 없게 하기 위함이다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥, pci_setup_device() 안에서 호출.
+ *
+ * 호출 체인:
+ *   pci_setup_device() → [set_pcie_untrusted] → arch_pci_dev_is_removable()
  */
-/* PCI/NVMe: set_pcie_untrusted 함수 정의 */
 static void set_pcie_untrusted(struct pci_dev *dev)
 {
-	struct pci_dev *parent = pci_upstream_bridge(dev); /* PCI/NVMe: 상위 bridge 장치 획득 */
+	struct pci_dev *parent = pci_upstream_bridge(dev);
+	/* [한국어] 상위 브리지 — 신뢰 여부를 물려받을 대상 */
 
-	if (!parent) /* PCI/NVMe: root bus 직접 연결 장치이면 신뢰 여부를 여기서 결정하지 않음 */
+	if (!parent)
 		return;
+	/* [한국어] 루트 버스에 직접 붙은 장치는 메인보드 온보드로 간주해
+	 * 여기서 untrusted 로 만들지 않는다 */
 	/*
 	 * If the upstream bridge is untrusted we treat this device as
 	 * untrusted as well.
 	 */
-	if (parent->untrusted) { /* PCI/NVMe: 상위 bridge가 untrusted이면 상속 */
-		/* PCI/NVMe: 구조체 필드에 값 저장: dev->untrusted */
+	if (parent->untrusted) {
+		/* [한국어] 부모가 신뢰 불가면 그 아래는 무조건 신뢰 불가.
+		 * 이 상속이 트리를 따라 전파되므로, 외부 포트 아래 전체가
+		 * 자동으로 표시된다. */
 		dev->untrusted = true;
 		return;
+		/* [한국어] 이미 결론이 났으므로 아키텍처 판정은 볼 필요 없다 */
 	}
 
-	if (arch_pci_dev_is_removable(dev)) { /* PCI/NVMe: 아키텍처에서 제거 가능으로 판단하면 */
-		/* PCI/NVMe: 디버그 메시지 출력 */
-		pci_dbg(dev, "marking as untrusted\n"); /* PCI/NVMe: 진단/오류/경고 메시지 출력 */
-		dev->untrusted = true; /* PCI/NVMe: untrusted 표시; IOMMU/ATS 정책에 영향 */
+	if (arch_pci_dev_is_removable(dev)) {
+		/* [한국어] 아키텍처/펌웨어가 "이 포트는 외부 노출(external facing)"
+		 * 이라고 알려 준 경우. x86 에서는 ACPI 의 ExternalFacingPort 속성이
+		 * 근거가 된다. */
+		pci_dbg(dev, "marking as untrusted\n");
+		dev->untrusted = true;
+		/* [한국어] 표시. 이후 IOMMU 설정과 ATS 허용 여부가 달라진다 */
 	}
 }
 
 /*
- * pci_set_removable() - 사용자가 제거할 수 있는 PCIe 장치로 표시
+ * [한국어]
+ * pci_set_removable - 사용자가 뽑을 수 있는 장치로 표시한다
  *
- * NVMe 연결: 외장 NVMe 케이스, Thunderbolt NVMe 등은 removable로
- * 표시되어 userspace(udev 등)가 이를 인식할 수 있다. 이는 eject
- * 처리와 보안 정책에 사용.
+ * @dev: 대상 장치.
+ * @return: 없음. 해당하면 device 의 removable 속성이 DEVICE_REMOVABLE 이 된다.
+ *
+ * 왜 필요한가: 사용자 공간(udev, 데스크톱 환경)이 "이 장치는 사용자가 뽑을 수
+ * 있다"를 알아야 안전 제거 UI 를 보여 주거나 마운트 정책을 달리할 수 있다.
+ * sysfs 의 removable 속성으로 노출된다.
+ *
+ * untrusted 와의 차이: untrusted 는 보안 정책(DMA 제한)용이고, removable 은
+ * 사용자 경험용이다. 판단 근거는 비슷하지만 쓰임이 다르다.
+ *
+ * 아래 영어 주석이 설명하는 정책이 중요하다: 전통적인 핫플러그 슬롯(서버의
+ * U.2 NVMe 베이 같은 것)은 기술적으로는 뽑을 수 있지만, 케이스를 열어야
+ * 접근할 수 있어 일반 사용자가 뽑는 대상으로 보지 않는다. 그래서
+ * external_facing 으로 표시된 포트 아래만 removable 로 노출한다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥, pci_setup_device() 안에서 호출.
+ *
+ * 호출 체인:
+ *   pci_setup_device() → [pci_set_removable] → dev_set_removable()
  */
-/* PCI/NVMe: pci_set_removable 함수 정의 */
 static void pci_set_removable(struct pci_dev *dev)
 {
-	struct pci_dev *parent = pci_upstream_bridge(dev); /* PCI/NVMe: 상위 bridge 장치 획득 */
+	struct pci_dev *parent = pci_upstream_bridge(dev);
+	/* [한국어] 상위 브리지 — removable 성질을 물려받을 대상 */
 
-	if (!parent) /* PCI/NVMe: root 직접 연결 장치는 여기서 처리하지 않음 */
+	if (!parent)
 		return;
+	/* [한국어] 루트 버스 직결 장치는 온보드로 간주 */
 	/*
 	 * We (only) consider everything tunneled below an external_facing
 	 * device to be removable by the user. We're mainly concerned with
@@ -3528,15 +4194,20 @@ static void pci_set_removable(struct pci_dev *dev)
 	 * accessible to user / may not be removed by end user, and thus not
 	 * exposed as "removable" to userspace.
 	 */
-	if (dev_is_removable(&parent->dev)) { /* PCI/NVMe: 상위 bridge가 external_facing/removable이면 */
-		dev_set_removable(&dev->dev, DEVICE_REMOVABLE); /* PCI/NVMe: 이 장치도 removable로 표시 */
+	if (dev_is_removable(&parent->dev)) {
+		/* [한국어] 부모가 removable 이면 그 아래도 removable — 상속 규칙.
+		 * 외부 포트에 도킹을 물리고 거기에 또 장치를 다는 구조가 흔하다. */
+		dev_set_removable(&dev->dev, DEVICE_REMOVABLE);
 		return;
 	}
 
-	if (arch_pci_dev_is_removable(dev)) { /* PCI/NVMe: 아키텍처에서 removable로 판단하면 */
-		/* PCI/NVMe: 디버그 메시지 출력 */
-		pci_dbg(dev, "marking as removable\n"); /* PCI/NVMe: 진단/오류/경고 메시지 출력 */
-		dev_set_removable(&dev->dev, DEVICE_REMOVABLE); /* PCI/NVMe: removable 속성 설정 */
+	if (arch_pci_dev_is_removable(dev)) {
+		/* [한국어] 아키텍처/펌웨어가 external_facing 포트라고 알려 준 경우.
+		 * 위 영어 주석대로 서버의 일반 핫플러그 슬롯은 여기에 해당하지
+		 * 않으므로, 백플레인의 NVMe 는 보통 removable 로 표시되지 않는다. */
+		pci_dbg(dev, "marking as removable\n");
+		dev_set_removable(&dev->dev, DEVICE_REMOVABLE);
+		/* [한국어] sysfs 의 removable 속성이 "removable" 로 바뀐다 */
 	}
 }
 
@@ -3556,41 +4227,84 @@ static void pci_set_removable(struct pci_dev *dev)
  *   ASM1083/1085 PCIe-to-PCI Reversible Bridge (1b21:1080, rev 01 & 03)
  *   AMD/ATI SBx00 PCI to PCI Bridge (1002:4384, rev 40)
  */
-/*
- * pci_ext_cfg_is_aliased() - extended config space가 standard space의
- *                            alias인지 검출
+/**
+ * pci_ext_cfg_is_aliased - Is ext config space just an alias of std config?
+ * @dev: PCI device
  *
- * NVMe 연결: 일부 broken bridge는 extended config access(0x100~)를
- * 256B standard config로 잘못 forwarding. 이 경우 NVMe 컨트롤러의
- * MSI-X capability(0x100 이상)가 올바르게 읽히지 않아 MSI-X 인터럽트
- * 초기화가 실패할 수 있다.
+ * PCI Express to PCI/PCI-X Bridge Specification, rev 1.0, 4.1.4 says that
+ * when forwarding a type1 configuration request the bridge must check that
+ * the extended register address field is zero.  The bridge is not permitted
+ * to forward the transactions and must handle it as an Unsupported Request.
+ * Some bridges do not follow this rule and simply drop the extended register
+ * bits, resulting in the standard config space being aliased, every 256
+ * bytes across the entire configuration space.  Test for this condition by
+ * comparing the first dword of each potential alias to the vendor/device ID.
+ * Known offenders:
+ *   ASM1083/1085 PCIe-to-PCI Reversible Bridge (1b21:1080, rev 01 & 03)
+ *   AMD/ATI SBx00 PCI to PCI Bridge (1002:4384, rev 40)
  */
-/* PCI/NVMe: pci_ext_cfg_is_aliased 함수 정의 */
+/*
+ * [한국어]
+ * pci_ext_cfg_is_aliased - 확장 config 영역이 사실은 표준 영역의 그림자인지 검사
+ *
+ * @dev: 검사할 장치.
+ * @return: true 면 0x100 이상이 0x00 의 반복(alias)일 뿐이므로 확장 config 를
+ *          쓰면 안 된다. false 면 진짜 확장 영역이거나 판단 불가.
+ *
+ * 무엇이 문제인가(위 영어 주석의 quirk): 스펙상 PCIe-to-PCI 브리지는 확장
+ * 레지스터 주소 비트가 0 이 아닌 config 요청을 아래로 전달하면 안 되고,
+ * Unsupported Request 로 처리해야 한다. 그런데 일부 브리지가 그 비트를 그냥
+ * 버리고 전달해 버린다. 그 결과 0x100 을 읽으면 0x00 이, 0x200 을 읽으면
+ * 다시 0x00 이 읽히는 식으로 256바이트마다 같은 내용이 되풀이된다.
+ * 알려진 문제 하드웨어는 영어 주석에 적힌 ASM1083/1085 와 AMD/ATI SBx00 이다.
+ *
+ * 검출 방법: 확장 영역의 각 256바이트 경계에서 첫 dword 를 읽어, 그것이
+ * 표준 영역 0x00 의 Vendor/Device ID 와 같은지 본다. 모든 경계에서 같으면
+ * 그림자다. 진짜 확장 capability 헤더가 우연히 Vendor ID 와 같을 확률은
+ * 사실상 없다.
+ *
+ * 왜 CONFIG_PCI_QUIRKS 로 감싸는가: 이 검사는 15번의 config 읽기를 하므로
+ * 공짜가 아니다. quirk 지원을 뺀 구성(임베디드 등)에서는 이런 고장난 브리지가
+ * 없다고 보고 검사를 생략한다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_cfg_space_size_ext() → [pci_ext_cfg_is_aliased] → pci_read_config_dword()
+ */
 static bool pci_ext_cfg_is_aliased(struct pci_dev *dev)
 {
-/* PCI/NVMe: 컴파일 조건: CONFIG_PCI_QUIRKS 정의 시 포함 */
 #ifdef CONFIG_PCI_QUIRKS
-	/* PCI/NVMe: pos 변수 선언/초기화: config space 오프셋. NVMe capability/BAR 위치 */
+	/* [한국어] quirk 지원이 켜진 구성에서만 실제 검사를 수행한다 */
 	int pos, ret;
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
+	/* [한국어] pos = 검사할 확장 영역 오프셋, ret = config 읽기 결과 코드 */
 	u32 header, tmp;
+	/* [한국어] header = 표준 영역 0x00 의 Vendor/Device ID(비교 기준),
+	 * tmp = 확장 영역에서 읽은 값 */
 
-	pci_read_config_dword(dev, PCI_VENDOR_ID, &header); /* PCI/NVMe: standard config의 vendor/device ID 읽기 */
+	pci_read_config_dword(dev, PCI_VENDOR_ID, &header);
+	/* [한국어] offset 0x00 — 하위 16비트가 Vendor ID, 상위 16비트가 Device ID.
+	 * 이 4바이트가 그림자 검사의 지문 역할을 한다. */
 
-	/* PCI/NVMe: 반복문, NVMe 리소스/장치 일괄 처리 */
 	for (pos = PCI_CFG_SPACE_SIZE;
-	     pos < PCI_CFG_SPACE_EXP_SIZE; pos += PCI_CFG_SPACE_SIZE) { /* PCI/NVMe: 0x100, 0x200, 0x300 등 extended offset 순회 */
-		ret = pci_read_config_dword(dev, pos, &tmp); /* PCI/NVMe: extended offset에서 dword 읽기 */
-		if ((ret != PCIBIOS_SUCCESSFUL) || (header != tmp)) /* PCI/NVMe: 읽기 실패거나 vendor ID와 다륾면 alias 아님 */
-			/* PCI/NVMe: 거짓 반환 */
+	     pos < PCI_CFG_SPACE_EXP_SIZE; pos += PCI_CFG_SPACE_SIZE) {
+		/* [한국어] 0x100 부터 0xf00 까지 256바이트 간격으로 15군데를 본다.
+		 * PCI_CFG_SPACE_SIZE = 256, PCI_CFG_SPACE_EXP_SIZE = 4096. */
+		ret = pci_read_config_dword(dev, pos, &tmp);
+		/* [한국어] 그 경계의 첫 dword 를 읽는다 */
+		if ((ret != PCIBIOS_SUCCESSFUL) || (header != tmp))
 			return false;
+		/* [한국어] 읽기 자체가 실패했거나 값이 Vendor ID 와 다르면
+		 * 그림자가 아니다(진짜 확장 영역이거나 판단 불가). 한 군데만
+		 * 달라도 즉시 false 다. */
 	}
 
-	return true; /* PCI/NVMe: 모든 extended offset이 vendor ID와 동일하면 alias로 판단; extended config 사용 불가 */
-/* PCI/NVMe: 컴파일 조건: 이전 조건의 반대 경로 */
+	return true;
+	/* [한국어] 15군데가 모두 Vendor ID 와 같았다 = 표준 영역이 반복되고 있다.
+	 * 호출자는 이 장치의 config space 를 256바이트로 제한한다. */
 #else
-	return false; /* PCI/NVMe: PCI_QUIRKS가 꺼져 있으면 alias 검출 안 함 */
-/* PCI/NVMe: 컴파일 조건 종료 */
+	return false;
+	/* [한국어] quirk 지원이 없는 구성 — 검사 비용을 아끼고 정상으로 간주 */
 #endif
 }
 
@@ -3606,48 +4320,91 @@ static bool pci_ext_cfg_is_aliased(struct pci_dev *dev)
  * capability header.
  */
 /*
- * pci_cfg_space_size_ext() - extended config space 접근 가능성 테스트
+ * [한국어]
+ * pci_cfg_space_size_ext - 확장 config 영역에 실제로 접근되는지 시험한다
  *
- * NVMe 연결: NVMe PCIe 컨트롤러는 4KB config space가 필요(MSI-X, AER,
- * LTR 등). 0x100에서 유효한 extended capability header를 읽을 수 있어야
- * 4KB로 인식. alias나 error response면 256B로 제한되어 NVMe 고급
- * capability 접근이 불가능해진다.
+ * @dev: 검사할 장치.
+ * @return: 접근 가능하면 PCI_CFG_SPACE_EXP_SIZE(4096), 아니면
+ *          PCI_CFG_SPACE_SIZE(256).
+ *
+ * 왜 "지원"과 "접근 가능"이 다른가: 장치가 PCIe 라서 4KB config 를 갖고
+ * 있어도, 그 사이의 경로가 확장 주소를 전달하지 못하면 읽을 수 없다.
+ * 위 영어 주석이 드는 예가 그것이다 — 확장 접근을 만들어 낼 방법이 없는
+ * 플랫폼이거나, reverse Express 브리지 뒤에 있는 경우.
+ *
+ * 판정 근거: 0x100 의 dword 는 스펙상 "0(확장 capability 없음)이거나
+ * 유효한 확장 capability 헤더"여야 한다. all-ones 가 나오면 응답이 없다는
+ * 뜻이고, 표준 영역의 그림자면 Vendor ID 가 나온다. 둘 다 아니어야 통과다.
+ *
+ * NVMe 접점: AER, LTR, SR-IOV, ARI 같은 확장 capability 는 0x100 이상에
+ * 있으므로, 여기서 4096 이 나와야 NVMe 컨트롤러의 오류 보고(AER)와
+ * 지연 보고(LTR)를 쓸 수 있다. (MSI-X 는 표준 capability ID 0x11 이라
+ * 256바이트 영역 안에 있어, 확장 접근이 막혀도 영향받지 않는다.)
+ *
+ * 실행 컨텍스트: 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_cfg_space_size() → [pci_cfg_space_size_ext] → pci_ext_cfg_is_aliased()
  */
-/* PCI/NVMe: pci_cfg_space_size_ext 함수 정의 */
 static int pci_cfg_space_size_ext(struct pci_dev *dev)
 {
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
 	u32 status;
-	int pos = PCI_CFG_SPACE_SIZE; /* PCI/NVMe: extended config space 시작 offset 0x100 */
+	/* [한국어] 0x100 에서 읽은 값 */
+	int pos = PCI_CFG_SPACE_SIZE;
+	/* [한국어] 확장 영역의 시작 오프셋 = 0x100 */
 
-	if (pci_read_config_dword(dev, pos, &status) != PCIBIOS_SUCCESSFUL) /* PCI/NVMe: 0x100 dword 읽기 시도 */
-		return PCI_CFG_SPACE_SIZE; /* PCI/NVMe: 접근 실패 시 256B로 제한; NVMe MSI-X 접근 불가 */
-	if (PCI_POSSIBLE_ERROR(status) || pci_ext_cfg_is_aliased(dev)) /* PCI/NVMe: error response이거나 alias이면 */
-		return PCI_CFG_SPACE_SIZE; /* PCI/NVMe: 256B로 제한 */
+	if (pci_read_config_dword(dev, pos, &status) != PCIBIOS_SUCCESSFUL)
+		return PCI_CFG_SPACE_SIZE;
+	/* [한국어] 읽기 자체가 실패 — 이 플랫폼/경로에서는 확장 접근을 만들 수
+	 * 없다는 뜻이므로 256바이트로 제한한다. */
+	if (PCI_POSSIBLE_ERROR(status) || pci_ext_cfg_is_aliased(dev))
+		return PCI_CFG_SPACE_SIZE;
+	/* [한국어] 두 가지 실패 방식을 함께 거른다.
+	 * (1) all-ones = 응답 없음(요청이 어딘가에서 버려졌다).
+	 * (2) 그림자(alias) = 고장난 브리지가 확장 주소 비트를 버리고 있다.
+	 * 어느 쪽이든 확장 영역을 신뢰할 수 없다. */
 
-	return PCI_CFG_SPACE_EXP_SIZE; /* PCI/NVMe: 4KB extended config space 사용 가능; NVMe MSI-X/AER/LTR 접근 가능 */
+	return PCI_CFG_SPACE_EXP_SIZE;
+	/* [한국어] 4096바이트 전체를 쓸 수 있다. 이 값이 dev->cfg_size 가 되고,
+	 * pci_find_ext_capability() 가 그 안에서 확장 capability 를 찾는다. */
 }
 
 /*
- * pci_cfg_space_size() - 장치의 config space 크기(256B 또는 4KB) 결정
+ * [한국어]
+ * pci_cfg_space_size - 이 장치의 config space 크기를 확정한다
  *
- * NVMe 연결: NVMe PCIe 컨트롤러는 PCIe capability를 가지므로
- * pci_cfg_space_size_ext()를 통해 4KB로 인식. 4KB가 확볼되어야
- * pci_init_capabilities()에서 MSI-X, AER, LTR 등의 extended capability를
- * 파싱할 수 있다. SR-IOV VF는 spec상 4KB를 사용.
+ * @dev: 대상 장치. dev->class 와 dev->pcie_cap 이 이미 채워져 있어야 한다.
+ * @return: 256 또는 4096.
+ *
+ * 왜 필요한가: dev->cfg_size 는 이후 모든 config 접근의 상한이 된다.
+ * sysfs 의 config 파일 크기도 이 값이고, pci_find_ext_capability() 는
+ * cfg_size 가 256 이면 아예 탐색을 시작하지 않는다. 즉 이 판정 하나가
+ * 그 장치에서 쓸 수 있는 확장 기능 전체를 좌우한다.
+ *
+ * 판정 순서:
+ *  1) SR-IOV VF 는 무조건 4096(아래 영어 주석의 근거 참조).
+ *  2) 상위 버스가 확장 접근 불가로 표시되어 있으면 256.
+ *  3) 호스트 브리지이거나 PCIe 장치면 실제 접근을 시험해 본다.
+ *  4) 구식 PCI 라도 PCI-X Mode 2 면 시험해 본다.
+ *  5) 그 밖에는 256.
+ *
+ * NVMe 접점: NVMe 컨트롤러는 PCIe 장치이므로 3)번 경로를 타고,
+ * 정상이라면 4096 이 되어 AER/LTR/ARI 같은 확장 capability 를 쓸 수 있다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥, pci_setup_device() 안에서 호출.
+ *
+ * 호출 체인:
+ *   pci_setup_device() → [pci_cfg_space_size] → pci_cfg_space_size_ext()
  */
-/* PCI/NVMe: PCI config space 크기(256/4096) 결정. NVMe Extended Tags/AER 접근 범위 결정 */
-/* PCI/NVMe: pci_cfg_space_size 함수 정의 */
 int pci_cfg_space_size(struct pci_dev *dev)
 {
-	/* PCI/NVMe: pos 변수 선언/초기화: config space 오프셋. NVMe capability/BAR 위치 */
 	int pos;
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
+	/* [한국어] PCI-X capability 오프셋 */
 	u32 status;
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
+	/* [한국어] PCI-X Status 레지스터 값 */
 	u16 class;
+	/* [한국어] 상위 3바이트로 줄인 클래스 코드 */
 
-/* PCI/NVMe: 컴파일 조건: CONFIG_PCI_IOV 정의 시 포함 */
 #ifdef CONFIG_PCI_IOV
 	/*
 	 * Per the SR-IOV specification (rev 1.1, sec 3.5), VFs are required to
@@ -3659,108 +4416,189 @@ int pci_cfg_space_size(struct pci_dev *dev)
 	 * support for this VF.  This is a micro performance optimization for
 	 * systems supporting many VFs.
 	 */
-	if (dev->is_virtfn) /* PCI/NVMe: SR-IOV VF는 항상 4KB config space 사용; NVMe VF의 MSI-X 접근 보장 */
-		/* PCI/NVMe: 결과 반환: PCI_CFG_SPACE_EXP_SIZE */
+	if (dev->is_virtfn)
 		return PCI_CFG_SPACE_EXP_SIZE;
-/* PCI/NVMe: 컴파일 조건 종료 */
+	/* [한국어] 위 영어 주석의 논리가 정연하다: VF 가 존재한다는 것 자체가
+	 * PF 의 SR-IOV capability 를 읽을 수 있었다는 뜻이고, 그 capability 는
+	 * 확장 영역에 있다. 즉 확장 접근이 되고 그림자도 아님이 이미 증명된
+	 * 상태다. VF 가 수백 개인 시스템에서 검사를 반복하지 않으려는
+	 * 성능 최적화다. */
 #endif
 
-	if (dev->bus->bus_flags & PCI_BUS_FLAGS_NO_EXTCFG) /* PCI/NVMe: 상위 버스에서 extended config가 불가능하면 */
-		return PCI_CFG_SPACE_SIZE; /* PCI/NVMe: 256B로 제한; NVMe MSI-X 초기화 실패 가능 */
+	if (dev->bus->bus_flags & PCI_BUS_FLAGS_NO_EXTCFG)
+		return PCI_CFG_SPACE_SIZE;
+	/* [한국어] pci_alloc_child_bus() 가 이 버스에 확장 접근 불가 표시를
+	 * 해 두었다면 시험해 볼 것도 없이 256 이다. */
 
-	class = dev->class >> 8; /* PCI/NVMe: class code 상위 3바이트 추출 */
-	/* PCI/NVMe: 조걸 분기, 값 일치 여부 검사 */
+	class = dev->class >> 8;
+	/* [한국어] dev->class 는 하위 8비트가 revision 이고 그 위 24비트가
+	 * 클래스/서브클래스/프로그래밍 인터페이스다. 8비트 내려 클래스 부분만
+	 * 취한다(u16 이라 상위 8비트는 잘리고 class/subclass 만 남는다). */
 	if (class == PCI_CLASS_BRIDGE_HOST)
-		return pci_cfg_space_size_ext(dev); /* PCI/NVMe: host bridge도 4KB 가능성 테스트 */
+		return pci_cfg_space_size_ext(dev);
+	/* [한국어] 호스트 브리지는 PCIe capability 를 갖지 않는 경우가 많지만
+	 * 확장 config 는 가질 수 있다. 그래서 별도로 먼저 시험한다. */
 
-	if (pci_is_pcie(dev)) /* PCI/NVMe: PCIe 장치(NVMe 포함)이면 */
-		return pci_cfg_space_size_ext(dev); /* PCI/NVMe: 4KB 접근 가능성 테스트 */
+	if (pci_is_pcie(dev))
+		return pci_cfg_space_size_ext(dev);
+	/* [한국어] PCIe 장치는 4KB config 를 갖는다. NVMe 컨트롤러가 여기로 온다 */
 
-	pos = pci_find_capability(dev, PCI_CAP_ID_PCIX); /* PCI/NVMe: PCI-X capability 탐색 */
-	/* PCI/NVMe: 조걸 분기, NULL/0/미설정 여부 검사 */
+	pos = pci_find_capability(dev, PCI_CAP_ID_PCIX);
+	/* [한국어] 남은 것은 구식 PCI/PCI-X 장치. PCI-X capability 를 찾아본다 */
 	if (!pos)
-		return PCI_CFG_SPACE_SIZE; /* PCI/NVMe: PCI-X capability 없으면 256B */
+		return PCI_CFG_SPACE_SIZE;
+	/* [한국어] 순수 구식 PCI 장치 — 256바이트가 전부다 */
 
-	pci_read_config_dword(dev, pos + PCI_X_STATUS, &status); /* PCI/NVMe: PCI-X status 읽기 */
-	if (status & (PCI_X_STATUS_266MHZ | PCI_X_STATUS_533MHZ)) /* PCI/NVMe: PCI-X 266/533MHz이면 extended config 가능 */
-		return pci_cfg_space_size_ext(dev); /* PCI/NVMe: 4KB 테스트 수행 */
+	pci_read_config_dword(dev, pos + PCI_X_STATUS, &status);
+	/* [한국어] PCI-X Status 를 읽어 Mode 2 지원 여부를 본다 */
+	if (status & (PCI_X_STATUS_266MHZ | PCI_X_STATUS_533MHZ))
+		return pci_cfg_space_size_ext(dev);
+	/* [한국어] 266/533MHz 지원 = PCI-X Mode 2. Mode 2 부터 4KB config 가
+	 * 규정되어 있으므로 실제 접근을 시험해 본다. */
 
-	return PCI_CFG_SPACE_SIZE; /* PCI/NVMe: 기본 256B config space */
+	return PCI_CFG_SPACE_SIZE;
+	/* [한국어] PCI-X Mode 1 이하 — 256바이트 */
 }
 
 /*
- * pci_class() - 장치의 class/revision 코드 읽기
+ * [한국어]
+ * pci_class - 장치의 클래스 코드와 리비전을 얻는다
  *
- * NVMe 연결: NVMe 컨트롤러는 class 0x010802(Non-Volatile Memory
- * Controller)를 가진다. 이 값이 pci_setup_device()에서 dev->class에
- * 저장되어 드라이버 매칭(nvme_pci_driver)의 기준이 된다.
+ * @dev: 대상 장치.
+ * @return: offset 0x08 의 4바이트. 하위 8비트 = Revision ID,
+ *          그 위 24비트 = Class Code(base class / sub-class / prog-if).
+ *
+ * 왜 필요한가: 클래스 코드는 "이 장치가 무엇인가"를 벤더와 무관하게 나타내는
+ * 표준 분류다. 드라이버가 특정 벤더가 아니라 종류로 매칭할 수 있게 해 준다.
+ *
+ * NVMe 접점: NVMe 컨트롤러의 클래스 코드는 0x010802 다
+ * (base 0x01 = Mass Storage, sub 0x08 = Non-Volatile Memory,
+ *  prog-if 0x02 = NVM Express). include/linux/pci_ids.h 의
+ * PCI_CLASS_STORAGE_EXPRESS 가 그 값이며, drivers/nvme/host/pci.c:4137 의
+ * nvme_id_table 이 PCI_DEVICE_CLASS(PCI_CLASS_STORAGE_EXPRESS, 0xffffff) 로
+ * 이 클래스 전체를 잡는다. 즉 여기서 읽은 값이 dev->class 에 들어가고,
+ * pci_device_add() → device_add() 이후의 드라이버 매칭에서 nvme 드라이버가
+ * 그 장치를 자기 것으로 인식하는 근거가 된다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_setup_device() → [pci_class] → pci_read_config_dword()
  */
-/* PCI/NVMe: pci_class 함수 정의 */
 static u32 pci_class(struct pci_dev *dev)
 {
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
 	u32 class;
+	/* [한국어] 읽어 온 클래스+리비전 4바이트 */
 
-/* PCI/NVMe: 컴파일 조건: CONFIG_PCI_IOV 정의 시 포함 */
 #ifdef CONFIG_PCI_IOV
-	if (dev->is_virtfn) /* PCI/NVMe: VF는 PF의 SR-IOV 구조체에 저장된 class 사용 */
-		/* PCI/NVMe: 결과 반환: dev->physfn->sriov->class */
+	if (dev->is_virtfn)
 		return dev->physfn->sriov->class;
-/* PCI/NVMe: 컴파일 조건 종료 */
+	/* [한국어] SR-IOV 가상 함수는 자기 config 에 클래스 코드를 갖지 않는다.
+	 * PF(물리 함수)의 SR-IOV capability 가 VF 들의 공통 클래스를 기술하므로,
+	 * PF 쪽에 저장해 둔 값을 그대로 쓴다. */
 #endif
-	pci_read_config_dword(dev, PCI_CLASS_REVISION, &class); /* PCI/NVMe: 설정 공간의 class/revision dword 읽기 */
-	return class; /* PCI/NVMe: class(상위 3바이트)와 revision(하위 1바이트) 반환 */
+	pci_read_config_dword(dev, PCI_CLASS_REVISION, &class);
+	/* [한국어] offset 0x08 — Revision(0x08)과 Class Code(0x09~0x0b)가
+	 * 연속해 있어 한 번의 dword 읽기로 둘 다 얻는다. */
+	return class;
+	/* [한국어] 호출자가 dev->class 에 그대로 저장한다 */
 }
 
 /*
- * pci_subsystem_ids() - subsystem vendor/device ID 읽기
+ * [한국어]
+ * pci_subsystem_ids - 서브시스템 벤더/장치 ID 를 얻는다
  *
- * NVMe 연결: 동일 NVMe controller chip이라도 subsystem vendor/device가
- * 다륾면 firmware, thermal, form factor 등이 달라질 수 있다. quirk나
- * 드라이버 매칭에 사용.
+ * @dev:    대상 장치.
+ * @vendor: 서브시스템 벤더 ID 를 받을 곳.
+ * @device: 서브시스템 장치 ID 를 받을 곳.
+ * @return: 없음.
+ *
+ * 왜 필요한가: Vendor/Device ID 는 칩 자체를 식별하지만, 같은 칩을 여러 회사가
+ * 서로 다른 보드에 얹어 판다. 서브시스템 ID 는 "그 칩을 누가 어떤 제품으로
+ * 만들었는가"를 나타내며, 보드마다 다른 quirk 를 적용할 때 결정적인 단서가 된다.
+ *
+ * config 위치(header type 0 전용):
+ *   0x2c PCI_SUBSYSTEM_VENDOR_ID (16bit)
+ *   0x2e PCI_SUBSYSTEM_ID        (16bit)
+ *
+ * 실행 컨텍스트: 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_setup_device() → [pci_subsystem_ids] → pci_read_config_word()
  */
-/* PCI/NVMe: pci_subsystem_ids 함수 정의 */
 static void pci_subsystem_ids(struct pci_dev *dev, u16 *vendor, u16 *device)
 {
-/* PCI/NVMe: 컴파일 조건: CONFIG_PCI_IOV 정의 시 포함 */
 #ifdef CONFIG_PCI_IOV
-	if (dev->is_virtfn) { /* PCI/NVMe: VF는 PF의 SR-IOV 구조체에서 subsystem ID 상속 */
-		*vendor = dev->physfn->sriov->subsystem_vendor; /* PCI/NVMe: subsystem vendor ID */
-		*device = dev->physfn->sriov->subsystem_device; /* PCI/NVMe: subsystem device ID */
+	if (dev->is_virtfn) {
+		/* [한국어] VF 는 서브시스템 ID 도 자기 config 에 갖지 않는다.
+		 * PF 의 SR-IOV capability 에 기록된 값을 물려받는다. */
+		*vendor = dev->physfn->sriov->subsystem_vendor;
+		/* [한국어] PF 가 기억해 둔 서브시스템 벤더 ID */
+		*device = dev->physfn->sriov->subsystem_device;
+		/* [한국어] PF 가 기억해 둔 서브시스템 장치 ID */
 		return;
 	}
-/* PCI/NVMe: 컴파일 조건 종료 */
 #endif
-	pci_read_config_word(dev, PCI_SUBSYSTEM_VENDOR_ID, vendor); /* PCI/NVMe: 설정 공간에서 subsystem vendor ID 읽기 */
-	pci_read_config_word(dev, PCI_SUBSYSTEM_ID, device); /* PCI/NVMe: 설정 공간에서 subsystem device ID 읽기 */
+	pci_read_config_word(dev, PCI_SUBSYSTEM_VENDOR_ID, vendor);
+	/* [한국어] offset 0x2c */
+	pci_read_config_word(dev, PCI_SUBSYSTEM_ID, device);
+	/* [한국어] offset 0x2e */
 }
 
 /*
- * pci_hdr_type() - PCI header type 읽기
+ * [한국어]
+ * pci_hdr_type - 헤더 타입 바이트를 읽는다
  *
- * NVMe 연결: NVMe 컨트롤러는 PCI_HEADER_TYPE_NORMAL(0x00) 헤더를
- * 사용하며, 이로 인해 pci_setup_device()에서 standard BAR(6개)와
- * INTx/MSI-X를 파싱한다.
+ * @dev: 대상 장치.
+ * @return: offset 0x0e 의 8비트 원본. 하위 7비트가 헤더 타입,
+ *          최상위 비트(0x80, PCI_HEADER_TYPE_MFD)가 멀티펑션 표시다.
+ *
+ * 헤더 타입이란: config space 의 앞 64바이트 중 뒤쪽 48바이트의 레이아웃이
+ * 장치 종류마다 다르다. 그 레이아웃을 고르는 값이다.
+ *   0 (PCI_HEADER_TYPE_NORMAL)  : 일반 장치. BAR 6개(0x10~0x27),
+ *                                 서브시스템 ID(0x2c), ROM(0x30).
+ *   1 (PCI_HEADER_TYPE_BRIDGE)  : PCI-to-PCI 브리지. BAR 2개(0x10~0x17),
+ *                                 버스 번호(0x18~0x1a), I/O 창(0x1c),
+ *                                 MEM 창(0x20), prefetch 창(0x24), ROM(0x38).
+ *   2 (PCI_HEADER_TYPE_CARDBUS) : CardBus 브리지. BAR 1개, 전혀 다른 배치.
+ * 앞 16바이트(Vendor/Device/Command/Status/Class/헤더 타입 등)는 세 타입이
+ * 공통이라, 헤더 타입 자체는 어느 장치에서든 같은 자리에서 읽을 수 있다.
+ *
+ * 멀티펑션 비트: function 0 의 헤더 타입 최상위 비트가 1 이면 그 슬롯에
+ * function 1~7 이 더 있을 수 있다는 뜻이다. pci_scan_slot() 이 이 비트를
+ * 보고 나머지 function 을 훑을지 결정한다.
+ *
+ * NVMe 접점: NVMe 컨트롤러는 header type 0(일반 장치)이므로 BAR 6칸을 갖고,
+ * 그중 BAR0(+64비트면 BAR1)이 컨트롤러 레지스터 창이 된다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_setup_device() → [pci_hdr_type] → pci_read_config_byte()
  */
-/* PCI/NVMe: pci_hdr_type 함수 정의 */
 static u8 pci_hdr_type(struct pci_dev *dev)
 {
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
 	u8 hdr_type;
+	/* [한국어] 읽어 온 헤더 타입 바이트(멀티펑션 비트 포함) */
 
-/* PCI/NVMe: 컴파일 조건: CONFIG_PCI_IOV 정의 시 포함 */
 #ifdef CONFIG_PCI_IOV
-	if (dev->is_virtfn) /* PCI/NVMe: VF는 PF의 SR-IOV 구조체에서 header type 상속 */
-		/* PCI/NVMe: 결과 반환: dev->physfn->sriov->hdr_type */
+	if (dev->is_virtfn)
 		return dev->physfn->sriov->hdr_type;
-/* PCI/NVMe: 컴파일 조건 종료 */
+	/* [한국어] VF 의 헤더 타입도 PF 의 SR-IOV capability 가 기술한다 */
 #endif
-	pci_read_config_byte(dev, PCI_HEADER_TYPE, &hdr_type); /* PCI/NVMe: 설정 공간의 header type 바이트 읽기 */
-	return hdr_type; /* PCI/NVMe: header type(멀티펑션 비트 포함) 반환 */
+	pci_read_config_byte(dev, PCI_HEADER_TYPE, &hdr_type);
+	/* [한국어] offset 0x0e. 세 헤더 타입 모두 같은 자리에 있어,
+	 * 레이아웃을 알기 전에도 안전하게 읽을 수 있다. */
+	return hdr_type;
+	/* [한국어] 호출자가 PCI_HEADER_TYPE_MASK(0x7f)로 타입만 뽑아 쓰고,
+	 * 0x80 비트는 멀티펑션 판정에 따로 쓴다. */
 }
 
-/* PCI/NVMe: 매크로 정의: 레거시 IO 리소스 플래그 */
 #define LEGACY_IO_RESOURCE	(IORESOURCE_IO | IORESOURCE_PCI_FIXED)
+/* [한국어] IDE 컨트롤러의 레거시 고정 I/O 포트(0x1f0, 0x3f6 등)를 나타낼 때
+ * 쓰는 플래그 조합. IORESOURCE_IO = I/O 포트 공간,
+ * IORESOURCE_PCI_FIXED = 주소가 하드웨어에 고정되어 재배치할 수 없음.
+ * 아래 pci_setup_device() 의 IDE 처리에서 사용한다. */
 
 /**
  * pci_intx_mask_broken - Test PCI_COMMAND_INTX_DISABLE writability
@@ -3770,123 +4608,195 @@ static u8 pci_hdr_type(struct pci_dev *dev)
  * at enumeration-time to avoid modifying PCI_COMMAND at run-time.
  */
 /*
- * pci_intx_mask_broken() - PCI_COMMAND_INTX_DISABLE 비트의 쓰기 가능성 테스트
+ * [한국어]
+ * pci_intx_mask_broken - INTx 차단 비트가 실제로 쓰기 가능한지 시험한다
  *
- * NVMe 연결: NVMe는 주로 MSI-X를 사용하지만 INTx disable이 제대로
- * 작동하지 않으면 런타임에 pci_intx() 호출 시 의도치 않은 INTx가 남을
- * 수 있다. 이 함수는 probe 시점에 미리 감지하여 dev->broken_intx_masking
- * 플래그를 설정.
+ * @dev: 대상 장치.
+ * @return: 1 이면 쓰기가 안 된다(= INTx 를 소프트웨어로 막을 수 없다), 0 이면 정상.
+ *
+ * 무엇을 시험하나: Command 레지스터(0x04)의 bit 10(PCI_COMMAND_INTX_DISABLE)은
+ * "이 장치의 레거시 INTx 인터럽트를 내보내지 마라"는 스위치다. PCI 2.3 에서
+ * 추가된 것이라, 그 이전 장치에서는 예약(읽기 전용)이다.
+ *
+ * 왜 열거 시점에 시험하나: 위 영어 주석이 이유를 밝힌다 — 이 시험은
+ * Command 레지스터를 잠시 바꾸는 파괴적 동작이므로, 드라이버가 장치를
+ * 쓰고 있는 런타임에 하면 위험하다. 아직 아무도 쓰지 않는 열거 단계에
+ * 미리 해 두고 결과만 플래그로 남긴다.
+ *
+ * 이름이 부정확하다는 점: 영어 주석대로, PCI 2.3 이전 장치가 이 비트를
+ * 지원하지 않는 것은 "고장"이 아니라 규격대로다. 그래도 커널 입장에서는
+ * 소프트웨어로 인터럽트를 막을 수 없다는 결과가 같아 broken 으로 부른다.
+ *
+ * NVMe 접점: NVMe 컨트롤러는 실제로는 MSI-X 를 쓰지만, VFIO 로 장치를
+ * 사용자 공간에 넘길 때처럼 INTx 를 소프트웨어로 마스킹해야 하는 경우가
+ * 있어 이 정보가 필요하다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥, pci_setup_device() 안에서 호출.
+ *
+ * 호출 체인:
+ *   pci_setup_device() → [pci_intx_mask_broken] → pci_read/write_config_word()
  */
-/* PCI/NVMe: pci_intx_mask_broken 함수 정의 */
 static int pci_intx_mask_broken(struct pci_dev *dev)
 {
-	/* PCI/NVMe: orig 변수 선언/초기화: 원래 레지스터 값. NVMe BAR/COMMAND 백업 */
 	u16 orig, toggle, new;
+	/* [한국어] orig = 원본 Command 값, toggle = 해당 비트만 뒤집은 값,
+	 * new = 되읽은 값. */
 
-	pci_read_config_word(dev, PCI_COMMAND, &orig); /* PCI/NVMe: 원래 COMMAND 레지스터 값 읽기 */
-	toggle = orig ^ PCI_COMMAND_INTX_DISABLE; /* PCI/NVMe: INTx disable bit를 toggle한 값 */
-	pci_write_config_word(dev, PCI_COMMAND, toggle); /* PCI/NVMe: toggle 값 쓰기 */
-	pci_read_config_word(dev, PCI_COMMAND, &new); /* PCI/NVMe: 실제 쓰인 값 읽기 */
+	pci_read_config_word(dev, PCI_COMMAND, &orig);
+	/* [한국어] 원본 백업 — 시험이 끝나면 반드시 되돌린다 */
+	toggle = orig ^ PCI_COMMAND_INTX_DISABLE;
+	/* [한국어] XOR 로 INTx Disable 비트 하나만 반전시킨다. 다른 비트는
+	 * 그대로 두어야 장치의 현재 동작(디코딩 등)을 건드리지 않는다. */
+	pci_write_config_word(dev, PCI_COMMAND, toggle);
+	/* [한국어] 반전된 값을 써 본다 */
+	pci_read_config_word(dev, PCI_COMMAND, &new);
+	/* [한국어] 되읽어 그 비트가 실제로 바뀌었는지 확인 */
 
-	pci_write_config_word(dev, PCI_COMMAND, orig); /* PCI/NVMe: 원래 값 복원 */
+	pci_write_config_word(dev, PCI_COMMAND, orig);
+	/* [한국어] 결과와 무관하게 원본 복원. 판정보다 먼저 복원해 두어야
+	 * 어떤 경로로도 장치를 이상한 상태로 남기지 않는다. */
 
 	/*
 	 * PCI_COMMAND_INTX_DISABLE was reserved and read-only prior to PCI
 	 * r2.3, so strictly speaking, a device is not *broken* if it's not
 	 * writable.  But we'll live with the misnomer for now.
 	 */
-	if (new != toggle) /* PCI/NVMe: 쓰기가 반영되지 않으면 INTx masking이 broken */
-		return 1; /* PCI/NVMe: broken_intx_masking = true */
-	return 0; /* PCI/NVMe: 정상 동작 */
+	if (new != toggle)
+		return 1;
+	/* [한국어] 쓴 값이 그대로 읽히지 않았다 = 그 비트가 읽기 전용이다.
+	 * 호출자가 dev->broken_intx_masking 을 세운다. */
+	return 0;
+	/* [한국어] 정상적으로 쓰기가 되는 장치 */
 }
 
 /*
- * early_dump_pci_device() - probe 시점에 장치의 standard config space를 덤프
+ * [한국어]
+ * early_dump_pci_device - 장치의 표준 config space 256바이트를 통째로 로그에 찍는다
  *
- * NVMe 연결: pci_early_dump 커널 파라미터가 켜져 있으면 NVMe 컨트롤러의
- * 설정 공간을 부팅 초기에 16진수로 출력. 디버깅/ Bring-up 시 유용.
+ * @pdev: 대상 장치.
+ * @return: 없음.
+ *
+ * 왜 필요한가: 하드웨어 브링업이나 열거 단계의 버그를 쫓을 때, 커널이 무엇을
+ * 보고 판단했는지 원본 그대로 확인해야 할 때가 있다. pci_early_dump 커널
+ * 파라미터가 켜져 있을 때만 pci_setup_device() 가 이 함수를 부른다.
+ *
+ * 왜 256바이트만인가: 이 시점에는 dev->cfg_size 판정(pci_cfg_space_size)이
+ * 아직 이루어지지 않아 확장 영역 접근 가능 여부를 모른다. 어느 장치에나
+ * 있는 표준 영역만 안전하게 덤프한다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥. 배열 64칸(256바이트)을 스택에 잡는다.
+ *
+ * 호출 체인:
+ *   pci_setup_device() → [early_dump_pci_device] → print_hex_dump()
  */
-/* PCI/NVMe: early_dump_pci_device 함수 정의 */
 static void early_dump_pci_device(struct pci_dev *pdev)
 {
-	/* PCI/NVMe: sizeof 함수 호출 */
 	u32 value[PCI_CFG_SPACE_SIZE / sizeof(u32)];
-	/* PCI/NVMe: i 변수 선언/초기화: 반복 인덱스. NVMe BAR/버스/슬롯 순회 */
+	/* [한국어] 256 / 4 = 64칸. config 를 dword 단위로 모아 담을 버퍼 */
 	int i;
+	/* [한국어] 순회 인덱스 */
 
-	pci_info(pdev, "config space:\n"); /* PCI/NVMe: config space 덤프 시작 로그 */
+	pci_info(pdev, "config space:\n");
+	/* [한국어] 덤프 시작을 알리는 머리글 */
 
-	for (i = 0; i < ARRAY_SIZE(value); i++) /* PCI/NVMe: 256B를 4바이트 단위로 읽기 */
-		pci_read_config_dword(pdev, i * sizeof(u32), &value[i]); /* PCI/NVMe: offset i*4에서 dword 읽기 */
+	for (i = 0; i < ARRAY_SIZE(value); i++)
+		pci_read_config_dword(pdev, i * sizeof(u32), &value[i]);
+	/* [한국어] 오프셋 0, 4, 8 … 252 를 차례로 읽는다. config 접근은
+	 * dword 단위가 기본이라 4의 배수 오프셋으로 접근한다. */
 
-	/* PCI/NVMe: 16진수 덤프 출력 */
 	print_hex_dump(KERN_INFO, "", DUMP_PREFIX_OFFSET, 16, 1,
-		       value, ARRAY_SIZE(value) * sizeof(u32), false); /* PCI/NVMe: 읽은 256B를 16진수로 출력 */
+		       value, ARRAY_SIZE(value) * sizeof(u32), false);
+	/* [한국어] 커널 표준 16진 덤프. 한 줄에 16바이트씩, 1바이트 단위로
+	 * 끊어 오프셋을 앞에 붙여 출력한다. 마지막 false 는 ASCII 병기를
+	 * 하지 않는다는 뜻이다. */
 }
 
 /*
- * pci_type_str() - PCIe/PCI 장치 유형을 사람이 읽을 수 있는 문자열로 변환
+ * [한국어]
+ * pci_type_str - 장치 종류를 사람이 읽는 문자열로 바꾼다
  *
- * NVMe 연결: NVMe 컨트롤러는 일반적으로 "PCIe Endpoint"로 인쇄. 로그를
- * 통해 NVMe 장치가 정상적으로 PCIe Endpoint로 인식되었는지 확인 가능.
+ * @dev: 대상 장치. hdr_type 과 pcie_flags_reg 가 이미 채워져 있어야 한다.
+ * @return: "PCIe Endpoint" 같은 정적 문자열(해제 금지).
+ *
+ * 왜 필요한가: 부팅 로그에서 각 장치가 무엇으로 인식되었는지 한눈에 보이게
+ * 하려는 목적이다. 특히 상향/하향 포트 타입 보정이 있었는지, 장치가 PCIe 로
+ * 잡혔는지 구식 PCI 로 잡혔는지 진단할 때 쓰인다.
+ *
+ * NVMe 접점: NVMe SSD 는 PCIe Endpoint 이므로 로그에 "PCIe Endpoint" 로
+ * 나타난다. 만약 다르게 나온다면 PCIe capability 를 못 찾았거나 타입 필드가
+ * 이상하다는 신호다.
+ *
+ * 실행 컨텍스트: 순수 함수.
+ *
+ * 호출 체인:
+ *   pci_setup_device() → [pci_type_str]
  */
-/* PCI/NVMe: 장치 타입 문자열 반환 */
 static const char *pci_type_str(struct pci_dev *dev)
 {
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
+	/*
+	 * [한국어] 인덱스가 곧 PCI_EXP_TYPE_* 값인 문자열 표.
+	 * 0x0 Endpoint, 0x1 Legacy Endpoint, 0x4 Root Port,
+	 * 0x5 Switch Upstream, 0x6 Switch Downstream,
+	 * 0x7 PCIe-to-PCI/PCI-X bridge, 0x8 PCI/PCI-X-to-PCIe bridge,
+	 * 0x9 Root Complex Integrated Endpoint, 0xa Root Complex Event Collector.
+	 * 0x2, 0x3 은 정의되지 않은 자리라 "unknown" 으로 채워 표의 정렬을 맞춘다.
+	 */
 	static const char * const str[] = {
-		/* PCI/NVMe: 후속 코드 동작 수행 */
 		"PCIe Endpoint",
-		/* PCI/NVMe: 후속 코드 동작 수행 */
+		/* [한국어] 타입 0x0 — 일반 PCIe 엔드포인트. NVMe SSD 가 여기다 */
 		"PCIe Legacy Endpoint",
-		/* PCI/NVMe: 후속 코드 동작 수행 */
+		/* [한국어] 타입 0x1 — I/O 공간을 쓰는 등 구식 동작을 남긴 엔드포인트 */
 		"PCIe unknown",
-		/* PCI/NVMe: 후속 코드 동작 수행 */
+		/* [한국어] 타입 0x2 — 스펙상 정의되지 않은 값 */
 		"PCIe unknown",
-		/* PCI/NVMe: 후속 코드 동작 수행 */
+		/* [한국어] 타입 0x3 — 스펙상 정의되지 않은 값 */
 		"PCIe Root Port",
-		/* PCI/NVMe: 후속 코드 동작 수행 */
+		/* [한국어] 타입 0x4 — 루트 컴플렉스에서 나오는 하향 포트 */
 		"PCIe Switch Upstream Port",
-		/* PCI/NVMe: 후속 코드 동작 수행 */
+		/* [한국어] 타입 0x5 — 스위치의 위쪽 포트 */
 		"PCIe Switch Downstream Port",
-		/* PCI/NVMe: 후속 코드 동작 수행 */
+		/* [한국어] 타입 0x6 — 스위치의 아래쪽 포트들 */
 		"PCIe to PCI/PCI-X bridge",
-		/* PCI/NVMe: 후속 코드 동작 수행 */
+		/* [한국어] 타입 0x7 — PCIe 아래에 구식 PCI 를 붙이는 정방향 브리지 */
 		"PCI/PCI-X to PCIe bridge",
-		/* PCI/NVMe: 후속 코드 동작 수행 */
+		/* [한국어] 타입 0x8 — 구식 PCI 아래에 PCIe 를 붙이는 역방향 브리지 */
 		"PCIe Root Complex Integrated Endpoint",
-		/* PCI/NVMe: 후속 코드 동작 수행 */
+		/* [한국어] 타입 0x9 — 링크 없이 루트 컴플렉스에 내장된 장치 */
 		"PCIe Root Complex Event Collector",
+		/* [한국어] 타입 0xa — 내장 엔드포인트들의 오류를 모아 보고하는 장치 */
 	};
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
 	int type;
+	/* [한국어] 표에서 찾을 PCIe 포트 타입 */
 
-	if (pci_is_pcie(dev)) { /* PCI/NVMe: PCIe 장치이면 */
-		type = pci_pcie_type(dev); /* PCI/NVMe: PCIe capability의 device/port type 필드 읽기 */
-		/* PCI/NVMe: 조걸 분기, 값 크기 비교 */
+	if (pci_is_pcie(dev)) {
+		/* [한국어] pcie_cap 이 0 이 아니면 PCIe 장치다 */
+		type = pci_pcie_type(dev);
+		/* [한국어] 캐시해 둔 pcie_flags_reg 에서 타입 필드를 뽑는다.
+		 * set_pcie_port_type() 이 보정한 값이 반영된다. */
 		if (type < ARRAY_SIZE(str))
-			return str[type]; /* PCI/NVMe: NVMe 컨트롤러는 보통 여기서 "PCIe Endpoint" 반환 */
+			return str[type];
+		/* [한국어] 표 안이면 그대로 반환 */
 
-		/* PCI/NVMe: 결과 반환: "PCIe unknown" */
 		return "PCIe unknown";
+		/* [한국어] 표 밖의 값 — 미래 스펙이거나 고장난 장치 */
 	}
 
-	switch (dev->hdr_type) { /* PCI/NVMe: PCIe가 아닌 legacy PCI 장치 유형 */
-	/* PCI/NVMe: case 분기: PCI_HEADER_TYPE_NORMAL */
+	switch (dev->hdr_type) {
+		/* [한국어] PCIe 가 아니면 헤더 타입으로 분류할 수밖에 없다.
+		 * 구식 PCI 에는 포트 타입 개념 자체가 없기 때문이다. */
 	case PCI_HEADER_TYPE_NORMAL:
-		/* PCI/NVMe: 결과 반환: "conventional PCI endpoint" */
 		return "conventional PCI endpoint";
-	/* PCI/NVMe: case 분기: PCI_HEADER_TYPE_BRIDGE */
+		/* [한국어] 헤더 타입 0 — 일반 장치 */
 	case PCI_HEADER_TYPE_BRIDGE:
-		/* PCI/NVMe: 결과 반환: "conventional PCI bridge" */
 		return "conventional PCI bridge";
-	/* PCI/NVMe: case 분기: PCI_HEADER_TYPE_CARDBUS */
+		/* [한국어] 헤더 타입 1 — PCI-to-PCI 브리지 */
 	case PCI_HEADER_TYPE_CARDBUS:
-		/* PCI/NVMe: 결과 반환: "CardBus bridge" */
 		return "CardBus bridge";
+		/* [한국어] 헤더 타입 2 — CardBus 브리지 */
 	default:
-		/* PCI/NVMe: 결과 반환: "conventional PCI" */
 		return "conventional PCI";
+		/* [한국어] 스펙에 없는 헤더 타입. 이 경우 pci_setup_device() 가
+		 * 아래에서 -EIO 로 거절하므로 실제로는 거의 보이지 않는다. */
 	}
 }
 
@@ -3900,161 +4810,266 @@ static const char *pci_type_str(struct pci_dev *dev)
  * Returns 0 on success and negative if unknown type of device (not normal,
  * bridge or CardBus).
  */
-/* PCI/NVMe: PCI 장치 공통 초기화. NVMe 장치의 class, BAR, MSI-X capability 등 설정 */
-/* PCI/NVMe: pci_setup_device 함수 정의 */
+/**
+ * pci_setup_device - Fill in class and map information of a device
+ * @dev: the device structure to fill
+ *
+ * Initialize the device structure with information about the device's
+ * vendor,class,memory and IO-space addresses, IRQ lines etc.
+ * Called at initialisation of the PCI subsystem and by CardBus services.
+ * Returns 0 on success and negative if unknown type of device (not normal,
+ * bridge or CardBus).
+ */
+/*
+ * [한국어]
+ * pci_setup_device - config space 를 해석해 pci_dev 를 채운다 (헤더 타입 분기의 중심)
+ *
+ * @dev: 이미 vendor/device/devfn/bus 가 채워진 갓 만들어진 pci_dev.
+ * @return: 0 이면 성공. 알 수 없는 헤더 타입이면 -EIO(호출자가 이 장치를 버린다).
+ *          pci_set_of_node() 실패 시 그 오류를 그대로 전달한다.
+ *
+ * 왜 필요한가: pci_scan_device() 가 "여기 장치가 있다"까지 확인했다면, 이
+ * 함수가 "그 장치가 무엇이고 어떤 자원을 요구하는가"를 알아낸다. 클래스,
+ * 리비전, 서브시스템 ID, 헤더 타입, BAR, IRQ, 그리고 각종 성질 플래그가
+ * 여기서 확정된다. 이 함수가 끝나야 pci_device_add() 로 넘어갈 수 있다.
+ *
+ * ★ 헤더 타입 분기 ★ — 이 함수의 핵심이다. config space 의 앞 16바이트
+ * (Vendor/Device/Command/Status/Class/CacheLine/헤더 타입/BIST)는 모든 장치가
+ * 같지만, 0x10 이후는 헤더 타입에 따라 완전히 다르다:
+ *
+ *   type 0 (일반 장치, NVMe SSD 가 여기):
+ *     0x10~0x27 BAR 0~5 (6칸)
+ *     0x28      CardBus CIS 포인터
+ *     0x2c/0x2e 서브시스템 벤더/장치 ID
+ *     0x30      확장 ROM 주소
+ *     0x34      Capabilities 포인터
+ *     0x3c/0x3d Interrupt Line / Pin
+ *
+ *   type 1 (PCI-to-PCI 브리지):
+ *     0x10~0x17 BAR 0~1 (2칸뿐 — 브리지는 자기 자원이 거의 없다)
+ *     0x18~0x1b primary/secondary/subordinate 버스 번호 + latency
+ *     0x1c~0x1d I/O 창 base/limit
+ *     0x20~0x23 메모리 창 base/limit
+ *     0x24~0x2f prefetchable 창 base/limit (+ 상위 32비트)
+ *     0x30~0x33 I/O 창 상위 16비트
+ *     0x34      Capabilities 포인터 (type 0 과 같은 자리)
+ *     0x38      확장 ROM 주소 (type 0 의 0x30 과 다른 자리!)
+ *     0x3e      Bridge Control
+ *     서브시스템 ID 는 표준 필드가 없어 SSVID capability 로 얻는다.
+ *
+ *   type 2 (CardBus 브리지):
+ *     BAR 1칸, 0x14 에 Capabilities 포인터(다른 두 타입은 0x34),
+ *     0x18~0x1a 버스 번호, 메모리/IO 창이 각각 2쌍씩, 서브시스템 ID 는 0x40/0x42.
+ *
+ * 따라서 pci_read_bases() 에 넘기는 BAR 개수(6/2/1)와 ROM 오프셋
+ * (PCI_ROM_ADDRESS/PCI_ROM_ADDRESS1/없음)이 타입마다 다르고, 서브시스템 ID 를
+ * 얻는 방법도 셋 다 다르다.
+ *
+ * 정합성 검사: 헤더 타입과 클래스 코드는 서로 맞아야 한다. 예를 들어 헤더
+ * 타입 0(일반 장치)인데 클래스가 PCI-to-PCI 브리지라면 모순이다. 그런 장치는
+ * bad 레이블로 가서 클래스를 "정의되지 않음"으로 바꾸고 계속 진행한다
+ * (장치를 버리지는 않는다 — BAR 정보는 여전히 유효할 수 있으므로).
+ *
+ * NVMe 접점: NVMe SSD 는 header type 0 이고 클래스는 0x010802 다. 이 함수의
+ * type 0 분기에서 pci_read_bases(dev, PCI_STD_NUM_BARS, PCI_ROM_ADDRESS) 가
+ * 실행되어 BAR0 의 크기와 타입이 dev->resource[0] 에 확정된다. 나중에
+ * drivers/nvme/host/pci.c 가 pci_resource_start/len(pdev, 0) 으로 읽어 가는
+ * 바로 그 값이다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥. 장치가 아직 어떤 드라이버에도 바인딩되지
+ * 않은 상태라, BAR 를 흔들거나 Command 를 바꾸는 조작이 안전하다.
+ *
+ * 호출 체인:
+ *   pci_scan_device() → [pci_setup_device]
+ *     → pci_hdr_type(), set_pcie_port_type(), pci_class(),
+ *       pci_cfg_space_size(), pci_read_irq(), pci_read_bases(),
+ *       pci_read_bridge_windows()
+ */
 int pci_setup_device(struct pci_dev *dev)
 {
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
 	u32 class;
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
+	/* [한국어] 클래스+리비전 4바이트, 나중에는 클래스만 담는 용도로 재사용 */
 	u16 cmd;
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
+	/* [한국어] Command 레지스터 값(비정상 BAR 장치의 디코딩을 끌 때 사용) */
 	u8 hdr_type;
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
+	/* [한국어] 헤더 타입 원본(멀티펑션 비트 포함) */
 	int err, pos = 0;
-	/* PCI/NVMe: region 변수 선언/초기화: pci_bus_region. bus 주소 ↔ CPU physical address 변환용 */
+	/* [한국어] err = 오류 코드, pos = capability 오프셋(브리지의 SSVID 용) */
 	struct pci_bus_region region;
-	/* PCI/NVMe: 후속 코드 동작 수행 */
+	/* [한국어] 레거시 IDE quirk 에서 고정 포트 주소를 리소스로 바꿀 때 쓰는 버퍼 */
 	struct resource *res;
+	/* [한국어] 그 quirk 에서 채울 리소스 슬롯 포인터 */
 
-	/* PCI/NVMe: 헤더 타입 읽기 */
 	hdr_type = pci_hdr_type(dev);
+	/* [한국어] offset 0x0e — 이후 모든 파싱의 분기 기준이 되는 값 */
 
-	/* PCI/NVMe: 구조체 필드에 값 저장: dev->sysdata */
 	dev->sysdata = dev->bus->sysdata;
-	/* PCI/NVMe: dev->dev.parent 설정: 부모 device(NVMe PCIe 계층) */
+	/* [한국어] 버스로부터 컨트롤러 전용 데이터 포인터를 물려받는다 */
 	dev->dev.parent = dev->bus->bridge;
-	/* PCI/NVMe: dev->dev.bus 플래그: 소속 PCI 버스(NVMe BDF 경로) */
+	/* [한국어] sysfs 계층에서 이 장치를 브리지 아래에 놓는다 */
 	dev->dev.bus = &pci_bus_type;
-	/* PCI/NVMe: FIELD_GET 함수 호출 */
+	/* [한국어] 드라이버 모델의 "PCI 버스 타입"에 소속시킨다. 이 값이 있어야
+	 * device_add() 이후 pci_bus_type.match(= pci_bus_match) 가 불려
+	 * id_table 기반 드라이버 매칭이 일어난다. NVMe 드라이버가 이 장치를
+	 * 자기 것으로 인식하게 되는 출발점이다. */
 	dev->hdr_type = FIELD_GET(PCI_HEADER_TYPE_MASK, hdr_type);
-	/* PCI/NVMe: FIELD_GET 함수 호출 */
+	/* [한국어] 마스크 0x7f — 멀티펑션 비트를 제외한 순수 헤더 타입(0/1/2) */
 	dev->multifunction = FIELD_GET(PCI_HEADER_TYPE_MFD, hdr_type);
-	/* PCI/NVMe: 구조체 필드에 값 저장: dev->error_state */
+	/* [한국어] 마스크 0x80 — 이 슬롯에 function 이 더 있을 수 있다는 표시.
+	 * pci_scan_slot() 이 function 1~7 을 훑을지 결정할 때 본다. */
 	dev->error_state = pci_channel_io_normal;
-	/* PCI/NVMe: PCIe 포트 타입 설정 */
+	/* [한국어] AER/오류 복구용 채널 상태의 초기값 = 정상. 오류가 나면
+	 * pci_channel_io_frozen 등으로 바뀌고, 드라이버의 err_handler 가
+	 * 그 상태를 보고 대응한다(NVMe 도 err_handler 를 등록한다). */
 	set_pcie_port_type(dev);
+	/* [한국어] PCIe capability 를 찾아 pcie_cap/포트 타입/MPSS/ASPM 지원을
+	 * 확정한다. 이후 pci_is_pcie() 가 의미를 갖는다. */
 
-	/* PCI/NVMe: OF node 연결 */
 	err = pci_set_of_node(dev);
-	/* PCI/NVMe: 조걸 분기, 조건에 따른 실행 경로 선택 */
+	/* [한국어] Device Tree 에서 이 BDF 에 대응하는 노드를 찾아 연결한다 */
 	if (err)
-		/* PCI/NVMe: 결과 반환: err */
 		return err;
-	/* PCI/NVMe: ACPI fwnode 연결 */
+	/* [한국어] DT 파싱 오류 — 이 장치를 만들 수 없다 */
 	pci_set_acpi_fwnode(dev);
+	/* [한국어] ACPI 시스템이면 대응하는 ACPI 핸들을 연결한다.
+	 * 전원 관리(_PS0/_PS3)와 핫플러그 정보가 여기서 온다. */
 
-	/* PCI/NVMe: PCI 슬롯 할당 */
 	pci_dev_assign_slot(dev);
+	/* [한국어] 이 장치가 속한 물리 슬롯(struct pci_slot)이 이미 등록되어
+	 * 있으면 연결한다. sysfs 의 slot 링크와 핫플러그에 쓰인다. */
 
 	/*
 	 * Assume 32-bit PCI; let 64-bit PCI cards (which are far rarer)
 	 * set this higher, assuming the system even supports it.
 	 */
-	/* PCI/NVMe: 구조체 필드에 값 저장: dev->dma_mask */
 	dev->dma_mask = 0xffffffff;
+	/* [한국어] DMA 주소 마스크의 보수적 기본값 = 32비트.
+	 * 64비트 DMA 가 가능한 장치는 드라이버가 dma_set_mask() 로 올린다.
+	 * NVMe 드라이버도 probe 에서 64비트로 올린다. 기본값을 낮게 두는 이유는,
+	 * 능력을 과대평가해 4GB 위 버퍼를 넘겨 주면 데이터가 조용히 깨지기
+	 * 때문이다(반대로 과소평가하면 성능만 손해다). */
 
 	/*
 	 * Assume 64-bit addresses for MSI initially. Will be changed to 32-bit
 	 * if MSI (rather than MSI-X) capability does not have
 	 * PCI_MSI_FLAGS_64BIT. Can also be overridden by driver.
 	 */
-	/* PCI/NVMe: DMA_BIT_MASK 함수 호출 */
 	dev->msi_addr_mask = DMA_BIT_MASK(64);
+	/* [한국어] MSI 메시지를 쓸 주소의 폭. 여기서는 낙관적으로 64비트로 두고,
+	 * MSI capability 에 64비트 지원 비트가 없으면 나중에 32비트로 낮춘다.
+	 * MSI-X 는 언제나 64비트 주소를 지원하므로 그대로 유지된다 —
+	 * NVMe 는 MSI-X 를 쓰므로 이 값이 유지된다. */
 
-	/* PCI/NVMe: 장치 이름 설정 */
 	dev_set_name(&dev->dev, "%04x:%02x:%02x.%d", pci_domain_nr(dev->bus),
-		     /* PCI/NVMe: PCI_SLOT 함수 호출 */
 		     dev->bus->number, PCI_SLOT(dev->devfn),
-		     /* PCI/NVMe: PCI_FUNC 함수 호출 */
 		     PCI_FUNC(dev->devfn));
+	/* [한국어] 익숙한 "0000:01:00.0" 형태의 BDF 이름을 만든다.
+	 * devfn 은 (device << 3) | function 으로 압축된 8비트라,
+	 * PCI_SLOT 이 상위 5비트(장치 번호), PCI_FUNC 이 하위 3비트(함수 번호)를
+	 * 뽑아낸다. lspci 와 sysfs 에 이 이름이 그대로 나온다. */
 
-	/* PCI/NVMe: Class Code/Revision 읽기 */
 	class = pci_class(dev);
+	/* [한국어] offset 0x08 의 클래스+리비전 */
 
-	/* PCI/NVMe: 구조체 필드에 비트 마스크 적용: dev->revision */
 	dev->revision = class & 0xff;
+	/* [한국어] 하위 8비트가 Revision ID — 같은 칩의 판올림 구분 */
 	dev->class = class >> 8;		    /* upper 3 bytes */
+	/* [한국어] 상위 24비트가 Class Code. NVMe 라면 0x010802 가 된다.
+	 * 이 값이 드라이버 매칭의 기준이다. */
 
-	/* PCI/NVMe: 조걸 분기, 조건에 따른 실행 경로 선택 */
 	if (pci_early_dump)
-		/* PCI/NVMe: 초기 config space 덤프 */
 		early_dump_pci_device(dev);
+	/* [한국어] pci_early_dump 커널 파라미터가 켜져 있을 때만 config 덤프 */
 
 	/* Need to have dev->class ready */
-	/* PCI/NVMe: config space 크기 결정 */
 	dev->cfg_size = pci_cfg_space_size(dev);
+	/* [한국어] 위 영어 주석대로 pci_cfg_space_size() 가 클래스 코드를
+	 * 참조하므로(호스트 브리지 판정), dev->class 를 채운 뒤에 불러야 한다.
+	 * 결과가 4096 이어야 확장 capability(AER/LTR 등)를 쓸 수 있다. */
 
 	/* Need to have dev->cfg_size ready */
-	/* PCI/NVMe: Thunderbolt 장치 표시 */
 	set_pcie_thunderbolt(dev);
+	/* [한국어] Thunderbolt VSEC 는 확장 영역에 있으므로 cfg_size 확정 후에
+	 * 불러야 한다(영어 주석의 순서 요구). */
 
-	/* PCI/NVMe: CXL 장치 표시 */
 	set_pcie_cxl(dev);
+	/* [한국어] CXL DVSEC 도 확장 영역에 있다. 상위로 재귀하며 링크 상태 갱신 */
 
-	/* PCI/NVMe: 신뢰할 수 없는 장치 표시 */
 	set_pcie_untrusted(dev);
+	/* [한국어] 위 두 판정과 부모의 상태를 종합해 신뢰 여부를 정한다.
+	 * IOMMU 정책과 ATS 허용에 영향을 준다. */
 
-	/* PCI/NVMe: 조걸 분기, 조건에 따른 실행 경로 선택 */
 	if (pci_is_pcie(dev))
-		/* PCI/NVMe: 지원 링크 속도 획득 */
 		dev->supported_speeds = pcie_get_supported_speeds(dev);
+	/* [한국어] 이 장치가 지원하는 링크 속도 집합을 비트맵으로 캐시한다.
+	 * 링크 속도 강등 진단(pcie_report_downtraining)과 sysfs 표시에 쓰인다. */
 
 	/* "Unknown power state" */
-	/* PCI/NVMe: 구조체 필드에 값 저장: dev->current_state */
 	dev->current_state = PCI_UNKNOWN;
+	/* [한국어] 전원 상태(D0~D3) 를 아직 확인하지 않았다는 표시.
+	 * pci_pm_init() 이 PM capability 를 읽어 실제 상태로 갱신한다. */
 
 	/* Early fixups, before probing the BARs */
-	/* PCI/NVMe: 장치 quirk/workaround 적용 */
 	pci_fixup_device(pci_fixup_early, dev);
+	/* [한국어] BAR 를 건드리기 전에 적용해야 하는 quirk 를 실행한다.
+	 * 예: BAR 가 쓰레기 값인 장치에 non_compliant_bars 를 세우는 quirk.
+	 * 이 시점에 해야 아래 pci_read_bases() 가 그 표시를 존중할 수 있다. */
 
-	/* PCI/NVMe: 제거 가능 장치 표시 */
 	pci_set_removable(dev);
+	/* [한국어] 사용자 제거 가능 여부를 sysfs 속성으로 표시 */
 
-	/* PCI/NVMe: pci_info() 진단 메시지 출력. NVMe 초기화/리소스 상태 기록 */
-	pci_info(dev, "[%04x:%04x] type %02x class %#08x %s\n", /* PCI/NVMe: 진단/오류/경고 메시지 출력 */
-		 /* PCI/NVMe: 후속 코드 동작 수행 */
+	pci_info(dev, "[%04x:%04x] type %02x class %#08x %s\n",
 		 dev->vendor, dev->device, dev->hdr_type, dev->class,
-		 /* PCI/NVMe: 장치 타입 문자열 반환 */
 		 pci_type_str(dev));
+	/* [한국어] 열거 결과 한 줄 요약. NVMe SSD 라면
+	 * "[144d:a80a] type 00 class 0x010802 PCIe Endpoint" 같은 형태가 된다.
+	 * 부팅 로그에서 SSD 가 제대로 인식되었는지 확인하는 첫 단서다. */
 
 	/* Device class may be changed after fixup */
-	/* PCI/NVMe: 비트 연산으로 값 설정/마스크: class */
 	class = dev->class >> 8;
+	/* [한국어] quirk 가 클래스를 바꿨을 수 있으므로 다시 읽어 온다.
+	 * 8비트 더 내려 base class + sub-class 만 남긴다(prog-if 제외) —
+	 * 아래 비교 상수 PCI_CLASS_BRIDGE_PCI 등이 그 형식이다. */
 
-	/* PCI/NVMe: 조걸 분기, 값 크기 비교 */
 	if (dev->non_compliant_bars && !dev->mmio_always_on) {
-		/* PCI/NVMe: PCI config space 16-bit 읽기. COMMAND/STATUS 등 워드 단위 접근 */
-		pci_read_config_word(dev, PCI_COMMAND, &cmd); /* PCI/NVMe: PCI config space 읽기. NVMe capability/CSR 탐색 */
-		/* PCI/NVMe: 조걸 분기, 플래그/비트 마스크 검사 */
+		/* [한국어] quirk 가 "이 장치의 BAR 는 믿을 수 없다"고 표시했고,
+		 * 디코딩을 꺼도 되는 장치인 경우 */
+		pci_read_config_word(dev, PCI_COMMAND, &cmd);
+		/* [한국어] 현재 Command 값 확인 */
 		if (cmd & (PCI_COMMAND_IO | PCI_COMMAND_MEMORY)) {
-			/* PCI/NVMe: pci_info() 진단 메시지 출력. NVMe 초기화/리소스 상태 기록 */
-			pci_info(dev, "device has non-compliant BARs; disabling IO/MEM decoding\n"); /* PCI/NVMe: 진단/오류/경고 메시지 출력 */
-			/* PCI/NVMe: 비트 연산으로 값 설정/마스크: cmd & */
+			/* [한국어] 디코딩이 켜져 있다면 위험하다 — BAR 값이 쓰레기인데
+			 * 그 주소를 디코딩하고 있으면 다른 장치의 트랜잭션을 가로챌 수 있다 */
+			pci_info(dev, "device has non-compliant BARs; disabling IO/MEM decoding\n");
 			cmd &= ~PCI_COMMAND_IO;
-			/* PCI/NVMe: 비트 연산으로 값 설정/마스크: cmd & */
+			/* [한국어] I/O 공간 응답 비활성화 */
 			cmd &= ~PCI_COMMAND_MEMORY;
-			/* PCI/NVMe: PCI config space 16-bit 쓰기. COMMAND decode/MSE/IOSE 비트 제어 */
-			pci_write_config_word(dev, PCI_COMMAND, cmd); /* PCI/NVMe: PCI config space 쓰기. NVMe 레지스터/비트 제어 */
+			/* [한국어] 메모리 공간 응답 비활성화 */
+			pci_write_config_word(dev, PCI_COMMAND, cmd);
+			/* [한국어] 반영. 이 장치는 이후 주소 디코딩을 하지 않는다 */
 		}
 	}
 
-	/* PCI/NVMe: INTx 마스크 쓰기 가능 여부 검사 */
 	dev->broken_intx_masking = pci_intx_mask_broken(dev);
+	/* [한국어] INTx 차단 비트가 쓰기 가능한지 지금(아무도 장치를 쓰지 않을 때)
+	 * 시험해 결과만 남긴다 */
 
 	switch (dev->hdr_type) {		    /* header type */
+		/* [한국어] ★여기서부터가 헤더 타입별 레이아웃 분기다★ */
 	case PCI_HEADER_TYPE_NORMAL:		    /* standard header */
-		/* PCI/NVMe: 조걸 분기, 값 일치 여부 검사 */
+		/* [한국어] type 0 — 일반 장치. NVMe 컨트롤러가 여기로 온다 */
 		if (class == PCI_CLASS_BRIDGE_PCI)
-			/* PCI/NVMe: 오류 처리/종료 지점으로 이동: bad */
 			goto bad;
-		/* PCI/NVMe: INTx 인터럽트 라인 읽기 */
+		/* [한국어] 헤더는 일반 장치인데 클래스는 PCI 브리지라고 주장한다 =
+		 * 모순. 브리지 레이아웃으로 읽을 수도, 클래스를 믿을 수도 없다. */
 		pci_read_irq(dev);
-		/* PCI/NVMe: 표준 BAR 6개 일괄 읽기. NVMe PCIe 엔드포인트 리소스 획득 */
+		/* [한국어] 0x3c/0x3d 의 INTx 정보를 읽는다 */
 		pci_read_bases(dev, PCI_STD_NUM_BARS, PCI_ROM_ADDRESS);
+		/* [한국어] ★핵심★ BAR 6칸(0x10~0x27)과 ROM BAR(0x30)를 읽어
+		 * dev->resource[] 를 채운다. NVMe 의 BAR0(대개 64비트 MEM BAR)이
+		 * 여기서 크기와 타입이 확정되어 resource[0] 에 들어간다. */
 
-		/* PCI/NVMe: 서브시스템 ID 읽기 */
 		pci_subsystem_ids(dev, &dev->subsystem_vendor, &dev->subsystem_device);
+		/* [한국어] type 0 은 0x2c/0x2e 에 서브시스템 ID 표준 필드가 있다 */
 
 		/*
 		 * Do the ugly legacy mode stuff here rather than broken chip
@@ -4062,205 +5077,261 @@ int pci_setup_device(struct pci_dev *dev)
 		 * addresses. These are not always echoed in BAR0-3, and
 		 * BAR0-3 in a few cases contain junk!
 		 */
-		/* PCI/NVMe: 조걸 분기, 값 일치 여부 검사 */
 		if (class == PCI_CLASS_STORAGE_IDE) {
-			/* PCI/NVMe: 지역 변수 선언 및 초기화 */
+			/* [한국어] IDE 컨트롤러 전용 예외 처리. 레거시 모드로 동작하는
+			 * IDE 는 BAR 대신 PC 시절부터 고정된 I/O 포트를 쓴다.
+			 * 영어 주석대로 그 주소가 BAR 에 반영되지 않거나 아예 쓰레기가
+			 * 들어 있는 칩이 있어, BAR 를 무시하고 고정 주소를 박아 넣는다. */
 			u8 progif;
-			/* PCI/NVMe: PCI config space 8-bit 읽기. secondary/subordinate bus 등 바이트 접근 */
-			pci_read_config_byte(dev, PCI_CLASS_PROG, &progif); /* PCI/NVMe: PCI config space 읽기. NVMe capability/CSR 탐색 */
-			/* PCI/NVMe: 조걸 분기, 값 일치 여부 검사 */
+			/* [한국어] 클래스 코드의 프로그래밍 인터페이스 바이트(0x09).
+			 * IDE 에서는 각 채널이 레거시 모드인지 네이티브 모드인지를 나타낸다. */
+			pci_read_config_byte(dev, PCI_CLASS_PROG, &progif);
+			/* [한국어] offset 0x09 */
 			if ((progif & 1) == 0) {
-				/* PCI/NVMe: region.start 설정: 리소스 시작 주소(NVMe BAR 매핑 범위) */
+				/* [한국어] bit0 == 0 → primary 채널이 레거시 모드.
+				 * 즉 BAR0/BAR1 이 아니라 고정 포트를 쓴다. */
 				region.start = 0x1F0;
-				/* PCI/NVMe: region.end 설정: 리소스 끝 주소(NVMe BAR 매핑 범위) */
+				/* [한국어] PC 표준 primary IDE 명령 포트 시작 */
 				region.end = 0x1F7;
-				/* PCI/NVMe: 비트 연산으로 값 설정/마스크: res */
+				/* [한국어] 8바이트 범위(0x1F0~0x1F7) */
 				res = &dev->resource[0];
-				/* PCI/NVMe: 구조체 필드에 값 저장: res->flags */
+				/* [한국어] BAR0 슬롯을 이 고정 포트로 덮어쓴다 */
 				res->flags = LEGACY_IO_RESOURCE;
-				/* PCI/NVMe: bus 주소를 CPU physical address로 변환. NVMe BAR 매핑 시 사용 */
+				/* [한국어] IORESOURCE_IO | IORESOURCE_PCI_FIXED —
+				 * I/O 포트이며 재배치 불가 */
 				pcibios_bus_to_resource(dev->bus, res, &region);
-				/* PCI/NVMe: pci_info() 진단 메시지 출력. NVMe 초기화/리소스 상태 기록 */
-				pci_info(dev, "BAR 0 %pR: legacy IDE quirk\n", /* PCI/NVMe: 진단/오류/경고 메시지 출력 */
-					 /* PCI/NVMe: 후속 코드 동작 수행 */
+				/* [한국어] 버스 주소를 CPU 주소로 변환해 리소스에 기록 */
+				pci_info(dev, "BAR 0 %pR: legacy IDE quirk\n",
 					 res);
-				/* PCI/NVMe: region.start 설정: 리소스 시작 주소(NVMe BAR 매핑 범위) */
+				/* [한국어] BAR 를 덮어썼다는 사실을 로그로 남긴다 */
 				region.start = 0x3F6;
-				/* PCI/NVMe: region.end 설정: 리소스 끝 주소(NVMe BAR 매핑 범위) */
+				/* [한국어] primary 채널의 제어 포트 */
 				region.end = 0x3F6;
-				/* PCI/NVMe: 비트 연산으로 값 설정/마스크: res */
+				/* [한국어] 1바이트뿐 */
 				res = &dev->resource[1];
-				/* PCI/NVMe: 구조체 필드에 값 저장: res->flags */
+				/* [한국어] BAR1 슬롯 */
 				res->flags = LEGACY_IO_RESOURCE;
-				/* PCI/NVMe: bus 주소를 CPU physical address로 변환. NVMe BAR 매핑 시 사용 */
+				/* [한국어] 동일한 고정 I/O 플래그 */
 				pcibios_bus_to_resource(dev->bus, res, &region);
-				/* PCI/NVMe: pci_info() 진단 메시지 출력. NVMe 초기화/리소스 상태 기록 */
-				pci_info(dev, "BAR 1 %pR: legacy IDE quirk\n", /* PCI/NVMe: 진단/오류/경고 메시지 출력 */
-					 /* PCI/NVMe: 후속 코드 동작 수행 */
+				/* [한국어] 주소 변환 후 기록 */
+				pci_info(dev, "BAR 1 %pR: legacy IDE quirk\n",
 					 res);
+				/* [한국어] 로그 */
 			}
-			/* PCI/NVMe: 조걸 분기, 값 일치 여부 검사 */
 			if ((progif & 4) == 0) {
-				/* PCI/NVMe: region.start 설정: 리소스 시작 주소(NVMe BAR 매핑 범위) */
+				/* [한국어] bit2 == 0 → secondary 채널이 레거시 모드.
+				 * 두 채널이 독립적이라 각각 검사한다. */
 				region.start = 0x170;
-				/* PCI/NVMe: region.end 설정: 리소스 끝 주소(NVMe BAR 매핑 범위) */
+				/* [한국어] PC 표준 secondary IDE 명령 포트 */
 				region.end = 0x177;
-				/* PCI/NVMe: 비트 연산으로 값 설정/마스크: res */
+				/* [한국어] 8바이트 범위 */
 				res = &dev->resource[2];
-				/* PCI/NVMe: 구조체 필드에 값 저장: res->flags */
+				/* [한국어] BAR2 슬롯 */
 				res->flags = LEGACY_IO_RESOURCE;
-				/* PCI/NVMe: bus 주소를 CPU physical address로 변환. NVMe BAR 매핑 시 사용 */
+				/* [한국어] 고정 I/O 리소스 */
 				pcibios_bus_to_resource(dev->bus, res, &region);
-				/* PCI/NVMe: pci_info() 진단 메시지 출력. NVMe 초기화/리소스 상태 기록 */
-				pci_info(dev, "BAR 2 %pR: legacy IDE quirk\n", /* PCI/NVMe: 진단/오류/경고 메시지 출력 */
-					 /* PCI/NVMe: 후속 코드 동작 수행 */
+				/* [한국어] 주소 변환 후 기록 */
+				pci_info(dev, "BAR 2 %pR: legacy IDE quirk\n",
 					 res);
-				/* PCI/NVMe: region.start 설정: 리소스 시작 주소(NVMe BAR 매핑 범위) */
+				/* [한국어] 로그 */
 				region.start = 0x376;
-				/* PCI/NVMe: region.end 설정: 리소스 끝 주소(NVMe BAR 매핑 범위) */
+				/* [한국어] secondary 채널의 제어 포트 */
 				region.end = 0x376;
-				/* PCI/NVMe: 비트 연산으로 값 설정/마스크: res */
+				/* [한국어] 1바이트 */
 				res = &dev->resource[3];
-				/* PCI/NVMe: 구조체 필드에 값 저장: res->flags */
+				/* [한국어] BAR3 슬롯 */
 				res->flags = LEGACY_IO_RESOURCE;
-				/* PCI/NVMe: bus 주소를 CPU physical address로 변환. NVMe BAR 매핑 시 사용 */
+				/* [한국어] 고정 I/O 리소스 */
 				pcibios_bus_to_resource(dev->bus, res, &region);
-				/* PCI/NVMe: pci_info() 진단 메시지 출력. NVMe 초기화/리소스 상태 기록 */
-				pci_info(dev, "BAR 3 %pR: legacy IDE quirk\n", /* PCI/NVMe: 진단/오류/경고 메시지 출력 */
-					 /* PCI/NVMe: 후속 코드 동작 수행 */
+				/* [한국어] 주소 변환 후 기록 */
+				pci_info(dev, "BAR 3 %pR: legacy IDE quirk\n",
 					 res);
+				/* [한국어] 로그 */
 			}
 		}
 		break;
 
 	case PCI_HEADER_TYPE_BRIDGE:		    /* bridge header */
+		/* [한국어] type 1 — PCI-to-PCI 브리지. 레이아웃이 완전히 다르다.
+		 * 여기서는 클래스 정합성 검사를 하지 않는데, PCIe 포트가 스스로를
+		 * 브리지 헤더로 표현하면서 클래스는 다양하게 보고하는 경우가 있기
+		 * 때문이다. */
 		/*
 		 * The PCI-to-PCI bridge spec requires that subtractive
 		 * decoding (i.e. transparent) bridge must have programming
 		 * interface code of 0x01.
 		 */
-		/* PCI/NVMe: INTx 인터럽트 라인 읽기 */
 		pci_read_irq(dev);
-		/* PCI/NVMe: 구조체 필드에 비트 마스크 적용: dev->transparent */
+		/* [한국어] 브리지도 자기 INTx 를 가질 수 있다 */
 		dev->transparent = ((dev->class & 0xff) == 1);
-		/* PCI/NVMe: 표준 BAR 6개 일괄 읽기. NVMe PCIe 엔드포인트 리소스 획득 */
+		/* [한국어] 클래스 코드의 최하위 바이트 = prog-if.
+		 * 위 영어 주석대로 값 0x01 이 subtractive decode(transparent)
+		 * 브리지를 뜻한다. 그런 브리지는 자기 창 밖의 주소도 아래로
+		 * 흘려보내므로, pci_read_bridge_bases() 가 부모 리소스를 상속시킨다. */
 		pci_read_bases(dev, 2, PCI_ROM_ADDRESS1);
-		/* PCI/NVMe: 브리지 윈도우 일괄 읽기 */
+		/* [한국어] ★type 0 과의 차이★ BAR 는 2칸뿐이고(0x18 부터는 버스
+		 * 번호가 차지한다), ROM BAR 는 0x30 이 아니라 0x38 에 있다. */
 		pci_read_bridge_windows(dev);
-		/* PCI/NVMe: 핫플러그 브리지 플래그 설정 */
+		/* [한국어] I/O / MEM / prefetchable 창의 구현 여부를 시험 쓰기로
+		 * 판정하고 범위를 읽는다. type 1 에만 존재하는 단계다. */
 		set_pcie_hotplug_bridge(dev);
-		/* PCI/NVMe: PCI capability 위치 탐색 */
-		pos = pci_find_capability(dev, PCI_CAP_ID_SSVID); /* PCI/NVMe: NVMe MSI-X/PCIe/AER capability 탐색 */
-		/* PCI/NVMe: 조걸 분기, 조건에 따른 실행 경로 선택 */
+		/* [한국어] Slot Capabilities 를 보고 핫플러그 가능 포트인지 표시 */
+		pos = pci_find_capability(dev, PCI_CAP_ID_SSVID);
+		/* [한국어] ★type 0 과의 차이★ 브리지 헤더에는 서브시스템 ID 표준
+		 * 필드가 없다. 대신 SSVID capability(ID 0x0d)가 있으면 거기서 읽는다. */
 		if (pos) {
-			/* PCI/NVMe: PCI config space 16-bit 읽기. COMMAND/STATUS 등 워드 단위 접근 */
-			pci_read_config_word(dev, pos + PCI_SSVID_VENDOR_ID, &dev->subsystem_vendor); /* PCI/NVMe: PCI config space 읽기. NVMe capability/CSR 탐색 */
-			/* PCI/NVMe: PCI config space 16-bit 읽기. COMMAND/STATUS 등 워드 단위 접근 */
-			pci_read_config_word(dev, pos + PCI_SSVID_DEVICE_ID, &dev->subsystem_device); /* PCI/NVMe: PCI config space 읽기. NVMe capability/CSR 탐색 */
+			/* [한국어] capability 가 존재할 때만 */
+			pci_read_config_word(dev, pos + PCI_SSVID_VENDOR_ID, &dev->subsystem_vendor);
+			/* [한국어] capability 시작 + 상대 오프셋 = 서브시스템 벤더 ID */
+			pci_read_config_word(dev, pos + PCI_SSVID_DEVICE_ID, &dev->subsystem_device);
+			/* [한국어] 서브시스템 장치 ID */
 		}
 		break;
 
 	case PCI_HEADER_TYPE_CARDBUS:		    /* CardBus bridge header */
-		/* PCI/NVMe: 조걸 분기, 값 불일치 여부 검사 */
+		/* [한국어] type 2 — CardBus 브리지(PCMCIA 후속). 노트북용 구식 규격 */
 		if (class != PCI_CLASS_BRIDGE_CARDBUS)
-			/* PCI/NVMe: 오류 처리/종료 지점으로 이동: bad */
 			goto bad;
-		/* PCI/NVMe: INTx 인터럽트 라인 읽기 */
+		/* [한국어] CardBus 헤더라면 클래스도 반드시 CardBus 브리지여야 한다 */
 		pci_read_irq(dev);
-		/* PCI/NVMe: 표준 BAR 6개 일괄 읽기. NVMe PCIe 엔드포인트 리소스 획득 */
+		/* [한국어] INTx 정보 */
 		pci_read_bases(dev, 1, 0);
-		/* PCI/NVMe: PCI config space 16-bit 읽기. COMMAND/STATUS 등 워드 단위 접근 */
-		pci_read_config_word(dev, PCI_CB_SUBSYSTEM_VENDOR_ID, &dev->subsystem_vendor); /* PCI/NVMe: PCI config space 읽기. NVMe capability/CSR 탐색 */
-		/* PCI/NVMe: PCI config space 16-bit 읽기. COMMAND/STATUS 등 워드 단위 접근 */
-		pci_read_config_word(dev, PCI_CB_SUBSYSTEM_ID, &dev->subsystem_device); /* PCI/NVMe: PCI config space 읽기. NVMe capability/CSR 탐색 */
+		/* [한국어] ★세 타입 중 가장 적다★ BAR 1칸뿐이고 ROM BAR 는 없다
+		 * (세 번째 인자 0 = ROM 읽지 않음). 나머지 공간은 CardBus 전용
+		 * 창 레지스터들이 차지한다. */
+		pci_read_config_word(dev, PCI_CB_SUBSYSTEM_VENDOR_ID, &dev->subsystem_vendor);
+		/* [한국어] ★또 다른 자리★ CardBus 의 서브시스템 벤더 ID 는 0x40 */
+		pci_read_config_word(dev, PCI_CB_SUBSYSTEM_ID, &dev->subsystem_device);
+		/* [한국어] 서브시스템 장치 ID 는 0x42 */
 		break;
 
 	default:				    /* unknown header */
-		/* PCI/NVMe: pci_err() 오류 메시지 출력. NVMe 장치 초기화 실패 기록 */
-		pci_err(dev, "unknown header type %02x, ignoring device\n", /* PCI/NVMe: 진단/오류/경고 메시지 출력 */
-			/* PCI/NVMe: 후속 코드 동작 수행 */
+		/* [한국어] 스펙에 없는 헤더 타입(3~7). 레이아웃을 모르므로 어떤
+		 * 필드도 안전하게 해석할 수 없다. */
+		pci_err(dev, "unknown header type %02x, ignoring device\n",
 			dev->hdr_type);
-		/* PCI/NVMe: OF node 레퍼런스 해제 */
+		/* [한국어] 오류 보고 */
 		pci_release_of_node(dev);
-		/* PCI/NVMe: 오류 코드 반환: -EIO */
+		/* [한국어] 위에서 pci_set_of_node() 로 잡은 DT 참조를 되돌린다.
+		 * 이 경로만 실패로 빠져나가므로 여기서만 해제가 필요하다. */
 		return -EIO;
+		/* [한국어] 호출자 pci_scan_device() 가 이 값을 보고 pci_dev 를
+		 * 해제하고 장치를 없는 것으로 취급한다. */
 
 	bad:
-		/* PCI/NVMe: pci_err() 오류 메시지 출력. NVMe 장치 초기화 실패 기록 */
-		pci_err(dev, "ignoring class %#08x (doesn't match header type %02x)\n", /* PCI/NVMe: 진단/오류/경고 메시지 출력 */
-			/* PCI/NVMe: 후속 코드 동작 수행 */
+		/* [한국어] 헤더 타입과 클래스 코드가 모순인 경우의 공통 처리.
+		 * switch 문 안의 레이블이라 위 case 들에서 goto 로 뛰어든다. */
+		pci_err(dev, "ignoring class %#08x (doesn't match header type %02x)\n",
 			dev->class, dev->hdr_type);
-		/* PCI/NVMe: 구조체 필드에 비트 마스크 적용: dev->class */
+		/* [한국어] 어떤 모순인지 로그로 남긴다 */
 		dev->class = PCI_CLASS_NOT_DEFINED << 8;
+		/* [한국어] 클래스를 "정의되지 않음"으로 바꾼다. 장치를 버리지는
+		 * 않는다 — 이렇게 하면 클래스 기반 드라이버 매칭에 걸리지 않아
+		 * 잘못된 드라이버가 붙는 것을 막으면서, 장치 자체는 sysfs 에
+		 * 보이게 되어 사용자가 상황을 확인할 수 있다. */
 	}
 
 	/* We found a fine healthy device, go go go... */
-	/* PCI/NVMe: 정상 종료 및 반환 */
 	return 0;
+	/* [한국어] 성공. 호출자가 이어서 pci_device_add() 를 부른다 */
 }
 
-/* PCI/NVMe: pci_configure_mps 함수 정의 */
+/*
+ * [한국어]
+ * pci_configure_mps - 장치의 Max Payload Size 를 상위 브리지와 맞춘다
+ *
+ * @dev: 대상 장치.
+ * @return: 없음.
+ *
+ * MPS 란: PCIe 트랜잭션 하나가 실어 나를 수 있는 데이터의 최대 바이트 수
+ * (128, 256, 512 … 4096). 클수록 헤더 오버헤드 비율이 줄어 대역폭 효율이
+ * 좋아진다. NVMe 처럼 큰 DMA 전송을 하는 장치에서 체감 차이가 크다.
+ *
+ * 왜 맞춰야 하는가: PCIe 스펙상 한 계층 구조 안에서 MPS 는 일치해야 한다.
+ * 어떤 장치가 상위 브리지보다 큰 MPS 로 TLP 를 보내면 브리지가 그것을
+ * Malformed TLP 로 판정해 버린다. 그래서 커널은 기본적으로 자식의 MPS 를
+ * 부모(상위 브리지) 값에 맞춘다.
+ *
+ * pcie_bus_config 정책(커널 파라미터 pci=pcie_bus_*):
+ *   PCIE_BUS_TUNE_OFF  : 아무것도 건드리지 않고 불일치만 경고.
+ *   PCIE_BUS_DEFAULT   : 이 함수가 부모 값에 맞춘다(아래 로직).
+ *   PCIE_BUS_PEER2PEER : 모든 장치를 128 로 통일. 어떤 두 장치끼리도 직접
+ *                        통신(peer-to-peer)할 수 있게 최소 공통값을 쓴다.
+ *   그 밖(safe/performance) : 나중에 pcie_bus_configure_settings() 가 처리.
+ *
+ * 실행 컨텍스트: 프로세스 문맥, pci_configure_device() 안에서 호출.
+ *
+ * 호출 체인:
+ *   pci_device_add() → pci_configure_device() → [pci_configure_mps]
+ *     → pcie_get_mps()/pcie_set_mps()
+ */
 static void pci_configure_mps(struct pci_dev *dev)
 {
-	/* PCI/NVMe: 상위 브리지 획득 */
 	struct pci_dev *bridge = pci_upstream_bridge(dev);
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
+	/* [한국어] 맞출 기준이 될 상위 브리지 */
 	int mps, mpss, p_mps, rc;
+	/* [한국어] mps   = 이 장치의 현재 MPS(바이트),
+	 * mpss  = 이 장치가 지원하는 최대 MPS(바이트),
+	 * p_mps = 상위 브리지의 현재 MPS,
+	 * rc    = pcie_set_mps() 결과. */
 
-	/* PCI/NVMe: 조걸 분기, NULL/0/미설정 여부 검사 */
 	if (!pci_is_pcie(dev))
 		return;
+	/* [한국어] MPS 는 PCIe 개념이다. 구식 PCI 장치는 해당 없음 */
 
 	/* MPS and MRRS fields are of type 'RsvdP' for VFs, short-circuit out */
-	/* PCI/NVMe: 조걸 분기, 값 크기 비교 */
 	if (dev->is_virtfn)
 		return;
+	/* [한국어] SR-IOV VF 의 MPS/MRRS 필드는 예약(RsvdP)이라 쓸 수 없다.
+	 * 실제 값은 PF 가 정하며 VF 는 그것을 따른다. */
 
 	/*
 	 * For Root Complex Integrated Endpoints, program the maximum
 	 * supported value unless limited by the PCIE_BUS_PEER2PEER case.
 	 */
-	/* PCI/NVMe: 조걸 분기, 값 일치 여부 검사 */
 	if (pci_pcie_type(dev) == PCI_EXP_TYPE_RC_END) {
-		/* PCI/NVMe: 조걸 분기, 값 일치 여부 검사 */
+		/* [한국어] Root Complex Integrated Endpoint 는 링크 없이 루트
+		 * 컴플렉스에 내장된 장치라 "맞출 상위 브리지"가 없다.
+		 * 그래서 맞추는 대신 자기가 낼 수 있는 최대값을 그냥 쓴다. */
 		if (pcie_bus_config == PCIE_BUS_PEER2PEER)
-			/* PCI/NVMe: 변수에 값 할당: mps */
 			mps = 128;
-		/* PCI/NVMe: 조걸 분기의 else 경로 */
+		/* [한국어] peer-to-peer 정책에서는 모든 장치가 서로 통신할 수
+		 * 있어야 하므로 최소 공통값 128 로 통일한다 */
 		else
-			/* PCI/NVMe: 비트 연산으로 값 설정/마스크: mps */
 			mps = 128 << dev->pcie_mpss;
-		/* PCI/NVMe: MPS 레지스터 쓰기 */
+		/* [한국어] MPSS 는 지수 코드다(0=128B, 1=256B, 2=512B …).
+		 * 128 을 그만큼 왼쪽으로 밀면 실제 바이트 수가 된다. */
 		rc = pcie_set_mps(dev, mps);
-		/* PCI/NVMe: 조걸 분기, 조건에 따른 실행 경로 선택 */
+		/* [한국어] Device Control 레지스터의 MPS 필드에 반영 */
 		if (rc) {
-			/* PCI/NVMe: pci_warn() 경고 메시지 출력. NVMe 성능/호환성 문제 알림 */
 			pci_warn(dev, "can't set Max Payload Size to %d; if necessary, use \"pci=pcie_bus_safe\" and report a bug\n",
-				 /* PCI/NVMe: 후속 코드 동작 수행 */
 				 mps);
+			/* [한국어] 설정 실패 — 사용자에게 우회 방법(pcie_bus_safe)을
+			 * 알리고 버그 보고를 요청한다. 치명적이지는 않다. */
 		}
 		return;
+		/* [한국어] 내장 엔드포인트 처리 끝 */
 	}
 
-	/* PCI/NVMe: 조걸 분기, NULL/0/미설정 여부 검사 */
 	if (!bridge || !pci_is_pcie(bridge))
 		return;
+	/* [한국어] 맞출 대상이 없거나 상위가 PCIe 가 아니면 할 일이 없다 */
 
-	/* PCI/NVMe: MPS 레지스터 읽기 */
 	mps = pcie_get_mps(dev);
-	/* PCI/NVMe: MPS 레지스터 읽기 */
+	/* [한국어] 이 장치의 현재 MPS */
 	p_mps = pcie_get_mps(bridge);
+	/* [한국어] 상위 브리지의 현재 MPS — 맞춰야 할 목표값 */
 
-	/* PCI/NVMe: 조걸 분기, 값 일치 여부 검사 */
 	if (mps == p_mps)
 		return;
+	/* [한국어] 이미 일치하면 건드릴 필요 없다(가장 흔한 경우) */
 
-	/* PCI/NVMe: 조걸 분기, 값 일치 여부 검사 */
 	if (pcie_bus_config == PCIE_BUS_TUNE_OFF) {
-		/* PCI/NVMe: pci_warn() 경고 메시지 출력. NVMe 성능/호환성 문제 알림 */
+		/* [한국어] 사용자가 "손대지 마라"고 지시한 경우 */
 		pci_warn(dev, "Max Payload Size %d, but upstream %s set to %d; if necessary, use \"pci=pcie_bus_safe\" and report a bug\n",
-			 /* PCI/NVMe: pci_name()으로 BDF 문자열 획득, 리소스 이름으로 사용 */
 			 mps, pci_name(bridge), p_mps);
+		/* [한국어] 불일치 사실만 알리고 고치지 않는다. 이 상태로는
+		 * Malformed TLP 가 날 수 있음을 사용자가 알아야 한다. */
 		return;
 	}
 
@@ -4268,136 +5339,182 @@ static void pci_configure_mps(struct pci_dev *dev)
 	 * Fancier MPS configuration is done later by
 	 * pcie_bus_configure_settings()
 	 */
-	/* PCI/NVMe: 조걸 분기, 값 불일치 여부 검사 */
 	if (pcie_bus_config != PCIE_BUS_DEFAULT)
 		return;
+	/* [한국어] safe/performance 같은 정교한 정책은 트리 전체를 훑어야
+	 * 정할 수 있으므로, 열거가 끝난 뒤 pcie_bus_configure_settings() 가
+	 * 따로 처리한다. 여기서는 기본 정책만 다룬다. */
 
-	/* PCI/NVMe: 비트 연산으로 값 설정/마스크: mpss */
 	mpss = 128 << dev->pcie_mpss;
-	/* PCI/NVMe: 조걸 분기, 값 일치 여부 검사 */
+	/* [한국어] 이 장치가 지원하는 최대 MPS(바이트) */
 	if (mpss < p_mps && pci_pcie_type(bridge) == PCI_EXP_TYPE_ROOT_PORT) {
-		/* PCI/NVMe: MPS 레지스터 쓰기 */
+		/* [한국어] 이 장치가 부모만큼 큰 MPS 를 낼 수 없는 경우.
+		 * 부모가 Root Port 라면 그 아래에는 이 장치 하나뿐이므로
+		 * (Root Port 는 하나의 링크만 가진다), 부모 쪽을 낮춰도
+		 * 다른 장치에 피해가 없다. 그래서 부모를 낮춘다. */
 		pcie_set_mps(bridge, mpss);
-		/* PCI/NVMe: pci_info() 진단 메시지 출력. NVMe 초기화/리소스 상태 기록 */
-		pci_info(dev, "Upstream bridge's Max Payload Size set to %d (was %d, max %d)\n", /* PCI/NVMe: 진단/오류/경고 메시지 출력 */
-			 /* PCI/NVMe: 후속 코드 동작 수행 */
+		/* [한국어] 부모의 MPS 를 자식이 감당 가능한 값으로 낮춘다 */
+		pci_info(dev, "Upstream bridge's Max Payload Size set to %d (was %d, max %d)\n",
 			 mpss, p_mps, 128 << bridge->pcie_mpss);
-		/* PCI/NVMe: MPS 레지스터 읽기 */
+		/* [한국어] 부모를 건드렸다는 사실을 명시적으로 로그에 남긴다 */
 		p_mps = pcie_get_mps(bridge);
+		/* [한국어] 실제로 반영된 값을 다시 읽는다. 하드웨어가 요청한
+		 * 값을 그대로 받아들이지 않을 수도 있기 때문이다. */
 	}
 
-	/* PCI/NVMe: MPS 레지스터 쓰기 */
 	rc = pcie_set_mps(dev, p_mps);
-	/* PCI/NVMe: 조걸 분기, 조건에 따른 실행 경로 선택 */
+	/* [한국어] 이 장치의 MPS 를 부모 값에 맞춘다 */
 	if (rc) {
-		/* PCI/NVMe: pci_warn() 경고 메시지 출력. NVMe 성능/호환성 문제 알림 */
 		pci_warn(dev, "can't set Max Payload Size to %d; if necessary, use \"pci=pcie_bus_safe\" and report a bug\n",
-			 /* PCI/NVMe: 후속 코드 동작 수행 */
 			 p_mps);
+		/* [한국어] 설정 실패 — 불일치가 남지만 열거는 계속한다 */
 		return;
 	}
 
-	/* PCI/NVMe: pci_info() 진단 메시지 출력. NVMe 초기화/리소스 상태 기록 */
-	pci_info(dev, "Max Payload Size set to %d (was %d, max %d)\n", /* PCI/NVMe: 진단/오류/경고 메시지 출력 */
-		 /* PCI/NVMe: 후속 코드 동작 수행 */
+	pci_info(dev, "Max Payload Size set to %d (was %d, max %d)\n",
 		 p_mps, mps, mpss);
+	/* [한국어] 무엇을 무엇으로 바꿨고 최대 가능치는 얼마인지 남긴다.
+	 * NVMe 성능이 기대에 못 미칠 때 MPS 가 128 로 묶여 있는지 확인하는
+	 * 근거가 되는 로그다. */
 }
 
-/* PCI/NVMe: PCIe Extended Tag Field 활성화. NVMe 큐 깊이/동시 outstanding IO 향상 */
-/* PCI/NVMe: pci_configure_extended_tags 함수 정의 */
+/*
+ * [한국어]
+ * pci_configure_extended_tags - PCIe Extended Tag(8비트 태그)를 켜거나 끈다
+ *
+ * @dev: 대상 장치.
+ * @ign: 무시되는 인자. 이 함수는 pci_walk_bus() 류의 콜백으로도 쓰이도록
+ *       (struct pci_dev *, void *) 시그니처를 맞춰 두었다.
+ * @return: 항상 0. 콜백 규약상 0 이 아니면 순회가 중단되므로, 어떤 실패가
+ *          있어도 0 을 돌려 열거가 계속되게 한다.
+ *
+ * Tag 란: PCIe 에서 완료(completion)를 기다리는 읽기 요청 하나하나를
+ * 구별하는 번호다. 기본은 5비트라 동시에 32개까지만 미완료(outstanding)
+ * 요청을 가질 수 있다. Extended Tag 를 켜면 8비트가 되어 256개까지 늘어난다.
+ *
+ * 왜 중요한가: 지연이 큰 링크에서는 "동시에 얼마나 많은 요청을 띄울 수
+ * 있는가"가 곧 대역폭 상한이다(Little's law). NVMe 처럼 큐 깊이를 깊게
+ * 가져가는 장치는 태그가 32개로 묶이면 링크를 다 채우지 못한다.
+ *
+ * no_ext_tags quirk: 계층 어딘가에 8비트 태그를 제대로 처리하지 못하는
+ * 장치가 있으면 호스트 브리지에 no_ext_tags 가 세워진다. 그 경우 성능보다
+ * 정확성이 우선이므로 아래 모든 장치에서 Extended Tag 를 끈다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_device_add() → pci_configure_device() → [pci_configure_extended_tags]
+ *     → pcie_capability_read/set/clear_word()
+ */
 int pci_configure_extended_tags(struct pci_dev *dev, void *ign)
 {
-	/* PCI/NVMe: 후속 코드 동작 수행 */
 	struct pci_host_bridge *host;
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
+	/* [한국어] no_ext_tags 정책을 들고 있는 루트 호스트 브리지 */
 	u32 cap;
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
+	/* [한국어] Device Capabilities — Extended Tag 지원 여부가 들어 있다 */
 	u16 ctl;
-	/* PCI/NVMe: ret 변수 선언/초기화: 반환값 변수. NVMe 초기화 성공/실패 상태 */
+	/* [한국어] Device Control — Extended Tag 활성화 비트가 들어 있다 */
 	int ret;
+	/* [한국어] config 접근 결과 */
 
 	/* PCI_EXP_DEVCTL_EXT_TAG is RsvdP in VFs */
-	/* PCI/NVMe: 조걸 분기, NULL/0/미설정 여부 검사 */
 	if (!pci_is_pcie(dev) || dev->is_virtfn)
-		/* PCI/NVMe: 정상 종료 및 반환 */
 		return 0;
+	/* [한국어] PCIe 가 아니면 개념 자체가 없고, VF 는 이 비트가 예약이라
+	 * 건드릴 수 없다(실제 값은 PF 가 정한다). */
 
-	/* PCI/NVMe: PCIe capability 4바이트 읽기 */
 	ret = pcie_capability_read_dword(dev, PCI_EXP_DEVCAP, &cap);
-	/* PCI/NVMe: 조걸 분기, 조건에 따른 실행 경로 선택 */
 	if (ret)
-		/* PCI/NVMe: 정상 종료 및 반환 */
 		return 0;
+	/* [한국어] 읽기 실패 — 조용히 포기한다. 여기서 오류를 올려도 할 수 있는
+	 * 일이 없고, 열거를 멈추게 하면 손해가 더 크다. */
 
-	/* PCI/NVMe: 조걸 분기, 플래그/비트 마스크 검사 */
 	if (!(cap & PCI_EXP_DEVCAP_EXT_TAG))
-		/* PCI/NVMe: 정상 종료 및 반환 */
 		return 0;
+	/* [한국어] 이 장치가 8비트 태그를 지원하지 않는다 — 켤 수도 끌 수도 없다 */
 
-	/* PCI/NVMe: PCIe capability 2바이트 읽기 */
 	ret = pcie_capability_read_word(dev, PCI_EXP_DEVCTL, &ctl);
-	/* PCI/NVMe: 조걸 분기, 조건에 따른 실행 경로 선택 */
 	if (ret)
-		/* PCI/NVMe: 정상 종료 및 반환 */
 		return 0;
+	/* [한국어] 현재 활성화 상태를 못 읽었다 — 포기 */
 
-	/* PCI/NVMe: 호스트 브리지 검색 */
 	host = pci_find_host_bridge(dev->bus);
-	/* PCI/NVMe: 조걸 분기, NULL/0/미설정 여부 검사 */
 	if (!host)
-		/* PCI/NVMe: 정상 종료 및 반환 */
 		return 0;
+	/* [한국어] 정책을 물어볼 곳이 없다 — 포기 */
 
 	/*
 	 * If some device in the hierarchy doesn't handle Extended Tags
 	 * correctly, make sure they're disabled.
 	 */
-	/* PCI/NVMe: 조걸 분기, 값 크기 비교 */
 	if (host->no_ext_tags) {
-		/* PCI/NVMe: 조걸 분기, 플래그/비트 마스크 검사 */
+		/* [한국어] 이 계층에 8비트 태그를 오해하는 장치가 있다는 표시.
+		 * quirk 가 세워 준다. 성능보다 정확성이 우선이다. */
 		if (ctl & PCI_EXP_DEVCTL_EXT_TAG) {
-			/* PCI/NVMe: pci_info() 진단 메시지 출력. NVMe 초기화/리소스 상태 기록 */
-			pci_info(dev, "disabling Extended Tags\n"); /* PCI/NVMe: 진단/오류/경고 메시지 출력 */
-			/* PCI/NVMe: PCIe capability 비트 클리어 */
+			/* [한국어] 지금 켜져 있으면(펌웨어가 켰거나) 꺼야 한다 */
+			pci_info(dev, "disabling Extended Tags\n");
 			pcie_capability_clear_word(dev, PCI_EXP_DEVCTL,
-						   /* PCI/NVMe: 후속 코드 동작 수행 */
 						   PCI_EXP_DEVCTL_EXT_TAG);
+			/* [한국어] 읽기-수정-쓰기로 그 비트만 지운다.
+			 * 다른 제어 비트(MPS, MRRS 등)는 그대로 유지된다. */
 		}
-		/* PCI/NVMe: 정상 종료 및 반환 */
 		return 0;
+		/* [한국어] 끄는 것이 목적이었으므로 여기서 끝 */
 	}
 
-	/* PCI/NVMe: 조걸 분기, 플래그/비트 마스크 검사 */
 	if (!(ctl & PCI_EXP_DEVCTL_EXT_TAG)) {
-		/* PCI/NVMe: pci_info() 진단 메시지 출력. NVMe 초기화/리소스 상태 기록 */
-		pci_info(dev, "enabling Extended Tags\n"); /* PCI/NVMe: 진단/오류/경고 메시지 출력 */
-		/* PCI/NVMe: PCIe capability 비트 설정 */
+		/* [한국어] 지원하는데 꺼져 있으면 켜 준다 */
+		pci_info(dev, "enabling Extended Tags\n");
 		pcie_capability_set_word(dev, PCI_EXP_DEVCTL,
-					 /* PCI/NVMe: 후속 코드 동작 수행 */
 					 PCI_EXP_DEVCTL_EXT_TAG);
+		/* [한국어] 그 비트만 세운다. 이제 이 장치는 최대 256개의 미완료
+		 * 읽기 요청을 띄울 수 있다. */
 	}
-	/* PCI/NVMe: 정상 종료 및 반환 */
 	return 0;
+	/* [한국어] 콜백 규약상 항상 0 */
 }
 
 /*
- * pci_dev3_init() - PCI Express Device 3(PCIe 6.0+) capability 초기화
+ * [한국어]
+ * pci_dev3_init - Device 3 확장 capability 를 읽어 flit 모드 여부를 기록한다
  *
- * NVMe 연결: Device 3 capability는 FLIT 모드, Retry buffer 등 PCIe 6.0
- * 이상의 기능을 노출. FLIT 모드는 NVMe PCIe 6.0 SSD의 데이터 링크
- * 효율에 영향을 줄 수 있다(추정).
+ * @pdev: 대상 장치.
+ * @return: 없음. pdev->fm_enabled 가 설정된다.
+ *
+ * Device 3 capability 란: 확장 capability ID 0x2F.
+ * (include/uapi/linux/pci_regs.h:763 PCI_EXT_CAP_ID_DEV3)
+ * 그 안의 Status 레지스터(오프셋 0x0c) bit3 이
+ * PCI_DEV3_STA_SEGMENT 이며, 헤더의 영어 주석은 이 비트를
+ * "Segment Captured (end-to-end flit-mode detected)" 라고 설명한다.
+ *
+ * 이 트리에서 확인되는 쓰임: pdev->fm_enabled 를 읽는 곳은
+ * drivers/pci/ide.c:480 의 pci_ide_domain() 한 곳이며, 이 값이 참이면
+ * pci_domain_nr(pdev->bus) 를, 거짓이면 0 을 IDE 스트림의 도메인 번호로
+ * 쓴다. 그 밖의 용도는 이 트리에서 확인되지 않는다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥, pci_init_capabilities() 안에서 호출.
+ *
+ * 호출 체인:
+ *   pci_device_add() → pci_init_capabilities() → [pci_dev3_init]
+ *     → pci_find_ext_capability()
  */
-/* PCI/NVMe: pci_dev3_init 함수 정의 */
 static void pci_dev3_init(struct pci_dev *pdev)
 {
-	u16 cap = pci_find_ext_capability(pdev, PCI_EXT_CAP_ID_DEV3); /* PCI/NVMe: Device 3 extended capability 탐색 */
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
+	u16 cap = pci_find_ext_capability(pdev, PCI_EXT_CAP_ID_DEV3);
+	/* [한국어] 확장 capability 링크(0x100 부터 시작하는 별도 리스트)에서
+	 * ID 0x2F 를 찾는다. dev->cfg_size 가 256 이면 즉시 0 을 돌려준다. */
 	u32 val = 0;
+	/* [한국어] Status 레지스터 값. 읽기가 실패해도 0 이 남아 아래 판정이
+	 * 자연히 거짓이 되도록 0 으로 초기화한다. */
 
-	if (!cap) /* PCI/NVMe: capability가 없으면 초기화 불필요 */
+	if (!cap)
 		return;
-	pci_read_config_dword(pdev, cap + PCI_DEV3_STA, &val); /* PCI/NVMe: Device 3 Status 레지스터 읽기 */
-	pdev->fm_enabled = !!(val & PCI_DEV3_STA_SEGMENT); /* PCI/NVMe: FLIT 모드 segment 지원 여부를 pci_dev에 기록 */
+	/* [한국어] Device 3 capability 가 없는 장치 — 대부분이 여기에 해당 */
+	pci_read_config_dword(pdev, cap + PCI_DEV3_STA, &val);
+	/* [한국어] capability 시작 + 0x0c = Device 3 Status */
+	pdev->fm_enabled = !!(val & PCI_DEV3_STA_SEGMENT);
+	/* [한국어] bit3(값 0x8)을 뽑아 0/1 로 정규화해 저장한다.
+	 * !! 는 비트 위치와 무관하게 참/거짓만 남기는 관용구다. */
 }
 
 /**
@@ -4407,151 +5524,247 @@ static void pci_dev3_init(struct pci_dev *pdev)
  * Returns true if the device has enabled relaxed ordering attribute.
  */
 /*
- * pcie_relaxed_ordering_enabled() - 장치의 Relaxed Ordering 활성화 여부 반환
+ * [한국어]
+ * pcie_relaxed_ordering_enabled - Relaxed Ordering 이 켜져 있는지 알려 준다
  *
- * NVMe 연결: NVMe queue 간 순서 독립성이 높아 RO(Relaxed Ordering)를
- * 활성화하면 링크 사용률을 높일 수 있다. 이 함수는 다른 드라이버나
- * quirk에서 RO 상태를 확인할 때 사용.
+ * @dev: 조회할 장치.
+ * @return: RO 가 활성화되어 있으면 true.
+ *
+ * Relaxed Ordering 이란: PCIe 는 기본적으로 같은 방향의 트랜잭션 순서를
+ * 지킨다(strict ordering). RO 를 켜면 하드웨어가 순서를 바꿔 처리할 수 있어
+ * 링크와 메모리 컨트롤러가 더 효율적으로 동작한다. 순서에 의존하지 않는
+ * 데이터 전송(예: DMA 로 옮기는 데이터 블록)에서 이득이 있다.
+ *
+ * 왜 조회 함수가 따로 있나: 드라이버가 자기 DMA 설정을 결정할 때 현재 RO
+ * 상태를 알아야 하는 경우가 있어 외부에 공개(EXPORT)되어 있다.
+ *
+ * 실행 컨텍스트: 어느 문맥에서나 config 읽기가 가능한 곳.
+ *
+ * 호출 체인:
+ *   드라이버/quirk → [pcie_relaxed_ordering_enabled] → pcie_capability_read_word()
  */
-/* PCI/NVMe: Relaxed Ordering 활성화 여부 확인. NVMe 성능/일관성 튜닝 참고 */
-/* PCI/NVMe: pcie_relaxed_ordering_enabled 함수 정의 */
 bool pcie_relaxed_ordering_enabled(struct pci_dev *dev)
 {
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
 	u16 v;
+	/* [한국어] Device Control 레지스터 값 */
 
-	pcie_capability_read_word(dev, PCI_EXP_DEVCTL, &v); /* PCI/NVMe: Device Control 레지스터 읽기 */
+	pcie_capability_read_word(dev, PCI_EXP_DEVCTL, &v);
+	/* [한국어] PCIe capability 의 Device Control */
 
-	return !!(v & PCI_EXP_DEVCTL_RELAX_EN); /* PCI/NVMe: Relaxed Ordering Enable bit 반환 */
+	return !!(v & PCI_EXP_DEVCTL_RELAX_EN);
+	/* [한국어] Relaxed Ordering Enable 비트를 뽑아 bool 로 정규화 */
 }
-/* PCI/NVMe: EXPORT_SYMBOL 함수 호출 */
-EXPORT_SYMBOL(pcie_relaxed_ordering_enabled); /* PCI/NVMe: 심볼 외부 낸출. nvme-pci 등 모듈에서 참조 가능 */
+EXPORT_SYMBOL(pcie_relaxed_ordering_enabled);
+/* [한국어] 드라이버 모듈에서 조회할 수 있도록 공개 */
 
 /*
- * pci_configure_relaxed_ordering() - Root Port가 RO를 지원하지 않으면
- *                                     endpoint의 RO를 비활성화
+ * [한국어]
+ * pci_configure_relaxed_ordering - Root Port 가 못 견디면 장치의 RO 를 끈다
  *
- * NVMe 연결: 일부 Root Port는 Relaxed Ordering을 제대로 지원하지 않아
- * 데이터 무결성 문제를 일으킬 수 있다. NVMe endpoint의 RO를 비활성화하여
- * 안정성을 확보.
+ * @dev: 대상 장치.
+ * @return: 없음.
+ *
+ * 왜 필요한가: Relaxed Ordering 은 성능 최적화지만, 일부 Root Port 는 순서가
+ * 뒤바뀐 트랜잭션을 제대로 처리하지 못해 데이터가 잘못 배치되는 결함이 있다.
+ * 그런 Root Port 는 quirk 가 PCI_DEV_FLAGS_NO_RELAXED_ORDERING 을 세워 두고,
+ * 이 함수가 그 아래 장치들의 RO 를 강제로 끈다. 성능보다 정확성이 우선인 판단이다.
+ *
+ * 왜 Root Port 만 보는가: 아래 영어 주석이 밝히듯, 지금은 Root Port 로 향하는
+ * DMA 만 다룬다. 장치끼리 직접 주고받는 peer-to-peer DMA 는 경로가 달라
+ * 별도의 문제이며 여기서 다루지 않는다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥, pci_configure_device() 안에서 호출.
+ *
+ * 호출 체인:
+ *   pci_device_add() → pci_configure_device() → [pci_configure_relaxed_ordering]
+ *     → pcie_find_root_port(), pcie_capability_clear_word()
  */
-/* PCI/NVMe: pci_configure_relaxed_ordering 함수 정의 */
 static void pci_configure_relaxed_ordering(struct pci_dev *dev)
 {
-	/* PCI/NVMe: 후속 코드 동작 수행 */
 	struct pci_dev *root;
+	/* [한국어] 이 장치의 DMA 가 최종적으로 도달하는 Root Port */
 
 	/* PCI_EXP_DEVCTL_RELAX_EN is RsvdP in VFs */
-	if (dev->is_virtfn) /* PCI/NVMe: VF는 RO bit가 예약되어 있으므로 건드리지 않음 */
+	if (dev->is_virtfn)
 		return;
+	/* [한국어] VF 의 RO 비트는 예약(RsvdP)이라 쓸 수 없다.
+	 * PF 의 설정이 VF 에도 적용된다. */
 
-	if (!pcie_relaxed_ordering_enabled(dev)) /* PCI/NVMe: 이미 RO가 꺼져 있으면 할 것 없음 */
+	if (!pcie_relaxed_ordering_enabled(dev))
 		return;
+	/* [한국어] 이미 꺼져 있으면 할 일이 없다.
+	 * 이 함수는 켜는 일은 하지 않고 끄기만 한다. */
 
 	/*
 	 * For now, we only deal with Relaxed Ordering issues with Root
 	 * Ports. Peer-to-Peer DMA is another can of worms.
 	 */
-	root = pcie_find_root_port(dev); /* PCI/NVMe: NVMe 장치의 Root Port 탐색 */
-	if (!root) /* PCI/NVMe: Root Port를 찾을 수 없으면(가상화 등) 처리 불가 */
+	root = pcie_find_root_port(dev);
+	/* [한국어] 트리를 거슬러 올라가 Root Port 를 찾는다 */
+	if (!root)
 		return;
+	/* [한국어] 가상화 게스트 등에서는 Root Port 가 보이지 않을 수 있다.
+	 * 그러면 판단 근거가 없으므로 손대지 않는다. */
 
-	if (root->dev_flags & PCI_DEV_FLAGS_NO_RELAXED_ORDERING) { /* PCI/NVMe: Root Port가 RO 미지원으로 표시되어 있으면 */
-		/* PCI/NVMe: PCIe capability 비트 클리어 */
+	if (root->dev_flags & PCI_DEV_FLAGS_NO_RELAXED_ORDERING) {
+		/* [한국어] 이 Root Port 는 RO 를 제대로 처리하지 못한다고
+		 * quirk 가 표시해 두었다(drivers/pci/quirks.c 가 벤더/장치 ID 로 설정). */
 		pcie_capability_clear_word(dev, PCI_EXP_DEVCTL,
-					   PCI_EXP_DEVCTL_RELAX_EN); /* PCI/NVMe: NVMe endpoint의 RO 비활성화 */
-		/* PCI/NVMe: pci_info() 진단 메시지 출력. NVMe 초기화/리소스 상태 기록 */
-		pci_info(dev, "Relaxed Ordering disabled because the Root Port didn't support it\n"); /* PCI/NVMe: 진단/오류/경고 메시지 출력 */
+					   PCI_EXP_DEVCTL_RELAX_EN);
+		/* [한국어] 장치 쪽 RO Enable 비트를 끈다. 이제 이 장치는
+		 * 순서를 지키는 트랜잭션만 보낸다 — 느리지만 안전하다. */
+		pci_info(dev, "Relaxed Ordering disabled because the Root Port didn't support it\n");
+		/* [한국어] 성능 저하의 이유를 진단할 수 있도록 로그로 남긴다 */
 	}
 }
 
 /*
- * pci_configure_eetlp_prefix() - End-to-End TLP Prefix 지원 크기 설정
+ * [한국어]
+ * pci_configure_eetlp_prefix - End-to-End TLP Prefix 최대 개수를 기록한다
  *
- * NVMe 연결: EETLP Prefix는 PCIe 3.1 이상의 고급 기능으로, TLP에
- * 추가 메타데이터를 담을 수 있다. NVMe와 직접 관련은 적으나, prefix
- * 지원 여부는 향상된 에러 보고나 보안 확장에 사용될 수 있다.
+ * @dev: 대상 장치.
+ * @return: 없음. dev->eetlp_prefix_max 가 설정될 수 있다.
+ *
+ * EETLP Prefix 란: TLP(Transaction Layer Packet) 앞에 붙이는 추가 헤더로,
+ * 종단 간(end-to-end)에 전달되는 부가 정보를 담는다. PASID(프로세스 주소
+ * 공간 식별자) 같은 확장이 이 방식을 쓴다. 경로 중간의 스위치들이 이
+ * prefix 를 그대로 전달할 수 있어야 하므로, "이 장치가 지원한다"만으로는
+ * 부족하고 경로 전체가 지원해야 한다.
+ *
+ * 그래서 상위 브리지를 확인한다: Root Port 와 RC 내장 엔드포인트는 자기가
+ * 경로의 끝이므로 자기 값을 그대로 쓰고, 그 밖의 장치는 상위 브리지가
+ * prefix 를 지원할 때에만(bridge->eetlp_prefix_max 가 0 이 아닐 때) 자기
+ * 값을 기록한다. 열거가 위에서 아래로 진행하므로 부모가 이미 처리되어 있다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥, pci_configure_device() 안에서 호출.
+ *
+ * 호출 체인:
+ *   pci_device_add() → pci_configure_device() → [pci_configure_eetlp_prefix]
  */
-/* PCI/NVMe: pci_configure_eetlp_prefix 함수 정의 */
 static void pci_configure_eetlp_prefix(struct pci_dev *dev)
 {
-	/* PCI/NVMe: 후속 코드 동작 수행 */
 	struct pci_dev *bridge;
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
+	/* [한국어] 상위 브리지 — 경로가 prefix 를 전달할 수 있는지 확인용 */
 	unsigned int eetlp_max;
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
+	/* [한국어] 이 장치가 지원하는 prefix 최대 개수 */
 	int pcie_type;
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
+	/* [한국어] 이 장치의 PCIe 포트 종류 */
 	u32 cap;
+	/* [한국어] Device Capabilities 2 레지스터 값 */
 
-	if (!pci_is_pcie(dev)) /* PCI/NVMe: PCIe 장치가 아니면 EETLP prefix 불가 */
+	if (!pci_is_pcie(dev))
 		return;
+	/* [한국어] PCIe 전용 기능 */
 
-	pcie_capability_read_dword(dev, PCI_EXP_DEVCAP2, &cap); /* PCI/NVMe: Device Capabilities 2 레지스터 읽기 */
-	if (!(cap & PCI_EXP_DEVCAP2_EE_PREFIX)) /* PCI/NVMe: EETLP Prefix 지원 bit 확인 */
+	pcie_capability_read_dword(dev, PCI_EXP_DEVCAP2, &cap);
+	/* [한국어] Device Capabilities 2 — PCIe 2.1 이후에 추가된 기능들이 모여 있다 */
+	if (!(cap & PCI_EXP_DEVCAP2_EE_PREFIX))
 		return;
+	/* [한국어] 이 장치가 EETLP prefix 를 지원하지 않는다 */
 
-	pcie_type = pci_pcie_type(dev); /* PCI/NVMe: 장치의 PCIe type 확인 */
+	pcie_type = pci_pcie_type(dev);
+	/* [한국어] Root Port/RC 내장 엔드포인트인지 판단하기 위해 종류를 얻는다 */
 
-	eetlp_max = FIELD_GET(PCI_EXP_DEVCAP2_EE_PREFIX_MAX, cap); /* PCI/NVMe: 지원하는 prefix 최대 개수 필드 추출 */
+	eetlp_max = FIELD_GET(PCI_EXP_DEVCAP2_EE_PREFIX_MAX, cap);
+	/* [한국어] 지원하는 최대 prefix 개수 필드(2비트) 추출 */
 	/* 00b means 4 */
-	eetlp_max = eetlp_max ?: 4; /* PCI/NVMe: 0이면 최대 4개로 해석 */
+	eetlp_max = eetlp_max ?: 4;
+	/* [한국어] 스펙상 인코딩이 특이하다. 1/2/3 은 그대로 1/2/3 개지만
+	 * 0(00b)은 "0개"가 아니라 "4개"를 뜻한다. GCC 확장인 ?: 로
+	 * "0 이면 4, 아니면 그대로"를 간결하게 쓴 것이다. */
 
-	/* PCI/NVMe: 조걸 분기, NVMe 장치 상태/플래그에 따른 경로 선택 */
 	if (pcie_type == PCI_EXP_TYPE_ROOT_PORT ||
-	    pcie_type == PCI_EXP_TYPE_RC_END) /* PCI/NVMe: Root Port나 RCiE이면 자신의 prefix 크기 설정 */
-		/* PCI/NVMe: 구조체 필드에 값 저장: dev->eetlp_prefix_max */
+	    pcie_type == PCI_EXP_TYPE_RC_END)
 		dev->eetlp_prefix_max = eetlp_max;
-	/* PCI/NVMe: 조걸 분기의 else 경로 */
+	/* [한국어] Root Port 와 RC 내장 엔드포인트는 경로의 시작점이라
+	 * 위쪽 제약을 볼 필요가 없다. 자기 지원값을 그대로 기록한다. */
 	else {
-		bridge = pci_upstream_bridge(dev); /* PCI/NVMe: 상위 bridge 획득 */
-		if (bridge && bridge->eetlp_prefix_max) /* PCI/NVMe: 상위 bridge가 prefix를 지원하면 endpoint도 설정 */
-			/* PCI/NVMe: 구조체 필드에 값 저장: dev->eetlp_prefix_max */
+		/* [한국어] 그 밖의 장치는 위쪽 경로가 prefix 를 전달할 수 있어야 한다 */
+		bridge = pci_upstream_bridge(dev);
+		/* [한국어] 상위 브리지 획득 */
+		if (bridge && bridge->eetlp_prefix_max)
 			dev->eetlp_prefix_max = eetlp_max;
+		/* [한국어] 부모가 prefix 를 지원할 때에만 기록한다.
+		 * 열거는 위에서 아래로 내려오므로 부모의 값은 이미 확정되어 있다.
+		 * 부모가 0 이면 경로가 끊긴 것이라 이 장치도 쓸 수 없다. */
 	}
 }
 
 /*
- * pci_configure_serr() - bridge의 SERR# forwarding 활성화
+ * [한국어]
+ * pci_configure_serr - 브리지의 SERR# 포워딩을 켠다
  *
- * NVMe 연결: bridge가 SERR# forwarding을 하지 않으면 NVMe endpoint에서
- * 발생한 PCIe fatal/non-fatal error(ERR_COR/ERR_NONFATAL/ERR_FATAL)가
- * Root Complex에 도달하지 못해 AER 인터럽트가 발생하지 않는다.
+ * @dev: 대상 장치(브리지가 아니면 아무 일도 하지 않는다).
+ * @return: 없음.
+ *
+ * 왜 필요한가: 아래 영어 주석대로, 브리지는 SERR# 포워딩이 꺼져 있으면
+ * 아래쪽 엔드포인트가 보낸 오류 메시지(ERR_COR / ERR_NONFATAL / ERR_FATAL)를
+ * 위로 전달하지 않는다. 그러면 오류가 Root Complex 에 도달하지 못해
+ * AER 이 아무 것도 보고하지 못한다. 오류가 없는 것이 아니라 보이지 않게 되는
+ * 것이라 더 위험하다.
+ *
+ * NVMe 접점: NVMe 컨트롤러에서 링크 오류가 나면 그 오류 메시지가 이 경로를
+ * 타고 올라가야 AER 이 err_handler 를 호출하고 컨트롤러 리셋/복구가 시작된다.
+ * 중간 브리지에서 이 비트가 꺼져 있으면 그 복구가 시작되지 않는다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥, pci_configure_device() 안에서 호출.
+ *
+ * 호출 체인:
+ *   pci_device_add() → pci_configure_device() → [pci_configure_serr]
  */
-/* PCI/NVMe: pci_configure_serr 함수 정의 */
 static void pci_configure_serr(struct pci_dev *dev)
 {
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
 	u16 control;
+	/* [한국어] Bridge Control 레지스터(0x3e) 값 */
 
-	if (dev->hdr_type == PCI_HEADER_TYPE_BRIDGE) { /* PCI/NVMe: bridge 장치에만 적용 */
+	if (dev->hdr_type == PCI_HEADER_TYPE_BRIDGE) {
+		/* [한국어] Bridge Control 은 header type 1 에만 존재하는 레지스터다.
+		 * 다른 타입에서 0x3e 를 건드리면 엉뚱한 필드를 망가뜨린다. */
 
 		/*
 		 * A bridge will not forward ERR_ messages coming from an
 		 * endpoint unless SERR# forwarding is enabled.
 		 */
-		pci_read_config_word(dev, PCI_BRIDGE_CONTROL, &control); /* PCI/NVMe: Bridge Control 레지스터 읽기 */
-		if (!(control & PCI_BRIDGE_CTL_SERR)) { /* PCI/NVMe: SERR forwarding이 꺼져 있으면 */
-			control |= PCI_BRIDGE_CTL_SERR; /* PCI/NVMe: SERR forwarding enable bit 설정 */
-			pci_write_config_word(dev, PCI_BRIDGE_CONTROL, control); /* PCI/NVMe: Bridge Control에 기록 */
+		pci_read_config_word(dev, PCI_BRIDGE_CONTROL, &control);
+		/* [한국어] 현재 값을 읽어 다른 비트를 보존한다 */
+		if (!(control & PCI_BRIDGE_CTL_SERR)) {
+			/* [한국어] 꺼져 있을 때만 쓴다 — 불필요한 config 쓰기를 아낀다 */
+			control |= PCI_BRIDGE_CTL_SERR;
+			/* [한국어] 값 0x02 — SERR# 포워딩 활성화 비트 */
+			pci_write_config_word(dev, PCI_BRIDGE_CONTROL, control);
+			/* [한국어] 반영. 이제 아래에서 온 오류 메시지가 위로 전달된다 */
 		}
 	}
 }
 
 /*
- * pci_configure_rcb() - Read Completion Boundary를 Root Port와 일치시킴
+ * [한국어]
+ * pci_configure_rcb - Read Completion Boundary 를 Root Port 와 일치시킨다
  *
- * NVMe 연결: RCB는 Memory Read completion을 정렬하는 단위(64B 또는
- * 128B). NVMe DMA read 완료 데이터의 정렬 방식이 RCB에 따라 달라질 수
- * 있어, endpoint의 RCB를 Root Port와 맞추는 것이 바람직하다.
+ * @dev: 대상 장치.
+ * @return: 없음.
+ *
+ * RCB 란: 메모리 읽기 요청 하나에 대한 응답(completion)을 여러 개로 쪼갤 때,
+ * 그 경계를 어느 단위에 맞출지 정하는 값이다. 64바이트 또는 128바이트다.
+ * 경로 양끝의 값이 다르면 completion 조각의 경계가 어긋나 비효율이 생긴다.
+ *
+ * 왜 Root Port 값을 따르는가: 아래 영어 주석이 인용하는 PCIe r7.0 sec 7.5.3.7
+ * 에 따르면, Root Port 의 RCB 는 읽기 전용이고, 엔드포인트와 브리지는
+ * Root Port 에 그 값이 설정되어 있을 때에만 자기 RCB 를 설정할 수 있다.
+ * 즉 Root Port 가 기준이고 나머지가 따라가는 구조다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥, pci_configure_device() 안에서 호출.
+ *
+ * 호출 체인:
+ *   pci_device_add() → pci_configure_device() → [pci_configure_rcb]
+ *     → pcie_find_root_port(), pcie_capability_clear_and_set_word()
  */
-/* PCI/NVMe: pci_configure_rcb 함수 정의 */
 static void pci_configure_rcb(struct pci_dev *dev)
 {
-	/* PCI/NVMe: 후속 코드 동작 수행 */
 	struct pci_dev *rp;
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
+	/* [한국어] 기준이 될 Root Port */
 	u16 rp_lnkctl;
+	/* [한국어] 그 Root Port 의 Link Control 값 */
 
 	/*
 	 * Per PCIe r7.0, sec 7.5.3.7, RCB is only meaningful in Root Ports
@@ -4559,66 +5772,134 @@ static void pci_configure_rcb(struct pci_dev *dev)
 	 * set for Endpoints and Bridges if it is set in the Root Port. For
 	 * Endpoints, it is 'RsvdP' for Virtual Functions.
 	 */
-	if (!pci_is_pcie(dev) || /* PCI/NVMe: PCIe 장치가 아니면 RCB 의미 없음 */
-	    pci_pcie_type(dev) == PCI_EXP_TYPE_ROOT_PORT || /* PCI/NVMe: Root Port의 RCB는 read-only */
-	    pci_pcie_type(dev) == PCI_EXP_TYPE_UPSTREAM || /* PCI/NVMe: Switch upstream은 RCB 설정 대상 아님 */
-	    pci_pcie_type(dev) == PCI_EXP_TYPE_DOWNSTREAM || /* PCI/NVMe: Switch downstream은 RCB 설정 대상 아님 */
-	    pci_pcie_type(dev) == PCI_EXP_TYPE_RC_EC || /* PCI/NVMe: RC Event Collector 제외 */
-	    dev->is_virtfn) /* PCI/NVMe: VF는 RCB bit가 RsvdP */
+	if (!pci_is_pcie(dev) ||
+	    pci_pcie_type(dev) == PCI_EXP_TYPE_ROOT_PORT ||
+	    pci_pcie_type(dev) == PCI_EXP_TYPE_UPSTREAM ||
+	    pci_pcie_type(dev) == PCI_EXP_TYPE_DOWNSTREAM ||
+	    pci_pcie_type(dev) == PCI_EXP_TYPE_RC_EC ||
+	    dev->is_virtfn)
 		return;
+	/* [한국어] 설정 대상이 아닌 경우를 한꺼번에 걸러 낸다.
+	 * - PCIe 가 아니면 RCB 개념이 없다.
+	 * - Root Port 는 자기 RCB 가 읽기 전용이라 쓸 수 없다(기준일 뿐).
+	 * - 스위치 상/하향 포트와 RC Event Collector 는 위 스펙 인용에서
+	 *   설정 대상으로 열거되지 않았다.
+	 * - VF 는 이 비트가 예약(RsvdP)이다.
+	 * 남는 것은 엔드포인트와 (PCIe-to-PCI 등) 브리지다. NVMe SSD 는
+	 * 엔드포인트이므로 여기를 통과한다. */
 
 	/* Root Port often not visible to virtualized guests */
-	rp = pcie_find_root_port(dev); /* PCI/NVMe: NVMe 장치의 Root Port 탐색 */
-	if (!rp) /* PCI/NVMe: 가상화 등에서 Root Port를 찾지 못하면 처리 불가 */
+	rp = pcie_find_root_port(dev);
+	/* [한국어] 기준값을 읽어 올 Root Port 를 찾는다 */
+	if (!rp)
 		return;
+	/* [한국어] 위 영어 주석대로 가상화 게스트에서는 Root Port 가 보이지
+	 * 않는 경우가 흔하다. 기준이 없으면 설정하지 않는다. */
 
-	pcie_capability_read_word(rp, PCI_EXP_LNKCTL, &rp_lnkctl); /* PCI/NVMe: Root Port의 Link Control 읽기 */
-	/* PCI/NVMe: PCIe capability 비트 클리어 후 설정 */
+	pcie_capability_read_word(rp, PCI_EXP_LNKCTL, &rp_lnkctl);
+	/* [한국어] Root Port 의 Link Control — RCB 비트가 여기 있다 */
 	pcie_capability_clear_and_set_word(dev, PCI_EXP_LNKCTL,
-					   /* PCI/NVMe: 후속 코드 동작 수행 */
 					   PCI_EXP_LNKCTL_RCB,
-					   /* PCI/NVMe: 후속 코드 동작 수행 */
 					   (rp_lnkctl & PCI_EXP_LNKCTL_RCB) ?
-					   PCI_EXP_LNKCTL_RCB : 0); /* PCI/NVMe: Root Port의 RCB 값을 NVMe endpoint에 동기화 */
-}
-
-/* PCI/NVMe: pci_configure_device 함수 정의 */
-static void pci_configure_device(struct pci_dev *dev)
-{
-	/* PCI/NVMe: Max Payload Size 설정 */
-	pci_configure_mps(dev);
-	/* PCI/NVMe: Extended Tag 활성화 */
-	pci_configure_extended_tags(dev, NULL);
-	/* PCI/NVMe: Relaxed Ordering 설정 */
-	pci_configure_relaxed_ordering(dev);
-	/* PCI/NVMe: Latency Tolerance Reporting 설정 */
-	pci_configure_ltr(dev);
-	/* PCI/NVMe: ASPM L1 Substates 설정 */
-	pci_configure_aspm_l1ss(dev);
-	/* PCI/NVMe: End-to-End TLP Prefix 설정 */
-	pci_configure_eetlp_prefix(dev);
-	/* PCI/NVMe: SERR 포워딩 설정 */
-	pci_configure_serr(dev);
-	/* PCI/NVMe: Read Completion Boundary 설정 */
-	pci_configure_rcb(dev);
-
-	/* PCI/NVMe: ACPI 핫플러그 파라미터 적용 */
-	pci_acpi_program_hp_params(dev);
+					   PCI_EXP_LNKCTL_RCB : 0);
+	/* [한국어] clear_and_set 은 "지정한 비트를 먼저 지우고, 지정한 값으로
+	 * 다시 세운다"를 한 번의 읽기-수정-쓰기로 처리한다. 세 번째 인자가
+	 * 지울 마스크, 네 번째가 세울 값이다.
+	 * 삼항 연산은 "Root Port 에 RCB 가 서 있으면 나도 세우고, 아니면 지운다"
+	 * 즉 Root Port 값을 그대로 복사하는 것이다. 다른 Link Control 비트
+	 * (ASPM 설정 등)는 건드리지 않는다. */
 }
 
 /*
- * pci_release_capabilities() - pci_dev의 PCI/PCIe 고급 capability 정리
+ * [한국어]
+ * pci_configure_device - 새로 발견한 장치에 대한 링크/전송 계층 설정을 모아 실행
  *
- * NVMe 연결: NVMe 컨트롤러가 제거되거나 해제될 때 AER, SR-IOV, capability
- * save buffer 등을 정리. MSI-X는 pci_disable_msix() 등에서 별도 처리.
+ * @dev: 방금 열거된 장치.
+ * @return: 없음.
+ *
+ * 왜 필요한가: pci_setup_device() 가 "장치가 무엇인지" 읽어 냈다면, 이
+ * 함수는 "그 장치가 이 시스템에서 어떻게 동작해야 하는지"를 써 넣는다.
+ * 드라이버가 붙기 전에 끝나야 하므로 pci_device_add() 안에서, device_add()
+ * 보다 앞서 호출된다.
+ *
+ * 순서의 의미: MPS/Extended Tag 처럼 성능에 관한 것부터, RO/SERR/RCB 처럼
+ * 정확성과 오류 보고에 관한 것까지 차례로 적용하고, 마지막에 ACPI 펌웨어가
+ * 지정한 핫플러그 파라미터를 덮어쓴다.
+ *
+ * NVMe 접점: NVMe SSD 가 나타나면 이 함수가 그 SSD 의 MPS, Extended Tag,
+ * LTR, ASPM L1 substates 를 확정한다. 이 설정들이 이후 SSD 의 실효 대역폭과
+ * 유휴 시 절전 동작을 좌우한다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥, 드라이버 바인딩 전.
+ *
+ * 호출 체인:
+ *   pci_device_add() → [pci_configure_device] → 각 pci_configure_* 함수
  */
-/* PCI/NVMe: pci_release_capabilities 함수 정의 */
+static void pci_configure_device(struct pci_dev *dev)
+{
+	pci_configure_mps(dev);
+	/* [한국어] 최대 페이로드 크기를 상위 브리지와 맞춘다(대역폭 효율) */
+	pci_configure_extended_tags(dev, NULL);
+	/* [한국어] 8비트 태그를 켜 미완료 요청 수를 32 → 256 으로 늘린다.
+	 * 두 번째 인자는 콜백 시그니처를 맞추기 위한 더미다. */
+	pci_configure_relaxed_ordering(dev);
+	/* [한국어] Root Port 가 RO 를 못 견디면 장치 쪽 RO 를 끈다(정확성) */
+	pci_configure_ltr(dev);
+	/* [한국어] LTR(Latency Tolerance Reporting) 설정. 장치가 "이만큼의
+	 * 지연은 견딘다"고 플랫폼에 알려, 플랫폼이 더 깊은 절전으로 갈 수
+	 * 있게 한다. drivers/pci/pci.c 에 구현되어 있다. */
+	pci_configure_aspm_l1ss(dev);
+	/* [한국어] ASPM L1 Substates(L1.1/L1.2) 설정. L1 보다 더 깊은 링크
+	 * 절전 상태로, 복귀 지연이 더 크다. drivers/pci/pcie/aspm.c 소관.
+	 * NVMe 의 APST(컨트롤러 자체 전력 상태)와는 별개의 층위다. */
+	pci_configure_eetlp_prefix(dev);
+	/* [한국어] End-to-End TLP Prefix 최대 개수를 경로 제약과 함께 기록 */
+	pci_configure_serr(dev);
+	/* [한국어] 브리지면 SERR# 포워딩을 켜 오류 메시지가 위로 전달되게 한다 */
+	pci_configure_rcb(dev);
+	/* [한국어] Read Completion Boundary 를 Root Port 값에 맞춘다 */
+
+	pci_acpi_program_hp_params(dev);
+	/* [한국어] 마지막으로 ACPI 펌웨어가 _DSM 으로 지정한 핫플러그 파라미터를
+	 * 적용한다. 위에서 커널이 정한 값을 펌웨어가 덮어쓸 수 있으므로 맨 끝이다.
+	 * CONFIG_ACPI 가 없으면 빈 함수다. */
+}
+
+/*
+ * [한국어]
+ * pci_release_capabilities - 장치가 해제될 때 각 capability 하위 시스템을 정리한다
+ *
+ * @dev: 해제 중인 장치.
+ * @return: 없음.
+ *
+ * 왜 필요한가: pci_init_capabilities() 가 장치 등록 시 여러 하위 시스템의
+ * 초기화 훅을 불렀다면, 그 짝이 되는 정리 훅을 여기서 부른다. 이것을
+ * 빼먹으면 장치를 뽑았다 꽂을 때마다 메모리와 등록 항목이 쌓인다.
+ *
+ * NVMe 접점: NVMe SSD 를 핫플러그로 뽑거나 드라이버를 언로드할 때, 이
+ * 함수가 그 장치의 AER 등록과 SR-IOV 자원을 정리한다. MSI-X 벡터는 여기가
+ * 아니라 드라이버가 pci_free_irq_vectors() 로 따로 반납한다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥, pci_release_dev() 안(참조 카운트 0 시점).
+ *
+ * 호출 체인:
+ *   put_device(&dev->dev) → pci_release_dev() → [pci_release_capabilities]
+ */
 static void pci_release_capabilities(struct pci_dev *dev)
 {
-	pci_aer_exit(dev); /* PCI/NVMe: AER 콜백 및 자원 정리; NVMe 오류 보고 중단 */
-	pci_rcec_exit(dev); /* PCI/NVMe: Root Complex Event Collector 관련 정리 */
-	pci_iov_release(dev); /* PCI/NVMe: SR-IOV 자원 반납; NVMe VF 정리 */
-	pci_free_cap_save_buffers(dev); /* PCI/NVMe: suspend/resume용 capability 저장 버퍼 해제 */
+	pci_aer_exit(dev);
+	/* [한국어] AER 관련 상태와 등록을 해제한다. 이후 이 장치의 PCIe 오류는
+	 * 커널이 보고하지 않는다. */
+	pci_rcec_exit(dev);
+	/* [한국어] Root Complex Event Collector 와의 연결을 끊는다.
+	 * RCEC 는 내장 엔드포인트들의 오류를 모아 보고하는 장치라,
+	 * 그 목록에서 이 장치를 빼야 한다. */
+	pci_iov_release(dev);
+	/* [한국어] SR-IOV 자원을 반납한다. PF 라면 VF 관련 상태가 정리된다 */
+	pci_free_cap_save_buffers(dev);
+	/* [한국어] suspend 시 capability 레지스터 내용을 저장해 두던 버퍼를
+	 * 해제한다. 절전 복귀 시 하드웨어가 초기화되므로 커널이 값을 기억해
+	 * 두었다가 되쓰는데, 그 버퍼다. */
 }
 
 /**
@@ -4630,310 +5911,601 @@ static void pci_release_capabilities(struct pci_dev *dev)
  * done.
  */
 /*
- * pci_release_dev() - pci_dev의 최종 해제
+ * [한국어]
+ * pci_release_dev - pci_dev 의 마지막 참조가 사라졌을 때의 소멸자
  *
- * NVMe 연결: NVMe 컨트롤러의 struct device 참조 카운트가 0이 되면
- * 호출. capability, OF node, DMA alias bitmap, bus 참조 등을 정리하고
- * pci_dev 메모리를 해제.
+ * @dev: pci_dev 안에 박혀 있는 struct device.
+ * @return: 없음.
+ *
+ * 왜 필요한가: pci_dev 는 refcount 로 관리되므로 아무도 임의로 kfree 하면
+ * 안 된다. 커널이 참조가 0 이 되는 순간 device_type->release 로 이 함수를
+ * 부르고, 여기서만 실제 해제가 일어난다.
+ *
+ * 해제 순서가 중요하다: 하위 시스템 정리 → 외부 참조 반납 → 메모리 해제.
+ * 순서를 바꾸면 이미 해제된 필드를 참조하게 된다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥. 마지막 put_device() 호출자 문맥에서 동기 실행.
+ *
+ * 호출 체인:
+ *   put_device(&pdev->dev) → device_release() → [pci_release_dev] → kfree
  */
-/* PCI/NVMe: pci_release_dev 함수 정의 */
 static void pci_release_dev(struct device *dev)
 {
-	/* PCI/NVMe: 후속 코드 동작 수행 */
 	struct pci_dev *pci_dev;
+	/* [한국어] 내장 device 에서 복원한 바깥 pci_dev */
 
-	pci_dev = to_pci_dev(dev); /* PCI/NVMe: device에서 pci_dev 구조체 획득 */
-	pci_release_capabilities(pci_dev); /* PCI/NVMe: AER/SR-IOV/cap save buffer 정리 */
-	pci_release_of_node(pci_dev); /* PCI/NVMe: device tree node 참조 해제 */
-	pcibios_release_device(pci_dev); /* PCI/NVMe: 아키텍처별 device 해제 처리 */
-	pci_bus_put(pci_dev->bus); /* PCI/NVMe: bus 참조 카운트 감소 */
-	bitmap_free(pci_dev->dma_alias_mask); /* PCI/NVMe: DMA alias bitmap 해제; NVMe DMA alias 정리 */
-	dev_dbg(dev, "device released\n"); /* PCI/NVMe: device 해제 로그 */
-	kfree(pci_dev); /* PCI/NVMe: pci_dev 메모리 해제 */
+	pci_dev = to_pci_dev(dev);
+	/* [한국어] container_of 기반 역변환 */
+	pci_release_capabilities(pci_dev);
+	/* [한국어] AER/RCEC/SR-IOV/저장 버퍼 등 하위 시스템 정리 */
+	pci_release_of_node(pci_dev);
+	/* [한국어] pci_set_of_node() 로 잡은 DT 노드 참조 반납 */
+	pcibios_release_device(pci_dev);
+	/* [한국어] 아키텍처별 정리 훅(기본은 빈 __weak 함수) */
+	pci_bus_put(pci_dev->bus);
+	/* [한국어] pci_alloc_dev() 의 pci_bus_get() 과 짝. 버스 참조를 놓는다.
+	 * 이 장치가 버스의 마지막 사용자였다면 버스도 해제될 수 있다. */
+	bitmap_free(pci_dev->dma_alias_mask);
+	/* [한국어] DMA alias 비트맵 해제. 일부 장치는 자기 것이 아닌 다른
+	 * BDF 로 DMA 요청을 보내는데(브리지 뒤의 구식 장치 등), IOMMU 가
+	 * 그 별칭들도 함께 매핑해야 해서 커널이 비트맵으로 기억해 둔 것이다.
+	 * NULL 이어도 안전하다. */
+	dev_dbg(dev, "device released\n");
+	/* [한국어] 해제 완료 디버그 로그. kfree 직전이라 dev 를 쓸 수 있는 마지막 시점 */
+	kfree(pci_dev);
+	/* [한국어] 구조체 자체 해제. 이후 어떤 필드도 접근 불가 */
 }
 
-/* PCI/NVMe: 지역 변수 선언 및 초기화 */
+/*
+ * [한국어] pci_dev_type - PCI 장치 device 의 타입 서술자.
+ * release 콜백을 여기 두지 않는 것에 유의 — pci_dev 의 소멸자
+ * pci_release_dev() 는 pci_device_add() 에서 dev->dev.release 에 직접
+ * 대입되며, 이 device_type 은 sysfs 속성 그룹만 제공한다.
+ */
 static const struct device_type pci_dev_type = {
-	/* PCI/NVMe: .groups 설정: sysfs attribute group */
 	.groups = pci_dev_attr_groups,
+	/* [한국어] 모든 PCI 장치에 자동 생성되는 sysfs 속성 그룹들
+	 * (drivers/pci/pci-sysfs.c: vendor, device, class, resource,
+	 *  config, enable, numa_node 등). */
 };
 
 /*
- * pci_alloc_dev() - 새 PCI 디바이스를 표현할 struct pci_dev 할당
+ * [한국어]
+ * pci_alloc_dev - 빈 pci_dev 를 할당하고 최소한의 초기화를 한다
  *
- * NVMe 연결: nvme_pci_driver가 바인딩될 대상 pci_dev가 여기서 생성된다.
- * dev->resource[]는 아직 비어 있고, 뒤의 pci_setup_device()에서
- * BAR/IRQ/클록 등을 채운다. msi_lock은 MSI-X 벡터 할당 시 사용.
+ * @bus: 이 장치가 붙을 버스.
+ * @return: 0 으로 초기화되고 락과 버스 참조가 준비된 pci_dev. 실패 시 NULL.
+ *
+ * 왜 필요한가: 장치를 발견했을 때(pci_scan_device)와 SR-IOV VF 를 만들 때
+ * (drivers/pci/iov.c) 모두 이 함수를 쓴다. 공통 초기화를 한곳에 모아 둔 것이며,
+ * 이 시점에는 아직 vendor/device 도 채워지지 않은 빈 껍데기다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥(GFP_KERNEL).
+ *
+ * 호출 체인:
+ *   pci_scan_device()/pci_iov_add_virtfn() → [pci_alloc_dev] → kzalloc_obj
  */
-/* PCI/NVMe: PCI 장치 구조체 할당 */
 struct pci_dev *pci_alloc_dev(struct pci_bus *bus)
 {
-	/* PCI/NVMe: 후속 코드 동작 수행 */
 	struct pci_dev *dev;
+	/* [한국어] 만들 장치 객체 */
 
-	dev = kzalloc_obj(struct pci_dev); /* PCI/NVMe: pci_dev 구조체를 0으로 초기화하며 할당 */
-	if (!dev) /* PCI/NVMe: 메모리 부족 시 NULL 반환 */
-		/* PCI/NVMe: NULL 반환(메모리/리소스 부족 또는 초기화 실패) */
+	dev = kzalloc_obj(struct pci_dev);
+	/* [한국어] 0 초기화 할당. 명시적으로 채우지 않는 필드는 모두 0/NULL 이다 */
+	if (!dev)
 		return NULL;
+	/* [한국어] 메모리 부족 */
 
-	INIT_LIST_HEAD(&dev->bus_list); /* PCI/NVMe: bus devices 리스트 연결용 node 초기화 */
-	dev->dev.type = &pci_dev_type; /* PCI/NVMe: PCI device type 설정 */
-	dev->bus = pci_bus_get(bus); /* PCI/NVMe: 소속 bus 참조 카운트 증가 */
-	/* PCI/NVMe: 구조체 필드에 값 저장: dev->driver_exclusive_resource */
+	INIT_LIST_HEAD(&dev->bus_list);
+	/* [한국어] 이 장치를 버스의 devices 목록에 매달 링크.
+	 * 실제 연결은 pci_device_add() 가 한다. */
+	dev->dev.type = &pci_dev_type;
+	/* [한국어] sysfs 속성 그룹을 제공할 device_type 지정 */
+	dev->bus = pci_bus_get(bus);
+	/* [한국어] 소속 버스를 가리키면서 참조를 하나 잡는다.
+	 * 이 장치가 살아 있는 동안 버스가 사라지지 않도록 보장한다.
+	 * pci_release_dev() 의 pci_bus_put() 과 짝이다. */
 	dev->driver_exclusive_resource = (struct resource) {
-		/* PCI/NVMe: .name 설정: 리소스/장치 식별자 */
+		/* [한국어] 드라이버가 "이 영역은 나만 쓰겠다"고 예약할 때 부모로
+		 * 쓰이는 리소스. 복합 리터럴로 한 번에 초기화한다. */
 		.name = "PCI Exclusive",
-		/* PCI/NVMe: .start 설정: 리소스 시작 주소(NVMe BAR 매핑 범위) */
+		/* [한국어] /proc/iomem 등에서 보일 이름 */
 		.start = 0,
-		/* PCI/NVMe: .end 설정: 리소스 끝 주소(NVMe BAR 매핑 범위) */
+		/* [한국어] 시작을 0 으로, */
 		.end = -1,
-	}; /* PCI/NVMe: 드라이버 전용 resource 범위 초기화 */
+		/* [한국어] 끝을 -1(= 부호 없는 최대값)로 두어 주소 공간 전체를
+		 * 덮는 열린 범위로 만든다. 실제 제한은 자식 리소스가 가진다. */
+	};
 
-	spin_lock_init(&dev->pcie_cap_lock); /* PCI/NVMe: PCIe capability 접근 보호용 spinlock 초기화 */
-/* PCI/NVMe: 컴파일 조건: CONFIG_PCI_MSI 정의 시 포함 */
+	spin_lock_init(&dev->pcie_cap_lock);
+	/* [한국어] PCIe capability 레지스터의 읽기-수정-쓰기를 보호하는 락.
+	 * pcie_capability_clear_and_set_word() 같은 함수가 이 락을 잡아,
+	 * 두 CPU 가 동시에 같은 레지스터를 고쳐 한쪽 변경이 사라지는 것을 막는다. */
 #ifdef CONFIG_PCI_MSI
-	raw_spin_lock_init(&dev->msi_lock); /* PCI/NVMe: MSI/MSI-X 할당 보호용 raw spinlock 초기화; NVMe per-queue MSI-X에 사용 */
-/* PCI/NVMe: 컴파일 조건 종료 */
+	raw_spin_lock_init(&dev->msi_lock);
+	/* [한국어] MSI/MSI-X 마스킹 비트를 보호하는 락. raw_spinlock 인 이유는
+	 * 인터럽트 마스킹 경로가 RT 커널에서도 잠들면 안 되기 때문이다
+	 * (일반 spinlock 은 PREEMPT_RT 에서 잠들 수 있는 뮤텍스가 된다).
+	 * NVMe 처럼 큐마다 벡터를 갖는 장치에서 자주 쓰인다. */
 #endif
-	return dev; /* PCI/NVMe: 초기화된 pci_dev 반환 */
+	return dev;
+	/* [한국어] 호출자가 devfn/vendor/device 를 채우고 pci_setup_device() 로 넘긴다 */
 }
-/* PCI/NVMe: EXPORT_SYMBOL 함수 호출 */
-EXPORT_SYMBOL(pci_alloc_dev); /* PCI/NVMe: 심볼 외부 낸출. nvme-pci 등 모듈에서 참조 가능 */
+EXPORT_SYMBOL(pci_alloc_dev);
+/* [한국어] 일부 컨트롤러/가상화 코드가 모듈에서 쓰므로 공개 */
 
 /*
- * pci_bus_wait_rrs() - Configuration Request Retry Status 대기
+ * [한국어]
+ * pci_bus_wait_rrs - 장치가 "준비 중"이라고 답하는 동안 기다린다
  *
- * NVMe 연결: NVMe 컨트롤러가 부팅 직후 아직 준비되지 않았을 때,
- * config read는 RRS(예약된 vendor ID)로 완료될 수 있다. 이 함수는
- * 지수 백오프로 재시도하여 컨트롤러가 준비될 때까지 기다린다.
+ * @bus:     대상 버스.
+ * @devfn:   대상 (device, function) 좌표.
+ * @l:       입출력. 현재 읽은 Vendor/Device ID dword 이며, 재시도 성공 시
+ *           유효한 값으로 갱신된다.
+ * @timeout: 최대 대기 시간(ms). 0 이면 기다리지 않는다.
+ * @return: 유효한 Vendor ID 를 얻었으면 true. 시간 초과나 읽기 실패면 false.
+ *
+ * RRS 란: Configuration Request Retry Status(예전 이름 CRS). 리셋이나 전원
+ * 인가 직후의 장치는 config 요청에 답할 준비가 되지 않아 "나중에 다시
+ * 요청하라"고 응답한다. Root Port 가 RRS Software Visibility 를 켜 두었으면
+ * (pci_enable_rrs_sv 참조) 그 상태가 Vendor ID 0x0001 이라는 예약값으로
+ * 커널에 보인다. drivers/pci/pci.h 의 pci_bus_rrs_vendor_id() 가 그 판정을 한다.
+ *
+ * 왜 필요한가: 이것이 없으면 커널은 아직 준비 중인 장치를 "없는 장치"로
+ * 오해하고 지나쳐 버린다. 초기화에 시간이 걸리는 장치(전원이 막 들어온
+ * NVMe SSD 등)가 열거에서 통째로 누락될 수 있다.
+ *
+ * 지수 백오프: 1ms 부터 시작해 매번 두 배로 늘린다. 대부분의 장치는 몇 ms 만에
+ * 준비되므로 빠르게 잡아내고, 오래 걸리는 장치에 대해서는 config 읽기 횟수를
+ * 로그 스케일로 억제한다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥. msleep() 으로 잠들므로 인터럽트 문맥 금지.
+ *
+ * 호출 체인:
+ *   pci_bus_generic_read_dev_vendor_id() → [pci_bus_wait_rrs]
+ *     → msleep(), pci_bus_read_config_dword()
  */
-/* PCI/NVMe: Configuration RRS 대기 */
 static bool pci_bus_wait_rrs(struct pci_bus *bus, int devfn, u32 *l,
-			     /* PCI/NVMe: 후속 코드 동작 수행 */
 			     int timeout)
 {
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
 	int delay = 1;
+	/* [한국어] 다음에 기다릴 시간(ms). 1 → 2 → 4 → … 로 두 배씩 늘어난다.
+	 * 로그에 찍는 "누적 경과 시간"은 delay - 1 인데, 1+2+4+…+2^(n-1) = 2^n - 1
+	 * 이므로 현재 delay 에서 1 을 뺀 값이 지금까지 잔 총 시간이 된다. */
 
-	/* PCI/NVMe: 조걸 분기, NULL/0/미설정 여부 검사 */
 	if (!pci_bus_rrs_vendor_id(*l))
-		return true;	/* not a Configuration RRS completion */ /* PCI/NVMe: RRS가 아니면 즉시 true */
+		return true;	/* not a Configuration RRS completion */
+	/* [한국어] 애초에 RRS 표식(Vendor ID 0x0001)이 아니었다 — 이미 유효한
+	 * 값이므로 기다릴 필요 없이 성공이다. */
 
-	/* PCI/NVMe: 조걸 분기, NULL/0/미설정 여부 검사 */
 	if (!timeout)
-		return false;	/* RRS, but caller doesn't want to wait */ /* PCI/NVMe: 대기를 원하지 않으면 false */
+		return false;	/* RRS, but caller doesn't want to wait */
+	/* [한국어] RRS 이긴 한데 호출자가 대기를 원하지 않는다(timeout 0).
+	 * 예를 들어 빠른 존재 확인만 하려는 경로가 그렇다. */
 
 	/*
 	 * We got the reserved Vendor ID that indicates a completion with
 	 * Configuration Request Retry Status (RRS).  Retry until we get a
 	 * valid Vendor ID or we time out.
 	 */
-	while (pci_bus_rrs_vendor_id(*l)) { /* PCI/NVMe: RRS가 해제될 때까지 반복 */
-		if (delay > timeout) { /* PCI/NVMe: timeout 초과 시 */
-			/* PCI/NVMe: 커널 경고 메시지 출력 */
+	while (pci_bus_rrs_vendor_id(*l)) {
+		/* [한국어] 여전히 RRS 인 동안 반복 */
+		if (delay > timeout) {
+			/* [한국어] 다음 대기 시간이 남은 예산을 넘었다 = 시간 초과 */
 			pr_warn("pci %04x:%02x:%02x.%d: not ready after %dms; giving up\n",
-				/* PCI/NVMe: PCI 도메인 번호 획득 */
 				pci_domain_nr(bus), bus->number,
-				PCI_SLOT(devfn), PCI_FUNC(devfn), delay - 1); /* PCI/NVMe: NVMe 장치 준비 실패 경고 */
+				PCI_SLOT(devfn), PCI_FUNC(devfn), delay - 1);
+			/* [한국어] 어느 BDF 가 얼마나 기다린 끝에 포기되었는지 남긴다.
+			 * pci_dev 가 아직 없으므로 pci_warn 이 아니라 pr_warn 을 쓴다. */
 
-			/* PCI/NVMe: 거짓 반환 */
 			return false;
+			/* [한국어] 호출자는 이 자리에 장치가 없는 것으로 처리한다 */
 		}
-		/* PCI/NVMe: 조걸 분기, 값 크기 비교 */
 		if (delay >= 1000)
-			/* PCI/NVMe: 커널 정보 메시지 출력 */
 			pr_info("pci %04x:%02x:%02x.%d: not ready after %dms; waiting\n",
-				/* PCI/NVMe: PCI 도메인 번호 획득 */
 				pci_domain_nr(bus), bus->number,
-				PCI_SLOT(devfn), PCI_FUNC(devfn), delay - 1); /* PCI/NVMe: 1초 이상 대기 시 정보 로그 */
+				PCI_SLOT(devfn), PCI_FUNC(devfn), delay - 1);
+		/* [한국어] 1초 이상 걸리기 시작하면 사용자에게 알린다. 부팅이
+		 * 멈춘 것처럼 보이는 상황의 원인을 로그로 설명해 주는 것이다. */
 
-		msleep(delay); /* PCI/NVMe: 지연 시간만큼 대기 */
-		delay *= 2; /* PCI/NVMe: 지수 백오프로 대기 시간 증가 */
+		msleep(delay);
+		/* [한국어] 잠든다. 이 함수가 프로세스 문맥 전용인 이유다 */
+		delay *= 2;
+		/* [한국어] 지수 백오프 — 다음 대기는 두 배 */
 
-		/* PCI/NVMe: 조걸 분기, 조건에 따른 실행 경로 선택 */
 		if (pci_bus_read_config_dword(bus, devfn, PCI_VENDOR_ID, l))
-			return false; /* PCI/NVMe: config read 자체가 실패하면 false */
+			return false;
+		/* [한국어] 다시 읽는다. 0 이 아닌 반환값은 config 접근 자체의
+		 * 실패를 뜻하므로 더 기다릴 의미가 없다. 성공하면 갱신된 *l 로
+		 * 루프 조건을 다시 판정한다. */
 	}
 
-	/* PCI/NVMe: 조걸 분기, 값 크기 비교 */
 	if (delay >= 1000)
-		/* PCI/NVMe: 커널 정보 메시지 출력 */
 		pr_info("pci %04x:%02x:%02x.%d: ready after %dms\n",
-			/* PCI/NVMe: PCI 도메인 번호 획득 */
 			pci_domain_nr(bus), bus->number,
-			PCI_SLOT(devfn), PCI_FUNC(devfn), delay - 1); /* PCI/NVMe: 준비 완료 로그 */
+			PCI_SLOT(devfn), PCI_FUNC(devfn), delay - 1);
+	/* [한국어] 오래 기다렸던 장치가 마침내 응답했다는 사실을 남긴다.
+	 * 위의 "waiting" 로그와 짝을 이룬다. */
 
-	return true; /* PCI/NVMe: 유효한 vendor ID 획득 */
+	return true;
+	/* [한국어] 이제 *l 에는 유효한 Vendor/Device ID 가 들어 있다 */
 }
 
 /*
- * pci_bus_generic_read_dev_vendor_id() - slot에서 vendor/device ID 읽기
+ * [한국어]
+ * pci_bus_generic_read_dev_vendor_id - 어떤 좌표에 장치가 있는지 판정한다
  *
- * NVMe 연결: bus/dev/function 위치에 실제로 장치(예: NVMe 컨트롤러)가
- * 있는지 확인하는 첫 단계. 유효한 vendor ID가 읽히면 해당 위치에
- * pci_dev를 할당하고 계속 초기화.
+ * @bus:     대상 버스.
+ * @devfn:   대상 (device, function) 좌표.
+ * @l:       읽은 Vendor/Device ID dword 를 받을 곳.
+ * @timeout: RRS 상태일 때 기다릴 최대 ms.
+ * @return: 그 자리에 장치가 있으면 true, 없으면 false.
+ *
+ * ★ 이 함수가 PCI 열거의 근본 원리를 구현한다 ★
+ * 시스템에는 "어떤 장치가 어디에 있다"는 명부가 없다. 그래서 커널은 가능한
+ * 모든 좌표에 대해 config 오프셋 0x00(Vendor/Device ID)을 실제로 읽어 보고,
+ * 응답이 오는지로 존재를 판정한다.
+ *
+ * 왜 0xFFFF 가 "없음"인가: config 요청의 목적지에 아무도 없으면 응답이
+ * 오지 않는다. 그때 호스트 브리지/Root Complex 는 마스터 어보트를 감지하고,
+ * 읽기 결과로 모든 비트가 1 인 값(0xFFFFFFFF)을 CPU 에 돌려준다. 이것은
+ * 버스가 아무도 구동하지 않을 때 풀업 저항 때문에 모두 1 로 읽히는
+ * 물리적 성질에서 유래한 규약이며, PCI 스펙은 유효한 Vendor ID 로 0xFFFF 를
+ * 쓰지 못하도록 예약해 두어 이 판정이 모호해지지 않게 했다.
+ * 같은 원리가 이 파일 곳곳에서 쓰인다 — __pci_read_base() 의
+ * PCI_POSSIBLE_ERROR(sz), capability 순회에서 ID 0xff 를 만나면 중단하는 것,
+ * 그리고 drivers/nvme/host/pci.c:3118 에서
+ * readl(dev->bar + NVME_REG_CSTS) == -1 로 컨트롤러가 사라졌는지 보는 것까지
+ * 모두 "all-ones = 응답 없음"이라는 같은 규약이다.
+ *
+ * 0x0000 도 걸러 내는 이유: 아래 영어 주석대로, 빈 슬롯에 대해 0xFFFFFFFF 가
+ * 아니라 0 을 돌려주는 결함 보드가 있다. Vendor ID 0x0000 역시 유효한 값이
+ * 아니므로 함께 없는 것으로 처리한다. 0x0000ffff/0xffff0000 은 상위 또는
+ * 하위 절반만 제대로 읽힌 어중간한 응답으로, 역시 신뢰할 수 없다.
+ *
+ * NVMe 접점: 부팅 시 NVMe SSD 가 발견되는 최초의 순간이 바로 이 함수가
+ * 그 SSD 의 Vendor ID(예: 삼성 0x144d)를 읽어 내는 시점이다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥(RRS 대기에서 잠들 수 있다).
+ *
+ * 호출 체인:
+ *   pci_scan_device() → pci_bus_read_dev_vendor_id()
+ *     → [pci_bus_generic_read_dev_vendor_id] → pci_bus_wait_rrs()
  */
-/* PCI/NVMe: Vendor/Device ID 일반 읽기 */
 bool pci_bus_generic_read_dev_vendor_id(struct pci_bus *bus, int devfn, u32 *l,
-					/* PCI/NVMe: 후속 코드 동작 수행 */
 					int timeout)
 {
-	if (pci_bus_read_config_dword(bus, devfn, PCI_VENDOR_ID, l)) /* PCI/NVMe: 설정 공간 0x00에서 vendor/device ID 읽기 시도 */
-		return false; /* PCI/NVMe: 읽기 실패 시 slot이 비어있거나 접근 불가 */
+	if (pci_bus_read_config_dword(bus, devfn, PCI_VENDOR_ID, l))
+		return false;
+	/* [한국어] config 오프셋 0x00 을 dword 로 읽는다. 하위 16비트가
+	 * Vendor ID, 상위 16비트가 Device ID 라 한 번에 둘 다 얻는다.
+	 * 0 이 아닌 반환값은 버스 접근 자체가 실패했다는 뜻(해당 버스 번호가
+	 * 유효하지 않거나 컨트롤러가 거부)이므로 장치 없음으로 처리한다. */
 
 	/* Some broken boards return 0 or ~0 (PCI_ERROR_RESPONSE) if a slot is empty: */
-	/* PCI/NVMe: 조걸 분기, 조건에 따른 실행 경로 선택 */
 	if (PCI_POSSIBLE_ERROR(*l) || *l == 0x00000000 ||
-	    *l == 0x0000ffff || *l == 0xffff0000) /* PCI/NVMe: empty slot이나 error response이면 장치 없음 */
-		/* PCI/NVMe: 거짓 반환 */
+	    *l == 0x0000ffff || *l == 0xffff0000)
 		return false;
+	/* [한국어] 네 가지 "장치 없음" 패턴을 한꺼번에 거른다.
+	 *  0xFFFFFFFF : 표준적인 응답 없음(마스터 어보트). PCI_POSSIBLE_ERROR 가 판정.
+	 *  0x00000000 : 영어 주석이 말하는 결함 보드의 빈 슬롯 응답.
+	 *  0x0000ffff : Vendor ID 만 0xffff — 절반만 응답 없음.
+	 *  0xffff0000 : Device ID 만 0xffff — 역시 절반만 응답 없음.
+	 * 어느 쪽이든 유효한 장치일 수 없으므로 이 좌표는 비어 있다고 본다. */
 
-	if (pci_bus_rrs_vendor_id(*l)) /* PCI/NVMe: RRS(예약 vendor ID)이면 */
-		return pci_bus_wait_rrs(bus, devfn, l, timeout); /* PCI/NVMe: 장치 준비될 때까지 대기 */
+	if (pci_bus_rrs_vendor_id(*l))
+		return pci_bus_wait_rrs(bus, devfn, l, timeout);
+	/* [한국어] Vendor ID 가 예약값 0x0001 이면 "장치는 있는데 아직 준비
+	 * 중"이라는 뜻이다(RRS). 없는 것으로 처리하면 안 되므로 기다린다. */
 
-	return true; /* PCI/NVMe: 유효한 vendor/device ID 획득; NVMe 컨트롤러 탐색 성공 */
+	return true;
+	/* [한국어] 유효한 Vendor/Device ID 를 얻었다 = 이 좌표에 장치가 있다.
+	 * 호출자가 *l 에서 vendor 와 device 를 뽑아 pci_dev 에 채운다. */
 }
 
 /*
- * pci_bus_read_dev_vendor_id() - vendor/device ID 읽기의 아키텍처 기본 래퍼
+ * [한국어]
+ * pci_bus_read_dev_vendor_id - 장치 존재 판정의 공개 진입점
  *
- * NVMe 연결: 대부분의 플랫폼에서 pci_bus_generic_read_dev_vendor_id()를
- * 직접 호출. NVMe 컨트롤러 탐색의 출발점.
+ * @bus:     대상 버스.
+ * @devfn:   대상 좌표.
+ * @l:       읽은 Vendor/Device ID 를 받을 곳.
+ * @timeout: RRS 대기 최대 ms.
+ * @return: 장치가 있으면 true.
+ *
+ * 왜 한 겹 더 감싸는가: 아키텍처나 가상화 계층이 존재 판정을 가로채야 할
+ * 때를 대비한 분리 지점이다. 현재 이 구현은 generic 버전을 그대로 부른다.
+ * 외부 모듈(핫플러그 드라이버 등)이 쓰는 공개 API 이기도 하다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_scan_device() → [pci_bus_read_dev_vendor_id]
+ *     → pci_bus_generic_read_dev_vendor_id()
  */
-/* PCI/NVMe: pci_bus_read_dev_vendor_id 함수 호출 */
 bool pci_bus_read_dev_vendor_id(struct pci_bus *bus, int devfn, u32 *l,
-				/* PCI/NVMe: 후속 코드 동작 수행 */
 				int timeout)
 {
-	return pci_bus_generic_read_dev_vendor_id(bus, devfn, l, timeout); /* PCI/NVMe: 일반 vendor ID 읽기 경로 */
+	return pci_bus_generic_read_dev_vendor_id(bus, devfn, l, timeout);
+	/* [한국어] 일반 구현으로 그대로 위임 */
 }
-/* PCI/NVMe: EXPORT_SYMBOL 함수 호출 */
-EXPORT_SYMBOL(pci_bus_read_dev_vendor_id); /* PCI/NVMe: 심볼 외부 낸출. nvme-pci 등 모듈에서 참조 가능 */
+EXPORT_SYMBOL(pci_bus_read_dev_vendor_id);
+/* [한국어] 핫플러그 등 모듈에서 쓰므로 공개 */
 
 /*
  * Read the config data for a PCI device, sanity-check it,
  * and fill in the dev structure.
  */
-/* PCI/NVMe: PCI config space 읽어 장치 구조체 채우기 */
+/*
+ * [한국어]
+ * pci_scan_device - 한 좌표를 조사해 장치가 있으면 pci_dev 를 만든다
+ *
+ * @bus:   대상 버스.
+ * @devfn: 대상 (device, function) 좌표.
+ * @return: 완성된 pci_dev(아직 등록 전). 장치가 없거나 해석에 실패하면 NULL.
+ *
+ * 왜 필요한가: "존재 판정 → 객체 할당 → config 해석"의 세 단계를 묶은
+ * 함수다. 이 함수가 NULL 이 아닌 것을 돌려주어야 비로소 그 좌표에 장치가
+ * 있다고 확정되고, 호출자 pci_scan_single_device() 가 pci_device_add() 로
+ * 드라이버 모델에 올린다.
+ *
+ * 60초 타임아웃: 첫 인자로 60*1000ms 를 넘긴다. PCIe 스펙이 요구하는
+ * 준비 시간보다 훨씬 넉넉한 값으로, 느린 장치도 놓치지 않으려는 선택이다.
+ * 실제로는 대부분 수 ms 안에 끝난다.
+ *
+ * 실패 시 정리: pci_setup_device() 가 실패하면(알 수 없는 헤더 타입 등)
+ * 아직 드라이버 모델에 등록되지 않은 상태이므로, put_device 가 아니라
+ * 버스 참조를 직접 놓고 kfree 한다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥. RRS 대기에서 최대 60초까지 잠들 수 있다.
+ *
+ * 호출 체인:
+ *   pci_scan_slot() → pci_scan_single_device() → [pci_scan_device]
+ *     → pci_bus_read_dev_vendor_id(), pci_alloc_dev(), pci_setup_device()
+ */
 static struct pci_dev *pci_scan_device(struct pci_bus *bus, int devfn)
 {
-	/* PCI/NVMe: 후속 코드 동작 수행 */
 	struct pci_dev *dev;
-	/* PCI/NVMe: l 변수 선언/초기화: config space 읽은 32-bit 값. NVMe capability/CSR 원시 데이터 */
+	/* [한국어] 만들 장치 객체 */
 	u32 l;
+	/* [한국어] config 0x00 에서 읽은 Vendor/Device ID dword */
 
-	/* PCI/NVMe: 조걸 분기, NULL/0/미설정 여부 검사 */
 	if (!pci_bus_read_dev_vendor_id(bus, devfn, &l, 60*1000))
-		/* PCI/NVMe: NULL 반환(메모리/리소스 부족 또는 초기화 실패) */
 		return NULL;
+	/* [한국어] ★존재 판정★ 응답이 all-ones 등이면 이 좌표는 비어 있다.
+	 * 60초까지 RRS 재시도를 허용한다. */
 
-	/* PCI/NVMe: PCI 장치 구조체 할당 */
 	dev = pci_alloc_dev(bus);
-	/* PCI/NVMe: 조걸 분기, NULL/0/미설정 여부 검사 */
 	if (!dev)
-		/* PCI/NVMe: NULL 반환(메모리/리소스 부족 또는 초기화 실패) */
 		return NULL;
+	/* [한국어] 메모리 부족 — 장치는 있지만 표현할 객체를 못 만든다 */
 
-	/* PCI/NVMe: 구조체 필드에 값 저장: dev->devfn */
 	dev->devfn = devfn;
-	/* PCI/NVMe: 구조체 필드에 비트 마스크 적용: dev->vendor */
+	/* [한국어] 이 장치의 좌표를 기록. 이후 모든 config 접근이 이 값을 쓴다 */
 	dev->vendor = l & 0xffff;
-	/* PCI/NVMe: 구조체 필드에 비트 마스크 적용: dev->device */
+	/* [한국어] 하위 16비트가 Vendor ID(PCI-SIG 가 회사마다 부여한 번호).
+	 * 예: 0x144d 삼성, 0x8086 인텔. */
 	dev->device = (l >> 16) & 0xffff;
+	/* [한국어] 상위 16비트가 Device ID(회사가 제품마다 정한 번호).
+	 * 이 두 값이 드라이버 id_table 매칭의 기본 키다. */
 
-	/* PCI/NVMe: 조걸 분기, 조건에 따른 실행 경로 선택 */
 	if (pci_setup_device(dev)) {
-		/* PCI/NVMe: 버스 레퍼런스 해제 */
+		/* [한국어] 헤더 타입을 해석해 BAR/IRQ/클래스를 채운다.
+		 * 0 이 아니면 이 장치를 다룰 수 없다는 뜻이다. */
 		pci_bus_put(dev->bus);
-		/* PCI/NVMe: 동적 메모리 해제 */
+		/* [한국어] pci_alloc_dev() 에서 잡은 버스 참조를 되돌린다 */
 		kfree(dev);
-		/* PCI/NVMe: NULL 반환(메모리/리소스 부족 또는 초기화 실패) */
+		/* [한국어] 아직 device_initialize 전이라 kfree 가 맞다.
+		 * (device_add 이후였다면 put_device 를 써야 한다.) */
 		return NULL;
 	}
 
-	/* PCI/NVMe: 결과 반환: dev */
 	return dev;
+	/* [한국어] 완성된 pci_dev. 아직 버스 목록에도 sysfs 에도 없다 */
 }
 
 /*
- * pcie_report_downtraining() - 링크가 최대 속도/폭보다 낮게 협상되면 경고
+ * [한국어]
+ * pcie_report_downtraining - 링크가 최대치보다 낮게 협상되었으면 알린다
  *
- * NVMe 연결: NVMe SSD가 x4 링크에 연결되어야 하는데 x1로 협상되거나,
- * Gen4로 연결되어야 하는데 Gen3로 낮아지면 성능이 크게 저하. 이 함수는
- * pci_init_capabilities()에서 호출되어 문제를 로그에 남긴다.
+ * @dev: 검사할 장치.
+ * @return: 없음. 문제가 있으면 로그를 남긴다.
+ *
+ * downtraining 이란: PCIe 링크는 양끝이 협상해 속도(Gen)와 폭(x1/x2/x4/…)을
+ * 정한다. 신호 품질 문제나 슬롯 배선 제약 때문에 양쪽이 지원하는 최대치보다
+ * 낮게 정해지는 것을 downtraining 이라 한다. 하드웨어는 아무 오류도 보고하지
+ * 않고 조용히 느리게 동작하므로, 커널이 알려 주지 않으면 알아채기 어렵다.
+ *
+ * NVMe 접점: Gen4 x4 로 붙어야 할 SSD 가 Gen3 x4 로 잡히면 대역폭이 절반이
+ * 되고, x4 여야 할 것이 x1 이면 4분의 1 이 된다. "새 SSD 인데 왜 이렇게
+ * 느리지" 하는 상황의 첫 번째 확인 지점이 이 로그다.
+ *
+ * 세 가지 필터의 이유:
+ *  1) 엔드포인트/레거시 엔드포인트/스위치 상향 포트만 본다 — 아래 영어
+ *     주석대로 "장치 쪽에서 위를 보는" 방향이라야, 아무것도 꽂히지 않은
+ *     하향 포트에 대해 헛된 경고가 나오지 않는다.
+ *  2) function 0 에서만 보고한다 — 멀티펑션 장치의 모든 function 은 같은
+ *     물리 링크를 공유하므로 같은 경고가 여러 번 나올 이유가 없다.
+ *  3) VF 는 제외한다 — VF 도 PF 와 같은 링크를 쓴다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥, pci_init_capabilities() 안에서 호출.
+ *
+ * 호출 체인:
+ *   pci_device_add() → pci_init_capabilities() → [pcie_report_downtraining]
+ *     → __pcie_print_link_status()
  */
-/* PCI/NVMe: 링크 다운트레이닝 경고. NVMe SSD가 최대 대역폭으로 협상되지 않은 경우 */
-/* PCI/NVMe: pcie_report_downtraining 함수 정의 */
 void pcie_report_downtraining(struct pci_dev *dev)
 {
-	if (!pci_is_pcie(dev)) /* PCI/NVMe: PCIe 장치가 아니면 무관 */
+	if (!pci_is_pcie(dev))
 		return;
+	/* [한국어] 링크 협상은 PCIe 개념이다 */
 
 	/* Look from the device up to avoid downstream ports with no devices */
-	if ((pci_pcie_type(dev) != PCI_EXP_TYPE_ENDPOINT) && /* PCI/NVMe: Endpoint가 아니고 */
-	    (pci_pcie_type(dev) != PCI_EXP_TYPE_LEG_END) && /* PCI/NVMe: Legacy Endpoint가 아니고 */
-	    (pci_pcie_type(dev) != PCI_EXP_TYPE_UPSTREAM)) /* PCI/NVMe: Switch Upstream Port도 아니면 skip */
+	if ((pci_pcie_type(dev) != PCI_EXP_TYPE_ENDPOINT) &&
+	    (pci_pcie_type(dev) != PCI_EXP_TYPE_LEG_END) &&
+	    (pci_pcie_type(dev) != PCI_EXP_TYPE_UPSTREAM))
 		return;
+	/* [한국어] 링크의 "아래쪽 끝"에 해당하는 세 종류만 검사한다.
+	 * 이렇게 해야 빈 하향 포트(아무것도 꽂히지 않아 링크가 안 올라온 곳)에
+	 * 대해 의미 없는 경고가 쏟아지지 않는다. NVMe SSD 는 ENDPOINT 라 통과한다. */
 
 	/* Multi-function PCIe devices share the same link/status */
-	if (PCI_FUNC(dev->devfn) != 0 || dev->is_virtfn) /* PCI/NVMe: 멀티펑션 장치는 function 0에서만 보고; VF는 skip */
+	if (PCI_FUNC(dev->devfn) != 0 || dev->is_virtfn)
 		return;
+	/* [한국어] 같은 링크에 대한 중복 경고를 막는다. function 1~7 과 VF 는
+	 * function 0 / PF 와 물리 링크를 공유하므로 대표 하나만 보고하면 된다. */
 
 	/* Print link status only if the device is constrained by the fabric */
-	__pcie_print_link_status(dev, false); /* PCI/NVMe: 링크가 최대 값보다 낮으면 경고 출력; NVMe 성능 저하 원인 분석 */
+	__pcie_print_link_status(dev, false);
+	/* [한국어] 두 번째 인자 false 는 "항상 찍지 말고, 경로가 장치의 능력을
+	 * 제한하고 있을 때만 찍어라"는 뜻이다(true 면 무조건 출력).
+	 * 즉 정상적으로 최대 속도로 붙었으면 아무 로그도 나오지 않는다. */
 }
 
 /*
- * pci_imm_ready_init() - Immediate Readiness Status bit 확인
+ * [한국어]
+ * pci_imm_ready_init - Immediate Readiness 지원 여부를 기록한다
  *
- * NVMe 연결: Immediate Readiness를 지원하는 장치는 전원 상태 전환 후
- * 추가 지연 없이 config access에 응답. NVMe RTD3 복귀 지연에 영향.
+ * @dev: 대상 장치.
+ * @return: 없음. 지원하면 dev->imm_ready 가 1 이 된다.
+ *
+ * Immediate Readiness 란: 보통 장치는 D3hot 에서 D0 으로 돌아온 뒤 config
+ * 접근에 답할 수 있게 되기까지 규정된 대기 시간(10ms 등)이 필요하다.
+ * 이 비트가 서 있는 장치는 그 대기 없이 즉시 응답할 수 있다고 선언하는 것이다.
+ * Status 레지스터(offset 0x06)의 PCI_STATUS_IMM_READY 비트로 표시된다.
+ *
+ * 왜 중요한가: 커널이 불필요한 지연을 건너뛸 수 있어 절전 복귀가 빨라진다.
+ * 자주 절전에 들었다 나오는 장치일수록 누적 효과가 크다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥, pci_init_capabilities() 안에서 호출.
+ *
+ * 호출 체인:
+ *   pci_device_add() → pci_init_capabilities() → [pci_imm_ready_init]
  */
-/* PCI/NVMe: pci_imm_ready_init 함수 정의 */
 static void pci_imm_ready_init(struct pci_dev *dev)
 {
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
 	u16 status;
+	/* [한국어] Status 레지스터 값 */
 
-	pci_read_config_word(dev, PCI_STATUS, &status); /* PCI/NVMe: PCI Status 레지스터 읽기 */
-	if (status & PCI_STATUS_IMM_READY) /* PCI/NVMe: Immediate Readiness bit 확인 */
-		dev->imm_ready = 1; /* PCI/NVMe: pci_dev에 즉시 준비 가능 표시 */
+	pci_read_config_word(dev, PCI_STATUS, &status);
+	/* [한국어] offset 0x06 — 오류 비트와 capability 목록 유무 등이 함께 있는
+	 * 레지스터. 그중 한 비트가 Immediate Readiness 다. */
+	if (status & PCI_STATUS_IMM_READY)
+		dev->imm_ready = 1;
+	/* [한국어] 지원하면 기록. 전원 상태 전환 코드(drivers/pci/pci.c)가
+	 * 이 값을 보고 대기를 생략한다. */
 }
 
-/* PCI/NVMe: pci_init_capabilities 함수 정의 */
+/*
+ * [한국어]
+ * pci_init_capabilities - 장치가 가진 각 capability 별 하위 시스템을 초기화한다
+ *
+ * @dev: 방금 발견되어 아직 등록 전인 장치.
+ * @return: 없음.
+ *
+ * 왜 필요한가: capability 는 "이 장치가 추가로 무엇을 할 수 있는가"의 목록이고,
+ * 각 항목마다 그것을 다루는 커널 하위 시스템이 따로 있다. 이 함수는 그
+ * 초기화 훅들을 한 줄씩 부르는 목록이다. 각 훅은 자기 capability 가 없으면
+ * 조용히 아무 일도 하지 않으므로, 모든 장치에 대해 전부 불러도 안전하다.
+ *
+ * capability 를 찾는 공통 방식: 각 훅은 pci_find_capability()(표준 목록) 또는
+ * pci_find_ext_capability()(확장 목록)를 쓴다. 표준 목록은 Status 레지스터의
+ * CAP_LIST 비트를 확인한 뒤 Capabilities Pointer(header type 0/1 은 0x34,
+ * CardBus 는 0x14)가 가리키는 곳에서 시작해, 각 항목의 첫 2바이트
+ * [Capability ID, Next Pointer] 를 읽으며 Next 를 따라간다. Next 가 0 이면 끝.
+ * 무한 루프 방지는 drivers/pci/pci.h 의 PCI_FIND_NEXT_CAP 매크로에 있는
+ * TTL 48회 제한이며(PCI_FIND_CAP_TTL), 그 밖에 오프셋이 0x40 미만이면 중단,
+ * 4바이트 경계로 내림, ID 가 0xff 면(응답 없음) 중단하는 방어가 함께 있다.
+ * 확장 목록은 0x100 에서 시작하고 항목 헤더가 4바이트다.
+ *
+ * 순서의 의미: MSI/MSI-X 를 먼저 끄는 것이 중요하다 — 펌웨어가 켜 둔 채로
+ * 남겨 두면 드라이버가 준비되기 전에 인터럽트가 들어올 수 있다.
+ * 저장 버퍼 할당이 pci_pm_init() 보다 앞서는 것도 마찬가지 이유다.
+ *
+ * NVMe 접점: NVMe 컨트롤러에서는 pci_msix_init(MSI-X), pci_pm_init(전원 관리),
+ * pci_aer_init(오류 보고), pci_iov_init(SR-IOV), pci_dpc_init(오류 격리)가
+ * 실제로 의미 있는 일을 한다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥, 드라이버 바인딩 전.
+ *
+ * 호출 체인:
+ *   pci_device_add() → [pci_init_capabilities] → 각 하위 시스템 init 함수
+ */
 static void pci_init_capabilities(struct pci_dev *dev)
 {
 	pci_ea_init(dev);		/* Enhanced Allocation */
+	/* [한국어] 하드웨어에 고정된 BAR/버스 번호를 알려 주는 capability 처리 */
 	pci_msi_init(dev);		/* Disable MSI */
+	/* [한국어] MSI capability 를 찾아 위치를 기록하고, 펌웨어가 켜 두었다면
+	 * 끈다. 드라이버가 준비되기 전에 인터럽트가 들어오면 안 되기 때문이다. */
 	pci_msix_init(dev);		/* Disable MSI-X */
+	/* [한국어] MSI-X 도 마찬가지로 위치를 기록하고 비활성화한다.
+	 * MSI-X 는 표준 capability(ID 0x11)라 256바이트 영역 안에 있다.
+	 * NVMe 드라이버는 나중에 pci_alloc_irq_vectors_affinity() 로
+	 * 큐 수만큼 벡터를 요청해 다시 켠다. */
 
 	/* Buffers for saving PCIe and PCI-X capabilities */
-	/* PCI/NVMe: capability 저장 버퍼 할당 */
 	pci_allocate_cap_save_buffers(dev);
+	/* [한국어] 절전 진입 시 capability 레지스터 내용을 담아 둘 버퍼를 미리
+	 * 할당한다. 복귀 시 하드웨어가 초기화되어 있으므로 커널이 저장해 둔
+	 * 값을 되써야 한다. 아래 pci_pm_init() 이 이 버퍼를 전제로 동작한다. */
 
 	pci_imm_ready_init(dev);	/* Immediate Readiness */
+	/* [한국어] 절전 복귀 대기를 생략할 수 있는 장치인지 기록 */
 	pci_pm_init(dev);		/* Power Management */
+	/* [한국어] PM capability 를 읽어 D0~D3 지원 범위와 현재 상태를 확정.
+	 * dev->current_state 가 PCI_UNKNOWN 에서 실제 값으로 바뀐다. */
 	pci_vpd_init(dev);		/* Vital Product Data */
+	/* [한국어] 제조사가 심어 둔 일련번호/부품번호 등을 읽는 통로 준비 */
 	pci_configure_ari(dev);		/* Alternative Routing-ID Forwarding */
+	/* [한국어] ARI 는 한 장치가 8개 넘는 function 을 가질 수 있게 하는 확장.
+	 * SR-IOV 로 VF 를 많이 만들 때 필요하다. */
 	pci_iov_init(dev);		/* Single Root I/O Virtualization */
+	/* [한국어] SR-IOV capability 를 읽어 VF 를 몇 개까지 만들 수 있는지 등을
+	 * 파악한다. NVMe 도 SR-IOV 를 지원하는 제품이 있다. */
 	pci_ats_init(dev);		/* Address Translation Services */
+	/* [한국어] 장치가 IOMMU 의 주소 변환 결과를 자체 캐시(ATC)에 두는 기능.
+	 * untrusted 장치에는 허용되지 않는다. */
 	pci_pri_init(dev);		/* Page Request Interface */
+	/* [한국어] 장치가 없는 페이지를 만났을 때 호스트에 페이지 폴트를 요청하는
+	 * 기능. ATS 위에서 동작한다. */
 	pci_pasid_init(dev);		/* Process Address Space ID */
+	/* [한국어] 장치가 여러 프로세스의 주소 공간을 구분해 접근할 수 있게 하는
+	 * 식별자 기능. SVM(Shared Virtual Memory)의 기반이다. */
 	pci_acs_init(dev);		/* Access Control Services */
+	/* [한국어] 장치 간 peer-to-peer 트래픽을 IOMMU 로 강제로 우회시키는 기능.
+	 * 이것이 있어야 IOMMU 그룹을 잘게 나눌 수 있어 VFIO 통과가 쉬워진다. */
 	pci_ptm_init(dev);		/* Precision Time Measurement */
+	/* [한국어] 호스트와 장치의 시계를 정밀하게 맞추는 기능 */
 	pci_aer_init(dev);		/* Advanced Error Reporting */
+	/* [한국어] 확장 capability 인 AER 을 초기화한다. 이것이 성공해야
+	 * NVMe 컨트롤러의 링크 오류가 커널에 보고되고 복구 흐름이 돈다.
+	 * 호스트 브리지의 native_aer 가 0 이면 실질적으로 동작하지 않는다. */
 	pci_dpc_init(dev);		/* Downstream Port Containment */
+	/* [한국어] 오류가 난 링크를 즉시 차단해 오염이 퍼지지 않게 하는 기능 */
 	pci_rcec_init(dev);		/* Root Complex Event Collector */
+	/* [한국어] 루트 컴플렉스 내장 장치들의 오류를 모아 보고하는 장치와의 연결 */
 	pci_doe_init(dev);		/* Data Object Exchange */
+	/* [한국어] config space 를 통해 장치와 구조화된 데이터를 주고받는 통로.
+	 * CMA/SPDM 같은 인증 프로토콜이 이 위에서 동작한다. */
 	pci_tph_init(dev);		/* TLP Processing Hints */
+	/* [한국어] 장치가 TLP 에 "이 데이터는 어느 캐시에 두면 좋다" 같은 힌트를
+	 * 실어 보내 캐시 적중률을 높이는 기능 */
 	pci_rebar_init(dev);		/* Resizable BAR */
+	/* [한국어] BAR 크기를 소프트웨어가 바꿀 수 있게 하는 확장.
+	 * 큰 BAR 를 요구하는 장치가 주소 공간이 모자랄 때 줄일 수 있다. */
 	pci_dev3_init(dev);		/* Device 3 capabilities */
+	/* [한국어] 위에서 본 Device 3 capability — flit 모드 감지 여부 기록 */
 	pci_ide_init(dev);		/* Link Integrity and Data Encryption */
+	/* [한국어] 링크 구간의 무결성 검증과 암호화 기능 초기화 */
 
-	/* PCI/NVMe: 링크 다운트레이닝 경고 */
 	pcie_report_downtraining(dev);
-	/* PCI/NVMe: 리셋 방법 초기화 */
+	/* [한국어] 링크가 최대치보다 낮게 붙었으면 경고. 위 초기화들이 끝난
+	 * 뒤라 링크 정보가 모두 갖춰져 있다. */
 	pci_init_reset_methods(dev);
+	/* [한국어] 이 장치를 리셋할 수 있는 방법들(FLR, PM 리셋, 버스 리셋 등)을
+	 * 조사해 우선순위 목록으로 만든다. NVMe 컨트롤러가 응답하지 않을 때
+	 * 커널이 시도할 복구 수단이 여기서 정해진다. */
 }
 
 /*
@@ -4942,264 +6514,470 @@ static void pci_init_capabilities(struct pci_dev *dev)
  * per-device basis should be called from here.
  */
 /*
- * pci_dev_msi_domain() - 개별 PCI 장치에 대한 MSI domain 탐색
+ * [한국어]
+ * pci_dev_msi_domain - 이 장치만의 MSI 도메인이 따로 있는지 찾는다
  *
- * NVMe 연결: NVMe 컨트롤러의 MSI-X 벡터가 매핑될 IRQ domain을 찾는다.
- * interrupt remapping이 활성화된 시스템에서는 MSI message가 이 domain에
- * 의해 물리 인터럽트로 변환.
+ * @dev: 대상 장치.
+ * @return: 장치 전용 도메인이 있으면 그것, 없으면 NULL(버스 것을 상속해야 함).
+ *
+ * 왜 장치별 도메인이 필요한가: 대부분의 장치는 버스의 도메인을 그대로 쓰지만,
+ * 인터럽트 리매핑을 하는 시스템에서는 장치마다 다른 도메인이 필요할 수 있다.
+ * 위 영어 주석대로, 장치 단위로 도메인을 고를 수 있는 펌웨어 인터페이스가
+ * 있다면 여기서 물어봐야 한다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥, pci_device_add() 안에서 호출.
+ *
+ * 호출 체인:
+ *   pci_device_add() → pci_set_msi_domain() → [pci_dev_msi_domain]
  */
-/* PCI/NVMe: 장치별 MSI 도메인 획득 */
 static struct irq_domain *pci_dev_msi_domain(struct pci_dev *dev)
 {
-	/* PCI/NVMe: 후속 코드 동작 수행 */
 	struct irq_domain *d;
+	/* [한국어] 찾은 도메인 */
 
 	/*
 	 * If a domain has been set through the pcibios_device_add()
 	 * callback, then this is the one (platform code knows best).
 	 */
-	d = dev_get_msi_domain(&dev->dev); /* PCI/NVMe: platform이 미리 설정한 MSI domain 확인 */
-	/* PCI/NVMe: 조걸 분기, 조건에 따른 실행 경로 선택 */
+	d = dev_get_msi_domain(&dev->dev);
+	/* [한국어] 1순위: 아키텍처 코드가 pcibios_device_add() 훅에서 이미
+	 * 설정해 둔 도메인. 영어 주석대로 플랫폼 코드가 가장 잘 안다. */
 	if (d)
-		return d; /* PCI/NVMe: platform-specific domain 우선 사용 */
+		return d;
 
 	/*
 	 * Let's see if we have a firmware interface able to provide
 	 * the domain.
 	 */
-	d = pci_msi_get_device_domain(dev); /* PCI/NVMe: firmware(ACPI/DT)에서 장치별 MSI domain 검색 */
-	/* PCI/NVMe: 조걸 분기, 조건에 따른 실행 경로 선택 */
+	d = pci_msi_get_device_domain(dev);
+	/* [한국어] 2순위: ACPI/DT 가 이 장치(BDF)에 대해 지정한 도메인 */
 	if (d)
-		return d; /* PCI/NVMe: firmware가 제공한 domain 사용 */
+		return d;
 
-	return NULL; /* PCI/NVMe: 개별 domain 없음; bus/host bridge domain 상속 필요 */
+	return NULL;
+	/* [한국어] 장치 전용 도메인이 없다 — 호출자가 버스 것을 상속시킨다 */
 }
 
 /*
- * pci_set_msi_domain() - pci_dev에 최종 MSI domain 설정
+ * [한국어]
+ * pci_set_msi_domain - 장치의 MSI 도메인을 확정한다
  *
- * NVMe 연결: pci_device_add()에서 호출되며, NVMe 컨트롤러의 MSI-X
- * 인터럽트가 속할 IRQ domain을 확정. 개별 domain이 없으면 버스의
- * domain을 상속.
+ * @dev: 대상 장치.
+ * @return: 없음. dev->dev 의 msi_domain 이 설정된다.
+ *
+ * 왜 필요한가: MSI/MSI-X 벡터를 요청하려면 그 벡터를 발급할 도메인이
+ * 장치에 연결되어 있어야 한다. 장치 전용 도메인이 있으면 그것을, 없으면
+ * 버스의 도메인을 물려받는다.
+ *
+ * NVMe 접점: NVMe 드라이버가 pci_alloc_irq_vectors_affinity() 로 큐마다
+ * MSI-X 벡터를 요청하면(drivers/nvme/host/pci.c:2849), 그 벡터들은 여기서
+ * 확정된 도메인에서 할당된다. 도메인이 NULL 이면 MSI-X 를 쓸 수 없다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥, device_add() 전.
+ *
+ * 호출 체인:
+ *   pci_device_add() → [pci_set_msi_domain] → pci_dev_msi_domain()
  */
-/* PCI/NVMe: pci_set_msi_domain 함수 정의 */
 static void pci_set_msi_domain(struct pci_dev *dev)
 {
-	/* PCI/NVMe: 후속 코드 동작 수행 */
 	struct irq_domain *d;
+	/* [한국어] 확정할 도메인 */
 
 	/*
 	 * If the platform or firmware interfaces cannot supply a
 	 * device-specific MSI domain, then inherit the default domain
 	 * from the host bridge itself.
 	 */
-	d = pci_dev_msi_domain(dev); /* PCI/NVMe: 장치별 MSI domain 탐색 */
-	/* PCI/NVMe: 조걸 분기, NULL/0/미설정 여부 검사 */
+	d = pci_dev_msi_domain(dev);
+	/* [한국어] 장치 전용 도메인을 먼저 찾아본다 */
 	if (!d)
-		d = dev_get_msi_domain(&dev->bus->dev); /* PCI/NVMe: 없으면 bus의 MSI domain 상속; NVMe MSI-X affinity의 기반 */
+		d = dev_get_msi_domain(&dev->bus->dev);
+	/* [한국어] 없으면 이 장치가 붙은 버스의 도메인을 그대로 쓴다.
+	 * 버스의 도메인은 pci_set_bus_msi_domain() 이 이미 정해 두었다. */
 
-	dev_set_msi_domain(&dev->dev, d); /* PCI/NVMe: pci_dev의 MSI domain 확정; nvme_probe에서 pci_enable_msix_range() 사용 */
+	dev_set_msi_domain(&dev->dev, d);
+	/* [한국어] 장치에 기록. 이 값이 NULL 이면 이 장치는 MSI/MSI-X 를
+	 * 할당받을 수 없고 레거시 INTx 로 떨어진다. */
 }
 
-/* PCI/NVMe: pci_dev를 글로벌 트리에 추가. NVMe SSD가 sysfs와 드라이버 모델에 노출됨 */
-/* PCI/NVMe: pci_device_add 함수 정의 */
+/*
+ * [한국어]
+ * pci_device_add - 완성된 pci_dev 를 드라이버 모델에 올린다 (드라이버 매칭 개시 지점)
+ *
+ * @dev: pci_setup_device() 까지 마쳐 필드가 채워진 pci_dev.
+ * @bus: 이 장치가 붙은 버스.
+ * @return: 없음. 실패는 WARN_ON 으로 알릴 뿐 되돌리지 않는다.
+ *
+ * ★ 이 함수의 device_add() 호출이 "장치가 시스템의 일부가 되는" 순간이다 ★
+ * device_add() 가 성공하면 드라이버 코어가 pci_bus_type 에 등록된 모든
+ * 드라이버를 훑으며 pci_bus_match() 로 id_table 대조를 시작한다. 일치하는
+ * 드라이버가 있으면 그 자리에서 probe 가 호출된다. NVMe SSD 라면
+ * nvme_id_table 의 PCI_DEVICE_CLASS(PCI_CLASS_STORAGE_EXPRESS, 0xffffff)
+ * (drivers/nvme/host/pci.c:4137)에 클래스 0x010802 가 걸려 nvme_probe() 가
+ * 불리고, 그 안에서 pci_enable_device_mem() → pci_request_mem_regions() →
+ * BAR0 ioremap → CAP 읽기 → Admin Queue 설정으로 이어진다.
+ * 즉 /dev/nvme0 이 나타나는 사슬의 시작점이 이 한 줄이다.
+ *
+ * 왜 순서가 이런가:
+ *  1) pci_configure_device()  — 드라이버가 붙기 전에 링크/전송 설정을 끝낸다.
+ *  2) device_initialize()     — refcount 를 1 로 만든다. 이후 kfree 금지.
+ *  3) DMA 파라미터 설정       — 드라이버가 DMA 를 시작하기 전에 준비.
+ *  4) 헤더 quirk, capability 초기화 — 아래 영어 주석대로 알림(notifier)이
+ *     capability 정보를 참조할 수 있으므로 device_add 보다 먼저 끝내야 한다.
+ *  5) 버스 목록에 등록        — fixup 함수들이 목록을 훑을 수 있게.
+ *  6) MSI 도메인 설정         — 드라이버가 벡터를 요청하기 전에.
+ *  7) device_add()            — 드라이버 매칭 개시.
+ *
+ * 실행 컨텍스트: 프로세스 문맥. 버스 목록 갱신 구간에서만 pci_bus_sem 을
+ * 쓰기 모드로 잡는다. device_add() 자체는 락 없이 호출되며, 그 안에서
+ * 드라이버 probe 가 동기적으로 실행될 수 있다.
+ *
+ * 호출 체인:
+ *   pci_scan_single_device() → [pci_device_add]
+ *     → pci_configure_device(), pci_init_capabilities(), device_add()
+ *     → (드라이버 매칭) → nvme_probe() 등
+ */
 void pci_device_add(struct pci_dev *dev, struct pci_bus *bus)
 {
-	/* PCI/NVMe: ret 변수 선언/초기화: 반환값 변수. NVMe 초기화 성공/실패 상태 */
 	int ret;
+	/* [한국어] 하위 호출의 결과 코드. 실패해도 진행하되 WARN 으로 알린다 */
 
-	/* PCI/NVMe: 장치 PCIe 설정 일괄 구성 */
 	pci_configure_device(dev);
+	/* [한국어] MPS/Extended Tag/RO/LTR/ASPM L1SS/EETLP/SERR/RCB 설정.
+	 * 드라이버가 장치를 쓰기 시작하기 전에 링크 설정을 끝내야 한다. */
 
-	/* PCI/NVMe: 커널 장치 초기화 */
 	device_initialize(&dev->dev);
-	/* PCI/NVMe: dev->dev.release 설정: device release 콜백 */
+	/* [한국어] 드라이버 모델 객체 초기화. refcount 가 1 이 되며, 이 시점
+	 * 이후로는 kfree 가 아니라 put_device() 로 해제해야 한다. */
 	dev->dev.release = pci_release_dev;
+	/* [한국어] refcount 0 시 부를 소멸자를 직접 지정한다.
+	 * pci_dev_type 에는 release 가 없으므로 여기서 설정하는 것이 유일한
+	 * 해제 경로다. */
 
-	/* PCI/NVMe: NUMA 노드 설정 */
 	set_dev_node(&dev->dev, pcibus_to_node(bus));
-	/* PCI/NVMe: dev->dev.dma_mask 플래그: DMA 주소 마스크(NVMe PRP/SGL 범위) */
+	/* [한국어] 이 장치가 속한 NUMA 노드를 기록. 이후 커널이 DMA 버퍼를
+	 * 그 노드의 메모리에서 할당하고 인터럽트도 그 노드의 CPU 에 배치해
+	 * 원격 노드 접근 지연을 줄인다. NVMe 성능에 직접 영향을 준다. */
 	dev->dev.dma_mask = &dev->dma_mask;
-	/* PCI/NVMe: dev->dev.dma_parms 플래그: DMA 매개변수(NVMe segment/boundary) */
+	/* [한국어] 일반 device 구조체가 pci_dev 안의 dma_mask 를 가리키게 한다.
+	 * 드라이버가 dma_set_mask() 를 부르면 이 포인터를 통해 갱신된다. */
 	dev->dev.dma_parms = &dev->dma_parms;
-	/* PCI/NVMe: dev->dev.coherent_dma_mask 설정: 일관성 DMA 주소 마스크 */
+	/* [한국어] 최대 세그먼트 크기/경계 같은 DMA 제약을 담는 구조체 연결.
+	 * 블록 계층이 이 값을 보고 요청을 쪼갠다. */
 	dev->dev.coherent_dma_mask = 0xffffffffull;
+	/* [한국어] 일관성(coherent) DMA 버퍼의 주소 상한 기본값 = 32비트.
+	 * NVMe 의 Admin/IO 큐 메모리처럼 dma_alloc_coherent 로 잡는 버퍼에
+	 * 적용된다. 드라이버가 64비트로 올릴 수 있다. */
 
-	/* PCI/NVMe: dma_set_max_seg_size 함수 호출 */
 	dma_set_max_seg_size(&dev->dev, 65536);
-	/* PCI/NVMe: dma_set_seg_boundary 함수 호출 */
+	/* [한국어] 한 DMA 세그먼트의 최대 크기 기본값 64KB. 보수적인 값이며
+	 * 드라이버가 더 크게 올릴 수 있다. */
 	dma_set_seg_boundary(&dev->dev, 0xffffffff);
+	/* [한국어] DMA 세그먼트가 넘어서는 안 되는 주소 경계 = 4GB.
+	 * 구식 하드웨어 중에 4GB 경계를 넘는 전송을 처리하지 못하는 것이
+	 * 있어 기본값이 보수적이다. */
 
-	/* PCI/NVMe: 링크 재학습 실패 기록 */
 	pcie_failed_link_retrain(dev);
+	/* [한국어] 링크가 제대로 학습되지 않은 경우 재학습을 시도하는 quirk
+	 * 성격의 처리. 일부 하드웨어에서 첫 협상이 실패하면 장치가 아예
+	 * 보이지 않거나 낮은 속도로 붙는다. */
 
 	/* Fix up broken headers */
-	/* PCI/NVMe: 장치 quirk/workaround 적용 */
 	pci_fixup_device(pci_fixup_header, dev);
+	/* [한국어] 헤더 단계 quirk 적용. 벤더가 잘못 보고한 클래스 코드나
+	 * BAR 정보를 이 단계에서 바로잡는다. capability 초기화 전에 해야
+	 * 잘못된 정보로 하위 시스템이 초기화되는 것을 막는다. */
 
-	/* PCI/NVMe: 장치 리소스 정렬 재할당 */
 	pci_reassigndev_resource_alignment(dev);
+	/* [한국어] pci=resource_alignment 커널 파라미터로 사용자가 특정 장치의
+	 * BAR 정렬을 강제한 경우 그것을 반영한다. VFIO 로 장치를 게스트에
+	 * 넘길 때 페이지 단위 정렬이 필요해 쓰이는 기능이다. */
 
-	/* PCI/NVMe: PCIe 확장 기능 초기화 */
 	pci_init_capabilities(dev);
+	/* [한국어] MSI/MSI-X 비활성화, PM/AER/SR-IOV/ATS 등 모든 capability
+	 * 하위 시스템 초기화. device_add 전에 끝나야 한다(아래 주석 참조). */
 
 	/*
 	 * Add the device to our list of discovered devices
 	 * and the bus list for fixup functions, etc.
 	 */
-	/* PCI/NVMe: do-while 반복문 시작 */
-	down_write(&pci_bus_sem); /* PCI/NVMe: 잠금 획득. NVMe rescan/remove/hotplug 동시 접근 보호 */
-	/* PCI/NVMe: 새 도메인 bus 번호 리소스를 전역 리스트에 추가 */
+	down_write(&pci_bus_sem);
+	/* [한국어] 버스의 장치 목록을 보호하는 세마포어를 쓰기 모드로 획득.
+	 * 다른 CPU 가 동시에 목록을 순회(sysfs, 전원 관리)하거나 수정
+	 * (핫플러그 제거)하는 것을 막는다. */
 	list_add_tail(&dev->bus_list, &bus->devices);
-	/* PCI/NVMe: 쓰기 세마포어 해제 */
-	up_write(&pci_bus_sem); /* PCI/NVMe: 잠금 해제. NVMe rescan/remove/hotplug 동시 접근 보호 */
+	/* [한국어] 이 버스의 장치 목록 끝에 매단다. devfn 오름차순으로 스캔하므로
+	 * tail 에 붙이면 자연히 번호 순으로 정렬된다.
+	 * 이제 pci_get_slot() 같은 조회 함수가 이 장치를 찾을 수 있다. */
+	up_write(&pci_bus_sem);
+	/* [한국어] 락 해제. 목록 조작만 보호하면 되므로 구간을 최소화했다 */
 
-	/* PCI/NVMe: 아키텍처별 장치 추가 */
 	ret = pcibios_device_add(dev);
-	/* PCI/NVMe: 조건 경고 */
+	/* [한국어] 아키텍처별 장치 추가 훅. x86/ACPI 는 여기서 MSI 도메인이나
+	 * DMA 설정을 손볼 수 있다(그래서 아래 pci_set_msi_domain 이 이것보다
+	 * 뒤에 온다 — pci_dev_msi_domain() 이 그 결과를 1순위로 본다). */
 	WARN_ON(ret < 0);
+	/* [한국어] 실패는 정상 동작에서 일어나지 않으므로 스택 트레이스를 남긴다.
+	 * 그래도 등록을 중단하지는 않는다 — 장치를 통째로 잃는 것보다 낫다. */
 
 	/* Set up MSI IRQ domain */
-	/* PCI/NVMe: MSI 인터럽트 도메인 설정 */
 	pci_set_msi_domain(dev);
+	/* [한국어] 이 장치가 MSI/MSI-X 벡터를 받아 올 도메인을 확정한다.
+	 * 드라이버 probe 에서 벡터를 요청하기 전에 반드시 끝나야 한다. */
 
 	/* Notifier could use PCI capabilities */
-	/* PCI/NVMe: 커널에 장치 추가 */
 	ret = device_add(&dev->dev);
-	/* PCI/NVMe: 조건 경고 */
+	/* [한국어] ★드라이버 모델 등록★ sysfs 에 노드가 만들어지고, uevent 가
+	 * 사용자 공간(udev)으로 나가며, pci_bus_type 의 드라이버들과 매칭이
+	 * 시작된다. 일치하는 드라이버가 이미 등록되어 있으면 이 호출 안에서
+	 * 동기적으로 probe 가 실행된다.
+	 * 위 영어 주석은 이 시점에 불리는 알림(notifier) 수신자들이 capability
+	 * 정보를 참조할 수 있으므로 pci_init_capabilities() 가 먼저여야 한다는
+	 * 순서 제약을 설명한 것이다. */
 	WARN_ON(ret < 0);
+	/* [한국어] 등록 실패 시 경고. 이 경우 장치는 목록에는 있지만 sysfs 에는
+	 * 없는 어중간한 상태가 된다. */
 
 	/* Establish pdev->tsm for newly added (e.g. new SR-IOV VFs) */
-	/* PCI/NVMe: Thermal Status Management 초기화 */
 	pci_tsm_init(dev);
+	/* [한국어] TSM = TEE Security Manager. TDISP(TEE Device Interface
+	 * Security Protocol)에서 장치 인증, 링크 암호화, 기밀 컴퓨팅 VM 에 대한
+	 * function 할당을 관리하는 플랫폼 에이전트다(drivers/pci/Kconfig 의
+	 * PCI_TSM 설명). 위 영어 주석대로 새로 추가된 장치(새 SR-IOV VF 포함)에
+	 * 대해 pdev->tsm 연결을 세운다. CONFIG_PCI_TSM 이 꺼져 있으면 빈 함수다. */
 
-	/* PCI/NVMe: NPEM 객체 생성 */
 	pci_npem_create(dev);
+	/* [한국어] NPEM = Native PCIe Enclosure Management. 스토리지 인클로저의
+	 * LED 표시(OK/Locate/Fail/Rebuild)를 PCIe 표준 방식으로 제어하는 기능이며
+	 * LED 클래스 장치를 만든다(drivers/pci/Kconfig 의 PCI_NPEM).
+	 * NVMe 백플레인에서 특정 베이의 위치 표시등을 켜는 것이 이 기능이다. */
 
-	/* PCI/NVMe: DOE sysfs 초기화 */
 	pci_doe_sysfs_init(dev);
+	/* [한국어] DOE(Data Object Exchange) 관련 sysfs 항목 생성.
+	 * device_add() 이후여야 sysfs 부모 노드가 존재한다. */
 }
 
 /*
- * pci_scan_single_device() - 특정 bus/dev/function에서 장치를 스캔하거나
- *                            이미 등록된 장치 반환
+ * [한국어]
+ * pci_scan_single_device - 한 좌표의 장치를 스캔해 등록까지 마친다
  *
- * NVMe 연결: NVMe 컨트롤러가 있는 정확한 bus/dev/function 위치를
- * 처리. 이미 스캔된 장치면 참조를 반환하고, 새 장치면 pci_device_add()를
- * 통해 nvme_pci_driver가 probe할 수 있게 등록.
+ * @bus:   대상 버스.
+ * @devfn: 대상 (device, function) 좌표.
+ * @return: 그 좌표의 pci_dev(새로 만든 것이든 이미 있던 것이든).
+ *          장치가 없으면 NULL.
+ *
+ * 왜 필요한가: "발견 → 해석 → 등록"의 전 과정을 한 좌표에 대해 수행하는
+ * 가장 바깥 단위다. 핫플러그 드라이버가 슬롯 하나를 다시 훑을 때도 이
+ * 함수를 쓰므로 외부에 공개되어 있다.
+ *
+ * 재스캔 안전성: 이미 등록된 장치가 있으면 새로 만들지 않고 기존 것을
+ * 돌려준다. rescan 시 같은 장치가 두 번 만들어지는 것을 막는다.
+ *
+ * 반환 참조에 대한 주의: pci_get_slot() 이 올린 참조를 곧바로
+ * pci_dev_put() 으로 내려놓고 포인터만 돌려준다. 즉 호출자는 참조를
+ * 소유하지 않는다. 호출자(pci_scan_slot 등)가 버스 스캔 문맥 안에서만
+ * 이 포인터를 쓰고, 그동안 장치가 사라지지 않음이 보장되기 때문이다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥. 내부에서 최대 60초까지 잠들 수 있다.
+ *
+ * 호출 체인:
+ *   pci_scan_slot() → [pci_scan_single_device]
+ *     → pci_scan_device() → pci_device_add()
  */
-/* PCI/NVMe: 단일 PCI function 스캔 */
 struct pci_dev *pci_scan_single_device(struct pci_bus *bus, int devfn)
 {
-	/* PCI/NVMe: 후속 코드 동작 수행 */
 	struct pci_dev *dev;
+	/* [한국어] 찾았거나 새로 만든 장치 */
 
-	dev = pci_get_slot(bus, devfn); /* PCI/NVMe: 해당 slot에 이미 등록된 pci_dev가 있는지 확인 */
-	/* PCI/NVMe: 조걸 분기, 조건에 따른 실행 경로 선택 */
+	dev = pci_get_slot(bus, devfn);
+	/* [한국어] 이 좌표에 이미 등록된 장치가 있는지 버스 목록에서 찾는다.
+	 * 찾으면 참조를 하나 올려서 돌려준다. */
 	if (dev) {
-		pci_dev_put(dev); /* PCI/NVMe: 참조 카운트 감소 */
-		return dev; /* PCI/NVMe: 이미 스캔된 장치 반환 */
+		pci_dev_put(dev);
+		/* [한국어] 방금 올린 참조를 즉시 내린다. 호출자에게 참조를
+		 * 넘기지 않는다는 이 함수의 규약 때문이다. */
+		return dev;
+		/* [한국어] 이미 알고 있는 장치 — 재스캔 시의 정상 경로다 */
 	}
 
-	dev = pci_scan_device(bus, devfn); /* PCI/NVMe: 설정 공간을 읽어 새 pci_dev 생성; NVMe 컨트롤러 발견 */
-	/* PCI/NVMe: 조걸 분기, NULL/0/미설정 여부 검사 */
+	dev = pci_scan_device(bus, devfn);
+	/* [한국어] ★새 장치 발견 시도★ Vendor ID 를 읽어 존재를 판정하고,
+	 * 있으면 config 를 해석해 pci_dev 를 만든다. */
 	if (!dev)
-		return NULL; /* PCI/NVMe: 해당 slot에 장치 없음 */
+		return NULL;
+	/* [한국어] 이 좌표는 비어 있다 */
 
-	pci_device_add(dev, bus); /* PCI/NVMe: pci_dev를 PCI 코어에 등록; nvme_pci_driver.probe -> nvme_probe */
+	pci_device_add(dev, bus);
+	/* [한국어] ★드라이버 모델 등록★ 이 호출 안의 device_add() 에서
+	 * 드라이버 매칭이 시작된다. NVMe SSD 라면 여기서 nvme_probe() 가
+	 * 실행되어 컨트롤러 초기화가 시작된다. */
 
-	return dev; /* PCI/NVMe: 새로 등록된 pci_dev 반환 */
+	return dev;
+	/* [한국어] 등록까지 마친 장치 */
 }
-/* PCI/NVMe: EXPORT_SYMBOL 함수 호출 */
-EXPORT_SYMBOL(pci_scan_single_device); /* PCI/NVMe: 심볼 외부 낸출. nvme-pci 등 모듈에서 참조 가능 */
+EXPORT_SYMBOL(pci_scan_single_device);
+/* [한국어] 핫플러그 드라이버 등이 모듈에서 쓰므로 공개 */
 
 /*
- * next_ari_fn() - ARI(Alternative Routing-ID)를 사용하는 장치의 다음
- *                 function 번호 반환
+ * [한국어]
+ * next_ari_fn - ARI 링크를 따라 다음 function 번호를 얻는다
  *
- * NVMe 연결: ARI를 지원하는 NVMe 컨트롤러는 function 번호를 0~255까지
- * 사용할 수 있어, multifunction/SR-IOV 형태로 더 많은 function을 노출.
+ * @bus: 대상 버스(현재 구현에서는 참조하지 않지만 next_fn 과 시그니처를 맞춘다).
+ * @dev: 직전에 스캔한 장치. 첫 호출에서는 function 0 의 장치다.
+ * @fn:  직전 function 번호.
+ * @return: 다음에 스캔할 function 번호. 더 없으면 -ENODEV.
+ *
+ * ARI 란: Alternative Routing-ID Interpretation. 원래 PCI 는 devfn 8비트를
+ * "device 5비트 + function 3비트"로 나눠 한 장치당 function 을 8개까지만
+ * 허용했다. ARI 는 그 8비트 전체를 function 번호로 재해석해 한 장치가
+ * 최대 256개의 function 을 가질 수 있게 한다. SR-IOV 로 VF 를 많이 만들 때
+ * 필수적인 확장이다.
+ *
+ * 어떻게 순회하나: ARI 는 8개를 순서대로 훑는 방식이 아니라, 각 function 의
+ * ARI capability 안에 있는 "Next Function Number" 필드가 다음 function 을
+ * 가리키는 연결 리스트 구조다. 구현되지 않은 번호를 건너뛸 수 있어 효율적이다.
+ * 리스트의 끝은 Next Function Number 가 현재 번호 이하가 되는 것으로 판정한다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_scan_slot() → next_fn() → [next_ari_fn] → pci_find_ext_capability()
  */
-/* PCI/NVMe: next_ari_fn 함수 정의 */
 static int next_ari_fn(struct pci_bus *bus, struct pci_dev *dev, int fn)
 {
-	/* PCI/NVMe: pos 변수 선언/초기화: config space 오프셋. NVMe capability/BAR 위치 */
 	int pos;
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
+	/* [한국어] ARI 확장 capability 의 오프셋 */
 	u16 cap = 0;
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
+	/* [한국어] ARI Capability 레지스터 값. 읽기 실패 시에도 0 이 남도록 초기화 */
 	unsigned int next_fn;
+	/* [한국어] 추출한 다음 function 번호 */
 
-	if (!dev) /* PCI/NVMe: function 0이 없으면 ARI function도 없음 */
-		/* PCI/NVMe: 오류 코드 반환: -ENODEV */
+	if (!dev)
 		return -ENODEV;
+	/* [한국어] 직전 function 이 존재하지 않으면 그 capability 를 읽을 수 없다.
+	 * ARI 리스트가 끊긴 것이므로 순회를 끝낸다. */
 
-	pos = pci_find_ext_capability(dev, PCI_EXT_CAP_ID_ARI); /* PCI/NVMe: ARI extended capability 탐색 */
-	/* PCI/NVMe: 조걸 분기, NULL/0/미설정 여부 검사 */
+	pos = pci_find_ext_capability(dev, PCI_EXT_CAP_ID_ARI);
+	/* [한국어] ARI 는 확장 capability(0x100 이상)다. 확장 config 접근이
+	 * 막혀 있으면 여기서 0 이 나온다. */
 	if (!pos)
-		return -ENODEV; /* PCI/NVMe: ARI 미지원 */
+		return -ENODEV;
+	/* [한국어] ARI 미지원 — 이 장치에는 더 이상의 function 이 없다 */
 
-	pci_read_config_word(dev, pos + PCI_ARI_CAP, &cap); /* PCI/NVMe: ARI Capability 레지스터 읽기 */
-	next_fn = PCI_ARI_CAP_NFN(cap); /* PCI/NVMe: Next Function Number 필드 추출 */
-	/* PCI/NVMe: 조걸 분기, 값 크기 비교 */
+	pci_read_config_word(dev, pos + PCI_ARI_CAP, &cap);
+	/* [한국어] ARI Capability 레지스터 — Next Function Number 필드를 담는다 */
+	next_fn = PCI_ARI_CAP_NFN(cap);
+	/* [한국어] 그 필드를 뽑아내는 매크로. 0 이면 리스트의 끝을 뜻한다 */
 	if (next_fn <= fn)
-		return -ENODEV;	/* protect against malformed list */ /* PCI/NVMe: 잘못된 ARI capability이면 중단 */
+		return -ENODEV;	/* protect against malformed list */
+	/* [한국어] ★무한 루프 방지★ 다음 번호는 반드시 현재보다 커야 한다.
+	 * 같거나 작으면 리스트가 자기 자신이나 앞쪽을 가리키는 것이라
+	 * 순환이 생긴다. 위 영어 주석의 "malformed list" 방어다.
+	 * 번호가 단조 증가하고 상한이 255 이므로 순회는 반드시 끝난다. */
 
-	return next_fn; /* PCI/NVMe: 다음 스캔할 ARI function 번호 반환 */
+	return next_fn;
+	/* [한국어] 다음에 스캔할 function 번호 */
 }
 
 /*
- * next_fn() - 다음에 스캔할 PCI function 번호 반환
+ * [한국어]
+ * next_fn - 다음에 스캔할 function 번호를 정한다 (ARI / 전통 방식 분기)
  *
- * NVMe 연결: ARI가 활성화된 버스에서는 ARI function 번호를 따르고,
- * 그렇지 않으면 전통적인 8개 function을 multifunction 장치에 대해서만
- * 스캔. 멀티펑션 NVMe 컨트롤러를 모두 발견하는 데 사용.
+ * @bus: 대상 버스.
+ * @dev: 직전에 스캔한 장치(없을 수도 있다).
+ * @fn:  직전 function 번호.
+ * @return: 다음 function 번호. 더 스캔할 것이 없으면 -ENODEV.
+ *
+ * 왜 필요한가: function 순회 방식이 두 가지다. ARI 가 켜진 버스에서는
+ * capability 링크를 따라가고, 그렇지 않으면 0~7 을 차례로 훑는다.
+ * 그 분기를 한곳에 모아 pci_scan_slot() 의 루프를 단순하게 유지한다.
+ *
+ * 전통 방식의 중요한 최적화: function 0 의 헤더 타입 최상위 비트
+ * (PCI_HEADER_TYPE_MFD, 0x80)가 0 이면 그 장치는 단일 function 이므로
+ * 1~7 을 볼 필요가 없다. 이 검사가 없으면 모든 슬롯에서 헛되이 7번의
+ * config 읽기를 더 하게 되어 부팅이 느려진다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_scan_slot() → [next_fn] → next_ari_fn()
  */
-/* PCI/NVMe: next_fn 함수 정의 */
 static int next_fn(struct pci_bus *bus, struct pci_dev *dev, int fn)
 {
-	if (pci_ari_enabled(bus)) /* PCI/NVMe: 버스에서 ARI가 활성화되어 있으면 */
-		return next_ari_fn(bus, dev, fn); /* PCI/NVMe: ARI 기반 다음 function 번호 반환 */
+	if (pci_ari_enabled(bus))
+		return next_ari_fn(bus, dev, fn);
+	/* [한국어] 이 버스에서 ARI 가 켜져 있으면(상위 브리지가 ARI 포워딩을
+	 * 활성화했으면) capability 링크를 따라간다. 최대 256개까지 가능하다. */
 
-	if (fn >= 7) /* PCI/NVMe: 전통적인 function 번호가 7에 도달하면 종료 */
-		/* PCI/NVMe: 오류 코드 반환: -ENODEV */
+	if (fn >= 7)
 		return -ENODEV;
+	/* [한국어] 전통 방식의 상한. devfn 의 function 필드가 3비트라 0~7 뿐이다 */
 	/* only multifunction devices may have more functions */
-	if (dev && !dev->multifunction) /* PCI/NVMe: 단일 function 장치이면 더 이상 스캔하지 않음 */
-		/* PCI/NVMe: 오류 코드 반환: -ENODEV */
+	if (dev && !dev->multifunction)
 		return -ENODEV;
+	/* [한국어] function 0 의 헤더 타입에 멀티펑션 비트가 없으면 단일 function
+	 * 장치다. 1~7 을 읽어 봐야 아무것도 없으므로 즉시 끝낸다.
+	 * dev 가 NULL 인 경우(function 0 이 없는데 하이퍼바이저 통과 모드라
+	 * 계속 훑는 상황)에는 이 검사를 건너뛰고 다음 번호로 넘어간다. */
 
-	return fn + 1; /* PCI/NVMe: 다음 function 번호 반환 */
+	return fn + 1;
+	/* [한국어] 다음 function 번호 */
 }
 
 /*
- * only_one_child() - PCIe Downstream Port 아래에서는 Device 0만 스캔할지 결정
+ * [한국어]
+ * only_one_child - 이 버스에는 device 0 만 있을 수 있는가
  *
- * NVMe 연결: PCIe link에는 보통 Device 0 하나만 연결되므로 function 1~7
- * 스캔을 생략하여 부팅 시간을 단축. 다만 ARI를 사용하는 NVMe
- * 컨트롤러는 function 0이 여러 function을 대표할 수 있다.
+ * @bus: 대상 버스.
+ * @return: 1 이면 device 0 만 스캔하면 된다. 0 이면 32개 device 를 모두 훑는다.
+ *
+ * 왜 필요한가: PCI 버스 하나에는 device 번호가 0~31 까지 있을 수 있어,
+ * 모두 훑으려면 32번(멀티펑션까지 하면 그 이상)의 config 접근이 필요하다.
+ * 그런데 PCIe 링크는 점대점(point-to-point) 연결이라 아래 영어 주석이
+ * 인용하는 PCIe spec r3.1 sec 7.3.1 대로 device 0 하나만 존재한다.
+ * 그래서 하향 포트 아래에서는 device 0 만 보고 끝낸다. 장치가 많은 서버에서
+ * 부팅 시간에 눈에 띄는 차이를 만든다.
+ *
+ * PCI_SCAN_ALL_PCIE_DEVS 예외: 일부 특이한 토폴로지(가상화 환경, 비표준
+ * 브리지)에서는 하향 포트 아래에 device 0 이 아닌 장치가 나타난다.
+ * 그런 시스템은 이 플래그를 세워 최적화를 끈다.
+ *
+ * NVMe 접점: NVMe SSD 는 Root Port 나 스위치 하향 포트 아래에 device 0 으로
+ * 붙으므로 이 최적화의 혜택을 받는다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_scan_slot() → [only_one_child]
  */
-/* PCI/NVMe: only_one_child 함수 정의 */
 static int only_one_child(struct pci_bus *bus)
 {
-	struct pci_dev *bridge = bus->self; /* PCI/NVMe: 이 버스의 upstream bridge */
+	struct pci_dev *bridge = bus->self;
+	/* [한국어] 이 버스로 내려오는 브리지. 루트 버스면 NULL 이다 */
 
 	/*
 	 * Systems with unusual topologies set PCI_SCAN_ALL_PCIE_DEVS so
 	 * we scan for all possible devices, not just Device 0.
 	 */
-	if (pci_has_flag(PCI_SCAN_ALL_PCIE_DEVS)) /* PCI/NVMe: 강제 전체 스캔 플래그가 켜져 있으면 */
-		return 0; /* PCI/NVMe: Device 0만 스캔하지 않고 모든 device/function 스캔 */
+	if (pci_has_flag(PCI_SCAN_ALL_PCIE_DEVS))
+		return 0;
+	/* [한국어] 전역 플래그로 최적화가 꺼져 있으면 전부 훑는다.
+	 * 아키텍처 코드나 quirk 가 이 플래그를 세운다. */
 
 	/*
 	 * A PCIe Downstream Port normally leads to a Link with only Device
 	 * 0 on it (PCIe spec r3.1, sec 7.3.1).  As an optimization, scan
 	 * only for Device 0 in that situation.
 	 */
-	if (bridge && pci_is_pcie(bridge) && pcie_downstream_port(bridge)) /* PCI/NVMe: PCIe Downstream Port 아래면 */
-		return 1; /* PCI/NVMe: Device 0만 스캔; NVMe는 보통 function 0에 위치 */
+	if (bridge && pci_is_pcie(bridge) && pcie_downstream_port(bridge))
+		return 1;
+	/* [한국어] 세 조건이 모두 맞아야 한다: 브리지가 존재하고, PCIe 이고,
+	 * 하향 포트(Root Port 또는 스위치 하향 포트)여야 한다.
+	 * 그 아래는 점대점 링크이므로 device 0 하나뿐이다. */
 
-	return 0; /* PCI/NVMe: 일반 PCI 버스이면 모든 device/function 스캔 */
+	return 0;
+	/* [한국어] 구식 PCI 버스나 루트 버스 — 여러 device 가 공유할 수 있으므로
+	 * 32개를 모두 훑어야 한다. */
 }
 
 /**
@@ -5213,76 +6991,138 @@ static int only_one_child(struct pci_bus *bus)
  *
  * Returns the number of new devices found.
  */
-/* PCI/NVMe: 한 슬롯(8개 function) 탐색. NVMe AIC/EDSFF 슬롯의 다중 function 검사 */
-/* PCI/NVMe: pci_scan_slot 함수 정의 */
+/*
+ * [한국어]
+ * pci_scan_slot - 한 슬롯(device 번호 하나)의 모든 function 을 훑는다
+ *
+ * @bus:   대상 버스.
+ * @devfn: 슬롯의 시작 좌표. function 부분이 0 이어야 한다(= device 번호 << 3).
+ * @return: 이번에 새로 발견한 장치의 개수.
+ *
+ * ★ 장치 발견의 실질적 단위 ★
+ * PCI 에서 "슬롯"은 하나의 device 번호를 뜻하고, 그 안에 최대 8개(ARI 면 256개)의
+ * function 이 있을 수 있다. 이 함수는 function 0 부터 시작해 next_fn() 이
+ * 정해 주는 순서대로 훑으며, 각 좌표에 대해 pci_scan_single_device() 를 부른다.
+ *
+ * function 0 의 특별한 지위: PCI 스펙상 function 0 이 없으면 그 슬롯에는
+ * 아무 function 도 없는 것으로 본다. 그래서 function 0 이 비어 있으면 즉시
+ * 중단해 나머지 7번의 헛된 config 읽기를 아낀다. 예외는 아래 영어 주석이
+ * 설명하는 하이퍼바이저 통과 상황 — 게스트에 function 3 만 넘겨 주는 식으로
+ * 개별 function 을 통과시키면 function 0 이 비어 있어도 뒤에 장치가 있다.
+ *
+ * NVMe 접점: NVMe SSD 는 대개 단일 function 이라 function 0 하나만 발견되고,
+ * dev->multifunction 이 0 이므로 next_fn() 이 곧바로 -ENODEV 를 돌려 루프가 끝난다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥. 내부에서 RRS 대기로 잠들 수 있다.
+ *
+ * 호출 체인:
+ *   pci_scan_child_bus_extend() → [pci_scan_slot]
+ *     → pci_scan_single_device(), next_fn(), pcie_aspm_init_link_state()
+ */
 int pci_scan_slot(struct pci_bus *bus, int devfn)
 {
-	/* PCI/NVMe: 후속 코드 동작 수행 */
 	struct pci_dev *dev;
-	/* PCI/NVMe: 변수에 값 할당: int fn */
+	/* [한국어] 방금 스캔한 function 의 장치(없으면 NULL) */
 	int fn = 0, nr = 0;
+	/* [한국어] fn = 현재 function 번호(0 부터 시작),
+	 * nr = 이번 호출에서 새로 발견한 장치 수(반환값). */
 
-	/* PCI/NVMe: 조걸 분기, 값 크기 비교 */
 	if (only_one_child(bus) && (devfn > 0))
 		return 0; /* Already scanned the entire slot */
+	/* [한국어] PCIe 하향 포트 아래에서는 device 0(devfn 0)만 존재한다.
+	 * devfn 이 0 보다 크다는 것은 device 1 이상을 훑으려는 것이므로
+	 * 헛수고다. 첫 호출(devfn == 0)에서 이미 그 슬롯 전체를 봤다. */
 
-	/* PCI/NVMe: do-while 반복문 시작 */
 	do {
-		/* PCI/NVMe: 단일 PCI function 스캔 */
 		dev = pci_scan_single_device(bus, devfn + fn);
-		/* PCI/NVMe: 조걸 분기, 조건에 따른 실행 경로 선택 */
+		/* [한국어] devfn 은 슬롯의 시작 좌표(function 0)이고 fn 을 더하면
+		 * 그 슬롯 안의 특정 function 좌표가 된다. 이 호출이 장치를
+		 * 발견하고 등록까지 마친다. */
 		if (dev) {
-			/* PCI/NVMe: 조걸 분기, NULL/0/미설정 여부 검사 */
+			/* [한국어] 이 function 에 장치가 있다 */
 			if (!pci_dev_is_added(dev))
-				/* PCI/NVMe: 카운터 증감 */
 				nr++;
-			/* PCI/NVMe: 조걸 분기, 값 크기 비교 */
+			/* [한국어] 재스캔에서 이미 등록되어 있던 장치는 세지 않는다.
+			 * 반환값은 "이번에 새로 나타난 장치 수"라야 호출자가
+			 * 핫플러그 결과를 판단할 수 있다. */
 			if (fn > 0)
-				/* PCI/NVMe: 구조체 필드에 값 저장: dev->multifunction */
 				dev->multifunction = 1;
-		/* PCI/NVMe: if 함수 호출 */
+			/* [한국어] function 0 이 아닌 자리에서 장치가 나왔다는 것은
+			 * 이 슬롯이 실제로 멀티펑션이라는 증거다. function 0 의 헤더에
+			 * 멀티펑션 비트를 세우지 않은 스펙 위반 장치가 있어, 발견된
+			 * 사실로부터 역으로 표시해 준다. */
 		} else if (fn == 0) {
 			/*
 			 * Function 0 is required unless we are running on
 			 * a hypervisor that passes through individual PCI
 			 * functions.
 			 */
-			/* PCI/NVMe: 조걸 분기, NULL/0/미설정 여부 검사 */
 			if (!hypervisor_isolated_pci_functions())
 				break;
+			/* [한국어] function 0 이 비어 있다 = 보통은 이 슬롯 전체가
+			 * 비어 있다는 뜻이므로 즉시 중단한다.
+			 * 다만 하이퍼바이저가 function 단위로 장치를 통과시키는
+			 * 환경(예: 게스트에 function 1 만 할당)에서는 function 0 이
+			 * 없어도 뒤에 장치가 있을 수 있으므로 계속 훑는다. */
 		}
-		/* PCI/NVMe: next_fn 함수 호출 */
 		fn = next_fn(bus, dev, fn);
-	/* PCI/NVMe: while 함수 호출 */
+		/* [한국어] 다음 function 번호를 정한다. ARI 면 capability 링크를,
+		 * 아니면 fn+1 을 돌려주며, 더 없으면 음수(-ENODEV)를 돌려준다. */
 	} while (fn >= 0);
+	/* [한국어] 음수가 나오면 순회 종료. do-while 이라 function 0 은
+	 * 조건과 무관하게 반드시 한 번 검사된다. */
 
 	/* Only one slot has PCIe device */
-	/* PCI/NVMe: 조걸 분기, 값 크기 비교 */
 	if (bus->self && nr)
-		/* PCI/NVMe: ASPM 링크 상태 초기화 */
 		pcie_aspm_init_link_state(bus->self);
+	/* [한국어] 이 버스에 장치가 실제로 하나라도 새로 생겼을 때에만,
+	 * 이 버스로 내려오는 링크의 ASPM 상태를 초기화한다. 링크 양끝의
+	 * 능력을 모두 알아야 절전 정책을 정할 수 있는데, 아래쪽 장치가
+	 * 이제 막 발견되었기 때문이다. 장치가 없는 빈 링크에는 할 일이 없다. */
 
-	/* PCI/NVMe: 결과 반환: nr */
 	return nr;
+	/* [한국어] 새로 발견한 장치 수. 호출자는 이 값을 직접 쓰지는 않지만,
+	 * 핫플러그 경로에서는 "무엇이 나타났는가"의 판단 근거가 된다. */
 }
-/* PCI/NVMe: EXPORT_SYMBOL 함수 호출 */
-EXPORT_SYMBOL(pci_scan_slot); /* PCI/NVMe: 심볼 외부 낸출. nvme-pci 등 모듈에서 참조 가능 */
+EXPORT_SYMBOL(pci_scan_slot);
+/* [한국어] 핫플러그 드라이버 등이 모듈에서 쓰므로 공개 */
 
 /*
- * pcie_find_smpss() - 버스 계층에서 가장 작은 MPSS(MPS Supported Size) 찾기
+ * [한국어]
+ * pcie_find_smpss - 계층 안에서 가장 작은 MPSS 를 찾는 pci_walk_bus 콜백
  *
- * NVMe 연결: MPS는 PCIe TLP payload 상한을 결정. SAFE 모드에서는 계층
- * 내 모든 장치의 MPSS 중 가장 작은 값을 선택해 호환성을 보장. NVMe
- * 성능보다 안정성을 우선.
+ * @dev:  순회 중 만난 장치.
+ * @data: u8 * — 지금까지 찾은 최솟값을 담고 있으며 여기서 갱신된다.
+ * @return: 항상 0(0 이 아니면 pci_walk_bus 순회가 중단된다).
+ *
+ * 왜 필요한가: PCIE_BUS_SAFE 정책은 계층 안 모든 장치가 감당할 수 있는
+ * 공통 MPS 를 쓴다. 그러려면 먼저 최솟값을 알아야 하고, 그것을 구하려고
+ * 버스 전체를 한 번 훑는 것이 이 콜백이다.
+ *
+ * 핫플러그 브리지를 만나면 0(=128B)으로 못박는 이유: 아래 영어 주석이
+ * 자세히 설명한다. 드라이버가 이미 붙은 장치의 MPS 는 바꿀 수 없는데,
+ * 나중에 꽂힐 장치는 128B 만 지원할 수도 있다. 그러면 계층 전체를 그 장치에
+ * 맞춰 낮춰야 하는데 그때는 이미 늦다. 그래서 핫플러그 가능성이 있으면
+ * 미리 128B 로 낮춰 둔다.
+ *
+ * Root Port 는 예외인 이유: Root Port 아래 링크에는 장치가 하나뿐이므로
+ * (점대점), 나중에 장치를 꽂으면 Root Port 와 그 장치 둘만 다시 설정하면 된다.
+ * 다른 장치가 영향받지 않으므로 미리 낮출 필요가 없다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥, pci_walk_bus() 순회 안.
+ *
+ * 호출 체인:
+ *   pcie_bus_configure_settings() → pci_walk_bus() → [pcie_find_smpss]
  */
-/* PCI/NVMe: pcie_find_smpss 함수 정의 */
 static int pcie_find_smpss(struct pci_dev *dev, void *data)
 {
-	u8 *smpss = data; /* PCI/NVMe: 현재까지 찾은 최소 MPSS 포인터 */
+	u8 *smpss = data;
+	/* [한국어] 호출자가 넘긴 "지금까지의 최솟값" 저장소.
+	 * void * 콜백 규약이라 타입을 되살려 쓴다. */
 
-	if (!pci_is_pcie(dev)) /* PCI/NVMe: PCIe 장치가 아니면 MPS 개념 없음 */
-		/* PCI/NVMe: 정상 종료 및 반환 */
+	if (!pci_is_pcie(dev))
 		return 0;
+	/* [한국어] 구식 PCI 장치는 MPS 개념이 없어 최솟값 계산에 영향을 주지 않는다 */
 
 	/*
 	 * We don't have a way to change MPS settings on devices that have
@@ -5299,34 +7139,60 @@ static int pcie_find_smpss(struct pci_dev *dev, void *data)
 	 *
 	 * Note that this PCIE_BUS_SAFE path assumes no peer-to-peer DMA.
 	 */
-	if (dev->is_hotplug_bridge && /* PCI/NVMe: hotplug bridge이고 */
-	    pci_pcie_type(dev) != PCI_EXP_TYPE_ROOT_PORT) /* PCI/NVMe: Root Port 직접 아래가 아니면 */
-		*smpss = 0; /* PCI/NVMe: MPS를 최소 128B로 제한; 향후 hot-add 장치 호환성 */
+	if (dev->is_hotplug_bridge &&
+	    pci_pcie_type(dev) != PCI_EXP_TYPE_ROOT_PORT)
+		*smpss = 0;
+	/* [한국어] 핫플러그 가능 브리지인데 Root Port 는 아니다 =
+	 * 그 아래에 이미 다른 장치가 있을 수 있는 스위치 하향 포트다.
+	 * 나중에 128B 만 지원하는 장치가 꽂혀도 기존 장치들의 MPS 를 바꿀 수
+	 * 없으므로, 미리 최소값(코드 0 = 128바이트)으로 못박는다. */
 
-	if (*smpss > dev->pcie_mpss) /* PCI/NVMe: 현재 최소값보다 장치의 MPSS가 더 작으면 */
-		*smpss = dev->pcie_mpss; /* PCI/NVMe: 최소 MPSS 갱신 */
+	if (*smpss > dev->pcie_mpss)
+		*smpss = dev->pcie_mpss;
+	/* [한국어] 이 장치가 더 작은 값만 지원하면 최솟값을 갱신한다.
+	 * 순회가 끝나면 *smpss 는 계층 전체가 공통으로 감당 가능한 값이 된다. */
 
-	return 0; /* PCI/NVMe: pci_walk_bus 콜백 계속 진행 */
+	return 0;
+	/* [한국어] 0 을 돌려 순회를 계속한다 */
 }
 
 /*
- * pcie_write_mps() - 장치의 Max Payload Size 레지스터에 기록
+ * [한국어]
+ * pcie_write_mps - 정책에 맞는 MPS 값을 장치에 기록한다
  *
- * NVMe 연결: PERFORMANCE 모드에서는 장치가 지원하는 최대 MPS를 사용하여
- * NVMe Read/Write TLP 효율을 극대화. SAFE 모드에서는 이미 계산된
- * smpss 값을 사용.
+ * @dev: 대상 장치.
+ * @mps: 기본으로 쓸 MPS(바이트). PERFORMANCE 모드에서는 이 값을 무시하고
+ *       다시 계산한다.
+ * @return: 없음. 실패는 오류 로그로만 알린다.
+ *
+ * 왜 정책에 따라 계산이 다른가:
+ *  - SAFE / PEER2PEER : 호출자가 이미 계층 최솟값을 구해 넘겨 주므로 그대로 쓴다.
+ *  - PERFORMANCE      : 각 장치가 낼 수 있는 최대치를 쓰되, 부모 브리지의
+ *                       MPS 를 넘을 수는 없다.
+ *
+ * PERFORMANCE 모드의 논리: 아래 영어 주석이 설명한다. 하향(호스트 → 장치)
+ * 트래픽은 MRRS 를 넘지 않으므로 걱정할 필요가 없고, 상향(장치 → 호스트)
+ * 트래픽만 MPS 제약을 받는다. 그래서 트리를 위에서 아래로 훑으며 자식의
+ * MPS 를 부모 값 이하로 맞추면 된다. pci_walk_bus 가 위에서 아래 순서를
+ * 보장하므로 이 시점에 부모는 이미 설정이 끝나 있다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pcie_bus_configure_set() → [pcie_write_mps] → pcie_set_mps()
  */
-/* PCI/NVMe: pcie_write_mps 함수 정의 */
 static void pcie_write_mps(struct pci_dev *dev, int mps)
 {
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
 	int rc;
+	/* [한국어] pcie_set_mps() 결과 */
 
-	if (pcie_bus_config == PCIE_BUS_PERFORMANCE) { /* PCI/NVMe: 성능 우선 모드이면 */
-		mps = 128 << dev->pcie_mpss; /* PCI/NVMe: 장치가 지원하는 최대 MPS로 설정 */
+	if (pcie_bus_config == PCIE_BUS_PERFORMANCE) {
+		/* [한국어] 성능 우선 정책 — 계층 최솟값이 아니라 각자의 최대치를 쓴다 */
+		mps = 128 << dev->pcie_mpss;
+		/* [한국어] 이 장치가 지원하는 최대 MPS(바이트). MPSS 는 지수 코드다 */
 
-		if (pci_pcie_type(dev) != PCI_EXP_TYPE_ROOT_PORT && /* PCI/NVMe: Root Port가 아니고 */
-		    dev->bus->self) /* PCI/NVMe: 상위 bridge가 있으면 */
+		if (pci_pcie_type(dev) != PCI_EXP_TYPE_ROOT_PORT &&
+		    dev->bus->self)
 
 			/*
 			 * For "Performance", the assumption is made that
@@ -5341,34 +7207,61 @@ static void pcie_write_mps(struct pci_dev *dev, int mps)
 			 * properly configured at this point to the largest
 			 * allowable MPS based on its parent bus).
 			 */
-			mps = min(mps, pcie_get_mps(dev->bus->self)); /* PCI/NVMe: 장치 최대 MPS와 상위 bridge MPS 중 작은 값 선택 */
+			mps = min(mps, pcie_get_mps(dev->bus->self));
+		/* [한국어] Root Port 가 아니고 상위 브리지가 있는 장치는, 자기
+		 * 최대치와 부모의 현재 MPS 중 작은 값을 쓴다. 부모보다 큰 MPS 로
+		 * 보내면 부모가 Malformed TLP 로 판정하기 때문이다.
+		 * Root Port 는 부모가 루트 컴플렉스라 이 제약이 없다. */
 	}
 
-	rc = pcie_set_mps(dev, mps); /* PCI/NVMe: PCI_EXP_DEVCTL의 MPS 필드 기록 */
-	/* PCI/NVMe: 조걸 분기, 조건에 따른 실행 경로 선택 */
+	rc = pcie_set_mps(dev, mps);
+	/* [한국어] Device Control 레지스터의 MPS 필드에 기록 */
 	if (rc)
-		pci_err(dev, "Failed attempting to set the MPS\n"); /* PCI/NVMe: MPS 설정 실패 로그; NVMe TLP 크기 제한 가능 */
+		pci_err(dev, "Failed attempting to set the MPS\n");
+	/* [한국어] 실패해도 되돌리지 않고 오류만 남긴다. 이 경우 기존 값이
+	 * 유지되므로 동작은 하되 성능이 기대와 다를 수 있다. */
 }
 
 /*
- * pcie_write_mrrs() - Max Read Request Size 설정
+ * [한국어]
+ * pcie_write_mrrs - Max Read Request Size 를 가능한 최대로 올린다
  *
- * NVMe 연결: MRRS는 한 번의 Memory Read 요청이 요청할 수 있는 최대
- * 바이트 수. PERFORMANCE 모드에서 큰 값으로 설정하면 NVMe의 대용량
- * DMA Read(PRP/SGL) 효율이 향상. MPS보다 클 수 없다.
+ * @dev: 대상 장치.
+ * @return: 없음.
+ *
+ * MRRS 란: 이 장치가 메모리 읽기 요청 하나로 몇 바이트까지 요구할 수
+ * 있는지의 상한이다. MPS 가 "한 패킷의 데이터 크기"라면, MRRS 는
+ * "한 요청으로 받아 올 총량"이다. MRRS 가 크면 같은 양의 데이터를 더
+ * 적은 수의 요청으로 가져올 수 있어 오버헤드가 줄어든다.
+ *
+ * NVMe 접점: NVMe 는 PRP/SGL 로 큰 DMA 읽기를 하므로 MRRS 가 실효 처리량에
+ * 직접 영향을 준다.
+ *
+ * SAFE 모드에서 건드리지 않는 이유: 아래 영어 주석대로 MRRS 를 0(=128B)으로
+ * 설정했을 때 오작동하는 장치가 여럿 알려져 있다. 안전을 우선하는 정책에서는
+ * 아예 손대지 않는 편이 낫다.
+ *
+ * 축소 재시도 루프: MRRS 레지스터는 읽기/쓰기가 가능하지만, 하드웨어가
+ * 받아들이지 못하는 값을 쓰면 조용히 무시할 수 있다. 그래서 쓴 뒤 되읽어
+ * 확인하고, 어긋나면 절반으로 줄여 다시 시도한다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pcie_bus_configure_set() → [pcie_write_mrrs] → pcie_set_readrq()
  */
-/* PCI/NVMe: pcie_write_mrrs 함수 정의 */
 static void pcie_write_mrrs(struct pci_dev *dev)
 {
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
 	int rc, mrrs;
+	/* [한국어] rc = 쓰기 결과, mrrs = 시도할 값(바이트) */
 
 	/*
 	 * In the "safe" case, do not configure the MRRS.  There appear to be
 	 * issues with setting MRRS to 0 on a number of devices.
 	 */
-	if (pcie_bus_config != PCIE_BUS_PERFORMANCE) /* PCI/NVMe: PERFORMANCE 모드가 아니면 MRRS 변경 안 함 */
+	if (pcie_bus_config != PCIE_BUS_PERFORMANCE)
 		return;
+	/* [한국어] 성능 정책일 때만 MRRS 를 조정한다 */
 
 	/*
 	 * For max performance, the MRRS must be set to the largest supported
@@ -5376,7 +7269,10 @@ static void pcie_write_mrrs(struct pci_dev *dev)
 	 * device or the bus can support.  This should already be properly
 	 * configured by a prior call to pcie_write_mps().
 	 */
-	mrrs = pcie_get_mps(dev); /* PCI/NVMe: MPS를 초과할 수 없으므로 MPS 값을 MRRS 초기값으로 사용 */
+	mrrs = pcie_get_mps(dev);
+	/* [한국어] 시작값은 방금 설정된 MPS. 영어 주석대로 MRRS 가 MPS 를
+	 * 넘어설 수 없으므로, 바로 앞에서 pcie_write_mps() 가 정해 놓은 값이
+	 * 곧 시도할 수 있는 최대치다. */
 
 	/*
 	 * MRRS is a R/W register.  Invalid values can be written, but a
@@ -5384,58 +7280,85 @@ static void pcie_write_mrrs(struct pci_dev *dev)
 	 * If the MRRS value provided is not acceptable (e.g., too large),
 	 * shrink the value until it is acceptable to the HW.
 	 */
-	while (mrrs != pcie_get_readrq(dev) && mrrs >= 128) { /* PCI/NVMe: 설정된 MRRS가 실제 값과 다륾고 128B 이상이면 재시도 */
-		rc = pcie_set_readrq(dev, mrrs); /* PCI/NVMe: MRRS 레지스터 기록 */
-		/* PCI/NVMe: 조걸 분기, NULL/0/미설정 여부 검사 */
+	while (mrrs != pcie_get_readrq(dev) && mrrs >= 128) {
+		/* [한국어] 되읽은 값이 원하는 값과 다르고, 아직 128B 이상 남아
+		 * 있으면 계속 시도한다. mrrs 가 매번 절반이 되므로 루프는
+		 * 반드시 끝난다(로그 스케일). */
+		rc = pcie_set_readrq(dev, mrrs);
+		/* [한국어] Device Control 의 MRRS 필드에 기록 시도 */
 		if (!rc)
-			break; /* PCI/NVMe: 성공하면 루프 종료 */
+			break;
+		/* [한국어] 쓰기 자체가 성공하면 종료. (루프 조건의 되읽기 비교는
+		 * 하드웨어가 값을 조용히 거부하는 경우를 잡기 위한 것이다.) */
 
-		/* PCI/NVMe: pci_warn() 경고 메시지 출력. NVMe 성능/호환성 문제 알림 */
-		pci_warn(dev, "Failed attempting to set the MRRS\n"); /* PCI/NVMe: 진단/오류/경고 메시지 출력 */
-		mrrs /= 2; /* PCI/NVMe: 실패하면 MRRS를 절반으로 줄여 재시도 */
+		pci_warn(dev, "Failed attempting to set the MRRS\n");
+		/* [한국어] 이번 시도가 실패했음을 알린다 */
+		mrrs /= 2;
+		/* [한국어] 절반으로 줄여 다시 시도. 128 → 64 가 되면 루프 조건에
+		 * 걸려 빠져나간다. */
 	}
 
-	/* PCI/NVMe: 조걸 분기, 값 크기 비교 */
 	if (mrrs < 128)
-		pci_err(dev, "MRRS was unable to be configured with a safe value.  If problems are experienced, try running with pci=pcie_bus_safe\n"); /* PCI/NVMe: MRRS 설정 최종 실패; NVMe Read 효율 저하 */
+		pci_err(dev, "MRRS was unable to be configured with a safe value.  If problems are experienced, try running with pci=pcie_bus_safe\n");
+	/* [한국어] 128B 아래까지 내려갔는데도 실패했다 = 어떤 값도 받아들여지지
+	 * 않았다. 사용자에게 pci=pcie_bus_safe 로 이 조정을 아예 끄는 방법을 안내한다. */
 }
 
 /*
- * pcie_bus_configure_set() - 개별 장치에 MPS/MRRS 적용
+ * [한국어]
+ * pcie_bus_configure_set - 장치 하나에 MPS/MRRS 를 적용하는 pci_walk_bus 콜백
  *
- * NVMe 연결: pcie_bus_configure_settings()가 버스를 순회하면서 각
- * 장치(NVMe 포함)의 MPS/MRRS를 설정. TUNE_OFF나 DEFAULT 모드에서는
- * 아무 것도 하지 않는다.
+ * @dev:  순회 중 만난 장치.
+ * @data: u8 * — 적용할 MPSS 코드(계층 최솟값 또는 0).
+ * @return: 항상 0(순회 계속).
+ *
+ * 왜 필요한가: 계층 최솟값을 구한 뒤(pcie_find_smpss) 그것을 실제로 적용하는
+ * 두 번째 순회의 본체다. 정책이 TUNE_OFF 나 DEFAULT 면 아무 일도 하지 않는데,
+ * DEFAULT 정책에서는 이미 pci_configure_mps() 가 장치 발견 시점에 처리했기
+ * 때문이다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥, pci_walk_bus() 순회 안.
+ *
+ * 호출 체인:
+ *   pcie_bus_configure_settings() → pci_walk_bus() → [pcie_bus_configure_set]
+ *     → pcie_write_mps(), pcie_write_mrrs()
  */
-/* PCI/NVMe: pcie_bus_configure_set 함수 정의 */
 static int pcie_bus_configure_set(struct pci_dev *dev, void *data)
 {
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
 	int mps, orig_mps;
+	/* [한국어] mps = 적용할 목표값(바이트), orig_mps = 바꾸기 전 값(로그용) */
 
-	if (!pci_is_pcie(dev)) /* PCI/NVMe: PCIe 장치가 아니면 MPS/MRRS 무관 */
-		/* PCI/NVMe: 정상 종료 및 반환 */
+	if (!pci_is_pcie(dev))
 		return 0;
+	/* [한국어] 구식 PCI 장치는 대상이 아니다 */
 
-	/* PCI/NVMe: 조걸 분기, NVMe 장치 상태/플래그에 따른 경로 선택 */
 	if (pcie_bus_config == PCIE_BUS_TUNE_OFF ||
-	    pcie_bus_config == PCIE_BUS_DEFAULT) /* PCI/NVMe: tuning하지 않는 모드이면 skip */
-		/* PCI/NVMe: 정상 종료 및 반환 */
+	    pcie_bus_config == PCIE_BUS_DEFAULT)
 		return 0;
+	/* [한국어] TUNE_OFF 는 사용자가 조정을 금지한 것이고,
+	 * DEFAULT 는 장치 발견 시점의 pci_configure_mps() 가 이미 처리했다.
+	 * 남는 것은 SAFE / PERFORMANCE / PEER2PEER 세 정책이다. */
 
-	mps = 128 << *(u8 *)data; /* PCI/NVMe: smpss에 기반한 목표 MPS 산출; 128*2^smpss */
-	orig_mps = pcie_get_mps(dev); /* PCI/NVMe: 설정 전 원래 MPS 저장 */
+	mps = 128 << *(u8 *)data;
+	/* [한국어] 넘겨받은 MPSS 코드를 바이트 수로 바꾼다.
+	 * PEER2PEER 나 핫플러그 제약이 걸렸으면 코드가 0 이라 128B 가 된다. */
+	orig_mps = pcie_get_mps(dev);
+	/* [한국어] 변경 전 값을 로그에 남기기 위해 저장 */
 
-	pcie_write_mps(dev, mps); /* PCI/NVMe: 목표 MPS로 설정; NVMe TLP payload 크기 결정 */
-	pcie_write_mrrs(dev); /* PCI/NVMe: MRRS 설정; NVMe Read request 크기 결정 */
+	pcie_write_mps(dev, mps);
+	/* [한국어] MPS 적용(PERFORMANCE 모드면 내부에서 다시 계산한다) */
+	pcie_write_mrrs(dev);
+	/* [한국어] MRRS 적용. 반드시 MPS 설정 뒤여야 한다 — MRRS 의 시작값이
+	 * 방금 설정된 MPS 이기 때문이다. */
 
-	/* PCI/NVMe: pci_info() 진단 메시지 출력. NVMe 초기화/리소스 상태 기록 */
-	pci_info(dev, "Max Payload Size set to %4d/%4d (was %4d), Max Read Rq %4d\n", /* PCI/NVMe: 진단/오류/경고 메시지 출력 */
-		 /* PCI/NVMe: MPS 레지스터 읽기 */
+	pci_info(dev, "Max Payload Size set to %4d/%4d (was %4d), Max Read Rq %4d\n",
 		 pcie_get_mps(dev), 128 << dev->pcie_mpss,
-		 orig_mps, pcie_get_readrq(dev)); /* PCI/NVMe: 설정 결과 로깅 */
+		 orig_mps, pcie_get_readrq(dev));
+	/* [한국어] "설정값/최대가능값 (이전값), 읽기요청크기" 형식으로 남긴다.
+	 * NVMe 성능 진단 시 이 줄로 MPS 가 128 에 묶여 있는지 확인할 수 있다. */
 
-	return 0; /* PCI/NVMe: pci_walk_bus 콜백 계속 진행 */
+	return 0;
+	/* [한국어] 순회 계속 */
 }
 
 /*
@@ -5443,64 +7366,112 @@ static int pcie_bus_configure_set(struct pci_dev *dev, void *data)
  * parents then children fashion.  If this changes, then this code will not
  * work as designed.
  */
-/* PCI/NVMe: PCIe 링크 설정 재구성. NVMe SSD MPS, RCB, ASPM 등 최적화 */
-/* PCI/NVMe: pcie_bus_configure_settings 함수 정의 */
+/*
+ * [한국어]
+ * pcie_bus_configure_settings - 한 버스 아래 전체의 MPS/MRRS 정책을 적용한다
+ *
+ * @bus: 설정을 적용할 버스.
+ * @return: 없음.
+ *
+ * 왜 필요한가: MPS 는 계층 전체가 정합해야 하는 값이라, 장치를 하나씩
+ * 발견할 때마다 정할 수 없는 정책이 있다(SAFE 는 최솟값을 알아야 하고,
+ * PERFORMANCE 는 부모가 먼저 정해져야 한다). 그래서 열거가 끝난 뒤 이
+ * 함수가 트리를 훑으며 일괄 적용한다.
+ *
+ * ★ 순서 의존성 ★ 위 영어 주석이 못박아 두었듯이, 이 코드는
+ * pci_walk_bus() 가 "부모 먼저, 자식 나중" 순서로 순회한다는 것에 의존한다.
+ * PERFORMANCE 모드에서 자식의 MPS 를 부모 값에 맞추므로, 부모가 먼저
+ * 설정되어 있지 않으면 잘못된 값이 전파된다.
+ *
+ * 두 번 순회하는 이유: SAFE 모드에서는 (1) 최솟값을 구하는 순회와
+ * (2) 그 값을 적용하는 순회가 분리되어야 한다. 한 번에 하면 아직 만나지
+ * 않은 장치가 더 작은 값을 요구할 때 이미 설정한 장치를 되돌릴 수 없다.
+ *
+ * bus->self 를 따로 처리하는 이유: pci_walk_bus() 는 bus 아래의 장치들만
+ * 훑고 그 버스로 내려오는 브리지 자신은 포함하지 않는다. 브리지도 링크의
+ * 한쪽 끝이므로 함께 설정해야 하며, 위에서 아래 순서를 지키려면 반드시
+ * 먼저 처리해야 한다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥, 열거 완료 후.
+ *
+ * 호출 체인:
+ *   pci_host_probe()/pci_scan_root_bus() → [pcie_bus_configure_settings]
+ *     → pci_walk_bus(pcie_find_smpss), pci_walk_bus(pcie_bus_configure_set)
+ */
 void pcie_bus_configure_settings(struct pci_bus *bus)
 {
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
 	u8 smpss = 0;
+	/* [한국어] 적용할 MPSS 코드. 0 은 128바이트를 뜻하며, PEER2PEER 나
+	 * 정책이 없을 때의 안전한 기본값이다. */
 
-	/* PCI/NVMe: 조걸 분기, NULL/0/미설정 여부 검사 */
 	if (!bus->self)
 		return;
+	/* [한국어] 루트 버스에는 이 버스로 내려오는 브리지가 없다.
+	 * 기준으로 삼을 링크가 없으므로 할 일이 없다. */
 
-	/* PCI/NVMe: 조걸 분기, NULL/0/미설정 여부 검사 */
 	if (!pci_is_pcie(bus->self))
 		return;
+	/* [한국어] MPS/MRRS 는 PCIe 개념이다 */
 
 	/*
 	 * FIXME - Peer to peer DMA is possible, though the endpoint would need
 	 * to be aware of the MPS of the destination.  To work around this,
 	 * simply force the MPS of the entire system to the smallest possible.
 	 */
-	/* PCI/NVMe: 조걸 분기, 값 일치 여부 검사 */
 	if (pcie_bus_config == PCIE_BUS_PEER2PEER)
-		/* PCI/NVMe: 변수에 값 할당: smpss */
 		smpss = 0;
+	/* [한국어] 장치끼리 직접 DMA 를 주고받으려면 서로의 MPS 를 알아야 하는데
+	 * 그럴 방법이 없다. 위 영어 주석의 FIXME 대로, 모든 장치를 최소값
+	 * 128B 로 통일해 어떤 조합이든 통신 가능하게 만드는 것이 현재의 해법이다. */
 
-	/* PCI/NVMe: 조걸 분기, 값 일치 여부 검사 */
 	if (pcie_bus_config == PCIE_BUS_SAFE) {
-		/* PCI/NVMe: 변수에 값 할당: smpss */
+		/* [한국어] 계층 전체의 공통 최솟값을 구해 쓰는 정책 */
 		smpss = bus->self->pcie_mpss;
+		/* [한국어] 브리지 자신의 지원값에서 시작한다 */
 
-		/* PCI/NVMe: 최소 MPS 인덱스 탐색 */
 		pcie_find_smpss(bus->self, &smpss);
-		/* PCI/NVMe: 버스 전체 순회 */
+		/* [한국어] 브리지 자신도 검사 대상에 넣는다. pci_walk_bus 가
+		 * 브리지를 포함하지 않으므로 직접 불러 준다. 여기서 브리지가
+		 * 핫플러그 가능하면 smpss 가 0 으로 못박힌다. */
 		pci_walk_bus(bus, pcie_find_smpss, &smpss);
+		/* [한국어] 이 버스 아래 모든 장치를 훑어 최솟값을 확정한다 */
 	}
 
-	/* PCI/NVMe: 버스 설정 적용 */
 	pcie_bus_configure_set(bus->self, &smpss);
-	/* PCI/NVMe: 버스 전체 순회 */
+	/* [한국어] 확정된 값을 브리지에 먼저 적용한다. 위에서 아래 순서를
+	 * 지켜야 PERFORMANCE 모드의 부모-자식 전파가 올바르게 동작한다. */
 	pci_walk_bus(bus, pcie_bus_configure_set, &smpss);
+	/* [한국어] 이어서 아래 모든 장치에 적용한다. NVMe SSD 의 최종 MPS/MRRS
+	 * 가 이 순회에서 확정된다. */
 }
-/* PCI/NVMe: EXPORT_SYMBOL_GPL 함수 호출 */
-EXPORT_SYMBOL_GPL(pcie_bus_configure_settings); /* PCI/NVMe: 심볼 외부 낸출. nvme-pci 등 모듈에서 참조 가능 */
+EXPORT_SYMBOL_GPL(pcie_bus_configure_settings);
+/* [한국어] 일부 호스트 컨트롤러 드라이버가 모듈에서 호출하므로 공개 */
 
 /*
  * Called after each bus is probed, but before its children are examined.  This
  * is marked as __weak because multiple architectures define it.
  */
 /*
- * pcibios_fixup_bus() - 아키텍처별 bus fixup(기본 빈 구현)
+ * [한국어]
+ * pcibios_fixup_bus - 아키텍처별 버스 보정 훅(기본 구현은 비어 있음)
  *
- * NVMe 연결: 특정 아키텍처에서 필요한 bus 리소스나 속성을 조정.
- * 대부분의 플랫폼에서는 아무 것도 하지 않는다.
+ * @bus: 방금 스캔한 버스.
+ * @return: 없음.
+ *
+ * 왜 필요한가: 예전에는 아키텍처마다 버스 스캔 직후 손봐야 할 것이 있어
+ * 이 훅을 두었다. __weak 이므로 아키텍처가 같은 이름의 함수를 정의하면
+ * 그쪽이 링크된다. 아래 영어 주석대로 상류에서는 이 훅을 없앨 계획이다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥, 버스 스캔 경로.
+ *
+ * 호출 체인:
+ *   pci_scan_child_bus_extend() → [pcibios_fixup_bus]
  */
-/* PCI/NVMe: 아키텍처별 버스 fixup */
 void __weak pcibios_fixup_bus(struct pci_bus *bus)
 {
-       /* nothing to do, expected to be removed in the future */ /* PCI/NVMe: 기본적으로 수행할 작업 없음 */
+       /* nothing to do, expected to be removed in the future */
+       /* [한국어] 기본 구현은 아무 일도 하지 않는다. 영어 주석이 밝히듯
+	* 장래에 제거될 예정인 훅이다. */
 }
 
 /**
@@ -5516,46 +7487,86 @@ void __weak pcibios_fixup_bus(struct pci_bus *bus)
  * hierarchy.
  */
 /*
- * pci_scan_child_bus_extend() - 버스 아래의 모든 장치와 하위 버스를 재귀 스캔
+ * [한국어]
+ * pci_scan_child_bus_extend - 한 버스의 모든 슬롯과 그 아래 브리지들을 훑는다
  *
- * NVMe 연결: 이 함수는 NVMe SSD가 발견되는 핵심 루프. 모든 slot을
- * 스캔하고, SR-IOV용 bus 번호를 예약하며, bridge 뒤의 하위 버스를
- * 재귀적으로 탐색. available_buses는 hotplug bridge를 위한 추가 bus
- * 번호를 분배하는 데 사용.
+ * @bus:             훑을 버스.
+ * @available_buses: 이 버스 아래에 여유로 쓸 수 있는 버스 번호 개수.
+ *                   0 이면 꼭 필요한 만큼만 쓴다.
+ * @return: 이 버스와 그 아래 전체를 포함하는 최대 버스 번호(subordinate).
+ *
+ * ★ 재귀 하강의 다른 한쪽 ★
+ * pci_scan_bridge_extend() 와 서로를 호출하며 PCI 트리 전체를 깊이 우선으로
+ * 훑는다. 이 함수가 하는 일은 세 가지다:
+ *   1) device 0~31 각각에 대해 pci_scan_slot() 을 불러 장치를 발견한다.
+ *   2) 발견된 브리지들에 대해 2-pass 로 버스 번호를 배정하고 아래로 하강한다.
+ *   3) 남은 버스 번호를 핫플러그 브리지들에게 나눠 준다.
+ *
+ * 왜 여유 버스를 나눠 주는가: 핫플러그 슬롯에 나중에 스위치가 달린 장치가
+ * 꽂히면 버스 번호가 여러 개 필요하다. 그때 가서 번호를 만들려면 이미 배정된
+ * 이웃 브리지들의 번호를 전부 옮겨야 하는데, 동작 중인 시스템에서는 사실상
+ * 불가능하다. 그래서 지금 미리 빈 번호를 남겨 둔다.
+ *
+ * NVMe 접점: NVMe SSD 가 실제로 발견되는 지점이 이 함수의
+ * pci_scan_slot() 루프다. 백플레인의 핫플러그 베이라면 여유 버스 분배가
+ * 나중에 SSD 를 꽂았을 때 정상 인식되는지를 좌우한다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥. 재귀 깊이는 PCI 트리 깊이(현실적으로 한 자릿수).
+ *
+ * 호출 체인:
+ *   pci_scan_child_bus()/pci_scan_bridge_extend() → [pci_scan_child_bus_extend]
+ *     → pci_scan_slot(), pci_scan_bridge_extend() → …(상호 재귀)
  */
-/* PCI/NVMe: 하위 버스 재귀 스캔(확장 버스 분배) */
 static unsigned int pci_scan_child_bus_extend(struct pci_bus *bus,
-					      /* PCI/NVMe: 후속 코드 동작 수행 */
 					      unsigned int available_buses)
 {
-	/* PCI/NVMe: 변수에 값 할당: unsigned int used_buses, normal_bridges */
 	unsigned int used_buses, normal_bridges = 0, hotplug_bridges = 0;
-	/* PCI/NVMe: 변수에 값 할당: unsigned int start */
+	/* [한국어] used_buses      = 지금까지 이 버스 아래에서 소비한 번호 개수,
+	 * normal_bridges  = 이 버스의 일반 브리지 수,
+	 * hotplug_bridges = 이 버스의 핫플러그 가능 브리지 수(여유분을 나눌 대상). */
 	unsigned int start = bus->busn_res.start;
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
+	/* [한국어] 이 버스 자신의 번호. 아래에서 "얼마나 늘었는가"를 재는 기준점 */
 	unsigned int devnr, cmax, max = start;
-	/* PCI/NVMe: 후속 코드 동작 수행 */
+	/* [한국어] devnr = 슬롯 순회 인덱스,
+	 * cmax  = 한 브리지를 처리하기 직전의 max(증가분 계산용),
+	 * max   = 지금까지 쓰인 최대 버스 번호(반환값이 된다). */
 	struct pci_dev *dev;
+	/* [한국어] 브리지 순회 커서 */
 
-	dev_dbg(&bus->dev, "scanning bus\n"); /* PCI/NVMe: 버스 스캔 시작 디버그 로그 */
+	dev_dbg(&bus->dev, "scanning bus\n");
+	/* [한국어] 스캔 시작 디버그 로그 */
 
 	/* Go find them, Rover! */
-	for (devnr = 0; devnr < PCI_MAX_NR_DEVS; devnr++) /* PCI/NVMe: 0~31 slot 순회 */
-		pci_scan_slot(bus, PCI_DEVFN(devnr, 0)); /* PCI/NVMe: 각 slot의 function 0부터 스캔; NVMe 컨트롤러 탐색 */
+	for (devnr = 0; devnr < PCI_MAX_NR_DEVS; devnr++)
+		pci_scan_slot(bus, PCI_DEVFN(devnr, 0));
+	/* [한국어] ★장치 발견 루프★ device 번호 0~31(PCI_MAX_NR_DEVS)을 모두
+	 * 훑는다. PCI_DEVFN(devnr, 0) 은 (devnr << 3) | 0 으로 각 슬롯의
+	 * function 0 좌표를 만든다. pci_scan_slot() 이 그 안의 function 들을
+	 * 처리한다. PCIe 하향 포트 아래라면 only_one_child() 덕분에 devnr 0 만
+	 * 실제로 검사되고 나머지는 즉시 반환한다.
+	 * NVMe SSD 는 이 루프에서 발견된다. */
 
 	/* Reserve buses for SR-IOV capability */
-	used_buses = pci_iov_bus_range(bus); /* PCI/NVMe: 이 버스의 SR-IOV VF들을 위해 필요한 bus 번호 수 계산 */
-	max += used_buses; /* PCI/NVMe: 사용된 bus 번호만큼 max 증가 */
+	used_buses = pci_iov_bus_range(bus);
+	/* [한국어] 이 버스의 장치들이 SR-IOV VF 를 만들 때 필요한 버스 번호
+	 * 개수를 계산한다. VF 는 PF 와 다른 버스 번호에 나타날 수 있어
+	 * 미리 자리를 비워 두어야 한다. */
+	max += used_buses;
+	/* [한국어] 그만큼 최대 번호를 밀어 둔다. 실제로 VF 를 만들 때
+	 * 그 번호들이 쓰인다. */
 
 	/*
 	 * After performing arch-dependent fixup of the bus, look behind
 	 * all PCI-to-PCI bridges on this bus.
 	 */
-	if (!bus->is_added) { /* PCI/NVMe: 처음 추가된 버스이면 */
-		/* PCI/NVMe: 장치 디버그 메시지 출력 */
+	if (!bus->is_added) {
+		/* [한국어] 이 버스에 대해 아직 fixup 을 하지 않았을 때만.
+		 * 재스캔에서 중복 실행되는 것을 막는다. */
 		dev_dbg(&bus->dev, "fixups for bus\n");
-		pcibios_fixup_bus(bus); /* PCI/NVMe: 아키텍처별 bus fixup 수행 */
-		bus->is_added = 1; /* PCI/NVMe: fixup 완료 표시 */
+		pcibios_fixup_bus(bus);
+		/* [한국어] 아키텍처별 보정 훅(기본은 빈 함수) */
+		bus->is_added = 1;
+		/* [한국어] 완료 표시 */
 	}
 
 	/*
@@ -5563,13 +7574,14 @@ static unsigned int pci_scan_child_bus_extend(struct pci_bus *bus,
 	 * are on this bus. We will distribute the additional available
 	 * buses between hotplug bridges.
 	 */
-	for_each_pci_bridge(dev, bus) { /* PCI/NVMe: 이 버스에 있는 모든 bridge 순회 */
-		/* PCI/NVMe: 조걸 분기, 값 크기 비교 */
+	for_each_pci_bridge(dev, bus) {
+		/* [한국어] 이 버스의 장치 중 브리지만 골라 순회하는 매크로 */
 		if (dev->is_hotplug_bridge)
-			hotplug_bridges++; /* PCI/NVMe: hotplug bridge 카운트 */
-		/* PCI/NVMe: 조걸 분기의 else 경로 */
+			hotplug_bridges++;
+		/* [한국어] 나중에 여유 버스를 나눠 받을 대상 */
 		else
-			normal_bridges++; /* PCI/NVMe: 일반 bridge 카운트 */
+			normal_bridges++;
+		/* [한국어] 여유 버스가 필요 없는 고정 브리지 */
 	}
 
 	/*
@@ -5577,50 +7589,76 @@ static unsigned int pci_scan_child_bus_extend(struct pci_bus *bus,
 	 * unless they are misconfigured (which will be done in the second
 	 * scan below).
 	 */
-	for_each_pci_bridge(dev, bus) { /* PCI/NVMe: 이미 firmware가 설정한 bridge들을 첫 pass로 스캔 */
-		/* PCI/NVMe: 변수에 값 할당: cmax */
+	for_each_pci_bridge(dev, bus) {
+		/* [한국어] ★1차 순회(pass 0)★ 펌웨어가 이미 번호를 넣어 둔
+		 * 브리지들을 먼저 처리해 그 번호들을 max 에 반영한다.
+		 * 이렇게 해야 2차에서 새 번호를 매길 때 충돌하지 않는다. */
 		cmax = max;
-		max = pci_scan_bridge_extend(bus, dev, max, 0, 0); /* PCI/NVMe: pass 0로 bridge 뒤 스캔; NVMe가 연결될 수 있음 */
+		/* [한국어] 이 브리지 처리 전의 값을 기억 */
+		max = pci_scan_bridge_extend(bus, dev, max, 0, 0);
+		/* [한국어] pass=0, available_buses=0 으로 호출.
+		 * 이미 설정된 브리지만 실제로 처리되고, 설정이 필요한 브리지는
+		 * 아무 일도 하지 않고 돌아온다(그쪽은 2차에서 처리). */
 
 		/*
 		 * Reserve one bus for each bridge now to avoid extending
 		 * hotplug bridges too much during the second scan below.
 		 */
-		used_buses++; /* PCI/NVMe: 각 bridge에 최소 1개 bus 예약 */
-		/* PCI/NVMe: 조걸 분기, 값 크기 비교 */
+		used_buses++;
+		/* [한국어] 브리지 하나당 최소 버스 하나는 반드시 필요하다.
+		 * 영어 주석대로 이것을 지금 예약해 두어야, 2차에서 핫플러그
+		 * 브리지에게 여유분을 나눠 줄 때 아직 처리되지 않은 브리지들의
+		 * 몫까지 가져가 버리는 일이 없다. */
 		if (max - cmax > 1)
-			used_buses += max - cmax - 1; /* PCI/NVMe: 추가로 사용된 bus 수만큼 증가 */
+			used_buses += max - cmax - 1;
+		/* [한국어] 이 브리지가 실제로 두 개 이상의 번호를 썼다면
+		 * (아래에 또 브리지가 있어서) 그 추가분도 소비량에 반영한다.
+		 * 하나는 위에서 이미 셌으므로 -1 한다. */
 	}
 
 	/* Scan bridges that need to be reconfigured */
-	for_each_pci_bridge(dev, bus) { /* PCI/NVMe: 재설정이 필요한 bridge들을 두 번째 pass로 스캔 */
-		/* PCI/NVMe: 지역 변수 선언 및 초기화 */
+	for_each_pci_bridge(dev, bus) {
+		/* [한국어] ★2차 순회(pass 1)★ 이제 기존 번호를 모두 파악했으므로
+		 * 새 번호를 안전하게 배정할 수 있다. */
 		unsigned int buses = 0;
+		/* [한국어] 이 브리지에게 넘겨 줄 여유 버스 개수 */
 
-		if (!hotplug_bridges && normal_bridges == 1) { /* PCI/NVMe: hotplug bridge가 없고 일반 bridge가 1개뿐이면 */
+		if (!hotplug_bridges && normal_bridges == 1) {
 			/*
 			 * There is only one bridge on the bus (upstream
 			 * port) so it gets all available buses which it
 			 * can then distribute to the possible hotplug
 			 * bridges below.
 			 */
-			buses = available_buses; /* PCI/NVMe: 모든 추가 available bus를 이 bridge에 할당 */
-		} else if (dev->is_hotplug_bridge) { /* PCI/NVMe: hotplug bridge이면 */
+			buses = available_buses;
+			/* [한국어] 이 버스에 브리지가 딱 하나뿐이라면(전형적으로
+			 * 스위치의 상향 포트), 나눌 상대가 없으므로 여유분을 통째로
+			 * 넘긴다. 그 브리지가 아래로 내려가 자기 하향 포트들에게
+			 * 다시 나눠 준다. */
+		} else if (dev->is_hotplug_bridge) {
 			/*
 			 * Distribute the extra buses between hotplug
 			 * bridges if any.
 			 */
-			buses = available_buses / hotplug_bridges; /* PCI/NVMe: hotplug bridge들 간 추가 bus 분배 */
-			buses = min(buses, available_buses - used_buses + 1); /* PCI/NVMe: 남은 bus를 초과하지 않도록 제한 */
+			buses = available_buses / hotplug_bridges;
+			/* [한국어] 여유분을 핫플러그 브리지 수로 나눠 균등 분배 */
+			buses = min(buses, available_buses - used_buses + 1);
+			/* [한국어] 다만 이미 소비한 만큼은 빼야 한다. 앞선 브리지들이
+			 * 예상보다 많이 썼다면 뒤쪽 브리지의 몫이 줄어든다.
+			 * +1 은 위 1차 순회에서 이 브리지 몫으로 미리 하나를
+			 * used_buses 에 더해 두었기 때문에 그것을 되돌리는 보정이다. */
 		}
 
-		/* PCI/NVMe: 변수에 값 할당: cmax */
 		cmax = max;
-		max = pci_scan_bridge_extend(bus, dev, cmax, buses, 1); /* PCI/NVMe: pass 1로 재설정 및 하위 스캔 */
+		/* [한국어] 처리 전 값 기억 */
+		max = pci_scan_bridge_extend(bus, dev, cmax, buses, 1);
+		/* [한국어] pass=1 로 호출 — 여기서 실제로 번호가 배정되고
+		 * 아래로 재귀 하강이 일어난다. 여유분 buses 도 함께 넘긴다. */
 		/* One bus is already accounted so don't add it again */
-		/* PCI/NVMe: 조걸 분기, 값 크기 비교 */
 		if (max - cmax > 1)
-			used_buses += max - cmax - 1; /* PCI/NVMe: 추가 사용 bus 수 갱신 */
+			used_buses += max - cmax - 1;
+		/* [한국어] 1차와 같은 계산. 영어 주석대로 버스 하나는 이미
+		 * 셌으므로 중복해서 더하지 않는다. */
 	}
 
 	/*
@@ -5628,20 +7666,28 @@ static unsigned int pci_scan_child_bus_extend(struct pci_bus *bus,
 	 * number of buses but allow it to grow up to the maximum available
 	 * bus number if there is room.
 	 */
-	if (bus->self && bus->self->is_hotplug_bridge) { /* PCI/NVMe: 현재 버스가 hotplug bridge 아래이면 */
-		used_buses = max(available_buses, pci_hotplug_bus_size - 1); /* PCI/NVMe: 최소 요구 bus 수 확보 */
-		if (max - start < used_buses) { /* PCI/NVMe: 현재 max가 최소 요구보다 작으면 확장 */
-			/* PCI/NVMe: 변수에 값 할당: max */
+	if (bus->self && bus->self->is_hotplug_bridge) {
+		/* [한국어] 이 버스 자신이 핫플러그 브리지 아래에 있는 경우.
+		 * 지금 아래가 비어 있어도 나중에 장치가 꽂힐 수 있으므로
+		 * 번호 구간을 미리 넓혀 둔다. */
+		used_buses = max(available_buses, pci_hotplug_bus_size - 1);
+		/* [한국어] 호출자가 준 여유분과 커널 기본 예약치
+		 * (pci_hotplug_bus_size, 커널 파라미터로 조정 가능) 중 큰 쪽을 쓴다.
+		 * -1 은 자기 자신의 번호를 제외한 하위 구간 크기이기 때문이다. */
+		if (max - start < used_buses) {
+			/* [한국어] 실제로 쓴 범위가 예약하려는 크기보다 작으면 넓힌다 */
 			max = start + used_buses;
+			/* [한국어] 시작 번호에 예약 크기를 더해 새 상한을 만든다 */
 
 			/* Do not allocate more buses than we have room left */
-			/* PCI/NVMe: 조걸 분기, 값 크기 비교 */
 			if (max > bus->busn_res.end)
-				max = bus->busn_res.end; /* PCI/NVMe: 상위가 허용한 bus 번호를 초과하지 않도록 제한 */
+				max = bus->busn_res.end;
+			/* [한국어] 부모가 허용한 구간을 넘어설 수는 없다.
+			 * 넘으면 조상 브리지가 그 번호의 요청을 전달하지 않는다. */
 
-			/* PCI/NVMe: 장치 디버그 메시지 출력 */
 			dev_dbg(&bus->dev, "%pR extended by %#02x\n",
-				&bus->busn_res, max - start); /* PCI/NVMe: bus 번호 범위 확장 디버그 로그 */
+				&bus->busn_res, max - start);
+			/* [한국어] 얼마나 넓혔는지 디버그 로그로 남긴다 */
 		}
 	}
 
@@ -5652,8 +7698,11 @@ static unsigned int pci_scan_child_bus_extend(struct pci_bus *bus,
 	 *
 	 * Return how far we've got finding sub-buses.
 	 */
-	dev_dbg(&bus->dev, "bus scan returning with max=%02x\n", max); /* PCI/NVMe: 스캔 완료 및 최대 subordinate bus 출력 */
-	return max; /* PCI/NVMe: 현재 버스 계층에서 사용한 최대 bus 번호 반환 */
+	dev_dbg(&bus->dev, "bus scan returning with max=%02x\n", max);
+	/* [한국어] 이 서브트리가 소비한 최대 번호를 로그로 남긴다 */
+	return max;
+	/* [한국어] 호출자(pci_scan_bridge_extend)가 이 값을 브리지의
+	 * subordinate 로 프로그래밍하거나, 다음 브리지 처리에 이어 쓴다. */
 }
 
 /**
@@ -5664,18 +7713,29 @@ static unsigned int pci_scan_child_bus_extend(struct pci_bus *bus,
  * subordinate number including all the found devices.
  */
 /*
- * pci_scan_child_bus() - 추가 available bus 없이 하위 버스 스캔
+ * [한국어]
+ * pci_scan_child_bus - 여유 버스 없이 버스 아래를 훑는 공개 API
  *
- * NVMe 연결: 일반적인 PCI 스캔 경로. NVMe SSD가 발견될 때까지
- * pci_scan_child_bus_extend()를 호출.
+ * @bus: 훑을 버스.
+ * @return: 이 버스 아래 전체를 포함하는 최대 버스 번호.
+ *
+ * 왜 필요한가: pci_scan_child_bus_extend() 의 available_buses 를 0 으로
+ * 고정한 래퍼다. 핫플러그 여유분을 남기지 않는 가장 단순한 형태이며,
+ * 부팅 시 루트 버스 스캔의 기본 경로다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_scan_root_bus_bridge()/pci_scan_bus() → [pci_scan_child_bus]
+ *     → pci_scan_child_bus_extend()
  */
-/* PCI/NVMe: 하위 버스 재귀 스캔 */
 unsigned int pci_scan_child_bus(struct pci_bus *bus)
 {
-	return pci_scan_child_bus_extend(bus, 0); /* PCI/NVMe: 추가 bus 예약 없이 하위 스캔 */
+	return pci_scan_child_bus_extend(bus, 0);
+	/* [한국어] 여유 버스 0 — 꼭 필요한 만큼만 배정한다 */
 }
-/* PCI/NVMe: EXPORT_SYMBOL_GPL 함수 호출 */
-EXPORT_SYMBOL_GPL(pci_scan_child_bus); /* PCI/NVMe: 심볼 외부 낸출. nvme-pci 등 모듈에서 참조 가능 */
+EXPORT_SYMBOL_GPL(pci_scan_child_bus);
+/* [한국어] 호스트 컨트롤러/핫플러그 드라이버가 모듈에서 쓰므로 공개 */
 
 /**
  * pcibios_root_bridge_prepare - Platform-specific host bridge setup
@@ -5684,115 +7744,224 @@ EXPORT_SYMBOL_GPL(pci_scan_child_bus); /* PCI/NVMe: 심볼 외부 낸출. nvme-p
  * Default empty implementation.  Replace with an architecture-specific setup
  * routine, if necessary.
  */
-/* PCI/NVMe: 아키텍처별 호스트 브리지 준비 */
+/*
+ * [한국어]
+ * pcibios_root_bridge_prepare - 루트 브리지 등록 직전의 아키텍처 훅
+ *
+ * @bridge: 준비할 호스트 브리지.
+ * @return: 0 이면 계속 진행. 음수면 pci_register_host_bridge() 가 실패한다.
+ *
+ * 왜 필요한가: 루트 브리지를 드라이버 모델에 올리기 전에 아키텍처가 손봐야
+ * 할 것(NUMA 노드, ACPI 정보 연결 등)이 있을 수 있다. __weak 이므로
+ * 아키텍처가 같은 이름의 강한 심볼을 정의하면 그쪽이 링크된다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥, device_add() 전.
+ *
+ * 호출 체인:
+ *   pci_register_host_bridge() → [pcibios_root_bridge_prepare]
+ */
 int __weak pcibios_root_bridge_prepare(struct pci_host_bridge *bridge)
 {
-	/* PCI/NVMe: 정상 종료 및 반환 */
 	return 0;
+	/* [한국어] 기본 구현은 할 일이 없으므로 성공만 알린다 */
 }
 
-/* PCI/NVMe: 아키텍처별 버스 추가 */
+/*
+ * [한국어]
+ * pcibios_add_bus - 버스가 등록된 직후의 아키텍처 훅
+ *
+ * @bus: 방금 등록된 버스.
+ * @return: 없음.
+ *
+ * 왜 필요한가: 아키텍처가 버스별 자료구조를 만들거나 펌웨어에 알려야 하는
+ * 경우를 위한 자리다. 기본 구현은 비어 있다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥, device_register() 직후.
+ *
+ * 호출 체인:
+ *   pci_register_host_bridge()/pci_alloc_child_bus() → [pcibios_add_bus]
+ */
 void __weak pcibios_add_bus(struct pci_bus *bus)
 {
+	/* [한국어] 기본 구현 없음 */
 }
 
-/* PCI/NVMe: 아키텍처별 버스 제거 */
+/*
+ * [한국어]
+ * pcibios_remove_bus - 버스가 제거되기 직전의 아키텍처 훅
+ *
+ * @bus: 제거될 버스.
+ * @return: 없음.
+ *
+ * 왜 필요한가: pcibios_add_bus() 에서 만든 것을 되돌리는 짝이다.
+ * 기본 구현은 비어 있다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥, 버스 제거 경로(drivers/pci/remove.c).
+ *
+ * 호출 체인:
+ *   pci_remove_bus() → [pcibios_remove_bus]
+ */
 void __weak pcibios_remove_bus(struct pci_bus *bus)
 {
+	/* [한국어] 기본 구현 없음 */
 }
 
 /*
- * pci_create_root_bus() - host bridge를 할당하고 root bus 등록
+ * [한국어]
+ * pci_create_root_bus - 호스트 브리지를 만들어 루트 버스를 생성하는 구식 API
  *
- * NVMe 연결: PCI host controller driver가 Root Complex 아래의 root bus를
- * 생성할 때 사용. resources에는 MEM/IO/BUS window가 포함되며, 이는
- * NVMe BAR 할당의 전체 공간이 된다.
+ * @parent:    호스트 컨트롤러 device(없으면 NULL).
+ * @bus:       루트 버스 번호.
+ * @ops:       이 버스의 config 접근 함수 집합.
+ * @sysdata:   컨트롤러 전용 데이터 포인터.
+ * @resources: 이 브리지가 제공하는 주소 창 목록. 성공하면 이 목록은
+ *             브리지로 옮겨져 비워진다.
+ * @return: 생성된 루트 버스. 실패 시 NULL.
+ *
+ * 왜 있는가: pci_alloc_host_bridge() + 필드 설정 + pci_register_host_bridge()
+ * 를 한 번에 하는 편의 함수다. 브리지 객체를 직접 다루지 않는 오래된
+ * 컨트롤러 드라이버들이 쓴다. 새 드라이버는 devm_pci_alloc_host_bridge() 와
+ * pci_host_probe() 조합을 쓰는 것이 권장된다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥의 드라이버 probe.
+ *
+ * 호출 체인:
+ *   호스트 컨트롤러 드라이버 → [pci_create_root_bus]
+ *     → pci_alloc_host_bridge(), pci_register_host_bridge()
  */
-/* PCI/NVMe: 루트 PCI 버스 생성 */
 struct pci_bus *pci_create_root_bus(struct device *parent, int bus,
-		/* PCI/NVMe: 후속 코드 동작 수행 */
 		struct pci_ops *ops, void *sysdata, struct list_head *resources)
 {
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
 	int error;
-	/* PCI/NVMe: 후속 코드 동작 수행 */
+	/* [한국어] 등록 결과 코드 */
 	struct pci_host_bridge *bridge;
+	/* [한국어] 만들 호스트 브리지 */
 
-	bridge = pci_alloc_host_bridge(0); /* PCI/NVMe: host bridge 할당 */
-	if (!bridge) /* PCI/NVMe: 할당 실패 시 NULL 반환 */
-		/* PCI/NVMe: NULL 반환(메모리/리소스 부족 또는 초기화 실패) */
+	bridge = pci_alloc_host_bridge(0);
+	/* [한국어] 드라이버 전용 영역 없이(priv=0) 브리지만 할당 */
+	if (!bridge)
 		return NULL;
+	/* [한국어] 메모리 부족 */
 
-	bridge->dev.parent = parent; /* PCI/NVMe: host bridge의 부모 device 설정 */
+	bridge->dev.parent = parent;
+	/* [한국어] sysfs 계층에서의 부모 */
 
-	list_splice_init(resources, &bridge->windows); /* PCI/NVMe: caller가 제공한 resource window를 bridge로 이동 */
-	bridge->sysdata = sysdata; /* PCI/NVMe: platform-specific data 연결 */
-	bridge->busnr = bus; /* PCI/NVMe: root bus 번호 설정 */
-	bridge->ops = ops; /* PCI/NVMe: PCI config space ops 연결 */
+	list_splice_init(resources, &bridge->windows);
+	/* [한국어] 호출자가 준비한 창 목록을 브리지로 통째로 옮기고 원본은 비운다.
+	 * 이제 그 리소스들의 수명은 브리지가 관리한다. */
+	bridge->sysdata = sysdata;
+	/* [한국어] config 접근 함수가 쓸 컨트롤러 전용 데이터 */
+	bridge->busnr = bus;
+	/* [한국어] 루트 버스 번호 */
+	bridge->ops = ops;
+	/* [한국어] config 읽기/쓰기 함수 집합 */
 
-	error = pci_register_host_bridge(bridge); /* PCI/NVMe: host bridge 등록 및 root bus 생성; NVMe 트리의 시작점 */
-	/* PCI/NVMe: 조걸 분기, 값 크기 비교 */
+	error = pci_register_host_bridge(bridge);
+	/* [한국어] 실제 등록. 여기서 pci_bus 가 만들어지고 창들이 버스 리소스로
+	 * 옮겨지며 전역 루트 버스 목록에 들어간다. */
 	if (error < 0)
-		/* PCI/NVMe: 오류 처리/종료 지점으로 이동: err_out */
 		goto err_out;
+	/* [한국어] 등록 실패 */
 
-	return bridge->bus; /* PCI/NVMe: 생성된 root bus 반환 */
+	return bridge->bus;
+	/* [한국어] 만들어진 루트 버스를 돌려준다. 호출자는 이어서
+	 * pci_scan_child_bus() 로 장치를 훑는다. */
 
 err_out:
-	put_device(&bridge->dev); /* PCI/NVMe: 등록 실패 시 host bridge 참조 감소 */
-	/* PCI/NVMe: NULL 반환(메모리/리소스 부족 또는 초기화 실패) */
+	put_device(&bridge->dev);
+	/* [한국어] pci_alloc_host_bridge() 안의 device_initialize() 로 잡힌
+	 * 참조를 놓는다. 마지막 참조라면 소멸자가 돌아 브리지가 해제된다.
+	 * (list_splice_init 으로 옮긴 창 목록도 소멸자가 정리한다.) */
 	return NULL;
 }
-/* PCI/NVMe: EXPORT_SYMBOL_GPL 함수 호출 */
-EXPORT_SYMBOL_GPL(pci_create_root_bus); /* PCI/NVMe: 심볼 외부 낸출. nvme-pci 등 모듈에서 참조 가능 */
+EXPORT_SYMBOL_GPL(pci_create_root_bus);
+/* [한국어] 구식 컨트롤러 드라이버들이 모듈에서 쓰므로 공개 */
 
 /*
- * pci_host_probe() - PCI host bridge 아래 전체 PCIe 계층 탐색 및 초기화
+ * [한국어]
+ * pci_host_probe - 호스트 브리지 하나에 대한 열거·리소스 할당·드라이버 바인딩 전 과정
  *
- * NVMe 연결: host controller driver가 이 함수를 호출하여 Root Complex
- * 아래의 모든 PCIe 장치를 스캔하고, 리소스를 할당하며, 매칭되는
- * 드라이버를 probe. NVMe SSD는 pci_bus_add_devices()에서
- * nvme_pci_driver의 nvme_probe()가 호출되어 초기화.
+ * @bridge: 컨트롤러 드라이버가 준비한 호스트 브리지.
+ * @return: 0 이면 성공, 음수면 스캔 실패 errno.
+ *
+ * ★ 컨트롤러 드라이버 입장에서의 "한 방" 진입점 ★
+ * 이 함수 하나를 부르면 그 아래 PCIe 트리 전체가 발견되고, 주소가 배정되고,
+ * 드라이버가 붙는다. 단계는 다음과 같다:
+ *   1) pci_scan_root_bus_bridge()  — 루트 버스 생성 + 트리 전체 재귀 스캔.
+ *      이 단계가 끝나면 모든 pci_dev 가 만들어져 있지만, BAR 주소는
+ *      아직 확정되지 않았을 수 있다(IORESOURCE_UNSET).
+ *   2) 리소스 확정 — 펌웨어 설정을 보존할지에 따라 claim 또는 재배정.
+ *   3) pcie_bus_configure_settings() — MPS/MRRS 정책 적용.
+ *   4) pci_bus_add_devices()        — 드라이버 바인딩.
+ *   5) runtime PM 준비.
+ *
+ * NVMe 접점: NVMe SSD 의 pci_dev 는 1)에서 만들어지고, BAR0 의 물리 주소는
+ * 2)에서 확정되며, nvme_probe() 는 4)에서 호출된다. nvme_probe 가
+ * pci_resource_start(pdev, 0) 으로 읽는 값이 2)에서 정해진 주소다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥의 드라이버 probe. 스캔과 장치 추가 구간에서
+ * pci_lock_rescan_remove() 로 다른 rescan/remove 와 상호 배제한다.
+ *
+ * 호출 체인:
+ *   호스트 컨트롤러 드라이버 probe → [pci_host_probe]
+ *     → pci_scan_root_bus_bridge() → pci_scan_child_bus() → …
+ *     → pci_bus_add_devices() → 드라이버 probe(nvme_probe 등)
  */
-/* PCI/NVMe: host bridge 기반 루트 버스 탐색. NVMe PCIe 컨트롤러 열수 시작 */
-/* PCI/NVMe: pci_host_probe 함수 정의 */
 int pci_host_probe(struct pci_host_bridge *bridge)
 {
-	/* PCI/NVMe: 후속 코드 동작 수행 */
 	struct pci_bus *bus, *child;
-	/* PCI/NVMe: ret 변수 선언/초기화: 반환값 변수. NVMe 초기화 성공/실패 상태 */
+	/* [한국어] bus = 만들어진 루트 버스, child = 자식 버스 순회 커서 */
 	int ret;
+	/* [한국어] 스캔 결과 */
 
-	pci_lock_rescan_remove(); /* PCI/NVMe: rescan/remove 상호 배제 잠금 */
-	ret = pci_scan_root_bus_bridge(bridge); /* PCI/NVMe: root bus 및 전체 계층 스캔; NVMe 컨트롤러 pci_dev 생성 */
-	pci_unlock_rescan_remove(); /* PCI/NVMe: 잠금 해제 */
-	/* PCI/NVMe: 조걸 분기, 값 크기 비교 */
+	pci_lock_rescan_remove();
+	/* [한국어] 전역 rescan/remove 뮤텍스 획득. 스캔 도중 다른 경로에서
+	 * 장치를 제거하거나 재스캔하면 트리가 깨지므로 직렬화한다. */
+	ret = pci_scan_root_bus_bridge(bridge);
+	/* [한국어] ★열거 전 과정★ 루트 버스를 만들고 그 아래를 재귀 스캔한다.
+	 * 이 안에서 NVMe SSD 를 포함한 모든 장치의 pci_dev 가 만들어진다. */
+	pci_unlock_rescan_remove();
+	/* [한국어] 락 해제 */
 	if (ret < 0) {
-		dev_err(bridge->dev.parent, "Scanning root bridge failed"); /* PCI/NVMe: root bridge 스캔 실패 로그 */
-		/* PCI/NVMe: 결과 반환: ret */
+		dev_err(bridge->dev.parent, "Scanning root bridge failed");
+		/* [한국어] 스캔 실패 — 이 컨트롤러 아래는 쓸 수 없다 */
 		return ret;
 	}
 
-	bus = bridge->bus; /* PCI/NVMe: 스캔이 완료된 root bus 획득 */
+	bus = bridge->bus;
+	/* [한국어] pci_register_host_bridge() 가 채워 준 루트 버스 */
 
 	/* If we must preserve the resource configuration, claim now */
-	/* PCI/NVMe: 조걸 분기, 값 크기 비교 */
 	if (bridge->preserve_config)
-		pci_bus_claim_resources(bus); /* PCI/NVMe: firmware 설정을 유지하며 리소스 claim */
+		pci_bus_claim_resources(bus);
+	/* [한국어] 펌웨어 설정을 보존해야 하는 경우, 지금 그 주소들을 리소스
+	 * 트리에 "이미 사용 중"으로 등록해 둔다. 그러면 아래의 재배정이
+	 * 그 영역을 건드리지 않는다. */
 
 	/*
 	 * Assign whatever was left unassigned. If we didn't claim above,
 	 * this will reassign everything.
 	 */
-	pci_assign_unassigned_root_bus_resources(bus); /* PCI/NVMe: 할당되지 않은 BAR/버스 번호 할당; NVMe BAR 물리 주소 확정 */
+	pci_assign_unassigned_root_bus_resources(bus);
+	/* [한국어] ★BAR 주소 확정★ IORESOURCE_UNSET 으로 남아 있던 BAR 와
+	 * 브리지 창에 실제 CPU 주소를 배정한다(drivers/pci/setup-bus.c).
+	 * 위에서 claim 하지 않았다면 영어 주석대로 전부 새로 배정한다.
+	 * 이 단계가 끝나야 NVMe 의 BAR0 이 실제 물리 주소를 갖는다. */
 
-	/* PCI/NVMe: 도메인별 bus 번호 리스트 순회. 다중 루트 컴플렉스/VMD 그룹핑 참고 */
 	list_for_each_entry(child, &bus->children, node)
-		pcie_bus_configure_settings(child); /* PCI/NVMe: 각 서브 버스의 MPS/MRRS 설정; NVMe 링크 효율 결정 */
+		pcie_bus_configure_settings(child);
+	/* [한국어] 루트 버스의 각 자식 버스에 대해 MPS/MRRS 정책을 적용한다.
+	 * 트리 전체가 만들어진 뒤여야 계층 최솟값을 구할 수 있다. */
 
-	pci_lock_rescan_remove(); /* PCI/NVMe: device 추가 동안 잠금 */
-	pci_bus_add_devices(bus); /* PCI/NVMe: 매칭되는 PCI 드라이버 probe 호출; nvme_probe 실행 */
-	pci_unlock_rescan_remove(); /* PCI/NVMe: 잠금 해제 */
+	pci_lock_rescan_remove();
+	/* [한국어] 장치 추가 구간도 직렬화한다 */
+	pci_bus_add_devices(bus);
+	/* [한국어] ★드라이버 바인딩★ 트리의 모든 장치에 대해 device_attach()
+	 * 를 수행한다. 여기서 nvme 드라이버가 클래스 0x010802 장치에 매칭되어
+	 * nvme_probe() 가 실행되고, BAR0 매핑 → CAP 읽기 → Admin Queue 설정 →
+	 * 네임스페이스 스캔을 거쳐 /dev/nvme0n1 이 나타난다. */
+	pci_unlock_rescan_remove();
+	/* [한국어] 락 해제 */
 
 	/*
 	 * Ensure pm_runtime_enable() is called for the controller drivers
@@ -5800,273 +7969,403 @@ int pci_host_probe(struct pci_host_bridge *bridge)
 	 * if the parent device supports runtime PM, it will be enabled
 	 * before child runtime PM is enabled.
 	 */
-	pm_runtime_set_active(&bridge->dev); /* PCI/NVMe: host bridge runtime PM 활성 상태 설정 */
-	pm_runtime_no_callbacks(&bridge->dev); /* PCI/NVMe: bridge 자체에는 runtime PM 콜백 없음 */
-	devm_pm_runtime_enable(&bridge->dev); /* PCI/NVMe: device-managed runtime PM 활성화; NVMe RTD3의 상위 전원 관리 */
+	pm_runtime_set_active(&bridge->dev);
+	/* [한국어] 호스트 브리지를 "지금 동작 중"으로 표시한다. 자식들이
+	 * runtime PM 을 켤 때 부모가 활성 상태여야 하기 때문이다. */
+	pm_runtime_no_callbacks(&bridge->dev);
+	/* [한국어] 브리지 객체 자체에는 절전 콜백이 없다고 알린다. 그러면
+	 * PM 코어가 이 객체를 그냥 통과시켜 부모-자식 관계만 유지한다. */
+	devm_pm_runtime_enable(&bridge->dev);
+	/* [한국어] runtime PM 활성화. devm_ 접두어라 컨트롤러 device 가
+	 * 사라질 때 자동으로 비활성화된다.
+	 * 위 영어 주석은 순서 제약을 설명한다 — PM 프레임워크는 부모가 먼저
+	 * 활성화되어 있을 것을 기대하므로, 자식 장치들이 붙은 뒤인 여기서
+	 * 브리지의 PM 을 켠다. NVMe 의 RTD3(유휴 시 D3 진입) 같은 자식 쪽
+	 * 절전이 이 상위 구조 위에서 동작한다. */
 
-	/* PCI/NVMe: 정상 종료 및 반환 */
 	return 0;
+	/* [한국어] 성공. 이 시점에 이 컨트롤러 아래의 모든 장치가 동작 중이다 */
 }
-/* PCI/NVMe: EXPORT_SYMBOL_GPL 함수 호출 */
-EXPORT_SYMBOL_GPL(pci_host_probe); /* PCI/NVMe: 심볼 외부 낸출. nvme-pci 등 모듈에서 참조 가능 */
-
-/* PCI/NVMe: 버스 번호 리소스 삽입. NVMe 장치 추가를 위한 bus 번호 범위 예약 */
-/* PCI/NVMe: pci_bus_insert_busn_res 함수 정의 */
-int pci_bus_insert_busn_res(struct pci_bus *b, int bus, int bus_max)
-{
-	/* PCI/NVMe: 비트 연산으로 값 설정/마스크: struct resource *res */
-	struct resource *res = &b->busn_res;
-	/* PCI/NVMe: 후속 코드 동작 수행 */
-	struct resource *parent_res, *conflict;
-
-	/* PCI/NVMe: 구조체 필드에 값 저장: res->start */
-	res->start = bus;
-	/* PCI/NVMe: 구조체 필드에 값 저장: res->end */
-	res->end = bus_max;
-	/* PCI/NVMe: 구조체 필드에 값 저장: res->flags */
-	res->flags = IORESOURCE_BUS;
-
-	/* PCI/NVMe: 조걸 분기, NULL/0/미설정 여부 검사 */
-	if (!pci_is_root_bus(b))
-		/* PCI/NVMe: 비트 연산으로 값 설정/마스크: parent_res */
-		parent_res = &b->parent->busn_res;
-	/* PCI/NVMe: 조걸 분기의 else 경로 */
-	else {
-		/* PCI/NVMe: get_pci_domain_busn_res 함수 호출 */
-		parent_res = get_pci_domain_busn_res(pci_domain_nr(b));
-		/* PCI/NVMe: 구조체 필드에 값 저장: res->flags | */
-		res->flags |= IORESOURCE_PCI_FIXED;
-	}
-
-	/* PCI/NVMe: 리소스 충돌 검사 */
-	conflict = request_resource_conflict(parent_res, res);
-
-	/* PCI/NVMe: 조걸 분기, 조건에 따른 실행 경로 선택 */
-	if (conflict)
-		/* PCI/NVMe: 장치 정보 메시지 출력 */
-		dev_info(&b->dev,
-			   /* PCI/NVMe: pR 함수 호출 */
-			   "busn_res: can not insert %pR under %s%pR (conflicts with %s %pR)\n",
-			    /* PCI/NVMe: 루트 버스 여부 확인 */
-			    res, pci_is_root_bus(b) ? "domain " : "",
-			    /* PCI/NVMe: 후속 코드 동작 수행 */
-			    parent_res, conflict->name, conflict);
-
-	/* PCI/NVMe: 결과 반환: conflict == NULL */
-	return conflict == NULL;
-}
-
-/* PCI/NVMe: bus 번호 리소스 끝 갱신. NVMe 핫플러그/리스캔 시 범위 조정 */
-/* PCI/NVMe: pci_bus_update_busn_res_end 함수 정의 */
-int pci_bus_update_busn_res_end(struct pci_bus *b, int bus_max)
-{
-	/* PCI/NVMe: 비트 연산으로 값 설정/마스크: struct resource *res */
-	struct resource *res = &b->busn_res;
-	/* PCI/NVMe: 변수에 값 할당: struct resource old_res */
-	struct resource old_res = *res;
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
-	resource_size_t size;
-	/* PCI/NVMe: ret 변수 선언/초기화: 반환값 변수. NVMe 초기화 성공/실패 상태 */
-	int ret;
-
-	/* PCI/NVMe: 조걸 분기, 값 크기 비교 */
-	if (res->start > bus_max)
-		/* PCI/NVMe: 오류 코드 반환: -EINVAL */
-		return -EINVAL;
-
-	/* PCI/NVMe: 변수에 값 할당: size */
-	size = bus_max - res->start + 1;
-	/* PCI/NVMe: 리소스 범위 조정 */
-	ret = adjust_resource(res, res->start, size);
-	/* PCI/NVMe: 장치 정보 메시지 출력 */
-	dev_info(&b->dev, "busn_res: %pR end %s updated to %02x\n",
-			/* PCI/NVMe: 후속 코드 동작 수행 */
-			&old_res, ret ? "can not be" : "is", bus_max);
-
-	/* PCI/NVMe: 조걸 분기, NULL/0/미설정 여부 검사 */
-	if (!ret && !res->parent)
-		/* PCI/NVMe: bus 번호 리소스 삽입 */
-		pci_bus_insert_busn_res(b, res->start, res->end);
-
-	/* PCI/NVMe: 결과 반환: ret */
-	return ret;
-}
-
-/* PCI/NVMe: bus 번호 리소스 해제. NVMe 장치 제거 후 번호 반환 */
-/* PCI/NVMe: pci_bus_release_busn_res 함수 정의 */
-void pci_bus_release_busn_res(struct pci_bus *b)
-{
-	/* PCI/NVMe: 비트 연산으로 값 설정/마스크: struct resource *res */
-	struct resource *res = &b->busn_res;
-	/* PCI/NVMe: ret 변수 선언/초기화: 반환값 변수. NVMe 초기화 성공/실패 상태 */
-	int ret;
-
-	/* PCI/NVMe: 조걸 분기, NULL/0/미설정 여부 검사 */
-	if (!res->flags || !res->parent)
-		return;
-
-	/* PCI/NVMe: 리소스 해제 */
-	ret = release_resource(res);
-	/* PCI/NVMe: 장치 정보 메시지 출력 */
-	dev_info(&b->dev, "busn_res: %pR %s released\n",
-			/* PCI/NVMe: 후속 코드 동작 수행 */
-			res, ret ? "can not be" : "is");
-}
-
-/* PCI/NVMe: host bridge에서 루트 버스 스캔. NVMe PCIe 엔드포인트 발견 루트 진입점 */
-/* PCI/NVMe: pci_scan_root_bus_bridge 함수 정의 */
-int pci_scan_root_bus_bridge(struct pci_host_bridge *bridge)
-{
-	/* PCI/NVMe: 후속 코드 동작 수행 */
-	struct resource_entry *window;
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
-	bool found = false;
-	/* PCI/NVMe: 후속 코드 동작 수행 */
-	struct pci_bus *b;
-	/* PCI/NVMe: max 변수 선언/초기화: 최대 bus 번호/값. NVMe 하위 버스 범위 */
-	int max, bus, ret;
-
-	/* PCI/NVMe: 조걸 분기, NULL/0/미설정 여부 검사 */
-	if (!bridge)
-		/* PCI/NVMe: 오류 코드 반환: -EINVAL */
-		return -EINVAL;
-
-	/* PCI/NVMe: resource_list_for_each_entry 함수 호출 */
-	resource_list_for_each_entry(window, &bridge->windows)
-		/* PCI/NVMe: 조걸 분기, 플래그/비트 마스크 검사 */
-		if (window->res->flags & IORESOURCE_BUS) {
-			/* PCI/NVMe: 구조체 필드에 값 저장: bridge->busnr */
-			bridge->busnr = window->res->start;
-			/* PCI/NVMe: 변수에 값 할당: found */
-			found = true;
-			break;
-		}
-
-	/* PCI/NVMe: 호스트 브리지 등록 */
-	ret = pci_register_host_bridge(bridge);
-	/* PCI/NVMe: 조걸 분기, 값 크기 비교 */
-	if (ret < 0)
-		/* PCI/NVMe: 결과 반환: ret */
-		return ret;
-
-	/* PCI/NVMe: 변수에 값 할당: b */
-	b = bridge->bus;
-	/* PCI/NVMe: 변수에 값 할당: bus */
-	bus = bridge->busnr;
-
-	/* PCI/NVMe: 조걸 분기, NULL/0/미설정 여부 검사 */
-	if (!found) {
-		/* PCI/NVMe: 장치 정보 메시지 출력 */
-		dev_info(&b->dev,
-		 /* PCI/NVMe: 후속 코드 동작 수행 */
-		 "No busn resource found for root bus, will use [bus %02x-ff]\n",
-			/* PCI/NVMe: 후속 코드 동작 수행 */
-			bus);
-		/* PCI/NVMe: bus 번호 리소스 삽입 */
-		pci_bus_insert_busn_res(b, bus, 255);
-	}
-
-	/* PCI/NVMe: 하위 버스 재귀 스캔 */
-	max = pci_scan_child_bus(b);
-
-	/* PCI/NVMe: 조걸 분기, NULL/0/미설정 여부 검사 */
-	if (!found)
-		/* PCI/NVMe: bus 번호 리소스 끝 갱신 */
-		pci_bus_update_busn_res_end(b, max);
-
-	/* PCI/NVMe: 정상 종료 및 반환 */
-	return 0;
-}
-/* PCI/NVMe: EXPORT_SYMBOL 함수 호출 */
-EXPORT_SYMBOL(pci_scan_root_bus_bridge); /* PCI/NVMe: 심볼 외부 낸출. nvme-pci 등 모듈에서 참조 가능 */
-
-/* PCI/NVMe: 루트 버스 스캔 */
-struct pci_bus *pci_scan_root_bus(struct device *parent, int bus,
-		/* PCI/NVMe: 후속 코드 동작 수행 */
-		struct pci_ops *ops, void *sysdata, struct list_head *resources)
-{
-	/* PCI/NVMe: 후속 코드 동작 수행 */
-	struct resource_entry *window;
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
-	bool found = false;
-	/* PCI/NVMe: 후속 코드 동작 수행 */
-	struct pci_bus *b;
-	/* PCI/NVMe: max 변수 선언/초기화: 최대 bus 번호/값. NVMe 하위 버스 범위 */
-	int max;
-
-	/* PCI/NVMe: resource_list_for_each_entry 함수 호출 */
-	resource_list_for_each_entry(window, resources)
-		/* PCI/NVMe: 조걸 분기, 플래그/비트 마스크 검사 */
-		if (window->res->flags & IORESOURCE_BUS) {
-			/* PCI/NVMe: 변수에 값 할당: found */
-			found = true;
-			break;
-		}
-
-	/* PCI/NVMe: 루트 PCI 버스 생성 */
-	b = pci_create_root_bus(parent, bus, ops, sysdata, resources);
-	/* PCI/NVMe: 조걸 분기, NULL/0/미설정 여부 검사 */
-	if (!b)
-		/* PCI/NVMe: NULL 반환(메모리/리소스 부족 또는 초기화 실패) */
-		return NULL;
-
-	/* PCI/NVMe: 조걸 분기, NULL/0/미설정 여부 검사 */
-	if (!found) {
-		/* PCI/NVMe: 장치 정보 메시지 출력 */
-		dev_info(&b->dev,
-		 /* PCI/NVMe: 후속 코드 동작 수행 */
-		 "No busn resource found for root bus, will use [bus %02x-ff]\n",
-			/* PCI/NVMe: 후속 코드 동작 수행 */
-			bus);
-		/* PCI/NVMe: bus 번호 리소스 삽입 */
-		pci_bus_insert_busn_res(b, bus, 255);
-	}
-
-	/* PCI/NVMe: 하위 버스 재귀 스캔 */
-	max = pci_scan_child_bus(b);
-
-	/* PCI/NVMe: 조걸 분기, NULL/0/미설정 여부 검사 */
-	if (!found)
-		/* PCI/NVMe: bus 번호 리소스 끝 갱신 */
-		pci_bus_update_busn_res_end(b, max);
-
-	/* PCI/NVMe: 결과 반환: b */
-	return b;
-}
-/* PCI/NVMe: EXPORT_SYMBOL 함수 호출 */
-EXPORT_SYMBOL(pci_scan_root_bus); /* PCI/NVMe: 심볼 외부 낸출. nvme-pci 등 모듈에서 참조 가능 */
+EXPORT_SYMBOL_GPL(pci_host_probe);
+/* [한국어] 모든 호스트 컨트롤러 드라이버가 모듈에서 쓰므로 공개 */
 
 /*
- * pci_scan_bus() - 단순 root bus 스캔(레거시 API)
+ * [한국어]
+ * pci_bus_insert_busn_res - 버스가 담당할 번호 구간을 리소스 트리에 등록한다
  *
- * NVMe 연결: MEM/IO/BUS 전체 리소스를 사용하여 root bus를 만들고
- * 스캔. 일부 아키텍처나 초기화 코드에서 여전히 사용.
+ * @b:       대상 버스.
+ * @bus:     구간의 시작 번호(= 이 버스 자신의 번호).
+ * @bus_max: 구간의 끝 번호(= subordinate).
+ * @return: 충돌 없이 등록되었으면 1(참), 충돌했으면 0(거짓).
+ *          bool 이 아니라 int 로 "conflict == NULL" 을 그대로 돌려주는 형태다.
+ *
+ * 왜 필요한가: 버스 번호도 메모리/IO 처럼 리소스 트리로 관리한다. 그래야
+ * 두 브리지가 같은 번호 구간을 주장하는 상황을 커널이 자동으로 잡아낼 수 있다.
+ * 부모는 상위 버스의 번호 구간이고, 루트 버스라면 도메인 전체(0~0xff)다.
+ *
+ * 충돌 시 왜 실패로 끝내지 않는가: 로그만 남기고 진행한다. 버스 번호 구간이
+ * 겹치면 그 아래 장치에 접근하지 못할 수는 있지만, 열거 전체를 중단하는 것보다
+ * 나머지 장치라도 살리는 편이 낫다는 판단이다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥. 리소스 트리 조작은 커널 resource 락이 보호한다.
+ *
+ * 호출 체인:
+ *   pci_scan_bridge_extend()/pci_register_host_bridge() → [pci_bus_insert_busn_res]
+ *     → get_pci_domain_busn_res(), request_resource_conflict()
  */
-/* PCI/NVMe: pci_scan_bus 함수 호출 */
+int pci_bus_insert_busn_res(struct pci_bus *b, int bus, int bus_max)
+{
+	struct resource *res = &b->busn_res;
+	/* [한국어] 이 버스에 내장된 "버스 번호 구간" 리소스 */
+	struct resource *parent_res, *conflict;
+	/* [한국어] parent_res = 이 구간이 들어갈 부모 리소스,
+	 * conflict   = 충돌한 기존 리소스(없으면 NULL). */
+
+	res->start = bus;
+	/* [한국어] 구간 시작 = 이 버스의 번호 */
+	res->end = bus_max;
+	/* [한국어] 구간 끝 = 이 버스 아래를 모두 포함하는 최대 번호 */
+	res->flags = IORESOURCE_BUS;
+	/* [한국어] 메모리/IO 가 아니라 버스 번호 축의 리소스임을 표시 */
+
+	if (!pci_is_root_bus(b))
+		parent_res = &b->parent->busn_res;
+	/* [한국어] 일반 버스는 상위 버스의 번호 구간 아래에 들어간다.
+	 * 이 포함 관계가 곧 "조상 브리지가 이 번호를 전달할 수 있는가"를 뜻한다. */
+	else {
+		/* [한국어] 루트 버스는 위에 버스가 없다 */
+		parent_res = get_pci_domain_busn_res(pci_domain_nr(b));
+		/* [한국어] 대신 이 도메인의 0~0xff 전체 구간을 부모로 삼는다.
+		 * 도메인이 여럿이면 각자 별도의 번호 공간을 갖는다. */
+		res->flags |= IORESOURCE_PCI_FIXED;
+		/* [한국어] 루트 버스의 번호는 펌웨어가 정한 고정값이므로
+		 * 리소스 할당기가 옮기지 못하도록 표시한다. */
+	}
+
+	conflict = request_resource_conflict(parent_res, res);
+	/* [한국어] 부모 아래에 이 구간을 등록 시도한다. 이미 겹치는 구간이
+	 * 있으면 그 리소스 포인터를, 성공하면 NULL 을 돌려준다. */
+
+	if (conflict)
+		dev_info(&b->dev,
+			   "busn_res: can not insert %pR under %s%pR (conflicts with %s %pR)\n",
+			    res, pci_is_root_bus(b) ? "domain " : "",
+			    parent_res, conflict->name, conflict);
+	/* [한국어] 무엇이 무엇과 충돌했는지 구체적으로 남긴다. 루트 버스면
+	 * 부모가 도메인 리소스임을 "domain " 접두어로 구분해 보여 준다.
+	 * 이 로그가 나오면 그 구간의 장치에 접근하지 못할 수 있다. */
+
+	return conflict == NULL;
+	/* [한국어] 충돌이 없었으면 1(성공), 있었으면 0. 호출자 대부분은
+	 * 이 값을 검사하지 않고 진행한다. */
+}
+
+/*
+ * [한국어]
+ * pci_bus_update_busn_res_end - 버스 번호 구간의 끝을 실제 값으로 좁힌다
+ *
+ * @b:       대상 버스.
+ * @bus_max: 새로 확정된 끝 번호.
+ * @return: 0 이면 성공. res->start 가 bus_max 보다 크면 -EINVAL,
+ *          adjust_resource() 가 실패하면 그 오류.
+ *
+ * 왜 필요한가: 브리지 아래를 스캔하기 전에는 버스가 몇 개나 필요한지 모른다.
+ * 그래서 pci_scan_bridge_extend() 는 일단 구간을 최대로 열어 두고 스캔한 뒤,
+ * 실제로 쓴 만큼으로 좁힌다. 그래야 남은 번호를 다른 브리지가 쓸 수 있다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_scan_bridge_extend() → [pci_bus_update_busn_res_end]
+ *     → adjust_resource(), pci_bus_insert_busn_res()
+ */
+int pci_bus_update_busn_res_end(struct pci_bus *b, int bus_max)
+{
+	struct resource *res = &b->busn_res;
+	/* [한국어] 좁힐 대상 구간 */
+	struct resource old_res = *res;
+	/* [한국어] 로그에 "무엇이 어떻게 바뀌었는가"를 찍기 위한 사본.
+	 * adjust_resource() 가 res 를 바꾸기 전에 떠 둔다. */
+	resource_size_t size;
+	/* [한국어] 새 구간의 크기(번호 개수) */
+	int ret;
+	/* [한국어] adjust_resource 결과 */
+
+	if (res->start > bus_max)
+		return -EINVAL;
+	/* [한국어] 끝이 시작보다 앞이면 빈 구간이 되어 말이 되지 않는다 */
+
+	size = bus_max - res->start + 1;
+	/* [한국어] 포함(inclusive) 구간이므로 +1 — 예: 2~5 는 4개 */
+	ret = adjust_resource(res, res->start, size);
+	/* [한국어] 리소스 트리에 등록된 상태 그대로 크기만 줄인다.
+	 * 자식 리소스가 새 범위를 벗어나면 실패한다. */
+	dev_info(&b->dev, "busn_res: %pR end %s updated to %02x\n",
+			&old_res, ret ? "can not be" : "is", bus_max);
+	/* [한국어] 성공/실패를 문장 안에서 "is"/"can not be" 로 바꿔 찍는다.
+	 * 원래 구간(old_res)을 함께 보여 주어 변화가 드러나게 한다. */
+
+	if (!ret && !res->parent)
+		pci_bus_insert_busn_res(b, res->start, res->end);
+	/* [한국어] 조정에 성공했는데 이 리소스가 아직 트리에 붙어 있지 않다면
+	 * (parent 가 NULL) 지금 등록한다. adjust_resource() 는 이미 등록된
+	 * 리소스를 조정할 뿐 새로 넣지는 않기 때문이다. */
+
+	return ret;
+	/* [한국어] 호출자는 대부분 이 값을 검사하지 않는다 */
+}
+
+/*
+ * [한국어]
+ * pci_bus_release_busn_res - 버스 번호 구간을 리소스 트리에서 뗀다
+ *
+ * @b: 대상 버스.
+ * @return: 없음.
+ *
+ * 왜 필요한가: 버스를 제거할 때 그 번호 구간을 반납해야 나중에 같은 번호를
+ * 재사용할 수 있다. 반납하지 않으면 핫플러그를 반복할 때마다 번호가 고갈된다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥, 버스 제거 경로.
+ *
+ * 호출 체인:
+ *   pci_remove_root_bus() 등 → [pci_bus_release_busn_res] → release_resource()
+ */
+void pci_bus_release_busn_res(struct pci_bus *b)
+{
+	struct resource *res = &b->busn_res;
+	/* [한국어] 반납할 구간 */
+	int ret;
+	/* [한국어] release_resource 결과 */
+
+	if (!res->flags || !res->parent)
+		return;
+	/* [한국어] 애초에 설정된 적이 없거나(flags 0) 트리에 등록되지 않았으면
+	 * (parent NULL) 반납할 것이 없다. 두 조건을 모두 보는 것이 중요한데,
+	 * 등록에 실패한 구간은 flags 는 있어도 parent 가 없기 때문이다. */
+
+	ret = release_resource(res);
+	/* [한국어] 부모 리소스에서 떼어 낸다. 이제 이 번호 구간은 비어 있다 */
+	dev_info(&b->dev, "busn_res: %pR %s released\n",
+			res, ret ? "can not be" : "is");
+	/* [한국어] 반납 결과를 로그로 남긴다 */
+}
+
+/*
+ * [한국어]
+ * pci_scan_root_bus_bridge - 호스트 브리지를 등록하고 그 아래 트리를 전부 훑는다
+ *
+ * @bridge: 컨트롤러 드라이버가 준비한 호스트 브리지(windows 목록 포함).
+ * @return: 0 이면 성공, 음수면 -EINVAL 또는 등록 실패 errno.
+ *
+ * 왜 필요한가: "루트 버스 생성 + 재귀 스캔"을 묶은 표준 진입점이다.
+ * pci_host_probe() 가 이 함수를 부르고, 리소스 배정과 드라이버 바인딩은
+ * 그 뒤에 이어진다.
+ *
+ * busn 리소스를 찾는 이유: 컨트롤러 드라이버가 창 목록에 IORESOURCE_BUS
+ * 항목을 넣어 두었다면, 그것이 이 호스트 브리지가 쓸 수 있는 버스 번호
+ * 범위를 뜻한다. 그 시작값이 곧 루트 버스 번호다. 없으면 0~255 전체를
+ * 쓴다고 가정하고, 스캔이 끝난 뒤 실제 사용량으로 좁힌다.
+ *
+ * NVMe 접점: NVMe SSD 가 발견되는 재귀 스캔이 이 함수의
+ * pci_scan_child_bus() 호출에서 시작된다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥. 호출자가 pci_lock_rescan_remove() 로
+ * 직렬화한 상태여야 한다.
+ *
+ * 호출 체인:
+ *   pci_host_probe() → [pci_scan_root_bus_bridge]
+ *     → pci_register_host_bridge(), pci_scan_child_bus()
+ */
+int pci_scan_root_bus_bridge(struct pci_host_bridge *bridge)
+{
+	struct resource_entry *window;
+	/* [한국어] 창 목록 순회 커서 */
+	bool found = false;
+	/* [한국어] 창 목록에 버스 번호 리소스가 있었는지 */
+	struct pci_bus *b;
+	/* [한국어] 생성된 루트 버스 */
+	int max, bus, ret;
+	/* [한국어] max = 스캔 결과 최대 버스 번호, bus = 루트 버스 번호,
+	 * ret = 등록 결과. */
+
+	if (!bridge)
+		return -EINVAL;
+	/* [한국어] 인자 검증 */
+
+	resource_list_for_each_entry(window, &bridge->windows)
+		if (window->res->flags & IORESOURCE_BUS) {
+			/* [한국어] 창 목록에서 버스 번호 축의 리소스를 찾는다 */
+			bridge->busnr = window->res->start;
+			/* [한국어] 그 구간의 시작이 루트 버스 번호다 */
+			found = true;
+			break;
+			/* [한국어] 버스 번호 리소스는 하나뿐이므로 찾는 즉시 종료 */
+		}
+
+	ret = pci_register_host_bridge(bridge);
+	/* [한국어] 루트 버스 생성 + sysfs 등록 + 창들을 버스 리소스로 이관 */
+	if (ret < 0)
+		return ret;
+	/* [한국어] 등록 실패(-ENOMEM, -EEXIST 등) */
+
+	b = bridge->bus;
+	/* [한국어] 방금 만들어진 루트 버스 */
+	bus = bridge->busnr;
+	/* [한국어] 루트 버스 번호 */
+
+	if (!found) {
+		/* [한국어] 컨트롤러가 버스 번호 범위를 알려 주지 않은 경우 */
+		dev_info(&b->dev,
+		 "No busn resource found for root bus, will use [bus %02x-ff]\n",
+			bus);
+		/* [한국어] 무엇을 가정하는지 명시적으로 알린다 */
+		pci_bus_insert_busn_res(b, bus, 255);
+		/* [한국어] 일단 끝까지(255) 열어 둔다. 스캔 도중 브리지에 번호를
+		 * 배정하려면 이 구간이 넉넉해야 하기 때문이다. */
+	}
+
+	max = pci_scan_child_bus(b);
+	/* [한국어] ★트리 전체 재귀 스캔★ 여기서 모든 장치가 발견되고
+	 * 브리지에 버스 번호가 배정된다. 반환값은 실제로 쓰인 최대 번호다. */
+
+	if (!found)
+		pci_bus_update_busn_res_end(b, max);
+	/* [한국어] 넉넉히 열어 두었던 구간을 실제 사용량으로 좁힌다.
+	 * 컨트롤러가 범위를 지정해 준 경우에는 그 값을 존중해 건드리지 않는다. */
+
+	return 0;
+	/* [한국어] 성공. 호출자가 리소스 배정과 드라이버 바인딩을 이어 간다 */
+}
+EXPORT_SYMBOL(pci_scan_root_bus_bridge);
+/* [한국어] 호스트 컨트롤러 드라이버가 모듈에서 쓰므로 공개 */
+
+/*
+ * [한국어]
+ * pci_scan_root_bus - 루트 버스를 만들고 스캔하는 구식 진입점
+ *
+ * @parent:    호스트 컨트롤러 device(없으면 NULL).
+ * @bus:       루트 버스 번호.
+ * @ops:       config 접근 함수 집합.
+ * @sysdata:   컨트롤러 전용 데이터.
+ * @resources: 주소 창 목록(성공 시 브리지로 이관되어 비워진다).
+ * @return: 생성된 루트 버스, 실패 시 NULL.
+ *
+ * 왜 있는가: pci_create_root_bus() + pci_scan_child_bus() 를 묶은 구식 API 다.
+ * pci_host_bridge 객체를 직접 다루지 않는 오래된 아키텍처/드라이버 코드가 쓴다.
+ * 동작은 pci_scan_root_bus_bridge() 와 사실상 같다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   구식 아키텍처/컨트롤러 코드 → [pci_scan_root_bus]
+ *     → pci_create_root_bus(), pci_scan_child_bus()
+ */
+struct pci_bus *pci_scan_root_bus(struct device *parent, int bus,
+		struct pci_ops *ops, void *sysdata, struct list_head *resources)
+{
+	struct resource_entry *window;
+	/* [한국어] 창 목록 순회 커서 */
+	bool found = false;
+	/* [한국어] 버스 번호 리소스가 목록에 있었는지 */
+	struct pci_bus *b;
+	/* [한국어] 생성된 루트 버스 */
+	int max;
+	/* [한국어] 스캔 결과 최대 버스 번호 */
+
+	resource_list_for_each_entry(window, resources)
+		if (window->res->flags & IORESOURCE_BUS) {
+			found = true;
+			break;
+		}
+	/* [한국어] 위 함수와 달리 여기서는 busnr 을 뽑지 않는다. 루트 버스
+	 * 번호는 인자 @bus 로 이미 받았기 때문이며, 존재 여부만 확인한다.
+	 * 목록은 아래 pci_create_root_bus() 에서 브리지로 옮겨지므로,
+	 * 반드시 옮기기 전에 검사해야 한다. */
+
+	b = pci_create_root_bus(parent, bus, ops, sysdata, resources);
+	/* [한국어] 브리지 할당 + 등록 + 루트 버스 생성을 한 번에 */
+	if (!b)
+		return NULL;
+	/* [한국어] 생성 실패 — 호출자가 resources 를 직접 정리해야 한다 */
+
+	if (!found) {
+		/* [한국어] 버스 번호 범위를 알려 주지 않은 경우 */
+		dev_info(&b->dev,
+		 "No busn resource found for root bus, will use [bus %02x-ff]\n",
+			bus);
+		pci_bus_insert_busn_res(b, bus, 255);
+		/* [한국어] 끝까지 열어 두고 스캔한다 */
+	}
+
+	max = pci_scan_child_bus(b);
+	/* [한국어] 트리 전체 재귀 스캔 */
+
+	if (!found)
+		pci_bus_update_busn_res_end(b, max);
+	/* [한국어] 실제 사용량으로 구간을 좁힌다 */
+
+	return b;
+	/* [한국어] 만들어진 루트 버스 */
+}
+EXPORT_SYMBOL(pci_scan_root_bus);
+/* [한국어] 구식 코드가 모듈에서 쓰므로 공개 */
+
+/*
+ * [한국어]
+ * pci_scan_bus - 주소 공간 전체를 창으로 삼아 루트 버스를 만드는 최소 API
+ *
+ * @bus:     루트 버스 번호.
+ * @ops:     config 접근 함수 집합.
+ * @sysdata: 컨트롤러 전용 데이터.
+ * @return: 생성된 루트 버스, 실패 시 NULL.
+ *
+ * 왜 있는가: 주소 변환도 없고 창 제약도 없는 단순한 플랫폼을 위한 가장
+ * 오래된 API 다. I/O 포트 공간 전체, 메모리 공간 전체, 버스 번호 0~255
+ * 전체를 그대로 창으로 삼는다. 실제 하드웨어 제약이 있는 현대 시스템에는
+ * 맞지 않으므로 새 코드는 pci_host_probe() 경로를 써야 한다.
+ *
+ * 전역 리소스를 쓰는 것에 유의: ioport_resource/iomem_resource 는 커널
+ * 전역의 루트 리소스이고, busn_resource 는 이 파일 앞부분에서 정의한
+ * 0~255 구간이다. 즉 "제한 없음"을 뜻한다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   구식 아키텍처 초기화 코드 → [pci_scan_bus]
+ *     → pci_create_root_bus(), pci_scan_child_bus()
+ */
 struct pci_bus *pci_scan_bus(int bus, struct pci_ops *ops,
-					/* PCI/NVMe: 후속 코드 동작 수행 */
 					void *sysdata)
 {
-	/* PCI/NVMe: LIST_HEAD 함수 호출 */
 	LIST_HEAD(resources);
-	/* PCI/NVMe: 후속 코드 동작 수행 */
+	/* [한국어] 이 함수 안에서만 쓰는 지역 창 목록 */
 	struct pci_bus *b;
+	/* [한국어] 생성된 루트 버스 */
 
-	pci_add_resource(&resources, &ioport_resource); /* PCI/NVMe: 전체 I/O port 리소스 추가 */
-	pci_add_resource(&resources, &iomem_resource); /* PCI/NVMe: 전체 memory 리소스 추가 */
-	pci_add_resource(&resources, &busn_resource); /* PCI/NVMe: bus 번호 리소스 추가 */
-	b = pci_create_root_bus(NULL, bus, ops, sysdata, &resources); /* PCI/NVMe: root bus 생성; NVMe BAR 할당 공간 설정 */
-	/* PCI/NVMe: 조걸 분기, 조건에 따른 실행 경로 선택 */
+	pci_add_resource(&resources, &ioport_resource);
+	/* [한국어] I/O 포트 공간 전체를 창으로 등록 */
+	pci_add_resource(&resources, &iomem_resource);
+	/* [한국어] 메모리 공간 전체를 창으로 등록. 주소 변환 오프셋이 없으므로
+	 * 버스 주소와 CPU 주소가 같다고 가정하는 것이다. */
+	pci_add_resource(&resources, &busn_resource);
+	/* [한국어] 버스 번호 0~255 전체. 이 파일 앞부분의 정적 리소스다 */
+	b = pci_create_root_bus(NULL, bus, ops, sysdata, &resources);
+	/* [한국어] 부모 device 없이 루트 버스 생성. 성공하면 위 목록이
+	 * 브리지로 옮겨져 지역 목록은 비워진다. */
 	if (b) {
-		pci_scan_child_bus(b); /* PCI/NVMe: 하위 계층 스캔; NVMe SSD 탐색 */
-	/* PCI/NVMe: 후속 코드 동작 수행 */
+		pci_scan_child_bus(b);
+		/* [한국어] 트리 재귀 스캔. 버스 번호 구간을 따로 좁히지 않는
+		 * 것은 이 API 가 제약 없는 환경을 전제하기 때문이다. */
 	} else {
-		pci_free_resource_list(&resources); /* PCI/NVMe: root bus 생성 실패 시 리소스 해제 */
+		pci_free_resource_list(&resources);
+		/* [한국어] 생성 실패 시에는 목록이 옮겨지지 않고 지역 변수에
+		 * 남아 있으므로, 직접 해제해 누수를 막아야 한다. */
 	}
-	return b; /* PCI/NVMe: 생성된 root bus 또는 NULL 반환 */
+	return b;
+	/* [한국어] 만들어진 루트 버스 또는 NULL */
 }
-/* PCI/NVMe: EXPORT_SYMBOL 함수 호출 */
-EXPORT_SYMBOL(pci_scan_bus); /* PCI/NVMe: 심볼 외부 낸출. nvme-pci 등 모듈에서 참조 가능 */
+EXPORT_SYMBOL(pci_scan_bus);
+/* [한국어] 구식 아키텍처 코드가 쓰므로 공개 */
 
 /**
  * pci_rescan_bus_bridge_resize - Scan a PCI bus for devices
@@ -6079,26 +8378,62 @@ EXPORT_SYMBOL(pci_scan_bus); /* PCI/NVMe: 심볼 외부 낸출. nvme-pci 등 모
  *
  * Returns the max number of subordinate bus discovered.
  */
-/*
- * pci_rescan_bus_bridge_resize() - bridge 아래 버스를 재스캔하고 리소스 재할당
+/**
+ * pci_rescan_bus_bridge_resize - Scan a PCI bus for devices
+ * @bridge: PCI bridge for the bus to scan
  *
- * NVMe 연결: hotplug나 SR-IOV VF 추가 등으로 bridge 아래에 새 NVMe
- * 장치가 추가되었을 때 호출. 필요하면 bridge window 크기를 조정.
+ * Scan a PCI bus and child buses for new devices, add them,
+ * and enable them, resizing bridge mmio/io resource if necessary
+ * and possible.  The caller must ensure the child devices are already
+ * removed for resizing to occur.
+ *
+ * Returns the max number of subordinate bus discovered.
  */
-/* PCI/NVMe: pci_rescan_bus_bridge_resize 함수 호출 */
+/*
+ * [한국어]
+ * pci_rescan_bus_bridge_resize - 브리지 아래를 재스캔하고 창 크기까지 다시 잡는다
+ *
+ * @bridge: 재스캔할 브리지. bridge->subordinate 가 그 아래 버스다.
+ * @return: 발견된 최대 subordinate 버스 번호.
+ *
+ * 왜 필요한가: 핫플러그로 새 장치가 꽂히면 기존 브리지 창으로는 그 장치의
+ * BAR 를 담지 못할 수 있다. 이 함수는 재스캔한 뒤 브리지 창 자체를 다시
+ * 계산해 필요하면 넓힌다.
+ *
+ * 중요한 전제: 위 영어 주석이 못박듯이, 창 크기를 바꾸려면 그 아래 자식
+ * 장치들이 미리 제거되어 있어야 한다. 사용 중인 장치의 BAR 주소를 옮길 수는
+ * 없기 때문이다. 그 보장은 호출자의 책임이다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥. 호출자가 pci_lock_rescan_remove() 로
+ * 직렬화해야 한다.
+ *
+ * 호출 체인:
+ *   핫플러그 드라이버 → [pci_rescan_bus_bridge_resize]
+ *     → pci_scan_child_bus(), pci_assign_unassigned_bridge_resources(),
+ *       pci_bus_add_devices()
+ */
 unsigned int pci_rescan_bus_bridge_resize(struct pci_dev *bridge)
 {
-	/* PCI/NVMe: max 변수 선언/초기화: 최대 bus 번호/값. NVMe 하위 버스 범위 */
 	unsigned int max;
-	struct pci_bus *bus = bridge->subordinate; /* PCI/NVMe: 재스캔할 하위 버스 */
+	/* [한국어] 재스캔 결과 최대 버스 번호 */
+	struct pci_bus *bus = bridge->subordinate;
+	/* [한국어] 이 브리지 아래 버스. 브리지가 아니면 NULL 이지만,
+	 * 호출자가 브리지임을 보장한다. */
 
-	max = pci_scan_child_bus(bus); /* PCI/NVMe: 하위 버스 재스캔; 새 NVMe 장치 탐색 */
+	max = pci_scan_child_bus(bus);
+	/* [한국어] 그 아래를 다시 훑어 새 장치를 발견한다. 이미 등록된 장치는
+	 * pci_scan_single_device() 가 기존 객체를 돌려주므로 중복되지 않는다. */
 
-	pci_assign_unassigned_bridge_resources(bridge); /* PCI/NVMe: 새 장치의 BAR를 위해 bridge 리소스 재할당/확장 */
+	pci_assign_unassigned_bridge_resources(bridge);
+	/* [한국어] ★창 재계산★ 이 브리지의 I/O/MEM/prefetch 창을 새 장치들의
+	 * 요구에 맞춰 다시 잡는다. 필요하면 창 자체를 넓힌다. */
 
-	pci_bus_add_devices(bus); /* PCI/NVMe: 새로 발견된 장치에 드라이버 probe; 새 NVMe 컨트롤러 초기화 */
+	pci_bus_add_devices(bus);
+	/* [한국어] 주소가 배정된 새 장치들에 드라이버를 붙인다.
+	 * 새 NVMe SSD 라면 여기서 nvme_probe() 가 실행된다. */
 
-	return max; /* PCI/NVMe: 새로 발견된 최대 subordinate bus 번호 반환 */
+	return max;
+	/* [한국어] 발견된 최대 버스 번호 */
 }
 
 /**
@@ -6111,134 +8446,255 @@ unsigned int pci_rescan_bus_bridge_resize(struct pci_dev *bridge)
  * Returns the max number of subordinate bus discovered.
  */
 /*
- * pci_rescan_bus() - bus를 재스캔하고 리소스 할당 및 드라이버 바인딩
+ * [한국어]
+ * pci_rescan_bus - 버스를 다시 훑어 새 장치를 찾고 붙인다
  *
- * NVMe 연결: runtime rescan 요청(예: sysfs echo 1 > rescan) 시 호출.
- * 새로 연결된 NVMe SSD를 발견하고 초기화.
+ * @bus: 재스캔할 버스.
+ * @return: 발견된 최대 subordinate 버스 번호.
+ *
+ * 왜 필요한가: 사용자가 sysfs 에 `echo 1 > /sys/bus/pci/rescan` 을 하거나
+ * 핫플러그 이벤트가 발생했을 때 새 장치를 찾는 경로다. 위의
+ * _bridge_resize 판과 달리 브리지 창 크기는 건드리지 않고, 이미 있는 창
+ * 안에서 미배정 리소스만 배정한다. 따라서 자식 장치를 미리 제거할 필요가 없다.
+ *
+ * NVMe 접점: 동작 중인 시스템에 NVMe SSD 를 꽂았을 때 이 경로로 발견되어
+ * nvme_probe() 까지 이어진다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥. 호출자가 pci_lock_rescan_remove() 로
+ * 직렬화해야 한다(아래 주석의 규약).
+ *
+ * 호출 체인:
+ *   sysfs rescan / 핫플러그 → [pci_rescan_bus]
+ *     → pci_scan_child_bus(), pci_assign_unassigned_bus_resources(),
+ *       pci_bus_add_devices()
  */
-/* PCI/NVMe: pci_rescan_bus 함수 호출 */
 unsigned int pci_rescan_bus(struct pci_bus *bus)
 {
-	/* PCI/NVMe: max 변수 선언/초기화: 최대 bus 번호/값. NVMe 하위 버스 범위 */
 	unsigned int max;
+	/* [한국어] 재스캔 결과 최대 버스 번호 */
 
-	max = pci_scan_child_bus(bus); /* PCI/NVMe: 하위 계층 재스캔; NVMe SSD 탐색 */
-	pci_assign_unassigned_bus_resources(bus); /* PCI/NVMe: 할당되지 않은 리소스(BAR) 할당 */
-	pci_bus_add_devices(bus); /* PCI/NVMe: 새 장치에 드라이버 probe; nvme_probe 호출 */
+	max = pci_scan_child_bus(bus);
+	/* [한국어] 트리를 다시 훑어 새 장치의 pci_dev 를 만든다 */
+	pci_assign_unassigned_bus_resources(bus);
+	/* [한국어] 새 장치의 BAR 에 실제 주소를 배정한다. 기존 브리지 창
+	 * 안에서만 배정하므로 이미 동작 중인 장치는 영향받지 않는다. */
+	pci_bus_add_devices(bus);
+	/* [한국어] 드라이버 바인딩 — 새 NVMe SSD 라면 nvme_probe() 실행 */
 
-	return max; /* PCI/NVMe: 새로 발견된 최대 subordinate bus 번호 반환 */
+	return max;
+	/* [한국어] 발견된 최대 버스 번호 */
 }
-/* PCI/NVMe: EXPORT_SYMBOL_GPL 함수 호출 */
-EXPORT_SYMBOL_GPL(pci_rescan_bus); /* PCI/NVMe: 심볼 외부 낸출. nvme-pci 등 모듈에서 참조 가능 */
+EXPORT_SYMBOL_GPL(pci_rescan_bus);
+/* [한국어] 핫플러그/sysfs 코드가 모듈에서 쓰므로 공개 */
 
 /*
  * pci_rescan_bus(), pci_rescan_bus_bridge_resize() and PCI device removal
  * routines should always be executed under this mutex.
  */
-/* PCI/NVMe: 뮤텍스 정의 */
 DEFINE_MUTEX(pci_rescan_remove_lock);
+/*
+ * [한국어] pci_rescan_remove_lock - 재스캔과 장치 제거를 서로 배제하는 전역 뮤텍스.
+ * 위 영어 주석이 규약을 못박는다: 재스캔 계열 함수와 장치 제거 루틴은 항상
+ * 이 뮤텍스 아래에서 실행되어야 한다.
+ * 왜 필요한가: 한쪽이 트리에 장치를 추가하는 동안 다른 쪽이 같은 트리에서
+ * 장치를 떼어 내면 목록이 깨지고, 이미 해제된 pci_dev 를 참조하게 된다.
+ * 설정자/읽는 자: 아래 pci_lock_rescan_remove()/pci_unlock_rescan_remove().
+ * 동기화: 뮤텍스이므로 잠들 수 있다 — 인터럽트 문맥에서 잡으면 안 된다.
+ */
 
-/* PCI/NVMe: rescan/remove 상호배제 잠금. NVMe 핫플러그와 리스캔 동시 실행 방지 */
-/* PCI/NVMe: pci_lock_rescan_remove 함수 정의 */
+/*
+ * [한국어]
+ * pci_lock_rescan_remove - 재스캔/제거 상호 배제 락을 잡는다
+ *
+ * @return: 없음.
+ *
+ * 왜 함수로 감싸는가: 뮤텍스 자체를 외부에 노출하지 않고 접근을 두 함수로
+ * 좁혀, 호출자가 잘못된 방식으로 다루는 것을 막는다. 핫플러그 드라이버 등
+ * 모듈에서도 써야 하므로 EXPORT 되어 있다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥 전용(뮤텍스는 잠들 수 있다).
+ *
+ * 호출 체인:
+ *   pci_host_probe()/핫플러그 드라이버 → [pci_lock_rescan_remove]
+ */
 void pci_lock_rescan_remove(void)
 {
-	/* PCI/NVMe: 뮤텍스 획득 */
-	mutex_lock(&pci_rescan_remove_lock); /* PCI/NVMe: 잠금 획득. NVMe rescan/remove/hotplug 동시 접근 보호 */
+	mutex_lock(&pci_rescan_remove_lock);
+	/* [한국어] 이미 잠겨 있으면 잠들어 기다린다 */
 }
-/* PCI/NVMe: EXPORT_SYMBOL_GPL 함수 호출 */
-EXPORT_SYMBOL_GPL(pci_lock_rescan_remove); /* PCI/NVMe: 심볼 외부 낸출. nvme-pci 등 모듈에서 참조 가능 */
+EXPORT_SYMBOL_GPL(pci_lock_rescan_remove);
+/* [한국어] 핫플러그 드라이버 등이 모듈에서 쓰므로 공개 */
 
-/* PCI/NVMe: rescan/remove 잠금 해제. NVMe 핫플러그 처리 재개 */
-/* PCI/NVMe: pci_unlock_rescan_remove 함수 정의 */
+/*
+ * [한국어]
+ * pci_unlock_rescan_remove - 재스캔/제거 상호 배제 락을 놓는다
+ *
+ * @return: 없음.
+ *
+ * 실행 컨텍스트: 프로세스 문맥. 반드시 같은 스레드가 잡은 락을 놓아야 한다.
+ *
+ * 호출 체인:
+ *   pci_host_probe()/핫플러그 드라이버 → [pci_unlock_rescan_remove]
+ */
 void pci_unlock_rescan_remove(void)
 {
-	/* PCI/NVMe: 뮤텍스 해제 */
-	mutex_unlock(&pci_rescan_remove_lock); /* PCI/NVMe: 잠금 해제. NVMe rescan/remove/hotplug 동시 접근 보호 */
+	mutex_unlock(&pci_rescan_remove_lock);
+	/* [한국어] 기다리던 스레드가 있으면 깨어난다 */
 }
-/* PCI/NVMe: EXPORT_SYMBOL_GPL 함수 호출 */
-EXPORT_SYMBOL_GPL(pci_unlock_rescan_remove); /* PCI/NVMe: 심볼 외부 낸출. nvme-pci 등 모듈에서 참조 가능 */
+EXPORT_SYMBOL_GPL(pci_unlock_rescan_remove);
+/* [한국어] 핫플러그 드라이버 등이 모듈에서 쓰므로 공개 */
 
-/* PCI/NVMe: pci_sort_bf_cmp 함수 호출 */
+/*
+ * [한국어]
+ * pci_sort_bf_cmp - 장치를 (도메인, 버스, devfn) 순으로 비교하는 정렬 함수
+ *
+ * @d_a: 비교할 첫 device(안에 pci_dev 가 들어 있다).
+ * @d_b: 비교할 둘째 device.
+ * @return: a 가 앞서면 -1, 뒤서면 1, 같으면 0.
+ *
+ * 왜 필요한가: 커널의 전역 장치 목록은 스캔 순서대로 쌓이는데, 그 순서가
+ * 깊이 우선이라 사람이 보기에 뒤죽박죽이다. 이 비교 함수로 다시 정렬하면
+ * lspci 처럼 BDF 오름차순이 된다. 아래 pci_sort_breadthfirst() 가 쓴다.
+ *
+ * 비교 순서의 의미: 도메인이 가장 바깥, 그다음 버스 번호, 마지막이 devfn 이다.
+ * devfn 안에 device 번호와 function 번호가 함께 들어 있으므로 이 하나로
+ * 두 단계가 동시에 정렬된다.
+ *
+ * 실행 컨텍스트: 부팅 시 __init 문맥.
+ *
+ * 호출 체인:
+ *   pci_sort_breadthfirst() → bus_sort_breadthfirst() → [pci_sort_bf_cmp]
+ */
 static int __init pci_sort_bf_cmp(const struct device *d_a,
-				  /* PCI/NVMe: 후속 코드 동작 수행 */
 				  const struct device *d_b)
 {
-	/* PCI/NVMe: device를 pci_dev로 변환 */
 	const struct pci_dev *a = to_pci_dev(d_a);
-	/* PCI/NVMe: device를 pci_dev로 변환 */
+	/* [한국어] 첫 device 에서 pci_dev 복원 */
 	const struct pci_dev *b = to_pci_dev(d_b);
+	/* [한국어] 둘째 device 에서 pci_dev 복원 */
 
-	/* PCI/NVMe: 조걸 분기, 값 크기 비교 */
 	if      (pci_domain_nr(a->bus) < pci_domain_nr(b->bus)) return -1;
-	/* PCI/NVMe: 추가 조걸 분기 */
 	else if (pci_domain_nr(a->bus) > pci_domain_nr(b->bus)) return  1;
+	/* [한국어] 1차 키: PCI 도메인(세그먼트) 번호. 다른 도메인은 완전히
+	 * 별개의 주소 공간이므로 가장 바깥 기준이다. */
 
-	/* PCI/NVMe: 조걸 분기, 값 크기 비교 */
 	if      (a->bus->number < b->bus->number) return -1;
-	/* PCI/NVMe: 추가 조걸 분기 */
 	else if (a->bus->number > b->bus->number) return  1;
+	/* [한국어] 2차 키: 버스 번호. 같은 도메인 안에서의 순서 */
 
-	/* PCI/NVMe: 조걸 분기, 값 크기 비교 */
 	if      (a->devfn < b->devfn) return -1;
-	/* PCI/NVMe: 추가 조걸 분기 */
 	else if (a->devfn > b->devfn) return  1;
+	/* [한국어] 3차 키: devfn. 상위 5비트가 device, 하위 3비트가 function
+	 * 이므로 이 한 번의 비교로 두 단계가 동시에 정렬된다. */
 
-	/* PCI/NVMe: 정상 종료 및 반환 */
 	return 0;
-}
-
-/* PCI/NVMe: pci_sort_breadthfirst 함수 호출 */
-void __init pci_sort_breadthfirst(void)
-{
-	/* PCI/NVMe: bus_sort_breadthfirst 함수 호출 */
-	bus_sort_breadthfirst(&pci_bus_type, &pci_sort_bf_cmp);
+	/* [한국어] 세 키가 모두 같다 = 같은 장치. 실제로는 일어나지 않는다 */
 }
 
 /*
- * pci_hp_add_bridge() - hotplug로 추가된 bridge를 PCI 트리에 통합
+ * [한국어]
+ * pci_sort_breadthfirst - 전역 PCI 장치 목록을 BDF 오름차순으로 재정렬한다
  *
- * NVMe 연결: hotplug slot에 새 Root Port/Switch가 추가되었을 때 호출.
- * 이 bridge 아래에 NVMe SSD가 연결될 수 있으므로 bus 번호를 할당하고
- * 하위를 스캔.
+ * @return: 없음.
+ *
+ * 왜 필요한가: 스캔은 깊이 우선으로 진행되므로 장치가 발견된 순서가
+ * 사람이 기대하는 순서와 다르다. 부팅 후 이 함수를 한 번 불러
+ * (도메인, 버스, devfn) 오름차순으로 정렬해 두면, 이후 목록을 훑는 코드와
+ * 사용자 공간 도구가 안정적이고 예측 가능한 순서를 보게 된다.
+ *
+ * 실행 컨텍스트: 부팅 시 __init 문맥, 열거 완료 후 한 번.
+ *
+ * 호출 체인:
+ *   아키텍처 초기화 코드 → [pci_sort_breadthfirst] → bus_sort_breadthfirst()
  */
-/* PCI/NVMe: 핫플러그로 추가된 브리지 처리. NVMe 핫스왑 SSD 연결 시 버스 확장 */
-/* PCI/NVMe: pci_hp_add_bridge 함수 정의 */
+void __init pci_sort_breadthfirst(void)
+{
+	bus_sort_breadthfirst(&pci_bus_type, &pci_sort_bf_cmp);
+	/* [한국어] 드라이버 코어가 pci_bus_type 의 장치 목록을 위 비교 함수로
+	 * 정렬한다. "breadthfirst" 라는 이름은 결과가 너비 우선 순서처럼
+	 * 버스 번호 순으로 보이기 때문이다. */
+}
+
+/*
+ * [한국어]
+ * pci_hp_add_bridge - 핫플러그로 나타난 브리지에 버스 번호를 배정하고 하강한다
+ *
+ * @dev: 핫플러그로 발견된 브리지 장치.
+ * @return: 0 이면 성공. 쓸 버스 번호가 없거나 하위 버스 생성에 실패하면 -1.
+ *
+ * 왜 별도 함수인가: 부팅 시 스캔은 트리 전체를 한꺼번에 훑으며 번호를
+ * 배정하지만, 핫플러그는 이미 번호가 대부분 배정된 상태에서 한 브리지만
+ * 끼워 넣어야 한다. 그래서 (1) 비어 있는 번호를 직접 찾고,
+ * (2) 남은 번호를 여유분으로 넘겨 그 아래에 또 핫플러그가 생길 여지를
+ * 남기는 별도의 절차가 필요하다.
+ *
+ * NVMe 접점: 핫스왑 베이에 PCIe 스위치가 달린 캐리어나 NVMe 장치를 꽂았을
+ * 때, 그 아래 SSD 를 발견하려면 먼저 이 함수가 브리지에 버스 번호를 주어야 한다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥. 호출자(pciehp 등)가
+ * pci_lock_rescan_remove() 로 직렬화한 상태여야 한다.
+ *
+ * 호출 체인:
+ *   pciehp 등 핫플러그 드라이버 → [pci_hp_add_bridge]
+ *     → pci_scan_bridge(), pci_scan_bridge_extend()
+ */
 int pci_hp_add_bridge(struct pci_dev *dev)
 {
-	struct pci_bus *parent = dev->bus; /* PCI/NVMe: hotplug bridge의 부모 버스 */
-	int busnr, start = parent->busn_res.start; /* PCI/NVMe: 부모 버스 번호 범위 시작 */
-	/* PCI/NVMe: 지역 변수 선언 및 초기화 */
+	struct pci_bus *parent = dev->bus;
+	/* [한국어] 이 브리지가 꽂힌 버스 */
+	int busnr, start = parent->busn_res.start;
+	/* [한국어] busnr = 찾을 빈 번호, start = 부모가 담당하는 구간의 시작 */
 	unsigned int available_buses = 0;
-	int end = parent->busn_res.end; /* PCI/NVMe: 부모 버스 번호 범위 끝 */
+	/* [한국어] 이 브리지 아래에 여유로 넘겨 줄 번호 개수 */
+	int end = parent->busn_res.end;
+	/* [한국어] 부모가 담당하는 구간의 끝. 이 범위를 넘는 번호는 조상
+	 * 브리지가 전달하지 않으므로 쓸 수 없다. */
 
-	for (busnr = start; busnr <= end; busnr++) { /* PCI/NVMe: 부모 범위 내에서 사용 가능한 bus 번호 탐색 */
-		/* PCI/NVMe: 조걸 분기, NULL/0/미설정 여부 검사 */
+	for (busnr = start; busnr <= end; busnr++) {
+		/* [한국어] 부모 구간을 처음부터 훑으며 아직 쓰이지 않은 번호를 찾는다 */
 		if (!pci_find_bus(pci_domain_nr(parent), busnr))
-			break; /* PCI/NVMe: 비어있는 bus 번호 찾기 */
+			break;
+		/* [한국어] 그 번호의 버스가 존재하지 않으면 비어 있는 것이다 */
 	}
-	if (busnr-- > end) { /* PCI/NVMe: 사용 가능한 bus 번호가 없으면 */
-		pci_err(dev, "No bus number available for hot-added bridge\n"); /* PCI/NVMe: bus 번호 부족 오류 */
-		/* PCI/NVMe: 결과 반환: -1 */
+	if (busnr-- > end) {
+		/* [한국어] 루프가 break 없이 끝났다면 busnr == end+1 이다.
+		 * 즉 부모 구간이 전부 차 있다. 후위 감소로 busnr 을 다시
+		 * 마지막 유효 번호로 되돌리면서(아래에서 쓰이지는 않는다)
+		 * 비교는 감소 전 값으로 수행한다. */
+		pci_err(dev, "No bus number available for hot-added bridge\n");
+		/* [한국어] 번호 고갈 — 이 브리지 아래는 쓸 수 없다.
+		 * 부팅 시 핫플러그 여유분을 충분히 남기지 못했을 때 생긴다. */
 		return -1;
 	}
 
 	/* Scan bridges that are already configured */
-	busnr = pci_scan_bridge(parent, dev, busnr, 0); /* PCI/NVMe: pass 0로 이미 설정된 bridge 스캔 */
+	busnr = pci_scan_bridge(parent, dev, busnr, 0);
+	/* [한국어] pass 0 — 이 브리지가 이미 펌웨어 설정을 갖고 있다면
+	 * 그것을 존중해 처리한다. 반환값은 갱신된 최대 번호다. */
 
 	/*
 	 * Distribute the available bus numbers between hotplug-capable
 	 * bridges to make extending the chain later possible.
 	 */
-	available_buses = end - busnr; /* PCI/NVMe: 남은 추가 bus 번호 계산 */
+	available_buses = end - busnr;
+	/* [한국어] 부모 구간의 끝까지 남은 번호를 모두 여유분으로 삼는다.
+	 * 영어 주석대로, 이 브리지 아래에 또 핫플러그 브리지가 있으면
+	 * pci_scan_child_bus_extend() 가 그들에게 나눠 준다. 그래야 나중에
+	 * 체인을 더 늘릴 수 있다. */
 
 	/* Scan bridges that need to be reconfigured */
-	pci_scan_bridge_extend(parent, dev, busnr, available_buses, 1); /* PCI/NVMe: pass 1로 재설정 및 하위 스캔; NVMe 장치 탐색 */
+	pci_scan_bridge_extend(parent, dev, busnr, available_buses, 1);
+	/* [한국어] pass 1 — 실제로 번호를 배정하고 아래로 재귀 하강한다.
+	 * 여기서 브리지 아래의 NVMe SSD 등이 발견된다. */
 
-	if (!dev->subordinate) /* PCI/NVMe: subordinate bus가 생성되지 않았으면 실패 */
-		/* PCI/NVMe: 결과 반환: -1 */
+	if (!dev->subordinate)
 		return -1;
+	/* [한국어] 하위 버스가 만들어지지 않았다 = 위 스캔이 실패했다.
+	 * pci_scan_bridge_extend() 는 실패를 반환값으로 알리지 않으므로,
+	 * subordinate 포인터의 유무로 판정한다. */
 
-	return 0; /* PCI/NVMe: hotplug bridge 통합 성공 */
+	return 0;
+	/* [한국어] 성공. 호출자가 이어서 리소스 배정과 드라이버 바인딩을 한다 */
 }
-/* PCI/NVMe: EXPORT_SYMBOL_GPL 함수 호출 */
-EXPORT_SYMBOL_GPL(pci_hp_add_bridge); /* PCI/NVMe: 심볼 외부 낸출. nvme-pci 등 모듈에서 참조 가능 */
+EXPORT_SYMBOL_GPL(pci_hp_add_bridge);
+/* [한국어] pciehp 등 핫플러그 드라이버가 모듈에서 쓰므로 공개 */
