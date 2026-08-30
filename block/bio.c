@@ -48,6 +48,26 @@
  *     드라이버 완료 처리기에서 불려오므로 **하드 IRQ 컨텍스트에서도 실행**된다.
  *     그래서 이 경로에는 잠들 수 있는 연산(GFP_KERNEL 할당, mutex)이 없다.
  *
+ * === bi_size 와 NLB, bi_vcnt 와 PRP/SGL — 한 번만 정리 ===
+ * 이 파일 곳곳에서 bi_size / bi_vcnt 를 다루므로, NVMe 와의 관계를 여기서
+ * 한 번 정리하고 개별 라인에서는 짧게만 가리킨다.
+ *
+ * bi_size 는 이 bio 가 옮길 **바이트 수**다. NVMe 명령의 NLB 로 곧장 가는 것이
+ * 아니라, 병합·분할을 거쳐 request 로 묶인 뒤에야 값이 정해진다:
+ *     cmnd->rw.length = cpu_to_le16((blk_rq_bytes(req) >> lba_shift) - 1);
+ *                                                   (core.c:1305)
+ * 세 가지가 중요하다 — 기준이 bio 가 아니라 **request** 라는 것,
+ * lba_shift 로 나누어 **논리 블록 수**로 바꾼다는 것, 그리고 **0-based** 라
+ * -1 을 한다는 것(NLB=0 이 1블록을 뜻한다). 16비트 필드이므로 한 명령이
+ * 옮길 수 있는 논리 블록은 최대 65536 개다.
+ *
+ * bi_vcnt 는 bvec 개수일 뿐 PRP 엔트리나 SGL 디스크립터 개수와 같지 않다.
+ * DMA 매핑에서 물리적으로 이어진 bvec 들은 하나로 합쳐지고, 반대로 페이지
+ * 경계를 걸친 bvec 하나가 PRP 엔트리 여럿이 되기도 한다. 실제 엔트리 구성은
+ * 매핑 이후 nvme_pci_setup_data_prp() / nvme_pci_setup_data_sgl() 이 정한다.
+ * 이 파일은 그 어느 쪽도 만들지 않는다 — (page, offset, len) 삼중항의 배열을
+ * 모양 좋게 쌓아 두는 것까지가 여기의 일이다.
+ *
  * === 타 모듈과의 연결 ===
  * 의존 모듈 (bio.c 가 호출하는 쪽):
  *   - include/linux/blk_types.h : struct bio, bio_vec, bvec_iter, BIO_* 플래그 정의
@@ -277,16 +297,25 @@ static struct biovec_slab {
 	 * 가능성이 커지고, 그때는 blk-merge.c 의 bio_split_rw() 가 bio 를 쪼갠다. */
 	{ .nr_vecs = 128, .name = "biovec-128" },
 	/* [한국어] BIO_MAX_VECS = bio 하나가 가질 수 있는 세그먼트 수의 절대 상한.
-	 * include/linux/bio.h 에 `#define BIO_MAX_VECS 256U` 로 하드코딩된 블록 계층
-	 * 고유의 상수이며, 특정 장치나 프로토콜에서 유도된 값이 아니다.
+	 * include/linux/bio.h 에 정의된 블록 계층 고유의 상수이며, 특정 장치나
+	 * 프로토콜에서 유도된 값이 아니다. (그 헤더는 이 sparse checkout 에 포함되어
+	 * 있지 않아 값 자체를 트리 안에서 확인할 수는 없다.)
 	 * 흩어진 사용자 버퍼를 O_DIRECT 로 제출하는 등 극단적 스캐터에서 이 등급이 쓰인다.
 	 *
 	 * NVMe 와의 수치 일치에 대하여: NVME_MAX_SEGS 도 256 이지만
-	 * (drivers/nvme/host/pci.c: NVME_CTRL_PAGE_SIZE(4096) / sizeof(struct nvme_sgl_desc)(16)),
-	 * 이는 "SGL 디스크립터 페이지 한 장에 몇 개가 들어가는가"에서 나온 값이고
+	 * (drivers/nvme/host/pci.c:128 — NVME_CTRL_PAGE_SIZE(4096) / sizeof(struct nvme_sgl_desc)(16)),
+	 * 이는 "SGL 디스크립터 페이지 한 장에 몇 개가 들어가는가"에서 나온 값이다.
+	 * 게다가 그 정의 바로 위의 upstream 주석이 못박아 두었듯
+	 *     "For PRPs, segments don't matter at all."
+	 * PRP 는 링크 리스트로 무한히 이어 붙일 수 있어 세그먼트 수 자체가 제약이
+	 * 아니다. 즉 NVME_MAX_SEGS 는 **SGL 을 쓸 때만** 의미가 있는 값이고,
 	 * BIO_MAX_VECS 는 블록 계층이 임의로 정한 상한이다. 두 값이 같은 것은
 	 * 서로 인과 관계가 없는 **수치상의 우연**이며, 한쪽이 다른 쪽을 참조하지 않는다.
-	 * (드라이버 소스 어디에도 BIO_MAX_VECS 를 근거로 삼는 코드는 없다.) */
+	 * (드라이버 소스 어디에도 BIO_MAX_VECS 를 근거로 삼는 코드는 없다.)
+	 *
+	 * NVMe 에서 bio 를 실제로 쪼개는 것은 이 상한이 아니라 큐 한계다:
+	 * max_segments(= nvme_max_drv_segments, MDTS 유래), max_hw_sectors(MDTS),
+	 * 그리고 PRP 정렬을 표현한 virt_boundary_mask. 그 판정은 blk-merge.c 몫이다. */
 	{ .nr_vecs = BIO_MAX_VECS, .name = "biovec-max" },
 };
 
@@ -3056,11 +3085,17 @@ void bio_iov_bvec_set(struct bio *bio, const struct iov_iter *iter)
 	                                 * 자기 배열이 있는데 여기서 포인터를 덮어쓰면 그 배열이 미아가 되어 누수된다.
 	                                 * 호출자는 bio_alloc(bdev, 0, ...) 로 슬롯 0 개짜리 bio 를 만들어 넘겨야 한다. */
 
-	bio->bi_io_vec = (struct bio_vec *)iter->bvec;
-	bio->bi_iter.bi_idx = 0;
-	bio->bi_iter.bi_bvec_done = iter->iov_offset;
-	bio->bi_iter.bi_size = iov_iter_count(iter);  // NVMe 명령의 NLB(Length)로 변환됨
-	bio_set_flag(bio, BIO_CLONED);	// NVMe PRP/SGL 원본 공유 표시
+	bio->bi_io_vec = (struct bio_vec *)iter->bvec;	/* [한국어] 복사가 아니라 **포인터만** 가져온다. 이 함수의 요점이 그것이다 —
+						 * 이미 bvec 형태로 들어온 iov_iter 라면 페이지를 다시 pin 할 필요도,
+						 * 배열을 새로 만들 필요도 없다. const 를 떼는 캐스트는 소유권을 갖는다는
+						 * 뜻이 아니라 타입을 맞추기 위한 것이며, 아래 BIO_CLONED 가 "수정 금지"를 표시한다. */
+	bio->bi_iter.bi_idx = 0;			/* [한국어] 빌려 온 배열의 0번부터 시작 */
+	bio->bi_iter.bi_bvec_done = iter->iov_offset;	/* [한국어] 다만 첫 bvec 의 중간부터 시작할 수는 있다.
+						 * iov_offset 이 그 "이미 지나간 바이트 수"이며, 이것이 있어야
+						 * 사용자 버퍼가 페이지 중간에서 시작하는 경우가 정확히 표현된다. */
+	bio->bi_iter.bi_size = iov_iter_count(iter);	/* [한국어] bi_size = 이 bio 가 옮길 바이트 수 (파일 상단 "bi_size 와 NLB" 참고) */
+	bio_set_flag(bio, BIO_CLONED);	/* [한국어] BIO_CLONED — bvec 배열을 이 bio 가 소유하지 않고 빌려 쓴다는 표시.
+	 * 완료 시 배열을 해제하면 안 되고, bvec 을 수정해서도 안 된다(원본이 공유 중이다). */
 }
 
 /*
@@ -3091,29 +3126,31 @@ void bio_iov_bvec_set(struct bio *bio, const struct iov_iter *iter)
 static int bio_iov_iter_align_down(struct bio *bio, struct iov_iter *iter,
 			    unsigned len_align_mask)
 {
-	size_t nbytes = bio->bi_iter.bi_size & len_align_mask;  // NVMe 명령의 NLB(Length)로 변환됨
+	size_t nbytes = bio->bi_iter.bi_size & len_align_mask;	/* [한국어] bi_size = 이 bio 가 옮길 바이트 수 (파일 상단 "bi_size 와 NLB" 참고) */
 
 	if (!nbytes)
-		return 0;
+		return 0;	/* [한국어] 이미 정렬돼 있다 — 가장 흔한 경우이며 아무것도 하지 않는다 */
 
-	iov_iter_revert(iter, nbytes);
-	bio->bi_iter.bi_size -= nbytes;  // NVMe 명령의 NLB(Length)로 변환됨
+	iov_iter_revert(iter, nbytes);	/* [한국어] bio 에서 떼어 낼 만큼 iter 도 뒤로 되돌린다.
+					 * 이 짝을 맞추지 않으면 호출자의 다음 회차가 잘라 낸 구간을 건너뛰어
+					 * 데이터에 구멍이 생긴다. */
+	bio->bi_iter.bi_size -= nbytes;	/* [한국어] bi_size = 이 bio 가 옮길 바이트 수 (파일 상단 "bi_size 와 NLB" 참고) */
 	do {
-		struct bio_vec *bv = &bio->bi_io_vec[bio->bi_vcnt - 1];  // NVMe 명령의 PRP entry/SGL segment 개수 집계
+		struct bio_vec *bv = &bio->bi_io_vec[bio->bi_vcnt - 1];	/* [한국어] bi_vcnt = bvec 개수 (PRP/SGL 엔트리 수와는 다르다 — 파일 상단 참고) */
 
-		if (nbytes < bv->bv_len) {
-			bv->bv_len -= nbytes;
+		if (nbytes < bv->bv_len) {	/* [한국어] 이 bvec 하나를 줄이는 것만으로 충분한 경우 */
+			bv->bv_len -= nbytes;	/* [한국어] 길이만 깎는다. 페이지는 그대로 쓰이므로 unpin 하면 안 된다 */
 			break;
 		}
 
-		if (bio_flagged(bio, BIO_PAGE_PINNED))  // 사용자 페이지 pin 상태: NVMe DMA 엔진이 페이지를 안전하게 접근
+		if (bio_flagged(bio, BIO_PAGE_PINNED))	/* [한국어] pin 한 페이지였다면 반드시 unpin 해야 한다 — 빠뜨리면 영영 회수되지 않는다 */
 			unpin_user_page(bv->bv_page);
 
-		bio->bi_vcnt--;  // NVMe 명령의 PRP entry/SGL segment 개수 집계
+		bio->bi_vcnt--;	/* [한국어] bi_vcnt = bvec 개수 (PRP/SGL 엔트리 수와는 다르다 — 파일 상단 참고) */
 		nbytes -= bv->bv_len;
 	} while (nbytes);
 
-	if (!bio->bi_vcnt)  // NVMe 명령의 PRP entry/SGL segment 개수 집계
+	if (!bio->bi_vcnt)	/* [한국어] bi_vcnt = bvec 개수 (PRP/SGL 엔트리 수와는 다르다 — 파일 상단 참고) */
 		return -EFAULT;
 	return 0;
 }
@@ -3216,14 +3253,14 @@ int bio_iov_iter_get_pages(struct bio *bio, struct iov_iter *iter,
 		ssize_t ret;
 
 		ret = iov_iter_extract_bvecs(iter, bio->bi_io_vec,
-				BIO_MAX_SIZE - bio->bi_iter.bi_size,  // NVMe 명령의 NLB(Length)로 변환됨
-				&bio->bi_vcnt, bio->bi_max_vecs, flags);  // bio당 segment 수: NVMe PRP list/SGL 길이에 영향
+				BIO_MAX_SIZE - bio->bi_iter.bi_size,	/* [한국어] bi_size = 이 bio 가 옮길 바이트 수 (파일 상단 "bi_size 와 NLB" 참고) */
+				&bio->bi_vcnt, bio->bi_max_vecs, flags);	/* [한국어] bvec 슬롯이 남아 있어야 folio 를 더 붙일 수 있다 */
 		if (ret <= 0) {
-			if (!bio->bi_vcnt)  // NVMe 명령의 PRP entry/SGL segment 개수 집계
+			if (!bio->bi_vcnt)	/* [한국어] bi_vcnt = bvec 개수 (PRP/SGL 엔트리 수와는 다르다 — 파일 상단 참고) */
 				return ret;
 			break;
 		}
-		bio->bi_iter.bi_size += ret;  // NVMe 명령의 NLB(Length)로 변환됨
+		bio->bi_iter.bi_size += ret;	/* [한국어] bi_size = 이 bio 가 옮길 바이트 수 (파일 상단 "bi_size 와 NLB" 참고) */
 	} while (iov_iter_count(iter) && !bio_full(bio, 0));  // bio가 가득 찼는지 확인: NVMe segment/MDTS 한도 초과 신호
 
 	/* [한국어] 추출된 첫 페이지가 P2PDMA 메모리이면 이 bio 전체를 병합 금지로
@@ -3278,13 +3315,16 @@ static struct folio *folio_alloc_greedy(gfp_t gfp, size_t *size)
  */
 static void bio_free_folios(struct bio *bio)
 {
-	struct bio_vec *bv;
-	int i;
+	struct bio_vec *bv;	/* [한국어] 순회 커서 */
+	int i;			/* [한국어] 매크로가 요구하는 인덱스 변수 */
 
-	bio_for_each_bvec_all(bv, bio, i) {  // bio_vec(bvec) 순회: NVMe PRP entry/SGL segment를 구성하는 단위
-		struct folio *folio = page_folio(bv->bv_page);
+	bio_for_each_bvec_all(bv, bio, i) {	/* [한국어] _all 판은 bi_iter 를 무시하고 bvec 배열 전체를 훑는다.
+	 * 완료 후 정리 경로에서는 bi_iter 가 이미 끝까지 전진해 있어
+	 * 일반 순회로는 아무것도 보이지 않기 때문이다. */
+		struct folio *folio = page_folio(bv->bv_page);	/* [한국어] bvec 은 page 단위로 기록되지만 해제는 folio 단위다 */
 
-		if (!is_zero_folio(folio))
+		if (!is_zero_folio(folio))	/* [한국어] 공유 zero folio 는 커널 전역에서 하나뿐인 특별한 페이지다.
+					 * 읽기 요청 중 구멍(hole) 구간을 채울 때 쓰이며, 참조를 낮추면 안 된다. */
 			folio_put(folio);
 	}
 }
@@ -3302,28 +3342,32 @@ static void bio_free_folios(struct bio *bio)
  * 복사 실패 시 이미 할당된 folio들을 bio_free_folios()로 해제한다.
  * 실행 컨텍스트: 태스크 컨텍스트.
  * 호출자: bio_iov_iter_bounce()
- * NVMe 연결: 할당된 bounce buffer 페이지들이 NVMe PRP/SGL로 변환되어 DMA 전송.
+ * bounce 를 쓰는 이유: 사용자 버퍼가 장치의 정렬/경계 제약을 만족하지 못하거나
+ * pin 할 수 없는 종류일 때, 커널이 소유한 folio 로 옮겨 담아 제약을 만족시킨다.
  */
 static int bio_iov_iter_bounce_write(struct bio *bio, struct iov_iter *iter,
 		size_t maxlen)
 {
 	size_t total_len = min(maxlen, iov_iter_count(iter));
 
-	if (WARN_ON_ONCE(bio_flagged(bio, BIO_CLONED)))  // clone된 bio: PRP/SGL 원본을 공유하므로 중간 수정 불가
-		return -EINVAL;  // 잘못된 인자: NVMe SQ에 잘못된 명령이 들어가기 전 차단
-	if (WARN_ON_ONCE(bio->bi_iter.bi_size))  // NVMe 명령의 NLB(Length)로 변환됨
-		return -EINVAL;  // 잘못된 인자: NVMe SQ에 잘못된 명령이 들어가기 전 차단
-	if (WARN_ON_ONCE(bio->bi_vcnt >= bio->bi_max_vecs))  // bio당 segment 수: NVMe PRP list/SGL 길이에 영향
-		return -EINVAL;  // 잘못된 인자: NVMe SQ에 잘못된 명령이 들어가기 전 차단
+	if (WARN_ON_ONCE(bio_flagged(bio, BIO_CLONED)))	/* [한국어] BIO_CLONED 는 bvec 배열을 빌려 쓰고 있다는 뜻이라 여기에 새 folio 를 붙일 수 없다 */
+		return -EINVAL;	/* [한국어] 호출 규약 위반 — 이 함수는 비어 있는 bio 를 전제로 한다 */
+	if (WARN_ON_ONCE(bio->bi_iter.bi_size))	/* [한국어] bi_size = 이 bio 가 옮길 바이트 수 (파일 상단 "bi_size 와 NLB" 참고) */
+		return -EINVAL;	/* [한국어] 호출 규약 위반 — 이 함수는 비어 있는 bio 를 전제로 한다 */
+	if (WARN_ON_ONCE(bio->bi_vcnt >= bio->bi_max_vecs))	/* [한국어] bvec 슬롯이 남아 있어야 folio 를 더 붙일 수 있다 */
+		return -EINVAL;	/* [한국어] 호출 규약 위반 — 이 함수는 비어 있는 bio 를 전제로 한다 */
 
 	do {
-		size_t this_len = min(total_len, SZ_1M);
-		struct folio *folio;
+		size_t this_len = min(total_len, SZ_1M);	/* [한국어] 한 번에 최대 1MB. folio 하나를 그보다 크게 잡으면
+							 * 할당 실패 확률이 급격히 올라가므로 여기서 끊는다 */
+		struct folio *folio;				/* [한국어] 이번 회차에 확보할 연속 물리 영역 */
 
 		if (this_len > PAGE_SIZE * 2)
-			this_len = rounddown_pow_of_two(this_len);
+			this_len = rounddown_pow_of_two(this_len);	/* [한국어] 버디 할당기는 2의 거듭제곱 단위로만 연속 영역을 준다.
+									 * 어중간한 크기를 요구하면 그보다 큰 거듭제곱을 잡아 뒤쪽을 낭비하므로,
+									 * 아예 거듭제곱으로 내림해 요청한다. 2페이지 이하는 낭비가 없어 그대로 둔다. */
 
-		if (bio->bi_iter.bi_size > BIO_MAX_SIZE - this_len)  // NVMe 명령의 NLB(Length)로 변환됨
+		if (bio->bi_iter.bi_size > BIO_MAX_SIZE - this_len)	/* [한국어] bi_size = 이 bio 가 옮길 바이트 수 (파일 상단 "bi_size 와 NLB" 참고) */
 			break;
 
 		/* [한국어] 남은 길이(this_len)만큼을 담을 수 있는 가장 큰 folio를 잡는다.
@@ -3333,8 +3377,10 @@ static int bio_iov_iter_bounce_write(struct bio *bio, struct iov_iter *iter,
 		 * 실제로 잡은 크기를 this_len에 되돌려 준다(in/out 파라미터). */
 		folio = folio_alloc_greedy(GFP_KERNEL, &this_len);
 		if (!folio)
-			break;
-		bio_add_folio_nofail(bio, folio, this_len, 0);
+			break;	/* [한국어] 실패해도 에러가 아니다 — 지금까지 담은 만큼으로 bio 를 완성하고
+				 * 나머지는 호출자가 다음 bio 로 이어 붙인다 */
+		bio_add_folio_nofail(bio, folio, this_len, 0);	/* [한국어] _nofail 판을 쓸 수 있는 이유: 위 루프 조건이
+								 * bi_vcnt < bi_max_vecs 를 이미 보장하므로 슬롯이 반드시 남아 있다 */
 
 		if (copy_from_iter(folio_address(folio), this_len, iter) !=  // 사용자 버퍼 -> bounce buffer 복사: NVMe DMA 전송 전 준비
 				this_len) {
@@ -3342,10 +3388,11 @@ static int bio_iov_iter_bounce_write(struct bio *bio, struct iov_iter *iter,
 			return -EFAULT;
 		}
 
-		total_len -= this_len;
-	} while (total_len && bio->bi_vcnt < bio->bi_max_vecs);  // bio당 segment 수: NVMe PRP list/SGL 길이에 영향
+		total_len -= this_len;	/* [한국어] this_len 은 in/out 인자라 실제로 확보된 크기로 갱신돼 있다.
+					 * 요청한 값이 아니라 받은 값을 빼야 진도가 맞는다 */
+	} while (total_len && bio->bi_vcnt < bio->bi_max_vecs);	/* [한국어] bvec 슬롯이 남아 있어야 folio 를 더 붙일 수 있다 */
 
-	if (!bio->bi_iter.bi_size)  // NVMe 명령의 NLB(Length)로 변환됨
+	if (!bio->bi_iter.bi_size)	/* [한국어] 한 바이트도 담지 못했다면 진짜 실패다 — 부분 성공은 위에서 break 로 허용했다 */
 		return -ENOMEM;
 	return 0;
 }
@@ -3360,10 +3407,11 @@ static int bio_iov_iter_bounce_write(struct bio *bio, struct iov_iter *iter,
  * @return: 0 성공; 음수 에러
  *
  * bi_io_vec[0]에 bounce buffer folio를 설정하고, bi_io_vec[1+]에 사용자 페이지를 pin한다.
- * NVMe는 bounce buffer로 데이터를 읽고, bio_iov_iter_unbounce_read()가 완료 후 사용자 페이지로 복사한다.
+ * 장치는 bounce folio 로 데이터를 읽어 오고, 완료 후 bio_iov_iter_unbounce_read() 가 사용자 페이지로 복사한다.
  * 실행 컨텍스트: 태스크 컨텍스트.
  * 호출자: bio_iov_iter_bounce()
- * NVMe 연결: bounce buffer(bi_io_vec[0])가 NVMe PRP/SGL의 첫 번째 항목으로 DMA 수신.
+ * 슬롯 0 을 bounce folio 가 차지하고 사용자 페이지는 1번부터 들어가는 배치라,
+ * 완료 후 복사할 때 양쪽을 헷갈리지 않고 짝지을 수 있다.
  */
 static int bio_iov_iter_bounce_read(struct bio *bio, struct iov_iter *iter,
 		size_t maxlen)
@@ -3382,17 +3430,17 @@ static int bio_iov_iter_bounce_read(struct bio *bio, struct iov_iter *iter,
 		ssize_t ret;
 
 		ret = iov_iter_extract_bvecs(iter, bio->bi_io_vec + 1, len,
-				&bio->bi_vcnt, bio->bi_max_vecs - 1, 0);  // bio당 segment 수: NVMe PRP list/SGL 길이에 영향
+				&bio->bi_vcnt, bio->bi_max_vecs - 1, 0);	/* [한국어] bvec 슬롯이 남아 있어야 folio 를 더 붙일 수 있다 */
 		if (ret <= 0) {
-			if (!bio->bi_vcnt) {  // NVMe 명령의 PRP entry/SGL segment 개수 집계
+			if (!bio->bi_vcnt) {	/* [한국어] bi_vcnt = bvec 개수 (PRP/SGL 엔트리 수와는 다르다 — 파일 상단 참고) */
 				folio_put(folio);
 				return ret;
 			}
 			break;
 		}
 		len -= ret;
-		bio->bi_iter.bi_size += ret;  // NVMe 명령의 NLB(Length)로 변환됨
-	} while (len && bio->bi_vcnt < bio->bi_max_vecs - 1);  // bio당 segment 수: NVMe PRP list/SGL 길이에 영향
+		bio->bi_iter.bi_size += ret;	/* [한국어] bi_size = 이 bio 가 옮길 바이트 수 (파일 상단 "bi_size 와 NLB" 참고) */
+	} while (len && bio->bi_vcnt < bio->bi_max_vecs - 1);	/* [한국어] bvec 슬롯이 남아 있어야 folio 를 더 붙일 수 있다 */
 
 	/*
 	 * Set the folio directly here.  The above loop has already calculated
@@ -3401,8 +3449,9 @@ static int bio_iov_iter_bounce_read(struct bio *bio, struct iov_iter *iter,
 	 * I/O path.
 	 */
 	bvec_set_folio(&bio->bi_io_vec[0], folio, bio->bi_iter.bi_size, 0);  // folio를 bio_vec에 등록: NVMe PRP/SGL segment 후보
-	if (iov_iter_extract_will_pin(iter))  // 사용자 페이지 pin 여부: NVMe DMA 안전성 판단
-		bio_set_flag(bio, BIO_PAGE_PINNED);	// 사용자 페이지 pin: NVMe DMA 안전 보장
+	if (iov_iter_extract_will_pin(iter))	/* [한국어] 이 iov_iter 가 실제로 페이지를 pin 하는 종류인지 묻는다.
+	 * 커널 버퍼나 이미 bvec 인 경우는 pin 이 필요 없어 false 다. */
+		bio_set_flag(bio, BIO_PAGE_PINNED);	/* [한국어] pin 했다는 사실을 bio 에 남긴다. 완료 경로가 이 플래그를 보고 unpin 여부를 정한다 */
 	return 0;
 }
 
@@ -3456,15 +3505,21 @@ int bio_iov_iter_bounce(struct bio *bio, struct iov_iter *iter, size_t maxlen)
  * mark_dirty이면 folio_mark_dirty_lock()으로 dirty 표시 후 pin 해제.
  * 실행 컨텍스트: 태스크 컨텍스트 (DIO 완료 경로).
  * 호출자: bio_iov_iter_unbounce_read()
- * NVMe 연결: NVMe 읽기 완료 후 DMA가 끝난 사용자 페이지의 pin을 해제.
+ * 읽기가 끝난 사용자 페이지는 내용이 바뀌었으므로 dirty 로 표시한 뒤 pin 을 푼다.
  */
 static void bvec_unpin(struct bio_vec *bv, bool mark_dirty)
 {
 	struct folio *folio = page_folio(bv->bv_page);
+	/* [한국어] 이 bvec 이 실제로 몇 페이지에 걸쳐 있는지 센다. 단순히
+	 * bv_len / PAGE_SIZE 가 아닌 이유는 시작 오프셋 때문이다 — 예를 들어
+	 * offset=4095, len=2 면 길이는 2바이트지만 두 페이지에 걸친다.
+	 * "끝 페이지 번호 - 시작 페이지 번호 + 1" 로 계산해야 정확하고,
+	 * pin 을 건 페이지 수와 정확히 같은 수만큼 풀어야 참조가 맞는다. */
 	size_t nr_pages = (bv->bv_offset + bv->bv_len - 1) / PAGE_SIZE -
 			bv->bv_offset / PAGE_SIZE + 1;
 
-	if (mark_dirty)
+	if (mark_dirty)	/* [한국어] 읽기였다면 내용이 바뀌었으므로 dirty 로 표시한다.
+			 * _lock 판을 쓰는 이유는 이 시점에 folio 락을 쥐고 있지 않기 때문이다. */
 		folio_mark_dirty_lock(folio);
 	unpin_user_folio(folio, nr_pages);
 }
@@ -3492,7 +3547,7 @@ static void bio_iov_iter_unbounce_read(struct bio *bio, bool is_error,
 		void *buf = bvec_virt(&bio->bi_io_vec[0]);
 		struct iov_iter to;
 
-		iov_iter_bvec(&to, ITER_DEST, bio->bi_io_vec + 1, bio->bi_vcnt,  // NVMe 명령의 PRP entry/SGL segment 개수 집계
+		iov_iter_bvec(&to, ITER_DEST, bio->bi_io_vec + 1, bio->bi_vcnt,	/* [한국어] bi_vcnt = bvec 개수 (PRP/SGL 엔트리 수와는 다르다 — 파일 상단 참고) */
 				len);
 		/* copying to pinned pages should always work */
 		WARN_ON_ONCE(copy_to_iter(buf, len, &to) != len);  // bounce buffer -> 사용자 버퍼 복사: NVMe read 완료 후 데이터 반환
@@ -3501,10 +3556,10 @@ static void bio_iov_iter_unbounce_read(struct bio *bio, bool is_error,
 		mark_dirty = false;
 	}
 
-	if (bio_flagged(bio, BIO_PAGE_PINNED)) {  // 사용자 페이지 pin 상태: NVMe DMA 엔진이 페이지를 안전하게 접근
+	if (bio_flagged(bio, BIO_PAGE_PINNED)) {	/* [한국어] pin 한 페이지였다면 반드시 unpin 해야 한다 — 빠뜨리면 영영 회수되지 않는다 */
 		int i;
 
-		for (i = 0; i < bio->bi_vcnt; i++)  // NVMe 명령의 PRP entry/SGL segment 개수 집계
+		for (i = 0; i < bio->bi_vcnt; i++)	/* [한국어] bi_vcnt = bvec 개수 (PRP/SGL 엔트리 수와는 다르다 — 파일 상단 참고) */
 			bvec_unpin(&bio->bi_io_vec[1 + i], mark_dirty);  // pin 해제: NVMe DMA 완료 후 사용자 페이지 참조 해제
 	}
 
@@ -3631,16 +3686,16 @@ void bio_await(struct bio *bio, void *priv,  // bio 제출 후 완료 대기: su
 	       void (*submit)(struct bio *bio, void *priv))
 {
 	DECLARE_COMPLETION_ONSTACK_MAP(done,
-			bio->bi_bdev->bd_disk->lockdep_map);  // NVMe namespace/block device 선택
+			bio->bi_bdev->bd_disk->lockdep_map);	/* [한국어] 이 bio 가 향할 블록 디바이스 지정 */
 
-	bio->bi_private = &done;  // NVMe 완료 콜백용 private 데이터(예: completion 구조체)
-	bio->bi_end_io = bio_wait_end_io;  // NVMe sync/admin 명령 완료 시 대기자 깨움
-	bio->bi_opf |= REQ_SYNC;	// NVMe polling/sync 완료 우선순위 힌트
+	bio->bi_private = &done;	/* [한국어] 스택에 둔 completion 을 bio 에 매달아 둔다 — 완료 콜백이 이것으로 대기자를 찾는다 */
+	bio->bi_end_io = bio_wait_end_io;	/* [한국어] 완료 시 위 completion 을 깨울 콜백 */
+	bio->bi_opf |= REQ_SYNC;	/* [한국어] 이 요청을 기다리는 사람이 있다는 표시. 스케줄러와 wbt 가 비동기 쓰기보다 우선 처리한다 */
 	if (submit)
 		submit(bio, priv);
 	else
 		submit_bio(bio);  // bio -> block 레이어 -> blk-mq -> mq_ops->queue_rq (간접 호출; NVMe PCIe 면 nvme_queue_rq -> nvme_sq_copy_cmd -> nvme_write_sq_db)
-	blk_wait_io(&done);  // NVMe CQ 수신까지 동기 대기
+	blk_wait_io(&done);	/* [한국어] 완료까지 잠든다. 이 함수가 동기 API 인 이유 */
 }
 EXPORT_SYMBOL_GPL(bio_await);  // bio 제출 후 완료 대기: submit_bio -> blk-mq -> nvme_queue_rq -> doorbell -> CQ
 
@@ -3670,12 +3725,13 @@ EXPORT_SYMBOL_GPL(bio_await);  // bio 제출 후 완료 대기: submit_bio -> bl
  * 호출 체인:
  *   bdev_rw_virt() → [submit_bio_wait()] → bio_await() → submit_bio() → NVMe CQ
  */
-int submit_bio_wait(struct bio *bio)  // NVMe admin/sync 명령: SQ 제출 후 CQ 수신까지 동기 대기
+int submit_bio_wait(struct bio *bio)	/* [한국어] 제출 후 완료까지 동기적으로 기다리는 경로 */
 {
 	bio_await(bio, NULL, NULL);  // bio 제출 후 완료 대기: submit_bio -> blk-mq -> nvme_queue_rq -> doorbell -> CQ
-	return blk_status_to_errno(bio->bi_status);  // NVMe CQ status -> request status -> bio status 전파 경로
+	return blk_status_to_errno(bio->bi_status);	/* [한국어] blk_status_t(BLK_STS_*) → 음수 errno 변환.
+	 * NVMe 라면 CQE 의 상태 코드를 nvme_error_status() 가 먼저 BLK_STS_* 로 바꿔 놓은 것이다 */
 }
-EXPORT_SYMBOL(submit_bio_wait);  // NVMe admin/sync 명령: SQ 제출 후 CQ 수신까지 동기 대기
+EXPORT_SYMBOL(submit_bio_wait);	/* [한국어] 제출 후 완료까지 동기적으로 기다리는 경로 */
 
 /*
  * [한국어]
@@ -3720,7 +3776,7 @@ int bio_submit_or_kill(struct bio *bio, unsigned int flags)
 		return -EINTR; /* [한국어] kill 시그널로 중단됨을 호출자에게 통보 */
 	}
 
-	return submit_bio_wait(bio);  // NVMe admin/sync 명령: SQ 제출 후 CQ 수신까지 동기 대기
+	return submit_bio_wait(bio);	/* [한국어] 제출 후 완료까지 동기적으로 기다리는 경로 */
 }
 
 /**
@@ -3766,9 +3822,10 @@ int bdev_rw_virt(struct block_device *bdev, sector_t sector, void *data,
 		return -EIO;  // I/O 오류: NVMe 명령 제출/완료 실패 전파
 
 	bio_init(&bio, bdev, &bv, 1, op);  // bio 필드 초기화: SLBA/length/OPC/PRP-SGL 기반 준비
-	bio.bi_iter.bi_sector = sector;  // NVMe Read/Write 명령의 SLBA(Starting LBA)로 변환됨
+	bio.bi_iter.bi_sector = sector;	/* [한국어] 512B 섹터 단위 시작 위치. NVMe 는 나중에 nvme_sect_to_lba() 로
+	 * lba_shift 만큼 시프트해 SLBA 필드에 넣는다 */
 	bio_add_virt_nofail(&bio, data, len);  // 커널 가상 주소를 bio에 추가: NVMe PRP/SGL로 변환
-	error = submit_bio_wait(&bio);  // NVMe admin/sync 명령: SQ 제출 후 CQ 수신까지 동기 대기
+	error = submit_bio_wait(&bio);	/* [한국어] 제출 후 완료까지 동기적으로 기다리는 경로 */
 	bio_uninit(&bio);  // cgroup/integrity/crypto 정리: NVMe 완료 후 자원 해제
 	return error;
 }
@@ -3792,11 +3849,12 @@ EXPORT_SYMBOL_GPL(bdev_rw_virt);
  */
 void __bio_advance(struct bio *bio, unsigned bytes)
 {
-	if (bio_integrity(bio))	// NVMe PI/DIF 보호 정보 해제
+	if (bio_integrity(bio))	/* [한국어] 무결성(PI) 메타데이터 자원 해제 */
 		bio_integrity_advance(bio, bytes);
 
-	bio_crypt_advance(bio, bytes);  // NVMe inline crypto/Opal: PRP/SGL 데이터와 암호화 컨텍스트가 nvme_queue_rq에서 연결됨
-	bio_advance_iter(bio, &bio->bi_iter, bytes);	// NVMe partial completion 시 LBA/length 갱신
+	bio_crypt_advance(bio, bytes);	/* [한국어] 인라인 암호화 컨텍스트도 같은 폭만큼 전진시킨다.
+	 * (NVMe 는 blk-crypto 프로파일을 등록하지 않으므로 이 경로를 쓰지 않는다) */
+	bio_advance_iter(bio, &bio->bi_iter, bytes);	/* [한국어] 완료된 바이트만큼 iter 를 전진시켜 남은 구간을 가리키게 한다 */
 }
 EXPORT_SYMBOL(__bio_advance);
 
@@ -3894,7 +3952,9 @@ void bio_free_pages(struct bio *bio)  // bio에 할당된 페이지 해제: NVMe
 	struct bio_vec *bvec;
 	struct bvec_iter_all iter_all;
 
-	bio_for_each_segment_all(bvec, bio, iter_all)  // bio_vec(bvec) 순회: NVMe PRP entry/SGL segment를 구성하는 단위
+	bio_for_each_segment_all(bvec, bio, iter_all)	/* [한국어] _all 판은 bi_iter 를 무시하고 bvec 배열 전체를 훑는다.
+	 * 완료 후 정리 경로에서는 bi_iter 가 이미 끝까지 전진해 있어
+	 * 일반 순회로는 아무것도 보이지 않기 때문이다. */
 		__free_page(bvec->bv_page);
 }
 EXPORT_SYMBOL(bio_free_pages);  // bio에 할당된 페이지 해제: NVMe 완료/abort 시 정리
@@ -3944,7 +4004,9 @@ void bio_set_pages_dirty(struct bio *bio)  // DIO 완료 전 페이지 dirty 마
 {
 	struct folio_iter fi;
 
-	bio_for_each_folio_all(fi, bio) {  // bio_vec(bvec) 순회: NVMe PRP entry/SGL segment를 구성하는 단위
+	bio_for_each_folio_all(fi, bio) {	/* [한국어] _all 판은 bi_iter 를 무시하고 bvec 배열 전체를 훑는다.
+	 * 완료 후 정리 경로에서는 bi_iter 가 이미 끝까지 전진해 있어
+	 * 일반 순회로는 아무것도 보이지 않기 때문이다. */
 		folio_lock(fi.folio);
 		folio_mark_dirty(fi.folio);
 		folio_unlock(fi.folio);
@@ -4025,7 +4087,7 @@ static void bio_dirty_fn(struct work_struct *work)
  * 호출 체인:
  *   bio_endio() → bi_end_io → [bio_check_pages_dirty()] → bio_dirty_fn(워크큐)
  */
-void bio_check_pages_dirty(struct bio *bio)  // NVMe DIO 완료 후 페이지 dirty 상태 검증/재마킹
+void bio_check_pages_dirty(struct bio *bio)	/* [한국어] Direct I/O 완료 후 페이지 dirty 상태 처리 */
 {
 	struct folio_iter fi;
 	unsigned long flags;
@@ -4045,7 +4107,7 @@ defer:
 	spin_unlock_irqrestore(&bio_dirty_lock, flags);  /* [한국어] 락 해제 + IRQ 복원 */
 	schedule_work(&bio_dirty_work);    /* [한국어] 프로세스 컨텍스트에서 dirty 재마킹을 위한 워크큐 예약 */
 }
-EXPORT_SYMBOL_GPL(bio_check_pages_dirty);  // NVMe DIO 완료 후 페이지 dirty 상태 검증/재마킹
+EXPORT_SYMBOL_GPL(bio_check_pages_dirty);	/* [한국어] Direct I/O 완료 후 페이지 dirty 상태 처리 */
 
 /*
  * [한국어]
@@ -4073,9 +4135,10 @@ static inline bool bio_remaining_done(struct bio *bio)  // 모든 NVMe 하위 �
 	if (!bio_flagged(bio, BIO_CHAIN))
 		return true;
 
-	BUG_ON(atomic_read(&bio->__bi_remaining) <= 0);  // NVMe bio 참조/remaining 상태 확인
+	BUG_ON(atomic_read(&bio->__bi_remaining) <= 0);	/* [한국어] 이미 0 이하라면 완료가 중복으로 불린 것 — 심각한 버그다 */
 
-	if (atomic_dec_and_test(&bio->__bi_remaining)) {  // NVMe completion 순서 보장: 마지막 하위 bio 완료 시 부모로 전파
+	if (atomic_dec_and_test(&bio->__bi_remaining)) {	/* [한국어] 분할된 자식들이 각자 완료할 때마다 감소하고, 마지막 하나가
+	 * 0 으로 만들 때만 진짜 완료로 취급한다 — 순서와 무관하게 안전하다 */
 		bio_clear_flag(bio, BIO_CHAIN);
 		return true;
 	}
@@ -4117,20 +4180,21 @@ static inline bool bio_remaining_done(struct bio *bio)  // 모든 NVMe 하위 �
  * 호출 체인:
  *   nvme_poll_cq() → blk_mq_end_request() → [bio_endio()] → bi_end_io()
  */
-void bio_endio(struct bio *bio)  // NVMe CQ 수신 후 상위 레이어로 completion 전파
+void bio_endio(struct bio *bio)	/* [한국어] 완료를 상위 계층으로 전파 */
 {
 again:
 	if (!bio_remaining_done(bio))	// bio_chain으로 묶인 NVMe 분할 명령, 아직 부모 완료 불가
 		return;
-	if (!bio_integrity_endio(bio))	// NVMe PI/DIF 검증 실패 시 상위로 전파
+	if (!bio_integrity_endio(bio))	/* [한국어] 무결성 검증이 아직 안 끝났으면(워커로 넘어갔으면) 여기서 반환하고,
+	 * 검증이 끝난 뒤 다시 이 함수로 들어온다 */
 		return;
 
-	blk_zone_bio_endio(bio);	// NVMe ZNS zone 상태 갱신
+	blk_zone_bio_endio(bio);	/* [한국어] zoned 장치의 존 상태 갱신 */
 
-	rq_qos_done_bio(bio);  // NVMe QoS(latency/iocost) 완료 기록
+	rq_qos_done_bio(bio);	/* [한국어] rq-qos 체인(wbt/iolatency/iocost)에 완료를 알려 지연 통계를 갱신한다 */
 
-	if (bio->bi_bdev && bio_flagged(bio, BIO_TRACE_COMPLETION)) {  // NVMe namespace/block device 선택
-		trace_block_bio_complete(bdev_get_queue(bio->bi_bdev), bio);	// NVMe 완료 추적(tracepoint)
+	if (bio->bi_bdev && bio_flagged(bio, BIO_TRACE_COMPLETION)) {	/* [한국어] 이 bio 가 향할 블록 디바이스 지정 */
+		trace_block_bio_complete(bdev_get_queue(bio->bi_bdev), bio);	/* [한국어] 완료 tracepoint */
 		bio_clear_flag(bio, BIO_TRACE_COMPLETION);
 	}
 
@@ -4142,7 +4206,7 @@ again:
 	 * handle this, but compiling with frame pointers also disables
 	 * gcc's sibling call optimization.
 	 */
-	if (bio->bi_end_io == bio_chain_endio) {	// NVMe 분할 bio의 chained completion 처리
+	if (bio->bi_end_io == bio_chain_endio) {	/* [한국어] 체인된 자식 bio 는 부모로 완료를 전파해야 하므로 별도 처리 */
 		bio = __bio_chain_endio(bio);
 		goto again;  // chained bio completion 반복: NVMe 분할 명령 모두 소진
 	}
@@ -4159,10 +4223,10 @@ again:
 	}
 #endif
 
-	if (bio->bi_end_io)  // NVMe CQ 처리기와 연결된 상위 완료 콜백
-		bio->bi_end_io(bio);  // NVMe CQ 처리기와 연결된 상위 완료 콜백
+	if (bio->bi_end_io)	/* [한국어] 완료 시 불릴 콜백 */
+		bio->bi_end_io(bio);	/* [한국어] 완료 시 불릴 콜백 */
 }
-EXPORT_SYMBOL(bio_endio);  // NVMe CQ 수신 후 상위 레이어로 completion 전파
+EXPORT_SYMBOL(bio_endio);	/* [한국어] 완료를 상위 계층으로 전파 */
 
 /**
  * bio_split - split a bio
@@ -4199,7 +4263,8 @@ EXPORT_SYMBOL(bio_endio);  // NVMe CQ 수신 후 상위 레이어로 completion 
  * 호출 체인:
  *   blk_queue_split() → [bio_split()] → bio_alloc_clone() + bio_advance()
  */
-struct bio *bio_split(struct bio *bio, int sectors,  // NVMe MDTS/segment 한도 초과 시 여러 CID로 분할
+struct bio *bio_split(struct bio *bio, int sectors,	/* [한국어] 큐 한계(max_hw_sectors, max_segments, virt_boundary)를 넘으면
+	 * blk-merge.c 가 bio 를 쪼개고, 쪼개진 조각마다 별도 request/명령이 된다 */
 		      gfp_t gfp, struct bio_set *bs)
 {
 	struct bio *split;
@@ -4214,26 +4279,29 @@ struct bio *bio_split(struct bio *bio, int sectors,  // NVMe MDTS/segment 한도
 		return ERR_PTR(-EINVAL);  // 오류 포인터 반환: NVMe 분할/clone 실패 전파
 
 	/* atomic writes cannot be split */
-	if (bio->bi_opf & REQ_ATOMIC)	// NVMe atomic write는 분할/trim 불가
+	if (bio->bi_opf & REQ_ATOMIC)	/* [한국어] 원자적 쓰기는 전부 아니면 전무여야 하므로 쪼갤 수 없다.
+	 * NVMe 에서 이 보장의 근거는 NAWUPF/NABSPF 이며, 그 경계를 넘는 요청은 애초에 만들어지지 않는다 */
 		return ERR_PTR(-EINVAL);  // 오류 포인터 반환: NVMe 분할/clone 실패 전파
 
 	split = bio_alloc_clone(bio->bi_bdev, bio, gfp, bs);  // bio_vec 공유 clone: NVMe MDTS 분할 시 원본 PRP/SGL 재사용
 	if (!split)
 		return ERR_PTR(-ENOMEM);  // 오류 포인터 반환: NVMe 분할/clone 실패 전파
 
-	split->bi_iter.bi_size = sectors << 9;  // NVMe 명령의 NLB(Length)로 변환됨
+	split->bi_iter.bi_size = sectors << 9;	/* [한국어] bi_size = 이 bio 가 옮길 바이트 수 (파일 상단 "bi_size 와 NLB" 참고) */
 
-	if (bio_integrity(split))  // NVMe PI/DIF 보호 정보 처리: PRP/SGL과 함께 보호 정보가 일치해야 컨트롤러가 명령을 수락함
+	if (bio_integrity(split))	/* [한국어] 무결성 메타데이터도 데이터와 같은 지점에서 함께 쪼개야 한다.
+	 * 데이터와 보호 정보의 구간이 어긋나면 장치가 reftag 불일치로 거부한다 */
 		bio_integrity_trim(split);
 
-	bio_advance(bio, split->bi_iter.bi_size);  // NVMe partial completion 후 남은 sector 범위 갱신
+	bio_advance(bio, split->bi_iter.bi_size);	/* [한국어] 부분 완료 후 남은 구간으로 iter 를 전진시킨다 */
 
 	if (bio_flagged(bio, BIO_TRACE_COMPLETION))
 		bio_set_flag(split, BIO_TRACE_COMPLETION);
 
 	return split;
 }
-EXPORT_SYMBOL(bio_split);  // NVMe MDTS/segment 한도 초과 시 여러 CID로 분할
+EXPORT_SYMBOL(bio_split);	/* [한국어] 큐 한계(max_hw_sectors, max_segments, virt_boundary)를 넘으면
+	 * blk-merge.c 가 bio 를 쪼개고, 쪼개진 조각마다 별도 request/명령이 된다 */
 
 /**
  * bio_trim - trim a bio
@@ -4265,7 +4333,7 @@ EXPORT_SYMBOL(bio_split);  // NVMe MDTS/segment 한도 초과 시 여러 CID로 
 void bio_trim(struct bio *bio, sector_t offset, sector_t size)
 {
 	/* We should never trim an atomic write */
-	if (WARN_ON_ONCE(bio->bi_opf & REQ_ATOMIC && size))  // NVMe atomic write 단위: 분할/trim 불가
+	if (WARN_ON_ONCE(bio->bi_opf & REQ_ATOMIC && size))	/* [한국어] 원자적 쓰기를 잘라내려는 시도 — 있을 수 없는 호출이다 */
 		return;
 
 	if (WARN_ON_ONCE(offset > BIO_MAX_SECTORS || size > BIO_MAX_SECTORS ||
@@ -4273,13 +4341,13 @@ void bio_trim(struct bio *bio, sector_t offset, sector_t size)
 		return;
 
 	size <<= 9;
-	if (offset == 0 && size == bio->bi_iter.bi_size)  // NVMe 명령의 NLB(Length)로 변환됨
+	if (offset == 0 && size == bio->bi_iter.bi_size)	/* [한국어] bi_size = 이 bio 가 옮길 바이트 수 (파일 상단 "bi_size 와 NLB" 참고) */
 		return;
 
-	bio_advance(bio, offset << 9);  // NVMe partial completion 후 남은 sector 범위 갱신
-	bio->bi_iter.bi_size = size;  // NVMe 명령의 NLB(Length)로 변환됨
+	bio_advance(bio, offset << 9);	/* [한국어] 부분 완료 후 남은 구간으로 iter 를 전진시킨다 */
+	bio->bi_iter.bi_size = size;	/* [한국어] bi_size = 이 bio 가 옮길 바이트 수 (파일 상단 "bi_size 와 NLB" 참고) */
 
-	if (bio_integrity(bio))	// NVMe PI/DIF 보호 정보 해제
+	if (bio_integrity(bio))	/* [한국어] 무결성(PI) 메타데이터 자원 해제 */
 		bio_integrity_trim(bio);
 }
 EXPORT_SYMBOL_GPL(bio_trim);
