@@ -569,6 +569,11 @@ static inline int bio_queue_enter(struct bio *bio)
 	struct request_queue *q = bdev_get_queue(bio->bi_bdev);	/* bio -> block_device -> request_queue; NVMe namespace 마다 독립 queue */
 
 	if (blk_try_enter_queue(q, false)) {				/* NVMe I/O 일반 경로; PM 경로 아님 */
+		/* [한국어] 곧바로 잡았다 놓는 이 한 쌍은 실제로는 아무것도 잠그지 않는다.
+		 * lockdep 에게 "이 지점에서 io_lockdep_map 을 읽기 모드로 잡을 수 있다"는
+		 * 사실만 기록시키는 순수 어노테이션이다. 그 기록이 있어야 lockdep 이
+		 * 'IO 제출 중에 큐 freeze 를 기다리는' 잘못된 락 순서를 잡아낼 수 있다.
+		 * CONFIG_LOCKDEP 이 꺼지면 두 줄 다 사라져 비용이 0 이 된다. */
 		rwsem_acquire_read(&q->io_lockdep_map, 0, 0, _RET_IP_);
 		rwsem_release(&q->io_lockdep_map, _RET_IP_);
 		return 0;						/* queue 진입 성공; blk_mq_submit_bio 계속 진행 -> NVMe SQ 할당 */
@@ -3285,7 +3290,10 @@ static inline u64 blk_time_get_ns(void)
 	struct blk_plug *plug = current->plug;				/* 현재 task의 plug; scheduler batching으로 인해 여러 NVMe rq가 동일 timestamp 획득 */
 
 	if (!plug || !in_task())
-		return ktime_get_ns();						/* plug 없거나 interrupt context면 직접 측정; NVMe ISR/complete 경로 */
+		/* [한국어] plug 가 없으면 캐시할 곳이 없고, 인터럽트 문맥이면 current->plug 가
+		 * 이 문맥의 것이 아니라 인터럽트당한 태스크의 것이므로 써서는 안 된다.
+		 * 두 경우 모두 시각을 직접 읽는다. */
+		return ktime_get_ns();
 
 	/*
 	 * 0 could very well be a valid time, but rather than flag "this is
