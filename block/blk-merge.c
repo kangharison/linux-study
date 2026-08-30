@@ -3224,7 +3224,7 @@ EXPORT_SYMBOL_GPL(blk_mq_sched_try_merge);
  *    Identify Controller/Namespace에서 보고된 MDTS, maximum SGL/PRP,
  *    DMA 정렬 특성을 blk layer 형식으로 표현한 것이다(추정).
  *  - bio_will_gap, bvec_split_segs 등은 메모리 물리 주소의 연속성을 검사해
- *    NVMe DMA(SGL/PRP)가 올바르게 구성되도록 보장한다(추정).
+ *    뒤이은 DMA 매핑이 큐 한계를 만족하도록 보장한다.
  *  - Discard/Secure Erase/Write Zeroes는 각각 NVMe Dataset Management,
  *    Sanitize, Write Zeroes 명령의 제약을 반영하여 분할/병합한다.
  *  - 이 파일의 처리 이후 request는 block/blk-mq.c의 blk_mq_get_request를

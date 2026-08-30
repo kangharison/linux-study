@@ -385,7 +385,8 @@ static inline void blk_mq_set_min_shallow_depth(struct request_queue *q, /* q: N
 
 	queue_for_each_hw_ctx(q, hctx, i) /* queue의 모든 hctx(즉, NVMe queue들)에 적용 */
 		sbitmap_queue_min_shallow_depth(&hctx->sched_tags->bitmap_tags, /* sched_tags bitmap: NVMe queue depth보다 상위인 tag pool */
-						depth); /* depth보다 얕은 영역만 우선 탐색 -> CID/tag 확보 지연 감소 (추정) */
+						depth); /* [한국어] sbitmap 앞쪽 depth 범위에서만 비트를 찾는다. 한 큐가 드라이버 태그를
+				 * 전부 채가지 못하게 막아, 스케줄러가 재정렬할 후보를 남겨 두기 위한 상한이다. */
 }
 
 /*

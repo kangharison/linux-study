@@ -108,7 +108,8 @@ static inline void mac_fix_string(char *stg, int len)
 {
 	int i;
 
-	/* 문자열 우측 공백 제거; NVMe DMA 완료 후 CPU가 버퍼를 가공하는 단계 (추정) */
+	/* [한국어] 파티션 이름의 우측 공백을 잘라낸다 — Mac 파티션 맵은 이름을 고정 길이
+	 * 필드에 공백으로 채워 저장한다 */
 	for (i = len - 1; i >= 0 && stg[i] == ' '; i--)
 		stg[i] = 0;	/* 우측 끝 공백을 '\0'로 덮어써서 문자열 종료 (NVMe queue의 데이터 버퍼와 무관) */
 }
@@ -195,7 +196,8 @@ int mac_partition(struct parsed_partitions *state)
 	/* Get 0th block and look at the first partition map entry. */
 	/* LBA 0을 NVMe에서 읽음: read_part_sector() -> submit_bio -> blk_mq_submit_bio -> blk_mq_get_request -> nvme_queue_rq -> nvme_sq_copy_cmd/nvme_write_sq_db(Read, SLBA=0, doorbell) */
 	md = read_part_sector(state, 0, &sect);
-	/* read_part_sector() 내부 bio/mem 할당 실패 또는 NVMe CQE 오류(SQ full, LBA 초과 등) 시 NULL 반환 (추정) */
+	/* [한국어] read_part_sector() 가 NULL 이면 그 섹터를 읽지 못했다는 뜻이다
+		 * (메모리 부족이거나 장치가 에러를 냈거나 범위를 벗어났거나) */
 	if (!md)
 		return -1;	/* NVMe Read 명령 실패 또는 메모리 부족 (CID 완료 전/후 오류 가능) */
 	/* NVMe Read CQE가 성공했어도 매직 넘버 검증이 필요; MAC_DRIVER_MAGIC(0x4552) 불일치 시 Mac 디스크 아님 */
@@ -204,8 +206,10 @@ int mac_partition(struct parsed_partitions *state)
 		put_dev_sector(sect);
 		return 0;	/* LBA 0에 Mac 드라이버 서술자가 없음 -> NVMe 입장에서는 일반 블록 데이터 */
 	}
-	/* md->block_size는 LBA 0 오프셋 2의 big-endian 16비트; NVMe Identify Namespace LBAF의 LBA Data Size와 대응 (추정) */
-	secsize = be16_to_cpu(md->block_size);	/* Mac 논리 블록 크기; NVMe Read 단위(보통 512B)와 다를 수 있음 (추정) */
+	/* [한국어] Mac 파티션 맵이 스스로 기록해 둔 논리 블록 크기(빅엔디언 16비트).
+	 * 장치가 보고하는 논리 블록 크기와는 별개의 값으로, 맵을 해석하는 데만 쓴다 */
+	secsize = be16_to_cpu(md->block_size);	/* [한국어] 이 맵이 쓰는 블록 크기. 커널이 읽어 오는 512B 섹터와 다를 수 있어
+						 * 아래에서 비율을 곱해 섹터 번호로 환산한다 */
 	/* 드라이버 서술자 파싱 후 버퍼 해제; 다음 read_part_sector() 전 필수 */
 	put_dev_sector(sect);
 
@@ -216,14 +220,15 @@ int mac_partition(struct parsed_partitions *state)
 	 * Real block sizes are probably (?) powers of two, so just require
 	 * that.
 	 */
-	/* NVMe LBA는 보통 512B 기준; secsize가 2의 거듭제곱이 아니면 read_part_sector()로 정렬된 APM 엔트리 읽기 불가 (추정) */
+	/* [한국어] 아래에서 secsize/512 로 섹터 번호를 환산하므로 2의 거듭제곱이어야
+	 * 시프트로 정확히 나눠떨어진다. 손상된 맵이 이상한 값을 담고 있을 수 있어 검사한다 */
 	if (!is_power_of_2(secsize))
-		return -1;	/* NVMe LBA는 보통 512B 기준이므로 secsize가 2의 거듭제곱이 아니면 후속 read_part_sector()로 정렬 읽기 불가 (추정) */
+		return -1;	/* [한국어] 2의 거듭제곱이 아니면 이 맵을 해석할 수 없다 — 손상으로 보고 포기한다 */
 	/* secsize를 NVMe 섹터(512B) 단위로 내림; secsize<512이면 datasize=0이 되어 후속 읽기가 실패할 수 있음 */
 	datasize = round_down(secsize, 512);	/* NVMe가 반환하는 512B 섹터 단위로 내림 */
 	/* datasize/512 = NVMe Read의 SLBA; LBA 0 또는 1에서 첫 Apple Partition Map 엔트리를 읽음 */
 	data = read_part_sector(state, datasize / 512, &sect);
-	/* NVMe CQE 오류, SQ full, 또는 메모리 부족으로 LBA datasize/512 읽기 실패 (추정) */
+	/* [한국어] 해당 섹터를 읽지 못했다 (에러이거나 메모리 부족) */
 	if (!data)
 		return -1;	/* NVMe Read 실패: SQ/CQ 완료 상태 비정상 또는 메모리 할당 실패 */
 	/* secsize가 512B 배수가 아닐 때 섹터 내 APM 엔트리 시작 오프셋; 512B 배수면 0 */
@@ -257,7 +262,8 @@ int mac_partition(struct parsed_partitions *state)
 
 	/* 파티션 스캔 결과 문자열 버퍼에 " [mac]" 기록; 이후 dmesg 등에서 "nvme0n1: [mac] p1 p2 ..." 형태로 출력 */
 	seq_buf_puts(&state->pp_buf, " [mac]");
-	/* APM은 MBR 확장 파티션 체인(EBR)처럼 연결 리스트가 아닌 평면 구조이므로, NVMe Read 제출 횟수는 blocks_in_map에 선형 (추정) */
+	/* [한국어] APM 은 MBR 확장 파티션(EBR)처럼 연결 리스트를 따라가는 구조가 아니라
+	 * 엔트리가 평면으로 나열된 구조라, blocks_in_map 만큼만 순회하면 끝난다 */
 	for (slot = 1; slot <= blocks_in_map; ++slot) {
 		/* 현재 파티션 엔트리의 Mac 논리 블록 오프셋; CHS 변환 없이 /512로 NVMe LBA로 직접 환산 */
 		int pos = slot * secsize;	/* 현재 파티션 엔트리의 Mac 논리 블록 오프셋 */
@@ -265,16 +271,17 @@ int mac_partition(struct parsed_partitions *state)
 		put_dev_sector(sect);
 		/* pos/512 = NVMe Read SLBA; APM은 CHS 대신 논리 블록 번호를 사용하므로 bio remap 시 NVMe SLBA로 직접 대응 */
 		data = read_part_sector(state, pos/512, &sect);
-		/* APM 엔트리 읽기 실패: NVMe CQE status가 error이거나, SQ/CQ/doorbell 단계에서 문제 발생 (추정) */
+		/* [한국어] 이 엔트리를 담은 섹터를 읽지 못했다 */
 		if (!data)
-			return -1;		/* NVMe Read 실패: SQ가 가득 찼거나, CID 완료에 오류가 포함됨 (추정) */
+			return -1;		/* [한국어] 읽기 실패 — 맵을 신뢰할 수 없으므로 파싱을 중단한다 */
 		/* NVMe가 반환한 512B 버퍼 내 pos%512 위치의 APM 엔트리; 이 위치는 NVMe PRP/SGL 버퍼의 바이트 오프셋 */
 		part = (struct mac_partition *) (data + pos%512);
 		/* 예상된 APM 시그니처(0x504d)가 아니면 중단; NVMe에서 읽은 데이터의 나머지는 무시됨 */
 		if (be16_to_cpu(part->signature) != MAC_PARTITION_MAGIC)
 			/* APM 시그니처 깨짐: 이 지점 이후의 NVMe Read는 불필요하므로 루프 탈출 */
 			break;			/* 예상된 Apple Partition Map 시그니처가 아니면 중단; NVMe 데이터는 여기까지만 유효 */
-		/* 파티션 슬롯(slot)을 parsed_partitions.parts[]에 등록 -> rescan_partitions 종료 후 add_gd_partition()을 거쳐 /dev/nvme0n1pN 형태의 독립 블록 디바이스 생성 (추정) */
+		/* [한국어] 파싱 결과를 state->parts[] 에 기록해 둔다. 실제 파티션 블록 디바이스는
+		 * 파싱이 모두 끝난 뒤 상위(bdev_disk_changed 경로)가 만든다 — 이 파일은 해석만 한다 */
 		put_partition(state, slot,
 			/* start_block은 APM 엔트리 오프셋 8의 be32; Mac 블록 단위를 NVMe 512B LBA 단위로 환산 -> bio remap 후 SLBA에 더해짐 */
 			be32_to_cpu(part->start_block) * (secsize/512),	/* NVMe LBA = Mac 시작 블록 * (Mac 블록 크기 / 512B) */
@@ -338,7 +345,8 @@ int mac_partition(struct parsed_partitions *state)
 
 			/* 현재까지 가장 부팅에 적합한 파티션 후보 갱신 */
 			if (goodness > found_root_goodness) {
-				/* 루트 파티션 슬롯 번호 기록; 이는 /dev/nvme0n1pN의 N과 대응 (추정) */
+				/* [한국어] 루트로 표시된 파티션의 슬롯 번호를 기록한다. 이 번호가 곧 장치 이름 끝의
+			 * 파티션 번호(예: nvme0n1p2 의 2)가 된다 */
 				found_root = slot;
 				/* 현재 최고 부팅 적합도 점수 갱신 */
 				found_root_goodness = goodness;

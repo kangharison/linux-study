@@ -2023,10 +2023,12 @@ static inline bool hctx_may_queue(struct blk_mq_hw_ctx *hctx,
 				(dispatch_ops);						\
 				rcu_read_unlock();					\
 			}								\
-		} while (0)								/* rcu/srcu로 NVMe tag_set/hctx 접근 보호; dispatch 임계영역(추정) */ \
+		} while (0)								/* [한국어] 디스패치 구간을 RCU 또는 SRCU 로 감싼다. 어느 쪽인지는 큐가
+							 * BLK_MQ_F_BLOCKING 인지에 달렸다 — 잠들 수 있는 드라이버는 SRCU 를 쓴다.
+							 * 이 보호가 막는 것은 quiesce 와의 경쟁이다. */ \
 
 #define blk_mq_run_dispatch_ops(q, dispatch_ops)		\
-		__blk_mq_run_dispatch_ops(q, true, dispatch_ops)	/* NVMe dispatch 경로 진입 시 tag_set 생명주기 보호(추정) */
+		__blk_mq_run_dispatch_ops(q, true, dispatch_ops)	/* [한국어] 위 매크로의 "검사 후 진입" 판이다 */
 
 /*
  * [한국어]

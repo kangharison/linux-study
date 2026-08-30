@@ -5,7 +5,7 @@
 #include <linux/bio-integrity.h>  /* [한국어] bio_integrity_payload 등 T10-PI/DIF/DIX 자료구조 — NVMe PI(Protection Information) Guard/APP/REF 태그가 CQE와 함께 검증되는 경로에 사용 */
 #include <linux/blk-crypto.h>     /* [한국어] blk_crypto_key/keyslot API — NVMe SED/TCG Opal 또는 inline encryption에서 write 시 key 선택, read 시 key unwrap에 사용 */
 #include <linux/lockdep.h>        /* [한국어] rwsem_acquire/release 등 lockdep 매크로 — request_queue freeze/PM lockdep map으로 NVMe reset 중 교착(deadlock)을 정적으로 검출 */
-#include <linux/memblock.h>	/* [한국어] max_pfn/max_low_pfn 참조용 — NVMe DMA/PRP(Physical Region Page) 물리 주소 상한을 결정할 때 사용(추정) */
+#include <linux/memblock.h>	/* [한국어] max_pfn/max_low_pfn 참조용 — 시스템 물리 메모리 상한을 아는 데 쓴다. bounce 여부 판정 등이 이 값을 참조한다할 때 사용(추정) */
 #include <linux/sched/sysctl.h>   /* [한국어] sysctl_hung_task_timeout_secs — NVMe command가 오래 멈췄을 때 hung_task watchdog 오탐을 피하기 위한 대기 주기 계산 기준 */
 #include <linux/timekeeping.h>    /* [한국어] ktime_get_ns() — NVMe I/O latency 측정 및 doorbell 발행 타이밍 기록에 사용되는 단조 시각 소스 */
 #include <xen/xen.h>              /* [한국어] xen_domain()/xen_biovec_phys_mergeable() — Xen 게스트 환경에서 grant table 경계로 인해 NVMe PRP/SGL 병합이 불가능한 경우를 추가로 판단 */
@@ -95,7 +95,7 @@ struct elv_change_ctx;
  * 왜 필요한가: 드라이버가 하드웨어적으로 훨씬 큰 max_hw_sectors(예: NVMe MDTS가 매우 큰
  * 경우)를 보고하더라도, 소프트웨어 기본값은 지연시간·페이지 캐시 사용량 균형을 위해
  * 4MB로 제한한다. sysfs(/sys/block/<disk>/queue/max_sectors_kb)를 통해 max_hw_sectors
- * 한도 내에서 사용자가 늘릴 수 있다(추정: nvme_update_ns_info_block 등에서 조정). */
+ * 한도 내에서 사용자가 sysfs 로 조정할 수 있다. */
 #define BLK_DEF_MAX_SECTORS_CAP	(SZ_4M >> SECTOR_SHIFT)	/* [한국어] 4MB를 섹터(512B) 단위로 환산 = 8192 sectors */
 
 /* [한국어] BLK_DEV_MAX_SECTORS — request_queue가 표현 가능한 섹터 수의 이론적 최댓값.
@@ -546,7 +546,8 @@ static inline int bio_queue_enter(struct bio *bio)
 		rwsem_release(&q->io_lockdep_map, _RET_IP_);
 		return 0;						/* queue 진입 성공; blk_mq_submit_bio 계속 진행 -> NVMe SQ 할당 */
 	}
-	return __bio_queue_enter(q, bio);				/* slow path: queue dead/suspended 상태에서 대기 또는 kill; NVMe reset 대기(추정) */
+	return __bio_queue_enter(q, bio);				/* [한국어] 느린 경로 — 큐가 freeze 중이면 여기서 기다리고, 이미 죽었으면 실패한다.
+							 * 컨트롤러 리셋처럼 큐를 얼리는 작업이 진행 중일 때 이 경로를 탄다. */
 }
 
 /*
@@ -3265,7 +3266,9 @@ static inline u64 blk_time_get_ns(void)
 	 * ktime_get_ns() if we just happen to get 0 as the current time.
 	 */
 	if (!plug->cur_ktime) {
-		plug->cur_ktime = ktime_get_ns();				/* plug 수명 동안 동일한 timestamp; batch 내 NVMe rq들의 latency 분산 왜곡 가능(추정) */
+		plug->cur_ktime = ktime_get_ns();				/* [한국어] plug 하나가 사는 동안 시각을 한 번만 읽고 재사용한다.
+							 * ktime_get_ns() 는 공짜가 아니고 배치 안의 요청마다 부르면 비용이 쌓이기 때문이다.
+							 * 대가로 같은 배치의 요청들은 제출 시각이 동일하게 기록된다. */
 		current->flags |= PF_BLOCK_TS;				/* plug flush 시점까지 timestamp 유효 표시; NVMe multi-queue 타임스탬프 정렬 */
 	}
 	return plug->cur_ktime;							/* NVMe request 발행 시각; later CQE 수신 시점과 차이로 latency 계산 */
@@ -3288,7 +3291,7 @@ static inline u64 blk_time_get_ns(void)
  */
 static inline ktime_t blk_time_get(void)
 {
-	return ns_to_ktime(blk_time_get_ns());				/* ktime 형태로 변환; NVMe timeout timer 등록 시 사용(추정) */
+	return ns_to_ktime(blk_time_get_ns());				/* [한국어] ns 값을 ktime_t 로 감싼다 — 타이머 API 가 그 타입을 요구한다 */
 }
 
 /*

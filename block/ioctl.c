@@ -881,7 +881,8 @@ static int blkdev_pr_register(struct block_device *bdev, blk_mode_t mode,
 
 	if (reg.flags & ~PR_FL_IGNORE_KEY) /* [한국어] PR_FL_IGNORE_KEY 이외의 알 수 없는 플래그 비트가 설정돼 있으면 */
 		return -EOPNOTSUPP; /* [한국어] 알 수 없는 플래그는 지원하지 않음 */
-	return ops->pr_register(bdev, reg.old_key, reg.new_key, reg.flags); /* [한국어] 드라이버의 pr_register 콜백으로 위임 - NVMe라면 Reservation Register 명령에 대응(추정) */
+	return ops->pr_register(bdev, reg.old_key, reg.new_key, reg.flags); /* [한국어] 드라이버의 pr_register 콜백으로 위임. NVMe 는 drivers/nvme/host/pr.c 의 nvme_pr_ops 를
+						 * fops->pr_ops 에 심어 두며, 이 콜백은 Reservation Register(opcode 0x0d)로 나간다. 원래 주석: 면 Reservation Register 명령에 대응(추정) */
 }
 
 /*
@@ -1104,7 +1105,7 @@ static int blkdev_pr_read_keys(struct block_device *bdev, blk_mode_t mode,
 
 	keys_info->num_keys = read_keys.num_keys; /* [한국어] 드라이버에게 "이 배열에 최대 몇 개까지 담을 수 있는지" 알려줌(드라이버 pr_read_keys의 입력 계약) */
 
-	ret = ops->pr_read_keys(bdev, keys_info); /* [한국어] 드라이버의 pr_read_keys 콜백 호출 - NVMe라면 Reservation Report 명령으로 실제 키 목록을 채움(추정) */
+	ret = ops->pr_read_keys(bdev, keys_info); /* [한국어] 드라이버의 pr_read_keys 콜백 호출. NVMe 는 Reservation Report(opcode 0x0e)로 실제 키 목록을 채운다 */
 	if (ret) /* [한국어] 드라이버 호출 실패 여부 확인 */
 		goto out; /* [한국어] 실패 시 out 레이블(해제)로 점프 */
 
@@ -1694,7 +1695,7 @@ long blkdev_ioctl(struct file *file, unsigned cmd, unsigned long arg)
 
 	if (!bdev->bd_disk->fops->ioctl) /* [한국어] 여기까지 왔다는 것은 이 파일이 이 cmd를 전혀 모른다는 뜻 - 드라이버가 자체 ioctl 콜백을 등록했는지 확인 */
 		return -ENOTTY; /* [한국어] 드라이버도 처리할 수 없음 - Inappropriate ioctl for device */
-	return bdev->bd_disk->fops->ioctl(bdev, mode, cmd, arg); /* [한국어] 드라이버의 fops->ioctl 콜백으로 최종 위임 - NVMe라면 vendor/passthrough ioctl 등이 여기서 처리됨(추정) */
+	return bdev->bd_disk->fops->ioctl(bdev, mode, cmd, arg); /* [한국어] 드라이버의 fops->ioctl 콜백으로 최종 위임. NVMe 는 여기서 NVME_IOCTL_* 계열(패스스루 등)을 처리한다. 원래 주석: vendor/passthrough ioctl 등이 여기서 처리됨(추정) */
 }
 
 #ifdef CONFIG_COMPAT

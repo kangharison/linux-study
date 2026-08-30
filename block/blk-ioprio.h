@@ -57,7 +57,9 @@
  *   WRR(Weighted Round Robin) Arbitration을 지원한다면 URGENT/HIGH/MEDIUM/LOW
  *   클래스 힌트로 이어질 가능성이 있다. 다만 이는 NVMe 스펙 자체의 커맨드
  *   우선순위/Arbitration 메커니즘과는 별개의 계층이며, 정확한 매핑 여부는 이
- *   블록 계층 코드가 아니라 개별 NVMe 드라이버/컨트롤러 구현에 달려 있다 (추정).
+ *   블록 계층이 아니라 드라이버와 장치 구현에 달려 있다. 이 트리의
+ *   drivers/nvme/ 에는 rq->ioprio 나 IOPRIO_* 를 읽는 코드가 없으므로,
+ *   NVMe PCIe 에서 이 우선순위는 스케줄러 단계까지만 영향을 주고 명령에는 실리지 않는다.
  * 데이터 흐름을 한 줄로 요약하면: cgroup 설정 파일(io.prio.class) 기록 ->
  * blkcg_policy_data 갱신 -> (다음 I/O 제출 시) blkcg_set_ioprio(bio) 호출 ->
  * bio->bi_ioprio 갱신 -> request->ioprio로 전파 -> 스케줄러/드라이버가 소비.
@@ -208,7 +210,7 @@ static inline void blkcg_set_ioprio(struct bio *bio)	/* [한국어] 대체(fallb
  * - 이 값은 request->ioprio로 전파되어 mq-deadline/bfq/kyber 등 I/O
  *   스케줄러의 디스패치 순서에 영향을 주고, NVMe 드라이버까지 내려가면
  *   컨트롤러의 WRR(Weighted Round Robin) Arbitration 힌트로 이어질 수도
- *   있다(추정) — 다만 이는 NVMe 자체의 커맨드 우선순위 메커니즘과는 별개
+ *   있다 — 다만 이는 NVMe 자체의 커맨드 우선순위 메커니즘(가중 라운드로빈 중재 등)과는 별개
  *   계층이다.
  */
 

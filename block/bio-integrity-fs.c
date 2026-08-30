@@ -106,7 +106,7 @@ struct fs_bio_integrity_buf {
 	 *         block/bio-integrity.c의 책임).
 	 * 읽는 자: NVMe 등 블록 드라이버가 bio_integrity(bio)를 통해 이
 	 *         bio_vec를 순회하며 DMA를 위한 PRP(Physical Region Page) 또는
-	 *         SGL(Scatter Gather List) 엔트리로 변환한다(추정).
+	 *         메타데이터 버퍼로서 DMA 매핑된다.
 	 * 값 범위: 큰 메타데이터가 필요한 경우 bip_max_vcnt가 1을 넘을 수
 	 *         있으나(그 경우 이 단일 bvec만으로는 부족하므로 별도 배열이
 	 *         쓰일 수 있음, 추정), 이 파일이 다루는 fs_bio_integrity_buf는

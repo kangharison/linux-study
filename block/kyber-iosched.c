@@ -317,7 +317,7 @@ struct kyber_cpu_latency {
  *   - blk-mq에서 request->mq_ctx(소프트웨어 컨텍스트)와 blk_mq_hw_ctx(하드웨어
  *     컨텍스트) 간 매핑은 NVMe 드라이버의 nvme_queue 선택과 밀접하다.
  *   - ctx->index_hw[hctx->type]을 인덱스로 사용하므로, 동일 CPU/동일 hctx
- *     그룹 내 요청은 동일 kcq.rq_list에 삽입된다. (추정) 이는 NVMe SQ당
+ *     그룹 내 요청은 동일 kcq.rq_list 에 삽입된다. 이는 하드웨어 큐당
  *     도착 순서를 유지하면서 도메인별 재정렬을 가능하게 한다.
  */
 struct kyber_ctx_queue {
@@ -1145,7 +1145,7 @@ static void kyber_ctx_queue_init(struct kyber_ctx_queue *kcq)
  * [한국어]
  * kyber_init_hctx() - elevator_ops.init_hctx 콜백: per-hctx Kyber 데이터(khd) 생성
  *
- * @hctx: 새로 초기화되는 blk_mq_hw_ctx. (추정) NVMe 컨트롤러의 한 SQ(또는
+ * @hctx: 새로 초기화되는 blk_mq_hw_ctx. NVMe PCIe 라면 nvme_queue 하나(또는
  *        SQ 그룹)에 대응. hctx->nr_ctx, hctx->numa_node를 khd 크기/NUMA
  *        배치 결정에 사용.
  * @hctx_idx: 이 hctx의 전역 인덱스 (Kyber 로직에서는 사용하지 않고 콜백
@@ -1171,7 +1171,8 @@ static int kyber_init_hctx(struct blk_mq_hw_ctx *hctx, unsigned int hctx_idx)
 	struct kyber_hctx_data *khd;	/* [한국어] 새로 할당할 이 hctx 전용 Kyber 데이터 포인터 */
 	int i;	/* [한국어] 아래 여러 초기화 루프에서 공용으로 쓰는 순회 인덱스 */
 
-	/* (추정) 이 hctx는 NVMe 컨트롤러의 한 SQ(또는 SQ 그룹)에 매핑됨 */
+	/* 이 hctx 는 NVMe PCIe 라면 nvme_queue 하나(SQ/CQ 쌍)에 대응한다.
+	 * 연결은 set->ops->init_hctx = nvme_init_hctx 가 hctx->driver_data 에 그 포인터를 넣어 맺는다 */
 	khd = kmalloc_node(sizeof(*khd), GFP_KERNEL, hctx->numa_node);	/* [한국어] hctx와 같은 NUMA 노드에 khd 할당 - NVMe SQ 처리 CPU와 cache locality 확보 */
 	if (!khd)	/* [한국어] 할당 실패 시 */
 		return -ENOMEM;	/* [한국어] 아직 아무 것도 추가 할당하지 않았으므로 바로 실패 반환 */
@@ -2373,7 +2374,7 @@ MODULE_DESCRIPTION("Kyber I/O scheduler");	/* [한국어] modinfo에 표시될 �
  *    늘리거나 줄인다.
  *  - 비동기 쓰기 폭주로부터 동기 요청을 보호하기 위해 async_depth 및
  *    domain별 batching을 사용한다.
- *  - (추정) 각 blk_mq_hw_ctx는 NVMe 컨트롤러의 한 SQ(또는 SQ 그룹)에
+ *  - 각 blk_mq_hw_ctx 는 NVMe PCIe 에서 nvme_queue 하나(SQ/CQ 쌍)에
  *    대응하며, kcq는 동일 hctx 내에서 per-ctx로 도착 순서를 유지하면서
  *    merge/dispatch를 준비하는 버퍼 역할을 한다.
  */
