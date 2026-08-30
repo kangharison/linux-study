@@ -1302,7 +1302,8 @@ int blk_mq_alloc_sched_ctx_batch(struct xarray *elv_tbl,
 		 * 이미 같은 id가 있으면 실패 (-EBUSY) — 정상 흐름에서는 발생하지 않음 */
 		if (xa_insert(elv_tbl, q->id, ctx, GFP_KERNEL)) {
 			kfree(ctx);
-			return -ENOMEM;
+			return -ENOMEM;	/* [한국어] 이번 항목만 되돌린다. 앞서 xarray 에 넣은 것들은
+					 * 호출자의 blk_mq_free_sched_ctx_batch() 가 일괄 정리한다. */
 		}
 	}
 	return 0;
@@ -1583,15 +1584,15 @@ int blk_mq_init_sched(struct request_queue *q, struct elevator_type *e,
 	/* [한국어] et: 미리 할당된 스케줄러 태그 풀 */
 	struct elevator_tags *et = res->et;
 	/* [한국어] hctx: 각 하드웨어 큐 컨텍스트 */
-	struct blk_mq_hw_ctx *hctx;
-	struct elevator_queue *eq;
-	unsigned long i;
-	int ret;
+	struct blk_mq_hw_ctx *hctx;	/* [한국어] hctx 순회 커서 — 스케줄러는 하드웨어 큐마다 자기 문맥을 갖는다 */
+	struct elevator_queue *eq;	/* [한국어] 이번에 만들 elevator 인스턴스 */
+	unsigned long i;		/* [한국어] queue_for_each_hw_ctx 가 요구하는 인덱스 */
+	int ret;			/* [한국어] 콜백 반환값 — 실패 시 out 라벨로 간다 */
 
 	/* [한국어] elevator_alloc(): elevator_queue 할당 + q->elevator 등록 + kobject 초기화 */
 	eq = elevator_alloc(q, e, res);
 	if (!eq)
-		return -ENOMEM;
+		return -ENOMEM;	/* [한국어] 아직 큐에 아무것도 연결하지 않았으므로 정리할 것이 없다 */
 
 	/* [한국어] q->nr_requests를 scheduler tag pool 크기로 설정:
 	 * elevator가 이 많큼의 request를 동시에 관리할 수 있어야 하드웨어 큐를 놀리지 않고 채울 수 있다 */
@@ -1618,14 +1619,16 @@ int blk_mq_init_sched(struct request_queue *q, struct elevator_type *e,
 
 	/* [한국어] ops.init_sched(): elevator 전역 자원 초기화
 	 * (mq-deadline: 우선순위별 rb-tree; BFQ: bfq_data 구조체; kyber: kyber_queue) */
-	ret = e->ops.init_sched(q, eq);
+	ret = e->ops.init_sched(q, eq);	/* [한국어] 스케줄러별 큐 전역 자료구조 초기화
+					 * (mq-deadline 의 rbtree/FIFO, kyber 의 도메인 토큰, bfq 의 서비스 트리 등) */
 	if (ret)
-		goto out;
+		goto out;		/* [한국어] out 은 blk_mq_exit_sched 를 불러 여기까지 만들어진 것을 전부 되돌린다 */
 
 	/* [한국어] ops.init_hctx(): hctx별 elevator context 초기화; 하드웨어 큐마다 하나씩 필요한 스케줄러 사설 자료구조 설정 */
 	queue_for_each_hw_ctx(q, hctx, i) {
 		if (e->ops.init_hctx) {
-			ret = e->ops.init_hctx(hctx, i);
+			ret = e->ops.init_hctx(hctx, i);	/* [한국어] 하드웨어 큐 단위 스케줄러 문맥 생성.
+								 * NVMe 처럼 큐가 수십 개면 이 콜백도 그만큼 불린다. */
 			if (ret) {
 				/* [한국어] init_hctx 실패: 이전에 성공한 hctx들은 blk_mq_exit_sched가 정리 */
 				blk_mq_exit_sched(q, eq);
@@ -1670,15 +1673,15 @@ out:
 void blk_mq_sched_free_rqs(struct request_queue *q)
 {
 	/* [한국어] 각 하드웨어 큐(hctx) 순회용 */
-	struct blk_mq_hw_ctx *hctx;
-	unsigned long i;
+	struct blk_mq_hw_ctx *hctx;	/* [한국어] hctx 순회 커서 */
+	unsigned long i;		/* [한국어] 순회 인덱스 */
 
 	/* [한국어] shared tags: 공유 tag pool의 모든 잔여 request를 한 번에 해제 */
 	if (blk_mq_is_shared_tags(q->tag_set->flags)) {
 		blk_mq_free_rqs(q->tag_set, q->sched_shared_tags,
-				BLK_MQ_NO_HCTX_IDX);
+				BLK_MQ_NO_HCTX_IDX);	/* [한국어] 공유 pool 은 특정 hctx 에 속하지 않는다는 뜻의 표식 인덱스 */
 	} else {
-		/* [한국어] per-SQ: 각 hctx->sched_tags에 남은 request 해제 */
+		/* [한국어] 큐마다 자기 sched_tags 를 갖는 구성: 각각에 남은 request 를 해제 */
 		queue_for_each_hw_ctx(q, hctx, i) {
 			/* [한국어] sched_tags가 NULL이면(teardown 완료 또는 미설정) 건너뜀 */
 			if (hctx->sched_tags)
