@@ -159,46 +159,70 @@ EXPORT_SYMBOL_GPL(blk_queue_rq_timeout);
  */
 void blk_set_stacking_limits(struct queue_limits *lim)
 {
-	/* 상속 전 구조체를 0으로 클리어하여 하위 NVMe 값과 min/max 병합 시
-	 * neutral identity(max 또는 0)가 된다. */
+	/* [한국어] 여기 채우는 값들은 **스택형 장치(MD/DM)의 출발점**이지 특정 장치의
+	 * 값이 아니다. 아래 blk_stack_limits() 가 하위 장치들의 값을 하나씩 병합해
+	 * 들어오므로, 각 필드는 "병합에 영향을 주지 않는 중립 원소"로 시작해야 한다 —
+	 * min 으로 합쳐질 필드는 최댓값(USHRT_MAX 등)으로, max 로 합쳐질 필드는
+	 * 최솟값(0)으로 두는 것이 그 이유다.
+	 *
+	 * NVMe 독자 주의: 아래 값들은 NVMe 가 쓰는 값이 아니다. NVMe 는
+	 * nvme_set_ctrl_limits() / nvme_update_disk_info() 에서 자기 값으로 덮어쓴다.
+	 * 특히 dma_alignment 는 대비가 크다 — 여기 기본값은 511(512B 정렬)이지만
+	 * NVMe 는 3(4바이트 정렬)으로 훨씬 관대하다. 그래서 NVMe 에서는 어지간한
+	 * 사용자 버퍼가 bounce 없이 그대로 매핑된다. */
 	memset(lim, 0, sizeof(*lim));
-	/* NVMe LBA Data Size 기본값: 드라이버가 명시하지 않으면 512B. */
+	/* [한국어] 논리 블록 크기 기본값 512B — 커널이 섹터를 세는 단위와 같다 */
 	lim->logical_block_size = SECTOR_SIZE;
-	/* NVMe 물리 페이지 정렬 기본값, LBAF에서 4K일 경우 갱신됨. */
+	/* [한국어] 물리 블록 크기도 일단 같게 둔다. 4Kn 이나 512e 장치가 붙으면 그때 커진다 */
 	lim->physical_block_size = SECTOR_SIZE;
-	/* NVMe 최소 I/O 크기 기본값: physical_block_size와 동일한 512B로 시작. */
+	/* [한국어] 최소 권장 IO 크기. 물리 블록 크기와 같게 시작한다 */
 	lim->io_min = SECTOR_SIZE;
-	/* NVMe Deallocate granularity 기본값, Identify에서 갱신됨. */
+	/* [한국어] discard 단위 기본값 */
 	lim->discard_granularity = SECTOR_SIZE;
-	/* NVMe DMA/PRP 시작 주소 정렬 기본값: 512B 경계. */
+	/* [한국어] DMA 시작 주소 정렬 요구(마스크 형태). 511 = 512B 경계 요구라는 뜻이며,
+	 * 이는 보수적인 기본값이다. 실제 장치가 더 관대하면(NVMe 는 3) 그 값으로 덮인다. */
 	lim->dma_alignment = SECTOR_SIZE - 1;
-	/* PRP/SGL 엔트리가 넘지 않을 기본 4GB 물리 경계. */
+	/* [한국어] 하나의 세그먼트가 넘어서는 안 되는 물리 주소 경계(기본 4GB).
+	 * 32비트 DMA 엔진이 주소 상위를 못 넘기는 경우를 표현하는 값이다. */
 	lim->seg_boundary_mask = BLK_SEG_BOUNDARY_MASK;
 
 	/* Inherit limits from component devices */
-	/* 하위 NVMe max_segments(PRP/SGL 최대 엔트리)와 min 병합 준비. */
+	/* [한국어] 아래 세 값은 min 으로 병합되므로 최댓값에서 시작해야 한다.
+	 * 0 으로 두면 첫 병합에서 0 이 되어 "세그먼트를 하나도 못 쓴다"가 되어 버린다. */
 	lim->max_segments = USHRT_MAX;
-	/* NVMe DSM/Deallocate scatter-gather segment 상한 준비. */
+	/* [한국어] discard 요청 하나에 담을 수 있는 구간 수의 상한 */
 	lim->max_discard_segments = USHRT_MAX;
-	/* 하위 NVMe MDTS와 min 병합 준비. */
+	/* [한국어] 아래는 전부 같은 이유로 UINT_MAX 다 — 하위 장치 값과 min 으로
+	 * 합쳐지므로 "아직 아무 제한도 없다"를 최댓값으로 표현한다. 각 필드가
+	 * 실제로 무엇을 제한하는지는 다음과 같다. */
+	/* [한국어] 장치가 한 명령으로 옮길 수 있는 최대 섹터 수. NVMe 는 MDTS 에서 유도한다 */
 	lim->max_hw_sectors = UINT_MAX;
-	/* 단일 PRP/SGL 엔트리 바이트 상한 준비. */
+	/* [한국어] 세그먼트 하나의 바이트 상한. NVMe 는 UINT_MAX 로 두어 사실상 무제한이다 */
 	lim->max_segment_size = UINT_MAX;
-	/* 사용자/커널 최종 I/O 크기 상한 준비. */
+	/* [한국어] 실제 적용되는 IO 크기 상한. hw 한계와 사용자 sysfs 설정의 교집합이다 */
 	lim->max_sectors = UINT_MAX;
-	/* NVMe SCSI ULP류 max_dev_sectors 상한 준비: 하위 값과 min 병합. */
+	/* [한국어] 장치 자체가 보고한 상한. 프로토콜 계층(SCSI ULP 등)이 별도로 두는 값이며
+	 * NVMe 는 이 필드를 쓰지 않고 max_hw_sectors 만 채운다 */
 	lim->max_dev_sectors = UINT_MAX;
-	/* NVMe Write Zeroes 최대 섹터 상한 준비. */
+	/* [한국어] Write Zeroes 한 번의 최대 섹터. NVMe 는 opcode 0x08 로 매핑되며
+	 * WZSL(Identify) 이 있으면 그 값에서 유도한다 */
 	lim->max_write_zeroes_sectors = UINT_MAX;
-	/* NVMe Write Zeroes와 함께 unmap(할당 해제)까지 수행 가능한 HW 상한 준비. */
+	/* [한국어] "0 을 쓰면서 동시에 할당까지 해제"할 수 있는 상한.
+	 * NVMe 에서는 Write Zeroes 의 DEAC 비트에 해당하며, 커널은 아주 좁은
+	 * 조건에서만 이것을 켠다(core.c:2840):
+	 *     (id->dlfeat & 0x7) == 0x1 && (id->dlfeat & (1 << 3))
+	 * 즉 DLFEAT 이 "해제된 블록을 읽으면 0 이 나온다"를 보장하고(하위 3비트 == 1),
+	 * 동시에 DEAC 지원을 광고할 때(비트 3)만이다. 보장이 없으면 DEAC 를 켜도
+	 * 읽었을 때 0 이 아닌 값이 나올 수 있어 Write Zeroes 의 의미가 깨진다. */
 	lim->max_hw_wzeroes_unmap_sectors = UINT_MAX;
-	/* 사용자 sysfs 설정 가능한 Write Zeroes unmap 상한 준비. */
+	/* [한국어] 위 값의 사용자 조정판(sysfs). 하드웨어 한계와 min 으로 합쳐진다 */
 	lim->max_user_wzeroes_unmap_sectors = UINT_MAX;
-	/* NVMe ZNS Zone Append 최대 섹터 상한 준비. */
+	/* [한국어] Zone Append 한 번의 최대 섹터. NVMe ZNS 는 ZASL 에서 유도하며,
+	 * 이 값이 0 이 아니라는 사실 자체가 "네이티브 append 지원"의 판정 기준이다 */
 	lim->max_hw_zone_append_sectors = UINT_MAX;
-	/* 사용자 sysfs 설정 가능한 Deallocate 상한 준비. */
+	/* [한국어] discard 상한의 사용자 조정판(sysfs) */
 	lim->max_user_discard_sectors = UINT_MAX;
-	/* NVMe 원자적 쓰기(NAWUPF 유래)의 하드웨어 최대 상한 준비. */
+	/* [한국어] 원자적 쓰기 하드웨어 상한. NVMe 는 (1 + NAWUPF) * 논리블록크기 */
 	lim->atomic_write_hw_max = UINT_MAX;
 }
 EXPORT_SYMBOL(blk_set_stacking_limits);
@@ -415,14 +439,34 @@ static int blk_validate_zoned_limits(struct queue_limits *lim)
  */
 static int blk_validate_integrity_limits(struct queue_limits *lim)
 {
-	/* lim 안에 임베드된 blk_integrity 서브구조체 포인터 - 이후 모든 PI
-	 * 필드 접근은 이 bi를 통해 이루어진다. */
+	/* [한국어] ===== 이 검증이 무엇을 확인하는가 (NVMe 기준 실물 대조) =====
+	 * 드라이버가 채워 넣은 blk_integrity 가 자기모순 없는 조합인지 본다.
+	 * NVMe 가 이 구조체를 채우는 곳은 nvme_init_integrity()(core.c:2200~2253)이며,
+	 * Identify Namespace 의 DPS(PI Type)와 guard type 을 다음과 같이 옮긴다:
+	 *
+	 *   PI Type 1/2  → BLK_INTEGRITY_REF_TAG 설정, tag_size = sizeof(u16)
+	 *                  (앱 태그만; 레퍼런스 태그는 플래그로 표현)
+	 *   PI Type 3    → REF_TAG 없음. Type 3 은 레퍼런스 태그를 쓰지 않기 때문이다.
+	 *                  tag_size = u16 + u32 (16B guard) 또는 u16 + 6 (64B guard)
+	 *   16B guard    → csum_type = BLK_INTEGRITY_CSUM_CRC    (CRC16)
+	 *   64B guard    → csum_type = BLK_INTEGRITY_CSUM_CRC64
+	 *   그리고 공통으로
+	 *     bi->metadata_size = head->ms          // LBA 당 메타데이터 바이트 수
+	 *     bi->pi_tuple_size = head->pi_size     // 8 또는 16
+	 *     bi->pi_offset     = info->pi_offset   // 메타데이터 안에서 PI 의 위치
+	 *     bi->flags |= BLK_INTEGRITY_DEVICE_CAPABLE  // 장치가 PRACT 로 직접 처리 가능
+	 *
+	 * 참고: NVMe 는 BLK_INTEGRITY_CSUM_IP 를 절대 설정하지 않는다. 아래 switch 에
+	 * 그 케이스가 CRC 와 함께 묶여 있는 것은 SCSI(DIF Type 1 의 IP 체크섬) 때문이다.
+	 * ================================================================= */
 	struct blk_integrity *bi = &lim->integrity;
 
-	/* NVMe PI metadata_size=0이면 checksum/reftag도 없어야 정상. */
+	/* [한국어] metadata_size 가 0 이면 애초에 메타데이터 영역이 없다는 뜻이므로,
+	 * 그 안에 놓일 체크섬·태그가 설정되어 있으면 앞뒤가 맞지 않는다.
+	 * NVMe 에서 이 경우는 PI 를 쓰지 않는 평범한 네임스페이스(ms == 0)다. */
 	if (!bi->metadata_size) {
 		if (bi->csum_type != BLK_INTEGRITY_CSUM_NONE ||
-		    bi->tag_size || ((bi->flags & BLK_INTEGRITY_REF_TAG))) {
+		    bi->tag_size || ((bi->flags & BLK_INTEGRITY_REF_TAG))) {	/* [한국어] 셋 중 하나라도 설정돼 있으면 드라이버 버그다 */
 			pr_warn("invalid PI settings.\n");
 			return -EINVAL;
 		}
@@ -438,33 +482,39 @@ static int blk_validate_integrity_limits(struct queue_limits *lim)
 		return -EINVAL;
 	}
 
-	/* NVMe: ref tag는 checksum과 함께만 사용 가능(PI Type 1/2/3). */
+	/* [한국어] 레퍼런스 태그는 체크섬 없이 홀로 설 수 없다. 레퍼런스 태그가 하는 일은
+	 * "이 블록이 정말 그 LBA 의 것인가"(오배치 검출)인데, 그 태그 자체가 손상되지
+	 * 않았음을 보장하는 것이 가드(체크섬)이기 때문이다. 검증 순서상 가드가 먼저다. */
 	if (bi->csum_type == BLK_INTEGRITY_CSUM_NONE &&
 	    (bi->flags & BLK_INTEGRITY_REF_TAG)) {
 		pr_warn("ref tag not support without checksum.\n");
 		return -EINVAL;
 	}
 
-	/* NVMe DIF: pi_offset+pi_tuple_size가 metadata_size 이내여야 함. */
+	/* [한국어] PI 튜플은 메타데이터 영역 **안에** 완전히 들어가야 한다.
+	 * NVMe 메타데이터는 PI 만 담는 것이 아니라 그 앞뒤에 벤더 영역이 있을 수 있고,
+	 * pi_offset 이 그 시작 위치다(그래서 0 이 아닐 수 있다).
+	 * 이 검사가 없으면 PI 를 읽고 쓰는 코드가 메타데이터 버퍼 밖을 넘본다. */
 	if (bi->pi_offset + bi->pi_tuple_size > bi->metadata_size) {
 		pr_warn("pi_offset (%u) + pi_tuple_size (%u) exceeds metadata_size (%u)\n",
 			bi->pi_offset, bi->pi_tuple_size, bi->metadata_size);
 		return -EINVAL;
 	}
 
-	/* NVMe csum_type(체크섬 방식)별로 pi_tuple_size가 표준 규격과
-	 * 일치하는지 검사 - 방식마다 tuple 레이아웃 크기가 고정되어 있음. */
+	/* [한국어] 체크섬 방식마다 튜플 구조체가 정해져 있으므로 크기가 정확히 맞아야 한다.
+	 * 여기서 걸린다면 장치가 보고한 pi_size 와 커널이 아는 레이아웃이 어긋난 것이고,
+	 * 그대로 두면 가드/앱태그/레퍼런스태그를 엉뚱한 오프셋에서 읽게 된다. */
 	switch (bi->csum_type) {
 	case BLK_INTEGRITY_CSUM_NONE:
-		/* 체크섬이 없는데 tuple 크기가 0이 아니면 설정 모순. */
+		/* [한국어] 체크섬이 없으면 튜플도 없어야 한다 */
 		if (bi->pi_tuple_size) {
 			pr_warn("pi_tuple_size must be 0 when checksum type is none\n");
 			return -EINVAL;
 		}
 		break;
-	case BLK_INTEGRITY_CSUM_CRC:
-	case BLK_INTEGRITY_CSUM_IP:
-		/* NVMe T10 PI tuple 크기는 8바이트여야 함. */
+	case BLK_INTEGRITY_CSUM_CRC:	/* [한국어] NVMe 16B guard 가 여기로 온다 (CRC16) */
+	case BLK_INTEGRITY_CSUM_IP:	/* [한국어] SCSI 전용 — NVMe 는 이 값을 설정하지 않는다 */
+		/* [한국어] 둘 다 T10 PI 레이아웃(guard 2 + app 2 + ref 4 = 8바이트)을 공유한다 */
 		if (bi->pi_tuple_size != sizeof(struct t10_pi_tuple)) {
 			pr_warn("pi_tuple_size mismatch for T10 PI: expected %zu, got %u\n",
 				 sizeof(struct t10_pi_tuple),
@@ -472,8 +522,8 @@ static int blk_validate_integrity_limits(struct queue_limits *lim)
 			return -EINVAL;
 		}
 		break;
-	case BLK_INTEGRITY_CSUM_CRC64:
-		/* NVMe CRC64 PI tuple 크기는 16바이트여야 함. */
+	case BLK_INTEGRITY_CSUM_CRC64:	/* [한국어] NVMe 64B guard (확장 PI) */
+		/* [한국어] guard 8 + app 2 + ref 6 = 16바이트. 가드가 넓어진 만큼 튜플도 커진다 */
 		if (bi->pi_tuple_size != sizeof(struct crc64_pi_tuple)) {
 			pr_warn("pi_tuple_size mismatch for CRC64 PI: expected %zu, got %u\n",
 				 sizeof(struct crc64_pi_tuple),
@@ -483,11 +533,13 @@ static int blk_validate_integrity_limits(struct queue_limits *lim)
 		break;
 	}
 
-	/* NVMe PI interval_exp 기본값 = log2(LBA Data Size). */
+	/* [한국어] interval 은 "PI 튜플 하나가 보호하는 데이터 구간"의 크기다.
+	 * 지정되지 않았으면 논리 블록 하나로 잡는다 — NVMe 는 LBA 당 메타데이터를
+	 * 하나씩 두므로 이것이 자연스러운 기본값이다. */
 	if (!bi->interval_exp) {
 		bi->interval_exp = ilog2(lim->logical_block_size);
-	} else if (bi->interval_exp < SECTOR_SHIFT ||
-		   bi->interval_exp > ilog2(lim->logical_block_size)) {
+	} else if (bi->interval_exp < SECTOR_SHIFT ||	/* [한국어] 512B 보다 잘게 보호할 수는 없다 */
+		   bi->interval_exp > ilog2(lim->logical_block_size)) {	/* [한국어] 논리 블록보다 크게 잡으면 블록 경계와 어긋난다 */
 		/* 드라이버가 명시적으로 지정한 interval_exp가 섹터 크기(2^9)보다
 		 * 작거나 LBA 크기보다 크면 범위를 벗어난 것이므로 거부. */
 		pr_warn("invalid interval_exp %u\n", bi->interval_exp);
@@ -557,9 +609,22 @@ static int blk_validate_integrity_limits(struct queue_limits *lim)
  *   NABSPF (Namespace Atomic Boundary Size Power Fail)
  *     - 이 경계를 걸치면 원자성이 깨지는 주소 경계.
  *       atomic_write_hw_boundary가 된다.
+ *   NABO (Namespace Atomic Boundary Offset)
+ *     - 경계가 0 이 아닌 오프셋에서 시작하는 경우를 나타낸다. 커널은 이것을
+ *       지원하지 않아, nvme_configure_atomic_write() 는 id->nabo 가 0 이 아니면
+ *       **원자적 쓰기를 통째로 끈다**(그냥 논리 블록 크기를 반환하고 끝낸다).
  *   AWUPF (컨트롤러 단위 값)
  *     - 커널은 이 값을 무시하고 NAWUPF만 신뢰한다("AWUPF ignored, only
- *       NAWUPF accepted" 경고를 남긴다).
+ *       NAWUPF accepted" 경고를 dev_info_once 로 한 번 남긴다).
+ *       컨트롤러 전역 값보다 네임스페이스별 값이 항상 더 정확하기 때문이다.
+ *
+ * 변환 결과(core.c:2420~2423)를 그대로 옮기면:
+ *     atomic_write_hw_max       = (1 + NAWUPF) * bs      // 0's based
+ *     atomic_write_hw_boundary  = (NABSPF + 1) * bs      // 없으면 0
+ *     atomic_write_hw_unit_min  = bs                     // 논리 블록 하나
+ *     atomic_write_hw_unit_max  = rounddown_pow_of_two(atomic_write_hw_max)
+ * unit_max 만 2의 거듭제곱으로 내림한다는 점에 주의 — 그래야 아래 검증들이
+ * 시프트/마스크 연산으로 성립한다.
  *
  * 주의: FUA(Force Unit Access)나 FAW(Firmware Activation Without Reset)는
  * 원자적 쓰기와 무관한 별개의 기능이다. FUA는 휘발성 캐시를 건너뛰고 매체에
@@ -645,7 +710,11 @@ static void blk_atomic_writes_update_limits(struct queue_limits *lim)
 	unsigned int unit_limit = min(lim->max_hw_sectors << SECTOR_SHIFT,
 					blk_queue_max_guaranteed_bio(lim));
 
-	/* NVMe atomic write 단위는 2의 거듭제곱이어야 함(컨트롤러 요구). */
+	/* [한국어] 2의 거듭제곱으로 내리는 것은 **커널의 요구**이지 컨트롤러의 요구가 아니다.
+	 * NVMe 스펙은 NAWUPF 가 거듭제곱이어야 한다고 정하지 않는다. 커널이 이렇게 만드는
+	 * 이유는 아래 정렬·경계 검사를 전부 시프트와 마스크로 처리하기 위해서다
+	 * (드라이버 쪽에서도 nvme_configure_atomic_write() 가 unit_max 에 같은 처리를 한다).
+	 * 그 대가로 예컨대 NAWUPF 가 48KB 를 뜻하면 32KB 까지만 원자성을 활용하게 된다. */
 	unit_limit = rounddown_pow_of_two(unit_limit);
 
 	/* NVMe atomic write 최종 최대 섹터 = min(HW 최대, MDTS). */
@@ -813,18 +882,25 @@ static void blk_validate_atomic_write_limits(struct queue_limits *lim)
 		 * Furthermore, if needed, unit_max could even be reduced so
 		 * that it is compliant with a !power-of-2 boundary.
 		 */
-		/* NVMe: 현재 구현은 boundary도 2의 거듭제곱일 것을 요구(향후 완화 가능). */
+		/* [한국어] 위 영문 주석이 인정하듯 이것은 원리적 요구가 아니라 현재 구현의 편의다.
+		 * 경계 검사(주소 & mask)를 시프트로 처리하려면 2의 거듭제곱이어야 한다.
+		 * NVMe 의 NABSPF 는 스펙상 거듭제곱을 강제하지 않으므로, 그렇지 않은
+		 * 네임스페이스는 여기서 원자적 쓰기 지원이 통째로 꺼진다. */
 		if (!is_power_of_2(boundary_sectors))
 			goto unsupported;
 	}
 
-	/* 모든 검증 통과 - MDTS/guaranteed bio 크기를 반영한 최종 한도 계산. */
+	/* [한국어] 검증을 모두 통과했으니 실제 사용할 한도를 확정한다.
+	 * 하드웨어 값(atomic_write_hw_*)과 "bio 하나에 담을 수 있는 크기"라는
+	 * 소프트웨어 상한 중 작은 쪽이 최종값이 된다. */
 	blk_atomic_writes_update_limits(lim);
-	/* 성공 경로는 여기서 종료(불린 반환값 없음, void). */
+	/* [한국어] 성공 — 아래 unsupported 라벨을 건너뛴다 */
 	return;
 
 unsupported:
-	/* NVMe atomic write 미지원 시 상위 경로에서 0으로 표시. */
+	/* [한국어] 지원 불가로 판정된 경우. 네 값을 모두 0 으로 만드는 것이
+	 * "이 큐는 원자적 쓰기를 지원하지 않는다"의 표현이며, REQ_ATOMIC 이 붙은
+	 * 요청은 상위에서 거절된다. 일부만 0 으로 두면 부분 지원처럼 보여 위험하다. */
 	lim->atomic_write_max_sectors = 0;
 	lim->atomic_write_boundary_sectors = 0;
 	lim->atomic_write_unit_min = 0;
@@ -1045,14 +1121,18 @@ int blk_validate_limits(struct queue_limits *lim)
 	 * NVMe: Deallocate(Trim/Discard)를 지원하지 않는 namespace에서는
 	 * discard_granularity가 0으로 보고된다.
 	 */
-	/* NVMe Deallocate 지원 시 granularity는 physical_block_size 이상. */
+	/* [한국어] discard 를 지원한다면 그 단위는 최소한 물리 블록 크기여야 한다.
+	 * 그보다 잘게 요청해 봐야 장치가 실제로 해제할 수 있는 단위가 아니기 때문이다.
+	 * NVMe 는 이 값을 NPDG/NPDA 에서 유도해 넘긴다(core.c:2532 부근). */
 	if (lim->max_discard_sectors)
 		lim->discard_granularity =
 			max(lim->discard_granularity, lim->physical_block_size);
 	else
 		lim->discard_granularity = 0;
 
-	/* NVMe DSM/Deallocate scatter-gather는 최소 1개 segment. */
+	/* [한국어] discard 요청도 최소 한 구간은 담아야 하므로 0 은 있을 수 없다.
+	 * NVMe 의 Dataset Management 는 한 명령에 여러 구간(range)을 실을 수 있어
+	 * 드라이버가 이 값을 1보다 크게 잡는다. */
 	if (!lim->max_discard_segments)
 		lim->max_discard_segments = 1;
 
@@ -1097,7 +1177,9 @@ int blk_validate_limits(struct queue_limits *lim)
 	}
 
 	/* setup max segment size for building new segment in fast path */
-	/* NVMe fast-path segment 크기 = min(max_segment_size, seg_boundary+1, PAGE). */
+	/* [한국어] 핫패스에서 "이 세그먼트에 더 붙여도 되는가"를 매번 두 조건(크기 상한과
+	 * 경계 마스크)으로 따지지 않도록, 둘 중 더 빡빡한 쪽을 미리 하나로 합쳐 둔다.
+	 * PAGE_SIZE 로 한 번 더 자르는 이유는 어차피 페이지 단위로 붙여 나가기 때문이다. */
 	if (lim->seg_boundary_mask > lim->max_segment_size - 1)
 		seg_size = lim->max_segment_size;
 	else
@@ -1689,22 +1771,27 @@ static void blk_stack_atomic_writes_limits(struct queue_limits *t,
 		goto unsupported;
 
 	/* UINT_MAX indicates no stacking of bottom devices yet */
-	/* NVMe 첫 하위 장치 병합 시 head 함수 사용. */
+	/* [한국어] UINT_MAX 는 "아직 아무 하위 장치도 합치지 않았다"는 초기 표식이다.
+	 * 첫 장치는 비교 대상이 없으므로 값을 그대로 채우는 head 경로를 탄다. */
 	if (t->atomic_write_hw_max == UINT_MAX) {
 		if (!blk_stack_atomic_writes_head(t, b))
 			goto unsupported;
 	} else {
-		/* NVMe 두 번째 이후 하위 장치 병합 시 tail 함수 사용. */
+		/* [한국어] 둘째부터는 기존 값과 교집합을 취해야 한다 — 한 장치라도 보장하지
+		 * 못하면 스택 전체가 보장하지 못하기 때문이다. */
 		if (!blk_stack_atomic_writes_tail(t, b))
 			goto unsupported;
 	}
-	/* head/tail 병합 결과를 RAID stripe(chunk_sectors)와 재정렬. */
+	/* [한국어] RAID 스트라이프 경계도 원자성을 깨뜨릴 수 있다 — 한 쓰기가 두 디스크에
+	 * 나뉘어 내려가면 한쪽만 반영될 수 있기 때문이다. chunk_sectors 로 한 번 더 자른다. */
 	blk_stack_atomic_writes_chunk_sectors(t);
-	/* 병합 성공 - unsupported 레이블은 건너뛰고 함수 종료. */
+	/* [한국어] 성공 — 아래 unsupported 라벨로 떨어지지 않도록 여기서 반환한다 */
 	return;
 
 unsupported:
-	/* NVMe atomic write 호환 실패 시 상위 장치에서 0으로 표시. */
+	/* [한국어] 하위 장치들의 원자성 보장이 서로 호환되지 않는 경우.
+	 * MD/DM 처럼 여러 장치를 묶는 구성에서, 한쪽만 원자적 쓰기를 지원하거나
+	 * 단위·경계가 어긋나면 스택 장치 전체로는 보장할 수 없다. */
 	t->atomic_write_hw_max = 0;
 	t->atomic_write_hw_unit_max = 0;
 	t->atomic_write_hw_unit_min = 0;
@@ -1882,20 +1969,26 @@ int blk_stack_limits(struct queue_limits *t, struct queue_limits *b,
 	t->dma_alignment = max(t->dma_alignment, b->dma_alignment);
 
 	/* Set non-power-of-2 compatible chunk_sectors boundary */
-	/* NVMe chunk_sectors는 RAID stripe 등을 고려하여 GCD 병합. */
+	/* [한국어] chunk_sectors 는 "이 경계를 넘는 IO 는 쪼개라"는 값이다. 두 하위 장치의
+	 * 경계가 다르면 **양쪽 모두**의 경계를 지켜야 하므로 최대공약수를 쓴다.
+	 * 최솟값이 아니라 GCD 인 이유가 이것이다 — 예: 8과 12 면 4 마다 잘라야 둘 다 만족한다. */
 	if (b->chunk_sectors)
 		t->chunk_sectors = gcd(t->chunk_sectors, b->chunk_sectors);
 
 	/* Physical block size a multiple of the logical block size? */
-	/* NVMe physical_block_size가 logical_block_size 배수가 아니면 보정. */
+	/* [한국어] 물리 블록은 논리 블록의 정수 배여야 한다(512e 면 8배). 어긋나면
+	 * 정렬 계산이 전부 무의미해지므로 물리 = 논리로 낮춰 안전한 값으로 만든다. */
 	if (t->physical_block_size & (t->logical_block_size - 1)) {
 		t->physical_block_size = t->logical_block_size;
-		t->flags |= BLK_FLAG_MISALIGNED;
-		ret = -1;
+		t->flags |= BLK_FLAG_MISALIGNED;	/* [한국어] "이 스택은 정렬이 어긋나 있다"를 큐에 남긴다.
+							 * 파일시스템이 sysfs 로 이 상태를 읽어 경고할 수 있다. */
+		ret = -1;				/* [한국어] 실패가 아니라 "보정했음"이다 — 호출자는 계속 진행하되
+							 * 성능 저하를 감수한다는 뜻으로 이 값을 해석한다. */
 	}
 
 	/* Minimum I/O a multiple of the physical block size? */
-	/* NVMe io_min이 physical_block_size 배수가 아니면 보정. */
+	/* [한국어] io_min(최소 권장 IO 크기)이 물리 블록의 배수가 아니면 읽기-수정-쓰기를
+	 * 유발한다. 물리 블록 크기로 낮춘다. */
 	if (t->io_min & (t->physical_block_size - 1)) {
 		t->io_min = t->physical_block_size;
 		t->flags |= BLK_FLAG_MISALIGNED;
@@ -1903,7 +1996,8 @@ int blk_stack_limits(struct queue_limits *t, struct queue_limits *b,
 	}
 
 	/* Optimal I/O a multiple of the physical block size? */
-	/* NVMe io_opt가 physical_block_size 배수가 아니면 0으로 보정. */
+	/* [한국어] io_opt(최적 IO 크기)는 힌트일 뿐이라, 어긋나면 낮추는 대신 0(힌트 없음)으로
+	 * 만든다. 잘못된 힌트보다 힌트가 없는 편이 낫기 때문이다. */
 	if (t->io_opt & (t->physical_block_size - 1)) {
 		t->io_opt = 0;
 		t->flags |= BLK_FLAG_MISALIGNED;
@@ -1911,7 +2005,8 @@ int blk_stack_limits(struct queue_limits *t, struct queue_limits *b,
 	}
 
 	/* chunk_sectors a multiple of the physical block size? */
-	/* NVMe chunk_sectors가 physical_block_size 배수가 아니면 0으로 보정. */
+	/* [한국어] chunk 경계가 물리 블록 중간에 걸리면 그 경계에서 자른 IO 가 부분 블록
+	 * 쓰기가 된다. 역시 0(경계 없음)으로 무력화한다. */
 	if (t->chunk_sectors % (t->physical_block_size >> SECTOR_SHIFT)) {
 		t->chunk_sectors = 0;
 		t->flags |= BLK_FLAG_MISALIGNED;
@@ -1919,7 +2014,8 @@ int blk_stack_limits(struct queue_limits *t, struct queue_limits *b,
 	}
 
 	/* Find lowest common alignment_offset */
-	/* NVMe alignment_offset는 LCM으로 병합 후 granularity 내로 정규화. */
+	/* [한국어] 두 장치의 정렬 오프셋을 동시에 만족하는 지점을 찾는다.
+	 * 주기가 서로 다르므로 최소공배수 주기로 맞춰 본 뒤 granularity 안으로 접는다. */
 	t->alignment_offset = lcm_not_zero(t->alignment_offset, alignment)
 		% max(t->physical_block_size, t->io_min);
 
