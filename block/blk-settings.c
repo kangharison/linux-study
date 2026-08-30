@@ -354,6 +354,10 @@ static int blk_validate_zoned_limits(struct queue_limits *lim)
 {
 	/* BLK_FEAT_ZONED 미설정 시 ZNS 관련 값이 residual하면 컨트롤러 상태 불일치. */
 	if (!(lim->features & BLK_FEAT_ZONED)) {
+		/* [한국어] zoned 가 아닌데 zone 관련 값이 하나라도 설정돼 있으면 드라이버 버그다.
+		 * 네 항목을 각각 WARN 으로 감싸는 이유: 어느 필드가 잘못됐는지 스택 트레이스에
+		 * 줄 번호로 드러나야 원인을 찾을 수 있기 때문이다. 하나로 묶으면 "넷 중 뭔가"
+		 * 라는 것밖에 알 수 없다. */
 		if (WARN_ON_ONCE(lim->max_open_zones) ||
 		    WARN_ON_ONCE(lim->max_active_zones) ||
 		    WARN_ON_ONCE(lim->zone_write_granularity) ||
@@ -904,9 +908,10 @@ unsupported:
 	 * "이 큐는 원자적 쓰기를 지원하지 않는다"의 표현이며, REQ_ATOMIC 이 붙은
 	 * 요청은 상위에서 거절된다. 일부만 0 으로 두면 부분 지원처럼 보여 위험하다. */
 	lim->atomic_write_max_sectors = 0;
-	lim->atomic_write_boundary_sectors = 0;
-	lim->atomic_write_unit_min = 0;
-	lim->atomic_write_unit_max = 0;
+	lim->atomic_write_boundary_sectors = 0;	/* [한국어] 경계 없음 */
+	lim->atomic_write_unit_min = 0;		/* [한국어] 최소 단위 없음 */
+	lim->atomic_write_unit_max = 0;		/* [한국어] 최대 단위 0 — 이 값이 0 이라는 것이
+						 * "원자적 쓰기 미지원"의 대외적 표현이다. 상위 계층은 이 하나만 보고 판단한다 */
 }
 
 /**
@@ -1130,7 +1135,8 @@ int blk_validate_limits(struct queue_limits *lim)
 		lim->discard_granularity =
 			max(lim->discard_granularity, lim->physical_block_size);
 	else
-		lim->discard_granularity = 0;
+		lim->discard_granularity = 0;	/* [한국어] discard 미지원이면 단위도 0 으로 맞춘다.
+					 * 크기 한도는 0 인데 단위만 남아 있으면 상위 계층이 "지원함"으로 오판한다 */
 
 	/* [한국어] discard 요청도 최소 한 구간은 담아야 하므로 0 은 있을 수 없다.
 	 * NVMe 의 Dataset Management 는 한 명령에 여러 구간(range)을 실을 수 있어
@@ -1185,8 +1191,12 @@ int blk_validate_limits(struct queue_limits *lim)
 	if (lim->seg_boundary_mask > lim->max_segment_size - 1)
 		seg_size = lim->max_segment_size;
 	else
-		seg_size = lim->seg_boundary_mask + 1;
+		seg_size = lim->seg_boundary_mask + 1;	/* [한국어] 마스크에 1 을 더하면 경계 간격이 된다
+						 * (예: 0xFFFFFFFF → 4GB). 두 제약 중 더 빡빡한 쪽을 위 분기에서 골랐다 */
 	lim->max_fast_segment_size = min_t(unsigned int, seg_size, PAGE_SIZE);
+	/* [한국어] 여기서 PAGE_SIZE 로 한 번 더 자르는 이유: 핫패스의 세그먼트 확장은
+	 * 페이지 단위로 이뤄지므로, 한 번에 페이지보다 큰 판정이 필요 없다.
+	 * 이 값 하나만 비교하면 크기 상한과 경계 마스크를 매번 따로 따질 필요가 없어진다. */
 
 	/*
 	 * We require drivers to at least do logical block aligned I/O, but
@@ -1320,6 +1330,8 @@ int queue_limits_commit_update(struct request_queue *q,
 
 	/* NVMe Identify/Controller 값을 정규화; 실패 시 unlock 후 반환. */
 	error = blk_validate_limits(lim);
+	/* [한국어] 검증을 **락을 쥔 채** 수행한다. 검증과 반영 사이에 다른 갱신이 끼어들면
+	 * 검증을 통과한 값과 실제로 심는 값이 달라질 수 있기 때문이다. */
 	if (error)
 		goto out_unlock;
 
@@ -1615,6 +1627,10 @@ static bool blk_stack_atomic_writes_tail(struct queue_limits *t,
 	 * 그 결과 구간이 [max(min), min(max)] 로 좁아지고, 위에서 이미 확인했듯 비어 있지 않다. */
 	t->atomic_write_hw_max = min(t->atomic_write_hw_max,
 				b->atomic_write_hw_max);
+	/* [한국어] 아래 두 대입이 방향을 달리해 구간을 좁힌다.
+	 * unit_min 은 max 로 — 둘의 요구를 모두 만족하려면 더 큰 쪽을 따라야 한다.
+	 * unit_max 는 min 으로 — 둘 다 감당할 수 있어야 하므로 더 작은 쪽에 맞춘다.
+	 * 결과 구간 [max(min), min(max)] 가 비어 있지 않음은 위 호환성 검사에서 이미 확인했다. */
 	t->atomic_write_hw_unit_min = max(t->atomic_write_hw_unit_min,
 				b->atomic_write_hw_unit_min);
 	t->atomic_write_hw_unit_max = min(t->atomic_write_hw_unit_max,
@@ -1803,9 +1819,11 @@ unsupported:
 	 * MD/DM 처럼 여러 장치를 묶는 구성에서, 한쪽만 원자적 쓰기를 지원하거나
 	 * 단위·경계가 어긋나면 스택 장치 전체로는 보장할 수 없다. */
 	t->atomic_write_hw_max = 0;
-	t->atomic_write_hw_unit_max = 0;
+	t->atomic_write_hw_unit_max = 0;	/* [한국어] 네 값을 모두 0 으로 만들어야 한다 —
+						 * 일부만 남기면 부분 지원처럼 보여 상위 계층이 잘못 판단한다 */
 	t->atomic_write_hw_unit_min = 0;
-	t->atomic_write_hw_boundary = 0;
+	t->atomic_write_hw_boundary = 0;	/* [한국어] 네 값을 모두 0 으로 만들어야 한다 —
+					 * 일부만 남기면 부분 지원처럼 보여 상위 계층이 잘못 판단한다 */
 }
 
 /**
@@ -2041,8 +2059,9 @@ int blk_stack_limits(struct queue_limits *t, struct queue_limits *b,
 	 * 그 한도에 맞춰 자른 요청이 부분 블록 쓰기가 되어, 장치가 읽기-수정-쓰기를 하게 된다.
 	 * 내림(round down)인 이유는 한도를 늘리면 하드웨어 제약을 넘기 때문이다. */
 	t->max_sectors = blk_round_down_sectors(t->max_sectors, t->logical_block_size);
-	t->max_hw_sectors = blk_round_down_sectors(t->max_hw_sectors, t->logical_block_size);
-	t->max_dev_sectors = blk_round_down_sectors(t->max_dev_sectors, t->logical_block_size);
+	t->max_hw_sectors = blk_round_down_sectors(t->max_hw_sectors, t->logical_block_size);	/* [한국어] 하드웨어 한계도 같은 이유로 내림 */
+	t->max_dev_sectors = blk_round_down_sectors(t->max_dev_sectors, t->logical_block_size);	/* [한국어] 장치 보고값도 마찬가지.
+						 * 세 값을 모두 같은 규칙으로 맞춰야 어느 것이 최종 한도가 되든 블록 정렬이 보장된다 */
 
 	/* Discard alignment and granularity */
 	/* [한국어] 하위 장치가 discard 를 지원할 때만 관련 한도를 병합한다.
@@ -2074,8 +2093,9 @@ int blk_stack_limits(struct queue_limits *t, struct queue_limits *b,
 					b->zone_write_granularity);
 	/* NVMe ZNS가 아닌 장치에서는 ZNS 관련 필드 클리어. */
 	if (!(t->features & BLK_FEAT_ZONED)) {
-		t->zone_write_granularity = 0;
-		t->max_zone_append_sectors = 0;
+		t->zone_write_granularity = 0;	/* [한국어] zoned 가 아닌 하위 장치가 섞이면 zone 관련 값을 모두 지운다 */
+		t->max_zone_append_sectors = 0;	/* [한국어] 0 은 곧 "네이티브 zone append 없음"이며,
+					 * 그 경우 블록 계층이 write plug 로 에뮬레이션한다 */
 	}
 	/* 원자적 쓰기 한도는 별도 서브함수로 위임해 병합/호환성 검사. */
 	blk_stack_atomic_writes_limits(t, b, start);
