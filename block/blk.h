@@ -12,6 +12,32 @@
 #include "blk-crypto-internal.h"  /* [한국어] blk-crypto 내부 API(bio_crypt_rq_ctx_compatible 등) — 두 bio/request의 암호화 컨텍스트가 같아 병합 가능한지 판단할 때 필요 */
 
 /*
+ * [한국어] ★★★ block/ 주석 전체에 적용되는 표기 규약 — 화살표 체인 읽는 법 ★★★
+ *
+ * 이 디렉터리의 한국어 주석에는 다음과 같은 호출 체인이 자주 나온다:
+ *
+ *     blk_mq_submit_bio → ... → blk_mq_dispatch_rq_list → nvme_queue_rq → doorbell
+ *
+ * 여기서 "→ nvme_queue_rq" 는 **직접 호출이 아니다.** 블록 계층이 NVMe 심볼을
+ * 직접 부르는 코드는 이 트리에 단 한 줄도 없다(주석을 제거한 block/**.[ch] 전체를
+ * 검색해 확인: nvme_ 로 시작하는 함수 호출 0건). 실제로 일어나는 일은 언제나
+ *
+ *     set->ops->queue_rq(hctx, bd)      // struct blk_mq_ops 의 함수 포인터
+ *
+ * 라는 간접 호출이고, NVMe PCIe 가 붙어 있을 때 그 포인터가 가리키는 실체가
+ * nvme_queue_rq 다(drivers/nvme/host/pci.c 의 nvme_mq_ops.queue_rq).
+ * SCSI 가 붙으면 scsi_queue_rq 가, virtio-blk 이 붙으면 virtio_queue_rq 가 된다.
+ *
+ * 그러니 체인의 그 지점은 "런타임에 NVMe 장치에서 이렇게 흘러간다"는 뜻으로
+ * 읽어야지, "이 함수가 저 함수를 부른다"는 정적 호출 관계로 읽으면 안 된다.
+ * 이 구분이 중요한 이유: 블록 계층은 자기가 어떤 장치를 다루는지 전혀 모르고,
+ * 그 무지가 곧 blk-mq 가 NVMe·SCSI·virtio·loop 를 동시에 지탱하는 근거다.
+ *
+ * 같은 규약이 완료 방향에도 적용된다. 완료 경로에서 드라이버로 되돌아가는
+ * 지점은 mq_ops->complete(NVMe PCIe 면 nvme_pci_complete_rq)이며, 폴링은
+ * mq_ops->poll(nvme_poll), 타임아웃은 mq_ops->timeout(nvme_timeout)이다.
+ * 함수 포인터 테이블은 include/linux/blk-mq.h 의 struct blk_mq_ops 에 있다.
+ *
  * [한국어 설명] block/blk.h — 블록 계층 내부(private) 공용 헤더 (block/blk.h)
  *
  * === 파일의 역할 ===
