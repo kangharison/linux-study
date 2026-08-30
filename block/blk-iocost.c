@@ -547,9 +547,19 @@ enum ioc_running {
 /* io.cost.qos controls including per-dev enable of the whole controller */
 /* [한국어] io.cost.qos sysfs 항목의 제어 파라미터 인덱스 */
 enum {
-	QOS_ENABLE,		/* [한국어] iocost 컨트롤러 활성화 여부(0=off, 1=on) — 장치별 독립 설정 */
-	QOS_CTRL,		/* [한국어] QoS 제어 모드(auto=자동 프로파일, absolute=직접 지정) */
-	NR_QOS_CTRL_PARAMS,	/* [한국어] QoS 제어 파라미터 총 개수 — 배열 크기 정의용 */
+	QOS_ENABLE,
+	/* [한국어] 이 장치에서 iocost 를 켤지 여부(0/1).
+	 * 설정자: io.cost.qos 에 enable=1 로 지정.
+	 * 왜 장치별인가: 한 시스템에 특성이 전혀 다른 장치들이 섞여 있을 수 있어
+	 *   (NVMe 와 USB 디스크 등), 전역 스위치로는 의미 있는 제어가 되지 않는다. */
+	QOS_CTRL,
+	/* [한국어] 지연 목표를 어떻게 정할지의 모드.
+	 * auto 면 autop[] 프로파일이 장치 등급에 맞는 값을 골라 주고,
+	 * absolute(user) 면 사용자가 적은 rpct/rlat/wpct/wlat 를 그대로 쓴다.
+	 * 사용자가 값을 하나라도 명시하면 auto 판정이 꺼진다 — 자동 조정이 사용자
+	 * 설정을 덮어쓰지 않게 하기 위해서다. */
+	NR_QOS_CTRL_PARAMS,
+	/* [한국어] 제어 파라미터 개수. 파싱 토큰 테이블의 크기이자 순회 상한이다. */
 };
 
 /* io.cost.qos params */
@@ -589,8 +599,13 @@ enum {
 /* [한국어] io.cost.model sysfs 항목의 제어 파라미터 인덱스 */
 enum {
 	COST_CTRL,		/* [한국어] 비용 모델 제어 모드(auto=자동 프로파일 선택, linear=직접 계수 지정) */
-	COST_MODEL,		/* [한국어] 사용할 비용 모델 종류(현재 linear만 지원) */
-	NR_COST_CTRL_PARAMS,	/* [한국어] 비용 제어 파라미터 총 개수 */
+	COST_MODEL,
+	/* [한국어] 비용 모델의 종류.
+	 * 현재 커널이 구현한 것은 linear 하나뿐이다 — "고정 오버헤드 + 크기 × 단가"라는
+	 * 1차식으로 IO 비용을 근사한다. 이 열거자가 존재하는 이유는 모델을 나중에
+	 * 추가할 여지를 남겨 두기 위해서이며, 지금은 사실상 상수다. */
+	NR_COST_CTRL_PARAMS,
+	/* [한국어] 비용 제어 파라미터 개수 — io.cost.model 파싱 테이블 크기. */
 };
 
 /* builtin linear cost model coefficients */
@@ -637,15 +652,28 @@ enum {
 	LCOEF_RPAGE,	/* [한국어] 읽기 1페이지(4KB)의 vtime 비용: VTIME_PER_SEC/I_LCOEF_RBPS×pagesize 로 유도 */
 	LCOEF_RSEQIO,	/* [한국어] 읽기 순차 IO 1회의 기본 vtime 비용: VTIME_PER_SEC/I_LCOEF_RSEQIOPS */
 	LCOEF_RRANDIO,	/* [한국어] 읽기 랜덤 IO 1회의 기본 vtime 비용: VTIME_PER_SEC/I_LCOEF_RRANDIOPS */
-	LCOEF_WPAGE,	/* [한국어] 쓰기 1페이지(4KB)의 vtime 비용 */
-	LCOEF_WSEQIO,	/* [한국어] 쓰기 순차 IO 1회의 기본 vtime 비용 */
-	LCOEF_WRANDIO,	/* [한국어] 쓰기 랜덤 IO 1회의 기본 vtime 비용 */
-	NR_LCOEFS,	/* [한국어] 내부 계수 총 개수 — ioc_params.lcoefs[] 크기 */
+	LCOEF_WPAGE,
+	/* [한국어] 쓰기 4KB 한 페이지의 vtime 비용.
+	 * 읽기(LCOEF_RPAGE)와 따로 두는 이유: 플래시는 읽기와 쓰기의 비용이 근본적으로
+	 * 다르다. 쓰기는 프로그램 시간이 길고 GC 를 유발하며, 컨트롤러 캐시에 흡수될
+	 * 수도 있어 편차가 크다. 하나의 계수로 뭉치면 어느 쪽도 맞지 않는다. */
+	LCOEF_WSEQIO,
+	/* [한국어] 순차 쓰기 IO 하나의 고정 비용(전송분을 뺀 나머지). */
+	LCOEF_WRANDIO,
+	/* [한국어] 랜덤 쓰기 IO 하나의 고정 비용.
+	 * HDD 라면 이 값과 WSEQIO 의 차이가 곧 seek 비용이고, NVMe 급 장치에서는
+	 * 그 차이가 작아진다 — 이 여섯 계수의 상대적 크기가 곧 장치의 성격이다. */
+	NR_LCOEFS,
+	/* [한국어] 내부 계수 개수 — ioc_params.lcoefs[] 크기이자 순회 상한. */
 };
 
 /* [한국어] 장치 유형별 자동 프로파일 인덱스 (autop[] 테이블의 첨자, ioc_autop_idx()가 장치 성능 측정 후 결정) */
 enum {
-	AUTOP_INVALID,	/* [한국어] 미초기화: 아직 장치 유형이 결정되지 않은 상태 — ioc 생성 시 초기값 */
+	AUTOP_INVALID,
+	/* [한국어] 아직 장치 등급이 정해지지 않은 초기 상태.
+	 * 읽는 자: ioc_autop_idx() 가 이 값이면 아직 판정 전으로 보고, 관측 데이터가
+	 *   쌓이면 실제 등급으로 옮긴다. 유효한 프로파일 첨자가 아니므로 autop[]
+	 *   배열을 이 값으로 인덱싱해서는 안 된다. 원래 주석: ioc 생성 시 초기값 */
 	AUTOP_HDD,	/* [한국어] 회전 디스크: seek 비용 지배, 대역폭 낮음, latency 목표 250ms */
 	AUTOP_SSD_QD1,	/* [한국어] SSD 큐 깊이 1 운용 모드: 병렬 IO 없이 순차 발행, latency 목표 25ms */
 	AUTOP_SSD_DFL,	/* [한국어] SSD 기본 프로파일: too_fast_vrate_pct=500, latency 목표 25ms */

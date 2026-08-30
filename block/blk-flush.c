@@ -192,10 +192,18 @@ enum {
 	REQ_FSEQ_PREFLUSH	= (1 << 0), /* [한국어] pre-flushing 진행 중: Flush 명령이 진행 중 (NVMe 라면 opcode 0x00) */
 	REQ_FSEQ_DATA		= (1 << 1), /* [한국어] data write 진행 중: 데이터 쓰기가 진행 중 (FUA 비트가 실렸을 수 있다) */
 	REQ_FSEQ_POSTFLUSH	= (1 << 2), /* [한국어] post-flushing 진행 중: FUA 미지원 장치에서 Write 뒤에 덧붙이는 Flush. NVMe 는 WRITE_CACHE 와 FUA 가 함께 켜지므로 이 단계에 거의 오지 않는다 */
-	REQ_FSEQ_DONE		= (1 << 3), /* [한국어] 시퀀스 완료: 에러 발생 시에도 이 상태로 즉시 전이 */
+	REQ_FSEQ_DONE		= (1 << 3),
+	/* [한국어] 시퀀스가 끝났다는 표시.
+	 * 다른 셋과 성격이 다르다 — PREFLUSH/DATA/POSTFLUSH 는 "할 일"이지만 이것은
+	 * "더 할 일이 없다"는 종착점이다. 에러가 나면 남은 단계를 건너뛰고 곧장
+	 * 이 상태로 넘어가므로, 실패한 flush 가 중간 단계에 갇히는 일이 없다. */
 
 	REQ_FSEQ_ACTIONS	= REQ_FSEQ_PREFLUSH | REQ_FSEQ_DATA |
-				  REQ_FSEQ_POSTFLUSH, /* [한국어] 실제 동작이 필요한 단계 마스크: DONE은 제외 */
+				  REQ_FSEQ_POSTFLUSH,
+	/* [한국어] "실제로 할 일이 있는" 세 단계만 묶은 마스크(DONE 제외).
+	 * 쓰임새: blk_insert_flush() 가 `REQ_FSEQ_ACTIONS & ~policy` 로 넘겨
+	 *   "이번에 하지 않을 단계는 이미 끝난 것으로 쳐라"를 한 번에 표현한다.
+	 *   DONE 이 여기 포함되면 그 표현이 "시퀀스가 이미 끝났다"가 되어 버린다. */
 
 	/*
 	 * If flush has been pending longer than the following timeout,

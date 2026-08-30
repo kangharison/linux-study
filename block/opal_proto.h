@@ -1126,6 +1126,25 @@ struct opal_stack_reset_response {
  * 이 헤더 뒤에 가변 개수의 struct d0_features가 이어지는 형태다.
  * 읽는 자: opal_discovery0_end()가 length로 feature 영역의 끝 주소를
  * 계산한 뒤 그 안에서 feature descriptor를 순회한다. */
+/* [한국어] ★ 이 파일의 d0_* 구조체들에 공통으로 적용되는 사항: reserved 필드의 존재 이유 ★
+ *
+ * 아래 구조체들은 장치가 Level 0 Discovery 응답으로 돌려주는 **와이어 포맷**을
+ * 그대로 옮긴 것이다. 따라서 reserved 필드는 "쓰지 않는 값"이 아니라
+ * **오프셋을 맞추기 위해 반드시 있어야 하는 자리**다. 하나라도 빠지면 그 뒤의
+ * 모든 필드가 엉뚱한 바이트를 가리키게 된다.
+ *
+ * 그래서 이 필드들에 대해 지켜야 할 것이 셋이다.
+ *  1) 값을 읽고 해석하지 않는다 — 스펙이 정의하지 않은 자리이므로 장치마다
+ *     쓰레기가 들어 있을 수 있다.
+ *  2) 0 이라고 가정하지 않는다. 위 (1)과 같은 이유다.
+ *  3) 그러나 이름이 reserved 라고 해서 언제나 무의미한 것은 아니다. 이 파일에는
+ *     반례가 둘 있다 — d0_geometry_features.reserved01 은 실제로 ALIGN 비트를
+ *     담고 있어 check_geometry() 가 `& 1` 로 읽고, d0_single_user_mode.reserved01
+ *     역시 SUM 정책 비트를 담는다(다만 커널은 후자를 읽지 않는다).
+ *     스펙 개정으로 예약 자리에 의미가 부여됐지만 커널이 이름을 그대로 둔 경우다.
+ *
+ * 아래 개별 reserved 필드의 짧은 주석은 이 설명을 전제로 크기만 밝힌다.
+ */
 struct d0_header {
 	__be32 length; /* the length of the header 48 in 2.00.100 */
 	/* [한국어] Discovery 0 헤더 전체 길이(바이트). 2.00.100 스펙 기준
@@ -1189,7 +1208,7 @@ struct d0_tper_features {
 	/* [한국어] 예약 3바이트 — 뒤따르는 두 __be32 필드를 4바이트 경계에
 	 * 정렬시키기 위한 패딩 목적을 겸한다. */
 	__be32 reserved02;		/* reserved */
-	/* [한국어] 예약 4바이트. */
+	/* [한국어] 예약 4바이트 — 오프셋 유지용. 해석 금지·0 가정 금지(파일 내 d0_header 위 규약 참고). */
 	__be32 reserved03;		/* reserved */
 	/* [한국어] 예약 4바이트. 이 구조체 전체 크기를 스펙이 정한
 	 * 16바이트에 맞춘다. */
@@ -1233,11 +1252,11 @@ struct d0_locking_features {
 	 * u8 to keep the other two 32bits integers aligned.
 	 */
 	u8 reserved01[3];		/* reserved, alignment 패딩 */
-	/* [한국어] 예약 3바이트 — 정렬용 패딩. */
+	/* [한국어] 예약 3바이트 — 뒤따르는 __be32 를 4바이트 경계에 맞추기 위한 패딩. */
 	__be32 reserved02;		/* reserved */
-	/* [한국어] 예약 4바이트. */
+	/* [한국어] 예약 4바이트 — 오프셋 유지용. 해석 금지·0 가정 금지(파일 내 d0_header 위 규약 참고). */
 	__be32 reserved03;		/* reserved */
-	/* [한국어] 예약 4바이트. */
+	/* [한국어] 예약 4바이트 — 오프셋 유지용. 해석 금지·0 가정 금지(파일 내 d0_header 위 규약 참고). */
 };
 
 /*
@@ -1319,13 +1338,13 @@ struct d0_enterprise_ssc {
 	 * 수행되는 것을 허용하는지 여부. 0이면 IO마다 단일 Band 안에서만
 	 * 완결되어야 한다. */
 	u8 reserved01;			/* reserved */
-	/* [한국어] 예약 1바이트. */
+	/* [한국어] 예약 1바이트 — 오프셋 유지용. 해석 금지·0 가정 금지(d0_header 위 규약 참고). */
 	__be16 reserved02;		/* reserved */
-	/* [한국어] 예약 2바이트. */
+	/* [한국어] 예약 2바이트 — 오프셋 유지용. 해석 금지·0 가정 금지(d0_header 위 규약 참고). */
 	__be32 reserved03;		/* reserved */
-	/* [한국어] 예약 4바이트. */
+	/* [한국어] 예약 4바이트 — 오프셋 유지용. 해석 금지·0 가정 금지(파일 내 d0_header 위 규약 참고). */
 	__be32 reserved04;		/* reserved */
-	/* [한국어] 예약 4바이트. */
+	/* [한국어] 예약 4바이트 — 오프셋 유지용. 해석 금지·0 가정 금지(파일 내 d0_header 위 규약 참고). */
 };
 
 /*
@@ -1380,11 +1399,11 @@ struct d0_single_user_mode {
 	 * (get_sum_ranges()), 필드 이름이 reserved01인 것도 커널이 이 값을
 	 * 쓰지 않기 때문이다. */
 	u8 reserved02;			/* reserved */
-	/* [한국어] 예약 1바이트. */
+	/* [한국어] 예약 1바이트 — 오프셋 유지용. 해석 금지·0 가정 금지(d0_header 위 규약 참고). */
 	__be16 reserved03;		/* reserved */
-	/* [한국어] 예약 2바이트. */
+	/* [한국어] 예약 2바이트 — 오프셋 유지용. 해석 금지·0 가정 금지(d0_header 위 규약 참고). */
 	__be32 reserved04;		/* reserved */
-	/* [한국어] 예약 4바이트. */
+	/* [한국어] 예약 4바이트 — 오프셋 유지용. 해석 금지·0 가정 금지(파일 내 d0_header 위 규약 참고). */
 };
 
 /*
@@ -1400,7 +1419,7 @@ struct d0_single_user_mode {
  * OPAL_TABLE_ROWS를 Get해 실제 크기를 확인한다. */
 struct d0_datastore_table {
 	__be16 reserved01;		/* reserved */
-	/* [한국어] 예약 2바이트. */
+	/* [한국어] 예약 2바이트 — 오프셋 유지용. 해석 금지·0 가정 금지(d0_header 위 규약 참고). */
 	__be16 max_tables;		/* [한국어] 생성 가능한 DataStore 테이블 최대 개수 */
 	/* [한국어] 생성 가능한 DataStore 테이블의 최대 개수. */
 	__be32 max_size_tables;		/* [한국어] DataStore 테이블 하나의 최대 크기(바이트) */
@@ -1466,9 +1485,9 @@ struct d0_opal_v200 {
 	/* [한국어] Revert 이후 각 Authority PIN이 어떤 값으로 재설정되는지를
 	 * 나타내는 정책 코드. */
 	u8 reserved01;			/* reserved */
-	/* [한국어] 예약 1바이트. */
+	/* [한국어] 예약 1바이트 — 오프셋 유지용. 해석 금지·0 가정 금지(d0_header 위 규약 참고). */
 	__be32 reserved02;		/* reserved */
-	/* [한국어] 예약 4바이트. */
+	/* [한국어] 예약 4바이트 — 오프셋 유지용. 해석 금지·0 가정 금지(파일 내 d0_header 위 규약 참고). */
 };
 
 /*

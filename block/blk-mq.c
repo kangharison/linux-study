@@ -5086,9 +5086,22 @@ static void blk_mq_handle_dev_resource(struct request *rq,
  * blk_mq_dispatch_rq_list 가 이 값으로 request 처리 방식을 결정한다.
  */
 enum prep_dispatch {
-	PREP_DISPATCH_OK,        /* [한국어] budget 과 tag 모두 확보 성공 */
-	PREP_DISPATCH_NO_TAG,    /* [한국어] NVMe CID 할당 실패 (SQ full) */
-	PREP_DISPATCH_NO_BUDGET, /* [한국어] dispatch budget 고갈 (queue depth 제한) */
+	PREP_DISPATCH_OK,
+	/* [한국어] budget 과 드라이버 태그를 모두 얻었다 — 이 요청은 드라이버로 내려보낼 수 있다.
+	 * 읽는 자: blk_mq_dispatch_rq_list() 가 이 값일 때만 mq_ops->queue_rq 를 호출한다. */
+	PREP_DISPATCH_NO_TAG,
+	/* [한국어] 드라이버 태그를 얻지 못했다 = 이 하드웨어 큐의 인플라이트 상한에 걸렸다.
+	 * 실패 처리가 아래 NO_BUDGET 과 다르다는 점이 중요하다. 태그는 다른 요청이
+	 * **완료되어야** 돌아오므로, 이 경우 hctx 를 태그 대기열에 등록해 두고
+	 * 반납 시 wakeup 으로 재개한다(blk_mq_mark_tag_wait).
+	 * 주의: 이것은 장치의 SQ 링이 꽉 찼다는 뜻이 아니다. 태그 수는 블록 계층이
+	 * 관리하는 인플라이트 상한이고, SQ 링 위치는 드라이버가 sq_tail 로 따로 정한다. */
+	PREP_DISPATCH_NO_BUDGET,
+	/* [한국어] 드라이버가 budget 을 내주지 않았다 = "지금은 더 못 받는다"고 답한 것.
+	 * 태그와 달리 budget 은 드라이버 사정(예: SCSI 의 device queue depth)에 달려 있어,
+	 * 언제 풀릴지 블록 계층이 알 수 없다. 그래서 대기열에 걸지 않고 큐를 다시
+	 * 돌리는 방식으로 재시도한다.
+	 * NVMe 는 get_budget/put_budget 을 등록하지 않으므로 이 값이 나오지 않는다. */
 };
 
 /*
