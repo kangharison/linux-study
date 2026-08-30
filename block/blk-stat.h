@@ -82,7 +82,8 @@
  *   bucket에 대한 샘플 추가/병합/리셋.
  */
 #ifndef BLK_STAT_H
-#define BLK_STAT_H
+#define BLK_STAT_H	/* [한국어] 인클루드 가드. 바로 위 #ifndef 와 짝을 이뤄, 이 헤더가 한 번역 단위에
+				 * 여러 번 포함돼도 내용이 한 번만 펼쳐지게 한다(중복 정의 오류 방지). */
 
 #include <linux/kernel.h>	/* [한국어] u64 등 기본 타입과 min()/max()/div_u64() 커널 유틸리티
 				 * 제공 — latency 계산과 bucket 인덱스 처리에 사용(block/blk-stat.c) */

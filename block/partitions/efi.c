@@ -155,13 +155,14 @@
  * - Code works, detects all the partitions.
  *
  ************************************************************/
-#include <linux/kernel.h>
-#include <linux/crc32.h>
-#include <linux/ctype.h>
-#include <linux/math64.h>
-#include <linux/slab.h>
-#include "check.h"
-#include "efi.h"
+#include <linux/kernel.h>	/* [한국어] min/max, le32_to_cpu 등 기본 매크로 */
+#include <linux/crc32.h>	/* [한국어] crc32() — GPT 는 헤더와 파티션 엔트리 배열 각각에 CRC32 를 두고,
+				 * 이 파일이 그것을 재계산해 대조한다. 검증에 실패하면 백업 GPT 로 넘어간다 */
+#include <linux/ctype.h>	/* [한국어] isprint 등 — 파티션 이름(UTF-16)을 출력 가능한 문자로 옮길 때 */
+#include <linux/math64.h>	/* [한국어] div_u64 등 — LBA 값이 64비트라 32비트 아키텍처에서 일반 나눗셈이 안 된다 */
+#include <linux/slab.h>		/* [한국어] kmalloc/kfree — GPT 헤더와 엔트리 배열을 담을 버퍼 할당 */
+#include "check.h"		/* [한국어] parsed_partitions, read_part_sector 등 파티션 파서 공통 인터페이스 */
+#include "efi.h"		/* [한국어] gpt_header/gpt_entry 구조체와 GPT 시그니처 상수 */
 
 /* 커널 커맨드라인 'gpt' 옵션으로 PMBR(보호 MBR) 검사를 우회할 수 있다.
  * 파티션 테이블 재읽기는 init 이후에도 발생하므로 __initdata가 아니다.

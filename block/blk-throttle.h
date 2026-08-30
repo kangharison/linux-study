@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 #ifndef BLK_THROTTLE_H
-#define BLK_THROTTLE_H
+#define BLK_THROTTLE_H	/* [한국어] 인클루드 가드. 바로 위 #ifndef 와 짝을 이뤄, 이 헤더가 한 번역 단위에
+				 * 여러 번 포함돼도 내용이 한 번만 펼쳐지게 한다(중복 정의 오류 방지). */
 
 /*
  * [한국어] blk-throttle 헤더: cgroup 기반 IO 대역폭/IOPS 조율 자료구조 정의 (blk-throttle.h)

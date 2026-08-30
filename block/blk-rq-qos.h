@@ -80,7 +80,8 @@
  * rq_qos_wait()       — budget 부족 시 태스크를 재우는 공용 대기 루틴(wbt/iolatency 사용).
  */
 #ifndef RQ_QOS_H
-#define RQ_QOS_H
+#define RQ_QOS_H	/* [한국어] 인클루드 가드. 바로 위 #ifndef 와 짝을 이뤄, 이 헤더가 한 번역 단위에
+				 * 여러 번 포함돼도 내용이 한 번만 펼쳐지게 한다(중복 정의 오류 방지). */
 
 #include <linux/kernel.h>	/* [한국어] bool/NULL 등 커널 전역 기본 타입·매크로 — 이 헤더가 직접 쓰는
 				 * 매크로는 없지만 관례적으로 최상단에 포함해 다른 헤더들이 기대하는

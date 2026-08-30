@@ -1974,6 +1974,10 @@ static ssize_t __FUNC(struct elevator_queue *e, const char *page, size_t count)	
  */
 #define STORE_INT(__FUNC, __PTR, MIN, MAX)				\
 	STORE_FUNCTION(__FUNC, __PTR, MIN, MAX, ) /* [한국어] STORE_INT(__FUNC, __PTR, MIN, MAX) 전개: STORE_FUNCTION(..., __CONV 없음) - 값 검증/clamp 후 변환 없이 *(__PTR)에 그대로 대입 */
+/* [한국어] 시간 파라미터용 store 함수 생성기. STORE_INT 와 짝을 이루며, 차이는
+ * 마지막 인자로 msecs_to_jiffies 를 넘긴다는 것 하나다 — sysfs 로 들어온 값을
+ * 밀리초로 해석해 jiffies 로 바꿔 저장한다. read_expire/write_expire 처럼
+ * 내부적으로 jiffies 를 쓰는 필드가 이 판을 쓴다. */
 #define STORE_JIFFIES(__FUNC, __PTR, MIN, MAX)				\
 	STORE_FUNCTION(__FUNC, __PTR, MIN, MAX, msecs_to_jiffies) /* [한국어] STORE_JIFFIES(__FUNC, __PTR, MIN, MAX) 전개: STORE_FUNCTION(..., msecs_to_jiffies) - 사용자가 쓴 ms 값을 msecs_to_jiffies()로 jiffies로 변환 후 대입 */
 STORE_JIFFIES(deadline_read_expire_store, &dd->fifo_expire[DD_READ], 0, INT_MAX); /* [한국어] deadline_read_expire_store(e, page, count) 생성 - 사용자가 쓴 ms 값을 [0, INT_MAX] 범위로 clamp 후 jiffies로 변환해 dd->fifo_expire[DD_READ]에 대입 */
@@ -2406,6 +2410,10 @@ static const struct seq_operations deadline_dispatch_seq_ops = {
 #define DEADLINE_QUEUE_DDIR_ATTRS(name)					\
 	{#name "_fifo_list", 0400,					\
 			.seq_ops = &deadline_##name##_fifo_seq_ops} /* [한국어] DEADLINE_QUEUE_DDIR_ATTRS 매크로 정의 끝(백슬래시 없는 마지막 줄) - {"<name>_fifo_list", 0400, .seq_ops=&deadline_<name>_fifo_seq_ops} 리터럴로 전개 */
+/* [한국어] debugfs 에 "<name>_next_rq" 파일 하나를 만드는 테이블 원소 생성기.
+ * 그 파일을 읽으면 해당 방향/우선순위의 **다음 순차 디스패치 후보**가 보인다 —
+ * mq-deadline 이 FIFO(기한) 대신 섹터 순서로 골랐을 때 무엇이 나갈지를 알려 주므로,
+ * 스케줄러가 지금 기한 우선인지 순차 우선인지 판단하는 단서가 된다. */
 #define DEADLINE_NEXT_RQ_ATTR(name)					\
 	{#name "_next_rq", 0400, deadline_##name##_next_rq_show} /* [한국어] DEADLINE_NEXT_RQ_ATTR(name) 전개 - {"<name>_next_rq", 0400, deadline_<name>_next_rq_show} 리터럴로, .show(단발성 콜백)를 사용하는 항목 */
 /*

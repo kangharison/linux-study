@@ -83,7 +83,8 @@
  *     온라인/오프라인·해제·통계 콜백 테이블
  */
 #ifndef _BLK_CGROUP_PRIVATE_H
-#define _BLK_CGROUP_PRIVATE_H
+#define _BLK_CGROUP_PRIVATE_H	/* [한국어] 인클루드 가드. 바로 위 #ifndef 와 짝을 이뤄, 이 헤더가 한 번역 단위에
+				 * 여러 번 포함돼도 내용이 한 번만 펼쳐지게 한다(중복 정의 오류 방지). */
 /*
  * block cgroup private header
  *

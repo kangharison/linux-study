@@ -63,20 +63,23 @@
  * blk_rq_merge_ok()          - 두 request가 병합 가능한지 기본 조건 검사
  * bio_will_gap()             - PRP/SGL 물리 불연속(gap) 여부 검사
  */
-#include <linux/kernel.h>
-#include <linux/module.h>
-#include <linux/bio.h>
-#include <linux/blkdev.h>
-#include <linux/blk-integrity.h>
-#include <linux/part_stat.h>
-#include <linux/blk-cgroup.h>
+#include <linux/kernel.h>		/* [한국어] min/max, ALIGN 등 — 분할 경계 계산 전반 */
+#include <linux/module.h>		/* [한국어] EXPORT_SYMBOL — bio_split_to_limits 등을 스택 드라이버에 공개 */
+#include <linux/bio.h>			/* [한국어] bio_for_each_bvec, bio_split — 분할의 실제 도구 */
+#include <linux/blkdev.h>		/* [한국어] queue_limits — 이 파일의 모든 판정이 여기서 나온다
+					 * (max_hw_sectors, max_segments, virt_boundary_mask, chunk_sectors) */
+#include <linux/blk-integrity.h>	/* [한국어] 무결성 페이로드도 데이터와 같은 지점에서 함께 쪼개야 하므로 필요 */
+#include <linux/part_stat.h>		/* [한국어] part_stat_* — 분할·병합 시 파티션 통계를 갱신한다 */
+#include <linux/blk-cgroup.h>		/* [한국어] blk_cgroup_mergeable — 소속 cgroup 이 다르면 병합을 막는다.
+					 * 합치면 두 cgroup 의 IO 회계가 뒤섞여 격리가 깨지기 때문이다 */
 
-#include <trace/events/block.h>
+#include <trace/events/block.h>	/* [한국어] trace_block_split — bio 가 쪼개질 때마다 tracepoint 를 남긴다.
+				 * 분할이 잦다는 것은 큐 한계에 자주 걸린다는 뜻이라 성능 분석의 단서가 된다 */
 
-#include "blk.h"
-#include "blk-mq-sched.h"
-#include "blk-rq-qos.h"
-#include "blk-throttle.h"
+#include "blk.h"		/* [한국어] rq_mergeable, bio_may_need_split 등 판정 헬퍼의 정의처 */
+#include "blk-mq-sched.h"	/* [한국어] 스케줄러 큐에 있는 요청과의 병합 시도 경로 */
+#include "blk-rq-qos.h"		/* [한국어] rq_qos_merge — 병합이 일어나면 QoS 계층에도 알려야 회계가 맞는다 */
+#include "blk-throttle.h"	/* [한국어] blk_throtl_bio 관련 — 스로틀 중인 bio 의 병합 취급 */
 
 /*
  * [한국어]

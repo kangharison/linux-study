@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 #ifndef BLK_MQ_SCHED_H
-#define BLK_MQ_SCHED_H
+#define BLK_MQ_SCHED_H	/* [한국어] 인클루드 가드. 바로 위 #ifndef 와 짝을 이뤄, 이 헤더가 한 번역 단위에
+				 * 여러 번 포함돼도 내용이 한 번만 펼쳐지게 한다(중복 정의 오류 방지). */
 
 /* [한국어] elevator.h: elevator_type, elevator_queue, elv_change_ctx 등 공통 스케줄러 타입 */
 #include "elevator.h"

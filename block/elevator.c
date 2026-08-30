@@ -123,27 +123,31 @@
  * struct elevator_queue      - 디바이스 큐(request_queue)에 붙는 elevator 상태; type·hash·kobj
  * struct elevator_type       - 스케줄러 플러그인 설명자; ops vtable·이름·icq 캐시
  */
-#include <linux/kernel.h>
-#include <linux/fs.h>
-#include <linux/blkdev.h>
-#include <linux/bio.h>
-#include <linux/module.h>
-#include <linux/slab.h>
-#include <linux/init.h>
-#include <linux/compiler.h>
-#include <linux/blktrace_api.h>
-#include <linux/hash.h>
-#include <linux/uaccess.h>
-#include <linux/pm_runtime.h>
+#include <linux/kernel.h>	/* [한국어] pr_err/WARN_ON 등 커널 기본 매크로 */
+#include <linux/fs.h>		/* [한국어] struct file/inode — sysfs 로 스케줄러를 바꿀 때 파일 문맥이 필요 */
+#include <linux/blkdev.h>	/* [한국어] request_queue, struct request — 이 파일이 다루는 대상 그 자체 */
+#include <linux/bio.h>		/* [한국어] struct bio — bio 병합 판정(elv_merge)이 bio 를 인자로 받는다 */
+#include <linux/module.h>	/* [한국어] try_module_get/module_put — 스케줄러가 모듈일 수 있어
+				 * 사용 중에는 언로드되지 않도록 참조를 잡아야 한다 */
+#include <linux/slab.h>		/* [한국어] kmalloc/kfree — elevator_queue 와 스케줄러별 데이터 할당 */
+#include <linux/init.h>		/* [한국어] __init 등 초기화 섹션 표시 */
+#include <linux/compiler.h>	/* [한국어] likely/unlikely 등 컴파일러 힌트 */
+#include <linux/blktrace_api.h>	/* [한국어] blk_add_trace_* — 병합/삽입 이벤트를 blktrace 에 남긴다 */
+#include <linux/hash.h>		/* [한국어] hash_min — elv_rqhash_* 가 섹터 값을 해시 버킷으로 접는 데 쓴다.
+				 * back-merge 후보를 O(1)로 찾기 위한 해시 테이블의 기반이다 */
+#include <linux/uaccess.h>	/* [한국어] 사용자 공간 문자열 취급(스케줄러 이름 입력 처리) */
+#include <linux/pm_runtime.h>	/* [한국어] 런타임 PM — 큐가 suspend 중이면 스케줄러 교체를 미뤄야 한다 */
 
-#include <trace/events/block.h>
+#include <trace/events/block.h>	/* [한국어] trace_block_rq_* — 병합·삽입 이벤트를 tracepoint 로 노출한다 */
 
-#include "elevator.h"
-#include "blk.h"
-#include "blk-mq-sched.h"
-#include "blk-pm.h"
-#include "blk-wbt.h"
-#include "blk-cgroup.h"
+#include "elevator.h"	/* [한국어] elevator_type/elevator_queue 정의와 이 파일이 노출하는 내부 API */
+#include "blk.h"		/* [한국어] 블록 계층 내부 공용 API(큐 freeze, rq 헬퍼 등) */
+#include "blk-mq-sched.h"	/* [한국어] blk_mq_init_sched/exit_sched — 실제 스케줄러 부착·해제는 이쪽이 한다.
+				 * elevator.c 는 "어떤 것을 붙일지" 정하고, 붙이는 일 자체는 위임한다 */
+#include "blk-pm.h"		/* [한국어] blk_pm_* — 스케줄러 교체 전후로 런타임 PM 상태를 맞춘다 */
+#include "blk-wbt.h"		/* [한국어] wbt_enable_default/wbt_disable_default — 스케줄러가 바뀌면
+				 * write-back 스로틀링을 다시 켤지 판단해야 한다(BFQ 는 자체 제어를 가짐) */
+#include "blk-cgroup.h"	/* [한국어] blkcg 정책 연동 — BFQ 처럼 cgroup 정책을 가진 스케줄러의 등록/해제 */
 
 /* [한국어] 전역 스케줄러 등록 목록(elv_list)을 보호하는 스핀락.
  * 보호 대상: elv_list 자체의 연결 구조와, 그 위에서 수행하는 elevator_tryget().
@@ -167,6 +171,11 @@ static LIST_HEAD(elv_list);
  * Merge hash stuff.
  */
 #define rq_hash_key(rq)		(blk_rq_pos(rq) + blk_rq_sectors(rq))
+/* [한국어] 해시 키 = 이 요청이 **끝나는** 섹터(시작 + 길이).
+ * 왜 끝 섹터인가: 이 해시는 back-merge 후보를 찾기 위한 것이고, back-merge 는
+ * "기존 요청의 끝"에 새 bio 의 시작이 딱 붙는 경우다. 끝 섹터를 키로 두면
+ * 새 bio 의 시작 섹터로 곧장 조회해 O(1)에 후보를 찾을 수 있다.
+ * (front-merge 는 시작 섹터 기준이라 해시가 아니라 스케줄러의 rbtree 로 찾는다.) */
 
 /*
  * [한국어] rq_hash_key - request의 "끝나는 섹터"를 해시 키로 만든다

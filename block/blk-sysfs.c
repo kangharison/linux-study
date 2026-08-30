@@ -80,13 +80,14 @@
 /* linux/kernel.h: printk 계열(예: pr_info_ratelimited)과 기본 매크로(min() 등) 제공. */
 #include <linux/kernel.h>
 /*
- * linux/slab.h: kmalloc/kfree 계열 메모리 할당 인터페이스 선언 - 이 파일이 직접 호출하지는
- * 않지만(추정) 포함하는 다른 블록 레이어 헤더들과의 호환을 위해 포함된다.
+ * linux/slab.h: kmalloc/kfree 계열 선언. 확인 결과 이 파일은 이들을 직접 호출하지는
+ * 않는다(주석 제거 후 코드에서 kmalloc/kzalloc/kfree 모두 0건 확인). 포함된 다른
+ * 블록 계층 헤더가 요구하는 의존을 채우기 위한 것이다.
  */
 #include <linux/slab.h>
 /*
- * linux/module.h: THIS_MODULE, EXPORT_SYMBOL 계열 매크로 - 블록 레이어 공통 헤더 체인의
- * 일부로 포함되며, 이 파일 자체가 심볼을 export 하지는 않는다.
+ * linux/module.h: THIS_MODULE, EXPORT_SYMBOL 계열 매크로. 이 파일은 심볼을 export 하지
+ * 않는다(EXPORT_SYMBOL 0건 확인). 블록 계층 공통 헤더 체인이 요구해 포함한다.
  */
 #include <linux/module.h>
 /*

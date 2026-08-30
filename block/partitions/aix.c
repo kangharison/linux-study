@@ -71,7 +71,7 @@
  * - struct pvd: 물리 볼륨 서술자. pp_count/psn_part1 및 ppe[] 배열 보유.
  */
 
-#include "check.h"
+#include "check.h"	/* [한국어] parsed_partitions 와 read_part_sector() — 모든 파티션 파서의 공통 인터페이스 */
 
 
 /*

@@ -71,7 +71,8 @@
  */
 
 #ifndef _ELEVATOR_H
-#define _ELEVATOR_H
+#define _ELEVATOR_H	/* [한국어] 인클루드 가드. 바로 위 #ifndef 와 짝을 이뤄, 이 헤더가 한 번역 단위에
+				 * 여러 번 포함돼도 내용이 한 번만 펼쳐지게 한다(중복 정의 오류 방지). */
 
 #include <linux/percpu.h>
 /* [한국어] per-CPU 변수 매크로(DEFINE_PER_CPU 등)를 제공 - io_cq/icq 캐시 등

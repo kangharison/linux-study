@@ -58,12 +58,14 @@
  *   블록 크기(block_size)와 매직 넘버를 담는다.
  */
 
-#include <linux/ctype.h> /* 문자열 처리용; NVMe I/O 경로와 직접 무관 */
+#include <linux/ctype.h> /* [한국어] isprint 등 — 파티션 이름 문자열을 다듬을 때 쓴다 */
 #include "check.h" /* read_part_sector(), parsed_partitions, put_partition 선언; NVMe namespace 파싱 인프라 */
 #include "mac.h" /* mac_partition(), mac_driver_desc, MAC_* 매직 정의; NVMe LBA 0/APM 엔트리 레이아웃 */
 
-#ifdef CONFIG_PPC_PMAC /* PowerMac 부팅 관련; NVMe SQ/CQ/doorbell 경로와 무관 */
-#include <asm/machdep.h>
+#ifdef CONFIG_PPC_PMAC /* [한국어] PowerMac 전용 코드 — 이 아키텍처에서만 부팅 파티션을 펌웨어에 보고한다 */
+#include <asm/machdep.h>	/* [한국어] PowerMac 펌웨어 연동 헤더. 아래 note_bootable_part() 를 통해
+				 * "Open Firmware 가 지정한 부팅 파티션이 어느 것인가"를 커널에 알린다.
+				 * CONFIG_PPC_PMAC 에서만 필요하므로 #ifdef 안에 들어 있다 */
 extern void note_bootable_part(dev_t dev, int part, int goodness); /* PowerMac용 루트 파티션 알림; NVMe controller 무관 */
 #endif
 

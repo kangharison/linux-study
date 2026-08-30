@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 #ifndef BLK_INTERNAL_H
-#define BLK_INTERNAL_H
+#define BLK_INTERNAL_H	/* [한국어] 인클루드 가드. 바로 위 #ifndef 와 짝을 이뤄, 이 헤더가 한 번역 단위에
+				 * 여러 번 포함돼도 내용이 한 번만 펼쳐지게 한다(중복 정의 오류 방지). */
 
 #include <linux/bio-integrity.h>  /* [한국어] bio_integrity_payload 등 T10-PI/DIF/DIX 자료구조 — NVMe PI(Protection Information) Guard/APP/REF 태그가 CQE와 함께 검증되는 경로에 사용 */
 #include <linux/blk-crypto.h>     /* [한국어] blk_crypto_key/keyslot API — NVMe SED/TCG Opal 또는 inline encryption에서 write 시 key 선택, read 시 key unwrap에 사용 */

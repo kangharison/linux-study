@@ -57,24 +57,26 @@
  * blk_validate_zoned_limits()    — NVMe ZNS의 zone_append_sectors 최종 한도 결정.
  * blk_validate_atomic_write_limits() — NVMe 원자적 쓰기(NAWUPF/NABSPF 유래) 단위 검증 및 정규화.
  */
-#include <linux/kernel.h>
-#include <linux/module.h>
-#include <linux/init.h>
-#include <linux/bio.h>
-#include <linux/blk-integrity.h>
-#include <linux/pagemap.h>
-#include <linux/backing-dev-defs.h>
-#include <linux/gcd.h>
-#include <linux/lcm.h>
-#include <linux/jiffies.h>
-#include <linux/gfp.h>
-#include <linux/dma-mapping.h>
-#include <linux/t10-pi.h>
-#include <linux/crc64.h>
+#include <linux/kernel.h>		/* [한국어] min/max, round_down 등 한계값 계산 전반에 쓰는 기본 매크로 */
+#include <linux/module.h>		/* [한국어] EXPORT_SYMBOL — blk_stack_limits 등을 MD/DM 모듈에 공개 */
+#include <linux/init.h>			/* [한국어] 초기화 섹션 표시 */
+#include <linux/bio.h>			/* [한국어] BIO_MAX_VECS 등 — 세그먼트 상한 계산의 입력 */
+#include <linux/blk-integrity.h>	/* [한국어] struct blk_integrity — PI 설정 검증(blk_validate_integrity_limits) */
+#include <linux/pagemap.h>		/* [한국어] PAGE_SIZE 기반 계산 — max_fast_segment_size 를 페이지 단위로 자른다 */
+#include <linux/backing-dev-defs.h>	/* [한국어] struct backing_dev_info — read_ahead 한계가 여기 얹힌다 */
+#include <linux/gcd.h>			/* [한국어] gcd() — chunk_sectors 를 스택할 때 최대공약수를 쓴다.
+					 * 두 하위 장치의 경계를 **모두** 지켜야 하므로 최솟값이 아니라 GCD 다 */
+#include <linux/lcm.h>			/* [한국어] lcm() — alignment_offset 병합. 두 장치의 정렬 주기가 다르므로
+					 * 최소공배수 주기에서 공통 지점을 찾는다 */
+#include <linux/jiffies.h>		/* [한국어] 시간 단위 한계값(타임아웃 등) 취급 */
+#include <linux/gfp.h>			/* [한국어] GFP 플래그 — 한계 갱신 중 할당에 쓰인다 */
+#include <linux/dma-mapping.h>		/* [한국어] dma_get_required_mask 등 — DMA 정렬/경계 기본값의 근거 */
+#include <linux/t10-pi.h>		/* [한국어] struct t10_pi_tuple — PI 튜플 크기(8바이트) 검증에 sizeof 로 쓴다 */
+#include <linux/crc64.h>		/* [한국어] struct crc64_pi_tuple — 확장 PI 튜플 크기(16바이트) 검증용 */
 
-#include "blk.h"
-#include "blk-rq-qos.h"
-#include "blk-wbt.h"
+#include "blk.h"		/* [한국어] 블록 계층 내부 공용 API 와 queue_limits 헬퍼 */
+#include "blk-rq-qos.h"		/* [한국어] rq-qos 체인 — 한계가 바뀌면 wbt 등이 기준값을 다시 잡아야 한다 */
+#include "blk-wbt.h"		/* [한국어] wbt_set_write_cache 등 — write cache 유무가 바뀌면 wbt 에 알린다 */
 
 /*
  * struct request_queue NVMe 관련 주요 필드:

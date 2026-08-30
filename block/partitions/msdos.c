@@ -233,7 +233,9 @@ static inline int is_extended_partition(struct msdos_partition *p)
  * 디스크/파티션 테이블"로 인식하는 조건과 동일하며, 이 파일은 이를 "MBR 파티션
  * 테이블이 존재함"의 관문으로 재사용한다. */
 #define MSDOS_LABEL_MAGIC1	0x55
-#define MSDOS_LABEL_MAGIC2	0xAA
+#define MSDOS_LABEL_MAGIC2	0xAA	/* [한국어] MBR 부트 시그니처의 둘째 바이트. 섹터 0 의 마지막 두 바이트가
+					 * 0x55 0xAA 여야 MBR 로 인정한다. 두 바이트뿐이라 우연히 일치할 수도 있어,
+					 * 이 검사는 필요조건일 뿐 충분조건이 아니다 */
 
 /*
  * [한국어]
@@ -272,8 +274,9 @@ msdos_magic_present(unsigned char *p)
  * 시그니처가 없는 일부(특히 부팅 불가능한) AIX 디스크를 aix_magic_present()가 이
  * 4바이트로 식별한다. */
 #define AIX_LABEL_MAGIC1	0xC9
-#define AIX_LABEL_MAGIC2	0xC2
-#define AIX_LABEL_MAGIC3	0xD4
+#define AIX_LABEL_MAGIC2	0xC2	/* [한국어] AIX 디스크 레이블 시그니처의 둘째 바이트(전체는 0xC9C2D4C1).
+					 * MBR 과 같은 자리를 쓰므로, AIX 디스크를 MBR 로 오인하지 않도록 먼저 검사한다 */
+#define AIX_LABEL_MAGIC3	0xD4	/* [한국어] AIX 시그니처 셋째 바이트 */
 #define AIX_LABEL_MAGIC4	0xC1
 /*
  * [한국어]
@@ -647,7 +650,11 @@ done:
  * SOLARIS_X86_VTOC_SANE(0x600DDEEE, "sane"과 발음이 비슷한 말장난 매직)는 VTOC가
  * 유효한지 확인하는 sanity 매직 넘버다. */
 #define SOLARIS_X86_NUMSLICE	16
-#define SOLARIS_X86_VTOC_SANE	(0x600DDEEEUL)
+#define SOLARIS_X86_VTOC_SANE	(0x600DDEEEUL)	/* [한국어] Solaris x86 VTOC 가 유효함을 나타내는 매직값.
+						 * 16진수를 읽으면 "GOOD DEEE" 로 보이는 의도적 배치다.
+						 * 아래 UNIXWARE_DISKMAGIC2 와 값이 같은데, 두 포맷이 같은 조상에서
+						 * 갈라져 나왔기 때문이다 — 그래서 값만으로는 구분되지 않고
+						 * 파티션 타입 바이트로 먼저 갈라야 한다 */
 
 /*
  * [한국어] Solaris x86 VTOC 슬라이스(슬라이스 = Solaris 용어의 파티션) 온디스크
@@ -848,8 +855,11 @@ static void parse_solaris_x86(struct parsed_partitions *state,
  * OPENBSD_MAXPARTITIONS(둘 다 16)는 d_partitions[] 배열 크기, BSD_FS_UNUSED(0)는
  * 미사용 파티션 엔트리 표시값이다. */
 #define BSD_DISKMAGIC	(0x82564557UL)	/* The disk magic number */
-#define BSD_MAXPARTITIONS	16
-#define OPENBSD_MAXPARTITIONS	16
+#define BSD_MAXPARTITIONS	16	/* [한국어] BSD 디스크 레이블 하나가 담을 수 있는 파티션(슬라이스) 최대 수.
+					 * 파싱 루프의 상한이며, 레이블이 손상돼 더 큰 값을 담고 있어도
+					 * 이 값으로 잘라 배열 밖 접근을 막는다 */
+#define OPENBSD_MAXPARTITIONS	16	/* [한국어] OpenBSD 판. 값은 같지만 별도 상수로 둔 이유는 두 포맷이
+						 * 서로 독립적으로 변할 수 있기 때문이다 */
 #define BSD_FS_UNUSED		0 /* disklabel unused partition entry ID */
 /*
  * [한국어] BSD disklabel 온디스크 구조체 - FreeBSD/NetBSD/OpenBSD가 공통으로 쓰는
@@ -1188,9 +1198,12 @@ static void parse_openbsd(struct parsed_partitions *state,
  * 안에 중첩된 슬라이스 테이블(VTOC) 매직, UNIXWARE_NUMSLICE(16)는 슬라이스 배열
  * 크기, UNIXWARE_FS_UNUSED(0)는 미사용 슬라이스 표시값이다. */
 #define UNIXWARE_DISKMAGIC     (0xCA5E600DUL)	/* The disk magic number */
-#define UNIXWARE_DISKMAGIC2    (0x600DDEEEUL)	/* The slice table magic nr */
-#define UNIXWARE_NUMSLICE      16
-#define UNIXWARE_FS_UNUSED     0		/* Unused slice entry ID */
+#define UNIXWARE_DISKMAGIC2    (0x600DDEEEUL)	/* [한국어] UnixWare 슬라이스 테이블 매직.
+						 * 위 SOLARIS_X86_VTOC_SANE 과 같은 값이다(공통 조상). 원본 주석: The slice table magic nr */
+#define UNIXWARE_NUMSLICE      16	/* [한국어] UnixWare 슬라이스 최대 개수 — 파싱 루프 상한 */
+#define UNIXWARE_FS_UNUSED     0		/* [한국어] 빈 슬라이스를 나타내는 파일시스템 타입 값(0).
+						 * 파싱 시 이 값인 항목은 건너뛴다 — 테이블에는 자리가 있지만
+						 * 실제 파티션은 아니라는 뜻이다. 원본 주석: Unused slice entry ID */
 
 /*
  * [한국어] Unixware 슬라이스 온디스크 엔트리 - vtoc.v_slice[] 배열의 원소 타입.

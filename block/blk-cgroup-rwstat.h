@@ -111,7 +111,8 @@
  * block/blk-cgroup-rwstat.c (본 헤더 선언 함수들의 실제 구현체)
  */
 #ifndef _BLK_CGROUP_RWSTAT_H
-#define _BLK_CGROUP_RWSTAT_H
+#define _BLK_CGROUP_RWSTAT_H	/* [한국어] 인클루드 가드. 바로 위 #ifndef 와 짝을 이뤄, 이 헤더가 한 번역 단위에
+				 * 여러 번 포함돼도 내용이 한 번만 펼쳐지게 한다(중복 정의 오류 방지). */
 
 /* 이 파일은 block/blk-cgroup.h에 정의된 blkcg 구조체/정책을 기반으로
  * I/O 통계 헬퍼를 제공한다. */

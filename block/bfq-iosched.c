@@ -582,7 +582,11 @@ static struct kmem_cache *bfq_pool;
  * (hw_tag=1인 장치는 병렬성이 이미 충분하므로 idling을 덜 적용) 판단에
  * 쓰인다. */
 #define BFQ_HW_QUEUE_THRESHOLD	3
-#define BFQ_HW_QUEUE_SAMPLES	32
+#define BFQ_HW_QUEUE_SAMPLES	32	/* [한국어] 장치가 "큐 깊이가 깊다"고 판정하기까지 필요한 표본 수.
+					 * BFQ 는 관측된 인플라이트 요청 수로 장치 성격을 추정하는데, 표본이
+					 * 적으면 우연한 burst 를 깊은 큐로 오인한다. 이 판정이 중요한 이유:
+					 * 깊은 큐 장치(NVMe 등)에서는 idling(장치를 일부러 놀리며 다음 요청을
+					 * 기다리는 것)이 오히려 손해라, BFQ 가 idling 을 끄는 근거가 된다 */
 
 #define BFQQ_SEEK_THR		(sector_t)(8 * 100)
 /* [한국어] "seek(탐색)"으로 간주할 최소 거리(섹터, 8*100=800섹터≈400KiB).
@@ -1078,8 +1082,15 @@ void bfq_schedule_dispatch(struct bfq_data *bfqd)
 }
 
 #define bfq_class_idle(bfqq)	((bfqq)->ioprio_class == IOPRIO_CLASS_IDLE)
+/* [한국어] 이 큐가 IDLE 우선순위 클래스인지 판정.
+ * IDLE 클래스는 "다른 아무도 IO 를 원하지 않을 때만 돌려라"라는 뜻이라,
+ * BFQ 는 이 큐를 서비스 트리의 최하위로 두고 다른 클래스가 비었을 때만 고른다.
+ * 그래서 IDLE 큐는 원리상 기아 상태가 될 수 있으며, 그것이 의도된 동작이다. */
 
-#define bfq_sample_valid(samples)	((samples) > 80)
+#define bfq_sample_valid(samples)	((samples) > 80)	/* [한국어] 통계를 신뢰할 최소 표본 수(80).
+							 * seek 거리·처리 시간 같은 추정값을 쓰기 전에 이 검사를 통과해야 한다.
+							 * 표본이 모자란 채로 판단하면 프로세스 하나의 초기 몇 IO 로
+							 * 그 프로세스의 성격을 잘못 낙인찍게 된다 */
 
 /*
  * Lifted from AS - choose which of rq1 and rq2 that is best served now.
@@ -1116,7 +1127,11 @@ static struct request *bfq_choose_req(struct bfq_data *bfqd,
 {
 	sector_t s1, s2, d1 = 0, d2 = 0; /* s1/s2: 각 rq의 시작 섹터, d1/d2: head(last)로부터의 유효 거리 */
 	unsigned long back_max; /* 뒤쪽 탐색을 허용하는 최대 거리(섹터, bfq_back_max*2) */
-#define BFQ_RQ1_WRAP	0x01 /* request 1 wraps */
+#define BFQ_RQ1_WRAP	0x01 /* [한국어] bfq_choose_req() 내부 플래그 — 후보 1 이 디스크 끝을 넘어
+				     * 처음으로 되돌아가는(wrap) 위치라는 표시.
+				     * 회전 디스크에서 wrap 은 전체 스트로크만큼의 탐색을 뜻해 비용이 크므로,
+				     * 두 후보 중 하나만 wrap 이면 wrap 하지 않는 쪽을 고른다.
+				     * 원본 주석: request 1 wraps */
 #define BFQ_RQ2_WRAP	0x02 /* request 2 wraps */
 	/* wrap: rq1/rq2가 각각 "허용 범위를 넘는 뒤쪽" 위치라 wrap 취급되는지 나타내는 비트마스크 */
 	unsigned int wrap = 0; /* bit mask: requests behind the disk head? */

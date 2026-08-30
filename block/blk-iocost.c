@@ -1950,8 +1950,12 @@ static void iocg_unlock(struct ioc_gq *iocg, bool unlock_ioc, unsigned long *fla
 	}
 }
 
-#define CREATE_TRACE_POINTS
-#include <trace/events/iocost.h>
+#define CREATE_TRACE_POINTS	/* [한국어] tracepoint 헤더를 "선언"이 아니라 "정의"로 펼치게 하는 스위치.
+				 * 이 매크로가 정의된 번역 단위 딱 하나에서만 tracepoint 의 실체(구조체·심볼)가
+				 * 생성된다. 그래서 바로 아래 iocost.h 포함보다 반드시 먼저 와야 하고,
+				 * 다른 파일에서 같은 헤더를 포함하면 선언만 얻는다 */
+#include <trace/events/iocost.h>	/* [한국어] iocost 전용 tracepoint 정의(iocost_iocg_activate, iocost_ioc_vrate_adj 등).
+				 * CREATE_TRACE_POINTS 를 정의한 뒤 포함해야 실제 정의가 생성되므로 위치가 고정이다 */
 
 /*
  * [한국어]

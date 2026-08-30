@@ -80,7 +80,8 @@
  */
 
 #ifndef _BFQ_H
-#define _BFQ_H
+#define _BFQ_H	/* [한국어] 인클루드 가드. 바로 위 #ifndef 와 짝을 이뤄, 이 헤더가 한 번역 단위에
+				 * 여러 번 포함돼도 내용이 한 번만 펼쳐지게 한다(중복 정의 오류 방지). */
 
 #include <linux/blktrace_api.h> // bfq_log/bfq_log_bfqq 매크로가 쓰는 blk_add_trace_msg() 선언 - BFQ의 내부 결정을 blktrace 스트림에 남기기 위해 필요
 #include <linux/hrtimer.h> // idle_slice_timer(다음 요청을 기다리며 장치를 비워 두는 idling 타이머)가 hrtimer이므로 필요
