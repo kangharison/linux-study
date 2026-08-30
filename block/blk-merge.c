@@ -542,9 +542,10 @@ static struct bio *__bio_split_discard(struct bio *bio,
 		const struct queue_limits *lim, unsigned *nsegs,
 		unsigned int max_sectors)
 {
-	unsigned int max_discard_sectors, granularity;
-	sector_t tmp;
-	unsigned split_sectors;
+	unsigned int max_discard_sectors, granularity;	/* [한국어] 한 번에 해제 가능한 최대 섹터 수와 해제 단위 */
+	sector_t tmp;					/* [한국어] granularity 경계 계산용 임시값. sector_t 인 이유는
+							 * 아래 나눗셈이 64비트 섹터 번호를 다루기 때문이다 */
+	unsigned split_sectors;				/* [한국어] 이번에 잘라 낼 앞부분의 섹터 수 */
 
 	/* [한국어] discard bio는 전송할 데이터 페이지가 없어 bvec도 없다. 따라서
 	 * "세그먼트 수"는 R/W처럼 계산할 대상이 아니라 상수 1로 고정한다. 실제 DSM
@@ -1345,16 +1346,20 @@ struct bio *bio_split_rw(struct bio *bio, const struct queue_limits *lim,
 struct bio *bio_split_zone_append(struct bio *bio,
 		const struct queue_limits *lim, unsigned *nr_segs)
 {
-	int split_sectors;
+	int split_sectors;	/* [한국어] 양수면 "여기서 잘라야 한다", 0 이면 분할 불필요, 음수면 에러 */
 
-	/* max_zone_append_sectors는 NVMe Zone Append 명령이 한 번에 처리할 수
-	 * 있는 최대 섹터 수. 분할이 필요하면 경고로 잡아내는데, ZNS의 경우
-	 * block layer에서 Zone Append bio를 분할해서는 안 되기 때문이다. */
+	/* [한국어] Zone Append 는 **쪼갤 수 없다**. 일반 쓰기라면 앞뒤로 나눠 두 명령을
+	 * 보내면 되지만, append 는 기록 위치를 장치가 정해 하나의 LBA 로 돌려주므로
+	 * 둘로 나누면 반환할 위치가 둘이 되어 의미가 성립하지 않는다.
+	 * 그래서 여기서는 "잘라야 한다"는 결과 자체가 상위 계층의 버그다 —
+	 * 애초에 max_zone_append_sectors 를 넘는 append bio 를 만들면 안 된다.
+	 * bio_split_rw_at() 을 부르는 것은 자르기 위해서가 아니라 **검사하기 위해서**다. */
 	split_sectors = bio_split_rw_at(bio, lim, nr_segs,
 			lim->max_zone_append_sectors << SECTOR_SHIFT);
-	if (WARN_ON_ONCE(split_sectors > 0))
-		split_sectors = -EINVAL;
-	return bio_submit_split(bio, split_sectors);
+	if (WARN_ON_ONCE(split_sectors > 0))	/* [한국어] 양수 = 잘라야 한다 = 있어서는 안 될 상황 */
+		split_sectors = -EINVAL;	/* [한국어] 자르는 대신 에러로 바꿔 제출을 실패시킨다.
+					 * 잘못 잘라 조용히 틀린 위치를 보고하는 것보다 실패가 낫다. */
+	return bio_submit_split(bio, split_sectors);	/* [한국어] 0 이면 원본 그대로, 음수면 bio 를 에러로 완료시킨다 */
 }
 
 /*
@@ -1423,13 +1428,13 @@ EXPORT_SYMBOL(bio_split_to_limits);
  */
 unsigned int blk_recalc_rq_segments(struct request *rq)
 {
-	unsigned int nr_phys_segs = 0;
-	unsigned int bytes = 0;
-	struct req_iterator iter;
-	struct bio_vec bv;
+	unsigned int nr_phys_segs = 0;	/* [한국어] 누적 세그먼트 수 — 이 함수의 결과 */
+	unsigned int bytes = 0;		/* [한국어] 누적 바이트 수. 세그먼트 경계 판정(크기 상한)에 쓰인다 */
+	struct req_iterator iter;	/* [한국어] request 안의 모든 bio 를 가로질러 bvec 을 훑는 커서 */
+	struct bio_vec bv;		/* [한국어] 순회 중 현재 bvec (복사본으로 받는다) */
 
 	if (!rq->bio)
-		return 0;
+		return 0;		/* [한국어] bio 가 없는 request(패스스루 중 데이터 없는 명령 등)는 세그먼트도 0 이다 */
 
 	/* rq->bio의 op별로 세그먼트 계산 방식이 다르다. 데이터 버퍼가 없는
 	 * Discard/Write Zeroes는 별도 처리. */
@@ -1439,13 +1444,16 @@ unsigned int blk_recalc_rq_segments(struct request *rq)
 		/* NVMe DSM은 여러 range를 하나의 명령에 담을 수 있다.
 		 * queue_max_discard_segments가 1이면 range 1개로 계산. */
 		if (queue_max_discard_segments(rq->q) > 1) {
-			struct bio *bio = rq->bio;
+			struct bio *bio = rq->bio;	/* [한국어] 체인의 시작 */
 
+			/* [한국어] discard 는 bvec 이 아니라 **bio 하나가 구간 하나**다.
+			 * 병합된 discard request 는 bio 체인으로 여러 구간을 들고 있고,
+			 * 그 개수가 곧 DSM 명령에 실릴 range 개수가 된다. */
 			for_each_bio(bio)
 				nr_phys_segs++;
 			return nr_phys_segs;
 		}
-		return 1;
+		return 1;	/* [한국어] 장치가 구간 하나만 받는다면 병합도 없었을 테니 1 이다 */
 	case REQ_OP_WRITE_ZEROES:
 		/* NVMe Write Zeroes는 데이터 버퍼/PRP/SGL이 필요 없다. */
 		return 0;
@@ -1860,8 +1868,12 @@ static int ll_merge_requests_fn(struct request_queue *q, struct request *req,
 
 	/* Merge is OK... */
 	/* [한국어] 모든 검사 통과 — 카운터를 커밋한다. 물리 세그먼트 수는 임시 변수의
-	 * 합계로 교체하고, 무결성 세그먼트 수는 누적한다. 이 값들이 나중에
-	 * nvme_queue_rq()에서 데이터 포인터와 메타데이터 포인터를 구성할 때 쓰인다.
+	 * 합계로 교체하고, 무결성 세그먼트 수는 누적한다.
+	 * nr_phys_segments 는 드라이버가 실제로 읽는 값이다 — NVMe PCIe 는
+	 * blk_rq_nr_phys_segments(req) 로 DMA 기술 방식을 고른다:
+	 *   == 1 이면 nvme_pci_setup_data_simple() 로 iterator 없이 곧장 처리하고(pci.c:1645),
+	 *   그보다 많으면 PRP 리스트나 SGL 을 구성한다(pci.c:1533).
+	 * 즉 여기서 세그먼트를 하나로 합쳐 두면 드라이버의 고속 경로가 열린다.
 	 * 실제 bio 리스트 연결(req->biotail->bi_next = next->bio)과 next 해제는
 	 * 호출자 attempt_merge()가 이어서 수행한다. */
 	req->nr_phys_segments = total_phys_segments;
@@ -1874,7 +1886,7 @@ static int ll_merge_requests_fn(struct request_queue *q, struct request *req,
  * @rq: 표시할 request
  *
  * 여러 bio의 FAILFAST 속성(REQ_FAILFAST_DEV/REQ_FAILFAST_TRANSPORT/
- * REQ_FAILFAST_DRIVER)을 하나의 request로 합치는 경우, NVMe timeout/retry
+ * REQ_FAILFAST_DRIVER)을 하나의 request 로 합치는 경우, 재시도 정책
  * 정책에 영향을 주는 플래그들을 각 bio에도 분산시켜야 나중에 분할 완료나
  * partial completion 처리 시 일관성이 유지된다.
  */
@@ -1889,8 +1901,9 @@ static int ll_merge_requests_fn(struct request_queue *q, struct request *req,
  */
 static void blk_rq_set_mixed_merge(struct request *rq)
 {
-	blk_opf_t ff = rq->cmd_flags & REQ_FAILFAST_MASK;
-	struct bio *bio;
+	blk_opf_t ff = rq->cmd_flags & REQ_FAILFAST_MASK;	/* [한국어] request 대표값으로 삼을 failfast 조합.
+							 * 첫 bio 의 것이며, 이것을 나머지 전부에 퍼뜨린다 */
+	struct bio *bio;					/* [한국어] 체인 순회 커서 */
 
 	/* 이미 mixed merge로 표시되면 추가 분배 불필요. */
 	if (rq->rq_flags & RQF_MIXED_MERGE)
@@ -1901,12 +1914,23 @@ static void blk_rq_set_mixed_merge(struct request *rq)
 	 * contained bios.  It will just track those of the first one.
 	 * Distributes the attributs to each bio.
 	 */
-	/* rq에 포함된 모든 bio에 failfast 플래그를 분배. NVMe timeout/abort
-	 * 처리 시 각 bio 단위로 retry 여부를 결정할 수 있게 한다(추정). */
+	/* [한국어] request 가 여러 bio 를 품게 되면 대표 플래그 하나로는 개별 bio 의
+	 * 원래 속성을 표현할 수 없다. 그래서 대표값을 각 bio 에 복사해 두고,
+	 * 완료 시점에 각 bio 가 자기 플래그를 보고 판단하게 만든다.
+	 *
+	 * failfast 의 뜻: "이 요청이 실패하면 재시도하지 말고 즉시 실패를 알려라".
+	 * 주로 MD/DM 멀티패스가 쓴다 — 한 경로가 죽었을 때 재시도로 시간을 끌지 않고
+	 * 곧바로 다른 경로로 넘기기 위해서다.
+	 *
+	 * 확인 결과: drivers/nvme/ 에는 REQ_FAILFAST_* 를 읽는 코드가 없다.
+	 * (NVMe 의 NVME_CTRL_FAILFAST_EXPIRED 는 fabrics 의 fast_io_fail_tmo 상태로
+	 *  이름만 비슷할 뿐 별개다.) 따라서 이 플래그는 NVMe 단독 구성에서는 사실상
+	 * 쓰이지 않고, NVMe 위에 MD/DM 을 얹은 구성에서 의미를 갖는다. */
 	for (bio = rq->bio; bio; bio = bio->bi_next) {
 		WARN_ON_ONCE((bio->bi_opf & REQ_FAILFAST_MASK) &&
-			     (bio->bi_opf & REQ_FAILFAST_MASK) != ff);
-		bio->bi_opf |= ff;
+			     (bio->bi_opf & REQ_FAILFAST_MASK) != ff);	/* [한국어] 이미 다른 조합을 갖고 있었다면 병합 판정이 잘못된 것이다 —
+									 * 서로 다른 failfast 요구를 한 request 로 묶으면 한쪽 요구가 조용히 사라진다 */
+		bio->bi_opf |= ff;	/* [한국어] 덮어쓰기가 아니라 OR — 원래 갖고 있던 비트는 보존한다 */
 	}
 	rq->rq_flags |= RQF_MIXED_MERGE;
 }
