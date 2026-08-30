@@ -4108,6 +4108,10 @@ static void transfer_surpluses(struct list_head *surpluses, struct ioc_now *now)
 	list_for_each_entry(iocg, &inner_walk, walk_list) {
 		if (iocg->level) {		/* root 제외 기부자 비율 재계산 */
 			struct ioc_gq *parent = iocg->ancestors[iocg->level - 1];
+			/* [한국어] ancestors[] 는 루트부터 자기 자신까지의 조상 배열이고,
+			 * level 은 그 배열에서 자기 위치다. 따라서 level-1 이 곧 부모다.
+			 * 포인터를 따라 올라가지 않고 배열로 두는 이유: 계층 어느 높이의
+			 * 조상이든 O(1)에 꺼낼 수 있어야 hweight 계산이 빨라지기 때문이다. */
 
 			iocg->hweight_active = DIV64_U64_ROUND_UP(			/* 부모로부터 상속된 hweight_active */
 				(u64)parent->hweight_active * iocg->active,				/* 부모 hweight * 자식 active */
@@ -4244,8 +4248,9 @@ static void transfer_surpluses(struct list_head *surpluses, struct ioc_now *now)
 	 * we can finally determine leaf adjustments.
 	 */
 	list_for_each_entry(iocg, surpluses, surplus_list) {
-		struct ioc_gq *parent = iocg->ancestors[iocg->level - 1];
-		u32 inuse;
+		struct ioc_gq *parent = iocg->ancestors[iocg->level - 1];	/* [한국어] 기부는 형제 사이에서 일어나므로 부모가 기준점이다 */
+		u32 inuse;	/* [한국어] 이 iocg 에 최종적으로 설정할 inuse(실사용 가중치).
+				 * active(설정된 가중치)와 달리 inuse 는 기부·회수에 따라 계속 움직인다 */
 
 		/*
 		 * In-debt iocgs participated in the donation calculation with
@@ -5179,18 +5184,27 @@ static void ioc_rqos_throttle(struct rq_qos *rqos, struct bio *bio)
 				 * 반드시 finish_wait()으로 큐에서 떼어내야 한다 */
 	u64 abs_cost, cost, vtime;	/* abs_cost=절대 비용, cost=할당비율 적용 비용, vtime=현재 issued */
 	bool use_debt, ioc_locked;	/* debt 사용 시 ioc->lock 필요: vtime 부채/주기 보호 */
-	unsigned long flags;
+	unsigned long flags;	/* [한국어] 락을 irqsave 로 잡을 때 저장할 인터럽트 상태.
+				 * 이 함수는 두 종류의 락(iocg->waitq.lock 또는 ioc->lock)을 상황에 따라 골라 잡는데,
+				 * 어느 쪽이든 완료 경로와 공유하므로 인터럽트를 막아야 한다 */
 
 	/* bypass IOs if disabled, still initializing, or for root cgroup */
 	if (!ioc->enabled || !iocg || !iocg->level)	/* iocost 미활성/root cgroup은 throttling bypass */
 		return;
 
 	/* calculate the absolute vtime cost */
-	abs_cost = calc_vtime_cost(bio, iocg, false);	/* bio의 예상 처리 시간(절대값) */
+	abs_cost = calc_vtime_cost(bio, iocg, false);
+	/* [한국어] "절대" 비용이라 부르는 이유: 아직 이 cgroup 의 가중치를 반영하지 않은,
+	 * 장치 관점의 순수 비용이기 때문이다. 같은 4KB 읽기는 어느 cgroup 이 냈든
+	 * 여기서 같은 값이 나온다. 가중치는 아래 adjust_inuse_and_calc_cost() 가
+	 * hweight_inuse 로 나눠 반영한다 — 몫이 작은 cgroup 일수록 같은 IO 가 더 비싸진다. */
 	if (!abs_cost)	/* 0이면 throttling 대상 외 bio */
 		return;
 
-	if (!iocg_activate(iocg, &now))	/* 활성화 실패(낮부 node IO) 시 bypass */
+	if (!iocg_activate(iocg, &now))
+		/* [한국어] 활성화는 "이 cgroup 을 이번 주기의 경쟁자 목록에 넣는다"는 뜻이다.
+		 * 실패하는 경우는 컨트롤러가 종료 중이거나 계층 어딘가가 이미 정리된 때이며,
+		 * 그때는 회계에 넣을 곳이 없으므로 스로틀 없이 통과시킨다. */
 		return;
 
 	iocg->cursor = bio_end_sector(bio);	/* [한국어] 다음 bio의 순차/랜덤 판정 기준을 이 bio의 끝 섹터로 갱신한다.
@@ -5349,11 +5363,13 @@ static void ioc_rqos_merge(struct rq_qos *rqos, struct request *rq,
 			   struct bio *bio)
 {
 	struct ioc_gq *iocg = blkg_to_iocg(bio->bi_blkg);	/* 병합 bio의 blk-cgroup vtime 예산 상태 */
-	struct ioc *ioc = rqos_to_ioc(rqos);
+	struct ioc *ioc = rqos_to_ioc(rqos);	/* [한국어] rq_qos 노드에서 자기 ioc 로 되돌아간다(container_of 패턴) */
 	sector_t bio_end = bio_end_sector(bio);	/* 병합 후 LBA 끝: cursor 갱신용 */
-	struct ioc_now now;
-	u64 vtime, abs_cost, cost;
-	unsigned long flags;
+	struct ioc_now now;			/* [한국어] 이번 판정에 쓸 시각 스냅숏(실시간 + vtime + vrate).
+						 * 한 번 찍어 두고 아래 계산 전체가 같은 시점을 쓰게 한다 —
+						 * 중간에 시각이 흐르면 비용과 예산이 서로 다른 기준으로 비교된다 */
+	u64 vtime, abs_cost, cost;		/* [한국어] 각각 현재 예산 위치 / 장치 중립 비용 / 이 cgroup 몫으로 환산한 비용 */
+	unsigned long flags;			/* [한국어] iocg->waitq.lock 을 irqsave 로 잡을 때 저장할 인터럽트 상태 */
 
 	/* bypass if disabled, still initializing, or for root cgroup */
 	if (!ioc->enabled || !iocg || !iocg->level)
@@ -5361,9 +5377,10 @@ static void ioc_rqos_merge(struct rq_qos *rqos, struct request *rq,
 
 	abs_cost = calc_vtime_cost(bio, iocg, true);	/* 병합으로 추가된 비용만 계산 */
 	if (!abs_cost)
-		return;
+		return;		/* [한국어] 추가 비용이 0 이면 회계에 반영할 것이 없다 */
 
-	ioc_now(ioc, &now);
+	ioc_now(ioc, &now);	/* [한국어] 지금 시각과 그 시점의 vtime 을 한 번에 읽는다.
+				 * 아래 비용 계산과 예산 비교가 모두 이 스냅숏을 기준으로 이뤄진다 */
 
 	vtime = atomic64_read(&iocg->vtime);	/* [한국어] atomic 읽기: 현재 발행 기준 가상 시각 */
 	cost = adjust_inuse_and_calc_cost(iocg, vtime, abs_cost, &now);	/* [한국어] abs_cost → (hweight_inuse 반영) cost 변환.
@@ -5833,9 +5850,11 @@ static void ioc_pd_init(struct blkg_policy_data *pd)
 		iocg->ancestors[tiocg->level] = tiocg;		/* ancestors[]에 계층 위치 기록 */
 	}
 
-	spin_lock_irqsave(&ioc->lock, flags);
+	spin_lock_irqsave(&ioc->lock, flags);	/* [한국어] hweight 는 계층 전체에 걸친 값이라, 한 노드만 바꿔도
+					 * 조상·형제의 몫이 함께 재계산된다. 그 갱신이 원자적으로 보이도록 ioc 전역 락을 잡는다.
+					 * irqsave 인 이유: 완료 경로(인터럽트 문맥에서 시작 가능)도 같은 락을 쓴다 */
 	weight_updated(iocg, &now);	/* 초기 weight를 상위로 전파해 hweight 계산 준비 */
-	spin_unlock_irqrestore(&ioc->lock, flags);
+	spin_unlock_irqrestore(&ioc->lock, flags);	/* [한국어] 갱신이 끝나는 즉시 놓는다 — 이 락은 IO 핫패스도 쓰므로 오래 잡으면 안 된다 */
 }
 
 /*
@@ -5919,6 +5938,11 @@ static void ioc_pd_stat(struct blkg_policy_data *pd, struct seq_file *s)
 		return;
 
 	if (iocg->level == 0) {	/* root cgroup 출력: 전체 vrate */
+		/* [한국어] vrate 를 사람이 읽을 수 있는 "1.00 배" 형태로 바꾼다.
+		 * vtime_base_rate 는 "마이크로초당 흐르는 vtime" 이고, VTIME_PER_USEC 이
+		 * 그 기준값(=1.0배)이므로 둘을 나누면 배율이 나온다. 소수 둘째 자리까지
+		 * 보여 주려고 먼저 10000 을 곱해 정수로 만든 뒤, 아래에서 100 으로 나눈
+		 * 몫과 나머지를 각각 정수부·소수부로 출력한다(커널에는 부동소수점이 없다). */
 		unsigned vp10k = DIV64_U64_ROUND_CLOSEST(
 			ioc->vtime_base_rate * 10000,		/* vrate * 10000 */
 			VTIME_PER_USEC);		/* 1.0 기준으로 정규화: 상대 IO 속도 */
@@ -6156,8 +6180,11 @@ static int ioc_qos_show(struct seq_file *sf, void *v)
 {
 	struct blkcg *blkcg = css_to_blkcg(seq_css(sf));	/* [한국어] seq_file에서 blk-cgroup 포인터 취득 */
 
-	blkcg_print_blkgs(sf, blkcg, ioc_qos_prfill,
-			  &blkcg_policy_iocost, seq_cft(sf)->private, false);
+	blkcg_print_blkgs(sf, blkcg, ioc_qos_prfill,	/* [한국어] 이 cgroup 에 딸린 모든 blkg(= 장치마다 하나)를 순회하며
+						 * ioc_qos_prfill 로 한 줄씩 출력한다. io.cost.qos 가 장치별 설정이라
+						 * 한 파일에 여러 줄("MAJ:MIN enable=… ")이 나오는 이유가 이것이다 */
+			  &blkcg_policy_iocost, seq_cft(sf)->private, false);	/* [한국어] 마지막 false = 재귀 집계 안 함.
+						 * 설정값은 상속되는 것이 아니라 각 cgroup 이 자기 값을 갖기 때문이다 */
 	/* [한국어] 모든 blkg를 순회해 ioc_qos_prfill로 장치별 QoS 파라미터 출력 */
 	return 0;
 }
@@ -6239,8 +6266,9 @@ static ssize_t ioc_qos_write(struct kernfs_open_file *of, char *input,
 	if (!ioc) {	/* [한국어] 최초 io.cost.qos 쓰기 시 iocost 초기화 */
 		ret = blk_iocost_init(disk);
 		if (ret)
-			goto err;
-		ioc = q_to_ioc(disk->queue);
+			goto err;	/* [한국어] 초기화 실패 — 아래 err 라벨이 freeze 해제와 컨텍스트 정리를 맡는다 */
+		ioc = q_to_ioc(disk->queue);	/* [한국어] 방금 만들어진 ioc 를 다시 꺼낸다.
+					 * blk_iocost_init() 이 큐에 붙여 놓았을 뿐 포인터를 돌려주지 않기 때문이다 */
 	}
 
 	blk_mq_quiesce_queue(disk->queue);	/* 요청 큐 일시 정지: qos 변경 중 race 방지 */
@@ -6251,10 +6279,12 @@ static ssize_t ioc_qos_write(struct kernfs_open_file *of, char *input,
 	user = ioc->user_qos_params;	/* [한국어] 현재 수동 파라미터 여부 */
 
 	while ((p = strsep(&body, " \t\n"))) {	/* [한국어] 공백으로 구분된 "key=value" 토큰 순회 */
-		substring_t args[MAX_OPT_ARGS];
-		char buf[32];
-		int tok;
-		s64 v;
+		substring_t args[MAX_OPT_ARGS];	/* [한국어] match_token() 이 채워 주는 "key=value" 의 value 부분 위치 */
+		char buf[32];			/* [한국어] value 를 널 종료 문자열로 복사해 둘 임시 버퍼.
+						 * substring_t 는 원본 버퍼 안의 구간만 가리켜 그대로는 문자열 함수에 넘길 수 없다.
+						 * 32바이트면 "12345.67" 같은 실수 표기에 충분하고, 넘치면 einval 로 거절한다 */
+		int tok;			/* [한국어] match_token() 이 돌려주는 QOS_* 열거자 — 곧 qos[] 의 첨자가 된다 */
+		s64 v;				/* [한국어] 파싱된 값. 부호 있는 타입인 이유는 음수 입력을 걸러내기 위해서다 */
 
 		if (!*p)	/* [한국어] 빈 토큰 skip */
 			continue;
@@ -6304,8 +6334,11 @@ static ssize_t ioc_qos_write(struct kernfs_open_file *of, char *input,
 				goto einval;
 			if (v < 0)	/* [한국어] 음수 vrate 범위 거부 */
 				goto einval;
-			qos[tok] = clamp_t(s64, v * 100,
-					   VRATE_MIN_PPM, VRATE_MAX_PPM);
+			qos[tok] = clamp_t(s64, v * 100,	/* [한국어] 사용자는 백분율로 쓰지만 내부 단위는 ppm 이라 100 을 곱한다
+								 * (예: "125.00" → 12500 ppm). cgroup_parse_float 이 소수 둘째 자리까지
+								 * 정수로 만들어 주므로 여기서는 단위 변환만 하면 된다 */
+					   VRATE_MIN_PPM, VRATE_MAX_PPM);	/* [한국어] 범위를 벗어난 값을 거절하지 않고 잘라 넣는다 —
+								 * 설정은 받아들이되 제어가 감당 못 할 값은 쓰지 않는다는 방침 */
 			/* [한국어] VRATE_MIN_PPM~VRATE_MAX_PPM 범위로 클램핑 */
 			break;
 		default:
@@ -6320,11 +6353,14 @@ static ssize_t ioc_qos_write(struct kernfs_open_file *of, char *input,
 	if (enable && !ioc->enabled) {	/* iocost 활성화: rq alloc_time 계정 시작 */
 		blk_stat_enable_accounting(disk->queue);		/* request 할당/완료 시간 측정 활성화 -> 지연(latency) QoS 통계 정확도 향상 */
 		blk_queue_flag_set(QUEUE_FLAG_RQ_ALLOC_TIME, disk->queue);		/* blk-mq tag(sbitmap) 대기 시간 측정 플래그 설정 */
-		ioc->enabled = true;
+		ioc->enabled = true;	/* [한국어] 이 대입 이후부터 ioc_rqos_throttle/merge 가 실제로 동작한다.
+					 * 통계 수집을 먼저 켜고 마지막에 이 플래그를 세우는 순서가 중요하다 —
+					 * 반대로 하면 통계가 없는 상태에서 판정을 시도해 잘못된 결론을 낸다 */
 	} else if (!enable && ioc->enabled) {	/* iocost 비활성화: 통계 중지 */
 		blk_stat_disable_accounting(disk->queue);		/* 완료/대기 시간 측정 중지 */
 		blk_queue_flag_clear(QUEUE_FLAG_RQ_ALLOC_TIME, disk->queue);		/* blk-mq tag(sbitmap) 대기 시간 측정 플래그 해제 */
-		ioc->enabled = false;
+		ioc->enabled = false;	/* [한국어] 이 플래그가 내려간 뒤로는 새 요청에 스로틀이 걸리지 않는다.
+					 * 다만 이미 waitq 에서 기다리던 요청들은 따로 깨워 줘야 한다 */
 	}
 
 	if (user) {	/* [한국어] 수동 모드: 파싱된 파라미터를 ioc에 반영 */
@@ -6416,8 +6452,8 @@ static int ioc_cost_model_show(struct seq_file *sf, void *v)
 {
 	struct blkcg *blkcg = css_to_blkcg(seq_css(sf));	/* [한국어] seq_file에서 blk-cgroup 포인터 취득 */
 
-	blkcg_print_blkgs(sf, blkcg, ioc_cost_model_prfill,
-			  &blkcg_policy_iocost, seq_cft(sf)->private, false);
+	blkcg_print_blkgs(sf, blkcg, ioc_cost_model_prfill,	/* [한국어] 장치마다 한 줄씩 비용 모델 계수를 출력한다 */
+			  &blkcg_policy_iocost, seq_cft(sf)->private, false);	/* [한국어] false = 재귀 집계 안 함(설정값은 상속되지 않는다) */
 	/* [한국어] 모든 blkg를 순회해 비용 모델 파라미터 출력 */
 	return 0;
 }
@@ -6495,8 +6531,8 @@ static ssize_t ioc_cost_model_write(struct kernfs_open_file *of, char *input,
 	if (!ioc) {	/* [한국어] 최초 io.cost.model 쓰기 시 iocost 초기화 */
 		ret = blk_iocost_init(ctx.bdev->bd_disk);
 		if (ret)
-			goto err;
-		ioc = q_to_ioc(q);
+			goto err;	/* [한국어] 초기화 실패 — err 라벨에서 정리 */
+		ioc = q_to_ioc(q);	/* [한국어] 방금 붙인 ioc 를 큐에서 다시 꺼낸다 */
 	}
 
 	memflags = blk_mq_freeze_queue(q);	/* 요청 큐 동결: cost model 변경 중 IO 정지 */
@@ -6507,10 +6543,10 @@ static ssize_t ioc_cost_model_write(struct kernfs_open_file *of, char *input,
 	user = ioc->user_cost_model;	/* [한국어] 현재 수동 모델 여부 */
 
 	while ((p = strsep(&body, " \t\n"))) {	/* [한국어] 공백으로 구분된 토큰 순회 */
-		substring_t args[MAX_OPT_ARGS];
-		char buf[32];
-		int tok;
-		u64 v;
+		substring_t args[MAX_OPT_ARGS];	/* [한국어] "key=value" 의 value 위치 */
+		char buf[32];			/* [한국어] value 를 널 종료 문자열로 옮길 임시 버퍼 */
+		int tok;			/* [한국어] I_LCOEF_* 또는 COST_* 열거자 — u[] 배열의 첨자가 된다 */
+		u64 v;				/* [한국어] 파싱된 값. 여기 오는 것은 bps/iops 라 음수가 없어 부호 없는 타입을 쓴다 */
 
 		if (!*p)	/* [한국어] 빈 토큰 skip */
 			continue;
@@ -6559,8 +6595,10 @@ static ssize_t ioc_cost_model_write(struct kernfs_open_file *of, char *input,
 einval:
 	spin_unlock_irq(&ioc->lock);
 
-	blk_mq_unquiesce_queue(q);
-	blk_mq_unfreeze_queue(q, memflags);
+	blk_mq_unquiesce_queue(q);	/* [한국어] 디스패치 재개 */
+	blk_mq_unfreeze_queue(q, memflags);	/* [한국어] 큐 사용 참조 복원. quiesce 를 먼저 풀고 freeze 를 나중에 푸는
+					 * 순서가 중요하다 — 반대로 하면 새 요청이 들어온 뒤에도 디스패치가 막혀 있어
+					 * 잠시나마 요청이 큐에 쌓인 채 진행하지 못한다 */
 
 	ret = -EINVAL;
 err:
