@@ -1537,8 +1537,8 @@ static void bio_alloc_irq_cache_splice(struct bio_alloc_cache *cache)
  */
 static struct bio *bio_alloc_percpu_cache(struct bio_set *bs)
 {
-	struct bio_alloc_cache *cache;
-	struct bio *bio;
+	struct bio_alloc_cache *cache;	/* [한국어] 이 CPU 의 캐시. get_cpu() 로 선점을 막은 뒤에만 접근한다 */
+	struct bio *bio;		/* [한국어] 캐시에서 꺼낸 bio. 비어 있으면 NULL 로 남아 호출자가 슬랩에서 새로 잡는다 */
 
 	cache = per_cpu_ptr(bs->cache, get_cpu());   /* [한국어] 현재 CPU에 고정하고 해당 CPU의 캐시 포인터 획득 */
 	if (!cache->free_list) {                      /* [한국어] 태스크 캐시 비어 있음: IRQ 캐시로 보충 시도 */
@@ -3268,9 +3268,14 @@ int bio_iov_iter_get_pages(struct bio *bio, struct iov_iter *iter,
 	 * 추출에서 P2PDMA 페이지와 일반 페이지를 섞지 않기 때문이다(섞이면
 	 * 추출 단계에서 끊긴다). 병합을 막는 이유는 __bio_add_page()의 경우와
 	 * 같다 — 매핑 방식이 다른 두 종류의 메모리를 한 request에 담을 수 없다. */
+	/* [한국어] P2PDMA(Peer-to-Peer DMA) 페이지는 시스템 메모리가 아니라 다른 PCIe
+	 * 장치의 BAR 영역이다(예: NVMe 컨트롤러의 CMB). 이런 페이지는 일반 메모리와
+	 * 섞어 하나의 요청으로 만들 수 없어 — 매핑 방식과 주소 공간이 다르다 —
+	 * 아예 병합을 금지해 둔다. 첫 bvec 만 검사하는 이유는 한 bio 안의 페이지가
+	 * 모두 같은 출처라는 상위 계층의 전제 때문이다. */
 	if (is_pci_p2pdma_page(bio->bi_io_vec->bv_page))
 		bio->bi_opf |= REQ_NOMERGE;
-	return bio_iov_iter_align_down(bio, iter, len_align_mask);
+	return bio_iov_iter_align_down(bio, iter, len_align_mask);	/* [한국어] 마지막으로 크기를 정렬 경계에 맞춰 내림하고 반환 */
 }
 
 /*
@@ -3933,6 +3938,9 @@ EXPORT_SYMBOL(bio_copy_data_iter);
  */
 void bio_copy_data(struct bio *dst, struct bio *src)  // bio 간 데이터 복사: NVMe clone/raid/duplicate 경로
 {
+	/* [한국어] 양쪽 iterator 를 **복사본으로** 만든다. 아래 복사 루프가 iterator 를
+	 * 전진시키는데, 원본 bio 의 bi_iter 를 직접 움직이면 그 bio 는 이후 자기 데이터를
+	 * 가리키지 못하게 된다. 복사본을 쓰면 bio 자체는 손대지 않고 내용만 옮길 수 있다. */
 	struct bvec_iter src_iter = src->bi_iter;
 	struct bvec_iter dst_iter = dst->bi_iter;
 
@@ -4034,6 +4042,8 @@ EXPORT_SYMBOL_GPL(bio_set_pages_dirty);  // DIO 완료 전 페이지 dirty 마�
  * BIO.
  */
 
+/* [한국어] 전방 선언 — 바로 아래 DECLARE_WORK 가 이 함수를 참조하는데,
+ * 정의는 파일 뒤쪽에 있어 여기서 미리 선언해 둔다. */
 static void bio_dirty_fn(struct work_struct *work);
 
 static DECLARE_WORK(bio_dirty_work, bio_dirty_fn);    /* [한국어] bio dirty 재마킹 지연 작업: 인터럽트 컨텍스트에서 직접 호출 불가하므로 워크큐로 지연 */
@@ -4098,8 +4108,10 @@ static void bio_dirty_fn(struct work_struct *work)
  */
 void bio_check_pages_dirty(struct bio *bio)	/* [한국어] Direct I/O 완료 후 페이지 dirty 상태 처리 */
 {
-	struct folio_iter fi;
-	unsigned long flags;
+	struct folio_iter fi;	/* [한국어] folio 단위 순회 커서 */
+	unsigned long flags;	/* [한국어] bio_dirty_lock 을 irqsave 로 잡을 때 저장할 인터럽트 상태.
+				 * 이 함수는 완료 경로에서 불릴 수 있고 그 경로가 인터럽트에서 시작하므로,
+				 * 평범한 spin_lock 으로는 같은 CPU 의 인터럽트와 교착할 수 있다. */
 
 	bio_for_each_folio_all(fi, bio) {  /* [한국어] 모든 folio를 순회하며 dirty 여부 확인 */
 		if (!folio_test_dirty(fi.folio))   /* [한국어] 하나라도 clean이면 defer 경로로 이동 */
@@ -4357,6 +4369,11 @@ void bio_trim(struct bio *bio, sector_t offset, sector_t size)
 	if (WARN_ON_ONCE(bio->bi_opf & REQ_ATOMIC && size))	/* [한국어] 원자적 쓰기를 잘라내려는 시도 — 있을 수 없는 호출이다 */
 		return;
 
+	/* [한국어] 세 가지를 한꺼번에 막는다: 오프셋·크기가 각각 표현 가능 범위를 넘는 경우와,
+	 * 둘의 합이 원본 bio 를 넘어서는 경우. 마지막 조건이 핵심이다 — 그것을 통과시키면
+	 * 존재하지 않는 뒷부분을 가리키는 bio 가 만들어져 엉뚱한 LBA 를 읽거나 쓰게 된다.
+	 * offset+size 를 검사하기 전에 각각을 먼저 거르는 이유는 덧셈 자체의 오버플로를
+	 * 피하기 위해서다. */
 	if (WARN_ON_ONCE(offset > BIO_MAX_SECTORS || size > BIO_MAX_SECTORS ||
 			 offset + size > bio_sectors(bio)))
 		return;
@@ -4601,20 +4618,32 @@ static int __init init_bio(void)  // bio 서브시스템 초기화: NVMe 드라�
 
 	BUILD_BUG_ON(BIO_FLAG_LAST > 8 * sizeof_field(struct bio, bi_flags));	// struct bio flags 크기 불변: NVMe 드라이버 바이너리 호환성
 
+	/* [한국어] bvec 배열 크기 등급(16/64/128/BIO_MAX_VECS)마다 슬랩 캐시를 하나씩 만든다.
+	 * 등급을 나누는 이유: 세그먼트 2개짜리 bio 에 256개짜리 배열을 주면 대부분이 낭비되고,
+	 * 반대로 큰 등급 하나만 두면 그 낭비가 모든 bio 에 발생한다. */
 	for (i = 0; i < ARRAY_SIZE(bvec_slabs); i++) {
-		struct biovec_slab *bvs = bvec_slabs + i;
+		struct biovec_slab *bvs = bvec_slabs + i;	/* [한국어] 이번 등급의 기술자(이름·벡터 수·슬랩 포인터) */
 
 		bvs->slab = kmem_cache_create(bvs->name,  // bio/bio_vec slab 생성: NVMe bio 할당 성능에 영향
-				bvs->nr_vecs * sizeof(struct bio_vec), 0,
-				SLAB_HWCACHE_ALIGN | SLAB_PANIC, NULL);
+				bvs->nr_vecs * sizeof(struct bio_vec), 0,	/* [한국어] 오브젝트 크기 = 이 등급의 벡터 수 × bio_vec 크기 */
+				SLAB_HWCACHE_ALIGN | SLAB_PANIC, NULL);	/* [한국어] HWCACHE_ALIGN: bvec 배열이 캐시 라인 경계에서 시작하게 해
+								 * 서로 다른 CPU 가 쓰는 bvec 이 같은 라인을 공유(false sharing)하지 않게 한다.
+								 * SLAB_PANIC: 부팅 초기라 실패 시 복구할 방법이 없어 즉시 패닉한다. */
 	}
 
 	cpuhp_setup_state_multi(CPUHP_BIO_DEAD, "block/bio:dead", NULL,
 					bio_cpu_dead);
+	/* [한국어] CPU 가 오프라인될 때 그 CPU 의 per-CPU bio 캐시를 회수하는 콜백을 건다.
+	 * 등록하지 않으면 죽은 CPU 의 캐시에 남은 bio 들이 영원히 묶여 반환되지 않는다.
+	 * _multi 판인 이유: bio_set 마다 인스턴스를 하나씩 붙일 수 있어야 하기 때문이다
+	 * (여기서는 상태만 등록하고 실제 인스턴스는 bioset_init 이 붙인다). */
 
+	/* [한국어] 파일시스템 공용 bio_set. 드라이버가 자기 bio_set 을 두지 않는 모든 경로가
+	 * 이것을 쓴다. 세 번째 인자 front_pad 가 0 인 이유는 공용이라 특정 드라이버의
+	 * 사설 구조체를 bio 앞에 붙일 수 없기 때문이다. */
 	if (bioset_init(&fs_bio_set, BIO_POOL_SIZE, 0,  // bio_set 초기화: NVMe 제출에 사용되는 전역/드라이버 풀 생성
 			BIOSET_NEED_BVECS | BIOSET_PERCPU_CACHE))
-		panic("bio: can't allocate bios\n");
+		panic("bio: can't allocate bios\n");	/* [한국어] 이것 없이는 블록 IO 자체가 불가능하고 부팅 초기라 되돌릴 방법도 없으므로 즉시 패닉한다 */
 
 	return 0;
 }
