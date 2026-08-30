@@ -773,23 +773,28 @@ static inline bool bvec_gap_to_prev(const struct queue_limits *lim,
 static inline bool rq_mergeable(struct request *rq)
 {
 	if (blk_rq_is_passthrough(rq))
-		return false;							/* NVMe admin/io passthrough는 vendor 특수 opcode -> READ/WRITE와 CID 공유 불가 */
+		return false;							/* [한국어] 패스스루는 호출자가 만든 명령을 그대로 전달하는 것이라
+								 * 블록 계층이 내용을 해석하지 않는다. 해석하지 못하는 것을 합칠 수는 없다. */
 
 	if (req_op(rq) == REQ_OP_FLUSH)
-		return false;							/* NVMe FLUSH opcode(0h)는 data command와 병합 불가; 별도 flush_rq 사용 */
+		return false;							/* [한국어] Flush(NVMe opcode 0x00)는 데이터 없는 순수 배리어다. 합칠 LBA 구간 자체가
+								 * 없고, blk-flush.c 가 전용 flush_rq 로 따로 다룬다. */
 
 	if (req_op(rq) == REQ_OP_WRITE_ZEROES)
-		return false;							/* NVMe Write Zeroes는 Dataset Management 계열; 일반 Write와 PRP 형식 다름 */
+		return false;							/* [한국어] Write Zeroes 는 NVMe opcode 0x08 로 독립된 명령이며 0x09 Dataset Management 와는
+								 * 다르다. 데이터를 전송하지 않고 범위만 지정하므로 일반 쓰기와 합칠 수 없다. */
 
 	if (req_op(rq) == REQ_OP_ZONE_APPEND)
-		return false;							/* NVMe ZONE_APPEND(0x7D)는 쓰기 포인터 자동 할당; 연속 LBA 가정 무효 */
+		return false;							/* [한국어] Zone Append(NVMe 0x7D)는 기록 위치를 장치가 정하고 그 LBA 를 돌려준다.
+								 * 둘을 합치면 어느 쪽이 어디에 쓰였는지 보고할 방법이 사라진다. */
 
 	if (rq->cmd_flags & REQ_NOMERGE_FLAGS)
-		return false;							/* REQ_NOMERGE 등 상위 명시적 금지; NVMe low-latency 경로에서 자주 설정 */
+		return false;							/* [한국어] 제출자가 명시적으로 병합을 금지한 경우(REQ_NOMERGE, REQ_ATOMIC 등) */
 	if (rq->rq_flags & RQF_NOMERGE_FLAGS)
-		return false;							/* RQF_STARTED 등 이미 NVMe SQ에 삽입된 rq는 병합 불가; CID 할당 완료 */
+		return false;							/* [한국어] 이미 드라이버로 디스패치가 시작된(RQF_STARTED) 요청 등.
+								 * 장치가 이미 보고 있을 수 있는 것을 뒤에서 늘리면 안 된다. */
 
-	return true;								/* 일반 NVMe READ/WRITE로 병합 가능; PRP/SGL entry 추가로 확장 */
+	return true;								/* [한국어] 일반 읽기/쓰기 — 인접하다면 합칠 수 있다 */
 }
 
 /*
@@ -875,24 +880,28 @@ static inline unsigned int blk_rq_get_max_segments(struct request *rq)
  */
 static inline unsigned int blk_queue_get_max_sectors(struct request *rq)
 {
-	struct request_queue *q = rq->q;				/* NVMe namespace당 request_queue; limits에 MDTS, namespace boundary 반영 */
-	enum req_op op = req_op(rq);					/* NVMe opcode 계열 판별; READ/WRITE(0x1/0x2), Dataset Management(0x9) 등 */
+	struct request_queue *q = rq->q;				/* [한국어] 한계값은 큐마다 다르다. NVMe 면 네임스페이스마다 큐가 하나씩 있다 */
+	enum req_op op = req_op(rq);					/* [한국어] 연산 종류마다 상한이 따로 있어 먼저 갈라 본다.
+						 * (NVMe 실제 opcode: Write 0x01, Read 0x02, Write Zeroes 0x08, DSM 0x09 — 앞 두 개의 순서에 주의) */
 
 	if (unlikely(op == REQ_OP_DISCARD))
-		return min(q->limits.max_discard_sectors,		/* NVMe Deallocate 한 번에 처리할 수 있는 최대 sector 수 */
-			   UINT_MAX >> SECTOR_SHIFT);		/* sector 계산 시 오버플로 방지; NVMe LBA range entry 크기 제한 고려 */
+		return min(q->limits.max_discard_sectors,		/* [한국어] discard 상한. NVMe 는 DMRSL(Identify) 에서 유도한다 */
+			   UINT_MAX >> SECTOR_SHIFT);		/* [한국어] discard 는 GB 단위가 흔해 섹터 수가 32비트를 넘칠 수 있다.
+						 * 바이트로 환산할 때 넘치지 않도록 여기서 미리 자른다. */
 
 	if (unlikely(op == REQ_OP_SECURE_ERASE))
 		return min(q->limits.max_secure_erase_sectors,		/* NVMe Sanitize/Secure Erase 경로; 컨트롤러 sanitize capability에 따름 */
 			   UINT_MAX >> SECTOR_SHIFT);
 
 	if (unlikely(op == REQ_OP_WRITE_ZEROES))
-		return q->limits.max_write_zeroes_sectors;		/* NVMe Write Zeroes 명령 최대 길이; namespace NAWUN/NAWUPN 반영(추정) */
+		return q->limits.max_write_zeroes_sectors;		/* [한국어] NVMe 에서 이 값의 출처는 ctrl->max_zeroes_sectors 이며 WZSL(Write Zeroes
+						 * Size Limit) 또는 MDTS 에서 온다(core.c:2496). NAWUN 계열과는 무관하다 — 그쪽은 원자적 쓰기용이다. */
 
 	if (rq->cmd_flags & REQ_ATOMIC)
-		return q->limits.atomic_write_max_sectors;		/* NVMe Atomic Write(NAWUN) 경계; atomic unit를 넘어서면 분할 필요 */
+		return q->limits.atomic_write_max_sectors;		/* [한국어] 원자적 쓰기 상한. NVMe 는 NAWUPF 에서 유도한다 — 커널은 컨트롤러 전역의
+						 * AWUPF 를 무시하고 네임스페이스별 NAWUPF 만 신뢰한다. */
 
-	return q->limits.max_sectors;					/* 일반 NVMe READ/WRITE; MDTS와 max_hw_sectors 중 작은 값 */
+	return q->limits.max_sectors;					/* [한국어] 일반 읽기/쓰기. NVMe 는 MDTS 에서 온 max_hw_sectors 와 사용자 sysfs 설정의 교집합이다 */
 }
 
 #ifdef CONFIG_BLK_DEV_INTEGRITY
@@ -1046,12 +1055,14 @@ bool blk_integrity_merge_bio(struct request_queue *, struct request *,
 static inline bool integrity_req_gap_back_merge(struct request *req,
 		struct bio *next)
 {
-	struct bio_integrity_payload *bip = bio_integrity(req->bio);		/* 현재 NVMe rq의 PI payload; PRP data와 분리된 integrity buffer */
-	struct bio_integrity_payload *bip_next = bio_integrity(next);		/* 병합 후보 bio의 PI payload; 연속 integrity 영역 필요 */
+	struct bio_integrity_payload *bip = bio_integrity(req->bio);		/* [한국어] 기존 request 의 무결성 페이로드. 데이터와 별개의 버퍼이므로
+							 * 데이터 쪽 병합 조건을 통과해도 이쪽이 따로 걸릴 수 있다 (원래 주석: PRP data와 분리된 integrity buffer */
+	struct bio_integrity_payload *bip_next = bio_integrity(next);		/* [한국어] 병합 후보의 무결성 페이로드 (원래 주석: 연속 integrity 영역 필요 */
 
 	return bvec_gap_to_prev(&req->q->limits,
-				&bip->bip_vec[bip->bip_vcnt - 1],		/* 마지막 integrity bvec; NVMe PI metadata도 segment boundary 검사 필요 */
-				bip_next->bip_vec[0].bv_offset);		/* 다음 integrity buffer offset; virt_boundary 통과 시 병합 거부 */
+				&bip->bip_vec[bip->bip_vcnt - 1],		/* [한국어] 기존 쪽의 마지막 메타데이터 세그먼트 — 이 끝과 다음 시작이 이어져야 한다 */
+				bip_next->bip_vec[0].bv_offset);		/* [한국어] 다음 쪽의 시작 오프셋. 둘 사이에 틈(gap)이 생기면 병합을 거부한다.
+						 * NVMe 는 메타데이터도 데이터와 같은 virt_boundary 제약을 받기 때문이다. */
 }
 
 /*
@@ -1078,7 +1089,7 @@ static inline bool integrity_req_gap_front_merge(struct request *req,
 	struct bio_integrity_payload *bip_next = bio_integrity(req->bio);	/* 기존 NVMe rq의 PI payload */
 
 	return bvec_gap_to_prev(&req->q->limits,
-				&bip->bip_vec[bip->bip_vcnt - 1],		/* front merge에서도 integrity bvec 간 gap 검사; NVMe PI 연속성 유지 */
+				&bip->bip_vec[bip->bip_vcnt - 1],		/* [한국어] front merge 라 bip/bip_next 의 역할이 뒤바뀌었을 뿐 검사 자체는 동일하다 */
 				bip_next->bip_vec[0].bv_offset);
 }
 
@@ -1698,15 +1709,23 @@ static inline bool bio_may_need_split(struct bio *bio,
 	const struct bio_vec *bv;
 
 	if (lim->chunk_sectors)
-		return true;							/* RAID/stripe 단위 존재; NVMe RAID 하에서 chunk 경계 넘으면 분할 필요 */
+		return true;							/* [한국어] chunk 경계가 있으면 어디서 걸릴지 여기서는 알 수 없으므로 무조건 정밀 검사로 보낸다.
+							 * NVMe 단독 장치는 보통 chunk_sectors 가 0 이라 이 분기를 타지 않는다 —
+							 * ZNS(존 크기)나 MD/DM 스택 위에서만 값이 설정된다. */
 
 	if (!bio->bi_io_vec)
-		return true;							/* bio_vec 없음(비정상); NVMe PRP/SGL 매핑 불가 -> 분할/오류 처리 */
+		return true;							/* [한국어] bvec 배열이 아예 없으면 아래 검사를 할 수 없으므로 정밀 경로로 넘긴다 */
 
-	bv = __bvec_iter_bvec(bio->bi_io_vec, bio->bi_iter);		/* 첫 번째 유효 bvec; NVMe PRP0에 해당하는 page/offset/len */
+	bv = __bvec_iter_bvec(bio->bi_io_vec, bio->bi_iter);		/* [한국어] bi_iter 가 이미 얼마간 전진했을 수 있으므로, 배열 0번이 아니라
+							 * "지금 위치의" bvec 을 꺼낸다 */
 	if (bio->bi_iter.bi_size > bv->bv_len - bio->bi_iter.bi_bvec_done)
-		return true;							/* 첫 bvec만으로 bio 전체를 커버하지 못함; 여러 PRP/SGL entry 필요 -> 세부 분할 검사 */
-	return bv->bv_len + bv->bv_offset > lim->max_fast_segment_size;	/* 단일 bvec이 max_fast_segment_size 초과; NVMe PRP segment 한도 위반 */
+		return true;							/* [한국어] 남은 크기가 첫 bvec 하나로 감당되지 않는다 = 세그먼트가 둘 이상이다.
+							 * 그때부터는 max_segments 나 virt_boundary 에 걸릴 수 있어 정밀 검사가 필요하다.
+							 * 반대로 세그먼트가 하나뿐이면 그 두 한계는 정의상 만족되므로 검사를 건너뛸 수 있다 — 이 함수의 존재 이유사 */
+	return bv->bv_len + bv->bv_offset > lim->max_fast_segment_size;	/* [한국어] 세그먼트 하나짜리라도 그 하나가 너무 크거나 경계를 걸치면 쪼개야 한다.
+							 * bv_offset 을 더해서 비교하는 이유: 경계 위반은 "시작 주소 + 길이"로 판정되므로
+							 * 페이지 안 오프셋까지 포함해야 정확하다. max_fast_segment_size 는
+							 * blk-settings.c 가 크기 상한과 경계 마스크를 미리 합쳐 둔 값이다 (원래 주석: NVMe PRP segment 한도 위반 */
 }
 
 /**
@@ -1755,19 +1774,27 @@ static inline struct bio *__bio_split_to_limits(struct bio *bio,
 	case REQ_OP_READ:
 	case REQ_OP_WRITE:
 		if (bio_may_need_split(bio, lim))
-			return bio_split_rw(bio, lim, nr_segs);	/* NVMe MDTS/max_segments/seg_boundary 초과 시 분할; 반환 bio는 limits 내 */
-		*nr_segs = 1;						/* 분할 불필요; 단일 NVMe PRP/SGL segment로 처리 가능 */
+			return bio_split_rw(bio, lim, nr_segs);	/* [한국어] 실제로 한계를 넘었을 때만 쪼갠다. NVMe 에서 걸리는 한계는 셋이다 —
+							 * max_hw_sectors(MDTS 유래), max_segments(MDTS 에서 유도),
+							 * virt_boundary_mask(PRP 페이지 정렬). 반환된 앞부분은 한계 안 */
+		*nr_segs = 1;						/* [한국어] 쪼갤 필요가 없다는 것은 세그먼트가 하나로 충분하다는 뜻이다 */
 		return bio;
 	case REQ_OP_ZONE_APPEND:
-		return bio_split_zone_append(bio, lim, nr_segs);	/* ZNS: zone write pointer 단위로 분할; NVMe ZONE_APPEND(0x7D) 경계 준수 */
+		return bio_split_zone_append(bio, lim, nr_segs);	/* [한국어] Zone Append 는 존 경계를 넘을 수 없다. 존마다 쓰기 포인터가 따로 있어
+							 * 하나의 append 가 두 존에 걸치면 어느 포인터를 쓸지 정의되지 않는다.
+							 * NVMe ZNS 는 opcode 0x7D 로 네이티브 지원 준수 */
 	case REQ_OP_DISCARD:
 	case REQ_OP_SECURE_ERASE:
-		return bio_split_discard(bio, lim, nr_segs);	/* NVMe Dataset Management range 개수 제한 적용 */
+		return bio_split_discard(bio, lim, nr_segs);	/* [한국어] discard 는 바이트 수가 아니라 "구간 개수"가 한계다.
+						 * NVMe Dataset Management(0x09) 는 한 명령에 담을 수 있는 range 수가 정해져 있다. */
 	case REQ_OP_WRITE_ZEROES:
-		return bio_split_write_zeroes(bio, lim, nr_segs);	/* NVMe Write Zeroes 길이 제한; NAWUN/NAWUPN 단위 고려 */
+		return bio_split_write_zeroes(bio, lim, nr_segs);	/* [한국어] Write Zeroes 는 max_write_zeroes_sectors 로만 잘린다.
+							 * 데이터를 전송하지 않으므로 세그먼트 제약과는 무관하다.
+							 * (그 한계의 출처는 WZSL/MDTS 이며 NAWUN 계열이 아니다.) */
 	default:
 		/* other operations can't be split */
-		*nr_segs = 0;							/* NVMe passthrough/admin 등은 블록 계층에서 분할하지 않음; 드라이버가 처리 */
+		*nr_segs = 0;							/* [한국어] 그 외(패스스루 등)는 블록 계층이 내용을 해석하지 않으므로 쪼갤 수 없다.
+							 * nr_segs=0 은 "세지 않았다"는 표시이며, 한계를 넘으면 제출 자체가 실패한다. */
 		return bio;
 	}
 }
