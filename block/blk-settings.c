@@ -1604,18 +1604,22 @@ static bool blk_stack_atomic_writes_tail(struct queue_limits *t,
 		return false;
 
 	/* Or this */
-	/* NVMe t의 최대 단위가 b의 최소 단위보다 작으면 호환 불가. */
+	/* [한국어] 두 장치의 [unit_min, unit_max] 구간이 겹치지 않으면 공통으로 보장할 수 있는
+	 * 원자 단위가 없다. 예: 상위가 [4K, 8K], 하위가 [16K, 32K] 면 어떤 크기도 양쪽을
+	 * 동시에 만족하지 못한다. 그때는 원자성을 포기하는 수밖에 없다. */
 	if (t->atomic_write_hw_unit_max < b->atomic_write_hw_unit_min)
 		return false;
 
-	/* 멀티 장치 스택 시 원자적 쓰기 최대치/단위는 교차 병합. */
+	/* [한국어] 세 값을 방향을 달리해 합친다. max 계열은 min 으로(둘 다 감당해야 하므로),
+	 * unit_min 은 max 로(둘의 요구를 모두 만족하려면 더 큰 쪽을 따라야 하므로).
+	 * 그 결과 구간이 [max(min), min(max)] 로 좁아지고, 위에서 이미 확인했듯 비어 있지 않다. */
 	t->atomic_write_hw_max = min(t->atomic_write_hw_max,
 				b->atomic_write_hw_max);
 	t->atomic_write_hw_unit_min = max(t->atomic_write_hw_unit_min,
 				b->atomic_write_hw_unit_min);
 	t->atomic_write_hw_unit_max = min(t->atomic_write_hw_unit_max,
 				b->atomic_write_hw_unit_max);
-	/* boundary 일치 + unit 범위 교집합 존재 → 병합 성공. */
+	/* [한국어] 여기 도달했다면 경계가 맞고 단위 구간에 교집합이 있다 — 병합 성공 */
 	return true;
 }
 
@@ -1711,17 +1715,21 @@ static void blk_stack_atomic_writes_chunk_sectors(struct queue_limits *t)
 static bool blk_stack_atomic_writes_head(struct queue_limits *t,
 				struct queue_limits *b)
 {
-	/* NVMe atomic boundary가 chunk_sectors와 정렬되어야 첫 장치 채택 가능. */
+	/* [한국어] 원자 경계가 RAID chunk 경계와 어긋나면 안 된다. 어긋나면 한 번의 원자적
+	 * 쓰기가 두 디스크에 나뉘어 내려가고, 한쪽만 반영된 채 전원이 끊기면 원자성이 깨진다.
+	 * 첫 하위 장치를 채택하기 전에 이것부터 확인한다. */
 	if (!blk_valid_atomic_writes_boundary(t->chunk_sectors,
 			b->atomic_write_hw_boundary >> SECTOR_SHIFT))
 		return false;
 
-	/* NVMe 첫 하위 장치의 atomic write 단위를 상위로 상속. */
-	t->atomic_write_hw_unit_max = b->atomic_write_hw_unit_max;
-	t->atomic_write_hw_unit_min = b->atomic_write_hw_unit_min;
-	t->atomic_write_hw_max = b->atomic_write_hw_max;
-	t->atomic_write_hw_boundary = b->atomic_write_hw_boundary;
-	/* 정렬 검사 통과 + 값 상속 완료 → 첫 장치 채택 성공. */
+	/* [한국어] 첫 장치이므로 비교할 상대가 없다 — 그대로 복사해 기준으로 삼는다.
+	 * 둘째부터는 blk_stack_atomic_writes_tail() 이 이 값들과 교집합을 취한다. */
+	t->atomic_write_hw_unit_max = b->atomic_write_hw_unit_max;	/* [한국어] 원자적으로 쓸 수 있는 최대 단위 */
+	t->atomic_write_hw_unit_min = b->atomic_write_hw_unit_min;	/* [한국어] 최소 단위(NVMe 는 논리 블록 하나) */
+	t->atomic_write_hw_max = b->atomic_write_hw_max;		/* [한국어] 한 번에 원자적으로 쓸 수 있는 전체 바이트 수 */
+	t->atomic_write_hw_boundary = b->atomic_write_hw_boundary;	/* [한국어] 걸치면 원자성이 깨지는 주소 경계(NVMe 는 NABSPF 유래, 없으면 0) */
+	/* [한국어] 상속 완료 — 이제 t->atomic_write_hw_max 가 UINT_MAX 가 아니게 되어,
+	 * 호출자가 "이미 하위 장치를 하나 합쳤다"를 그 값으로 판별할 수 있다 */
 	return true;
 }
 
@@ -2022,28 +2030,36 @@ int blk_stack_limits(struct queue_limits *t, struct queue_limits *b,
 		% max(t->physical_block_size, t->io_min);
 
 	/* Verify that new alignment_offset is on a logical block boundary */
-	/* NVMe alignment_offset가 logical_block_size 경계에 있지 않으면 misaligned. */
+	/* [한국어] 정렬 오프셋이 논리 블록 경계에 걸리지 않으면 그 자체가 모순이다 —
+	 * "블록 단위로 정렬하라"는 값이 블록 중간을 가리키는 셈이기 때문이다. */
 	if (t->alignment_offset & (t->logical_block_size - 1)) {
 		t->flags |= BLK_FLAG_MISALIGNED;
 		ret = -1;
 	}
 
-	/* NVMe I/O 크기 한도를 LBA 단위로 내림. */
+	/* [한국어] 크기 한도를 논리 블록의 배수로 내림한다. 한도가 블록 중간에서 끊기면
+	 * 그 한도에 맞춰 자른 요청이 부분 블록 쓰기가 되어, 장치가 읽기-수정-쓰기를 하게 된다.
+	 * 내림(round down)인 이유는 한도를 늘리면 하드웨어 제약을 넘기 때문이다. */
 	t->max_sectors = blk_round_down_sectors(t->max_sectors, t->logical_block_size);
 	t->max_hw_sectors = blk_round_down_sectors(t->max_hw_sectors, t->logical_block_size);
 	t->max_dev_sectors = blk_round_down_sectors(t->max_dev_sectors, t->logical_block_size);
 
 	/* Discard alignment and granularity */
-	/* NVMe Deallocate 지원 하위 장치가 있을 때 discard 한도 병합. */
+	/* [한국어] 하위 장치가 discard 를 지원할 때만 관련 한도를 병합한다.
+	 * granularity 가 0 이면 discard 미지원이라는 뜻이라 아래를 통째로 건너뛴다. */
 	if (b->discard_granularity) {
 		alignment = queue_limit_discard_alignment(b, start);
 
-		/* NVMe 상위 max_discard_sectors = min(상위, 하위). */
+		/* [한국어] 크기 한도는 min 으로 합친다 — 하위 장치 중 하나라도 감당 못 하는 크기는
+		 * 스택 전체로도 보낼 수 없기 때문이다. min_not_zero 인 이유는 0 이 "무제한"을
+		 * 뜻하므로 그냥 min 을 쓰면 무제한이 항상 이겨 버려서다. */
 		t->max_discard_sectors = min_not_zero(t->max_discard_sectors,
 						      b->max_discard_sectors);
 		t->max_hw_discard_sectors = min_not_zero(t->max_hw_discard_sectors,
 							 b->max_hw_discard_sectors);
-		/* NVMe discard_granularity는 더 큰 값으로 상속(보수적). */
+		/* [한국어] 반대로 granularity 는 max 로 합친다. 단위는 "이보다 잘게는 못 지운다"는
+		 * 하한이므로, 하위 장치들의 요구를 모두 만족하려면 가장 큰 것을 따라야 한다.
+		 * 크기 한도(min)와 정반대 방향인 이유가 이것이다. */
 		t->discard_granularity = max(t->discard_granularity,
 					     b->discard_granularity);
 		/* NVMe discard_alignment는 LCM 병합 후 granularity 내 정규화. */
@@ -2178,22 +2194,28 @@ bool queue_limits_stack_integrity(struct queue_limits *t,
 		if ((ti->flags & BLK_INTEGRITY_REF_TAG) !=
 		    (bi->flags & BLK_INTEGRITY_REF_TAG))
 			goto incompatible;
-		/* NVMe SPLIT_INTERVAL_CAPABLE는 하위 장치가 지원 안 하면 클리어. */
+		/* [한국어] 능력 비트는 AND 로 합친다 — 하위 장치 하나라도 못 하면 스택 전체가 못 한다.
+		 * (SPLIT_INTERVAL_CAPABLE 은 PI 보호 구간 중간에서 bio 를 쪼개도 되는가를 뜻한다.) */
 		if ((ti->flags & BLK_SPLIT_INTERVAL_CAPABLE) &&
 		    !(bi->flags & BLK_SPLIT_INTERVAL_CAPABLE))
 			ti->flags &= ~BLK_SPLIT_INTERVAL_CAPABLE;
 	} else {
-		/* NVMe PI profile을 상위 장치로 처음 복사. */
-		ti->flags = BLK_INTEGRITY_STACKED;
-		ti->flags |= (bi->flags & BLK_INTEGRITY_DEVICE_CAPABLE) |
-			     (bi->flags & BLK_INTEGRITY_REF_TAG) |
-			     (bi->flags & BLK_SPLIT_INTERVAL_CAPABLE);
-		ti->csum_type = bi->csum_type;
-		ti->pi_tuple_size = bi->pi_tuple_size;
-		ti->metadata_size = bi->metadata_size;
-		ti->pi_offset = bi->pi_offset;
-		ti->interval_exp = bi->interval_exp;
-		ti->tag_size = bi->tag_size;
+		/* [한국어] 첫 하위 장치인 경우 — 비교할 상대가 없으므로 그대로 복사해 기준으로 삼는다.
+		 * 둘째부터는 위 분기에서 이 기준과 일치하는지 검사하며, 하나라도 어긋나면
+		 * incompatible 로 간다. PI 는 값이 조금이라도 다르면 섞을 수 없기 때문이다 —
+		 * 체크섬 방식이나 튜플 크기가 다른 장치들을 한 스택으로 묶으면 어느 쪽 규칙으로
+		 * 검증해야 할지 정할 수 없다. */
+		ti->flags = BLK_INTEGRITY_STACKED;	/* [한국어] "이 무결성 설정은 하위에서 물려받은 것"이라는 표식.
+							 * 다음 하위 장치가 올 때 이 비트로 "이미 기준이 있다"를 판단한다 */
+		ti->flags |= (bi->flags & BLK_INTEGRITY_DEVICE_CAPABLE) |	/* [한국어] 장치가 PI 를 직접 생성·검증할 수 있는가(NVMe 는 PRACT) */
+			     (bi->flags & BLK_INTEGRITY_REF_TAG) |	/* [한국어] 레퍼런스 태그를 쓰는가(NVMe PI Type 1/2 면 참, Type 3 이면 거짓) */
+			     (bi->flags & BLK_SPLIT_INTERVAL_CAPABLE);	/* [한국어] 보호 구간 중간에서 분할해도 되는가 */
+		ti->csum_type = bi->csum_type;		/* [한국어] 가드 방식(CRC16 / CRC64 / IP). NVMe 는 guard 폭으로 결정된다 */
+		ti->pi_tuple_size = bi->pi_tuple_size;	/* [한국어] 튜플 크기(T10 PI 8바이트, 확장 PI 16바이트) */
+		ti->metadata_size = bi->metadata_size;	/* [한국어] 논리 블록당 메타데이터 바이트 수. NVMe 는 Identify NS 의 MS */
+		ti->pi_offset = bi->pi_offset;		/* [한국어] 메타데이터 안에서 PI 튜플이 시작하는 위치(벤더 영역이 앞에 올 수 있다) */
+		ti->interval_exp = bi->interval_exp;	/* [한국어] 튜플 하나가 보호하는 구간 크기의 log2 */
+		ti->tag_size = bi->tag_size;		/* [한국어] 애플리케이션 태그 공간의 크기 */
 	}
 	/* 이미 스택된 경우 모든 필드 일치 확인 완료, 처음인 경우 복사 완료 -
 	 * 두 경우 모두 호환 성공으로 true 반환. */
