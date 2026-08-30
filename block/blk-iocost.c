@@ -277,28 +277,78 @@ static char trace_iocg_path[TRACE_IOCG_PATH_LEN];	/* [한국어] cgroup_path() �
 #endif	/* CONFIG_TRACE_POINTS */
 
 enum {
-	MILLION			= 1000000,	/* [한국어] ppm(parts per million) 계산 기준: QoS 파라미터와 vrate를 백분율 단위로 표현할 때 분모로 사용 */
+	MILLION			= 1000000,
+	/* [한국어] ppm(parts per million) 환산 분모.
+	 * 읽는 자: VRATE_MIN 계산, ioc_refresh_vrate(), QoS 파라미터 파싱/출력.
+	 * 값 근거: 백분율(1/100)로는 vrate 를 표현하기에 해상도가 모자란다.
+	 *   VRATE_MIN_PPM 이 10000(=1%)인데 그보다 잘게 조정해야 하므로 ppm 을 쓴다.
+	 * 동기화: 컴파일 타임 상수. 원래 주석: 백분율 단위로 표현할 때 분모로 사용 */
 
 	/* timer period is calculated from latency requirements, bound it */
-	MIN_PERIOD		= USEC_PER_MSEC,	/* [한국어] 주기 타이머 최소 1ms: 너무 짧으면 softirq 폭풍 및 불필요한 vrate 재계산 유발 */
-	MAX_PERIOD		= USEC_PER_SEC,		/* [한국어] 주기 타이머 최대 1s: 너무 길면 장치 포화 반응이 지연돼 latency QoS 위반 증가 */
+	MIN_PERIOD		= USEC_PER_MSEC,
+	/* [한국어] 주기 타이머의 하한(1ms).
+	 * 읽는 자: ioc_refresh_period_us() 가 지연 목표에서 계산한 주기를 이 값으로 클램프.
+	 * 값 근거: 주기가 짧을수록 vrate 되먹임이 민감해지지만, 매 주기마다 모든 iocg 를
+	 *   순회하므로 1ms 아래로 내려가면 그 순회 비용이 IO 처리를 잠식한다.
+	 * 원래 주석: 너무 짧으면 softirq 폭풍 및 불필요한 vrate 재계산 유발 */
+	MAX_PERIOD		= USEC_PER_SEC,
+	/* [한국어] 주기 타이머의 상한(1s).
+	 * 읽는 자: 같은 ioc_refresh_period_us().
+	 * 값 근거: 이 주기가 곧 vrate 되먹임의 반응 속도다. 1초를 넘기면 장치 상태가
+	 *   바뀐 뒤 그만큼 늦게 대응하게 되어 제어가 사실상 무의미해진다.
+	 * 원래 주석: 너무 길면 장치 포화 반응이 지연돼 latency QoS 위반 증가 */
 
 	/*
 	 * iocg->vtime is targeted at 50% behind the device vtime, which
 	 * serves as its IO credit buffer.  Surplus weight adjustment is
 	 * immediately canceled if the vtime margin runs below 10%.
 	 */
-	MARGIN_MIN_PCT		= 10,	/* [한국어] vtime 여유 10% 미만: 서플러스 가중치 조정을 즉시 취소해 IO 버짓 고갈 방지 */
-	MARGIN_LOW_PCT		= 20,	/* [한국어] vtime 여유 20% 미만: inuse 하향 조정 검토 시작점 */
-	MARGIN_TARGET_PCT	= 50,	/* [한국어] 목표 vtime 버퍼 50%: 이 수준을 유지해야 burst IO를 지연 없이 흡수 가능 */
+	MARGIN_MIN_PCT		= 10,
+	/* [한국어] vtime 여유의 최소 경계(주기의 10%).
+	 * 읽는 자: ioc_refresh_margins() 가 margins->min = period_us * 10 / 100 * vrate 로 환산.
+	 * 의미: 이 아래로 내려가면 예산이 거의 바닥났다는 뜻이라, 진행 중이던 서플러스
+	 *   가중치 조정을 즉시 취소한다. 세 경계(min 10% < low 20% < target 50%) 중 가장 급한 선.
+	 * 원래 주석: IO 버짓 고갈 방지 */
+	MARGIN_LOW_PCT		= 20,
+	/* [한국어] vtime 여유의 경고 경계(주기의 20%).
+	 * 읽는 자: ioc_refresh_margins().
+	 * 의미: 아직 급하지는 않지만 여유가 줄고 있으니 inuse(실사용 가중치)를 낮출지
+	 *   검토하기 시작하는 지점. min 과 target 사이에 이 중간 단계를 둔 이유는
+	 *   조정이 한 번에 크게 튀지 않도록 완충을 두기 위해서다. */
+	MARGIN_TARGET_PCT	= 50,
+	/* [한국어] 유지하려는 vtime 버퍼(주기의 50%).
+	 * 읽는 자: ioc_refresh_margins(), 그리고 예산이 이 선을 넘으면 초과분을 버리고
+	 *   vtime_err 를 보정하는 경로(파일 내 target margin 처리부).
+	 * 의미: 위 영문 주석대로 iocg->vtime 은 장치 vtime 보다 의도적으로 50% 뒤처져
+	 *   달린다. 그 격차가 곧 "미리 쌓아 둔 IO 크레딧"이라, 갑작스러운 burst 가 와도
+	 *   즉시 소화할 수 있다. 무한정 쌓이지 않게 상한 역할도 겸한다.
+	 * 원래 주석: burst IO를 지연 없이 흡수 가능 */
 
-	INUSE_ADJ_STEP_PCT	= 25,	/* [한국어] cgroup이 vtime 예산을 회복할 때 inuse를 25%씩 증가 — 너무 크면 오실레이션, 너무 작으면 회복 지연 */
+	INUSE_ADJ_STEP_PCT	= 25,
+	/* [한국어] inuse 를 되돌릴 때의 한 걸음 크기(25%).
+	 * 읽는 자: ioc_timer_fn() 이 매 주기마다 active 에 못 미친 iocg 의 inuse 를
+	 *   이 비율만큼 끌어올린다.
+	 * 값 근거: 한 번에 active 까지 복원하면 방금 남는 예산을 기부받은 형제들이
+	 *   급격히 굶는다. 네 주기에 걸쳐 나눠 올려 진동을 막는다.
+	 * 원래 주석: 너무 크면 오실레이션, 너무 작으면 회복 지연 */
 
 	/* Have some play in timer operations */
-	TIMER_SLACK_PCT		= 1,	/* [한국어] waitq 타이머 해상도 여유 1%: hrtimer 정확도 한계를 보정해 조기 만료 방지 */
+	TIMER_SLACK_PCT		= 1,
+	/* [한국어] 타이머 만료에 허용하는 오차(주기의 1%).
+	 * 읽는 자: ioc_refresh_period_us() 가 period_us * NSEC_PER_USEC * 1 / 100 을
+	 *   타이머 slack 으로 설정한다.
+	 * 값 근거: slack 을 주면 커널이 인접한 타이머들을 한 번에 몰아 처리할 수 있어
+	 *   웨이크업 횟수가 줄고 전력에 유리하다. 1% 는 제어 정확도에 영향을 주지 않는 선.
+	 * 원래 주석: 조기 만료 방지 */
 
 	/* 1/64k is granular enough and can easily be handled w/ u32 */
-	WEIGHT_ONE		= 1 << 16,	/* [한국어] 정규화된 가중치 1.0을 나타내는 고정소수점 값(65536): u32로 충분한 정밀도 확보 */
+	WEIGHT_ONE		= 1 << 16,
+	/* [한국어] 고정소수점 가중치에서 1.0 에 해당하는 값(65536).
+	 * 읽는 자: hweight(계층 가중치) 계산 전반 — 부모의 몫을 자식들에게 비율로
+	 *   나눠 줄 때 이 값을 1.0 기준으로 삼는다.
+	 * 값 근거: 위 영문 주석대로 1/64k 해상도면 충분하고, 곱셈 결과가 u32 안에
+	 *   들어가 64비트 연산 없이 처리된다. 2의 거듭제곱이라 나눗셈이 시프트가 된다.
+	 * 원래 주석: u32로 충분한 정밀도 확보 */
 };
 
 /* [한국어] vtime(가상 시간)의 단위계와 vrate 허용 범위를 정의하는 익명 enum.
@@ -315,30 +365,87 @@ enum {
 	 * 1s worth of vtime is 2^37.  This gives us both sub-nanosecond
 	 * granularity and days of wrap-around time even at extreme vrates.
 	 */
-	VTIME_PER_SEC_SHIFT	= 37,	/* [한국어] vtime 1초 = 2^37: sub-nanosecond 정밀도와 수일 단위 wrap-around 시간 동시 확보 */
-	VTIME_PER_SEC		= 1LLU << VTIME_PER_SEC_SHIFT,	/* [한국어] 1초를 vtime 단위로 표현한 값 — vtime/VTIME_PER_SEC = 경과 초 수 */
-	VTIME_PER_USEC		= VTIME_PER_SEC / USEC_PER_SEC,	/* [한국어] 1마이크로초를 vtime 단위로 환산 — wallclock us를 vtime과 비교할 때 사용 */
-	VTIME_PER_NSEC		= VTIME_PER_SEC / NSEC_PER_SEC,	/* [한국어] 1나노초를 vtime 단위로 환산 — ktime_get_ns() 결과와 직접 연산 가능 */
+	VTIME_PER_SEC_SHIFT	= 37,
+	/* [한국어] vtime 의 눈금: 1초 = 2^37 vtime 단위.
+	 * 읽는 자: 아래 VTIME_PER_* 셋이 전부 이 값에서 파생된다.
+	 * 값 근거: 위 영문 주석이 두 요구를 동시에 만족시켜야 한다고 설명한다 —
+	 *   (1) 페이지 하나짜리 discard 비용까지 표현할 만큼 잘아야 하고,
+	 *   (2) 극단적 vrate 에서도 며칠은 wrap 되지 않을 만큼 넓어야 한다.
+	 *   2^37 이면 1 vtime 단위가 약 7.3ps 이고, s64 로 수천 년을 표현한다.
+	 * 동기화: 컴파일 타임 상수. 원래 주석: wrap-around 시간 동시 확보 */
+	VTIME_PER_SEC		= 1LLU << VTIME_PER_SEC_SHIFT,
+	/* [한국어] 1초에 해당하는 vtime 양.
+	 * 읽는 자: vtime ↔ 실시간 환산이 필요한 모든 곳. 나눗셈이 시프트로 처리된다.
+	 * 값 범위: 2^37. LLU 접미사가 붙은 이유는 32비트 아키텍처에서 int 로 잘리지
+	 *   않게 하기 위해서다. 원래 주석: vtime/VTIME_PER_SEC = 경과 초 수 */
+	VTIME_PER_USEC		= VTIME_PER_SEC / USEC_PER_SEC,
+	/* [한국어] 1마이크로초에 해당하는 vtime 양.
+	 * 읽는 자: VRATE_MIN 계산과 ioc_refresh_vrate() 등 vrate 를 다루는 경로.
+	 *   vrate 자체가 "마이크로초당 얼마나 vtime 이 흐르는가"이므로 이 단위가 기준이다.
+	 * 원래 주석: wallclock us를 vtime과 비교할 때 사용 */
+	VTIME_PER_NSEC		= VTIME_PER_SEC / NSEC_PER_SEC,
+	/* [한국어] 1나노초에 해당하는 vtime 양.
+	 * 읽는 자: ktime_get_ns() 로 얻은 실시간을 vtime 으로 옮길 때.
+	 * 주의: 2^37 / 10^9 ≈ 137 이라 나노초 해상도에서는 정밀도 손실이 생긴다.
+	 *   그래서 정밀한 계산은 대개 usec 단위(VTIME_PER_USEC)로 한다. 원래 주석: 결과와 직접 연산 가능 */
 
 	/* bound vrate adjustments within two orders of magnitude */
-	VRATE_MIN_PPM		= 10000,	/* [한국어] vrate 최소 0.01(1%): 장치가 매우 느려도 이 값 이하로 내리지 않아 vtime 진행 정지 방지 */
-	VRATE_MAX_PPM		= 100000000,	/* [한국어] vrate 최대 100(10000%): 고속 SSD에서 burst 허용 상한 */
+	VRATE_MIN_PPM		= 10000,
+	/* [한국어] vrate 하한(10000 ppm = 1%).
+	 * 읽는 자: VRATE_MIN 이 이 값에서 계산된다.
+	 * 의미: 되먹임 제어가 장치를 느리다고 판단해도 기준 속도의 1% 아래로는 내리지
+	 *   않는다. 그 아래로 내려가면 정상 장치에서 일시적 지연이 발생했을 때 회복
+	 *   불가능할 만큼 예산이 말라 버린다. 위 영문 주석의 "two orders of magnitude"
+	 *   중 아래쪽 끝이다. 원래 주석: 이 값 이하로 내리지 않아 vtime 진행 정지 방지 */
+	VRATE_MAX_PPM		= 100000000,
+	/* [한국어] vrate 상한(10^8 ppm = 100배).
+	 * 의미: 장치가 예상보다 훨씬 빠를 때 vrate 를 최대 100배까지 올릴 수 있다.
+	 *   하한 1% 와 합쳐 "두 자릿수 규모(two orders of magnitude)" 범위를 이룬다.
+	 *   상한이 필요한 이유: 무한정 올리면 순간적으로 관측된 빠른 구간 때문에
+	 *   예산이 폭증해, 이후 느려졌을 때 제어가 한참 뒤처진다. */
 
-	VRATE_MIN		= VTIME_PER_USEC * VRATE_MIN_PPM / MILLION,	/* [한국어] vrate 절대 하한을 vtime/ns 단위로 미리 계산한 값 */
-	VRATE_CLAMP_ADJ_PCT	= 4,	/* [한국어] vrate가 min/max 경계에 걸릴 때 4%씩 완화해 급격한 vrate 진동 방지 */
+	VRATE_MIN		= VTIME_PER_USEC * VRATE_MIN_PPM / MILLION,
+	/* [한국어] vrate 하한을 실제 사용 단위로 미리 환산해 둔 값.
+	 * 읽는 자: vrate 를 클램프하는 지점(ioc 초기화 및 ioc_refresh_vrate()).
+	 * 계산: (1usec 당 vtime) × 1% — 즉 "기준 속도의 1%로 흐르는 vtime 속도".
+	 *   런타임에 매번 나누지 않도록 컴파일 타임에 접어 둔 것이다. 원래 주석: 계산한 값 */
+	VRATE_CLAMP_ADJ_PCT	= 4,
+	/* [한국어] 사용자 지정 범위 밖으로 나간 vrate 를 되돌리는 한 걸음(4%).
+	 * 읽는 자: ioc_refresh_vrate() 가 vrate 를 한 번에 경계로 끌어당기지 않고
+	 *   매 주기 4%씩 옮긴다.
+	 * 값 근거: 즉시 경계값으로 스냅하면 그 순간 모든 cgroup 의 예산이 계단처럼
+	 *   변해 지연이 튄다. 점진적으로 옮겨 그 충격을 분산한다. 원래 주석: 방지 */
 
 	/* switch iff the conditions are met for longer than this */
-	AUTOP_CYCLE_NSEC	= 10LLU * NSEC_PER_SEC,	/* [한국어] HDD/SSD 자동 프로파일 전환 조건이 10초 연속 충족돼야 실제 전환 — 일시적 부하 변동에 의한 오전환 방지 */
+	AUTOP_CYCLE_NSEC	= 10LLU * NSEC_PER_SEC,
+	/* [한국어] 자동 프로파일(autop) 전환 판정에 요구되는 지속 시간(10초).
+	 * 읽는 자: autop 승격/강등 판정부(파일 내 ioc_refresh_params 계열).
+	 * 값 근거: 위 영문 주석의 "switch iff the conditions are met for longer than this".
+	 *   순간적인 부하 변동으로 프로파일이 오락가락하면 그때마다 모든 비용 계수가
+	 *   바뀌어 제어가 불안정해진다. 10초는 진짜 장치 특성 변화만 잡아내는 관찰창이다.
+	 *   NVMe 급 장치가 SSD_FAST 등급에 오르는 것도 "NVMe라서"가 아니라
+	 *   10초간 관측된 vrate 로 판정된 결과다. 원래 주석: 족돼야 실제 전환 — 일시적 부하 변동에 의한 오전환 방지 */
 };
 
 /* [한국어] 되먹임 제어(vrate 조정)와 부채/지연 유도에 쓰이는 임계값 익명 enum.
  * ioc_timer_fn()과 ioc_adjust_base_vrate()의 판정 상수가 모여 있다. */
 enum {
 	/* if IOs end up waiting for requests, issue less */
-	RQ_WAIT_BUSY_PCT	= 5,	/* [한국어] 한 주기 내 request(tag) 할당 대기 시간이 5% 이상이면 장치 포화로 판단해 vrate 하강 */
+	RQ_WAIT_BUSY_PCT	= 5,
+	/* [한국어] 장치가 포화됐다고 판정하는 태그 대기 비율(5%).
+	 * 읽는 자: ioc_timer_fn() 이 rq_wait_pct 와 비교해 vrate 를 내릴지 정한다.
+	 * 의미: 요청이 드라이버 태그를 기다렸다는 것은 장치가 이미 감당 못 하고 있다는
+	 *   가장 직접적인 신호다. 지연 통계보다 앞서 나타나므로 우선 판정 기준이 된다.
+	 * 주의: 이 비율은 CPU 수가 많으면 100%를 넘을 수도 있는 누적값이다.
+	 * 원래 주석: 장치 포화로 판단해 vrate 하강 */
 
 	/* unbusy hysterisis */
-	UNBUSY_THR_PCT		= 75,	/* [한국어] latency QoS 달성률이 75% 이상이면 포화 아님으로 판단 — busy/unbusy 히스테리시스 */
+	UNBUSY_THR_PCT		= 75,
+	/* [한국어] 포화 해제 판정의 이력(hysteresis) 계수(75%).
+	 * 읽는 자: ioc_timer_fn() 의 rq_wait_pct <= RQ_WAIT_BUSY_PCT * 75 / 100 비교.
+	 * 의미: 포화 진입은 5%에서, 해제는 그보다 낮은 3.75%에서 일어나게 만든다.
+	 *   두 문턱을 다르게 둔 이유가 이력이다 — 같은 값이면 경계 근처에서 busy/unbusy 가
+	 *   매 주기 번갈아 뒤집혀 vrate 가 진동한다. 원래 주석: busy/unbusy 히스테리시스 */
 
 	/*
 	 * The effect of delay is indirect and non-linear and a huge amount of
@@ -360,29 +467,74 @@ enum {
 	 * mechanism and policies for anonymous memory. Fully addressing this
 	 * issue will likely require substantial improvements in the area.
 	 */
-	MIN_DELAY_THR_PCT	= 500,	/* [한국어] vtime 초과가 500%(5배)를 넘으면 blkcg use_delay 유도 시작 — 선형 지연 증가 구간 시작점 */
-	MAX_DELAY_THR_PCT	= 25000,	/* [한국어] vtime 초과 25000%(250배)에서 최대 지연 도달 — 이 이상은 지수 감쇠로 전환 */
-	MIN_DELAY		= 250,		/* [한국어] 최소 유도 지연 250us: 지연 인가 시 최소 억제 효과를 보장 */
-	MAX_DELAY		= 250 * USEC_PER_MSEC,	/* [한국어] 최대 유도 지연 250ms: 과도한 지연으로 인한 응용 타임아웃 방지 */
+	MIN_DELAY_THR_PCT	= 500,
+	/* [한국어] 지연 유도를 시작하는 부채 수준(예산의 5배).
+	 * 읽는 자: 부채→지연 변환부. 이 아래로는 지연을 걸지 않는다.
+	 * 값 근거: 위 영문 주석대로 실험으로 정한 값이며, 부채가 조금 있다고 바로
+	 *   지연을 걸면 정상적인 burst 까지 벌하게 된다. 원래 주석: 선형 지연 증가 구간 시작점 */
+	MAX_DELAY_THR_PCT	= 25000,
+	/* [한국어] 최대 지연에 도달하는 부채 수준(예산의 250배).
+	 * 의미: 500%~25000% 구간에서 지연이 선형으로 증가하고, 그 위로는 포화된다.
+	 *   위 영문 주석의 "linearly scale up delay as debt is going up" 이 이 구간이다.
+	 *   상한이 없으면 부채가 폭증했을 때 지연이 무한정 커져 프로세스가 사실상 정지한다.
+	 * 원래 주석: 이 이상은 지수 감쇠로 전환 */
+	MIN_DELAY		= 250,
+	/* [한국어] 지연을 걸 때의 최솟값(250us).
+	 * 의미: 이보다 짧은 지연은 스케줄러 오차에 묻혀 억제 효과가 없다.
+	 *   걸 거면 최소한 체감되는 만큼은 걸어야 한다는 뜻이다. */
+	MAX_DELAY		= 250 * USEC_PER_MSEC,
+	/* [한국어] 지연의 상한(250ms).
+	 * 의미: 한 번에 250ms 를 넘겨 재우면 응용이 타임아웃으로 오판하거나 사용자가
+	 *   멈춤으로 느낀다. 위 영문 주석이 인정하듯 이 지연 기구는 "종종 채무자를
+	 *   지나치게 가혹하게 처벌"하는 한계가 있고, 이 상한이 그 피해를 제한한다. 원래 주석: 응용 타임아웃 방지 */
 
 	/* halve debts if avg usage over 100ms is under 50% */
-	DFGV_USAGE_PCT		= 50,	/* [한국어] 100ms 평균 사용률 50% 미만이면 부채를 절반으로 탕감 — 유휴 cgroup이 과거 부채에 묶이지 않도록 */
-	DFGV_PERIOD		= 100 * USEC_PER_MSEC,	/* [한국어] 부채 탕감 평가 단위 시간 100ms: 이 창에서 사용률을 측정해 탕감 여부 결정 */
+	DFGV_USAGE_PCT		= 50,
+	/* [한국어] 부채 탕감(debt forgiving) 조건이 되는 장치 사용률(50%).
+	 * 의미: 장치가 절반도 안 쓰이고 있다면 그 여유는 아무도 안 쓰고 버려지는 것이므로,
+	 *   과거 부채를 계속 물릴 이유가 없다. 매 DFGV_PERIOD 마다 부채를 절반으로 줄인다.
+	 *   이 장치가 놀고 있는데 누군가는 과거 부채 때문에 막혀 있는 상황을 푸는 장치다.
+	 * 원래 주석: 유휴 cgroup이 과거 부채에 묶이지 않도록 */
+	DFGV_PERIOD		= 100 * USEC_PER_MSEC,
+	/* [한국어] 탕감 판정에 쓰는 관찰창(100ms).
+	 * 값 근거: 주기 타이머(최대 1s)보다 짧게 잡아 유휴 구간을 놓치지 않으면서,
+	 *   순간적인 공백에 반응하지 않을 만큼은 길다. 원래 주석: 사용률을 측정해 탕감 여부 결정 */
 
 	/* don't let cmds which take a very long time pin lagging for too long */
-	MAX_LAGGING_PERIODS	= 10,	/* [한국어] 10주기 이상 완료되지 않은 IO는 lagging 상태로 처리 — 극단적 장수명 IO가 vtime 계산을 왜곡하는 것을 방지 */
+	MAX_LAGGING_PERIODS	= 10,
+	/* [한국어] 완료되지 않은 IO 때문에 lagging 판정을 유지할 최대 주기 수(10).
+	 * 의미: 위 영문 주석대로 아주 오래 걸리는 명령 하나가 lagging 상태를 무한정
+	 *   붙잡아 두지 못하게 막는다. 그런 명령을 계속 기다리면 vrate 가 실제 장치
+	 *   성능과 무관하게 계속 눌린다. 원래 주석: 극단적 장수명 IO가 vtime 계산을 왜곡하는 것을 방지 */
 
 	/*
 	 * Count IO size in 4k pages.  The 12bit shift helps keeping
 	 * size-proportional components of cost calculation in closer
 	 * numbers of digits to per-IO cost components.
 	 */
-	IOC_PAGE_SHIFT		= 12,	/* [한국어] IO 비용을 4KB 단위로 환산: 12비트 shift로 크기 비례 항과 per-IO 기본 비용의 자릿수를 맞춤 */
-	IOC_PAGE_SIZE		= 1 << IOC_PAGE_SHIFT,	/* [한국어] 4096바이트: 선형 비용 모델에서 IO 크기를 세는 기본 단위 */
-	IOC_SECT_TO_PAGE_SHIFT	= IOC_PAGE_SHIFT - SECTOR_SHIFT,	/* [한국어] 512B 섹터를 4KB 페이지로 변환하는 shift 값(=3): bio->bi_iter.bi_size>>9 로 얻은 섹터 수를 페이지 수로 변환 */
+	IOC_PAGE_SHIFT		= 12,
+	/* [한국어] 비용 계산에서 IO 크기를 세는 단위(2^12 = 4KB).
+	 * 값 근거: 위 영문 주석이 이유를 밝힌다 — 비용 모델은 "IO 하나당 고정 비용"과
+	 *   "크기에 비례하는 비용"을 더하는데, 크기를 바이트로 세면 후자가 전자보다
+	 *   자릿수가 훨씬 커져 고정 항이 반올림에 묻힌다. 4KB 단위로 세면 두 항의
+	 *   자릿수가 비슷해져 둘 다 의미 있게 반영된다. 원래 주석: per-IO 기본 비용의 자릿수를 맞춤 */
+	IOC_PAGE_SIZE		= 1 << IOC_PAGE_SHIFT,
+	/* [한국어] 위 shift 를 바이트로 편 값(4096).
+	 * 주의: 시스템의 PAGE_SIZE 와 이름이 비슷하지만 무관하다. 아키텍처가 64KB
+	 *   페이지를 써도 이 값은 4096 으로 고정이라, 비용 모델이 플랫폼에 따라
+	 *   달라지지 않는다. 원래 주석: 기본 단위 */
+	IOC_SECT_TO_PAGE_SHIFT	= IOC_PAGE_SHIFT - SECTOR_SHIFT,
+	/* [한국어] 512B 섹터 수를 4KB 페이지 수로 바꾸는 시프트 폭(12-9=3).
+	 * 읽는 자: bio/request 크기를 비용 단위로 환산하는 지점.
+	 * 블록 계층이 모든 크기를 512B 섹터로 말하므로 이 변환이 항상 필요하다. 원래 주석: hift 값(=3): bio->bi_iter.bi_size>>9 로 얻은 섹터 수를 페이지 수로 변환 */
 
 	/* if apart further than 16M, consider randio for linear model */
-	LCOEF_RANDIO_PAGES	= 4096,	/* [한국어] 직전 IO 끝 섹터에서 4096 페이지(16MB) 이상 떨어지면 랜덤 IO로 분류 — 선형 비용 모델에서 seek 비용 항 적용 */
+	LCOEF_RANDIO_PAGES	= 4096,
+	/* [한국어] 순차/랜덤을 가르는 거리(4096 페이지 = 16MB).
+	 * 읽는 자: 비용 계산에서 이번 IO 를 seq 계수로 볼지 rand 계수로 볼지 정할 때.
+	 * 의미: 직전 IO 가 끝난 위치에서 16MB 이상 떨어져 있으면 랜덤으로 본다.
+	 *   HDD 는 두 계수 차이가 수백 배지만(autop 테이블의 370 대 100000 IOPS 대비),
+	 *   NVMe 급 장치는 그 차이가 작아 이 판정의 영향도 작다. 원래 주석: 랜덤 IO로 분류 — 선형 비용 모델에서 seek 비용 항 적용 */
 };
 
 /* [한국어] ioc->running이 가질 수 있는 세 상태. 주기 타이머의 수명을 나타낸다. */
@@ -403,13 +555,34 @@ enum {
 /* io.cost.qos params */
 /* [한국어] io.cost.qos sysfs 항목의 상세 파라미터 인덱스 */
 enum {
-	QOS_RPPM,	/* [한국어] 읽기 완료 지연 QoS 목표 백분위수(ppm: 1000000=100%) */
-	QOS_RLAT,	/* [한국어] 읽기 완료 지연 목표값(us): 이 분위에서 초과 시 장치 포화로 판단 */
-	QOS_WPPM,	/* [한국어] 쓰기 완료 지연 QoS 목표 백분위수(ppm) */
-	QOS_WLAT,	/* [한국어] 쓰기 완료 지연 목표값(us) */
-	QOS_MIN,	/* [한국어] vrate 허용 최솟값(ppm) — 기본값 VRATE_MIN_PPM(10000=1%) */
-	QOS_MAX,	/* [한국어] vrate 허용 최댓값(ppm) — 기본값 VRATE_MAX_PPM(100000000=10000%) */
-	NR_QOS_PARAMS,	/* [한국어] QoS 파라미터 총 개수 — ioc_params.qos[] 배열 크기 */
+	/* [한국어] 아래 여섯 값이 ioc_params.qos[] 의 첨자다. 넷은 "무엇을 지킬 것인가"(지연 목표),
+	 * 둘은 "그러기 위해 vrate 를 어디까지 움직여도 되는가"(제어 범위)를 정한다.
+	 * 지연 목표를 백분위수와 값의 쌍으로 받는 것이 핵심 설계다 — 평균 지연은
+	 * 소수의 느린 IO 를 감춰 버리므로, "95% 는 2ms 안에" 같은 꼬리 기준으로 말해야
+	 * 실제 사용자 경험과 맞는다. */
+	QOS_RPPM,
+	/* [한국어] 읽기 지연 목표의 백분위수(ppm 단위, 1000000 = 100%).
+	 * 설정자: 사용자가 io.cost.qos 에 rpct=... 로 지정.
+	 * 읽는 자: ioc_timer_fn() 이 이번 주기의 지연 분포와 비교해 목표 달성 여부를 센다.
+	 * 예: 950000 이면 "읽기의 95%가 아래 QOS_RLAT 안에 끝나야 한다"는 뜻. */
+	QOS_RLAT,
+	/* [한국어] 위 백분위수에서 지켜야 할 읽기 완료 지연(us).
+	 * 이 둘을 못 지킨 주기가 누적되면 장치가 포화됐다고 보고 vrate 를 내린다. */
+	QOS_WPPM,
+	/* [한국어] 쓰기 지연 목표의 백분위수. 읽기와 따로 두는 이유는 대부분의 장치에서
+	 * 쓰기 지연 분포가 읽기와 크게 다르기 때문이다(캐시 흡수, GC 간섭 등). */
+	QOS_WLAT,
+	/* [한국어] 그 백분위수에서 지켜야 할 쓰기 완료 지연(us). */
+	QOS_MIN,
+	/* [한국어] vrate 를 내릴 수 있는 하한(ppm).
+	 * 기본값은 VRATE_MIN_PPM(10000 = 1%). 사용자가 이 값을 올리면 "아무리 느려도
+	 * 이만큼은 허용하라"가 되어, 지연 목표보다 처리량을 우선하는 설정이 된다. */
+	QOS_MAX,
+	/* [한국어] vrate 를 올릴 수 있는 상한(ppm). 기본값 VRATE_MAX_PPM.
+	 * min 과 max 를 같은 값으로 두면 vrate 가 고정되어 되먹임 제어가 꺼진 것과 같다. */
+	NR_QOS_PARAMS,
+	/* [한국어] 파라미터 개수. qos[] 배열 크기와 파싱 루프의 상한으로 쓰인다.
+	 * 열거형 마지막에 두는 관례라, 항목을 추가해도 배열 크기가 자동으로 따라온다. */
 };
 
 /* io.cost.model controls */
@@ -423,13 +596,40 @@ enum {
 /* builtin linear cost model coefficients */
 /* [한국어] 사용자 입력 선형 비용 계수 인덱스 (i_lcoefs: 장치 최대 IOPS/BPS, ioc_refresh_params_disk()에서 lcoefs로 변환) */
 enum {
-	I_LCOEF_RBPS,		/* [한국어] 읽기 최대 대역폭(bytes/s): 순차 읽기 최대 처리량 */
-	I_LCOEF_RSEQIOPS,	/* [한국어] 읽기 순차 최대 IOPS: IO당 고정 vtime 비용 계산 기준 */
-	I_LCOEF_RRANDIOPS,	/* [한국어] 읽기 랜덤 최대 IOPS: seek 포함 IO당 vtime 비용 기준 */
-	I_LCOEF_WBPS,		/* [한국어] 쓰기 최대 대역폭(bytes/s) */
-	I_LCOEF_WSEQIOPS,	/* [한국어] 쓰기 순차 최대 IOPS */
-	I_LCOEF_WRANDIOPS,	/* [한국어] 쓰기 랜덤 최대 IOPS */
-	NR_I_LCOEFS,		/* [한국어] 입력 계수 총 개수 — ioc_params.i_lcoefs[] 크기 */
+	/* [한국어] 이 여섯은 **사람이 이해하는 단위**로 장치 성능을 기술한다
+	 * (bytes/s, IOPS). 사용자가 io.cost.model 에 적거나 autop[] 프로파일에서 온다.
+	 * 아래 LCOEF_* 는 같은 정보를 **vtime 단위 비용**으로 바꾼 것이다.
+	 * 변환은 ioc_refresh_lcoefs() → calc_lcoefs() 가 수행하며, 실제 식은 이렇다:
+	 *
+	 *     bps_pages = bps / IOC_PAGE_SIZE            // 초당 처리 가능한 4KB 페이지 수
+	 *     *page  = VTIME_PER_SEC / bps_pages         // 페이지 하나의 전송 비용
+	 *     v      = VTIME_PER_SEC / seqiops           // IO 하나의 **총** 비용
+	 *     *seqio = v - *page                         // 거기서 전송분을 뺀 고정 오버헤드
+	 *
+	 * 마지막 줄이 이 모델의 핵심이다. IOPS 로부터 얻은 값은 "IO 하나에 드는 전부"라
+	 * 전송 비용이 이미 섞여 있고, 그것을 빼야 순수한 고정 오버헤드(HDD 라면 seek,
+	 * SSD 라면 명령 처리 비용)가 남는다. 그래야 나중에
+	 *   비용 = 고정 오버헤드 + 페이지 수 × 페이지 비용
+	 * 으로 더했을 때 이중 계산이 되지 않는다.
+	 * 성능값이 분모이므로 장치가 빠를수록 비용이 싸진다 — 역수 관계다. */
+	I_LCOEF_RBPS,
+	/* [한국어] 읽기 최대 대역폭(bytes/s). 크기에 비례하는 비용의 기준이 된다.
+	 * 읽는 자: ioc_refresh_lcoefs() → LCOEF_RPAGE 로 변환. */
+	I_LCOEF_RSEQIOPS,
+	/* [한국어] 순차 읽기 최대 IOPS. IO 한 건의 고정 비용 기준이 된다(→ LCOEF_RSEQIO). */
+	I_LCOEF_RRANDIOPS,
+	/* [한국어] 랜덤 읽기 최대 IOPS(→ LCOEF_RRANDIO).
+	 * 순차와 따로 두는 이유: HDD 는 두 값이 수백 배 차이 나고(autop 테이블에서
+	 * 랜덤 370 대 순차 100000 IOPS), 그 차이가 곧 seek 비용이다.
+	 * NVMe 급 장치는 둘의 차이가 작아 이 구분의 영향도 작아진다. */
+	I_LCOEF_WBPS,
+	/* [한국어] 쓰기 최대 대역폭(bytes/s)(→ LCOEF_WPAGE). */
+	I_LCOEF_WSEQIOPS,
+	/* [한국어] 순차 쓰기 최대 IOPS(→ LCOEF_WSEQIO). */
+	I_LCOEF_WRANDIOPS,
+	/* [한국어] 랜덤 쓰기 최대 IOPS(→ LCOEF_WRANDIO). */
+	NR_I_LCOEFS,
+	/* [한국어] 입력 계수 개수 — ioc_params.i_lcoefs[] 크기. */
 };
 
 /* [한국어] 내부 선형 비용 계수 인덱스 (lcoefs: VTIME_PER_SEC/[BPS or IOPS] 단위, calc_vtime_cost_builtin()에서 직접 사용) */

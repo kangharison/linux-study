@@ -244,9 +244,31 @@ inline const char *blk_op_str(enum req_op op)
 }
 EXPORT_SYMBOL_GPL(blk_op_str);
 
+/* [한국어] blk_status_t(BLK_STS_*) → (errno, 사람이 읽을 이름) 변환표.
+ * 이 표가 있는 이유: 블록 계층은 내부적으로 blk_status_t 라는 자체 상태 코드를
+ * 쓰는데, 사용자 공간과 상위 계층은 음수 errno 를 기대하고 로그는 문자열을
+ * 원하기 때문이다. 한 곳에 모아 두어 두 변환이 서로 어긋나지 않게 한다.
+ * 배열 인덱스가 곧 BLK_STS_* 값이라 조회가 O(1) 이다. */
 static const struct {
 	int		errno;
+	/* [한국어] 이 상태에 대응하는 음수 errno.
+	 * 설정자: 아래 지정 초기화자(designated initializer)가 컴파일 타임에 채운다.
+	 * 읽는 자: blk_status_to_errno() 가 이 값을 그대로 반환해 read(2)/write(2) 등의
+	 *   반환값이 된다. 즉 사용자가 최종적으로 보는 오류 번호가 이 필드다.
+	 * 값 범위: 0(성공) 또는 음수 errno. NVMe 라면 nvme_error_status() 가 CQE 의
+	 *   Status Code 를 먼저 BLK_STS_* 로 바꾸고, 그 결과가 여기서 errno 가 된다.
+	 * 동기화: const 정적 데이터라 런타임에 변하지 않는다. */
+
 	const char	*name;
+	/* [한국어] 로그에 찍을 사람이 읽을 수 있는 설명 문자열.
+	 * 설정자: 같은 초기화자.
+	 * 읽는 자: blk_print_req_error() 가 I/O 오류를 dmesg 에 남길 때 쓴다.
+	 *   errno 만으로는 "-EIO" 처럼 원인이 뭉뚱그려지므로, 이 이름이
+	 *   "critical medium"(매체 손상)인지 "reservation conflict"(예약 충돌)인지를
+	 *   구분해 준다 — 장애 분석에서 실질적인 단서가 되는 쪽은 이 문자열이다.
+	 * 값 범위: 정적 문자열 리터럴. BLK_STS_OK 만 빈 문자열("")인데,
+	 *   성공은 로그로 남기지 않기 때문이다.
+	 * 동기화: const 정적 데이터. */
 } blk_errors[] = {
 	[BLK_STS_OK]		= { 0,		"" },                          /* [한국어] 정상 완료; NVMe CQE SC(Status Code)=0 에 대응 */
 	[BLK_STS_NOTSUPP]	= { -EOPNOTSUPP, "operation not supported" }, /* [한국어] 연산 미지원; NVMe ZNS 등 미지원 opcode 요청 시 */
