@@ -2371,7 +2371,7 @@ fail_exit:
 	 * avoid busy looping.
 	 */
 	if (ret == -EBUSY) {
-	/* [한국어] queue bypass 중이면 잠시 대기 후 재시도; NVMe reset/recovery 대기 */
+	/* [한국어] queue bypass 중이면 잠시 대기 후 재시도; 큐가 bypass 를 벗어나기를 기다린다 */
 		msleep(10);
 	/* [한국어] 시스템 콜 재시작 */
 		ret = restart_syscall();
@@ -2844,7 +2844,7 @@ static void blkcg_rstat_flush(struct cgroup_subsys_state *css, int cpu)
  * blkcg_fill_root_iostats - root cgroup 통계를 시스템 전체 disk_stats 로 채움
  *
  * 호출 경로: blkcg_print_stat() -> blkcg_fill_root_iostats()
- * NVMe 연결점: root cgroup 은 모든 NVMe namespace/장치의 disk_stats 를
+ * root cgroup 은 모든 장치의 disk_stats 를
  *   집계해 read/write/discard 바이트/IO 수를 시뮬레이션한다. sector 단위를
  *   << 9 로 바이트로 변환한다.
  */
@@ -3079,7 +3079,7 @@ static int blkcg_print_stat(struct seq_file *sf, void *v)
 	 * 제거할 수 있는데, RCU 유예 해제 덕분에 이 구간에서는 안전하게 읽는다. */
 	rcu_read_lock();
 	/* [한국어] 이 cgroup에 속한 모든 blkg를 순회한다. blkg는 (cgroup × 디스크)
-	 * 조합이므로, 시스템에 NVMe 네임스페이스가 여러 개면 각각에 대해
+	 * 조합이므로, 시스템에 블록 장치가 여러 개면 각각에 대해
 	 * 한 줄씩 출력된다. */
 	hlist_for_each_entry_rcu(blkg, &blkcg->blkg_list, blkcg_node) {
 		/* [한국어] 큐 락을 잡는다. blkcg_print_one_stat()이 정책별 통계
@@ -3190,7 +3190,7 @@ struct list_head *blkcg_get_cgwb_list(struct cgroup_subsys_state *css)
  * blkcg_destroy_blkgs - blkcg 의 모든 blkg 를 제거
  *
  * 호출 경로: blkcg_unpin_online() -> blkcg_destroy_blkgs()
- * NVMe 연결점: cgroup 이 제거되면 해당 cgroup 이 NVMe request_queue 들에
+ * cgroup 이 제거되면 그 cgroup 이 각 request_queue 에
  *   남긴 blkg 를 모두 정리한다. blkcg lock 과 queue lock 의 lock ordering 을
  *   맞추기 위해 역순으로 락을 잡는다.
  */
@@ -4087,8 +4087,8 @@ EXPORT_SYMBOL_GPL(blkcg_activate_policy);
  * blkcg_deactivate_policy - gendisk 에서 blkcg 정책 비활성화
  *
  * 호출 경로: 정책 제거/queue 종료 -> blkcg_deactivate_policy()
- * NVMe 연결점: NVMe queue 에서 해당 cgroup 정책을 제거한다. q->blkcg_pols
- *   비트를 클리어하고 모든 blkg 의 pd[] 를 해제하여 nvme_queue_rq() 에서
+ * 이 큐에서 해당 cgroup 정책을 제거한다. q->blkcg_pols
+ *   비트를 클리어하고 모든 blkg 의 pd[] 를 해제하여 이후 IO 경로에서
  *   더 이상 정책을 참조하지 않게 한다.
  */
 
@@ -4096,7 +4096,7 @@ void blkcg_deactivate_policy(struct gendisk *disk,
 			     const struct blkcg_policy *pol)
 {
 	struct request_queue *q = disk->queue;
-	/* [한국어] 정책을 비활성화할 NVMe request_queue */
+	/* [한국어] 정책을 비활성화할 request_queue */
 	struct blkcg_gq *blkg;
 	/* [한국어] 순회 중인 blkg */
 	unsigned int memflags;
@@ -4107,9 +4107,9 @@ void blkcg_deactivate_policy(struct gendisk *disk,
 		return;
 
 	if (queue_is_mq(q))
-	/* [한국어] NVMe queue freeze; IO 경로 정지 후 정책 제거 */
+	/* [한국어] 큐 freeze — pd 를 해제하는 동안 그것을 참조하는 IO 가 없어야 한다 */
 		memflags = blk_mq_freeze_queue(q);
-		/* [한국어] blk-mq queue freeze; NVMe IO 제출/완료 일시 정지 */
+		/* [한국어] blk-mq 큐 freeze — 새 진입을 막고 인플라이트가 끝나기를 기다린다 */
 
 	mutex_lock(&q->blkcg_mutex);
 	/* [한국어] blkg_free_workfn 과의 동기화 */
@@ -4120,7 +4120,7 @@ void blkcg_deactivate_policy(struct gendisk *disk,
 	/* [한국어] queue 의 정책 활성화 비트 클리어 */
 
 	list_for_each_entry(blkg, &q->blkg_list, q_node) {
-	/* [한국어] 모든 blkg 의 pd 해제; NVMe queue 에서 cgroup 정책 제거 */
+	/* [한국어] 이 큐의 모든 blkg 에서 해당 정책의 pd 를 해제한다 */
 		struct blkcg *blkcg = blkg->blkcg;
 
 		spin_lock(&blkcg->lock);
@@ -4133,7 +4133,7 @@ void blkcg_deactivate_policy(struct gendisk *disk,
 			pol->pd_free_fn(blkg->pd[pol->plid]);
 		/* [한국어] pd 메모리 해제 */
 			blkg->pd[pol->plid] = NULL;
-		/* [한국어] blkg 에서 pd 제거; nvme_queue_rq() 정책 참조 차단 */
+		/* [한국어] blkg 에서 pd 를 떼어 낸다 — 이후 IO 경로가 이 정책 데이터를 참조하지 못하게 된다 */
 		}
 		spin_unlock(&blkcg->lock);
 	}
@@ -4144,7 +4144,7 @@ void blkcg_deactivate_policy(struct gendisk *disk,
 	/* [한국어] blkcg_mutex 해제 */
 
 	if (queue_is_mq(q))
-	/* [한국어] queue freeze 해제; NVMe IO 재개 */
+	/* [한국어] freeze 해제 — IO 재개 */
 		blk_mq_unfreeze_queue(q, memflags);
 }
 EXPORT_SYMBOL_GPL(blkcg_deactivate_policy);
@@ -4199,8 +4199,8 @@ static void blkcg_free_all_cpd(struct blkcg_policy *pol)
  * blkcg_policy_register - blkcg 정책 전역 등록
  *
  * 호출 경로: policy module init -> blkcg_policy_register()
- * NVMe 연결점: throtl, BFQ, ioprio 등이 등록되며, 기존 모든 blkcg 의 cpd[]
- *   를 할당하고 sysfs cgroup 파일을 추가한다. NVMe queue 들은 이후
+ * throtl, BFQ, ioprio 등이 이 함수로 등록되며, 기존 모든 blkcg 의 cpd[]
+ *   를 할당하고 sysfs cgroup 파일을 추가한다. 이후 각 큐는
  *   blkcg_activate_policy() 로 개별적으로 활성화해야 한다.
  */
 
@@ -4231,7 +4231,7 @@ int blkcg_policy_register(struct blkcg_policy *pol)
 		if (!blkcg_policy[i])
 			break;
 	if (i >= BLKCG_MAX_POLS) {
-	/* [한국어] 정책 슬롯 부족, 더 이상 NVMe queue 정책 추가 불가 */
+	/* [한국어] plid 슬롯이 다 찼다 — 동시에 등록 가능한 정책 수(BLKCG_MAX_POLS)에 걸렸다 */
 		pr_warn("blkcg_policy_register: BLKCG_MAX_POLS too small\n");
 		ret = -ENOSPC;
 		goto err_unlock;
@@ -4276,7 +4276,7 @@ int blkcg_policy_register(struct blkcg_policy *pol)
 					   pol->dfl_cftypes));
 	} else {
 		WARN_ON(cgroup_add_dfl_cftypes(&io_cgrp_subsys,
-		/* [한국어] cgroup v2 파일 추가; NVMe 설정 인터페이스 */
+		/* [한국어] cgroup v2 인터페이스 파일 추가 */
 					       pol->dfl_cftypes));
 		WARN_ON(cgroup_add_legacy_cftypes(&io_cgrp_subsys,
 		/* [한국어] cgroup v1 파일 추가 */
@@ -4310,7 +4310,7 @@ EXPORT_SYMBOL_GPL(blkcg_policy_register);
  * blkcg_policy_unregister - blkcg 정책 전역 등록 해제
  *
  * 호출 경로: policy module exit -> blkcg_policy_unregister()
- * NVMe 연결점: NVMe 장치에 적용되던 cgroup 정책 인터페이스를 제거한다.
+ * 해당 정책의 cgroup 인터페이스를 제거하고 plid 슬롯을 반납한다.
  *   blkcg_policy[] 슬롯을 NULL 로 만들고 cpd 를 해제한다.
  */
 
@@ -4360,7 +4360,7 @@ EXPORT_SYMBOL_GPL(blkcg_policy_unregister);
  *
  * 호출 경로: blkcg_add_delay() -> blkcg_scale_delay()
  *            blkcg_maybe_throttle_blkg() -> blkcg_scale_delay()
- * NVMe 연결점: NVMe SSD 의 IO 완료 지연이나 throttle 로 인해 쌓인
+ * 장치의 IO 완료 지연이나 throttle 로 인해 쌓인
  *   delay_nsec 를 1초 단위로 decay 시킨다. queue depth 가 포화 상태일 때
  *   cgroup 별 제출 속도를 조절하는 데 사용된다.
  */
@@ -4438,8 +4438,8 @@ static void blkcg_scale_delay(struct blkcg_gq *blkg, u64 now)
  * blkcg_maybe_throttle_blkg - blkg 계층을 거슬러 올라가며 태스크 throttle
  *
  * 호출 경로: blkcg_maybe_throttle_current() -> blkcg_maybe_throttle_blkg()
- * NVMe 연결점: NVMe queue 의 IO 지연이 cgroup limit 을 초과하면 사용자 공간
- *   복귀 직전 태스크를 수면시켜 NVMe 로의 새로운 IO 제출을 줄인다.
+ * IO 지연이 cgroup limit 을 초과하면 사용자 공간
+ *   복귀 직전 태스크를 재워 새로운 IO 제출을 줄인다.
  *   clamp 시 최대 250ms 로 제한한다.
  */
 
@@ -4508,7 +4508,7 @@ static void blkcg_maybe_throttle_blkg(struct blkcg_gq *blkg, bool use_memdelay)
 	/* [한국어] IO 스케줄링 준비 */
 	do {
 		__set_current_state(TASK_KILLABLE);
-		/* [한국어] kill 가능한 수면 상태로 전환; NVMe IO 대기 중 시그널 처리 */
+		/* [한국어] TASK_KILLABLE 로 잔다 — 무한정 throttle 되더라도 SIGKILL 로는 빠져나올 수 있어야 한다 */
 		if (!schedule_hrtimeout(&exp, HRTIMER_MODE_ABS))
 		/* [한국어] 지정 시간까지 수면; 시간 만료 시 깨어남 */
 			break;
@@ -4535,7 +4535,7 @@ static void blkcg_maybe_throttle_blkg(struct blkcg_gq *blkg, bool use_memdelay)
  * blkcg_maybe_throttle_current - 현재 태스크의 blkcg throttle 조건 확인/수행
  *
  * 호출 경로: resume 코드 -> blkcg_maybe_throttle_current()
- * NVMe 연결점: current->throttle_disk 에 저장된 NVMe disk 를 찾아 해당
+ * current->throttle_disk 에 저장된 디스크를 찾아 해당
  *   cgroup 의 blkg 를 lookup 한 후 지연을 적용한다. syscall 당 한 번만
  *   throttle 한다.
  */
@@ -4543,7 +4543,7 @@ static void blkcg_maybe_throttle_blkg(struct blkcg_gq *blkg, bool use_memdelay)
 void blkcg_maybe_throttle_current(void)
 {
 	struct gendisk *disk = current->throttle_disk;
-	/* [한국어] throttle 할 NVMe disk */
+	/* [한국어] throttle 대상 디스크 */
 	struct blkcg *blkcg;
 	/* [한국어] 현재 태스크의 cgroup */
 	struct blkcg_gq *blkg;
@@ -4568,7 +4568,7 @@ void blkcg_maybe_throttle_current(void)
 	/* [한국어] blkcg 가 없으면 throttle 불가 */
 		goto out;
 	blkg = blkg_lookup(blkcg, disk->queue);
-	/* [한국어] NVMe disk 의 blkg 검색 */
+	/* [한국어] 이 디스크의 blkg 검색 */
 	if (!blkg)
 	/* [한국어] blkg 가 없으면 throttle 불가 */
 		goto out;
@@ -4610,7 +4610,7 @@ out:
  * blkcg_schedule_throttle - 현재 태스크가 user space 복귀 시 throttle 검사
  *
  * 호출 경로: throtl/bfq 등 -> blkcg_schedule_throttle()
- * NVMe 연결점: NVMe disk 의 IO 지연이 발생했음을 알리고, 태스크가 user
+ * IO 지연이 발생했음을 기록해 두고, 태스크가 user
  *   space 로 돌아갈 때 blkcg_maybe_throttle_current() 가 동작하도록
  *   set_notify_resume() 을 설정한다.
  */
@@ -4624,7 +4624,7 @@ void blkcg_schedule_throttle(struct gendisk *disk, bool use_memdelay)
 	if (current->throttle_disk != disk) {
 	/* [한국어] 다른 disk 를 가리키고 있거나 처음 설정 */
 		if (test_bit(GD_DEAD, &disk->state))
-		/* [한국어] 죽은 disk 이면 throttle 예약 안 함; NVMe namespace 제거 중 */
+		/* [한국어] 이미 죽은 디스크면 throttle 을 걸어 봐야 깨워 줄 IO 가 없다 */
 			return;
 		get_device(disk_to_dev(disk));
 		/* [한국어] disk 장치 참조 획득 */
@@ -4657,7 +4657,7 @@ void blkcg_schedule_throttle(struct gendisk *disk, bool use_memdelay)
  * blkcg_add_delay - blkg 에 delta 만큼의 IO 지연을 누적
  *
  * 호출 경로: throtl/bfq -> blkcg_add_delay()
- * NVMe 연결점: NVMe queue 의 latency 가 목표를 초과하면 해당 cgroup 의
+ * 큐의 지연이 목표를 초과하면 해당 cgroup 의
  *   delay_nsec 에 초과분을 축적한다. 이 값은 blkcg_maybe_throttle_blkg() 에서
  *   태스크 수면 시간으로 변환된다.
  */
@@ -4670,7 +4670,7 @@ void blkcg_add_delay(struct blkcg_gq *blkg, u64 now, u64 delta)
 	blkcg_scale_delay(blkg, now);
 	/* [한국어] 먼저 지연 예산을 시간에 따라 정규화 */
 	atomic64_add(delta, &blkg->delay_nsec);
-	/* [한국어] delta 를 atomic 으로 누적; NVMe 멀티 코어에서의 race 방지 */
+	/* [한국어] delta 를 원자적으로 누적한다 — 여러 CPU 가 같은 blkg 에 동시에 기록한다 */
 }
 
 /**
@@ -4687,7 +4687,7 @@ void blkcg_add_delay(struct blkcg_gq *blkg, u64 now, u64 delta)
  * blkg_tryget_closest - 가장 가까운 살아있는 blkg 에 대한 참조 획득 시도
  *
  * 호출 경로: bio_associate_blkg_from_css() -> blkg_tryget_closest()
- * NVMe 연결점: cgroup 이 소멸 중일 때 NVMe IO 는 상위(부모) blkg 로 spill
+ * cgroup 이 소멸 중이면 그 IO 는 상위(부모) blkg 로 spill
  *   된다. blkg->parent 체인을 따라 올라가며 유효한 참조를 얻어 IO 완료까지
  *   blkg 가 유지되도록 한다.
  */
@@ -4701,7 +4701,7 @@ static inline struct blkcg_gq *blkg_tryget_closest(struct bio *bio,
 	rcu_read_lock();
 	/* [한국어] blkg_lookup_create 및 parent 체인 접근 보호 */
 	blkg = blkg_lookup_create(css_to_blkcg(css), bio->bi_bdev->bd_disk);
-	/* [한국어] bio 의 disk(NVMe namespace)에 대한 blkg 검색/생성 */
+	/* [한국어] bio 가 향하는 디스크에 대한 blkg 검색/생성 */
 	while (blkg) {
 	/* [한국어] blkg->parent 체인을 따라 올라가며 살아있는 blkg 탐색 */
 		if (blkg_tryget(blkg)) {
@@ -4737,8 +4737,8 @@ static inline struct blkcg_gq *blkg_tryget_closest(struct bio *bio,
  *
  * 호출 경로: bio_associate_blkg() -> bio_associate_blkg_from_css()
  *            bio_clone_blkg_association() -> bio_associate_blkg_from_css()
- * NVMe 연결점: bio->bi_blkg 를 설정하여 이후 submit_bio ->
- *   blk_mq_submit_bio -> nvme_queue_rq 경로에서 사용할 cgroup context 를
+ * bio->bi_blkg 를 설정한다. 이 포인터가 이후 rq-qos(throttle/iolatency/iocost)와
+ *   통계 집계에서 "이 IO 는 누구 것인가"를 판정하는 근거가 된다. 귀속을
  *   고정한다. root cgroup 이면 q->root_blkg 를 사용한다.
  */
 
@@ -4755,9 +4755,9 @@ void bio_associate_blkg_from_css(struct bio *bio,
 		bio->bi_blkg = blkg_tryget_closest(bio, css);
 	} else {
 		blkg_get(bdev_get_queue(bio->bi_bdev)->root_blkg);
-		/* [한국어] root cgroup 이면 해당 NVMe queue 의 root_blkg 사용 */
+		/* [한국어] root cgroup 이면 그 큐의 root_blkg 를 그대로 쓴다 */
 		bio->bi_blkg = bdev_get_queue(bio->bi_bdev)->root_blkg;
-		/* [한국어] root_blkg 를 bio->bi_blkg 에 설정; NVMe SQ/CQ 선택의 cgroup 기준 확정 */
+		/* [한국어] root_blkg 를 bio->bi_blkg 에 설정한다 (이 값은 큐 선택과 무관하며, 이후 throttle·통계의 귀속 대상만 정한다) */
 	}
 }
 EXPORT_SYMBOL_GPL(bio_associate_blkg_from_css);
@@ -4776,7 +4776,7 @@ EXPORT_SYMBOL_GPL(bio_associate_blkg_from_css);
  * bio_associate_blkg - bio 의 cgroup 에 맞는 blkg 를 찾아 연결
  *
  * 호출 경로: submit_bio() -> bio_associate_blkg()
- * NVMe 연결점: NVMe IO 제출의 시작점에서 bio 가 속한 cgroup 을 결정한다.
+ * IO 제출의 시작점에서 이 bio 가 어느 cgroup 소유인지 확정한다.
  *   passthrough IO 는 제외한다. 이 함수 이후 bio 는
  *   submit_bio -> bio_associate_blkg -> blk_mq_submit_bio ->
  *   blk_mq_get_request -> mq_ops->queue_rq (간접 호출; NVMe PCIe 면 nvme_queue_rq -> nvme_sq_copy_cmd -> nvme_write_sq_db) 의
@@ -4803,7 +4803,7 @@ void bio_associate_blkg(struct bio *bio)
 	/* [한국어] 현재 태스크의 cgroup css 획득 */
 
 	bio_associate_blkg_from_css(bio, css);
-	/* [한국어] css 에 맞는 blkg 로 bio 연결; NVMe SQ/CQ 선택의 cgroup 기준 확정 */
+	/* [한국어] css 에 맞는 blkg 를 bio 에 연결한다 — 이후 rq-qos 와 통계가 이 포인터로 귀속을 판단한다 */
 
 	rcu_read_unlock();
 }
@@ -4819,7 +4819,7 @@ EXPORT_SYMBOL_GPL(bio_associate_blkg);
  * bio_clone_blkg_association - src bio 의 blkg 연결을 dst bio 로 복제
  *
  * 호출 경로: bio_clone_* -> bio_clone_blkg_association()
- * NVMe 연결점: NVMe split/clone bio 가 원본과 동일한 cgroup context 를
+ * split/clone 된 bio 가 원본과 동일한 cgroup 귀속을
  *   유지하도록 한다. CID/SQ 에 기록될 때 동일한 cgroup 정책이 적용된다.
  */
 
@@ -4837,8 +4837,8 @@ EXPORT_SYMBOL_GPL(bio_clone_blkg_association);
  * blk_cgroup_io_type - bio 를 read/write/discard 로 분류
  *
  * 호출 경로: blk_cgroup_bio_start() -> blk_cgroup_io_type()
- * NVMe 연결점: NVMe 명령어 opcode(bi_opf)에 따라 read, write, discard
- *   통계 인덱스로 매핑한다. NVMe PRP/SGL 은 분류에 직접 사용되지 않고
+ * bio 의 연산 종류(bi_opf)를 read/write/discard 통계 인덱스로 매핑한다.
+ *   이 분류는 블록 계층 통계용이며 장치 프로토콜과 무관하다.
  *   op 코드만 본다.
  */
 
@@ -4850,7 +4850,7 @@ static int blk_cgroup_io_type(struct bio *bio)
 	if (op_is_write(bio->bi_opf))
 	/* [한국어] write 관련 opcode 를 BLKG_IOSTAT_WRITE 로 분류 */
 		return BLKG_IOSTAT_WRITE;
-	/* [한국어] 나머지는 read 로 분류; NVMe read opcode 와 대응 */
+	/* [한국어] 나머지는 전부 read 로 분류한다 */
 	return BLKG_IOSTAT_READ;
 }
 
@@ -4860,7 +4860,7 @@ static int blk_cgroup_io_type(struct bio *bio)
  *
  * 호출 경로: block layer IO 시작/완료 지점 -> blk_cgroup_bio_start()
  *            (rq_qos 또는 blk_account 경로를 통해 호출됨, 추정)
- * NVMe 연결점: NVMe IO 가 서비스 되거나 완료될 때 bio->bi_iter.bi_size 와
+ * IO 가 서비스되거나 완료될 때 bio->bi_iter.bi_size 와
  *   ios[BLKG_IOSTAT_*] 를 per-cpu blkg_iostat_set 에 누적한다. BIO_CGROUP_ACCT
  *   플래그로 split bio 의 중복 집계를 방지하고, lockless list(lhead)에 등록해
  *   rstat flush 시점에 global 통계로 반영한다.
@@ -4891,7 +4891,7 @@ void blk_cgroup_bio_start(struct bio *bio)
 	bis = per_cpu_ptr(bio->bi_blkg->iostat_cpu, cpu);
 	/* [한국어] bio 가 속한 blkg 의 per-cpu iostat_set 획득 */
 	flags = u64_stats_update_begin_irqsave(&bis->sync);
-	/* [한국어] per-cpu 통계 seqlock 진입; irqsave 로 NVMe ISR 컨텍스트에서도 안전 */
+	/* [한국어] per-cpu 통계 seqlock 진입. 완료 경로가 인터럽트 문맥에서 같은 카운터를 만질 수 있어 irqsave 로 막는다 */
 
 	/*
 	 * If the bio is flagged with BIO_CGROUP_ACCT it means this is a split
@@ -4902,11 +4902,11 @@ void blk_cgroup_bio_start(struct bio *bio)
 		bio_set_flag(bio, BIO_CGROUP_ACCT);
 		/* [한국어] 중복 집계 방지 플래그 설정 */
 		bis->cur.bytes[rwd] += bio->bi_iter.bi_size;
-		/* [한국어] bio 크기(바이트)를 read/write/discard 별로 누적; NVMe PRP/SGL 전송 크기(추정) */
+		/* [한국어] bio 크기(바이트)를 read/write/discard 별로 누적한다 */
 		/* [한국어] bio 크기(바이트)를 read/write/discard 별로 누적 */
 	}
 	bis->cur.ios[rwd]++;
-	/* [한국어] read/write/discard IO 횟수 증가; NVMe CID 단위 완료와 대응(추정) */
+	/* [한국어] read/write/discard IO 건수 증가. 세는 단위는 bio 이지 장치 명령이 아니다 — 병합되면 여러 bio 가 명령 하나가 된다 */
 	/* [한국어] read/write/discard IO 횟수 증가 */
 
 	/*
@@ -4940,7 +4940,7 @@ void blk_cgroup_bio_start(struct bio *bio)
  * blk_cgroup_congested - 현재 cgroup 계층에 IO 혼잡이 있는지 확인
  *
  * 호출 경로: writeback/congestion 판단 -> blk_cgroup_congested()
- * NVMe 연결점: cgroup 의 congestion_count 가 0보다 크면 NVMe queue 가
+ * cgroup 의 congestion_count 가 0보다 크면 그 cgroup 이
  *   지연/스로틀 상태임을 나타낸다. writeback 등에서 추가 IO 제출을 억제하는
  *   데 활용된다.
  */
@@ -4958,7 +4958,7 @@ bool blk_cgroup_congested(void)
 	/* [한국어] 현재 cgroup 에서 root 까지 계층 순회 */
 	     blkcg = blkcg_parent(blkcg)) {
 		if (atomic_read(&blkcg->congestion_count)) {
-		/* [한국어] congestion_count > 0 이면 NVMe queue 가 지연/스로틀 상태로 판단 */
+		/* [한국어] congestion_count > 0 이면 이 cgroup 이 현재 스로틀되고 있다는 뜻 */
 			ret = true;
 			break;
 		}
@@ -4969,21 +4969,37 @@ bool blk_cgroup_congested(void)
 }
 
 module_param(blkcg_debug_stats, bool, 0644);
-	/* [한국어] debug stats 모듈 파라미터; NVMe queue 지연/통계 디버깅용 */
+	/* [한국어] debug 통계 활성화 모듈 파라미터 */
 MODULE_PARM_DESC(blkcg_debug_stats, "True if you want debug stats, false if not");
 
-/* NVMe 관점 핵심 요약
+/* [한국어] 핵심 요약 — 그리고 NVMe 독자를 위한 경계 긋기
  *
- * - block/blk-cgroup.c 는 NVMe IO 경로의 최상단에서 bio(request) 가 어느
- *   cgroup 에 속하는지를 결정하고, blk-mq/NVMe 드라이버(nvme_queue_rq,
- *   nvme_sq_copy_cmd/nvme_write_sq_db, doorbell)로 전달되는 cgroup context(bi_blkg)를 관리한다.
- * - per-cpu blkg_iostat_set 과 lockless list(lhead)를 통해 NVMe SSD 의
- *   멀티코어 CQ 완료를 저렴하게 집계하며, cgroup 별 read/write/discard
- *   통계와 use_delay/delay_nsec 기반 스로틀링을 지원한다.
- * - throtl, BFQ, ioprio 같은 정책은 blkcg_policy 를 통해 등록/활성화되며,
- *   NVMe request_queue(q) 단위로 blkg->pd[] 를 할당받아 nvme_queue_rq()
- *   호출 시점에 큐 선택, 제한, 우선순위를 반영한다.
- * - blk-mq, elevator(bio), IO scheduler(bfq-iosched.c 등) 및 throttle
- *   (blk-throttle.c) 파일과 논리적으로 연결되며, NVMe 장치 드라이버
- *   (drivers/nvme/host/pci.c 등) 보다 상위에서 cgroup 단원 추상화를 제공한다.
+ * 이 파일은 장치를 전혀 모른다. 파일 상단에도 적었듯 코드에 nvme 식별자가
+ * 하나도 없고, 여기서 일어나는 모든 일은 NVMe·SATA·loop 에 똑같이 적용된다.
+ * 그래서 아래 요약은 "NVMe 에서 이 파일이 무엇을 하는가"가 아니라
+ * "이 파일이 하는 일과 NVMe 가 만나는 지점은 어디까지인가"로 적는다.
+ *
+ * - 이 파일이 하는 일: (blkcg, request_queue) 쌍마다 blkg 를 하나 두고,
+ *   bio 가 들어올 때 bio->bi_blkg 를 채워 "이 IO 는 누구 것인가"를 확정한다.
+ *   그 위에 정책(throtl / iocost / iolatency / bfq)이 blkg->pd[] 로 얹혀
+ *   각자의 제한과 회계를 수행한다.
+ *
+ * - 시점이 중요하다. 이 파일과 그 위의 정책들은 **요청이 드라이버로 내려가기
+ *   한참 전**, bio 단계에서 작동한다. mq_ops->queue_rq(NVMe 면 nvme_queue_rq)에
+ *   닿을 무렵이면 throttle 판정은 이미 끝나 있다. cgroup 정책이
+ *   "어느 하드웨어 큐를 쓸지"를 고르는 일은 **없다** — 큐 선택은 제출 CPU 와
+ *   blk_mq_map_queue() 가 정하며 cgroup 과 무관하다.
+ *
+ * - 통계의 단위도 구분해야 한다. 여기서 세는 것은 bio 건수이지 장치 명령
+ *   건수가 아니다. 병합되면 여러 bio 가 명령 하나가 되고, 분할되면 그 반대다.
+ *   따라서 cgroup 의 ios 값과 NVMe 컨트롤러가 본 명령 수는 일치하지 않는다.
+ *
+ * - per-cpu blkg_iostat_set + lockless list(lhead) 구조는 완료가 여러 CPU 에서
+ *   동시에 쏟아지는 고속 장치에서 카운터 한 줄을 두고 다투지 않기 위한 것이다.
+ *   NVMe 처럼 큐가 CPU 수만큼 있는 장치에서 이 설계의 이득이 가장 크다 —
+ *   이것이 이 파일에서 NVMe 와 가장 가까운 접점이다.
+ *
+ * - 관련 파일: 정책 구현은 blk-throttle.c / blk-iocost.c / blk-iolatency.c /
+ *   bfq-cgroup.c 에 있고, 이 파일은 그것들이 공유하는 뼈대(blkg 트리, pd 슬롯,
+ *   등록/활성화 절차)만 제공한다.
  */
