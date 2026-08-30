@@ -3543,9 +3543,10 @@ static void bio_iov_iter_unbounce_read(struct bio *bio, bool is_error,
 {
 	unsigned int len = bio->bi_io_vec[0].bv_len;
 
-	if (likely(!is_error)) {
-		void *buf = bvec_virt(&bio->bi_io_vec[0]);
-		struct iov_iter to;
+	if (likely(!is_error)) {	/* [한국어] 실패한 읽기라면 bounce 버퍼 내용이 쓰레기이므로 복사하지 않는다 */
+		void *buf = bvec_virt(&bio->bi_io_vec[0]);	/* [한국어] 슬롯 0 이 bounce folio 라는 배치 규약을 여기서 쓴다.
+							 * 사용자 페이지는 1번부터라 둘을 헷갈릴 일이 없다 */
+		struct iov_iter to;	/* [한국어] 복사 목적지(사용자 페이지들)를 기술할 iterator */
 
 		iov_iter_bvec(&to, ITER_DEST, bio->bi_io_vec + 1, bio->bi_vcnt,	/* [한국어] bi_vcnt = bvec 개수 (PRP/SGL 엔트리 수와는 다르다 — 파일 상단 참고) */
 				len);
@@ -3814,19 +3815,27 @@ int bio_submit_or_kill(struct bio *bio, unsigned int flags)
 int bdev_rw_virt(struct block_device *bdev, sector_t sector, void *data,
 		size_t len, enum req_op op)
 {
-	struct bio_vec bv;
-	struct bio bio;
-	int error;
+	struct bio_vec bv;	/* [한국어] 세그먼트 하나짜리 bvec — 스택에 둔다 */
+	struct bio bio;		/* [한국어] bio 도 스택에 둔다. bio_alloc 을 쓰지 않는 이유는 이 경로가
+				 * mempool 고갈에 걸려서는 안 되기 때문이다(파티션 스캔·부팅 초기 등) */
+	int error;		/* [한국어] submit_bio_wait 의 결과. 음수 errno 로 그대로 반환한다 */
 
 	if (WARN_ON_ONCE(is_vmalloc_addr(data)))
-		return -EIO;  // I/O 오류: NVMe 명령 제출/완료 실패 전파
+		return -EIO;	/* [한국어] vmalloc 영역은 가상 주소가 연속이어도 물리 주소가 흩어져 있어,
+				 * 아래 bio_add_virt_nofail() 이 전제하는 "단일 물리 세그먼트"가 성립하지 않는다.
+				 * 호출자가 잘못 쓴 것이므로 WARN 과 함께 거절한다. */
 
-	bio_init(&bio, bdev, &bv, 1, op);  // bio 필드 초기화: SLBA/length/OPC/PRP-SGL 기반 준비
+	bio_init(&bio, bdev, &bv, 1, op);	/* [한국어] 스택에 잡은 bio 를 초기화한다. bvec 도 스택 변수 하나(&bv)를 쓰므로
+					 * 이 경로 전체에 동적 할당이 없다 — 부팅 초기나 메모리 압박 상황에서도
+					 * 실패하지 않아야 하는 호출자를 위한 설계다. */
 	bio.bi_iter.bi_sector = sector;	/* [한국어] 512B 섹터 단위 시작 위치. NVMe 는 나중에 nvme_sect_to_lba() 로
 	 * lba_shift 만큼 시프트해 SLBA 필드에 넣는다 */
-	bio_add_virt_nofail(&bio, data, len);  // 커널 가상 주소를 bio에 추가: NVMe PRP/SGL로 변환
+	bio_add_virt_nofail(&bio, data, len);	/* [한국어] 커널 선형 매핑 주소를 (page, offset, len) 으로 바꿔 bvec 하나에 넣는다.
+					 * _nofail 인 이유: 위에서 bvec 슬롯 1개를 확보해 두었고 세그먼트도 하나뿐이라
+					 * 실패할 수 없기 때문이다. */
 	error = submit_bio_wait(&bio);	/* [한국어] 제출 후 완료까지 동기적으로 기다리는 경로 */
-	bio_uninit(&bio);  // cgroup/integrity/crypto 정리: NVMe 완료 후 자원 해제
+	bio_uninit(&bio);	/* [한국어] bio 에 매달렸던 부속 자원(blkg 참조, 무결성 페이로드, 암호화 컨텍스트)을 푼다.
+				 * bio 자체는 스택 변수라 해제할 것이 없지만, 이것들은 참조를 잡고 있어 반드시 놓아야 한다. */
 	return error;
 }
 EXPORT_SYMBOL_GPL(bdev_rw_virt);
@@ -4270,22 +4279,33 @@ struct bio *bio_split(struct bio *bio, int sectors,	/* [한국어] 큐 한계(ma
 	struct bio *split;
 
 	if (WARN_ON_ONCE(sectors <= 0))
-		return ERR_PTR(-EINVAL);  // 오류 포인터 반환: NVMe 분할/clone 실패 전파
+		return ERR_PTR(-EINVAL);	/* [한국어] 포인터 반환 함수이므로 NULL 이 아니라 ERR_PTR 로 오류를 싣는다.
+				  * 호출자는 IS_ERR() 로 가려낸다 — NULL 은 "분할 불필요"라는 다른 뜻으로 쓰이기 때문이다 */
 	if (WARN_ON_ONCE(sectors >= bio_sectors(bio)))
-		return ERR_PTR(-EINVAL);  // 오류 포인터 반환: NVMe 분할/clone 실패 전파
+		return ERR_PTR(-EINVAL);	/* [한국어] 포인터 반환 함수이므로 NULL 이 아니라 ERR_PTR 로 오류를 싣는다.
+				  * 호출자는 IS_ERR() 로 가려낸다 — NULL 은 "분할 불필요"라는 다른 뜻으로 쓰이기 때문이다 */
 
 	/* Zone append commands cannot be split */
-	if (WARN_ON_ONCE(bio_op(bio) == REQ_OP_ZONE_APPEND))  // ZNS zone append: NVMe 컨트롤러가 쓰기 위치를 결정하므로 분할 불가
-		return ERR_PTR(-EINVAL);  // 오류 포인터 반환: NVMe 분할/clone 실패 전파
+	if (WARN_ON_ONCE(bio_op(bio) == REQ_OP_ZONE_APPEND))
+		/* [한국어] Zone Append 는 기록 위치를 장치가 정해 하나의 LBA 로 돌려준다.
+		 * 둘로 나누면 어느 조각이 어디 쓰였는지 보고할 방법이 사라지므로 분할 불가다.
+		 * 여기 도달했다는 것 자체가 상위 계층의 버그라 WARN 으로 남긴다. */
+		return ERR_PTR(-EINVAL);	/* [한국어] 포인터 반환 함수이므로 NULL 이 아니라 ERR_PTR 로 오류를 싣는다.
+				  * 호출자는 IS_ERR() 로 가려낸다 — NULL 은 "분할 불필요"라는 다른 뜻으로 쓰이기 때문이다 */
 
 	/* atomic writes cannot be split */
 	if (bio->bi_opf & REQ_ATOMIC)	/* [한국어] 원자적 쓰기는 전부 아니면 전무여야 하므로 쪼갤 수 없다.
 	 * NVMe 에서 이 보장의 근거는 NAWUPF/NABSPF 이며, 그 경계를 넘는 요청은 애초에 만들어지지 않는다 */
-		return ERR_PTR(-EINVAL);  // 오류 포인터 반환: NVMe 분할/clone 실패 전파
+		return ERR_PTR(-EINVAL);	/* [한국어] 포인터 반환 함수이므로 NULL 이 아니라 ERR_PTR 로 오류를 싣는다.
+				  * 호출자는 IS_ERR() 로 가려낸다 — NULL 은 "분할 불필요"라는 다른 뜻으로 쓰이기 때문이다 */
 
-	split = bio_alloc_clone(bio->bi_bdev, bio, gfp, bs);  // bio_vec 공유 clone: NVMe MDTS 분할 시 원본 PRP/SGL 재사용
+	split = bio_alloc_clone(bio->bi_bdev, bio, gfp, bs);
+	/* [한국어] bvec 배열을 복사하지 않고 원본과 **공유하는** clone 을 만든다.
+	 * 분할이란 결국 "같은 배열의 앞부분만 가리키기"이므로 복사가 필요 없다 —
+	 * 아래에서 bi_size 만 줄이면 조각이 완성된다. 그래서 분할 비용이 O(1)이다. */
 	if (!split)
-		return ERR_PTR(-ENOMEM);  // 오류 포인터 반환: NVMe 분할/clone 실패 전파
+		return ERR_PTR(-ENOMEM);	/* [한국어] 포인터 반환 함수이므로 NULL 이 아니라 ERR_PTR 로 오류를 싣는다.
+				  * 호출자는 IS_ERR() 로 가려낸다 — NULL 은 "분할 불필요"라는 다른 뜻으로 쓰이기 때문이다 */
 
 	split->bi_iter.bi_size = sectors << 9;	/* [한국어] bi_size = 이 bio 가 옮길 바이트 수 (파일 상단 "bi_size 와 NLB" 참고) */
 
@@ -4295,10 +4315,11 @@ struct bio *bio_split(struct bio *bio, int sectors,	/* [한국어] 큐 한계(ma
 
 	bio_advance(bio, split->bi_iter.bi_size);	/* [한국어] 부분 완료 후 남은 구간으로 iter 를 전진시킨다 */
 
-	if (bio_flagged(bio, BIO_TRACE_COMPLETION))
-		bio_set_flag(split, BIO_TRACE_COMPLETION);
+	if (bio_flagged(bio, BIO_TRACE_COMPLETION))	/* [한국어] 원본이 완료 추적 대상이었다면 */
+		bio_set_flag(split, BIO_TRACE_COMPLETION);	/* [한국어] 조각에도 물려준다 — 그러지 않으면 blktrace 에서
+							 * 분할된 뒤의 완료가 통째로 사라져 추적이 끊긴다 */
 
-	return split;
+	return split;	/* [한국어] 앞부분 조각. 원본(bio)은 위 bio_advance 로 남은 뒷부분을 가리키게 됐다 */
 }
 EXPORT_SYMBOL(bio_split);	/* [한국어] 큐 한계(max_hw_sectors, max_segments, virt_boundary)를 넘으면
 	 * blk-merge.c 가 bio 를 쪼개고, 쪼개진 조각마다 별도 request/명령이 된다 */
@@ -4494,16 +4515,17 @@ int bioset_init(struct bio_set *bs,  // bio_set 초기화: NVMe 제출에 사용
 	 * 기다리는 교착이다.
 	 * rescue_list와 워커가 이 상황을 푼다: 대기 중인 bio를 별도 워커가
 	 * 대신 제출해 진행을 만든다. */
-	spin_lock_init(&bs->rescue_lock);
-	bio_list_init(&bs->rescue_list);
-	INIT_WORK(&bs->rescue_work, bio_alloc_rescue);
+	spin_lock_init(&bs->rescue_lock);	/* [한국어] rescue_list 를 보호. 제출 경로와 워커가 동시에 만진다 */
+	bio_list_init(&bs->rescue_list);	/* [한국어] 대신 제출해 줄 bio 들이 쌓이는 목록 */
+	INIT_WORK(&bs->rescue_work, bio_alloc_rescue);	/* [한국어] 그 목록을 비워 주는 워커. 실제 실행은 아래
+						 * WQ_MEM_RECLAIM 워크큐 위에서 이뤄진다 */
 
 	/* [한국어] 이 bio_set의 오브젝트 크기(front_pad + bio + back_pad)에 맞는
 	 * 슬랩 캐시를 찾거나 만든다. 같은 크기를 쓰는 bio_set끼리는 캐시를
 	 * 공유해 슬랩 종류가 무한정 늘어나지 않게 한다. */
 	bs->bio_slab = bio_find_or_create_slab(bs);
 	if (!bs->bio_slab)
-		return -ENOMEM;
+		return -ENOMEM;	/* [한국어] 아직 아무것도 초기화하지 않았으므로 bad 라벨이 아니라 그냥 반환한다 */
 
 	/* [한국어] 위 슬랩 위에 mempool을 얹는다. mempool은 pool_size개를 미리
 	 * 확보해 두어, 메모리가 고갈되어도 진행 중인 I/O가 완료될 만큼은
@@ -4527,7 +4549,8 @@ int bioset_init(struct bio_set *bs,  // bio_set 초기화: NVMe 제출에 사용
 		if (!bs->rescue_workqueue)
 			goto bad;
 	}
-	if (flags & BIOSET_PERCPU_CACHE) {
+	if (flags & BIOSET_PERCPU_CACHE) {	/* [한국어] 호출자가 명시적으로 요청한 경우에만 켠다 —
+					 * per-CPU 배열은 CPU 수만큼 메모리를 쓰므로 모든 bio_set 에 두면 낭비다 */
 		/* [한국어] per-CPU bio 캐시. 완료된 bio를 슬랩에 돌려주는 대신
 		 * 자기 CPU의 리스트에 쌓아 두었다가 다음 할당에 재사용한다.
 		 * 락도 원자적 연산도 없어 매우 빠르며, 초당 수십만 bio를 만드는
