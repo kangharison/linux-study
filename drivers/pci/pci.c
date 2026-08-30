@@ -9,81 +9,103 @@
  */
 
 /*
- * ===================================================================
- * NVMe PCIe 호스트 드라이버 관점 파일 요약
- * -------------------------------------------------------------------
- * 본 파일(drivers/pci/pci.c)은 PCI 버스 서비스의 핵심 진입점으로,
- * NVMe SSD가 동작하기 위해 반드시 거쳐야 하는 여러 PCI 단계를 구현한다.
- * NVMe 드라이버(drivers/nvme/host/pci.c)가 직접 또는 간접적으로 호출하는
- * 주요 경로는 다음과 같다.
+ * [한국어 설명] PCI 버스 서비스의 핵심 구현 (drivers/pci/pci.c)
  *
- *   [초기화 및 BAR/리소스]
- *     nvme_probe -> pci_enable_device[_mem] -> pci_set_master ->
- *     pci_request_regions -> pci_iomap(BAR0 doorbell) ->
- *     pci_ioremap_bar / pci_resource_start / pci_resource_len
+ * === 파일의 역할 ===
+ * PCI 장치 하나를 "쓸 수 있는 상태"로 만들고 유지하는 데 필요한 조작을 모아 둔
+ * 파일이다. 장치 활성화(pci_enable_device 계열), 버스 마스터 권한 부여,
+ * BAR 리소스 예약, config space 접근 헬퍼, capability 탐색, 전원 상태 전이,
+ * 함수 리셋(FLR 등), 링크 파라미터 조회가 모두 여기 있다.
+ * 버스를 훑어 장치를 발견하는 일은 probe.c 가, 리소스 주소를 실제로 배정하는 일은
+ * setup-bus.c/setup-res.c 가, 인터럽트 할당은 msi/ 가 맡는다. 이 파일은 그렇게
+ * 만들어진 struct pci_dev 를 대상으로 "무엇을 켜고 끄고 되돌릴 것인가"를 다룬다.
+ * 7700여 줄로 PCI 서브시스템에서 가장 큰 파일이며, 드라이버가 pci_* API 를 부르면
+ * 대부분 이 파일 어딘가에 도달한다.
  *
- *   [MSI-X 및 인터럽트]
- *     pci_find_capability(pdev, PCI_CAP_ID_MSI/MSIX) ->
- *     pci_msix_vec_count / pci_alloc_irq_vectors(pci.c는 capability/enable
- *     기반을 제공하고 실제 할당은 drivers/pci/msi.c에서 수행)
+ * === 전체 아키텍처에서의 위치 ===
+ * 부팅 시 흐름은 대략 다음과 같다.
+ *   PCI 호스트 컨트롤러 드라이버(controller/) 가 버스를 등록
+ *     → probe.c 가 config space 를 훑어 장치를 발견하고 pci_dev 를 만든다
+ *     → setup-bus.c 가 BAR 에 실제 주소를 배정한다
+ *     → pci-driver.c 가 vendor/device ID 로 드라이버를 짝지어 .probe 를 부른다
+ *     → [이 파일] 드라이버가 pci_enable_device_mem(), pci_set_master() 등을 호출해
+ *       장치를 깨우고 DMA 권한을 준다
+ * 실행 컨텍스트는 대부분 프로세스 컨텍스트다(잠들 수 있다). 다만
+ * pci_channel_offline() 이나 config 접근 헬퍼처럼 오류 처리 경로에서 불리는
+ * 것들은 더 제한적인 문맥에서도 호출될 수 있다.
  *
- *   [DMA 및 버스 마스터링]
- *     pci_set_master (PCI_COMMAND 의 Bus Master Enable 비트 설정) ->
- *     dma_set_mask / dma_set_coherent_mask (pci.c 내 __pci_set_master
- *     호출 경로를 통해 MSE/BME 활성화 확인)
+ * === 타 모듈과의 연결 ===
+ * 아래로는 각 호스트 컨트롤러 드라이버의 config space 접근 콜백(access.c 가 중개)에
+ * 의존하고, 위로는 모든 PCI 드라이버가 이 파일의 API 를 쓴다. 전원 관리는
+ * pci-acpi.c(ACPI _PS0/_PS3, _DSM)와 협력하고, 링크 절전은 pcie/aspm.c,
+ * 오류 복구는 pcie/aer.c, 인터럽트는 msi/ 가 각각 나눠 맡는다.
+ * 공유 상태는 struct pci_dev 자체와, 그 안의 saved_config_space(전원 전이 전후로
+ * config space 를 통째로 저장·복원하는 버퍼)다.
  *
- *   [PCIe 링크 및 성능]
- *     pcie_get_readrq / pcie_set_readrq (Max Read Request Size)
- *     pcie_get_mps / pcie_set_mps (Max Payload Size)
- *     pcie_print_link_status (링크 속도/폭 진단)
+ * === NVMe 드라이버가 실제로 쓰는 것 (drivers/nvme/ 전수 확인) ===
+ * 주석을 제거한 drivers/nvme/ 전체를 검색해 실제 호출을 확인했다. NVMe 가 부르는
+ * pci* 함수는 33개이며, 그중 이 파일에 정의된 것은 다음 7개다:
  *
- *   [전원 관리]
- *     pci_set_power_state / pci_power_up / pci_prepare_to_sleep /
- *     pci_back_from_sleep / pci_finish_runtime_suspend
- *     NVMe reset/suspend/resume 시 D3hot/D0 전환 및 config space save/restore
+ *     pci_enable_device_mem()   — 장치를 깨우고 MEM 공간 디코딩을 켠다.
+ *                                 NVMe 는 IO 공간을 쓰지 않아 _mem 판을 쓴다.
+ *     pci_set_master()          — PCI_COMMAND 의 Bus Master Enable 비트를 세운다.
+ *                                 이것이 없으면 장치가 DMA 를 시작할 수 없어,
+ *                                 NVMe 의 SQ/CQ 링과 PRP/SGL 전송이 전부 불가능하다.
+ *     pci_disable_device()      — 위 둘의 반대. 제거·리셋 경로에서 부른다.
+ *     pci_save_state()          — config space 를 saved_config_space 에 통째로 보관.
+ *     pci_restore_state()       — 그것을 되돌린다. D3 전환이나 FLR 후에는 BAR·
+ *                                 Command 레지스터가 초기화되므로 반드시 필요하다.
+ *     pci_load_saved_state()    — 미리 만들어 둔 상태 묶음을 적용한다.
+ *     pci_device_is_present()   — Vendor ID 를 읽어 0xFFFF 가 아닌지 본다.
+ *                                 표면 제거(surprise removal) 판정의 근거다.
  *
- *   [리셋 및 복구]
- *     pci_reset_function / pcie_flr / pci_bus_error_reset
- *     NVMe controller reset(FLR), surprise removal, AER 복구 시 호출
+ * 나머지 26개는 다른 파일에 있다 — 예를 들어 pci_alloc_irq_vectors_affinity() 는
+ * msi/ 에, pci_p2pdma_add_resource()/pci_alloc_p2pmem() 은 p2pdma.c 에,
+ * pci_request_mem_regions() 는 인라인 래퍼다. pcie_reset_flr() 도 여기가 아니다.
  *
- *   [기능 캡ability 및 ASPM]
- *     pci_find_capability / pci_find_ext_capability
- *     pci_configure_ari / pci_acs_init / pci_enable_acs
- *     ASPM 정책은 drivers/pci/pcie/aspm.c에서 처리되나, pci.c 의 전원/링크
- *     상태 함수들이 NVMe 장치의 활성/저전원 상태 전환과 연동된다.
+ * (이전 주석은 pci_iomap, pci_find_capability, pcie_get_mps, pci_set_power_state,
+ *  pci_reset_function, pci_enable_acs 등을 "NVMe 가 호출한다"고 적어 두었으나
+ *  실제 호출은 없었다. 위 검증 결과로 대체했다.)
  *
- * 본 파일은 NVMe endpoint 에 대한 config space 접근, BAR 리소스 관리,
- * 버스 마스터/DMA 활성화, 링크 파라미터, 전원 상태, 함수 리셋 등
- * 하드웨어 제어의 근간을 제공하므로, NVMe 드라이버 개발자가 이 파일의
- * 동작을 이해하는 것은 디버깅과 성능 튜닝에 필수적이다.
- * ===================================================================
+ * === 주요 함수/구조체 요약 ===
+ * pci_enable_device_mem()/pci_disable_device() : 장치 활성화·비활성화의 짝.
+ *   내부적으로 참조 계수를 세므로 중복 호출이 안전하다.
+ * pci_set_master()/pci_clear_master()          : Bus Master Enable 비트 제어.
+ * pci_save_state()/pci_restore_state()         : config space 스냅숏과 복원.
+ *   전원 전이·리셋을 넘나들 때 BAR 와 Command 를 잃지 않게 하는 장치다.
+ * pci_set_power_state()                        : D0~D3cold 전이. ACPI 협력 포함.
+ * pci_find_capability()/pci_find_ext_capability() : capability 리스트 순회.
+ *   전자는 config space 0x34 에서 시작하는 표준 리스트, 후자는 0x100 부터의
+ *   확장 리스트를 훑는다.
+ * pci_reset_function() 계열                    : FLR 을 비롯한 리셋 방법 선택.
  */
-#include <linux/acpi.h> /* NVMe: 헤더 파일을 포함한다. */
-#include <linux/kernel.h> /* NVMe: 헤더 파일을 포함한다. */
-#include <linux/delay.h> /* NVMe: 헤더 파일을 포함한다. */
-#include <linux/dmi.h> /* NVMe: 헤더 파일을 포함한다. */
-#include <linux/init.h> /* NVMe: 헤더 파일을 포함한다. */
-#include <linux/iommu.h> /* NVMe: 헤더 파일을 포함한다. */
-#include <linux/lockdep.h> /* NVMe: 헤더 파일을 포함한다. */
-#include <linux/msi.h> /* NVMe: 헤더 파일을 포함한다. */
-#include <linux/of.h> /* NVMe: 헤더 파일을 포함한다. */
-#include <linux/pci.h> /* NVMe: 헤더 파일을 포함한다. */
-#include <linux/pm.h> /* NVMe: 헤더 파일을 포함한다. */
-#include <linux/slab.h> /* NVMe: 헤더 파일을 포함한다. */
-#include <linux/module.h> /* NVMe: 헤더 파일을 포함한다. */
-#include <linux/spinlock.h> /* NVMe: 헤더 파일을 포함한다. */
-#include <linux/string.h> /* NVMe: 헤더 파일을 포함한다. */
-#include <linux/log2.h> /* NVMe: 헤더 파일을 포함한다. */
-#include <linux/logic_pio.h> /* NVMe: 헤더 파일을 포함한다. */
-#include <linux/device.h> /* NVMe: 헤더 파일을 포함한다. */
-#include <linux/pm_runtime.h> /* NVMe: 헤더 파일을 포함한다. */
-#include <linux/pci-ats.h> /* NVMe: 헤더 파일을 포함한다. */
-#include <linux/pci_hotplug.h> /* NVMe: 헤더 파일을 포함한다. */
-#include <linux/vmalloc.h> /* NVMe: 헤더 파일을 포함한다. */
-#include <asm/dma.h> /* NVMe: 헤더 파일을 포함한다. */
-#include <linux/aer.h> /* NVMe: 헤더 파일을 포함한다. */
-#include <linux/bitfield.h> /* NVMe: 헤더 파일을 포함한다. */
-#include "pci.h" /* NVMe: 헤더 파일을 포함한다. */
+
+#include <linux/acpi.h>	/* [한국어] ACPI 전원 관리 연동 — _PS0/_PS3 로 D-state 를 바꾸거나 _DSM 으로 장치별 기능을 묻는다 */
+#include <linux/kernel.h>	/* [한국어] min/max, WARN_ON 등 커널 기본 매크로 */
+#include <linux/delay.h>	/* [한국어] msleep/udelay — 리셋 후 장치가 응답하기까지 스펙이 정한 대기 시간을 지킬 때 */
+#include <linux/dmi.h>	/* [한국어] DMI(SMBIOS) 조회 — 특정 메인보드에서만 필요한 예외 처리를 판별한다 */
+#include <linux/init.h>	/* [한국어] __init 등 초기화 섹션 표시 */
+#include <linux/iommu.h>	/* [한국어] IOMMU 연동 — DMA 를 켜기 전에 장치가 어느 IOMMU 그룹에 속하는지 확인한다 */
+#include <linux/lockdep.h>	/* [한국어] 락 순서 검증 어노테이션. 이 파일은 여러 전역 락(pci_bus_sem 등)을 다뤄 순서가 중요하다 */
+#include <linux/msi.h>	/* [한국어] struct msi_desc — 인터럽트 해제 시 남은 MSI 기술자를 정리하는 경로에서 참조 */
+#include <linux/of.h>	/* [한국어] DeviceTree 노드 조회 — ACPI 가 없는 임베디드 플랫폼의 전원/리셋 정보를 읽는다 */
+#include <linux/pci.h>	/* [한국어] struct pci_dev, pci_* 공개 API 선언. 이 파일이 구현하는 인터페이스의 정의처 */
+#include <linux/pm.h>	/* [한국어] 전원 관리 공통 타입(pm_message_t 등) */
+#include <linux/slab.h>	/* [한국어] kmalloc/kfree — saved_config_space 버퍼 등을 동적 할당한다 */
+#include <linux/module.h>	/* [한국어] EXPORT_SYMBOL — 이 파일의 API 를 모든 PCI 드라이버에 공개한다 */
+#include <linux/spinlock.h>	/* [한국어] pci_lock 등 config space 접근 직렬화용 스핀락 */
+#include <linux/string.h>	/* [한국어] memcpy/strcmp — 파라미터 문자열 파싱과 상태 버퍼 복사 */
+#include <linux/log2.h>	/* [한국어] ilog2/roundup_pow_of_two — BAR 크기와 정렬이 2의 거듭제곱이라 시프트 계산에 쓴다 */
+#include <linux/logic_pio.h>	/* [한국어] 논리 PIO — MMIO 만 있는 아키텍처에서 IO 공간 접근을 흉내 내는 계층 */
+#include <linux/device.h>	/* [한국어] 드라이버 모델(struct device) — pci_dev 가 그 위에 얹혀 있다 */
+#include <linux/pm_runtime.h>	/* [한국어] 런타임 PM — 유휴 시 D3 로 내려보내고 접근 시 깨우는 자동 전원 관리 */
+#include <linux/pci-ats.h>	/* [한국어] ATS/PASID — 장치가 IOMMU 변환을 캐시하는 기능. 활성화 순서 제약이 있다 */
+#include <linux/pci_hotplug.h>	/* [한국어] 핫플러그 슬롯 관련 타입 */
+#include <linux/vmalloc.h>	/* [한국어] vmalloc — 큰 상태 버퍼를 물리 연속 없이 잡을 때 */
+#include <asm/dma.h>	/* [한국어] 아키텍처별 DMA 상수(MAX_DMA_ADDRESS 등) */
+#include <linux/aer.h>	/* [한국어] AER(Advanced Error Reporting) 타입 — 오류 복구 경로와 리셋이 맞물린다 */
+#include <linux/bitfield.h>	/* [한국어] FIELD_GET/FIELD_PREP — config space 레지스터의 비트 필드를 안전하게 뽑고 넣는다 */
+#include "pci.h"	/* [한국어] PCI 서브시스템 내부 전용 API(pci_bus_sem, 내부 헬퍼). 외부에 노출하지 않는 것들 */
 
 DEFINE_MUTEX(pci_slot_mutex); /* NVMe: DEFINE_MUTEX 매크로를 호출한다. */
 
