@@ -10135,8 +10135,9 @@ out_unwind:
  */
 static int blk_mq_alloc_set_map_and_rqs(struct blk_mq_tag_set *set)
 {
-	unsigned int depth;
-	int err;
+	unsigned int depth;	/* [한국어] 원래 요청받은 깊이. 재시도로 줄어들 수 있어 따로 보관해 두고
+				 * 마지막에 값이 달라졌는지 비교해 사용자에게 알린다 */
+	int err;		/* [한국어] 재시도 루프의 결과. 0 이면 성공, 아니면 깊이를 절반으로 줄여 다시 돈다 */
 
 	/* [한국어] 요청 depth 기억: 실제 할당과 비교하여 축소 경고 출력 */
 	depth = set->queue_depth;
@@ -10387,9 +10388,11 @@ int blk_mq_alloc_tag_set(struct blk_mq_tag_set *set)
 	 * queue_depth = min(ctrl->sqsize, BLK_MQ_MAX_DEPTH - 1) 로 잘라 넘긴다
 	 * (sqsize 는 Identify/Set Features 로 정해진 SQ 크기). */
 	if (set->queue_depth > BLK_MQ_MAX_DEPTH) {
-		pr_info("blk-mq: reduced tag depth to %u\n",
+		pr_info("blk-mq: reduced tag depth to %u\n",	/* [한국어] 조용히 줄이지 않고 반드시 알린다 —
+							 * 나중에 이 장치의 동시성이 기대에 못 미칠 때 dmesg 의 이 줄이 원인을 알려 준다 */
 			BLK_MQ_MAX_DEPTH);
-		set->queue_depth = BLK_MQ_MAX_DEPTH;
+		set->queue_depth = BLK_MQ_MAX_DEPTH;	/* [한국어] 거절이 아니라 잘라서 받아들인다.
+							 * 드라이버 설정이 과했다고 장치를 못 쓰게 만드는 것보다 낫다 */
 	}
 
 	/* [한국어] nr_maps: 하드웨어 큐를 몇 "종류"로 나눌 것인가(DEFAULT/READ/POLL).
@@ -10401,9 +10404,11 @@ int blk_mq_alloc_tag_set(struct blk_mq_tag_set *set)
 	 * io_queues[HCTX_TYPE_READ] 가 있으면 2, 아니면 1 을 돌려준다. 즉
 	 * poll_queues / write_queues 모듈 파라미터가 0 이면 맵이 자동으로 줄어든다. */
 	if (!set->nr_maps)
-		set->nr_maps = 1;
+		set->nr_maps = 1;	/* [한국어] 지정하지 않은 드라이버를 위한 기본값 */
 	else if (set->nr_maps > HCTX_MAX_TYPES)
-		return -EINVAL;
+		return -EINVAL;		/* [한국어] map[] 배열 크기가 HCTX_MAX_TYPES 로 고정이라,
+					 * 그보다 큰 값은 배열 밖을 쓰게 된다. 잘라 넣지 않고 거절하는 이유는
+					 * 이것이 드라이버의 명백한 버그이지 자원 부족이 아니기 때문이다 */
 
 	/*
 	 * If a crashdump is active, then we are potentially in a very
@@ -10546,7 +10551,9 @@ out_cleanup_srcu:
 	if (set->flags & BLK_MQ_F_BLOCKING)
 		cleanup_srcu_struct(set->srcu);
 out_free_srcu:
-	if (set->flags & BLK_MQ_F_BLOCKING)
+	if (set->flags & BLK_MQ_F_BLOCKING)	/* [한국어] 같은 조건을 두 라벨에서 각각 검사하는 이유:
+					 * 실패 지점에 따라 srcu 가 "할당만 됨"일 수도 "초기화까지 됨"일 수도 있어,
+					 * 각 단계를 정확히 그 역순으로만 되돌려야 한다 */
 		kfree(set->srcu);
 	return ret;
 }
@@ -10574,11 +10581,13 @@ int blk_mq_alloc_sq_tag_set(struct blk_mq_tag_set *set,
 	set->ops = ops;
 	/* [한국어] 하드웨어 큐 하나짜리 구성 — SCSI 나 loop 처럼 큐를 여러 개 두지 않는 드라이버용 */
 	set->nr_hw_queues = 1;
-	set->nr_maps = 1;
-	set->queue_depth = queue_depth;
-	set->numa_node = NUMA_NO_NODE;
-	set->flags = set_flags;
-	return blk_mq_alloc_tag_set(set);
+	set->nr_maps = 1;		/* [한국어] 맵도 하나 — 큐가 하나뿐이면 read/poll 을 따로 나눌 대상이 없다 */
+	set->queue_depth = queue_depth;	/* [한국어] 호출자가 정한 깊이를 그대로 쓴다.
+					 * 다중 큐 드라이버와 달리 여기서는 장치 능력을 물어볼 것이 없다 */
+	set->numa_node = NUMA_NO_NODE;	/* [한국어] 노드를 지정하지 않는다 — 큐가 하나라 특정 노드에 붙일 근거가 없고,
+					 * 할당기가 현재 실행 중인 CPU 의 노드를 알아서 고르게 둔다 */
+	set->flags = set_flags;		/* [한국어] BLK_MQ_F_BLOCKING 등 드라이버가 선언한 특성 */
+	return blk_mq_alloc_tag_set(set);	/* [한국어] 나머지는 공통 경로에 맡긴다 — 이 함수는 기본값 채우기용 얇은 래퍼다 */
 }
 EXPORT_SYMBOL_GPL(blk_mq_alloc_sq_tag_set);
 
@@ -10619,8 +10628,11 @@ void blk_mq_free_tag_set(struct blk_mq_tag_set *set)
 
 	/* [한국어] SRCU grace period 완료 대기: tags_srcu 하에 동작 중인
 	 * complete/submit 경로가 모두 빠져나올 때까지 blocking */
-	srcu_barrier(&set->tags_srcu);
-	cleanup_srcu_struct(&set->tags_srcu);
+	srcu_barrier(&set->tags_srcu);	/* [한국어] call_srcu 로 예약해 둔 콜백들이 **실제로 실행 완료**될 때까지 기다린다.
+					 * blk_mq_free_tags() 가 태그 해제를 콜백으로 미뤄 두었으므로,
+					 * 이것을 건너뛰면 아직 실행되지 않은 콜백이 곧 해제될 SRCU 구조체를 건드린다.
+					 * 아래 cleanup 이 유예 기간을 기다리는 것과는 다른 일이다 — 이쪽은 콜백 실행 완료다 */
+	cleanup_srcu_struct(&set->tags_srcu);	/* [한국어] per-CPU 카운터 등 SRCU 자원 해제 */
 	if (set->flags & BLK_MQ_F_BLOCKING) {
 		/* [한국어] blocking 드라이버용 per-set SRCU 해제 */
 		cleanup_srcu_struct(set->srcu);
@@ -10657,9 +10669,10 @@ struct elevator_tags *blk_mq_update_nr_requests(struct request_queue *q,
 						unsigned int nr)
 {
 	struct blk_mq_tag_set *set = q->tag_set;
-	struct elevator_tags *old_et = NULL;
-	struct blk_mq_hw_ctx *hctx;
-	unsigned long i;
+	struct elevator_tags *old_et = NULL;	/* [한국어] 교체된 옛 스케줄러 태그. NULL 로 시작해, 실제로 교체가 일어난
+						 * 경우에만 채워진다 — 호출자는 NULL 이 아닐 때만 해제하면 된다 */
+	struct blk_mq_hw_ctx *hctx;		/* [한국어] hctx 순회 커서 */
+	unsigned long i;			/* [한국어] queue_for_each_hw_ctx 가 요구하는 인덱스 */
 
 	/* [한국어] quiesce — sbitmap 의 유효 비트 수를 바꾸는 동안 아무도 tag 를 잡거나 놓지 않도록 디스패치를 멈춘다.
 	 * 진행 중인 요청의 완료까지 기다리므로, 이 호출이 돌아온 뒤에는 인플라이트가 0 이다 */
@@ -10758,6 +10771,10 @@ static void blk_mq_elv_switch_back(struct request_queue *q,
 	struct elv_change_ctx *ctx = xa_load(elv_tbl, q->id);
 
 	if (WARN_ON_ONCE(!ctx))
+		/* [한국어] switch_none 단계에서 이 큐의 컨텍스트를 넣어 두었어야 한다.
+		 * 없다는 것은 두 단계가 짝이 맞지 않는다는 뜻이고, 그대로 진행하면
+		 * 스케줄러가 복원되지 않은 채 큐가 얼어붙은 상태로 남는다.
+		 * 다만 여기서 되돌릴 방법이 없으므로 경고만 남기고 이 큐는 건너뛴다. */
 		return;
 
 	/* The elv_update_nr_hw_queues unfreezes the queue. */
@@ -10932,7 +10949,9 @@ static void __blk_mq_update_nr_hw_queues(struct blk_mq_tag_set *set,
 	/* [한국어] 새 nr_hw_queues 에 맞는 tags 배열 사전 할당 */
 	new_tags = blk_mq_prealloc_tag_set_tags(set, nr_hw_queues);
 	if (IS_ERR(new_tags))
-		goto switch_back;
+		goto switch_back;	/* [한국어] 아직 큐를 얼리기 전이므로 스케줄러 복원만 하면 원상태가 된다.
+					 * 이 할당을 freeze 이전에 두는 이유가 바로 이 되돌리기의 단순함이다 —
+					 * 얼린 뒤에 실패하면 정리해야 할 상태가 훨씬 많아진다. */
 
 	/* [한국어] 이 tag set을 공유하는 "모든" 큐를 freeze한다. NVMe에서는
 	 * 컨트롤러 하나의 모든 네임스페이스(/dev/nvme0n1, n2, ...)가 여기 해당한다.
@@ -10946,7 +10965,8 @@ static void __blk_mq_update_nr_hw_queues(struct blk_mq_tag_set *set,
 	/* [한국어] 큐 수가 늘어난 경우에만 새 tags 배열이 준비되어 있다.
 	 * 줄어드는 경우는 기존 배열을 그대로 쓰고 뒤쪽만 비운다. */
 	if (new_tags) {
-		kfree(set->tags);
+		kfree(set->tags);	/* [한국어] 옛 배열은 포인터 목록일 뿐이고, 그것이 가리키던 tag pool 들은
+					 * 위에서 새 배열로 memcpy 되어 그대로 살아 있다. 따라서 배열만 해제하면 된다 */
 		set->tags = new_tags;
 	}
 	/* [한국어] 목표 큐 수를 확정한다. 이 시점부터 아래 재구성 코드가
@@ -11172,7 +11192,8 @@ int blk_rq_poll(struct request *rq, struct io_comp_batch *iob,
 		unsigned int poll_flags)
 {
 	struct request_queue *q = rq->q;
-	int ret;
+	int ret;	/* [한국어] 이번 폴링에서 완료 처리한 요청 수. 0 이면 아직 안 끝났다는 뜻이라
+			 * 호출자가 다시 부르거나 잠든다 */
 
 	/* [한국어] poll hctx 에 제출된 request 가 아니면 폴링 불필요 */
 	if (!blk_rq_is_poll(rq))
@@ -11215,8 +11236,8 @@ EXPORT_SYMBOL(blk_mq_rq_cpu);
  */
 void blk_mq_cancel_work_sync(struct request_queue *q)
 {
-	struct blk_mq_hw_ctx *hctx;
-	unsigned long i;
+	struct blk_mq_hw_ctx *hctx;	/* [한국어] hctx 순회 커서 — 큐마다 자기 run_work 가 있다 */
+	unsigned long i;		/* [한국어] 순회 인덱스 */
 
 	/* [한국어] requeue_work: 실패 request 를 재제출하는 지연 work 취소 */
 	cancel_delayed_work_sync(&q->requeue_work);
