@@ -49,6 +49,49 @@
  * 그 사이에서 "누가 이 디바이스를 열었는가/독점하고 있는가/캐시 상태가
  * 어떤가"를 추적하는 계층이라고 볼 수 있다.
  *
+ * === /dev/nvme0n1 은 어떻게 생겨나는가 (실물 확인) ===
+ * 이 파일이 다루는 bdev 는 "이미 존재하는 디스크를 여는" 쪽이고, 디스크
+ * 자체가 만들어지는 것은 드라이버 몫이다. NVMe 의 경로는 다음과 같다
+ * (drivers/nvme/host/core.c 에서 직접 확인):
+ *
+ *   nvme_alloc_ns(ctrl, info)                     // 네임스페이스 하나 발견
+ *     → blk_mq_alloc_disk(ctrl->tagset, &lim, ns) // core.c:4604
+ *         gendisk + request_queue 를 한 번에 만들고 컨트롤러의 tag set 에 붙인다.
+ *         같은 컨트롤러의 모든 네임스페이스가 이 tag set 을 공유하므로,
+ *         둘째 네임스페이스가 붙는 순간 양쪽 모두 BLK_MQ_F_TAG_QUEUE_SHARED 로
+ *         전환되어 태그를 나눠 쓰게 된다.
+ *     → device_add_disk(ctrl->device, ns->disk, nvme_ns_attr_groups) // core.c:4658
+ *         이때 비로소 disk->part0 (전체 디스크를 나타내는 bdev)가 등록되고
+ *         /dev/nvme0n1 노드와 /sys/block/nvme0n1 이 나타난다. 파티션이 있으면
+ *         스캔되어 nvme0n1p1 … 이 각각 별도의 bdev 로 추가된다.
+ *   제거는 nvme_ns_remove() → del_gendisk(ns->disk) (core.c:4745).
+ *
+ * 이름이 sda 처럼 알파벳이 아니라 nvme0n1 인 이유: NVMe 는 "컨트롤러 번호 +
+ * 네임스페이스 ID"를 그대로 이름에 쓴다. 그래서 n1, n2 는 서로 다른 디스크이고
+ * p1, p2 는 같은 디스크의 파티션이다 — nvme0n1p1 은 "0번 컨트롤러의 1번
+ * 네임스페이스의 1번 파티션"이다.
+ *
+ * === 논리 블록 크기: 512 라는 숫자의 두 얼굴 ===
+ * 블록 계층은 **언제나 512바이트 섹터 단위**로 말한다(bio->bi_iter.bi_sector,
+ * blk_rq_pos 등이 전부 512B 섹터다). 이것은 장치의 실제 블록 크기와 무관한
+ * 커널 내부의 고정 단위다. 장치의 진짜 논리 블록 크기는 따로 있고, NVMe 는
+ * 그것을 Identify Namespace 의 LBA Format 에서 가져온다:
+ *
+ *   ns->head->lba_shift  = id->lbaf[lbaf].ds;        // core.c:2799, log2(바이트)
+ *   lim->logical_block_size = 1 << lba_shift;        // core.c:2488
+ *
+ * 그리고 두 단위 사이의 변환은 시프트 한 번이다(nvme.h:1545, 1553):
+ *
+ *   nvme_sect_to_lba(head, sector) = sector >> (lba_shift - SECTOR_SHIFT)
+ *   nvme_lba_to_sect(head, lba)    = lba    << (lba_shift - SECTOR_SHIFT)
+ *
+ * 4Kn 네임스페이스라면 lba_shift = 12 이므로 시프트 폭은 12 - 9 = 3, 즉 8로
+ * 나누고 곱한다. 512e(논리 512B / 물리 4K) 장치라면 lba_shift = 9 라 시프트가
+ * 0 이고 변환이 항등이 된다 — 대신 물리 블록 크기가 4K 로 보고되어 정렬
+ * 힌트로만 쓰인다. 이 파일의 set_blocksize()/bdev_validate_blocksize() 가
+ * 다루는 "블록 크기"는 파일시스템이 쓰려는 단위이고, 그것이 장치의
+ * logical_block_size 보다 작을 수 없다는 것이 검증의 핵심이다.
+ *
  * === 타 모듈과의 연결 ===
  * - block/genhd.c: struct gendisk 생명주기, disk_block_events()/
  *   disk_unblock_events()/disk_flush_events(), bdev_disk_changed()(파티션
@@ -1111,12 +1154,12 @@ EXPORT_SYMBOL(sb_min_blocksize);
  * 독립적으로 관리되므로 별도 락 불필요.
  * 호출자: 블록 계층의 비동기 flush 가 필요한 경로(예: 디바이스 제거 전 힌트성 flush).
  * 피호출자: filemap_flush() -> ... -> ->writepages() -> blk_mq_submit_bio() ->
- * (NVMe 라면) nvme_queue_rq().
+ * 이후 mq_ops->queue_rq(NVMe PCIe 면 nvme_queue_rq)로 내려간다.
  * 에러 경로: filemap_flush() 의 에러를 그대로 전달 - 별도 처리 없음(비동기 특성상
  * 실제 쓰기 실패는 이 반환값에 나타나지 않을 수 있음).
  *
  * 호출 체인:
- *   (블록 계층/디바이스 제거 경로) -> [sync_blockdev_nowait] -> filemap_flush() -> nvme_queue_rq()
+ *   (블록 계층/디바이스 제거 경로) -> [sync_blockdev_nowait] -> filemap_flush() -> submit_bio -> ... -> mq_ops->queue_rq
  */
 
 int sync_blockdev_nowait(struct block_device *bdev)
@@ -1161,7 +1204,7 @@ EXPORT_SYMBOL_GPL(sync_blockdev_nowait);
  * 호출자: set_blocksize(), bdev_freeze() (holder ops 가 없을 때의 fallback),
  * fsync 계열 시스템 콜 경로.
  * 피호출자: filemap_write_and_wait() -> ->writepages() -> blk_mq_submit_bio() ->
- * (NVMe 라면) nvme_queue_rq() -> 완료 인터럽트 대기.
+ * submit_bio -> ... -> mq_ops->queue_rq 로 내려가고, 완료를 기다린다.
  * 에러 경로: writeback 중 에러가 있었다면 그 에러코드가 그대로 전달되며, 별도
  * 재시도 로직은 이 함수에 없다(호출자가 필요시 재시도).
  *
@@ -6349,8 +6392,11 @@ __setup("bdev_allow_write_mounted=", setup_bdev_allow_write_mounted);
  *
  * - block/bdev.c 는 struct block_device 의 생명주기(open/close/claim/flush)를
  *   관리하며, NVMe SSD 의 namespace 나 파티션에 대한 VFS 진입점 역할을 한다.
- * - bio -> bdev -> bd_queue -> request_queue -> nvme_queue -> doorbell 의 경로에서
- *   bdev 는 bio 가 NVMe SQ/CID/PRP/SGL 로 변환되기 직전의 마지막 추상화 객체다.
+ * - bio -> bdev -> bd_queue -> request_queue -> (blk-mq) -> mq_ops->queue_rq 경로에서
+ *   bdev 는 "어느 장치의 어느 파티션인가"를 정하는 마지막 지점이다. 여기서
+ *   bio->bi_bdev 가 확정되고, 파티션이면 blk_partition_remap() 이 섹터 번호에
+ *   시작 오프셋을 더해 디스크 전체 기준으로 바꾼다. 그 뒤로는 파티션 개념이
+ *   사라지고 blk-mq 와 드라이버는 디스크 하나만 본다.
  * - bdev_freeze/thaw, sync_blockdev, bdev_mark_dead 등은 NVMe Flush/Write
  *   명령 발행과 밀접하게 연결된 캐시 동기화/무효화 지점이다.
  * - exclusive claim(bd_prepare_to_claim ... bd_finish_claiming)은 NVMe 디바이스를
