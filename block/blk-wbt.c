@@ -108,12 +108,36 @@
  * [한국어] WBT가 request를 분류하는 플래그 — 장치 큐 발행 특성에 따라 구분
  */
 enum wbt_flags {
-	WBT_TRACKED		= 1,	/* [한국어] 장치 큐로 발행할 buffered write/discard — inflight 어카운팅 대상 */
-	WBT_READ		= 2,	/* [한국어] 읽기 요청: 완료 latency를 샘플로 사용해 scale 결정 */
-	WBT_SWAP		= 4,	/* [한국어] kswapd/swap_writeout 경로의 긴급 쓰기: BG와 별도 그룹 */
-	WBT_DISCARD		= 8,	/* [한국어] discard(trim) 요청 */
+	WBT_TRACKED		= 1,
+	/* [한국어] "이 요청은 WBT 가 세고 있다"는 표시.
+	 * 설정자: wbt_wait() 가 대기열을 통과시키며 rq->wbt_flags 에 넣는다.
+	 * 읽는 자: wbt_done()/wbt_track() 이 이 비트를 보고 inflight 카운터를 되돌린다.
+	 * 왜 필요한가: 스로틀 대상이 아닌 요청까지 완료 시 카운터를 내리면 음수가 된다.
+	 *   즉 이 비트는 "들어올 때 셌으니 나갈 때도 세라"는 짝 맞춤 표식이다. */
 
-	WBT_NR_BITS		= 4,	/* [한국어] 위 플래그 비트 수: rq->wbt_flags 필드 크기 결정에 사용 */
+	WBT_READ		= 2,
+	/* [한국어] 읽기 요청 표시.
+	 * 읽는 자: 완료 시 지연 통계를 읽기 쪽 버킷에 넣는 경로.
+	 * 핵심: WBT 는 **읽기를 스로틀하지 않는다.** 읽기는 오직 "장치가 지금 얼마나
+	 *   힘든가"를 재는 계측기로만 쓴다. 읽기 지연이 목표를 넘으면 그것을 근거로
+	 *   쓰기 쪽 깊이를 줄인다 — 이 파일의 이름이 write-back throttling 인 이유다. */
+
+	WBT_SWAP		= 4,
+	/* [한국어] 스왑 아웃 경로의 쓰기 표시.
+	 * 읽는 자: get_limit() 계열이 이 비트를 보고 배경 쓰기와 다른 한도를 적용한다
+	 *   (파일 내 `if (wb_acct & WBT_SWAP)` 분기).
+	 * 왜 따로 두는가: 스왑 쓰기가 막히면 메모리 회수가 진행되지 못해 시스템 전체가
+	 *   멈춘다. 일반 배경 쓰기보다 훨씬 관대한 한도를 줘야 하는 이유다. */
+
+	WBT_DISCARD		= 8,
+	/* [한국어] discard(trim) 요청 표시.
+	 * 왜 따로 두는가: discard 는 데이터를 옮기지 않는데도 장치 내부에서 오래 걸릴 수
+	 *   있어, 일반 쓰기와 같은 한도로 묶으면 서로를 부당하게 방해한다. */
+
+	WBT_NR_BITS		= 4,
+	/* [한국어] 위 플래그가 차지하는 비트 수.
+	 * 읽는 자: rq->wbt_flags 필드 폭 정의. 플래그를 추가하려면 이 값도 함께 늘려야
+	 *   하며, 그러지 않으면 새 비트가 조용히 잘려 나간다. */
 };
 
 /*
@@ -121,10 +145,18 @@ enum wbt_flags {
  * BG/SWAP/DISCARD를 별도 rq_wait로 관리해 그룹별 장치 큐 요청 수를 독립 조절
  */
 enum {
-	WBT_RWQ_BG		= 0,	/* [한국어] 일반 background writeback 그룹 */
-	WBT_RWQ_SWAP,			/* [한국어] swapout 긴급 쓰기 그룹 */
-	WBT_RWQ_DISCARD,		/* [한국어] discard/trim 그룹 */
-	WBT_NUM_RWQ,			/* [한국어] 그룹 수 = 3: rq_wait[WBT_NUM_RWQ] 배열 크기 */
+	WBT_RWQ_BG		= 0,
+	/* [한국어] 배경 writeback 대기열 인덱스.
+	 * 읽는 자: rwb->rq_wait[] 첨자. 여기 걸린 요청은 wb_background 한도의 적용을 받는다.
+	 * 대기열을 종류별로 나눈 이유: 하나로 합치면 discard 하나가 대기열 앞을 막았을 때
+	 *   그 뒤의 스왑 쓰기까지 함께 굶는다. 종류마다 독립된 큐와 한도를 준다. */
+	WBT_RWQ_SWAP,
+	/* [한국어] 스왑 쓰기 대기열 인덱스. WBT_SWAP 플래그가 붙은 요청이 여기로 온다. */
+	WBT_RWQ_DISCARD,
+	/* [한국어] discard 대기열 인덱스. */
+	WBT_NUM_RWQ,
+	/* [한국어] 대기열 개수(3). rq_wait[WBT_NUM_RWQ] 배열 크기이자 순회 상한.
+	 * 열거형 마지막에 두는 관례라 항목을 추가하면 배열이 자동으로 커진다. */
 };
 
 /*
@@ -134,10 +166,23 @@ enum {
  */
 /* [한국어] WBT 활성/비활성 상태 — DEFAULT는 자동 전이 가능, MANUAL은 수동 조작만 허용 */
 enum {
-	WBT_STATE_ON_DEFAULT	= 1,	/* [한국어] 기본 활성 상태: 디스크 초기화 시 자동으로 켜짐 */
-	WBT_STATE_ON_MANUAL	= 2,	/* [한국어] 수동 활성 상태: sysfs/ioctl로 명시적으로 켬 */
-	WBT_STATE_OFF_DEFAULT	= 3,	/* [한국어] 기본 비활성 상태: 장치 특성으로 비활성화 */
-	WBT_STATE_OFF_MANUAL	= 4,	/* [한국어] 수동 비활성 상태: sysfs/ioctl로 명시적으로 끔 */
+	/* [한국어] 네 상태의 요점은 "켜짐/꺼짐"이 아니라 **누가 그렇게 정했는가**다.
+	 * 위 영문 주석대로 DEFAULT 상태는 어느 쪽으로든 자동 전이할 수 있지만,
+	 * MANUAL 상태는 다시 MANUAL 로만 바뀐다. 사용자가 명시적으로 설정한 값을
+	 * 커널의 자동 판단이 조용히 덮어쓰지 못하게 하는 장치다. */
+	WBT_STATE_ON_DEFAULT	= 1,
+	/* [한국어] 커널이 기본값으로 켠 상태.
+	 * 설정자: wbt_init()/wbt_enable_default() 가 초기화 시 넣는다.
+	 * 읽는 자: 스케줄러 전환 등에서 `enable_state == WBT_STATE_ON_DEFAULT` 를 보고
+	 *   자동으로 꺼도 되는지 판단한다. */
+	WBT_STATE_ON_MANUAL	= 2,
+	/* [한국어] 사용자가 sysfs 로 켠 상태. 자동 경로가 이 값을 끄지 못한다. */
+	WBT_STATE_OFF_DEFAULT	= 3,
+	/* [한국어] 커널이 기본값으로 끈 상태(장치 특성상 WBT 가 무의미한 경우 등). */
+	WBT_STATE_OFF_MANUAL	= 4,
+	/* [한국어] 사용자가 sysfs 로 끈 상태.
+	 * 읽는 자: wbt_enabled() 가 `enable_state != WBT_STATE_OFF_MANUAL` 로 판정하므로,
+	 *   이 값만이 "무슨 일이 있어도 켜지 말라"를 뜻한다. */
 };
 
 /*
@@ -361,24 +406,46 @@ enum {
 	 * Default setting, we'll scale up (to 75% of QD max) or down (min 1)
 	 * from here depending on device stats
 	 */
-	RWB_DEF_DEPTH	= 16, /* [한국어] 기본 장치 큐 소프트웨어 깊이: scaling_step==0일 때 초기값 */
+	RWB_DEF_DEPTH	= 16,
+	/* [한국어] scaling_step == 0(중립) 일 때의 기본 깊이.
+	 * 설정자: wbt_init() 이 rwb->rq_depth.default_depth 에 넣는다.
+	 * 읽는 자: scale_up/scale_down 이 이 값을 기준으로 위아래로 움직인다.
+	 *   위 영문 주석대로 위로는 장치 큐 깊이의 75% 까지, 아래로는 1 까지 간다.
+	 * 값 근거: 특정 장치에서 유도한 값이 아니라 "일단 여기서 시작해 관측으로
+	 *   맞춰 가겠다"는 출발점이다. 실제 동작 깊이는 지연 통계가 결정한다. */
 
 	/*
 	 * 100msec window
 	 */
-	RWB_WINDOW_NSEC	= 100 * 1000 * 1000ULL, /* [한국어] 기본 latency 샘플링 윈도우 100ms (ns 단위) */
+	RWB_WINDOW_NSEC	= 100 * 1000 * 1000ULL,
+	/* [한국어] 지연 통계를 모으는 관찰창(100ms).
+	 * 설정자: wbt_init() 이 rwb->win_nsec 에 넣는다.
+	 * 값 근거: 창이 짧으면 표본이 모자라 판단이 흔들리고(RWB_MIN_WRITE_SAMPLES 미달),
+	 *   길면 장치 상태 변화에 늦게 반응한다. 100ms 는 그 절충이며, 이 창 하나가
+	 *   scale 을 한 단계 올리거나 내리는 판단 주기가 된다. */
 
 	/*
 	 * Disregard stats, if we don't meet this minimum
 	 */
-	RWB_MIN_WRITE_SAMPLES = 3, /* [한국어] 통계 유효성 최소 샘플 수: 이보다 적으면 unknown으로 처리 */
+	RWB_MIN_WRITE_SAMPLES = 3,
+	/* [한국어] 통계를 신뢰하기 위한 최소 쓰기 표본 수.
+	 * 읽는 자: latency_exceeded() 가 `stat[WRITE].nr_samples >= RWB_MIN_WRITE_SAMPLES`
+	 *   로 검사하고, 미달이면 LAT_UNKNOWN 계열을 반환해 scale 을 건드리지 않는다.
+	 * 왜 필요한가: 표본 한둘로 깊이를 조정하면 우연히 느렸던 IO 하나 때문에
+	 *   전체 처리량이 깎인다. 원래 주석: 이보다 적으면 unknown으로 처리 */
 
 	/*
 	 * If we have this number of consecutive windows without enough
 	 * information to scale up or down, slowly return to center state
 	 * (step == 0).
 	 */
-	RWB_UNKNOWN_BUMP = 5, /* [한국어] 연속 unknown 윈도우 수 임계값: 초과 시 scale_step을 0으로 복귀 */
+	RWB_UNKNOWN_BUMP = 5,
+	/* [한국어] 연속으로 판단 불가였던 창을 몇 번까지 참을지(5).
+	 * 읽는 자: `if (++rwb->unknown_cnt < RWB_UNKNOWN_BUMP)` — 이 횟수를 넘기면
+	 *   scale_step 을 중립(0)으로 서서히 되돌린다.
+	 * 왜 필요한가: 위 영문 주석대로, 판단 근거가 계속 없는데 과거에 내려 둔 깊이를
+	 *   그대로 유지하면 그 제약이 영구화된다. 부하가 사라진 뒤에도 계속 조여 두는
+	 *   상황을 막고 기본 상태로 복귀시킨다. 원래 주석: */
 };
 
 /*
@@ -693,10 +760,22 @@ static inline unsigned int wbt_inflight(struct rq_wb *rwb)
 
 /* [한국어] latency_exceeded() 반환값 — 장치 큐 부하 상태 분류 */
 enum {
-	LAT_OK = 1,		/* [한국어] 장치 큐 latency가 목표 이하: scale_up 가능 */
-	LAT_UNKNOWN,		/* [한국어] 샘플 부족으로 판단 불가: scale 유지 */
-	LAT_UNKNOWN_WRITES,	/* [한국어] read 샘플 없이 쓰기만 진행 중: 음수 step으로 boost 가능 */
-	LAT_EXCEEDED,		/* [한국어] 장치 큐 latency가 목표 초과: scale_down 필요 */
+	/* [한국어] latency_exceeded() 의 네 가지 판정. "초과/미달" 둘이 아니라 넷인 이유는
+	 * **판단할 수 없는 경우**를 초과와 구분해야 하기 때문이다. 표본이 없다고 조이면
+	 * 한가한 시스템이 영원히 조여진 채로 남는다. */
+	LAT_OK = 1,
+	/* [한국어] 지연이 목표 안이다 — 깊이를 올려도 된다(scale_up).
+	 * 1 부터 시작하는 이유: 0 을 "값 없음"과 구분하기 위해서다. */
+	LAT_UNKNOWN,
+	/* [한국어] 표본이 모자라 판단할 수 없다 — 현재 깊이를 그대로 둔다.
+	 * 이 상태가 RWB_UNKNOWN_BUMP 번 연속되면 중립으로 복귀시킨다. */
+	LAT_UNKNOWN_WRITES,
+	/* [한국어] 읽기 표본은 없는데 쓰기는 진행 중인 상태.
+	 * UNKNOWN 과 구분하는 이유: 읽기가 아예 없다는 것은 지금 지연을 신경 쓸
+	 *   상대가 없다는 뜻이므로, 오히려 깊이를 더 풀어(step 을 음수로) 쓰기
+	 *   처리량을 높여도 된다. 판단 불가가 아니라 "적극적으로 풀어도 되는" 신호다. */
+	LAT_EXCEEDED,
+	/* [한국어] 지연이 목표를 넘었다 — 깊이를 줄인다(scale_down). */
 };
 
 /*
