@@ -6,34 +6,67 @@
  */
 
 /*
- * ===================================================================
- * NVMe PCIe 호스트 드라이버 관점 파일 요약
- * -------------------------------------------------------------------
- * 본 파일(drivers/pci/slot.c)은 PCI 물리 슬롯(struct pci_slot)을 생성,
- * 제거하고, sysfs(/sys/bus/pci/slots/<slot_name>/)를 통해 사용자 공간에
- * 노출하는 기능을 제공한다.
- * NVMe SSD는 PCIe endpoint로서 Root Port 아래 특정 slot(device 번호)에
- * 연결되므로, 이 슬롯 관리 코드는 NVMe 장치의 물리적 위치, 핫플러그,
- * 전원/EDR(Error Disconnect Recover), 속도 정보 등과 직접 맞닿아 있다.
- * NVMe 호스트 드라이버(drivers/nvme/host/pci.c)가 slot.c를 직접 호출하지는
- * 않지만, 다음과 같은 NVMe 동작들이 slot 정보에 의존한다.
- *   - NVMe 장치의 sysfs 경로 및 slot 이름(address, max_bus_speed,
- *     cur_bus_speed 속성) 노출
- *   - PCIe 핫플러그/사용자 공간 sysfs triggered remove 시 slot 단위로
- *     NVMe 장치가 분리됨
- *   - EDR(ACPI Error Disconnect Recover)이나 Surprise Remove 시 slot에
- *     속한 NVMe 디바이스의 link_down 처리
- *   - 전원 제어(power_control), D3cold, PERST# 등 slot 단위 전원 정책의
- *     사용자 공간 인터페이스
- *   - RCEC(Root Complex Event Collector)나 AER 등에서 slot 단위 이벤트
- *     전파
- * 주요 호출 경로(커널 부팅 및 NVMe probe 시):
- *   pci_scan_bus -> pci_scan_slot -> pci_create_slot
- *   nvme_probe(struct pci_dev *dev)에서 dev->slot이 이미 할당되어 있음
- *   사용자 공간: /sys/bus/pci/slots/<slot>/power -> slot 단위 전원 제어
- *              -> NVMe device reset/removal
- *   핫플러그: pciehp, acpi_pci_hp 등 -> pci_create_slot/pci_destroy_slot
- * ===================================================================
+ * [한국어 설명] 물리적 슬롯을 sysfs 에 노출하는 계층 (slot.c)
+ *
+ * === 파일의 역할 ===
+ * "슬롯" 은 카드를 꽂는 물리적 자리다. 장치(pci_dev)와는 다른 개념이라
+ * 별도의 객체가 필요하다 — 슬롯은 비어 있을 수도 있고, 하나의 슬롯에
+ * 여러 function 이 있는 장치가 꽂힐 수도 있다.
+ *
+ * 이 파일은 struct pci_slot 을 관리하고 /sys/bus/pci/slots/ 아래에
+ * 노출한다. 슬롯 번호는 펌웨어(ACPI _SUN 메서드)나 핫플러그 컨트롤러가
+ * 알려 주는 값이며, 그것이 섀시에 인쇄된 번호와 일치한다.
+ *
+ * 왜 필요한가. 데이터센터에서 드라이브 하나가 고장 났을 때, 관리자는
+ * "0000:65:00.0" 이 아니라 "몇 번 베이" 인지를 알아야 한다. 이 파일이
+ * 그 대응을 제공한다.
+ *
+ * 여러 주체가 같은 슬롯을 등록할 수 있다는 점이 설계의 요점이다. ACPI 와
+ * pciehp 가 같은 슬롯을 각자 알고 있을 수 있으므로, 참조 카운트로
+ * 관리하고 마지막 참조가 사라질 때 해제한다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * 등록: 핫플러그 드라이버(pciehp/acpiphp) 또는 ACPI 코드
+ *         -> [이 파일] pci_create_slot(parent, slot_nr, name, hotplug)
+ *            -> kobject 를 만들어 /sys/bus/pci/slots/<번호>/ 생성
+ *            -> 같은 버스의 장치들에서 dev->slot 을 이 슬롯으로 연결
+ *
+ * 사용: pci.c 의 pci_dev_reset_slot_function() 이 dev->slot->hotplug 로
+ *       그 슬롯을 관리하는 컨트롤러를 찾아 리셋을 요청한다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. pci_slot_mutex 로 목록을 보호한다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: hotplug/ 의 각 컨트롤러 드라이버, pci-acpi.c.
+ * 아래쪽: kobject/sysfs, bus.c 의 장치 목록.
+ * 공유 상태: struct pci_bus 의 slots 목록, struct pci_dev 의 slot 포인터,
+ *   그리고 전역 pci_slot_mutex.
+ *
+ * === NVMe 관점 ===
+ * NVMe 드라이버는 이 파일의 함수를 쓰지 않는다(전수 확인).
+ *
+ * 하지만 U.2/EDSFF 백플레인의 NVMe 드라이브는 반드시 슬롯을 갖는다.
+ * 그것이 있어야 두 가지가 성립한다.
+ *   - 핫스왑: pciehp 가 그 슬롯의 Presence Detect 를 감시한다.
+ *   - 슬롯 리셋: pci.c 의 pci_dev_reset_slot_function() 이 dev->slot 이
+ *     NULL 이 아닐 때만 성립한다. FLR 이 통하지 않는 드라이브에서
+ *     쓸 수 있는 대안이다.
+ *
+ * 반대로 M.2 나 납땜된 NVMe 는 슬롯이 없어 dev->slot 이 NULL 이고,
+ * 위 두 기능이 모두 해당되지 않는다.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * pci_create_slot()     : 슬롯 객체를 만들거나, 이미 있으면 참조를 늘린다.
+ *                         같은 슬롯을 여러 주체가 등록할 수 있어 필요하다.
+ * pci_destroy_slot()    : 참조를 줄이고, 0 이 되면 실제로 해제한다.
+ * pci_slot_release()    : 실제 해제. 그 슬롯에 속한 장치들의 slot 포인터를
+ *                         NULL 로 되돌린다.
+ * make_slot_name()      : 이름 충돌을 피해 유일한 이름을 만든다.
+ *                         같은 번호가 두 번 등록되면 "-1" 을 붙인다.
+ * pci_slot_attrs        : sysfs 속성. address(장치 주소)와
+ *                         function 별 정보를 노출한다.
+ * pci_hp_create_module_link() / _remove_module_link() : sysfs 에서 슬롯과
+ *                         그것을 관리하는 모듈을 잇는 심볼릭 링크.
  */
 
 #include <linux/kobject.h>	/* NVMe: sysfs kobject를 위한 헤더 */

@@ -11,46 +11,60 @@
  */
 
 /*
- * ===================================================================
- * NVMe PCIe 호스트 드라이버 관점 파일 요약
- * -------------------------------------------------------------------
- * 본 파일(drivers/pci/mmap.c)은 PCI 장치의 BAR(Base Address Register)
- * 리소스를 사용자 공간 프로세스의 가상 주소 공간에 매핑하는 데 필요한
- * 핵심 헬퍼 함수들을 제공한다.
+ * [한국어 설명] BAR 를 userspace 주소 공간에 매핑하는 공통 구현 (mmap.c)
  *
- * NVMe SSD 입장에서는 이 파일이 직접 호출되는 경우는 드물지만, NVMe
- * 컨트롤러의 BAR0(일반적으로 MMIO register/doorbell 영역)과 같은
- * 리소스를 /sys/bus/pci/devices/.../resource{N} 또는 /proc/bus/pci
- * 인터페이스를 통해 사용자 공간으로 노출할 때 사용된다. 따라서 NVMe
- * 드라이버가 낮은 레벨에서 NVMe 컨트롤러의 레지스터와 doorbell에
- * 접근할 수 있도록 하는 데 필수적인 하위 레이어 역할을 한다.
+ * === 파일의 역할 ===
+ * userspace 가 장치의 BAR 를 직접 매핑해 쓰는 경로를 제공한다.
+ * sysfs 의 resource<N> 파일이나 /proc/bus/pci 의 장치 파일을 mmap 하면
+ * 결국 이 파일의 pci_mmap_resource_range() 로 들어온다.
  *
- * 주요 NVMe 관련 호출 경로:
- *   - 사용자 공간 mmap syscall
- *     -> /sys/bus/pci/devices/.../resourceN (pci-sysfs.c)
- *        -> pci_mmap_fits() : 요청한 VMA가 해당 NVMe BAR 영역 안에
- *           들어오는지 검사
- *        -> pci_mmap_resource_range() : 실제로 NVMe BAR의 물리 주소를
- *           사용자 프로세스 주소 공간에 매핑
- *     -> /proc/bus/pci/... (pci-proc.c)
- *        -> pci_mmap_fits() -> pci_mmap_resource_range()
+ * 하는 일은 크게 셋이다.
+ *   1) 매핑 종류 결정 - I/O 공간인가 메모리 공간인가. I/O 공간은 대부분의
+ *      아키텍처에서 mmap 할 수 없어 거절한다.
+ *   2) 캐시 속성 설정 - MMIO 는 캐시하면 안 되므로 페이지 속성을
+ *      uncached 로 만든다. 다만 write-combining 을 요청하면 그쪽으로 한다.
+ *   3) 실제 매핑 - io_remap_pfn_range() 로 페이지 테이블을 채운다.
  *
- * NVMe PCIe 호스트 드라이버(drivers/nvme/host/pci.c)는 커널 내부에서
- * pci_iomap(), pci_resource_start(), ioremap() 등을 통해 BAR0/1을
- * 매핑하지만, 사용자 공간에서 동일한 NVMe BAR를 직접 접근해야 할
- * 때(예: SPDK, performance counter, debugging, userspace NVMe driver)
- * 본 파일의 함수가 동작한다. 이는 커널과 사용자 공간 양쪽에서 NVMe
- * register/doorbell을 다룰 수 있게 하는 공통 PCI mmap 인프라이다.
+ * 위험한 기능이라 여러 겹의 방어가 있다. sysfs 쪽은 CAP_SYS_RAWIO 를
+ * 요구하고, 매핑 범위가 그 BAR 안에 들어가는지 확인한다. 그럼에도
+ * userspace 가 레지스터를 직접 만지게 되므로, VFIO 처럼 IOMMU 로 격리된
+ * 환경이 아니면 시스템을 망가뜨릴 수 있다.
  *
- * NVMe BAR 특성 상 주로 Memory BAR(MEM 타입)이 사용되며, I/O BAR
- * (pci_mmap_io)는 거의 사용되지 않는다. writecombine과 device
- * 메모리 속성 설정은 NVMe doorbell region의 cacheability 특성과
- * 직결된다.
+ * === 전체 아키텍처에서의 위치 ===
+ * userspace -> mmap("/sys/bus/pci/devices/.../resource0")
+ *   -> pci-sysfs.c 의 pci_mmap_resource()
+ *      -> 권한과 범위 확인
+ *      -> [이 파일] pci_mmap_resource_range(pdev, bar, vma, mmap_state, wc)
+ *         -> pgprot 를 uncached 또는 write-combining 으로 설정
+ *         -> io_remap_pfn_range() 로 페이지 테이블 채우기
  *
- * 본 파일은 다음 두 함수를 제공한다:
- *   pci_mmap_resource_range() : 실제 BAR 리소스 mmap 수행
- *   pci_mmap_fits() : 요청 VMA가 지정된 PCI 리소스 영역에 맞는지 검사
- * ===================================================================
+ * 실행 컨텍스트: 프로세스 컨텍스트(mmap 시스템 호출). mmap_lock 을
+ * 쥔 상태로 불린다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: pci-sysfs.c(resource<N> 속성), proc.c(/proc/bus/pci mmap).
+ * 아래쪽: mm 의 io_remap_pfn_range, 아키텍처별 pgprot 헬퍼.
+ * 옆쪽: 아키텍처가 덮어쓸 수 있는 pci_iobar_pfn() — I/O 공간을 mmap 할
+ *   수 있는 소수의 아키텍처가 그 변환을 제공한다.
+ *
+ * === NVMe 관점 ===
+ * NVMe 드라이버는 이 파일과 관련이 없다(전수 확인).
+ *
+ * 다만 NVMe 를 userspace 드라이버로 다루는 경우 — SPDK 가 대표적이다 —
+ * 이 경로가 쓰인다. SPDK 는 VFIO 나 uio 로 NVMe 컨트롤러를 커널에서
+ * 떼어 내고, BAR0 를 userspace 에 매핑해 도어벨을 직접 두드린다.
+ * 커널 NVMe 드라이버를 거치지 않으므로 컨텍스트 스위치와 시스템 호출
+ * 비용이 사라져 지연이 크게 줄어든다.
+ *
+ * 그 매핑의 실제 구현이 VFIO 를 거치면 drivers/vfio/pci 쪽이고,
+ * sysfs resource 파일을 거치면 이 파일이다.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * pci_mmap_resource_range() : 매핑의 본체. 종류를 판별하고 캐시 속성을
+ *                             정한 뒤 페이지 테이블을 채운다.
+ * pci_iobar_pfn()           : I/O 공간 BAR 의 pfn 을 구한다. 대부분의
+ *                             아키텍처에서는 불가능해 실패를 돌려준다.
+ * pci_mmap_page_range()     : 옛 인터페이스. /proc 경로가 쓴다.
  */
 
 #include <linux/kernel.h>	/* NVMe: 커널 기본 타입과 함수를 사용하기 위해 포함. */

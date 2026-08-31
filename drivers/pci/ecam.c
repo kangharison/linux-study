@@ -4,37 +4,69 @@
  */
 
 /*
- * NVMe: PCI ECAM(Enhanced Configuration Access Mechanism) 공통 유틸리티
+ * [한국어 설명] 메모리 매핑 방식 config 접근의 공통 구현 (ecam.c)
  *
- * 이 파일은 ARM64/x86 등 PCI 호스트 브리지 드라이버가 ECAM을 통해
- * PCI/PCIe 설정 공간(configuration space)에 접근할 때 사용하는 공통 인프라다.
+ * === 파일의 역할 ===
+ * ECAM(Enhanced Configuration Access Mechanism)은 PCIe 가 정한 config space
+ * 접근 방식이다. config space 전체를 물리 메모리 구간에 매핑해 두고,
+ * 정해진 규칙으로 주소를 계산해 그냥 읽고 쓰면 된다.
  *
- * NVMe SSD는 PCIe 엔드포인트(EP)로서 호스트의 PCI 버스에 연결되며,
- * nvme-pci 드라이버(drivers/nvme/host/pci.c)는 운영 중 이 설정 공간에
- * 여러 차례 접근한다. 대표적인 호출 경로는 다음과 같다.
+ * 주소 계산 규칙이 스펙에 못박혀 있다:
+ *   주소 = base + (bus << 20) + (devfn << 12) + offset
+ * 버스마다 1MB, 장치+function 마다 4KB 가 배정되는 셈이다. 4KB 는 확장
+ * config space(0x000~0xFFF)의 크기와 정확히 일치한다.
  *
- *  1) NVMe 컨트롤러 초기화 시 nvme_probe() -> pci_enable_device() ->
- *     PCI 설정 공간 BAR(Base Address Register) 탐색 -> pci_iomap():
- *     NVMe BAR0(레지스터 공간)를 메모리 맵하기 위해 먼저 PCI 설정
- *     공간의 BAR 필드를 읽어야 하며, 이 read가 아래 pci_ecam_map_bus()
- *     -> pci_generic_config_read() 경로로 전달된다.
+ * 이 파일은 그 매핑을 관리하는 공통 코드를 제공한다. 호스트 브리지
+ * 드라이버가 "내 ECAM 은 이 물리 주소에서 시작하고 이 버스 범위를 담당한다"
+ * 고 알려 주면, 이 파일이 매핑을 잡고 주소 계산 콜백(map_bus)을 준비한다.
+ * 그 콜백이 access.c 의 pci_generic_config_read/write 와 짝을 이룬다.
  *
- *  2) MSI/MSI-X 인터럽트 활성화: pci_enable_msix_range() / pci_alloc_irq_vectors():
- *     메시지 컨트롤 레지스터(MSI-X CAP), 테이블 BIR/offset 등을 설정
- *     공간에서 읽고/쓴다. 이 작업 역시 pci_ecam_map_bus()가 가상 주소를
- *     반환하면 그 위치에 read/write가 수행된다.
+ * 변형도 다룬다. 어떤 SoC 는 버스당 1MB 가 아니라 다른 크기를 쓰거나
+ * (bus_shift 를 조정), ECAM 창을 한 번에 다 매핑하지 못해 버스마다
+ * 따로 매핑해야 한다. pci_ecam_ops 의 변형들이 그것을 흡수한다.
  *
- *  3) NVMe 장치 리셋/전원 관리: nvme_reset_work() -> nvme_dev_disable() ->
- *     pci_disable_device() / pci_set_power_state() 등:
- *     Power Management Capability, Command/Status 레지스터 등에 접근
- *     한다. hotplug 상황에서도 pci_config_window는 재생성될 수 있다.
+ * === 전체 아키텍처에서의 위치 ===
+ * 초기화: 호스트 브리지 드라이버(controller/ 아래) 또는 ACPI MCFG 처리
+ *           -> [이 파일] pci_ecam_create(dev, cfgres, busr, ops)
+ *              -> ECAM 창을 ioremap 하고 struct pci_config_window 를 만든다
+ *              -> ops->init 이 있으면 SoC 별 추가 초기화
  *
- *  4) PCI 핫플러그/제거 시: pci_ecam_free() -> bus 제거:
- *     NVMe 장치가 Surprise Removal 되면 연결된 PCI 버스가 사라지고
- *     pci_ecam_remove_bus()가 해당 버스의 ioremap을 해제한다.
+ * 접근:   pci_read_config_word 등
+ *           -> bus->ops->read = pci_generic_config_read [access.c]
+ *              -> bus->ops->map_bus = [이 파일] pci_ecam_map_bus
+ *                 -> 위 공식으로 주소를 계산해 돌려준다
  *
- * 따라서 pci_ecam_create()/pci_ecam_map_bus()는 NVMe 커널 드라이버가
- * 레지스터/인터럽트/DMA 를 사용하기 전 반드시 거치는 하위 레이어다.
+ * 실행 컨텍스트: 생성/해제는 프로세스 컨텍스트. map_bus 는 config 접근
+ * 경로에서 pci_lock 을 쥔 채 불리므로 잠들 수 없고 계산만 한다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: controller/ 아래의 여러 호스트 브리지 드라이버,
+ *   그리고 ACPI 기반 시스템의 MCFG 처리(pci-acpi.c).
+ * 아래쪽: access.c 의 pci_generic_config_read/write, ioremap.
+ * 공유 상태: struct pci_config_window — ECAM 창 하나를 나타낸다.
+ *   물리 주소 범위, 버스 범위, 매핑된 가상 주소, 그리고 ops 를 담는다.
+ *
+ * === NVMe 관점 ===
+ * NVMe 드라이버는 이 파일의 함수를 쓰지 않는다(전수 확인).
+ *
+ * 하지만 NVMe 의 config space 접근이 대부분 이 경로를 지난다. NVMe 는
+ * PCIe 장치이고 현대 시스템은 거의 다 ECAM 을 쓰기 때문이다.
+ * 그리고 ECAM 이어야만 확장 config space(0x100 이상)에 닿을 수 있어,
+ * NVMe 의 SR-IOV, AER, ATS 같은 확장 capability 가 보이려면
+ * 이 방식이 필수다(access.c 의 pci_ext_cfg_avail 주석 참고).
+ *
+ * === 주요 함수/구조체 요약 ===
+ * pci_ecam_create()      : ECAM 창을 만들고 매핑한다. 버스 범위가 크면
+ *                          한 번에 매핑하지 못할 수 있어 버스별 매핑도
+ *                          지원한다.
+ * pci_ecam_free()        : 매핑을 풀고 구조체를 해제한다.
+ * pci_ecam_map_bus()     : 표준 주소 공식으로 위치를 계산한다.
+ *                          bus_shift 를 곱하는 방식이라 변형도 흡수한다.
+ * pci_32b_ops / pci_32b_read_ops : 32비트 접근만 되는 하드웨어용 변형.
+ *                          access.c 의 pci_generic_config_read32 와 짝이다.
+ * pci_ecam_ops           : 기본 ops. bus_shift = 20 과 표준 map_bus.
+ * struct pci_config_window : ECAM 창 하나. 물리/가상 주소, 버스 범위,
+ *                          그리고 SoC 별 사설 데이터를 담는다.
  */
 
 #include <linux/device.h>		/* NVMe: struct device, dev_info/err/warn() 등 사용 */

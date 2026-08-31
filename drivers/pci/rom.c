@@ -7,31 +7,74 @@
  */
 
 /*
- * ===================================================================
- * NVMe PCIe 호스트 드라이버 관점 파일 요약
- * -------------------------------------------------------------------
- * 본 파일(drivers/pci/rom.c)은 PCI 장치의 Expansion ROM(Option ROM) BAR를
- * 제어하고, ROM 이미지를 커널 가상 주소 공간에 매핑하는 기능을 제공한다.
- * NVMe SSD도 PCIe 엔드포인트이므로 PCI_ROM_RESOURCE를 가질 수 있으며,
- * 다음과 같은 NVMe 관련 시나리오에서 본 파일의 함수가 사용될 수 있다.
- *   - NVMe SSD에 내장된 UEFI/BIOS Option ROM이 있는 경우: 부팅 펌웨어가
- *     이 ROM을 통해 NVMe 장치를 초기화하거나 부팅 코드를 로드한다.
- *   - 커널 런타임에서 /sys/bus/pci/devices/<BDF>/rom 파일을 통해 NVMe
- *     장치의 ROM 이미지를 사용자 공간으로 노출할 때 호출된다.
- *   - PCI 핫플러그/재스캔 시 NVMe 장치의 ROM 리소스를 재할당/재활성화
- *     해야 할 때 사용된다.
- *   - ROM BAR를 enable/disable 할 때 일부 장치는 ROM과 MMIO(BAR0/1 등)
- *     간 주소 디코더를 공유하므로, NVMe BAR 접근에 잠재적 영향이 있다.
- * 주요 호출 경로(예시):
- *   sysfs "rom" read -> pci_map_rom() -> pci_enable_rom() -> ioremap()
- *   -> pci_get_rom_size() -> copy_to_user() -> pci_unmap_rom() ->
- *   pci_disable_rom()
- *   또는 부팅 단계에서 vgacon/vgaarb/드라이버 로드 시 ROM을 읽어들이는
- *   경로에서 사용될 수 있다.
- * 본 파일은 drivers/nvme/host/pci.c에서 직접 호출하지는 않지만, NVMe
- * 장치의 PCI 리소스 생명주기와 사용자 공간 ROM 노출에 직접 관여한다.
- * ===================================================================
+ * [한국어 설명] 장치에 내장된 옵션 ROM 을 읽는 계층 (rom.c)
+ *
+ * === 파일의 역할 ===
+ * 옵션 ROM(Expansion ROM)은 장치가 자기 안에 들고 있는 코드다. 부팅 초기,
+ * OS 가 뜨기 전에 펌웨어가 그것을 실행해 장치를 쓸 수 있게 만든다.
+ * 그래픽 카드의 VGA BIOS 와 부팅 가능한 스토리지 컨트롤러의 코드가
+ * 대표적이며, x86 BIOS 시절부터 이어져 온 구조다.
+ *
+ * ROM 은 일곱 번째 BAR 처럼 취급된다(PCI_ROM_RESOURCE). 다만 두 가지가 다르다.
+ *   - Enable 비트가 따로 있다. 평소에는 꺼 두고, 읽을 때만 잠시 켠다.
+ *     켜 두면 그 주소 구간을 장치가 계속 점유하기 때문이다.
+ *   - 크기가 실제 내용보다 클 수 있다. ROM 안에는 여러 이미지가 이어져
+ *     있고(각각 다른 아키텍처용), 각 이미지 헤더에 "다음이 있는가" 표시가
+ *     있다. 그것을 따라가야 실제 길이를 안다.
+ *
+ * 이 파일은 그 절차를 처리한다. Enable 을 켜고, 매핑하고, 헤더의 서명
+ * (0xAA55)을 확인하고, 이미지 사슬을 훑어 크기를 재고, 다 끝나면 Enable 을
+ * 다시 끈다.
+ *
+ * 세 가지 출처를 시도한다는 점도 중요하다.
+ *   1) 장치의 ROM BAR (하드웨어에 실제로 있는 것)
+ *   2) 펌웨어가 시스템 메모리에 복사해 둔 것(dev->rom, ROM shadow)
+ *   3) 플랫폼이 제공하는 것(pci_platform_rom)
+ * 2번이 필요한 이유는 일부 장치가 초기화된 뒤에는 ROM 을 읽을 수 없게
+ * 되기 때문이다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * 읽기: cat /sys/bus/pci/devices/.../rom
+ *         -> pci-sysfs.c 의 pci_read_rom()
+ *            -> [이 파일] pci_map_rom() — Enable 을 켜고 매핑, 크기 계산
+ *            -> 내용을 사용자에게 복사
+ *            -> [이 파일] pci_unmap_rom() — 매핑 해제, Enable 을 다시 끔
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트(ioremap 과 config 접근).
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: pci-sysfs.c 의 rom 속성, 그리고 ROM 을 읽어야 하는 드라이버
+ *   (GPU 드라이버가 VBIOS 를 파싱할 때).
+ * 아래쪽: setup-res.c 의 자원 관리, access.c 의 config 접근, ioremap.
+ * 공유 상태: struct pci_dev 의 rom / romlen(펌웨어가 복사해 둔 것),
+ *   rom_attr_enabled(sysfs 에서 읽기를 허용했는지), 그리고
+ *   resource[PCI_ROM_RESOURCE].
+ *
+ * === NVMe 관점 ===
+ * NVMe 드라이버는 이 파일의 함수를 쓰지 않는다(전수 확인).
+ *
+ * NVMe SSD 도 옵션 ROM 을 가질 수 있고, 실제로 부팅 가능한 엔터프라이즈
+ * 드라이브에는 있는 경우가 있다. 그 ROM 이 UEFI 드라이버를 담아, OS 가
+ * 뜨기 전에 펌웨어가 그 드라이브에서 부팅할 수 있게 한다.
+ *
+ * 하지만 커널이 뜬 뒤에는 그 ROM 이 쓰이지 않는다. NVMe 드라이버가 자기
+ * 코드로 컨트롤러를 처음부터 초기화하기 때문이다. 그래서 이 파일과
+ * NVMe 의 접점은 "sysfs 로 ROM 을 덤프할 수 있다" 는 정도에 그친다.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * pci_map_rom()          : ROM 을 읽을 수 있게 준비한다. Enable 을 켜고,
+ *                          매핑하고, 이미지 사슬을 훑어 실제 크기를 정한다.
+ *                          펌웨어 사본이 있으면 그쪽을 우선한다.
+ * pci_unmap_rom()        : 매핑을 풀고 Enable 을 원래대로 되돌린다.
+ * pci_enable_rom()       : ROM BAR 의 Enable 비트를 켠다. 자원이 배정돼
+ *                          있지 않으면 실패한다.
+ * pci_disable_rom()      : 끈다.
+ * pci_get_rom_size()     : 이미지 헤더의 서명(0xAA55)과 "다음 이미지" 표시를
+ *                          따라가며 전체 크기를 잰다. 이 파일에서 가장
+ *                          형식 지식이 필요한 부분이다.
+ * pci_rom_size()         : 위 결과를 캐시해 돌려준다.
  */
+
 #include <linux/kernel.h> /* NVMe: 커널 기본 자료형과 매크로 사용 */
 #include <linux/export.h> /* NVMe: EXPORT_SYMBOL 관련 매크로 */
 #include <linux/pci.h> /* NVMe: PCI 버스 및 pci_dev 구조체 정의 */

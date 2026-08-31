@@ -6,32 +6,55 @@
  */
 
 /*
- * ===================================================================
- * NVMe PCIe 호스트 드라이버 관점 파일 요약
- * -------------------------------------------------------------------
- * 본 파일(drivers/pci/syscall.c)은 사용자 공간에서 PCI 장치의 설정
- * 공간(configuration space)에 직접 접근할 수 있게 하는 시스템 콜
- * (pciconfig_read/pciconfig_write)을 구현한다.
+ * [한국어 설명] config space 를 읽고 쓰는 옛 시스템 호출 (syscall.c)
  *
- * NVMe SSD 입장에서 본 파일은 다음과 같은 의미를 갖는다.
- *   - NVMe 장치의 PCIe config space(Vendor ID, Device ID, Class Code,
- *     BAR, Capabilities 등)를 사용자 공간 유틸리티(lspci/setpci 등)가
- *     읽고 쓸 수 있는 통로를 제공한다.
- *   - 커널 낸 NVMe 드라이버(drivers/nvme/host/pci.c)는 직접 이
- *     시스템 콜을 호출하지 않고, 대신 pci_read_config_ 계열과 pci_write_config_ 계열
- *     계열 함수를 사용한다. 그러나 본 파일이 제공하는 권한 검사와
- *     config access 인터페이스는 NVMe 장치의 config space 탐색/진단에
- *     사용된다.
- *   - 전원 제어, EDR(Error Detection and Isolation), RCEC, slot 등 NVMe
- *     장치의 PCIe 물리적 환경을 진단하거나 제어하는 도구들이 config
- *     space를 통해 Root Port/Downstream Switch/NVMe endpoint 상태를
- *     확인할 때 이 시스템 콜을 거친다.
+ * === 파일의 역할 ===
+ * pciconfig_read() 와 pciconfig_write() 두 시스템 호출을 구현한다.
+ * userspace 가 PCI config space 에 접근하는 세 번째 경로다 —
+ * 앞의 둘은 sysfs(pci-sysfs.c)와 /proc(proc.c)이다.
  *
- * 주요 호출 경로:
- *   사용자 공간(lspci/setpci) -> pciconfig_read/pciconfig_write ->
- *   pci_get_domain_bus_and_slot() -> pci_user_read/write_config_* ->
- *   NVMe SSD의 PCIe config space
- * ===================================================================
+ * 셋 중 가장 오래됐고 지금은 거의 쓰이지 않는다. 시스템 호출 번호를
+ * 차지하므로 없앨 수 없어 유지될 뿐이다. 실제로 x86 에서는 이 시스템
+ * 호출이 등록조차 되어 있지 않고, alpha/arm 같은 일부 아키텍처에만 남아 있다.
+ *
+ * 하는 일은 단순하다. 인자로 받은 bus/dfn/off/len 으로 장치를 찾아
+ * config 를 읽거나 쓰고, 결과를 사용자 버퍼에 복사한다. 권한 검사와
+ * 정렬 검사를 앞에서 하고, 실제 접근은 access.c 의 userspace 전용
+ * 경로(pci_user_read_config_*)에 위임한다.
+ *
+ * 반환값 규약이 특이하다. 오류를 음수 errno 가 아니라 PCIBIOS_* 계열
+ * 상수로 돌려준다. 옛 PCI BIOS 인터페이스의 잔재다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * userspace -> syscall(pciconfig_read, bus, dfn, off, len, buf)
+ *   -> [이 파일] SYSCALL_DEFINE5(pciconfig_read, ...)
+ *      -> capable(CAP_SYS_ADMIN) 권한 확인
+ *      -> pci_get_domain_bus_and_slot() [search.c] 로 장치를 찾고
+ *      -> pci_user_read_config_* [access.c] 로 읽고
+ *      -> put_user() 로 사용자 버퍼에 복사
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트(시스템 호출). 사용자 메모리 접근이
+ * 페이지 폴트를 일으킬 수 있어 잠들 수 있다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: userspace 의 옛 도구들.
+ * 아래쪽: search.c 의 장치 조회, access.c 의 pci_user_read/write_config_*.
+ * 공유 상태: 없다.
+ *
+ * === NVMe 관점 ===
+ * NVMe 와는 관련이 없다. NVMe 장치도 원리상 이 시스템 호출로 접근할 수
+ * 있지만, 현대 도구는 전부 sysfs 나 /proc 을 쓴다.
+ *
+ * 굳이 학습 가치를 찾자면, 같은 config space 에 세 가지 경로가 있고
+ * 모두 access.c 의 pci_user_read/write_config_* 로 모인다는 점이다.
+ * 그 함수들이 리셋 중 차단(block_cfg_access)을 존중하는 이유가 여기 있다 —
+ * 세 경로 중 어느 것으로 들어와도 같은 보호를 받아야 하기 때문이다.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * sys_pciconfig_read()  : config 를 읽어 사용자 버퍼에 넣는다.
+ *                         len 은 1/2/4 만 유효하고, 오프셋 정렬도 확인한다.
+ * sys_pciconfig_write() : 사용자 버퍼의 값을 config 에 쓴다.
+ *                         CAP_SYS_ADMIN 이 필요하다.
  */
 
 #include <linux/errno.h>	/* NVMe: EPERM/ENODEV/EIO 등 에러 코드 정의 */
