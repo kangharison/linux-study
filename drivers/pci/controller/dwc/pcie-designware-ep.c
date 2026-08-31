@@ -1,5 +1,7 @@
-/* NVMe: GPL-2.0 라이선스; NVMe 호스트 커널 모듈과 동일한 라이선스 정책 적용 */
 // SPDX-License-Identifier: GPL-2.0
+/* [한국어] 위 SPDX 줄은 커널의 라이선스 표기 규약이다. 반드시 파일의
+ * 첫 줄에 정확한 형식으로만 있어야 scripts/spdxcheck.py 가 인식하므로,
+ * 그 앞이나 뒤에 아무것도 덧붙이지 않는다. */
 /*
  * Synopsys DesignWare PCIe Endpoint controller driver
  *

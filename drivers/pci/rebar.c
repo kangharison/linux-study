@@ -4,25 +4,68 @@
  */
 
 /*
- * ===================================================================
- * NVMe PCIe 호스트 드라이버 관점 파일 요약
- * -------------------------------------------------------------------
- * 본 파일(drivers/pci/rebar.c)은 PCI Resizable BAR Extended Capability를
- * 탐지/읽기/쓰기하여 BAR(Base Address Register)의 크기를 런타임에 변경할
- * 수 있게 한다.
- * NVMe SSD 입장에서 BAR는 호스트가 NVMe 컨트롤러 레지스터(특히 BAR0의
- * doorbell, CAP/VS/CC 등)와 선택적 CMB(Controller Memory Buffer)를 MMIO로
- * 접근하는 창이다. ReBAR을 지원하면 다음에 활용 가능하다.
- *   - NVMe BAR0/1 등의 MMIO 영역을 더 큰 크기로 확장(CMB 포함)
- *   - P2PDMA, ATS/PRI, SR-IOV VF BAR 등에서 BAR 크기 조정
- *   - MSI/MSI-X 테이블이 포함된 BAR의 크기 조정
- *   - AER/DPC 등 PCIe 포트 서비스로 인한 재구성 시 BAR 복원
- * 일반적인 NVMe 드라이버 관련 호출 경로:
- *   nvme_probe -> pci_enable_device -> pci_request_regions -> pci_iomap
- *   -> (필요시) pci_resize_resource / pci_rebar_get_possible_sizes
- * 본 파일의 함수들은 PCI 장치 초기화, sysfs resize, VF BAR 설정,
- * pci_restore_rebar_state()를 통한 suspend/resume 시 복원 등에서 사용된다.
- * ===================================================================
+ * [한국어 설명] BAR 의 크기를 소프트웨어가 바꾸는 기능 (rebar.c)
+ *
+ * === 파일의 역할 ===
+ * 보통 BAR 의 크기는 하드웨어가 정해 놓은 고정값이다. 크기를 알아내는
+ * 방법도 "all-ones 를 써 넣고 되읽어 무시된 하위 비트를 세는" 것이라,
+ * 크기 자체가 하드웨어의 성질이다.
+ *
+ * Resizable BAR(ReBAR)는 그것을 바꿀 수 있게 한 확장 capability 다.
+ * 장치가 "나는 1MB, 2MB, ... 8GB 중 아무거나 될 수 있다" 고 지원 크기
+ * 목록을 밝히고, 소프트웨어가 그중 하나를 골라 설정한다.
+ *
+ * 왜 필요한가. 대표적인 예가 GPU 다. 예전에는 VRAM 이 커도 BAR 는
+ * 256MB 로 고정이라 CPU 가 한 번에 그만큼만 볼 수 있었고, 나머지는
+ * 창을 옮겨 가며 접근해야 했다. ReBAR 로 BAR 를 VRAM 전체 크기로
+ * 키우면 그 번거로움이 사라진다.
+ *
+ * 대가는 주소 공간이다. BAR 를 키우면 그만큼 넓은 연속 구간이 필요하고,
+ * 32비트 주소 공간에서는 자리가 없을 수 있다. 그래서 크기를 바꾼 뒤에는
+ * 자원을 재배치해야 하며, 그 과정이 실패하면 원래 크기로 되돌린다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * 조회: 드라이버 또는 sysfs
+ *         -> [이 파일] pci_rebar_get_possible_sizes() — 지원 크기 비트맵
+ *
+ * 변경: 드라이버 또는 sysfs 의 resource<N>_resize
+ *         -> [이 파일] pci_resize_resource(pdev, bar, size)
+ *            -> 자원을 놓고 -> BAR Control 에 새 크기를 쓰고
+ *            -> struct resource 의 크기를 갱신하고 UNSET 표시
+ *            -> 상위 브리지 윈도우를 다시 계산하도록 요청한다
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. config 접근과 자원 조작이 있다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: GPU 드라이버(amdgpu, i915 등), pci-sysfs.c 의 resize 속성.
+ * 아래쪽: access.c 의 확장 capability 접근, setup-res.c 의 자원 해제,
+ *   setup-bus.c 의 재배치.
+ * 공유 상태: struct pci_dev 의 resource[] 크기와 IORESOURCE_UNSET 플래그.
+ *
+ * === NVMe 관점 ===
+ * NVMe 드라이버는 이 파일의 함수를 쓰지 않는다(전수 확인, "pci_rebar" 0건).
+ *
+ * NVMe 의 BAR0 는 컨트롤러 레지스터와 도어벨 배열을 담는데, 그 크기가
+ * 큐 개수에 따라 정해지긴 하지만 하드웨어가 결정하는 값이고 소프트웨어가
+ * 키울 이유가 없다. CMB 를 담는 BAR 도 컨트롤러가 가진 메모리 크기라
+ * 마찬가지다.
+ *
+ * ReBAR 가 의미 있으려면 "장치 안에 큰 메모리가 있는데 창이 작아서
+ * 다 못 본다" 는 상황이어야 하는데, NVMe 는 데이터를 창으로 들여다보는
+ * 것이 아니라 DMA 로 주고받으므로 그런 상황이 생기지 않는다.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * pci_rebar_find_pos()          : ReBAR capability 안에서 이 BAR 에 해당하는
+ *                                 항목의 위치를 찾는다. 항목 순서가 BAR
+ *                                 번호와 일치하지 않을 수 있어 필요하다.
+ * pci_rebar_get_possible_sizes(): 지원 크기 비트맵. 비트 n 이 1이면
+ *                                 2^n MB 를 지원한다는 뜻이다.
+ * pci_rebar_get_current_size()  : 지금 설정된 크기(같은 인코딩).
+ * pci_rebar_set_size()          : BAR Control 에 새 크기를 쓴다.
+ * pci_resize_resource()         : 크기 변경의 진입점. 자원을 놓고, 크기를
+ *                                 바꾸고, 재배치가 필요하다고 표시한다.
+ * pci_reassign_bridge_resources(): 바뀐 크기를 담도록 상위 브리지 윈도우를
+ *                                 다시 계산한다.
  */
 
 #include <linux/bits.h> /* NVMe: 비트 마스크 매크로 포함. */

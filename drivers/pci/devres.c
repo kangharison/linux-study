@@ -1,4 +1,79 @@
 // SPDX-License-Identifier: GPL-2.0
+/*
+ * [한국어 설명] 드라이버가 잡은 PCI 자원을 자동으로 되돌려 주는 계층 (devres.c)
+ *
+ * === 파일의 역할 ===
+ * devres(device resource management)는 "드라이버가 죽거나 언바인딩될 때
+ * 잡아 둔 것을 커널이 알아서 풀어 주는" 커널 공통 기능이다. 이 파일은
+ * 그것의 PCI 판 — pcim_* 접두사가 붙은 함수들을 제공한다.
+ *
+ * 문제의식은 이렇다. 드라이버의 probe 는 실패 지점이 여럿이고, 각 지점에서
+ * 그때까지 잡은 것을 정확한 역순으로 풀어야 한다. goto 사슬로 그것을 쓰다
+ * 보면 하나를 빠뜨리기 쉽고, 그 실수는 조용한 자원 누수가 된다.
+ * devres 를 쓰면 잡은 것이 장치에 매달리고, remove 시점에 커널이 역순으로
+ * 전부 푼다. probe 는 실패해도 그냥 return 하면 된다.
+ *
+ * 다루는 자원이 넷이다.
+ *   - 장치 활성화(pcim_enable_device) — pci_disable_device 를 자동 호출
+ *   - 자원 영역 예약(pcim_request_region 계열) — pci_release_region 자동
+ *   - BAR 매핑(pcim_iomap 계열) — iounmap 자동
+ *   - INTx 설정(pcim_intx) — 원래 상태로 자동 복원
+ *
+ * 구현 방식이 흥미롭다. devres 는 "해제 함수 + 데이터" 를 한 덩어리로
+ * 장치에 매다는데, 이 파일은 자원 종류마다 그 덩어리의 모양과 해제
+ * 함수를 정의한다. 예컨대 pcim_addr_devres 는 매핑 종류(BAR 번호,
+ * 주소 범위)와 그것을 푸는 방법을 함께 담는다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * 드라이버 probe
+ *   -> [이 파일] pcim_enable_device(pdev)
+ *      -> pci_enable_device() + devres 에 해제 항목 등록
+ *   -> [이 파일] pcim_iomap_regions(pdev, mask, name)
+ *      -> pci_request_region + ioremap + 해제 항목 등록
+ *   (실패하면 그냥 return — 정리는 커널이 한다)
+ *
+ * 드라이버 remove 또는 probe 실패
+ *   -> 드라이버 코어가 devres 목록을 역순으로 훑으며 해제 함수 호출
+ *      -> [이 파일] 각 해제 함수가 대응하는 pci_* 를 부른다
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. 할당과 자원 조작이 있다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: PCI 드라이버들. pcim_ 을 쓰는 드라이버와 pci_ 를 직접 쓰는 드라이버가
+ *   섞여 있고, 두 방식을 한 드라이버 안에서 섞으면 안 된다.
+ * 아래쪽: drivers/base/devres.c 의 devres 코어, pci.c 의 자원 함수들.
+ * 공유 상태: struct pci_dev 에 매달린 devres 목록(struct device 의 devres_head).
+ *
+ * === NVMe 관점 ===
+ * NVMe 드라이버는 이 파일의 함수를 하나도 쓰지 않는다. drivers/nvme/ 에
+ * "pcim_" 문자열이 0건이다(주석 제거 후 검색).
+ *
+ * NVMe 는 자원을 직접 잡고 직접 푼다 — pci_enable_device_mem(),
+ * pci_request_mem_regions(), ioremap() 을 부르고, nvme_dev_unmap() 과
+ * nvme_pci_disable() 에서 대칭적으로 되돌린다.
+ *
+ * 그 선택에는 이유가 있다. NVMe 는 컨트롤러 리셋 중에 자원을 잠시 놓았다가
+ * 다시 잡는 경우가 있는데(nvme_dev_disable -> nvme_reset_work), devres 는
+ * "드라이버가 떨어질 때 한 번에 푼다" 는 모델이라 그런 중간 해제를
+ * 표현하기 어렵다. 수명이 probe~remove 와 정확히 일치하지 않는 자원에는
+ * devres 가 맞지 않는다.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * pcim_enable_device()      : pci_enable_device + 자동 해제 등록.
+ *                             한 번 쓰면 그 장치의 다른 자원도 devres 로
+ *                             관리된다는 표시(is_managed)가 선다.
+ * pcim_iomap()              : BAR 하나를 매핑하고 해제를 등록한다.
+ * pcim_iomap_regions()      : 마스크로 지정한 여러 BAR 을 한 번에
+ *                             request + iomap 한다. 가장 자주 쓰이는 함수다.
+ * pcim_iounmap()            : 명시적으로 풀 때. 등록된 항목도 함께 지운다.
+ * pcim_request_region()     : 자원 영역만 예약(매핑은 하지 않는다).
+ * pcim_intx()               : INTx 설정을 바꾸되 원래 값을 기억해 둔다.
+ * pcim_set_mwi()            : Memory-Write-Invalidate 를 켜고 자동 해제 등록.
+ * struct pcim_addr_devres   : 매핑/예약 하나를 나타내는 devres 항목.
+ *                             종류(type), BAR 번호, 주소 범위를 담는다.
+ * struct pcim_intx_devres   : INTx 의 원래 상태를 담는 항목.
+ */
+
 #include <linux/device.h> /* NVMe: PCI 장치의 device 생명주기 관리를 위한 핵심 헤더 포함. */
 #include <linux/pci.h> /* NVMe: PCI 버스 및 NVMe 장치 레지스터 접근을 위한 PCI 핵심 헤더 포함. */
 #include "pci.h" /* NVMe: PCI 서브시스템 내 부 선언을 위한 로컬 헤더 포함. */

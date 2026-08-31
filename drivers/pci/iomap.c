@@ -6,31 +6,68 @@
  */
 
 /*
- * ===================================================================
- * NVMe PCIe 호스트 드라이버 관점 파일 요약
- * -------------------------------------------------------------------
- * 본 파일(drivers/pci/iomap.c)은 PCI 장치의 BAR(Base Address Register)를
- * 커널 가상 주소 공간에 매핑(iomap)하고 해제(iounmap)하는 기본 인터페이스를
- * 구현한다.
- * NVMe SSD는 PCIe endpoint로서, 호스트 드라이버가 NVMe controller registers와
- * doorbell registers에 접근하려면 BAR(보통 BAR0)를 CPU가 볼 수 있는 가상
- * 주소로 매핑해야 한다. 본 파일은 그 매핑/해제의 핵심 경로를 담당한다.
- *   - pci_iomap(): NVMe BAR 전체 또는 일부를 일반 메모리 속성으로 매핑
- *   - pci_iomap_wc(): write combining 속성으로 매핑(doorbell 쓰기 성능 향상)
- *   - pci_iounmap(): NVMe 제거/ suspend 시 매핑 해제
- * 일반적인 NVMe 드라이버 호출 경로:
- *   nvme_probe -> pci_enable_device -> pci_request_regions ->
- *   pci_iomap(pdev, 0, ...) -> doorbell/register MMIO access
- *   nvme_remove / nvme_suspend -> pci_iounmap -> 매핑 해제
- * DMA, MSI-X, IRQ, 전원 관리와의 연관성:
- *   - BAR 매핑은 DMA 버퍼 매핑과는 별개이나, NVMe submission/completion
- *     queue의 물리 주소를 BAR를 통해 설정하고 doorbell로 활성화한다.
- *   - MSI-X table이 BAR에 위치한 경우 BAR 매핑을 통해 MSI-X table에
- *     접근할 수 있다.
- *   - ASPM/전원 관리 시 BAR는 unmapped 되었다가 resume 시 다시 매핑된다.
- * 본 파일은 drivers/nvme/host/pci.c에서 직접 또는 pci_iomap() 등을 통해
- * 간접적으로 사용되며, NVMe 드라이버의 register/doorbell 접근의 기반이 된다.
- * ===================================================================
+ * [한국어 설명] BAR 를 커널 가상 주소로 매핑하는 헬퍼 (iomap.c)
+ *
+ * === 파일의 역할 ===
+ * 드라이버가 BAR 에 접근하려면 물리 주소를 커널 가상 주소로 매핑해야 한다.
+ * 그 일 자체는 ioremap() 이 하지만, PCI 에는 두 가지 성가신 점이 있다.
+ *
+ *   1) BAR 가 메모리 공간일 수도 I/O 포트 공간일 수도 있다. 둘은 접근
+ *      방법이 전혀 다르다(readl vs inl). 드라이버가 매번 그것을 구분해
+ *      코드를 두 벌 쓰는 것은 번거롭다.
+ *   2) BAR 번호만 알지 주소와 크기는 pci_dev 에서 꺼내야 한다.
+ *
+ * 이 파일은 둘을 함께 해결한다. pci_iomap(pdev, bar, maxlen) 하나로
+ * BAR 번호를 주면 종류를 판별해 알맞게 매핑하고, 그 결과를 __iomem
+ * 토큰으로 돌려준다. 이후 ioread32()/iowrite32() 같은 통합 접근자를 쓰면
+ * 메모리든 포트든 같은 코드로 다룰 수 있다.
+ *
+ * 이 "통합 토큰" 이 lib/iomap.c 의 기법이다. 포트 공간이면 주소에 표식을
+ * 붙여 돌려주고, 접근자가 그 표식을 보고 inl/outl 로 갈린다. 그래서
+ * pci_iomap 의 결과는 진짜 포인터가 아닐 수 있고 절대 역참조하면 안 된다.
+ * __iomem 이라는 sparse 어노테이션이 그 실수를 정적으로 잡아 준다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * 드라이버 probe
+ *   -> pci_request_regions() 로 영역을 예약하고
+ *   -> [이 파일] pci_iomap(pdev, 0, 0) 으로 BAR0 를 매핑
+ *      -> pci_resource_start/len 으로 주소와 크기를 얻고
+ *      -> 종류에 따라 ioremap() 또는 포트 토큰 생성
+ *   -> ioread32(base + offset) 으로 접근
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트(ioremap 이 페이지 테이블을 건드린다).
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: PCI 드라이버들, devres.c 의 pcim_iomap.
+ * 아래쪽: lib/iomap.c 의 ioport_map, asm-generic 의 ioremap 계열.
+ * 공유 상태: 없다. struct pci_dev 의 resource[] 를 읽기만 한다.
+ *
+ * === NVMe 관점 ===
+ * NVMe 드라이버는 이 파일의 함수를 쓰지 않는다. drivers/nvme/ 에
+ * "pci_iomap" 이 0건이다(주석 제거 후 검색).
+ *
+ * 대신 ioremap() 을 직접 부른다:
+ *   dev->bar = ioremap(pci_resource_start(pdev, 0), size);
+ *
+ * 이유를 코드에서 추정할 수 있다. NVMe 의 BAR0 는 반드시 메모리 공간이라
+ * 종류 판별이 불필요하고, 통합 토큰이 아닌 진짜 __iomem 포인터를 쓰는
+ * 편이 readl/writel 로 직접 접근할 때 명확하다.
+ *
+ * 또 NVMe 는 매핑 크기를 스스로 계산한다. 도어벨 배열의 크기가 큐 개수와
+ * 도어벨 stride(CAP.DSTRD)에 달려 있어서, BAR 전체가 아니라 필요한
+ * 만큼만 매핑하려면 크기를 직접 정해야 한다. 큐를 더 만들면 매핑을
+ * 다시 잡는 nvme_remap_bar() 가 그 처리다.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * pci_iomap()             : BAR 하나를 매핑한다. maxlen 이 0 이면 BAR 전체,
+ *                           아니면 그 크기만큼만 매핑한다.
+ * pci_iomap_range()       : BAR 안의 특정 오프셋부터 매핑한다. BAR 가 크고
+ *                           일부만 필요할 때 쓴다.
+ * pci_iomap_wc()          : write-combining 매핑. 쓰기를 모아 보내 대역폭을
+ *                           높이지만 순서 보장이 약해진다. 프레임버퍼용이며,
+ *                           레지스터에는 쓰면 안 된다(순서가 중요하므로).
+ * pci_iomap_wc_range()    : 위 둘의 조합.
+ * pci_iounmap()           : 매핑을 푼다. 포트 토큰이면 ioport_unmap 으로 간다.
  */
 
 #include <linux/pci.h> /* NVMe: NVMe PCIe device의 PCI core 정의 */

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: GPL-2.0+
 /*
  * NVMe 관점 요약:
  *  이 파일은 PCI 버스와 Open Firmware(Device Tree)를 매핑하는 헬퍼 모음이다.
@@ -24,7 +25,6 @@
  *  바탕으로 동작하므로 NVMe 호스트 드라이버 입장에서 본 파일은 최상위 초기화
  *  레이어 중 하나이다.
  */
-// SPDX-License-Identifier: GPL-2.0+
 /*
  * PCI <-> OF mapping helpers
  *
