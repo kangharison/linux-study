@@ -1,4 +1,59 @@
 /* SPDX-License-Identifier: GPL-2.0 */
+/*
+ * [한국어 설명] 가짜 브리지 에뮬레이션의 자료구조 정의 (pci-bridge-emul.h)
+ *
+ * === 파일의 역할 ===
+ * pci-bridge-emul.c 가 쓰는 자료구조와 상수를 정의한다. 세 가지가 핵심이다.
+ *
+ *   struct pci_bridge_emul_conf     — 가짜 PCI 브리지 헤더(타입 1)의
+ *     레지스터들을 그대로 옮긴 구조체. vendor, device, command, status 부터
+ *     프라이머리/세컨더리 버스 번호, I/O 와 메모리 윈도우까지 스펙 순서대로
+ *     늘어놓았다. 이것이 메모리에 놓이면 그 자체가 config space 가 된다.
+ *
+ *   struct pci_bridge_emul_pcie_conf — PCIe capability 부분의 같은 것.
+ *     선택적이며, 이것을 제공하면 커널이 이 가짜 브리지를 PCIe 브리지로
+ *     인식한다.
+ *
+ *   struct pci_bridge_reg_behavior  — dword 하나의 성질. ro / rw / w1c
+ *     세 마스크로 각 비트가 어떻게 동작해야 하는지 기술한다. 이것이
+ *     "가짜지만 진짜처럼 보이게" 만드는 열쇠다.
+ *
+ * 구조체 필드가 스펙 레지스터 순서와 정확히 일치해야 한다는 점이 중요하다.
+ * config 접근은 오프셋으로 이뤄지므로, 필드 순서가 어긋나면 엉뚱한 값이
+ * 읽힌다. 그래서 __le16 / __le32 같은 엔디언 명시 타입을 쓰고 패딩을
+ * 명시적으로 넣는다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * pci-bridge-emul.c 가 이 정의대로 메모리를 잡고 동작 마스크를 채운다.
+ * controller/ 아래의 SoC 드라이버들이 이 헤더를 include 해
+ * struct pci_bridge_emul 을 자기 구조체에 담고 ops 를 제공한다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 포함되는 곳: pci-bridge-emul.c, 그리고 브리지를 노출하지 않는
+ *   SoC 컨트롤러 드라이버들(mvebu, aardvark, brcmstb, rockchip 등).
+ * 의존하는 것: linux/types.h 의 엔디언 타입.
+ *
+ * === NVMe 관점 ===
+ * NVMe 와 직접 관련이 없다. 다만 이 헤더가 정의하는 윈도우 레지스터
+ * (memory base/limit)가 그 아래 NVMe 의 BAR 주소를 결정하는 근거가 된다.
+ * 자세한 것은 pci-bridge-emul.c 의 헤더 참고.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * struct pci_bridge_emul_conf      : 가짜 PCI 브리지 헤더 전체.
+ * struct pci_bridge_emul_pcie_conf : 가짜 PCIe capability 전체.
+ * struct pci_bridge_reg_behavior   : dword 하나의 ro/rw/w1c 마스크.
+ * struct pci_bridge_emul_ops       : 컨트롤러 드라이버가 제공하는 훅.
+ *                                    읽기 전(read_base/read_pcie)과
+ *                                    쓰기 후(write_base/write_pcie)에
+ *                                    실제 하드웨어와 동기화할 기회를 준다.
+ * struct pci_bridge_emul           : 위 모두를 묶은 상태.
+ * PCI_BRIDGE_EMUL_NO_PREFETCHABLE_BAR / _NO_IO_FORWARD /
+ * _NO_PREFMEM_FORWARD              : 지원하지 않는 기능을 읽기 전용 0 으로
+ *                                    고정하라는 플래그.
+ * pci_bridge_emul_init() / _cleanup() / _conf_read() / _conf_write()
+ *                                  : 구현부(.c)의 함수 선언.
+ */
+
 #ifndef __PCI_BRIDGE_EMUL_H__
 #define __PCI_BRIDGE_EMUL_H__
 

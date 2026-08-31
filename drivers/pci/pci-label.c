@@ -23,20 +23,61 @@
  */
 
 /*
- * NVMe 관점 요약:
- *  - NVMe SSD는 PCI Express Endpoint로 동작하며, 이 파일은 그런 NVMe 장치의
- *    ACPI _DSM 또는 SMBIOS type 41 레코드에서 firmware label(문자열)과
- *    instance 번호를 읽어 /sys/bus/pci/devices/.../label, index, acpi_index
- *    속성으로 노출한다.
- *  - NVMe host driver(drivers/nvme/host/pci.c)는 nvme_probe()에서
- *    pci_enable_device(), pci_request_regions(), pci_set_master() 등을 거쳐
- *    NVMe 컨트롤러를 초기화한다. 이때 이 파일이 만든 sysfs attribute group은
- *    PCI core가 nvme_pci_dev 구조체에 등록해주므로, 사용자/관리 도구는 NVMe
- *    컨트롤러가 꽂힌 PCIe 슬롯의 물리적 라벨과 인덱스를 식별할 수 있다.
- *  - 이 정보는 NVMe hot-swap(hotplug core), CXL/PCIe 포트 TLP 라우팅, AER
- *    (Advanced Error Reporting) 복구, 전원 제어, 그리고 bridge emulation
- *    header를 통한 포트 식별과 연동되어, 특정 NVMe 장치를 물리적으로 찾거나
- *    교체할 때 사용된다.
+ * [한국어 설명] 펌웨어가 붙인 장치 이름표를 sysfs 에 노출한다 (pci-label.c)
+ *
+ * === 파일의 역할 ===
+ * 위 원문 주석이 목적과 근거를 모두 밝힌다. 요약하면 — 시스템 펌웨어가
+ * 온보드 PCI 장치에 붙여 둔 "인스턴스 번호" 와 "이름표" 를 읽어
+ * sysfs 에 내보낸다.
+ *
+ * 왜 필요한가. 서버에 온보드 네트워크 포트가 네 개 있다고 하자.
+ * 커널이 보는 것은 "0000:01:00.0~0000:01:00.3" 이지만, 섀시 뒤판에는
+ * "NIC1"~"NIC4" 라고 인쇄되어 있다. 그 대응을 아무도 모르면 케이블을
+ * 어디 꽂을지 알 수 없다. 펌웨어만 그 대응을 알고 있고, 이 파일이
+ * 그것을 커널로 가져온다.
+ *
+ * 출처가 둘이다.
+ *   ACPI _DSM (PCI Firmware Spec r3.1 sec 4.6.7) — 우선.
+ *     인스턴스 번호와 문자열을 함께 준다.
+ *   SMBIOS type 41 — _DSM 이 없을 때의 대안. 온보드 장치를 기술하는
+ *     SMBIOS 항목에서 같은 정보를 얻는다.
+ *
+ * 결과는 두 개의 sysfs 파일이 된다:
+ *   .../label     — 이름표 문자열("NIC1" 등)
+ *   .../index     — 인스턴스 번호
+ * systemd 의 "예측 가능한 네트워크 인터페이스 이름"(eno1, ens3 같은 것)이
+ * 이 값을 읽어 만들어진다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * 등록: pci-sysfs.c 가 장치의 속성을 만들 때
+ *         -> [이 파일] pci_create_firmware_label_files()
+ *            -> _DSM 또는 SMBIOS 를 조회해 값이 있으면 속성을 만든다
+ *
+ * 읽기: cat /sys/bus/pci/devices/.../label
+ *         -> [이 파일] label_show() / index_show()
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. ACPI 평가가 잠들 수 있다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: pci-sysfs.c, 그리고 그 값을 읽는 userspace(systemd-udevd).
+ * 아래쪽: ACPI 의 _DSM 평가, drivers/firmware/dmi_scan.c 의 SMBIOS 파서.
+ * 공유 상태: 없다. 조회할 때마다 다시 읽는다.
+ *
+ * === NVMe 관점 ===
+ * NVMe 드라이버는 이 파일과 관련이 없다(전수 확인).
+ *
+ * 다만 온보드 NVMe 컨트롤러(메인보드에 납땜된 것)에 펌웨어가 이름표를
+ * 붙여 두었다면 여기 나타난다. 다만 대부분의 NVMe 는 슬롯이나 백플레인에
+ * 꽂는 형태라 이름표보다 슬롯 번호(slot.c)가 더 유용하다.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * pci_create_firmware_label_files() : label / index 속성을 만든다.
+ *                                     값이 없으면 아무것도 만들지 않는다.
+ * pci_remove_firmware_label_files() : 그 반대.
+ * dsm_get_label()      : ACPI _DSM 으로 이름표를 얻는다.
+ * device_has_dsm()     : 이 장치에 해당 _DSM 이 있는지 확인.
+ * label_show() / index_show() : sysfs 읽기 핸들러.
+ * smbios_instance_string_exist() : SMBIOS type 41 항목이 있는지 확인.
  */
 
 #include <linux/dmi.h>		/* NVMe: DMI/SMBIOS 테이블 접근을 위한 헤더; NVMe 보드 내장 정보 조회용 */

@@ -23,21 +23,70 @@
  */
 
 /*
- * NVMe 관점 요약:
- * 이 파일은 PCIe 엔드포인트(대부분 PCIe NVMe SSD)의 상태를 외부 인클로저 LED로
- * 노출하기 위한 Native PCIe Enclosure Management(NPEM) 드라이버다.
- * drivers/nvme/host/pci.c 가 등록한 NVMe 장치가 탑재된 PCIe 슬롯/포트에서
- * PCI 코어가 NPEM 확장 캐패빌리티나 ACPI _DSM을 발견하면,
- * pci_npem_create() -> pci_npem_init() 순으로 LED class device를 등록한다.
- * NVMe 호스트 드라이버는 이 LED 장치를 직접 제어하지 않지만, 사용자공간(LED
- * 트리거/_sysfs)이 밝기를 바꿀 때 최종적으로 npem_set_active_indications()를
- * 통해 PCIe SSD의 OK/LOCATE/FAIL/REBUILD 등 상태를 하드웨어 LED에 반영한다.
- * 호출 경로:
- *   drivers/nvme/host/pci.c: nvme_probe() -> pci_set_drvdata() 등록
- *   -> PCI 포트 드라이버가 NPEM capability 발견
- *   -> pci_npem_create() -> pci_npem_init() -> led_classdev_register()
- *   -> userspace brightness echo
- *   -> brightness_set() -> npem_set_active_indications()
+ * [한국어 설명] 인클로저의 상태 LED 를 제어하는 드라이버 (npem.c)
+ *
+ * === 파일의 역할 ===
+ * 서버 섀시의 드라이브 베이마다 LED 가 있다. "정상", "고장", "재구성 중",
+ * "이 드라이브를 찾으세요" 같은 상태를 사람에게 알리는 용도다.
+ * 이 파일은 그 LED 를 커널의 LED 서브시스템에 노출한다.
+ *
+ * 위 원문 주석이 중요한 구분을 밝힌다 — 이 표준은 "무엇을 알릴지"만
+ * 정하고 "어떻게 깜빡일지" 는 정하지 않는다. 깜빡임 패턴은 하드웨어가
+ * 알아서 한다. 그래서 커널은 "고장 표시를 켜라" 고만 하면 된다.
+ *
+ * 두 가지 접근 경로를 지원한다.
+ *   NPEM (Native PCIe Enclosure Management) — PCIe 확장 capability 로
+ *     직접 레지스터를 읽고 쓴다. 표준적이고 빠르다.
+ *   _DSM — ACPI 메서드로 펌웨어에게 부탁한다. NPEM capability 가 없거나,
+ *     펌웨어가 자기가 관리하겠다고 한 경우에 쓴다.
+ * 두 경로가 같은 인터페이스(npem_ops / dsm_ops)를 구현해, 위쪽 코드는
+ * 어느 쪽인지 몰라도 된다.
+ *
+ * 표시 종류는 스펙이 정한 목록이다 — OK, Locate, Fail, Rebuild,
+ * PFA(Predicted Failure Analysis), Hot Spare, In Critical Array,
+ * In Failed Array, Invalid Device Type, Disabled 등.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * 등록: 열거 시 NPEM capability 또는 _DSM 을 가진 장치를 발견
+ *         -> [이 파일] pci_npem_create()
+ *            -> LED 클래스 장치를 만들어 /sys/class/leds/ 에 등록
+ *
+ * 제어: echo 1 > /sys/class/leds/<name>:fail/brightness
+ *         -> LED 코어 -> [이 파일] npem_set()
+ *            -> NPEM 레지스터에 쓰거나 _DSM 을 평가
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. _DSM 평가가 잠들 수 있고,
+ * NPEM 레지스터도 완료 대기(Command Completed)가 있다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: LED 서브시스템(drivers/leds/), sysfs.
+ * 아래쪽: access.c 의 확장 capability 접근, ACPI 의 _DSM 평가.
+ * 공유 상태: struct npem — LED 클래스 장치, 뮤텍스, 그리고 ops 포인터.
+ *
+ * === NVMe 관점 ===
+ * NVMe 드라이버는 이 파일의 함수를 쓰지 않는다(전수 확인).
+ *
+ * 하지만 이 파일의 주된 대상이 바로 NVMe SSD 다. 원문 주석이 인용한
+ * 스펙 이름이 그것을 말해 준다 — "_DSM Definitions for PCIe SSD Status LED"
+ * (PCI Firmware Specification r3.3 sec 4.7).
+ *
+ * U.2/EDSFF 백플레인에서 드라이브 하나가 고장 났을 때, 관리자가 어느
+ * 베이인지 알아야 교체할 수 있다. `ledctl` 같은 도구로 그 드라이브의
+ * Locate LED 를 켜면 이 파일을 거쳐 실제로 불이 들어온다.
+ *
+ * 실무에서는 slot.c 와 함께 쓰인다 — 슬롯 번호로 어느 베이인지 알고,
+ * 이 파일로 그 베이의 LED 를 켜는 식이다.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * pci_npem_create()      : NPEM 또는 _DSM 지원을 확인하고 LED 장치를 만든다.
+ * pci_npem_remove()      : 그 반대.
+ * npem_set() / npem_get(): LED 상태를 쓰고 읽는다. ops 로 위임한다.
+ * npem_get_ops()         : NPEM 과 _DSM 중 어느 것을 쓸지 정한다.
+ * npem_write_ctrl()      : NPEM Control 레지스터에 쓰고 Command Completed 를
+ *                          기다린다. 하드웨어가 처리에 시간이 걸린다.
+ * dsm_get() / dsm_set()  : _DSM 경로의 구현.
+ * struct indication      : 표시 하나(비트 위치와 이름).
+ * struct npem            : LED 장치 하나의 상태.
  */
 
 #include <linux/acpi.h>		/* NVMe: ACPI _DSM 평가에 필요한 헤더, PCIe SSD LED 상태를 ACPI를 통해 제어할 때 사용 */

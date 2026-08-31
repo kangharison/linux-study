@@ -8,37 +8,73 @@
  */
 
 /*
- * ===================================================================
- * NVMe PCIe 호스트 드라이버 관점 파일 요약
- * -------------------------------------------------------------------
- * 본 파일(drivers/pci/tph.c)은 PCIe TLP Processing Hints(TPH)를 관리한다.
- * TPH는 엔드포인트(예: NVMe SSD)가 Root Complex(RC)에 메모리 트랜잭션
- * 처리 방식에 대한 힌트(Processing Hint, PH)와 Steering Tag(ST)를 전달해
- * 캐시/메모리 근접성을 최적화하는 PCIe 기능이다.
+ * [한국어 설명] 장치가 "이 데이터를 어디에 두라" 고 힌트를 주는 기능 (tph.c)
  *
- * NVMe SSD 관련 의미:
- *   - NVMe 드라이브는 여러 큐와 MSI-X 인터럽트를 사용하며, 큐-CPU affinity
- *     설정 시 TPH를 이용해 데이터/완료큐가 특정 CPU/NUMA 노드의 캐시로
- *     스티어링되도록 요청할 수 있다.
- *   - TPH를 통해 DMA read/write 트랜잭션의 지연(latency)과 대역폭을 개선할
- *     수 있어 고성능 NVMe 워크로드에 직접적인 영향을 준다.
- *   - NVMe 장치가 D3cold, PCIe surprise down, FLR, suspend-resume 등으로
- *     상태를 잃은 뒤 복귀할 때 TPH 설정값(Control register, ST table)을
- *     복원해야 큐-CPU affinity 성능이 유지된다.
+ * === 파일의 역할 ===
+ * TPH(TLP Processing Hints)는 장치가 DMA 를 하면서 "이 데이터는 곧
+ * 어느 CPU 가 쓸 것" 이라는 힌트를 함께 보내는 기능이다. 그러면
+ * Root Complex 가 그 데이터를 해당 CPU 의 캐시(또는 가까운 메모리
+ * 컨트롤러)에 미리 넣어 둘 수 있다.
  *
- * NVMe 드라이버가 간접/직접 사용하는 호출 경로:
- *   - 장치 탐색 단계: pci_tph_init() -> pci_find_ext_capability()
- *     (NVMe pdev->tph_cap 등록, drivers/pci/probe.c에서 자동 호출)
- *   - NVMe 큐 초기화: pcie_enable_tph() -> pcie_tph_set_st_entry() 로
- *     큐/인터럽트 벡터별 ST 구성(현재 NVMe 본문은 직접 호출하지 않으나,
- *     NVMe 성능 최적화를 위해 활용 가능한 표준 인터페이스)
- *   - 장치 재초기화/오류 복구: pci_restore_tph_state() -> pcie_enable_tph()
- *     (PCIe AER, PME, D3cold wakeup, runtime resume 시 복원)
- *   - 전역 비활성화: pci_no_tph() ("notph" 커널 파라미터)
+ * 힌트는 두 부분이다.
+ *   PH (Processing Hint, 2비트) — 데이터의 성격. 곧 읽힐 것인가,
+ *     쓰기만 될 것인가, 양방향인가, 시간 지역성이 있는가.
+ *   ST (Steering Tag, 8~16비트) — 목적지. 어느 CPU/캐시인지를 나타내는
+ *     플랫폼 고유 값이다. 커널이 그 값을 알아내 장치에 알려 줘야 한다.
  *
- * TPH 상태는 struct pci_dev의 tph_cap, tph_enabled, tph_mode,
- * tph_req_type 필드로 관리되며, NVMe pdev에 포함된다.
- * ===================================================================
+ * ST 값을 얻는 방법이 이 파일의 어려운 부분이다. 플랫폼마다 다르고,
+ * ACPI 의 _DSM 이나 아키텍처 고유 인터페이스로 물어봐야 한다. 그리고
+ * 장치는 그 값을 어디에 저장할지도 두 가지다 —
+ * MSI-X 테이블 항목 안(ST Table Location = MSI-X)이거나,
+ * TPH capability 안의 전용 테이블이거나.
+ *
+ * 왜 유용한가. NVMe 같은 고성능 장치는 완료 큐 엔트리를 쓰고 바로
+ * 인터럽트를 올린다. 그 인터럽트를 받은 CPU 가 그 엔트리를 읽는데,
+ * 데이터가 그 CPU 의 캐시에 없으면 메모리까지 다녀와야 한다. TPH 로
+ * 미리 그 캐시에 넣어 두면 그 지연이 사라진다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * 열거: probe.c 가 TPH capability 를 찾아 dev->tph_cap 에 캐시
+ *
+ * 사용: 드라이버가 큐마다 인터럽트를 배정한 뒤
+ *         -> [이 파일] pcie_tph_set_st_entry(pdev, index, tag)
+ *            -> ST 값을 MSI-X 테이블 또는 TPH 테이블에 기록
+ *         -> [이 파일] pcie_tph_get_cpu_st() 로 그 CPU 의 ST 값을 얻는다
+ *            -> 플랫폼에 물어본다(ACPI _DSM 등)
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. ACPI 평가와 MSI-X 테이블 접근이 있다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: TPH 를 쓰는 드라이버들(주로 고성능 네트워크 카드).
+ * 아래쪽: msi/msi.c 의 MSI-X 테이블 접근(pci_msix_write_tph_tag),
+ *   ACPI 의 _DSM 평가, access.c 의 config 접근.
+ * 공유 상태: struct pci_dev 의 tph_cap, tph_mode, tph_req_type.
+ *
+ * === NVMe 관점 ===
+ * NVMe 드라이버는 이 파일의 함수를 쓰지 않는다(전수 확인).
+ *
+ * 기술적으로는 잘 맞는 조합이다. NVMe 는 큐마다 MSI-X 벡터를 갖고 그
+ * 벡터가 특정 CPU 에 묶여 있으므로(irq affinity), 그 큐의 완료 엔트리를
+ * 그 CPU 캐시로 보내면 이득이 크다. 그리고 ST 값을 MSI-X 테이블에
+ * 저장하는 방식이 그 구조와 자연스럽게 맞는다.
+ *
+ * 그럼에도 NVMe 가 쓰지 않는 이유는 코드에서 확인할 수 없다. 플랫폼
+ * 지원이 아직 제한적이라는 것이 일반적인 설명이지만, 이 트리의
+ * 정보만으로는 확인할 수 없다.
+ *
+ * (기존 주석은 NVMe 가 "큐-CPU affinity 설정과 함께 TPH 를 활용한다" 는
+ *  취지로 적었으나, drivers/nvme/ 에 TPH 관련 호출은 0건이다.)
+ *
+ * === 주요 함수/구조체 요약 ===
+ * pcie_tph_init()            : TPH capability 를 찾아 캐시한다.
+ * pcie_enable_tph() / pcie_disable_tph() : TPH 를 켜고 끈다. 켤 때
+ *                              어느 방식(No ST / Interrupt Vector / Device
+ *                              Specific)으로 ST 를 쓸지 지정한다.
+ * pcie_tph_get_cpu_st()      : 특정 CPU 에 대응하는 ST 값을 플랫폼에 묻는다.
+ * pcie_tph_set_st_entry()    : ST 값을 장치에 기록한다. 저장 위치가
+ *                              MSI-X 테이블인지 TPH 테이블인지에 따라 갈린다.
+ * tph_write_tag_to_msix()    : MSI-X 테이블 항목에 ST 를 쓴다.
+ * pcie_tph_intr_vec_supported() : 이 장치가 인터럽트 벡터 방식을 지원하는가.
  */
 
 #include <linux/pci.h>           /* NVMe: PCIe 장치 구조체와 config space 접근 API */
