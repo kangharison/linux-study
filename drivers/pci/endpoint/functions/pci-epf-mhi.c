@@ -2666,7 +2666,7 @@ static int pci_epf_mhi_link_down(struct pci_epf *epf)
 
 /* [한국어]
  * pci_epf_mhi_bus_master_enable - 호스트가 Bus Master 를 켰을 때 MHI 스택을 다시 올린다
-
+ *
  * @epf: 이 EPF 인스턴스. epf_get_drvdata() 로 struct pci_epf_mhi 를 되찾는다.
  * @return: 항상 0. 전원 인가에 실패해도 0 을 돌려주고 정리만 한다 --
  *          EPC 코어의 통지 경로에는 되돌릴 만한 상위 동작이 없기 때문이다.
@@ -2735,7 +2735,7 @@ static int pci_epf_mhi_bus_master_enable(struct pci_epf *epf)
 
 /* [한국어]
  * pci_epf_mhi_bind - EPF 가 EPC 에 묶일 때 MHI 레지스터 창과 도어벨 IRQ 를 확보한다
-
+ *
  * @epf: configfs 로 EPC 에 바인딩된 이 EPF 인스턴스. epf->epc 는 이 시점에
  *       이미 채워져 있다(EPF 코어가 bind 를 부르기 전에 연결한다).
  * @return: 0 성공. -ENODEV 는 DT 에 "mmio" reg 가 없을 때, -ENOMEM 은
@@ -2826,7 +2826,7 @@ static int pci_epf_mhi_bind(struct pci_epf *epf)
 
 /* [한국어]
  * pci_epf_mhi_unbind - EPF 를 EPC 에서 떼어낼 때 MHI 스택과 BAR 를 모두 되돌린다
-
+ *
  * @epf: 떼어낼 EPF 인스턴스.
  * @return: 없음. 언바인드 경로에는 실패를 보고할 상위가 없으므로 void 다.
  *
@@ -2901,7 +2901,7 @@ static const struct pci_epc_event_ops pci_epf_mhi_event_ops = {
 
 /* [한국어]
  * pci_epf_mhi_probe - EPF 인스턴스를 만들고 SoC 기술표를 붙인다
-
+ *
  * @epf: configfs 에서 이름으로 만들어진 EPF 장치. 아직 EPC 에 묶이지 않았다.
  * @id: 이 EPF 이름과 맞아떨어진 pci_epf_device_id 항목. driver_data 에
  *      SoC별 pci_epf_mhi_ep_info 포인터가 kernel_ulong_t 로 실려 온다.
@@ -2999,7 +2999,7 @@ static struct pci_epf_driver pci_epf_mhi_driver = {
 
 /* [한국어]
  * pci_epf_mhi_init - 모듈 적재 시 EPF 드라이버를 가상 버스에 등록한다
-
+ *
  * @return: pci_epf_register_driver() 의 반환값 그대로. 음수면 모듈 적재가
  *          실패한다.
  *
@@ -3025,7 +3025,7 @@ module_init(pci_epf_mhi_init);
 
 /* [한국어]
  * pci_epf_mhi_exit - 모듈 제거 시 EPF 드라이버 등록을 해제한다
-
+ *
  * @return: 없음.
  *
  * pci_epf_unregister_driver() 가 configfs 항목을 걷어내고 driver_unregister()

@@ -711,7 +711,7 @@ static u16 dw_pcie_find_vsec_capability(struct dw_pcie *pci,				/* PCI/NVMe: VSE
 /* PCI/NVMe: RAS-DES(Reliability/Availability) VSEC 탐색, NVMe AER/오류 카운터 연결 */
 /* [한국어]
  * dw_pcie_find_rasdes_capability - RAS DES 확장의 위치를 찾는다
-
+ *
  * @pci: 대상 컨트롤러.
  * @return: 그 오프셋. 없으면 0.
  *
@@ -737,7 +737,7 @@ EXPORT_SYMBOL_GPL(dw_pcie_find_rasdes_capability);
 /* PCI/NVMe: PTM(Precision Time Measurement) VSEC 탐색, NVMe 타임스탬프 동기화 */
 /* [한국어]
  * dw_pcie_find_ptm_capability - PTM 확장의 위치를 찾는다
-
+ *
  * @pci: 대상 컨트롤러.
  * @return: 그 오프셋. 없으면 0.
  *
@@ -758,7 +758,7 @@ EXPORT_SYMBOL_GPL(dw_pcie_find_ptm_capability);
 
 /* [한국어]
  * dw_pcie_read - 정렬을 확인하고 크기에 맞는 MMIO 읽기를 한다
-
+ *
  * @addr: 읽을 주소. 호출자가 이미 베이스를 더해 넘긴다.
  * @size: 1, 2, 4 중 하나.
  * @val: 결과를 담을 곳.
@@ -805,7 +805,7 @@ EXPORT_SYMBOL_GPL(dw_pcie_read);
 
 /* [한국어]
  * dw_pcie_write - 정렬을 확인하고 크기에 맞는 MMIO 쓰기를 한다
-
+ *
  * @addr: 쓸 주소.
  * @size: 1, 2, 4 중 하나.
  * @val: 쓸 값.
@@ -840,7 +840,7 @@ EXPORT_SYMBOL_GPL(dw_pcie_write);
 /* PCI/NVMe: DBI(config) 공간 읽기, RC 자체 및 다운스트림 NVMe config 접근 */
 /* [한국어]
  * dw_pcie_read_dbi - DBI(이 IP 의 config space)에서 읽는다
-
+ *
  * @pci: 대상 컨트롤러.
  * @reg: DBI 안의 오프셋.
  * @size: 읽을 크기(바이트).
@@ -883,7 +883,7 @@ EXPORT_SYMBOL_GPL(dw_pcie_read_dbi);
 /* PCI/NVMe: DBI(config) 공간 쓰기, NVMe 링크/MSI/BAR 설정 */
 /* [한국어]
  * dw_pcie_write_dbi - DBI 에 쓴다
-
+ *
  * @pci: 대상 컨트롤러.
  * @reg: DBI 안의 오프셋.
  * @size: 쓸 크기(바이트).
@@ -920,7 +920,7 @@ EXPORT_SYMBOL_GPL(dw_pcie_write_dbi);
 /* PCI/NVMe: DBI2 공간 쓰기, EP 모드에서 NVMe BAR/MSI-X 등 설정 */
 /* [한국어]
  * dw_pcie_write_dbi2 - 두 번째 DBI 창에 쓴다
-
+ *
  * @pci: 대상 컨트롤러.
  * @reg: DBI2 안의 오프셋.
  * @size: 쓸 크기(바이트).
@@ -963,7 +963,7 @@ EXPORT_SYMBOL_GPL(dw_pcie_write_dbi2);
 /* PCI/NVMe: iATU 영역 선택, NVMe 메모리/config/message TLP 변환 */
 /* [한국어]
  * dw_pcie_select_atu - iATU 창 하나의 레지스터 주소를 얻는다
-
+ *
  * @pci: 대상 컨트롤러.
  * @dir: 방향(아웃바운드 PCIE_ATU_REGION_DIR_OB 또는 인바운드 _IB).
  * @index: 몇 번째 창인지.
@@ -1005,7 +1005,7 @@ static inline void __iomem *dw_pcie_select_atu(struct dw_pcie *pci, u32 dir,
 /* PCI/NVMe: ATU 레지스터 읽기, NVMe BAR/iATU 설정 검증 */
 /* [한국어]
  * dw_pcie_readl_atu - iATU 레지스터를 읽는다
-
+ *
  * @pci: 대상 컨트롤러.
  * @dir: 방향.
  * @index: 창 번호.
@@ -1045,7 +1045,7 @@ static u32 dw_pcie_readl_atu(struct dw_pcie *pci, u32 dir, u32 index, u32 reg)
 /* PCI/NVMe: ATU 레지스터 쓰기, NVMe 메모리/config 창 프로그래밍 */
 /* [한국어]
  * dw_pcie_writel_atu - iATU 레지스터에 쓴다
-
+ *
  * @pci: 대상 컨트롤러.
  * @dir: 방향.
  * @index: 창 번호.
@@ -1080,7 +1080,7 @@ static void dw_pcie_writel_atu(struct dw_pcie *pci, u32 dir, u32 index,
 
 /* [한국어]
  * dw_pcie_readl_atu_ob - 아웃바운드 창의 레지스터를 읽는다
-
+ *
  * @pci: 대상 컨트롤러.
  * @index: 창 번호.
  * @reg: 레지스터 오프셋.
@@ -1102,7 +1102,7 @@ static inline u32 dw_pcie_readl_atu_ob(struct dw_pcie *pci, u32 index, u32 reg)	
 
 /* [한국어]
  * dw_pcie_writel_atu_ob - 아웃바운드 창의 레지스터에 쓴다
-
+ *
  * @pci: 대상 컨트롤러.
  * @index: 창 번호.
  * @reg: 레지스터 오프셋.
@@ -1126,7 +1126,7 @@ static inline void dw_pcie_writel_atu_ob(struct dw_pcie *pci, u32 index, u32 reg
 
 /* [한국어]
  * dw_pcie_enable_ecrc - 특정 IP 버전의 ECRC 결함을 우회한다
-
+ *
  * @val: 아웃바운드 창의 Control 1 레지스터에 쓸 값.
  * @return: TD 비트가 필요에 따라 켜진 값.
  *
@@ -1190,7 +1190,7 @@ static inline u32 dw_pcie_enable_ecrc(u32 val)							/* PCI/NVMe: ATU TD 비트�
 /* PCI/NVMe: outbound iATU 프로그램, NVMe config/MMIO/MSG 전송 경로 설정 */
 /* [한국어]
  * dw_pcie_prog_outbound_atu - 아웃바운드 주소 변환 창을 설정한다
-
+ *
  * @pci: 대상 컨트롤러.
  * @atu: 설정할 내용. 창 번호, 이쪽 주소, 저쪽 PCIe 주소, 크기,
  *   TLP 종류와 라우팅 방식이 들어 있다.
@@ -1300,7 +1300,7 @@ int dw_pcie_prog_outbound_atu(struct dw_pcie *pci,
 
 /* [한국어]
  * dw_pcie_readl_atu_ib - 인바운드 창의 레지스터를 읽는다
-
+ *
  * @pci: 대상 컨트롤러.
  * @index: 창 번호.
  * @reg: 레지스터 오프셋.
@@ -1322,7 +1322,7 @@ static inline u32 dw_pcie_readl_atu_ib(struct dw_pcie *pci, u32 index, u32 reg)	
 
 /* [한국어]
  * dw_pcie_writel_atu_ib - 인바운드 창의 레지스터에 쓴다
-
+ *
  * @pci: 대상 컨트롤러.
  * @index: 창 번호.
  * @reg: 레지스터 오프셋.
@@ -1347,7 +1347,7 @@ static inline void dw_pcie_writel_atu_ib(struct dw_pcie *pci, u32 index, u32 reg
 /* PCI/NVMe: inbound iATU 프로그램, NVMe EP 모드에서 host가 NVMe BAR 접근 */
 /* [한국어]
  * dw_pcie_prog_inbound_atu - 인바운드 주소 변환 창을 설정한다 (주소 기준)
-
+ *
  * @pci: 대상 컨트롤러.
  * @index: 창 번호.
  * @type: TLP 종류.
@@ -1433,7 +1433,7 @@ int dw_pcie_prog_inbound_atu(struct dw_pcie *pci, int index, int type,
 /* PCI/NVMe: EP 모드에서 function별 inbound ATU(BAR mode) 설정, NVMe SSD function */
 /* [한국어]
  * dw_pcie_prog_ep_inbound_atu - 인바운드 창을 BAR 기준으로 설정한다
-
+ *
  * @pci: 대상 컨트롤러.
  * @func_no: 어느 엔드포인트 함수의 BAR 인지.
  * @index: 창 번호.
@@ -1502,7 +1502,7 @@ int dw_pcie_prog_ep_inbound_atu(struct dw_pcie *pci, u8 func_no, int index,
 /* PCI/NVMe: iATU 윈도우 비활성화, NVMe BAR/config 접근 해제 */
 /* [한국어]
  * dw_pcie_disable_atu - 주소 변환 창 하나를 끈다
-
+ *
  * @pci: 대상 컨트롤러.
  * @dir: 방향(아웃바운드/인바운드).
  * @index: 끌 창 번호.
@@ -1528,7 +1528,7 @@ void dw_pcie_disable_atu(struct dw_pcie *pci, u32 dir, int index)
 
 /* [한국어]
  * dw_pcie_ltssm_status_string - LTSSM 상태 값을 사람이 읽을 문자열로 바꾼다
-
+ *
  * @ltssm: LTSSM 상태 값.
  * @return: 그 상태의 이름.
  *
@@ -1607,7 +1607,7 @@ const char *dw_pcie_ltssm_status_string(enum dw_pcie_ltssm ltssm)				/* PCI/NVMe
  */
 /* [한국어]
  * dw_pcie_wait_for_link - 링크가 올라오기를 기다리고 결과를 보고한다
-
+ *
  * @pci: 대상 컨트롤러.
  * @return: 0 이면 링크가 올라왔다. 실패는 원인에 따라 셋으로 나뉜다 —
  *   -ENODEV(장치가 없음), -EIO(있는데 활성화 안 됨), -ETIMEDOUT(그 밖).
@@ -1696,7 +1696,7 @@ EXPORT_SYMBOL_GPL(dw_pcie_wait_for_link);
 
 /* [한국어]
  * dw_pcie_link_up - 링크가 올라와 있는지 확인한다
-
+ *
  * @pci: 대상 컨트롤러.  @return: 링크가 살아 있으면 true.
  *
  * SoC 별 콜백이 있으면 그것을 우선하고, 없으면 IP 의 표준 방식 —
@@ -1726,7 +1726,7 @@ EXPORT_SYMBOL_GPL(dw_pcie_link_up);
 
 /* [한국어]
  * dw_pcie_upconfig_setup - 레인 수를 동적으로 늘릴 수 있게 한다
-
+ *
  * @pci: 대상 컨트롤러.  @return: 없음.
  *
  * Upconfigure 는 링크가 올라온 뒤 레인 수를 늘리는 PCIe 기능이다.
@@ -1752,7 +1752,7 @@ EXPORT_SYMBOL_GPL(dw_pcie_upconfig_setup);
 
 /* [한국어]
  * dw_pcie_link_set_max_speed - 협상할 최대 링크 속도를 제한한다
-
+ *
  * @pci: 대상 컨트롤러. max_link_speed 를 본다.  @return: 없음.
  *
  * 디바이스 트리의 max-link-speed 로 지정한 상한을 하드웨어에 반영한다.
@@ -1819,7 +1819,7 @@ static void dw_pcie_link_set_max_speed(struct dw_pcie *pci)							/* PCI/NVMe: P
 
 /* [한국어]
  * dw_pcie_link_get_max_link_width - 하드웨어가 지원하는 최대 레인 수를 읽는다
-
+ *
  * @pci: 대상 컨트롤러.  @return: 최대 레인 수.
  *
  * Link Capabilities 레지스터의 Maximum Link Width 필드를 읽는다.
@@ -1843,7 +1843,7 @@ int dw_pcie_link_get_max_link_width(struct dw_pcie *pci)							/* PCI/NVMe: PCIe
 /* PCI/NVMe: PCIe 링크 폭 설정, NVMe 사용 가능 lane 수 제한 */
 /* [한국어]
  * dw_pcie_link_set_max_link_width - 쓸 레인 수를 설정한다
-
+ *
  * @pci: 대상 컨트롤러.
  * @num_lanes: 쓸 레인 수. 0 이면 아무것도 하지 않는다.
  *
@@ -1912,7 +1912,7 @@ static void dw_pcie_link_set_max_link_width(struct dw_pcie *pci, u32 num_lanes)
 
 /* [한국어]
  * dw_pcie_iatu_detect - iATU 의 창 개수와 주소 제약을 하드웨어에서 알아낸다
-
+ *
  * @pci: 대상 컨트롤러. 결과를 num_ob_windows, num_ib_windows,
  *   region_align, region_limit 에 기록한다.  @return: 없음.
  *
@@ -2002,7 +2002,7 @@ void dw_pcie_iatu_detect(struct dw_pcie *pci)										/* PCI/NVMe: iATU 윈도�
 
 /* [한국어]
  * dw_pcie_readl_dma - eDMA 레지스터를 읽는다
-
+ *
  * @pci: 대상 컨트롤러.  @reg: eDMA 영역 안의 오프셋.  @return: 읽은 값.
  *
  * DBI 접근과 같은 구조이되 베이스가 edma.reg_base 다. SoC 별 콜백을
@@ -2030,7 +2030,7 @@ static u32 dw_pcie_readl_dma(struct dw_pcie *pci, u32 reg)							/* PCI/NVMe: eD
 /* PCI/NVMe: eDMA 채널별 IRQ 번호 획득, NVMe DMA 완료 인터럽트 */
 /* [한국어]
  * dw_pcie_edma_irq_vector - eDMA 채널 번호를 IRQ 번호로 바꾼다
-
+ *
  * @dev: 이 컨트롤러의 device.
  * @nr: 채널 번호(쓰기 채널 다음에 읽기 채널이 이어진다).
  * @return: 그 채널의 IRQ 번호. 없으면 음수.
@@ -2071,7 +2071,7 @@ static struct dw_edma_plat_ops dw_pcie_edma_ops = {									/* PCI/NVMe: eDMA �
 
 /* [한국어]
  * dw_pcie_edma_init_data - eDMA 칩 정보의 기본값을 채운다
-
+ *
  * @pci: 대상 컨트롤러.  @return: 없음.
  *
  * dmaengine 에 등록할 struct dw_edma_chip 의 공통 필드를 채운다 —
@@ -2094,7 +2094,7 @@ static void dw_pcie_edma_init_data(struct dw_pcie *pci)								/* PCI/NVMe: eDMA
 
 /* [한국어]
  * dw_pcie_edma_find_mf - eDMA 레지스터의 매핑 형식을 알아낸다
-
+ *
  * @pci: 대상 컨트롤러.  @return: 0 이면 성공. eDMA 가 없으면 -ENODEV.
  *
  * MF 는 Mapping Format 이다. eDMA 레지스터의 배치가 IP 버전에 따라 다르다.
@@ -2148,7 +2148,7 @@ static int dw_pcie_edma_find_mf(struct dw_pcie *pci)									/* PCI/NVMe: eDMA �
 /* PCI/NVMe: eDMA 읽기/쓰기 채널 수 자동 탐지, NVMe DMA 큐 용량 결정 */
 /* [한국어]
  * dw_pcie_edma_find_channels - 읽기·쓰기 채널 개수를 알아낸다
-
+ *
  * @pci: 대상 컨트롤러.
  * @return: 0 이면 성공. 채널이 없거나 상한을 넘으면 -EINVAL.
  *
@@ -2190,7 +2190,7 @@ static int dw_pcie_edma_find_channels(struct dw_pcie *pci)
 
 /* [한국어]
  * dw_pcie_edma_find_chip - eDMA 하드웨어를 찾아 정보를 채운다
-
+ *
  * @pci: 대상 컨트롤러.  @return: 0 이면 있음, 없으면 -ENODEV.
  *
  * 위 두 find_ 함수를 순서대로 부른다. 매핑 형식을 먼저 알아야
@@ -2216,7 +2216,7 @@ static int dw_pcie_edma_find_chip(struct dw_pcie *pci)									/* PCI/NVMe: eDMA
 
 /* [한국어]
  * dw_pcie_edma_irq_verify - eDMA IRQ 구성이 채널 수와 맞는지 확인한다
-
+ *
  * @pci: 대상 컨트롤러.  @return: 0 이면 맞다. 아니면 -EINVAL.
  *
  * eDMA 인터럽트는 세 가지 구성이 가능하다 — 채널마다 하나, 읽기와
@@ -2260,7 +2260,7 @@ static int dw_pcie_edma_irq_verify(struct dw_pcie *pci)								/* PCI/NVMe: eDMA
 /* PCI/NVMe: eDMA Linked List 메모리 할당, NVMe DMA descriptor 저장 */
 /* [한국어]
  * dw_pcie_edma_ll_alloc - 채널마다 링크드 리스트 메모리를 잡는다
-
+ *
  * @pci: 대상 컨트롤러.
  * @return: 0 이면 성공. -ENOMEM.
  *
@@ -2311,7 +2311,7 @@ static int dw_pcie_edma_ll_alloc(struct dw_pcie *pci)
 
 /* [한국어]
  * dw_pcie_edma_detect - eDMA 를 찾아 dmaengine 에 등록한다
-
+ *
  * @pci: 대상 컨트롤러.  @return: 0 이면 성공(eDMA 가 없어도 성공이다).
  *
  * eDMA 는 DesignWare IP 가 선택적으로 내장하는 DMA 엔진이다. 있으면
@@ -2368,7 +2368,7 @@ int dw_pcie_edma_detect(struct dw_pcie *pci)											/* PCI/NVMe: eDMA 엔진 
 
 /* [한국어]
  * dw_pcie_edma_remove - eDMA 등록을 해제한다
-
+ *
  * @pci: 대상 컨트롤러.  @return: 없음.
  *
  * detect 의 반대다. 링크드 리스트 메모리는 devres 라 여기서 해제하지 않는다.
@@ -2385,7 +2385,7 @@ void dw_pcie_edma_remove(struct dw_pcie *pci)											/* PCI/NVMe: eDMA 드라
 /* PCI/NVMe: 지원하지 않는 L1 PM Substates 숨김, NVMe ASPM 호환성 */
 /* [한국어]
  * dw_pcie_hide_unsupported_l1ss - 동작하지 않는 L1 서브스테이트를 감춘다
-
+ *
  * @pci: 대상 컨트롤러.
  * @return: 없음.
  *
@@ -2432,7 +2432,7 @@ void dw_pcie_hide_unsupported_l1ss(struct dw_pcie *pci)
 
 /* [한국어]
  * dw_pcie_setup - 링크 트레이닝 전의 공통 설정을 한다
-
+ *
  * @pci: 대상 컨트롤러.  @return: 없음.
  *
  * 호스트든 엔드포인트든 공통으로 필요한 설정을 모아 놓은 함수다.
@@ -2489,7 +2489,7 @@ void dw_pcie_setup(struct dw_pcie *pci)													/* PCI/NVMe: PCIe RC 기본 
 /* PCI/NVMe: 상위 버스 주소 오프셋 계산, NVMe BAR/ATU 주소 변환 */
 /* [한국어]
  * dw_pcie_parent_bus_offset - CPU 물리 주소와 상위 버스 주소의 차이를 구한다
-
+ *
  * @pci: 대상 컨트롤러.
  * @reg_name: 기준으로 삼을 자원 이름("dbi" 등).
  * @cpu_phys_addr: 그 자원의 CPU 물리 주소.

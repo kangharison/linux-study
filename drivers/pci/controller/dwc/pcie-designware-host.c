@@ -96,7 +96,7 @@ static struct pci_ops dw_child_pcie_ops;	/* PCI/NVMe: 하위 버스 config 접�
 #ifdef CONFIG_SMP
 /* [한국어]
  * dw_irq_noop - 아무 일도 하지 않는 irq_ack 자리채우기 (SMP 전용)
-
+ *
  * @d: 대상 인터럽트의 irq_data. 쓰지 않는다.
  * @return: 없음.
  *
@@ -121,7 +121,7 @@ static void dw_irq_noop(struct irq_data *d) { }	/* NVMe: SMP 시 irq_ack no-op, 
 
 /* [한국어]
  * dw_pcie_init_dev_msi_info - 자식 MSI 도메인을 만들 때 irq_chip 을 이 IP 에 맞게 손본다
-
+ *
  * @dev: MSI 를 요청한 PCI 디바이스.
  * @domain: 새로 만들어지는 자식(디바이스별) MSI 도메인.
  * @real_parent: 실제 부모 도메인 — 여기서는 pp->irq_domain.
@@ -186,7 +186,7 @@ static const struct msi_parent_ops dw_pcie_msi_parent_ops = {
 /* MSI int handler */
 /* [한국어]
  * dw_handle_msi_irq - iMSI-RX 상태 레지스터를 훑어 걸린 MSI 를 커널로 올린다
-
+ *
  * @pp: 이 루트 포트. 컨트롤러 레지스터와 IRQ 도메인이 여기 달려 있다.
  * @return: 없음.
  *
@@ -239,7 +239,7 @@ void dw_handle_msi_irq(struct dw_pcie_rp *pp)
 /* Chained MSI interrupt service routine */
 /* [한국어]
  * dw_chained_msi_isr - MSI 부모 IRQ 에 걸리는 연쇄(chained) 핸들러
-
+ *
  * @desc: 부모 IRQ 의 irq_desc. 핸들러 데이터로 dw_pcie_rp 가 매달려 있다.
  * @return: 없음.
  *
@@ -275,7 +275,7 @@ static void dw_chained_msi_isr(struct irq_desc *desc)
 
 /* [한국어]
  * dw_pci_setup_msi_msg - 디바이스가 써야 할 MSI 주소/데이터를 조립한다
-
+ *
  * @d: 이 벡터의 irq_data. chip_data 에 dw_pcie_rp 가, hwirq 에 벡터 번호가 있다.
  * @msg: 채워 넣을 MSI 메시지. 커널이 이 값을 디바이스 설정공간의
  *       MSI/MSI-X 능력 구조에 기록한다.
@@ -312,7 +312,7 @@ static void dw_pci_setup_msi_msg(struct irq_data *d, struct msi_msg *msg)
 
 /* [한국어]
  * dw_pci_bottom_mask - 벡터 하나를 iMSI-RX 마스크 레지스터에서 막는다
-
+ *
  * @d: 막을 벡터의 irq_data. hwirq 가 전역 벡터 번호다.
  * @return: 없음.
  *
@@ -350,7 +350,7 @@ static void dw_pci_bottom_mask(struct irq_data *d)
 
 /* [한국어]
  * dw_pci_bottom_unmask - 벡터 하나의 마스크를 풀어 다시 받게 한다
-
+ *
  * @d: 풀 벡터의 irq_data.
  * @return: 없음.
  *
@@ -385,7 +385,7 @@ static void dw_pci_bottom_unmask(struct irq_data *d)
 
 /* [한국어]
  * dw_pci_bottom_ack - 처리한 벡터의 STATUS 비트를 write-1-to-clear 로 지운다
-
+ *
  * @d: 처리 중인 벡터의 irq_data.
  * @return: 없음.
  *
@@ -439,7 +439,7 @@ static struct irq_chip dw_pci_msi_bottom_irq_chip = {
 
 /* [한국어]
  * dw_pcie_irq_domain_alloc - MSI 비트맵에서 벡터를 잡아 virq 에 연결한다
-
+ *
  * @domain: 부모 MSI 도메인. host_data 에 dw_pcie_rp 가 들어 있다.
  * @virq: 커널이 배정한 첫 가상 IRQ 번호.
  * @nr_irqs: 연속으로 요청된 벡터 개수. multi-MSI 는 2의 거듭제곱이다.
@@ -490,7 +490,7 @@ static int dw_pcie_irq_domain_alloc(struct irq_domain *domain, unsigned int virq
 
 /* [한국어]
  * dw_pcie_irq_domain_free - 할당했던 MSI 벡터 묶음을 비트맵에 되돌린다
-
+ *
  * @domain: 부모 MSI 도메인.
  * @virq: 반납할 첫 가상 IRQ 번호.
  * @nr_irqs: 반납할 개수.
@@ -527,7 +527,7 @@ static const struct irq_domain_ops dw_pcie_msi_domain_ops = {
 
 /* [한국어]
  * dw_pcie_allocate_domains - iMSI-RX 를 대표하는 부모 MSI 도메인을 만든다
-
+ *
  * @pp: 이 루트 포트. num_vectors 가 도메인 크기를 정하고, 만들어진 도메인이
  *      pp->irq_domain 에 저장된다.
  * @return: 0 성공, -ENOMEM 생성 실패.
@@ -578,7 +578,7 @@ EXPORT_SYMBOL_GPL(dw_pcie_allocate_domains);
 
 /* [한국어]
  * dw_pcie_free_msi - 연쇄 핸들러를 떼고 MSI 도메인을 없앤다
-
+ *
  * @pp: 정리할 루트 포트.
  * @return: 없음.
  *
@@ -613,7 +613,7 @@ EXPORT_SYMBOL_GPL(dw_pcie_free_msi);
 
 /* [한국어]
  * dw_pcie_msi_init - iMSI-RX 하드웨어에 마스크/활성/목적지 주소를 써 넣는다
-
+ *
  * @pp: 이 루트 포트.
  * @return: 없음.
  *
@@ -670,7 +670,7 @@ EXPORT_SYMBOL_GPL(dw_pcie_msi_init);
 
 /* [한국어]
  * dw_pcie_parse_split_msi_irq - "msi0".."msi7" 로 쪼개진 인터럽트 선을 모은다
-
+ *
  * @pp: 이 루트 포트. 찾은 IRQ 를 pp->msi_irq[] 에 채우고 num_vectors 를 조정한다.
  * @return: 0 성공, -ENXIO 는 "msi0" 조차 없다(= 분리형이 아니다), 그 외 음수는
  *          DT 파싱 오류로 dev_err_probe 를 거친 값.
@@ -740,7 +740,7 @@ static int dw_pcie_parse_split_msi_irq(struct dw_pcie_rp *pp)
 
 /* [한국어]
  * dw_pcie_msi_host_init - 내장 iMSI-RX 를 쓰는 MSI 경로 전체를 세운다
-
+ *
  * @pp: 이 루트 포트.
  * @return: 0 성공. 음수는 IRQ 조회 실패나 목적지 주소 확보 실패.
  *
@@ -866,7 +866,7 @@ EXPORT_SYMBOL_GPL(dw_pcie_msi_host_init);
 
 /* [한국어]
  * dw_pcie_host_request_msg_tlp_res - MSG TLP 를 쏘기 위한 주소 창 한 칸을 떼어 놓는다
-
+ *
  * @pp: 이 루트 포트. 확보한 자원이 pp->msg_res 에 저장된다.
  * @return: 없음. 실패해도 msg_res 가 NULL 로 남을 뿐 프로브를 막지 않는다.
  *
@@ -922,7 +922,7 @@ static void dw_pcie_host_request_msg_tlp_res(struct dw_pcie_rp *pp)
 
 /* [한국어]
  * dw_pcie_config_ecam_iatu - ECAM 모드에서 설정공간 접근용 iATU 창 두 개를 세운다
-
+ *
  * @pp: 이 루트 포트.
  * @return: 0 성공, 음수는 dw_pcie_prog_outbound_atu 의 실패값.
  *
@@ -998,7 +998,7 @@ static int dw_pcie_config_ecam_iatu(struct dw_pcie_rp *pp)
 
 /* [한국어]
  * dw_pcie_create_ecam_window - 공용 ECAM 설정공간 매핑 객체를 만든다
-
+ *
  * @pp: 이 루트 포트. 만들어진 pci_config_window 가 pp->cfg 에 저장된다.
  * @res: "config" reg 영역. ECAM 창 전체가 여기에 들어간다.
  * @return: 0 성공, -ENODEV 는 버스 범위 없음, 그 외 음수는 pci_ecam_create 실패.
@@ -1038,7 +1038,7 @@ static int dw_pcie_create_ecam_window(struct dw_pcie_rp *pp, struct resource *re
 
 /* [한국어]
  * dw_pcie_ecam_enabled - 이 하드웨어/DT 조합에서 ECAM 방식을 쓸 수 있는지 판정한다
-
+ *
  * @pp: 이 루트 포트.
  * @config_res: DT 의 "config" reg 영역.
  * @return: true 면 ECAM 경로(dw_pcie_ecam_ops), false 면 기존 iATU 창 방식
@@ -1105,7 +1105,7 @@ static bool dw_pcie_ecam_enabled(struct dw_pcie_rp *pp, struct resource *config_
 
 /* [한국어]
  * dw_pcie_host_get_resources - DT 자원을 읽어 설정공간 접근 방식을 확정한다
-
+ *
  * @pp: 이 루트 포트.
  * @return: 0 성공, -ENODEV 는 "config" reg 없음, 그 외 음수는 하위 실패값.
  *
@@ -1206,7 +1206,7 @@ static int dw_pcie_host_get_resources(struct dw_pcie_rp *pp)
 
 /* [한국어]
  * dw_pcie_host_init - DWC 루트 포트를 처음부터 끝까지 세우는 주 진입점
-
+ *
  * @pp: SoC 글루 드라이버가 채워 둔 루트 포트. ops, num_vectors 등 SoC 별
  *      설정이 미리 들어 있다.
  * @return: 0 성공. 음수면 단계별 goto 라벨을 타고 전부 되감긴 상태다.
@@ -1388,7 +1388,7 @@ EXPORT_SYMBOL_GPL(dw_pcie_host_init);
 
 /* [한국어]
  * dw_pcie_host_deinit - dw_pcie_host_init 이 세운 것을 역순으로 모두 되돌린다
-
+ *
  * @pp: 정리할 루트 포트.
  * @return: 없음.
  *
@@ -1437,7 +1437,7 @@ EXPORT_SYMBOL_GPL(dw_pcie_host_deinit);
 
 /* [한국어]
  * dw_pcie_other_conf_map_bus - 하위 버스 설정 접근마다 iATU 창을 다시 겨눈다
-
+ *
  * @bus: 접근할 버스. sysdata 에 dw_pcie_rp 가 있다.
  * @devfn: 장치/함수 번호.
  * @where: 설정공간 안의 바이트 오프셋.
@@ -1510,7 +1510,7 @@ static void __iomem *dw_pcie_other_conf_map_bus(struct pci_bus *bus,
 
 /* [한국어]
  * dw_pcie_rd_other_conf - 하위 버스 설정공간을 읽고, 필요하면 IO 창을 복구한다
-
+ *
  * @bus, @devfn, @where, @size: 표준 설정 읽기 인자.
  * @val: 읽은 값을 담을 곳.
  * @return: PCIBIOS_SUCCESSFUL 또는 오류 코드.
@@ -1562,7 +1562,7 @@ static int dw_pcie_rd_other_conf(struct pci_bus *bus, unsigned int devfn,
 
 /* [한국어]
  * dw_pcie_wr_other_conf - 하위 버스 설정공간에 쓰고, 필요하면 IO 창을 복구한다
-
+ *
  * @bus, @devfn, @where, @size, @val: 표준 설정 쓰기 인자.
  * @return: PCIBIOS_SUCCESSFUL 또는 오류 코드.
  *
@@ -1613,7 +1613,7 @@ static struct pci_ops dw_child_pcie_ops = {
 
 /* [한국어]
  * dw_pcie_own_conf_map_bus - 루트 포트 자신의 설정공간을 DBI 로 바로 매핑한다
-
+ *
  * @bus: 루트 버스.
  * @devfn: 장치/함수. 슬롯 0 만 유효하다.
  * @where: 설정공간 오프셋.
@@ -1650,7 +1650,7 @@ EXPORT_SYMBOL_GPL(dw_pcie_own_conf_map_bus);
 
 /* [한국어]
  * dw_pcie_ecam_conf_map_bus - ECAM 매핑을 쓰되 루트 버스만 DBI 로 우회시킨다
-
+ *
  * @bus: 접근할 버스. sysdata 는 pci_config_window 다(ECAM 경로이므로).
  * @devfn: 장치/함수 번호.
  * @where: 설정공간 오프셋.
@@ -1707,7 +1707,7 @@ static struct pci_ops dw_pcie_ecam_ops = {
 
 /* [한국어]
  * dw_pcie_iatu_setup - 한정된 iATU 창을 MEM/IO/MSG/DMA 범위에 나눠 배분한다
-
+ *
  * @pp: 이 루트 포트.
  * @return: 0 성공, -EINVAL 은 아웃바운드 창이 하나도 없음, -ENOMEM 은 창 부족,
  *          그 외 음수는 창 프로그래밍 실패값.
@@ -1924,7 +1924,7 @@ static int dw_pcie_iatu_setup(struct dw_pcie_rp *pp)
 
 /* [한국어]
  * dw_pcie_program_presets - 한 속도 등급의 레인별 이퀄라이제이션 프리셋을 써 넣는다
-
+ *
  * @pp: 이 루트 포트. DT 에서 읽어 둔 pp->presets 를 쓴다.
  * @speed: 프로그래밍할 속도 등급(8/16/32/64 GT/s).
  * @return: 없음. 프리셋이 없거나 능력 구조가 없으면 조용히 돌아간다.
@@ -2008,7 +2008,7 @@ static void dw_pcie_program_presets(struct dw_pcie_rp *pp, enum pci_bus_speed sp
 
 /* [한국어]
  * dw_pcie_config_presets - 링크가 낼 수 있는 모든 속도 등급의 프리셋을 차례로 넣는다
-
+ *
  * @pp: 이 루트 포트.
  * @return: 없음.
  *
@@ -2052,7 +2052,7 @@ static void dw_pcie_config_presets(struct dw_pcie_rp *pp)
 
 /* [한국어]
  * dw_pcie_setup_rc - 루트 컴플렉스의 설정공간과 주소 변환을 실제로 프로그래밍한다
-
+ *
  * @pp: 이 루트 포트.
  * @return: 0 성공, 음수는 dw_pcie_iatu_setup 실패값.
  *
@@ -2179,7 +2179,7 @@ EXPORT_SYMBOL_GPL(dw_pcie_setup_rc);
 
 /* [한국어]
  * dw_pcie_pme_turn_off - iATU 의 MSG 창을 통해 PME_Turn_Off 를 브로드캐스트한다
-
+ *
  * @pci: 이 DWC 인스턴스.
  * @return: 0 성공, -ENOSPC 는 MSG 용 창이나 주소가 준비되지 않음,
  *          -ENOMEM 은 ioremap 실패, 그 외는 창 프로그래밍 실패값.
@@ -2248,7 +2248,7 @@ static int dw_pcie_pme_turn_off(struct dw_pcie *pci)
 
 /* [한국어]
  * dw_pcie_suspend_noirq - 링크를 L2 로 내리고 루트 포트를 잠재운다
-
+ *
  * @pci: 이 DWC 인스턴스.
  * @return: 0 이면 서스펜드 진행 가능. 음수는 PME_Turn_Off 실패로, 상위
  *          드라이버가 서스펜드를 취소한다.
@@ -2369,7 +2369,7 @@ EXPORT_SYMBOL_GPL(dw_pcie_suspend_noirq);
 
 /* [한국어]
  * dw_pcie_resume_noirq - 서스펜드로 내려 둔 루트 포트와 링크를 되살린다
-
+ *
  * @pci: 이 DWC 인스턴스.
  * @return: 0 성공. 음수면 되감기까지 마친 뒤의 실패값.
  *
