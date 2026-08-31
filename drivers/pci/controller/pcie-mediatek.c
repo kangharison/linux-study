@@ -668,7 +668,7 @@ static void mtk_pcie_intr_handler(struct irq_desc *desc) /* mtk_pcie_intr_handle
 
 	status = readl(port->base + PCIE_INT_STATUS); /* 인터럽트/상태 레지스터 값에 32비트 호스트 레지스터 읽기; NVMe 링크/인터럽트/설정 상태 관찰 결과를 대입; NVMe 호스트 상태 갱신 */
 	if (status & INTX_MASK) { /* 조건 검사; NVMe 호스트 동작 분기(에러/링크/IRQ 등) */
-		for_each_set_bit_from(bit, &status, PCI_NUM_INTX + INTX_SHIFT) { /* NVMe 관련 포트/장치/비트를 순회하는 루프 */
+		for_each_set_bit_from(bit, &status, PCI_NUM_INTX + INTX_SHIFT) {
 			/* Clear the INTx */
 			writel(1 << bit, port->base + PCIE_INT_STATUS); /* 32비트 호스트 레지스터 쓰기; 루트 포트를 NVMe 접근에 맞게 구성 */
 			generic_handle_domain_irq(port->irq_domain, /* irq를 NVMe INTx/MSI 핸들러로 전달 */
@@ -689,7 +689,7 @@ static void mtk_pcie_intr_handler(struct irq_desc *desc) /* mtk_pcie_intr_handle
 			 */ /* kernel-doc/설명 블록 끝; 이 객체는 NVMe PCIe host 열거에 참여 */
 			writel(MSI_STATUS, port->base + PCIE_INT_STATUS); /* 32비트 호스트 레지스터 쓰기; 루트 포트를 NVMe 접근에 맞게 구성 */
 			while ((imsi_status = readl(port->base + PCIE_IMSI_STATUS))) { /* 조건이 참인 동안 NVMe 상태 변경을 대기/반복 */
-				for_each_set_bit(bit, &imsi_status, MTK_MSI_IRQS_NUM) /* NVMe 관련 포트/장치/비트를 순회하는 루프 */
+				for_each_set_bit(bit, &imsi_status, MTK_MSI_IRQS_NUM)
 					generic_handle_domain_irq(port->inner_domain, bit); /* irq를 NVMe INTx/MSI 핸들러로 전달 */
 			} /* 코드 블록 종료 */
 		} /* 코드 블록 종료 */
@@ -730,7 +730,7 @@ static int mtk_pcie_startup_port_v2(struct mtk_pcie_port *port) /* mtk_pcie_star
 { /* 코드 블록 시작 */
 	struct mtk_pcie *pcie = port->pcie; /* MediaTek PCIe host private data를 설정; NVMe 호스트 동작에 필요한 상태/주소 */
 	struct pci_host_bridge *host = pci_host_bridge_from_priv(pcie); /* PCI host bridge에 private data에서 host bridge 획득; NVMe 리소스 결과를 대입; NVMe 호스트 상태 갱신 */
-	struct resource *mem = NULL; /* NVMe BAR용 MEM 리소스 윈도우를 설정; NVMe 호스트 동작에 필요한 상태/주소 */
+	struct resource *mem = NULL;
 	struct resource_entry *entry; /* 지역 변수 entry 선언; NVMe 호스트 동작 상태 저장 */
 	const struct mtk_pcie_soc *soc = port->pcie->soc; /* SoC별 동작/퀴크 포인터를 설정; NVMe 호스트 동작에 필요한 상태/주소 */
 	u32 val; /* 지역 변수 val 선언; NVMe 호스트 동작 상태 저장 */
@@ -738,7 +738,7 @@ static int mtk_pcie_startup_port_v2(struct mtk_pcie_port *port) /* mtk_pcie_star
 
 	entry = resource_list_first_type(&host->windows, IORESOURCE_MEM); /* 리소스 리스트 항목에 첫 MEM 리소스 윈도우 획득; NVMe BAR 매핑 결과를 대입; NVMe 호스트 상태 갱신 */
 	if (entry) /* 조건 검사; NVMe 호스트 동작 분기(에러/링크/IRQ 등) */
-		mem = entry->res; /* NVMe BAR용 MEM 리소스 윈도우를 설정; NVMe 호스트 동작에 필요한 상태/주소 */
+		mem = entry->res;
 	if (!mem) /* 조건 검사; NVMe 호스트 동작 분기(에러/링크/IRQ 등) */
 		return -EINVAL; /* -EINVAL 오류 반환; NVMe 장치 열거 중단 */
 
@@ -1150,7 +1150,7 @@ static int mtk_pcie_setup(struct mtk_pcie *pcie) /* mtk_pcie_setup() 함수 정�
 
 	slot = of_get_pci_domain_nr(dev->of_node); /* PCI 슬롯 번호에 NVMe 루트 버스용 PCI 도메인 번호 획득 결과를 대입; NVMe 호스트 상태 갱신 */
 	if (slot < 0) { /* 조건 검사; NVMe 호스트 동작 분기(에러/링크/IRQ 등) */
-		for_each_available_child_of_node_scoped(node, child) { /* NVMe 관련 포트/장치/비트를 순회하는 루프 */
+		for_each_available_child_of_node_scoped(node, child) {
 			err = of_pci_get_devfn(child); /* 에러 상태(실패 시 NVMe 열거 중단)에 자식 노드의 devfn 파싱; NVMe 엔드포인트 결과를 대입; NVMe 호스트 상태 갱신 */
 			if (err < 0) /* 조건 검사; NVMe 호스트 동작 분기(에러/링크/IRQ 등) */
 				return dev_err_probe(dev, err, "failed to get devfn\n"); /* dev_err_probe(dev, err, "failed to get devfn\n") 값 반환; NVMe 호스트 흐름 제어 */
@@ -1227,7 +1227,7 @@ static void mtk_pcie_free_resources(struct mtk_pcie *pcie) /* mtk_pcie_free_reso
 	struct pci_host_bridge *host = pci_host_bridge_from_priv(pcie); /* PCI host bridge에 private data에서 host bridge 획득; NVMe 리소스 결과를 대입; NVMe 호스트 상태 갱신 */
 	struct list_head *windows = &host->windows; /* struct list_head *windows를 설정; NVMe 호스트 동작에 필요한 상태/주소 */
 
-	pci_free_resource_list(windows); /* NVMe 열거로 생성된 버스 리소스 리스트 해제 */
+	pci_free_resource_list(windows);
 } /* 코드 블록 종료 */
 
 static void mtk_pcie_remove(struct platform_device *pdev) /* mtk_pcie_remove() 함수 정의; NVMe PCIe host 동작 중 호출 */
@@ -1237,7 +1237,7 @@ static void mtk_pcie_remove(struct platform_device *pdev) /* mtk_pcie_remove() �
 
 	pci_stop_root_bus(host->bus); /* 루트 버스 정지; NVMe 장치 제거 전 */
 	pci_remove_root_bus(host->bus); /* 루트 버스 제거; NVMe 장치 detach */
-	mtk_pcie_free_resources(pcie); /* NVMe 제거 후 host bridge 리소스 리스트 해제 */
+	mtk_pcie_free_resources(pcie);
 
 	mtk_pcie_irq_teardown(pcie); /* NVMe가 사용하던 IRQ 도메인/체인 핸들러 제거 */
 

@@ -68,20 +68,20 @@
  *                                 다시 계산한다.
  */
 
-#include <linux/bits.h> /* NVMe: 비트 마스크 매크로 포함. */
-#include <linux/bitfield.h> /* NVMe: PCIe REBAR 레지스터 필드 추출/조립용. */
-#include <linux/bitops.h> /* NVMe: ilog2, roundup_pow_of_two 등 비트 연산용. */
-#include <linux/errno.h> /* NVMe: -ENOENT, -ENOTSUPP, -EBUSY 등 오류 코드 정의. */
-#include <linux/export.h> /* NVMe: EXPORT_SYMBOL_* 매크로 정의. */
-#include <linux/ioport.h> /* NVMe: struct resource, resource_set_size() 등 정의. */
-#include <linux/log2.h> /* NVMe: log2 관련 매크로 포함. */
-#include <linux/pci.h> /* NVMe: struct pci_dev, PCI_EXT_CAP_ID_REBAR 등 정의. */
-#include <linux/sizes.h> /* NVMe: SZ_1M, SZ_128T 등 크기 상수 정의. */
-#include <linux/types.h> /* NVMe: u32, u64, resource_size_t 등 기본 타입 정의. */
+#include <linux/bits.h>
+#include <linux/bitfield.h>
+#include <linux/bitops.h>
+#include <linux/errno.h>
+#include <linux/export.h>
+#include <linux/ioport.h>
+#include <linux/log2.h>
+#include <linux/pci.h>
+#include <linux/sizes.h>
+#include <linux/types.h>
 
-#include "pci.h" /* NVMe: PCI 서브시스템 날부 헤더(PCI_REBAR_* 상수 등). */
+#include "pci.h"
 
-#define PCI_REBAR_MIN_SIZE	((resource_size_t)SZ_1M) /* NVMe: ReBAR 최소 단위는 1MiB(인코딩 0). */
+#define PCI_REBAR_MIN_SIZE	((resource_size_t)SZ_1M)
 
 /**
  * pci_rebar_bytes_to_size - Convert size in bytes to PCI BAR Size
@@ -98,15 +98,15 @@
  *   인코딩 값(0=1MB, 31=128TB)으로 변환한다. sysfs나 드라이버가 ReBAR 크기를
  *   설정할 때 먼저 호출된다.
  */
-int pci_rebar_bytes_to_size(u64 bytes) /* NVMe: NVMe BAR 크기(바이트)를 PCIe ReBAR 인코딩 값으로 변환하는 함수 정의. */
-{ /* NVMe: pci_rebar_bytes_to_size 함수 본문 시작. */
-	int rebar_minsize = ilog2(PCI_REBAR_MIN_SIZE); /* NVMe: 최소 1MiB에 대한 log2 값(20)을 계산. */
+int pci_rebar_bytes_to_size(u64 bytes)
+{
+	int rebar_minsize = ilog2(PCI_REBAR_MIN_SIZE);
 
-	bytes = roundup_pow_of_two(bytes); /* NVMe: NVMe BAR 크기를 2의 거듭제곱으로 올림(ReBAR은 2^n 단위만 지원). */
+	bytes = roundup_pow_of_two(bytes);
 
-	return max(ilog2(bytes), rebar_minsize) - rebar_minsize; /* NVMe: 인코딩 값 = (요청 크기 log2 - 최소 log2), 예: 2MB -> (21-20)=1. */
-} /* NVMe: pci_rebar_bytes_to_size 함수 본문 종료. */
-EXPORT_SYMBOL_GPL(pci_rebar_bytes_to_size); /* NVMe: 외부 모듈(NVMe 포함)에서 사용 가능하도록 심볼 익스포트. */
+	return max(ilog2(bytes), rebar_minsize) - rebar_minsize;
+}
+EXPORT_SYMBOL_GPL(pci_rebar_bytes_to_size);
 
 /**
  * pci_rebar_size_to_bytes - Convert encoded BAR Size to size in bytes
@@ -119,11 +119,11 @@ EXPORT_SYMBOL_GPL(pci_rebar_bytes_to_size); /* NVMe: 외부 모듈(NVMe 포함)�
  *   PCIe ReBAR 인코딩 값을 NVMe BAR의 실제 바이트 크기로 환산한다.
  *   예를 들어 인코딩 1은 2MiB, 2는 4MiB 등이다. resource 크기 갱신 시 사용.
  */
-resource_size_t pci_rebar_size_to_bytes(int size) /* NVMe: PCIe ReBAR 인코딩 값을 NVMe BAR의 실제 바이트 크기로 변환하는 함수 정의. */
-{ /* NVMe: pci_rebar_size_to_bytes 함수 본문 시작. */
-	return 1ULL << (size + ilog2(PCI_REBAR_MIN_SIZE)); /* NVMe: 1MiB * 2^size 형태로 NVMe BAR 크기를 바이트로 산출. */
-} /* NVMe: pci_rebar_size_to_bytes 함수 본문 종료. */
-EXPORT_SYMBOL_GPL(pci_rebar_size_to_bytes); /* NVMe: NVMe 드라이버 등 외부 모듈에서 호출 가능. */
+resource_size_t pci_rebar_size_to_bytes(int size)
+{
+	return 1ULL << (size + ilog2(PCI_REBAR_MIN_SIZE));
+}
+EXPORT_SYMBOL_GPL(pci_rebar_size_to_bytes);
 
 /*
  * pci_rebar_init:
@@ -131,10 +131,10 @@ EXPORT_SYMBOL_GPL(pci_rebar_size_to_bytes); /* NVMe: NVMe 드라이버 등 외�
  *   캐패빌리티의 config space 오프셋을 찾아 pdev->rebar_cap에 저장한다.
  *   이후 모든 ReBAR 연산이 이 오프셋을 사용한다.
  */
-void pci_rebar_init(struct pci_dev *pdev) /* NVMe: NVMe 장치에서 ReBAR capability 위치를 초기화하는 함수 정의. */
-{ /* NVMe: pci_rebar_init 함수 본문 시작. */
-	pdev->rebar_cap = pci_find_ext_capability(pdev, PCI_EXT_CAP_ID_REBAR); /* NVMe: NVMe SSD의 PCIe config space에서 Resizable BAR 확장 capability 위치 탐색. */
-} /* NVMe: pci_rebar_init 함수 본문 종료. */
+void pci_rebar_init(struct pci_dev *pdev)
+{
+	pdev->rebar_cap = pci_find_ext_capability(pdev, PCI_EXT_CAP_ID_REBAR);
+}
 
 /**
  * pci_rebar_find_pos - find position of resize control reg for BAR
@@ -153,35 +153,35 @@ void pci_rebar_init(struct pci_dev *pdev) /* NVMe: NVMe 장치에서 ReBAR capab
  *   ReBAR control 레지스터의 config space 위치를 반환한다. SR-IOV VF BAR의
  *   경우 VF ReBAR capability를 별도로 조회한다.
  */
-static int pci_rebar_find_pos(struct pci_dev *pdev, int bar) /* NVMe: NVMe BAR의 ReBAR control 레지스터 위치를 찾는 정적 함수 정의. */
-{ /* NVMe: pci_rebar_find_pos 함수 본문 시작. */
-	unsigned int pos, nbars, i; /* NVMe: pos=config space 오프셋, nbars=ReBAR 컨트롤 개수, i=루프 인덱스. */
-	u32 ctrl; /* NVMe: ReBAR control 레지스터 값을 담을 임시 변수. */
+static int pci_rebar_find_pos(struct pci_dev *pdev, int bar)
+{
+	unsigned int pos, nbars, i;
+	u32 ctrl;
 
-	if (pci_resource_is_iov(bar)) { /* NVMe: 대상 BAR가 SR-IOV VF 리소스인지 확인. */
-		pos = pci_iov_vf_rebar_cap(pdev); /* NVMe: VF의 ReBAR capability 오프셋을 가져온다. */
-		bar = pci_resource_num_to_vf_bar(bar); /* NVMe: 전체 리소스 번호를 VF 내의 BAR 인덱스로 변환. */
-	} else { /* NVMe: 물리적 PF BAR인 경우. */
-		pos = pdev->rebar_cap; /* NVMe: probe 시 저장한 PF ReBAR capability 오프셋 사용. */
-	} /* NVMe: PF/VF 분기의 else 블록 종료. */
+	if (pci_resource_is_iov(bar)) {
+		pos = pci_iov_vf_rebar_cap(pdev);
+		bar = pci_resource_num_to_vf_bar(bar);
+	} else {
+		pos = pdev->rebar_cap;
+	}
 
-	if (!pos) /* NVMe: ReBAR capability가 없으면. */
-		return -ENOTSUPP; /* NVMe: 해당 NVMe 장치/바는 ReBAR을 지원하지 않음을 알린다. */
+	if (!pos)
+		return -ENOTSUPP;
 
-	pci_read_config_dword(pdev, pos + PCI_REBAR_CTRL, &ctrl); /* NVMe: ReBAR control 레지스터를 읽어 총 BAR 개수 획득. */
-	nbars = FIELD_GET(PCI_REBAR_CTRL_NBAR_MASK, ctrl); /* NVMe: control 레지스터의 NBAR 필드로 등록된 BAR 수 추출. */
+	pci_read_config_dword(pdev, pos + PCI_REBAR_CTRL, &ctrl);
+	nbars = FIELD_GET(PCI_REBAR_CTRL_NBAR_MASK, ctrl);
 
-	for (i = 0; i < nbars; i++, pos += 8) { /* NVMe: 각 ReBAR 항목은 8바이트(cap+ctrl) 단위로 순회. */
-		int bar_idx; /* NVMe: 현재 항목이 서술하는 BAR 인덱스. */
+	for (i = 0; i < nbars; i++, pos += 8) {
+		int bar_idx;
 
-		pci_read_config_dword(pdev, pos + PCI_REBAR_CTRL, &ctrl); /* NVMe: 현재 항목의 control 레지스터를 읽는다. */
-		bar_idx = FIELD_GET(PCI_REBAR_CTRL_BAR_IDX, ctrl); /* NVMe: control 레지스터에서 BAR 인덱스 필드 추출. */
-		if (bar_idx == bar) /* NVMe: 찾고자 하는 NVMe BAR와 일치하면. */
-			return pos; /* NVMe: 해당 BAR의 ReBAR 레지스터 오프셋 반환. */
-	} /* NVMe: ReBAR 항목 순회 for 루프 종료. */
+		pci_read_config_dword(pdev, pos + PCI_REBAR_CTRL, &ctrl);
+		bar_idx = FIELD_GET(PCI_REBAR_CTRL_BAR_IDX, ctrl);
+		if (bar_idx == bar)
+			return pos;
+	}
 
-	return -ENOENT; /* NVMe: 끝까지 못 찾으면 해당 BAR는 ReBAR을 지원하지 않음. */
-} /* NVMe: pci_rebar_find_pos 함수 본문 종료. */
+	return -ENOENT;
+}
 
 /**
  * pci_rebar_get_possible_sizes - get possible sizes for Resizable BAR
@@ -199,26 +199,26 @@ static int pci_rebar_find_pos(struct pci_dev *pdev, int bar) /* NVMe: NVMe BAR�
  *   1MiB부터 128TiB까지 2의 거듭제곱 크기를 의미한다. 이 값은 resize 가능
  *   여부 판단과 sysfs 노출에 사용된다.
  */
-u64 pci_rebar_get_possible_sizes(struct pci_dev *pdev, int bar) /* NVMe: NVMe BAR가 지원할 수 있는 모든 크기 비트마스크를 반환하는 함수 정의. */
-{ /* NVMe: pci_rebar_get_possible_sizes 함수 본문 시작. */
-	int pos; /* NVMe: 대상 BAR의 ReBAR capability 오프셋. */
-	u32 cap; /* NVMe: ReBAR capability 레지스터 값. */
+u64 pci_rebar_get_possible_sizes(struct pci_dev *pdev, int bar)
+{
+	int pos;
+	u32 cap;
 
-	pos = pci_rebar_find_pos(pdev, bar); /* NVMe: NVMe BAR의 ReBAR 레지스터 위치 탐색. */
-	if (pos < 0) /* NVMe: ReBAR을 지원하지 않거나 위치를 찾지 못한 경우. */
-		return 0; /* NVMe: 가능 크기 집합이 비어 있음(0). */
+	pos = pci_rebar_find_pos(pdev, bar);
+	if (pos < 0)
+		return 0;
 
-	pci_read_config_dword(pdev, pos + PCI_REBAR_CAP, &cap); /* NVMe: capability 레지스터를 읽어 지원 크기 비트마스크 획득. */
-	cap = FIELD_GET(PCI_REBAR_CAP_SIZES, cap); /* NVMe: SIZES 필드만 추출한다. */
+	pci_read_config_dword(pdev, pos + PCI_REBAR_CAP, &cap);
+	cap = FIELD_GET(PCI_REBAR_CAP_SIZES, cap);
 
 	/* Sapphire RX 5600 XT Pulse has an invalid cap dword for BAR 0 */
-	if (pdev->vendor == PCI_VENDOR_ID_ATI && pdev->device == 0x731f && /* NVMe: 특정 GPU의 잘못된 capability 워드에 대한 워크어라운드 조건. */
-	    bar == 0 && cap == 0x700) /* NVMe: 조건이 모두 만족하면. */
-		return 0x3f00; /* NVMe: 하드코딩된 올바른 가능 크기 마스크 반환. */
+	if (pdev->vendor == PCI_VENDOR_ID_ATI && pdev->device == 0x731f &&
+	    bar == 0 && cap == 0x700)
+		return 0x3f00;
 
-	return cap; /* NVMe: NVMe BAR가 지원하는 크기 비트마스크 반환. */
-} /* NVMe: pci_rebar_get_possible_sizes 함수 본문 종료. */
-EXPORT_SYMBOL(pci_rebar_get_possible_sizes); /* NVMe: NVMe 드라이버 및 pciutils 등에서 사용 가능. */
+	return cap;
+}
+EXPORT_SYMBOL(pci_rebar_get_possible_sizes);
 
 /**
  * pci_rebar_size_supported - check if size is supported for BAR
@@ -235,16 +235,16 @@ EXPORT_SYMBOL(pci_rebar_get_possible_sizes); /* NVMe: NVMe 드라이버 및 pciu
  *   유효한 범위 내에 있는지 먼저 검사한 뒤, capability 비트마스크에서
  *   해당 비트가 설정되어 있는지 본다.
  */
-bool pci_rebar_size_supported(struct pci_dev *pdev, int bar, int size) /* NVMe: NVMe BAR가 지정한 크기를 지원하는지 확인하는 함수 정의. */
-{ /* NVMe: pci_rebar_size_supported 함수 본문 시작. */
-	u64 sizes = pci_rebar_get_possible_sizes(pdev, bar); /* NVMe: 해당 NVMe BAR의 지원 크기 집합 획득. */
+bool pci_rebar_size_supported(struct pci_dev *pdev, int bar, int size)
+{
+	u64 sizes = pci_rebar_get_possible_sizes(pdev, bar);
 
-	if (size < 0 || size > ilog2(SZ_128T) - ilog2(PCI_REBAR_MIN_SIZE)) /* NVMe: 요청 인코딩이 0~31 범위를 벗어나는지 검사. */
-		return false; /* NVMe: 범위를 벗어나면 지원 불가. */
+	if (size < 0 || size > ilog2(SZ_128T) - ilog2(PCI_REBAR_MIN_SIZE))
+		return false;
 
-	return BIT(size) & sizes; /* NVMe: 요청 크기에 해당하는 비트가 capability 마스크에 있는지 반환. */
-} /* NVMe: pci_rebar_size_supported 함수 본문 종료. */
-EXPORT_SYMBOL_GPL(pci_rebar_size_supported); /* NVMe: 외부 모듈에서 사용 가능. */
+	return BIT(size) & sizes;
+}
+EXPORT_SYMBOL_GPL(pci_rebar_size_supported);
 
 /**
  * pci_rebar_get_max_size - get the maximum supported size of a BAR
@@ -261,17 +261,17 @@ EXPORT_SYMBOL_GPL(pci_rebar_size_supported); /* NVMe: 외부 모듈에서 사용
  *   NVMe BAR가 지원하는 최대 크기의 인코딩 값을 반환한다. 예를 들어 NVMe
  *   CMB를 위한 BAR를 최대로 확장하고자 할 때 사용할 수 있다.
  */
-int pci_rebar_get_max_size(struct pci_dev *pdev, int bar) /* NVMe: NVMe BAR가 지원하는 최대 크기 인코딩을 반환하는 함수 정의. */
-{ /* NVMe: pci_rebar_get_max_size 함수 본문 시작. */
-	u64 sizes; /* NVMe: 지원 크기 비트마스크. */
+int pci_rebar_get_max_size(struct pci_dev *pdev, int bar)
+{
+	u64 sizes;
 
-	sizes = pci_rebar_get_possible_sizes(pdev, bar); /* NVMe: NVMe BAR의 가능 크기 마스크 획득. */
-	if (!sizes) /* NVMe: 마스크가 0이면 ReBAR을 지원하지 않음. */
-		return -ENOENT; /* NVMe: 오류 코드 반환. */
+	sizes = pci_rebar_get_possible_sizes(pdev, bar);
+	if (!sizes)
+		return -ENOENT;
 
-	return __fls(sizes); /* NVMe: 가장 높은 비트 위치를 반환(최대 크기 인코딩). */
-} /* NVMe: pci_rebar_get_max_size 함수 본문 종료. */
-EXPORT_SYMBOL_GPL(pci_rebar_get_max_size); /* NVMe: 외부 모듈에서 호출 가능. */
+	return __fls(sizes);
+}
+EXPORT_SYMBOL_GPL(pci_rebar_get_max_size);
 
 /**
  * pci_rebar_get_current_size - get the current size of a Resizable BAR
@@ -288,18 +288,18 @@ EXPORT_SYMBOL_GPL(pci_rebar_get_max_size); /* NVMe: 외부 모듈에서 호출 �
  *   NVMe BAR의 현재 설정된 ReBAR 인코딩 값을 읽는다. 현재 MMIO로 매핑된
  *   NVMe BAR(예: doorbell/CMB)의 실제 크기를 파악할 때 사용된다.
  */
-int pci_rebar_get_current_size(struct pci_dev *pdev, int bar) /* NVMe: NVMe BAR의 현재 설정된 크기 인코딩을 읽는 함수 정의. */
-{ /* NVMe: pci_rebar_get_current_size 함수 본문 시작. */
-	int pos; /* NVMe: ReBAR 레지스터 오프셋. */
-	u32 ctrl; /* NVMe: ReBAR control 레지스터 값. */
+int pci_rebar_get_current_size(struct pci_dev *pdev, int bar)
+{
+	int pos;
+	u32 ctrl;
 
-	pos = pci_rebar_find_pos(pdev, bar); /* NVMe: NVMe BAR의 control 레지스터 위치 탐색. */
-	if (pos < 0) /* NVMe: 탐색 실패 시. */
-		return pos; /* NVMe: 음수 오류 코드 그대로 반환. */
+	pos = pci_rebar_find_pos(pdev, bar);
+	if (pos < 0)
+		return pos;
 
-	pci_read_config_dword(pdev, pos + PCI_REBAR_CTRL, &ctrl); /* NVMe: control 레지스터 읽기. */
-	return FIELD_GET(PCI_REBAR_CTRL_BAR_SIZE, ctrl); /* NVMe: BAR_SIZE 필드 추출하여 현재 크기 인코딩 반환. */
-} /* NVMe: pci_rebar_get_current_size 함수 본문 종료. */
+	pci_read_config_dword(pdev, pos + PCI_REBAR_CTRL, &ctrl);
+	return FIELD_GET(PCI_REBAR_CTRL_BAR_SIZE, ctrl);
+}
 
 /**
  * pci_rebar_set_size - set a new size for a Resizable BAR
@@ -317,25 +317,25 @@ int pci_rebar_get_current_size(struct pci_dev *pdev, int bar) /* NVMe: NVMe BAR�
  *   할당 알고리즘 재수행 전/후에 호출되며, VF BAR인 경우 VF 리소스 크기도
  *   함께 갱신한다.
  */
-int pci_rebar_set_size(struct pci_dev *pdev, int bar, int size) /* NVMe: NVMe BAR의 ReBAR control 레지스터에 새 크기를 쓰는 함수 정의. */
-{ /* NVMe: pci_rebar_set_size 함수 본문 시작. */
-	int pos; /* NVMe: 대상 BAR의 ReBAR control 레지스터 오프셋. */
-	u32 ctrl; /* NVMe: ReBAR control 레지스터 값. */
+int pci_rebar_set_size(struct pci_dev *pdev, int bar, int size)
+{
+	int pos;
+	u32 ctrl;
 
-	pos = pci_rebar_find_pos(pdev, bar); /* NVMe: NVMe BAR의 control 레지스터 위치 탐색. */
-	if (pos < 0) /* NVMe: 위치를 찾지 못하면. */
-		return pos; /* NVMe: 오류 코드 반환. */
+	pos = pci_rebar_find_pos(pdev, bar);
+	if (pos < 0)
+		return pos;
 
-	pci_read_config_dword(pdev, pos + PCI_REBAR_CTRL, &ctrl); /* NVMe: 현재 control 레지스터 값 읽기. */
-	ctrl &= ~PCI_REBAR_CTRL_BAR_SIZE; /* NVMe: BAR_SIZE 필드 클리어. */
-	ctrl |= FIELD_PREP(PCI_REBAR_CTRL_BAR_SIZE, size); /* NVMe: 새 크기 인코딩을 BAR_SIZE 필드에 기록. */
-	pci_write_config_dword(pdev, pos + PCI_REBAR_CTRL, ctrl); /* NVMe: 변경된 control 레지스터를 PCIe config space에 쓴다. */
+	pci_read_config_dword(pdev, pos + PCI_REBAR_CTRL, &ctrl);
+	ctrl &= ~PCI_REBAR_CTRL_BAR_SIZE;
+	ctrl |= FIELD_PREP(PCI_REBAR_CTRL_BAR_SIZE, size);
+	pci_write_config_dword(pdev, pos + PCI_REBAR_CTRL, ctrl);
 
-	if (pci_resource_is_iov(bar)) /* NVMe: 설정 대상이 SR-IOV VF BAR인 경우. */
-		pci_iov_resource_set_size(pdev, bar, size); /* NVMe: VF 리소스 크기도 동일하게 갱신. */
+	if (pci_resource_is_iov(bar))
+		pci_iov_resource_set_size(pdev, bar, size);
 
-	return 0; /* NVMe: ReBAR 크기 설정 성공. */
-} /* NVMe: pci_rebar_set_size 함수 본문 종료. */
+	return 0;
+}
 
 /*
  * pci_restore_rebar_state:
@@ -344,31 +344,31 @@ int pci_rebar_set_size(struct pci_dev *pdev, int bar, int size) /* NVMe: NVMe BA
  *   레지스터를 복원한다. BAR 크기가 resume 시 firmware에 의해 바뀌었을
  *   가능성을 방어한다.
  */
-void pci_restore_rebar_state(struct pci_dev *pdev) /* NVMe: NVMe 장치의 ReBAR 상태를 kernel resource 크기에 맞게 복원하는 함수 정의. */
-{ /* NVMe: pci_restore_rebar_state 함수 본문 시작. */
-	unsigned int pos, nbars, i; /* NVMe: pos=오프셋, nbars=BAR 수, i=순회 인덱스. */
-	u32 ctrl; /* NVMe: ReBAR control 레지스터 값. */
+void pci_restore_rebar_state(struct pci_dev *pdev)
+{
+	unsigned int pos, nbars, i;
+	u32 ctrl;
 
-	pos = pdev->rebar_cap; /* NVMe: PF의 ReBAR capability 오프셋 획득. */
-	if (!pos) /* NVMe: PF가 ReBAR을 지원하지 않으면. */
-		return; /* NVMe: 복원할 것이 없으므로 즉시 반환. */
+	pos = pdev->rebar_cap;
+	if (!pos)
+		return;
 
-	pci_read_config_dword(pdev, pos + PCI_REBAR_CTRL, &ctrl); /* NVMe: control 레지스터 읽어 총 BAR 개수 확인. */
-	nbars = FIELD_GET(PCI_REBAR_CTRL_NBAR_MASK, ctrl); /* NVMe: NBAR 필드로 등록된 BAR 수 추출. */
+	pci_read_config_dword(pdev, pos + PCI_REBAR_CTRL, &ctrl);
+	nbars = FIELD_GET(PCI_REBAR_CTRL_NBAR_MASK, ctrl);
 
-	for (i = 0; i < nbars; i++, pos += 8) { /* NVMe: 각 ReBAR 항목(8바이트)을 순회하며 복원. */
-		struct resource *res; /* NVMe: 현재 BAR에 해당하는 kernel resource 포인터. */
-		int bar_idx, size; /* NVMe: bar_idx=BAR 번호, size=복원할 인코딩 크기. */
+	for (i = 0; i < nbars; i++, pos += 8) {
+		struct resource *res;
+		int bar_idx, size;
 
-		pci_read_config_dword(pdev, pos + PCI_REBAR_CTRL, &ctrl); /* NVMe: 현재 항목의 control 레지스터 읽기. */
-		bar_idx = ctrl & PCI_REBAR_CTRL_BAR_IDX; /* NVMe: BAR 인덱스 필드 획득. */
-		res = pci_resource_n(pdev, bar_idx); /* NVMe: 해당 BAR의 struct resource 획득. */
-		size = pci_rebar_bytes_to_size(resource_size(res)); /* NVMe: kernel resource 크기를 ReBAR 인코딩으로 변환. */
-		ctrl &= ~PCI_REBAR_CTRL_BAR_SIZE; /* NVMe: 기존 BAR_SIZE 필드 클리어. */
-		ctrl |= FIELD_PREP(PCI_REBAR_CTRL_BAR_SIZE, size); /* NVMe: kernel resource 크기에 맞춰 BAR_SIZE 필드 설정. */
-		pci_write_config_dword(pdev, pos + PCI_REBAR_CTRL, ctrl); /* NVMe: 복원된 control 레지스터를 config space에 기록. */
-	} /* NVMe: PF ReBAR 항목 복원 for 루프 종료. */
-} /* NVMe: pci_restore_rebar_state 함수 본문 종료. */
+		pci_read_config_dword(pdev, pos + PCI_REBAR_CTRL, &ctrl);
+		bar_idx = ctrl & PCI_REBAR_CTRL_BAR_IDX;
+		res = pci_resource_n(pdev, bar_idx);
+		size = pci_rebar_bytes_to_size(resource_size(res));
+		ctrl &= ~PCI_REBAR_CTRL_BAR_SIZE;
+		ctrl |= FIELD_PREP(PCI_REBAR_CTRL_BAR_SIZE, size);
+		pci_write_config_dword(pdev, pos + PCI_REBAR_CTRL, ctrl);
+	}
+}
 
 /*
  * pci_resize_is_memory_decoding_enabled:
@@ -376,18 +376,18 @@ void pci_restore_rebar_state(struct pci_dev *pdev) /* NVMe: NVMe 장치의 ReBAR
  *   있는지 확인한다. Memory decoding이 활성화된 상태에서 BAR 크기를 바꾸면
  *   버스/리소스 일관성이 깨질 수 있으므로 resize는 거부해야 한다.
  */
-static bool pci_resize_is_memory_decoding_enabled(struct pci_dev *dev, /* NVMe: NVMe BAR resize 전 메모리 디코딩 상태 확인 함수 선언(매개변수 연속). */
-						  int resno) /* NVMe: NVMe BAR resize 전 메모리 디코딩 상태를 확인하는 정적 함수 정의. */
-{ /* NVMe: pci_resize_is_memory_decoding_enabled 함수 본문 시작. */
-	u16 cmd; /* NVMe: PCI Command 레지스터 값. */
+static bool pci_resize_is_memory_decoding_enabled(struct pci_dev *dev,
+						  int resno)
+{
+	u16 cmd;
 
-	if (pci_resource_is_iov(resno)) /* NVMe: 대상 리소스가 SR-IOV VF BAR인지 확인. */
-		return pci_iov_is_memory_decoding_enabled(dev); /* NVMe: VF의 메모리 decoding 상태 반환. */
+	if (pci_resource_is_iov(resno))
+		return pci_iov_is_memory_decoding_enabled(dev);
 
-	pci_read_config_word(dev, PCI_COMMAND, &cmd); /* NVMe: NVMe 장치의 PCI Command 레지스터 읽기. */
+	pci_read_config_word(dev, PCI_COMMAND, &cmd);
 
-	return cmd & PCI_COMMAND_MEMORY; /* NVMe: Memory Space Enable 비트가 1이면 true 반환. */
-} /* NVMe: pci_resize_is_memory_decoding_enabled 함수 본문 종료. */
+	return cmd & PCI_COMMAND_MEMORY;
+}
 
 /*
  * pci_resize_resource_set_size:
@@ -395,16 +395,16 @@ static bool pci_resize_is_memory_decoding_enabled(struct pci_dev *dev, /* NVMe: 
  *   갱신한다. VF BAR인 경우 총 VF 수를 곱하여 전체 VF 리소스 크기를
  *   반영한다.
  */
-void pci_resize_resource_set_size(struct pci_dev *dev, int resno, int size) /* NVMe: NVMe BAR resource의 크기를 새 ReBAR 크기로 갱신하는 함수 정의. */
-{ /* NVMe: pci_resize_resource_set_size 함수 본문 시작. */
-	resource_size_t res_size = pci_rebar_size_to_bytes(size); /* NVMe: 인코딩 값을 바이트 크기로 변환. */
-	struct resource *res = pci_resource_n(dev, resno); /* NVMe: 대상 NVMe BAR의 struct resource 획득. */
+void pci_resize_resource_set_size(struct pci_dev *dev, int resno, int size)
+{
+	resource_size_t res_size = pci_rebar_size_to_bytes(size);
+	struct resource *res = pci_resource_n(dev, resno);
 
-	if (pci_resource_is_iov(resno)) /* NVMe: SR-IOV VF BAR인 경우. */
-		res_size *= pci_sriov_get_totalvfs(dev); /* NVMe: 전체 VF 수를 곱해 모든 VF가 사용할 크기 산출. */
+	if (pci_resource_is_iov(resno))
+		res_size *= pci_sriov_get_totalvfs(dev);
 
-	resource_set_size(res, res_size); /* NVMe: kernel resource의 크기 필드를 갱신. */
-} /* NVMe: pci_resize_resource_set_size 함수 본문 종료. */
+	resource_set_size(res, res_size);
+}
 
 /**
  * pci_resize_resource - reconfigure a Resizable BAR and resources
@@ -434,22 +434,22 @@ void pci_resize_resource_set_size(struct pci_dev *dev, int resno, int size) /* N
  *   window를 새 크기에 맞게 조정한다. SR-IOV VF BAR, CMB BAR, MSI-X table
  *   BAR 등의 동적 크기 조정에 활용될 수 있다.
  */
-int pci_resize_resource(struct pci_dev *dev, int resno, int size, /* NVMe: NVMe BAR 런타임 크기 변경 함수 선언(매개변수 연속). */
-			int exclude_bars) /* NVMe: NVMe 장치의 BAR 크기를 런타임에 변경하는 함수 정의. */
-{ /* NVMe: pci_resize_resource 함수 본문 시작. */
-	struct pci_host_bridge *host; /* NVMe: NVMe 장치가 연결된 host bridge 포인터. */
+int pci_resize_resource(struct pci_dev *dev, int resno, int size,
+			int exclude_bars)
+{
+	struct pci_host_bridge *host;
 
 	/* Check if we must preserve the firmware's resource assignment */
-	host = pci_find_host_bridge(dev->bus); /* NVMe: NVMe 장치가 연결된 host bridge 획득. */
-	if (host->preserve_config) /* NVMe: firmware 할당을 유지해야 하는 host bridge면. */
-		return -ENOTSUPP; /* NVMe: resize를 허용하지 않음. */
+	host = pci_find_host_bridge(dev->bus);
+	if (host->preserve_config)
+		return -ENOTSUPP;
 
-	if (pci_resize_is_memory_decoding_enabled(dev, resno)) /* NVMe: NVMe BAR의 memory decoding이 켜져 있는지 확인. */
-		return -EBUSY; /* NVMe: decoding 중이면 resize 불가(드라이버가 pci_iounmap 후 시도해야 함). */
+	if (pci_resize_is_memory_decoding_enabled(dev, resno))
+		return -EBUSY;
 
-	if (!pci_rebar_size_supported(dev, resno, size)) /* NVMe: 요청한 크기가 NVMe BAR에서 지원되는지 확인. */
-		return -EINVAL; /* NVMe: 지원되지 않는 크기이면 오류 반환. */
+	if (!pci_rebar_size_supported(dev, resno, size))
+		return -EINVAL;
 
-	return pci_do_resource_release_and_resize(dev, resno, size, exclude_bars); /* NVMe: 기존 리소스 해제 후 새 크기로 재할당 수행. */
-} /* NVMe: pci_resize_resource 함수 본문 종료. */
-EXPORT_SYMBOL(pci_resize_resource); /* NVMe: NVMe 드라이버 및 pci resize sysfs 인터페이스에서 사용 가능. */
+	return pci_do_resource_release_and_resize(dev, resno, size, exclude_bars);
+}
+EXPORT_SYMBOL(pci_resize_resource);

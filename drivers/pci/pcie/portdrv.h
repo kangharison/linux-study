@@ -67,10 +67,10 @@
  * pcie_port_bus_type            : 이 가상 버스의 bus_type.
  */
 
-#ifndef _PORTDRV_H_ /* NVMe: PCIe 포트 버스 헤더 중복 포함 방지 */
+#ifndef _PORTDRV_H_
 #define _PORTDRV_H_
 
-#include <linux/compiler.h> /* NVMe: 컴파일러 최적화/가시성 관련 매크로 포함 */
+#include <linux/compiler.h>
 
 /* Service Type */
 /* [한국어] 하나의 PCIe 포트(Root Port 또는 스위치 포트)는 여러 종류의 "서비스" 를
@@ -120,36 +120,35 @@
  * 동기화: 부팅 중 한 번 정해진 뒤 바뀌지 않으므로 별도 보호가 없다. */
 extern bool pcie_ports_dpc_native;
 
-#ifdef CONFIG_PCIEAER /* NVMe: 커널 설정에서 AER 지원 시에만 컴파일 */
-int pcie_aer_init(void); /* NVMe: AER 서비스 초기화; NVMe PCIe 오류 보고 메커니즘 활성화 */
-#else /* NVMe: AER 미설정 시 */
-static inline int pcie_aer_init(void) { return 0; } /* NVMe: AER 지원 없이 빈 초기화 함수 제공, NVMe는 오류 보고 제한적 */
-#endif /* NVMe: CONFIG_PCIEAER 분기 종료 */
+#ifdef CONFIG_PCIEAER
+int pcie_aer_init(void);
+#else
+static inline int pcie_aer_init(void) { return 0; }
+#endif
 
-#ifdef CONFIG_HOTPLUG_PCI_PCIE /* NVMe: PCIe 핫플러그 지원 시에만 컴파일 */
-int pcie_hp_init(void); /* NVMe: PCIe 핫플러그 서비스 초기화; NVMe SSD 교체 감지 준비 */
-#else /* NVMe: 핫플러그 미지원 시 */
-static inline int pcie_hp_init(void) { return 0; } /* NVMe: 핫플러그 없이 NVMe SSD는 runtime 등록/해제만 가능 */
-#endif /* NVMe: CONFIG_HOTPLUG_PCI_PCIE 분기 종료 */
+#ifdef CONFIG_HOTPLUG_PCI_PCIE
+int pcie_hp_init(void);
+#else
+static inline int pcie_hp_init(void) { return 0; }
+#endif
 
-#ifdef CONFIG_PCIE_PME /* NVMe: PCIe PME 지원 시에만 컴파일 */
-int pcie_pme_init(void); /* NVMe: PME 서비스 초기화; NVMe 전원 관리 이벤트 처리 준비 */
-#else /* NVMe: PME 미지원 시 */
-static inline int pcie_pme_init(void) { return 0; } /* NVMe: PME 없이 NVMe 장치의 wake 이벤트 처리 불가 */
-#endif /* NVMe: CONFIG_PCIE_PME 분기 종료 */
+#ifdef CONFIG_PCIE_PME
+int pcie_pme_init(void);
+#else
+static inline int pcie_pme_init(void) { return 0; }
+#endif
 
-#ifdef CONFIG_PCIE_DPC /* NVMe: DPC 지원 시에만 컴파일 */
-int pcie_dpc_init(void); /* NVMe: DPC 서비스 초기화; NVMe surprise down 컨테인먼트 활성화 */
-#else /* NVMe: DPC 미지원 시 */
-static inline int pcie_dpc_init(void) { return 0; } /* NVMe: DPC 없이 NVMe 링크 오류 시 즉시 장치 손실 가능 */
-#endif /* NVMe: CONFIG_PCIE_DPC 분기 종료 */
+#ifdef CONFIG_PCIE_DPC
+int pcie_dpc_init(void);
+#else
+static inline int pcie_dpc_init(void) { return 0; }
+#endif
 
-int pcie_bwctrl_init(void); /* NVMe: 대역폭 변경 알림 서비스 초기화; NVMe 링크 속도·폭 변경 감지 */
+int pcie_bwctrl_init(void);
 
 /* Port Type */
-#define PCIE_ANY_PORT			(~0) /* NVMe: 임의의 PCIe 포트 유형을 나타내는 all-ones 마스크 */
+#define PCIE_ANY_PORT			(~0)
 
-/* NVMe: PCIe 포트 버스 상의 가상 장치; NVMe SSD 상위 포트의 특정 서비스를 표현 */
 /* [한국어] 포트 서비스 하나를 나타내는 가상 장치.
  * 실제 하드웨어가 아니라 소프트웨어가 만든 장치이며, 포트 하나에 대해
  * 서비스 개수만큼(최대 PCIE_PORT_DEVICE_MAXSERVICES 개) 만들어진다.
@@ -200,18 +199,16 @@ struct pcie_device {
 	 *   pcie_device 를 되찾는다(아래 to_pcie_device 매크로).
 	 * 동기화: 참조 카운트로 관리된다 — 마지막 참조가 사라져야 해제된다. */
 };
-#define to_pcie_device(d) container_of(d, struct pcie_device, device) /* NVMe: struct device에서 struct pcie_device 역산 매크로 */
+#define to_pcie_device(d) container_of(d, struct pcie_device, device)
 
-/* NVMe: 포트 서비스가 사용할 사설 데이터를 struct pcie_device에 연결 */
 static inline void set_service_data(struct pcie_device *dev, void *data)
 {
-	dev->priv_data = data; /* NVMe: AER/DPC 등 서비스가 자신의 상태 구조체 포인터 저장 */
+	dev->priv_data = data;
 }
 
-/* NVMe: 포트 서비스 사설 데이터 포인터를 읽어온다 */
 static inline void *get_service_data(struct pcie_device *dev)
 {
-	return dev->priv_data; /* NVMe: 서비스 드라이버가 자신의 컨텍스트를 얻어 NVMe 장치 처리 재개 */
+	return dev->priv_data;
 }
 
 /* [한국어] 포트 서비스 드라이버가 자기 자신을 기술하는 구조체.
@@ -286,48 +283,46 @@ struct pcie_port_service_driver {
 	 * 읽는 자: 드라이버 코어. 아래 to_service_driver() 로 역산한다. */
 };
 #define to_service_driver(d) \
-	container_of(d, struct pcie_port_service_driver, driver) /* NVMe: struct device_driver에서 서비스 드라이버 역산 */
+	container_of(d, struct pcie_port_service_driver, driver)
 
-int pcie_port_service_register(struct pcie_port_service_driver *new); /* NVMe: AER/DPC/PME/HP/BWCTRL 드라이버를 portdrv bus에 등록 */
-void pcie_port_service_unregister(struct pcie_port_service_driver *new); /* NVMe: 서비스 드라이버 등록 해제; NVMe 상위 포트 서비스 종료 */
+int pcie_port_service_register(struct pcie_port_service_driver *new);
+void pcie_port_service_unregister(struct pcie_port_service_driver *new);
 
-extern const struct bus_type pcie_port_bus_type; /* NVMe: PCIe 포트 버스의 bus_type; 포트 서비스 드라이버 매칭 기준 */
+extern const struct bus_type pcie_port_bus_type;
 
-struct pci_dev; /* NVMe: struct pci_dev 전방 선언; NVMe PCIe 장치와 포트 간 관계 표현 */
+struct pci_dev;
 
-#ifdef CONFIG_PCIE_PME /* NVMe: PME 서비스 컴파일 분기 */
-extern bool pcie_pme_msi_disabled; /* NVMe: PME MSI 사용 금지 여부; NVMe PM 이벤트가 INTx로 전달되면 지연 가능 */
+#ifdef CONFIG_PCIE_PME
+extern bool pcie_pme_msi_disabled;
 
-/* NVMe: PME MSI를 비활성화; 일부 플랫폼에서 NVMe wake 지연/안정성 문제 회피 */
 static inline void pcie_pme_disable_msi(void)
 {
-	pcie_pme_msi_disabled = true; /* NVMe: PME가 MSI 대신 INTx 경로 사용하도록 플래그 설정 */
+	pcie_pme_msi_disabled = true;
 }
 
-/* NVMe: PME MSI가 비활성화되었는지 확인 */
 static inline bool pcie_pme_no_msi(void)
 {
-	return pcie_pme_msi_disabled; /* NVMe: true이면 PME가 레거시 인터럽트로 동작, NVMe PM 이벤트 처리 방식 변경 */
+	return pcie_pme_msi_disabled;
 }
 
-void pcie_pme_interrupt_enable(struct pci_dev *dev, bool enable); /* NVMe: 특정 PCIe 장치(NVMe SSD 포함)의 PME 인터럽트 활성화/비활성화 */
-#else /* !CONFIG_PCIE_PME */ /* NVMe: PME 지원 안 될 때 */
-static inline void pcie_pme_disable_msi(void) {} /* NVMe: 아무 동작 없음; NVMe PM 이벤트 MSI 비활성화 불필요 */
-static inline bool pcie_pme_no_msi(void) { return false; } /* NVMe: MSI 사용 금지 의미 없음; NVMe PM 이벤트 경로 고정 */
-static inline void pcie_pme_interrupt_enable(struct pci_dev *dev, bool en) {} /* NVMe: PME 없이는 아무 동작 없음 */
-#endif /* !CONFIG_PCIE_PME */ /* NVMe: PME 분기 종료 */
+void pcie_pme_interrupt_enable(struct pci_dev *dev, bool enable);
+#else /* !CONFIG_PCIE_PME */
+static inline void pcie_pme_disable_msi(void) {}
+static inline bool pcie_pme_no_msi(void) { return false; }
+static inline void pcie_pme_interrupt_enable(struct pci_dev *dev, bool en) {}
+#endif /* !CONFIG_PCIE_PME */
 
-struct device *pcie_port_find_device(struct pci_dev *dev, u32 service); /* NVMe: NVMe SSD 상위 포트에서 특정 서비스(AER/DPC 등)의 pcie_device 검색 */
+struct device *pcie_port_find_device(struct pci_dev *dev, u32 service);
 
-struct aer_err_info; /* NVMe: AER 오류 정보 전방 선언; NVMe PCIe 오류 처리 시 참조 */
+struct aer_err_info;
 
-#ifdef CONFIG_CXL_RAS /* NVMe: CXL RAS 확장 지원 시 */
-bool is_aer_internal_error(struct aer_err_info *info); /* NVMe: AER 오류가 CXL RCH 내부 포트에 있는지 판별; NVMe 단일 오류인지 판단 */
-void cxl_rch_handle_error(struct pci_dev *dev, struct aer_err_info *info); /* NVMe: CXL RCH(Root Complex Host) 오류 처리; NVMe와 공유하는 RC 오류 경로 */
-void cxl_rch_enable_rcec(struct pci_dev *rcec); /* NVMe: CXL RCEC(Root Complex Event Collector) 활성화; NVMe 오류 전파 제어 */
-#else /* NVMe: CXL RAS 미지원 시 */
-static inline bool is_aer_internal_error(struct aer_err_info *info) { return false; } /* NVMe: CXL 내부 오류 아님으로 간주, NVMe 일반 PCIe AER 처리 */
-static inline void cxl_rch_handle_error(struct pci_dev *dev, struct aer_err_info *info) { } /* NVMe: CXL 특수 처리 없음 */
-static inline void cxl_rch_enable_rcec(struct pci_dev *rcec) { } /* NVMe: RCEC 활성화 동작 없음 */
-#endif /* CONFIG_CXL_RAS */ /* NVMe: CXL RAS 분기 종료 */
-#endif /* _PORTDRV_H_ */ /* NVMe: 헤더 중복 포함 방지 종료 */
+#ifdef CONFIG_CXL_RAS
+bool is_aer_internal_error(struct aer_err_info *info);
+void cxl_rch_handle_error(struct pci_dev *dev, struct aer_err_info *info);
+void cxl_rch_enable_rcec(struct pci_dev *rcec);
+#else
+static inline bool is_aer_internal_error(struct aer_err_info *info) { return false; }
+static inline void cxl_rch_handle_error(struct pci_dev *dev, struct aer_err_info *info) { }
+static inline void cxl_rch_enable_rcec(struct pci_dev *rcec) { }
+#endif /* CONFIG_CXL_RAS */
+#endif /* _PORTDRV_H_ */

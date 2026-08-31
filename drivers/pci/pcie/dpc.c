@@ -89,44 +89,42 @@
  * pci_dpc_recovered()   : 복구가 끝났음을 기다리던 쪽에 알린다.
  */
 
-#define dev_fmt(fmt) "DPC: " fmt /* NVMe: DPC 로그 메시지 접두사, NVMe 복구 디버깅 시 식별용 */
+#define dev_fmt(fmt) "DPC: " fmt
 
-#include <linux/aer.h>		/* NVMe: AER(Advanced Error Reporting) 헤더, NVMe ERS 복구에 연계 */
-#include <linux/bitfield.h>	/* NVMe: DPC capability 레지스터의 field 추출에 사용 */
-#include <linux/delay.h>	/* NVMe: DPC 복구 대기 시 msleep() 사용 */
-#include <linux/interrupt.h>	/* NVMe: DPC PCIe 포트 서비스 IRQ 핸들러 등록/처리 */
-#include <linux/init.h>		/* NVMe: 모듈 초기화 매크로 */
-#include <linux/pci.h>		/* NVMe: PCIe 장치/버스 구조체 및 Config 접근 API */
+#include <linux/aer.h>
+#include <linux/bitfield.h>
+#include <linux/delay.h>
+#include <linux/interrupt.h>
+#include <linux/init.h>
+#include <linux/pci.h>
 
-#include "portdrv.h"		/* NVMe: PCIe 포트 서비스 드라이버 등록 구조체 */
-#include "../pci.h"		/* NVMe: PCI 서브시스템 낮은 수준 함수 및 날것의 capability 접근 */
+#include "portdrv.h"
+#include "../pci.h"
 
-/* NVMe: DPC control 레지스터에서 Fatal/Non-fatal trigger enable 비트 마스크 */
-#define PCI_EXP_DPC_CTL_EN_MASK	(PCI_EXP_DPC_CTL_EN_FATAL | /* NVMe: DPC control trigger enable mask 매크로 정의, FATAL 비트 OR */ \
-				 PCI_EXP_DPC_CTL_EN_NONFATAL) /* NVMe: DPC control trigger enable mask 매크로 연속 줄, NONFATAL 비트 포함 */
+#define PCI_EXP_DPC_CTL_EN_MASK	(PCI_EXP_DPC_CTL_EN_FATAL | \
+				 PCI_EXP_DPC_CTL_EN_NONFATAL)
 
-/* NVMe: Root Port PIO(per-port I/O) error의 원인 문자열 배열, NVMe 관련 CA/UR/CTO 메시지 포함 */
-static const char * const rp_pio_error_string[] = { /* NVMe: Root Port PIO 에러 원인 문자열 테이블, NVMe 요청 실패 메시지 매핑 */
-	"Configuration Request received UR Completion",	 /* Bit Position 0  */ /* NVMe: 설정 요청 UR 완료 */
-	"Configuration Request received CA Completion",	 /* Bit Position 1  */ /* NVMe: 설정 요청 CA 완료 */
-	"Configuration Request Completion Timeout",	 /* Bit Position 2  */ /* NVMe: 설정 요청 완료 시간 초과 */
-	NULL,						 /* NVMe: Bit 3, 예약 */
-	NULL,						 /* NVMe: Bit 4, 예약 */
-	NULL,						 /* NVMe: Bit 5, 예약 */
-	NULL,						 /* NVMe: Bit 6, 예약 */
-	NULL,						 /* NVMe: Bit 7, 예약 */
-	"I/O Request received UR Completion",		 /* Bit Position 8  */ /* NVMe: I/O 요청 UR 완료 */
-	"I/O Request received CA Completion",		 /* Bit Position 9  */ /* NVMe: I/O 요청 CA 완료 */
-	"I/O Request Completion Timeout",		 /* Bit Position 10 */ /* NVMe: I/O 요청 완료 시간 초과 */
-	NULL,						 /* NVMe: Bit 11, 예약 */
-	NULL,						 /* NVMe: Bit 12, 예약 */
-	NULL,						 /* NVMe: Bit 13, 예약 */
-	NULL,						 /* NVMe: Bit 14, 예약 */
-	NULL,						 /* NVMe: Bit 15, 예약 */
-	"Memory Request received UR Completion",	 /* Bit Position 16 */ /* NVMe: 메모리 요청 UR 완료, NVMe DMA/ATS 관련 */
-	"Memory Request received CA Completion",	 /* Bit Position 17 */ /* NVMe: 메모리 요청 CA 완료, NVMe DMA/ATS 관련 */
-	"Memory Request Completion Timeout",		 /* Bit Position 18 */ /* NVMe: 메모리 요청 완료 시간 초과, NVMe DMA/CTO */
-}; /* NVMe: Root Port PIO 에러 원인 문자열 배열 정의 종료 */
+static const char * const rp_pio_error_string[] = {
+	"Configuration Request received UR Completion",	 /* Bit Position 0  */
+	"Configuration Request received CA Completion",	 /* Bit Position 1  */
+	"Configuration Request Completion Timeout",	 /* Bit Position 2  */
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	"I/O Request received UR Completion",		 /* Bit Position 8  */
+	"I/O Request received CA Completion",		 /* Bit Position 9  */
+	"I/O Request Completion Timeout",		 /* Bit Position 10 */
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	"Memory Request received UR Completion",	 /* Bit Position 16 */
+	"Memory Request received CA Completion",	 /* Bit Position 17 */
+	"Memory Request Completion Timeout",		 /* Bit Position 18 */
+};
 
 /*
  * pci_save_dpc_state:
@@ -134,21 +132,21 @@ static const char * const rp_pio_error_string[] = { /* NVMe: Root Port PIO 에�
  *   suspend/hibernate 전에 저장한다. 이 값은 resume 시 복원되어 NVMe의
  *   DPC containment 동작이 유지된다.
  */
-void pci_save_dpc_state(struct pci_dev *dev) /* NVMe: NVMe 장치가 연결된 포트의 DPC control 레지스터를 suspend 전에 저장 */
-{ /* NVMe: pci_save_dpc_state 함수 본문 시작, DPC control 저장 */
-	struct pci_cap_saved_state *save_state;	/* NVMe: 저장할 확장 capability 상태 버퍼 포인터 */
-	u16 *cap;				/* NVMe: DPC control 레지스터 값을 저장할 u16 포인터 */
+void pci_save_dpc_state(struct pci_dev *dev)
+{
+	struct pci_cap_saved_state *save_state;
+	u16 *cap;
 
-	if (!pci_is_pcie(dev))			/* NVMe: 대상 장치가 PCIe 장치가 아니면 */
-		return;				/* NVMe: 저장할 필요 없이 리턴, NVMe는 항상 PCIe */
+	if (!pci_is_pcie(dev))
+		return;
 
-	save_state = pci_find_saved_ext_cap(dev, PCI_EXT_CAP_ID_DPC);	/* NVMe: DPC 확장 capability 저장 슬롯 탐색 */
-	if (!save_state)			/* NVMe: DPC capability 저장 슬롯이 없으면 */
-		return;				/* NVMe: 저장하지 않고 리턴 */
+	save_state = pci_find_saved_ext_cap(dev, PCI_EXT_CAP_ID_DPC);
+	if (!save_state)
+		return;
 
-	cap = (u16 *)&save_state->cap.data[0];	/* NVMe: 저장 버퍼의 데이터 영역을 u16 포인터로 매핑 */
-	pci_read_config_word(dev, dev->dpc_cap + PCI_EXP_DPC_CTL, cap);	/* NVMe: DPC control 레지스터 값을 읽어 버퍼에 저장 */
-} /* NVMe: pci_save_dpc_state 함수 본문 종료 */
+	cap = (u16 *)&save_state->cap.data[0];
+	pci_read_config_word(dev, dev->dpc_cap + PCI_EXP_DPC_CTL, cap);
+}
 
 /*
  * pci_restore_dpc_state:
@@ -156,45 +154,44 @@ void pci_save_dpc_state(struct pci_dev *dev) /* NVMe: NVMe 장치가 연결된 �
  *   포트의 DPC containment/interrupt enable 상태를 복구하여 NVMe의 fatal
  *   error 처리 능력을 되살린다.
  */
-void pci_restore_dpc_state(struct pci_dev *dev) /* NVMe: NVMe 장치가 연결된 포트의 DPC control 레지스터를 resume 시 복원 */
-{ /* NVMe: pci_restore_dpc_state 함수 본문 시작, DPC control 복원 */
-	struct pci_cap_saved_state *save_state;	/* NVMe: 복원할 DPC capability 저장 상태 포인터 */
-	u16 *cap;				/* NVMe: 복원할 DPC control 값 포인터 */
+void pci_restore_dpc_state(struct pci_dev *dev)
+{
+	struct pci_cap_saved_state *save_state;
+	u16 *cap;
 
-	if (!pci_is_pcie(dev))			/* NVMe: PCIe 장치가 아니면 */
-		return;				/* NVMe: 복원 불필요, 리턴 */
+	if (!pci_is_pcie(dev))
+		return;
 
-	save_state = pci_find_saved_ext_cap(dev, PCI_EXT_CAP_ID_DPC);	/* NVMe: DPC 확장 capability 저장 슬롯 탐색 */
-	if (!save_state)			/* NVMe: 저장된 DPC 상태가 없으면 */
-		return;				/* NVMe: 복원하지 않고 리턴 */
+	save_state = pci_find_saved_ext_cap(dev, PCI_EXT_CAP_ID_DPC);
+	if (!save_state)
+		return;
 
-	cap = (u16 *)&save_state->cap.data[0];	/* NVMe: 저장 버퍼에서 u16 값 포인터 획득 */
-	pci_write_config_word(dev, dev->dpc_cap + PCI_EXP_DPC_CTL, *cap);	/* NVMe: DPC control 레지스터에 저장값 복원 */
-} /* NVMe: pci_restore_dpc_state 함수 본문 종료 */
+	cap = (u16 *)&save_state->cap.data[0];
+	pci_write_config_word(dev, dev->dpc_cap + PCI_EXP_DPC_CTL, *cap);
+}
 
-/* NVMe: DPC 복구 완료를 대기하는 프로세스들의 waitqueue, hotplug가 복구를 동기화할 때 사용 */
-static DECLARE_WAIT_QUEUE_HEAD(dpc_completed_waitqueue); /* NVMe: DPC 복구 완료 대기 waitqueue, NVMe 복구와 hotplug 동기화용 */
+static DECLARE_WAIT_QUEUE_HEAD(dpc_completed_waitqueue);
 
-#ifdef CONFIG_HOTPLUG_PCI_PCIE /* NVMe: hotplug PCI Express 지원 시 DPC 완료 여부 확인 함수 포함 */
+#ifdef CONFIG_HOTPLUG_PCI_PCIE
 /*
  * dpc_completed:
  *   DPC 복구가 완료되었는지 확인한다. hotplug driver가 Link Down/Up
  *   이벤트를 무시할지 결정할 때 사용되며, NVMe 장치의 DPC trigger로
  *   인한 surprise removal와 일반 hotplug를 구분한다.
  */
-static bool dpc_completed(struct pci_dev *pdev) /* NVMe: DPC 복구가 완료되었는지 확인, NVMe surprise removal 구분용 */
-{ /* NVMe: dpc_completed 함수 본문 시작, DPC 복구 완료 여부 확인 */
-	u16 status;	/* NVMe: DPC status 레지스터 값 */
+static bool dpc_completed(struct pci_dev *pdev)
+{
+	u16 status;
 
-	pci_read_config_word(pdev, pdev->dpc_cap + PCI_EXP_DPC_STATUS, &status);	/* NVMe: DPC status 읽기, NVMe 포트의 현재 containment 상태 확인 */
-	if ((!PCI_POSSIBLE_ERROR(status)) && (status & PCI_EXP_DPC_STATUS_TRIGGER))	/* NVMe: status가 에러 코드가 아니고 trigger 비트가 여전히 세트면 */
-		return false;	/* NVMe: 아직 복구가 완료되지 않음, NVMe 링크 복구 진행 중 */
+	pci_read_config_word(pdev, pdev->dpc_cap + PCI_EXP_DPC_STATUS, &status);
+	if ((!PCI_POSSIBLE_ERROR(status)) && (status & PCI_EXP_DPC_STATUS_TRIGGER))
+		return false;
 
-	if (test_bit(PCI_DPC_RECOVERING, &pdev->priv_flags))	/* NVMe: DPC 복구 플래그가 세트되어 있으면 */
-		return false;	/* NVMe: 복구 핸들러가 실행 중이므로 완료되지 않음 */
+	if (test_bit(PCI_DPC_RECOVERING, &pdev->priv_flags))
+		return false;
 
-	return true;	/* NVMe: DPC trigger가 클리어되고 복구 완료, NVMe 복구 가능 */
-} /* NVMe: dpc_completed 함수 본문 종료 */
+	return true;
+}
 
 /**
  * pci_dpc_recovered - whether DPC triggered and has recovered successfully
@@ -209,31 +206,31 @@ static bool dpc_completed(struct pci_dev *pdev) /* NVMe: DPC 복구가 완료되
  * 판단할 때 호출된다. NVMe SSD에서 fatal error가 발생해 DPC에 의해
  * 링크가 끊어진 후, surprise hotplug 이벤트로 오인하지 않도록 한다.
  */
-bool pci_dpc_recovered(struct pci_dev *pdev) /* NVMe: DPC 트리거 후 NVMe 복구 성공 여부를 hotplug 드라이버에 알림 */
-{ /* NVMe: pci_dpc_recovered 함수 본문 시작, hotplug 동기화 */
-	struct pci_host_bridge *host;	/* NVMe: NVMe 장치가 연결된 host bridge 포인터 */
+bool pci_dpc_recovered(struct pci_dev *pdev)
+{
+	struct pci_host_bridge *host;
 
-	if (!pdev->dpc_cap)		/* NVMe: 이 장치에 DPC capability가 없으면 */
-		return false;		/* NVMe: DPC 복구 이력이 없으므로 false, NVMe 일반 장치일 수 있음 */
+	if (!pdev->dpc_cap)
+		return false;
 
 	/*
 	 * Synchronization between hotplug and DPC is not supported
 	 * if DPC is owned by firmware and EDR is not enabled.
 	 */
-	host = pci_find_host_bridge(pdev->bus);	/* NVMe: NVMe가 속한 bus의 host bridge 획득, native DPC 소유주 확인용 */
-	if (!host->native_dpc && !IS_ENABLED(CONFIG_PCIE_EDR))	/* NVMe: 펌웨어가 DPC를 소유하고 EDR이 꺼져 있으면 */
-		return false;	/* NVMe: hotplug와 DPC 동기화 불가, NVMe 복구 상태 신뢰 불가 */
+	host = pci_find_host_bridge(pdev->bus);
+	if (!host->native_dpc && !IS_ENABLED(CONFIG_PCIE_EDR))
+		return false;
 
 	/*
 	 * Need a timeout in case DPC never completes due to failure of
 	 * dpc_wait_rp_inactive().  The spec doesn't mandate a time limit,
 	 * but reports indicate that DPC completes within 4 seconds.
 	 */
-	wait_event_timeout(dpc_completed_waitqueue, dpc_completed(pdev),	/* NVMe: DPC 복구 완료까지 최대 4초 대기, NVMe 컨트롤러 리셋 시간 포함 */
-			   msecs_to_jiffies(4000)); /* NVMe: DPC 복구 최대 4초 대기, NVMe 컨트롤러 리셋 시간 포함 */
+	wait_event_timeout(dpc_completed_waitqueue, dpc_completed(pdev),
+			   msecs_to_jiffies(4000));
 
-	return test_and_clear_bit(PCI_DPC_RECOVERED, &pdev->priv_flags);	/* NVMe: 복구 성공 플래그를 읽고 클리어, NVMe 복구 성공 여부 반환 */
-} /* NVMe: pci_dpc_recovered 함수 본문 종료 */
+	return test_and_clear_bit(PCI_DPC_RECOVERED, &pdev->priv_flags);
+}
 #endif /* CONFIG_HOTPLUG_PCI_PCIE */
 
 /*
@@ -242,23 +239,23 @@ bool pci_dpc_recovered(struct pci_dev *pdev) /* NVMe: DPC 트리거 후 NVMe 복
  *   비활성 상태가 될 때까지 대기한다. NVMe의 DMA 요청 등이 RP에서
  *   정리되어야 다음 복구 단계로 진행할 수 있다.
  */
-static int dpc_wait_rp_inactive(struct pci_dev *pdev) /* NVMe: DPC trigger 후 Root Port 비활성 상태 대기, NVMe 트랜잭션 정리 */
-{ /* NVMe: dpc_wait_rp_inactive 함수 본문 시작, Root Port 비활성 대기 */
-	unsigned long timeout = jiffies + HZ;	/* NVMe: 1초 후 타임아웃 설정, NVMe 복구 시 허용 최대 대기 */
-	u16 cap = pdev->dpc_cap, status;	/* NVMe: DPC capability 오프셋과 status 레지스터 */
+static int dpc_wait_rp_inactive(struct pci_dev *pdev)
+{
+	unsigned long timeout = jiffies + HZ;
+	u16 cap = pdev->dpc_cap, status;
 
-	pci_read_config_word(pdev, cap + PCI_EXP_DPC_STATUS, &status);	/* NVMe: DPC status 읽기, RP busy 비트 확인 */
-	while (status & PCI_EXP_DPC_RP_BUSY &&			/* NVMe: Root Port가 여전히 busy이고 */
-					!time_after(jiffies, timeout)) {	/* NVMe: 타임아웃 전이면 */
-		msleep(10);					/* NVMe: 10ms 대기, NVMe 트랜잭션 정리 시간 확보 */
-		pci_read_config_word(pdev, cap + PCI_EXP_DPC_STATUS, &status);	/* NVMe: DPC status 재확인 */
-	} /* NVMe: while 루프 종료, Root Port busy 대기 완료 */
-	if (status & PCI_EXP_DPC_RP_BUSY) {	/* NVMe: 타임아웃 후에도 RP가 busy이면 */
-		pci_warn(pdev, "root port still busy\n");	/* NVMe: Root Port가 비활성화되지 않음 경고, NVMe 복구 실패 가능성 */
-		return -EBUSY;	/* NVMe: 복구 불가 상태 반환, NVMe 드라이버는 disconnect로 이어질 수 있음 */
-	} /* NVMe: if 블록 종료, Root Port busy 타임아웃 처리 완료 */
-	return 0;	/* NVMe: Root Port 비활성화 완료, NVMe 링크 재초기화 진행 가능 */
-} /* NVMe: dpc_wait_rp_inactive 함수 본문 종료 */
+	pci_read_config_word(pdev, cap + PCI_EXP_DPC_STATUS, &status);
+	while (status & PCI_EXP_DPC_RP_BUSY &&
+					!time_after(jiffies, timeout)) {
+		msleep(10);
+		pci_read_config_word(pdev, cap + PCI_EXP_DPC_STATUS, &status);
+	}
+	if (status & PCI_EXP_DPC_RP_BUSY) {
+		pci_warn(pdev, "root port still busy\n");
+		return -EBUSY;
+	}
+	return 0;
+}
 
 /*
  * dpc_reset_link:
@@ -266,47 +263,47 @@ static int dpc_wait_rp_inactive(struct pci_dev *pdev) /* NVMe: DPC trigger 후 R
  *   endpoint가 연결된 다운스트림 포트를 다시 활성화하여 NVMe 장치를
  *   ERS(error recovery) 경로로 복구할 수 있게 한다.
  */
-pci_ers_result_t dpc_reset_link(struct pci_dev *pdev) /* NVMe: DPC로 disable된 PCIe 링크를 재초기화하여 NVMe ERS 복구 진행 */
-{ /* NVMe: dpc_reset_link 함수 본문 시작, NVMe 링크 재초기화 */
-	pci_ers_result_t ret;	/* NVMe: ERS 복구 결과, NVMe 콜백에 전달될 상태 */
-	u16 cap;		/* NVMe: DPC capability 오프셋 */
+pci_ers_result_t dpc_reset_link(struct pci_dev *pdev)
+{
+	pci_ers_result_t ret;
+	u16 cap;
 
-	set_bit(PCI_DPC_RECOVERING, &pdev->priv_flags);	/* NVMe: DPC 복구 중 플래그 설정, 동기화용 */
+	set_bit(PCI_DPC_RECOVERING, &pdev->priv_flags);
 
 	/*
 	 * DPC disables the Link automatically in hardware, so it has
 	 * already been reset by the time we get here.
 	 */
-	cap = pdev->dpc_cap;	/* NVMe: DPC capability 오프셋 저장, NVMe 포트의 DPC 레지스터 접근에 사용 */
+	cap = pdev->dpc_cap;
 
 	/*
 	 * Wait until the Link is inactive, then clear DPC Trigger Status
 	 * to allow the Port to leave DPC.
 	 */
-	if (!pcie_wait_for_link(pdev, false))	/* NVMe: Data Link Layer Link Active가 클리어될 때까지 대기, NVMe 링크가 완전히 꺼졌는지 확인 */
-		pci_info(pdev, "Data Link Layer Link Active not cleared in 1000 msec\n");	/* NVMe: 1초 내 링크 비활성화 실패 정보, NVMe 복구 지연 가능성 */
+	if (!pcie_wait_for_link(pdev, false))
+		pci_info(pdev, "Data Link Layer Link Active not cleared in 1000 msec\n");
 
-	if (pdev->dpc_rp_extensions && dpc_wait_rp_inactive(pdev)) {	/* NVMe: RP 확장이 있고 RP가 비활성화되지 않으면 */
-		clear_bit(PCI_DPC_RECOVERED, &pdev->priv_flags);	/* NVMe: 복구 성공 플래그 클리어 */
-		ret = PCI_ERS_RESULT_DISCONNECT;	/* NVMe: NVMe 장치 disconnect 결정, 복구 포기 */
-		goto out;	/* NVMe: 정리 코드로 점프 */
-	} /* NVMe: if 블록 종료, RP inactive 실패 시 disconnect 처리 완료 */
+	if (pdev->dpc_rp_extensions && dpc_wait_rp_inactive(pdev)) {
+		clear_bit(PCI_DPC_RECOVERED, &pdev->priv_flags);
+		ret = PCI_ERS_RESULT_DISCONNECT;
+		goto out;
+	}
 
-	pci_write_config_word(pdev, cap + PCI_EXP_DPC_STATUS, /* NVMe: DPC trigger status 레지스터 기록 시작, NVMe 포트 DPC 상태 해제 */
-			      PCI_EXP_DPC_STATUS_TRIGGER);	/* NVMe: DPC trigger status 클리어, 포트가 DPC 상태를 벗어나도록 허용 */
+	pci_write_config_word(pdev, cap + PCI_EXP_DPC_STATUS,
+			      PCI_EXP_DPC_STATUS_TRIGGER);
 
-	if (pci_bridge_wait_for_secondary_bus(pdev, "DPC")) {	/* NVMe: secondary bus(link)가 다시 활성화될 때까지 대기, NVMe 재열거 준비 */
-		clear_bit(PCI_DPC_RECOVERED, &pdev->priv_flags);	/* NVMe: 링크 재활성화 실패 시 복구 플래그 클리어 */
-		ret = PCI_ERS_RESULT_DISCONNECT;	/* NVMe: NVMe 장치 분리 결정 */
-	} else { /* NVMe: 링크 재활성화 실패 시 disconnect, 성공 시 recovered 분기 */
-		set_bit(PCI_DPC_RECOVERED, &pdev->priv_flags);	/* NVMe: 링크 재활성화 성공, NVMe 복구 가능 표시 */
-		ret = PCI_ERS_RESULT_RECOVERED;	/* NVMe: NVMe ERS에 복구 성공 알림 */
-	} /* NVMe: if-else 블록 종료, secondary bus 재활성화 결과 처리 완료 */
-out: /* NVMe: DPC 복구 공통 정리 레이블, NVMe 복구 플래그 클리어 */
-	clear_bit(PCI_DPC_RECOVERING, &pdev->priv_flags);	/* NVMe: DPC 복구 중 플래그 클리어 */
-	wake_up_all(&dpc_completed_waitqueue);	/* NVMe: DPC 복구 대기 중인 hotplug/NVMe 관련 프로세스들을 깨움 */
-	return ret;	/* NVMe: ERS 복구 결과 반환, NVMe 콜백 체인으로 전달 */
-} /* NVMe: dpc_reset_link 함수 본문 종료 */
+	if (pci_bridge_wait_for_secondary_bus(pdev, "DPC")) {
+		clear_bit(PCI_DPC_RECOVERED, &pdev->priv_flags);
+		ret = PCI_ERS_RESULT_DISCONNECT;
+	} else {
+		set_bit(PCI_DPC_RECOVERED, &pdev->priv_flags);
+		ret = PCI_ERS_RESULT_RECOVERED;
+	}
+out:
+	clear_bit(PCI_DPC_RECOVERING, &pdev->priv_flags);
+	wake_up_all(&dpc_completed_waitqueue);
+	return ret;
+}
 
 /*
  * dpc_process_rp_pio_error:
@@ -314,51 +311,51 @@ out: /* NVMe: DPC 복구 공통 정리 레이블, NVMe 복구 플래그 클리�
  *   메모리/IO/configuration 요청이 Root Port 수준에서 UR/CA/CTO 등으로
  *   실패했을 때 상세 정보를 출력하여 NVMe 디버깅에 사용된다.
  */
-static void dpc_process_rp_pio_error(struct pci_dev *pdev) /* NVMe: Root Port PIO 에러 로그 처리, NVMe 요청 실패 원인 상세 출력 */
-{ /* NVMe: dpc_process_rp_pio_error 함수 본문 시작, NVMe PIO 에러 로그 처리 */
-	u16 cap = pdev->dpc_cap, dpc_status, first_error;	/* NVMe: DPC cap/status/첫 에러 포인터 */
-	u32 status, mask, sev, syserr, exc, log;		/* NVMe: PIO status/mask/severity/syserror/exception/impSpec log */
-	struct pcie_tlp_log tlp_log;	/* NVMe: 캡처된 TLP 헤더 로그 구조체, NVMe 트랜잭션 추적용 */
-	int i;				/* NVMe: 에러 비트 순회 인덱스 */
+static void dpc_process_rp_pio_error(struct pci_dev *pdev)
+{
+	u16 cap = pdev->dpc_cap, dpc_status, first_error;
+	u32 status, mask, sev, syserr, exc, log;
+	struct pcie_tlp_log tlp_log;
+	int i;
 
-	pci_read_config_dword(pdev, cap + PCI_EXP_DPC_RP_PIO_STATUS, &status);	/* NVMe: RP PIO status 레지스터 읽기, NVMe 요청 실패 원인 비트 */
-	pci_read_config_dword(pdev, cap + PCI_EXP_DPC_RP_PIO_MASK, &mask);	/* NVMe: RP PIO mask 레지스터 읽기, 숨겨진 에러 비트 확인 */
-	pci_err(pdev, "rp_pio_status: %#010x, rp_pio_mask: %#010x\n", /* NVMe: RP PIO status/mask 레지스터 값 출력, NVMe 디버깅 */
-		status, mask);	/* NVMe: NVMe 관련 PIO status/mask 출력 */
+	pci_read_config_dword(pdev, cap + PCI_EXP_DPC_RP_PIO_STATUS, &status);
+	pci_read_config_dword(pdev, cap + PCI_EXP_DPC_RP_PIO_MASK, &mask);
+	pci_err(pdev, "rp_pio_status: %#010x, rp_pio_mask: %#010x\n",
+		status, mask);
 
-	pci_read_config_dword(pdev, cap + PCI_EXP_DPC_RP_PIO_SEVERITY, &sev);	/* NVMe: PIO severity 레지스터 읽기, NVMe 요청 실패 심각도 */
-	pci_read_config_dword(pdev, cap + PCI_EXP_DPC_RP_PIO_SYSERROR, &syserr);	/* NVMe: PIO system error 설정 읽기 */
-	pci_read_config_dword(pdev, cap + PCI_EXP_DPC_RP_PIO_EXCEPTION, &exc);	/* NVMe: PIO exception 레지스터 읽기 */
-	pci_err(pdev, "RP PIO severity=%#010x, syserror=%#010x, exception=%#010x\n", /* NVMe: RP PIO severity/syserror/exception 출력, NVMe 에러 심각도 확인 */
-		sev, syserr, exc);	/* NVMe: NVMe 디버깅을 위한 PIO severity/syserror/exception 출력 */
+	pci_read_config_dword(pdev, cap + PCI_EXP_DPC_RP_PIO_SEVERITY, &sev);
+	pci_read_config_dword(pdev, cap + PCI_EXP_DPC_RP_PIO_SYSERROR, &syserr);
+	pci_read_config_dword(pdev, cap + PCI_EXP_DPC_RP_PIO_EXCEPTION, &exc);
+	pci_err(pdev, "RP PIO severity=%#010x, syserror=%#010x, exception=%#010x\n",
+		sev, syserr, exc);
 
 	/* Get First Error Pointer */
-	pci_read_config_word(pdev, cap + PCI_EXP_DPC_STATUS, &dpc_status);	/* NVMe: DPC status에서 첫 에러 포인터 추출을 위해 읽기 */
-	first_error = FIELD_GET(PCI_EXP_DPC_RP_PIO_FEP, dpc_status);	/* NVMe: 가장 먼저 발생한 PIO 에러 인덱스 추출, NVMe 장애 원인 특정에 사용 */
+	pci_read_config_word(pdev, cap + PCI_EXP_DPC_STATUS, &dpc_status);
+	first_error = FIELD_GET(PCI_EXP_DPC_RP_PIO_FEP, dpc_status);
 
-	for (i = 0; i < ARRAY_SIZE(rp_pio_error_string); i++) {	/* NVMe: 모든 PIO 에러 비트 순회 */
-		if ((status & ~mask) & (1 << i))	/* NVMe: 마스크되지 않은 실제 PIO 에러 비트이면 */
-			pci_err(pdev, "[%2d] %s%s\n", i, rp_pio_error_string[i], /* NVMe: NVMe PIO 에러 원인 메시지 출력, 첫 에러 여부 표시 */
-				first_error == i ? " (First)" : "");	/* NVMe: NVMe 요청 실패 원인 메시지 출력, 첫 에러 표시 */
-	} /* NVMe: for 루프 종료, RP PIO 에러 비트 순회 완료 */
+	for (i = 0; i < ARRAY_SIZE(rp_pio_error_string); i++) {
+		if ((status & ~mask) & (1 << i))
+			pci_err(pdev, "[%2d] %s%s\n", i, rp_pio_error_string[i],
+				first_error == i ? " (First)" : "");
+	}
 
-	if (pdev->dpc_rp_log_size < PCIE_STD_NUM_TLP_HEADERLOG)	/* NVMe: TLP 헤더 로그 크기가 부족하면 */
-		goto clear_status;	/* NVMe: TLP 로그 출력 건너뛰고 상태 클리어로 이동 */
-	pcie_read_tlp_log(pdev, cap + PCI_EXP_DPC_RP_PIO_HEADER_LOG,	/* NVMe: PIO TLP 헤더 로그 읽기, NVMe가 본 TLP 정보 */
-			  cap + PCI_EXP_DPC_RP_PIO_TLPPREFIX_LOG,	/* NVMe: PIO TLP prefix 로그 읽기 */
-			  dpc_tlp_log_len(pdev),	/* NVMe: TLP 로그 길이 */
-			  pdev->subordinate->flit_mode,	/* NVMe: PCIe flit 모드 여부, NVMe Gen6/Flit 고려 */
-			  &tlp_log);	/* NVMe: 읽은 TLP 로그 저장 */
-	pcie_print_tlp_log(pdev, &tlp_log, KERN_ERR, dev_fmt(""));	/* NVMe: TLP 로그 출력, NVMe 트랜잭션 디버깅 */
+	if (pdev->dpc_rp_log_size < PCIE_STD_NUM_TLP_HEADERLOG)
+		goto clear_status;
+	pcie_read_tlp_log(pdev, cap + PCI_EXP_DPC_RP_PIO_HEADER_LOG,
+			  cap + PCI_EXP_DPC_RP_PIO_TLPPREFIX_LOG,
+			  dpc_tlp_log_len(pdev),
+			  pdev->subordinate->flit_mode,
+			  &tlp_log);
+	pcie_print_tlp_log(pdev, &tlp_log, KERN_ERR, dev_fmt(""));
 
-	if (pdev->dpc_rp_log_size < PCIE_STD_NUM_TLP_HEADERLOG + 1)	/* NVMe: ImpSpec 로그 공간이 없으면 */
-		goto clear_status;	/* NVMe: ImpSpec 로그 건너뛰고 상태 클리어로 이동 */
-	pci_read_config_dword(pdev, cap + PCI_EXP_DPC_RP_PIO_IMPSPEC_LOG, &log);	/* NVMe: 구현체 고유 PIO 로그 읽기 */
-	pci_err(pdev, "RP PIO ImpSpec Log %#010x\n", log);	/* NVMe: 구현체 고유 PIO 로그 출력, NVMe 벤더별 디버깅 */
+	if (pdev->dpc_rp_log_size < PCIE_STD_NUM_TLP_HEADERLOG + 1)
+		goto clear_status;
+	pci_read_config_dword(pdev, cap + PCI_EXP_DPC_RP_PIO_IMPSPEC_LOG, &log);
+	pci_err(pdev, "RP PIO ImpSpec Log %#010x\n", log);
 
- clear_status: /* NVMe: RP PIO 상태 클리어 레이블, NVMe 관련 에러 비트 정리 */
-	pci_write_config_dword(pdev, cap + PCI_EXP_DPC_RP_PIO_STATUS, status);	/* NVMe: RP PIO status 레지스터에 기록하여 에러 비트 클리어, NVMe 재발 방지 */
-} /* NVMe: dpc_process_rp_pio_error 함수 본문 종료 */
+ clear_status:
+	pci_write_config_dword(pdev, cap + PCI_EXP_DPC_RP_PIO_STATUS, status);
+}
 
 /*
  * dpc_get_aer_uncorrect_severity:
@@ -366,33 +363,33 @@ static void dpc_process_rp_pio_error(struct pci_dev *pdev) /* NVMe: Root Port PI
  *   status/mask/severity를 읽어 해당 에러가 fatal인지 non-fatal인지
  *   판단한다. NVMe 장치의 PCIe AER 로그를 ERS 복구에 전달한다.
  */
-static int dpc_get_aer_uncorrect_severity(struct pci_dev *dev, /* NVMe: DPC가 AER uncorrectable error로 트리거된 경우 심각도 판단 */
-					  struct aer_err_info *info) /* NVMe: AER 에러 정보 구조체, NVMe ERS 연계용 */
-{ /* NVMe: dpc_get_aer_uncorrect_severity 함수 본문 시작, NVMe AER 심각도 판단 */
-	int pos = dev->aer_cap;		/* NVMe: 장치의 AER capability 오프셋, NVMe AER 레지스터 위치 */
-	u32 status, mask, sev;		/* NVMe: AER uncorrectable status/mask/severity */
+static int dpc_get_aer_uncorrect_severity(struct pci_dev *dev,
+					  struct aer_err_info *info)
+{
+	int pos = dev->aer_cap;
+	u32 status, mask, sev;
 
-	pci_read_config_dword(dev, pos + PCI_ERR_UNCOR_STATUS, &status);	/* NVMe: AER uncorrectable status 읽기, NVMe에서 발생한 uncorrectable error */
-	pci_read_config_dword(dev, pos + PCI_ERR_UNCOR_MASK, &mask);	/* NVMe: AER uncorrectable mask 읽기, 보고되지 않은 에러 필터링 */
-	status &= ~mask;		/* NVMe: 마스크된 비트를 제거하여 실제 보고된 uncorrectable error만 남김 */
-	if (!status)			/* NVMe: 보고된 uncorrectable error가 없으면 */
-		return 0;		/* NVMe: AER 정보가 없음을 반환 */
+	pci_read_config_dword(dev, pos + PCI_ERR_UNCOR_STATUS, &status);
+	pci_read_config_dword(dev, pos + PCI_ERR_UNCOR_MASK, &mask);
+	status &= ~mask;
+	if (!status)
+		return 0;
 
-	pci_read_config_dword(dev, pos + PCI_ERR_UNCOR_SEVER, &sev);	/* NVMe: AER uncorrectable severity 읽기, NVMe 에러 심각도 판단 */
-	status &= sev;			/* NVMe: severity가 1인 비트만 남김 */
-	if (status)			/* NVMe: severity 비트가 세트된 에러가 있으면 */
-		info->severity = AER_FATAL;	/* NVMe: NVMe 관련 fatal error로 분류, 컨트롤러 리셋 필요 */
-	else /* NVMe: severity 비트가 없으면 NVMe non-fatal error로 분류 */
-		info->severity = AER_NONFATAL;	/* NVMe: NVMe non-fatal error로 분류, SW 복구 가능 */
+	pci_read_config_dword(dev, pos + PCI_ERR_UNCOR_SEVER, &sev);
+	status &= sev;
+	if (status)
+		info->severity = AER_FATAL;
+	else
+		info->severity = AER_NONFATAL;
 
-	info->level = KERN_ERR;		/* NVMe: 에러 로그 레벨을 KERN_ERR로 설정, NVMe 장애 메시지 심각도 */
+	info->level = KERN_ERR;
 
-	info->dev[0] = dev;		/* NVMe: 에러가 발생한 장치(여기서는 NVMe가 연결된 포트) 저장 */
-	info->error_dev_num = 1;	/* NVMe: 에러 장치 수 1개로 기록 */
-	info->ratelimit_print[0] = 1;	/* NVMe: 로그 출력 속도 제한 설정, NVMe flood 방지 */
+	info->dev[0] = dev;
+	info->error_dev_num = 1;
+	info->ratelimit_print[0] = 1;
 
-	return 1;	/* NVMe: AER 정보 획득 성공, NVMe ERS 복구에 활용 */
-} /* NVMe: dpc_get_aer_uncorrect_severity 함수 본문 종료 */
+	return 1;
+}
 
 /*
  * dpc_process_error:
@@ -400,53 +397,53 @@ static int dpc_get_aer_uncorrect_severity(struct pci_dev *dev, /* NVMe: DPC가 A
  *   NVMe endpoint에서 발생한 uncorrectable error, ERR_FATAL/ERR_NONFATAL
  *   메시지, RP PIO error 등을 구분하여 처리한다.
  */
-void dpc_process_error(struct pci_dev *pdev) /* NVMe: DPC 트리거 원인을 분석하고 NVMe 에러 로그 출력 */
-{ /* NVMe: dpc_process_error 함수 본문 시작, NVMe DPC 트리거 원인 분석 */
-	u16 cap = pdev->dpc_cap, status, source, reason, ext_reason;	/* NVMe: DPC cap/status/source/trigger reason/ext reason */
-	struct aer_err_info info = {};	/* NVMe: AER 에러 정보 구조체, NVMe ERS 연계용 */
+void dpc_process_error(struct pci_dev *pdev)
+{
+	u16 cap = pdev->dpc_cap, status, source, reason, ext_reason;
+	struct aer_err_info info = {};
 
-	pci_read_config_word(pdev, cap + PCI_EXP_DPC_STATUS, &status);	/* NVMe: DPC status 읽기, NVMe 포트의 containment 상태 확인 */
+	pci_read_config_word(pdev, cap + PCI_EXP_DPC_STATUS, &status);
 
-	reason = status & PCI_EXP_DPC_STATUS_TRIGGER_RSN;	/* NVMe: DPC trigger reason 필드 추출, NVMe 장치가 복구 가능한지 판단 */
+	reason = status & PCI_EXP_DPC_STATUS_TRIGGER_RSN;
 
-	switch (reason) { /* NVMe: DPC trigger reason에 따라 NVMe 에러 유형별 처리 분기 */
-	case PCI_EXP_DPC_STATUS_TRIGGER_RSN_UNCOR:	/* NVMe: unmasked uncorrectable error로 DPC가 트리거된 경우 */
-		pci_warn(pdev, "containment event, status:%#06x: unmasked uncorrectable error detected\n", /* NVMe: uncorrectable error containment 경고 출력, NVMe 장애 알림 */
-			 status);	/* NVMe: NVMe 연결 포트에서 uncorrectable error 발생 경고 */
-		if (dpc_get_aer_uncorrect_severity(pdev, &info) &&	/* NVMe: AER uncorrectable severity 획득, NVMe 에러 심각도 판단 */
-		    aer_get_device_error_info(&info, 0)) {	/* NVMe: AER 장치 에러 상세 정보 획득, NVMe AER 로그 */
-			aer_print_error(&info, 0);	/* NVMe: AER 에러 출력, NVMe 디버깅 */
-			pci_aer_clear_nonfatal_status(pdev);	/* NVMe: non-fatal AER status 클리어, NVMe 복구 준비 */
-			pci_aer_clear_fatal_status(pdev);	/* NVMe: fatal AER status 클리어, NVMe 복구 준비 */
-		} /* NVMe: if 블록 종료, AER 정보 출력 및 status 클리어 완료 */
-		break;	/* NVMe: uncorrectable reason 처리 완료 */
-	case PCI_EXP_DPC_STATUS_TRIGGER_RSN_NFE:	/* NVMe: ERR_NONFATAL 메시지로 DPC 트리거 */
-	case PCI_EXP_DPC_STATUS_TRIGGER_RSN_FE:	/* NVMe: ERR_FATAL 메시지로 DPC 트리거, NVMe 치명적 오류 */
-		pci_read_config_word(pdev, cap + PCI_EXP_DPC_SOURCE_ID, /* NVMe: DPC source ID 레지스터 읽기, NVMe 장치 BDF 식별 */
-			     &source);	/* NVMe: DPC source ID 읽기, 어떤 NVMe/하위 장치에서 왔는지 식별 */
-		pci_warn(pdev, "containment event, status:%#06x, %s received from %04x:%02x:%02x.%d\n", /* NVMe: ERR_FATAL/ERR_NONFATAL containment 경고 출력, NVMe 장치 위치 포함 */
-			 status, /* NVMe: DPC status 인자 전달 */
-			 (reason == PCI_EXP_DPC_STATUS_TRIGGER_RSN_FE) ? /* NVMe: ERR_FATAL 여부에 따라 메시지 문자열 선택 */
-				"ERR_FATAL" : "ERR_NONFATAL",	/* NVMe: ERR_FATAL인지 ERR_NONFATAL인지 구분, NVMe 복구 전략 결정 */
-			 pci_domain_nr(pdev->bus), PCI_BUS_NUM(source), /* NVMe: NVMe 장치의 domain/bus/device/function 출력 */
-			 PCI_SLOT(source), PCI_FUNC(source));	/* NVMe: 에러를 본 BDF 출력, NVMe 장치 위치 식별 */
-		break;	/* NVMe: ERR_FATAL/ERR_NONFATAL reason 처리 완료 */
-	case PCI_EXP_DPC_STATUS_TRIGGER_RSN_IN_EXT:	/* NVMe: 확장 trigger reason이 있는 경우 */
-		ext_reason = status & PCI_EXP_DPC_STATUS_TRIGGER_RSN_EXT;	/* NVMe: 확장 trigger reason 필드 추출 */
-		pci_warn(pdev, "containment event, status:%#06x: %s detected\n", /* NVMe: 확장 trigger reason containment 경고 출력 */
-			 status, /* NVMe: DPC status 인자 전달 */
-			 (ext_reason == PCI_EXP_DPC_STATUS_TRIGGER_RSN_RP_PIO) ? /* NVMe: RP PIO error 여부 확인 */
-			 "RP PIO error" : /* NVMe: RP PIO error 메시지 선택 */
-			 (ext_reason == PCI_EXP_DPC_STATUS_TRIGGER_RSN_SW_TRIGGER) ? /* NVMe: software trigger 여부 확인 */
-			 "software trigger" : /* NVMe: software trigger/reserved 메시지 선택 */
-			 "reserved error");	/* NVMe: RP PIO error/sw trigger 등 출력, NVMe DMA/설정 오류 가능성 */
+	switch (reason) {
+	case PCI_EXP_DPC_STATUS_TRIGGER_RSN_UNCOR:
+		pci_warn(pdev, "containment event, status:%#06x: unmasked uncorrectable error detected\n",
+			 status);
+		if (dpc_get_aer_uncorrect_severity(pdev, &info) &&
+		    aer_get_device_error_info(&info, 0)) {
+			aer_print_error(&info, 0);
+			pci_aer_clear_nonfatal_status(pdev);
+			pci_aer_clear_fatal_status(pdev);
+		}
+		break;
+	case PCI_EXP_DPC_STATUS_TRIGGER_RSN_NFE:
+	case PCI_EXP_DPC_STATUS_TRIGGER_RSN_FE:
+		pci_read_config_word(pdev, cap + PCI_EXP_DPC_SOURCE_ID,
+			     &source);
+		pci_warn(pdev, "containment event, status:%#06x, %s received from %04x:%02x:%02x.%d\n",
+			 status,
+			 (reason == PCI_EXP_DPC_STATUS_TRIGGER_RSN_FE) ?
+				"ERR_FATAL" : "ERR_NONFATAL",
+			 pci_domain_nr(pdev->bus), PCI_BUS_NUM(source),
+			 PCI_SLOT(source), PCI_FUNC(source));
+		break;
+	case PCI_EXP_DPC_STATUS_TRIGGER_RSN_IN_EXT:
+		ext_reason = status & PCI_EXP_DPC_STATUS_TRIGGER_RSN_EXT;
+		pci_warn(pdev, "containment event, status:%#06x: %s detected\n",
+			 status,
+			 (ext_reason == PCI_EXP_DPC_STATUS_TRIGGER_RSN_RP_PIO) ?
+			 "RP PIO error" :
+			 (ext_reason == PCI_EXP_DPC_STATUS_TRIGGER_RSN_SW_TRIGGER) ?
+			 "software trigger" :
+			 "reserved error");
 		/* show RP PIO error detail information */
-		if (ext_reason == PCI_EXP_DPC_STATUS_TRIGGER_RSN_RP_PIO &&	/* NVMe: RP PIO error로 트리거되었고 */
-		    pdev->dpc_rp_extensions)	/* NVMe: RP 확장이 지원되면 */
-			dpc_process_rp_pio_error(pdev);	/* NVMe: RP PIO 상세 로그 처리, NVMe 요청 실패 원인 분석 */
-		break;	/* NVMe: 확장 reason 처리 완료 */
-	} /* NVMe: switch 블록 종료, DPC trigger reason 분기 완료 */
-} /* NVMe: dpc_process_error 함수 본문 종료 */
+		if (ext_reason == PCI_EXP_DPC_STATUS_TRIGGER_RSN_RP_PIO &&
+		    pdev->dpc_rp_extensions)
+			dpc_process_rp_pio_error(pdev);
+		break;
+	}
+}
 
 /*
  * pci_clear_surpdn_errors:
@@ -454,21 +451,21 @@ void dpc_process_error(struct pci_dev *pdev) /* NVMe: DPC 트리거 원인을 �
  *   Device Status의 Fatal Error Detected 비트를 클리어한다. NVMe
  *   장치의 갑작스러운 링크 다운으로 인한 오류 비트를 정리한다.
  */
-static void pci_clear_surpdn_errors(struct pci_dev *pdev) /* NVMe: Surprise Down 에러로 인한 PCIe/Device status 비트 클리어 */
-{ /* NVMe: pci_clear_surpdn_errors 함수 본문 시작, NVMe Surprise Down 에러 클리어 */
-	if (pdev->dpc_rp_extensions)	/* NVMe: RP 확장이 지원되면 */
-		pci_write_config_dword(pdev, pdev->dpc_cap + /* NVMe: RP PIO status 레지스터의 모든 비트 클리어, NVMe PIO 오류 정리 */
-				       PCI_EXP_DPC_RP_PIO_STATUS, ~0);	/* NVMe: RP PIO status의 모든 비트 클리어(1 쓰기), NVMe 관련 PIO 오류 정리 */
+static void pci_clear_surpdn_errors(struct pci_dev *pdev)
+{
+	if (pdev->dpc_rp_extensions)
+		pci_write_config_dword(pdev, pdev->dpc_cap +
+				       PCI_EXP_DPC_RP_PIO_STATUS, ~0);
 
 	/*
 	 * In practice, Surprise Down errors have been observed to also set
 	 * error bits in the Status Register as well as the Fatal Error
 	 * Detected bit in the Device Status Register.
 	 */
-	pci_write_config_word(pdev, PCI_STATUS, 0xffff);	/* NVMe: PCI Status Register의 모든 에러 비트 클리어, NVMe 링크 다운 관련 상태 정리 */
+	pci_write_config_word(pdev, PCI_STATUS, 0xffff);
 
-	pcie_capability_write_word(pdev, PCI_EXP_DEVSTA, PCI_EXP_DEVSTA_FED);	/* NVMe: PCIe Device Status의 Fatal Error Detected 비트 클리어, NVMe fatal 오류 표시 제거 */
-} /* NVMe: pci_clear_surpdn_errors 함수 본문 종료 */
+	pcie_capability_write_word(pdev, PCI_EXP_DEVSTA, PCI_EXP_DEVSTA_FED);
+}
 
 /*
  * dpc_handle_surprise_removal:
@@ -477,26 +474,26 @@ static void pci_clear_surpdn_errors(struct pci_dev *pdev) /* NVMe: Surprise Down
  *   대신 surprise removal 경로로 전환하여 NVMe 드라이버가 장치를
  *   정리하도록 한다.
  */
-static void dpc_handle_surprise_removal(struct pci_dev *pdev) /* NVMe: DPC surprise removal 처리, NVMe 장치 제거 경로로 전환 */
-{ /* NVMe: dpc_handle_surprise_removal 함수 본문 시작, NVMe surprise removal 처리 */
-	if (!pcie_wait_for_link(pdev, false)) {	/* NVMe: 링크가 inactive가 될 때까지 대기, NVMe 분리 확인 */
-		pci_info(pdev, "Data Link Layer Link Active not cleared in 1000 msec\n");	/* NVMe: 1초 내 링크 비활성화 실패 정보, NVMe surprise removal 지연 */
-		goto out;	/* NVMe: 정리 코드로 이동, NVMe 장치 복구 포기 */
-	} /* NVMe: if 블록 종료, 링크 inactive 대기 실패 처리 완료 */
+static void dpc_handle_surprise_removal(struct pci_dev *pdev)
+{
+	if (!pcie_wait_for_link(pdev, false)) {
+		pci_info(pdev, "Data Link Layer Link Active not cleared in 1000 msec\n");
+		goto out;
+	}
 
-	if (pdev->dpc_rp_extensions && dpc_wait_rp_inactive(pdev))	/* NVMe: RP 확장이 있고 RP가 비활성화되지 않으면 */
-		goto out;	/* NVMe: 정리 코드로 이동, NVMe 장치 복구 포기 */
+	if (pdev->dpc_rp_extensions && dpc_wait_rp_inactive(pdev))
+		goto out;
 
-	pci_aer_raw_clear_status(pdev);	/* NVMe: AER status 레지스터 원시 클리어, NVMe AER 오류 비트 제거 */
-	pci_clear_surpdn_errors(pdev);	/* NVMe: Surprise Down 관련 오류 비트 클리어, NVMe 장치 제거 시 깨끗한 상태 유지 */
+	pci_aer_raw_clear_status(pdev);
+	pci_clear_surpdn_errors(pdev);
 
-	pci_write_config_word(pdev, pdev->dpc_cap + PCI_EXP_DPC_STATUS, /* NVMe: DPC trigger status 클리어, NVMe 포트 DPC 상태 해제 */
-			      PCI_EXP_DPC_STATUS_TRIGGER);	/* NVMe: DPC trigger status 클리어, 포트 DPC 상태 해제 */
+	pci_write_config_word(pdev, pdev->dpc_cap + PCI_EXP_DPC_STATUS,
+			      PCI_EXP_DPC_STATUS_TRIGGER);
 
-out: /* NVMe: surprise removal 정리 레이블, NVMe 복구 플래그 클리어 */
-	clear_bit(PCI_DPC_RECOVERED, &pdev->priv_flags);	/* NVMe: 복구 성공 플래그 클리어, NVMe는 복구되지 않음 */
-	wake_up_all(&dpc_completed_waitqueue);	/* NVMe: DPC 완료 대기 중인 프로세스들을 깨움, NVMe hotplug 동기화 */
-} /* NVMe: dpc_handle_surprise_removal 함수 본문 종료 */
+out:
+	clear_bit(PCI_DPC_RECOVERED, &pdev->priv_flags);
+	wake_up_all(&dpc_completed_waitqueue);
+}
 
 /*
  * dpc_is_surprise_removal:
@@ -504,19 +501,19 @@ out: /* NVMe: surprise removal 정리 레이블, NVMe 복구 플래그 클리어
  *   surprise removal에 의한 것인지 AER Surprise Down 비트를 확인하여
  *   판단한다. hotplug bridge인 경우에만 의미가 있다.
  */
-static bool dpc_is_surprise_removal(struct pci_dev *pdev) /* NVMe: AER Surprise Down 비트로 NVMe surprise removal 여부 판단 */
-{ /* NVMe: dpc_is_surprise_removal 함수 본문 시작, NVMe surprise removal 판단 */
-	u16 status;	/* NVMe: AER uncorrectable status 레지스터 값 */
+static bool dpc_is_surprise_removal(struct pci_dev *pdev)
+{
+	u16 status;
 
-	if (!pdev->is_hotplug_bridge)	/* NVMe: 이 포트가 hotplug bridge가 아니면 */
-		return false;		/* NVMe: surprise removal 판단 불필요, NVMe 일반 DPC 복구 진행 */
+	if (!pdev->is_hotplug_bridge)
+		return false;
 
-	if (pci_read_config_word(pdev, pdev->aer_cap + PCI_ERR_UNCOR_STATUS, /* NVMe: AER uncorrectable status 읽기, NVMe 링크 다운 원인 확인 */
-				 &status))	/* NVMe: AER uncorrectable status 읽기, 실패하면 */
-		return false;		/* NVMe: 상태를 읽을 수 없으면 false, NVMe 일반 복구 진행 */
+	if (pci_read_config_word(pdev, pdev->aer_cap + PCI_ERR_UNCOR_STATUS,
+				 &status))
+		return false;
 
-	return status & PCI_ERR_UNC_SURPDN;	/* NVMe: Surprise Down 비트가 세트되어 있으면 true 반환, NVMe 장치 예기치 않은 분 */
-} /* NVMe: dpc_is_surprise_removal 함수 본문 종료 */
+	return status & PCI_ERR_UNC_SURPDN;
+}
 
 /*
  * dpc_handler:
@@ -524,28 +521,28 @@ static bool dpc_is_surprise_removal(struct pci_dev *pdev) /* NVMe: AER Surprise 
  *   endpoint에서 발생한 PCIe fatal error에 대해 containment 후
  *   pcie_do_recovery()를 호출하여 NVMe ERS 콜백을 시작한다.
  */
-static irqreturn_t dpc_handler(int irq, void *context) /* NVMe: DPC threaded IRQ 핸들러, NVMe fatal error 복구 시작 */
-{ /* NVMe: dpc_handler 함수 본문 시작, NVMe PCIe fatal error 복구 시작 */
-	struct pci_dev *pdev = context;	/* NVMe: DPC IRQ가 등록된 PCIe 포트 장치, NVMe가 연결된 Root/Downstream Port */
+static irqreturn_t dpc_handler(int irq, void *context)
+{
+	struct pci_dev *pdev = context;
 
 	/*
 	 * According to PCIe r6.0 sec 6.7.6, errors are an expected side effect
 	 * of async removal and should be ignored by software.
 	 */
-	if (dpc_is_surprise_removal(pdev)) {	/* NVMe: surprise removal로 인한 DPC 트리거인지 확인, NVMe 물리 분리 여부 */
-		dpc_handle_surprise_removal(pdev);	/* NVMe: surprise removal 경로 처리, NVMe 드라이버는 device removal 처리 */
-		return IRQ_HANDLED;	/* NVMe: IRQ 처리 완료 반환, NVMe 복구 콜백 미호출 */
-	} /* NVMe: if 블록 종료, surprise removal 처리 완료 */
+	if (dpc_is_surprise_removal(pdev)) {
+		dpc_handle_surprise_removal(pdev);
+		return IRQ_HANDLED;
+	}
 
-	pci_dev_get(pdev);	/* NVMe: pdev 참조 카운트 증가, NVMe 복구 중 장치가 해제되지 않도록 보호 */
-	dpc_process_error(pdev);	/* NVMe: DPC 트리거 원인 분석 및 로그 출력, NVMe 에러 정보 기록 */
+	pci_dev_get(pdev);
+	dpc_process_error(pdev);
 
 	/* We configure DPC so it only triggers on ERR_FATAL */
-	pcie_do_recovery(pdev, pci_channel_io_frozen, dpc_reset_link);	/* NVMe: PCIe ERS 복구 시작, NVMe error_detected 콜백 호출, 채널 frozen 상태 전달 */
+	pcie_do_recovery(pdev, pci_channel_io_frozen, dpc_reset_link);
 
-	pci_dev_put(pdev);	/* NVMe: pdev 참조 카운트 감소, NVMe 복구 처리 후 장치 해제 허용 */
-	return IRQ_HANDLED;	/* NVMe: threaded IRQ 처리 완료, NVMe 복구 흐름 진행 중 */
-} /* NVMe: dpc_handler 함수 본문 종료 */
+	pci_dev_put(pdev);
+	return IRQ_HANDLED;
+}
 
 /*
  * dpc_irq:
@@ -553,22 +550,22 @@ static irqreturn_t dpc_handler(int irq, void *context) /* NVMe: DPC threaded IRQ
  *   DPC 트리거가 있으면 threaded handler(dpc_handler)를 깨운다.
  *   NVMe endpoint의 PCIe fatal error를 신속히 감지하는 역할을 한다.
  */
-static irqreturn_t dpc_irq(int irq, void *context) /* NVMe: DPC 상단 IRQ 핸들러, NVMe PCIe fatal error 감지 */
-{ /* NVMe: dpc_irq 함수 본문 시작, NVMe PCIe fatal error 감지 */
-	struct pci_dev *pdev = context;	/* NVMe: DPC IRQ가 등록된 PCIe 포트 장치, NVMe가 연결된 포트 */
-	u16 cap = pdev->dpc_cap, status;	/* NVMe: DPC capability 오프셋과 status 레지스터 */
+static irqreturn_t dpc_irq(int irq, void *context)
+{
+	struct pci_dev *pdev = context;
+	u16 cap = pdev->dpc_cap, status;
 
-	pci_read_config_word(pdev, cap + PCI_EXP_DPC_STATUS, &status);	/* NVMe: DPC status 읽기, NVMe 포트의 interrupt/trigger 상태 확인 */
+	pci_read_config_word(pdev, cap + PCI_EXP_DPC_STATUS, &status);
 
-	if (!(status & PCI_EXP_DPC_STATUS_INTERRUPT) || PCI_POSSIBLE_ERROR(status))	/* NVMe: DPC interrupt 비트가 없거나 status가 에러 코드이면 */
-		return IRQ_NONE;	/* NVMe: 이 IRQ는 DPC가 아님, NVMe 다른 interrupt 소스 */
+	if (!(status & PCI_EXP_DPC_STATUS_INTERRUPT) || PCI_POSSIBLE_ERROR(status))
+		return IRQ_NONE;
 
-	pci_write_config_word(pdev, cap + PCI_EXP_DPC_STATUS, /* NVMe: DPC interrupt status 클리어, NVMe IRQ flood 방지 */
-			      PCI_EXP_DPC_STATUS_INTERRUPT);	/* NVMe: DPC interrupt status 클리어, NVMe 추가 IRQ flood 방지 */
-	if (status & PCI_EXP_DPC_STATUS_TRIGGER)	/* NVMe: DPC trigger 비트가 세트되어 있으면 */
-		return IRQ_WAKE_THREAD;	/* NVMe: threaded handler(dpc_handler) 깨움, NVMe 복구 프로세스 시작 */
-	return IRQ_HANDLED;	/* NVMe: interrupt만 처리하고 thread는 불필요, NVMe 복구 트리거 없음 */
-} /* NVMe: dpc_irq 함수 본문 종료 */
+	pci_write_config_word(pdev, cap + PCI_EXP_DPC_STATUS,
+			      PCI_EXP_DPC_STATUS_INTERRUPT);
+	if (status & PCI_EXP_DPC_STATUS_TRIGGER)
+		return IRQ_WAKE_THREAD;
+	return IRQ_HANDLED;
+}
 
 /*
  * pci_dpc_init:
@@ -576,43 +573,43 @@ static irqreturn_t dpc_irq(int irq, void *context) /* NVMe: DPC 상단 IRQ 핸�
  *   설정한다. NVMe SSD가 연결될 다운스트림 포트의 DPC PIO 로그 크기를
  *   검증하여 추후 NVMe 관련 PIO error 진단 정보를 확보한다.
  */
-void pci_dpc_init(struct pci_dev *pdev) /* NVMe: NVMe SSD 연결 포트의 DPC capability 및 RP 확장 초기화 */
-{ /* NVMe: pci_dpc_init 함수 본문 시작, NVMe 연결 포트 DPC 초기화 */
-	u16 cap;	/* NVMe: DPC capability 레지스터 값 */
+void pci_dpc_init(struct pci_dev *pdev)
+{
+	u16 cap;
 
-	pdev->dpc_cap = pci_find_ext_capability(pdev, PCI_EXT_CAP_ID_DPC);	/* NVMe: DPC 확장 capability 위치 탐색, NVMe 포트의 DPC 지원 여부 확인 */
-	if (!pdev->dpc_cap)		/* NVMe: DPC capability가 없으면 */
-		return;			/* NVMe: DPC 초기화 불필요, NVMe는 일반 AER 복구 경로 사용 */
+	pdev->dpc_cap = pci_find_ext_capability(pdev, PCI_EXT_CAP_ID_DPC);
+	if (!pdev->dpc_cap)
+		return;
 
-	pci_read_config_word(pdev, pdev->dpc_cap + PCI_EXP_DPC_CAP, &cap);	/* NVMe: DPC capability 레지스터 읽기, NVMe 포트의 DPC 기능 파악 */
-	if (!(cap & PCI_EXP_DPC_CAP_RP_EXT))	/* NVMe: Root Port extension이 지원되지 않으면 */
-		return;			/* NVMe: RP 확장 없이는 DPC 서비스 동작 안 함, NVMe 복구 지원 불가 */
+	pci_read_config_word(pdev, pdev->dpc_cap + PCI_EXP_DPC_CAP, &cap);
+	if (!(cap & PCI_EXP_DPC_CAP_RP_EXT))
+		return;
 
-	pdev->dpc_rp_extensions = true;	/* NVMe: Root Port 확장 지원 플래그 설정, NVMe PIO 로그 등 고급 기능 사용 가능 */
+	pdev->dpc_rp_extensions = true;
 
 	/* Quirks may set dpc_rp_log_size if device or firmware is buggy */
-	if (!pdev->dpc_rp_log_size) {	/* NVMe: quirks에서 로그 크기를 미리 설정하지 않았으면 */
-		u16 flags;		/* NVMe: PCIe capability flags 레지스터 값 */
-		int ret;		/* NVMe: pcie_capability_read_word 반환값 */
+	if (!pdev->dpc_rp_log_size) {
+		u16 flags;
+		int ret;
 
-		ret = pcie_capability_read_word(pdev, PCI_EXP_FLAGS, &flags);	/* NVMe: PCIe capability flags 읽기, Flit 모드 확인용 */
-		if (ret)		/* NVMe: flags 읽기에 실패하면 */
-			return;		/* NVMe: 로그 크기 설정 불가, NVMe PIO 로그 사용 안 함 */
+		ret = pcie_capability_read_word(pdev, PCI_EXP_FLAGS, &flags);
+		if (ret)
+			return;
 
-		pdev->dpc_rp_log_size = /* NVMe: DPC capability에서 기본 PIO 로그 크기 추출 */
-				FIELD_GET(PCI_EXP_DPC_RP_PIO_LOG_SIZE, cap);	/* NVMe: DPC capability에서 PIO 로그 크기 필드 추출, NVMe 디버깅용 TLP 수 */
-		if (FIELD_GET(PCI_EXP_FLAGS_FLIT, flags))	/* NVMe: PCIe Flit 모드가 활성화되어 있으면 */
-			pdev->dpc_rp_log_size += FIELD_GET(PCI_EXP_DPC_RP_PIO_LOG_SIZE4, /* NVMe: Flit 모드 추가 PIO 로그 크기 반영, NVMe Gen6 지원 */
-						   cap) << 4;	/* NVMe: Flit 모드용 추가 PIO 로그 크기 반영, NVMe Gen6/Flit 장치 지원 */
+		pdev->dpc_rp_log_size =
+				FIELD_GET(PCI_EXP_DPC_RP_PIO_LOG_SIZE, cap);
+		if (FIELD_GET(PCI_EXP_FLAGS_FLIT, flags))
+			pdev->dpc_rp_log_size += FIELD_GET(PCI_EXP_DPC_RP_PIO_LOG_SIZE4,
+						   cap) << 4;
 
-		if (pdev->dpc_rp_log_size < PCIE_STD_NUM_TLP_HEADERLOG || /* NVMe: PIO 로그 크기가 허용 범위 내인지 검증 */
-		    pdev->dpc_rp_log_size > PCIE_STD_MAX_TLP_HEADERLOG + 1) {	/* NVMe: PIO 로그 크기가 허용 범위를 벗어나면 */
-			pci_err(pdev, "RP PIO log size %u is invalid\n", /* NVMe: 잘못된 PIO 로그 크기 에러 메시지 출력 */
-				pdev->dpc_rp_log_size);	/* NVMe: 잘못된 로그 크기 에러, NVMe 진단 정보 부정확 가능성 */
-			pdev->dpc_rp_log_size = 0;	/* NVMe: 로그 크기를 0으로 무효화, NVMe PIO 로그 사용 안 함 */
-		} /* NVMe: if 블록 종료, PIO 로그 크기 유효성 검증 완료 */
-	} /* NVMe: if 블록 종료, quirks 미설정 시 PIO 로그 크기 계산 완료 */
-} /* NVMe: pci_dpc_init 함수 본문 종료 */
+		if (pdev->dpc_rp_log_size < PCIE_STD_NUM_TLP_HEADERLOG ||
+		    pdev->dpc_rp_log_size > PCIE_STD_MAX_TLP_HEADERLOG + 1) {
+			pci_err(pdev, "RP PIO log size %u is invalid\n",
+				pdev->dpc_rp_log_size);
+			pdev->dpc_rp_log_size = 0;
+		}
+	}
+}
 
 /*
  * dpc_enable:
@@ -620,24 +617,24 @@ void pci_dpc_init(struct pci_dev *pdev) /* NVMe: NVMe SSD 연결 포트의 DPC c
  *   ERR_FATAL trigger와 DPC interrupt enable을 설정한다. NVMe 장치에서
  *   fatal error가 발생하면 DPC가 링크를 억제하고 IRQ를 발생시킨다.
  */
-static void dpc_enable(struct pcie_device *dev) /* NVMe: DPC 포트 서비스 활성화, NVMe fatal error containment 준비 */
-{ /* NVMe: dpc_enable 함수 본문 시작, NVMe DPC 활성화 */
-	struct pci_dev *pdev = dev->port;	/* NVMe: PCIe 포트 장치, NVMe가 연결된 Root/Downstream Port */
-	int dpc = pdev->dpc_cap;		/* NVMe: DPC capability 오프셋 */
-	u16 ctl;				/* NVMe: DPC control 레지스터 값 */
+static void dpc_enable(struct pcie_device *dev)
+{
+	struct pci_dev *pdev = dev->port;
+	int dpc = pdev->dpc_cap;
+	u16 ctl;
 
 	/*
 	 * Clear DPC Interrupt Status so we don't get an interrupt for an
 	 * old event when setting DPC Interrupt Enable.
 	 */
-	pci_write_config_word(pdev, dpc + PCI_EXP_DPC_STATUS, /* NVMe: DPC interrupt status 클리어, NVMe 구동 중 낡은 IRQ 방지 */
-			      PCI_EXP_DPC_STATUS_INTERRUPT);	/* NVMe: 이전 DPC interrupt status 클리어, NVMe 구동 중 낡은 IRQ 방지 */
+	pci_write_config_word(pdev, dpc + PCI_EXP_DPC_STATUS,
+			      PCI_EXP_DPC_STATUS_INTERRUPT);
 
-	pci_read_config_word(pdev, dpc + PCI_EXP_DPC_CTL, &ctl);	/* NVMe: DPC control 레지스터 읽기, NVMe trigger 설정 변경 전 상태 */
-	ctl &= ~PCI_EXP_DPC_CTL_EN_MASK;	/* NVMe: 기존 fatal/non-fatal trigger enable 비트 클리어 */
-	ctl |= PCI_EXP_DPC_CTL_EN_FATAL | PCI_EXP_DPC_CTL_INT_EN;	/* NVMe: ERR_FATAL trigger와 DPC interrupt 활성화, NVMe fatal error containment 준비 */
-	pci_write_config_word(pdev, dpc + PCI_EXP_DPC_CTL, ctl);	/* NVMe: DPC control 레지스터에 새 설정 기록, NVMe DPC 기능 활성화 */
-} /* NVMe: dpc_enable 함수 본문 종료 */
+	pci_read_config_word(pdev, dpc + PCI_EXP_DPC_CTL, &ctl);
+	ctl &= ~PCI_EXP_DPC_CTL_EN_MASK;
+	ctl |= PCI_EXP_DPC_CTL_EN_FATAL | PCI_EXP_DPC_CTL_INT_EN;
+	pci_write_config_word(pdev, dpc + PCI_EXP_DPC_CTL, ctl);
+}
 
 /*
  * dpc_disable:
@@ -645,20 +642,19 @@ static void dpc_enable(struct pcie_device *dev) /* NVMe: DPC 포트 서비스 �
  *   장치의 DPC trigger와 interrupt를 끄고 더 이상 containment 동작이
  *   일어나지 않도록 한다.
  */
-static void dpc_disable(struct pcie_device *dev) /* NVMe: DPC 포트 서비스 비활성화, NVMe 제거/suspend 시 정리 */
-{ /* NVMe: dpc_disable 함수 본문 시작, NVMe DPC 비활성화 */
-	struct pci_dev *pdev = dev->port;	/* NVMe: PCIe 포트 장치, NVMe가 연결된 포트 */
-	int dpc = pdev->dpc_cap;		/* NVMe: DPC capability 오프셋 */
-	u16 ctl;				/* NVMe: DPC control 레지스터 값 */
+static void dpc_disable(struct pcie_device *dev)
+{
+	struct pci_dev *pdev = dev->port;
+	int dpc = pdev->dpc_cap;
+	u16 ctl;
 
 	/* Disable DPC triggering and DPC interrupts */
-	pci_read_config_word(pdev, dpc + PCI_EXP_DPC_CTL, &ctl);	/* NVMe: DPC control 레지스터 읽기, NVMe DPC 현재 설정 확인 */
-	ctl &= ~(PCI_EXP_DPC_CTL_EN_FATAL | PCI_EXP_DPC_CTL_INT_EN);	/* NVMe: ERR_FATAL trigger와 interrupt enable 비트 클리어 */
-	pci_write_config_word(pdev, dpc + PCI_EXP_DPC_CTL, ctl);	/* NVMe: DPC control 레지스터에 기록, NVMe DPC 기능 비활성화 */
-} /* NVMe: dpc_disable 함수 본문 종료 */
+	pci_read_config_word(pdev, dpc + PCI_EXP_DPC_CTL, &ctl);
+	ctl &= ~(PCI_EXP_DPC_CTL_EN_FATAL | PCI_EXP_DPC_CTL_INT_EN);
+	pci_write_config_word(pdev, dpc + PCI_EXP_DPC_CTL, ctl);
+}
 
-/* NVMe: capability 플래그 출력용 매크로, 비트가 세트되어 있으면 '+', 아니면 '-' */
-#define FLAG(x, y) (((x) & (y)) ? '+' : '-') /* NVMe: DPC capability 플래그를 '+/-' 문자로 출력하는 매크로 */
+#define FLAG(x, y) (((x) & (y)) ? '+' : '-')
 
 /*
  * dpc_probe:
@@ -666,38 +662,38 @@ static void dpc_disable(struct pcie_device *dev) /* NVMe: DPC 포트 서비스 �
  *   연결된 포트에 threaded IRQ를 등록하고 DPC를 활성화하며, NVMe
  *   장치의 fatal PCIe error를 처리할 준비를 마친다.
  */
-static int dpc_probe(struct pcie_device *dev) /* NVMe: DPC 포트 서비스 드라이버 probe, NVMe 복구 IRQ 등록 */
-{ /* NVMe: dpc_probe 함수 본문 시작, NVMe DPC 포트 서비스 등록 */
-	struct pci_dev *pdev = dev->port;	/* NVMe: PCIe 포트 장치, NVMe가 연결된 포트 */
-	struct device *device = &dev->device;	/* NVMe: pcie_device의 generic device 구조체, IRQ 등록용 */
-	int status;				/* NVMe: 반환값 및 IRQ 요청 결과 */
-	u16 cap;				/* NVMe: DPC capability 레지스터 값 */
+static int dpc_probe(struct pcie_device *dev)
+{
+	struct pci_dev *pdev = dev->port;
+	struct device *device = &dev->device;
+	int status;
+	u16 cap;
 
-	if (!pcie_aer_is_native(pdev) && !pcie_ports_dpc_native)	/* NVMe: native AER도 DPC도 지원하지 않으면 */
-		return -ENOTSUPP;	/* NVMe: DPC 포트 서비스 지원 불가, NVMe는 다른 복구 메커니즘 사용 */
+	if (!pcie_aer_is_native(pdev) && !pcie_ports_dpc_native)
+		return -ENOTSUPP;
 
-	status = devm_request_threaded_irq(device, dev->irq, dpc_irq, /* NVMe: DPC 상단/threaded IRQ 요청, NVMe fatal error 발생 시 호출 */
-					   dpc_handler, IRQF_SHARED, /* NVMe: threaded 핸들러 및 공유 IRQ 플래그 지정 */
-					   "pcie-dpc", pdev);	/* NVMe: DPC 상단/threaded IRQ 등록, NVMe fatal error 발생 시 dpc_handler 호출 */
-	if (status) {				/* NVMe: IRQ 등록에 실패하면 */
-		pci_warn(pdev, "request IRQ%d failed: %d\n", dev->irq, /* NVMe: IRQ 등록 실패 경고 메시지 출력 */
-			 status);		/* NVMe: IRQ 등록 실패 경고, NVMe DPC 복구 불가 */
-		return status;		/* NVMe: 에러 코드 반환, NVMe DPC probe 실패 */
-	} /* NVMe: if 블록 종료, IRQ 등록 실패 처리 완료 */
+	status = devm_request_threaded_irq(device, dev->irq, dpc_irq,
+					   dpc_handler, IRQF_SHARED,
+					   "pcie-dpc", pdev);
+	if (status) {
+		pci_warn(pdev, "request IRQ%d failed: %d\n", dev->irq,
+			 status);
+		return status;
+	}
 
-	pci_read_config_word(pdev, pdev->dpc_cap + PCI_EXP_DPC_CAP, &cap);	/* NVMe: DPC capability 레지스터 읽기, NVMe 포트 기능 로그 출력용 */
-	dpc_enable(dev);					/* NVMe: DPC 활성화, NVMe fatal error containment 시작 */
+	pci_read_config_word(pdev, pdev->dpc_cap + PCI_EXP_DPC_CAP, &cap);
+	dpc_enable(dev);
 
-	pci_info(pdev, "enabled with IRQ %d\n", dev->irq);	/* NVMe: DPC 활성화 및 IRQ 번호 정보, NVMe 복구 경로 준비 완료 */
-	pci_info(pdev, "error containment capabilities: Int Msg #%d, RPExt%c PoisonedTLP%c SwTrigger%c RP PIO Log %d, DL_ActiveErr%c\n", /* NVMe: DPC containment 기능 지원 현황 정보 출력, NVMe 디버깅 */
-		 cap & PCI_EXP_DPC_IRQ, FLAG(cap, PCI_EXP_DPC_CAP_RP_EXT),	/* NVMe: DPC IRQ 번호 및 RP 확장 지원 여부, NVMe PIO 로그 가능성 */
-		 FLAG(cap, PCI_EXP_DPC_CAP_POISONED_TLP),	/* NVMe: Poisoned TLP trigger 지원 여부, NVMe 데이터 무결성 오류 연관 */
-		 FLAG(cap, PCI_EXP_DPC_CAP_SW_TRIGGER), pdev->dpc_rp_log_size,	/* NVMe: SW trigger 지원 및 RP PIO 로그 크기, NVMe 디버깅 정보 */
-		 FLAG(cap, PCI_EXP_DPC_CAP_DL_ACTIVE));	/* NVMe: Data Link Active error trigger 지원 여부, NVMe 링크 상태 모니터링 연관 */
+	pci_info(pdev, "enabled with IRQ %d\n", dev->irq);
+	pci_info(pdev, "error containment capabilities: Int Msg #%d, RPExt%c PoisonedTLP%c SwTrigger%c RP PIO Log %d, DL_ActiveErr%c\n",
+		 cap & PCI_EXP_DPC_IRQ, FLAG(cap, PCI_EXP_DPC_CAP_RP_EXT),
+		 FLAG(cap, PCI_EXP_DPC_CAP_POISONED_TLP),
+		 FLAG(cap, PCI_EXP_DPC_CAP_SW_TRIGGER), pdev->dpc_rp_log_size,
+		 FLAG(cap, PCI_EXP_DPC_CAP_DL_ACTIVE));
 
-	pci_add_ext_cap_save_buffer(pdev, PCI_EXT_CAP_ID_DPC, sizeof(u16));	/* NVMe: DPC capability 상태 저장 버퍼 추가, NVMe suspend/resume 시 DPC 설정 복원 */
-	return status;	/* NVMe: probe 성공(0) 반환, NVMe DPC 복구 경로 활성화 완료 */
-} /* NVMe: dpc_probe 함수 본문 종료 */
+	pci_add_ext_cap_save_buffer(pdev, PCI_EXT_CAP_ID_DPC, sizeof(u16));
+	return status;
+}
 
 /*
  * dpc_suspend:
@@ -705,11 +701,11 @@ static int dpc_probe(struct pcie_device *dev) /* NVMe: DPC 포트 서비스 드�
  *   저전력 상태로 전환되기 전 DPC trigger/interrupt를 끄고, resume 시
  *   다시 활성화될 수 있도록 상태를 저장한다.
  */
-static int dpc_suspend(struct pcie_device *dev) /* NVMe: DPC 포트 서비스 suspend, NVMe 저전력 전환 전 DPC 정지 */
-{ /* NVMe: dpc_suspend 함수 본문 시작, NVMe DPC 일시 중지 */
-	dpc_disable(dev);	/* NVMe: DPC 비활성화, NVMe suspend 중 DPC trigger 방지 */
-	return 0;		/* NVMe: suspend 성공, NVMe DPC 일시 중지 */
-} /* NVMe: dpc_suspend 함수 본문 종료 */
+static int dpc_suspend(struct pcie_device *dev)
+{
+	dpc_disable(dev);
+	return 0;
+}
 
 /*
  * dpc_resume:
@@ -717,11 +713,11 @@ static int dpc_suspend(struct pcie_device *dev) /* NVMe: DPC 포트 서비스 su
  *   다시 동작하기 전 DPC를 켜서 NVMe fatal error containment 기능을
  *   복원한다.
  */
-static int dpc_resume(struct pcie_device *dev) /* NVMe: DPC 포트 서비스 resume, NVMe 동작 재개 전 DPC 활성화 */
-{ /* NVMe: dpc_resume 함수 본문 시작, NVMe DPC 복원 */
-	dpc_enable(dev);	/* NVMe: DPC 활성화, NVMe resume 후 fatal error 처리 준비 */
-	return 0;		/* NVMe: resume 성공, NVMe DPC 복구 경로 복원 */
-} /* NVMe: dpc_resume 함수 본문 종료 */
+static int dpc_resume(struct pcie_device *dev)
+{
+	dpc_enable(dev);
+	return 0;
+}
 
 /*
  * dpc_remove:
@@ -729,28 +725,27 @@ static int dpc_resume(struct pcie_device *dev) /* NVMe: DPC 포트 서비스 res
  *   장치가 제거되거나 포트 서비스가 unload될 때 DPC trigger/interrupt를
  *   끄고 정리한다.
  */
-static void dpc_remove(struct pcie_device *dev) /* NVMe: DPC 포트 서비스 remove, NVMe 제거 시 DPC 정리 */
-{ /* NVMe: dpc_remove 함수 본문 시작, NVMe DPC 정리 */
-	dpc_disable(dev);	/* NVMe: DPC 비활성화, NVMe 제거 시 DPC 동작 중지 */
-} /* NVMe: dpc_remove 함수 본문 종료 */
+static void dpc_remove(struct pcie_device *dev)
+{
+	dpc_disable(dev);
+}
 
-/* NVMe: PCIe 포트 서비스 드라이버 구조체, NVMe DPC 복구를 담당할 드라이버 등록 정보 */
-static struct pcie_port_service_driver dpcdriver = { /* NVMe: DPC 포트 서비스 드라이버 구조체 정의 */
-	.name		= "dpc",		/* NVMe: 드라이버 이름, /sys/bus/pci_express에 표시 */
-	.port_type	= PCIE_ANY_PORT,	/* NVMe: 모든 PCIe 포트 유형에 대해 등록, NVMe가 연결될 수 있는 Root/Switch Port */
-	.service	= PCIE_PORT_SERVICE_DPC,	/* NVMe: 제공하는 서비스는 DPC, NVMe error containment */
-	.probe		= dpc_probe,		/* NVMe: 포트 서비스 probe 함수, NVMe 포트에서 DPC 활성화 */
-	.suspend	= dpc_suspend,		/* NVMe: 시스템 suspend 콜백, NVMe DPC 일시 중지 */
-	.resume		= dpc_resume,		/* NVMe: 시스템 resume 콜백, NVMe DPC 복원 */
-	.remove		= dpc_remove,		/* NVMe: 포트 서비스 제거 콜백, NVMe DPC 정리 */
-}; /* NVMe: DPC 포트 서비스 드라이버 구조체 정의 종료 */
+static struct pcie_port_service_driver dpcdriver = {
+	.name		= "dpc",
+	.port_type	= PCIE_ANY_PORT,
+	.service	= PCIE_PORT_SERVICE_DPC,
+	.probe		= dpc_probe,
+	.suspend	= dpc_suspend,
+	.resume		= dpc_resume,
+	.remove		= dpc_remove,
+};
 
 /*
  * pcie_dpc_init:
  *   DPC PCIe 포트 서비스 드라이버를 커널에 등록한다. NVMe SSD의
  *   PCIe fatal error 복구 인프라 초기화의 일부로, 부팅 시 호출된다.
  */
-int __init pcie_dpc_init(void) /* NVMe: DPC PCIe 포트 서비스 드라이버를 커널에 등록 */
-{ /* NVMe: pcie_dpc_init 함수 본문 시작, DPC 포트 서비스 등록 */
-	return pcie_port_service_register(&dpcdriver);	/* NVMe: DPC 포트 서비스 드라이버 등록, NVMe 장치의 DPC 복구 경로 활성화 */
-} /* NVMe: pcie_dpc_init 함수 본문 종료 */
+int __init pcie_dpc_init(void)
+{
+	return pcie_port_service_register(&dpcdriver);
+}

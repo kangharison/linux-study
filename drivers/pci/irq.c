@@ -115,14 +115,14 @@
  *                              드라이버 바인딩 직전/직후에 PCI 코어가 부른다.
  */
 
-#include <linux/device.h>	/* NVMe: PCI device 구조체 및 device model 관련 헤더 포함. */
-#include <linux/kernel.h>	/* NVMe: 커널 기본 매크로와 함수를 사용하기 위한 헤더. */
-#include <linux/errno.h>	/* NVMe: 오류 코드(ENOMEM 등) 정의 헤더. */
-#include <linux/export.h>	/* NVMe: pci_request_irq 등의 심볼을 외부 모듈에 낼 때 사용. */
-#include <linux/interrupt.h>	/* NVMe: request_threaded_irq(), irq_handler_t 등 IRQ API 헤더. */
-#include <linux/pci.h>		/* NVMe: PCI 핵심 데이터 구조와 함수 선언 헤더. */
+#include <linux/device.h>
+#include <linux/kernel.h>
+#include <linux/errno.h>
+#include <linux/export.h>
+#include <linux/interrupt.h>
+#include <linux/pci.h>
 
-#include "pci.h"		/* NVMe: PCI 서브시스템 내부 전용 선언과 lock 등 포함. */
+#include "pci.h"
 
 /**
  * pci_request_irq - allocate an interrupt line for a PCI device
@@ -311,41 +311,38 @@ EXPORT_SYMBOL(pci_free_irq);
  *   NVMe SSD가 add-in card나 bridge 뒤에 장착된 경우, 하위 장치의 INTA~INTD가
  *   상위 bridge의 다른 핀으로 매핑되므로 이 함수로 올바른 핀을 계산한다.
  */
-u8 pci_swizzle_interrupt_pin(const struct pci_dev *dev, u8 pin) /* NVMe: bridge 뒤 NVMe 장치의 INTx 핀을 swizzling하는 함수. */
-{ /* NVMe: bridge 뒤 NVMe 장치 INTx 핀 swizzling 함수 본문 시작. */
-	int slot;		/* NVMe: 현재 PCI 장치의 물리 슬롯 번호. */
+u8 pci_swizzle_interrupt_pin(const struct pci_dev *dev, u8 pin)
+{
+	int slot;
 
-	if (pci_ari_enabled(dev->bus))	/* NVMe: ARI(Alternative Routing-ID Interpretation)가 켜져 있으면. */
-		slot = 0;		/* NVMe: ARI에서는 slot 번호가 항상 0으로 간주된다. */
+	if (pci_ari_enabled(dev->bus))
+		slot = 0;
 	else
-		slot = PCI_SLOT(dev->devfn);	/* NVMe: devfn에서 상위 5비트(slot)를 추출. */
+		slot = PCI_SLOT(dev->devfn);
 
-	return (((pin - 1) + slot) % 4) + 1; /* NVMe: bridge 뒤 NVMe 장치의 INTx 핀 번호를 계산하여 반환. */
-	/* NVMe: 핀 번호와 slot 번호를 더해 4로 나눈 나머지로 bridge 뒤의
-	 *      INTx 핀을 결정. 예: slot 1의 INTA는 상위 bridge의 INTB로 연결. */
-}	/* NVMe: bridge 뒤 NVMe 장치의 최종 INTx 핀 번호를 반환. */
-
+	return (((pin - 1) + slot) % 4) + 1;
+}
 /*
  * pci_get_interrupt_pin:
  *   NVMe 장치의 INTx 핀이 Root Complex에 도달할 때까지 bridge를 따라
  *   swizzling하고, 최종적으로 도달한 루트 bridge 측 장치를 *bridge에
  *   저장한다. 플랫폼 map_irq()에 넘길 pin과 bridge를 얻는 데 사용된다.
  */
-int pci_get_interrupt_pin(struct pci_dev *dev, struct pci_dev **bridge) /* NVMe: NVMe 장치의 INTx 핀을 Root Complex까지 추적하는 함수. */
-{ /* NVMe: NVMe 장치 INTx 핀 Root Complex 추적 함수 본문 시작. */
-	u8 pin;		/* NVMe: 현재 단계의 INTx 핀 번호. */
+int pci_get_interrupt_pin(struct pci_dev *dev, struct pci_dev **bridge)
+{
+	u8 pin;
 
-	pin = dev->pin;		/* NVMe: NVMe 장치의 PCI config 공간 INT_PIN 값을 읽어온다. */
-	if (!pin)		/* NVMe: INT_PIN이 0이면 이 장치는 INTx를 사용하지 않는다. */
-		return -1;	/* NVMe: INTx 미사용을 의미하는 -1 반환. */
+	pin = dev->pin;
+	if (!pin)
+		return -1;
 
-	while (!pci_is_root_bus(dev->bus)) {	/* NVMe: 현재 bus가 root bus가 아닐 때까지 bridge를 따라 올라간다. */
-		pin = pci_swizzle_interrupt_pin(dev, pin);	/* NVMe: bridge를 지날 때마다 INTx 핀을 swizzling. */
-		dev = dev->bus->self;	/* NVMe: 상위 bridge의 pci_dev로 이동. */
+	while (!pci_is_root_bus(dev->bus)) {
+		pin = pci_swizzle_interrupt_pin(dev, pin);
+		dev = dev->bus->self;
 	}
-	*bridge = dev;		/* NVMe: 최종 root bus에 연결된 bridge 장치를 반환. */
-	return pin;		/* NVMe: Root Complex에 도달한 INTx 핀 번호 반환. */
-}	/* NVMe: NVMe 장치의 INTx 핀과 root bridge 장치를 호출자에 반환. */
+	*bridge = dev;
+	return pin;
+}
 
 /**
  * pci_common_swizzle - swizzle INTx all the way to root bridge
@@ -362,18 +359,18 @@ int pci_get_interrupt_pin(struct pci_dev *dev, struct pci_dev **bridge) /* NVMe:
  *   *pinp에 최종 핀을 기록하고, root bus에 연결된 장치의 slot 번호를
  *   반환한다. 레거시 플랫폼 INTx 라우팅 테이블에서 사용된다.
  */
-u8 pci_common_swizzle(struct pci_dev *dev, u8 *pinp) /* NVMe: NVMe 장치의 INTx 핀을 Root Complex까지 누적 swizzling하는 함수. */
-{ /* NVMe: NVMe 장치 INTx 누적 swizzling 함수 본문 시작. */
-	u8 pin = *pinp;		/* NVMe: 호출자가 전달한 INTx 핀 값을 복사. */
+u8 pci_common_swizzle(struct pci_dev *dev, u8 *pinp)
+{
+	u8 pin = *pinp;
 
-	while (!pci_is_root_bus(dev->bus)) {	/* NVMe: root bus에 도달할 때까지 반복. */
-		pin = pci_swizzle_interrupt_pin(dev, pin);	/* NVMe: bridge 단계별 핀 swizzling. */
-		dev = dev->bus->self;	/* NVMe: 상위 bridge로 이동. */
+	while (!pci_is_root_bus(dev->bus)) {
+		pin = pci_swizzle_interrupt_pin(dev, pin);
+		dev = dev->bus->self;
 	}
-	*pinp = pin;		/* NVMe: 최종 swizzled 핀 번호를 호출자가 제공한 변수에 기록. */
-	return PCI_SLOT(dev->devfn);	/* NVMe: root bus 장치의 slot 번호 반환. */
-}	/* NVMe: NVMe 장치 INTx 누적 swizzling 함수 종료. */
-EXPORT_SYMBOL_GPL(pci_common_swizzle);	/* NVMe: NVMe 드라이버 모듈에서 pci_common_swizzle 심볼을 사용할 수 있도록 낸다. */
+	*pinp = pin;
+	return PCI_SLOT(dev->devfn);
+}
+EXPORT_SYMBOL_GPL(pci_common_swizzle);
 
 /*
  * pci_assign_irq:
@@ -382,17 +379,16 @@ EXPORT_SYMBOL_GPL(pci_common_swizzle);	/* NVMe: NVMe 드라이버 모듈에서 p
  *   dev->irq에 플랫폼 IRQ 번호가 설정되며, PCI config space의
  *   INTERRUPT_LINE 레지스터에도 기록된다.
  */
-void pci_assign_irq(struct pci_dev *dev) /* NVMe: NVMe 장치의 INTx 라인에 플랫폼 IRQ를 할당하는 함수. */
-{ /* NVMe: NVMe 장치 INTx IRQ 할당 함수 본문 시작. */
-	u8 pin;			/* NVMe: INTERRUPT_PIN 레지스터 값. */
-	u8 slot = -1;		/* NVMe: root 측 slot 번호(기본값 -1). */
-	int irq = 0;		/* NVMe: 할당받은 플랫폼 IRQ 번호(기본 0). */
-	struct pci_host_bridge *hbrg = pci_find_host_bridge(dev->bus); /* NVMe: NVMe 장치가 연결된 bus의 host bridge 구조체 포인터를 획득. */
-	/* NVMe: NVMe 장치가 연결된 bus의 host bridge 획득. */
+void pci_assign_irq(struct pci_dev *dev)
+{
+	u8 pin;
+	u8 slot = -1;
+	int irq = 0;
+	struct pci_host_bridge *hbrg = pci_find_host_bridge(dev->bus);
 
-	if (!(hbrg->map_irq)) {	/* NVMe: 아키텍처/플랫폼이 runtime IRQ 매핑 함수를 제공하지 않으면. */
-		pci_dbg(dev, "runtime IRQ mapping not provided by arch\n"); /* NVMe: 플랫폼이 runtime IRQ 매핑을 제공하지 않음을 디버그 로그로 출력. */
-		return;		/* NVMe: IRQ 할당 없이 리턴. */
+	if (!(hbrg->map_irq)) {
+		pci_dbg(dev, "runtime IRQ mapping not provided by arch\n");
+		return;
 	}
 
 	/*
@@ -402,43 +398,33 @@ void pci_assign_irq(struct pci_dev *dev) /* NVMe: NVMe 장치의 INTx 라인에 
 	 * time the interrupt line passes through a PCI-PCI bridge we must
 	 * apply the swizzle function.
 	 */
-	pci_read_config_byte(dev, PCI_INTERRUPT_PIN, &pin); /* NVMe: NVMe 장치의 PCI config space에서 INT_PIN 바이트를 읽어온다. */
-	/* NVMe: NVMe 장치의 PCI config space에서 INT_PIN 바이트 읽기. */
+	pci_read_config_byte(dev, PCI_INTERRUPT_PIN, &pin);
 	/* Cope with illegal. */
-	if (pin > 4)		/* NVMe: 비정상적인 pin 값(5 이상)이면. */
-		pin = 1;	/* NVMe: INTA로 강제 보정. */
+	if (pin > 4)
+		pin = 1;
 
-	if (pin) {		/* NVMe: INT_PIN이 0이 아니면(1~4) INTx 라우팅 수행. */
+	if (pin) {
 		/* Follow the chain of bridges, swizzling as we go. */
-		if (hbrg->swizzle_irq)	/* NVMe: host bridge에 swizzle 콜백이 있으면. */
-			slot = (*(hbrg->swizzle_irq))(dev, &pin); /* NVMe: host bridge의 swizzle 콜백을 호출해 root 측 slot과 pin을 계산. */
-			/* NVMe: 플랫폼별 swizzle 함수를 호출해 root 측 slot/pin 계산. */
+		if (hbrg->swizzle_irq)
+			slot = (*(hbrg->swizzle_irq))(dev, &pin);
 
 		/*
 		 * If a swizzling function is not used, map_irq() must
 		 * ignore slot.
 		 */
-		irq = (*(hbrg->map_irq))(dev, slot, pin); /* NVMe: host bridge의 map_irq()를 호출해 NVMe INTx에 대한 시스템 IRQ 번호를 할당받는다. */
-		/* NVMe: 플랫폼 map_irq()를 호출해 NVMe 장치의 INTx에 대한
-		 *      시스템 IRQ 번호를 할당받는다. */
-		if (irq == -1)	/* NVMe: map_irq()가 -1을 반환하면 할당 실패. */
-			irq = 0;	/* NVMe: IRQ 0으로 설정(미할당 표시). */
+		irq = (*(hbrg->map_irq))(dev, slot, pin);
+		if (irq == -1)
+			irq = 0;
 	}
-	dev->irq = irq;		/* NVMe: pci_dev의 irq 필드에 최종 IRQ 번호 저장. */
-
-	pci_dbg(dev, "assign IRQ: got %d\n", dev->irq); /* NVMe: 할당된 IRQ 번호를 디버그 로그로 출력. */
-	/* NVMe: 디버그 메시지로 할당된 IRQ 번호 출력. */
+	dev->irq = irq;
+	pci_dbg(dev, "assign IRQ: got %d\n", dev->irq);
 
 	/*
 	 * Always tell the device, so the driver knows what is the real IRQ
 	 * to use; the device does not use it.
 	 */
-	pci_write_config_byte(dev, PCI_INTERRUPT_LINE, irq); /* NVMe: PCI config space의 INTERRUPT_LINE 레지스터에 최종 IRQ 번호를 기록. */
-	/* NVMe: PCI config space INTERRUPT_LINE 레지스터에 할당된 IRQ 번호
-	 *      기록. NVMe 컨트롤러는 보통 MSI/MSI-X를 쓰지만, 레거시 호환을
-	 *      위해 이 값을 기록한다. */
-}	/* NVMe: NVMe 장치의 pci_dev->irq와 INTERRUPT_LINE 레지스터 업데이트 완료. */
-
+	pci_write_config_byte(dev, PCI_INTERRUPT_LINE, irq);
+}
 /*
  * pci_check_and_set_intx_mask:
  *   NVMe 장치의 PCI COMMAND/STATUS 레지스터를 원자적으로 읽고, INTx
@@ -447,60 +433,50 @@ void pci_assign_irq(struct pci_dev *dev) /* NVMe: NVMe 장치의 INTx 라인에 
  *   MSI/MSI-X를 지원하지 않는 NVMe 컨트롤러의 INTx 핸들링에서 사용될 수
  *   있다.
  */
-static bool pci_check_and_set_intx_mask(struct pci_dev *dev, bool mask) /* NVMe: NVMe 장치의 INTx 마스크를 원자적으로 설정/해제하는 함수. */
-{ /* NVMe: NVMe 장치 INTx 마스크 원자적 설정/해제 함수 본문 시작. */
-	struct pci_bus *bus = dev->bus;	/* NVMe: NVMe 장치가 연결된 PCI bus. */
-	bool mask_updated = true;	/* NVMe: 마스크 레지스터가 실제로 변경되었는지 표시. */
-	u32 cmd_status_dword;	/* NVMe: COMMAND(하위 16비트) + STATUS(상위 16비트)를 한 번에 읽은 값. */
-	u16 origcmd, newcmd;	/* NVMe: COMMAND 레지스터 원본/새 값. */
-	unsigned long flags;	/* NVMe: raw spinlock irqsave용 플래그 저장. */
-	bool irq_pending;	/* NVMe: STATUS의 INTERRUPT pending 비트 상태. */
+static bool pci_check_and_set_intx_mask(struct pci_dev *dev, bool mask)
+{
+	struct pci_bus *bus = dev->bus;
+	bool mask_updated = true;
+	u32 cmd_status_dword;
+	u16 origcmd, newcmd;
+	unsigned long flags;
+	bool irq_pending;
 
 	/*
 	 * We do a single dword read to retrieve both command and status.
 	 * Document assumptions that make this possible.
 	 */
-	BUILD_BUG_ON(PCI_COMMAND % 4); /* NVMe: PCI_COMMAND 레지스터가 4바이트 정렬되어 있음을 컴파일 타임에 검사. */
-	/* NVMe: 컴파일 타임에 PCI_COMMAND가 4바이트 정렬되어 있음을 검사. */
-	BUILD_BUG_ON(PCI_COMMAND + 2 != PCI_STATUS); /* NVMe: PCI_STATUS가 PCI_COMMAND로부터 2바이트 뒤에 있음을 컴파일 타임에 검사. */
-	/* NVMe: PCI_STATUS가 PCI_COMMAND로부터 정확히 2바이트 뒤에 위치함을
-	 *      검사하여 한 dword로 둘 다 읽을 수 있음을 보장. */
+	BUILD_BUG_ON(PCI_COMMAND % 4);
+	BUILD_BUG_ON(PCI_COMMAND + 2 != PCI_STATUS);
 
-	raw_spin_lock_irqsave(&pci_lock, flags); /* NVMe: PCI config 접근 동기화를 위해 pci_lock을 획득하고 인터럽트 상태를 저장. */
-	/* NVMe: PCI config 접근 시 동기화를 위해 전역 pci_lock 획득,
-	 *      인터럽트는 저장핒두고 비활성화. */
+	raw_spin_lock_irqsave(&pci_lock, flags);
 
-	bus->ops->read(bus, dev->devfn, PCI_COMMAND, 4, &cmd_status_dword); /* NVMe: NVMe 장치의 COMMAND+STATUS 레지스터를 4바이트로 원자적으로 읽음. */
-	/* NVMe: NVMe 장치의 COMMAND+STATUS 레지스터를 4바이트로 읽음. */
+	bus->ops->read(bus, dev->devfn, PCI_COMMAND, 4, &cmd_status_dword);
 
-	irq_pending = (cmd_status_dword >> 16) & PCI_STATUS_INTERRUPT; /* NVMe: dword의 상위 16비트에서 INTx pending 비트를 추출. */
-	/* NVMe: 상위 16비트(STATUS)에서 INTERRUPT pending 비트를 추출.
-	 *      NVMe가 INTx로 인터럽트를 발생시켰는지 확인. */
+	irq_pending = (cmd_status_dword >> 16) & PCI_STATUS_INTERRUPT;
 
 	/*
 	 * Check interrupt status register to see whether our device
 	 * triggered the interrupt (when masking) or the next IRQ is
 	 * already pending (when unmasking).
 	 */
-	if (mask != irq_pending) {	/* NVMe: 마스크 요청과 pending 상태가 불일치하면. */
-		mask_updated = false;	/* NVMe: 레지스터 변경 없음을 표시. */
-		goto done;		/* NVMe: lock 해제 후 반환. */
+	if (mask != irq_pending) {
+		mask_updated = false;
+		goto done;
 	}
 
-	origcmd = cmd_status_dword;	/* NVMe: COMMAND 레지스터 원본 값(하위 16비트). */
-	newcmd = origcmd & ~PCI_COMMAND_INTX_DISABLE;	/* NVMe: INTx Disable 비트를 일단 0으로 만든다. */
-	if (mask)			/* NVMe: 마스크 요청이면. */
-		newcmd |= PCI_COMMAND_INTX_DISABLE;	/* NVMe: INTx Disable 비트를 1로 설정. */
-	if (newcmd != origcmd)		/* NVMe: COMMAND 레지스터 값이 실제로 바뀌어야 할 때만. */
-		bus->ops->write(bus, dev->devfn, PCI_COMMAND, 2, newcmd); /* NVMe: NVMe 장치의 COMMAND 레지스터에 2바이트로 INTx 마스크 상태를 기록. */
-		/* NVMe: 2바이트로 COMMAND 레지스터를 써서 INTx 마스크 상태 변경. */
+	origcmd = cmd_status_dword;
+	newcmd = origcmd & ~PCI_COMMAND_INTX_DISABLE;
+	if (mask)
+		newcmd |= PCI_COMMAND_INTX_DISABLE;
+	if (newcmd != origcmd)
+		bus->ops->write(bus, dev->devfn, PCI_COMMAND, 2, newcmd);
 
-done:				/* NVMe: INTx 마스크 처리 완료 후 lock 해제를 위한 레이블. */
-	raw_spin_unlock_irqrestore(&pci_lock, flags); /* NVMe: pci_lock을 해제하고 이전 인터럽트 상태를 복원. */
-	/* NVMe: pci_lock 해제 및 인터럽트 상태 복원. */
+done:
+	raw_spin_unlock_irqrestore(&pci_lock, flags);
 
-	return mask_updated;	/* NVMe: 마스크가 실제로 갱신되었으면 true, 아니면 false. */
-}	/* NVMe: NVMe 장치의 INTx 마스크 상태 변경 함수 종료. */
+	return mask_updated;
+}
 
 /**
  * pci_check_and_mask_intx - mask INTx on pending interrupt
@@ -516,12 +492,11 @@ done:				/* NVMe: INTx 마스크 처리 완료 후 lock 해제를 위한 레이�
  *   pending 인터럽트가 없으면 false 반환. MSI/MSI-X 미지원 NVMe에서
  *   인터럽트 처리 후 재진입 방지에 사용될 수 있다.
  */
-bool pci_check_and_mask_intx(struct pci_dev *dev) /* NVMe: NVMe 장치의 INTx pending 시 마스크하는 함수. */
-{ /* NVMe: NVMe 장치 INTx pending 마스크 함수 본문 시작. */
-	return pci_check_and_set_intx_mask(dev, true); /* NVMe: NVMe 장치의 INTx pending 확인 후 마스크 설정 결과를 반환. */
-	/* NVMe: mask=true로 INTx pending 확인 및 마스크 설정. */
-}	/* NVMe: NVMe 장치의 INTx 마스크 상태를 반환. */
-EXPORT_SYMBOL_GPL(pci_check_and_mask_intx);	/* NVMe: NVMe 드라이버 모듈에서 pci_check_and_mask_intx 심볼을 사용할 수 있도록 낸다. */
+bool pci_check_and_mask_intx(struct pci_dev *dev)
+{
+	return pci_check_and_set_intx_mask(dev, true);
+}
+EXPORT_SYMBOL_GPL(pci_check_and_mask_intx);
 
 /**
  * pci_check_and_unmask_intx - unmask INTx if no interrupt is pending
@@ -538,12 +513,11 @@ EXPORT_SYMBOL_GPL(pci_check_and_mask_intx);	/* NVMe: NVMe 드라이버 모듈에
  *   pending이 여전히 있으면 마스크 유지(false 반환). 인터럽트 핸들러
  *   종료 후 다음 인터럽트를 받기 위해 언마스크할 때 사용된다.
  */
-bool pci_check_and_unmask_intx(struct pci_dev *dev) /* NVMe: NVMe 장치의 INTx pending 해제 시 언마스크하는 함수. */
-{ /* NVMe: NVMe 장치 INTx pending 없을 때 언마스크 함수 본문 시작. */
-	return pci_check_and_set_intx_mask(dev, false); /* NVMe: NVMe 장치의 INTx pending 확인 후 언마스크 결과를 반환. */
-	/* NVMe: mask=false로 pending 확인 및 언마스크. */
-}	/* NVMe: NVMe 장치의 INTx 언마스크 상태를 반환. */
-EXPORT_SYMBOL_GPL(pci_check_and_unmask_intx);	/* NVMe: NVMe 드라이버 모듈에서 pci_check_and_unmask_intx 심볼을 사용할 수 있도록 낸다. */
+bool pci_check_and_unmask_intx(struct pci_dev *dev)
+{
+	return pci_check_and_set_intx_mask(dev, false);
+}
+EXPORT_SYMBOL_GPL(pci_check_and_unmask_intx);
 
 /**
  * pcibios_penalize_isa_irq - penalize an ISA IRQ
@@ -561,23 +535,23 @@ EXPORT_SYMBOL_GPL(pci_check_and_unmask_intx);	/* NVMe: NVMe 드라이버 모듈�
  *   장치는 ISA IRQ와 직접 관련 없지만, 일부 레거시 플랫폼에서 INTx
  *   라우팅 시 ISA 충돌을 회피하기 위해 호출될 수 있다.
  */
-void __weak pcibios_penalize_isa_irq(int irq, int active) {} /* NVMe: ISA IRQ 우선순위 조정 기본 구현. NVMe PCIe 장치와는 직접 관련 없음. */
+void __weak pcibios_penalize_isa_irq(int irq, int active) {}
 
 /*
  * pcibios_alloc_irq:
  *   아키텍처별 추가 IRQ 할당 훅의 기본 구현. NVMe 장치의 INTx 할당
  *   과정에서 플랫폼별 추가 작업이 필요할 때 재정의될 수 있다.
  */
-int __weak pcibios_alloc_irq(struct pci_dev *dev) /* NVMe: NVMe 장치의 아키텍처별 IRQ 추가 할당 훅 기본 구현. */
-{ /* NVMe: NVMe 장치 아키텍처별 추가 IRQ 할당 함수 본문 시작. */
-	return 0;	/* NVMe: 기본적으로 성공(0) 반환. */
-}	/* NVMe: NVMe 장치에 대한 추가 IRQ 할당 기본 동작 종료. */
+int __weak pcibios_alloc_irq(struct pci_dev *dev)
+{
+	return 0;
+}
 
 /*
  * pcibios_free_irq:
  *   pcibios_alloc_irq()에서 할당한 아키텍처별 IRQ 리소스를 해제하는
  *   기본 구현. NVMe 장치 제거 시 플랫폼 정리 작업에 사용될 수 있다.
  */
-void __weak pcibios_free_irq(struct pci_dev *dev) /* NVMe: NVMe 장치의 아키텍처별 IRQ 리소스 해제 훅 기본 구현. */
-{ /* NVMe: NVMe 장치 아키텍처별 IRQ 리소스 해제 함수 본문 시작. */
-}	/* NVMe: NVMe 장치에 대한 추가 IRQ 해제 기본 동작 종료. */
+void __weak pcibios_free_irq(struct pci_dev *dev)
+{
+}

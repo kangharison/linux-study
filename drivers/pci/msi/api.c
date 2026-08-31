@@ -136,18 +136,14 @@
  *
  * Return: 0 on success, errno otherwise
  */
-/* NVMe: 레거시 API; NVMe는 MSI-X 복수 벡터를 원하므로 이 함수 대신 pci_alloc_irq_vectors_affinity() 사용 */
 int pci_enable_msi(struct pci_dev *dev)
 {
 	int rc = __pci_enable_msi_range(dev, 1, 1, NULL);
-		/* NVMe: 내부 함수로 최소 1개 최대 1개의 MSI 벡터를 요청; NVMe는 단일 MSI만으로는 큐별 인터럽트 부족 */
 	if (rc < 0)
 		return rc;
-		/* NVMe: MSI 할당 실패 시 음수 errno 반환; NVMe는 이 경우 MSI-X나 INTx 폴백 고려 */
 	return 0;
-		/* NVMe: 성공 시 0 반환; @dev->irq에 단일 MSI Linux IRQ가 저장됨 */
 }
-EXPORT_SYMBOL(pci_enable_msi);	/* NVMe: pci_enable_msi 심볼을 외부 모듈(NVMe 등)에 노출 */
+EXPORT_SYMBOL(pci_enable_msi);
 
 /**
  * pci_disable_msi() - Disable MSI interrupt mode on device
@@ -161,7 +157,6 @@ EXPORT_SYMBOL(pci_enable_msi);	/* NVMe: pci_enable_msi 심볼을 외부 모듈(N
  * NOTE: The newer pci_alloc_irq_vectors() / pci_free_irq_vectors() API
  * pair should, in general, be used instead.
  */
-/* NVMe: 레거시 MSI 비활성화; NVMe는 보통 pci_free_irq_vectors()에서 함께 호출됨 */
 void pci_disable_msi(struct pci_dev *dev)
 {
 	if (!pci_msi_enabled() || !dev || !dev->msi_enabled)
@@ -172,13 +167,10 @@ void pci_disable_msi(struct pci_dev *dev)
 		 */
 
 	guard(msi_descs_lock)(&dev->dev);
-		/* NVMe: MSI descriptor 리스트 보호; NVMe remove/reset 경로에서 race 방지 */
 	pci_msi_shutdown(dev);
-		/* NVMe: MSI capability/메시지 데이터 클리어, INTx emulation 복원 */
 	pci_free_msi_irqs(dev);
-		/* NVMe: 할당받은 MSI Linux IRQ 번호들 해제; NVMe는 이 후 다시 벡터 할당 가능 */
 }
-EXPORT_SYMBOL(pci_disable_msi);	/* NVMe: pci_disable_msi 심볼을 외부 모듈(NVMe 등)에 노출 */
+EXPORT_SYMBOL(pci_disable_msi);
 
 /**
  * pci_msix_vec_count() - Get number of MSI-X interrupt vectors on device
@@ -198,11 +190,9 @@ EXPORT_SYMBOL(pci_disable_msi);	/* NVMe: pci_disable_msi 심볼을 외부 모듈
 int pci_msix_vec_count(struct pci_dev *dev)
 {
 	u16 control;
-		/* NVMe: MSI-X capability의 Message Control 레지스터(16비트)를 읽어올 변수 */
 
 	if (!dev->msix_cap)
 		return -EINVAL;
-		/* NVMe: MSI-X capability가 없으면 -EINVAL; NVMe는 이 경우 MSI나 INTx로 폴백 */
 
 	pci_read_config_word(dev, dev->msix_cap + PCI_MSIX_FLAGS, &control);
 		/*
@@ -210,7 +200,6 @@ int pci_msix_vec_count(struct pci_dev *dev)
 		 *       이 비트들 안에 MSI-X Table Size가 들어 있음
 		 */
 	return msix_table_size(control);
-		/* NVMe: control 레지스터 하위 비트에서 table size 추출; NVMe 큐 수는 이 값+1을 넘을 수 없음 */
 }
 EXPORT_SYMBOL(pci_msix_vec_count);	/* [한국어] 벡터 수를 미리 알아야 자원을 계획할 수 있는
 					 * 드라이버들(주로 네트워크 카드)이 쓴다 */
@@ -240,7 +229,6 @@ EXPORT_SYMBOL(pci_msix_vec_count);	/* [한국어] 벡터 수를 미리 알아야
  * was invalid or a duplicate, or if plain MSI interrupts mode was
  * earlier enabled on device. Return other errnos otherwise.
  */
-/* NVMe: 레거시 MSI-X 벡터 범위 활성화; NVMe는 entries 기반보다 pci_alloc_irq_vectors_affinity()를 주로 사용 */
 int pci_enable_msix_range(struct pci_dev *dev, struct msix_entry *entries,
 			  int minvec, int maxvec)
 {
@@ -251,7 +239,7 @@ int pci_enable_msix_range(struct pci_dev *dev, struct msix_entry *entries,
 		 *       일반적으로는 아래 pci_alloc_irq_vectors_affinity() 쪽이 유연함
 		 */
 }
-EXPORT_SYMBOL(pci_enable_msix_range);	/* NVMe: 외부 모듈에서 복수 MSI-X 벡터 활성화 시 사용 가능 */
+EXPORT_SYMBOL(pci_enable_msix_range);
 
 /**
  * pci_msix_can_alloc_dyn - Query whether dynamic allocation after enabling
@@ -269,7 +257,6 @@ bool pci_msix_can_alloc_dyn(struct pci_dev *dev)
 {
 	if (!dev->msix_cap)
 		return false;
-		/* NVMe: MSI-X capability가 없으면 동적 할당 불가; NVMe는 MSI-X 미지원 장치에서 false 수신 */
 
 	return pci_msi_domain_supports(dev, MSI_FLAG_PCI_MSIX_ALLOC_DYN, DENY_LEGACY);
 		/*
@@ -278,7 +265,7 @@ bool pci_msix_can_alloc_dyn(struct pci_dev *dev)
 		 *       NVMe가 런타임에 큐/벡터를 추가하려면 true가 필요
 		 */
 }
-EXPORT_SYMBOL_GPL(pci_msix_can_alloc_dyn);	/* NVMe: GPL 모듈(NVMe 등)에서 동적 MSI-X 지원 여부 확인 */
+EXPORT_SYMBOL_GPL(pci_msix_can_alloc_dyn);
 
 /**
  * pci_msix_alloc_irq_at - Allocate an MSI-X interrupt after enabling MSI-X
@@ -297,20 +284,16 @@ EXPORT_SYMBOL_GPL(pci_msix_can_alloc_dyn);	/* NVMe: GPL 모듈(NVMe 등)에서 �
  *	On fail msi_map::index contains the error code and msi_map::virq
  *	is set to 0.
  */
-/* NVMe: MSI-X 이미 활성화된 상태에서 특정 MSI-X table index 또는 임의의 비어있는 index에 IRQ 할당 */
 struct msi_map pci_msix_alloc_irq_at(struct pci_dev *dev, unsigned int index,
 				     const struct irq_affinity_desc *affdesc)
 {
 	struct msi_map map = { .index = -ENOTSUPP };
-		/* NVMe: 기본 반환값은 "지원하지 않음"(-ENOTSUPP); 성공 시 index/virq 덮어씀 */
 
 	if (!dev->msix_enabled)
 		return map;
-		/* NVMe: MSI-X가 아직 활성화되지 않았으면 할당 불가; NVMe reset 직후 상태 주의 */
 
 	if (!pci_msix_can_alloc_dyn(dev))
 		return map;
-		/* NVMe: IRQ domain이 동적 할당을 지원하지 않으면 -ENOTSUPP 반환; NVMe는 정적 할당 경로로 대체 */
 
 	return msi_domain_alloc_irq_at(&dev->dev, MSI_DEFAULT_DOMAIN, index, affdesc, NULL);
 		/*
@@ -321,7 +304,7 @@ struct msi_map pci_msix_alloc_irq_at(struct pci_dev *dev, unsigned int index,
 		 * 이 동적 추가 API 는 VFIO 나 일부 네트워크 드라이버가 쓴다.
 		 */
 }
-EXPORT_SYMBOL_GPL(pci_msix_alloc_irq_at);	/* NVMe: GPL 모듈에서 MSI-X 동적 벡터 할당 API로 사용 */
+EXPORT_SYMBOL_GPL(pci_msix_alloc_irq_at);
 
 /**
  * pci_msix_free_irq - Free an interrupt on a PCI/MSI-X interrupt domain
@@ -331,15 +314,12 @@ EXPORT_SYMBOL_GPL(pci_msix_alloc_irq_at);	/* NVMe: GPL 모듈에서 MSI-X 동적
  *
  * Undo an interrupt vector allocation. Does not disable MSI-X.
  */
-/* NVMe: 동적으로 할당한 MSI-X 벡터를 해제; MSI-X 자체는 끄지 않고 해당 table entry만 비움 */
 void pci_msix_free_irq(struct pci_dev *dev, struct msi_map map)
 {
 	if (WARN_ON_ONCE(map.index < 0 || map.virq <= 0))
 		return;
-		/* NVMe: 잘못된 map(할당 실패한 index거나 유효하지 않은 virq)이면 경고 후 early return */
 	if (WARN_ON_ONCE(!pci_msix_can_alloc_dyn(dev)))
 		return;
-		/* NVMe: 동적 할당 미지원 장치에서 해제 시도하면 경고; NVMe는 이 경로 진입 전에 능력 확인 필요 */
 
 	msi_domain_free_irqs_range(&dev->dev, MSI_DEFAULT_DOMAIN, map.index, map.index);
 		/*
@@ -349,7 +329,7 @@ void pci_msix_free_irq(struct pci_dev *dev, struct msi_map map)
 		 * 전체를 반납한 뒤 필요한 만큼 다시 받는다.
 		 */
 }
-EXPORT_SYMBOL_GPL(pci_msix_free_irq);	/* NVMe: GPL 모듈에서 동적 MSI-X 벡터 해제 API로 사용 */
+EXPORT_SYMBOL_GPL(pci_msix_free_irq);
 
 /**
  * pci_disable_msix() - Disable MSI-X interrupt mode on device
@@ -363,7 +343,6 @@ EXPORT_SYMBOL_GPL(pci_msix_free_irq);	/* NVMe: GPL 모듈에서 동적 MSI-X 벡
  * NOTE: The newer pci_alloc_irq_vectors() / pci_free_irq_vectors() API
  * pair should, in general, be used instead.
  */
-/* NVMe: MSI-X를 비활성화하고 모든 MSI-X 벡터 해제; NVMe reset/remove 시 pci_free_irq_vectors() 통해 호출 */
 void pci_disable_msix(struct pci_dev *dev)
 {
 	if (!pci_msi_enabled() || !dev || !dev->msix_enabled)
@@ -374,13 +353,10 @@ void pci_disable_msix(struct pci_dev *dev)
 		 */
 
 	guard(msi_descs_lock)(&dev->dev);
-		/* NVMe: MSI descriptor 리스트 동시 접근 보호; NVMe reset/rescan과 race 방지 */
 	pci_msix_shutdown(dev);
-		/* NVMe: MSI-X capability/function mask bit 클리어, MSI-X table 비활성화, INTx 복원 */
 	pci_free_msi_irqs(dev);
-		/* NVMe: MSI-X 벡터별 Linux IRQ 해제; NVMe는 이 후 virq 값들을 무효로 봐야 함 */
 }
-EXPORT_SYMBOL(pci_disable_msix);	/* NVMe: pci_disable_msix 심볼을 외부 모듈(NVMe 등)에 노출 */
+EXPORT_SYMBOL(pci_disable_msix);
 
 /**
  * pci_alloc_irq_vectors() - Allocate multiple device interrupt vectors
@@ -425,7 +401,7 @@ int pci_alloc_irq_vectors(struct pci_dev *dev, unsigned int min_vecs,
 		 *       이 함수보다 아래의 _affinity 버전을 직접 사용하여 NUMA/CPU 분산을 제어함
 		 */
 }
-EXPORT_SYMBOL(pci_alloc_irq_vectors);	/* NVMe: NVMe 등 외부 모듈에서 복수 IRQ 벡터 할당 시 직접 사용 */
+EXPORT_SYMBOL(pci_alloc_irq_vectors);
 
 /**
  * pci_alloc_irq_vectors_affinity() - Allocate multiple device interrupt
@@ -450,12 +426,9 @@ int pci_alloc_irq_vectors_affinity(struct pci_dev *dev, unsigned int min_vecs,
 				   struct irq_affinity *affd)
 {
 	struct irq_affinity msi_default_affd = {0};
-		/* NVMe: PCI_IRQ_AFFINITY 플래그만 주어졌을 때 사용할 기본 affinity 구조체 */
 	int nvecs = -ENOSPC;
-		/* NVMe: 기본 반환값 -ENOSPC; 충분한 벡터를 얻지 못하면 NVMe가 큐 수를 줄여야 함 */
 
 	if (flags & PCI_IRQ_AFFINITY) {
-		/* NVMe: NVMe가 PCI_IRQ_AFFINITY를 준 경우 */
 		if (!affd)
 			affd = &msi_default_affd;
 			/*
@@ -463,14 +436,11 @@ int pci_alloc_irq_vectors_affinity(struct pci_dev *dev, unsigned int min_vecs,
 			 *       Linux가 CPU 코어 수에 맞춰 벡터들을 자동 분산(spread)
 			 */
 	} else {
-		/* NVMe: affinity 자동 분산을 원하지 않는 경우 */
 		if (WARN_ON(affd))
 			affd = NULL;
-			/* NVMe: affinity 플래그 없이 affd를 넘기면 잘못된 사용이므로 무시하고 NULL로 설정 */
 	}
 
 	if (flags & PCI_IRQ_MSIX) {
-		/* NVMe: NVMe가 가장 선호하는 MSI-X 시도 */
 		nvecs = __pci_enable_msix_range(dev, NULL, min_vecs, max_vecs,
 						affd, flags);
 			/*
@@ -486,7 +456,6 @@ int pci_alloc_irq_vectors_affinity(struct pci_dev *dev, unsigned int min_vecs,
 	}
 
 	if (flags & PCI_IRQ_MSI) {
-		/* NVMe: MSI-X 실패 시 MSI로 폴백; NVMe가 PCI_IRQ_MSI 플래그도 준 경우 */
 		nvecs = __pci_enable_msi_range(dev, min_vecs, max_vecs, affd);
 			/*
 			 * NVMe: MSI 벡터 범위 할당 시도; MSI는 벡터들이 연속적이어야 하므로
@@ -494,15 +463,11 @@ int pci_alloc_irq_vectors_affinity(struct pci_dev *dev, unsigned int min_vecs,
 			 */
 		if (nvecs > 0)
 			return nvecs;
-			/* NVMe: MSI 할당 성공 시 반환; NVMe는 MSI도 여러 벡터를 지원하므로 큐별 인터럽트 가능 */
 	}
 
 	/* use INTx IRQ if allowed */
-	/* NVMe: MSI-X/MSI 모두 실패하면 마지막 수단으로 레거시 INTx 사용 */
 	if (flags & PCI_IRQ_INTX) {
-		/* NVMe: NVMe가 INTx 폴백을 허용한 경우 */
 		if (min_vecs == 1 && dev->irq) {
-			/* NVMe: INTx는 단일 인터럽트만 제공하므로 min_vecs가 1이고 dev->irq가 유효해야 함 */
 			/*
 			 * Invoke the affinity spreading logic to ensure that
 			 * the device driver can adjust queue configuration
@@ -515,16 +480,13 @@ int pci_alloc_irq_vectors_affinity(struct pci_dev *dev, unsigned int min_vecs,
 				 *       NVMe 드라이버가 단일 IRQ용 큐 설정을 조정할 수 있도록 함
 				 */
 			pci_intx(dev, 1);
-				/* NVMe: PCI command 레지스터의 Interrupt Disable bit를 클리어하여 INTx 활성화 */
 			return 1;
-				/* NVMe: INTx 단일 벡터만 반환; NVMe는 IO 큐를 단일 인터럽트로 share하게 됨 */
 		}
 	}
 
 	return nvecs;
-		/* NVMe: MSI-X/MSI/INTx 모두 실패하면 -ENOSPC(또는 마지막 errno) 반환; NVMe는 큐 수 축소 또는 실패 처리 */
 }
-EXPORT_SYMBOL(pci_alloc_irq_vectors_affinity);	/* NVMe: NVMe가 link하는 핵심 exported 심볼 */
+EXPORT_SYMBOL(pci_alloc_irq_vectors_affinity);
 
 /**
  * pci_irq_vector() - Get Linux IRQ number of a device interrupt vector
@@ -546,7 +508,6 @@ EXPORT_SYMBOL(pci_alloc_irq_vectors_affinity);	/* NVMe: NVMe가 link하는 핵�
 int pci_irq_vector(struct pci_dev *dev, unsigned int nr)
 {
 	unsigned int irq;
-		/* NVMe: 반환할 Linux IRQ 번호를 임시 저장 */
 
 	if (!dev->msi_enabled && !dev->msix_enabled)
 		return !nr ? dev->irq : -EINVAL;
@@ -561,9 +522,8 @@ int pci_irq_vector(struct pci_dev *dev, unsigned int nr)
 		 *       NVMe 큐 번호와 벡터 index가 1:1 매핑될 때 이 값이 request_threaded_irq()로 전달됨
 		 */
 	return irq ? irq : -EINVAL;
-		/* NVMe: 유효한 vIRQ가 있으면 반환, 없으면 -EINVAL; NVMe는 이 값으로 request_irq 실패 여부 판단 */
 }
-EXPORT_SYMBOL(pci_irq_vector);	/* NVMe: NVMe가 큐-IRQ 매핑을 구성할 때 핵심적으로 사용 */
+EXPORT_SYMBOL(pci_irq_vector);
 
 /**
  * pci_irq_get_affinity() - Get a device interrupt vector affinity
@@ -582,29 +542,22 @@ EXPORT_SYMBOL(pci_irq_vector);	/* NVMe: NVMe가 큐-IRQ 매핑을 구성할 때 
  * generic set of CPU IDs representing all possible CPUs available
  * during system boot if the device is in legacy INTx mode.
  */
-/* NVMe: 특정 MSI/MSI-X 벡터가 어떤 CPU 집합에 affinity 되어 있는지 조회; NVMe 큐-CPU 바인딩 시 사용 */
 const struct cpumask *pci_irq_get_affinity(struct pci_dev *dev, int nr)
 {
 	int idx, irq = pci_irq_vector(dev, nr);
-		/* NVMe: 우선 nr번 벡터의 Linux IRQ 획득; 실패하면 음수 irq */
 	struct msi_desc *desc;
-		/* NVMe: MSI descriptor; affinity mask 배열이 들어 있음 */
 
 	if (WARN_ON_ONCE(irq <= 0))
 		return NULL;
-		/* NVMe: 잘못된 벡터 번호면 경고 후 NULL; NVMe는 큐 인덱스가 벡터 수를 넘지 않도록 주의 */
 
 	desc = irq_get_msi_desc(irq);
-		/* NVMe: 해당 Linux IRQ에 연결된 MSI descriptor 획득; INTx에는 descriptor가 없을 수 있음 */
 	/* Non-MSI does not have the information handy */
 	if (!desc)
 		return cpu_possible_mask;
-		/* NVMe: INTx 등 Non-MSI이면 모든 가능한 CPU 집합 반환; NVMe는 이 경우 큐 affinity 제한 없음 */
 
 	/* MSI[X] interrupts can be allocated without affinity descriptor */
 	if (!desc->affinity)
 		return NULL;
-		/* NVMe: affinity 없이 할당된 MSI/MSI-X면 NULL; NVMe는 수동 affinity 설정 불가 */
 
 	/*
 	 * MSI has a mask array in the descriptor.
@@ -616,9 +569,8 @@ const struct cpumask *pci_irq_get_affinity(struct pci_dev *dev, int nr)
 		 *       MSI-X는 단일 mask(affinity[0])를 사용하므로 idx를 0으로 고정
 		 */
 	return &desc->affinity[idx].mask;
-		/* NVMe: nr번 벡터의 CPU affinity mask 반환; NVMe는 이 값으로 큐를 특정 CPU에 바인딩 */
 }
-EXPORT_SYMBOL(pci_irq_get_affinity);	/* NVMe: NVMe 등에서 큐-CPU affinity를 확인할 때 사용 */
+EXPORT_SYMBOL(pci_irq_get_affinity);
 
 /**
  * pci_free_irq_vectors() - Free previously allocated IRQs for a device
@@ -641,11 +593,9 @@ EXPORT_SYMBOL(pci_irq_get_affinity);	/* NVMe: NVMe 등에서 큐-CPU affinity를
 void pci_free_irq_vectors(struct pci_dev *dev)
 {
 	pci_disable_msix(dev);
-		/* NVMe: MSI-X 활성화 상태면 MSI-X capability/벡터 정리; NVMe는 주로 MSI-X를 사용하므로 먼저 처리 */
 	pci_disable_msi(dev);
-		/* NVMe: MSI 활성화 상태면 MSI capability/벡터 정리; MSI-X 정리 후 MSI 상태도 안전하게 비활성화 */
 }
-EXPORT_SYMBOL(pci_free_irq_vectors);	/* NVMe: NVMe remove/reset/suspend에서 사용하는 핵심 정리 API */
+EXPORT_SYMBOL(pci_free_irq_vectors);
 
 /**
  * pci_restore_msi_state() - Restore cached MSI(-X) state on device
@@ -663,14 +613,13 @@ EXPORT_SYMBOL(pci_free_irq_vectors);	/* NVMe: NVMe remove/reset/suspend에서 �
 void pci_restore_msi_state(struct pci_dev *dev)
 {
 	__pci_restore_msi_state(dev);
-		/* NVMe: MSI capability(Message Control, Message Address/Upper Address, Message Data, Mask bits) 복원 */
 	__pci_restore_msix_state(dev);
 		/*
 		 * NVMe: MSI-X capability 및 MSI-X table entry들의 address/data/vector control 복원;
 		 *       NVMe resume 후 큐별 MSI-X 인터럽트가 다시 정상 동작하도록 필수
 		 */
 }
-EXPORT_SYMBOL_GPL(pci_restore_msi_state);	/* NVMe: NVMe resume/error recovery 경로에서 호출 */
+EXPORT_SYMBOL_GPL(pci_restore_msi_state);
 
 /**
  * pci_msi_enabled() - Are MSI(-X) interrupts enabled system-wide?
@@ -690,4 +639,4 @@ bool pci_msi_enabled(void)
 		 *       커널 파라미터 pci=nomsi 등에 의해 false가 될 수 있음
 		 */
 }
-EXPORT_SYMBOL(pci_msi_enabled);	/* NVMe: NVMe가 초기화 전 MSI 사용 가능 여부를 판단할 때 사용 */
+EXPORT_SYMBOL(pci_msi_enabled);

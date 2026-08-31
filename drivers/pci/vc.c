@@ -112,9 +112,6 @@
  * @dwords: number of dwords to save/restore
  * @save: whether to save or restore
  */
-/* NVMe: PCIe 설정 공간의 연속된 32비트 값을 저장(save=true) 하거나
- * 복원(save=false) 하는 보조 함수. NVMe 장치의 VC/Port Arbitration Table
- * 등 대용량 레지스터 블록을 save/restore 할 때 사용된다. */
 static void pci_vc_save_restore_dwords(struct pci_dev *dev, int pos,
 				       u32 *buf, int dwords, bool save)
 {
@@ -144,9 +141,6 @@ static void pci_vc_save_restore_dwords(struct pci_dev *dev, int pos,
  * Arbitration Table (previously loaded).  When the VC Arbitration Table
  * Status clears, hardware has latched the table into VC arbitration logic.
  */
-/* NVMe: VC Arbitration Table(여러 VC 간 트래픽 우선순위표)을 하드웨어에
- * 다시 로드하고 완료를 기다리는 함수. NVMe SSD가 Low Priority VC를 사용하는
- * 환경에서 resume 후 QoS 정책이 복원되는 데 필요하다. */
 static void pci_vc_load_arb_table(struct pci_dev *dev, int pos)
 {
 	/* 16비트 Port VC Control 레지스터 값을 담을 변수 */
@@ -178,9 +172,6 @@ static void pci_vc_load_arb_table(struct pci_dev *dev, int pos)
  * Arbitration Table (previously loaded).  When the Port Arbitration Table
  * Status clears, hardware has latched the table into port arbitration logic.
  */
-/* NVMe: 특정 VCn(0~7)에 속한 Port Arbitration Table을 하드웨어에 로드.
- * Port Arbitration Table은 같은 VC 내에서 여러 다운스트림 포트/장치
- * (NVMe 포함) 간 링크 대역폭 분배 규칙을 정의한다. */
 static void pci_vc_load_port_arb_table(struct pci_dev *dev, int pos, int res)
 {
 	/* VC Resource Control/Status 오프셋 계산용 변수 */
@@ -221,9 +212,6 @@ static void pci_vc_load_port_arb_table(struct pci_dev *dev, int pos, int res)
  * (spec is unclear).  Once we find the upstream device, match the VC ID to
  * get the correct resource, disable and enable on both ends.
  */
-/* NVMe: 특정 VCn을 링크 양단에서 enable 한다. NVMe SSD가 다운스트림
- * 장치일 때 upstream 포트(스위치 업스트림/루트포트)의 동일 VC ID를 찾아
- * 양쪽을 enable해야 VC가 실제로 동작한다. */
 static void pci_vc_enable(struct pci_dev *dev, int pos, int res)
 {
 	/* 여러 오프셋/인덱스/id/상대편 capability 위치 변수들 */
@@ -234,8 +222,6 @@ static void pci_vc_enable(struct pci_dev *dev, int pos, int res)
 	struct pci_dev *link = NULL;
 
 	/* Enable VCs from the downstream device */
-	/* NVMe: 다운스트림 포트가 아니면 VC enable 책임이 없으므로 종료.
-	 * NVMe endpoint는 다운스트림이 아니라 보통 이 함수에서 빠른 return */
 	if (!pci_is_pcie(dev) || !pcie_downstream_port(dev))
 		return;
 
@@ -252,14 +238,10 @@ static void pci_vc_enable(struct pci_dev *dev, int pos, int res)
 	pci_read_config_dword(dev, pos, &header);
 
 	/* If there is no opposite end of the link, skip to enable */
-	/* NVMe: VC9 확장 capability이거나 루트 버스에 붙은 장치면 upstream
-	 * 이 없으므로 바로 enable 레이블로 점프 */
 	if (PCI_EXT_CAP_ID(header) == PCI_EXT_CAP_ID_VC9 ||
 	    pci_is_root_bus(dev->bus))
 		goto enable;
 
-	/* NVMe: 현재 다운스트림 포트의 상위 버스 컨트롤러(업스트림 포트)에서
-	 * 일반 VC(PCI_EXT_CAP_ID_VC) 확장 capability 위치 검색 */
 	pos2 = pci_find_ext_capability(dev->bus->self, PCI_EXT_CAP_ID_VC);
 	/* 없으면 상대편과 매칭 불가, 현재 측만 enable 시도 */
 	if (!pos2)
@@ -271,8 +253,6 @@ static void pci_vc_enable(struct pci_dev *dev, int pos, int res)
 	evcc = cap1 & PCI_VC_CAP1_EVCC;
 
 	/* VC0 is hardwired enabled, so we can start with 1 */
-	/* NVMe: VC0은 하드웨어 고정 enable이므로 1번 VC부터 상대편에서
-	 * 같은 VC ID를 갖는 리소스를 찾음 */
 	for (i = 1; i < evcc + 1; i++) {
 		/* 상대편 VCi Control/Status 오프셋 계산 */
 		ctrl_pos2 = pos2 + PCI_VC_RES_CTRL +
@@ -293,8 +273,6 @@ static void pci_vc_enable(struct pci_dev *dev, int pos, int res)
 		goto enable;
 
 	/* Disable if enabled */
-	/* NVMe: 상대편이 이미 enable되어 있으면 일단 disable 후 재enable,
-	 * clean negotiation을 위해 필요 */
 	if (ctrl2 & PCI_VC_RES_CTRL_ENABLE) {
 		/* enable 비트 클리어 */
 		ctrl2 &= ~PCI_VC_RES_CTRL_ENABLE;
@@ -303,11 +281,9 @@ static void pci_vc_enable(struct pci_dev *dev, int pos, int res)
 	}
 
 	/* Enable on both ends */
-	/* NVMe: 상대편 VC enable 비트 설정 후 쓰기 */
 	ctrl2 |= PCI_VC_RES_CTRL_ENABLE;
 	pci_write_config_dword(link, ctrl_pos2, ctrl2);
 enable:
-	/* NVMe: 현재 포트(다운스트림) VCn enable 비트 설정 후 쓰기 */
 	ctrl |= PCI_VC_RES_CTRL_ENABLE;
 	pci_write_config_dword(dev, ctrl_pos, ctrl);
 
@@ -336,9 +312,6 @@ enable:
  * with a non-NULL @save_state, @save determines whether we save to the
  * buffer or restore from it.
  */
-/* NVMe: VC capability 전체(Control, Arbitration Tables)를 한 번에
- * 크기 측정(NULL save_state)하거나 저장(true)/복원(false)하는 핵심 함수.
- * NVMe 장치의 suspend/resume/FLR 시 VC 상태 무결성을 책임진다. */
 static int pci_vc_do_save_buffer(struct pci_dev *dev, int pos,
 				 struct pci_cap_saved_state *save_state,
 				 bool save)
@@ -353,8 +326,6 @@ static int pci_vc_do_save_buffer(struct pci_dev *dev, int pos,
 	u8 *buf = save_state ? (u8 *)save_state->cap.data : NULL;
 
 	/* Sanity check buffer size for save/restore */
-	/* NVMe: 버퍼가 주어졌으면 미리 할당된 크기가 실제 필요 크기와
-	 * 일치하는지 검증, 불일치 시 save/restore 진행 불가 */
 	if (buf && save_state->cap.size !=
 	    pci_vc_do_save_buffer(dev, pos, NULL, save)) {
 		/* 크기 불일치 에러 로그 출력, NVMe 장치명과 capability 오프셋 포함 */
@@ -366,14 +337,10 @@ static int pci_vc_do_save_buffer(struct pci_dev *dev, int pos,
 	/* Port VC Capability Register 1 읽기 */
 	pci_read_config_dword(dev, pos + PCI_VC_PORT_CAP1, &cap1);
 	/* Extended VC Count (not counting VC0) */
-	/* NVMe: VC0 제외한 추가 VC 개수, 이 값+1이 전체 VC 개수 */
 	evcc = cap1 & PCI_VC_CAP1_EVCC;
 	/* Low Priority Extended VC Count (not counting VC0) */
-	/* NVMe: Low Priority VC 개수, 0보다 크면 VC Arbitration Table 존재 가능 */
 	lpevcc = FIELD_GET(PCI_VC_CAP1_LPEVCC, cap1);
 	/* Port Arbitration Table Entry Size (bits) */
-	/* NVMe: Port Arbitration Table의 한 phase당 비트 수,
-	 * 1 << ARB_SIZE 로 계산 (예: 1, 2, 4, 8 비트 등) */
 	parb_size = 1 << FIELD_GET(PCI_VC_CAP1_ARB_SIZE, cap1);
 
 	/*
@@ -382,8 +349,6 @@ static int pci_vc_do_save_buffer(struct pci_dev *dev, int pos,
 	 * therefore save/restore it first, as only VC0 should be enabled
 	 * after device reset.
 	 */
-	/* NVMe: 버퍼가 있을 때 Port VC Control 레지스터를 먼저 다룬다.
-	 * reset 직후 VC0만 enabled 상태이므로 안전하게 변경 가능하다. */
 	if (buf) {
 		/* save 모드면 설정 공간에서 버퍼로 16비트 읽어옴 */
 		if (save)
@@ -404,7 +369,6 @@ static int pci_vc_do_save_buffer(struct pci_dev *dev, int pos,
 	 * If we have any Low Priority VCs and a VC Arbitration Table Offset
 	 * in Port VC Capability Register 2 then save/restore it next.
 	 */
-	/* NVMe: Low Priority VC가 존재하면 VC Arbitration Table을 다음에 처리 */
 	if (lpevcc) {
 		/* Port VC Capability Register 2 값 */
 		u32 cap2;
@@ -435,8 +399,6 @@ static int pci_vc_do_save_buffer(struct pci_dev *dev, int pos,
 				vcarb_phases = 32;
 
 			/* Fixed 4 bits per phase per lpevcc (plus VC0) */
-			/* NVMe: phase당 (lpevcc+1)개 VC에 각각 4비트 할당,
-			 * 총 바이트 수 = 개수 * phase * 4 / 8 */
 			size = ((lpevcc + 1) * vcarb_phases * 4) / 8;
 
 			/* 크기가 있고 버퍼가 주어졌을 때만 save/restore 수행 */
@@ -450,7 +412,6 @@ static int pci_vc_do_save_buffer(struct pci_dev *dev, int pos,
 				 * On restore, we need to signal hardware to
 				 * re-load the VC Arbitration Table.
 				 */
-				/* NVMe: 복원 시에는 하드웨어에 테이블 재적용 요청 */
 				if (!save)
 					pci_vc_load_arb_table(dev, pos);
 
@@ -469,8 +430,6 @@ static int pci_vc_do_save_buffer(struct pci_dev *dev, int pos,
 	 * it exists.  The entry size is global from the Port VC Capability
 	 * Register1 above.  The number of phases is determined per VC.
 	 */
-	/* NVMe: 각 VC(0부터 evcc까지)에 대해 Port Arbitration Table과
-	 * VC Resource Control Register를 save/restore 한다. */
 	for (i = 0; i < evcc + 1; i++) {
 		/* VC Resource Capability 레지스터 값 */
 		u32 cap;
@@ -521,7 +480,6 @@ static int pci_vc_do_save_buffer(struct pci_dev *dev, int pos,
 		}
 
 		/* VC Resource Control Register */
-		/* NVMe: 각 VC의 Resource Control Register save/restore */
 		if (buf) {
 			/* VCi Resource Control 오프셋 계산 */
 			int ctrl_pos = pos + PCI_VC_RES_CTRL +
@@ -562,11 +520,9 @@ static int pci_vc_do_save_buffer(struct pci_dev *dev, int pos,
 		len += 4;
 	}
 
-	/* NVMe: 버퍼가 NULL이면 필요한 크기(len) 반환, 아니면 성공 0 반환 */
 	return buf ? 0 : len;
 }
 
-/* NVMe: 이 파일에서 다루는 세 가지 VC capability 종류를 정의하는 테이블 */
 static struct {
 	/* 확장 capability ID (MFVC/VC/VC9) */
 	u16 id;
@@ -583,9 +539,6 @@ static struct {
  * For each type of VC capability, VC/VC9/MFVC, find the capability and
  * save it to the pre-allocated save buffer.
  */
-/* NVMe: NVMe 장치의 PCI dev에 대해 MFVC/VC/VC9 capability를 모두 찾아
- * 미리 할당된 save buffer에 현재 VC 상태를 저장한다. 시스템 suspend 직전
- * 또는 NVMe reset 전에 PCI core가 호출한다. */
 int pci_save_vc_state(struct pci_dev *dev)
 {
 	/* vc_caps 테이블 인덱스 */
@@ -635,9 +588,6 @@ int pci_save_vc_state(struct pci_dev *dev)
  * For each type of VC capability, VC/VC9/MFVC, find the capability and
  * restore it from the previously saved buffer.
  */
-/* NVMe: NVMe 장치 resume/reset 후 PCI core가 호출하여 저장했던 VC 상태를
- * PCIe 설정 공간에 복원한다. 복원 중 Port Arbitration Table과 VC enable
- * negotiation도 다시 수행된다. */
 void pci_restore_vc_state(struct pci_dev *dev)
 {
 	/* vc_caps 테이블 인덱스 */
@@ -670,9 +620,6 @@ void pci_restore_vc_state(struct pci_dev *dev)
  * For each type of VC capability, VC/VC9/MFVC, find the capability, size
  * it, and allocate a buffer for save/restore.
  */
-/* NVMe: NVMe 장치 초기화(pci_enable_device 메모리 등) 시 PCI core가
- * 호출하여 VC save/restore에 필요한 버퍼를 미리 할당한다. 이 버퍼는
- * suspend/resume/FLR 시 VC 레지스터를 안전하게 보존하는 데 쓰인다. */
 void pci_allocate_vc_save_buffers(struct pci_dev *dev)
 {
 	/* vc_caps 테이블 인덱스 */

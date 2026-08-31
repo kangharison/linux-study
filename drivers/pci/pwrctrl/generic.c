@@ -54,16 +54,16 @@
  * pci_pwrctrl_generic_driver   : 플랫폼 드라이버 구조체.
  */
 
-#include <linux/clk.h>		/* NVMe: PCIe Root Port/슬롯에 공급되는 bus clock 정의 */
-#include <linux/device.h>		/* NVMe: 장치 모델과 dev_info/dev_err 등 사용 */
-#include <linux/mod_devicetable.h>	/* NVMe: OF compatible 매칭 테이블 */
-#include <linux/module.h>		/* NVMe: 모듈 로드/언로드 및 라이선스 */
-#include <linux/of_graph.h>		/* NVMe: DT graph(power sequencer 연결) 존재 여부 확인 */
-#include <linux/pci-pwrctrl.h>		/* NVMe: PCI power control core 인터페이스 */
-#include <linux/platform_device.h>	/* NVMe: platform bus 드라이버 등록 */
-#include <linux/pwrseq/consumer.h>	/* NVMe: 전원 온/오프 시퀀서 제어 */
-#include <linux/regulator/consumer.h>	/* NVMe: 슬롯 레귤레이터(전원) 제어 */
-#include <linux/slab.h>			/* NVMe: devm_kzalloc() 메모리 할당 */
+#include <linux/clk.h>
+#include <linux/device.h>
+#include <linux/mod_devicetable.h>
+#include <linux/module.h>
+#include <linux/of_graph.h>
+#include <linux/pci-pwrctrl.h>
+#include <linux/platform_device.h>
+#include <linux/pwrseq/consumer.h>
+#include <linux/regulator/consumer.h>
+#include <linux/slab.h>
 
 /*
  * NVMe: PCIe 슬롯 전원 제어를 위한 낮은 수준 구조체.
@@ -71,11 +71,11 @@
  *       전원 상태를 상위 계층이 제어할 수 있게 한다.
  */
 struct slot_pwrctrl {
-	struct pci_pwrctrl pwrctrl;		/* NVMe: PCI power control core 구조체 */
-	struct regulator_bulk_data *supplies;	/* NVMe: 슬롯에 공급되는 레귤레이터(전원) 배열 */
-	int num_supplies;			/* NVMe: supplies 배열의 개수 */
-	struct clk *clk;			/* NVMe: PCIe 슬롯/링크에 공급되는 클록 */
-	struct pwrseq_desc *pwrseq;		/* NVMe: 전원 온/오프 시퀀서(리셋/전원 순서 제어) */
+	struct pci_pwrctrl pwrctrl;
+	struct regulator_bulk_data *supplies;
+	int num_supplies;
+	struct clk *clk;
+	struct pwrseq_desc *pwrseq;
 };
 
 /*
@@ -90,7 +90,7 @@ static int slot_pwrctrl_power_on(struct pci_pwrctrl *pwrctrl)
 	 */
 	struct slot_pwrctrl *slot = container_of(pwrctrl,
 						struct slot_pwrctrl, pwrctrl);
-	int ret;				/* NVMe: 함수 호출 결과 저장 */
+	int ret;
 
 	/*
 	 * NVMe: DT에 power sequencer(graph)가 연결되어 있으면,
@@ -98,9 +98,7 @@ static int slot_pwrctrl_power_on(struct pci_pwrctrl *pwrctrl)
 	 *       이는 NVMe 핫플러그/핫스왑 시 전원/리셋 순서를 보장한다.
 	 */
 	if (slot->pwrseq) {
-		/* NVMe: 시퀀서를 동작시켜 슬롯 전원/리셋 순서를 실행 */
 		pwrseq_power_on(slot->pwrseq);
-		/* NVMe: 전원 시퀀스 완료, PCIe 링크 업 및 NVMe 인식 준비 */
 		return 0;
 	}
 
@@ -109,11 +107,8 @@ static int slot_pwrctrl_power_on(struct pci_pwrctrl *pwrctrl)
 	 *       NVMe 장치가 탑재된 슬롯에 전원을 공급한다.
 	 */
 	ret = regulator_bulk_enable(slot->num_supplies, slot->supplies);
-	/* NVMe: 레귤레이터 활성화 실패 시 NVMe 장치는 전원을 받지 못함 */
 	if (ret < 0) {
-		/* NVMe: 오류 로그: 슬롯 전원 공급 실패로 NVMe 초기화 불가 */
 		dev_err(slot->pwrctrl.dev, "Failed to enable slot regulators\n");
-		/* NVMe: 오류 코드를 PCI core로 반환하여 NVMe probe 차단 */
 		return ret;
 	}
 
@@ -142,9 +137,7 @@ static int slot_pwrctrl_power_off(struct pci_pwrctrl *pwrctrl)
 	 *       통해 NVMe 슬롯 전원을 내린다. 핫리무브 시 데이터 손상 방지.
 	 */
 	if (slot->pwrseq) {
-		/* NVMe: 시퀀서에 의해 슬롯 전원/리셋 순차적 차단 */
 		pwrseq_power_off(slot->pwrseq);
-		/* NVMe: 전원 오프 완료, NVMe 장치는 더 이상 버스에 보이지 않음 */
 		return 0;
 	}
 
@@ -159,7 +152,6 @@ static int slot_pwrctrl_power_off(struct pci_pwrctrl *pwrctrl)
 	 */
 	clk_disable_unprepare(slot->clk);
 
-	/* NVMe: 정상적으로 전원을 끈 경우 0 반환 */
 	return 0;
 }
 
@@ -169,10 +161,8 @@ static int slot_pwrctrl_power_off(struct pci_pwrctrl *pwrctrl)
  */
 static void devm_slot_pwrctrl_release(void *data)
 {
-	/* NVMe: 해제 대상 slot_pwrctrl 인스턴스 */
 	struct slot_pwrctrl *slot = data;
 
-	/* NVMe: devm으로 얻은 레귤레이터 배열의 메타데이터를 해제 */
 	regulator_bulk_free(slot->num_supplies, slot->supplies);
 }
 
@@ -183,18 +173,15 @@ static void devm_slot_pwrctrl_release(void *data)
  */
 static int slot_pwrctrl_probe(struct platform_device *pdev)
 {
-	/* NVMe: per-slot 전원 제어 구조체 포인터 */
 	struct slot_pwrctrl *slot;
-	/* NVMe: platform device의 범용 device 구조체 */
 	struct device *dev = &pdev->dev;
-	int ret;				/* NVMe: 함수 호출 결과 저장 */
+	int ret;
 
 	/*
 	 * NVMe: 슬롯 제어 구조체를 devm으로 할당. probe 실패/제거 시
 	 *       자동 해제되어 NVMe 장치와 함께 깔끔히 정리된다.
 	 */
 	slot = devm_kzalloc(dev, sizeof(*slot), GFP_KERNEL);
-	/* NVMe: 메모리 부족 시 NVMe 슬롯 초기화를 중단 */
 	if (!slot)
 		return -ENOMEM;
 
@@ -209,7 +196,6 @@ static int slot_pwrctrl_probe(struct platform_device *pdev)
 		 *       이 시퀀서는 NVMe 장치의 안정적인 전원 온/오프를 보장.
 		 */
 		slot->pwrseq = devm_pwrseq_get(dev, "pcie");
-		/* NVMe: 시퀀서 획득 실패 시, NVMe 슬롯 제어 등록을 포기 */
 		if (IS_ERR(slot->pwrseq))
 			return dev_err_probe(dev, PTR_ERR(slot->pwrseq),
 				     "Failed to get the power sequencer\n");
@@ -227,7 +213,6 @@ static int slot_pwrctrl_probe(struct platform_device *pdev)
 	 */
 	ret = of_regulator_bulk_get_all(dev, dev_of_node(dev),
 					&slot->supplies);
-	/* NVMe: regulator 획득 실패 시 NVMe 슬롯 전원 제어를 등록하지 않음 */
 	if (ret < 0)
 		return dev_err_probe(dev, ret, "Failed to get slot regulators\n");
 
@@ -242,7 +227,6 @@ static int slot_pwrctrl_probe(struct platform_device *pdev)
 	 *       일부 플랫폼에서는 클록이 항상 켜져 있어 optional이다.
 	 */
 	slot->clk = devm_clk_get_optional(dev, NULL);
-	/* NVMe: 클록 획득 실패 시 NVMe 링크 활성화에 실패할 수 있음 */
 	if (IS_ERR(slot->clk))
 		return dev_err_probe(dev, PTR_ERR(slot->clk),
 				     "Failed to enable slot clock\n");
@@ -264,7 +248,6 @@ skip_resources:
 	 *       등록한다. NVMe 장치 제거 후에도 메모리/리소스 누수를 막음.
 	 */
 	ret = devm_add_action_or_reset(dev, devm_slot_pwrctrl_release, slot);
-	/* NVMe: action 등록 실패 시 probe를 중단하여 불완전한 등록을 방지 */
 	if (ret)
 		return ret;
 
@@ -281,11 +264,9 @@ skip_resources:
 	 *       수 있는 물리적 전원/클록 기반이 마련된다.
 	 */
 	ret = devm_pci_pwrctrl_device_set_ready(dev, &slot->pwrctrl);
-	/* NVMe: 등록 실패 시 NVMe 장치를 위한 슬롯 전원 제어가 동작하지 않음 */
 	if (ret)
 		return dev_err_probe(dev, ret, "Failed to register pwrctrl driver\n");
 
-	/* NVMe: probe 성공. NVMe 장치를 위한 슬롯 전원 제어 준비 완료 */
 	return 0;
 }
 
@@ -298,15 +279,14 @@ skip_resources:
  */
 static const struct of_device_id slot_pwrctrl_of_match[] = {
 	{
-		.compatible = "pciclass,0604",	/* NVMe: PCI bridge/slot 클래스 */
+		.compatible = "pciclass,0604",
 	},
 	/* Renesas UPD720201/UPD720202 USB 3.0 xHCI Host Controller */
 	{
-		.compatible = "pci1912,0014",	/* NVMe: Renesas 장치용 전원 제어 */
+		.compatible = "pci1912,0014",
 	},
 	{ }
 };
-/* NVMe: of_match_table로 사용되도록 모듈 심볼로 등록 */
 MODULE_DEVICE_TABLE(of, slot_pwrctrl_of_match);
 
 /*
@@ -317,10 +297,10 @@ MODULE_DEVICE_TABLE(of, slot_pwrctrl_of_match);
  */
 static struct platform_driver slot_pwrctrl_driver = {
 	.driver = {
-		.name = "pci-pwrctrl-slot",		/* NVMe: platform bus 등록 이름 */
-		.of_match_table = slot_pwrctrl_of_match,	/* NVMe: DT 매칭 테이블 */
+		.name = "pci-pwrctrl-slot",
+		.of_match_table = slot_pwrctrl_of_match,
 	},
-	.probe = slot_pwrctrl_probe,			/* NVMe: 슬롯 초기화 및 PCI core 등록 */
+	.probe = slot_pwrctrl_probe,
 };
 /*
  * NVMe: 모듈 로드 시 platform_driver를 자동 등록/해제한다.
@@ -329,12 +309,10 @@ static struct platform_driver slot_pwrctrl_driver = {
  */
 module_platform_driver(slot_pwrctrl_driver);
 
-/* NVMe: 모듈 저자 정보 */
 MODULE_AUTHOR("Manivannan Sadhasivam <manivannan.sadhasivam@linaro.org>");
 /*
  * NVMe: 모듈 설명. PCIe 슬롯 전원 제어 드라이버로, NVMe SSD 등의
  *       PCIe 엔드포인트가 탑재된 슬롯에 전원을 공급/차단한다.
  */
 MODULE_DESCRIPTION("Generic PCI Power Control driver for PCI Slots");
-/* NVMe: GPL 라이선스 */
 MODULE_LICENSE("GPL");

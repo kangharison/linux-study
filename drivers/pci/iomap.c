@@ -70,10 +70,10 @@
  * pci_iounmap()           : 매핑을 푼다. 포트 토큰이면 ioport_unmap 으로 간다.
  */
 
-#include <linux/pci.h> /* NVMe: NVMe PCIe device의 PCI core 정의 */
-#include <linux/io.h> /* NVMe: NVMe MMIO 접근을 위한 I/O 메모리 primitive */
+#include <linux/pci.h>
+#include <linux/io.h>
 
-#include <linux/export.h> /* NVMe: NVMe 모듈 연결용 EXPORT_SYMBOL helper */
+#include <linux/export.h>
 
 #include "pci.h" /* for pci_bar_index_is_valid() */
 
@@ -99,36 +99,36 @@
  * @maxlen specifies the maximum length to map. If you want to get access to
  * the complete BAR from offset to the end, pass %0 here.
  * */
-void __iomem *pci_iomap_range(struct pci_dev *dev,		/* NVMe: 대상 NVMe PCIe device */
-			      int bar,			/* NVMe: 매핑할 BAR 번호(보통 0) */
-			      unsigned long offset,	/* NVMe: BAR 내 시작 오프셋 */
-			      unsigned long maxlen)	/* NVMe: 매핑 최대 길이(0이면 offset부터 끝까지) */
-{ /* NVMe: pci_iomap_range 함수 본문 시작 */
-	resource_size_t start, len;				/* NVMe: BAR의 bus 물리 시작 주소와 길이 */
-	unsigned long flags;					/* NVMe: BAR 리소스 플래그(MEM/IO 등) */
+void __iomem *pci_iomap_range(struct pci_dev *dev,
+			      int bar,
+			      unsigned long offset,
+			      unsigned long maxlen)
+{
+	resource_size_t start, len;
+	unsigned long flags;
 
-	if (!pci_bar_index_is_valid(bar))			/* NVMe: BAR 번호가 유효한지 검사 */
-		return NULL;					/* NVMe: 잘못된 BAR 번호이면 매핑 실패 */
+	if (!pci_bar_index_is_valid(bar))
+		return NULL;
 
-	start = pci_resource_start(dev, bar);			/* NVMe: NVMe BAR의 시작 bus 주소 획득 */
-	len = pci_resource_len(dev, bar);			/* NVMe: NVMe BAR의 전체 길이 획득 */
-	flags = pci_resource_flags(dev, bar);			/* NVMe: BAR가 MMIO인지 PIO인지 등 플래그 획득 */
+	start = pci_resource_start(dev, bar);
+	len = pci_resource_len(dev, bar);
+	flags = pci_resource_flags(dev, bar);
 
-	if (len <= offset || !start)				/* NVMe: 오프셋이 길이 이상이거나 시작 주소가 0이면 */
-		return NULL;					/* NVMe: 유효하지 않은 BAR 영역이므로 매핑 실패 */
+	if (len <= offset || !start)
+		return NULL;
 
-	len -= offset;						/* NVMe: offset 이후의 실제 매핑 가능 길이 계산 */
-	start += offset;					/* NVMe: 시작 주소를 offset만큼 이동 */
-	if (maxlen && len > maxlen)				/* NVMe: 요청한 최대 길이가 있고 실제 길이보다 짧으면 */
-		len = maxlen;					/* NVMe: 매핑 길이를 요청한 최대 길이로 제한 */
-	if (flags & IORESOURCE_IO)				/* NVMe: BAR가 I/O 포트 공간이면 */
-		return __pci_ioport_map(dev, start, len);	/* NVMe: I/O 포트 매핑 수행(레거시) */
-	if (flags & IORESOURCE_MEM)				/* NVMe: BAR가 메모리 매핑 공간이면 */
-		return ioremap(start, len);			/* NVMe: 물리 주소를 커널 가상 주소로 매핑(MMIO) */
+	len -= offset;
+	start += offset;
+	if (maxlen && len > maxlen)
+		len = maxlen;
+	if (flags & IORESOURCE_IO)
+		return __pci_ioport_map(dev, start, len);
+	if (flags & IORESOURCE_MEM)
+		return ioremap(start, len);
 	/* What? */
-	return NULL;						/* NVMe: 알 수 없는 리소스 타입이면 매핑 실패 */
-} /* NVMe: pci_iomap_range 함수 끝 */
-EXPORT_SYMBOL(pci_iomap_range);					/* NVMe: NVMe 모듈 등에서 참조 가능하도록 EXPORT */
+	return NULL;
+}
+EXPORT_SYMBOL(pci_iomap_range);
 
 /*
  * pci_iomap_wc_range:
@@ -153,38 +153,38 @@ EXPORT_SYMBOL(pci_iomap_range);					/* NVMe: NVMe 모듈 등에서 참조 가능
  * @maxlen specifies the maximum length to map. If you want to get access to
  * the complete BAR from offset to the end, pass %0 here.
  * */
-void __iomem *pci_iomap_wc_range(struct pci_dev *dev,		/* NVMe: 대상 NVMe PCIe device */
-				 int bar,			/* NVMe: 매핑할 BAR 번호 */
-				 unsigned long offset,		/* NVMe: BAR 내 시작 오프셋 */
-				 unsigned long maxlen)		/* NVMe: 매핑 최대 길이 */
-{ /* NVMe: pci_iomap_wc_range 함수 본문 시작 */
-	resource_size_t start, len;				/* NVMe: BAR의 bus 물리 시작 주소와 길이 */
-	unsigned long flags;					/* NVMe: BAR 리소스 플래그 */
+void __iomem *pci_iomap_wc_range(struct pci_dev *dev,
+				 int bar,
+				 unsigned long offset,
+				 unsigned long maxlen)
+{
+	resource_size_t start, len;
+	unsigned long flags;
 
-	if (!pci_bar_index_is_valid(bar))			/* NVMe: BAR 번호가 유효한지 검사 */
-		return NULL;					/* NVMe: 잘못된 BAR 번호이면 매핑 실패 */
+	if (!pci_bar_index_is_valid(bar))
+		return NULL;
 
-	start = pci_resource_start(dev, bar);			/* NVMe: NVMe BAR의 시작 bus 주소 획득 */
-	len = pci_resource_len(dev, bar);			/* NVMe: NVMe BAR의 전체 길이 획득 */
-	flags = pci_resource_flags(dev, bar);			/* NVMe: BAR 플래그 획득 */
+	start = pci_resource_start(dev, bar);
+	len = pci_resource_len(dev, bar);
+	flags = pci_resource_flags(dev, bar);
 
-	if (len <= offset || !start)				/* NVMe: 오프셋이 길이 이상이거나 시작 주소가 0이면 */
-		return NULL;					/* NVMe: 유효하지 않은 BAR 영역이므로 매핑 실패 */
-	if (flags & IORESOURCE_IO)				/* NVMe: BAR가 I/O 포트 공간이면 */
-		return NULL;					/* NVMe: WC는 MMIO에만 적용되므로 매핑 실패 */
+	if (len <= offset || !start)
+		return NULL;
+	if (flags & IORESOURCE_IO)
+		return NULL;
 
-	len -= offset;						/* NVMe: offset 이후의 실제 매핑 가능 길이 계산 */
-	start += offset;					/* NVMe: 시작 주소를 offset만큼 이동 */
-	if (maxlen && len > maxlen)				/* NVMe: 요청한 최대 길이가 있고 실제 길이보다 짧으면 */
-		len = maxlen;					/* NVMe: 매핑 길이를 요청한 최대 길이로 제한 */
+	len -= offset;
+	start += offset;
+	if (maxlen && len > maxlen)
+		len = maxlen;
 
-	if (flags & IORESOURCE_MEM)				/* NVMe: BAR가 메모리 매핑 공간이면 */
-		return ioremap_wc(start, len);			/* NVMe: WC 속성으로 물리 주소를 커널 가상 주소로 매핑 */
+	if (flags & IORESOURCE_MEM)
+		return ioremap_wc(start, len);
 
 	/* What? */
-	return NULL;						/* NVMe: 알 수 없는 리소스 타입이면 매핑 실패 */
-} /* NVMe: pci_iomap_wc_range 함수 끝 */
-EXPORT_SYMBOL_GPL(pci_iomap_wc_range);				/* NVMe: NVMe 모듈 등에서 GPL EXPORT로 참조 */
+	return NULL;
+}
+EXPORT_SYMBOL_GPL(pci_iomap_wc_range);
 
 /*
  * pci_iomap:
@@ -207,11 +207,11 @@ EXPORT_SYMBOL_GPL(pci_iomap_wc_range);				/* NVMe: NVMe 모듈 등에서 GPL EXP
  * @maxlen specifies the maximum length to map. If you want to get access to
  * the complete BAR without checking for its length first, pass %0 here.
  * */
-void __iomem *pci_iomap(struct pci_dev *dev, int bar, unsigned long maxlen)	/* NVMe: NVMe device, BAR 번호, 최대 길이 */
-{ /* NVMe: pci_iomap 함수 본문 시작 */
-	return pci_iomap_range(dev, bar, 0, maxlen);		/* NVMe: offset 0으로 BAR 시작부터 maxlen까지 매핑 */
-} /* NVMe: pci_iomap 함수 끝 */
-EXPORT_SYMBOL(pci_iomap);						/* NVMe: NVMe 모듈 등에서 참조 가능하도록 EXPORT */
+void __iomem *pci_iomap(struct pci_dev *dev, int bar, unsigned long maxlen)
+{
+	return pci_iomap_range(dev, bar, 0, maxlen);
+}
+EXPORT_SYMBOL(pci_iomap);
 
 /*
  * pci_iomap_wc:
@@ -234,11 +234,11 @@ EXPORT_SYMBOL(pci_iomap);						/* NVMe: NVMe 모듈 등에서 참조 가능하�
  * @maxlen specifies the maximum length to map. If you want to get access to
  * the complete BAR without checking for its length first, pass %0 here.
  * */
-void __iomem *pci_iomap_wc(struct pci_dev *dev, int bar, unsigned long maxlen)	/* NVMe: NVMe device, BAR 번호, 최대 길이 */
-{ /* NVMe: pci_iomap_wc 함수 본문 시작 */
-	return pci_iomap_wc_range(dev, bar, 0, maxlen);		/* NVMe: offset 0으로 BAR 시작부터 WC 매핑 */
-} /* NVMe: pci_iomap_wc 함수 끝 */
-EXPORT_SYMBOL_GPL(pci_iomap_wc);					/* NVMe: NVMe 모듈 등에서 GPL EXPORT로 참조 */
+void __iomem *pci_iomap_wc(struct pci_dev *dev, int bar, unsigned long maxlen)
+{
+	return pci_iomap_wc_range(dev, bar, 0, maxlen);
+}
+EXPORT_SYMBOL_GPL(pci_iomap_wc);
 
 /*
  * pci_iounmap:
@@ -272,19 +272,19 @@ EXPORT_SYMBOL_GPL(pci_iomap_wc);					/* NVMe: NVMe 모듈 등에서 GPL EXPORT�
  * did. Probably incorrectly, but this is meant to be bug-for-bug
  * compatible.
  */
-#if defined(ARCH_WANTS_GENERIC_PCI_IOUNMAP)				/* NVMe: 아키텍처가 generic pci_iounmap를 원할 때만 컴파일 */
+#if defined(ARCH_WANTS_GENERIC_PCI_IOUNMAP)
 
-void pci_iounmap(struct pci_dev *dev, void __iomem *p)			/* NVMe: NVMe device와 매핑된 가상 주소 */
-{ /* NVMe: pci_iounmap 함수 본문 시작 */
-#ifdef ARCH_HAS_GENERIC_IOPORT_MAP					/* NVMe: I/O 포트 매핑도 generic으로 관리하는 아키텍처인 경우 */
-	uintptr_t start = (uintptr_t) PCI_IOBASE;			/* NVMe: I/O 공간의 커널 기준 시작 주소 */
-	uintptr_t addr = (uintptr_t) p;					/* NVMe: 해제할 가상 주소 */
+void pci_iounmap(struct pci_dev *dev, void __iomem *p)
+{
+#ifdef ARCH_HAS_GENERIC_IOPORT_MAP
+	uintptr_t start = (uintptr_t) PCI_IOBASE;
+	uintptr_t addr = (uintptr_t) p;
 
-	if (addr >= start && addr < start + IO_SPACE_LIMIT)		/* NVMe: 해당 주소가 I/O 포트 매핑 영역이면 */
-		return;							/* NVMe: I/O 포트 매핑은 별도 해제가 필요 없으므로 종료 */
-#endif /* NVMe: ARCH_HAS_GENERIC_IOPORT_MAP 조건부 컴파일 종료 */
-	iounmap(p);							/* NVMe: 메모리 매핑(MMIO) 해제: NVMe BAR 가상 주소 반납 */
-} /* NVMe: pci_iounmap 함수 끝 */
-EXPORT_SYMBOL(pci_iounmap);						/* NVMe: NVMe 모듈 등에서 참조 가능하도록 EXPORT */
+	if (addr >= start && addr < start + IO_SPACE_LIMIT)
+		return;
+#endif
+	iounmap(p);
+}
+EXPORT_SYMBOL(pci_iounmap);
 
 #endif /* ARCH_WANTS_GENERIC_PCI_IOUNMAP */

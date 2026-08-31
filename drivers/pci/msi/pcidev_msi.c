@@ -69,52 +69,41 @@
  * 두 함수 모두 반환값이 없다. capability 가 없는 것은 오류가 아니라 정상이고,
  * 호출자가 확인할 것도 없기 때문이다.
  */
-#include "../pci.h"		/* NVMe: PCI 서브시스템 내부 헤더, pci_dev, PCI capability 매크로 등 포함 */
+#include "../pci.h"
 
 /*
  * Disable the MSI[X] hardware to avoid screaming interrupts during boot.
  * This is the power on reset default so usually this should be a noop.
  */
-/* NVMe: 부팅/장치 탐색 시 MSI/MSI-X 하드웨어를 끄는 공통 함수들의 시작 부분 */
 
-/* NVMe: NVMe SSD를 포함한 PCI 장치의 MSI Capability 초기화 함수 */
 void pci_msi_init(struct pci_dev *dev)
 {
-	u16 ctrl;			/* NVMe: MSI Message Control 레지스터(16bit)를 담을 지역 변수 */
+	u16 ctrl;
 
-	/* NVMe: Configuration Space에서 MSI Capability의 오프셋을 찾아 저장 */
 	dev->msi_cap = pci_find_capability(dev, PCI_CAP_ID_MSI);
-	if (!dev->msi_cap)		/* NVMe: MSI Capability가 없으면(예: 일부 레거시 장치) */
-		return;			/* NVMe: 더 이상 할 일이 없으므로 함수 종료 */
+	if (!dev->msi_cap)
+		return;
 
-	/* NVMe: MSI Capability의 Message Control 레지스터를 ECAM으로 읽어옴 */
 	pci_read_config_word(dev, dev->msi_cap + PCI_MSI_FLAGS, &ctrl);
-	if (ctrl & PCI_MSI_FLAGS_ENABLE) {	/* NVMe: MSI Enable 비트가 켜져 있다면 */
-		/* NVMe: Enable 비트만 클리어하여 MSI 인터럽트를 금지함 */
+	if (ctrl & PCI_MSI_FLAGS_ENABLE) {
 		pci_write_config_word(dev, dev->msi_cap + PCI_MSI_FLAGS,
 				      ctrl & ~PCI_MSI_FLAGS_ENABLE);
 	}
 
-	/* NVMe: 64bit 주소 지원 플래그가 설정되어 있지 않은 경우 */
 	if (!(ctrl & PCI_MSI_FLAGS_64BIT))
-		/* NVMe: DMA 주소를 32bit로 마스크(MSI 메시지 주소도 32bit 제한) */
 		dev->msi_addr_mask = DMA_BIT_MASK(32);
 }
 
-/* NVMe: NVMe SSD에서 필수적으로 사용하는 MSI-X Capability 초기화 함수 */
 void pci_msix_init(struct pci_dev *dev)
 {
-	u16 ctrl;			/* NVMe: MSI-X Message Control 레지스터(16bit)를 담을 지역 변수 */
+	u16 ctrl;
 
-	/* NVMe: Configuration Space에서 MSI-X Capability의 오프셋을 찾아 저장 */
 	dev->msix_cap = pci_find_capability(dev, PCI_CAP_ID_MSIX);
-	if (!dev->msix_cap)		/* NVMe: MSI-X Capability가 없으면 */
-		return;			/* NVMe: NVMe에서도 MSI-X 미지원 시 MSI 폴스백을 위해 종료 */
+	if (!dev->msix_cap)
+		return;
 
-	/* NVMe: MSI-X Capability의 Message Control 레지스터를 ECAM으로 읽어옴 */
 	pci_read_config_word(dev, dev->msix_cap + PCI_MSIX_FLAGS, &ctrl);
-	if (ctrl & PCI_MSIX_FLAGS_ENABLE) {	/* NVMe: MSI-X Enable 비트가 켜져 있다면 */
-		/* NVMe: Enable 비트만 클리어하여 MSI-X 인터럽트를 금지함 */
+	if (ctrl & PCI_MSIX_FLAGS_ENABLE) {
 		pci_write_config_word(dev, dev->msix_cap + PCI_MSIX_FLAGS,
 				      ctrl & ~PCI_MSIX_FLAGS_ENABLE);
 	}

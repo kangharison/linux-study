@@ -105,14 +105,14 @@
  * pcibios_align_resource()   : 아키텍처가 추가 정렬을 요구할 수 있는 __weak 훅.
  */
 
-#include <linux/kernel.h> /* NVMe: 커널 기본 타입과 함수 정의 */
-#include <linux/export.h> /* NVMe: EXPORT_SYMBOL 관련 매크로 */
-#include <linux/pci.h> /* NVMe: PCI/NVMe 공용 구조체와 API 선언 */
-#include <linux/errno.h> /* NVMe: 오류 코드 상수 */
-#include <linux/ioport.h> /* NVMe: I/O/MEM 리소스 트리 관리 */
-#include <linux/cache.h> /* NVMe: 캐시 정렬 관련 */
-#include <linux/slab.h> /* NVMe: 메모리 할당 */
-#include "pci.h" /* NVMe: PCI 서브시스템 내부 헤더 */
+#include <linux/kernel.h>
+#include <linux/export.h>
+#include <linux/pci.h>
+#include <linux/errno.h>
+#include <linux/ioport.h>
+#include <linux/cache.h>
+#include <linux/slab.h>
+#include "pci.h"
 
 /*
  * [한국어]
@@ -157,54 +157,54 @@
  *   pci_assign_resource -> pci_update_resource -> [pci_std_update_resource]
  *     -> pci_write_config_dword(BAR)
  */
-static void pci_std_update_resource(struct pci_dev *dev, int resno) /* NVMe: 특정 BAR 레지스터를 갱신하는 내부 함수 선언 */
-{ /* NVMe: pci_std_update_resource 함수 본문 시작 */
-	struct pci_bus_region region; /* NVMe: BAR에 기록할 bus 주소 영역 임시 변수 */
-	bool disable; /* NVMe: 64비트 BAR 갱신 시 메모리 디코딩을 일시 끌지 여부 */
-	u16 cmd; /* NVMe: PCI_COMMAND 레지스터 값을 저장해 복원 */
-	u32 new, check, mask; /* NVMe: BAR에 쓸 새 주소, 확인용 읽기 값, 필터 마스크 */
-	int reg; /* NVMe: 대상 BAR 레지스터의 config space 오프셋 */
-	struct resource *res = pci_resource_n(dev, resno); /* NVMe: NVMe BAR(예: BAR0 doorbell) 리소스 포인터 */
-	const char *res_name = pci_resource_name(dev, resno); /* NVMe: 로그 출력용 BAR 이름 */
+static void pci_std_update_resource(struct pci_dev *dev, int resno)
+{
+	struct pci_bus_region region;
+	bool disable;
+	u16 cmd;
+	u32 new, check, mask;
+	int reg;
+	struct resource *res = pci_resource_n(dev, resno);
+	const char *res_name = pci_resource_name(dev, resno);
 
 	/* Per SR-IOV spec 3.4.1.11, VF BARs are RO zero */
-	if (dev->is_virtfn) /* NVMe: SR-IOV VF의 BAR은 읽기 전용이므로 건너뛴다 */
-		return; /* NVMe: VF BAR 갱신 중단 */
+	if (dev->is_virtfn)
+		return;
 
 	/*
 	 * Ignore resources for unimplemented BARs and unused resource slots
 	 * for 64 bit BARs.
 	 */
-	if (!res->flags) /* NVMe: 미구현 BAR 또는 64비트 BAR 상위 슬롯이면 무시 */
-		return; /* NVMe: 갱신할 필요 없음 */
+	if (!res->flags)
+		return;
 
-	if (res->flags & IORESOURCE_UNSET) /* NVMe: 주소가 아직 할당되지 않은 BAR은 config에 기록하지 않는다 */
-		return; /* NVMe: UNSET 상태 유지 */
+	if (res->flags & IORESOURCE_UNSET)
+		return;
 
 	/*
 	 * Ignore non-moveable resources.  This might be legacy resources for
 	 * which no functional BAR register exists or another important
 	 * system resource we shouldn't move around.
 	 */
-	if (res->flags & IORESOURCE_PCI_FIXED) /* NVMe: firmware/BIOS가 고정한 BAR은 이동 불가 */
-		return; /* NVMe: 고정 BAR 보존 */
+	if (res->flags & IORESOURCE_PCI_FIXED)
+		return;
 
-	pcibios_resource_to_bus(dev->bus, &region, res); /* NVMe: CPU 물리 주소를 PCIe bus 주소로 변환(BAR에는 bus 주소 기록) */
-	new = region.start; /* NVMe: BAR에 쓸 시작 bus 주소 */
+	pcibios_resource_to_bus(dev->bus, &region, res);
+	new = region.start;
 
-	if (res->flags & IORESOURCE_IO) { /* NVMe: I/O 공간 BAR이면 IO 마스크/플래그 적용 */
-		mask = (u32)PCI_BASE_ADDRESS_IO_MASK; /* NVMe: I/O BAR 하위 2비트 마스크 */
-		new |= res->flags & ~PCI_BASE_ADDRESS_IO_MASK; /* NVMe: BAR 하위 플래그 비트 보존 */
-	} else if (resno == PCI_ROM_RESOURCE) { /* NVMe: ROM BAR이면 전용 마스크 사용 */
-		mask = PCI_ROM_ADDRESS_MASK; /* NVMe: ROM 주소 마스크 */
-	} else { /* NVMe: 메모리 BAR(32/64비트, prefetchable) 처리 */
-		mask = (u32)PCI_BASE_ADDRESS_MEM_MASK; /* NVMe: 메모리 BAR 주소/플래그 마스크 */
-		new |= res->flags & ~PCI_BASE_ADDRESS_MEM_MASK; /* NVMe: prefetchable 등 하위 플래그 보존 */
-	} /* NVMe: IO/ROM/MEM BAR 유형별 마스크 선택 분기 종료 */
+	if (res->flags & IORESOURCE_IO) {
+		mask = (u32)PCI_BASE_ADDRESS_IO_MASK;
+		new |= res->flags & ~PCI_BASE_ADDRESS_IO_MASK;
+	} else if (resno == PCI_ROM_RESOURCE) {
+		mask = PCI_ROM_ADDRESS_MASK;
+	} else {
+		mask = (u32)PCI_BASE_ADDRESS_MEM_MASK;
+		new |= res->flags & ~PCI_BASE_ADDRESS_MEM_MASK;
+	}
 
-	if (resno < PCI_ROM_RESOURCE) { /* NVMe: 일반 BAR의 config 오프셋 계산 */
-		reg = PCI_BASE_ADDRESS_0 + 4 * resno; /* NVMe: BAR0/1/... 레지스터 오프셋 산출 */
-	} else if (resno == PCI_ROM_RESOURCE) { /* NVMe: ROM BAR 처리 분기 */
+	if (resno < PCI_ROM_RESOURCE) {
+		reg = PCI_BASE_ADDRESS_0 + 4 * resno;
+	} else if (resno == PCI_ROM_RESOURCE) {
 
 		/*
 		 * Apparently some Matrox devices have ROM BARs that read
@@ -214,49 +214,49 @@ static void pci_std_update_resource(struct pci_dev *dev, int resno) /* NVMe: 특
 		 * But we must update ROM BAR for buggy devices where even a
 		 * disabled ROM can conflict with other BARs.
 		 */
-		if (!(res->flags & IORESOURCE_ROM_ENABLE) && /* NVMe: ROM이 비활성화면 갱신 생략(단 중첩 버그 장치 제외) */
-		    !dev->rom_bar_overlap) /* NVMe: ROM BAR이 다른 BAR과 중첩되지 않으면 스킵 */
-			return; /* NVMe: ROM BAR 갱신 생략 */
+		if (!(res->flags & IORESOURCE_ROM_ENABLE) &&
+		    !dev->rom_bar_overlap)
+			return;
 
-		reg = dev->rom_base_reg; /* NVMe: ROM BAR config 오프셋 */
-		if (res->flags & IORESOURCE_ROM_ENABLE) /* NVMe: ROM 활성화 시 ENABLE 비트 추가 */
-			new |= PCI_ROM_ADDRESS_ENABLE; /* NVMe: ROM BAR enable bit 설정 */
-	} else /* NVMe: ROM 이외의 bridge 리소스는 여기서 처리하지 않음 */
-		return; /* NVMe: 갱신 대상 아님 */
+		reg = dev->rom_base_reg;
+		if (res->flags & IORESOURCE_ROM_ENABLE)
+			new |= PCI_ROM_ADDRESS_ENABLE;
+	} else
+		return;
 
 	/*
 	 * We can't update a 64-bit BAR atomically, so when possible,
 	 * disable decoding so that a half-updated BAR won't conflict
 	 * with another device.
 	 */
-	disable = (res->flags & IORESOURCE_MEM_64) && !dev->mmio_always_on; /* NVMe: 64비트 BAR은 원자적 갱신이 불가하므로 디코딩 끔 */
-	if (disable) { /* NVMe: 메모리 디코딩 일시 중단 필요 시 */
-		pci_read_config_word(dev, PCI_COMMAND, &cmd); /* NVMe: 현재 PCI_COMMAND(메모리/IO 마스터 비트 포함) 읽기 */
-		pci_write_config_word(dev, PCI_COMMAND, /* NVMe: MEMORY 비트만 클리어하여 NVMe endpoint BAR 디코딩 중단 */
-				      cmd & ~PCI_COMMAND_MEMORY); /* NVMe: PCI_COMMAND_MEMORY 비트 제거 */
-	} /* NVMe: 64비트 BAR 갱신용 메모리 디코딩 일시 중단 블록 종료 */
+	disable = (res->flags & IORESOURCE_MEM_64) && !dev->mmio_always_on;
+	if (disable) {
+		pci_read_config_word(dev, PCI_COMMAND, &cmd);
+		pci_write_config_word(dev, PCI_COMMAND,
+				      cmd & ~PCI_COMMAND_MEMORY);
+	}
 
-	pci_write_config_dword(dev, reg, new); /* NVMe: 계산된 bus 주소를 BAR 레지스터에 기록 */
-	pci_read_config_dword(dev, reg, &check); /* NVMe: BAR에 정상 기록되었는지 확인용 읽기 */
+	pci_write_config_dword(dev, reg, new);
+	pci_read_config_dword(dev, reg, &check);
 
-	if ((new ^ check) & mask) { /* NVMe: 쓴 값과 읽은 값이 마스크 영역에서 다륾면 실패 */
-		pci_err(dev, "%s: error updating (%#010x != %#010x)\n", /* NVMe: BAR 갱신 실패 로그(잘못된 doorbell 주소 원인 가능) */
-			res_name, new, check); /* NVMe: 오류 메시지 인자 전달 */
-	} /* NVMe: 쓰기-읽기 검증 블록 끝 */
+	if ((new ^ check) & mask) {
+		pci_err(dev, "%s: error updating (%#010x != %#010x)\n",
+			res_name, new, check);
+	}
 
-	if (res->flags & IORESOURCE_MEM_64) { /* NVMe: 64비트 BAR의 상위 32비트도 기록 */
-		new = region.start >> 16 >> 16; /* NVMe: 64비트 주소의 상위 32비트 추출 */
-		pci_write_config_dword(dev, reg + 4, new); /* NVMe: BAR+4에 상위 32비트 기록 */
-		pci_read_config_dword(dev, reg + 4, &check); /* NVMe: 상위 32비트 확인 읽기 */
-		if (check != new) { /* NVMe: 상위 32비트 불일치 시 실패 */
-			pci_err(dev, "%s: error updating (high %#010x != %#010x)\n", /* NVMe: 상위 32비트 갱신 실패 로그 */
-				res_name, new, check); /* NVMe: 오류 메시지 인자 전달 */
-		} /* NVMe: 상위 32비트 불일치 검사 블록 끝 */
-	} /* NVMe: 64비트 BAR 상위 32비트 처리 블록 끝 */
+	if (res->flags & IORESOURCE_MEM_64) {
+		new = region.start >> 16 >> 16;
+		pci_write_config_dword(dev, reg + 4, new);
+		pci_read_config_dword(dev, reg + 4, &check);
+		if (check != new) {
+			pci_err(dev, "%s: error updating (high %#010x != %#010x)\n",
+				res_name, new, check);
+		}
+	}
 
-	if (disable) /* NVMe: 갱신 완료 후 이전 PCI_COMMAND 복원 */
-		pci_write_config_word(dev, PCI_COMMAND, cmd); /* NVMe: NVMe endpoint의 메모리 디코딩 원래대로 복원 */
-} /* NVMe: pci_std_update_resource 함수 종료 */
+	if (disable)
+		pci_write_config_word(dev, PCI_COMMAND, cmd);
+}
 
 /*
  * [한국어]
@@ -280,13 +280,13 @@ static void pci_std_update_resource(struct pci_dev *dev, int resno) /* NVMe: 특
  * 실행 컨텍스트: 프로세스 컨텍스트.
  * 호출자: pci_assign_resource(), pci_reassign_resource(), pci_restore_state().
  */
-void pci_update_resource(struct pci_dev *dev, int resno) /* NVMe: BAR 갱신 wrapper 함수 선언 */
-{ /* NVMe: pci_update_resource 함수 본문 시작 */
-	if (resno <= PCI_ROM_RESOURCE) /* NVMe: 일반 BAR(0~ROM)은 표준 갱신 경로 사용 */
-		pci_std_update_resource(dev, resno); /* NVMe: 해당 BAR의 config space 갱신 수행 */
-	else if (pci_resource_is_iov(resno)) /* NVMe: SR-IOV VF BAR인 경우 */
-		pci_iov_update_resource(dev, resno); /* NVMe: VF BAR 갱신 함수 호출 */
-} /* NVMe: pci_update_resource 함수 종료 */
+void pci_update_resource(struct pci_dev *dev, int resno)
+{
+	if (resno <= PCI_ROM_RESOURCE)
+		pci_std_update_resource(dev, resno);
+	else if (pci_resource_is_iov(resno))
+		pci_iov_update_resource(dev, resno);
+}
 
 /*
  * [한국어]
@@ -323,45 +323,45 @@ void pci_update_resource(struct pci_dev *dev, int resno) /* NVMe: BAR 갱신 wra
  *   pcibios_resource_survey_bus -> [pci_claim_resource]
  *     -> pci_find_parent_resource -> request_resource_conflict
  */
-int pci_claim_resource(struct pci_dev *dev, int resource) /* NVMe: NVMe BAR 리소스 등록(claim) 함수 선언 */
-{ /* NVMe: pci_claim_resource 함수 본문 시작 */
-	struct resource *res = &dev->resource[resource]; /* NVMe: claim하려는 NVMe BAR 리소스 */
-	const char *res_name = pci_resource_name(dev, resource); /* NVMe: 로그용 BAR 이름 */
-	struct resource *root, *conflict; /* NVMe: 상위 bridge window와 충돌 리소스 */
+int pci_claim_resource(struct pci_dev *dev, int resource)
+{
+	struct resource *res = &dev->resource[resource];
+	const char *res_name = pci_resource_name(dev, resource);
+	struct resource *root, *conflict;
 
-	if (res->flags & IORESOURCE_UNSET) { /* NVMe: 주소 미할당 BAR은 claim할 수 없다 */
-		pci_info(dev, "%s %pR: can't claim; no address assigned\n", /* NVMe: 미할당 로그(BAR0 doorbell 매핑 실패 원인) */
-			 res_name, res); /* NVMe: 로그 인자 전달 */
-		return -EINVAL; /* NVMe: claim 실패 */
-	} /* NVMe: UNSET 상태 검사 블록 끝 */
+	if (res->flags & IORESOURCE_UNSET) {
+		pci_info(dev, "%s %pR: can't claim; no address assigned\n",
+			 res_name, res);
+		return -EINVAL;
+	}
 
 	/*
 	 * If we have a shadow copy in RAM, the PCI device doesn't respond
 	 * to the shadow range, so we don't need to claim it, and upstream
 	 * bridges don't need to route the range to the device.
 	 */
-	if (res->flags & IORESOURCE_ROM_SHADOW) /* NVMe: RAM에 섀도우된 ROM은 PCI 응답 안 함 */
-		return 0; /* NVMe: claim 필요 없음 */
+	if (res->flags & IORESOURCE_ROM_SHADOW)
+		return 0;
 
-	root = pci_find_parent_resource(dev, res); /* NVMe: NVMe BAR가 속할 상위 bridge window 탐색 */
-	if (!root) { /* NVMe: 호환 bridge window가 없으면 BAR 사용 불가 */
-		pci_info(dev, "%s %pR: can't claim; no compatible bridge window\n", /* NVMe: 상위 window 부재 로그 */
-			 res_name, res); /* NVMe: 로그 인자 전달 */
-		res->flags |= IORESOURCE_UNSET; /* NVMe: BAR를 미할당 상태로 되돌림 */
-		return -EINVAL; /* NVMe: claim 실패 */
-	} /* NVMe: 상위 bridge window 탐색 실패 블록 끝 */
+	root = pci_find_parent_resource(dev, res);
+	if (!root) {
+		pci_info(dev, "%s %pR: can't claim; no compatible bridge window\n",
+			 res_name, res);
+		res->flags |= IORESOURCE_UNSET;
+		return -EINVAL;
+	}
 
-	conflict = request_resource_conflict(root, res); /* NVMe: 상위 window 내에서 리소스 등록(충돌 검사) */
-	if (conflict) { /* NVMe: 다른 장치와 주소가 겹치면 claim 실패 */
-		pci_info(dev, "%s %pR: can't claim; address conflict with %s %pR\n", /* NVMe: 주소 충돌 로그 */
-			 res_name, res, conflict->name, conflict); /* NVMe: 충돌 리소스 정보 전달 */
-		res->flags |= IORESOURCE_UNSET; /* NVMe: 충돌로 인해 BAR 미할당 처리 */
-		return -EBUSY; /* NVMe: 리소스 사용 중 */
-	} /* NVMe: 리소스 충돌 처리 블록 끝 */
+	conflict = request_resource_conflict(root, res);
+	if (conflict) {
+		pci_info(dev, "%s %pR: can't claim; address conflict with %s %pR\n",
+			 res_name, res, conflict->name, conflict);
+		res->flags |= IORESOURCE_UNSET;
+		return -EBUSY;
+	}
 
-	return 0; /* NVMe: claim 성공 */
-} /* NVMe: pci_claim_resource 함수 종료 */
-EXPORT_SYMBOL(pci_claim_resource); /* NVMe: 다른 드라이버에서도 pci_claim_resource 사용 */
+	return 0;
+}
+EXPORT_SYMBOL(pci_claim_resource);
 
 /*
  * [한국어]
@@ -400,16 +400,16 @@ EXPORT_SYMBOL(pci_claim_resource); /* NVMe: 다른 드라이버에서도 pci_cla
  * 실행 컨텍스트: 프로세스 컨텍스트(config 쓰기).
  * 호출자: pci_reassigndev_resource_alignment() [pci.c], setup-bus.c 의 재배치 경로.
  */
-void pci_disable_bridge_window(struct pci_dev *dev) /* NVMe: bridge MMIO/Prefetchable window를 폐쇄하는 함수 선언 */
-{ /* NVMe: pci_disable_bridge_window 함수 본문 시작 */
+void pci_disable_bridge_window(struct pci_dev *dev)
+{
 	/* MMIO Base/Limit */
-	pci_write_config_dword(dev, PCI_MEMORY_BASE, 0x0000fff0); /* NVMe: bridge의 non-prefetchable MMIO window base/limit를 무효화 */
+	pci_write_config_dword(dev, PCI_MEMORY_BASE, 0x0000fff0);
 
 	/* Prefetchable MMIO Base/Limit */
-	pci_write_config_dword(dev, PCI_PREF_LIMIT_UPPER32, 0); /* NVMe: prefetchable MMIO 상위 limit 0으로 설정 */
-	pci_write_config_dword(dev, PCI_PREF_MEMORY_BASE, 0x0000fff0); /* NVMe: prefetchable MMIO base/limit 무효화 */
-	pci_write_config_dword(dev, PCI_PREF_BASE_UPPER32, 0xffffffff); /* NVMe: prefetchable MMIO 상위 base를 최대로 설정해 window 폐쇄 */
-} /* NVMe: pci_disable_bridge_window 함수 종료 */
+	pci_write_config_dword(dev, PCI_PREF_LIMIT_UPPER32, 0);
+	pci_write_config_dword(dev, PCI_PREF_MEMORY_BASE, 0x0000fff0);
+	pci_write_config_dword(dev, PCI_PREF_BASE_UPPER32, 0xffffffff);
+}
 
 /*
  * Generic function that returns a value indicating that the device's
@@ -442,10 +442,10 @@ void pci_disable_bridge_window(struct pci_dev *dev) /* NVMe: bridge MMIO/Prefetc
  * 실행 컨텍스트: 제약 없음.
  * 호출자: pci_revert_fw_address().
  */
-resource_size_t __weak pcibios_retrieve_fw_addr(struct pci_dev *dev, int idx) /* NVMe: firmware BAR 주소 복원 weak 함수 선언 */
-{ /* NVMe: pcibios_retrieve_fw_addr 함수 본문 시작 */
-	return 0; /* NVMe: firmware 주소를 복원할 수 없음을 의미 */
-} /* NVMe: pcibios_retrieve_fw_addr 함수 종료 */
+resource_size_t __weak pcibios_retrieve_fw_addr(struct pci_dev *dev, int idx)
+{
+	return 0;
+}
 
 /*
  * [한국어]
@@ -475,53 +475,53 @@ resource_size_t __weak pcibios_retrieve_fw_addr(struct pci_dev *dev, int idx) /*
  *   pci_assign_resource -> [pci_revert_fw_address]
  *     -> pcibios_retrieve_fw_addr -> request_resource_conflict
  */
-static int pci_revert_fw_address(struct resource *res, struct pci_dev *dev, /* NVMe: firmware BAR 주소로 되돌리는 내부 함수 선언 */
-		int resno, resource_size_t size) /* NVMe: 함수 매개변수 선언 (NVMe BAR 번호와 크기) */
-{ /* NVMe: pci_revert_fw_address 함수 본문 시작 */
-	struct resource *root, *conflict; /* NVMe: 상위 bridge window와 충돌 리소스 */
-	resource_size_t fw_addr, start, end; /* NVMe: firmware 주소, 원래 범위 백업 */
-	const char *res_name = pci_resource_name(dev, resno); /* NVMe: 로그용 BAR 이름 */
+static int pci_revert_fw_address(struct resource *res, struct pci_dev *dev,
+		int resno, resource_size_t size)
+{
+	struct resource *root, *conflict;
+	resource_size_t fw_addr, start, end;
+	const char *res_name = pci_resource_name(dev, resno);
 
-	fw_addr = pcibios_retrieve_fw_addr(dev, resno); /* NVMe: firmware가 남긴 BAR 주소 획득 시도 */
-	if (!fw_addr) /* NVMe: firmware 주소가 없으면 fallback 불가 */
-		return -ENOMEM; /* NVMe: fallback 실패 */
+	fw_addr = pcibios_retrieve_fw_addr(dev, resno);
+	if (!fw_addr)
+		return -ENOMEM;
 
-	start = res->start; /* NVMe: 실패 시 복원할 시작 주소 저장 */
-	end = res->end; /* NVMe: 실패 시 복원할 끝 주소 저장 */
-	resource_set_range(res, fw_addr, size); /* NVMe: BAR 범위를 firmware 주소로 설정 */
-	res->flags &= ~IORESOURCE_UNSET; /* NVMe: firmware 주소를 사용하므로 UNSET 클리어 */
+	start = res->start;
+	end = res->end;
+	resource_set_range(res, fw_addr, size);
+	res->flags &= ~IORESOURCE_UNSET;
 
-	root = pci_find_parent_resource(dev, res); /* NVMe: firmware 주소가 들어갈 상위 window 탐색 */
-	if (!root) { /* NVMe: 상위 window를 찾지 못한 경우 */
+	root = pci_find_parent_resource(dev, res);
+	if (!root) {
 		/*
 		 * If dev is behind a bridge, accesses will only reach it
 		 * if res is inside the relevant bridge window.
 		 */
-		if (pci_upstream_bridge(dev)) /* NVMe: bridge 뒤에 있는 NVMe 장치는 window 외부 주소에 접근 불가 */
-			return -ENXIO; /* NVMe: bridge window 외부이므로 실패 */
+		if (pci_upstream_bridge(dev))
+			return -ENXIO;
 
 		/*
 		 * On the root bus, assume the host bridge will forward
 		 * everything.
 		 */
-		if (res->flags & IORESOURCE_IO) /* NVMe: IO 리소스면 루트 IO 리소스 사용 */
-			root = &ioport_resource; /* NVMe: 시스템 전체 I/O 포트 트리 */
-		else /* NVMe: MEM 리소스면 루트 MEM 리소스 사용 */
-			root = &iomem_resource; /* NVMe: 시스템 전체 physical memory I/O 트리 */
-	} /* NVMe: 상위 window 탐색 및 루트 리소스 선택 블록 끝 */
+		if (res->flags & IORESOURCE_IO)
+			root = &ioport_resource;
+		else
+			root = &iomem_resource;
+	}
 
-	pci_info(dev, "%s: trying firmware assignment %pR\n", res_name, res); /* NVMe: firmware 주소로 재시도 로그 */
-	conflict = request_resource_conflict(root, res); /* NVMe: firmware 주소 등록 및 충돌 검사 */
-	if (conflict) { /* NVMe: 충돌 시 원래 값 복원 */
-		pci_info(dev, "%s %pR: conflicts with %s %pR\n", res_name, res, /* NVMe: 충돌 리소스 로그 */
-			 conflict->name, conflict); /* NVMe: 충돌 리소스 정보 전달 */
-		res->start = start; /* NVMe: 시작 주소 복원 */
-		res->end = end; /* NVMe: 끝 주소 복원 */
-		res->flags |= IORESOURCE_UNSET; /* NVMe: 다시 UNSET 상태로 표시 */
-		return -EBUSY; /* NVMe: firmware 주소도 사용 불가 */
-	} /* NVMe: 충돌 시 원래 값 복원 블록 끝 */
-	return 0; /* NVMe: firmware 주소 fallback 성공 */
-} /* NVMe: pci_revert_fw_address 함수 종료 */
+	pci_info(dev, "%s: trying firmware assignment %pR\n", res_name, res);
+	conflict = request_resource_conflict(root, res);
+	if (conflict) {
+		pci_info(dev, "%s %pR: conflicts with %s %pR\n", res_name, res,
+			 conflict->name, conflict);
+		res->start = start;
+		res->end = end;
+		res->flags |= IORESOURCE_UNSET;
+		return -EBUSY;
+	}
+	return 0;
+}
 
 /*
  * For mem bridge windows, try to relocate tail remainder space to space
@@ -552,35 +552,35 @@ static int pci_revert_fw_address(struct resource *res, struct pci_dev *dev, /* N
  *   자원 트리를 다시 건드려서도 안 된다.
  * 호출자: pcibios_align_resource() 를 통해 allocate_resource() 가 부른다.
  */
-resource_size_t pci_align_resource(struct pci_dev *dev, /* NVMe: BAR 시작 주소 정렬 함수 선언 */
-				   const struct resource *res, /* NVMe: 기존 할당 후보 리소스 */
-				   const struct resource *empty_res, /* NVMe: 비어 있는 영역 정보 */
-				   resource_size_t size, /* NVMe: 요청 크기 */
-				   resource_size_t align) /* NVMe: 요구 정렬 */
-{ /* NVMe: pci_align_resource 함수 본문 시작 */
-	resource_size_t remainder, start_addr; /* NVMe: 정렬 후 남은 공간과 후보 시작 주소 */
+resource_size_t pci_align_resource(struct pci_dev *dev,
+				   const struct resource *res,
+				   const struct resource *empty_res,
+				   resource_size_t size,
+				   resource_size_t align)
+{
+	resource_size_t remainder, start_addr;
 
-	if (!(res->flags & IORESOURCE_MEM)) /* NVMe: 메모리 BAR이 아니면 정렬 조정 불필요 */
-		return res->start; /* NVMe: 그대로 반환 */
+	if (!(res->flags & IORESOURCE_MEM))
+		return res->start;
 
-	if (IS_ALIGNED(size, align)) /* NVMe: 이미 정렬에 딱 맞으면 조정 불필요 */
-		return res->start; /* NVMe: 그대로 반환 */
+	if (IS_ALIGNED(size, align))
+		return res->start;
 
-	remainder = size - ALIGN_DOWN(size, align); /* NVMe: 정렬 단위로 채우지 못한 꼬리 공간 계산 */
+	remainder = size - ALIGN_DOWN(size, align);
 	/* Don't mess with size that doesn't align with window size granularity */
-	if (!IS_ALIGNED(remainder, pci_min_window_alignment(dev->bus, res->flags))) /* NVMe: bridge window 세분성과 맞지 않으면 조정 불가 */
-		return res->start; /* NVMe: 그대로 반환 */
+	if (!IS_ALIGNED(remainder, pci_min_window_alignment(dev->bus, res->flags)))
+		return res->start;
 	/* Try to place remainder that doesn't fill align before */
-	if (res->start < remainder) /* NVMe: 앞쪽에 여유 공간이 부족하면 조정 불가 */
-		return res->start; /* NVMe: 그대로 반환 */
-	start_addr = res->start - remainder; /* NVMe: 꼬리 공간을 앞쪽으로 밀어 시작 주소 계산 */
-	if (empty_res->start > start_addr) /* NVMe: 비어 있는 영역이 후볳보다 뒤에 있으면 불가 */
-		return res->start; /* NVMe: 그대로 반환 */
+	if (res->start < remainder)
+		return res->start;
+	start_addr = res->start - remainder;
+	if (empty_res->start > start_addr)
+		return res->start;
 
-	pci_dbg(dev, "%pR: moving candidate start address below align to %llx\n", /* NVMe: 시작 주소 조정 로그 */
-		res, (unsigned long long)start_addr); /* NVMe: 로그 인자 전달 */
-	return start_addr; /* NVMe: 조정된 시작 주소 반환 */
-} /* NVMe: pci_align_resource 함수 종료 */
+	pci_dbg(dev, "%pR: moving candidate start address below align to %llx\n",
+		res, (unsigned long long)start_addr);
+	return start_addr;
+}
 
 /*
  * We don't have to worry about legacy ISA devices, so nothing to do here.
@@ -609,16 +609,16 @@ resource_size_t pci_align_resource(struct pci_dev *dev, /* NVMe: BAR 시작 주�
  * 실행 컨텍스트: 자원 트리 락 안. 잠들 수 없다.
  * 호출자: kernel/resource.c 의 allocate_resource().
  */
-resource_size_t __weak pcibios_align_resource(void *data, /* NVMe: 아키텍처별 정렬 weak 함수 선언 */
-					      const struct resource *res, /* NVMe: 정렬 대상 리소스 (매개변수) */
-					      const struct resource *empty_res, /* NVMe: 비어 있는 영역 (매개변수) */
-					      resource_size_t size, /* NVMe: 요청 크기 (매개변수) */
-					      resource_size_t align) /* NVMe: 요구 정렬 (매개변수) */
-{ /* NVMe: pcibios_align_resource 함수 본문 시작 */
-	struct pci_dev *dev = data; /* NVMe: 정렬 대상 NVMe 장치 포인터 */
+resource_size_t __weak pcibios_align_resource(void *data,
+					      const struct resource *res,
+					      const struct resource *empty_res,
+					      resource_size_t size,
+					      resource_size_t align)
+{
+	struct pci_dev *dev = data;
 
-	return pci_align_resource(dev, res, empty_res, size, align); /* NVMe: 아키텍처 독립적 정렬 함수 호출 */
-} /* NVMe: pcibios_align_resource 함수 종료 */
+	return pci_align_resource(dev, res, empty_res, size, align);
+}
 
 /*
  * [한국어]
@@ -660,14 +660,14 @@ resource_size_t __weak pcibios_align_resource(void *data, /* NVMe: 아키텍처�
  *   pci_assign_resource -> _pci_assign_resource -> [__pci_assign_resource]
  *     -> pci_bus_alloc_resource -> allocate_resource
  */
-static int __pci_assign_resource(struct pci_bus *bus, struct pci_dev *dev, /* NVMe: bridge window 내 BAR 공간 할당 내부 함수 선언 */
-		int resno, resource_size_t size, resource_size_t align) /* NVMe: 매개변수: BAR 번호, 크기, 정렬 */
-{ /* NVMe: __pci_assign_resource 함수 본문 시작 */
-	struct resource *res = pci_resource_n(dev, resno); /* NVMe: 할당할 NVMe BAR 리소스 */
-	resource_size_t min; /* NVMe: 할당 최소 주소(IO/MEM 구분) */
-	int ret; /* NVMe: 할당 결과 */
+static int __pci_assign_resource(struct pci_bus *bus, struct pci_dev *dev,
+		int resno, resource_size_t size, resource_size_t align)
+{
+	struct resource *res = pci_resource_n(dev, resno);
+	resource_size_t min;
+	int ret;
 
-	min = (res->flags & IORESOURCE_IO) ? PCIBIOS_MIN_IO : PCIBIOS_MIN_MEM; /* NVMe: IO BAR이면 최소 IO, 아니면 최소 MEM 주소 */
+	min = (res->flags & IORESOURCE_IO) ? PCIBIOS_MIN_IO : PCIBIOS_MIN_MEM;
 
 	/*
 	 * First, try exact prefetching match.  Even if a 64-bit
@@ -676,24 +676,24 @@ static int __pci_assign_resource(struct pci_bus *bus, struct pci_dev *dev, /* NV
 	 * 64-bit window will contain no 32-bit resources.  If we assign
 	 * things differently than they were sized, not everything will fit.
 	 */
-	ret = pci_bus_alloc_resource(bus, res, size, align, min, /* NVMe: 64비트 prefetchable window에 정확히 맞춰 할당 시도 */
-				     IORESOURCE_PREFETCH | IORESOURCE_MEM_64, /* NVMe: prefetchable+64비트 조건 */
-				     pcibios_align_resource, dev); /* NVMe: 정렬 콜백과 NVMe 장치 전달 */
-	if (ret == 0) /* NVMe: 성공하면 바로 반환 */
-		return 0; /* NVMe: BAR 할당 성공 */
+	ret = pci_bus_alloc_resource(bus, res, size, align, min,
+				     IORESOURCE_PREFETCH | IORESOURCE_MEM_64,
+				     pcibios_align_resource, dev);
+	if (ret == 0)
+		return 0;
 
 	/*
 	 * If the prefetchable window is only 32 bits wide, we can put
 	 * 64-bit prefetchable resources in it.
 	 */
-	if ((res->flags & (IORESOURCE_PREFETCH | IORESOURCE_MEM_64)) == /* NVMe: 64비트 prefetchable BAR이면 32비트 prefetchable window도 시도 */
-	     (IORESOURCE_PREFETCH | IORESOURCE_MEM_64)) { /* NVMe: prefetchable+64비트 플래그 비교 */
-		ret = pci_bus_alloc_resource(bus, res, size, align, min, /* NVMe: 32비트 prefetchable window 할당 시도 */
-					     IORESOURCE_PREFETCH, /* NVMe: prefetchable 조건 */
-					     pcibios_align_resource, dev); /* NVMe: 정렬 콜백과 NVMe 장치 전달 */
-		if (ret == 0) /* NVMe: 성공하면 반환 */
-			return 0; /* NVMe: BAR 할당 성공 */
-	} /* NVMe: 64비트 prefetchable 32비트 window fallback 블록 끝 */
+	if ((res->flags & (IORESOURCE_PREFETCH | IORESOURCE_MEM_64)) ==
+	     (IORESOURCE_PREFETCH | IORESOURCE_MEM_64)) {
+		ret = pci_bus_alloc_resource(bus, res, size, align, min,
+					     IORESOURCE_PREFETCH,
+					     pcibios_align_resource, dev);
+		if (ret == 0)
+			return 0;
+	}
 
 	/*
 	 * If we didn't find a better match, we can put any memory resource
@@ -701,12 +701,12 @@ static int __pci_assign_resource(struct pci_bus *bus, struct pci_dev *dev, /* NV
 	 * non-prefetchable, the first call already tried the only possibility
 	 * so we don't need to try again.
 	 */
-	if (res->flags & (IORESOURCE_PREFETCH | IORESOURCE_MEM_64)) /* NVMe: non-prefetchable window에도 시도할 대상 */
-		ret = pci_bus_alloc_resource(bus, res, size, align, min, 0, /* NVMe: non-prefetchable window 할당 시도 */
-					     pcibios_align_resource, dev); /* NVMe: 정렬 콜백과 NVMe 장치 전달 */
+	if (res->flags & (IORESOURCE_PREFETCH | IORESOURCE_MEM_64))
+		ret = pci_bus_alloc_resource(bus, res, size, align, min, 0,
+					     pcibios_align_resource, dev);
 
-	return ret; /* NVMe: 할당 결과 반환(0이면 성공) */
-} /* NVMe: __pci_assign_resource 함수 종료 */
+	return ret;
+}
 
 /*
  * [한국어]
@@ -733,21 +733,21 @@ static int __pci_assign_resource(struct pci_bus *bus, struct pci_dev *dev, /* NV
  * 실행 컨텍스트: 프로세스 컨텍스트.
  * 호출자: pci_assign_resource(), pci_reassign_resource().
  */
-static int _pci_assign_resource(struct pci_dev *dev, int resno, /* NVMe: transparent bridge 따라 할당하는 내부 함수 선언 */
-				resource_size_t size, resource_size_t min_align) /* NVMe: 매개변수: 크기, 최소 정렬 */
-{ /* NVMe: _pci_assign_resource 함수 본문 시작 */
-	struct pci_bus *bus; /* NVMe: 현재 NVMe 장치가 속한 bus */
-	int ret; /* NVMe: 할당 결과 */
+static int _pci_assign_resource(struct pci_dev *dev, int resno,
+				resource_size_t size, resource_size_t min_align)
+{
+	struct pci_bus *bus;
+	int ret;
 
-	bus = dev->bus; /* NVMe: NVMe endpoint의 현재 bus */
-	while ((ret = __pci_assign_resource(bus, dev, resno, size, min_align))) { /* NVMe: 상위 transparent bridge를 따라 할당 재시도 */
-		if (!bus->parent || !bus->self->transparent) /* NVMe: root bus에 도달하거나 non-transparent bridge면 중단 */
-			break; /* NVMe: 더 이상 올라갈 수 없음 */
-		bus = bus->parent; /* NVMe: 상위 bus로 이동 */
-	} /* NVMe: transparent bridge 순회 while 루프 블록 끝 */
+	bus = dev->bus;
+	while ((ret = __pci_assign_resource(bus, dev, resno, size, min_align))) {
+		if (!bus->parent || !bus->self->transparent)
+			break;
+		bus = bus->parent;
+	}
 
-	return ret; /* NVMe: 최종 할당 결과 반환 */
-} /* NVMe: _pci_assign_resource 함수 종료 */
+	return ret;
+}
 
 /*
  * [한국어]
@@ -784,54 +784,54 @@ static int _pci_assign_resource(struct pci_dev *dev, int resno, /* NVMe: transpa
  *     -> _pci_assign_resource -> __pci_assign_resource -> pci_bus_alloc_resource
  *     -> pci_update_resource -> pci_write_config_dword(BAR)
  */
-int pci_assign_resource(struct pci_dev *dev, int resno) /* NVMe: NVMe BAR 전체 할당 흐름 함수 선언 */
-{ /* NVMe: pci_assign_resource 함수 본문 시작 */
-	struct resource *res = pci_resource_n(dev, resno); /* NVMe: 할당할 NVMe BAR 리소스 */
-	const char *res_name = pci_resource_name(dev, resno); /* NVMe: 로그용 BAR 이름 */
-	resource_size_t align, size; /* NVMe: BAR 정렬과 크기 */
-	int ret; /* NVMe: 할당 결과 */
+int pci_assign_resource(struct pci_dev *dev, int resno)
+{
+	struct resource *res = pci_resource_n(dev, resno);
+	const char *res_name = pci_resource_name(dev, resno);
+	resource_size_t align, size;
+	int ret;
 
-	if (res->flags & IORESOURCE_PCI_FIXED) /* NVMe: 고정 BAR은 할당할 필요 없음 */
-		return 0; /* NVMe: 고정 BAR 유지 */
+	if (res->flags & IORESOURCE_PCI_FIXED)
+		return 0;
 
-	res->flags |= IORESOURCE_UNSET; /* NVMe: 재할당 전 일단 UNSET 표시 */
-	align = pci_resource_alignment(dev, res); /* NVMe: BAR의 요구 정렬 값 산출 */
-	if (!align) { /* NVMe: 정렬 값이 0이면 잘못된 BAR */
-		pci_info(dev, "%s %pR: can't assign; bogus alignment\n", /* NVMe: 잘못된 정렬 로그 */
-			 res_name, res); /* NVMe: 로그 인자 전달 */
-		return -EINVAL; /* NVMe: 할당 실패 */
-	} /* NVMe: 정렬 값 검증 실패 블록 끝 */
+	res->flags |= IORESOURCE_UNSET;
+	align = pci_resource_alignment(dev, res);
+	if (!align) {
+		pci_info(dev, "%s %pR: can't assign; bogus alignment\n",
+			 res_name, res);
+		return -EINVAL;
+	}
 
-	size = resource_size(res); /* NVMe: BAR의 실제 크기 */
-	ret = _pci_assign_resource(dev, resno, size, align); /* NVMe: 상위 bus를 따라 BAR 공간 할당 시도 */
+	size = resource_size(res);
+	ret = _pci_assign_resource(dev, resno, size, align);
 
 	/*
 	 * If we failed to assign anything, let's try the address
 	 * where firmware left it.  That at least has a chance of
 	 * working, which is better than just leaving it disabled.
 	 */
-	if (ret < 0) { /* NVMe: 커널 할당 실패 시 firmware 주소로 fallback */
-		pci_info(dev, "%s %pR: can't assign; no space\n", res_name, res); /* NVMe: 공간 부족 로그 */
-		ret = pci_revert_fw_address(res, dev, resno, size); /* NVMe: firmware가 남긴 주소로 되돌림 */
-	} /* NVMe: 커널 할당 실패 firmware fallback 블록 끝 */
+	if (ret < 0) {
+		pci_info(dev, "%s %pR: can't assign; no space\n", res_name, res);
+		ret = pci_revert_fw_address(res, dev, resno, size);
+	}
 
-	if (ret < 0) { /* NVMe: firmware fallback도 실패하면 최종 실패 */
-		pci_info(dev, "%s %pR: failed to assign\n", res_name, res); /* NVMe: 최종 할당 실패 로그 */
-		return ret; /* NVMe: 실패 코드 반환 */
-	} /* NVMe: firmware fallback 실패 블록 끝 */
+	if (ret < 0) {
+		pci_info(dev, "%s %pR: failed to assign\n", res_name, res);
+		return ret;
+	}
 
-	res->flags &= ~IORESOURCE_UNSET; /* NVMe: 할당 성공, UNSET 클리어 */
-	res->flags &= ~IORESOURCE_STARTALIGN; /* NVMe: 시작 정렬 플래그 클리어 */
-	if (pci_resource_is_bridge_win(resno)) /* NVMe: bridge window 리소스면 disabled 클리어 */
-		res->flags &= ~IORESOURCE_DISABLED; /* NVMe: bridge window 활성화 */
+	res->flags &= ~IORESOURCE_UNSET;
+	res->flags &= ~IORESOURCE_STARTALIGN;
+	if (pci_resource_is_bridge_win(resno))
+		res->flags &= ~IORESOURCE_DISABLED;
 
-	pci_info(dev, "%s %pR: assigned\n", res_name, res); /* NVMe: BAR 할당 성공 로그 */
-	if (resno < PCI_BRIDGE_RESOURCES) /* NVMe: endpoint BAR이면 config space에도 기록 */
-		pci_update_resource(dev, resno); /* NVMe: BAR 레지스터에 bus 주소 기록 */
+	pci_info(dev, "%s %pR: assigned\n", res_name, res);
+	if (resno < PCI_BRIDGE_RESOURCES)
+		pci_update_resource(dev, resno);
 
-	return 0; /* NVMe: pci_assign_resource 성공 */
-} /* NVMe: pci_assign_resource 함수 종료 */
-EXPORT_SYMBOL(pci_assign_resource); /* NVMe: NVMe 드라이버 등에서 간접 사용 */
+	return 0;
+}
+EXPORT_SYMBOL(pci_assign_resource);
 
 /*
  * [한국어]
@@ -857,44 +857,44 @@ EXPORT_SYMBOL(pci_assign_resource); /* NVMe: NVMe 드라이버 등에서 간접 
  * 실행 컨텍스트: 프로세스 컨텍스트.
  * 호출자: setup-bus.c 의 add_size 처리 경로(선택적 추가 크기 반영).
  */
-int pci_reassign_resource(struct pci_dev *dev, int resno, /* NVMe: NVMe BAR 크기 확장 재할당 함수 선언 */
-			  resource_size_t addsize, resource_size_t min_align) /* NVMe: 매개변수: 확장 크기, 최소 정렬 */
-{ /* NVMe: pci_reassign_resource 함수 본문 시작 */
-	struct resource *res = pci_resource_n(dev, resno); /* NVMe: 확장할 NVMe BAR 리소스 */
-	const char *res_name = pci_resource_name(dev, resno); /* NVMe: 로그용 BAR 이름 */
-	unsigned long flags; /* NVMe: 원래 리소스 플래그 백업 */
-	resource_size_t new_size; /* NVMe: 확장된 BAR 크기 */
-	int ret; /* NVMe: 재할당 결과 */
+int pci_reassign_resource(struct pci_dev *dev, int resno,
+			  resource_size_t addsize, resource_size_t min_align)
+{
+	struct resource *res = pci_resource_n(dev, resno);
+	const char *res_name = pci_resource_name(dev, resno);
+	unsigned long flags;
+	resource_size_t new_size;
+	int ret;
 
-	if (res->flags & IORESOURCE_PCI_FIXED) /* NVMe: 고정 BAR은 확장 불가 */
-		return 0; /* NVMe: 고정 BAR 유지 */
+	if (res->flags & IORESOURCE_PCI_FIXED)
+		return 0;
 
-	flags = res->flags; /* NVMe: 실패 시 복원할 원래 플래그 저장 */
-	res->flags |= IORESOURCE_UNSET; /* NVMe: 재할당 전 UNSET 표시 */
-	if (!res->parent) { /* NVMe: 아직 부모에 등록되지 않은 BAR은 재할당 불가 */
-		pci_info(dev, "%s %pR: can't reassign; unassigned resource\n", /* NVMe: 미할당 로그 */
-			 res_name, res); /* NVMe: 로그 인자 전달 */
-		return -EINVAL; /* NVMe: 재할당 실패 */
-	} /* NVMe: 미할당 BAR 검사 블록 끝 */
+	flags = res->flags;
+	res->flags |= IORESOURCE_UNSET;
+	if (!res->parent) {
+		pci_info(dev, "%s %pR: can't reassign; unassigned resource\n",
+			 res_name, res);
+		return -EINVAL;
+	}
 
-	new_size = resource_size(res) + addsize; /* NVMe: 확장된 크기 계산 */
-	ret = _pci_assign_resource(dev, resno, new_size, min_align); /* NVMe: 확장 크기로 재할당 시도 */
-	if (ret) { /* NVMe: 실패 시 원래 플래그 복원 */
-		res->flags = flags; /* NVMe: 원래 플래그 복원 */
-		pci_info(dev, "%s %pR: failed to expand by %#llx\n", /* NVMe: 확장 실패 로그 */
-			 res_name, res, (unsigned long long) addsize); /* NVMe: 로그 인자 전달 */
-		return ret; /* NVMe: 재할당 실패 */
-	} /* NVMe: 재할당 실패 플래그 복원 블록 끝 */
+	new_size = resource_size(res) + addsize;
+	ret = _pci_assign_resource(dev, resno, new_size, min_align);
+	if (ret) {
+		res->flags = flags;
+		pci_info(dev, "%s %pR: failed to expand by %#llx\n",
+			 res_name, res, (unsigned long long) addsize);
+		return ret;
+	}
 
-	res->flags &= ~IORESOURCE_UNSET; /* NVMe: 재할당 성공, UNSET 클리어 */
-	res->flags &= ~IORESOURCE_STARTALIGN; /* NVMe: 시작 정렬 플래그 클리어 */
-	pci_info(dev, "%s %pR: reassigned; expanded by %#llx\n", /* NVMe: 재할당 성공 로그 */
-		 res_name, res, (unsigned long long) addsize); /* NVMe: 로그 인자 전달 */
-	if (resno < PCI_BRIDGE_RESOURCES) /* NVMe: endpoint BAR이면 config space 갱신 */
-		pci_update_resource(dev, resno); /* NVMe: BAR 레지스터에 새 주소/크기 반영 */
+	res->flags &= ~IORESOURCE_UNSET;
+	res->flags &= ~IORESOURCE_STARTALIGN;
+	pci_info(dev, "%s %pR: reassigned; expanded by %#llx\n",
+		 res_name, res, (unsigned long long) addsize);
+	if (resno < PCI_BRIDGE_RESOURCES)
+		pci_update_resource(dev, resno);
 
-	return 0; /* NVMe: pci_reassign_resource 성공 */
-} /* NVMe: pci_reassign_resource 함수 종료 */
+	return 0;
+}
 
 /*
  * [한국어]
@@ -916,27 +916,27 @@ int pci_reassign_resource(struct pci_dev *dev, int resno, /* NVMe: NVMe BAR 크�
  * 실행 컨텍스트: 프로세스 컨텍스트.
  * 호출자: 재배치 경로(setup-bus.c), 장치 제거(remove.c 의 pci_free_resources).
  */
-int pci_release_resource(struct pci_dev *dev, int resno) /* NVMe: NVMe BAR 리소스 해제 함수 선언 */
-{ /* NVMe: pci_release_resource 함수 본문 시작 */
-	struct resource *res = pci_resource_n(dev, resno); /* NVMe: 해제할 NVMe BAR 리소스 */
-	const char *res_name = pci_resource_name(dev, resno); /* NVMe: 로그용 BAR 이름 */
-	int ret; /* NVMe: 해제 결과 */
+int pci_release_resource(struct pci_dev *dev, int resno)
+{
+	struct resource *res = pci_resource_n(dev, resno);
+	const char *res_name = pci_resource_name(dev, resno);
+	int ret;
 
-	if (!res->parent) /* NVMe: 이미 등록되지 않은 BAR은 할 필요 없음 */
-		return 0; /* NVMe: 이미 해제됨 */
+	if (!res->parent)
+		return 0;
 
-	pci_info(dev, "%s %pR: releasing\n", res_name, res); /* NVMe: BAR 해제 로그 */
+	pci_info(dev, "%s %pR: releasing\n", res_name, res);
 
-	ret = release_resource(res); /* NVMe: 상위 리소스 트리에서 제거 */
-	if (ret) /* NVMe: 해제 실패 시 */
-		return ret; /* NVMe: 실패 코드 반환 */
-	res->end = resource_size(res) - 1; /* NVMe: end를 크기-1로 재설정 */
-	res->start = 0; /* NVMe: 시작 주소 초기화 */
-	res->flags |= IORESOURCE_UNSET; /* NVMe: 미할당 상태로 표시 */
+	ret = release_resource(res);
+	if (ret)
+		return ret;
+	res->end = resource_size(res) - 1;
+	res->start = 0;
+	res->flags |= IORESOURCE_UNSET;
 
-	return 0; /* NVMe: pci_release_resource 성공 */
-} /* NVMe: pci_release_resource 함수 종료 */
-EXPORT_SYMBOL(pci_release_resource); /* NVMe: 외부에서 호출 가능 */
+	return 0;
+}
+EXPORT_SYMBOL(pci_release_resource);
 
 /*
  * [한국어]
@@ -977,52 +977,52 @@ EXPORT_SYMBOL(pci_release_resource); /* NVMe: 외부에서 호출 가능 */
  *   nvme_pci_enable -> pci_enable_device_mem -> do_pci_enable_device
  *     -> [pci_enable_resources] -> pci_write_config_word(PCI_COMMAND)
  */
-int pci_enable_resources(struct pci_dev *dev, int mask) /* NVMe: NVMe endpoint PCI_COMMAND 활성화 함수 선언 */
-{ /* NVMe: pci_enable_resources 함수 본문 시작 */
-	u16 cmd, old_cmd; /* NVMe: PCI_COMMAND 레지스터 값 */
-	int i; /* NVMe: 리소스 인덱스 */
-	struct resource *r; /* NVMe: 순회 중인 NVMe BAR */
-	const char *r_name; /* NVMe: 로그용 리소스 이름 */
+int pci_enable_resources(struct pci_dev *dev, int mask)
+{
+	u16 cmd, old_cmd;
+	int i;
+	struct resource *r;
+	const char *r_name;
 
-	pci_read_config_word(dev, PCI_COMMAND, &cmd); /* NVMe: 현재 PCI_COMMAND 읽기 */
-	old_cmd = cmd; /* NVMe: 변경 전 값 백업 */
+	pci_read_config_word(dev, PCI_COMMAND, &cmd);
+	old_cmd = cmd;
 
-	pci_dev_for_each_resource(dev, r, i) { /* NVMe: NVMe 장치의 모든 BAR를 순회 */
-		if (!(mask & (1 << i))) /* NVMe: mask에 포함되지 않은 리소스는 건너뛴다 */
-			continue; /* NVMe: 다음 리소스로 */
+	pci_dev_for_each_resource(dev, r, i) {
+		if (!(mask & (1 << i)))
+			continue;
 
-		r_name = pci_resource_name(dev, i); /* NVMe: 현재 리소스 이름 */
+		r_name = pci_resource_name(dev, i);
 
-		if (!(r->flags & (IORESOURCE_IO | IORESOURCE_MEM))) /* NVMe: IO/MEM 리소스가 아니면 무시 */
-			continue; /* NVMe: 다음 리소스로 */
-		if (pci_resource_is_optional(dev, i)) /* NVMe: optional 리소스면 enable 생략 */
-			continue; /* NVMe: 다음 리소스로 */
+		if (!(r->flags & (IORESOURCE_IO | IORESOURCE_MEM)))
+			continue;
+		if (pci_resource_is_optional(dev, i))
+			continue;
 
-		if (i < PCI_BRIDGE_RESOURCES) { /* NVMe: endpoint BAR인 경우 할당/claim 확인 */
-			if (r->flags & IORESOURCE_UNSET) { /* NVMe: 주소 미할당 BAR은 enable 불가 */
-				pci_err(dev, "%s %pR: not assigned; can't enable device\n", /* NVMe: 미할당 오류 로그(doorbell 접근 불가 원인) */
-					r_name, r); /* NVMe: 오류 메시지 인자 전달 */
-				return -EINVAL; /* NVMe: 장치 활성화 실패 */
-			} /* NVMe: UNSET BAR 검사 블록 끝 */
+		if (i < PCI_BRIDGE_RESOURCES) {
+			if (r->flags & IORESOURCE_UNSET) {
+				pci_err(dev, "%s %pR: not assigned; can't enable device\n",
+					r_name, r);
+				return -EINVAL;
+			}
 
-			if (!r->parent) { /* NVMe: claim되지 않은 BAR은 enable 불가 */
-				pci_err(dev, "%s %pR: not claimed; can't enable device\n", /* NVMe: 미claim 오류 로그 */
-					r_name, r); /* NVMe: 오류 메시지 인자 전달 */
-				return -EINVAL; /* NVMe: 장치 활성화 실패 */
-			} /* NVMe: 미claim BAR 검사 블록 끝 */
-		} /* NVMe: endpoint BAR 검증 블록 끝 */
+			if (!r->parent) {
+				pci_err(dev, "%s %pR: not claimed; can't enable device\n",
+					r_name, r);
+				return -EINVAL;
+			}
+		}
 
-		if (r->parent) { /* NVMe: 유효한 리소스면 command bit 설정 */
-			if (r->flags & IORESOURCE_IO) /* NVMe: IO BAR이면 IO enable */
-				cmd |= PCI_COMMAND_IO; /* NVMe: PCI_COMMAND_IO 비트 설정 */
-			if (r->flags & IORESOURCE_MEM) /* NVMe: MEM BAR이면 memory enable */
-				cmd |= PCI_COMMAND_MEMORY; /* NVMe: PCI_COMMAND_MEMORY 설정(DMA/MSI-X/도어벨 전제) */
-		} /* NVMe: 유효 리소스 command bit 설정 블록 끝 */
-	} /* NVMe: 리소스 순회 루프 끝 */
+		if (r->parent) {
+			if (r->flags & IORESOURCE_IO)
+				cmd |= PCI_COMMAND_IO;
+			if (r->flags & IORESOURCE_MEM)
+				cmd |= PCI_COMMAND_MEMORY;
+		}
+	}
 
-	if (cmd != old_cmd) { /* NVMe: 변경 사항이 있을 때만 기록 */
-		pci_info(dev, "enabling device (%04x -> %04x)\n", old_cmd, cmd); /* NVMe: command 변경 로그 */
-		pci_write_config_word(dev, PCI_COMMAND, cmd); /* NVMe: NVMe endpoint의 PCI_COMMAND 갱신 */
-	} /* NVMe: PCI_COMMAND 변경 시 기록 블록 끝 */
-	return 0; /* NVMe: enable 성공 */
-} /* NVMe: pci_enable_resources 함수 종료 */
+	if (cmd != old_cmd) {
+		pci_info(dev, "enabling device (%04x -> %04x)\n", old_cmd, cmd);
+		pci_write_config_word(dev, PCI_COMMAND, cmd);
+	}
+	return 0;
+}

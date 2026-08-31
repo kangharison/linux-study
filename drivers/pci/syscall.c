@@ -57,12 +57,12 @@
  *                         CAP_SYS_ADMIN 이 필요하다.
  */
 
-#include <linux/errno.h>	/* NVMe: EPERM/ENODEV/EIO 등 에러 코드 정의 */
-#include <linux/pci.h>		/* NVMe: PCI/NVMe 장치 구조체 및 config access 함수 */
-#include <linux/security.h>	/* NVMe: LOCKDOWN_PCI_ACCESS 보안 검사 */
-#include <linux/syscalls.h>	/* NVMe: SYSCALL_DEFINE5 매크로 */
-#include <linux/uaccess.h>	/* NVMe: 사용자 공간 접근 put_user/get_user */
-#include "pci.h"		/* NVMe: PCI 코어 낸부 헤더 */
+#include <linux/errno.h>
+#include <linux/pci.h>
+#include <linux/security.h>
+#include <linux/syscalls.h>
+#include <linux/uaccess.h>
+#include "pci.h"
 
 /*
  * pciconfig_read:
@@ -72,80 +72,80 @@
  *   CAP_SYS_ADMIN 권한이 필요하며, 존재하지 않는 장치는 -ENODEV로
  *   처리한다.
  */
-SYSCALL_DEFINE5(pciconfig_read,	/* NVMe: pciconfig_read 시스템 콜 정의(5개 인자) */
-		unsigned long, bus,	/* NVMe: 대상이 속한 PCI 버스 번호 */
-		unsigned long, dfn,	/* NVMe: 대상 장치/함수 번호(devfn) */
-		unsigned long, off,	/* NVMe: config space 내 바이트 오프셋 */
-		unsigned long, len,	/* NVMe: 읽을 바이트 수(1/2/4) */
-		void __user *, buf)	/* NVMe: 사용자 공간 결과 버퍼 */
-{	/* NVMe: pciconfig_read 시스템 콜 본문 시작 */
-	struct pci_dev *dev;	/* NVMe: 탐색/접근 대상 PCI 장치(NVMe SSD 등) 구조체 */
-	u8 byte;		/* NVMe: 1바이트 config read 결과 */
-	u16 word;		/* NVMe: 2바이트 config read 결과 */
-	u32 dword;		/* NVMe: 4바이트 config read 결과 */
-	int err, cfg_ret;	/* NVMe: err: 반환 에러 코드, cfg_ret: config access 결과 */
+SYSCALL_DEFINE5(pciconfig_read,
+		unsigned long, bus,
+		unsigned long, dfn,
+		unsigned long, off,
+		unsigned long, len,
+		void __user *, buf)
+{
+	struct pci_dev *dev;
+	u8 byte;
+	u16 word;
+	u32 dword;
+	int err, cfg_ret;
 
-	err = -EPERM;		/* NVMe: 기본 에러를 권한 부족으로 설정 */
-	dev = NULL;		/* NVMe: 장치 포인터 초기화(에러 경로에서 안전하게 put) */
-	if (!capable(CAP_SYS_ADMIN))	/* NVMe: NVMe config 접근도 root/CAP_SYS_ADMIN 필요 */
-		goto error;	/* NVMe: 권한 없으면 -EPERM 반환 */
+	err = -EPERM;
+	dev = NULL;
+	if (!capable(CAP_SYS_ADMIN))
+		goto error;
 
-	err = -ENODEV;		/* NVMe: 이후 에러는 장치 부재로 설정 */
-	dev = pci_get_domain_bus_and_slot(0, bus, dfn);	/* NVMe: domain 0에서 bus/dfn으로 NVMe 등 PCI 장치 검색 */
-	if (!dev)		/* NVMe: 해당 슬롯에 NVMe 장치가 없으면 */
-		goto error;	/* NVMe: -ENODEV 처리 */
+	err = -ENODEV;
+	dev = pci_get_domain_bus_and_slot(0, bus, dfn);
+	if (!dev)
+		goto error;
 
-	switch (len) {		/* NVMe: 요청한 바이트 수에 따라 config read 분기 */
-	case 1:		/* NVMe: 1바이트 읽기 분기 */
-		cfg_ret = pci_user_read_config_byte(dev, off, &byte);	/* NVMe: NVMe config space 1바이트 읽기 */
-		break;		/* NVMe: 1바이트 분기 종료 */
-	case 2:		/* NVMe: 2바이트 읽기 분기 */
-		cfg_ret = pci_user_read_config_word(dev, off, &word);	/* NVMe: NVMe config space 2바이트 읽기 */
-		break;		/* NVMe: 2바이트 분기 종료 */
-	case 4:		/* NVMe: 4바이트 읽기 분기 */
-		cfg_ret = pci_user_read_config_dword(dev, off, &dword);	/* NVMe: NVMe config space 4바이트 읽기 */
-		break;		/* NVMe: 4바이트 분기 종료 */
-	default:		/* NVMe: 1/2/4 외 길이 처리 */
-		err = -EINVAL;	/* NVMe: 1/2/4 바이트 외 요청은 잘못된 인자 */
-		goto error;	/* NVMe: 에러 처리로 이동 */
-	}			/* NVMe: 요청 길이별 config read 분기 종료 */
+	switch (len) {
+	case 1:
+		cfg_ret = pci_user_read_config_byte(dev, off, &byte);
+		break;
+	case 2:
+		cfg_ret = pci_user_read_config_word(dev, off, &word);
+		break;
+	case 4:
+		cfg_ret = pci_user_read_config_dword(dev, off, &dword);
+		break;
+	default:
+		err = -EINVAL;
+		goto error;
+	}
 
-	err = -EIO;		/* NVMe: config access 하드웨어 오류 시 반환값 */
-	if (cfg_ret)		/* NVMe: pci_user_read_*가 실패하면 */
-		goto error;	/* NVMe: -EIO 반환 */
+	err = -EIO;
+	if (cfg_ret)
+		goto error;
 
-	switch (len) {		/* NVMe: 커널 버퍼에서 사용자 버퍼로 복사 */
-	case 1:		/* NVMe: 1바이트 결과 복사 분기 */
-		err = put_user(byte, (u8 __user *)buf);	/* NVMe: 1바이트 결과를 사용자 공간에 기록 */
-		break;		/* NVMe: 1바이트 복사 분기 종료 */
-	case 2:		/* NVMe: 2바이트 결과 복사 분기 */
-		err = put_user(word, (u16 __user *)buf);	/* NVMe: 2바이트 결과를 사용자 공간에 기록 */
-		break;		/* NVMe: 2바이트 복사 분기 종료 */
-	case 4:		/* NVMe: 4바이트 결과 복사 분기 */
-		err = put_user(dword, (u32 __user *)buf);	/* NVMe: 4바이트 결과를 사용자 공간에 기록 */
-		break;		/* NVMe: 4바이트 복사 분기 종료 */
-	}			/* NVMe: 사용자 공간 결과 복사 switch 종료 */
-	pci_dev_put(dev);	/* NVMe: NVMe 장치 참조 카운트 감소 */
-	return err;		/* NVMe: 성공(0) 또는 put_user 실패 코드 반환 */
+	switch (len) {
+	case 1:
+		err = put_user(byte, (u8 __user *)buf);
+		break;
+	case 2:
+		err = put_user(word, (u16 __user *)buf);
+		break;
+	case 4:
+		err = put_user(dword, (u32 __user *)buf);
+		break;
+	}
+	pci_dev_put(dev);
+	return err;
 
-error:				/* NVMe: 공통 에러 처리 레이블 */
+error:
 	/* ??? XFree86 doesn't even check the return value.  They
 	   just look for 0xffffffff in the output, since that's what
 	   they get instead of a machine check on x86.  */
-	switch (len) {		/* NVMe: 에러 시 사용자 버퍼에 0xffffffff 형태로 채워 반환 */
-	case 1:		/* NVMe: 1바이트 에러 마커 분기 */
-		put_user(-1, (u8 __user *)buf);	/* NVMe: 1바이트 에러 마커 기록 */
-		break;		/* NVMe: 1바이트 에러 마커 분기 종료 */
-	case 2:		/* NVMe: 2바이트 에러 마커 분기 */
-		put_user(-1, (u16 __user *)buf);	/* NVMe: 2바이트 에러 마커 기록 */
-		break;		/* NVMe: 2바이트 에러 마커 분기 종료 */
-	case 4:		/* NVMe: 4바이트 에러 마커 분기 */
-		put_user(-1, (u32 __user *)buf);	/* NVMe: 4바이트 에러 마커 기록 */
-		break;		/* NVMe: 4바이트 에러 마커 분기 종료 */
-	}			/* NVMe: 에러 마커 복사 switch 종료 */
-	pci_dev_put(dev);	/* NVMe: 검색한 NVMe 장치 참조 해제(NULL이면 무시) */
-	return err;		/* NVMe: 에러 코드 반환 */
-}			/* NVMe: pciconfig_read 시스템 콜 종료 */
+	switch (len) {
+	case 1:
+		put_user(-1, (u8 __user *)buf);
+		break;
+	case 2:
+		put_user(-1, (u16 __user *)buf);
+		break;
+	case 4:
+		put_user(-1, (u32 __user *)buf);
+		break;
+	}
+	pci_dev_put(dev);
+	return err;
+}
 
 /*
  * pciconfig_write:
@@ -155,59 +155,59 @@ error:				/* NVMe: 공통 에러 처리 레이블 */
  *   있다. 단 커널 NVMe 드라이버가 런타임에 직접 호출하지는 않는다.
  *   CAP_SYS_ADMIN과 LOCKDOWN_PCI_ACCESS 검사를 수행한다.
  */
-SYSCALL_DEFINE5(pciconfig_write,	/* NVMe: pciconfig_write 시스템 콜 정의(5개 인자) */
-		unsigned long, bus,	/* NVMe: 대상이 속한 PCI 버스 번호 */
-		unsigned long, dfn,	/* NVMe: 대상 장치/함수 번호(devfn) */
-		unsigned long, off,	/* NVMe: config space 내 바이트 오프셋 */
-		unsigned long, len,	/* NVMe: 쓸 바이트 수(1/2/4) */
-		void __user *, buf)	/* NVMe: 사용자 공간 원본 버퍼 */
-{	/* NVMe: pciconfig_write 시스템 콜 본문 시작 */
-	struct pci_dev *dev;	/* NVMe: 쓰기 대상 PCI 장치(NVMe SSD) 구조체 */
-	u8 byte;		/* NVMe: 1바이트 쓰기 값 */
-	u16 word;		/* NVMe: 2바이트 쓰기 값 */
-	u32 dword;		/* NVMe: 4바이트 쓰기 값 */
-	int err = 0;		/* NVMe: 기본 반환값(성공) */
+SYSCALL_DEFINE5(pciconfig_write,
+		unsigned long, bus,
+		unsigned long, dfn,
+		unsigned long, off,
+		unsigned long, len,
+		void __user *, buf)
+{
+	struct pci_dev *dev;
+	u8 byte;
+	u16 word;
+	u32 dword;
+	int err = 0;
 
-	if (!capable(CAP_SYS_ADMIN) ||	/* NVMe: NVMe config write도 고권한 필요 */
-	    security_locked_down(LOCKDOWN_PCI_ACCESS))	/* NVMe: lockdown 모드에서는 config 접근 차단(보안) */
-		return -EPERM;	/* NVMe: 권한/lockdown 위반 시 즉시 반환 */
+	if (!capable(CAP_SYS_ADMIN) ||
+	    security_locked_down(LOCKDOWN_PCI_ACCESS))
+		return -EPERM;
 
-	dev = pci_get_domain_bus_and_slot(0, bus, dfn);	/* NVMe: domain 0에서 대상 NVMe 장치 탐색 */
-	if (!dev)		/* NVMe: 장치가 존재하지 않으면 */
-		return -ENODEV;	/* NVMe: -ENODEV 반환 */
+	dev = pci_get_domain_bus_and_slot(0, bus, dfn);
+	if (!dev)
+		return -ENODEV;
 
-	switch (len) {		/* NVMe: 요청 길이에 따라 쓰기 수행 */
-	case 1:		/* NVMe: 1바이트 쓰기 분기 */
-		err = get_user(byte, (u8 __user *)buf);	/* NVMe: 사용자 공간에서 1바이트 값 복사 */
-		if (err)	/* NVMe: 복사 실패 시 */
-			break;	/* NVMe: get_user 에러 코드(err) 반환 준비 */
-		err = pci_user_write_config_byte(dev, off, byte);	/* NVMe: NVMe config space 1바이트 기록 */
-		if (err)	/* NVMe: config write 실패 시 */
-			err = -EIO;	/* NVMe: 하드웨어 I/O 오류로 변환 */
-		break;		/* NVMe: 1바이트 쓰기 분기 종료 */
+	switch (len) {
+	case 1:
+		err = get_user(byte, (u8 __user *)buf);
+		if (err)
+			break;
+		err = pci_user_write_config_byte(dev, off, byte);
+		if (err)
+			err = -EIO;
+		break;
 
-	case 2:		/* NVMe: 2바이트 쓰기 분기 */
-		err = get_user(word, (u16 __user *)buf);	/* NVMe: 사용자 공간에서 2바이트 값 복사 */
-		if (err)	/* NVMe: 사용자 공간 복사 실패 시 */
-			break;	/* NVMe: get_user 에러 코드 반환 준비 */
-		err = pci_user_write_config_word(dev, off, word);	/* NVMe: NVMe config space 2바이트 기록 */
-		if (err)	/* NVMe: config write 실패 시 */
-			err = -EIO;	/* NVMe: I/O 에러 변환 */
-		break;		/* NVMe: 2바이트 쓰기 분기 종료 */
+	case 2:
+		err = get_user(word, (u16 __user *)buf);
+		if (err)
+			break;
+		err = pci_user_write_config_word(dev, off, word);
+		if (err)
+			err = -EIO;
+		break;
 
-	case 4:		/* NVMe: 4바이트 쓰기 분기 */
-		err = get_user(dword, (u32 __user *)buf);	/* NVMe: 사용자 공간에서 4바이트 값 복사 */
-		if (err)	/* NVMe: 사용자 공간 복사 실패 시 */
-			break;	/* NVMe: get_user 에러 코드 반환 준비 */
-		err = pci_user_write_config_dword(dev, off, dword);	/* NVMe: NVMe config space 4바이트 기록 */
-		if (err)	/* NVMe: config write 실패 시 */
-			err = -EIO;	/* NVMe: I/O 에러 변환 */
-		break;		/* NVMe: 4바이트 쓰기 분기 종료 */
+	case 4:
+		err = get_user(dword, (u32 __user *)buf);
+		if (err)
+			break;
+		err = pci_user_write_config_dword(dev, off, dword);
+		if (err)
+			err = -EIO;
+		break;
 
-	default:		/* NVMe: 1/2/4 외 길이 처리 */
-		err = -EINVAL;	/* NVMe: 허용되지 않는 길이 */
-		break;		/* NVMe: -EINVAL 반환 준비 */
-	}			/* NVMe: 요청 길이별 config write 분기 종료 */
-	pci_dev_put(dev);	/* NVMe: NVMe 장치 참조 해제 */
-	return err;		/* NVMe: 성공(0) 또는 에러 코드 반환 */
-}			/* NVMe: pciconfig_write 시스템 콜 종료 */
+	default:
+		err = -EINVAL;
+		break;
+	}
+	pci_dev_put(dev);
+	return err;
+}

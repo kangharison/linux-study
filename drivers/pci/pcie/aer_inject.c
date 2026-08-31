@@ -177,7 +177,7 @@ static struct aer_error *__find_aer_error(u32 domain, unsigned int bus, /* domai
 /* inject_lock must be held before calling */
 static struct aer_error *__find_aer_error_by_dev(struct pci_dev *dev) /* 주어진 pci_dev(NVMe 장치 등)에 해당하는 aer_error 검색 */
 { /* 코드 블록 시작 */
-	int domain = pci_domain_nr(dev->bus); /* NVMe 장치가 속한 PCI 도메인 번호 획득 */
+	int domain = pci_domain_nr(dev->bus);
 	if (domain < 0) /* 도메인 번호가 유효하지 않은지 검사 */
 		return NULL; /* 유효하지 않으면 NULL 반환 */
 	return __find_aer_error(domain, dev->bus->number, dev->devfn); /* 도메인/버스/devfn로 기존 에러 노드 검색 */

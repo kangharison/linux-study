@@ -71,21 +71,21 @@
  * struct pci_pwrctrl              : 이 인프라의 상태 묶음.
  */
 
-#define dev_fmt(fmt) "pwrctrl: " fmt	/* NVMe: pwrctrl 로그 메시지 접두사 매크로 정의 */
+#define dev_fmt(fmt) "pwrctrl: " fmt
 
-#include <linux/device.h>     /* NVMe: device/driver core (struct device, drvdata 등) */
-#include <linux/export.h>     /* NVMe: 심볼 난출용 EXPORT_SYMBOL_GPL */
-#include <linux/kernel.h>     /* NVMe: 커널 기본 타입/매크로 */
-#include <linux/of.h>         /* NVMe: Device Tree 노드 조작 (OF node, power supply) */
-#include <linux/of_graph.h>   /* NVMe: DT graph/endpoint 순회 (remote port parent) */
-#include <linux/of_platform.h>/* NVMe: of_platform_device_create()로 pwrctrl pdev 생성 */
-#include <linux/pci.h>        /* NVMe: PCI bus 타입, pci_bus_type 등 */
-#include <linux/pci-pwrctrl.h>/* NVMe: struct pci_pwrctrl, pwrctrl API 선언 */
-#include <linux/platform_device.h> /* NVMe: platform_device 조작 */
-#include <linux/property.h>   /* NVMe: device property 접근 */
-#include <linux/slab.h>       /* NVMe: 메모리 할당 관련 */
+#include <linux/device.h>
+#include <linux/export.h>
+#include <linux/kernel.h>
+#include <linux/of.h>
+#include <linux/of_graph.h>
+#include <linux/of_platform.h>
+#include <linux/pci.h>
+#include <linux/pci-pwrctrl.h>
+#include <linux/platform_device.h>
+#include <linux/property.h>
+#include <linux/slab.h>
 
-#include "../pci.h"           /* NVMe: PCI 서브시스템 내部 헤더 */
+#include "../pci.h"
 
 /*
  * pci_pwrctrl_notify:
@@ -94,17 +94,17 @@
  *   사용하는 PCI device가 나중에 추가되면, of_node_reused 플래그를 설정해
  *   pinctrl/clock 등이 두 번 bind되지 않도록 한다.
  */
-static int pci_pwrctrl_notify(struct notifier_block *nb, unsigned long action,	/* NVMe: PCI bus notifier callback 정의: NVMe pci_dev 추가 시 중복 pinctrl 방지 */
-			      void *data)	/* NVMe: notifier callback 매개변수 (추가/삭제된 PCI device) */
-{	/* NVMe: pci_pwrctrl_notify() 함수 본문 시작: NVMe pci_dev 추가 시 중복 pinctrl 방지 처리 */
-	struct pci_pwrctrl *pwrctrl = container_of(nb, struct pci_pwrctrl, nb); /* NVMe: notifier_block에서 pwrctrl 구조체 역참조 */
-	struct device *dev = data;						/* NVMe: bus notify로 전달된 추가/삭제 대상 device (NVMe pci_dev 가능) */
+static int pci_pwrctrl_notify(struct notifier_block *nb, unsigned long action,
+			      void *data)
+{
+	struct pci_pwrctrl *pwrctrl = container_of(nb, struct pci_pwrctrl, nb);
+	struct device *dev = data;
 
-	if (dev_fwnode(dev) != dev_fwnode(pwrctrl->dev))			/* NVMe: pwrctrl device와 같은 firmware node를 쓰는 device인지 확인 */
-		return NOTIFY_DONE;						/* NVMe: 동일 node가 아니면 처리할 필요 없음 */
+	if (dev_fwnode(dev) != dev_fwnode(pwrctrl->dev))
+		return NOTIFY_DONE;
 
-	switch (action) {							/* NVMe: bus notifier action 분기 */
-	case BUS_NOTIFY_ADD_DEVICE:						/* NVMe: PCI device가 bus에 추가되는 시점 */
+	switch (action) {
+	case BUS_NOTIFY_ADD_DEVICE:
 		/*
 		 * We will have two struct device objects bound to two different
 		 * drivers on different buses but consuming the same DT node. We
@@ -114,12 +114,12 @@ static int pci_pwrctrl_notify(struct notifier_block *nb, unsigned long action,	/
 		 * If we got here then the PCI device is the second after the
 		 * power control platform device. Mark its OF node as reused.
 		 */
-		dev->of_node_reused = true;					/* NVMe: NVMe pci_dev 등의 OF node를 재사용으로 표시 -> pinctrl 중복 bind 방지 */
-		break;								/* NVMe: case 종료 */
-	}	/* NVMe: switch(action) 블록 종료 */
+		dev->of_node_reused = true;
+		break;
+	}
 
-	return NOTIFY_DONE;							/* NVMe: notifier 처리 완료 반환 */
-}	/* NVMe: pci_pwrctrl_notify() 함수 종료 */
+	return NOTIFY_DONE;
+}
 
 /**
  * pci_pwrctrl_init() - Initialize the PCI power control context struct
@@ -134,12 +134,12 @@ static int pci_pwrctrl_notify(struct notifier_block *nb, unsigned long action,	/
  *   장치)의 driver data로 pwrctrl을 등록해 NVMe 장치 탐색 전 전원 제어
  *   컨텍스트를 준비한다.
  */
-void pci_pwrctrl_init(struct pci_pwrctrl *pwrctrl, struct device *dev)	/* NVMe: pwrctrl context 초기화 함수: parent device에 pwrctrl 저장 */
-{	/* NVMe: pci_pwrctrl_init() 함수 본문 시작: pwrctrl context 초기화 */
-	pwrctrl->dev = dev;							/* NVMe: pwrctrl 구조체가 관리하는 device 기록 */
-	dev_set_drvdata(dev, pwrctrl);						/* NVMe: parent device의 driver data에 pwrctrl 저장 -> 후속 power_on/off 시 꺼냄 */
-}	/* NVMe: pci_pwrctrl_init() 함수 종료 */
-EXPORT_SYMBOL_GPL(pci_pwrctrl_init);	/* NVMe: pci_pwrctrl_init 심볼 외부 노출 */
+void pci_pwrctrl_init(struct pci_pwrctrl *pwrctrl, struct device *dev)
+{
+	pwrctrl->dev = dev;
+	dev_set_drvdata(dev, pwrctrl);
+}
+EXPORT_SYMBOL_GPL(pci_pwrctrl_init);
 
 /**
  * pci_pwrctrl_device_set_ready() - Notify the pwrctrl subsystem that the PCI
@@ -162,21 +162,21 @@ EXPORT_SYMBOL_GPL(pci_pwrctrl_init);	/* NVMe: pci_pwrctrl_init 심볼 외부 노
  *   NVMe 장치가 발견되면 drivers/nvme/host/pci.c의 nvme_probe()가 호출되어
  *   BAR, MSI-X, queue, doorbell 등을 초기화한다.
  */
-int pci_pwrctrl_device_set_ready(struct pci_pwrctrl *pwrctrl)	/* NVMe: NVMe 탐색 전 PCI bus notifier 등록 함수 */
-{	/* NVMe: pci_pwrctrl_device_set_ready() 함수 본문 시작: NVMe 탐색을 위한 bus notifier 등록 */
-	int ret;								/* NVMe: bus_register_notifier 반환값 저장 */
+int pci_pwrctrl_device_set_ready(struct pci_pwrctrl *pwrctrl)
+{
+	int ret;
 
-	if (!pwrctrl->dev)							/* NVMe: pwrctrl이 연결된 parent device가 없으면 */
-		return -ENODEV;							/* NVMe: 장치 없음 오류 반환 -> NVMe 탐색 불가 */
+	if (!pwrctrl->dev)
+		return -ENODEV;
 
-	pwrctrl->nb.notifier_call = pci_pwrctrl_notify;				/* NVMe: bus notifier callback 설정 (NVMe pci_dev 추가 감지) */
-	ret = bus_register_notifier(&pci_bus_type, &pwrctrl->nb);		/* NVMe: PCI bus에 notifier 등록 -> NVMe 등 PCI device 추가 이벤트 수신 */
-	if (ret)								/* NVMe: notifier 등록 실패 시 */
-		return ret;							/* NVMe: 오류 코드 반환, NVMe 탐색 시작 전 실패 */
+	pwrctrl->nb.notifier_call = pci_pwrctrl_notify;
+	ret = bus_register_notifier(&pci_bus_type, &pwrctrl->nb);
+	if (ret)
+		return ret;
 
-	return 0;								/* NVMe: 성공 -> 이후 bus rescan으로 NVMe detect 가능 */
-}	/* NVMe: pci_pwrctrl_device_set_ready() 함수 종료 */
-EXPORT_SYMBOL_GPL(pci_pwrctrl_device_set_ready);	/* NVMe: pci_pwrctrl_device_set_ready 심볼 외부 노출 */
+	return 0;
+}
+EXPORT_SYMBOL_GPL(pci_pwrctrl_device_set_ready);
 
 /**
  * pci_pwrctrl_device_unset_ready() - Notify the pwrctrl subsystem that the PCI
@@ -190,29 +190,29 @@ EXPORT_SYMBOL_GPL(pci_pwrctrl_device_set_ready);	/* NVMe: pci_pwrctrl_device_set
  *   일반적으로 pwrctrl platform driver가 detach될 때 호출되며, 이 시점에서는
  *   이미 NVMe pci_dev가 unbound된 상태여야 한다.
  */
-void pci_pwrctrl_device_unset_ready(struct pci_pwrctrl *pwrctrl)	/* NVMe: NVMe power-down 직전 PCI bus notifier 해제 함수 */
-{	/* NVMe: pci_pwrctrl_device_unset_ready() 함수 본문 시작: NVMe power-down 직전 notifier 해제 */
+void pci_pwrctrl_device_unset_ready(struct pci_pwrctrl *pwrctrl)
+{
 	/*
 	 * We don't have to delete the link here. Typically, this function
 	 * is only called when the power control device is being detached. If
 	 * it is being detached then the child PCI device must have already
 	 * been unbound too or the device core wouldn't let us unbind.
 	 */
-	bus_unregister_notifier(&pci_bus_type, &pwrctrl->nb);			/* NVMe: PCI bus notifier 해제 -> NVMe device 추가 이벤트 더 이상 처리 안 함 */
-}	/* NVMe: pci_pwrctrl_device_unset_ready() 함수 종료 */
-EXPORT_SYMBOL_GPL(pci_pwrctrl_device_unset_ready);	/* NVMe: pci_pwrctrl_device_unset_ready 심볼 외부 노출 */
+	bus_unregister_notifier(&pci_bus_type, &pwrctrl->nb);
+}
+EXPORT_SYMBOL_GPL(pci_pwrctrl_device_unset_ready);
 
 /*
  * devm_pci_pwrctrl_device_unset_ready:
  *   devm_add_action_or_reset()에 의해 등록된 release action callback이다.
  *   관리 device가 release될 때 자동으로 PCI bus notifier를 해제한다.
  */
-static void devm_pci_pwrctrl_device_unset_ready(void *data)	/* NVMe: devm release action: pwrctrl notifier 자동 해제 */
-{	/* NVMe: devm_pci_pwrctrl_device_unset_ready() release action 본문 시작 */
-	struct pci_pwrctrl *pwrctrl = data;					/* NVMe: release action에 저장된 pwrctrl 객체 */
+static void devm_pci_pwrctrl_device_unset_ready(void *data)
+{
+	struct pci_pwrctrl *pwrctrl = data;
 
-	pci_pwrctrl_device_unset_ready(pwrctrl);				/* NVMe: 관리 객체 해제 시 notifier 자동 제거 */
-}	/* NVMe: devm_pci_pwrctrl_device_unset_ready() release action 종료 */
+	pci_pwrctrl_device_unset_ready(pwrctrl);
+}
 
 /**
  * devm_pci_pwrctrl_device_set_ready - Managed variant of
@@ -230,35 +230,35 @@ static void devm_pci_pwrctrl_device_unset_ready(void *data)	/* NVMe: devm releas
  *   release되면 자동으로 notifier를 해제한다. NVMe 장치가 hot-unplug되거나
  *   driver가 unload될 때 누수 없이 정리되도록 한다.
  */
-int devm_pci_pwrctrl_device_set_ready(struct device *dev,	/* NVMe: managed notifier 등록 함수: NVMe hot-unplug 시 자동 정리 */
-				      struct pci_pwrctrl *pwrctrl)	/* NVMe: 관리 대상 pwrctrl 객체 */
-{	/* NVMe: devm_pci_pwrctrl_device_set_ready() 함수 본문 시작: managed notifier 등록 */
-	int ret;								/* NVMe: 등록 결과 저장 */
+int devm_pci_pwrctrl_device_set_ready(struct device *dev,
+				      struct pci_pwrctrl *pwrctrl)
+{
+	int ret;
 
-	ret = pci_pwrctrl_device_set_ready(pwrctrl);				/* NVMe: 일반 버전으로 bus notifier 등록 (NVMe 탐색 준비) */
-	if (ret)								/* NVMe: 등록 실패 시 */
-		return ret;							/* NVMe: 즉시 오류 반환 */
+	ret = pci_pwrctrl_device_set_ready(pwrctrl);
+	if (ret)
+		return ret;
 
-	return devm_add_action_or_reset(dev,					/* NVMe: 관리 device에 release action 등록 */
-					devm_pci_pwrctrl_device_unset_ready,	/* NVMe: release action callback: pwrctrl notifier 자동 해제 */
-					pwrctrl);					/* NVMe: release 시 pwrctrl notifier 자동 해제 */
-}	/* NVMe: devm_pci_pwrctrl_device_set_ready() 함수 종료 */
-EXPORT_SYMBOL_GPL(devm_pci_pwrctrl_device_set_ready);	/* NVMe: devm_pci_pwrctrl_device_set_ready 심볼 외부 노출 */
+	return devm_add_action_or_reset(dev,
+					devm_pci_pwrctrl_device_unset_ready,
+					pwrctrl);
+}
+EXPORT_SYMBOL_GPL(devm_pci_pwrctrl_device_set_ready);
 
 /*
  * __pci_pwrctrl_power_off_device:
  *   이미 찾은 platform device의 driver data에서 pwrctrl 객체를 꺼내
  *   power_off callback을 호출한다. NVMe slot의 전원 레일을 끄는 핵심 동작이다.
  */
-static int __pci_pwrctrl_power_off_device(struct device *dev)	/* NVMe: platform device에서 pwrctrl 꺼내 전원 끄는 헬퍼 */
-{	/* NVMe: __pci_pwrctrl_power_off_device() 함수 본문 시작: pdev에서 pwrctl 꺼내 전원 off */
-	struct pci_pwrctrl *pwrctrl = dev_get_drvdata(dev);			/* NVMe: platform device에서 pwrctrl context 획득 */
+static int __pci_pwrctrl_power_off_device(struct device *dev)
+{
+	struct pci_pwrctrl *pwrctrl = dev_get_drvdata(dev);
 
-	if (!pwrctrl)								/* NVMe: driver data가 없으면 이미 off이거나 초기화 안 됨 */
-		return 0;							/* NVMe: 정상 종료로 처리 */
+	if (!pwrctrl)
+		return 0;
 
-	return pwrctrl->power_off(pwrctrl);					/* NVMe: pwrctrl 드라이버의 power_off() 호출 -> NVMe 장치 전원 차단 */
-}	/* NVMe: __pci_pwrctrl_power_off_device() 함수 종료 */
+	return pwrctrl->power_off(pwrctrl);
+}
 
 /*
  * pci_pwrctrl_power_off_device:
@@ -266,26 +266,26 @@ static int __pci_pwrctrl_power_off_device(struct device *dev)	/* NVMe: platform 
  *   leaf node에 해당하는 platform device가 bound되어 있으면 전원을 끈다.
  *   NVMe SSD가 탑재된 slot의 전원이 역순으로 차단되는 것을 보장한다.
  */
-static void pci_pwrctrl_power_off_device(struct device_node *np)	/* NVMe: DT 노드별 pwrctrl device 전원 off (깊이 우선) */
-{	/* NVMe: pci_pwrctrl_power_off_device() 함수 본문 시작: DT 노드별 깊이 우선 전원 off */
-	struct platform_device *pdev;						/* NVMe: OF node에 해당하는 platform device */
-	int ret;								/* NVMe: power_off 반환값 저장 */
+static void pci_pwrctrl_power_off_device(struct device_node *np)
+{
+	struct platform_device *pdev;
+	int ret;
 
-	for_each_available_child_of_node_scoped(np, child)	/* NVMe: 자식 노드부터 재귀적으로 전원 off 순회 */
-		pci_pwrctrl_power_off_device(child);				/* NVMe: 자식 노드부터 깊이 우선으로 전원 끄기 -> NVMe 장치보다 상위 regulator부터 순차 off */
+	for_each_available_child_of_node_scoped(np, child)
+		pci_pwrctrl_power_off_device(child);
 
-	pdev = of_find_device_by_node(np);					/* NVMe: 현재 OF node에 등록된 platform device 검색 */
-	if (!pdev)								/* NVMe: 해당 node에 pdev가 없으면 */
-		return;								/* NVMe: 아무 것도 하지 않고 리턴 */
+	pdev = of_find_device_by_node(np);
+	if (!pdev)
+		return;
 
-	if (device_is_bound(&pdev->dev)) {					/* NVMe: pwrctrl driver가 bind된 상태인지 확인 */
-		ret = __pci_pwrctrl_power_off_device(&pdev->dev);		/* NVMe: bind된 경우 실제 power_off 수행 (NVMe slot off) */
-		if (ret)							/* NVMe: power_off 실패 시 */
-			dev_err(&pdev->dev, "Failed to power off device: %d", ret); /* NVMe: dmesg에 NVMe 관련 전원 off 실패 기록 */
-	}	/* NVMe: if (device_is_bound) 블록 종료 */
+	if (device_is_bound(&pdev->dev)) {
+		ret = __pci_pwrctrl_power_off_device(&pdev->dev);
+		if (ret)
+			dev_err(&pdev->dev, "Failed to power off device: %d", ret);
+	}
 
-	platform_device_put(pdev);						/* NVMe: of_find_device_by_node()로 얻은 참조 카운트 감소 */
-}	/* NVMe: pci_pwrctrl_power_off_device() 함수 종료 */
+	platform_device_put(pdev);
+}
 
 /**
  * pci_pwrctrl_power_off_devices - Power off pwrctrl devices
@@ -302,29 +302,29 @@ static void pci_pwrctrl_power_off_device(struct device_node *np)	/* NVMe: DT 노
  *   깊이 우선으로 끈다. NVMe endpoint가 연결된 slot의 안전한 전원 차단에
  *   사용된다.
  */
-void pci_pwrctrl_power_off_devices(struct device *parent)	/* NVMe: host controller 아래 모든 NVMe slot 전원 off */
-{	/* NVMe: pci_pwrctrl_power_off_devices() 함수 본문 시작: host controller 아래 모든 NVMe slot off */
-	struct device_node *np = parent->of_node;				/* NVMe: host controller의 OF node 획득 -> NVMe 트리 루트 */
+void pci_pwrctrl_power_off_devices(struct device *parent)
+{
+	struct device_node *np = parent->of_node;
 
-	for_each_available_child_of_node_scoped(np, child)	/* NVMe: host controller 직계 자식 pwrctrl device 순회 */
-		pci_pwrctrl_power_off_device(child);				/* NVMe: host controller 바로 아래 자식 pwrctrl device부터 전원 off */
-}	/* NVMe: pci_pwrctrl_power_off_devices() 함수 종료 */
-EXPORT_SYMBOL_GPL(pci_pwrctrl_power_off_devices);	/* NVMe: pci_pwrctrl_power_off_devices 심볼 외부 노출 */
+	for_each_available_child_of_node_scoped(np, child)
+		pci_pwrctrl_power_off_device(child);
+}
+EXPORT_SYMBOL_GPL(pci_pwrctrl_power_off_devices);
 
 /*
  * __pci_pwrctrl_power_on_device:
  *   platform device의 driver data에서 pwrctrl 객체를 꺼내 power_on callback을
  *   호출한다. NVMe endpoint가 detect되기 전 필요한 전원 레일을 켜는 동작이다.
  */
-static int __pci_pwrctrl_power_on_device(struct device *dev)	/* NVMe: platform device에서 pwrctrl 꺼내 전원 켜는 헬퍼 */
-{	/* NVMe: __pci_pwrctrl_power_on_device() 함수 본문 시작: pdev에서 pwrctrl 꺼내 전원 on */
-	struct pci_pwrctrl *pwrctrl = dev_get_drvdata(dev);			/* NVMe: pdev에서 pwrctrl context 획득 */
+static int __pci_pwrctrl_power_on_device(struct device *dev)
+{
+	struct pci_pwrctrl *pwrctrl = dev_get_drvdata(dev);
 
-	if (!pwrctrl)								/* NVMe: pwrctrl context가 없으면 */
-		return 0;							/* NVMe: 이미 준비된 것으로 보고 정상 반환 */
+	if (!pwrctrl)
+		return 0;
 
-	return pwrctrl->power_on(pwrctrl);					/* NVMe: pwrctrl 드라이버의 power_on() 호출 -> NVMe 장치 전원 공급 */
-}	/* NVMe: __pci_pwrctrl_power_on_device() 함수 종료 */
+	return pwrctrl->power_on(pwrctrl);
+}
 
 /*
  * Power on the devices in a depth first manner. Before powering on the device,
@@ -337,33 +337,33 @@ static int __pci_pwrctrl_power_on_device(struct device *dev)	/* NVMe: platform d
  *   driver가 아직 bind되지 않았으면 -EPROBE_DEFER를 반환해 NVMe probe를
  *   뒤로 미룬다.
  */
-static int pci_pwrctrl_power_on_device(struct device_node *np)	/* NVMe: DT 노드별 pwrctrl device 전원 on (깊이 우선) */
-{	/* NVMe: pci_pwrctrl_power_on_device() 함수 본문 시작: DT 노드별 깊이 우선 전원 on */
-	struct platform_device *pdev;						/* NVMe: 현재 OF node의 platform device */
-	int ret;								/* NVMe: 각 단계 결과 저장 */
+static int pci_pwrctrl_power_on_device(struct device_node *np)
+{
+	struct platform_device *pdev;
+	int ret;
 
-	for_each_available_child_of_node_scoped(np, child) {			/* NVMe: 자식 노드부터 전원을 켜기 위해 순회 */
-		ret = pci_pwrctrl_power_on_device(child);			/* NVMe: 자식 pwrctrl device 전원 켜기 재귀 호출 */
-		if (ret)							/* NVMe: 자식에서 실패하면 */
-			return ret;						/* NVMe: 상위로 오류 전파 -> NVMe 탐색 중단 */
-	}	/* NVMe: 자식 노드 순회 for 루프 종료 */
+	for_each_available_child_of_node_scoped(np, child) {
+		ret = pci_pwrctrl_power_on_device(child);
+		if (ret)
+			return ret;
+	}
 
-	pdev = of_find_device_by_node(np);					/* NVMe: 현재 node에 등록된 platform device 검색 */
-	if (!pdev)								/* NVMe: pdev가 없으면 */
-		return 0;							/* NVMe: 전원 제어할 장치가 없는 것으로 정상 처리 */
+	pdev = of_find_device_by_node(np);
+	if (!pdev)
+		return 0;
 
-	if (device_is_bound(&pdev->dev)) {					/* NVMe: pwrctrl driver가 platform device에 bind됐는지 확인 */
-		ret = __pci_pwrctrl_power_on_device(&pdev->dev);		/* NVMe: bind된 경우 NVMe slot 전원 켜기 */
-	} else {	/* NVMe: pwrctrl driver가 아직 bind되지 않은 경우: probe defer 처리 */
+	if (device_is_bound(&pdev->dev)) {
+		ret = __pci_pwrctrl_power_on_device(&pdev->dev);
+	} else {
 		/* FIXME: Use blocking wait instead of probe deferral */
-		dev_dbg(&pdev->dev, "driver is not bound\n");			/* NVMe: driver 미bind 상태 디버그 출력 */
-		ret = -EPROBE_DEFER;						/* NVMe: probe defer -> NVMe 초기화를 나중에 재시도 */
-	}	/* NVMe: if-else (device_is_bound) 블록 종료 */
+		dev_dbg(&pdev->dev, "driver is not bound\n");
+		ret = -EPROBE_DEFER;
+	}
 
-	platform_device_put(pdev);						/* NVMe: pdev 참조 카운트 감소 */
+	platform_device_put(pdev);
 
-	return ret;								/* NVMe: 성공/EPROBE_DEFER/오류 반환 */
-}	/* NVMe: pci_pwrctrl_power_on_device() 함수 종료 */
+	return ret;
+}
 
 /**
  * pci_pwrctrl_power_on_devices - Power on pwrctrl devices
@@ -383,31 +383,31 @@ static int pci_pwrctrl_power_on_device(struct device_node *np)	/* NVMe: DT 노�
  *   중간에 실패하면 그전에 켠 device를 모두 끄므로 NVMe 장치의 부분 전원
  *   공급 상태로 남는 것을 방지한다.
  */
-int pci_pwrctrl_power_on_devices(struct device *parent)	/* NVMe: host controller 아래 모든 NVMe slot 전원 on */
-{	/* NVMe: pci_pwrctrl_power_on_devices() 함수 본문 시작: host controller 아래 모든 NVMe slot on */
-	struct device_node *np = parent->of_node;				/* NVMe: host controller의 OF node */
-	struct device_node *child = NULL;					/* NVMe: 순회 중인 자식 노드 포인터 */
-	int ret;								/* NVMe: power_on_device 결과 저장 */
+int pci_pwrctrl_power_on_devices(struct device *parent)
+{
+	struct device_node *np = parent->of_node;
+	struct device_node *child = NULL;
+	int ret;
 
-	for_each_available_child_of_node(np, child) {				/* NVMe: host controller 아래 사용 가능한 자식 노드 순회 */
-		ret = pci_pwrctrl_power_on_device(child);			/* NVMe: 각 자식 pwrctrl device 전원 켜기 */
-		if (ret)							/* NVMe: 하나라도 실패하면 */
-			goto err_power_off;					/* NVMe: 이미 켠 device 정리로 이동 */
-	}	/* NVMe: 성공 시 자식 노드 순회 for 루프 종료 */
+	for_each_available_child_of_node(np, child) {
+		ret = pci_pwrctrl_power_on_device(child);
+		if (ret)
+			goto err_power_off;
+	}
 
-	return 0;								/* NVMe: 모든 pwrctrl device 전원 켜기 성공 -> NVMe 탐색 진행 가능 */
+	return 0;
 
-err_power_off:	/* NVMe: 전원 on 실패 시 이미 켠 device를 끄는 레이블 */
-	for_each_available_child_of_node_scoped(np, tmp) {			/* NVMe: 실패 지점까지 켰던 device를 다시 순회 */
-		if (tmp == child)						/* NVMe: 실패한 노드에 도달하면 */
-			break;							/* NVMe: 그 이후는 아직 켜지 않았으므로 중단 */
-		pci_pwrctrl_power_off_device(tmp);				/* NVMe: 켰던 pwrctrl device를 다시 끔 -> NVMe slot 완전 off */
-	}	/* NVMe: 실패 시 정리용 for 루프 종료 */
-	of_node_put(child);							/* NVMe: for_each_... 반복자가 참조한 child node의 카운트 감소 */
+err_power_off:
+	for_each_available_child_of_node_scoped(np, tmp) {
+		if (tmp == child)
+			break;
+		pci_pwrctrl_power_off_device(tmp);
+	}
+	of_node_put(child);
 
-	return ret;								/* NVMe: 오류 코드 반환 -> NVMe probe 지연/실패 */
-}	/* NVMe: pci_pwrctrl_power_on_devices() 함수 종료 */
-EXPORT_SYMBOL_GPL(pci_pwrctrl_power_on_devices);	/* NVMe: pci_pwrctrl_power_on_devices 심볼 외부 노출 */
+	return ret;
+}
+EXPORT_SYMBOL_GPL(pci_pwrctrl_power_on_devices);
 
 /*
  * Check whether the pwrctrl device really needs to be created or not. The
@@ -425,37 +425,37 @@ EXPORT_SYMBOL_GPL(pci_pwrctrl_power_on_devices);	/* NVMe: pci_pwrctrl_power_on_d
  *   판단한다. compatible에 "pci" prefix가 있고, supply가 정의된 경우에만
  *   true를 반환한다.
  */
-static bool pci_pwrctrl_is_required(struct device_node *np)	/* NVMe: NVMe/PCI endpoint용 pwrctrl device 필요 여부 판단 */
-{	/* NVMe: pci_pwrctrl_is_required() 함수 본문 시작: NVMe/PCI endpoint용 pwrctrl 필요 여부 판단 */
-	struct device_node *endpoint;						/* NVMe: DT graph endpoint 순회용 */
-	const char *compat;							/* NVMe: compatible 문자열 */
-	int ret;								/* NVMe: of_property_read_string 반환값 */
+static bool pci_pwrctrl_is_required(struct device_node *np)
+{
+	struct device_node *endpoint;
+	const char *compat;
+	int ret;
 
-	ret = of_property_read_string(np, "compatible", &compat);		/* NVMe: node의 compatible property 읽기 */
-	if (ret < 0)								/* NVMe: compatible이 없으면 */
-		return false;							/* NVMe: pwrctrl device 불필요 */
+	ret = of_property_read_string(np, "compatible", &compat);
+	if (ret < 0)
+		return false;
 
-	if (!strstarts(compat, "pci"))						/* NVMe: compatible이 "pci"로 시작하지 않으면 */
-		return false;							/* NVMe: PCI/NVMe 관련 node가 아니므로 건 넘김 */
+	if (!strstarts(compat, "pci"))
+		return false;
 
-	if (of_pci_supply_present(np))						/* NVMe: 현재 node에 PCI power supply가 정의됐는지 확인 */
-		return true;							/* NVMe: supply가 있으면 pwrctrl device 필요 */
+	if (of_pci_supply_present(np))
+		return true;
 
-	if (of_graph_is_present(np)) {						/* NVMe: DT graph(endpoint)가 있으면 remote 쪽도 검사 */
-		for_each_endpoint_of_node(np, endpoint) {			/* NVMe: node의 모든 endpoint 순회 */
-			struct device_node *remote __free(device_node) =	/* NVMe: endpoint 연결 remote node (자동 해제) */
-				of_graph_get_remote_port_parent(endpoint);	/* NVMe: endpoint가 연결된 remote port parent 획득 (예: NVMe 컨트롤러 측 node) */
-			if (remote) {						/* NVMe: remote node가 존재하면 */
-				if (of_pci_supply_present(remote)) {		/* NVMe: remote node에 PCI power supply가 있는지 확인 */
-					of_node_put(endpoint);			/* NVMe: endpoint 참조 카운트 감소 */
-					return true;				/* NVMe: remote 쪽에 supply가 있으면 pwrctrl 필요 */
-				}	/* NVMe: if (of_pci_supply_present(remote)) 블록 종료 */
-			}	/* NVMe: if (remote) 블록 종료 */
-		}	/* NVMe: for_each_endpoint_of_node 루프 종료 */
-	}	/* NVMe: if (of_graph_is_present) 블록 종료 */
+	if (of_graph_is_present(np)) {
+		for_each_endpoint_of_node(np, endpoint) {
+			struct device_node *remote __free(device_node) =
+				of_graph_get_remote_port_parent(endpoint);
+			if (remote) {
+				if (of_pci_supply_present(remote)) {
+					of_node_put(endpoint);
+					return true;
+				}
+			}
+		}
+	}
 
-	return false;								/* NVMe: 어디에도 supply가 없으면 pwrctrl device 생성 안 함 */
-}	/* NVMe: pci_pwrctrl_is_required() 함수 종료 */
+	return false;
+}
 
 /*
  * pci_pwrctrl_create_device:
@@ -463,39 +463,39 @@ static bool pci_pwrctrl_is_required(struct device_node *np)	/* NVMe: NVMe/PCI en
  *   이미 pdev가 있거나 pci_pwrctrl_is_required()가 false면 생성을 건 넘긴다.
  *   NVMe SSD가 연결될 slot의 전원 제어 장치를 준비하는 단계이다.
  */
-static int pci_pwrctrl_create_device(struct device_node *np,	/* NVMe: DT 노드에 pwrctrl platform device 생성 (재귀) */
-				     struct device *parent)	/* NVMe: platform device의 parent device (host controller) */
-{	/* NVMe: pci_pwrctrl_create_device() 함수 본문 시작: DT 노드에 pwrctrl pdev 생성 */
-	struct platform_device *pdev;						/* NVMe: 생성 대상/기존 platform device */
-	int ret;								/* NVMe: 재귀 호출 결과 저장 */
+static int pci_pwrctrl_create_device(struct device_node *np,
+				     struct device *parent)
+{
+	struct platform_device *pdev;
+	int ret;
 
-	for_each_available_child_of_node_scoped(np, child) {			/* NVMe: 자식 노드부터 pwrctrl device 생성을 위해 순회 */
-		ret = pci_pwrctrl_create_device(child, parent);			/* NVMe: 자식 node에서 pwrctrl pdev 생성 재귀 호출 */
-		if (ret)							/* NVMe: 자식 생성 실패 시 */
-			return ret;						/* NVMe: 상위로 오류 전파 -> NVMe 트리 준비 중단 */
-	}	/* NVMe: 자식 노드 순회 for 루프 종료 */
+	for_each_available_child_of_node_scoped(np, child) {
+		ret = pci_pwrctrl_create_device(child, parent);
+		if (ret)
+			return ret;
+	}
 
 	/* Bail out if the platform device is already available for the node */
-	pdev = of_find_device_by_node(np);					/* NVMe: node에 이미 platform device가 있는지 확인 */
-	if (pdev) {								/* NVMe: 이미 pdev가 존재하면 */
-		platform_device_put(pdev);					/* NVMe: 참조 카운트 감소 */
-		return 0;							/* NVMe: 중복 생성 방지 */
-	}	/* NVMe: if (pdev) 블록 종료 (중복 생성 방지) */
+	pdev = of_find_device_by_node(np);
+	if (pdev) {
+		platform_device_put(pdev);
+		return 0;
+	}
 
-	if (!pci_pwrctrl_is_required(np)) {					/* NVMe: 이 node가 pwrctrl을 필요로 하는지 재확인 */
-		dev_dbg(parent, "Skipping OF node: %s\n", np->name);		/* NVMe: 필요 없는 node는 디버그 로그로 남기고 건 넘김 */
-		return 0;							/* NVMe: pwrctrl device 생성 생략 */
-	}	/* NVMe: if (!pci_pwrctrl_is_required) 블록 종료 */
+	if (!pci_pwrctrl_is_required(np)) {
+		dev_dbg(parent, "Skipping OF node: %s\n", np->name);
+		return 0;
+	}
 
 	/* Now create the pwrctrl device */
-	pdev = of_platform_device_create(np, NULL, parent);			/* NVMe: OF node에 platform device 생성 -> NVMe slot 전원 제어 드라이버 바인딩 대상 마련 */
-	if (!pdev) {								/* NVMe: platform device 생성 실패 시 */
-		dev_err(parent, "Failed to create pwrctrl device for node: %s\n", np->name); /* NVMe: NVMe 관련 전원 제어 장치 생성 실패 기록 */
-		return -EINVAL;							/* NVMe: 잘못된 인자/생성 실패 오류 반환 */
-	}	/* NVMe: if (!pdev) 블록 종료 */
+	pdev = of_platform_device_create(np, NULL, parent);
+	if (!pdev) {
+		dev_err(parent, "Failed to create pwrctrl device for node: %s\n", np->name);
+		return -EINVAL;
+	}
 
-	return 0;								/* NVMe: pwrctrl device 생성 성공 */
-}	/* NVMe: pci_pwrctrl_create_device() 함수 종료 */
+	return 0;
+}
 
 /**
  * pci_pwrctrl_create_devices - Create pwrctrl devices
@@ -514,21 +514,21 @@ static int pci_pwrctrl_create_device(struct device_node *np,	/* NVMe: DT 노드�
  *   깊이 우선으로 생성한다. 생성 중 오류가 발생하면 이미 만든 device를
  *   모두 제거한다. NVMe SSD가 detect되기 전 전원 제어 장치를 먼저 세팅한다.
  */
-int pci_pwrctrl_create_devices(struct device *parent)	/* NVMe: host controller 아래 모든 pwrctrl device 생성 */
-{	/* NVMe: pci_pwrctrl_create_devices() 함수 본문 시작: host controller 아래 pwrctrl pdev 생성 */
-	int ret;								/* NVMe: create_device 결과 저장 */
+int pci_pwrctrl_create_devices(struct device *parent)
+{
+	int ret;
 
-	for_each_available_child_of_node_scoped(parent->of_node, child) {	/* NVMe: host controller 아래 사용 가능한 모든 자식 node 순회 */
-		ret = pci_pwrctrl_create_device(child, parent);			/* NVMe: 각 node에 대해 pwrctrl platform device 생성 */
-		if (ret) {							/* NVMe: 생성 실패 시 */
-			pci_pwrctrl_destroy_devices(parent);			/* NVMe: 이미 생성된 pwrctrl device를 모두 제거 -> NVMe 트리 정리 */
-			return ret;						/* NVMe: 오류 반환 */
-		}	/* NVMe: if (ret) 블록 종료 (생성 실패 시 정리) */
-	}	/* NVMe: for_each_available_child_of_node_scoped 루프 종료 */
+	for_each_available_child_of_node_scoped(parent->of_node, child) {
+		ret = pci_pwrctrl_create_device(child, parent);
+		if (ret) {
+			pci_pwrctrl_destroy_devices(parent);
+			return ret;
+		}
+	}
 
-	return 0;								/* NVMe: 모든 pwrctrl device 생성 완료 -> 이후 power_on 및 NVMe 탐색 */
-}	/* NVMe: pci_pwrctrl_create_devices() 함수 종료 */
-EXPORT_SYMBOL_GPL(pci_pwrctrl_create_devices);	/* NVMe: pci_pwrctrl_create_devices 심볼 외부 노출 */
+	return 0;
+}
+EXPORT_SYMBOL_GPL(pci_pwrctrl_create_devices);
 
 /*
  * pci_pwrctrl_destroy_device:
@@ -536,22 +536,22 @@ EXPORT_SYMBOL_GPL(pci_pwrctrl_create_devices);	/* NVMe: pci_pwrctrl_create_devic
  *   of_node_clear_flag()로 OF_POPULATED 플래그를 지워 추후 다시 create할 수
  *   있게 한다. NVMe 장치 제거 시 전원 제어 장치를 정리한다.
  */
-static void pci_pwrctrl_destroy_device(struct device_node *np)	/* NVMe: DT 노드에서 pwrctrl platform device 제거 (재귀) */
-{	/* NVMe: pci_pwrctrl_destroy_device() 함수 본문 시작: DT 노드에서 pwrctrl pdev 제거 */
-	struct platform_device *pdev;						/* NVMe: 제거 대상 platform device */
+static void pci_pwrctrl_destroy_device(struct device_node *np)
+{
+	struct platform_device *pdev;
 
-	for_each_available_child_of_node_scoped(np, child)	/* NVMe: 자식 노드부터 pwrctrl device 제거 순회 */
-		pci_pwrctrl_destroy_device(child);				/* NVMe: 자식 node부터 pwrctrl device 제거 (깊이 우선) */
+	for_each_available_child_of_node_scoped(np, child)
+		pci_pwrctrl_destroy_device(child);
 
-	pdev = of_find_device_by_node(np);					/* NVMe: 현재 node에 등록된 platform device 검색 */
-	if (!pdev)								/* NVMe: pdev가 없으면 */
-		return;								/* NVMe: 제거할 것이 없음 */
+	pdev = of_find_device_by_node(np);
+	if (!pdev)
+		return;
 
-	of_device_unregister(pdev);						/* NVMe: platform device를 OF tree에서 등록 해제 */
-	platform_device_put(pdev);						/* NVMe: pdev 참조 카운트 감소 */
+	of_device_unregister(pdev);
+	platform_device_put(pdev);
 
-	of_node_clear_flag(np, OF_POPULATED);					/* NVMe: OF_POPULATED 플래그 클리어 -> 추후 NVMe 트리 재초기화 가능 */
-}	/* NVMe: pci_pwrctrl_destroy_device() 함수 종료 */
+	of_node_clear_flag(np, OF_POPULATED);
+}
 
 /**
  * pci_pwrctrl_destroy_devices - Destroy pwrctrl devices
@@ -566,15 +566,15 @@ static void pci_pwrctrl_destroy_device(struct device_node *np)	/* NVMe: DT 노�
  *   PCI host controller 아래의 모든 pwrctrl device를 깊이 우선으로 제거한다.
  *   NVMe 장치가 제거된 후 호출되어 전원 제어 리소스를 깨끗이 정리한다.
  */
-void pci_pwrctrl_destroy_devices(struct device *parent)	/* NVMe: host controller 아래 모든 pwrctrl device 제거 */
-{	/* NVMe: pci_pwrctrl_destroy_devices() 함수 본문 시작: host controller 아래 pwrctrl pdev 제거 */
-	struct device_node *np = parent->of_node;				/* NVMe: host controller의 OF node */
+void pci_pwrctrl_destroy_devices(struct device *parent)
+{
+	struct device_node *np = parent->of_node;
 
-	for_each_available_child_of_node_scoped(np, child)	/* NVMe: host controller 직계 자식 pwrctrl device 제거 순회 */
-		pci_pwrctrl_destroy_device(child);				/* NVMe: 자식 pwrctrl device부터 제거 -> NVMe slot 전원 제어 정리 */
-}	/* NVMe: pci_pwrctrl_destroy_devices() 함수 종료 */
-EXPORT_SYMBOL_GPL(pci_pwrctrl_destroy_devices);	/* NVMe: pci_pwrctrl_destroy_devices 심볼 외부 노출 */
+	for_each_available_child_of_node_scoped(np, child)
+		pci_pwrctrl_destroy_device(child);
+}
+EXPORT_SYMBOL_GPL(pci_pwrctrl_destroy_devices);
 
-MODULE_AUTHOR("Bartosz Golaszewski <bartosz.golaszewski@linaro.org>");	/* NVMe: 모듈 저자 정보 */
-MODULE_DESCRIPTION("PCI Device Power Control core driver");	/* NVMe: 모듈 설명: PCI 전원 제어 코어 */
-MODULE_LICENSE("GPL");	/* NVMe: 모듈 라이선스 (GPL) */
+MODULE_AUTHOR("Bartosz Golaszewski <bartosz.golaszewski@linaro.org>");
+MODULE_DESCRIPTION("PCI Device Power Control core driver");
+MODULE_LICENSE("GPL");

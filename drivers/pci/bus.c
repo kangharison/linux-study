@@ -93,20 +93,20 @@
  * pci_bus_get() / pci_bus_put() : struct pci_bus 참조 카운트.
  */
 
-#include <linux/module.h> /* NVMe: 모듈 관리 및 EXPORT_SYMBOL 매크로 제공. */
-#include <linux/kernel.h> /* NVMe: 커널 공용 매크로와 printk 같은 기본 기능 포함. */
-#include <linux/cleanup.h> /* NVMe: 자동 리소스 해제(guard) 매크로 제공. */
-#include <linux/pci.h> /* NVMe: PCI core API, NVMe 호스트 드라이버와 PCI 버스 간 인터페이스 정의. */
-#include <linux/errno.h> /* NVMe: ENOMEM 등 오류 코드 정의. */
-#include <linux/ioport.h> /* NVMe: IO/MEM 리소스 트리 관리 구조체 및 함수. */
-#include <linux/of.h> /* NVMe: Open Firmware/device tree 관련 헬퍼. */
-#include <linux/of_platform.h> /* NVMe: OF 플랫폼 장치 바인딩 헬퍼. */
-#include <linux/platform_device.h> /* NVMe: 플랫폼 장치 관리 구조체. */
-#include <linux/pm_runtime.h> /* NVMe: NVMe 장치의 runtime PM 활성화/비활성화 API. */
-#include <linux/proc_fs.h> /* NVMe: /proc/bus/pci 노드 생성 API. */
-#include <linux/slab.h> /* NVMe: kzalloc_obj, kfree 등 메모리 할당 함수. */
+#include <linux/module.h>
+#include <linux/kernel.h>
+#include <linux/cleanup.h>
+#include <linux/pci.h>
+#include <linux/errno.h>
+#include <linux/ioport.h>
+#include <linux/of.h>
+#include <linux/of_platform.h>
+#include <linux/platform_device.h>
+#include <linux/pm_runtime.h>
+#include <linux/proc_fs.h>
+#include <linux/slab.h>
 
-#include "pci.h" /* NVMe: PCI core 내부 헤더, bus 구조체 상세 정의 포함. */
+#include "pci.h"
 
 /*
  * The first PCI_BRIDGE_RESOURCE_NUM PCI bus resources (those that correspond
@@ -115,11 +115,10 @@
  * Use pci_bus_for_each_resource() to iterate through all the resources.
  */
 
-/* NVMe: bus별 추가 리소스를 연결 리스트로 관리하기 위한 날것의 구조체. */
-struct pci_bus_resource { /* NVMe: bus별 추가 PCI 리소스를 연결 리스트로 관리하는 노드 정의 시작. */
-	struct list_head	list; /* NVMe: bus 리소스 연결 리스트의 노드. */
-	struct resource		*res; /* NVMe: NVMe 장치가 사용 가능한 bus 리소스를 가리킴. */
-}; /* NVMe: pci_bus_resource 구조체 정의 끝. */
+struct pci_bus_resource {
+	struct list_head	list;
+	struct resource		*res;
+};
 
 /*
  * pci_add_resource_offset:
@@ -127,32 +126,32 @@ struct pci_bus_resource { /* NVMe: bus별 추가 PCI 리소스를 연결 리스�
  *   NVMe 장치의 BAR가 매핑될 메모리/IO window를 구성할 때 호스트 브리지나
  *   Root Port가 이 함수로 리소스를 등록한다.
  */
-void pci_add_resource_offset(struct list_head *resources, struct resource *res, /* NVMe: bus 리소스 목록에 NVMe BAR가 사용할 리소스와 offset을 추가하는 함수 선언. */
-			     resource_size_t offset) /* NVMe: CPU 물리 주소와 PCI bus 주소 간 변환 offset. */
-{ /* NVMe: bus 리소스 목록에 NVMe BAR가 사용할 리소스와 offset을 등록 함수 본문 시작. */
-	struct resource_entry *entry; /* NVMe: 등록할 리소스 항목 포인터. */
+void pci_add_resource_offset(struct list_head *resources, struct resource *res,
+			     resource_size_t offset)
+{
+	struct resource_entry *entry;
 
-	entry = resource_list_create_entry(res, 0); /* NVMe: res를 연결 리스트에 담을 entry를 할당. */
-	if (!entry) { /* NVMe: entry 할당 실패 시. */
-		pr_err("PCI: can't add host bridge window %pR\n", res); /* NVMe: 오류 로그: NVMe BAR가 사용할 window 등록 실패. */
-		return; /* NVMe: 등록 중단. */
-	} /* NVMe: if (!entry) 블록 끝. */
+	entry = resource_list_create_entry(res, 0);
+	if (!entry) {
+		pr_err("PCI: can't add host bridge window %pR\n", res);
+		return;
+	}
 
-	entry->offset = offset; /* NVMe: CPU 물리 주소와 PCI bus 주소 간 오프셋 기록. */
-	resource_list_add_tail(entry, resources); /* NVMe: resources 리스트 끝에 추가. */
-} /* NVMe: bus 리소스 목록에 NVMe BAR가 사용할 리소스와 offset을 등록 함수 본문 끝. */
-EXPORT_SYMBOL(pci_add_resource_offset); /* NVMe: pci_add_resource_offset을 다른 모듈에서도 사용 가능하게 노출. */
+	entry->offset = offset;
+	resource_list_add_tail(entry, resources);
+}
+EXPORT_SYMBOL(pci_add_resource_offset);
 
 /*
  * pci_add_resource:
  *   오프셋 0으로 pci_add_resource_offset()을 호출하여 리소스를 등록한다.
  *   NVMe BAR의 기본 매핑 정보가 포함된 리소스를 추가할 때 사용된다.
  */
-void pci_add_resource(struct list_head *resources, struct resource *res) /* NVMe: offset 0으로 bus 리소스 목록에 리소스를 추가하는 함수 선언. */
-{ /* NVMe: offset 0으로 bus 리소스 목록에 리소스를 추가 함수 본문 시작. */
-	pci_add_resource_offset(resources, res, 0); /* NVMe: offset 0으로 리소스를 추가. */
-} /* NVMe: offset 0으로 bus 리소스 목록에 리소스를 추가 함수 본문 끝. */
-EXPORT_SYMBOL(pci_add_resource); /* NVMe: pci_add_resource를 다른 모듈에서도 사용 가능하게 노출. */
+void pci_add_resource(struct list_head *resources, struct resource *res)
+{
+	pci_add_resource_offset(resources, res, 0);
+}
+EXPORT_SYMBOL(pci_add_resource);
 
 /*
  * pci_free_resource_list:
@@ -160,10 +159,10 @@ EXPORT_SYMBOL(pci_add_resource); /* NVMe: pci_add_resource를 다른 모듈에�
  *   NVMe 장치가 제거되거나 host bridge teardown 시 관련 리소스 정리에
  *   사용될 수 있다.
  */
-void pci_free_resource_list(struct list_head *resources) /* NVMe: bus 리소스 목록을 해제하는 함수 선언. */
-{ /* NVMe: bus 리소스 목록을 해제 함수 본문 시작. */
-	resource_list_free(resources); /* NVMe: resources 리스트의 모든 entry를 해제. */
-} /* NVMe: bus 리소스 목록을 해제 함수 본문 끝. */
+void pci_free_resource_list(struct list_head *resources)
+{
+	resource_list_free(resources);
+}
 /* [한국어] 주의: 이 심볼은 EXPORT_SYMBOL(GPL 아님)이다. 같은 파일의
  * pci_bus_resource_n 등이 EXPORT_SYMBOL_GPL 인 것과 대비되며, 비-GPL 모듈도
  * 이 함수를 쓸 수 있다는 뜻이다. 내보내기 종류는 코드이므로 바꾸면 안 된다. */
@@ -175,19 +174,19 @@ EXPORT_SYMBOL(pci_free_resource_list);
  *   NVMe 장치가 속한 bus가 사용하는 bridge window 이상의 추가 영역을
  *   관리할 때 사용된다.
  */
-void pci_bus_add_resource(struct pci_bus *bus, struct resource *res) /* NVMe: pci_bus 구조체에 추가 리소스를 등록하는 함수 선언. */
-{ /* NVMe: pci_bus에 추가 리소스를 등록 함수 본문 시작. */
-	struct pci_bus_resource *bus_res; /* NVMe: bus별 추가 리소스 항목 포인터. */
+void pci_bus_add_resource(struct pci_bus *bus, struct resource *res)
+{
+	struct pci_bus_resource *bus_res;
 
-	bus_res = kzalloc_obj(struct pci_bus_resource); /* NVMe: pci_bus_resource 구조체를 kzalloc로 할당. */
-	if (!bus_res) { /* NVMe: 메모리 할당 실패 시. */
-		dev_err(&bus->dev, "can't add %pR resource\n", res); /* NVMe: bus device에 리소스 추가 실패 로그. */
-		return; /* NVMe: 추가 작업 중단. */
-	} /* NVMe: if (!bus_res) 블록 끝. */
+	bus_res = kzalloc_obj(struct pci_bus_resource);
+	if (!bus_res) {
+		dev_err(&bus->dev, "can't add %pR resource\n", res);
+		return;
+	}
 
-	bus_res->res = res; /* NVMe: 추가 리소스 포인터 저장. */
-	list_add_tail(&bus_res->list, &bus->resources); /* NVMe: bus->resources 리스트 끝에 추가. */
-} /* NVMe: pci_bus에 추가 리소스를 등록 함수 본문 끝. */
+	bus_res->res = res;
+	list_add_tail(&bus_res->list, &bus->resources);
+}
 
 /*
  * pci_bus_resource_n:
@@ -195,21 +194,21 @@ void pci_bus_add_resource(struct pci_bus *bus, struct resource *res) /* NVMe: pc
  *   NVMe driver가 pci_resource_start()로 얻는 BAR 리소스 외에, bridge
  *   window 등 bus 레벨의 n번째 리소스를 확인할 때 사용된다.
  */
-struct resource *pci_bus_resource_n(const struct pci_bus *bus, int n) /* NVMe: bus의 n번째 리소스를 반환하는 함수 선언. */
-{ /* NVMe: bus의 n번째 리소스를 반환 함수 본문 시작. */
-	struct pci_bus_resource *bus_res; /* NVMe: 추가 리소스 순회용 포인터. */
+struct resource *pci_bus_resource_n(const struct pci_bus *bus, int n)
+{
+	struct pci_bus_resource *bus_res;
 
-	if (n < PCI_BRIDGE_RESOURCE_NUM) /* NVMe: 인덱스가 고정 bridge resource 범위 내이면. */
-		return bus->resource[n]; /* NVMe: 배열에 직접 저장된 리소스 반환. */
+	if (n < PCI_BRIDGE_RESOURCE_NUM)
+		return bus->resource[n];
 
-	n -= PCI_BRIDGE_RESOURCE_NUM; /* NVMe: 추가 리소스 리스트의 인덱스로 변환. */
-	list_for_each_entry(bus_res, &bus->resources, list) { /* NVMe: bus->resources 연결 리스트를 순회. */
-		if (n-- == 0) /* NVMe: 목표 인덱스에 도달하면. */
-			return bus_res->res; /* NVMe: 해당 추가 리소스 반환. */
-	} /* NVMe: list_for_each_entry(bus_res, &bus->resources, list) 블록 끝. */
-	return NULL; /* NVMe: 인덱스가 범위를 벗어나면 NULL 반환. */
-} /* NVMe: bus의 n번째 리소스를 반환 함수 본문 끝. */
-EXPORT_SYMBOL_GPL(pci_bus_resource_n); /* NVMe: pci_bus_resource_n을 GPL 모듈에 노출. */
+	n -= PCI_BRIDGE_RESOURCE_NUM;
+	list_for_each_entry(bus_res, &bus->resources, list) {
+		if (n-- == 0)
+			return bus_res->res;
+	}
+	return NULL;
+}
+EXPORT_SYMBOL_GPL(pci_bus_resource_n);
 
 /*
  * pci_bus_remove_resource:
@@ -217,45 +216,45 @@ EXPORT_SYMBOL_GPL(pci_bus_resource_n); /* NVMe: pci_bus_resource_n을 GPL 모듈
  *   NVMe 장치의 BAR나 bridge window가 재구성될 때 기존 리소스를 제거하는
  *   데 사용될 수 있다.
  */
-void pci_bus_remove_resource(struct pci_bus *bus, struct resource *res) /* NVMe: bus에서 특정 리소스를 제거하는 함수 선언. */
-{ /* NVMe: bus에서 특정 리소스를 제거 함수 본문 시작. */
-	struct pci_bus_resource *bus_res, *tmp; /* NVMe: 추가 리소스 순회 및 임시 포인터. */
-	int i; /* NVMe: 고정 bridge resource 인덱스. */
+void pci_bus_remove_resource(struct pci_bus *bus, struct resource *res)
+{
+	struct pci_bus_resource *bus_res, *tmp;
+	int i;
 
-	for (i = 0; i < PCI_BRIDGE_RESOURCE_NUM; i++) { /* NVMe: 고정 bridge resource 슬롯을 순회. */
-		if (bus->resource[i] == res) { /* NVMe: 제거하려는 리소스를 찾으면. */
-			bus->resource[i] = NULL; /* NVMe: 해당 슬롯을 비운다. */
-			return; /* NVMe: 제거 완료. */
-		} /* NVMe: if (bus->resource[i] == res) 블록 끝. */
-	} /* NVMe: for (i = 0; i < PCI_BRIDGE_RESOURCE_NUM; i++) 블록 끝. */
+	for (i = 0; i < PCI_BRIDGE_RESOURCE_NUM; i++) {
+		if (bus->resource[i] == res) {
+			bus->resource[i] = NULL;
+			return;
+		}
+	}
 
-	list_for_each_entry_safe(bus_res, tmp, &bus->resources, list) { /* NVMe: 추가 리소스 리스트를 안전하게 순회. */
-		if (bus_res->res == res) { /* NVMe: 제거 대상 리소스를 찾으면. */
-			list_del(&bus_res->list); /* NVMe: 리스트에서 노드 분리. */
-			kfree(bus_res); /* NVMe: 노드 메모리 해제. */
-			return; /* NVMe: 제거 완료. */
-		} /* NVMe: if (bus_res->res == res) 블록 끝. */
-	} /* NVMe: list_for_each_entry_safe(bus_res, tmp, &bus->resources, list) 블록 끝. */
-} /* NVMe: bus에서 특정 리소스를 제거 함수 본문 끝. */
+	list_for_each_entry_safe(bus_res, tmp, &bus->resources, list) {
+		if (bus_res->res == res) {
+			list_del(&bus_res->list);
+			kfree(bus_res);
+			return;
+		}
+	}
+}
 
 /*
  * pci_bus_remove_resources:
  *   bus의 모든 리소스(고정 슬롯 및 추가 리스트)를 제거한다.
  *   NVMe 장치가 연결된 bus가 해제될 때 리소스 정리에 사용된다.
  */
-void pci_bus_remove_resources(struct pci_bus *bus) /* NVMe: bus의 모든 리소스를 제거하는 함수 선언. */
-{ /* NVMe: bus의 모든 리소스를 제거 함수 본문 시작. */
-	int i; /* NVMe: 고정 bridge resource 인덱스. */
-	struct pci_bus_resource *bus_res, *tmp; /* NVMe: 추가 리소스 순회용. */
+void pci_bus_remove_resources(struct pci_bus *bus)
+{
+	int i;
+	struct pci_bus_resource *bus_res, *tmp;
 
-	for (i = 0; i < PCI_BRIDGE_RESOURCE_NUM; i++) /* NVMe: 모든 고정 bridge resource 슬롯을 순회. */
-		bus->resource[i] = NULL; /* NVMe: 각 슬롯을 NULL로 초기화. */
+	for (i = 0; i < PCI_BRIDGE_RESOURCE_NUM; i++)
+		bus->resource[i] = NULL;
 
-	list_for_each_entry_safe(bus_res, tmp, &bus->resources, list) { /* NVMe: 추가 리소스 리스트를 순회하며. */
-		list_del(&bus_res->list); /* NVMe: 리스트에서 노드 분리. */
-		kfree(bus_res); /* NVMe: 노드 메모리 해제. */
-	} /* NVMe: list_for_each_entry_safe(bus_res, tmp, &bus->resources, list) 블록 끝. */
-} /* NVMe: bus의 모든 리소스를 제거 함수 본문 끝. */
+	list_for_each_entry_safe(bus_res, tmp, &bus->resources, list) {
+		list_del(&bus_res->list);
+		kfree(bus_res);
+	}
+}
 
 /*
  * devm_request_pci_bus_resources:
@@ -264,45 +263,42 @@ void pci_bus_remove_resources(struct pci_bus *bus) /* NVMe: bus의 모든 리소
  *   NVMe BAR가 사용하는 메모리 영역이 시스템 전체 리소스 충돌 없이
  *   예약되도록 보장한다.
  */
-int devm_request_pci_bus_resources(struct device *dev, /* NVMe: bus 리소스를 devm 방식으로 시스템에 예약하는 함수 선언. */
-				   struct list_head *resources) /* NVMe: 예약할 PCI bus 리소스 목록. */
-{ /* NVMe: bus 리소스를 devm 방식으로 시스템에 예약 함수 본문 시작. */
-	struct resource_entry *win; /* NVMe: bus 리소스 목록의 각 항목을 순회. */
-	struct resource *parent, *res; /* NVMe: 시스템 상위 리소스와 현재 리소스. */
-	int err; /* NVMe: 등록 결과 코드. */
+int devm_request_pci_bus_resources(struct device *dev,
+				   struct list_head *resources)
+{
+	struct resource_entry *win;
+	struct resource *parent, *res;
+	int err;
 
-	resource_list_for_each_entry(win, resources) { /* NVMe: resources 리스트의 각 entry를 순회. */
-		res = win->res; /* NVMe: 현재 entry의 resource 포인터 획득. */
-		switch (resource_type(res)) { /* NVMe: 리소스 타입에 따라 상위 리소스 선택. */
-		case IORESOURCE_IO: /* NVMe: IO 포트 리소스인 경우. */
-			parent = &ioport_resource; /* NVMe: 시스템 IO 포트 트리의 루트 사용. */
-			break; /* NVMe: IO 처리 종료. */
-		case IORESOURCE_MEM: /* NVMe: 메모리 리소스인 경우(NVMe BAR가 대부분). */
-			parent = &iomem_resource; /* NVMe: 시스템 메모리 리소스 트리의 루트 사용. */
-			break; /* NVMe: MEM 처리 종료. */
-		default: /* NVMe: IO/MEM 외 리소스는 등록할 필요 없음. */
-			continue; /* NVMe: 다음 entry로 걄뜀. */
-		} /* NVMe: switch (resource_type(res)) 블록 끝. */
+	resource_list_for_each_entry(win, resources) {
+		res = win->res;
+		switch (resource_type(res)) {
+		case IORESOURCE_IO:
+			parent = &ioport_resource;
+			break;
+		case IORESOURCE_MEM:
+			parent = &iomem_resource;
+			break;
+		default:
+			continue;
+		}
 
-		err = devm_request_resource(dev, parent, res); /* NVMe: 상위 리소스 아래 res를 예약. */
-		if (err) /* NVMe: 예약 실패 시. */
-			return err; /* NVMe: 오류 코드 반환. */
-	} /* NVMe: resource_list_for_each_entry(win, resources) 블록 끝. */
+		err = devm_request_resource(dev, parent, res);
+		if (err)
+			return err;
+	}
 
-	return 0; /* NVMe: 모든 리소스 예약 성공. */
-} /* NVMe: bus 리소스를 devm 방식으로 시스템에 예약 함수 본문 끝. */
-EXPORT_SYMBOL_GPL(devm_request_pci_bus_resources); /* NVMe: devm_request_pci_bus_resources를 GPL 모듈에 노출. */
+	return 0;
+}
+EXPORT_SYMBOL_GPL(devm_request_pci_bus_resources);
 
-/* NVMe: 32비트 PCI bus 주소 전체 범위를 나타내는 상수(0~4GB). */
-static struct pci_bus_region pci_32_bit = {0, 0xffffffffULL}; /* NVMe: 32비트 PCI bus 주소 전체 범위(0~4GB) 상수. */
-#ifdef CONFIG_ARCH_DMA_ADDR_T_64BIT /* NVMe: 64비트 DMA 주소 지원 아키텍처에서만 64비트 BAR 할당 로직 활성화. */
-/* NVMe: 64비트 PCI bus 주소 전체 범위를 나타내는 상수. */
-static struct pci_bus_region pci_64_bit = {0, /* NVMe: 64비트 PCI bus 주소 전체 범위 시작. */
-				(pci_bus_addr_t) 0xffffffffffffffffULL}; /* NVMe: 64비트 최대 주소로 전체 범위 종료. */
-/* NVMe: 64비트 공간 중 4GB 이상 고주소 영역을 나타내는 상수(NVMe 64bit BAR 할당 시 사용). */
-static struct pci_bus_region pci_high = {(pci_bus_addr_t) 0x100000000ULL, /* NVMe: 4GB 이상 고주소 영역 시작(NVMe 64bit BAR 우선 할당 대상). */
-				(pci_bus_addr_t) 0xffffffffffffffffULL}; /* NVMe: 64비트 최대 주소로 고주소 영역 종료. */
-#endif /* NVMe: 64비트 DMA 주소 관련 상수 정의 끝. */
+static struct pci_bus_region pci_32_bit = {0, 0xffffffffULL};
+#ifdef CONFIG_ARCH_DMA_ADDR_T_64BIT
+static struct pci_bus_region pci_64_bit = {0,
+				(pci_bus_addr_t) 0xffffffffffffffffULL};
+static struct pci_bus_region pci_high = {(pci_bus_addr_t) 0x100000000ULL,
+				(pci_bus_addr_t) 0xffffffffffffffffULL};
+#endif
 
 /*
  * @res contains CPU addresses.  Clip it so the corresponding bus addresses
@@ -317,63 +313,63 @@ static struct pci_bus_region pci_high = {(pci_bus_addr_t) 0x100000000ULL, /* NVM
  *   NVMe 32비트 BAR는 4GB 이하 bus 주소만 표현 가능하므로, 64비트 영역을
  *   할당하면 안 되는 경우 이 함수로 범위를 제한한다.
  */
-static void pci_clip_resource_to_region(struct pci_bus *bus, /* NVMe: 리소스를 region 범위 내로 클리핑하는 함수 선언. */
-					struct resource *res, /* NVMe: 클리핑 대상 리소스(NVMe BAR 후보). */
-					struct pci_bus_region *region) /* NVMe: 허용할 PCI bus 주소 범위. */
-{ /* NVMe: 리소스를 주어진 PCI bus region 범위 내로 클리핑 함수 본문 시작. */
-	struct pci_bus_region r; /* NVMe: res를 bus 주소로 변환한 임시 영역. */
+static void pci_clip_resource_to_region(struct pci_bus *bus,
+					struct resource *res,
+					struct pci_bus_region *region)
+{
+	struct pci_bus_region r;
 
-	pcibios_resource_to_bus(bus, &r, res); /* NVMe: CPU 주소 res를 PCI bus 주소 r로 변환. */
-	if (r.start < region->start) /* NVMe: 시작 주소가 region 아래쪽을 벗어나면. */
-		r.start = region->start; /* NVMe: region 시작으로 클리핑. */
-	if (r.end > region->end) /* NVMe: 끝 주소가 region 위쪽을 벗어나면. */
-		r.end = region->end; /* NVMe: region 끝으로 클리핑. */
+	pcibios_resource_to_bus(bus, &r, res);
+	if (r.start < region->start)
+		r.start = region->start;
+	if (r.end > region->end)
+		r.end = region->end;
 
-	if (r.end < r.start) /* NVMe: 클리핑 결과 유효하지 않은 범위이면. */
-		res->end = res->start - 1; /* NVMe: 빈 리소스로 표시. */
-	else /* NVMe: 유효한 범위이면. */
-		pcibios_bus_to_resource(bus, res, &r); /* NVMe: 다시 CPU 주소 res로 변환. */
-} /* NVMe: 리소스를 주어진 PCI bus region 범위 내로 클리핑 함수 본문 끝. */
+	if (r.end < r.start)
+		res->end = res->start - 1;
+	else
+		pcibios_bus_to_resource(bus, res, &r);
+}
 
 /*
  * pci_bus_alloc_from_region:
  *   특정 PCI bus 주소 region 내에서 장치 리소스를 할당한다.
  *   NVMe BAR 할당 시 32비트/64비트 적합 영역을 찾아 메모리를 배정한다.
  */
-static int pci_bus_alloc_from_region(struct pci_bus *bus, struct resource *res, /* NVMe: 특정 PCI bus region 내에서 리소스를 할당하는 함수 선언. */
-		resource_size_t size, resource_size_t align, /* NVMe: NVMe BAR 크기와 정렬 제약. */
-		resource_size_t min, unsigned long type_mask, /* NVMe: 최소 주소와 리소스 타입 마스크. */
-		resource_alignf alignf, /* NVMe: 추가 정렬 조건을 검사하는 콜백 함수 포인터. */
-		void *alignf_data, /* NVMe: 정렬 콜백에 전달할 사용자 데이터. */
-		struct pci_bus_region *region) /* NVMe: 할당할 PCI bus 주소 범위. */
-{ /* NVMe: 특정 PCI bus region 내에서 NVMe BAR용 리소스를 할당 함수 본문 시작. */
-	struct resource *r, avail; /* NVMe: bus 리소스와 클리핑 후 가용 영역. */
-	resource_size_t max; /* NVMe: 할당 가능한 최대 주소. */
-	int ret; /* NVMe: 할당 결과 코드. */
+static int pci_bus_alloc_from_region(struct pci_bus *bus, struct resource *res,
+		resource_size_t size, resource_size_t align,
+		resource_size_t min, unsigned long type_mask,
+		resource_alignf alignf,
+		void *alignf_data,
+		struct pci_bus_region *region)
+{
+	struct resource *r, avail;
+	resource_size_t max;
+	int ret;
 
-	type_mask |= IORESOURCE_TYPE_BITS; /* NVMe: 타입 비트를 항상 포함하도록 마스크 갱신. */
+	type_mask |= IORESOURCE_TYPE_BITS;
 
-	pci_bus_for_each_resource(bus, r) { /* NVMe: NVMe 장치가 속한 bus의 모든 리소스를 순회. */
-		resource_size_t min_used = min; /* NVMe: 실제로 사용할 최소 주소(기본값은 min). */
+	pci_bus_for_each_resource(bus, r) {
+		resource_size_t min_used = min;
 
-		if (!r) /* NVMe: 유효하지 않은 리소스 슬롯은 걄뜀. */
-			continue; /* NVMe: 다음 리소스로 이동. */
+		if (!r)
+			continue;
 
-		if (r->flags & (IORESOURCE_UNSET|IORESOURCE_DISABLED)) /* NVMe: 설정되지 않거나 비활성화된 리소스는 걄뜀. */
-			continue; /* NVMe: 다음 리소스로 이동. */
+		if (r->flags & (IORESOURCE_UNSET|IORESOURCE_DISABLED))
+			continue;
 
 		/* type_mask must match */
-		if ((res->flags ^ r->flags) & type_mask) /* NVMe: 요청 리소스와 bus 리소스의 타입이 다른지 확인. */
-			continue; /* NVMe: 타입 불일치 시 걄뜀. */
+		if ((res->flags ^ r->flags) & type_mask)
+			continue;
 
 		/* We cannot allocate a non-prefetching resource
 		   from a pre-fetching area */
-		if ((r->flags & IORESOURCE_PREFETCH) && /* NVMe: bus 리소스가 prefetchable이고. */
-		    !(res->flags & IORESOURCE_PREFETCH)) /* NVMe: 요청 리소스가 prefetchable이 아니면. */
-			continue; /* NVMe: non-prefetch 리소스를 prefetch 영역에서 할당할 수 없음. */
+		if ((r->flags & IORESOURCE_PREFETCH) &&
+		    !(res->flags & IORESOURCE_PREFETCH))
+			continue;
 
-		avail = *r; /* NVMe: 현재 bus 리소스를 복사. */
-		pci_clip_resource_to_region(bus, &avail, region); /* NVMe: region 범위 내로 클리핑. */
+		avail = *r;
+		pci_clip_resource_to_region(bus, &avail, region);
 
 		/*
 		 * "min" is typically PCIBIOS_MIN_IO or PCIBIOS_MIN_MEM to
@@ -381,23 +377,23 @@ static int pci_bus_alloc_from_region(struct pci_bus *bus, struct resource *res, 
 		 * this is an already-configured bridge window, its start
 		 * overrides "min".
 		 */
-		if (avail.start) /* NVMe: 이미 설정된 bridge window의 시작이 0이 아니면. */
-			min_used = avail.start; /* NVMe: 최소 주소를 bridge window 시작으로 설정. */
+		if (avail.start)
+			min_used = avail.start;
 
-		max = avail.end; /* NVMe: 가용 영역의 끝을 최대 주소로 설정. */
+		max = avail.end;
 
 		/* Don't bother if available space isn't large enough */
-		if (size > max - min_used + 1) /* NVMe: 요청 size가 가용 공간보다 크면. */
-			continue; /* NVMe: 이 리소스에서는 할당 불가. */
+		if (size > max - min_used + 1)
+			continue;
 
 		/* Ok, try it out.. */
-		ret = allocate_resource(r, res, size, min_used, max, /* NVMe: NVMe BAR 크기/정렬을 만족하는 영역을 상위 bus 리소스에서 할당. */
-					align, alignf, alignf_data); /* NVMe: 실제로 리소스 트리에서 size만큼 할당 시도. */
-		if (ret == 0) /* NVMe: 할당 성공 시. */
-			return 0; /* NVMe: 성공 반환. */
-	} /* NVMe: pci_bus_for_each_resource(bus, r) 블록 끝. */
-	return -ENOMEM; /* NVMe: 모든 bus 리소스에서 할당 실패. */
-} /* NVMe: 특정 PCI bus region 내에서 NVMe BAR용 리소스를 할당 함수 본문 끝. */
+		ret = allocate_resource(r, res, size, min_used, max,
+					align, alignf, alignf_data);
+		if (ret == 0)
+			return 0;
+	}
+	return -ENOMEM;
+}
 
 /**
  * pci_bus_alloc_resource - allocate a resource from a parent bus
@@ -421,33 +417,33 @@ static int pci_bus_alloc_from_region(struct pci_bus *bus, struct resource *res, 
  *   할당한다. NVMe BAR(특히 BAR0의 doorbell/register 영역)가 사용할
  *   물리 메모리 공간을 확보하는 핵심 함수이다.
  */
-int pci_bus_alloc_resource(struct pci_bus *bus, struct resource *res, /* NVMe: 상위 bus로부터 NVMe BAR용 리소스를 할당하는 함수 선언. */
-		resource_size_t size, resource_size_t align, /* NVMe: NVMe BAR 크기와 정렬 제약. */
-		resource_size_t min, unsigned long type_mask, /* NVMe: 최소 주소와 리소스 타입 마스크. */
-		resource_alignf alignf, /* NVMe: 추가 정렬 콜백 함수 포인터. */
-		void *alignf_data) /* NVMe: 정렬 콜백에 전달할 사용자 데이터. */
-{ /* NVMe: 상위 bus로부터 NVMe BAR용 리소스를 할당 함수 본문 시작. */
-#ifdef CONFIG_ARCH_DMA_ADDR_T_64BIT /* NVMe: 64비트 DMA를 지원하면 64bit NVMe BAR를 고주소 영역부터 할당. */
-	int rc; /* NVMe: 64비트 할당 시도 결과. */
+int pci_bus_alloc_resource(struct pci_bus *bus, struct resource *res,
+		resource_size_t size, resource_size_t align,
+		resource_size_t min, unsigned long type_mask,
+		resource_alignf alignf,
+		void *alignf_data)
+{
+#ifdef CONFIG_ARCH_DMA_ADDR_T_64BIT
+	int rc;
 
-	if (res->flags & IORESOURCE_MEM_64) { /* NVMe: NVMe BAR가 64비트 메모리 리소스이면. */
-		rc = pci_bus_alloc_from_region(bus, res, size, align, min, /* NVMe: 4GB 이상 고주소 영역에서 NVMe 64bit BAR 할당 시도. */
-				       type_mask, alignf, alignf_data, /* NVMe: 리소스 타입 마스크와 정렬 콜백을 함께 전달. */
-				       &pci_high); /* NVMe: 우선 4GB 이상 고주소 영역에서 할당 시도. */
-		if (rc == 0) /* NVMe: 고주소 영역 할당 성공 시. */
-			return 0; /* NVMe: 성공 반환. */
+	if (res->flags & IORESOURCE_MEM_64) {
+		rc = pci_bus_alloc_from_region(bus, res, size, align, min,
+				       type_mask, alignf, alignf_data,
+				       &pci_high);
+		if (rc == 0)
+			return 0;
 
-		return pci_bus_alloc_from_region(bus, res, size, align, min, /* NVMe: 고주소 영역 할당 실패 시 전체 64비트 공간에서 재시도. */
-					 type_mask, alignf, alignf_data, /* NVMe: 64비트 전체 공간 할당에 필요한 인자 전달. */
-					 &pci_64_bit); /* NVMe: 고주소 실패 시 전체 64비트 영역에서 재시도. */
-	} /* NVMe: if (res->flags & IORESOURCE_MEM_64) 블록 끝. */
-#endif /* NVMe: 64비트 BAR 할당 분기 종료. */
+		return pci_bus_alloc_from_region(bus, res, size, align, min,
+					 type_mask, alignf, alignf_data,
+					 &pci_64_bit);
+	}
+#endif
 
-	return pci_bus_alloc_from_region(bus, res, size, align, min, /* NVMe: 32비트 BAR 또는 32비트 모드에서는 4GB 이하 공간에서 할당. */
-				 type_mask, alignf, alignf_data, /* NVMe: 32비트 공간 할당에 필요한 인자 전달. */
-				 &pci_32_bit); /* NVMe: 32비트 BAR 또는 32비트 모드에서는 4GB 이하 영역에서 할당. */
-} /* NVMe: 상위 bus로부터 NVMe BAR용 리소스를 할당 함수 본문 끝. */
-EXPORT_SYMBOL(pci_bus_alloc_resource); /* NVMe: pci_bus_alloc_resource를 다른 모듈에서도 사용 가능하게 노출. */
+	return pci_bus_alloc_from_region(bus, res, size, align, min,
+				 type_mask, alignf, alignf_data,
+				 &pci_32_bit);
+}
+EXPORT_SYMBOL(pci_bus_alloc_resource);
 
 /*
  * The @idx resource of @dev should be a PCI-PCI bridge window.  If this
@@ -462,48 +458,46 @@ EXPORT_SYMBOL(pci_bus_alloc_resource); /* NVMe: pci_bus_alloc_resource를 다른
  *   NVMe 장치가 여러 단계의 bridge 뒤에 있을 때, 중간 bridge의 메모리
  *   window가 상위 bridge를 벗어나지 않도록 보정한다.
  */
-bool pci_bus_clip_resource(struct pci_dev *dev, int idx) /* NVMe: bridge window를 상위 bridge 범위 내로 클리핑하는 함수 선언. */
-{ /* NVMe: bridge window를 상위 bridge 범위 내로 클리핑 함수 본문 시작. */
-	struct pci_bus *bus = dev->bus; /* NVMe: 대상 bridge가 속한 PCI bus 획득. */
-	struct resource *res = &dev->resource[idx]; /* NVMe: 자를 대상 bridge window 리소스. */
-	struct resource orig_res = *res; /* NVMe: 변경 전 원본 리소스를 보존. */
-	struct resource *r; /* NVMe: 상위 bus 리소스 순회용. */
+bool pci_bus_clip_resource(struct pci_dev *dev, int idx)
+{
+	struct pci_bus *bus = dev->bus;
+	struct resource *res = &dev->resource[idx];
+	struct resource orig_res = *res;
+	struct resource *r;
 
-	pci_bus_for_each_resource(bus, r) { /* NVMe: 상위 bus의 모든 리소스를 순회. */
-		resource_size_t start, end; /* NVMe: 겹치는 영역의 시작/끝. */
+	pci_bus_for_each_resource(bus, r) {
+		resource_size_t start, end;
 
-		if (!r) /* NVMe: 유효하지 않은 상위 리소스는 걄뜀. */
-			continue; /* NVMe: 다음 리소스로 이동. */
+		if (!r)
+			continue;
 
-		if (resource_type(res) != resource_type(r)) /* NVMe: IO/MEM 타입이 다른지 확인. */
-			continue; /* NVMe: 타입 불일치 시 걄뜀. */
+		if (resource_type(res) != resource_type(r))
+			continue;
 
-		start = max(r->start, res->start); /* NVMe: 두 리소스의 시작 중 큰 값으로 겹침 시작. */
-		end = min(r->end, res->end); /* NVMe: 두 리소스의 끝 중 작은 값으로 겹침 끝. */
+		start = max(r->start, res->start);
+		end = min(r->end, res->end);
 
-		if (start > end) /* NVMe: 겹치는 영역이 없으면. */
-			continue;	/* no overlap */ /* NVMe: 다음 상위 리소스로 이동. */
+		if (start > end)
+			continue;	/* no overlap */
 
-		if (res->start == start && res->end == end) /* NVMe: 이미 상위 윈도우 안에 완전히 포함되면. */
-			return false;	/* no change */ /* NVMe: 변경 불필요. */
+		if (res->start == start && res->end == end)
+			return false;	/* no change */
 
-		res->start = start; /* NVMe: 시작을 겹침 영역으로 갱신. */
-		res->end = end; /* NVMe: 끝을 겹침 영역으로 갱신. */
-		res->flags &= ~IORESOURCE_UNSET; /* NVMe: 리소스가 설정되었음을 표시. */
-		orig_res.flags &= ~IORESOURCE_UNSET; /* NVMe: 원본에도 설정 플래그 반영(로깅용). */
-		pci_info(dev, "%pR clipped to %pR\n", &orig_res, res); /* NVMe: 클리핑 내용을 로그로 기록. */
+		res->start = start;
+		res->end = end;
+		res->flags &= ~IORESOURCE_UNSET;
+		orig_res.flags &= ~IORESOURCE_UNSET;
+		pci_info(dev, "%pR clipped to %pR\n", &orig_res, res);
 
-		return true; /* NVMe: 리소스가 변경되었음을 반환. */
-	} /* NVMe: pci_bus_for_each_resource(bus, r) 블록 끝. */
+		return true;
+	}
 
-	return false; /* NVMe: 변경이 발생하지 않았음을 반환. */
-} /* NVMe: bridge window를 상위 bridge 범위 내로 클리핑 함수 본문 끝. */
+	return false;
+}
 
-/* NVMe: 아키텍처별 bus 리소스 조사 weak 함수(기본 no-op). */
-void __weak pcibios_resource_survey_bus(struct pci_bus *bus) { } /* NVMe: 아키텍처별 bus 리소스 조사 weak 함수의 기본 no-op 본문. */
+void __weak pcibios_resource_survey_bus(struct pci_bus *bus) { }
 
-/* NVMe: 아키텍처별 bus 장치 추가 weak 함수(기본 no-op). */
-void __weak pcibios_bus_add_device(struct pci_dev *pdev) { } /* NVMe: 아키텍처별 bus 장치 추가 weak 함수의 기본 no-op 본문. */
+void __weak pcibios_bus_add_device(struct pci_dev *pdev) { }
 
 /**
  * pci_bus_add_device - start driver for a single device
@@ -519,40 +513,40 @@ void __weak pcibios_bus_add_device(struct pci_dev *pdev) { } /* NVMe: 아키텍�
  *   sysfs/proc 노드 생성, config space 저장, runtime PM 활성화 등을
  *   수행한다.
  */
-void pci_bus_add_device(struct pci_dev *dev) /* NVMe: 단일 PCI 장치(NVMe SSD)를 등록하고 드라이버를 시작하는 함수 선언. */
-{ /* NVMe: 단일 NVMe SSD를 등록하고 드라이버를 시작 함수 본문 시작. */
-	struct device_node *dn = dev->dev.of_node; /* NVMe: 장치의 device tree 노드 포인터 획득. */
+void pci_bus_add_device(struct pci_dev *dev)
+{
+	struct device_node *dn = dev->dev.of_node;
 
 	/*
 	 * Can not put in pci_device_add yet because resources
 	 * are not assigned yet for some devices.
 	 */
-	pcibios_bus_add_device(dev); /* NVMe: 아키텍처별 추가 초기화(예: firmware quirk). */
-	pci_fixup_device(pci_fixup_final, dev); /* NVMe: 최종 PCI quirk 적용(NVMe 호환성 보정). */
-	if (pci_is_bridge(dev)) /* NVMe: 대상이 PCI bridge이면. */
-		of_pci_make_dev_node(dev); /* NVMe: device tree 노드를 bridge에 연결. */
-	pci_create_sysfs_dev_files(dev); /* NVMe: /sys/bus/pci/devices/... 아래 장치 파일 생성. */
-	pci_proc_attach_device(dev); /* NVMe: /proc/bus/pci/... 노드 생성. */
-	pci_bridge_d3_update(dev); /* NVMe: bridge D3 상태 갱신(전원 관리, ASPM 관련). */
+	pcibios_bus_add_device(dev);
+	pci_fixup_device(pci_fixup_final, dev);
+	if (pci_is_bridge(dev))
+		of_pci_make_dev_node(dev);
+	pci_create_sysfs_dev_files(dev);
+	pci_proc_attach_device(dev);
+	pci_bridge_d3_update(dev);
 
 	/* Save config space for error recoverability */
-	pci_save_state(dev); /* NVMe: NVMe 장치의 PCI config space를 저장(AER 복구 시 복원). */
+	pci_save_state(dev);
 
 	/*
 	 * Enable runtime PM, which potentially allows the device to
 	 * suspend immediately, only after the PCI state has been
 	 * configured completely.
 	 */
-	pm_runtime_enable(&dev->dev); /* NVMe: runtime PM 활성화(NVMe idle 시 저전력 전환 가능). */
+	pm_runtime_enable(&dev->dev);
 
-	if (!dn || of_device_is_available(dn)) /* NVMe: device tree에서 사용 가능하거나 OF를 사용하지 않으면. */
-		pci_dev_allow_binding(dev); /* NVMe: 드라이버 바인딩을 허용. */
+	if (!dn || of_device_is_available(dn))
+		pci_dev_allow_binding(dev);
 
-	device_initial_probe(&dev->dev); /* NVMe: 등록된 드라이버 중 일치하는 드라이버를 찾아 probe 수행(NVMe의 경우 nvme_probe). */
+	device_initial_probe(&dev->dev);
 
-	pci_dev_assign_added(dev); /* NVMe: 장치가 추가되었음을 표시. */
-} /* NVMe: 단일 NVMe SSD를 등록하고 드라이버를 시작 함수 본문 끝. */
-EXPORT_SYMBOL_GPL(pci_bus_add_device); /* NVMe: pci_bus_add_device를 GPL 모듈에 노출. */
+	pci_dev_assign_added(dev);
+}
+EXPORT_SYMBOL_GPL(pci_bus_add_device);
 
 /**
  * pci_bus_add_devices - start driver for PCI devices
@@ -567,27 +561,27 @@ EXPORT_SYMBOL_GPL(pci_bus_add_device); /* NVMe: pci_bus_add_device를 GPL 모듈
  *   호출한다. NVMe SSD가 연결된 bus를 스캔할 때 nvme_probe()가 호출되는
  *   경로이다.
  */
-void pci_bus_add_devices(const struct pci_bus *bus) /* NVMe: bus 및 하위 bus의 모든 장치(NVMe 포함) 드라이버를 시작하는 함수 선언. */
-{ /* NVMe: bus 및 하위 bus의 모든 장치(NVMe 포함) 드라이버를 시작 함수 본문 시작. */
-	struct pci_dev *dev; /* NVMe: 현재 bus의 PCI 장치 순회용. */
-	struct pci_bus *child; /* NVMe: 하위 bus 포인터. */
+void pci_bus_add_devices(const struct pci_bus *bus)
+{
+	struct pci_dev *dev;
+	struct pci_bus *child;
 
-	list_for_each_entry(dev, &bus->devices, bus_list) { /* NVMe: bus의 장치 목록을 순회. */
+	list_for_each_entry(dev, &bus->devices, bus_list) {
 		/* Skip already-added devices */
-		if (pci_dev_is_added(dev)) /* NVMe: 이미 추가된 장치는 걄뜀. */
-			continue; /* NVMe: 다음 장치로 이동. */
-		pci_bus_add_device(dev); /* NVMe: NVMe 장치 등록 및 드라이버 시작. */
-	} /* NVMe: list_for_each_entry(dev, &bus->devices, bus_list) 블록 끝. */
+		if (pci_dev_is_added(dev))
+			continue;
+		pci_bus_add_device(dev);
+	}
 
-	list_for_each_entry(dev, &bus->devices, bus_list) { /* NVMe: 다시 장치 목록을 순회. */
+	list_for_each_entry(dev, &bus->devices, bus_list) {
 		/* Skip if device attach failed */
-		if (!pci_dev_is_added(dev)) /* NVMe: 이전 단계에서 추가 실패한 장치는 걄뜀. */
-			continue; /* NVMe: 다음 장치로 이동. */
-		child = dev->subordinate; /* NVMe: 현재 장치가 bridge인 경우 하위 bus 획득. */
-		if (child) /* NVMe: 하위 bus가 존재하면. */
-			pci_bus_add_devices(child); /* NVMe: 재귀적으로 하위 bus의 장치 등록. */
-	} /* NVMe: list_for_each_entry(dev, &bus->devices, bus_list) 블록 끝. */
-} /* NVMe: bus 및 하위 bus의 모든 장치(NVMe 포함) 드라이버를 시작 함수 본문 끝. */
+		if (!pci_dev_is_added(dev))
+			continue;
+		child = dev->subordinate;
+		if (child)
+			pci_bus_add_devices(child);
+	}
+}
 /* [한국어] 주의: 원본은 EXPORT_SYMBOL(GPL 아님)이다. 내보내기 종류는 코드이므로
  * 주석을 달면서 바꾸면 안 된다 — 비-GPL 모듈이 이 심볼을 못 쓰게 된다. */
 EXPORT_SYMBOL(pci_bus_add_devices);
@@ -597,50 +591,50 @@ EXPORT_SYMBOL(pci_bus_add_devices);
  *   주어진 bus와 그 하위 bus의 모든 장치에 대해 콜백을 순방향으로 호출.
  *   NVMe 장치를 포함한 전체 PCIe 계층을 순회할 때 사용.
  */
-static int __pci_walk_bus(struct pci_bus *top, int (*cb)(struct pci_dev *, void *), /* NVMe: bus 트리를 순방향으로 순회하는 낮은 수준 함수 선언. */
-			  void *userdata) /* NVMe: 콜백에 전달할 사용자 데이터 포인터. */
-{ /* NVMe: bus 트리를 순방향으로 순회하는 함수 본문 시작. */
-	struct pci_dev *dev; /* NVMe: 순회 중인 PCI 장치. */
-	int ret = 0; /* NVMe: 콜백 반환값. */
+static int __pci_walk_bus(struct pci_bus *top, int (*cb)(struct pci_dev *, void *),
+			  void *userdata)
+{
+	struct pci_dev *dev;
+	int ret = 0;
 
-	list_for_each_entry(dev, &top->devices, bus_list) { /* NVMe: top bus의 장치 목록 순회. */
-		ret = cb(dev, userdata); /* NVMe: NVMe 장치에 대해 등록된 콜백 실행. */
-		if (ret) /* NVMe: 콜백이 0이 아닌 값을 반환하면. */
-			break; /* NVMe: 순회 중단. */
-		if (dev->subordinate) { /* NVMe: 현재 장치가 bridge이면. */
-			ret = __pci_walk_bus(dev->subordinate, cb, userdata); /* NVMe: 하위 bus 재귀 순회. */
-			if (ret) /* NVMe: 하위 순회에서 중단 요청이 오면. */
-				break; /* NVMe: 상위 순회도 중단. */
-		} /* NVMe: if (dev->subordinate) 블록 끝. */
-	} /* NVMe: list_for_each_entry(dev, &top->devices, bus_list) 블록 끝. */
-	return ret; /* NVMe: 최종 콜백 반환값. */
-} /* NVMe: bus 트리를 순방향으로 순회하는 함수 본문 끝. */
+	list_for_each_entry(dev, &top->devices, bus_list) {
+		ret = cb(dev, userdata);
+		if (ret)
+			break;
+		if (dev->subordinate) {
+			ret = __pci_walk_bus(dev->subordinate, cb, userdata);
+			if (ret)
+				break;
+		}
+	}
+	return ret;
+}
 
 /*
  * __pci_walk_bus_reverse:
  *   주어진 bus와 그 하위 bus의 모든 장치에 대해 콜백을 역방향으로 호출.
  *   NVMe 장치 제거 시 하위 장치부터 정리해야 할 때 사용.
  */
-static int __pci_walk_bus_reverse(struct pci_bus *top, /* NVMe: bus 트리를 역방향으로 순회하는 낮은 수준 함수 선언. */
-				  int (*cb)(struct pci_dev *, void *), /* NVMe: 각 NVMe 장치에 호출될 콜백 함수 포인터. */
-				  void *userdata) /* NVMe: 콜백에 전달할 사용자 데이터 포인터. */
-{ /* NVMe: bus 트리를 역방향으로 순회하는 함수 본문 시작. */
-	struct pci_dev *dev; /* NVMe: 순회 중인 PCI 장치. */
-	int ret = 0; /* NVMe: 콜백 반환값. */
+static int __pci_walk_bus_reverse(struct pci_bus *top,
+				  int (*cb)(struct pci_dev *, void *),
+				  void *userdata)
+{
+	struct pci_dev *dev;
+	int ret = 0;
 
-	list_for_each_entry_reverse(dev, &top->devices, bus_list) { /* NVMe: 장치 목록을 역순으로 순회. */
-		if (dev->subordinate) { /* NVMe: bridge의 하위 bus가 있으면. */
-			ret = __pci_walk_bus_reverse(dev->subordinate, cb, /* NVMe: bridge 하위 bus의 NVMe 장치들부터 역순으로 콜백 실행. */
-					     userdata); /* NVMe: 하위 bus를 먼저 역순 순회. */
-			if (ret) /* NVMe: 하위 순회 중단 요청 시. */
-				break; /* NVMe: 상위 순회 중단. */
-		} /* NVMe: if (dev->subordinate) 블록 끝. */
-		ret = cb(dev, userdata); /* NVMe: NVMe 장치에 대해 콜백 실행. */
-		if (ret) /* NVMe: 콜백이 0이 아닌 값을 반환하면. */
-			break; /* NVMe: 순회 중단. */
-	} /* NVMe: list_for_each_entry_reverse(dev, &top->devices, bus_list) 블록 끝. */
-	return ret; /* NVMe: 최종 콜백 반환값. */
-} /* NVMe: bus 트리를 역방향으로 순회하는 함수 본문 끝. */
+	list_for_each_entry_reverse(dev, &top->devices, bus_list) {
+		if (dev->subordinate) {
+			ret = __pci_walk_bus_reverse(dev->subordinate, cb,
+					     userdata);
+			if (ret)
+				break;
+		}
+		ret = cb(dev, userdata);
+		if (ret)
+			break;
+	}
+	return ret;
+}
 
 /**
  *  pci_walk_bus - walk devices on/under bus, calling callback.
@@ -662,13 +656,13 @@ static int __pci_walk_bus_reverse(struct pci_bus *top, /* NVMe: bus 트리를 �
  *   NVMe 장치의 전원/에러 복구/리셋 작업에서 전체 PCIe 계층을 안전하게
  *   순회할 때 사용된다.
  */
-void pci_walk_bus(struct pci_bus *top, int (*cb)(struct pci_dev *, void *), void *userdata) /* NVMe: read lock을 잡고 bus 트리를 순방향 순회하는 함수 선언. */
-{ /* NVMe: read lock을 잡고 bus 트리를 순방향으로 순회하는 함수 본문 시작. */
-	down_read(&pci_bus_sem); /* NVMe: PCI bus 구조 read lock 획득. */
-	__pci_walk_bus(top, cb, userdata); /* NVMe: 실제 순회 수행. */
-	up_read(&pci_bus_sem); /* NVMe: read lock 해제. */
-} /* NVMe: read lock을 잡고 bus 트리를 순방향으로 순회하는 함수 본문 끝. */
-EXPORT_SYMBOL_GPL(pci_walk_bus); /* NVMe: pci_walk_bus를 GPL 모듈에 노출. */
+void pci_walk_bus(struct pci_bus *top, int (*cb)(struct pci_dev *, void *), void *userdata)
+{
+	down_read(&pci_bus_sem);
+	__pci_walk_bus(top, cb, userdata);
+	up_read(&pci_bus_sem);
+}
+EXPORT_SYMBOL_GPL(pci_walk_bus);
 
 /**
  * pci_walk_bus_reverse - walk devices on/under bus, calling callback.
@@ -684,46 +678,46 @@ EXPORT_SYMBOL_GPL(pci_walk_bus); /* NVMe: pci_walk_bus를 GPL 모듈에 노출. 
  *   pci_bus_sem read lock을 잡고 bus 트리를 역방향으로 순회한다.
  *   NVMe suspend/remove 시 하위 장치부터 역순으로 처리해야 할 때 사용.
  */
-void pci_walk_bus_reverse(struct pci_bus *top, /* NVMe: read lock을 잡고 bus 트리를 역방향 순회하는 함수 선언. */
-			  int (*cb)(struct pci_dev *, void *), void *userdata) /* NVMe: 콜백과 사용자 데이터. */
-{ /* NVMe: read lock을 잡고 bus 트리를 역방향으로 순회하는 함수 본문 시작. */
-	down_read(&pci_bus_sem); /* NVMe: PCI bus 구조 read lock 획득. */
-	__pci_walk_bus_reverse(top, cb, userdata); /* NVMe: 역순 순회 수행. */
-	up_read(&pci_bus_sem); /* NVMe: read lock 해제. */
-} /* NVMe: read lock을 잡고 bus 트리를 역방향으로 순회하는 함수 본문 끝. */
-EXPORT_SYMBOL_GPL(pci_walk_bus_reverse); /* NVMe: pci_walk_bus_reverse를 GPL 모듈에 노출. */
+void pci_walk_bus_reverse(struct pci_bus *top,
+			  int (*cb)(struct pci_dev *, void *), void *userdata)
+{
+	down_read(&pci_bus_sem);
+	__pci_walk_bus_reverse(top, cb, userdata);
+	up_read(&pci_bus_sem);
+}
+EXPORT_SYMBOL_GPL(pci_walk_bus_reverse);
 
 /*
  * pci_walk_bus_locked:
  *   호출자가 이미 pci_bus_sem을 잡고 있다고 가정하고 bus를 순회.
  *   NVMe AER 복구 등 lock context 내에서 재귀적으로 장치를 다룰 때 사용.
  */
-void pci_walk_bus_locked(struct pci_bus *top, int (*cb)(struct pci_dev *, void *), void *userdata) /* NVMe: pci_bus_sem이 이미 잡힌 상태에서 bus를 순회하는 함수 선언. */
-{ /* NVMe: pci_bus_sem이 잡힌 상태에서 bus를 순회하는 함수 본문 시작. */
-	lockdep_assert_held(&pci_bus_sem); /* NVMe: pci_bus_sem이 잡혀 있음을 lockdep으로 검증. */
+void pci_walk_bus_locked(struct pci_bus *top, int (*cb)(struct pci_dev *, void *), void *userdata)
+{
+	lockdep_assert_held(&pci_bus_sem);
 
-	__pci_walk_bus(top, cb, userdata); /* NVMe: lock 획득 없이 순회 수행. */
-} /* NVMe: pci_bus_sem이 잡힌 상태에서 bus를 순회하는 함수 본문 끝. */
+	__pci_walk_bus(top, cb, userdata);
+}
 
 /*
  * pci_bus_get:
  *   pci_bus의 참조 카운트를 증가시키고 반환.
  *   NVMe 드라이버가 bus 객체를 오래 유지해야 할 때 사용.
  */
-struct pci_bus *pci_bus_get(struct pci_bus *bus) /* NVMe: pci_bus 참조 카운트를 증가시키는 함수 선언. */
-{ /* NVMe: pci_bus 참조 카운트를 증가 함수 본문 시작. */
-	if (bus) /* NVMe: 유효한 bus 포인터인 경우. */
-		get_device(&bus->dev); /* NVMe: bus의 struct device 참조 카운트 증가. */
-	return bus; /* NVMe: 참조 증가된 bus 포인터 반환(또는 NULL). */
-} /* NVMe: pci_bus 참조 카운트를 증가 함수 본문 끝. */
+struct pci_bus *pci_bus_get(struct pci_bus *bus)
+{
+	if (bus)
+		get_device(&bus->dev);
+	return bus;
+}
 
 /*
  * pci_bus_put:
  *   pci_bus의 참조 카운트를 감소.
  *   NVMe 드라이버가 bus 객체 사용을 마쳤을 때 반납.
  */
-void pci_bus_put(struct pci_bus *bus) /* NVMe: pci_bus 참조 카운트를 감소시키는 함수 선언. */
-{ /* NVMe: pci_bus 참조 카운트를 감소 함수 본문 시작. */
-	if (bus) /* NVMe: 유효한 bus 포인터인 경우. */
-		put_device(&bus->dev); /* NVMe: bus의 struct device 참조 카운트 감소. */
-} /* NVMe: pci_bus 참조 카운트를 감소 함수 본문 끝. */
+void pci_bus_put(struct pci_bus *bus)
+{
+	if (bus)
+		put_device(&bus->dev);
+}

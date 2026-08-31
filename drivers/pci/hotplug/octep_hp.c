@@ -55,44 +55,25 @@
  * struct octep_hp_device     : 슬롯 하나에 대응.
  */
 
-/* PCI/NVMe: GFP/자원 정리 헬퍼; NVMe host driver의 devm_*과 동일한 managed resource 패턴 */
 #include <linux/cleanup.h>
-/* PCI/NVMe: container_of는 pci_dev/container_of 등 구조체 역참조 시 사용 */
 #include <linux/container_of.h>
-/* PCI/NVMe: PCIe 레지스터 타이밍/폴에 필요한 udelay; NVMe BAR 폴 시에도 사용 */
 #include <linux/delay.h>
-/* PCI/NVMe: pci_info/pci_err 등과 연결된 dev_printk 계열 매크로 */
 #include <linux/dev_printk.h>
-/* PCI/NVMe: __init/__exit 섹션; NVMe host driver도 동일 패턴으로 등록 */
 #include <linux/init.h>
-/* PCI/NVMe: MSI-X 인터럽트 핸들러 및 IRQF_* 플래그 정의 */
 #include <linux/interrupt.h>
-/* PCI/NVMe: 64-bit MMIO readq/writeq 바이트오더; NVMe BAR(CAP/STS/CC/DB) 접근 핵심 */
 #include <linux/io-64-nonatomic-lo-hi.h>
-/* PCI/NVMe: 커널 범용 매크로 및 printk */
 #include <linux/kernel.h>
-/* PCI/NVMe: 핫플러그 슬롯/명령 리스트 관리; NVMe queue list와 유사 */
 #include <linux/list.h>
-/* PCI/NVMe: module_pci_driver, MODULE_*, pci_driver 등록 */
 #include <linux/module.h>
-/* PCI/NVMe: slot_lock 등 PCIe 핫플러그 동기화; NVMe remove/reset 시에도 사용 */
 #include <linux/mutex.h>
-/* PCI/NVMe: PCI 버스/장치/리소스/MSI-X/DMA 마스터 등 핵심 구조체/함수 */
 #include <linux/pci.h>
-/* PCI/NVMe: 핫플러그 코어(pci_hp_register, hotplug_slot) 정의 */
 #include <linux/pci_hotplug.h>
-/* PCI/NVMe: kzalloc_obj/kmalloc; NVMe queue/mem 할당에도 사용 */
 #include <linux/slab.h>
-/* PCI/NVMe: hp_cmd_list 회전 보호; NVMe MSI-X 핸들러에서도 spinlock 사용 */
 #include <linux/spinlock.h>
-/* PCI/NVMe: 인터럽트 Bottom Half(workqueue); NVMe reset/처리 워크에서도 활용 */
 #include <linux/workqueue.h>
 
-/* PCI/NVMe: 핫플러그 인터럽트 레지스터 오프셋; NVMe BAR0 내 vendor-specific 영역과 유사 */
 #define OCTEP_HP_INTR_OFFSET(x) (0x20400 + ((x) << 4))
-/* PCI/NVMe: MSI-X vector 번호; NVMe host driver도 pci_irq_vector()로 mapping */
 #define OCTEP_HP_INTR_VECTOR(x) (16 + (x))
-/* PCI/NVMe: 드라이버/리전 이름; pci_driver.name 및 pcim_iomap_region에 사용 */
 #define OCTEP_HP_DRV_NAME "octep_hp"
 
 /*
@@ -130,9 +111,7 @@ struct octep_hp_slot {
 	struct hotplug_slot slot;
 	/* PCI/NVMe hotplug: 이 슬롯의 논리 번호; intr_val bit 위치와 매핑 */
 	u16 slot_number;
-	/* PCI/NVMe: 이 슬롯에 현재 바인딩된 pci_dev; NVMe SSD면 nvme_pci_probe가 이 pdev로 호출됨 */
 	struct pci_dev *hp_pdev;
-	/* PCI/NVMe: 슬롯의 PCI devfn; pci_scan_single_device() 시 사용 */
 	unsigned int hp_devfn;
 	/* PCI/NVMe hotplug: 상위 핫플러그 컨트롤러 역참조용 포인터 */
 	struct octep_hp_controller *ctrl;
@@ -150,9 +129,7 @@ struct octep_hp_intr_info {
 
 /* PCI/NVMe hotplug: Octeon 핫플러그 컨트롤러 전역 상태 */
 struct octep_hp_controller {
-	/* PCI/NVMe: BAR0 MMIO 베이스; NVMe host driver의 bar mapped base와 동일 */
 	void __iomem *base;
-	/* PCI/NVMe: 핫플러그 컨트롤러 자신의 pci_dev; parent bridge 아래 첫 번째 function */
 	struct pci_dev *pdev;
 	/* PCI/NVMe MSI-X: ENA/DIS MSI-X 벡터 정보 배열 */
 	struct octep_hp_intr_info intr[OCTEP_HP_INTR_MAX];
@@ -176,7 +153,6 @@ static void octep_hp_enable_pdev(struct octep_hp_controller *hp_ctrl,
 	guard(mutex)(&hp_ctrl->slot_lock);
 	/* PCI/NVMe hotplug: 이미 enable 상태면 중복 삽입 방지; NVMe probe 중복 방지와 동일 */
 	if (hp_slot->hp_pdev) {
-		/* PCI/NVMe: NVMe 장치라면 이미 nvme_pci_probe가 완료된 상태 */
 		pci_dbg(hp_slot->hp_pdev, "Slot %s is already enabled\n",
 			hotplug_slot_name(&hp_slot->slot));
 		/* PCI/NVMe hotplug: guard(mutex)가 자동 해제됨 */
@@ -184,12 +160,9 @@ static void octep_hp_enable_pdev(struct octep_hp_controller *hp_ctrl,
 	}
 
 	/* Scan the device and add it to the bus */
-	/* PCI/NVMe: 버스 스캔; 이 pdev가 NVMe controller면 nvme_pci_probe 바인딩 시작점 */
 	hp_slot->hp_pdev = pci_scan_single_device(hp_ctrl->pdev->bus,
 						  hp_slot->hp_devfn);
-	/* PCI/NVMe: NVMe BAR 및 bridge window 할당; NVMe BAR0/1 매핑 전에 수행해야 함 */
 	pci_bus_assign_resources(hp_ctrl->pdev->bus);
-	/* PCI/NVMe: PCI 버스에 장치 추가; 이후 nvme_pci_probe()가 pci_driver.match/probe로 호출됨 */
 	pci_bus_add_device(hp_slot->hp_pdev);
 
 	/* PCI/NVMe hotplug: enable 완료 로그; NVMe 장치면 이후 nvme_reset_work 진행 */
@@ -210,7 +183,6 @@ static void octep_hp_disable_pdev(struct octep_hp_controller *hp_ctrl,
 		return;
 	}
 
-	/* PCI/NVMe: NVMe 장치라면 nvme_pci_remove()가 호출되어 queue/DMA/irq 정리 */
 	pci_dbg(hp_slot->hp_pdev, "Disabling slot %s\n",
 		hotplug_slot_name(&hp_slot->slot));
 
@@ -277,9 +249,7 @@ octep_hp_register_slot(struct octep_hp_controller *hp_ctrl,
 
 	/* PCI/NVMe hotplug: 역참조용 컨트롤러 연결 */
 	hp_slot->ctrl = hp_ctrl;
-	/* PCI/NVMe: 초기에는 버스에 보이는 pdev를 참조; 곧 disable되며 NULL 됨 */
 	hp_slot->hp_pdev = pdev;
-	/* PCI/NVMe: 나중에 pci_scan_single_device()로 재스캔할 devfn 보관 */
 	hp_slot->hp_devfn = pdev->devfn;
 	/* PCI/NVMe hotplug: 인터럽트 mask에서 사용할 bit 위치 */
 	hp_slot->slot_number = slot_number;
@@ -297,7 +267,6 @@ octep_hp_register_slot(struct octep_hp_controller *hp_ctrl,
 		return ERR_PTR(ret);
 	}
 
-	/* PCI/NVMe: 등록된 슬롯 로그; NVMe 장치면 바인딩 직전 상태 */
 	pci_info(pdev, "Registered slot %s for device %s\n",
 		 slot_name, pci_name(pdev));
 
@@ -442,15 +411,12 @@ static enum octep_hp_intr_type octep_hp_intr_type(struct octep_hp_intr_info *int
 /* PCI/NVMe MSI-X: MSI-X top-half 인터럽트 핸들러 */
 static irqreturn_t octep_hp_intr_handler(int irq, void *data)
 {
-	/* PCI/NVMe: 핫플러그 컨트롤러 인스턴스; data 인자로 전달 */
 	struct octep_hp_controller *hp_ctrl = data;
-	/* PCI/NVMe: 컨트롤러 자신의 pci_dev; pci_info/pci_err용 */
 	struct pci_dev *pdev = hp_ctrl->pdev;
 	/* PCI/NVMe MSI-X: 이 IRQ가 ENA/DIS 중 어떤 종류인지 */
 	enum octep_hp_intr_type type;
 	/* PCI/NVMe hotplug: workqueue로 전달할 명령 객체 */
 	struct octep_hp_cmd *hp_cmd;
-	/* PCI/NVMe: 핫플러그 레지스터에서 읽은 64-bit 슬롯 mask */
 	u64 intr_val;
 
 	/* PCI/NVMe MSI-X: irq 번호로 인터럽트 종류 식별; NVMe cq vector 식별과 유사 */
@@ -495,7 +461,6 @@ static irqreturn_t octep_hp_intr_handler(int irq, void *data)
 /* PCI/NVMe MSI-X: devm cleanup action으로 등록된 IRQ 벡터/워크 해제 */
 static void octep_hp_irq_cleanup(void *data)
 {
-	/* PCI/NVMe: cleanup 대상 컨트롤러 */
 	struct octep_hp_controller *hp_ctrl = data;
 
 	/* PCI/NVMe MSI-X: 할당받은 MSI-X 벡터 해제; NVMe remove 시 pci_free_irq_vectors와 동일 */
@@ -508,7 +473,6 @@ static void octep_hp_irq_cleanup(void *data)
 static int octep_hp_request_irq(struct octep_hp_controller *hp_ctrl,
 				enum octep_hp_intr_type type)
 {
-	/* PCI/NVMe: 컨트롤러 pci_dev; pci_irq_vector/request_irq에 사용 */
 	struct pci_dev *pdev = hp_ctrl->pdev;
 	/* PCI/NVMe MSI-X: 현재 벡터 메타정보 포인터 */
 	struct octep_hp_intr_info *intr;
@@ -535,20 +499,15 @@ static int octep_hp_request_irq(struct octep_hp_controller *hp_ctrl,
 				IRQF_SHARED, intr->name, hp_ctrl);
 }
 
-/* PCI/NVMe: 컨트롤러 PCI 장치 초기화 및 MSI-X/워크큐 설정 */
 static int octep_hp_controller_setup(struct pci_dev *pdev,
 				     struct octep_hp_controller *hp_ctrl)
 {
-	/* PCI/NVMe: generic device 포인터; dev_err_probe 등에 사용 */
 	struct device *dev = &pdev->dev;
 	/* PCI/NVMe MSI-X: 벡터 루프 변수 */
 	enum octep_hp_intr_type type;
-	/* PCI/NVMe: 반환값 저장 */
 	int ret;
 
-	/* PCI/NVMe: PCI command 레지스터 enable 및 I/O/MEM decoding; NVMe probe 필수 첫 단계 */
 	ret = pcim_enable_device(pdev);
-	/* PCI/NVMe: enable 실패 시 -ENODEV/-EIO 등; NVMe host driver도 동일 처리 */
 	if (ret)
 		return dev_err_probe(dev, ret, "Failed to enable PCI device\n");
 
@@ -559,9 +518,7 @@ static int octep_hp_controller_setup(struct pci_dev *pdev,
 		return dev_err_probe(dev, PTR_ERR(hp_ctrl->base),
 				     "Failed to map PCI device region\n");
 
-	/* PCI/NVMe: DMA master bit 설정; NVMe host driver도 pci_set_master로 DMA transaction 허용 */
 	pci_set_master(pdev);
-	/* PCI/NVMe: pci_dev->driver_data에 컨트롤러 저장; NVMe drvdata 저장과 동일 */
 	pci_set_drvdata(pdev, hp_ctrl);
 
 	/* PCI/NVMe hotplug: 슬롯 리스트 초기화 */
@@ -574,7 +531,6 @@ static int octep_hp_controller_setup(struct pci_dev *pdev,
 	spin_lock_init(&hp_ctrl->hp_cmd_lock);
 	/* PCI/NVMe hotplug: workqueue 핸들러 연결; NVMe reset_work init과 동일 */
 	INIT_WORK(&hp_ctrl->work, octep_hp_work_handler);
-	/* PCI/NVMe: 역참조용 pdev 저장 */
 	hp_ctrl->pdev = pdev;
 
 	/* PCI/NVMe MSI-X: MSI-X 벡터 할당; NVMe host driver도 pci_alloc_irq_vectors_affinity 또는 pci_alloc_irq_vectors 사용 */
@@ -585,9 +541,7 @@ static int octep_hp_controller_setup(struct pci_dev *pdev,
 	if (ret < 0)
 		return dev_err_probe(dev, ret, "Failed to alloc MSI-X vectors\n");
 
-	/* PCI/NVMe: devm cleanup action 등록; remove 시 pci_free_irq_vectors + flush_work 수행 */
 	ret = devm_add_action(&pdev->dev, octep_hp_irq_cleanup, hp_ctrl);
-	/* PCI/NVMe: cleanup action 등록 실패 시; 이후 메모리 누수 방지 위해 probe 실패 */
 	if (ret)
 		return dev_err_probe(&pdev->dev, ret, "Failed to add IRQ cleanup action\n");
 
@@ -606,7 +560,6 @@ static int octep_hp_controller_setup(struct pci_dev *pdev,
 	return 0;
 }
 
-/* PCI/NVMe: PCI 드라이버 probe; NVMe host driver의 nvme_pci_probe와 동일한 pci_driver 콜백 */
 static int octep_hp_pci_probe(struct pci_dev *pdev,
 			      const struct pci_device_id *id)
 {
@@ -618,18 +571,13 @@ static int octep_hp_pci_probe(struct pci_dev *pdev,
 	struct octep_hp_slot *hp_slot;
 	/* PCI/NVMe hotplug: 슬롯 번호 카운터; intr_val bit 위치와 일치 */
 	u16 slot_number = 0;
-	/* PCI/NVMe: 반환값 */
 	int ret;
 
-	/* PCI/NVMe: managed 컨트롤러 메모리 할당; NVMe host driver도 devm_kzalloc 사용 */
 	hp_ctrl = devm_kzalloc(&pdev->dev, sizeof(*hp_ctrl), GFP_KERNEL);
-	/* PCI/NVMe: 메모리 부족 시; NVMe probe -ENOMEM 처리와 동일 */
 	if (!hp_ctrl)
 		return -ENOMEM;
 
-	/* PCI/NVMe: 컨트롤러 초기화(장치 enable, BAR 매핑, MSI-X, workqueue) */
 	ret = octep_hp_controller_setup(pdev, hp_ctrl);
-	/* PCI/NVMe: 초기화 실패 시; devm으로 할당된 자원은 remove 시 자동 해제 */
 	if (ret)
 		return ret;
 
@@ -654,10 +602,8 @@ static int octep_hp_pci_probe(struct pci_dev *pdev,
 					     "Failed to register hotplug slot %u\n",
 					     slot_number);
 
-		/* PCI/NVMe: 슬롯 등록 해제용 devm cleanup action 추가; NVMe devm_* 패턴과 동일 */
 		ret = devm_add_action(&pdev->dev, octep_hp_deregister_slot,
 				      hp_slot);
-		/* PCI/NVMe: cleanup action 등록 실패 시; 이전 슬롯들은 devm cleanup에서 정리 */
 		if (ret)
 			return dev_err_probe(&pdev->dev, ret,
 					     "Failed to add action for deregistering slot %u\n",
@@ -670,35 +616,24 @@ static int octep_hp_pci_probe(struct pci_dev *pdev,
 	return 0;
 }
 
-/* PCI/NVMe: Marvell OCTEON 핫플러그 컨트롤러 PCI device ID; NVMe도 PCI_DEVICE_ID_* 매크로 사용 */
 #define PCI_DEVICE_ID_CAVIUM_OCTEP_HP_CTLR  0xa0e3
-/* PCI/NVMe: PCI ID 테이블; NVMe host driver의 pci_device_id 테이블과 동일한 형태 */
 static struct pci_device_id octep_hp_pci_map[] = {
 	/* [한국어] Cavium/Marvell OCTEON 핫플러그 컨트롤러 매칭 테이블.
 	 * NVMe 드라이버도 같은 방식으로 PCI_VENDOR_ID_ 와 PCI_DEVICE_ID_ 상수를 써서 매칭한다.
 	 * (원래 주석은 'PCI_VENDOR_ID_*' 를 쓰려다 별표와 슬래시가 이어져 주석이 조기 종료됐고,
 	 *  그 뒤 텍스트가 C 코드로 해석되어 컴파일이 깨져 있었다.) */
 	{ PCI_DEVICE(PCI_VENDOR_ID_CAVIUM, PCI_DEVICE_ID_CAVIUM_OCTEP_HP_CTLR) },
-	/* PCI/NVMe: 테이블 종료 sentinel; NVMe id_table도 동일 */
 	{ },
 };
 
-/* PCI/NVMe: pci_driver 구조체; NVMe의 nvme_pci_driver와 동일한 드라이버 등록 객체 */
 static struct pci_driver octep_hp = {
-	/* PCI/NVMe: /sys/bus/pci/drivers/octep_hp 에 노출되는 드라이버 이름 */
 	.name = OCTEP_HP_DRV_NAME,
-	/* PCI/NVMe: PCI ID 매칭 테이블; probe 결정 */
 	.id_table = octep_hp_pci_map,
-	/* PCI/NVMe: 장치 발견 시 호출될 probe 콜백; NVMe host driver의 nvme_pci_probe 대응 */
 	.probe = octep_hp_pci_probe,
 };
 
-/* PCI/NVMe: module_pci_driver 매크로로 pci_driver 등록/해제 자동화; NVMe host driver도 동일 */
 module_pci_driver(octep_hp);
 
-/* PCI/NVMe: 모듈 라이선스; GPL-2.0-only */
 MODULE_LICENSE("GPL");
-/* PCI/NVMe: 모듈 저작자 */
 MODULE_AUTHOR("Marvell");
-/* PCI/NVMe: modinfo에 표시될 모듈 설명; 핫플러그 컨트롤러임을 명시 */
 MODULE_DESCRIPTION("Marvell OCTEON PCI Hotplug driver");
