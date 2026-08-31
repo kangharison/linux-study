@@ -11,27 +11,80 @@
  */
 
 /*
- * ===================================================================
- * NVMe PCIe 호스트 드라이버 관점 파일 요약
- * -------------------------------------------------------------------
- * 본 파일(drivers/pci/doe.c)은 PCIe Data Object Exchange(DOE) 메일박스를
- * 관리한다. DOE는 PCIe 6.0 sec 6.30에 정의된 메커니즘으로, PCI 장치와
- * 호스트 간에 길이가 긴 데이터 객체를 구성 공간을 통해 교환할 수 있게 한다.
- * NVMe SSD 입장에서 DOE는 다음과 같은 보안/관리 기능의 전송로 역할을 한다.
- *   - PCIe Component Measurement and Authentication(CMA) / SPDM: NVMe
- *     컨트롤러의 신원 확인 및 펌웨어 측정값 교환
- *   - Integrity and Data Encryption(IDE) 키 협상: NVMe 트래픽 무결성/암호화
- *   - 벤더별 DOE feature(대역폭/전원/ROM 갱신 등)의 사용자공간 노출
- *   - doe_features sysfs를 통한 NVMe 장치 DOE capability 확인
- * NVMe 드라이버가 직접 DOE를 호출하지는 않지만, NVMe 장치가 노출하는 DOE
- * capability는 PCI core에 의해 본 파일에서 초기화/관리되며, 보안 하위시스템
- * 또는 nvme-cli 등의 사용자공간 도구가 간접적으로 사용한다.
- * 일반적인 호출 경로:
- *   nvme_probe -> pci_device_probe -> pci_doe_init (probe 시 DOE 메일박스 생성)
- *   보안/인증 레이어 -> pci_find_doe_mailbox -> pci_doe_submit_task 또는
- *   pci_doe -> DOE 상태 머신 -> pci_doe_send_req / pci_doe_recv_resp
- *   nvme_remove / hot-unplug -> pci_doe_disconnected / pci_doe_destroy
- * ===================================================================
+ * [한국어 설명] config space 위로 데이터를 주고받는 메시지 통로 (doe.c)
+ *
+ * === 파일의 역할 ===
+ * DOE(Data Object Exchange)는 PCIe 6.0 에서 도입된 확장 capability 로,
+ * config space 를 통해 임의 길이의 데이터를 주고받게 해 준다.
+ *
+ * 왜 이런 것이 필요한가. config space 는 원래 작은 레지스터들의 모음이라
+ * 큰 데이터를 옮길 수단이 없다. BAR 를 쓰면 되지만, BAR 는 장치가
+ * 초기화되고 메모리 공간이 배정된 뒤에야 쓸 수 있다. 그보다 이른 시점에,
+ * 또는 BAR 와 무관하게 장치와 대화해야 하는 경우가 있다 — 대표적으로
+ * 보안 관련 협상이다.
+ *
+ * 동작 방식은 우편함(mailbox)이다. capability 안에 Write Data Mailbox 와
+ * Read Data Mailbox 레지스터가 있고, 4바이트씩 밀어 넣고 꺼낸다.
+ *   1) 요청 페이로드를 Write Mailbox 에 dword 단위로 쓴다.
+ *   2) DOE Go 비트를 세워 "다 썼다" 고 알린다.
+ *   3) Data Object Ready 가 설 때까지 기다린다(폴링 또는 인터럽트).
+ *   4) Read Mailbox 에서 응답을 dword 단위로 읽는다.
+ *
+ * 이 파일은 그 절차를 감싸 비동기 작업 큐로 만든다. 요청 하나가
+ * struct pci_doe_task 이고, 워크큐 스레드가 그것을 순서대로 처리한다.
+ * 응답이 오래 걸릴 수 있어(암호 연산이 끼면 수백 밀리초) 동기 호출로
+ * 두면 곤란하기 때문이다.
+ *
+ * 프로토콜도 여럿이다. 장치가 어떤 프로토콜을 지원하는지 Discovery
+ * 프로토콜(vendor 0x0001, type 0x00)로 먼저 물어보고, 그 목록을 캐시해 둔다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * 초기화: 열거 시 pci_doe_init()
+ *           -> DOE capability 마다 struct pci_doe_mb 를 만들고
+ *           -> Discovery 로 지원 프로토콜 목록을 채운다
+ *
+ * 사용:  CMA/SPDM 이나 CXL 코드가
+ *           -> [이 파일] pci_doe_submit_task() 로 요청을 큐에 넣고
+ *              -> 워크큐가 pci_doe_task_complete() 까지 처리
+ *           또는 pci_doe() 동기 래퍼로 완료까지 기다린다
+ *
+ * 실행 컨텍스트: 제출은 어디서나, 실제 처리는 워크큐 스레드.
+ * 폴링 대기가 있어 잠들 수 있다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: drivers/pci/cma.c 계열(장치 인증), drivers/cxl/ (CXL 의 여러 협상),
+ *   그리고 IDE(Integrity and Data Encryption) 설정.
+ * 아래쪽: access.c 의 config 접근, 워크큐, xarray(프로토콜 목록 캐시).
+ * 공유 상태: struct pci_doe_mb — 우편함 하나. capability 오프셋,
+ *   워크큐, 프로토콜 목록(xarray), 그리고 진행 상태를 담는다.
+ *   struct pci_dev 의 doe_mbs xarray 에 등록된다.
+ *
+ * === NVMe 관점 ===
+ * NVMe 드라이버는 이 파일의 함수를 쓰지 않는다(전수 확인).
+ *
+ * 다만 NVMe 와 무관하다고 단정하기는 이르다. DOE 는 장치 인증(SPDM)과
+ * 링크 암호화(IDE)의 통로이고, 그 기능들은 "신뢰할 수 없는 환경에서
+ * 스토리지를 쓴다" 는 요구에서 나왔다. 기밀 컴퓨팅 환경의 NVMe 가
+ * 그 대상이 될 수 있다.
+ *
+ * 현재 커널에서는 CXL 메모리 장치와 일부 가속기가 DOE 를 쓰고,
+ * NVMe 는 아직 쓰지 않는다. NVMe 스펙 자체의 보안 기능(TCG Opal 등)은
+ * DOE 가 아니라 NVMe 명령으로 이뤄진다(block/opal_proto.h 참고).
+ *
+ * === 주요 함수/구조체 요약 ===
+ * pci_doe_init()            : 장치의 모든 DOE capability 를 찾아 우편함을 만든다.
+ * pcim_doe_create_mb()      : 우편함 하나를 만들고 워크큐를 준비한다.
+ *                             devres 로 등록해 자동 해제된다.
+ * pci_doe_discovery()       : Discovery 프로토콜로 지원 목록을 조회한다.
+ * pci_doe_supports_prot()   : 특정 프로토콜을 지원하는지 캐시에서 확인.
+ * pci_doe_submit_task()     : 요청을 큐에 넣는다(비동기).
+ * pci_doe()                 : 제출하고 완료까지 기다리는 동기 래퍼.
+ * pci_doe_send_req()        : Write Mailbox 에 요청을 밀어 넣고 Go 를 세운다.
+ * pci_doe_recv_resp()       : Read Mailbox 에서 응답을 꺼낸다.
+ * pci_doe_abort()           : 진행 중인 교환을 취소한다. 타임아웃 시 쓴다.
+ * struct pci_doe_mb         : 우편함 하나의 상태.
+ * struct pci_doe_task       : 요청 하나. 프로토콜, 요청/응답 버퍼,
+ *                             완료 콜백을 담는다.
  */
 
 #define dev_fmt(fmt) "DOE: " fmt	/* NVMe: 디버그 메시지 접두사를 'DOE: '로 설정한다. */
@@ -435,7 +488,7 @@ static int pci_doe_send_req(struct pci_doe_mb *doe_mb,	/* NVMe: pci_doe_send_req
 					  length));	/* NVMe: FIELD_PREP() 호출의 인자를 계속한다. */
 
 	/* Write payload */
-	for (i = 0; i < task->request_pl_sz / sizeof(__le32); i++)	/* NVMe: 반복문을 순회한다. */
+	for (i = 0; i < task->request_pl_sz / sizeof(__le32); i++)	/* [한국어] 페이로드를 dword 단위로 순회한다 — DOE 는 4바이트 단위로만 주고받는다 */
 		pci_write_config_dword(pdev, offset + PCI_DOE_WRITE,	/* NVMe: 함수/매크로 pci_write_config_dword()를 호출한다. */
 				       le32_to_cpu(task->request_pl[i]));	/* NVMe: pci_write_config_dword() 호출의 인자를 계속한다. */
 
@@ -527,7 +580,7 @@ static int pci_doe_recv_resp(struct pci_doe_mb *doe_mb, struct pci_doe_task *tas
 
 	if (payload_length) {	/* NVMe: 조건을 검사한다: (payload_length) {. */
 		/* Read all payload dwords except the last */
-		for (; i < payload_length - 1; i++) {	/* NVMe: 반복문을 순회한다. */
+		for (; i < payload_length - 1; i++) {	/* [한국어] 페이로드를 dword 단위로 순회한다 — DOE 는 4바이트 단위로만 주고받는다 */
 			pci_read_config_dword(pdev, offset + PCI_DOE_READ,	/* NVMe: 함수/매크로 pci_read_config_dword()를 호출한다. */
 					      &val);	/* NVMe: pci_read_config_dword() 호출의 인자를 계속한다. */
 			task->response_pl[i] = cpu_to_le32(val);	/* NVMe: 값을 설정한다: task->response_pl[i]. */
@@ -546,7 +599,7 @@ static int pci_doe_recv_resp(struct pci_doe_mb *doe_mb, struct pci_doe_task *tas
 	}	/* NVMe: 제어문/블록을 마친다. */
 
 	/* Flush excess length */
-	for (; i < length; i++) {	/* NVMe: 반복문을 순회한다. */
+	for (; i < length; i++) {	/* [한국어] 페이로드를 dword 단위로 순회한다 — DOE 는 4바이트 단위로만 주고받는다 */
 		pci_read_config_dword(pdev, offset + PCI_DOE_READ, &val);	/* NVMe: 함수/매크로 pci_read_config_dword()를 호출한다. */
 		pci_write_config_dword(pdev, offset + PCI_DOE_READ, 0);	/* NVMe: 함수/매크로 pci_write_config_dword()를 호출한다. */
 	}	/* NVMe: 제어문/블록을 마친다. */

@@ -4,31 +4,60 @@
  */
 
 /*
- * NVMe 관점 요약:
- *  이 파일은 PCI 장치(bridge 또는 endpoint)와 PCI host bridge를 대상으로
- *  Open Firmware / Device Tree(DT)에서 사용하는 속성(ranges, reg, interrupts,
- *  compatible, interrupt-map 등)을 생성하는 PCI OF helper 모음이다.
+ * [한국어 설명] 커널의 PCI 정보를 DeviceTree 속성으로 내보내는 계층 (of_property.c)
  *
- *  NVMe SSD는 일반적으로 PCIe root complex 아래의 endpoint로 동작하므로
- *  drivers/nvme/host/pci.c 입장에서는 pci_dev가 bridge가 아닌 경우
- *  of_pci_add_properties()의 else 분기(endpoint 경로)를 통해
- *  ranges, reg, compatible, interrupts 등의 DT property가 채워진다.
+ * === 파일의 역할 ===
+ * of.c 의 반대 방향이다. of.c 가 DT 를 읽어 PCI 자료구조를 만든다면,
+ * 이 파일은 이미 만들어진 PCI 정보를 DT 속성 형태로 조립한다.
  *
- *  NVMe 장치가 연결된 PCIe 포트(bridge)를 기준으로 하면
- *  of_pci_add_host_bridge_properties()를 통해 host bridge의
- *  device_type, #address-cells, #size-cells, ranges 속성이 생성된다.
+ * 왜 그런 것이 필요한가. 가상화 때문이다. 호스트가 PCI 장치를 게스트에
+ * 넘길 때, 게스트에게도 그 장치를 기술해 줘야 한다. 게스트가 DT 기반
+ * 시스템이라면 그 기술은 DT 노드 형태여야 하고, 호스트는 자기가 아는
+ * PCI 정보로 그것을 만들어 줘야 한다.
  *
- *  주요 호출 경로(개념):
- *    NVMe pci_dev -> of_pci_add_properties() -> of_pci_prop_ranges()
- *                                           -> of_pci_prop_reg()
- *                                           -> of_pci_prop_compatible()
- *                                           -> of_pci_prop_interrupts()
- *                                           -> of_pci_prop_intr_ctrl()
- *    NVMe가 탑재된 host bridge -> of_pci_add_host_bridge_properties()
- *                            -> of_pci_host_bridge_prop_ranges()
+ * 만드는 속성들:
+ *   reg          — 장치 주소(bus/devfn 을 DT 형식으로 인코딩)
+ *   ranges       — 브리지의 주소 변환 범위
+ *   #address-cells / #size-cells — DT 의 주소 표현 규칙
+ *   interrupt-map / interrupt-map-mask — INTx 라우팅
+ *   device_type  — "pci"
+ *
+ * DT 의 주소 인코딩이 까다로운 부분이다. PCI 주소는 3개의 32비트 셀로
+ * 표현되며, 첫 셀에 공간 종류(config/IO/mem32/mem64)와 prefetchable
+ * 여부, bus/devfn 이 비트로 채워진다. 이 파일이 그 인코딩을 만든다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * 가상화 계층(VFIO 등) 또는 오버레이 생성 코드
+ *   -> [이 파일] of_pci_add_properties(pdev, ...)
+ *      -> reg / ranges / interrupt-map 등을 만들어 property 배열로
+ *      -> 그것이 DT 오버레이가 되어 게스트에게 전달된다
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. 메모리 할당이 많다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: DT 오버레이를 만드는 코드(주로 가상화 관련).
+ * 아래쪽: drivers/of/ 의 property 헬퍼, pci.c 의 자원 정보.
+ * 옆쪽: of.c — 정확히 반대 방향의 변환을 한다.
+ *
+ * === NVMe 관점 ===
+ * NVMe 와 직접 관련이 없다(전수 확인).
+ *
+ * 간접적으로는 NVMe 를 DT 기반 게스트에 통째로 넘기는 경우가 해당한다.
+ * 그때 이 파일이 만든 DT 노드로 게스트가 그 NVMe 컨트롤러를 인식하고
+ * 자기 nvme 드라이버를 붙인다.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * of_pci_add_properties()      : 장치 하나에 대한 DT 속성 묶음을 만든다.
+ *                                이 파일의 진입점이다.
+ * of_pci_prop_address_cells() / of_pci_prop_size_cells() : 주소 표현 규칙.
+ * of_pci_prop_reg()            : reg 속성. bus/devfn 을 DT 3셀 형식으로 인코딩.
+ * of_pci_prop_ranges()         : 브리지의 주소 변환 범위.
+ * of_pci_prop_intr_map()       : interrupt-map. 자식 장치들의 INTx 를
+ *                                상위 컨트롤러 입력에 대응시킨다.
+ * of_pci_prop_compatible()     : compatible 문자열("pciVVVV,DDDD" 형식).
+ * of_pci_get_addr_flags()      : 자원의 종류를 DT 첫 셀의 플래그 비트로 변환.
  */
 
-/* NVMe: PCI 핵심 구조체와 함수를 사용하기 위한 헤더 */
 #include <linux/pci.h>
 /* NVMe: Open Firmware / Device Tree 파싱 및 조작 헤더 */
 #include <linux/of.h>

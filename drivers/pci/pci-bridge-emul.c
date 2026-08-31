@@ -18,23 +18,94 @@
  */
 
 /*
- * NVMe: 이 파일은 PCIe 컨트롤러가 하드웨어 Root Port(루트 컴플렉스 내
- * 브리지)를 제공하지 않을 때, 가상의 PCI-to-PCI 브리지를 소프트웨어로
- * 에뮬레이션한다. NVMe SSD는 대개 PCIe 엔드포인트로 Root Port 하위에
- * 연결되므로, 이 에뮬레이션이 없으면 Linux PCI core가 장치를 인식/열거할
- * 수 없다. drivers/nvme/host/pci.c 의 NVMe 호스트 드라이버는 PCI core를
- * 통해 간접적으로 이 브리지 아래의 NVMe 엔드포인트를 제어하며, BAR
- * 매핑, 버스 마스터링, MSI/MSI-X, AER(Advanced Error Reporting), Virtual
- * Channel, NPEM(Native PCIe Enclosure Management), port driver 등의
- * PCIe 확장 기능이 정상 동작하려면 이 가상 브리지의 설정 공간이
- * 올바로 노출되어야 한다. PCI 컨트롤러 드라이버(예: pci-aardvark,
- * pci-mvebu)는 Device Tree에 기술된 PCIe 컨트롤러 노드에 대해 이
- * 에뮬레이션 구조체를 할당/초기화하고, pci_bridge_emul_init(),
- * pci_bridge_emul_conf_read(), pci_bridge_emul_conf_write()를 호출하여
- * 가짜 브리지 설정 공간 접근을 처리한다. NVMe 장치 관점에서는 이
- * 브리지가 상위 버스(primary bus)와 NVMe가 속한 하위 버스(secondary
- * bus) 사이의 I/O/MEM/prefetchable 메모리 창, 버스 번호, 에러 전파
- * 경로를 표현하는 핵심 객체이다.
+ * [한국어 설명] 하드웨어에 없는 루트 포트를 소프트웨어로 흉내 낸다 (pci-bridge-emul.c)
+ *
+ * === 파일의 역할 ===
+ * 위 원문 주석이 목적을 밝힌다 — 하드웨어가 루트 포트 브리지를 제공하지
+ * 않을 때, 그 브리지의 config space 를 메모리에 만들어 있는 척한다.
+ *
+ * 왜 필요한가. Linux PCI 코어는 계층 구조를 전제로 만들어져 있다.
+ * 엔드포인트는 반드시 어떤 브리지 아래에 있어야 하고, 그 브리지의
+ * 윈도우 레지스터로 주소가 라우팅된다고 가정한다. 그런데 일부 SoC 의
+ * PCIe 컨트롤러는 그런 브리지를 config space 로 노출하지 않는다 —
+ * 하드웨어 안에서 알아서 처리하고 소프트웨어에게는 보여 주지 않는다.
+ *
+ * 그러면 커널이 곤란해진다. 브리지가 없으니 엔드포인트를 매달 곳이 없고,
+ * 윈도우가 없으니 자원 배치도 할 수 없다. 이 파일은 가짜 브리지를 만들어
+ * 그 간극을 메운다. 커널은 평범한 브리지를 다루듯 동작하고, 컨트롤러
+ * 드라이버는 그 가짜 레지스터에 대한 읽기·쓰기를 실제 하드웨어 동작으로
+ * 번역한다.
+ *
+ * 핵심 자료구조가 pci_regs_behavior 배열이다. config space 의 dword 마다
+ * 세 개의 마스크를 둔다.
+ *   ro  — 읽기 전용 비트. 쓰기가 무시된다.
+ *   rw  — 읽고 쓸 수 있는 비트.
+ *   w1c — 1 을 쓰면 지워지는 비트(오류 상태 등).
+ * 이 세 마스크로 각 비트의 성질을 정확히 흉내 낸다. 예컨대 Status
+ * 레지스터의 오류 비트는 w1c 여야 하고, Vendor ID 는 ro 여야 한다.
+ * 이것을 제대로 하지 않으면 커널이 이상한 동작을 한다 — 예를 들어
+ * 지워지지 않는 오류 비트를 보고 무한히 복구를 시도한다.
+ *
+ * PCIe capability 도 선택적으로 흉내 낸다. 그래야 커널이 이 브리지를
+ * PCIe 브리지로 인식하고 링크 상태나 슬롯 제어를 시도한다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * 초기화: SoC 의 PCIe 컨트롤러 드라이버(controller/ 아래)
+ *           -> [이 파일] pci_bridge_emul_init(bridge, flags)
+ *              -> 가짜 config space 를 메모리에 잡고
+ *              -> 각 dword 의 ro/rw/w1c 마스크를 채운다
+ *              -> flags 로 지원하지 않는 기능을 읽기 전용 0 으로 고정
+ *
+ * 접근:  커널이 루트 포트의 config 를 읽거나 쓸 때
+ *           -> 컨트롤러 드라이버의 config ops
+ *              -> [이 파일] pci_bridge_emul_conf_read/write()
+ *                 -> 기본은 메모리의 가짜 값을 읽고 쓴다
+ *                 -> 드라이버가 ops 를 제공했으면 그것을 먼저 부른다
+ *                    (실제 하드웨어와 동기화가 필요한 레지스터용)
+ *
+ * 실행 컨텍스트: config 접근 경로이므로 pci_lock 을 쥔 상태에서 불린다.
+ * 잠들 수 없다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: controller/ 아래의 여러 SoC 드라이버 — mvebu, aardvark,
+ *   brcmstb, rockchip 등 브리지를 노출하지 않는 컨트롤러들.
+ * 아래쪽: 없다. 메모리 조작과 콜백 호출뿐이다.
+ * 공유 상태: struct pci_bridge_emul — 가짜 config space(conf, pcie_conf),
+ *   동작 마스크(pci_regs_behavior, pcie_cap_regs_behavior),
+ *   그리고 드라이버가 제공한 ops 와 사설 데이터.
+ *
+ * === NVMe 관점 ===
+ * NVMe 드라이버는 이 파일과 직접 관련이 없다(전수 확인).
+ *
+ * 하지만 브리지를 노출하지 않는 SoC 에 NVMe 를 붙이면 이 에뮬레이션이
+ * 그 사이에 놓인다. NVMe 컨트롤러가 열거되려면 그것을 담을 버스가
+ * 있어야 하고, 그 버스를 만드는 것이 이 가짜 브리지다.
+ *
+ * 특히 자원 배치가 이것에 달려 있다. NVMe 의 BAR0 주소를 정하려면
+ * 상위 브리지의 메모리 윈도우가 있어야 하는데(setup-bus.c),
+ * 그 윈도우 레지스터가 바로 이 파일이 흉내 내는 것이다. 에뮬레이션이
+ * 윈도우를 제대로 보고하지 않으면 NVMe 의 BAR 가 배정되지 않아
+ * probe 가 실패한다.
+ *
+ * (기존 주석은 이 에뮬레이션이 "MSI/MSI-X, AER, Virtual Channel, NPEM,
+ *  port driver 가 정상 동작하려면" 필요하다고 적었으나, 그 기능들은
+ *  엔드포인트나 실제 포트의 capability 에 달린 것이고 이 가짜 브리지와
+ *  직접 관계가 없다. 이 파일이 실제로 좌우하는 것은 열거와 자원 배치다.)
+ *
+ * === 주요 함수/구조체 요약 ===
+ * pci_bridge_emul_init()        : 가짜 브리지를 만든다. flags 로 지원하지
+ *                                 않는 기능(I/O 포워딩, prefetchable 메모리)을
+ *                                 읽기 전용 0 으로 고정할 수 있다.
+ * pci_bridge_emul_cleanup()     : 할당한 마스크 배열을 해제한다.
+ * pci_bridge_emul_conf_read()   : 가짜 config 를 읽는다. 드라이버 ops 가
+ *                                 있으면 먼저 불러 값을 갱신할 기회를 준다.
+ * pci_bridge_emul_conf_write()  : 쓴다. ro/rw/w1c 마스크에 따라 각 비트를
+ *                                 다르게 처리하는 것이 이 함수의 핵심이다.
+ * struct pci_bridge_emul        : 가짜 브리지 하나의 전부.
+ * struct pci_bridge_emul_ops    : 컨트롤러 드라이버가 제공하는 훅.
+ *                                 읽기 전/쓰기 후에 실제 하드웨어와
+ *                                 동기화할 기회를 준다.
+ * struct pci_bridge_reg_behavior: dword 하나의 ro/rw/w1c 마스크 세 개.
  */
 
 #include <linux/pci.h>		/* NVMe: PCI core 헤더: pci.h는 PCI 설정 공간 오프셋, capability ID,
@@ -622,24 +693,45 @@ int pci_bridge_emul_init(struct pci_bridge_emul *bridge,
 		/* These bits are applicable only for PCI and reserved on PCIe */
 		/* NVMe: PCIe 모드에서는 PCI 전용으로 사용되던 비트들을 예약
 		 * 처리하기 위해 마스크에서 제거한다. */
+		/* [한국어] Latency Timer(비트 15:8). PCIe 에는 버스 중재라는
+		 * 개념이 없어 이 필드가 의미를 잃었다. 읽기 전용 마스크에서
+		 * 빼면 그 비트는 항상 0 으로 읽힌다. */
 		bridge->pci_regs_behavior[PCI_CACHE_LINE_SIZE / 4].ro &=
 			~GENMASK(15, 8);
+		/* [한국어] 이 dword 는 하위 16비트가 Command, 상위 16비트가 Status 다.
+		 * 그래서 Status 쪽 비트에는 << 16 을 붙여 자리를 옮긴다.
+		 * 지우는 것들:
+		 *   Command 의 Special Cycles / Memory Write and Invalidate /
+		 *   VGA Palette Snoop / Wait Cycle Control / Fast Back-to-Back —
+		 *   전부 공유 버스 시절의 기능이라 점대점 링크인 PCIe 에는 없다.
+		 *   Status 의 66MHz Capable / Fast Back-to-Back Capable /
+		 *   DEVSEL Timing — 마찬가지로 PCI 버스 타이밍 개념이다. */
 		bridge->pci_regs_behavior[PCI_COMMAND / 4].ro &=
 			~((PCI_COMMAND_SPECIAL | PCI_COMMAND_INVALIDATE |
 			   PCI_COMMAND_VGA_PALETTE | PCI_COMMAND_WAIT |
 			   PCI_COMMAND_FAST_BACK) |
 			  (PCI_STATUS_66MHZ | PCI_STATUS_FAST_BACK |
 			   PCI_STATUS_DEVSEL_MASK) << 16);
+		/* [한국어] 이 dword 의 최상위 바이트(31:24)는 Secondary Latency Timer 다.
+		 * 위와 같은 이유로 PCIe 에서는 예약이다. */
 		bridge->pci_regs_behavior[PCI_PRIMARY_BUS / 4].ro &=
 			~GENMASK(31, 24);
+		/* [한국어] 이 dword 의 상위 16비트는 Secondary Status 다.
+		 * Command/Status 쌍과 같은 이유로 버스 타이밍 비트들을 지운다. */
 		bridge->pci_regs_behavior[PCI_IO_BASE / 4].ro &=
 			~((PCI_STATUS_66MHZ | PCI_STATUS_FAST_BACK |
 			   PCI_STATUS_DEVSEL_MASK) << 16);
+		/* [한국어] 이 dword 의 상위 16비트는 Bridge Control 이다.
+		 * Master Abort Mode 와 비트 8/9/11 은 PCIe 에서 예약이라
+		 * 쓰기 가능 마스크에서 뺀다 — 쓰려고 해도 무시된다. */
 		bridge->pci_regs_behavior[PCI_INTERRUPT_LINE / 4].rw &=
 			~((PCI_BRIDGE_CTL_MASTER_ABORT |
 			   BIT(8) | BIT(9) | BIT(11)) << 16);
+		/* [한국어] Fast Back-to-Back Enable 도 마찬가지로 예약. */
 		bridge->pci_regs_behavior[PCI_INTERRUPT_LINE / 4].ro &=
 			~((PCI_BRIDGE_CTL_FAST_BACK) << 16);
+		/* [한국어] 비트 10(Discard Timer Status)은 원래 RW1C 였으나
+		 * PCIe 에서는 예약이라 그 동작도 없앤다. */
 		bridge->pci_regs_behavior[PCI_INTERRUPT_LINE / 4].w1c &=
 			~(BIT(10) << 16);
 	}
@@ -658,8 +750,15 @@ int pci_bridge_emul_init(struct pci_bridge_emul *bridge,
 	if (flags & PCI_BRIDGE_EMUL_NO_IO_FORWARD) {
 		bridge->pci_regs_behavior[PCI_COMMAND / 4].ro |= PCI_COMMAND_IO;
 		bridge->pci_regs_behavior[PCI_COMMAND / 4].rw &= ~PCI_COMMAND_IO;
+		/* [한국어] I/O Base/Limit(하위 16비트)를 읽기 전용으로 고정한다.
+		 * ro 에 넣고 rw 에서 빼는 두 동작이 한 쌍이다 — 읽으면 0 이 나오고
+		 * 쓰기는 무시된다. 그러면 소프트웨어가 "이 브리지는 I/O 창이
+		 * 없다" 고 판단한다(base > limit 이 되므로). */
 		bridge->pci_regs_behavior[PCI_IO_BASE / 4].ro |= GENMASK(15, 0);
 		bridge->pci_regs_behavior[PCI_IO_BASE / 4].rw &= ~GENMASK(15, 0);
+		/* [한국어] 32비트 I/O 주소용 상위 16비트 레지스터도 통째로
+		 * 읽기 전용 0 으로 만든다. 여기는 dword 전체가 그 용도라
+		 * &= 가 아니라 = 로 덮어쓴다. */
 		bridge->pci_regs_behavior[PCI_IO_BASE_UPPER16 / 4].ro = ~0;
 		bridge->pci_regs_behavior[PCI_IO_BASE_UPPER16 / 4].rw = 0;
 	}
@@ -877,12 +976,18 @@ int pci_bridge_emul_conf_write(struct pci_bridge_emul *bridge, int where,
 	shift = (where & 0x3) * 8;
 
 	/* NVMe: 쓰기 크기에 따라 업데이트할 비트 마스크를 만든다. */
+	/* [한국어] 요청한 폭에 해당하는 비트만 1인 마스크를 만든다.
+	 * shift 는 dword 안에서의 바이트 오프셋 x 8 이다.
+	 * 예: size=2, where=0x02 이면 shift=16 이라 마스크가 0xffff0000 —
+	 * 즉 그 dword 의 상위 워드만 대상이 된다.
+	 * 이 마스크로 dword 단위 저장소에서 요청한 부분만 뽑아내거나
+	 * 갈아끼운다. */
 	if (size == 4)
-		mask = 0xffffffff;
+		mask = 0xffffffff;	/* [한국어] dword 전체 */
 	else if (size == 2)
-		mask = 0xffff << shift;
+		mask = 0xffff << shift;	/* [한국어] 워드 하나를 그 자리로 */
 	else if (size == 1)
-		mask = 0xff << shift;
+		mask = 0xff << shift;	/* [한국어] 바이트 하나를 그 자리로 */
 	else
 		/* NVMe: 1/2/4바이트 외 크기는 잘못된 레지스터 번호로 처리한다. */
 		return PCIBIOS_BAD_REGISTER_NUMBER;

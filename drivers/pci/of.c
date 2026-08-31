@@ -1,35 +1,81 @@
 // SPDX-License-Identifier: GPL-2.0+
 /*
- * NVMe 관점 요약:
- *  이 파일은 PCI 버스와 Open Firmware(Device Tree)를 매핑하는 헬퍼 모음이다.
- *  NVMe SSD가 연결된 PCIe root complex/host bridge는 부팅 시 DT로부터
- *  자신의 pci_host_bridge, 리소스 윈도우, MSI domain, INTx/MSI-X 인터럽트
- *  매핑, 링크 속도/전력/이퀄라이제이션 등의 정보를 이 파일 함수들을 통해
- *  해석한다. NVMe 입장에서는 이 파일이 장치를 발견하고 초기화하기 위한
- *  PCI 코어의 'DT 해석 레이어' 역할을 한다.
- *
- *  NVMe PCIe host driver(drivers/nvme/host/pci.c) 관련 주요 호출 경로:
- *   1) pci_set_of_node()        : nvme의 pci_dev가 DT에 대응되는 of_node를 갖는지 연결
- *   2) pci_host_bridge_of_msi_domain() : NVMe MSI/MSI-X 인터럽트를 위한 MSI domain 조회
- *   3) of_irq_parse_and_map_pci(): NVMe INTx 인터럽트를 DT에서 해석하여 virq 매핑
- *   4) devm_of_pci_bridge_init() : NVMe가 탑재된 host bridge의 BAR/IO/MEM/DMA 리소스
- *                                  윈도우를 DT에서 추출하여 DMA 가능한 메모리 공간 확보
- *   5) of_pci_get_max_link_speed(): NVMe PCIe 링크 속도 제한(max-link-speed) 읽기
- *   6) of_pci_get_slot_power_limit(): NVMe 슬롯 전력 제한 해석
- *   7) of_pci_get_equalization_presets(): NVMe 연결 링크의 EQ preset 읽기
- *
- *  본 파일은 AER(Advanced Error Reporting), Virtual Channel, NPEM(Native PCIe
- *  Enclosure Management), PCI port driver 등 NVMe와 밀접한 PCIe 고급 기능의
- *  기반이 되는 pci_dev/pci_host_bridge <-> DT 연결 및 리소스 파싱을 담당한다.
- *  위 고급 기능들은 이 파일에서 설정된 of_node, MSI domain, 리소스 윈도우를
- *  바탕으로 동작하므로 NVMe 호스트 드라이버 입장에서 본 파일은 최상위 초기화
- *  레이어 중 하나이다.
- */
-/*
  * PCI <-> OF mapping helpers
  *
  * Copyright 2011 IBM Corp.
  */
+
+/*
+ * [한국어 설명] PCI 와 DeviceTree 를 잇는 헬퍼 (of.c)
+ *
+ * === 파일의 역할 ===
+ * DeviceTree(DT)는 ACPI 가 없는 시스템 — 주로 ARM/RISC-V 임베디드와
+ * SoC — 이 하드웨어를 기술하는 방식이다. 이 파일은 DT 노드에 적힌
+ * 정보를 PCI 자료구조로 옮긴다.
+ *
+ * 옮기는 것이 여럿이다.
+ *   - 주소 범위(ranges 속성) — 호스트 브리지가 어떤 CPU 주소 구간을
+ *     어떤 PCI 버스 주소로 매핑하는지. CPU 주소와 버스 주소가 다른
+ *     플랫폼이 많아 offset 정보가 함께 온다.
+ *   - 버스 번호 범위(bus-range 속성)
+ *   - 인터럽트 매핑(interrupt-map) — INTx 핀이 어느 인터럽트 컨트롤러의
+ *     몇 번에 연결됐는가. ACPI 의 _PRT 에 대응한다.
+ *   - MSI 컨트롤러 연결(msi-parent) — 이 장치의 MSI 를 누가 담당하는가.
+ *   - 도메인 번호(linux,pci-domain) — pci.c 의 도메인 배정이 이것을 읽는다.
+ *   - 장치별 속성 — 최대 링크 속도(max-link-speed), 슬롯 전원 등.
+ *
+ * DT 노드를 PCI 장치에 연결하는 방식도 다룬다. DT 는 장치를 주소로
+ * 표현하므로("pci@1,0"), 열거로 발견한 pci_dev 와 그 노드를 짝지어야
+ * 한다. of_pci_find_child_device() 가 그 일을 한다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * 호스트 브리지 드라이버(controller/ 아래)
+ *   -> [이 파일] devm_of_pci_get_host_bridge_resources()
+ *      DT 의 ranges 를 읽어 자원 목록을 만든다
+ *   -> pci_host_probe() -> probe.c 의 열거
+ *      -> [이 파일] pci_set_of_node() 로 각 장치에 DT 노드를 연결
+ *      -> [이 파일] of_irq_parse_and_map_pci() 로 INTx 배정
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. DT 순회와 메모리 할당이 있다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: controller/ 아래의 SoC 호스트 브리지 드라이버들, probe.c.
+ * 아래쪽: drivers/of/ 의 DT 파서, bus.c 의 자원 목록.
+ * 옆쪽: of_property.c — 반대 방향이다. 커널이 만든 PCI 정보를 DT 속성으로
+ *   내보낸다(주로 가상화 환경에서 게스트에게 넘길 때).
+ * 공유 상태: struct pci_dev / pci_bus / pci_host_bridge 의 of_node 포인터.
+ *
+ * === NVMe 관점 ===
+ * NVMe 드라이버는 이 파일의 함수를 쓰지 않는다(전수 확인).
+ *
+ * 관련이 생기는 것은 ARM 서버나 SoC 에 NVMe 를 붙이는 경우다. 그런
+ * 시스템에서는 PCIe 컨트롤러가 DT 로 기술되고, 이 파일이 그 정보를
+ * 읽어 버스 트리를 만든다. NVMe SSD 는 그 트리 위에 열거되는
+ * 장치 중 하나일 뿐이라 이 파일과 직접 얽히지 않는다.
+ *
+ * 다만 주소 변환은 눈여겨볼 만하다. DT 의 ranges 에 CPU 주소와 PCI 버스
+ * 주소의 대응이 적혀 있고, 그것이 host-bridge.c 의
+ * pcibios_resource_to_bus / pcibios_bus_to_resource 가 쓰는 offset 이 된다.
+ * x86 에서는 두 주소가 같아 이 구분이 눈에 띄지 않지만, 여기서는
+ * NVMe 의 BAR0 주소가 실제로 두 값을 갖는다.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * pci_set_of_node() / pci_release_of_node() : pci_dev 에 DT 노드를 연결/해제.
+ * of_pci_find_child_device()   : 주소로 DT 자식 노드를 찾는다.
+ * of_pci_get_devfn()           : DT 의 reg 속성에서 devfn 을 뽑아낸다.
+ * of_pci_parse_bus_range()     : bus-range 속성을 읽는다.
+ * of_get_pci_domain_nr()       : linux,pci-domain 속성을 읽는다.
+ *                                pci.c 의 도메인 배정이 이것을 쓴다.
+ * of_pci_check_probe_only()    : linux,pci-probe-only 속성. 자원 재배치를
+ *                                금지하고 펌웨어 배치를 그대로 쓰게 한다.
+ * devm_of_pci_get_host_bridge_resources() : ranges 를 읽어 자원 목록을 만든다.
+ *                                이 파일에서 가장 큰 함수다.
+ * of_irq_parse_and_map_pci()   : interrupt-map 으로 INTx IRQ 를 배정한다.
+ * of_pci_get_max_link_speed()  : max-link-speed 속성. 보드가 신호 품질상
+ *                                낮은 속도만 보장할 때 상한을 건다.
+ * of_pci_get_slot_power_limit(): 슬롯이 공급할 수 있는 전력 상한.
+ */
+
 #define pr_fmt(fmt)	"PCI: OF: " fmt /* NVMe: 이 모듈의 pr_xxx 메시지에 'PCI: OF: ' 프리픽스 추가 */
 
 #include <linux/cleanup.h> /* NVMe: 자동 정리 매크로 지원 */
