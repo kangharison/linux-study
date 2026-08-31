@@ -174,8 +174,14 @@ EXPORT_SYMBOL_GPL(cdns_pcie_host_training_complete);
  * cdns_pcie_host_wait_for_link - 링크가 올라오기를 기다린다
  *
  * @pcie: 대상 컨트롤러.
- * @pcie_link_up: 링크 상태를 읽는 방법. 구형은 cdns_pcie_linkup(),
- *   신형은 cdns_pcie_hpa_link_up() 을 넘긴다.
+ * @pcie_link_up: 링크 상태를 읽는 방법.
+ *   실제 호출부를 확인하면, 구형 경로는 pcie-cadence-host.c:1183 에서
+ *   cdns_pcie_link_up() 을 넘긴다 — 이것은 pcie-cadence.h:432 의
+ *   static inline 디스패처로, ops->link_up 이 있으면 그것을, 없으면
+ *   기본 판정을 쓴다. 신형 경로는 pcie-cadence-host-hpa.c:304 에서
+ *   cdns_pcie_hpa_link_up() 을 직접 넘긴다.
+ *   참고: cdns_pcie_linkup()(pcie-cadence.c)은 EXPORT 되어 있지만
+ *   이 트리 안에서 호출자가 0건이다.
  * @return: 0 이면 링크가 올라왔다. 재시도 한도를 넘기면 -ETIMEDOUT.
  *
  * 함수 포인터를 받는 이유가 이 파일의 공통화 기법 자체다. 대기 루프의
@@ -299,7 +305,11 @@ EXPORT_SYMBOL_GPL(cdns_pcie_retrain);
  * @pcie_link_up: 링크 상태를 읽는 방법.
  * @return: 0 이면 링크가 올라왔다.
  * 
- * 두 호스트 파일이 부르는 진입점이다. 링크를 기다린 뒤, 이 보드에
+ * 확인해 보면 이 함수를 부르는 곳은 pcie-cadence-host.c:1183 하나뿐이다.
+ * 신형(hpa) 경로는 이것을 거치지 않고 cdns_pcie_host_wait_for_link() 를
+ * 직접 부른다(pcie-cadence-host-hpa.c:304) — 재트레이닝 quirk 가
+ * 구형 경로에만 해당하기 때문으로 보이나, 그 근거는 확인하지 못했다.
+ * 링크를 기다린 뒤, 이 보드에
  * Gen2 결함 quirk 가 걸려 있으면 재트레이닝까지 한다.
  * 
  * 실행 컨텍스트: 호스트 초기화 중 프로세스 컨텍스트.

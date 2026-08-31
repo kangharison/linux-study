@@ -62,7 +62,9 @@
  *
  * === 주요 함수/구조체 요약 ===
  * cdns_pcie_hpa_link_up()  : 신형 배치에서 링크 상태를 읽는다.
- *                            구형의 cdns_pcie_linkup() 에 대응.
+ *                            구형의 cdns_pcie_linkup() 에 대응한다.
+ *                            다만 구형 경로가 실제로 넘기는 것은
+ *                            cdns_pcie_link_up() 디스패처 쪽이다.
  * cdns_pcie_hpa_detect_quiet_min_delay_set() : LTSSM Detect.Quiet 최소
  *                            대기를 설정한다. 구형 판과 값이 같다.
  * cdns_pcie_hpa_set_outbound_region() : 아웃바운드 창 설정.
@@ -91,7 +93,8 @@
  * @pcie: 대상 컨트롤러.
  * @return: 링크가 살아 있으면 true.
  *
- * 구형의 cdns_pcie_linkup() 과 판정 방식은 같다 — 어떤 레지스터의
+ * 구형의 cdns_pcie_linkup() 과 판정 방식은 같다(다만 구형 호스트 경로가
+ * 실제로 넘기는 것은 cdns_pcie_link_up() 디스패처다) — 어떤 레지스터의
  * 최하위 비트를 본다. 다른 것은 그 레지스터의 위치다.
  *   구형: CDNS_PCIE_LM_BASE (Local Management 블록)
  *   신형: REG_BANK_IP_REG 뱅크의 PHY_DBG_STS_REG0 (PHY 디버그 상태)

@@ -64,7 +64,10 @@
  * === 주요 함수/구조체 요약 ===
  * cdns_pcie_find_capability() / _find_ext_capability() : 이 IP 자신의
  *                          config space 에서 capability 를 찾는다.
- * cdns_pcie_linkup()       : 링크가 올라왔는지 확인한다.
+ * cdns_pcie_linkup()       : 링크가 올라왔는지 확인한다. EXPORT 되어
+ *                          있으나 이 트리 안에서 호출자는 0건이다 —
+ *                          실제로 쓰이는 것은 pcie-cadence.h 의
+ *                          cdns_pcie_link_up() 디스패처 쪽이다.
  * cdns_pcie_detect_quiet_min_delay_set() : LTSSM 의 Detect.Quiet 최소
  *                          대기 시간을 설정한다.
  * cdns_pcie_set_outbound_region() : 아웃바운드 주소 변환 창을 설정한다.

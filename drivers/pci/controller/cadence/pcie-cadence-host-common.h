@@ -20,8 +20,9 @@
  *
  * 공통화의 핵심 기법이 함수 포인터 타입 둘이다. 레지스터를 실제로
  * 만지는 부분만 호출자가 넘기게 하면, 나머지 논리는 한 벌로 충분해진다.
- *   cdns_pcie_linkup_func — 링크 상태를 읽는 방법. 구형은
- *     cdns_pcie_linkup(), 신형은 cdns_pcie_hpa_link_up() 을 넘긴다.
+ *   cdns_pcie_linkup_func — 링크 상태를 읽는 방법. 실제 호출부를
+ *     확인하면 구형은 cdns_pcie_link_up()(pcie-cadence.h 의 static
+ *     inline 디스패처)을, 신형은 cdns_pcie_hpa_link_up() 을 넘긴다.
  *   cdns_pcie_host_bar_ib_cfg — 인바운드 BAR 를 설정하는 방법.
  * 이 덕에 대기 루프나 BAR 배정 알고리즘 같은 복잡한 부분을 두 번
  * 쓰지 않아도 된다.
@@ -87,8 +88,12 @@ typedef int (*cdns_pcie_host_bar_ib_cfg)(struct cdns_pcie_rc *,
 					 u64,
 					 unsigned long);
 /* [한국어] 링크 상태를 읽는 함수의 형태.
- * 구형은 cdns_pcie_linkup(), 신형은 cdns_pcie_hpa_link_up() 이 이
- * 형태를 만족한다. 대기 루프가 이 포인터를 받아 반복 호출한다. */
+ * 이 형태를 만족하는 것으로 실제로 넘겨지는 것은 구형 경로의
+ * cdns_pcie_link_up()(pcie-cadence.h:432 의 static inline 디스패처)과
+ * 신형 경로의 cdns_pcie_hpa_link_up() 이다. 대기 루프가 이 포인터를
+ * 받아 반복 호출한다.
+ * 참고: cdns_pcie_linkup()(pcie-cadence.c:164)도 같은 형태이고
+ * EXPORT 되어 있지만 이 트리 안에서 호출자가 0건이다. */
 typedef bool (*cdns_pcie_linkup_func)(struct cdns_pcie *);
 
 /* [한국어] cdns_pcie_host_training_complete - 링크 트레이닝이 끝났는지 확인한다.
