@@ -3,30 +3,100 @@
  * PCI Message Signaled Interrupt (MSI) - irqdomain support
  */
 /*
- * NVMe: PCIe 기반 NVMe SSD가 커널에 MSI/MSI-X 인터럽트를 요청할 때
- *       PCI 서브시스템이 호출하는 핵심 irqdomain 지원 계층.
+ * [한국어 설명] MSI/MSI-X 를 커널 irq_domain 계층에 연결하는 다리 (irqdomain.c)
  *
- *       NVMe 호스트 드라이버(drivers/nvme/host/pci.c)에서는
- *       pci_enable_msix_range() / pci_alloc_irq_vectors() 등을 통해
- *       이 파일의 pci_msi_setup_msi_irqs(), pci_msi_teardown_msi_irqs(),
- *       pci_setup_msi_device_domain(), pci_setup_msix_device_domain() 등이
- *       간접적으로 호출된다.
+ * === 파일의 역할 ===
+ * msi.c 가 "이 장치에 벡터 N개가 필요하다" 는 것까지 알아냈다면, 이 파일은
+ * 그것을 커널의 인터럽트 라우팅 체계에 실제로 등록한다. 결과물은 두 가지다 -
+ * 드라이버가 request_irq() 에 넘길 Linux IRQ 번호(virq), 그리고 장치가
+ * 인터럽트를 보낼 때 써야 할 메시지(주소 + 데이터).
  *
- *       주요 경로:
- *         nvme_reset_work() -> nvme_setup_io_queues()
- *           -> pci_alloc_irq_vectors(ADF_MSIX) / pci_enable_msix_range()
- *             -> pci_setup_msix_device_domain()      — MSI-X device domain 생성
- *             -> msi_domain_alloc_irqs_all_locked()  — MSI-X vector 할당
- *         nvme_dev_disable()
- *           -> pci_free_irq_vectors()
- *             -> pci_msi_teardown_msi_irqs()         — MSI/MSI-X 해제
+ * 여기서 irq_domain 이라는 개념을 알아야 한다. 커널은 인터럽트 컨트롤러를
+ * 계층으로 본다. PCI 장치의 MSI 는 그 자체로 끝이 아니라, 그 위에 IOMMU 의
+ * 인터럽트 재매핑(x86 의 IR, ARM 의 ITS)이 있고, 다시 그 위에 실제 CPU 에
+ * 인터럽트를 꽂는 컨트롤러(APIC, GIC)가 있다. 각 계층이 하나의 irq_domain 이고,
+ * 벡터 하나를 할당하면 이 계층들이 위에서 아래로 순서대로 자기 몫을 채운다.
+ * 최종적으로 맨 위 계층이 정한 물리적 목적지가, 아래로 내려오면서 MSI 메시지
+ * 주소/데이터로 번역된다.
  *
- *       NVMe 입장에서 본 핵심 역할:
- *         - MSI/MSI-X interrupt domain 생성/제거
- *         - MSI message (address/data)를 PCI config space / MSI-X table에 기록
- *         - per-vector mask/unmask, startup/shutdown 콜백 등록
- *         - DMA alias, requester ID(RID) 산출 (IOMMU/IRQ remapping용)
- *         - hotplug / surprise removal 시 interrupt 자원 정리
+ * 그래서 이 파일이 하는 일은 크게 셋이다.
+ *   1) 장치별 MSI/MSI-X domain 을 만들어 상위 domain 에 매단다
+ *      (pci_setup_msi_device_domain / pci_setup_msix_device_domain).
+ *   2) 그 domain 의 chip 콜백 — mask/unmask/startup/shutdown 과
+ *      write_msg — 을 PCI 하드웨어 조작 함수에 연결한다.
+ *   3) 이 장치가 상위 컨트롤러에게 어떤 ID 로 보이는지(requester ID)를 계산한다
+ *      (pci_msi_domain_get_msi_rid). IOMMU 가 "누가 보낸 인터럽트인가" 를
+ *      판별하는 근거이고, 브리지 뒤의 장치는 ID 가 바뀌기 때문에 필요하다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * msi.c (msix_capability_init 등)
+ *   -> [이 파일] pci_msi_setup_msi_irqs()
+ *      -> msi_domain_alloc_irqs_all_locked()   (커널 공통 MSI 계층)
+ *         -> 상위 irq_domain 들이 차례로 벡터를 확보
+ *            -> 결정된 주소/데이터를 pci_msi_domain_write_msg() 로 되돌려 준다
+ *               -> [이 파일] -> msi.c 의 __pci_write_msi_msg()
+ *                  -> MSI capability 또는 MSI-X 테이블에 기록
+ *
+ * 실행 컨텍스트: 벡터 할당/해제(setup/teardown)와 domain 생성은 프로세스
+ * 컨텍스트. 반면 mask/unmask/startup/shutdown 콜백은 IRQ 코어가 인터럽트를
+ * 다루는 도중에 부르므로 잠들 수 없고, 대개 irq_desc 의 락을 쥔 상태다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: msi.c 가 pci_msi_setup_msi_irqs()/pci_msi_teardown_msi_irqs() 를 부른다.
+ * 아래쪽: kernel/irq/msi.c 의 공통 MSI 계층, 그리고 아키텍처별 IRQ 컨트롤러
+ *   드라이버(x86 의 arch/x86/kernel/apic/msi.c, ARM 의 GICv3-ITS 등).
+ * 옆쪽: ACPI IORT(acpi_iort.h)와 DeviceTree(of_irq.h) - 이 장치의 MSI 를
+ *   어느 컨트롤러가 담당하는지 펌웨어 기술에서 찾아내는 데 쓴다.
+ * 공유 상태: struct msi_desc (벡터 하나의 모든 정보), struct pci_dev 의
+ *   msi_domain 포인터, 그리고 irq_domain 트리 자체.
+ * 데이터 흐름: "몇 개 필요" 라는 요청이 위로 올라가고, "어느 CPU 의 어느
+ *   벡터" 라는 답이 메시지 형태로 내려온다. 이 파일이 그 왕복의 양 끝을 잇는다.
+ *
+ * === NVMe 관점 ===
+ * NVMe 드라이버가 이 파일의 함수를 직접 부르는 일은 없다. 전부 간접이다.
+ * 확인된 실제 경로는 이렇다.
+ *
+ *   nvme_setup_io_queues() -> nvme_setup_irqs()
+ *     -> pci_alloc_irq_vectors_affinity()          [msi/api.c]
+ *       -> __pci_enable_msix_range() -> msix_capability_init()   [msi/msi.c]
+ *         -> [이 파일] pci_msi_setup_msi_irqs()
+ *           -> msi_domain_alloc_irqs_all_locked()
+ *
+ * 이 파일이 NVMe 성능에 직접 관여하는 지점이 CPU affinity 다. NVMe 는
+ * struct irq_affinity 에 pre_vectors = 1 (0번은 admin 전용이라 분배 제외)과
+ * calc_sets = nvme_calc_irq_sets 를 채워 넘긴다. 그 규칙에 따라 상위
+ * domain 이 각 벡터를 서로 다른 CPU 에 배정하고, 그 결과가 다시
+ * pci_irq_get_affinity() 로 조회되어 blk-mq 의 하드웨어 큐 - CPU 매핑이 된다.
+ * "CPU 마다 자기 큐, 자기 인터럽트" 라는 NVMe 의 확장성이 여기서 완성된다.
+ *
+ * 벡터별 마스킹(pci_irq_mask_msix / pci_irq_unmask_msix)도 NVMe 와 얽힌다.
+ * MSI-X 는 벡터마다 Vector Control 의 0번 비트로 개별 마스킹이 가능해서,
+ * CPU 핫플러그로 그 벡터를 옮길 때 해당 큐의 인터럽트만 잠시 막을 수 있다.
+ * MSI 였다면 장치 전체를 막아야 했을 것이다.
+ *
+ * (기존 주석에 "pci_alloc_irq_vectors(ADF_MSIX)" 라고 적혀 있었으나
+ *  ADF_MSIX 는 커널에 없는 이름이다. NVMe 가 실제로 넘기는 것은
+ *  PCI_IRQ_ALL_TYPES | PCI_IRQ_AFFINITY 다. 위 내용으로 대체했다.)
+ *
+ * === 주요 함수/구조체 요약 ===
+ * pci_msi_setup_msi_irqs()      : 벡터 N개를 irq_domain 에 등록해 virq 를 얻는다.
+ *                                 계층형 domain 이 있으면 그쪽으로, 없으면
+ *                                 legacy.c 의 아키텍처 훅으로 내려간다.
+ * pci_msi_teardown_msi_irqs()   : 위의 역동작. 벡터를 반납한다.
+ * pci_msi_domain_write_msg()    : 상위 계층이 정한 주소/데이터를 받아
+ *                                 msi.c 의 하드웨어 기록 함수로 넘긴다.
+ * pci_irq_mask_msi/unmask_msi   : MSI 의 Mask Bits 를 통한 마스킹. 장치가
+ *                                 이 기능을 구현하지 않았으면 상위로 위임한다.
+ * pci_irq_mask_msix/unmask_msix : MSI-X 테이블의 Vector Control 비트를 통한
+ *                                 벡터별 마스킹. 항상 가능하다.
+ * pci_setup_msi_device_domain() / pci_setup_msix_device_domain()
+ *                               : 이 장치 전용 MSI/MSI-X domain 을 만든다.
+ *                                 MSI 로 켜 둔 장치를 MSI-X 로 바꾸려면
+ *                                 domain 을 갈아 끼워야 하므로 둘이 분리돼 있다.
+ * pci_msi_domain_get_msi_rid()  : 브리지를 거치며 바뀌는 requester ID 를
+ *                                 DMA alias 를 따라가며 계산한다. IOMMU 용.
+ * pci_msi_get_device_domain()   : 이 장치를 담당하는 MSI 컨트롤러의 domain 을
+ *                                 IORT/DeviceTree 에서 찾아낸다.
  */
 #include <linux/acpi_iort.h>    /* NVMe: ACPI/IORT를 통해 MSI controller node 탐색 */
 #include <linux/irqdomain.h>    /* NVMe: irq_domain, MSI domain API 사용 */

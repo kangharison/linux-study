@@ -8,47 +8,121 @@
  */
 
 /*
- * ===================================================================
- * NVMe PCIe 호스트 드라이버 관점 파일 요약
- * -------------------------------------------------------------------
- * 본 파일(drivers/pci/msi/msi.c)은 PCI/PCIe 장치의 MSI(Message Signaled
- * Interrupt) 및 MSI-X(Message Signaled Interrupt eXtended) 기능을 초기화,
- * 활성화, 비활성화, 복원하는 핵심 코드이다.
+ * [한국어 설명] MSI/MSI-X 하드웨어를 실제로 조작하는 구현부 (msi.c)
  *
- * NVMe SSD는 고성능 I/O를 위해 전통적인 INTx(legacy pin) 인터럽트 대신
- * MSI 또는 MSI-X를 사용한다. 특히 MSI-X는 하나의 NVMe 장치에 대해 수십
- * ~ 수백 개의 독립적인 인터럽트 벡터를 제공하므로, NVMe 드라이버가 각
- * Completion Queue(CQ)마다 전용 인터럽트 벡터를 할당하여 CPU affinity를
- * 세밀하게 조정할 수 있게 한다.
+ * === 파일의 역할 ===
+ * api.c 가 결정한 것을 실제 하드웨어에 반영하는 곳이다. config space 의 MSI /
+ * MSI-X capability 구조를 파싱하고, MSI-X 테이블이 놓인 BAR 영역을 ioremap 하고,
+ * 벡터마다 msi_desc 를 만들어 커널 MSI 계층에 등록하고, 마지막으로 Message
+ * Control 레지스터의 Enable 비트를 켠다. 해제는 그 역순이다.
  *
- * NVMe 드라이버에서의 대표적인 호출 경로:
- *   nvme_probe()
- *     -> nvme_setup_irqs()
- *        -> pci_alloc_irq_vectors_affinity(PCI_IRQ_ALL_TYPES | PCI_IRQ_AFFINITY)
- *           -> __pci_enable_msix_range()  (MSI-X 우선)
- *              또는 __pci_enable_msi_range() (MSI-X 실패 시 MSI 후보)
- *        -> pci_irq_vector()              (각 벡터의 Linux virq 획득)
- *        -> pci_request_irq()             (nvme_irq 핸들러 등록)
- *     -> nvme_reset_work() / queue_request_irq()
- *        -> pci_irq_vector(), pci_request_irq()
- *   nvme_remove() / nvme_reset_work()
- *     -> pci_free_irq()
- *     -> pci_free_irq_vectors()
- *        -> pci_msix_shutdown() / pci_msi_shutdown()
+ * 이 파일을 읽으려면 MSI 와 MSI-X 가 하드웨어적으로 얼마나 다른지를 알아야 한다.
  *
- * 본 파일에서 다루는 NVMe와 직접 연관된 주요 기능:
- *   - MSI/MSI-X capability 초기화 및 MSI message(Address/Data) 설정
- *   - MSI-X table(BAR 내 위치) 매핑 및 벡터별 mask/unmask
- *   - IRQ affinity mask 처리: NVMe 다중 큐의 CPU 분산에 사용
- *   - MSI/MSI-X 벡터 개수 협상: NVMe admin queue + I/O queue 수만큼 벡터 확보
- *   - 장치 D3cold/suspend 이후 __pci_restore_msi_state()로 MSI context 복원
- *   - P2PDMA/CMB, SR-IOV, AER, PCIe 포트 서비스, ATS, ReBAR, DPC 등은
- *     NVMe 입장에서 모두 PCIe 트랜잭션/주소 공간 기반 기능이며, MSI/MSI-X는
- *     이들과 독립적으로 동작하지만 NVMe 장치가 호스트/피어/가상함수 등에
- *     비동기 이벤트를 알리는 통로이므로 안정성에 결정적이다.
+ *   MSI  - 모든 정보가 config space 안의 capability 구조에 들어 있다.
+ *          Message Address(32 또는 64비트) 하나와 Message Data 하나가 전부다.
+ *          벡터가 여러 개여도 주소는 하나를 공유하고, 데이터의 하위 몇 비트만
+ *          벡터 번호로 바뀐다. 그래서 벡터 수가 2의 거듭제곱이어야 하고,
+ *          번호도 연속이어야 하며, 최대 32개다. 벡터별 마스킹은 선택 기능이라
+ *          없는 장치도 많다.
  *
- * 기존 커널 주석은 그대로 보존하고, NVMe 관점의 한국어 설명을 추가한다.
- * ===================================================================
+ *   MSI-X - capability 구조에는 "테이블이 어느 BAR 의 어느 오프셋에 있는가"
+ *          (Table Offset/BIR)만 적혀 있고, 실제 벡터 정보는 그 BAR 안의
+ *          MSI-X Table 에 있다. 항목 하나가 16바이트(주소 하위 4 + 상위 4 +
+ *          데이터 4 + 벡터 제어 4)이고, 최대 2048개다. 항목마다 주소가 따로라
+ *          벡터별로 다른 CPU 를 지정할 수 있고, Vector Control 의 0번 비트로
+ *          벡터별 마스킹이 항상 가능하다.
+ *
+ * 이 차이 때문에 이 파일의 코드가 msi_ 계열과 msix_ 계열 두 갈래로 크게 나뉜다.
+ * MSI-X 쪽이 BAR 매핑(msix_map_region)이라는 추가 단계를 갖는 것이 핵심 차이다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * api.c (드라이버가 부르는 얼굴)
+ *   -> [이 파일] __pci_enable_msi_range() / __pci_enable_msix_range()
+ *      -> msi_capability_init() / msix_capability_init()
+ *         -> msix_map_region()          : MSI-X 테이블이 있는 BAR 영역을 ioremap
+ *         -> msix_setup_msi_descs()     : 벡터마다 msi_desc 를 만들어 등록
+ *         -> pci_msi_setup_msi_irqs()   : irqdomain.c 로 넘겨 실제 IRQ 번호 확보
+ *            -> 아키텍처 IRQ 컨트롤러가 주소/데이터를 정해 돌려준다
+ *         -> msix_update_entries()      : 정해진 주소/데이터를 MSI-X 테이블에 기록
+ *         -> pci_msix_clear_and_set_ctrl(): Enable 비트를 켜고 Function Mask 를 푼다
+ *
+ * 실행 컨텍스트: 대부분 프로세스 컨텍스트(뮤텍스와 메모리 할당이 있다).
+ * 예외적으로 pci_msi_mask_irq()/pci_msi_unmask_irq() 와 __pci_write_msi_msg()
+ * 계열은 인터럽트 처리 도중 IRQ 코어가 부를 수 있어 잠들지 않는다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: api.c (공개 API), pcidev_msi.c (장치 발견 시 초기 비활성화).
+ * 아래쪽: irqdomain.c (irq_domain 에 벡터 등록), ../pci.h 의 config 접근 함수,
+ *   그리고 커널 공통 MSI 계층(kernel/irq/msi.c)의 msi_desc 저장소.
+ * 공유 상태:
+ *   - struct pci_dev 의 msi_cap / msix_cap (capability 오프셋),
+ *     msi_enabled / msix_enabled (현재 상태), msi_irq_groups (sysfs).
+ *   - struct msi_desc 의 pci.mask_base (MSI-X 테이블의 가상 주소),
+ *     pci.msi_mask / pci.msix_ctrl (마스크 레지스터의 소프트웨어 캐시).
+ *     캐시를 두는 이유는 MSI-X 테이블 읽기가 느리고, 마스킹이 인터럽트
+ *     처리 경로에서 일어나기 때문이다.
+ * 데이터 흐름: capability 레지스터 -> msi_desc -> irqdomain -> 아키텍처가 정한
+ *   message address/data -> 다시 하드웨어(MSI capability 또는 MSI-X 테이블).
+ *   즉 정보가 하드웨어에서 올라갔다가 다시 내려온다.
+ *
+ * === NVMe 드라이버가 실제로 쓰는 것 (drivers/nvme/ 전수 확인) ===
+ * NVMe 드라이버는 이 파일의 함수를 직접 부르지 않는다. 전부 api.c 를 거친다.
+ * 주석을 제거한 drivers/nvme/ 검색으로 확인한 실제 호출과 그 아래 경로다.
+ *
+ *   nvme_pci_enable()
+ *     -> pci_alloc_irq_vectors(pdev, 1, 1, flags)      [api.c]
+ *        -> [이 파일] __pci_enable_msix_range(...)
+ *           -> msix_capability_init()  : 테이블 매핑 + 벡터 1개 등록 + Enable
+ *      admin 큐 하나만 돌리기 위한 최소 구성이다.
+ *
+ *   nvme_setup_io_queues()
+ *     -> pci_free_irq_vectors(pdev)                    [api.c]
+ *        -> [이 파일] pci_msix_shutdown() -> pci_free_msi_irqs()
+ *     -> nvme_setup_irqs() -> pci_alloc_irq_vectors_affinity(...)
+ *        -> [이 파일] __pci_enable_msix_range(...) 를 다시
+ *      벡터 수를 늘리려면 껐다 켜는 수밖에 없다. MSI-X Enable 상태에서
+ *      테이블 크기를 바꿀 방법이 하드웨어에 없기 때문이다.
+ *
+ *   전원 복귀(D3cold -> D0) 시
+ *     pci_restore_state() -> pci_restore_msi_state()   [api.c]
+ *       -> [이 파일] __pci_restore_msix_state()
+ *      MSI-X 테이블은 장치 안의 메모리라 전원이 끊기면 내용이 날아간다.
+ *      그래서 커널이 msi_desc 에 캐시해 둔 주소/데이터를 다시 써 넣는다.
+ *      NVMe 드라이버 코드에는 이 호출이 없다 - PCI 코어가 대신 한다.
+ *
+ * NVMe 가 요청하는 벡터 수: "admin 1개 + (I/O 큐 수 - 폴링 큐 수)".
+ * 폴링 큐를 빼는 이유는 그 큐가 인터럽트 대신 blk-mq 의 poll 경로로
+ * 완료를 확인하기 때문이다. NVME_QUIRK_SINGLE_VECTOR 가 걸린 Apple
+ * 컨트롤러는 모든 큐가 0번 벡터를 공유해야 해서 1개만 요청한다.
+ *
+ * 핸들러 등록/해제는 이 파일이 아니라 drivers/pci/irq.c 가 담당한다.
+ * NVMe 는 queue_request_irq() 에서 pci_request_irq(pdev, nvmeq->cq_vector, ...) 로
+ * 벡터에 nvme_irq / nvme_irq_check 핸들러를 걸고, pci_free_irq() 로 뗀다.
+ * 즉 "벡터를 몇 개 확보하느냐"(이 파일)와 "그 벡터에 어떤 함수를 거느냐"
+ * (irq.c)가 서로 다른 계층이다.
+ *
+ * (기존 주석에 P2PDMA/CMB/SR-IOV/AER/ATS/ReBAR/DPC 를 나열한 문단이 있었으나
+ *  이 파일의 코드와 아무 관계가 없어 삭제했다.)
+ *
+ * === 주요 함수/구조체 요약 ===
+ * msi_capability_init()      : MSI capability 를 읽어 msi_desc 를 만들고 Enable.
+ *                              벡터 수를 2의 거듭제곱으로 내림하는 처리가 여기 있다.
+ * msix_capability_init()     : MSI-X 테이블을 매핑하고 벡터들을 등록한 뒤 Enable.
+ *                              등록 전에 모든 벡터를 마스크해 두는 순서가 중요하다.
+ * msix_map_region()          : Table Offset/BIR 을 해석해 테이블이 있는 물리 주소를
+ *                              구하고 ioremap 한다. MSI-X 만의 단계다.
+ * msix_mask_all()            : 테이블의 모든 항목을 마스크. 켜자마자 엉뚱한
+ *                              인터럽트가 오는 것을 막는다.
+ * pci_msi_update_mask()      : MSI 의 Mask Bits 레지스터를 갱신(캐시 포함).
+ * pci_msix_clear_and_set_ctrl(): Message Control 레지스터의 비트를 read-modify-write.
+ * __pci_write_msi_msg()      : 결정된 주소/데이터를 하드웨어에 기록. MSI 면 config
+ *                              space 에, MSI-X 면 테이블 항목에 쓴다.
+ * __pci_restore_msi_state() / __pci_restore_msix_state() : 전원 복귀 후 복원.
+ * pci_intx_for_msi()         : MSI 를 켤 때 INTx 를 끄고, 끌 때 다시 켠다.
+ *                              두 방식이 동시에 활성이면 인터럽트가 두 번 온다.
+ * pci_msi_enable (전역 bool) : "pci=nomsi" 부팅 인자로 MSI 전체를 끄는 스위치.
+ *
+ * 기존 커널 영어 주석은 그대로 보존하고, 한국어 설명을 위/옆에 추가한다.
  */
 #include <linux/bitfield.h> /* NVMe: 비트 필드 매크로(u32/u16 추출/조합)를 위해 포함. */
 #include <linux/err.h>      /* NVMe: 오류 코드(IS_ERR_VALUE 등) 정의 포함. */
