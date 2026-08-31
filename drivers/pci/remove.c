@@ -1,31 +1,87 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * ===================================================================
- * NVMe PCIe 호스트 드라이버 관점 파일 요약
- * -------------------------------------------------------------------
- * 본 파일(drivers/pci/remove.c)은 PCI 장치 및 하위 bus를 제거(stop/remove)
- * 하는 핵심 경로를 구현한다. NVMe SSD 입장에서 본 파일은 장치의 수명
- * 주기(lifecycle) 종료, 즉 hot-unplug, 드라이버 언바인드, 시스템 종료/
- * suspend/resume 과정에서 간접적으로 호출되며 다음과 같은 NVMe 관련
- * 정리 작업을 수행한다.
- *   - NVMe 드라이버(nvme_probe()/nvme_remove())와의 바인딩 해제
- *   - NVMe BAR(특히 BAR0 doorbell/register 영역)에 매핑된 리소스 반납
- *   - MSI-X/IRQ/ASPM/config space 관련 link state 및 전원 상태 정리
- *   - DMA/IOMMU 매핑과 관련된 struct device의 참조 카운트 정리
- *   - NVMe 장치가 연결된 bus 및 상위 root bus 제거
- * 일반적인 NVMe 장치 제거 호출 경로:
- *   사용자 공간 hotplug / ACPI notify -> pci_stop_and_remove_bus_device()
- *   -> pci_stop_bus_device() -> pci_stop_dev()
- *      -> device_release_driver(&pdev->dev) -> nvme_remove()
- *   -> pci_remove_bus_device() -> pci_destroy_dev()
- *      -> pcie_aspm_exit_link_state() (ASPM link state 종료)
- *      -> pci_free_resources() (BAR 리소스 반납)
- *      -> put_device() (DMA/IOMMU 등 struct device 참조 해제)
- * NVMe 장치가 연결된 root bus 전체를 제거할 때는 pci_stop_root_bus()와
- * pci_remove_root_bus()가 사용되며, 이 때 host bridge의 domain_nr 및
- * bus 리소스도 함께 해제된다.
- * ===================================================================
+ * [한국어 설명] 장치와 버스를 커널에서 떼어 내는 경로 (remove.c)
+ *
+ * === 파일의 역할 ===
+ * probe.c 가 만든 것을 되돌린다. 파일이 짧은데도 따로 존재하는 이유는
+ * 제거 순서가 까다롭기 때문이다. 순서를 어기면 이미 사라진 장치에
+ * config 접근을 시도하거나, 아직 실행 중인 드라이버 코드 밑에서 자료구조가
+ * 사라진다.
+ *
+ * 그래서 제거가 "stop" 과 "remove" 두 단계로 나뉜다.
+ *   stop  : 드라이버를 떼고(device_release_driver), 장치를 sysfs 에서 내리고,
+ *           이후 아무도 이 장치를 새로 잡지 못하게 한다. 이 단계가 끝나면
+ *           장치는 아직 자료구조로 존재하지만 아무도 쓰지 않는 상태다.
+ *   remove: 자원을 반납하고 struct pci_dev 를 실제로 없앤다.
+ *
+ * 두 단계로 나눈 덕분에 "서브트리 전체를 먼저 stop 한 뒤, 그다음 전체를
+ * remove" 하는 순서가 가능해진다. 부모 브리지를 제거하기 전에 그 아래
+ * 모든 자식이 먼저 멈춰 있어야 하는데, 한 단계로는 그 보장을 만들기 어렵다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * 계기: 핫플러그(pciehp/acpiphp), sysfs 의 remove 속성, 드라이버 모듈 제거,
+ *       surprise removal 감지, 호스트 브리지 드라이버 언로드.
+ *
+ *   pci_stop_and_remove_bus_device(dev)
+ *     -> pci_stop_bus_device(dev)      : 아래에서 위로 stop
+ *        -> (자식 버스가 있으면 재귀)
+ *        -> pci_stop_dev(dev)
+ *           -> device_release_driver() -> pci_device_remove() -> nvme_remove()
+ *           -> pci_dev_assign_added(dev, false)
+ *     -> pci_remove_bus_device(dev)    : 아래에서 위로 remove
+ *        -> pci_remove_bus()           : 자식 버스 객체 제거
+ *        -> pci_destroy_dev(dev)
+ *           -> pci_free_resources()    : BAR 자원 목록에서 해제
+ *           -> put_device()            : 마지막 참조가 사라지면 kfree
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트 전용. device_release_driver() 가 드라이버의
+ * remove 콜백을 부르고 그 안에서 잠들 수 있다. 대부분의 진입점이
+ * pci_rescan_remove_lock 을 요구한다(_locked 판은 호출자가 이미 쥔 경우).
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: hotplug/ 의 pciehp·acpiphp, pci-sysfs.c 의 remove 속성,
+ *   probe.c 의 재스캔 실패 처리.
+ * 아래쪽: 드라이버 모델(device_release_driver, device_del), pci.c 의
+ *   pcie_aspm_exit_link_state·전원 관리, bus.c 의 자원 목록.
+ * 공유 상태: 부모 버스의 devices 목록, pci_rescan_remove_lock,
+ *   struct pci_dev 의 참조 카운트(put_device 가 0 으로 만들 때 실제 해제).
+ *
+ * === NVMe 관점 ===
+ * NVMe 드라이버는 이 파일의 함수를 직접 부르지 않는다(전수 확인).
+ * 반대로 이 파일이 NVMe 를 부른다 — pci_stop_dev() 안의
+ * device_release_driver() 가 결국 nvme_remove() 를 실행한다.
+ *
+ * NVMe 학습에서 이 파일이 중요한 이유는 "뽑힌 SSD" 의 처리 순서 때문이다.
+ * U.2/EDSFF 백플레인에서 드라이브를 뽑으면 이런 일이 벌어진다.
+ *
+ *   1) 하류 포트의 Presence Detect Changed 인터럽트 -> pciehp
+ *   2) pciehp -> pci_stop_and_remove_bus_device()
+ *   3) pci_stop_dev() -> nvme_remove()
+ *        NVMe 는 여기서 진행 중인 I/O 를 모두 실패 처리하고, 큐를 없애고,
+ *        블록 장치를 등록 해제한다. 이 시점에 컨트롤러는 이미 응답하지
+ *        않으므로, NVMe 는 config 읽기가 all-ones 를 돌려주는 것으로
+ *        "장치 없음" 을 판정한다(access.c 의 pci_dev_is_disconnected 참조).
+ *   4) pci_destroy_dev() -> BAR 자원 반납 -> struct pci_dev 해제
+ *
+ * 반대로 nvme_remove() 가 오래 걸리면(진행 중인 I/O 를 정리하느라) 3번에서
+ * 오래 머문다. 그동안 4번은 시작되지 않으므로, 드라이버가 아직 BAR 를
+ * 쓰고 있는데 자원이 해제되는 일은 생기지 않는다.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * pci_stop_dev()                      : 드라이버를 떼고 sysfs 에서 내린다.
+ *                                       이미 stop 된 장치면 아무것도 하지 않는다.
+ * pci_destroy_dev()                   : 자원을 반납하고 참조를 놓는다.
+ * pci_stop_bus_device()               : 서브트리를 잎부터 stop.
+ * pci_remove_bus_device()             : 서브트리를 잎부터 remove.
+ * pci_stop_and_remove_bus_device()    : 위 둘을 순서대로. 가장 흔한 진입점.
+ * pci_stop_and_remove_bus_device_locked() : 호출자가 이미
+ *                                       pci_rescan_remove_lock 을 쥔 경우용.
+ * pci_stop_root_bus() / pci_remove_root_bus() : 호스트 브리지 전체를 내린다.
+ *                                       브리지 드라이버 언로드 시.
+ * pci_remove_bus()                    : struct pci_bus 객체 자체를 제거.
+ * pci_free_resources()                : 이 장치가 쓰던 BAR 구간을 자원 트리에서 해제.
  */
+
 #include <linux/pci.h> /* NVMe: PCI 핵심 자료구조와 함수 선언. */
 #include <linux/module.h> /* NVMe: 모듈 로드/언로드 시 사용. */
 #include <linux/of.h> /* NVMe: Open Firmware(Device Tree) 관련 헬퍼. */

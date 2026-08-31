@@ -1,4 +1,7 @@
-// SPDX-License-Identifier: GPL-2.0	/* NVMe: GPL-2.0 라이선스 선언. */
+// SPDX-License-Identifier: GPL-2.0
+/* [한국어] 위 SPDX 줄은 커널의 라이선스 표기 규약이다. 파일 첫 줄에
+ * 정확한 형식으로만 있어야 scripts/spdxcheck.py 가 인식하므로,
+ * 그 줄에는 어떤 내용도 덧붙이지 않는다. */
 /*
  * Generic PCI resource mmap helper
  *

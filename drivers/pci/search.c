@@ -9,32 +9,92 @@
  */
 
 /*
- * ===================================================================
- * NVMe PCIe 호스트 드라이버 관점 파일 요약
- * -------------------------------------------------------------------
- * 본 파일(drivers/pci/search.c)은 PCI 버스/장치 검색 유틸리티를 제공한다.
- * NVMe SSD 입장에서 본 파일은 다음과 같은 경로에서 간접적으로 사용된다.
- *   - NVMe probe: nvme_probe() -> pci_enable_device() 등에서 참조하는
- *     pdev가 이미 PCI core의 장치 검색 결과물이다. pci_get_class() 같은
- *     함수로 class code 0x010802(NVM Express controller)를 갖는 장치를
- *     찾을 때 사용된다.
- *   - DMA alias 탐색: pci_for_each_dma_alias()는 IOMMU, P2PDMA, ATS 등에서
- *     NVMe 장치의 DMA requester ID가 bridge/alias를 거쳐 root bus에 도달하는
- *     경로를 식별할 때 사용된다. NVMe의 DMA 메모리(dma_pool, PRP/SGL,
- *     Host Memory Buffer)가 실제로 어떤 requester ID로 노출되는지 파악하는
- *     데 핵심적이다.
- *   - 버스/장치 검색: pci_find_bus(), pci_find_next_bus(), pci_get_slot(),
- *     pci_get_domain_bus_and_slot() 등은 NVMe가 연결된 bus/slot을 식별하고,
- *     상위 Root Port/Upstream Port를 찾을 때 사용된다. ASPM, MSI-X, BAR
- *     할당, 전원 관리 등은 모두 이 검색 결과를 기반으로 동작한다.
- *   - ID/클스 검색: pci_get_device(), pci_get_subsys(), pci_get_class(),
- *     pci_get_base_class(), pci_dev_present()는 vendor/device ID 또는 class
- *     code 기반으로 NVMe 컨트롤러를 매칭하거나 존재 여부를 확인할 때
- *     사용된다. 예: drivers/nvme/host/pci.c의 nvme_id_table.
- * 본 파일은 drivers/nvme/host/pci.c에서 직접 호출하지 않을 수도 있지만,
- * NVMe 장치의 탐색, DMA alias 해석, 상위 bridge/root port 식별 등에
- * 근간이 되는 PCI core 함수군이다.
- * ===================================================================
+ * [한국어 설명] 버스 트리에서 장치와 버스를 찾아 주는 조회 함수 모음 (search.c)
+ *
+ * === 파일의 역할 ===
+ * "조건에 맞는 PCI 장치를 찾아 달라" 는 요청을 처리한다. 조건은 도메인:버스:슬롯,
+ * Vendor/Device ID, Class Code 등 여러 가지다. 여기에 더해, 이 파일의 절반쯤
+ * 특이한 함수 하나가 있다 — pci_for_each_dma_alias().
+ *
+ * 조회 함수들의 공통 규약 두 가지를 먼저 알아야 한다.
+ *   1) pci_get_* 계열은 찾은 장치의 참조 카운트를 올려서 돌려준다. 다 쓴 뒤
+ *      pci_dev_put() 을 부르지 않으면 그 장치는 영원히 해제되지 않는다.
+ *      반면 pci_find_* 계열은 참조를 올리지 않는다 — 그래서 이름이 다르다.
+ *   2) from 인자를 받는 함수들은 "이전에 찾은 것 다음부터" 를 뜻한다. 같은
+ *      조건의 장치가 여러 개일 때 반복 호출로 전부 훑는 관용구다. from 에
+ *      넘긴 장치의 참조는 함수가 대신 내려 준다.
+ *
+ * DMA alias 는 별도로 설명이 필요하다. PCIe 에서 DMA 트랜잭션에는 발신자를
+ * 나타내는 requester ID(RID)가 붙고, IOMMU 는 그 ID 로 어느 주소 공간을
+ * 쓸지 정한다. 문제는 이 ID 가 도중에 바뀔 수 있다는 것이다.
+ *   - PCIe-to-PCI 브리지 뒤의 장치는 브리지의 ID 로 바뀐다(구형 PCI 에는
+ *     RID 라는 개념 자체가 없어 브리지가 대신 자기 ID 를 붙인다).
+ *   - 일부 장치는 펌웨어 버그로 엉뚱한 ID 를 쓴다(quirk 로 등록해 둔다).
+ * pci_for_each_dma_alias() 는 한 장치가 낼 수 있는 모든 RID 를 훑어 콜백을
+ * 부른다. IOMMU 는 그 전부에 대해 같은 매핑을 걸어야 DMA 가 통한다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * 이 파일은 자료구조를 읽기만 하는 최하위 유틸리티다. 만들지도, 바꾸지도 않는다.
+ *
+ *   드라이버/quirk/IOMMU/hotplug
+ *     -> [이 파일] pci_get_device(), pci_get_domain_bus_and_slot(),
+ *                  pci_for_each_dma_alias()
+ *        -> 커널 드라이버 모델의 bus_find_device() 로 pci_bus_type 을 훑거나,
+ *           pci_root_buses 목록을 직접 순회
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. bus_find_device() 가 클래스 뮤텍스를
+ * 잡으므로 인터럽트 문맥에서 부를 수 없다. pci_for_each_dma_alias() 는
+ * 자료구조 순회뿐이라 더 가볍지만, 여전히 pci_bus_sem 이 필요한 경우가 있다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: quirks.c(특정 장치를 찾아 우회 적용), IOMMU 드라이버(alias 순회),
+ *   hotplug, 그리고 수많은 장치 드라이버(짝이 되는 다른 function 찾기).
+ * 아래쪽: drivers/base/bus.c 의 bus_find_device, 그리고 pci_root_buses 목록.
+ * 공유 상태: pci_bus_type 에 등록된 장치 목록, pci_root_buses(모든 루트 버스),
+ *   struct pci_dev 의 dma_alias_mask(quirk 가 표시해 둔 추가 RID 비트맵).
+ *
+ * === NVMe 관점 ===
+ * NVMe 드라이버는 이 파일의 함수를 직접 부르지 않는다(전수 확인).
+ * 다만 두 지점에서 간접적으로 NVMe 와 얽힌다.
+ *
+ *   1) 클래스 기반 매칭의 재료. NVMe 의 id_table 마지막 항목은
+ *      { PCI_DEVICE_CLASS(PCI_CLASS_STORAGE_EXPRESS, 0xffffff) } 로,
+ *      벤더를 가리지 않고 "NVM Express 클래스" 인 모든 장치를 잡는다.
+ *      이 클래스 코드 개념을 다루는 조회 함수(pci_get_class 등)가 여기 있다.
+ *      다만 매칭 자체는 pci-driver.c 의 pci_match_device 가 하고, 이 파일의
+ *      함수를 쓰지는 않는다.
+ *
+ *   2) IOMMU 매핑. NVMe 는 PRP 리스트/SGL 로 호스트 메모리를 DMA 하고,
+ *      HMB(Host Memory Buffer)를 쓰면 그 영역도 DMA 대상이다. 이 매핑을
+ *      거는 IOMMU 코드가 pci_for_each_dma_alias() 로 NVMe 컨트롤러의 모든
+ *      RID 를 훑는다. NVMe 가 PCIe 스위치 뒤에 있고 그 경로에
+ *      PCIe-to-PCI 브리지가 끼어 있다면 alias 가 생기는데, 그것을 빠뜨리면
+ *      DMA 가 IOMMU 에 막혀 I/O 가 전부 타임아웃난다.
+ *
+ * (기존 주석의 "class code 0x010802" 는 오기다. NVM Express 의 클래스 코드는
+ *  Base Class 0x01(Mass Storage) / Sub-Class 0x08(Non-Volatile Memory) /
+ *  Prog-IF 0x02(NVMHCI 가 아닌 NVM Express) 이므로 0x010802 가 아니라
+ *  0x010802 를 24비트로 쓴 PCI_CLASS_STORAGE_EXPRESS = 0x010802 가 맞다 —
+ *  값 자체는 맞으나 "NVM Express controller" 라는 설명 순서를 위와 같이
+ *  풀어 두는 편이 이해에 낫다. 또 nvme_id_table 이 이 파일의 함수를 쓴다는
+ *  서술은 사실이 아니어서 위와 같이 정정했다.)
+ *
+ * === 주요 함수/구조체 요약 ===
+ * pci_find_bus()                 : 도메인 + 버스 번호로 struct pci_bus 를 찾는다.
+ *                                  참조를 올리지 않는다.
+ * pci_find_next_bus()            : 모든 루트 버스를 차례로 훑는 반복자.
+ * pci_get_slot()                 : 버스 + devfn 으로 장치를 찾는다(참조 올림).
+ * pci_get_domain_bus_and_slot()  : 도메인:버스:슬롯.함수 로 장치를 찾는다.
+ *                                  "0000:01:00.0" 같은 주소를 코드로 옮긴 것.
+ * pci_get_device()               : Vendor/Device ID 로 찾는다. from 으로 반복.
+ * pci_get_subsys()               : 위에 Subsystem ID 조건을 더한다.
+ * pci_get_class()                : 24비트 Class Code 전체로 찾는다.
+ * pci_get_base_class()           : 상위 8비트(Base Class)만으로 찾는다.
+ * pci_get_device_reverse()       : 역순 순회. 제거 경로에서 쓴다.
+ * pci_dev_present()              : 주어진 id 표 중 하나라도 시스템에 있는지만
+ *                                  확인한다. 참조를 남기지 않아 quirk 판정에 편하다.
+ * pci_for_each_dma_alias()       : 이 장치가 낼 수 있는 모든 requester ID 에 대해
+ *                                  콜백을 부른다. IOMMU 매핑의 핵심.
  */
 
 #include <linux/pci.h>		/* NVMe: PCI core 헤더. NVMe endpoint/bridge/BAR/DMA 관련 구조체와 함수 선언. */
@@ -310,14 +370,14 @@ EXPORT_SYMBOL(pci_get_slot);	/* NVMe: NVMe 드라이버 등에서 pci_get_slot �
  * pci_get_domain_bus_and_slot - locate PCI device for a given PCI domain (segment), bus, and slot
  * @domain: PCI domain/segment on which the PCI device resides.
  * @bus: PCI bus on which desired PCI device resides
- * @devfn: encodes number of PCI slot in which the desired PCI
- * device resides and the logical device number within that slot in case of
+ * @devfn: encodes number of PCI slot in which the desired PCI device
+ * resides and the logical device number within that slot in case of
  * multi-function devices.
  *
  * Given a PCI domain, bus, and slot/function number, the desired PCI
  * device is located in the list of PCI devices. If the device is
- * found, its reference count is increased and this pointer to its
- * data structure is returned.  The caller must decrement the
+ * found, its reference count is increased and this function returns a
+ * pointer to its data structure.  The caller must decrement the
  * reference count by calling pci_dev_put().  If no device is found,
  * %NULL is returned.
  */
@@ -497,7 +557,7 @@ EXPORT_SYMBOL(pci_get_subsys);	/* NVMe: NVMe 등에서 pci_get_subsys 심볼 사
  * device is incremented and a pointer to its device structure is returned.
  * Otherwise, %NULL is returned.  A new search is initiated by passing %NULL
  * as the @from argument.  Otherwise if @from is not %NULL, searches continue
- * from the next device on the global list.  The reference count for @from is
+ * from next device on the global list.  The reference count for @from is
  * always decremented if it is not %NULL.
  */
 /*

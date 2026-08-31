@@ -5,27 +5,104 @@
  */
 
 /*
- * ===================================================================
- * NVMe PCIe 호스트 드라이버 관점 파일 요약
- * -------------------------------------------------------------------
- * 본 파일(drivers/pci/pci-driver.c)은 PCI 코어의 "디바이스-드라이버 바인딩/라이프사이클"
- * 계층이다. pci_bus_type을 등록하고, PCI 디바이스를 pci_driver(probe/remove/shutdown/PM
- * 콜백)에 연결한다.
- * NVMe PCIe SSD 입장에서 본 파일은 PCI 버스 열거(drivers/pci/probe.c, bus.c, pci.c) 이후
- * nvme_probe()가 호출되기 직전의 중간 관문이며, 다음 NVMe 동작에 직접 관여한다.
- *   - BAR 할당: NVMe controller registers(BAR0, doorbell 영역) 매핑 준비
- *   - IRQ 라우팅: MSI/MSI-X 벡터 할당 및 CPU affinity 설정
- *   - DMA/IOMMU: NVMe PRP/SGL에 사용되는 dma_addr_t 변환 및 default domain 설정
- *   - 전원 관리: ASPM/D-state, S3/S4, runtime suspend-resume 조정
- * 일반적인 NVMe 드라이버 호출 경로:
- *   nvme_probe -> pci_enable_device -> pci_request_regions ->
- *   pci_iomap(pci_resource_start(pdev, 0), pci_resource_len(pdev, 0)) ->
- *   dma_set_mask -> pci_enable_msix_range -> nvme_reset_work ->
- *   nvme_create_queue -> doorbell access
- * 본 파일은 drivers/pci/probe.c, bus.c, pci.c 등에서 먼저 수행된 후 간접적으로
- * 호출되며, NVMe 드라이버가 직접 호출하지는 않지만 NVMe 컨트롤러 초기화·라이프사이클
- * 관리의 근간이 된다.
- * ===================================================================
+ * [한국어 설명] 장치와 드라이버를 짝지어 주는 PCI 버스 타입 구현 (pci-driver.c)
+ *
+ * === 파일의 역할 ===
+ * 커널의 드라이버 모델에서 "버스" 는 장치와 드라이버를 이어 주는 중매인이다.
+ * 이 파일이 PCI 버스의 그 역할을 구현한다. 구체적으로 세 가지를 한다.
+ *
+ *   1) 짝짓기(matching). pci_bus_match() 가 장치의 Vendor/Device/Class ID 를
+ *      드라이버가 등록한 id_table 과 대조한다. 맞으면 커널이 그 드라이버의
+ *      probe 를 부른다.
+ *   2) 생애주기. pci_device_probe() / pci_device_remove() / pci_device_shutdown()
+ *      이 드라이버의 콜백을 부르기 전후로 PCI 고유의 준비와 정리를 한다 —
+ *      전원 상태를 D0 로 올리고, DMA 마스크를 설정하고, 참조 카운트를 잡는다.
+ *   3) 전원 관리. 파일의 절반 이상이 pci_pm_* 함수들인데, 시스템 절전(S3/S4)과
+ *      런타임 절전의 각 단계에서 PCI 표준 동작(config space 저장/복원,
+ *      D-state 전환, PME 설정)을 수행하고 그 사이사이에 드라이버 콜백을 끼워 넣는다.
+ *
+ * 이 파일을 읽을 때 헷갈리기 쉬운 점 하나. pci_pm_* 함수가 스무 개 넘게 있는
+ * 이유는 커널 PM 코어가 절전을 여러 단계로 쪼개 놓았기 때문이다. prepare ->
+ * suspend -> suspend_late -> suspend_noirq 순으로 내려가는데, 뒤로 갈수록
+ * 할 수 있는 일이 줄어든다(noirq 단계에서는 인터럽트가 꺼져 있다). 그리고
+ * 시스템 절전(suspend), 최대 절전(freeze/thaw/poweroff/restore), 런타임 절전이
+ * 각각 자기 계열을 갖는다. 그래서 조합이 스무 개가 넘는다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * 장치 발견 (probe.c: pci_scan_device -> pci_device_add)
+ *   -> device_add() -> 드라이버 모델이 pci_bus_type 의 match 를 부른다
+ *      -> [이 파일] pci_bus_match() -> pci_match_device()
+ *         -> 맞으면 -> [이 파일] pci_device_probe()
+ *            -> pci_assign_irq(), pci_enable_device() 등 사전 준비
+ *            -> local_pci_probe() -> drv->probe()   <- 여기서 nvme_probe() 실행
+ *
+ * 절전 시:
+ *   PM 코어 -> [이 파일] pci_pm_suspend() -> drv->pm->suspend()
+ *           -> [이 파일] pci_pm_suspend_noirq() -> pci_save_state(),
+ *              pci_prepare_to_sleep() -> 장치를 D3 로
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. probe 는 PROBE_PREFER_ASYNCHRONOUS 를
+ * 지정한 드라이버(NVMe 가 그렇다)면 별도 워커 스레드에서 비동기로 실행된다.
+ * _noirq 계열 PM 콜백만 인터럽트가 꺼진 상태에서 불린다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: 커널 드라이버 모델(drivers/base/dd.c, drivers/base/power/main.c).
+ *   이 파일은 struct bus_type pci_bus_type 과 struct dev_pm_ops pci_dev_pm_ops 를
+ *   채워 그쪽에 넘기는 형태로만 관여한다.
+ * 아래쪽: pci.c 의 pci_enable_device/pci_save_state/pci_set_power_state,
+ *   irq.c 의 pcibios_alloc_irq, iov.c 의 SR-IOV 처리.
+ * 옆쪽: 각 PCI 드라이버의 struct pci_driver. 이 파일은 그 안의 함수 포인터를
+ *   적절한 시점에 부르는 것이 일이다.
+ * 공유 상태: struct pci_dev 의 driver 포인터(현재 바인딩된 드라이버),
+ *   is_probed / state_saved 플래그, 그리고 struct pci_dynid 목록
+ *   (sysfs 의 new_id/remove_id 로 런타임에 추가한 ID).
+ *
+ * === NVMe 드라이버가 실제로 쓰는 것 (drivers/nvme/ 전수 확인) ===
+ * NVMe 가 이 파일에서 직접 부르는 함수는 사실상 등록/해제 한 쌍뿐이다.
+ *
+ *   nvme_init()  -> pci_register_driver(&nvme_driver)
+ *                   (매크로가 __pci_register_driver(drv, THIS_MODULE, KBUILD_MODNAME) 로 펼친다)
+ *   nvme_exit()  -> pci_unregister_driver(&nvme_driver)
+ *
+ * 나머지는 전부 반대 방향이다 — 이 파일이 NVMe 를 부른다.
+ * struct pci_driver nvme_driver 에 등록된 것들:
+ *   .probe    = nvme_probe            <- pci_device_probe -> local_pci_probe 가 부른다
+ *   .remove   = nvme_remove           <- pci_device_remove 가 부른다
+ *   .shutdown = nvme_shutdown         <- pci_device_shutdown 이 부른다
+ *   .id_table = nvme_id_table         <- pci_match_device 가 대조한다
+ *   .driver.pm = &nvme_dev_pm_ops     <- pci_pm_* 들이 각 단계에서 부른다
+ *   .driver.probe_type = PROBE_PREFER_ASYNCHRONOUS
+ *       NVMe 의 probe 는 Identify Controller 명령 완료를 기다리느라 느리다.
+ *       이 지정이 있으면 드라이버 모델이 probe 를 워커에 던져 병렬로 돌리므로,
+ *       SSD 를 여러 개 꽂은 시스템의 부팅 시간이 크게 줄어든다.
+ *   .sriov_configure = pci_sriov_configure_simple  <- iov.c 의 sysfs 경로가 부른다
+ *
+ * (기존 주석은 NVMe 호출 경로로 "pci_enable_device -> pci_request_regions ->
+ *  pci_iomap -> pci_enable_msix_range" 를 적어 두었으나, 그중 pci_iomap 과
+ *  pci_enable_msix_range 는 drivers/nvme/ 에 호출이 0건이다. NVMe 는
+ *  ioremap(pci_resource_start(pdev,0), size) 로 BAR0 를 직접 매핑하고,
+ *  인터럽트는 pci_alloc_irq_vectors 계열을 쓴다. 또 그 함수들은 이 파일이
+ *  아니라 pci.c/msi 에 있어 이 파일의 설명으로도 맞지 않는다. 삭제했다.)
+ *
+ * === 주요 함수/구조체 요약 ===
+ * pci_bus_match()        : 장치와 드라이버의 짝을 판정. pci_match_device() 로 위임.
+ * pci_match_device()     : 런타임에 추가된 dynid 를 먼저 보고, 없으면 드라이버의
+ *                          정적 id_table 을 훑는다. NVMe 는 Class Code 매칭
+ *                          (PCI_CLASS_STORAGE_EXPRESS)도 쓰므로 벤더를 몰라도 잡힌다.
+ * pci_device_probe()     : 바인딩 직전 준비 후 드라이버 probe 호출. 실패하면
+ *                          잡아 둔 참조와 자원을 되돌린다.
+ * pci_call_probe()       : probe 를 어느 NUMA 노드에서 실행할지 정한다. 장치가
+ *                          붙은 노드에서 돌려야 그 노드 메모리로 자료구조가 잡힌다.
+ * local_pci_probe()      : 실제로 drv->probe() 를 부르는 자리. 전후로 런타임 PM
+ *                          참조를 잡아 probe 도중 장치가 잠들지 않게 한다.
+ * pci_device_remove()    : drv->remove() 호출 후 자원 정리.
+ * pci_device_shutdown()  : 시스템 종료 시. NVMe 는 여기서 정상 shutdown 절차를
+ *                          밟아 캐시를 내려 쓴다.
+ * pci_pm_* (20여 개)     : 시스템/최대절전/런타임 절전의 각 단계 처리.
+ * pci_dev_pm_ops         : 위 함수들을 단계별 슬롯에 꽂은 struct dev_pm_ops.
+ * pci_add_dynid() / new_id_store() : sysfs 로 런타임에 ID 를 추가해 드라이버에
+ *                          없는 장치를 강제로 바인딩하는 경로.
+ * __pci_register_driver() / pci_unregister_driver() : 드라이버 등록/해제.
  */
 
 #include <linux/pci.h> /* NVMe: PCI 코어 데이터 구조(pci_dev, pci_driver, pci_device_id 등) */

@@ -8,35 +8,91 @@
  */
 
 /*
- * ===================================================================
- * NVMe PCIe 호스트 드라이버 관점 파일 요약
- * -------------------------------------------------------------------
- * 본 파일(drivers/pci/bus.c)은 PCI bus 객체의 리소스 관리, 장치 추가,
- * bus 순회 등 PCI core의 핵심 기능을 구현한다.
- * NVMe SSD 입장에서 본 파일은 다음과 같은 동작에 직접 관여한다.
- *   - NVMe endpoint의 PCI bus 리소스(BAR0/1 등 doorbell/register 영역,
- *     DMA를 위한 메모리 공간) 할당 및 관리
- *   - NVMe 장치가 속한 bus의 상위 bridge window와의 정합성 확인(BAR
- *     클리핑)
- *   - NVMe 장치를 sysfs/proc에 노출하고, NVMe 드라이버(nvme_probe)를
- *     호출하기 위한 pci_bus_add_device()/pci_bus_add_devices() 처리
- *   - NVMe 장치의 runtime PM, config space 저장, bridge D3 상태 갱신 등
- *     전원 관련 초기화
- * 일반적인 NVMe 드라이버 호출 경로:
- *   nvme_probe -> pci_enable_device -> pci_request_regions ->
- *   pci_iomap -> doorbell access
- *   pci_bus_add_devices -> pci_bus_add_device -> device_initial_probe ->
- *   nvme_probe
- *   pci_bus_alloc_resource는 NVMe BAR의 크기/정렬을 만족하는 메모리
- *   영역을 상위 bus에서 할당하며, 이 주소가 NVMe driver가 사용하는
- *   pci_resource_start(pdev, 0) 값이 된다.
- *   pcibios_resource_to_bus()/pcibios_bus_to_resource()는 DMA 주소 변환,
- *   IOMMU/ATS, P2PDMA 시 NVMe BAR/버퍼의 CPU 물리 주소와 PCI bus 주소
- *   간 환산에 사용된다.
- * 본 파일은 drivers/nvme/host/pci.c가 직접 호출하지는 않으나, NVMe 장치의
- * PCI 리소스 할당, 드라이버 바인딩, 전원/라이프사이클 관리의 토대가 된다.
- * ===================================================================
+ * [한국어 설명] 버스 객체의 자원 목록과 장치 등록·순회 (bus.c)
+ *
+ * === 파일의 역할 ===
+ * struct pci_bus 하나가 "어떤 주소 범위를 자기 것으로 갖는가" 를 관리하고,
+ * 그 범위 안에서 하위 장치에게 자리를 떼어 주며, 버스 트리를 훑는 도구를
+ * 제공한다. 세 덩어리로 나뉜다.
+ *
+ *   1) 자원 목록 관리 - pci_add_resource(), pci_bus_add_resource(),
+ *      pci_bus_remove_resources(). 호스트 브리지가 "이 도메인은 메모리
+ *      0x80000000~0xBFFFFFFF 와 I/O 0x0~0xFFFF 를 쓴다" 고 알려 준 것을
+ *      루트 버스의 자원 목록에 등록한다. 하위 브리지는 자기 윈도우 레지스터
+ *      값이 자원이 된다.
+ *   2) 자원 할당 - pci_bus_alloc_resource(). 장치의 BAR 하나가 요구하는
+ *      크기와 정렬을 만족하는 빈 구간을 이 버스(또는 조상 버스)의 자원에서
+ *      찾아 준다. setup-bus.c 가 BAR 배치를 정할 때 실제로 자리를 얻는 곳이다.
+ *   3) 장치 등록과 순회 - pci_bus_add_device()/pci_bus_add_devices() 는
+ *      새로 발견한 장치를 sysfs 에 올리고 드라이버 바인딩을 시작시킨다.
+ *      pci_walk_bus() 계열은 버스 트리 전체에 콜백을 적용한다(에러 복구나
+ *      전원 상태 변경처럼 "이 아래 전부" 를 대상으로 하는 동작에 쓴다).
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * 열거:  probe.c 의 pci_scan_child_bus 가 장치를 찾아 struct pci_dev 를 만든다
+ *   -> setup-bus.c 가 BAR 크기를 모아 배치를 계산
+ *      -> [이 파일] pci_bus_alloc_resource() 로 실제 주소 구간을 얻는다
+ *   -> [이 파일] pci_bus_add_devices()
+ *      -> pci_bus_add_device() -> device_attach()
+ *         -> pci-driver.c 의 pci_device_probe() -> nvme_probe()
+ *
+ * 순회: AER 복구, D3 전환, 리셋 등
+ *   -> [이 파일] pci_walk_bus(bus, cb, userdata) -> 서브트리의 모든 장치에 cb
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. pci_walk_bus() 는 pci_bus_sem 을 읽기
+ * 잠금으로 잡고 돌므로 콜백 안에서 장치를 제거하면 안 된다. 잠금 없이 도는
+ * __pci_walk_bus() 는 호출자가 이미 잠금을 쥔 경우에만 쓴다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: probe.c(열거 후 등록), setup-bus.c(자원 배치), hotplug 드라이버.
+ * 아래쪽: 커널 공통 자원 관리(kernel/resource.c 의 allocate_resource),
+ *   드라이버 모델(device_attach), pci.c 의 전원 관리 함수.
+ * 공유 상태: struct pci_bus 의 resources 목록(struct pci_bus_resource 로
+ *   감싼 struct resource 포인터들), pci_bus_sem(버스 트리 전역 rw 세마포어),
+ *   그리고 struct pci_dev 의 match_driver / is_added 플래그.
+ * 데이터 흐름: 펌웨어/브리지 윈도우 -> 버스 자원 목록 -> BAR 별 구간 할당
+ *   -> struct resource 로 pci_dev->resource[] 에 기록 -> 드라이버가
+ *   pci_resource_start() 로 읽는다.
+ *
+ * === NVMe 관점 ===
+ * NVMe 드라이버는 이 파일의 함수를 하나도 직접 부르지 않는다(전수 확인).
+ * 그럼에도 NVMe 가 동작하기 위한 두 가지 전제를 이 파일이 만든다.
+ *
+ *   1) BAR0 의 주소. NVMe 컨트롤러 레지스터(CAP, VS, CC, CSTS, 그리고
+ *      도어벨 배열)는 전부 BAR0 가 가리키는 메모리 창 안에 있다. 그 창이
+ *      물리 주소 공간의 어디에 놓일지를 정하는 마지막 단계가
+ *      pci_bus_alloc_resource() 다. 결과는 pdev->resource[0] 에 담기고,
+ *      NVMe 드라이버가 pci_resource_start(pdev, 0) 로 읽어
+ *      ioremap() 하는 값이 바로 이것이다.
+ *
+ *   2) nvme_probe() 가 불리는 계기. pci_bus_add_device() 가 장치를 드라이버
+ *      모델에 올리면서 device_attach() 를 부르고, 그 끝에 pci_device_probe()
+ *      를 거쳐 nvme_probe() 가 실행된다. NVMe SSD 를 핫플러그로 꽂았을 때도
+ *      pciehp 가 재스캔한 뒤 이 경로를 탄다.
+ *
+ * (기존 주석은 NVMe 경로로 "pci_enable_device -> pci_request_regions ->
+ *  pci_iomap" 을 적어 두었으나 drivers/nvme/ 에 pci_request_regions 와
+ *  pci_iomap 호출은 0건이다. 실제로는 pci_enable_device_mem() 뒤에
+ *  ioremap(pci_resource_start(pdev, 0), size) 로 직접 매핑한다.)
+ *
+ * === 주요 함수/구조체 요약 ===
+ * pci_add_resource() / pci_add_resource_offset()
+ *                            : 호스트 브리지 등록용 자원 목록에 항목을 추가.
+ *                              offset 판은 CPU 주소와 PCI 버스 주소가 다른
+ *                              플랫폼에서 그 차이를 함께 기록한다.
+ * pci_bus_add_resource()     : 이미 만들어진 버스에 자원을 붙인다.
+ * pci_bus_for_each_resource(): 이 버스와 조상 버스의 자원을 순회하는 매크로.
+ * pci_bus_alloc_resource()   : 크기/정렬/타입 조건에 맞는 빈 구간을 찾아 예약.
+ *                              실패하면 상위 버스로 올라가며 다시 시도한다.
+ * pci_bus_clip_resource()    : 브리지 윈도우 밖으로 삐져나온 자원을 잘라낸다.
+ *                              펌웨어가 잘못 설정해 둔 경우를 수습하는 용도.
+ * pci_bus_add_device()       : 장치 하나를 sysfs 에 올리고 드라이버 바인딩 시작.
+ * pci_bus_add_devices()      : 버스 아래 모든 장치에 대해 위를 재귀 수행.
+ * pci_walk_bus()             : 서브트리의 모든 장치에 콜백 적용(잠금 포함).
+ * pci_walk_bus_reverse()     : 역순 순회. 제거 경로에서 잎부터 처리해야 할 때.
+ * pci_bus_get() / pci_bus_put() : struct pci_bus 참조 카운트.
  */
+
 #include <linux/module.h> /* NVMe: 모듈 관리 및 EXPORT_SYMBOL 매크로 제공. */
 #include <linux/kernel.h> /* NVMe: 커널 공용 매크로와 printk 같은 기본 기능 포함. */
 #include <linux/cleanup.h> /* NVMe: 자동 리소스 해제(guard) 매크로 제공. */

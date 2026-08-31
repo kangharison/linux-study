@@ -1,4 +1,6 @@
-// SPDX-License-Identifier: GPL-2.0+ /* NVMe: SPDX license; this file implements the PCIe root port that the NVMe driver uses */
+// SPDX-License-Identifier: GPL-2.0+
+/* [한국어] 위 SPDX 줄은 커널의 라이선스 표기 규약이며 파일 첫 줄에
+ * 정확한 형식으로만 있어야 한다. 그 줄에는 아무것도 덧붙이지 않는다. */
 /*
  * PCIe host controller driver for NWL PCIe Bridge
  * Based on pcie-xilinx.c, pci-tegra.c
