@@ -14,54 +14,73 @@
  */
 
 /*
- * NVMe PCIe 호스트 드라이버(drivers/nvme/host/pci.c) 관점에서 본 pciehp_ctrl.c
+ * [한국어 설명] 핫플러그 이벤트를 해석하는 상태 기계 (pciehp_ctrl.c)
  *
- * 이 파일은 PCI Express 핫플러그 컨트롤러의 상태 머신과 슬롯 제어 로직을 담당한다.
- * NVMe SSD가 장착된 PCIe 슬롯의 전원/링크/프레즌스 상태 변화를 감지하고,
- * 사용자 공간이나 Attention 버튼/물리적 삽입 제거 이벤트에 따라 슬롯을 켜거나 끄는
- * 핵심 경로를 구현한다.
+ * === 파일의 역할 ===
+ * 하드웨어가 알려 준 이벤트를 받아 "무엇을 할지" 를 정한다. pciehp 네 파일
+ * 중 판단을 담당하는 부분이며, 실제 하드웨어 조작은 hpc.c 에, 열거와
+ * 제거는 pci.c 에 맡긴다.
  *
- * NVMe 입장에서 볼 때, 이 파일의 함수들은 NVMe 장치가 연결된 PCIe 포트의
- * 핫플러그 컨트롤러를 통해 다음과 같은 사이클을 수행한다.
+ * 상태 기계가 필요한 이유는 같은 이벤트가 상황에 따라 다른 뜻을 갖기
+ * 때문이다. 예를 들어 Presence Detect Changed 는 "카드가 꽂혔다" 일 수도
+ * "빠졌다" 일 수도 있고, 그 판단은 현재 슬롯 상태와 함께 봐야 한다.
  *
- *   1) pciehp_request()           : 핫플러그 이벤트(PDC/DLLSC/DISABLE_SLOT)를
- *                                   pending_events에 기록하고 IRQ 스레드를 깨운다.
- *                                   NVMe 장치의 삽입/링크변화/제거 요청이 이 경로로
- *                                   들어온다.
- *   2) pciehp_handle_presence_or_link_change() : 카드 프레즌스 또는 링크 상태 변화를
- *                                   처리. 링크 다운(DLLSC) 시 surprise removal로
- *                                   NVMe 장치를 해제하고, 카드 삽입/링크 업(PDC) 시
- *                                   슬롯을 켜서 NVMe를 다시 enumerate 한다.
- *   3) pciehp_enable_slot() / __pciehp_enable_slot() / board_added() :
- *                                   슬롯 전원을 켜고, 링크 트레이닝을 확인하며,
- *                                   power fault를 점검하고, pciehp_configure_device()
- *                                   를 호출해 하위 PCI 버스의 장치(예: NVMe)를
- *                                   탐색/바인딩 한다.
- *   4) pciehp_disable_slot() / __pciehp_disable_slot() / remove_board() :
- *                                   NVMe 장치를 unconfigure 하고 슬롯 전원을 끈다.
- *                                   safe removal이면 정리(disable device, release
- *                                   BAR/IRQ/MSI/MSI-X)를 수행하고, surprise removal이면
- *                                   빠르게 전원을 내린다.
- *   5) pciehp_handle_button_press() : Attention 버튼을 눌렀을 때 5초 타이머를 두고
- *                                   ON/OFF 상태를 전환할 수 있게 한다.
- *   6) pciehp_sysfs_enable_slot() / pciehp_sysfs_disable_slot() :
- *                                   사용자 공간(/sys/bus/pci/slots/.../power)에서
- *                                   NVMe 슬롯을 켜거나 끌 때 호출된다.
+ * 상태는 여섯이다.
+ *   OFF_STATE        — 슬롯 전원이 꺼져 있고 아무것도 없다.
+ *   BLINKINGON_STATE — Attention 버튼이 눌려 "곧 켤 것" 을 LED 로 알리는 중.
+ *                      5초 안에 다시 누르면 취소된다.
+ *   BLINKINGOFF_STATE— 반대로 "곧 끌 것" 을 알리는 중.
+ *   POWERON_STATE    — 전원을 넣고 링크와 열거를 진행하는 중.
+ *   POWEROFF_STATE   — 제거 절차를 진행하는 중.
+ *   ON_STATE         — 정상 동작 중.
  *
- * NVMe 장치와 직접 연관된 부분
- * - PCIe 포트의 ECAM(Enhanced Configuration Access Mechanism)을 통해 Slot Control,
- *   Slot Status 레지스터를 읽고 쓰며, 전원/인디케이터/Attention 비트를 조작한다.
- * - MSI/MSI-X: pciehp_request()에서 irq_wake_thread(ctrl->pcie->irq, ctrl)를 호출.
- *   이 irq는 PCIe 포트의 핫플러그 서비스용 MSI/MSI-X/INTx 중 하나이며, NVMe 장치
- *   자체의 MSI/MSI-X와는 별개지만 동일한 IRQ domain 내에서 관리될 수 있다.
- * - Power control: POWER_CTRL() 매크로로 슬롯 전원 제어 지원 여부를 확인하고,
- *   pciehp_power_on_slot()/pciehp_power_off_slot()을 호출. NVMe가 장착된 슬롯의
- *   전원이 켜져야 PCIe 링크가 트레이닝되고 NVMe가 응답한다.
- * - Link training: pciehp_check_link_status()는 PCIe 링크가 LTSSM을 통해 L0로
- *   진입했는지 확인. NVMe가 정상 동작하려면 링크가 up(L0) 상태여야 한다.
- * - Surprise removal: NVMe SSD가 물리적으로 갑자기 빠지거나 링크가 끊기면
- *   pciehp_unconfigure_device(ctrl, false)를 통해 NVMe 드라이버의 remove 콜백,
- *   MSI/MSI-X 해제, BAR 해제 등을 긴급 처리한다.
+ * 중간 상태(POWERON/POWEROFF)가 있는 이유는 그 작업이 오래 걸리기
+ * 때문이다. 그 사이에 들어온 새 이벤트는 대개 무시하거나 미뤄야 한다 —
+ * 열거하는 도중에 또 열거를 시작하면 안 되기 때문이다.
+ *
+ * 사람이 버튼을 누르는 흐름과 소프트웨어가 sysfs 로 요청하는 흐름이
+ * 같은 상태 기계로 모인다는 점도 이 파일의 설계다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * 하드웨어 이벤트 -> pciehp_hpc.c 의 인터럽트 핸들러
+ *   -> pciehp_request() 로 이벤트를 큐에 넣고 스레드를 깨운다
+ *      -> [이 파일] pciehp_handle_*() 로 상태 기계 진입
+ *         -> pciehp_enable_slot() / pciehp_disable_slot()
+ *            -> hpc.c 로 전원과 LED 조작
+ *            -> pci.c 로 열거 또는 제거
+ *
+ * 실행 컨텍스트: 대부분 pciehp 의 IRQ 스레드. 열거와 제거가 오래 걸리고
+ * 잠들 수 있어 하드 IRQ 에서 처리할 수 없다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: pciehp_hpc.c 의 인터럽트 처리, pciehp_core.c 의 sysfs 콜백.
+ * 아래쪽: pciehp_hpc.c 의 하드웨어 조작, pciehp_pci.c 의 열거·제거.
+ * 공유 상태: struct controller 의 state 와 그것을 보호하는 state_lock,
+ *   그리고 이벤트 대기열.
+ *
+ * === NVMe 관점 ===
+ * NVMe 드라이버는 이 파일의 함수를 부르지 않는다(전수 확인).
+ *
+ * U.2 백플레인에서 NVMe 드라이브를 뽑았을 때 실제로 일어나는 일이
+ * 이 파일의 상태 전이다:
+ *   Presence Detect Changed 인터럽트
+ *     -> ON_STATE 에서 pciehp_handle_presence_or_link_change()
+ *        -> 존재하지 않음을 확인 -> POWEROFF_STATE 로
+ *           -> pciehp_disable_slot() -> pciehp_unconfigure_device()
+ *              -> pci_stop_and_remove_bus_device() -> nvme_remove()
+ *           -> 슬롯 전원 차단 -> OFF_STATE
+ *
+ * === 주요 함수/구조체 요약 ===
+ * pciehp_request()            : 이벤트를 큐에 넣고 IRQ 스레드를 깨운다.
+ * pciehp_handle_button_press(): Attention 버튼. 깜빡임 상태로 들어가거나,
+ *                               이미 깜빡이는 중이면 취소한다.
+ * pciehp_handle_disable_request() : sysfs 를 통한 명시적 끄기 요청.
+ * pciehp_handle_presence_or_link_change() : 삽입/제거의 실제 판정.
+ *                               Presence 와 Link 두 신호를 함께 본다.
+ * pciehp_enable_slot()        : 전원을 넣고 링크를 기다린 뒤 열거한다.
+ * pciehp_disable_slot()       : 제거하고 전원을 끈다.
+ * __pciehp_enable_slot() / __pciehp_disable_slot() : 잠금 없는 내부 판.
+ * pciehp_sync_bus_speed()     : 링크 속도를 다시 읽어 반영한다.
  */
 
 #define dev_fmt(fmt) "pciehp: " fmt

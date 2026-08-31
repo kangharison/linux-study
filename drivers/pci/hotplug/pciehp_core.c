@@ -18,41 +18,63 @@
  */
 
 /*
- * ===================================================================
- * NVMe PCIe 호스트 드라이버(drivers/nvme/host/pci.c) 관점 파일 요약
- * -------------------------------------------------------------------
- * 본 파일(drivers/pci/hotplug/pciehp_core.c)은 PCI Express 핫플러그 컨트롤러
- * 드라이버의 핵심 부분으로, PCIe 슬롯의 장치 삽입/제거(Insertion/Removal),
- * 전원 제어(Power Control), Attention Indicator, Presence Detect Changed(PDC),
- * Link 상태 변화 등을 처리한다.
+ * [한국어 설명] pciehp 드라이버의 등록과 슬롯 노출 (pciehp_core.c)
  *
- * NVMe SSD는 종종 서버/워크스테이션의 핫플러그 가능한 PCIe 슬롯에 연결되므로
- * 본 드라이버의 동작은 NVMe 장치의 생명주기와 직접 연결된다.
+ * === 파일의 역할 ===
+ * pciehp 를 PCIe 포트 서비스 드라이버로 등록하고, 슬롯을 커널의 hotplug
+ * 코어에 노출한다. 네 파일 중 "입구" 에 해당한다.
  *
- * NVMe 관련 주요 영향 및 호출 경로:
- *   - NVMe SSD가 슬롯에 삽입되면 pciehp는 Presence Detect Changed(PDC) 이벤트를
- *     처리하여 슬롯 전원을 켜고, 링크를 트레이닝(link training)시킨 뒤 PCI bus를
- *     다시 스캔한다. 이후 nvme_probe()가 호출되어 NVMe 컨트롤러가 초기화된다.
- *   - NVMe SSD가 물리적으로 제거(또는 surprise removal)되면 pciehp는 PDC를 받아
- *     pci_dev_set_disconnected() 등을 통해 NVMe 드라이버의 메모리/IO 접근을
- *     막고, nvme_remove()가 안전하게 수행될 수 있도록 한다.
- *   - 핫플러그로 인한 전원 OFF/ON은 NVMe의 DOE(Data Object Exchange), PTM
- *     (Precision Time Measurement), ROM(Option ROM), 대역폭 제어 등과 연관된
- *     PCIe 기능들이 임시로 사용 불가능해짐을 의미한다. 특히 NVMe 장치가 링크
- *     재학습(link retrain)을 거치면 현재 링크 속도/폭(带宽)이 바뀔 수 있다.
- *   - procfs(/sys/bus/pci/slots/...) 및 sysfs를 통해 사용자공간에서 슬롯 상태를
- *     확인하거나 수동으로 enable/disable할 수 있으며, NVMe SSD가 탑재된 슬롯은
- *     이 인터페이스로 제어된다.
+ * probe 에서 하는 일이 순서대로 넷이다.
+ *   1) 이 포트가 정말 핫플러그 슬롯을 갖는지 확인한다(Slot Implemented
+ *      비트와 Slot Capabilities). 아니면 바인딩을 거절한다.
+ *   2) struct controller 를 만들고 하드웨어를 초기화한다(pciehp_hpc.c).
+ *   3) 슬롯을 hotplug 코어에 등록해 /sys/bus/pci/slots/ 에 노출한다.
+ *   4) 인터럽트를 켜고, 이미 카드가 꽂혀 있으면 즉시 열거를 시작한다.
  *
- * 핵심 진입 함수:
- *   pciehp_probe()    : PCIe 포트 서비스 드라이버로 등록되며 슬롯 초기화
- *   pciehp_remove()   : 드라이버 해제 시 슬롯 자원 정리
- *   pciehp_check_presence() : 현재 슬롯 점유 상태를 확인하고 이벤트를 합성
- *   pciehp_suspend/resume() : 전원 관리 시 핫플러그 인터럽트 및 상태 복원
+ * 4번의 "이미 꽂혀 있으면" 이 중요하다. 부팅 시점에 이미 드라이브가
+ * 꽂혀 있는 것이 보통이고, 그때는 삽입 이벤트가 발생하지 않는다.
+ * 그래서 초기 상태를 직접 확인해 필요하면 열거를 걸어 준다.
  *
- * NVMe 드라이버는 본 파일을 직접 호출하지 않지만, NVMe SSD가 연결된 PCIe 슬롯의
- * 전원/링크/ Presence 상태 변화를 관리하는 관문(gatekeeper) 역할을 한다.
- * ===================================================================
+ * 전원 관리도 이 파일이 다룬다. 절전에서 복귀했을 때 그 사이에 카드가
+ * 바뀌었을 수 있으므로, 현재 상태를 다시 읽어 기억하던 것과 다르면
+ * 적절히 열거하거나 제거한다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * pcie/portdrv.c 가 HP 서비스 가상 장치를 만들면
+ *   -> [이 파일] pciehp_probe()
+ *      -> pcie_init() [hpc.c] 로 하드웨어 초기화
+ *      -> pci_hp_initialize() [pci_hotplug_core.c] 로 슬롯 등록
+ *      -> pcie_enable_notification() [hpc.c] 로 인터럽트 활성화
+ *         -> 이후 이벤트는 hpc.c 의 인터럽트 핸들러가 받아
+ *            ctrl.c 의 상태 기계로 넘긴다
+ *
+ * 실행 컨텍스트: probe/remove 와 PM 콜백 — 전부 프로세스 컨텍스트.
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: pcie/portdrv.c(서비스 등록), hotplug/pci_hotplug_core.c(슬롯 등록).
+ * 아래쪽: 같은 디렉터리의 pciehp_hpc.c / _ctrl.c / _pci.c.
+ * 공유 상태: struct controller, 그리고 hotplug 코어에 등록한 struct hotplug_slot.
+ *
+ * === NVMe 관점 ===
+ * NVMe 드라이버는 이 파일의 함수를 부르지 않는다(전수 확인).
+ * 관계는 한 방향이다 — 이 드라이버가 슬롯을 감시하다가 열거를 일으키면
+ * 그 결과로 nvme_probe() 가 불린다.
+ *
+ * 서버에서 이 드라이버가 붙지 못하는 경우가 실제로 있다. 펌웨어가 _OSC
+ * 협상에서 핫플러그 소유권을 넘겨주지 않으면(pci-acpi.c 참고) portdrv 가
+ * HP 서비스를 만들지 않아 이 드라이버가 바인딩되지 않는다. 그러면
+ * NVMe 드라이브를 뽑았다 꽂아도 커널이 알아채지 못한다.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * pciehp_probe()          : 슬롯을 확인하고 컨트롤러를 만들어 등록한다.
+ * pciehp_remove()         : 그 반대.
+ * pciehp_suspend() / _resume() / _resume_noirq() : 절전 전후 처리.
+ *                           복귀 시 상태를 다시 읽어 변화를 반영한다.
+ * pciehp_runtime_suspend() / _runtime_resume() : 런타임 절전판.
+ * set_bus_speed() / get_*_status() 계열 : hotplug 코어가 부르는 콜백.
+ *                           슬롯의 전원/표시등/존재 상태를 읽고 쓴다.
+ * pciehp_slot_ops         : 그 콜백들을 묶은 구조체.
+ * pciehp_driver           : 포트 서비스 드라이버 정의.
  */
 
 #define pr_fmt(fmt) "pciehp: " fmt /* NVMe: pciehp 드라이버의 printk 접두사. */

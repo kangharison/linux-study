@@ -4,6 +4,83 @@
  * Copyright (c) 2015, Intel Corporation.
  */
 
+/*
+ * [한국어 설명] NVMe 여러 대를 하나의 엔드포인트 뒤에 숨기는 인텔 VMD (vmd.c)
+ *
+ * === 파일의 역할 ===
+ * VMD(Volume Management Device)는 인텔 서버 칩셋의 기능으로, 여러 PCIe
+ * 루트 포트를 하나의 PCI 엔드포인트 뒤로 감춘다. 호스트에서 보면 VMD
+ * 장치 하나만 보이고, 그 뒤에 별도의 PCI 도메인이 생겨 실제 장치들이
+ * 거기 놓인다.
+ *
+ * 왜 그렇게 하는가. 원래 목적은 NVMe SSD 의 관리다.
+ *   - 핫플러그 이벤트를 VMD 가 가로채 처리하므로, 운영체제가 루트 포트를
+ *     직접 다루지 않아도 드라이브를 갈아끼울 수 있다.
+ *   - 부팅 시 펌웨어가 수십 개의 NVMe 를 일일이 열거하지 않아도 된다.
+ *   - RAID 소프트웨어(인텔 VROC)가 그 도메인을 통째로 관리한다.
+ *
+ * 이 드라이버가 하는 일은 그 숨겨진 도메인을 커널에 되살리는 것이다.
+ *   1) VMD 엔드포인트의 BAR 를 매핑한다. 그 BAR 안이 곧 숨겨진 도메인의
+ *      config space(ECAM)다.
+ *   2) 새 PCI 도메인 번호를 받아(pci.c 의 pci_bus_find_emul_domain_nr)
+ *      루트 버스를 만든다.
+ *   3) config 접근 ops 를 제공해, 그 도메인의 config 읽기·쓰기가
+ *      VMD BAR 안의 해당 위치로 가게 한다.
+ *   4) 인터럽트를 중계한다. 하위 장치들의 MSI-X 를 VMD 자신의 벡터로
+ *      받아 다시 뿌린다.
+ *
+ * 4번이 이 드라이버의 가장 복잡한 부분이다. 하위 NVMe 들이 각자 MSI-X 를
+ * 쓰지만 실제 벡터는 VMD 가 가진 것뿐이라, VMD 의 MSI 도메인이 그 사이를
+ * 중계해야 한다. vmd_msi_domain_ops 와 vmd_irq_list 가 그 구현이다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * VMD 엔드포인트에 이 드라이버가 바인딩
+ *   -> vmd_probe() -> vmd_enable_domain()
+ *      -> BAR 매핑, 도메인 번호 획득, 루트 버스 생성
+ *      -> MSI 도메인 구성
+ *      -> pci_scan_child_bus() 로 숨겨진 도메인 열거
+ *         -> 그 안의 NVMe 들이 발견되어 nvme_probe() 가 불린다
+ *
+ * 실행 컨텍스트: probe 는 프로세스 컨텍스트. 인터럽트 중계는 하드 IRQ.
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: pci-driver.c(이 드라이버의 바인딩).
+ * 아래쪽: probe.c 의 열거, msi/ 의 IRQ 도메인, pci.c 의 도메인 번호 할당,
+ *   그리고 pci.c 의 pci_real_dma_dev — VMD 뒤 장치들의 DMA 는 VMD 의
+ *   requester ID 로 나가므로 IOMMU 에 그것을 알려야 한다.
+ * 공유 상태: struct vmd_dev — BAR 매핑, IRQ 목록, 그리고 만들어 낸 버스.
+ *
+ * === NVMe 관점 ===
+ * drivers/pci 에서 NVMe 와 가장 직접적으로 얽힌 컨트롤러 드라이버다.
+ * VMD 가 존재하는 이유 자체가 NVMe 관리이기 때문이다.
+ *
+ * NVMe 드라이버는 이 파일의 함수를 부르지 않는다(전수 확인). 관계는
+ * 구조적이다 — VMD 가 켜진 시스템에서 NVMe SSD 는 도메인 0 이 아니라
+ * VMD 가 만든 별도 도메인(예: 10000)에 나타난다. lspci 에
+ * "10000:00:00.0" 처럼 큰 도메인 번호가 보이면 그것이다.
+ *
+ * 실무적으로 알아 둘 점: VMD 를 BIOS 에서 켜면 그 드라이브들이
+ * 이 드라이버 없이는 보이지 않는다. 리눅스 설치 미디어에 vmd 모듈이
+ * 없으면 NVMe 를 찾지 못하는 문제가 그것이다.
+ *
+ * 또 pci.c 의 pci_real_dma_dev() 를 덮어쓰는 것이 이 드라이버다.
+ * VMD 뒤의 NVMe 가 DMA 를 내면 그 requester ID 는 VMD 의 것이므로,
+ * IOMMU 가 매핑을 올바른 ID 에 걸려면 그 사실을 알아야 한다.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * vmd_probe()             : VMD 엔드포인트에 바인딩되어 도메인을 만든다.
+ * vmd_enable_domain()     : 실제 작업 본체. BAR 매핑부터 열거까지.
+ * vmd_pci_read() / _write(): 숨겨진 도메인의 config 접근. VMD BAR 안의
+ *                           해당 오프셋으로 변환한다.
+ * vmd_cfg_addr()          : 그 주소 변환 계산.
+ * vmd_attach_resources() / vmd_detach_resources() : 도메인의 자원 창 설정.
+ * vmd_msi_init() / vmd_msi_free() : 하위 장치의 MSI-X 를 VMD 벡터에 중계.
+ * vmd_irq() / vmd_irq_enable() / vmd_irq_disable() : 인터럽트 중계 구현.
+ * vmd_dma_ops 관련 처리   : 하위 장치의 DMA 를 VMD 이름으로 내보내는 처리.
+ * struct vmd_dev          : 이 VMD 인스턴스의 모든 상태.
+ * struct vmd_irq_list     : 중계할 인터럽트 목록.
+ */
+
 #include <linux/device.h>          /* PCI/NVMe: 장치 모델 기반으로 NVMe SSD 열거 시 사용 */
 #include <linux/interrupt.h>       /* PCI/NVMe: NVMe MSI-X 인터럽트 demux 처리를 위한 핵심 헤더 */
 #include <linux/irq.h>             /* PCI/NVMe: NVMe 장치가 할당받는 virq 관리 */
@@ -75,7 +152,20 @@ enum vmd_features {
 	 * BIOS. This is needed for laptops, which require these settings for
 	 * proper power management of the SoC.
 	 */
-	VMD_FEAT_BIOS_PM_QUIRK		= (1 << 5), /* PCI/NVMe: BIOS 미설정 시 NVMe SSD ASPM/LTR 강제 활성화 */
+	/*
+	 * Enable ASPM on the PCIE root ports and set the default LTR of the
+	 * storage devices on platforms where these values are not configured by
+	 * BIOS. This is needed for laptops, which require these settings for
+	 * proper power management of the SoC.
+	 */
+	/* [한국어] BIOS 가 해 주지 않은 절전 설정을 이 드라이버가 대신 넣는다.
+	 * 노트북에서 문제가 되는 부분이다. VMD 뒤에 있는 NVMe SSD 에 ASPM 과
+	 * LTR(Latency Tolerance Reporting) 이 설정되어 있지 않으면 SoC 가
+	 * 깊은 절전 상태로 내려가지 못해 배터리가 빨리 닳는다.
+	 * 데스크톱/서버 BIOS 는 이 값을 넣어 주지만 일부 노트북 BIOS 는 넣지
+	 * 않아서, 그런 플랫폼에 이 플래그를 달아 드라이버가 보정하게 한다.
+	 * 실제 보정은 vmd_enable_domain() 안에서 이 비트를 확인한 뒤 수행한다. */
+	VMD_FEAT_BIOS_PM_QUIRK		= (1 << 5),
 };
 
 #define VMD_BIOS_PM_QUIRK_LTR	0x1003	/* 3145728 ns */ /* PCI/NVMe: NVMe 장치 기본 LTR 지연 값 */
@@ -958,7 +1048,11 @@ static int vmd_enable_domain(struct vmd_dev *vmd, unsigned long features)
 	list_for_each_entry(child, &vmd->bus->children, node) /* PCI/NVMe: NVMe 실제 루트 포트별로 */
 		pcie_bus_configure_settings(child);       /* PCI/NVMe: NVMe 링크 폭/속도 및 ASPM 설정 구성 */
 
-	pci_bus_add_devices(vmd->bus);                    /* PCI/NVMe: VMD 아래 NVMe SSD를 시스템에 등록, nvme_pci_probe 연결 */
+	/* [한국어] 발견해 둔 장치들에 드라이버를 붙인다. 열거(pci_scan_child_bus)와
+	 * 바인딩이 나뉘어 있는 이유는 그 사이에 자원 배정이 끼어야 하기 때문이다.
+	 * 이 호출이 끝나야 VMD 도메인 안의 NVMe 들이 실제로 동작하기 시작한다 —
+	 * 여기서 drivers/nvme/host/pci.c 의 nvme_probe() 가 불린다. */
+	pci_bus_add_devices(vmd->bus);
 
 	vmd_acpi_end();                                   /* PCI/NVMe: NVMe ACPI companion 탐색 hook 비활성화 */
 	return 0;                                         /* PCI/NVMe: NVMe 도메인 활성화 성공 */
@@ -1055,7 +1149,11 @@ static void vmd_remove(struct pci_dev *dev)
 {
 	struct vmd_dev *vmd = pci_get_drvdata(dev);       /* PCI/NVMe: NVMe VMD 드라이버 사설 데이터 획득 */
 
-	pci_stop_root_bus(vmd->bus);                      /* PCI/NVMe: NVMe 루트 버스 중지, nvme_pci_remove 유도 */
+	/* [한국어] 도메인 전체를 정지시킨다. 아래 장치부터 차례로 드라이버가
+	 * 떨어져 나가므로, VMD 뒤의 NVMe 들은 여기서 nvme_remove() 를 거친다.
+	 * stop 과 remove 가 나뉜 이유는 드라이버를 떼는 일과 struct pci_dev 를
+	 * 없애는 일을 분리해야 참조가 남은 상태에서 해제하는 사고를 막을 수 있어서다. */
+	pci_stop_root_bus(vmd->bus);
 	sysfs_remove_link(&vmd->dev->dev.kobj, "domain"); /* PCI/NVMe: NVMe 도메인 sysfs 링크 제거 */
 	pci_remove_root_bus(vmd->bus);                    /* PCI/NVMe: NVMe 루트 버스 및 하위 NVMe 장치 제거 */
 	vmd_cleanup_srcu(vmd);                            /* PCI/NVMe: NVMe IRQ demux SRCU 정리 */

@@ -14,18 +14,60 @@
  */
 
 /*
- * NVMe 관점 요약:
- * 이 파일은 PCIe Native Hot Plug 컨트롤러 드라이버의 핵심 장치 구성/제거 루틴을 담고 있다.
- * NVMe SSD가 핫플러그 슬롯에 삽입되면 pciehp_configure_device()가 하위 버스를 스캔하고
- * pci_bus_add_devices()를 통해 커널이 drivers/nvme/host/pci.c의 nvme_probe()를 호출하여
- * NVMe 컨트롤러를 초기화한다. 이 과정에서 NVMe 장치의 ECAM 기반 BAR, MSI/MSI-X,
- * IRQ domain 할당이 이루어진다.
- * 반대로 SSD가 제거되면 pciehp_unconfigure_device()가 호출되어
- * pci_stop_and_remove_bus_device() -> drivers/nvme/host/pci.c의 nvme_remove() 경로로
- * NVMe 장치를 정지시키고, DMA를 끊으며(PCI_COMMAND_MASTER 클리어), MSI/MSI-X 인터럽트를
- * 비활성화하고 큐/IRQ 자원을 해제한다.
- * 따라서 NVMe 호스트 드라이버가 의존하는 PCIe 버스 생명주기, 전원 제어, 링크 상태,
- * INTx/MSI-X 인터럽트 안전성이 이 파일에서 관리된다.
+ * [한국어 설명] 슬롯 아래 장치를 실제로 열거하고 제거한다 (pciehp_pci.c)
+ *
+ * === 파일의 역할 ===
+ * pciehp 네 파일 중 가장 짧고 하는 일이 분명하다 — 상태 기계가 "이제
+ * 열거하라" 또는 "제거하라" 고 하면 PCI 코어의 해당 함수를 부른다.
+ *
+ * 열거 쪽(pciehp_configure_device):
+ *   1) 이미 그 자리에 장치가 있는지 확인한다. 있으면 -EEXIST 로 물러난다 —
+ *      이전 제거가 끝나지 않았다는 뜻이라, 그 위에 또 열거하면 중복이 된다.
+ *   2) pci_scan_slot() 으로 그 슬롯의 function 들을 발견한다.
+ *   3) pci_assign_unassigned_bridge_resources() 로 BAR 를 배정한다.
+ *      부팅 때와 달리 여기서는 이미 다른 장치들이 주소 공간을 차지한
+ *      뒤이므로, 자리가 없으면 실패할 수 있다.
+ *   4) pci_bus_add_devices() 로 드라이버 바인딩을 시작한다.
+ *
+ * 제거 쪽(pciehp_unconfigure_device):
+ *   - 역순으로 pci_stop_and_remove_bus_device() 를 부른다.
+ *   - presence 인자로 "장치가 아직 물리적으로 있는가" 를 알려 준다.
+ *     surprise removal(예고 없이 뽑은 경우)이면 false 이고, 그때는
+ *     config 접근을 시도하지 않아야 한다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * pciehp_ctrl.c 의 상태 기계
+ *   -> [이 파일] pciehp_configure_device()
+ *      -> probe.c 의 pci_scan_slot()
+ *      -> setup-bus.c 의 자원 배정
+ *      -> bus.c 의 pci_bus_add_devices()
+ *         -> pci-driver.c 의 probe -> nvme_probe() 등
+ *
+ *   -> [이 파일] pciehp_unconfigure_device()
+ *      -> remove.c 의 pci_stop_and_remove_bus_device()
+ *         -> nvme_remove() 등
+ *
+ * 실행 컨텍스트: pciehp 의 IRQ 스레드. 열거와 제거가 오래 걸린다.
+ *   pci_lock_rescan_remove() 로 다른 재스캔과 직렬화한다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: pciehp_ctrl.c 의 상태 기계.
+ * 아래쪽: probe.c, setup-bus.c, bus.c, remove.c — PCI 코어의 열거·제거 전부.
+ * 공유 상태: 슬롯의 버스와 그 아래 장치 목록.
+ *
+ * === NVMe 관점 ===
+ * NVMe 드라이버는 이 파일의 함수를 부르지 않는다(전수 확인).
+ *
+ * 하지만 U.2 백플레인에 NVMe 드라이브를 꽂았을 때 nvme_probe() 를
+ * 실제로 불러 오는 것이 이 파일이다. 그 경로가 부팅 시의 열거와 다른
+ * 점은 자원 배정이다 — 부팅 때는 주소 공간이 비어 있지만, 실행 중에는
+ * 이미 차 있어 BAR 를 넣을 자리가 없을 수 있다. 그 대비가 pci.c 의
+ * hpiosize / hpmmiosize 부팅 인자로 미리 예약해 두는 방식이다.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * pciehp_configure_device()   : 슬롯 아래를 열거하고 드라이버를 붙인다.
+ * pciehp_unconfigure_device() : 제거한다. presence 인자로 surprise removal
+ *                               여부를 구분한다.
  */
 
 #define dev_fmt(fmt) "pciehp: " fmt /* NVMe: pciehp 모듈의 커널 메시지에 "pciehp: " 접두어 추가 */
