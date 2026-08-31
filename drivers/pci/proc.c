@@ -6,45 +6,92 @@
  */
 
 /*
- * ===================================================================
- * NVMe PCIe 호스트 드라이버 관점 파일 요약
- * -------------------------------------------------------------------
- * 본 파일(drivers/pci/proc.c)은 /proc/bus/pci/* 인터페이스를 구현한다.
- * NVMe SSD도 일반 PCI endpoint로 등록되므로, 다음과 같은 NVMe 관련
- * 동작에 직접/간접적으로 영향을 준다.
+ * [한국어 설명] /proc/bus/pci 인터페이스 (proc.c)
  *
- *   - /proc/bus/pci/<domain>:<bus>/<dev>.<func> 형태의 장치별 config
- *     space 파일을 생성한다. NVMe 장치의 PCI config space(0x00~0xFF,
- *     확장 시 0xFFF)를 userspace에서 읽고 쓸 수 있게 한다.
- *   - lspci/setpci 등이 NVMe의 Vendor/Device ID, Class Code, BAR,
- *     ROM, IRQ, 그리고 DOE/PTM/ACS 등의 capability를 탐색할 때 사용하는
- *     통로이다.
- *   - NVMe 호스트 드라이버(drivers/nvme/host/pci.c)는 procfs를 직접
- *     호출하지 않지만, NVMe pci_dev가 생성되면 pci_proc_attach_device()
- *     이 /proc 트리에 연결하고, 제거/핫플러그 시 pci_proc_detach_device()
- *     으로 정리한다.
- *   - proc_bus_pci_mmap()을 통해 NVMe BAR(특히 BAR0의 doorbell/register
- *     영역)를 userspace에 매핑할 수 있다.
- *   - show_device()가 출력하는 /proc/bus/pci/devices 한 줄에는 NVMe
- *     장치의 bus/devfn, vendor/device, irq, BAR0~BAR5, ROM 크기 등이
- *     포함되어 대역폭/리소스 분석에 활용된다.
+ * === 파일의 역할 ===
+ * PCI 장치를 /proc 파일시스템에 노출한다. sysfs 가 생기기 전부터 있던
+ * 오래된 인터페이스이며, 지금도 lspci 와 setpci 가 이것을 쓴다.
  *
- * 일반적인 NVMe 장치와의 연결 경로:
- *   nvme_probe (drivers/nvme/host/pci.c)
- *   -> pci_enable_device / pci_request_regions / pci_iomap
- *   -> NVMe BAR0 doorbell 매핑
- *   /proc/bus/pci/devices 또는 per-device config 파일을 통한
- *   NVMe capability/리소스 열
+ * 만드는 것은 셋이다.
+ *   /proc/bus/pci/devices  - 모든 장치를 한 줄씩 나열한 텍스트 파일.
+ *                            bus/devfn, vendor/device, IRQ, BAR 6개와 크기,
+ *                            ROM 주소와 크기, 그리고 드라이버 이름이 담긴다.
+ *   /proc/bus/pci/<bus>/   - 버스마다 디렉터리.
+ *   .../<slot>.<func>      - 장치마다 파일 하나. 이 파일 자체가 그 장치의
+ *                            config space 다. read 하면 config 를 읽고,
+ *                            write 하면 config 에 쓴다. lseek 으로 오프셋을
+ *                            정한다. mmap 으로 BAR 를 매핑할 수도 있다.
  *
- * 본 파일은 커널의 PCI 핵심 코드에서 NVMe endpoint 정보를 userspace로
- * 노출하는 관문(gateway) 역할을 한다.
- * ===================================================================
+ * "파일 하나 = config space 하나" 라는 설계가 이 인터페이스의 특징이다.
+ * sysfs 는 값마다 파일을 따로 두지만(vendor, device, class ...), 여기서는
+ * 파일 하나를 통째로 읽고 원하는 오프셋을 직접 해석한다. lspci 가
+ * 임의의 capability 를 훑을 수 있는 것이 이 덕분이다.
+ *
+ * ioctl 도 두 개 있다 — PCIIOC_MMAP_IS_IO / PCIIOC_MMAP_IS_MEM 으로
+ * 이어질 mmap 이 I/O 공간인지 메모리 공간인지 지정하고,
+ * PCIIOC_WRITE_COMBINE 으로 write-combining 매핑을 요청한다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * 등록:  pci_bus_add_device() [bus.c]
+ *          -> [이 파일] pci_proc_attach_device() — /proc 트리에 파일을 만든다
+ * 제거:  pci_stop_dev() [remove.c]
+ *          -> [이 파일] pci_proc_detach_device()
+ *
+ * 접근:  lspci
+ *          -> open("/proc/bus/pci/00/1f.2") -> read()
+ *             -> [이 파일] proc_bus_pci_read()
+ *                -> pci_user_read_config_* [access.c]
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. 파일 연산이므로 당연히 잠들 수 있고,
+ * 하위 pci_user_read_config_* 가 리셋 중이면 대기한다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: userspace(lspci, setpci, 그리고 이 인터페이스를 쓰는 옛 도구들).
+ * 아래쪽: access.c 의 pci_user_read/write_config_* (차단 상태를 존중하는
+ *   userspace 전용 경로), mmap.c 의 pci_mmap_page_range.
+ * 옆쪽: pci-sysfs.c — 같은 정보를 다른 방식으로 노출한다. 두 인터페이스가
+ *   공존하는 이유는 호환성 때문이며, 새 기능은 sysfs 에만 추가된다.
+ * 공유 상태: struct pci_dev 의 procent 포인터(이 장치의 proc 항목).
+ *
+ * === NVMe 관점 ===
+ * NVMe 드라이버는 이 파일의 함수를 하나도 직접 부르지 않는다(전수 확인).
+ * 반대로 이 파일이 NVMe 장치를 노출한다 — NVMe SSD 도 다른 PCI 장치와
+ * 똑같이 /proc/bus/pci 아래에 나타나고, lspci 로 그 config space 를
+ * 들여다볼 수 있다.
+ *
+ * config 쓰기가 가능하다는 점은 주의할 만하다. setpci 로 NVMe 의 Command
+ * 레지스터를 끄면 그 순간 드라이버가 하드웨어와 통신할 수 없게 되어
+ * 진행 중인 I/O 가 전부 타임아웃난다. 그래서 이 파일의 write 경로는
+ * CAP_SYS_ADMIN 을 요구한다.
+ *
+ * (기존 주석은 NVMe 경로로 "pci_enable_device / pci_request_regions /
+ *  pci_iomap" 을 적었으나, pci_request_regions 와 pci_iomap 은
+ *  drivers/nvme/ 에 호출이 0건이다. 실제로는 pci_enable_device_mem() 뒤
+ *  ioremap(pci_resource_start(pdev,0), size) 로 BAR0 를 직접 매핑한다.
+ *  또 그 경로는 이 파일과 아무 관계가 없어 삭제했다.)
+ *
+ * === 주요 함수/구조체 요약 ===
+ * pci_proc_attach_device()  : 장치 하나를 /proc 트리에 등록한다. 버스
+ *                             디렉터리가 없으면 함께 만든다.
+ * pci_proc_detach_device()  : 그 반대.
+ * pci_proc_detach_bus()     : 버스 디렉터리를 제거한다.
+ * proc_bus_pci_read()       : config space 를 읽는다. 오프셋과 크기를 보고
+ *                             dword/word/byte 접근을 조합해 채운다.
+ * proc_bus_pci_write()      : config space 에 쓴다. CAP_SYS_ADMIN 필요.
+ * proc_bus_pci_lseek()      : 파일 크기를 config space 크기(256 또는 4096)로
+ *                             삼아 위치를 옮긴다.
+ * proc_bus_pci_ioctl()      : 이어질 mmap 의 종류를 지정한다.
+ * proc_bus_pci_mmap()       : BAR 를 userspace 주소 공간에 매핑한다.
+ * show_device()             : /proc/bus/pci/devices 의 한 줄을 만든다.
+ * pci_seq_start/next/stop() : 그 파일을 훑는 seq_file 반복자.
  */
 
 #include <linux/init.h>        /* NVMe: 부팅 초기화 단계 매크로 제공 */
 #include <linux/pci.h>         /* NVMe: PCI/pcie 구조체 및 함수 선언 포함 */
 #include <linux/slab.h>        /* NVMe: 메모리 할당(kmalloc 등) 헤더 */
-#include <linux/module.h>      /* NVMe: 모듈 관련 매크로 정의 */
+#include <linux/module.h>      /* [한국어] MODULE_* 매크로와 모듈 참조 관리.
+				* 이 파일의 파일 연산 구조체가 THIS_MODULE 을 참조해,
+				* /proc 파일이 열려 있는 동안 모듈이 내려가지 않게 한다 */
 #include <linux/proc_fs.h>     /* NVMe: procfs 생성 API 제공 */
 #include <linux/seq_file.h>    /* NVMe: /proc/bus/pci/devices 출력용 seq_file */
 #include <linux/capability.h>  /* NVMe: CAP_SYS_ADMIN/CAP_SYS_RAWIO 권한 확인 */

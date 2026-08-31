@@ -10,43 +10,94 @@
  */
 
 /*
- * ===================================================================
- * NVMe PCIe 호스트 드라이버 관점 파일 요약
- * -------------------------------------------------------------------
- * 본 파일(drivers/pci/ats.c)은 PCI Express I/O 가상화(IOV)의 핵심 능력인
- * ATS(Address Translation Service), PRI(Page Request Interface), PASID
- * (Process Address Space ID)를 초기화/활성화/비활성화/복원하는 함수들을
- * 제공한다. NVMe SSD는 고속 DMA 엔드포인트로서 이들 기능과 밀접하게
- * 연관된다.
+ * [한국어 설명] 장치가 주소 변환을 캐시하고 페이지를 요청하게 해 주는 계층 (ats.c)
  *
- * [ATS]
- * - NVMe 컨트롤러가 Endpoint에 내장된 translation cache를 통해 IOMMU의
- *   주소 변환 결과를 재사용할 수 있게 한다.
- * - DMA latency를 줄이고 IOMMU TLB miss 비용을 감소시켜 NVMe의 고속
- *   I/O 성능(특히 랜덤 DMA, P2P DMA, CMB 접근)에 직접적 도움이 된다.
- * - SR-IOV 환경에서 PF(Physical Function)가 ATS를 활성화하면 VF가 같은
- *   STU(Shared Translation Unit)로 ATS를 공유할 수 있다.
- * - IOMMU 드라이버(예: Intel VT-d, AMD-Vi)가 NVMe 장치를 probe할 때
- *   pci_enable_ats()를 호출하여 활성화한다.
+ * === 파일의 역할 ===
+ * IOMMU 가 켜진 시스템에서 장치의 DMA 성능과 유연성을 끌어올리는 세 가지
+ * PCIe 기능을 켜고 끄고 복원한다. 세 기능은 층층이 쌓인 관계다.
  *
- * [PRI]
- * - NVMe 컨트롤러가 DMA 대상 페이지가 스왑아웃 등으로 메모리에 없을 때
- *   Root Complex/CPU에게 페이지를 요청하는 메커니즘이다.
- * - ATS와 결합되어 NVMe + IOMMU 환경에서 demand-paging 기반 DMA를
- *   가능하게 한다.
+ *   ATS (Address Translation Service)
+ *     장치가 "이 IOVA 를 실제 물리 주소로 바꿔 달라" 고 IOMMU 에게 미리
+ *     물어보고, 그 답을 자기 안의 캐시(ATC)에 저장한다. 이후 같은 주소로
+ *     DMA 할 때는 이미 변환된 주소를 직접 내보내므로 IOMMU 를 거치지 않는다.
+ *     IOMMU TLB 미스로 인한 지연이 사라지는 것이 이득이다.
  *
- * [PASID]
- * - NVMe 컨트롤러가 하나의 물리 Function 안에서 여러 프로세스 주소
- *   공간(Process Address Space)을 동시에 사용할 수 있게 한다.
- * - NVMe 장치에 여러 submission/completion queue가 있을 때 각 큐에
- *   서로 다른 PASID를 부여하여 멀티테넌트/가상화 환경에서 보다 세밀한
- *   주소 공간 분리가 가능하다.
+ *   PRI (Page Request Interface)
+ *     ATS 위에 얹힌다. 장치가 접근하려는 페이지가 메모리에 없으면
+ *     (스왑아웃되었거나 아직 할당되지 않았으면) 호스트에게 "이 페이지를
+ *     올려 달라" 고 요청한다. 이것이 있어야 장치 DMA 에 demand paging 이
+ *     성립한다 — 그전에는 DMA 대상 메모리를 미리 전부 고정(pin)해야 했다.
  *
- * 일반적인 NVMe 관련 호출 경로:
- *   nvme_probe -> pci_enable_device -> IOMMU attach ->
- *   iommu_enable_acs -> iommu_enable_ats -> pci_enable_ats(pdev, stu)
- *   (또는 iommu_enable_pri/pasid)
- * ===================================================================
+ *   PASID (Process Address Space ID)
+ *     한 장치가 여러 프로세스의 주소 공간을 동시에 다루게 한다. DMA 요청에
+ *     20비트 PASID 를 붙여 "이 요청은 어느 프로세스의 것" 인지 표시하고,
+ *     IOMMU 가 그에 맞는 페이지 테이블로 변환한다. SVA(Shared Virtual
+ *     Addressing)의 토대다.
+ *
+ * 이 파일 자체는 정책을 결정하지 않는다. capability 를 찾고, 레지스터의
+ * Enable 비트를 켜고 끄고, 전원 복귀 후 복원하는 기계적인 일만 한다.
+ * "이 장치에 ATS 를 켤 것인가" 는 IOMMU 드라이버가 판단한다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * 열거:  probe.c 가 장치를 발견
+ *          -> [이 파일] pci_ats_init(), pci_pri_init(), pci_pasid_init()
+ *             capability 오프셋을 찾아 struct pci_dev 에 캐시한다.
+ *
+ * 활성화: IOMMU 드라이버가 장치를 자기 도메인에 붙일 때
+ *          -> [이 파일] pci_enable_ats() / pci_enable_pri() / pci_enable_pasid()
+ *             -> config 레지스터의 Enable 비트를 켠다
+ *
+ * 복원:  전원 복귀 후 pci_restore_state()
+ *          -> [이 파일] pci_restore_ats_state() 등
+ *             (config space 저장/복원만으로는 부족한 부분을 채운다)
+ *
+ * 실행 컨텍스트: 전부 프로세스 컨텍스트. config 접근이 있고, 일부는
+ * 장치가 진행 중인 트랜잭션을 비우기를 기다린다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: drivers/iommu/ 의 각 IOMMU 드라이버(Intel VT-d, AMD-Vi, ARM SMMU).
+ *   이 파일의 함수를 부르는 것은 사실상 그들뿐이다.
+ * 아래쪽: access.c 의 config 접근 함수.
+ * 옆쪽: iov.c — SR-IOV 와 얽힌 처리가 있다. VF 는 자기 ATS capability 를
+ *   갖지 않고 PF 의 설정(특히 STU, Smallest Translation Unit)을 따른다.
+ * 공유 상태: struct pci_dev 의 ats_cap / pri_cap / pasid_cap 오프셋과
+ *   ats_enabled / pri_enabled / pasid_enabled 플래그, 그리고 ats_stu.
+ *
+ * === NVMe 관점 ===
+ * NVMe 드라이버는 이 파일의 함수를 하나도 직접 부르지 않는다(전수 확인).
+ * ATS/PRI/PASID 를 켤지는 IOMMU 드라이버가 정하고, NVMe 는 그 사실을
+ * 알지도 못한 채 이득만 본다.
+ *
+ * NVMe 에 미치는 영향은 실질적이다. IOMMU 가 켜진 서버에서 NVMe 는
+ * 4KB 블록마다 IOVA 를 변환해야 하는데, 랜덤 I/O 가 많으면 IOMMU TLB
+ * 미스가 잦아 지연이 눈에 띄게 늘어난다. ATS 로 컨트롤러가 변환 결과를
+ * 캐시하면 그 비용이 사라진다.
+ *
+ * 다만 ATS 에는 보안 측면의 대가가 있다. 장치가 "이미 변환된 주소" 를
+ * 보내므로 IOMMU 가 그것을 다시 검사하지 않는다. 악의적이거나 고장 난
+ * 장치가 임의의 물리 주소를 내보낼 수 있다는 뜻이다. 그래서 신뢰할 수
+ * 없는 장치(Thunderbolt 로 꽂힌 것 등)에는 ATS 를 켜지 않는다.
+ *
+ * (기존 주석은 "SR-IOV 환경에서 PF 가 ATS 를 활성화하면 VF 가 같은
+ *  STU(Shared Translation Unit)로 ATS 를 공유한다" 고 적었는데, STU 의
+ *  정확한 뜻은 Shared Translation Unit 이 아니라 Smallest Translation
+ *  Unit — 장치가 한 번에 요청하는 변환 단위의 최소 크기다. VF 가 PF 의
+ *  STU 를 따르는 것은 맞다.)
+ *
+ * === 주요 함수/구조체 요약 ===
+ * pci_ats_init()          : ATS capability 를 찾아 dev->ats_cap 에 캐시한다.
+ * pci_enable_ats()        : ATS 를 켠다. STU(변환 단위)를 함께 지정한다.
+ *                           VF 는 PF 가 이미 켜져 있어야 하고 PF 의 STU 를 쓴다.
+ * pci_disable_ats()       : 끈다. 끄기 전에 장치의 캐시를 비워야 한다.
+ * pci_restore_ats_state() : 전원 복귀 후 다시 켠다.
+ * pci_ats_supported()     : ATS 를 쓸 수 있는 장치인가. untrusted 장치는
+ *                           capability 가 있어도 false 다.
+ * pci_enable_pri()        : PRI 를 켠다. 미결 요청 수 상한을 함께 정한다.
+ * pci_reset_pri()         : PRI 를 초기 상태로 되돌린다.
+ * pci_prg_resp_pasid_required() : 페이지 응답에 PASID 를 붙여야 하는지.
+ * pci_enable_pasid()      : PASID 를 켠다. 어떤 기능(실행 권한, 특권 모드)을
+ *                           함께 허용할지 마스크로 지정한다.
+ * pci_max_pasids()        : 이 장치가 지원하는 PASID 개수.
  */
 
 #include <linux/bitfield.h>   /* NVMe: bitfield 추출 매크로 FIELD_GET 등 사용 */

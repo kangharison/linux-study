@@ -9,32 +9,130 @@
  */
 
 /*
- * ===================================================================
- * NVMe PCIe 호스트 드라이버 관점 파일 요약
- * -------------------------------------------------------------------
- * 본 파일(drivers/pci/p2pdma.c)은 PCI Peer-to-Peer DMA(P2PDMA) 인프라를
- * 제공한다. NVMe SSD 입장에서 P2PDMA는 CMB(Controller Memory Buffer)나
- * SR-IOV 기반으로 다른 PCI endpoint 간에 직접 DMA 경로를 구성할 때 사용된다.
- *   - NVMe 장치의 CMB를 P2P 메모리로 등록하여 다른 장치가 접근 가능하게 함
- *   - NVMe queue memory(nvmeq->sq_cmds)를 pci_alloc_p2pmem()으로 할당해
- *     controller 낸부 메모리(CMB)에 배치 가능
- *   - provider/client 간 PCIe 토폴로지를 분석해 직접 P2P 가능 여부 판정
- *   - ACS redirect, host bridge whitelist, Root Complex 특성을 고려
- * 일반적인 NVMe 드라이버 호출 경로:
- *   nvme_probe -> nvme_setup_pci_p2pdma -> pci_p2pdma_add_resource
- *       -> pci_p2pmem_publish (CMB를 P2P provider로 게시)
- *   nvme_alloc_queue -> pci_alloc_p2pmem (SQ를 CMB에 할당)
- *   nvme_setup_prps/sgl -> pci_p2pdma_map_type (I/O buffer의 P2P 매핑
- *       타입 결정, BUS_ADDR 또는 THRU_HOST_BRIDGE)
- *   dma_pci_p2pdma_supported -> pci_p2pdma_distance_many (P2P 사용 가능
- *       거리 계산)
- * P2PDMA는 PCIe switch 내 직접 경로가 가능할 때 host 메모리를 우회하므로
- * 지연 시간 감소와 메모리 대역폭 절약에 기여하지만, ACS(Access Control
- * Services) redirect나 IOMMU, ATS(Address Translation Services), ReBAR,
- * DPC(Downstream Port Containment) 등과 상호작용을 주의 깊게 다뤄야 한다.
- * 본 파일은 NVMe뿐 아니라 RDMA NIC, GPU 등 peer endpoint 간 DMA를 지원하는
- * 근간이 된다.
- * ===================================================================
+ * [한국어 설명] 장치끼리 호스트 메모리를 거치지 않고 직접 DMA 하게 해 주는 계층 (p2pdma.c)
+ *
+ * === 파일의 역할 ===
+ * 보통의 DMA 는 장치가 호스트 메모리를 읽고 쓴다. P2PDMA(Peer-to-Peer DMA)는
+ * 그 대신 한 PCI 장치가 다른 PCI 장치의 메모리를 직접 읽고 쓰게 한다.
+ * NVMe SSD 의 CMB 에 있는 데이터를 네트워크 카드가 곧바로 가져가는 식이다.
+ * 호스트 메모리를 한 번 거치지 않으므로 지연이 줄고 메모리 대역폭이 절약된다.
+ *
+ * 이 파일이 하는 일은 셋이다.
+ *
+ *   1) 제공자(provider) 등록 - pci_p2pdma_add_resource() 가 어떤 장치의 BAR
+ *      일부를 "다른 장치가 쓸 수 있는 메모리" 로 등록한다. 그 구간을
+ *      genalloc(범용 할당자) 풀로 감싸 조각내어 나눠 줄 수 있게 만든다.
+ *
+ *   2) 경로 판정 - pci_p2pdma_map_type() 이 "이 두 장치 사이에 직접 경로가
+ *      성립하는가" 를 판정한다. 이것이 이 파일에서 가장 어려운 부분이며,
+ *      아래 별도 항목으로 설명한다.
+ *
+ *   3) 할당 - pci_alloc_p2pmem() / pci_free_p2pmem() 이 등록된 풀에서
+ *      메모리를 떼어 주고 돌려받는다.
+ *
+ * === 경로 판정이 왜 어려운가 ===
+ * 두 장치가 같은 PCIe 스위치 아래 있으면 스위치가 트랜잭션을 곧바로 옆으로
+ * 넘길 수 있어 직접 경로가 성립한다. 하지만 다음 세 가지가 걸림돌이다.
+ *
+ *   - Root Complex 를 거쳐야 하는 경우: 많은 Root Complex 가 P2P 트랜잭션을
+ *     제대로 전달하지 못한다. 그래서 이 파일은 검증된 호스트 브리지 목록
+ *     (화이트리스트)을 들고 있고, 목록에 없으면 직접 경로를 허용하지 않는다.
+ *   - ACS(Access Control Services) redirect: 격리를 위해 스위치가 모든
+ *     트랜잭션을 위로 올려보내도록 설정돼 있으면, 옆으로 가는 지름길이
+ *     막힌다. 그래서 P2PDMA 를 쓰려면 경로상의 ACS 재지향을 꺼야 하고,
+ *     그것은 IOMMU 격리를 약화시킨다 — 성능과 보안의 맞교환이다.
+ *   - IOMMU: 켜져 있으면 장치가 내는 주소가 IOVA 라 상대 장치의 실제
+ *     BAR 주소와 다르다. 그래서 매핑 종류(BUS_ADDR / THRU_HOST_BRIDGE)를
+ *     구분해 각각 다르게 처리한다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * 등록:  NVMe 등 provider 드라이버
+ *          -> [이 파일] pci_p2pdma_add_resource()
+ *             -> devm_memremap_pages() 로 그 BAR 구간에 struct page 를 만든다
+ *             -> gen_pool 로 감싸 할당 가능하게 한다
+ *          -> pci_p2pmem_publish() 로 "남들이 써도 된다" 고 표시
+ *
+ * 사용:  소비자 드라이버(또는 같은 장치 자신)
+ *          -> [이 파일] pci_alloc_p2pmem() 으로 한 조각을 얻고
+ *          -> pci_p2pmem_virt_to_bus() 로 그 조각의 PCI 버스 주소를 구해
+ *          -> 장치의 DMA 엔진에 그 주소를 넘긴다
+ *
+ * 매핑:  dma_map_sg 계열
+ *          -> [이 파일] pci_p2pdma_map_type() 으로 경로를 판정하고
+ *             BUS_ADDR 이면 IOMMU 를 거치지 않는 직행 주소를 쓴다
+ *
+ * 실행 컨텍스트: 등록과 해제는 프로세스 컨텍스트(메모리 할당과 devm 등록).
+ * 할당(pci_alloc_p2pmem)은 gen_pool 이 내부 락만 쓰므로 더 가볍지만,
+ * 역시 프로세스 컨텍스트에서 쓰는 것을 전제로 한다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: NVMe(CMB), RDMA NIC, GPU 드라이버.
+ * 아래쪽: mm/memremap.c 의 devm_memremap_pages()(BAR 구간에 struct page 를
+ *   만들어 커널 메모리처럼 다룰 수 있게 한다), lib/genalloc.c(조각 할당),
+ *   pci.c 의 ACS 설정 조회, host-bridge.c 의 주소 변환.
+ * 옆쪽: dma-mapping 계층. P2PDMA 를 쓰는 DMA 요청은 결국 그쪽을 지나며,
+ *   pci_p2pdma_map_type() 의 판정 결과에 따라 처리가 갈린다.
+ * 공유 상태: struct pci_dev 의 p2pdma 포인터(RCU 로 보호되는
+ *   struct pci_p2pdma). 그 안에 gen_pool 과 published 플래그가 있다.
+ *
+ * === NVMe 드라이버가 실제로 쓰는 것 (drivers/nvme/ 전수 확인) ===
+ * NVMe 는 이 파일의 함수를 다섯 개 직접 부른다. drivers/pci 에서
+ * 이만큼 직접 얽힌 파일은 드물다. CMB(Controller Memory Buffer)가
+ * P2PDMA 로 노출되기 때문이다.
+ *
+ *   nvme_map_cmb()                      [drivers/nvme/host/pci.c]
+ *     CMBSZ/CMBLOC 레지스터로 CMB 의 크기와 위치(어느 BAR 의 어느 오프셋)를
+ *     읽은 뒤:
+ *       -> pci_p2pdma_add_resource(pdev, bar, size, offset)
+ *          그 BAR 구간을 P2PDMA 풀로 등록한다. 실패하면 CMBMSC 를 0 으로
+ *          되돌려 CMB 자체를 포기한다.
+ *       -> pci_p2pmem_publish(pdev, true)
+ *          다른 장치도 이 CMB 를 쓸 수 있다고 공개한다.
+ *
+ *   nvme_alloc_sq()                     [큐 하나를 만들 때마다]
+ *       -> pci_alloc_p2pmem(pdev, SQ_SIZE(nvmeq))
+ *          Submission Queue 링을 호스트 메모리가 아니라 CMB 에 잡는다.
+ *       -> pci_p2pmem_virt_to_bus(pdev, nvmeq->sq_cmds)
+ *          그 주소를 Create SQ 명령에 넣을 PCI 버스 주소로 바꾼다.
+ *       -> 실패하면 pci_free_p2pmem() 으로 되돌리고 dma_alloc_coherent()
+ *          (호스트 메모리)로 폴백한다.
+ *
+ *   nvme_free_queue()  -> pci_free_p2pmem()
+ *
+ * SQ 를 CMB 에 두면 무엇이 좋은가. 보통은 호스트가 SQ 엔트리를 호스트
+ * 메모리에 쓰고, 도어벨을 두드리면 컨트롤러가 그것을 DMA 로 읽어 간다.
+ * SQ 가 CMB(컨트롤러 안)에 있으면 호스트가 직접 써 넣으므로 그 읽기 DMA 가
+ * 통째로 사라진다. use_cmb_sqes 모듈 파라미터로 켜고 끌 수 있다.
+ *
+ * 그리고 NVMe 는 enum pci_p2pdma_map_type 을 직접 쓴다(pci.c 의 두 곳).
+ * I/O 버퍼가 P2P 메모리인지 판정해 unmap 방식을 가르는 데 쓴다.
+ *
+ * (기존 주석은 호출 경로로 "nvme_probe -> nvme_setup_pci_p2pdma" 를
+ *  적었으나 nvme_setup_pci_p2pdma 라는 함수는 drivers/nvme/ 에 없다.
+ *  실제 진입점은 nvme_map_cmb() 다. 또 "nvme_setup_prps/sgl 이
+ *  pci_p2pdma_map_type 을 부른다", "dma_pci_p2pdma_supported 가
+ *  pci_p2pdma_distance_many 를 부른다" 고 적었으나 그 함수 이름들도
+ *  NVMe 쪽에 없다. 위 검증 결과로 대체했다.)
+ *
+ * === 주요 함수/구조체 요약 ===
+ * pci_p2pdma_add_resource()   : BAR 의 한 구간을 P2P 메모리 풀로 등록한다.
+ *                               devm_memremap_pages() 로 struct page 를 만들고
+ *                               gen_pool 로 감싸는 것이 핵심이다.
+ * pci_p2pmem_publish()        : 그 풀을 다른 장치에게 공개할지 표시한다.
+ *                               공개하지 않으면 자기 자신만 쓴다.
+ * pci_alloc_p2pmem()          : 풀에서 한 조각을 떼어 커널 가상 주소로 준다.
+ * pci_free_p2pmem()           : 돌려준다.
+ * pci_p2pmem_virt_to_bus()    : 그 가상 주소에 대응하는 PCI 버스 주소.
+ *                               장치의 DMA 엔진에 넣을 값이다.
+ * pci_p2pdma_map_type()       : 두 장치 사이의 매핑 종류를 판정한다.
+ *                               NOT_SUPPORTED / BUS_ADDR / THRU_HOST_BRIDGE.
+ * pci_p2pdma_distance_many()  : 여러 소비자에 대해 provider 까지의 거리를
+ *                               재고, 그중 가장 나쁜 경우를 돌려준다.
+ * calc_map_type_and_dist()    : 실제 판정 로직. 두 장치의 공통 상위를 찾고,
+ *                               그 경로가 스위치인지 호스트 브리지인지,
+ *                               ACS 가 어떻게 설정됐는지를 본다.
+ * struct pci_p2pdma           : provider 장치에 매달리는 상태. gen_pool 과
+ *                               published 플래그를 갖는다. RCU 로 보호된다.
  */
 
 #define pr_fmt(fmt) "pci-p2pdma: " fmt	/* NVMe: 커널 로그 접두사를 pci-p2pdma로 설정 */

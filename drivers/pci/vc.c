@@ -7,30 +7,83 @@
  */
 
 /*
- * [NVMe 관점 요약]
- * 이 파일은 PCI Express(PCIe) Virtual Channel(VC) 기능을 저장/복원하고
- * 선택적으로 활성화하는 PCI 핵심 서브시스템 코드다. NVMe SSD는 x4/x8/x16
- * 같은 PCIe 링크를 통해 호스트와 통신하며, PCIe 스위치/루트포트에 VC
- * (가상 채널) 기능이 있으면 이 파일이 해당 레지스터 상태를 다룬다.
+ * [한국어 설명] PCIe Virtual Channel 설정의 저장과 복원 (vc.c)
  *
- * NVMe PCIe 호스트 드라이버(drivers/nvme/host/pci.c) 입장에서 볼 때
- * 이 코드는 직접 호출되지 않는다. 대신 PCI 코어가 nvme_pci_dev
- * (struct pci_dev)를 대상으로 suspend/resume/FLR(Function Level Reset)
- * 시 VC 상태를 저장하고 복원할 때 사용한다. NVMe 장치가 D3hot->D0
- * 전환, 런타임 복귀, 또는 시스템 Suspend/Resume 과정에서 VC 레지스터
- * (VC Arbitration Table, Port Arbitration Table, VC Resource Control)가
- * 올바르게 복원되지 않으면 PCIe QoS/아비트레이션 설정이 깨지고
- * DMA 지연/성능 저하/링크 오류가 발생할 수 있으므로 NVMe 입장에서도
- * 간접적으로 중요하다.
+ * === 파일의 역할 ===
+ * PCIe 는 하나의 물리 링크 위에 여러 개의 논리 채널(Virtual Channel)을
+ * 둘 수 있다. 채널마다 별도의 버퍼와 중재 규칙을 가지므로, 지연에 민감한
+ * 트래픽과 대역폭만 필요한 트래픽을 섞이지 않게 나눌 수 있다.
+ * 어떤 트래픽이 어느 채널로 갈지는 TC(Traffic Class) 번호로 정하고,
+ * TC 와 VC 의 대응을 각 포트가 자기 레지스터에 들고 있다.
  *
- * 주요 호출 경로(NVMe 입장):
- *   nvme_probe() -> pci_enable_device() -> PCI core
- *        -> pci_allocate_vc_save_buffers()  (초기화 시 VC 버퍼 할당)
- *   nvme_suspend() / nvme_resume() -> PCI core
- *        -> pci_save_vc_state() / pci_restore_vc_state()
- *        -> pci_vc_do_save_buffer()         (VC 레지스터 save/restore)
- *   nvme_reset_work() -> pci_reset_function() / FLR
- *        -> pci_restore_vc_state()           (리셋 후 VC 상태 복원)
+ * 이 파일이 하는 일은 그 설정을 저장하고 복원하는 것뿐이다. 설정 자체를
+ * 만들지는 않는다 — 그것은 펌웨어나 플랫폼이 부팅 시 정한다. 커널은
+ * 전원이 끊기거나 리셋이 걸려 그 설정이 날아갔을 때 되돌려 놓는 역할만
+ * 맡는다.
+ *
+ * 저장할 것이 세 종류다.
+ *   VC Resource Control - 각 VC 의 활성 여부, TC/VC 매핑, 중재 방식.
+ *   VC Arbitration Table - VC 들 사이의 중재 가중치 표.
+ *   Port Arbitration Table - 한 VC 안에서 여러 포트의 중재 가중치 표.
+ * 뒤의 두 표는 크기가 가변이고(VC 개수와 중재 방식에 따라 다르다),
+ * 존재하지 않을 수도 있다. 그래서 크기를 먼저 계산해 버퍼를 잡는
+ * pci_vc_do_save_buffer() 의 구조가 필요하다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * 버퍼 준비: pci_save_state() 의 준비 단계
+ *              -> [이 파일] pci_allocate_vc_save_buffers()
+ *                 크기를 계산해 저장 버퍼를 미리 잡아 둔다. 저장 시점에
+ *                 할당하면 실패할 수 있으므로 미리 하는 것이다.
+ * 저장:      pci_save_state() -> [이 파일] pci_save_vc_state()
+ * 복원:      pci_restore_state() -> [이 파일] pci_restore_vc_state()
+ *
+ * 세 함수 모두 pci_vc_do_save_buffer() 를 부르고, save 인자로 방향을
+ * 가른다. 크기 계산과 저장과 복원이 같은 순회 로직을 공유해야 어긋나지
+ * 않기 때문이다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. config 접근이 있고, 중재 표를 다시
+ * 로드한 뒤 하드웨어가 반영하기를 기다리는 구간이 있다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: pci.c 의 pci_save_state() / pci_restore_state() 만이 이 파일을 부른다.
+ * 아래쪽: access.c 의 config 접근 함수.
+ * 공유 상태: struct pci_dev 의 save_state 목록에 매달리는
+ *   struct pci_cap_saved_data. VC capability 는 확장 capability 이고,
+ *   VC / VC9 / MFVC 세 가지 ID 가 각각 따로 저장된다.
+ *
+ * === NVMe 관점 ===
+ * NVMe 드라이버는 이 파일의 함수를 직접 부르지 않는다(전수 확인).
+ * 그리고 대부분의 NVMe SSD 는 VC capability 자체를 갖지 않는다 —
+ * 엔드포인트에서 VC 를 여러 개 두는 것은 드물고, 보통 VC0 하나만 쓴다.
+ * 그 경우 이 파일의 함수들은 capability 를 찾지 못해 곧바로 돌아간다.
+ *
+ * 의미가 있는 것은 NVMe 가 꽂힌 경로의 스위치나 루트 포트 쪽이다.
+ * 여러 종류의 트래픽이 한 링크를 공유하는 환경에서 VC 설정이 복원되지
+ * 않으면 중재 규칙이 기본값으로 돌아가, 의도했던 QoS 가 사라진다.
+ *
+ * (기존 주석은 호출 경로로 "nvme_reset_work() -> pci_reset_function()" 을
+ *  적었으나, drivers/nvme/ 에 pci_reset_function() 호출은 0건이다.
+ *  NVMe 컨트롤러 리셋은 NVMe 스펙의 CC.EN 절차로 직접 수행하고,
+ *  PCI 리셋이 필요한 경우에도 pcie_reset_flr() 을 직접 부른다.
+ *  또 "nvme_probe() -> pci_enable_device() -> pci_allocate_vc_save_buffers()"
+ *  라고 적었으나 그 함수를 부르는 것은 pci_enable_device 가 아니라
+ *  pci_save_state 의 준비 경로다.)
+ *
+ * === 주요 함수/구조체 요약 ===
+ * pci_vc_do_save_buffer() : 이 파일의 심장. save 인자에 따라 크기 계산,
+ *                           저장, 복원 셋 중 하나를 수행한다. 세 동작이
+ *                           같은 순회 코드를 공유해 서로 어긋나지 않는다.
+ * pci_vc_save_restore_dwords() : dword 배열을 config space 와 버퍼 사이에
+ *                           양방향으로 옮긴다. 중재 표 처리에 쓴다.
+ * pci_vc_load_arb_table() : 중재 표를 하드웨어에 다시 로드하고, Table
+ *                           Status 비트가 내려가기를 기다린다.
+ * pci_vc_load_port_arb_table() : 위와 같되 포트 중재 표용.
+ * pci_vc_enable()         : VC 를 활성화하고 Negotiation Pending 이
+ *                           풀리기를 기다린다. 링크 양쪽이 합의해야 하므로
+ *                           시간이 걸린다.
+ * pci_save_vc_state()     : 저장 진입점.
+ * pci_restore_vc_state()  : 복원 진입점.
+ * pci_allocate_vc_save_buffers() : 저장 버퍼를 미리 잡아 둔다.
  */
 
 /* Linux 커널 비트필드 헬퍼 포함: FIELD_GET 등 사용 */
@@ -371,6 +424,11 @@ static int pci_vc_do_save_buffer(struct pci_dev *dev, int pos,
 			/* 가능한 phase 수 중 하나를 비트 검사로 결정 */
 			if (cap2 & PCI_VC_CAP2_128_PHASE)
 				vcarb_phases = 128;
+			/* [한국어] 아래로 갈수록 작은 단계 수. 여러 비트가 동시에
+			 * 서 있으면 가장 큰 것이 이긴다 — else if 사슬이 위에서부터
+			 * 검사하므로 순서 자체가 우선순위다.
+			 * 단계(phase) 수는 중재 표의 항목 개수를 결정하고,
+			 * 그것이 곧 저장해야 할 버퍼 크기가 된다. */
 			else if (cap2 & PCI_VC_CAP2_64_PHASE)
 				vcarb_phases = 64;
 			else if (cap2 & PCI_VC_CAP2_32_PHASE)
@@ -406,8 +464,8 @@ static int pci_vc_do_save_buffer(struct pci_dev *dev, int pos,
 
 	/*
 	 * In addition to each VC Resource Control Register, we may have a
-	 * Port Arbitration Table attached to each VC.  The Port Arbitration Table
-	 * Offset in each VC Resource Capability Register tells us if
+	 * Port Arbitration Table attached to each VC.  The Port Arbitration
+	 * Table Offset in each VC Resource Capability Register tells us if
 	 * it exists.  The entry size is global from the Port VC Capability
 	 * Register1 above.  The number of phases is determined per VC.
 	 */
@@ -432,11 +490,16 @@ static int pci_vc_do_save_buffer(struct pci_dev *dev, int pos,
 			/* Resource Capability 비트에 따라 phase 수 결정 */
 			if (cap & PCI_VC_RES_CAP_256_PHASE)
 				parb_phases = 256;
+			/* [한국어] 포트 중재 표의 단계 수. VC 중재와 달리 128 단계에
+			 * 두 종류(일반과 Time-Based)가 있어 둘을 OR 로 함께 본다.
+			 * 마찬가지로 큰 것부터 검사해 가장 큰 값이 이긴다. */
 			else if (cap & (PCI_VC_RES_CAP_128_PHASE |
 					PCI_VC_RES_CAP_128_PHASE_TB))
 				parb_phases = 128;
+			/* [한국어] 64단계. 128 이 없을 때만 여기 온다 */
 			else if (cap & PCI_VC_RES_CAP_64_PHASE)
 				parb_phases = 64;
+			/* [한국어] 32단계. 가장 작은 선택지 */
 			else if (cap & PCI_VC_RES_CAP_32_PHASE)
 				parb_phases = 32;
 

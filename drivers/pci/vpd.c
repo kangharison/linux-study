@@ -6,33 +6,83 @@
  */
 
 /*
- * ===================================================================
- * NVMe PCIe 호스트 드라이버 관점 파일 요약
- * -------------------------------------------------------------------
- * 본 파일(drivers/pci/vpd.c)은 PCI Vital Product Data(VPD)에 대한
- * 읽기/쓰기, 크기 탐지, sysfs 인터페이스, 그리고 관련 quirk를
- * 구현한다. VPD는 PCIe 장치의 EEPROM에 저장된 제조사/모델/일련번호
- * 등 제품 식별 정보를 담고 있으며, NVMe SSD 역시 PCIe endpoint로서
- * VPD를 노출할 수 있다.
+ * [한국어 설명] 장치의 EEPROM 에 든 제품 정보를 읽고 쓰는 계층 (vpd.c)
  *
- * NVMe 호스트 드라이버(drivers/nvme/host/pci.c)가 직접 VPD 함수를
- * 호출하지는 않지만, NVMe 장치의 PCIe 수준 초기화, sysfs(/vpd),
- * 그리고 다기능(Multi-Function) NVMe 컨트롤러의 VPD 라우팅 quirk에서
- * 본 파일의 기능이 사용된다. 특히:
- *   - pci_vpd_init(): NVMe 장치 probe 시 VPD capability를 찾아 lock 초기화
- *   - pci_vpd_alloc(), pci_read_vpd(): /sys/bus/pci/devices/.../vpd 읽기
- *   - quirk_f0_vpd_link(): Multi-Function NVMe 등에서 function 0을 통해
- *     VPD에 접근하도록 라우팅
- *   - quirk_blacklist_vpd(): 비표준 VPD 형식으로 인해 NVMe 장치가
- *     비정상 동작할 수 있는 경우 접근 차단
- *   - pci_vpd_check_csum(): VPD checksum 검증(PCIe 장치 신뢰성 확인)
+ * === 파일의 역할 ===
+ * VPD(Vital Product Data)는 PCI 장치가 자기 자신에 대해 기록해 둔 정보다.
+ * 제조사명, 부품 번호, 일련번호, 펌웨어 버전 같은 것이 들어 있다.
+ * config space 의 몇 바이트가 아니라 별도의 직렬 EEPROM 에 저장되며,
+ * config space 의 VPD capability 가 그것을 읽고 쓰는 창구 역할을 한다.
  *
- * VPD 접근은 config space의 VPD capability를 통해 이루어지며, serial
- * EEPROM에 연결된 경우 수 ms 이상 지연될 수 있어 pci_vpd_wait()에서
- * 플래그 폴링을 수행한다. NVMe 장치의 에러 복구나 PME 처리 중에도
- * sysfs를 통한 VPD 접근이 가능하므로, 런타임 전원 관리
- * (pci_config_pm_runtime_get/put)와 mutex lock으로 동시 접근을 보호한다.
- * ===================================================================
+ * 접근 방식이 독특하고, 그것이 이 파일의 복잡성 대부분을 만든다.
+ *   1) VPD Address 레지스터에 읽고 싶은 오프셋을 쓴다.
+ *   2) 장치가 EEPROM 에서 그 4바이트를 가져올 때까지 기다린다.
+ *      완료되면 Address 레지스터의 F 비트가 뒤집힌다.
+ *   3) VPD Data 레지스터에서 값을 읽는다.
+ * EEPROM 은 느려서 한 번에 수 밀리초가 걸릴 수 있다. 그래서
+ * pci_vpd_wait() 이 폴링하며 기다리고, 점점 간격을 늘려 가며 잔다.
+ *
+ * 데이터 형식도 따로 있다. VPD 는 태그로 구분된 자원들의 나열이고
+ * (문자열 태그, 읽기 전용 태그, 읽기/쓰기 태그, 끝 태그), 각 태그 안에
+ * 다시 "PN"(part number), "SN"(serial number) 같은 두 글자 키워드로
+ * 항목이 나뉜다. 이 파일은 그 구조를 훑어 전체 크기를 알아낸다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * 열거:  probe.c 의 pci_init_capabilities()
+ *          -> [이 파일] pci_vpd_init() — capability 오프셋을 찾고 뮤텍스를 초기화
+ *
+ * 읽기:  cat /sys/bus/pci/devices/.../vpd
+ *          -> pci-sysfs.c 의 vpd_read()
+ *             -> [이 파일] pci_read_vpd() -> pci_vpd_read() -> 폴링 루프
+ *
+ * quirk: quirks.c 가 DECLARE_PCI_FIXUP_* 로 등록한 것들이 이 파일에 있다
+ *          (quirk_f0_vpd_link, quirk_blacklist_vpd 등).
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트 전용. 폴링 중에 잠들고, 뮤텍스를 잡는다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: pci-sysfs.c(vpd 속성), 일부 네트워크 드라이버(자기 장치의 일련번호를
+ *   읽어 MAC 주소를 만들거나 펌웨어 이미지를 고르는 데 쓴다).
+ * 아래쪽: access.c 의 config 접근, pci.c 의 런타임 PM 참조 관리.
+ * 공유 상태: struct pci_dev 의 vpd 하위 구조 — cap(capability 오프셋),
+ *   len(전체 크기, 처음 읽을 때 계산해 캐시), valid(형식이 올바른가),
+ *   lock(동시 접근 직렬화용 뮤텍스).
+ *
+ * 뮤텍스가 필요한 이유가 위 3단계 절차에 있다. Address 를 쓰고 Data 를
+ * 읽는 사이에 다른 태스크가 Address 를 덮어쓰면 엉뚱한 오프셋의 값을
+ * 읽는다. config 접근 자체를 보호하는 pci_lock 은 접근 한 번만 감싸므로
+ * 이 절차 전체를 덮지 못한다.
+ *
+ * === NVMe 관점 ===
+ * NVMe 드라이버는 이 파일의 함수를 하나도 직접 부르지 않는다(전수 확인).
+ * NVMe SSD 도 VPD 를 노출할 수는 있고, 그 경우 lspci -vv 나 sysfs 로
+ * 일련번호를 읽을 수 있다. 다만 NVMe 는 자기 스펙의 Identify Controller
+ * 명령으로 훨씬 풍부한 정보(모델명, 일련번호, 펌웨어 리비전)를 제공하므로,
+ * NVMe 관리 도구들은 VPD 대신 그쪽을 쓴다.
+ *
+ * (기존 주석은 "NVMe 장치 probe 시 VPD capability 를 찾아" 라고 적었는데,
+ *  probe 는 드라이버 바인딩 시점이고 pci_vpd_init() 은 그보다 앞선 열거
+ *  단계에서 불린다. 또 "다기능 NVMe 컨트롤러의 VPD 라우팅 quirk" 라고
+ *  했으나 quirk_f0_vpd_link 의 대상 목록에 NVMe 컨트롤러는 없다.)
+ *
+ * === 주요 함수/구조체 요약 ===
+ * pci_vpd_init()          : capability 를 찾고 뮤텍스를 초기화한다. 열거 시 1회.
+ * pci_vpd_size()          : VPD 태그들을 훑어 전체 크기를 알아낸다. 형식이
+ *                           깨져 있으면 거기까지만 유효한 것으로 자른다.
+ * pci_vpd_wait()          : F 비트가 뒤집히기를 기다린다. 간격을 늘려 가며
+ *                           폴링하고, 상한을 넘으면 -ETIMEDOUT.
+ * pci_vpd_read()          : 3단계 절차로 실제 읽기. 4바이트 단위이므로
+ *                           앞뒤가 정렬되지 않은 요청은 잘라 붙인다.
+ * pci_vpd_write()         : 쓰기. 읽기와 F 비트의 의미가 반대다.
+ * pci_read_vpd() / pci_write_vpd() : 외부에 노출되는 진입점. 뮤텍스와
+ *                           런타임 PM 참조를 여기서 관리한다.
+ * pci_vpd_alloc()         : 전체 VPD 를 읽어 힙 버퍼로 돌려준다.
+ * pci_vpd_find_id_string() / pci_vpd_find_ro_info_keyword() : 태그와
+ *                           키워드를 찾아 그 안의 값 위치를 알려 준다.
+ * pci_vpd_check_csum()    : 읽기 전용 영역의 체크섬을 검증한다.
+ * quirk_f0_vpd_link()     : 다기능 장치에서 function 0 의 VPD 를 공유하게 한다.
+ * quirk_blacklist_vpd()   : VPD 접근이 장치를 망가뜨리는 것으로 알려진
+ *                           모델에서 아예 접근을 막는다.
  */
 
 #include <linux/pci.h> /* NVMe: PCIe 장치와 VPD capability 정의를 위한 PCI 핵심 헤더. */
