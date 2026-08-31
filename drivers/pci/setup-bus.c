@@ -742,17 +742,6 @@ static void pci_dev_res_restore(struct pci_dev_resource *dev_res)
  * 호출 체인:
  *   pbus_select_window_for_type() -> [이 함수] -> pci_bus_for_each_resource()
  */
-/*
- * Helper function for sizing routines.  Assigned resources have non-NULL
- * parent resource.
- *
- * Return first unassigned resource of the correct type.  If there is none,
- * return first assigned resource of the correct type.  If none of the
- * above, return NULL.
- *
- * Returning an assigned resource of the correct type allows the caller to
- * distinguish between already assigned and no resource of the correct type.
- */
 static struct resource *find_bus_resource_of_type(struct pci_bus *bus,
 						  unsigned long type_mask,
 						  unsigned long type)
@@ -841,28 +830,6 @@ static struct resource *find_bus_resource_of_type(struct pci_bus *bus,
  *   pbus_select_window() / pbus_size_io() / __pci_bus_size_bridges() /
  *   pci_prepare_next_assign_round()
  *     -> [이 함수] -> find_bus_resource_of_type(), pci_bus_resource_n()
- */
-/**
- * pbus_select_window_for_type - Select bridge window for a resource type
- * @bus: PCI bus
- * @type: Resource type (resource flags can be passed as is)
- *
- * Select the bridge window based on a resource @type.
- *
- * For memory resources, the selection is done as follows:
- *
- * Any non-prefetchable resource is put into the non-prefetchable window.
- *
- * If there is no prefetchable MMIO window, put all memory resources into the
- * non-prefetchable window.
- *
- * If there's a 64-bit prefetchable MMIO window, put all 64-bit prefetchable
- * resources into it and place 32-bit prefetchable memory into the
- * non-prefetchable window.
- *
- * Otherwise, put all prefetchable resources into the prefetchable window.
- *
- * Return: the bridge window resource or NULL if no bridge window is found.
  */
 static struct resource *pbus_select_window_for_type(struct pci_bus *bus,
 						    unsigned long type)
@@ -1014,29 +981,6 @@ static struct resource *pbus_select_window_for_type(struct pci_bus *bus,
  *   pbus_size_mem() / remove_dev_resources() /
  *   pbus_reassign_bridge_resources() / pci_do_resource_release_and_resize()
  *     -> [이 함수] -> pbus_select_window_for_type()
- */
-/**
- * pbus_select_window - Select bridge window for a resource
- * @bus: PCI bus
- * @res: Resource
- *
- * Select the bridge window for @res. If the resource is already assigned,
- * return the current bridge window.
- *
- * For memory resources, the selection is done as follows:
- *
- * Any non-prefetchable resource is put into the non-prefetchable window.
- *
- * If there is no prefetchable MMIO window, put all memory resources into the
- * non-prefetchable window.
- *
- * If there's a 64-bit prefetchable MMIO window, put all 64-bit prefetchable
- * resources into it and place 32-bit prefetchable memory into the
- * non-prefetchable window.
- *
- * Otherwise, put all prefetchable resources into the prefetchable window.
- *
- * Return: the bridge window resource or NULL if no bridge window is found.
  */
 struct resource *pbus_select_window(struct pci_bus *bus,
 				    const struct resource *res)
@@ -1475,17 +1419,6 @@ static void reset_resource(struct pci_dev *dev, struct resource *res)
  *   __assign_resources_sorted() -> [이 함수]
  *     -> pci_assign_resource() / pci_reassign_resource() (setup-res.c)
  */
-/**
- * reassign_resources_sorted() - Satisfy any additional resource requests
- *
- * @realloc_head:	Head of the list tracking requests requiring
- *			additional resources
- * @head:		Head of the list tracking requests with allocated
- *			resources
- *
- * Walk through each element of the realloc_head and try to procure additional
- * resources for the element, provided the element is in the head list.
- */
 static void reassign_resources_sorted(struct list_head *realloc_head,
 				      struct list_head *head)
 {
@@ -1645,17 +1578,6 @@ out:
  * 호출 체인:
  *   __assign_resources_sorted() -> [이 함수]
  *     -> pci_assign_resource() (setup-res.c) / pci_dev_res_add_to_list()
- */
-/**
- * assign_requested_resources_sorted() - Satisfy resource requests
- *
- * @head:	Head of the list tracking requests for resources
- * @fail_head:	Head of the list tracking requests that could not be
- *		allocated
- * @optional:	Assign also optional resources
- *
- * Satisfy resource requests of each element in the list.  Add requests that
- * could not be satisfied to the failed_list.
  */
 static void assign_requested_resources_sorted(struct list_head *head,
 					      struct list_head *fail_head,
@@ -2939,11 +2861,6 @@ int pci_claim_bridge_resource(struct pci_dev *bridge, int i)
  * 호출 체인:
  *   __pci_bus_size_bridges() -> [이 함수]
  */
-/*
- * Check whether the bridge supports optional I/O and prefetchable memory
- * ranges.  If not, the respective base/limit registers must be read-only
- * and read as 0.
- */
 static void pci_bridge_check_ranges(struct pci_bus *bus)
 {
 	/* [한국어] 창을 소유한 브리지 장치. */
@@ -3239,18 +3156,6 @@ resource_size_t pci_min_window_alignment(struct pci_bus *bus, unsigned long type
  *     -> pbus_select_window_for_type(), pci_min_window_alignment(),
  *        get_res_add_size(), calculate_iosize(), pci_dev_res_add_to_list()
  */
-/**
- * pbus_size_io() - Size the I/O window of a given bus
- *
- * @bus:		The bus
- * @add_size:		Additional I/O window
- * @realloc_head:	Track the additional I/O window on this list
- *
- * Sizing the I/O windows of the PCI-PCI bridge is trivial, since these
- * windows have 1K or 4K granularity and the I/O ranges of non-bridge PCI
- * devices are limited to 256 bytes.  We must be careful with the ISA
- * aliasing though.
- */
 static void pbus_size_io(struct pci_bus *bus, resource_size_t add_size,
 			 struct list_head *realloc_head)
 {
@@ -3518,10 +3423,6 @@ static inline resource_size_t calculate_mem_align(resource_size_t *aligns,
  * 호출 체인:
  *   pbus_size_mem() -> [이 함수]
  */
-/*
- * Calculate bridge window head alignment that leaves no gaps in between
- * resources.
- */
 static resource_size_t calculate_head_align(resource_size_t *aligns,
 					    int max_order)
 {
@@ -3619,14 +3520,6 @@ static resource_size_t calculate_head_align(resource_size_t *aligns,
  * 호출 체인:
  *   pbus_size_mem() -> [이 함수]
  *     -> pci_resource_is_optional(), res_to_dev_res(), pci_dev_res_add_to_list()
- */
-/*
- * pbus_size_mem_optional - Account optional resources in bridge window
- *
- * Account an optional resource or the optional part of the resource in bridge
- * window size.
- *
- * Return: %true if the resource is entirely optional.
  */
 static bool pbus_size_mem_optional(struct pci_dev *dev, int resno,
 				   resource_size_t align,
@@ -3751,23 +3644,6 @@ static bool pbus_size_mem_optional(struct pci_dev *dev, int resno,
  *   __pci_bus_size_bridges() -> [이 함수]
  *     -> pbus_select_window(), pbus_size_mem_optional(),
  *        calculate_head_align(), calculate_memsize(), pci_dev_res_add_to_list()
- */
-/**
- * pbus_size_mem() - Size the memory window of a given bus
- *
- * @bus:		The bus
- * @b_res:		The bridge window resource
- * @add_size:		Additional memory window
- * @realloc_head:	Track the additional memory window on this list
- *
- * Calculate the size of the bridge window @b_res and minimal alignment
- * which guarantees that all child resources fit in this size.
- *
- * Set the bus resource start/end to indicate the required size if there an
- * available unassigned bus resource of the desired @type.
- *
- * Add optional resource requests to the @realloc_head list if it is
- * supplied.
  */
 static void pbus_size_mem(struct pci_bus *bus, struct resource *b_res,
 			  resource_size_t add_size,
@@ -4292,10 +4168,6 @@ static void assign_fixed_resource_on_bus(struct pci_bus *b, struct resource *r)
  *
  * 호출 체인:
  *   __pci_bus_assign_resources() -> [이 함수] -> assign_fixed_resource_on_bus()
- */
-/*
- * Try to assign any resources marked as IORESOURCE_PCI_FIXED, as they are
- * skipped by pbus_assign_resources_sorted().
  */
 static void pdev_assign_fixed_resources(struct pci_dev *dev)
 {
@@ -4858,10 +4730,6 @@ enum release_type {
  *   pci_prepare_next_assign_round() -> [이 함수]
  *     -> (재귀) -> pci_bridge_release_resources()
  */
-/*
- * Try to release PCI bridge resources from leaf bridge, so we can allocate
- * a larger window later.
- */
 static void pci_bus_release_bridge_resources(struct pci_bus *bus,
 					     struct resource *b_win,
 					     enum release_type rel_type)
@@ -5074,13 +4942,6 @@ static int pci_bus_get_depth(struct pci_bus *bus)
  * 값의 배치가 정교하다: user_enabled 이상이 "켜짐"이라
  * pci_realloc_enabled() 가 단순 비교 하나로 판정한다.
  * 바로 위 원문 주석이 각 값의 의미를 한 줄씩 밝히고 있다.
- */
-/*
- * -1: undefined, will auto detect later
- *  0: disabled by user
- *  1: disabled by auto detect
- *  2: enabled by user
- *  3: enabled by auto detect
  */
 enum enable_type {
 	undefined = -1,
@@ -5669,12 +5530,6 @@ static void remove_dev_resources(struct pci_dev *dev,
  *   pci_bridge_distribute_available_resources()
  *     -> [이 함수] -> (재귀) -> adjust_bridge_window(), remove_dev_resources()
  */
-/*
- * io, mmio and mmio_pref contain the total amount of bridge window space
- * available. This includes the minimal space needed to cover all the
- * existing devices on the bus and the possible extra space that can be
- * shared with the bridges.
- */
 static void pci_bus_distribute_available_resources(struct pci_bus *bus,
 		    struct list_head *add_list,
 		    struct resource available_in[PCI_P2P_BRIDGE_RESOURCE_NUM])
@@ -6173,11 +6028,6 @@ static void pci_prepare_next_assign_round(struct list_head *fail_head,
  *        __pci_bus_assign_resources(), pci_prepare_next_assign_round(),
  *        pci_bus_dump_resources()
  */
-/*
- * First try will not touch PCI bridge res.
- * Second and later try will clear small leaf bridge res.
- * Will stop till to the max depth if can not find good one.
- */
 void pci_assign_unassigned_root_bus_resources(struct pci_bus *bus)
 {
 	/* [한국어] 선택적 요구를 담을 실제 리스트. 스택에 잡고, 마지막
@@ -6508,11 +6358,6 @@ EXPORT_SYMBOL_GPL(pci_assign_unassigned_bridge_resources);
  *     -> pbus_select_window(), pci_release_resource(),
  *        __pci_bus_size_bridges(), __pci_bridge_assign_resources(),
  *        pci_required_resource_failed(), pci_setup_bridge()
- */
-/*
- * Walk to the root bus, find the bridge window relevant for @res and
- * release it when possible. If the bridge window contains assigned
- * resources, it cannot be released.
  */
 static int pbus_reassign_bridge_resources(struct pci_bus *bus, struct resource *res,
 					  struct list_head *saved)

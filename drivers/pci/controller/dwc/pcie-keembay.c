@@ -231,14 +231,6 @@ static int keembay_pcie_pll_init(struct keembay_pcie *pcie)
 	return ret;
 }
 
-/*
- * Keem Bay PCIe Controller provides an additional IP logic on top of
- * standard DWC IP to clear MSI IRQ by writing '1' to the respective
- * bit of the status register.
- *
- * So, a chained irq handler is defined to handle this additional
- * IP logic.
- */
 static void keembay_pcie_msi_irq_handler(struct irq_desc *desc)
 {
 	struct keembay_pcie *pcie = irq_desc_get_handler_data(desc);

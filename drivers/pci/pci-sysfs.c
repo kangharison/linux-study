@@ -2907,17 +2907,6 @@ void __weak pci_adjust_legacy_attr(struct pci_bus *b, /* [한국어] 대상 버�
  *   probe.c 의 버스 등록 / pci_sysfs_init -> [pci_create_legacy_files]
  *     -> kzalloc_objs -> pci_adjust_legacy_attr -> device_create_bin_file
  */
-/**
- * pci_create_legacy_files - create legacy I/O port and memory files
- * @b: bus to create files under
- *
- * Some platforms allow access to legacy I/O port and ISA memory space on
- * a per-bus basis.  This routine creates the files and ties them into
- * their associated read, write and mmap files from pci-sysfs.c
- *
- * On error unwind, but don't propagate the error to the caller
- * as it is ok to set up the PCI bus without these files.
- */
 void pci_create_legacy_files(struct pci_bus *b) /* [한국어] 이 버스에 legacy_io/legacy_mem 두 파일을 만든다 */
 { /* [한국어] 함수 본문 시작 */
 	int error; /* [한국어] device_create_bin_file 의 결과. 0 이 성공 */
@@ -3359,13 +3348,6 @@ static ssize_t pci_write_resource_io(struct file *filp, struct kobject *kobj, /*
  *   pci_remove_sysfs_dev_files / __resource_resize_store
  *     -> [pci_remove_resource_files] -> sysfs_remove_bin_file -> kfree
  */
-/**
- * pci_remove_resource_files - cleanup resource files
- * @pdev: dev to cleanup
- *
- * If we created resource files for @pdev, remove them from sysfs and
- * free their resources.
- */
 static void pci_remove_resource_files(struct pci_dev *pdev) /* [한국어] 이 장치의 resourceN, resourceN_wc 파일을 전부 정리한다 */
 { /* [한국어] 함수 본문 시작 */
 	int i; /* [한국어] BAR 인덱스 */
@@ -3639,17 +3621,6 @@ void __weak pci_remove_resource_files(struct pci_dev *dev) { return; } /* [한�
  *
  * 호출 체인:
  *   write(2) -> sysfs bin_attr write -> [pci_write_rom]
- */
-/**
- * pci_write_rom - used to enable access to the PCI ROM display
- * @filp: sysfs file
- * @kobj: kernel object handle
- * @bin_attr: struct bin_attribute for this file
- * @buf: user input
- * @off: file offset
- * @count: number of byte in input
- *
- * writing anything except 0 enables it
  */
 static ssize_t pci_write_rom(struct file *filp, struct kobject *kobj, /* [한국어] 파일 핸들(미사용)과 kobject */
 			     const struct bin_attribute *bin_attr, char *buf, /* [한국어] 속성 서술자(미사용)와 사용자 입력 */

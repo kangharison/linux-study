@@ -3710,25 +3710,6 @@ out:
  * Return: New subordinate number covering all buses behind this bridge.
  */
 /*
- * pci_scan_bridge() - Scan buses behind a bridge
- * @bus: Parent bus the bridge is on
- * @dev: Bridge itself
- * @max: Starting subordinate number of buses behind this bridge
- * @pass: Either %0 (scan already configured bridges) or %1 (scan bridges
- *        that need to be reconfigured.
- *
- * If it's a bridge, configure it and scan the bus behind it.
- * For CardBus bridges, we don't scan behind as the devices will
- * be handled by the bridge driver itself.
- *
- * We need to process bridges in two passes -- first we scan those
- * already configured by the BIOS and after we are done with all of
- * them, we proceed to assigning numbers to the remaining buses in
- * order to avoid overlaps between old and new bus numbers.
- *
- * Return: New subordinate number covering all buses behind this bridge.
- */
-/*
  * [한국어]
  * pci_scan_bridge - 브리지 아래를 스캔하는 공개 API (예비 버스 없이)
  *
@@ -4211,22 +4192,6 @@ static void pci_set_removable(struct pci_dev *dev)
 	}
 }
 
-/**
- * pci_ext_cfg_is_aliased - Is ext config space just an alias of std config?
- * @dev: PCI device
- *
- * PCI Express to PCI/PCI-X Bridge Specification, rev 1.0, 4.1.4 says that
- * when forwarding a type1 configuration request the bridge must check that
- * the extended register address field is zero.  The bridge is not permitted
- * to forward the transactions and must handle it as an Unsupported Request.
- * Some bridges do not follow this rule and simply drop the extended register
- * bits, resulting in the standard config space being aliased, every 256
- * bytes across the entire configuration space.  Test for this condition by
- * comparing the first dword of each potential alias to the vendor/device ID.
- * Known offenders:
- *   ASM1083/1085 PCIe-to-PCI Reversible Bridge (1b21:1080, rev 01 & 03)
- *   AMD/ATI SBx00 PCI to PCI Bridge (1002:4384, rev 40)
- */
 /**
  * pci_ext_cfg_is_aliased - Is ext config space just an alias of std config?
  * @dev: PCI device
@@ -4800,16 +4765,6 @@ static const char *pci_type_str(struct pci_dev *dev)
 	}
 }
 
-/**
- * pci_setup_device - Fill in class and map information of a device
- * @dev: the device structure to fill
- *
- * Initialize the device structure with information about the device's
- * vendor,class,memory and IO-space addresses, IRQ lines etc.
- * Called at initialisation of the PCI subsystem and by CardBus services.
- * Returns 0 on success and negative if unknown type of device (not normal,
- * bridge or CardBus).
- */
 /**
  * pci_setup_device - Fill in class and map information of a device
  * @dev: the device structure to fill
@@ -8367,17 +8322,6 @@ struct pci_bus *pci_scan_bus(int bus, struct pci_ops *ops,
 EXPORT_SYMBOL(pci_scan_bus);
 /* [한국어] 구식 아키텍처 코드가 쓰므로 공개 */
 
-/**
- * pci_rescan_bus_bridge_resize - Scan a PCI bus for devices
- * @bridge: PCI bridge for the bus to scan
- *
- * Scan a PCI bus and child buses for new devices, add them,
- * and enable them, resizing bridge mmio/io resource if necessary
- * and possible.  The caller must ensure the child devices are already
- * removed for resizing to occur.
- *
- * Returns the max number of subordinate bus discovered.
- */
 /**
  * pci_rescan_bus_bridge_resize - Scan a PCI bus for devices
  * @bridge: PCI bridge for the bus to scan
