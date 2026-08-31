@@ -44,7 +44,7 @@
  *
  * === NVMe 드라이버가 실제로 쓰는 것 (drivers/nvme/ 전수 확인) ===
  * 주석을 제거한 drivers/nvme/ 전체를 검색해 실제 호출을 확인했다. NVMe 가 부르는
- * pci* 함수는 33개이며, 그중 이 파일에 정의된 것은 다음 7개다:
+ * pci* 함수는 33개이며, 그중 이 파일에 정의된 것은 다음 8개다:
  *
  *     pci_enable_device_mem()   — 장치를 깨우고 MEM 공간 디코딩을 켠다.
  *                                 NVMe 는 IO 공간을 쓰지 않아 _mem 판을 쓴다.
@@ -58,10 +58,14 @@
  *     pci_load_saved_state()    — 미리 만들어 둔 상태 묶음을 적용한다.
  *     pci_device_is_present()   — Vendor ID 를 읽어 0xFFFF 가 아닌지 본다.
  *                                 표면 제거(surprise removal) 판정의 근거다.
+ *     pcie_reset_flr()          — PCIe Device Control 의 Initiate Function Level
+ *                                 Reset 비트를 눌러 함수 하나만 리셋한다.
+ *                                 drivers/nvme/host/pci.c 의 컨트롤러 리셋 경로가
+ *                                 직접 호출한다.
  *
- * 나머지 26개는 다른 파일에 있다 — 예를 들어 pci_alloc_irq_vectors_affinity() 는
+ * 나머지 25개는 다른 파일에 있다 — 예를 들어 pci_alloc_irq_vectors_affinity() 는
  * msi/ 에, pci_p2pdma_add_resource()/pci_alloc_p2pmem() 은 p2pdma.c 에,
- * pci_request_mem_regions() 는 인라인 래퍼다. pcie_reset_flr() 도 여기가 아니다.
+ * pci_request_mem_regions() 는 인라인 래퍼다.
  *
  * (이전 주석은 pci_iomap, pci_find_capability, pcie_get_mps, pci_set_power_state,
  *  pci_reset_function, pci_enable_acs 등을 "NVMe 가 호출한다"고 적어 두었으나
@@ -107,33 +111,44 @@
 #include <linux/bitfield.h>	/* [한국어] FIELD_GET/FIELD_PREP — config space 레지스터의 비트 필드를 안전하게 뽑고 넣는다 */
 #include "pci.h"	/* [한국어] PCI 서브시스템 내부 전용 API(pci_bus_sem, 내부 헬퍼). 외부에 노출하지 않는 것들 */
 
-DEFINE_MUTEX(pci_slot_mutex); /* NVMe: DEFINE_MUTEX 매크로를 호출한다. */
+DEFINE_MUTEX(pci_slot_mutex); /* [한국어] PCI 슬롯 리스트(struct pci_slot)를 보호하는 전역 뮤텍스. 슬롯 등록/해제와 슬롯 단위 리셋이 서로를 밟지 않게 한다 */
 
-const char *pci_power_names[] = { /* NVMe: char 타입 변수를 선언한다. */
-	"error", "D0", "D1", "D2", "D3hot", "D3cold", "unknown", /* NVMe: 표현식을 이어서 작성한다. */
-}; /* NVMe: 코드 블록을 시작한다. */
+/*
+ * [한국어] pci_power_t 값(PCI_UNKNOWN..PCI_D3cold)을 사람이 읽는 문자열로 바꾸는 표.
+ * 인덱스가 곧 D-state 번호이며, 로그에 "D0" "D3hot" 처럼 찍을 때 쓴다.
+ * PCI PM 규격의 전원 상태는 D0(완전 동작) → D1 → D2 → D3hot(버스 전원은 살아 있음)
+ * → D3cold(전원 자체가 끊김) 순으로 깊어진다.
+ */
+const char *pci_power_names[] = {
+	"error", "D0", "D1", "D2", "D3hot", "D3cold", "unknown", /* [한국어] 앞의 두 칸은 D-state 가 아닌 특수값 — "error"(PCI_ERROR_RESPONSE 상태), "unknown"(아직 모름) */
+};
 EXPORT_SYMBOL_GPL(pci_power_names);
 
-#ifdef CONFIG_X86_32 /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
-int isa_dma_bridge_buggy; /* NVMe: int 타입 변수를 선언한다. */
+#ifdef CONFIG_X86_32 /* [한국어] x86 32비트에서만 존재하는 ISA DMA 브리지 결함 플래그. 다른 아키텍처에는 ISA 브리지가 없어 컴파일하지 않는다 */
+int isa_dma_bridge_buggy; /* [한국어] 특정 ISA/PCI 브리지가 DMA 중 버스를 제대로 넘기지 못하는 결함이 있으면 1. quirk 코드가 세우고, 사운드/플로피 같은 ISA DMA 드라이버가 읽어 우회한다 */
 EXPORT_SYMBOL(isa_dma_bridge_buggy);
-#endif /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
+#endif
 
-int pci_pci_problems; /* NVMe: int 타입 변수를 선언한다. */
+int pci_pci_problems; /* [한국어] PCI_PCI_PROBLEMS_* 비트 모음 — 칩셋 자체의 알려진 결함(쓰기 결합 불가, MWI 금지 등)을 quirk 가 기록해 두는 전역 */
 EXPORT_SYMBOL(pci_pci_problems);
 
-unsigned int pci_pm_d3hot_delay; /* NVMe: unsigned 타입 변수를 선언한다. */
+unsigned int pci_pm_d3hot_delay; /* [한국어] D3hot→D0 복귀 후 추가로 기다릴 밀리초. pci=d3hot_delay= 로 관리자가 늘릴 수 있고, pci_dev_d3_sleep() 이 장치별 값과 max 를 취한다 */
 
-static void pci_pme_list_scan(struct work_struct *work); /* NVMe: pci_pme_list_scan 함수를 선언한다. */
+static void pci_pme_list_scan(struct work_struct *work); /* [한국어] 아래에서 DECLARE_DELAYED_WORK 가 이 함수를 참조하므로 미리 선언해 둔다 */
 
-static LIST_HEAD(pci_pme_list); /* NVMe: LIST_HEAD 매크로를 호출한다. */
-static DEFINE_MUTEX(pci_pme_list_mutex); /* NVMe: DEFINE_MUTEX 매크로를 호출한다. */
-static DECLARE_DELAYED_WORK(pci_pme_work, pci_pme_list_scan); /* NVMe: DECLARE_DELAYED_WORK 매크로를 호출한다. */
+static LIST_HEAD(pci_pme_list); /* [한국어] PME(Power Management Event) 를 폴링으로 확인해야 하는 장치들의 리스트 머리. 인터럽트로 PME 를 못 받는 장치를 주기적으로 훑는다 */
+static DEFINE_MUTEX(pci_pme_list_mutex); /* [한국어] 위 리스트를 보호하는 뮤텍스. 등록/해제는 프로세스 문맥이고 스캔도 워크큐(프로세스 문맥)라 잠들 수 있는 뮤텍스로 충분하다 */
+static DECLARE_DELAYED_WORK(pci_pme_work, pci_pme_list_scan); /* [한국어] PME_TIMEOUT(1초) 마다 pci_pme_list_scan() 을 돌리는 지연 워크. 워크큐 문맥이라 config space 접근이 잠들어도 안전하다 */
 
-struct pci_pme_device { /* NVMe: pci_pme_device 구조체를 정의한다. */
-	struct list_head list; /* NVMe: 데이터 타입 변수를 선언한다. */
-	struct pci_dev *dev; /* NVMe: 데이터 타입 변수를 선언한다. */
-}; /* NVMe: 코드 블록을 시작한다. */
+/*
+ * [한국어] PME 폴링 대상 하나를 나타내는 항목.
+ * pci_pme_active() 가 "PME 를 켰지만 이 장치는 pme_poll 이다" 라고 판단하면
+ * 이 구조체를 만들어 pci_pme_list 에 넣고, pci_pme_list_scan() 이 1초마다 훑는다.
+ */
+struct pci_pme_device {
+	struct list_head list; /* [한국어] pci_pme_list 에 꿰이는 링크. 설정자: pci_pme_active(). 읽는 자: pci_pme_list_scan(). 동기화: pci_pme_list_mutex */
+	struct pci_dev *dev; /* [한국어] 폴링할 장치. 이 포인터를 들고 있는 동안 장치가 사라지면 안 되므로 pci_pme_active() 가 리스트에서 빼는 것으로 수명을 맞춘다 */
+};
 
 #define PME_TIMEOUT 1000 /* How long between PME checks */
 
@@ -142,6 +157,9 @@ struct pci_pme_device { /* NVMe: pci_pme_device 구조체를 정의한다. */
  * (PCIe r6.0 sec 6.6.1).  A D3cold to D0 transition implies a Conventional
  * Reset (PCIe r6.0 sec 5.8).
  */
+/* [한국어] Conventional Reset 을 벗어난 장치가 config 요청에 응답해야 하는 제한 시간(ms).
+ * D3cold→D0 전이도 Conventional Reset 과 같은 효과라 이 대기가 적용된다.
+ * pci_dev_wait() 이 이 값을 상한으로 삼아 장치가 살아나기를 기다린다. */
 #define PCI_RESET_WAIT 1000 /* msec */
 
 /*
@@ -150,67 +168,102 @@ struct pci_pme_device { /* NVMe: pci_pme_device 구조체를 정의한다. */
  * limit, but 60 sec ought to be enough for any device to become
  * responsive.
  */
+/* [한국어] 장치가 Request Retry Status(CRS)로 "아직 준비 안 됨"을 계속 답할 때의 상한(ms).
+ * 스펙에 상한이 없어 커널이 60초로 못 박았다 — 이보다 오래 끌면 고장으로 본다. */
 #define PCIE_RESET_READY_POLL_MS 60000 /* msec */
 
 /*
- * pci_dev_d3_sleep:
- *   D3 상태에서 D0 복귀 후 추가 지연을 준다. NVMe 장치가 D3hot/D3cold에서 깨어날 때 안정화 시간을 보장한다.
+ * [한국어]
+ * pci_dev_d3_sleep - D3 계열 전원 상태를 오갈 때 규정된 안정화 시간만큼 잠든다.
+ *
+ * @dev: 전원 상태를 막 바꾼(또는 바꾸려는) PCI 장치.
+ * @return: 없음 — 지연만 준다.
+ *
+ * PCI PM 규격은 D3hot 을 드나든 뒤 장치가 config 접근에 응답하기까지 일정 시간이
+ * 필요하다고 정한다. 그 시간을 지키지 않고 config space 를 읽으면 응답이 없어
+ * all-ones(0xFFFF)가 돌아오고, 상위 코드가 장치가 사라졌다고 오인한다.
+ * 실제 지연은 "장치별 요구치 dev->d3hot_delay" 와 "커널 파라미터
+ * pci_pm_d3hot_delay" 중 큰 쪽이다. 후자는 스펙보다 굼뜬 하드웨어를 위해
+ * pci=d3hot_delay= 로 전역 하한을 올릴 수 있게 열어 둔 것이다.
+ * 둘 다 0 이면 아무 지연도 주지 않는다(지연이 필요 없다고 선언된 장치).
+ *
+ * 실행 문맥: usleep_range() 로 잠들기 때문에 반드시 프로세스 문맥이어야 한다.
+ * 인터럽트/atomic 문맥에서 부르면 안 된다.
+ *
+ * 호출 체인:
+ *   pci_power_up() / pci_set_low_power_state() / pci_pm_reset()
+ *     → [이 함수] → usleep_range()
  */
-static void pci_dev_d3_sleep(struct pci_dev *dev) /* NVMe: pci_dev_d3_sleep 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	unsigned int delay_ms = max(dev->d3hot_delay, pci_pm_d3hot_delay); /* NVMe: 변수에 값을 할당한다. */
-	unsigned int upper; /* NVMe: unsigned 타입 변수를 선언한다. */
+static void pci_dev_d3_sleep(struct pci_dev *dev)
+{
+	unsigned int delay_ms = max(dev->d3hot_delay, pci_pm_d3hot_delay); /* [한국어] 두 요구치 중 큰 값을 택한다 — 어느 쪽도 위반하지 않으려면 더 긴 쪽을 지켜야 한다 */
+	unsigned int upper; /* [한국어] 실제 sleep 구간의 위쪽 경계. 아래에서 delay_ms 의 20% 로 잡는다 */
 
-	if (delay_ms) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
+	if (delay_ms) { /* [한국어] 요구 지연이 0 이면 잠들 이유가 없다 — 그대로 빠져나간다 */
 		/* Use a 20% upper bound, 1ms minimum */
-		upper = max(DIV_ROUND_CLOSEST(delay_ms, 5), 1U); /* NVMe: 변수에 값을 할당한다. */
-		usleep_range(delay_ms * USEC_PER_MSEC, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-			     (delay_ms + upper) * USEC_PER_MSEC); /* NVMe: 표현식을 평가한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+		upper = max(DIV_ROUND_CLOSEST(delay_ms, 5), 1U); /* [한국어] 허용 오차를 delay_ms 의 20%(1/5)로 잡되 최소 1ms. usleep_range 에 폭을 주면 커널이 다른 타이머와 묶어 깨울 수 있어 인터럽트 횟수가 준다 */
+		usleep_range(delay_ms * USEC_PER_MSEC, /* [한국어] [delay_ms, delay_ms+upper] 구간에서 깨어난다. 하한은 반드시 지키므로 스펙 위반은 없다 */
+			     (delay_ms + upper) * USEC_PER_MSEC);
+	}
+}
 
 /*
- * pci_reset_supported:
- *   해당 PCI 장치가 지원하는 reset method 가 있는지 확인한다. NVMe probe 단계에서 controller reset 가능 여부를 판단할 때 참조된다.
+ * [한국어]
+ * pci_reset_supported - 이 장치에 시도해 볼 수 있는 리셋 방법이 하나라도 있는가.
+ *
+ * @dev: 검사 대상 PCI 장치.
+ * @return: 리셋 방법이 하나라도 등록돼 있으면 true, 없으면 false.
+ *
+ * dev->reset_methods[] 는 pci_init_reset_methods() 가 채우는 배열로,
+ * 쓸 수 있는 리셋 방법의 인덱스를 우선순위 순으로 담고 0 으로 끝난다.
+ * 따라서 첫 칸이 0 이면 후보가 하나도 없다는 뜻이고, 그때 리셋 요청은
+ * -ENOTTY 로 거절되어야 한다.
+ *
+ * 실행 문맥: 필드 하나를 읽을 뿐이라 어떤 문맥에서도 안전하다. 락도 잡지 않는다.
+ *
+ * 호출 체인:
+ *   pci_reset_function() / pci_reset_function_locked() / pci_try_reset_function()
+ *   그리고 pci-sysfs.c 의 reset_store(), quirks.c
+ *     → [이 함수]
  */
-bool pci_reset_supported(struct pci_dev *dev) /* NVMe: pci_reset_supported 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	return dev->reset_methods[0] != 0; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+bool pci_reset_supported(struct pci_dev *dev)
+{
+	return dev->reset_methods[0] != 0; /* [한국어] 배열이 0 으로 끝나므로 첫 칸이 0 이 아니면 최소 한 가지 방법이 있다 */
+}
 
-#ifdef CONFIG_PCI_DOMAINS /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
-int pci_domains_supported = 1; /* NVMe: int 타입 변수를 선언한다. */
-#endif /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
+#ifdef CONFIG_PCI_DOMAINS /* [한국어] PCI 도메인(세그먼트)을 여러 개 둘 수 있는 아키텍처에서만 컴파일한다. 도메인은 버스 번호 0~255 를 통째로 갖는 독립 공간이다 */
+int pci_domains_supported = 1; /* [한국어] 런타임에 도메인이 실제로 지원되는지. pci_no_domains() 가 0 으로 내리면 도메인 번호를 모두 0 으로 취급한다 */
+#endif
 
-#define DEFAULT_HOTPLUG_IO_SIZE		(256) /* NVMe: 매크로를 정의한다. */
-#define DEFAULT_HOTPLUG_MMIO_SIZE	(2*1024*1024) /* NVMe: 매크로를 정의한다. */
-#define DEFAULT_HOTPLUG_MMIO_PREF_SIZE	(2*1024*1024) /* NVMe: 매크로를 정의한다. */
+#define DEFAULT_HOTPLUG_IO_SIZE		(256) /* [한국어] 핫플러그 브리지 뒤에 미리 잡아 둘 IO 공간 크기(바이트). 나중에 꽂힐 장치를 위한 예약분이다 */
+#define DEFAULT_HOTPLUG_MMIO_SIZE	(2*1024*1024) /* [한국어] 핫플러그용 non-prefetchable MMIO 예약 크기 — 2MB */
+#define DEFAULT_HOTPLUG_MMIO_PREF_SIZE	(2*1024*1024) /* [한국어] 핫플러그용 prefetchable MMIO 예약 크기 — 2MB. prefetchable 은 읽기에 부작용이 없어 브리지가 미리 읽어 와도 되는 영역이다 */
 /* hpiosize=nn can override this */
-unsigned long pci_hotplug_io_size  = DEFAULT_HOTPLUG_IO_SIZE; /* NVMe: unsigned 타입 변수를 선언한다. */
+unsigned long pci_hotplug_io_size  = DEFAULT_HOTPLUG_IO_SIZE; /* [한국어] 위 기본값을 담는 전역. pci=hpiosize= 로 덮어쓸 수 있다 */
 /*
  * pci=hpmmiosize=nnM overrides non-prefetchable MMIO size,
  * pci=hpmmioprefsize=nnM overrides prefetchable MMIO size;
  * pci=hpmemsize=nnM overrides both
  */
-unsigned long pci_hotplug_mmio_size = DEFAULT_HOTPLUG_MMIO_SIZE; /* NVMe: unsigned 타입 변수를 선언한다. */
-unsigned long pci_hotplug_mmio_pref_size = DEFAULT_HOTPLUG_MMIO_PREF_SIZE; /* NVMe: unsigned 타입 변수를 선언한다. */
+unsigned long pci_hotplug_mmio_size = DEFAULT_HOTPLUG_MMIO_SIZE; /* [한국어] 핫플러그 non-prefetchable MMIO 예약 크기 전역 */
+unsigned long pci_hotplug_mmio_pref_size = DEFAULT_HOTPLUG_MMIO_PREF_SIZE; /* [한국어] 핫플러그 prefetchable MMIO 예약 크기 전역 */
 
-#define DEFAULT_HOTPLUG_BUS_SIZE	1 /* NVMe: 매크로를 정의한다. */
-unsigned long pci_hotplug_bus_size = DEFAULT_HOTPLUG_BUS_SIZE; /* NVMe: unsigned 타입 변수를 선언한다. */
+#define DEFAULT_HOTPLUG_BUS_SIZE	1 /* [한국어] 핫플러그 브리지 뒤에 예약할 버스 번호 개수. 1 이면 바로 아래 버스 하나만 미리 확보한다 */
+unsigned long pci_hotplug_bus_size = DEFAULT_HOTPLUG_BUS_SIZE; /* [한국어] 그 값을 담는 전역. pci=hpbussize= 로 덮어쓸 수 있다 */
 
 
 /* PCIe MPS/MRRS strategy; can be overridden by kernel command-line param */
-#ifdef CONFIG_PCIE_BUS_TUNE_OFF /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
-enum pcie_bus_config_types pcie_bus_config = PCIE_BUS_TUNE_OFF; /* NVMe: 데이터 타입 변수를 선언한다. */
-#elif defined CONFIG_PCIE_BUS_SAFE /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
-enum pcie_bus_config_types pcie_bus_config = PCIE_BUS_SAFE; /* NVMe: 데이터 타입 변수를 선언한다. */
-#elif defined CONFIG_PCIE_BUS_PERFORMANCE /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
-enum pcie_bus_config_types pcie_bus_config = PCIE_BUS_PERFORMANCE; /* NVMe: 데이터 타입 변수를 선언한다. */
-#elif defined CONFIG_PCIE_BUS_PEER2PEER /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
-enum pcie_bus_config_types pcie_bus_config = PCIE_BUS_PEER2PEER; /* NVMe: 데이터 타입 변수를 선언한다. */
-#else /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
-enum pcie_bus_config_types pcie_bus_config = PCIE_BUS_DEFAULT; /* NVMe: 데이터 타입 변수를 선언한다. */
-#endif /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
+#ifdef CONFIG_PCIE_BUS_TUNE_OFF /* [한국어] 빌드 설정으로 기본 MPS/MRRS 정책을 고른다. MPS(Max Payload Size)는 TLP 하나가 실어 나를 수 있는 데이터 바이트 수다 */
+enum pcie_bus_config_types pcie_bus_config = PCIE_BUS_TUNE_OFF; /* [한국어] TUNE_OFF — 커널이 MPS 를 건드리지 않고 펌웨어가 설정한 값을 그대로 쓴다 */
+#elif defined CONFIG_PCIE_BUS_SAFE /* [한국어] SAFE — 경로상 가장 작은 MPS 에 모두를 맞춘다. 가장 보수적이다 */
+enum pcie_bus_config_types pcie_bus_config = PCIE_BUS_SAFE; /* [한국어] SAFE 정책 값 */
+#elif defined CONFIG_PCIE_BUS_PERFORMANCE /* [한국어] PERFORMANCE — 각 링크가 감당 가능한 최대 MPS 를 쓴다. TLP 헤더 오버헤드가 줄어 대역폭이 오르지만, 경로가 섞이면 위험하다 */
+enum pcie_bus_config_types pcie_bus_config = PCIE_BUS_PERFORMANCE; /* [한국어] PERFORMANCE 정책 값 */
+#elif defined CONFIG_PCIE_BUS_PEER2PEER /* [한국어] PEER2PEER — 장치끼리 직접 DMA 할 수 있게 전 구간 MPS 를 128B 로 통일한다. P2P 트래픽은 어느 경로로 갈지 모르기 때문이다 */
+enum pcie_bus_config_types pcie_bus_config = PCIE_BUS_PEER2PEER; /* [한국어] PEER2PEER 정책 값 */
+#else /* [한국어] 아무 것도 고르지 않았을 때 */
+enum pcie_bus_config_types pcie_bus_config = PCIE_BUS_DEFAULT; /* [한국어] DEFAULT — 펌웨어 값을 존중하되 필요한 경우에만 조정한다 */
+#endif
 
 /*
  * The default CLS is used if arch didn't set CLS explicitly and not
@@ -218,52 +271,83 @@ enum pcie_bus_config_types pcie_bus_config = PCIE_BUS_DEFAULT; /* NVMe: 데이�
  * the dfl or actual value as it sees fit.  Don't forget this is
  * measured in 32-bit words, not bytes.
  */
-u8 pci_dfl_cache_line_size __ro_after_init = L1_CACHE_BYTES >> 2; /* NVMe: u8 타입 변수를 선언한다. */
-u8 pci_cache_line_size __ro_after_init ; /* NVMe: u8 타입 변수를 선언한다. */
+u8 pci_dfl_cache_line_size __ro_after_init = L1_CACHE_BYTES >> 2; /* [한국어] 아키텍처가 명시하지 않았을 때 쓸 기본 캐시라인 크기. 단위가 32비트 워드라서 L1_CACHE_BYTES 를 4로 나눈다(>>2) */
+u8 pci_cache_line_size __ro_after_init ; /* [한국어] 실제로 장치에 써 넣을 값. 0 이면 아직 정해지지 않은 것으로 보고 pci_set_cacheline_size() 가 기본값을 쓴다 */
 
 /*
  * If we set up a device for bus mastering, we need to check the latency
  * timer as certain BIOSes forget to set it properly.
  */
-unsigned int pcibios_max_latency = 255; /* NVMe: unsigned 타입 변수를 선언한다. */
+unsigned int pcibios_max_latency = 255; /* [한국어] Latency Timer 에 써 넣을 상한(PCI 클럭 단위, 최대 255). 일부 BIOS 가 이 값을 0 으로 두고 넘겨 버스를 독점하는 문제가 있어 pcibios_set_master() 가 보정한다 */
 
 /* If set, the PCIe ARI capability will not be used. */
-static bool pcie_ari_disabled; /* NVMe: 정적 변수를 선언한다. */
+static bool pcie_ari_disabled; /* [한국어] pci=noari 로 세워지는 플래그. ARI(Alternative Routing-ID)는 하나의 장치 번호 아래 함수 번호를 8비트로 확장하는 기능이다 */
 
 /* If set, the PCIe ATS capability will not be used. */
-static bool pcie_ats_disabled; /* NVMe: 정적 변수를 선언한다. */
+static bool pcie_ats_disabled; /* [한국어] pci=noats 로 세워지는 플래그. ATS 를 끄면 장치가 IOMMU 변환 결과를 캐시하지 못한다 */
 
 /* If set, the PCI config space of each device is printed during boot. */
-bool pci_early_dump; /* NVMe: bool 타입 변수를 선언한다. */
+bool pci_early_dump; /* [한국어] pci=earlydump 으로 세워지는 플래그. 부팅 초기에 각 장치의 config space 를 통째로 로그에 찍는다 */
 
 /*
- * pci_ats_disabled:
- *   ATS(Address Translation Services) 사용 금지 여부를 반환한다. NVMe 장치가 IOMMU 환경에서 ATS를 통한 DMA 주소 변환을 사용할지 여부와 관련된다.
+ * [한국어]
+ * pci_ats_disabled - ATS(Address Translation Services) 사용이 금지돼 있는지 알려준다.
+ *
+ * @return: pci=noats 로 꺼 두었으면 true, 아니면 false.
+ *
+ * ATS 는 장치가 IOMMU 의 주소 변환 결과를 스스로 캐시(Device TLB)해 두고
+ * 이미 변환된 주소로 DMA 를 내보내는 기능이다. 변환 왕복이 줄어 성능에는
+ * 이롭지만, 장치를 신뢰할 수 없으면 변환을 우회하는 공격 통로가 되므로
+ * 관리자가 통째로 끌 수 있어야 한다. 그 스위치를 읽는 접근자다.
+ * 내부 변수 pcie_ats_disabled 는 static 이라 다른 파일에서 직접 볼 수 없어
+ * 이 함수를 EXPORT 해 둔다.
+ *
+ * 실행 문맥: bool 하나를 읽을 뿐이며 락이 필요 없다. 부팅 후에는 값이 바뀌지 않는다.
+ *
+ * 호출 체인:
+ *   drivers/pci/ats.c 의 pci_ats_init(), 이 파일의 pci_enable_acs(),
+ *   drivers/pci/quirks.c → [이 함수]
  */
-bool pci_ats_disabled(void) /* NVMe: pci_ats_disabled 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	return pcie_ats_disabled; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+bool pci_ats_disabled(void)
+{
+	return pcie_ats_disabled; /* [한국어] static 변수를 그대로 돌려준다 */
+}
 EXPORT_SYMBOL_GPL(pci_ats_disabled);
 
 /* Disable bridge_d3 for all PCIe ports */
-static bool pci_bridge_d3_disable; /* NVMe: 정적 변수를 선언한다. */
+static bool pci_bridge_d3_disable; /* [한국어] pcie_port_pm=off 로 세워진다. 모든 PCIe 포트의 D3 진입을 막는다 */
 /* Force bridge_d3 for all PCIe ports */
-static bool pci_bridge_d3_force; /* NVMe: 정적 변수를 선언한다. */
+static bool pci_bridge_d3_force; /* [한국어] pcie_port_pm=force 로 세워진다. 화이트리스트를 무시하고 D3 를 강제한다 */
 
 /*
- * pcie_port_pm_setup:
- *   커널 커맨드라인 pcie_port_pm= 파라미터를 파싱하여 PCIe 포트의 D3 전원 관리를 제어한다. NVMe가 연결된 Root Port/Upstream Switch 의 저전원 정책에 영향을 준다.
+ * [한국어]
+ * pcie_port_pm_setup - 커널 커맨드라인 "pcie_port_pm=" 값을 해석한다.
+ *
+ * @str: "=" 뒤에 붙은 문자열. "off" 또는 "force" 를 기대한다.
+ * @return: 항상 1 — __setup 규약에서 1 은 "이 파라미터를 내가 처리했다"는 뜻이다.
+ *
+ * PCIe 포트(브리지)를 D3 로 내려보내면 그 아래 장치까지 전원이 끊겨 절전이
+ * 크지만, 일부 플랫폼에서는 다시 깨우지 못하는 사고가 난다. 그래서 커널은
+ * 브리지 D3 를 조건부로만 허용하고, 이 파라미터로 양쪽 극단을 강제할 수 있게 했다.
+ *   off   → pci_bridge_d3_disable = true  (절대 D3 로 내리지 않는다)
+ *   force → pci_bridge_d3_force   = true  (조건 검사 없이 허용한다)
+ * 두 플래그는 pci_bridge_d3_possible() 이 읽는다.
+ *
+ * 실행 문맥: __init 이며 부팅 초기 파라미터 파싱 단계에서 한 번만 불린다.
+ * 아직 장치가 하나도 없으므로 동기화가 필요 없다.
+ *
+ * 호출 체인:
+ *   커널 파라미터 파서(__setup 테이블) → [이 함수]
  */
-static int __init pcie_port_pm_setup(char *str) /* NVMe: pcie_port_pm_setup 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	if (!strcmp(str, "off")) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pci_bridge_d3_disable = true; /* NVMe: 변수에 값을 할당한다. */
-	else if (!strcmp(str, "force")) /* NVMe: 이전 조건이 거짓일 때 추가 조건을 검사한다. */
-		pci_bridge_d3_force = true; /* NVMe: 변수에 값을 할당한다. */
-	return 1; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
-__setup("pcie_port_pm=", pcie_port_pm_setup); /* NVMe: 변수에 값을 할당한다. */
+static int __init pcie_port_pm_setup(char *str)
+{
+	if (!strcmp(str, "off")) /* [한국어] "off" 이면 브리지 D3 를 전면 금지한다 */
+		pci_bridge_d3_disable = true; /* [한국어] 금지 플래그를 세운다 */
+	else if (!strcmp(str, "force")) /* [한국어] "force" 이면 반대로 조건 검사를 건너뛰고 허용한다 */
+		pci_bridge_d3_force = true; /* [한국어] 강제 플래그를 세운다. 둘 다 아니면 아무 것도 바꾸지 않고 기본 정책을 쓴다 */
+	return 1; /* [한국어] __setup 콜백은 1 을 돌려 "처리했음"을 알린다. 0 이면 알 수 없는 파라미터로 취급돼 init 환경변수로 넘어간다 */
+}
+__setup("pcie_port_pm=", pcie_port_pm_setup); /* [한국어] 이 함수를 "pcie_port_pm=" 파라미터의 처리기로 등록한다. 링크 타임에 __setup 섹션에 항목이 박힌다 */
 
 /**
  * pci_bus_max_busnr - returns maximum PCI bus number of given bus' children
@@ -273,22 +357,38 @@ __setup("pcie_port_pm=", pcie_port_pm_setup); /* NVMe: 변수에 값을 할당�
  * including the given PCI bus and its list of child PCI buses.
  */
 /*
- * pci_bus_max_busnr:
- *   주어진 bus 의 하위 bus 를 포함한 최대 bus 번호를 반환한다. NVMe 장치가 속한 PCI 계층의 bus 범위를 파악할 때 사용된다.
+ * [한국어]
+ * pci_bus_max_busnr - 이 버스와 그 아래 모든 자식 버스 중 가장 큰 버스 번호를 구한다.
+ *
+ * @bus: 탐색을 시작할 버스.
+ * @return: 자기 자신을 포함한 서브트리에서 가장 큰 버스 번호(0~255).
+ *
+ * PCI 버스 번호는 8비트라 한 도메인에 256개뿐이다. 브리지 아래에 버스를 새로
+ * 만들 때(핫플러그 등) 어디까지 이미 쓰였는지 알아야 다음 번호를 고를 수 있어
+ * 이 값이 필요하다.
+ * bus->busn_res 는 그 버스가 차지한 번호 구간을 담은 resource 이고, .end 가
+ * 그 구간의 마지막 번호다. 자식 버스를 재귀로 훑어 최댓값을 갱신한다.
+ *
+ * 실행 문맥: bus->children 리스트를 락 없이 순회하므로, 호출자가 버스 구조가
+ * 바뀌지 않는 문맥(핫플러그 경로 안 등)에 있어야 한다. 재귀 깊이는 PCI 계층
+ * 깊이만큼이라 스택 위험은 없다.
+ *
+ * 호출 체인:
+ *   drivers/pci/hotplug/acpiphp_glue.c → [이 함수] → [이 함수](재귀)
  */
-unsigned char pci_bus_max_busnr(struct pci_bus *bus) /* NVMe: pci_bus_max_busnr 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	struct pci_bus *tmp; /* NVMe: 데이터 타입 변수를 선언한다. */
-	unsigned char max, n; /* NVMe: unsigned 타입 변수를 선언한다. */
+unsigned char pci_bus_max_busnr(struct pci_bus *bus)
+{
+	struct pci_bus *tmp; /* [한국어] 자식 버스를 훑는 커서 */
+	unsigned char max, n; /* [한국어] max 는 지금까지의 최댓값, n 은 자식 서브트리의 최댓값 */
 
-	max = bus->busn_res.end; /* NVMe: 변수에 값을 할당한다. */
-	list_for_each_entry(tmp, &bus->children, node) { /* NVMe: 리스트/해시 항목을 순회하는 매크로 루프를 시작한다. */
-		n = pci_bus_max_busnr(tmp); /* NVMe: 변수에 값을 할당한다. */
-		if (n > max) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			max = n; /* NVMe: 변수에 값을 할당한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
-	return max; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	max = bus->busn_res.end; /* [한국어] 우선 자기 구간의 마지막 번호로 시작한다 */
+	list_for_each_entry(tmp, &bus->children, node) { /* [한국어] 직속 자식 버스를 모두 순회한다. node 가 부모의 children 리스트에 꿰이는 링크다 */
+		n = pci_bus_max_busnr(tmp); /* [한국어] 자식 서브트리의 최댓값을 재귀로 구한다 */
+		if (n > max) /* [한국어] 더 큰 번호를 만나면 */
+			max = n; /* [한국어] 최댓값을 갱신한다 */
+	}
+	return max; /* [한국어] 서브트리 전체의 최댓값을 돌려준다 */
+}
 EXPORT_SYMBOL_GPL(pci_bus_max_busnr);
 
 /**
@@ -298,68 +398,139 @@ EXPORT_SYMBOL_GPL(pci_bus_max_busnr);
  * Returns error bits set in PCI_STATUS and clears them.
  */
 /*
- * pci_status_get_and_clear_errors:
- *   PCI_STATUS 레지스터의 에러 비트를 읽고 클리어한다. NVMe I/O 중 발생한 parity/signal/target/abort 에러를 진단할 때 활용된다.
+ * [한국어]
+ * pci_status_get_and_clear_errors - PCI_STATUS 의 오류 비트를 읽어 돌려주고 지운다.
+ *
+ * @pdev: 대상 PCI 장치.
+ * @return: 읽은 시점에 켜져 있던 오류 비트들(PCI_STATUS_ERROR_BITS 로 걸러낸 값).
+ *          config 읽기 자체가 실패하면 -EIO.
+ *
+ * config space 오프셋 0x06 의 Status 레지스터에는 패리티 오류, Signaled Target
+ * Abort, Received Target/Master Abort, Signaled System Error 같은 사건이
+ * 비트로 남는다. 이 비트들은 W1C(Write-1-to-Clear) 라서, 읽은 값을 그대로 다시
+ * 쓰면 켜져 있던 비트만 지워지고 그 사이 새로 켜진 비트는 살아남는다.
+ * 그래서 "읽고 지우기"를 이 한 함수로 묶어 둔 것이다.
+ *
+ * 실행 문맥: config 접근이므로 잠들 수 있는 문맥이 안전하다. 별도 락은 잡지 않고
+ * config 접근 직렬화는 access.c 의 pci_lock 이 맡는다.
+ *
+ * 호출 체인:
+ *   각 드라이버의 오류 처리 경로 → [이 함수]
+ *     → pci_read_config_word() / pci_write_config_word()
  */
-int pci_status_get_and_clear_errors(struct pci_dev *pdev) /* NVMe: pci_status_get_and_clear_errors 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	u16 status; /* NVMe: u16 타입 변수를 선언한다. */
-	int ret; /* NVMe: int 타입 변수를 선언한다. */
+int pci_status_get_and_clear_errors(struct pci_dev *pdev)
+{
+	u16 status; /* [한국어] Status 레지스터 값(16비트)을 받을 곳 */
+	int ret; /* [한국어] config 접근 결과 코드 */
 
-	ret = pci_read_config_word(pdev, PCI_STATUS, &status); /* NVMe: 변수에 값을 할당한다. */
-	if (ret != PCIBIOS_SUCCESSFUL) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return -EIO; /* NVMe: PM capability 부재로 power up 에 실패했음을 반환한다. */
+	ret = pci_read_config_word(pdev, PCI_STATUS, &status); /* [한국어] config space 오프셋 0x06(PCI_STATUS)에서 2바이트를 읽는다 */
+	if (ret != PCIBIOS_SUCCESSFUL) /* [한국어] PCIBIOS_SUCCESSFUL 이 아니면 장치가 응답하지 않았거나 접근이 막힌 것이다 */
+		return -EIO; /* [한국어] config 읽기 실패는 -EIO 로 알린다. 상태 비트가 아니라 접근 자체가 실패한 경우다 */
 
-	status &= PCI_STATUS_ERROR_BITS; /* NVMe: 변수에 값을 할당한다. */
-	if (status) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pci_write_config_word(pdev, PCI_STATUS, status); /* NVMe: PCI 설정 공간 2바이트를 쓴다. */
+	status &= PCI_STATUS_ERROR_BITS; /* [한국어] 관심 있는 오류 비트만 남긴다. PCI_STATUS_ERROR_BITS 는 패리티/어보트/SERR 계열 비트의 묶음이다 */
+	if (status) /* [한국어] 켜진 오류가 하나라도 있을 때만 쓰기를 한다 */
+		pci_write_config_word(pdev, PCI_STATUS, status); /* [한국어] 읽은 값을 그대로 되쓴다 — W1C 규약이라 1 인 비트만 지워진다. 0 인 비트에 0 을 써도 아무 일도 없어 안전하다 */
 
-	return status; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return status; /* [한국어] 지우기 전에 읽어 둔 오류 비트를 호출자에게 돌려준다 */
+}
 EXPORT_SYMBOL_GPL(pci_status_get_and_clear_errors);
 
-#ifdef CONFIG_HAS_IOMEM /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
-static void __iomem *__pci_ioremap_resource(struct pci_dev *pdev, int bar, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-					    bool write_combine) /* NVMe: bool 타입 변수를 선언한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	struct resource *res = &pdev->resource[bar]; /* NVMe: 지정한 BAR(보통 BAR0 doorbell)의 resource 구조체를 가져온다. */
-	resource_size_t start = res->start; /* NVMe: BAR의 CPU 물리 시작 주소를 얻는다. */
-	resource_size_t size = resource_size(res); /* NVMe: BAR의 크기를 계산한다. */
+#ifdef CONFIG_HAS_IOMEM /* [한국어] ioremap 이 있는 아키텍처에서만 컴파일한다. MMIO 창을 커널 가상 주소로 못 잡는 구성에서는 아래 세 함수가 존재하지 않는다 */
+/*
+ * [한국어]
+ * __pci_ioremap_resource - BAR 하나가 가리키는 MMIO 영역을 커널 가상 주소로 잡는다.
+ *
+ * @pdev: 대상 PCI 장치.
+ * @bar: BAR 번호(0~5). PCI 헤더 타입 0 의 BAR 는 config space 0x10 부터 4바이트씩 6개다.
+ * @write_combine: true 면 Write-Combining 속성으로, false 면 일반(uncached) 속성으로 매핑.
+ * @return: 매핑된 __iomem 포인터. BAR 가 MEM 이 아니거나 주소가 배정되지 않았으면 NULL.
+ *
+ * 열거 단계에서 pci_dev->resource[bar] 에는 그 BAR 가 차지하는 CPU 물리 주소
+ * 구간이 이미 기록돼 있다. 이 함수는 그 구간을 그대로 ioremap 해 준다.
+ * 두 가지를 먼저 확인하는 것이 요점이다.
+ *   - IORESOURCE_UNSET: 주소가 아직 배정되지 않은 BAR. 매핑하면 엉뚱한 물리
+ *     주소를 잡게 되므로 거절한다.
+ *   - IORESOURCE_MEM 없음: IO 공간 BAR 다. IO 공간은 inb/outb 로 접근하는
+ *     별도 주소 공간이라 ioremap 대상이 아니다.
+ * write_combine 은 쓰기를 모아 한 번에 내보내도 되는 영역(프레임버퍼 등)에만
+ * 쓴다. 레지스터처럼 쓰기 순서와 시점이 의미를 갖는 영역에 쓰면 안 된다.
+ *
+ * 실행 문맥: ioremap 은 페이지 테이블을 건드리므로 프로세스 문맥에서 부른다.
+ *
+ * 호출 체인:
+ *   pci_ioremap_bar() / pci_ioremap_wc_bar() → [이 함수] → ioremap() / ioremap_wc()
+ */
+static void __iomem *__pci_ioremap_resource(struct pci_dev *pdev, int bar,
+					    bool write_combine)
+{
+	struct resource *res = &pdev->resource[bar]; /* [한국어] BAR 번호로 resource 배열을 인덱싱한다. 열거 때 setup-res.c 가 채워 둔 항목이다 */
+	resource_size_t start = res->start; /* [한국어] 그 BAR 가 차지하는 CPU 물리 주소의 시작 */
+	resource_size_t size = resource_size(res); /* [한국어] end - start + 1. BAR 크기는 항상 2의 거듭제곱이며, 열거 때 "BAR 에 전부 1 을 쓰고 되읽어" 알아낸 값이다 */
 
 	/*
 	 * Make sure the BAR is actually a memory resource, not an IO resource
 	 */
-	if (res->flags & IORESOURCE_UNSET || !(res->flags & IORESOURCE_MEM)) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pci_err(pdev, "can't ioremap BAR %d: %pR\n", bar, res); /* NVMe: NVMe BAR가 메모리 타입이 아니거나 할당되지 않았으면 에러를 기록한다. */
-		return NULL; /* NVMe: 매핑 실패를 나타내는 NULL을 반환한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+	if (res->flags & IORESOURCE_UNSET || !(res->flags & IORESOURCE_MEM)) { /* [한국어] IORESOURCE_UNSET 이면 주소가 아직 배정되지 않은 BAR 이고, IORESOURCE_MEM 이 없으면 IO 공간 BAR 다. 둘 다 ioremap 대상이 아니다 */
+		pci_err(pdev, "can't ioremap BAR %d: %pR\n", bar, res); /* [한국어] %pR 은 resource 를 "[mem 0x... - 0x...]" 꼴로 찍어 주는 커널 전용 포맷이다 */
+		return NULL; /* [한국어] 매핑 실패는 NULL 로 알린다. 호출자는 이 값을 그대로 상위에 전달한다 */
+	}
 
-	if (write_combine) /* NVMe: WC(Write-Combining) 매핑이 요청되었는지 확인한다. */
-		return ioremap_wc(start, size); /* NVMe: NVMe CMB 등에 적합한 WC 속성으로 가상 주소 매핑을 반환한다. */
+	if (write_combine) /* [한국어] WC 매핑 요청이면 */
+		return ioremap_wc(start, size); /* [한국어] 쓰기 결합을 허용하는 속성으로 매핑한다. 쓰기가 버퍼에 모였다 한꺼번에 나가므로 레지스터에는 쓰면 안 된다 */
 
-	return ioremap(start, size); /* NVMe: NVMe doorbell/register 접근용 일반 메모리 속성 가상 주소를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return ioremap(start, size); /* [한국어] 기본은 uncached 매핑 — 매 readl/writel 이 실제 버스 트랜잭션이 되어 레지스터 접근의 순서와 시점이 보장된다 */
+}
 
 /*
- * pci_ioremap_bar:
- *   NVMe BAR(주로 BAR0)를 일반 메모리 속성으로 ioremap 한다. NVMe driver 의 doorbell 및 controller register 접근의 근간이 된다.
+ * [한국어]
+ * pci_ioremap_bar - BAR 하나를 일반(uncached) 속성으로 ioremap 하는 공개 래퍼.
+ *
+ * @pdev: 대상 PCI 장치.
+ * @bar: BAR 번호(0~5).
+ * @return: 매핑된 __iomem 포인터, 실패 시 NULL.
+ *
+ * 장치 레지스터 창을 잡는 가장 흔한 방법이다. write_combine=false 로 고정하므로
+ * 매 readl/writel 이 실제 버스 트랜잭션이 되어 순서가 보장된다.
+ *
+ * 참고 — NVMe 드라이버는 이 함수를 쓰지 않는다. drivers/nvme/host/pci.c 의
+ * nvme_remap_bar() 가 pci_resource_start(pdev, 0) 로 BAR0 시작 주소만 얻은 뒤
+ * ioremap() 을 직접 부른다. 도어벨 개수가 큐 수에 따라 달라져 매핑 크기를
+ * 나중에 늘려야 하기 때문에, 크기를 스스로 정하는 쪽을 택한 것이다.
+ *
+ * 실행 문맥: 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   각 드라이버의 probe → [이 함수] → __pci_ioremap_resource() → ioremap()
  */
-void __iomem *pci_ioremap_bar(struct pci_dev *pdev, int bar) /* NVMe: pci_ioremap_bar 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	return __pci_ioremap_resource(pdev, bar, false); /* NVMe: 일반 메모리 속성으로 NVMe BAR를 ioremap 한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+void __iomem *pci_ioremap_bar(struct pci_dev *pdev, int bar)
+{
+	return __pci_ioremap_resource(pdev, bar, false); /* [한국어] write_combine=false — 레지스터 접근용 일반 매핑 */
+}
 EXPORT_SYMBOL_GPL(pci_ioremap_bar);
 
 /*
- * pci_ioremap_wc_bar:
- *   NVMe BAR를 Write-Combining 속성으로 ioremap 한다. NVMe CMB(Controller Memory Buffer) 등에 WC 매핑이 필요할 때 사용될 수 있다.
+ * [한국어]
+ * pci_ioremap_wc_bar - BAR 하나를 Write-Combining 속성으로 ioremap 하는 공개 래퍼.
+ *
+ * @pdev: 대상 PCI 장치.
+ * @bar: BAR 번호(0~5).
+ * @return: 매핑된 __iomem 포인터, 실패 시 NULL.
+ *
+ * WC 매핑은 연속된 쓰기를 CPU 가 모아 한 번의 큰 버스트로 내보내게 한다.
+ * 프레임버퍼처럼 "많이 쓰고, 쓰기 순서가 중요하지 않은" 영역에서 대역폭이
+ * 크게 오른다. 반대로 레지스터에 쓰면 순서가 뒤집혀 장치가 오동작한다.
+ *
+ * 실행 문맥: 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   각 드라이버의 probe → [이 함수] → __pci_ioremap_resource() → ioremap_wc()
  */
-void __iomem *pci_ioremap_wc_bar(struct pci_dev *pdev, int bar) /* NVMe: pci_ioremap_wc_bar 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	return __pci_ioremap_resource(pdev, bar, true); /* NVMe: Write-Combining 속성으로 NVMe BAR를 ioremap 한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+void __iomem *pci_ioremap_wc_bar(struct pci_dev *pdev, int bar)
+{
+	return __pci_ioremap_resource(pdev, bar, true); /* [한국어] write_combine=true — 쓰기 결합 매핑 */
+}
 EXPORT_SYMBOL_GPL(pci_ioremap_wc_bar);
-#endif /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
+#endif /* [한국어] CONFIG_HAS_IOMEM 블록의 끝 */
 
 /**
  * pci_dev_str_match_path - test if a path string matches a device
@@ -380,34 +551,60 @@ EXPORT_SYMBOL_GPL(pci_ioremap_wc_bar);
  * Returns 1 if the string matches the device, 0 if it does not and
  * a negative error code if it fails to parse the string.
  */
-static int pci_dev_str_match_path(struct pci_dev *dev, const char *path, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-				  const char **endptr) /* NVMe: char 타입 변수를 선언한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	int ret; /* NVMe: int 타입 변수를 선언한다. */
-	unsigned int seg, bus, slot, func; /* NVMe: unsigned 타입 변수를 선언한다. */
-	char *wpath, *p; /* NVMe: 포인터 변수를 선언한다. */
-	char end; /* NVMe: char 타입 변수를 선언한다. */
+/*
+ * [한국어]
+ * pci_dev_str_match_path - "경로" 형식 문자열이 이 장치를 가리키는지 판정한다.
+ *
+ * @dev: 검사할 PCI 장치.
+ * @path: "[<domain>:]<bus>:<dev>.<func>[/<dev>.<func>]*" 형식 문자열.
+ * @endptr: 매치에 쓴 부분 바로 뒤(다음 ';' 위치)를 돌려줄 곳.
+ * @return: 일치하면 1, 불일치면 0, 파싱 실패면 음수 오류(-EINVAL/-ENOMEM).
+ *
+ * 커널 파라미터로 특정 장치를 지목할 때 "0000:01:00.0" 처럼 주소만 쓰면
+ * 하드웨어를 추가하거나 펌웨어가 바뀔 때 버스 번호가 밀려 엉뚱한 장치를
+ * 가리키게 된다. 그래서 루트부터의 브리지 경로를 함께 적는 형식을 지원한다
+ * (lspci -t 로 얻을 수 있다). 경로는 번호 재배정에 훨씬 강하다.
+ *
+ * 판정은 뒤에서 앞으로 진행한다. 문자열 끝의 "/<dev>.<func>" 를 하나 떼어
+ * 지금 장치의 devfn 과 맞춰 보고, 맞으면 상위 브리지로 올라가며 반복한다.
+ * 마지막에 "/" 가 없어지면 남은 앞부분이 루트 쪽 "[domain:]bus:dev.func" 이다.
+ *
+ * 실행 문맥: GFP_ATOMIC 으로 복사본을 뜬다 — 이 함수가 잠들 수 없는 문맥에서도
+ * 불릴 수 있기 때문이다. 상위 브리지로 올라갈 때 참조 계수를 따로 올리지 않는
+ * 이유는 원본 주석대로, 맨 아래 장치의 참조가 위쪽 브리지들의 수명을
+ * 이미 붙들고 있기 때문이다.
+ *
+ * 호출 체인:
+ *   pci_dev_str_match() → [이 함수] → pci_upstream_bridge(), sscanf()
+ */
+static int pci_dev_str_match_path(struct pci_dev *dev, const char *path,
+				  const char **endptr)
+{
+	int ret; /* [한국어] 중간 반환값과 최종 판정값을 함께 담는다 */
+	unsigned int seg, bus, slot, func; /* [한국어] 파싱해 낼 도메인/버스/장치/함수 번호 */
+	char *wpath, *p; /* [한국어] wpath 는 잘라 쓰기 위한 복사본, p 는 마지막 "/" 위치 */
+	char end; /* [한국어] sscanf 가 형식 뒤에 남는 문자를 잡아내려고 두는 자리 — 여기에 뭔가 들어오면 형식이 어긋난 것이다 */
 
-	*endptr = strchrnul(path, ';');
+	*endptr = strchrnul(path, ';'); /* [한국어] 이 항목은 ';' 에서 끝난다. strchrnul 은 못 찾으면 NUL 위치를 주므로 별도 분기가 필요 없다 */
 
-	wpath = kmemdup_nul(path, *endptr - path, GFP_ATOMIC); /* NVMe: 변수에 값을 할당한다. */
-	if (!wpath) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return -ENOMEM; /* NVMe: 메모리 부족 오류를 반환한다. */
+	wpath = kmemdup_nul(path, *endptr - path, GFP_ATOMIC); /* [한국어] ';' 앞까지만 NUL 로 끝나게 복사한다. GFP_ATOMIC 은 잠들 수 없는 문맥에서도 부를 수 있게 하려는 선택이다 */
+	if (!wpath) /* [한국어] 할당 실패 */
+		return -ENOMEM; /* [한국어] -ENOMEM 으로 알린다. 여기서는 아직 해제할 것이 없다 */
 
-	while (1) { /* NVMe: 조건이 참인 동안 반복한다. */
-		p = strrchr(wpath, '/'); /* NVMe: 변수에 값을 할당한다. */
-		if (!p) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			break; /* NVMe: 현재 반복문을 빠져나간다. */
-		ret = sscanf(p, "/%x.%x%c", &slot, &func, &end); /* NVMe: 변수에 값을 할당한다. */
-		if (ret != 2) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			ret = -EINVAL; /* NVMe: 변수에 값을 할당한다. */
-			goto free_and_exit; /* NVMe: 지정한 레이블로 제어를 이동한다. */
-		} /* NVMe: 코드 블록을 종료한다. */
+	while (1) { /* [한국어] 경로 성분이 남아 있는 동안 뒤에서부터 하나씩 떼어 낸다 */
+		p = strrchr(wpath, '/'); /* [한국어] 가장 마지막 "/" — 즉 가장 아래쪽(장치에 가장 가까운) 성분의 시작 */
+		if (!p) /* [한국어] "/" 가 없으면 남은 것은 루트 쪽 "bus:dev.func" 뿐이다 */
+			break; /* [한국어] 루프를 빠져나가 아래에서 그 부분을 파싱한다 */
+		ret = sscanf(p, "/%x.%x%c", &slot, &func, &end); /* [한국어] "/<slot>.<func>" 를 16진수로 읽는다. %c 로 잉여 문자를 잡는다 */
+		if (ret != 2) { /* [한국어] 정확히 두 항목만 읽혀야 정상 — 세 개가 읽혔다면 뒤에 군더더기가 붙은 것이다 */
+			ret = -EINVAL; /* [한국어] 형식 오류 */
+			goto free_and_exit; /* [한국어] 복사본을 해제하고 나간다 */
+		}
 
-		if (dev->devfn != PCI_DEVFN(slot, func)) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			ret = 0; /* NVMe: 변수에 값을 할당한다. */
-			goto free_and_exit; /* NVMe: 지정한 레이블로 제어를 이동한다. */
-		} /* NVMe: 코드 블록을 종료한다. */
+		if (dev->devfn != PCI_DEVFN(slot, func)) { /* [한국어] PCI_DEVFN(slot, func) 는 (slot << 3) | func — devfn 은 상위 5비트가 장치 번호, 하위 3비트가 함수 번호다 */
+			ret = 0; /* [한국어] 이 성분에서 이미 어긋났으므로 "불일치"다. 오류가 아니라 정상적인 0 */
+			goto free_and_exit; /* [한국어] 해제 후 0 반환 */
+		}
 
 		/*
 		 * Note: we don't need to get a reference to the upstream
@@ -415,34 +612,34 @@ static int pci_dev_str_match_path(struct pci_dev *dev, const char *path, /* NVMe
 		 * device which should hold a reference to the bridge,
 		 * and so on.
 		 */
-		dev = pci_upstream_bridge(dev); /* NVMe: 변수에 값을 할당한다. */
-		if (!dev) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			ret = 0; /* NVMe: 변수에 값을 할당한다. */
-			goto free_and_exit; /* NVMe: 지정한 레이블로 제어를 이동한다. */
-		} /* NVMe: 코드 블록을 종료한다. */
+		dev = pci_upstream_bridge(dev); /* [한국어] 한 단계 위 브리지로 올라간다. 경로를 뒤에서 앞으로 훑는 중이다 */
+		if (!dev) { /* [한국어] 루트에 닿았는데 경로 성분이 아직 남아 있다면 경로가 더 길다는 뜻이므로 */
+			ret = 0; /* [한국어] 불일치 */
+			goto free_and_exit; /* [한국어] 해제 후 0 반환 */
+		}
 
-		*p = 0;
-	} /* NVMe: 코드 블록을 종료한다. */
+		*p = 0; /* [한국어] 방금 처리한 "/..." 성분을 잘라 내 문자열을 짧게 만든다. 다음 반복에서 그 앞 성분이 마지막이 된다 */
+	}
 
-	ret = sscanf(wpath, "%x:%x:%x.%x%c", &seg, &bus, &slot, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-		     &func, &end); /* NVMe: 비트 연산을 수행한다. */
-	if (ret != 4) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		seg = 0; /* NVMe: 변수에 값을 할당한다. */
-		ret = sscanf(wpath, "%x:%x.%x%c", &bus, &slot, &func, &end); /* NVMe: 변수에 값을 할당한다. */
-		if (ret != 3) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			ret = -EINVAL; /* NVMe: 변수에 값을 할당한다. */
-			goto free_and_exit; /* NVMe: 지정한 레이블로 제어를 이동한다. */
-		} /* NVMe: 코드 블록을 종료한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+	ret = sscanf(wpath, "%x:%x:%x.%x%c", &seg, &bus, &slot, /* [한국어] 남은 앞부분을 "<domain>:<bus>:<dev>.<func>" 로 읽어 본다 */
+		     &func, &end); /* [한국어] end 는 잉여 문자 검출용 — 네 항목만 읽혀야 정상이다 */
+	if (ret != 4) { /* [한국어] 네 개가 아니면 도메인이 생략된 형식일 수 있다 */
+		seg = 0; /* [한국어] 도메인 생략 시 0 으로 본다(원본 주석대로의 규약) */
+		ret = sscanf(wpath, "%x:%x.%x%c", &bus, &slot, &func, &end); /* [한국어] "<bus>:<dev>.<func>" 로 다시 읽는다 */
+		if (ret != 3) { /* [한국어] 이번에도 어긋나면 파싱 실패다 */
+			ret = -EINVAL; /* [한국어] 형식 오류 */
+			goto free_and_exit; /* [한국어] 해제 후 나간다 */
+		}
+	}
 
-	ret = (seg == pci_domain_nr(dev->bus) && /* NVMe: 표현식을 이어서 작성한다. */
-	       bus == dev->bus->number && /* NVMe: 표현식을 이어서 작성한다. */
-	       dev->devfn == PCI_DEVFN(slot, func)); /* NVMe: 변수에 값을 할당한다. */
+	ret = (seg == pci_domain_nr(dev->bus) && /* [한국어] 도메인(세그먼트) 번호 비교. 도메인은 버스 번호 공간을 통째로 나누는 상위 개념이다 */
+	       bus == dev->bus->number && /* [한국어] 버스 번호 비교 */
+	       dev->devfn == PCI_DEVFN(slot, func)); /* [한국어] devfn 비교. 셋이 모두 같아야 1(일치)이 된다 */
 
-free_and_exit: /* NVMe: 레이블을 정의한다. */
-	kfree(wpath); /* NVMe: 동적 할당된 커널 메모리를 해제한다. */
-	return ret; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+free_and_exit: /* [한국어] 성공·실패 모두 이 지점으로 모여 복사본을 반드시 해제한다 */
+	kfree(wpath); /* [한국어] kmemdup_nul 로 잡은 작업용 복사본을 돌려준다 */
+	return ret; /* [한국어] 1(일치) / 0(불일치) / 음수(오류) 중 하나 */
+}
 
 /**
  * pci_dev_str_match - test if a string matches a device
@@ -474,92 +671,191 @@ free_and_exit: /* NVMe: 레이블을 정의한다. */
  * Returns 1 if the string matches the device, 0 if it does not and
  * a negative error code if the string cannot be parsed.
  */
-static int pci_dev_str_match(struct pci_dev *dev, const char *p, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-			     const char **endptr) /* NVMe: char 타입 변수를 선언한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	int ret; /* NVMe: int 타입 변수를 선언한다. */
-	int count; /* NVMe: int 타입 변수를 선언한다. */
-	unsigned short vendor, device, subsystem_vendor, subsystem_device; /* NVMe: unsigned 타입 변수를 선언한다. */
+/*
+ * [한국어]
+ * pci_dev_str_match - 커널 파라미터 문자열 하나가 이 장치를 가리키는지 판정한다.
+ *
+ * @dev: 검사할 PCI 장치.
+ * @p: 판정할 문자열. 두 가지 형식을 받는다.
+ *     1) "[<domain>:]<bus>:<dev>.<func>[/<dev>.<func>]*"  — 주소(또는 경로)
+ *     2) "pci:<vendor>:<device>[:<subvendor>:<subdevice>]" — ID
+ * @endptr: 이 항목을 소비하고 난 뒤의 위치를 돌려줄 곳. 호출자가 ';' 로 이어진
+ *          목록을 계속 훑을 수 있게 한다.
+ * @return: 일치 1, 불일치 0, 파싱 실패 시 음수 오류.
+ *
+ * pci=resource_alignment=, pci=disable_acs_redir= 처럼 "특정 장치들에만" 적용할
+ * 파라미터를 해석하는 공통 판정기다. 주소 형식은 한 장치를 정확히 집지만 버스
+ * 번호 재배정에 약하고, ID 형식은 같은 모델 전부를 한꺼번에 집는다.
+ * ID 형식에서 0 은 "아무 값이나"를 뜻한다 — 커널 내부의 PCI_ANY_ID(~0)와
+ * 다른데, 사용자가 명령줄에 FFFF 를 적지 않아도 되게 한 편의다(원본 주석).
+ *
+ * 실행 문맥: 문자열 파싱뿐이고 config space 접근이 없다. 하위 호출
+ * pci_dev_str_match_path() 가 GFP_ATOMIC 을 쓰므로 잠들 수 없는 문맥도 허용한다.
+ *
+ * 호출 체인:
+ *   pci_specified_resource_alignment(), pci_disable_acs_redir 처리 경로
+ *     → [이 함수] → pci_dev_str_match_path()
+ */
+static int pci_dev_str_match(struct pci_dev *dev, const char *p,
+			     const char **endptr)
+{
+	int ret; /* [한국어] 하위 호출 결과와 최종 판정값 */
+	int count; /* [한국어] sscanf 의 %n 이 돌려줄 "소비한 문자 수" — 이 문자열을 어디까지 먹었는지 알아야 endptr 을 옮길 수 있다 */
+	unsigned short vendor, device, subsystem_vendor, subsystem_device; /* [한국어] ID 형식에서 뽑아낼 네 가지 식별자. PCI config space 의 0x00(Vendor), 0x02(Device), 0x2c(Subsystem Vendor), 0x2e(Subsystem Device)에 대응한다 */
 
-	if (strncmp(p, "pci:", 4) == 0) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
+	if (strncmp(p, "pci:", 4) == 0) { /* [한국어] "pci:" 접두가 붙었으면 ID 형식이다 */
 		/* PCI vendor/device (subvendor/subdevice) IDs are specified */
-		p += 4; /* NVMe: 변수에 값을 할당한다. */
-		ret = sscanf(p, "%hx:%hx:%hx:%hx%n", &vendor, &device, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-			     &subsystem_vendor, &subsystem_device, &count); /* NVMe: 비트 연산을 수행한다. */
-		if (ret != 4) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			ret = sscanf(p, "%hx:%hx%n", &vendor, &device, &count); /* NVMe: 변수에 값을 할당한다. */
-			if (ret != 2) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-				return -EINVAL; /* NVMe: 오류 코드를 반환한다. */
+		p += 4; /* [한국어] 접두 4글자를 건너뛴다 */
+		ret = sscanf(p, "%hx:%hx:%hx:%hx%n", &vendor, &device, /* [한국어] 네 항목 형식을 먼저 시도한다. %hx 는 unsigned short 16진수 */
+			     &subsystem_vendor, &subsystem_device, &count); /* [한국어] %n 은 값을 소비하지 않고 지금까지 읽은 문자 수만 count 에 넣는다 */
+		if (ret != 4) { /* [한국어] 네 개가 다 읽히지 않았으면 subsystem 을 생략한 두 항목 형식일 수 있다 */
+			ret = sscanf(p, "%hx:%hx%n", &vendor, &device, &count); /* [한국어] vendor:device 만 읽어 본다 */
+			if (ret != 2) /* [한국어] 그것마저 실패하면 형식 오류다 */
+				return -EINVAL; /* [한국어] -EINVAL. 이 경로에서는 아직 할당한 자원이 없어 바로 반환해도 된다 */
 
-			subsystem_vendor = 0; /* NVMe: 변수에 값을 할당한다. */
-			subsystem_device = 0; /* NVMe: 변수에 값을 할당한다. */
+			subsystem_vendor = 0; /* [한국어] 생략된 subsystem 은 0 으로 둔다 — 아래 비교에서 0 은 "아무 값이나 허용"으로 쓰인다 */
+			subsystem_device = 0; /* [한국어] 같은 이유로 subsystem device 도 0 */
 		} /* NVMe: 코드 블록을 종료한다. */
 
-		p += count; /* NVMe: 변수에 값을 할당한다. */
+		p += count; /* [한국어] 소비한 만큼 커서를 앞으로 옮긴다. 호출자에게 돌려줄 endptr 의 기준이 된다 */
 
-		if ((!vendor || vendor == dev->vendor) && /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		    (!device || device == dev->device) && /* NVMe: 표현식을 이어서 작성한다. */
-		    (!subsystem_vendor || /* NVMe: 표현식을 이어서 작성한다. */
-			    subsystem_vendor == dev->subsystem_vendor) && /* NVMe: 표현식을 이어서 작성한다. */
-		    (!subsystem_device || /* NVMe: 표현식을 이어서 작성한다. */
-			    subsystem_device == dev->subsystem_device)) /* NVMe: 구조체 멤버에 접근한다. */
-			goto found; /* NVMe: 지정한 레이블로 제어를 이동한다. */
-	} else { /* NVMe: 표현식을 평가한다. */
+		if ((!vendor || vendor == dev->vendor) && /* [한국어] vendor 가 0 이면 무조건 통과, 아니면 실제 Vendor ID 와 같아야 한다 */
+		    (!device || device == dev->device) && /* [한국어] device 도 같은 규칙 */
+		    (!subsystem_vendor || /* [한국어] subsystem vendor 가 0 이면 검사를 건너뛰고 */
+			    subsystem_vendor == dev->subsystem_vendor) && /* [한국어] 0 이 아니면 값이 일치해야 한다 */
+		    (!subsystem_device || /* [한국어] subsystem device 도 마찬가지로 0 이면 무시하고 */
+			    subsystem_device == dev->subsystem_device)) /* [한국어] 0 이 아니면 일치해야 한다 */
+			goto found; /* [한국어] 네 조건이 모두 통과하면 일치 처리 지점으로 간다 */
+	} else { /* [한국어] "pci:" 로 시작하지 않으면 주소/경로 형식이다 */
 		/*
 		 * PCI Bus, Device, Function IDs are specified
 		 * (optionally, may include a path of devfns following it)
 		 */
-		ret = pci_dev_str_match_path(dev, p, &p); /* NVMe: 변수에 값을 할당한다. */
-		if (ret < 0) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			return ret; /* NVMe: 연산 결과를 반환한다. */
-		else if (ret) /* NVMe: 이전 조건이 거짓일 때 추가 조건을 검사한다. */
-			goto found; /* NVMe: 지정한 레이블로 제어를 이동한다. */
+		ret = pci_dev_str_match_path(dev, p, &p); /* [한국어] 경로 판정기에 넘긴다. 세 번째 인자로 &p 를 주어 소비한 끝 위치를 돌려받는다 */
+		if (ret < 0) /* [한국어] 음수는 파싱 실패 */
+			return ret; /* [한국어] 그대로 상위에 전달한다 */
+		else if (ret) /* [한국어] 1 이면 일치 */
+			goto found; /* [한국어] 일치 처리 지점으로 */
 	} /* NVMe: 코드 블록을 종료한다. */
 
-	*endptr = p;
-	return 0; /* NVMe: 성공(0)을 반환한다. */
+	*endptr = p; /* [한국어] 불일치로 끝나더라도 이 항목을 어디까지 읽었는지는 알려 줘야 호출자가 다음 항목으로 넘어갈 수 있다 */
+	return 0; /* [한국어] 불일치 */
 
-found: /* NVMe: 레이블을 정의한다. */
-	*endptr = p;
-	return 1; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
-
-static u8 __pci_find_next_cap(struct pci_bus *bus, unsigned int devfn, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-			      u8 pos, int cap) /* NVMe: u8 타입 변수를 선언한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	return PCI_FIND_NEXT_CAP(pci_bus_read_config, pos, cap, NULL, bus, devfn); /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+found: /* [한국어] 일치했을 때만 오는 지점 */
+	*endptr = p; /* [한국어] 여기서도 소비 위치를 알려 준다 */
+	return 1; /* [한국어] 일치 */
+}
 
 /*
- * pci_find_next_capability:
- *   현재 capability 다음부터 지정한 capability 를 검색한다. NVMe 장치의 MSI/MSI-X capability offset 을 찾는 데 직접 사용된다.
+ * [한국어]
+ * __pci_find_next_cap - capability 연결 리스트를 순회해 원하는 ID 를 찾는다.
+ *
+ * @bus: 대상 장치가 붙은 버스. pci_dev 없이도 쓸 수 있게 bus/devfn 을 따로 받는다.
+ * @devfn: 장치·함수 번호((device << 3) | function).
+ * @pos: 순회를 시작할 config space 오프셋. "다음 포인터가 들어 있는 위치"를 준다.
+ * @cap: 찾을 capability ID(PCI_CAP_ID_PM=0x01, PCI_CAP_ID_MSI=0x05,
+ *       PCI_CAP_ID_PCIX=0x07, PCI_CAP_ID_EXP=0x10, PCI_CAP_ID_MSIX=0x11 등).
+ * @return: 찾은 capability 구조체의 시작 오프셋, 없으면 0.
+ *
+ * PCI 표준 capability 는 config space 안에 "다음 항목 오프셋"으로 이어진
+ * 단방향 연결 리스트다. 각 항목의 첫 바이트가 ID, 둘째 바이트가 다음 항목의
+ * 오프셋이며, 다음 오프셋 0 이 리스트의 끝이다.
+ * 실제 순회는 drivers/pci/pci.h 의 PCI_FIND_NEXT_CAP 매크로가 한다. 그 매크로가
+ * 지키는 규약은 세 가지다.
+ *   - TTL 48회 제한: 링크가 자기 자신을 가리키는 고장난 하드웨어에서
+ *     무한 루프에 빠지지 않게 끊는다.
+ *   - PCI_STD_HEADER_SIZEOF(0x40) 미만이면 중단: capability 는 표준 헤더
+ *     64바이트 뒤쪽에만 놓일 수 있으므로, 그보다 작은 오프셋은 잘못된 링크다.
+ *   - ALIGN_DOWN(pos, 4): capability 는 DWORD 경계에 정렬돼 있어야 한다.
+ *   - 읽은 ID 가 0xff 면 중단: 응답 없는 config 읽기가 all-ones 를 돌려주므로,
+ *     장치가 사라진 경우를 리스트 끝과 함께 걸러 낸다.
+ * 매크로에 pci_bus_read_config 를 넘기므로 pci_dev 가 아직 없어도 동작한다.
+ *
+ * 실행 문맥: config space 를 여러 번 읽는다. 프로세스 문맥에서 부르는 것이 안전하다.
+ *
+ * 호출 체인:
+ *   pci_find_capability() / pci_bus_find_capability() / pci_find_next_capability()
+ *     → [이 함수] → PCI_FIND_NEXT_CAP → pci_bus_read_config_byte/_word()
  */
-u8 pci_find_next_capability(struct pci_dev *dev, u8 pos, int cap) /* NVMe: pci_find_next_capability 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	return __pci_find_next_cap(dev->bus, dev->devfn, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-				   pos + PCI_CAP_LIST_NEXT, cap); /* NVMe: 표현식을 평가한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+static u8 __pci_find_next_cap(struct pci_bus *bus, unsigned int devfn,
+			      u8 pos, int cap)
+{
+	return PCI_FIND_NEXT_CAP(pci_bus_read_config, pos, cap, NULL, bus, devfn); /* [한국어] prev_ptr 에 NULL 을 넘겨 "직전 항목 위치는 필요 없다"고 알린다. args 로 bus/devfn 이 매크로 안의 pci_bus_read_config_byte/_word 호출에 전달된다 */
+}
+
+/*
+ * [한국어]
+ * pci_find_next_capability - 이미 찾은 capability 다음부터 같은 ID 를 이어서 찾는다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @pos: 직전에 찾은 capability 의 시작 오프셋.
+ * @cap: 찾을 capability ID.
+ * @return: 다음에 나오는 같은 ID 의 오프셋, 더 없으면 0.
+ *
+ * 같은 ID 의 capability 가 여러 개 있을 수 있는 경우(Vendor-Specific 등)를 위해
+ * 존재한다. 시작점을 pos + PCI_CAP_LIST_NEXT 로 주는 것이 핵심이다 —
+ * PCI_CAP_LIST_NEXT 는 capability 헤더 안에서 "다음 포인터" 필드의 오프셋(1)이고,
+ * 매크로는 시작 위치의 바이트를 먼저 읽어 그것을 첫 후보 오프셋으로 삼기 때문이다.
+ * 즉 "현재 항목의 next 필드부터 이어서 훑어라"는 뜻이 된다.
+ *
+ * 실행 문맥: config space 읽기. 프로세스 문맥.
+ *
+ * 참고 — drivers/nvme/ 전체를 검색해도 이 함수 호출은 없다.
+ *
+ * 호출 체인:
+ *   각 드라이버/quirk → [이 함수] → __pci_find_next_cap()
+ */
+u8 pci_find_next_capability(struct pci_dev *dev, u8 pos, int cap)
+{
+	return __pci_find_next_cap(dev->bus, dev->devfn, /* [한국어] bus/devfn 을 풀어 하위 헬퍼에 넘긴다 */
+				   pos + PCI_CAP_LIST_NEXT, cap); /* [한국어] 현재 capability 의 next 필드 위치에서 시작하게 한다 */
+}
 EXPORT_SYMBOL_GPL(pci_find_next_capability);
 
-static u8 __pci_bus_find_cap_start(struct pci_bus *bus, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-				    unsigned int devfn, u8 hdr_type) /* NVMe: unsigned 타입 변수를 선언한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	u16 status; /* NVMe: u16 타입 변수를 선언한다. */
+/*
+ * [한국어]
+ * __pci_bus_find_cap_start - capability 리스트의 머리 포인터가 놓인 오프셋을 구한다.
+ *
+ * @bus: 대상 버스.
+ * @devfn: 장치·함수 번호.
+ * @hdr_type: config space 0x0e 의 Header Type 하위 7비트.
+ * @return: 리스트 머리 포인터가 들어 있는 config 오프셋, capability 가 없으면 0.
+ *
+ * capability 리스트를 훑기 전에 "어디서 시작하는가"를 먼저 알아야 한다.
+ * 두 단계로 판단한다.
+ *   1) Status 레지스터(0x06)의 Capabilities List 비트를 본다. 이 비트가 0 이면
+ *      이 장치에는 capability 가 하나도 없다 — 더 볼 것도 없이 0.
+ *   2) 머리 포인터의 위치는 헤더 타입마다 다르다.
+ *      일반 장치(타입 0)와 브리지(타입 1)는 0x34(PCI_CAPABILITY_LIST),
+ *      CardBus 브리지(타입 2)는 0x14(PCI_CB_CAPABILITY_LIST) 다.
+ *      헤더 타입 0/1 은 헤더 레이아웃이 달라도 이 필드 위치만은 같다.
+ * NVMe SSD 는 헤더 타입 0 이므로 언제나 0x34 를 쓴다.
+ *
+ * 실행 문맥: config space 읽기 한 번. 프로세스 문맥이 안전하다.
+ *
+ * 호출 체인:
+ *   pci_find_capability() / pci_bus_find_capability()
+ *     → [이 함수] → pci_bus_read_config_word()
+ */
+static u8 __pci_bus_find_cap_start(struct pci_bus *bus,
+				    unsigned int devfn, u8 hdr_type)
+{
+	u16 status; /* [한국어] Status 레지스터 값 */
 
-	pci_bus_read_config_word(bus, devfn, PCI_STATUS, &status); /* NVMe: bus 단위로 PCI 설정 공간 2바이트를 읽는다. */
-	if (!(status & PCI_STATUS_CAP_LIST)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return 0; /* NVMe: 성공(0)을 반환한다. */
+	pci_bus_read_config_word(bus, devfn, PCI_STATUS, &status); /* [한국어] config space 오프셋 0x06 에서 Status 를 읽는다 */
+	if (!(status & PCI_STATUS_CAP_LIST)) /* [한국어] PCI_STATUS_CAP_LIST(비트 4)가 0 이면 이 장치에는 capability 리스트 자체가 없다 */
+		return 0; /* [한국어] 0 은 "머리 포인터 없음"을 뜻한다 */
 
-	switch (hdr_type) { /* NVMe: 다중 분기를 위한 switch 문을 시작한다. */
-	case PCI_HEADER_TYPE_NORMAL: /* NVMe: switch 의 case 레이블이다. */
-	case PCI_HEADER_TYPE_BRIDGE: /* NVMe: switch 의 case 레이블이다. */
-		return PCI_CAPABILITY_LIST; /* NVMe: 연산 결과를 반환한다. */
-	case PCI_HEADER_TYPE_CARDBUS: /* NVMe: switch 의 case 레이블이다. */
-		return PCI_CB_CAPABILITY_LIST; /* NVMe: 연산 결과를 반환한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+	switch (hdr_type) { /* [한국어] 헤더 타입에 따라 머리 포인터의 위치가 다르다 */
+	case PCI_HEADER_TYPE_NORMAL: /* [한국어] 타입 0 — 일반 장치(NVMe SSD 가 여기 해당) */
+	case PCI_HEADER_TYPE_BRIDGE: /* [한국어] 타입 1 — PCI-to-PCI 브리지. 레이아웃은 달라도 capability 포인터 위치는 같다 */
+		return PCI_CAPABILITY_LIST; /* [한국어] PCI_CAPABILITY_LIST = config space 오프셋 0x34 */
+	case PCI_HEADER_TYPE_CARDBUS: /* [한국어] 타입 2 — CardBus 브리지 */
+		return PCI_CB_CAPABILITY_LIST; /* [한국어] PCI_CB_CAPABILITY_LIST = config space 오프셋 0x14. CardBus 헤더는 0x34 를 다른 용도로 쓴다 */
+	}
 
-	return 0; /* NVMe: 성공(0)을 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return 0; /* [한국어] 알 수 없는 헤더 타입이면 안전하게 "없음"으로 처리한다 */
+}
 
 /**
  * pci_find_capability - query for devices' capabilities
@@ -581,19 +877,44 @@ static u8 __pci_bus_find_cap_start(struct pci_bus *bus, /* NVMe: 함수 호출 �
  *  %PCI_CAP_ID_EXP          PCI Express
  */
 /*
- * pci_find_capability:
- *   pci_dev 의 PCI capability 중 지정한 capability 가 있는지 확인하고 offset 을 반환한다. NVMe driver 가 MSI/MSI-X/PM/PCIe capability 를 찾는 핵심 함수이다.
+ * [한국어]
+ * pci_find_capability - 이 장치가 특정 capability 를 갖고 있는지 보고 그 오프셋을 준다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @cap: 찾을 capability ID.
+ * @return: capability 구조체가 시작하는 config space 오프셋, 없으면 0.
+ *
+ * PCI 장치의 선택 기능은 config space 안에 "capability 구조체"로 붙어 있고,
+ * 그 목록을 훑어야 지원 여부와 레지스터 위치를 알 수 있다. 전원 관리(PM),
+ * MSI, MSI-X, PCI Express capability 가 모두 이 방식으로 노출된다.
+ * 반환값 0 은 "지원하지 않음"이며, capability 는 0x40 이후에만 놓일 수 있으므로
+ * 0 을 유효한 오프셋과 혼동할 일이 없다.
+ *
+ * 이 파일 안에서는 pci_pm_init() 이 PCI_CAP_ID_PM 을, pci_save_pcix_state() 가
+ * PCI_CAP_ID_PCIX 를 찾는 데 쓴다.
+ *
+ * 참고 — drivers/nvme/ 전체를 검색해도 이 함수를 직접 부르는 곳은 없다.
+ * NVMe 는 MSI-X 를 pci_alloc_irq_vectors_affinity() 로 요청하고, 그 안쪽
+ * drivers/pci/msi/ 코드가 대신 이 계열 함수로 capability 를 찾는다.
+ * 또 PCIe capability 위치는 열거 때 dev->pcie_cap 에 이미 캐시돼 있어
+ * pcie_capability_read_word() 같은 헬퍼가 리스트를 다시 훑지 않는다.
+ *
+ * 실행 문맥: config space 를 여러 번 읽으므로 프로세스 문맥이 안전하다. 락은 없다.
+ *
+ * 호출 체인:
+ *   드라이버/PCI 코어 → [이 함수]
+ *     → __pci_bus_find_cap_start() → __pci_find_next_cap()
  */
-u8 pci_find_capability(struct pci_dev *dev, int cap) /* NVMe: pci_find_capability 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	u8 pos; /* NVMe: u8 타입 변수를 선언한다. */
+u8 pci_find_capability(struct pci_dev *dev, int cap)
+{
+	u8 pos; /* [한국어] 찾은 오프셋을 담는다 */
 
-	pos = __pci_bus_find_cap_start(dev->bus, dev->devfn, dev->hdr_type); /* NVMe: 변수에 값을 할당한다. */
-	if (pos) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pos = __pci_find_next_cap(dev->bus, dev->devfn, pos, cap); /* NVMe: 변수에 값을 할당한다. */
+	pos = __pci_bus_find_cap_start(dev->bus, dev->devfn, dev->hdr_type); /* [한국어] 먼저 리스트 머리 포인터가 놓인 위치를 구한다 */
+	if (pos) /* [한국어] 0 이면 capability 가 없는 장치이므로 순회할 것도 없다 */
+		pos = __pci_find_next_cap(dev->bus, dev->devfn, pos, cap); /* [한국어] 머리부터 리스트를 훑어 원하는 ID 를 찾는다 */
 
-	return pos; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return pos; /* [한국어] 찾은 오프셋 또는 0 */
+}
 EXPORT_SYMBOL(pci_find_capability);
 
 /**
@@ -610,21 +931,37 @@ EXPORT_SYMBOL(pci_find_capability);
  * support it.
  */
 /*
- * pci_bus_find_capability:
- *   pci_dev 가 아직 초기화되지 않은 상태의 bus 상 장치에 대해 capability 를 검색한다. NVMe early probe 단계에서 활용될 수 있다.
+ * [한국어]
+ * pci_bus_find_capability - pci_dev 가 아직 없는 장치에서 capability 를 찾는다.
+ *
+ * @bus: 장치가 붙은 버스.
+ * @devfn: 장치·함수 번호.
+ * @cap: 찾을 capability ID.
+ * @return: capability 오프셋, 없으면 0.
+ *
+ * pci_find_capability() 와 하는 일은 같지만, struct pci_dev 가 만들어지기 전
+ * 단계에서도 쓸 수 있다. 열거(probe.c) 도중에는 아직 pci_dev 가 없어
+ * bus + devfn 만으로 config space 를 두드려야 하기 때문이다.
+ * 그래서 캐시된 dev->hdr_type 대신 config space 0x0e 를 직접 읽는다.
+ *
+ * 실행 문맥: config space 읽기. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   probe 이전 단계의 PCI 코어 코드 → [이 함수]
+ *     → __pci_bus_find_cap_start() → __pci_find_next_cap()
  */
-u8 pci_bus_find_capability(struct pci_bus *bus, unsigned int devfn, int cap) /* NVMe: pci_bus_find_capability 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	u8 hdr_type, pos; /* NVMe: u8 타입 변수를 선언한다. */
+u8 pci_bus_find_capability(struct pci_bus *bus, unsigned int devfn, int cap)
+{
+	u8 hdr_type, pos; /* [한국어] 헤더 타입과 찾은 오프셋 */
 
-	pci_bus_read_config_byte(bus, devfn, PCI_HEADER_TYPE, &hdr_type); /* NVMe: bus 단위로 PCI 설정 공간 1바이트를 읽는다. */
+	pci_bus_read_config_byte(bus, devfn, PCI_HEADER_TYPE, &hdr_type); /* [한국어] config space 오프셋 0x0e 에서 Header Type 을 1바이트 읽는다 */
 
-	pos = __pci_bus_find_cap_start(bus, devfn, hdr_type & PCI_HEADER_TYPE_MASK); /* NVMe: 변수에 값을 할당한다. */
-	if (pos) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pos = __pci_find_next_cap(bus, devfn, pos, cap); /* NVMe: 변수에 값을 할당한다. */
+	pos = __pci_bus_find_cap_start(bus, devfn, hdr_type & PCI_HEADER_TYPE_MASK); /* [한국어] PCI_HEADER_TYPE_MASK(0x7f)로 하위 7비트만 남긴다 — 최상위 비트는 헤더 타입이 아니라 "멀티펑션 장치"를 뜻하는 별개 플래그다 */
+	if (pos) /* [한국어] 머리 포인터가 없으면 순회하지 않는다 */
+		pos = __pci_find_next_cap(bus, devfn, pos, cap); /* [한국어] 리스트를 훑는다 */
 
-	return pos; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return pos; /* [한국어] 찾은 오프셋 또는 0 */
+}
 EXPORT_SYMBOL(pci_bus_find_capability);
 
 /**
@@ -639,17 +976,41 @@ EXPORT_SYMBOL(pci_bus_find_capability);
  * vendor-specific capability, and this provides a way to find them all.
  */
 /*
- * pci_find_next_ext_capability:
- *   PCIe extended capability list 를 순회한다. NVMe 장치의 AER, ACS, ATS, SR-IOV 등 extended capability 탐색에 사용된다.
+ * [한국어]
+ * pci_find_next_ext_capability - PCIe 확장 capability 리스트를 이어서 훑는다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @start: 순회를 시작할 확장 config 오프셋. 0 이면 리스트 처음(0x100)부터.
+ * @cap: 찾을 확장 capability ID(PCI_EXT_CAP_ID_ERR=AER, _ACS, _ATS, _SRIOV, _DSN 등).
+ * @return: 찾은 확장 capability 의 오프셋, 없으면 0.
+ *
+ * PCIe 는 기존 256바이트 config space 로는 모자라 4096바이트로 확장했고,
+ * 0x100 부터 "확장 capability" 리스트를 따로 둔다. 표준 capability 리스트와
+ * 구조가 다르다.
+ *   - 헤더가 4바이트다: 하위 16비트가 ID, 상위 4비트가 버전, 그 사이 12비트가
+ *     다음 항목 오프셋. 표준 쪽 8비트 링크보다 넓어 4KB 전체를 가리킬 수 있다.
+ *   - 리스트는 항상 0x100 에서 시작한다. 별도의 머리 포인터가 없다.
+ * 같은 ID 가 여러 번 나올 수 있어(Vendor-Specific 등) start 로 이어 찾게 했다.
+ *
+ * 확장 config space 는 접근 방법 자체가 다르다. x86 의 전통적인 0xCF8/0xCFC
+ * IO 포트 방식으로는 256바이트까지만 닿고, 0x100 이후는 ECAM(메모리 매핑
+ * config)이 있어야 읽을 수 있다. dev->cfg_size 가 그 가능 범위를 담고 있어
+ * 맨 먼저 확인한다.
+ *
+ * 실행 문맥: config space 를 여러 번 읽는다. 프로세스 문맥이 안전하다.
+ *
+ * 호출 체인:
+ *   pci_find_ext_capability(), pci_find_vsec_capability(), AER/ACS/SR-IOV 코드
+ *     → [이 함수] → PCI_FIND_NEXT_EXT_CAP → pci_bus_read_config_dword()
  */
-u16 pci_find_next_ext_capability(struct pci_dev *dev, u16 start, int cap) /* NVMe: pci_find_next_ext_capability 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	if (dev->cfg_size <= PCI_CFG_SPACE_SIZE) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return 0; /* NVMe: 성공(0)을 반환한다. */
+u16 pci_find_next_ext_capability(struct pci_dev *dev, u16 start, int cap)
+{
+	if (dev->cfg_size <= PCI_CFG_SPACE_SIZE) /* [한국어] PCI_CFG_SPACE_SIZE 는 256. 확장 config 에 닿을 수 없는 플랫폼/장치면 확장 capability 도 있을 수 없다 */
+		return 0; /* [한국어] "없음"을 뜻하는 0 */
 
-	return PCI_FIND_NEXT_EXT_CAP(pci_bus_read_config, start, cap, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-				     NULL, dev->bus, dev->devfn); /* NVMe: 구조체 멤버에 접근한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return PCI_FIND_NEXT_EXT_CAP(pci_bus_read_config, start, cap, /* [한국어] 매크로가 0x100 부터(또는 start 부터) 12비트 링크를 따라간다. 여기서도 TTL 로 무한 루프를 막는다 */
+				     NULL, dev->bus, dev->devfn); /* [한국어] prev_ptr 은 NULL — 직전 항목 위치는 필요 없다. bus/devfn 이 config 읽기 인자로 전달된다 */
+}
 EXPORT_SYMBOL_GPL(pci_find_next_ext_capability);
 
 /**
@@ -667,13 +1028,31 @@ EXPORT_SYMBOL_GPL(pci_find_next_ext_capability);
  *  %PCI_EXT_CAP_ID_PWR		Power Budgeting
  */
 /*
- * pci_find_ext_capability:
- *   지정한 PCIe extended capability 의 offset 을 반환한다. NVMe error reporting(AER)이나 SR-IOV 설정 시 capability 위치 확인에 쓰인다.
+ * [한국어]
+ * pci_find_ext_capability - 확장 capability 를 리스트 처음부터 찾는다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @cap: 찾을 확장 capability ID.
+ * @return: 오프셋(0x100 이상), 없으면 0.
+ *
+ * pci_find_next_ext_capability(dev, 0, cap) 의 얇은 래퍼다. start=0 은
+ * "리스트 처음(0x100)부터"를 뜻한다.
+ * AER(오류 보고), ACS(피어 간 접근 제어), ATS, SR-IOV, DSN(일련번호)이 모두
+ * 확장 capability 이므로, PCI 코어의 오류 복구·가상화 코드가 자주 부른다.
+ *
+ * 참고 — drivers/nvme/ 전체를 검색해도 이 함수 호출은 없다. NVMe 장치의 AER
+ * 처리는 NVMe 드라이버가 아니라 drivers/pci/pcie/aer.c 가 맡고, 드라이버는
+ * pci_error_handlers 콜백으로 통보만 받는다.
+ *
+ * 실행 문맥: config space 읽기. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   AER/ACS/SR-IOV/DSN 코드 → [이 함수] → pci_find_next_ext_capability()
  */
-u16 pci_find_ext_capability(struct pci_dev *dev, int cap) /* NVMe: pci_find_ext_capability 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	return pci_find_next_ext_capability(dev, 0, cap); /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+u16 pci_find_ext_capability(struct pci_dev *dev, int cap)
+{
+	return pci_find_next_ext_capability(dev, 0, cap); /* [한국어] start=0 으로 넘겨 리스트 처음부터 훑게 한다 */
+}
 EXPORT_SYMBOL_GPL(pci_find_ext_capability);
 
 /**
@@ -686,66 +1065,103 @@ EXPORT_SYMBOL_GPL(pci_find_ext_capability);
  * Returns the DSN, or zero if the capability does not exist.
  */
 /*
- * pci_get_dsn:
- *   PCIe Device Serial Number extended capability 를 읽어 64비트 일련번호를 반환한다. NVMe controller 의 고유 식별자 중 하나로 활용될 수 있다.
+ * [한국어]
+ * pci_get_dsn - Device Serial Number 확장 capability 에서 64비트 일련번호를 읽는다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @return: 8바이트 일련번호. DSN capability 가 없으면 0.
+ *
+ * DSN 은 장치마다 유일한 64비트 값으로, 같은 모델이 여러 개 꽂혔을 때 각각을
+ * 구별하는 데 쓴다. 버스 번호나 슬롯과 달리 재배치·재부팅에도 변하지 않는다.
+ * 값의 배치는 스펙이 정해 두었다 — capability 시작에서 4바이트 떨어진 곳에
+ * DWORD 두 개가 놓이며, 앞이 하위 32비트, 뒤가 상위 32비트다.
+ * 반환값 0 은 "capability 없음"이다. 이론상 일련번호 0 과 구분되지 않지만,
+ * 스펙상 0 은 유효한 DSN 이 아니다.
+ *
+ * 실행 문맥: config space 를 두 번 읽는다. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   장치를 고유 식별해야 하는 드라이버/서브시스템 → [이 함수]
+ *     → pci_find_ext_capability() → pci_read_config_dword()
  */
-u64 pci_get_dsn(struct pci_dev *dev) /* NVMe: pci_get_dsn 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	u32 dword; /* NVMe: u32 타입 변수를 선언한다. */
-	u64 dsn; /* NVMe: u64 타입 변수를 선언한다. */
-	int pos; /* NVMe: int 타입 변수를 선언한다. */
+u64 pci_get_dsn(struct pci_dev *dev)
+{
+	u32 dword; /* [한국어] config 읽기 한 번당 32비트를 담는 임시 */
+	u64 dsn; /* [한국어] 두 DWORD 를 합쳐 만들 64비트 결과 */
+	int pos; /* [한국어] DSN capability 의 시작 오프셋 */
 
-	pos = pci_find_ext_capability(dev, PCI_EXT_CAP_ID_DSN); /* NVMe: 변수에 값을 할당한다. */
-	if (!pos) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return 0; /* NVMe: 성공(0)을 반환한다. */
+	pos = pci_find_ext_capability(dev, PCI_EXT_CAP_ID_DSN); /* [한국어] 확장 capability 리스트에서 DSN(ID 0x0003)을 찾는다 */
+	if (!pos) /* [한국어] 이 장치는 DSN 을 노출하지 않는다 */
+		return 0; /* [한국어] "없음"을 0 으로 알린다 */
 
 	/*
 	 * The Device Serial Number is two dwords offset 4 bytes from the
 	 * capability position. The specification says that the first dword is
 	 * the lower half, and the second dword is the upper half.
 	 */
-	pos += 4; /* NVMe: 변수에 값을 할당한다. */
-	pci_read_config_dword(dev, pos, &dword); /* NVMe: PCI 설정 공간 4바이트를 읽는다. */
-	dsn = (u64)dword; /* NVMe: 변수에 값을 할당한다. */
-	pci_read_config_dword(dev, pos + 4, &dword); /* NVMe: PCI 설정 공간 4바이트를 읽는다. */
-	dsn |= ((u64)dword) << 32; /* NVMe: 변수에 값을 할당한다. */
+	pos += 4; /* [한국어] capability 헤더 4바이트를 건너뛴다 — 그 뒤부터가 실제 일련번호다 */
+	pci_read_config_dword(dev, pos, &dword); /* [한국어] 앞 DWORD 를 읽는다 */
+	dsn = (u64)dword; /* [한국어] 스펙상 앞 DWORD 가 하위 32비트다 */
+	pci_read_config_dword(dev, pos + 4, &dword); /* [한국어] 그 다음 DWORD 를 읽는다 */
+	dsn |= ((u64)dword) << 32; /* [한국어] 뒤 DWORD 를 상위 32비트로 올려 합친다. (u64) 캐스트를 먼저 하지 않으면 32비트 시프트가 정의되지 않은 동작이 된다 */
 
-	return dsn; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return dsn; /* [한국어] 완성된 64비트 일련번호 */
+}
 EXPORT_SYMBOL_GPL(pci_get_dsn);
 
 /*
- * __pci_find_next_ht_cap:
- *   HyperTransport capability 를 순회한다. NVMe 장치는 일반적으로 직접 관련 없으나, AMD 플랫폼 Root Complex 관련 진단 시 참조될 수 있다.
+ * [한국어]
+ * __pci_find_next_ht_cap - HyperTransport capability 중 원하는 하위 타입을 찾는다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @pos: 순회를 시작할 config 오프셋.
+ * @ht_cap: 찾을 HT 하위 타입(HT_CAPTYPE_SLAVE, HT_CAPTYPE_HOST, HT_CAPTYPE_IRQ 등).
+ * @return: 조건에 맞는 HT capability 의 오프셋, 없으면 0.
+ *
+ * HyperTransport 는 AMD 계열 플랫폼이 쓰던 상호연결 규격이다. HT 관련 기능이
+ * 여러 개라도 PCI capability ID 는 모두 PCI_CAP_ID_HT(0x08) 하나로 같고,
+ * 실제 종류는 capability 안쪽 바이트(오프셋 +3)의 상위 비트로 구분한다.
+ * 그래서 "ID 로 찾은 뒤 하위 타입을 다시 확인"하는 두 겹 탐색이 된다.
+ *
+ * 마스크가 둘인 이유가 이 구조 때문이다. SLAVE/HOST 타입은 상위 3비트로,
+ * 나머지 타입은 상위 5비트로 식별한다. 3비트 타입의 나머지 비트에는 다른
+ * 의미가 실려 있어 5비트로 비교하면 어긋난다.
+ *
+ * 실행 문맥: config space 를 반복해 읽는다. 프로세스 문맥.
+ * 오류가 나면(장치가 사라졌거나 접근 실패) 즉시 0 을 돌려 루프를 끝낸다.
+ *
+ * 호출 체인:
+ *   pci_find_ht_capability() / pci_find_next_ht_capability()
+ *     → [이 함수] → PCI_FIND_NEXT_CAP, pci_read_config_byte()
  */
-static u8 __pci_find_next_ht_cap(struct pci_dev *dev, u8 pos, int ht_cap) /* NVMe: __pci_find_next_ht_cap 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	int rc; /* NVMe: int 타입 변수를 선언한다. */
-	u8 cap, mask; /* NVMe: u8 타입 변수를 선언한다. */
+static u8 __pci_find_next_ht_cap(struct pci_dev *dev, u8 pos, int ht_cap)
+{
+	int rc; /* [한국어] config 읽기 결과 코드 */
+	u8 cap, mask; /* [한국어] cap 은 읽어 온 하위 타입 바이트, mask 는 그중 비교할 비트 범위 */
 
-	if (ht_cap == HT_CAPTYPE_SLAVE || ht_cap == HT_CAPTYPE_HOST) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		mask = HT_3BIT_CAP_MASK; /* NVMe: 변수에 값을 할당한다. */
-	else /* NVMe: 이전 조건이 모두 거짓일 때 실행한다. */
-		mask = HT_5BIT_CAP_MASK; /* NVMe: 변수에 값을 할당한다. */
+	if (ht_cap == HT_CAPTYPE_SLAVE || ht_cap == HT_CAPTYPE_HOST) /* [한국어] SLAVE/HOST 는 상위 3비트만으로 구분되는 타입이다 */
+		mask = HT_3BIT_CAP_MASK; /* [한국어] 상위 3비트 마스크 */
+	else /* [한국어] 그 밖의 HT 타입은 */
+		mask = HT_5BIT_CAP_MASK; /* [한국어] 상위 5비트로 구분한다 */
 
-	pos = PCI_FIND_NEXT_CAP(pci_bus_read_config, pos, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-				PCI_CAP_ID_HT, NULL, dev->bus, dev->devfn); /* NVMe: 구조체 멤버에 접근한다. */
-	while (pos) { /* NVMe: 조건이 참인 동안 반복한다. */
-		rc = pci_read_config_byte(dev, pos + 3, &cap); /* NVMe: 변수에 값을 할당한다. */
-		if (rc != PCIBIOS_SUCCESSFUL) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			return 0; /* NVMe: 성공(0)을 반환한다. */
+	pos = PCI_FIND_NEXT_CAP(pci_bus_read_config, pos, /* [한국어] 먼저 PCI_CAP_ID_HT(0x08) 인 capability 를 찾는다 */
+				PCI_CAP_ID_HT, NULL, dev->bus, dev->devfn); /* [한국어] prev_ptr 은 NULL. bus/devfn 이 config 읽기 인자로 넘어간다 */
+	while (pos) { /* [한국어] HT capability 를 하나 찾을 때마다 하위 타입을 확인한다 */
+		rc = pci_read_config_byte(dev, pos + 3, &cap); /* [한국어] capability 시작에서 3바이트 뒤가 HT 하위 타입 바이트다 */
+		if (rc != PCIBIOS_SUCCESSFUL) /* [한국어] 읽기가 실패하면 장치가 응답하지 않는 것이므로 더 훑을 의미가 없다 */
+			return 0; /* [한국어] 실패를 "못 찾음"으로 처리한다 */
 
-		if ((cap & mask) == ht_cap) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			return pos; /* NVMe: 연산 결과를 반환한다. */
+		if ((cap & mask) == ht_cap) /* [한국어] 마스크로 걸러 낸 상위 비트가 원하는 타입과 같으면 */
+			return pos; /* [한국어] 그 오프셋이 답이다 */
 
-		pos = PCI_FIND_NEXT_CAP(pci_bus_read_config, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-					pos + PCI_CAP_LIST_NEXT, /* NVMe: 표현식을 이어서 작성한다. */
-					PCI_CAP_ID_HT, NULL, dev->bus, /* NVMe: 표현식을 이어서 작성한다. */
-					dev->devfn); /* NVMe: 구조체 멤버에 접근한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+		pos = PCI_FIND_NEXT_CAP(pci_bus_read_config, /* [한국어] 아니면 다음 HT capability 로 넘어간다 */
+					pos + PCI_CAP_LIST_NEXT, /* [한국어] 현재 항목의 next 필드 위치에서 이어 찾는다 */
+					PCI_CAP_ID_HT, NULL, dev->bus, /* [한국어] 같은 ID(PCI_CAP_ID_HT)로 계속 검색한다 */
+					dev->devfn); /* [한국어] config 접근에 쓸 devfn */
+	}
 
-	return 0; /* NVMe: 성공(0)을 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return 0; /* [한국어] 리스트를 다 훑도록 맞는 하위 타입이 없었다 */
+}
 
 /**
  * pci_find_next_ht_capability - query a device's HyperTransport capabilities
@@ -761,13 +1177,28 @@ static u8 __pci_find_next_ht_cap(struct pci_dev *dev, u8 pos, int ht_cap) /* NVM
  * steps to avoid an infinite loop.
  */
 /*
- * pci_find_next_ht_capability:
- *   다음 HyperTransport capability 를 검색한다. NVMe host environment 의 플랫폼 특정 capability 탐색에 사용될 수 있다.
+ * [한국어]
+ * pci_find_next_ht_capability - 직전 HT capability 다음부터 같은 하위 타입을 찾는다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @pos: pci_find_ht_capability() 가 돌려준 직전 위치.
+ * @ht_cap: 찾을 HT 하위 타입.
+ * @return: 다음에 나오는 오프셋, 더 없으면 0.
+ *
+ * HT capability 는 한 장치에 여러 개 있을 수 있어 전부 훑을 방법이 필요하다.
+ * pos + PCI_CAP_LIST_NEXT 로 "현재 항목의 next 필드"를 시작점으로 준다.
+ * 원본 주석의 경고대로, 링크가 깨진 장치에서 완전히 안전하려면 호출자가
+ * 스스로 반복 횟수를 제한해야 한다.
+ *
+ * 실행 문맥: config space 읽기. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   HT 관련 quirk/드라이버 → [이 함수] → __pci_find_next_ht_cap()
  */
-u8 pci_find_next_ht_capability(struct pci_dev *dev, u8 pos, int ht_cap) /* NVMe: pci_find_next_ht_capability 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	return __pci_find_next_ht_cap(dev, pos + PCI_CAP_LIST_NEXT, ht_cap); /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+u8 pci_find_next_ht_capability(struct pci_dev *dev, u8 pos, int ht_cap)
+{
+	return __pci_find_next_ht_cap(dev, pos + PCI_CAP_LIST_NEXT, ht_cap); /* [한국어] 현재 항목의 next 필드 위치부터 이어 찾게 한다 */
+}
 EXPORT_SYMBOL_GPL(pci_find_next_ht_capability);
 
 /**
@@ -782,19 +1213,35 @@ EXPORT_SYMBOL_GPL(pci_find_next_ht_capability);
  * which has a HyperTransport capability matching @ht_cap.
  */
 /*
- * pci_find_ht_capability:
- *   HyperTransport capability offset 을 반환한다. NVMe endpoint 와는 거리가 있으나 플랫폼 진단용으로 존재한다.
+ * [한국어]
+ * pci_find_ht_capability - HyperTransport 하위 타입을 리스트 처음부터 찾는다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @ht_cap: 찾을 HT 하위 타입.
+ * @return: 오프셋, 없으면 0.
+ *
+ * pci_find_capability() 와 같은 구조지만, ID 만 보는 대신 HT 하위 타입까지
+ * 확인하는 __pci_find_next_ht_cap() 을 쓴다.
+ * HyperTransport 는 AMD 플랫폼의 상호연결 규격이라 PCIe 엔드포인트인
+ * NVMe SSD 자체와는 관계가 없다. 이 경로를 쓰는 것은 HT 를 노출하는
+ * 칩셋/브리지 쪽 코드다.
+ *
+ * 실행 문맥: config space 읽기. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   HT 관련 quirk/드라이버 → [이 함수]
+ *     → __pci_bus_find_cap_start() → __pci_find_next_ht_cap()
  */
-u8 pci_find_ht_capability(struct pci_dev *dev, int ht_cap) /* NVMe: pci_find_ht_capability 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	u8 pos; /* NVMe: u8 타입 변수를 선언한다. */
+u8 pci_find_ht_capability(struct pci_dev *dev, int ht_cap)
+{
+	u8 pos; /* [한국어] 찾은 오프셋 */
 
-	pos = __pci_bus_find_cap_start(dev->bus, dev->devfn, dev->hdr_type); /* NVMe: 변수에 값을 할당한다. */
-	if (pos) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pos = __pci_find_next_ht_cap(dev, pos, ht_cap); /* NVMe: 변수에 값을 할당한다. */
+	pos = __pci_bus_find_cap_start(dev->bus, dev->devfn, dev->hdr_type); /* [한국어] 리스트 머리 포인터 위치를 먼저 구한다 */
+	if (pos) /* [한국어] capability 리스트가 없으면 건너뛴다 */
+		pos = __pci_find_next_ht_cap(dev, pos, ht_cap); /* [한국어] HT 하위 타입까지 확인하며 훑는다 */
 
-	return pos; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return pos; /* [한국어] 오프셋 또는 0 */
+}
 EXPORT_SYMBOL_GPL(pci_find_ht_capability);
 
 /**
@@ -808,30 +1255,49 @@ EXPORT_SYMBOL_GPL(pci_find_ht_capability);
  * config space; otherwise return 0.
  */
 /*
- * pci_find_vsec_capability:
- *   Vendor Specific Extended Capability 를 검색한다. NVMe vendor 특수 레지스터나 제조사별 확장 기능 위치를 찾는 데 사용될 수 있다.
+ * [한국어]
+ * pci_find_vsec_capability - 특정 벤더의 VSEC(Vendor-Specific Extended Capability)을 찾는다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @vendor: 이 VSEC 을 정의한 벤더 ID. 장치의 Vendor ID 와 다르면 볼 필요가 없다.
+ * @cap: 그 벤더가 정한 VSEC ID.
+ * @return: VSEC 의 config space 오프셋, 없으면 0.
+ *
+ * VSEC 은 벤더가 스펙 밖의 기능을 노출하려고 쓰는 확장 capability 다. 확장
+ * capability ID 는 모두 PCI_EXT_CAP_ID_VNDR(0x000b) 로 같고, 실제 구분은
+ * capability 안쪽 VSEC 헤더의 ID 필드로 한다. 그래서 HT 와 마찬가지로
+ * "ID 로 훑고, 안쪽 필드로 다시 거른다"는 두 겹 구조다.
+ * 같은 벤더가 VSEC 을 여러 개 둘 수 있어 리스트 전체를 순회한다.
+ * 벤더 ID 부터 비교하는 이유는 명확하다 — VSEC 의 의미는 벤더가 정하므로,
+ * 다른 벤더의 장치에서 같은 VSEC ID 를 찾아 봤자 전혀 다른 것을 가리킨다.
+ *
+ * 실행 문맥: config space 를 반복해 읽는다. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   벤더별 기능 코드(예: probe.c 의 Thunderbolt 식별) → [이 함수]
+ *     → pci_find_next_ext_capability() → pci_read_config_dword()
  */
-u16 pci_find_vsec_capability(struct pci_dev *dev, u16 vendor, int cap) /* NVMe: pci_find_vsec_capability 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	u16 vsec = 0; /* NVMe: u16 타입 변수를 선언한다. */
-	u32 header; /* NVMe: u32 타입 변수를 선언한다. */
-	int ret; /* NVMe: int 타입 변수를 선언한다. */
+u16 pci_find_vsec_capability(struct pci_dev *dev, u16 vendor, int cap)
+{
+	u16 vsec = 0; /* [한국어] 순회 커서. 0 으로 시작해 리스트 처음부터 훑는다 */
+	u32 header; /* [한국어] VSEC 헤더 DWORD 를 받을 곳 */
+	int ret; /* [한국어] config 읽기 결과 코드 */
 
-	if (vendor != dev->vendor) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return 0; /* NVMe: 성공(0)을 반환한다. */
+	if (vendor != dev->vendor) /* [한국어] 요청한 벤더의 장치가 아니면 그 벤더의 VSEC 이 있을 리 없다 */
+		return 0; /* [한국어] "없음" */
 
-	while ((vsec = pci_find_next_ext_capability(dev, vsec, /* NVMe: 조건이 참인 동안 반복한다. */
-						     PCI_EXT_CAP_ID_VNDR))) { /* NVMe: 표현식을 평가한다. */
-		ret = pci_read_config_dword(dev, vsec + PCI_VNDR_HEADER, &header); /* NVMe: 변수에 값을 할당한다. */
-		if (ret != PCIBIOS_SUCCESSFUL) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			continue; /* NVMe: 다음 반복으로 걸러뛴다. */
+	while ((vsec = pci_find_next_ext_capability(dev, vsec, /* [한국어] VNDR 확장 capability 를 하나씩 이어 찾는다. 반환값을 다시 vsec 에 담아 다음 검색의 시작점으로 삼는다 */
+						     PCI_EXT_CAP_ID_VNDR))) { /* [한국어] PCI_EXT_CAP_ID_VNDR — 모든 VSEC 이 공유하는 확장 capability ID */
+		ret = pci_read_config_dword(dev, vsec + PCI_VNDR_HEADER, &header); /* [한국어] VSEC 헤더(capability 시작 + PCI_VNDR_HEADER)를 읽는다. 이 DWORD 안에 벤더가 정한 VSEC ID 와 리비전, 길이가 들어 있다 */
+		if (ret != PCIBIOS_SUCCESSFUL) /* [한국어] 읽기 실패 */
+			continue; /* [한국어] 이 항목만 건너뛰고 다음 VSEC 을 계속 본다 — 하나 실패했다고 나머지를 포기할 이유는 없다 */
 
-		if (PCI_VNDR_HEADER_ID(header) == cap) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			return vsec; /* NVMe: 연산 결과를 반환한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+		if (PCI_VNDR_HEADER_ID(header) == cap) /* [한국어] 헤더에서 VSEC ID 필드를 뽑아 찾는 값과 비교한다 */
+			return vsec; /* [한국어] 일치하면 이 VSEC 의 시작 오프셋이 답이다 */
+	}
 
-	return 0; /* NVMe: 성공(0)을 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return 0; /* [한국어] 리스트를 다 훑도록 맞는 VSEC 이 없었다 */
+}
 EXPORT_SYMBOL_GPL(pci_find_vsec_capability);
 
 /**
@@ -844,30 +1310,49 @@ EXPORT_SYMBOL_GPL(pci_find_vsec_capability);
  * offset in config space; otherwise return 0.
  */
 /*
- * pci_find_dvsec_capability:
- *   Designated Vendor Specific Extended Capability 를 검색한다. NVMe 컨트롤러의 vendor-specific debug/telemetry 레지스터를 찾을 때 쓰일 수 있다.
+ * [한국어]
+ * pci_find_dvsec_capability - 특정 벤더의 DVSEC 을 찾는다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @vendor: DVSEC 헤더에 적힌 벤더 ID.
+ * @dvsec: 그 벤더가 정한 DVSEC ID.
+ * @return: DVSEC 의 config space 오프셋, 없으면 0.
+ *
+ * DVSEC(Designated VSEC)은 VSEC 과 목적은 같지만 결정적 차이가 있다 —
+ * 헤더 안에 벤더 ID 를 직접 적어 두기 때문에, 장치 자신의 Vendor ID 와
+ * 다른 벤더가 정의한 기능도 실을 수 있다. CXL 이 대표적이다. CXL 기능은
+ * PCI-SIG 벤더 ID 로 정의돼 있어 어느 회사의 장치에 붙어 있든 같은 DVSEC 으로
+ * 식별된다. 이 파일의 cxl_port_dvsec() 이 바로 그렇게 쓴다.
+ * 그래서 pci_find_vsec_capability() 와 달리 dev->vendor 를 먼저 보지 않고,
+ * 리스트를 훑으며 각 DVSEC 헤더의 벤더 ID 를 직접 비교한다.
+ *
+ * 실행 문맥: config space 를 반복해 읽는다. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   cxl_port_dvsec() 등 → [이 함수]
+ *     → pci_find_ext_capability() / pci_find_next_ext_capability()
  */
-u16 pci_find_dvsec_capability(struct pci_dev *dev, u16 vendor, u16 dvsec) /* NVMe: pci_find_dvsec_capability 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	int pos; /* NVMe: int 타입 변수를 선언한다. */
+u16 pci_find_dvsec_capability(struct pci_dev *dev, u16 vendor, u16 dvsec)
+{
+	int pos; /* [한국어] 순회 커서 */
 
-	pos = pci_find_ext_capability(dev, PCI_EXT_CAP_ID_DVSEC); /* NVMe: 변수에 값을 할당한다. */
-	if (!pos) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return 0; /* NVMe: 성공(0)을 반환한다. */
+	pos = pci_find_ext_capability(dev, PCI_EXT_CAP_ID_DVSEC); /* [한국어] DVSEC 확장 capability(ID 0x0023)를 리스트 처음부터 찾는다 */
+	if (!pos) /* [한국어] 하나도 없으면 */
+		return 0; /* [한국어] "없음" */
 
-	while (pos) { /* NVMe: 조건이 참인 동안 반복한다. */
-		u16 v, id; /* NVMe: u16 타입 변수를 선언한다. */
+	while (pos) { /* [한국어] DVSEC 은 여러 개 있을 수 있으므로 벤더/ID 가 맞을 때까지 훑는다 */
+		u16 v, id; /* [한국어] v 는 헤더에 적힌 벤더 ID, id 는 DVSEC ID */
 
-		pci_read_config_word(dev, pos + PCI_DVSEC_HEADER1, &v); /* NVMe: PCI 설정 공간 2바이트를 읽는다. */
-		pci_read_config_word(dev, pos + PCI_DVSEC_HEADER2, &id); /* NVMe: PCI 설정 공간 2바이트를 읽는다. */
-		if (vendor == v && dvsec == id) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			return pos; /* NVMe: 연산 결과를 반환한다. */
+		pci_read_config_word(dev, pos + PCI_DVSEC_HEADER1, &v); /* [한국어] DVSEC Header1 에서 벤더 ID 를 읽는다 */
+		pci_read_config_word(dev, pos + PCI_DVSEC_HEADER2, &id); /* [한국어] DVSEC Header2 에서 DVSEC ID 를 읽는다 */
+		if (vendor == v && dvsec == id) /* [한국어] 둘 다 맞아야 우리가 찾는 DVSEC 이다 */
+			return pos; /* [한국어] 그 시작 오프셋이 답이다 */
 
-		pos = pci_find_next_ext_capability(dev, pos, PCI_EXT_CAP_ID_DVSEC); /* NVMe: 변수에 값을 할당한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+		pos = pci_find_next_ext_capability(dev, pos, PCI_EXT_CAP_ID_DVSEC); /* [한국어] 아니면 다음 DVSEC 으로 넘어간다 */
+	}
 
-	return 0; /* NVMe: 성공(0)을 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return 0; /* [한국어] 끝까지 훑도록 맞는 것이 없었다 */
+}
 EXPORT_SYMBOL_GPL(pci_find_dvsec_capability);
 
 /**
@@ -879,24 +1364,53 @@ EXPORT_SYMBOL_GPL(pci_find_dvsec_capability);
  * For given resource region of given device, return the resource region of
  * parent bus the given region is contained in.
  */
-struct resource *pci_find_parent_resource(const struct pci_dev *dev, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-					  struct resource *res) /* NVMe: 표현식을 평가한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	const struct pci_bus *bus = dev->bus; /* NVMe: 구조체 포인터 변수를 선언한다. */
-	struct resource *r; /* NVMe: 데이터 타입 변수를 선언한다. */
+/*
+ * [한국어]
+ * pci_find_parent_resource - 이 BAR 를 품고 있는 상위 버스의 주소 창을 찾는다.
+ *
+ * @dev: 자원을 가진 PCI 장치.
+ * @res: 부모 창을 찾고 싶은 자식 자원(보통 이 장치의 BAR 하나).
+ * @return: @res 를 포함하는 부모 버스의 resource, 없으면 NULL.
+ *
+ * PCI 주소 공간은 계층적이다. 브리지는 자기 아래로 내려보낼 주소 구간(윈도)을
+ * 갖고, 그 아래 장치의 BAR 는 반드시 그 윈도 안에 들어와야 한다. 그렇지 않으면
+ * 브리지가 그 주소의 트랜잭션을 아래로 흘려보내지 않아 장치에 닿지 못한다.
+ * 자원을 새로 배정하거나 옮길 때 "어느 윈도 안에서 자리를 잡아야 하는가"를
+ * 알아야 해서 이 조회가 필요하다.
+ *
+ * 두 가지 미묘한 점이 있다.
+ *   - prefetchable 윈도 안에 non-prefetchable BAR 가 놓이면 안 된다.
+ *     prefetchable 영역은 브리지가 미리 읽어 와도 되는 곳인데, 읽기에 부작용이
+ *     있는 레지스터를 그런 창에 두면 오동작한다. 이 경우는 배정기의 버그라
+ *     NULL 을 돌려 잘못을 드러낸다.
+ *   - transparent 브리지(subtractive decode) 아래에서는 한 주소가 두 창에
+ *     모두 걸릴 수 있다. positively-decoded 쪽이 정답이고, 원본 주석대로
+ *     pci_bus_for_each_resource() 가 그 순서를 보장해 주므로 첫 일치를 쓴다.
+ *
+ * 실행 문맥: 부모 버스의 resource 배열을 훑을 뿐 config 접근이 없다.
+ *
+ * 호출 체인:
+ *   setup-res.c 의 자원 배정 코드, pci_reassigndev_resource_alignment()
+ *     → [이 함수]
+ */
+struct resource *pci_find_parent_resource(const struct pci_dev *dev,
+					  struct resource *res)
+{
+	const struct pci_bus *bus = dev->bus; /* [한국어] 이 장치가 붙은 버스 — 그 버스의 창들이 후보다 */
+	struct resource *r; /* [한국어] 후보 창을 훑는 커서 */
 
-	pci_bus_for_each_resource(bus, r) { /* NVMe: 표현식을 평가한다. */
-		if (!r) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			continue; /* NVMe: 다음 반복으로 걸러뛴다. */
-		if (resource_contains(r, res)) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
+	pci_bus_for_each_resource(bus, r) { /* [한국어] 버스에 등록된 주소 창을 순서대로 본다. 이 매크로는 positively-decoded 창을 먼저 준다 */
+		if (!r) /* [한국어] 빈 슬롯은 건너뛴다 — 창 배열에는 쓰이지 않는 칸이 있을 수 있다 */
+			continue; /* [한국어] 다음 창으로 */
+		if (resource_contains(r, res)) { /* [한국어] 이 창이 자식 자원을 완전히 포함하는가 */
 
 			/*
 			 * If the window is prefetchable but the BAR is
 			 * not, the allocator made a mistake.
 			 */
-			if (r->flags & IORESOURCE_PREFETCH && /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			    !(res->flags & IORESOURCE_PREFETCH)) /* NVMe: 비트 연산을 수행한다. */
-				return NULL; /* NVMe: 연산 결과를 반환한다. */
+			if (r->flags & IORESOURCE_PREFETCH && /* [한국어] 창은 prefetchable 인데 */
+			    !(res->flags & IORESOURCE_PREFETCH)) /* [한국어] BAR 는 아니라면 — 읽기 부작용이 있는 영역을 미리 읽어도 되는 창에 넣은 셈이다 */
+				return NULL; /* [한국어] 배정기의 실수이므로 부모를 찾지 못한 것으로 처리한다 */
 
 			/*
 			 * If we're below a transparent bridge, there may
@@ -906,11 +1420,11 @@ struct resource *pci_find_parent_resource(const struct pci_dev *dev, /* NVMe: �
 			 * on pci_bus_for_each_resource() giving us those
 			 * first.
 			 */
-			return r; /* NVMe: 연산 결과를 반환한다. */
-		} /* NVMe: 코드 블록을 종료한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
-	return NULL; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+			return r; /* [한국어] 첫 일치를 그대로 쓴다. 순서 보장 덕분에 이것이 positively-decoded 창이다 */
+		}
+	}
+	return NULL; /* [한국어] 어느 창에도 들어가지 않는다 — 이 자원은 부모 아래로 라우팅되지 않는다 */
+}
 EXPORT_SYMBOL(pci_find_parent_resource);
 
 /**
@@ -923,22 +1437,38 @@ EXPORT_SYMBOL(pci_find_parent_resource);
  * matching resource is returned, %NULL otherwise.
  */
 /*
- * pci_find_resource:
- *   pci_dev 의 resource 배열에서 주어진 resource 와 일치하는 항목을 찾는다. NVMe BAR 리소스가 올바르게 할당되었는지 확인할 때 사용된다.
+ * [한국어]
+ * pci_find_resource - 주어진 주소 구간이 이 장치의 어느 BAR 에 속하는지 찾는다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @res: 찾고자 하는 주소 구간.
+ * @return: 그 구간을 포함하는 BAR 의 resource, 없으면 NULL.
+ *
+ * 방향이 pci_find_parent_resource() 와 반대다. 저쪽은 "이 BAR 의 부모 창"을
+ * 찾고, 이쪽은 "이 주소가 내 어느 BAR 인지"를 찾는다.
+ * 표준 BAR 6개(PCI_STD_NUM_BARS)만 본다 — ROM 이나 VF BAR, 브리지 윈도는
+ * 같은 resource 배열의 뒤쪽에 있지만 여기서는 대상이 아니다.
+ * r->start 가 0 인 항목을 건너뛰는 것은 그 BAR 가 구현되지 않았거나 주소가
+ * 배정되지 않았다는 뜻이기 때문이다.
+ *
+ * 실행 문맥: 배열 순회뿐. config 접근이 없어 어느 문맥에서도 안전하다.
+ *
+ * 호출 체인:
+ *   주소로부터 BAR 를 역추적해야 하는 코드 → [이 함수]
  */
-struct resource *pci_find_resource(struct pci_dev *dev, struct resource *res) /* NVMe: pci_find_resource 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	int i; /* NVMe: int 타입 변수를 선언한다. */
+struct resource *pci_find_resource(struct pci_dev *dev, struct resource *res)
+{
+	int i; /* [한국어] BAR 인덱스 */
 
-	for (i = 0; i < PCI_STD_NUM_BARS; i++) { /* NVMe: 반복문을 시작한다. */
-		struct resource *r = &dev->resource[i]; /* NVMe: 데이터 타입 변수를 선언한다. */
+	for (i = 0; i < PCI_STD_NUM_BARS; i++) { /* [한국어] PCI_STD_NUM_BARS 는 6 — 헤더 타입 0 의 표준 BAR 개수(config space 0x10~0x24) */
+		struct resource *r = &dev->resource[i]; /* [한국어] i 번 BAR 의 resource */
 
-		if (r->start && resource_contains(r, res)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			return r; /* NVMe: 연산 결과를 반환한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+		if (r->start && resource_contains(r, res)) /* [한국어] 주소가 배정된 BAR 중에서 이 구간을 포함하는 것을 찾는다 */
+			return r; /* [한국어] 그 BAR 가 답이다 */
+	}
 
-	return NULL; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return NULL; /* [한국어] 어느 BAR 에도 속하지 않는다 */
+}
 EXPORT_SYMBOL(pci_find_resource);
 
 /**
@@ -949,61 +1479,82 @@ EXPORT_SYMBOL(pci_find_resource);
  * Return the standard PCI resource (BAR) name according to their index.
  */
 /*
- * pci_resource_name:
- *   지정한 BAR 의 이름을 반환한다. NVMe driver 의 request_region/iomap 시 보여줄 리소스 레이블을 얻는 데 쓰인다.
+ * [한국어]
+ * pci_resource_name - resource 배열의 인덱스를 사람이 읽는 이름으로 바꾼다.
+ *
+ * @dev: 대상 PCI 장치(헤더 타입에 따라 이름표가 달라진다).
+ * @i: dev->resource[] 의 인덱스.
+ * @return: "BAR 0", "ROM", "bridge window" 같은 정적 문자열. 범위를 벗어나면 "unknown".
+ *
+ * struct pci_dev 의 resource 배열에는 성격이 다른 것들이 한 줄로 섞여 있다 —
+ * 표준 BAR 6개, Expansion ROM, (CONFIG_PCI_IOV 일 때) VF BAR 6개, 그리고
+ * 브리지 윈도 3개. 인덱스만으로는 무엇인지 알 수 없어 로그와 sysfs 출력에
+ * 쓸 이름표가 필요하다.
+ * 배열의 순서가 곧 resource 배열의 배치와 일치해야 하므로, CONFIG_PCI_IOV 가
+ * 꺼지면 VF BAR 칸이 통째로 빠져 뒤쪽 인덱스가 당겨진다. #ifdef 를 이름표
+ * 배열 안에 둔 이유가 이것이다.
+ * CardBus 브리지(헤더 타입 2)는 배치가 아예 달라 별도 표를 쓴다.
+ *
+ * 실행 문맥: 정적 표 조회뿐이라 어느 문맥에서도 안전하다. 반환 문자열은
+ * static const 이므로 호출자가 해제하면 안 된다.
+ *
+ * 호출 체인:
+ *   pci_request_region()/pci_release_region() 의 로그, pci-sysfs.c → [이 함수]
  */
-const char *pci_resource_name(struct pci_dev *dev, unsigned int i) /* NVMe: pci_resource_name 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	static const char * const bar_name[] = { /* NVMe: char 타입 변수를 선언한다. */
-		"BAR 0", /* NVMe: 표현식을 이어서 작성한다. */
-		"BAR 1", /* NVMe: 표현식을 이어서 작성한다. */
-		"BAR 2", /* NVMe: 표현식을 이어서 작성한다. */
-		"BAR 3", /* NVMe: 표현식을 이어서 작성한다. */
-		"BAR 4", /* NVMe: 표현식을 이어서 작성한다. */
-		"BAR 5", /* NVMe: 표현식을 이어서 작성한다. */
-		"ROM", /* NVMe: 표현식을 이어서 작성한다. */
-#ifdef CONFIG_PCI_IOV /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
-		"VF BAR 0", /* NVMe: 표현식을 이어서 작성한다. */
-		"VF BAR 1", /* NVMe: 표현식을 이어서 작성한다. */
-		"VF BAR 2", /* NVMe: 표현식을 이어서 작성한다. */
-		"VF BAR 3", /* NVMe: 표현식을 이어서 작성한다. */
-		"VF BAR 4", /* NVMe: 표현식을 이어서 작성한다. */
-		"VF BAR 5", /* NVMe: 표현식을 이어서 작성한다. */
-#endif /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
+const char *pci_resource_name(struct pci_dev *dev, unsigned int i)
+{
+	/* [한국어] 헤더 타입 0/1 용 이름표. 인덱스가 dev->resource[] 의 인덱스와 일대일로 대응해야 한다. */
+	static const char * const bar_name[] = {
+		"BAR 0", /* [한국어] 인덱스 0 — config space 0x10 의 BAR0. NVMe 는 여기에 컨트롤러 레지스터와 도어벨이 매핑된다 */
+		"BAR 1", /* [한국어] 인덱스 1 — config space 0x14. BAR0 가 64비트면 이 칸은 BAR0 의 상위 32비트로 소모된다 */
+		"BAR 2", /* [한국어] 인덱스 2 — config space 0x18 */
+		"BAR 3", /* [한국어] 인덱스 3 — config space 0x1c */
+		"BAR 4", /* [한국어] 인덱스 4 — config space 0x20. NVMe 의 CMB/PMR 가 여기 놓이는 경우가 있다 */
+		"BAR 5", /* [한국어] 인덱스 5 — config space 0x24 */
+		"ROM", /* [한국어] 인덱스 6 — Expansion ROM Base Address(config space 0x30). 옵션 ROM 이 있는 장치만 쓴다 */
+#ifdef CONFIG_PCI_IOV /* [한국어] SR-IOV 를 빌드했을 때만 VF BAR 칸이 resource 배열에 존재한다 */
+		"VF BAR 0", /* [한국어] VF BAR 0 — SR-IOV capability 안에 따로 있는, 가상 함수용 BAR */
+		"VF BAR 1", /* [한국어] VF BAR 1 */
+		"VF BAR 2", /* [한국어] VF BAR 2 */
+		"VF BAR 3", /* [한국어] VF BAR 3 */
+		"VF BAR 4", /* [한국어] VF BAR 4 */
+		"VF BAR 5", /* [한국어] VF BAR 5 */
+#endif /* [한국어] SR-IOV 가 꺼지면 위 여섯 칸이 사라지고 뒤 항목의 인덱스가 당겨진다 */
 		"bridge window",	/* "io" included in %pR */
 		"bridge window",	/* "mem" included in %pR */
 		"bridge window",	/* "mem pref" included in %pR */
-	}; /* NVMe: 코드 블록을 시작한다. */
-	static const char * const cardbus_name[] = { /* NVMe: char 타입 변수를 선언한다. */
-		"BAR 1", /* NVMe: 표현식을 이어서 작성한다. */
-		"unknown", /* NVMe: 표현식을 이어서 작성한다. */
-		"unknown", /* NVMe: 표현식을 이어서 작성한다. */
-		"unknown", /* NVMe: 표현식을 이어서 작성한다. */
-		"unknown", /* NVMe: 표현식을 이어서 작성한다. */
-		"unknown", /* NVMe: 표현식을 이어서 작성한다. */
-#ifdef CONFIG_PCI_IOV /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
-		"unknown", /* NVMe: 표현식을 이어서 작성한다. */
-		"unknown", /* NVMe: 표현식을 이어서 작성한다. */
-		"unknown", /* NVMe: 표현식을 이어서 작성한다. */
-		"unknown", /* NVMe: 표현식을 이어서 작성한다. */
-		"unknown", /* NVMe: 표현식을 이어서 작성한다. */
-		"unknown", /* NVMe: 표현식을 이어서 작성한다. */
-#endif /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
+	};
+	/* [한국어] CardBus 브리지(헤더 타입 2)용 이름표. config space 배치가 달라 표를 따로 둔다. */
+	static const char * const cardbus_name[] = {
+		"BAR 1", /* [한국어] CardBus 는 BAR 를 하나만 쓴다 */
+		"unknown", /* [한국어] 나머지 칸은 CardBus 에서 의미가 없다 */
+		"unknown", /* [한국어] 미사용 칸 */
+		"unknown", /* [한국어] 미사용 칸 */
+		"unknown", /* [한국어] 미사용 칸 */
+		"unknown", /* [한국어] 미사용 칸 */
+#ifdef CONFIG_PCI_IOV /* [한국어] 인덱스를 위 표와 맞추려면 여기서도 VF BAR 칸 수를 똑같이 채워야 한다 */
+		"unknown", /* [한국어] 인덱스 정렬용 자리 */
+		"unknown", /* [한국어] 인덱스 정렬용 자리 */
+		"unknown", /* [한국어] 인덱스 정렬용 자리 */
+		"unknown", /* [한국어] 인덱스 정렬용 자리 */
+		"unknown", /* [한국어] 인덱스 정렬용 자리 */
+		"unknown", /* [한국어] 인덱스 정렬용 자리 */
+#endif /* [한국어] VF BAR 칸의 끝 */
 		"CardBus bridge window 0",	/* I/O */
 		"CardBus bridge window 1",	/* I/O */
 		"CardBus bridge window 0",	/* mem */
 		"CardBus bridge window 1",	/* mem */
-	}; /* NVMe: 코드 블록을 시작한다. */
+	};
 
-	if (dev->hdr_type == PCI_HEADER_TYPE_CARDBUS && /* NVMe: 조건식을 평가해 분기를 결정한다. */
-	    i < ARRAY_SIZE(cardbus_name)) /* NVMe: ARRAY_SIZE 함수를 정의한다. */
-		return cardbus_name[i]; /* NVMe: 연산 결과를 반환한다. */
+	if (dev->hdr_type == PCI_HEADER_TYPE_CARDBUS && /* [한국어] CardBus 브리지이고 */
+	    i < ARRAY_SIZE(cardbus_name)) /* [한국어] 인덱스가 CardBus 표 안이면 */
+		return cardbus_name[i]; /* [한국어] CardBus 이름표를 쓴다 */
 
-	if (i < ARRAY_SIZE(bar_name)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return bar_name[i]; /* NVMe: 연산 결과를 반환한다. */
+	if (i < ARRAY_SIZE(bar_name)) /* [한국어] 그 밖에는 일반 표를 본다 */
+		return bar_name[i]; /* [한국어] 해당 이름표 */
 
-	return "unknown"; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return "unknown"; /* [한국어] 표 범위를 벗어난 인덱스 — 이름을 알 수 없다 */
+}
 
 /**
  * pci_wait_for_pending - wait for @mask bit(s) to clear in status word @pos
@@ -1014,138 +1565,210 @@ const char *pci_resource_name(struct pci_dev *dev, unsigned int i) /* NVMe: pci_
  * Return 1 when mask bit(s) in status word clear, 0 otherwise.
  */
 /*
- * pci_wait_for_pending:
- *   PCI 상태 레지스터의 특정 비트가 클리어될 때까지 대기한다. NVMe config space 쓰기 후 pending transaction 완료를 기다릴 때 사용된다.
+ * [한국어]
+ * pci_wait_for_pending - config space 상태 워드의 특정 비트가 내려갈 때까지 기다린다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @pos: 상태 워드가 놓인 config space 오프셋.
+ * @mask: 지켜볼 비트 마스크.
+ * @return: 비트가 내려갔으면 1, 끝까지 안 내려갔으면 0.
+ *
+ * 리셋을 걸기 전에는 장치가 이미 내보낸 트랜잭션이 모두 끝났는지 확인해야
+ * 한다. 아직 완료를 기다리는 트랜잭션이 남은 채로 리셋하면, 뒤늦게 돌아온
+ * 완료 패킷이 갈 곳을 잃어 시스템 오류가 된다. 그 확인이 PCIe 의
+ * Device Status 레지스터에 있는 Transaction Pending 비트다.
+ *
+ * 대기 방식은 지수적 백오프다. 첫 번째는 곧바로 확인하고, 이후 100ms, 200ms,
+ * 400ms 를 자며 총 4번 본다. 최악의 경우 약 700ms 를 쓴다.
+ * msleep 을 쓰므로 반드시 프로세스 문맥이어야 한다.
+ *
+ * 참고 — NVMe 컨트롤러의 큐 소진(SQ/CQ 비우기)과는 무관하다. 여기서 보는
+ * 것은 PCIe 링크 위의 미완료 트랜잭션이지 NVMe 명령 큐가 아니다.
+ *
+ * 호출 체인:
+ *   pci_wait_for_pending_transaction() / pci_af_flr() → [이 함수]
+ *     → pci_read_config_word(), msleep()
  */
-int pci_wait_for_pending(struct pci_dev *dev, int pos, u16 mask) /* NVMe: pci_wait_for_pending 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	int i; /* NVMe: int 타입 변수를 선언한다. */
+int pci_wait_for_pending(struct pci_dev *dev, int pos, u16 mask)
+{
+	int i; /* [한국어] 시도 횟수 */
 
 	/* Wait for Transaction Pending bit clean */
-	for (i = 0; i < 4; i++) { /* NVMe: 반복문을 시작한다. */
-		u16 status; /* NVMe: u16 타입 변수를 선언한다. */
-		if (i) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			msleep((1 << (i - 1)) * 100); /* NVMe: msleep 함수를 호출한다. */
+	for (i = 0; i < 4; i++) { /* [한국어] 최대 4번 확인한다 */
+		u16 status; /* [한국어] 매 시도마다 새로 읽을 상태 워드 */
+		if (i) /* [한국어] 첫 시도(i==0)는 자지 않고 바로 확인한다 — 이미 끝나 있으면 지연을 줄 이유가 없다 */
+			msleep((1 << (i - 1)) * 100); /* [한국어] 100ms → 200ms → 400ms 로 두 배씩 늘려 잔다. 합계 700ms 가 상한이다 */
 
-		pci_read_config_word(dev, pos, &status); /* NVMe: PCI 설정 공간 2바이트를 읽는다. */
-		if (!(status & mask)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			return 1; /* NVMe: 연산 결과를 반환한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+		pci_read_config_word(dev, pos, &status); /* [한국어] 상태 워드를 다시 읽는다 */
+		if (!(status & mask)) /* [한국어] 관심 비트가 모두 내려갔으면 */
+			return 1; /* [한국어] 성공(1) */
+	}
 
-	return 0; /* NVMe: 성공(0)을 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return 0; /* [한국어] 700ms 를 기다려도 안 내려갔다 — 호출자는 이를 알고도 리셋을 강행할지 결정한다 */
+}
 
-static int pci_acs_enable; /* NVMe: 정적 변수를 선언한다. */
+static int pci_acs_enable; /* [한국어] pci_request_acs() 가 세우는 전역 플래그. 1 이면 ACS 를 지원하는 장치마다 켠다 */
 
 /**
  * pci_request_acs - ask for ACS to be enabled if supported
  */
 /*
- * pci_request_acs:
- *   ACS(Access Control Services) 기능을 시스템 전체에 요청한다. NVMe 장치의 P2PDMA나 IOMMU 격리 정책과 관련된다.
+ * [한국어]
+ * pci_request_acs - 이후 열거되는 장치에서 ACS 를 켜 달라고 표시해 둔다.
+ *
+ * @return: 없음.
+ *
+ * ACS(Access Control Services)는 스위치나 멀티펑션 장치가 "아래 장치끼리
+ * 자기들끼리만 주고받는 트랜잭션"을 그대로 통과시키지 않고 위로 올려보내도록
+ * 강제하는 기능이다. 그래야 IOMMU 가 모든 DMA 를 볼 수 있어 장치 간 격리가
+ * 성립한다. ACS 없이 P2P 트래픽이 스위치 안에서 되돌아가면 IOMMU 를 우회한다.
+ *
+ * IOMMU 드라이버가 초기화될 때 이 함수를 불러 의사만 남기고, 실제로 켜는 일은
+ * 각 장치가 열거될 때 pci_enable_acs() 가 한다. 순서가 이렇게 나뉜 이유는
+ * IOMMU 초기화가 PCI 열거보다 먼저이거나 뒤일 수 있기 때문이다.
+ *
+ * 실행 문맥: 전역 int 하나를 1 로 놓을 뿐이다. 부팅 초기에 불려 경쟁이 없다.
+ *
+ * 호출 체인:
+ *   IOMMU 드라이버 초기화 → [이 함수]  (나중에 pci_enable_acs() 가 이 값을 읽는다)
  */
-void pci_request_acs(void) /* NVMe: pci_request_acs 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	pci_acs_enable = 1; /* NVMe: 변수에 값을 할당한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+void pci_request_acs(void)
+{
+	pci_acs_enable = 1; /* [한국어] 의사 표시만 남긴다. 실제 레지스터 조작은 열거 시점의 pci_enable_acs() 몫이다 */
+}
 
-static const char *disable_acs_redir_param; /* NVMe: 포인터 변수를 선언한다. */
-static const char *config_acs_param; /* NVMe: 포인터 변수를 선언한다. */
+static const char *disable_acs_redir_param; /* [한국어] pci=disable_acs_redir= 로 받은 문자열. 지정된 장치들에서 ACS 재지정 제어 비트를 끈다 */
+static const char *config_acs_param; /* [한국어] pci=config_acs= 로 받은 문자열. 장치별로 ACS 제어 비트를 임의 조합으로 지정한다 */
 
-struct pci_acs { /* NVMe: pci_acs 구조체를 정의한다. */
-	u16 ctrl; /* NVMe: u16 타입 변수를 선언한다. */
-	u16 fw_ctrl; /* NVMe: u16 타입 변수를 선언한다. */
-}; /* NVMe: 코드 블록을 시작한다. */
+/*
+ * [한국어] 한 장치의 ACS 설정을 계산하는 동안 들고 다니는 작업 상태.
+ * pci_acs_init() 이 스택에 잡아 pci_std_enable_acs() 와 __pci_config_acs() 에
+ * 넘기고, 최종값을 config space 의 ACS Control 레지스터에 한 번에 쓴다.
+ */
+struct pci_acs {
+	u16 ctrl; /* [한국어] 최종적으로 ACS Control 레지스터에 쓸 값. 설정자: pci_std_enable_acs()/__pci_config_acs(). 읽는 자: pci_acs_init(). 값 범위: PCI_ACS_SV/TB/RR/CR/UF/EC/DT 비트 조합 */
+	u16 fw_ctrl; /* [한국어] 펌웨어가 이미 켜 두었던 값. 커널 파라미터로 비트를 지울 때도 펌웨어가 켠 것은 존중하려고 따로 보관한다 */
+};
 
-static void __pci_config_acs(struct pci_dev *dev, struct pci_acs *caps, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-			     const char *p, const u16 acs_mask, const u16 acs_flags) /* NVMe: char 타입 변수를 선언한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	u16 flags = acs_flags; /* NVMe: u16 타입 변수를 선언한다. */
-	u16 mask = acs_mask; /* NVMe: u16 타입 변수를 선언한다. */
-	char *delimit; /* NVMe: 포인터 변수를 선언한다. */
-	int ret = 0; /* NVMe: int 타입 변수를 선언한다. */
+/*
+ * [한국어]
+ * __pci_config_acs - 커널 커맨드라인이 지정한 ACS 설정을 이 장치에 반영한다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @caps: 계산 중인 ACS 설정 상태(ctrl 을 여기서 고쳐 쓴다).
+ * @p: 파라미터 문자열. 두 형태로 불린다.
+ *     - disable_acs_redir 용: "<장치>[;<장치>]*"  (마스크·플래그는 인자로 고정)
+ *     - config_acs 용:       "<비트열>@<장치>[;...]"  (비트열도 문자열에서 읽는다)
+ * @acs_mask: 건드릴 비트의 마스크. 0 이면 문자열에서 직접 파싱하라는 신호다.
+ * @acs_flags: 그 비트에 넣을 값.
+ *
+ * @return: 없음. 결과는 caps->ctrl 에 남는다.
+ *
+ * 특정 장치의 ACS 를 관리자가 손으로 조정할 수 있게 하는 경로다. 보통은
+ * IOMMU 격리를 위해 ACS 를 켜는 것이 맞지만, GPU 나 NVMe 사이의 P2P DMA 를
+ * 쓰려면 오히려 재지정(redirect) 비트를 꺼야 성능이 나온다. 그런 판단은
+ * 커널이 대신할 수 없어 관리자에게 맡긴 것이다.
+ *
+ * config_acs 형식의 비트열은 "@" 앞에 오고, 오른쪽 끝이 비트 0 이다.
+ * 각 자리는 '1'(켬), '0'(끔), 'x'/'X'(건드리지 않음) 셋 중 하나다.
+ * 마스크는 1 과 0 자리에만 세워지고, x 자리는 마스크에서 빠져 펌웨어 값이
+ * 그대로 유지된다.
+ *
+ * 실행 문맥: 열거 중 pci_acs_init() 에서 불린다. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_enable_acs() → [이 함수]
+ *     → pci_dev_str_match(), pci_dev_specific_disable_acs_redir()
+ */
+static void __pci_config_acs(struct pci_dev *dev, struct pci_acs *caps,
+			     const char *p, const u16 acs_mask, const u16 acs_flags)
+{
+	u16 flags = acs_flags; /* [한국어] 인자로 받은 기본 플래그. config_acs 경로에서는 문자열에서 다시 계산된다 */
+	u16 mask = acs_mask; /* [한국어] 인자로 받은 기본 마스크. 마찬가지로 덮어써질 수 있다 */
+	char *delimit; /* [한국어] 비트열과 장치 지정자를 가르는 "@" 의 위치 */
+	int ret = 0; /* [한국어] pci_dev_str_match() 의 결과. 루프를 빠져나온 뒤 "일치했는가"를 판단하는 데 쓰므로 0 으로 초기화해 둔다 */
 
-	if (!p) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return; /* NVMe: 함수 실행을 종료한다. */
+	if (!p) /* [한국어] 해당 커맨드라인 파라미터가 아예 주어지지 않았으면 */
+		return; /* [한국어] 할 일이 없다 */
 
-	while (*p) { /* NVMe: 조건이 참인 동안 반복한다. */
-		if (!acs_mask) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
+	while (*p) { /* [한국어] ';' 로 이어진 장치 지정자를 하나씩 훑는다 */
+		if (!acs_mask) { /* [한국어] 마스크가 인자로 고정되지 않았다면 config_acs 형식이므로 비트열부터 읽어야 한다 */
 			/* Check for ACS flags */
-			delimit = strstr(p, "@"); /* NVMe: 변수에 값을 할당한다. */
-			if (delimit) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-				int end; /* NVMe: int 타입 변수를 선언한다. */
-				u32 shift = 0; /* NVMe: u32 타입 변수를 선언한다. */
+			delimit = strstr(p, "@"); /* [한국어] 비트열과 장치 지정자의 경계 */
+			if (delimit) { /* [한국어] "@" 가 있어야 형식이 맞다 */
+				int end; /* [한국어] 비트열의 마지막 문자 인덱스 */
+				u32 shift = 0; /* [한국어] 지금 해석 중인 비트 위치. 오른쪽 끝이 비트 0 이다 */
 
-				end = delimit - p - 1; /* NVMe: 변수에 값을 할당한다. */
-				mask = 0; /* NVMe: 변수에 값을 할당한다. */
-				flags = 0; /* NVMe: 변수에 값을 할당한다. */
+				end = delimit - p - 1; /* [한국어] "@" 바로 앞이 비트열의 끝이다 */
+				mask = 0; /* [한국어] 문자열에서 새로 계산하므로 0 에서 시작한다 */
+				flags = 0; /* [한국어] 플래그도 마찬가지 */
 
-				while (end > -1) { /* NVMe: 조건이 참인 동안 반복한다. */
-					if (*(p + end) == '0') { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-						mask |= 1 << shift; /* NVMe: 변수에 값을 할당한다. */
-						shift++; /* NVMe: 표현식을 평가한다. */
-						end--; /* NVMe: 표현식을 평가한다. */
-					} else if (*(p + end) == '1') { /* NVMe: if 함수를 정의한다. */
-						mask |= 1 << shift; /* NVMe: 변수에 값을 할당한다. */
-						flags |= 1 << shift; /* NVMe: 변수에 값을 할당한다. */
-						shift++; /* NVMe: 표현식을 평가한다. */
-						end--; /* NVMe: 표현식을 평가한다. */
-					} else if ((*(p + end) == 'x') || (*(p + end) == 'X')) { /* NVMe: if 함수를 정의한다. */
-						shift++; /* NVMe: 표현식을 평가한다. */
-						end--; /* NVMe: 표현식을 평가한다. */
-					} else { /* NVMe: 표현식을 평가한다. */
-						pci_err(dev, "Invalid ACS flags... Ignoring\n"); /* NVMe: PCI 장치에 대한 에러 로그를 출력한다. */
-						return; /* NVMe: 함수 실행을 종료한다. */
-					} /* NVMe: 코드 블록을 종료한다. */
-				} /* NVMe: 코드 블록을 종료한다. */
-				p = delimit + 1; /* NVMe: 변수에 값을 할당한다. */
-			} else { /* NVMe: 표현식을 평가한다. */
-				pci_err(dev, "ACS Flags missing\n"); /* NVMe: PCI 장치에 대한 에러 로그를 출력한다. */
-				return; /* NVMe: 함수 실행을 종료한다. */
-			} /* NVMe: 코드 블록을 종료한다. */
-		} /* NVMe: 코드 블록을 종료한다. */
+				while (end > -1) { /* [한국어] 오른쪽부터 왼쪽으로 한 글자씩 해석한다 */
+					if (*(p + end) == '0') { /* [한국어] '0' — 이 비트를 명시적으로 끈다 */
+						mask |= 1 << shift; /* [한국어] 마스크에는 세우고(건드린다) 플래그에는 세우지 않는다(0 을 넣는다) */
+						shift++; /* [한국어] 다음 비트 자리로 */
+						end--; /* [한국어] 왼쪽 글자로 */
+					} else if (*(p + end) == '1') { /* [한국어] '1' — 이 비트를 켠다 */
+						mask |= 1 << shift; /* [한국어] 건드릴 비트로 표시하고 */
+						flags |= 1 << shift; /* [한국어] 값 1 을 넣는다 */
+						shift++; /* [한국어] 다음 비트 자리로 */
+						end--; /* [한국어] 왼쪽 글자로 */
+					} else if ((*(p + end) == 'x') || (*(p + end) == 'X')) { /* [한국어] 'x'/'X' — 이 비트는 건드리지 않는다 */
+						shift++; /* [한국어] 마스크를 세우지 않으므로 아래 합성식에서 펌웨어 값이 그대로 남는다 */
+						end--; /* [한국어] 왼쪽 글자로 */
+					} else { /* [한국어] 0/1/x 가 아닌 글자 */
+						pci_err(dev, "Invalid ACS flags... Ignoring\n"); /* [한국어] 형식 오류를 알린다 */
+						return; /* [한국어] 잘못된 파라미터로 ACS 를 건드리느니 아무 것도 하지 않는다 */
+					}
+				}
+				p = delimit + 1; /* [한국어] 비트열을 다 읽었으니 "@" 다음의 장치 지정자로 커서를 옮긴다 */
+			} else { /* [한국어] "@" 가 없으면 비트열이 빠진 것이다 */
+				pci_err(dev, "ACS Flags missing\n"); /* [한국어] 형식 오류를 알리고 */
+				return; /* [한국어] 중단한다 */
+			}
+		}
 
-		if (mask & ~(PCI_ACS_SV | PCI_ACS_TB | PCI_ACS_RR | PCI_ACS_CR | /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			    PCI_ACS_UF | PCI_ACS_EC | PCI_ACS_DT)) { /* NVMe: 비트 연산을 수행한다. */
-			pci_err(dev, "Invalid ACS flags specified\n"); /* NVMe: PCI 장치에 대한 에러 로그를 출력한다. */
-			return; /* NVMe: 함수 실행을 종료한다. */
-		} /* NVMe: 코드 블록을 종료한다. */
+		if (mask & ~(PCI_ACS_SV | PCI_ACS_TB | PCI_ACS_RR | PCI_ACS_CR | /* [한국어] ACS Control 에 실제로 존재하는 비트(Source Validation, Translation Blocking, P2P Request/Completion Redirect, Upstream Forwarding, Egress Control, Direct Translated P2P) 이외의 자리를 지정했는지 본다 */
+			    PCI_ACS_UF | PCI_ACS_EC | PCI_ACS_DT)) { /* [한국어] 이 일곱 비트가 ACS Control 레지스터에 정의된 전부다 */
+			pci_err(dev, "Invalid ACS flags specified\n"); /* [한국어] 정의되지 않은 비트를 건드리라는 요구는 거절한다 */
+			return; /* [한국어] 아무 것도 바꾸지 않고 나간다 */
+		}
 
-		ret = pci_dev_str_match(dev, p, &p); /* NVMe: 변수에 값을 할당한다. */
-		if (ret < 0) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			pr_warn_once("PCI: Can't parse ACS command line parameter\n"); /* NVMe: pr_warn_once 함수를 호출한다. */
-			break; /* NVMe: 현재 반복문을 빠져나간다. */
-		} else if (ret == 1) { /* NVMe: if 함수를 정의한다. */
+		ret = pci_dev_str_match(dev, p, &p); /* [한국어] 남은 문자열이 이 장치를 가리키는지 판정한다. 소비한 위치를 p 로 돌려받아 다음 항목으로 이어 간다 */
+		if (ret < 0) { /* [한국어] 파싱 실패 */
+			pr_warn_once("PCI: Can't parse ACS command line parameter\n"); /* [한국어] 같은 경고가 부팅 로그를 덮지 않도록 한 번만 찍는다 */
+			break; /* [한국어] 더 볼 것이 없다 */
+		} else if (ret == 1) { /* [한국어] 이 장치와 일치했다 */
 			/* Found a match */
-			break; /* NVMe: 현재 반복문을 빠져나간다. */
-		} /* NVMe: 코드 블록을 종료한다. */
+			break; /* [한국어] 루프를 끝내고 아래에서 설정을 적용한다 */
+		}
 
-		if (*p != ';' && *p != ',') { /* NVMe: 조건식을 평가해 분기를 결정한다. */
+		if (*p != ';' && *p != ',') { /* [한국어] 항목 구분자가 아니면 문자열의 끝이거나 형식이 깨진 것이다 */
 			/* End of param or invalid format */
-			break; /* NVMe: 현재 반복문을 빠져나간다. */
-		} /* NVMe: 코드 블록을 종료한다. */
-		p++; /* NVMe: 표현식을 평가한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+			break; /* [한국어] 더 훑지 않는다 */
+		}
+		p++; /* [한국어] 구분자를 건너뛰고 다음 장치 지정자로 */
+	}
 
-	if (ret != 1) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return; /* NVMe: 함수 실행을 종료한다. */
+	if (ret != 1) /* [한국어] 끝까지 훑도록 이 장치와 일치한 항목이 없었다면 */
+		return; /* [한국어] 이 장치에는 적용할 설정이 없다 */
 
-	if (!pci_dev_specific_disable_acs_redir(dev)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return; /* NVMe: 함수 실행을 종료한다. */
+	if (!pci_dev_specific_disable_acs_redir(dev)) /* [한국어] 장치별 quirk 가 "이 하드웨어에서는 ACS 재지정을 끄면 안 된다"고 거부할 수 있다 */
+		return; /* [한국어] 거부되면 커맨드라인보다 quirk 를 우선한다 */
 
-	pci_dbg(dev, "ACS mask  = %#06x\n", mask); /* NVMe: PCI 장치에 대한 디버그 로그를 출력한다. */
-	pci_dbg(dev, "ACS flags = %#06x\n", flags); /* NVMe: PCI 장치에 대한 디버그 로그를 출력한다. */
-	pci_dbg(dev, "ACS control = %#06x\n", caps->ctrl); /* NVMe: PCI 장치에 대한 디버그 로그를 출력한다. */
-	pci_dbg(dev, "ACS fw_ctrl = %#06x\n", caps->fw_ctrl); /* NVMe: PCI 장치에 대한 디버그 로그를 출력한다. */
+	pci_dbg(dev, "ACS mask  = %#06x\n", mask); /* [한국어] 어떤 비트를 건드리는지 */
+	pci_dbg(dev, "ACS flags = %#06x\n", flags); /* [한국어] 그 비트에 무엇을 넣는지 */
+	pci_dbg(dev, "ACS control = %#06x\n", caps->ctrl); /* [한국어] 지금까지 계산된 제어값 */
+	pci_dbg(dev, "ACS fw_ctrl = %#06x\n", caps->fw_ctrl); /* [한국어] 펌웨어가 켜 두었던 원래 값 */
 
 	/*
 	 * For mask bits that are 0, copy them from the firmware setting
 	 * and apply flags for all the mask bits that are 1.
 	 */
-	caps->ctrl = (caps->fw_ctrl & ~mask) | (flags & mask); /* NVMe: 변수에 값을 할당한다. */
+	caps->ctrl = (caps->fw_ctrl & ~mask) | (flags & mask); /* [한국어] 마스크가 0 인 자리는 펌웨어 값을 그대로 두고, 1 인 자리만 flags 로 덮는다. 앞서 pci_std_enable_acs() 가 채운 caps->ctrl 이 아니라 fw_ctrl 을 바탕으로 삼는 점이 중요하다 — 관리자의 지정이 커널 기본값보다 우선한다 */
 
-	pci_info(dev, "Configured ACS to %#06x\n", caps->ctrl); /* NVMe: PCI 장치에 대한 정보 로그를 출력한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	pci_info(dev, "Configured ACS to %#06x\n", caps->ctrl); /* [한국어] 최종 결과를 로그에 남긴다. ACS 는 격리 정책이라 무엇이 적용됐는지 흔적을 남길 가치가 있다 */
+}
 
 /**
  * pci_std_enable_acs - enable ACS on devices using standard ACS capabilities
@@ -1153,69 +1776,120 @@ static void __pci_config_acs(struct pci_dev *dev, struct pci_acs *caps, /* NVMe:
  * @caps: default ACS controls
  */
 /*
- * pci_std_enable_acs:
- *   PCIe ACS capability 레지스터의 제어 비트를 설정한다. NVMe P2PDMA 경로에서 source validation/redirect/forwarding 등을 제어할 수 있다.
+ * [한국어]
+ * pci_std_enable_acs - 표준 ACS 기능 중 격리에 필요한 비트를 켠다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @caps: 계산 중인 ACS 설정. ctrl 에 비트를 얹는다.
+ * @return: 없음.
+ *
+ * IOMMU 가 모든 DMA 를 볼 수 있게 하려면 스위치/멀티펑션 장치가 트래픽을
+ * 자기 안에서 되돌리지 못하게 막아야 한다. 켜는 비트마다 이유가 다르다.
+ *   - SV(Source Validation): 아래 장치가 자기 것이 아닌 Requester ID 를
+ *     사칭하지 못하게 검사한다.
+ *   - RR(P2P Request Redirect) / CR(P2P Completion Redirect): 아래 장치끼리
+ *     주고받는 요청·완료를 스위치 안에서 처리하지 않고 위로 올려보낸다.
+ *     이것이 켜져야 IOMMU 가 그 트래픽을 본다.
+ *   - UF(Upstream Forwarding): 위로 올려보내야 할 트래픽을 실제로 올린다.
+ *   - TB(Translation Blocking): 이미 변환된 주소로 온 요청을 막는다.
+ * dev->acs_capabilities 와 AND 하는 이유는, 하드웨어가 지원하지 않는 비트를
+ * 켜 봐야 무시되거나 오동작하기 때문이다. 지원하는 것만 켠다.
+ *
+ * TB 만 조건부다. ATS 를 쓰는 장치는 변환된 주소로 DMA 하는 것이 정상 동작인데
+ * TB 를 켜면 그 정상 경로가 막힌다. 그래서 ATS 가 꺼져 있거나(pci=noats),
+ * 외부에 노출된 포트(Thunderbolt 등)이거나, 신뢰할 수 없다고 표시된 장치일
+ * 때만 켠다 — 그런 경우에는 변환 우회 자체를 위험으로 본다.
+ *
+ * 실행 문맥: 열거 중 pci_enable_acs() 에서 불린다. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_enable_acs() → [이 함수] → pci_ats_disabled()
  */
-static void pci_std_enable_acs(struct pci_dev *dev, struct pci_acs *caps) /* NVMe: pci_std_enable_acs 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
+static void pci_std_enable_acs(struct pci_dev *dev, struct pci_acs *caps)
+{
 	/* Source Validation */
-	caps->ctrl |= (dev->acs_capabilities & PCI_ACS_SV); /* NVMe: 변수에 값을 할당한다. */
+	caps->ctrl |= (dev->acs_capabilities & PCI_ACS_SV); /* [한국어] 하드웨어가 SV 를 지원할 때만 켠다 */
 
 	/* P2P Request Redirect */
-	caps->ctrl |= (dev->acs_capabilities & PCI_ACS_RR); /* NVMe: 변수에 값을 할당한다. */
+	caps->ctrl |= (dev->acs_capabilities & PCI_ACS_RR); /* [한국어] P2P 요청을 위로 올려보내게 한다 */
 
 	/* P2P Completion Redirect */
-	caps->ctrl |= (dev->acs_capabilities & PCI_ACS_CR); /* NVMe: 변수에 값을 할당한다. */
+	caps->ctrl |= (dev->acs_capabilities & PCI_ACS_CR); /* [한국어] P2P 완료도 위로 올려보내게 한다 */
 
 	/* Upstream Forwarding */
-	caps->ctrl |= (dev->acs_capabilities & PCI_ACS_UF); /* NVMe: 변수에 값을 할당한다. */
+	caps->ctrl |= (dev->acs_capabilities & PCI_ACS_UF); /* [한국어] 올려보낼 트래픽을 실제로 상위로 전달하게 한다 */
 
 	/* Enable Translation Blocking for external devices and noats */
-	if (pci_ats_disabled() || dev->external_facing || dev->untrusted) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		caps->ctrl |= (dev->acs_capabilities & PCI_ACS_TB); /* NVMe: 변수에 값을 할당한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	if (pci_ats_disabled() || dev->external_facing || dev->untrusted) /* [한국어] ATS 를 아예 못 쓰게 했거나, 외부 노출 포트이거나, 신뢰할 수 없는 장치일 때만 */
+		caps->ctrl |= (dev->acs_capabilities & PCI_ACS_TB); /* [한국어] 변환된 주소로 오는 요청을 차단한다. ATS 를 정상적으로 쓰는 장치에 켜면 그 DMA 가 막힌다 */
+}
 
 /**
  * pci_enable_acs - enable ACS if hardware support it
  * @dev: the PCI device
  */
 /*
- * pci_enable_acs:
- *   해당 pci_dev 의 ACS capability 를 찾아 enable 한다. NVMe 장치가 IOMMU 뒤에서 안전하게 DMA/P2P를 수행하도록 보장한다.
+ * [한국어]
+ * pci_enable_acs - 이 장치의 ACS Control 레지스터를 최종 계산해 써 넣는다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @return: 없음.
+ *
+ * ACS 설정은 세 곳에서 온다. 이 함수가 그 셋을 순서대로 겹쳐 쌓는다.
+ *   1) 펌웨어가 이미 써 둔 값 — 현재 레지스터를 읽어 바탕으로 삼는다.
+ *   2) 커널 기본 정책 — IOMMU 가 있고(pci_acs_enable) 장치별 quirk 가
+ *      허락하면 pci_std_enable_acs() 가 격리 비트를 얹는다.
+ *   3) 커맨드라인 지정 — disable_acs_redir 와 config_acs 를 차례로 적용한다.
+ *      원본 주석대로 이것은 IOMMU 유무와 무관하게 언제나 적용된다.
+ *      관리자가 바꾸려는 데는 이유가 있다고 보는 것이다.
+ * 계산이 끝난 뒤에야 config space 에 한 번 쓴다 — 중간 상태를 하드웨어에
+ * 노출하지 않기 위해서다.
+ *
+ * dev->acs_cap 은 열거 때 pci_acs_init() 이 캐시해 둔 ACS capability 오프셋이다.
+ * 0 이면 이 장치에는 ACS 자체가 없어 할 일이 없다.
+ *
+ * 참고 — drivers/nvme/ 에는 이 함수 호출이 없다. ACS 는 PCI 코어가 열거 중에
+ * 처리하며, NVMe 드라이버가 개입하지 않는다.
+ *
+ * 실행 문맥: 열거 중 프로세스 문맥. config space 를 읽고 쓴다.
+ *
+ * 호출 체인:
+ *   pci_acs_init()(probe.c 경로) → [이 함수]
+ *     → pci_std_enable_acs(), __pci_config_acs(), pci_write_config_word()
  */
-void pci_enable_acs(struct pci_dev *dev) /* NVMe: pci_enable_acs 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	struct pci_acs caps; /* NVMe: 데이터 타입 변수를 선언한다. */
-	bool enable_acs = false; /* NVMe: bool 타입 변수를 선언한다. */
-	int pos; /* NVMe: int 타입 변수를 선언한다. */
+void pci_enable_acs(struct pci_dev *dev)
+{
+	struct pci_acs caps; /* [한국어] 계산 중간값을 담을 작업 구조체. 스택에 두므로 다른 CPU 와 공유되지 않는다 */
+	bool enable_acs = false; /* [한국어] 커널 기본 정책을 얹을지 여부 */
+	int pos; /* [한국어] ACS capability 오프셋 */
 
 	/* If an iommu is present we start with kernel default caps */
-	if (pci_acs_enable) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		if (pci_dev_specific_enable_acs(dev)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			enable_acs = true; /* NVMe: 변수에 값을 할당한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+	if (pci_acs_enable) { /* [한국어] IOMMU 드라이버가 pci_request_acs() 로 의사를 남겼다면 */
+		if (pci_dev_specific_enable_acs(dev)) /* [한국어] 장치별 quirk 에 물어본다. 일부 하드웨어는 표준 ACS 대신 자체 방식을 쓰거나 표준 비트가 오동작한다 */
+			enable_acs = true; /* [한국어] quirk 가 허락하면 기본 정책을 적용한다 */
+	}
 
-	pos = dev->acs_cap; /* NVMe: 변수에 값을 할당한다. */
-	if (!pos) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return; /* NVMe: 함수 실행을 종료한다. */
+	pos = dev->acs_cap; /* [한국어] 열거 때 캐시해 둔 ACS capability 오프셋 */
+	if (!pos) /* [한국어] ACS capability 가 없는 장치 */
+		return; /* [한국어] 할 일이 없다 */
 
-	pci_read_config_word(dev, pos + PCI_ACS_CTRL, &caps.ctrl); /* NVMe: PCI 설정 공간 2바이트를 읽는다. */
-	caps.fw_ctrl = caps.ctrl; /* NVMe: 변수에 값을 할당한다. */
+	pci_read_config_word(dev, pos + PCI_ACS_CTRL, &caps.ctrl); /* [한국어] 현재 ACS Control 값을 읽는다 — 펌웨어가 설정해 둔 상태다 */
+	caps.fw_ctrl = caps.ctrl; /* [한국어] 그 원본을 따로 보관한다. 아래 __pci_config_acs() 가 "건드리지 않는 비트"의 출처로 쓴다 */
 
-	if (enable_acs) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pci_std_enable_acs(dev, &caps); /* NVMe: pci_std_enable_acs 함수를 호출한다. */
+	if (enable_acs) /* [한국어] 커널 기본 정책을 얹을 차례면 */
+		pci_std_enable_acs(dev, &caps); /* [한국어] 격리에 필요한 비트를 caps.ctrl 에 켠다 */
 
 	/*
 	 * Always apply caps from the command line, even if there is no iommu.
 	 * Trust that the admin has a reason to change the ACS settings.
 	 */
-	__pci_config_acs(dev, &caps, disable_acs_redir_param, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-			 PCI_ACS_RR | PCI_ACS_CR | PCI_ACS_EC, /* NVMe: 표현식을 이어서 작성한다. */
-			 ~(PCI_ACS_RR | PCI_ACS_CR | PCI_ACS_EC)); /* NVMe: 비트 연산을 수행한다. */
-	__pci_config_acs(dev, &caps, config_acs_param, 0, 0); /* NVMe: __pci_config_acs 함수를 호출한다. */
+	__pci_config_acs(dev, &caps, disable_acs_redir_param, /* [한국어] disable_acs_redir 파라미터 적용 — 지정된 장치에서 재지정 비트를 끈다 */
+			 PCI_ACS_RR | PCI_ACS_CR | PCI_ACS_EC, /* [한국어] 건드릴 비트: P2P Request Redirect, P2P Completion Redirect, Egress Control */
+			 ~(PCI_ACS_RR | PCI_ACS_CR | PCI_ACS_EC)); /* [한국어] 넣을 값: 그 세 비트를 모두 0 으로 (~ 로 뒤집어 해당 자리를 0 으로 만든다). P2P DMA 를 쓰려는 관리자가 격리를 일부러 푸는 경로다 */
+	__pci_config_acs(dev, &caps, config_acs_param, 0, 0); /* [한국어] config_acs 파라미터 적용 — 마스크/플래그에 0 을 넘겨 "비트열도 문자열에서 파싱하라"고 알린다 */
 
-	pci_write_config_word(dev, pos + PCI_ACS_CTRL, caps.ctrl); /* NVMe: PCI 설정 공간 2바이트를 쓴다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	pci_write_config_word(dev, pos + PCI_ACS_CTRL, caps.ctrl); /* [한국어] 계산이 끝난 값을 ACS Control 레지스터에 한 번에 쓴다 */
+}
 
 /**
  * pci_restore_bars - restore a device's BAR values (e.g. after wake-up)
@@ -1225,107 +1899,256 @@ void pci_enable_acs(struct pci_dev *dev) /* NVMe: pci_enable_acs 함수를 정�
  * accessible by its driver.
  */
 /*
- * pci_restore_bars:
- *   pci_dev 의 BAR 레지스터를 저장했던 값으로 복원한다. NVMe suspend/resume 또는 D3->D0 복귀 시 BAR 주소를 복구하는 데 필수적이다.
+ * [한국어]
+ * pci_restore_bars - 소프트웨어가 기억하는 자원 주소를 BAR 에 다시 써 넣는다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @return: 없음.
+ *
+ * D3cold 를 거치거나 전원이 끊기면 config space 가 초기값으로 돌아가 BAR 가
+ * 모두 0 이 된다. 그 상태에서는 CPU 가 장치 레지스터에 닿을 주소가 없어
+ * 드라이버가 아무 것도 할 수 없다.
+ * 이 함수는 pci_dev->resource[] 에 남아 있는 "이 장치는 여기에 있어야 한다"는
+ * 정보를 근거로 BAR 를 다시 쓴다. 저장해 둔 config space 사본을 되돌리는
+ * pci_restore_state() 와는 출처가 다르다 — 이쪽은 자원 배정 결과가 근거다.
+ *
+ * PCI_BRIDGE_RESOURCES 까지만 도는 것이 요점이다. 그 인덱스부터는 브리지
+ * 윈도라 BAR 가 아니고, 되돌리는 방식도 다르다. 따라서 표준 BAR 와 ROM 까지만
+ * 갱신한다.
+ *
+ * 실행 문맥: 전원 복귀 경로에서 프로세스 문맥으로 불린다.
+ *
+ * 호출 체인:
+ *   pci_set_full_power_state()(D3cold 에서 돌아온 경우) → [이 함수]
+ *     → pci_update_resource()
  */
-static void pci_restore_bars(struct pci_dev *dev) /* NVMe: pci_restore_bars 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	int i; /* NVMe: int 타입 변수를 선언한다. */
+static void pci_restore_bars(struct pci_dev *dev)
+{
+	int i; /* [한국어] resource 인덱스 */
 
-	for (i = 0; i < PCI_BRIDGE_RESOURCES; i++) /* NVMe: 반복문을 시작한다. */
-		pci_update_resource(dev, i); /* NVMe: pci_update_resource 함수를 호출한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	for (i = 0; i < PCI_BRIDGE_RESOURCES; i++) /* [한국어] 표준 BAR 와 ROM 까지만 — PCI_BRIDGE_RESOURCES 부터는 브리지 윈도라 대상이 아니다 */
+		pci_update_resource(dev, i); /* [한국어] resource[i] 의 주소를 해당 BAR 레지스터에 다시 써 넣는다 */
+}
 
 /*
- * platform_pci_power_manageable:
- *   플랫폼별 전원 관리 가능 여부를 확인한다. NVMe 장치의 runtime suspend/resume 결정에 영향을 줄 수 있다.
+ * [한국어] 아래 platform_pci_* 묶음은 "PCI 규격이 아니라 플랫폼 펌웨어가 하는
+ * 전원 관리"로 가는 창구다. 장치의 PM capability 만으로는 D3cold 를 만들 수 없다 —
+ * 전원 자체를 끊는 것은 슬롯의 전원 스위치를 쥔 펌웨어의 일이기 때문이다.
+ * 그 펌웨어 창구가 둘이라 매번 갈래를 탄다.
+ *   - ACPI(acpi_pci_*): x86/ARM 서버·데스크톱의 표준 경로. _PS0/_PS3 메서드로
+ *     장치 전원을 켜고 끄며, _PR3 로 전원 자원 유무를 알린다.
+ *   - Intel MID(mid_pci_*): CONFIG_X86_INTEL_MID 인 구형 임베디드 플랫폼 전용.
+ *     ACPI 대신 전용 전원 관리 유닛을 쓴다. 그 옵션이 꺼져 있으면
+ *     drivers/pci/pci.h 의 pci_use_mid_pm() 스텁이 항상 false 를 돌려주어
+ *     컴파일러가 MID 갈래를 통째로 걷어 낸다. 오늘날 NVMe 를 쓰는 환경은
+ *     예외 없이 ACPI 갈래로 간다.
  */
-static inline bool platform_pci_power_manageable(struct pci_dev *dev) /* NVMe: platform_pci_power_manageable 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	if (pci_use_mid_pm()) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return true; /* NVMe: 연산 결과를 반환한다. */
+/*
+ * [한국어]
+ * platform_pci_power_manageable - 플랫폼 펌웨어가 이 장치의 전원을 다룰 수 있는가.
+ *
+ * @dev: 대상 PCI 장치.
+ * @return: 펌웨어가 전원 상태를 바꿔 줄 수 있으면 true.
+ *
+ * 이 값이 false 면 커널은 장치 자신의 PM capability 로만 전원을 다룰 수 있고,
+ * 그 범위는 D0~D3hot 까지다. 전원을 아예 끊는 D3cold 는 펌웨어의 협조가 있어야
+ * 가능하다. pci_set_power_state() 와 pci_target_state() 가 목표 상태를 정할 때
+ * 맨 먼저 확인하는 조건이다.
+ *
+ * 실행 문맥: ACPI 갈래는 ACPI 객체를 조회하므로 프로세스 문맥에서 부른다.
+ *
+ * 호출 체인:
+ *   pci_set_power_state() / pci_target_state() / pci_pm_init() → [이 함수]
+ *     → acpi_pci_power_manageable()
+ */
+static inline bool platform_pci_power_manageable(struct pci_dev *dev)
+{
+	if (pci_use_mid_pm()) /* [한국어] MID 플랫폼이면 */
+		return true; /* [한국어] MID 전원 유닛이 모든 PCI 장치를 관리하므로 무조건 true */
 
-	return acpi_pci_power_manageable(dev); /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
-
-static inline int platform_pci_set_power_state(struct pci_dev *dev, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-					       pci_power_t t) /* NVMe: 표현식을 평가한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	if (pci_use_mid_pm()) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return mid_pci_set_power_state(dev, t); /* NVMe: 연산 결과를 반환한다. */
-
-	return acpi_pci_set_power_state(dev, t); /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return acpi_pci_power_manageable(dev); /* [한국어] 표준 경로 — ACPI 에 이 장치의 전원 자원(_PR0/_PR3)이 정의돼 있는지 묻는다 */
+}
 
 /*
- * platform_pci_get_power_state:
- *   플랫폼이 관리하는 현재 전원 상태를 반환한다. NVMe controller 의 현재 D-state 를 판단할 때 참조된다.
+ * [한국어]
+ * platform_pci_set_power_state - 플랫폼 펌웨어에 전원 상태 전이를 요청한다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @t: 목표 D-state.
+ * @return: 0 성공, 음수 오류.
+ *
+ * PMCSR(장치의 PM Control/Status 레지스터)을 직접 쓰는 것과 다르다. 이쪽은
+ * 슬롯에 공급되는 전원 자원 자체를 켜고 끈다. ACPI 갈래에서는 _PS0/_PS3
+ * 메서드가 호출되어 전원 레일이 실제로 끊기거나 살아난다.
+ * D3cold 로 내려가고 D0 로 돌아오는 일이 이 경로 없이는 불가능하다.
+ *
+ * 실행 문맥: ACPI 메서드 실행은 잠들 수 있다. 반드시 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_platform_power_transition() → [이 함수] → acpi_pci_set_power_state()
  */
-static inline pci_power_t platform_pci_get_power_state(struct pci_dev *dev) /* NVMe: platform_pci_get_power_state 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	if (pci_use_mid_pm()) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return mid_pci_get_power_state(dev); /* NVMe: 연산 결과를 반환한다. */
+static inline int platform_pci_set_power_state(struct pci_dev *dev,
+					       pci_power_t t)
+{
+	if (pci_use_mid_pm()) /* [한국어] MID 플랫폼이면 */
+		return mid_pci_set_power_state(dev, t); /* [한국어] MID 전용 전원 유닛에 요청한다 */
 
-	return acpi_pci_get_power_state(dev); /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return acpi_pci_set_power_state(dev, t); /* [한국어] 표준 경로 — ACPI 의 _PS0/_PS3 를 실행해 전원 자원을 조작한다 */
+}
 
 /*
- * platform_pci_refresh_power_state:
- *   플랫폼 전원 상태를 새로고침한다. NVMe resume 직후 실제 하드웨어 상태와 소프트웨어 상태를 동기화할 때 사용된다.
+ * [한국어]
+ * platform_pci_get_power_state - 플랫폼 펌웨어가 보는 현재 전원 상태를 묻는다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @return: 펌웨어가 보고하는 D-state. 알 수 없으면 PCI_UNKNOWN.
+ *
+ * D3cold 는 장치의 PMCSR 을 읽어서는 알 수 없다. 전원이 없으니 config 접근
+ * 자체가 응답하지 않기 때문이다. 그래서 "지금 D3cold 인가"는 전원 레일을 쥔
+ * 펌웨어에게 물어야 한다. pci_update_current_state() 가 맨 먼저 이 함수를
+ * 부르는 이유가 바로 그것이다.
+ *
+ * 실행 문맥: ACPI 조회. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_update_current_state() / pci_power_up() → [이 함수]
+ *     → acpi_pci_get_power_state()
  */
-static inline void platform_pci_refresh_power_state(struct pci_dev *dev) /* NVMe: platform_pci_refresh_power_state 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	if (!pci_use_mid_pm()) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		acpi_pci_refresh_power_state(dev); /* NVMe: acpi_pci_refresh_power_state 함수를 호출한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+static inline pci_power_t platform_pci_get_power_state(struct pci_dev *dev)
+{
+	if (pci_use_mid_pm()) /* [한국어] MID 플랫폼이면 */
+		return mid_pci_get_power_state(dev); /* [한국어] MID 전원 유닛에 묻는다 */
+
+	return acpi_pci_get_power_state(dev); /* [한국어] 표준 경로 — ACPI 가 보고하는 전원 상태 */
+}
 
 /*
- * platform_pci_choose_state:
- *   플랫폼에 맞는 전원 상태를 선택한다. NVMe suspend 시 최종 D-state 결정에 반영된다.
+ * [한국어]
+ * platform_pci_refresh_power_state - 펌웨어가 캐시한 전원 상태를 다시 읽게 한다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @return: 없음.
+ *
+ * ACPI 계층은 전원 자원의 상태를 캐시해 둔다. 시스템 전체가 절전에서 돌아온
+ * 직후처럼 캐시를 믿을 수 없는 시점에는 실제 하드웨어를 다시 읽어 캐시를
+ * 갱신해야 한다. 그 요청을 보내는 것이 전부다.
+ * MID 갈래에는 대응하는 개념이 없어 아무 것도 하지 않는다.
+ *
+ * 실행 문맥: ACPI 조회. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_refresh_power_state() → [이 함수] → acpi_pci_refresh_power_state()
  */
-static inline pci_power_t platform_pci_choose_state(struct pci_dev *dev) /* NVMe: platform_pci_choose_state 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	if (pci_use_mid_pm()) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return PCI_POWER_ERROR; /* NVMe: 연산 결과를 반환한다. */
-
-	return acpi_pci_choose_state(dev); /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+static inline void platform_pci_refresh_power_state(struct pci_dev *dev)
+{
+	if (!pci_use_mid_pm()) /* [한국어] MID 가 아닐 때만 — MID 에는 대응하는 캐시가 없다 */
+		acpi_pci_refresh_power_state(dev); /* [한국어] ACPI 전원 자원 상태를 하드웨어에서 다시 읽게 한다 */
+}
 
 /*
- * platform_pci_set_wakeup:
- *   플랫폼 wake-up 이벤트를 활성화/비활성화한다. NVMe 장치의 PME 기반 원격 깨우기 설정과 연동된다.
+ * [한국어]
+ * platform_pci_choose_state - 시스템 절전 시 이 장치를 어느 D-state 로 둘지 펌웨어에 묻는다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @return: 펌웨어가 권하는 D-state. 판단할 수 없으면 PCI_POWER_ERROR.
+ *
+ * ACPI 는 장치마다 _SxD 메서드로 "시스템이 S3 일 때 이 장치는 D3 로 두어라"
+ * 같은 지시를 담을 수 있다. 펌웨어가 하드웨어의 사정을 아는 경우가 있어
+ * 커널이 임의로 정하기보다 먼저 물어보는 것이다.
+ * 반환값 PCI_POWER_ERROR 는 오류가 아니라 "지시가 없으니 커널이 알아서 정하라"는
+ * 뜻으로 pci_choose_state() 가 해석한다.
+ *
+ * 실행 문맥: ACPI 메서드 조회. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_choose_state() / pci_target_state() → [이 함수] → acpi_pci_choose_state()
  */
-static inline int platform_pci_set_wakeup(struct pci_dev *dev, bool enable) /* NVMe: platform_pci_set_wakeup 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	if (pci_use_mid_pm()) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return PCI_POWER_ERROR; /* NVMe: 연산 결과를 반환한다. */
+static inline pci_power_t platform_pci_choose_state(struct pci_dev *dev)
+{
+	if (pci_use_mid_pm()) /* [한국어] MID 갈래에는 이런 지시 메서드가 없다 */
+		return PCI_POWER_ERROR; /* [한국어] "지시 없음"을 뜻한다. 호출자는 자체 규칙으로 상태를 정한다 */
 
-	return acpi_pci_wakeup(dev, enable); /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return acpi_pci_choose_state(dev); /* [한국어] 표준 경로 — ACPI 의 _SxD 를 조회한다 */
+}
 
 /*
- * platform_pci_need_resume:
- *   플랫폼 관점에서 resume 이 필요한지 판단한다. NVMe runtime resume 조건 판별에 참조된다.
+ * [한국어]
+ * platform_pci_set_wakeup - 이 장치의 원격 깨우기(wakeup) 를 펌웨어 수준에서 켜고 끈다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @enable: true 면 깨우기 허용, false 면 금지.
+ * @return: 0 성공, 음수 오류.
+ *
+ * PME(Power Management Event) 신호는 장치가 낸다고 끝이 아니다. 그 신호를
+ * 받아 시스템을 깨우려면 GPE(General Purpose Event) 같은 플랫폼 쪽 경로가
+ * 열려 있어야 한다. ACPI 갈래에서 그것을 여닫는 것이 이 함수다.
+ * 장치 쪽 PME 활성화는 별개이며 __pci_pme_active() 가 담당한다 — 둘 다
+ * 켜져야 실제로 깨어난다.
+ *
+ * 실행 문맥: ACPI 조작. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   __pci_enable_wake() → [이 함수] → acpi_pci_wakeup()
  */
-static inline bool platform_pci_need_resume(struct pci_dev *dev) /* NVMe: platform_pci_need_resume 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	if (pci_use_mid_pm()) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return false; /* NVMe: 연산 결과를 반환한다. */
+static inline int platform_pci_set_wakeup(struct pci_dev *dev, bool enable)
+{
+	if (pci_use_mid_pm()) /* [한국어] MID 갈래에는 대응 경로가 없다 */
+		return PCI_POWER_ERROR; /* [한국어] 실패를 알린다. 이 반환값은 호출자에서 0 이 아니므로 오류로 취급된다 */
 
-	return acpi_pci_need_resume(dev); /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return acpi_pci_wakeup(dev, enable); /* [한국어] 표준 경로 — ACPI 의 깨우기 경로(GPE 등)를 켜거나 끈다 */
+}
 
 /*
- * platform_pci_bridge_d3:
- *   플랫폼이 bridge 의 D3 상태를 허용하는지 확인한다. NVMe가 연결된 Root Port/Upstream bridge 의 저전원 진입을 제어한다.
+ * [한국어]
+ * platform_pci_need_resume - 펌웨어가 이 장치를 반드시 깨워야 한다고 보는가.
+ *
+ * @dev: 대상 PCI 장치.
+ * @return: 강제로 깨워야 하면 true.
+ *
+ * 시스템 절전에서 돌아올 때, 장치를 굳이 D0 로 올리지 않고 절전 상태 그대로
+ * 두는 최적화(direct-complete)가 있다. 그러나 펌웨어가 절전 중에 그 장치의
+ * 전원 상태를 바꿔 버렸다면 소프트웨어가 기억하는 상태와 어긋나므로
+ * 반드시 깨워 상태를 다시 맞춰야 한다. 그 판단을 펌웨어에 묻는다.
+ *
+ * 실행 문맥: ACPI 조회. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_dev_need_resume() → [이 함수] → acpi_pci_need_resume()
  */
-static inline bool platform_pci_bridge_d3(struct pci_dev *dev) /* NVMe: platform_pci_bridge_d3 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	if (pci_use_mid_pm()) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return false; /* NVMe: 연산 결과를 반환한다. */
+static inline bool platform_pci_need_resume(struct pci_dev *dev)
+{
+	if (pci_use_mid_pm()) /* [한국어] MID 갈래에서는 */
+		return false; /* [한국어] 강제 깨우기를 요구하지 않는다 */
 
-	return acpi_pci_bridge_d3(dev); /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return acpi_pci_need_resume(dev); /* [한국어] 표준 경로 — ACPI 가 상태 불일치를 알리면 true */
+}
+
+/*
+ * [한국어]
+ * platform_pci_bridge_d3 - 이 브리지를 D3 로 내려도 되는지 펌웨어에 묻는다.
+ *
+ * @dev: 대상 브리지(Root Port 또는 Switch Port).
+ * @return: 허용되면 true.
+ *
+ * 브리지를 D3 로 내리면 그 아래 모든 장치의 전원이 함께 끊긴다. 절전 효과는
+ * 크지만, 다시 깨울 때 링크를 재훈련하고 아래 장치를 모두 복원해야 해서
+ * 플랫폼이 제대로 지원하지 않으면 장치를 잃는다.
+ * ACPI 는 _PR3(전원 자원)나 핫플러그 관련 정보로 그 가부를 알려 준다.
+ * NVMe SSD 가 붙은 Root Port 가 D3 로 갈 수 있는지가 이 판단에 걸린다 —
+ * 갈 수 있으면 유휴 시 SSD 전원까지 완전히 끊어 노트북 대기 전력이 크게 준다.
+ *
+ * 실행 문맥: ACPI 조회. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_bridge_d3_possible() → [이 함수] → acpi_pci_bridge_d3()
+ */
+static inline bool platform_pci_bridge_d3(struct pci_dev *dev)
+{
+	if (pci_use_mid_pm()) /* [한국어] MID 갈래에서는 */
+		return false; /* [한국어] 브리지 D3 를 허용하지 않는다 */
+
+	return acpi_pci_bridge_d3(dev); /* [한국어] 표준 경로 — ACPI 에 물어본다 */
+}
 
 /**
  * pci_update_current_state - Read power state of given device and cache it
@@ -1340,26 +2163,51 @@ static inline bool platform_pci_bridge_d3(struct pci_dev *dev) /* NVMe: platform
  * vendor ID in config space.
  */
 /*
- * pci_update_current_state:
- *   pci_dev 의 현재 전원 상태를 하드웨어에서 읽어 갱신한다. NVMe power state 머신에서 D-state 정확성을 유지한다.
+ * [한국어]
+ * pci_update_current_state - 하드웨어의 실제 전원 상태를 읽어 dev->current_state 에 캐시한다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @state: PM capability 가 없어 읽을 방법이 없을 때 그냥 믿고 기록할 값.
+ * @return: 없음.
+ *
+ * 커널은 각 장치의 D-state 를 dev->current_state 에 들고 다니는데, 이 값이
+ * 실제와 어긋나면 이미 잠든 장치에 명령을 내리거나 깨어 있는 장치를 다시
+ * 깨우는 일이 생긴다. 그래서 전원 전이 전후와 resume 직후에 실물을 다시 읽는다.
+ *
+ * 읽는 순서에 이유가 있다.
+ *   1) 먼저 플랫폼에 묻는다. D3cold 는 전원이 없어 PMCSR 을 읽을 수 없으므로,
+ *      레지스터를 읽기 전에 펌웨어 답부터 확인해야 한다.
+ *   2) PM capability 가 있으면 PMCSR 의 하위 2비트를 읽는다. 이 두 비트가
+ *      곧 D0~D3hot 을 나타낸다.
+ *   3) 읽은 값이 all-ones 면(PCI_POSSIBLE_ERROR) 장치가 응답하지 않은 것이다.
+ *      원본 주석대로, 펌웨어가 상태를 잘못 보고했거나 애초에 플랫폼이 이
+ *      장치의 전원을 관리하지 않는 경우를 여기서 걸러 D3cold 로 판정한다.
+ *   4) PM capability 조차 없으면 읽을 곳이 없으니 호출자가 넘긴 @state 를 믿는다.
+ *
+ * 실행 문맥: config space 를 읽는다. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_power_up(), pci_set_full_power_state(), pci_refresh_power_state(),
+ *   pci_enable_device_flags() → [이 함수]
+ *     → platform_pci_get_power_state(), pci_read_config_word()
  */
-void pci_update_current_state(struct pci_dev *dev, pci_power_t state) /* NVMe: pci_update_current_state 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	if (platform_pci_get_power_state(dev) == PCI_D3cold) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		dev->current_state = PCI_D3cold; /* NVMe: 변수에 값을 할당한다. */
-	} else if (dev->pm_cap) { /* NVMe: if 함수를 정의한다. */
-		u16 pmcsr; /* NVMe: u16 타입 변수를 선언한다. */
+void pci_update_current_state(struct pci_dev *dev, pci_power_t state)
+{
+	if (platform_pci_get_power_state(dev) == PCI_D3cold) { /* [한국어] 전원 자체가 끊긴 상태인지는 펌웨어만 안다. 레지스터를 읽기 전에 먼저 확인한다 */
+		dev->current_state = PCI_D3cold; /* [한국어] D3cold 로 확정. 이 상태에서는 config 접근이 무의미하다 */
+	} else if (dev->pm_cap) { /* [한국어] 전원은 있고 PM capability 도 있으면 장치 레지스터로 정확히 알 수 있다 */
+		u16 pmcsr; /* [한국어] PM Control/Status 레지스터 값 */
 
-		pci_read_config_word(dev, dev->pm_cap + PCI_PM_CTRL, &pmcsr); /* NVMe: NVMe PMCSR 레지스터를 읽어 현재 power state 를 확인한다. */
-		if (PCI_POSSIBLE_ERROR(pmcsr)) { /* NVMe: PMCSR 읽기가 에러를 반환하면 */
-			dev->current_state = PCI_D3cold; /* NVMe: 변수에 값을 할당한다. */
-			return; /* NVMe: 함수 실행을 종료한다. */
-		} /* NVMe: 코드 블록을 종료한다. */
-		dev->current_state = pmcsr & PCI_PM_CTRL_STATE_MASK; /* NVMe: 변수에 값을 할당한다. */
-	} else { /* NVMe: 표현식을 평가한다. */
-		dev->current_state = state; /* NVMe: 변수에 값을 할당한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+		pci_read_config_word(dev, dev->pm_cap + PCI_PM_CTRL, &pmcsr); /* [한국어] PM capability 시작 + PCI_PM_CTRL(4) 위치가 PMCSR 이다 */
+		if (PCI_POSSIBLE_ERROR(pmcsr)) { /* [한국어] all-ones 가 읽혔다 — 응답 없는 config 읽기의 표식이다. 장치가 사라졌거나 이미 전원이 끊겼다 */
+			dev->current_state = PCI_D3cold; /* [한국어] 전원이 없는 것으로 본다 */
+			return; /* [한국어] 더 볼 것이 없다 */
+		}
+		dev->current_state = pmcsr & PCI_PM_CTRL_STATE_MASK; /* [한국어] PMCSR 하위 2비트(PCI_PM_CTRL_STATE_MASK)가 곧 현재 D-state 다. 0=D0, 1=D1, 2=D2, 3=D3hot */
+	} else { /* [한국어] PM capability 가 없는 장치 — 전원 상태를 물어볼 레지스터 자체가 없다 */
+		dev->current_state = state; /* [한국어] 호출자가 알려 준 값을 그대로 믿는다 */
+	}
+}
 
 /**
  * pci_refresh_power_state - Refresh the given device's power state data
@@ -1369,14 +2217,30 @@ void pci_update_current_state(struct pci_dev *dev, pci_power_t state) /* NVMe: p
  * pci_update_current_state() to update its current PCI power state.
  */
 /*
- * pci_refresh_power_state:
- *   현재 전원 상태를 플랫폼/하드웨어 기준으로 다시 확인한다. NVMe resume 후 상태 불일치를 방지한다.
+ * [한국어]
+ * pci_refresh_power_state - 펌웨어 캐시와 소프트웨어 캐시를 모두 실물에 맞춘다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @return: 없음.
+ *
+ * 전원 상태는 두 겹으로 캐시돼 있다 — ACPI 계층이 전원 자원 상태를,
+ * 커널이 dev->current_state 를 들고 있다. 시스템 절전에서 돌아온 직후처럼
+ * 그 사이 펌웨어가 몰래 상태를 바꿨을 수 있는 시점에는 둘 다 못 믿는다.
+ * 그래서 아래쪽(ACPI) 캐시를 먼저 갱신하고, 그 결과를 근거로 위쪽
+ * (dev->current_state) 을 갱신한다. 순서가 반대면 갱신되지 않은 ACPI 답을
+ * 그대로 믿게 되어 의미가 없다.
+ *
+ * 실행 문맥: ACPI 조회 + config 읽기. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci-driver.c 의 시스템 resume 경로 → [이 함수]
+ *     → platform_pci_refresh_power_state() → pci_update_current_state()
  */
-void pci_refresh_power_state(struct pci_dev *dev) /* NVMe: pci_refresh_power_state 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	platform_pci_refresh_power_state(dev); /* NVMe: platform_pci_refresh_power_state 함수를 호출한다. */
-	pci_update_current_state(dev, dev->current_state); /* NVMe: NVMe 장치의 현재 전원 상태를 정확히 갱신한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+void pci_refresh_power_state(struct pci_dev *dev)
+{
+	platform_pci_refresh_power_state(dev); /* [한국어] 먼저 ACPI 쪽 캐시를 실물에서 다시 읽게 한다 */
+	pci_update_current_state(dev, dev->current_state); /* [한국어] 그 갱신된 답을 바탕으로 dev->current_state 를 맞춘다. 두 번째 인자는 PM capability 가 없을 때만 쓰이는 대체값이라 현재 값을 그대로 넘긴다 */
+}
 
 /**
  * pci_platform_power_transition - Use platform to change device power state
@@ -1384,64 +2248,140 @@ void pci_refresh_power_state(struct pci_dev *dev) /* NVMe: pci_refresh_power_sta
  * @state: State to put the device into.
  */
 /*
- * pci_platform_power_transition:
- *   플랫폼 특정 전원 상태 전이를 수행한다. NVMe D-state 변경 시 아키텍처별 추가 동작을 실행한다.
+ * [한국어]
+ * pci_platform_power_transition - 펌웨어를 통해 전원 상태를 바꾸고 캐시를 맞춘다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @state: 목표 D-state.
+ * @return: 0 성공, 음수면 펌웨어가 전이를 수행하지 못했다.
+ *
+ * 장치 자신의 PMCSR 로는 D0~D3hot 까지만 갈 수 있다. 전원 레일을 끊는
+ * D3cold 는 펌웨어만 할 수 있어 이 경로가 따로 있다.
+ * 전이에 성공하면 실물을 다시 읽어 캐시를 맞춘다.
+ *
+ * 실패했을 때의 처리가 미묘하다. PM capability 조차 없는 장치는 전원 상태를
+ * 읽거나 바꿀 수단이 아예 없으므로, 펌웨어가 실패했다면 그 장치는 계속
+ * 켜져 있다고 보는 것이 안전하다. 그래서 D0 로 기록한다. PM capability 가
+ * 있는 장치는 나중에 PMCSR 을 읽어 정확한 값을 알 수 있으므로 손대지 않는다.
+ *
+ * 실행 문맥: ACPI 메서드 실행. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_power_up() / pci_set_low_power_state() 등 → [이 함수]
+ *     → platform_pci_set_power_state() → pci_update_current_state()
  */
-int pci_platform_power_transition(struct pci_dev *dev, pci_power_t state) /* NVMe: pci_platform_power_transition 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	int error; /* NVMe: int 타입 변수를 선언한다. */
+int pci_platform_power_transition(struct pci_dev *dev, pci_power_t state)
+{
+	int error; /* [한국어] 펌웨어 전이 결과 */
 
-	error = platform_pci_set_power_state(dev, state); /* NVMe: 변수에 값을 할당한다. */
-	if (!error) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pci_update_current_state(dev, state); /* NVMe: pci_update_current_state 함수를 호출한다. */
+	error = platform_pci_set_power_state(dev, state); /* [한국어] ACPI 의 _PS0/_PS3 등을 실행해 전원 자원을 조작한다 */
+	if (!error) /* [한국어] 전이에 성공했으면 */
+		pci_update_current_state(dev, state); /* [한국어] 실물을 다시 읽어 dev->current_state 를 맞춘다 */
 	else if (!dev->pm_cap) /* Fall back to PCI_D0 */
-		dev->current_state = PCI_D0; /* NVMe: NVMe pci_dev 의 현재 상태를 D0 로 갱신한다. */
+		dev->current_state = PCI_D0; /* [한국어] PM capability 도 없고 펌웨어 전이도 실패했다 — 상태를 알아낼 방법이 전혀 없으므로 켜져 있다고 보는 쪽이 안전하다 */
 
-	return error; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return error; /* [한국어] 호출자는 이 값으로 다음 단계(PMCSR 직접 조작 등)를 결정한다 */
+}
 EXPORT_SYMBOL_GPL(pci_platform_power_transition);
 
 /*
- * pci_resume_one:
- *   하나의 pci_dev 를 resume 한다. NVMe controller resume 시 연관된 PCI 함수들을 순차적으로 깨운다.
+ * [한국어]
+ * pci_resume_one - 장치 하나에 런타임 resume 을 요청하는 pci_walk_bus 콜백.
+ *
+ * @pci_dev: 순회 중 만난 장치.
+ * @ign: pci_walk_bus 가 넘겨 주는 사용자 데이터. 여기서는 쓰지 않는다.
+ * @return: 항상 0 — pci_walk_bus 규약에서 0 이 아닌 값은 "순회를 중단하라"는
+ *          뜻이므로, 모든 장치를 빠짐없이 훑기 위해 언제나 0 을 돌려준다.
+ *
+ * pm_request_resume() 은 요청만 큐에 넣고 즉시 돌아온다. 실제 깨우기는 PM
+ * 워크큐가 나중에 수행하므로 이 콜백은 잠들지 않는다. pci_walk_bus 가
+ * 버스 락을 쥔 채 콜백을 부르기 때문에 이 성질이 중요하다.
+ *
+ * 호출 체인:
+ *   pci_resume_bus() → pci_walk_bus() → [이 함수] → pm_request_resume()
  */
-static int pci_resume_one(struct pci_dev *pci_dev, void *ign) /* NVMe: pci_resume_one 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	pm_request_resume(&pci_dev->dev); /* NVMe: pm_request_resume 함수를 호출한다. */
-	return 0; /* NVMe: 성공(0)을 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+static int pci_resume_one(struct pci_dev *pci_dev, void *ign)
+{
+	pm_request_resume(&pci_dev->dev); /* [한국어] 비동기 resume 요청 — 큐에 넣기만 하고 바로 돌아온다 */
+	return 0; /* [한국어] 0 을 돌려 순회를 계속하게 한다 */
+}
 
 /**
  * pci_resume_bus - Walk given bus and runtime resume devices on it
  * @bus: Top bus of the subtree to walk.
  */
 /*
- * pci_resume_bus:
- *   bus 상의 모든 pci_dev 를 resume 한다. NVMe가 연결된 bus 의 계층적 resume 을 수행한다.
+ * [한국어]
+ * pci_resume_bus - 버스 아래 모든 장치에 런타임 resume 을 요청한다.
+ *
+ * @bus: 훑을 서브트리의 꼭대기 버스. NULL 이면 아무 것도 하지 않는다.
+ * @return: 없음.
+ *
+ * 브리지를 D3 에서 D0 로 올렸다면 그 아래 장치들도 다시 쓸 수 있는 상태가
+ * 됐다는 뜻이다. 하지만 런타임 PM 은 각 장치가 스스로 상태를 관리하므로,
+ * 아래 장치들에게 "너희도 깨어나라"고 알려 주어야 한다.
+ * 요청만 걸어 두고 실제 깨우기는 각 장치의 PM 코어가 수행한다.
+ *
+ * 실행 문맥: pci_walk_bus 가 pci_bus_sem 을 쥐고 순회한다. 콜백이 잠들지
+ * 않도록 비동기 요청만 거는 이유가 그것이다.
+ *
+ * 호출 체인:
+ *   pci_bridge_d3_update() 등 브리지 전원 경로 → [이 함수]
+ *     → pci_walk_bus() → pci_resume_one()
  */
-void pci_resume_bus(struct pci_bus *bus) /* NVMe: pci_resume_bus 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	if (bus) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pci_walk_bus(bus, pci_resume_one, NULL); /* NVMe: pci_walk_bus 함수를 호출한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+void pci_resume_bus(struct pci_bus *bus)
+{
+	if (bus) /* [한국어] NULL 버스 방어 — 호출자가 브리지의 subordinate 버스를 그대로 넘겨 NULL 일 수 있다 */
+		pci_walk_bus(bus, pci_resume_one, NULL); /* [한국어] 서브트리 전체를 훑으며 각 장치에 pci_resume_one() 을 적용한다 */
+}
 
 /*
- * pci_dev_wait:
- *   reset 후 장치가 응답할 때까지 기다린다. NVMe controller reset(FLR/Conventional) 후 config space 접근 가능 여부를 확인할 때 사용된다.
+ * [한국어]
+ * pci_dev_wait - 리셋 뒤 장치가 config 요청에 정상 응답할 때까지 기다린다.
+ *
+ * @dev: 기다릴 대상 장치.
+ * @reset_type: 로그에 찍을 리셋 이름("FLR", "bus reset" 등).
+ * @timeout: 총 대기 상한(ms).
+ * @return: 0 준비 완료. -ENOTTY 는 장치가 분리됐거나 시간 안에 살아나지 못한 경우.
+ *
+ * 리셋 직후의 장치는 살아 있어도 아직 초기화 중일 수 있다. 그 상태에서
+ * config 요청을 받으면 PCIe 는 RRS(Request Retry Status)로 "나중에 다시
+ * 물어라"라고 답한다. 문제는 그 답이 소프트웨어에 어떻게 보이느냐가
+ * 상위 Root Port 설정에 따라 달라진다는 점이다.
+ *
+ *   - Root Port 가 Configuration RRS Software Visibility 를 켰다면,
+ *     Vendor ID 읽기가 RRS 를 나타내는 특별한 값(0x0001)을 돌려준다.
+ *     그래서 Vendor ID 를 읽어 그 값이 아니게 될 때까지 기다린다.
+ *   - 그 기능이 없으면 하드웨어가 알아서 재시도하고, 끝내 실패하면
+ *     ~0(all-ones)을 합성해 돌려준다. 그런데 존재하지 않는 장치와 VF 도
+ *     Vendor ID 로 ~0 을 주기 때문에 구분이 되지 않는다. 그래서 이쪽
+ *     갈래에서는 Vendor ID 대신 Command 레지스터를 읽는다. Command 는
+ *     정상 장치라면 결코 all-ones 가 아니다.
+ *
+ * 대기는 1ms 에서 시작해 두 배씩 늘린다(1, 2, 4, ... ms). PCI_RESET_WAIT(1초)를
+ * 넘기면 로그를 남기고, 그 시점에 링크 자체가 죽은 경우를 대비해 상위
+ * 브리지의 링크 재훈련을 한 번만 시도한다 — 성공하면 대기를 처음부터 다시 센다.
+ *
+ * 실행 문맥: msleep 으로 잔다. 반드시 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_reset_secondary_bus(), pcie_flr(), pci_af_flr(), pci_pm_reset(),
+ *   pci_bridge_wait_for_secondary_bus() → [이 함수]
+ *     → pci_read_config_dword(), pcie_failed_link_retrain(), msleep()
  */
-static int pci_dev_wait(struct pci_dev *dev, char *reset_type, int timeout) /* NVMe: pci_dev_wait 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	int delay = 1; /* NVMe: int 타입 변수를 선언한다. */
-	bool retrain = false; /* NVMe: bool 타입 변수를 선언한다. */
-	struct pci_dev *root, *bridge; /* NVMe: 데이터 타입 변수를 선언한다. */
+static int pci_dev_wait(struct pci_dev *dev, char *reset_type, int timeout)
+{
+	int delay = 1; /* [한국어] 다음 대기 길이(ms). 1 에서 시작해 두 배씩 늘린다 */
+	bool retrain = false; /* [한국어] 링크 재훈련을 아직 시도하지 않았는지. 한 번만 시도하려고 플래그로 둔다 */
+	struct pci_dev *root, *bridge; /* [한국어] root 는 RRS 가시성 설정을 확인할 Root Port, bridge 는 재훈련을 걸 상위 브리지 */
 
-	root = pcie_find_root_port(dev); /* NVMe: 변수에 값을 할당한다. */
+	root = pcie_find_root_port(dev); /* [한국어] 이 장치 위쪽의 Root Port 를 찾는다. RRS Software Visibility 는 Root Port 의 설정이다 */
 
-	if (pci_is_pcie(dev)) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		bridge = pci_upstream_bridge(dev); /* NVMe: 변수에 값을 할당한다. */
-		if (bridge) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			retrain = true; /* NVMe: 변수에 값을 할당한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+	if (pci_is_pcie(dev)) { /* [한국어] PCIe 장치일 때만 링크 재훈련이 의미가 있다. 재래식 PCI 에는 훈련할 링크가 없다 */
+		bridge = pci_upstream_bridge(dev); /* [한국어] 재훈련을 걸 대상은 바로 위 브리지다 */
+		if (bridge) /* [한국어] 루트 버스에 직접 붙은 장치라면 상위 브리지가 없다 */
+			retrain = true; /* [한국어] 브리지가 있을 때만 재훈련 시도를 예약한다 */
+	}
 
 	/*
 	 * The caller has already waited long enough after a reset that the
@@ -1462,55 +2402,55 @@ static int pci_dev_wait(struct pci_dev *dev, char *reset_type, int timeout) /* N
 	 * ID for VFs and non-existent devices also returns ~0, so read the
 	 * Command register until it returns something other than ~0.
 	 */
-	for (;;) { /* NVMe: 반복문을 시작한다. */
-		u32 id; /* NVMe: u32 타입 변수를 선언한다. */
+	for (;;) { /* [한국어] 준비될 때까지, 또는 시간이 다할 때까지 반복한다 */
+		u32 id; /* [한국어] 읽어 온 config 값(Vendor ID 또는 Command) */
 
-		if (pci_dev_is_disconnected(dev)) { /* NVMe: NVMe 장치가 bus 에서 분리되었으면 */
-			pci_dbg(dev, "disconnected; not waiting\n"); /* NVMe: PCI 장치에 대한 디버그 로그를 출력한다. */
-			return -ENOTTY; /* NVMe: 오류 코드를 반환한다. */
-		} /* NVMe: 코드 블록을 종료한다. */
+		if (pci_dev_is_disconnected(dev)) { /* [한국어] 그 사이 장치가 뽑혔거나 오류로 끊겼다면 기다려도 소용없다 */
+			pci_dbg(dev, "disconnected; not waiting\n"); /* [한국어] 이유를 남긴다 */
+			return -ENOTTY; /* [한국어] -ENOTTY 로 "이 방법으로는 안 된다"를 알린다. 상위 리셋 코드는 다른 방법을 시도한다 */
+		}
 
-		if (root && root->config_rrs_sv) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			pci_read_config_dword(dev, PCI_VENDOR_ID, &id); /* NVMe: PCI 설정 공간 4바이트를 읽는다. */
-			if (!pci_bus_rrs_vendor_id(id)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-				break; /* NVMe: 현재 반복문을 빠져나간다. */
-		} else { /* NVMe: 표현식을 평가한다. */
-			pci_read_config_dword(dev, PCI_COMMAND, &id); /* NVMe: PCI 설정 공간 4바이트를 읽는다. */
-			if (!PCI_POSSIBLE_ERROR(id)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-				break; /* NVMe: 현재 반복문을 빠져나간다. */
-		} /* NVMe: 코드 블록을 종료한다. */
+		if (root && root->config_rrs_sv) { /* [한국어] Root Port 가 RRS 를 소프트웨어에 보여 주도록 설정돼 있다면 */
+			pci_read_config_dword(dev, PCI_VENDOR_ID, &id); /* [한국어] Vendor ID(오프셋 0x00)를 32비트로 읽는다 — Device ID 까지 함께 온다 */
+			if (!pci_bus_rrs_vendor_id(id)) /* [한국어] RRS 를 뜻하는 특별한 Vendor ID 값이 아니면 장치가 준비된 것이다 */
+				break; /* [한국어] 대기 종료 */
+		} else { /* [한국어] RRS 가시성이 없으면 RRS 와 "장치 없음"을 구분할 수 없다 */
+			pci_read_config_dword(dev, PCI_COMMAND, &id); /* [한국어] 그래서 Command 레지스터(오프셋 0x04)를 읽는다. 정상 장치라면 all-ones 일 수 없다 */
+			if (!PCI_POSSIBLE_ERROR(id)) /* [한국어] all-ones 가 아니면 정상 응답이다 */
+				break; /* [한국어] 대기 종료 */
+		}
 
-		if (delay > timeout) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			pci_warn(dev, "not ready %dms after %s; giving up\n", /* NVMe: PCI 장치에 대한 경고 로그를 출력한다. */
-				 delay - 1, reset_type); /* NVMe: 표현식을 평가한다. */
-			return -ENOTTY; /* NVMe: 오류 코드를 반환한다. */
-		} /* NVMe: 코드 블록을 종료한다. */
+		if (delay > timeout) { /* [한국어] 누적 대기가 상한을 넘었다 */
+			pci_warn(dev, "not ready %dms after %s; giving up\n", /* [한국어] 포기 사실을 경고로 남긴다 */
+				 delay - 1, reset_type); /* [한국어] delay 는 이미 다음 값으로 두 배가 돼 있으므로 실제 경과는 delay-1 이다(1+2+4+...+n = 2n-1) */
+			return -ENOTTY; /* [한국어] -ENOTTY 로 실패를 알린다 */
+		}
 
-		if (delay > PCI_RESET_WAIT) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			if (retrain) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-				retrain = false; /* NVMe: 변수에 값을 할당한다. */
-				if (pcie_failed_link_retrain(bridge) == 0) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-					delay = 1; /* NVMe: 변수에 값을 할당한다. */
-					continue; /* NVMe: 다음 반복으로 걸러뛴다. */
-				} /* NVMe: 코드 블록을 종료한다. */
-			} /* NVMe: 코드 블록을 종료한다. */
-			pci_info(dev, "not ready %dms after %s; waiting\n", /* NVMe: PCI 장치에 대한 정보 로그를 출력한다. */
-				 delay - 1, reset_type); /* NVMe: 표현식을 평가한다. */
-		} /* NVMe: 코드 블록을 종료한다. */
+		if (delay > PCI_RESET_WAIT) { /* [한국어] 1초를 넘겨도 안 살아난다 — 스펙이 보장하는 시간을 이미 지났다 */
+			if (retrain) { /* [한국어] 아직 링크 재훈련을 시도하지 않았다면 */
+				retrain = false; /* [한국어] 한 번만 시도하도록 플래그를 내린다 */
+				if (pcie_failed_link_retrain(bridge) == 0) { /* [한국어] 링크가 죽어 config 가 닿지 않는 경우일 수 있다. 재훈련에 성공하면 */
+					delay = 1; /* [한국어] 장치는 이제 막 링크를 얻은 셈이므로 대기 시간을 처음부터 다시 센다 */
+					continue; /* [한국어] 곧바로 다시 확인한다 */
+				}
+			}
+			pci_info(dev, "not ready %dms after %s; waiting\n", /* [한국어] 재훈련으로도 해결되지 않았으면 계속 기다린다는 사실만 알린다 */
+				 delay - 1, reset_type); /* [한국어] 지금까지 실제로 기다린 시간 */
+		}
 
-		msleep(delay); /* NVMe: msleep 함수를 호출한다. */
-		delay *= 2; /* NVMe: 포인터 변수를 선언한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+		msleep(delay); /* [한국어] 현재 간격만큼 잔다 */
+		delay *= 2; /* [한국어] 지수 백오프 — 다음 대기는 두 배로 늘린다. 준비가 빠른 장치는 몇 ms 만에 끝나고, 느린 장치도 폴링 횟수가 로그 규모로 억제된다 */
+	}
 
-	if (delay > PCI_RESET_WAIT) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pci_info(dev, "ready %dms after %s\n", delay - 1, /* NVMe: PCI 장치에 대한 정보 로그를 출력한다. */
-			 reset_type); /* NVMe: 표현식을 평가한다. */
-	else /* NVMe: 이전 조건이 모두 거짓일 때 실행한다. */
-		pci_dbg(dev, "ready %dms after %s\n", delay - 1, /* NVMe: PCI 장치에 대한 디버그 로그를 출력한다. */
-			reset_type); /* NVMe: 표현식을 평가한다. */
+	if (delay > PCI_RESET_WAIT) /* [한국어] 1초를 넘겨 걸렸다면 눈에 띄게 남길 가치가 있다 */
+		pci_info(dev, "ready %dms after %s\n", delay - 1, /* [한국어] 정보 수준으로 기록한다 */
+			 reset_type); /* [한국어] 어떤 리셋 뒤였는지도 함께 */
+	else /* [한국어] 평범하게 끝났으면 */
+		pci_dbg(dev, "ready %dms after %s\n", delay - 1, /* [한국어] 디버그 수준으로만 남긴다 */
+			reset_type); /* [한국어] 어떤 리셋 뒤였는지 */
 
-	return 0; /* NVMe: 성공(0)을 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return 0; /* [한국어] 장치가 config 요청에 정상 응답한다 */
+}
 
 /**
  * pci_power_up - Put the given device into D0
@@ -1524,67 +2464,96 @@ static int pci_dev_wait(struct pci_dev *dev, char *reset_type, int timeout) /* N
  * put the device in D0 via non-PCI means.
  */
 /*
- * pci_power_up:
- *   pci_dev 를 D0 상태로 깨운다. NVMe resume/reset 전에 controller 가 동작 가능하도록 전원을 복구한다.
+ * [한국어]
+ * pci_power_up - 장치를 D0 로 올리고, BAR 를 다시 써야 하는지 알려 준다.
+ *
+ * @dev: 깨울 PCI 장치.
+ * @return: 0 = D0 로 올렸고 BAR 는 그대로다.
+ *          1 = D0 로 올렸지만 내부 리셋이 있었을 수 있어 BAR 복원이 필요하다.
+ *          음수 = 실패. PM capability 가 없으면 플랫폼이 D0 로 올려 주었더라도
+ *                 언제나 -EIO 다(원본 주석 참고).
+ *
+ * 전원을 올리는 일은 두 층에서 이뤄진다. 먼저 플랫폼(ACPI)에 전원 자원을
+ * 켜 달라고 하고, 그 다음 장치의 PMCSR 로 D-state 를 D0 로 바꾼다. 순서가
+ * 중요하다 — 전원이 없으면 PMCSR 을 쓸 수조차 없다.
+ *
+ * 반환값 1 의 의미가 이 함수의 핵심이다. PCI PM 규격은 D3hot 에서 D0 로
+ * 돌아올 때 장치가 내부 리셋을 수행해도 된다고 허용한다(원본 주석의 5.4.1절).
+ * 그러면 BAR 를 비롯한 config 가 초기값으로 돌아가 버린다. 장치가
+ * PMCSR 의 No_Soft_Reset 비트로 "나는 리셋하지 않는다"고 선언했다면 안전하지만,
+ * 그렇지 않으면 호출자가 BAR 를 다시 써야 한다. 그 판단 결과를 1 로 알린다.
+ *
+ * PM capability 가 없을 때 굳이 -EIO 를 돌려주는 이유는, 이 함수의 계약이
+ * "PCI PM 으로 D0 를 만들었다"이기 때문이다. 플랫폼이 전원을 켜 주었을 수는
+ * 있어도 D-state 를 PCI 방식으로 확인·설정할 수단이 없으므로 성공이라
+ * 말할 수 없다. 대신 current_state 는 최선을 다해 기록해 둔다.
+ *
+ * 실행 문맥: ACPI 조작과 config 접근, 그리고 전이 지연 동안 잠든다.
+ * 반드시 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_set_full_power_state(), pci_restore_state() 경로, pci-driver.c 의 resume
+ *     → [이 함수] → platform_pci_set_power_state(), pci_read/write_config_word(),
+ *        pci_dev_d3_sleep()
  */
-int pci_power_up(struct pci_dev *dev) /* NVMe: pci_power_up 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	bool need_restore; /* NVMe: BAR 복원이 필요한지 여부를 저장할 변수이다. */
-	pci_power_t state; /* NVMe: 현재 PMCSR 의 power state 값을 저장할 변수이다. */
-	u16 pmcsr; /* NVMe: PCI PM Capability 의 PMCSR 레지스터 값이다. */
+int pci_power_up(struct pci_dev *dev)
+{
+	bool need_restore; /* [한국어] D0 도착 후 호출자가 BAR 를 다시 써야 하는지 */
+	pci_power_t state; /* [한국어] PMCSR 에서 읽어 낸, 이 함수에 들어오기 전의 실제 D-state */
+	u16 pmcsr; /* [한국어] PM Control/Status 레지스터 값 */
 
-	platform_pci_set_power_state(dev, PCI_D0); /* NVMe: 플랫폼 수준에서 NVMe 장치를 D0 상태로 전환한다. */
+	platform_pci_set_power_state(dev, PCI_D0); /* [한국어] 먼저 플랫폼에 전원 자원을 켜 달라고 한다. D3cold 였다면 이것 없이는 config 접근 자체가 불가능하다 */
 
-	if (!dev->pm_cap) { /* NVMe: NVMe 장치가 PCI PM capability 를 갖지 않으면 플랫폼 상태를 따른다. */
-		state = platform_pci_get_power_state(dev); /* NVMe: 플랫폼이 관리하는 NVMe 장치의 전원 상태를 읽는다. */
-		if (state == PCI_UNKNOWN) /* NVMe: 플랫폼 상태를 알 수 없으면 */
-			dev->current_state = PCI_D0; /* NVMe: NVMe 장치를 D0 로 가정한다. */
-		else /* NVMe: 플랫폼 상태가 확인되면 */
-			dev->current_state = state; /* NVMe: 해당 상태를 NVMe pci_dev 에 반영한다. */
+	if (!dev->pm_cap) { /* [한국어] PM capability 가 없는 장치 — PCI 방식으로 D-state 를 다룰 수 없다 */
+		state = platform_pci_get_power_state(dev); /* [한국어] 그래도 플랫폼이 아는 상태는 기록해 둔다 */
+		if (state == PCI_UNKNOWN) /* [한국어] 플랫폼도 모른다면 */
+			dev->current_state = PCI_D0; /* [한국어] 전원이 켜져 있다고 보는 쪽이 안전하다 */
+		else /* [한국어] 플랫폼이 답을 주었으면 */
+			dev->current_state = state; /* [한국어] 그 값을 그대로 기록한다 */
 
-		return -EIO; /* NVMe: 오류 코드를 반환한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+		return -EIO; /* [한국어] 상태 기록과 별개로, PCI PM 으로 D0 를 만들지는 못했으므로 실패로 보고한다 */
+	}
 
-	if (pci_dev_is_disconnected(dev)) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		dev->current_state = PCI_D3cold; /* NVMe: 연결이 끊긴 NVMe 장치를 D3cold 로 표시한다. */
-		return -EIO; /* NVMe: 전원 상승 실패를 반환한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+	if (pci_dev_is_disconnected(dev)) { /* [한국어] 그 사이 장치가 뽑혔거나 오류로 끊겼다면 config 를 써 봐야 소용없다 */
+		dev->current_state = PCI_D3cold; /* [한국어] 응답하지 않는 장치는 전원이 없는 것과 같다고 기록한다 */
+		return -EIO; /* [한국어] 실패 */
+	}
 
-	pci_read_config_word(dev, dev->pm_cap + PCI_PM_CTRL, &pmcsr); /* NVMe: PCI 설정 공간 2바이트를 읽는다. */
-	if (PCI_POSSIBLE_ERROR(pmcsr)) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pci_err(dev, "Unable to change power state from %s to D0, device inaccessible\n", /* NVMe: PCI 장치에 대한 에러 로그를 출력한다. */
-			pci_power_name(dev->current_state)); /* NVMe: pci_power_name 함수를 호출한다. */
-		dev->current_state = PCI_D3cold; /* NVMe: 접근 불가능한 NVMe 장치를 D3cold 로 표시한다. */
-		return -EIO; /* NVMe: 전원 상승 실패를 반환한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+	pci_read_config_word(dev, dev->pm_cap + PCI_PM_CTRL, &pmcsr); /* [한국어] PMCSR 을 읽어 지금 어느 D-state 인지 확인한다 */
+	if (PCI_POSSIBLE_ERROR(pmcsr)) { /* [한국어] all-ones 가 읽혔다 — 응답 없는 config 읽기의 표식이다 */
+		pci_err(dev, "Unable to change power state from %s to D0, device inaccessible\n", /* [한국어] 어느 상태에서 D0 로 못 갔는지 남긴다 */
+			pci_power_name(dev->current_state)); /* [한국어] pci_power_names[] 표를 통해 "D3hot" 같은 문자열로 바꾼다 */
+		dev->current_state = PCI_D3cold; /* [한국어] 접근할 수 없는 장치는 D3cold 로 기록한다 */
+		return -EIO; /* [한국어] 실패 */
+	}
 
-	state = pmcsr & PCI_PM_CTRL_STATE_MASK; /* NVMe: PMCSR 의 PowerState 필드를 추출한다. */
+	state = pmcsr & PCI_PM_CTRL_STATE_MASK; /* [한국어] PMCSR 하위 2비트가 현재 D-state 다 */
 
-	need_restore = (state == PCI_D3hot || dev->current_state >= PCI_D3hot) && /* NVMe: 표현식을 이어서 작성한다. */
-			!(pmcsr & PCI_PM_CTRL_NO_SOFT_RESET); /* NVMe: D3hot 에서 깨어날 때 BAR 가 손실되었는지 판단한다. */
+	need_restore = (state == PCI_D3hot || dev->current_state >= PCI_D3hot) && /* [한국어] 지금 D3hot 이거나, 소프트웨어가 D3hot 이상(D3cold 포함)으로 알고 있었다면 내부 리셋이 일어났을 수 있고 */
+			!(pmcsr & PCI_PM_CTRL_NO_SOFT_RESET); /* [한국어] No_Soft_Reset 비트가 0 이면 실제로 리셋한다는 선언이다 — 그때만 BAR 복원이 필요하다. 이 비트가 1 이면 장치가 D3hot 을 오가도 config 를 유지한다고 약속한 것이다 */
 
-	if (state == PCI_D0) /* NVMe: 이미 D0 상태이면 */
-		goto end; /* NVMe: 추가 전환 없이 종료 레이블로 이동한다. */
+	if (state == PCI_D0) /* [한국어] 이미 D0 라면 전이 자체가 필요 없다 */
+		goto end; /* [한국어] 전이와 지연을 건너뛰고 마무리로 간다. need_restore 계산은 이미 끝나 있다 */
 
 	/*
 	 * Force the entire word to 0. This doesn't affect PME_Status, disables
 	 * PME_En, and sets PowerState to 0.
 	 */
-	pci_write_config_word(dev, dev->pm_cap + PCI_PM_CTRL, 0); /* NVMe: PMCSR 의 PowerState 를 D0 으로 설정하고 PME_En 을 클리어한다. */
+	pci_write_config_word(dev, dev->pm_cap + PCI_PM_CTRL, 0); /* [한국어] 워드 전체를 0 으로 쓴다. PowerState 는 0(D0)이 되고 PME_En 은 꺼진다. PME_Status 는 W1C 라서 0 을 써도 지워지지 않아 보존된다 — 아직 처리하지 않은 깨우기 사건을 잃지 않기 위해서다 */
 
 	/* Mandatory transition delays; see PCI PM 1.2. */
-	if (state == PCI_D3hot) /* NVMe: 이전 상태가 D3hot 이면 */
-		pci_dev_d3_sleep(dev); /* NVMe: NVMe D3hot->D0 전환 후 필요한 지연을 준다. */
-	else if (state == PCI_D2) /* NVMe: 이전 상태가 D2 이면 */
-		udelay(PCI_PM_D2_DELAY); /* NVMe: D2->D0 전환에 필요한 짧은 지연을 준다. */
+	if (state == PCI_D3hot) /* [한국어] D3hot 에서 올라온 경우 */
+		pci_dev_d3_sleep(dev); /* [한국어] 규격이 정한 D3hot→D0 안정화 시간을 지킨다 */
+	else if (state == PCI_D2) /* [한국어] D2 에서 올라온 경우 */
+		udelay(PCI_PM_D2_DELAY); /* [한국어] D2→D0 은 훨씬 짧아 마이크로초 단위 지연으로 충분하다 */
 
-end: /* NVMe: 레이블을 정의한다. */
-	dev->current_state = PCI_D0; /* NVMe: NVMe pci_dev 의 현재 상태를 D0 로 갱신한다. */
-	if (need_restore) /* NVMe: BAR 복원이 필요하면 */
-		return 1; /* NVMe: 호출자에게 BAR 복원이 필요함을 알린다. */
+end: /* [한국어] 이미 D0 였을 때 건너뛰어 오는 지점 */
+	dev->current_state = PCI_D0; /* [한국어] D0 로 확정 기록한다 */
+	if (need_restore) /* [한국어] 내부 리셋 가능성이 있었으면 */
+		return 1; /* [한국어] 1 을 돌려 호출자가 BAR 를 복원하게 한다 */
 
-	return 0; /* NVMe: D0 전환 성공, BAR 복원 불필요를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return 0; /* [한국어] BAR 가 살아 있으므로 할 일이 없다 */
+}
 
 /**
  * pci_set_full_power_state - Put a PCI device into D0 and update its state
@@ -1600,28 +2569,52 @@ end: /* NVMe: 레이블을 정의한다. */
  * function.
  */
 /*
- * pci_set_full_power_state:
- *   장치를 완전한 D0 상태로 전환한다. NVMe probe 나 resume 시 D3hot/D3cold 에서 D0로 복귀한다.
+ * [한국어]
+ * pci_set_full_power_state - D0 로 올린 뒤 확인·BAR 복원·ASPM 재설정까지 마친다.
+ *
+ * @dev: 깨울 PCI 장치.
+ * @locked: 호출자가 이미 pci_bus_sem 을 쥐고 있는지. 아래 ASPM 코드가 그 락을
+ *          다시 잡을지 말지 결정하는 데 쓴다.
+ * @return: 0 성공(또는 이미 D0). 음수면 실패.
+ *
+ * pci_power_up() 이 하는 일에 세 가지를 더한다.
+ *   1) PMCSR 을 다시 읽어 정말 D0 가 됐는지 확인한다. 장치가 전이를 거부하는
+ *      경우가 실제로 있어, 성공했다고 가정하면 이후 접근이 모두 어긋난다.
+ *   2) pci_power_up() 이 1 을 돌려주면 BAR 를 복원한다. 원본 주석이 드는
+ *      예처럼, D3hot→D0 에서 내부 리셋을 하는 장치와 부팅 시 장치를 D3hot 에
+ *      둔 채 넘기는 BIOS 가 실제로 존재한다.
+ *   3) 상위 브리지의 ASPM 설정을 다시 계산한다. 링크 절전 정책은 양쪽 끝의
+ *      전원 상태에 따라 달라지기 때문이다.
+ *
+ * 원본 주석이 일러 두듯, 곧바로 pci_restore_state() 를 부를 참이라면 이
+ * 함수 대신 pci_power_up() 을 직접 쓰는 편이 낫다 — BAR 복원이 두 번 되기
+ * 때문이다.
+ *
+ * 실행 문맥: 잠들 수 있다. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   __pci_set_power_state() → [이 함수]
+ *     → pci_power_up(), pci_restore_bars(), pcie_aspm_pm_state_change()
  */
-static int pci_set_full_power_state(struct pci_dev *dev, bool locked) /* NVMe: pci_set_full_power_state 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	u16 pmcsr; /* NVMe: u16 타입 변수를 선언한다. */
-	int ret; /* NVMe: int 타입 변수를 선언한다. */
+static int pci_set_full_power_state(struct pci_dev *dev, bool locked)
+{
+	u16 pmcsr; /* [한국어] 확인용으로 다시 읽을 PMCSR */
+	int ret; /* [한국어] pci_power_up() 의 결과(0/1/음수) */
 
-	ret = pci_power_up(dev); /* NVMe: 변수에 값을 할당한다. */
-	if (ret < 0) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		if (dev->current_state == PCI_D0) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			return 0; /* NVMe: 성공(0)을 반환한다. */
+	ret = pci_power_up(dev); /* [한국어] 실제 D0 전이를 맡긴다 */
+	if (ret < 0) { /* [한국어] 실패한 경우 */
+		if (dev->current_state == PCI_D0) /* [한국어] PM capability 가 없어 -EIO 를 받았더라도 플랫폼이 D0 로 올려 두었다면 */
+			return 0; /* [한국어] 목적은 이룬 것이므로 성공으로 본다 */
 
-		return ret; /* NVMe: 연산 결과를 반환한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+		return ret; /* [한국어] 그 밖의 실패는 그대로 전달한다 */
+	}
 
-	pci_read_config_word(dev, dev->pm_cap + PCI_PM_CTRL, &pmcsr); /* NVMe: PCI 설정 공간 2바이트를 읽는다. */
-	dev->current_state = pmcsr & PCI_PM_CTRL_STATE_MASK; /* NVMe: 변수에 값을 할당한다. */
-	if (dev->current_state != PCI_D0) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pci_info_ratelimited(dev, "Refused to change power state from %s to D0\n", /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-				     pci_power_name(dev->current_state)); /* NVMe: pci_power_name 함수를 호출한다. */
-	} else if (ret > 0) { /* NVMe: if 함수를 정의한다. */
+	pci_read_config_word(dev, dev->pm_cap + PCI_PM_CTRL, &pmcsr); /* [한국어] 전이 결과를 하드웨어에서 다시 확인한다 */
+	dev->current_state = pmcsr & PCI_PM_CTRL_STATE_MASK; /* [한국어] 읽은 값으로 캐시를 갱신한다 */
+	if (dev->current_state != PCI_D0) { /* [한국어] D0 가 아니면 장치가 전이를 거부한 것이다 */
+		pci_info_ratelimited(dev, "Refused to change power state from %s to D0\n", /* [한국어] 로그가 넘치지 않도록 빈도를 제한해 알린다. 실패로 반환하지는 않는다 — 이후 접근이 실제로 되는 경우도 있어 진행을 막지는 않는다 */
+				     pci_power_name(dev->current_state)); /* [한국어] 거부된 뒤 남아 있는 상태 이름 */
+	} else if (ret > 0) { /* [한국어] D0 로 잘 갔고, pci_power_up() 이 BAR 복원이 필요하다고 알렸다면 */
 		/*
 		 * According to section 5.4.1 of the "PCI BUS POWER MANAGEMENT
 		 * INTERFACE SPECIFICATION, REV. 1.2", a device transitioning
@@ -1635,14 +2628,14 @@ static int pci_set_full_power_state(struct pci_dev *dev, bool locked) /* NVMe: p
 		 * restore at least the BARs so that the device will be
 		 * accessible to its driver.
 		 */
-		pci_restore_bars(dev); /* NVMe: NVMe controller 의 BAR 레지스터를 복원한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+		pci_restore_bars(dev); /* [한국어] resource[] 에 남아 있는 배정 결과를 BAR 에 다시 써 넣는다 */
+	}
 
-	if (dev->bus->self) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pcie_aspm_pm_state_change(dev->bus->self, locked); /* NVMe: pcie_aspm_pm_state_change 함수를 호출한다. */
+	if (dev->bus->self) /* [한국어] 루트 버스가 아니라 브리지 아래에 있다면 */
+		pcie_aspm_pm_state_change(dev->bus->self, locked); /* [한국어] 그 브리지 링크의 ASPM 정책을 다시 계산한다. locked 는 pci_bus_sem 중복 획득을 피하려고 전달한다 */
 
-	return 0; /* NVMe: 성공(0)을 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return 0; /* [한국어] D0 도달(또는 이미 D0) */
+}
 
 /**
  * __pci_dev_set_current_state - Set current state of a PCI device
@@ -1650,16 +2643,30 @@ static int pci_set_full_power_state(struct pci_dev *dev, bool locked) /* NVMe: p
  * @data: pointer to state to be set
  */
 /*
- * __pci_dev_set_current_state:
- *   개별 pci_dev 의 current_state 필드를 설정한다. NVMe power state 추적의 낶부 헬퍼이다.
+ * [한국어]
+ * __pci_dev_set_current_state - 장치 하나의 current_state 만 바꾸는 pci_walk_bus 콜백.
+ *
+ * @dev: 순회 중 만난 장치.
+ * @data: pci_power_t 하나를 가리키는 포인터. pci_walk_bus 의 콜백 시그니처가
+ *        void * 라서 이렇게 감싸 넘긴다.
+ * @return: 항상 0 — pci_walk_bus 에서 0 이 아니면 순회가 중단되므로,
+ *          모든 장치에 적용하기 위해 언제나 0 이다.
+ *
+ * 하드웨어를 건드리지 않고 소프트웨어 캐시만 고친다. 브리지가 D3cold 로
+ * 내려가면 그 아래 장치는 config 접근조차 불가능해져 실물을 읽을 수 없으므로,
+ * "논리적으로 이 상태가 됐다"고 기록만 해 두는 것이다.
+ *
+ * 호출 체인:
+ *   pci_bus_set_current_state() / __pci_bus_set_current_state()
+ *     → pci_walk_bus() → [이 함수]
  */
-static int __pci_dev_set_current_state(struct pci_dev *dev, void *data) /* NVMe: __pci_dev_set_current_state 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	pci_power_t state = *(pci_power_t *)data; /* NVMe: 변수에 값을 할당한다. */
+static int __pci_dev_set_current_state(struct pci_dev *dev, void *data)
+{
+	pci_power_t state = *(pci_power_t *)data; /* [한국어] void * 로 넘어온 값을 pci_power_t 로 되돌린다 */
 
-	dev->current_state = state; /* NVMe: 변수에 값을 할당한다. */
-	return 0; /* NVMe: 성공(0)을 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	dev->current_state = state; /* [한국어] 하드웨어는 건드리지 않고 캐시만 갱신한다 */
+	return 0; /* [한국어] 0 을 돌려 순회를 계속하게 한다 */
+}
 
 /**
  * pci_bus_set_current_state - Walk given bus and set current state of devices
@@ -1667,29 +2674,60 @@ static int __pci_dev_set_current_state(struct pci_dev *dev, void *data) /* NVMe:
  * @state: state to be set
  */
 /*
- * pci_bus_set_current_state:
- *   bus 상 모든 장치의 current_state 를 설정한다. NVMe bus 전체의 D-state 동기화에 사용된다.
+ * [한국어]
+ * pci_bus_set_current_state - 서브트리 전체의 전원 상태 캐시를 한 값으로 맞춘다.
+ *
+ * @bus: 훑을 서브트리의 꼭대기 버스. NULL 이면 아무 것도 하지 않는다.
+ * @state: 기록할 D-state.
+ * @return: 없음.
+ *
+ * 브리지 하나의 전원 상태를 바꾸면 그 아래 장치들의 실제 상태도 함께 바뀐다.
+ * 예를 들어 브리지가 D3cold 로 내려가면 아래 장치도 전원을 잃는다. 그러나
+ * 그 장치들의 config 에는 이제 닿을 수 없어 읽어서 확인할 방법이 없다.
+ * 그래서 소프트웨어 캐시만 일괄로 맞춰 둔다.
+ *
+ * 실행 문맥: pci_walk_bus 가 pci_bus_sem 을 잡고 순회한다. 그 락을 이미
+ * 쥐고 있는 호출자는 이 함수 대신 __pci_bus_set_current_state() 를 써야 한다.
+ *
+ * 호출 체인:
+ *   전원 전이 경로 → [이 함수] → pci_walk_bus() → __pci_dev_set_current_state()
  */
-void pci_bus_set_current_state(struct pci_bus *bus, pci_power_t state) /* NVMe: pci_bus_set_current_state 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	if (bus) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pci_walk_bus(bus, __pci_dev_set_current_state, &state); /* NVMe: pci_walk_bus 함수를 호출한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+void pci_bus_set_current_state(struct pci_bus *bus, pci_power_t state)
+{
+	if (bus) /* [한국어] NULL 버스 방어 — 브리지의 subordinate 버스가 없을 수 있다 */
+		pci_walk_bus(bus, __pci_dev_set_current_state, &state); /* [한국어] 서브트리의 모든 장치에 같은 상태를 기록한다 */
+}
 
 /*
- * __pci_bus_set_current_state:
- *   bus 의 current_state 설정을 수행하는 낶부 함수이다. NVMe bus power 일괄 전환에 참여한다.
+ * [한국어]
+ * __pci_bus_set_current_state - 락 보유 여부에 따라 순회 방법을 골라 상태 캐시를 맞춘다.
+ *
+ * @bus: 훑을 서브트리의 꼭대기 버스.
+ * @state: 기록할 D-state.
+ * @locked: 호출자가 이미 pci_bus_sem 을 쥐고 있는가.
+ * @return: 없음.
+ *
+ * pci_walk_bus() 는 내부에서 pci_bus_sem 을 잡는다. 이미 그 락을 쥔 호출자가
+ * 부르면 자기 자신과 교착하므로, 그런 경우를 위해 락을 잡지 않는
+ * pci_walk_bus_locked() 를 대신 쓴다. 전원 전이 경로는 락을 쥔 채 들어오는
+ * 경우와 아닌 경우가 모두 있어 이 갈래가 필요하다.
+ *
+ * 실행 문맥: locked=true 면 pci_bus_sem 을 이미 쥔 상태여야 한다.
+ *
+ * 호출 체인:
+ *   __pci_set_power_state() → [이 함수]
+ *     → pci_walk_bus_locked() 또는 pci_walk_bus() → __pci_dev_set_current_state()
  */
-static void __pci_bus_set_current_state(struct pci_bus *bus, pci_power_t state, bool locked) /* NVMe: __pci_bus_set_current_state 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	if (!bus) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return; /* NVMe: 함수 실행을 종료한다. */
+static void __pci_bus_set_current_state(struct pci_bus *bus, pci_power_t state, bool locked)
+{
+	if (!bus) /* [한국어] 브리지에 하위 버스가 없으면 */
+		return; /* [한국어] 훑을 것이 없다 */
 
-	if (locked) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pci_walk_bus_locked(bus, __pci_dev_set_current_state, &state); /* NVMe: pci_walk_bus_locked 함수를 호출한다. */
-	else /* NVMe: 이전 조건이 모두 거짓일 때 실행한다. */
-		pci_walk_bus(bus, __pci_dev_set_current_state, &state); /* NVMe: pci_walk_bus 함수를 호출한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	if (locked) /* [한국어] 호출자가 이미 pci_bus_sem 을 쥐고 있으면 */
+		pci_walk_bus_locked(bus, __pci_dev_set_current_state, &state); /* [한국어] 락을 다시 잡지 않는 판을 쓴다 — 그러지 않으면 자기 자신과 교착한다 */
+	else /* [한국어] 락이 없으면 */
+		pci_walk_bus(bus, __pci_dev_set_current_state, &state); /* [한국어] 스스로 pci_bus_sem 을 잡는 일반 순회를 쓴다 */
+}
 
 /**
  * pci_set_low_power_state - Put a PCI device into a low-power state.
@@ -1707,15 +2745,43 @@ static void __pci_bus_set_current_state(struct pci_bus *bus, pci_power_t state, 
  * 0 if device's power state has been successfully changed.
  */
 /*
- * pci_set_low_power_state:
- *   장치를 D1/D2/D3hot 등 저전원 상태로 전환한다. NVMe runtime suspend 시 controller 저전원 진입을 제어한다.
+ * [한국어]
+ * pci_set_low_power_state - 장치의 PMCSR 로 D1/D2/D3hot 에 들어간다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @state: 목표 저전원 상태(PCI_D1, PCI_D2, PCI_D3hot).
+ * @locked: pci_bus_sem 보유 여부. ASPM 재설정에 그대로 전달한다.
+ * @return: 0 성공(또는 이미 그 상태). -EINVAL 잘못된 전이. -EIO PM capability
+ *          없음 또는 장치가 그 상태를 지원하지 않음.
+ *
+ * 전원을 "내리는" 쪽은 올리는 쪽과 규칙이 다르다. PCI PM 규격상 D0 로는
+ * 어느 상태에서든 갈 수 있지만, 저전원 상태끼리는 더 깊은 쪽으로만 갈 수 있다.
+ * D1 에서 D3 는 되지만 D3 에서 D1 은 안 되고, 굳이 가려면 D0 를 거쳐야 한다.
+ * 그래서 맨 먼저 전이 방향을 검사한다.
+ *
+ * D1 과 D2 는 선택 기능이라 장치가 지원하지 않을 수 있다. 지원 여부는 열거
+ * 때 PM capability 에서 읽어 dev->d1_support / d2_support 에 담아 둔다.
+ * D3hot 은 PM capability 가 있으면 언제나 지원된다.
+ *
+ * 상태를 쓴 뒤 규격이 정한 안정화 시간을 지키고, 다시 읽어 실제로 전이됐는지
+ * 확인한다. 장치가 거부하는 경우가 있어 확인 없이는 믿을 수 없다.
+ *
+ * 참고 — NVMe 의 APST(Autonomous Power State Transition) 와는 다른 층이다.
+ * APST 는 NVMe 컨트롤러가 스스로 자기 전력 상태를 바꾸는 NVMe 규격의 기능이고,
+ * 여기서 다루는 D-state 는 PCI 링크·슬롯 수준의 전원 상태다.
+ *
+ * 실행 문맥: 전이 지연 동안 잠든다. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   __pci_set_power_state() → [이 함수]
+ *     → pci_read/write_config_word(), pci_dev_d3_sleep(), pcie_aspm_pm_state_change()
  */
-static int pci_set_low_power_state(struct pci_dev *dev, pci_power_t state, bool locked) /* NVMe: pci_set_low_power_state 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	u16 pmcsr; /* NVMe: u16 타입 변수를 선언한다. */
+static int pci_set_low_power_state(struct pci_dev *dev, pci_power_t state, bool locked)
+{
+	u16 pmcsr; /* [한국어] PM Control/Status 레지스터 값 */
 
-	if (!dev->pm_cap) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return -EIO; /* NVMe: 오류 코드를 반환한다. */
+	if (!dev->pm_cap) /* [한국어] PM capability 가 없으면 D-state 를 바꿀 레지스터 자체가 없다 */
+		return -EIO; /* [한국어] -EIO */
 
 	/*
 	 * Validate transition: We can enter D0 from any state, but if
@@ -1723,69 +2789,101 @@ static int pci_set_low_power_state(struct pci_dev *dev, pci_power_t state, bool 
 	 * we can go from D1 to D3, but we can't go directly from D3 to D1;
 	 * we'd have to go from D3 to D0, then to D1.
 	 */
-	if (dev->current_state <= PCI_D3cold && dev->current_state > state) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pci_dbg(dev, "Invalid power transition (from %s to %s)\n", /* NVMe: PCI 장치에 대한 디버그 로그를 출력한다. */
-			pci_power_name(dev->current_state), /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-			pci_power_name(state)); /* NVMe: pci_power_name 함수를 호출한다. */
-		return -EINVAL; /* NVMe: 오류 코드를 반환한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+	if (dev->current_state <= PCI_D3cold && dev->current_state > state) { /* [한국어] 현재 상태가 유효 범위 안이면서 목표보다 깊다면 얕은 쪽으로 되돌아가려는 것이다 — 규격이 금지한다 */
+		pci_dbg(dev, "Invalid power transition (from %s to %s)\n", /* [한국어] 어떤 전이가 거부됐는지 남긴다 */
+			pci_power_name(dev->current_state), /* [한국어] 현재 상태 이름 */
+			pci_power_name(state)); /* [한국어] 목표 상태 이름 */
+		return -EINVAL; /* [한국어] 잘못된 요청 */
+	}
 
 	/* Check if this device supports the desired state */
-	if ((state == PCI_D1 && !dev->d1_support) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-	   || (state == PCI_D2 && !dev->d2_support)) /* NVMe: 구조체 멤버에 접근한다. */
-		return -EIO; /* NVMe: 오류 코드를 반환한다. */
+	if ((state == PCI_D1 && !dev->d1_support) /* [한국어] D1 을 요청했는데 장치가 D1 을 지원하지 않거나 */
+	   || (state == PCI_D2 && !dev->d2_support)) /* [한국어] D2 를 요청했는데 D2 를 지원하지 않으면. 두 상태는 PM capability 에서 선택 사항이다 */
+		return -EIO; /* [한국어] -EIO */
 
-	if (dev->current_state == state) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return 0; /* NVMe: 성공(0)을 반환한다. */
+	if (dev->current_state == state) /* [한국어] 이미 목표 상태면 */
+		return 0; /* [한국어] 할 일이 없다 */
 
-	pci_read_config_word(dev, dev->pm_cap + PCI_PM_CTRL, &pmcsr); /* NVMe: PCI 설정 공간 2바이트를 읽는다. */
-	if (PCI_POSSIBLE_ERROR(pmcsr)) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pci_err(dev, "Unable to change power state from %s to %s, device inaccessible\n", /* NVMe: PCI 장치에 대한 에러 로그를 출력한다. */
-			pci_power_name(dev->current_state), /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-			pci_power_name(state)); /* NVMe: pci_power_name 함수를 호출한다. */
-		dev->current_state = PCI_D3cold; /* NVMe: 변수에 값을 할당한다. */
-		return -EIO; /* NVMe: 오류 코드를 반환한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+	pci_read_config_word(dev, dev->pm_cap + PCI_PM_CTRL, &pmcsr); /* [한국어] 현재 PMCSR 을 읽는다. 다른 비트(PME_En, PME_Status)를 보존한 채 상태 필드만 바꾸기 위해서다 */
+	if (PCI_POSSIBLE_ERROR(pmcsr)) { /* [한국어] all-ones 면 장치가 응답하지 않는다 */
+		pci_err(dev, "Unable to change power state from %s to %s, device inaccessible\n", /* [한국어] 실패를 남긴다 */
+			pci_power_name(dev->current_state), /* [한국어] 현재 상태 이름 */
+			pci_power_name(state)); /* [한국어] 목표 상태 이름 */
+		dev->current_state = PCI_D3cold; /* [한국어] 응답하지 않는 장치는 전원이 없는 것으로 본다 */
+		return -EIO; /* [한국어] -EIO */
+	}
 
-	pmcsr &= ~PCI_PM_CTRL_STATE_MASK; /* NVMe: 변수에 값을 할당한다. */
-	pmcsr |= state; /* NVMe: 변수에 값을 할당한다. */
+	pmcsr &= ~PCI_PM_CTRL_STATE_MASK; /* [한국어] 상태 필드(하위 2비트)만 지운다. PME_En 과 PME_Status 는 건드리지 않는다 — 저전원으로 내려가면서 깨우기 설정을 잃으면 안 된다 */
+	pmcsr |= state; /* [한국어] 목표 D-state 값을 그 자리에 넣는다. PCI_D1=1, PCI_D2=2, PCI_D3hot=3 이 그대로 비트 값이다 */
 
 	/* Enter specified state */
-	pci_write_config_word(dev, dev->pm_cap + PCI_PM_CTRL, pmcsr); /* NVMe: PCI 설정 공간 2바이트를 쓴다. */
+	pci_write_config_word(dev, dev->pm_cap + PCI_PM_CTRL, pmcsr); /* [한국어] PMCSR 에 쓰는 순간 장치가 그 상태로 들어간다 */
 
 	/* Mandatory power management transition delays; see PCI PM 1.2. */
-	if (state == PCI_D3hot) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pci_dev_d3_sleep(dev); /* NVMe: pci_dev_d3_sleep 함수를 호출한다. */
-	else if (state == PCI_D2) /* NVMe: 이전 조건이 거짓일 때 추가 조건을 검사한다. */
-		udelay(PCI_PM_D2_DELAY); /* NVMe: udelay 함수를 호출한다. */
+	if (state == PCI_D3hot) /* [한국어] D3hot 로 내려가는 경우 */
+		pci_dev_d3_sleep(dev); /* [한국어] 규격이 정한 안정화 시간을 지킨다. 이 지연 없이 곧바로 config 를 건드리면 응답하지 않는다 */
+	else if (state == PCI_D2) /* [한국어] D2 로 내려가는 경우 */
+		udelay(PCI_PM_D2_DELAY); /* [한국어] D2 는 훨씬 짧아 마이크로초 단위로 충분하다. D1 은 지연이 필요 없다 */
 
-	pci_read_config_word(dev, dev->pm_cap + PCI_PM_CTRL, &pmcsr); /* NVMe: PCI 설정 공간 2바이트를 읽는다. */
-	dev->current_state = pmcsr & PCI_PM_CTRL_STATE_MASK; /* NVMe: 변수에 값을 할당한다. */
-	if (dev->current_state != state) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pci_info_ratelimited(dev, "Refused to change power state from %s to %s\n", /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-				     pci_power_name(dev->current_state), /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-				     pci_power_name(state)); /* NVMe: pci_power_name 함수를 호출한다. */
+	pci_read_config_word(dev, dev->pm_cap + PCI_PM_CTRL, &pmcsr); /* [한국어] 실제로 전이됐는지 다시 읽어 확인한다 */
+	dev->current_state = pmcsr & PCI_PM_CTRL_STATE_MASK; /* [한국어] 읽은 값으로 캐시를 갱신한다 */
+	if (dev->current_state != state) /* [한국어] 목표와 다르면 장치가 전이를 거부한 것이다 */
+		pci_info_ratelimited(dev, "Refused to change power state from %s to %s\n", /* [한국어] 로그 빈도를 제한해 알린다. 실패로 반환하지는 않는다 — 상태 캐시는 이미 실물에 맞춰 두었으므로 상위 로직은 정확한 값으로 동작한다 */
+				     pci_power_name(dev->current_state), /* [한국어] 실제로 머무른 상태 */
+				     pci_power_name(state)); /* [한국어] 가려던 상태 */
 
-	if (dev->bus->self) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pcie_aspm_pm_state_change(dev->bus->self, locked); /* NVMe: pcie_aspm_pm_state_change 함수를 호출한다. */
+	if (dev->bus->self) /* [한국어] 루트 버스가 아니라 브리지 아래에 있다면 */
+		pcie_aspm_pm_state_change(dev->bus->self, locked); /* [한국어] 링크 절전(ASPM) 정책을 새 전원 상태에 맞춰 다시 계산한다 */
 
-	return 0; /* NVMe: 성공(0)을 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return 0; /* [한국어] 전이 시도를 마쳤다 */
+}
 
 /*
- * __pci_set_power_state:
- *   pci_dev 의 전원 상태 전이를 실제 수행한다. NVMe D-state 전환의 핵심 경로이다.
+ * [한국어]
+ * __pci_set_power_state - 전원 상태 전이의 공통 본체. 유효성 검사와 경로 선택을 맡는다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @state: 목표 D-state.
+ * @locked: pci_bus_sem 보유 여부.
+ * @return: 0 성공 또는 "할 필요 없음". 음수면 실패.
+ *
+ * 요청을 그대로 하드웨어에 넘기지 않고 여러 겹으로 거른다.
+ *   1) 범위를 강제로 맞춘다(클램프). 잘못된 값으로 레지스터를 쓰는 것보다
+ *      가장 가까운 유효 상태로 조정하는 편이 안전하다.
+ *   2) 장치나 상위 브리지가 PCI PM 을 지원하지 않으면 D1/D2 요청을 조용히
+ *      무시한다. 원본 주석대로, 이런 경우 D0 로 가는 요청만 의미가 있다.
+ *   3) 이미 목표 상태면 아무 것도 하지 않는다.
+ *   4) D3 진입을 금지하는 quirk 가 걸린 장치는 요청을 무시한다. 실제로 D3 에서
+ *      돌아오지 못하는 하드웨어가 있어 목록으로 관리한다.
+ *
+ * 그 뒤 목적지에 따라 경로가 갈린다.
+ *   - D0 → pci_set_full_power_state()
+ *   - D3cold → 먼저 장치의 PMCSR 로 D3hot 까지 내려간 뒤, 플랫폼에 전원을
+ *     끊게 한다. 전원을 끊기 전에 장치를 정리된 상태로 두어야 하기 때문이다.
+ *     브리지를 껐다면 그 아래 계층 전체가 전원을 잃으므로 캐시를 함께 맞춘다.
+ *   - 그 밖(D1/D2/D3hot) → PMCSR 전이 후 플랫폼에도 알린다.
+ *
+ * 반환값 규약이 미묘하다. 플랫폼 전이가 실패하면 그때서야 앞 단계(PMCSR)의
+ * 결과를 돌려준다 — 플랫폼이 성공했다면 PMCSR 단계의 실패는 결과적으로
+ * 문제가 되지 않기 때문이다.
+ *
+ * 실행 문맥: 잠들 수 있다. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_set_power_state() / pci_set_power_state_locked() → [이 함수]
+ *     → pci_set_full_power_state(), pci_set_low_power_state(),
+ *        pci_platform_power_transition(), __pci_bus_set_current_state()
  */
-static int __pci_set_power_state(struct pci_dev *dev, pci_power_t state, bool locked) /* NVMe: __pci_set_power_state 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	int error; /* NVMe: NVMe D-state 전환의 오류 코드를 저장할 변수이다. */
+static int __pci_set_power_state(struct pci_dev *dev, pci_power_t state, bool locked)
+{
+	int error; /* [한국어] 하위 전이 함수들의 반환값을 모아 두는 곳 */
 
 	/* Bound the state we're entering */
-	if (state > PCI_D3cold) /* NVMe: 요청된 D-state 가 D3cold 보다 크면 */
-		state = PCI_D3cold; /* NVMe: NVMe 전원 상태를 D3cold 로 클램프한다. */
-	else if (state < PCI_D0) /* NVMe: 요청된 D-state 가 D0 보다 낮으면 */
-		state = PCI_D0; /* NVMe: NVMe 전원 상태를 D0 로 클램프한다. */
-	else if ((state == PCI_D1 || state == PCI_D2) && pci_no_d1d2(dev)) /* NVMe: NVMe 장치나 상위 bridge 가 D1/D2 를 지원하지 않으면 */
+	if (state > PCI_D3cold) /* [한국어] D3cold 보다 깊은 상태는 없다 */
+		state = PCI_D3cold; /* [한국어] 가장 깊은 유효 상태로 맞춘다 */
+	else if (state < PCI_D0) /* [한국어] D0 보다 얕은 상태도 없다 */
+		state = PCI_D0; /* [한국어] 가장 얕은 유효 상태로 맞춘다 */
+	else if ((state == PCI_D1 || state == PCI_D2) && pci_no_d1d2(dev)) /* [한국어] D1/D2 를 요청했는데 장치나 상위 브리지가 PCI PM 을 제대로 지원하지 않으면 */
 
 		/*
 		 * If the device or the parent bridge do not support PCI
@@ -1793,44 +2891,44 @@ static int __pci_set_power_state(struct pci_dev *dev, pci_power_t state, bool lo
 		 * than putting it into D0 (which would only happen on
 		 * boot).
 		 */
-		return 0; /* NVMe: 성공(0)을 반환한다. */
+		return 0; /* [한국어] 조용히 성공으로 처리한다. 전원을 못 내렸을 뿐 오류는 아니다 */
 
 	/* Check if we're already there */
-	if (dev->current_state == state) /* NVMe: NVMe가 이미 목표 D-state 에 있으면 */
-		return 0; /* NVMe: 성공(0)을 반환한다. */
+	if (dev->current_state == state) /* [한국어] 이미 목표 상태면 */
+		return 0; /* [한국어] 건드릴 것이 없다 */
 
-	if (state == PCI_D0) /* NVMe: 목표 상태가 D0 이면 */
-		return pci_set_full_power_state(dev, locked); /* NVMe: D0 전환(및 필요시 BAR 복원)을 수행한다. */
+	if (state == PCI_D0) /* [한국어] D0 로 올리는 경우 */
+		return pci_set_full_power_state(dev, locked); /* [한국어] 전용 경로로 넘긴다 — 확인과 BAR 복원, ASPM 재설정이 함께 필요하다 */
 
 	/*
 	 * This device is quirked not to be put into D3, so don't put it in
 	 * D3
 	 */
-	if (state >= PCI_D3hot && (dev->dev_flags & PCI_DEV_FLAGS_NO_D3)) /* NVMe: NVMe 장치가 D3 진입을 금지하는 quirk 가 있으면 */
-		return 0; /* NVMe: 성공(0)을 반환한다. */
+	if (state >= PCI_D3hot && (dev->dev_flags & PCI_DEV_FLAGS_NO_D3)) /* [한국어] D3 계열을 요청했지만 이 장치에 NO_D3 quirk 가 걸려 있으면 — D3 에서 돌아오지 못하는 하드웨어다 */
+		return 0; /* [한국어] 요청을 무시하고 성공으로 처리한다 */
 
-	if (state == PCI_D3cold) { /* NVMe: 목표 상태가 D3cold 이면 */
+	if (state == PCI_D3cold) { /* [한국어] D3cold 는 두 단계를 밟는다 */
 		/*
 		 * To put the device in D3cold, put it into D3hot in the native
 		 * way, then put it into D3cold using platform ops.
 		 */
-		error = pci_set_low_power_state(dev, PCI_D3hot, locked); /* NVMe: 우선 D3hot 로 전환한다. */
+		error = pci_set_low_power_state(dev, PCI_D3hot, locked); /* [한국어] 먼저 장치 스스로 D3hot 까지 내려가게 한다. 결과는 보관만 해 둔다 */
 
-		if (pci_platform_power_transition(dev, PCI_D3cold)) /* NVMe: 플랫폼 D3cold 전환이 실패하면 */
-			return error; /* NVMe: D3hot 상태 전환의 오류를 반환한다. */
+		if (pci_platform_power_transition(dev, PCI_D3cold)) /* [한국어] 그 다음 플랫폼에 전원 자원을 끊게 한다. 실패하면 */
+			return error; /* [한국어] 앞 단계의 결과를 돌려준다 — D3hot 까지는 갔을 수도 있다 */
 
 		/* Powering off a bridge may power off the whole hierarchy */
-		if (dev->current_state == PCI_D3cold) /* NVMe: bridge 가 D3cold 에 들어가면 */
-			__pci_bus_set_current_state(dev->subordinate, PCI_D3cold, locked); /* NVMe: 하위 bus(연결된 NVMe 포함)의 상태도 D3cold 로 동기화한다. */
-	} else { /* NVMe: D3cold 가 아닌 저전원 상태로의 전환 */
-		error = pci_set_low_power_state(dev, state, locked); /* NVMe: NVMe 장치를 D1/D2/D3hot 로 전환한다. */
+		if (dev->current_state == PCI_D3cold) /* [한국어] 브리지 자신이 D3cold 에 들어갔다면 */
+			__pci_bus_set_current_state(dev->subordinate, PCI_D3cold, locked); /* [한국어] 그 아래 모든 장치도 전원을 잃었다. config 로 확인할 수 없으니 캐시만 일괄로 맞춘다 */
+	} else { /* [한국어] D1/D2/D3hot 로 내려가는 경우 */
+		error = pci_set_low_power_state(dev, state, locked); /* [한국어] 장치의 PMCSR 로 전이한다 */
 
-		if (pci_platform_power_transition(dev, state)) /* NVMe: 플랫폼 전원 전환이 실패하면 */
-			return error; /* NVMe: 저전원 상태 전환의 오류를 반환한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+		if (pci_platform_power_transition(dev, state)) /* [한국어] 플랫폼에도 같은 상태를 알린다. 실패하면 */
+			return error; /* [한국어] 앞 단계의 결과를 돌려준다 */
+	}
 
-	return 0; /* NVMe: NVMe D-state 전환 성공을 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return 0; /* [한국어] 여기까지 왔으면 목표 상태(또는 그에 준하는 상태)에 도달했다 */
+}
 
 /**
  * pci_set_power_state - Set the power state of a PCI device
@@ -1850,174 +2948,330 @@ static int __pci_set_power_state(struct pci_dev *dev, pci_power_t state, bool lo
  * 0 if device's power state has been successfully changed.
  */
 /*
- * pci_set_power_state:
- *   NVMe controller 의 PCI 전원 상태를 설정한다. suspend/resume/reset 시 D0/D3hot 전환에 직접 호출된다.
+ * [한국어]
+ * pci_set_power_state - 전원 상태를 바꾸는 공개 API(락을 잡지 않은 호출자용).
+ *
+ * @dev: 대상 PCI 장치.
+ * @state: 목표 D-state.
+ * @return: __pci_set_power_state() 의 반환값 그대로. 0 이면 성공이거나
+ *          "할 필요/방법이 없어 무시"이고, 음수면 실패다.
+ *
+ * locked=false 로 본체에 넘긴다 — 즉 아래에서 pci_bus_sem 이 필요하면
+ * 스스로 잡는다. 대부분의 드라이버가 쓰는 진입점이다.
+ *
+ * 참고 — drivers/nvme/ 전체를 검색해도 이 함수 호출은 없다. NVMe 장치의
+ * D-state 전이는 drivers/pci/pci-driver.c 의 PM 콜백(pci_pm_suspend 계열)이
+ * 대신 수행하고, NVMe 드라이버는 컨트롤러를 끄고 켜는 자기 일만 한다.
+ *
+ * 실행 문맥: 잠들 수 있다. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   드라이버, pci-driver.c 의 PM 콜백 → [이 함수] → __pci_set_power_state()
  */
-int pci_set_power_state(struct pci_dev *dev, pci_power_t state) /* NVMe: pci_set_power_state 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	return __pci_set_power_state(dev, state, false); /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+int pci_set_power_state(struct pci_dev *dev, pci_power_t state)
+{
+	return __pci_set_power_state(dev, state, false); /* [한국어] locked=false — 필요하면 하위에서 pci_bus_sem 을 직접 잡는다 */
+}
 EXPORT_SYMBOL(pci_set_power_state);
 
 /*
- * pci_set_power_state_locked:
- *   pci_dev->devmutex 를 hold 한 상태에서 power state 를 변경한다. NVMe reset/suspend 경로에서 race 없이 D-state 를 전환한다.
+ * [한국어]
+ * pci_set_power_state_locked - pci_bus_sem 을 이미 쥔 호출자를 위한 진입점.
+ *
+ * @dev: 대상 PCI 장치.
+ * @state: 목표 D-state.
+ * @return: __pci_set_power_state() 의 반환값 그대로.
+ *
+ * 하는 일은 pci_set_power_state() 와 같지만 locked=true 로 넘긴다. 그래야
+ * 아래쪽 버스 순회가 pci_bus_sem 을 다시 잡으려다 교착하는 일을 피한다.
+ * 진입 시 lockdep 로 "정말 그 락을 쥐고 있는가"를 검사해, 잘못 쓴 호출자를
+ * 조용한 교착 대신 즉시 경고로 드러낸다.
+ *
+ * 실행 문맥: pci_bus_sem 을 쥔 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_bus_sem 을 쥔 채 전원을 다루는 코드 → [이 함수] → __pci_set_power_state()
  */
-int pci_set_power_state_locked(struct pci_dev *dev, pci_power_t state) /* NVMe: pci_set_power_state_locked 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	lockdep_assert_held(&pci_bus_sem); /* NVMe: lockdep_assert_held 함수를 호출한다. */
+int pci_set_power_state_locked(struct pci_dev *dev, pci_power_t state)
+{
+	lockdep_assert_held(&pci_bus_sem); /* [한국어] 계약 위반을 조기에 드러낸다 — 이 락 없이 들어오면 아래 순회가 교착한다 */
 
-	return __pci_set_power_state(dev, state, true); /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return __pci_set_power_state(dev, state, true); /* [한국어] PCIe capability 에서 저장할 레지스터 개수. 아래 pci_save_pcie_state() 가 DEVCTL/LNKCTL/SLTCTL/RTCTL/DEVCTL2/LNKCTL2/SLTCTL2 일곱 개를 u16 으로 담으므로 버퍼 크기도 7 * sizeof(u16) 로 잡힌다 */
+}
 EXPORT_SYMBOL(pci_set_power_state_locked);
 
 #define PCI_EXP_SAVE_REGS	7 /* NVMe: 매크로를 정의한다. */
 
-static struct pci_cap_saved_state *_pci_find_saved_cap(struct pci_dev *pci_dev, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-						       u16 cap, bool extended) /* NVMe: u16 타입 변수를 선언한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	struct pci_cap_saved_state *tmp; /* NVMe: 데이터 타입 변수를 선언한다. */
+/*
+ * [한국어]
+ * _pci_find_saved_cap - 이 장치에 붙어 있는 capability 저장 버퍼를 찾는다.
+ *
+ * @pci_dev: 대상 PCI 장치.
+ * @cap: 찾을 capability 번호.
+ * @extended: false 면 표준 capability, true 면 확장 capability.
+ * @return: 해당 버퍼(struct pci_cap_saved_state), 없으면 NULL.
+ *
+ * config space 를 통째로 뜨는 것만으로는 전원 전이를 넘길 수 없다.
+ * 표준 헤더 64바이트 밖의 capability 레지스터들은 saved_config_space 에
+ * 담기지 않기 때문이다. 그래서 capability 마다 따로 버퍼를 잡아
+ * dev->saved_cap_space 해시 리스트에 매달아 둔다. 그 버퍼를 찾는 조회다.
+ *
+ * 버퍼는 pci_allocate_cap_save_buffers() 가 열거 시점에 미리 잡는다.
+ * 저장 시점(pci_save_state)에 할당하지 않는 이유는, 그 경로가 메모리 할당이
+ * 실패하면 안 되는 상황에서도 불릴 수 있기 때문이다.
+ *
+ * 표준과 확장 capability 는 번호 공간이 겹친다(둘 다 작은 정수). 그래서
+ * cap_nr 만으로는 구분되지 않고 cap_extended 를 함께 비교해야 한다.
+ *
+ * 실행 문맥: 리스트 순회뿐이고 config 접근이 없다. 리스트는 열거 시점에
+ * 구성돼 이후 바뀌지 않으므로 별도 락이 없다.
+ *
+ * 호출 체인:
+ *   pci_find_saved_cap() / pci_find_saved_ext_cap() → [이 함수]
+ */
+static struct pci_cap_saved_state *_pci_find_saved_cap(struct pci_dev *pci_dev,
+						       u16 cap, bool extended)
+{
+	struct pci_cap_saved_state *tmp; /* [한국어] 해시 리스트 순회 커서 */
 
-	hlist_for_each_entry(tmp, &pci_dev->saved_cap_space, next) { /* NVMe: 리스트/해시 항목을 순회하는 매크로 루프를 시작한다. */
-		if (tmp->cap.cap_extended == extended && tmp->cap.cap_nr == cap) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			return tmp; /* NVMe: 연산 결과를 반환한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
-	return NULL; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	hlist_for_each_entry(tmp, &pci_dev->saved_cap_space, next) { /* [한국어] 이 장치에 매달린 저장 버퍼들을 훑는다 */
+		if (tmp->cap.cap_extended == extended && tmp->cap.cap_nr == cap) /* [한국어] 번호와 "표준/확장" 구분이 둘 다 맞아야 같은 capability 다 */
+			return tmp; /* [한국어] 찾은 버퍼 */
+	}
+	return NULL; /* [한국어] 이 capability 용 버퍼는 할당되지 않았다 */
+}
 
 /*
- * pci_find_saved_cap:
- *   저장된 표준 capability 상태 버퍼를 찾는다. NVMe suspend/resume 시 capability context 복원에 사용된다.
+ * [한국어]
+ * pci_find_saved_cap - 표준 capability 의 저장 버퍼를 찾는다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @cap: 표준 capability ID(PCI_CAP_ID_EXP, PCI_CAP_ID_PCIX 등).
+ * @return: 저장 버퍼, 없으면 NULL.
+ *
+ * extended=false 로 고정한 얇은 래퍼다. 저장·복원 코드가 매번 false 를 적는
+ * 대신 의도가 드러나는 이름을 쓰게 한다.
+ *
+ * 호출 체인:
+ *   pci_save_pcie_state(), pci_restore_pcie_state(), pci_save_pcix_state() 등
+ *     → [이 함수] → _pci_find_saved_cap()
  */
-struct pci_cap_saved_state *pci_find_saved_cap(struct pci_dev *dev, char cap) /* NVMe: pci_find_saved_cap 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	return _pci_find_saved_cap(dev, cap, false); /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+struct pci_cap_saved_state *pci_find_saved_cap(struct pci_dev *dev, char cap)
+{
+	return _pci_find_saved_cap(dev, cap, false); /* [한국어] extended=false — 표준 capability 공간에서 찾는다 */
+}
 
 /*
- * pci_find_saved_ext_cap:
- *   저장된 extended capability 상태 버퍼를 찾는다. NVMe resume 시 PCIe/MSI-X 등 capability 를 복원한다.
+ * [한국어]
+ * pci_find_saved_ext_cap - 확장 capability 의 저장 버퍼를 찾는다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @cap: 확장 capability ID(PCI_EXT_CAP_ID_ERR, _DPC, _PTM 등).
+ * @return: 저장 버퍼, 없으면 NULL.
+ *
+ * extended=true 로 고정한 래퍼다. AER/DPC/PTM/VC 처럼 0x100 이후에 있는
+ * capability 의 상태를 저장·복원하는 코드가 쓴다.
+ *
+ * 호출 체인:
+ *   pci_save_aer_state(), pci_save_dpc_state() 등(다른 파일) → [이 함수]
+ *     → _pci_find_saved_cap()
  */
-struct pci_cap_saved_state *pci_find_saved_ext_cap(struct pci_dev *dev, u16 cap) /* NVMe: pci_find_saved_ext_cap 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	return _pci_find_saved_cap(dev, cap, true); /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+struct pci_cap_saved_state *pci_find_saved_ext_cap(struct pci_dev *dev, u16 cap)
+{
+	return _pci_find_saved_cap(dev, cap, true); /* [한국어] extended=true — 확장 capability 공간에서 찾는다 */
+}
 
 /*
- * pci_save_pcie_state:
- *   PCIe capability 레지스터를 저장한다. NVMe suspend 시 link control/device control 등 PCIe 상태를 보존한다.
+ * [한국어]
+ * pci_save_pcie_state - PCIe capability 의 제어 레지스터 일곱 개를 떠 둔다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @return: 0 성공(또는 PCIe 장치가 아니라 할 일 없음), -ENOMEM 이면 저장 버퍼가 없다.
+ *
+ * saved_config_space 는 config space 앞쪽 64바이트만 담는다. PCIe capability 는
+ * 그보다 뒤에 있어 별도로 떠야 한다. 여기서 저장하는 레지스터들이 잃으면
+ * 곤란한 이유는 각각 분명하다.
+ *   - DEVCTL: Max Payload Size, Max Read Request Size, 오류 보고 활성화.
+ *     MPS/MRRS 를 잃으면 링크 성능이 기본값으로 떨어지고, 경로상 불일치가
+ *     생기면 오동작한다. NVMe 의 대역폭에 직접 영향을 준다.
+ *   - LNKCTL: ASPM 정책, Common Clock 설정.
+ *   - SLTCTL / SLTCTL2: 슬롯 제어(핫플러그 표시등, 전원 제어).
+ *   - RTCTL: Root Port 의 오류 보고 제어.
+ *   - DEVCTL2: LTR 활성화, Completion Timeout 설정, ARI Forwarding.
+ *   - LNKCTL2: 목표 링크 속도.
+ * ASPM L1 substate 와 LTR 은 별도 확장 capability 라 전용 함수가 따로 뜬다.
+ *
+ * 저장 버퍼가 없으면 -ENOMEM 을 돌려준다. 실제로 할당에 실패했다기보다
+ * pci_allocate_cap_save_buffers() 가 미리 잡아 두지 못한 상황이므로,
+ * 이 시점에는 되돌릴 방법이 없어 오류로 알린다.
+ *
+ * 실행 문맥: config space 읽기. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_save_state() → [이 함수] → pcie_capability_read_word()
  */
-static int pci_save_pcie_state(struct pci_dev *dev) /* NVMe: pci_save_pcie_state 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	int i = 0; /* NVMe: 저장할 PCIe capability 레지스터 인덱스이다. */
-	struct pci_cap_saved_state *save_state; /* NVMe: PCIe capability 저장 버퍼 포인터이다. */
-	u16 *cap; /* NVMe: 저장된 capability 데이터를 가리킬 포인터이다. */
+static int pci_save_pcie_state(struct pci_dev *dev)
+{
+	int i = 0; /* [한국어] 버퍼에 채워 넣을 위치. 아래에서 i++ 로 하나씩 전진한다 — 복원 함수가 같은 순서로 읽으므로 순서 자체가 형식이다 */
+	struct pci_cap_saved_state *save_state; /* [한국어] PCIe capability 전용 저장 버퍼 */
+	u16 *cap; /* [한국어] 그 버퍼를 u16 배열로 보는 포인터 */
 
-	if (!pci_is_pcie(dev)) /* NVMe: NVMe 장치가 PCIe capability 를 갖지 않으면 */
-		return 0; /* NVMe: 성공(0)을 반환한다. */
+	if (!pci_is_pcie(dev)) /* [한국어] PCIe capability 가 없는 재래식 PCI 장치면 */
+		return 0; /* [한국어] 저장할 것이 없다 */
 
-	save_state = pci_find_saved_cap(dev, PCI_CAP_ID_EXP); /* NVMe: PCIe capability 저장 버퍼를 찾는다. */
-	if (!save_state) { /* NVMe: 저장 버퍼가 없으면 */
-		pci_err(dev, "buffer not found in %s\n", __func__); /* NVMe: NVMe PCIe capability 저장 버퍼 부재를 에러로 기록한다. */
-		return -ENOMEM; /* NVMe: 오류 코드를 반환한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+	save_state = pci_find_saved_cap(dev, PCI_CAP_ID_EXP); /* [한국어] PCI_CAP_ID_EXP 용 버퍼를 찾는다 */
+	if (!save_state) { /* [한국어] 열거 때 미리 잡혀 있어야 한다 */
+		pci_err(dev, "buffer not found in %s\n", __func__); /* [한국어] 버퍼가 없다는 것은 초기화 단계에서 이미 문제가 있었다는 뜻이다 */
+		return -ENOMEM; /* [한국어] 저장에 실패했음을 알린다 */
+	}
 
-	cap = (u16 *)&save_state->cap.data[0]; /* NVMe: capability 데이터 저장 영역의 시작 주소를 설정한다. */
-	pcie_capability_read_word(dev, PCI_EXP_DEVCTL, &cap[i++]); /* NVMe: NVMe PCIe Device Control 레지스터를 저장한다. */
-	pcie_capability_read_word(dev, PCI_EXP_LNKCTL, &cap[i++]); /* NVMe: NVMe PCIe Link Control 레지스터를 저장한다. */
-	pcie_capability_read_word(dev, PCI_EXP_SLTCTL, &cap[i++]); /* NVMe: NVMe PCIe Slot Control 레지스터를 저장한다. */
-	pcie_capability_read_word(dev, PCI_EXP_RTCTL,  &cap[i++]); /* NVMe: NVMe PCIe Root Control 레지스터를 저장한다. */
-	pcie_capability_read_word(dev, PCI_EXP_DEVCTL2, &cap[i++]); /* NVMe: NVMe PCIe Device Control 2 레지스터를 저장한다. */
-	pcie_capability_read_word(dev, PCI_EXP_LNKCTL2, &cap[i++]); /* NVMe: NVMe PCIe Link Control 2 레지스터를 저장한다. */
-	pcie_capability_read_word(dev, PCI_EXP_SLTCTL2, &cap[i++]); /* NVMe: NVMe PCIe Slot Control 2 레지스터를 저장한다. */
+	cap = (u16 *)&save_state->cap.data[0]; /* [한국어] 버퍼의 데이터 영역을 u16 배열로 다룬다. 이 capability 의 레지스터가 모두 16비트이기 때문이다 */
+	pcie_capability_read_word(dev, PCI_EXP_DEVCTL, &cap[i++]); /* [한국어] Device Control — MPS, MRRS, 오류 보고 활성화 비트가 들어 있다 */
+	pcie_capability_read_word(dev, PCI_EXP_LNKCTL, &cap[i++]); /* [한국어] Link Control — ASPM 정책과 Common Clock 설정 */
+	pcie_capability_read_word(dev, PCI_EXP_SLTCTL, &cap[i++]); /* [한국어] Slot Control — 슬롯 표시등·전원·핫플러그 인터럽트 제어 */
+	pcie_capability_read_word(dev, PCI_EXP_RTCTL,  &cap[i++]); /* [한국어] Root Control — Root Port 가 어떤 오류 메시지에 인터럽트를 낼지 */
+	pcie_capability_read_word(dev, PCI_EXP_DEVCTL2, &cap[i++]); /* [한국어] Device Control 2 — LTR 활성화, Completion Timeout, ARI Forwarding */
+	pcie_capability_read_word(dev, PCI_EXP_LNKCTL2, &cap[i++]); /* [한국어] Link Control 2 — 목표 링크 속도(Gen1~Gen5 등) */
+	pcie_capability_read_word(dev, PCI_EXP_SLTCTL2, &cap[i++]); /* [한국어] Slot Control 2 */
 
-	pci_save_aspm_l1ss_state(dev); /* NVMe: NVMe ASPM L1 substates 상태를 저장한다. */
-	pci_save_ltr_state(dev); /* NVMe: NVMe Latency Tolerance Reporting 상태를 저장한다. */
+	pci_save_aspm_l1ss_state(dev); /* [한국어] ASPM L1 substate 설정은 별도 확장 capability 라 따로 뜬다 */
+	pci_save_ltr_state(dev); /* [한국어] LTR(Latency Tolerance Reporting)의 최대 지연 값도 별도 capability 다 */
 
-	return 0; /* NVMe: 성공(0)을 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return 0; /* [한국어] 저장 완료 */
+}
 
 /*
- * pci_restore_pcie_state:
- *   저장한 PCIe capability 레지스터를 복원한다. NVMe resume 후 PCIe 링크/장치 설정을 복구한다.
+ * [한국어]
+ * pci_restore_pcie_state - 떠 두었던 PCIe capability 레지스터를 되돌린다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @return: 없음. 저장 버퍼가 없으면 조용히 아무 것도 하지 않는다.
+ *
+ * 순서가 이 함수의 전부라 해도 좋다.
+ *   1) LTR 값을 먼저 복원한다. DEVCTL2 의 LTR Enable 비트를 켜기 전에
+ *      최대 지연 값이 제자리에 있어야 한다 — 원본 주석이 짚는 요점이다.
+ *      순서가 반대면 아직 쓰레기 값인 지연 한도로 LTR 이 동작한다.
+ *   2) ASPM L1 substate 를 복원한다.
+ *   3) 다운스트림 포트는 링크가 끊길 때 LTR Enable 비트를 스스로 지운다
+ *      (PCIe r5.0 7.5.3.16). 그래서 장치 레지스터를 복원하기 전에 상위
+ *      브리지의 LTR 을 먼저 되살려야 한다.
+ *   4) 그제서야 저장 순서 그대로 일곱 레지스터를 되쓴다.
+ *
+ * 저장 순서와 복원 순서가 정확히 같아야 한다는 점이 중요하다. 버퍼에는
+ * 레지스터 이름이 아니라 값만 들어 있어, 순서가 어긋나면 엉뚱한 레지스터에
+ * 값을 쓴다.
+ *
+ * 실행 문맥: config space 쓰기. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_restore_state() → [이 함수]
+ *     → pci_restore_ltr_state(), pci_bridge_reconfigure_ltr(),
+ *        pcie_capability_write_word()
  */
-static void pci_restore_pcie_state(struct pci_dev *dev) /* NVMe: pci_restore_pcie_state 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	int i = 0; /* NVMe: int 타입 변수를 선언한다. */
-	struct pci_cap_saved_state *save_state; /* NVMe: 데이터 타입 변수를 선언한다. */
-	u16 *cap; /* NVMe: 포인터 변수를 선언한다. */
+static void pci_restore_pcie_state(struct pci_dev *dev)
+{
+	int i = 0; /* [한국어] 버퍼에서 꺼낼 위치. 저장 때와 같은 순서로 전진한다 */
+	struct pci_cap_saved_state *save_state; /* [한국어] PCIe capability 저장 버퍼 */
+	u16 *cap; /* [한국어] 그 버퍼를 u16 배열로 보는 포인터 */
 
 	/*
 	 * Restore max latencies (in the LTR capability) before enabling
 	 * LTR itself in PCI_EXP_DEVCTL2.
 	 */
-	pci_restore_ltr_state(dev); /* NVMe: pci_restore_ltr_state 함수를 호출한다. */
-	pci_restore_aspm_l1ss_state(dev); /* NVMe: pci_restore_aspm_l1ss_state 함수를 호출한다. */
+	pci_restore_ltr_state(dev); /* [한국어] LTR 최대 지연 값을 먼저 되돌린다. 아래에서 DEVCTL2 의 LTR Enable 을 켜기 전이어야 한다 */
+	pci_restore_aspm_l1ss_state(dev); /* [한국어] ASPM L1 substate 설정 복원 */
 
-	save_state = pci_find_saved_cap(dev, PCI_CAP_ID_EXP); /* NVMe: 변수에 값을 할당한다. */
-	if (!save_state) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return; /* NVMe: 함수 실행을 종료한다. */
+	save_state = pci_find_saved_cap(dev, PCI_CAP_ID_EXP); /* [한국어] PCIe capability 저장 버퍼를 찾는다 */
+	if (!save_state) /* [한국어] 저장된 적이 없으면 */
+		return; /* [한국어] 되돌릴 것이 없다 */
 
 	/*
 	 * Downstream ports reset the LTR enable bit when link goes down.
 	 * Check and re-configure the bit here before restoring device.
 	 * PCIe r5.0, sec 7.5.3.16.
 	 */
-	pci_bridge_reconfigure_ltr(dev); /* NVMe: pci_bridge_reconfigure_ltr 함수를 호출한다. */
+	pci_bridge_reconfigure_ltr(dev); /* [한국어] 상위 다운스트림 포트가 링크 다운 때 스스로 지운 LTR Enable 을 되살린다. 장치 쪽을 복원하기 전에 해야 한다 */
 
-	cap = (u16 *)&save_state->cap.data[0]; /* NVMe: 변수에 값을 할당한다. */
-	pcie_capability_write_word(dev, PCI_EXP_DEVCTL, cap[i++]); /* NVMe: pcie_capability_write_word 함수를 호출한다. */
-	pcie_capability_write_word(dev, PCI_EXP_LNKCTL, cap[i++]); /* NVMe: pcie_capability_write_word 함수를 호출한다. */
-	pcie_capability_write_word(dev, PCI_EXP_SLTCTL, cap[i++]); /* NVMe: pcie_capability_write_word 함수를 호출한다. */
-	pcie_capability_write_word(dev, PCI_EXP_RTCTL, cap[i++]); /* NVMe: pcie_capability_write_word 함수를 호출한다. */
-	pcie_capability_write_word(dev, PCI_EXP_DEVCTL2, cap[i++]); /* NVMe: pcie_capability_write_word 함수를 호출한다. */
-	pcie_capability_write_word(dev, PCI_EXP_LNKCTL2, cap[i++]); /* NVMe: pcie_capability_write_word 함수를 호출한다. */
-	pcie_capability_write_word(dev, PCI_EXP_SLTCTL2, cap[i++]); /* NVMe: pcie_capability_write_word 함수를 호출한다. */
-} /* NVMe: 코드 블록을 종료한다. */
-
-/*
- * pci_save_pcix_state:
- *   PCI-X capability 레지스터를 저장한다. NVMe 장치는 일반적으로 PCI-X 가 아니나 레거시 호환 경로에서 참조된다.
- */
-static int pci_save_pcix_state(struct pci_dev *dev) /* NVMe: pci_save_pcix_state 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	int pos; /* NVMe: int 타입 변수를 선언한다. */
-	struct pci_cap_saved_state *save_state; /* NVMe: 데이터 타입 변수를 선언한다. */
-
-	pos = pci_find_capability(dev, PCI_CAP_ID_PCIX); /* NVMe: 변수에 값을 할당한다. */
-	if (!pos) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return 0; /* NVMe: 성공(0)을 반환한다. */
-
-	save_state = pci_find_saved_cap(dev, PCI_CAP_ID_PCIX); /* NVMe: 변수에 값을 할당한다. */
-	if (!save_state) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pci_err(dev, "buffer not found in %s\n", __func__); /* NVMe: PCI 장치에 대한 에러 로그를 출력한다. */
-		return -ENOMEM; /* NVMe: 오류 코드를 반환한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
-
-	pci_read_config_word(dev, pos + PCI_X_CMD, /* NVMe: PCI 설정 공간 2바이트를 읽는다. */
-			     (u16 *)save_state->cap.data); /* NVMe: 구조체 멤버에 접근한다. */
-
-	return 0; /* NVMe: 성공(0)을 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	cap = (u16 *)&save_state->cap.data[0]; /* [한국어] 저장 버퍼의 데이터 영역 */
+	pcie_capability_write_word(dev, PCI_EXP_DEVCTL, cap[i++]); /* [한국어] Device Control 복원 — MPS/MRRS 가 여기서 되살아난다 */
+	pcie_capability_write_word(dev, PCI_EXP_LNKCTL, cap[i++]); /* [한국어] Link Control 복원 */
+	pcie_capability_write_word(dev, PCI_EXP_SLTCTL, cap[i++]); /* [한국어] Slot Control 복원 */
+	pcie_capability_write_word(dev, PCI_EXP_RTCTL, cap[i++]); /* [한국어] Root Control 복원 */
+	pcie_capability_write_word(dev, PCI_EXP_DEVCTL2, cap[i++]); /* [한국어] Device Control 2 복원 — LTR Enable 이 여기서 켜진다 */
+	pcie_capability_write_word(dev, PCI_EXP_LNKCTL2, cap[i++]); /* [한국어] Link Control 2 복원 */
+	pcie_capability_write_word(dev, PCI_EXP_SLTCTL2, cap[i++]); /* [한국어] Slot Control 2 복원 */
+}
 
 /*
- * pci_restore_pcix_state:
- *   PCI-X capability 레지스터를 복원한다. NVMe 장치와는 직접 관련이 낮다.
+ * [한국어]
+ * pci_save_pcix_state - PCI-X capability 의 Command 레지스터를 떠 둔다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @return: 0 성공(또는 PCI-X 가 아니라 할 일 없음), -ENOMEM 이면 저장 버퍼가 없다.
+ *
+ * PCI-X 는 PCIe 이전의 고속 병렬 버스 규격이다. Command 레지스터에
+ * 분할 트랜잭션 개수와 최대 읽기 바이트 수 설정이 들어 있어, 잃으면
+ * 성능이 기본값으로 떨어진다.
+ * PCIe 엔드포인트인 NVMe SSD 에는 PCI-X capability 가 없으므로 이 함수는
+ * 곧바로 0 을 돌려주고 끝난다. 오래된 하드웨어를 위해 남아 있는 경로다.
+ *
+ * 실행 문맥: config space 읽기. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_save_state() → [이 함수] → pci_find_capability(), pci_read_config_word()
  */
-static void pci_restore_pcix_state(struct pci_dev *dev) /* NVMe: pci_restore_pcix_state 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	int i = 0, pos; /* NVMe: int 타입 변수를 선언한다. */
-	struct pci_cap_saved_state *save_state; /* NVMe: 데이터 타입 변수를 선언한다. */
-	u16 *cap; /* NVMe: 포인터 변수를 선언한다. */
+static int pci_save_pcix_state(struct pci_dev *dev)
+{
+	int pos; /* [한국어] PCI-X capability 의 오프셋 */
+	struct pci_cap_saved_state *save_state; /* [한국어] 저장 버퍼 */
 
-	save_state = pci_find_saved_cap(dev, PCI_CAP_ID_PCIX); /* NVMe: 변수에 값을 할당한다. */
-	pos = pci_find_capability(dev, PCI_CAP_ID_PCIX); /* NVMe: 변수에 값을 할당한다. */
-	if (!save_state || !pos) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return; /* NVMe: 함수 실행을 종료한다. */
-	cap = (u16 *)&save_state->cap.data[0]; /* NVMe: 변수에 값을 할당한다. */
+	pos = pci_find_capability(dev, PCI_CAP_ID_PCIX); /* [한국어] 이 장치에 PCI-X capability 가 있는지 본다 */
+	if (!pos) /* [한국어] 없으면(PCIe 장치는 모두 여기 해당) */
+		return 0; /* [한국어] 저장할 것이 없다 */
 
-	pci_write_config_word(dev, pos + PCI_X_CMD, cap[i++]); /* NVMe: PCI 설정 공간 2바이트를 쓴다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	save_state = pci_find_saved_cap(dev, PCI_CAP_ID_PCIX); /* [한국어] PCI-X 용 저장 버퍼를 찾는다 */
+	if (!save_state) { /* [한국어] capability 는 있는데 버퍼가 없다면 초기화 단계의 문제다 */
+		pci_err(dev, "buffer not found in %s\n", __func__); /* [한국어] 어느 함수에서 났는지 __func__ 로 남긴다 */
+		return -ENOMEM; /* [한국어] 저장 실패 */
+	}
+
+	pci_read_config_word(dev, pos + PCI_X_CMD, /* [한국어] PCI-X Command 레지스터를 읽어 */
+			     (u16 *)save_state->cap.data); /* [한국어] 저장 버퍼에 그대로 담는다. 레지스터가 하나뿐이라 인덱스가 필요 없다 */
+
+	return 0; /* [한국어] 저장 완료 */
+}
+
+/*
+ * [한국어]
+ * pci_restore_pcix_state - PCI-X Command 레지스터를 되돌린다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @return: 없음.
+ *
+ * pci_save_pcix_state() 의 짝이다. 저장 버퍼와 capability 오프셋이 둘 다
+ * 있어야 복원할 수 있다. capability 오프셋을 다시 찾는 이유는, 오프셋 자체는
+ * 저장해 두지 않고 필요할 때마다 config space 를 훑기 때문이다.
+ * PCIe 엔드포인트인 NVMe SSD 에는 해당 사항이 없다.
+ *
+ * 실행 문맥: config space 쓰기. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_restore_state() → [이 함수] → pci_write_config_word()
+ */
+static void pci_restore_pcix_state(struct pci_dev *dev)
+{
+	int i = 0, pos; /* [한국어] i 는 버퍼 인덱스, pos 는 capability 오프셋 */
+	struct pci_cap_saved_state *save_state; /* [한국어] 저장 버퍼 */
+	u16 *cap; /* [한국어] 버퍼를 u16 배열로 보는 포인터 */
+
+	save_state = pci_find_saved_cap(dev, PCI_CAP_ID_PCIX); /* [한국어] PCI-X 저장 버퍼를 찾는다 */
+	pos = pci_find_capability(dev, PCI_CAP_ID_PCIX); /* [한국어] capability 오프셋을 다시 구한다 — 오프셋은 저장해 두지 않는다 */
+	if (!save_state || !pos) /* [한국어] 둘 중 하나라도 없으면 */
+		return; /* [한국어] 복원할 수 없다 */
+	cap = (u16 *)&save_state->cap.data[0]; /* [한국어] 버퍼의 데이터 영역 */
+
+	pci_write_config_word(dev, pos + PCI_X_CMD, cap[i++]); /* [한국어] Command 레지스터를 되쓴다. 레지스터가 하나뿐이지만 저장 쪽과 형태를 맞추려고 i++ 를 쓴다 */
+}
 
 /**
  * pci_save_state - save the PCI configuration space of a device before
@@ -2025,138 +3279,293 @@ static void pci_restore_pcix_state(struct pci_dev *dev) /* NVMe: pci_restore_pci
  * @dev: PCI device that we're dealing with
  */
 /*
- * pci_save_state:
- *   pci_dev 의 전체 config space 와 capability 상태를 저장한다. NVMe suspend/reset/D-state 전환 전에 controller context 를 보존한다.
+ * [한국어]
+ * pci_save_state - config space 앞 64바이트와 capability 상태를 통째로 떠 둔다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @return: 0 성공. 음수면 어느 capability 저장 단계에서 실패했다.
+ *
+ * 이 함수가 필요한 이유는 하나다 — D3cold 전이나 리셋(FLR/보조 버스 리셋)을
+ * 거치면 장치의 config space 가 초기값으로 돌아간다. BAR 는 모두 0 이 되고
+ * Command 레지스터의 MEM/IO 디코딩과 Bus Master Enable 도 꺼진다. 그 상태의
+ * 장치는 CPU 가 닿을 주소도 없고 DMA 도 못 한다. 즉 시스템에서 사라진 것과
+ * 같다. 그래서 잃기 전에 떠 두었다가 pci_restore_state() 로 되돌린다.
+ *
+ * 뜨는 대상은 두 갈래다.
+ *   1) 표준 헤더 64바이트 = DWORD 16개. dev->saved_config_space[] 에 담는다.
+ *      여기에 Vendor/Device ID, Command, Status, BAR 6개, 인터럽트 라인 등
+ *      장치를 다시 찾고 켜는 데 필요한 모든 것이 들어 있다.
+ *   2) 그 밖의 capability 들. 각각 전용 버퍼에 따로 뜬다 — PCIe, PCI-X, DPC,
+ *      AER, PTM, TPH, VC.
+ *
+ * MSI/MSI-X 는 여기서 저장하지 않는다. 복원은 pci_restore_state() 안의
+ * pci_restore_msi_state() 가 하는데, 그 값의 출처는 config space 사본이
+ * 아니라 커널이 들고 있는 인터럽트 기술자다.
+ *
+ * NVMe 와의 관계: drivers/nvme/host/pci.c 가 이 함수를 직접 부른다.
+ * 컨트롤러 리셋과 절전 진입 직전에 상태를 떠 두고, 돌아온 뒤
+ * pci_restore_state() 로 되돌린다. 이것이 없으면 리셋 후 BAR0 가 0 이 되어
+ * 도어벨과 컨트롤러 레지스터에 접근할 수 없다.
+ *
+ * 실행 문맥: config space 를 여러 번 읽는다. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   drivers/nvme/host/pci.c, pci_dev_save_and_disable(), pci-driver.c 의 PM 콜백
+ *     → [이 함수] → pci_read_config_dword(), pci_save_pcie_state(),
+ *        pci_save_pcix_state(), pci_save_dpc/aer/ptm/tph/vc_state()
  */
-int pci_save_state(struct pci_dev *dev) /* NVMe: pci_save_state 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	int i; /* NVMe: config space dword 인덱스 변수이다. */
+int pci_save_state(struct pci_dev *dev)
+{
+	int i; /* [한국어] DWORD 인덱스 겸, 아래에서는 하위 저장 함수의 반환값을 담는 임시로도 쓰인다 */
 	/* XXX: 100% dword access ok here? */
-	for (i = 0; i < 16; i++) { /* NVMe: NVMe config space 의 16개 dword 를 순회한다. */
-		pci_read_config_dword(dev, i * 4, &dev->saved_config_space[i]); /* NVMe: NVMe config space dword 단위로 읽어 saved_config_space 에 저장한다. */
-		pci_dbg(dev, "save config %#04x: %#010x\n", /* NVMe: 저장된 NVMe config dword 를 디버그 로그로 출력한다. */
-			i * 4, dev->saved_config_space[i]); /* NVMe: offset 과 저장값을 로그 인자로 전달한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
-	dev->state_saved = true; /* NVMe: NVMe config space 저장 완료 플래그를 설정한다. */
+	for (i = 0; i < 16; i++) { /* [한국어] DWORD 16개 = 64바이트. PCI 표준 헤더의 크기이자 헤더 타입에 상관없이 존재하는 영역이다 */
+		pci_read_config_dword(dev, i * 4, &dev->saved_config_space[i]); /* [한국어] i 번째 DWORD 는 오프셋 i*4 다. 32비트 단위로 읽는 이유는 BAR 처럼 32비트로 다뤄야 하는 필드가 있기 때문이다 */
+		pci_dbg(dev, "save config %#04x: %#010x\n", /* [한국어] 무엇을 떴는지 디버그 로그로 남긴다. 복원이 어긋났을 때 이 로그와 대조한다 */
+			i * 4, dev->saved_config_space[i]); /* [한국어] 오프셋과 값 */
+	}
+	dev->state_saved = true; /* [한국어] 복원해도 되는 사본이 있다는 표시. pci_restore_state() 가 이 플래그를 보고 복원 여부를 정하고, 복원 후 다시 내린다 */
 
-	i = pci_save_pcie_state(dev); /* NVMe: NVMe PCIe capability 상태를 저장한다. */
-	if (i != 0) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return i; /* NVMe: 연산 결과를 반환한다. */
+	i = pci_save_pcie_state(dev); /* [한국어] PCIe capability 의 제어 레지스터들을 뜬다 */
+	if (i != 0) /* [한국어] 저장 버퍼가 없어 실패하면 */
+		return i; /* [한국어] 그 오류를 그대로 올린다. 이후 capability 는 시도하지 않는다 */
 
-	i = pci_save_pcix_state(dev); /* NVMe: NVMe PCI-X capability 상태를 저장한다. */
-	if (i != 0) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return i; /* NVMe: 연산 결과를 반환한다. */
+	i = pci_save_pcix_state(dev); /* [한국어] PCI-X capability 를 뜬다(PCIe 장치에는 없어 곧바로 0) */
+	if (i != 0) /* [한국어] 실패하면 */
+		return i; /* [한국어] 오류를 올린다 */
 
-	pci_save_dpc_state(dev); /* NVMe: NVMe DPC(Downstream Port Containment) 상태를 저장한다. */
-	pci_save_aer_state(dev); /* NVMe: NVMe AER(Advanced Error Reporting) 상태를 저장한다. */
-	pci_save_ptm_state(dev); /* NVMe: NVMe PTM(Precision Time Measurement) 상태를 저장한다. */
-	pci_save_tph_state(dev); /* NVMe: NVMe TPH(TLP Processing Hints) 상태를 저장한다. */
-	return pci_save_vc_state(dev); /* NVMe: NVMe Virtual Channel capability 상태 저장 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	pci_save_dpc_state(dev); /* [한국어] DPC(Downstream Port Containment) — 오류 발생 시 하위 포트를 격리하는 기능의 설정 */
+	pci_save_aer_state(dev); /* [한국어] AER — 어떤 오류를 보고할지 정한 마스크와 심각도 설정 */
+	pci_save_ptm_state(dev); /* [한국어] PTM(Precision Time Measurement) — 장치와 호스트의 시각 동기 설정 */
+	pci_save_tph_state(dev); /* [한국어] TPH(TLP Processing Hints) — 어느 캐시에 데이터를 놓을지 힌트를 주는 기능의 설정 */
+	return pci_save_vc_state(dev); /* [한국어] VC(Virtual Channel) — 트래픽 클래스와 가상 채널 매핑. 마지막이라 그 결과가 곧 이 함수의 결과다 */
+}
 EXPORT_SYMBOL(pci_save_state);
 
-static void pci_restore_config_dword(struct pci_dev *pdev, int offset, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-				     u32 saved_val, int retry, bool force) /* NVMe: u32 타입 변수를 선언한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	u32 val; /* NVMe: u32 타입 변수를 선언한다. */
+/*
+ * [한국어]
+ * pci_restore_config_dword - config space DWORD 하나를 되쓰되, 필요하면 재시도한다.
+ *
+ * @pdev: 대상 PCI 장치.
+ * @offset: config space 오프셋(바이트).
+ * @saved_val: 되돌릴 값.
+ * @retry: 값이 곧바로 반영되지 않을 때 다시 시도할 횟수.
+ * @force: true 면 현재 값이 이미 같아도 무조건 쓴다.
+ * @return: 없음.
+ *
+ * 단순한 쓰기가 아니라 세 가지 배려가 들어 있다.
+ *   - 이미 값이 같으면 쓰지 않는다. 불필요한 config 쓰기는 느릴 뿐 아니라
+ *     일부 레지스터에서는 부작용이 있다.
+ *   - force 는 그 최적화를 끄는 스위치다. 값이 같아 보여도 반드시 다시 써야
+ *     하는 레지스터가 있어(아래 브리지 prefetch 창) 예외를 열어 둔다.
+ *   - retry 는 BAR 처럼 "썼는데 곧바로 반영되지 않는" 경우를 위한 것이다.
+ *     1ms 씩 쉬며 되읽어 확인하고, 횟수를 다 쓰면 마지막 쓰기만 하고 포기한다.
+ *
+ * 실행 문맥: mdelay 로 바쁜 대기를 한다. retry 가 0 이 아닌 호출은 프로세스
+ * 문맥에서만 하는 것이 안전하다.
+ *
+ * 호출 체인:
+ *   pci_restore_config_space_range() → [이 함수]
+ *     → pci_read_config_dword(), pci_write_config_dword(), mdelay()
+ */
+static void pci_restore_config_dword(struct pci_dev *pdev, int offset,
+				     u32 saved_val, int retry, bool force)
+{
+	u32 val; /* [한국어] 현재 레지스터 값 */
 
-	pci_read_config_dword(pdev, offset, &val); /* NVMe: PCI 설정 공간 4바이트를 읽는다. */
-	if (!force && val == saved_val) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return; /* NVMe: 함수 실행을 종료한다. */
+	pci_read_config_dword(pdev, offset, &val); /* [한국어] 되쓰기 전에 지금 값을 읽는다 */
+	if (!force && val == saved_val) /* [한국어] 강제가 아니고 이미 같은 값이면 */
+		return; /* [한국어] 쓸 이유가 없다 */
 
-	for (;;) { /* NVMe: 반복문을 시작한다. */
-		pci_dbg(pdev, "restore config %#04x: %#010x -> %#010x\n", /* NVMe: PCI 장치에 대한 디버그 로그를 출력한다. */
-			offset, val, saved_val); /* NVMe: 표현식을 평가한다. */
-		pci_write_config_dword(pdev, offset, saved_val); /* NVMe: PCI 설정 공간 4바이트를 쓴다. */
-		if (retry-- <= 0) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			return; /* NVMe: 함수 실행을 종료한다. */
+	for (;;) { /* [한국어] 반영될 때까지, 또는 재시도 횟수를 다 쓸 때까지 */
+		pci_dbg(pdev, "restore config %#04x: %#010x -> %#010x\n", /* [한국어] 무엇을 무엇으로 바꾸는지 남긴다 */
+			offset, val, saved_val); /* [한국어] 오프셋, 현재 값, 되돌릴 값 */
+		pci_write_config_dword(pdev, offset, saved_val); /* [한국어] 저장해 둔 값을 써 넣는다 */
+		if (retry-- <= 0) /* [한국어] 재시도 횟수를 소진했으면 확인 없이 끝낸다 — 이미 쓰기는 했다 */
+			return; /* [한국어] 끝 */
 
-		pci_read_config_dword(pdev, offset, &val); /* NVMe: PCI 설정 공간 4바이트를 읽는다. */
-		if (val == saved_val) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			return; /* NVMe: 함수 실행을 종료한다. */
+		pci_read_config_dword(pdev, offset, &val); /* [한국어] 정말 반영됐는지 되읽어 확인한다 */
+		if (val == saved_val) /* [한국어] 값이 맞으면 */
+			return; /* [한국어] 끝 */
 
-		mdelay(1); /* NVMe: mdelay 함수를 호출한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
-} /* NVMe: 코드 블록을 종료한다. */
-
-static void pci_restore_config_space_range(struct pci_dev *pdev, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-					   int start, int end, int retry, /* NVMe: 표현식을 이어서 작성한다. */
-					   bool force) /* NVMe: bool 타입 변수를 선언한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	int index; /* NVMe: int 타입 변수를 선언한다. */
-
-	for (index = end; index >= start; index--) /* NVMe: 반복문을 시작한다. */
-		pci_restore_config_dword(pdev, 4 * index, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-					 pdev->saved_config_space[index], /* NVMe: 표현식을 이어서 작성한다. */
-					 retry, force); /* NVMe: 표현식을 평가한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+		mdelay(1); /* [한국어] 하드웨어가 반영할 시간을 준다. udelay 가 아닌 mdelay 라 바쁜 대기 1ms 다 */
+	}
+}
 
 /*
- * pci_restore_config_space:
- *   저장된 config space 를 복원한다. NVMe resume/reset 후 BAR/Command/Status 등을 원래대로 되돌린다.
+ * [한국어]
+ * pci_restore_config_space_range - config space 의 DWORD 구간을 뒤에서 앞으로 되돌린다.
+ *
+ * @pdev: 대상 PCI 장치.
+ * @start: 시작 DWORD 인덱스(포함).
+ * @end: 끝 DWORD 인덱스(포함).
+ * @retry: 각 DWORD 에 적용할 재시도 횟수.
+ * @force: 값이 같아도 강제로 쓸지.
+ * @return: 없음.
+ *
+ * 인덱스가 큰 쪽에서 작은 쪽으로 내려가며 쓴다. 이 방향이 곧 복원 순서
+ * 정책의 도구다 — 호출자(pci_restore_config_space)가 구간을 나누어 부르면서
+ * "BAR 를 Command 보다 먼저" 같은 순서를 만들어 낸다.
+ * 인덱스 i 의 config 오프셋은 4 * i 다.
+ *
+ * 실행 문맥: 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_restore_config_space() → [이 함수] → pci_restore_config_dword()
  */
-static void pci_restore_config_space(struct pci_dev *pdev) /* NVMe: pci_restore_config_space 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	if (pdev->hdr_type == PCI_HEADER_TYPE_NORMAL) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pci_restore_config_space_range(pdev, 10, 15, 0, false); /* NVMe: pci_restore_config_space_range 함수를 호출한다. */
+static void pci_restore_config_space_range(struct pci_dev *pdev,
+					   int start, int end, int retry,
+					   bool force)
+{
+	int index; /* [한국어] DWORD 인덱스 */
+
+	for (index = end; index >= start; index--) /* [한국어] 큰 인덱스에서 작은 인덱스로 내려간다 */
+		pci_restore_config_dword(pdev, 4 * index, /* [한국어] 인덱스를 바이트 오프셋으로 바꿔 넘긴다 */
+					 pdev->saved_config_space[index], /* [한국어] 그 자리에 되돌릴 값 */
+					 retry, force); /* [한국어] 재시도 횟수와 강제 여부는 그대로 전달한다 */
+}
+
+/*
+ * [한국어]
+ * pci_restore_config_space - 헤더 타입에 맞는 순서로 표준 헤더 64바이트를 되돌린다.
+ *
+ * @pdev: 대상 PCI 장치.
+ * @return: 없음.
+ *
+ * 이 함수의 핵심은 "무엇을 쓰느냐"가 아니라 "어떤 순서로 쓰느냐"다.
+ *
+ * 헤더 타입 0(일반 장치, NVMe SSD 가 여기 해당):
+ *   DWORD 10~15 → 4~9 → 0~3 순으로 되돌린다.
+ *   4~9 가 BAR 6개이고, 0~3 안에 Command 레지스터(오프셋 0x04)가 있다.
+ *   원본 주석이 짚듯 BAR 를 Command 보다 먼저 써야 한다. 순서가 반대라면
+ *   BAR 가 아직 0 인 상태에서 MEM 디코딩이 켜지고, 장치가 주소 0 부근을
+ *   자기 것이라 주장하는 위험한 창이 열린다.
+ *   BAR 구간에만 retry=10 을 주는 이유는, BAR 쓰기가 곧바로 반영되지 않는
+ *   하드웨어가 있어 되읽어 확인하며 최대 10번까지 다시 쓰기 위해서다.
+ *
+ * 헤더 타입 1(브리지):
+ *   DWORD 12~15 → 9~11 → 0~8 순이다. 9~11 에 force=true 를 주는 것이 특징인데,
+ *   원본 주석대로 일부 Intel 브리지가 prefetchable 창 레지스터를 명시적으로
+ *   다시 쓰지 않으면 S3 복귀 후 오동작하기 때문이다. 값이 같아 보여도
+ *   반드시 쓰게 하는 quirk 성 처리다.
+ *
+ * 그 밖의 헤더 타입은 순서를 따질 근거가 없어 0~15 를 한 번에 되돌린다.
+ *
+ * 실행 문맥: 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_restore_state() → [이 함수] → pci_restore_config_space_range()
+ */
+static void pci_restore_config_space(struct pci_dev *pdev)
+{
+	if (pdev->hdr_type == PCI_HEADER_TYPE_NORMAL) { /* [한국어] 헤더 타입 0 — 일반 엔드포인트. NVMe SSD 가 여기 해당한다 */
+		pci_restore_config_space_range(pdev, 10, 15, 0, false); /* [한국어] DWORD 10~15(오프셋 0x28~0x3f) — Subsystem ID, Expansion ROM, Capabilities Pointer, 인터럽트 라인/핀 등 */
 		/* Restore BARs before the command register. */
-		pci_restore_config_space_range(pdev, 4, 9, 10, false); /* NVMe: pci_restore_config_space_range 함수를 호출한다. */
-		pci_restore_config_space_range(pdev, 0, 3, 0, false); /* NVMe: pci_restore_config_space_range 함수를 호출한다. */
-	} else if (pdev->hdr_type == PCI_HEADER_TYPE_BRIDGE) { /* NVMe: if 함수를 정의한다. */
-		pci_restore_config_space_range(pdev, 12, 15, 0, false); /* NVMe: pci_restore_config_space_range 함수를 호출한다. */
+		pci_restore_config_space_range(pdev, 4, 9, 10, false); /* [한국어] DWORD 4~9 = BAR 0~5(오프셋 0x10~0x27). retry=10 은 쓰기가 곧바로 반영되지 않는 하드웨어를 위한 확인 재시도다 */
+		pci_restore_config_space_range(pdev, 0, 3, 0, false); /* [한국어] DWORD 0~3(오프셋 0x00~0x0f) — 여기에 Command 레지스터가 있다. BAR 가 모두 제자리에 들어간 뒤에야 디코딩을 켠다 */
+	} else if (pdev->hdr_type == PCI_HEADER_TYPE_BRIDGE) { /* [한국어] 헤더 타입 1 — PCI-to-PCI 브리지 */
+		pci_restore_config_space_range(pdev, 12, 15, 0, false); /* [한국어] DWORD 12~15(오프셋 0x30~0x3f) */
 
 		/*
 		 * Force rewriting of prefetch registers to avoid S3 resume
 		 * issues on Intel PCI bridges that occur when these
 		 * registers are not explicitly written.
 		 */
-		pci_restore_config_space_range(pdev, 9, 11, 0, true); /* NVMe: pci_restore_config_space_range 함수를 호출한다. */
-		pci_restore_config_space_range(pdev, 0, 8, 0, false); /* NVMe: pci_restore_config_space_range 함수를 호출한다. */
-	} else { /* NVMe: 표현식을 평가한다. */
-		pci_restore_config_space_range(pdev, 0, 15, 0, false); /* NVMe: pci_restore_config_space_range 함수를 호출한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+		pci_restore_config_space_range(pdev, 9, 11, 0, true); /* [한국어] DWORD 9~11 — prefetchable 메모리 창의 상위 32비트 레지스터들. force=true 로 값이 같아도 반드시 다시 쓴다 */
+		pci_restore_config_space_range(pdev, 0, 8, 0, false); /* [한국어] DWORD 0~8 — Command 와 나머지 브리지 창 설정 */
+	} else { /* [한국어] CardBus 등 그 밖의 헤더 타입 */
+		pci_restore_config_space_range(pdev, 0, 15, 0, false); /* [한국어] 순서를 따질 근거가 없어 전 구간을 한 번에 되돌린다 */
+	}
+}
 
 /**
  * pci_restore_state - Restore the saved state of a PCI device
  * @dev: PCI device that we're dealing with
  */
 /*
- * pci_restore_state:
- *   pci_save_state()로 저장한 상태를 복원한다. NVMe resume 시 controller 를 이전 상태로 복구하는 핵심 함수이다.
+ * [한국어]
+ * pci_restore_state - pci_save_state() 로 떠 둔 상태를 장치에 되돌린다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @return: 없음.
+ *
+ * 이 함수는 dev->state_saved 를 검사하지 않는다. 사본이 유효한지 판단하는 일은
+ * 호출자 몫이며(pci-driver.c 의 PM 콜백이 그 플래그를 보고 부를지 정한다),
+ * 여기서는 복원을 마친 뒤 플래그를 내리기만 한다.
+ *
+ * D3cold 나 리셋을 거치면 config space 가 초기값으로 돌아간다. 이 함수가
+ * 그것을 되돌려 장치를 "다시 찾을 수 있고 다시 쓸 수 있는" 상태로 만든다.
+ * BAR 가 복원되어야 CPU 가 레지스터에 닿고, Command 의 Bus Master Enable 이
+ * 복원되어야 장치가 DMA 를 다시 시작할 수 있다.
+ *
+ * 복원 순서에 뚜렷한 이유가 있다.
+ *   1) PCIe capability 를 먼저 되돌린다 — MPS/MRRS 같은 링크 파라미터는
+ *      트래픽이 흐르기 전에 제자리에 있어야 한다.
+ *   2) PASID → PRI → ATS 순서로 되돌린다. 이 셋은 의존 관계가 있어
+ *      순서를 지켜야 한다.
+ *   3) AER 상태를 지우고 나서 AER 설정을 복원한다. 순서가 반대면 복원 직후
+ *      리셋 과정에서 쌓인 오류 비트가 그대로 남아 곧바로 오류로 보고된다.
+ *   4) 그 다음에야 표준 헤더(BAR·Command 등)를 되돌린다.
+ *   5) 마지막으로 MSI/MSI-X 를 복원한다. 인터럽트는 장치가 다시 동작할 수
+ *      있게 된 뒤에 되살리는 것이 안전하다.
+ *
+ * NVMe 와의 관계: drivers/nvme/host/pci.c 가 리셋과 재초기화 경로에서
+ * 직접 부른다. FLR 뒤에 이 호출이 빠지면 BAR0 가 0 이 되어 컨트롤러
+ * 레지스터와 도어벨에 접근할 수 없고, Bus Master Enable 도 꺼진 채라
+ * SQ/CQ 를 읽지 못한다.
+ *
+ * 실행 문맥: config space 를 많이 쓴다. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   drivers/nvme/host/pci.c, pci_dev_restore(), pci-driver.c 의 resume
+ *     → [이 함수] → pci_restore_pcie_state(), pci_restore_config_space(),
+ *        pci_restore_msi_state(), pci_enable_acs(), pci_restore_iov_state()
  */
-void pci_restore_state(struct pci_dev *dev) /* NVMe: pci_restore_state 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	pci_restore_pcie_state(dev); /* NVMe: NVMe PCIe capability 상태를 복원한다. */
-	pci_restore_pasid_state(dev); /* NVMe: NVMe PASID 상태를 복원한다. */
-	pci_restore_pri_state(dev); /* NVMe: NVMe PRI(Page Request Interface) 상태를 복원한다. */
-	pci_restore_ats_state(dev); /* NVMe: NVMe ATS(Address Translation Services) 상태를 복원한다. */
-	pci_restore_vc_state(dev); /* NVMe: NVMe Virtual Channel capability 상태를 복원한다. */
-	pci_restore_rebar_state(dev); /* NVMe: NVMe Resizable BAR 상태를 복원한다. */
-	pci_restore_dpc_state(dev); /* NVMe: NVMe DPC 상태를 복원한다. */
-	pci_restore_ptm_state(dev); /* NVMe: NVMe PTM 상태를 복원한다. */
-	pci_restore_tph_state(dev); /* NVMe: NVMe TPH 상태를 복원한다. */
+void pci_restore_state(struct pci_dev *dev)
+{
+	pci_restore_pcie_state(dev); /* [한국어] 링크 파라미터(MPS/MRRS)와 ASPM/LTR 을 먼저 되돌린다 — 트래픽이 흐르기 전이어야 한다 */
+	pci_restore_pasid_state(dev); /* [한국어] PASID(Process Address Space ID) 복원. 아래 PRI/ATS 가 이 설정에 의존한다 */
+	pci_restore_pri_state(dev); /* [한국어] PRI(Page Request Interface) 복원 — 장치가 페이지 폴트를 요청하는 기능 */
+	pci_restore_ats_state(dev); /* [한국어] ATS 복원 — 주소 변환 캐시 기능. PASID/PRI 뒤에 와야 한다 */
+	pci_restore_vc_state(dev); /* [한국어] Virtual Channel 복원 — 트래픽 클래스 매핑 */
+	pci_restore_rebar_state(dev); /* [한국어] Resizable BAR 복원. BAR 크기 자체를 되돌리는 것이라 아래 BAR 주소 복원보다 먼저다 */
+	pci_restore_dpc_state(dev); /* [한국어] DPC 복원 */
+	pci_restore_ptm_state(dev); /* [한국어] PTM 복원 */
+	pci_restore_tph_state(dev); /* [한국어] TPH 복원 */
 
-	pci_aer_clear_status(dev); /* NVMe: NVMe AER 에러 상태를 클리어한다. */
-	pci_restore_aer_state(dev); /* NVMe: NVMe AER capability 상태를 복원한다. */
+	pci_aer_clear_status(dev); /* [한국어] 리셋 과정에서 쌓인 오류 상태 비트를 먼저 지운다 */
+	pci_restore_aer_state(dev); /* [한국어] 그 다음 AER 설정(마스크·심각도)을 되돌린다. 순서가 반대면 복원 직후 묵은 오류가 보고된다 */
 
-	pci_restore_config_space(dev); /* NVMe: NVMe config space(BAR/Command/Status 등)를 복원한다. */
+	pci_restore_config_space(dev); /* [한국어] 표준 헤더 64바이트를 되돌린다 — BAR 와 Command 가 여기서 살아난다 */
 
-	pci_restore_pcix_state(dev); /* NVMe: NVMe PCI-X capability 상태를 복원한다. */
-	pci_restore_msi_state(dev); /* NVMe: NVMe MSI/MSI-X 인터럽트 상태를 복원한다. */
+	pci_restore_pcix_state(dev); /* [한국어] PCI-X Command 복원(PCIe 장치에는 해당 없음) */
+	pci_restore_msi_state(dev); /* [한국어] MSI/MSI-X 복원. 장치가 다시 동작 가능해진 뒤에 인터럽트를 되살린다 */
 
 	/* Restore ACS and IOV configuration state */
-	pci_enable_acs(dev); /* NVMe: NVMe ACS 를 다시 enable 하여 DMA/P2P 격리를 복원한다. */
-	pci_restore_iov_state(dev); /* NVMe: NVMe SR-IOV 상태를 복원한다. */
+	pci_enable_acs(dev); /* [한국어] ACS 설정을 다시 계산해 적용한다 — 리셋으로 지워졌을 격리 설정을 되살린다 */
+	pci_restore_iov_state(dev); /* [한국어] SR-IOV 설정(VF 개수 등)을 복원한다 */
 
-	dev->state_saved = false; /* NVMe: NVMe config space 복원 완료 후 저장 플래그를 해제한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	dev->state_saved = false; /* [한국어] 사본을 다 썼다는 표시. 다시 복원하려면 pci_save_state() 를 새로 불러야 한다 */
+}
 EXPORT_SYMBOL(pci_restore_state);
 
-struct pci_saved_state { /* NVMe: pci_saved_state 구조체를 정의한다. */
-	u32 config_space[16]; /* NVMe: u32 타입 변수를 선언한다. */
-	struct pci_cap_saved_data cap[]; /* NVMe: 데이터 타입 변수를 선언한다. */
-}; /* NVMe: 코드 블록을 시작한다. */
+/*
+ * [한국어] 장치 밖으로 꺼내 들고 다닐 수 있는 "상태 사본" 한 벌.
+ *
+ * pci_dev 안의 saved_config_space + saved_cap_space 리스트는 장치에 매여 있어
+ * 다음 pci_save_state() 가 덮어써 버린다. 그와 달리 이 구조체는 kzalloc 으로
+ * 잡은 독립 메모리 한 덩어리라, 원하는 시점까지 보관했다가 되돌릴 수 있다.
+ * 소유권은 pci_store_saved_state() 를 부른 쪽에 있고 kfree 로 해제한다.
+ *
+ * 메모리 배치가 특이하다. 고정 길이 config_space 뒤에, 가변 길이 capability
+ * 사본들이 연달아 이어 붙는다. 각 capability 사본은 헤더 + 데이터라 크기가
+ * 제각각이므로 배열 인덱싱이 불가능하고, 바이트 단위 포인터 산술로 훑는다.
+ * 마지막에는 size 가 0 인 빈 항목이 끝 표시로 놓인다(원본 주석의
+ * "Empty cap_save terminates list").
+ */
+struct pci_saved_state {
+	u32 config_space[16]; /* [한국어] 표준 헤더 64바이트의 사본. 설정자: pci_store_saved_state(). 읽는 자: pci_load_saved_state(). 값 범위: pci_dev->saved_config_space 를 그대로 복사한 값. 동기화: 이 구조체는 호출자 소유라 공유되지 않는다 */
+	struct pci_cap_saved_data cap[]; /* [한국어] 가변 길이 배열 — 뒤에 이어 붙은 capability 사본들의 시작점. 각 항목의 실제 크기가 달라 (u8 *) 로 캐스팅해 바이트 단위로 전진하며 읽는다. size 가 0 인 항목이 끝 표시다 */
+};
 
 /**
  * pci_store_saved_state - Allocate and return an opaque struct containing
@@ -2166,41 +3575,59 @@ struct pci_saved_state { /* NVMe: pci_saved_state 구조체를 정의한다. */
  * Return NULL if no state or error.
  */
 /*
- * pci_store_saved_state:
- *   현재 config space 상태를 별도 저장 버퍼에 담는다. NVMe kexec/suspend 시 상태 보존에 활용된다.
+ * [한국어]
+ * pci_store_saved_state - 장치에 붙어 있는 저장 상태를 독립 메모리로 복사해 낸다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @return: 새로 할당한 상태 사본. 저장된 상태가 없거나 할당에 실패하면 NULL.
+ *          호출자가 kfree 로 해제해야 한다.
+ *
+ * pci_save_state() 가 뜬 사본은 pci_dev 안에 있어 다음 저장이 덮어쓴다.
+ * "지금 이 상태를 나중에 되돌리고 싶다"면 장치 밖으로 빼내야 한다.
+ * VFIO 처럼 장치를 사용자 공간에 넘겼다 되찾는 코드가 이 짝을 쓴다.
+ *
+ * 크기 계산이 두 번에 걸친다. 먼저 고정 부분과 끝 표시용 빈 항목의 크기를
+ * 잡고, capability 사본을 하나씩 훑으며 그 크기를 더한다. 그 다음 한 번에
+ * 할당하고 같은 순서로 채운다. kzalloc 으로 잡으므로 마지막 빈 항목의
+ * size 는 0 으로 초기화돼 끝 표시가 저절로 만들어진다.
+ *
+ * 실행 문맥: GFP_KERNEL 로 할당한다. 반드시 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   VFIO 등 장치 상태를 보관해야 하는 코드 → [이 함수] → kzalloc(), memcpy()
  */
-struct pci_saved_state *pci_store_saved_state(struct pci_dev *dev) /* NVMe: pci_store_saved_state 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	struct pci_saved_state *state; /* NVMe: 데이터 타입 변수를 선언한다. */
-	struct pci_cap_saved_state *tmp; /* NVMe: 데이터 타입 변수를 선언한다. */
-	struct pci_cap_saved_data *cap; /* NVMe: 데이터 타입 변수를 선언한다. */
-	size_t size; /* NVMe: size_t 타입 변수를 선언한다. */
+struct pci_saved_state *pci_store_saved_state(struct pci_dev *dev)
+{
+	struct pci_saved_state *state; /* [한국어] 새로 만들 사본 */
+	struct pci_cap_saved_state *tmp; /* [한국어] 장치에 매달린 capability 저장 버퍼를 훑는 커서 */
+	struct pci_cap_saved_data *cap; /* [한국어] 사본 안에서 다음 capability 를 쓸 위치 */
+	size_t size; /* [한국어] 필요한 총 바이트 수 */
 
-	if (!dev->state_saved) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return NULL; /* NVMe: 연산 결과를 반환한다. */
+	if (!dev->state_saved) /* [한국어] pci_save_state() 를 부른 적이 없으면 복사할 것이 없다 */
+		return NULL; /* [한국어] NULL 로 "상태 없음"을 알린다 */
 
-	size = sizeof(*state) + sizeof(struct pci_cap_saved_data); /* NVMe: 변수에 값을 할당한다. */
+	size = sizeof(*state) + sizeof(struct pci_cap_saved_data); /* [한국어] 고정 부분 + 끝 표시용 빈 항목 하나. 이 빈 항목이 있어야 읽는 쪽이 리스트의 끝을 안다 */
 
-	hlist_for_each_entry(tmp, &dev->saved_cap_space, next) /* NVMe: 리스트/해시 항목을 순회하는 매크로 루프를 시작한다. */
-		size += sizeof(struct pci_cap_saved_data) + tmp->cap.size; /* NVMe: 변수에 값을 할당한다. */
+	hlist_for_each_entry(tmp, &dev->saved_cap_space, next) /* [한국어] 장치에 매달린 capability 버퍼를 모두 훑으며 */
+		size += sizeof(struct pci_cap_saved_data) + tmp->cap.size; /* [한국어] 각 항목의 헤더 크기와 데이터 크기를 더한다 */
 
-	state = kzalloc(size, GFP_KERNEL); /* NVMe: 변수에 값을 할당한다. */
-	if (!state) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return NULL; /* NVMe: 연산 결과를 반환한다. */
+	state = kzalloc(size, GFP_KERNEL); /* [한국어] 계산한 크기로 한 번에 잡는다. kzalloc 이라 끝 표시 항목의 size 가 0 으로 초기화된다 */
+	if (!state) /* [한국어] 할당 실패 */
+		return NULL; /* [한국어] NULL */
 
-	memcpy(state->config_space, dev->saved_config_space, /* NVMe: 메모리 영역을 복사한다. */
-	       sizeof(state->config_space)); /* NVMe: sizeof 함수를 호출한다. */
+	memcpy(state->config_space, dev->saved_config_space, /* [한국어] 표준 헤더 64바이트 사본을 그대로 옮긴다 */
+	       sizeof(state->config_space)); /* [한국어] 배열 크기 자체를 쓰므로 양쪽 크기가 어긋날 수 없다 */
 
-	cap = state->cap; /* NVMe: 변수에 값을 할당한다. */
-	hlist_for_each_entry(tmp, &dev->saved_cap_space, next) { /* NVMe: 리스트/해시 항목을 순회하는 매크로 루프를 시작한다. */
-		size_t len = sizeof(struct pci_cap_saved_data) + tmp->cap.size; /* NVMe: 변수에 값을 할당한다. */
-		memcpy(cap, &tmp->cap, len); /* NVMe: 메모리 영역을 복사한다. */
-		cap = (struct pci_cap_saved_data *)((u8 *)cap + len); /* NVMe: 변수에 값을 할당한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+	cap = state->cap; /* [한국어] 가변 부분의 시작 위치 */
+	hlist_for_each_entry(tmp, &dev->saved_cap_space, next) { /* [한국어] 같은 순서로 capability 사본을 이어 붙인다 */
+		size_t len = sizeof(struct pci_cap_saved_data) + tmp->cap.size; /* [한국어] 이 항목이 차지할 바이트 수 = 헤더 + 데이터 */
+		memcpy(cap, &tmp->cap, len); /* [한국어] 헤더와 데이터를 통째로 복사한다 */
+		cap = (struct pci_cap_saved_data *)((u8 *)cap + len); /* [한국어] 다음 항목 자리로 전진한다. 항목 크기가 제각각이라 (u8 *) 로 캐스팅해 바이트 단위로 더한다 */
+	}
 	/* Empty cap_save terminates list */
 
-	return state; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return state; /* [한국어] 호출자가 소유하고 kfree 로 해제한다 */
+}
 EXPORT_SYMBOL_GPL(pci_store_saved_state);
 
 /**
@@ -2208,35 +3635,63 @@ EXPORT_SYMBOL_GPL(pci_store_saved_state);
  * @dev: PCI device that we're dealing with
  * @state: Saved state returned from pci_store_saved_state()
  */
-int pci_load_saved_state(struct pci_dev *dev, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-			 struct pci_saved_state *state) /* NVMe: 표현식을 평가한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	struct pci_cap_saved_data *cap; /* NVMe: 데이터 타입 변수를 선언한다. */
+/*
+ * [한국어]
+ * pci_load_saved_state - 밖에서 들고 온 상태 사본을 장치의 저장 버퍼에 되싣는다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @state: pci_store_saved_state() 가 돌려준 사본. NULL 이면 "저장 상태를 지워라"는 뜻이다.
+ * @return: 0 성공. -EINVAL 이면 사본이 이 장치와 맞지 않는다.
+ *
+ * 주의할 점은 이 함수가 하드웨어를 전혀 건드리지 않는다는 것이다. 하는 일은
+ * pci_dev 안의 saved_config_space 와 capability 버퍼들을 채우는 것뿐이고,
+ * 실제로 장치에 써 넣는 것은 그 뒤에 부르는 pci_restore_state() 다.
+ *
+ * @state 가 NULL 인 호출이 중요한 관용구다. dev->state_saved 를 false 로
+ * 내려 "복원할 사본이 없다"고 표시하는 효과만 남는다.
+ * drivers/nvme/host/pci.c 가 정확히 이렇게 쓴다 — NVMe 자체 전력 상태
+ * 제어(프로토콜 PS)를 시도했다가 실패하면, PCI PM 이 평소대로 D-state 를
+ * 다루도록 저장 표시를 지워 되돌린다.
+ *
+ * 사본 검증이 -EINVAL 의 근거다. 사본 안의 capability 마다 이 장치에 같은
+ * 번호·같은 크기의 버퍼가 있어야 한다. 다른 장치의 사본을 실으면 크기가
+ * 어긋나 거절된다.
+ *
+ * 실행 문맥: memcpy 뿐이라 잠들지 않는다.
+ *
+ * 호출 체인:
+ *   drivers/nvme/host/pci.c(NULL 로), pci_load_and_free_saved_state(), VFIO
+ *     → [이 함수] → _pci_find_saved_cap(), memcpy()
+ */
+int pci_load_saved_state(struct pci_dev *dev,
+			 struct pci_saved_state *state)
+{
+	struct pci_cap_saved_data *cap; /* [한국어] 사본 안에서 읽어 나갈 위치 */
 
-	dev->state_saved = false; /* NVMe: 변수에 값을 할당한다. */
+	dev->state_saved = false; /* [한국어] 먼저 내려 둔다. 아래에서 성공적으로 다 실었을 때만 다시 올린다 — 중간에 실패하면 반쯤 채워진 사본을 복원하지 않게 하려는 것이다 */
 
-	if (!state) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return 0; /* NVMe: 성공(0)을 반환한다. */
+	if (!state) /* [한국어] NULL 이면 "지워라"는 뜻이다 */
+		return 0; /* [한국어] 플래그만 내린 채 성공으로 끝낸다 */
 
-	memcpy(dev->saved_config_space, state->config_space, /* NVMe: 메모리 영역을 복사한다. */
-	       sizeof(state->config_space)); /* NVMe: sizeof 함수를 호출한다. */
+	memcpy(dev->saved_config_space, state->config_space, /* [한국어] 표준 헤더 64바이트 사본을 장치의 버퍼로 옮긴다 */
+	       sizeof(state->config_space)); /* [한국어] 양쪽 배열 크기가 같으므로 이 크기로 안전하다 */
 
-	cap = state->cap; /* NVMe: 변수에 값을 할당한다. */
-	while (cap->size) { /* NVMe: 조건이 참인 동안 반복한다. */
-		struct pci_cap_saved_state *tmp; /* NVMe: 데이터 타입 변수를 선언한다. */
+	cap = state->cap; /* [한국어] 가변 부분의 시작 */
+	while (cap->size) { /* [한국어] size 가 0 인 끝 표시 항목을 만날 때까지 */
+		struct pci_cap_saved_state *tmp; /* [한국어] 이 장치에서 대응하는 저장 버퍼 */
 
-		tmp = _pci_find_saved_cap(dev, cap->cap_nr, cap->cap_extended); /* NVMe: 변수에 값을 할당한다. */
-		if (!tmp || tmp->cap.size != cap->size) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			return -EINVAL; /* NVMe: 오류 코드를 반환한다. */
+		tmp = _pci_find_saved_cap(dev, cap->cap_nr, cap->cap_extended); /* [한국어] 번호와 "표준/확장" 구분으로 짝을 찾는다 */
+		if (!tmp || tmp->cap.size != cap->size) /* [한국어] 대응 버퍼가 없거나 크기가 다르면 다른 장치의 사본이다 */
+			return -EINVAL; /* [한국어] 실을 수 없다 */
 
-		memcpy(tmp->cap.data, cap->data, tmp->cap.size); /* NVMe: 메모리 영역을 복사한다. */
-		cap = (struct pci_cap_saved_data *)((u8 *)cap + /* NVMe: 표현식을 이어서 작성한다. */
-		       sizeof(struct pci_cap_saved_data) + cap->size); /* NVMe: sizeof 함수를 호출한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+		memcpy(tmp->cap.data, cap->data, tmp->cap.size); /* [한국어] 데이터만 옮긴다. 헤더(번호·크기)는 이미 같음을 확인했다 */
+		cap = (struct pci_cap_saved_data *)((u8 *)cap + /* [한국어] 다음 항목으로 전진한다 */
+		       sizeof(struct pci_cap_saved_data) + cap->size); /* [한국어] 헤더 크기 + 이 항목의 데이터 크기만큼 */
+	}
 
-	dev->state_saved = true; /* NVMe: 변수에 값을 할당한다. */
-	return 0; /* NVMe: 성공(0)을 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	dev->state_saved = true; /* [한국어] 끝까지 문제없이 실었으므로 복원 가능 표시를 올린다 */
+	return 0; /* [한국어] 성공 */
+}
 EXPORT_SYMBOL_GPL(pci_load_saved_state);
 
 /**
@@ -2245,102 +3700,194 @@ EXPORT_SYMBOL_GPL(pci_load_saved_state);
  * @dev: PCI device that we're dealing with
  * @state: Pointer to saved state returned from pci_store_saved_state()
  */
-int pci_load_and_free_saved_state(struct pci_dev *dev, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-				  struct pci_saved_state **state) /* NVMe: 표현식을 평가한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	int ret = pci_load_saved_state(dev, *state); /* NVMe: 변수에 값을 할당한다. */
-	kfree(*state); /* NVMe: 동적 할당된 커널 메모리를 해제한다. */
-	*state = NULL;
-	return ret; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+/*
+ * [한국어]
+ * pci_load_and_free_saved_state - 사본을 싣고 그 메모리까지 해제한다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @state: 사본 포인터를 담은 변수의 주소. 해제 후 NULL 로 덮어써 준다.
+ * @return: pci_load_saved_state() 의 결과.
+ *
+ * "한 번 쓰고 버리는" 사본을 위한 편의 함수다. 포인터의 주소를 받는 이유는
+ * 해제한 뒤 호출자의 변수까지 NULL 로 만들어, 이미 해제된 메모리를 다시
+ * 쓰는 사고를 막기 위해서다.
+ * 싣기가 실패해도 메모리는 해제한다 — 실패한 사본을 계속 들고 있을 이유가 없다.
+ *
+ * 실행 문맥: kfree 를 부른다. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   VFIO 등 → [이 함수] → pci_load_saved_state(), kfree()
+ */
+int pci_load_and_free_saved_state(struct pci_dev *dev,
+				  struct pci_saved_state **state)
+{
+	int ret = pci_load_saved_state(dev, *state); /* [한국어] 사본을 장치 버퍼에 싣는다. 결과는 성공·실패와 무관하게 보관해 둔다 */
+	kfree(*state); /* [한국어] 싣기 성공 여부와 관계없이 사본 메모리를 해제한다 */
+	*state = NULL; /* [한국어] 호출자의 포인터까지 NULL 로 만들어 해제 후 재사용을 막는다 */
+	return ret; /* [한국어] 싣기 결과를 그대로 전달한다 */
+}
 EXPORT_SYMBOL_GPL(pci_load_and_free_saved_state);
 
 /*
- * pcibios_enable_device:
- *   아키텍처/BIOS 수준에서 장치와 BAR 를 활성화한다. NVMe probe 시 플랫폼별 추가 설정을 수행한다.
+ * [한국어]
+ * pcibios_enable_device - 아키텍처가 가로챌 수 있는 장치 활성화 훅(기본 구현).
+ *
+ * @dev: 활성화할 PCI 장치.
+ * @bars: 활성화할 resource 인덱스의 비트마스크. 비트 i 가 1 이면 resource[i] 를 켠다.
+ * @return: 0 성공, 음수 오류.
+ *
+ * __weak 이라 아키텍처가 같은 이름의 함수를 정의하면 그쪽이 링크된다.
+ * 기본 구현은 공통 코드인 pci_enable_resources() 를 그대로 부른다.
+ * 그 함수는 요청한 BAR 들이 실제로 주소를 배정받았는지 확인한 뒤 Command
+ * 레지스터의 MEM/IO 디코딩 비트를 켠다 — 즉 "이 주소는 내 것"이라고 장치가
+ * 응답하기 시작하는 지점이다.
+ * x86 처럼 펌웨어와 협조가 필요한 아키텍처는 이 훅을 덮어써 추가 처리를 넣는다.
+ *
+ * 실행 문맥: config space 를 읽고 쓴다. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   do_pci_enable_device() → [이 함수] → pci_enable_resources()
  */
-int __weak pcibios_enable_device(struct pci_dev *dev, int bars) /* NVMe: pcibios_enable_device 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	return pci_enable_resources(dev, bars); /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+int __weak pcibios_enable_device(struct pci_dev *dev, int bars)
+{
+	return pci_enable_resources(dev, bars); /* [한국어] 요청한 BAR 들의 배정 상태를 확인하고 Command 의 MEM/IO 디코딩을 켠다 */
+}
 
 /*
- * pci_host_bridge_enable_device:
- *   host bridge 관점에서 장치를 활성화한다. NVMe 장치가 bus mastering 및 I/O/MEM decoding 을 할 수 있도록 한다.
+ * [한국어]
+ * pci_host_bridge_enable_device - 호스트 브리지 드라이버에 활성화 사실을 알린다.
+ *
+ * @dev: 활성화 중인 PCI 장치.
+ * @return: 0 성공(훅이 없으면 그냥 0), 음수면 브리지 드라이버가 거부했다.
+ *
+ * 일부 호스트 컨트롤러는 장치가 켜지기 전에 자기 쪽 설정을 손봐야 한다 —
+ * 아웃바운드 주소 창을 열거나, 도메인별 자원을 잡거나 하는 일이다.
+ * 그런 컨트롤러 드라이버가 host_bridge->enable_device 훅을 채워 두면
+ * 여기서 불린다. 훅이 없으면(대부분의 경우) 아무 일도 하지 않는다.
+ *
+ * 실행 문맥: 컨트롤러 드라이버의 훅을 부른다. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   do_pci_enable_device() → [이 함수] → host_bridge->enable_device()
  */
-static int pci_host_bridge_enable_device(struct pci_dev *dev) /* NVMe: pci_host_bridge_enable_device 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	struct pci_host_bridge *host_bridge = pci_find_host_bridge(dev->bus); /* NVMe: 변수에 값을 할당한다. */
-	int err; /* NVMe: int 타입 변수를 선언한다. */
+static int pci_host_bridge_enable_device(struct pci_dev *dev)
+{
+	struct pci_host_bridge *host_bridge = pci_find_host_bridge(dev->bus); /* [한국어] 이 장치가 속한 도메인의 호스트 브리지를 찾는다. 버스 계층을 루트까지 거슬러 올라간다 */
+	int err; /* [한국어] 훅의 반환값 */
 
-	if (host_bridge && host_bridge->enable_device) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		err = host_bridge->enable_device(host_bridge, dev); /* NVMe: 변수에 값을 할당한다. */
-		if (err) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			return err; /* NVMe: 연산 결과를 반환한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+	if (host_bridge && host_bridge->enable_device) { /* [한국어] 브리지가 있고 활성화 훅을 채워 두었으면 */
+		err = host_bridge->enable_device(host_bridge, dev); /* [한국어] 컨트롤러 드라이버에게 처리를 넘긴다 */
+		if (err) /* [한국어] 거부하면 */
+			return err; /* [한국어] 그 오류를 그대로 올려 활성화를 중단시킨다 */
+	}
 
-	return 0; /* NVMe: 성공(0)을 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return 0; /* [한국어] 훅이 없거나 성공했다 */
+}
 
 /*
- * pci_host_bridge_disable_device:
- *   host bridge 관점에서 장치를 비활성화한다. NVMe 제거/해제 시 리소스를 정리한다.
+ * [한국어]
+ * pci_host_bridge_disable_device - 호스트 브리지 드라이버에 비활성화 사실을 알린다.
+ *
+ * @dev: 비활성화 중인 PCI 장치.
+ * @return: 없음.
+ *
+ * pci_host_bridge_enable_device() 의 짝이다. 활성화 때 잡아 둔 컨트롤러 쪽
+ * 자원을 돌려주도록 훅을 부른다. 반환값이 없는 이유는 정리 경로라서
+ * 실패해도 되돌릴 것이 없기 때문이다.
+ *
+ * 실행 문맥: 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   do_pci_enable_device() 의 오류 경로, pci_disable_device()
+ *     → [이 함수] → host_bridge->disable_device()
  */
-static void pci_host_bridge_disable_device(struct pci_dev *dev) /* NVMe: pci_host_bridge_disable_device 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	struct pci_host_bridge *host_bridge = pci_find_host_bridge(dev->bus); /* NVMe: 변수에 값을 할당한다. */
+static void pci_host_bridge_disable_device(struct pci_dev *dev)
+{
+	struct pci_host_bridge *host_bridge = pci_find_host_bridge(dev->bus); /* [한국어] 이 장치가 속한 도메인의 호스트 브리지 */
 
-	if (host_bridge && host_bridge->disable_device) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		host_bridge->disable_device(host_bridge, dev); /* NVMe: 구조체 멤버에 접근한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	if (host_bridge && host_bridge->disable_device) /* [한국어] 브리지가 있고 비활성화 훅이 있으면 */
+		host_bridge->disable_device(host_bridge, dev); /* [한국어] 컨트롤러 드라이버에게 정리를 맡긴다 */
+}
 
 /*
- * do_pci_enable_device:
- *   pci_enable_device() 의 실제 수행부로, BAR 및 리소스를 설정한다. NVMe probe 시 DMA/IRQ/BAR 활성화의 핵심 단계이다.
+ * [한국어]
+ * do_pci_enable_device - 장치를 실제로 켜는 본체. 전원, 디코딩, 인터럽트 순으로 준비한다.
+ *
+ * @dev: 활성화할 PCI 장치.
+ * @bars: 켤 resource 인덱스의 비트마스크.
+ * @return: 0 성공, 음수 오류.
+ *
+ * 참조 계수 관리는 호출자(pci_enable_device_flags)가 하고, 이 함수는 순수하게
+ * "켜는 절차"만 밟는다. 순서에 각각 이유가 있다.
+ *
+ *   1) D0 로 올린다. 전원이 없으면 그 뒤의 config 쓰기가 모두 무의미하다.
+ *      -EIO 를 예외로 허용하는 것이 중요한 세부다 — pci_power_up() 은 PM
+ *      capability 가 없는 장치에 언제나 -EIO 를 돌려주지만, 그런 장치는
+ *      애초에 늘 켜져 있으므로 계속 진행해도 된다.
+ *   2) 상위 브리지의 ASPM 링크 설정을 다시 계산한다. 곧 트래픽이 흐를 참이므로
+ *      절전 상태를 새 상황에 맞춘다.
+ *   3) 호스트 브리지 드라이버에 알린다.
+ *   4) pcibios_enable_device() 로 Command 의 MEM/IO 디코딩을 켠다.
+ *      여기서 실패하면 3)에서 잡은 것을 되돌려야 해서 goto 정리 경로가 있다.
+ *   5) enable 단계 quirk 를 적용한다.
+ *   6) INTx(레거시 핀 인터럽트)를 다시 살린다.
+ *
+ * 6)의 조건이 미묘하다. 이미 MSI/MSI-X 를 쓰는 장치는 INTx 를 켜면 안 된다 —
+ * 두 방식은 배타적이고, MSI 를 쓰는 중에 INTx 가 열려 있으면 가짜 인터럽트가
+ * 생긴다. 그래서 msi_enabled/msix_enabled 이면 그대로 끝낸다.
+ * NVMe 는 MSI-X 를 쓰지만, pci_enable_device_mem() 을 부르는 시점에는 아직
+ * MSI-X 를 요청하기 전이라 이 갈래로 오지 않는다. 대신 Interrupt Pin 이
+ * 0 이 아닌 경우에만 INTx 를 여는 두 번째 조건에 걸린다.
+ *
+ * 실행 문맥: 전원 전이 지연 동안 잠들 수 있다. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_enable_device_flags(), pci_reenable_device() → [이 함수]
+ *     → pci_set_power_state(), pcibios_enable_device(), pci_fixup_device()
  */
-static int do_pci_enable_device(struct pci_dev *dev, int bars) /* NVMe: do_pci_enable_device 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	int err; /* NVMe: 전원/enable 상태 반환값을 저장할 변수이다. */
-	struct pci_dev *bridge; /* NVMe: NVMe 장치의 상위 PCIe bridge 포인터이다. */
-	u16 cmd; /* NVMe: PCI_COMMAND 레지스터 값을 읽어 저장할 변수이다. */
-	u8 pin; /* NVMe: PCI_INTERRUPT_PIN 레지스터 값을 저장할 변수이다. */
+static int do_pci_enable_device(struct pci_dev *dev, int bars)
+{
+	int err; /* [한국어] 각 단계의 반환값 */
+	struct pci_dev *bridge; /* [한국어] 상위 브리지. ASPM 재설정 대상이다 */
+	u16 cmd; /* [한국어] Command 레지스터 값 */
+	u8 pin; /* [한국어] Interrupt Pin 레지스터 값 — 0 이면 이 함수는 INTx 를 쓰지 않는다 */
 
-	err = pci_set_power_state(dev, PCI_D0); /* NVMe: 변수에 값을 할당한다. */
-	if (err < 0 && err != -EIO) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return err; /* NVMe: 연산 결과를 반환한다. */
+	err = pci_set_power_state(dev, PCI_D0); /* [한국어] 무엇보다 먼저 전원을 D0 로 올린다 */
+	if (err < 0 && err != -EIO) /* [한국어] -EIO 는 예외로 넘긴다. PM capability 가 없는 장치는 늘 -EIO 를 받지만 애초에 항상 켜져 있어 문제가 없다 */
+		return err; /* [한국어] 그 밖의 오류는 활성화를 포기한다 */
 
-	bridge = pci_upstream_bridge(dev); /* NVMe: NVMe 장치의 상위 bridge 를 찾는다. */
-	if (bridge) /* NVMe: 상위 bridge 가 존재하면 ASPM 링크 설정을 조정한다. */
-		pcie_aspm_powersave_config_link(bridge); /* NVMe: NVMe DMA 활성화 전후 링크 전원 상태를 최적화한다. */
+	bridge = pci_upstream_bridge(dev); /* [한국어] 상위 브리지를 찾는다 */
+	if (bridge) /* [한국어] 루트 버스 직결이 아니면 */
+		pcie_aspm_powersave_config_link(bridge); /* [한국어] 곧 트래픽이 흐를 것이므로 그 링크의 ASPM 절전 설정을 다시 계산한다 */
 
-	err = pci_host_bridge_enable_device(dev); /* NVMe: 변수에 값을 할당한다. */
-	if (err) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return err; /* NVMe: 연산 결과를 반환한다. */
+	err = pci_host_bridge_enable_device(dev); /* [한국어] 호스트 컨트롤러 드라이버에 활성화를 알린다 */
+	if (err) /* [한국어] 컨트롤러가 거부하면 */
+		return err; /* [한국어] 여기서 중단한다. 아직 되돌릴 것이 없다 */
 
-	err = pcibios_enable_device(dev, bars); /* NVMe: 변수에 값을 할당한다. */
-	if (err < 0) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		goto err_enable; /* NVMe: 지정한 레이블로 제어를 이동한다. */
-	pci_fixup_device(pci_fixup_enable, dev); /* NVMe: pci_fixup_device 함수를 호출한다. */
+	err = pcibios_enable_device(dev, bars); /* [한국어] 요청한 BAR 들에 대해 Command 의 MEM/IO 디코딩을 켠다. 이 순간부터 장치가 그 주소에 응답한다 */
+	if (err < 0) /* [한국어] 실패하면 */
+		goto err_enable; /* [한국어] 앞서 알린 호스트 브리지 쪽을 되돌려야 한다 */
+	pci_fixup_device(pci_fixup_enable, dev); /* [한국어] 활성화 단계에 걸린 quirk 를 적용한다. 켜진 직후에만 손봐야 하는 하드웨어가 있다 */
 
-	if (dev->msi_enabled || dev->msix_enabled) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return 0; /* NVMe: 성공(0)을 반환한다. */
+	if (dev->msi_enabled || dev->msix_enabled) /* [한국어] 이미 MSI 또는 MSI-X 를 쓰고 있으면 */
+		return 0; /* [한국어] INTx 를 건드리지 않고 끝낸다. 두 방식은 배타적이라 함께 열면 가짜 인터럽트가 생긴다 */
 
-	pci_read_config_byte(dev, PCI_INTERRUPT_PIN, &pin); /* NVMe: PCI 설정 공간 1바이트를 읽는다. */
-	if (pin) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pci_read_config_word(dev, PCI_COMMAND, &cmd); /* NVMe: PCI 설정 공간 2바이트를 읽는다. */
-		if (cmd & PCI_COMMAND_INTX_DISABLE) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			pci_write_config_word(dev, PCI_COMMAND, /* NVMe: PCI 설정 공간 2바이트를 쓴다. */
-					      cmd & ~PCI_COMMAND_INTX_DISABLE); /* NVMe: 비트 연산을 수행한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+	pci_read_config_byte(dev, PCI_INTERRUPT_PIN, &pin); /* [한국어] config space 오프셋 0x3d 의 Interrupt Pin. 0 이면 이 함수가 INTx 를 전혀 쓰지 않는다는 뜻이다 */
+	if (pin) { /* [한국어] INTx 를 쓰는 장치라면 */
+		pci_read_config_word(dev, PCI_COMMAND, &cmd); /* [한국어] Command 레지스터를 읽어 */
+		if (cmd & PCI_COMMAND_INTX_DISABLE) /* [한국어] INTx Disable 비트(비트 10)가 켜져 있으면 — 리셋이나 이전 사용의 잔재다 */
+			pci_write_config_word(dev, PCI_COMMAND, /* [한국어] 그 비트를 지워 INTx 를 다시 연다 */
+					      cmd & ~PCI_COMMAND_INTX_DISABLE); /* [한국어] ~ 로 해당 비트만 0 으로 만든다. 다른 비트는 그대로 둔다 */
+	}
 
-	return 0; /* NVMe: 성공(0)을 반환한다. */
+	return 0; /* [한국어] 활성화 완료 */
 
-err_enable: /* NVMe: 레이블을 정의한다. */
-	pci_host_bridge_disable_device(dev); /* NVMe: host bridge 관점에서 NVMe 장치를 비활성화한다. */
+err_enable: /* [한국어] pcibios_enable_device() 가 실패했을 때만 오는 정리 지점 */
+	pci_host_bridge_disable_device(dev); /* [한국어] 호스트 브리지 드라이버에 알렸던 것을 되돌린다 */
 
-	return err; /* NVMe: 연산 결과를 반환한다. */
+	return err; /* [한국어] 실패 원인을 그대로 올린다 */
 
-} /* NVMe: 코드 블록을 종료한다. */
+}
 
 /**
  * pci_reenable_device - Resume abandoned device
@@ -2350,52 +3897,123 @@ err_enable: /* NVMe: 레이블을 정의한다. */
  * to be called by normal code, write proper resume handler and use it instead.
  */
 /*
- * pci_reenable_device:
- *   이전에 enable 된 장치를 다시 enable 한다. NVMe resume 후 장치 상태를 재활성화할 때 사용된다.
+ * [한국어]
+ * pci_reenable_device - 이미 enable 된 장치의 활성화 절차를 다시 밟는다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @return: 0 성공(또는 애초에 enable 상태가 아니어서 할 일 없음), 음수 오류.
+ *
+ * 절전에서 돌아오면 config space 가 초기화돼 Command 의 디코딩 비트가 꺼져
+ * 있을 수 있다. 그런데 참조 계수(enable_cnt)는 그대로라 pci_enable_device()
+ * 를 다시 불러도 "이미 켜져 있다"며 곧바로 돌아온다. 그 틈을 메우는 함수다 —
+ * 참조 계수를 건드리지 않고 do_pci_enable_device() 만 다시 밟는다.
+ *
+ * 모든 resource 비트를 켜는 마스크를 넘기는 이유는, 원래 어떤 BAR 로 켰는지
+ * 기억해 두지 않기 때문이다. 이미 배정되지 않은 BAR 는 하위에서 걸러진다.
+ *
+ * 원본 주석의 경고대로 드라이버가 직접 부를 함수가 아니다 —
+ * 제대로 된 resume 핸들러를 작성해 쓰라는 뜻이다.
+ *
+ * 실행 문맥: 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci-driver.c 의 pci_default_resume 계열 → [이 함수] → do_pci_enable_device()
  */
-int pci_reenable_device(struct pci_dev *dev) /* NVMe: pci_reenable_device 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	if (pci_is_enabled(dev)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return do_pci_enable_device(dev, (1 << PCI_NUM_RESOURCES) - 1); /* NVMe: 연산 결과를 반환한다. */
-	return 0; /* NVMe: 성공(0)을 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+int pci_reenable_device(struct pci_dev *dev)
+{
+	if (pci_is_enabled(dev)) /* [한국어] enable_cnt 가 0 이면 원래 꺼져 있던 장치이므로 되살릴 것이 없다 */
+		return do_pci_enable_device(dev, (1 << PCI_NUM_RESOURCES) - 1); /* [한국어] 모든 resource 비트를 세운 마스크. 어떤 BAR 로 켰었는지 기억해 두지 않아 전부 시도한다 */
+	return 0; /* [한국어] 꺼져 있던 장치는 그대로 둔다 */
+}
 EXPORT_SYMBOL(pci_reenable_device);
 
 /*
- * pci_enable_bridge:
- *   상위 bridge 의 I/O/MEM decoding 을 활성화한다. NVMe BAR 접근 경로 상의 bridge 들이 forwarding 을 수행하도록 한다.
+ * [한국어]
+ * pci_enable_bridge - 이 장치까지 이르는 브리지 경로를 루트 쪽부터 모두 켠다.
+ *
+ * @dev: 켜야 할 브리지(또는 그 아래 장치).
+ * @return: 없음. 실패해도 로그만 남기고 계속 진행한다.
+ *
+ * 엔드포인트를 켜는 것만으로는 부족하다. CPU 가 그 BAR 주소로 보낸 트랜잭션이
+ * 중간 브리지를 통과하려면, 경로상 모든 브리지가 켜져 있고 Bus Master 여야
+ * 한다. 브리지의 Bus Master Enable 은 "아래에서 올라온 DMA 를 위로 전달한다"는
+ * 뜻이라, 이것이 꺼져 있으면 NVMe 가 아무리 DMA 를 내보내도 메모리에 닿지 못한다.
+ *
+ * 재귀로 루트 쪽부터 처리한다 — 위쪽 브리지가 먼저 켜져야 아래쪽 브리지에
+ * 접근할 수 있기 때문이다.
+ *
+ * 실패해도 중단하지 않고 로그만 남기는 이유는, 여기서 포기하면 아래 장치의
+ * 활성화가 통째로 실패해 상황이 더 나빠지기 때문이다. 켤 수 있는 데까지
+ * 켜 보고 결과는 상위 장치의 접근 실패로 드러나게 둔다.
+ *
+ * 실행 문맥: 프로세스 문맥. 재귀 깊이는 PCI 계층 깊이만큼이다.
+ *
+ * 호출 체인:
+ *   pci_enable_device_flags() → [이 함수] → [이 함수](재귀),
+ *     pci_enable_device(), pci_set_master()
  */
-static void pci_enable_bridge(struct pci_dev *dev) /* NVMe: pci_enable_bridge 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	struct pci_dev *bridge; /* NVMe: NVMe 장치의 상위 PCIe bridge 포인터이다. */
-	int retval; /* NVMe: int 타입 변수를 선언한다. */
+static void pci_enable_bridge(struct pci_dev *dev)
+{
+	struct pci_dev *bridge; /* [한국어] 한 단계 위 브리지 */
+	int retval; /* [한국어] pci_enable_device() 의 결과 */
 
-	bridge = pci_upstream_bridge(dev); /* NVMe: NVMe 장치의 상위 PCIe bridge 를 찾는다. */
-	if (bridge) /* NVMe: 상위 bridge 가 있으면 해당 bridge 도 enable 한다. */
-		pci_enable_bridge(bridge); /* NVMe: NVMe BAR 접근 경로 상의 bridge 를 활성화한다. */
+	bridge = pci_upstream_bridge(dev); /* [한국어] 상위 브리지를 찾는다 */
+	if (bridge) /* [한국어] 루트에 닿지 않았으면 */
+		pci_enable_bridge(bridge); /* [한국어] 위쪽부터 먼저 켠다 — 위가 꺼져 있으면 아래에 접근할 수 없다 */
 
-	if (pci_is_enabled(dev)) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		if (!dev->is_busmaster) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			pci_set_master(dev); /* NVMe: NVMe DMA 를 위한 bus mastering 을 활성화한다. */
-		return; /* NVMe: 함수 실행을 종료한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+	if (pci_is_enabled(dev)) { /* [한국어] 이 브리지가 이미 켜져 있으면 */
+		if (!dev->is_busmaster) /* [한국어] Bus Master 만 확인한다. 켜져 있어도 BME 가 꺼져 있으면 아래 DMA 가 위로 못 간다 */
+			pci_set_master(dev); /* [한국어] Bus Master Enable 을 세운다 */
+		return; /* [한국어] 이미 켜져 있으므로 더 할 일이 없다 */
+	}
 
-	retval = pci_enable_device(dev); /* NVMe: 변수에 값을 할당한다. */
-	if (retval) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pci_err(dev, "Error enabling bridge (%d), continuing\n", /* NVMe: PCI 장치에 대한 에러 로그를 출력한다. */
-			retval); /* NVMe: 표현식을 평가한다. */
-	pci_set_master(dev); /* NVMe: NVMe DMA 를 위한 bus mastering 을 활성화한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	retval = pci_enable_device(dev); /* [한국어] 꺼져 있으면 켠다. MEM 과 IO 를 모두 요청한다 — 브리지는 양쪽 창을 다 가질 수 있다 */
+	if (retval) /* [한국어] 실패해도 */
+		pci_err(dev, "Error enabling bridge (%d), continuing\n", /* [한국어] 로그만 남기고 계속한다. 여기서 포기하면 아래 장치가 통째로 못 켜진다 */
+			retval); /* [한국어] 실패 코드 */
+	pci_set_master(dev); /* [한국어] 브리지의 Bus Master 는 반드시 켠다 — 아래에서 올라오는 DMA 를 위로 전달하는 스위치다 */
+}
 
 /*
- * pci_enable_device_flags:
- *   주어진 flags 에 맞춰 pci_dev 를 enable 한다. NVMe probe 시 MEM/IO/MSI 등 필요한 리소스만 활성화한다.
+ * [한국어]
+ * pci_enable_device_flags - 활성화의 공통 본체. 참조 계수와 BAR 선택을 담당한다.
+ *
+ * @dev: 활성화할 PCI 장치.
+ * @flags: 켤 자원의 종류. IORESOURCE_MEM 이면 메모리 BAR 만,
+ *         IORESOURCE_MEM | IORESOURCE_IO 면 둘 다.
+ * @return: 0 성공, 음수 오류.
+ *
+ * 두 가지가 이 함수의 핵심이다.
+ *
+ * 하나는 참조 계수다. dev->enable_cnt 를 원자적으로 올려, 그 결과가 1 보다
+ * 크면 이미 다른 곳에서 켜 둔 것이므로 곧바로 성공을 돌려준다. 덕분에
+ * pci_enable_device() 를 여러 번 불러도 안전하고, pci_disable_device() 와
+ * 짝을 맞춰 부르기만 하면 마지막 하나가 실제로 끈다. atomic_inc_return 을
+ * 쓰므로 여러 CPU 가 동시에 불러도 정확히 한 쪽만 실제 활성화를 수행한다.
+ * 실패하면 올렸던 계수를 다시 내려 균형을 맞춘다.
+ *
+ * 다른 하나는 BAR 선택이다. resource[] 를 훑어 @flags 와 성격이 맞는 것만
+ * 비트마스크로 모은다. 두 루프로 나뉜 이유는 원본 주석대로 SR-IOV VF BAR
+ * 구간을 건너뛰기 위해서다 — VF BAR 는 PF 를 켜는 것과 다른 절차로 다룬다.
+ *
+ * 맨 앞에서 전원 상태를 새로 읽는 것도 이유가 있다. 부팅 직후나 장치 제거
+ * 직후에는 캐시가 실물과 다를 수 있고, 그 상태에서 MSI 메시지를 쓰면
+ * 엉뚱하게 동작한다(원본 주석).
+ *
+ * NVMe 와의 관계: drivers/nvme/host/pci.c 가 pci_enable_device_mem() 을 통해
+ * 이 경로로 들어온다. NVMe 는 IO 공간 BAR 를 쓰지 않아 MEM 만 요청한다.
+ *
+ * 실행 문맥: 잠들 수 있다. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_enable_device_mem() / pci_enable_device() → [이 함수]
+ *     → pci_update_current_state(), pci_enable_bridge(), do_pci_enable_device()
  */
-static int pci_enable_device_flags(struct pci_dev *dev, unsigned long flags) /* NVMe: pci_enable_device_flags 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	struct pci_dev *bridge; /* NVMe: NVMe 장치의 상위 PCIe bridge 포인터이다. */
-	int err; /* NVMe: enable_device_flags 반환값이다. */
-	int i, bars = 0; /* NVMe: 활성화할 BAR 비트마스크를 저장할 변수이다. */
+static int pci_enable_device_flags(struct pci_dev *dev, unsigned long flags)
+{
+	struct pci_dev *bridge; /* [한국어] 상위 브리지 */
+	int err; /* [한국어] do_pci_enable_device() 의 결과 */
+	int i, bars = 0; /* [한국어] i 는 resource 인덱스, bars 는 켤 resource 들의 비트마스크 */
 
 	/*
 	 * Power state could be unknown at this point, either due to a fresh
@@ -2403,28 +4021,28 @@ static int pci_enable_device_flags(struct pci_dev *dev, unsigned long flags) /* 
 	 * so that things like MSI message writing will behave as expected
 	 * (e.g. if the device really is in D0 at enable time).
 	 */
-	pci_update_current_state(dev, dev->current_state); /* NVMe: pci_update_current_state 함수를 호출한다. */
+	pci_update_current_state(dev, dev->current_state); /* [한국어] 캐시된 전원 상태를 실물에 맞춘다. 두 번째 인자는 PM capability 가 없을 때만 쓰이는 대체값이라 현재 값을 그대로 넘긴다 */
 
-	if (atomic_inc_return(&dev->enable_cnt) > 1) /* NVMe: 이미 enable 된 상태면 참조 카운트만 증가시킨다. */
+	if (atomic_inc_return(&dev->enable_cnt) > 1) /* [한국어] 참조 계수를 원자적으로 올린다. 결과가 1 보다 크면 이미 누군가 켜 둔 것이다. 여러 CPU 가 동시에 불러도 정확히 한 쪽만 아래로 내려간다 */
 		return 0;		/* already enabled */
 
-	bridge = pci_upstream_bridge(dev); /* NVMe: 변수에 값을 할당한다. */
-	if (bridge) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pci_enable_bridge(bridge); /* NVMe: pci_enable_bridge 함수를 호출한다. */
+	bridge = pci_upstream_bridge(dev); /* [한국어] 상위 브리지를 찾는다 */
+	if (bridge) /* [한국어] 루트 직결이 아니면 */
+		pci_enable_bridge(bridge); /* [한국어] 경로상 브리지를 루트 쪽부터 모두 켠다. 그러지 않으면 이 장치의 BAR 에 트랜잭션이 닿지 못한다 */
 
 	/* only skip sriov related */
-	for (i = 0; i <= PCI_ROM_RESOURCE; i++) /* NVMe: 일반 BAR(0~6) 중 flags 와 일치하는 리소스를 순회한다. */
-		if (dev->resource[i].flags & flags) /* NVMe: NVMe BAR 플래그가 요청한 flags 와 일치하는지 확인한다. */
-			bars |= (1 << i); /* NVMe: 해당 BAR 를 활성화 대상 비트마스크에 추가한다. */
-	for (i = PCI_BRIDGE_RESOURCES; i < DEVICE_COUNT_RESOURCE; i++) /* NVMe: bridge 리소스 중 flags 와 일치하는 영역을 순회한다. */
-		if (dev->resource[i].flags & flags) /* NVMe: bridge 리소스 플래그가 요청한 flags 와 일치하는지 확인한다. */
-			bars |= (1 << i); /* NVMe: 해당 bridge 리소스도 활성화 대상에 추가한다. */
+	for (i = 0; i <= PCI_ROM_RESOURCE; i++) /* [한국어] 표준 BAR 0~5 와 ROM(PCI_ROM_RESOURCE)까지 */
+		if (dev->resource[i].flags & flags) /* [한국어] 그 자원의 성격이 요청한 flags 와 겹치는지 본다. MEM 만 요청하면 IO BAR 는 걸러진다 */
+			bars |= (1 << i); /* [한국어] 해당 인덱스 비트를 세운다 */
+	for (i = PCI_BRIDGE_RESOURCES; i < DEVICE_COUNT_RESOURCE; i++) /* [한국어] 브리지 윈도 구간. 중간의 SR-IOV VF BAR 구간을 건너뛰려고 루프를 둘로 나눈 것이다 */
+		if (dev->resource[i].flags & flags) /* [한국어] 같은 기준으로 거른다 */
+			bars |= (1 << i); /* [한국어] 해당 인덱스 비트를 세운다 */
 
-	err = do_pci_enable_device(dev, bars); /* NVMe: 선택된 NVMe BAR 와 리소스를 실제로 활성화한다. */
-	if (err < 0) /* NVMe: 활성화 실패 시 enable 참조 카운트를 롤백한다. */
-		atomic_dec(&dev->enable_cnt); /* NVMe: atomic_dec 함수를 호출한다. */
-	return err; /* NVMe: NVMe 장치 활성화 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	err = do_pci_enable_device(dev, bars); /* [한국어] 고른 자원들에 대해 실제 활성화 절차를 밟는다 */
+	if (err < 0) /* [한국어] 실패하면 */
+		atomic_dec(&dev->enable_cnt); /* [한국어] 앞서 올린 참조 계수를 되돌린다. 그러지 않으면 영영 끌 수 없는 장치가 된다 */
+	return err; /* [한국어] 활성화 결과 */
+}
 
 /**
  * pci_enable_device_mem - Initialize a device for use with Memory space
@@ -2435,13 +4053,36 @@ static int pci_enable_device_flags(struct pci_dev *dev, unsigned long flags) /* 
  * Beware, this function can fail.
  */
 /*
- * pci_enable_device_mem:
- *   NVMe BAR(메모리 리소스)를 사용하기 위해 장치를 enable 한다. NVMe driver probe 의 첫 단계에서 호출된다.
+ * [한국어]
+ * pci_enable_device_mem - 메모리 공간만 쓰는 장치를 활성화한다.
+ *
+ * @dev: 활성화할 PCI 장치.
+ * @return: 0 성공, 음수 오류.
+ *
+ * pci_enable_device_flags(dev, IORESOURCE_MEM) 의 얇은 래퍼다. IO 공간 BAR 는
+ * 켜지 않는다는 점이 pci_enable_device() 와 유일한 차이다.
+ *
+ * 그 차이가 실질적인 이유는 이렇다. IO 공간은 x86 의 64KB 짜리 별도 주소
+ * 공간으로, 시스템 전체에서 극히 부족한 자원이다. 쓰지도 않을 IO BAR 를
+ * 켜면 그 자원을 붙들고 있게 되고, 배정에 실패하면 활성화 자체가 실패한다.
+ * 그래서 메모리 BAR 만 쓰는 현대적인 장치는 이 판을 쓰는 것이 맞다.
+ *
+ * NVMe 와의 관계: drivers/nvme/host/pci.c 의 nvme_pci_enable() 이 이 함수를
+ * 부른다. NVMe 규격은 컨트롤러 레지스터와 도어벨을 BAR0 의 메모리 공간에
+ * 매핑하도록 정하고 있고 IO 공간은 쓰지 않으므로, _mem 판이 정확한 선택이다.
+ * 이 호출이 성공해야 Command 의 Memory Space Enable 이 켜져 BAR0 매핑을 통한
+ * 레지스터 접근이 실제로 동작한다.
+ *
+ * 실행 문맥: 잠들 수 있다. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   drivers/nvme/host/pci.c 의 nvme_pci_enable() → [이 함수]
+ *     → pci_enable_device_flags() → do_pci_enable_device()
  */
-int pci_enable_device_mem(struct pci_dev *dev) /* NVMe: pci_enable_device_mem 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	return pci_enable_device_flags(dev, IORESOURCE_MEM); /* NVMe: NVMe 메모리 BAR만 활성화하고 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+int pci_enable_device_mem(struct pci_dev *dev)
+{
+	return pci_enable_device_flags(dev, IORESOURCE_MEM); /* [한국어] IORESOURCE_MEM 만 넘겨 메모리 BAR 만 켠다. IO BAR 는 걸러진다 */
+}
 EXPORT_SYMBOL(pci_enable_device_mem);
 
 /**
@@ -2456,13 +4097,29 @@ EXPORT_SYMBOL(pci_enable_device_mem);
  * this function repeatedly (we just increment the count).
  */
 /*
- * pci_enable_device:
- *   NVMe controller 를 PCIe bus 상에서 완전히 활성화한다. DMA, BAR, 인터럽트 등 모든 동작의 전제 조건이다.
+ * [한국어]
+ * pci_enable_device - 메모리와 IO 공간을 모두 쓰는 장치를 활성화한다.
+ *
+ * @dev: 활성화할 PCI 장치.
+ * @return: 0 성공, 음수 오류.
+ *
+ * pci_enable_device_flags(dev, IORESOURCE_MEM | IORESOURCE_IO) 의 래퍼다.
+ * 두 종류의 BAR 를 모두 켜므로, IO 공간 BAR 가 배정되지 않았다면 활성화가
+ * 실패할 수 있다. 메모리 BAR 만 쓰는 장치라면 pci_enable_device_mem() 이 낫다.
+ *
+ * 원본 주석이 짚듯 여러 번 불러도 안전하다 — 참조 계수만 올라간다.
+ * 다만 pci_disable_device() 를 같은 횟수만큼 불러야 실제로 꺼진다.
+ *
+ * 실행 문맥: 잠들 수 있다. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   각 드라이버의 probe, pci_enable_bridge() → [이 함수]
+ *     → pci_enable_device_flags() → do_pci_enable_device()
  */
-int pci_enable_device(struct pci_dev *dev) /* NVMe: pci_enable_device 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	return pci_enable_device_flags(dev, IORESOURCE_MEM | IORESOURCE_IO); /* NVMe: NVMe 메모리 및 I/O BAR를 모두 활성화하고 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+int pci_enable_device(struct pci_dev *dev)
+{
+	return pci_enable_device_flags(dev, IORESOURCE_MEM | IORESOURCE_IO); /* [한국어] MEM 과 IO 를 모두 요청한다 */
+}
 EXPORT_SYMBOL(pci_enable_device);
 
 /*
@@ -2474,13 +4131,25 @@ EXPORT_SYMBOL(pci_enable_device);
  * implementations can override this.
  */
 /*
- * pcibios_device_add:
- *   아키텍처별 장치 추가 후처리를 수행한다. NVMe pci_dev 가 시스템에 등록될 때 플랫폼 설정을 적용한다.
+ * [한국어]
+ * pcibios_device_add - 장치가 시스템에 등록될 때 아키텍처가 끼어들 수 있는 훅(기본 구현).
+ *
+ * @dev: 막 등록되는 PCI 장치.
+ * @return: 0 성공. 음수를 돌려주면 장치 등록이 중단된다.
+ *
+ * __weak 이라 아키텍처가 같은 이름의 함수를 정의하면 그쪽이 링크된다.
+ * 공통 코드에는 특별히 할 일이 없어 기본 구현은 0 만 돌려준다.
+ * 아키텍처별로 DMA 마스크 조정이나 IOMMU 그룹 배정 같은 처리를 넣을 자리다.
+ *
+ * 실행 문맥: 열거 중 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   probe.c 의 pci_device_add() → [이 함수]
  */
-int __weak pcibios_device_add(struct pci_dev *dev) /* NVMe: pcibios_device_add 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	return 0; /* NVMe: 성공(0)을 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+int __weak pcibios_device_add(struct pci_dev *dev)
+{
+	return 0; /* [한국어] 공통 코드에는 할 일이 없다 */
+}
 
 /**
  * pcibios_release_device - provide arch specific hooks when releasing
@@ -2491,7 +4160,20 @@ int __weak pcibios_device_add(struct pci_dev *dev) /* NVMe: pcibios_device_add �
  * devices are released. This is the default implementation. Architecture
  * implementations can override this.
  */
-void __weak pcibios_release_device(struct pci_dev *dev) {} /* NVMe: void 타입 변수를 선언한다. */
+/*
+ * [한국어]
+ * pcibios_release_device - 장치가 해제될 때의 아키텍처 훅(기본 구현, 빈 함수).
+ *
+ * @dev: 해제되는 PCI 장치.
+ * @return: 없음.
+ *
+ * __weak 이며 본문이 비어 있다. 아키텍처가 장치 등록 때 잡아 둔 자원이
+ * 있다면 여기서 돌려주도록 덮어쓴다.
+ *
+ * 호출 체인:
+ *   probe.c 의 장치 해제 경로 → [이 함수]
+ */
+void __weak pcibios_release_device(struct pci_dev *dev) {}
 
 /**
  * pcibios_disable_device - disable arch specific PCI resources for device dev
@@ -2501,24 +4183,57 @@ void __weak pcibios_release_device(struct pci_dev *dev) {} /* NVMe: void 타입 
  * is the default implementation. Architecture implementations can
  * override this.
  */
-void __weak pcibios_disable_device(struct pci_dev *dev) {} /* NVMe: void 타입 변수를 선언한다. */
+/*
+ * [한국어]
+ * pcibios_disable_device - 장치 비활성화 시의 아키텍처 훅(기본 구현, 빈 함수).
+ *
+ * @dev: 비활성화되는 PCI 장치.
+ * @return: 없음.
+ *
+ * __weak 이며 본문이 비어 있다. pcibios_enable_device() 가 아키텍처별로 켠
+ * 것이 있다면 그 짝으로 여기서 끈다.
+ *
+ * 호출 체인:
+ *   do_pci_disable_device() → [이 함수]
+ */
+void __weak pcibios_disable_device(struct pci_dev *dev) {}
 
 /*
- * do_pci_disable_device:
- *   pci_disable_device() 의 실제 수행부로 command 레지스터를 클리어한다. NVMe remove 시 DMA/IO/MEM decoding 을 중지한다.
+ * [한국어]
+ * do_pci_disable_device - Bus Master 를 끄고 아키텍처 훅을 부른다.
+ *
+ * @dev: 비활성화할 PCI 장치.
+ * @return: 없음.
+ *
+ * "장치를 끈다"고 할 때 실제로 하는 일은 Command 레지스터의 Bus Master Enable
+ * 비트를 지우는 것뿐이다. 이 비트가 내려가면 장치는 더 이상 스스로 트랜잭션을
+ * 시작할 수 없다 — 즉 DMA 가 멈춘다. MEM/IO 디코딩 비트는 건드리지 않는다.
+ *
+ * 이것이 정리 경로에서 결정적으로 중요하다. 드라이버를 내리는데 DMA 가
+ * 멈추지 않으면, 이미 해제한 메모리에 장치가 계속 써 넣어 메모리를
+ * 망가뜨린다. NVMe 로 치면 컨트롤러가 SQ/CQ 를 계속 읽고 PRP 가 가리키는
+ * 버퍼에 데이터를 쓰는 상태가 이어지는 것이다.
+ *
+ * 이미 꺼져 있으면 쓰지 않는다 — 불필요한 config 쓰기를 피한다.
+ *
+ * 실행 문맥: config space 를 읽고 쓴다. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_disable_device(), pci_disable_enabled_device() → [이 함수]
+ *     → pci_read/write_config_word(), pcibios_disable_device()
  */
-static void do_pci_disable_device(struct pci_dev *dev) /* NVMe: do_pci_disable_device 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	u16 pci_command; /* NVMe: u16 타입 변수를 선언한다. */
+static void do_pci_disable_device(struct pci_dev *dev)
+{
+	u16 pci_command; /* [한국어] Command 레지스터 값 */
 
-	pci_read_config_word(dev, PCI_COMMAND, &pci_command); /* NVMe: NVMe controller 의 PCI_COMMAND 레지스터를 읽는다. */
-	if (pci_command & PCI_COMMAND_MASTER) { /* NVMe: Bus Master Enable(BME) 비트가 설정되어 있으면 클리어한다. */
-		pci_command &= ~PCI_COMMAND_MASTER; /* NVMe: BME 비트를 클리어하여 NVMe DMA 를 중단한다. */
-		pci_write_config_word(dev, PCI_COMMAND, pci_command); /* NVMe: BME 클리어한 PCI_COMMAND 를 NVMe config space 에 기록한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+	pci_read_config_word(dev, PCI_COMMAND, &pci_command); /* [한국어] config space 오프셋 0x04 의 Command 를 읽는다 */
+	if (pci_command & PCI_COMMAND_MASTER) { /* [한국어] Bus Master Enable(비트 2)이 켜져 있을 때만 손댄다 */
+		pci_command &= ~PCI_COMMAND_MASTER; /* [한국어] 그 비트만 지운다. 다른 비트(MEM/IO 디코딩 등)는 그대로 둔다 */
+		pci_write_config_word(dev, PCI_COMMAND, pci_command); /* [한국어] 되쓰는 순간 장치는 새 DMA 트랜잭션을 시작할 수 없게 된다 */
+	}
 
-	pcibios_disable_device(dev); /* NVMe: 아키텍처별로 NVMe 장치 비활성화 후처리를 수행한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	pcibios_disable_device(dev); /* [한국어] 아키텍처가 켜 두었던 것이 있으면 여기서 끈다 */
+}
 
 /**
  * pci_disable_enabled_device - Disable device without updating enable_cnt
@@ -2528,14 +4243,29 @@ static void do_pci_disable_device(struct pci_dev *dev) /* NVMe: do_pci_disable_d
  * not supposed to be called drivers.
  */
 /*
- * pci_disable_enabled_device:
- *   enable 된 pci_dev 를 안전하게 disable 한다. NVMe 장치 해제 시 리소스 누수를 방지한다.
+ * [한국어]
+ * pci_disable_enabled_device - 참조 계수를 건드리지 않고 장치만 끈다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @return: 없음.
+ *
+ * pci_disable_device() 와 달리 enable_cnt 를 내리지 않는다. 절전으로 들어갈
+ * 때처럼 "지금은 끄지만 나중에 그대로 되살릴 것"인 상황을 위한 함수다.
+ * 계수를 유지해 두면 돌아온 뒤 pci_reenable_device() 로 같은 상태를
+ * 복구할 수 있다.
+ *
+ * 원본 주석대로 드라이버가 부를 함수가 아니다 — PM 코어 내부용이다.
+ *
+ * 실행 문맥: 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   PCI 전원 관리 경로 → [이 함수] → do_pci_disable_device()
  */
-void pci_disable_enabled_device(struct pci_dev *dev) /* NVMe: pci_disable_enabled_device 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	if (pci_is_enabled(dev)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		do_pci_disable_device(dev); /* NVMe: NVMe controller 의 command 레지스터를 클리어한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+void pci_disable_enabled_device(struct pci_dev *dev)
+{
+	if (pci_is_enabled(dev)) /* [한국어] 애초에 켜져 있지 않으면 끌 것이 없다 */
+		do_pci_disable_device(dev); /* [한국어] Bus Master 만 끈다. enable_cnt 는 그대로 둔다 */
+}
 
 /**
  * pci_disable_device - Disable PCI device after use
@@ -2548,23 +4278,46 @@ void pci_disable_enabled_device(struct pci_dev *dev) /* NVMe: pci_disable_enable
  * pci_enable_device() have called pci_disable_device().
  */
 /*
- * pci_disable_device:
- *   NVMe controller 를 PCIe bus 상에서 비활성화한다. remove/reset/shutdown 시 DMA 와 BAR 접근을 차단한다.
+ * [한국어]
+ * pci_disable_device - 장치를 다 썼음을 알린다(참조 계수 감소 포함).
+ *
+ * @dev: 비활성화할 PCI 장치.
+ * @return: 없음.
+ *
+ * pci_enable_device() 계열의 정확한 짝이다. enable_cnt 를 원자적으로 내리고,
+ * 0 이 되었을 때만 실제로 끈다. 원본 주석이 짚듯 pci_enable_device() 를
+ * 부른 모든 주체가 이 함수를 불러야 비로소 장치가 꺼진다.
+ *
+ * 맨 앞의 dev_WARN_ONCE 는 짝이 맞지 않는 호출을 잡는 장치다. 이미 0 인데
+ * 또 내리면 계수가 음수가 되어, 이후의 pci_enable_device() 가 "이미 켜져
+ * 있다"고 오판하게 된다. 그런 버그는 원인을 찾기 어려워 즉시 경고로 드러낸다.
+ *
+ * 실제로 끄는 일은 Bus Master 비트를 지우는 것뿐이다(원본 주석). MEM/IO
+ * 디코딩은 그대로 남으므로, 이 호출 뒤에도 config 와 BAR 는 여전히 읽을 수 있다.
+ *
+ * NVMe 와의 관계: drivers/nvme/host/pci.c 가 제거·정리 경로에서 부른다.
+ * 이 호출로 Bus Master 가 꺼져야 컨트롤러가 SQ/CQ 를 더 읽지 않고 DMA 가 멎는다.
+ *
+ * 실행 문맥: 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   drivers/nvme/host/pci.c, 각 드라이버의 remove → [이 함수]
+ *     → pci_host_bridge_disable_device(), do_pci_disable_device()
  */
-void pci_disable_device(struct pci_dev *dev) /* NVMe: pci_disable_device 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	dev_WARN_ONCE(&dev->dev, atomic_read(&dev->enable_cnt) <= 0, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-		      "disabling already-disabled device"); /* NVMe: 배열 초기화를 수행한다. */
+void pci_disable_device(struct pci_dev *dev)
+{
+	dev_WARN_ONCE(&dev->dev, atomic_read(&dev->enable_cnt) <= 0, /* [한국어] 계수가 이미 0 이하인데 또 내리려 한다면 enable/disable 짝이 맞지 않는 버그다 */
+		      "disabling already-disabled device"); /* [한국어] 한 번만 경고해 로그를 덮지 않게 한다 */
 
-	if (atomic_dec_return(&dev->enable_cnt) != 0) /* NVMe: enable 참조 카운트가 0이 아니면 실제 비활성화하지 않는다. */
-		return; /* NVMe: 다른 사용자가 여전히 있으므로 여기서 종료한다. */
+	if (atomic_dec_return(&dev->enable_cnt) != 0) /* [한국어] 원자적으로 내린다. 0 이 아니면 아직 다른 사용자가 남아 있다 */
+		return; /* [한국어] 실제로 끄지 않고 돌아간다 */
 
-	pci_host_bridge_disable_device(dev); /* NVMe: pci_host_bridge_disable_device 함수를 호출한다. */
+	pci_host_bridge_disable_device(dev); /* [한국어] 마지막 사용자였으므로 호스트 브리지 드라이버에 먼저 알린다 */
 
-	do_pci_disable_device(dev); /* NVMe: do_pci_disable_device 함수를 호출한다. */
+	do_pci_disable_device(dev); /* [한국어] Bus Master 를 끄고 아키텍처 훅을 부른다 */
 
-	dev->is_busmaster = 0; /* NVMe: NVMe 장치가 더 이상 bus master(DMA) 상태가 아님을 표시한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	dev->is_busmaster = 0; /* [한국어] 소프트웨어 쪽 표시도 내린다. pci_set_master()/pci_clear_master() 가 이 필드로 현재 상태를 판단한다 */
+}
 EXPORT_SYMBOL(pci_disable_device);
 
 /**
@@ -2575,11 +4328,26 @@ EXPORT_SYMBOL(pci_disable_device);
  * Set the PCIe reset state for the device. This is the default
  * implementation. Architecture implementations can override this.
  */
-int __weak pcibios_set_pcie_reset_state(struct pci_dev *dev, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-					enum pcie_reset_state state) /* NVMe: 표현식을 평가한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	return -EINVAL; /* NVMe: 오류 코드를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+/*
+ * [한국어]
+ * pcibios_set_pcie_reset_state - PCIe 리셋 상태를 설정하는 아키텍처 훅(기본 구현).
+ *
+ * @dev: 대상 PCIe 장치.
+ * @state: 요청하는 리셋 상태(pcie_reset_state_t).
+ * @return: 언제나 -EINVAL — 기본 구현은 이 기능을 지원하지 않는다.
+ *
+ * __weak 이라 아키텍처(대표적으로 powerpc 의 EEH)가 덮어쓸 수 있다. 공통
+ * 코드에는 링크 리셋을 거는 표준 방법이 없어 기본값은 거절이다.
+ * 호출자는 -EINVAL 을 "이 플랫폼에는 그런 수단이 없다"로 읽는다.
+ *
+ * 호출 체인:
+ *   pci_set_pcie_reset_state() → [이 함수]
+ */
+int __weak pcibios_set_pcie_reset_state(struct pci_dev *dev,
+					enum pcie_reset_state state)
+{
+	return -EINVAL; /* [한국어] 지원하지 않음을 알린다. 아키텍처가 덮어쓰지 않았다면 이 경로가 전부다 */
+}
 
 /**
  * pci_set_pcie_reset_state - set reset state for device dev
@@ -2589,40 +4357,85 @@ int __weak pcibios_set_pcie_reset_state(struct pci_dev *dev, /* NVMe: 함수 호
  * Sets the PCI reset state for the device.
  */
 /*
- * pci_set_pcie_reset_state:
- *   PCIe reset state 를 설정한다. NVMe controller reset 수행 중 link reset 상태를 제어할 수 있다.
+ * [한국어]
+ * pci_set_pcie_reset_state - 아키텍처 훅을 통해 PCIe 리셋 상태를 설정한다.
+ *
+ * @dev: 대상 PCIe 장치.
+ * @state: 요청하는 리셋 상태.
+ * @return: 아키텍처 훅의 결과. 기본 구현에서는 -EINVAL.
+ *
+ * 공개 API 이지만 실제 내용은 전적으로 아키텍처 훅에 달려 있다. powerpc 의
+ * EEH(Enhanced Error Handling)처럼 플랫폼이 링크 리셋을 직접 제어할 수 있는
+ * 환경에서만 의미가 있다.
+ *
+ * 실행 문맥: 아키텍처 구현에 달렸다.
+ *
+ * 호출 체인:
+ *   EEH 등 플랫폼 오류 복구 코드 → [이 함수] → pcibios_set_pcie_reset_state()
  */
-int pci_set_pcie_reset_state(struct pci_dev *dev, enum pcie_reset_state state) /* NVMe: pci_set_pcie_reset_state 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	return pcibios_set_pcie_reset_state(dev, state); /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+int pci_set_pcie_reset_state(struct pci_dev *dev, enum pcie_reset_state state)
+{
+	return pcibios_set_pcie_reset_state(dev, state); /* [한국어] 아키텍처 구현에 그대로 넘긴다 */
+}
 EXPORT_SYMBOL_GPL(pci_set_pcie_reset_state);
 
-#ifdef CONFIG_PCIEAER /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
+#ifdef CONFIG_PCIEAER /* [한국어] AER 을 빌드했을 때만 필요한 함수다. AER 코드가 오류 처리 후 상태를 지우는 데 쓴다 */
 /*
- * pcie_clear_device_status:
- *   PCIe Device Status 레지스터의 에러 비트를 클리어한다. NVMe AER 복구나 reset 후 상태를 초기화한다.
+ * [한국어]
+ * pcie_clear_device_status - PCIe Device Status 의 오류 비트를 지운다.
+ *
+ * @dev: 대상 PCIe 장치.
+ * @return: 없음.
+ *
+ * PCIe capability 의 Device Status 레지스터에는 이 장치가 겪은 오류가 비트로
+ * 남는다. 네 가지를 한 번에 지운다.
+ *   - CED(Correctable Error Detected): 하드웨어가 스스로 복구한 오류.
+ *   - NFED(Non-Fatal Error Detected): 해당 트랜잭션만 실패한 오류.
+ *   - FED(Fatal Error Detected): 링크가 신뢰할 수 없게 된 오류.
+ *   - URD(Unsupported Request Detected): 장치가 처리할 수 없는 요청.
+ * 이 비트들은 W1C(Write-1-to-Clear) 라서 1 을 써야 지워진다. 그래서 "쓰기"가
+ * 곧 "지우기"다.
+ * 오류 복구를 마친 뒤 이 흔적을 지우지 않으면, 다음 점검에서 이미 처리한
+ * 오류를 새 오류로 다시 보고하게 된다.
+ *
+ * 실행 문맥: config space 쓰기. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   drivers/pci/pcie/aer.c 의 복구 경로 → [이 함수] → pcie_capability_write_word()
  */
-void pcie_clear_device_status(struct pci_dev *dev) /* NVMe: pcie_clear_device_status 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	pcie_capability_write_word(dev, PCI_EXP_DEVSTA, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-				   PCI_EXP_DEVSTA_CED | PCI_EXP_DEVSTA_NFED | /* NVMe: 표현식을 이어서 작성한다. */
-				   PCI_EXP_DEVSTA_FED | PCI_EXP_DEVSTA_URD); /* NVMe: 비트 연산을 수행한다. */
-} /* NVMe: 코드 블록을 종료한다. */
-#endif /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
+void pcie_clear_device_status(struct pci_dev *dev)
+{
+	pcie_capability_write_word(dev, PCI_EXP_DEVSTA, /* [한국어] Device Status 레지스터에 쓴다 — W1C 라 1 인 비트가 지워진다 */
+				   PCI_EXP_DEVSTA_CED | PCI_EXP_DEVSTA_NFED | /* [한국어] Correctable / Non-Fatal 오류 검출 비트 */
+				   PCI_EXP_DEVSTA_FED | PCI_EXP_DEVSTA_URD); /* [한국어] Fatal / Unsupported Request 검출 비트 */
+}
+#endif /* [한국어] CONFIG_PCIEAER 블록의 끝 */
 
 /**
  * pcie_clear_root_pme_status - Clear root port PME interrupt status.
  * @dev: PCIe root port or event collector.
  */
 /*
- * pcie_clear_root_pme_status:
- *   Root Port 의 PME status 를 클리어한다. NVMe 장치의 PME 기반 wake 이벤트 처리 후 정리한다.
+ * [한국어]
+ * pcie_clear_root_pme_status - Root Port 의 PME 인터럽트 상태를 지운다.
+ *
+ * @dev: Root Port 또는 Root Complex Event Collector.
+ * @return: 없음.
+ *
+ * 아래 장치가 PME 를 보내면 Root Port 의 Root Status 레지스터에 PME 비트가
+ * 서고 인터럽트가 난다. 그 사건을 처리한 뒤 이 비트를 지우지 않으면
+ * 같은 인터럽트가 계속 다시 발생한다.
+ * PCI_EXP_RTSTA_PME 역시 W1C 라 1 을 쓰는 것이 지우는 동작이다.
+ *
+ * 실행 문맥: config space 쓰기. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   drivers/pci/pcie/pme.c → [이 함수] → pcie_capability_write_dword()
  */
-void pcie_clear_root_pme_status(struct pci_dev *dev) /* NVMe: pcie_clear_root_pme_status 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	pcie_capability_write_dword(dev, PCI_EXP_RTSTA, PCI_EXP_RTSTA_PME); /* NVMe: pcie_capability_write_dword 함수를 호출한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+void pcie_clear_root_pme_status(struct pci_dev *dev)
+{
+	pcie_capability_write_dword(dev, PCI_EXP_RTSTA, PCI_EXP_RTSTA_PME); /* [한국어] Root Status 의 PME 비트에 1 을 써서 지운다. W1C 이므로 다른 비트는 0 을 써도 영향이 없다 */
+}
 
 /**
  * pci_check_pme_status - Check if given device has generated PME.
@@ -2633,35 +4446,60 @@ void pcie_clear_root_pme_status(struct pci_dev *dev) /* NVMe: pcie_clear_root_pm
  * 'false' otherwise.
  */
 /*
- * pci_check_pme_status:
- *   PME(Power Management Event) 상태 비트를 확인한다. NVMe runtime wake-up 이벤트 검출에 사용된다.
+ * [한국어]
+ * pci_check_pme_status - 이 장치가 PME 를 냈는지 확인하고, 냈다면 흔적을 지운다.
+ *
+ * @dev: 검사할 PCI 장치.
+ * @return: PME Status 와 PME Enable 이 둘 다 켜져 있었으면 true, 아니면 false.
+ *
+ * PME(Power Management Event)는 절전 중인 장치가 "나를 깨워 달라"고 보내는
+ * 신호다. 장치의 PMCSR 안에 두 비트가 있다.
+ *   - PME_Status: 실제로 사건이 났다는 표시(W1C).
+ *   - PME_Enable: 그 사건을 신호로 내보내도 되는지.
+ *
+ * 반환값이 true 이려면 둘 다 켜져 있어야 한다. Status 만 켜져 있고 Enable 이
+ * 꺼져 있다면, 장치가 사건을 기록만 했을 뿐 깨우기를 요청한 것이 아니므로
+ * 흔적만 지우고 false 를 돌려준다.
+ *
+ * 확인과 동시에 PME_Enable 을 끄는 것이 중요하다(원본 주석의 "interrupt
+ * flood"). PME 는 레벨 신호라, Enable 을 켠 채로 두면 장치를 깨워 처리할
+ * 때까지 같은 인터럽트가 끝없이 반복된다.
+ *
+ * 쓰기가 한 번뿐인 것도 요점이다. PME_Status 에 1(지우기)을, PME_Enable 에
+ * 0(끄기)을 담아 한 번에 쓴다.
+ *
+ * 실행 문맥: config space 를 읽고 쓴다. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_pme_wakeup(), drivers/pci/pcie/pme.c → [이 함수]
+ *     → pci_read/write_config_word()
  */
-bool pci_check_pme_status(struct pci_dev *dev) /* NVMe: pci_check_pme_status 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	int pmcsr_pos; /* NVMe: int 타입 변수를 선언한다. */
-	u16 pmcsr; /* NVMe: u16 타입 변수를 선언한다. */
-	bool ret = false; /* NVMe: bool 타입 변수를 선언한다. */
+bool pci_check_pme_status(struct pci_dev *dev)
+{
+	int pmcsr_pos; /* [한국어] PMCSR 의 config space 오프셋 */
+	u16 pmcsr; /* [한국어] PMCSR 값 */
+	bool ret = false; /* [한국어] "깨우기 요청이었다"의 판정 결과 */
 
-	if (!dev->pm_cap) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return false; /* NVMe: 연산 결과를 반환한다. */
+	if (!dev->pm_cap) /* [한국어] PM capability 가 없으면 PME 자체가 불가능하다 */
+		return false; /* [한국어] false */
 
-	pmcsr_pos = dev->pm_cap + PCI_PM_CTRL; /* NVMe: 변수에 값을 할당한다. */
-	pci_read_config_word(dev, pmcsr_pos, &pmcsr); /* NVMe: PCI 설정 공간 2바이트를 읽는다. */
-	if (!(pmcsr & PCI_PM_CTRL_PME_STATUS)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return false; /* NVMe: 연산 결과를 반환한다. */
+	pmcsr_pos = dev->pm_cap + PCI_PM_CTRL; /* [한국어] PM capability 시작 + PCI_PM_CTRL(4) = PMCSR 위치 */
+	pci_read_config_word(dev, pmcsr_pos, &pmcsr); /* [한국어] 현재 값을 읽는다 */
+	if (!(pmcsr & PCI_PM_CTRL_PME_STATUS)) /* [한국어] PME_Status 가 꺼져 있으면 사건 자체가 없었다 */
+		return false; /* [한국어] false. 아무 것도 쓰지 않고 돌아간다 */
 
 	/* Clear PME status. */
-	pmcsr |= PCI_PM_CTRL_PME_STATUS; /* NVMe: 변수에 값을 할당한다. */
-	if (pmcsr & PCI_PM_CTRL_PME_ENABLE) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
+	pmcsr |= PCI_PM_CTRL_PME_STATUS; /* [한국어] W1C 이므로 1 을 세워 두면 아래 쓰기에서 이 비트가 지워진다 */
+	if (pmcsr & PCI_PM_CTRL_PME_ENABLE) { /* [한국어] PME_Enable 도 켜져 있었다면 이것은 진짜 깨우기 요청이다 */
 		/* Disable PME to avoid interrupt flood. */
-		pmcsr &= ~PCI_PM_CTRL_PME_ENABLE; /* NVMe: 변수에 값을 할당한다. */
-		ret = true; /* NVMe: 변수에 값을 할당한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+		pmcsr &= ~PCI_PM_CTRL_PME_ENABLE; /* [한국어] Enable 을 끈다. PME 는 레벨 신호라 켜 둔 채로는 같은 인터럽트가 끝없이 반복된다 */
+		ret = true; /* [한국어] 호출자에게 "깨워야 한다"고 알린다 */
+	}
 
-	pci_write_config_word(dev, pmcsr_pos, pmcsr); /* NVMe: PCI 설정 공간 2바이트를 쓴다. */
+	pci_write_config_word(dev, pmcsr_pos, pmcsr); /* [한국어] 한 번의 쓰기로 Status 를 지우고 Enable 을 끈다 */
 
-	return ret; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return ret; /* [한국어] true 면 호출자가 장치를 깨운다 */
+}
 
 /**
  * pci_pme_wakeup - Wake up a PCI device if its PME Status bit is set.
@@ -2672,34 +4510,71 @@ bool pci_check_pme_status(struct pci_dev *dev) /* NVMe: pci_check_pme_status 함
  * case.
  */
 /*
- * pci_pme_wakeup:
- *   PME 이벤트를 처리하여 장치를 깨운다. NVMe surprise removal 이나 wake-on-event 처리에 연동된다.
+ * [한국어]
+ * pci_pme_wakeup - PME 를 낸 장치에 resume 요청을 거는 pci_walk_bus 콜백.
+ *
+ * @dev: 검사할 장치.
+ * @pme_poll_reset: NULL 이 아니면 이 장치의 pme_poll 플래그를 내린다.
+ *                  포인터로 받는 것은 pci_walk_bus 콜백의 시그니처가 void * 이기 때문이다.
+ * @return: 항상 0 — pci_walk_bus 규약상 0 이 아니면 순회가 중단되므로,
+ *          모든 장치를 훑기 위해 언제나 0 이다.
+ *
+ * pme_poll 은 "이 장치의 PME 인터럽트를 믿을 수 없어 1초마다 폴링해야 한다"는
+ * 표시다. 그런데 실제로 인터럽트가 도착했다면 폴링이 필요 없다는 것이
+ * 증명된 셈이므로, 그때 이 플래그를 내려 불필요한 폴링을 그만둔다.
+ * pme_poll_reset 이 참인 호출은 인터럽트 경로에서 오는 것이라 그 정리를 함께 한다.
+ *
+ * 실제 깨우기는 pm_request_resume() 으로 요청만 걸고 즉시 돌아온다 —
+ * pci_walk_bus 가 버스 락을 쥔 채 콜백을 부르므로 여기서 잠들면 안 된다.
+ *
+ * 실행 문맥: pci_walk_bus 콜백. 잠들지 않는다.
+ *
+ * 호출 체인:
+ *   pci_pme_wakeup_bus() → pci_walk_bus() → [이 함수],
+ *   pci_pme_list_scan() → [이 함수]
+ *     → pci_check_pme_status(), pci_wakeup_event(), pm_request_resume()
  */
-static int pci_pme_wakeup(struct pci_dev *dev, void *pme_poll_reset) /* NVMe: pci_pme_wakeup 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	if (pme_poll_reset && dev->pme_poll) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		dev->pme_poll = false; /* NVMe: 변수에 값을 할당한다. */
+static int pci_pme_wakeup(struct pci_dev *dev, void *pme_poll_reset)
+{
+	if (pme_poll_reset && dev->pme_poll) /* [한국어] 인터럽트로 PME 를 받은 경로라면 폴링이 필요 없다는 증거다 */
+		dev->pme_poll = false; /* [한국어] 폴링 플래그를 내려 pci_pme_list_scan() 이 이 장치를 리스트에서 빼게 한다 */
 
-	if (pci_check_pme_status(dev)) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pci_wakeup_event(dev); /* NVMe: pci_wakeup_event 함수를 호출한다. */
-		pm_request_resume(&dev->dev); /* NVMe: pm_request_resume 함수를 호출한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
-	return 0; /* NVMe: 성공(0)을 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	if (pci_check_pme_status(dev)) { /* [한국어] PME Status 와 Enable 이 둘 다 켜져 있었으면 진짜 깨우기 요청이다 */
+		pci_wakeup_event(dev); /* [한국어] 전원 관리 코어에 깨우기 사건을 보고한다 — 이 계수가 시스템 절전을 취소시키기도 한다 */
+		pm_request_resume(&dev->dev); /* [한국어] 비동기 resume 을 요청한다. 여기서 직접 깨우면 버스 락을 쥔 채 잠들게 된다 */
+	}
+	return 0; /* [한국어] 0 을 돌려 순회를 계속하게 한다 */
+}
 
 /**
  * pci_pme_wakeup_bus - Walk given bus and wake up devices on it, if necessary.
  * @bus: Top bus of the subtree to walk.
  */
 /*
- * pci_pme_wakeup_bus:
- *   bus 상의 PME 이벤트를 처리한다. NVMe가 연결된 bus 에서 하위 장치의 wake-up 을 전파한다.
+ * [한국어]
+ * pci_pme_wakeup_bus - 서브트리 전체에서 PME 를 낸 장치를 찾아 깨운다.
+ *
+ * @bus: 훑을 서브트리의 꼭대기 버스. NULL 이면 아무 것도 하지 않는다.
+ * @return: 없음.
+ *
+ * Root Port 가 PME 인터럽트를 받아도 "어느 장치가 보냈는지"는 알려 주지
+ * 않는다. PME 는 여러 장치가 공유하는 신호이기 때문이다. 그래서 그 아래
+ * 서브트리를 모두 훑으며 각 장치의 PME Status 를 직접 확인한다.
+ *
+ * 콜백에 (void *)true 를 넘겨 pme_poll 플래그를 내리게 한다 — 인터럽트가
+ * 실제로 왔다는 것은 이 장치에 폴링이 필요 없다는 증거이기 때문이다.
+ *
+ * 실행 문맥: pci_walk_bus 가 pci_bus_sem 을 잡고 순회한다. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   drivers/pci/pcie/pme.c 의 인터럽트 처리 → [이 함수]
+ *     → pci_walk_bus() → pci_pme_wakeup()
  */
-void pci_pme_wakeup_bus(struct pci_bus *bus) /* NVMe: pci_pme_wakeup_bus 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	if (bus) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pci_walk_bus(bus, pci_pme_wakeup, (void *)true); /* NVMe: pci_walk_bus 함수를 호출한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+void pci_pme_wakeup_bus(struct pci_bus *bus)
+{
+	if (bus) /* [한국어] NULL 버스 방어 */
+		pci_walk_bus(bus, pci_pme_wakeup, (void *)true); /* [한국어] (void *)true 는 "pme_poll 플래그를 내려라"는 신호다. 콜백 시그니처가 void * 라 이렇게 실어 보낸다 */
+}
 
 
 /**
@@ -2708,35 +4583,82 @@ void pci_pme_wakeup_bus(struct pci_bus *bus) /* NVMe: pci_pme_wakeup_bus 함수�
  * @state: PCI state from which device will issue PME#.
  */
 /*
- * pci_pme_capable:
- *   해당 pci_dev 가 특정 D-state 에서 PME 를 발생할 수 있는지 확인한다. NVMe wake-up 지원 범위를 판단한다.
+ * [한국어]
+ * pci_pme_capable - 이 장치가 지정한 D-state 에서 PME 를 낼 수 있는가.
+ *
+ * @dev: 검사할 장치.
+ * @state: 확인할 D-state(PCI_D0 ~ PCI_D3cold).
+ * @return: 그 상태에서 PME 를 낼 수 있으면 true.
+ *
+ * 장치마다 "어느 전원 상태에서 PME 를 낼 수 있는가"가 다르다. PM capability 의
+ * PMC 레지스터에 상태별 지원 비트가 있고, 열거 때 pci_pm_init() 이 그것을
+ * dev->pme_support 비트맵으로 옮겨 둔다. 비트 위치가 곧 D-state 번호다.
+ *
+ * 이 판정이 중요한 이유는, PME 를 낼 수 없는 깊은 상태로 장치를 내려보내면
+ * 그 장치로는 시스템을 깨울 수 없게 되기 때문이다. pci_target_state() 가
+ * 목표 상태를 고를 때 이 함수로 후보를 거른다.
+ *
+ * 실행 문맥: 캐시된 비트맵만 읽는다. 어느 문맥에서도 안전하다.
+ *
+ * 호출 체인:
+ *   pci_target_state(), pci_enable_wake() 경로 → [이 함수]
  */
-bool pci_pme_capable(struct pci_dev *dev, pci_power_t state) /* NVMe: pci_pme_capable 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	if (!dev->pm_cap) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return false; /* NVMe: 연산 결과를 반환한다. */
+bool pci_pme_capable(struct pci_dev *dev, pci_power_t state)
+{
+	if (!dev->pm_cap) /* [한국어] PM capability 가 없으면 PME 자체가 불가능하다 */
+		return false; /* [한국어] false */
 
-	return !!(dev->pme_support & (1 << state)); /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return !!(dev->pme_support & (1 << state)); /* [한국어] 비트 위치가 곧 D-state 번호다. !! 로 0/1 의 bool 로 정규화한다 */
+}
 EXPORT_SYMBOL(pci_pme_capable);
 
 /*
- * pci_pme_list_scan:
- *   지연된 work queue 를 통해 PME 상태를 폴linng 한다. NVMe PME 이벤트의 비동기 처리를 담당한다.
+ * [한국어]
+ * pci_pme_list_scan - PME 폴링 대상 장치들을 1초마다 훑는 지연 워크 핸들러.
+ *
+ * @work: 워크큐가 넘겨 주는 work_struct. 여기서는 쓰지 않는다.
+ * @return: 없음.
+ *
+ * PME 신호를 제대로 내지 않는 하드웨어를 위한 대비책이다. 인터럽트를 기다리는
+ * 대신 절전 중인 장치들의 PMCSR 을 직접 읽어 PME Status 를 확인한다.
+ *
+ * config space 를 안전하게 읽으려면 두 조건이 갖춰져야 한다.
+ *   - 상위 브리지가 D0 여야 한다. 브리지가 자고 있으면 그 아래 config 접근이
+ *     닿지 않거나 값이 불안정하다(원본 주석).
+ *   - 장치 자신은 절전 중이되 D3cold 는 아니어야 한다. D3cold 는 전원이 없어
+ *     config 를 읽을 수 없고, 깨어 있는 장치는 폴링할 이유가 없다.
+ *
+ * 브리지 참조를 pm_runtime_get_if_active() 로 잡는 것이 요점이다. "이미
+ * 깨어 있으면 참조를 올리고, 자고 있으면 0 을 돌려준다" — 폴링하자고
+ * 브리지를 깨우면 절전이 무의미해지므로, 자고 있으면 그냥 건너뛴다.
+ *
+ * pme_poll 이 내려간 항목은 리스트에서 빼고 해제한다. 실제 인터럽트가 온
+ * 적이 있어 폴링이 필요 없다고 판명된 장치다. 그래서 순회에
+ * list_for_each_entry_safe 를 써야 한다 — 순회 도중 항목을 지우기 때문이다.
+ *
+ * 리스트가 비지 않았으면 자기 자신을 1초 뒤로 다시 예약한다.
+ * system_freezable_wq 를 쓰는 이유는 시스템 절전에 들어갈 때 이 워크가
+ * 함께 멈춰야 하기 때문이다.
+ *
+ * 실행 문맥: 워크큐(프로세스 문맥). pci_pme_list_mutex 를 쥔 채 config 를
+ * 읽으므로 잠들 수 있는 문맥이어야 한다.
+ *
+ * 호출 체인:
+ *   워크큐 → [이 함수] → pm_runtime_get_if_active(), pci_pme_wakeup()
  */
-static void pci_pme_list_scan(struct work_struct *work) /* NVMe: pci_pme_list_scan 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	struct pci_pme_device *pme_dev, *n; /* NVMe: 데이터 타입 변수를 선언한다. */
+static void pci_pme_list_scan(struct work_struct *work)
+{
+	struct pci_pme_device *pme_dev, *n; /* [한국어] 순회 커서와, 순회 중 삭제를 견디기 위한 예비 포인터 */
 
-	mutex_lock(&pci_pme_list_mutex); /* NVMe: mutex 를 잠근다. */
-	list_for_each_entry_safe(pme_dev, n, &pci_pme_list, list) { /* NVMe: 리스트/해시 항목을 순회하는 매크로 루프를 시작한다. */
-		struct pci_dev *pdev = pme_dev->dev; /* NVMe: 데이터 타입 변수를 선언한다. */
+	mutex_lock(&pci_pme_list_mutex); /* [한국어] 리스트를 보호한다. 아래에서 config 접근으로 잠들 수 있어 스핀락이 아닌 뮤텍스다 */
+	list_for_each_entry_safe(pme_dev, n, &pci_pme_list, list) { /* [한국어] _safe 판을 쓰는 이유는 아래에서 항목을 지우기 때문이다 */
+		struct pci_dev *pdev = pme_dev->dev; /* [한국어] 폴링할 실제 장치 */
 
-		if (pdev->pme_poll) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			struct pci_dev *bridge = pdev->bus->self; /* NVMe: 데이터 타입 변수를 선언한다. */
-			struct device *dev = &pdev->dev; /* NVMe: 데이터 타입 변수를 선언한다. */
-			struct device *bdev = bridge ? &bridge->dev : NULL; /* NVMe: 데이터 타입 변수를 선언한다. */
-			int bref = 0; /* NVMe: int 타입 변수를 선언한다. */
+		if (pdev->pme_poll) { /* [한국어] 아직 폴링이 필요한 장치인가 */
+			struct pci_dev *bridge = pdev->bus->self; /* [한국어] 상위 브리지(루트 버스 직결이면 NULL) */
+			struct device *dev = &pdev->dev; /* [한국어] 런타임 PM API 에 넘길 struct device */
+			struct device *bdev = bridge ? &bridge->dev : NULL; /* [한국어] 브리지의 struct device. 브리지가 없으면 NULL */
+			int bref = 0; /* [한국어] 브리지 참조를 잡았는지 기록. 0 이면 잡지 않았다는 뜻이라 나중에 놓지 않는다 */
 
 			/*
 			 * If we have a bridge, it should be in an active/D0
@@ -2744,83 +4666,120 @@ static void pci_pme_list_scan(struct work_struct *work) /* NVMe: pci_pme_list_sc
 			 * devices may not be accessible or stable over the
 			 * course of the call.
 			 */
-			if (bdev) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-				bref = pm_runtime_get_if_active(bdev); /* NVMe: 변수에 값을 할당한다. */
-				if (!bref) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-					continue; /* NVMe: 다음 반복으로 걸러뛴다. */
+			if (bdev) { /* [한국어] 브리지가 있으면 그 상태부터 확인한다 */
+				bref = pm_runtime_get_if_active(bdev); /* [한국어] 이미 깨어 있을 때만 참조를 올린다. 폴링하자고 브리지를 깨우면 절전이 무의미해진다 */
+				if (!bref) /* [한국어] 브리지가 자고 있으면 */
+					continue; /* [한국어] 이 장치는 이번 회차에 건너뛴다 */
 
-				if (bridge->current_state != PCI_D0) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-					goto put_bridge; /* NVMe: 지정한 레이블로 제어를 이동한다. */
-			} /* NVMe: 코드 블록을 종료한다. */
+				if (bridge->current_state != PCI_D0) /* [한국어] 참조는 잡혔지만 PCI 관점의 상태가 D0 가 아니면 config 접근이 불안정하다 */
+					goto put_bridge; /* [한국어] 참조를 놓고 다음 장치로 */
+			}
 
 			/*
 			 * The device itself should be suspended but config
 			 * space must be accessible, therefore it cannot be in
 			 * D3cold.
 			 */
-			if (pm_runtime_suspended(dev) && /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			    pdev->current_state != PCI_D3cold) /* NVMe: 구조체 멤버에 접근한다. */
-				pci_pme_wakeup(pdev, NULL); /* NVMe: pci_pme_wakeup 함수를 호출한다. */
+			if (pm_runtime_suspended(dev) && /* [한국어] 장치가 런타임 절전 중이고 — 깨어 있으면 폴링할 이유가 없다 */
+			    pdev->current_state != PCI_D3cold) /* [한국어] D3cold 가 아니어야 한다. 전원이 없으면 PMCSR 을 읽을 수 없다 */
+				pci_pme_wakeup(pdev, NULL); /* [한국어] PME Status 를 확인하고, 났다면 깨우기를 요청한다. NULL 은 "pme_poll 플래그는 건드리지 말라"는 뜻이다 */
 
-put_bridge: /* NVMe: 레이블을 정의한다. */
-			if (bref > 0) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-				pm_runtime_put(bdev); /* NVMe: pm_runtime_put 함수를 호출한다. */
-		} else { /* NVMe: 표현식을 평가한다. */
-			list_del(&pme_dev->list); /* NVMe: list_del 함수를 호출한다. */
-			kfree(pme_dev); /* NVMe: 동적 할당된 커널 메모리를 해제한다. */
-		} /* NVMe: 코드 블록을 종료한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
-	if (!list_empty(&pci_pme_list)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		queue_delayed_work(system_freezable_wq, &pci_pme_work, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-				   msecs_to_jiffies(PME_TIMEOUT)); /* NVMe: msecs_to_jiffies 함수를 호출한다. */
-	mutex_unlock(&pci_pme_list_mutex); /* NVMe: mutex 를 해제한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+put_bridge: /* [한국어] 브리지 참조를 놓기 위한 공통 출구 */
+			if (bref > 0) /* [한국어] 참조를 실제로 잡았을 때만 */
+				pm_runtime_put(bdev); /* [한국어] 놓는다. 그래야 브리지가 다시 절전에 들어갈 수 있다 */
+		} else { /* [한국어] pme_poll 이 내려간 장치 — 인터럽트가 제대로 온다고 판명됐다 */
+			list_del(&pme_dev->list); /* [한국어] 폴링 리스트에서 뺀다 */
+			kfree(pme_dev); /* [한국어] 항목 메모리를 해제한다. _safe 순회라 삭제해도 안전하다 */
+		}
+	}
+	if (!list_empty(&pci_pme_list)) /* [한국어] 폴링할 장치가 남아 있으면 */
+		queue_delayed_work(system_freezable_wq, &pci_pme_work, /* [한국어] 1초 뒤 자기 자신을 다시 예약한다. freezable 워크큐라 시스템 절전 시 함께 멈춘다 */
+				   msecs_to_jiffies(PME_TIMEOUT)); /* [한국어] PME_TIMEOUT(1000ms)을 jiffies 로 바꾼다 */
+	mutex_unlock(&pci_pme_list_mutex); /* [한국어] 리스트 보호를 푼다 */
+}
 
 /*
- * __pci_pme_active:
- *   PME 폴linng 리스트에 장치를 등록/제거한다. NVMe wake-up 모니터링 활성화/비활성화의 낶부 함수이다.
+ * [한국어]
+ * __pci_pme_active - 장치의 PMCSR 에서 PME# 발생을 켜거나 끈다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @enable: true 면 PME 발생 허용, false 면 금지.
+ * @return: 없음.
+ *
+ * 하드웨어 레지스터만 만지는 저수준 부분이다. 폴링 리스트 관리는 상위의
+ * pci_pme_active() 가 맡는다.
+ *
+ * 쓰기 한 번에 두 가지를 한다는 점이 요점이다. PME_Status 비트는 W1C 라
+ * 언제나 1 을 세워 둬 묵은 상태를 지우고, PME_Enable 은 @enable 에 따라
+ * 켜거나 끈다. 켜기 전에 상태를 지우지 않으면, 예전에 남은 Status 때문에
+ * 켜자마자 가짜 PME 로 판정될 수 있다.
+ *
+ * 실행 문맥: config space 를 읽고 쓴다. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_pme_active() → [이 함수] → pci_read/write_config_word()
  */
-static void __pci_pme_active(struct pci_dev *dev, bool enable) /* NVMe: __pci_pme_active 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	u16 pmcsr; /* NVMe: u16 타입 변수를 선언한다. */
+static void __pci_pme_active(struct pci_dev *dev, bool enable)
+{
+	u16 pmcsr; /* [한국어] PMCSR 값 */
 
-	if (!dev->pme_support) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return; /* NVMe: 함수 실행을 종료한다. */
+	if (!dev->pme_support) /* [한국어] 어느 상태에서도 PME 를 못 내는 장치면 건드릴 것이 없다 */
+		return; /* [한국어] 끝 */
 
-	pci_read_config_word(dev, dev->pm_cap + PCI_PM_CTRL, &pmcsr); /* NVMe: PCI 설정 공간 2바이트를 읽는다. */
+	pci_read_config_word(dev, dev->pm_cap + PCI_PM_CTRL, &pmcsr); /* [한국어] 현재 PMCSR 을 읽는다 — 전원 상태 비트 등 다른 필드를 보존하기 위해서다 */
 	/* Clear PME_Status by writing 1 to it and enable PME# */
-	pmcsr |= PCI_PM_CTRL_PME_STATUS | PCI_PM_CTRL_PME_ENABLE; /* NVMe: 변수에 값을 할당한다. */
-	if (!enable) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pmcsr &= ~PCI_PM_CTRL_PME_ENABLE; /* NVMe: 변수에 값을 할당한다. */
+	pmcsr |= PCI_PM_CTRL_PME_STATUS | PCI_PM_CTRL_PME_ENABLE; /* [한국어] Status 는 언제나 1 을 세워 묵은 흔적을 지우고, Enable 은 일단 켠 값으로 둔다 */
+	if (!enable) /* [한국어] 끄라는 요청이면 */
+		pmcsr &= ~PCI_PM_CTRL_PME_ENABLE; /* [한국어] Enable 만 다시 내린다. Status 지우기는 그대로 남는다 */
 
-	pci_write_config_word(dev, dev->pm_cap + PCI_PM_CTRL, pmcsr); /* NVMe: PCI 설정 공간 2바이트를 쓴다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	pci_write_config_word(dev, dev->pm_cap + PCI_PM_CTRL, pmcsr); /* [한국어] 한 번의 쓰기로 상태 지우기와 활성/비활성을 함께 적용한다 */
+}
 
 /**
  * pci_pme_restore - Restore PME configuration after config space restore.
  * @dev: PCI device to update.
  */
 /*
- * pci_pme_restore:
- *   resume 후 PME 설정을 복원한다. NVMe suspend/resume 시 wake-up capability 를 되살린다.
+ * [한국어]
+ * pci_pme_restore - config space 복원 뒤 PME 설정을 소프트웨어 기대값에 맞춘다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @return: 없음.
+ *
+ * pci_restore_state() 는 config space 사본을 그대로 되쓰는데, 그 사본에 담긴
+ * PME 설정이 "지금 원하는" 설정과 다를 수 있다. 사본을 뜬 뒤에 깨우기 설정이
+ * 바뀌었을 수 있기 때문이다. 그래서 복원 후 dev->wakeup_prepared 를 기준으로
+ * 다시 맞춘다.
+ *
+ * 두 갈래의 처리가 대칭적이다.
+ *   - 깨우기를 원하는 상태(wakeup_prepared): Enable 을 켜고 Status 는 건드리지
+ *     않는다(W1C 라 0 을 쓰면 보존된다). 복원 도중 실제로 도착한 PME 를
+ *     잃지 않기 위해서다.
+ *   - 원하지 않는 상태: Enable 을 끄고 Status 에 1 을 써 지운다. 어차피
+ *     깨우지 않을 것이므로 묵은 흔적을 남길 이유가 없다.
+ *
+ * 실행 문맥: config space 를 읽고 쓴다. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci-driver.c 의 resume 경로 → [이 함수] → pci_read/write_config_word()
  */
-void pci_pme_restore(struct pci_dev *dev) /* NVMe: pci_pme_restore 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	u16 pmcsr; /* NVMe: u16 타입 변수를 선언한다. */
+void pci_pme_restore(struct pci_dev *dev)
+{
+	u16 pmcsr; /* [한국어] PMCSR 값 */
 
-	if (!dev->pme_support) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return; /* NVMe: 함수 실행을 종료한다. */
+	if (!dev->pme_support) /* [한국어] PME 를 낼 수 없는 장치면 맞출 것이 없다 */
+		return; /* [한국어] 끝 */
 
-	pci_read_config_word(dev, dev->pm_cap + PCI_PM_CTRL, &pmcsr); /* NVMe: PCI 설정 공간 2바이트를 읽는다. */
-	if (dev->wakeup_prepared) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pmcsr |= PCI_PM_CTRL_PME_ENABLE; /* NVMe: 변수에 값을 할당한다. */
-		pmcsr &= ~PCI_PM_CTRL_PME_STATUS; /* NVMe: 변수에 값을 할당한다. */
-	} else { /* NVMe: 표현식을 평가한다. */
-		pmcsr &= ~PCI_PM_CTRL_PME_ENABLE; /* NVMe: 변수에 값을 할당한다. */
-		pmcsr |= PCI_PM_CTRL_PME_STATUS; /* NVMe: 변수에 값을 할당한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
-	pci_write_config_word(dev, dev->pm_cap + PCI_PM_CTRL, pmcsr); /* NVMe: PCI 설정 공간 2바이트를 쓴다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	pci_read_config_word(dev, dev->pm_cap + PCI_PM_CTRL, &pmcsr); /* [한국어] 복원 직후의 PMCSR 을 읽는다 */
+	if (dev->wakeup_prepared) { /* [한국어] 소프트웨어가 "이 장치로 깨어날 것"이라 기대하는 상태라면 */
+		pmcsr |= PCI_PM_CTRL_PME_ENABLE; /* [한국어] PME 발생을 켠다 */
+		pmcsr &= ~PCI_PM_CTRL_PME_STATUS; /* [한국어] Status 비트는 0 으로 남긴다 — W1C 라 0 을 쓰면 지워지지 않아, 그 사이 실제로 도착한 PME 를 잃지 않는다 */
+	} else { /* [한국어] 깨우기를 원하지 않는 상태라면 */
+		pmcsr &= ~PCI_PM_CTRL_PME_ENABLE; /* [한국어] PME 발생을 끄고 */
+		pmcsr |= PCI_PM_CTRL_PME_STATUS; /* [한국어] Status 에 1 을 세워 묵은 흔적을 지운다 */
+	}
+	pci_write_config_word(dev, dev->pm_cap + PCI_PM_CTRL, pmcsr); /* [한국어] 맞춘 값을 써 넣는다 */
+}
 
 /**
  * pci_pme_active - enable or disable PCI device's PME# function
@@ -2831,12 +4790,38 @@ void pci_pme_restore(struct pci_dev *dev) /* NVMe: pci_pme_restore 함수를 정
  * calling this function with @enable equal to 'true'.
  */
 /*
- * pci_pme_active:
- *   PME 폴linng을 활성화/비활성화한다. NVMe runtime suspend 시 wake 이벤트 모니터링을 제어한다.
+ * [한국어]
+ * pci_pme_active - PME# 발생을 켜거나 끄고, 필요하면 폴링 리스트도 관리한다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @enable: true 면 PME 발생 허용, false 면 금지.
+ * @return: 없음.
+ *
+ * 하드웨어 설정(__pci_pme_active)과 소프트웨어 폴링 리스트 관리를 함께 한다.
+ *
+ * 폴링이 필요한 이유는 원본 주석이 길게 설명한다. 재래식 PCI 는 PME# 라는
+ * 물리적 신호선이 제대로 배선돼 있어야 하는데 그러지 않은 보드가 있고,
+ * PCIe 는 신호선 대신 메시지를 쓰지만 Status 비트만 세우고 메시지를 보내지
+ * 않는 장치나, 메시지를 받고도 인터럽트를 내지 않는 Root Port 가 실재한다.
+ * 그래서 PCIe 에서도 폴링이 남아 있다. 어차피 시스템은 다른 이유로도 자주
+ * 깨어나므로 1초 주기 폴링의 비용보다 절전 이득이 크다는 판단이다.
+ *
+ * dev->pme_poll 이 참인 장치만 리스트에 넣는다. 켤 때는 항목을 만들어 리스트
+ * 앞에 붙이고, 그것이 리스트의 유일한 항목이라면(= 방금 비어 있던 리스트가
+ * 살아났다면) 폴링 워크를 시작한다. 끌 때는 리스트에서 찾아 빼고 해제한다.
+ *
+ * 원본 주석의 경고대로, enable=true 로 부르기 전에 호출자가
+ * pci_pme_capable() 로 지원 여부를 확인해야 한다.
+ *
+ * 실행 문맥: kmalloc 과 뮤텍스를 쓴다. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   __pci_enable_wake() → [이 함수]
+ *     → __pci_pme_active(), kmalloc_obj(), queue_delayed_work()
  */
-void pci_pme_active(struct pci_dev *dev, bool enable) /* NVMe: pci_pme_active 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	__pci_pme_active(dev, enable); /* NVMe: __pci_pme_active 함수를 호출한다. */
+void pci_pme_active(struct pci_dev *dev, bool enable)
+{
+	__pci_pme_active(dev, enable); /* [한국어] 먼저 하드웨어 쪽 PME Enable 비트를 맞춘다 */
 
 	/*
 	 * PCI (as opposed to PCIe) PME requires that the device have
@@ -2858,37 +4843,37 @@ void pci_pme_active(struct pci_dev *dev, bool enable) /* NVMe: pci_pme_active �
 	 * devices below.  So PME poll is used for PCIe devices too.
 	 */
 
-	if (dev->pme_poll) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		struct pci_pme_device *pme_dev; /* NVMe: 데이터 타입 변수를 선언한다. */
-		if (enable) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			pme_dev = kmalloc_obj(struct pci_pme_device); /* NVMe: 변수에 값을 할당한다. */
-			if (!pme_dev) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-				pci_warn(dev, "can't enable PME#\n"); /* NVMe: PCI 장치에 대한 경고 로그를 출력한다. */
-				return; /* NVMe: 함수 실행을 종료한다. */
-			} /* NVMe: 코드 블록을 종료한다. */
-			pme_dev->dev = dev; /* NVMe: 변수에 값을 할당한다. */
-			mutex_lock(&pci_pme_list_mutex); /* NVMe: mutex 를 잠근다. */
-			list_add(&pme_dev->list, &pci_pme_list); /* NVMe: list_add 함수를 호출한다. */
-			if (list_is_singular(&pci_pme_list)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-				queue_delayed_work(system_freezable_wq, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-						   &pci_pme_work, /* NVMe: 표현식을 이어서 작성한다. */
-						   msecs_to_jiffies(PME_TIMEOUT)); /* NVMe: msecs_to_jiffies 함수를 호출한다. */
-			mutex_unlock(&pci_pme_list_mutex); /* NVMe: mutex 를 해제한다. */
-		} else { /* NVMe: 표현식을 평가한다. */
-			mutex_lock(&pci_pme_list_mutex); /* NVMe: mutex 를 잠근다. */
-			list_for_each_entry(pme_dev, &pci_pme_list, list) { /* NVMe: 리스트/해시 항목을 순회하는 매크로 루프를 시작한다. */
-				if (pme_dev->dev == dev) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-					list_del(&pme_dev->list); /* NVMe: list_del 함수를 호출한다. */
-					kfree(pme_dev); /* NVMe: 동적 할당된 커널 메모리를 해제한다. */
-					break; /* NVMe: 현재 반복문을 빠져나간다. */
-				} /* NVMe: 코드 블록을 종료한다. */
-			} /* NVMe: 코드 블록을 종료한다. */
-			mutex_unlock(&pci_pme_list_mutex); /* NVMe: mutex 를 해제한다. */
-		} /* NVMe: 코드 블록을 종료한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+	if (dev->pme_poll) { /* [한국어] 인터럽트를 믿을 수 없어 폴링이 필요하다고 표시된 장치만 리스트로 관리한다 */
+		struct pci_pme_device *pme_dev; /* [한국어] 리스트에 넣을 항목 */
+		if (enable) { /* [한국어] 켜는 경우 */
+			pme_dev = kmalloc_obj(struct pci_pme_device); /* [한국어] 항목 하나를 잡는다 */
+			if (!pme_dev) { /* [한국어] 할당에 실패하면 */
+				pci_warn(dev, "can't enable PME#\n"); /* [한국어] 폴링을 못 하므로 PME 가 동작하지 않을 수 있음을 알린다 */
+				return; /* [한국어] 하드웨어 설정은 이미 했으므로 그대로 돌아간다 */
+			}
+			pme_dev->dev = dev; /* [한국어] 어느 장치를 폴링할지 기록한다 */
+			mutex_lock(&pci_pme_list_mutex); /* [한국어] 리스트를 보호한다 */
+			list_add(&pme_dev->list, &pci_pme_list); /* [한국어] 리스트 앞에 붙인다 */
+			if (list_is_singular(&pci_pme_list)) /* [한국어] 이 항목이 유일하다면 방금 전까지 리스트가 비어 있었다는 뜻이다 */
+				queue_delayed_work(system_freezable_wq, /* [한국어] 폴링 워크를 새로 시작한다. 이미 항목이 있었다면 워크가 이미 돌고 있어 다시 예약하지 않는다 */
+						   &pci_pme_work, /* [한국어] 예약할 지연 워크 */
+						   msecs_to_jiffies(PME_TIMEOUT)); /* [한국어] 1초 뒤 */
+			mutex_unlock(&pci_pme_list_mutex); /* [한국어] 리스트 보호를 푼다 */
+		} else { /* [한국어] 끄는 경우 */
+			mutex_lock(&pci_pme_list_mutex); /* [한국어] 리스트를 보호한다 */
+			list_for_each_entry(pme_dev, &pci_pme_list, list) { /* [한국어] 해당 장치의 항목을 찾는다 */
+				if (pme_dev->dev == dev) { /* [한국어] 같은 장치를 가리키는 항목이면 */
+					list_del(&pme_dev->list); /* [한국어] 리스트에서 뺀다 */
+					kfree(pme_dev); /* [한국어] 항목 메모리를 해제한다 */
+					break; /* [한국어] 한 장치에 항목은 하나뿐이므로 더 찾지 않는다 */
+				}
+			}
+			mutex_unlock(&pci_pme_list_mutex); /* [한국어] 리스트 보호를 푼다 */
+		}
+	}
 
-	pci_dbg(dev, "PME# %s\n", enable ? "enabled" : "disabled"); /* NVMe: PCI 장치에 대한 디버그 로그를 출력한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	pci_dbg(dev, "PME# %s\n", enable ? "enabled" : "disabled"); /* [한국어] 최종 상태를 디버그 로그로 남긴다 */
+}
 EXPORT_SYMBOL(pci_pme_active);
 
 /**
@@ -2911,12 +4896,38 @@ EXPORT_SYMBOL(pci_pme_active);
  * the native mechanism fail to enable the generation of wake-up events
  */
 /*
- * __pci_enable_wake:
- *   해당 pci_dev 의 wake-up 기능을 활성화/비활성화한다. NVMe 시스템 대기 모드에서 깨어나도록 설정한다.
+ * [한국어]
+ * __pci_enable_wake - 이 장치를 깨우기 이벤트 원천으로 켜거나 끈다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @state: 어느 D-state 에서 깨우기 신호를 낼 것인지.
+ * @enable: true 면 허용, false 면 금지.
+ * @return: 0 성공. 장치도 플랫폼도 깨우기를 켜지 못하면 그 오류 코드.
+ *
+ * 깨우기는 두 층이 모두 열려야 성립한다.
+ *   - 장치 쪽: PMCSR 의 PME Enable(pci_pme_active).
+ *   - 플랫폼 쪽: ACPI 의 깨우기 경로(platform_pci_set_wakeup).
+ * 원본 주석이 인용하는 "PCI System Architecture" 의 지침대로, 켤 때는
+ * PME# 를 먼저 켜고 ACPI 를 나중에 켠다. 끌 때는 대칭이 되도록 반대 순서로
+ * 플랫폼을 먼저 끈다.
+ *
+ * D3cold 를 함께 보는 조건이 미묘하다. 목표 상태에서 PME 를 못 내더라도
+ * D3cold 에서 낼 수 있다면 PME 를 켜 둔다 — 원본 주석대로, 위쪽 계층이
+ * D3cold 로 내려가면 이 장치도 덩달아 D3cold 가 되고, 그때 깨울 수 있어야
+ * 하기 때문이다.
+ *
+ * 반환값 계산이 특이하다. 장치 쪽을 켜지 못했을 때만(ret=1) 플랫폼 쪽
+ * 결과를 최종 결과로 삼는다. 즉 "둘 중 하나라도 성공하면 성공"이다.
+ *
+ * 실행 문맥: ACPI 조작과 config 접근. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_enable_wake(), pci_finish_runtime_suspend() → [이 함수]
+ *     → pci_pme_capable(), pci_pme_active(), platform_pci_set_wakeup()
  */
-static int __pci_enable_wake(struct pci_dev *dev, pci_power_t state, bool enable) /* NVMe: __pci_enable_wake 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	int ret = 0; /* NVMe: int 타입 변수를 선언한다. */
+static int __pci_enable_wake(struct pci_dev *dev, pci_power_t state, bool enable)
+{
+	int ret = 0; /* [한국어] 반환값. 0 이 성공이며, 아래에서 장치 쪽 실패를 1 로 표시했다가 플랫폼 결과로 덮는다 */
 
 	/*
 	 * Bridges that are not power-manageable directly only signal
@@ -2925,12 +4936,12 @@ static int __pci_enable_wake(struct pci_dev *dev, pci_power_t state, bool enable
 	 * power-manageable may signal wakeup for themselves (for example,
 	 * on a hotplug event) and they need to be covered here.
 	 */
-	if (!pci_power_manageable(dev)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return 0; /* NVMe: 성공(0)을 반환한다. */
+	if (!pci_power_manageable(dev)) /* [한국어] 전원 관리가 불가능한 브리지는 자기 자신이 아니라 아래 장치를 대신해 신호할 뿐이고, 그 설정은 다른 곳에서 한다(원본 주석) */
+		return 0; /* [한국어] 할 일이 없으므로 성공으로 끝낸다 */
 
 	/* Don't do the same thing twice in a row for one device. */
-	if (!!enable == !!dev->wakeup_prepared) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return 0; /* NVMe: 성공(0)을 반환한다. */
+	if (!!enable == !!dev->wakeup_prepared) /* [한국어] 요청과 현재 상태가 같으면 — !! 로 양쪽을 0/1 로 정규화해 비교한다 */
+		return 0; /* [한국어] 중복 호출이므로 아무 것도 하지 않는다. ACPI 쪽에는 참조 계수가 있어 두 번 켜면 균형이 깨진다 */
 
 	/*
 	 * According to "PCI System Architecture" 4th ed. by Tom Shanley & Don
@@ -2938,8 +4949,8 @@ static int __pci_enable_wake(struct pci_dev *dev, pci_power_t state, bool enable
 	 * enable.  To disable wake-up we call the platform first, for symmetry.
 	 */
 
-	if (enable) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		int error; /* NVMe: int 타입 변수를 선언한다. */
+	if (enable) { /* [한국어] 켜는 경우 */
+		int error; /* [한국어] 플랫폼 쪽 결과를 따로 받는다 */
 
 		/*
 		 * Enable PME signaling if the device can signal PME from
@@ -2948,23 +4959,23 @@ static int __pci_enable_wake(struct pci_dev *dev, pci_power_t state, bool enable
 		 * signal PME when the hierarchy above it goes into D3cold and
 		 * the device itself ends up in D3cold as a result of that.
 		 */
-		if (pci_pme_capable(dev, state) || pci_pme_capable(dev, PCI_D3cold)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			pci_pme_active(dev, true); /* NVMe: pci_pme_active 함수를 호출한다. */
-		else /* NVMe: 이전 조건이 모두 거짓일 때 실행한다. */
-			ret = 1; /* NVMe: 변수에 값을 할당한다. */
-		error = platform_pci_set_wakeup(dev, true); /* NVMe: 변수에 값을 할당한다. */
-		if (ret) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			ret = error; /* NVMe: 변수에 값을 할당한다. */
-		if (!ret) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			dev->wakeup_prepared = true; /* NVMe: 변수에 값을 할당한다. */
-	} else { /* NVMe: 표현식을 평가한다. */
-		platform_pci_set_wakeup(dev, false); /* NVMe: platform_pci_set_wakeup 함수를 호출한다. */
-		pci_pme_active(dev, false); /* NVMe: pci_pme_active 함수를 호출한다. */
-		dev->wakeup_prepared = false; /* NVMe: 변수에 값을 할당한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+		if (pci_pme_capable(dev, state) || pci_pme_capable(dev, PCI_D3cold)) /* [한국어] 목표 상태에서 PME 를 낼 수 있거나, D3cold 에서 낼 수 있으면 — 후자는 위 계층이 D3cold 로 내려갈 때를 대비한 것이다 */
+			pci_pme_active(dev, true); /* [한국어] 장치 쪽 PME 를 켠다 */
+		else /* [한국어] 어느 쪽도 아니면 */
+			ret = 1; /* [한국어] 장치 쪽은 실패로 표시해 둔다. 플랫폼 쪽이 성공하면 아래에서 덮인다 */
+		error = platform_pci_set_wakeup(dev, true); /* [한국어] 플랫폼 쪽 깨우기 경로를 연다 */
+		if (ret) /* [한국어] 장치 쪽이 실패했을 때만 */
+			ret = error; /* [한국어] 플랫폼 쪽 결과를 최종 결과로 삼는다. 둘 중 하나라도 되면 깨울 수 있다 */
+		if (!ret) /* [한국어] 어느 한쪽이라도 성공했으면 */
+			dev->wakeup_prepared = true; /* [한국어] 깨우기 준비 완료로 표시한다. pci_pme_restore() 가 이 플래그를 기준으로 복원한다 */
+	} else { /* [한국어] 끄는 경우 */
+		platform_pci_set_wakeup(dev, false); /* [한국어] 대칭을 위해 플랫폼 쪽을 먼저 끈다 */
+		pci_pme_active(dev, false); /* [한국어] 그 다음 장치 쪽 PME 를 끈다 */
+		dev->wakeup_prepared = false; /* [한국어] 표시를 내린다 */
+	}
 
-	return ret; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return ret; /* [한국어] 0 이면 깨우기 설정이 성립했다 */
+}
 
 /**
  * pci_enable_wake - change wakeup settings for a PCI device
@@ -2976,16 +4987,32 @@ static int __pci_enable_wake(struct pci_dev *dev, pci_power_t state, bool enable
  * __pci_enable_wake() for it.
  */
 /*
- * pci_enable_wake:
- *   NVMe 장치의 wake-up 기능을 활성화한다. S3/S4/hibernate 에서 NVMe 이벤트로 시스템을 깨우도록 한다.
+ * [한국어]
+ * pci_enable_wake - 사용자 정책(device_may_wakeup)을 확인한 뒤 깨우기를 설정한다.
+ *
+ * @pci_dev: 대상 PCI 장치.
+ * @state: 어느 D-state 에서 깨우기 신호를 낼 것인지.
+ * @enable: true 면 허용, false 면 금지.
+ * @return: 0 성공, -EINVAL 이면 이 장치로 깨우는 것이 허용돼 있지 않다.
+ *
+ * __pci_enable_wake() 앞에 정책 검사를 한 겹 두른 공개 API 다.
+ * device_may_wakeup() 은 사용자가 sysfs 의 power/wakeup 로 켜고 끄는 설정을
+ * 본다. 하드웨어가 할 수 있어도 사용자가 원하지 않으면 켜지 않는다.
+ * 끄는 요청에는 검사를 하지 않는다 — 끄는 것은 언제나 허용된다.
+ *
+ * 실행 문맥: 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   각 드라이버, pci_prepare_to_sleep(), pci_wake_from_d3() → [이 함수]
+ *     → device_may_wakeup(), __pci_enable_wake()
  */
-int pci_enable_wake(struct pci_dev *pci_dev, pci_power_t state, bool enable) /* NVMe: pci_enable_wake 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	if (enable && !device_may_wakeup(&pci_dev->dev)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return -EINVAL; /* NVMe: 오류 코드를 반환한다. */
+int pci_enable_wake(struct pci_dev *pci_dev, pci_power_t state, bool enable)
+{
+	if (enable && !device_may_wakeup(&pci_dev->dev)) /* [한국어] 켜려는데 사용자 정책이 이 장치의 깨우기를 허용하지 않으면 */
+		return -EINVAL; /* [한국어] 거절한다. 끄는 요청에는 이 검사가 적용되지 않는다 */
 
-	return __pci_enable_wake(pci_dev, state, enable); /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return __pci_enable_wake(pci_dev, state, enable); /* [한국어] 실제 설정은 본체에 맡긴다 */
+}
 EXPORT_SYMBOL(pci_enable_wake);
 
 /**
@@ -3003,15 +5030,33 @@ EXPORT_SYMBOL(pci_enable_wake);
  * D3_hot and D3_cold and the platform is unable to enable wake-up power for it.
  */
 /*
- * pci_wake_from_d3:
- *   D3 상태에서 wake-up 을 활성화한다. NVMe 장치가 D3hot/D3cold 에서 PME 로 시스템을 깨울 수 있게 한다.
+ * [한국어]
+ * pci_wake_from_d3 - D3hot 또는 D3cold 에서 깨어나도록 설정한다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @enable: true 면 허용, false 면 금지.
+ * @return: 0 성공, 음수면 깨우기를 설정할 수 없다.
+ *
+ * 드라이버가 흔히 원하는 것은 "가장 깊은 절전에서도 깨어나게 해 달라"인데,
+ * 그 깊이가 장치마다 다르다. D3cold 에서 PME 를 낼 수 있으면 D3cold 를,
+ * 아니면 D3hot 을 기준으로 설정한다.
+ *
+ * 원본 주석이 경고하듯 pci_enable_wake() 를 연달아 두 번 불러 두 상태를
+ * 모두 켜려 해서는 안 된다 — PCI PM 과 ACPI 사이의 순서 제약 때문이다.
+ * 이 함수는 둘 중 하나만 고르게 해 그 실수를 막는다.
+ *
+ * 실행 문맥: 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   각 드라이버의 suspend 경로 → [이 함수]
+ *     → pci_pme_capable(), pci_enable_wake()
  */
-int pci_wake_from_d3(struct pci_dev *dev, bool enable) /* NVMe: pci_wake_from_d3 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	return pci_pme_capable(dev, PCI_D3cold) ? /* NVMe: 연산 결과를 반환한다. */
-			pci_enable_wake(dev, PCI_D3cold, enable) : /* NVMe: 표현식을 평가한다. */
-			pci_enable_wake(dev, PCI_D3hot, enable); /* NVMe: pci_enable_wake 함수를 호출한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+int pci_wake_from_d3(struct pci_dev *dev, bool enable)
+{
+	return pci_pme_capable(dev, PCI_D3cold) ? /* [한국어] D3cold 에서 PME 를 낼 수 있는가에 따라 */
+			pci_enable_wake(dev, PCI_D3cold, enable) : /* [한국어] 낼 수 있으면 D3cold 기준으로 설정하고 */
+			pci_enable_wake(dev, PCI_D3hot, enable); /* [한국어] 없으면 D3hot 기준으로 설정한다 */
+}
 EXPORT_SYMBOL(pci_wake_from_d3);
 
 /**
@@ -3024,59 +5069,87 @@ EXPORT_SYMBOL(pci_wake_from_d3);
  * can generate wake events, based on any available PME info.
  */
 /*
- * pci_target_state:
- *   장치가 진입해야 할 목표 D-state 를 결정한다. NVMe runtime/system suspend 시 최종 전원 상태를 산출한다.
+ * [한국어]
+ * pci_target_state - 이 장치를 내려보낼 적절한 저전원 상태를 고른다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @wakeup: 이 장치로 시스템을 깨울 계획인지. 참이면 PME 를 낼 수 있는 상태만 고른다.
+ * @return: 목표 D-state.
+ *
+ * 결정 순서가 곧 우선순위다.
+ *
+ *   1) 플랫폼이 전원을 관리할 수 있으면 플랫폼에 물어본다. 답을 알 수 없거나
+ *      (PCI_POWER_ERROR/PCI_UNKNOWN) 지원하지 않는 D1/D2 를 답하면 D3hot 으로
+ *      되돌린다.
+ *   2) 플랫폼이 관리하지 않는데 이미 D3cold 라면, 표준 밖의 방법으로 전원이
+ *      끊긴 것이다. 원본 주석대로 그대로 재우는 편이 낫다.
+ *   3) PM capability 조차 없으면 저전원 상태로 갈 방법이 없어 D0 다.
+ *   4) 깨우기가 필요하면, PME 를 낼 수 있는 가장 깊은 상태를 찾는다.
+ *      D3hot 부터 하나씩 얕아지며 pme_support 비트맵을 확인한다.
+ *      D0 에서만 PME 를 낼 수 있다면 D0 를 돌려준다 — 깨울 수 있는 것이
+ *      깊이보다 중요하기 때문이다.
+ *   5) 아무 제약이 없으면 D3hot.
+ *
+ * NVMe 와의 관계: NVMe 컨트롤러가 D3hot 으로 내려갈지, 아니면 자체 APST 로
+ * 얕은 상태에 머무를지는 drivers/nvme/host/pci.c 가 따로 판단한다. 이 함수는
+ * PCI 층의 D-state 만 고른다.
+ *
+ * 실행 문맥: ACPI 조회를 포함한다. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_prepare_to_sleep(), pci_finish_runtime_suspend(), pci_dev_run_wake()
+ *     → [이 함수] → platform_pci_choose_state(), pci_no_d1d2()
  */
-static pci_power_t pci_target_state(struct pci_dev *dev, bool wakeup) /* NVMe: pci_target_state 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	if (platform_pci_power_manageable(dev)) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
+static pci_power_t pci_target_state(struct pci_dev *dev, bool wakeup)
+{
+	if (platform_pci_power_manageable(dev)) { /* [한국어] 플랫폼이 이 장치의 전원을 다룰 수 있으면 플랫폼의 판단을 우선한다 */
 		/*
 		 * Call the platform to find the target state for the device.
 		 */
-		pci_power_t state = platform_pci_choose_state(dev); /* NVMe: 변수에 값을 할당한다. */
+		pci_power_t state = platform_pci_choose_state(dev); /* [한국어] ACPI 의 _SxD 등을 조회해 권고 상태를 받는다 */
 
-		switch (state) { /* NVMe: 다중 분기를 위한 switch 문을 시작한다. */
-		case PCI_POWER_ERROR: /* NVMe: switch 의 case 레이블이다. */
-		case PCI_UNKNOWN: /* NVMe: switch 의 case 레이블이다. */
-			return PCI_D3hot; /* NVMe: 연산 결과를 반환한다. */
+		switch (state) { /* [한국어] 받은 답을 검증한다 */
+		case PCI_POWER_ERROR: /* [한국어] 플랫폼이 판단하지 못했거나 */
+		case PCI_UNKNOWN: /* [한국어] 상태를 알 수 없다고 답한 경우 */
+			return PCI_D3hot; /* [한국어] 표준적으로 안전한 D3hot 을 쓴다 */
 
-		case PCI_D1: /* NVMe: switch 의 case 레이블이다. */
-		case PCI_D2: /* NVMe: switch 의 case 레이블이다. */
-			if (pci_no_d1d2(dev)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-				return PCI_D3hot; /* NVMe: 연산 결과를 반환한다. */
-		} /* NVMe: 코드 블록을 종료한다. */
+		case PCI_D1: /* [한국어] D1 을 권했지만 */
+		case PCI_D2: /* [한국어] D2 를 권했지만 */
+			if (pci_no_d1d2(dev)) /* [한국어] 장치나 상위 브리지가 D1/D2 를 지원하지 않으면 */
+				return PCI_D3hot; /* [한국어] D3hot 으로 대체한다 */
+		}
 
-		return state; /* NVMe: 연산 결과를 반환한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+		return state; /* [한국어] 플랫폼의 권고를 그대로 쓴다 */
+	}
 
 	/*
 	 * If the device is in D3cold even though it's not power-manageable by
 	 * the platform, it may have been powered down by non-standard means.
 	 * Best to let it slumber.
 	 */
-	if (dev->current_state == PCI_D3cold) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return PCI_D3cold; /* NVMe: 연산 결과를 반환한다. */
-	else if (!dev->pm_cap) /* NVMe: 이전 조건이 거짓일 때 추가 조건을 검사한다. */
-		return PCI_D0; /* NVMe: 연산 결과를 반환한다. */
+	if (dev->current_state == PCI_D3cold) /* [한국어] 플랫폼이 관리하지 않는데 이미 D3cold 라면 표준 밖의 방법으로 전원이 끊긴 것이다 */
+		return PCI_D3cold; /* [한국어] 그대로 재워 둔다 */
+	else if (!dev->pm_cap) /* [한국어] PM capability 가 없으면 */
+		return PCI_D0; /* [한국어] 저전원 상태로 갈 수단 자체가 없다 */
 
-	if (wakeup && dev->pme_support) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pci_power_t state = PCI_D3hot; /* NVMe: pci_power_t 타입 변수를 선언한다. */
+	if (wakeup && dev->pme_support) { /* [한국어] 깨우기가 필요하고 PME 를 낼 수 있는 상태가 하나라도 있으면 */
+		pci_power_t state = PCI_D3hot; /* [한국어] 가장 깊은 후보인 D3hot 부터 시작한다 */
 
 		/*
 		 * Find the deepest state from which the device can generate
 		 * PME#.
 		 */
-		while (state && !(dev->pme_support & (1 << state))) /* NVMe: 조건이 참인 동안 반복한다. */
-			state--; /* NVMe: 표현식을 평가한다. */
+		while (state && !(dev->pme_support & (1 << state))) /* [한국어] pme_support 비트맵에서 해당 상태 비트를 확인하며 */
+			state--; /* [한국어] 점점 얕은 상태로 내려온다. 비트 위치가 곧 D-state 번호다 */
 
-		if (state) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			return state; /* NVMe: 연산 결과를 반환한다. */
-		else if (dev->pme_support & 1) /* NVMe: 이전 조건이 거짓일 때 추가 조건을 검사한다. */
-			return PCI_D0; /* NVMe: 연산 결과를 반환한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+		if (state) /* [한국어] D0 보다 깊은 상태에서 PME 를 낼 수 있으면 */
+			return state; /* [한국어] 그 상태를 쓴다 */
+		else if (dev->pme_support & 1) /* [한국어] D0(비트 0)에서만 PME 를 낼 수 있다면 */
+			return PCI_D0; /* [한국어] 절전을 포기하고 D0 에 머문다. 깨울 수 있는 것이 절전보다 중요하다 */
+	}
 
-	return PCI_D3hot; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return PCI_D3hot; /* [한국어] 깨우기가 필요 없으면 가장 깊은 표준 상태로 내려간다 */
+}
 
 /**
  * pci_prepare_to_sleep - prepare PCI device for system-wide transition
@@ -3088,27 +5161,41 @@ static pci_power_t pci_target_state(struct pci_dev *dev, bool wakeup) /* NVMe: p
  * (PCI_D3hot is the default) and put the device into that state.
  */
 /*
- * pci_prepare_to_sleep:
- *   시스템 수면 전 PCI 장치를 준비 상태로 전환한다. NVMe controller 를 목표 D-state 로 저전원 진입시킨다.
+ * [한국어]
+ * pci_prepare_to_sleep - 시스템 절전 진입 전에 장치를 목표 상태로 내려보낸다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @return: 0 성공, -EIO 면 목표 상태를 정할 수 없었고, 그 밖의 음수는 전이 실패.
+ *
+ * 순서가 중요하다. 깨우기를 먼저 설정하고 그 다음 전원을 내린다 —
+ * 이미 잠든 장치의 PMCSR 을 건드릴 수는 없기 때문이다.
+ * 전이에 실패하면 깨우기 설정을 되돌린다. 켜지도 못한 장치를 깨우기 원천으로
+ * 남겨 두면 ACPI 쪽 참조 계수가 어긋난다.
+ *
+ * 실행 문맥: 시스템 절전 경로. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci-driver.c 의 시스템 suspend 콜백 → [이 함수]
+ *     → pci_target_state(), pci_enable_wake(), pci_set_power_state()
  */
-int pci_prepare_to_sleep(struct pci_dev *dev) /* NVMe: pci_prepare_to_sleep 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	bool wakeup = device_may_wakeup(&dev->dev); /* NVMe: 변수에 값을 할당한다. */
-	pci_power_t target_state = pci_target_state(dev, wakeup); /* NVMe: 변수에 값을 할당한다. */
-	int error; /* NVMe: int 타입 변수를 선언한다. */
+int pci_prepare_to_sleep(struct pci_dev *dev)
+{
+	bool wakeup = device_may_wakeup(&dev->dev); /* [한국어] 사용자가 이 장치로 깨우는 것을 허용했는가 */
+	pci_power_t target_state = pci_target_state(dev, wakeup); /* [한국어] 그 정책까지 반영해 목표 상태를 고른다 */
+	int error; /* [한국어] 전이 결과 */
 
-	if (target_state == PCI_POWER_ERROR) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return -EIO; /* NVMe: 오류 코드를 반환한다. */
+	if (target_state == PCI_POWER_ERROR) /* [한국어] 목표 상태를 정할 수 없었다면 */
+		return -EIO; /* [한국어] 절전 진입을 실패로 알린다 */
 
-	pci_enable_wake(dev, target_state, wakeup); /* NVMe: pci_enable_wake 함수를 호출한다. */
+	pci_enable_wake(dev, target_state, wakeup); /* [한국어] 전원을 내리기 전에 깨우기를 설정한다 — 잠든 뒤에는 PMCSR 을 건드릴 수 없다 */
 
-	error = pci_set_power_state(dev, target_state); /* NVMe: 변수에 값을 할당한다. */
+	error = pci_set_power_state(dev, target_state); /* [한국어] 목표 상태로 내려보낸다 */
 
-	if (error) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pci_enable_wake(dev, target_state, false); /* NVMe: pci_enable_wake 함수를 호출한다. */
+	if (error) /* [한국어] 전이에 실패했으면 */
+		pci_enable_wake(dev, target_state, false); /* [한국어] 깨우기 설정을 되돌린다. 그러지 않으면 ACPI 쪽 참조 계수가 어긋난다 */
 
-	return error; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return error; /* [한국어] 전이 결과를 그대로 올린다 */
+}
 EXPORT_SYMBOL(pci_prepare_to_sleep);
 
 /**
@@ -3119,19 +5206,32 @@ EXPORT_SYMBOL(pci_prepare_to_sleep);
  * Disable device's system wake-up capability and put it into D0.
  */
 /*
- * pci_back_from_sleep:
- *   시스템 수면에서 복귀 후 PCI 장치를 깨운다. NVMe controller 를 D0 로 복원한다.
+ * [한국어]
+ * pci_back_from_sleep - 절전에서 돌아와 D0 로 올리고 깨우기 설정을 정리한다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @return: 0 성공, 음수면 D0 전이 실패.
+ *
+ * pci_prepare_to_sleep() 의 짝이다. 순서가 반대인 것에 이유가 있다 —
+ * 먼저 D0 로 올려야 PMCSR 에 접근할 수 있고, 그래야 깨우기 설정을 끌 수 있다.
+ * 깨어난 뒤에는 더 이상 깨우기 원천일 필요가 없으므로 끄는 것이 맞다.
+ *
+ * 실행 문맥: 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci-driver.c 의 시스템 resume 콜백 → [이 함수]
+ *     → pci_set_power_state(), pci_enable_wake()
  */
-int pci_back_from_sleep(struct pci_dev *dev) /* NVMe: pci_back_from_sleep 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	int ret = pci_set_power_state(dev, PCI_D0); /* NVMe: 변수에 값을 할당한다. */
+int pci_back_from_sleep(struct pci_dev *dev)
+{
+	int ret = pci_set_power_state(dev, PCI_D0); /* [한국어] 먼저 D0 로 올린다. 그래야 PMCSR 을 건드릴 수 있다 */
 
-	if (ret) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return ret; /* NVMe: 연산 결과를 반환한다. */
+	if (ret) /* [한국어] 전이에 실패하면 */
+		return ret; /* [한국어] 깨우기 설정을 건드릴 수 없으므로 그대로 오류를 올린다 */
 
-	pci_enable_wake(dev, PCI_D0, false); /* NVMe: pci_enable_wake 함수를 호출한다. */
-	return 0; /* NVMe: 성공(0)을 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	pci_enable_wake(dev, PCI_D0, false); /* [한국어] 깨어났으므로 깨우기 원천 설정을 끈다 */
+	return 0; /* [한국어] 복귀 완료 */
+}
 EXPORT_SYMBOL(pci_back_from_sleep);
 
 /**
@@ -3142,27 +5242,44 @@ EXPORT_SYMBOL(pci_back_from_sleep);
  * power state.
  */
 /*
- * pci_finish_runtime_suspend:
- *   runtime suspend 완료 처리를 수행한다. NVMe runtime suspend 의 마지막 단계에서 호출된다.
+ * [한국어]
+ * pci_finish_runtime_suspend - 런타임 절전의 PCI 쪽 마무리를 수행한다.
+ *
+ * @dev: 절전에 들어가는 PCI 장치.
+ * @return: 0 성공, -EIO 면 목표 상태를 정할 수 없었고, 그 밖의 음수는 전이 실패.
+ *
+ * pci_prepare_to_sleep() 과 구조는 같지만 깨우기 판단 기준이 다르다.
+ * 시스템 절전은 사용자 정책(device_may_wakeup)을 따르지만, 런타임 절전은
+ * 그것과 무관하게 "장치가 스스로 깨어나 일을 계속할 수 있어야" 한다.
+ * 그래서 목표 상태는 device_can_wakeup()(하드웨어 능력)으로 고르고,
+ * 실제 깨우기 설정은 pci_dev_run_wake()(런타임 깨우기가 실제로 가능한가)로 정한다.
+ * 사용자 정책 검사를 건너뛰려고 pci_enable_wake() 대신 __pci_enable_wake() 를
+ * 직접 부르는 것도 같은 이유다.
+ *
+ * 실행 문맥: 런타임 PM 경로. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci-driver.c 의 런타임 suspend 콜백 → [이 함수]
+ *     → pci_target_state(), __pci_enable_wake(), pci_set_power_state()
  */
-int pci_finish_runtime_suspend(struct pci_dev *dev) /* NVMe: pci_finish_runtime_suspend 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	pci_power_t target_state; /* NVMe: pci_power_t 타입 변수를 선언한다. */
-	int error; /* NVMe: int 타입 변수를 선언한다. */
+int pci_finish_runtime_suspend(struct pci_dev *dev)
+{
+	pci_power_t target_state; /* [한국어] 고를 목표 D-state */
+	int error; /* [한국어] 전이 결과 */
 
-	target_state = pci_target_state(dev, device_can_wakeup(&dev->dev)); /* NVMe: 변수에 값을 할당한다. */
-	if (target_state == PCI_POWER_ERROR) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return -EIO; /* NVMe: 오류 코드를 반환한다. */
+	target_state = pci_target_state(dev, device_can_wakeup(&dev->dev)); /* [한국어] 하드웨어가 깨우기를 지원하는지를 기준으로 상태를 고른다. 사용자 정책이 아니라 능력이 기준이다 */
+	if (target_state == PCI_POWER_ERROR) /* [한국어] 상태를 정할 수 없으면 */
+		return -EIO; /* [한국어] 절전을 포기한다 */
 
-	__pci_enable_wake(dev, target_state, pci_dev_run_wake(dev)); /* NVMe: __pci_enable_wake 함수를 호출한다. */
+	__pci_enable_wake(dev, target_state, pci_dev_run_wake(dev)); /* [한국어] 런타임 깨우기가 실제로 가능한 경우에만 켠다. 사용자 정책 검사를 건너뛰려고 __ 판을 직접 부른다 */
 
-	error = pci_set_power_state(dev, target_state); /* NVMe: 변수에 값을 할당한다. */
+	error = pci_set_power_state(dev, target_state); /* [한국어] 목표 상태로 내려보낸다 */
 
-	if (error) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pci_enable_wake(dev, target_state, false); /* NVMe: pci_enable_wake 함수를 호출한다. */
+	if (error) /* [한국어] 실패하면 */
+		pci_enable_wake(dev, target_state, false); /* [한국어] 깨우기 설정을 되돌린다 */
 
-	return error; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return error; /* [한국어] 전이 결과 */
+}
 
 /**
  * pci_dev_run_wake - Check if device can generate run-time wake-up events.
@@ -3173,38 +5290,61 @@ int pci_finish_runtime_suspend(struct pci_dev *dev) /* NVMe: pci_finish_runtime_
  * PME and one of its upstream bridges can generate wake-up events.
  */
 /*
- * pci_dev_run_wake:
- *   해당 pci_dev 가 runtime wake-up 을 지원하는지 확인한다. NVMe runtime suspend 허용 여부를 판단한다.
+ * [한국어]
+ * pci_dev_run_wake - 런타임 절전 중에도 이 장치가 시스템을 깨울 수 있는가.
+ *
+ * @dev: 검사할 장치.
+ * @return: 깨울 수 있으면 true.
+ *
+ * 조건을 세 겹으로 확인한다.
+ *   1) 장치가 PME 를 낼 수 있어야 한다(pme_support).
+ *   2) 실제로 내려갈 목표 상태에서 낼 수 있어야 한다. 원칙적으로 PME 가
+ *      가능해도 그 깊이에서 못 내면 소용없다(원본 주석).
+ *   3) 그 PME 신호를 받아 줄 주체가 있어야 한다. 장치 자신이 깨우기 원천으로
+ *      허용돼 있거나, 위쪽 브리지 중 하나가 그 역할을 할 수 있어야 한다.
+ *      브리지가 대신 깨울 수 있는 이유는, PCIe 의 PME 가 상위로 전파되는
+ *      메시지이기 때문이다.
+ *
+ * 3)의 순회는 루트 버스까지 올라간다. 루트에 닿으면 마지막으로 호스트
+ * 브리지의 struct device 를 확인한다 — ACPI 가 깨우기 능력을 그쪽에 붙여
+ * 두는 경우가 있다.
+ *
+ * 실행 문맥: 버스 계층을 락 없이 거슬러 올라간다. 계층 구조가 안정된
+ * 문맥에서 불러야 한다.
+ *
+ * 호출 체인:
+ *   pci_finish_runtime_suspend(), pci_dev_complete_resume(), pci-driver.c
+ *     → [이 함수] → pci_pme_capable(), pci_target_state(), device_can_wakeup()
  */
-bool pci_dev_run_wake(struct pci_dev *dev) /* NVMe: pci_dev_run_wake 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	struct pci_bus *bus = dev->bus; /* NVMe: 데이터 타입 변수를 선언한다. */
+bool pci_dev_run_wake(struct pci_dev *dev)
+{
+	struct pci_bus *bus = dev->bus; /* [한국어] 위로 거슬러 올라갈 버스 커서 */
 
-	if (!dev->pme_support) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return false; /* NVMe: 연산 결과를 반환한다. */
+	if (!dev->pme_support) /* [한국어] 어느 상태에서도 PME 를 못 내면 */
+		return false; /* [한국어] 깨울 수 없다 */
 
 	/* PME-capable in principle, but not from the target power state */
-	if (!pci_pme_capable(dev, pci_target_state(dev, true))) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return false; /* NVMe: 연산 결과를 반환한다. */
+	if (!pci_pme_capable(dev, pci_target_state(dev, true))) /* [한국어] 런타임 절전에서 실제로 내려갈 상태를 계산해, 그 상태에서 PME 를 낼 수 있는지 본다 */
+		return false; /* [한국어] 그 깊이에서 못 내면 소용없다 */
 
-	if (device_can_wakeup(&dev->dev)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return true; /* NVMe: 연산 결과를 반환한다. */
+	if (device_can_wakeup(&dev->dev)) /* [한국어] 장치 자신이 깨우기 원천으로 허용돼 있으면 */
+		return true; /* [한국어] 그것으로 충분하다 */
 
-	while (bus->parent) { /* NVMe: 조건이 참인 동안 반복한다. */
-		struct pci_dev *bridge = bus->self; /* NVMe: 데이터 타입 변수를 선언한다. */
+	while (bus->parent) { /* [한국어] 아니면 위쪽 브리지 중 대신 깨워 줄 수 있는 것을 찾는다. parent 가 없으면 루트 버스다 */
+		struct pci_dev *bridge = bus->self; /* [한국어] 이 버스를 만든 브리지 */
 
-		if (device_can_wakeup(&bridge->dev)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			return true; /* NVMe: 연산 결과를 반환한다. */
+		if (device_can_wakeup(&bridge->dev)) /* [한국어] 그 브리지가 깨우기 원천이 될 수 있으면 */
+			return true; /* [한국어] PME 메시지가 그 브리지까지 전파되므로 깨울 수 있다 */
 
-		bus = bus->parent; /* NVMe: 변수에 값을 할당한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+		bus = bus->parent; /* [한국어] 한 단계 위로 올라간다 */
+	}
 
 	/* We have reached the root bus. */
-	if (bus->bridge) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return device_can_wakeup(bus->bridge); /* NVMe: 연산 결과를 반환한다. */
+	if (bus->bridge) /* [한국어] 루트 버스의 호스트 브리지 device — ACPI 가 깨우기 능력을 여기 붙여 두는 경우가 있다 */
+		return device_can_wakeup(bus->bridge); /* [한국어] 그 능력을 그대로 답으로 삼는다 */
 
-	return false; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return false; /* [한국어] 루트까지 올라가도 깨워 줄 주체가 없다 */
+}
 EXPORT_SYMBOL_GPL(pci_dev_run_wake);
 
 /**
@@ -3217,28 +5357,51 @@ EXPORT_SYMBOL_GPL(pci_dev_run_wake);
  * (system-wide) transition.
  */
 /*
- * pci_dev_need_resume:
- *   해당 pci_dev 가 resume 이 필요한지 판단한다. NVMe resume 최적화 시 불필요한 resume 을 걸러낸다.
+ * [한국어]
+ * pci_dev_need_resume - 시스템 절전에 들어가기 전에 이 장치를 반드시 깨워야 하는가.
+ *
+ * @pci_dev: 검사할 장치.
+ * @return: 깨워야 하면 true.
+ *
+ * 런타임 절전 중인 장치를 시스템 절전에 들어갈 때 굳이 깨우지 않고 그대로
+ * 두는 최적화(direct-complete)가 있다. 이 함수는 그 최적화를 적용해도
+ * 되는지 판정한다.
+ *
+ * 깨워야 하는 경우는 세 가지다.
+ *   1) 애초에 런타임 절전 중이 아니다 — 깨울 것도 없이 이미 깨어 있다.
+ *   2) 플랫폼이 상태 불일치를 알린다(platform_pci_need_resume).
+ *   3) 지금 상태가 시스템 절전에 적합하지 않다. 런타임 절전과 시스템 절전은
+ *      깨우기 정책이 달라 목표 상태가 다를 수 있기 때문이다.
+ *
+ * 3)의 판정에서 D3cold 와 D3hot 을 예외로 두는 것이 요점이다. 원본 주석대로
+ * D3cold 는 D3hot 위에 전원 차단이 더해진 것뿐이라, 앞의 플랫폼 검사가
+ * 걸리지 않았다면 굳이 깨워 다시 설정할 필요가 없다.
+ *
+ * 실행 문맥: 시스템 절전 준비 단계. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci-driver.c 의 pci_pm_prepare 계열 → [이 함수]
+ *     → pm_runtime_suspended(), platform_pci_need_resume(), pci_target_state()
  */
-bool pci_dev_need_resume(struct pci_dev *pci_dev) /* NVMe: pci_dev_need_resume 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	struct device *dev = &pci_dev->dev; /* NVMe: 데이터 타입 변수를 선언한다. */
-	pci_power_t target_state; /* NVMe: pci_power_t 타입 변수를 선언한다. */
+bool pci_dev_need_resume(struct pci_dev *pci_dev)
+{
+	struct device *dev = &pci_dev->dev; /* [한국어] 런타임 PM API 에 넘길 struct device */
+	pci_power_t target_state; /* [한국어] 시스템 절전에서 목표로 삼을 상태 */
 
-	if (!pm_runtime_suspended(dev) || platform_pci_need_resume(pci_dev)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return true; /* NVMe: 연산 결과를 반환한다. */
+	if (!pm_runtime_suspended(dev) || platform_pci_need_resume(pci_dev)) /* [한국어] 런타임 절전 중이 아니거나, 플랫폼이 상태 불일치를 알리면 */
+		return true; /* [한국어] 깨워야 한다 */
 
-	target_state = pci_target_state(pci_dev, device_may_wakeup(dev)); /* NVMe: 변수에 값을 할당한다. */
+	target_state = pci_target_state(pci_dev, device_may_wakeup(dev)); /* [한국어] 시스템 절전 기준(사용자 정책 포함)으로 목표 상태를 다시 계산한다 */
 
 	/*
 	 * If the earlier platform check has not triggered, D3cold is just power
 	 * removal on top of D3hot, so no need to resume the device in that
 	 * case.
 	 */
-	return target_state != pci_dev->current_state && /* NVMe: 표현식을 이어서 작성한다. */
-		target_state != PCI_D3cold && /* NVMe: 표현식을 이어서 작성한다. */
-		pci_dev->current_state != PCI_D3hot; /* NVMe: 변수에 값을 할당한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return target_state != pci_dev->current_state && /* [한국어] 목표가 현재와 다르고 */
+		target_state != PCI_D3cold && /* [한국어] 목표가 D3cold 가 아니며 — D3cold 는 D3hot 위에 전원 차단만 더한 것이라 다시 설정할 필요가 없다 */
+		pci_dev->current_state != PCI_D3hot; /* [한국어] 현재가 D3hot 도 아닐 때만 깨운다 */
+}
 
 /**
  * pci_dev_adjust_pme - Adjust PME setting for a suspended device.
@@ -3252,21 +5415,38 @@ bool pci_dev_need_resume(struct pci_dev *pci_dev) /* NVMe: pci_dev_need_resume �
  * be changed.
  */
 /*
- * pci_dev_adjust_pme:
- *   PME 능력을 장치 상태에 맞게 조정한다. NVMe D-state 변화에 따라 wake-up 이벤트를 재설정한다.
+ * [한국어]
+ * pci_dev_adjust_pme - 시스템을 깨울 필요가 없는 절전 장치의 PME 를 꺼 둔다.
+ *
+ * @pci_dev: 대상 장치.
+ * @return: 없음.
+ *
+ * 런타임 절전 중인 장치는 자기 일을 재개하려고 PME 를 켜 두었을 수 있다.
+ * 그러나 시스템 절전에 들어갈 때 사용자가 이 장치로 시스템을 깨우기를
+ * 원하지 않는다면, 그 PME 가 시스템을 불필요하게 깨우게 된다. 그래서 꺼 둔다.
+ *
+ * D3cold 를 제외하는 이유는 두 가지다. 전원이 없어 PMCSR 을 쓸 수 없고,
+ * 원본 주석대로 pci_dev_need_resume() 의 플랫폼 검사가 걸리지 않았다면
+ * 설정을 바꿀 필요도 없다.
+ *
+ * 실행 문맥: dev->power.lock 스핀락을 인터럽트를 막고 잡는다. 그 락 안에서
+ * 런타임 절전 상태가 바뀌지 않도록 보장하면서 PMCSR 을 만진다.
+ *
+ * 호출 체인:
+ *   pci-driver.c 의 시스템 suspend 준비 단계 → [이 함수] → __pci_pme_active()
  */
-void pci_dev_adjust_pme(struct pci_dev *pci_dev) /* NVMe: pci_dev_adjust_pme 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	struct device *dev = &pci_dev->dev; /* NVMe: 데이터 타입 변수를 선언한다. */
+void pci_dev_adjust_pme(struct pci_dev *pci_dev)
+{
+	struct device *dev = &pci_dev->dev; /* [한국어] 런타임 PM 상태를 볼 struct device */
 
-	spin_lock_irq(&dev->power.lock); /* NVMe: spin_lock_irq 함수를 호출한다. */
+	spin_lock_irq(&dev->power.lock); /* [한국어] 상태 확인과 PMCSR 조작 사이에 런타임 절전 상태가 바뀌지 않도록 막는다. 인터럽트 문맥에서도 이 락을 잡으므로 _irq 판이 필요하다 */
 
-	if (pm_runtime_suspended(dev) && !device_may_wakeup(dev) && /* NVMe: 조건식을 평가해 분기를 결정한다. */
-	    pci_dev->current_state < PCI_D3cold) /* NVMe: 구조체 멤버에 접근한다. */
-		__pci_pme_active(pci_dev, false); /* NVMe: __pci_pme_active 함수를 호출한다. */
+	if (pm_runtime_suspended(dev) && !device_may_wakeup(dev) && /* [한국어] 런타임 절전 중이고, 사용자가 이 장치로 시스템을 깨우기를 원하지 않으며 */
+	    pci_dev->current_state < PCI_D3cold) /* [한국어] D3cold 가 아니어야 한다 — 전원이 없으면 PMCSR 을 쓸 수 없다 */
+		__pci_pme_active(pci_dev, false); /* [한국어] PME 를 꺼 시스템이 불필요하게 깨어나지 않게 한다 */
 
-	spin_unlock_irq(&dev->power.lock); /* NVMe: spin_unlock_irq 함수를 호출한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	spin_unlock_irq(&dev->power.lock); /* [한국어] 락을 푼다 */
+}
 
 /**
  * pci_dev_complete_resume - Finalize resume from system sleep for a device.
@@ -3277,23 +5457,39 @@ void pci_dev_adjust_pme(struct pci_dev *pci_dev) /* NVMe: pci_dev_adjust_pme 함
  * the device was not configured for system wakeup.
  */
 /*
- * pci_dev_complete_resume:
- *   resume 완료 후 후처리를 수행한다. NVMe resume 후 PME/INTx 등 인터럽트 상태를 정리한다.
+ * [한국어]
+ * pci_dev_complete_resume - 시스템 절전에서 돌아온 뒤 꺼 두었던 PME 를 되살린다.
+ *
+ * @pci_dev: 대상 장치.
+ * @return: 없음.
+ *
+ * pci_dev_adjust_pme() 의 짝이다. 시스템 절전 준비 단계에서 껐던 PME 를
+ * 다시 켜, 런타임 절전 중인 장치가 스스로 깨어날 수 있게 되돌린다.
+ * 그러지 않으면 그 장치는 영영 깨어나지 못한 채 남는다.
+ *
+ * 먼저 pci_dev_run_wake() 로 "런타임 깨우기가 원래 가능한 장치인가"를
+ * 확인한다. 애초에 불가능했다면 켤 이유가 없다.
+ *
+ * 실행 문맥: dev->power.lock 을 인터럽트를 막고 잡는다.
+ *
+ * 호출 체인:
+ *   pci-driver.c 의 시스템 resume 완료 단계 → [이 함수]
+ *     → pci_dev_run_wake(), __pci_pme_active()
  */
-void pci_dev_complete_resume(struct pci_dev *pci_dev) /* NVMe: pci_dev_complete_resume 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	struct device *dev = &pci_dev->dev; /* NVMe: 데이터 타입 변수를 선언한다. */
+void pci_dev_complete_resume(struct pci_dev *pci_dev)
+{
+	struct device *dev = &pci_dev->dev; /* [한국어] 런타임 PM 상태를 볼 struct device */
 
-	if (!pci_dev_run_wake(pci_dev)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return; /* NVMe: 함수 실행을 종료한다. */
+	if (!pci_dev_run_wake(pci_dev)) /* [한국어] 애초에 런타임 깨우기가 불가능한 장치면 */
+		return; /* [한국어] 되살릴 것이 없다 */
 
-	spin_lock_irq(&dev->power.lock); /* NVMe: spin_lock_irq 함수를 호출한다. */
+	spin_lock_irq(&dev->power.lock); /* [한국어] 상태 확인과 PMCSR 조작 사이에 상태가 바뀌지 않도록 막는다 */
 
-	if (pm_runtime_suspended(dev) && pci_dev->current_state < PCI_D3cold) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		__pci_pme_active(pci_dev, true); /* NVMe: __pci_pme_active 함수를 호출한다. */
+	if (pm_runtime_suspended(dev) && pci_dev->current_state < PCI_D3cold) /* [한국어] 여전히 런타임 절전 중이고 D3cold 가 아니면 — 전원이 있어야 PMCSR 을 쓸 수 있다 */
+		__pci_pme_active(pci_dev, true); /* [한국어] PME 를 다시 켜 스스로 깨어날 수 있게 한다 */
 
-	spin_unlock_irq(&dev->power.lock); /* NVMe: spin_unlock_irq 함수를 호출한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	spin_unlock_irq(&dev->power.lock); /* [한국어] 락을 푼다 */
+}
 
 /**
  * pci_choose_state - Choose the power state of a PCI device.
@@ -3303,100 +5499,174 @@ void pci_dev_complete_resume(struct pci_dev *pci_dev) /* NVMe: pci_dev_complete_
  * Returns PCI power state suitable for @dev and @state.
  */
 /*
- * pci_choose_state:
- *   주어진 pm_message_t 에 맞는 PCI 전원 상태를 선택한다. NVMe 시스템 suspend 시 D-state 를 매핑한다.
+ * [한국어]
+ * pci_choose_state - 시스템 절전 이벤트에 대응하는 이 장치의 D-state 를 고른다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @state: 시스템 전체의 목표 상태를 담은 pm_message_t.
+ * @return: 이 장치에 적합한 D-state.
+ *
+ * PM_EVENT_ON 은 "시스템을 켜진 상태로 되돌린다"는 뜻이므로 장치도 D0 다.
+ * 그 밖의 이벤트(SUSPEND, HIBERNATE 등)는 모두 절전이라 pci_target_state() 에
+ * 판단을 맡긴다.
+ *
+ * wakeup=false 로 넘기는 것이 특징이다. 즉 이 함수가 고르는 상태는 깨우기
+ * 능력을 고려하지 않은, 순수한 절전 관점의 목표다. 깨우기까지 감안한 선택은
+ * pci_prepare_to_sleep() 이 따로 한다.
+ *
+ * 실행 문맥: 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   각 드라이버의 suspend 콜백 → [이 함수] → pci_target_state()
  */
-pci_power_t pci_choose_state(struct pci_dev *dev, pm_message_t state) /* NVMe: pci_choose_state 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	if (state.event == PM_EVENT_ON) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return PCI_D0; /* NVMe: 연산 결과를 반환한다. */
+pci_power_t pci_choose_state(struct pci_dev *dev, pm_message_t state)
+{
+	if (state.event == PM_EVENT_ON) /* [한국어] 시스템을 다시 켜는 이벤트면 */
+		return PCI_D0; /* [한국어] 장치도 완전 동작 상태여야 한다 */
 
-	return pci_target_state(dev, false); /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return pci_target_state(dev, false); /* [한국어] 그 밖의 절전 이벤트는 목표 상태 계산에 맡긴다. wakeup=false 라 깨우기 능력은 고려하지 않는다 */
+}
 EXPORT_SYMBOL(pci_choose_state);
 
 /*
- * pci_config_pm_runtime_get:
- *   config space 접근 시 runtime PM reference 를 획득한다. NVMe config read/write 중 장치가 suspend 되지 않도록 한다.
+ * [한국어]
+ * pci_config_pm_runtime_get - config space 를 건드리는 동안 장치가 잠들지 않게 붙든다.
+ *
+ * @pdev: 대상 PCI 장치.
+ * @return: 없음.
+ *
+ * sysfs 등으로 config space 를 읽고 쓰는 동안 장치가 런타임 절전에 들어가면
+ * 접근이 실패하거나 엉뚱한 값을 읽는다. 그래서 참조를 잡아 둔다.
+ *
+ * 처리 순서에 이유가 있다.
+ *   1) 부모(대개 상위 브리지)를 먼저 동기적으로 깨운다. 부모가 자고 있으면
+ *      자식의 config 에 아예 닿을 수 없기 때문이다.
+ *   2) 자기 자신은 참조만 올리고 깨우지는 않는다(_noresume). 아래에서 보듯
+ *      D3cold 가 아니면 자고 있어도 config 는 읽히므로, 굳이 깨워
+ *      절전 이득을 버릴 이유가 없다.
+ *   3) pm_runtime_barrier() 로 진행 중인 절전 작업이 끝나기를 기다린다.
+ *      원본 주석대로 current_state 는 절전 도중에 D3cold 로 바뀌므로,
+ *      그 작업이 끝나야 아래 검사가 올바른 값을 본다.
+ *   4) 그래도 D3cold 라면 그때만 실제로 깨운다.
+ *
+ * 실행 문맥: pm_runtime_get_sync/resume 이 잠들 수 있다. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   drivers/pci/pci-sysfs.c 의 config 접근 → [이 함수]
+ *     → pm_runtime_get_sync(), pm_runtime_barrier(), pm_runtime_resume()
  */
-void pci_config_pm_runtime_get(struct pci_dev *pdev) /* NVMe: pci_config_pm_runtime_get 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	struct device *dev = &pdev->dev; /* NVMe: 데이터 타입 변수를 선언한다. */
-	struct device *parent = dev->parent; /* NVMe: 데이터 타입 변수를 선언한다. */
+void pci_config_pm_runtime_get(struct pci_dev *pdev)
+{
+	struct device *dev = &pdev->dev; /* [한국어] 이 장치의 struct device */
+	struct device *parent = dev->parent; /* [한국어] 부모 device — 대개 상위 브리지다 */
 
-	if (parent) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pm_runtime_get_sync(parent); /* NVMe: pm_runtime_get_sync 함수를 호출한다. */
-	pm_runtime_get_noresume(dev); /* NVMe: pm_runtime_get_noresume 함수를 호출한다. */
+	if (parent) /* [한국어] 부모가 있으면 */
+		pm_runtime_get_sync(parent); /* [한국어] 동기적으로 깨운다. 부모가 자고 있으면 자식의 config 에 닿을 수 없다 */
+	pm_runtime_get_noresume(dev); /* [한국어] 자기 자신은 참조만 올린다. 깨우지 않는 이유는 아래에서 D3cold 인 경우에만 깨우면 되기 때문이다 */
 	/*
 	 * pdev->current_state is set to PCI_D3cold during suspending,
 	 * so wait until suspending completes
 	 */
-	pm_runtime_barrier(dev); /* NVMe: pm_runtime_barrier 함수를 호출한다. */
+	pm_runtime_barrier(dev); /* [한국어] 진행 중인 절전 작업이 끝나기를 기다린다. 그래야 아래에서 읽는 current_state 가 확정된 값이 된다 */
 	/*
 	 * Only need to resume devices in D3cold, because config
 	 * registers are still accessible for devices suspended but
 	 * not in D3cold.
 	 */
-	if (pdev->current_state == PCI_D3cold) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pm_runtime_resume(dev); /* NVMe: pm_runtime_resume 함수를 호출한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	if (pdev->current_state == PCI_D3cold) /* [한국어] D3cold 는 전원이 없어 config 에 닿을 수 없다 */
+		pm_runtime_resume(dev); /* [한국어] 이때만 실제로 깨운다 */
+}
 
 /*
- * pci_config_pm_runtime_put:
- *   config space 접근 후 runtime PM reference 를 반납한다. NVMe config 접근 완료 후 suspend 허용을 복원한다.
+ * [한국어]
+ * pci_config_pm_runtime_put - config space 접근이 끝나 참조를 돌려준다.
+ *
+ * @pdev: 대상 PCI 장치.
+ * @return: 없음.
+ *
+ * pci_config_pm_runtime_get() 의 짝이다. 잡을 때와 반대 순서로 놓는다 —
+ * 자식을 먼저 놓고 부모를 나중에 놓는다. 부모를 먼저 놓으면 자식이 아직
+ * 참조를 쥔 채로 부모가 잠들려 시도하는 어색한 순간이 생긴다.
+ *
+ * 부모에만 _sync 를 쓰는 것도 대칭이다. 잡을 때 부모를 동기적으로 깨웠으니
+ * 놓을 때도 동기적으로 돌려준다.
+ *
+ * 실행 문맥: pm_runtime_put_sync 가 잠들 수 있다. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   drivers/pci/pci-sysfs.c 의 config 접근 → [이 함수]
+ *     → pm_runtime_put(), pm_runtime_put_sync()
  */
-void pci_config_pm_runtime_put(struct pci_dev *pdev) /* NVMe: pci_config_pm_runtime_put 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	struct device *dev = &pdev->dev; /* NVMe: 데이터 타입 변수를 선언한다. */
-	struct device *parent = dev->parent; /* NVMe: 데이터 타입 변수를 선언한다. */
+void pci_config_pm_runtime_put(struct pci_dev *pdev)
+{
+	struct device *dev = &pdev->dev; /* [한국어] 이 장치의 struct device */
+	struct device *parent = dev->parent; /* [한국어] 부모 device */
 
-	pm_runtime_put(dev); /* NVMe: pm_runtime_put 함수를 호출한다. */
-	if (parent) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pm_runtime_put_sync(parent); /* NVMe: pm_runtime_put_sync 함수를 호출한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	pm_runtime_put(dev); /* [한국어] 자식 참조를 먼저 놓는다 */
+	if (parent) /* [한국어] 부모가 있으면 */
+		pm_runtime_put_sync(parent); /* [한국어] 부모 참조를 동기적으로 돌려준다. 잡을 때 _sync 로 깨운 것과 대칭이다 */
+}
 
-static const struct dmi_system_id bridge_d3_blacklist[] = { /* NVMe: 표현식을 평가한다. */
-#ifdef CONFIG_X86 /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
-	{ /* NVMe: 코드 블록을 시작한다. */
+/*
+ * [한국어] 브리지를 D3 로 내리면 안 되는 것으로 알려진 메인보드 목록(quirk).
+ *
+ * 스펙상으로는 D3 가 가능해 보여도 실제 하드웨어·펌웨어가 그 전이를 견디지
+ * 못하는 보드가 있다. 그런 보드를 DMI(SMBIOS)의 제조사·모델 문자열로 식별해
+ * 브리지 전원 관리를 통째로 막는다. pci_bridge_d3_possible() 이 이 표를 본다.
+ *
+ * 표에 담긴 세 사례가 각각 다른 종류의 고장을 보여 준다.
+ *   - Gigabyte X299: Root Port 가 핫플러그 가능으로 표시돼 있지 않아 커널이
+ *     전원을 관리해도 된다고 판단하는데, 그러면 BIOS 의 SMI 핸들러가 혼란에
+ *     빠진다.
+ *   - Elo Continental Z2: Root Port 를 D3cold 로 내렸다 D0 로 되돌리면 그
+ *     아래 장치에 더 이상 접근할 수 없다.
+ *   - HP Pavilion 17: dGPU 가 붙은 Root Port 의 전원 상태 변경이 실패한다.
+ *
+ * 표 전체가 CONFIG_X86 안에 있는 이유는 이 보드들이 모두 x86 이기 때문이고,
+ * 마지막의 빈 항목 { } 는 dmi_check_system() 이 표의 끝을 알아보는 표식이다.
+ */
+static const struct dmi_system_id bridge_d3_blacklist[] = {
+#ifdef CONFIG_X86 /* [한국어] 아래 항목들이 모두 x86 보드라 그 아키텍처에서만 컴파일한다 */
+	{
 		/*
 		 * Gigabyte X299 root port is not marked as hotplug capable
 		 * which allows Linux to power manage it.  However, this
 		 * confuses the BIOS SMI handler so don't power manage root
 		 * ports on that system.
 		 */
-		.ident = "X299 DESIGNARE EX-CF", /* NVMe: 표현식을 이어서 작성한다. */
-		.matches = { /* NVMe: 구조체 멤버에 접근한다. */
-			DMI_MATCH(DMI_BOARD_VENDOR, "Gigabyte Technology Co., Ltd."), /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-			DMI_MATCH(DMI_BOARD_NAME, "X299 DESIGNARE EX-CF"), /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-		}, /* NVMe: 표현식을 이어서 작성한다. */
-	}, /* NVMe: 표현식을 이어서 작성한다. */
-	{ /* NVMe: 코드 블록을 시작한다. */
+		.ident = "X299 DESIGNARE EX-CF", /* [한국어] 로그에 찍힐 이 항목의 이름 */
+		.matches = { /* [한국어] DMI 필드가 모두 일치해야 이 보드로 판정한다 */
+			DMI_MATCH(DMI_BOARD_VENDOR, "Gigabyte Technology Co., Ltd."), /* [한국어] 보드 제조사 문자열 */
+			DMI_MATCH(DMI_BOARD_NAME, "X299 DESIGNARE EX-CF"), /* [한국어] 보드 모델 문자열 */
+		},
+	},
+	{
 		/*
 		 * Downstream device is not accessible after putting a root port
 		 * into D3cold and back into D0 on Elo Continental Z2 board
 		 */
-		.ident = "Elo Continental Z2", /* NVMe: 표현식을 이어서 작성한다. */
-		.matches = { /* NVMe: 구조체 멤버에 접근한다. */
-			DMI_MATCH(DMI_BOARD_VENDOR, "Elo Touch Solutions"), /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-			DMI_MATCH(DMI_BOARD_NAME, "Geminilake"), /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-			DMI_MATCH(DMI_BOARD_VERSION, "Continental Z2"), /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-		}, /* NVMe: 표현식을 이어서 작성한다. */
-	}, /* NVMe: 표현식을 이어서 작성한다. */
-	{ /* NVMe: 코드 블록을 시작한다. */
+		.ident = "Elo Continental Z2", /* [한국어] 로그에 찍힐 이 항목의 이름 */
+		.matches = { /* [한국어] 세 필드가 모두 맞아야 한다 */
+			DMI_MATCH(DMI_BOARD_VENDOR, "Elo Touch Solutions"), /* [한국어] 보드 제조사 */
+			DMI_MATCH(DMI_BOARD_NAME, "Geminilake"), /* [한국어] 보드 모델 */
+			DMI_MATCH(DMI_BOARD_VERSION, "Continental Z2"), /* [한국어] 보드 리비전까지 확인한다 — 같은 모델의 다른 리비전은 문제가 없을 수 있다 */
+		},
+	},
+	{
 		/*
 		 * Changing power state of root port dGPU is connected fails
 		 * https://gitlab.freedesktop.org/drm/amd/-/issues/3229
 		 */
-		.ident = "Hewlett-Packard HP Pavilion 17 Notebook PC/1972", /* NVMe: 표현식을 이어서 작성한다. */
-		.matches = { /* NVMe: 구조체 멤버에 접근한다. */
-			DMI_MATCH(DMI_BOARD_VENDOR, "Hewlett-Packard"), /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-			DMI_MATCH(DMI_BOARD_NAME, "1972"), /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-			DMI_MATCH(DMI_BOARD_VERSION, "95.33"), /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-		}, /* NVMe: 표현식을 이어서 작성한다. */
-	}, /* NVMe: 표현식을 이어서 작성한다. */
-#endif /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
-	{ } /* NVMe: 표현식을 평가한다. */
-}; /* NVMe: 코드 블록을 시작한다. */
+		.ident = "Hewlett-Packard HP Pavilion 17 Notebook PC/1972", /* [한국어] 로그에 찍힐 이 항목의 이름 */
+		.matches = { /* [한국어] 세 필드가 모두 맞아야 한다 */
+			DMI_MATCH(DMI_BOARD_VENDOR, "Hewlett-Packard"), /* [한국어] 보드 제조사 */
+			DMI_MATCH(DMI_BOARD_NAME, "1972"), /* [한국어] 보드 모델 */
+			DMI_MATCH(DMI_BOARD_VERSION, "95.33"), /* [한국어] BIOS/보드 버전 */
+		},
+	},
+#endif /* [한국어] x86 전용 항목의 끝 */
+	{ } /* [한국어] 빈 항목이 표의 끝 표식이다. dmi_check_system() 이 이것을 만나면 순회를 멈춘다 */
+};
 
 /**
  * pci_bridge_d3_possible - Is it possible to put the bridge into D3
@@ -3410,88 +5680,145 @@ static const struct dmi_system_id bridge_d3_blacklist[] = { /* NVMe: 표현식�
  * of the bridge, including its hot-removal.
  */
 /*
- * pci_bridge_d3_possible:
- *   bridge 가 D3 상태로 들어갈 수 있는지 조건을 검사한다. NVMe가 연결된 bridge 의 저전원 가능성을 판단한다.
+ * [한국어]
+ * pci_bridge_d3_possible - 이 브리지를 런타임에 D3 로 내려도 되는가.
+ *
+ * @bridge: 검사할 브리지.
+ * @return: D3 로 내릴 수 있으면 true.
+ *
+ * 브리지를 D3 로 내리면 그 아래 계층 전체의 전원이 끊긴다. 절전 효과가
+ * 크지만 되살리지 못하면 장치를 통째로 잃으므로, 허용 조건을 여러 겹으로
+ * 따진다. 위에서부터 순서대로 판정한다.
+ *
+ *   - PCIe 포트가 아니면 불가. 재래식 PCI 브리지는 대상이 아니다.
+ *   - Root Port / Upstream / Downstream 포트만 후보다.
+ *   - pcie_port_pm=off 로 전면 금지했으면 불가.
+ *   - 펌웨어가 다루는 핫플러그 포트(ACPI 슬롯 등)는 OS 가 함부로 D3 로
+ *     내리면 안 된다.
+ *   - PCIe 핫플러그 포트인데 OS 가 직접 다루지 않는 경우(펌웨어가 쥐고 있는
+ *     경우)도 마찬가지다.
+ *   - pcie_port_pm=force 면 그 뒤 검사를 건너뛰고 허용한다.
+ *   - Thunderbolt 는 가장 오래된 2010년 컨트롤러도 D3 를 지원한다(원본 주석).
+ *   - 플랫폼(ACPI)이 지원한다고 하면 그 판단을 믿는다.
+ *   - OS 가 직접 다루는 PCIe 핫플러그 포트는 불가. 원본 주석대로 2018년까지
+ *     OS 지원이 없어 벤더가 런타임 D3 를 검증한 적이 없다.
+ *   - DMI 블랙리스트에 걸린 보드는 불가.
+ *   - x86 에서는 BIOS 연도가 2015년 이상일 때만 허용한다. 오래된 보드의
+ *     펌웨어를 믿을 수 없다는 보수적 판단이다. x86 이 아니면 이 제한이 없다.
+ *
+ * 원본 주석이 강조하듯 반환값은 브리지의 수명 내내 변하지 않는다.
+ * 그래서 열거 시점에 한 번 계산해 두고 쓸 수 있다.
+ *
+ * NVMe 와의 관계: NVMe SSD 가 붙은 Root Port 가 여기서 true 를 받아야
+ * 유휴 시 SSD 전원까지 완전히 끊을 수 있다. 노트북 대기 전력에 직접 영향을 준다.
+ *
+ * 실행 문맥: DMI 조회와 ACPI 조회를 한다. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_bridge_d3_update(), probe.c → [이 함수]
+ *     → platform_pci_bridge_d3(), dmi_check_system(), dmi_get_bios_year()
  */
-bool pci_bridge_d3_possible(struct pci_dev *bridge) /* NVMe: pci_bridge_d3_possible 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	if (!pci_is_pcie(bridge)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return false; /* NVMe: 연산 결과를 반환한다. */
+bool pci_bridge_d3_possible(struct pci_dev *bridge)
+{
+	if (!pci_is_pcie(bridge)) /* [한국어] 재래식 PCI 브리지에는 이 정책이 적용되지 않는다 */
+		return false; /* [한국어] 불가 */
 
-	switch (pci_pcie_type(bridge)) { /* NVMe: 다중 분기를 위한 switch 문을 시작한다. */
-	case PCI_EXP_TYPE_ROOT_PORT: /* NVMe: switch 의 case 레이블이다. */
-	case PCI_EXP_TYPE_UPSTREAM: /* NVMe: switch 의 case 레이블이다. */
-	case PCI_EXP_TYPE_DOWNSTREAM: /* NVMe: switch 의 case 레이블이다. */
-		if (pci_bridge_d3_disable) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			return false; /* NVMe: 연산 결과를 반환한다. */
+	switch (pci_pcie_type(bridge)) { /* [한국어] PCIe 포트의 종류에 따라 갈린다 */
+	case PCI_EXP_TYPE_ROOT_PORT: /* [한국어] Root Complex 에서 내려오는 첫 포트 */
+	case PCI_EXP_TYPE_UPSTREAM: /* [한국어] 스위치의 업스트림 포트 */
+	case PCI_EXP_TYPE_DOWNSTREAM: /* [한국어] 스위치의 다운스트림 포트. 이 셋만 후보이며 엔드포인트는 대상이 아니다 */
+		if (pci_bridge_d3_disable) /* [한국어] pcie_port_pm=off 로 전면 금지했으면 */
+			return false; /* [한국어] 불가 */
 
 		/*
 		 * Hotplug ports handled by platform firmware may not be put
 		 * into D3 by the OS, e.g. ACPI slots ...
 		 */
-		if (bridge->is_hotplug_bridge && !bridge->is_pciehp) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			return false; /* NVMe: 연산 결과를 반환한다. */
+		if (bridge->is_hotplug_bridge && !bridge->is_pciehp) /* [한국어] 핫플러그 브리지인데 PCIe 네이티브 핫플러그가 아니면 — 펌웨어(ACPI 슬롯 등)가 다루는 포트다 */
+			return false; /* [한국어] OS 가 함부로 전원을 끊으면 안 되므로 불가 */
 
 		/* ... or PCIe hotplug ports not handled natively by the OS. */
-		if (bridge->is_pciehp && !pciehp_is_native(bridge)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			return false; /* NVMe: 연산 결과를 반환한다. */
+		if (bridge->is_pciehp && !pciehp_is_native(bridge)) /* [한국어] PCIe 핫플러그 포트이지만 OS 가 직접 다루지 않는(펌웨어가 쥔) 경우 */
+			return false; /* [한국어] 역시 불가 */
 
-		if (pci_bridge_d3_force) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			return true; /* NVMe: 연산 결과를 반환한다. */
+		if (pci_bridge_d3_force) /* [한국어] pcie_port_pm=force 면 */
+			return true; /* [한국어] 뒤의 보수적 검사를 모두 건너뛰고 허용한다 */
 
 		/* Even the oldest 2010 Thunderbolt controller supports D3. */
-		if (bridge->is_thunderbolt) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			return true; /* NVMe: 연산 결과를 반환한다. */
+		if (bridge->is_thunderbolt) /* [한국어] Thunderbolt 컨트롤러라면 */
+			return true; /* [한국어] 허용. 가장 오래된 세대도 D3 를 지원한다 */
 
 		/* Platform might know better if the bridge supports D3 */
-		if (platform_pci_bridge_d3(bridge)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			return true; /* NVMe: 연산 결과를 반환한다. */
+		if (platform_pci_bridge_d3(bridge)) /* [한국어] 플랫폼 펌웨어가 지원한다고 답하면 */
+			return true; /* [한국어] 그 판단을 믿고 허용한다 */
 
 		/*
 		 * Hotplug ports handled natively by the OS were not validated
 		 * by vendors for runtime D3 at least until 2018 because there
 		 * was no OS support.
 		 */
-		if (bridge->is_pciehp) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			return false; /* NVMe: 연산 결과를 반환한다. */
+		if (bridge->is_pciehp) /* [한국어] OS 가 직접 다루는 PCIe 핫플러그 포트는 — 벤더 검증이 없었다 */
+			return false; /* [한국어] 보수적으로 불가 */
 
-		if (dmi_check_system(bridge_d3_blacklist)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			return false; /* NVMe: 연산 결과를 반환한다. */
+		if (dmi_check_system(bridge_d3_blacklist)) /* [한국어] 알려진 문제 보드 목록에 걸리면 */
+			return false; /* [한국어] 불가 */
 
 		/*
 		 * Out of caution, we only allow PCIe ports from 2015 or newer
 		 * into D3 on x86.
 		 */
-		if (!IS_ENABLED(CONFIG_X86) || dmi_get_bios_year() >= 2015) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			return true; /* NVMe: 연산 결과를 반환한다. */
-		break; /* NVMe: 현재 반복문을 빠져나간다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+		if (!IS_ENABLED(CONFIG_X86) || dmi_get_bios_year() >= 2015) /* [한국어] x86 이 아니면 이 연도 제한을 적용하지 않고, x86 이면 BIOS 가 2015년 이후일 때만 */
+			return true; /* [한국어] 허용한다 */
+		break; /* [한국어] 연도 조건을 만족하지 못했으면 switch 를 빠져나가 아래에서 불가로 끝난다 */
+	}
 
-	return false; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return false; /* [한국어] 위 조건을 통과하지 못했거나 대상 포트 종류가 아니다 */
+}
 
 /*
- * pci_dev_check_d3cold:
- *   하위 장치들이 D3cold 를 지원하는지 확인한다. NVMe가 연결된 bridge 의 D3cold 진입 가능 여부에 영향을 준다.
+ * [한국어]
+ * pci_dev_check_d3cold - 장치 하나가 D3cold 를 막고 있는지 보는 pci_walk_bus 콜백.
+ *
+ * @dev: 검사할 장치.
+ * @data: bool 하나를 가리키는 포인터. 하나라도 막으면 false 로 내린다.
+ * @return: 0 이면 순회 계속, 0 이 아니면 순회 중단. 즉 !*d3cold_ok 를 돌려주어
+ *          "이미 불가로 판정됐으면 더 볼 것 없이 멈춰라"가 된다.
+ *
+ * 브리지를 D3cold 로 내리려면 그 아래 모든 장치가 전원 차단을 견뎌야 한다.
+ * 하나라도 반대하면 전체가 불가다. 반대 사유는 세 가지다.
+ *   - no_d3cold 또는 !d3cold_allowed: 드라이버나 사용자가 이 장치의 D3cold 를
+ *     막아 두었다.
+ *   - 깨우기 원천으로 설정돼 있는데 D3cold 에서는 PME 를 못 낸다: 전원을 끊으면
+ *     깨울 수 없게 되므로 안 된다.
+ *   - 전원 관리가 불가능하다: 상태를 다룰 수단이 없다.
+ *
+ * 값을 조기 반환으로 전파하는 구조라, 반대하는 장치를 하나 만나는 즉시
+ * 순회가 끝난다.
+ *
+ * 실행 문맥: pci_walk_bus 콜백. 잠들지 않는다.
+ *
+ * 호출 체인:
+ *   pci_bridge_d3_update() → pci_walk_bus() → [이 함수]
+ *     → pci_pme_capable(), pci_power_manageable()
  */
-static int pci_dev_check_d3cold(struct pci_dev *dev, void *data) /* NVMe: pci_dev_check_d3cold 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	bool *d3cold_ok = data; /* NVMe: 포인터 변수를 선언한다. */
+static int pci_dev_check_d3cold(struct pci_dev *dev, void *data)
+{
+	bool *d3cold_ok = data; /* [한국어] void * 로 넘어온 판정 결과 포인터 */
 
 	if (/* The device needs to be allowed to go D3cold ... */
-	    dev->no_d3cold || !dev->d3cold_allowed || /* NVMe: 표현식을 이어서 작성한다. */
+	    dev->no_d3cold || !dev->d3cold_allowed || /* [한국어] 드라이버나 사용자가 이 장치의 D3cold 를 막아 두었거나 */
 
 	    /* ... and if it is wakeup capable to do so from D3cold. */
-	    (device_may_wakeup(&dev->dev) && /* NVMe: 표현식을 이어서 작성한다. */
-	     !pci_pme_capable(dev, PCI_D3cold)) || /* NVMe: 표현식을 이어서 작성한다. */
+	    (device_may_wakeup(&dev->dev) && /* [한국어] 깨우기 원천으로 설정돼 있는데 */
+	     !pci_pme_capable(dev, PCI_D3cold)) || /* [한국어] D3cold 에서는 PME 를 낼 수 없거나 — 전원을 끊으면 깨울 수 없게 된다 */
 
 	    /* If it is a bridge it must be allowed to go to D3. */
-	    !pci_power_manageable(dev)) /* NVMe: 표현식을 평가한다. */
+	    !pci_power_manageable(dev)) /* [한국어] 전원 관리 자체가 불가능하면 */
 
-		*d3cold_ok = false;
+		*d3cold_ok = false; /* [한국어] 이 서브트리는 D3cold 로 내릴 수 없다 */
 
-	return !*d3cold_ok; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return !*d3cold_ok; /* [한국어] 불가로 판정됐으면 0 이 아닌 값이 되어 순회가 즉시 멈춘다 */
+}
 
 /*
  * pci_bridge_d3_update - Update bridge D3 capabilities
@@ -3502,25 +5829,48 @@ static int pci_dev_check_d3cold(struct pci_dev *dev, void *data) /* NVMe: pci_de
  * change is also propagated upstream.
  */
 /*
- * pci_bridge_d3_update:
- *   bridge 의 D3 허용 여부를 업데이트한다. NVMe 연결 bridge 의 전원 정책을 동적으로 조정한다.
+ * [한국어]
+ * pci_bridge_d3_update - 자식의 변화에 맞춰 상위 브리지의 D3 허용 여부를 다시 계산한다.
+ *
+ * @dev: 설정이 바뀌었거나 제거되는 장치.
+ * @return: 없음.
+ *
+ * 브리지의 D3 허용 여부는 아래 모든 장치의 사정에 달려 있다. 자식 하나가
+ * 추가·변경·제거될 때마다 다시 계산해야 한다. 계산 비용을 아끼려고 세 가지
+ * 지름길을 쓴다.
+ *
+ *   1) 제거인데 브리지가 이미 D3 허용 상태라면 다시 계산할 필요가 없다.
+ *      장치를 빼는 것은 제약을 없애는 방향이라 결과가 바뀔 수 없다.
+ *   2) 추가·변경이면 그 장치 하나만 먼저 본다. 이미 허용 상태였다면
+ *      불허로 바뀌는 원인은 방금 바뀐 그 장치뿐이기 때문이다.
+ *   3) 그래도 판정이 나지 않고 브리지가 현재 불허 상태라면, 형제들 중
+ *      누가 막고 있는지 알 수 없으므로 서브트리 전체를 훑는다.
+ *
+ * 결과가 달라졌으면 브리지의 플래그를 갱신하고 그 위쪽으로도 같은 계산을
+ * 재귀로 전파한다 — 손자의 변화가 할아버지 브리지의 판정까지 바꿀 수 있다.
+ *
+ * 실행 문맥: pci_walk_bus 를 부르므로 프로세스 문맥. 재귀 깊이는 계층 깊이만큼이다.
+ *
+ * 호출 체인:
+ *   pci_d3cold_enable(), pci_d3cold_disable(), 장치 추가·제거 경로
+ *     → [이 함수] → pci_dev_check_d3cold(), pci_walk_bus(), [이 함수](재귀)
  */
-void pci_bridge_d3_update(struct pci_dev *dev) /* NVMe: pci_bridge_d3_update 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	bool remove = !device_is_registered(&dev->dev); /* NVMe: 변수에 값을 할당한다. */
-	struct pci_dev *bridge; /* NVMe: 데이터 타입 변수를 선언한다. */
-	bool d3cold_ok = true; /* NVMe: bool 타입 변수를 선언한다. */
+void pci_bridge_d3_update(struct pci_dev *dev)
+{
+	bool remove = !device_is_registered(&dev->dev); /* [한국어] device_is_registered() 가 거짓이면 이 장치는 제거되는 중이다 */
+	struct pci_dev *bridge; /* [한국어] 다시 계산할 대상인 상위 브리지 */
+	bool d3cold_ok = true; /* [한국어] 낙관적으로 시작해, 반대하는 장치를 만나면 false 로 내린다 */
 
-	bridge = pci_upstream_bridge(dev); /* NVMe: 변수에 값을 할당한다. */
-	if (!bridge || !pci_bridge_d3_possible(bridge)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return; /* NVMe: 함수 실행을 종료한다. */
+	bridge = pci_upstream_bridge(dev); /* [한국어] 상위 브리지를 찾는다 */
+	if (!bridge || !pci_bridge_d3_possible(bridge)) /* [한국어] 루트 직결이거나 그 브리지가 애초에 D3 대상이 아니면 */
+		return; /* [한국어] 계산할 것이 없다 */
 
 	/*
 	 * If D3 is currently allowed for the bridge, removing one of its
 	 * children won't change that.
 	 */
-	if (remove && bridge->bridge_d3) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return; /* NVMe: 함수 실행을 종료한다. */
+	if (remove && bridge->bridge_d3) /* [한국어] 제거인데 이미 허용 상태라면 — 제약이 하나 사라지는 방향이라 결과가 바뀔 수 없다 */
+		return; /* [한국어] 다시 계산하지 않는다 */
 
 	/*
 	 * If D3 is currently allowed for the bridge and a child is added or
@@ -3530,8 +5880,8 @@ void pci_bridge_d3_update(struct pci_dev *dev) /* NVMe: pci_bridge_d3_update 함
 	 * If D3 is currently not allowed for the bridge, checking the device
 	 * first may allow us to skip checking its siblings.
 	 */
-	if (!remove) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pci_dev_check_d3cold(dev, &d3cold_ok); /* NVMe: pci_dev_check_d3cold 함수를 호출한다. */
+	if (!remove) /* [한국어] 추가·변경이면 */
+		pci_dev_check_d3cold(dev, &d3cold_ok); /* [한국어] 바뀐 장치 하나만 먼저 확인한다. 이것만으로 불허가 나면 형제를 훑을 필요가 없다 */
 
 	/*
 	 * If D3 is currently not allowed for the bridge, this may be caused
@@ -3539,16 +5889,16 @@ void pci_bridge_d3_update(struct pci_dev *dev) /* NVMe: pci_bridge_d3_update 함
 	 * so we need to go through all children to find out if one of them
 	 * continues to block D3.
 	 */
-	if (d3cold_ok && !bridge->bridge_d3) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pci_walk_bus(bridge->subordinate, pci_dev_check_d3cold, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-			     &d3cold_ok); /* NVMe: 비트 연산을 수행한다. */
+	if (d3cold_ok && !bridge->bridge_d3) /* [한국어] 그 장치는 문제없는데 브리지가 아직 불허 상태라면, 다른 형제가 막고 있는지 확인해야 한다 */
+		pci_walk_bus(bridge->subordinate, pci_dev_check_d3cold, /* [한국어] 서브트리 전체를 훑는다. 콜백이 0 이 아닌 값을 돌려주면 그 지점에서 순회가 멈춘다 */
+			     &d3cold_ok); /* [한국어] 판정 결과를 받을 변수의 주소 */
 
-	if (bridge->bridge_d3 != d3cold_ok) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		bridge->bridge_d3 = d3cold_ok; /* NVMe: 변수에 값을 할당한다. */
+	if (bridge->bridge_d3 != d3cold_ok) { /* [한국어] 계산 결과가 지금 값과 다르면 */
+		bridge->bridge_d3 = d3cold_ok; /* [한국어] 브리지의 플래그를 갱신하고 */
 		/* Propagate change to upstream bridges */
-		pci_bridge_d3_update(bridge); /* NVMe: bridge D3 상태를 업데이트한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+		pci_bridge_d3_update(bridge); /* [한국어] 위쪽 브리지에도 같은 계산을 전파한다. 손자의 변화가 할아버지의 판정까지 바꿀 수 있다 */
+	}
+}
 
 /**
  * pci_d3cold_enable - Enable D3cold for device
@@ -3559,16 +5909,31 @@ void pci_bridge_d3_update(struct pci_dev *dev) /* NVMe: pci_bridge_d3_update 함
  * accordingly.
  */
 /*
- * pci_d3cold_enable:
- *   D3cold 상태 진입을 허용한다. NVMe 장치가 완전 전원 차단 상태로 들어갈 수 있게 한다.
+ * [한국어]
+ * pci_d3cold_enable - 이 장치의 D3cold 진입 금지를 푼다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @return: 없음.
+ *
+ * 드라이버가 "이제 이 장치는 전원이 끊겨도 괜찮다"고 알리는 창구다.
+ * 플래그를 바꾸는 것만으로는 부족하다 — 상위 브리지의 D3 허용 여부가
+ * 이 장치의 사정에 달려 있었을 수 있으므로 그것도 다시 계산해야 한다.
+ *
+ * 이미 허용 상태면 아무 것도 하지 않는다. 불필요한 재계산과 재귀 전파를
+ * 피하기 위해서다.
+ *
+ * 실행 문맥: pci_bridge_d3_update() 가 버스를 순회한다. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   각 드라이버 → [이 함수] → pci_bridge_d3_update()
  */
-void pci_d3cold_enable(struct pci_dev *dev) /* NVMe: pci_d3cold_enable 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	if (dev->no_d3cold) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		dev->no_d3cold = false; /* NVMe: 변수에 값을 할당한다. */
-		pci_bridge_d3_update(dev); /* NVMe: bridge D3 상태를 업데이트한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+void pci_d3cold_enable(struct pci_dev *dev)
+{
+	if (dev->no_d3cold) { /* [한국어] 지금 금지돼 있을 때만 손댄다 */
+		dev->no_d3cold = false; /* [한국어] 금지를 푼다 */
+		pci_bridge_d3_update(dev); /* [한국어] 이 변화가 상위 브리지의 판정을 바꿀 수 있으므로 다시 계산한다 */
+	}
+}
 EXPORT_SYMBOL_GPL(pci_d3cold_enable);
 
 /**
@@ -3580,102 +5945,165 @@ EXPORT_SYMBOL_GPL(pci_d3cold_enable);
  * accordingly.
  */
 /*
- * pci_d3cold_disable:
- *   D3cold 상태 진입을 금지한다. NVMe 장치가 D3hot 이하로만 저전원 상태로 진입하도록 제한한다.
+ * [한국어]
+ * pci_d3cold_disable - 이 장치의 D3cold 진입을 금지한다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @return: 없음.
+ *
+ * pci_d3cold_enable() 의 짝이다. 전원이 끊기면 곤란한 상태(예: 장치가
+ * 유지해야 할 컨텍스트가 있는 동안)에서 드라이버가 부른다.
+ * 이 장치가 막으면 상위 브리지도 D3cold 로 갈 수 없으므로 그 판정을 다시
+ * 계산해 위로 전파한다.
+ *
+ * 실행 문맥: 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   각 드라이버 → [이 함수] → pci_bridge_d3_update()
  */
-void pci_d3cold_disable(struct pci_dev *dev) /* NVMe: pci_d3cold_disable 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	if (!dev->no_d3cold) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		dev->no_d3cold = true; /* NVMe: 변수에 값을 할당한다. */
-		pci_bridge_d3_update(dev); /* NVMe: bridge D3 상태를 업데이트한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+void pci_d3cold_disable(struct pci_dev *dev)
+{
+	if (!dev->no_d3cold) { /* [한국어] 지금 허용돼 있을 때만 손댄다 */
+		dev->no_d3cold = true; /* [한국어] 금지 플래그를 세운다 */
+		pci_bridge_d3_update(dev); /* [한국어] 상위 브리지의 판정을 다시 계산한다 */
+	}
+}
 EXPORT_SYMBOL_GPL(pci_d3cold_disable);
 
 /*
- * pci_pm_power_up_and_verify_state:
- *   전원을 켜고 상태를 검증한다. NVMe resume/reset 후 controller 가 D0 에 있는지 확인한다.
+ * [한국어]
+ * pci_pm_power_up_and_verify_state - D0 로 올린 뒤 실제 상태를 다시 읽어 캐시를 맞춘다.
+ *
+ * @pci_dev: 대상 PCI 장치.
+ * @return: 없음. pci_power_up() 의 반환값을 일부러 무시한다.
+ *
+ * pci_power_up() 이 실패하더라도 그 뒤의 pci_update_current_state() 가
+ * 실물을 읽어 정확한 상태를 기록한다. 즉 "올릴 수 있으면 올리고, 어쨌든
+ * 캐시는 실제와 맞춘다"가 이 함수의 계약이다. 그래서 반환값이 없다.
+ *
+ * 두 번째 인자 PCI_D0 는 PM capability 가 없어 읽을 방법이 없을 때만 쓰이는
+ * 대체값이다. 그런 장치는 늘 켜져 있으므로 D0 로 기록하는 것이 맞다.
+ *
+ * 실행 문맥: 전원 전이 지연 동안 잠들 수 있다. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci-driver.c 의 resume 경로 → [이 함수]
+ *     → pci_power_up(), pci_update_current_state()
  */
-void pci_pm_power_up_and_verify_state(struct pci_dev *pci_dev) /* NVMe: pci_pm_power_up_and_verify_state 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	pci_power_up(pci_dev); /* NVMe: 장치를 D0 로 깨운다. */
-	pci_update_current_state(pci_dev, PCI_D0); /* NVMe: pci_update_current_state 함수를 호출한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+void pci_pm_power_up_and_verify_state(struct pci_dev *pci_dev)
+{
+	pci_power_up(pci_dev); /* [한국어] D0 로 올린다. 반환값은 일부러 무시한다 — 실패해도 아래에서 실제 상태를 읽어 맞춘다 */
+	pci_update_current_state(pci_dev, PCI_D0); /* [한국어] 실물을 읽어 캐시를 갱신한다. PCI_D0 는 PM capability 가 없을 때만 쓰이는 대체값이다 */
+}
 
 /**
  * pci_pm_init - Initialize PM functions of given PCI device
  * @dev: PCI device to handle.
  */
 /*
- * pci_pm_init:
- *   pci_dev 의 전원 관리 관련 필드를 초기화한다. NVMe pci_dev 등록 시 D-state/PME/wake-up 설정의 기반을 마련한다.
+ * [한국어]
+ * pci_pm_init - 열거 중 이 장치의 전원 관리 능력을 조사해 pci_dev 에 기록한다.
+ *
+ * @dev: 막 열거된 PCI 장치.
+ * @return: 없음.
+ *
+ * PM capability(config space 안의 ID 0x01 구조체)를 찾아 그 안의 PMC
+ * (Power Management Capabilities) 레지스터를 읽고, 이후 모든 전원 관리
+ * 판단의 근거가 되는 필드들을 채운다.
+ *   - dev->pm_cap: PM capability 의 오프셋. 이후 PMCSR 접근이 모두 이 값 기준이다.
+ *     0 이면 "PCI PM 을 쓸 수 없는 장치"를 뜻한다.
+ *   - dev->d1_support / d2_support: 선택 상태인 D1/D2 의 지원 여부.
+ *   - dev->pme_support: 어느 D-state 에서 PME 를 낼 수 있는지의 비트맵.
+ *   - dev->d3hot_delay / d3cold_delay: 전이 후 지켜야 할 기본 대기 시간.
+ *   - dev->bridge_d3: 이 장치가 브리지라면 D3 로 내릴 수 있는지.
+ *
+ * PMC 버전 검사가 앞에 있다. 이 코드가 아는 것은 버전 3까지이며, 그보다
+ * 높으면 레지스터 배치를 신뢰할 수 없어 PM capability 자체를 없는 것으로
+ * 취급하고 poweron 으로 건너뛴다.
+ *
+ * 마지막의 세 호출이 초기 상태를 정한다.
+ *   - pci_pm_power_up_and_verify_state(): 일단 D0 로 올려 놓는다. 부팅 시
+ *     펌웨어가 장치를 D3hot 에 둔 채 넘기는 경우가 있기 때문이다.
+ *   - pm_runtime_forbid(): 런타임 절전을 기본적으로 막는다. 사용자가
+ *     sysfs 의 power/control 로 열어 주어야 켜진다.
+ *   - pm_runtime_set_active(): 원본 주석대로, 아직 런타임 PM 을 켜지 않았어도
+ *     부모와 공급자가 그 사이 잠들어 버리지 않도록 "동작 중"으로 표시해 둔다.
+ *
+ * PME 를 발견하면 device_set_wakeup_capable() 로 능력만 알리고 실제 PME 는
+ * 꺼 둔다 — 원본 주석대로 켜는 판단은 사용자 공간에 맡긴다.
+ *
+ * 실행 문맥: 열거 중 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   probe.c 의 pci_device_add() → [이 함수]
+ *     → pci_find_capability(), pci_bridge_d3_possible(), pci_pme_active()
  */
-void pci_pm_init(struct pci_dev *dev) /* NVMe: pci_pm_init 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	int pm; /* NVMe: int 타입 변수를 선언한다. */
-	u16 pmc; /* NVMe: u16 타입 변수를 선언한다. */
+void pci_pm_init(struct pci_dev *dev)
+{
+	int pm; /* [한국어] PM capability 의 오프셋 */
+	u16 pmc; /* [한국어] PMC(Power Management Capabilities) 레지스터 값 */
 
-	device_enable_async_suspend(&dev->dev); /* NVMe: device_enable_async_suspend 함수를 호출한다. */
-	dev->wakeup_prepared = false; /* NVMe: 변수에 값을 할당한다. */
+	device_enable_async_suspend(&dev->dev); /* [한국어] 이 장치의 suspend/resume 을 다른 장치와 병렬로 처리해도 된다고 알린다. 절전 진입·복귀 시간이 줄어든다 */
+	dev->wakeup_prepared = false; /* [한국어] 아직 깨우기 설정을 하지 않았다 */
 
-	dev->pm_cap = 0; /* NVMe: 변수에 값을 할당한다. */
-	dev->pme_support = 0; /* NVMe: 변수에 값을 할당한다. */
+	dev->pm_cap = 0; /* [한국어] PM capability 를 못 찾을 경우를 대비해 0 으로 초기화한다. 0 은 "PCI PM 불가"를 뜻한다 */
+	dev->pme_support = 0; /* [한국어] PME 지원 비트맵도 비워 둔다 */
 
 	/* find PCI PM capability in list */
-	pm = pci_find_capability(dev, PCI_CAP_ID_PM); /* NVMe: 변수에 값을 할당한다. */
-	if (!pm) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		goto poweron; /* NVMe: 지정한 레이블로 제어를 이동한다. */
+	pm = pci_find_capability(dev, PCI_CAP_ID_PM); /* [한국어] 표준 capability 리스트에서 PM(ID 0x01)을 찾는다 */
+	if (!pm) /* [한국어] 없으면 이 장치는 PCI PM 을 쓸 수 없다 */
+		goto poweron; /* [한국어] 조사할 것이 없으니 전원만 켜고 끝낸다 */
 	/* Check device's ability to generate PME# */
-	pci_read_config_word(dev, pm + PCI_PM_PMC, &pmc); /* NVMe: PCI 설정 공간 2바이트를 읽는다. */
+	pci_read_config_word(dev, pm + PCI_PM_PMC, &pmc); /* [한국어] PM capability 시작 + PCI_PM_PMC(2) 위치의 PMC 레지스터를 읽는다 */
 
-	if ((pmc & PCI_PM_CAP_VER_MASK) > 3) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pci_err(dev, "unsupported PM cap regs version (%u)\n", /* NVMe: PCI 장치에 대한 에러 로그를 출력한다. */
-			pmc & PCI_PM_CAP_VER_MASK); /* NVMe: 비트 연산을 수행한다. */
-		goto poweron; /* NVMe: 지정한 레이블로 제어를 이동한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+	if ((pmc & PCI_PM_CAP_VER_MASK) > 3) { /* [한국어] PMC 하위 3비트가 규격 버전이다. 이 코드는 3까지만 안다 */
+		pci_err(dev, "unsupported PM cap regs version (%u)\n", /* [한국어] 모르는 버전은 레지스터 배치를 신뢰할 수 없다 */
+			pmc & PCI_PM_CAP_VER_MASK); /* [한국어] 몇 번 버전인지 남긴다 */
+		goto poweron; /* [한국어] PM capability 가 없는 것처럼 취급하고 건너뛴다 */
+	}
 
-	dev->pm_cap = pm; /* NVMe: 변수에 값을 할당한다. */
-	dev->d3hot_delay = PCI_PM_D3HOT_WAIT; /* NVMe: 변수에 값을 할당한다. */
-	dev->d3cold_delay = PCI_PM_D3COLD_WAIT; /* NVMe: 변수에 값을 할당한다. */
-	dev->bridge_d3 = pci_bridge_d3_possible(dev); /* NVMe: 변수에 값을 할당한다. */
-	dev->d3cold_allowed = true; /* NVMe: 변수에 값을 할당한다. */
+	dev->pm_cap = pm; /* [한국어] 이제부터 이 값이 PMCSR 접근의 기준점이 된다. 0 이 아니면 "PCI PM 가능"의 표식이기도 하다 */
+	dev->d3hot_delay = PCI_PM_D3HOT_WAIT; /* [한국어] D3hot 을 드나든 뒤 지켜야 할 기본 대기(ms). quirk 가 장치별로 늘릴 수 있다 */
+	dev->d3cold_delay = PCI_PM_D3COLD_WAIT; /* [한국어] D3cold 에서 돌아온 뒤의 기본 대기(ms). 전원이 다시 들어오는 것이라 더 길다 */
+	dev->bridge_d3 = pci_bridge_d3_possible(dev); /* [한국어] 브리지라면 D3 로 내릴 수 있는지 지금 한 번 계산해 둔다. 이 판정은 수명 내내 바뀌지 않는다 */
+	dev->d3cold_allowed = true; /* [한국어] 기본적으로 D3cold 를 허용한다. 드라이버가 pci_d3cold_disable() 로 막을 수 있다 */
 
-	dev->d1_support = false; /* NVMe: 변수에 값을 할당한다. */
-	dev->d2_support = false; /* NVMe: 변수에 값을 할당한다. */
-	if (!pci_no_d1d2(dev)) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		if (pmc & PCI_PM_CAP_D1) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			dev->d1_support = true; /* NVMe: 변수에 값을 할당한다. */
-		if (pmc & PCI_PM_CAP_D2) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			dev->d2_support = true; /* NVMe: 변수에 값을 할당한다. */
+	dev->d1_support = false; /* [한국어] D1 은 선택 상태라 기본은 미지원 */
+	dev->d2_support = false; /* [한국어] D2 도 마찬가지 */
+	if (!pci_no_d1d2(dev)) { /* [한국어] 장치나 상위 브리지에 D1/D2 금지 quirk 가 없을 때만 조사한다 */
+		if (pmc & PCI_PM_CAP_D1) /* [한국어] PMC 의 D1 지원 비트 */
+			dev->d1_support = true; /* [한국어] 지원 표시 */
+		if (pmc & PCI_PM_CAP_D2) /* [한국어] PMC 의 D2 지원 비트 */
+			dev->d2_support = true; /* [한국어] 지원 표시 */
 
-		if (dev->d1_support || dev->d2_support) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			pci_info(dev, "supports%s%s\n", /* NVMe: PCI 장치에 대한 정보 로그를 출력한다. */
-				   dev->d1_support ? " D1" : "", /* NVMe: 표현식을 이어서 작성한다. */
-				   dev->d2_support ? " D2" : ""); /* NVMe: 구조체 멤버에 접근한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+		if (dev->d1_support || dev->d2_support) /* [한국어] 둘 중 하나라도 지원하면 */
+			pci_info(dev, "supports%s%s\n", /* [한국어] 어느 것을 지원하는지 로그에 남긴다 */
+				   dev->d1_support ? " D1" : "", /* [한국어] D1 지원 여부에 따라 문자열을 붙이거나 뺀다 */
+				   dev->d2_support ? " D2" : ""); /* [한국어] D2 도 같은 방식 */
+	}
 
-	pmc &= PCI_PM_CAP_PME_MASK; /* NVMe: 변수에 값을 할당한다. */
-	if (pmc) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pci_info(dev, "PME# supported from%s%s%s%s%s\n", /* NVMe: PCI 장치에 대한 정보 로그를 출력한다. */
-			 (pmc & PCI_PM_CAP_PME_D0) ? " D0" : "", /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-			 (pmc & PCI_PM_CAP_PME_D1) ? " D1" : "", /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-			 (pmc & PCI_PM_CAP_PME_D2) ? " D2" : "", /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-			 (pmc & PCI_PM_CAP_PME_D3hot) ? " D3hot" : "", /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-			 (pmc & PCI_PM_CAP_PME_D3cold) ? " D3cold" : ""); /* NVMe: 비트 연산을 수행한다. */
-		dev->pme_support = FIELD_GET(PCI_PM_CAP_PME_MASK, pmc); /* NVMe: 변수에 값을 할당한다. */
-		dev->pme_poll = true; /* NVMe: 변수에 값을 할당한다. */
+	pmc &= PCI_PM_CAP_PME_MASK; /* [한국어] PMC 상위 5비트가 "어느 D-state 에서 PME 를 낼 수 있는가"의 비트맵이다 */
+	if (pmc) { /* [한국어] 하나라도 낼 수 있으면 */
+		pci_info(dev, "PME# supported from%s%s%s%s%s\n", /* [한국어] 어느 상태에서 가능한지 로그에 남긴다 */
+			 (pmc & PCI_PM_CAP_PME_D0) ? " D0" : "", /* [한국어] D0 에서 PME 가능 */
+			 (pmc & PCI_PM_CAP_PME_D1) ? " D1" : "", /* [한국어] D1 에서 PME 가능 */
+			 (pmc & PCI_PM_CAP_PME_D2) ? " D2" : "", /* [한국어] D2 에서 PME 가능 */
+			 (pmc & PCI_PM_CAP_PME_D3hot) ? " D3hot" : "", /* [한국어] D3hot 에서 PME 가능 */
+			 (pmc & PCI_PM_CAP_PME_D3cold) ? " D3cold" : ""); /* [한국어] D3cold 에서 PME 가능 — 전원이 끊긴 상태에서도 보조 전원으로 신호를 낸다 */
+		dev->pme_support = FIELD_GET(PCI_PM_CAP_PME_MASK, pmc); /* [한국어] 마스크를 제자리로 시프트해 비트 위치가 곧 D-state 번호가 되게 만든다. pci_pme_capable() 이 이 형태를 전제로 조회한다 */
+		dev->pme_poll = true; /* [한국어] 기본적으로 폴링 대상으로 표시한다. PME 신호를 제대로 내지 않는 하드웨어가 많아 보수적으로 켜 두고, 실제 인터럽트를 받으면 그때 내린다 */
 		/*
 		 * Make device's PM flags reflect the wake-up capability, but
 		 * let the user space enable it to wake up the system as needed.
 		 */
-		device_set_wakeup_capable(&dev->dev, true); /* NVMe: device_set_wakeup_capable 함수를 호출한다. */
+		device_set_wakeup_capable(&dev->dev, true); /* [한국어] "이 장치는 깨울 능력이 있다"고 드라이버 모델에 알린다. 실제 허용 여부는 사용자 공간이 정한다 */
 		/* Disable the PME# generation functionality */
-		pci_pme_active(dev, false); /* NVMe: pci_pme_active 함수를 호출한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+		pci_pme_active(dev, false); /* [한국어] 능력만 알리고 실제 PME 발생은 꺼 둔다 — 쓰지도 않을 깨우기로 시스템이 깨어나지 않게 */
+	}
 
-poweron: /* NVMe: 레이블을 정의한다. */
-	pci_pm_power_up_and_verify_state(dev); /* NVMe: 전원을 켜고 상태를 검증한다. */
-	pm_runtime_forbid(&dev->dev); /* NVMe: pm_runtime_forbid 함수를 호출한다. */
+poweron: /* [한국어] PM capability 가 없거나 버전이 맞지 않아 조사를 건너뛴 경우도 여기로 온다 */
+	pci_pm_power_up_and_verify_state(dev); /* [한국어] 일단 D0 로 올리고 실제 상태를 확인한다. 펌웨어가 장치를 D3hot 에 둔 채 넘기는 경우가 있다 */
+	pm_runtime_forbid(&dev->dev); /* [한국어] 런타임 절전을 기본적으로 금지한다. sysfs 의 power/control 로 사용자가 열어 주어야 켜진다 */
 
 	/*
 	 * Runtime PM will be enabled for the device when it has been fully
@@ -3683,219 +6111,334 @@ poweron: /* NVMe: 레이블을 정의한다. */
 	 * the meantime, prevent them from doing so by changing the
 	 * device's runtime PM status to "active".
 	 */
-	pm_runtime_set_active(&dev->dev); /* NVMe: pm_runtime_set_active 함수를 호출한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	pm_runtime_set_active(&dev->dev); /* [한국어] 런타임 PM 을 아직 켜지 않았더라도 "동작 중"으로 표시해 둔다. 그러지 않으면 부모나 공급자가 그 사이 잠들어 버릴 수 있다 */
+}
 
 /*
- * pci_ea_flags:
- *   Enhanced Allocation capability 의 속성 플래그를 해석한다. NVMe BAR 할당 방식(가변/고정 등)을 판단하는 데 참조될 수 있다.
+ * [한국어]
+ * pci_ea_flags - EA 엔트리의 Property 값을 resource 플래그로 옮긴다.
+ *
+ * @dev: 대상 PCI 장치(현재 구현은 쓰지 않지만 시그니처를 맞춰 둔다).
+ * @prop: EA 엔트리의 Property 필드 값.
+ * @return: IORESOURCE_* 플래그 조합. 알 수 없는 Property 면 0.
+ *
+ * EA(Enhanced Allocation)는 BAR 대신 쓰는 자원 기술 방식이다. 보통의 BAR 는
+ * "전부 1 을 쓰고 되읽어" 크기를 알아내고 커널이 주소를 배정하지만, EA 는
+ * 주소와 크기를 config space 에 직접 적어 둔다. 재배치가 불가능한 대신
+ * 크기 탐색이 필요 없다. 그래서 반환 플래그에 IORESOURCE_PCI_FIXED 가 항상
+ * 들어간다 — "이 자원은 옮길 수 없다"는 뜻이며, 자원 재배정 코드가 이 표시를
+ * 보고 건드리지 않는다.
+ *
+ * IORESOURCE_PCI_EA_BEI 는 "이 자원의 출처가 EA 다"라는 표식이다.
+ *
+ * Property 값이 자원의 종류를 정한다 — 메모리인지 IO 인지, prefetchable 인지,
+ * PF 용인지 VF 용인지. 정의되지 않은 값에는 0 을 돌려주어 호출자가 그
+ * 엔트리를 버리게 한다.
+ *
+ * 실행 문맥: 값 변환뿐이라 어느 문맥에서도 안전하다.
+ *
+ * 호출 체인:
+ *   pci_ea_read() → [이 함수]
  */
-static unsigned long pci_ea_flags(struct pci_dev *dev, u8 prop) /* NVMe: pci_ea_flags 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	unsigned long flags = IORESOURCE_PCI_FIXED | IORESOURCE_PCI_EA_BEI; /* NVMe: unsigned 타입 변수를 선언한다. */
+static unsigned long pci_ea_flags(struct pci_dev *dev, u8 prop)
+{
+	unsigned long flags = IORESOURCE_PCI_FIXED | IORESOURCE_PCI_EA_BEI; /* [한국어] 모든 EA 자원에 공통인 두 표식 — 재배치 불가(FIXED)와 EA 출처(EA_BEI) */
 
-	switch (prop) { /* NVMe: 다중 분기를 위한 switch 문을 시작한다. */
-	case PCI_EA_P_MEM: /* NVMe: switch 의 case 레이블이다. */
-	case PCI_EA_P_VF_MEM: /* NVMe: switch 의 case 레이블이다. */
-		flags |= IORESOURCE_MEM; /* NVMe: 변수에 값을 할당한다. */
-		break; /* NVMe: 현재 반복문을 빠져나간다. */
-	case PCI_EA_P_MEM_PREFETCH: /* NVMe: switch 의 case 레이블이다. */
-	case PCI_EA_P_VF_MEM_PREFETCH: /* NVMe: switch 의 case 레이블이다. */
-		flags |= IORESOURCE_MEM | IORESOURCE_PREFETCH; /* NVMe: 변수에 값을 할당한다. */
-		break; /* NVMe: 현재 반복문을 빠져나간다. */
-	case PCI_EA_P_IO: /* NVMe: switch 의 case 레이블이다. */
-		flags |= IORESOURCE_IO; /* NVMe: 변수에 값을 할당한다. */
-		break; /* NVMe: 현재 반복문을 빠져나간다. */
-	default: /* NVMe: switch 의 기본 처리 레이블이다. */
-		return 0; /* NVMe: 성공(0)을 반환한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+	switch (prop) { /* [한국어] Property 값에 따라 자원의 종류가 갈린다 */
+	case PCI_EA_P_MEM: /* [한국어] 일반 함수용 non-prefetchable 메모리 */
+	case PCI_EA_P_VF_MEM: /* [한국어] VF 용 non-prefetchable 메모리 */
+		flags |= IORESOURCE_MEM; /* [한국어] 메모리 공간으로 표시한다 */
+		break; /* [한국어] 분기 종료 */
+	case PCI_EA_P_MEM_PREFETCH: /* [한국어] 일반 함수용 prefetchable 메모리 */
+	case PCI_EA_P_VF_MEM_PREFETCH: /* [한국어] VF 용 prefetchable 메모리 */
+		flags |= IORESOURCE_MEM | IORESOURCE_PREFETCH; /* [한국어] prefetchable 표시를 함께 세운다 — 읽기에 부작용이 없어 브리지가 미리 읽어도 되는 영역이다 */
+		break; /* [한국어] 분기 종료 */
+	case PCI_EA_P_IO: /* [한국어] IO 공간 */
+		flags |= IORESOURCE_IO; /* [한국어] IO 공간으로 표시한다 */
+		break; /* [한국어] 분기 종료 */
+	default: /* [한국어] 정의되지 않았거나 이 코드가 다루지 않는 Property */
+		return 0; /* [한국어] 0 을 돌려 호출자가 이 엔트리를 버리게 한다 */
+	}
 
-	return flags; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return flags; /* [한국어] 완성된 플래그 조합 */
+}
 
-static struct resource *pci_ea_get_resource(struct pci_dev *dev, u8 bei, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-					    u8 prop) /* NVMe: u8 타입 변수를 선언한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	if (bei <= PCI_EA_BEI_BAR5 && prop <= PCI_EA_P_IO) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return &dev->resource[bei]; /* NVMe: 연산 결과를 반환한다. */
-#ifdef CONFIG_PCI_IOV /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
-	else if (bei >= PCI_EA_BEI_VF_BAR0 && bei <= PCI_EA_BEI_VF_BAR5 && /* NVMe: 이전 조건이 거짓일 때 추가 조건을 검사한다. */
-		 (prop == PCI_EA_P_VF_MEM || prop == PCI_EA_P_VF_MEM_PREFETCH)) /* NVMe: 비트 연산을 수행한다. */
-		return &dev->resource[PCI_IOV_RESOURCES + /* NVMe: 표현식을 이어서 작성한다. */
-				      bei - PCI_EA_BEI_VF_BAR0]; /* NVMe: 표현식을 평가한다. */
-#endif /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
-	else if (bei == PCI_EA_BEI_ROM) /* NVMe: 이전 조건이 거짓일 때 추가 조건을 검사한다. */
-		return &dev->resource[PCI_ROM_RESOURCE]; /* NVMe: 연산 결과를 반환한다. */
-	else /* NVMe: 이전 조건이 모두 거짓일 때 실행한다. */
-		return NULL; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+/*
+ * [한국어]
+ * pci_ea_get_resource - EA 엔트리의 BEI 값이 가리키는 resource 슬롯을 찾는다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @bei: BAR Equivalent Indicator — 이 엔트리가 어느 BAR 에 해당하는지를 나타내는 번호.
+ * @prop: EA 엔트리의 Property. VF 자원인지 확인하는 데 함께 쓴다.
+ * @return: dev->resource[] 안의 해당 슬롯, 대응하는 것이 없으면 NULL.
+ *
+ * BEI 는 EA 가 쓰는 자체 번호 체계라 pci_dev->resource[] 의 인덱스와 다르다.
+ * 그 사이를 옮기는 것이 이 함수의 일이다.
+ *   - BEI 0~5 → 표준 BAR 0~5. 인덱스가 그대로 같다.
+ *   - BEI 9~14(VF BAR 0~5) → PCI_IOV_RESOURCES 부터 시작하는 구간.
+ *     CONFIG_PCI_IOV 를 껐다면 그 슬롯이 없으므로 갈래 자체가 컴파일되지 않는다.
+ *   - BEI ROM → PCI_ROM_RESOURCE.
+ *   - 그 밖(브리지 윈도 등)은 이 코드가 다루지 않아 NULL.
+ *
+ * Property 를 함께 보는 이유는 일관성 검사다. VF BAR 를 가리키는 BEI 인데
+ * Property 가 VF 용이 아니면 앞뒤가 맞지 않는 엔트리이므로 받아들이지 않는다.
+ *
+ * 실행 문맥: 배열 인덱싱뿐이다.
+ *
+ * 호출 체인:
+ *   pci_ea_read() → [이 함수]
+ */
+static struct resource *pci_ea_get_resource(struct pci_dev *dev, u8 bei,
+					    u8 prop)
+{
+	if (bei <= PCI_EA_BEI_BAR5 && prop <= PCI_EA_P_IO) /* [한국어] BEI 가 표준 BAR 범위이고 Property 도 일반 함수용이면 */
+		return &dev->resource[bei]; /* [한국어] 인덱스가 그대로 대응한다 */
+#ifdef CONFIG_PCI_IOV /* [한국어] VF BAR 슬롯은 SR-IOV 를 빌드했을 때만 존재한다 */
+	else if (bei >= PCI_EA_BEI_VF_BAR0 && bei <= PCI_EA_BEI_VF_BAR5 && /* [한국어] BEI 가 VF BAR 범위이고 */
+		 (prop == PCI_EA_P_VF_MEM || prop == PCI_EA_P_VF_MEM_PREFETCH)) /* [한국어] Property 도 VF 용이어야 앞뒤가 맞는 엔트리다 */
+		return &dev->resource[PCI_IOV_RESOURCES + /* [한국어] VF 자원 구간의 시작에서 */
+				      bei - PCI_EA_BEI_VF_BAR0]; /* [한국어] BEI 의 상대 위치만큼 떨어진 슬롯이다 */
+#endif /* [한국어] SR-IOV 갈래의 끝 */
+	else if (bei == PCI_EA_BEI_ROM) /* [한국어] Expansion ROM 을 가리키는 BEI 면 */
+		return &dev->resource[PCI_ROM_RESOURCE]; /* [한국어] ROM 전용 슬롯을 준다 */
+	else /* [한국어] 그 밖의 BEI(브리지 윈도 등)는 */
+		return NULL; /* [한국어] 이 코드가 다루지 않는다 */
+}
 
 /* Read an Enhanced Allocation (EA) entry */
 /*
- * pci_ea_read:
- *   Enhanced Allocation entry 를 읽어 resource 정보를 채운다. NVMe BAR/리소스 초기화 시 EA 기반 할당 정보를 얻는다.
+ * [한국어]
+ * pci_ea_read - EA 엔트리 하나를 읽어 대응하는 resource 를 채운다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @offset: 이 엔트리가 시작하는 config space 오프셋.
+ * @return: 다음 엔트리의 오프셋(= offset + 이 엔트리의 크기).
+ *
+ * EA 엔트리는 가변 길이다. 첫 DWORD 의 Entry Size 필드가 "첫 DWORD 이후
+ * 몇 개가 더 있는지"를 말해 주므로, 실제 크기는 (ES + 1) * 4 바이트다.
+ * 오류가 나든 성공하든 이 크기만큼 건너뛴 오프셋을 돌려주어야 다음 엔트리를
+ * 제대로 읽을 수 있다. 그래서 모든 오류 경로가 out 레이블로 모인다.
+ *
+ * 엔트리는 최대 다섯 DWORD 로 이뤄진다.
+ *   [0] 헤더 — Entry Size, BEI, Property, Secondary Property, Enable 비트
+ *   [1] Base 하위 32비트. 최하위 비트가 "64비트 엔트리인가"의 표시다.
+ *   [2] MaxOffset 하위 32비트. 역시 최하위 비트가 64비트 표시다.
+ *   [3] Base 상위 32비트 (64비트일 때만)
+ *   [4] MaxOffset 상위 32비트 (64비트일 때만)
+ *
+ * 주소 계산에 두 가지 요령이 있다.
+ *   - Base 와 MaxOffset 의 하위 2비트는 값이 아니라 플래그 자리이므로
+ *     PCI_EA_FIELD_MASK 로 걸러낸다.
+ *   - end = start + (max_offset | 0x03) 에서 | 0x03 은 걸러낸 하위 2비트를
+ *     다시 1 로 채우는 것이다. EA 의 구간은 항상 DWORD 단위이므로 마지막
+ *     주소는 반드시 ...11 로 끝난다.
+ *
+ * 32비트 아키텍처(resource_size_t 가 4바이트)에서 상위 32비트가 0 이 아닌
+ * 엔트리는 표현할 수 없어 버린다.
+ *
+ * 실행 문맥: config space 를 여러 번 읽는다. 열거 중 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_ea_init() → [이 함수] → pci_ea_get_resource(), pci_ea_flags()
  */
-static int pci_ea_read(struct pci_dev *dev, int offset) /* NVMe: pci_ea_read 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	struct resource *res; /* NVMe: 데이터 타입 변수를 선언한다. */
-	const char *res_name; /* NVMe: 포인터 변수를 선언한다. */
-	int ent_size, ent_offset = offset; /* NVMe: int 타입 변수를 선언한다. */
-	resource_size_t start, end; /* NVMe: resource_size_t 타입 변수를 선언한다. */
-	unsigned long flags; /* NVMe: unsigned 타입 변수를 선언한다. */
-	u32 dw0, bei, base, max_offset; /* NVMe: u32 타입 변수를 선언한다. */
-	u8 prop; /* NVMe: u8 타입 변수를 선언한다. */
-	bool support_64 = (sizeof(resource_size_t) >= 8); /* NVMe: 변수에 값을 할당한다. */
+static int pci_ea_read(struct pci_dev *dev, int offset)
+{
+	struct resource *res; /* [한국어] 채울 대상 resource 슬롯 */
+	const char *res_name; /* [한국어] 로그에 쓸 자원 이름("BAR 0" 등) */
+	int ent_size, ent_offset = offset; /* [한국어] ent_size 는 이 엔트리의 총 바이트 수, ent_offset 은 지금까지 읽은 위치 */
+	resource_size_t start, end; /* [한국어] 계산해 낼 주소 구간 */
+	unsigned long flags; /* [한국어] resource 에 넣을 IORESOURCE_* 플래그 */
+	u32 dw0, bei, base, max_offset; /* [한국어] dw0 은 헤더, 나머지는 헤더에서 뽑아낸 필드와 주소 값 */
+	u8 prop; /* [한국어] Property 필드 */
+	bool support_64 = (sizeof(resource_size_t) >= 8); /* [한국어] 이 아키텍처의 resource_size_t 가 64비트를 담을 수 있는가 — 32비트라면 상위 주소를 표현할 수 없다 */
 
-	pci_read_config_dword(dev, ent_offset, &dw0); /* NVMe: PCI 설정 공간 4바이트를 읽는다. */
-	ent_offset += 4; /* NVMe: 변수에 값을 할당한다. */
+	pci_read_config_dword(dev, ent_offset, &dw0); /* [한국어] 첫 DWORD(헤더)를 읽는다 */
+	ent_offset += 4; /* [한국어] 다음 DWORD 로 커서를 옮긴다 */
 
 	/* Entry size field indicates DWORDs after 1st */
-	ent_size = (FIELD_GET(PCI_EA_ES, dw0) + 1) << 2; /* NVMe: 변수에 값을 할당한다. */
+	ent_size = (FIELD_GET(PCI_EA_ES, dw0) + 1) << 2; /* [한국어] Entry Size 는 "첫 DWORD 이후의 개수"라 +1 하고, DWORD 를 바이트로 바꾸려 <<2(=×4) 한다 */
 
 	if (!(dw0 & PCI_EA_ENABLE)) /* Entry not enabled */
-		goto out; /* NVMe: 지정한 레이블로 제어를 이동한다. */
+		goto out; /* [한국어] Enable 비트가 꺼진 엔트리는 내용이 무효다. 크기만큼 건너뛰도록 out 으로 간다 */
 
-	bei = FIELD_GET(PCI_EA_BEI, dw0); /* NVMe: 변수에 값을 할당한다. */
-	prop = FIELD_GET(PCI_EA_PP, dw0); /* NVMe: 변수에 값을 할당한다. */
+	bei = FIELD_GET(PCI_EA_BEI, dw0); /* [한국어] 이 엔트리가 어느 BAR 에 해당하는지 */
+	prop = FIELD_GET(PCI_EA_PP, dw0); /* [한국어] 자원의 종류(메모리/IO, prefetchable 여부, PF/VF) */
 
 	/*
 	 * If the Property is in the reserved range, try the Secondary
 	 * Property instead.
 	 */
-	if (prop > PCI_EA_P_BRIDGE_IO && prop < PCI_EA_P_MEM_RESERVED) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		prop = FIELD_GET(PCI_EA_SP, dw0); /* NVMe: 변수에 값을 할당한다. */
-	if (prop > PCI_EA_P_BRIDGE_IO) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		goto out; /* NVMe: 지정한 레이블로 제어를 이동한다. */
+	if (prop > PCI_EA_P_BRIDGE_IO && prop < PCI_EA_P_MEM_RESERVED) /* [한국어] Primary Property 가 예약 범위에 들어가면 규격이 Secondary Property 를 보라고 정한다 */
+		prop = FIELD_GET(PCI_EA_SP, dw0); /* [한국어] 같은 헤더의 Secondary Property 필드로 대체한다 */
+	if (prop > PCI_EA_P_BRIDGE_IO) /* [한국어] 그래도 아는 범위를 벗어나면 */
+		goto out; /* [한국어] 해석할 수 없는 엔트리다 */
 
-	res = pci_ea_get_resource(dev, bei, prop); /* NVMe: 변수에 값을 할당한다. */
-	res_name = pci_resource_name(dev, bei); /* NVMe: 변수에 값을 할당한다. */
-	if (!res) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pci_err(dev, "Unsupported EA entry BEI: %u\n", bei); /* NVMe: PCI 장치에 대한 에러 로그를 출력한다. */
-		goto out; /* NVMe: 지정한 레이블로 제어를 이동한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+	res = pci_ea_get_resource(dev, bei, prop); /* [한국어] BEI 를 resource 슬롯으로 옮긴다 */
+	res_name = pci_resource_name(dev, bei); /* [한국어] 로그용 이름을 미리 구해 둔다 */
+	if (!res) { /* [한국어] 대응하는 슬롯이 없으면 */
+		pci_err(dev, "Unsupported EA entry BEI: %u\n", bei); /* [한국어] 어떤 BEI 였는지 남기고 */
+		goto out; /* [한국어] 이 엔트리를 버린다 */
+	}
 
-	flags = pci_ea_flags(dev, prop); /* NVMe: 변수에 값을 할당한다. */
-	if (!flags) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pci_err(dev, "Unsupported EA properties: %#x\n", prop); /* NVMe: PCI 장치에 대한 에러 로그를 출력한다. */
-		goto out; /* NVMe: 지정한 레이블로 제어를 이동한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+	flags = pci_ea_flags(dev, prop); /* [한국어] Property 를 resource 플래그로 옮긴다 */
+	if (!flags) { /* [한국어] 0 이면 다룰 수 없는 Property 다 */
+		pci_err(dev, "Unsupported EA properties: %#x\n", prop); /* [한국어] 어떤 값이었는지 남기고 */
+		goto out; /* [한국어] 버린다 */
+	}
 
 	/* Read Base */
-	pci_read_config_dword(dev, ent_offset, &base); /* NVMe: PCI 설정 공간 4바이트를 읽는다. */
-	start = (base & PCI_EA_FIELD_MASK); /* NVMe: 변수에 값을 할당한다. */
-	ent_offset += 4; /* NVMe: 변수에 값을 할당한다. */
+	pci_read_config_dword(dev, ent_offset, &base); /* [한국어] Base 하위 32비트를 읽는다 */
+	start = (base & PCI_EA_FIELD_MASK); /* [한국어] 하위 2비트는 값이 아니라 플래그 자리이므로 마스크로 걸러낸다 */
+	ent_offset += 4; /* [한국어] 다음 DWORD 로 */
 
 	/* Read MaxOffset */
-	pci_read_config_dword(dev, ent_offset, &max_offset); /* NVMe: PCI 설정 공간 4바이트를 읽는다. */
-	ent_offset += 4; /* NVMe: 변수에 값을 할당한다. */
+	pci_read_config_dword(dev, ent_offset, &max_offset); /* [한국어] MaxOffset 하위 32비트를 읽는다 */
+	ent_offset += 4; /* [한국어] 다음 DWORD 로 */
 
 	/* Read Base MSBs (if 64-bit entry) */
-	if (base & PCI_EA_IS_64) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		u32 base_upper; /* NVMe: u32 타입 변수를 선언한다. */
+	if (base & PCI_EA_IS_64) { /* [한국어] Base 의 최하위 비트가 "64비트 엔트리"를 뜻한다 */
+		u32 base_upper; /* [한국어] 상위 32비트를 담을 임시 */
 
-		pci_read_config_dword(dev, ent_offset, &base_upper); /* NVMe: PCI 설정 공간 4바이트를 읽는다. */
-		ent_offset += 4; /* NVMe: 변수에 값을 할당한다. */
+		pci_read_config_dword(dev, ent_offset, &base_upper); /* [한국어] Base 상위 32비트를 읽는다 */
+		ent_offset += 4; /* [한국어] 다음 DWORD 로 */
 
-		flags |= IORESOURCE_MEM_64; /* NVMe: 변수에 값을 할당한다. */
+		flags |= IORESOURCE_MEM_64; /* [한국어] 64비트 메모리 자원임을 표시한다 */
 
 		/* entry starts above 32-bit boundary, can't use */
-		if (!support_64 && base_upper) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			goto out; /* NVMe: 지정한 레이블로 제어를 이동한다. */
+		if (!support_64 && base_upper) /* [한국어] 32비트 아키텍처인데 상위 주소가 0 이 아니면 표현할 방법이 없다 */
+			goto out; /* [한국어] 이 엔트리를 버린다 */
 
-		if (support_64) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			start |= ((u64)base_upper << 32); /* NVMe: 변수에 값을 할당한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+		if (support_64) /* [한국어] 64비트를 담을 수 있으면 */
+			start |= ((u64)base_upper << 32); /* [한국어] 상위 32비트를 올려 붙인다 */
+	}
 
-	end = start + (max_offset | 0x03); /* NVMe: 변수에 값을 할당한다. */
+	end = start + (max_offset | 0x03); /* [한국어] | 0x03 은 앞서 마스크로 걸러낸 하위 2비트를 다시 1 로 채우는 것이다. EA 구간은 DWORD 단위라 마지막 주소가 반드시 ...11 로 끝난다 */
 
 	/* Read MaxOffset MSBs (if 64-bit entry) */
-	if (max_offset & PCI_EA_IS_64) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		u32 max_offset_upper; /* NVMe: u32 타입 변수를 선언한다. */
+	if (max_offset & PCI_EA_IS_64) { /* [한국어] MaxOffset 의 최하위 비트도 64비트 여부를 뜻한다 */
+		u32 max_offset_upper; /* [한국어] 상위 32비트를 담을 임시 */
 
-		pci_read_config_dword(dev, ent_offset, &max_offset_upper); /* NVMe: PCI 설정 공간 4바이트를 읽는다. */
-		ent_offset += 4; /* NVMe: 변수에 값을 할당한다. */
+		pci_read_config_dword(dev, ent_offset, &max_offset_upper); /* [한국어] MaxOffset 상위 32비트를 읽는다 */
+		ent_offset += 4; /* [한국어] 다음 DWORD 로 */
 
-		flags |= IORESOURCE_MEM_64; /* NVMe: 변수에 값을 할당한다. */
+		flags |= IORESOURCE_MEM_64; /* [한국어] 64비트 자원 표시 */
 
 		/* entry too big, can't use */
-		if (!support_64 && max_offset_upper) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			goto out; /* NVMe: 지정한 레이블로 제어를 이동한다. */
+		if (!support_64 && max_offset_upper) /* [한국어] 32비트 아키텍처에서는 이만한 크기를 표현할 수 없다 */
+			goto out; /* [한국어] 버린다 */
 
-		if (support_64) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			end += ((u64)max_offset_upper << 32); /* NVMe: 변수에 값을 할당한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+		if (support_64) /* [한국어] 64비트를 담을 수 있으면 */
+			end += ((u64)max_offset_upper << 32); /* [한국어] 상위 32비트만큼 끝 주소를 늘린다 */
+	}
 
-	if (end < start) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pci_err(dev, "EA Entry crosses address boundary\n"); /* NVMe: PCI 장치에 대한 에러 로그를 출력한다. */
-		goto out; /* NVMe: 지정한 레이블로 제어를 이동한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+	if (end < start) { /* [한국어] 끝이 시작보다 앞이면 32비트 경계를 넘어가며 값이 뒤집힌 것이다 */
+		pci_err(dev, "EA Entry crosses address boundary\n"); /* [한국어] 잘못된 엔트리임을 알리고 */
+		goto out; /* [한국어] 버린다 */
+	}
 
-	if (ent_size != ent_offset - offset) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pci_err(dev, "EA Entry Size (%d) does not match length read (%d)\n", /* NVMe: PCI 장치에 대한 에러 로그를 출력한다. */
-			ent_size, ent_offset - offset); /* NVMe: 표현식을 평가한다. */
-		goto out; /* NVMe: 지정한 레이블로 제어를 이동한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+	if (ent_size != ent_offset - offset) { /* [한국어] 헤더가 말한 크기와 실제로 읽은 바이트 수가 맞아야 한다 */
+		pci_err(dev, "EA Entry Size (%d) does not match length read (%d)\n", /* [한국어] 어긋나면 엔트리 형식이 깨진 것이다 */
+			ent_size, ent_offset - offset); /* [한국어] 양쪽 값을 함께 남긴다 */
+		goto out; /* [한국어] 버린다 */
+	}
 
-	res->name = pci_name(dev); /* NVMe: 변수에 값을 할당한다. */
-	res->start = start; /* NVMe: 변수에 값을 할당한다. */
-	res->end = end; /* NVMe: 변수에 값을 할당한다. */
-	res->flags = flags; /* NVMe: 변수에 값을 할당한다. */
+	res->name = pci_name(dev); /* [한국어] /proc/iomem 등에 표시될 이름 */
+	res->start = start; /* [한국어] 계산해 낸 시작 주소 */
+	res->end = end; /* [한국어] 계산해 낸 끝 주소 */
+	res->flags = flags; /* [한국어] 종류와 IORESOURCE_PCI_FIXED 등 표식. FIXED 가 있어 자원 재배정 코드가 이 자원을 옮기지 않는다 */
 
-	if (bei <= PCI_EA_BEI_BAR5) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pci_info(dev, "%s %pR: from Enhanced Allocation, properties %#02x\n", /* NVMe: PCI 장치에 대한 정보 로그를 출력한다. */
-			 res_name, res, prop); /* NVMe: 표현식을 평가한다. */
-	else if (bei == PCI_EA_BEI_ROM) /* NVMe: 이전 조건이 거짓일 때 추가 조건을 검사한다. */
-		pci_info(dev, "%s %pR: from Enhanced Allocation, properties %#02x\n", /* NVMe: PCI 장치에 대한 정보 로그를 출력한다. */
-			 res_name, res, prop); /* NVMe: 표현식을 평가한다. */
-	else if (bei >= PCI_EA_BEI_VF_BAR0 && bei <= PCI_EA_BEI_VF_BAR5) /* NVMe: 이전 조건이 거짓일 때 추가 조건을 검사한다. */
-		pci_info(dev, "%s %pR: from Enhanced Allocation, properties %#02x\n", /* NVMe: PCI 장치에 대한 정보 로그를 출력한다. */
-			 res_name, res, prop); /* NVMe: 표현식을 평가한다. */
-	else /* NVMe: 이전 조건이 모두 거짓일 때 실행한다. */
-		pci_info(dev, "BEI %d %pR: from Enhanced Allocation, properties %#02x\n", /* NVMe: PCI 장치에 대한 정보 로그를 출력한다. */
-			   bei, res, prop); /* NVMe: 표현식을 평가한다. */
+	if (bei <= PCI_EA_BEI_BAR5) /* [한국어] 표준 BAR 에 해당하면 */
+		pci_info(dev, "%s %pR: from Enhanced Allocation, properties %#02x\n", /* [한국어] 이름표와 함께 남긴다 */
+			 res_name, res, prop); /* [한국어] 자원 이름, 구간, Property */
+	else if (bei == PCI_EA_BEI_ROM) /* [한국어] ROM 이면 */
+		pci_info(dev, "%s %pR: from Enhanced Allocation, properties %#02x\n", /* [한국어] 같은 형식으로 남긴다 */
+			 res_name, res, prop); /* [한국어] 자원 이름, 구간, Property */
+	else if (bei >= PCI_EA_BEI_VF_BAR0 && bei <= PCI_EA_BEI_VF_BAR5) /* [한국어] VF BAR 범위면 */
+		pci_info(dev, "%s %pR: from Enhanced Allocation, properties %#02x\n", /* [한국어] 역시 같은 형식으로 남긴다 */
+			 res_name, res, prop); /* [한국어] 자원 이름, 구간, Property */
+	else /* [한국어] 이름표를 붙일 수 없는 BEI 면 */
+		pci_info(dev, "BEI %d %pR: from Enhanced Allocation, properties %#02x\n", /* [한국어] BEI 번호를 그대로 찍는다 */
+			   bei, res, prop); /* [한국어] BEI 번호, 구간, Property */
 
-out: /* NVMe: 레이블을 정의한다. */
-	return offset + ent_size; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+out: /* [한국어] 성공·실패가 모두 모이는 지점 */
+	return offset + ent_size; /* [한국어] 실패했더라도 이 엔트리의 크기만큼은 건너뛰어야 다음 엔트리를 제대로 읽는다 */
+}
 
 /* Enhanced Allocation Initialization */
 /*
- * pci_ea_init:
- *   Enhanced Allocation capability 를 파싱하여 pci_dev 의 resource 정보를 보완한다. NVMe BAR 해석의 보조 정보로 사용된다.
+ * [한국어]
+ * pci_ea_init - EA capability 를 찾아 모든 엔트리를 읽어 들인다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @return: 없음. EA capability 가 없으면 아무 것도 하지 않는다.
+ *
+ * EA 가 있는 장치는 BAR 탐색 대신 이 경로로 자원을 얻는다. 엔트리 개수는
+ * capability 헤더의 NumEntries 필드에 있고, 첫 엔트리의 위치는
+ * PCI_EA_FIRST_ENT 로 정해져 있다.
+ *
+ * 헤더 타입 1(브리지)에서 4바이트를 더 건너뛰는 이유는, 브리지용 EA
+ * capability 에는 첫 엔트리 앞에 DWORD 가 하나 더 놓이기 때문이다
+ * (원본 주석의 "Skip DWORD 2 for type 1 functions").
+ *
+ * 각 엔트리는 길이가 달라, pci_ea_read() 가 돌려주는 다음 오프셋을 그대로
+ * 이어받는 방식으로 순회한다.
+ *
+ * 실행 문맥: 열거 중 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   probe.c → [이 함수] → pci_find_capability(), pci_ea_read()
  */
-void pci_ea_init(struct pci_dev *dev) /* NVMe: pci_ea_init 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	int ea; /* NVMe: int 타입 변수를 선언한다. */
-	u8 num_ent; /* NVMe: u8 타입 변수를 선언한다. */
-	int offset; /* NVMe: int 타입 변수를 선언한다. */
-	int i; /* NVMe: int 타입 변수를 선언한다. */
+void pci_ea_init(struct pci_dev *dev)
+{
+	int ea; /* [한국어] EA capability 의 오프셋 */
+	u8 num_ent; /* [한국어] 엔트리 개수 */
+	int offset; /* [한국어] 지금 읽을 엔트리의 오프셋 */
+	int i; /* [한국어] 엔트리 순회 인덱스 */
 
 	/* find PCI EA capability in list */
-	ea = pci_find_capability(dev, PCI_CAP_ID_EA); /* NVMe: 변수에 값을 할당한다. */
-	if (!ea) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return; /* NVMe: 함수 실행을 종료한다. */
+	ea = pci_find_capability(dev, PCI_CAP_ID_EA); /* [한국어] 표준 capability 리스트에서 EA 를 찾는다 */
+	if (!ea) /* [한국어] 없으면 이 장치는 EA 를 쓰지 않는다 */
+		return; /* [한국어] 할 일이 없다 */
 
 	/* determine the number of entries */
-	pci_bus_read_config_byte(dev->bus, dev->devfn, ea + PCI_EA_NUM_ENT, /* NVMe: bus 단위로 PCI 설정 공간 1바이트를 읽는다. */
-					&num_ent); /* NVMe: 비트 연산을 수행한다. */
-	num_ent &= PCI_EA_NUM_ENT_MASK; /* NVMe: 변수에 값을 할당한다. */
+	pci_bus_read_config_byte(dev->bus, dev->devfn, ea + PCI_EA_NUM_ENT, /* [한국어] capability 헤더의 NumEntries 필드를 읽는다 */
+					&num_ent); /* [한국어] 읽은 값을 담을 곳 */
+	num_ent &= PCI_EA_NUM_ENT_MASK; /* [한국어] 상위 비트는 다른 용도라 개수 필드만 남긴다 */
 
-	offset = ea + PCI_EA_FIRST_ENT; /* NVMe: 변수에 값을 할당한다. */
+	offset = ea + PCI_EA_FIRST_ENT; /* [한국어] 첫 엔트리의 위치 */
 
 	/* Skip DWORD 2 for type 1 functions */
-	if (dev->hdr_type == PCI_HEADER_TYPE_BRIDGE) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		offset += 4; /* NVMe: 변수에 값을 할당한다. */
+	if (dev->hdr_type == PCI_HEADER_TYPE_BRIDGE) /* [한국어] 브리지용 EA 는 첫 엔트리 앞에 DWORD 가 하나 더 있다 */
+		offset += 4; /* [한국어] 그만큼 건너뛴다 */
 
 	/* parse each EA entry */
-	for (i = 0; i < num_ent; ++i) /* NVMe: 반복문을 시작한다. */
-		offset = pci_ea_read(dev, offset); /* NVMe: 변수에 값을 할당한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	for (i = 0; i < num_ent; ++i) /* [한국어] 선언된 개수만큼 반복한다 */
+		offset = pci_ea_read(dev, offset); /* [한국어] 각 엔트리를 읽고, 돌려받은 다음 오프셋을 이어받는다. 엔트리 길이가 제각각이라 이 방식이어야 한다 */
+}
 
-static void pci_add_saved_cap(struct pci_dev *pci_dev, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-	struct pci_cap_saved_state *new_cap) /* NVMe: 표현식을 평가한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	hlist_add_head(&new_cap->next, &pci_dev->saved_cap_space); /* NVMe: hlist_add_head 함수를 호출한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+/*
+ * [한국어]
+ * pci_add_saved_cap - capability 저장 버퍼를 장치의 해시 리스트에 매단다.
+ *
+ * @pci_dev: 대상 PCI 장치.
+ * @new_cap: 새로 할당한 저장 버퍼.
+ * @return: 없음.
+ *
+ * 저장 버퍼는 dev->saved_cap_space 해시 리스트에 매달리고,
+ * _pci_find_saved_cap() 이 그 리스트를 훑어 찾는다. 리스트 앞에 붙이므로
+ * 순서는 등록의 역순이 되지만, 조회가 번호로 이뤄져 순서는 의미가 없다.
+ *
+ * 실행 문맥: 열거 중 프로세스 문맥. 이 시점에는 다른 주체가 리스트를 보지
+ * 않으므로 별도 락이 없다.
+ *
+ * 호출 체인:
+ *   _pci_add_cap_save_buffer() → [이 함수] → hlist_add_head()
+ */
+static void pci_add_saved_cap(struct pci_dev *pci_dev,
+	struct pci_cap_saved_state *new_cap)
+{
+	hlist_add_head(&new_cap->next, &pci_dev->saved_cap_space); /* [한국어] 해시 리스트 앞에 붙인다. 조회가 번호로 이뤄져 순서는 의미가 없다 */
+}
 
 /**
  * _pci_add_cap_save_buffer - allocate buffer for saving given
@@ -3905,91 +6448,176 @@ static void pci_add_saved_cap(struct pci_dev *pci_dev, /* NVMe: 함수 호출 �
  * @extended: Standard or Extended capability ID
  * @size: requested size of the buffer
  */
-static int _pci_add_cap_save_buffer(struct pci_dev *dev, u16 cap, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-				    bool extended, unsigned int size) /* NVMe: bool 타입 변수를 선언한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	int pos; /* NVMe: int 타입 변수를 선언한다. */
-	struct pci_cap_saved_state *save_state; /* NVMe: 데이터 타입 변수를 선언한다. */
+/*
+ * [한국어]
+ * _pci_add_cap_save_buffer - capability 하나를 위한 저장 버퍼를 미리 잡아 둔다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @cap: 버퍼를 잡을 capability 번호.
+ * @extended: 확장 capability 면 true.
+ * @size: 그 capability 의 레지스터를 담는 데 필요한 바이트 수.
+ * @return: 0 성공 또는 "해당 capability 가 없어 잡을 필요 없음". -ENOMEM 은 할당 실패.
+ *
+ * 저장 버퍼를 왜 미리 잡아 두는가가 핵심이다. pci_save_state() 는 절전
+ * 진입이나 리셋 직전처럼 실패가 곤란한 시점에 불린다. 그때 메모리 할당이
+ * 실패하면 상태를 뜨지 못하고, 결국 복원도 못 해 장치를 잃는다. 그래서
+ * 열거 시점에 미리 잡아 두고, 저장 경로는 이미 있는 버퍼에 쓰기만 한다.
+ *
+ * capability 가 없으면 0 을 돌려준다. 오류가 아니라 "잡을 필요가 없다"는
+ * 뜻이므로 호출자가 실패로 취급하면 안 된다.
+ *
+ * cap_nr 과 cap_extended 를 함께 기록해 두어야 _pci_find_saved_cap() 이
+ * 나중에 이 버퍼를 정확히 찾아낼 수 있다. 두 번호 공간이 겹치기 때문이다.
+ *
+ * 실행 문맥: GFP_KERNEL 할당. 열거 중 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_add_cap_save_buffer() / pci_add_ext_cap_save_buffer() → [이 함수]
+ *     → pci_find_capability(), kzalloc(), pci_add_saved_cap()
+ */
+static int _pci_add_cap_save_buffer(struct pci_dev *dev, u16 cap,
+				    bool extended, unsigned int size)
+{
+	int pos; /* [한국어] capability 의 오프셋 — 존재 여부만 확인하는 데 쓴다 */
+	struct pci_cap_saved_state *save_state; /* [한국어] 새로 잡을 저장 버퍼 */
 
-	if (extended) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pos = pci_find_ext_capability(dev, cap); /* NVMe: 변수에 값을 할당한다. */
-	else /* NVMe: 이전 조건이 모두 거짓일 때 실행한다. */
-		pos = pci_find_capability(dev, cap); /* NVMe: 변수에 값을 할당한다. */
+	if (extended) /* [한국어] 확장 capability 면 */
+		pos = pci_find_ext_capability(dev, cap); /* [한국어] 0x100 이후 리스트에서 찾고 */
+	else /* [한국어] 표준 capability 면 */
+		pos = pci_find_capability(dev, cap); /* [한국어] 0x34 에서 시작하는 리스트에서 찾는다 */
 
-	if (!pos) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return 0; /* NVMe: 성공(0)을 반환한다. */
+	if (!pos) /* [한국어] 이 장치에 해당 capability 가 없으면 */
+		return 0; /* [한국어] 잡을 필요가 없다. 오류가 아니라 정상적인 0 이다 */
 
-	save_state = kzalloc(sizeof(*save_state) + size, GFP_KERNEL); /* NVMe: 변수에 값을 할당한다. */
-	if (!save_state) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return -ENOMEM; /* NVMe: 오류 코드를 반환한다. */
+	save_state = kzalloc(sizeof(*save_state) + size, GFP_KERNEL); /* [한국어] 관리용 헤더 + 요청한 데이터 크기만큼 잡는다. kzalloc 이라 데이터 영역이 0 으로 시작한다 */
+	if (!save_state) /* [한국어] 할당 실패 */
+		return -ENOMEM; /* [한국어] 저장 경로에서 이 버퍼가 없으면 상태를 뜰 수 없으므로 오류로 알린다 */
 
-	save_state->cap.cap_nr = cap; /* NVMe: 변수에 값을 할당한다. */
-	save_state->cap.cap_extended = extended; /* NVMe: 변수에 값을 할당한다. */
-	save_state->cap.size = size; /* NVMe: 변수에 값을 할당한다. */
-	pci_add_saved_cap(dev, save_state); /* NVMe: pci_add_saved_cap 함수를 호출한다. */
+	save_state->cap.cap_nr = cap; /* [한국어] 어느 capability 의 버퍼인지 기록한다 */
+	save_state->cap.cap_extended = extended; /* [한국어] 표준/확장 구분도 기록한다. 두 공간의 번호가 겹쳐 이 필드가 없으면 구분되지 않는다 */
+	save_state->cap.size = size; /* [한국어] 데이터 영역의 크기. 사본을 실을 때 크기가 맞는지 검증하는 근거가 된다 */
+	pci_add_saved_cap(dev, save_state); /* [한국어] 장치의 해시 리스트에 매단다 */
 
-	return 0; /* NVMe: 성공(0)을 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return 0; /* [한국어] 준비 완료 */
+}
 
 /*
- * pci_add_cap_save_buffer:
- *   표준 capability 저장 버퍼를 추가한다. NVMe suspend 시 개별 capability 상태 보존을 준비한다.
+ * [한국어]
+ * pci_add_cap_save_buffer - 표준 capability 용 저장 버퍼를 잡는다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @cap: 표준 capability ID.
+ * @size: 필요한 바이트 수.
+ * @return: 0 성공 또는 "capability 없음", -ENOMEM 은 할당 실패.
+ *
+ * extended=false 로 고정한 래퍼다.
+ *
+ * 호출 체인:
+ *   pci_allocate_cap_save_buffers() 등 → [이 함수] → _pci_add_cap_save_buffer()
  */
-int pci_add_cap_save_buffer(struct pci_dev *dev, char cap, unsigned int size) /* NVMe: pci_add_cap_save_buffer 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	return _pci_add_cap_save_buffer(dev, cap, false, size); /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+int pci_add_cap_save_buffer(struct pci_dev *dev, char cap, unsigned int size)
+{
+	return _pci_add_cap_save_buffer(dev, cap, false, size); /* [한국어] extended=false — 표준 capability 공간 */
+}
 
 /*
- * pci_add_ext_cap_save_buffer:
- *   extended capability 저장 버퍼를 추가한다. NVMe resume 시 PCIe/MSI-X 등 상태 복원을 준비한다.
+ * [한국어]
+ * pci_add_ext_cap_save_buffer - 확장 capability 용 저장 버퍼를 잡는다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @cap: 확장 capability ID.
+ * @size: 필요한 바이트 수.
+ * @return: 0 성공 또는 "capability 없음", -ENOMEM 은 할당 실패.
+ *
+ * extended=true 로 고정한 래퍼다. AER/DPC/PTM/LTR 처럼 0x100 이후에 있는
+ * capability 의 상태를 뜨려는 코드가 쓴다.
+ *
+ * 호출 체인:
+ *   pci_allocate_cap_save_buffers(), aer.c/dpc.c 등 → [이 함수]
+ *     → _pci_add_cap_save_buffer()
  */
-int pci_add_ext_cap_save_buffer(struct pci_dev *dev, u16 cap, unsigned int size) /* NVMe: pci_add_ext_cap_save_buffer 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	return _pci_add_cap_save_buffer(dev, cap, true, size); /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+int pci_add_ext_cap_save_buffer(struct pci_dev *dev, u16 cap, unsigned int size)
+{
+	return _pci_add_cap_save_buffer(dev, cap, true, size); /* [한국어] extended=true — 확장 capability 공간 */
+}
 
 /**
  * pci_allocate_cap_save_buffers - allocate buffers for saving capabilities
  * @dev: the PCI device
  */
 /*
- * pci_allocate_cap_save_buffers:
- *   모든 capability 저장 버퍼를 할당한다. NVMe suspend/hibernate 전 controller context 보존을 준비한다.
+ * [한국어]
+ * pci_allocate_cap_save_buffers - 열거 시점에 필요한 저장 버퍼를 한꺼번에 잡는다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @return: 없음. 개별 실패는 로그만 남기고 계속 진행한다.
+ *
+ * pci_save_state() 가 실패하면 안 되는 시점에 불리므로, 그때 필요한 버퍼를
+ * 여기서 미리 다 잡아 둔다. 잡는 대상과 크기가 각각 저장 함수와 짝을 이룬다.
+ *   - PCIe: PCI_EXP_SAVE_REGS(7) 개의 u16 — pci_save_pcie_state() 가 딱 그만큼 쓴다.
+ *   - PCI-X: u16 하나 — Command 레지스터 한 개.
+ *   - LTR: u16 두 개 — 최대 지연 값 두 개.
+ * VC(Virtual Channel)는 크기가 장치마다 달라 전용 함수가 따로 계산한다.
+ *
+ * 실패해도 중단하지 않고 로그만 남기는 이유는, 한 capability 의 버퍼를 잡지
+ * 못했다고 나머지까지 포기하면 절전 시 잃는 것이 더 많기 때문이다.
+ * 잡지 못한 capability 는 나중에 저장 단계에서 -ENOMEM 으로 드러난다.
+ *
+ * 실행 문맥: GFP_KERNEL 할당. 열거 중 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   probe.c 의 pci_device_add() → [이 함수]
+ *     → pci_add_cap_save_buffer(), pci_add_ext_cap_save_buffer(),
+ *        pci_allocate_vc_save_buffers()
  */
-void pci_allocate_cap_save_buffers(struct pci_dev *dev) /* NVMe: pci_allocate_cap_save_buffers 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	int error; /* NVMe: int 타입 변수를 선언한다. */
+void pci_allocate_cap_save_buffers(struct pci_dev *dev)
+{
+	int error; /* [한국어] 각 할당의 결과 */
 
-	error = pci_add_cap_save_buffer(dev, PCI_CAP_ID_EXP, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-					PCI_EXP_SAVE_REGS * sizeof(u16)); /* NVMe: sizeof 함수를 선언한다. */
-	if (error) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pci_err(dev, "unable to preallocate PCI Express save buffer\n"); /* NVMe: PCI 장치에 대한 에러 로그를 출력한다. */
+	error = pci_add_cap_save_buffer(dev, PCI_CAP_ID_EXP, /* [한국어] PCIe capability 용 버퍼 */
+					PCI_EXP_SAVE_REGS * sizeof(u16)); /* [한국어] pci_save_pcie_state() 가 저장하는 레지스터 개수와 정확히 일치해야 한다 */
+	if (error) /* [한국어] 실패하면 */
+		pci_err(dev, "unable to preallocate PCI Express save buffer\n"); /* [한국어] 로그만 남기고 다음 것을 계속 잡는다 */
 
-	error = pci_add_cap_save_buffer(dev, PCI_CAP_ID_PCIX, sizeof(u16)); /* NVMe: 변수에 값을 할당한다. */
-	if (error) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pci_err(dev, "unable to preallocate PCI-X save buffer\n"); /* NVMe: PCI 장치에 대한 에러 로그를 출력한다. */
+	error = pci_add_cap_save_buffer(dev, PCI_CAP_ID_PCIX, sizeof(u16)); /* [한국어] PCI-X 는 Command 레지스터 하나뿐이라 u16 하나면 된다 */
+	if (error) /* [한국어] 실패하면 */
+		pci_err(dev, "unable to preallocate PCI-X save buffer\n"); /* [한국어] 로그만 남긴다 */
 
-	error = pci_add_ext_cap_save_buffer(dev, PCI_EXT_CAP_ID_LTR, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-					    2 * sizeof(u16)); /* NVMe: sizeof 함수를 선언한다. */
-	if (error) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pci_err(dev, "unable to allocate suspend buffer for LTR\n"); /* NVMe: PCI 장치에 대한 에러 로그를 출력한다. */
+	error = pci_add_ext_cap_save_buffer(dev, PCI_EXT_CAP_ID_LTR, /* [한국어] LTR 확장 capability 용 버퍼 */
+					    2 * sizeof(u16)); /* [한국어] 최대 지연 값 두 개를 담는다 */
+	if (error) /* [한국어] 실패하면 */
+		pci_err(dev, "unable to allocate suspend buffer for LTR\n"); /* [한국어] 로그만 남긴다 */
 
-	pci_allocate_vc_save_buffers(dev); /* NVMe: pci_allocate_vc_save_buffers 함수를 호출한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	pci_allocate_vc_save_buffers(dev); /* [한국어] VC 는 장치마다 채널 수가 달라 크기를 전용 함수가 직접 계산한다 */
+}
 
 /*
- * pci_free_cap_save_buffers:
- *   capability 저장 버퍼를 해제한다. NVMe pci_dev 해제 시 메모리를 정리한다.
+ * [한국어]
+ * pci_free_cap_save_buffers - 장치에 매달린 저장 버퍼를 모두 해제한다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @return: 없음.
+ *
+ * pci_allocate_cap_save_buffers() 와 그 밖의 경로가 잡아 둔 버퍼를 장치 해제
+ * 시점에 한꺼번에 돌려준다. 순회하며 지우므로 _safe 판이 필요하다 —
+ * 지운 항목의 next 를 읽을 수 없기 때문이다.
+ *
+ * 리스트 머리를 비우지 않는 이유는 이 함수 뒤에 pci_dev 자체가 해제되어
+ * 리스트를 다시 볼 일이 없기 때문이다.
+ *
+ * 실행 문맥: 장치 해제 경로. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   probe.c 의 장치 해제 경로 → [이 함수] → kfree()
  */
-void pci_free_cap_save_buffers(struct pci_dev *dev) /* NVMe: pci_free_cap_save_buffers 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	struct pci_cap_saved_state *tmp; /* NVMe: 데이터 타입 변수를 선언한다. */
-	struct hlist_node *n; /* NVMe: 데이터 타입 변수를 선언한다. */
+void pci_free_cap_save_buffers(struct pci_dev *dev)
+{
+	struct pci_cap_saved_state *tmp; /* [한국어] 순회 커서 */
+	struct hlist_node *n; /* [한국어] 지운 항목의 next 를 미리 붙들어 두는 예비 포인터 */
 
-	hlist_for_each_entry_safe(tmp, n, &dev->saved_cap_space, next) /* NVMe: 리스트/해시 항목을 순회하는 매크로 루프를 시작한다. */
-		kfree(tmp); /* NVMe: 동적 할당된 커널 메모리를 해제한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	hlist_for_each_entry_safe(tmp, n, &dev->saved_cap_space, next) /* [한국어] 순회 중 항목을 지우므로 _safe 판을 쓴다 */
+		kfree(tmp); /* [한국어] 버퍼 하나를 해제한다 */
+}
 
 /**
  * pci_configure_ari - enable or disable ARI forwarding
@@ -3999,59 +6627,102 @@ void pci_free_cap_save_buffers(struct pci_dev *dev) /* NVMe: pci_free_cap_save_b
  * bridge.  Otherwise, disable ARI in the bridge.
  */
 /*
- * pci_configure_ari:
- *   ARI(Alternative Routing-ID Interpretation) 를 설정한다. NVMe 장치가 function 수가 많을 때 routing ID 효율화에 기여한다.
+ * [한국어]
+ * pci_configure_ari - 상위 브리지의 ARI Forwarding 을 켜거나 끈다.
+ *
+ * @dev: 방금 열거된 PCI 장치.
+ * @return: 없음.
+ *
+ * ARI(Alternative Routing-ID Interpretation)는 devfn 8비트를 해석하는 방식을
+ * 바꾸는 기능이다. 원래는 상위 5비트가 device 번호, 하위 3비트가 function
+ * 번호라 한 장치에 함수가 8개뿐이지만, ARI 를 켜면 8비트 전체를 함수 번호로
+ * 읽어 한 장치가 최대 256개 함수를 가질 수 있다. SR-IOV 로 VF 를 많이 만드는
+ * 장치에 꼭 필요하다.
+ *
+ * 켜야 할 곳이 장치가 아니라 그 위 브리지라는 점이 요점이다. devfn 을
+ * 해석해 트래픽을 내려보내는 주체가 브리지이기 때문이다. 그래서 조건도
+ * 양쪽을 본다 — 브리지의 DEVCAP2 에 ARI 지원 비트가 있어야 하고,
+ * 장치에는 ARI 확장 capability 가 있어야 한다.
+ *
+ * dev->devfn 이 0 인 장치(함수 0)에서만 동작한다. 한 장치의 여러 함수가
+ * 저마다 브리지 설정을 뒤집는 것을 막기 위해, 대표 함수 하나만 판단한다.
+ *
+ * 실행 문맥: 열거 중 프로세스 문맥. config space 를 읽고 쓴다.
+ *
+ * 호출 체인:
+ *   probe.c 의 pci_configure_device() 경로 → [이 함수]
+ *     → pcie_capability_read_dword(), pci_find_ext_capability(),
+ *        pcie_capability_set_word()/clear_word()
  */
-void pci_configure_ari(struct pci_dev *dev) /* NVMe: pci_configure_ari 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	u32 cap; /* NVMe: u32 타입 변수를 선언한다. */
-	struct pci_dev *bridge; /* NVMe: 데이터 타입 변수를 선언한다. */
+void pci_configure_ari(struct pci_dev *dev)
+{
+	u32 cap; /* [한국어] 브리지의 Device Capabilities 2 레지스터 값 */
+	struct pci_dev *bridge; /* [한국어] 설정을 실제로 바꿀 상위 브리지 */
 
-	if (pcie_ari_disabled || !pci_is_pcie(dev) || dev->devfn) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return; /* NVMe: 함수 실행을 종료한다. */
+	if (pcie_ari_disabled || !pci_is_pcie(dev) || dev->devfn) /* [한국어] pci=noari 로 껐거나, PCIe 가 아니거나, 함수 0 이 아니면 — 마지막 조건은 한 장치의 여러 함수가 브리지 설정을 뒤집는 것을 막는다 */
+		return; /* [한국어] 건드리지 않는다 */
 
-	bridge = dev->bus->self; /* NVMe: 변수에 값을 할당한다. */
-	if (!bridge) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return; /* NVMe: 함수 실행을 종료한다. */
+	bridge = dev->bus->self; /* [한국어] devfn 을 해석하는 주체인 상위 브리지 */
+	if (!bridge) /* [한국어] 루트 버스 직결이면 조정할 브리지가 없다 */
+		return; /* [한국어] 할 일이 없다 */
 
-	pcie_capability_read_dword(bridge, PCI_EXP_DEVCAP2, &cap); /* NVMe: pcie_capability_read_dword 함수를 호출한다. */
-	if (!(cap & PCI_EXP_DEVCAP2_ARI)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return; /* NVMe: 함수 실행을 종료한다. */
+	pcie_capability_read_dword(bridge, PCI_EXP_DEVCAP2, &cap); /* [한국어] 브리지가 ARI Forwarding 을 지원하는지 확인한다 */
+	if (!(cap & PCI_EXP_DEVCAP2_ARI)) /* [한국어] 지원하지 않으면 */
+		return; /* [한국어] 켤 수도 없다 */
 
-	if (pci_find_ext_capability(dev, PCI_EXT_CAP_ID_ARI)) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pcie_capability_set_word(bridge, PCI_EXP_DEVCTL2, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-					 PCI_EXP_DEVCTL2_ARI); /* NVMe: 표현식을 평가한다. */
-		bridge->ari_enabled = 1; /* NVMe: 변수에 값을 할당한다. */
-	} else { /* NVMe: 표현식을 평가한다. */
-		pcie_capability_clear_word(bridge, PCI_EXP_DEVCTL2, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-					   PCI_EXP_DEVCTL2_ARI); /* NVMe: 표현식을 평가한다. */
-		bridge->ari_enabled = 0; /* NVMe: 변수에 값을 할당한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	if (pci_find_ext_capability(dev, PCI_EXT_CAP_ID_ARI)) { /* [한국어] 장치 쪽에 ARI 확장 capability 가 있으면 — 즉 8비트 함수 번호를 쓰는 장치면 */
+		pcie_capability_set_word(bridge, PCI_EXP_DEVCTL2, /* [한국어] 브리지의 ARI Forwarding 을 켠다 */
+					 PCI_EXP_DEVCTL2_ARI); /* [한국어] Device Control 2 의 ARI Forwarding Enable 비트 */
+		bridge->ari_enabled = 1; /* [한국어] 소프트웨어 쪽 표시도 세운다. SR-IOV 코드가 VF 의 devfn 을 계산할 때 이 값을 본다 */
+	} else { /* [한국어] 장치가 ARI 를 쓰지 않으면 */
+		pcie_capability_clear_word(bridge, PCI_EXP_DEVCTL2, /* [한국어] 브리지의 ARI Forwarding 을 끈다. 켜 둔 채로 두면 devfn 해석이 어긋난다 */
+					   PCI_EXP_DEVCTL2_ARI); /* [한국어] 같은 비트를 지운다 */
+		bridge->ari_enabled = 0; /* [한국어] 소프트웨어 표시도 내린다 */
+	}
+}
 
 /*
- * pci_acs_flags_enabled:
- *   ACS 의 개별 플래그가 enable 되었는지 확인한다. NVMe P2PDMA/IOMMU 격리 설정 점검에 사용된다.
+ * [한국어]
+ * pci_acs_flags_enabled - 요구한 ACS 비트가 실제로 켜져 있는지 확인한다.
+ *
+ * @pdev: 검사할 장치.
+ * @acs_flags: 확인할 ACS 비트 조합.
+ * @return: 요구한 비트가 모두 켜져 있으면 true.
+ *
+ * 단순 비트 비교가 아니라 한 겹의 해석이 들어간다. 원본 주석이 설명하듯,
+ * ACS 기능 대부분은 규격상 "필수" 이거나 "제어 가능한 경우에만 필수"다.
+ * 따라서 Capability 필드에 그 기능이 없다는 것은 "지원하지 않는다"가 아니라
+ * "제어할 수 없게 하드와이어로 켜져 있다"는 뜻으로 읽어야 한다.
+ * 그래서 요구 비트를 Capability 와 AND 해 "제어 가능한 것만" 남긴 뒤
+ * Control 레지스터와 비교한다. 제어할 수 없는 비트는 이미 켜진 것으로 본다.
+ *
+ * Egress Control(EC)만 예외라 마스크에 언제나 포함시킨다 — 이 기능은
+ * 하드와이어로 켜져 있다고 가정할 수 없기 때문이다.
+ *
+ * 실행 문맥: config space 읽기. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_acs_enabled() → [이 함수] → pci_read_config_word()
  */
-static bool pci_acs_flags_enabled(struct pci_dev *pdev, u16 acs_flags) /* NVMe: pci_acs_flags_enabled 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	int pos; /* NVMe: int 타입 변수를 선언한다. */
-	u16 ctrl; /* NVMe: u16 타입 변수를 선언한다. */
+static bool pci_acs_flags_enabled(struct pci_dev *pdev, u16 acs_flags)
+{
+	int pos; /* [한국어] ACS capability 의 오프셋 */
+	u16 ctrl; /* [한국어] ACS Control 레지스터 값 */
 
-	pos = pdev->acs_cap; /* NVMe: 변수에 값을 할당한다. */
-	if (!pos) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return false; /* NVMe: 연산 결과를 반환한다. */
+	pos = pdev->acs_cap; /* [한국어] 열거 때 캐시해 둔 ACS capability 위치 */
+	if (!pos) /* [한국어] ACS capability 자체가 없으면 */
+		return false; /* [한국어] 요구를 만족한다고 말할 수 없다 */
 
 	/*
 	 * Except for egress control, capabilities are either required
 	 * or only required if controllable.  Features missing from the
 	 * capability field can therefore be assumed as hard-wired enabled.
 	 */
-	acs_flags &= (pdev->acs_capabilities | PCI_ACS_EC); /* NVMe: 변수에 값을 할당한다. */
+	acs_flags &= (pdev->acs_capabilities | PCI_ACS_EC); /* [한국어] 제어 가능한 비트만 남긴다. Capability 에 없는 기능은 하드와이어로 켜진 것으로 보아 검사에서 뺀다. EC 만 예외라 언제나 포함시킨다 */
 
-	pci_read_config_word(pdev, pos + PCI_ACS_CTRL, &ctrl); /* NVMe: PCI 설정 공간 2바이트를 읽는다. */
-	return (ctrl & acs_flags) == acs_flags; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	pci_read_config_word(pdev, pos + PCI_ACS_CTRL, &ctrl); /* [한국어] ACS Control 레지스터를 읽는다 */
+	return (ctrl & acs_flags) == acs_flags; /* [한국어] 남은 요구 비트가 모두 켜져 있어야 true 다 */
+}
 
 /**
  * pci_acs_enabled - test ACS against required flags for a given device
@@ -4070,49 +6741,81 @@ static bool pci_acs_flags_enabled(struct pci_dev *pdev, u16 acs_flags) /* NVMe: 
  * or topology of the device when testing ACS support.
  */
 /*
- * pci_acs_enabled:
- *   해당 pci_dev 의 ACS 가 요구하는 플래그를 모두 enable 했는지 확인한다. NVMe DMA 격리와 P2P 경로 보안을 검증한다.
+ * [한국어]
+ * pci_acs_enabled - 이 장치가 요구한 ACS 격리를 제공하는가(실효적 판정).
+ *
+ * @pdev: 검사할 장치.
+ * @acs_flags: 요구하는 ACS 비트 조합.
+ * @return: 요구를 만족하면 true.
+ *
+ * 원본 주석이 강조하듯, 이것은 "실제 capability" 가 아니라 "실효적
+ * capability" 를 본다. 즉 "ACS 를 구현했는가"가 아니라 "이 장치를 지나는
+ * P2P 트래픽이 IOMMU 를 우회할 수 있는가"를 묻는다.
+ * 그래서 단일 함수 엔드포인트처럼 애초에 P2P 를 할 기회가 없는 장치는
+ * ACS capability 가 없어도 true 를 돌려준다. 덕분에 호출자는 장치의 종류나
+ * 위상을 신경 쓰지 않고 이 함수 하나로 판정할 수 있다.
+ *
+ * 판정은 PCIe 타입별로 갈리며 각각 규격 근거가 있다(원본 주석에 절 번호가 있다).
+ *   - quirk 가 먼저다. 하드웨어별 예외는 pci_dev_specific_acs_enabled() 가 답한다.
+ *   - 재래식 PCI/PCI-X: 공유 버스라 어느 장치든 남의 DMA 를 엿보거나 받을 수
+ *     있다. 격리가 성립할 수 없으므로 false.
+ *   - PCIe-to-PCI/X 브리지, RC Event Collector: 규격이 ACS 를 배제하거나
+ *     언급하지 않아 보수적으로 false.
+ *   - Downstream Port / Root Port: 단일·다중 함수와 무관하게 ACS 를 구현해야
+ *     하므로 실제 비트를 확인한다.
+ *   - Endpoint / Upstream / Legacy End / RC End: 다중 함수일 때만 P2P 기회가
+ *     있으므로, 다중 함수면 확인하고 단일 함수면 아래로 빠져 true.
+ *
+ * NVMe 와의 관계: NVMe SSD 는 보통 단일 함수 엔드포인트라 이 함수가 true 를
+ * 돌려준다. P2PDMA 를 쓸 때는 SSD 자체가 아니라 경로상의 스위치 포트가
+ * 관건이며, 그 판정은 pci_acs_path_enabled() 가 한다.
+ *
+ * 실행 문맥: config space 읽기. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   IOMMU 그룹 구성 코드, p2pdma.c → [이 함수]
+ *     → pci_dev_specific_acs_enabled(), pci_acs_flags_enabled()
  */
-bool pci_acs_enabled(struct pci_dev *pdev, u16 acs_flags) /* NVMe: pci_acs_enabled 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	int ret; /* NVMe: int 타입 변수를 선언한다. */
+bool pci_acs_enabled(struct pci_dev *pdev, u16 acs_flags)
+{
+	int ret; /* [한국어] quirk 의 답. 0 이상이면 quirk 가 판정을 끝냈다는 뜻이다 */
 
-	ret = pci_dev_specific_acs_enabled(pdev, acs_flags); /* NVMe: 변수에 값을 할당한다. */
-	if (ret >= 0) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return ret > 0; /* NVMe: 연산 결과를 반환한다. */
+	ret = pci_dev_specific_acs_enabled(pdev, acs_flags); /* [한국어] 하드웨어별 예외를 먼저 물어본다. 표준 ACS 대신 자체 방식으로 격리하는 장치가 있다 */
+	if (ret >= 0) /* [한국어] quirk 가 판정했으면(음수가 아니면) */
+		return ret > 0; /* [한국어] 그 답을 그대로 쓴다. 0 은 false, 양수는 true */
 
 	/*
 	 * Conventional PCI and PCI-X devices never support ACS, either
 	 * effectively or actually.  The shared bus topology implies that
 	 * any device on the bus can receive or snoop DMA.
 	 */
-	if (!pci_is_pcie(pdev)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return false; /* NVMe: 연산 결과를 반환한다. */
+	if (!pci_is_pcie(pdev)) /* [한국어] 재래식 PCI/PCI-X 는 공유 버스라 격리 자체가 성립하지 않는다 */
+		return false; /* [한국어] 격리 없음 */
 
-	switch (pci_pcie_type(pdev)) { /* NVMe: 다중 분기를 위한 switch 문을 시작한다. */
+	switch (pci_pcie_type(pdev)) { /* [한국어] PCIe 타입별로 규격이 요구하는 바가 다르다 */
 	/*
 	 * PCI/X-to-PCIe bridges are not specifically mentioned by the spec,
 	 * but since their primary interface is PCI/X, we conservatively
 	 * handle them as we would a non-PCIe device.
 	 */
-	case PCI_EXP_TYPE_PCIE_BRIDGE: /* NVMe: switch 의 case 레이블이다. */
+	case PCI_EXP_TYPE_PCIE_BRIDGE: /* [한국어] PCIe-to-PCI/X 브리지 — 주 인터페이스가 PCI/X 라 보수적으로 다룬다 */
 	/*
 	 * PCIe 3.0, 6.12.1 excludes ACS on these devices.  "ACS is never
 	 * applicable... must never implement an ACS Extended Capability...".
 	 * This seems arbitrary, but we take a conservative interpretation
 	 * of this statement.
 	 */
-	case PCI_EXP_TYPE_PCI_BRIDGE: /* NVMe: switch 의 case 레이블이다. */
-	case PCI_EXP_TYPE_RC_EC: /* NVMe: switch 의 case 레이블이다. */
-		return false; /* NVMe: 연산 결과를 반환한다. */
+	case PCI_EXP_TYPE_PCI_BRIDGE: /* [한국어] PCI-to-PCIe 브리지 */
+	case PCI_EXP_TYPE_RC_EC: /* [한국어] Root Complex Event Collector — 규격이 ACS 를 배제한다 */
+		return false; /* [한국어] 세 종류 모두 격리를 보장할 수 없다 */
 	/*
 	 * PCIe 3.0, 6.12.1.1 specifies that downstream and root ports should
 	 * implement ACS in order to indicate their peer-to-peer capabilities,
 	 * regardless of whether they are single- or multi-function devices.
 	 */
-	case PCI_EXP_TYPE_DOWNSTREAM: /* NVMe: switch 의 case 레이블이다. */
-	case PCI_EXP_TYPE_ROOT_PORT: /* NVMe: switch 의 case 레이블이다. */
-		return pci_acs_flags_enabled(pdev, acs_flags); /* NVMe: 연산 결과를 반환한다. */
+	case PCI_EXP_TYPE_DOWNSTREAM: /* [한국어] 스위치의 다운스트림 포트 */
+	case PCI_EXP_TYPE_ROOT_PORT: /* [한국어] Root Port — 이 둘은 단일·다중 함수와 무관하게 ACS 를 구현해야 한다 */
+		return pci_acs_flags_enabled(pdev, acs_flags); /* [한국어] 실제 비트를 확인한다 */
 	/*
 	 * PCIe 3.0, 6.12.1.2 specifies ACS capabilities that should be
 	 * implemented by the remaining PCIe types to indicate peer-to-peer
@@ -4120,22 +6823,22 @@ bool pci_acs_enabled(struct pci_dev *pdev, u16 acs_flags) /* NVMe: pci_acs_enabl
 	 * device.  The footnote for section 6.12 indicates the specific
 	 * PCIe types included here.
 	 */
-	case PCI_EXP_TYPE_ENDPOINT: /* NVMe: switch 의 case 레이블이다. */
-	case PCI_EXP_TYPE_UPSTREAM: /* NVMe: switch 의 case 레이블이다. */
-	case PCI_EXP_TYPE_LEG_END: /* NVMe: switch 의 case 레이블이다. */
-	case PCI_EXP_TYPE_RC_END: /* NVMe: switch 의 case 레이블이다. */
-		if (!pdev->multifunction) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			break; /* NVMe: 현재 반복문을 빠져나간다. */
+	case PCI_EXP_TYPE_ENDPOINT: /* [한국어] 엔드포인트 */
+	case PCI_EXP_TYPE_UPSTREAM: /* [한국어] 스위치 업스트림 포트 */
+	case PCI_EXP_TYPE_LEG_END: /* [한국어] 레거시 엔드포인트 */
+	case PCI_EXP_TYPE_RC_END: /* [한국어] Root Complex 통합 엔드포인트 */
+		if (!pdev->multifunction) /* [한국어] 단일 함수 장치라면 P2P 를 할 기회가 없다 */
+			break; /* [한국어] switch 를 빠져나가 아래에서 true 로 끝난다 */
 
-		return pci_acs_flags_enabled(pdev, acs_flags); /* NVMe: 연산 결과를 반환한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+		return pci_acs_flags_enabled(pdev, acs_flags); /* [한국어] 다중 함수라면 함수끼리 P2P 가 가능하므로 실제 비트를 확인한다 */
+	}
 
 	/*
 	 * PCIe 3.0, 6.12.1.3 specifies no ACS capabilities are applicable
 	 * to single function devices with the exception of downstream ports.
 	 */
-	return true; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return true; /* [한국어] 단일 함수 장치(다운스트림 포트 제외)에는 ACS 가 적용되지 않는다. 격리를 깰 방법이 없으므로 요구를 만족한 것으로 본다 */
+}
 
 /**
  * pci_acs_path_enabled - test ACS flags from start to end in a hierarchy
@@ -4146,46 +6849,97 @@ bool pci_acs_enabled(struct pci_dev *pdev, u16 acs_flags) /* NVMe: pci_acs_enabl
  * Walk up a device tree from start to end testing PCI ACS support.  If
  * any step along the way does not support the required flags, return false.
  */
-bool pci_acs_path_enabled(struct pci_dev *start, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-			  struct pci_dev *end, u16 acs_flags) /* NVMe: 표현식을 평가한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	struct pci_dev *pdev, *parent = start; /* NVMe: 데이터 타입 변수를 선언한다. */
+/*
+ * [한국어]
+ * pci_acs_path_enabled - 두 장치 사이의 경로 전 구간에서 ACS 격리가 성립하는지 본다.
+ *
+ * @start: 아래쪽 시작 장치.
+ * @end: 위쪽 끝 장치. NULL 이면 루트 버스까지 훑는다.
+ * @acs_flags: 요구하는 ACS 비트 조합.
+ * @return: 경로상 모든 장치가 요구를 만족하면 true.
+ *
+ * 격리는 경로에서 가장 약한 고리로 결정된다. 중간의 스위치 포트 하나가
+ * P2P 트래픽을 위로 올려보내지 않고 자기 안에서 되돌리면, 그 지점에서
+ * IOMMU 를 우회하게 되어 아래위 모두의 격리가 무너진다. 그래서 한 곳이라도
+ * 어긋나면 즉시 false 다.
+ *
+ * @end 가 NULL 인 경우의 처리가 미묘하다. 루트 버스에 닿으면 (end == NULL) 을
+ * 돌려준다 — end 를 지정했는데 루트까지 왔다는 것은 그 end 가 이 경로 위에
+ * 없었다는 뜻이므로 false 여야 한다.
+ *
+ * do-while 인 이유는 start 자신도 검사 대상이기 때문이다. start == end 인
+ * 경우에도 최소 한 번은 돌아 그 장치를 확인한다.
+ *
+ * NVMe 와의 관계: P2PDMA 로 NVMe 의 CMB 와 다른 장치가 직접 데이터를 주고받을
+ * 때, 그 경로에서 ACS 재지정이 켜져 있으면 트래픽이 루트까지 올라갔다
+ * 내려와 성능이 크게 떨어진다. p2pdma.c 가 이 함수로 경로를 검사한다.
+ *
+ * 실행 문맥: 버스 계층을 거슬러 올라가며 config 를 읽는다. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   drivers/pci/p2pdma.c, IOMMU 그룹 구성 코드 → [이 함수] → pci_acs_enabled()
+ */
+bool pci_acs_path_enabled(struct pci_dev *start,
+			  struct pci_dev *end, u16 acs_flags)
+{
+	struct pci_dev *pdev, *parent = start; /* [한국어] pdev 는 지금 검사 중인 장치, parent 는 다음에 올라갈 장치. start 부터 시작한다 */
 
-	do { /* NVMe: do-while 루프 본문을 시작한다. */
-		pdev = parent; /* NVMe: 변수에 값을 할당한다. */
+	do { /* [한국어] start 자신도 검사해야 하므로 do-while 이다 */
+		pdev = parent; /* [한국어] 이번 회차에 검사할 장치 */
 
-		if (!pci_acs_enabled(pdev, acs_flags)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			return false; /* NVMe: 연산 결과를 반환한다. */
+		if (!pci_acs_enabled(pdev, acs_flags)) /* [한국어] 한 곳이라도 격리를 제공하지 않으면 */
+			return false; /* [한국어] 경로 전체가 무너진다 */
 
-		if (pci_is_root_bus(pdev->bus)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			return (end == NULL); /* NVMe: 연산 결과를 반환한다. */
+		if (pci_is_root_bus(pdev->bus)) /* [한국어] 루트 버스에 닿았다면 더 올라갈 곳이 없다 */
+			return (end == NULL); /* [한국어] end 를 지정하지 않았다면 루트까지 온 것이 정상이라 true, 지정했는데 여기까지 왔다면 그 end 가 경로 위에 없었다는 뜻이라 false 다 */
 
-		parent = pdev->bus->self; /* NVMe: 변수에 값을 할당한다. */
-	} while (pdev != end); /* NVMe: 변수에 값을 할당한다. */
+		parent = pdev->bus->self; /* [한국어] 한 단계 위 브리지로 */
+	} while (pdev != end); /* [한국어] end 에 닿으면 멈춘다 */
 
-	return true; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return true; /* [한국어] 경로 전 구간이 요구를 만족했다 */
+}
 
 /**
  * pci_acs_init - Initialize ACS if hardware supports it
  * @dev: the PCI device
  */
 /*
- * pci_acs_init:
- *   ACS capability 를 초기화한다. NVMe 장치가 안전한 IOMMU/P2P 환경에서 동작하도록 ACS 정책을 적용한다.
+ * [한국어]
+ * pci_acs_init - 열거 중 ACS capability 위치와 능력 비트를 캐시해 둔다.
+ *
+ * @dev: 막 열거된 PCI 장치.
+ * @return: 없음.
+ *
+ * 이후 ACS 관련 코드가 매번 확장 capability 리스트를 훑지 않도록,
+ * 오프셋과 Capability 레지스터 값을 pci_dev 에 담아 둔다.
+ *   - dev->acs_cap: ACS capability 의 오프셋. 0 이면 이 장치에는 ACS 가 없다.
+ *   - dev->acs_capabilities: 어떤 ACS 기능을 제어할 수 있는지의 비트맵.
+ *
+ * 마지막의 pci_disable_broken_acs_cap() 은 quirk 다. ACS capability 를
+ * 내보이지만 실제로는 동작하지 않는 하드웨어가 있어, 그런 장치의 능력
+ * 비트를 지워 커널이 잘못 믿지 않게 한다.
+ *
+ * 이름과 달리 여기서 ACS 를 켜지는 않는다. 켜는 일은 pci_enable_acs() 가
+ * 나중에 한다.
+ *
+ * 실행 문맥: 열거 중 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   probe.c 의 pci_init_capabilities() → [이 함수]
+ *     → pci_find_ext_capability(), pci_disable_broken_acs_cap()
  */
-void pci_acs_init(struct pci_dev *dev) /* NVMe: pci_acs_init 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	int pos; /* NVMe: int 타입 변수를 선언한다. */
+void pci_acs_init(struct pci_dev *dev)
+{
+	int pos; /* [한국어] 지역 사본. 아래에서 두 번 쓰므로 한 번만 읽어 둔다 */
 
-	dev->acs_cap = pci_find_ext_capability(dev, PCI_EXT_CAP_ID_ACS); /* NVMe: 변수에 값을 할당한다. */
-	pos = dev->acs_cap; /* NVMe: 변수에 값을 할당한다. */
-	if (!pos) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return; /* NVMe: 함수 실행을 종료한다. */
+	dev->acs_cap = pci_find_ext_capability(dev, PCI_EXT_CAP_ID_ACS); /* [한국어] ACS 확장 capability 의 오프셋을 캐시한다. 이후 조회가 리스트를 다시 훑지 않는다 */
+	pos = dev->acs_cap; /* [한국어] 지역 변수로 옮긴다 */
+	if (!pos) /* [한국어] ACS capability 가 없는 장치면 */
+		return; /* [한국어] 캐시할 것이 없다 */
 
-	pci_read_config_word(dev, pos + PCI_ACS_CAP, &dev->acs_capabilities); /* NVMe: PCI 설정 공간 2바이트를 읽는다. */
-	pci_disable_broken_acs_cap(dev); /* NVMe: pci_disable_broken_acs_cap 함수를 호출한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	pci_read_config_word(dev, pos + PCI_ACS_CAP, &dev->acs_capabilities); /* [한국어] ACS Capability 레지스터를 읽어 "어떤 기능을 제어할 수 있는가"를 캐시한다 */
+	pci_disable_broken_acs_cap(dev); /* [한국어] ACS 를 내보이지만 실제로는 동작하지 않는 하드웨어의 능력 비트를 지우는 quirk */
+}
 
 /**
  * pci_enable_atomic_ops_to_root - enable AtomicOp requests to root port
@@ -4201,24 +6955,54 @@ void pci_acs_init(struct pci_dev *dev) /* NVMe: pci_acs_init 함수를 정의한
  * AtomicOp completion), or negative otherwise.
  */
 /*
- * pci_enable_atomic_ops_to_root:
- *   PCIe AtomicOps 를 root 까지 enable 한다. NVMe Compare-and-Write 나 atomic 명령 지원에 필요하다.
+ * [한국어]
+ * pci_enable_atomic_ops_to_root - 이 장치가 Root Port 로 AtomicOp 을 보낼 수 있게 한다.
+ *
+ * @dev: AtomicOp 를 보내려는 엔드포인트.
+ * @cap_mask: 필요한 완료 크기 조합(32/64/128비트).
+ * @return: 0 성공. 경로상 어느 조건이라도 맞지 않으면 -EINVAL.
+ *
+ * PCIe AtomicOp 는 FetchAdd, Swap, CAS 를 메모리에 대해 원자적으로 수행하는
+ * 트랜잭션이다. 이것이 성립하려면 요청자(엔드포인트)부터 완료자(Root Port)
+ * 까지 경로 전체가 협조해야 하므로, 검사가 여러 겹이다.
+ *
+ *   1) VF 는 안 된다. 규격상 Device Control 2 의 AtomicOp Requester Enable
+ *      비트가 VF 에서는 예약이고 PF 의 값이 모든 VF 에 적용된다(원본 주석).
+ *   2) PCIe 장치여야 한다.
+ *   3) 요청자가 될 수 있는 것은 엔드포인트(및 레거시 엔드포인트)뿐이다.
+ *      원본 주석대로 이 구현은 완료자를 Root Port 로 한정하고 P2P 는 다루지 않는다.
+ *   4) Root Port 가 요청한 크기의 완료를 지원해야 한다.
+ *   5) 경로상 모든 스위치 포트가 AtomicOp 라우팅을 지원해야 하고,
+ *      업스트림 포트는 Egress Blocking 을 켜 두지 않아야 한다.
+ *
+ * 5)의 순회에서 fallthrough 가 중요하다. 업스트림 포트는 Egress Blocking 을
+ * 확인한 뒤 그대로 아래로 흘러 라우팅 지원까지 검사한다 — 두 조건이 모두
+ * 필요하기 때문이다.
+ *
+ * 모든 검사를 통과한 뒤에야 장치의 AtomicOp Requester Enable 을 켠다.
+ *
+ * 실행 문맥: config space 를 여러 번 읽는다. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   AtomicOp 을 쓰려는 드라이버 → [이 함수]
+ *     → pcie_find_root_port(), pcie_capability_read_dword(),
+ *        pcie_capability_set_word()
  */
-int pci_enable_atomic_ops_to_root(struct pci_dev *dev, u32 cap_mask) /* NVMe: pci_enable_atomic_ops_to_root 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	struct pci_dev *root, *bridge; /* NVMe: 데이터 타입 변수를 선언한다. */
-	u32 cap, ctl2; /* NVMe: u32 타입 변수를 선언한다. */
+int pci_enable_atomic_ops_to_root(struct pci_dev *dev, u32 cap_mask)
+{
+	struct pci_dev *root, *bridge; /* [한국어] root 는 완료자가 될 Root Port, bridge 는 경로를 훑는 커서 */
+	u32 cap, ctl2; /* [한국어] cap 은 읽어 온 Device Capabilities 2, ctl2 는 Device Control 2 */
 
 	/*
 	 * Per PCIe r7.0, sec 7.5.3.16, the AtomicOp Requester Enable bit
 	 * in Device Control 2 is reserved in VFs and the PF value applies
 	 * to all associated VFs.
 	 */
-	if (dev->is_virtfn) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return -EINVAL; /* NVMe: 오류 코드를 반환한다. */
+	if (dev->is_virtfn) /* [한국어] VF 는 이 비트를 스스로 제어할 수 없다 — PF 의 설정이 모든 VF 에 적용된다 */
+		return -EINVAL; /* [한국어] 거절 */
 
-	if (!pci_is_pcie(dev)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return -EINVAL; /* NVMe: 오류 코드를 반환한다. */
+	if (!pci_is_pcie(dev)) /* [한국어] 재래식 PCI 에는 AtomicOp 자체가 없다 */
+		return -EINVAL; /* [한국어] 거절 */
 
 	/*
 	 * Per PCIe r7.0, sec 6.15, endpoints and root ports may be
@@ -4227,49 +7011,49 @@ int pci_enable_atomic_ops_to_root(struct pci_dev *dev, u32 cap_mask) /* NVMe: pc
 	 * completers, and no peer-to-peer.
 	 */
 
-	switch (pci_pcie_type(dev)) { /* NVMe: 다중 분기를 위한 switch 문을 시작한다. */
-	case PCI_EXP_TYPE_ENDPOINT: /* NVMe: switch 의 case 레이블이다. */
-	case PCI_EXP_TYPE_LEG_END: /* NVMe: switch 의 case 레이블이다. */
-		break; /* NVMe: 현재 반복문을 빠져나간다. */
-	default: /* NVMe: switch 의 기본 처리 레이블이다. */
-		return -EINVAL; /* NVMe: 오류 코드를 반환한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+	switch (pci_pcie_type(dev)) { /* [한국어] 요청자가 될 수 있는 종류인지 확인한다 */
+	case PCI_EXP_TYPE_ENDPOINT: /* [한국어] 엔드포인트 */
+	case PCI_EXP_TYPE_LEG_END: /* [한국어] 레거시 엔드포인트 — 이 둘만 요청자가 될 수 있다 */
+		break; /* [한국어] 검사를 통과했으니 계속 진행한다 */
+	default: /* [한국어] 그 밖의 종류(브리지, 스위치 포트 등)는 */
+		return -EINVAL; /* [한국어] 이 구현에서 요청자가 될 수 없다 */
+	}
 
-	root = pcie_find_root_port(dev); /* NVMe: 변수에 값을 할당한다. */
-	if (!root) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return -EINVAL; /* NVMe: 오류 코드를 반환한다. */
+	root = pcie_find_root_port(dev); /* [한국어] 완료자가 될 Root Port 를 찾는다 */
+	if (!root) /* [한국어] 찾지 못하면 */
+		return -EINVAL; /* [한국어] 완료를 받아 줄 곳이 없다 */
 
-	pcie_capability_read_dword(root, PCI_EXP_DEVCAP2, &cap); /* NVMe: pcie_capability_read_dword 함수를 호출한다. */
-	if ((cap & cap_mask) != cap_mask) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return -EINVAL; /* NVMe: 오류 코드를 반환한다. */
+	pcie_capability_read_dword(root, PCI_EXP_DEVCAP2, &cap); /* [한국어] Root Port 의 Device Capabilities 2 를 읽는다 */
+	if ((cap & cap_mask) != cap_mask) /* [한국어] 요청한 완료 크기를 모두 지원해야 한다. 하나라도 빠지면 */
+		return -EINVAL; /* [한국어] 거절 */
 
-	bridge = pci_upstream_bridge(dev); /* NVMe: 변수에 값을 할당한다. */
-	while (bridge != root) { /* NVMe: 조건이 참인 동안 반복한다. */
-		switch (pci_pcie_type(bridge)) { /* NVMe: 다중 분기를 위한 switch 문을 시작한다. */
-		case PCI_EXP_TYPE_UPSTREAM: /* NVMe: switch 의 case 레이블이다. */
+	bridge = pci_upstream_bridge(dev); /* [한국어] 경로 순회를 바로 위 브리지에서 시작한다 */
+	while (bridge != root) { /* [한국어] Root Port 에 닿을 때까지 중간 스위치 포트를 모두 확인한다 */
+		switch (pci_pcie_type(bridge)) { /* [한국어] 포트 종류에 따라 확인할 것이 다르다 */
+		case PCI_EXP_TYPE_UPSTREAM: /* [한국어] 스위치의 업스트림 포트 */
 			/* Upstream ports must not block AtomicOps on egress */
-			pcie_capability_read_dword(bridge, PCI_EXP_DEVCTL2, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-						   &ctl2); /* NVMe: 비트 연산을 수행한다. */
-			if (ctl2 & PCI_EXP_DEVCTL2_ATOMIC_EGRESS_BLOCK) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-				return -EINVAL; /* NVMe: 오류 코드를 반환한다. */
-			fallthrough; /* NVMe: 표현식을 평가한다. */
+			pcie_capability_read_dword(bridge, PCI_EXP_DEVCTL2, /* [한국어] Device Control 2 를 읽어 */
+						   &ctl2); /* [한국어] 값을 담는다 */
+			if (ctl2 & PCI_EXP_DEVCTL2_ATOMIC_EGRESS_BLOCK) /* [한국어] AtomicOp Egress Blocking 이 켜져 있으면 이 포트에서 막힌다 */
+				return -EINVAL; /* [한국어] 거절 */
+			fallthrough; /* [한국어] 막히지 않았으면 아래 라우팅 검사로 그대로 이어진다 — 업스트림 포트는 두 조건을 모두 만족해야 한다 */
 
 		/* All switch ports need to route AtomicOps */
-		case PCI_EXP_TYPE_DOWNSTREAM: /* NVMe: switch 의 case 레이블이다. */
-			pcie_capability_read_dword(bridge, PCI_EXP_DEVCAP2, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-						   &cap); /* NVMe: 비트 연산을 수행한다. */
-			if (!(cap & PCI_EXP_DEVCAP2_ATOMIC_ROUTE)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-				return -EINVAL; /* NVMe: 오류 코드를 반환한다. */
-			break; /* NVMe: 현재 반복문을 빠져나간다. */
-		} /* NVMe: 코드 블록을 종료한다. */
+		case PCI_EXP_TYPE_DOWNSTREAM: /* [한국어] 스위치의 다운스트림 포트(그리고 위에서 흘러온 업스트림 포트) */
+			pcie_capability_read_dword(bridge, PCI_EXP_DEVCAP2, /* [한국어] Device Capabilities 2 를 읽어 */
+						   &cap); /* [한국어] 값을 담는다 */
+			if (!(cap & PCI_EXP_DEVCAP2_ATOMIC_ROUTE)) /* [한국어] AtomicOp Routing 지원 비트가 없으면 이 포트가 AtomicOp 를 전달하지 못한다 */
+				return -EINVAL; /* [한국어] 거절 */
+			break; /* [한국어] 이 포트는 통과 */
+		}
 
-		bridge = pci_upstream_bridge(bridge); /* NVMe: 변수에 값을 할당한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+		bridge = pci_upstream_bridge(bridge); /* [한국어] 한 단계 위로 올라간다 */
+	}
 
-	pcie_capability_set_word(dev, PCI_EXP_DEVCTL2, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-				 PCI_EXP_DEVCTL2_ATOMIC_REQ); /* NVMe: 표현식을 평가한다. */
-	return 0; /* NVMe: 성공(0)을 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	pcie_capability_set_word(dev, PCI_EXP_DEVCTL2, /* [한국어] 경로 전체가 조건을 만족했으므로 이제 장치의 요청 기능을 켠다 */
+				 PCI_EXP_DEVCTL2_ATOMIC_REQ); /* [한국어] Device Control 2 의 AtomicOp Requester Enable 비트 */
+	return 0; /* [한국어] 설정 완료 */
+}
 EXPORT_SYMBOL(pci_enable_atomic_ops_to_root);
 
 /**
@@ -4283,23 +7067,43 @@ EXPORT_SYMBOL(pci_enable_atomic_ops_to_root);
  * after all use of the PCI regions has ceased.
  */
 /*
- * pci_release_region:
- *   지정한 BAR 의 리소스 영역을 해제한다. NVMe driver remove 시 해당 BAR 의 request 를 반납한다.
+ * [한국어]
+ * pci_release_region - BAR 하나에 대해 잡아 두었던 자원 예약을 돌려준다.
+ *
+ * @pdev: 대상 PCI 장치.
+ * @bar: 해제할 BAR 번호.
+ * @return: 없음.
+ *
+ * "자원 예약"은 하드웨어를 건드리는 일이 아니라 커널의 자원 트리
+ * (/proc/iomem, /proc/ioports 에 보이는 그것)에 이 구간의 주인을 등록하는
+ * 일이다. 두 드라이버가 같은 MMIO 창을 동시에 잡는 사고를 막는 장치이며,
+ * 등록해 두면 /proc/iomem 에 드라이버 이름이 표시돼 진단에도 쓰인다.
+ *
+ * IO 공간과 메모리 공간은 커널 안에서 서로 다른 자원 트리에 속하므로
+ * 해제 함수도 다르다. 그래서 resource 플래그를 보고 갈래를 탄다.
+ *
+ * 길이가 0 인 BAR 는 애초에 예약된 적이 없어 그냥 넘어간다.
+ *
+ * 실행 문맥: 자원 트리를 조작한다. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_release_selected_regions(), 각 드라이버의 remove → [이 함수]
+ *     → release_region() / release_mem_region()
  */
-void pci_release_region(struct pci_dev *pdev, int bar) /* NVMe: pci_release_region 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	if (!pci_bar_index_is_valid(bar)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return; /* NVMe: 함수 실행을 종료한다. */
+void pci_release_region(struct pci_dev *pdev, int bar)
+{
+	if (!pci_bar_index_is_valid(bar)) /* [한국어] BAR 번호가 유효 범위 밖이면 인덱싱 자체가 위험하다 */
+		return; /* [한국어] 조용히 무시한다 */
 
-	if (pci_resource_len(pdev, bar) == 0) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return; /* NVMe: 함수 실행을 종료한다. */
-	if (pci_resource_flags(pdev, bar) & IORESOURCE_IO) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		release_region(pci_resource_start(pdev, bar), /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-				pci_resource_len(pdev, bar)); /* NVMe: BAR 의 길이를 반환한다. */
-	else if (pci_resource_flags(pdev, bar) & IORESOURCE_MEM) /* NVMe: 이전 조건이 거짓일 때 추가 조건을 검사한다. */
-		release_mem_region(pci_resource_start(pdev, bar), /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-				pci_resource_len(pdev, bar)); /* NVMe: BAR 의 길이를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	if (pci_resource_len(pdev, bar) == 0) /* [한국어] 구현되지 않았거나 크기가 0 인 BAR 는 예약된 적이 없다 */
+		return; /* [한국어] 해제할 것이 없다 */
+	if (pci_resource_flags(pdev, bar) & IORESOURCE_IO) /* [한국어] IO 공간 BAR 면 */
+		release_region(pci_resource_start(pdev, bar), /* [한국어] IO 자원 트리에서 이 구간을 놓는다 */
+				pci_resource_len(pdev, bar)); /* [한국어] 예약했던 것과 같은 시작 주소와 길이를 넘겨야 정확히 그 구간이 풀린다 */
+	else if (pci_resource_flags(pdev, bar) & IORESOURCE_MEM) /* [한국어] 메모리 공간 BAR 면 */
+		release_mem_region(pci_resource_start(pdev, bar), /* [한국어] 메모리 자원 트리에서 놓는다. IO 와 메모리는 별개의 트리라 함수가 다르다 */
+				pci_resource_len(pdev, bar)); /* [한국어] 같은 구간을 지정한다 */
+}
 EXPORT_SYMBOL(pci_release_region);
 
 /**
@@ -4322,33 +7126,60 @@ EXPORT_SYMBOL(pci_release_region);
  * Returns 0 on success, or %EBUSY on error.  A warning
  * message is also printed on failure.
  */
-static int __pci_request_region(struct pci_dev *pdev, int bar, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-				const char *name, int exclusive) /* NVMe: char 타입 변수를 선언한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	if (!pci_bar_index_is_valid(bar)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return -EINVAL; /* NVMe: 오류 코드를 반환한다. */
+/*
+ * [한국어]
+ * __pci_request_region - BAR 하나의 주소 구간을 커널 자원 트리에 예약한다.
+ *
+ * @pdev: 대상 PCI 장치.
+ * @bar: 예약할 BAR 번호.
+ * @name: 예약자 이름. /proc/iomem 에 이 이름이 표시된다.
+ * @exclusive: 0 이면 보통 예약, IORESOURCE_EXCLUSIVE 면 사용자 공간의 접근까지 막는다.
+ * @return: 0 성공(길이 0 인 BAR 도 성공), -EINVAL 잘못된 BAR 번호, -EBUSY 이미 남이 잡고 있음.
+ *
+ * 이 예약이 하는 일은 하드웨어 설정이 아니라 소유권 등록이다. 예약이 성공해야
+ * 그 주소를 ioremap 해 접근해도 안전하다 — 원본 주석이 "이 호출이 성공하기
+ * 전에는 그 구간의 어떤 주소도 건드리지 말라"고 못 박는 이유다.
+ *
+ * @exclusive 는 한 걸음 더 나간다. IORESOURCE_EXCLUSIVE 로 표시된 구간은
+ * /dev/mem 이나 sysfs 의 MMIO 통로로도 매핑할 수 없게 된다. 사용자 공간이
+ * 드라이버 몰래 레지스터를 건드려 장치를 망가뜨리는 것을 막는 장치다.
+ *
+ * 길이가 0 인 BAR 에 0(성공)을 돌려주는 것이 중요하다. 구현되지 않은 BAR 를
+ * 요청 목록에 넣었다는 이유로 전체 요청이 실패하면 곤란하기 때문이다.
+ *
+ * 실행 문맥: 자원 트리를 조작한다. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_request_region(), __pci_request_selected_regions() → [이 함수]
+ *     → request_region() / __request_mem_region()
+ */
+static int __pci_request_region(struct pci_dev *pdev, int bar,
+				const char *name, int exclusive)
+{
+	if (!pci_bar_index_is_valid(bar)) /* [한국어] BAR 번호가 유효 범위 밖이면 */
+		return -EINVAL; /* [한국어] 잘못된 요청이다 */
 
-	if (pci_resource_len(pdev, bar) == 0) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return 0; /* NVMe: 성공(0)을 반환한다. */
+	if (pci_resource_len(pdev, bar) == 0) /* [한국어] 구현되지 않았거나 크기가 0 인 BAR 는 */
+		return 0; /* [한국어] 예약할 것이 없으므로 성공으로 처리한다. 여기서 실패로 돌리면 요청 목록에 든 다른 BAR 까지 함께 실패한다 */
 
-	if (pci_resource_flags(pdev, bar) & IORESOURCE_IO) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		if (!request_region(pci_resource_start(pdev, bar), /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			    pci_resource_len(pdev, bar), name)) /* NVMe: BAR 의 길이를 반환한다. */
-			goto err_out; /* NVMe: 지정한 레이블로 제어를 이동한다. */
-	} else if (pci_resource_flags(pdev, bar) & IORESOURCE_MEM) { /* NVMe: if 함수를 정의한다. */
-		if (!__request_mem_region(pci_resource_start(pdev, bar), /* NVMe: 조건식을 평가해 분기를 결정한다. */
-					pci_resource_len(pdev, bar), name, /* NVMe: BAR 의 길이를 반환한다. */
-					exclusive)) /* NVMe: 표현식을 평가한다. */
-			goto err_out; /* NVMe: 지정한 레이블로 제어를 이동한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+	if (pci_resource_flags(pdev, bar) & IORESOURCE_IO) { /* [한국어] IO 공간 BAR 면 */
+		if (!request_region(pci_resource_start(pdev, bar), /* [한국어] IO 자원 트리에 등록을 시도한다 */
+			    pci_resource_len(pdev, bar), name)) /* [한국어] 시작 주소와 길이, 그리고 소유자 이름 */
+			goto err_out; /* [한국어] 이미 다른 주인이 있으면 실패 경로로 */
+	} else if (pci_resource_flags(pdev, bar) & IORESOURCE_MEM) { /* [한국어] 메모리 공간 BAR 면 */
+		if (!__request_mem_region(pci_resource_start(pdev, bar), /* [한국어] 메모리 자원 트리에 등록을 시도한다 */
+					pci_resource_len(pdev, bar), name, /* [한국어] 시작 주소와 길이, 소유자 이름 */
+					exclusive)) /* [한국어] exclusive 플래그를 그대로 넘겨 사용자 공간 매핑 차단 여부를 정한다 */
+			goto err_out; /* [한국어] 이미 다른 주인이 있으면 실패 경로로 */
+	}
 
-	return 0; /* NVMe: 성공(0)을 반환한다. */
+	return 0; /* [한국어] 예약 성공 */
 
-err_out: /* NVMe: 레이블을 정의한다. */
-	pci_warn(pdev, "BAR %d: can't reserve %pR\n", bar, /* NVMe: PCI 장치에 대한 경고 로그를 출력한다. */
-		 &pdev->resource[bar]); /* NVMe: 비트 연산을 수행한다. */
-	return -EBUSY; /* NVMe: 오류 코드를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+err_out: /* [한국어] 두 갈래의 실패가 모이는 지점 */
+	pci_warn(pdev, "BAR %d: can't reserve %pR\n", bar, /* [한국어] 어느 BAR 가 왜 실패했는지 남긴다. 자원 충돌은 원인을 찾기 어려워 로그가 중요하다 */
+		 &pdev->resource[bar]); /* [한국어] %pR 로 "[mem 0x... - 0x...]" 형태로 구간을 찍는다 */
+	return -EBUSY; /* [한국어] 이미 남이 쓰고 있다는 뜻의 -EBUSY */
+}
 
 /**
  * pci_request_region - Reserve PCI I/O and memory resource
@@ -4366,13 +7197,26 @@ err_out: /* NVMe: 레이블을 정의한다. */
  * message is also printed on failure.
  */
 /*
- * pci_request_region:
- *   지정한 BAR 의 리소스 영역을 요청한다. NVMe driver probe 시 BAR0/등록 공간 사용권을 확보한다.
+ * [한국어]
+ * pci_request_region - BAR 하나를 보통(비독점) 방식으로 예약한다.
+ *
+ * @pdev: 대상 PCI 장치.
+ * @bar: 예약할 BAR 번호.
+ * @name: 예약자 이름.
+ * @return: 0 성공, -EBUSY 충돌, -EINVAL 잘못된 BAR 번호.
+ *
+ * exclusive=0 으로 고정한 래퍼다. 사용자 공간이 /dev/mem 등으로 이 구간을
+ * 매핑하는 것을 막지 않는다.
+ *
+ * 실행 문맥: 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   각 드라이버의 probe → [이 함수] → __pci_request_region()
  */
-int pci_request_region(struct pci_dev *pdev, int bar, const char *name) /* NVMe: pci_request_region 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	return __pci_request_region(pdev, bar, name, 0); /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+int pci_request_region(struct pci_dev *pdev, int bar, const char *name)
+{
+	return __pci_request_region(pdev, bar, name, 0); /* [한국어] exclusive=0 — 사용자 공간 매핑을 막지 않는 보통 예약 */
+}
 EXPORT_SYMBOL(pci_request_region);
 
 /**
@@ -4384,37 +7228,78 @@ EXPORT_SYMBOL(pci_request_region);
  * Call this function only after all use of the PCI regions has ceased.
  */
 /*
- * pci_release_selected_regions:
- *   선택한 BAR 들의 리소스 영역을 해제한다. NVMe driver 가 사용하던 여러 BAR 를 한 번에 반납한다.
+ * [한국어]
+ * pci_release_selected_regions - 비트마스크로 고른 BAR 들의 예약을 한꺼번에 푼다.
+ *
+ * @pdev: 대상 PCI 장치.
+ * @bars: 해제할 BAR 들의 비트마스크. 비트 i 가 1 이면 BAR i 를 푼다.
+ * @return: 없음.
+ *
+ * 예약할 때 쓴 비트마스크를 그대로 넘겨 대칭을 맞추는 것이 보통이다.
+ * 표준 BAR 6개만 대상이며 ROM 이나 VF BAR 는 다루지 않는다.
+ *
+ * NVMe 와의 관계: drivers/nvme/host/pci.c 가 부르는 pci_release_mem_regions()
+ * 는 <linux/pci.h> 의 인라인 함수로, 결국 이 함수에 도달한다.
+ * (그 헤더는 이 작업 트리에 포함돼 있지 않아 트리 안에서는 확인할 수 없다.)
+ *
+ * 실행 문맥: 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_release_regions(), pci_release_mem_regions()(인라인) → [이 함수]
+ *     → pci_release_region()
  */
-void pci_release_selected_regions(struct pci_dev *pdev, int bars) /* NVMe: pci_release_selected_regions 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	int i; /* NVMe: int 타입 변수를 선언한다. */
+void pci_release_selected_regions(struct pci_dev *pdev, int bars)
+{
+	int i; /* [한국어] BAR 인덱스 */
 
-	for (i = 0; i < PCI_STD_NUM_BARS; i++) /* NVMe: 표준 BAR 0~5 를 순회하며 해제한다. */
-		if (bars & (1 << i)) /* NVMe: 비트마스크에 해당 BAR 가 설정되어 있으면 */
-			pci_release_region(pdev, i); /* NVMe: 해당 NVMe BAR 의 리소스 요청을 해제한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	for (i = 0; i < PCI_STD_NUM_BARS; i++) /* [한국어] 표준 BAR 6개만 대상이다 */
+		if (bars & (1 << i)) /* [한국어] 비트마스크에 표시된 BAR 만 */
+			pci_release_region(pdev, i); /* [한국어] 하나씩 예약을 푼다 */
+}
 EXPORT_SYMBOL(pci_release_selected_regions);
 
-static int __pci_request_selected_regions(struct pci_dev *pdev, int bars, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-					  const char *name, int excl) /* NVMe: char 타입 변수를 선언한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	int i; /* NVMe: int 타입 변수를 선언한다. */
+/*
+ * [한국어]
+ * __pci_request_selected_regions - 고른 BAR 들을 예약하되, 실패하면 전부 되돌린다.
+ *
+ * @pdev: 대상 PCI 장치.
+ * @bars: 예약할 BAR 들의 비트마스크.
+ * @name: 예약자 이름.
+ * @excl: 0 이면 보통 예약, IORESOURCE_EXCLUSIVE 면 독점 예약.
+ * @return: 0 성공, -EBUSY 이면 하나라도 충돌해 아무 것도 예약되지 않은 상태다.
+ *
+ * "전부 성공하거나 전부 없던 일이 되거나" 를 보장하는 것이 이 함수의 요점이다.
+ * 중간에 실패하면 이미 예약한 BAR 들을 역순으로 풀어, 호출자가 부분적으로
+ * 예약된 어정쩡한 상태를 떠안지 않게 한다.
+ *
+ * 되돌리기 루프의 --i 가 그 장치다. 실패한 시점의 i 는 아직 예약하지 못한
+ * BAR 를 가리키므로, 먼저 감소시켜 직전에 성공한 BAR 부터 푼다.
+ *
+ * 실행 문맥: 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_request_selected_regions(), pci_request_selected_regions_exclusive(),
+ *   pci_request_regions() → [이 함수]
+ *     → __pci_request_region(), pci_release_region()
+ */
+static int __pci_request_selected_regions(struct pci_dev *pdev, int bars,
+					  const char *name, int excl)
+{
+	int i; /* [한국어] BAR 인덱스. 실패 시 되돌리기의 시작점으로도 쓰인다 */
 
-	for (i = 0; i < PCI_STD_NUM_BARS; i++) /* NVMe: 표준 BAR 0~5 를 순회하며 요청한다. */
-		if (bars & (1 << i)) /* NVMe: 비트마스크에 해당 BAR 가 설정되어 있으면 */
-			if (__pci_request_region(pdev, i, name, excl)) /* NVMe: 해당 NVMe BAR 리소스 요청에 실패하면 */
-				goto err_out; /* NVMe: 이미 요청한 BAR 를 롤백하기 위해 err_out 으로 이동한다. */
-	return 0; /* NVMe: 성공(0)을 반환한다. */
+	for (i = 0; i < PCI_STD_NUM_BARS; i++) /* [한국어] 표준 BAR 6개만 대상이다 */
+		if (bars & (1 << i)) /* [한국어] 비트마스크에 표시된 BAR 만 */
+			if (__pci_request_region(pdev, i, name, excl)) /* [한국어] 하나씩 예약을 시도하고, 실패하면 */
+				goto err_out; /* [한국어] 이미 예약한 것들을 되돌리러 간다 */
+	return 0; /* [한국어] 모두 성공 */
 
-err_out: /* NVMe: 레이블을 정의한다. */
-	while (--i >= 0) /* NVMe: 조건이 참인 동안 반복한다. */
-		if (bars & (1 << i)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			pci_release_region(pdev, i); /* NVMe: 지정한 NVMe BAR 리소스를 해제한다. */
+err_out: /* [한국어] 부분 실패를 되돌리는 지점 */
+	while (--i >= 0) /* [한국어] i 는 실패한 BAR 를 가리키므로 먼저 감소시켜 직전에 성공한 것부터 푼다 */
+		if (bars & (1 << i)) /* [한국어] 예약을 시도했던 BAR 만 */
+			pci_release_region(pdev, i); /* [한국어] 되돌린다 */
 
-	return -EBUSY; /* NVMe: 오류 코드를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return -EBUSY; /* [한국어] 아무 것도 예약되지 않은 상태로 -EBUSY 를 알린다 */
+}
 
 
 /**
@@ -4425,11 +7310,34 @@ err_out: /* NVMe: 레이블을 정의한다. */
  *
  * Returns: 0 on success, negative error code on failure.
  */
-int pci_request_selected_regions(struct pci_dev *pdev, int bars, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-				 const char *name) /* NVMe: char 타입 변수를 선언한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	return __pci_request_selected_regions(pdev, bars, name, 0); /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+/*
+ * [한국어]
+ * pci_request_selected_regions - 고른 BAR 들을 보통(비독점) 방식으로 예약한다.
+ *
+ * @pdev: 대상 PCI 장치.
+ * @bars: 예약할 BAR 들의 비트마스크.
+ * @name: 예약자 이름.
+ * @return: 0 성공, -EBUSY 충돌.
+ *
+ * excl=0 으로 고정한 래퍼다. 전부 성공하거나 전부 되돌려지는 성질은
+ * 하위 함수에서 보장된다.
+ *
+ * NVMe 와의 관계: drivers/nvme/host/pci.c 의 nvme_dev_map() 이 부르는
+ * pci_request_mem_regions() 는 <linux/pci.h> 의 인라인 함수로,
+ * pci_select_bars(pdev, IORESOURCE_MEM) 로 메모리 BAR 만 골라 이 함수에
+ * 넘긴다. 그 헤더는 이 작업 트리에 없어 트리 안에서는 확인할 수 없다.
+ *
+ * 실행 문맥: 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   각 드라이버, pci_request_regions(), pci_request_mem_regions()(인라인)
+ *     → [이 함수] → __pci_request_selected_regions()
+ */
+int pci_request_selected_regions(struct pci_dev *pdev, int bars,
+				 const char *name)
+{
+	return __pci_request_selected_regions(pdev, bars, name, 0); /* [한국어] excl=0 — 사용자 공간 매핑을 막지 않는 보통 예약 */
+}
 EXPORT_SYMBOL(pci_request_selected_regions);
 
 /**
@@ -4440,12 +7348,31 @@ EXPORT_SYMBOL(pci_request_selected_regions);
  *
  * Returns: 0 on success, negative error code on failure.
  */
-int pci_request_selected_regions_exclusive(struct pci_dev *pdev, int bars, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-					   const char *name) /* NVMe: char 타입 변수를 선언한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	return __pci_request_selected_regions(pdev, bars, name, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-			IORESOURCE_EXCLUSIVE); /* NVMe: 표현식을 평가한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+/*
+ * [한국어]
+ * pci_request_selected_regions_exclusive - 고른 BAR 들을 독점 예약한다.
+ *
+ * @pdev: 대상 PCI 장치.
+ * @bars: 예약할 BAR 들의 비트마스크.
+ * @name: 예약자 이름.
+ * @return: 0 성공, -EBUSY 충돌.
+ *
+ * IORESOURCE_EXCLUSIVE 를 넘겨, 사용자 공간이 /dev/mem 이나 sysfs 의 MMIO
+ * 통로로 이 구간을 매핑하는 것까지 막는다. 드라이버 몰래 레지스터를 건드려
+ * 장치를 망가뜨리는 일을 방지하려는 것이다.
+ *
+ * 실행 문맥: 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   독점이 필요한 드라이버, pci_request_regions_exclusive() → [이 함수]
+ *     → __pci_request_selected_regions()
+ */
+int pci_request_selected_regions_exclusive(struct pci_dev *pdev, int bars,
+					   const char *name)
+{
+	return __pci_request_selected_regions(pdev, bars, name, /* [한국어] 독점 플래그를 실어 보낸다 */
+			IORESOURCE_EXCLUSIVE); /* [한국어] IORESOURCE_EXCLUSIVE — 사용자 공간의 매핑까지 차단한다 */
+}
 EXPORT_SYMBOL(pci_request_selected_regions_exclusive);
 
 /**
@@ -4458,13 +7385,24 @@ EXPORT_SYMBOL(pci_request_selected_regions_exclusive);
  * after all use of the PCI regions has ceased.
  */
 /*
- * pci_release_regions:
- *   모든 BAR 의 리소스 영역을 해제한다. NVMe driver remove/재초기화 시 모든 BAR request 를 정리한다.
+ * [한국어]
+ * pci_release_regions - 표준 BAR 6개의 예약을 모두 푼다.
+ *
+ * @pdev: 대상 PCI 장치.
+ * @return: 없음.
+ *
+ * (1 << PCI_STD_NUM_BARS) - 1 은 하위 6비트가 모두 1 인 마스크, 즉 BAR 0~5
+ * 전부를 뜻한다. pci_request_regions() 의 짝이다.
+ *
+ * 실행 문맥: 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   각 드라이버의 remove → [이 함수] → pci_release_selected_regions()
  */
-void pci_release_regions(struct pci_dev *pdev) /* NVMe: pci_release_regions 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	pci_release_selected_regions(pdev, (1 << PCI_STD_NUM_BARS) - 1); /* NVMe: NVMe controller 의 표준 BAR 0~5 리소스 요청을 모두 해제한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+void pci_release_regions(struct pci_dev *pdev)
+{
+	pci_release_selected_regions(pdev, (1 << PCI_STD_NUM_BARS) - 1); /* [한국어] 하위 6비트가 모두 1 인 마스크 — 표준 BAR 전부를 가리킨다 */
+}
 EXPORT_SYMBOL(pci_release_regions);
 
 /**
@@ -4480,14 +7418,29 @@ EXPORT_SYMBOL(pci_release_regions);
  * message is also printed on failure.
  */
 /*
- * pci_request_regions:
- *   NVMe controller 의 모든 BAR 리소스를 요청한다. probe 단계에서 BAR0 doorbell 영역 등을 확보한다.
+ * [한국어]
+ * pci_request_regions - 표준 BAR 6개를 모두 보통 방식으로 예약한다.
+ *
+ * @pdev: 대상 PCI 장치.
+ * @name: 예약자 이름.
+ * @return: 0 성공, -EBUSY 충돌.
+ *
+ * 구현되지 않은 BAR 는 길이가 0 이라 하위에서 성공으로 처리되므로, 6개를
+ * 모두 요청해도 문제가 없다. 하나라도 충돌하면 전부 되돌려진다.
+ *
+ * 메모리 BAR 만 쓰는 장치라면 IO 자원까지 붙들지 않도록
+ * pci_request_mem_regions()(헤더의 인라인 함수)를 쓰는 편이 낫다.
+ *
+ * 실행 문맥: 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   각 드라이버의 probe → [이 함수] → pci_request_selected_regions()
  */
-int pci_request_regions(struct pci_dev *pdev, const char *name) /* NVMe: pci_request_regions 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	return pci_request_selected_regions(pdev, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-			((1 << PCI_STD_NUM_BARS) - 1), name); /* NVMe: NVMe 표준 BAR 0~5 전체를 driver 이름으로 요청한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+int pci_request_regions(struct pci_dev *pdev, const char *name)
+{
+	return pci_request_selected_regions(pdev, /* [한국어] 표준 BAR 전부를 대상으로 */
+			((1 << PCI_STD_NUM_BARS) - 1), name); /* [한국어] 하위 6비트가 1 인 마스크와 소유자 이름을 넘긴다 */
+}
 EXPORT_SYMBOL(pci_request_regions);
 
 /**
@@ -4508,81 +7461,155 @@ EXPORT_SYMBOL(pci_request_regions);
  * printed on failure.
  */
 /*
- * pci_request_regions_exclusive:
- *   다른 드라이버와 공유하지 않고 모든 BAR 를 독점 요청한다. NVMe controller 는 일반적으로 독점적으로 BAR 를 사용한다.
+ * [한국어]
+ * pci_request_regions_exclusive - 표준 BAR 6개를 모두 독점 예약한다.
+ *
+ * @pdev: 대상 PCI 장치.
+ * @name: 예약자 이름.
+ * @return: 0 성공, -EBUSY 충돌.
+ *
+ * pci_request_regions() 와 같지만 IORESOURCE_EXCLUSIVE 가 붙는다. 원본
+ * 주석대로 /dev/mem 과 sysfs 의 MMIO 접근이 모두 막힌다.
+ *
+ * 실행 문맥: 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   독점이 필요한 드라이버 → [이 함수]
+ *     → pci_request_selected_regions_exclusive()
  */
-int pci_request_regions_exclusive(struct pci_dev *pdev, const char *name) /* NVMe: pci_request_regions_exclusive 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	return pci_request_selected_regions_exclusive(pdev, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-				((1 << PCI_STD_NUM_BARS) - 1), name); /* NVMe: 비트 연산을 수행한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+int pci_request_regions_exclusive(struct pci_dev *pdev, const char *name)
+{
+	return pci_request_selected_regions_exclusive(pdev, /* [한국어] 표준 BAR 전부를 독점으로 요청한다 */
+				((1 << PCI_STD_NUM_BARS) - 1), name); /* [한국어] 하위 6비트가 1 인 마스크와 소유자 이름 */
+}
 EXPORT_SYMBOL(pci_request_regions_exclusive);
 
 /*
  * Record the PCI IO range (expressed as CPU physical address + size).
  * Return a negative value if an error has occurred, zero otherwise
  */
-int pci_register_io_range(const struct fwnode_handle *fwnode, phys_addr_t addr, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-			resource_size_t	size) /* NVMe: resource_size_t 타입 변수를 선언한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	int ret = 0; /* NVMe: int 타입 변수를 선언한다. */
-#ifdef PCI_IOBASE /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
-	struct logic_pio_hwaddr *range; /* NVMe: 데이터 타입 변수를 선언한다. */
+/*
+ * [한국어]
+ * pci_register_io_range - 호스트 브리지가 제공하는 IO 창을 논리 PIO 계층에 등록한다.
+ *
+ * @fwnode: 이 IO 창을 기술한 펌웨어 노드(DeviceTree/ACPI). 나중에 이 노드로 창을 찾는다.
+ * @addr: 그 창이 놓인 CPU 물리 주소.
+ * @size: 창의 크기.
+ * @return: 0 성공, -EINVAL 잘못된 인자, -ENOMEM 할당 실패.
+ *
+ * x86 은 IO 공간을 inb/outb 전용 명령으로 접근하지만, ARM 같은 아키텍처에는
+ * 그런 명령이 없다. 대신 IO 공간을 메모리 창에 매핑해 두고 그 창에 대한
+ * 읽기·쓰기로 흉내 낸다. 그 대응 관계를 관리하는 것이 논리 PIO(logic_pio)
+ * 계층이고, 이 함수는 거기에 창 하나를 등록한다.
+ *
+ * PCI_IOBASE 가 정의되지 않은 아키텍처(x86 등)에서는 본문이 통째로 사라지고
+ * 0 만 돌려준다.
+ *
+ * addr + size < addr 검사는 정수 넘침을 잡는 것이다. 넘치면 창의 끝이
+ * 시작보다 앞에 오는 말이 안 되는 구간이 된다.
+ *
+ * -EEXIST 를 성공으로 바꾸는 것이 미묘하다. 원본 주석대로 지연 프로브
+ * (deferred probing) 때문에 같은 창이 두 번 등록될 수 있는데, 이미 등록돼
+ * 있다는 것은 목적이 이뤄진 상태이므로 실패로 볼 이유가 없다.
+ *
+ * 실행 문맥: GFP_ATOMIC 으로 할당한다 — 잠들 수 없는 문맥에서도 부를 수 있게
+ * 한 선택이다.
+ *
+ * 호출 체인:
+ *   호스트 브리지 드라이버(controller/), of/acpi 자원 파싱 → [이 함수]
+ *     → logic_pio_register_range()
+ */
+int pci_register_io_range(const struct fwnode_handle *fwnode, phys_addr_t addr,
+			resource_size_t	size)
+{
+	int ret = 0; /* [한국어] PCI_IOBASE 가 없는 아키텍처에서는 아래가 통째로 사라지므로 여기서 0 으로 초기화해 두어야 한다 */
+#ifdef PCI_IOBASE /* [한국어] IO 공간을 메모리 창으로 흉내 내는 아키텍처에서만 실제 등록을 한다 */
+	struct logic_pio_hwaddr *range; /* [한국어] 논리 PIO 계층에 등록할 창 기술자 */
 
-	if (!size || addr + size < addr) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return -EINVAL; /* NVMe: 오류 코드를 반환한다. */
+	if (!size || addr + size < addr) /* [한국어] 크기가 0 이거나, 더했을 때 넘쳐 끝이 시작보다 앞에 오면 */
+		return -EINVAL; /* [한국어] 말이 되지 않는 구간이다 */
 
-	range = kzalloc_obj(*range, GFP_ATOMIC); /* NVMe: 변수에 값을 할당한다. */
-	if (!range) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return -ENOMEM; /* NVMe: 오류 코드를 반환한다. */
+	range = kzalloc_obj(*range, GFP_ATOMIC); /* [한국어] GFP_ATOMIC 은 잠들 수 없는 문맥에서도 부를 수 있게 하려는 선택이다 */
+	if (!range) /* [한국어] 할당 실패 */
+		return -ENOMEM; /* [한국어] -ENOMEM */
 
-	range->fwnode = fwnode; /* NVMe: 변수에 값을 할당한다. */
-	range->size = size; /* NVMe: 변수에 값을 할당한다. */
-	range->hw_start = addr; /* NVMe: 변수에 값을 할당한다. */
-	range->flags = LOGIC_PIO_CPU_MMIO; /* NVMe: 변수에 값을 할당한다. */
+	range->fwnode = fwnode; /* [한국어] 나중에 이 창을 되찾을 열쇠가 되는 펌웨어 노드 */
+	range->size = size; /* [한국어] 창의 크기 */
+	range->hw_start = addr; /* [한국어] 창이 놓인 CPU 물리 주소 */
+	range->flags = LOGIC_PIO_CPU_MMIO; /* [한국어] "CPU 의 MMIO 로 접근하는 IO 창"이라는 종류 표시 */
 
-	ret = logic_pio_register_range(range); /* NVMe: 변수에 값을 할당한다. */
-	if (ret) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		kfree(range); /* NVMe: 동적 할당된 커널 메모리를 해제한다. */
+	ret = logic_pio_register_range(range); /* [한국어] 논리 PIO 계층에 등록한다 */
+	if (ret) /* [한국어] 실패하면 */
+		kfree(range); /* [한국어] 기술자를 해제한다. 등록에 성공했다면 소유권이 그쪽으로 넘어가므로 해제하면 안 된다 */
 
 	/* Ignore duplicates due to deferred probing */
-	if (ret == -EEXIST) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		ret = 0; /* NVMe: 변수에 값을 할당한다. */
-#endif /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
+	if (ret == -EEXIST) /* [한국어] 이미 같은 창이 등록돼 있다면 — 지연 프로브로 같은 등록이 두 번 오는 경우다 */
+		ret = 0; /* [한국어] 목적은 이미 이뤄졌으므로 성공으로 처리한다 */
+#endif /* [한국어] PCI_IOBASE 갈래의 끝 */
 
-	return ret; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return ret; /* [한국어] PCI_IOBASE 가 없으면 언제나 0 이다 */
+}
 
 /*
- * pci_pio_to_address:
- *   포트 I/O 번호를 물리 주소로 변환한다. NVMe 장치는 PIO 를 거의 사용하지 않으나 레거시 인터페이스 호환용이다.
+ * [한국어]
+ * pci_pio_to_address - 논리 IO 포트 번호를 CPU 물리 주소로 되돌린다.
+ *
+ * @pio: 논리 PIO 계층이 부여한 포트 번호.
+ * @return: 대응하는 CPU 물리 주소. 변환할 수 없으면 OF_BAD_ADDR.
+ *
+ * pci_register_io_range() 로 등록해 둔 대응 관계를 거꾸로 조회한다.
+ * "IO 포트 0x1000 이 실제로는 어느 물리 주소인가"를 알아야 하는 코드가 쓴다.
+ *
+ * MMIO_UPPER_LIMIT 는 논리 PIO 가 관리하는 번호 공간의 상한이다. 그보다 큰
+ * 값은 애초에 이 계층이 부여한 번호가 아니므로 변환할 수 없다.
+ * PCI_IOBASE 가 없는 아키텍처에서는 언제나 OF_BAD_ADDR 다.
+ *
+ * 실행 문맥: 조회뿐이다.
+ *
+ * 호출 체인:
+ *   IO 자원을 물리 주소로 되돌려야 하는 코드 → [이 함수] → logic_pio_to_hwaddr()
  */
-phys_addr_t pci_pio_to_address(unsigned long pio) /* NVMe: pci_pio_to_address 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-#ifdef PCI_IOBASE /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
-	if (pio < MMIO_UPPER_LIMIT) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return logic_pio_to_hwaddr(pio); /* NVMe: 연산 결과를 반환한다. */
-#endif /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
+phys_addr_t pci_pio_to_address(unsigned long pio)
+{
+#ifdef PCI_IOBASE /* [한국어] 논리 PIO 계층이 있는 아키텍처에서만 실제 변환이 가능하다 */
+	if (pio < MMIO_UPPER_LIMIT) /* [한국어] 논리 PIO 가 관리하는 번호 공간 안이면 */
+		return logic_pio_to_hwaddr(pio); /* [한국어] 등록된 대응 관계로 물리 주소를 찾는다 */
+#endif /* [한국어] PCI_IOBASE 갈래의 끝 */
 
-	return (phys_addr_t) OF_BAD_ADDR; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return (phys_addr_t) OF_BAD_ADDR; /* [한국어] 변환할 수 없음을 뜻하는 관례적인 값 */
+}
 EXPORT_SYMBOL_GPL(pci_pio_to_address);
 
 /*
- * pci_address_to_pio:
- *   물리 주소를 포트 I/O 번호로 변환한다. NVMe 장치와는 직접 관련이 낮다.
+ * [한국어]
+ * pci_address_to_pio - CPU 물리 주소를 IO 포트 번호로 옮긴다.
+ *
+ * @address: 변환할 CPU 물리 주소.
+ * @return: 대응하는 IO 포트 번호. 변환할 수 없으면 (unsigned long)-1.
+ *
+ * pci_pio_to_address() 의 반대 방향이다. __weak 이라 아키텍처가 덮어쓸 수 있다.
+ *
+ * 두 갈래의 성격이 다르다.
+ *   - 논리 PIO 가 있는 아키텍처: 등록된 대응 관계를 조회한다.
+ *   - 없는 아키텍처(x86 등): IO 주소 공간과 포트 번호가 같은 값이므로
+ *     상한만 확인하고 그대로 캐스팅한다.
+ *
+ * 실행 문맥: 조회 또는 단순 변환.
+ *
+ * 호출 체인:
+ *   of/acpi 자원 파싱 코드 → [이 함수] → logic_pio_trans_cpuaddr()
  */
-unsigned long __weak pci_address_to_pio(phys_addr_t address) /* NVMe: pci_address_to_pio 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-#ifdef PCI_IOBASE /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
-	return logic_pio_trans_cpuaddr(address); /* NVMe: 연산 결과를 반환한다. */
-#else /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
-	if (address > IO_SPACE_LIMIT) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return (unsigned long)-1; /* NVMe: 연산 결과를 반환한다. */
+unsigned long __weak pci_address_to_pio(phys_addr_t address)
+{
+#ifdef PCI_IOBASE /* [한국어] 논리 PIO 계층이 있는 아키텍처면 */
+	return logic_pio_trans_cpuaddr(address); /* [한국어] 등록된 대응 관계로 포트 번호를 찾는다 */
+#else /* [한국어] 없는 아키텍처면 주소와 포트 번호가 같은 값이다 */
+	if (address > IO_SPACE_LIMIT) /* [한국어] IO 공간의 상한을 넘으면 */
+		return (unsigned long)-1; /* [한국어] 변환할 수 없음을 뜻하는 전부 1 인 값 */
 
-	return (unsigned long) address; /* NVMe: 연산 결과를 반환한다. */
-#endif /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return (unsigned long) address; /* [한국어] 상한 안이면 값 그대로가 포트 번호다 */
+#endif /* [한국어] 갈래의 끝 */
+}
 
 /**
  * pci_remap_iospace - Remap the memory mapped I/O space
@@ -4594,35 +7621,56 @@ unsigned long __weak pci_address_to_pio(phys_addr_t address) /* NVMe: pci_addres
  * architectures that have memory mapped IO functions defined (and the
  * PCI_IOBASE value defined) should call this function.
  */
-#ifndef pci_remap_iospace /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
+#ifndef pci_remap_iospace /* [한국어] 아키텍처가 같은 이름의 매크로/함수를 정의하지 않았을 때만 이 기본 구현을 쓴다 */
 /*
- * pci_remap_iospace:
- *   I/O 공간을 재매핑한다. NVMe 장치는 memory-mapped BAR 를 사용하므로 직접 사용되지 않는다.
+ * [한국어]
+ * pci_remap_iospace - IO 공간 창을 커널 가상 주소 공간에 매핑한다.
+ *
+ * @res: 매핑할 IO 자원(포트 번호 구간).
+ * @phys_addr: 그 구간이 놓인 CPU 물리 주소.
+ * @return: 0 성공, -EINVAL 이면 IO 자원이 아니거나 범위를 벗어났다.
+ *          IO 공간을 메모리로 흉내 내지 않는 아키텍처에서는 -ENODEV.
+ *
+ * PCI_IOBASE 는 커널이 IO 공간을 통째로 얹어 두는 가상 주소의 기준점이다.
+ * 포트 번호 N 은 PCI_IOBASE + N 번지에 대응하며, inb(N) 은 결국 그 주소를
+ * 읽는 것이 된다. 이 함수는 그 가상 주소 구간에 실제 물리 주소를 연결한다.
+ *
+ * pgprot_device(PAGE_KERNEL) 로 매핑하는 것이 중요하다. 장치 메모리 속성이라
+ * 캐시되지 않고 쓰기가 재배열되지 않는다 — IO 접근은 순서와 시점이 곧
+ * 의미이기 때문이다.
+ *
+ * IO 공간을 메모리로 흉내 낼 수 없는 아키텍처에서는 애초에 불릴 일이 없어
+ * WARN_ONCE 로 호출 자체를 버그로 드러낸다.
+ *
+ * 실행 문맥: 페이지 테이블을 건드린다. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   호스트 브리지 드라이버(controller/) → [이 함수] → vmap_page_range()
  */
-int pci_remap_iospace(const struct resource *res, phys_addr_t phys_addr) /* NVMe: pci_remap_iospace 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-#if defined(PCI_IOBASE) /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
-	unsigned long vaddr = (unsigned long)PCI_IOBASE + res->start; /* NVMe: 변수에 값을 할당한다. */
+int pci_remap_iospace(const struct resource *res, phys_addr_t phys_addr)
+{
+#if defined(PCI_IOBASE) /* [한국어] IO 공간을 메모리 창으로 흉내 내는 아키텍처에서만 실제 매핑이 가능하다 */
+	unsigned long vaddr = (unsigned long)PCI_IOBASE + res->start; /* [한국어] 포트 번호 res->start 가 대응하는 커널 가상 주소. PCI_IOBASE 가 IO 공간 전체의 기준점이다 */
 
-	if (!(res->flags & IORESOURCE_IO)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return -EINVAL; /* NVMe: 오류 코드를 반환한다. */
+	if (!(res->flags & IORESOURCE_IO)) /* [한국어] IO 자원이 아니면 이 경로의 대상이 아니다 */
+		return -EINVAL; /* [한국어] 거절 */
 
-	if (res->end > IO_SPACE_LIMIT) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return -EINVAL; /* NVMe: 오류 코드를 반환한다. */
+	if (res->end > IO_SPACE_LIMIT) /* [한국어] IO 공간의 상한을 넘는 구간은 매핑할 수 없다 */
+		return -EINVAL; /* [한국어] 거절 */
 
-	return vmap_page_range(vaddr, vaddr + resource_size(res), phys_addr, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-			       pgprot_device(PAGE_KERNEL)); /* NVMe: pgprot_device 함수를 호출한다. */
-#else /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
+	return vmap_page_range(vaddr, vaddr + resource_size(res), phys_addr, /* [한국어] 가상 주소 구간에 물리 주소를 연결한다 */
+			       pgprot_device(PAGE_KERNEL)); /* [한국어] 장치 메모리 속성 — 캐시되지 않고 쓰기가 재배열되지 않는다. IO 접근은 순서와 시점이 곧 의미다 */
+#else /* [한국어] IO 공간을 메모리로 흉내 내지 않는 아키텍처 */
 	/*
 	 * This architecture does not have memory mapped I/O space,
 	 * so this function should never be called
 	 */
-	WARN_ONCE(1, "This architecture does not support memory mapped I/O\n"); /* NVMe: WARN_ONCE 함수를 호출한다. */
-	return -ENODEV; /* NVMe: 오류 코드를 반환한다. */
-#endif /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	WARN_ONCE(1, "This architecture does not support memory mapped I/O\n"); /* [한국어] 여기에 도달했다는 것 자체가 호출자의 버그다. 한 번만 경고한다 */
+	return -ENODEV; /* [한국어] 지원하지 않음을 알린다 */
+#endif /* [한국어] 갈래의 끝 */
+}
 EXPORT_SYMBOL(pci_remap_iospace);
-#endif /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
+#endif /* [한국어] pci_remap_iospace 기본 구현 블록의 끝 */
 
 /**
  * pci_unmap_iospace - Unmap the memory mapped I/O space
@@ -4633,39 +7681,85 @@ EXPORT_SYMBOL(pci_remap_iospace);
  * PCI_IOBASE value defined) should call this function.
  */
 /*
- * pci_unmap_iospace:
- *   I/O 공간 매핑을 해제한다. NVMe 장치와는 직접 관련이 낮다.
+ * [한국어]
+ * pci_unmap_iospace - pci_remap_iospace() 로 만든 매핑을 되돌린다.
+ *
+ * @res: 해제할 IO 자원.
+ * @return: 없음.
+ *
+ * 같은 규칙으로 가상 주소를 계산해 그 구간의 페이지 매핑을 푼다.
+ * IO 공간을 메모리로 흉내 내지 않는 아키텍처에서는 본문이 통째로 사라져
+ * 아무 일도 하지 않는다 — 그런 곳에서는 매핑을 만든 적도 없기 때문이다.
+ *
+ * 실행 문맥: 페이지 테이블을 건드린다. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   호스트 브리지 드라이버의 해제 경로 → [이 함수] → vunmap_range()
  */
-void pci_unmap_iospace(struct resource *res) /* NVMe: pci_unmap_iospace 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-#if defined(PCI_IOBASE) /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
-	unsigned long vaddr = (unsigned long)PCI_IOBASE + res->start; /* NVMe: 변수에 값을 할당한다. */
+void pci_unmap_iospace(struct resource *res)
+{
+#if defined(PCI_IOBASE) /* [한국어] 매핑을 만든 아키텍처에서만 해제할 것이 있다 */
+	unsigned long vaddr = (unsigned long)PCI_IOBASE + res->start; /* [한국어] 매핑할 때와 같은 규칙으로 가상 주소를 계산한다 */
 
-	vunmap_range(vaddr, vaddr + resource_size(res)); /* NVMe: vunmap_range 함수를 호출한다. */
-#endif /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	vunmap_range(vaddr, vaddr + resource_size(res)); /* [한국어] 그 구간의 페이지 매핑을 푼다 */
+#endif /* [한국어] 갈래의 끝 */
+}
 EXPORT_SYMBOL(pci_unmap_iospace);
 
 /*
- * __pci_set_master:
- *   PCI_COMMAND 의 Bus Master Enable/ Memory Space Enable 등을 설정/클리어한다. NVMe DMA 와 BAR 접근의 핵심 제어 비트이다.
+ * [한국어]
+ * __pci_set_master - Command 레지스터의 Bus Master Enable 비트를 세우거나 지운다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @enable: true 면 BME 를 세우고, false 면 지운다.
+ * @return: 없음.
+ *
+ * 하는 일은 config space 오프셋 0x04(Command)의 비트 2 하나를 바꾸는 것이
+ * 전부다. 그러나 그 비트 하나가 "이 장치가 스스로 버스 트랜잭션을 시작할 수
+ * 있는가"를 결정한다. 꺼져 있으면 장치는 오직 응답만 할 수 있다 — CPU 가
+ * 보낸 읽기·쓰기에 답할 뿐, 자기가 먼저 메모리를 읽거나 쓸 수 없다.
+ * 즉 DMA 가 통째로 불가능해진다.
+ *
+ * NVMe 로 옮겨 보면 이 비트가 왜 결정적인지 분명해진다. NVMe 컨트롤러의
+ * 동작은 거의 전부가 장치가 시작하는 DMA 다.
+ *   - 호스트가 도어벨을 울리면 컨트롤러가 호스트 메모리의 SQ(제출 큐)를
+ *     읽어 명령을 가져온다.  ← 장치가 시작하는 읽기
+ *   - PRP 목록이나 SGL 이 가리키는 버퍼에 데이터를 쓰거나 읽는다.
+ *     ← 장치가 시작하는 전송
+ *   - 완료를 CQ(완료 큐)에 써 넣고 MSI-X 메시지를 보낸다.
+ *     ← 장치가 시작하는 쓰기 (MSI-X 도 결국 메모리 쓰기 트랜잭션이다)
+ * BME 가 꺼져 있으면 이 셋이 모두 막힌다. 도어벨을 울려도 컨트롤러는 SQ 를
+ * 읽어 오지 못하고, 명령은 영원히 완료되지 않는다.
+ *
+ * 반대로 정리 경로에서는 이 비트를 지우는 것이 안전의 핵심이다. 드라이버가
+ * 버퍼를 해제한 뒤에도 장치가 DMA 를 계속하면 남의 메모리를 덮어쓰게 된다.
+ *
+ * 값이 바뀔 때만 쓰는 것은 불필요한 config 쓰기를 피하려는 것이다. 다만
+ * dev->is_busmaster 는 조건과 무관하게 언제나 갱신한다 — 소프트웨어가 보는
+ * 상태와 하드웨어가 어긋나면 안 되기 때문이다.
+ *
+ * 실행 문맥: config space 를 읽고 쓴다. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_set_master() / pci_clear_master() → [이 함수]
+ *     → pci_read_config_word(), pci_write_config_word()
  */
-static void __pci_set_master(struct pci_dev *dev, bool enable) /* NVMe: __pci_set_master 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	u16 old_cmd, cmd; /* NVMe: NVMe controller 의 PCI_COMMAND 레지스터 값을 저장할 변수이다. */
+static void __pci_set_master(struct pci_dev *dev, bool enable)
+{
+	u16 old_cmd, cmd; /* [한국어] old_cmd 는 읽어 온 원래 값, cmd 는 비트를 조작한 새 값 */
 
-	pci_read_config_word(dev, PCI_COMMAND, &old_cmd); /* NVMe: NVMe controller 의 현재 PCI_COMMAND 레지스터를 읽는다. */
-	if (enable) /* NVMe: bus mastering 을 활성화하는 경로이다. */
-		cmd = old_cmd | PCI_COMMAND_MASTER; /* NVMe: Bus Master Enable(BME) 비트를 설정한다. */
-	else /* NVMe: bus mastering 을 비활성화하는 경로이다. */
-		cmd = old_cmd & ~PCI_COMMAND_MASTER; /* NVMe: Bus Master Enable(BME) 비트를 클리어한다. */
-	if (cmd != old_cmd) { /* NVMe: PCI_COMMAND 값이 실제로 변경될 때만 쓴다. */
-		pci_dbg(dev, "%s bus mastering\n", /* NVMe: NVMe bus mastering 상태 변경을 디버그 로그로 남긴다. */
-			enable ? "enabling" : "disabling"); /* NVMe: 표현식을 평가한다. */
-		pci_write_config_word(dev, PCI_COMMAND, cmd); /* NVMe: 변경된 BME 값을 NVMe config space 에 기록한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
-	dev->is_busmaster = enable; /* NVMe: NVMe 장치의 bus master(DMA) 상태를 소프트웨어에 반영한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	pci_read_config_word(dev, PCI_COMMAND, &old_cmd); /* [한국어] config space 오프셋 0x04 의 Command 레지스터를 읽는다. 다른 비트(MEM/IO 디코딩 등)를 보존하려면 먼저 읽어야 한다 */
+	if (enable) /* [한국어] 켜는 경우 */
+		cmd = old_cmd | PCI_COMMAND_MASTER; /* [한국어] PCI_COMMAND_MASTER(비트 2)를 세운다. 이 비트가 서야 장치가 스스로 트랜잭션을 시작할 수 있다 */
+	else /* [한국어] 끄는 경우 */
+		cmd = old_cmd & ~PCI_COMMAND_MASTER; /* [한국어] 같은 비트를 지운다. 이 순간부터 장치는 새 DMA 를 시작할 수 없다 */
+	if (cmd != old_cmd) { /* [한국어] 값이 실제로 달라졌을 때만 쓴다 — 불필요한 config 쓰기를 피한다 */
+		pci_dbg(dev, "%s bus mastering\n", /* [한국어] 상태 변화를 디버그 로그로 남긴다 */
+			enable ? "enabling" : "disabling"); /* [한국어] 켜는지 끄는지 */
+		pci_write_config_word(dev, PCI_COMMAND, cmd); /* [한국어] 바뀐 Command 값을 써 넣는다. 이 쓰기가 완료되는 순간 하드웨어의 동작이 바뀐다 */
+	}
+	dev->is_busmaster = enable; /* [한국어] 값이 바뀌지 않았더라도 소프트웨어 표시는 언제나 갱신한다. pci_enable_bridge() 등이 이 필드로 현재 상태를 판단한다 */
+}
 
 /**
  * pcibios_setup - process "pci=" kernel boot arguments
@@ -4674,10 +7768,27 @@ static void __pci_set_master(struct pci_dev *dev, bool enable) /* NVMe: __pci_se
  * Process kernel boot arguments.  This is the default implementation.
  * Architecture specific implementations can override this as necessary.
  */
-char * __weak __init pcibios_setup(char *str) /* NVMe: pcibios_setup 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	return str; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+/*
+ * [한국어]
+ * pcibios_setup - "pci=" 커널 파라미터 중 아키텍처가 처리할 것을 가로챈다(기본 구현).
+ *
+ * @str: 아직 아무도 처리하지 않은 "pci=" 옵션 문자열.
+ * @return: 처리하지 않고 그대로 돌려주는 문자열. 공통 코드는 이 값을 보고
+ *          "알 수 없는 옵션"으로 경고한다.
+ *
+ * __weak 이라 아키텍처가 덮어쓸 수 있다. x86 처럼 자기만의 pci= 옵션이 있는
+ * 아키텍처가 이 훅에서 그것들을 처리하고, 남은 문자열만 돌려준다.
+ * 기본 구현은 아무 것도 처리하지 않으므로 받은 문자열을 그대로 돌려준다.
+ *
+ * 실행 문맥: __init. 부팅 초기 파라미터 파싱 단계.
+ *
+ * 호출 체인:
+ *   pci_setup() → [이 함수]
+ */
+char * __weak __init pcibios_setup(char *str)
+{
+	return str; /* [한국어] 아무 것도 처리하지 않았음을 뜻한다. 호출자가 이 문자열을 보고 알 수 없는 옵션으로 경고한다 */
+}
 
 /**
  * pcibios_set_master - enable PCI bus-mastering for device dev
@@ -4688,27 +7799,49 @@ char * __weak __init pcibios_setup(char *str) /* NVMe: pcibios_setup 함수를 �
  * this if necessary.
  */
 /*
- * pcibios_set_master:
- *   아키텍처별 bus mastering 설정 후처리를 수행한다. NVMe DMA 마스터링 활성화 시 플랫폼별 latency/cache 설정을 조정한다.
+ * [한국어]
+ * pcibios_set_master - Bus Master 를 켠 뒤의 아키텍처별 마무리(기본 구현).
+ *
+ * @dev: 방금 Bus Master 가 된 PCI 장치.
+ * @return: 없음.
+ *
+ * 기본 구현이 하는 일은 Latency Timer 보정 하나다. Latency Timer 는 재래식
+ * PCI 의 공유 버스에서 "한 마스터가 버스를 몇 클럭까지 붙들 수 있는가"를
+ * 정하는 값이다. 이 값이 0 이면 다른 장치가 버스를 요구하는 즉시 놓아야 해
+ * 전송 효율이 크게 떨어지고, 반대로 너무 크면 한 장치가 버스를 독점해
+ * 다른 장치의 지연이 커진다.
+ * 일부 BIOS 가 이 값을 제대로 설정하지 않은 채 넘기기 때문에 커널이 보정한다.
+ *   - 16보다 작으면 64(또는 관리자가 정한 상한)로 올린다.
+ *   - 상한을 넘으면 상한으로 낮춘다.
+ *   - 그 사이면 손대지 않는다.
+ *
+ * PCIe 장치는 곧바로 돌아간다. PCIe 는 점대점 링크라 버스를 공유하지 않고,
+ * 원본 주석대로 Latency Timer 자체가 적용되지 않는다. NVMe SSD 는 모두
+ * 여기에 해당해 이 함수는 사실상 아무 일도 하지 않는다.
+ *
+ * 실행 문맥: config space 를 읽고 쓴다. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_set_master() → [이 함수]
  */
-void __weak pcibios_set_master(struct pci_dev *dev) /* NVMe: pcibios_set_master 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	u8 lat; /* NVMe: u8 타입 변수를 선언한다. */
+void __weak pcibios_set_master(struct pci_dev *dev)
+{
+	u8 lat; /* [한국어] Latency Timer 레지스터 값 */
 
 	/* The latency timer doesn't apply to PCIe (either Type 0 or Type 1) */
-	if (pci_is_pcie(dev)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return; /* NVMe: 함수 실행을 종료한다. */
+	if (pci_is_pcie(dev)) /* [한국어] PCIe 는 점대점 링크라 버스를 공유하지 않으므로 Latency Timer 가 의미가 없다. NVMe SSD 는 모두 여기서 돌아간다 */
+		return; /* [한국어] 할 일이 없다 */
 
-	pci_read_config_byte(dev, PCI_LATENCY_TIMER, &lat); /* NVMe: NVMe 장치의 latency timer 값을 읽는다. */
-	if (lat < 16) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		lat = (64 <= pcibios_max_latency) ? 64 : pcibios_max_latency; /* NVMe: 변수에 값을 할당한다. */
-	else if (lat > pcibios_max_latency) /* NVMe: 이전 조건이 거짓일 때 추가 조건을 검사한다. */
-		lat = pcibios_max_latency; /* NVMe: 변수에 값을 할당한다. */
-	else /* NVMe: 이전 조건이 모두 거짓일 때 실행한다. */
-		return; /* NVMe: 함수 실행을 종료한다. */
+	pci_read_config_byte(dev, PCI_LATENCY_TIMER, &lat); /* [한국어] config space 오프셋 0x0d 의 Latency Timer 를 읽는다 */
+	if (lat < 16) /* [한국어] 16 미만이면 버스를 너무 빨리 놓아 전송 효율이 나쁘다 */
+		lat = (64 <= pcibios_max_latency) ? 64 : pcibios_max_latency; /* [한국어] 64 로 올리되, 관리자가 정한 상한(pcibios_max_latency)을 넘지 않게 한다 */
+	else if (lat > pcibios_max_latency) /* [한국어] 상한보다 크면 */
+		lat = pcibios_max_latency; /* [한국어] 상한으로 낮춘다. 한 장치가 버스를 독점하지 않게 하는 것이다 */
+	else /* [한국어] 그 사이의 값이면 */
+		return; /* [한국어] 손대지 않고 그대로 둔다. 아래 쓰기도 건너뛴다 */
 
-	pci_write_config_byte(dev, PCI_LATENCY_TIMER, lat); /* NVMe: 조정된 latency timer 를 NVMe config space 에 기록한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	pci_write_config_byte(dev, PCI_LATENCY_TIMER, lat); /* [한국어] 보정한 값을 써 넣는다 */
+}
 
 /**
  * pci_set_master - enables bus-mastering for device dev
@@ -4718,14 +7851,40 @@ void __weak pcibios_set_master(struct pci_dev *dev) /* NVMe: pcibios_set_master 
  * to do the needed arch specific settings.
  */
 /*
- * pci_set_master:
- *   NVMe controller 의 bus mastering 을 활성화하여 DMA 를 허용한다. NVMe I/O 큐/PRP/SGL 메모리 접근의 전제 조건이다.
+ * [한국어]
+ * pci_set_master - 이 장치가 DMA 를 시작할 수 있게 한다.
+ *
+ * @dev: Bus Master 로 만들 PCI 장치.
+ * @return: 없음.
+ *
+ * 두 단계로 이뤄진다. 먼저 Command 레지스터의 Bus Master Enable 비트를
+ * 세우고, 그 다음 아키텍처별 마무리를 부른다.
+ *
+ * 이 함수 하나가 장치를 "응답만 하는 존재"에서 "스스로 버스 트랜잭션을
+ * 시작하는 존재"로 바꾼다. BAR 를 매핑해 레지스터를 읽고 쓸 수 있게 되는
+ * 것과는 전혀 다른 권한이다 — 그쪽은 CPU 가 장치를 향해 가는 방향이고,
+ * 이쪽은 장치가 메모리를 향해 가는 방향이다.
+ *
+ * NVMe 와의 관계: drivers/nvme/host/pci.c 의 nvme_pci_enable() 이 부른다.
+ * 이 호출이 없으면 컨트롤러는 도어벨을 받아도 SQ 를 읽어 오지 못하고,
+ * PRP/SGL 이 가리키는 버퍼로 데이터를 옮기지도, CQ 에 완료를 써 넣지도
+ * 못한다. 즉 NVMe 의 동작 전체가 성립하지 않는다.
+ *
+ * 참고로 이 함수는 되돌릴 수 있는 참조 계수를 두지 않는다. 여러 번 불러도
+ * 같은 상태이며, 끄려면 pci_clear_master() 나 pci_disable_device() 를 쓴다.
+ *
+ * 실행 문맥: config space 를 읽고 쓴다. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   drivers/nvme/host/pci.c 의 nvme_pci_enable(), 각 드라이버의 probe,
+ *   pci_enable_bridge() → [이 함수]
+ *     → __pci_set_master(), pcibios_set_master()
  */
-void pci_set_master(struct pci_dev *dev) /* NVMe: pci_set_master 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	__pci_set_master(dev, true); /* NVMe: NVMe controller 의 Bus Master Enable(BME) 비트를 설정하여 DMA 를 허용한다. */
-	pcibios_set_master(dev); /* NVMe: 아키텍처별로 NVMe DMA master 설정(latency timer 등)을 마무리한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+void pci_set_master(struct pci_dev *dev)
+{
+	__pci_set_master(dev, true); /* [한국어] Command 의 Bus Master Enable 비트를 세운다. 이 순간부터 장치가 DMA 를 시작할 수 있다 */
+	pcibios_set_master(dev); /* [한국어] 아키텍처별 마무리. 기본 구현은 재래식 PCI 의 Latency Timer 를 보정하며, PCIe 장치에서는 곧바로 돌아간다 */
+}
 EXPORT_SYMBOL(pci_set_master);
 
 /**
@@ -4733,13 +7892,31 @@ EXPORT_SYMBOL(pci_set_master);
  * @dev: the PCI device to disable
  */
 /*
- * pci_clear_master:
- *   NVMe controller 의 bus mastering 을 비활성화한다. remove/reset/shutdown 시 DMA 를 중단하여 시스템 안전성을 확보한다.
+ * [한국어]
+ * pci_clear_master - 이 장치가 더 이상 DMA 를 시작하지 못하게 한다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @return: 없음.
+ *
+ * pci_set_master() 의 짝이다. Command 의 Bus Master Enable 비트를 지운다.
+ * 이 순간 이후 장치는 새로운 버스 트랜잭션을 시작할 수 없다.
+ *
+ * 정리·리셋 경로에서 중요하다. 드라이버가 DMA 버퍼를 해제했는데 장치가
+ * 여전히 그 주소로 쓰고 있으면 이미 다른 용도로 재사용된 메모리를
+ * 덮어쓰게 되고, 원인을 찾기 매우 어려운 손상이 된다.
+ *
+ * 아키텍처 마무리(pcibios_set_master)를 부르지 않는 것이 pci_set_master()
+ * 와의 차이다. Latency Timer 보정은 켤 때만 의미가 있기 때문이다.
+ *
+ * 실행 문맥: config space 를 읽고 쓴다. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   각 드라이버의 remove/오류 경로 → [이 함수] → __pci_set_master()
  */
-void pci_clear_master(struct pci_dev *dev) /* NVMe: pci_clear_master 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	__pci_set_master(dev, false); /* NVMe: NVMe controller 의 Bus Master Enable(BME) 비트를 클리어하여 DMA 를 중단한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+void pci_clear_master(struct pci_dev *dev)
+{
+	__pci_set_master(dev, false); /* [한국어] Bus Master Enable 비트를 지운다. 이 순간 이후 장치는 새 DMA 를 시작할 수 없다 */
+}
 EXPORT_SYMBOL(pci_clear_master);
 
 /**
@@ -4753,35 +7930,58 @@ EXPORT_SYMBOL(pci_clear_master);
  * RETURNS: An appropriate -ERRNO error value on error, or zero for success.
  */
 /*
- * pci_set_cacheline_size:
- *   Cache Line Size 레지스터를 설정한다. NVMe DMA 성능과 MWI 동작에 영향을 준다.
+ * [한국어]
+ * pci_set_cacheline_size - Cache Line Size 레지스터에 올바른 값을 넣는다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @return: 0 성공, -EINVAL 이면 값을 정할 수 없거나 장치가 그 값을 받지 않는다.
+ *
+ * config space 오프셋 0x0c 의 Cache Line Size 는 이름 그대로 이 시스템의
+ * 캐시라인 크기를 장치에 알려 주는 값이다. 단위가 바이트가 아니라 32비트
+ * 워드라는 점이 함정이다 — 64바이트 캐시라인이면 16 을 넣는다. 로그에서
+ * << 2(×4)로 되돌려 바이트로 찍는 것이 그 때문이다.
+ *
+ * 이 값이 필요한 이유는 MWI(Memory Write and Invalidate) 때문이다. MWI 는
+ * "캐시라인 하나를 통째로 덮어쓸 테니 읽어 올 필요 없이 무효화하라"는
+ * 트랜잭션이라, 장치가 캐시라인 크기를 정확히 알아야 성립한다.
+ *
+ * 이미 들어 있는 값이 올바른 값의 배수라면 그대로 둔다 — 더 큰 배수도
+ * 캐시라인 경계를 침범하지 않아 안전하기 때문이다.
+ *
+ * 써 넣은 뒤 되읽어 확인하는 이유는 이 레지스터가 읽기 전용이거나 특정
+ * 값만 받는 장치가 있기 때문이다. 그런 장치에는 MWI 를 켤 수 없다.
+ *
+ * 실행 문맥: config space 를 읽고 쓴다. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_set_mwi() → [이 함수] → pci_read/write_config_byte()
  */
-int pci_set_cacheline_size(struct pci_dev *dev) /* NVMe: pci_set_cacheline_size 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	u8 cacheline_size; /* NVMe: u8 타입 변수를 선언한다. */
+int pci_set_cacheline_size(struct pci_dev *dev)
+{
+	u8 cacheline_size; /* [한국어] 현재 레지스터 값 */
 
-	if (!pci_cache_line_size) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return -EINVAL; /* NVMe: 오류 코드를 반환한다. */
+	if (!pci_cache_line_size) /* [한국어] 아키텍처가 캐시라인 크기를 알려 주지 않았으면 넣을 값이 없다 */
+		return -EINVAL; /* [한국어] 설정할 수 없다 */
 
 	/* Validate current setting: the PCI_CACHE_LINE_SIZE must be
 	   equal to or multiple of the right value. */ /* NVMe: 표현식을 이어서 작성한다. */
-	pci_read_config_byte(dev, PCI_CACHE_LINE_SIZE, &cacheline_size); /* NVMe: NVMe controller 의 cache line size 레지스터를 읽는다. */
-	if (cacheline_size >= pci_cache_line_size && /* NVMe: 조건식을 평가해 분기를 결정한다. */
-	    (cacheline_size % pci_cache_line_size) == 0) /* NVMe: 표현식을 평가한다. */
-		return 0; /* NVMe: 성공(0)을 반환한다. */
+	pci_read_config_byte(dev, PCI_CACHE_LINE_SIZE, &cacheline_size); /* [한국어] 현재 값을 읽는다 */
+	if (cacheline_size >= pci_cache_line_size && /* [한국어] 올바른 값 이상이면서 */
+	    (cacheline_size % pci_cache_line_size) == 0) /* [한국어] 그 배수이면 캐시라인 경계를 침범하지 않아 그대로 두어도 안전하다 */
+		return 0; /* [한국어] 손대지 않고 성공으로 끝낸다 */
 
 	/* Write the correct value. */
-	pci_write_config_byte(dev, PCI_CACHE_LINE_SIZE, pci_cache_line_size); /* NVMe: PCI 설정 공간 1바이트를 쓴다. */
+	pci_write_config_byte(dev, PCI_CACHE_LINE_SIZE, pci_cache_line_size); /* [한국어] 올바른 값을 써 넣는다 */
 	/* Read it back. */
-	pci_read_config_byte(dev, PCI_CACHE_LINE_SIZE, &cacheline_size); /* NVMe: PCI 설정 공간 1바이트를 읽는다. */
-	if (cacheline_size == pci_cache_line_size) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return 0; /* NVMe: 성공(0)을 반환한다. */
+	pci_read_config_byte(dev, PCI_CACHE_LINE_SIZE, &cacheline_size); /* [한국어] 되읽어 실제로 반영됐는지 확인한다 — 이 레지스터를 읽기 전용으로 둔 장치가 있다 */
+	if (cacheline_size == pci_cache_line_size) /* [한국어] 값이 그대로 들어갔으면 */
+		return 0; /* [한국어] 성공 */
 
-	pci_dbg(dev, "cache line size of %d is not supported\n", /* NVMe: PCI 장치에 대한 디버그 로그를 출력한다. */
-		   pci_cache_line_size << 2); /* NVMe: 비트 연산을 수행한다. */
+	pci_dbg(dev, "cache line size of %d is not supported\n", /* [한국어] 장치가 이 값을 받지 않는다는 사실을 남긴다 */
+		   pci_cache_line_size << 2); /* [한국어] 저장 단위가 32비트 워드라 << 2(×4)로 바이트 단위로 되돌려 찍는다 */
 
-	return -EINVAL; /* NVMe: 오류 코드를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return -EINVAL; /* [한국어] MWI 를 켤 수 없다 */
+}
 EXPORT_SYMBOL_GPL(pci_set_cacheline_size);
 
 /**
@@ -4793,30 +7993,52 @@ EXPORT_SYMBOL_GPL(pci_set_cacheline_size);
  * RETURNS: An appropriate -ERRNO error value on error, or zero for success.
  */
 /*
- * pci_set_mwi:
- *   Memory Write and Invalidate 를 활성화한다. NVMe DMA 쓰기 시 cache coherence 와 성능에 영향을 준다.
+ * [한국어]
+ * pci_set_mwi - Memory Write and Invalidate 트랜잭션을 켠다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @return: 0 성공, 음수면 켤 수 없다.
+ *
+ * MWI 는 재래식 PCI 의 성능 기능이다. 보통의 메모리 쓰기는 캐시라인의 일부만
+ * 바꿀 수 있어 캐시가 원본을 먼저 읽어 와야 하지만(read-for-ownership),
+ * MWI 는 "이 캐시라인을 통째로 덮어쓴다"고 선언하므로 그 읽기를 건너뛸 수
+ * 있다. 큰 DMA 쓰기에서 메모리 대역폭이 눈에 띄게 줄어든다.
+ *
+ * 성립 조건이 Cache Line Size 레지스터라, 그것을 먼저 맞춘 뒤에야 Command 의
+ * MWI 비트를 켠다.
+ *
+ * PCIe 에는 MWI 가 없다. PCIe 트랜잭션에는 이 개념 자체가 없어 Command 의
+ * 해당 비트는 무시된다. NVMe SSD 를 포함한 모든 PCIe 장치에서 이 함수는
+ * 의미가 없으며, 실제로 drivers/nvme/ 에는 호출이 없다.
+ * 일부 아키텍처는 PCI_DISABLE_MWI 를 정의해 이 기능을 통째로 무력화한다.
+ *
+ * 실행 문맥: config space 를 읽고 쓴다. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   재래식 PCI 드라이버, pci_try_set_mwi() → [이 함수]
+ *     → pci_set_cacheline_size(), pci_write_config_word()
  */
-int pci_set_mwi(struct pci_dev *dev) /* NVMe: pci_set_mwi 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-#ifdef PCI_DISABLE_MWI /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
-	return 0; /* NVMe: 성공(0)을 반환한다. */
-#else /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
-	int rc; /* NVMe: int 타입 변수를 선언한다. */
-	u16 cmd; /* NVMe: u16 타입 변수를 선언한다. */
+int pci_set_mwi(struct pci_dev *dev)
+{
+#ifdef PCI_DISABLE_MWI /* [한국어] 아키텍처가 MWI 를 쓰지 않기로 했으면 */
+	return 0; /* [한국어] 아무 일도 하지 않고 성공으로 처리한다 */
+#else /* [한국어] MWI 를 쓰는 아키텍처 */
+	int rc; /* [한국어] Cache Line Size 설정 결과 */
+	u16 cmd; /* [한국어] Command 레지스터 값 */
 
-	rc = pci_set_cacheline_size(dev); /* NVMe: 변수에 값을 할당한다. */
-	if (rc) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return rc; /* NVMe: 연산 결과를 반환한다. */
+	rc = pci_set_cacheline_size(dev); /* [한국어] MWI 는 캐시라인 크기를 장치가 알아야 성립하므로 먼저 맞춘다 */
+	if (rc) /* [한국어] 맞추지 못했으면 */
+		return rc; /* [한국어] MWI 를 켤 수 없다 */
 
-	pci_read_config_word(dev, PCI_COMMAND, &cmd); /* NVMe: PCI 설정 공간 2바이트를 읽는다. */
-	if (!(cmd & PCI_COMMAND_INVALIDATE)) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pci_dbg(dev, "enabling Mem-Wr-Inval\n"); /* NVMe: PCI 장치에 대한 디버그 로그를 출력한다. */
-		cmd |= PCI_COMMAND_INVALIDATE; /* NVMe: 변수에 값을 할당한다. */
-		pci_write_config_word(dev, PCI_COMMAND, cmd); /* NVMe: PCI 설정 공간 2바이트를 쓴다. */
-	} /* NVMe: 코드 블록을 종료한다. */
-	return 0; /* NVMe: 성공(0)을 반환한다. */
-#endif /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	pci_read_config_word(dev, PCI_COMMAND, &cmd); /* [한국어] Command 레지스터를 읽는다 */
+	if (!(cmd & PCI_COMMAND_INVALIDATE)) { /* [한국어] MWI 비트가 아직 꺼져 있으면 */
+		pci_dbg(dev, "enabling Mem-Wr-Inval\n"); /* [한국어] 켠다는 사실을 남기고 */
+		cmd |= PCI_COMMAND_INVALIDATE; /* [한국어] PCI_COMMAND_INVALIDATE(비트 4)를 세운다 */
+		pci_write_config_word(dev, PCI_COMMAND, cmd); /* [한국어] 써 넣는다 */
+	}
+	return 0; /* [한국어] 성공 */
+#endif /* [한국어] PCI_DISABLE_MWI 갈래의 끝 */
+}
 EXPORT_SYMBOL(pci_set_mwi);
 
 /**
@@ -4829,17 +8051,29 @@ EXPORT_SYMBOL(pci_set_mwi);
  * RETURNS: An appropriate -ERRNO error value on error, or zero for success.
  */
 /*
- * pci_try_set_mwi:
- *   MWI 활성화를 시도하고 실패필도 에러를 반환한다. NVMe probe 시 MWI 지원 여부를 점검할 때 사용된다.
+ * [한국어]
+ * pci_try_set_mwi - MWI 를 켜 보되, 실패해도 호출자가 신경 쓰지 않아도 되는 판.
+ *
+ * @dev: 대상 PCI 장치.
+ * @return: pci_set_mwi() 의 결과. 원본 주석대로 호출자가 확인하지 않아도 된다.
+ *
+ * 현재 구현은 pci_set_mwi() 를 그대로 부른다. 반환값을 무시해도 좋다는
+ * 계약을 이름으로 드러내는 것이 존재 이유이며, 그래서 MWI 를 켜지 못해도
+ * 동작에 지장이 없는 드라이버가 이 쪽을 쓴다.
+ *
+ * 실행 문맥: 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   MWI 가 없어도 무방한 드라이버 → [이 함수] → pci_set_mwi()
  */
-int pci_try_set_mwi(struct pci_dev *dev) /* NVMe: pci_try_set_mwi 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-#ifdef PCI_DISABLE_MWI /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
-	return 0; /* NVMe: 성공(0)을 반환한다. */
-#else /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
-	return pci_set_mwi(dev); /* NVMe: 연산 결과를 반환한다. */
-#endif /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+int pci_try_set_mwi(struct pci_dev *dev)
+{
+#ifdef PCI_DISABLE_MWI /* [한국어] 아키텍처가 MWI 를 쓰지 않기로 했으면 */
+	return 0; /* [한국어] 아무 일도 하지 않는다 */
+#else /* [한국어] MWI 를 쓰는 아키텍처면 */
+	return pci_set_mwi(dev); /* [한국어] 평범하게 켜기를 시도한다 */
+#endif /* [한국어] 갈래의 끝 */
+}
 EXPORT_SYMBOL(pci_try_set_mwi);
 
 /**
@@ -4849,21 +8083,36 @@ EXPORT_SYMBOL(pci_try_set_mwi);
  * Disables PCI Memory-Write-Invalidate transaction on the device
  */
 /*
- * pci_clear_mwi:
- *   Memory Write and Invalidate 를 비활성화한다. NVMe DMA 설정 해제 시 MWI 비트를 클리어한다.
+ * [한국어]
+ * pci_clear_mwi - Memory Write and Invalidate 를 끈다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @return: 없음.
+ *
+ * pci_set_mwi() 의 짝이다. Command 의 MWI 비트만 지운다. Cache Line Size 는
+ * 되돌리지 않는데, 그 값은 MWI 와 무관하게 시스템의 사실을 담고 있어
+ * 남겨 두어도 해가 없기 때문이다.
+ *
+ * PCI_DISABLE_MWI 인 아키텍처에서는 본문이 통째로 사라진다 — 켠 적이 없으니
+ * 끌 것도 없다.
+ *
+ * 실행 문맥: config space 를 읽고 쓴다. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   재래식 PCI 드라이버의 정리 경로 → [이 함수] → pci_write_config_word()
  */
-void pci_clear_mwi(struct pci_dev *dev) /* NVMe: pci_clear_mwi 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-#ifndef PCI_DISABLE_MWI /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
-	u16 cmd; /* NVMe: u16 타입 변수를 선언한다. */
+void pci_clear_mwi(struct pci_dev *dev)
+{
+#ifndef PCI_DISABLE_MWI /* [한국어] MWI 를 쓰는 아키텍처에서만 끌 것이 있다 */
+	u16 cmd; /* [한국어] Command 레지스터 값 */
 
-	pci_read_config_word(dev, PCI_COMMAND, &cmd); /* NVMe: PCI 설정 공간 2바이트를 읽는다. */
-	if (cmd & PCI_COMMAND_INVALIDATE) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		cmd &= ~PCI_COMMAND_INVALIDATE; /* NVMe: 변수에 값을 할당한다. */
-		pci_write_config_word(dev, PCI_COMMAND, cmd); /* NVMe: PCI 설정 공간 2바이트를 쓴다. */
-	} /* NVMe: 코드 블록을 종료한다. */
-#endif /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	pci_read_config_word(dev, PCI_COMMAND, &cmd); /* [한국어] 현재 값을 읽는다 */
+	if (cmd & PCI_COMMAND_INVALIDATE) { /* [한국어] MWI 비트가 켜져 있을 때만 손댄다 */
+		cmd &= ~PCI_COMMAND_INVALIDATE; /* [한국어] 그 비트만 지운다. 다른 비트는 보존한다 */
+		pci_write_config_word(dev, PCI_COMMAND, cmd); /* [한국어] 써 넣는다 */
+	}
+#endif /* [한국어] 갈래의 끝 */
+}
 EXPORT_SYMBOL(pci_clear_mwi);
 
 /**
@@ -4873,19 +8122,37 @@ EXPORT_SYMBOL(pci_clear_mwi);
  * Disable parity checking for device @dev
  */
 /*
- * pci_disable_parity:
- *   Parity 에러 검사를 비활성화한다. NVMe 장치에서 parity 관련 비정상 재시도를 막을 때 사용될 수 있다.
+ * [한국어]
+ * pci_disable_parity - 이 장치의 패리티 오류 응답을 끈다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @return: 없음.
+ *
+ * Command 레지스터의 Parity Error Response(비트 6)를 지운다. 이 비트가
+ * 켜져 있으면 장치가 패리티 오류를 감지했을 때 그것을 오류로 보고하고,
+ * 꺼져 있으면 감지는 하되 보고하지 않는다.
+ *
+ * 끄는 이유는 성능이 아니라 오작동 회피다. 패리티 신호를 잘못 내는 하드웨어
+ * 때문에 끝없는 오류 보고가 발생하는 경우가 있어, quirk 가 그런 장치의
+ * 보고를 막는다.
+ *
+ * 이미 꺼져 있으면 쓰지 않는다.
+ *
+ * 실행 문맥: config space 를 읽고 쓴다. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   drivers/pci/quirks.c → [이 함수] → pci_read/write_config_word()
  */
-void pci_disable_parity(struct pci_dev *dev) /* NVMe: pci_disable_parity 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	u16 cmd; /* NVMe: u16 타입 변수를 선언한다. */
+void pci_disable_parity(struct pci_dev *dev)
+{
+	u16 cmd; /* [한국어] Command 레지스터 값 */
 
-	pci_read_config_word(dev, PCI_COMMAND, &cmd); /* NVMe: PCI 설정 공간 2바이트를 읽는다. */
-	if (cmd & PCI_COMMAND_PARITY) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		cmd &= ~PCI_COMMAND_PARITY; /* NVMe: 변수에 값을 할당한다. */
-		pci_write_config_word(dev, PCI_COMMAND, cmd); /* NVMe: PCI 설정 공간 2바이트를 쓴다. */
-	} /* NVMe: 코드 블록을 종료한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	pci_read_config_word(dev, PCI_COMMAND, &cmd); /* [한국어] 현재 값을 읽는다 */
+	if (cmd & PCI_COMMAND_PARITY) { /* [한국어] 패리티 오류 응답이 켜져 있을 때만 손댄다 */
+		cmd &= ~PCI_COMMAND_PARITY; /* [한국어] 그 비트만 지운다 */
+		pci_write_config_word(dev, PCI_COMMAND, cmd); /* [한국어] 써 넣는다 */
+	}
+}
 
 /**
  * pci_intx - enables/disables PCI INTx for device dev
@@ -4895,25 +8162,48 @@ void pci_disable_parity(struct pci_dev *dev) /* NVMe: pci_disable_parity 함수�
  * Enables/disables PCI INTx for device @pdev
  */
 /*
- * pci_intx:
- *   legacy INTx 인터럽트를 활성화/비활성화한다. NVMe는 보통 MSI-X 를 사용하나 fallback 경로에서 INTx 설정에 쓰인다.
+ * [한국어]
+ * pci_intx - 레거시 INTx 인터럽트를 켜거나 끈다.
+ *
+ * @pdev: 대상 PCI 장치.
+ * @enable: 0 이 아니면 INTx 허용, 0 이면 금지.
+ * @return: 없음.
+ *
+ * 비트의 뜻이 뒤집혀 있다는 점이 요점이다. Command 레지스터의 비트 10 은
+ * "INTx Enable" 이 아니라 "INTx Disable" 이다. 그래서 켜려면 비트를 지우고,
+ * 끄려면 비트를 세운다. 이 반전 때문에 코드를 잘못 읽기 쉽다.
+ *
+ * INTx 는 PCIe 에서도 메시지로 흉내 내어 남아 있지만, MSI/MSI-X 와 함께
+ * 쓸 수는 없다. MSI 를 쓰는 중에 INTx 가 열려 있으면 가짜 인터럽트가 생기고,
+ * 반대로 INTx 를 쓰려는데 막혀 있으면 인터럽트가 오지 않는다.
+ *
+ * 값이 바뀌지 않으면 쓰지 않는다.
+ *
+ * NVMe 와의 관계: NVMe 는 MSI-X 를 쓰므로 정상 경로에서 INTx 를 열지 않는다.
+ * do_pci_enable_device() 가 msi_enabled/msix_enabled 를 먼저 보고 INTx 를
+ * 건드리지 않는 것이 그 때문이다.
+ *
+ * 실행 문맥: config space 를 읽고 쓴다. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   각 드라이버, MSI 코드 → [이 함수] → pci_read/write_config_word()
  */
-void pci_intx(struct pci_dev *pdev, int enable) /* NVMe: pci_intx 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	u16 pci_command, new; /* NVMe: u16 타입 변수를 선언한다. */
+void pci_intx(struct pci_dev *pdev, int enable)
+{
+	u16 pci_command, new; /* [한국어] pci_command 는 읽어 온 원래 값, new 는 비트를 조작한 새 값 */
 
-	pci_read_config_word(pdev, PCI_COMMAND, &pci_command); /* NVMe: NVMe controller 의 PCI_COMMAND 레지스터를 읽는다. */
+	pci_read_config_word(pdev, PCI_COMMAND, &pci_command); /* [한국어] Command 레지스터를 읽는다 */
 
-	if (enable) /* NVMe: INTx 를 활성화하는 경로이다. */
-		new = pci_command & ~PCI_COMMAND_INTX_DISABLE; /* NVMe: INTx Disable 비트를 클리어한다. */
-	else /* NVMe: INTx 를 비활성화하는 경로이다. */
-		new = pci_command | PCI_COMMAND_INTX_DISABLE; /* NVMe: INTx Disable 비트를 설정한다. */
+	if (enable) /* [한국어] INTx 를 허용하려면 */
+		new = pci_command & ~PCI_COMMAND_INTX_DISABLE; /* [한국어] INTx Disable 비트를 지운다 — 이름이 Disable 이라 켜는 쪽이 "지우기"다 */
+	else /* [한국어] INTx 를 막으려면 */
+		new = pci_command | PCI_COMMAND_INTX_DISABLE; /* [한국어] 같은 비트를 세운다 */
 
-	if (new == pci_command) /* NVMe: PCI_COMMAND 값이 변경되지 않았으면 */
-		return; /* NVMe: 추가 쓰기 없이 종료한다. */
+	if (new == pci_command) /* [한국어] 값이 그대로면 */
+		return; /* [한국어] 불필요한 config 쓰기를 하지 않는다 */
 
-	pci_write_config_word(pdev, PCI_COMMAND, new); /* NVMe: 변경된 INTx 설정을 NVMe config space 에 기록한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	pci_write_config_word(pdev, PCI_COMMAND, new); /* [한국어] 바뀐 값을 써 넣는다 */
+}
 EXPORT_SYMBOL_GPL(pci_intx);
 
 /**
@@ -4923,17 +8213,38 @@ EXPORT_SYMBOL_GPL(pci_intx);
  * Return 0 if transaction is pending 1 otherwise.
  */
 /*
- * pci_wait_for_pending_transaction:
- *   pending transaction 이 완료될 때까지 대기한다. NVMe reset/FLR 전에 진행 중인 DMA 트랜잭션을 마친다.
+ * [한국어]
+ * pci_wait_for_pending_transaction - 미완료 PCIe 트랜잭션이 없어질 때까지 기다린다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @return: 미완료 트랜잭션이 없어졌으면 1, 시간 안에 없어지지 않으면 0.
+ *          PCIe 가 아니면 확인할 방법이 없어 1(문제 없음)로 본다.
+ *
+ * 리셋을 걸기 전 반드시 밟아야 하는 단계다. 장치가 이미 내보낸 읽기 요청이
+ * 남아 있는데 리셋해 버리면, 뒤늦게 돌아온 완료 패킷이 갈 곳을 잃는다.
+ * 그 결과는 보통 Unexpected Completion 오류이며, 심하면 시스템 오류가 된다.
+ *
+ * 확인 대상은 PCIe capability 의 Device Status 레지스터에 있는
+ * Transaction Pending 비트다. 이 비트는 "이 함수가 발행했고 아직 완료를
+ * 받지 못한 요청이 있다"를 뜻한다.
+ *
+ * NVMe 로 옮기면, 컨트롤러가 SQ 를 읽거나 데이터 버퍼를 읽는 요청이 아직
+ * 공중에 떠 있는 상태를 말한다. 다만 이것은 PCIe 링크 위의 트랜잭션이지
+ * NVMe 명령 큐의 상태가 아니다 — 큐를 비우는 것은 NVMe 드라이버가 따로 한다.
+ *
+ * 실행 문맥: 하위에서 msleep 으로 잔다. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pcie_flr() → [이 함수] → pci_wait_for_pending()
  */
-int pci_wait_for_pending_transaction(struct pci_dev *dev) /* NVMe: pci_wait_for_pending_transaction 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	if (!pci_is_pcie(dev)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return 1; /* NVMe: 연산 결과를 반환한다. */
+int pci_wait_for_pending_transaction(struct pci_dev *dev)
+{
+	if (!pci_is_pcie(dev)) /* [한국어] 재래식 PCI 에는 Transaction Pending 비트가 없다 */
+		return 1; /* [한국어] 확인할 방법이 없으므로 문제 없음(1)으로 본다 */
 
-	return pci_wait_for_pending(dev, pci_pcie_cap(dev) + PCI_EXP_DEVSTA, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-				    PCI_EXP_DEVSTA_TRPND); /* NVMe: 표현식을 평가한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return pci_wait_for_pending(dev, pci_pcie_cap(dev) + PCI_EXP_DEVSTA, /* [한국어] PCIe capability 시작 + PCI_EXP_DEVSTA 위치의 Device Status 를 지켜본다 */
+				    PCI_EXP_DEVSTA_TRPND); /* [한국어] 그중 Transaction Pending 비트가 내려갈 때까지 기다린다 */
+}
 EXPORT_SYMBOL(pci_wait_for_pending_transaction);
 
 /**
@@ -4944,40 +8255,79 @@ EXPORT_SYMBOL(pci_wait_for_pending_transaction);
  * checking any flags and DEVCAP
  */
 /*
- * pcie_flr:
- *   Function Level Reset 을 수행한다. NVMe controller reset 의 핵심 메커니즘으로 controller 상태를 초기화한다.
+ * [한국어]
+ * pcie_flr - PCIe Function Level Reset 을 조건 없이 실행한다.
+ *
+ * @dev: 리셋할 PCIe 장치.
+ * @return: 0 성공. 음수면 IOMMU 준비 실패이거나, 리셋 후 장치가 되살아나지 않았다.
+ *
+ * FLR 은 "이 함수 하나만" 초기 상태로 되돌리는 리셋이다. 링크는 살아 있고
+ * 같은 장치의 다른 함수나 형제 장치에는 영향이 없다. 그래서 한 장치만
+ * 되살리고 싶을 때 가장 먼저 시도하는 방법이다.
+ *
+ * FLR 이 지우는 것과 남기는 것을 구분하는 것이 중요하다.
+ *   - 지워지는 것: BAR, Command 레지스터, MSI/MSI-X 설정, 장치 내부 상태.
+ *     그래서 리셋 전에 pci_save_state() 로 떠 두고 나중에
+ *     pci_restore_state() 로 되돌려야 한다.
+ *   - 남는 것: 링크 자체와 링크 파라미터. 재훈련이 필요 없다.
+ *
+ * 절차의 각 단계에 이유가 있다.
+ *   1) 미완료 트랜잭션이 없어지기를 기다린다. 시간이 지나도 남아 있으면
+ *      로그를 남기고 그대로 진행한다 — 리셋을 포기하는 것보다 낫다는 판단이다.
+ *   2) IOMMU 를 준비시킨다. 원본 주석대로 이 순서여야 한다. DMA 가 멎기
+ *      전에 IOMMU 매핑을 걷으면 아직 떠 있는 요청이 변환에 실패한다.
+ *   3) Device Control 의 Initiate Function Level Reset 비트를 쓴다.
+ *      쓰는 순간 리셋이 시작된다.
+ *   4) 100ms 기다린다. 원본 주석대로 규격은 100ms 안에 FLR 을 끝내라고
+ *      요구하되, 그동안 요청을 조용히 버려도 된다고 허용한다. 그래서 그
+ *      시간 동안은 아예 건드리지 않는다.
+ *   5) 장치가 config 요청에 응답할 때까지 최대 60초까지 기다린다.
+ *   dev->imm_ready 는 "리셋 직후 즉시 응답한다"고 선언한 장치의 표시로,
+ *   그런 장치는 4)와 5)를 건너뛴다.
+ *
+ * NVMe 와의 관계: drivers/nvme/host/pci.c 가 컨트롤러 리셋 경로에서
+ * pcie_reset_flr() 를 통해 이 함수에 도달한다. 컨트롤러가 응답하지 않을 때
+ * 소프트웨어 수준의 리셋(CC.EN 조작)으로 되살아나지 않으면 PCI 층의 FLR 로
+ * 더 강하게 초기화하는 것이다.
+ *
+ * 실행 문맥: msleep 으로 잔다. 반드시 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pcie_reset_flr(), drivers/nvme/host/pci.c → [이 함수]
+ *     → pci_wait_for_pending_transaction(), pci_dev_reset_iommu_prepare(),
+ *        pcie_capability_set_word(), pci_dev_wait()
  */
-int pcie_flr(struct pci_dev *dev) /* NVMe: pcie_flr 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	int ret; /* NVMe: int 타입 변수를 선언한다. */
+int pcie_flr(struct pci_dev *dev)
+{
+	int ret; /* [한국어] pci_dev_wait() 와 IOMMU 준비의 결과 */
 
-	if (!pci_wait_for_pending_transaction(dev)) /* NVMe: 진행 중인 NVMe DMA 트랜잭션이 완료되지 않으면 */
-		pci_err(dev, "timed out waiting for pending transaction; performing function level reset anyway\n"); /* NVMe: timeout 을 기록하고 FLR 을 강제로 수행한다. */
+	if (!pci_wait_for_pending_transaction(dev)) /* [한국어] 미완료 트랜잭션이 시간 안에 사라지지 않으면 */
+		pci_err(dev, "timed out waiting for pending transaction; performing function level reset anyway\n"); /* [한국어] 사실만 남기고 그대로 진행한다. 리셋을 포기하는 것보다 낫다는 판단이다 */
 
 	/* Have to call it after waiting for pending DMA transaction */
-	ret = pci_dev_reset_iommu_prepare(dev); /* NVMe: NVMe reset 전 IOMMU DMA 를 안전하게 멈춘다. */
-	if (ret) { /* NVMe: IOMMU 중지에 실패하면 */
-		pci_err(dev, "failed to stop IOMMU for a PCI reset: %d\n", ret); /* NVMe: IOMMU 중지 실패를 에러로 기록한다. */
-		return ret; /* NVMe: FLR 실패를 반환한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+	ret = pci_dev_reset_iommu_prepare(dev); /* [한국어] IOMMU 쪽 준비. 원본 주석대로 DMA 대기 뒤에 와야 한다 — 아직 떠 있는 요청이 변환에 실패하지 않도록 */
+	if (ret) { /* [한국어] 준비에 실패하면 */
+		pci_err(dev, "failed to stop IOMMU for a PCI reset: %d\n", ret); /* [한국어] 이유를 남기고 */
+		return ret; /* [한국어] 리셋을 포기한다. 여기서는 아직 아무 것도 되돌릴 것이 없다 */
+	}
 
-	pcie_capability_set_word(dev, PCI_EXP_DEVCTL, PCI_EXP_DEVCTL_BCR_FLR); /* NVMe: PCIe Device Control 의 FLR 비트를 설정하여 NVMe controller reset 을 시작한다. */
+	pcie_capability_set_word(dev, PCI_EXP_DEVCTL, PCI_EXP_DEVCTL_BCR_FLR); /* [한국어] Device Control 의 Initiate Function Level Reset 비트를 쓴다. 이 쓰기가 곧 리셋의 시작이다 */
 
-	if (dev->imm_ready) /* NVMe: NVMe 장치가 즉시 reset 준비가 되었으면 */
-		goto done; /* NVMe: 대기 없이 FLR 완료 처리로 이동한다. */
+	if (dev->imm_ready) /* [한국어] "리셋 직후 즉시 응답한다"고 선언한 장치라면 */
+		goto done; /* [한국어] 대기를 건너뛴다 */
 
 	/*
 	 * Per PCIe r4.0, sec 6.6.2, a device must complete an FLR within
 	 * 100ms, but may silently discard requests while the FLR is in
 	 * progress.  Wait 100ms before trying to access the device.
 	 */
-	msleep(100); /* NVMe: PCIe spec 의 FLR 100ms 완료 대기를 수행한다. */
+	msleep(100); /* [한국어] 규격이 정한 100ms. 이 시간 동안 장치는 요청을 조용히 버려도 되므로 아예 건드리지 않는다 */
 
-	ret = pci_dev_wait(dev, "FLR", PCIE_RESET_READY_POLL_MS); /* NVMe: NVMe controller 가 FLR 후 config space 에 응답하는지 확인한다. */
-done: /* NVMe: 레이블을 정의한다. */
-	pci_dev_reset_iommu_done(dev); /* NVMe: FLR 완료 후 IOMMU 상태를 복원한다. */
-	return ret; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	ret = pci_dev_wait(dev, "FLR", PCIE_RESET_READY_POLL_MS); /* [한국어] 그 뒤 장치가 config 요청에 정상 응답할 때까지 최대 60초까지 기다린다 */
+done: /* [한국어] imm_ready 장치가 건너뛰어 오는 지점 */
+	pci_dev_reset_iommu_done(dev); /* [한국어] IOMMU 쪽 준비를 되돌린다. 성공·실패 모두 반드시 거쳐야 짝이 맞는다 */
+	return ret; /* [한국어] pci_dev_wait() 의 결과가 곧 FLR 의 결과다 */
+}
 EXPORT_SYMBOL_GPL(pcie_flr);
 
 /**
@@ -4988,68 +8338,120 @@ EXPORT_SYMBOL_GPL(pcie_flr);
  * Initiate a function level reset on @dev.
  */
 /*
- * pcie_reset_flr:
- *   FLR 수행 여부를 probe/실행한다. NVMe reset 메서드 등록 시 FLR 지원 여부를 확인한다.
+ * [한국어]
+ * pcie_reset_flr - FLR 가능 여부를 확인하거나 실제로 FLR 을 실행한다.
+ *
+ * @dev: 대상 PCIe 장치.
+ * @probe: true 면 "이 방법을 쓸 수 있는가"만 판정하고 실제 리셋은 하지 않는다.
+ * @return: 0 이면 가능(probe) 또는 성공(실행). -ENOTTY 는 이 방법을 쓸 수 없다는 뜻이다.
+ *
+ * 이 파일의 리셋 방법들은 모두 이 "probe 겸 실행" 형태를 따른다.
+ * pci_init_reset_methods() 가 probe=true 로 불러 쓸 수 있는 방법 목록을
+ * 만들고, 실제 리셋 때는 그 목록을 순서대로 probe=false 로 부른다.
+ * 덕분에 판정 조건과 실행 코드가 한곳에 있어 둘이 어긋날 수 없다.
+ *
+ * -ENOTTY 를 쓰는 것도 규약이다. 상위 코드는 이 값을 "실패"가 아니라
+ * "이 방법은 해당 없음"으로 읽고 다음 방법으로 넘어간다.
+ *
+ * 두 가지 조건을 본다.
+ *   - PCI_DEV_FLAGS_NO_FLR_RESET: FLR 이 오히려 장치를 망가뜨리는 하드웨어에
+ *     quirk 가 붙여 두는 표시.
+ *   - devcap 의 FLR 지원 비트: 열거 때 캐시해 둔 Device Capabilities 값.
+ *
+ * NVMe 와의 관계: drivers/nvme/host/pci.c 가 이 함수를 probe=false 로 직접
+ * 부른다 — 리셋 방법 목록을 거치지 않고 FLR 만 콕 집어 쓰는 경로다.
+ *
+ * 실행 문맥: probe=false 면 잠든다. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_init_reset_methods(), __pci_reset_function_locked(),
+ *   drivers/nvme/host/pci.c → [이 함수] → pcie_flr()
  */
-int pcie_reset_flr(struct pci_dev *dev, bool probe) /* NVMe: pcie_reset_flr 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	if (dev->dev_flags & PCI_DEV_FLAGS_NO_FLR_RESET) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return -ENOTTY; /* NVMe: 오류 코드를 반환한다. */
+int pcie_reset_flr(struct pci_dev *dev, bool probe)
+{
+	if (dev->dev_flags & PCI_DEV_FLAGS_NO_FLR_RESET) /* [한국어] FLR 이 오히려 장치를 망가뜨린다고 quirk 가 표시해 두었으면 */
+		return -ENOTTY; /* [한국어] "이 방법은 해당 없음"을 뜻하는 -ENOTTY */
 
-	if (!(dev->devcap & PCI_EXP_DEVCAP_FLR)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return -ENOTTY; /* NVMe: 오류 코드를 반환한다. */
+	if (!(dev->devcap & PCI_EXP_DEVCAP_FLR)) /* [한국어] 열거 때 캐시해 둔 Device Capabilities 에 FLR 지원 비트가 없으면 */
+		return -ENOTTY; /* [한국어] 역시 쓸 수 없는 방법이다 */
 
-	if (probe) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return 0; /* NVMe: 성공(0)을 반환한다. */
+	if (probe) /* [한국어] 가능 여부만 묻는 호출이면 */
+		return 0; /* [한국어] "쓸 수 있다"는 뜻의 0 을 돌려주고 실제 리셋은 하지 않는다 */
 
-	return pcie_flr(dev); /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return pcie_flr(dev); /* [한국어] 실제로 FLR 을 건다 */
+}
 EXPORT_SYMBOL_GPL(pcie_reset_flr);
 
 /*
- * pci_af_flr:
- *   Advanced Features capability 기반 FLR 를 수행한다. NVMe 장치가 AF FLR 을 지원할 때 사용된다.
+ * [한국어]
+ * pci_af_flr - Advanced Features capability 를 통한 FLR 을 판정하거나 실행한다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @probe: true 면 가능 여부만 판정한다.
+ * @return: 0 가능/성공, -ENOTTY 이 방법을 쓸 수 없음, 그 밖의 음수는 실패.
+ *
+ * PCIe 가 아닌 재래식 PCI 장치도 FLR 을 쓸 수 있게 하려고 나중에 추가된
+ * 규격이 AF(Advanced Features) capability 다. 하는 일은 pcie_flr() 과 같지만
+ * 조작하는 레지스터가 PCIe capability 가 아니라 AF capability 안에 있다.
+ *
+ * 두 비트를 모두 확인해야 한다.
+ *   - PCI_AF_CAP_TP: Transaction Pending 비트를 구현했는가. 미완료 트랜잭션을
+ *     확인할 수 없으면 안전하게 리셋할 수 없다.
+ *   - PCI_AF_CAP_FLR: FLR 자체를 지원하는가.
+ *
+ * 대기 코드의 << 8 이 요령이다. pci_wait_for_pending() 은 워드(16비트) 단위로
+ * 읽는데 AF Status 와 AF Control 이 인접한 바이트라, Control 오프셋에서
+ * 워드로 읽으면 상위 바이트가 Status 가 된다. 그래서 Status 의 비트를
+ * 8칸 올려 맞춘다(원본 주석의 "word-aligned test").
+ *
+ * NVMe SSD 는 PCIe 장치라 AF capability 가 없어 이 방법은 곧바로 -ENOTTY 다.
+ *
+ * 실행 문맥: msleep 으로 잔다. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_init_reset_methods(), __pci_reset_function_locked() → [이 함수]
+ *     → pci_wait_for_pending(), pci_dev_reset_iommu_prepare(), pci_dev_wait()
  */
-static int pci_af_flr(struct pci_dev *dev, bool probe) /* NVMe: pci_af_flr 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	int ret; /* NVMe: int 타입 변수를 선언한다. */
-	int pos; /* NVMe: int 타입 변수를 선언한다. */
-	u8 cap; /* NVMe: u8 타입 변수를 선언한다. */
+static int pci_af_flr(struct pci_dev *dev, bool probe)
+{
+	int ret; /* [한국어] pci_dev_wait() 와 IOMMU 준비의 결과 */
+	int pos; /* [한국어] AF capability 의 오프셋 */
+	u8 cap; /* [한국어] AF Capabilities 레지스터 값 */
 
-	pos = pci_find_capability(dev, PCI_CAP_ID_AF); /* NVMe: 변수에 값을 할당한다. */
-	if (!pos) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return -ENOTTY; /* NVMe: 오류 코드를 반환한다. */
+	pos = pci_find_capability(dev, PCI_CAP_ID_AF); /* [한국어] 표준 capability 리스트에서 AF 를 찾는다 */
+	if (!pos) /* [한국어] 없으면 이 방법을 쓸 수 없다 */
+		return -ENOTTY; /* [한국어] "해당 없음"을 뜻하는 -ENOTTY */
 
-	if (dev->dev_flags & PCI_DEV_FLAGS_NO_FLR_RESET) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return -ENOTTY; /* NVMe: 오류 코드를 반환한다. */
+	if (dev->dev_flags & PCI_DEV_FLAGS_NO_FLR_RESET) /* [한국어] FLR 이 오히려 장치를 망가뜨린다고 quirk 가 표시했으면 */
+		return -ENOTTY; /* [한국어] 역시 해당 없음 */
 
-	pci_read_config_byte(dev, pos + PCI_AF_CAP, &cap); /* NVMe: PCI 설정 공간 1바이트를 읽는다. */
-	if (!(cap & PCI_AF_CAP_TP) || !(cap & PCI_AF_CAP_FLR)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return -ENOTTY; /* NVMe: 오류 코드를 반환한다. */
+	pci_read_config_byte(dev, pos + PCI_AF_CAP, &cap); /* [한국어] AF Capabilities 를 읽는다 */
+	if (!(cap & PCI_AF_CAP_TP) || !(cap & PCI_AF_CAP_FLR)) /* [한국어] Transaction Pending 비트를 구현하지 않았거나 FLR 을 지원하지 않으면 — 전자가 없으면 미완료 DMA 를 확인할 수 없어 안전하게 리셋할 수 없다 */
+		return -ENOTTY; /* [한국어] 해당 없음 */
 
-	if (probe) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return 0; /* NVMe: 성공(0)을 반환한다. */
+	if (probe) /* [한국어] 가능 여부만 묻는 호출이면 */
+		return 0; /* [한국어] "쓸 수 있다"만 알리고 끝낸다 */
 
 	/*
 	 * Wait for Transaction Pending bit to clear.  A word-aligned test
 	 * is used, so we use the control offset rather than status and shift
 	 * the test bit to match.
 	 */
-	if (!pci_wait_for_pending(dev, pos + PCI_AF_CTRL, /* NVMe: 조건식을 평가해 분기를 결정한다. */
-				 PCI_AF_STATUS_TP << 8)) /* NVMe: 비트 연산을 수행한다. */
-		pci_err(dev, "timed out waiting for pending transaction; performing AF function level reset anyway\n"); /* NVMe: PCI 장치에 대한 에러 로그를 출력한다. */
+	if (!pci_wait_for_pending(dev, pos + PCI_AF_CTRL, /* [한국어] AF Control 오프셋에서 워드로 읽는다. 인접한 상위 바이트가 AF Status 이므로 */
+				 PCI_AF_STATUS_TP << 8)) /* [한국어] Status 의 Transaction Pending 비트를 8칸 올려 위치를 맞춘다 */
+		pci_err(dev, "timed out waiting for pending transaction; performing AF function level reset anyway\n"); /* [한국어] 시간 안에 내려가지 않아도 사실만 남기고 리셋을 강행한다 */
 
 	/* Have to call it after waiting for pending DMA transaction */
-	ret = pci_dev_reset_iommu_prepare(dev); /* NVMe: 변수에 값을 할당한다. */
-	if (ret) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pci_err(dev, "failed to stop IOMMU for a PCI reset: %d\n", ret); /* NVMe: PCI 장치에 대한 에러 로그를 출력한다. */
-		return ret; /* NVMe: 연산 결과를 반환한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+	ret = pci_dev_reset_iommu_prepare(dev); /* [한국어] IOMMU 쪽 준비. DMA 대기 뒤에 와야 한다 */
+	if (ret) { /* [한국어] 실패하면 */
+		pci_err(dev, "failed to stop IOMMU for a PCI reset: %d\n", ret); /* [한국어] 이유를 남기고 */
+		return ret; /* [한국어] 리셋을 포기한다 */
+	}
 
-	pci_write_config_byte(dev, pos + PCI_AF_CTRL, PCI_AF_CTRL_FLR); /* NVMe: PCI 설정 공간 1바이트를 쓴다. */
+	pci_write_config_byte(dev, pos + PCI_AF_CTRL, PCI_AF_CTRL_FLR); /* [한국어] AF Control 의 FLR 비트를 쓴다. 이 쓰기가 리셋의 시작이다 */
 
-	if (dev->imm_ready) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		goto done; /* NVMe: 지정한 레이블로 제어를 이동한다. */
+	if (dev->imm_ready) /* [한국어] 즉시 응답한다고 선언한 장치면 */
+		goto done; /* [한국어] 대기를 건너뛴다 */
 
 	/*
 	 * Per Advanced Capabilities for Conventional PCI ECN, 13 April 2006,
@@ -5057,13 +8459,13 @@ static int pci_af_flr(struct pci_dev *dev, bool probe) /* NVMe: pci_af_flr 함�
 	 * 100ms, but may silently discard requests while the FLR is in
 	 * progress.  Wait 100ms before trying to access the device.
 	 */
-	msleep(100); /* NVMe: msleep 함수를 호출한다. */
+	msleep(100); /* [한국어] AF FLR 도 100ms 안에 끝내되 그동안 요청을 버려도 된다는 규정이라, 그 시간 동안 건드리지 않는다 */
 
-	ret = pci_dev_wait(dev, "AF_FLR", PCIE_RESET_READY_POLL_MS); /* NVMe: 변수에 값을 할당한다. */
-done: /* NVMe: 레이블을 정의한다. */
-	pci_dev_reset_iommu_done(dev); /* NVMe: pci_dev_reset_iommu_done 함수를 호출한다. */
-	return ret; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	ret = pci_dev_wait(dev, "AF_FLR", PCIE_RESET_READY_POLL_MS); /* [한국어] 그 뒤 장치가 응답할 때까지 기다린다 */
+done: /* [한국어] imm_ready 장치가 건너뛰어 오는 지점 */
+	pci_dev_reset_iommu_done(dev); /* [한국어] IOMMU 준비를 되돌린다. 성공·실패 모두 거쳐야 짝이 맞는다 */
+	return ret; /* [한국어] 대기 결과가 곧 리셋 결과다 */
+}
 
 /**
  * pci_pm_reset - Put device into PCI_D3 and back into PCI_D0.
@@ -5081,47 +8483,74 @@ done: /* NVMe: 레이블을 정의한다. */
  * Moreover, only devices in D0 can be reset by this function.
  */
 /*
- * pci_pm_reset:
- *   Power Management capability 기반 reset 을 수행한다. NVMe controller 의 소프트 리셋 옵션 중 하나이다.
+ * [한국어]
+ * pci_pm_reset - D0 → D3hot → D0 왕복으로 장치를 리셋한다.
+ *
+ * @dev: 대상 PCI 장치.
+ * @probe: true 면 가능 여부만 판정한다.
+ * @return: 0 가능/성공, -ENOTTY 해당 없음, -EINVAL 이면 장치가 D0 가 아니다.
+ *
+ * FLR 이 없는 장치를 위한 대안이다. 근거는 PCI PM 규격의 성질 하나다 —
+ * No_Soft_Reset 비트가 0 인 장치는 D3hot 에서 D0 로 돌아올 때 내부 리셋을
+ * 수행해도 된다. 그 성질을 리셋 수단으로 역이용하는 것이다.
+ *
+ * 그래서 판정 조건이 뒤집혀 보인다. No_Soft_Reset 이 켜져 있으면(= 리셋하지
+ * 않겠다고 선언한 장치면) 이 방법을 쓸 수 없어 -ENOTTY 다.
+ *
+ * D0 가 아니면 -EINVAL 인 이유는, 이미 저전원 상태인 장치를 D3hot 으로
+ * 내려 봐야 "D3hot 에서 D0 로 올라오는" 전이가 성립하지 않기 때문이다
+ * (원본 주석의 "only devices in D0 can be reset by this function").
+ *
+ * 비용도 원본 주석에 적혀 있다. 전이 지연을 두 번 겪으므로 기본값 기준
+ * 최소 20ms 를 잔다. FLR 이 있으면 그쪽이 훨씬 빠르고 확실하다.
+ *
+ * 이 방법이 지우는 것은 장치 내부 상태이며 config space 도 초기화될 수
+ * 있으므로, 다른 리셋과 마찬가지로 상태 저장·복원이 필요하다.
+ *
+ * 실행 문맥: 전이 지연 동안 두 번 잔다. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_init_reset_methods(), __pci_reset_function_locked() → [이 함수]
+ *     → pci_dev_d3_sleep(), pci_dev_wait()
  */
-static int pci_pm_reset(struct pci_dev *dev, bool probe) /* NVMe: pci_pm_reset 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	u16 csr; /* NVMe: u16 타입 변수를 선언한다. */
-	int ret; /* NVMe: int 타입 변수를 선언한다. */
+static int pci_pm_reset(struct pci_dev *dev, bool probe)
+{
+	u16 csr; /* [한국어] PMCSR 값. 상태 비트를 바꿔 가며 두 번 쓴다 */
+	int ret; /* [한국어] pci_dev_wait() 와 IOMMU 준비의 결과 */
 
-	if (!dev->pm_cap || dev->dev_flags & PCI_DEV_FLAGS_NO_PM_RESET) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return -ENOTTY; /* NVMe: 오류 코드를 반환한다. */
+	if (!dev->pm_cap || dev->dev_flags & PCI_DEV_FLAGS_NO_PM_RESET) /* [한국어] PM capability 가 없거나, PM 리셋이 위험하다고 quirk 가 표시했으면 */
+		return -ENOTTY; /* [한국어] 이 방법을 쓸 수 없다 */
 
-	pci_read_config_word(dev, dev->pm_cap + PCI_PM_CTRL, &csr); /* NVMe: PCI 설정 공간 2바이트를 읽는다. */
-	if (csr & PCI_PM_CTRL_NO_SOFT_RESET) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return -ENOTTY; /* NVMe: 오류 코드를 반환한다. */
+	pci_read_config_word(dev, dev->pm_cap + PCI_PM_CTRL, &csr); /* [한국어] PMCSR 을 읽는다 */
+	if (csr & PCI_PM_CTRL_NO_SOFT_RESET) /* [한국어] No_Soft_Reset 이 켜져 있으면 "D3hot 을 오가도 리셋하지 않는다"는 선언이라 */
+		return -ENOTTY; /* [한국어] 리셋 수단으로 쓸 수 없다 */
 
-	if (probe) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return 0; /* NVMe: 성공(0)을 반환한다. */
+	if (probe) /* [한국어] 가능 여부만 묻는 호출이면 */
+		return 0; /* [한국어] "쓸 수 있다"만 알린다 */
 
-	if (dev->current_state != PCI_D0) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return -EINVAL; /* NVMe: 오류 코드를 반환한다. */
+	if (dev->current_state != PCI_D0) /* [한국어] 이미 저전원 상태면 "D3hot 에서 D0 로 올라오는" 전이를 만들 수 없다 */
+		return -EINVAL; /* [한국어] 잘못된 요청으로 거절한다 */
 
-	ret = pci_dev_reset_iommu_prepare(dev); /* NVMe: 변수에 값을 할당한다. */
-	if (ret) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pci_err(dev, "failed to stop IOMMU for a PCI reset: %d\n", ret); /* NVMe: PCI 장치에 대한 에러 로그를 출력한다. */
-		return ret; /* NVMe: 연산 결과를 반환한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+	ret = pci_dev_reset_iommu_prepare(dev); /* [한국어] IOMMU 쪽 준비 */
+	if (ret) { /* [한국어] 실패하면 */
+		pci_err(dev, "failed to stop IOMMU for a PCI reset: %d\n", ret); /* [한국어] 이유를 남기고 */
+		return ret; /* [한국어] 리셋을 포기한다 */
+	}
 
-	csr &= ~PCI_PM_CTRL_STATE_MASK; /* NVMe: 변수에 값을 할당한다. */
-	csr |= PCI_D3hot; /* NVMe: 변수에 값을 할당한다. */
-	pci_write_config_word(dev, dev->pm_cap + PCI_PM_CTRL, csr); /* NVMe: PCI 설정 공간 2바이트를 쓴다. */
-	pci_dev_d3_sleep(dev); /* NVMe: pci_dev_d3_sleep 함수를 호출한다. */
+	csr &= ~PCI_PM_CTRL_STATE_MASK; /* [한국어] 상태 필드만 지운다. PME 관련 비트는 보존한다 */
+	csr |= PCI_D3hot; /* [한국어] D3hot 값을 넣는다 */
+	pci_write_config_word(dev, dev->pm_cap + PCI_PM_CTRL, csr); /* [한국어] 써 넣는 순간 장치가 D3hot 으로 내려간다 */
+	pci_dev_d3_sleep(dev); /* [한국어] 규격이 정한 D3hot 전이 안정화 시간을 지킨다 */
 
-	csr &= ~PCI_PM_CTRL_STATE_MASK; /* NVMe: 변수에 값을 할당한다. */
-	csr |= PCI_D0; /* NVMe: 변수에 값을 할당한다. */
-	pci_write_config_word(dev, dev->pm_cap + PCI_PM_CTRL, csr); /* NVMe: PCI 설정 공간 2바이트를 쓴다. */
-	pci_dev_d3_sleep(dev); /* NVMe: pci_dev_d3_sleep 함수를 호출한다. */
+	csr &= ~PCI_PM_CTRL_STATE_MASK; /* [한국어] 다시 상태 필드만 지우고 */
+	csr |= PCI_D0; /* [한국어] D0 값을 넣는다 */
+	pci_write_config_word(dev, dev->pm_cap + PCI_PM_CTRL, csr); /* [한국어] 써 넣는 순간 장치가 D0 로 올라오며, No_Soft_Reset 이 0 이므로 내부 리셋이 일어난다 */
+	pci_dev_d3_sleep(dev); /* [한국어] D3hot→D0 전이 안정화 시간을 다시 지킨다 */
 
-	ret = pci_dev_wait(dev, "PM D3hot->D0", PCIE_RESET_READY_POLL_MS); /* NVMe: 변수에 값을 할당한다. */
-	pci_dev_reset_iommu_done(dev); /* NVMe: pci_dev_reset_iommu_done 함수를 호출한다. */
-	return ret; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	ret = pci_dev_wait(dev, "PM D3hot->D0", PCIE_RESET_READY_POLL_MS); /* [한국어] 그 뒤 장치가 config 요청에 응답할 때까지 기다린다 */
+	pci_dev_reset_iommu_done(dev); /* [한국어] IOMMU 준비를 되돌린다 */
+	return ret; /* [한국어] 대기 결과가 곧 리셋 결과다 */
+}
 
 /**
  * pcie_wait_for_link_status - Wait for link status change
@@ -5132,26 +8561,52 @@ static int pci_pm_reset(struct pci_dev *dev, bool probe) /* NVMe: pci_pm_reset �
  * Return 0 if successful, or -ETIMEDOUT if status has not changed within
  * PCIE_LINK_RETRAIN_TIMEOUT_MS milliseconds.
  */
-static int pcie_wait_for_link_status(struct pci_dev *pdev, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-				     bool use_lt, bool active) /* NVMe: bool 타입 변수를 선언한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	u16 lnksta_mask, lnksta_match; /* NVMe: u16 타입 변수를 선언한다. */
-	unsigned long end_jiffies; /* NVMe: unsigned 타입 변수를 선언한다. */
-	u16 lnksta; /* NVMe: u16 타입 변수를 선언한다. */
+/*
+ * [한국어]
+ * pcie_wait_for_link_status - 링크 상태 비트가 원하는 값이 될 때까지 기다린다.
+ *
+ * @pdev: 링크를 지켜볼 장치(보통 브리지).
+ * @use_lt: true 면 LT(Link Training) 비트를, false 면 DLLLA(Data Link Layer
+ *          Link Active) 비트를 본다.
+ * @active: true 면 그 비트가 서기를, false 면 내려가기를 기다린다.
+ * @return: 0 원하는 상태 도달, -ETIMEDOUT 이면 1초 안에 그렇게 되지 않았다.
+ *
+ * 두 비트의 뜻이 서로 다르다는 것이 이 함수를 이해하는 열쇠다.
+ *   - LT(Link Training): 지금 링크 훈련이 진행 중이다. 훈련이 끝나기를
+ *     기다리려면 이 비트가 내려가기를 기다린다.
+ *   - DLLLA(Data Link Layer Link Active): 데이터 링크 계층이 살아 있다.
+ *     링크가 쓸 수 있게 되기를 기다리려면 이 비트가 서기를 기다린다.
+ * 그래서 호출자는 보통 (use_lt=true, active=false) 또는
+ * (use_lt=false, active=true) 조합으로 부른다.
+ *
+ * 1ms 씩 자며 폴링하고 상한은 PCIE_LINK_RETRAIN_TIMEOUT_MS(1초)다.
+ * do-while 이라 먼저 한 번 확인하므로, 이미 원하는 상태면 자지 않는다.
+ *
+ * 실행 문맥: msleep 으로 잔다. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pcie_retrain_link() → [이 함수] → pcie_capability_read_word()
+ */
+static int pcie_wait_for_link_status(struct pci_dev *pdev,
+				     bool use_lt, bool active)
+{
+	u16 lnksta_mask, lnksta_match; /* [한국어] lnksta_mask 는 지켜볼 비트, lnksta_match 는 그 비트가 가져야 할 값 */
+	unsigned long end_jiffies; /* [한국어] 폴링을 멈출 시각 */
+	u16 lnksta; /* [한국어] 매번 읽어 올 Link Status 값 */
 
-	lnksta_mask = use_lt ? PCI_EXP_LNKSTA_LT : PCI_EXP_LNKSTA_DLLLA; /* NVMe: 변수에 값을 할당한다. */
-	lnksta_match = active ? lnksta_mask : 0; /* NVMe: 변수에 값을 할당한다. */
+	lnksta_mask = use_lt ? PCI_EXP_LNKSTA_LT : PCI_EXP_LNKSTA_DLLLA; /* [한국어] LT 는 "훈련 중", DLLLA 는 "링크 살아 있음"을 뜻한다. 목적에 따라 볼 비트가 다르다 */
+	lnksta_match = active ? lnksta_mask : 0; /* [한국어] active 면 그 비트가 서야 하고, 아니면 내려가야 한다 */
 
-	end_jiffies = jiffies + msecs_to_jiffies(PCIE_LINK_RETRAIN_TIMEOUT_MS); /* NVMe: 변수에 값을 할당한다. */
-	do { /* NVMe: do-while 루프 본문을 시작한다. */
-		pcie_capability_read_word(pdev, PCI_EXP_LNKSTA, &lnksta); /* NVMe: pcie_capability_read_word 함수를 호출한다. */
-		if ((lnksta & lnksta_mask) == lnksta_match) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			return 0; /* NVMe: 성공(0)을 반환한다. */
-		msleep(1); /* NVMe: msleep 함수를 호출한다. */
-	} while (time_before(jiffies, end_jiffies)); /* NVMe: while 함수를 선언한다. */
+	end_jiffies = jiffies + msecs_to_jiffies(PCIE_LINK_RETRAIN_TIMEOUT_MS); /* [한국어] 1초 뒤의 시각을 만료 기준으로 잡는다 */
+	do { /* [한국어] 먼저 한 번 확인하고 시작한다 — 이미 원하는 상태면 자지 않는다 */
+		pcie_capability_read_word(pdev, PCI_EXP_LNKSTA, &lnksta); /* [한국어] Link Status 레지스터를 읽는다 */
+		if ((lnksta & lnksta_mask) == lnksta_match) /* [한국어] 지켜보는 비트가 원하는 값이 됐으면 */
+			return 0; /* [한국어] 대기 종료 */
+		msleep(1); /* [한국어] 1ms 자고 다시 본다 */
+	} while (time_before(jiffies, end_jiffies)); /* [한국어] 만료 시각 전이면 계속 반복한다 */
 
-	return -ETIMEDOUT; /* NVMe: 오류 코드를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return -ETIMEDOUT; /* [한국어] 1초 안에 원하는 상태가 되지 않았다 */
+}
 
 /**
  * pcie_retrain_link - Request a link retrain and wait for it to complete
@@ -5171,12 +8626,41 @@ static int pcie_wait_for_link_status(struct pci_dev *pdev, /* NVMe: 함수 호�
  * within PCIE_LINK_RETRAIN_TIMEOUT_MS milliseconds.
  */
 /*
- * pcie_retrain_link:
- *   PCIe 링크를 재학습시킨다. NVMe 링크 속도/폭 복구나 hotplug 후 link 안정화에 사용된다.
+ * [한국어]
+ * pcie_retrain_link - 링크 재훈련을 요청하고 끝날 때까지 기다린다.
+ *
+ * @pdev: 재훈련을 걸 장치(보통 브리지).
+ * @use_lt: 완료 판정에 LT 비트를 쓸지, DLLLA 비트를 쓸지.
+ * @return: 0 성공, -ETIMEDOUT 이면 1초 안에 훈련이 끝나지 않았다.
+ *
+ * 링크 재훈련은 링크 속도나 폭을 바꾸거나, 불안정한 링크를 되살릴 때 쓴다.
+ * Link Control 의 Retrain Link 비트를 쓰면 하드웨어가 훈련을 시작한다.
+ *
+ * 앞뒤로 붙은 처리에 각각 이유가 있다.
+ *   1) 시작 전에 "훈련 중이 아님"을 먼저 확인한다. 원본 주석이 인용하는
+ *      PCIe r6.1 7.5.3.7 의 구현 노트대로, 파라미터를 바꾸기 전에 시작된
+ *      훈련이 아직 돌고 있으면 새 파라미터가 반영되지 않는 LTSSM 경쟁이 생긴다.
+ *   2) clear_retrain_link quirk: 일부 장치는 Retrain Link 비트를 소프트웨어가
+ *      직접 지워 주어야 훈련이 성공한다는 결함이 있다.
+ *   3) 훈련 뒤 LBMS(Link Bandwidth Management Status)를 지운다. 재훈련 자체가
+ *      이 비트를 세우기 때문에, 지워 두어야 이후 이 비트를 "하드웨어가 스스로
+ *      속도·폭을 바꿨다"는 신호로 쓸 수 있다.
+ *   4) 하위 버스의 링크 속도를 갱신한다. 원본 주석대로 LBMS 를 지우는 것이
+ *      대역폭 제어 IRQ 핸들러와 경쟁해, 핸들러가 속도를 갱신하지 못한 채
+ *      일찍 돌아갈 수 있기 때문이다.
+ *
+ * NVMe 와의 관계: NVMe SSD 가 붙은 링크가 낮은 속도로 훈련됐거나 오류로
+ * 불안정할 때 이 경로로 되살린다. 링크 속도는 곧 SSD 의 최대 대역폭이다.
+ *
+ * 실행 문맥: 최대 2초까지 잘 수 있다. 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   링크 속도 조정 코드, pcie_failed_link_retrain() → [이 함수]
+ *     → pcie_wait_for_link_status(), pcie_reset_lbms(), pcie_update_link_speed()
  */
-int pcie_retrain_link(struct pci_dev *pdev, bool use_lt) /* NVMe: pcie_retrain_link 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	int rc; /* NVMe: int 타입 변수를 선언한다. */
+int pcie_retrain_link(struct pci_dev *pdev, bool use_lt)
+{
+	int rc; /* [한국어] 각 단계의 결과 */
 
 	/*
 	 * Ensure the updated LNKCTL parameters are used during link
@@ -5185,28 +8669,28 @@ int pcie_retrain_link(struct pci_dev *pdev, bool use_lt) /* NVMe: pcie_retrain_l
 	 * avoid LTSSM race as recommended in Implementation Note at the end
 	 * of PCIe r6.1 sec 7.5.3.7.
 	 */
-	rc = pcie_wait_for_link_status(pdev, true, false); /* NVMe: 변수에 값을 할당한다. */
-	if (rc) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return rc; /* NVMe: 연산 결과를 반환한다. */
+	rc = pcie_wait_for_link_status(pdev, true, false); /* [한국어] 훈련이 이미 돌고 있지 않은지 먼저 확인한다(LT 비트가 내려가기를 기다린다). 이것을 건너뛰면 새 파라미터가 반영되지 않는 경쟁이 생긴다 */
+	if (rc) /* [한국어] 이미 돌고 있는 훈련이 1초 안에 끝나지 않으면 */
+		return rc; /* [한국어] 재훈련을 걸지 않고 물러난다 */
 
-	pcie_capability_set_word(pdev, PCI_EXP_LNKCTL, PCI_EXP_LNKCTL_RL); /* NVMe: pcie_capability_set_word 함수를 호출한다. */
-	if (pdev->clear_retrain_link) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
+	pcie_capability_set_word(pdev, PCI_EXP_LNKCTL, PCI_EXP_LNKCTL_RL); /* [한국어] Link Control 의 Retrain Link 비트를 세운다. 이 쓰기가 훈련을 시작시킨다 */
+	if (pdev->clear_retrain_link) { /* [한국어] 비트를 소프트웨어가 직접 지워야 훈련이 성공하는 결함이 있는 장치라면 */
 		/*
 		 * Due to an erratum in some devices the Retrain Link bit
 		 * needs to be cleared again manually to allow the link
 		 * training to succeed.
 		 */
-		pcie_capability_clear_word(pdev, PCI_EXP_LNKCTL, PCI_EXP_LNKCTL_RL); /* NVMe: pcie_capability_clear_word 함수를 호출한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+		pcie_capability_clear_word(pdev, PCI_EXP_LNKCTL, PCI_EXP_LNKCTL_RL); /* [한국어] quirk 대로 다시 지워 준다 */
+	}
 
-	rc = pcie_wait_for_link_status(pdev, use_lt, !use_lt); /* NVMe: 변수에 값을 할당한다. */
+	rc = pcie_wait_for_link_status(pdev, use_lt, !use_lt); /* [한국어] 훈련이 끝나기를 기다린다. use_lt 에 따라 "LT 가 내려감" 또는 "DLLLA 가 섬"을 기준으로 삼는다 */
 
 	/*
 	 * Clear LBMS after a manual retrain so that the bit can be used
 	 * to track link speed or width changes made by hardware itself
 	 * in attempt to correct unreliable link operation.
 	 */
-	pcie_reset_lbms(pdev); /* NVMe: pcie_reset_lbms 함수를 호출한다. */
+	pcie_reset_lbms(pdev); /* [한국어] 재훈련이 세워 놓은 LBMS 를 지운다. 그래야 이후 이 비트를 "하드웨어가 스스로 속도·폭을 바꿨다"는 신호로 쓸 수 있다 */
 
 	/*
 	 * Ensure the Link Speed updates after retraining in case the Link
@@ -5216,11 +8700,11 @@ int pcie_retrain_link(struct pci_dev *pdev, bool use_lt) /* NVMe: pcie_retrain_l
 	 * can result in the handler returning early without updating the
 	 * Link Speed.
 	 */
-	if (pdev->subordinate) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pcie_update_link_speed(pdev->subordinate, PCIE_LINK_RETRAIN); /* NVMe: pcie_update_link_speed 함수를 호출한다. */
+	if (pdev->subordinate) /* [한국어] 이 장치가 브리지라면 */
+		pcie_update_link_speed(pdev->subordinate, PCIE_LINK_RETRAIN); /* [한국어] 하위 버스의 링크 속도 기록을 갱신한다. LBMS 를 지우는 것이 IRQ 핸들러와 경쟁해 핸들러가 갱신을 놓칠 수 있기 때문이다 */
 
-	return rc; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return rc; /* [한국어] 훈련 대기의 결과가 곧 이 함수의 결과다 */
+}
 
 /**
  * pcie_wait_for_link_delay - Wait until link is active or inactive
@@ -5230,19 +8714,54 @@ int pcie_retrain_link(struct pci_dev *pdev, bool use_lt) /* NVMe: pcie_retrain_l
  *
  * Use this to wait till link becomes active or inactive.
  */
-static bool pcie_wait_for_link_delay(struct pci_dev *pdev, bool active, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-				     int delay) /* NVMe: int 타입 변수를 선언한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	int rc; /* NVMe: int 타입 변수를 선언한다. */
+/*
+ * [한국어]
+ * pcie_wait_for_link_delay - 링크가 살아나거나(또는 죽거나) 할 때까지 기다린다
+ *
+ * @pdev:   하류 포트(브리지). 이 포트 아래 링크의 상태를 본다.
+ * @active: true 면 "링크가 올라올 때까지", false 면 "내려갈 때까지" 기다린다.
+ * @delay:  링크가 올라온 뒤 추가로 더 기다릴 시간(ms). 링크가 붙었다고 해서
+ *          하위 장치가 곧바로 config 요청을 받을 수 있는 것은 아니기 때문이다.
+ * @return: true = 원하는 상태에 도달, false = 시간 안에 도달하지 못함.
+ *
+ * 리셋이나 D3cold 복귀 뒤에 반드시 거쳐야 하는 관문이다. 링크가 아직
+ * 훈련 중인데 config 요청을 내려보내면 응답이 오지 않아 all-ones 가 읽히고,
+ * 커널은 장치가 사라졌다고 오판한다.
+ *
+ * 세 갈래로 갈린다.
+ *   1) 링크 상태 보고 기능이 없는 컨트롤러 - 물어볼 방법이 없으니 그냥
+ *      최대 시간만큼 자고 성공했다고 친다.
+ *   2) active 요청 - 20ms 먼저 자고(스펙이 정한 LTSSM Detect 진입 시간),
+ *      Data Link Layer Link Active 비트를 폴링한다. 실패하면 재훈련을
+ *      한 번 시도해 본다.
+ *   3) inactive 요청 - 폴링만 한다. 추가 대기가 필요 없다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트 전용. msleep 으로 잠든다.
+ * 호출자: pcie_wait_for_link(), pci_bridge_wait_for_secondary_bus().
+ * 피호출자: pcie_wait_for_link_status(), pcie_failed_link_retrain().
+ *
+ * 호출 체인:
+ *   pci_bridge_wait_for_secondary_bus -> [pcie_wait_for_link_delay]
+ *     -> pcie_wait_for_link_status -> pcie_capability_read_word(LNKSTA)
+ */
+static bool pcie_wait_for_link_delay(struct pci_dev *pdev, bool active,
+				     int delay)
+{
+	int rc;		/* [한국어] pcie_wait_for_link_status 의 결과. 0 이 성공이다 */
 
 	/*
 	 * Some controllers might not implement link active reporting. In this
 	 * case, we wait for 1000 ms + any delay requested by the caller.
 	 */
-	if (!pdev->link_active_reporting) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		msleep(PCIE_LINK_RETRAIN_TIMEOUT_MS + delay); /* NVMe: msleep 함수를 호출한다. */
-		return true; /* NVMe: 연산 결과를 반환한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+	/* [한국어] Data Link Layer Link Active Reporting 을 구현하지 않은 포트다.
+	 * 상태를 물어볼 수단이 없으므로 "충분히 오래" 자는 것 말고는 방법이 없다.
+	 * 최대 훈련 시간에 호출자가 요구한 추가 지연을 더해 한 번에 잔다.
+	 * 조건과 무관하게 true 를 돌려주는 것은, 실패를 알 방법이 없는 이상
+	 * 성공했다고 가정하는 편이 낫기 때문이다(아니면 멀쩡한 장치도 못 쓴다). */
+	if (!pdev->link_active_reporting) {
+		msleep(PCIE_LINK_RETRAIN_TIMEOUT_MS + delay);
+		return true;
+	}
 
 	/*
 	 * PCIe r4.0 sec 6.6.1, a component must enter LTSSM Detect within 20ms,
@@ -5253,24 +8772,37 @@ static bool pcie_wait_for_link_delay(struct pci_dev *pdev, bool active, /* NVMe:
 	 * If the link fails to activate, either the device was physically
 	 * removed or the link is permanently failed.
 	 */
-	if (active) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		msleep(20); /* NVMe: msleep 함수를 호출한다. */
-	rc = pcie_wait_for_link_status(pdev, false, active); /* NVMe: 변수에 값을 할당한다. */
-	if (active) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		if (rc) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			rc = pcie_failed_link_retrain(pdev); /* NVMe: 변수에 값을 할당한다. */
-		if (rc) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			return false; /* NVMe: 연산 결과를 반환한다. */
+	/* [한국어] 링크가 올라오기를 기다리는 경우에만 20ms 를 먼저 잔다.
+	 * 스펙이 "리셋 해제 후 20ms 안에 LTSSM 이 Detect 상태로 들어간다" 고
+	 * 정했으므로, 그 전에 폴링해 봐야 아직 아무 일도 일어나지 않았다. */
+	if (active)
+		msleep(20);
+	/* [한국어] LNKSTA 의 Data Link Layer Link Active 비트를 원하는 값이 될 때까지
+	 * 폴링한다. 두 번째 인자 false 는 "링크 훈련 중(LT) 비트는 보지 않는다" 는 뜻.
+	 * 0 = 도달, 음수 = 시간 초과. */
+	rc = pcie_wait_for_link_status(pdev, false, active);
+	if (active) {
+		/* [한국어] 링크가 안 올라왔다. 일부 장치는 첫 훈련에 실패하지만
+		 * 속도를 낮춰 다시 시도하면 붙는다. 그 우회를 한 번 시도한다. */
+		if (rc)
+			rc = pcie_failed_link_retrain(pdev);
+		/* [한국어] 재훈련도 실패했다면 물리적으로 뽑혔거나 링크가 영구 고장이다. */
+		if (rc)
+			return false;
 
-		msleep(delay); /* NVMe: msleep 함수를 호출한다. */
-		return true; /* NVMe: 연산 결과를 반환한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+		/* [한국어] 링크는 붙었지만 하위 장치가 아직 config 요청을 받을 준비가
+		 * 안 됐을 수 있다. 스펙이 요구하는 최소 100ms(호출자가 delay 로 전달)를
+		 * 여기서 채운다. 이 대기를 건너뛰면 첫 config 읽기가 all-ones 로 돌아온다. */
+		msleep(delay);
+		return true;
+	}
 
-	if (rc) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return false; /* NVMe: 연산 결과를 반환한다. */
+	/* [한국어] 링크가 내려가기를 기다린 경우. 시간 안에 안 내려갔으면 실패다. */
+	if (rc)
+		return false;
 
-	return true; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return true;	/* [한국어] 원하는 상태에 도달했다 */
+}
 
 /**
  * pcie_wait_for_link - Wait until link is active or inactive
@@ -5280,13 +8812,27 @@ static bool pcie_wait_for_link_delay(struct pci_dev *pdev, bool active, /* NVMe:
  * Use this to wait till link becomes active or inactive.
  */
 /*
- * pcie_wait_for_link:
- *   PCIe 링크가 활성/비활성 상태가 될 때까지 대기한다. NVMe reset/link 재학습 후 link up 을 확인한다.
+ * [한국어]
+ * pcie_wait_for_link - 링크 상태 변화를 기다린다 (표준 100ms 판)
+ *
+ * @pdev:   하류 포트(브리지)
+ * @active: true 면 링크가 올라오기를, false 면 내려가기를 기다린다.
+ * @return: true = 도달, false = 시간 초과.
+ *
+ * pcie_wait_for_link_delay() 에 delay=100 을 넣은 것이 전부다. 100ms 는
+ * PCIe 스펙이 정한 값으로, 링크가 붙은 뒤 하위 장치에 첫 config 요청을
+ * 보내기까지 반드시 기다려야 하는 최소 시간이다(PCIe Base Spec 6.6.1).
+ * 대부분의 호출자는 이 표준 값이면 충분하므로 이 짧은 판을 쓴다.
+ * 펌웨어가 더 긴 시간을 요구하는 특수한 경우에만 _delay 판을 직접 부른다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트 전용.
+ * 호출자: hotplug 드라이버(pciehp), 리셋 경로, 전원 복귀 경로.
  */
-bool pcie_wait_for_link(struct pci_dev *pdev, bool active) /* NVMe: pcie_wait_for_link 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	return pcie_wait_for_link_delay(pdev, active, 100); /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+bool pcie_wait_for_link(struct pci_dev *pdev, bool active)
+{
+	/* [한국어] 100 = PCIe 스펙이 요구하는 링크 활성 후 최소 대기(ms). */
+	return pcie_wait_for_link_delay(pdev, active, 100);
+}
 
 /*
  * Find maximum D3cold delay required by all the devices on the bus.  The
@@ -5296,26 +8842,59 @@ bool pcie_wait_for_link(struct pci_dev *pdev, bool active) /* NVMe: pcie_wait_fo
  * Context: Called with @pci_bus_sem locked for reading.
  */
 /*
- * pci_bus_max_d3cold_delay:
- *   bus 상 하위 장치들의 D3cold 지연 중 최대값을 구한다. NVMe가 연결된 bus 의 resume 지연을 예측한다.
+ * [한국어]
+ * pci_bus_max_d3cold_delay - 이 버스의 장치들이 요구하는 D3cold 복귀 지연의 최대값
+ *
+ * @bus:    검사할 버스
+ * @return: 밀리초 단위 지연. 버스가 비어 있으면 100.
+ *
+ * D3cold 는 장치에서 전원을 완전히 끊은 상태다. 전원을 다시 넣으면 장치가
+ * 스스로 초기화를 마칠 때까지 config 접근을 하면 안 되고, 그 시간이 장치마다
+ * 다르다. 브리지 하나 아래에 여러 장치가 있으면 그중 가장 오래 걸리는 것에
+ * 맞춰야 하므로 최대값을 구한다.
+ *
+ * 코드가 눈에 띄게 이상해 보인다 — min_delay 를 100 에서 시작해 더 작은 값을
+ * 찾아 내려가고, max_delay 는 0 에서 시작해 올라간 뒤, 마지막에 둘 중 큰 것을
+ * 돌려준다. 결과적으로:
+ *   - 어떤 장치가 100 보다 큰 지연을 요구하면 그 값이 이긴다(max_delay).
+ *   - 모든 장치가 100 이하를 요구하면 min_delay 는 그중 최소값이 되고,
+ *     max_delay 는 그중 최대값이 되므로 max() 는 최대값을 고른다.
+ * 즉 실질적으로는 "모든 장치의 요구 중 최대값" 이며, min_delay 의 초기값 100 은
+ * 아무 장치도 없을 때의 스펙 기본값 역할만 한다.
+ *
+ * 실행 컨텍스트: 호출자가 pci_bus_sem 을 읽기 잠금으로 쥐고 들어와야 한다.
+ *   lockdep_assert_held 가 그것을 강제한다(디버그 빌드에서 경고).
+ * 호출자: pci_bridge_wait_for_secondary_bus().
+ *
+ * 호출 체인:
+ *   pci_bridge_wait_for_secondary_bus -> [pci_bus_max_d3cold_delay]
  */
-static int pci_bus_max_d3cold_delay(const struct pci_bus *bus) /* NVMe: pci_bus_max_d3cold_delay 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	const struct pci_dev *pdev; /* NVMe: 구조체 포인터 변수를 선언한다. */
-	int min_delay = 100; /* NVMe: int 타입 변수를 선언한다. */
-	int max_delay = 0; /* NVMe: int 타입 변수를 선언한다. */
+static int pci_bus_max_d3cold_delay(const struct pci_bus *bus)
+{
+	const struct pci_dev *pdev;	/* [한국어] 순회 커서 */
+	/* [한국어] 스펙 기본값 100ms 에서 시작해 더 작은 값을 찾아 내려간다. */
+	int min_delay = 100;
+	/* [한국어] 0 에서 시작해 더 큰 값을 찾아 올라간다. */
+	int max_delay = 0;
 
-	lockdep_assert_held(&pci_bus_sem); /* NVMe: lockdep_assert_held 함수를 호출한다. */
+	/* [한국어] 버스의 devices 목록을 순회하려면 pci_bus_sem 이 필요하다.
+	 * 잠금 없이 돌면 그사이 장치가 제거되어 목록이 끊길 수 있다.
+	 * 이 매크로는 CONFIG_LOCKDEP 빌드에서만 실제로 검사한다. */
+	lockdep_assert_held(&pci_bus_sem);
 
-	list_for_each_entry(pdev, &bus->devices, bus_list) { /* NVMe: 리스트/해시 항목을 순회하는 매크로 루프를 시작한다. */
-		if (pdev->d3cold_delay < min_delay) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			min_delay = pdev->d3cold_delay; /* NVMe: 변수에 값을 할당한다. */
-		if (pdev->d3cold_delay > max_delay) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			max_delay = pdev->d3cold_delay; /* NVMe: 변수에 값을 할당한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+	/* [한국어] 이 버스에 직접 붙은 장치들만 본다(하위 브리지 아래는 재귀하지 않는다). */
+	list_for_each_entry(pdev, &bus->devices, bus_list) {
+		/* [한국어] d3cold_delay 는 열거 시 스펙 기본값으로 채워지고,
+		 * quirk 나 펌웨어(_DSM)가 장치별로 조정한다. */
+		if (pdev->d3cold_delay < min_delay)
+			min_delay = pdev->d3cold_delay;
+		if (pdev->d3cold_delay > max_delay)
+			max_delay = pdev->d3cold_delay;
+	}
 
-	return max(min_delay, max_delay); /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	/* [한국어] 둘 중 큰 값. 위 주석에서 설명한 대로 사실상 최대값이다. */
+	return max(min_delay, max_delay);
+}
 
 /**
  * pci_bridge_wait_for_secondary_bus - Wait for secondary bus to be accessible
@@ -5334,21 +8913,65 @@ static int pci_bus_max_d3cold_delay(const struct pci_bus *bus) /* NVMe: pci_bus_
  * failed to become accessible.
  */
 /*
- * pci_bridge_wait_for_secondary_bus:
- *   bridge secondary bus 가 reset 후 준비될 때까지 대기한다. NVMe가 연결된 downstream bus 복구 시 사용된다.
+ * [한국어]
+ * pci_bridge_wait_for_secondary_bus - 리셋 후 하위 버스가 접근 가능해질 때까지 기다린다
+ *
+ * @dev:        하류 브리지(Root Port 또는 스위치의 Downstream Port)
+ * @reset_type: 로그에 찍을 리셋 종류 이름("bus reset", "FLR" 등). 사람이 읽을
+ *              문자열이며 동작에는 영향을 주지 않는다.
+ * @return: 0 = 하위 장치에 접근 가능해졌음(또는 기다릴 필요가 없었음),
+ *          -ENOTTY = 하위 버스의 첫 장치가 끝내 응답하지 않음.
+ *
+ * 리셋이나 D3cold -> D0 전환 뒤에 반드시 거쳐야 하는 대기다. 이 대기를
+ * 건너뛰고 config 요청을 내려보내면 응답이 없어 all-ones 가 읽히고, 커널은
+ * 멀쩡한 장치를 "사라졌다" 고 판단해 제거해 버린다.
+ *
+ * 필요한 대기 시간이 상황마다 달라서 함수가 여러 갈래로 갈린다.
+ *   - 재래식 PCI/PCI-X: Tpvrh + Trhfa = 1000ms + 100ms 를 그냥 잔다.
+ *     상태를 물어볼 수단이 없기 때문이다(PCI 3.0 spec 4.3.2).
+ *   - PCIe 5 GT/s 이하: 100ms 자고 나서 장치가 응답하는지 폴링한다.
+ *     이 속도대에서는 링크가 빨리 붙으므로 링크 상태를 따로 기다릴 필요가 없다.
+ *   - PCIe Gen3 이상: 먼저 Data Link Layer Link Active 가 서기를 기다린 뒤,
+ *     그다음에 장치 응답을 폴링한다. 고속 링크는 훈련이 오래 걸려서
+ *     시간만 재서는 판정할 수 없다(PCIe 5.0 spec 6.6.1).
+ *
+ * 폴링을 하는 이유가 하나 더 있다. 장치는 아직 준비되지 않았을 때
+ * Request Retry Status(CRS)로 완료를 돌려줄 수 있고, 그러면 정해진 시간보다
+ * 더 오래 걸린다. 스펙은 "1초까지는 고장으로 단정하지 말라" 고 한다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트 전용(msleep 과 폴링). 하위 버스 목록을
+ *   읽는 짧은 구간에서만 pci_bus_sem 을 읽기 잠금으로 잡고, 잠들기 전에 놓는다.
+ * 호출자: pci_reset_bus_function(), pci_parent_bus_reset(), 전원 복귀 경로,
+ *   그리고 AER/DPC 복구.
+ * 피호출자: pci_bus_max_d3cold_delay(), pcie_wait_for_link_delay(), pci_dev_wait().
+ *
+ * 호출 체인:
+ *   pci_reset_bus_function -> pci_bridge_secondary_bus_reset
+ *     -> [pci_bridge_wait_for_secondary_bus] -> pci_dev_wait
  */
-int pci_bridge_wait_for_secondary_bus(struct pci_dev *dev, char *reset_type) /* NVMe: pci_bridge_wait_for_secondary_bus 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	struct pci_dev *child __free(pci_dev_put) = NULL; /* NVMe: 변수에 값을 할당한다. */
-	int delay; /* NVMe: int 타입 변수를 선언한다. */
+int pci_bridge_wait_for_secondary_bus(struct pci_dev *dev, char *reset_type)
+{
+	/* [한국어] 응답 여부를 확인할 대표 장치(하위 버스의 첫 장치).
+	 * __free(pci_dev_put) 은 이 변수가 스코프를 벗어날 때 자동으로
+	 * pci_dev_put() 을 부르게 하는 정리(cleanup) 속성이다. 아래에 return 이
+	 * 여러 개라 손으로 put 을 챙기면 빠뜨리기 쉬운데, 그 실수를 원천 차단한다.
+	 * NULL 로 초기화해 두어야 참조를 잡기 전에 반환해도 안전하다. */
+	struct pci_dev *child __free(pci_dev_put) = NULL;
+	int delay;	/* [한국어] 하위 장치들이 요구하는 D3cold 복귀 지연(ms) */
 
-	if (pci_dev_is_disconnected(dev)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return 0; /* NVMe: 성공(0)을 반환한다. */
+	/* [한국어] 이미 사라진 장치라면 기다릴 것이 없다. 오히려 config 접근을
+	 * 시도하면 위험하므로 즉시 성공으로 돌아간다. */
+	if (pci_dev_is_disconnected(dev))
+		return 0;
 
-	if (!pci_is_bridge(dev)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return 0; /* NVMe: 성공(0)을 반환한다. */
+	/* [한국어] 브리지가 아니면 "하위 버스" 자체가 없다. */
+	if (!pci_is_bridge(dev))
+		return 0;
 
-	down_read(&pci_bus_sem); /* NVMe: down_read 함수를 호출한다. */
+	/* [한국어] 하위 버스의 장치 목록을 읽기 위한 잠금. 아래에서 목록을
+	 * 확인하고 첫 장치의 참조를 잡은 뒤 곧바로 놓는다 — 이 세마포어를 쥔 채
+	 * msleep 으로 잠들면 버스 트리 전체가 그동안 멈춘다. */
+	down_read(&pci_bus_sem);
 
 	/*
 	 * We only deal with devices that are present currently on the bus.
@@ -5356,31 +8979,49 @@ int pci_bridge_wait_for_secondary_bus(struct pci_dev *dev, char *reset_type) /* 
 	 * board_added(). In case of ACPI hotplug the firmware is expected
 	 * to configure the devices before OS is notified.
 	 */
-	if (!dev->subordinate || list_empty(&dev->subordinate->devices)) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		up_read(&pci_bus_sem); /* NVMe: up_read 함수를 호출한다. */
-		return 0; /* NVMe: 성공(0)을 반환한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+	/* [한국어] 하위 버스가 없거나 비어 있으면 기다릴 대상이 없다.
+	 * 위 영어 주석이 설명하듯, 핫플러그로 새로 꽂힌 장치의 대기는 여기가 아니라
+	 * pciehp 의 board_added() 가 담당한다 — 그쪽은 아직 열거도 안 된 상태라
+	 * 이 함수가 볼 수 있는 자식이 없다. */
+	if (!dev->subordinate || list_empty(&dev->subordinate->devices)) {
+		up_read(&pci_bus_sem);
+		return 0;
+	}
 
 	/* Take d3cold_delay requirements into account */
-	delay = pci_bus_max_d3cold_delay(dev->subordinate); /* NVMe: 변수에 값을 할당한다. */
-	if (!delay) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		up_read(&pci_bus_sem); /* NVMe: up_read 함수를 호출한다. */
-		return 0; /* NVMe: 성공(0)을 반환한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+	/* [한국어] 하위 장치들이 요구하는 지연 중 최대값. 이 값이 아래 모든
+	 * 대기의 기준이 된다. 반드시 pci_bus_sem 을 쥔 상태에서 불러야 한다. */
+	delay = pci_bus_max_d3cold_delay(dev->subordinate);
+	/* [한국어] 0 이면 모든 하위 장치가 "기다릴 필요 없다" 고 선언한 것이다
+	 * (quirk 나 펌웨어가 d3cold_delay 를 0 으로 낮춘 경우). 그대로 돌아간다. */
+	if (!delay) {
+		up_read(&pci_bus_sem);
+		return 0;
+	}
 
-	child = pci_dev_get(list_first_entry(&dev->subordinate->devices, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-					     struct pci_dev, bus_list)); /* NVMe: 데이터 타입 변수를 선언한다. */
-	up_read(&pci_bus_sem); /* NVMe: up_read 함수를 호출한다. */
+	/* [한국어] 하위 버스의 첫 장치를 대표로 삼아 참조를 올린다. 이 장치가
+	 * config 요청에 응답하면 버스 전체가 살아난 것으로 본다 — 모든 장치를
+	 * 하나씩 확인할 필요는 없다는 판단이다.
+	 * 참조를 올리는 이유: 아래에서 잠금을 놓고 최대 1초까지 자는데, 그 사이
+	 * 이 장치가 제거되면 포인터가 무효해진다. 참조가 있으면 구조체 자체는
+	 * 유지된다(내용은 disconnected 로 바뀔 수 있고, pci_dev_wait 이 그것을 본다). */
+	child = pci_dev_get(list_first_entry(&dev->subordinate->devices,
+					     struct pci_dev, bus_list));
+	/* [한국어] 여기서 잠금을 놓는다. 이후는 전부 잠들 수 있는 대기다. */
+	up_read(&pci_bus_sem);
 
 	/*
 	 * Conventional PCI and PCI-X we need to wait Tpvrh + Trhfa before
 	 * accessing the device after reset (that is 1000 ms + 100 ms).
 	 */
-	if (!pci_is_pcie(dev)) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pci_dbg(dev, "waiting %d ms for secondary bus\n", 1000 + delay); /* NVMe: PCI 장치에 대한 디버그 로그를 출력한다. */
-		msleep(1000 + delay); /* NVMe: msleep 함수를 호출한다. */
-		return 0; /* NVMe: 성공(0)을 반환한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+	/* [한국어] 재래식 PCI/PCI-X 경로. 링크라는 개념도, 상태를 물어볼 레지스터도
+	 * 없으므로 스펙이 정한 시간을 그대로 자는 수밖에 없다.
+	 * 1000 = Tpvrh(전원/리셋 안정화), delay = 하위 장치가 요구한 추가 시간. */
+	if (!pci_is_pcie(dev)) {
+		pci_dbg(dev, "waiting %d ms for secondary bus\n", 1000 + delay);
+		msleep(1000 + delay);
+		return 0;
+	}
 
 	/*
 	 * For PCIe downstream and root ports that do not support speeds
@@ -5397,76 +9038,156 @@ int pci_bridge_wait_for_secondary_bus(struct pci_dev *dev, char *reset_type) /* 
 	 * Therefore we wait for 100 ms and check for the device presence
 	 * until the timeout expires.
 	 */
-	if (!pcie_downstream_port(dev)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return 0; /* NVMe: 성공(0)을 반환한다. */
+	/* [한국어] 상류 포트나 엔드포인트에는 "하위 버스" 라는 것이 없다.
+	 * 아래 로직은 전부 하류 포트를 전제로 하므로 여기서 빠져나간다. */
+	if (!pcie_downstream_port(dev))
+		return 0;
 
-	if (pcie_get_speed_cap(dev) <= PCIE_SPEED_5_0GT) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		u16 status; /* NVMe: u16 타입 변수를 선언한다. */
+	/* [한국어] Gen1(2.5GT/s) / Gen2(5GT/s) 경로. 이 속도대는 링크 훈련이
+	 * 짧아서 링크 상태를 따로 기다리지 않고 곧바로 장치 응답을 본다. */
+	if (pcie_get_speed_cap(dev) <= PCIE_SPEED_5_0GT) {
+		u16 status;	/* [한국어] LNKSTA 값을 담을 임시 변수 */
 
-		pci_dbg(dev, "waiting %d ms for downstream link\n", delay); /* NVMe: PCI 장치에 대한 디버그 로그를 출력한다. */
-		msleep(delay); /* NVMe: msleep 함수를 호출한다. */
+		pci_dbg(dev, "waiting %d ms for downstream link\n", delay);
+		/* [한국어] 하위 장치가 요구한 최소 시간을 먼저 채운다. */
+		msleep(delay);
 
-		if (!pci_dev_wait(child, reset_type, PCI_RESET_WAIT - delay)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			return 0; /* NVMe: 성공(0)을 반환한다. */
+		/* [한국어] 그다음 실제로 응답하는지 확인한다. pci_dev_wait 은 Vendor ID 를
+		 * 반복해 읽으며 all-ones 가 아닌 값이 나오기를 기다린다. 0 이면 성공.
+		 * 남은 예산에서 이미 잔 delay 를 빼서 넘긴다 — 전체 대기 상한이
+		 * PCI_RESET_WAIT 을 넘지 않게 하기 위해서다. */
+		if (!pci_dev_wait(child, reset_type, PCI_RESET_WAIT - delay))
+			return 0;
 
 		/*
 		 * If the port supports active link reporting we now check
 		 * whether the link is active and if not bail out early with
 		 * the assumption that the device is not present anymore.
 		 */
-		if (!dev->link_active_reporting) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			return -ENOTTY; /* NVMe: 오류 코드를 반환한다. */
+		/* [한국어] 여기까지 왔다는 것은 1차 대기 안에 응답이 없었다는 뜻이다.
+		 * 더 기다릴지 포기할지 정해야 하는데, 링크 상태를 물어볼 수 없는
+		 * 포트라면 판단 근거가 없으므로 고장으로 처리한다. */
+		if (!dev->link_active_reporting)
+			return -ENOTTY;
 
-		pcie_capability_read_word(dev, PCI_EXP_LNKSTA, &status); /* NVMe: pcie_capability_read_word 함수를 호출한다. */
-		if (!(status & PCI_EXP_LNKSTA_DLLLA)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			return -ENOTTY; /* NVMe: 오류 코드를 반환한다. */
+		/* [한국어] 링크 상태를 직접 확인한다. DLLLA(Data Link Layer Link Active)가
+		 * 서 있지 않다면 물리적으로 뽑혔거나 링크가 죽은 것이므로, 더 기다려 봐야
+		 * 시간만 버린다. 반대로 서 있다면 장치가 아직 초기화 중일 뿐이므로
+		 * 아래에서 더 기다려 준다. */
+		pcie_capability_read_word(dev, PCI_EXP_LNKSTA, &status);
+		if (!(status & PCI_EXP_LNKSTA_DLLLA))
+			return -ENOTTY;
 
-		return pci_dev_wait(child, reset_type, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-				    PCIE_RESET_READY_POLL_MS - PCI_RESET_WAIT); /* NVMe: 표현식을 평가한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+		/* [한국어] 링크는 살아 있으니 남은 예산만큼 더 폴링한다.
+		 * PCIE_RESET_READY_POLL_MS 가 전체 상한이고 그중 PCI_RESET_WAIT 은
+		 * 위에서 이미 썼다. */
+		return pci_dev_wait(child, reset_type,
+				    PCIE_RESET_READY_POLL_MS - PCI_RESET_WAIT);
+	}
 
-	pci_dbg(dev, "waiting %d ms for downstream link, after activation\n", /* NVMe: PCI 장치에 대한 디버그 로그를 출력한다. */
-		delay); /* NVMe: 표현식을 평가한다. */
-	if (!pcie_wait_for_link_delay(dev, true, delay)) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
+	/* [한국어] Gen3 이상 경로. 고속 링크는 훈련이 오래 걸리고 시간이 일정하지
+	 * 않아서, 시간만 재는 방식이 통하지 않는다. 링크가 실제로 붙었는지를
+	 * 먼저 확인해야 한다. */
+	pci_dbg(dev, "waiting %d ms for downstream link, after activation\n",
+		delay);
+	/* [한국어] DLLLA 가 설 때까지 기다린 뒤, 추가로 delay 만큼 더 잔다.
+	 * 두 번째 인자 true 가 "활성화를 기다린다" 는 뜻이다. */
+	if (!pcie_wait_for_link_delay(dev, true, delay)) {
 		/* Did not train, no need to wait any further */
-		pci_info(dev, "Data Link Layer Link Active not set in %d msec\n", delay); /* NVMe: PCI 장치에 대한 정보 로그를 출력한다. */
-		return -ENOTTY; /* NVMe: 오류 코드를 반환한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+		/* [한국어] 훈련 자체가 안 됐다. 장치 응답을 폴링해 봐야 의미가 없으므로
+		 * 바로 포기한다. dbg 가 아니라 info 로 찍는 것은, 이것이 실제로
+		 * 무언가 잘못됐다는 신호이기 때문이다. */
+		pci_info(dev, "Data Link Layer Link Active not set in %d msec\n", delay);
+		return -ENOTTY;
+	}
 
-	return pci_dev_wait(child, reset_type, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-			    PCIE_RESET_READY_POLL_MS - delay); /* NVMe: 표현식을 평가한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	/* [한국어] 링크가 붙었으니 이제 장치가 config 요청에 응답하기를 기다린다.
+	 * 전체 상한에서 이미 쓴 delay 를 뺀 만큼이 남은 예산이다. */
+	return pci_dev_wait(child, reset_type,
+			    PCIE_RESET_READY_POLL_MS - delay);
+}
 
 /*
- * pci_reset_secondary_bus:
- *   bridge 의 secondary bus 를 reset 한다. NVMe가 연결된 bus 를 전체 초기화할 때 호출된다.
+ * [한국어]
+ * pci_reset_secondary_bus - 브리지의 하위 버스에 리셋 신호를 넣었다 뺀다
+ *
+ * @dev: 브리지 장치
+ * @return: 없음. 이 동작은 실패할 수 없다(레지스터 쓰기가 전부다).
+ *
+ * Secondary Bus Reset(SBR)이라고 부르는 동작이다. 브리지의 Bridge Control
+ * 레지스터에 있는 Secondary Bus Reset 비트를 세우면, 그 브리지 아래로
+ * 리셋 신호가 나가 하위의 모든 장치가 초기화된다.
+ *
+ * 주의할 점이 있다. 이 함수는 "리셋 신호를 넣었다 빼는" 것까지만 한다.
+ * 리셋이 풀린 뒤 장치가 다시 응답하기까지 기다리는 일은 하지 않으므로,
+ * 호출자가 반드시 pci_bridge_wait_for_secondary_bus() 를 이어서 불러야 한다.
+ * 그것을 묶어 둔 것이 pci_bridge_secondary_bus_reset() 이고, 대부분의 코드는
+ * 그쪽을 쓴다. 이 함수를 직접 부르는 것은 대기 시점을 스스로 제어해야 하는
+ * 특수한 경우뿐이다.
+ *
+ * FLR 과의 차이: FLR 은 PCIe function 하나만 리셋하지만, SBR 은 그 브리지
+ * 아래 전부를 리셋한다. NVMe 컨트롤러가 FLR 에 응답하지 않을 때 마지막
+ * 수단으로 쓰지만, 같은 스위치 포트에 다른 드라이브가 붙어 있으면 그것들도
+ * 함께 리셋된다는 부작용이 있다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트 전용(msleep).
+ * 호출자: pci_bridge_secondary_bus_reset(), 그리고 일부 quirk.
+ *
+ * 호출 체인:
+ *   pci_parent_bus_reset -> pci_bridge_secondary_bus_reset
+ *     -> [pci_reset_secondary_bus] -> pci_write_config_word
  */
-void pci_reset_secondary_bus(struct pci_dev *dev) /* NVMe: pci_reset_secondary_bus 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	u16 ctrl; /* NVMe: u16 타입 변수를 선언한다. */
+void pci_reset_secondary_bus(struct pci_dev *dev)
+{
+	u16 ctrl;	/* [한국어] Bridge Control 레지스터(오프셋 0x3E)의 현재 값 */
 
-	pci_read_config_word(dev, PCI_BRIDGE_CONTROL, &ctrl); /* NVMe: PCI 설정 공간 2바이트를 읽는다. */
-	ctrl |= PCI_BRIDGE_CTL_BUS_RESET; /* NVMe: 변수에 값을 할당한다. */
-	pci_write_config_word(dev, PCI_BRIDGE_CONTROL, ctrl); /* NVMe: PCI 설정 공간 2바이트를 쓴다. */
+	/* [한국어] 읽고-고쳐-쓰기. 이 레지스터에는 VGA Enable, ISA Enable,
+	 * Master Abort Mode 같은 다른 설정도 함께 들어 있어서, 통째로 덮어쓰면
+	 * 그것들이 지워진다. */
+	pci_read_config_word(dev, PCI_BRIDGE_CONTROL, &ctrl);
+	/* [한국어] Secondary Bus Reset 비트(0x40)를 세운다. 이 비트가 1인 동안
+	 * 하위 버스는 리셋 상태로 유지된다. */
+	ctrl |= PCI_BRIDGE_CTL_BUS_RESET;
+	pci_write_config_word(dev, PCI_BRIDGE_CONTROL, ctrl);
 
 	/*
 	 * PCI spec v3.0 7.6.4.2 requires minimum Trst of 1ms.  Double
 	 * this to 2ms to ensure that we meet the minimum requirement.
 	 */
-	msleep(2); /* NVMe: msleep 함수를 호출한다. */
+	/* [한국어] 리셋 신호를 최소 1ms 는 유지해야 한다는 스펙 요구를,
+	 * 여유를 두어 2ms 로 잡았다. msleep 은 요청한 시간보다 더 잘 수는 있어도
+	 * 덜 자지는 않으므로 최소 요구를 확실히 넘긴다. */
+	msleep(2);
 
-	ctrl &= ~PCI_BRIDGE_CTL_BUS_RESET; /* NVMe: 변수에 값을 할당한다. */
-	pci_write_config_word(dev, PCI_BRIDGE_CONTROL, ctrl); /* NVMe: PCI 설정 공간 2바이트를 쓴다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	/* [한국어] 비트를 내려 리셋을 해제한다. 이 순간부터 하위 장치들이
+	 * 초기화를 시작하며, 그것이 끝날 때까지는 config 요청에 응답하지 않는다. */
+	ctrl &= ~PCI_BRIDGE_CTL_BUS_RESET;
+	pci_write_config_word(dev, PCI_BRIDGE_CONTROL, ctrl);
+}
 
 /*
- * pcibios_reset_secondary_bus:
- *   아키텍처별 secondary bus reset 을 수행한다. NVMe bus reset 의 플랫폼별 구현이다.
+ * [한국어]
+ * pcibios_reset_secondary_bus - 아키텍처가 가로챌 수 있는 하위 버스 리셋 훅
+ *
+ * @dev: 브리지 장치
+ * @return: 없음.
+ *
+ * __weak 로 선언돼 있다. 즉 아키텍처 코드가 같은 이름의 함수를 정의하면
+ * 링커가 그쪽을 쓰고, 정의하지 않으면 이 기본 구현이 쓰인다. 기본 구현은
+ * 표준 방식인 pci_reset_secondary_bus() 를 그대로 부를 뿐이다.
+ *
+ * 훅을 둔 이유: 일부 플랫폼은 Bridge Control 레지스터의 SBR 비트를 쓰는
+ * 표준 방식으로 리셋이 되지 않거나, 리셋 전후에 SoC 고유의 처리(클럭 게이팅,
+ * PHY 재설정 등)를 함께 해야 한다. 그런 플랫폼이 이 함수를 덮어쓴다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트(기본 구현이 msleep 한다).
+ * 호출자: pci_bridge_secondary_bus_reset() 하나뿐이다.
  */
-void __weak pcibios_reset_secondary_bus(struct pci_dev *dev) /* NVMe: pcibios_reset_secondary_bus 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	pci_reset_secondary_bus(dev); /* NVMe: secondary bus 를 reset 한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+void __weak pcibios_reset_secondary_bus(struct pci_dev *dev)
+{
+	/* [한국어] 표준 동작. 아키텍처가 덮어쓰지 않았다면 이것이 전부다. */
+	pci_reset_secondary_bus(dev);
+}
 
 /**
  * pci_bridge_secondary_bus_reset - Reset the secondary bus on a PCI bridge.
@@ -5476,261 +9197,646 @@ void __weak pcibios_reset_secondary_bus(struct pci_dev *dev) /* NVMe: pcibios_re
  * Devices on the secondary bus are left in power-on state.
  */
 /*
- * pci_bridge_secondary_bus_reset:
- *   bridge 를 통해 secondary bus reset 을 수행한다. NVMe 장치를 포함한 bus 전체를 reset 한다.
+ * [한국어]
+ * pci_bridge_secondary_bus_reset - 하위 버스를 리셋하고, 다시 살아날 때까지 기다린다
+ *
+ * @dev: 브리지 장치
+ * @return: 0 = 리셋 후 하위 장치에 접근 가능,
+ *          -ENOTTY = 하위 장치가 끝내 응답하지 않음.
+ *
+ * "리셋 신호를 넣었다 빼는 것"(pcibios_reset_secondary_bus)과 "다시 응답할
+ * 때까지 기다리는 것"(pci_bridge_wait_for_secondary_bus)을 한 쌍으로 묶은
+ * 함수다. 리셋만 걸고 기다리지 않으면 곧바로 이어지는 config 접근이 전부
+ * 실패하므로, 이 둘은 사실상 항상 함께 쓰인다.
+ *
+ * 앞부분의 경고가 중요하다. dev->block_cfg_access 가 서 있지 않다는 것은
+ * 호출자가 pci_cfg_access_lock() 을 걸지 않았다는 뜻이고, 그러면 리셋이
+ * 진행되는 동안 userspace(lspci 등)나 다른 커널 코드가 config 를 읽을 수
+ * 있다. 리셋 중인 장치는 아무 값이나 돌려주므로 그 값을 믿은 코드가
+ * 오작동한다. 그래서 잠금 없이 부르는 호출자를 찾아내 고치도록
+ * 호출 지점(%pS 로 반환 주소를 심볼 이름으로 출력)을 남긴다.
+ * _once 판이라 같은 지점에 대해 한 번만 찍는다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트 전용.
+ * 호출자: pci_parent_bus_reset(), pci_reset_bus_function(), AER/DPC 복구.
+ *
+ * 호출 체인:
+ *   pci_reset_bus -> pci_bus_reset -> [pci_bridge_secondary_bus_reset]
+ *     -> pcibios_reset_secondary_bus -> pci_bridge_wait_for_secondary_bus
  */
-int pci_bridge_secondary_bus_reset(struct pci_dev *dev) /* NVMe: pci_bridge_secondary_bus_reset 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	if (!dev->block_cfg_access) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pci_warn_once(dev, "unlocked secondary bus reset via: %pS\n", /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-			      __builtin_return_address(0)); /* NVMe: __builtin_return_address 함수를 호출한다. */
-	pcibios_reset_secondary_bus(dev); /* NVMe: 아키텍처별 secondary bus reset 을 수행한다. */
+int pci_bridge_secondary_bus_reset(struct pci_dev *dev)
+{
+	/* [한국어] config 접근 차단이 안 걸린 채로 들어왔다. 버그이지만 리셋
+	 * 자체는 진행한다 — 여기서 실패시키면 기존 호출자들이 전부 깨진다.
+	 * 대신 어디서 불렀는지 남겨 고칠 수 있게 한다. */
+	if (!dev->block_cfg_access)
+		pci_warn_once(dev, "unlocked secondary bus reset via: %pS\n",
+			      __builtin_return_address(0));
+	/* [한국어] 실제 리셋. 아키텍처가 훅을 덮어썼다면 그쪽으로 간다. */
+	pcibios_reset_secondary_bus(dev);
 
-	return pci_bridge_wait_for_secondary_bus(dev, "bus reset"); /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	/* [한국어] 리셋이 풀린 뒤 하위 장치가 config 요청에 응답할 때까지 기다린다.
+	 * "bus reset" 은 로그에 찍힐 이름일 뿐이다. 이 함수의 반환값이 곧
+	 * 이 함수의 결과가 된다. */
+	return pci_bridge_wait_for_secondary_bus(dev, "bus reset");
+}
 EXPORT_SYMBOL_GPL(pci_bridge_secondary_bus_reset);
 
 /*
- * pci_parent_bus_reset:
- *   상위 bus 를 통해 해당 pci_dev 를 reset 한다. NVMe reset 계층 중 상위 bus reset 경로이다.
+ * [한국어]
+ * pci_parent_bus_reset - 상위 브리지의 버스 리셋으로 이 장치 하나를 리셋한다
+ *
+ * @dev:   리셋할 장치
+ * @probe: true 면 "이 방법을 쓸 수 있는가" 만 확인하고 실제로는 리셋하지 않는다.
+ *         false 면 실제로 리셋한다.
+ * @return: 0 = 가능(probe) 또는 성공, -ENOTTY = 이 방법을 쓸 수 없음.
+ *
+ * 리셋 방법 후보 중 하나다. 커널은 장치를 리셋할 때 여러 방법을 정해진 순서로
+ * 시도하는데(pci_dev_reset_methods 배열), 이것은 그중 "상위 버스를 통째로
+ * 리셋한다" 는 방법이다. FLR 처럼 장치가 스스로 지원해야 하는 방법이 없을 때
+ * 쓰는 최후 수단에 가깝다.
+ *
+ * probe 인자가 이 함수의 구조를 결정한다. 커널은 먼저 모든 방법에 대해
+ * probe=true 로 물어 "쓸 수 있는 것" 목록을 만들어 두고, 실제 리셋 때는
+ * 그 목록을 순서대로 probe=false 로 부른다. 그래서 조건 검사와 실행이
+ * 한 함수 안에 함께 있고, 검사를 통과한 뒤 probe 이면 거기서 멈춘다.
+ *
+ * 쓸 수 없는 조건이 네 가지다.
+ *   1) 루트 버스에 직접 붙은 장치 - 위에 브리지가 없어 리셋할 대상이 없다.
+ *   2) 이 장치 자신이 브리지 - 자기 아래를 리셋하는 것과 혼동되고,
+ *      상위 버스를 리셋하면 자기 아래 전부가 함께 날아간다.
+ *   3) bus->self 가 없음 - 상위 브리지 구조체를 찾을 수 없다.
+ *   4) PCI_DEV_FLAGS_NO_BUS_RESET quirk - 버스 리셋을 받으면 망가지는
+ *      것으로 알려진 장치다.
+ * 그리고 한 가지 더 — 같은 버스에 다른 장치가 있으면 안 된다. 버스 리셋은
+ * 그 버스 전체를 리셋하므로, 목표가 아닌 장치까지 함께 리셋되기 때문이다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트 전용.
+ * 호출자: __pci_reset_function_locked() 가 pci_dev_reset_methods 순서대로 부른다.
+ *
+ * 호출 체인:
+ *   pci_reset_function -> __pci_reset_function_locked
+ *     -> [pci_parent_bus_reset] -> pci_bridge_secondary_bus_reset
  */
-static int pci_parent_bus_reset(struct pci_dev *dev, bool probe) /* NVMe: pci_parent_bus_reset 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	struct pci_dev *pdev; /* NVMe: 데이터 타입 변수를 선언한다. */
+static int pci_parent_bus_reset(struct pci_dev *dev, bool probe)
+{
+	struct pci_dev *pdev;	/* [한국어] 같은 버스의 다른 장치를 찾는 순회 커서 */
 
-	if (pci_is_root_bus(dev->bus) || dev->subordinate || /* NVMe: 조건식을 평가해 분기를 결정한다. */
-	    !dev->bus->self || dev->dev_flags & PCI_DEV_FLAGS_NO_BUS_RESET) /* NVMe: 비트 연산을 수행한다. */
-		return -ENOTTY; /* NVMe: 오류 코드를 반환한다. */
+	/* [한국어] 위 네 가지 불가 조건을 한 번에 검사한다.
+	 * pci_is_root_bus: 상위 브리지 없음 / dev->subordinate: 자신이 브리지 /
+	 * !dev->bus->self: 상위 브리지 구조체 없음 /
+	 * PCI_DEV_FLAGS_NO_BUS_RESET: quirk 로 금지된 장치. */
+	if (pci_is_root_bus(dev->bus) || dev->subordinate ||
+	    !dev->bus->self || dev->dev_flags & PCI_DEV_FLAGS_NO_BUS_RESET)
+		return -ENOTTY;
 
-	list_for_each_entry(pdev, &dev->bus->devices, bus_list) /* NVMe: 리스트/해시 항목을 순회하는 매크로 루프를 시작한다. */
-		if (pdev != dev) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			return -ENOTTY; /* NVMe: 오류 코드를 반환한다. */
+	/* [한국어] 같은 버스에 다른 장치가 하나라도 있으면 쓸 수 없다.
+	 * 루프처럼 보이지만 실제로는 "자기 자신이 아닌 것을 처음 만나면 즉시 실패" 라
+	 * 사실상 조건 검사다. 버스 리셋은 대상을 고를 수 없기 때문에,
+	 * 이 버스에 이 장치 하나뿐일 때만 안전하다. */
+	list_for_each_entry(pdev, &dev->bus->devices, bus_list)
+		if (pdev != dev)
+			return -ENOTTY;
 
-	if (probe) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return 0; /* NVMe: 성공(0)을 반환한다. */
+	/* [한국어] 가능 여부만 묻는 호출이었다면 여기서 "가능" 을 알리고 끝낸다. */
+	if (probe)
+		return 0;
 
-	return pci_bridge_secondary_bus_reset(dev->bus->self); /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	/* [한국어] 실제 리셋. bus->self 가 이 버스를 만든 상위 브리지다. */
+	return pci_bridge_secondary_bus_reset(dev->bus->self);
+}
 
 /*
- * pci_reset_hotplug_slot:
- *   hotplug slot reset 을 수행한다. NVMe hotplug/removal 시 slot 단위 reset 에 사용된다.
+ * [한국어]
+ * pci_reset_hotplug_slot - 핫플러그 드라이버에게 슬롯 리셋을 요청한다
+ *
+ * @hotplug: 슬롯을 관리하는 핫플러그 컨트롤러. NULL 일 수 있다.
+ * @probe:   true 면 가능 여부만 확인, false 면 실제 리셋.
+ * @return:  0 = 가능/성공, -ENOTTY = 이 방법을 쓸 수 없음, 그 외 = 드라이버가 준 오류.
+ *
+ * 슬롯 리셋은 핫플러그 컨트롤러(pciehp, acpiphp, shpchp 등)가 슬롯의 전원을
+ * 껐다 켜거나 리셋 신호를 넣는 방식이다. 방법이 컨트롤러마다 다르므로
+ * 커널은 콜백으로 위임하고, 이 함수는 그 위임을 안전하게 감싸는 일만 한다.
+ *
+ * try_module_get / module_put 쌍이 이 함수의 핵심이다. 핫플러그 드라이버는
+ * 모듈이라 언제든 언로드될 수 있는데, 콜백을 부르는 도중에 모듈이 사라지면
+ * 이미 해제된 코드로 점프하게 된다. try_module_get 이 참조를 잡아 그 사이
+ * 언로드를 막고, 콜백이 끝난 뒤 놓는다. try_ 접두사는 "이미 언로드가
+ * 진행 중이면 실패한다" 는 뜻이라, 실패하면 이 방법을 포기한다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트 전용(콜백이 잠들 수 있다).
+ * 호출자: pci_dev_reset_slot_function().
+ *
+ * 호출 체인:
+ *   __pci_reset_function_locked -> pci_dev_reset_slot_function
+ *     -> [pci_reset_hotplug_slot] -> hotplug->ops->reset_slot (pciehp_reset_slot 등)
  */
-static int pci_reset_hotplug_slot(struct hotplug_slot *hotplug, bool probe) /* NVMe: pci_reset_hotplug_slot 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	int rc = -ENOTTY; /* NVMe: int 타입 변수를 선언한다. */
+static int pci_reset_hotplug_slot(struct hotplug_slot *hotplug, bool probe)
+{
+	/* [한국어] "쓸 수 없음" 을 기본값으로 두고, 콜백이 있을 때만 덮어쓴다. */
+	int rc = -ENOTTY;
 
-	if (!hotplug || !try_module_get(hotplug->owner)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return rc; /* NVMe: 연산 결과를 반환한다. */
+	/* [한국어] 두 가지를 한 번에 확인한다. 슬롯에 핫플러그 컨트롤러가 없거나,
+	 * 있어도 그 모듈이 언로드 중이면 이 방법을 쓸 수 없다.
+	 * && 가 아니라 || 로 묶여 있으므로 hotplug 가 NULL 이면 try_module_get 은
+	 * 아예 평가되지 않는다(단축 평가) — NULL 역참조를 막는다. */
+	if (!hotplug || !try_module_get(hotplug->owner))
+		return rc;
 
-	if (hotplug->ops->reset_slot) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		rc = hotplug->ops->reset_slot(hotplug, probe); /* NVMe: 변수에 값을 할당한다. */
+	/* [한국어] 콜백이 없는 컨트롤러도 있다. 그러면 rc 는 -ENOTTY 로 남는다.
+	 * probe 인자를 그대로 넘겨 "가능 여부만 묻는 것" 인지도 함께 전달한다. */
+	if (hotplug->ops->reset_slot)
+		rc = hotplug->ops->reset_slot(hotplug, probe);
 
-	module_put(hotplug->owner); /* NVMe: module_put 함수를 호출한다. */
+	/* [한국어] 콜백이 끝났으니 모듈 참조를 놓는다. 위 if 를 타지 않았더라도
+	 * try_module_get 은 이미 성공했으므로 반드시 짝을 맞춰야 한다. */
+	module_put(hotplug->owner);
 
-	return rc; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return rc;
+}
 
 /*
- * pci_dev_reset_slot_function:
- *   slot 내 특정 function 을 reset 한다. NVMe 단일 function reset 의 일부이다.
+ * [한국어]
+ * pci_dev_reset_slot_function - 슬롯 리셋으로 이 장치를 리셋한다
+ *
+ * @dev:   리셋할 장치
+ * @probe: true 면 가능 여부만 확인.
+ * @return: 0 = 가능/성공, -ENOTTY = 이 방법을 쓸 수 없음.
+ *
+ * 리셋 방법 후보 중 하나. 앞의 pci_parent_bus_reset() 과 성격이 같다 —
+ * 대상을 고를 수 없는 "광범위한" 리셋이라, 부작용이 없을 때만 허용한다.
+ *
+ * 쓸 수 없는 조건 네 가지:
+ *   1) multifunction - 슬롯 리셋은 그 슬롯의 모든 function 을 리셋한다.
+ *      대상 외의 function 까지 날아가므로 허용하지 않는다.
+ *   2) 자신이 브리지 - 아래 달린 것들이 전부 함께 리셋된다.
+ *   3) 슬롯이 없음 - 납땜된 장치는 슬롯이라는 개념 자체가 없다.
+ *   4) PCI_DEV_FLAGS_NO_BUS_RESET quirk - 광범위 리셋이 금지된 장치.
+ *
+ * NVMe 학습 관점: U.2 백플레인의 NVMe 드라이브는 슬롯이 있고 단일 function 인
+ * 경우가 많아 이 조건을 통과한다. 하지만 리셋 순서상 FLR 이 먼저 시도되므로
+ * (pci_dev_reset_methods 배열 순서), 실제로 이 경로까지 오는 것은 FLR 을
+ * 지원하지 않거나 FLR 이 실패한 드라이브다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트 전용.
+ * 호출자: __pci_reset_function_locked().
  */
-static int pci_dev_reset_slot_function(struct pci_dev *dev, bool probe) /* NVMe: pci_dev_reset_slot_function 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	if (dev->multifunction || dev->subordinate || !dev->slot || /* NVMe: 조건식을 평가해 분기를 결정한다. */
-	    dev->dev_flags & PCI_DEV_FLAGS_NO_BUS_RESET) /* NVMe: 비트 연산을 수행한다. */
-		return -ENOTTY; /* NVMe: 오류 코드를 반환한다. */
+static int pci_dev_reset_slot_function(struct pci_dev *dev, bool probe)
+{
+	/* [한국어] 위 네 가지 불가 조건. 하나라도 걸리면 이 방법은 쓸 수 없다. */
+	if (dev->multifunction || dev->subordinate || !dev->slot ||
+	    dev->dev_flags & PCI_DEV_FLAGS_NO_BUS_RESET)
+		return -ENOTTY;
 
-	return pci_reset_hotplug_slot(dev->slot->hotplug, probe); /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	/* [한국어] 이 슬롯을 관리하는 핫플러그 컨트롤러에게 위임한다.
+	 * dev->slot->hotplug 가 NULL 이면 그쪽에서 -ENOTTY 로 걸러진다. */
+	return pci_reset_hotplug_slot(dev->slot->hotplug, probe);
+}
 
 /*
- * cxl_port_dvsec:
- *   CXL 포트의 DVSEC ID 를 읽는다. NVMe 장치와는 CXL 메모리 확장 영역에서 간접 연관될 수 있다.
+ * [한국어]
+ * cxl_port_dvsec - 이 장치의 CXL Port DVSEC 오프셋을 찾는다
+ *
+ * @dev:    검사할 장치(보통 CXL 을 지원하는 브리지)
+ * @return: config space 안의 오프셋. 없으면 0.
+ *
+ * DVSEC(Designated Vendor-Specific Extended Capability)는 PCIe 확장 capability
+ * 중 하나로, 벤더가 자기만의 레지스터 묶음을 정의할 수 있게 해 준다.
+ * CXL 컨소시엄은 자기 벤더 ID(PCI_VENDOR_ID_CXL)로 여러 DVSEC 을 정의했고,
+ * 그중 PCI_DVSEC_CXL_PORT 가 포트 제어용이다.
+ *
+ * 이 오프셋이 필요한 이유는 바로 아래 cxl_sbr_masked() 때문이다. CXL 포트는
+ * Secondary Bus Reset 을 소프트웨어가 마음대로 걸지 못하게 막아 둘 수 있는데,
+ * 그 마스크 비트가 이 DVSEC 안에 있다.
+ *
+ * 실행 컨텍스트: 제약 없음. config 읽기뿐이다.
+ * 호출자: cxl_sbr_masked(), cxl_reset_bus_function().
  */
-static u16 cxl_port_dvsec(struct pci_dev *dev) /* NVMe: cxl_port_dvsec 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	return pci_find_dvsec_capability(dev, PCI_VENDOR_ID_CXL, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-					 PCI_DVSEC_CXL_PORT); /* NVMe: 표현식을 평가한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+static u16 cxl_port_dvsec(struct pci_dev *dev)
+{
+	/* [한국어] 확장 capability 목록을 훑어 (벤더=CXL, ID=PORT) 인 DVSEC 을 찾는다.
+	 * 없으면 0 을 돌려주며, 0 은 유효한 확장 capability 오프셋이 아니므로
+	 * (확장 capability 는 0x100 부터 시작) "없음" 을 나타내는 값으로 안전하다. */
+	return pci_find_dvsec_capability(dev, PCI_VENDOR_ID_CXL,
+					 PCI_DVSEC_CXL_PORT);
+}
 
 /*
- * cxl_sbr_masked:
- *   CXL secondary bus reset 마스크 여부를 확인한다. NVMe가 CXL 환경에 있을 때 reset 동작에 영향을 준다.
+ * [한국어]
+ * cxl_sbr_masked - 이 CXL 포트에서 Secondary Bus Reset 이 무력화돼 있는가
+ *
+ * @dev:    CXL 포트(브리지)
+ * @return: true = SBR 을 걸어도 아무 일도 일어나지 않는다(마스크됨),
+ *          false = SBR 이 정상 동작하거나, 판단할 수 없다.
+ *
+ * CXL 포트는 일반 PCIe 브리지와 달리 SBR 을 기본적으로 막아 둔다. CXL 링크
+ * 뒤에는 시스템 메모리로 쓰이는 장치가 붙을 수 있고, 그것을 예고 없이
+ * 리셋하면 커널이 쓰던 메모리가 통째로 사라져 즉시 죽기 때문이다.
+ * 그래서 CXL 스펙은 "Unmask SBR" 비트를 두고, 이 비트가 1 일 때만 Bridge
+ * Control 의 SBR 비트가 실제로 동작하게 했다(CXL spec r3.1, 8.1.5.2).
+ *
+ * 반환값의 의미가 미묘하다. "판단할 수 없는 경우" 를 모두 false 로 돌려준다 —
+ * DVSEC 이 없거나, config 읽기가 실패했거나, all-ones 가 읽힌 경우다.
+ * 이는 "마스크돼 있지 않다" 고 낙관하는 것이 아니라, "여기서 막을 근거가
+ * 없으니 상위 로직에게 판단을 넘긴다" 는 뜻이다. 실제로 SBR 이 안 먹히면
+ * 그다음 단계인 pci_bridge_wait_for_secondary_bus() 에서 실패로 드러난다.
+ *
+ * 실행 컨텍스트: 제약 없음(config 읽기).
+ * 호출자: pci_reset_bus_function().
  */
-static bool cxl_sbr_masked(struct pci_dev *dev) /* NVMe: cxl_sbr_masked 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	u16 dvsec, reg; /* NVMe: u16 타입 변수를 선언한다. */
-	int rc; /* NVMe: int 타입 변수를 선언한다. */
+static bool cxl_sbr_masked(struct pci_dev *dev)
+{
+	u16 dvsec, reg;	/* [한국어] dvsec = DVSEC 오프셋, reg = Port Control 레지스터 값 */
+	int rc;		/* [한국어] config 읽기 결과 */
 
-	dvsec = cxl_port_dvsec(dev); /* NVMe: 변수에 값을 할당한다. */
-	if (!dvsec) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return false; /* NVMe: 연산 결과를 반환한다. */
+	/* [한국어] CXL Port DVSEC 이 없다면 이 포트는 CXL 포트가 아니거나
+	 * 포트 제어 기능을 노출하지 않는다. 판단 근거가 없으므로 false. */
+	dvsec = cxl_port_dvsec(dev);
+	if (!dvsec)
+		return false;
 
-	rc = pci_read_config_word(dev, dvsec + PCI_DVSEC_CXL_PORT_CTL, &reg); /* NVMe: 변수에 값을 할당한다. */
-	if (rc || PCI_POSSIBLE_ERROR(reg)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return false; /* NVMe: 연산 결과를 반환한다. */
+	/* [한국어] DVSEC 시작 위치 + Port Control 레지스터의 상대 오프셋. */
+	rc = pci_read_config_word(dev, dvsec + PCI_DVSEC_CXL_PORT_CTL, &reg);
+	/* [한국어] 읽기 실패이거나 all-ones 가 돌아온 경우. 후자는 장치가
+	 * 응답하지 않았다는 뜻이고, PCI_POSSIBLE_ERROR 가 그 값을 판정한다.
+	 * 둘 다 "모르겠다" 이므로 false. */
+	if (rc || PCI_POSSIBLE_ERROR(reg))
+		return false;
 
 	/*
 	 * Per CXL spec r3.1, sec 8.1.5.2, when "Unmask SBR" is 0, the SBR
 	 * bit in Bridge Control has no effect.  When 1, the Port generates
 	 * hot reset when the SBR bit is set to 1.
 	 */
-	if (reg & PCI_DVSEC_CXL_PORT_CTL_UNMASK_SBR) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return false; /* NVMe: 연산 결과를 반환한다. */
+	/* [한국어] Unmask SBR 이 1 이면 SBR 이 정상 동작한다 -> 마스크돼 있지 않다. */
+	if (reg & PCI_DVSEC_CXL_PORT_CTL_UNMASK_SBR)
+		return false;
 
-	return true; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	/* [한국어] Unmask SBR 이 0 이다. SBR 을 걸어도 하드웨어가 무시한다. */
+	return true;
+}
 
 /*
- * pci_reset_bus_function:
- *   bus function 단위 reset 을 수행한다. NVMe function reset 메서드 중 하나이다.
+ * [한국어]
+ * pci_reset_bus_function - 슬롯 리셋과 상위 버스 리셋을 차례로 시도한다
+ *
+ * @dev:   리셋할 장치
+ * @probe: true 면 가능 여부만 확인, false 면 실제 리셋.
+ * @return: 0 = 가능/성공, -ENOTTY = 두 방법 모두 쓸 수 없음, 그 외 = 오류.
+ *
+ * "광범위 리셋"(장치 하나가 아니라 그 주변까지 함께 리셋하는 방식) 두 가지를
+ * 묶은 함수다. 먼저 슬롯 리셋을, 안 되면 상위 버스 리셋을 시도한다.
+ * 두 방법 모두 성립 조건이 까다로워서 대부분의 장치에서는 -ENOTTY 가 난다.
+ *
+ * 이 함수의 세 가지 공통 작업이 개별 방법에는 없다.
+ *   1) CXL 포트의 SBR 마스크 확인 - 막혀 있으면 시도 자체를 하지 않는다.
+ *   2) 리셋 전후의 IOMMU 정지/복구 - 리셋으로 장치 상태가 초기화되므로
+ *      IOMMU 매핑도 함께 무효화해야 한다.
+ *   3) goto done 으로 정리 경로를 하나로 모으기.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트 전용.
+ * 호출자: __pci_reset_function_locked() 가 pci_dev_reset_methods 배열의
+ *   순서대로 리셋 방법을 시도하며 이것을 부른다. FLR 등 장치 단위 방법이
+ *   먼저 오고 이것이 뒤에 온다 — 부작용이 큰 방법일수록 나중이다.
+ * 피호출자: cxl_sbr_masked(), pci_dev_reset_iommu_prepare/done(),
+ *   pci_dev_reset_slot_function(), pci_parent_bus_reset().
+ *
+ * 호출 체인:
+ *   pci_reset_function -> __pci_reset_function_locked -> [pci_reset_bus_function]
+ *     -> pci_dev_reset_slot_function 또는 pci_parent_bus_reset
  */
-static int pci_reset_bus_function(struct pci_dev *dev, bool probe) /* NVMe: pci_reset_bus_function 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	struct pci_dev *bridge = pci_upstream_bridge(dev); /* NVMe: 변수에 값을 할당한다. */
-	int rc; /* NVMe: int 타입 변수를 선언한다. */
+static int pci_reset_bus_function(struct pci_dev *dev, bool probe)
+{
+	/* [한국어] 이 장치의 바로 위 브리지. 광범위 리셋은 결국 이 브리지가 수행한다. */
+	struct pci_dev *bridge = pci_upstream_bridge(dev);
+	int rc;	/* [한국어] 하위 리셋 방법들의 결과 */
 
 	/*
 	 * If "dev" is below a CXL port that has SBR control masked, SBR
 	 * won't do anything, so return error.
 	 */
-	if (bridge && pcie_is_cxl(bridge) && cxl_sbr_masked(bridge)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return -ENOTTY; /* NVMe: 오류 코드를 반환한다. */
+	/* [한국어] 상위가 CXL 포트이고 그 포트가 SBR 을 막아 두었다면, 리셋을 걸어도
+	 * 하드웨어가 무시한다. 그런데도 시도하면 "리셋했다" 고 착각한 채
+	 * 응답을 기다리다 타임아웃만 낭비하므로, 미리 이 방법을 포기한다.
+	 * 세 조건을 && 로 이어 단축 평가하므로 브리지가 없으면 나머지는
+	 * 평가되지 않는다. */
+	if (bridge && pcie_is_cxl(bridge) && cxl_sbr_masked(bridge))
+		return -ENOTTY;
 
-	rc = pci_dev_reset_iommu_prepare(dev); /* NVMe: 변수에 값을 할당한다. */
-	if (rc) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pci_err(dev, "failed to stop IOMMU for a PCI reset: %d\n", rc); /* NVMe: PCI 장치에 대한 에러 로그를 출력한다. */
-		return rc; /* NVMe: 연산 결과를 반환한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+	/* [한국어] 리셋 전에 IOMMU 를 멈춘다. 리셋이 걸리면 장치의 requester ID 와
+	 * 진행 중이던 DMA 상태가 초기화되는데, IOMMU 가 그것을 모른 채 계속
+	 * 매핑을 유지하면 리셋 직후의 엉뚱한 DMA 가 통과해 버린다.
+	 * probe 인 경우에도 부르는 이유는 아래 방법들이 probe 여부와 무관하게
+	 * 같은 준비 상태를 전제하기 때문이다. */
+	rc = pci_dev_reset_iommu_prepare(dev);
+	if (rc) {
+		/* [한국어] IOMMU 를 멈출 수 없으면 리셋을 시도해서는 안 된다.
+		 * -ENOTTY 가 아니라 실제 오류를 그대로 올려 보내 상위가
+		 * "이 방법이 없다" 가 아니라 "실패했다" 로 구분하게 한다. */
+		pci_err(dev, "failed to stop IOMMU for a PCI reset: %d\n", rc);
+		return rc;
+	}
 
-	rc = pci_dev_reset_slot_function(dev, probe); /* NVMe: 변수에 값을 할당한다. */
-	if (rc != -ENOTTY) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		goto done; /* NVMe: 지정한 레이블로 제어를 이동한다. */
+	/* [한국어] 첫 번째 후보 — 슬롯 리셋. 핫플러그 컨트롤러가 있고 단일
+	 * function 인 경우에만 성립한다. */
+	rc = pci_dev_reset_slot_function(dev, probe);
+	/* [한국어] -ENOTTY 는 "이 방법은 쓸 수 없다" 는 뜻이므로 다음 후보로 넘어간다.
+	 * 그 외의 값(성공 0, 또는 실제 오류)은 결론이므로 정리 후 그대로 반환한다. */
+	if (rc != -ENOTTY)
+		goto done;
 
-	rc = pci_parent_bus_reset(dev, probe); /* NVMe: 변수에 값을 할당한다. */
-done: /* NVMe: 레이블을 정의한다. */
-	pci_dev_reset_iommu_done(dev); /* NVMe: pci_dev_reset_iommu_done 함수를 호출한다. */
-	return rc; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
-
-/*
- * cxl_reset_bus_function:
- *   CXL function reset 을 수행한다. NVMe 장치가 CXL 메모리 포트를 포함할 때 사용될 수 있다.
- */
-static int cxl_reset_bus_function(struct pci_dev *dev, bool probe) /* NVMe: cxl_reset_bus_function 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	struct pci_dev *bridge; /* NVMe: 데이터 타입 변수를 선언한다. */
-	u16 dvsec, reg, val; /* NVMe: u16 타입 변수를 선언한다. */
-	int rc; /* NVMe: int 타입 변수를 선언한다. */
-
-	bridge = pci_upstream_bridge(dev); /* NVMe: 변수에 값을 할당한다. */
-	if (!bridge) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return -ENOTTY; /* NVMe: 오류 코드를 반환한다. */
-
-	dvsec = cxl_port_dvsec(bridge); /* NVMe: 변수에 값을 할당한다. */
-	if (!dvsec) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return -ENOTTY; /* NVMe: 오류 코드를 반환한다. */
-
-	if (probe) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return 0; /* NVMe: 성공(0)을 반환한다. */
-
-	rc = pci_read_config_word(bridge, dvsec + PCI_DVSEC_CXL_PORT_CTL, &reg); /* NVMe: 변수에 값을 할당한다. */
-	if (rc) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return -ENOTTY; /* NVMe: 오류 코드를 반환한다. */
-
-	rc = pci_dev_reset_iommu_prepare(dev); /* NVMe: 변수에 값을 할당한다. */
-	if (rc) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pci_err(dev, "failed to stop IOMMU for a PCI reset: %d\n", rc); /* NVMe: PCI 장치에 대한 에러 로그를 출력한다. */
-		return rc; /* NVMe: 연산 결과를 반환한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
-
-	if (reg & PCI_DVSEC_CXL_PORT_CTL_UNMASK_SBR) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		val = reg; /* NVMe: 변수에 값을 할당한다. */
-	} else { /* NVMe: 표현식을 평가한다. */
-		val = reg | PCI_DVSEC_CXL_PORT_CTL_UNMASK_SBR; /* NVMe: 변수에 값을 할당한다. */
-		pci_write_config_word(bridge, dvsec + PCI_DVSEC_CXL_PORT_CTL, /* NVMe: PCI 설정 공간 2바이트를 쓴다. */
-				      val); /* NVMe: 표현식을 평가한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
-
-	rc = pci_reset_bus_function(dev, probe); /* NVMe: 변수에 값을 할당한다. */
-
-	if (reg != val) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pci_write_config_word(bridge, dvsec + PCI_DVSEC_CXL_PORT_CTL, /* NVMe: PCI 설정 공간 2바이트를 쓴다. */
-				      reg); /* NVMe: 표현식을 평가한다. */
-
-	pci_dev_reset_iommu_done(dev); /* NVMe: pci_dev_reset_iommu_done 함수를 호출한다. */
-	return rc; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	/* [한국어] 두 번째 후보 — 상위 버스 리셋. 이 버스에 이 장치 하나뿐일 때만 성립. */
+	rc = pci_parent_bus_reset(dev, probe);
+done:
+	/* [한국어] 어느 경로로 왔든 IOMMU 를 반드시 되살린다. goto 로 모아 둔 이유가
+	 * 이것이다 — 중간에 빠져나가는 경로가 여럿이라 각자 정리하면 빠뜨리기 쉽다. */
+	pci_dev_reset_iommu_done(dev);
+	return rc;
+}
 
 /*
- * pci_dev_lock:
- *   pci_dev 의 mutex 를 lock 한다. NVMe reset/suspend 등 동시 접근을 보호한다.
+ * [한국어]
+ * cxl_reset_bus_function - CXL 포트의 SBR 마스크를 잠시 풀고 버스 리셋을 건다
+ *
+ * @dev:   리셋할 장치(CXL 포트 아래에 있어야 한다)
+ * @probe: true 면 가능 여부만 확인.
+ * @return: 0 = 가능/성공, -ENOTTY = 이 방법을 쓸 수 없음, 그 외 = 오류.
+ *
+ * 바로 위 pci_reset_bus_function() 은 CXL 포트가 SBR 을 막아 두었으면
+ * 포기한다. 이 함수는 그 반대 전략이다 — 마스크를 잠시 풀고, 리셋하고,
+ * 원래대로 되돌린다.
+ *
+ * 두 함수가 따로 있는 이유는 위험도가 다르기 때문이다. CXL 포트가 SBR 을
+ * 막아 둔 데에는 이유가 있다(그 아래 장치의 메모리를 시스템이 쓰고 있을 수
+ * 있다). 그래서 커널은 안전한 방법들을 먼저 다 시도하고, 이 방법은
+ * pci_dev_reset_methods 배열의 마지막에 두어 최후 수단으로만 쓴다.
+ *
+ * 되돌리기(restore)가 이 함수의 핵심이다. 우리가 마스크를 푼 경우에만
+ * 다시 씌운다 — 원래부터 풀려 있었다면 건드리지 않는다. reg(원래 값)와
+ * val(우리가 쓴 값)을 비교하는 것이 그 판단이다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트 전용.
+ * 호출자: __pci_reset_function_locked() 가 pci_dev_reset_methods 순서대로 부른다.
+ *
+ * 호출 체인:
+ *   pci_reset_function -> __pci_reset_function_locked
+ *     -> [cxl_reset_bus_function] -> pci_reset_bus_function -> pci_parent_bus_reset
  */
-void pci_dev_lock(struct pci_dev *dev) /* NVMe: pci_dev_lock 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
+static int cxl_reset_bus_function(struct pci_dev *dev, bool probe)
+{
+	struct pci_dev *bridge;	/* [한국어] 상위 CXL 포트 */
+	/* [한국어] dvsec = DVSEC 오프셋, reg = 원래 Port Control 값,
+	 * val = 우리가 실제로 써 넣은 값. 마지막에 둘을 비교해 되돌릴지 정한다. */
+	u16 dvsec, reg, val;
+	int rc;
+
+	/* [한국어] 상위 브리지가 없으면 버스 리셋 자체가 불가능하다. */
+	bridge = pci_upstream_bridge(dev);
+	if (!bridge)
+		return -ENOTTY;
+
+	/* [한국어] 상위가 CXL 포트가 아니면 이 방법은 해당 사항이 없다. */
+	dvsec = cxl_port_dvsec(bridge);
+	if (!dvsec)
+		return -ENOTTY;
+
+	/* [한국어] 가능 여부만 묻는 호출이었다면 여기까지가 답이다.
+	 * 아래는 전부 실제로 하드웨어를 바꾸는 동작이므로 probe 에서는 하면 안 된다. */
+	if (probe)
+		return 0;
+
+	/* [한국어] 원래 값을 읽어 둔다. 마지막에 되돌리기 위해 반드시 필요하다.
+	 * 여기서 실패하면 되돌릴 수 없게 되므로 아예 시작하지 않는다. */
+	rc = pci_read_config_word(bridge, dvsec + PCI_DVSEC_CXL_PORT_CTL, &reg);
+	if (rc)
+		return -ENOTTY;
+
+	/* [한국어] 리셋 전 IOMMU 정지. 아래 pci_reset_bus_function() 도 같은 일을
+	 * 하지만, 그 함수는 probe=false 로 불릴 때 자기 안에서 다시 prepare/done
+	 * 쌍을 수행한다. 중첩 호출을 견디도록 설계된 함수들이다. */
+	rc = pci_dev_reset_iommu_prepare(dev);
+	if (rc) {
+		pci_err(dev, "failed to stop IOMMU for a PCI reset: %d\n", rc);
+		return rc;
+	}
+
+	/* [한국어] 이미 마스크가 풀려 있으면 아무것도 쓰지 않는다. val 을 reg 와
+	 * 같게 두면 아래 "reg != val" 이 거짓이 되어 되돌리기도 건너뛴다. */
+	if (reg & PCI_DVSEC_CXL_PORT_CTL_UNMASK_SBR) {
+		val = reg;
+	} else {
+		/* [한국어] 마스크를 푼다. 이 순간부터 Bridge Control 의 SBR 비트가
+		 * 실제로 동작한다. 원래 값 reg 는 그대로 보존해 둔다. */
+		val = reg | PCI_DVSEC_CXL_PORT_CTL_UNMASK_SBR;
+		pci_write_config_word(bridge, dvsec + PCI_DVSEC_CXL_PORT_CTL,
+				      val);
+	}
+
+	/* [한국어] 이제 일반 버스 리셋 경로를 탄다. 마스크가 풀렸으므로
+	 * 그 안의 cxl_sbr_masked() 검사도 통과한다. */
+	rc = pci_reset_bus_function(dev, probe);
+
+	/* [한국어] 우리가 바꿨을 때만 되돌린다. 원래 풀려 있던 포트를 우리가
+	 * 임의로 막아 버리면 다른 코드의 전제가 깨진다. */
+	if (reg != val)
+		pci_write_config_word(bridge, dvsec + PCI_DVSEC_CXL_PORT_CTL,
+				      reg);
+
+	/* [한국어] IOMMU 복구. 위 prepare 와 짝을 이룬다. */
+	pci_dev_reset_iommu_done(dev);
+	return rc;
+}
+
+/*
+ * [한국어]
+ * pci_dev_lock - 장치를 "아무도 건드리지 못하는" 상태로 만든다
+ *
+ * @dev: 잠글 장치
+ * @return: 없음. 얻을 때까지 기다린다.
+ *
+ * 리셋처럼 장치를 통째로 흔드는 동작 전에 두 겹의 잠금을 건다.
+ *   1) device_lock() - 드라이버 코어의 장치 뮤텍스. 이것을 쥐면 probe,
+ *      remove, 전원 관리 콜백이 전부 대기한다. 즉 드라이버가 리셋 도중에
+ *      바인딩되거나 떨어져 나가는 일이 없다.
+ *   2) pci_cfg_access_lock() - config 접근 차단 플래그. userspace(sysfs,
+ *      /proc/bus/pci, VFIO)의 config 읽기·쓰기를 재운다.
+ *
+ * 두 잠금의 성격이 다르다는 점이 중요하다. device_lock 은 커널 내부 경로를
+ * 막고, cfg_access_lock 은 바깥 경로를 막는다. 리셋 중인 장치의 config 는
+ * 아무 값이나 돌려주므로, 그 값을 읽고 판단하는 코드가 하나라도 있으면
+ * 오작동한다.
+ *
+ * 순서가 정해져 있다. 항상 device_lock 을 먼저 잡는다. 반대 순서로 잡는
+ * 코드가 생기면 교착이 나므로, 이 함수 하나로 순서를 고정해 둔 것이다.
+ * 해제는 pci_dev_unlock() 이 역순으로 한다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트 전용. 두 잠금 모두 잠들 수 있다.
+ * 호출자: pci_reset_function(), pci_try_reset_function(), VFIO.
+ *
+ * 호출 체인:
+ *   pci_reset_function -> [pci_dev_lock] -> device_lock + pci_cfg_access_lock
+ */
+void pci_dev_lock(struct pci_dev *dev)
+{
 	/* block PM suspend, driver probe, etc. */
-	device_lock(&dev->dev); /* NVMe: device_lock 함수를 호출한다. */
-	pci_cfg_access_lock(dev); /* NVMe: pci_cfg_access_lock 함수를 호출한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	/* [한국어] 커널 내부 경로 차단. 이 뮤텍스가 probe/remove/PM 콜백의
+	 * 직렬화 지점이라, 쥐고 있는 동안 드라이버 상태가 바뀌지 않는다. */
+	device_lock(&dev->dev);
+	/* [한국어] userspace 경로 차단. dev->block_cfg_access 를 세워
+	 * pci_user_read/write_config_* 를 재운다. 반드시 device_lock 뒤에
+	 * 와야 한다 — 순서를 뒤집으면 다른 경로와 교착할 수 있다. */
+	pci_cfg_access_lock(dev);
+}
 EXPORT_SYMBOL_GPL(pci_dev_lock);
 
 /* Return 1 on successful lock, 0 on contention */
 /*
- * pci_dev_trylock:
- *   pci_dev 의 mutex 를 시도하여 lock 한다. NVMe timeout/recovery 경로에서 deadlock 방지용으로 사용된다.
+ * [한국어]
+ * pci_dev_trylock - 기다리지 않고 두 잠금을 모두 얻어 본다
+ *
+ * @dev: 잠글 장치
+ * @return: 1 = 두 잠금 모두 획득(반드시 pci_dev_unlock 해야 한다),
+ *          0 = 둘 중 하나라도 얻지 못함(아무것도 잡지 않은 상태로 돌아간다).
+ *
+ * pci_dev_lock() 의 기다리지 않는 판이다. 잠들 수 없는 문맥이나, 잠금을
+ * 얻지 못했을 때 다른 방법으로 대응해야 하는 곳에서 쓴다.
+ *
+ * 두 잠금을 원자적으로 얻어야 한다는 점이 이 함수의 어려운 부분이다.
+ * 첫 번째는 얻었는데 두 번째를 못 얻으면, 첫 번째를 반드시 되돌려 놓아야
+ * 한다. 그러지 않으면 "실패했다" 고 알리면서 잠금은 쥐고 있는 상태가 되어,
+ * 호출자가 unlock 을 부르지 않으니 그 잠금이 영원히 풀리지 않는다.
+ * 중간의 device_unlock() 이 그 되돌리기다.
+ *
+ * 반환값 규약이 커널의 다른 trylock 들과 같다 — 성공이 1, 실패가 0 이다.
+ * 함수 대부분이 0 을 성공으로 쓰는 것과 반대이므로 주의해야 한다.
+ * (원문 주석 "Return 1 on successful lock, 0 on contention" 이 그것을 못박는다.)
+ *
+ * 실행 컨텍스트: 잠들지 않는다. 인터럽트 문맥에서도 부를 수 있다.
+ * 호출자: VFIO 의 리셋 경로, AER 복구처럼 기다릴 수 없는 곳.
  */
-int pci_dev_trylock(struct pci_dev *dev) /* NVMe: pci_dev_trylock 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	if (device_trylock(&dev->dev)) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		if (pci_cfg_access_trylock(dev)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			return 1; /* NVMe: 연산 결과를 반환한다. */
-		device_unlock(&dev->dev); /* NVMe: device_unlock 함수를 호출한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+int pci_dev_trylock(struct pci_dev *dev)
+{
+	/* [한국어] 첫 번째 잠금. 이미 누가 쥐고 있으면 0 을 돌려주고 끝난다. */
+	if (device_trylock(&dev->dev)) {
+		/* [한국어] 두 번째 잠금. 성공하면 둘 다 쥔 상태로 1 을 반환한다. */
+		if (pci_cfg_access_trylock(dev))
+			return 1;
+		/* [한국어] 두 번째를 못 얻었다. 첫 번째를 반드시 되돌린다 —
+		 * 이 한 줄이 없으면 장치 뮤텍스가 영구히 잠긴다. */
+		device_unlock(&dev->dev);
+	}
 
-	return 0; /* NVMe: 성공(0)을 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	/* [한국어] 실패. 잠금을 하나도 쥐지 않은 상태로 돌아간다. */
+	return 0;
+}
 EXPORT_SYMBOL_GPL(pci_dev_trylock);
 
 /*
- * pci_dev_unlock:
- *   pci_dev 의 mutex 를 unlock 한다. NVMe reset/suspend 임계구간 종료 후 호출된다.
+ * [한국어]
+ * pci_dev_unlock - pci_dev_lock() 이 건 두 잠금을 푼다
+ *
+ * @dev: 풀 장치
+ * @return: 없음.
+ *
+ * 해제 순서가 획득의 역순이라는 점이 전부다. 잠금은
+ * device_lock -> cfg_access_lock 순으로 잡았으므로,
+ * cfg_access_unlock -> device_unlock 순으로 푼다.
+ *
+ * 역순을 지키는 이유: cfg_access_unlock() 은 잠들어 있던 userspace 태스크를
+ * 깨우는데, 그들이 깨어나자마자 device_lock 을 기다리게 되면 불필요한
+ * 경쟁이 생긴다. 순서를 지키면 깨어난 태스크가 곧바로 진행한다.
+ * 더 중요하게는, 잠금 순서를 일관되게 유지해야 교착 분석(lockdep)이
+ * 성립한다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트 전용.
+ * 호출자: pci_dev_lock() 또는 1 을 돌려받은 pci_dev_trylock() 과 짝을 이루는 코드.
  */
-void pci_dev_unlock(struct pci_dev *dev) /* NVMe: pci_dev_unlock 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	pci_cfg_access_unlock(dev); /* NVMe: pci_cfg_access_unlock 함수를 호출한다. */
-	device_unlock(&dev->dev); /* NVMe: device_unlock 함수를 호출한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+void pci_dev_unlock(struct pci_dev *dev)
+{
+	/* [한국어] 바깥 경로부터 연다. 기다리던 userspace 접근이 깨어난다. */
+	pci_cfg_access_unlock(dev);
+	/* [한국어] 그다음 커널 내부 경로. probe/remove/PM 이 다시 진행된다. */
+	device_unlock(&dev->dev);
+}
 EXPORT_SYMBOL_GPL(pci_dev_unlock);
 
 /*
- * pci_dev_save_and_disable:
- *   장치 상태를 저장하고 disable 한다. NVMe reset 전에 controller context 를 보존하고 DMA를 멈춘다.
+ * [한국어]
+ * pci_dev_save_and_disable - 리셋 직전에 상태를 보관하고 장치를 완전히 잠재운다
+ *
+ * @dev: 리셋할 장치
+ * @return: 없음.
+ *
+ * 리셋은 config space 를 초기화하므로, 리셋 후 장치를 다시 쓰려면 지금 값을
+ * 어딘가 적어 두어야 한다. 그리고 리셋이 진행되는 동안 장치가 DMA 를
+ * 계속하거나 인터럽트를 쏘면 안 되므로 모든 활동을 멈춰야 한다.
+ * 이 함수가 그 둘을 순서대로 한다.
+ *
+ * 네 단계다.
+ *   1) 드라이버에게 알린다(reset_prepare). 드라이버는 진행 중인 요청을
+ *      정리하고 하드웨어에 더 이상 접근하지 않을 준비를 한다.
+ *   2) 장치를 D0 로 깨운다. D3 상태에서는 config space 접근이 제한되고,
+ *      리셋 후 어차피 D0 가 되므로 지금 맞춰 두는 편이 낫다.
+ *   3) config space 를 통째로 저장한다.
+ *   4) Command 레지스터를 0(+INTx Disable)으로 만들어 장치를 무력화한다.
+ *
+ * 4단계가 이 함수에서 가장 중요하다. Command 를 지우면 세 가지가 동시에
+ * 꺼진다 — MMIO/IO 디코딩(BAR 접근 차단), Bus Master(DMA 차단),
+ * 그리고 INTx Disable 비트를 세워 레거시 인터럽트까지 막는다.
+ * Bus Master 를 끄는 것이 특히 중요하다. NVMe 처럼 스스로 메모리를 읽고
+ * 쓰는 장치가 리셋 도중에 DMA 를 하면, 커널이 이미 해제한 메모리를
+ * 덮어쓸 수 있다. MSI/MSI-X 도 결국 메모리 쓰기이므로 함께 차단된다.
+ *
+ * 실행 컨텍스트: 호출자가 device lock 을 쥐고 있어야 한다.
+ *   device_lock_assert 가 그것을 강제한다. 이 잠금이 있어야 reset_prepare
+ *   콜백을 부르는 도중에 드라이버가 언바인딩되지 않는다.
+ * 호출자: pci_reset_function(), pci_try_reset_function(), 버스 단위 리셋.
+ * 짝: pci_dev_restore() 가 이것을 되돌린다.
+ *
+ * 호출 체인:
+ *   pci_reset_function -> [pci_dev_save_and_disable]
+ *     -> err_handler->reset_prepare (nvme_reset_prepare 등)
+ *     -> pci_save_state -> pci_write_config_word(PCI_COMMAND)
  */
-static void pci_dev_save_and_disable(struct pci_dev *dev) /* NVMe: pci_dev_save_and_disable 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	const struct pci_error_handlers *err_handler = /* NVMe: 표현식을 평가한다. */
-			dev->driver ? dev->driver->err_handler : NULL; /* NVMe: 구조체 멤버에 접근한다. */
+static void pci_dev_save_and_disable(struct pci_dev *dev)
+{
+	/* [한국어] 드라이버가 등록한 오류 처리 콜백 묶음. 드라이버가 바인딩돼
+	 * 있지 않거나 err_handler 를 제공하지 않으면 NULL 이다. */
+	const struct pci_error_handlers *err_handler =
+			dev->driver ? dev->driver->err_handler : NULL;
 
 	/*
 	 * dev->driver->err_handler->reset_prepare() is protected against
 	 * races with ->remove() by the device lock, which must be held by
 	 * the caller.
 	 */
-	device_lock_assert(&dev->dev); /* NVMe: device_lock_assert 함수를 호출한다. */
-	if (err_handler && err_handler->reset_prepare) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		err_handler->reset_prepare(dev); /* NVMe: 구조체 멤버에 접근한다. */
-	else if (dev->driver) /* NVMe: 이전 조건이 거짓일 때 추가 조건을 검사한다. */
-		pci_warn(dev, "resetting"); /* NVMe: PCI 장치에 대한 경고 로그를 출력한다. */
+	/* [한국어] 호출자가 device lock 을 쥐고 있는지 확인한다. 이 잠금이
+	 * reset_prepare 호출과 드라이버 언바인딩(->remove) 사이의 경쟁을 막는다.
+	 * CONFIG_LOCKDEP 빌드에서만 실제로 검사한다. */
+	device_lock_assert(&dev->dev);
+	/* [한국어] 1단계 — 드라이버에게 "곧 리셋한다" 고 알린다. */
+	if (err_handler && err_handler->reset_prepare)
+		err_handler->reset_prepare(dev);
+	/* [한국어] 드라이버는 붙어 있는데 준비 콜백이 없는 경우. 알릴 방법이
+	 * 없으므로 로그만 남긴다. 드라이버 입장에서는 예고 없이 하드웨어가
+	 * 초기화되는 셈이라, 이 경고가 문제 추적의 실마리가 된다. */
+	else if (dev->driver)
+		pci_warn(dev, "resetting");
 
 	/*
 	 * Wake-up device prior to save.  PM registers default to D0 after
 	 * reset and a simple register restore doesn't reliably return
 	 * to a non-D0 state anyway.
 	 */
-	pci_set_power_state(dev, PCI_D0); /* NVMe: NVMe controller 의 PCI 전원 상태를 변경한다. */
+	/* [한국어] 2단계 — D0 로 깨운다. 두 가지 이유가 있다.
+	 * (1) D3 에서는 config space 의 일부만 접근 가능해 저장이 불완전해진다.
+	 * (2) 리셋 후 전원 상태는 어차피 D0 가 되므로, 저장해 둔 상태와
+	 *     실제 상태를 맞춰 두는 편이 복원할 때 어긋나지 않는다. */
+	pci_set_power_state(dev, PCI_D0);
 
-	pci_save_state(dev); /* NVMe: config space 상태를 저장한다. */
+	/* [한국어] 3단계 — config space 전체를 dev->saved_config_space 에 복사한다.
+	 * BAR, Command, Interrupt Line, 그리고 capability 들의 상태가 모두 담긴다. */
+	pci_save_state(dev);
 	/*
 	 * Disable the device by clearing the Command register, except for
 	 * INTx-disable which is set.  This not only disables MMIO and I/O port
@@ -5738,42 +9844,109 @@ static void pci_dev_save_and_disable(struct pci_dev *dev) /* NVMe: pci_dev_save_
 	 * DMA from the device including MSI/MSI-X interrupts.  For PCI 2.3
 	 * compliant devices, INTx-disable prevents legacy interrupts.
 	 */
-	pci_write_config_word(dev, PCI_COMMAND, PCI_COMMAND_INTX_DISABLE); /* NVMe: PCI 설정 공간 2바이트를 쓴다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	/* [한국어] 4단계 — Command 레지스터를 INTx Disable 하나만 남기고 전부 0 으로.
+	 * 값 자체가 곧 의미다: Memory Space Enable=0(BAR 접근 차단),
+	 * I/O Space Enable=0, Bus Master Enable=0(DMA 차단),
+	 * INTx Disable=1(레거시 인터럽트 차단).
+	 * 저장을 먼저 하고 이 쓰기를 나중에 하는 순서가 중요하다 —
+	 * 순서가 바뀌면 지워진 Command 값이 저장돼 복원이 무의미해진다. */
+	pci_write_config_word(dev, PCI_COMMAND, PCI_COMMAND_INTX_DISABLE);
+}
 
 /*
- * pci_dev_restore:
- *   저장한 장치 상태를 복원한다. NVMe reset 후 controller 를 이전 상태로 되돌린다.
+ * [한국어]
+ * pci_dev_restore - 리셋 후 상태를 되돌리고 드라이버에게 알린다
+ *
+ * @dev: 리셋을 마친 장치
+ * @return: 없음.
+ *
+ * pci_dev_save_and_disable() 의 짝이다. 순서가 그것의 역순이라는 점이 핵심이다.
+ *   save 쪽: 드라이버에게 알림 -> 상태 저장 -> 장치 무력화
+ *   restore 쪽: 상태 복원 -> 드라이버에게 알림
+ *
+ * 왜 복원이 먼저이고 알림이 나중인가. reset_done 콜백을 받은 드라이버는
+ * 곧바로 하드웨어를 만지기 시작한다 — 큐를 다시 만들고, 도어벨을 두드리고,
+ * 인터럽트를 등록한다. 그러려면 BAR 가 이미 제자리에 있고 Bus Master 가
+ * 켜져 있어야 한다. 알림이 먼저 가면 드라이버가 아직 복원되지 않은
+ * 하드웨어를 건드리게 된다.
+ *
+ * pci_restore_state() 가 Command 레지스터를 되살리므로, save 단계에서 지웠던
+ * Memory Space Enable 과 Bus Master Enable 이 여기서 다시 켜진다.
+ *
+ * NVMe 관점: nvme_reset_done() 이 이 콜백으로 불려 컨트롤러 재초기화를
+ * 시작한다(nvme_reset_ctrl 을 큐잉). 그래서 이 시점에 BAR0 매핑이
+ * 유효해야 CC/CSTS 레지스터에 접근할 수 있다.
+ *
+ * 실행 컨텍스트: 호출자가 device lock 을 쥐고 있어야 한다(위 원문 주석).
+ * 호출자: pci_reset_function() 등, pci_dev_save_and_disable() 을 부른 그 코드.
+ *
+ * 호출 체인:
+ *   pci_reset_function -> [pci_dev_restore] -> pci_restore_state
+ *     -> err_handler->reset_done (nvme_reset_done 등)
  */
-static void pci_dev_restore(struct pci_dev *dev) /* NVMe: pci_dev_restore 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	const struct pci_error_handlers *err_handler = /* NVMe: 표현식을 평가한다. */
-			dev->driver ? dev->driver->err_handler : NULL; /* NVMe: 구조체 멤버에 접근한다. */
+static void pci_dev_restore(struct pci_dev *dev)
+{
+	/* [한국어] save 쪽과 같은 방식으로 콜백 묶음을 꺼낸다. 그 사이 드라이버가
+	 * 바뀌지 않았음은 호출자가 쥔 device lock 이 보장한다. */
+	const struct pci_error_handlers *err_handler =
+			dev->driver ? dev->driver->err_handler : NULL;
 
-	pci_restore_state(dev); /* NVMe: config space 상태를 복원한다. */
+	/* [한국어] 저장해 둔 config space 를 하드웨어에 다시 써 넣는다.
+	 * BAR 주소, Command(Memory/Bus Master Enable 포함), MSI/MSI-X 설정이
+	 * 이 한 번의 호출로 되살아난다. 반드시 아래 알림보다 먼저 와야 한다. */
+	pci_restore_state(dev);
 
 	/*
 	 * dev->driver->err_handler->reset_done() is protected against
 	 * races with ->remove() by the device lock, which must be held by
 	 * the caller.
 	 */
-	if (err_handler && err_handler->reset_done) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		err_handler->reset_done(dev); /* NVMe: 구조체 멤버에 접근한다. */
-	else if (dev->driver) /* NVMe: 이전 조건이 거짓일 때 추가 조건을 검사한다. */
-		pci_warn(dev, "reset done"); /* NVMe: PCI 장치에 대한 경고 로그를 출력한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	/* [한국어] 드라이버에게 "리셋이 끝났고 하드웨어는 복원됐다" 고 알린다.
+	 * 드라이버는 여기서 자기 자료구조를 재초기화한다. */
+	if (err_handler && err_handler->reset_done)
+		err_handler->reset_done(dev);
+	/* [한국어] 콜백이 없는 드라이버. 알릴 방법이 없으니 로그만 남긴다.
+	 * 이 드라이버는 자기 하드웨어가 리셋됐다는 사실을 영영 모르므로,
+	 * 대개 다음 I/O 에서 오류를 만나 스스로 복구를 시작하게 된다. */
+	else if (dev->driver)
+		pci_warn(dev, "reset done");
+}
 
 /* dev->reset_methods[] is a 0-terminated list of indices into this array */
-const struct pci_reset_fn_method pci_reset_fn_methods[] = { /* NVMe: 표현식을 평가한다. */
-	{ }, /* NVMe: 표현식을 이어서 작성한다. */
-	{ pci_dev_specific_reset, .name = "device_specific" }, /* NVMe: 표현식을 이어서 작성한다. */
-	{ pci_dev_acpi_reset, .name = "acpi" }, /* NVMe: 표현식을 이어서 작성한다. */
-	{ pcie_reset_flr, .name = "flr" }, /* NVMe: 표현식을 이어서 작성한다. */
-	{ pci_af_flr, .name = "af_flr" }, /* NVMe: 표현식을 이어서 작성한다. */
-	{ pci_pm_reset, .name = "pm" }, /* NVMe: 표현식을 이어서 작성한다. */
-	{ pci_reset_bus_function, .name = "bus" }, /* NVMe: 표현식을 이어서 작성한다. */
-	{ cxl_reset_bus_function, .name = "cxl_bus" }, /* NVMe: 표현식을 이어서 작성한다. */
-}; /* NVMe: 코드 블록을 시작한다. */
+/* [한국어] 커널이 알고 있는 모든 리셋 방법의 목록. 순서가 곧 우선순위다 —
+ * 위에 있을수록 먼저 시도하며, 부작용이 작은 방법일수록 위에 온다.
+ *
+ * 0번 항목이 빈 칸인 것이 이 배열의 설계다. dev->reset_methods[] 는 이
+ * 배열의 인덱스를 담은 0-종료 목록인데, 0 을 "끝" 표시로 쓰려면 0번이
+ * 실제 방법이어서는 안 되기 때문이다. 그래서 자리 하나를 비워 둔다.
+ *
+ * 각 방법과 그 범위:
+ *   device_specific - quirks.c 의 pci_dev_reset_methods[] 에 등록된 장치별
+ *                     맞춤 절차. 삼성 SM961/PM961 의 nvme_disable_and_flr()
+ *                     이 여기 해당한다.
+ *   acpi            - 펌웨어가 제공하는 _RST 메서드. 플랫폼이 방법을 안다.
+ *   flr             - PCIe Function Level Reset. 이 function 하나만 리셋하며
+ *                     이웃에 영향이 없어, 표준 방법 중 가장 안전하다.
+ *                     NVMe 드라이버가 pcie_reset_flr() 로 직접 부르기도 한다.
+ *   af_flr          - PCI-X/AF(Advanced Features) 방식의 FLR. PCIe 이전 세대용.
+ *   pm              - D3hot 으로 갔다가 D0 로 돌아오게 해 리셋을 유도한다.
+ *                     스펙상 D3hot -> D0 전환이 장치를 초기화하기 때문이다.
+ *   bus             - 슬롯 리셋 또는 상위 버스 리셋. 주변까지 함께 리셋된다.
+ *   cxl_bus         - CXL 포트의 SBR 마스크를 풀고 버스 리셋. 가장 위험해서
+ *                     마지막이다.
+ *
+ * 이 배열은 sysfs 의 reset_method 속성에도 쓰인다 — 사용자가 이름으로
+ * 특정 방법만 허용하거나 순서를 바꿀 수 있고, .name 필드가 그때의 이름이다. */
+const struct pci_reset_fn_method pci_reset_fn_methods[] = {
+	{ },	/* [한국어] 0번은 "목록의 끝" 을 나타내는 자리. 실제 방법이 아니다 */
+	{ pci_dev_specific_reset, .name = "device_specific" },	/* [한국어] quirks.c 의 장치별 절차 */
+	{ pci_dev_acpi_reset, .name = "acpi" },			/* [한국어] 펌웨어 _RST */
+	{ pcie_reset_flr, .name = "flr" },			/* [한국어] PCIe Function Level Reset */
+	{ pci_af_flr, .name = "af_flr" },			/* [한국어] PCI-X AF 방식 FLR */
+	{ pci_pm_reset, .name = "pm" },				/* [한국어] D3hot -> D0 전환 유도 */
+	{ pci_reset_bus_function, .name = "bus" },		/* [한국어] 슬롯/상위 버스 리셋 */
+	{ cxl_reset_bus_function, .name = "cxl_bus" },		/* [한국어] CXL 마스크 해제 후 버스 리셋 */
+};
 
 /**
  * __pci_reset_function_locked - reset a PCI device function while holding
@@ -5798,16 +9971,51 @@ const struct pci_reset_fn_method pci_reset_fn_methods[] = { /* NVMe: 표현식�
  * device doesn't support resetting a single function.
  */
 /*
- * __pci_reset_function_locked:
- *   lock 을 잡은 상태에서 function reset 을 수행한다. NVMe controller reset 의 실제 실행부이다.
+ * [한국어]
+ * __pci_reset_function_locked - 준비된 리셋 방법들을 순서대로 시도한다
+ *
+ * @dev: 리셋할 장치
+ * @return: 0 = 어느 한 방법으로 리셋 성공,
+ *          -ENOTTY = 쓸 수 있는 방법이 하나도 없거나 모두 "해당 없음",
+ *          그 외 음수 = 어떤 방법이 실제로 실패했다.
+ *
+ * 리셋의 실제 실행부다. dev->reset_methods[] 에 미리 담아 둔 방법 인덱스를
+ * 앞에서부터 하나씩 꺼내 실행하고, 하나라도 성공하면 즉시 끝낸다.
+ *
+ * 반환값의 세 갈래를 구분하는 것이 이 함수의 핵심 로직이다.
+ *   0        - 성공. 더 시도하지 않는다.
+ *   -ENOTTY  - "이 방법은 이 장치에 해당하지 않는다." 다음 방법으로 넘어간다.
+ *   그 외    - 실제 실패. 여기서 멈춘다. 원문 주석이 그 이유를 밝힌다 —
+ *              한 방법이 진짜로 실패했다면 장치가 이상한 상태일 가능성이
+ *              높고, 그 위에 다른 리셋을 더 거는 것은 상황을 악화시킨다.
+ *
+ * 이름 앞의 __ 는 "잠금과 상태 저장/복원을 호출자가 책임진다" 는 뜻이다.
+ * 그것까지 해 주는 판이 pci_reset_function() 이다. 리셋은 config space 를
+ * 임의의 값으로 만들므로, 이 함수만 부르고 복원을 하지 않으면 장치는
+ * BAR 도 Bus Master 도 없는 상태로 남는다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트 전용(might_sleep). 호출자가 device lock 을
+ *   쥐고 있어야 한다(device_lock_assert).
+ * 호출자: pci_reset_function(), pci_reset_function_locked(), VFIO.
+ * 피호출자: pci_reset_fn_methods[] 의 각 reset_fn.
+ *
+ * 호출 체인:
+ *   pci_reset_function -> [__pci_reset_function_locked]
+ *     -> pcie_reset_flr / pci_pm_reset / pci_reset_bus_function ...
  */
-int __pci_reset_function_locked(struct pci_dev *dev) /* NVMe: __pci_reset_function_locked 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	int i, m, rc; /* NVMe: int 타입 변수를 선언한다. */
-	const struct pci_reset_fn_method *method; /* NVMe: 구조체 포인터 변수를 선언한다. */
+int __pci_reset_function_locked(struct pci_dev *dev)
+{
+	/* [한국어] i = reset_methods 배열의 위치, m = 그 자리에 담긴 방법 인덱스,
+	 * rc = 방법이 돌려준 결과. i 와 m 이 다른 것이 중요하다 — reset_methods 는
+	 * "쓸 수 있는 방법만" 앞에서부터 채워 둔 압축 목록이라 인덱스가 어긋난다. */
+	int i, m, rc;
+	const struct pci_reset_fn_method *method;	/* [한국어] 현재 시도할 방법 */
 
-	might_sleep(); /* NVMe: might_sleep 함수를 호출한다. */
-	device_lock_assert(&dev->dev); /* NVMe: device_lock_assert 함수를 호출한다. */
+	/* [한국어] 리셋 방법들이 msleep 을 쓰므로 잠들 수 있다. 원자 문맥에서
+	 * 불렸다면 디버그 빌드가 여기서 경고한다. */
+	might_sleep();
+	/* [한국어] device lock 이 있어야 리셋 도중 드라이버가 바뀌지 않는다. */
+	device_lock_assert(&dev->dev);
 
 	/*
 	 * A reset method returns -ENOTTY if it doesn't support this device and
@@ -5817,24 +10025,36 @@ int __pci_reset_function_locked(struct pci_dev *dev) /* NVMe: __pci_reset_functi
 	 * error, we're also finished: this indicates that further reset
 	 * mechanisms might be broken on the device.
 	 */
-	for (i = 0; i < PCI_NUM_RESET_METHODS; i++) { /* NVMe: 반복문을 시작한다. */
-		m = dev->reset_methods[i]; /* NVMe: 변수에 값을 할당한다. */
-		if (!m) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			return -ENOTTY; /* NVMe: 오류 코드를 반환한다. */
+	for (i = 0; i < PCI_NUM_RESET_METHODS; i++) {
+		m = dev->reset_methods[i];	/* [한국어] 이 자리에 담긴 방법 인덱스 */
+		/* [한국어] 0 은 목록의 끝 표시다(pci_reset_fn_methods[0] 이 빈 칸인 이유).
+		 * 여기까지 왔다는 것은 모든 방법이 "해당 없음" 이었다는 뜻이다. */
+		if (!m)
+			return -ENOTTY;
 
-		method = &pci_reset_fn_methods[m]; /* NVMe: 변수에 값을 할당한다. */
-		pci_dbg(dev, "reset via %s\n", method->name); /* NVMe: PCI 장치에 대한 디버그 로그를 출력한다. */
-		rc = method->reset_fn(dev, PCI_RESET_DO_RESET); /* NVMe: 변수에 값을 할당한다. */
-		if (!rc) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			return 0; /* NVMe: 성공(0)을 반환한다. */
+		method = &pci_reset_fn_methods[m];	/* [한국어] 인덱스로 실제 방법을 찾는다 */
+		/* [한국어] 어떤 방법을 시도하는지 로그로 남긴다. 리셋이 왜 실패했는지
+		 * 추적할 때 이 순서가 결정적인 단서가 된다. */
+		pci_dbg(dev, "reset via %s\n", method->name);
+		/* [한국어] PCI_RESET_DO_RESET(=false) 을 넘겨 "실제로 리셋하라" 고 지시한다.
+		 * PCI_RESET_PROBE(=true) 였다면 가능 여부만 확인하고 끝난다. */
+		rc = method->reset_fn(dev, PCI_RESET_DO_RESET);
+		if (!rc)
+			return 0;	/* [한국어] 성공. 더 시도할 이유가 없다 */
 
-		pci_dbg(dev, "%s failed with %d\n", method->name, rc); /* NVMe: PCI 장치에 대한 디버그 로그를 출력한다. */
-		if (rc != -ENOTTY) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			return rc; /* NVMe: 연산 결과를 반환한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+		pci_dbg(dev, "%s failed with %d\n", method->name, rc);
+		/* [한국어] -ENOTTY 가 아니라면 실제 실패다. 위 원문 주석대로,
+		 * 이런 상태에서 다음 방법을 더 시도하면 장치가 더 망가질 수 있으므로
+		 * 그 오류를 그대로 올려 보낸다. */
+		if (rc != -ENOTTY)
+			return rc;
+		/* [한국어] -ENOTTY 였다면 루프가 계속되어 다음 방법으로 넘어간다. */
+	}
 
-	return -ENOTTY; /* NVMe: 오류 코드를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	/* [한국어] 배열을 끝까지 돌았는데 0 표시를 못 만난 경우.
+	 * reset_methods 가 가득 찼고 전부 -ENOTTY 였다는 뜻이다. */
+	return -ENOTTY;
+}
 EXPORT_SYMBOL_GPL(__pci_reset_function_locked);
 
 /**
@@ -5850,28 +10070,72 @@ EXPORT_SYMBOL_GPL(__pci_reset_function_locked);
  * which is a member of struct pci_dev.
  */
 /*
- * pci_init_reset_methods:
- *   pci_dev 의 reset_methods 배열을 초기화한다. NVMe controller reset 시 사용할 방법(FLTR/PM/ACS 등)을 결정한다.
+ * [한국어]
+ * pci_init_reset_methods - 이 장치에 쓸 수 있는 리셋 방법을 미리 조사해 둔다
+ *
+ * @dev: 조사할 장치
+ * @return: 없음. 결과는 dev->reset_methods[] 에 담긴다.
+ *
+ * 장치를 열거할 때 한 번 실행되어, 모든 리셋 방법에 "이 장치에 쓸 수 있는가"
+ * 를 물어보고 쓸 수 있는 것들의 인덱스만 앞에서부터 채워 넣는다.
+ * 실제 리셋 때마다 매번 물어보지 않기 위한 캐시다.
+ *
+ * 결과 배열의 모양이 특이하다. 예컨대 FLR(3번)과 버스 리셋(6번)만 가능한
+ * 장치라면 reset_methods = {3, 6, 0, ...} 이 된다. 값은 pci_reset_fn_methods
+ * 배열의 인덱스이고, 0 이 목록의 끝이다. 그래서 그 배열의 0번을 비워 둔 것이다.
+ *
+ * 루프가 m=1 부터 시작하는 것도 같은 이유다 — 0번은 실제 방법이 아니다.
+ *
+ * 도중에 break 하는 조건이 미묘하다. 어떤 방법이 -ENOTTY 가 아닌 오류를
+ * 돌려주면 거기서 조사를 멈춘다. probe 단계에서조차 오류가 났다는 것은
+ * 장치가 config 접근에 제대로 응답하지 않는다는 뜻이고, 그 상태에서 뒤쪽
+ * 방법들을 계속 물어봐야 결과를 믿을 수 없기 때문이다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트 전용(might_sleep). 열거 중에 불린다.
+ * 호출자: probe.c 의 pci_init_capabilities() 경로.
+ * 결과를 쓰는 곳: __pci_reset_function_locked(), sysfs 의 reset_method 속성.
+ *
+ * 호출 체인:
+ *   pci_device_add -> pci_init_capabilities -> [pci_init_reset_methods]
+ *     -> 각 reset_fn(dev, PCI_RESET_PROBE)
  */
-void pci_init_reset_methods(struct pci_dev *dev) /* NVMe: pci_init_reset_methods 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	int m, i, rc; /* NVMe: int 타입 변수를 선언한다. */
+void pci_init_reset_methods(struct pci_dev *dev)
+{
+	/* [한국어] m = 조사 중인 방법 인덱스, i = 결과 배열에 채워 넣을 위치.
+	 * 둘이 다르게 움직이는 것이 핵심이다 — 쓸 수 있는 방법만 i 를 전진시킨다. */
+	int m, i, rc;
 
-	BUILD_BUG_ON(ARRAY_SIZE(pci_reset_fn_methods) != PCI_NUM_RESET_METHODS); /* NVMe: 변수에 값을 할당한다. */
+	/* [한국어] 컴파일 시점 검사. 방법 배열의 크기와 상수가 어긋나면 빌드가
+	 * 실패한다. 새 리셋 방법을 추가하면서 PCI_NUM_RESET_METHODS 를 올리는 것을
+	 * 잊으면 아래 루프가 배열 밖을 읽게 되는데, 그것을 원천 차단한다. */
+	BUILD_BUG_ON(ARRAY_SIZE(pci_reset_fn_methods) != PCI_NUM_RESET_METHODS);
 
-	might_sleep(); /* NVMe: might_sleep 함수를 호출한다. */
+	/* [한국어] probe 단계에서도 일부 방법(ACPI 등)은 잠들 수 있다. */
+	might_sleep();
 
-	i = 0; /* NVMe: 변수에 값을 할당한다. */
-	for (m = 1; m < PCI_NUM_RESET_METHODS; m++) { /* NVMe: 반복문을 시작한다. */
-		rc = pci_reset_fn_methods[m].reset_fn(dev, PCI_RESET_PROBE); /* NVMe: 변수에 값을 할당한다. */
-		if (!rc) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			dev->reset_methods[i++] = m; /* NVMe: 변수에 값을 할당한다. */
-		else if (rc != -ENOTTY) /* NVMe: 이전 조건이 거짓일 때 추가 조건을 검사한다. */
-			break; /* NVMe: 현재 반복문을 빠져나간다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+	i = 0;	/* [한국어] 결과 배열의 첫 자리부터 채운다 */
+	/* [한국어] 1부터 시작 — 0번은 "끝" 표시 전용 자리다.
+	 * 순서대로 조사하므로 결과 배열도 우선순위 순서를 유지한다. */
+	for (m = 1; m < PCI_NUM_RESET_METHODS; m++) {
+		/* [한국어] PCI_RESET_PROBE(=true)를 넘겨 "실제로 하지 말고 가능한지만
+		 * 답하라" 고 요청한다. 각 방법이 이 인자를 보고 조건 검사만 하고 돌아온다. */
+		rc = pci_reset_fn_methods[m].reset_fn(dev, PCI_RESET_PROBE);
+		/* [한국어] 0 = 쓸 수 있다. 결과 배열에 인덱스를 기록하고 i 를 전진. */
+		if (!rc)
+			dev->reset_methods[i++] = m;
+		/* [한국어] -ENOTTY 가 아닌 오류 = 장치 상태가 이상하다. 뒤쪽 방법의
+		 * 조사 결과도 믿을 수 없으므로 여기서 멈춘다. */
+		else if (rc != -ENOTTY)
+			break;
+		/* [한국어] -ENOTTY 였다면 i 를 그대로 두고 다음 방법으로 넘어간다. */
+	}
 
-	dev->reset_methods[i] = 0; /* NVMe: 변수에 값을 할당한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	/* [한국어] 목록의 끝 표시. break 로 빠져나왔든 끝까지 돌았든 반드시
+	 * 여기서 0 을 넣어야 __pci_reset_function_locked 가 멈출 지점을 안다.
+	 * 배열 크기가 PCI_NUM_RESET_METHODS 이고 i 는 최대 그보다 1 작으므로
+	 * 이 쓰기는 항상 배열 안이다. */
+	dev->reset_methods[i] = 0;
+}
 
 /**
  * pci_reset_function - quiesce and reset a PCI device function
@@ -5890,38 +10154,83 @@ void pci_init_reset_methods(struct pci_dev *dev) /* NVMe: pci_init_reset_methods
  * device doesn't support resetting a single function.
  */
 /*
- * pci_reset_function:
- *   NVMe controller 의 function reset 을 수행한다. nvme_reset_work 등에서 controller 상태를 초기화할 때 호출된다.
+ * [한국어]
+ * pci_reset_function - 장치를 잠그고, 상태를 보관하고, 리셋하고, 되돌린다
+ *
+ * @dev: 리셋할 장치
+ * @return: 0 = 성공, 음수 = 쓸 수 있는 방법이 없거나 리셋이 실패했다.
+ *
+ * 리셋 절차 전체를 한 번에 처리하는 "완성품" 진입점이다.
+ * __pci_reset_function_locked() 가 리셋 자체만 한다면, 이 함수는 그 앞뒤에
+ * 필요한 모든 것을 붙인다.
+ *
+ *   잠금(상위 브리지 -> 자신) -> 상태 저장 및 무력화 -> 리셋
+ *     -> 상태 복원 -> 잠금 해제(자신 -> 상위 브리지)
+ *
+ * 상위 브리지까지 잠그는 이유가 이 함수에서 가장 설명이 필요한 부분이다.
+ * 리셋 방법 중에는 상위 브리지를 건드리는 것들이 있다 — 버스 리셋은
+ * 브리지의 Bridge Control 레지스터를 쓰고, CXL 리셋은 브리지의 DVSEC 을
+ * 건드린다. 그 사이에 브리지 자신이 절전에 들어가거나 드라이버가 떨어지면
+ * 리셋 절차가 어긋난다. 그래서 브리지도 함께 얼려 둔다.
+ * 브리지가 없는 경우(루트 버스 직결)에는 그럴 대상이 없으므로 건너뛴다.
+ *
+ * 잠금 순서 — 위에서 아래로 잡고, 아래에서 위로 푼다. 이 순서를 모든
+ * 코드가 지켜야 교착이 나지 않는다.
+ *
+ * NVMe 관점: drivers/nvme/ 에는 이 함수 호출이 없다(전수 확인).
+ * NVMe 컨트롤러 리셋은 nvme_reset_ctrl() 이 NVMe 스펙의 CC.EN 절차로
+ * 직접 수행하며, PCI 리셋이 필요한 경우에도 pcie_reset_flr() 을 직접 부른다.
+ * 이 함수를 타는 경로는 sysfs 의 reset 속성이나 VFIO 장치 할당 쪽이다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트 전용. 잠금과 msleep 이 있다.
+ * 호출자: pci-sysfs.c 의 reset 속성, VFIO, 일부 드라이버.
+ *
+ * 호출 체인:
+ *   echo 1 > /sys/bus/pci/devices/.../reset -> [pci_reset_function]
+ *     -> pci_dev_save_and_disable -> __pci_reset_function_locked -> pci_dev_restore
  */
-int pci_reset_function(struct pci_dev *dev) /* NVMe: pci_reset_function 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	struct pci_dev *bridge; /* NVMe: 데이터 타입 변수를 선언한다. */
-	int rc; /* NVMe: int 타입 변수를 선언한다. */
+int pci_reset_function(struct pci_dev *dev)
+{
+	struct pci_dev *bridge;	/* [한국어] 상위 브리지. 없을 수 있다 */
+	int rc;
 
-	if (!pci_reset_supported(dev)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return -ENOTTY; /* NVMe: 오류 코드를 반환한다. */
+	/* [한국어] pci_init_reset_methods() 가 채워 둔 목록이 비어 있으면
+	 * 시도할 방법이 없다. 잠금을 잡기 전에 걸러 낸다. */
+	if (!pci_reset_supported(dev))
+		return -ENOTTY;
 
 	/*
 	 * If there's no upstream bridge, no locking is needed since there is
 	 * no upstream bridge configuration to hold consistent.
 	 */
-	bridge = pci_upstream_bridge(dev); /* NVMe: 변수에 값을 할당한다. */
-	if (bridge) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pci_dev_lock(bridge); /* NVMe: NVMe controller 동시 접근을 보호하기 위해 mutex 를 잠근다. */
+	/* [한국어] 상위 브리지를 먼저 잠근다. 위에서 아래 순서를 지켜야
+	 * 다른 경로와 교착하지 않는다. 루트 버스 직결 장치면 NULL 이고,
+	 * 그때는 지킬 브리지 설정이 없으므로 잠글 필요도 없다. */
+	bridge = pci_upstream_bridge(dev);
+	if (bridge)
+		pci_dev_lock(bridge);
 
-	pci_dev_lock(dev); /* NVMe: NVMe controller 동시 접근을 보호하기 위해 mutex 를 잠근다. */
-	pci_dev_save_and_disable(dev); /* NVMe: 장치 상태를 저장하고 disable 한다. */
+	/* [한국어] 대상 장치를 잠근다. 이제 드라이버도 userspace 도 건드릴 수 없다. */
+	pci_dev_lock(dev);
+	/* [한국어] 드라이버에게 알리고, config 를 저장하고, Command 를 지워
+	 * DMA 와 인터럽트를 멈춘다. */
+	pci_dev_save_and_disable(dev);
 
-	rc = __pci_reset_function_locked(dev); /* NVMe: 변수에 값을 할당한다. */
+	/* [한국어] 실제 리셋. 준비된 방법들을 순서대로 시도한다. */
+	rc = __pci_reset_function_locked(dev);
 
-	pci_dev_restore(dev); /* NVMe: 장치 상태를 복원한다. */
-	pci_dev_unlock(dev); /* NVMe: NVMe controller mutex 를 해제한다. */
+	/* [한국어] 성공했든 실패했든 반드시 복원한다. 실패한 경우에도 저장해 둔
+	 * 상태를 되돌려야 장치가 최소한 리셋 전과 같은 모습으로 남는다 —
+	 * 복원을 건너뛰면 Command 가 0 인 채로 남아 장치가 완전히 죽는다. */
+	pci_dev_restore(dev);
+	pci_dev_unlock(dev);
 
-	if (bridge) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pci_dev_unlock(bridge); /* NVMe: NVMe controller mutex 를 해제한다. */
+	/* [한국어] 잡은 역순으로 푼다. */
+	if (bridge)
+		pci_dev_unlock(bridge);
 
-	return rc; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return rc;
+}
 EXPORT_SYMBOL_GPL(pci_reset_function);
 
 /**
@@ -5944,26 +10253,54 @@ EXPORT_SYMBOL_GPL(pci_reset_function);
  * device doesn't support resetting a single function.
  */
 /*
- * pci_reset_function_locked:
- *   lock 을 잡은 채 function reset 을 수행한다. NVMe reset 경로에서 race 없이 reset 을 실행한다.
+ * [한국어]
+ * pci_reset_function_locked - 호출자가 이미 잠금을 쥔 경우의 리셋
+ *
+ * @dev: 리셋할 장치
+ * @return: 0 = 성공, 음수 = 실패.
+ *
+ * pci_reset_function() 에서 잠금 획득/해제만 뺀 판이다. 저장과 복원은 그대로 한다.
+ * 이름이 비슷한 세 함수의 관계를 정리하면:
+ *
+ *   pci_reset_function()          잠금 O, 저장/복원 O   <- 가장 완전한 판
+ *   pci_reset_function_locked()   잠금 X, 저장/복원 O   <- 이 함수
+ *   __pci_reset_function_locked() 잠금 X, 저장/복원 X   <- 리셋만
+ *
+ * 이 판이 필요한 이유: 드라이버의 probe 나 remove 안에서 리셋을 걸어야 하는
+ * 경우가 있는데, 그 경로는 이미 드라이버 코어가 device lock 을 쥐고 들어온
+ * 상태다. 거기서 pci_reset_function() 을 부르면 자기가 쥔 잠금을 다시
+ * 잡으려다 교착한다.
+ *
+ * 다만 상위 브리지는 잠그지 않는다는 점에 주의해야 한다. 버스 리셋 계열이
+ * 선택되면 브리지를 건드리게 되는데, 그 보호가 없다. 그래서 이 함수는
+ * FLR 처럼 장치 안에서 끝나는 방법이 있는 장치에 주로 쓴다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. 호출자가 device lock 을 쥐고 있어야 한다.
+ * 호출자: 드라이버의 probe/remove 안, 그리고 일부 오류 복구 경로.
  */
-int pci_reset_function_locked(struct pci_dev *dev) /* NVMe: pci_reset_function_locked 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	int rc; /* NVMe: int 타입 변수를 선언한다. */
+int pci_reset_function_locked(struct pci_dev *dev)
+{
+	int rc;
 
-	device_lock_assert(&dev->dev); /* NVMe: device_lock_assert 함수를 호출한다. */
+	/* [한국어] 이 함수의 전제 조건. 호출자가 잠금을 안 쥐고 부르면
+	 * 리셋 도중 드라이버가 언바인딩될 수 있다. */
+	device_lock_assert(&dev->dev);
 
-	if (!pci_reset_supported(dev)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return -ENOTTY; /* NVMe: 오류 코드를 반환한다. */
+	/* [한국어] 쓸 수 있는 리셋 방법이 하나도 없으면 시작하지 않는다.
+	 * 저장/무력화를 해 놓고 실패하면 되돌리는 비용만 든다. */
+	if (!pci_reset_supported(dev))
+		return -ENOTTY;
 
-	pci_dev_save_and_disable(dev); /* NVMe: 장치 상태를 저장하고 disable 한다. */
+	/* [한국어] 상태 저장 + 장치 무력화. */
+	pci_dev_save_and_disable(dev);
 
-	rc = __pci_reset_function_locked(dev); /* NVMe: 변수에 값을 할당한다. */
+	rc = __pci_reset_function_locked(dev);	/* [한국어] 실제 리셋 */
 
-	pci_dev_restore(dev); /* NVMe: 장치 상태를 복원한다. */
+	/* [한국어] 성공/실패와 무관하게 복원한다. */
+	pci_dev_restore(dev);
 
-	return rc; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return rc;
+}
 EXPORT_SYMBOL_GPL(pci_reset_function_locked);
 
 /**
@@ -5973,53 +10310,108 @@ EXPORT_SYMBOL_GPL(pci_reset_function_locked);
  * Same as above, except return -EAGAIN if unable to lock device.
  */
 /*
- * pci_try_reset_function:
- *   reset 을 시도하고 실패필도 에러를 반환한다. NVMe recovery 에서 reset 가능성을 점검할 때 쓰인다.
+ * [한국어]
+ * pci_try_reset_function - 잠금을 기다리지 않는 리셋
+ *
+ * @dev: 리셋할 장치
+ * @return: 0 = 성공, -EAGAIN = 잠금을 얻지 못해 아무것도 하지 않았다,
+ *          -ENOTTY = 쓸 수 있는 방법이 없다, 그 외 = 리셋 실패.
+ *
+ * pci_reset_function() 과 같지만 잠금을 기다리지 않는다. 잠금이 이미 잡혀
+ * 있으면 -EAGAIN 을 돌려주고 즉시 물러난다.
+ *
+ * -EAGAIN 이라는 반환값이 의도를 말해 준다. "지금은 안 되니 나중에 다시
+ * 시도하라" 는 뜻이지 "이 장치는 리셋할 수 없다" 가 아니다. 호출자는
+ * 워크큐에 다시 넣거나 잠시 뒤 재시도하는 식으로 대응한다.
+ *
+ * 상위 브리지를 잠그지 않는 것은 pci_reset_function_locked() 와 같은
+ * 한계다. 두 장치의 잠금을 기다리지 않고 모두 얻으려면 한쪽만 얻는
+ * 어중간한 상태를 처리해야 해서 복잡해지기 때문이다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트(리셋 방법들이 msleep 한다).
+ *   잠금 획득만 기다리지 않을 뿐, 리셋 자체는 시간이 걸린다.
+ * 호출자: VFIO 의 장치 반납 경로처럼 실패해도 되는 곳.
  */
-int pci_try_reset_function(struct pci_dev *dev) /* NVMe: pci_try_reset_function 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	int rc; /* NVMe: int 타입 변수를 선언한다. */
+int pci_try_reset_function(struct pci_dev *dev)
+{
+	int rc;
 
-	if (!pci_reset_supported(dev)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return -ENOTTY; /* NVMe: 오류 코드를 반환한다. */
+	/* [한국어] 방법이 없으면 잠금을 건드릴 필요도 없다. */
+	if (!pci_reset_supported(dev))
+		return -ENOTTY;
 
-	if (!pci_dev_trylock(dev)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return -EAGAIN; /* NVMe: 오류 코드를 반환한다. */
+	/* [한국어] 두 잠금을 기다리지 않고 얻어 본다. 실패하면 아무것도
+	 * 잡지 않은 상태이므로 그냥 돌아가면 된다. */
+	if (!pci_dev_trylock(dev))
+		return -EAGAIN;
 
-	pci_dev_save_and_disable(dev); /* NVMe: 장치 상태를 저장하고 disable 한다. */
-	rc = __pci_reset_function_locked(dev); /* NVMe: 변수에 값을 할당한다. */
-	pci_dev_restore(dev); /* NVMe: 장치 상태를 복원한다. */
-	pci_dev_unlock(dev); /* NVMe: NVMe controller mutex 를 해제한다. */
+	pci_dev_save_and_disable(dev);		/* [한국어] 상태 저장 + 무력화 */
+	rc = __pci_reset_function_locked(dev);	/* [한국어] 실제 리셋 */
+	pci_dev_restore(dev);			/* [한국어] 상태 복원 */
+	pci_dev_unlock(dev);			/* [한국어] trylock 이 잡은 두 잠금 해제 */
 
-	return rc; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return rc;
+}
 EXPORT_SYMBOL_GPL(pci_try_reset_function);
 
 /* Do any devices on or below this bus prevent a bus reset? */
 /*
- * pci_bus_resettable:
- *   bus 전체 reset 이 가능한지 확인한다. NVMe가 연결된 bus 의 상태를 판단한다.
+ * [한국어]
+ * pci_bus_resettable - 이 버스 아래 전부를 리셋해도 되는가
+ *
+ * @bus:    검사할 버스
+ * @return: true = 버스 리셋 가능, false = 이 아래 어딘가에 리셋을 견디지
+ *          못하는 장치가 있다.
+ *
+ * 버스 리셋은 그 버스 아래 모든 장치를 함께 리셋한다. 그중 하나라도
+ * "나는 버스 리셋을 받으면 망가진다"(PCI_DEV_FLAGS_NO_BUS_RESET quirk)고
+ * 표시돼 있으면 전체를 포기해야 한다. 이 함수가 그 판정을 한다.
+ *
+ * 재귀 구조인 것이 요점이다. 하위에 브리지가 있으면 그 아래까지 전부
+ * 확인해야 한다 — 버스 리셋의 효과가 계층 전체로 퍼지기 때문이다.
+ * 깊이가 깊어도 PCIe 계층은 실제로 몇 단계뿐이라 스택 사용이 문제되지 않는다.
+ *
+ * 브리지 자신도 검사한다는 점에 주의. bus->self 는 이 버스를 만든 상위
+ * 브리지이고, 버스 리셋은 그 브리지의 레지스터를 통해 걸리므로 브리지가
+ * 리셋을 거부하면 애초에 방법이 없다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. 목록 순회에 pci_bus_sem 이 필요하지만
+ *   이 함수는 잡지 않는다 — 호출자(pci_probe_reset_bus 등)가 쥐고 들어온다.
+ * 호출자: pci_probe_reset_slot(), pci_probe_reset_bus().
  */
-static bool pci_bus_resettable(struct pci_bus *bus) /* NVMe: pci_bus_resettable 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	struct pci_dev *dev; /* NVMe: 데이터 타입 변수를 선언한다. */
+static bool pci_bus_resettable(struct pci_bus *bus)
+{
+	struct pci_dev *dev;	/* [한국어] 순회 커서 */
 
 
-	if (bus->self && (bus->self->dev_flags & PCI_DEV_FLAGS_NO_BUS_RESET)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return false; /* NVMe: 연산 결과를 반환한다. */
+	/* [한국어] 이 버스를 만든 상위 브리지가 버스 리셋을 거부하면 끝이다.
+	 * 실제 리셋이 그 브리지의 Bridge Control 레지스터로 걸리기 때문이다.
+	 * 루트 버스면 bus->self 가 NULL 이라 이 검사를 건너뛴다. */
+	if (bus->self && (bus->self->dev_flags & PCI_DEV_FLAGS_NO_BUS_RESET))
+		return false;
 
-	list_for_each_entry(dev, &bus->devices, bus_list) { /* NVMe: 리스트/해시 항목을 순회하는 매크로 루프를 시작한다. */
-		if (dev->dev_flags & PCI_DEV_FLAGS_NO_BUS_RESET || /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		    (dev->subordinate && !pci_bus_resettable(dev->subordinate))) /* NVMe: 구조체 멤버에 접근한다. */
-			return false; /* NVMe: 연산 결과를 반환한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+	/* [한국어] 이 버스의 모든 장치를 확인한다. */
+	list_for_each_entry(dev, &bus->devices, bus_list) {
+		/* [한국어] 두 조건 중 하나라도 걸리면 전체가 불가다.
+		 * (1) 이 장치 자신이 버스 리셋을 거부한다.
+		 * (2) 이 장치가 브리지이고, 그 아래에 거부하는 장치가 있다(재귀). */
+		if (dev->dev_flags & PCI_DEV_FLAGS_NO_BUS_RESET ||
+		    (dev->subordinate && !pci_bus_resettable(dev->subordinate)))
+			return false;
+	}
 
-	return true; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	/* [한국어] 서브트리 전체가 버스 리셋을 견딘다. */
+	return true;
+}
 
-static void pci_bus_lock(struct pci_bus *bus); /* NVMe: pci_bus_lock 함수를 선언한다. */
-static void pci_bus_unlock(struct pci_bus *bus); /* NVMe: pci_bus_unlock 함수를 선언한다. */
-static int pci_bus_trylock(struct pci_bus *bus); /* NVMe: pci_bus_trylock 함수를 선언한다. */
+/* [한국어] 전방 선언 세 개. 아래 __pci_bus_lock() 계열이 하위 버스를 만나면
+ * 이 함수들을 재귀 호출하는데, 정의가 더 뒤에 있어서 미리 선언해 둔다.
+ * __pci_bus_lock 과 pci_bus_lock 이 짝을 이루는 상호 재귀 구조다 —
+ * pci_bus_lock(bus) 이 __pci_bus_lock(bus, NULL) 을 부르고, 그것이 하위
+ * 버스에 대해 다시 pci_bus_lock 을 부른다. */
+static void pci_bus_lock(struct pci_bus *bus);
+static void pci_bus_unlock(struct pci_bus *bus);
+static int pci_bus_trylock(struct pci_bus *bus);
 
 /* Lock devices from the top of the tree down */
 /*
