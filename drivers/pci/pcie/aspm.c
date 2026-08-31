@@ -8,28 +8,110 @@
  */
 
 /*
- * ===================================================================
- * NVMe PCIe 호스트 드라이버 관점 파일 요약
- * -------------------------------------------------------------------
- * 본 파일(drivers/pci/pcie/aspm.c)은 PCI Express 링크의 Active State
- * Power Management(ASPM) 및 Clock Power Management(CLKREQ#, L1 substates)
- * 상태를 구성/저장/복원한다. NVMe SSD 입장에서 볼 때 Root Port에서
- * Endpoint까지의 링크 전원 정책이 이 파일에서 결정되며, 이는 BAR 매핑,
- * DMA/PCIe TLP 왕복 지연, MSI-X 인터럽트 지연, doorbell 응답 시간에
- * 직접적인 영향을 미친다. 일반적인 NVMe 드라이버 호출 경로:
- *   pci_register_driver -> nvme_probe -> pci_enable_device ->
- *   pci_request_regions -> dma_set_mask -> pci_enable_msix_range ->
- *   nvme_reset_work -> nvme_create_queue -> doorbell
- * 여기서 pci_enable_device() 이후 pcie_aspm_powersave_config_link()가
- * ASPM 정책을 실제 링크 레지스터에 반영한다.
- * 본 파일은 drivers/pci/probe.c, drivers/pci/setup-bus.c, drivers/pci/pci.c
- * 에서 장치/버스 스캔 및 전원 상태 변경 후 호출되며, NVMe 드라이버는
- * drivers/nvme/pci.c에서 pci_disable_link_state() 등을 직접 호출할 수 있다.
- * ===================================================================
+ * [한국어 설명] 링크를 놀 때 재우는 전력 관리 (aspm.c)
+ *
+ * === 파일의 역할 ===
+ * ASPM(Active State Power Management)은 PCIe 링크에 오갈 트래픽이 없을 때
+ * 링크 자체를 저전력 상태로 내리는 기능이다. 장치의 D-state 와는 다르다 —
+ * 장치는 D0(완전 동작) 상태 그대로이고 링크만 잠든다.
+ *
+ * 상태는 두 가지다.
+ *   L0s - 한쪽 방향만 재운다. 복귀가 빠르다(마이크로초 단위).
+ *   L1  - 양방향을 모두 재운다. 절전 효과가 크지만 복귀가 느리다.
+ *         L1.1 / L1.2 라는 하위 상태(L1 substates)가 더 있어, L1.2 는
+ *         공통 클럭까지 끄고 CLKREQ# 신호로 깨운다. 절전은 가장 크지만
+ *         복귀에 수십~수백 마이크로초가 걸린다.
+ *
+ * 이 파일이 하는 일의 핵심은 "얼마나 재워도 되는가" 의 계산이다.
+ * 링크를 깨우는 데 걸리는 시간이 엔드포인트가 견딜 수 있는 지연
+ * (Device Capability 의 Acceptable Latency)보다 길면 그 상태를 쓸 수 없다.
+ * 게다가 링크가 여러 단계로 이어져 있으면 각 단계의 복귀 시간이 누적된다.
+ * pcie_aspm_check_latency() 가 경로 전체의 누적 지연을 재서 판정한다.
+ *
+ * 정책도 다룬다. 부팅 인자 "pcie_aspm=off/force" 와 sysfs 의 policy 파일로
+ * default / performance / powersave / powersupersave 중 하나를 고를 수 있다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * 링크 발견: probe.c 가 브리지를 발견하면
+ *              -> [이 파일] pcie_aspm_init_link_state()
+ *                 struct pcie_link_state 를 만들어 링크의 양 끝을 기록하고,
+ *                 지원 상태와 지연 시간을 읽어 둔다.
+ *
+ * 적용:      pci_enable_device 후, 또는 정책이 바뀔 때
+ *              -> [이 파일] pcie_aspm_configure_common_clock(),
+ *                 pcie_config_aspm_link()
+ *                 -> pcie_capability_clear_and_set_word(LNKCTL) 로
+ *                    양 끝의 ASPM Control 비트를 함께 설정한다
+ *
+ * 제거:      pcie_aspm_exit_link_state() 가 링크 상태를 해제한다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. aspm_lock 뮤텍스로 링크 목록을 보호한다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: probe.c(링크 초기화), pci.c(전원 상태 전환 시 재설정),
+ *   remove.c(해제), pci-sysfs.c(정책 파일).
+ * 아래쪽: access.c 의 pcie_capability_* (LNKCTL/LNKCAP 접근).
+ *   특히 LNKCTL 은 여러 곳이 동시에 건드릴 수 있어
+ *   pcie_capability_clear_and_set_word_locked() 판을 쓴다.
+ * 공유 상태: struct pcie_link_state — 링크 하나를 나타내며, 양 끝 장치와
+ *   지원/활성/가능/기본/금지 상태 비트를 담는다. 전역 link_list 에 매달린다.
+ *
+ * === NVMe 관점 ===
+ * NVMe 드라이버가 이 파일에서 직접 부르는 함수는 pcie_aspm_enabled() 하나다
+ * (drivers/nvme/ 전수 확인). 그리고 그 쓰임이 흥미롭다.
+ *
+ *   nvme_suspend()  [drivers/nvme/host/pci.c]
+ *     if (pm_suspend_via_firmware() || !ctrl->npss ||
+ *         !pcie_aspm_enabled(pdev) ||
+ *         (ndev->ctrl.quirks & NVME_QUIRK_SIMPLE_SUSPEND))
+ *             return nvme_disable_prepare_reset(ndev, true);
+ *
+ * 절전에 들어갈 때 두 가지 방법 중 하나를 고르는 판단이다.
+ *   - NVMe 자체 전력 상태(NVMe Power State, npss 가 그 개수)를 써서
+ *     컨트롤러를 저전력으로 두되 링크는 살려 두는 방법. 복귀가 빠르다.
+ *   - 아예 PCI D3 로 내려 전원을 끊는 방법. 복귀가 느리다.
+ *
+ * 앞의 방법은 링크가 살아 있어야 성립하는데, ASPM 이 꺼져 있으면 링크가
+ * 계속 완전 동작 상태로 남아 전력을 먹는다. 그러면 컨트롤러만 재워 봐야
+ * 절전 효과가 없으므로, 차라리 D3 로 내리는 편이 낫다. 그 판단을 위해
+ * "이 링크에 ASPM 이 켜져 있는가" 를 이 함수로 묻는 것이다.
+ *
+ * 반대 방향의 영향도 크다. ASPM L1.2 는 복귀에 수백 마이크로초가 걸릴 수
+ * 있는데, 그것이 NVMe 명령 하나하나의 지연에 더해진다. 저지연이 중요한
+ * 워크로드에서 "pcie_aspm=off" 로 껐을 때 성능이 눈에 띄게 좋아지는 것이
+ * 그 때문이다. 반대로 노트북에서는 그 지연을 감수하고 배터리를 아낀다.
+ *
+ * (기존 주석은 "NVMe 드라이버가 pci_disable_link_state() 등을 직접 호출한다"
+ *  고 적었으나 drivers/nvme/ 에 그 호출은 0건이다. 또 NVMe 경로로
+ *  "pci_request_regions -> pci_enable_msix_range" 를 들었으나 두 함수 모두
+ *  호출이 0건이고, "pci_enable_device() 이후
+ *  pcie_aspm_powersave_config_link() 가 정책을 반영한다" 는 서술도
+ *  NVMe 쪽에 그 호출이 없다. 위 검증 결과로 대체했다.)
+ *
+ * === 주요 함수/구조체 요약 ===
+ * pcie_aspm_init_link_state()   : 링크를 발견했을 때 상태 구조를 만든다.
+ *                                 지원 상태와 지연 시간을 읽어 캐시한다.
+ * pcie_aspm_exit_link_state()   : 그 반대. 장치가 제거될 때.
+ * pcie_aspm_check_latency()     : 경로 전체의 누적 복귀 지연이 엔드포인트가
+ *                                 견딜 수 있는 범위인지 판정한다. 이 파일에서
+ *                                 가장 중요한 계산이다.
+ * pcie_config_aspm_link()       : 링크 양 끝의 LNKCTL 에 ASPM Control 을 쓴다.
+ *                                 상류부터 끄고 하류부터 켜는 순서 제약이 있다.
+ * pcie_aspm_configure_common_clock() : 양 끝이 같은 클럭을 쓰도록 설정하고
+ *                                 링크를 재훈련한다. L1 substates 의 전제다.
+ * pcie_aspm_enabled()           : 이 장치의 링크에 ASPM 이 켜져 있는가.
+ *                                 NVMe 가 부르는 유일한 함수다.
+ * pci_disable_link_state()      : 드라이버가 특정 상태를 금지할 수 있게 한다.
+ *                                 지연에 민감한 장치가 쓴다(NVMe 는 쓰지 않는다).
+ * struct pcie_link_state        : 링크 하나의 모든 상태. aspm_support(하드웨어가
+ *                                 지원), aspm_capable(지연 검사 통과),
+ *                                 aspm_enabled(현재 설정), aspm_default(초기값),
+ *                                 aspm_disable(금지됨) 다섯 비트필드가 핵심이다.
  */
 
 #include <linux/bitfield.h> /* NVMe: PCIe 레지스터 비트 필드 추출/조합 (ASPM/L1SS 파싱) */
-#include <linux/bits.h> /* NVMe: 비트 마스크 상수 정의 */
+#include <linux/bits.h>	/* [한국어] BIT() / GENMASK() 매크로. ASPM 상태를
+			 * 비트 조합으로 표현하므로 자주 쓴다 */
 #include <linux/build_bug.h> /* NVMe: 컴파일 타임 버그 검증 매크로 */
 #include <linux/kernel.h> /* NVMe: 커널 기본 타입/매크로 */
 #include <linux/limits.h> /* NVMe: 정수 한계 상수 */
@@ -271,7 +353,10 @@ void pci_restore_aspm_l1ss_state(struct pci_dev *pdev) /* NVMe: pci_restore_aspm
 #ifdef CONFIG_PCIEASPM /* NVMe: 전처리 조건: CONFIG_PCIEASPM 정의 시 컴파일 */
 
 #ifdef MODULE_PARAM_PREFIX /* NVMe: 전처리 조건: MODULE_PARAM_PREFIX 정의 시 컴파일 */
-#undef MODULE_PARAM_PREFIX /* NVMe: 기존 매크로 정의 제거 */
+/* [한국어] 이 파일의 모듈 파라미터를 "pcie_aspm." 접두사로 노출하기 위해
+ * 기본 접두사를 지우고 아래에서 다시 정의한다. 그래야 부팅 인자가
+ * "pcie_aspm=off" 같은 형태가 된다. */
+#undef MODULE_PARAM_PREFIX
 #endif /* NVMe: 전처리 조걸분 종료 */
 #define MODULE_PARAM_PREFIX "pcie_aspm." /* NVMe: 모듈 매개변수 접두사를 pcie_aspm.으로 지정 */
 
@@ -328,7 +413,14 @@ struct pcie_link_state { /* NVMe: 코드 라인 실행 */
 	u32 aspm_support:7;		/* Supported ASPM state */ /* NVMe: 링크 양단이 지원하는 ASPM L0s/L1/L1SS 비트; NVMe 장치 DEVCAP 기반 */
 	u32 aspm_enabled:7;		/* Enabled ASPM state */ /* NVMe: 현재 PCIe LNKCTL에 설정된 ASPM 상태; NVMe DMA/MSI-X 지연에 직접 영향 */
 	u32 aspm_capable:7;		/* Capable ASPM state with latency */ /* NVMe: latency 검사를 통과한 실제 사용 가능 ASPM 상태; NVMe acceptable latency 제약 반영 */
-	u32 aspm_default:7;		/* Default ASPM state by BIOS or override */ /* NVMe: BIOS/초기화 기본 ASPM 상태; NVMe 장치에 최초 적용되는 링크 전원 정책 */
+	/* [한국어] 초기 ASPM 상태. 펌웨어가 설정해 둔 값이거나, 부팅 인자/
+	 * sysfs 정책으로 덮어쓴 값이다.
+	 * 설정자: pcie_aspm_cap_init()(펌웨어 값 읽기), 정책 변경 경로.
+	 * 읽는 자: pcie_config_aspm_link() 가 정책 계산의 출발점으로 삼는다.
+	 * 값 범위: ASPM_STATE_* 비트 조합(7비트).
+	 * 동기화: aspm_lock 뮤텍스. */
+	u32 aspm_default:7;		/* Default ASPM state by BIOS or
+					   override */
 	u32 aspm_disable:7;		/* Disabled ASPM state */ /* NVMe: SW/HW적으로 금지된 ASPM 상태 비트; pci_disable_link_state()로 NVMe 성능 보장 시 설정 */
 
 	/* Clock PM state */
@@ -706,7 +798,10 @@ static void pcie_aspm_check_latency(struct pci_dev *endpoint) /* NVMe: pcie_aspm
 	encoding = FIELD_GET(PCI_EXP_DEVCAP_L1, endpoint->devcap); /* NVMe: 비트 필드 값 추출 */
 	acceptable_l1 = calc_l1_acceptable(encoding); /* NVMe: calc_l1_acceptable() 함수 호출 */
 
-	while (link) { /* NVMe: 반복문 실행 */
+	/* [한국어] 엔드포인트에서 루트까지 링크를 하나씩 거슬러 올라가며
+	 * 각 구간의 복귀 지연을 누적한다. 경로 전체의 합이 엔드포인트가
+	 * 견딜 수 있는 한계를 넘으면 그 ASPM 상태를 쓸 수 없다. */
+	while (link) {
 		struct pci_dev *dev = pci_function_0(link->pdev->subordinate); /* NVMe: multi-function 장치에서 function 0 획득 */
 
 		/* Read direction exit latencies */
@@ -1184,7 +1279,10 @@ static void pcie_config_aspm_link(struct pcie_link_state *link, u32 state) /* NV
 /* pcie_config_aspm_path: root까지의 경로에 대해 policy_to_aspm_state() 기반으로 ASPM을 설정한다. */
 static void pcie_config_aspm_path(struct pcie_link_state *link) /* NVMe: pcie_config_aspm_path() 함수 정의 */
 { /* NVMe: 블록/함수 본문 시작 */
-	while (link) { /* NVMe: 반복문 실행 */
+	/* [한국어] 이 링크에서 루트까지 올라가며 각 구간에 정책을 적용한다.
+	 * 경로 전체가 같은 정책이어야 절전이 실제로 이뤄진다 — 중간 한 구간만
+	 * 깨어 있으면 그 위로는 계속 트래픽이 흐르기 때문이다. */
+	while (link) {
 		pcie_config_aspm_link(link, policy_to_aspm_state(link)); /* NVMe: pcie_config_aspm_link() 함수 호출 */
 		link = link->parent; /* NVMe: 구조체 필드 값 갱신 */
 	} /* NVMe: 블록/함수 종료 */
@@ -1818,7 +1916,7 @@ static int pcie_aspm_set_policy(const char *val, /* NVMe: pcie_aspm_set_policy()
 static int pcie_aspm_get_policy(char *buffer, const struct kernel_param *kp) /* NVMe: pcie_aspm_get_policy() 함수 정의 */
 { /* NVMe: 블록/함수 본문 시작 */
 	int i, cnt = 0; /* NVMe: 지역/전역 변수 선언 */
-	for (i = 0; i < ARRAY_SIZE(policy_str); i++) /* NVMe: 반복문 실행 */
+	for (i = 0; i < ARRAY_SIZE(policy_str); i++)	/* [한국어] 정책 이름 표를 훑어 일치하는 것을 찾는다 */
 		if (i == aspm_policy) /* NVMe: 조건 검사 (참이면 아래 블록 실행) */
 			cnt += sprintf(buffer + cnt, "[%s] ", policy_str[i]); /* NVMe: 정책 문자열을 sysfs 버퍼에 기록 */
 		else /* NVMe: else 분기 */
@@ -1906,18 +2004,42 @@ static ssize_t aspm_attr_store_common(struct device *dev, /* NVMe: aspm_attr_sto
 	return len; /* NVMe: 값 반환 및 함수 종료 */
 } /* NVMe: 블록/함수 종료 */
 
-#define ASPM_ATTR(_f, _s) /* NVMe: ASPM_ATTR 매크로 정의 */ \
-static ssize_t _f##_show(struct device *dev, /* NVMe: _show() 함수 호출 */ \
-			 struct device_attribute *attr, char *buf) /* NVMe: 코드 라인 실행 */ \
-{ return aspm_attr_show_common(dev, attr, buf, PCIE_LINK_STATE_##_s); } /* NVMe: aspm_attr_show_common() 함수 호출 */ \
- /* NVMe: 코드 라인 실행 */ \
-static ssize_t _f##_store(struct device *dev, /* NVMe: _store() 함수 호출 */ \
-			  struct device_attribute *attr, /* NVMe: 코드 라인 실행 */ \
-			  const char *buf, size_t len) /* NVMe: 코드 라인 실행 */ \
-{ return aspm_attr_store_common(dev, attr, buf, len, PCIE_LINK_STATE_##_s); } /* NVMe: aspm_attr_store_common() 함수 호출 */
+/* [한국어] sysfs 의 ASPM 상태 속성 하나를 만드는 틀.
+ *
+ * @_f: 만들 함수와 속성의 이름 앞부분 (l0s_aspm, l1_aspm, ...)
+ * @_s: 대응하는 PCIE_LINK_STATE_* 상수의 뒷부분 (L0S, L1, L1_1, ...)
+ *
+ * ASPM 상태가 여섯 종류(L0s, L1, L1.1, L1.2, ASPM L1.1, ASPM L1.2)라
+ * 속성도 여섯 벌인데, 본문이 완전히 같고 상수 하나만 다르다.
+ * 손으로 여섯 번 쓰면 한 군데를 고칠 때 여섯 곳을 다 고쳐야 하므로
+ * 틀 하나로 찍어낸다.
+ *
+ * ##(토큰 붙이기) 연산자가 두 곳에서 쓰인다.
+ *   _f##_show / _f##_store  -> l0s_aspm_show, l0s_aspm_store 같은 함수 이름.
+ *     DEVICE_ATTR_RW 매크로가 <속성명>_show/_store 를 찾으므로 이름이
+ *     정확히 이 형태여야 한다.
+ *   PCIE_LINK_STATE_##_s    -> PCIE_LINK_STATE_L0S 같은 상수.
+ *     공통 함수에 "어느 상태를 다루는지" 를 알려 주는 인자다.
+ *
+ * 실제 동작은 aspm_attr_show_common() / aspm_attr_store_common() 이
+ * 전부 처리한다. 이 틀이 만드는 것은 상수 하나를 끼워 넣는 껍데기다.
+ *
+ * 각 물리 줄 끝의 백슬래시는 "다음 줄도 이 매크로의 일부" 라는 표시라
+ * 하나라도 빠지면 정의가 그 자리에서 끊긴다. */
+#define ASPM_ATTR(_f, _s) \
+static ssize_t _f##_show(struct device *dev, \
+			 struct device_attribute *attr, char *buf) \
+{ return aspm_attr_show_common(dev, attr, buf, PCIE_LINK_STATE_##_s); } \
+ \
+static ssize_t _f##_store(struct device *dev, \
+			  struct device_attribute *attr, \
+			  const char *buf, size_t len) \
+{ return aspm_attr_store_common(dev, attr, buf, len, PCIE_LINK_STATE_##_s); }
 
-ASPM_ATTR(l0s_aspm, L0S) /* NVMe: ASPM_ATTR() 함수 호출 */
-ASPM_ATTR(l1_aspm, L1) /* NVMe: ASPM_ATTR() 함수 호출 */
+/* [한국어] 여기서 틀을 실제 함수 쌍으로 펼친다. 각 줄이 _show 와 _store
+ * 두 함수를 만들며, 그것이 /sys/bus/pci/devices/.../link/<이름> 파일이 된다. */
+ASPM_ATTR(l0s_aspm, L0S)	/* [한국어] L0s — 한쪽 방향만 재우는 가장 얕은 상태 */
+ASPM_ATTR(l1_aspm, L1)		/* [한국어] L1 — 양방향을 재운다. 절전은 크고 복귀는 느리다 */
 ASPM_ATTR(l1_1_aspm, L1_1) /* NVMe: ASPM_ATTR() 함수 호출 */
 ASPM_ATTR(l1_2_aspm, L1_2) /* NVMe: ASPM_ATTR() 함수 호출 */
 ASPM_ATTR(l1_1_pcipm, L1_1_PCIPM) /* NVMe: ASPM_ATTR() 함수 호출 */

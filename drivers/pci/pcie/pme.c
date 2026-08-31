@@ -8,38 +8,92 @@
  */
 
 /*
- * ===================================================================
- * NVMe PCIe 호스트 드라이버 관점 파일 요약
- * -------------------------------------------------------------------
- * 본 파일(drivers/pci/pcie/pme.c)은 PCIe Native PME(Power Management
- * Event) 신호를 Root Port/Root Complex Event Collector 단에서 처리한다.
- * NVMe SSD 입장에서는 저전력 상태(D3hot/D3cold 등)에서 깨어나거나,
- * 런타임 전원 관리 이벤트를 OS에 알리는 핵심 경로이며, 다음과 같은
- * NVMe 동작에 직접 관여한다.
- *   - NVMe 장치가 D3cold에서 PME# 메시지를 발생시키면 Root Port가 이를
- *     수신하여 본 파일의 interrupt handler/worker를 통해 NVMe
- *     pdev->dev.dev_pm_ops의 .resume 콜백(nvme_resume/nvme_simple_resume)
- *     을 간접적으로 트리거한다.
- *   - NVMe suspend 경로(nvme_suspend)에서 pci_save_state() 후 NVMe
- *     전원 상태를 D3로 낮추면, 본 PME 서비스가 enable_irq_wake() 등으로
- *     wakeup 소스를 등록해 둔 상태여야 resume 시 PME#를 정상 수신한다.
- *   - PCIe link down 후 NVMe 장치가 AER/ERST 복구 없이 PME만으로
- *     살아나는 경우에도 pcie_pme_handle_request()가 Requester ID를
- *     따라 해당 NVMe pdev를 찾아 pm_request_resume()을 호출한다.
- *   - NVMe endpoint 뒤에 PCIe-PCI bridge가 있는 레거시 구성에서는
- *     pcie_pme_from_pci_bridge()가 bridge 뒤쪽 PCI 장치의 PME를
- *     in-band PCIe PME 메시지로 변환하여 처리한다.
- * 일반적인 NVMe 드라이버 호출/연결 경로:
- *   NVMe PME 발생 -> Root Port RTSTA.PME set
- *   -> pcie_pme_irq() -> schedule_work(pcie_pme_work_fn)
- *   -> pcie_pme_handle_request() -> pci_check_pme_status(nvme_pdev)
- *   -> pci_wakeup_event(nvme_pdev), pm_request_resume(&nvme_pdev->dev)
- *   -> nvme_resume() 또는 nvme_simple_resume() -> nvme_try_sched_reset()
- *      -> nvme_reset_work() -> controller 재초기화
- * 본 파일은 PCIe 포트 드라이버의 PME 서비스로 동작하며, NVMe 드라이버가
- * 직접 호출하지는 않지만 NVMe 장치의 runtime/system wakeup 복구를
- * 가능하게 하는 하부 인프라이다.
- * ===================================================================
+ * [한국어 설명] 잠든 장치가 깨워 달라고 보내는 신호를 받는 곳 (pme.c)
+ *
+ * === 파일의 역할 ===
+ * PME(Power Management Event)는 저전력 상태에 있는 장치가 "나를 깨워
+ * 달라" 고 보내는 신호다. 네트워크 카드가 Wake-on-LAN 패킷을 받았을 때,
+ * USB 컨트롤러에 장치가 꽂혔을 때, 그리고 NVMe 가 내부 사정으로 호스트의
+ * 주의를 끌어야 할 때 쓴다.
+ *
+ * "Native" PME 라는 이름이 붙은 이유가 있다. 옛 방식은 PME# 라는 물리적
+ * 신호선을 썼고 그것을 펌웨어(ACPI)가 받아 처리했다. PCIe 는 그것을
+ * 메시지(PME_Turn_Off / PME_TO_Ack 와 별개인 PM_PME 메시지)로 바꾸었고,
+ * Root Port 가 그것을 받아 인터럽트를 올린다. 커널이 그 인터럽트를 직접
+ * 다루는 것이 native PME 이며, 이 파일이 그 구현이다.
+ *
+ * 처리 절차의 핵심은 "누가 보냈는지 알아내기" 다.
+ *   1) Root Status 의 PME Status 비트가 서면 인터럽트가 온다.
+ *   2) 같은 레지스터의 PME Requester ID 필드에 보낸 장치의 ID 가 있다.
+ *   3) 그 ID 로 버스 트리를 뒤져 struct pci_dev 를 찾는다.
+ *   4) 찾았으면 pm_request_resume() 으로 그 장치를 깨운다.
+ *
+ * 3번이 항상 성공하지는 않는다. 장치가 이미 제거됐거나, 브리지 뒤에서
+ * ID 가 바뀌었을 수 있다. 그때는 그 아래 전부를 훑어 깨울 만한 것을 찾는
+ * 폴백이 있다(pcie_pme_from_pci_bridge / pcie_pme_handle_request).
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * 등록: portdrv 가 PME 서비스를 가진 포트에 이 드라이버를 바인딩
+ *         -> pcie_pme_probe() -> IRQ 등록, Root Control 의 PME 인터럽트 활성화
+ *
+ * 발생: 잠든 엔드포인트가 PM_PME 메시지를 상류로
+ *         -> Root Port 가 Root Status 에 기록하고 인터럽트
+ *         -> [이 파일] pcie_pme_irq()(하드 IRQ, 인터럽트를 끄고 워크 큐잉)
+ *            -> pcie_pme_work_fn()(워커)
+ *               -> pcie_pme_handle_request() -> 장치를 찾아
+ *                  -> pm_request_resume() -> 런타임 PM 이 그 장치의
+ *                     resume 콜백을 부른다
+ *
+ * 인터럽트를 즉시 끄고 워커로 넘기는 구조가 중요하다. PME 는 레벨 트리거처럼
+ * 동작해서 상태 비트를 지우기 전까지 계속 인터럽트가 오는데, 장치를 깨우는
+ * 일은 오래 걸리기 때문이다.
+ *
+ * 실행 컨텍스트: pcie_pme_irq() 는 하드 IRQ. 나머지는 워커 스레드.
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: pcie/portdrv.c(서비스 등록).
+ * 아래쪽: 커널 런타임 PM(pm_request_resume), search.c 의 장치 조회,
+ *   access.c 의 config 접근.
+ * 옆쪽: pci.c 의 전원 관리 — 어떤 장치를 wakeup 소스로 삼을지는 그쪽이
+ *   정하고, 이 파일은 신호가 왔을 때 전달만 한다.
+ * 공유 상태: struct pcie_pme_service_data — 워크 구조체, 스핀락, 그리고
+ *   noirq 구간 표시. 서비스 장치의 priv_data 에 매달린다.
+ *
+ * === NVMe 관점 ===
+ * NVMe 드라이버는 이 파일의 함수를 직접 부르지 않는다(전수 확인).
+ *
+ * NVMe 와의 관계는 절전 경로에 있다. nvme_suspend() 는 두 갈래 중 하나를
+ * 고르는데(pcie_aspm_enabled() 로 판단, aspm.c 주석 참고), PCI D3 로
+ * 내리는 쪽을 택하면 그 장치를 다시 깨우는 수단이 필요하다. 그것이 PME 다.
+ *
+ * 다만 NVMe 의 일반적인 사용에서는 호스트가 먼저 깨우지 장치가 스스로
+ * 깨워 달라고 하는 일이 드물다. 저장 장치는 요청을 받아 처리하는 쪽이지
+ * 이벤트를 만드는 쪽이 아니기 때문이다. 그래서 이 파일이 NVMe 때문에
+ * 동작하는 경우는 많지 않다.
+ *
+ * (기존 주석은 "PME 서비스가 NVMe 의 .resume 콜백(nvme_resume/
+ *  nvme_simple_resume)을 간접적으로 트리거한다" 고 적었는데, 정확히는
+ *  pm_request_resume() 이 런타임 PM 코어를 거쳐 부르는 것이고 이 파일이
+ *  직접 부르는 것은 아니다. 또 "NVMe suspend 경로에서 이 PME 서비스가
+ *  enable_irq_wake() 로 wakeup 소스를 등록해 둔다" 고 했으나, wakeup
+ *  소스 등록은 pci.c 의 pci_enable_wake() 와 ACPI 쪽이 담당한다.)
+ *
+ * === 주요 함수/구조체 요약 ===
+ * pcie_pme_probe()          : 포트에 PME 서비스를 붙인다. IRQ 를 등록하고
+ *                             Root Control 의 PME Interrupt Enable 을 켠다.
+ * pcie_pme_irq()            : 하드 IRQ. 인터럽트를 즉시 비활성화하고 워크를
+ *                             큐잉한다. 여기서 오래 머물면 안 된다.
+ * pcie_pme_work_fn()        : 워커. Root Status 를 읽어 요청을 처리하고,
+ *                             다 끝나면 인터럽트를 다시 켠다.
+ * pcie_pme_handle_request() : Requester ID 로 장치를 찾아 깨운다.
+ *                             못 찾으면 서브트리를 훑는 폴백을 쓴다.
+ * pcie_pme_from_pci_bridge(): 브리지 뒤에서 온 요청인지 판정한다.
+ * pcie_pme_check_wakeup()   : 이 버스 아래에 깨어나야 할 장치가 있는지 확인.
+ * pcie_pme_suspend() / pcie_pme_resume() : 시스템 절전 시 PME 인터럽트를
+ *                             끄고 켠다. 절전 자체를 PME 가 방해하면 안 되므로
+ *                             순서가 까다롭다.
+ * pcie_pme_disable_interrupt() : Root Control 의 PME 인터럽트를 끄고
+ *                             상태 비트를 지운다.
  */
 
 #define dev_fmt(fmt) "PME: " fmt /* NVMe: PME 로그 메시지 접두사 정의. */

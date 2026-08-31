@@ -7,49 +7,86 @@
  */
 
 /*
- * ===================================================================
- * NVMe PCIe 호스트 드라이버 관점 파일 요약
- * -------------------------------------------------------------------
- * 본 파일(drivers/pci/pcie/portdrv.c)은 PCIe Root Port(RP), Upstream
- * Port(USP), Downstream Port(DSP), Root Complex Event Collector(RCEC)
- * 등 PCIe 포트에서 동작하는 서비스(PME/AER/HP/DPC/BWCTRL)를 탐지하고
- * 등록하는 PCIe Port Bus Driver의 핵심이다.
+ * [한국어 설명] 포트 하나를 여러 서비스로 쪼개 각각 드라이버를 붙이는 버스 (portdrv.c)
  *
- * NVMe SSD 입장에서 이 포트 서비스들은 다음과 같이 직접 관련된다.
- *   - AER(Advanced Error Reporting): NVMe 메모리/TLP/CRC/ECRC 오류
- *     보고 경로. NVMe 엔드포인트에서 발생한 Uncorrectable/Correctable
- *     Error는 상위 Root Port의 AER 서비스가 수신, 처리 후 NVMe
- *     드라이버의 pci_error_handlers(.error_detected/.slot_reset)로
- *     연결될 수 있다.
- *   - DPC(Downstream Port Containment): NVMe 장치의 서프라이즈 제거,
- *     링크 다운, UR/CA 등으로 인한 시스템 손상을 포트 단에서 차단.
- *     특히 NVMe CMB/P2P DMA 사용 시 데이터 무결성 보호에 중요하다.
- *   - PME(Power Management Event): NVMe 장치가 D3cold 등 저전력 상태에서
- *     Resume 요청 시 Root Port가 PME 메시지를 전달. NVMe APST/PCIE ASPM
- *     런타임 전환과 연결된다.
- *   - BWCTRL(Bandwidth Change Notification): PCIe 링크 속도/폭 변경
- *     (Gen3->Gen4->Gen5, x4->x2 등) 시 알림. NVMe 대역폭 및 QoS에
- *     영향을 준다.
- *   - Hotplug: NVMe SSD 물리적 핫 추가/제거 시 Slot/Link 이벤트 처리.
+ * === 파일의 역할 ===
+ * PCIe 포트(Root Port, 스위치의 상/하류 포트, RC Event Collector)는 여러
+ * 기능을 동시에 갖는다 — 오류 보고(AER), 핫플러그(HP), 전원 이벤트(PME),
+ * 링크 격리(DPC), 대역폭 알림(BWCTRL). 이 기능들은 서로 독립적이고
+ * 담당하는 사람도 다르다.
  *
- * 일반적인 NVMe 드라이버와의 호출/영향 경로:
- *   nvme_probe() -> pci_enable_device(pdev) -> ...
- *   pcie_portdrv_probe() [이 파일]
- *     -> pcie_port_device_register()
- *        -> get_port_device_capability()    — RP/DSP 서비스 마스크 생성
- *        -> pcie_init_service_irqs()        — 서비스용 MSI/MSI-X/INTx 할당
- *           -> pcie_port_enable_irq_vec()
- *              -> pcie_message_numbers()    — PME/AER/DPC 벡터 번호 읽기
- *        -> pcie_device_init()              — 서비스별 pcie_device 생성
- *   이후 AER/DPC 서비스 드라이버가 로드되어 NVMe 장치 오류 발생 시
- *   포트 서비스가 먼저 감지하고, 필요 시 NVMe의 .err_handler 콜백을
- *   통해 복구(retry/reset)를 수행한다.
+ * 그래서 커널은 포트 하나에 드라이버 하나를 붙이는 대신, 기능마다 가상
+ * 장치(struct pcie_device)를 만들어 각각에 전용 드라이버를 바인딩한다.
+ * 이 파일이 그 가상 버스(pcie_port_bus_type)를 만들고 관리한다.
  *
- * 추가적으로 NVMe CMB/P2PDMA는 PCIe 주소 공간 상에서 host bridge를
- * 경유하거나 peer 장치 간 직접 버스 주소를 사용하므로, 포트의 AER/DPC
- * 동작과 맞물려 있고, MSI/MSI-X 벡터 할당 정책은 엔드포인트(NVMe)와
- * 포트 간 인터럽트 자원 분배에 영향을 준다.
- * ===================================================================
+ * 이렇게 나눈 이득이 분명하다. AER 드라이버는 핫플러그를 몰라도 되고,
+ * 각각 별도 모듈로 뺄 수 있으며, 커널 드라이버 모델의 probe/remove/PM
+ * 체계를 그대로 재사용한다. 대가는 한 겹의 간접성뿐이다.
+ *
+ * 인터럽트 배분도 이 파일이 한다. 포트가 MSI/MSI-X 를 지원하면 서비스마다
+ * 다른 벡터를 줄 수 있고, 아니면 하나를 공유한다. pcie_init_service_irqs()
+ * 가 그 배분을 정해 각 pcie_device 의 irq 필드에 채워 넣는다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * 바인딩: pci-driver.c 가 포트 장치에 pcie_portdriver 를 바인딩
+ *           -> [이 파일] pcie_portdrv_probe()
+ *              -> get_port_device_capability() 로 이 포트가 어떤 서비스를
+ *                 제공하는지 판정(_OSC 협상 결과와 capability 를 함께 본다)
+ *              -> pcie_init_service_irqs() 로 인터럽트를 배분
+ *              -> pcie_device_init() 으로 서비스마다 가상 장치를 만들어 등록
+ *                 -> 드라이버 코어가 pcie_port_bus_match() 로 짝을 찾아
+ *                    각 서비스 드라이버의 probe 를 부른다
+ *
+ * 전원/오류: PM 콜백과 err_handler 를 받아 각 서비스 드라이버에게 뿌린다.
+ *           서비스 드라이버는 자기가 포트 위에 얹혀 있다는 것을 신경 쓰지
+ *           않고 보통의 드라이버처럼 콜백만 구현하면 된다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. probe/remove 와 PM 콜백 경로다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: pci-driver.c(드라이버 모델), pci-acpi.c(_OSC 협상 결과).
+ * 아래쪽: 각 서비스 드라이버 — pcie/aer.c, pcie/pme.c, pcie/dpc.c,
+ *   pcie/bwctrl.c, hotplug/pciehp_core.c.
+ * 옆쪽: pcie/portdrv.h 가 서비스 비트 정의와 struct pcie_device /
+ *   pcie_port_service_driver 를 담는다.
+ * 공유 상태: 포트의 struct pci_dev, 그리고 서비스마다 하나씩 만들어지는
+ *   struct pcie_device(최대 PCIE_PORT_DEVICE_MAXSERVICES = 5개).
+ *
+ * === NVMe 관점 ===
+ * NVMe 드라이버는 이 파일의 함수를 직접 부르지 않는다(전수 확인).
+ * 하지만 NVMe SSD 가 꽂힌 슬롯의 상위 포트에서 이 드라이버가 동작하며,
+ * 그것이 NVMe 의 여러 동작을 뒷받침한다.
+ *
+ *   AER 서비스   - NVMe 의 PCIe 오류를 받아 복구 절차를 시작한다.
+ *                  결국 nvme_error_detected 등이 불린다.
+ *   DPC 서비스   - NVMe 를 예고 없이 뽑았을 때 링크를 격리한다.
+ *   HP 서비스    - U.2/EDSFF 백플레인의 핫스왑. 드라이브를 꽂으면
+ *                  pciehp 가 재스캔해 nvme_probe 가 불리고, 뽑으면
+ *                  nvme_remove 가 불린다.
+ *   PME 서비스   - D3 로 내려간 NVMe 가 깨어나야 할 때 그 신호를 받는다.
+ *   BWCTRL 서비스- 링크 속도가 떨어졌을 때 알림을 받는다.
+ *
+ * 이 드라이버가 붙지 못하면(예: 펌웨어가 소유권을 넘겨주지 않으면)
+ * 위 기능이 전부 동작하지 않는다. NVMe 는 여전히 I/O 를 하지만,
+ * 오류 복구도 핫플러그도 되지 않는 상태가 된다.
+ *
+ * (기존 주석은 DPC 가 "NVMe CMB/P2P DMA 사용 시 데이터 무결성 보호에
+ *  중요하다" 고 적었으나 dpc.c 코드에서 그 연결의 근거를 찾을 수 없어
+ *  삭제했다. DPC 는 링크 단위 격리이고 CMB 접근과는 별개다.)
+ *
+ * === 주요 함수/구조체 요약 ===
+ * pcie_portdrv_probe()        : 포트에 바인딩되어 서비스 가상 장치들을 만든다.
+ * pcie_port_device_register() : 실제로 서비스를 조사하고 등록하는 본체.
+ * get_port_device_capability(): 이 포트가 제공하는 서비스 비트를 모은다.
+ *                               capability 존재 여부와 _OSC 소유권을 함께 본다.
+ * pcie_init_service_irqs()    : MSI/MSI-X 벡터를 서비스별로 배분한다.
+ * pcie_device_init()          : 서비스 하나에 대한 struct pcie_device 를 만들어
+ *                               드라이버 모델에 등록한다.
+ * pcie_port_service_register() / _unregister() : 서비스 드라이버가 자신을
+ *                               이 버스에 등록한다.
+ * pcie_port_device_remove()   : 서비스 장치들을 제거한다.
+ * pcie_portdrv_err_handler    : 오류 복구 콜백. 각 서비스에게 전달한다.
+ * pcie_portdrv_pm_ops         : 전원 관리 콜백. 마찬가지로 전달한다.
  */
 
 #include <linux/bitfield.h> /* NVMe: 비트 필드 매크로 사용(PCIe 캐퍼빌리티 레지스터 파싱) */
@@ -144,7 +181,7 @@ static int pcie_message_numbers(struct pci_dev *dev, int mask, /* NVMe: 포트 �
 			nvec = max(nvec, *aer + 1); /* NVMe: PME 벡터 수와 AER 벡터 수 중 큰 값을 필요 벡터 수로 갱신. */
 		} /* NVMe: AER IRQ 번호 읽기 블록 끝. */
 	} /* NVMe: AER 서비스 처리 블록 끝. */
-#endif /* NVMe: CONFIG_PCIEAER 조결부 컴파일 끝. */
+#endif /* NVMe: CONFIG_PCIEAER 조건부 컴파일 끝. */
 
 	if (mask & PCIE_PORT_SERVICE_DPC) { /* NVMe: DPC 서비스가 활성화된 경우(NVMe 링크 다운/서프라이즈 제거 보호). */
 		pos = pci_find_ext_capability(dev, PCI_EXT_CAP_ID_DPC); /* NVMe: DPC 확장 캐퍼빌리티 오프셋 탐색. */
@@ -321,7 +358,7 @@ static int get_port_device_capability(struct pci_dev *dev) /* NVMe: PCIe 포트�
 	    dev->aer_cap && pci_aer_available() && /* NVMe: AER 캐퍼빌리티 존재 및 플랫폼 AER 사용 가능. */
 	    (pcie_ports_native || host->native_aer)) /* NVMe: native AER 사용 정책 확인. */
 		services |= PCIE_PORT_SERVICE_AER; /* NVMe: NVMe 장치 오류(UE/CE) 보고 경로인 AER 서비스 활성화. */
-#endif /* NVMe: CONFIG_PCIEAER 조결부 컴파일 끝. */
+#endif /* NVMe: CONFIG_PCIEAER 조건부 컴파일 끝. */
 
 	/* Root Ports and Root Complex Event Collectors may generate PMEs */
 	if ((pci_pcie_type(dev) == PCI_EXP_TYPE_ROOT_PORT || /* NVMe: Root Port에서 PME 수신. */
@@ -572,7 +609,7 @@ static int pcie_port_device_runtime_resume(struct device *dev) /* NVMe: 포트 �
 	size_t off = offsetof(struct pcie_port_service_driver, runtime_resume); /* NVMe: runtime_resume 멤버 오프셋. */
 	return device_for_each_child(dev, &off, pcie_port_device_iter); /* NVMe: 하위 서비스의 runtime_resume 콜백 순회 호출. */
 } /* NVMe: pcie_port_device_runtime_resume 함수 끝. */
-#endif /* PM */ /* NVMe: CONFIG_PM 조결부 컴파일 끝. */
+#endif /* PM */ /* NVMe: CONFIG_PM 조건부 컴파일 끝. */
 
 /*
  * remove_iter:
@@ -864,12 +901,17 @@ static const struct dev_pm_ops pcie_portdrv_pm_ops = { /* NVMe: PCIe 포트 드�
 	.runtime_idle	= pcie_port_runtime_idle, /* NVMe: 런타임 idle 판단. */
 }; /* NVMe: pcie_portdrv_pm_ops 구조체 정의 끝. */
 
-#define PCIE_PORTDRV_PM_OPS	(&pcie_portdrv_pm_ops) /* NVMe: PM ops 매크로 정의. */
+/* [한국어] 아래 struct pci_driver 의 .driver.pm 자리에 넣을 값.
+ * CONFIG_PM 이 켜져 있으면 위에서 정의한 콜백 묶음의 주소이고,
+ * 꺼져 있으면 아래 #else 에서 NULL 로 정의된다.
+ * 이렇게 매크로로 감싸 두면 드라이버 구조체 초기화 부분을 #ifdef 로
+ * 두 번 쓰지 않아도 된다. */
+#define PCIE_PORTDRV_PM_OPS	(&pcie_portdrv_pm_ops)
 
 #else /* !PM */ /* NVMe: PM 미지원 시 대체 매크로 정의 분기. */
 
 #define PCIE_PORTDRV_PM_OPS	NULL /* NVMe: PM 미지원 시 NULL. */
-#endif /* !PM */ /* NVMe: CONFIG_PM 조결부 컴파일 끝. */
+#endif /* !PM */ /* NVMe: CONFIG_PM 조건부 컴파일 끝. */
 
 /*
  * pcie_portdrv_probe - Probe PCI-Express port devices
