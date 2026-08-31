@@ -13005,8 +13005,21 @@ void __weak pci_resource_to_user(const struct pci_dev *dev, int bar,
 	*end = rsrc->end;
 }
 
-static char *resource_alignment_param; /* NVMe: 포인터 변수를 선언한다. */
-static DEFINE_SPINLOCK(resource_alignment_lock); /* NVMe: DEFINE_SPINLOCK 매크로를 호출한다. */
+/* [한국어] "pci=resource_alignment=..." 부팅 인자 또는 sysfs 로 들어온 문자열.
+ * 설정자: pci_setup() 이 부팅 인자를 파싱할 때, 그리고 sysfs 의
+ *   resource_alignment 속성 쓰기(resource_alignment_store).
+ * 읽는 자: pci_specified_resource_alignment().
+ * 값 범위: NULL 또는 "12@0000:01:00.0" 형식의 문자열. 앞의 숫자가 정렬
+ *   차수(2^n), @ 뒤가 장치 지정자다. 여러 개를 세미콜론으로 이을 수 있다.
+ * 동기화: 아래 spinlock 이 보호한다. sysfs 로 런타임에 바뀔 수 있어서
+ *   읽는 쪽과 쓰는 쪽이 경쟁하기 때문이다. */
+static char *resource_alignment_param;
+/* [한국어] 위 문자열 포인터를 보호하는 스핀락.
+ * sysfs 쓰기가 옛 문자열을 kfree 하고 새것을 대입하는 사이에,
+ * 다른 CPU 가 그 포인터를 따라가면 해제된 메모리를 읽는다.
+ * 뮤텍스가 아니라 스핀락인 것은 임계 구역이 문자열 파싱뿐이라 짧고,
+ * 그 안에서 잠들 일이 없기 때문이다. */
+static DEFINE_SPINLOCK(resource_alignment_lock);
 
 /**
  * pci_specified_resource_alignment - get resource alignment specified by user.
@@ -13016,47 +13029,100 @@ static DEFINE_SPINLOCK(resource_alignment_lock); /* NVMe: DEFINE_SPINLOCK 매크
  * RETURNS: Resource alignment if it is specified.
  *          Zero if it is not specified.
  */
-static resource_size_t pci_specified_resource_alignment(struct pci_dev *dev, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-							bool *resize) /* NVMe: bool 타입 변수를 선언한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	int align_order, count; /* NVMe: int 타입 변수를 선언한다. */
-	resource_size_t align = pcibios_default_alignment(); /* NVMe: 변수에 값을 할당한다. */
-	const char *p; /* NVMe: 포인터 변수를 선언한다. */
-	int ret; /* NVMe: int 타입 변수를 선언한다. */
+/*
+ * [한국어]
+ * pci_specified_resource_alignment - 사용자가 이 장치에 지정한 BAR 정렬을 찾는다
+ *
+ * @dev:    조회할 장치
+ * @resize: 사용자 지정이 발견되면 true 로 세워 돌려준다. 즉 "크기를 키워서라도
+ *          정렬을 맞추라" 는 신호다.
+ * @return: 바이트 단위 정렬값. 지정이 없으면 아키텍처 기본값(대개 0).
+ *
+ * "pci=resource_alignment=12@0000:01:00.0" 같은 부팅 인자를 해석한다.
+ * 이 기능이 왜 필요한가 — VFIO 로 장치를 게스트에 넘길 때, BAR 가 페이지
+ * 경계에 맞지 않으면 한 페이지에 두 장치의 레지스터가 섞여 격리가 깨진다.
+ * 그런 장치를 강제로 페이지 정렬시켜 통과시키는 것이 이 옵션의 목적이다.
+ *
+ * 문자열 형식: "<차수>@<장치지정자>" 를 세미콜론으로 이은 것.
+ *   차수는 2의 지수다 — 12 면 2^12 = 4096바이트(x86 의 페이지 크기).
+ *   @ 앞의 숫자를 생략하면 PAGE_SHIFT 가 기본값이 된다.
+ *   장치 지정자는 "0000:01:00.0" 또는 "pci:8086:1234" 형식이며,
+ *   그 해석은 pci_dev_str_match() 가 담당한다.
+ *
+ * 파싱 실패를 다루는 방식이 관대하다. 차수가 63 을 넘으면(1ULL 시프트가
+ * 정의되지 않는 범위) 오류를 찍되 PAGE_SHIFT 로 대체하고 계속 진행한다.
+ * 부팅 인자 하나 잘못 썼다고 부팅을 막을 이유가 없기 때문이다.
+ *
+ * PCI_PROBE_ONLY 플래그가 있으면 아예 무시한다. 그 모드는 "펌웨어가 정한
+ * 자원 배치를 그대로 쓰고 커널은 재배치하지 않는다" 는 뜻이라, 정렬을
+ * 바꾸겠다는 요청 자체가 성립하지 않는다.
+ *
+ * 실행 컨텍스트: 스핀락을 쥔 채 문자열을 파싱한다. 잠들 수 없다.
+ * 호출자: pci_reassigndev_resource_alignment().
+ */
+static resource_size_t pci_specified_resource_alignment(struct pci_dev *dev,
+							bool *resize)
+{
+	/* [한국어] align_order = 파싱한 2의 지수, count = sscanf 가 소비한 문자 수 */
+	int align_order, count;
+	/* [한국어] 기본값은 아키텍처가 요구하는 정렬. 사용자 지정이 없으면 이 값이 그대로 나간다. */
+	resource_size_t align = pcibios_default_alignment();
+	const char *p;	/* [한국어] 파싱 커서 */
+	int ret;	/* [한국어] pci_dev_str_match 의 결과 */
 
-	spin_lock(&resource_alignment_lock); /* NVMe: spinlock 을 잠근다. */
-	p = resource_alignment_param; /* NVMe: 변수에 값을 할당한다. */
-	if (!p || !*p) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		goto out; /* NVMe: 지정한 레이블로 제어를 이동한다. */
-	if (pci_has_flag(PCI_PROBE_ONLY)) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		align = 0; /* NVMe: 변수에 값을 할당한다. */
-		pr_info_once("PCI: Ignoring requested alignments (PCI_PROBE_ONLY)\n"); /* NVMe: pr_info_once 함수를 호출한다. */
-		goto out; /* NVMe: 지정한 레이블로 제어를 이동한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+	/* [한국어] resource_alignment_param 포인터를 읽는 동안 sysfs 쓰기가
+	 * 그것을 해제하지 못하게 막는다. 문자열 전체를 다 쓸 때까지 쥐고 있어야 한다. */
+	spin_lock(&resource_alignment_lock);
+	p = resource_alignment_param;
+	/* [한국어] NULL 이거나 빈 문자열이면 지정이 없다. 기본값으로 나간다. */
+	if (!p || !*p)
+		goto out;
+	/* [한국어] 펌웨어 배치를 그대로 쓰는 모드에서는 재정렬이 성립하지 않는다.
+	 * 0 을 돌려 "정렬 요구 없음" 으로 만들고, 왜 무시했는지 한 번만 알린다. */
+	if (pci_has_flag(PCI_PROBE_ONLY)) {
+		align = 0;
+		pr_info_once("PCI: Ignoring requested alignments (PCI_PROBE_ONLY)\n");
+		goto out;
+	}
 
-	while (*p) { /* NVMe: 조건이 참인 동안 반복한다. */
-		count = 0; /* NVMe: 변수에 값을 할당한다. */
-		if (sscanf(p, "%d%n", &align_order, &count) == 1 && /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		    p[count] == '@') { /* NVMe: 표현식을 평가한다. */
-			p += count + 1; /* NVMe: 변수에 값을 할당한다. */
-			if (align_order > 63) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-				pr_err("PCI: Invalid requested alignment (order %d)\n", /* NVMe: 에러 메시지를 출력한다. */
-				       align_order); /* NVMe: 표현식을 평가한다. */
-				align_order = PAGE_SHIFT; /* NVMe: 변수에 값을 할당한다. */
-			} /* NVMe: 코드 블록을 종료한다. */
-		} else { /* NVMe: 표현식을 평가한다. */
-			align_order = PAGE_SHIFT; /* NVMe: 변수에 값을 할당한다. */
-		} /* NVMe: 코드 블록을 종료한다. */
+	/* [한국어] 세미콜론으로 이어진 항목들을 앞에서부터 훑는다. */
+	while (*p) {
+		count = 0;
+		/* [한국어] "<숫자>@" 형식인지 본다. %n 은 여기까지 읽은 문자 수를
+		 * count 에 담는 지시자로, 그 다음 글자가 '@' 인지 확인하는 데 쓴다.
+		 * 두 조건을 && 로 묶어야 "12abc" 같은 것이 통과하지 않는다. */
+		if (sscanf(p, "%d%n", &align_order, &count) == 1 &&
+		    p[count] == '@') {
+			p += count + 1;	/* [한국어] 숫자와 '@' 를 건너뛴다 */
+			/* [한국어] 1ULL << 64 이상은 정의되지 않은 동작이다.
+			 * 오류를 알리되 부팅을 막지 않고 페이지 크기로 대체한다. */
+			if (align_order > 63) {
+				pr_err("PCI: Invalid requested alignment (order %d)\n",
+				       align_order);
+				align_order = PAGE_SHIFT;
+			}
+		} else {
+			/* [한국어] 차수를 생략한 형식("0000:01:00.0" 만 쓴 경우).
+			 * 기본값은 페이지 크기다 — VFIO 용도가 대부분이라 그것이 자연스럽다. */
+			align_order = PAGE_SHIFT;
+		}
 
-		ret = pci_dev_str_match(dev, p, &p); /* NVMe: 변수에 값을 할당한다. */
-		if (ret == 1) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
+		/* [한국어] 남은 문자열이 이 장치를 가리키는지 확인하고, 커서를
+		 * 다음 항목으로 옮긴다(p 를 갱신해 준다).
+		 * 반환: 1 = 일치, 0 = 불일치, 음수 = 형식 오류. */
+		ret = pci_dev_str_match(dev, p, &p);
+		if (ret == 1) {
+			/* [한국어] 이 장치에 대한 지정을 찾았다. 크기 확장을 허용하고
+			 * 차수를 실제 바이트 수로 바꾼다. 1ULL 인 것이 중요하다 —
+			 * 1 << 32 는 32비트에서 넘치지만 1ULL << 32 는 안전하다. */
 			*resize = true;
-			align = 1ULL << align_order; /* NVMe: 변수에 값을 할당한다. */
-			break; /* NVMe: 현재 반복문을 빠져나간다. */
-		} else if (ret < 0) { /* NVMe: if 함수를 정의한다. */
-			pr_err("PCI: Can't parse resource_alignment parameter: %s\n", /* NVMe: 에러 메시지를 출력한다. */
-			       p); /* NVMe: 표현식을 평가한다. */
-			break; /* NVMe: 현재 반복문을 빠져나간다. */
+			align = 1ULL << align_order;
+			break;
+		} else if (ret < 0) {
+			/* [한국어] 형식이 깨졌다. 뒤쪽도 신뢰할 수 없으므로 중단한다. */
+			pr_err("PCI: Can't parse resource_alignment parameter: %s\n",
+			       p);
+			break;
 		} /* NVMe: 코드 블록을 종료한다. */
 
 		if (*p != ';' && *p != ',') { /* NVMe: 조건식을 평가해 분기를 결정한다. */
@@ -13070,25 +13136,67 @@ out: /* NVMe: 레이블을 정의한다. */
 	return align; /* NVMe: 연산 결과를 반환한다. */
 } /* NVMe: 코드 블록을 종료한다. */
 
-static void pci_request_resource_alignment(struct pci_dev *dev, int bar, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-					   resource_size_t align, bool resize) /* NVMe: resource_size_t 타입 변수를 선언한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	struct resource *r = &dev->resource[bar]; /* NVMe: 데이터 타입 변수를 선언한다. */
-	const char *r_name = pci_resource_name(dev, bar); /* NVMe: 변수에 값을 할당한다. */
-	resource_size_t size; /* NVMe: resource_size_t 타입 변수를 선언한다. */
+/*
+ * [한국어]
+ * pci_request_resource_alignment - BAR 하나가 원하는 정렬을 갖도록 자원을 손본다
+ *
+ * @dev:    대상 장치
+ * @bar:    자원 번호
+ * @align:  원하는 정렬(바이트)
+ * @resize: true 면 크기를 키우는 방법, false 면 시작 주소를 지정하는 방법.
+ * @return: 없음.
+ *
+ * 아직 주소를 배정하지 않은 상태에서 struct resource 를 고쳐, 나중에
+ * setup-bus.c 가 자리를 정할 때 원하는 정렬로 배치되게 만든다.
+ * 실제 배치는 이 함수가 하지 않는다 — 요청만 기록해 두는 것이다.
+ *
+ * 아래 긴 영어 주석이 두 방법의 장단점을 설명한다. 요약하면:
+ *   방법 1(크기 확장) - BAR 는 자기 크기만큼 정렬되므로, 크기를 정렬값까지
+ *     키우면 자동으로 그 정렬을 얻는다. 그 구간을 통째로 차지하므로 다른
+ *     BAR 가 같은 페이지에 들어오지 못한다. 단점은 자원 크기가 실제
+ *     하드웨어 BAR 보다 커져서, 크기를 기준으로 계산하는 드라이버가
+ *     깨질 수 있다는 것이다.
+ *   방법 2(시작 주소 지정) - 크기는 그대로 두고 IORESOURCE_STARTALIGN 으로
+ *     정렬만 요구한다. 그 자체로는 다른 BAR 가 끼어드는 것을 막지 못하지만,
+ *     시스템의 모든 자원을 같은 방식으로 정렬하면 결과적으로 아무도 겹치지
+ *     않는다.
+ *
+ * 그래서 선택 기준이 resize 다. 사용자가 특정 장치만 지정했다면(부팅 인자에
+ * 장치 지정자가 있었다면) 그 장치만 확실히 격리해야 하므로 방법 1 을 쓰고,
+ * 아키텍처 기본값으로 전부 정렬하는 경우라면 방법 2 로 충분하다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. 열거 중에 불린다.
+ * 호출자: pci_reassigndev_resource_alignment().
+ */
+static void pci_request_resource_alignment(struct pci_dev *dev, int bar,
+					   resource_size_t align, bool resize)
+{
+	struct resource *r = &dev->resource[bar];	/* [한국어] 손볼 자원 */
+	/* [한국어] 로그에 쓸 자원 이름("BAR 0", "ROM" 등). */
+	const char *r_name = pci_resource_name(dev, bar);
+	resource_size_t size;	/* [한국어] 현재 자원 크기 */
 
-	if (!(r->flags & IORESOURCE_MEM)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return; /* NVMe: 함수 실행을 종료한다. */
+	/* [한국어] 메모리 자원만 대상이다. I/O 포트 공간은 정렬 개념이 다르고
+	 * IOMMU 격리와도 무관하다. 빈 자원(flags==0)도 여기서 걸러진다. */
+	if (!(r->flags & IORESOURCE_MEM))
+		return;
 
-	if (r->flags & IORESOURCE_PCI_FIXED) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pci_info(dev, "%s %pR: ignoring requested alignment %#llx\n", /* NVMe: PCI 장치에 대한 정보 로그를 출력한다. */
-			 r_name, r, (unsigned long long)align); /* NVMe: 표현식을 평가한다. */
-		return; /* NVMe: 함수 실행을 종료한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+	/* [한국어] IORESOURCE_PCI_FIXED 는 "이 자원은 옮길 수 없다" 는 표시다.
+	 * 펌웨어가 고정했거나 quirk 가 못박은 자원이라 재배치 자체가 불가능하다.
+	 * 조용히 넘어가지 않고 로그를 남기는 것은, 사용자가 부팅 인자로
+	 * 요청했는데 왜 안 먹히는지 알 수 있게 하기 위해서다. */
+	if (r->flags & IORESOURCE_PCI_FIXED) {
+		pci_info(dev, "%s %pR: ignoring requested alignment %#llx\n",
+			 r_name, r, (unsigned long long)align);
+		return;
+	}
 
-	size = resource_size(r); /* NVMe: 변수에 값을 할당한다. */
-	if (size >= align) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return; /* NVMe: 함수 실행을 종료한다. */
+	size = resource_size(r);
+	/* [한국어] 이미 요청보다 크면 할 일이 없다. BAR 는 자기 크기만큼
+	 * 정렬되므로, 크기가 align 이상이면 정렬도 자동으로 그 이상이다.
+	 * (BAR 크기는 항상 2의 거듭제곱이라 이 논리가 성립한다.) */
+	if (size >= align)
+		return;
 
 	/*
 	 * Increase the alignment of the resource.  There are two ways we
@@ -13118,19 +13226,38 @@ static void pci_request_resource_alignment(struct pci_dev *dev, int bar, /* NVMe
 	 * devices and we use the second.
 	 */
 
-	pci_info(dev, "%s %pR: requesting alignment to %#llx\n", /* NVMe: PCI 장치에 대한 정보 로그를 출력한다. */
-		 r_name, r, (unsigned long long)align); /* NVMe: 표현식을 평가한다. */
+	/* [한국어] 무엇을 왜 바꾸는지 남긴다. 자원 크기가 하드웨어 BAR 와
+	 * 달라질 수 있으므로, 나중에 이상해 보일 때 이 줄이 설명이 된다. */
+	pci_info(dev, "%s %pR: requesting alignment to %#llx\n",
+		 r_name, r, (unsigned long long)align);
 
-	if (resize) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		r->start = 0; /* NVMe: 변수에 값을 할당한다. */
-		r->end = align - 1; /* NVMe: 변수에 값을 할당한다. */
-	} else { /* NVMe: 표현식을 평가한다. */
-		r->flags &= ~IORESOURCE_SIZEALIGN; /* NVMe: 변수에 값을 할당한다. */
-		r->flags |= IORESOURCE_STARTALIGN; /* NVMe: 변수에 값을 할당한다. */
-		resource_set_range(r, align, size); /* NVMe: resource_set_range 함수를 호출한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
-	r->flags |= IORESOURCE_UNSET; /* NVMe: 변수에 값을 할당한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	if (resize) {
+		/* [한국어] 방법 1 — 크기를 정렬값까지 키운다.
+		 * start=0, end=align-1 로 두면 크기가 정확히 align 이 된다.
+		 * start 를 0 으로 만드는 것은 "아직 주소 미정" 의 관용적 표현이고,
+		 * 아래 IORESOURCE_UNSET 과 함께 그 뜻이 확정된다.
+		 * BAR 가 자기 크기만큼 정렬되는 성질 덕분에, 이 크기로 배치하면
+		 * 자동으로 align 경계에 놓이고 그 구간을 독점한다. */
+		r->start = 0;
+		r->end = align - 1;
+	} else {
+		/* [한국어] 방법 2 — 크기는 유지하고 정렬만 요구한다.
+		 * SIZEALIGN("크기만큼 정렬")을 끄고 STARTALIGN("start 필드에
+		 * 적힌 값만큼 정렬")로 바꾼다. 두 플래그는 배타적이라 반드시
+		 * 하나를 끄고 다른 하나를 켜야 한다. */
+		r->flags &= ~IORESOURCE_SIZEALIGN;
+		r->flags |= IORESOURCE_STARTALIGN;
+		/* [한국어] STARTALIGN 모드에서는 start 필드가 주소가 아니라
+		 * "요구 정렬" 을 담는다. 그래서 align 을 start 자리에 넣는다.
+		 * 크기는 원래 값을 그대로 유지한다. */
+		resource_set_range(r, align, size);
+	}
+	/* [한국어] "아직 실제 주소가 배정되지 않았다" 는 표시.
+	 * 두 방법 모두 자원의 내용을 요청으로 바꿔 놓았으므로, 이 플래그가
+	 * 있어야 setup-bus.c 가 이것을 배치 대상으로 인식한다.
+	 * 이 줄이 없으면 위에서 넣은 값이 실제 주소로 오해된다. */
+	r->flags |= IORESOURCE_UNSET;
+}
 
 /*
  * This function disables memory decoding and releases memory resources
@@ -13140,16 +13267,46 @@ static void pci_request_resource_alignment(struct pci_dev *dev, int bar, /* NVMe
  * to the device.
  */
 /*
- * pci_reassigndev_resource_alignment:
- *   장치 리소스의 정렬을 재할당한다. NVMe BAR 재배치 시 정렬 요구사항을 조정한다.
+ * [한국어]
+ * pci_reassigndev_resource_alignment - 이 장치의 BAR 들을 재배치 대상으로 표시한다
+ *
+ * @dev: 대상 장치
+ * @return: 없음.
+ *
+ * "pci=resource_alignment=" 로 지정된 장치의 메모리 자원을 모두 놓아 주고,
+ * 원하는 정렬을 요구 사항으로 기록해 둔다. 실제 재배치는 나중에
+ * setup-bus.c 가 한다.
+ *
+ * 위 원문 주석이 흐름을 요약한다 — 메모리 디코딩을 끄고, 자원을 놓고,
+ * 크기를 정렬값까지 올림한 뒤, 커널이 나중에 정렬된 주소를 다시 배정한다.
+ *
+ * 메모리 디코딩을 먼저 끄는 것이 순서상 중요하다. 자원을 놓아 준 뒤에도
+ * 하드웨어 BAR 에는 옛 주소가 남아 있는데, 디코딩이 켜져 있으면 그 주소로
+ * 가는 접근을 이 장치가 계속 받아들인다. 그 구간이 곧 다른 장치에게
+ * 배정되면 두 장치가 같은 주소에 응답하는 충돌이 생긴다.
+ *
+ * 세 가지 예외를 걸러 낸다.
+ *   1) VF — SR-IOV 가상 함수의 BAR 는 스펙상 읽기 전용 0 이고, 실제 주소는
+ *      PF 의 SR-IOV capability 안 VF BAR 로 정해진다. 여기서 손댈 수 없다.
+ *   2) 호스트 브리지 — 자원을 놓아 주면 시스템 전체의 주소 공간이 사라진다.
+ *   3) 정렬 요구가 없는 장치(align == 0).
+ *
+ * 브리지라면 윈도우 자원까지 함께 놓아 준다. 하위 장치의 BAR 가 커지거나
+ * 위치가 바뀌면 그것을 감싸는 브리지 윈도우도 다시 계산되어야 하기 때문이다.
+ * 윈도우를 그대로 두면 새 주소가 그 창 밖으로 나가 접근이 닿지 않는다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. 열거 직후에 불린다.
+ * 호출자: probe.c 의 pci_device_add() 경로.
  */
-void pci_reassigndev_resource_alignment(struct pci_dev *dev) /* NVMe: pci_reassigndev_resource_alignment 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	int i; /* NVMe: int 타입 변수를 선언한다. */
-	struct resource *r; /* NVMe: 데이터 타입 변수를 선언한다. */
-	resource_size_t align; /* NVMe: resource_size_t 타입 변수를 선언한다. */
-	u16 command; /* NVMe: u16 타입 변수를 선언한다. */
-	bool resize = false; /* NVMe: bool 타입 변수를 선언한다. */
+void pci_reassigndev_resource_alignment(struct pci_dev *dev)
+{
+	int i;			/* [한국어] 자원 인덱스 */
+	struct resource *r;	/* [한국어] 브리지 윈도우를 가리킬 포인터 */
+	resource_size_t align;	/* [한국어] 요구 정렬. 0 이면 요구 없음 */
+	u16 command;		/* [한국어] Command 레지스터 값 */
+	/* [한국어] pci_specified_resource_alignment 가 채워 줄 값.
+	 * true 면 "크기를 키워서라도 정렬하라"(방법 1), false 면 방법 2. */
+	bool resize = false;
 
 	/*
 	 * VF BARs are read-only zero according to SR-IOV spec r1.1, sec
@@ -13157,104 +13314,210 @@ void pci_reassigndev_resource_alignment(struct pci_dev *dev) /* NVMe: pci_reassi
 	 * described by the VF BARx register in the PF's SR-IOV capability.
 	 * We can't influence their alignment here.
 	 */
-	if (dev->is_virtfn) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return; /* NVMe: 함수 실행을 종료한다. */
+	/* [한국어] VF 는 자기 BAR 를 갖지 않는다. 주소가 PF 의 SR-IOV
+	 * capability 로 결정되므로 여기서 바꿀 수단이 없다. */
+	if (dev->is_virtfn)
+		return;
 
 	/* check if specified PCI is target device to reassign */
-	align = pci_specified_resource_alignment(dev, &resize); /* NVMe: 변수에 값을 할당한다. */
-	if (!align) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return; /* NVMe: 함수 실행을 종료한다. */
+	/* [한국어] 사용자가 이 장치를 지정했는지 확인한다. 0 이면 지정이 없거나
+	 * 아키텍처 기본 요구도 없다는 뜻이라 아무것도 하지 않는다. */
+	align = pci_specified_resource_alignment(dev, &resize);
+	if (!align)
+		return;
 
-	if (dev->hdr_type == PCI_HEADER_TYPE_NORMAL && /* NVMe: 조건식을 평가해 분기를 결정한다. */
-	    (dev->class >> 8) == PCI_CLASS_BRIDGE_HOST) { /* NVMe: 비트 연산을 수행한다. */
-		pci_warn(dev, "Can't reassign resources to host bridge\n"); /* NVMe: PCI 장치에 대한 경고 로그를 출력한다. */
-		return; /* NVMe: 함수 실행을 종료한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+	/* [한국어] 호스트 브리지는 시스템 전체 주소 공간의 소유자다. 그 자원을
+	 * 놓아 주면 그 아래 모든 장치가 갈 곳을 잃는다. 사용자가 실수로
+	 * 지정했을 가능성이 높으므로 경고를 남긴다.
+	 * hdr_type 이 NORMAL 인데 class 가 HOST 브리지인 특이한 조합을 보는
+	 * 이유는, 호스트 브리지가 브리지 헤더가 아니라 일반 헤더를 쓰기 때문이다. */
+	if (dev->hdr_type == PCI_HEADER_TYPE_NORMAL &&
+	    (dev->class >> 8) == PCI_CLASS_BRIDGE_HOST) {
+		pci_warn(dev, "Can't reassign resources to host bridge\n");
+		return;
+	}
 
-	pci_read_config_word(dev, PCI_COMMAND, &command); /* NVMe: PCI 설정 공간 2바이트를 읽는다. */
-	command &= ~PCI_COMMAND_MEMORY; /* NVMe: 변수에 값을 할당한다. */
-	pci_write_config_word(dev, PCI_COMMAND, command); /* NVMe: PCI 설정 공간 2바이트를 쓴다. */
+	/* [한국어] 메모리 디코딩을 끈다. 자원을 놓아 준 뒤에도 하드웨어 BAR 에는
+	 * 옛 주소가 남으므로, 디코딩이 켜져 있으면 그 구간을 물려받은 다른
+	 * 장치와 충돌한다. read-modify-write 로 다른 비트는 보존한다. */
+	pci_read_config_word(dev, PCI_COMMAND, &command);
+	command &= ~PCI_COMMAND_MEMORY;
+	pci_write_config_word(dev, PCI_COMMAND, command);
 
-	for (i = 0; i <= PCI_ROM_RESOURCE; i++) /* NVMe: 반복문을 시작한다. */
-		pci_request_resource_alignment(dev, i, align, resize); /* NVMe: pci_request_resource_alignment 함수를 호출한다. */
+	/* [한국어] 표준 BAR 6개와 ROM BAR 까지(PCI_ROM_RESOURCE 가 6이라 <= 로
+	 * 7개를 돈다) 정렬 요구를 기록한다. 메모리가 아닌 자원은 피호출자가
+	 * 알아서 걸러 낸다. */
+	for (i = 0; i <= PCI_ROM_RESOURCE; i++)
+		pci_request_resource_alignment(dev, i, align, resize);
 
 	/*
 	 * Need to disable bridge's resource window,
 	 * to enable the kernel to reassign new resource
 	 * window later on.
 	 */
-	if (dev->hdr_type == PCI_HEADER_TYPE_BRIDGE) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		for (i = PCI_BRIDGE_RESOURCES; i < PCI_NUM_RESOURCES; i++) { /* NVMe: 반복문을 시작한다. */
-			r = &dev->resource[i]; /* NVMe: 변수에 값을 할당한다. */
-			if (!(r->flags & IORESOURCE_MEM)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-				continue; /* NVMe: 다음 반복으로 걸러뛴다. */
-			r->flags |= IORESOURCE_UNSET; /* NVMe: 변수에 값을 할당한다. */
-			r->end = resource_size(r) - 1; /* NVMe: 변수에 값을 할당한다. */
-			r->start = 0; /* NVMe: 변수에 값을 할당한다. */
-		} /* NVMe: 코드 블록을 종료한다. */
-		pci_disable_bridge_window(dev); /* NVMe: pci_disable_bridge_window 함수를 호출한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	/* [한국어] 이 장치가 브리지라면 윈도우 자원도 놓아 준다.
+	 * 하위 BAR 가 재배치되면 그것을 감싸는 창도 다시 계산되어야 하는데,
+	 * 옛 창을 그대로 두면 새 주소가 창 밖으로 나가 접근이 닿지 않는다. */
+	if (dev->hdr_type == PCI_HEADER_TYPE_BRIDGE) {
+		/* [한국어] 브리지 윈도우 자원들(PCI_BRIDGE_RESOURCES 이후)을 훑는다. */
+		for (i = PCI_BRIDGE_RESOURCES; i < PCI_NUM_RESOURCES; i++) {
+			r = &dev->resource[i];
+			/* [한국어] I/O 윈도우는 대상이 아니다(메모리 정렬만 다룬다). */
+			if (!(r->flags & IORESOURCE_MEM))
+				continue;
+			/* [한국어] "주소 미정" 으로 표시하고, 크기는 유지한 채
+			 * start 를 0 으로 되돌린다. end 를 먼저 계산하는 순서가
+			 * 중요하다 — resource_size(r) 는 start 를 쓰므로, start 를
+			 * 먼저 0 으로 만들면 크기가 틀어진다. */
+			r->flags |= IORESOURCE_UNSET;
+			r->end = resource_size(r) - 1;
+			r->start = 0;
+		}
+		/* [한국어] 하드웨어의 윈도우 레지스터도 무효화한다. 자원 구조체만
+		 * 놓아 주고 하드웨어를 그대로 두면, 브리지가 옛 주소 범위를
+		 * 계속 하위로 통과시켜 충돌이 난다. */
+		pci_disable_bridge_window(dev);
+	}
+}
 
 /*
- * resource_alignment_show:
- *   sysfs 를 통해 리소스 정렬 정보를 보여준다. NVMe BAR 정렬 디버깅에 활용될 수 있다.
+ * [한국어]
+ * resource_alignment_show - 현재 설정된 정렬 파라미터를 sysfs 로 보여 준다
+ *
+ * @bus:    pci_bus_type. 버스 단위 속성이라 장치가 아니라 버스를 받는다.
+ * @buf:    출력 버퍼(PAGE_SIZE 크기)
+ * @return: 쓴 바이트 수. 설정이 없으면 0.
+ *
+ * /sys/bus/pci/resource_alignment 를 읽으면 이 함수가 불린다.
+ *
+ * 스핀락으로 문자열을 보호하는 것이 요점이다. 읽는 도중에
+ * resource_alignment_store() 가 옛 문자열을 kfree 하면 해제된 메모리를
+ * 복사하게 된다. sysfs_emit 이 락 안에서 복사를 마치므로 안전하다.
+ *
+ * sysfs_emit 은 sprintf 대신 쓰는 sysfs 전용 헬퍼로, 버퍼 경계를 자동으로
+ * 지키고 PAGE_SIZE 를 넘지 않도록 잘라 준다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트(sysfs 읽기). 스핀락 안에서는 잠들지 않는다.
+ * 호출자: sysfs 코어.
  */
-static ssize_t resource_alignment_show(const struct bus_type *bus, char *buf) /* NVMe: resource_alignment_show 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	size_t count = 0; /* NVMe: size_t 타입 변수를 선언한다. */
+static ssize_t resource_alignment_show(const struct bus_type *bus, char *buf)
+{
+	size_t count = 0;	/* [한국어] 설정이 없으면 0 바이트를 쓴 것으로 남는다 */
 
-	spin_lock(&resource_alignment_lock); /* NVMe: spinlock 을 잠근다. */
-	if (resource_alignment_param) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		count = sysfs_emit(buf, "%s\n", resource_alignment_param); /* NVMe: 변수에 값을 할당한다. */
-	spin_unlock(&resource_alignment_lock); /* NVMe: spinlock 을 해제한다. */
+	/* [한국어] 문자열을 복사하는 동안 store 가 그것을 해제하지 못하게 막는다. */
+	spin_lock(&resource_alignment_lock);
+	if (resource_alignment_param)
+		count = sysfs_emit(buf, "%s\n", resource_alignment_param);
+	spin_unlock(&resource_alignment_lock);
 
-	return count; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return count;
+}
 
-static ssize_t resource_alignment_store(const struct bus_type *bus, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-					const char *buf, size_t count) /* NVMe: char 타입 변수를 선언한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	char *param, *old, *end; /* NVMe: 포인터 변수를 선언한다. */
+/*
+ * [한국어]
+ * resource_alignment_store - sysfs 로 정렬 파라미터를 바꾼다
+ *
+ * @bus:    pci_bus_type
+ * @buf:    사용자가 쓴 문자열
+ * @count:  그 길이
+ * @return: 소비한 바이트 수(=count), 또는 음수 errno.
+ *
+ * 부팅 인자로 주던 값을 런타임에 바꿀 수 있게 해 준다. 다만 이미 배치가
+ * 끝난 장치에는 소급 적용되지 않는다 — 이후 새로 발견되거나 재스캔되는
+ * 장치부터 적용된다.
+ *
+ * 메모리 수명 관리가 이 함수의 핵심이다. 순서가 정확해야 한다.
+ *   1) 락 밖에서 새 문자열을 복사한다(GFP_KERNEL 할당은 잠들 수 있으므로
+ *      락 안에서 하면 안 된다).
+ *   2) 락 안에서 옛 포인터를 old 에 챙기고 새 포인터로 교체한다.
+ *   3) 락 밖에서 옛 문자열을 해제한다.
+ * 3번을 락 안에서 해도 되지만, 락 구간을 짧게 유지하는 편이 낫다.
+ * 반대로 2번 없이 곧바로 kfree 하면, 그 순간 show 나
+ * pci_specified_resource_alignment 가 그 포인터를 읽고 있을 수 있다.
+ *
+ * 빈 문자열을 쓰면 설정이 해제된다. 그때는 방금 할당한 param 을 바로
+ * 해제하고 NULL 을 넣는다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트(sysfs 쓰기).
+ * 호출자: sysfs 코어.
+ */
+static ssize_t resource_alignment_store(const struct bus_type *bus,
+					const char *buf, size_t count)
+{
+	/* [한국어] param = 새로 만들 문자열, old = 교체 전 것(나중에 해제),
+	 * end = 개행 위치 */
+	char *param, *old, *end;
 
-	if (count >= (PAGE_SIZE - 1)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return -EINVAL; /* NVMe: 오류 코드를 반환한다. */
+	/* [한국어] sysfs 버퍼는 한 페이지다. 널 종료 자리를 남겨야 하므로
+	 * PAGE_SIZE - 1 을 넘으면 거절한다. */
+	if (count >= (PAGE_SIZE - 1))
+		return -EINVAL;
 
-	param = kstrndup(buf, count, GFP_KERNEL); /* NVMe: 변수에 값을 할당한다. */
-	if (!param) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return -ENOMEM; /* NVMe: 오류 코드를 반환한다. */
+	/* [한국어] 락을 잡기 전에 할당한다. GFP_KERNEL 은 잠들 수 있어
+	 * 스핀락 안에서 쓰면 안 된다. kstrndup 은 복사 후 널 종료까지 해 준다. */
+	param = kstrndup(buf, count, GFP_KERNEL);
+	if (!param)
+		return -ENOMEM;
 
-	end = strchr(param, '\n'); /* NVMe: 변수에 값을 할당한다. */
-	if (end) /* NVMe: 조건식을 평가해 분기를 결정한다. */
+	/* [한국어] echo 로 쓰면 끝에 개행이 붙는다. 파서가 그것을 장치 지정자의
+	 * 일부로 오해하지 않도록 잘라 낸다. */
+	end = strchr(param, '\n');
+	if (end)
 		*end = '\0';
 
-	spin_lock(&resource_alignment_lock); /* NVMe: spinlock 을 잠근다. */
-	old = resource_alignment_param; /* NVMe: 변수에 값을 할당한다. */
-	if (strlen(param)) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		resource_alignment_param = param; /* NVMe: 변수에 값을 할당한다. */
-	} else { /* NVMe: 표현식을 평가한다. */
-		kfree(param); /* NVMe: 동적 할당된 커널 메모리를 해제한다. */
-		resource_alignment_param = NULL; /* NVMe: 변수에 값을 할당한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
-	spin_unlock(&resource_alignment_lock); /* NVMe: spinlock 을 해제한다. */
+	/* [한국어] 포인터 교체 구간만 락으로 보호한다. */
+	spin_lock(&resource_alignment_lock);
+	old = resource_alignment_param;	/* [한국어] 옛것을 챙겨 둔다 */
+	if (strlen(param)) {
+		resource_alignment_param = param;	/* [한국어] 교체 */
+	} else {
+		/* [한국어] 빈 문자열 = 설정 해제. 방금 만든 것은 쓸 데가 없으므로
+		 * 여기서 바로 해제한다(락 안이지만 이 포인터는 아직 공개되지
+		 * 않아 아무도 보고 있지 않다). */
+		kfree(param);
+		resource_alignment_param = NULL;
+	}
+	spin_unlock(&resource_alignment_lock);
 
-	kfree(old); /* NVMe: 동적 할당된 커널 메모리를 해제한다. */
+	/* [한국어] 옛 문자열 해제. 락을 놓은 뒤에 하는 이유는 락 구간을
+	 * 짧게 유지하기 위해서다. 이 시점에는 전역 포인터가 이미 바뀌었으므로
+	 * 아무도 old 를 새로 읽지 않는다. */
+	kfree(old);
 
-	return count; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	return count;	/* [한국어] 전부 소비했다고 알린다 */
+}
 
-static BUS_ATTR_RW(resource_alignment); /* NVMe: BUS_ATTR_RW 함수를 선언한다. */
+/* [한국어] 위 show/store 를 /sys/bus/pci/resource_alignment 속성으로 묶는다.
+ * BUS_ATTR_RW 는 이름으로부터 resource_alignment_show/_store 를 찾아
+ * struct bus_attribute bus_attr_resource_alignment 를 만드는 매크로다.
+ * 그래서 함수 이름이 정확히 <속성명>_show/_store 여야 한다. */
+static BUS_ATTR_RW(resource_alignment);
 
 /*
- * pci_resource_alignment_sysfs_init:
- *   리소스 정렬 sysfs 를 초기화한다. NVMe BAR 정렬 관련 커널 파라미터 인터페이스를 마련한다.
+ * [한국어]
+ * pci_resource_alignment_sysfs_init - resource_alignment sysfs 파일을 만든다
+ *
+ * @return: 0 = 성공, 음수 = sysfs 파일 생성 실패.
+ *
+ * /sys/bus/pci/resource_alignment 를 만드는 초기화 함수다.
+ *
+ * late_initcall 로 등록한 것에 이유가 있다. 이 파일을 만들려면
+ * pci_bus_type 이 이미 등록돼 있어야 하는데, 그것은 postcore_initcall
+ * 단계에서 이뤄진다. late_initcall 은 그보다 한참 뒤라 순서가 보장된다.
+ *
+ * __init 이 붙어 있어 부팅이 끝나면 이 함수의 코드는 해제된다.
+ *
+ * 실행 컨텍스트: 부팅 중, 단일 스레드.
  */
-static int __init pci_resource_alignment_sysfs_init(void) /* NVMe: pci_resource_alignment_sysfs_init 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	return bus_create_file(&pci_bus_type, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-					&bus_attr_resource_alignment); /* NVMe: 비트 연산을 수행한다. */
-} /* NVMe: 코드 블록을 종료한다. */
-late_initcall(pci_resource_alignment_sysfs_init); /* NVMe: late_initcall 함수를 호출한다. */
+static int __init pci_resource_alignment_sysfs_init(void)
+{
+	/* [한국어] pci_bus_type 아래에 속성 파일 하나를 만든다. */
+	return bus_create_file(&pci_bus_type,
+					&bus_attr_resource_alignment);
+}
+/* [한국어] 부팅 후반부에 위 함수를 실행하도록 등록한다. pci_bus_type 등록
+ * (postcore_initcall)보다 뒤여야 하므로 late 단계를 골랐다. */
+late_initcall(pci_resource_alignment_sysfs_init);
 
 /*
  * pci_no_domains:
