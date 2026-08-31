@@ -389,8 +389,16 @@ bool mobiveil_pcie_link_up(struct mobiveil_pcie *pcie)
 {
 	/* [한국어] SoC 별 구현이 있으면 그것을 우선한다. Layerscape 처럼
 	 * 별도 레지스터로 링크를 보는 하드웨어가 있기 때문이다.
-	 * ops 자체가 NULL 인지는 확인하지 않는데, 이 IP 를 쓰는 드라이버가
-	 * 반드시 ops 를 채운다고 전제하는 것으로 보인다. */
+	 *
+	 * ops 자체가 NULL 인지는 확인하지 않는다. 확인해 보면 mobiveil
+	 * 트리에서 pcie->ops 를 대입하는 곳은 pcie-layerscape-gen4.c:217
+	 * 하나뿐이고, pcie-mobiveil-plat.c 의 mbvl,gpex40-pcie 경로는
+	 * 그것을 채우지 않는다. 브리지 private 영역이 0 으로 초기화되므로
+	 * 그 경로에서는 이 줄이 NULL 을 역참조하게 된다.
+	 * 이 함수는 mobiveil_bringup_link() 를 거쳐
+	 * mobiveil_pcie_host_probe() 에서 도달한다.
+	 * 상류 코드 그대로이며 수정하지 않는다 — 의도인지, 그 compatible 이
+	 * 실제로 쓰이지 않아 드러나지 않는 것인지는 판단할 근거가 없다. */
 	if (pcie->ops->link_up)
 		return pcie->ops->link_up(pcie);
 
