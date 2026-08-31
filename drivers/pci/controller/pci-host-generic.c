@@ -91,6 +91,8 @@ static const struct pci_ecam_ops gen_pci_cfg_cam_bus_ops = {
 	.bus_shift	= 16,
 	.pci_ops	= {
 		.map_bus	= pci_ecam_map_bus,
+		/* [한국어] CAM 방식도 읽기/쓰기 자체는 공용 헬퍼로 충분하다. 차이는 map_bus 가
+		 * 주소를 어떻게 만드느냐뿐이다. */
 		.read		= pci_generic_config_read,
 		.write		= pci_generic_config_write,
 	}
@@ -100,6 +102,29 @@ static const struct pci_ecam_ops gen_pci_cfg_cam_bus_ops = {
  * NVMe: Synopsys DesignWare PCIe 컨트롤러의 ECAM 모드 특이점.
  *      루트 포트의 downstream port가 type 0 config TLP를 dev 1 이상으로도
  *      전달하여 버스 0에 동일 NVMe 장치가 여러 번 나타나는 문제를 방지.
+ */
+/* [한국어]
+ * pci_dw_valid_device - 루트 버스에서 슬롯 0 외의 장치를 걸러 낸다
+ *
+ * @bus: 접근할 버스. sysdata 는 pci_config_window 다(ECAM 경로).
+ * @devfn: 장치/함수 번호.
+ * @return: true 면 접근 허용, false 면 없는 장치로 처리.
+ *
+ * DesignWare IP 기반 ECAM 컨트롤러(armada8k, synquacer, snps,dw-pcie-ecam)에만
+ * 필요한 필터다. 이들 IP 는 루트 버스의 설정공간 주소를 슬롯 번호와 무관하게
+ * 디코딩해, 슬롯 1~31 을 읽어도 루트 포트 자신의 값이 그대로 되돌아온다.
+ * 그러면 열거가 같은 장치를 32개로 착각해 유령 장치를 만들어 낸다.
+ *
+ * 그래서 루트 버스(bus->number == cfg->busr.start)에서는 슬롯 0 만 통과시킨다.
+ * 하위 버스는 스위치가 라우팅하므로 이 문제가 없어 그대로 허용한다.
+ *
+ * 버스 번호를 0 과 견주지 않고 cfg->busr.start 와 견주는 점에 유의 --
+ * DT 의 bus-range 가 0 이 아닌 값에서 시작할 수 있기 때문이다.
+ *
+ * 실행 컨텍스트: 열거 및 설정 접근의 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_dw_ecam_map_bus → [이 함수]
  */
 static bool pci_dw_valid_device(struct pci_bus *bus, unsigned int devfn)
 {
@@ -122,6 +147,27 @@ static bool pci_dw_valid_device(struct pci_bus *bus, unsigned int devfn)
  *      pci_ecam_map_bus()로 NVMe config 공간 MMIO 주소를 만들기 전
  *      유효성 검사를 수행.
  */
+/* [한국어]
+ * pci_dw_ecam_map_bus - 필터를 거친 뒤 공용 ECAM 매핑에 넘긴다
+ *
+ * @bus: 접근할 버스.
+ * @devfn: 장치/함수 번호.
+ * @where: 설정공간 오프셋.
+ * @return: 접근할 가상 주소, 또는 걸러진 경우 NULL.
+ *
+ * 하는 일은 두 줄뿐이다: 위 필터를 통과하지 못하면 NULL 을, 통과하면
+ * 공용 pci_ecam_map_bus() 의 결과를 그대로 돌려준다. NULL 을 받은 PCI
+ * 코어는 그 접근을 0xffffffff(장치 없음)로 처리한다.
+ *
+ * 이 얇은 래퍼가 존재하는 이유는 pci_ecam_ops 가 map_bus 콜백 하나만
+ * 받기 때문이다 -- 필터를 끼워 넣을 다른 자리가 없다.
+ *
+ * 실행 컨텍스트: 열거 및 설정 접근의 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   pci_generic_config_read/write → ops->map_bus → [이 함수]
+ *     → pci_dw_valid_device → pci_ecam_map_bus
+ */
 static void __iomem *pci_dw_ecam_map_bus(struct pci_bus *bus,
 					 unsigned int devfn, int where)
 {
@@ -129,6 +175,8 @@ static void __iomem *pci_dw_ecam_map_bus(struct pci_bus *bus,
 		return NULL;
 
 	return pci_ecam_map_bus(bus, devfn, where);
+/* [한국어] 두 컨트롤러 계열의 유일한 차이가 map_bus 라는 점을 여기서 볼 수 있다 --
+ * read/write 는 양쪽 모두 공용 헬퍼다. */
 }
 
 /*
@@ -138,6 +186,8 @@ static void __iomem *pci_dw_ecam_map_bus(struct pci_bus *bus,
 static const struct pci_ecam_ops pci_dw_ecam_bus_ops = {
 	.pci_ops	= {
 		.map_bus	= pci_dw_ecam_map_bus,
+		/* [한국어] DW 계열도 읽기/쓰기는 공용 헬퍼를 쓴다. bus_shift 를 지정하지 않은 것은
+		 * 표준 ECAM 값(20)을 그대로 쓴다는 뜻이다(CAM 쪽은 16 으로 덮어썼다). */
 		.read		= pci_generic_config_read,
 		.write		= pci_generic_config_write,
 	}
@@ -154,18 +204,25 @@ static const struct of_device_id gen_pci_of_match[] = {
 	  .data = &gen_pci_cfg_cam_bus_ops },
 
 	{ .compatible = "pci-host-ecam-generic",
+	  /* [한국어] 표준 ECAM 컨트롤러 -- 코어의 pci_generic_ecam_ops 를 그대로 쓴다.
+	   * 슬롯 필터가 필요 없다. */
 	  .data = &pci_generic_ecam_ops },
 
 	{ .compatible = "marvell,armada8k-pcie-ecam",
+	  /* [한국어] Marvell Armada 8K 의 ECAM 모드. DesignWare IP 기반이라 루트 버스
+	   * 슬롯 필터가 필요하다. */
 	  .data = &pci_dw_ecam_bus_ops },
 
 	{ .compatible = "socionext,synquacer-pcie-ecam",
+	  /* [한국어] Socionext SynQuacer 도 같은 이유로 DW 전용 ops 를 쓴다. */
 	  .data = &pci_dw_ecam_bus_ops },
 
 	{ .compatible = "snps,dw-pcie-ecam",
+	  /* [한국어] Synopsys 참조 바인딩. 위 두 SoC 와 같은 IP 이므로 같은 ops 를 공유한다. */
 	  .data = &pci_dw_ecam_bus_ops },
 
 	{ },
+/* [한국어] 표의 끝을 알리는 빈 항목. */
 };
 MODULE_DEVICE_TABLE(of, gen_pci_of_match);
 
@@ -178,6 +235,9 @@ MODULE_DEVICE_TABLE(of, gen_pci_of_match);
 static struct platform_driver gen_pci_driver = {
 	.driver = {
 		.name = "pci-host-generic",
+		/* [한국어] 위 표를 걸어, DT 노드의 compatible 이 맞으면 pci_host_common_probe 가 불린다.
+		 * 이 파일에 자체 probe 가 없는 것이 요점이다 -- 공용 구현이 ops 를 표에서
+		 * 꺼내 쓰므로, 이 드라이버는 ops 표 두 벌과 매칭 표만 제공하면 된다. */
 		.of_match_table = gen_pci_of_match,
 	},
 	.probe = pci_host_common_probe,

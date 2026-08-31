@@ -1008,6 +1008,17 @@ static inline int cdns_pcie_read_cfg_dword(struct cdns_pcie *pcie, int where,
 }
 
 /* Root Port register access */
+/* [한국어] cdns_pcie_rp_writeb - 루트 포트 config 에 1바이트를 쓴다.
+ * @pcie: 대상 컨트롤러. @reg: 루트 포트 config 오프셋. @value: 쓸 값.
+ * @return: 없음.
+ * 리비전 ID, 프로그래밍 인터페이스, 서브클래스처럼 1바이트인 필드에 쓴다.
+ * PCI 버스는 바이트 단위 쓰기를 지원하지만 이 IP 의 레지스터 창은 32비트
+ * 접근만 받으므로, cdns_pcie_write_sz() 가 읽고-고쳐-쓰기로 흉내 낸다.
+ * 그 사이에 다른 문맥이 같은 워드를 건드리면 변경이 사라질 수 있는데,
+ * 이 계열은 루트 포트 초기화 경로에서만 쓰여 실제로 겹치지 않는다.
+ * 실행 컨텍스트: 프로브 시점의 프로세스 문맥.
+ * 호출 체인: cdns_pcie_host_init_root_port() 계열 → [이 함수]
+ *   → cdns_pcie_write_sz() */
 static inline void cdns_pcie_rp_writeb(struct cdns_pcie *pcie,
 				       u32 reg, u8 value)
 {
@@ -1125,6 +1136,17 @@ static inline u16 cdns_pcie_hpa_rp_readw(struct cdns_pcie *pcie, u32 reg)
 }
 
 /* Endpoint Function register access */
+/* [한국어] cdns_pcie_ep_fn_writeb - 엔드포인트 함수 fn 의 config 에 1바이트를 쓴다.
+ * @pcie: 대상 컨트롤러. @fn: 물리 함수 번호. @reg: 그 함수 config 안의 오프셋.
+ * @value: 쓸 값.
+ * @return: 없음.
+ * 루트 포트용 rp_write* 계열과 구조는 같지만 기준 주소가 다르다 --
+ * 엔드포인트는 함수마다 자기 config 영역을 갖고, 그 자리를
+ * CDNS_PCIE_EP_FUNC_BASE(fn) 이 계산한다(함수당 4KiB 간격).
+ * 아래 _writew/_writel 과 함께 EP 초기화가 벤더/디바이스 ID, 클래스 코드
+ * 같은 신원 정보를 써 넣는 통로다.
+ * 실행 컨텍스트: EP 초기화 시점의 프로세스 문맥.
+ * 호출 체인: cdns_pcie_ep_* 초기화 경로 → [이 함수] → cdns_pcie_write_sz() */
 static inline void cdns_pcie_ep_fn_writeb(struct cdns_pcie *pcie, u8 fn,
 					  u32 reg, u8 value)
 {
