@@ -9,6 +9,68 @@
  *           매핑, MSI-X/MSI/INTx 인터럽트, ASPM/전력 관리, AER 등의 동작이
  *           이 컨트롤러의 설정과 직결된다. */
 
+/*
+ * [한국어 설명] 인텔 Gateway SoC 의 PCIe (pcie-intel-gw.c)
+ *
+ * === 파일의 역할 ===
+ * 인텔 Gateway 는 가정용 라우터나 게이트웨이 장비에 들어가는 SoC 다
+ * (원래 랜틱/인피니언 계열). x86 이 아니라 MIPS 나 ARM 기반이며,
+ * DesignWare PCIe IP 를 써서 Wi-Fi 카드나 스토리지를 붙인다.
+ *
+ * 이 드라이버가 하는 일은 다른 DesignWare 파생 드라이버와 같다 — 주변부
+ * 준비. 다만 이 SoC 에 고유한 부분이 몇 가지 있다.
+ *
+ * 하나는 애플리케이션 레지스터(app 레지스터)다. DesignWare IP 의 표준
+ * 레지스터와 별개로, 이 SoC 가 IP 를 감싸며 추가한 제어 레지스터 묶음이
+ * 있다. 링크 트레이닝을 시작하거나 인터럽트를 다루는 일부가 그쪽에 있어서
+ * 표준 경로만으로는 안 된다.
+ *
+ * 다른 하나는 링크 속도와 폭을 디바이스 트리에서 제한하는 기능이다.
+ * 보드 배선 품질이 좋지 않으면 Gen3 로 올리려다 실패해 링크가 계속
+ * 재트레이닝될 수 있어서, 아예 낮은 속도로 고정하는 편이 안정적이다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * 디바이스 트리에 intel,lgm-pcie 가 있으면
+ *   -> [이 파일] intel_pcie_probe()
+ *      -> 클럭/리셋/PHY 준비, app 레지스터 설정
+ *      -> dw_pcie_host_init() [pcie-designware-host.c]
+ *         -> PCI 코어 열거
+ *
+ * 실행 컨텍스트: probe 시점의 프로세스 컨텍스트.
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: 플랫폼 버스.
+ * 아래쪽: pcie-designware.c / -host.c, PHY·클럭·리셋·GPIO 프레임워크.
+ * 공유 상태: struct intel_pcie 가 struct dw_pcie 를 품는다.
+ *
+ * === NVMe 관점 ===
+ * NVMe 드라이버는 이 파일의 함수를 부르지 않는다(전수 확인).
+ *
+ * 이런 게이트웨이 SoC 에 NVMe 를 붙이는 구성은 흔치 않지만, NAS 기능을
+ * 갖춘 공유기에서는 있을 수 있다. 그때 링크 속도가 디바이스 트리에서
+ * 제한되어 있으면 NVMe 대역폭이 그만큼 묶인다 — 드라이브가 Gen3 x4 를
+ * 지원해도 보드가 Gen2 x1 로 고정해 두었다면 그것이 상한이 된다.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * intel_pcie_probe()      : 전체 초기화.
+ * intel_pcie_host_setup()  : 클럭·리셋·PHY 를 켜고 링크를 올린다.
+ * intel_pcie_link_setup()  : app 레지스터로 링크 속도·폭 제한을 적용한다.
+ * intel_pcie_rc_init()    : 루트 컴플렉스 초기화 전체 흐름.
+ * intel_pcie_ltssm_enable() / intel_pcie_ltssm_disable() : LTSSM(Link
+ *                           Training and Status State Machine)을 켜고 끈다.
+ *                           app 레지스터를 통해야 하는 대표적인 조작이다.
+ * intel_pcie_init_n_fts() : N_FTS(Fast Training Sequence 개수)를 설정한다.
+ *                           L0s 에서 깨어날 때 링크를 다시 맞추는 데 쓰는
+ *                           시퀀스 수로, 이 값이 부족하면 복귀가 실패한다.
+ * intel_pcie_device_rst_assert() / _deassert() : 장치 쪽 PERST# 제어.
+ * intel_pcie_core_rst_assert() / _deassert() : 컨트롤러 쪽 리셋.
+ * intel_pcie_wait_l2()    : 절전 진입 시 링크가 L2 에 들어가기를 기다린다.
+ * intel_pcie_turn_off()   : 정리 경로. 리셋을 걸고 클럭을 끈다.
+ * intel_pcie_suspend_noirq() / intel_pcie_resume_noirq() : 절전 전후.
+ * intel_pcie_get_resources() : 디바이스 트리에서 클럭·리셋·GPIO 를 얻는다.
+ * struct intel_pcie       : dw_pcie 와 이 SoC 의 app 레지스터·GPIO 핸들.
+ */
+
 #include <linux/bitfield.h>	/* NVMe: 레지스터 비트 필드 조작용 헤더 */
 #include <linux/clk.h>		/* NVMe: PCIe core 클럭 활성화/비활성화 */
 #include <linux/gpio/consumer.h>	/* NVMe: 엔드포인트(NVMe SSD) 리셋 GPIO 제어 */

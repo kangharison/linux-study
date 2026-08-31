@@ -7,6 +7,69 @@
  *	   Honghui Zhang <honghui.zhang@mediatek.com>
  */ /* kernel-doc/설명 블록 끝; 이 객체는 NVMe PCIe host 열거에 참여 */
 
+/*
+ * [한국어 설명] 미디어텍 SoC 의 PCIe 호스트 (pcie-mediatek.c)
+ *
+ * === 파일의 역할 ===
+ * 미디어텍 SoC(MT7622, MT2712 등)의 PCIe 컨트롤러를 다룬다. DesignWare 가
+ * 아니라 미디어텍 자체 IP 라서 dwc/ 가 아닌 이 자리에 있고, 링크 관리부터
+ * config 접근, 인터럽트까지 전부 이 파일이 직접 구현한다. 그래서 파일이
+ * 1300줄 가까이 된다.
+ *
+ * 이 컨트롤러의 구조에서 눈여겨볼 점은 포트마다 독립적이라는 것이다.
+ * 하나의 컨트롤러가 여러 루트 포트를 갖는데, 각 포트가 자기 레지스터
+ * 묶음과 자기 PHY, 자기 클럭, 자기 리셋을 갖는다. 그래서 struct mtk_pcie 가
+ * struct mtk_pcie_port 의 목록을 들고 있고, 초기화가 포트 단위로 반복된다.
+ *
+ * 포트 하나가 실패해도 나머지는 살려야 하기 때문에, 초기화 실패 시 그
+ * 포트만 목록에서 빼고 계속 진행한다. 하드웨어가 여럿인 드라이버에서
+ * 흔히 보는 방어적 구조다.
+ *
+ * 세대가 둘 있다는 점도 알아야 한다. 구형(MT2701 등)과 신형(MT7622 등)이
+ * 레지스터 배치와 링크 관리 방식이 달라서, soc_data 로 콜백을 갈아 끼운다.
+ * 같은 파일 안에 두 하드웨어 세대가 공존하는 것이다.
+ *
+ * MSI 도 자체 구현이다. DesignWare 처럼 컨트롤러 안에 MSI 수신기가 있고,
+ * 그것을 IRQ 도메인으로 감싸 하위 장치에 벡터를 나눠 준다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * 디바이스 트리에 mediatek,mt7622-pcie 등이 있으면
+ *   -> [이 파일] mtk_pcie_probe()
+ *      -> 포트마다: 클럭/PHY/리셋 준비, 레지스터 설정, 링크 대기
+ *      -> MSI 도메인 구성
+ *      -> pci_host_probe() -> PCI 코어 열거
+ *
+ * 실행 컨텍스트: probe 는 프로세스 컨텍스트. config 접근은 잠금 아래.
+ * 인터럽트 분배는 하드 IRQ.
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: 플랫폼 버스.
+ * 아래쪽: PHY·클럭·리셋 프레임워크, 커널 IRQ 도메인, PCI 코어.
+ * 공유 상태: struct mtk_pcie 와 그 아래 struct mtk_pcie_port 목록.
+ *
+ * === NVMe 관점 ===
+ * NVMe 드라이버는 이 파일의 함수를 부르지 않는다(전수 확인).
+ *
+ * 미디어텍 SoC 를 쓴 라우터나 NAS 에 NVMe 를 붙이는 구성이 있는데,
+ * 그때 성능 상한을 정하는 것이 이 컨트롤러다. 포트마다 레인 수가
+ * 고정되어 있고(보통 x1), 세대도 Gen2 인 경우가 많아 드라이브의 성능이
+ * 다 나오지 않는다. 그것이 드라이브 문제가 아니라 호스트 쪽 제약임을
+ * 알아 두면 진단이 빨라진다.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * mtk_pcie_probe()        : 전체 초기화. 포트 목록을 만들고 각각 준비한다.
+ * mtk_pcie_parse_port() / mtk_pcie_setup() : 디바이스 트리에서 포트 정보를
+ *                           읽고 자원을 확보한다.
+ * mtk_pcie_startup_port() / mtk_pcie_startup_port_v2() : 링크를 올린다.
+ *                           구형과 신형의 절차가 달라 둘로 나뉘어 있다.
+ * mtk_pcie_config_read() / mtk_pcie_config_write() : config 접근.
+ * mtk_pcie_setup_irq() / mtk_pcie_intr_handler() : 인터럽트 설정과 분배.
+ * mtk_pcie_allocate_msi_domains() 계열 : MSI 도메인 구성.
+ * struct mtk_pcie         : 컨트롤러 전체.
+ * struct mtk_pcie_port    : 루트 포트 하나. 자기 PHY·클럭·리셋을 갖는다.
+ * struct mtk_pcie_soc     : 세대별 차이를 담은 콜백 표.
+ */
+
 #include <linux/clk.h> /* 리눅스 clk.h 헤더 포함; 클록 API; NVMe ASPM/전력 상태 전환 시 클럭 게이팅에 사용 */
 #include <linux/delay.h> /* 리눅스 delay.h 헤더 포함; msleep/udelay; NVMe 링크 트레이닝 및 reset 대기에 사용 */
 #include <linux/iopoll.h> /* 리눅스 iopoll.h 헤더 포함; readl_poll_timeout; NVMe 링크업/설정 완료 폴링에 사용 */

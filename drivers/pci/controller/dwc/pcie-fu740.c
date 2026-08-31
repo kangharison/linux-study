@@ -11,6 +11,70 @@
  *		https://www.kosagi.com
  */
 
+/*
+ * [한국어 설명] SiFive FU740 RISC-V SoC 의 PCIe (pcie-fu740.c)
+ *
+ * === 파일의 역할 ===
+ * SiFive FU740 은 HiFive Unmatched 보드에 들어간 RISC-V SoC 다. 리눅스가
+ * 도는 RISC-V 보드 중 M.2 슬롯에 NVMe 를 꽂을 수 있는 초기 사례여서,
+ * RISC-V 에서 NVMe 를 다뤄 본 사람은 대개 이 드라이버를 거쳤다.
+ *
+ * DesignWare IP 를 쓰므로 이 파일이 하는 일은 주변부뿐이다. 링크를 올리고
+ * config 를 다루는 핵심은 pcie-designware.c 와 -host.c 가 맡는다.
+ * 여기서 하는 것은 그 전 단계다.
+ *   1) 전원을 넣는다. M.2 슬롯의 3.3V 를 GPIO 로 켠다.
+ *   2) 클럭을 켠다.
+ *   3) PHY 를 초기화한다. FU740 은 PCIe PHY 가 여러 개라 각각 다룬다.
+ *   4) PERST# 를 뗀다. 이것이 장치에게 "이제 시작해도 좋다" 는 신호다.
+ *
+ * 순서와 타이밍이 중요하다. PCIe 규격은 전원이 안정된 뒤 최소 100ms 를
+ * 기다렸다가 PERST# 를 떼라고 정하고 있다. 너무 빨리 떼면 장치가 아직
+ * 준비되지 않아 링크가 올라오지 않거나 불안정해진다. 이 드라이버가
+ * delay 를 여기저기 넣는 이유다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * 디바이스 트리에 sifive,fu740-pcie 가 있으면
+ *   -> [이 파일] fu740_pcie_probe()
+ *      -> 전원/클럭/PHY/리셋 준비
+ *      -> dw_pcie_host_init() [pcie-designware-host.c]
+ *         -> 링크 대기 -> PCI 코어 열거 -> nvme_probe()
+ *
+ * 실행 컨텍스트: probe 시점의 프로세스 컨텍스트. 여러 곳에서 잠들며 기다린다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: 플랫폼 버스.
+ * 아래쪽: pcie-designware.c / -host.c, PHY 서브시스템, 클럭·리셋
+ *   프레임워크, GPIO(gpiod) 프레임워크.
+ * 공유 상태: struct fu740_pcie 가 struct dw_pcie 를 품는다.
+ *
+ * === NVMe 관점 ===
+ * NVMe 드라이버는 이 파일의 함수를 부르지 않는다(전수 확인).
+ *
+ * 그런데 이 보드에서 NVMe 를 쓸 때 자주 겪는 문제가 이 파일과 직결된다.
+ * 부팅 시 드라이브가 잡히지 않다가 재부팅하면 잡히는 증상은 대개
+ * PERST# 타이밍이나 전원 안정화 대기가 그 드라이브에 부족해서다.
+ * 드라이브마다 준비 시간이 다르기 때문에, 여유가 빠듯한 보드에서는
+ * 특정 모델만 실패하는 일이 생긴다.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * fu740_pcie_probe()      : 전체 초기화. 이 파일의 입구.
+ * fu740_pcie_host_init()  : DesignWare 호스트 초기화 콜백. 전원과 리셋
+ *                           순서를 여기서 지킨다.
+ * fu740_pcie_start_link() : 링크 트레이닝을 시작한다. DesignWare 코어가
+ *                           링크를 올릴 준비가 끝난 뒤 불린다.
+ * fu740_pcie_init_phy()   : 이 SoC 의 PCIe PHY 를 초기화한다.
+ *                           fu740_phyregwrite() 로 PHY 레지스터를 직접 쓴다.
+ * fu740_pcie_power_on()   : M.2 슬롯 전원(aux 및 pwren GPIO)을 켠다.
+ * fu740_pcie_drive_reset() : PERST# 를 제어한다. 전원 안정화 후 규격이
+ *                           요구하는 시간을 기다렸다가 뗀다.
+ * fu740_pcie_assert_reset() / fu740_pcie_deassert_reset() : 컨트롤러 쪽
+ *                           리셋. 장치 쪽 PERST# 와는 별개다.
+ * fu740_pcie_shutdown()   : 종료 시 링크를 내린다.
+ * fu740_pcie_host_ops     : DesignWare 호스트 콜백 표.
+ * fu740_pcie_of_match / fu740_pcie_driver : 바인딩 정의.
+ * struct fu740_pcie       : dw_pcie 와 이 보드의 GPIO·클럭·PHY 핸들.
+ */
+
 #include <linux/clk.h>			/* PCI/NVMe: SoC 클럭 게이팅/언게이팅을 위한 헤더; PCIe 링크 및 NVMe 열거 전 클럭 활성화에 사용 */
 #include <linux/delay.h>		/* NVMe: PCIe 리셋 홀드 타임, PHY 안정화, NVMe 디바이스 준비 대기에 필요한 ms/us/ndelay */
 #include <linux/gpio.h>			/* PCI/NVMe: PERST# 및 power-enable GPIO 제어를 위한 GPIO 프레임워크 헤더 */
