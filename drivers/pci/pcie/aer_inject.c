@@ -13,23 +13,77 @@
  */
 
 /*
- * NVMe 관점 요약:
- * 이 파일은 PCIe AER(Advanced Error Reporting) 소프트웨어 에러 주입 드라이버로,
- * NVMe SSD와 같이 PCIe 엔드포인트로 동작하는 장치의 AER 처리 경로를 디버깅하기 위해
- * 사용자 공간(aer-inject 도구)에서 지정한 PCIe 에러를 가상으로 발생시킨다.
+ * [한국어 설명] 가짜 PCIe 오류를 만들어 복구 경로를 시험하는 도구 (aer_inject.c)
  *
- * NVMe 호스트 드라이버(drivers/nvme/host/pci.c) 입장에서는 이 드라이버가 주입한
- * 에러가 실제 하드웨어 AER 이벤트처럼 보이며, 루트 포트의 AER 서비스가 이를 감지하면
- * pcie_do_recovery() -> nvme_reset_work() / nvme_remove() 등의 NVMe 복구/재설정 경로로
- * 전파될 수 있다.
+ * === 파일의 역할 ===
+ * AER 복구 코드를 시험하기가 매우 어렵다는 문제에서 출발한 파일이다.
+ * 위 원문 주석이 그 사정을 밝힌다 — 실제 하드웨어 오류를 일부러 일으키는
+ * 것은 거의 불가능하다. Completion Timeout 이나 Poisoned TLP 를 마음대로
+ * 만들어 낼 방법이 없기 때문이다.
  *
- * 주요 흐름:
- * 1. aer_inject_write() : /dev/aer_inject에 쓰기 -> aer_inject()
- * 2. aer_inject()       : 타겟 NVMe pci_dev, Root Port/RCEC 찾기, AER capability 확인,
- *                         시뮬레이션용 aer_error 노드 준비, 버스 config ops 가로채기,
- *                         AER 서비스에 IRQ 인젝션으로 처리 트리거
- * 3. aer_inj_read_config()/write_config() : 가로챈 config 접근에서 에러 상태/마스크 등을
- *                                           시뮬레이션 값으로 대체/갱신
+ * 그래서 이 파일은 오류를 흉내 낸다. 방법이 영리하다 — 실제로 오류를
+ * 일으키는 것이 아니라, config space 접근을 가로채서 "AER 상태 레지스터에
+ * 오류 비트가 서 있는 것처럼" 보이게 만든다.
+ *
+ *   1) pci_bus_set_ops() [access.c] 로 그 버스의 config 접근 ops 를
+ *      자기 것으로 바꿔 끼운다.
+ *   2) AER 관련 레지스터를 읽으면 진짜 하드웨어 대신 사용자가 지정한
+ *      가짜 값을 돌려준다.
+ *   3) 그 상태에서 AER 인터럽트를 흉내 낸다(aer_irq 를 직접 호출).
+ *   4) aer.c 는 진짜 오류가 난 줄 알고 정상 복구 절차를 밟는다.
+ *
+ * 사용자 인터페이스는 /dev/aer_inject 캐릭터 장치이고, 사용자 공간 도구
+ * aer-inject 가 struct aer_error_inj 를 write 해서 무엇을 주입할지 지정한다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * 주입: aer-inject 도구
+ *         -> write(/dev/aer_inject, struct aer_error_inj)
+ *            -> [이 파일] aer_inject_write() -> aer_inject()
+ *               -> pci_bus_set_ops() 로 config ops 가로채기
+ *               -> aer_irq() [aer.c] 직접 호출
+ *                  -> 이후는 진짜 오류와 완전히 같은 경로
+ *                     -> pcie_do_recovery() -> 드라이버 콜백
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트(write 시스템 호출). 다만 가로챈
+ * config ops 는 인터럽트 문맥에서도 불릴 수 있어 스핀락으로 보호한다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: userspace 의 aer-inject 도구.
+ * 아래쪽: access.c 의 pci_bus_set_ops(가로채기), pcie/aer.c 의 aer_irq.
+ * 공유 상태: 주입된 오류 목록(einjected)과 가로챈 ops 목록(pci_bus_ops_list).
+ *   둘 다 전역 스핀락 inject_lock 으로 보호한다.
+ *
+ * === NVMe 관점 ===
+ * NVMe 드라이버는 이 파일과 직접 연결되지 않는다(전수 확인).
+ *
+ * 하지만 NVMe 오류 복구 코드를 검증하는 데 실질적으로 쓸 수 있는 도구다.
+ * NVMe SSD 에 ERR_FATAL 을 주입하면 nvme_error_detected() ->
+ * nvme_slot_reset() -> nvme_error_resume() 이 실제로 불리고, 그 과정에서
+ * 진행 중이던 I/O 가 올바르게 실패 처리되는지, 컨트롤러가 제대로
+ * 재초기화되는지를 확인할 수 있다.
+ *
+ * 주의할 점은 이것이 "오류를 흉내 낸 것" 이라는 사실이다. 하드웨어는
+ * 멀쩡하므로, 진짜 오류에서 벌어지는 일(링크가 실제로 끊기거나 DMA 가
+ * 중간에 잘리는 것)은 재현되지 않는다. 소프트웨어 경로의 검증에는 충분하지만
+ * 하드웨어 상호작용의 검증에는 한계가 있다.
+ *
+ * (기존 주석은 주입된 오류가 "nvme_reset_work() / nvme_remove() 로
+ *  전파될 수 있다" 고 적었으나, 복구 경로가 직접 부르는 것은
+ *  nvme_err_handler 에 등록된 콜백들이다. nvme_reset_work 은 그중
+ *  nvme_slot_reset 이 nvme_reset_ctrl 을 큐잉해 간접적으로 실행되고,
+ *  nvme_remove 는 복구가 실패해 장치가 제거될 때 불린다.)
+ *
+ * === 주요 함수/구조체 요약 ===
+ * aer_inject()              : 주입의 본체. ops 를 가로채고 가짜 상태를
+ *                             등록한 뒤 aer_irq 를 부른다.
+ * aer_inject_write()        : /dev/aer_inject 의 write 핸들러.
+ * pci_read_aer() / pci_write_aer() : 가로챈 config 접근. AER 레지스터
+ *                             범위면 가짜 값을, 아니면 원래 ops 로 넘긴다.
+ * find_pci_bus_ops() / pci_bus_set_aer_ops() : ops 가로채기 관리.
+ * struct aer_error          : 주입된 가짜 오류 하나. 어느 장치의 어느
+ *                             레지스터에 어떤 값을 보이게 할지 담는다.
+ * struct pci_bus_ops        : 가로채기 전의 원래 ops 를 보관해 두는 구조.
+ *                             해제할 때 되돌리기 위해 필요하다.
  */
 
 #define dev_fmt(fmt) "aer_inject: " fmt /* 로그 메시지 접두사 매크로 정의 */

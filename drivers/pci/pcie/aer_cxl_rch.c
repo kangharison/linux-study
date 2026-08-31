@@ -2,18 +2,60 @@
 /* Copyright(c) 2023 AMD Corporation. All rights reserved. */
 
 /*
- * NVMe: 이 파일은 CXL(Compute Express Link) RCiEP/Root Complex Integrated
- * Endpoint)이나 RCH(Root Complex Host) 상에서 발생하는 AER(Advanced Error
- * Reporting) 오류를 CXL 메모리 장치 드라이버로 전달하기 위한 PCI Express
- * 포트 드라이버 확장 모듈이다. NVMe 입장에서 본 파일은 PCIe 포트가 AER
- * FATAL/NONFATAL/CORRECTABLE 오류를 감지했을 때, 연결된 CXL 메모리 장치에
- * 대해 등록된 pci_error_handlers 콜백(예: NVMe의 nvme_error_detected())을
- * 호출하는 경로의 일부를 담당한다. 즉, NVMe SSD가 CXL 메모리 계층과 공존하는
- * 시스템에서 PCIe 버스 오류가 발생하면, 이 파일은 오류가 CXL 메모리 장치
- * 영역에서 왔는지 확인하고, 맞다면 해당 장치 드라이버의 AER 핸들러를
- * trigger한다. NVMe 드라이버는 drivers/nvme/host/pci.c에 정의된
- * nvme_error_detected()/nvme_slot_reset()/nvme_error_resume() 콜백을 통해
- * 이 흐름에 연결될 수 있다.
+ * [한국어 설명] CXL RCH 계층의 AER 오류를 CXL 드라이버에게 넘기는 다리 (aer_cxl_rch.c)
+ *
+ * === 파일의 역할 ===
+ * CXL(Compute Express Link)은 PCIe 위에 얹힌 프로토콜로, 장치의 메모리를
+ * 시스템 메모리처럼 쓸 수 있게 한다. 그중 RCH(Restricted CXL Host) 라는
+ * 구성이 있는데, CXL 장치가 Root Complex 에 통합된 엔드포인트(RCiEP)로
+ * 나타나고 그 위에 RCRB(Root Complex Register Block) 라는 특수한 레지스터
+ * 블록이 놓인다.
+ *
+ * 문제는 그 구성에서 AER 오류의 보고 경로가 보통과 다르다는 것이다.
+ * 일반 PCIe 는 오류가 Root Port 로 올라가지만, RCH 에서는 RCEC(Root Complex
+ * Event Collector)가 받고 실제 오류 상태는 RCRB 안의 AER 레지스터에 있다.
+ * 그래서 표준 aer.c 의 처리가 그대로 통하지 않는다.
+ *
+ * 이 파일은 그 간극을 메운다. RCH 다운스트림 포트에서 온 오류인지 판별하고,
+ * 맞으면 RCRB 쪽 레지스터를 읽어 CXL 드라이버가 등록한 핸들러로 넘긴다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * aer.c 가 오류를 처리하는 중에
+ *   -> [이 파일] cxl_rch_handle_error()
+ *      -> RCH 구성인지 확인(is_cxl_mem_dev, cxl_error_is_native 등)
+ *      -> 맞으면 CXL 드라이버가 등록한 콜백(cxl_assign_event_handler 로
+ *         등록된 것)으로 오류를 전달
+ *      -> 아니면 아무것도 하지 않고 표준 경로에 맡긴다
+ *
+ * 실행 컨텍스트: aer.c 의 스레드 핸들러 안. 잠들 수 있다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: pcie/aer.c 만이 이 파일을 부른다.
+ * 아래쪽: drivers/cxl/ 의 CXL 코어가 등록한 콜백.
+ * 공유 상태: 전역 함수 포인터 두 개(cxl_error_handler 계열)를 RCU 로 보호한다.
+ *   CXL 모듈이 로드/언로드될 때 갈아끼워지기 때문이다.
+ *
+ * === NVMe 관점 ===
+ * NVMe 와는 관련이 없다. 이 파일이 다루는 것은 CXL 메모리 장치이고,
+ * NVMe SSD 는 CXL 장치가 아니다.
+ *
+ * NVMe 와 CXL 이 같은 시스템에 공존할 수는 있지만, 그것은 두 장치가
+ * 같은 PCIe 계층에 있다는 뜻일 뿐 서로의 오류 경로가 얽히지는 않는다.
+ * NVMe 의 오류는 표준 AER 경로(aer.c -> err.c -> nvme_error_detected)로
+ * 처리되고, 이 파일을 지나지 않는다.
+ *
+ * (기존 주석은 "이 파일이 NVMe 의 nvme_error_detected() 를 호출하는
+ *  경로의 일부를 담당한다" 고 적었으나, 이 파일의 콜백은 CXL 드라이버가
+ *  등록한 것이고 NVMe 와 무관하다. NVMe 의 오류 처리는 err.c 의
+ *  pcie_do_recovery() 가 담당한다.)
+ *
+ * === 주요 함수/구조체 요약 ===
+ * cxl_rch_handle_error()          : aer.c 가 부르는 진입점. RCH 구성이면
+ *                                   CXL 쪽으로 넘기고, 아니면 그냥 돌아간다.
+ * cxl_rch_handle_error_iter()     : 서브트리를 훑으며 CXL 메모리 장치를 찾는다.
+ * cxl_assign_event_handler() / cxl_clear_event_handler() : CXL 코어가
+ *                                   자기 핸들러를 등록하고 해제한다.
+ * is_internal_error()             : 이 오류가 CXL 내부 오류인지 판정한다.
  */
 
 #include <linux/pci.h>				/* NVMe: PCIe 장치 구조체(struct pci_dev)와 버스 타입, AER 헤더 등을 포함하는 PCI 핵심 헤더 */

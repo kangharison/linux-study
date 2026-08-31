@@ -4,7 +4,63 @@
  *
  * Copyright (C) 2024 Intel Corporation
  */
-/* PCI/NVMe: NVMe SSD가 PCIe TLP(Transaction Layer Packet) 오류를 일으킬 때 커널이 헤더/프리픽스를 기록/출력하는 모듈 */
+/*
+ * [한국어 설명] 오류를 낸 TLP 의 헤더를 읽고 출력하는 보조 모듈 (tlp.c)
+ *
+ * === 파일의 역할 ===
+ * PCIe 에서 오류가 나면 하드웨어가 "그때 문제가 된 패킷의 헤더" 를 로그
+ * 레지스터에 남긴다. TLP(Transaction Layer Packet) 헤더는 4바이트씩 4칸,
+ * 즉 16바이트이며, 그 안에 트랜잭션의 종류(읽기/쓰기/완료), 목표 주소,
+ * 요청자 ID, 태그가 들어 있다.
+ *
+ * 이 파일은 그 로그를 읽어(pcie_read_tlp_log) 구조체에 담고, 사람이 읽을
+ * 형태로 출력한다(pcie_print_tlp_log). 하는 일은 그것뿐이지만, 오류를
+ * 진단할 때 가장 결정적인 정보가 여기서 나온다 — 어느 주소로 가던
+ * 어떤 트랜잭션이 실패했는지가 곧 원인의 실마리이기 때문이다.
+ *
+ * 로그의 종류가 둘이다.
+ *   Header Log         - 항상 있다. TLP 헤더 16바이트.
+ *   TLP Prefix Log     - 선택. End-to-End TLP Prefix 를 쓰는 시스템에서
+ *                        추가로 남는다. 최대 4개의 prefix.
+ * 어느 것이 있고 몇 개인지는 AER capability 의 능력 비트가 알려 준다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * 오류 발생 -> aer.c 의 aer_print_error() 또는 dpc.c 의 오류 처리
+ *   -> [이 파일] pcie_read_tlp_log()  : 로그 레지스터를 읽어 구조체로
+ *   -> [이 파일] pcie_print_tlp_log() : 그 구조체를 dmesg 로
+ *
+ * 실행 컨텍스트: 오류 처리 경로에서 불린다. aer.c 쪽은 스레드 문맥,
+ * dpc.c 쪽도 스레드 핸들러다. config 읽기가 있으므로 잠들 수 있는 곳이어야 한다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: pcie/aer.c, pcie/dpc.c — 두 오류 경로가 모두 이 파일을 쓴다.
+ * 아래쪽: access.c 의 config 접근.
+ * 공유 상태: struct pcie_tlp_log — 읽어 온 헤더 4워드와 prefix 들을 담는
+ *   값 구조체다. 전역 상태는 없다.
+ *
+ * === NVMe 관점 ===
+ * NVMe 드라이버는 이 파일의 함수를 직접 부르지 않는다(전수 확인).
+ *
+ * 그러나 NVMe 문제를 추적할 때 이 파일의 출력이 매우 유용하다.
+ * dmesg 에 나오는 다음과 같은 줄이 이 파일의 결과다:
+ *
+ *   nvme 0000:01:00.0: AER:   TLP Header: 40000001 0000000f fedc0000 00000000
+ *
+ * 첫 워드의 상위 비트가 트랜잭션 종류(0x40 = Memory Write)를 나타내고,
+ * 세 번째 워드가 목표 주소다. 그 주소가 NVMe 의 BAR 범위인지, 호스트
+ * 메모리인지, 아니면 전혀 엉뚱한 곳인지를 보면 원인이 좁혀진다.
+ * 예컨대 매핑 해제된 DMA 버퍼의 주소가 찍혀 있으면 use-after-free 이고,
+ * 0 번지 근처면 NULL 포인터가 DMA 주소로 넘어간 것이다.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * pcie_read_tlp_log()   : AER 또는 DPC capability 의 로그 레지스터에서
+ *                         헤더와 prefix 를 읽어 struct pcie_tlp_log 에 담는다.
+ *                         읽을 워드 수는 호출자가 능력 비트를 보고 정해 넘긴다.
+ * pcie_print_tlp_log()  : 그 구조체를 형식에 맞춰 출력한다. prefix 가 있으면
+ *                         함께 찍는다.
+ * struct pcie_tlp_log   : 헤더 4워드(dw[4])와 prefix 배열, 그리고 prefix 가
+ *                         유효한지 표시하는 필드로 이뤄진 값 구조체.
+ */
 
 #include <linux/aer.h>		/* PCI/NVMe: AER(Advanced Error Reporting) 캡ability 정의; NVMe 장치의 PCIe 오류 보고에 사용 */
 #include <linux/array_size.h>	/* PCI/NVMe: ARRAY_SIZE() 매크로: TLP 로그 DWORD 배열 경계 확인 */

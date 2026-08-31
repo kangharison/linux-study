@@ -7,28 +7,64 @@
  */
 
 /*
- * NVMe 관점에서 본 drivers/pci/pcie/portdrv.h
+ * [한국어 설명] 포트 서비스 버스의 내부 자료구조 정의 (portdrv.h)
  *
- * NVMe SSD는 PCIe 엔드포인트로서, 상위 Root/Upstream/Downstream Port가
- * 제공하는 PCIe 포트 서비스에 직접 의존한다. 이 헤더는 PCIe 포트 버스
- * 드라이버가 관리하는 서비스(PME, AER, Hotplug, DPC, BWCTRL)와 서비스
- * 드라이버 등록 인프라, struct pcie_device / pcie_port_service_driver를
- * 정의한다.
+ * === 파일의 역할 ===
+ * portdrv.c 가 구현하는 "포트 서비스 버스" 의 자료구조와 상수를 정의한다.
+ * 이 헤더 하나로 다음이 정해진다.
  *
- * NVMe 호스트 드라이버(drivers/nvme/host/pci.c) 입장에서 중요한 호출 경로:
- *  - pcie_aer_init() / AER 서비스: NVMe SSD의 PCIe 비정상 완료(UR/CA),
- *    링크 다운, poisoned TLP 등을 상위 포트가 보고하면 NVMe 호스트가
- *    복구·리셋·장치 제거를 결정한다.
- *  - pcie_dpc_init() / DPC 서비스: 다운스트림 포트 컨테인먼트로 NVMe
- *    surprise link down 시 데이터 손상을 방지하고 제어된 복구를 제공한다.
- *  - pcie_pme_init() / PME 서비스: NVMe 장치의 D3hot->D0 전환,
- *    ASPM/PM 관련 웨이크 이벤트 처리에 관여한다.
- *  - pcie_hp_init() / 핫플러그 서비스: NVMe SSD 물리적 교체/제거 시
- *    pciehp가 bus rescan을 수행하고 nvme_probe/remove가 호출된다.
- *  - pcie_bwctrl_init() / 대역폭 변경 알림: NVMe Gen4/Gen5 링크 속도·폭
- *    변경 시 알림을 받는다.
- *  - pcie_port_service_register(): 위 서비스 드라이버들이 등록되어
- *    portdrv가 NVMe 상위 포트에 바인딩된다.
+ *   - 서비스의 종류: PCIE_PORT_SERVICE_{PME,AER,HP,DPC,BWCTRL} 다섯 개와
+ *     각각의 SHIFT 값. 마스크는 "이 포트가 제공하는 서비스들" 을 OR 로
+ *     모으는 데, SHIFT 는 서비스별 배열의 인덱스로 쓴다.
+ *   - struct pcie_device: 서비스 하나를 나타내는 가상 장치. 포트 하나에
+ *     대해 서비스 개수만큼 만들어진다.
+ *   - struct pcie_port_service_driver: 서비스 드라이버가 자기를 기술하는
+ *     구조체. 마지막 필드가 struct device_driver 라 커널 드라이버 모델을
+ *     그대로 재사용한다.
+ *   - 각 서비스의 초기화 함수 선언. CONFIG_* 에 따라 실제 구현이거나
+ *     아무것도 하지 않는 인라인 스텁이다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * 이 헤더는 코드가 아니라 계약이다. portdrv.c 가 이 정의대로 가상 장치를
+ * 만들고, 각 서비스 드라이버(aer.c, dpc.c, pme.c, bwctrl.c,
+ * hotplug/pciehp_core.c)가 이 정의대로 자기를 등록한다.
+ *
+ *   portdrv.c        : pcie_device 를 만들어 등록
+ *   aer.c 등          : pcie_port_service_driver 를 채워 등록
+ *   pcie_port_bus_type: 둘의 service 필드와 port_type 을 대조해 짝을 찾는다
+ *
+ * === 타 모듈과의 연결 ===
+ * 포함하는 것: linux/compiler.h 뿐이다. 그만큼 독립적인 헤더다.
+ * 포함되는 곳: drivers/pci/pcie/ 아래의 서비스 드라이버들과 portdrv.c,
+ *   그리고 drivers/pci/hotplug/pciehp_core.c.
+ *
+ * === NVMe 관점 ===
+ * NVMe 드라이버는 이 헤더를 include 하지 않는다. NVMe 는 엔드포인트이고,
+ * 이 헤더는 포트(그 위의 브리지)를 다루기 때문이다.
+ *
+ * 그럼에도 여기 정의된 다섯 서비스가 NVMe 의 동작을 뒷받침한다 —
+ * AER 이 오류를 잡아 복구를 시작하고, DPC 가 링크를 격리하고, HP 가
+ * 핫스왑을 처리하고, PME 가 절전 복귀 신호를 받고, BWCTRL 이 링크 속도
+ * 변화를 알린다. 그 자세한 관계는 각 필드의 주석과 portdrv.c 의 헤더에
+ * 적어 두었다.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * PCIE_PORT_SERVICE_* / *_SHIFT : 서비스 종류를 비트와 인덱스로 표현.
+ * PCIE_PORT_DEVICE_MAXSERVICES  : 5. 서비스 개수와 맞춰야 한다.
+ * PCIE_ANY_PORT                 : 포트 종류를 가리지 않는다는 표시(~0).
+ * struct pcie_device            : 서비스 가상 장치. irq / port / service /
+ *                                 priv_data / device 다섯 필드.
+ * struct pcie_port_service_driver : 서비스 드라이버. probe/remove 와
+ *                                 PM 콜백들, slot_reset, 그리고 매칭용
+ *                                 port_type / service.
+ * to_pcie_device() / to_service_driver() : container_of 로 임베디드
+ *                                 구조체에서 바깥 구조체를 되찾는 매크로.
+ * set_service_data() / get_service_data() : priv_data 접근 헬퍼.
+ * pcie_aer_init() / pcie_hp_init() / pcie_pme_init() / pcie_dpc_init() /
+ * pcie_bwctrl_init()            : 각 서비스의 초기화. CONFIG_* 가 꺼져 있으면
+ *                                 0 을 돌려주는 빈 인라인으로 대체된다.
+ * pcie_port_service_register() / _unregister() : 서비스 드라이버 등록/해제.
+ * pcie_port_bus_type            : 이 가상 버스의 bus_type.
  */
 
 #ifndef _PORTDRV_H_ /* NVMe: PCIe 포트 버스 헤더 중복 포함 방지 */

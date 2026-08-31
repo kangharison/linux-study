@@ -18,36 +18,75 @@
  */
 
 /*
- * ===================================================================
- * NVMe PCIe 호스트 드라이버 관점 파일 요약
- * -------------------------------------------------------------------
- * 본 파일(drivers/pci/pcie/bwctrl.c)은 PCIe 링크 대역폭(Link Speed/Width)
- * 변화를 감지하고, 운영체제가 원하는 target link speed를 설정하는 PCIe
- * bandwidth controller 서비스 드라이버이다.
+ * [한국어 설명] 링크 속도 변화를 감지하고 속도를 제어하는 서비스 (bwctrl.c)
  *
- * NVMe SSD 입장에서 본 파일은 다음과 밀접하게 연관된다.
- *   - NVMe 장치가 연결된 Root Port/Downstream Port의 현재 링크 속도 캐싱
- *     및 sysfs 노출
- *   - 링크 속도/폭 변경 시 Bandwidth Change Notification(BCN) 인터럽트 처리
- *   - NVMe 성능에 직접 영향을 주는 link speed downgrade/upgrade 감지
- *   - thermal cooling device 등록을 통한 NVMe 링크 속도 기반 쓰로틀링
+ * === 파일의 역할 ===
+ * PCIe 링크는 동작 중에 속도와 폭이 바뀔 수 있다. 신호 품질이 나빠지면
+ * 하드웨어가 스스로 속도를 낮추고, 전력 관리 정책이 폭을 줄이기도 한다.
+ * 이 파일은 그 변화를 알림(Link Bandwidth Notification)으로 받아 처리한다.
  *
- * 일반적인 NVMe 드라이버와의 연관 경로:
- *   NVMe SSD -> Root Port -> pcie_bwctrl_driver (PCIE_PORT_SERVICE_BWCTRL)
- *   - pcie_bwnotif_irq(): 링크 상태 변화 시 호출, NVMe 장치의 PCIe 링크
- *     속도 변화를 OS에 알림
- *   - pcie_set_target_speed(): NVMe 장치 아래 링크 속도를 요청 속도로
- *     변경(예: cooling policy 또는 사용자 sysfs 요청)
- *   - pcie_update_link_speed(): 변경된 링크 속도를 bus->cur_bus_speed에
- *     반영. 현재 링크 속도를 조회하는 실제 API 는 pcie_get_speed_cap()(pci.c:3681 등)
- *     이며, pci_get_max_link_speed() 라는 함수는 커널에 존재하지 않는다.
- *     참고로 drivers/nvme/ 에는 이들을 호출하는 코드가 없다 — NVMe 드라이버는
- *     링크 속도를 직접 확인하지 않고, 대역폭 변화는 이 파일이 알아서 처리한다
+ * 두 가지 알림 비트가 있다.
+ *   LBMS (Link Bandwidth Management Status) - 소프트웨어가 요청한 속도
+ *         변경이 끝났을 때 선다.
+ *   LABS (Link Autonomous Bandwidth Status) - 하드웨어가 스스로 속도를
+ *         바꿨을 때 선다. 이쪽이 문제 신호다 — 링크가 불안정하다는 뜻이다.
  *
- * 본 파일은 PCIe native hotplug, PTM(Precision Time Measurement), DOE,
- * ROM 등과 직접 연관되지는 않지만, NVMe SSD의 PCIe link 품질/속도를
- * 모니터링하고 제어하는 핵심 서비스 드라이버이다.
- * ===================================================================
+ * 하는 일은 둘이다.
+ *   1) 감지 - 알림 인터럽트를 받아 현재 링크 속도를 다시 읽고,
+ *      pci_dev 의 캐시(sysfs 의 current_link_speed)를 갱신한다.
+ *      그러지 않으면 sysfs 값이 실제와 어긋난 채로 남는다.
+ *   2) 제어 - 속도 상한을 지정할 수 있게 한다(pcie_set_target_speed).
+ *      LNKCTL2 의 Target Link Speed 를 바꾸고 링크를 재훈련한다.
+ *      thermal cooling device 로도 노출되어, 발열이 심하면 속도를 낮춰
+ *      전력을 줄이는 데 쓸 수 있다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * 등록: portdrv 가 BWCTRL 서비스를 가진 포트에 바인딩
+ *         -> pcie_bwnotif_probe() -> IRQ 등록, LNKCTL 의 알림 활성화
+ *
+ * 발생: 링크 속도/폭 변화
+ *         -> [이 파일] pcie_bwnotif_irq()(하드 IRQ)
+ *            -> pcie_bwnotif_irq_thread()(스레드)
+ *               -> pcie_update_link_speed() 로 캐시 갱신
+ *               -> LBMS/LABS 상태 비트를 지운다(RW1C)
+ *
+ * 제어: thermal 코어 또는 커널 내부
+ *         -> [이 파일] pcie_set_target_speed()
+ *            -> LNKCTL2 설정 -> 링크 재훈련 -> 완료 대기
+ *
+ * 실행 컨텍스트: IRQ 핸들러는 하드 IRQ, 실제 처리는 스레드. 속도 제어는
+ * 프로세스 컨텍스트(재훈련 대기가 있다).
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: pcie/portdrv.c(서비스 등록), thermal 서브시스템(cooling device).
+ * 아래쪽: pci.c 의 pcie_update_link_speed(), access.c 의 capability 접근.
+ * 공유 상태: struct pci_dev 의 current_link_speed / current_link_width
+ *   (sysfs 에 노출되는 캐시), 그리고 이 파일이 관리하는 속도 상한 목록.
+ *
+ * === NVMe 관점 ===
+ * NVMe 드라이버는 이 파일의 함수를 직접 부르지 않는다(전수 확인).
+ *
+ * NVMe 학습에서 이 파일이 의미 있는 지점은 진단이다. NVMe SSD 의 성능이
+ * 갑자기 떨어졌을 때, 링크가 Gen4 에서 Gen1 으로 내려앉은 것이 원인일 수
+ * 있다. 하드웨어가 신호 품질 문제로 스스로 낮춘 경우이며, LABS 알림이
+ * 그것을 잡아낸다.
+ *
+ * 이 서비스가 없으면 sysfs 의 current_link_speed 가 옛 값 그대로 남아,
+ * 실제로는 느려졌는데도 정상으로 보인다. 그래서 이 파일의 진짜 가치는
+ * "속도를 바꾸는 것" 보다 "바뀐 것을 정확히 알려 주는 것" 에 있다.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * pcie_bwnotif_probe()        : 포트에 이 서비스를 붙인다. IRQ 를 등록하고
+ *                               LNKCTL 의 LBMIE/LABIE 알림 비트를 켠다.
+ * pcie_bwnotif_irq()          : 하드 IRQ. 자기 인터럽트인지 확인하고
+ *                               스레드를 깨운다.
+ * pcie_bwnotif_irq_thread()   : 링크 속도를 다시 읽어 캐시를 갱신하고
+ *                               상태 비트를 지운다.
+ * pcie_update_link_speed()    : 하위 버스의 속도 캐시를 갱신한다(pci.c 정의).
+ * pcie_set_target_speed()     : 링크 속도 상한을 지정하고 재훈련한다.
+ * pcie_bwctrl_select_speed()  : 여러 제약(thermal, 사용자 지정) 중
+ *                               가장 낮은 값을 고른다.
+ * pcie_bwnotif_enable() / _disable() : 알림을 켜고 끈다.
  */
 
 #define dev_fmt(fmt) "bwctrl: " fmt /* NVMe: dmesg 등에서 메시지 접두사로 "bwctrl:" 사용. */

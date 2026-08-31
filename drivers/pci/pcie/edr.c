@@ -7,46 +7,70 @@
  */
 
 /*
- * ===================================================================
- * NVMe PCIe 호스트 드라이버 관점 파일 요약
- * -------------------------------------------------------------------
- * 본 파일(drivers/pci/pcie/edr.c)은 ACPI 기반 PCI Error Disconnect
- * Recover(EDR)를 구현한다. EDR은 DPC(Downstream Port Containment)
- * 이벤트가 발생해 하위 장치(예: NVMe SSD)의 PCIe 링크가 단절된 후
- * 펌웨어와 커널이 협력하여 복구하는 메커니즘이다.
+ * [한국어 설명] 펌웨어가 DPC 를 소유한 경우의 오류 복구 (edr.c)
  *
- * NVMe SSD 관련 호출 경로 및 의미:
- *   - NVMe 장치는 PCIe endpoint로 Root Port/Downstream Port 아래에 연결.
- *   - 상위 포트에서 Uncorrectable error(ERR_FATAL/ERR_NONFATAL)가 감지되면
- *     DPC가 트리거되어 해당 포트의 링크를 끊고 하위 장치(NVMe 포함)를
- *     disconnect 상태로 만든다.
- *   - ACPI NOTIFY_DISCONNECT_RECOVER(0xF) 알림이 운영체제로 전달되면
- *     edr_handle_event()가 실행된다.
- *   - edr_handle_event()는 DPC 포트를 찾고, dpc_process_error()와
- *     pcie_do_recovery()를 호출해 표준 PCIe AER/Error Recovery를 수행.
- *   - pcie_do_recovery()는 하위 endpoint 드라이버(여기서는 NVMe)의
- *     pci_error_handlers 콜백(error_detected -> slot_reset -> resume)을
- *     역순으로 호출하여 NVMe 컨트롤러를 재초기화한다.
- *   - 복구 성공/실패 여부를 _OST(0xF, BDF<<16 | status)로 펌웨어에 회신.
+ * === 파일의 역할 ===
+ * DPC 로 링크가 끊긴 뒤의 복구는 보통 커널이 직접 한다(pcie/dpc.c).
+ * 그런데 펌웨어가 DPC 소유권을 커널에게 넘기지 않는 플랫폼이 있다.
+ * 그 경우 커널은 DPC 레지스터를 만질 수 없고, 대신 펌웨어가 ACPI 알림으로
+ * "이러이러한 일이 있었다" 고 알려 준다. 그 알림을 받아 복구를 진행하는
+ * 것이 EDR(Error Disconnect Recover)이며 이 파일의 구현이다.
  *
- * NVMe 드라이버 입장에서 본 핵심 지점:
- *   - NVMe BAR mmap, doorbell, DMA 등이 동작하려면 PCIe 링크가 정상이어야
- *     함. DPC 이벤트는 이 링크를 강제로 끊으므로 NVMe I/O가 멈춘다.
- *   - pcie_do_recovery()가 NVMe error_detected(state=pci_channel_io_frozen)
- *     를 호출하면 NVMe는 컨트롤러를 중지하고 NEED_RESET 또는 DISCONNECT
- *     를 반환.
- *   - 이후 slot_reset에서 PCIe 링크가 재활성화되고 NVMe reset_work가
- *     스케줄되어 NVMe admin/IO 큐를 재생성한다.
- *   - EDR은 결국 NVMe 장치의 "링크 단절 후 복구"를 ACPI_DSM/_OST
- *     프레임워크로 구동하는 glue 코드이다.
+ * 절차가 펌웨어와의 협업이라 독특하다.
+ *   1) 하위에서 치명적 오류 -> 펌웨어가 DPC 로 링크를 격리한다.
+ *   2) 펌웨어가 ACPI Notify(0x0F, EDR)를 보낸다.
+ *   3) [이 파일] edr_handle_event() 가 그것을 받는다.
+ *   4) _DSM 메서드로 "어느 포트에서 일어난 일인가" 를 묻는다
+ *      (EDR_PORT_LOCATE_DSM).
+ *   5) 커널이 pcie_do_recovery() 로 표준 복구 절차를 진행한다.
+ *      드라이버 콜백들이 여기서 불린다.
+ *   6) 결과를 다시 _DSM 으로 펌웨어에게 알린다(EDR_PORT_ENABLE_DSM).
+ *      성공했다고 알려야 펌웨어가 DPC 트리거를 해제해 링크를 되살린다.
  *
- * 본 파일이 직접 호출하는 핵심 함수:
- *   acpi_enable_dpc()        : 펌웨어 DPC enable _DSM 호출
- *   acpi_dpc_port_get()      : DPC 이벤트가 발생한 포트의 BDF 획득
- *   acpi_send_edr_status()   : _OST를 통해 펌웨어에 복구 결과 전달
- *   edr_handle_event()       : ACPI 알림 수신 후 전체 복구 시퀀스 수행
- *   pci_acpi_add/remove_edr_notifier() : EDR 알림 핸들러 등록/해제
- * ===================================================================
+ * 6번이 이 파일의 존재 이유다. 커널이 마음대로 DPC 상태를 지울 수 없으므로,
+ * 복구 결과를 펌웨어에게 보고하고 펌웨어가 마무리하게 해야 한다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * 등록: pci-acpi.c 가 ACPI 장치에 알림 핸들러를 다는 경로
+ *         -> [이 파일] pci_acpi_add_edr_notifier()
+ *
+ * 발생: 펌웨어의 ACPI Notify(0x0F)
+ *         -> [이 파일] edr_handle_event()(ACPI 알림 문맥)
+ *            -> 워크큐로 넘겨 edr_work_fn 에서 처리
+ *               -> acpi_dpc_port_get() 으로 문제의 포트를 알아낸다
+ *               -> pcie_do_recovery() [err.c] 로 표준 복구
+ *               -> acpi_send_edr_status() 로 결과 보고
+ *
+ * 실행 컨텍스트: 알림 자체는 ACPI 문맥에서 오지만, 실제 처리는 워크큐로
+ * 넘긴다. 복구가 오래 걸리고 잠들 수 있기 때문이다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: drivers/acpi/ 의 알림 전달, pci-acpi.c.
+ * 아래쪽: pcie/err.c 의 pcie_do_recovery(), pcie/dpc.c 의 상태 조회
+ *   (커널이 DPC 를 소유하지 않아도 상태 레지스터를 읽을 수는 있다).
+ * 옆쪽: pcie/dpc.c — 소유권에 따라 둘 중 하나만 동작한다.
+ *   pcie_aer_is_native() / dpc 소유권 판정이 그 갈림길이다.
+ *
+ * === NVMe 관점 ===
+ * NVMe 드라이버는 이 파일의 함수를 직접 부르지 않는다(전수 확인).
+ *
+ * NVMe 와의 관계는 dpc.c 와 같다 — NVMe SSD 에서 치명적 오류가 나거나
+ * 예고 없이 뽑혔을 때 링크가 격리되고, 그 복구 과정에서 NVMe 가 등록한
+ * error_detected / slot_reset / resume 콜백이 불린다. 차이는 그 절차를
+ * 커널이 주도하느냐(dpc.c) 펌웨어와 협업하느냐(이 파일)뿐이다.
+ *
+ * 실무적으로는 어느 쪽이 동작하는지가 플랫폼에 달려 있다. dmesg 에
+ * "DPC: containment event" 가 보이면 dpc.c 가, "EDR: ..." 가 보이면
+ * 이 파일이 처리한 것이다.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * pci_acpi_add_edr_notifier()  : ACPI 장치에 EDR 알림 핸들러를 단다.
+ * pci_acpi_remove_edr_notifier(): 그 반대.
+ * edr_handle_event()           : ACPI 알림 진입점. 워크큐로 넘긴다.
+ * acpi_dpc_port_get()          : _DSM 으로 문제가 난 포트를 알아낸다.
+ *                                펌웨어만 아는 정보라 물어봐야 한다.
+ * acpi_send_edr_status()       : 복구 결과를 _DSM 으로 펌웨어에 보고한다.
+ *                                이것을 해야 펌웨어가 링크를 되살린다.
  */
 
 #define dev_fmt(fmt) "EDR: " fmt /* NVMe: EDR 관련 dmesg 메시지 앞에 "EDR: " 접두사를 붙이는 포맷 매크로. */

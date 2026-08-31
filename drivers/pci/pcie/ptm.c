@@ -5,31 +5,79 @@
  */
 
 /*
- * ===================================================================
- * NVMe PCIe 호스트 드라이버 관점 파일 요약
- * -------------------------------------------------------------------
- * 본 파일(drivers/pci/pcie/ptm.c)은 PCI Express Precision Time Measurement
- * (PTM) 기능을 탐지, 초기화, 활성화, 비활성화, 저장/복원, 그리고 debugfs
- * 인터페이스로 노출하는 코드를 담고 있다.
- * NVMe SSD는 PCIe Endpoint로서 PTM Requester 역할을 할 수 있으며, PTM을
- * 통해 호스트와 NVMe 컨트롤러 간 정밀 시간 동기화가 가능하다. 이는 NVMe
- * 타임스탬프, 지연 시간 측정, 도어벨/완료 큐 타이밍, telemetry 로그의 시간
- * 정렬 등에 활용될 수 있다.
- * NVMe 관련 주요 호출 경로:
- *   - pci_bus_add_device / pci_device_probe 시 pci_ptm_init()이 호출되어
- *     NVMe 장치의 PTM capability를 탐지하고, dev->ptm_cap, ptm_requester,
- *     ptm_root, ptm_granularity를 초기화한다.
- *   - NVMe 드라이버가 PTM 기반 기능을 사용하려면 pci_enable_ptm(pdev)를
- *     호출한다. 이때 상위 Root Port/Switch가 PTM Responder/Root를 지원해야
- *     하며, pci_disable_ptm(pdev)로 해제한다.
- *   - 시스템 suspend/resume 시 pci_save_ptm_state(), pci_restore_ptm_state(),
- *     pci_suspend_ptm(), pci_resume_ptm()이 NVMe 장치의 PTM 제어 레지스터를
- *     저장하고 복원한다.
- *   - NVMe 컨트롤러나 Root Complex 일부에서는 pcie_ptm_create_debugfs()로
- *     PTM context를 debugfs에 노출할 수 있다.
- * PTM 메시지는 link local이므로 NVMe Endpoint와 PTM Root 사이의 모든 중간
- * 포트가 PTM을 지원하고 enable되어야 한다.
- * ===================================================================
+ * [한국어 설명] 호스트와 장치의 시계를 나노초 단위로 맞추는 기능 (ptm.c)
+ *
+ * === 파일의 역할 ===
+ * PTM(Precision Time Measurement)은 PCIe 계층의 장치들이 같은 시각을
+ * 공유하게 해 주는 기능이다. 링크를 오가는 왕복 지연을 하드웨어가 직접
+ * 측정하고 그것을 보정해, 호스트와 장치의 시계를 나노초 수준으로 맞춘다.
+ *
+ * 역할이 셋으로 나뉜다.
+ *   Root      - 기준 시계를 갖는다. 보통 Root Complex 다.
+ *   Responder - 요청을 받아 자기 시각을 알려 주는 중간 노드. 스위치다.
+ *   Requester - 시각을 물어 자기 시계를 맞추는 엔드포인트.
+ * 요청이 Requester 에서 Root 까지 올라가려면 그 경로의 모든 중간 노드가
+ * Responder 여야 한다. 하나라도 PTM 을 모르면 그 경로는 성립하지 않는다.
+ * pci_ptm_init() 이 그 연쇄를 따라가며 판정한다.
+ *
+ * granularity(정밀도)도 경로 전체가 함께 결정한다. 각 노드가 "나는
+ * 몇 나노초까지 보장한다" 고 밝히고, 경로에서 가장 나쁜 값이 전체의
+ * 정밀도가 된다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * 열거: probe.c 의 pci_init_capabilities()
+ *         -> [이 파일] pci_ptm_init()
+ *            -> capability 를 읽고, 상위로 거슬러 올라가며 경로가
+ *               성립하는지와 정밀도를 계산해 dev->ptm_* 에 캐시한다
+ *
+ * 사용: PTM 이 필요한 드라이버가
+ *         -> [이 파일] pci_enable_ptm(pdev, &granularity)
+ *            -> 경로상의 모든 노드에서 PTM Enable 을 켠다
+ *
+ * 복원: 전원 복귀 후 pci_restore_state()
+ *         -> [이 파일] pci_restore_ptm_state()
+ *
+ * 디버그: debugfs 에 각 노드의 PTM 상태를 노출한다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. 열거와 드라이버 초기화 경로다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: probe.c(열거), pci.c(전원 복원), 그리고 PTM 을 쓰는 드라이버들.
+ * 아래쪽: access.c 의 config 접근, debugfs.
+ * 공유 상태: struct pci_dev 의 ptm_cap(capability 오프셋),
+ *   ptm_root / ptm_enabled / ptm_granularity, 그리고 상위 노드를 가리키는
+ *   연결. 경로 전체가 함께 켜져야 하므로 이 연결이 필요하다.
+ *
+ * === NVMe 관점 ===
+ * NVMe 드라이버는 PTM 을 전혀 쓰지 않는다. drivers/nvme/ 전체에서
+ * "ptm" 이라는 문자열의 등장이 0건이다(주석 제거 후 검색).
+ *
+ * NVMe 스펙에도 시각 관련 기능이 있지만 다른 방식이다 —
+ * Set Features 의 Timestamp(Feature Identifier 0x0E)로 호스트가
+ * 밀리초 단위 시각을 컨트롤러에 알려 준다. 정밀도가 PTM 과 비교할 수
+ * 없이 낮고, 목적도 다르다(로그의 시간 기록용이지 동기화용이 아니다).
+ * drivers/nvme/ 에 NVME_FEAT_TIMESTAMP 가 쓰이는 것이 그것이다.
+ *
+ * PTM 이 실제로 쓰이는 것은 정밀한 시각이 필요한 장치들이다 —
+ * 오디오 인터페이스, 산업용 이더넷(TSN), 계측 장비 같은 것들이다.
+ *
+ * (기존 주석은 "NVMe 컨트롤러가 PTM Requester 역할을 할 수 있으며,
+ *  NVMe 타임스탬프와 telemetry 로그의 시간 정렬에 활용될 수 있다",
+ *  "NVMe 드라이버가 PTM 기반 기능을 쓰려면 pci_enable_ptm 을 호출한다"
+ *  고 적었으나, drivers/nvme/ 에 그런 호출도 PTM 이라는 언급도 없다.
+ *  하드웨어가 지원할 가능성과 드라이버가 실제로 쓰는 것은 다른 문제이므로,
+ *  검증된 사실로 대체했다.)
+ *
+ * === 주요 함수/구조체 요약 ===
+ * pci_ptm_init()          : capability 를 찾고, 상위 경로가 PTM 을 지원하는지
+ *                           확인해 이 장치가 Requester 가 될 수 있는지 판정한다.
+ * pci_disable_ptm()       : PTM Enable 을 끈다.
+ * pci_save_ptm_state() / pci_restore_ptm_state() : 전원 복귀 대비 저장/복원.
+ * pci_enable_ptm()        : 경로상의 모든 노드에서 PTM 을 켜고, 최종
+ *                           정밀도를 호출자에게 알려 준다.
+ * pci_ptm_debugfs_init()  : debugfs 에 상태를 노출한다. 경로가 왜 성립하지
+ *                           않는지 진단할 때 쓴다.
+ * struct pci_ptm_debugfs  : debugfs 항목 하나의 상태.
  */
 
 #include <linux/bitfield.h> /* NVMe: 비트 필드 매크로 활용. */
