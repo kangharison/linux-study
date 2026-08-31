@@ -7,6 +7,65 @@
  *
  * 14/04/2005 Initial version, colin.king@philips.com
  */
+/*
+ * [한국어 설명] ARM Versatile 개발 보드의 PCI 호스트 (pci-versatile.c)
+ *
+ * === 파일의 역할 ===
+ * ARM 이 만든 Versatile/RealView 계열 개발 보드의 PCI 호스트 브리지를
+ * 다룬다. 2004년 필립스에서 시작된 오래된 코드이고, 지금은 그 보드를
+ * 에뮬레이션하는 QEMU 에서 주로 보게 된다.
+ *
+ * 이 파일이 흥미로운 이유는 PCIe 이전의 PCI 가 어떻게 생겼는지 보여 주기
+ * 때문이다. PCIe 는 점대점 링크지만 원래 PCI 는 여러 장치가 하나의 버스를
+ * 공유했고, config 접근도 방식이 달랐다.
+ *
+ * 여기서 config 접근은 창(window)을 통해 이뤄진다. 특정 물리 주소 범위가
+ * config space 로 연결되어 있고, 버스와 장치 번호를 주소 비트에 실어
+ * 접근한다. 지금의 ECAM 과 발상은 비슷하지만 비트 배치가 다르다.
+ *
+ * 자원 창도 하드웨어에 직접 설정한다. 요즘 SoC 는 iATU 같은 유연한 변환
+ * 장치를 쓰지만, 이 보드는 고정된 몇 개의 창에 시작 주소만 넣는 식이다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * 디바이스 트리에 arm,versatile-pci 가 있으면
+ *   -> [이 파일] versatile_pci_probe()
+ *      -> 레지스터 창 매핑, 자원 창 설정
+ *      -> pci_host_probe() -> PCI 코어 열거
+ *
+ * 실행 컨텍스트: probe 는 프로세스 컨텍스트. config 접근 함수는 PCI 코어의
+ * 잠금 아래에서 불린다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: 플랫폼 버스.
+ * 아래쪽: PCI 코어(probe.c 의 열거, access.c 의 config 접근 경로).
+ * 공유 상태: 매핑한 레지스터 베이스 주소들.
+ *
+ * === NVMe 관점 ===
+ * NVMe 와 직접 관계가 없다(전수 확인 — 함수 호출 0건). 이 보드에
+ * NVMe 를 꽂을 일도 사실상 없다.
+ *
+ * 그래도 배울 점은 있다. 지금 NVMe 가 쓰는 PCIe 의 config 접근, BAR,
+ * 자원 창 같은 개념이 전부 이 시절 PCI 에서 온 것이고, 이 파일은 그것을
+ * 가장 벌거벗은 형태로 보여 준다. NVMe 드라이버가 pci_resource_start()
+ * 로 얻는 주소가 어떻게 정해지는지 궁금할 때 참고가 된다.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * versatile_pci_probe()   : 레지스터를 매핑하고 자원 창을 설정한 뒤 열거한다.
+ *                           이 파일에서 실질적인 일을 하는 유일한 함수다.
+ * versatile_map_bus()     : config 접근의 핵심. 버스·devfn·오프셋을 받아
+ *                           실제로 읽고 쓸 가상 주소를 돌려준다. 나머지
+ *                           읽기·쓰기는 커널의 범용 구현(pci_generic_config_*)
+ *                           에 맡기므로, 이 보드에 고유한 것은 주소 계산뿐이다.
+ * versatile_pci_slot_ignore : 무시할 슬롯을 지정하는 모듈 파라미터.
+ *                           이 보드에는 실제로 아무것도 없는 슬롯 위치가 있어
+ *                           거기까지 탐색하면 버스 오류가 나기 때문이다.
+ * pci_versatile_ops       : map_bus 와 범용 읽기·쓰기를 묶은 표.
+ * versatile_cfg_base[]    : config 창 두 개의 베이스 주소. 타입 0(바로 아래
+ *                           장치)과 타입 1(브리지 너머)을 따로 매핑한다.
+ * versatile_pci_of_match  : 지원 compatible.
+ * versatile_pci_driver    : 플랫폼 드라이버 정의.
+ */
+
 #include <linux/kernel.h>		/* PCI/NVMe: 커널 기본 타입/매크로 포함 */
 #include <linux/module.h>		/* PCI/NVMe: module_init/module_platform_driver 등 모듈 등록용 */
 #include <linux/of_address.h>		/* PCI/NVMe: DT 'reg' 주소 파싱, BAR 매핑 시 참조 */
