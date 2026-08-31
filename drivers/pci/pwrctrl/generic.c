@@ -5,26 +5,53 @@
  */
 
 /*
- * NVMe 관점 요약:
- * 이 드라이버는 PCIe 슬롯에 공급되는 전원/클록/리셋 시퀀스를 제어하는
- * generic PCI power control 드라이버이다. NVMe SSD는 PCIe 엔드포인트로
- * PCIe 슬롯(또는 Root Port 뒤의 링크)에 연결되므로, 이 드라이버가 전원을
- * 켜고 끄는 동작은 NVMe 장치의 생사, 링크 트레이닝, 버스 재스캔,
- * 핫플러그/핫리묶에 직접 영향을 준다.
+ * [한국어 설명] DeviceTree 서술만으로 동작하는 범용 전원 제어 드라이버 (pwrctrl/generic.c)
  *
- * NVMe 호스트 드라이버(drivers/nvme/host/pci.c)가 동작하기 위해서는
- * 먼저 PCIe Root Complex/Root Port/슬롯 쪽 전원과 클록이 안정적으로
- * 공급되어야 하며, 그 후에야 PCI core가 bus scan을 수행하고 NVMe
- * 장치를 발견하여 nvme_probe()가 호출된다. 반대로 전원을 끄면 링크가
- * 다울되고 NVMe 장치는 사라지며, nvme_remove()가 호출될 수 있다.
+ * === 파일의 역할 ===
+ * PCIe 슬롯에 전원을 넣는 가장 단순한 경우를 처리한다. DT 에 레귤레이터
+ * 목록이 적혀 있으면 그것을 순서대로 켜고, pwrctrl 코어에 "준비됐다" 고
+ * 알리는 것이 전부다.
  *
- * 주요 호출 경로:
- *   platform_driver probe(slot_pwrctrl_probe)
- *     -> pci_pwrctrl_init() + devm_pci_pwrctrl_device_set_ready()
- *        => PCI power control subsystem에 등록
- *     -> PCIe core/portdrv가 필요 시 slot_pwrctrl_power_on/off 호출
- *        => regulator/clk/pwrseq를 통해 슬롯 전원/클록/리셋 제어
- *        => NVMe 장치의 PCIe 링크/ECAM 가시성 변경
+ * 특별한 순서 제약이나 클럭 조작이 필요한 보드는 자기 전용 드라이버를
+ * 쓰지만(예: 같은 디렉터리의 tc9563), 단순히 전원만 넣으면 되는 보드는
+ * 이 드라이버 하나로 충분하다. DT 의 compatible 문자열로 매칭된다.
+ *
+ * devm_ 계열(devres)을 적극적으로 쓴다는 점이 눈에 띈다. 레귤레이터 획득,
+ * 활성화, pwrctrl 등록이 모두 devres 로 관리되어, probe 가 실패하거나
+ * 드라이버가 떨어질 때 커널이 역순으로 알아서 되돌린다. 그래서 이 파일에는
+ * 명시적인 에러 정리 코드가 거의 없다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * pwrctrl/core.c 가 DT 를 보고 만든 platform device
+ *   -> 드라이버 코어가 compatible 로 이 드라이버를 바인딩
+ *      -> [이 파일] pci_pwrctrl_generic_probe()
+ *         -> devm_regulator_bulk_get_enable() 로 레귤레이터를 켜고
+ *         -> devm_pci_pwrctrl_device_set_ready() 로 코어에 알린다
+ *            -> 코어가 버스 재스캔을 예약 -> 장치 발견
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트(probe).
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: 플랫폼 드라이버 코어.
+ * 아래쪽: pwrctrl/core.c 의 인프라, regulator 서브시스템.
+ * 공유 상태: struct pci_pwrctrl 하나.
+ *
+ * === NVMe 관점 ===
+ * NVMe 드라이버와 직접 관련이 없다(전수 확인).
+ *
+ * 임베디드 보드에 NVMe 를 붙였고 그 슬롯의 전원이 DT 에 단순 레귤레이터로
+ * 기술돼 있다면, 이 드라이버가 전원을 넣은 뒤에야 NVMe 가 열거된다.
+ * 자세한 흐름은 pwrctrl/core.c 의 헤더 참고.
+ *
+ * (기존 주석은 이 드라이버가 "전원/클록/리셋 시퀀스" 를 제어한다고 적었으나,
+ *  이 파일이 실제로 다루는 것은 레귤레이터뿐이다. 클럭과 리셋을 다루는
+ *  것은 같은 디렉터리의 보드 전용 드라이버들이다.)
+ *
+ * === 주요 함수/구조체 요약 ===
+ * pci_pwrctrl_generic_probe()  : DT 의 레귤레이터 목록을 켜고 코어에 알린다.
+ *                                devres 덕분에 정리 코드가 필요 없다.
+ * pci_pwrctrl_generic_dt_ids[] : 이 드라이버가 담당할 DT compatible 목록.
+ * pci_pwrctrl_generic_driver   : 플랫폼 드라이버 구조체.
  */
 
 #include <linux/clk.h>		/* NVMe: PCIe Root Port/슬롯에 공급되는 bus clock 정의 */
@@ -112,7 +139,7 @@ static int slot_pwrctrl_power_off(struct pci_pwrctrl *pwrctrl)
 
 	/*
 	 * NVMe: power sequencer가 구성된 경우, 안전한 전원 오프 시퀀스를
-	 *       통해 NVMe 슬롯 전원을 내린다. 핫리묶 시 데이터 손상 방지.
+	 *       통해 NVMe 슬롯 전원을 내린다. 핫리무브 시 데이터 손상 방지.
 	 */
 	if (slot->pwrseq) {
 		/* NVMe: 시퀀서에 의해 슬롯 전원/리셋 순차적 차단 */

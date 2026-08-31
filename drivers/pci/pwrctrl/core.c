@@ -4,41 +4,71 @@
  */
 
 /*
- * ===================================================================
- * NVMe PCIe 호스트 드라이버 관점 파일 요약
- * -------------------------------------------------------------------
- * 본 파일(drivers/pci/pwrctrl/core.c)은 PCI 장치의 전원 제어(power control)
- * 인프라를 담당한다. Device Tree 기반 플랫폼에서 PCI host controller 아래
- * 연결된 endpoint(대표적으로 NVMe SSD)에 대한 전원 순서(power sequencing)를
- * 관리한다.
+ * [한국어 설명] 슬롯에 전원을 넣고 장치가 나타나기를 기다리는 인프라 (pwrctrl/core.c)
  *
- * NVMe SSD 입장에서 본 파일의 역할:
- *   - NVMe endpoint가 탑재된 보드/슬롯의 전원 레일/핀을 켜고 끄는
- *     pwrctrl platform device를 생성/제거한다.
- *   - pci_pwrctrl_device_set_ready()가 호출되면 NVMe 장치가 PCI bus에서
- *     detect될 수 있도록 bus rescan이 비동기적으로 시작된다. 이후 NVMe
- *     드라이버(drivers/nvme/host/pci.c)의 nvme_probe()가 호출되어
- *     BAR0 doorbell 영역을 iomap하고 queue를 설정한다.
- *   - pci_pwrctrl_device_unset_ready() 및 power_off_devices()는 NVMe 장치를
- *     안전하게 power-down하기 위해 bus notifier를 제거하고 전원을 차단한다.
- *   - OF node를 공유하는 pwrctrl platform device와 실제 PCI device(예: NVMe)
- *     사이에서 중복 pinctrl bind를 방지하기 위해 of_node_reused를 표시한다.
+ * === 파일의 역할 ===
+ * 임베디드 보드에서는 PCIe 슬롯의 전원과 클럭이 자동으로 들어오지 않는다.
+ * 전원 레귤레이터를 켜고, 클럭을 공급하고, 리셋 핀을 풀어 주는 순서를
+ * 소프트웨어가 밟아야 한다. 그 순서를 담당하는 것이 pwrctrl 드라이버들이고,
+ * 이 파일은 그들이 공유하는 인프라를 제공한다.
  *
- * 일반적인 NVMe 관련 호출 경로:
- *   host controller probe
- *     -> pci_pwrctrl_create_devices()   : DT 하위 노드에 pwrctrl pdev 생성
- *     -> pci_pwrctrl_power_on_devices() : NVMe slot 전원 켜기
- *     -> pci_pwrctrl_device_set_ready() : bus rescan, NVMe detect
- *     -> nvme_probe()                   : NVMe PCIe 드라이어 바인딩
- *   suspend/shutdown/제거:
- *     -> nvme_remove()                  : NVMe 드라이버 언바인딩
- *     -> pci_pwrctrl_device_unset_ready()
- *     -> pci_pwrctrl_power_off_devices(): NVMe slot 전원 끄기
- *     -> pci_pwrctrl_destroy_devices()  : pwrctrl pdev 제거
+ * 문제의 구조가 흥미롭다. PCI 열거는 "장치가 이미 거기 있다" 를 전제로
+ * 하는데, 여기서는 전원을 넣기 전까지 장치가 존재하지 않는다. 그래서
+ * 순서가 뒤집힌다 —
+ *   1) DeviceTree 에 "이 슬롯에는 전원 제어가 필요하다" 고 적혀 있으면
+ *      PCI 코어가 그 자리에 platform device 를 하나 만든다.
+ *   2) 그 platform device 에 pwrctrl 드라이버가 바인딩되어 전원을 넣는다.
+ *   3) 준비가 끝나면 pci_pwrctrl_device_set_ready() 로 알린다.
+ *   4) 이 파일이 버스 재스캔을 걸어 그제서야 장치가 열거된다.
  *
- * 본 파일은 EDR(Error Disconnect Recover), RCEC, slot hotplug, mmap/syscall
- * 직접 호출은 아니지만, NVMe PCIe link의 전원 상태를 제어하는 핵심 코드이다.
- * ===================================================================
+ * 재스캔을 워크큐로 미루는 것도 이유가 있다. probe 문맥에서 곧바로
+ * 재스캔하면 그 안에서 또 probe 가 불려 재귀가 되고, 드라이버 코어의
+ * 잠금과 얽혀 교착할 수 있다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * 열거 준비: of.c / probe.c 가 DT 를 보고
+ *              -> [이 파일] pci_pwrctrl_create_device()
+ *                 -> 그 자리에 platform device 생성
+ *
+ * 전원 인가: pwrctrl 드라이버(generic.c 등)가 그 device 에 바인딩
+ *              -> 레귤레이터/클럭/리셋 제어
+ *              -> [이 파일] pci_pwrctrl_device_set_ready()
+ *                 -> 워크큐에 재스캔을 예약
+ *                    -> pci_rescan_bus() -> 장치 발견 -> 드라이버 probe
+ *
+ * 제거:     [이 파일] pci_pwrctrl_device_unset_ready() / _cleanup()
+ *
+ * 실행 컨텍스트: 등록/해제는 프로세스 컨텍스트. 재스캔은 워크큐 스레드.
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: probe.c 와 of.c 의 열거 경로, 그리고 각 pwrctrl 드라이버.
+ * 아래쪽: 플랫폼 장치 인프라, 그리고 pci_rescan_bus().
+ * 공유 상태: struct pci_pwrctrl — 재스캔 워크, notifier 블록,
+ *   그리고 대상 장치를 담는다.
+ *
+ * === NVMe 관점 ===
+ * NVMe 드라이버는 이 파일의 함수를 쓰지 않는다(전수 확인).
+ *
+ * 하지만 임베디드 보드에 NVMe 를 붙이는 경우 이 파일이 먼저 동작해야
+ * NVMe 가 보인다. 전원과 클럭이 들어오고 리셋이 풀린 뒤에야 링크 훈련이
+ * 시작되고, 그다음에 열거가 되어 nvme_probe() 가 불린다.
+ *
+ * 반대로 전원을 끄면 링크가 끊기고 장치가 사라져 nvme_remove() 로 간다.
+ * 그 경로는 remove.c 의 일반적인 제거와 같다.
+ *
+ * (기존 주석은 이 파일이 "NVMe endpoint 가 탑재된 보드/슬롯의 전원 레일을
+ *  켜고 끈다" 고 적었으나, 실제 전원 조작은 개별 pwrctrl 드라이버가 하고
+ *  이 파일은 그들이 쓰는 인프라와 재스캔 트리거만 제공한다.)
+ *
+ * === 주요 함수/구조체 요약 ===
+ * pci_pwrctrl_init()              : struct pci_pwrctrl 을 초기화한다.
+ * pci_pwrctrl_device_set_ready()  : "전원이 들어왔다" 를 알리고 재스캔을 예약한다.
+ * pci_pwrctrl_device_unset_ready(): 그 예약을 취소하고 정리한다.
+ * devm_pci_pwrctrl_device_set_ready() : devres 판. 드라이버가 떨어질 때
+ *                                   자동으로 unset 된다.
+ * pci_pwrctrl_rescan()            : 워크큐가 실행하는 재스캔 본체.
+ * pci_pwrctrl_notify()            : 장치 등록/해제 알림을 받아 처리한다.
+ * struct pci_pwrctrl              : 이 인프라의 상태 묶음.
  */
 
 #define dev_fmt(fmt) "pwrctrl: " fmt	/* NVMe: pwrctrl 로그 메시지 접두사 매크로 정의 */
