@@ -8,6 +8,73 @@
  * Author: Jingoo Han <jg1.han@samsung.com>
  */
 
+/*
+ * [한국어 설명] DesignWare IP 를 루트 컴플렉스로 쓸 때 (pcie-designware-host.c)
+ *
+ * === 파일의 역할 ===
+ * 같은 DesignWare IP 를 호스트(RC)로도 엔드포인트(EP)로도 쓸 수 있다.
+ * 이 파일은 호스트 쪽 절반이다 — 버스를 만들고, config 접근을 제공하고,
+ * 하위 장치의 인터럽트를 받는다.
+ *
+ * 이 파일에서 가장 특이한 부분이 MSI 처리다. 보통의 PCIe 호스트는 장치가
+ * 보낸 MSI 쓰기가 그대로 인터럽트 컨트롤러에 도달하지만, DesignWare 는
+ * IP 안에 자체 MSI 수신기를 두었다. 장치들이 IP 가 정한 한 주소로 MSI 를
+ * 쓰면, IP 가 그것을 모아 하나의 인터럽트 선으로 CPU 에 알린다.
+ *
+ * 그래서 이 파일은 chained IRQ 구조를 만든다.
+ *   장치의 MSI 쓰기 -> IP 의 MSI 수신기 -> 하나의 부모 인터럽트
+ *     -> dw_chained_msi_isr() 가 어느 벡터인지 레지스터로 확인
+ *        -> 해당 가상 IRQ 로 분배
+ * 이 구조 때문에 MSI 벡터 개수가 IP 구성에 묶인다. 보통 32~256 개다.
+ *
+ * config 접근도 눈여겨볼 만하다. 버스 0(루트 포트 자신)은 DBI 로 직접
+ * 접근하지만, 그 아래 장치는 iATU 창을 config 타입으로 설정한 뒤
+ * 그 창을 통해 읽고 쓴다. 창이 하나뿐이면 접근할 때마다 재설정해야 해서,
+ * 그 부분에 잠금이 필요하다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * SoC 별 드라이버의 probe
+ *   -> dw_pcie_host_init() [이 파일]
+ *      -> MSI 도메인 구성, iATU 창 배치
+ *      -> pcie-designware.c 의 링크 대기
+ *      -> pci_host_probe() -> PCI 코어의 열거
+ *         -> 발견된 NVMe 등에 드라이버 바인딩
+ *
+ * 실행 컨텍스트: 초기화는 프로세스 컨텍스트. config 접근은 잠금 아래.
+ * MSI 분배는 하드 IRQ 컨텍스트.
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: dwc/ 의 SoC 별 드라이버들.
+ * 아래쪽: pcie-designware.c 의 공통 코어, 커널 IRQ 도메인 계층,
+ *   그리고 PCI 코어의 열거(probe.c).
+ * 공유 상태: struct dw_pcie_rp — 루트 포트 정보와 MSI 상태.
+ *
+ * === NVMe 관점 ===
+ * NVMe 드라이버는 이 파일의 함수를 부르지 않는다(전수 확인).
+ *
+ * 실무에서 부딪히는 지점은 MSI 벡터 수다. NVMe 는 CPU 코어마다 큐를
+ * 하나씩 두고 싶어 하므로 벡터를 많이 요청하는데, DesignWare 의 자체 MSI
+ * 컨트롤러는 그 수가 IP 합성 시점에 정해져 있다. 요청보다 적으면
+ * pci_alloc_irq_vectors() 가 줄여서 돌려주고, NVMe 는 그만큼 큐를 줄인다.
+ * ARM SoC 에서 NVMe 큐 수가 코어 수보다 적게 잡히는 이유가 대개 이것이다.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * dw_pcie_host_init()     : 호스트 초기화 전체. 이 파일의 입구.
+ * dw_pcie_host_deinit()   : 그 반대.
+ * dw_pcie_setup_rc()      : 루트 포트 자신의 config 를 설정한다.
+ * dw_pcie_rd_other_conf() / dw_pcie_wr_other_conf() : 하위 장치 config 접근.
+ *                           iATU 창을 config 타입으로 바꿔 쓴다.
+ * dw_pcie_own_conf_map_bus() : 버스 0(루트 포트 자신) 접근을 DBI 로 돌린다.
+ * dw_pcie_other_conf_map_bus() : 그 아래 버스는 iATU 창을 거치게 한다.
+ * dw_pcie_ecam_conf_map_bus() / dw_pcie_create_ecam_window() : ECAM 을 쓸 수
+ *                           있는 구성에서는 창 재설정 없이 접근할 수 있다.
+ * dw_chained_msi_isr() / dw_handle_msi_irq() : MSI 수신과 분배.
+ *                           앞의 것이 부모 인터럽트를 받아 뒤의 것을 부른다.
+ * dw_pcie_msi_init()      : IP 의 MSI 수신 주소를 설정한다.
+ * dw_pcie_allocate_domains() : MSI IRQ 도메인 생성.
+ * struct dw_pcie_rp       : 루트 포트 상태. MSI 비트맵이 여기 있다.
+ */
+
 #include <linux/align.h>			/* PCI/NVMe: 정렬 매크로, NVMe BAR/queue 정렬 시 사용 */
 #include <linux/iopoll.h>			/* PCI/NVMe: 레지스터 폴링, NVMe 링크 업/다운 감지 시 사용 */
 #include <linux/irqchip/chained_irq.h>	/* PCI/NVMe: 연결형 IRQ 진입, NVMe MSI-X/MSI 경로에 연결 */

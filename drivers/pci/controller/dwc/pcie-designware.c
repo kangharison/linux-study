@@ -8,6 +8,75 @@
  * Author: Jingoo Han <jg1.han@samsung.com>
  */
 
+/*
+ * [한국어 설명] DesignWare PCIe IP 의 공통 코어 (pcie-designware.c)
+ *
+ * === 파일의 역할 ===
+ * Synopsys DesignWare 는 PCIe 컨트롤러 IP 중 가장 널리 쓰이는 것이다.
+ * 퀄컴, 삼성 엑시노스, 록칩, TI, 인텔, NXP 등 수많은 SoC 가 이 IP 를
+ * 라이선스해 자기 칩에 넣는다. 그래서 dwc/ 디렉터리에만 40개가 넘는
+ * 드라이버가 있는데, 그 전부가 공유하는 부분이 이 파일이다.
+ *
+ * SoC 마다 다른 것은 대개 주변부다 — 클럭, 리셋, 전원, PHY, 그리고
+ * 레지스터가 어디에 매핑되는가. 링크를 올리고 config 접근을 하고 주소를
+ * 변환하는 핵심 동작은 IP 가 같으므로 동일하다. 이 파일이 그 핵심을 맡고,
+ * SoC 별 드라이버는 자기 주변부만 채워 넣는 구조다.
+ *
+ * 이 파일에서 가장 중요한 개념이 iATU(internal Address Translation Unit)다.
+ * PCIe 는 CPU 가 보는 주소와 버스에 나가는 주소가 다를 수 있는데, 그 변환을
+ * 하는 하드웨어다. 창(region)을 여러 개 두고 각각에
+ *   "CPU 주소 A~B 로 들어온 접근을 PCIe 주소 C 로, 타입 T 로 내보내라"
+ * 를 설정한다. MMIO 접근, config 접근, I/O 접근이 전부 이것을 거친다.
+ *
+ * iATU 창의 개수가 유한하다는 점이 실무에서 자주 문제가 된다. config
+ * 접근을 할 때마다 창을 바꿔 써야 하는 구성에서는 그 재설정 비용이 붙고,
+ * 그래서 ECAM 처럼 창 하나로 전체를 덮을 수 있으면 훨씬 빠르다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * SoC 별 드라이버(pcie-qcom.c, pci-exynos.c, pcie-dw-rockchip.c ...)
+ *   -> 자기 클럭·전원·PHY 를 켠 뒤
+ *      -> dw_pcie_host_init() [pcie-designware-host.c]
+ *         -> [이 파일] dw_pcie_setup(), iATU 설정, 링크 대기
+ *            -> PCI 코어의 열거로 이어진다
+ *
+ * 실행 컨텍스트: probe 시점의 프로세스 컨텍스트가 대부분. 일부 레지스터
+ * 접근 함수는 config 접근 경로에서 불려 잠금 아래에서 동작한다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: dwc/ 아래의 모든 SoC 별 드라이버.
+ * 옆쪽: pcie-designware-host.c(RC 모드), pcie-designware-ep.c(EP 모드).
+ *   같은 IP 를 호스트로 쓰느냐 엔드포인트로 쓰느냐로 갈린다.
+ * 아래쪽: PHY 서브시스템, 클럭·리셋 프레임워크, 그리고 PCI 코어.
+ * 공유 상태: struct dw_pcie — IP 레지스터 베이스, iATU 정보, 링크 상태.
+ *   SoC 드라이버가 이것을 자기 구조체에 품고 container_of 로 오간다.
+ *
+ * === NVMe 관점 ===
+ * NVMe 드라이버는 이 파일의 함수를 부르지 않는다(전수 확인).
+ *
+ * 하지만 임베디드/ARM 서버에서 NVMe 를 쓴다면 그 밑에 있는 것이 대개
+ * 이 IP 다. NVMe 성능이 기대에 못 미칠 때 확인할 것이 링크 폭과 속도인데,
+ * 그것을 읽고 설정하는 코드가 여기 있다(dw_pcie_link_up, 그리고 SoC
+ * 드라이버가 부르는 속도 변경 함수들).
+ *
+ * MSI 도 관계가 있다. DesignWare 는 자체 MSI 컨트롤러를 갖고 있어서
+ * (pcie-designware-host.c 의 dw_pcie_msi_* 계열) 표준 MSI 와 동작이
+ * 조금 다르다. NVMe 가 큐마다 인터럽트를 요구할 때 그 벡터 개수 제한이
+ * 이 IP 의 구성에 걸리는 경우가 있다.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * dw_pcie_read() / dw_pcie_write() : IP 레지스터 접근의 기본. 정렬되지 않은
+ *                         접근을 처리하고 오류를 보고한다.
+ * dw_pcie_read_dbi() / dw_pcie_write_dbi() : DBI(Design Block Interface)
+ *                         접근. 이 IP 자신의 config space 를 읽고 쓴다.
+ * dw_pcie_prog_outbound_atu() : iATU 아웃바운드 창 설정. CPU -> PCIe 방향.
+ * dw_pcie_prog_inbound_atu()  : 인바운드. PCIe -> 메모리 방향(EP 모드).
+ * dw_pcie_link_up()       : 링크가 올라왔는지 확인.
+ * dw_pcie_wait_for_link() : 링크를 기다린다. 타임아웃이 있다.
+ * dw_pcie_setup()         : IP 의 기본 설정. 링크 폭 등을 정한다.
+ * dw_pcie_find_capability() / dw_pcie_find_ext_capability() : capability 탐색.
+ * struct dw_pcie          : 이 IP 인스턴스의 모든 상태.
+ */
+
 #include <linux/align.h>		/* PCI/NVMe: DMA descriptor, BAR, page alignment 처리 */
 #include <linux/bitops.h>		/* PCI/NVMe: PCIe 링크/MSI/ATU 레지스터 비트 조작 */
 #include <linux/clk.h>			/* PCI/NVMe: NVMe 장치 및 PCIe 링크 클럭 전원 관리 */
