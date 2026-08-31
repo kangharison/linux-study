@@ -9,6 +9,62 @@
  * Send feedback to <kristen.c.accardi@intel.com>
  */
 
+/*
+ * [한국어 설명] 펌웨어와 핫플러그 소유권을 협상한다 (acpi_pcihp.c)
+ *
+ * === 파일의 역할 ===
+ * 짧은 파일이지만 하는 일이 중요하다. PCI 핫플러그를 펌웨어가 다룰지
+ * 운영체제가 다룰지를 정하는 협상, 그리고 그 결과를 판단하는 코드가 여기 있다.
+ *
+ * 왜 협상이 필요한가. 둘이 동시에 슬롯을 만지면 안 되기 때문이다. 펌웨어가
+ * SMI 로 핫플러그를 처리하는 중에 운영체제가 같은 레지스터를 건드리면
+ * 상태가 어긋난다. 그래서 부팅 시 _OSC 메서드로 "이 기능은 내가 맡겠다" 를
+ * 주고받는다.
+ *
+ * 핵심 함수는 acpi_get_hp_hw_control_from_firmware() 다. 이름 그대로
+ * 펌웨어에게서 하드웨어 제어권을 받아 오는 일을 한다. 실패하면 그 슬롯의
+ * 핫플러그 드라이버는 바인딩을 포기해야 한다.
+ *
+ * 여기에 얽힌 실무 함정이 하나 있다. 서버 BIOS 가 "OS 는 관여하지 말라"
+ * 고 답하면 pciehp 가 붙지 않아 드라이브를 뽑았다 꽂아도 커널이 모른다.
+ * 그럴 때 쓰는 것이 pciehp_force 부팅 인자로, 협상 결과를 무시하고
+ * 강제로 잡는 것이다. 권장되지는 않지만 필요할 때가 있다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * pciehp_probe() 또는 다른 핫플러그 드라이버의 probe
+ *   -> [이 파일] acpi_get_hp_hw_control_from_firmware()
+ *      -> pci-acpi.c 의 _OSC 협상 (pci_acpi_osc_support 등)
+ *         -> ACPI 코어의 메서드 평가
+ *      -> 성공하면 드라이버가 계속 진행, 실패하면 -ENODEV
+ *
+ * 실행 컨텍스트: probe 시점의 프로세스 컨텍스트. ACPI 메서드 평가는
+ * 잠들 수 있으므로 인터럽트 컨텍스트에서 부를 수 없다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: hotplug/ 아래의 각 드라이버.
+ * 아래쪽: pci-acpi.c 의 _OSC 처리, ACPI 코어.
+ * 공유 상태: 협상 결과는 host bridge 의 ACPI 컨텍스트에 남아,
+ *   나중에 다른 코드가 "핫플러그를 OS 가 소유하는가" 를 물을 때 쓰인다.
+ *
+ * === NVMe 관점 ===
+ * NVMe 드라이버는 이 파일의 함수를 부르지 않는다(전수 확인).
+ *
+ * 하지만 NVMe 핫스왑이 되느냐 안 되느냐가 여기서 갈린다. U.2 백플레인이
+ * 있는 서버에서 드라이브를 교체해도 커널이 반응하지 않으면, 먼저 확인할
+ * 곳이 이 협상의 결과다. dmesg 에 "Requesting control of ... via _OSC"
+ * 와 그 결과가 찍히므로 그것으로 판단할 수 있다.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * acpi_get_hp_hw_control_from_firmware() : 핵심. 펌웨어와 소유권을 협상하고
+ *                          결과를 반환한다. 실패 시 드라이버는 물러나야 한다.
+ * acpi_pci_check_ejectable() : 그 슬롯이 ACPI 로 뽑을 수 있는지 확인.
+ *                          _EJ0 메서드의 존재 여부로 판단한다.
+ * acpi_pci_detect_ejectable() : 버스 아래에 뽑을 수 있는 슬롯이 있는지.
+ * check_hotplug() / decode_type0_hpx_record() 계열 : _HPX/_HPP 로 펌웨어가
+ *                          지정한 PCI 설정값을 읽는 보조 함수들.
+ * debug_acpi 모듈 파라미터 : 이 협상 과정을 자세히 찍게 한다.
+ */
+
 #include <linux/module.h>          /* PCI/NVMe: 커널 모듈 인프라; NVMe 호스트 드라이버도 pci.c 모듈에서 동일 헤더 사용 */
 #include <linux/moduleparam.h>     /* PCI/NVMe: debug_acpi 모듈 파라미터 등록용; NVMe 호스트의 debug 모듈 파라미터와 유사 */
 #include <linux/kernel.h>          /* PCI/NVMe: 커널 기본 매크로/printk; NVMe 호스트의 pr_debug/err 등 동일 인프라 */

@@ -1,6 +1,60 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Copyright (C) 2024 Marvell. */
 
+/*
+ * [한국어 설명] Marvell OCTEON DPU 의 가상 핫플러그 (octep_hp.c)
+ *
+ * === 파일의 역할 ===
+ * Marvell OCTEON 은 DPU(Data Processing Unit)로, 그 자체가 리눅스를 돌리는
+ * 프로세서다. 호스트에서 보면 PCIe 엔드포인트지만, 그 안에서 여러 가상
+ * 기능을 만들었다 없앴다 할 수 있다.
+ *
+ * 문제는 호스트가 그것을 어떻게 아느냐다. 물리적으로 카드를 뽑고 꽂는 게
+ * 아니므로 표준 핫플러그 신호가 없다. 그래서 OCTEON 펌웨어가 MMIO 로
+ * "이제 이 기능이 생겼다/없어졌다" 를 알리고, 이 드라이버가 그것을 받아
+ * 리눅스 핫플러그 이벤트로 바꿔 준다.
+ *
+ * 구조가 단순하다.
+ *   1) OCTEON 이 인터럽트를 보낸다.
+ *   2) 이 드라이버가 MMIO 레지스터에서 명령을 읽는다.
+ *   3) 명령이 "추가" 면 해당 장치를 열거하고, "제거" 면 뗀다.
+ * 명령을 큐에 넣고 워크큐에서 처리하는 이유는 열거·제거가 잠들 수 있어서다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * OCTEON 펌웨어가 MMIO 로 명령을 쓰고 MSI-X 인터럽트 발생
+ *   -> [이 파일] 인터럽트 핸들러가 명령을 읽어 리스트에 넣는다
+ *      -> 워크큐에서 처리
+ *         -> pci_hotplug_core.c 를 거쳐 슬롯 상태 변경
+ *            -> PCI 코어의 열거 또는 제거
+ *
+ * 실행 컨텍스트: 인터럽트 핸들러(하드 IRQ)와 워크큐(프로세스 컨텍스트)로
+ * 나뉜다. 그 사이를 명령 리스트가 잇는다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: pci-driver.c 가 이 드라이버를 OCTEON 장치에 바인딩.
+ * 아래쪽: pci_hotplug_core.c 의 슬롯 등록, PCI 코어의 열거·제거.
+ * 공유 상태: struct octep_hp_controller 와 그 아래 슬롯·명령 리스트.
+ *   인터럽트와 워크큐가 함께 만지므로 스핀락으로 보호한다.
+ *
+ * === NVMe 관점 ===
+ * NVMe 와 직접 관계는 없다(전수 확인 — 이 파일과 drivers/nvme 사이에
+ * 함수 호출 0건). 이 디렉터리를 훑는 김에 함께 주석을 다는 파일이다.
+ *
+ * 간접적으로는 배울 점이 있다. DPU 나 SmartNIC 이 자기 자원을 동적으로
+ * 노출하는 이 방식은, NVMe-oF 타깃을 DPU 에서 돌리며 네임스페이스를
+ * 동적으로 붙이는 구성과 발상이 같다 — 물리 장치의 착탈이 아니라
+ * 소프트웨어가 만들어 내는 착탈이다.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * octep_hp_probe()        : OCTEON 장치에 바인딩되어 슬롯들을 등록한다.
+ * octep_hp_remove()       : 그 반대.
+ * octep_hp_intr_handler() : 인터럽트를 받아 명령을 읽고 큐에 넣는다.
+ * octep_hp_pfvf_cmd_handler() / 워크 함수 : 큐의 명령을 실제로 처리한다.
+ * octep_hp_enable_slot() / octep_hp_disable_slot() : 핫플러그 코어 콜백.
+ * struct octep_hp_controller : 이 카드의 전체 상태.
+ * struct octep_hp_device     : 슬롯 하나에 대응.
+ */
+
 /* PCI/NVMe: GFP/자원 정리 헬퍼; NVMe host driver의 devm_*과 동일한 managed resource 패턴 */
 #include <linux/cleanup.h>
 /* PCI/NVMe: container_of는 pci_dev/container_of 등 구조체 역참조 시 사용 */

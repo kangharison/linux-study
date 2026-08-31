@@ -16,6 +16,70 @@
 /* NVMe: PCIe 핫플러그 코어; NVMe SSD의 물리적 삽입/제거, 슬롯 전원 제어, */
 /* NVMe: 링크 상태 변화 처리의 기반이 되는 계층임 */
 
+/*
+ * [한국어 설명] 여러 핫플러그 방식이 공유하는 sysfs 계층 (pci_hotplug_core.c)
+ *
+ * === 파일의 역할 ===
+ * PCI 핫플러그에는 방식이 여럿이다. PCIe 네이티브(pciehp), ACPI 기반
+ * (acpiphp), 그리고 벤더 전용 컨트롤러들. 이 파일은 그것들이 공통으로
+ * 쓰는 껍데기를 제공한다 — 슬롯을 /sys/bus/pci/slots/ 에 노출하고,
+ * 사용자가 그 파일을 읽고 쓰면 해당 드라이버의 콜백으로 넘긴다.
+ *
+ * 핵심은 struct hotplug_slot_ops 다. 각 드라이버가 자기 하드웨어에 맞게
+ * 이 함수 표를 채워 등록하면, 이 파일은 sysfs 접근을 그 표로 전달하기만
+ * 한다. 공통 부분과 하드웨어 부분을 갈라 놓은 것이다.
+ *
+ * sysfs 에 나오는 항목이 다섯이다.
+ *   power         — 슬롯 전원. 여기에 0 이나 1 을 쓰면 실제로 켜지고 꺼진다.
+ *   attention     — Attention LED. 어느 드라이브가 문제인지 표시할 때 쓴다.
+ *   latch         — 물리적 걸쇠가 열렸는지.
+ *   adapter       — 카드가 꽂혀 있는지.
+ *   test          — 드라이버별 시험용.
+ * 모든 드라이버가 다섯을 다 지원하지는 않아서, ops 에 함수가 없으면
+ * 그 파일 자체를 만들지 않는다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * pciehp / acpiphp / shpchp / 벤더 드라이버
+ *   -> pci_hp_register() 또는 pci_hp_initialize() + pci_hp_add()
+ *      -> [이 파일] 슬롯을 등록하고 sysfs 항목 생성
+ *
+ * 사용자가 /sys/bus/pci/slots/N/power 에 쓰기
+ *   -> [이 파일] power_write_file()
+ *      -> slot->ops->enable_slot() 또는 disable_slot()
+ *         -> 예컨대 pciehp_sysfs_enable_slot() [pciehp_ctrl.c]
+ *
+ * 실행 컨텍스트: 전부 프로세스 컨텍스트. sysfs 쓰기는 사용자 프로세스에서
+ * 시작되고, 그 안에서 열거·제거까지 동기적으로 진행될 수 있어 오래 걸린다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: 각 핫플러그 드라이버(hotplug/ 아래 전부).
+ * 아래쪽: slot.c 의 struct pci_slot(슬롯의 PCI 코어 쪽 표현),
+ *   그리고 커널 sysfs 계층.
+ * 공유 상태: struct hotplug_slot 과 그것이 가리키는 struct pci_slot.
+ *   등록·해제 시 두 구조체의 수명을 맞추는 것이 이 파일의 까다로운 부분이다.
+ *
+ * === NVMe 관점 ===
+ * NVMe 드라이버는 이 파일의 함수를 부르지 않는다(전수 확인).
+ *
+ * 다만 운영 실무에서 NVMe 와 자주 엮인다. 서버에서 고장 난 드라이브를
+ * 뽑기 전에 attention LED 를 켜서 어느 베이인지 표시하고, power 에 0 을
+ * 써서 안전하게 내리는 절차가 전부 이 파일이 만든 sysfs 를 거친다.
+ *   echo 1 > /sys/bus/pci/slots/3/attention
+ *   echo 0 > /sys/bus/pci/slots/3/power
+ * 두 번째 명령이 nvme_remove() 까지 이어진다.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * pci_hp_register()      : 슬롯을 등록한다. initialize + add 를 한 번에.
+ * pci_hp_initialize()    : 등록 준비만 한다. 인터럽트를 켜기 전에 자료구조를
+ *                          갖춰 두어야 하는 드라이버가 나눠 쓴다.
+ * pci_hp_add()           : 실제로 sysfs 에 노출한다.
+ * pci_hp_deregister() / pci_hp_del() / pci_hp_destroy() : 그 반대들.
+ * power_write_file()     : 사용자의 전원 조작을 드라이버 콜백으로 넘긴다.
+ * attention_write_file() : Attention LED 조작. 표시등 소유권을 확인한다.
+ * has_power_file() 계열  : ops 에 해당 콜백이 있을 때만 sysfs 항목을 만든다.
+ * hotplug_slot_attrs     : 위 항목들을 묶은 sysfs 속성 그룹.
+ */
+
 #include <linux/module.h>		/* NVMe: nvme-pci 등 PCIe 엔드포인트 드라이버와 동적으로 로드/해제됨 */
 #include <linux/moduleparam.h>		/* NVMe: debug 파라미터로 NVMe 핫플러그 시나리오 진단 가능 */
 #include <linux/kernel.h>		/* NVMe: 커널 기반 헤더; 핫플러그 이벤트는 NVMe reset/workqueue와 연결됨 */
@@ -524,7 +588,13 @@ static DECLARE_WAIT_QUEUE_HEAD(pci_hp_link_change_wq);
 void pci_hp_ignore_link_change(struct pci_dev *pdev)
 {
 	set_bit(PCI_LINK_CHANGING, &pdev->priv_flags);		/* NVMe: 링크 변화 중 플래그 설정; NVMe AER/핫플러그 쓰레드가 무시하도록 */
-	smp_mb__after_atomic();		/* NVMe: wait_event와 메모리 배리어 쌍; NVMe 핫플러그 쓰레드가 최신 값 관측 */
+	smp_mb__after_atomic(); /* pairs with implied barrier of wait_event() */
+	/* [한국어] set_bit 자체는 원자적이지만 순서까지 보장하지는 않는다.
+	 * 다른 CPU 에서 wait_event() 로 이 비트를 기다리는 쪽이 있는데, 그쪽이
+	 * 비트 설정을 보기 전에 이후 코드의 효과를 먼저 보면 안 되므로 배리어를 둔다.
+	 * wait_event() 안에 이미 대응하는 배리어가 있어서 짝이 맞는다.
+	 * smp_mb__after_atomic() 을 쓰는 이유는 아키텍처에 따라 set_bit 이
+	 * 이미 배리어를 포함하기도 해서, 그럴 때는 아무 명령도 내지 않기 위해서다. */
 }
 
 /**
@@ -538,7 +608,14 @@ void pci_hp_ignore_link_change(struct pci_dev *pdev)
 void pci_hp_unignore_link_change(struct pci_dev *pdev)
 {
 	set_bit(PCI_LINK_CHANGED, &pdev->priv_flags);		/* NVMe: 링크 변경 발생 기록; spurious 여부 판단용 */
-	mb();				/* NVMe: 플래그 변경이 pci_hp_spurious_link_change()에 보이도록 */
+	mb(); /* ensure pci_hp_spurious_link_change() sees either bit set */
+	/* [한국어] 여기서 완전한 배리어가 필요한 이유가 분명하다. 바로 위에서
+	 * CHANGED 를 세우고 바로 아래에서 CHANGING 을 지우는데, 그 둘이 뒤집혀
+	 * 보이면 관측자가 두 비트 모두 꺼진 순간을 보게 된다.
+	 * pci_hp_spurious_link_change() 는 "둘 중 하나는 켜져 있다" 를 전제로
+	 * 판단하므로, 그 틈이 생기면 진짜 링크 변화로 오인해 불필요한 재열거가 일어난다.
+	 * smp_mb 가 아니라 mb 인 것은 이 순서가 CPU 사이뿐 아니라 장치 접근과도
+	 * 관계되기 때문이다. */
 	clear_bit(PCI_LINK_CHANGING, &pdev->priv_flags);	/* NVMe: 링크 변화 구간 종료 */
 	wake_up_all(&pci_hp_link_change_wq);	/* NVMe: 대기 중인 NVMe 핫플러그 쓰레드 깨움 */
 }
