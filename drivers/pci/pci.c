@@ -12434,25 +12434,60 @@ int pci_select_bars(struct pci_dev *dev, unsigned long flags)
 EXPORT_SYMBOL(pci_select_bars);
 
 /* Some architectures require additional programming to enable VGA */
-static arch_set_vga_state_t arch_set_vga_state; /* NVMe: 정적 변수를 선언한다. */
+/* [한국어] 아키텍처가 등록해 둘 VGA 설정 콜백. 전역 함수 포인터 하나다.
+ * 설정자: pci_register_set_vga_state() — 부팅 초기에 아키텍처 코드가 부른다.
+ * 읽는 자: pci_set_vga_state_arch().
+ * 값 범위: NULL(아키텍처가 추가 작업을 요구하지 않음) 또는 유효한 함수 포인터.
+ * 동기화: __init 시점에 한 번 설정되고 이후 바뀌지 않아 보호가 필요 없다.
+ * 왜 필요한가: 일부 아키텍처는 config space 비트만 바꿔서는 VGA 디코딩이
+ *   켜지지 않고, 칩셋 고유의 레지스터를 함께 건드려야 한다. 그 부분을
+ *   PCI 코어가 알 수 없으므로 훅으로 뺐다. */
+static arch_set_vga_state_t arch_set_vga_state;
 
 /*
- * pci_register_set_vga_state:
- *   VGA 상태 설정 콜백을 등록한다. NVMe 장치와는 직접 관련이 낮다.
+ * [한국어]
+ * pci_register_set_vga_state - 아키텍처별 VGA 설정 훅을 등록한다
+ *
+ * @func: 등록할 콜백. NULL 을 넘기면 훅이 해제된다.
+ * @return: 없음.
+ *
+ * __init 이 붙어 있어 부팅이 끝나면 이 함수의 코드가 메모리에서 해제된다.
+ * 즉 런타임에는 부를 수 없고, 아키텍처 초기화 시점에만 쓸 수 있다.
+ *
+ * 실행 컨텍스트: 부팅 초기, 단일 스레드.
+ * 호출자: 아키텍처별 PCI 초기화 코드.
  */
-void __init pci_register_set_vga_state(arch_set_vga_state_t func) /* NVMe: pci_register_set_vga_state 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
+void __init pci_register_set_vga_state(arch_set_vga_state_t func)
+{
 	arch_set_vga_state = func;	/* NULL disables */
-} /* NVMe: 코드 블록을 종료한다. */
+}
 
-static int pci_set_vga_state_arch(struct pci_dev *dev, bool decode, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-				  unsigned int command_bits, u32 flags) /* NVMe: unsigned 타입 변수를 선언한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	if (arch_set_vga_state) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return arch_set_vga_state(dev, decode, command_bits, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-						flags); /* NVMe: 표현식을 평가한다. */
-	return 0; /* NVMe: 성공(0)을 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+/*
+ * [한국어]
+ * pci_set_vga_state_arch - 등록된 아키텍처 훅이 있으면 부른다
+ *
+ * @dev:          대상 장치
+ * @decode:       true 면 VGA 디코딩 활성화, false 면 비활성화
+ * @command_bits: PCI_COMMAND_IO / PCI_COMMAND_MEMORY 조합
+ * @flags:        상위 브리지까지 함께 바꿀지 등의 옵션
+ * @return: 0 = 성공(훅이 없는 경우 포함), 음수 = 아키텍처가 실패를 알림.
+ *
+ * 훅이 등록돼 있지 않으면 아무것도 하지 않고 0 을 돌려준다. "아키텍처가
+ * 추가 작업을 요구하지 않는다" 는 것은 오류가 아니라 정상이기 때문이다.
+ * 이 판정을 여기 한 곳에 모아 두어 호출자가 NULL 검사를 반복하지 않게 한다.
+ *
+ * 실행 컨텍스트: 훅 구현에 달렸지만, 호출자가 프로세스 컨텍스트다.
+ * 호출자: pci_set_vga_state().
+ */
+static int pci_set_vga_state_arch(struct pci_dev *dev, bool decode,
+				  unsigned int command_bits, u32 flags)
+{
+	/* [한국어] 훅이 있으면 위임하고, 없으면 성공으로 처리한다. */
+	if (arch_set_vga_state)
+		return arch_set_vga_state(dev, decode, command_bits,
+						flags);
+	return 0;
+}
 
 /**
  * pci_set_vga_state - set VGA decode state on device and parents if requested
@@ -12462,82 +12497,175 @@ static int pci_set_vga_state_arch(struct pci_dev *dev, bool decode, /* NVMe: 함
  * @flags: traverse ancestors and change bridges
  * CHANGE_BRIDGE_ONLY / CHANGE_BRIDGE
  */
-int pci_set_vga_state(struct pci_dev *dev, bool decode, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-		      unsigned int command_bits, u32 flags) /* NVMe: unsigned 타입 변수를 선언한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	struct pci_bus *bus; /* NVMe: 데이터 타입 변수를 선언한다. */
-	struct pci_dev *bridge; /* NVMe: 데이터 타입 변수를 선언한다. */
-	u16 cmd; /* NVMe: u16 타입 변수를 선언한다. */
-	int rc; /* NVMe: int 타입 변수를 선언한다. */
+/*
+ * [한국어]
+ * pci_set_vga_state - 이 장치를 향해 VGA 레거시 주소가 흐르도록 경로를 연다
+ *
+ * @dev:          VGA 장치
+ * @decode:       true = 이 장치가 VGA 주소를 받게 한다, false = 막는다
+ * @command_bits: PCI_COMMAND_IO / PCI_COMMAND_MEMORY 중 켤 것
+ * @flags:        PCI_VGA_STATE_CHANGE_DECODES(장치 자신을 바꿀지),
+ *                PCI_VGA_STATE_CHANGE_BRIDGE(경로상 브리지들도 바꿀지)
+ * @return: 0 = 성공, -EIO = 브리지가 VGA Enable 을 지원하지 않음,
+ *          그 외 = 아키텍처 훅의 오류.
+ *
+ * VGA 는 PCI 이전 시대의 유산이다. 그래픽 카드가 쓰는 고정 주소 대역
+ * (I/O 0x3B0~0x3DF, 메모리 0xA0000~0xBFFFF)이 BAR 와 무관하게 하드와이어돼
+ * 있어서, 그 주소로 가는 트랜잭션을 "누구에게 보낼지" 를 경로상의 모든
+ * 브리지가 알아야 한다. 그 스위치가 Bridge Control 의 VGA Enable 비트다.
+ *
+ * 그래서 이 함수는 두 가지를 한다.
+ *   1) 장치 자신의 Command 레지스터에서 IO/Memory 디코딩을 켠다.
+ *   2) 루트까지 올라가며 모든 브리지의 VGA Enable 비트를 켠다.
+ * 하나라도 빠지면 그래픽 출력이 나오지 않는다. 그래서 계층 전체를 훑는다.
+ *
+ * 화면에 무언가를 그리는 카드는 시스템에 하나만 활성일 수 있으므로,
+ * 여러 GPU 가 있는 시스템에서 vgaarb(VGA arbiter)가 이 함수로 경로를
+ * 이쪽저쪽으로 바꿔 준다.
+ *
+ * 되읽기 검사가 있는 이유: Bridge Control 의 VGA Enable 은 선택 기능이라
+ * 지원하지 않는 브리지에서는 쓰기가 무시된다. 그런 브리지가 경로에 있으면
+ * VGA 주소가 이 장치까지 도달하지 못하므로, 실패를 조기에 알려야 한다.
+ * 켜는 방향(decode=true)에서만 확인하는 것은, 끄는 것은 실패해도
+ * 치명적이지 않기 때문이다.
+ *
+ * NVMe 관점: NVMe 와는 무관한 함수다. 다만 "경로상의 모든 브리지를 설정해야
+ * 한다" 는 구조는 MPS 설정이나 ACS 설정과 같은 패턴이라, PCIe 계층 구조를
+ * 이해하는 데 좋은 예다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트(config 접근).
+ * 호출자: drivers/gpu/vga/vgaarb.c, GPU 드라이버.
+ */
+int pci_set_vga_state(struct pci_dev *dev, bool decode,
+		      unsigned int command_bits, u32 flags)
+{
+	struct pci_bus *bus;		/* [한국어] 루트까지 올라갈 순회 커서 */
+	struct pci_dev *bridge;		/* [한국어] 현재 버스를 만든 브리지 */
+	u16 cmd;			/* [한국어] Command 또는 Bridge Control 값 */
+	int rc;				/* [한국어] 아키텍처 훅의 결과 */
 
-	WARN_ON((flags & PCI_VGA_STATE_CHANGE_DECODES) && (command_bits & ~(PCI_COMMAND_IO|PCI_COMMAND_MEMORY))); /* NVMe: 조건이 참이면 경고를 출력한다. */
+	/* [한국어] 디코딩을 바꾸겠다면서 IO/Memory 가 아닌 비트를 넘긴 것은
+	 * 호출자의 버그다. Command 레지스터의 다른 비트(Bus Master 등)를
+	 * 실수로 건드리면 장치가 오동작하므로 경고를 남긴다.
+	 * ~(IO|MEMORY) 마스크에 걸리는 비트가 있는지 보는 방식이다. */
+	WARN_ON((flags & PCI_VGA_STATE_CHANGE_DECODES) && (command_bits & ~(PCI_COMMAND_IO|PCI_COMMAND_MEMORY)));
 
 	/* ARCH specific VGA enables */
-	rc = pci_set_vga_state_arch(dev, decode, command_bits, flags); /* NVMe: 변수에 값을 할당한다. */
-	if (rc) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return rc; /* NVMe: 연산 결과를 반환한다. */
+	/* [한국어] 아키텍처가 추가로 할 일이 있으면 먼저 처리한다. 여기서
+	 * 실패하면 config 를 건드리지 않고 물러난다 — 절반만 설정된 상태를
+	 * 만들지 않기 위해서다. */
+	rc = pci_set_vga_state_arch(dev, decode, command_bits, flags);
+	if (rc)
+		return rc;
 
-	if (flags & PCI_VGA_STATE_CHANGE_DECODES) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pci_read_config_word(dev, PCI_COMMAND, &cmd); /* NVMe: PCI 설정 공간 2바이트를 읽는다. */
-		if (decode) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			cmd |= command_bits; /* NVMe: 변수에 값을 할당한다. */
-		else /* NVMe: 이전 조건이 모두 거짓일 때 실행한다. */
-			cmd &= ~command_bits; /* NVMe: 변수에 값을 할당한다. */
-		pci_write_config_word(dev, PCI_COMMAND, cmd); /* NVMe: PCI 설정 공간 2바이트를 쓴다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+	/* [한국어] 1단계 — 장치 자신의 디코딩 비트. 호출자가 요청한 경우에만. */
+	if (flags & PCI_VGA_STATE_CHANGE_DECODES) {
+		/* [한국어] read-modify-write. Command 에는 Bus Master 등 다른
+		 * 설정도 있어 통째로 덮어쓰면 안 된다. */
+		pci_read_config_word(dev, PCI_COMMAND, &cmd);
+		if (decode)
+			cmd |= command_bits;	/* [한국어] 요청한 디코딩을 켠다 */
+		else
+			cmd &= ~command_bits;	/* [한국어] 끈다 */
+		pci_write_config_word(dev, PCI_COMMAND, cmd);
+	}
 
-	if (!(flags & PCI_VGA_STATE_CHANGE_BRIDGE)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return 0; /* NVMe: 성공(0)을 반환한다. */
+	/* [한국어] 브리지까지 바꾸라는 요청이 없으면 여기서 끝. */
+	if (!(flags & PCI_VGA_STATE_CHANGE_BRIDGE))
+		return 0;
 
-	bus = dev->bus; /* NVMe: 변수에 값을 할당한다. */
-	while (bus) { /* NVMe: 조건이 참인 동안 반복한다. */
-		bridge = bus->self; /* NVMe: 변수에 값을 할당한다. */
-		if (bridge) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			pci_read_config_word(bridge, PCI_BRIDGE_CONTROL, /* NVMe: PCI 설정 공간 2바이트를 읽는다. */
-					     &cmd); /* NVMe: 비트 연산을 수행한다. */
-			if (decode) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-				cmd |= PCI_BRIDGE_CTL_VGA; /* NVMe: 변수에 값을 할당한다. */
-			else /* NVMe: 이전 조건이 모두 거짓일 때 실행한다. */
-				cmd &= ~PCI_BRIDGE_CTL_VGA; /* NVMe: 변수에 값을 할당한다. */
-			pci_write_config_word(bridge, PCI_BRIDGE_CONTROL, /* NVMe: PCI 설정 공간 2바이트를 쓴다. */
-					      cmd); /* NVMe: 표현식을 평가한다. */
+	/* [한국어] 2단계 — 이 장치가 붙은 버스에서 루트까지 올라가며
+	 * 모든 브리지의 VGA Enable 을 설정한다. 하나라도 빠지면 VGA 주소가
+	 * 중간에서 끊긴다. */
+	bus = dev->bus;
+	while (bus) {
+		bridge = bus->self;	/* [한국어] 루트 버스면 NULL */
+		if (bridge) {
+			/* [한국어] Bridge Control(오프셋 0x3E)의 read-modify-write.
+			 * 이 레지스터에는 Secondary Bus Reset 비트도 있어서
+			 * 통째로 덮어쓰면 하위 버스가 리셋된다 — 반드시 읽고 고쳐야 한다. */
+			pci_read_config_word(bridge, PCI_BRIDGE_CONTROL,
+					     &cmd);
+			if (decode)
+				/* [한국어] VGA Enable(0x08). 이 브리지가 VGA 주소 범위를
+				 * 하위 버스로 통과시킨다. */
+				cmd |= PCI_BRIDGE_CTL_VGA;
+			else
+				cmd &= ~PCI_BRIDGE_CTL_VGA;
+			pci_write_config_word(bridge, PCI_BRIDGE_CONTROL,
+					      cmd);
 
 
 			/*
 			 * VGA Enable may not be writable if bridge doesn't
 			 * support it.
 			 */
-			if (decode) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-				pci_read_config_word(bridge, PCI_BRIDGE_CONTROL, /* NVMe: PCI 설정 공간 2바이트를 읽는다. */
-						     &cmd); /* NVMe: 비트 연산을 수행한다. */
-				if (!(cmd & PCI_BRIDGE_CTL_VGA)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-					return -EIO; /* NVMe: 오류 코드를 반환한다. */
-			} /* NVMe: 코드 블록을 종료한다. */
-		} /* NVMe: 코드 블록을 종료한다. */
-		bus = bus->parent; /* NVMe: 변수에 값을 할당한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
-	return 0; /* NVMe: 성공(0)을 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+			/* [한국어] 되읽어 확인한다. VGA Enable 은 선택 기능이라
+			 * 지원하지 않는 브리지에서는 쓰기가 조용히 무시된다.
+			 * 그러면 경로가 끊긴 것이므로 -EIO 로 알린다.
+			 * 끄는 방향은 실패해도 무해하므로 확인하지 않는다. */
+			if (decode) {
+				pci_read_config_word(bridge, PCI_BRIDGE_CONTROL,
+						     &cmd);
+				if (!(cmd & PCI_BRIDGE_CTL_VGA))
+					return -EIO;
+			}
+		}
+		bus = bus->parent;	/* [한국어] 한 단계 위로. 루트에서 NULL 이 되어 끝난다 */
+	}
+	return 0;
+}
 
 #ifdef CONFIG_ACPI /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
 /*
- * pci_pr3_present:
- *   PR3(Power Reduction) 지원 여부를 확인한다. NVMe 장치의 추가 저전원 상태 지원 여부를 판단할 수 있다.
+ * [한국어]
+ * pci_pr3_present - 이 장치를 D3cold 로 보낼 수 있다고 펌웨어가 알려 주는가
+ *
+ * @pdev:   확인할 장치
+ * @return: true = ACPI 가 _PR3 메서드를 제공한다(D3cold 가능),
+ *          false = 없거나 ACPI 자체가 꺼져 있다.
+ *
+ * _PR3 는 ACPI 의 "Power Resources for D3hot" 메서드로, 이 장치를 D3 로
+ * 보낼 때 어떤 전원 자원을 꺼야 하는지 펌웨어가 알려 주는 것이다.
+ * 이것이 있어야 커널이 장치의 전원을 실제로 끊는 D3cold 까지 갈 수 있다.
+ * 없으면 D3hot(장치 안의 로직만 꺼짐)이 한계다.
+ *
+ * 두 조건을 모두 확인한다.
+ *   power_resources - ACPI 장치가 전원 자원을 갖고 있다고 선언했는가.
+ *   _PR3 메서드     - 실제로 그 메서드가 존재하는가.
+ * 둘 중 하나만 있으면 안 되므로 && 로 묶었다.
+ *
+ * PR3 를 "Power Reduction 3" 로 읽으면 안 된다 — Power Resources for D3 다.
+ *
+ * NVMe 학습 관점: 노트북의 NVMe SSD 를 D3cold 로 보내 배터리를 아끼는
+ * 동작이 이 조건에 달려 있다. 다만 D3cold 에서 깨어나려면 전원을 다시
+ * 넣고 링크를 재훈련해야 해서 수백 밀리초가 걸리므로, NVMe 는
+ * 그 지연을 감수할 만큼 오래 쉴 때만 그리로 간다.
+ * (drivers/nvme/ 에 이 함수 직접 호출은 없다 — PCI 코어의 전원 관리가
+ *  판단에 쓴다.)
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. ACPI 조회가 잠들 수 있다.
+ * 호출자: 전원 관리 정책 코드, 일부 GPU 드라이버.
  */
-bool pci_pr3_present(struct pci_dev *pdev) /* NVMe: pci_pr3_present 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	struct acpi_device *adev; /* NVMe: 데이터 타입 변수를 선언한다. */
+bool pci_pr3_present(struct pci_dev *pdev)
+{
+	struct acpi_device *adev;	/* [한국어] 이 PCI 장치에 대응하는 ACPI 노드 */
 
-	if (acpi_disabled) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return false; /* NVMe: 연산 결과를 반환한다. */
+	/* [한국어] "acpi=off" 로 부팅했다면 물어볼 곳이 없다. */
+	if (acpi_disabled)
+		return false;
 
-	adev = ACPI_COMPANION(&pdev->dev); /* NVMe: 변수에 값을 할당한다. */
-	if (!adev) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return false; /* NVMe: 연산 결과를 반환한다. */
+	/* [한국어] PCI 장치와 ACPI 노드를 잇는 매크로. 펌웨어가 이 장치를
+	 * 기술하지 않았으면 NULL 이다(핫플러그로 꽂힌 장치 등). */
+	adev = ACPI_COMPANION(&pdev->dev);
+	if (!adev)
+		return false;
 
-	return adev->power.flags.power_resources && /* NVMe: 표현식을 이어서 작성한다. */
-		acpi_has_method(adev->handle, "_PR3"); /* NVMe: acpi_has_method 함수를 호출한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	/* [한국어] 두 조건을 모두 만족해야 한다. 앞의 플래그는 "전원 자원을
+	 * 선언했는가", 뒤는 "D3 용 메서드가 실제로 있는가". */
+	return adev->power.flags.power_resources &&
+		acpi_has_method(adev->handle, "_PR3");
+}
 EXPORT_SYMBOL_GPL(pci_pr3_present);
 #endif /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
 
@@ -12561,75 +12689,218 @@ EXPORT_SYMBOL_GPL(pci_pr3_present);
  * cannot be left as a userspace activity).  DMA aliases should therefore
  * be configured via quirks, such as the PCI fixup header quirk.
  */
-void pci_add_dma_alias(struct pci_dev *dev, u8 devfn_from, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-		       unsigned int nr_devfns) /* NVMe: unsigned 타입 변수를 선언한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	int devfn_to; /* NVMe: int 타입 변수를 선언한다. */
+/*
+ * [한국어]
+ * pci_add_dma_alias - 이 장치가 다른 devfn 으로도 DMA 를 낸다고 등록한다
+ *
+ * @dev:        문제의 장치
+ * @devfn_from: 별칭 범위의 시작 devfn
+ * @nr_devfns:  범위의 개수. 1 이면 devfn 하나만 추가한다.
+ * @return: 없음. 실패해도 경고만 남기고 넘어간다.
+ *
+ * DMA 트랜잭션에는 발신자를 나타내는 requester ID(RID)가 붙고, IOMMU 는
+ * 그것으로 어느 주소 공간을 쓸지 정한다. 그런데 일부 장치는 자기 devfn 이
+ * 아닌 엉뚱한 값을 쓴다 — 하드웨어 버그이거나, 내부적으로 여러 function 이
+ * 하나의 DMA 엔진을 공유하는 설계다.
+ *
+ * 그런 장치를 IOMMU 뒤에서 쓰면 DMA 가 전부 차단된다. IOMMU 는 등록되지
+ * 않은 RID 에서 오는 접근을 막기 때문이다. 그래서 "이 장치는 이런 RID 로도
+ * 나타난다" 를 미리 알려 줘야 하고, 그 등록이 이 함수다.
+ *
+ * 원문 주석이 중요한 제약을 밝힌다 — IOMMU 그룹은 장치 발견 시점에
+ * 만들어지므로, 별칭 등록은 그보다 먼저 이뤄져야 한다. 그래서 드라이버가
+ * probe 에서 부르면 이미 늦고, quirks.c 의 DECLARE_PCI_FIXUP_HEADER 로
+ * 등록해야 한다.
+ *
+ * 마스크는 MAX_NR_DEVFNS(256) 비트짜리 비트맵이고, 필요할 때 처음 한 번만
+ * 할당한다. 대부분의 장치는 별칭이 없어 이 포인터가 NULL 로 남는다.
+ *
+ * 할당 실패를 치명적으로 다루지 않는다는 점에 주의. 경고만 남기고 돌아간다.
+ * 부팅 초기에 이만큼도 할당하지 못하는 상황이면 어차피 다른 데서 먼저
+ * 죽을 것이고, 여기서 실패를 전파해 봐야 quirk 호출자가 할 수 있는 일이 없다.
+ *
+ * NVMe 학습 관점: NVMe SSD 자체에 이런 quirk 가 걸린 사례는 없다. 하지만
+ * NVMe 가 PCIe-to-PCI 브리지 뒤에 있으면 브리지의 RID 로 바뀌는데,
+ * 그것은 이 함수가 아니라 pci_for_each_dma_alias() 가 계층을 훑으며
+ * 자동으로 처리한다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트(GFP_KERNEL 할당). 열거 중에 불린다.
+ * 호출자: quirks.c 의 DMA alias fixup 들.
+ */
+void pci_add_dma_alias(struct pci_dev *dev, u8 devfn_from,
+		       unsigned int nr_devfns)
+{
+	int devfn_to;	/* [한국어] 범위의 끝. 로그 출력에만 쓴다 */
 
-	nr_devfns = min(nr_devfns, (unsigned int)MAX_NR_DEVFNS - devfn_from); /* NVMe: 변수에 값을 할당한다. */
-	devfn_to = devfn_from + nr_devfns - 1; /* NVMe: 변수에 값을 할당한다. */
+	/* [한국어] 범위가 비트맵 밖으로 나가지 않게 자른다. devfn 은 8비트라
+	 * 최대 256개이고, devfn_from 부터 남은 칸이 그보다 적을 수 있다.
+	 * 이 clamp 가 없으면 bitmap_set 이 배열 밖을 건드린다. */
+	nr_devfns = min(nr_devfns, (unsigned int)MAX_NR_DEVFNS - devfn_from);
+	devfn_to = devfn_from + nr_devfns - 1;
 
-	if (!dev->dma_alias_mask) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		dev->dma_alias_mask = bitmap_zalloc(MAX_NR_DEVFNS, GFP_KERNEL); /* NVMe: 변수에 값을 할당한다. */
-	if (!dev->dma_alias_mask) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pci_warn(dev, "Unable to allocate DMA alias mask\n"); /* NVMe: PCI 장치에 대한 경고 로그를 출력한다. */
-		return; /* NVMe: 함수 실행을 종료한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+	/* [한국어] 비트맵을 처음 쓰는 경우에만 할당한다. 별칭이 없는 장치는
+	 * 이 포인터가 NULL 로 남아 메모리를 쓰지 않는다. zalloc 이라 0 으로 채워진다. */
+	if (!dev->dma_alias_mask)
+		dev->dma_alias_mask = bitmap_zalloc(MAX_NR_DEVFNS, GFP_KERNEL);
+	/* [한국어] 방금 할당했든 원래 있었든, 여기서 NULL 이면 쓸 수 없다.
+	 * 실패를 전파하지 않고 경고만 남기는 이유는 위 함수 주석 참고. */
+	if (!dev->dma_alias_mask) {
+		pci_warn(dev, "Unable to allocate DMA alias mask\n");
+		return;
+	}
 
-	bitmap_set(dev->dma_alias_mask, devfn_from, nr_devfns); /* NVMe: bitmap_set 함수를 호출한다. */
+	/* [한국어] devfn_from 부터 nr_devfns 개의 비트를 한 번에 세운다. */
+	bitmap_set(dev->dma_alias_mask, devfn_from, nr_devfns);
 
-	if (nr_devfns == 1) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		pci_info(dev, "Enabling fixed DMA alias to %02x.%d\n", /* NVMe: PCI 장치에 대한 정보 로그를 출력한다. */
-				PCI_SLOT(devfn_from), PCI_FUNC(devfn_from)); /* NVMe: PCI_SLOT 함수를 호출한다. */
-	else if (nr_devfns > 1) /* NVMe: 이전 조건이 거짓일 때 추가 조건을 검사한다. */
-		pci_info(dev, "Enabling fixed DMA alias for devfn range from %02x.%d to %02x.%d\n", /* NVMe: PCI 장치에 대한 정보 로그를 출력한다. */
-				PCI_SLOT(devfn_from), PCI_FUNC(devfn_from), /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-				PCI_SLOT(devfn_to), PCI_FUNC(devfn_to)); /* NVMe: PCI_SLOT 함수를 호출한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	/* [한국어] 로그를 단수/복수로 나눠 찍는다. IOMMU 문제를 추적할 때
+	 * 어떤 별칭이 등록됐는지가 결정적 단서라 반드시 남긴다.
+	 * %02x.%d 는 슬롯.함수 표기다(devfn 을 PCI_SLOT/PCI_FUNC 로 쪼갠 것). */
+	if (nr_devfns == 1)
+		pci_info(dev, "Enabling fixed DMA alias to %02x.%d\n",
+				PCI_SLOT(devfn_from), PCI_FUNC(devfn_from));
+	else if (nr_devfns > 1)
+		pci_info(dev, "Enabling fixed DMA alias for devfn range from %02x.%d to %02x.%d\n",
+				PCI_SLOT(devfn_from), PCI_FUNC(devfn_from),
+				PCI_SLOT(devfn_to), PCI_FUNC(devfn_to));
+	/* [한국어] nr_devfns 가 0 이면 아무것도 찍지 않는다. 위 clamp 로
+	 * 0 이 될 수 있다(devfn_from 이 이미 경계인 경우). */
+}
 
 /*
- * pci_devs_are_dma_aliases:
- *   두 pci_dev 가 DMA alias 관계인지 확인한다. NVMe DMA 주소 충돌/alias 처리에 사용된다.
+ * [한국어]
+ * pci_devs_are_dma_aliases - 두 장치가 DMA 관점에서 서로를 가리는 관계인가
+ *
+ * @dev1, @dev2: 비교할 두 장치
+ * @return: true = 하나가 다른 하나의 RID 로 DMA 를 낼 수 있다.
+ *
+ * IOMMU 는 서로 별칭 관계인 장치들을 같은 그룹으로 묶어야 한다. 하나가
+ * 다른 하나의 RID 를 쓸 수 있다면 두 장치를 서로 격리할 방법이 없기 때문이다.
+ * 그 판정을 이 함수가 한다.
+ *
+ * 네 가지 경우를 OR 로 확인한다. 관계가 대칭적이지 않을 수 있어서
+ * 양쪽 방향을 모두 봐야 한다.
+ *   1) dev1 의 별칭 목록에 dev2 의 devfn 이 있는가
+ *   2) dev2 의 별칭 목록에 dev1 의 devfn 이 있는가
+ *   3) dev1 의 실제 DMA 주체가 dev2 인가
+ *   4) dev2 의 실제 DMA 주체가 dev1 인가
+ *
+ * 1,2 는 quirk 로 등록한 devfn 별칭(pci_add_dma_alias)이고,
+ * 3,4 는 아키텍처가 제공하는 다른 버스로의 별칭(pci_real_dma_dev)이다.
+ * 두 메커니즘이 다르므로 둘 다 확인해야 한다.
+ *
+ * 마스크 검사에서 && 로 NULL 을 먼저 거르는 것에 주의. 대부분의 장치는
+ * dma_alias_mask 가 NULL 이라 test_bit 이 아예 평가되지 않는다.
+ *
+ * 실행 컨텍스트: 제약 없음.
+ * 호출자: IOMMU 코드의 그룹 구성(drivers/iommu/iommu.c).
  */
-bool pci_devs_are_dma_aliases(struct pci_dev *dev1, struct pci_dev *dev2) /* NVMe: pci_devs_are_dma_aliases 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	return (dev1->dma_alias_mask && /* NVMe: 표현식을 이어서 작성한다. */
-		test_bit(dev2->devfn, dev1->dma_alias_mask)) || /* NVMe: 표현식을 이어서 작성한다. */
-	       (dev2->dma_alias_mask && /* NVMe: 표현식을 이어서 작성한다. */
-		test_bit(dev1->devfn, dev2->dma_alias_mask)) || /* NVMe: 표현식을 이어서 작성한다. */
-	       pci_real_dma_dev(dev1) == dev2 || /* NVMe: 실제 DMA device 를 반환한다. */
-	       pci_real_dma_dev(dev2) == dev1; /* NVMe: 실제 DMA device 를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+bool pci_devs_are_dma_aliases(struct pci_dev *dev1, struct pci_dev *dev2)
+{
+	return (dev1->dma_alias_mask &&
+		/* [한국어] dev1 이 dev2 의 devfn 으로도 DMA 를 낸다고 등록돼 있는가.
+		 * NULL 검사를 && 앞에 두어 마스크 없는 장치에서 역참조를 막는다. */
+		test_bit(dev2->devfn, dev1->dma_alias_mask)) ||
+	       (dev2->dma_alias_mask &&
+		/* [한국어] 반대 방향. 관계가 한쪽에만 등록돼 있을 수 있다. */
+		test_bit(dev1->devfn, dev2->dma_alias_mask)) ||
+	       /* [한국어] 아키텍처가 정의한 "실제 DMA 주체" 관계. 다른 버스에
+		* 걸친 별칭은 devfn 비트맵으로 표현할 수 없어 이 경로를 쓴다. */
+	       pci_real_dma_dev(dev1) == dev2 ||
+	       pci_real_dma_dev(dev2) == dev1;
+}
 
 /*
- * pci_device_is_present:
- *   pci_dev 가 여전히 물리적으로 존재하는지 확인한다. NVMe surprise removal 감지에 활용된다.
+ * [한국어]
+ * pci_device_is_present - 이 장치가 아직 거기 있는가
+ *
+ * @pdev:   확인할 장치
+ * @return: true = 응답한다, false = 사라졌거나 이미 제거 표시가 됐다.
+ *
+ * 장치의 Vendor ID 를 읽어 all-ones 가 아닌지 본다. 응답 없는 장치를 읽으면
+ * 버스가 all-ones 를 돌려주므로, 그것이 "없음" 의 신호가 된다
+ * (access.c 의 PCI_SET_ERROR_RESPONSE 주석 참고).
+ *
+ * 두 단계로 확인한다.
+ *   1) pci_dev_is_disconnected() — 커널이 이미 "제거됨" 으로 표시해 둔
+ *      장치인가. 이 플래그는 hotplug 나 오류 처리 경로가 세운다.
+ *      하드웨어를 건드리지 않고 즉시 판정할 수 있어 먼저 본다.
+ *   2) 실제로 Vendor ID 를 읽어 본다.
+ *
+ * VF 를 PF 로 바꿔치기하는 첫 줄이 중요하다. SR-IOV 가상 함수(VF)의
+ * Vendor/Device ID 는 스펙상 항상 0xFFFF 로 하드와이어돼 있다 — VF 는
+ * PF 의 ID 를 물려받아 쓰므로 자기 ID 를 가질 필요가 없기 때문이다.
+ * 그래서 VF 를 그대로 읽으면 살아 있는 장치도 "없음" 으로 판정된다.
+ * pci_physfn() 이 VF 를 그 PF 로 바꿔 주고, PF 가 있으면 VF 도 있다.
+ *
+ * NVMe 학습 관점: NVMe 드라이버가 이 파일에서 직접 부르는 8개 함수 중
+ * 하나다(전수 확인). 명령이 타임아웃됐을 때 "컨트롤러가 뽑혔는가,
+ * 아니면 살아 있는데 응답만 늦는가" 를 가르는 데 쓴다. 뽑혔다면 복구를
+ * 시도할 이유가 없으므로 곧바로 모든 I/O 를 실패 처리한다.
+ *
+ * 실행 컨텍스트: 제약 없음(config 읽기).
+ * 호출자: drivers/nvme/host/pci.c 를 비롯한 여러 드라이버.
  */
-bool pci_device_is_present(struct pci_dev *pdev) /* NVMe: pci_device_is_present 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	u32 v; /* NVMe: u32 타입 변수를 선언한다. */
+bool pci_device_is_present(struct pci_dev *pdev)
+{
+	u32 v;	/* [한국어] 읽은 Vendor/Device ID. 값 자체는 쓰지 않는다 */
 
 	/* Check PF if pdev is a VF, since VF Vendor/Device IDs are 0xffff */
-	pdev = pci_physfn(pdev); /* NVMe: 변수에 값을 할당한다. */
-	if (pci_dev_is_disconnected(pdev)) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return false; /* NVMe: 연산 결과를 반환한다. */
-	return pci_bus_read_dev_vendor_id(pdev->bus, pdev->devfn, &v, 0); /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	/* [한국어] VF 라면 PF 로 바꾼다. VF 의 ID 는 스펙상 항상 0xFFFF 라
+	 * 그대로 읽으면 살아 있어도 "없음" 이 된다. PF 가 아니면 그대로 둔다. */
+	pdev = pci_physfn(pdev);
+	/* [한국어] 이미 제거 표시가 된 장치. 하드웨어를 건드리지 않고 판정한다 —
+	 * 사라진 장치에 접근하는 것 자체가 위험하기 때문이다. */
+	if (pci_dev_is_disconnected(pdev))
+		return false;
+	/* [한국어] 실제로 읽어 본다. 이 함수는 all-ones 인지 판정해
+	 * true/false 를 돌려주므로 그대로 반환하면 된다. 마지막 인자 0 은
+	 * "재시도하지 않음"(CRS 대기 없음)을 뜻한다. */
+	return pci_bus_read_dev_vendor_id(pdev->bus, pdev->devfn, &v, 0);
+}
 EXPORT_SYMBOL_GPL(pci_device_is_present);
 
 /*
- * pci_ignore_hotplug:
- *   해당 pci_dev 의 hotplug 이벤트를 무시하도록 설정한다. NVMe 장치의 예상치 못한 removal 이벤트 처리를 제어한다.
+ * [한국어]
+ * pci_ignore_hotplug - 이 장치의 링크가 끊겨도 제거로 해석하지 말라고 표시한다
+ *
+ * @dev: 대상 장치
+ * @return: 없음.
+ *
+ * 드라이버가 스스로 장치의 전원을 껐다 켜는 경우가 있다. 그러면 링크가
+ * 잠시 끊기는데, 그것을 본 핫플러그 컨트롤러는 "카드가 뽑혔다" 고 판단해
+ * 장치를 제거해 버린다. 드라이버 입장에서는 잠깐 재우려 했을 뿐인데
+ * 장치 자체가 사라지는 것이다.
+ *
+ * 이 함수는 그 오해를 막는다. 플래그를 보고 pciehp 가 Presence Detect /
+ * Data Link Layer State Changed 이벤트를 무시한다.
+ *
+ * 상위 브리지에도 함께 세우는 것이 중요하다. 링크 끊김을 실제로 감지하는
+ * 주체가 하위 장치가 아니라 상위 포트(하류 포트)이기 때문이다. 그 포트의
+ * 핫플러그 서비스가 이 플래그를 확인한다.
+ *
+ * 이 플래그는 한번 세우면 내려가지 않는다(해제 함수가 없다). 드라이버가
+ * 바인딩된 동안 계속 유효하다는 뜻이며, 그래서 진짜 뽑힘도 함께 무시된다 —
+ * 그 대가를 감수할 만한 드라이버만 이것을 쓴다.
+ *
+ * NVMe 관점: drivers/nvme/ 에는 호출이 없다(전수 확인). NVMe 는 D3 전환에
+ * 링크를 끊지 않으므로 필요가 없다. 주로 GPU 드라이버가 런타임 절전으로
+ * 외장 GPU 전원을 끊을 때 쓴다.
+ *
+ * 실행 컨텍스트: 제약 없음. 플래그 대입뿐이다.
+ * 호출자: nouveau, radeon 등 GPU 드라이버.
  */
-void pci_ignore_hotplug(struct pci_dev *dev) /* NVMe: pci_ignore_hotplug 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	struct pci_dev *bridge = dev->bus->self; /* NVMe: 데이터 타입 변수를 선언한다. */
+void pci_ignore_hotplug(struct pci_dev *dev)
+{
+	/* [한국어] 링크 끊김을 실제로 감지하는 상위 포트. 루트 버스 직결이면 NULL. */
+	struct pci_dev *bridge = dev->bus->self;
 
-	dev->ignore_hotplug = 1; /* NVMe: 변수에 값을 할당한다. */
+	dev->ignore_hotplug = 1;	/* [한국어] 장치 자신에게 표시 */
 	/* Propagate the "ignore hotplug" setting to the parent bridge. */
-	if (bridge) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		bridge->ignore_hotplug = 1; /* NVMe: 변수에 값을 할당한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	/* [한국어] 상위 브리지에도 전파. 실제로 이벤트를 받는 쪽이 여기라
+	 * 이 줄이 없으면 위 표시가 아무 효과를 내지 못한다. */
+	if (bridge)
+		bridge->ignore_hotplug = 1;
+}
 EXPORT_SYMBOL_GPL(pci_ignore_hotplug);
 
 /**
@@ -12643,34 +12914,96 @@ EXPORT_SYMBOL_GPL(pci_ignore_hotplug);
  * implementations can override this.
  */
 /*
- * pci_real_dma_dev:
- *   DMA 를 실제로 수행하는 pci_dev 를 반환한다. NVMe SR-IOV VF 의 DMA 가 PF 를 통해 이루어지는 경우 등 alias 를 해석한다.
+ * [한국어]
+ * pci_real_dma_dev - 이 장치를 대신해 DMA 를 내는 장치를 알려 준다
+ *
+ * @dev:    조회할 장치
+ * @return: 실제 DMA 주체. 기본 구현은 자기 자신을 그대로 돌려준다.
+ *
+ * __weak 훅이다. 기본 동작은 항등 함수 — 대부분의 장치는 자기 이름으로
+ * DMA 를 내기 때문이다.
+ *
+ * 아키텍처가 이것을 덮어쓰는 경우는 "다른 버스에 있는 장치가 대신 DMA 를
+ * 내는" 구조일 때다. pci_add_dma_alias() 는 같은 버스 안의 devfn 별칭만
+ * 표현할 수 있어서(비트맵의 인덱스가 devfn 이다), 버스를 건너뛰는 관계는
+ * 이 훅으로 표현한다. 원문 주석이 그 구분을 밝힌다 — 같은 버스면
+ * pci_add_dma_alias() 를 쓰라고 권한다.
+ *
+ * 실제로 이것을 덮어쓰는 곳은 Intel VMD 드라이버다. VMD 뒤의 장치들은
+ * VMD 컨트롤러의 RID 로 DMA 를 내므로, 그 매핑을 여기서 알려 준다.
+ *
+ * NVMe 학습 관점: VMD 는 인텔 플랫폼에서 NVMe SSD 여러 개를 하나의
+ * 엔드포인트 뒤에 숨기는 기능이다. VMD 가 켜진 시스템에서는 NVMe 가
+ * 별도의 PCI 도메인에 나타나고, 그 DMA 의 실제 주체는 VMD 컨트롤러다.
+ * IOMMU 가 그것을 알아야 매핑을 올바른 RID 에 걸 수 있다.
+ *
+ * 실행 컨텍스트: 제약 없음.
+ * 호출자: pci_devs_are_dma_aliases(), IOMMU 코드.
  */
-struct pci_dev __weak *pci_real_dma_dev(struct pci_dev *dev) /* NVMe: pci_real_dma_dev 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	return dev; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+struct pci_dev __weak *pci_real_dma_dev(struct pci_dev *dev)
+{
+	/* [한국어] 기본 동작 — 자기 자신이 DMA 주체다. */
+	return dev;
+}
 
 /*
- * pcibios_default_alignment:
- *   아키텍처 기본 리소스 정렬값을 반환한다. NVMe BAR 할당 정렬 기준을 판단한다.
+ * [한국어]
+ * pcibios_default_alignment - 아키텍처가 요구하는 BAR 정렬 하한
+ *
+ * @return: 바이트 단위 정렬값. 0 = 추가 요구 없음(기본).
+ *
+ * __weak 훅이다. 기본은 0 이며, 그러면 BAR 는 자기 크기만큼만 정렬된다
+ * (PCI 스펙의 요구). 아키텍처가 그보다 큰 정렬을 요구하면 이것을 덮어쓴다.
+ *
+ * 왜 더 큰 정렬이 필요한가. IOMMU 가 페이지 단위로만 매핑을 걸 수 있는
+ * 플랫폼에서는, 한 페이지 안에 두 장치의 BAR 가 섞이면 그 둘을 서로
+ * 격리할 수 없다. VFIO 로 장치를 게스트에 넘길 때 치명적인 문제가 되므로,
+ * 그런 플랫폼은 BAR 를 페이지 경계에 맞춘다.
+ *
+ * 실행 컨텍스트: 제약 없음.
+ * 호출자: pci_specified_resource_alignment() 가 사용자 지정 정렬과 비교할 때.
  */
-resource_size_t __weak pcibios_default_alignment(void) /* NVMe: pcibios_default_alignment 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	return 0; /* NVMe: 성공(0)을 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+resource_size_t __weak pcibios_default_alignment(void)
+{
+	/* [한국어] 0 = "아키텍처가 추가로 요구하는 정렬이 없다". */
+	return 0;
+}
 
 /*
  * Arches that don't want to expose struct resource to userland as-is in
  * sysfs and /proc can implement their own pci_resource_to_user().
  */
-void __weak pci_resource_to_user(const struct pci_dev *dev, int bar, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-				 const struct resource *rsrc, /* NVMe: 표현식을 이어서 작성한다. */
-				 resource_size_t *start, resource_size_t *end) /* NVMe: resource_size_t 타입 변수를 선언한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
+/*
+ * [한국어]
+ * pci_resource_to_user - 자원의 시작/끝 주소를 userspace 에 보일 형태로 바꾼다
+ *
+ * @dev:   대상 장치
+ * @bar:   자원 번호
+ * @rsrc:  커널이 들고 있는 자원
+ * @start: 사용자에게 보일 시작 주소를 담을 곳
+ * @end:   사용자에게 보일 끝 주소를 담을 곳
+ * @return: 없음.
+ *
+ * __weak 훅이며, 기본 구현은 그대로 복사한다. 즉 커널이 보는 주소와
+ * userspace 가 보는 주소가 같다.
+ *
+ * 위 원문 주석이 존재 이유를 밝힌다 — struct resource 의 값을 그대로
+ * 노출하고 싶지 않은 아키텍처가 자기 판을 제공할 수 있게 한 것이다.
+ * 예컨대 sparc 는 sysfs 와 /proc/bus/pci 에 CPU 물리 주소가 아니라
+ * PCI 버스 주소를 보여 준다. 그 플랫폼의 userspace 도구들이 그렇게
+ * 기대하도록 오래전에 굳어졌기 때문이다.
+ *
+ * 실행 컨텍스트: 제약 없음.
+ * 호출자: pci-sysfs.c 의 resource 속성, proc.c 의 /proc/bus/pci.
+ */
+void __weak pci_resource_to_user(const struct pci_dev *dev, int bar,
+				 const struct resource *rsrc,
+				 resource_size_t *start, resource_size_t *end)
+{
+	/* [한국어] 기본 동작 — 변환 없이 그대로 보여 준다. */
 	*start = rsrc->start;
 	*end = rsrc->end;
-} /* NVMe: 코드 블록을 종료한다. */
+}
 
 static char *resource_alignment_param; /* NVMe: 포인터 변수를 선언한다. */
 static DEFINE_SPINLOCK(resource_alignment_lock); /* NVMe: DEFINE_SPINLOCK 매크로를 호출한다. */
