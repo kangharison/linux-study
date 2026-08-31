@@ -56,19 +56,48 @@
  * 공유 상태: struct pcie_link_state — 링크 하나를 나타내며, 양 끝 장치와
  *   지원/활성/가능/기본/금지 상태 비트를 담는다. 전역 link_list 에 매달린다.
  *
- * === NVMe 관점 ===
- * NVMe 드라이버가 이 파일에서 직접 부르는 함수는 pcie_aspm_enabled() 하나다
- * (drivers/nvme/ 전수 확인). 그리고 그 쓰임이 흥미롭다.
+ * === 이 파일의 심볼을 누가 부르는가 (이 트리에서 grep 으로 전수 확인) ===
+ * 이 파일은 엔드포인트의 종류를 가리지 않는 PCI 코어 계층이다. 특정
+ * 장치(NVMe 등)를 위한 코드가 아니며, 링크 양 끝이 무엇이든 같은 계산을
+ * 돌린다. 실제 호출자는 다음이 전부다.
  *
- *   nvme_suspend()  [drivers/nvme/host/pci.c]
+ *   pcie_aspm_init_link_state()        <- probe.c:7077
+ *   pcie_aspm_exit_link_state()        <- remove.c:158
+ *   pcie_aspm_pm_state_change()        <- pci.c:2635, pci.c:2836
+ *   pcie_aspm_powersave_config_link()  <- pci.c:3868 (pci_enable_device 경로)
+ *   pcie_aspm_remove_cap()             <- quirks.c:5445, quirks.c:5495
+ *   pci_configure_ltr()                <- probe.c:5847
+ *   pci_configure_aspm_l1ss()          <- probe.c:5851
+ *   pci_bridge_reconfigure_ltr()       <- pci.c:3200
+ *   pci_save_ltr_state()               <- pci.c:3145
+ *   pci_restore_ltr_state()            <- pci.c:3188
+ *   pci_save_aspm_l1ss_state()         <- pci.c:3144, 그리고 이 파일 내부
+ *   pci_restore_aspm_l1ss_state()      <- pci.c:3189
+ *   pcie_no_aspm()                     <- pci-acpi.c:1922 (FADT 의 NO_ASPM 비트)
+ *   aspm_ctrl_attr_group               <- pci-sysfs.c:4959
+ *   pci_enable_link_state_locked()     <- controller/vmd.c:859,
+ *                                         controller/dwc/pcie-qcom.c:1060
+ *   pcie_aspm_enabled()                <- pcie/pme.c 주석, 그리고
+ *                                         drivers/nvme/host/pci.c:5005
+ *
+ * pci_disable_link_state() / pci_disable_link_state_locked() /
+ * pci_enable_link_state() / pcie_aspm_support_enabled() 는 EXPORT 되어 있으나
+ * 이 스파스 체크아웃 안에는 호출자가 하나도 없다. 트리 밖 드라이버가
+ * 쓰는 것으로 보이며, 여기서는 확인할 수 없다.
+ *
+ * === 엔드포인트 하나의 실제 사용례 (근거 있는 유일한 접점) ===
+ * 이 파일이 장치 드라이버에 직접 노출하는 판단은 pcie_aspm_enabled() 뿐이고,
+ * 이 트리에서 그것을 부르는 드라이버는 NVMe 하나다.
+ *
+ *   nvme_suspend()  [drivers/nvme/host/pci.c:5003~5006]
  *     if (pm_suspend_via_firmware() || !ctrl->npss ||
  *         !pcie_aspm_enabled(pdev) ||
  *         (ndev->ctrl.quirks & NVME_QUIRK_SIMPLE_SUSPEND))
  *             return nvme_disable_prepare_reset(ndev, true);
  *
  * 절전에 들어갈 때 두 가지 방법 중 하나를 고르는 판단이다.
- *   - NVMe 자체 전력 상태(NVMe Power State, npss 가 그 개수)를 써서
- *     컨트롤러를 저전력으로 두되 링크는 살려 두는 방법. 복귀가 빠르다.
+ *   - 장치 자체의 저전력 상태를 써서 컨트롤러만 재우고 링크는 살려 두는 방법.
+ *     복귀가 빠르다.
  *   - 아예 PCI D3 로 내려 전원을 끊는 방법. 복귀가 느리다.
  *
  * 앞의 방법은 링크가 살아 있어야 성립하는데, ASPM 이 꺼져 있으면 링크가
@@ -76,17 +105,19 @@
  * 절전 효과가 없으므로, 차라리 D3 로 내리는 편이 낫다. 그 판단을 위해
  * "이 링크에 ASPM 이 켜져 있는가" 를 이 함수로 묻는 것이다.
  *
- * 반대 방향의 영향도 크다. ASPM L1.2 는 복귀에 수백 마이크로초가 걸릴 수
- * 있는데, 그것이 NVMe 명령 하나하나의 지연에 더해진다. 저지연이 중요한
- * 워크로드에서 "pcie_aspm=off" 로 껐을 때 성능이 눈에 띄게 좋아지는 것이
+ * 반대 방향의 영향도 크다. L1.2 는 복귀에 수십~수백 마이크로초가 걸릴 수
+ * 있고, 그것이 장치로 보내는 요청 하나하나의 지연에 더해진다. 저지연이
+ * 중요한 워크로드에서 "pcie_aspm=off" 로 껐을 때 성능이 좋아지는 것이
  * 그 때문이다. 반대로 노트북에서는 그 지연을 감수하고 배터리를 아낀다.
  *
- * (기존 주석은 "NVMe 드라이버가 pci_disable_link_state() 등을 직접 호출한다"
- *  고 적었으나 drivers/nvme/ 에 그 호출은 0건이다. 또 NVMe 경로로
- *  "pci_request_regions -> pci_enable_msix_range" 를 들었으나 두 함수 모두
- *  호출이 0건이고, "pci_enable_device() 이후
- *  pcie_aspm_powersave_config_link() 가 정책을 반영한다" 는 서술도
- *  NVMe 쪽에 그 호출이 없다. 위 검증 결과로 대체했다.)
+ * (이전 주석이 적어 두었던 다음 서술들은 이 트리에서 반증되어 지웠다:
+ *  "NVMe 드라이버가 pci_disable_link_state() 를 호출한다" — drivers/nvme 에
+ *  0건이고 트리 전체에도 0건. "NVMe 경로가 pci_request_regions ->
+ *  pci_enable_msix_range 로 이어진다" — 두 함수 모두 호출 0건.
+ *  "고성능 NVMe 드라이버는 pcie_aspm_powersave_config_link() 전에
+ *  pci_disable_link_state() 를 부르는 경우가 많다" — 근거 없음.
+ *  "pcie_aspm_enabled() 를 NVMe 가 sysfs/디버깅 용도로 참조한다" — 실제로는
+ *  위와 같이 suspend 방식을 고르는 조건식이다.)
  *
  * === 주요 함수/구조체 요약 ===
  * pcie_aspm_init_link_state()   : 링크를 발견했을 때 상태 구조를 만든다.
@@ -96,250 +127,373 @@
  *                                 견딜 수 있는 범위인지 판정한다. 이 파일에서
  *                                 가장 중요한 계산이다.
  * pcie_config_aspm_link()       : 링크 양 끝의 LNKCTL 에 ASPM Control 을 쓴다.
- *                                 상류부터 끄고 하류부터 켜는 순서 제약이 있다.
+ *                                 끌 때는 하류부터, 켤 때는 상류부터라는
+ *                                 순서 제약이 있다(PCIe r6.2 sec 7.5.3.7).
  * pcie_aspm_configure_common_clock() : 양 끝이 같은 클럭을 쓰도록 설정하고
  *                                 링크를 재훈련한다. L1 substates 의 전제다.
  * pcie_aspm_enabled()           : 이 장치의 링크에 ASPM 이 켜져 있는가.
- *                                 NVMe 가 부르는 유일한 함수다.
+ *                                 이 파일이 드라이버에 내주는 유일한 질의다.
  * pci_disable_link_state()      : 드라이버가 특정 상태를 금지할 수 있게 한다.
- *                                 지연에 민감한 장치가 쓴다(NVMe 는 쓰지 않는다).
+ *                                 이 트리 안에는 호출자가 없다.
+ * aspm_calc_l12_info()          : L1.2 의 타이밍 파라미터(T_POWER_ON,
+ *                                 Common_Mode_Restore_Time, LTR_L1.2_THRESHOLD)
+ *                                 를 양 끝의 능력에서 계산해 레지스터에 쓴다.
  * struct pcie_link_state        : 링크 하나의 모든 상태. aspm_support(하드웨어가
  *                                 지원), aspm_capable(지연 검사 통과),
  *                                 aspm_enabled(현재 설정), aspm_default(초기값),
  *                                 aspm_disable(금지됨) 다섯 비트필드가 핵심이다.
+ *
+ * === 이 트리에서 확인하지 못한 것 ===
+ * include/linux/pci.h 가 이 스파스 체크아웃에 없다. 따라서
+ * PCIE_LINK_STATE_L0S / _L1 / _L1_1 / _L1_2 / _L1_1_PCIPM / _L1_2_PCIPM /
+ * _CLKPM / _ASPM_ALL / _ALL 의 실제 비트 값과, PCI_EXP_LNKCTL_* ·
+ * PCI_L1SS_* 레지스터 상수의 값은 여기서 확인할 수 없다. 아래 주석은
+ * 그 값을 지어내지 않고 "무엇을 뜻하는 비트인가" 만 적는다.
  */
 
-#include <linux/bitfield.h>
+#include <linux/bitfield.h>	/* [한국어] FIELD_GET/FIELD_PREP/FIELD_MAX. 이 파일은
+				 * 레지스터 안의 좁은 필드(예: LNKCAP 의 L0s Exit Latency,
+				 * L1SS CTL1 의 LTR_L1.2_THRESHOLD)를 끊임없이 꺼내고 끼워
+				 * 넣는다. 시프트/마스크를 손으로 쓰면 실수하기 쉬워
+				 * 마스크 상수 하나로 둘 다 처리하는 이 매크로를 쓴다 */
 #include <linux/bits.h>	/* [한국어] BIT() / GENMASK() 매크로. ASPM 상태를
 			 * 비트 조합으로 표현하므로 자주 쓴다 */
-#include <linux/build_bug.h>
-#include <linux/kernel.h>
-#include <linux/limits.h>
-#include <linux/math.h>
-#include <linux/module.h>
-#include <linux/moduleparam.h>
-#include <linux/of.h>
-#include <linux/pci.h>
-#include <linux/pci_regs.h>
-#include <linux/errno.h>
-#include <linux/pm.h>
-#include <linux/init.h>
-#include <linux/printk.h>
-#include <linux/slab.h>
-#include <linux/time.h>
+#include <linux/build_bug.h>	/* [한국어] static_assert(). 아래에서 손으로 정의한
+				 * PCIE_LINK_STATE_L0S_UP|_DW 조합이 pci.h 의
+				 * PCIE_LINK_STATE_L0S 와 같은지를 컴파일 때 못 박는다 */
+#include <linux/kernel.h>	/* [한국어] max_t(), ARRAY_SIZE() 등 커널 공용 매크로 */
+#include <linux/limits.h>	/* [한국어] U32_MAX. "지연을 얼마든 견딘다" 를 나타내는
+				 * 값으로 calc_l0s_acceptable/calc_l1_acceptable 이 쓴다 */
+#include <linux/math.h>		/* [한국어] roundup(). L1.2 threshold 를 인코딩할 때
+				 * 올림해야 한다 — 내림하면 임계값이 실제 필요 시간보다
+				 * 작아져 링크가 너무 공격적으로 L1.2 로 들어간다 */
+#include <linux/module.h>	/* [한국어] MODULE_PARAM_PREFIX 재정의와 모듈 인프라 */
+#include <linux/moduleparam.h>	/* [한국어] module_param_call(). sysfs 의
+				 * /sys/module/pcie_aspm/parameters/policy 를 만든다 */
+#include <linux/of.h>		/* [한국어] of_have_populated_dt(). devicetree 로 기술된
+				 * 플랫폼에서는 ASPM 기본값을 다르게 잡는다 */
+#include <linux/pci.h>		/* [한국어] struct pci_dev, PCIE_LINK_STATE_* 상수.
+				 * 이 스파스 체크아웃에는 이 헤더가 없어 상수의 실제
+				 * 비트 값은 확인하지 못했다 */
+#include <linux/pci_regs.h>	/* [한국어] PCI_EXP_LNKCTL / PCI_EXP_LNKCAP / PCI_L1SS_* 등
+				 * 규격이 정한 레지스터 오프셋과 비트 이름 */
+#include <linux/errno.h>	/* [한국어] -EINVAL, -EPERM 반환값 */
+#include <linux/pm.h>		/* [한국어] 전원 관리 공통 정의 */
+#include <linux/init.h>		/* [한국어] __setup(), __init. 부팅 인자 "pcie_aspm=" 처리 */
+#include <linux/printk.h>	/* [한국어] pr_info/pci_info/pci_err 로그 */
+#include <linux/slab.h>		/* [한국어] kzalloc_obj()/kfree(). pcie_link_state 할당 */
+#include <linux/time.h>		/* [한국어] NSEC_PER_USEC. 이 파일의 지연 계산은 전부
+				 * 나노초 단위로 맞춰 비교한다 */
 
-#include "../pci.h"
+#include "../pci.h"		/* [한국어] PCI 코어 내부 헤더. pcie_downstream_port(),
+				 * pcie_retrain_link(), pci_clear_and_set_config_dword(),
+				 * aspm_ctrl_attr_group 선언이 여기서 온다 */
 
-/*
- * pci_save_ltr_state:
- *   NVMe endpoint의 LTR(Latency Tolerance Reporting) capability 상태를
- *   suspend/resume 시 복원할 수 있도록 저장한다. LTR은 NVMe 장치가
- *   허용 가능한 지연 시간을 Root Complex에 보고하는 메커니즘으로, ASPM
- *   L1.2 threshold 설정과 직결된다. (추정) NVMe 드라이버는 장치 idle 시
- *   LTR 값을 낮춰 링크 저전력 상태 진입을 유도할 수 있다.
- *   호출 경로: pci_save_state -> pci_save_pcie_state -> pci_save_ltr_state
+/* [한국어]
+ * pci_save_ltr_state - LTR 확장 capability 의 현재 값을 저장 버퍼에 뜬다
+ *
+ * @dev:    대상 장치. PCIe 여야 하고, LTR 확장 capability 가 있어야 한다.
+ * @return: 없음. 저장할 것이 없거나 버퍼가 없으면 조용히 돌아간다.
+ *
+ * LTR(Latency Tolerance Reporting)은 엔드포인트가 "나는 이 정도 지연까지는
+ * 견딜 수 있다" 를 상류로 보고하는 PCIe 기능이다(PCIe r4.0 sec 6.18).
+ * 상류 포트는 그 값과 자기가 계산해 둔 LTR_L1.2_THRESHOLD 를 견주어
+ * L1.2 로 내려갈지 정한다. 그래서 LTR 값이 사라지면 L1.2 판단이 어긋난다.
+ *
+ * D3cold 로 내려가면 config space 가 통째로 날아가므로, 절전 직전에
+ * 이 값을 커널 쪽 버퍼(pci_cap_saved_state)에 복사해 두고 복귀 때 되돌린다.
+ * 저장 대상은 MAX_SNOOP_LAT 오프셋의 dword 하나뿐이다. 그 dword 안에
+ * Max Snoop Latency 와 Max No-Snoop Latency 두 16비트 필드가 함께 들어 있어
+ * dword 한 번으로 둘 다 잡힌다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. 절전 진입 경로에서만 불린다.
+ * 에러 경로: 저장 버퍼가 없으면 pci_err 로 알리기만 하고 돌아간다 —
+ *   저장하지 못했다는 사실 자체가 복귀 후 ASPM 이상의 단서가 되기 때문이다.
+ *
+ * 호출 체인:
+ *   pci_save_state() -> pci_save_pcie_state() [pci.c:3145]
+ *     -> [pci_save_ltr_state] -> pci_read_config_dword()
  */
 void pci_save_ltr_state(struct pci_dev *dev)
 {
-	int ltr;
-	struct pci_cap_saved_state *save_state;
-	u32 *cap;
+	int ltr;	/* [한국어] LTR 확장 capability 의 오프셋. 0 이면 없다는 뜻 */
+	struct pci_cap_saved_state *save_state;	/* [한국어] 커널 쪽 저장 버퍼. config space 가 날아가도 값을 지킨다 */
+	u32 *cap;	/* [한국어] 저장 버퍼의 첫 dword 를 가리킬 포인터 */
 
-	if (!pci_is_pcie(dev))
-		return;
+	if (!pci_is_pcie(dev))	/* [한국어] 전통 PCI 장치에는 LTR 이라는 개념 자체가 없다 */
+		return;	/* [한국어] 저장할 것이 없으므로 조용히 끝낸다 */
 
-	ltr = pci_find_ext_capability(dev, PCI_EXT_CAP_ID_LTR);
-	if (!ltr)
-		return;
+	ltr = pci_find_ext_capability(dev, PCI_EXT_CAP_ID_LTR);	/* [한국어] 확장 capability 사슬을 훑어 LTR 의 오프셋을 얻는다 */
+	if (!ltr)	/* [한국어] 장치가 LTR 을 구현하지 않았다 */
+		return;	/* [한국어] 저장할 레지스터가 없다 */
 
-	save_state = pci_find_saved_ext_cap(dev, PCI_EXT_CAP_ID_LTR);
-	if (!save_state) {
-		pci_err(dev, "no suspend buffer for LTR; ASPM issues possible after resume\n");
-		return;
+	save_state = pci_find_saved_ext_cap(dev, PCI_EXT_CAP_ID_LTR);	/* [한국어] pci_configure_aspm_l1ss 가 아니라 pci_allocate_cap_save_buffers 계열이 미리 잡아 둔 버퍼를 찾는다 */
+	if (!save_state) {	/* [한국어] 버퍼가 없으면 저장할 곳이 없다 */
+		pci_err(dev, "no suspend buffer for LTR; ASPM issues possible after resume\n");	/* [한국어] 조용히 넘기지 않고 알린다 — 복귀 후 ASPM 이 이상해지면 이 로그가 단서가 된다 */
+		return;	/* [한국어] 저장을 포기한다. 복귀 때는 펌웨어/하드웨어 초기값이 남는다 */
 	}
 
 	/* Some broken devices only support dword access to LTR */
-	cap = &save_state->cap.data[0];
-	pci_read_config_dword(dev, ltr + PCI_LTR_MAX_SNOOP_LAT, cap);
+	cap = &save_state->cap.data[0];	/* [한국어] 저장 버퍼의 첫 dword 자리 */
+	pci_read_config_dword(dev, ltr + PCI_LTR_MAX_SNOOP_LAT, cap);	/* [한국어] MAX_SNOOP_LAT 오프셋의 dword 하나. 그 안에 Max Snoop 과 Max No-Snoop 두 16비트 필드가 함께 들어 있어 한 번에 잡힌다 */
 }
 
-/*
- * pci_restore_ltr_state:
- *   resume 시 저장필 두었던 LTR capability 값을 PCI config space에
- *   복원한다. LTR 값이 복원되지 않으면 NVMe 장치의 LTR 보고가 누락되어
- *   상위 포트가 L1.2 진입 시기를 잘못 판단할 수 있다.
- *   호출 경로: pci_restore_state -> pci_restore_pcie_state -> pci_restore_ltr_state
+/* [한국어]
+ * pci_restore_ltr_state - 저장해 둔 LTR 값을 config space 로 되돌린다
+ *
+ * @dev:    복귀 중인 장치.
+ * @return: 없음. 저장 버퍼가 없거나 LTR capability 가 없으면 그냥 돌아간다.
+ *
+ * pci_save_ltr_state() 의 짝이다. 복원이 빠지면 장치는 LTR 을 보고하지
+ * 않는 상태가 되고, 상류 포트는 L1.2 진입 시점을 잘못 판단한다.
+ *
+ * 순서가 중요하다. pci.c:3188 을 보면 이 함수가 먼저 불리고 그 다음에
+ * DEVCTL2 의 LTR Enable 비트를 켠다. 값을 먼저 채워 넣고 나서 기능을
+ * 켜야, 켜는 순간부터 올바른 값이 보고되기 때문이다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트(resume 경로).
+ * 에러 경로: 없음 — 되돌릴 값이 없으면 아무 일도 하지 않는다.
+ *
+ * 호출 체인:
+ *   pci_restore_state() -> pci_restore_pcie_state() [pci.c:3188]
+ *     -> [pci_restore_ltr_state] -> pci_write_config_dword()
  */
 void pci_restore_ltr_state(struct pci_dev *dev)
 {
-	struct pci_cap_saved_state *save_state;
-	int ltr;
-	u32 *cap;
+	struct pci_cap_saved_state *save_state;	/* [한국어] 복원할 값이 담긴 버퍼 */
+	int ltr;	/* [한국어] LTR capability 의 오프셋 */
+	u32 *cap;	/* [한국어] 버퍼의 첫 dword 를 가리킬 포인터 */
 
-	save_state = pci_find_saved_ext_cap(dev, PCI_EXT_CAP_ID_LTR);
-	ltr = pci_find_ext_capability(dev, PCI_EXT_CAP_ID_LTR);
-	if (!save_state || !ltr)
-		return;
+	save_state = pci_find_saved_ext_cap(dev, PCI_EXT_CAP_ID_LTR);	/* [한국어] 저장 때 쓴 버퍼를 다시 찾는다 */
+	ltr = pci_find_ext_capability(dev, PCI_EXT_CAP_ID_LTR);	/* [한국어] 복귀 후 오프셋이 같다는 보장은 있지만, 버퍼와 짝이 맞는지 확인하려고 다시 읽는다 */
+	if (!save_state || !ltr)	/* [한국어] 둘 중 하나라도 없으면 복원이 성립하지 않는다 */
+		return;	/* [한국어] 반쪽만 복원하면 오히려 위험하므로 아무것도 하지 않는다 */
 
 	/* Some broken devices only support dword access to LTR */
-	cap = &save_state->cap.data[0];
-	pci_write_config_dword(dev, ltr + PCI_LTR_MAX_SNOOP_LAT, *cap);
+	cap = &save_state->cap.data[0];	/* [한국어] 저장 때와 같은 자리 */
+	pci_write_config_dword(dev, ltr + PCI_LTR_MAX_SNOOP_LAT, *cap);	/* [한국어] 저장해 둔 dword 를 그대로 되돌린다. 이 뒤에 호출자가 DEVCTL2 의 LTR Enable 을 켠다 */
 }
 
-/*
- * pci_configure_aspm_l1ss:
- *   장치의 L1 Substates capability offset을 찾아 pdev->l1ss에 저장하고,
- *   suspend/resume을 위한 save buffer를 할당한다. NVMe 장치가 L1SS를
- *   지원하면 이후 aspm_l1ss_init()에서 timing parameter를 계산한다.
+/* [한국어]
+ * pci_configure_aspm_l1ss - L1 Substates capability 위치를 찾아 캐시하고 저장 버퍼를 잡는다
+ *
+ * @pdev:   열거 중인 장치.
+ * @return: 없음. 버퍼 할당이 실패해도 pci_err 로 알리기만 한다.
+ *
+ * L1SS(L1 PM Substates)는 L1 을 더 잘게 나눈 L1.1/L1.2 를 정의하는 확장
+ * capability 다. 이 파일의 여러 함수가 pdev->l1ss 오프셋을 반복해서 쓰므로,
+ * 열거 시점에 한 번만 찾아 캐시해 둔다. 못 찾으면 0 이 남고, 그 뒤로는
+ * "이 장치는 L1SS 가 없다" 는 뜻으로 쓰인다.
+ *
+ * 동시에 suspend 용 저장 버퍼도 미리 잡는다. 2 * sizeof(u32) 인 이유는
+ * 저장할 레지스터가 CTL1 과 CTL2 두 개이기 때문이다
+ * (pci_save_aspm_l1ss_state() 가 그 순서대로 채운다).
+ * 버퍼 할당은 열거 시점에 해야 한다 — 절전 진입 경로는 메모리 할당이
+ * 실패하면 곤란한 자리라, 미리 잡아 두는 것이 원칙이다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트, 장치 열거 중. 이 함수는
+ * CONFIG_PCIEASPM 바깥(파일 앞부분)에 있어 ASPM 이 꺼져도 컴파일된다 —
+ * 저장/복원은 ASPM 정책과 무관하게 필요하기 때문이다.
+ * 에러 경로: 버퍼 할당 실패는 치명적이지 않다. 복귀 후 L1SS 설정이
+ *   펌웨어 초기값으로 돌아갈 뿐이다.
+ *
+ * 호출 체인:
+ *   pci_scan_single_device() -> pci_configure_device() [probe.c:5851]
+ *     -> [pci_configure_aspm_l1ss] -> pci_find_ext_capability(),
+ *        pci_add_ext_cap_save_buffer()
  */
 void pci_configure_aspm_l1ss(struct pci_dev *pdev)
 {
-	int rc;
+	int rc;	/* [한국어] pci_add_ext_cap_save_buffer 의 반환값 */
 
-	pdev->l1ss = pci_find_ext_capability(pdev, PCI_EXT_CAP_ID_L1SS);
+	pdev->l1ss = pci_find_ext_capability(pdev, PCI_EXT_CAP_ID_L1SS);	/* [한국어] L1SS 오프셋을 pci_dev 에 캐시한다. 이 파일 곳곳이 pdev->l1ss 를 그대로 쓴다. 없으면 0 이 남고, 그것이 곧 미지원 표시가 된다 */
 
-	rc = pci_add_ext_cap_save_buffer(pdev, PCI_EXT_CAP_ID_L1SS,
-					 2 * sizeof(u32));
-	if (rc)
-		pci_err(pdev, "unable to allocate ASPM L1SS save buffer (%pe)\n",
-			ERR_PTR(rc));
+	rc = pci_add_ext_cap_save_buffer(pdev, PCI_EXT_CAP_ID_L1SS,	/* [한국어] suspend 용 저장 버퍼를 미리 확보한다. 절전 진입 경로에서 할당하면 실패했을 때 대처할 방법이 없다 */
+					 2 * sizeof(u32));	/* [한국어] CTL1 과 CTL2 두 레지스터를 담을 크기 */
+	if (rc)	/* [한국어] 할당 실패는 치명적이지 않지만 조용히 넘기지 않는다 */
+		pci_err(pdev, "unable to allocate ASPM L1SS save buffer (%pe)\n",	/* [한국어] 복귀 후 L1SS 가 펌웨어 초기값으로 돌아간다는 뜻이므로 알린다 */
+			ERR_PTR(rc));	/* [한국어] %pe 는 오류 포인터를 사람이 읽는 이름으로 찍는 커널 확장 서식 */
 }
 
-/*
- * pci_save_aspm_l1ss_state:
- *   L1SS CTL1/CTL2 레지스터 값을 endpoint와 상위 포트 각각의 save
- *   buffer에 저장한다. Downstream Port 자신의 상태는 직접 복원하지
- *   않고 상위 포트 복원 시 함께 처리된다.
+/* [한국어]
+ * pci_save_aspm_l1ss_state - 링크 양 끝의 L1SS CTL1/CTL2 를 저장 버퍼에 뜬다
+ *
+ * @pdev:   링크의 하류 쪽 장치. 상류 포트(pdev->bus->self)의 값도 함께 뜬다.
+ * @return: 없음.
+ *
+ * L1SS 는 링크 양 끝이 반드시 짝을 맞춰야 하는 설정이다. 한쪽만 L1.2 가
+ * 켜져 있으면 링크가 그 상태로 들어가지 못하거나 복귀에 실패한다.
+ * 그래서 저장도 복원도 "쌍" 단위로 한다.
+ *
+ * 하류 장치를 기준으로 잡은 이유가 이 함수의 핵심이다. 하류 포트(스위치의
+ * Downstream Port 나 Root Port)에 대해 이 함수가 불리면 곧바로 돌아간다.
+ * 그 포트의 L1SS 는 "그 아래에 매달린 상류 포트" 를 복원할 때 짝으로 함께
+ * 복원되기 때문이다. 양쪽에서 각각 복원하면 순서가 꼬인다.
+ *
+ * L0s/L1 자체의 설정(LNKCTL 의 ASPM Control 필드)은 여기서 다루지 않는다.
+ * 그쪽은 pci_save_pcie_state() 가 PCIe capability 통째로 뜨면서 가져간다.
+ * 이 함수가 맡는 것은 별도 확장 capability 인 L1SS 뿐이다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. 절전 진입 경로와, 이 파일의
+ *   pcie_config_aspm_link() 끝부분(설정을 바꾼 직후 저장본 갱신).
+ * 에러 경로: 저장 버퍼가 없으면 조용히 돌아간다.
+ *
+ * 호출 체인:
+ *   pci_save_state() -> [pci_save_aspm_l1ss_state] [pci.c:3144]
+ *   pcie_config_aspm_link() -> [pci_save_aspm_l1ss_state] (이 파일)
  */
 void pci_save_aspm_l1ss_state(struct pci_dev *pdev)
 {
-	struct pci_dev *parent = pdev->bus->self;
-	struct pci_cap_saved_state *save_state;
-	u32 *cap;
+	struct pci_dev *parent = pdev->bus->self;	/* [한국어] 링크의 상류 쪽. pdev 가 하류이므로 그 버스의 브리지가 짝이 된다 */
+	struct pci_cap_saved_state *save_state;	/* [한국어] 저장 버퍼를 담을 포인터. 양 끝에 대해 차례로 재사용한다 */
+	u32 *cap;	/* [한국어] 버퍼 안을 훑을 커서. cap++ 로 CTL2 -> CTL1 순서를 만든다 */
 
 	/*
 	 * If this is a Downstream Port, we never restore the L1SS state
 	 * directly; we only restore it when we restore the state of the
 	 * Upstream Port below it.
 	 */
-	if (pcie_downstream_port(pdev) || !parent)
-		return;
+	if (pcie_downstream_port(pdev) || !parent)	/* [한국어] 이 장치 자체가 하류 포트면 짝이 반대다 — 그 아래 상류 포트를 복원할 때 함께 처리하므로 여기서는 아무것도 하지 않는다 */
+		return;	/* [한국어] 저장 대상이 아니다 */
 
-	if (!pdev->l1ss || !parent->l1ss)
-		return;
+	if (!pdev->l1ss || !parent->l1ss)	/* [한국어] 양 끝 중 하나라도 L1SS capability 가 없으면 저장할 쌍이 성립하지 않는다 */
+		return;	/* [한국어] 반쪽만 저장하면 복원 때 짝이 안 맞는다 */
 
 	/*
 	 * Save L1 substate configuration. The ASPM L0s/L1 configuration
 	 * in PCI_EXP_LNKCTL_ASPMC is saved by pci_save_pcie_state().
 	 */
-	save_state = pci_find_saved_ext_cap(pdev, PCI_EXT_CAP_ID_L1SS);
-	if (!save_state)
-		return;
+	save_state = pci_find_saved_ext_cap(pdev, PCI_EXT_CAP_ID_L1SS);	/* [한국어] 하류 장치의 저장 버퍼(pci_configure_aspm_l1ss 가 미리 잡아 둔 것) */
+	if (!save_state)	/* [한국어] 버퍼가 없으면 저장할 곳이 없다 */
+		return;	/* [한국어] 조용히 끝낸다 */
 
-	cap = &save_state->cap.data[0];
-	pci_read_config_dword(pdev, pdev->l1ss + PCI_L1SS_CTL2, cap++);
-	pci_read_config_dword(pdev, pdev->l1ss + PCI_L1SS_CTL1, cap++);
+	cap = &save_state->cap.data[0];	/* [한국어] 버퍼 첫 dword 부터 채우기 시작 */
+	pci_read_config_dword(pdev, pdev->l1ss + PCI_L1SS_CTL2, cap++);	/* [한국어] [0] = CTL2. 복원 쪽이 같은 순서로 읽으므로 순서가 곧 규약이다 */
+	pci_read_config_dword(pdev, pdev->l1ss + PCI_L1SS_CTL1, cap++);	/* [한국어] [1] = CTL1. cap++ 로 두 번째 dword 로 넘어간다 */
 
 	/*
 	 * Save parent's L1 substate configuration so we have it for
 	 * pci_restore_aspm_l1ss_state(pdev) to restore.
 	 */
-	save_state = pci_find_saved_ext_cap(parent, PCI_EXT_CAP_ID_L1SS);
-	if (!save_state)
-		return;
+	save_state = pci_find_saved_ext_cap(parent, PCI_EXT_CAP_ID_L1SS);	/* [한국어] 이번에는 상류 포트의 버퍼. 같은 변수를 재사용한다 */
+	if (!save_state)	/* [한국어] 상류 쪽 버퍼가 없으면 하류만 저장된 채로 끝난다 */
+		return;	/* [한국어] 복원 함수가 양쪽 버퍼를 모두 요구하므로, 이 경우 복원은 통째로 건너뛰게 된다 */
 
-	cap = &save_state->cap.data[0];
-	pci_read_config_dword(parent, parent->l1ss + PCI_L1SS_CTL2, cap++);
-	pci_read_config_dword(parent, parent->l1ss + PCI_L1SS_CTL1, cap++);
+	cap = &save_state->cap.data[0];	/* [한국어] 상류 버퍼의 첫 dword */
+	pci_read_config_dword(parent, parent->l1ss + PCI_L1SS_CTL2, cap++);	/* [한국어] [0] = 상류 CTL2 */
+	pci_read_config_dword(parent, parent->l1ss + PCI_L1SS_CTL1, cap++);	/* [한국어] [1] = 상류 CTL1. 하류와 같은 순서를 지킨다 */
 }
 
-/*
- * pci_restore_aspm_l1ss_state:
- *   resume 시 L1SS timing parameter와 enable bit를 안전한 순서로
- *   복원한다. L1.2는 먼저 끈 뒤 timing을 쓰고, 마지막에 enable bit를
- *   설정한다. NVMe 입장에서는 L1SS 복원이 실패하면 DMA/MSI-X喚醒 지연이
- *   길어질 수 있다.
+/* [한국어]
+ * pci_restore_aspm_l1ss_state - L1SS 설정을 규격이 요구하는 순서대로 되돌린다
+ *
+ * @pdev:   링크의 하류 쪽 장치. 상류 포트의 값도 함께 되돌린다.
+ * @return: 없음.
+ *
+ * 이 함수가 길고 조심스러운 이유는 순서 제약이 여러 겹이기 때문이다.
+ * 단순히 "저장한 dword 두 개를 그대로 쓴다" 로는 안 된다.
+ *
+ *   (1) L0s/L1 이 켜져 있으면 L1SS 설정을 바꿀 수 없다. 그래서 먼저
+ *       양 끝의 LNKCTL 에서 ASPM Control 을 꺼 두고, 다 끝나면 되돌린다.
+ *   (2) L1.2 를 끌 때는 하류 먼저, 상류 나중이다. 순서를 뒤집으면 상류가
+ *       이미 꺼진 상태에서 하류가 L1.2 진입을 시도할 수 있다.
+ *   (3) 타이밍 파라미터(Common_Mode_Restore_Time, LTR_L1.2_THRESHOLD)는
+ *       L1.2 enable 비트를 켜기 *전에* 써야 한다. 같은 레지스터(CTL1) 안에
+ *       있는데도 그렇다(PCIe r5.0 sec 5.5.4, 7.8.3.3). 그래서 enable 비트만
+ *       따로 떼어 두었다가 마지막에 쓴다.
+ *
+ * 펌웨어가 복귀 과정에서 L1.2 를 제멋대로 켜 놓았을 수 있다는 것이
+ * 함수 첫머리 영어 주석이 말하는 상황이다. 그래서 저장값을 쓰기 전에
+ * 무조건 한 번 꺼 두고 시작한다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트(resume 경로).
+ * 에러 경로: 양 끝 중 하나라도 l1ss 오프셋이나 저장 버퍼가 없으면
+ *   아무것도 하지 않는다 — 반쪽만 복원하면 링크가 더 나빠진다.
+ *
+ * 호출 체인:
+ *   pci_restore_state() [pci.c:3189] -> [pci_restore_aspm_l1ss_state]
+ *     -> pcie_capability_read_word/write_word(), pci_clear_and_set_config_dword()
  */
 void pci_restore_aspm_l1ss_state(struct pci_dev *pdev)
 {
-	struct pci_cap_saved_state *pl_save_state, *cl_save_state;
-	struct pci_dev *parent = pdev->bus->self;
-	u32 *cap, pl_ctl1, pl_ctl2, pl_l1_2_enable;
-	u32 cl_ctl1, cl_ctl2, cl_l1_2_enable;
-	u16 clnkctl, plnkctl;
+	struct pci_cap_saved_state *pl_save_state, *cl_save_state;	/* [한국어] pl_ = parent(상류), cl_ = child(하류). 두 벌의 저장 버퍼 */
+	struct pci_dev *parent = pdev->bus->self;	/* [한국어] 링크의 상류 쪽 장치 */
+	u32 *cap, pl_ctl1, pl_ctl2, pl_l1_2_enable;	/* [한국어] 버퍼 커서와 상류 쪽 CTL1/CTL2, 그리고 CTL1 에서 떼어 낸 L1.2 enable 비트 */
+	u32 cl_ctl1, cl_ctl2, cl_l1_2_enable;	/* [한국어] 하류 쪽의 같은 세 값 */
+	u16 clnkctl, plnkctl;	/* [한국어] 양 끝의 LNKCTL 원본. 마지막에 그대로 되돌리기 위해 통째로 보관한다 */
 
 	/*
 	 * In case BIOS enabled L1.2 when resuming, we need to disable it first
 	 * on the downstream component before the upstream. So, don't attempt to
 	 * restore either until we are at the downstream component.
 	 */
-	if (pcie_downstream_port(pdev) || !parent)
-		return;
+	if (pcie_downstream_port(pdev) || !parent)	/* [한국어] 저장 때와 같은 판정 — 하류 포트에 대해서는 아무것도 하지 않는다. 위 영어 주석대로 "하류 컴포넌트에 도달했을 때" 만 쌍으로 복원한다 */
+		return;	/* [한국어] 짝이 아직 정해지지 않았으므로 돌아간다 */
 
-	if (!pdev->l1ss || !parent->l1ss)
-		return;
+	if (!pdev->l1ss || !parent->l1ss)	/* [한국어] 양 끝 모두 L1SS 가 있어야 복원이 성립한다 */
+		return;	/* [한국어] 반쪽 복원은 하지 않는다 */
 
-	cl_save_state = pci_find_saved_ext_cap(pdev, PCI_EXT_CAP_ID_L1SS);
-	pl_save_state = pci_find_saved_ext_cap(parent, PCI_EXT_CAP_ID_L1SS);
-	if (!cl_save_state || !pl_save_state)
-		return;
+	cl_save_state = pci_find_saved_ext_cap(pdev, PCI_EXT_CAP_ID_L1SS);	/* [한국어] 하류 쪽 저장 버퍼 */
+	pl_save_state = pci_find_saved_ext_cap(parent, PCI_EXT_CAP_ID_L1SS);	/* [한국어] 상류 쪽 저장 버퍼 */
+	if (!cl_save_state || !pl_save_state)	/* [한국어] 둘 중 하나라도 없으면 짝이 안 맞는다 */
+		return;	/* [한국어] 복원을 통째로 포기한다 */
 
-	cap = &cl_save_state->cap.data[0];
-	cl_ctl2 = *cap++;
-	cl_ctl1 = *cap;
-	cap = &pl_save_state->cap.data[0];
-	pl_ctl2 = *cap++;
-	pl_ctl1 = *cap;
+	cap = &cl_save_state->cap.data[0];	/* [한국어] 하류 버퍼의 첫 dword 로 커서를 놓는다 */
+	cl_ctl2 = *cap++;	/* [한국어] [0] = CTL2 (저장 순서와 같다) */
+	cl_ctl1 = *cap;	/* [한국어] [1] = CTL1. 여기서는 커서를 더 올리지 않는다 */
+	cap = &pl_save_state->cap.data[0];	/* [한국어] 커서를 상류 버퍼로 옮긴다 */
+	pl_ctl2 = *cap++;	/* [한국어] [0] = 상류 CTL2 */
+	pl_ctl1 = *cap;	/* [한국어] [1] = 상류 CTL1 */
 
 	/* Make sure L0s/L1 are disabled before updating L1SS config */
-	pcie_capability_read_word(pdev, PCI_EXP_LNKCTL, &clnkctl);
-	pcie_capability_read_word(parent, PCI_EXP_LNKCTL, &plnkctl);
-	if (FIELD_GET(PCI_EXP_LNKCTL_ASPMC, clnkctl) ||
-	    FIELD_GET(PCI_EXP_LNKCTL_ASPMC, plnkctl)) {
-		pcie_capability_write_word(pdev, PCI_EXP_LNKCTL,
-					   clnkctl & ~PCI_EXP_LNKCTL_ASPMC);
-		pcie_capability_write_word(parent, PCI_EXP_LNKCTL,
-					   plnkctl & ~PCI_EXP_LNKCTL_ASPMC);
+	pcie_capability_read_word(pdev, PCI_EXP_LNKCTL, &clnkctl);	/* [한국어] 하류의 현재 LNKCTL. 나중에 그대로 되돌릴 원본이기도 하다 */
+	pcie_capability_read_word(parent, PCI_EXP_LNKCTL, &plnkctl);	/* [한국어] 상류의 현재 LNKCTL */
+	if (FIELD_GET(PCI_EXP_LNKCTL_ASPMC, clnkctl) ||	/* [한국어] 둘 중 하나라도 ASPM 이 켜져 있으면 L1SS 를 건드릴 수 없다 */
+	    FIELD_GET(PCI_EXP_LNKCTL_ASPMC, plnkctl)) {	/* [한국어] ASPMC 는 LNKCTL 안의 2비트 ASPM Control 필드다 */
+		pcie_capability_write_word(pdev, PCI_EXP_LNKCTL,	/* [한국어] 하류의 ASPM 만 끈다 — 다른 비트(CCC, CLKREQ 등)는 그대로 둔다 */
+					   clnkctl & ~PCI_EXP_LNKCTL_ASPMC);	/* [한국어] ~ASPMC 로 그 두 비트만 지운 값을 쓴다 */
+		pcie_capability_write_word(parent, PCI_EXP_LNKCTL,	/* [한국어] 상류도 같은 방식으로 끈다 */
+					   plnkctl & ~PCI_EXP_LNKCTL_ASPMC);	/* [한국어] 양쪽을 모두 꺼야 L1SS 쓰기가 허용된다 */
 	}
 
 	/*
 	 * Disable L1.2 on this downstream endpoint device first, followed
 	 * by the upstream
 	 */
-	pci_clear_and_set_config_dword(pdev, pdev->l1ss + PCI_L1SS_CTL1,
-				       PCI_L1SS_CTL1_L1_2_MASK, 0);
-	pci_clear_and_set_config_dword(parent, parent->l1ss + PCI_L1SS_CTL1,
-				       PCI_L1SS_CTL1_L1_2_MASK, 0);
+	pci_clear_and_set_config_dword(pdev, pdev->l1ss + PCI_L1SS_CTL1,	/* [한국어] 하류의 L1.2 를 먼저 끈다. 펌웨어가 복귀 중 켜 놓았을 수 있다 */
+				       PCI_L1SS_CTL1_L1_2_MASK, 0);	/* [한국어] L1_2_MASK 는 ASPM L1.2 와 PCI-PM L1.2 두 enable 비트를 함께 가리킨다. 두 번째 인자가 지울 마스크, 세 번째가 세울 값(0) */
+	pci_clear_and_set_config_dword(parent, parent->l1ss + PCI_L1SS_CTL1,	/* [한국어] 그다음 상류. 순서가 규격 요구다 — 뒤집으면 상류가 먼저 꺼져 하류가 홀로 L1.2 진입을 시도할 수 있다 */
+				       PCI_L1SS_CTL1_L1_2_MASK, 0);	/* [한국어] 같은 마스크로 지운다 */
 
 	/*
 	 * In addition, Common_Mode_Restore_Time and LTR_L1.2_THRESHOLD
 	 * in PCI_L1SS_CTL1 must be programmed *before* setting the L1.2
 	 * enable bits, even though they're all in PCI_L1SS_CTL1.
 	 */
-	pl_l1_2_enable = pl_ctl1 & PCI_L1SS_CTL1_L1_2_MASK;
-	pl_ctl1 &= ~PCI_L1SS_CTL1_L1_2_MASK;
-	cl_l1_2_enable = cl_ctl1 & PCI_L1SS_CTL1_L1_2_MASK;
-	cl_ctl1 &= ~PCI_L1SS_CTL1_L1_2_MASK;
+	pl_l1_2_enable = pl_ctl1 & PCI_L1SS_CTL1_L1_2_MASK;	/* [한국어] 상류 CTL1 에서 L1.2 enable 비트만 떼어 따로 보관한다 */
+	pl_ctl1 &= ~PCI_L1SS_CTL1_L1_2_MASK;	/* [한국어] 본체에서는 그 비트를 지운다 — 타이밍을 먼저 쓰고 enable 은 마지막에 쓰기 위해서다 */
+	cl_l1_2_enable = cl_ctl1 & PCI_L1SS_CTL1_L1_2_MASK;	/* [한국어] 하류에 대해서도 같은 분리 */
+	cl_ctl1 &= ~PCI_L1SS_CTL1_L1_2_MASK;	/* [한국어] 하류 본체에서도 enable 비트를 뺀다 */
 
 	/* Write back without enables first (above we cleared them in ctl1) */
-	pci_write_config_dword(parent, parent->l1ss + PCI_L1SS_CTL2, pl_ctl2);
-	pci_write_config_dword(pdev, pdev->l1ss + PCI_L1SS_CTL2, cl_ctl2);
-	pci_write_config_dword(parent, parent->l1ss + PCI_L1SS_CTL1, pl_ctl1);
-	pci_write_config_dword(pdev, pdev->l1ss + PCI_L1SS_CTL1, cl_ctl1);
+	pci_write_config_dword(parent, parent->l1ss + PCI_L1SS_CTL2, pl_ctl2);	/* [한국어] CTL2(T_POWER_ON)를 먼저 되돌린다. enable 비트가 없는 레지스터라 순서 제약에서 자유롭다 */
+	pci_write_config_dword(pdev, pdev->l1ss + PCI_L1SS_CTL2, cl_ctl2);	/* [한국어] 하류 CTL2 도 마찬가지 */
+	pci_write_config_dword(parent, parent->l1ss + PCI_L1SS_CTL1, pl_ctl1);	/* [한국어] enable 을 뺀 상류 CTL1 — 여기에 Common_Mode_Restore_Time 과 LTR_L1.2_THRESHOLD 가 들어 있다 */
+	pci_write_config_dword(pdev, pdev->l1ss + PCI_L1SS_CTL1, cl_ctl1);	/* [한국어] 하류 CTL1 도 enable 없이 먼저 */
 
 	/* Then write back the enables */
-	if (pl_l1_2_enable || cl_l1_2_enable) {
-		pci_write_config_dword(parent, parent->l1ss + PCI_L1SS_CTL1,
-				       pl_ctl1 | pl_l1_2_enable);
-		pci_write_config_dword(pdev, pdev->l1ss + PCI_L1SS_CTL1,
-				       cl_ctl1 | cl_l1_2_enable);
+	if (pl_l1_2_enable || cl_l1_2_enable) {	/* [한국어] 원래 켜져 있던 L1.2 가 있었을 때만 되살린다. 없었다면 지금 상태가 이미 맞다 */
+		pci_write_config_dword(parent, parent->l1ss + PCI_L1SS_CTL1,	/* [한국어] 켤 때는 상류 먼저 — 끌 때(하류 먼저)와 정확히 반대 순서다 */
+				       pl_ctl1 | pl_l1_2_enable);	/* [한국어] 방금 쓴 본체 값에 enable 비트를 OR 로 얹는다 */
+		pci_write_config_dword(pdev, pdev->l1ss + PCI_L1SS_CTL1,	/* [한국어] 그다음 하류 */
+				       cl_ctl1 | cl_l1_2_enable);	/* [한국어] 같은 방식 */
 	}
 
 	/* Restore L0s/L1 if they were enabled */
-	if (FIELD_GET(PCI_EXP_LNKCTL_ASPMC, clnkctl) ||
-	    FIELD_GET(PCI_EXP_LNKCTL_ASPMC, plnkctl)) {
-		pcie_capability_write_word(parent, PCI_EXP_LNKCTL, plnkctl);
-		pcie_capability_write_word(pdev, PCI_EXP_LNKCTL, clnkctl);
+	if (FIELD_GET(PCI_EXP_LNKCTL_ASPMC, clnkctl) ||	/* [한국어] 처음에 ASPM 을 꺼 두었던 경우에만 되돌린다 */
+	    FIELD_GET(PCI_EXP_LNKCTL_ASPMC, plnkctl)) {	/* [한국어] 판정 조건이 위와 같아야 한다 — 원본 변수를 그대로 재사용하는 이유다 */
+		pcie_capability_write_word(parent, PCI_EXP_LNKCTL, plnkctl);	/* [한국어] 상류부터 되살린다(ASPM L1 을 켤 때의 규격 순서) */
+		pcie_capability_write_word(pdev, PCI_EXP_LNKCTL, clnkctl);	/* [한국어] 그다음 하류. 저장해 둔 원본 값을 통째로 쓴다 */
 	}
 }
 
@@ -351,98 +505,289 @@ void pci_restore_aspm_l1ss_state(struct pci_dev *pdev)
  * "pcie_aspm=off" 같은 형태가 된다. */
 #undef MODULE_PARAM_PREFIX
 #endif
-#define MODULE_PARAM_PREFIX "pcie_aspm."
+#define MODULE_PARAM_PREFIX "pcie_aspm."	/* [한국어] 모듈 파라미터 이름 앞에 붙을 접두사. 이 정의 덕에 policy 파라미터가 /sys/module/pcie_aspm/parameters/policy 로 나타나고 부팅 인자도 pcie_aspm.policy= 형태가 된다 */
 
 /* Note: these are not register definitions */
+/* [한국어] L0s 는 방향마다 따로 켜고 끌 수 있는 유일한 상태다. 링크의
+ * 한 방향(예: 하류->상류)만 재우고 반대 방향은 깨어 있게 할 수 있다.
+ * L1 은 그렇지 않다 — 양방향을 함께 재운다.
+ * 그래서 커널은 L0s 를 상류행/하류행 두 비트로 나눠 관리하고, 지연 검사도
+ * 방향별로 따로 한다(pcie_aspm_check_latency 참고).
+ * 원문 주석이 밝히듯 이 두 비트는 레지스터 정의가 아니라 커널 내부
+ * 표현이다. 하드웨어의 LNKCTL 에는 이런 나눔이 없다. */
 #define PCIE_LINK_STATE_L0S_UP	BIT(0)	/* Upstream direction L0s state */
 #define PCIE_LINK_STATE_L0S_DW	BIT(1)	/* Downstream direction L0s state */
+/* [한국어] 위 두 비트를 합친 것이 pci.h 의 PCIE_LINK_STATE_L0S 와 정확히
+ * 같아야 한다. 다른 파일이 "L0s 를 꺼 달라" 며 넘겨 주는 값과 이 파일의
+ * 내부 표현이 어긋나면 조용히 잘못된 방향만 꺼진다. 그런 종류의 버그는
+ * 실행 중에는 드러나지 않으므로 컴파일 시점에 못 박아 둔다. */
 static_assert(PCIE_LINK_STATE_L0S == (PCIE_LINK_STATE_L0S_UP | PCIE_LINK_STATE_L0S_DW));
 
+/* [한국어] L1 하위 상태에는 두 갈래의 진입 방식이 있다.
+ *   ASPM L1.1/L1.2  — 링크가 유휴해지면 하드웨어가 스스로 들어간다.
+ *   PCI-PM L1.1/L1.2 — 장치를 D-state 로 내렸을 때 그 결과로 들어간다.
+ * 이 매크로는 뒤쪽(PCI-PM 판) 둘만 묶는다. 규격이 "PCI-PM 하위 상태를
+ * 켜려면 양 끝이 D0 여야 한다"(PCIe r6.0 sec 5.5.4)고 요구하므로,
+ * pcie_config_aspm_link() 가 D0 가 아닐 때 이 묶음만 골라 손대지 않는다. */
 #define PCIE_LINK_STATE_L1_SS_PCIPM	(PCIE_LINK_STATE_L1_1_PCIPM | \
 					 PCIE_LINK_STATE_L1_2_PCIPM)
+/* [한국어] L1.2 의 두 갈래(ASPM 판 + PCI-PM 판)를 함께 가리킨다.
+ * L1.2 만이 타이밍 파라미터(T_POWER_ON 등)를 필요로 하므로,
+ * "둘 중 하나라도 쓸 수 있으면 타이밍을 계산해 둬야 한다" 는 판정에 쓴다
+ * (aspm_l1ss_init 끝부분). */
 #define PCIE_LINK_STATE_L1_2_MASK	(PCIE_LINK_STATE_L1_2 | \
 					 PCIE_LINK_STATE_L1_2_PCIPM)
+/* [한국어] L1 하위 상태 네 가지 전부. "L1 이 꺼지면 하위 상태도 전부
+ * 무의미하다" 는 규칙을 한 번에 적용하기 위한 묶음이다
+ * (pcie_config_aspm_link 의 `state &= ~PCIE_LINK_STATE_L1SS`). */
 #define PCIE_LINK_STATE_L1SS		(PCIE_LINK_STATE_L1_1 | \
 					 PCIE_LINK_STATE_L1_1_PCIPM | \
 					 PCIE_LINK_STATE_L1_2_MASK)
 
-/*
- * struct pcie_link_state:
- *   Root Port나 Switch Downstream Port를 기준으로 한 PCIe 링크의 ASPM/
- *   Clock PM 상태를 관리한다. NVMe SSD 호스트 드라이버 관점에서 각 필드의
- *   의미는 다음과 같다.
- *   - pdev: 링크의 upstream component(보통 Root Port 또는 Switch upstream
- *     포트). NVMe 장치로부터 DMA read/write TLP가 거슬러 올라가는 첫 관문.
- *   - downstream: 링크의 downstream component function 0. NVMe endpoint가
- *     연결된 포트이며, BAR, MSI-X, LTR capability는 이 아래 장치들에
- *     속한다.
- *   - root/parent: PCIe 계층 내에서 상위/하위 링크를 연결하는 포인터.
- *     NVMe 장치에서 Root Complex까지의 경로를 따라 latency가 누적된다.
- *   - sibling: link_list에 연결되는 노드로, 시스템 전체 PCIe 링크의
- *     ASPM 정책이 일괄 변경될 때 사용된다.
- *   - aspm_support: 하드웨어가 지원하는 ASPM 상태(L0s/L1/L1SS 등).
- *   - aspm_enabled: 현재 링크에 실제로 enable된 ASPM 상태. NVMe 입장에서
- *     이 값이 L1/L1.2를 포함하면 doorbell/Completion 지연이 증가할 수 있다.
- *   - aspm_capable: endpoint acceptable latency와 링크 exit latency를
- *     비교해 허용된 ASPM 상태. NVMe DEVCAP의 L0S/L1 latency 필드가
- *     직접 영향을 준다.
- *   - aspm_default: BIOS나 kernel boot parameter(pcie_aspm=)로 설정된
- *     기본값. powersave 정책 시 pcie_aspm_powersave_config_link()에서
- *     참조된다.
- *   - aspm_disable: 드라이버(예: nvme)가 pci_disable_link_state()로
- *     금지한 상태 비트. 설정 시 해당 링크는 지정 상태로 진입하지 않는다.
- *   - clkpm_capable/enabled/default/disable: CLKREQ# 기반 common clock
- *     전원 관리 상태. 활성화 시 REFCLK를 gated 할 수 있어 NVMe DMA
- *     타이밍에 미세한 영향을 줄 수 있다(추정).
+/* [한국어]
+ * struct pcie_link_state - PCIe 링크 하나의 절전 상태 전부
+ *
+ * 이 파일의 중심 자료구조다. "링크 하나" 는 하류 포트(Root Port 또는
+ * Switch Downstream Port) 와 그 아래 매달린 것 사이의 구간을 뜻하며,
+ * 구조체는 그 구간의 상류 쪽 장치(pdev)에 매달린다(pdev->link_state).
+ *
+ * ASPM 상태를 다섯 벌의 비트필드로 나눠 든 것이 설계의 핵심이다.
+ * 하나로 뭉쳐 두면 "왜 이 상태를 못 쓰는가" 를 되짚을 수 없기 때문이다.
+ *
+ *   support  하드웨어가 할 줄 아는가        (양 끝 LNKCAP 의 교집합)
+ *   capable  지연 예산을 통과했는가          (support 에서 깎아 나간다)
+ *   default  아무도 안 건드리면 무엇인가     (펌웨어 값 또는 정책 기본값)
+ *   disable  누가 명시적으로 금지했는가      (드라이버/sysfs 요청)
+ *   enabled  지금 레지스터에 실제로 무엇이 들어 있는가
+ *
+ * 실제 적용값은 pcie_config_aspm_link() 에서
+ *   state & (capable & ~disable)
+ * 로 계산된다. 그래서 하드웨어가 지원해도(support) 지연이 안 맞으면
+ * (capable 에서 빠지면) 켜지지 않고, 지연이 맞아도 누가 금지하면
+ * (disable) 켜지지 않는다.
+ *
+ * 이 구조체 전체의 동기화는 aspm_lock 뮤텍스 하나로 한다. 그리고 링크
+ * 목록을 훑는 동안 장치가 사라지면 안 되므로 pci_bus_sem 읽기 잠금을
+ * 함께 잡는 것이 이 파일의 관례다(순서: pci_bus_sem -> aspm_lock).
  */
 struct pcie_link_state {
+	/* [한국어] 이 링크의 상류 쪽 장치 — Root Port 또는 스위치의
+	 * Downstream Port. 구조체가 매달리는 주인이기도 하다
+	 * (pdev->link_state == this).
+	 * 설정자: alloc_pcie_link_state() 가 한 번 설정한다.
+	 * 읽는 자: 이 파일 거의 전부. LNKCTL 을 쓸 때 "상류 쪽" 이 이것이다.
+	 * 값 범위: NULL 이 될 수 없다. pcie_downstream_port() 가 참인 장치.
+	 * 동기화: 생성 후 불변이므로 별도 보호 없이 읽어도 된다. */
 	struct pci_dev *pdev;		/* Upstream component of the Link */
+
+	/* [한국어] 링크 하류 쪽의 function 0. 하류에 여러 함수가 있어도
+	 * function 0 을 대표로 삼는다 — L1SS capability 는 다중 함수 장치에서
+	 * function 0 에만 구현되기 때문이다(위 pci_function_0() 의 영어 주석).
+	 * 설정자: alloc_pcie_link_state() 가 pci_function_0() 으로 찾는다.
+	 * 읽는 자: aspm_l1ss_init(), aspm_calc_l12_info(),
+	 *   pcie_config_aspm_l1ss() — 즉 L1SS 를 다루는 곳 전부.
+	 * 값 범위: 유효한 pci_dev 포인터. 하류 버스가 비어 있으면 NULL 이 될
+	 *   수 있으나, 호출자가 그 전에 빈 버스를 걸러 낸다.
+	 * 동기화: 생성 후 불변. 이 장치가 제거되면 링크 상태 전체가 해제된다
+	 *   (pcie_aspm_exit_link_state() 가 pdev != link->downstream 이면
+	 *    해제를 미루는 이유가 여기에 있다). */
 	struct pci_dev *downstream;	/* Downstream component, function 0 */
+
+	/* [한국어] 이 링크가 속한 계층의 뿌리 링크. 자기 자신일 수도 있다.
+	 * 설정자: alloc_pcie_link_state(). Root Port / PCIe Bridge / 상위
+	 *   버스에 브리지가 없는 경우에는 link->root = link 로 자기 자신을 건다.
+	 * 읽는 자: pcie_update_aspm_capable() 이 "같은 뿌리에 속한 링크"
+	 *   만 골라 다시 계산할 때 쓴다.
+	 * 값 범위: NULL 이 아니다.
+	 * 동기화: 생성 후 불변. */
 	struct pcie_link_state *root;	/* pointer to the root port link */
+
+	/* [한국어] 한 단계 위 링크. 뿌리 링크에서는 NULL 이다.
+	 * 이 포인터를 따라가는 것이 이 파일에서 가장 중요한 반복이다 —
+	 * pcie_aspm_check_latency() 는 이 사슬을 거슬러 올라가며 각 구간의
+	 * 복귀 지연을 누적하고, pcie_config_aspm_path() 는 같은 사슬을 따라
+	 * 정책을 적용한다.
+	 * 설정자: alloc_pcie_link_state().
+	 * 읽는 자: pcie_aspm_check_latency(), pcie_config_aspm_path(),
+	 *   pcie_aspm_exit_link_state(), pcie_update_aspm_capable()(BUG_ON).
+	 * 값 범위: NULL(= 이 링크가 뿌리) 또는 유효한 상위 링크.
+	 * 동기화: 생성 후 불변. 다만 상위 링크 객체 자체의 내용은
+	 *   aspm_lock 아래에서 읽어야 한다. */
 	struct pcie_link_state *parent;	/* pointer to the parent Link state */
+
+	/* [한국어] 전역 link_list 에 매다는 고리. 시스템의 모든 링크를 한 줄로
+	 * 꿰어 두어, 정책이 바뀌면(pcie_aspm_set_policy) 전부 순회할 수 있다.
+	 * 설정자: alloc_pcie_link_state() 가 list_add 로 넣고,
+	 *   pcie_aspm_exit_link_state() 가 list_del 로 뺀다.
+	 * 읽는 자: pcie_update_aspm_capable(), pcie_aspm_set_policy().
+	 * 값 범위: 항상 초기화된 list_head.
+	 * 동기화: link_list 전체가 aspm_lock 으로 보호된다. */
 	struct list_head sibling;	/* node in link_list */
 
 	/* ASPM state */
+	/* [한국어] 하드웨어가 지원한다고 밝힌 ASPM 상태의 집합.
+	 * 양 끝 모두가 지원해야 비트가 선다 — 한쪽만 되는 상태는 쓸 수 없다.
+	 * 설정자: pcie_aspm_cap_init()(L0s/L1), aspm_l1ss_init()(L1.1/L1.2 및
+	 *   그 PCI-PM 판). 각각 부모와 자식의 능력을 AND 로 묶는다.
+	 * 읽는 자: pcie_aspm_cap_init() 이 capable 의 출발값으로 복사하고,
+	 *   pcie_update_aspm_capable() 이 재계산할 때마다 다시 복사한다.
+	 * 값 범위: PCIE_LINK_STATE_* 비트 조합(7비트). 실제 비트 값은
+	 *   include/linux/pci.h 에 있는데 이 트리에는 없어 확인하지 못했다.
+	 * 동기화: aspm_lock. */
 	u32 aspm_support:7;		/* Supported ASPM state */
+
+	/* [한국어] 지금 레지스터에 실제로 켜져 있는 상태.
+	 * 이것만이 하드웨어의 현재를 반영한다 — 나머지 넷은 "무엇을 켤 수
+	 * 있는가/켜야 하는가" 를 계산하기 위한 값이다.
+	 * 설정자: pcie_aspm_cap_init()/aspm_l1ss_init() 이 부팅 때 레지스터를
+	 *   읽어 초기값을 채우고, 그 뒤로는 pcie_config_aspm_link() 이
+	 *   레지스터를 쓴 직후 갱신한다.
+	 * 읽는 자: pcie_aspm_enabled()(드라이버에 내주는 답),
+	 *   pcie_config_aspm_link()("이미 그 상태면 아무것도 하지 않는다"),
+	 *   aspm_attr_show_common()(sysfs 읽기).
+	 * 값 범위: PCIE_LINK_STATE_* 비트 조합(7비트).
+	 * 동기화: aspm_lock. 다만 pcie_aspm_enabled() 는 락 없이 읽는다 —
+	 *   위 영어 주석이 설명하듯 호출자가 장치 참조를 쥐고 있어 링크 상태
+	 *   객체가 사라지지 않는다는 근거에 기댄다. */
 	u32 aspm_enabled:7;		/* Enabled ASPM state */
+
+	/* [한국어] 지연 검사를 통과해 "켜도 되는" 상태의 집합.
+	 * support 에서 시작해, 경로 전체의 누적 복귀 지연이 엔드포인트의
+	 * acceptable latency 를 넘는 상태를 깎아 낸 결과다.
+	 * 설정자: pcie_aspm_cap_init() 이 support 로 초기화한 뒤
+	 *   pcie_aspm_check_latency() 가 비트를 지운다.
+	 *   장치가 붙거나 빠지거나 D-state 가 바뀌면
+	 *   pcie_update_aspm_capable() 이 전부 다시 계산한다.
+	 * 읽는 자: pcie_config_aspm_link()(적용 마스크),
+	 *   aspm_ctrl_attrs_are_visible()(sysfs 에 어떤 파일을 보일지).
+	 * 값 범위: aspm_support 의 부분집합.
+	 * 동기화: aspm_lock. */
 	u32 aspm_capable:7;		/* Capable ASPM state with latency */
+
 	/* [한국어] 초기 ASPM 상태. 펌웨어가 설정해 둔 값이거나, 부팅 인자/
-	 * sysfs 정책으로 덮어쓴 값이다.
-	 * 설정자: pcie_aspm_cap_init()(펌웨어 값 읽기), 정책 변경 경로.
-	 * 읽는 자: pcie_config_aspm_link() 가 정책 계산의 출발점으로 삼는다.
-	 * 값 범위: ASPM_STATE_* 비트 조합(7비트).
+	 * sysfs 정책으로 덮어쓴 값이다. POLICY_DEFAULT 일 때
+	 * policy_to_aspm_state() 가 돌려주는 값이 바로 이것이다.
+	 * 설정자: pcie_aspm_cap_init() 이 부팅 시 실제 레지스터 값을 복사하고,
+	 *   pcie_aspm_override_default_link_state() 가 devicetree 플랫폼에서
+	 *   덧칠하며, __pci_enable_link_state() 가 드라이버 요청으로 갈아친다.
+	 * 읽는 자: policy_to_aspm_state().
+	 * 값 범위: PCIE_LINK_STATE_* 비트 조합(7비트).
 	 * 동기화: aspm_lock 뮤텍스. */
 	u32 aspm_default:7;		/* Default ASPM state by BIOS or
 					   override */
+
+	/* [한국어] 명시적으로 금지된 상태. 여기에 선 비트는 정책이 무엇이든
+	 * 절대 켜지지 않는다(pcie_config_aspm_link 의 `& ~link->aspm_disable`).
+	 * 설정자: __pci_disable_link_state()(드라이버 요청),
+	 *   aspm_attr_store_common()(sysfs 에 0 을 쓴 경우),
+	 *   pcie_aspm_cap_init()(blacklist 인 링크는 전부 금지).
+	 * 읽는 자: pcie_config_aspm_link().
+	 * 값 범위: PCIE_LINK_STATE_* 비트 조합(7비트).
+	 * 동기화: aspm_lock.
+	 * 주의: L1 을 금지하면 L1SS 도 함께 금지해야 한다(L1SS 는 L1 안의
+	 *   하위 상태라서). pci_calc_aspm_disable_mask() 가 그 보정을 한다. */
 	u32 aspm_disable:7;		/* Disabled ASPM state */
 
 	/* Clock PM state */
+	/* [한국어] Clock Power Management 를 양 끝이 모두 지원하는가.
+	 * CLKPM 은 ASPM 과 다른 기능이다 — ASPM 은 링크를 재우고, CLKPM 은
+	 * 장치가 CLKREQ# 신호로 "지금은 레퍼런스 클럭이 필요 없다" 고 알려
+	 * 클럭 공급 자체를 끊게 한다.
+	 * 설정자: pcie_clkpm_cap_init() 이 하류 버스의 모든 함수를 훑어
+	 *   LNKCAP 의 Clock PM 비트를 AND 로 묶는다(하나라도 없으면 0).
+	 * 읽는 자: pcie_set_clkpm()(못 하면 요청을 무시),
+	 *   aspm_ctrl_attrs_are_visible()(sysfs clkpm 파일 노출 여부).
+	 * 값 범위: 0 또는 1.
+	 * 동기화: aspm_lock. */
 	u32 clkpm_capable:1;		/* Clock PM capable? */
+
+	/* [한국어] 지금 CLKREQ# 기반 클럭 관리가 켜져 있는가.
+	 * 설정자: pcie_clkpm_cap_init()(부팅 시 LNKCTL 을 읽어 초기화),
+	 *   pcie_set_clkpm_nocheck()(레지스터를 쓴 직후 갱신).
+	 * 읽는 자: pcie_set_clkpm()("이미 그 상태면 건너뛴다"), clkpm_show().
+	 * 값 범위: 0 또는 1.
+	 * 동기화: aspm_lock. */
 	u32 clkpm_enabled:1;		/* Current Clock PM state */
+
+	/* [한국어] 펌웨어가 남겨 둔 CLKPM 기본값. POLICY_DEFAULT 에서
+	 * policy_to_clkpm_state() 가 돌려주는 값이다.
+	 * 설정자: pcie_clkpm_cap_init(), __pci_enable_link_state().
+	 * 읽는 자: policy_to_clkpm_state().
+	 * 값 범위: 0 또는 1.
+	 * 동기화: aspm_lock. */
 	u32 clkpm_default:1;		/* Default Clock PM state by BIOS */
+
+	/* [한국어] CLKPM 이 금지되었는가. 1 이면 정책이 뭐든 켜지지 않는다.
+	 * 설정자: pcie_clkpm_cap_init()(blacklist 링크),
+	 *   __pci_disable_link_state()(드라이버가 PCIE_LINK_STATE_CLKPM 을
+	 *   금지 요청), clkpm_store()(sysfs 에 0 을 쓴 경우).
+	 * 읽는 자: pcie_set_clkpm().
+	 * 값 범위: 0 또는 1.
+	 * 동기화: aspm_lock. */
 	u32 clkpm_disable:1;		/* Clock PM disabled */
 };
 
+/* [한국어] aspm_disabled — "커널이 ASPM 레지스터를 건드릴 권한이 없다".
+ * 부팅 인자 "pcie_aspm=off" 나, ACPI FADT 의 NO_ASPM 비트를 본
+ * pci-acpi.c:1922 의 pcie_no_aspm() 이 이 값을 세운다.
+ * 이것이 참이면 __pci_disable_link_state() 조차 -EPERM 을 돌려준다.
+ * 중요한 것은 "끄는" 것이 아니라 "손대지 않는" 것이라는 점이다 —
+ * pcie_no_aspm() 의 영어 주석이 그 의도를 명확히 밝힌다.
+ * aspm_force — "pcie_aspm=force". PCIe 1.1 미만으로 보이는 장치에도
+ * ASPM 을 허용하고, pcie_no_aspm() 의 무력화도 무시한다.
+ * 동기화: 부팅 초기에만 쓰이고 그 뒤로는 읽기 전용이라 락이 없다. */
 static bool aspm_disabled, aspm_force;
+/* [한국어] "ASPM 지원 자체를 켜 둘 것인가". "pcie_aspm=off" 일 때만 거짓이 되며,
+ * 거짓이면 pcie_aspm_init_link_state() 가 링크 상태 객체를 아예 만들지 않는다.
+ * aspm_disabled 와 나뉘어 있는 이유: FADT 의 NO_ASPM 은 "건드리지 마라" 일 뿐
+ * "구조를 만들지 마라" 는 아니어서, pcie_no_aspm() 은 이 값을 건드리지 않는다.
+ * 동기화: 부팅 초기 설정 후 읽기 전용. */
 static bool aspm_support_enabled = true;
+/* [한국어] 링크 상태 전부를 지키는 뮤텍스. link_list 와 각 pcie_link_state 의
+ * 모든 비트필드가 이 락 아래에 있다. 잠금 순서는 항상
+ * pci_bus_sem(read) -> aspm_lock 이다. 반대로 잡으면 교착한다.
+ * 뮤텍스인 이유: 이 락을 쥔 채 config space 접근과 링크 재훈련(수 밀리초
+ * 대기)을 하므로 잠들 수 있어야 한다. */
 static DEFINE_MUTEX(aspm_lock);
+/* [한국어] 시스템의 모든 pcie_link_state 를 한 줄로 꿴 목록.
+ * sysfs 로 정책이 바뀌면(pcie_aspm_set_policy) 이 목록을 통째로 훑어
+ * 모든 링크에 새 정책을 적용한다. 계층 구조와 무관한 평평한 목록이라는
+ * 점이 중요하다 — 계층을 따라가는 것은 link->parent 사슬이 맡는다.
+ * 동기화: aspm_lock. */
 static LIST_HEAD(link_list);
 
+/* [한국어] 정책 네 가지. sysfs 의 policy 파일과
+ * /sys/module/pcie_aspm/parameters/policy 로 골라 쓴다.
+ * 값 자체는 policy_str[] 의 첨자로만 쓰이므로 0..3 이 연속이어야 한다. */
 #define POLICY_DEFAULT 0	/* BIOS default setting */
+/* [한국어] 펌웨어가 남긴 상태를 그대로 둔다 — link->aspm_default 를 쓴다 */
 #define POLICY_PERFORMANCE 1	/* high performance */
+/* [한국어] 지연을 최우선. ASPM 도 CLKPM 도 전부 끈다(0 을 돌려준다) */
 #define POLICY_POWERSAVE 2	/* high power saving */
+/* [한국어] L0s 와 L1 을 켠다. 다만 L1 하위 상태(L1.1/L1.2)까지는 가지 않는다 */
 #define POLICY_POWER_SUPERSAVE 3 /* possibly even more power saving */
+/* [한국어] L1 하위 상태를 포함해 가능한 모든 것을 켠다. 복귀 지연이 가장 크다 */
 
+/* [한국어] 컴파일 시점 기본 정책. Kconfig 로 고른다.
+ * 어느 것도 고르지 않으면 초기화자 없는 static 이라 0 = POLICY_DEFAULT 가
+ * 되어 "펌웨어가 정해 둔 대로" 가 기본이 된다. 커널이 사용자 하드웨어의
+ * 절전 설정을 함부로 바꾸지 않는다는 보수적 선택이다. */
 #ifdef CONFIG_PCIEASPM_PERFORMANCE
-static int aspm_policy = POLICY_PERFORMANCE;
+static int aspm_policy = POLICY_PERFORMANCE;	/* [한국어] 서버형 기본값: 절전보다 지연 */
 #elif defined CONFIG_PCIEASPM_POWERSAVE
-static int aspm_policy = POLICY_POWERSAVE;
+static int aspm_policy = POLICY_POWERSAVE;	/* [한국어] 노트북형 기본값: L0s/L1 을 켠다 */
 #elif defined CONFIG_PCIEASPM_POWER_SUPERSAVE
-static int aspm_policy = POLICY_POWER_SUPERSAVE;
+static int aspm_policy = POLICY_POWER_SUPERSAVE;	/* [한국어] L1 하위 상태까지 전부 */
 #else
-static int aspm_policy;
+static int aspm_policy;		/* [한국어] 명시적 초기화 없음 = 0 = POLICY_DEFAULT */
 #endif
 
+/* [한국어] 정책 번호 <-> 사용자에게 보이는 이름의 표.
+ * 첨자 지정 초기화([POLICY_*] = ...)를 쓴 덕에 위 상수 값이 바뀌어도
+ * 짝이 어긋나지 않는다.
+ * 읽는 자: pcie_aspm_set_policy() 가 sysfs_match_string() 으로 이름을
+ *   번호로 바꾸고, pcie_aspm_get_policy() 가 목록을 찍어 준다.
+ * 동기화: 상수 표라 락이 필요 없다. */
 static const char *policy_str[] = {
 	[POLICY_DEFAULT] = "default",
 	[POLICY_PERFORMANCE] = "performance",
@@ -454,6 +799,26 @@ static const char *policy_str[] = {
  * The L1 PM substate capability is only implemented in function 0 in a
  * multi function device.
  */
+/* [한국어]
+ * pci_function_0 - 버스 위의 function 0 장치를 찾아 준다
+ *
+ * @linkbus: 하류 버스(link->pdev->subordinate).
+ * @return:  function 0 인 pci_dev, 없으면 NULL.
+ *
+ * 바로 위 영어 주석이 이 함수의 존재 이유를 밝힌다 — 다중 함수 장치에서
+ * L1 PM Substates capability 는 function 0 에만 구현된다. 그래서 링크의
+ * "하류 대표" 를 고를 때 항상 function 0 을 쓴다.
+ *
+ * devfn 의 하위 3비트가 함수 번호이므로 PCI_FUNC() 로 뽑아 0 과 비교한다.
+ * 순회 순서에 기대지 않고 조건으로 찾는 이유: 버스 목록의 순서는
+ * 열거 과정에 따라 달라질 수 있어 첫 항목이 function 0 이라는 보장이 없다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. 호출자가 pci_bus_sem 을 쥔 상태에서
+ *   부르므로 목록이 바뀌지 않는다.
+ *
+ * 호출 체인:
+ *   alloc_pcie_link_state(), pcie_aspm_check_latency() -> [pci_function_0]
+ */
 static struct pci_dev *pci_function_0(struct pci_bus *linkbus)
 {
 	struct pci_dev *child;
@@ -464,6 +829,32 @@ static struct pci_dev *pci_function_0(struct pci_bus *linkbus)
 	return NULL;
 }
 
+/* [한국어]
+ * policy_to_aspm_state - 현재 정책이 이 링크에 요구하는 ASPM 상태를 돌려준다
+ *
+ * @link:   대상 링크. POLICY_DEFAULT 일 때만 실제로 쓰인다.
+ * @return: PCIE_LINK_STATE_* 비트 조합.
+ *
+ * 정책이라는 전역 설정을 링크별 요구 상태로 번역하는 곳이다.
+ *   PERFORMANCE     0 — ASPM 도 CLKPM 도 전부 끈다. 지연 우선.
+ *   POWERSAVE       L0s | L1 — 흔히 쓰이는 두 상태만. L1 하위 상태는 빼는데,
+ *                   복귀가 수십~수백 마이크로초로 훨씬 느리기 때문이다.
+ *   POWER_SUPERSAVE PCIE_LINK_STATE_ASPM_ALL — 하위 상태까지 전부.
+ *   DEFAULT         link->aspm_default — 펌웨어가 남긴 값 그대로.
+ *
+ * DEFAULT 만 링크별로 답이 다르다는 점이 pcie_config_aspm_path() 가
+ * 링크마다 이 함수를 다시 부르는 이유다.
+ *
+ * switch 밖의 return 0 은 도달할 수 없는 자리지만, aspm_policy 가
+ * 예상 밖 값이면 "전부 끄기" 라는 가장 안전한 답을 준다.
+ *
+ * 실행 컨텍스트: 순수 계산. 호출자가 aspm_lock 을 쥐고 있다.
+ *
+ * 호출 체인:
+ *   pcie_config_aspm_path(), __pci_disable_link_state(),
+ *   __pci_enable_link_state(), aspm_attr_store_common(),
+ *   pcie_aspm_set_policy() -> [policy_to_aspm_state]
+ */
 static int policy_to_aspm_state(struct pcie_link_state *link)
 {
 	switch (aspm_policy) {
@@ -482,6 +873,23 @@ static int policy_to_aspm_state(struct pcie_link_state *link)
 	return 0;
 }
 
+/* [한국어]
+ * policy_to_clkpm_state - 현재 정책이 이 링크에 요구하는 CLKPM 상태를 돌려준다
+ *
+ * @link:   대상 링크. POLICY_DEFAULT 일 때만 실제로 쓰인다.
+ * @return: 1 = 켜라, 0 = 꺼라.
+ *
+ * 위 policy_to_aspm_state() 의 CLKPM 판이다. 다른 점은 powersave 와
+ * powersupersave 가 같은 답(1)을 준다는 것 — CLKPM 에는 "더 깊은 단계"
+ * 가 없어 둘을 나눌 이유가 없기 때문이다.
+ *
+ * 실행 컨텍스트: 순수 계산. 호출자가 aspm_lock 을 쥐고 있다.
+ *
+ * 호출 체인:
+ *   pcie_aspm_init_link_state(), pcie_aspm_powersave_config_link(),
+ *   __pci_disable_link_state(), __pci_enable_link_state(),
+ *   clkpm_store(), pcie_aspm_set_policy() -> [policy_to_clkpm_state]
+ */
 static int policy_to_clkpm_state(struct pcie_link_state *link)
 {
 	switch (aspm_policy) {
@@ -498,6 +906,33 @@ static int policy_to_clkpm_state(struct pcie_link_state *link)
 	return 0;
 }
 
+/* [한국어]
+ * pci_update_aspm_saved_state - suspend 용 저장본의 LNKCTL 을 현재 값으로 고쳐 둔다
+ *
+ * @dev:    갱신할 장치.
+ * @return: 없음. 저장 버퍼가 없으면 조용히 돌아간다.
+ *
+ * ASPM 설정을 바꾼 직후에 반드시 불러야 하는 함수다. 그러지 않으면
+ * 다음 resume 이 옛 LNKCTL 을 되살려 방금 한 설정을 조용히 되돌린다.
+ *
+ * 저장본을 통째로 덮지 않고 두 비트 묶음만 갈아 끼우는 것이 핵심이다.
+ *   ASPM Control(PCI_EXP_LNKCTL_ASPMC)
+ *   CLKREQ Enable(PCI_EXP_LNKCTL_CLKREQ_EN)
+ * 나머지 비트는 저장본 쪽 값을 그대로 둔다. 영어 주석이 그 이유를
+ * 밝힌다 — Common Clock Configuration(CCC)은 열거 때 한 번만 쓰이므로
+ * 저장본에 담긴 값이 옳고, 지금 하드웨어에서 읽은 값보다 그쪽을
+ * 믿어야 한다.
+ *
+ * `cap[1]` 이 LNKCTL 인 것은 pci_save_pcie_state() 가 PCIe capability 를
+ * 담는 순서에 달려 있다. 코드의 영어 주석이 그 의존을 명시해 둔 이유는,
+ * 저쪽이 바뀌면 여기가 조용히 엉뚱한 레지스터를 고치기 때문이다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트, aspm_lock 을 쥔 채.
+ *
+ * 호출 체인:
+ *   pcie_set_clkpm_nocheck(), pcie_config_aspm_link()
+ *     -> [pci_update_aspm_saved_state] -> pci_find_saved_cap()
+ */
 static void pci_update_aspm_saved_state(struct pci_dev *dev)
 {
 	struct pci_cap_saved_state *save_state;
@@ -522,6 +957,31 @@ static void pci_update_aspm_saved_state(struct pci_dev *dev)
 	cap[1] = lnkctl | aspm_ctl;
 }
 
+/* [한국어]
+ * pcie_set_clkpm_nocheck - 확인 없이 CLKREQ Enable 을 켜거나 끈다
+ *
+ * @link:   대상 링크.
+ * @enable: 0 이 아니면 켠다.
+ * @return: 없음.
+ *
+ * 이름의 nocheck 는 "능력/금지/현재 상태를 확인하지 않는다" 는 뜻이다.
+ * 그 확인은 호출자인 pcie_set_clkpm() 이 한다. 둘을 나눈 덕에
+ * 확인 규칙이 바뀌어도 레지스터를 쓰는 쪽은 손대지 않아도 된다.
+ *
+ * 하류 버스의 *모든* 함수에 쓰는 것이 요점이다. CLKREQ# 는 물리적으로
+ * 장치 하나에 하나뿐인 신호선이라, 다중 함수 장치에서 함수마다 설정이
+ * 다르면 동작이 정의되지 않는다.
+ *
+ * 상류 포트에는 쓰지 않는다는 점도 눈에 띈다. CLKPM 은 "장치가 클럭을
+ * 요청한다" 는 단방향 신호라 하류 쪽만 설정하면 된다 — 링크 양 끝을
+ * 모두 설정해야 하는 ASPM 과 다른 부분이다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트, aspm_lock 을 쥔 채.
+ *
+ * 호출 체인:
+ *   pcie_set_clkpm() -> [pcie_set_clkpm_nocheck]
+ *     -> pcie_capability_clear_and_set_word(), pci_update_aspm_saved_state()
+ */
 static void pcie_set_clkpm_nocheck(struct pcie_link_state *link, int enable)
 {
 	struct pci_dev *child;
@@ -537,6 +997,30 @@ static void pcie_set_clkpm_nocheck(struct pcie_link_state *link, int enable)
 	link->clkpm_enabled = !!enable;
 }
 
+/* [한국어]
+ * pcie_set_clkpm - 능력과 금지 여부를 확인한 뒤 CLKPM 상태를 바꾼다
+ *
+ * @link:   대상 링크.
+ * @enable: 원하는 상태(0 또는 1).
+ * @return: 없음.
+ *
+ * 세 가지를 확인하고 실제 작업은 pcie_set_clkpm_nocheck() 에 넘긴다.
+ *   1. clkpm_capable 이 0 이면 켤 수 없다 -> 요청을 0 으로 낮춘다.
+ *   2. clkpm_disable 이 1 이면 금지되었다 -> 마찬가지로 0 으로 낮춘다.
+ *   3. 이미 원하는 상태면 아무것도 하지 않는다.
+ *
+ * 1, 2 번이 요청을 거절하지 않고 "0 으로 낮추는" 것이 눈에 띈다.
+ * 그 덕에 정책이 켜라고 해도 못 켜는 링크는 조용히 꺼진 상태를 유지하고,
+ * 호출자는 실패를 따로 처리하지 않아도 된다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트, aspm_lock 을 쥔 채.
+ *
+ * 호출 체인:
+ *   pcie_aspm_init_link_state(), pcie_aspm_powersave_config_link(),
+ *   __pci_disable_link_state(), __pci_enable_link_state(),
+ *   clkpm_store(), pcie_aspm_set_policy()
+ *     -> [pcie_set_clkpm] -> pcie_set_clkpm_nocheck()
+ */
 static void pcie_set_clkpm(struct pcie_link_state *link, int enable)
 {
 	/*
@@ -551,6 +1035,31 @@ static void pcie_set_clkpm(struct pcie_link_state *link, int enable)
 	pcie_set_clkpm_nocheck(link, enable);
 }
 
+/* [한국어]
+ * pcie_clkpm_cap_init - 링크의 CLKPM 능력과 현재 상태를 처음으로 읽어 채운다
+ *
+ * @link:      갓 할당된 링크 상태.
+ * @blacklist: pcie_aspm_sanity_check() 가 실패했는가.
+ * @return:    없음.
+ *
+ * 하류 버스의 모든 함수를 훑어 "가장 나쁜 쪽" 을 취한다. 영어 주석의
+ * take the worst 가 그 뜻이다.
+ *   LNKCAP 에 Clock PM 이 없는 함수가 하나라도 있으면 -> capable=0, 그 자리에서 중단.
+ *   LNKCTL 에 CLKREQ Enable 이 없는 함수가 있으면    -> enabled=0.
+ * capable 이 0 이면 enabled 도 함께 0 으로 만들고 즉시 break 하는 것이
+ * 맞다 — 능력이 없는데 켜져 있다고 기록하면 이후 판단이 어긋난다.
+ *
+ * 읽어 낸 enabled 를 default 에도 그대로 넣는다. "펌웨어가 남긴 상태"
+ * 를 기억해 두어야 POLICY_DEFAULT 에서 되돌아갈 수 있기 때문이다.
+ *
+ * blacklist 는 곧바로 clkpm_disable 로 옮긴다 — 링크를 믿을 수 없으면
+ * 클럭 관리도 하지 않는다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트, pci_bus_sem(read) + aspm_lock 을 쥔 채.
+ *
+ * 호출 체인:
+ *   pcie_aspm_init_link_state() -> [pcie_clkpm_cap_init]
+ */
 static void pcie_clkpm_cap_init(struct pcie_link_state *link, int blacklist)
 {
 	int capable = 1, enabled = 1;
@@ -582,12 +1091,41 @@ static void pcie_clkpm_cap_init(struct pcie_link_state *link, int blacklist)
  *   could use common clock. If they are, configure them to use the
  *   common clock. That will reduce the ASPM state exit latency.
  */
-/*
- * pcie_aspm_configure_common_clock:
- *   링크 양단의 Slot Clock Configuration(SLC) bit를 확인하고 Common
- *   Clock Configuration(CCC)을 활성화하면 링크 재학습(retrain)을
- *   수행한다. NVMe 관점에서는 common clock 사용 시 ASPM exit latency가
- *   감소하여 DMA/MSI-X 지연을 줄일 수 있다.
+/* [한국어]
+ * pcie_aspm_configure_common_clock - 링크 양 끝이 같은 레퍼런스 클럭을 쓰게 만든다
+ *
+ * @link:   설정할 링크.
+ * @return: 없음. 재훈련이 실패하면 원래 설정으로 되돌리고 끝낸다.
+ *
+ * 두 장치가 같은 클럭 소스에서 클럭을 받으면(common clock) 저전력 상태에서
+ * 깨어날 때 PLL 을 다시 잠글 필요가 줄어 복귀가 빨라진다. 반대로 서로
+ * 다른 클럭을 쓰면(separate reference clock) 복귀 때마다 위상을 다시
+ * 맞춰야 해서 exit latency 가 커진다. 그래서 지연 계산을 하기 *전에*
+ * 이 설정부터 정리한다(pcie_aspm_cap_init 의 호출 순서가 그 이유다).
+ *
+ * 동작 단계
+ *   1. 양 끝의 LNKSTA 에서 Slot Clock Configuration(SLC) 비트를 본다.
+ *      이 비트는 "나는 슬롯이 주는 레퍼런스 클럭을 쓴다" 는 뜻이라,
+ *      둘 다 1 이어야 같은 클럭을 공유한다고 말할 수 있다.
+ *   2. 이미 상류 포트에 CCC 가 켜져 있다면 하류의 모든 함수도 켜져 있는지
+ *      확인한다. 하나라도 어긋나면(inconsistent) 다시 설정한다 —
+ *      펌웨어가 다중 함수 장치의 일부만 설정하고 넘어간 경우가 있다.
+ *   3. 하류의 모든 함수, 그리고 상류 포트의 LNKCTL 에 CCC 를 쓴다.
+ *   4. 클럭 구성이 바뀌었으므로 링크를 재훈련해야 실제로 반영된다.
+ *      실패하면 원래 CCC 값들을 되돌린다 — 그래서 child_old_ccc[] 에
+ *      함수별 원래 값을 미리 담아 둔다.
+ *
+ * child_old_ccc 의 크기가 8 인 것은 PCI 의 한 장치가 가질 수 있는 함수가
+ * 최대 8 개(devfn 하위 3비트)이기 때문이다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트, aspm_lock 을 쥔 채(호출자가 잡는다).
+ *   재훈련 대기가 있어 수 밀리초 잠들 수 있다.
+ * 에러 경로: 재훈련 실패 시 pci_err 로 알리고 설정을 되돌린다. 링크는
+ *   원래 클럭 구성으로 계속 동작한다.
+ *
+ * 호출 체인:
+ *   pcie_aspm_init_link_state() -> pcie_aspm_cap_init()
+ *     -> [pcie_aspm_configure_common_clock] -> pcie_retrain_link()
  */
 static void pcie_aspm_configure_common_clock(struct pcie_link_state *link)
 {
@@ -658,7 +1196,26 @@ static void pcie_aspm_configure_common_clock(struct pcie_link_state *link)
 }
 
 /* Convert L0s latency encoding to ns */
-/* calc_l0s_latency: L0s exit latency를 ns로 변환. NVMe DEVCAP L0S acceptable latency와 비교 대상. */
+/* [한국어]
+ * calc_l0s_latency - LNKCAP 의 L0s Exit Latency 인코딩을 나노초로 편다
+ *
+ * @lnkcap: 한쪽 끝에서 읽은 Link Capabilities 레지스터 값.
+ * @return: L0s 에서 L0 으로 복귀하는 데 걸리는 시간(나노초).
+ *
+ * 규격은 이 지연을 3비트 부호로 싣는다. 0~6 은 64ns 를 밑으로 하는
+ * 2의 거듭제곱(64, 128, 256, ... ns)이고, 7 은 "4us 초과" 라는 뜻이라
+ * 상한이 없다. 상한이 없으면 비교를 할 수 없으므로 커널은 5us 라는
+ * 대표값을 쓴다 — 실제보다 작을 수 있지만, 그 값이면 어차피 대부분의
+ * acceptable latency 를 넘어 L0s 가 걸러진다.
+ *
+ * 반환 단위를 나노초로 맞추는 이유: 이 파일의 모든 지연 비교가
+ * 나노초 기준이라 단위를 섞으면 조용히 틀린 판정이 나온다.
+ *
+ * 실행 컨텍스트: 순수 계산 함수. 부수 효과도 락도 없다.
+ *
+ * 호출 체인:
+ *   pcie_aspm_check_latency() -> [calc_l0s_latency]
+ */
 static u32 calc_l0s_latency(u32 lnkcap)
 {
 	u32 encoding = FIELD_GET(PCI_EXP_LNKCAP_L0SEL, lnkcap);
@@ -669,7 +1226,24 @@ static u32 calc_l0s_latency(u32 lnkcap)
 }
 
 /* Convert L0s acceptable latency encoding to ns */
-/* calc_l0s_acceptable: endpoint가 허용하는 L0s 지연을 ns로 변환. 값이 작을수록 ASPM L0s를 억제한다. */
+/* [한국어]
+ * calc_l0s_acceptable - DEVCAP 의 Endpoint L0s Acceptable Latency 를 나노초로 편다
+ *
+ * @encoding: DEVCAP 에서 꺼낸 3비트 부호.
+ * @return:   이 엔드포인트가 L0s 복귀 지연으로 견딜 수 있는 최대 시간(나노초).
+ *
+ * 인코딩 규칙은 calc_l0s_latency() 와 같은 64ns 배수 체계지만, 7 의 뜻이
+ * 정반대다. exit latency 쪽의 7 은 "4us 보다 오래 걸린다"(나쁜 쪽)인데,
+ * acceptable 쪽의 7 은 "얼마든 견딘다"(좋은 쪽)이다. 그래서 U32_MAX 를
+ * 돌려 어떤 비교도 통과하게 한다.
+ *
+ * 이 값이 작을수록 지연에 민감한 장치라는 뜻이고, 그만큼 ASPM 이 걸러진다.
+ *
+ * 실행 컨텍스트: 순수 계산 함수.
+ *
+ * 호출 체인:
+ *   pcie_aspm_check_latency() -> [calc_l0s_acceptable]
+ */
 static u32 calc_l0s_acceptable(u32 encoding)
 {
 	if (encoding == 0x7)
@@ -678,7 +1252,26 @@ static u32 calc_l0s_acceptable(u32 encoding)
 }
 
 /* Convert L1 latency encoding to ns */
-/* calc_l1_latency: L1 exit latency를 ns로 변환. MSI-X 인터럽트喚醒 지연에 영향을 준다. */
+/* [한국어]
+ * calc_l1_latency - LNKCAP 의 L1 Exit Latency 인코딩을 나노초로 편다
+ *
+ * @lnkcap: 한쪽 끝에서 읽은 Link Capabilities 레지스터 값.
+ * @return: L1 에서 L0 으로 복귀하는 데 걸리는 시간(나노초).
+ *
+ * L0s 와 달리 밑이 1us 다. 0~6 은 1, 2, 4, ... 64us 이고 7 은 "64us 초과"
+ * 라서 대표값 65us 를 쓴다. L0s 의 밑(64ns)보다 세 자릿수 가까이 큰 것이
+ * 두 상태의 성격 차이를 그대로 보여 준다 — L1 은 양방향을 다 재우므로
+ * 훨씬 많이 아끼고 훨씬 늦게 깬다.
+ *
+ * L1 하위 상태(L1.1/L1.2)의 복귀 지연은 별도로 광고되지 않는다.
+ * pcie_aspm_check_latency() 의 영어 주석이 밝히듯, 커널은 이 L1 값이
+ * 하위 상태의 지연까지 포함한다고 가정하고 따로 검사하지 않는다.
+ *
+ * 실행 컨텍스트: 순수 계산 함수.
+ *
+ * 호출 체인:
+ *   pcie_aspm_check_latency() -> [calc_l1_latency]
+ */
 static u32 calc_l1_latency(u32 lnkcap)
 {
 	u32 encoding = FIELD_GET(PCI_EXP_LNKCAP_L1EL, lnkcap);
@@ -689,7 +1282,20 @@ static u32 calc_l1_latency(u32 lnkcap)
 }
 
 /* Convert L1 acceptable latency encoding to ns */
-/* calc_l1_acceptable: endpoint가 허용하는 L1 지연을 ns로 변환. NVMe는 보통 낮은 값을 갖는다. */
+/* [한국어]
+ * calc_l1_acceptable - DEVCAP 의 Endpoint L1 Acceptable Latency 를 나노초로 편다
+ *
+ * @encoding: DEVCAP 에서 꺼낸 3비트 부호.
+ * @return:   이 엔드포인트가 L1 복귀 지연으로 견딜 수 있는 최대 시간(나노초).
+ *
+ * calc_l1_latency() 와 같은 1us 배수 체계이며, 7 은 "무제한" 이라
+ * U32_MAX 를 돌려준다(calc_l0s_acceptable 과 같은 이유).
+ *
+ * 실행 컨텍스트: 순수 계산 함수.
+ *
+ * 호출 체인:
+ *   pcie_aspm_check_latency() -> [calc_l1_acceptable]
+ */
 static u32 calc_l1_acceptable(u32 encoding)
 {
 	if (encoding == 0x7)
@@ -698,7 +1304,29 @@ static u32 calc_l1_acceptable(u32 encoding)
 }
 
 /* Convert L1SS T_pwr encoding to usec */
-/* calc_l12_pwron: L1.2 T_POWER_ON 값을 usec로 환산. NVMe DMA 재개 전 링크 안정화 대기 시간에 관련. */
+/* [한국어]
+ * calc_l12_pwron - L1SS capability 의 T_POWER_ON 을 마이크로초로 편다
+ *
+ * @pdev:   이 값을 광고한 장치. 잘못된 scale 을 로그에 찍을 때만 쓴다.
+ * @scale:  2비트 배율 부호(0, 1, 2 만 유효).
+ * @value:  5비트 값.
+ * @return: T_POWER_ON(마이크로초). scale 이 3 이면 규격상 예약값이라 0.
+ *
+ * T_POWER_ON 은 L1.2 에서 깨어날 때 "전원을 다시 켜고 회로가 안정되기까지"
+ * 기다려야 하는 시간이다. 배율은 각각 2us, 10us, 100us 단위이며 3 은
+ * 예약(reserved)이라 하드웨어가 그 값을 실으면 규격 위반이다.
+ *
+ * 0 을 돌려주는 것이 안전한 쪽인지 주의해서 볼 만하다. 이 값은
+ * aspm_calc_l12_info() 에서 LTR_L1.2_THRESHOLD 를 더 크게 만드는 항으로
+ * 들어가므로, 0 이면 임계값이 실제보다 작아져 링크가 필요 이상으로
+ * 공격적으로 L1.2 에 들어갈 수 있다. 그래서 조용히 넘기지 않고
+ * pci_err 로 반드시 알린다.
+ *
+ * 실행 컨텍스트: 순수 계산 + 로그. 락 없음.
+ *
+ * 호출 체인:
+ *   aspm_l1ss_init() -> aspm_calc_l12_info() -> [calc_l12_pwron]
+ */
 static u32 calc_l12_pwron(struct pci_dev *pdev, u32 scale, u32 val)
 {
 	switch (scale) {
@@ -721,11 +1349,32 @@ static u32 calc_l12_pwron(struct pci_dev *pdev, u32 scale, u32 val)
  *
  * See PCIe r6.0, sec 5.5.1, 6.18, 7.8.3.3.
  */
-/*
- * encode_l12_threshold:
- *   LTR_L1.2_THRESHOLD register 값을 인코딩한다. threshold는 L0->L1.2->L0
- *   전환에 필요한 시간 이상이어야 하며, NVMe 장치가 보고한 LTR 값이
- *   이 threshold보다 크거나 같을 때 링크가 L1.2로 진입한다.
+/* [한국어]
+ * encode_l12_threshold - 마이크로초 값을 LTR_L1.2_THRESHOLD 의 (scale, value) 쌍으로 접는다
+ *
+ * @threshold_us: 넣고 싶은 임계 시간(마이크로초).
+ * @scale:        [출력] 3비트 배율 부호(0~5).
+ * @value:        [출력] 10비트 값.
+ * @return:       없음. 표현할 수 없을 만큼 크면 최대값으로 포화시킨다.
+ *
+ * 규격은 이 임계값을 (배율, 값)으로 나눠 싣는다. 배율은 1ns, 32ns, 1024ns,
+ * 32768ns, 1048576ns, 33554432ns 여섯 단계이고 값은 10비트(최대 0x3ff)다.
+ * 함수는 값이 10비트에 들어가는 가장 작은 배율을 골라 정밀도를 지킨다.
+ *
+ * 올림(roundup)을 쓰는 이유가 이 함수의 핵심이다. 바로 위 영어 주석이
+ * 밝히듯, 포트는 최근 LTR 값이 이 임계값 *이상* 일 때 L1.2 로 들어간다.
+ * 임계값을 내림해 실제 필요 시간보다 작게 잡으면, 사실은 견딜 수 없는
+ * 상황인데도 L1.2 로 들어가 버린다. 그래서 항상 큰 쪽으로 맞춘다.
+ *
+ * 마지막 else 는 33554432ns * 0x3ff 로도 모자란 경우다. 그때는 표현
+ * 가능한 최대값으로 포화시킨다 — 임계값이 너무 커서 사실상 L1.2 에
+ * 절대 들어가지 않게 되는데, 그것이 안전한 쪽이다.
+ *
+ * 실행 컨텍스트: 순수 계산 함수.
+ * 참고: PCIe r6.0 sec 5.5.1, 6.18, 7.8.3.3 (바로 위 영어 주석이 밝힌 출처).
+ *
+ * 호출 체인:
+ *   aspm_calc_l12_info() -> [encode_l12_threshold]
  */
 static void encode_l12_threshold(u32 threshold_us, u32 *scale, u32 *value)
 {
@@ -759,12 +1408,48 @@ static void encode_l12_threshold(u32 threshold_us, u32 *scale, u32 *value)
 	}
 }
 
-/*
- * pcie_aspm_check_latency:
- *   endpoint가 허용 가능한 지연 시간(acceptable latency)과 링크의 exit
- *   latency를 비교해 aspm_capable 비트를 조정한다. NVMe SSD의 DEVCAP
- *   L0S/L1 acceptable latency 필드가 낮을수록(= 민감할수록) ASPM을
- *   억제하여 DMA/MSI-X 응답 시간을 보장한다.
+/* [한국어]
+ * pcie_aspm_check_latency - 경로 전체의 누적 복귀 지연이 엔드포인트의 한계 안인지 판정한다
+ *
+ * @endpoint: 검사 기준이 되는 엔드포인트(또는 legacy endpoint).
+ * @return:   없음. 판정 결과는 경로상 각 링크의 aspm_capable 비트를
+ *            지우는 것으로 남긴다.
+ *
+ * 이 파일에서 가장 중요한 계산이다. 핵심 통찰은 "링크 하나만 봐서는 안
+ * 된다" 는 것이다. 엔드포인트에서 루트까지 스위치가 여러 단 끼어 있으면,
+ * 트래픽이 다시 흐르기까지 각 단의 복귀 시간이 차례로 더해진다.
+ * 그 합이 엔드포인트가 견딜 수 있는 시간을 넘으면 그 상태를 쓸 수 없다.
+ *
+ * 동작 단계
+ *   1. 엔드포인트의 DEVCAP 에서 L0s/L1 acceptable latency 를 꺼내 펴 둔다.
+ *      (endpoint->devcap 은 열거 때 캐시해 둔 값이라 여기서 다시 읽지 않는다.)
+ *   2. link = 엔드포인트 바로 위 링크에서 시작해 link->parent 로 루트까지
+ *      거슬러 올라간다.
+ *   3. 각 링크마다 양 끝의 LNKCAP 을 읽어 네 개의 exit latency 를 편다
+ *      (상류행/하류행 x L0s/L1).
+ *   4. L0s 는 방향별로 따로 비교한다. 상류행 L0s 의 복귀가 한계를 넘으면
+ *      L0S_UP 비트만 지운다 — 반대 방향은 여전히 쓸 수 있기 때문이다.
+ *   5. L1 은 양방향 중 더 나쁜 쪽(max)에 스위치 통과 비용을 더해 비교한다.
+ *
+ * l1_switch_latency 가 매 바퀴 1us 씩 늘어나는 것이 4번과 5번의 차이다.
+ * 영어 주석이 밝히듯 규격은 "루트로 가는 경로의 스위치마다 L1 에 1us 가
+ * 더 든다" 고 정하고 L0s 에 대해서는 아무 말이 없다. 그래서 L0s 에는
+ * 누적항을 더하지 않는다.
+ *
+ * D0 가 아닌 장치를 건너뛰는 이유: 절전 중인 장치는 어차피 트래픽을
+ * 만들지 않으므로 그 장치의 지연 요구로 링크를 제약할 이유가 없다.
+ * PCI_UNKNOWN 을 함께 허용하는 것은 아직 상태를 읽어 보지 않은 초기
+ * 열거 시점을 위한 것이다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트, aspm_lock 을 쥔 채. config space 를
+ *   읽으므로 잠들 수 있다.
+ * 에러 경로: 없다. 판정은 항상 "깎는" 방향으로만 작용해 안전하다.
+ *
+ * 호출 체인:
+ *   pcie_aspm_cap_init() -> [pcie_aspm_check_latency]
+ *   pcie_update_aspm_capable() -> [pcie_aspm_check_latency]
+ *     -> calc_l0s_latency(), calc_l1_latency(),
+ *        calc_l0s_acceptable(), calc_l1_acceptable()
  */
 static void pcie_aspm_check_latency(struct pci_dev *endpoint)
 {
@@ -838,12 +1523,51 @@ static void pcie_aspm_check_latency(struct pci_dev *endpoint)
 }
 
 /* Calculate L1.2 PM substate timing parameters */
-/*
- * aspm_calc_l12_info:
- *   L1.2 substate 진입/복귀에 필요한 Common_Mode_Restore_Time,
- *   T_POWER_ON, LTR_L1.2_THRESHOLD 값을 산출하고 레지스터에 기록한다.
- *   NVMe 관점에서는 L1.2 threshold가 NVMe 장치가 보고한 LTR 값보다
- *   커야 링크가 L1.2로 낮아가므로, 장치 드라이버의 LTR 정책과 밀접하다.
+/* [한국어]
+ * aspm_calc_l12_info - L1.2 의 타이밍 파라미터를 계산해 양 끝에 써 넣는다
+ *
+ * @link:            대상 링크.
+ * @parent_l1ss_cap: 상류 포트의 L1SS Capabilities 레지스터 값.
+ * @child_l1ss_cap:  하류 장치의 L1SS Capabilities 레지스터 값.
+ * @return:          없음.
+ *
+ * L1.2 는 공통 모드 전압까지 끄는 가장 깊은 링크 절전 상태라, 깨어날 때
+ * 회로가 안정되기를 기다려야 한다. 그 대기 시간을 양 끝이 각자 광고하고,
+ * 이 함수가 둘 중 더 큰 쪽을 골라 양쪽 레지스터에 같은 값으로 심는다.
+ * 더 큰 쪽을 고르는 이유는 자명하다 — 느린 쪽이 준비되기 전에 트래픽을
+ * 보내면 깨진다.
+ *
+ * 계산되는 값 세 가지
+ *   Common_Mode_Restore_Time  공통 모드 전압을 되살리는 시간
+ *   T_POWER_ON                전원을 켜고 안정되기까지의 시간
+ *   LTR_L1.2_THRESHOLD        "이만큼 못 견디면 L1.2 에 들이지 마라" 임계값
+ *
+ * 임계값 산식 `2 + 4 + t_common_mode + t_power_on` 은 위 영어 주석이 밝힌
+ * 근거대로다. PCIe r3.1 sec 5.5.3.3.1 의 Figure 5-16/5-17 과 Table 5-11 에서
+ * T(POWER_OFF)는 최대 2us, T(L1.2)는 최소 4us 이므로, L0 -> L1.2 -> L0
+ * 왕복에 최소한 그만큼은 든다. 즉 "왕복에 드는 시간보다 더 오래 견딜 수
+ * 있다고 장치가 말할 때만 L1.2 로 내려간다".
+ *
+ * 쓰기 순서가 규격에 묶여 있어 코드가 길어졌다.
+ *   (1) 이미 켜져 있던 L1.2 enable 비트를 하류 -> 상류 순으로 끈다.
+ *   (2) T_POWER_ON(CTL2)을 양쪽에 쓴다.
+ *   (3) Common_Mode_Restore_Time 은 상류에만 쓴다(규격상 상류 쪽 필드).
+ *   (4) LTR_L1.2_THRESHOLD 는 양쪽에 쓴다.
+ *   (5) 꺼 두었던 enable 비트를 원래대로 되살린다.
+ * 값이 이미 원하는 대로면 아무것도 하지 않고 빠져나간다 — 불필요하게
+ * L1.2 를 껐다 켜면 그 사이 링크가 절전에 들지 못하기 때문이다.
+ *
+ * pci_read_config_dword 로 CTL1/CTL2 를 통째로 읽는 것은 영어 주석이
+ * 말하듯 word 접근을 제대로 못 하는 장치가 있기 때문이다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트, aspm_lock 을 쥔 채.
+ * 에러 경로: calc_l12_pwron() 이 0 을 돌려주는 경우(잘못된 scale)를 빼면
+ *   실패 경로가 없다.
+ *
+ * 호출 체인:
+ *   pcie_aspm_cap_init() -> aspm_l1ss_init() -> [aspm_calc_l12_info]
+ *     -> calc_l12_pwron(), encode_l12_threshold(),
+ *        pci_clear_and_set_config_dword()
  */
 static void aspm_calc_l12_info(struct pcie_link_state *link,
 				u32 parent_l1ss_cap, u32 child_l1ss_cap)
@@ -951,12 +1675,35 @@ static void aspm_calc_l12_info(struct pcie_link_state *link,
 	}
 }
 
-/*
- * aspm_l1ss_init:
- *   parent/child L1SS capability를 읽고 지원하는 L1.1/L1.2/PCIPM
- *   substates를 aspm_support에 반영한다. child->ltr_path가 0이면
- *   L1.2는 사용 불가하다. NVMe 장치가 LTR을 지원하지 않으면 L1.2
- *   저전력 상태로 진입할 수 없다.
+/* [한국어]
+ * aspm_l1ss_init - 링크가 어떤 L1 하위 상태를 쓸 수 있는지 알아내 기록한다
+ *
+ * @link:   초기화할 링크. downstream/pdev 가 이미 채워져 있어야 한다.
+ * @return: 없음. 양 끝 중 하나라도 L1SS capability 가 없으면 즉시 돌아간다.
+ *
+ * L1 하위 상태는 네 가지 조합이 있다 — {L1.1, L1.2} x {ASPM 진입,
+ * PCI-PM 진입}. 이 함수는 양 끝의 L1SS Capabilities 를 AND 로 묶어
+ * 넷 중 무엇이 가능한지 aspm_support 에 기록하고, 이어서 현재 CTL1 을
+ * 읽어 무엇이 이미 켜져 있는지 aspm_enabled 에 기록한다.
+ *
+ * 세 가지 걸러 내기가 순서대로 일어난다.
+ *   1. L1SS Capabilities 의 "L1 PM Substates Supported" 비트가 없으면
+ *      나머지 필드가 의미 없으므로 cap 값 자체를 0 으로 만든다.
+ *   2. child->ltr_path 가 거짓이면 L1.2(ASPM 판)를 지운다. 영어 주석의
+ *      근거대로 L1.2 는 LTR_L1.2_THRESHOLD 와 실제 LTR 보고를 견주어
+ *      진입하는데, 루트에서 이 장치까지 경로 전체가 LTR 을 지원하지
+ *      않으면 그 보고 자체가 전달되지 않는다(PCIe r4.0 sec 5.5.4, 6.18).
+ *   3. 양 끝 AND — 한쪽만 되는 상태는 쓸 수 없다.
+ *
+ * 마지막에 L1.2 를 쓸 수 있을 때만 aspm_calc_l12_info() 를 부른다.
+ * L1.1 은 공통 모드 전압을 유지하므로 타이밍 파라미터가 필요 없다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트, aspm_lock 을 쥔 채.
+ * 에러 경로: 없다. 확인되지 않은 능력은 그냥 지원하지 않는 것으로 남는다.
+ *
+ * 호출 체인:
+ *   pcie_aspm_init_link_state() -> pcie_aspm_cap_init()
+ *     -> [aspm_l1ss_init] -> aspm_calc_l12_info()
  */
 static void aspm_l1ss_init(struct pcie_link_state *link)
 {
@@ -1017,6 +1764,30 @@ static void aspm_l1ss_init(struct pcie_link_state *link)
 
 #define FLAG(x, y, d)	(((x) & (PCIE_LINK_STATE_##y)) ? d : "")
 
+/* [한국어]
+ * pcie_aspm_override_default_link_state - devicetree 플랫폼에서 ASPM 기본값을 덧칠한다
+ *
+ * @link:   대상 링크. aspm_support 가 이미 채워져 있어야 한다.
+ * @return: 없음.
+ *
+ * ACPI 시스템에서는 펌웨어가 LNKCTL 에 남긴 값을 기본값으로 삼으면 되지만,
+ * devicetree 로 기술되는 임베디드/ARM 플랫폼에는 그런 펌웨어 설정이 없어
+ * 링크가 늘 꺼진 채로 남는다. 그래서 그런 플랫폼에서는 지원되는 범위
+ * 안에서 L0s 와 L1 을 기본값으로 켠다.
+ *
+ * L1 하위 상태는 덧칠하지 않는다. 복귀 지연이 크고 LTR 경로 등 전제가
+ * 많아, 기본으로 켜기에는 위험이 크기 때문이다.
+ *
+ * override 를 aspm_default & ~aspm_enabled 로 계산해 로그를 찍는 부분이
+ * 세심하다. 이미 켜져 있던 것은 빼고 "이번에 새로 기본값이 된 것" 만
+ * 알려 준다. FLAG 매크로가 그 비트를 문자열 조각으로 바꾼다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트, aspm_lock 을 쥔 채.
+ *
+ * 호출 체인:
+ *   pcie_aspm_cap_init() -> [pcie_aspm_override_default_link_state]
+ *     -> of_have_populated_dt()
+ */
 static void pcie_aspm_override_default_link_state(struct pcie_link_state *link)
 {
 	struct pci_dev *pdev = link->downstream;
@@ -1036,12 +1807,45 @@ static void pcie_aspm_override_default_link_state(struct pcie_link_state *link)
 	}
 }
 
-/*
- * pcie_aspm_cap_init:
- *   링크 양단의 ASPM capability(LNKCAP/DEVCAP)와 현재 LNKCTL 상태를
- *   읽어 pcie_link_state를 초기화한다. common clock을 먼저 설정하고
- *   latency 검사를 수행하며, NVMe endpoint라면 devcap의 acceptable
- *   latency를 기준으로 aspm_capable이 제한될 수 있다.
+/* [한국어]
+ * pcie_aspm_cap_init - 링크의 ASPM 능력·현재 상태·기본값·가능 범위를 모두 채운다
+ *
+ * @link:      갓 할당된 pcie_link_state.
+ * @blacklist: pcie_aspm_sanity_check() 가 실패했는가(= 이 링크는 믿을 수 없다).
+ * @return:    없음.
+ *
+ * struct pcie_link_state 의 다섯 비트필드를 처음으로 채우는 곳이다.
+ * 순서가 곧 설계다.
+ *
+ *   blacklist 이면  -> enabled/disable 을 전부 켠 채 즉시 돌아간다.
+ *       "지금 켜져 있다고 치고, 전부 금지" 라는 뜻이라, 다음번
+ *       pcie_config_aspm_link() 가 반드시 모두 끄게 된다.
+ *   지원 자체가 없으면 -> 클럭도 링크도 건드리지 않고 돌아간다.
+ *   그렇지 않으면
+ *     1. common clock 을 먼저 맞춘다. 이것이 exit latency 를 바꾸므로
+ *        반드시 지연 검사 전에 해야 한다(영어 주석: LNKCAP 의 L0s/L1
+ *        exit latency 는 읽기 전용인데도 클럭 구성에 따라 값이 변한다,
+ *        PCIe r5.0 sec 7.5.3.6). 그래서 클럭 설정 뒤에 LNKCTL 을 다시 읽는다.
+ *     2. L1SS 를 건드리기 전에 L0s/L1 을 잠시 꺼 둔다(규격 요구).
+ *     3. support/enabled 를 L0s -> L1 -> L1SS 순으로 채운다.
+ *     4. 꺼 두었던 L0s/L1 을 되살린다.
+ *     5. 지금 값을 default 로 박아 둔다("펌웨어가 남긴 상태").
+ *     6. devicetree 플랫폼이면 default 를 덧칠한다.
+ *     7. capable 을 support 로 초기화한 뒤, 하류의 모든 엔드포인트에
+ *        대해 지연 검사를 돌려 깎는다.
+ *
+ * L0s 를 방향별로 다루는 부분을 주의해서 볼 만하다. 하류 장치의 LNKCTL 에
+ * L0s 가 켜져 있으면 그것은 "하류가 상류로 보내는 방향" 을 재우는 것이므로
+ * L0S_UP 비트가 되고, 상류 포트 쪽이면 L0S_DW 가 된다. 이름이 헷갈리기
+ * 쉬운데, 비트 이름은 "재우는 트래픽의 방향" 을 가리킨다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트, pci_bus_sem(read) + aspm_lock 을 쥔 채.
+ * 에러 경로: 없다. 확인되지 않은 것은 지원하지 않는 것으로 남는다.
+ *
+ * 호출 체인:
+ *   pcie_aspm_init_link_state() -> [pcie_aspm_cap_init]
+ *     -> pcie_aspm_configure_common_clock(), aspm_l1ss_init(),
+ *        pcie_aspm_override_default_link_state(), pcie_aspm_check_latency()
  */
 static void pcie_aspm_cap_init(struct pcie_link_state *link, int blacklist)
 {
@@ -1135,12 +1939,34 @@ static void pcie_aspm_cap_init(struct pcie_link_state *link, int blacklist)
 }
 
 /* Configure the ASPM L1 substates. Caller must disable L1 first. */
-/*
- * pcie_config_aspm_l1ss:
- *   L1SS enable bit를 PCIe 규격 순서에 따라 설정/해제한다. disable 시에는
- *   child 먼저 parent 나중, enable 시에는 parent 먼저 child 나중에 쓴다.
- *   NVMe 관련: L1SS 변경 중에는 L1이 꺼진 상태이므로 DMA/TLP 왕복이
- *   일시적으로 저전력 상태를 겪지 않는다.
+/* [한국어]
+ * pcie_config_aspm_l1ss - L1 하위 상태 enable 비트를 규격 순서대로 쓴다
+ *
+ * @link:   대상 링크.
+ * @state:  켜고 싶은 PCIE_LINK_STATE_* 조합. 이미 걸러진 값이 들어온다.
+ * @return: 없음.
+ *
+ * 커널 내부 표현(PCIE_LINK_STATE_L1_1 등)을 하드웨어 비트
+ * (PCI_L1SS_CTL1_ASPM_L1_1 등)로 옮겨 심는 것이 전부인 함수지만,
+ * 쓰는 순서에 규격 제약이 셋 걸려 있다(PCIe r6.2 sec 5.5.4, 바로 아래
+ * 영어 주석이 인용한다).
+ *   - 끌 때는 하류(child) 먼저, 상류(parent) 나중.
+ *   - 켤 때는 상류 먼저, 하류 나중.
+ *   - 타이밍 파라미터를 고치는 동안에는 L1.2 가 꺼져 있어야 한다.
+ *
+ * 그래서 코드가 "일단 양쪽 전부 끄고(하류->상류), 그다음 필요한 것만
+ * 켠다(상류->하류)" 는 네 번의 쓰기로 되어 있다. 원하는 상태만 골라
+ * 한 번에 쓰지 않는 이유가 이 순서 제약이다.
+ *
+ * 함수 이름 위 영어 주석이 못 박듯, 호출자가 이미 L1 을 꺼 둔 상태여야
+ * 한다. pcie_config_aspm_link() 가 그 계약을 지킨다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트, aspm_lock 을 쥔 채.
+ * 에러 경로: 없다.
+ *
+ * 호출 체인:
+ *   pcie_config_aspm_link() -> [pcie_config_aspm_l1ss]
+ *     -> pci_clear_and_set_config_dword()
  */
 static void pcie_config_aspm_l1ss(struct pcie_link_state *link, u32 state)
 {
@@ -1177,19 +2003,81 @@ static void pcie_config_aspm_l1ss(struct pcie_link_state *link, u32 state)
 				       PCI_L1SS_CTL1_L1SS_MASK, val);
 }
 
+/* [한국어]
+ * pcie_config_aspm_dev - 장치 하나의 LNKCTL ASPM Control 필드를 쓴다
+ *
+ * @pdev:   대상 장치(링크의 한쪽 끝, 또는 다중 함수 중 한 함수).
+ * @val:    새 ASPM Control 값(PCI_EXP_LNKCTL_ASPM_L0S / _L1 조합).
+ * @return: 없음.
+ *
+ * 한 줄짜리 래퍼지만 이름을 붙일 값어치가 있다. pcie_config_aspm_link()
+ * 이 이 호출을 여섯 번 하는데(하류 함수들 끄기 / 상류 끄기 / 상류 켜기 /
+ * 하류 함수들 켜기), 매번 마스크와 레지스터 오프셋을 손으로 쓰면
+ * 한 군데만 틀려도 조용히 엉뚱한 비트를 건드린다.
+ *
+ * clear_and_set 형태를 쓰는 이유: LNKCTL 에는 ASPM 과 무관한 비트
+ * (CCC, CLKREQ Enable, Retrain 등)가 함께 들어 있어 통째로 쓰면 안 된다.
+ * 이 헬퍼는 마스크 안쪽만 갈아 끼운다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트, aspm_lock 을 쥔 채.
+ *
+ * 호출 체인:
+ *   pcie_config_aspm_link() -> [pcie_config_aspm_dev]
+ *     -> pcie_capability_clear_and_set_word()
+ */
 static void pcie_config_aspm_dev(struct pci_dev *pdev, u32 val)
 {
 	pcie_capability_clear_and_set_word(pdev, PCI_EXP_LNKCTL,
 					   PCI_EXP_LNKCTL_ASPMC, val);
 }
 
-/*
- * pcie_config_aspm_link:
- *   계산된 ASPM state를 upstream/downstream 포트의 PCI_EXP_LNKCTL_ASPMC
- *   필드에 기록한다. L1SS를 사용할 경우 L1을 먼저 끄고 L1SS 설정 후
- *   L1을 다시 켜는 순서를 지킨다. NVMe 입장에서는 이 함수가 결정한
- *   L0s/L1/L1.1/L1.2 상태가 doorbell 쓰기와 Completion 읽기 사이의
- *   링크 복귀 지연에 직접 영향을 준다.
+/* [한국어]
+ * pcie_config_aspm_link - 원하는 ASPM 상태를 실제 레지스터에 반영한다
+ *
+ * @link:   대상 링크.
+ * @state:  정책이 요구하는 상태(policy_to_aspm_state() 의 결과 등).
+ * @return: 없음.
+ *
+ * 이 파일의 모든 계산이 결국 도달하는 곳이다. 요청받은 state 를 그대로
+ * 쓰지 않고 세 단계로 걸러 낸 뒤에야 하드웨어에 쓴다.
+ *
+ *   state &= (aspm_capable & ~aspm_disable)
+ *       지연 검사를 통과했고, 아무도 금지하지 않은 것만 남긴다.
+ *   L1 이 빠졌으면 L1SS 도 전부 뺀다
+ *       L1 하위 상태는 L1 안에서만 의미가 있다.
+ *   양 끝이 D0 가 아니면 PCI-PM 하위 상태는 손대지 않는다
+ *       규격이 D0 를 요구한다(PCIe r6.0 sec 5.5.4). 이때 현재 켜져 있던
+ *       PCI-PM 비트를 도로 넣어 주는 것이 눈에 띈다 — 건드리지 못하는
+ *       비트를 "꺼졌다" 고 기록하면 aspm_enabled 가 하드웨어와 어긋나므로,
+ *       현재 값을 그대로 유지한다는 뜻을 담는다.
+ *
+ * 그다음 커널 표현을 레지스터 비트로 옮긴다. 여기서 L0s 의 방향이 다시
+ * 뒤집힌다 — L0S_UP(상류행 트래픽을 재움)은 *하류* 장치의 LNKCTL 에
+ * 써야 하고, L0S_DW 는 *상류* 포트에 써야 한다. 각 장치가 제어하는 것은
+ * "자기가 내보내는 방향" 이기 때문이다.
+ *
+ * 쓰기 순서(PCIe r6.2 sec 7.5.3.7, 아래 영어 주석 인용)
+ *   1. 하류의 모든 함수에서 ASPM 을 끈다.
+ *   2. 상류에서 ASPM 을 끈다.
+ *   3. (L1SS 를 쓸 수 있으면) L1SS 를 설정한다 — 지금 L1 이 꺼져 있어야 한다.
+ *   4. 상류에 새 값을 켠다.
+ *   5. 하류의 모든 함수에 새 값을 켠다.
+ * "끌 때는 하류부터, 켤 때는 상류부터" 라는 규칙을 지키면 링크 한쪽만
+ * 절전에 들어가 상대가 응답하지 못하는 창이 생기지 않는다.
+ *
+ * 마지막에 저장본을 갱신하는 것도 중요하다. 이 갱신이 없으면 다음번
+ * suspend/resume 이 옛 설정을 되살려 방금 한 일을 되돌린다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트, pci_bus_sem(read) + aspm_lock 을 쥔 채.
+ * 에러 경로: 없다. 이미 원하는 상태면 아무것도 하지 않고 돌아간다.
+ *
+ * 호출 체인:
+ *   pcie_config_aspm_path(), __pci_disable_link_state(),
+ *   __pci_enable_link_state(), aspm_attr_store_common(),
+ *   pcie_aspm_set_policy(), pcie_aspm_exit_link_state()
+ *     -> [pcie_config_aspm_link]
+ *        -> pcie_config_aspm_l1ss(), pcie_config_aspm_dev(),
+ *           pci_save_aspm_l1ss_state(), pci_update_aspm_saved_state()
  */
 static void pcie_config_aspm_link(struct pcie_link_state *link, u32 state)
 {
@@ -1257,7 +2145,25 @@ static void pcie_config_aspm_link(struct pcie_link_state *link, u32 state)
 	pci_update_aspm_saved_state(parent);
 }
 
-/* pcie_config_aspm_path: root까지의 경로에 대해 policy_to_aspm_state() 기반으로 ASPM을 설정한다. */
+/* [한국어]
+ * pcie_config_aspm_path - 이 링크부터 루트까지 경로 전체에 정책을 적용한다
+ *
+ * @link:   출발점 링크. NULL 이면 아무 일도 하지 않는다.
+ * @return: 없음.
+ *
+ * ASPM 은 경로 전체가 함께 자야 절전이 된다. 그래서 한 링크만 설정하는
+ * pcie_config_aspm_link() 를 link->parent 사슬을 따라 루트까지 반복한다.
+ * 정책 값은 링크마다 다시 계산한다 — POLICY_DEFAULT 일 때
+ * policy_to_aspm_state() 가 각 링크의 aspm_default 를 돌려주므로
+ * 링크마다 결과가 다를 수 있기 때문이다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트, pci_bus_sem(read) + aspm_lock 을 쥔 채.
+ *
+ * 호출 체인:
+ *   pcie_aspm_init_link_state(), pcie_aspm_exit_link_state(),
+ *   pcie_aspm_pm_state_change(), pcie_aspm_powersave_config_link()
+ *     -> [pcie_config_aspm_path] -> pcie_config_aspm_link()
+ */
 static void pcie_config_aspm_path(struct pcie_link_state *link)
 {
 	/* [한국어] 이 링크에서 루트까지 올라가며 각 구간에 정책을 적용한다.
@@ -1269,17 +2175,60 @@ static void pcie_config_aspm_path(struct pcie_link_state *link)
 	}
 }
 
+/* [한국어]
+ * free_link_state - 링크 상태 객체를 놓고 장치 쪽 포인터도 끊는다
+ *
+ * @link:   해제할 링크 상태.
+ * @return: 없음.
+ *
+ * 순서가 이 함수의 전부다. kfree 하기 *전에* pdev->link_state 를 NULL 로
+ * 만든다. 반대로 하면 해제된 메모리를 가리키는 포인터가 잠시라도 남고,
+ * 그 틈에 pcie_aspm_get_link() 같은 경로가 그것을 읽을 수 있다.
+ *
+ * link_list 에서 빼는 것은 여기가 아니라 호출자
+ * (pcie_aspm_exit_link_state)가 한다. 목록 조작과 메모리 해제를 나눠
+ * 두어, 목록에서 뺀 사실이 호출 자리에서 눈에 보이게 한 것이다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트, aspm_lock 을 쥔 채.
+ *
+ * 호출 체인:
+ *   pcie_aspm_exit_link_state() -> [free_link_state]
+ */
 static void free_link_state(struct pcie_link_state *link)
 {
 	link->pdev->link_state = NULL;
 	kfree(link);
 }
 
-/*
- * pcie_aspm_sanity_check:
- *   포트 아래 모든 함수가 PCIe 1.1 이상(RBER bit)인지 확인한다.
- *   NVMe 장치는 대부분 PCIe 1.1 이상이지만, 강제(force) 옵션이 없으면
- *   구형 장치에 대해 ASPM을 비활성화하여 안정성을 확보한다.
+/* [한국어]
+ * pcie_aspm_sanity_check - 이 포트 아래에서 ASPM 을 믿고 써도 되는지 본다
+ *
+ * @pdev:   검사할 하류 포트.
+ * @return: 0 = 괜찮다, -EINVAL = 이 링크는 blacklist 로 다뤄라.
+ *
+ * 두 가지를 본다.
+ *   1. 하류의 모든 함수가 PCIe 인가. 하나라도 아니면 슬롯 전체를 포기한다.
+ *      영어 주석이 "very strange" 라고 적어 둔 상황이다.
+ *   2. 각 함수가 PCIe 1.1 이상인가. 1.0a 시절의 ASPM 구현에는 알려진
+ *      문제가 있어 켜면 링크가 죽는 장치가 있었다. 그런데 규격에는
+ *      "PCIe 판 번호" 를 직접 알려 주는 필드가 없다. 그래서 마이크로소프트가
+ *      쓰던 요령을 그대로 따라, DEVCAP 의 RBER(Role-Based Error Reporting)
+ *      비트가 있으면 1.1 이상으로 본다 — 그 비트가 1.1 에서 추가되었기
+ *      때문이다.
+ *
+ * aspm_disabled 일 때 2번을 건너뛰는 이유가 미묘하다. 그 경우 커널은
+ * 어차피 레지스터를 건드리지 않으므로, 구형 장치라도 펌웨어가 설정해 둔
+ * 상태 그대로 두는 것이 맞다. blacklist 로 표시해 버리면 오히려
+ * pcie_aspm_cap_init() 이 "전부 끄라" 는 상태를 만들어 펌웨어 설정을
+ * 뒤엎게 된다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. pcie_aspm_init_link_state() 가
+ *   락을 잡기 *전에* 부른다.
+ * 에러 경로: -EINVAL 은 실패가 아니라 "조심해서 다뤄라" 는 신호로,
+ *   호출자가 blacklist 플래그로 바꿔 넘긴다.
+ *
+ * 호출 체인:
+ *   pcie_aspm_init_link_state() -> [pcie_aspm_sanity_check]
  */
 static int pcie_aspm_sanity_check(struct pci_dev *pdev)
 {
@@ -1316,11 +2265,36 @@ static int pcie_aspm_sanity_check(struct pci_dev *pdev)
 	return 0;
 }
 
-/*
- * alloc_pcie_link_state:
- *   포트당 하나의 pcie_link_state를 할당하고 link_list에 연결한다.
- *   downstream 함수 0을 기준으로 하며, NVMe 장치가 multi-function
- *   일 경우에도 function 0 기준으로 링크 상태가 관리된다.
+/* [한국어]
+ * alloc_pcie_link_state - 링크 상태 객체를 만들어 계층과 목록에 건다
+ *
+ * @pdev:   링크의 상류 쪽 장치(하류 포트).
+ * @return: 만들어진 pcie_link_state, 실패하면 NULL.
+ *
+ * 세 가지 연결을 동시에 만든다.
+ *   pdev->link_state = link      장치에서 링크로
+ *   link->parent / link->root    링크 계층 사슬
+ *   link_list 에 sibling 삽입    전역 평면 목록
+ *
+ * 뿌리(root)를 정하는 조건 세 가지가 흥미롭다.
+ *   - Root Port 이거나
+ *   - PCI/PCI-X to PCIe Bridge 이거나
+ *   - 상위 버스에 브리지가 없거나(!pdev->bus->parent->self)
+ * 마지막 조건이 영어 주석이 설명하는 경우다. 일부 PCIe 호스트 구현은
+ * Root Port 를 아예 두지 않는데, 그러면 스위치의 Downstream Port 가
+ * 사슬의 뿌리 노릇을 하게 된다.
+ *
+ * 뿌리가 아닌데 부모 링크가 아직 없으면(부모 포트에 link_state 가 없으면)
+ * 계층을 이을 수 없으므로 할당을 취소하고 NULL 을 돌려준다. 이때는
+ * pdev->link_state 를 건드리지 않았으므로 그냥 kfree 로 끝난다 —
+ * free_link_state() 를 쓰지 않는 이유가 그것이다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트, pci_bus_sem(read) + aspm_lock 을 쥔 채.
+ * 에러 경로: kzalloc 실패, 부모 링크 부재. 둘 다 NULL 반환.
+ *
+ * 호출 체인:
+ *   pcie_aspm_init_link_state() -> [alloc_pcie_link_state]
+ *     -> pci_function_0()
  */
 static struct pcie_link_state *alloc_pcie_link_state(struct pci_dev *pdev)
 {
@@ -1363,6 +2337,27 @@ static struct pcie_link_state *alloc_pcie_link_state(struct pci_dev *pdev)
 	return link;
 }
 
+/* [한국어]
+ * pcie_aspm_update_sysfs_visibility - 링크 아래 장치들의 sysfs 속성 노출을 다시 계산하게 한다
+ *
+ * @pdev:   하류 포트. 그 아래 모든 장치의 속성 그룹을 갱신한다.
+ * @return: 없음.
+ *
+ * sysfs 속성 그룹의 is_visible 콜백은 파일을 만들 때 한 번만 불린다.
+ * 그런데 이 파일의 판단 기준(link->aspm_capable, clkpm_capable)은
+ * 링크 상태를 초기화하고 나서야 정해진다. 그 전에 만들어진 속성들은
+ * "능력 없음" 으로 판정되어 감춰져 있으므로, 초기화가 끝난 뒤
+ * sysfs_update_group() 으로 다시 판정하게 만들어야 한다.
+ *
+ * 하류 장치 전부를 도는 이유: 속성은 링크가 아니라 각 장치의 kobject
+ * 아래(link/ 디렉터리)에 달리기 때문이다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트, pci_bus_sem(read) + aspm_lock 을 쥔 채.
+ *
+ * 호출 체인:
+ *   pcie_aspm_init_link_state() -> [pcie_aspm_update_sysfs_visibility]
+ *     -> sysfs_update_group(&child->dev.kobj, &aspm_ctrl_attr_group)
+ */
 static void pcie_aspm_update_sysfs_visibility(struct pci_dev *pdev)
 {
 	struct pci_dev *child;
@@ -1376,13 +2371,41 @@ static void pcie_aspm_update_sysfs_visibility(struct pci_dev *pdev)
  * It is called after the pcie and its children devices are scanned.
  * @pdev: the root port or switch downstream port
  */
-/*
- * pcie_aspm_init_link_state:
- *   Root Port나 Switch Downstream Port를 스캔한 후 링크 상태를 초기화한다.
- *   boot parameter(pcie_aspm=)와 정책(performance/powersave 등)에 따라
- *   초기 ASPM/CLKPM 상태를 설정한다. NVMe 장치가 연결된 포트에서 이
- *   함수가 실행되며, 이후 pci_enable_device() 시점에 powersave 정책이
- *   실제 레지스터에 반영된다.
+/* [한국어]
+ * pcie_aspm_init_link_state - 링크를 발견했을 때 상태를 만들고 안전한 초기값을 넣는다
+ *
+ * @pdev:   방금 하류를 다 열거한 하류 포트(Root Port 또는 Switch DSP).
+ * @return: 없음.
+ *
+ * 이 파일의 진입점이다. probe.c 가 버스 하나를 다 훑고 나면 그 버스의
+ * 브리지에 대해 이 함수를 부른다.
+ *
+ * 걸러 내는 조건이 넷이다.
+ *   aspm_support_enabled 가 거짓("pcie_aspm=off") -> 아무것도 만들지 않는다.
+ *   이미 link_state 가 있으면                     -> 중복 생성 방지.
+ *   하류 포트가 아니면                            -> 링크 상태는 하류 포트에만 매단다.
+ *   VIA 의 이상한 칩셋(Root Port 가 브리지 아래에 있는 경우) -> 건너뛴다.
+ *
+ * 마지막 판단이 이 함수에서 가장 생각할 거리가 많다. 정책이 powersave 나
+ * powersupersave 가 *아닐* 때만 곧바로 설정을 적용한다. 절전 정책일
+ * 때는 여기서 켜지 않고 pci_enable_device() 까지 미룬다.
+ * 영어 주석이 그 이유를 밝힌다 — 이 시점에는 드라이버가 아직 붙지
+ * 않았고, 결함 있는 하드웨어에서 ASPM 을 켜면 드라이버가 끄기도 전에
+ * 장치가 망가질 수 있다. 반대로 "끄는" 방향은 언제 해도 안전하므로
+ * performance/default 정책은 지금 적용한다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트, 열거 경로. 여기서 락을 잡는다
+ *   (pci_bus_sem read -> aspm_lock 순서).
+ * 에러 경로: alloc 실패 시 unlock 라벨로 빠져 락만 풀고 끝낸다.
+ *   하류 버스가 비어 있으면 out 라벨로 빠진다(아직 aspm_lock 을 잡기 전).
+ *
+ * 호출 체인:
+ *   pci_scan_child_bus() -> pci_scan_bridge_extend() [probe.c:7077]
+ *     -> [pcie_aspm_init_link_state]
+ *        -> pcie_aspm_sanity_check(), alloc_pcie_link_state(),
+ *           pcie_aspm_cap_init(), pcie_clkpm_cap_init(),
+ *           pcie_config_aspm_path(), pcie_set_clkpm(),
+ *           pcie_aspm_update_sysfs_visibility()
  */
 void pcie_aspm_init_link_state(struct pci_dev *pdev)
 {
@@ -1448,7 +2471,30 @@ out:
 	up_read(&pci_bus_sem);
 }
 
-/* pci_bridge_reconfigure_ltr: hot-add 등으로 꺼진 상위 bridge의 LTR을 다시 활성화한다. */
+/* [한국어]
+ * pci_bridge_reconfigure_ltr - 상위 브리지의 LTR Enable 이 꺼져 있으면 되살린다
+ *
+ * @pdev:   기준 장치. 이 장치의 상위 브리지를 손본다.
+ * @return: 없음.
+ *
+ * LTR Enable(DEVCTL2 의 비트)은 링크가 내려갔다 올라오면 하드웨어가
+ * 스스로 지워 버릴 수 있다. 그래서 hot-add 로 장치가 새로 꽂혔거나
+ * 복귀 중이면, 그 장치의 LTR 을 켜기 *전에* 상위 브리지 쪽을 먼저
+ * 확인해 되살려야 한다. 규격상 경로 전체가 LTR 을 지원해야 엔드포인트가
+ * LTR 을 쓸 수 있기 때문이다(PCIe r4.0 sec 6.18).
+ *
+ * bridge->ltr_path 를 먼저 보는 것이 조건의 핵심이다. 이 플래그는
+ * "루트에서 이 브리지까지 LTR 경로가 성립한다" 는 커널의 기록이라,
+ * 참일 때만 되살릴 자격이 있다. 거짓인데 켜면 경로가 끊긴 채 장치만
+ * LTR 을 보고하게 되어 상류가 잘못된 판단을 한다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트(열거/복귀 경로). 락 없음.
+ * 에러 경로: 상위 브리지가 없거나 ltr_path 가 거짓이면 아무것도 안 한다.
+ *
+ * 호출 체인:
+ *   pci_restore_state() [pci.c:3200] -> [pci_bridge_reconfigure_ltr]
+ *   pci_configure_ltr() (이 파일) -> [pci_bridge_reconfigure_ltr]
+ */
 void pci_bridge_reconfigure_ltr(struct pci_dev *pdev)
 {
 	struct pci_dev *bridge;
@@ -1465,12 +2511,41 @@ void pci_bridge_reconfigure_ltr(struct pci_dev *pdev)
 	}
 }
 
-/*
- * pci_configure_ltr:
- *   endpoint의 LTR capability를 검색하고 DEVCTL2.LTR_EN을 설정한다.
- *   NVMe 장치가 LTR을 지원하면 Root Complex부터 모든 중간 Switch가
- *   LTR을 지원하는지 확인한 뒤 ltr_path를 1로 표시한다. 이 경로가
- *   없으면 aspm_l1ss_init()에서 L1.2를 비활성화한다.
+/* [한국어]
+ * pci_configure_ltr - 이 장치의 LTR 을 켤 수 있는지 판단하고, 켤 수 있으면 켠다
+ *
+ * @pdev:   열거 중인 장치.
+ * @return: 없음. 결과는 pdev->ltr_path 와 DEVCTL2 의 LTR Enable 에 남는다.
+ *
+ * LTR 은 "경로 전체" 기능이다. 루트 컴플렉스와 그 사이의 모든 스위치가
+ * LTR 을 지원해야 엔드포인트가 LTR 메시지를 보낼 자격이 생긴다
+ * (영어 주석: PCIe r4.0 sec 6.18). 커널은 그 사실을 pdev->ltr_path 라는
+ * 한 비트로 들고 다닌다 — 위에서 아래로 전파되는 값이다.
+ *
+ * 분기 구조
+ *   DEVCAP2 에 LTR 지원이 없다        -> 끝.
+ *   이미 LTR Enable 이 켜져 있다      -> 펌웨어가 켜 둔 것이므로 존중하고,
+ *       ltr_path 만 계승한다(Root Port 면 무조건 1, 아니면 상위가 1일 때만).
+ *   host->native_ltr 가 거짓          -> 펌웨어가 LTR 소유권을 넘겨주지
+ *       않았다는 뜻이라 커널이 켜서는 안 된다(_OSC 협상 결과).
+ *   Root Port 다                      -> 경로의 시작점이므로 그냥 켜고 1.
+ *   그 외(스위치 아래 장치)           -> 상위가 ltr_path 를 가졌을 때만,
+ *       상위를 먼저 되살린 뒤 자기를 켠다.
+ *
+ * 마지막 경우에서 pci_bridge_reconfigure_ltr() 을 먼저 부르는 이유는
+ * 영어 주석이 밝힌다 — hot-add 된 장치라면 상위 브리지의 LTR 이 링크
+ * 다운 때 지워졌을 수 있어서다.
+ *
+ * ltr_path 가 0 으로 남으면 aspm_l1ss_init() 이 그 장치의 ASPM L1.2 를
+ * 지운다. 즉 이 함수의 결과가 곧 L1.2 사용 가능 여부다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트, 장치 열거 중. 락 없음.
+ * 에러 경로: 없다. 켤 수 없으면 그냥 켜지 않는다.
+ *
+ * 호출 체인:
+ *   pci_scan_single_device() -> pci_configure_device() [probe.c:5847]
+ *     -> [pci_configure_ltr] -> pci_bridge_reconfigure_ltr(),
+ *        pcie_capability_set_word()
  */
 void pci_configure_ltr(struct pci_dev *pdev)
 {
@@ -1529,7 +2604,33 @@ void pci_configure_ltr(struct pci_dev *pdev)
 }
 
 /* Recheck latencies and update aspm_capable for links under the root */
-/* pcie_update_aspm_capable: root 아래 모든 링크의 aspm_capable을 다시 계산한다. NVMe 제거/추가 시 latency 조건이 변할 때 호출. */
+/* [한국어]
+ * pcie_update_aspm_capable - 한 계층 전체의 aspm_capable 을 처음부터 다시 계산한다
+ *
+ * @root:   계층의 뿌리 링크. 뿌리가 아니면 BUG_ON 으로 터진다.
+ * @return: 없음.
+ *
+ * 지연 검사는 "깎기만" 하는 계산이라 되돌릴 수 없다. 장치가 빠지거나
+ * D-state 가 바뀌어 제약이 느슨해졌을 때, 이미 깎인 비트를 되살릴
+ * 방법은 처음부터 다시 계산하는 것뿐이다. 그래서 두 번의 순회로 되어 있다.
+ *
+ *   1차 순회: 같은 뿌리에 속한 모든 링크의 capable 을 support 로 되돌린다.
+ *   2차 순회: 각 링크 아래의 엔드포인트마다 지연 검사를 다시 돌린다.
+ *
+ * 두 순회를 나눈 것이 핵심이다. 한 번에 하면, 아직 초기화되지 않은
+ * 상위 링크에 대해 검사가 돌아 옛 값 위에 새로 깎게 된다.
+ * pcie_aspm_check_latency() 가 엔드포인트에서 루트까지 거슬러 올라가며
+ * 경로상 *모든* 링크를 손대기 때문에 이 문제가 생긴다.
+ *
+ * BUG_ON(root->parent) 은 계약 확인이다 — 뿌리가 아닌 링크를 넘기면
+ * link->root 비교가 엉뚱한 부분집합만 잡아 조용히 틀린 결과가 나온다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트, pci_bus_sem(read) + aspm_lock 을 쥔 채.
+ *
+ * 호출 체인:
+ *   pcie_aspm_exit_link_state(), pcie_aspm_pm_state_change()
+ *     -> [pcie_update_aspm_capable] -> pcie_aspm_check_latency()
+ */
 static void pcie_update_aspm_capable(struct pcie_link_state *root)
 {
 	struct pcie_link_state *link;
@@ -1554,11 +2655,39 @@ static void pcie_update_aspm_capable(struct pcie_link_state *root)
 }
 
 /* @pdev: the endpoint device */
-/*
- * pcie_aspm_exit_link_state:
- *   NVMe endpoint 제거 시 해당 링크의 ASPM을 끄고 pcie_link_state를
- *   해제한다. function 0 제거 시에만 수행하며, 상위 링크의 latency
- *   조건이 변경되면 재계산 후 재설정한다.
+/* [한국어]
+ * pcie_aspm_exit_link_state - 장치가 사라질 때 그 링크의 ASPM 을 끄고 상태를 해제한다
+ *
+ * @pdev:   제거되는 장치.
+ * @return: 없음.
+ *
+ * 해제 시점을 고르는 규칙이 이 함수의 전부라 해도 된다.
+ * 링크 상태는 상류 포트(parent)에 매달려 있고, 하류에는 함수가 여럿
+ * 있을 수 있다. 그중 아무나 빠질 때마다 해제하면 안 되고,
+ * link->downstream(= function 0)이 빠질 때 해제해야 한다.
+ *
+ * 영어 주석은 "더 일찍 해제해서도 안 된다" 고 덧붙인다. function 0 이
+ * 스위치의 Upstream Port 라면, 이 링크 상태는 그 스위치 아래 모든
+ * 링크의 parent 이기 때문이다. 먼저 없애면 자식들이 매달린 포인터가
+ * 허공을 가리킨다. 그래서 하위 장치들이 먼저 제거되는 remove.c 의 순서에
+ * 기대어 "function 0 이 빠지는 순간" 을 해제 시점으로 삼는다.
+ *
+ * 해제 순서
+ *   1. 이 링크의 ASPM 을 전부 끈다(state = 0). 사라질 링크를 절전
+ *      상태로 남겨 두면 상류가 응답 없는 링크를 깨우려 시도할 수 있다.
+ *   2. 목록에서 빼고 메모리를 놓는다.
+ *   3. 부모 링크가 있으면, 이 엔드포인트가 걸어 두었던 지연 제약이
+ *      사라졌으므로 계층 전체를 다시 계산하고 다시 설정한다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트, 장치 제거 경로.
+ *   여기서 pci_bus_sem(read) -> aspm_lock 순으로 잡는다.
+ * 에러 경로: 상위 브리지나 그 link_state 가 없으면 그냥 돌아간다.
+ *
+ * 호출 체인:
+ *   pci_stop_and_remove_bus_device() -> pci_destroy_dev() [remove.c:158]
+ *     -> [pcie_aspm_exit_link_state]
+ *        -> pcie_config_aspm_link(), free_link_state(),
+ *           pcie_update_aspm_capable(), pcie_config_aspm_path()
  */
 void pcie_aspm_exit_link_state(struct pci_dev *pdev)
 {
@@ -1605,7 +2734,32 @@ void pcie_aspm_exit_link_state(struct pci_dev *pdev)
  * @pdev: the root port or switch downstream port
  * @locked: whether pci_bus_sem is held
  */
-/* pcie_aspm_pm_state_change: D0/D3 전환 후 링크 latency 조건과 ASPM 상태를 갱신한다. */
+/* [한국어]
+ * pcie_aspm_pm_state_change - 전원 상태가 바뀐 뒤 지연 조건과 ASPM 을 다시 맞춘다
+ *
+ * @pdev:   상태가 바뀐 장치의 상위 하류 포트(호출자가 dev->bus->self 를 넘긴다).
+ * @locked: 호출자가 이미 pci_bus_sem 읽기 잠금을 쥐고 있는가.
+ * @return: 없음.
+ *
+ * 지연 검사는 D0 인 장치만 대상으로 한다(pcie_aspm_check_latency 첫 부분).
+ * 그러므로 어떤 장치가 D0 에서 내려가거나 D0 로 올라오면 그 링크의
+ * 제약 조건이 통째로 달라진다. 예를 들어 지연에 예민한 장치가 D3 로
+ * 내려가면, 그 장치 때문에 막혀 있던 L1 을 이제 켤 수 있게 된다.
+ * 그래서 계층 전체를 다시 계산하고 다시 적용한다.
+ *
+ * @locked 인자가 있는 이유: 호출자인 pci.c 의 전원 전환 경로가 이미
+ * pci_bus_sem 을 쥐고 들어오는 경우가 있어, 다시 잡으면 교착하거나
+ * lockdep 이 경고한다. 그래서 잠금 여부를 인자로 받아 조건부로 잡는다.
+ * 커널에서 흔한 "_locked 판" 관용구를 인자 하나로 접은 형태다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트, 전원 전환 경로.
+ * 에러 경로: aspm_disabled 이거나 link_state 가 없으면 아무것도 안 한다.
+ *
+ * 호출 체인:
+ *   pci_power_up() [pci.c:2635], pci_set_low_power_state() [pci.c:2836]
+ *     -> [pcie_aspm_pm_state_change]
+ *        -> pcie_update_aspm_capable(), pcie_config_aspm_path()
+ */
 void pcie_aspm_pm_state_change(struct pci_dev *pdev, bool locked)
 {
 	struct pcie_link_state *link = pdev->link_state;
@@ -1626,12 +2780,29 @@ void pcie_aspm_pm_state_change(struct pci_dev *pdev, bool locked)
 		up_read(&pci_bus_sem);
 }
 
-/*
- * pcie_aspm_powersave_config_link:
- *   pci_enable_device() 시점에 powersave/supersave 정책 하에서 ASPM과
- *   CLKPM을 실제로 활성화한다. NVMe probe 중 이 함수가 호출되면 링크가
- *   L0s/L1/L1SS로 진입할 수 있으므로, 고성능 NVMe 드라이버는 이전에
- *   pci_disable_link_state()를 호출하는 경우가 많다.
+/* [한국어]
+ * pcie_aspm_powersave_config_link - 미뤄 두었던 절전 정책을 이제 실제로 적용한다
+ *
+ * @pdev:   방금 활성화된 장치의 상위 브리지(호출자가 bridge 를 넘긴다).
+ * @return: 없음.
+ *
+ * pcie_aspm_init_link_state() 가 절전 정책일 때 설정을 미뤄 둔 것의
+ * 뒷수습이다. 그때는 드라이버가 붙기 전이라 ASPM 을 켜는 것이 위험했지만,
+ * pci_enable_device() 가 불렸다는 것은 드라이버가 이미 장치를 잡았고
+ * 필요하면 pci_disable_link_state() 로 금지해 둘 기회가 있었다는 뜻이다.
+ * 그러므로 이제는 켜도 된다.
+ *
+ * 정책이 powersave/powersupersave 가 아니면 즉시 돌아간다 —
+ * 다른 정책은 이미 초기화 시점에 적용을 마쳤기 때문이다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. 여기서 pci_bus_sem(read) -> aspm_lock
+ *   을 직접 잡는다.
+ * 에러 경로: 없다.
+ *
+ * 호출 체인:
+ *   pci_enable_device() -> do_pci_enable_device() [pci.c:3868]
+ *     -> [pcie_aspm_powersave_config_link]
+ *        -> pcie_config_aspm_path(), pcie_set_clkpm()
  */
 void pcie_aspm_powersave_config_link(struct pci_dev *pdev)
 {
@@ -1652,11 +2823,30 @@ void pcie_aspm_powersave_config_link(struct pci_dev *pdev)
 	up_read(&pci_bus_sem);
 }
 
-/*
- * pcie_aspm_get_link:
- *   endpoint의 직계 상위 브리지(Root Port 또는 Switch Downstream Port)의
- *   link_state 포인터를 반환한다. NVMe 드라이버가 pci_disable_link_state()
- *   등을 호출할 때 실제로 조작되는 링크 객체를 찾는다.
+/* [한국어]
+ * pcie_aspm_get_link - 장치에서 그 장치가 매달린 링크 상태를 찾아 준다
+ *
+ * @pdev:   기준 장치(보통 엔드포인트).
+ * @return: 그 위 링크의 pcie_link_state, 없으면 NULL.
+ *
+ * 링크 상태는 상류 포트에 매달려 있으므로, 장치 쪽에서 접근하려면
+ * 한 단계 위로 올라가야 한다. 그 한 줄짜리 변환을 이름 붙여 모아 둔
+ * 것이 이 함수다. 드라이버용 API(pci_disable_link_state 등)와 sysfs
+ * 속성 함수들이 전부 이것으로 시작한다.
+ *
+ * PCIe 인지 두 번 확인하는 것(자기 자신과 상위 브리지)이 중요하다.
+ * 전통 PCI 장치나 그 아래 브리지에는 link_state 가 없고, 그 필드를
+ * 읽으면 엉뚱한 값이 나온다.
+ *
+ * 실행 컨텍스트: 락 없이 불린다. 반환된 포인터의 유효성은 호출자가
+ *   장치 참조를 쥐고 있다는 사실에 기댄다
+ *   (pcie_aspm_enabled() 위 영어 주석이 그 근거를 설명한다).
+ *
+ * 호출 체인:
+ *   __pci_disable_link_state(), __pci_enable_link_state(),
+ *   pcie_aspm_enabled(), aspm_attr_show_common(), aspm_attr_store_common(),
+ *   clkpm_show(), clkpm_store(), aspm_ctrl_attrs_are_visible()
+ *     -> [pcie_aspm_get_link] -> pci_upstream_bridge()
  */
 static struct pcie_link_state *pcie_aspm_get_link(struct pci_dev *pdev)
 {
@@ -1672,6 +2862,30 @@ static struct pcie_link_state *pcie_aspm_get_link(struct pci_dev *pdev)
 	return bridge->link_state;
 }
 
+/* [한국어]
+ * pci_calc_aspm_disable_mask - 금지 요청을 종속 관계에 맞게 넓힌다
+ *
+ * @state:  드라이버/sysfs 가 요청한 PCIE_LINK_STATE_* 조합.
+ * @return: aspm_disable 에 OR 할 실제 마스크(u8).
+ *
+ * 두 가지 보정을 한다.
+ *   CLKPM 비트를 뺀다 — CLKPM 은 aspm_disable 이 아니라 clkpm_disable 이라는
+ *     별도 필드로 관리되므로, 여기 섞이면 엉뚱한 ASPM 비트와 겹친다.
+ *   L1 을 금지하면 L1SS 도 함께 금지한다 — L1 하위 상태는 L1 안에서만
+ *     의미가 있어서, L1 을 막으면 하위 상태도 반드시 막혀야 앞뒤가 맞는다.
+ *
+ * 짝인 pci_calc_aspm_enable_mask() 와 방향이 정확히 반대라는 점을 같이
+ * 보면 이해가 쉽다. 금지는 위에서 아래로 번지고, 허용은 아래에서 위로
+ * 번진다.
+ *
+ * 반환형이 u8 인데 인자가 int 인 것은 상류 API 가 int 를 쓰기 때문이며,
+ * 실제 값은 7비트 안에 들어간다.
+ *
+ * 실행 컨텍스트: 순수 계산.
+ *
+ * 호출 체인:
+ *   __pci_disable_link_state() -> [pci_calc_aspm_disable_mask]
+ */
 static u8 pci_calc_aspm_disable_mask(int state)
 {
 	state &= ~PCIE_LINK_STATE_CLKPM;
@@ -1683,6 +2897,25 @@ static u8 pci_calc_aspm_disable_mask(int state)
 	return state;
 }
 
+/* [한국어]
+ * pci_calc_aspm_enable_mask - 허용 요청을 종속 관계에 맞게 넓힌다
+ *
+ * @state:  드라이버가 요청한 PCIE_LINK_STATE_* 조합.
+ * @return: aspm_default 에 넣을 실제 마스크(u8).
+ *
+ * pci_calc_aspm_disable_mask() 의 거울상이다.
+ *   CLKPM 비트를 뺀다 — 별도 필드(clkpm_default)로 처리하므로.
+ *   L1SS 를 허용하면 L1 도 함께 허용한다 — L1 이 꺼져 있으면 하위 상태에
+ *     도달할 방법이 없으므로, 요청대로 되려면 L1 도 열려 있어야 한다.
+ *
+ * 금지 쪽이 "L1 -> L1SS"(상위가 하위로) 인 반면 이쪽은 "L1SS -> L1"
+ * (하위가 상위로) 인 것이 두 함수가 헷갈리기 쉬운 부분이다.
+ *
+ * 실행 컨텍스트: 순수 계산.
+ *
+ * 호출 체인:
+ *   __pci_enable_link_state() -> [pci_calc_aspm_enable_mask]
+ */
 static u8 pci_calc_aspm_enable_mask(int state)
 {
 	state &= ~PCIE_LINK_STATE_CLKPM;
@@ -1694,15 +2927,41 @@ static u8 pci_calc_aspm_enable_mask(int state)
 	return state;
 }
 
-/*
- * __pci_disable_link_state:
- *   주어진 pci_dev 상위 브리지의 ASPM 상태를 변경한다. NVMe 드라이버가
- *   pci_disable_link_state(pdev, PCIE_LINK_STATE_L0S | PCIE_LINK_STATE_L1)
- *   형태로 호출하면, DMA/TLP 왕복 지연 시간이 낮아져 고성능 NVMe I/O
- *   에 유리해진다. 다만 ACPI _OSC/FADT에서 ASPM 제어권을 OS에 위임하지
- *   않으면 -EPERM을 반환하고 레지스터를 건드리지 않는다.
- *   호출 경로: nvme_probe -> pci_disable_link_state ->
- *             __pci_disable_link_state -> pcie_config_aspm_link
+/* [한국어]
+ * __pci_disable_link_state - 드라이버 요청으로 특정 링크 상태를 영구 금지한다
+ *
+ * @pdev:   요청한 드라이버의 장치.
+ * @state:  금지할 PCIE_LINK_STATE_* 조합.
+ * @locked: 호출자가 이미 pci_bus_sem 읽기 잠금을 쥐고 있는가.
+ * @return: 0 = 반영됨, -EINVAL = 링크 상태가 없음, -EPERM = 권한 없음.
+ *
+ * 지연에 예민한 장치의 드라이버가 "이 링크는 재우지 마라" 고 못 박는
+ * 통로다. 정책이 무엇으로 바뀌든 aspm_disable 에 선 비트는 다시 켜지지
+ * 않는다 — pcie_config_aspm_link() 가 항상 `& ~aspm_disable` 을 적용한다.
+ *
+ * -EPERM 을 돌려주는 경우가 이 함수의 핵심이다. 펌웨어가 ASPM 제어권을
+ * 넘겨주지 않았으면(ACPI FADT 의 NO_ASPM 비트 또는 _OSC 협상 결과 —
+ * pci-acpi.c:1922 가 pcie_no_aspm() 을 부른다) 커널은 LNKCTL 을
+ * 건드려서는 안 된다. 드라이버가 아무리 요청해도 들어줄 수 없으므로
+ * 경고를 남기고 거절한다. 영어 주석은 윈도우의 "PciASPMOptOut" 도
+ * 같은 상황에서 무시된다고 덧붙인다.
+ *
+ * pci_calc_aspm_disable_mask() 를 거치는 이유: L1 을 금지하면 그 안의
+ * 하위 상태도 함께 금지해야 한다. 그 보정을 그 함수가 한다.
+ * CLKPM 은 별도 필드(clkpm_disable)라 따로 처리한다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트, 드라이버 문맥. @locked 에 따라
+ *   pci_bus_sem 을 잡거나 이미 잡힌 것으로 본다. aspm_lock 은 항상 여기서 잡는다.
+ * 에러 경로: 위 두 가지 반환값.
+ *
+ * 호출 체인:
+ *   pci_disable_link_state(), pci_disable_link_state_locked()
+ *     -> [__pci_disable_link_state]
+ *        -> pcie_aspm_get_link(), pci_calc_aspm_disable_mask(),
+ *           pcie_config_aspm_link(), pcie_set_clkpm()
+ * 주의: 이 스파스 체크아웃 안에는 pci_disable_link_state 계열의 호출자가
+ *   하나도 없다(전수 grep). 이전 주석이 적었던 "nvme_probe 가 부른다" 는
+ *   drivers/nvme 에서 반증되어 지웠다.
  */
 static int __pci_disable_link_state(struct pci_dev *pdev, int state, bool locked)
 {
@@ -1739,6 +2998,29 @@ static int __pci_disable_link_state(struct pci_dev *pdev, int state, bool locked
 	return 0;
 }
 
+/* [한국어]
+ * pci_disable_link_state_locked - pci_bus_sem 을 이미 쥔 호출자를 위한 판
+ *
+ * @pdev:   대상 장치.
+ * @state:  금지할 PCIE_LINK_STATE_* 조합.
+ * @return: __pci_disable_link_state() 의 반환값(0 / -EINVAL / -EPERM).
+ *
+ * 열거나 hotplug 경로처럼 이미 pci_bus_sem 읽기 잠금을 쥔 채로 여기까지
+ * 온 호출자를 위한 진입점이다. 같은 세마포어를 다시 잡으면 lockdep 이
+ * 경고하거나 교착할 수 있어 진입점을 둘로 나누었다.
+ *
+ * lockdep_assert_held_read() 로 계약을 검사하는 것이 요점이다. 잠그지
+ * 않은 호출자가 이쪽으로 잘못 들어오면 락 없이 링크 목록을 만지게
+ * 되는데, 그 버그는 드물게만 터져 찾기 어렵다. 그래서 개발 커널에서
+ * 곧바로 잡히도록 단언을 넣었다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트, pci_bus_sem(read) 를 쥔 채.
+ * EXPORT_SYMBOL 로 모듈에 노출된다(이 트리 안에는 호출자가 없다).
+ *
+ * 호출 체인:
+ *   (트리 밖 드라이버) -> [pci_disable_link_state_locked]
+ *     -> __pci_disable_link_state(locked=true)
+ */
 int pci_disable_link_state_locked(struct pci_dev *pdev, int state)
 {
 	lockdep_assert_held_read(&pci_bus_sem);
@@ -1756,16 +3038,65 @@ EXPORT_SYMBOL(pci_disable_link_state_locked);
  * @pdev: PCI device
  * @state: ASPM link state to disable
  */
+/* [한국어]
+ * pci_disable_link_state - 드라이버가 링크 상태를 금지하는 공개 API
+ *
+ * @pdev:   대상 장치.
+ * @state:  금지할 PCIE_LINK_STATE_* 조합.
+ * @return: 0 = 반영됨, -EINVAL = 링크 상태 없음, -EPERM = 제어권 없음.
+ *
+ * 바로 위 kernel-doc 이 계약을 밝힌다 — 펌웨어가 ASPM 제어권을 넘겨주지
+ * 않았으면 LNKCTL 을 만질 수 없으므로 아무 일도 하지 않는다.
+ *
+ * pci_bus_sem 을 아직 쥐지 않은 호출자용이다. 이미 쥔 호출자는
+ * pci_disable_link_state_locked() 를 쓴다. 실질은 locked=false 로
+ * __pci_disable_link_state() 를 부르는 것뿐이다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트, 락을 잡지 않은 상태.
+ * EXPORT_SYMBOL 로 모듈에 노출된다. 이 스파스 체크아웃 안에는 호출자가
+ * 하나도 없다(전수 grep — drivers/nvme 포함).
+ *
+ * 호출 체인:
+ *   (트리 밖 드라이버) -> [pci_disable_link_state]
+ *     -> __pci_disable_link_state(locked=false)
+ */
 int pci_disable_link_state(struct pci_dev *pdev, int state)
 {
 	return __pci_disable_link_state(pdev, state, false);
 }
 EXPORT_SYMBOL(pci_disable_link_state);
 
-/*
- * __pci_enable_link_state:
- *   ASPM 상태를 enable mask로 갱신한다. NVMe 드라이버에서 거의 사용되지
- *   않지만, 전력 절감이 우선인 경우 L1/L1SS를 재활성화할 때 사용된다.
+/* [한국어]
+ * __pci_enable_link_state - 링크의 "기본값" 을 드라이버가 원하는 상태로 갈아친다
+ *
+ * @pdev:   요청한 드라이버의 장치.
+ * @state:  허용하고 싶은 PCIE_LINK_STATE_* 조합.
+ * @locked: 호출자가 이미 pci_bus_sem 읽기 잠금을 쥐고 있는가.
+ * @return: 0 = 반영됨, -EINVAL = 링크 상태가 없음, -EPERM = 권한 없음.
+ *
+ * 이름과 달리 "켜는" 함수가 아니라 aspm_default 를 통째로 덮어쓰는
+ * 함수다. 그래서 POLICY_DEFAULT 일 때만 실제 효과가 나타난다 —
+ * 다른 정책에서는 policy_to_aspm_state() 가 aspm_default 를 보지 않는다.
+ *
+ * 그리고 __pci_disable_link_state() 로 금지된 것을 되살리지는 못한다.
+ * aspm_disable 은 pcie_config_aspm_link() 에서 별도로 빼기 때문이다.
+ * 바로 아래 pci_enable_link_state() 의 영어 주석이 그 점을 못 박는다.
+ *
+ * pci_calc_aspm_enable_mask() 를 거치는 이유는 disable 판과 정반대다.
+ * L1 하위 상태를 켜려면 L1 이 켜져 있어야 하므로 L1 을 자동으로 더한다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. @locked 에 따라 pci_bus_sem 을 조건부로,
+ *   aspm_lock 은 항상 여기서 잡는다.
+ * 에러 경로: aspm_disabled 이면 경고 후 -EPERM.
+ *
+ * 호출 체인:
+ *   pci_enable_link_state(), pci_enable_link_state_locked()
+ *     -> [__pci_enable_link_state]
+ *        -> pcie_aspm_get_link(), pci_calc_aspm_enable_mask(),
+ *           pcie_config_aspm_link(), pcie_set_clkpm()
+ * 실제 사용처(이 트리): controller/vmd.c:859 와
+ *   controller/dwc/pcie-qcom.c:1060 이 pci_enable_link_state_locked() 로
+ *   PCIE_LINK_STATE_ALL 을 넘긴다.
  */
 static int __pci_enable_link_state(struct pci_dev *pdev, int state, bool locked)
 {
@@ -1812,6 +3143,29 @@ static int __pci_enable_link_state(struct pci_dev *pdev, int state, bool locked)
  * @pdev: PCI device
  * @state: Mask of ASPM link states to enable
  */
+/* [한국어]
+ * pci_enable_link_state - 링크의 기본 허용 상태를 바꾸는 공개 API
+ *
+ * @pdev:   대상 장치.
+ * @state:  허용하고 싶은 PCIE_LINK_STATE_* 조합.
+ * @return: 0 = 반영됨, -EINVAL = 링크 상태 없음, -EPERM = 제어권 없음.
+ *
+ * 위 kernel-doc 이 두 가지 제약을 못 박는다.
+ *   - 펌웨어가 제어권을 주지 않았으면 아무 일도 하지 않는다.
+ *   - pci_disable_link_state() 로 금지된 것은 이것으로 되살릴 수 없다.
+ *     금지는 aspm_disable 에, 허용은 aspm_default 에 기록되어 서로
+ *     다른 필드이기 때문이다.
+ * 그리고 PCI-PM L1 하위 상태를 켜려면 장치가 D0 여야 한다는 규격
+ * 요구(PCIe r6.0 sec 5.5.4)도 함께 밝힌다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트, 락을 잡지 않은 상태.
+ * EXPORT_SYMBOL 로 노출된다. 이 트리 안에는 이 이름의 직접 호출자가
+ * 없고, _locked 판만 쓰인다.
+ *
+ * 호출 체인:
+ *   (트리 밖 드라이버) -> [pci_enable_link_state]
+ *     -> __pci_enable_link_state(locked=false)
+ */
 int pci_enable_link_state(struct pci_dev *pdev, int state)
 {
 	return __pci_enable_link_state(pdev, state, false);
@@ -1833,6 +3187,32 @@ EXPORT_SYMBOL(pci_enable_link_state);
  *
  * Context: Caller holds pci_bus_sem read lock.
  */
+/* [한국어]
+ * pci_enable_link_state_locked - pci_bus_sem 을 이미 쥔 호출자를 위한 판
+ *
+ * @pdev:   대상 장치.
+ * @state:  허용하고 싶은 PCIE_LINK_STATE_* 조합.
+ * @return: 0 = 반영됨, -EINVAL = 링크 상태 없음, -EPERM = 제어권 없음.
+ *
+ * 위 kernel-doc 의 Context 줄이 계약을 명시한다 — 호출자가 pci_bus_sem
+ * 읽기 잠금을 쥐고 있어야 한다. lockdep_assert_held_read() 가 개발
+ * 커널에서 그 계약을 실제로 검사한다.
+ *
+ * 이 트리의 실제 사용처는 둘이다. 둘 다 열거 도중 각 장치에 대해
+ * 부르는 콜백 안이라 이미 pci_bus_sem 을 쥐고 있다.
+ *   controller/vmd.c:859           pci_enable_link_state_locked(pdev, PCIE_LINK_STATE_ALL)
+ *   controller/dwc/pcie-qcom.c:1060 같은 호출
+ * 두 곳 모두 "이 컨트롤러 아래 링크는 모든 절전 상태를 써도 된다" 는
+ * 플랫폼 지식을 커널에 알리는 용도다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트, pci_bus_sem(read) 를 쥔 채.
+ *
+ * 호출 체인:
+ *   vmd_pm_enable_quirk() [controller/vmd.c:859],
+ *   qcom_pcie_enable_aspm() [controller/dwc/pcie-qcom.c:1060]
+ *     -> [pci_enable_link_state_locked]
+ *        -> __pci_enable_link_state(locked=true)
+ */
 int pci_enable_link_state_locked(struct pci_dev *pdev, int state)
 {
 	lockdep_assert_held_read(&pci_bus_sem);
@@ -1841,7 +3221,30 @@ int pci_enable_link_state_locked(struct pci_dev *pdev, int state)
 }
 EXPORT_SYMBOL(pci_enable_link_state_locked);
 
-/* pcie_aspm_remove_cap: quirk 등에서 장치 결함을 회피하기 위해 ASPM capability를 소프트웨어적으로 제거한다. */
+/* [한국어]
+ * pcie_aspm_remove_cap - 하드웨어가 광고한 ASPM 능력을 "없는 것으로 친다"
+ *
+ * @pdev:   대상 장치.
+ * @lnkcap: 지울 능력을 나타내는 LNKCAP 비트(PCI_EXP_LNKCAP_ASPM_L0S / _L1).
+ * @return: 없음. 지운 사실을 pci_info 로 반드시 남긴다.
+ *
+ * 어떤 장치는 L0s 나 L1 을 지원한다고 광고해 놓고 실제로는 제대로
+ * 동작하지 않는다. 하드웨어 레지스터는 읽기 전용이라 고칠 수 없으므로,
+ * 커널이 들고 있는 사본(pdev->aspm_l0s_support / aspm_l1_support)을 지워
+ * 그 뒤의 모든 판단이 "지원하지 않음" 으로 흐르게 만든다.
+ *
+ * 이 함수는 지우기만 한다. 실제로 어느 장치가 문제인지는 quirks.c 가
+ * 판별하고, 그 결과를 이 함수로 전달한다. 판별과 반영을 나눈 덕에
+ * ASPM 내부 표현이 바뀌어도 quirk 쪽은 손대지 않아도 된다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트, 열거 초기(fixup 단계). 락 없음 —
+ *   이 시점에는 아직 link_state 가 만들어지기 전이라 경쟁이 없다.
+ *
+ * 호출 체인:
+ *   pci_do_fixups() -> quirk_disable_aspm_l0s()   [quirks.c:5445]
+ *   pci_do_fixups() -> quirk_disable_aspm_l0s_l1() [quirks.c:5495]
+ *     -> [pcie_aspm_remove_cap]
+ */
 void pcie_aspm_remove_cap(struct pci_dev *pdev, u32 lnkcap)
 {
 	if (lnkcap & PCI_EXP_LNKCAP_ASPM_L0S)
@@ -1855,6 +3258,34 @@ void pcie_aspm_remove_cap(struct pci_dev *pdev, u32 lnkcap)
 
 }
 
+/* [한국어]
+ * pcie_aspm_set_policy - sysfs 로 들어온 정책 이름을 받아 전 시스템에 적용한다
+ *
+ * @val:    사용자가 쓴 문자열("performance", "powersave" 등).
+ * @kp:     모듈 파라미터 서술자. 이 함수는 쓰지 않는다.
+ * @return: 0 = 반영, -EPERM = 권한 없음, 음수 = 이름을 못 알아봄.
+ *
+ * /sys/module/pcie_aspm/parameters/policy 쓰기 처리다.
+ * aspm_disabled 이면 곧바로 -EPERM — 펌웨어가 제어권을 주지 않았는데
+ * 정책만 바꿔 봐야 레지스터를 건드릴 수 없기 때문이다.
+ *
+ * sysfs_match_string() 이 policy_str[] 에서 이름을 찾아 첨자를 돌려준다.
+ * 그래서 정책 상수와 문자열 표의 순서가 곧 이 함수의 정확성이다.
+ *
+ * 반영 방식이 이 파일에서 유일하게 "전역 순회" 다. link_list 를 통째로
+ * 훑어 모든 링크에 새 정책을 적용한다. 계층을 따라가지 않고 평면
+ * 목록을 쓰는 이유는, 어차피 전부 손대야 하므로 순서가 상관없기 때문이다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트(사용자 write).
+ *   pci_bus_sem(read) -> aspm_lock 을 여기서 잡는다.
+ * 에러 경로: 이름을 못 찾으면 sysfs_match_string 의 음수를 그대로 돌려준다.
+ *   이미 같은 정책이면 아무것도 하지 않고 0.
+ *
+ * 호출 체인:
+ *   사용자 write() -> module_param_call 이 등록한 set 콜백
+ *     -> [pcie_aspm_set_policy]
+ *        -> pcie_config_aspm_link(), pcie_set_clkpm()
+ */
 static int pcie_aspm_set_policy(const char *val,
 				const struct kernel_param *kp)
 {
@@ -1881,6 +3312,29 @@ static int pcie_aspm_set_policy(const char *val,
 	return 0;
 }
 
+/* [한국어]
+ * pcie_aspm_get_policy - 고를 수 있는 정책 목록을 현재 값 표시와 함께 찍어 준다
+ *
+ * @buffer: 출력 버퍼.
+ * @kp:     모듈 파라미터 서술자. 쓰지 않는다.
+ * @return: 쓴 바이트 수.
+ *
+ * 출력은 "default [performance] powersave powersupersave" 처럼 현재 값만
+ * 대괄호로 감싼 한 줄이다. 커널이 "선택지 목록 + 현재 선택" 을 한
+ * 파일로 보여 줄 때 쓰는 관용적 형식이라, 사용자는 별도 문서 없이도
+ * 무엇을 쓸 수 있는지 알 수 있다.
+ *
+ * cnt 를 누적해 buffer + cnt 에 이어 붙이는 것은 sprintf 가 쓴 길이를
+ * 돌려준다는 점을 이용한 관용구다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트(사용자 read). 락 없이 aspm_policy 를
+ *   읽는다 — 한 워드 읽기라 찢어질 염려가 없고, 목록 표시가 한 틱
+ *   늦어도 문제가 되지 않는다.
+ *
+ * 호출 체인:
+ *   사용자 read() -> module_param_call 이 등록한 get 콜백
+ *     -> [pcie_aspm_get_policy]
+ */
 static int pcie_aspm_get_policy(char *buffer, const struct kernel_param *kp)
 {
 	int i, cnt = 0;
@@ -1905,10 +3359,31 @@ module_param_call(policy, pcie_aspm_set_policy, pcie_aspm_get_policy,
  * sibling) is removed, and the caller should be holding a reference to
  * @pdev, so this should be safe.
  */
-/*
- * pcie_aspm_enabled:
- *   주어진 pci_dev의 상위 링크에서 ASPM이 활성화되어 있는지 확인한다.
- *   NVMe 드라이버는 sysfs나 디버깅 용도로 이 값을 참조할 수 있다.
+/* [한국어]
+ * pcie_aspm_enabled - 이 장치가 매달린 링크에 ASPM 이 하나라도 켜져 있는가
+ *
+ * @pdev:   질의 대상 장치.
+ * @return: true = 무언가 켜져 있다, false = 전부 꺼져 있거나 링크 상태가 없다.
+ *
+ * 이 파일이 장치 드라이버에게 내주는 유일한 질의다.
+ * aspm_enabled 는 비트필드인데 bool 로 접어 돌려주므로, "어느 상태가"
+ * 가 아니라 "무엇이든 켜져 있는가" 만 답한다.
+ *
+ * 락을 잡지 않는 것이 눈에 띈다. 위 영어 주석이 그 근거를 설명한다 —
+ * 링크 상태는 상위 브리지의 마지막 자식이 사라질 때에야 해제되는데,
+ * 호출자가 @pdev 참조를 쥐고 있으므로 적어도 자기 자신은 아직 살아 있다.
+ * 따라서 반환 직후 값이 바뀔 수는 있어도 메모리가 사라지지는 않는다.
+ *
+ * 실제 사용처(이 트리에서 확인한 유일한 드라이버):
+ *   drivers/nvme/host/pci.c:5005 의 nvme_suspend() 가
+ *   "ASPM 이 꺼져 있으면 컨트롤러만 재워 봐야 소용없으니 아예 D3 로
+ *   내리자" 는 판단에 쓴다. 파일 상단 주석에 자세히 적었다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트, 드라이버 문맥. 락 없음.
+ *
+ * 호출 체인:
+ *   nvme_suspend() [drivers/nvme/host/pci.c:5005]
+ *     -> [pcie_aspm_enabled] -> pcie_aspm_get_link()
  */
 bool pcie_aspm_enabled(struct pci_dev *pdev)
 {
@@ -1921,7 +3396,34 @@ bool pcie_aspm_enabled(struct pci_dev *pdev)
 }
 EXPORT_SYMBOL_GPL(pcie_aspm_enabled);
 
-/* aspm_attr_show_common: /sys/bus/pci/devices/.../link/ 상태 읽기. NVMe 관리자가 ASPM/CLKPM 모니터링에 사용. */
+/* [한국어]
+ * aspm_attr_show_common - sysfs 의 ASPM 상태 파일 하나를 읽어 준다
+ *
+ * @dev:    sysfs 가 넘겨 준 device. 실제로는 pci_dev 다.
+ * @attr:   어떤 속성인지. 이 함수는 쓰지 않는다(@state 로 대신 받는다).
+ * @buf:    출력 버퍼(PAGE_SIZE).
+ * @state:  이 파일이 대변하는 PCIE_LINK_STATE_* 상수. ASPM_ATTR 매크로가 끼워 넣는다.
+ * @return: 쓴 바이트 수.
+ *
+ * /sys/bus/pci/devices/<장치>/link/{l0s_aspm,l1_aspm,l1_1_aspm,...} 파일의
+ * 읽기 처리다. 여섯 개 파일의 본문이 완전히 같고 상수 하나만 달라서,
+ * 아래 ASPM_ATTR 매크로가 껍데기를 찍어 내고 알맹이는 이 함수 하나가 맡는다.
+ *
+ * 보고하는 것은 aspm_enabled — 즉 "지금 실제로 켜져 있는가" 다.
+ * capable 이나 default 가 아니다. 사용자가 이 파일에서 보고 싶은 것은
+ * 현재 상태이기 때문이다(무엇을 켤 수 있는지는 파일의 존재 여부로
+ * 드러난다 — aspm_ctrl_attrs_are_visible() 참고).
+ *
+ * link 가 NULL 인지 확인하지 않는데, 그것이 안전한 이유는
+ * aspm_ctrl_attrs_are_visible() 이 link 가 없으면 파일 자체를 만들지
+ * 않기 때문이다. 파일이 있다는 것이 곧 link 가 있다는 증거다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트(사용자 read). 락 없이 읽는다.
+ *
+ * 호출 체인:
+ *   사용자 read() -> sysfs -> l0s_aspm_show() 등(ASPM_ATTR 이 생성)
+ *     -> [aspm_attr_show_common] -> pcie_aspm_get_link()
+ */
 static ssize_t aspm_attr_show_common(struct device *dev,
 				     struct device_attribute *attr,
 				     char *buf, u8 state)
@@ -1932,11 +3434,34 @@ static ssize_t aspm_attr_show_common(struct device *dev,
 	return sysfs_emit(buf, "%d\n", (link->aspm_enabled & state) ? 1 : 0);
 }
 
-/*
- * aspm_attr_store_common:
- *   sysfs(/sys/bus/pci/devices/.../link/l1_aspm 등) 쓰기를 처리한다.
- *   NVMe 관리자가 runtime에 ASPM 상태를 켜거나 끌 수 있으며, 이는
- *   doorbell 응답 시간과 NVMe queue depth 활용에 영향을 준다.
+/* [한국어]
+ * aspm_attr_store_common - sysfs 로 들어온 ASPM 허용/금지 요청을 반영한다
+ *
+ * @dev:    sysfs 가 넘겨 준 device.
+ * @attr:   어떤 속성인지(쓰지 않는다).
+ * @buf:    사용자가 쓴 내용. "0"/"1"/"y"/"n" 등 kstrtobool 이 받는 형식.
+ * @len:    그 길이.
+ * @state:  이 파일이 대변하는 PCIE_LINK_STATE_* 상수.
+ * @return: 성공하면 @len, 파싱 실패면 -EINVAL.
+ *
+ * 여기서 건드리는 것은 aspm_enabled 가 아니라 aspm_disable 이다.
+ * 사용자가 1 을 쓰면 "금지 해제", 0 을 쓰면 "금지" 다. 즉 sysfs 는
+ * 상태를 직접 켜는 것이 아니라 허용/금지만 정하고, 실제로 켤지는
+ * 정책과 지연 검사가 정한다. 이 구분 덕에 사용자가 1 을 써도
+ * 지연 예산을 넘는 상태는 켜지지 않는다.
+ *
+ * L1 과 L1SS 의 종속 관계를 양방향으로 챙기는 것이 이 함수의 요점이다.
+ *   허용할 때: 하위 상태를 허용하면 L1 도 함께 허용해야 한다
+ *              (L1 이 막혀 있으면 하위 상태에 도달할 수 없으므로).
+ *   금지할 때: L1 을 금지하면 하위 상태도 함께 금지해야 한다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트(사용자 write).
+ *   pci_bus_sem(read) -> aspm_lock 을 여기서 잡는다.
+ * 에러 경로: kstrtobool 실패 시 -EINVAL(락을 잡기 전이라 풀 것이 없다).
+ *
+ * 호출 체인:
+ *   사용자 write() -> sysfs -> l1_aspm_store() 등(ASPM_ATTR 이 생성)
+ *     -> [aspm_attr_store_common] -> pcie_config_aspm_link()
  */
 static ssize_t aspm_attr_store_common(struct device *dev,
 				      struct device_attribute *attr,
@@ -2012,6 +3537,25 @@ ASPM_ATTR(l1_2_aspm, L1_2)
 ASPM_ATTR(l1_1_pcipm, L1_1_PCIPM)
 ASPM_ATTR(l1_2_pcipm, L1_2_PCIPM)
 
+/* [한국어]
+ * clkpm_show - sysfs 의 link/clkpm 파일을 읽어 준다
+ *
+ * @dev:    sysfs 가 넘겨 준 device.
+ * @attr:   속성 서술자. 쓰지 않는다.
+ * @buf:    출력 버퍼.
+ * @return: 쓴 바이트 수.
+ *
+ * ASPM 쪽과 달리 상태가 하나뿐이라 매크로로 찍어 내지 않고 직접 썼다.
+ * 보고하는 값은 clkpm_enabled — 지금 실제로 켜져 있는가다.
+ *
+ * link 가 NULL 인지 보지 않는 것이 안전한 이유는 ASPM 쪽과 같다.
+ * aspm_ctrl_attrs_are_visible() 이 link 가 없으면 파일 자체를 만들지 않는다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트(사용자 read). 락 없음.
+ *
+ * 호출 체인:
+ *   사용자 read() -> sysfs -> [clkpm_show] -> pcie_aspm_get_link()
+ */
 static ssize_t clkpm_show(struct device *dev,
 			  struct device_attribute *attr, char *buf)
 {
@@ -2021,6 +3565,30 @@ static ssize_t clkpm_show(struct device *dev,
 	return sysfs_emit(buf, "%d\n", link->clkpm_enabled);
 }
 
+/* [한국어]
+ * clkpm_store - sysfs 의 link/clkpm 파일 쓰기를 처리한다
+ *
+ * @dev:    sysfs 가 넘겨 준 device.
+ * @attr:   속성 서술자. 쓰지 않는다.
+ * @buf:    사용자가 쓴 내용.
+ * @len:    그 길이.
+ * @return: 성공하면 @len, 파싱 실패면 -EINVAL.
+ *
+ * ASPM 쪽(aspm_attr_store_common)과 마찬가지로 enabled 를 직접 건드리지
+ * 않고 clkpm_disable 을 뒤집은 뒤 pcie_set_clkpm() 에 판단을 맡긴다.
+ * 그래서 사용자가 1 을 써도 clkpm_capable 이 0 이면 켜지지 않는다.
+ *
+ * `link->clkpm_disable = !state_enable` 한 줄이 곧 그 뒤집기다.
+ * ASPM 쪽이 비트 조합이라 if/else 로 나뉘는 것과 달리, 여기는 단일
+ * 비트라 부정 한 번으로 끝난다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트(사용자 write).
+ *   pci_bus_sem(read) -> aspm_lock 을 여기서 잡는다.
+ * 에러 경로: kstrtobool 실패 시 -EINVAL(락을 잡기 전).
+ *
+ * 호출 체인:
+ *   사용자 write() -> sysfs -> [clkpm_store] -> pcie_set_clkpm()
+ */
 static ssize_t clkpm_store(struct device *dev,
 			   struct device_attribute *attr,
 			   const char *buf, size_t len)
@@ -2044,26 +3612,74 @@ static ssize_t clkpm_store(struct device *dev,
 	return len;
 }
 
-static DEVICE_ATTR_RW(clkpm);
-static DEVICE_ATTR_RW(l0s_aspm);
-static DEVICE_ATTR_RW(l1_aspm);
-static DEVICE_ATTR_RW(l1_1_aspm);
-static DEVICE_ATTR_RW(l1_2_aspm);
-static DEVICE_ATTR_RW(l1_1_pcipm);
-static DEVICE_ATTR_RW(l1_2_pcipm);
+/* [한국어] 위에서 만든 _show/_store 함수 쌍을 실제 sysfs 속성 객체로 묶는다.
+ * DEVICE_ATTR_RW(x) 는 struct device_attribute dev_attr_x 를 만들면서
+ * .show = x_show, .store = x_store, .attr.mode = 0644 를 채운다.
+ * 즉 "x_show / x_store 라는 이름의 함수가 있어야 한다" 는 암묵적 규약이
+ * 있고, 앞의 ASPM_ATTR 매크로가 정확히 그 이름으로 함수를 찍어 낸 이유가
+ * 여기에 있다. 이름이 한 글자만 어긋나도 컴파일이 실패한다.
+ * 각각이 /sys/bus/pci/devices/<장치>/link/<이름> 파일이 된다.
+ * 동기화: 읽기 전용 정적 객체라 락이 필요 없다. 파일 접근 시의 동기화는
+ *   show/store 함수 안에서 aspm_lock 으로 처리한다. */
+static DEVICE_ATTR_RW(clkpm);		/* [한국어] CLKREQ# 기반 클럭 관리 on/off */
+static DEVICE_ATTR_RW(l0s_aspm);	/* [한국어] L0s — 한 방향만 재우는 가장 얕은 상태 */
+static DEVICE_ATTR_RW(l1_aspm);		/* [한국어] L1 — 양방향을 재운다 */
+static DEVICE_ATTR_RW(l1_1_aspm);	/* [한국어] L1.1 — 공통 모드 전압은 유지한 채 더 절전 */
+static DEVICE_ATTR_RW(l1_2_aspm);	/* [한국어] L1.2 — 공통 모드까지 끈다. 가장 깊고 가장 느리다 */
+static DEVICE_ATTR_RW(l1_1_pcipm);	/* [한국어] L1.1 의 PCI-PM 진입 판(D-state 로 들어가는 경로) */
+static DEVICE_ATTR_RW(l1_2_pcipm);	/* [한국어] L1.2 의 PCI-PM 진입 판 */
 
+/* [한국어] 위 속성들을 그룹으로 묶은 배열.
+ * 순서가 중요하다 — aspm_ctrl_attrs_are_visible() 이 첨자 n 으로
+ * "어느 상태의 파일인가" 를 판별하기 때문이다. clkpm 이 n==0 이고,
+ * 나머지 여섯은 그 함수 안의 aspm_state_map[n-1] 과 순서가 같아야 한다.
+ * 두 배열의 순서가 어긋나면 엉뚱한 파일이 노출되는데, 컴파일러는 잡아
+ * 주지 못한다.
+ * 설정자: 컴파일 시점 상수.
+ * 읽는 자: sysfs 코어가 aspm_ctrl_attr_group 을 통해 순회한다.
+ * 값 범위: NULL 로 끝나야 한다(sysfs 가 배열 끝을 그렇게 판단한다).
+ * 동기화: 정적 상수라 불필요. */
 static struct attribute *aspm_ctrl_attrs[] = {
-	&dev_attr_clkpm.attr,
-	&dev_attr_l0s_aspm.attr,
-	&dev_attr_l1_aspm.attr,
-	&dev_attr_l1_1_aspm.attr,
-	&dev_attr_l1_2_aspm.attr,
-	&dev_attr_l1_1_pcipm.attr,
-	&dev_attr_l1_2_pcipm.attr,
-	NULL
+	&dev_attr_clkpm.attr,		/* [한국어] n == 0 — is_visible 이 특별 취급하는 자리 */
+	&dev_attr_l0s_aspm.attr,	/* [한국어] n == 1 -> aspm_state_map[0] = PCIE_LINK_STATE_L0S */
+	&dev_attr_l1_aspm.attr,		/* [한국어] n == 2 -> aspm_state_map[1] = PCIE_LINK_STATE_L1 */
+	&dev_attr_l1_1_aspm.attr,	/* [한국어] n == 3 -> aspm_state_map[2] = PCIE_LINK_STATE_L1_1 */
+	&dev_attr_l1_2_aspm.attr,	/* [한국어] n == 4 -> aspm_state_map[3] = PCIE_LINK_STATE_L1_2 */
+	&dev_attr_l1_1_pcipm.attr,	/* [한국어] n == 5 -> aspm_state_map[4] = ..._L1_1_PCIPM */
+	&dev_attr_l1_2_pcipm.attr,	/* [한국어] n == 6 -> aspm_state_map[5] = ..._L1_2_PCIPM */
+	NULL				/* [한국어] 배열 끝 표시. 빠지면 sysfs 가 넘어간다 */
 };
 
-/* aspm_ctrl_attrs_are_visible: 해당 장치에서 지원하는 ASPM/CLKPM sysfs 속성만 노출한다. */
+/* [한국어]
+ * aspm_ctrl_attrs_are_visible - 이 장치에 어떤 link/ 속성 파일을 보일지 정한다
+ *
+ * @kobj:   대상 장치의 kobject.
+ * @a:      후보 속성.
+ * @n:      aspm_ctrl_attrs[] 안에서의 첨자.
+ * @return: 파일에 줄 권한(a->mode) 또는 0(= 만들지 않는다).
+ *
+ * sysfs 속성 그룹의 is_visible 콜백이다. 장치마다 쓸 수 있는 상태가
+ * 다르므로, 있지도 않은 기능의 파일을 만들어 사용자를 헷갈리게 하지
+ * 않으려고 능력에 따라 걸러 낸다.
+ *
+ * 첨자와 상태의 짝을 두 단계로 맞추는 방식이 눈에 띈다.
+ *   n == 0        -> clkpm (aspm_ctrl_attrs[] 의 첫 항목)
+ *   n >= 1        -> aspm_state_map[n - 1]
+ * 즉 aspm_state_map[] 은 clkpm 을 뺀 나머지 여섯 개와 순서가 같아야 한다.
+ * 두 배열의 순서가 어긋나면 엉뚱한 파일이 노출되는데, 컴파일러가
+ * 잡아 주지 않는 종류의 결합이다.
+ *
+ * 판단 기준이 aspm_capable 인 것이 중요하다. support 가 아니라 capable
+ * 이므로, 하드웨어가 지원해도 지연 예산을 넘어 쓸 수 없는 상태의
+ * 파일은 아예 나타나지 않는다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. 속성 그룹을 만들거나 갱신할 때
+ *   (sysfs_update_group) 호출된다. 락 없이 읽는다.
+ *
+ * 호출 체인:
+ *   pci_create_sysfs_dev_files() / sysfs_update_group()
+ *     -> [aspm_ctrl_attrs_are_visible] -> pcie_aspm_get_link()
+ */
 static umode_t aspm_ctrl_attrs_are_visible(struct kobject *kobj,
 					   struct attribute *a, int n)
 {
@@ -2094,6 +3710,31 @@ const struct attribute_group aspm_ctrl_attr_group = {
 	.is_visible = aspm_ctrl_attrs_are_visible,
 };
 
+/* [한국어]
+ * pcie_aspm_disable - 부팅 인자 "pcie_aspm=" 를 해석한다
+ *
+ * @str:    "=" 뒤의 문자열. "off" 또는 "force" 만 뜻이 있다.
+ * @return: 항상 1(= 이 인자를 처리했다). __setup 규약상 0 이면
+ *          커널이 이 인자를 init 환경으로 넘긴다.
+ *
+ * 두 가지 정반대 지시를 받는다.
+ *   "off"   정책을 DEFAULT 로 되돌리고, aspm_disabled 와
+ *           aspm_support_enabled 를 모두 손봐 커널이 ASPM 에 관여하지
+ *           않게 한다. 링크 상태 객체조차 만들지 않는다.
+ *   "force" aspm_force 를 세워, PCIe 1.1 미만으로 보이는 장치에도
+ *           ASPM 을 허용하고 pcie_no_aspm() 의 무력화도 무시하게 한다.
+ *
+ * 알 수 없는 값은 조용히 무시하고 1 을 돌려준다. 오타를 쳤을 때
+ * 커널이 그 문자열을 init 에 넘기지 않게 하려는 선택이다.
+ *
+ * 함수 이름이 "disable" 인데 force 도 처리하는 것은 역사적 이유다 —
+ * 원래 off 만 받다가 force 가 나중에 붙었다.
+ *
+ * 실행 컨텍스트: 부팅 초기, __setup 파서. 락도 다른 스레드도 없다.
+ *
+ * 호출 체인:
+ *   커널 부팅 인자 파서 -> [pcie_aspm_disable] (__setup("pcie_aspm=", ...))
+ */
 static int __init pcie_aspm_disable(char *str)
 {
 	if (!strcmp(str, "off")) {
@@ -2110,6 +3751,32 @@ static int __init pcie_aspm_disable(char *str)
 
 __setup("pcie_aspm=", pcie_aspm_disable);
 
+/* [한국어]
+ * pcie_no_aspm - 펌웨어가 ASPM 제어권을 주지 않았음을 커널에 알린다
+ *
+ * @return: 없음.
+ *
+ * ACPI 의 FADT 에 NO_ASPM 비트가 서 있으면 pci-acpi.c:1922 가 이 함수를
+ * 부른다. 뜻은 "이 시스템에서 OS 는 ASPM 레지스터를 관리하지 마라" 다.
+ *
+ * 바로 아래 영어 주석이 의도를 분명히 밝힌다 — 목적은 "끄는" 것이
+ * 아니라 "건드리지 않는" 것이다. 그래서 두 가지만 한다.
+ *   (a) 정책을 POLICY_DEFAULT 로 되돌려, 커널이 상태를 바꾸지 않게 한다.
+ *   (b) aspm_disabled 를 세워, 사용자가 sysfs 로 정책을 바꾸는 것도 막는다.
+ * 이미 켜져 있는 상태를 끄지는 않는다. 펌웨어가 설정해 둔 것이 그대로
+ * 남는 것이 이 함수가 원하는 결과다.
+ *
+ * aspm_force 이면 아무것도 하지 않는다 — 사용자가 "pcie_aspm=force" 로
+ * 명시적으로 펌웨어의 판단을 무시하겠다고 했기 때문이다.
+ *
+ * aspm_support_enabled 는 건드리지 않는다. 링크 상태 객체는 계속 만들어야
+ * sysfs 로 현재 상태를 볼 수 있고, 지연 계산도 유지된다.
+ *
+ * 실행 컨텍스트: 부팅 초기(arch_initcall). 락 없음.
+ *
+ * 호출 체인:
+ *   acpi_pci_init() [pci-acpi.c:1922] -> [pcie_no_aspm]
+ */
 void pcie_no_aspm(void)
 {
 	/*
@@ -2124,6 +3791,20 @@ void pcie_no_aspm(void)
 	}
 }
 
+/* [한국어]
+ * pcie_aspm_support_enabled - 커널이 ASPM 을 관리하도록 빌드·설정되었는가
+ *
+ * @return: aspm_support_enabled 그대로. "pcie_aspm=off" 면 false.
+ *
+ * 전역 변수를 감싸기만 하는 접근자다. 변수 자체를 노출하지 않고 함수로
+ * 감싼 덕에, 다른 파일이 실수로 값을 바꾸는 일이 없다.
+ *
+ * 실행 컨텍스트: 아무 데서나. 락 없음(부팅 후 읽기 전용 값).
+ *
+ * 호출 체인: 이 스파스 체크아웃 안에는 호출자가 하나도 없다(전수 grep).
+ *   선언은 include/linux/pci.h 에 있을 것으로 보이는데 그 헤더가 이
+ *   트리에 없어 확인하지 못했다. 트리 밖 코드가 쓰는 것으로 보인다.
+ */
 bool pcie_aspm_support_enabled(void)
 {
 	return aspm_support_enabled;

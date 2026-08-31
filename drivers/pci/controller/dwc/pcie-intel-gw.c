@@ -80,94 +80,97 @@
  *   - intel_pcie_wait_l2() 가 Gen3 미만이면 L2 진입 절차를 건너뛴다.
  */
 
-/* [한국어] [한국어] BIT() 매크로를 쓰기 위해. 아래 APP 레지스터 비트 정의가 전부 이것으로
+/* [한국어] BIT() 매크로를 쓰기 위해. 아래 APP 레지스터 비트 정의가 전부 이것으로
  * 표현된다. (FIELD_GET/FIELD_PREP 은 이 파일에서 쓰지 않는다.) */
 #include <linux/bitfield.h>
-/* [한국어] [한국어] clk_prepare_enable / clk_disable_unprepare. 코어 클록 하나를 켜고 끈다. */
+/* [한국어] clk_prepare_enable / clk_disable_unprepare. 코어 클록 하나를 켜고 끈다. */
 #include <linux/clk.h>
-/* [한국어] [한국어] gpiod_* API. PERST# 를 GPIO 로 제어한다. */
+/* [한국어] gpiod_* API. PERST# 를 GPIO 로 제어한다. */
 #include <linux/gpio/consumer.h>
-/* [한국어] [한국어] readl_poll_timeout. L2 진입을 20us 간격으로 5초까지 기다리는 데 쓴다. */
+/* [한국어] readl_poll_timeout. L2 진입을 20us 간격으로 5초까지 기다리는 데 쓴다. */
 #include <linux/iopoll.h>
-/* [한국어] [한국어] struct of_device_id. 아래 of_intel_pcie_match 표 정의에 필요하다. */
+/* [한국어] struct of_device_id. 아래 of_intel_pcie_match 표 정의에 필요하다. */
 #include <linux/mod_devicetable.h>
-/* [한국어] [한국어] PCI_EXP_LNKCTL, PCI_EXP_LNKCTL_LD/ASPMC, PCI_COMMAND_MEMORY 같은
+/* [한국어] PCI_EXP_LNKCTL, PCI_EXP_LNKCTL_LD/ASPMC, PCI_COMMAND_MEMORY 같은
  * 규약 상수를 쓰기 위해. */
 #include <linux/pci_regs.h>
-/* [한국어] [한국어] phy_init / phy_power / phy_exit. 물리 계층을 켜고 끈다. */
+/* [한국어] phy_init / phy_power / phy_exit. 물리 계층을 켜고 끈다. */
 #include <linux/phy/phy.h>
-/* [한국어] [한국어] platform_driver 등록과 devm_platform_ioremap_resource_byname 을 위해. */
+/* [한국어] platform_driver 등록과 devm_platform_ioremap_resource_byname 을 위해. */
 #include <linux/platform_device.h>
-/* [한국어] [한국어] device_property_read_u32. DT 의 'reset-assert-ms' 를 읽는다. */
+/* [한국어] device_property_read_u32. DT 의 'reset-assert-ms' 를 읽는다. */
 #include <linux/property.h>
-/* [한국어] [한국어] reset_control_assert / _deassert. 컨트롤러 코어 리셋을 제어한다. */
+/* [한국어] reset_control_assert / _deassert. 컨트롤러 코어 리셋을 제어한다. */
 #include <linux/reset.h>
 
-/* [한국어] [한국어] PCI 코어 내부 헤더. SZ_128 등 크기 상수와 공통 정의를 가져온다. */
+/* [한국어] PCI 코어 내부 헤더. SZ_128 등 크기 상수와 공통 정의를 가져온다. */
 #include "../../pci.h"
-/* [한국어] [한국어] DWC 코어의 공개 인터페이스. struct dw_pcie, dw_pcie_host_init,
+/* [한국어] DWC 코어의 공개 인터페이스. struct dw_pcie, dw_pcie_host_init,
  * dw_pcie_setup_rc, DBI 접근자가 전부 여기 있다. */
 #include "pcie-designware.h"
 
-/* [한국어] [한국어] Gen1/Gen2 용 FTS(Fast Training Sequence) 기본 개수 = 127.
+/* [한국어] Gen1/Gen2 용 FTS(Fast Training Sequence) 기본 개수 = 127.
  * SZ_128 - 1 로 쓴 것은 이 필드가 7비트라 최대값이 127 이기 때문이다.
  * FTS 는 L0s 에서 깨어날 때 보내는 학습 시퀀스로, 모자라면 복귀에 실패한다. */
 #define PORT_AFR_N_FTS_GEN12_DFT	(SZ_128 - 1)
-/* [한국어] [한국어] Gen3(8GT/s)용 180개. 속도가 높을수록 수신단이 비트 동기를 되찾기
+/* [한국어] Gen3(8GT/s)용 180개. 속도가 높을수록 수신단이 비트 동기를 되찾기
  * 어려워 더 많은 시퀀스가 필요하다. */
 #define PORT_AFR_N_FTS_GEN3		180
-/* [한국어] [한국어] Gen4(16GT/s)용 196개. */
+/* [한국어] Gen4(16GT/s)용 196개. */
 #define PORT_AFR_N_FTS_GEN4		196
 /* PCIe Application logic Registers */
-/* [한국어] [한국어] APP 창의 Core Control Register 오프셋. Intel 이 DWC IP 바깥에
+/* [한국어] APP 창의 Core Control Register 오프셋. Intel 이 DWC IP 바깥에
  * 덧붙인 제어면이라 DBI 와는 전혀 다른 주소 공간이다. */
 #define PCIE_APP_CCR			0x10
-/* [한국어] [한국어] LTSSM 활성 비트. 이것을 세워야 링크 학습이 시작된다. */
+/* [한국어] LTSSM 활성 비트. 이것을 세워야 링크 학습이 시작된다. */
 #define PCIE_APP_CCR_LTSSM_ENABLE	BIT(0)
-/* [한국어] [한국어] 전원 관리 메시지 제어 레지스터. */
+/* [한국어] 전원 관리 메시지 제어 레지스터. */
 #define PCIE_APP_MSG_CR			0x30
-/* [한국어] [한국어] PM_Turn_Off 메시지를 보내라는 요청 비트. 하드웨어가 메시지 전송과
+/* [한국어] PM_Turn_Off 메시지를 보내라는 요청 비트. 하드웨어가 메시지 전송과
  * 상대의 응답 처리까지 알아서 하고, 결과만 아래 IN_L2 비트로 알려 준다. */
 #define PCIE_APP_MSG_XMT_PM_TURNOFF	BIT(0)
 
-/* [한국어] [한국어] 전원 관리 상태 레지스터. */
+/* [한국어] 전원 관리 상태 레지스터. */
 #define PCIE_APP_PMC			0x44
-/* [한국어] [한국어] 링크가 L2 에 들어갔다는 표시. intel_pcie_wait_l2 가 이 비트를 폴링한다. */
+/* [한국어] 링크가 L2 에 들어갔다는 표시. intel_pcie_wait_l2 가 이 비트를 폴링한다. */
 #define PCIE_APP_PMC_IN_L2		BIT(20)
 
-/* [한국어] [한국어] 인터럽트 활성(enable) 레지스터. 0 을 쓰면 전부 막힌다. */
+/* [한국어] 인터럽트 활성(enable) 레지스터. 0 을 쓰면 전부 막힌다. */
 #define PCIE_APP_IRNEN			0xF4
-/* [한국어] [한국어] 인터럽트 상태(capture) 레지스터. 1 을 써서 지운다. */
+/* [한국어] 인터럽트 상태(capture) 레지스터. 1 을 써서 지운다. */
 #define PCIE_APP_IRNCR			0xF8
-/* [한국어] [한국어] AER 오류 보고 인터럽트. */
+/* [한국어] AER 오류 보고 인터럽트. */
 #define PCIE_APP_IRN_AER_REPORT		BIT(0)
-/* [한국어] [한국어] PME(Power Management Event) 인터럽트. */
+/* [한국어] PME(Power Management Event) 인터럽트. */
 #define PCIE_APP_IRN_PME		BIT(2)
-/* [한국어] [한국어] 벤더 정의 메시지 수신 인터럽트. */
+/* [한국어] 벤더 정의 메시지 수신 인터럽트. */
 #define PCIE_APP_IRN_RX_VDM_MSG		BIT(4)
-/* [한국어] [한국어] PM_Turn_Off 에 대한 응답(PM_TO_Ack) 수신 인터럽트. */
+/* [한국어] PM_Turn_Off 에 대한 응답(PM_TO_Ack) 수신 인터럽트. */
 #define PCIE_APP_IRN_PM_TO_ACK		BIT(9)
-/* [한국어] [한국어] 링크 자동 대역폭 변경 상태 인터럽트. */
+/* [한국어] 링크 자동 대역폭 변경 상태 인터럽트. */
 #define PCIE_APP_IRN_LINK_AUTO_BW_STAT	BIT(11)
-/* [한국어] [한국어] 대역폭 관리 인터럽트. */
+/* [한국어] 대역폭 관리 인터럽트. */
 #define PCIE_APP_IRN_BW_MGT		BIT(12)
-/* [한국어] [한국어] INTA 레거시 인터럽트. 이 네 개(A~D)가 비트 13~16 에 연속으로 놓인다. */
+/* [한국어] INTA 레거시 인터럽트. 이 네 개(A~D)가 비트 13~16 에 연속으로 놓인다. */
 #define PCIE_APP_IRN_INTA		BIT(13)
-/* [한국어] [한국어] INTB. */
+/* [한국어] INTB. */
 #define PCIE_APP_IRN_INTB		BIT(14)
-/* [한국어] [한국어] INTC. */
+/* [한국어] INTC. */
 #define PCIE_APP_IRN_INTC		BIT(15)
-/* [한국어] [한국어] INTD. */
+/* [한국어] INTD. */
 #define PCIE_APP_IRN_INTD		BIT(16)
-/* [한국어] [한국어] LTR(Latency Tolerance Reporting) 메시지 수신 인터럽트. */
+/* [한국어] LTR(Latency Tolerance Reporting) 메시지 수신 인터럽트. */
 #define PCIE_APP_IRN_MSG_LTR		BIT(18)
-/* [한국어] [한국어] 루트 컴플렉스 시스템 오류 인터럽트. */
+/* [한국어] 루트 컴플렉스 시스템 오류 인터럽트. */
 #define PCIE_APP_IRN_SYS_ERR_RC		BIT(29)
-/* [한국어] [한국어] INTx 비트들이 시작하는 자리(13). 위 INTA~INTD 정의와 같은 값을
- * 따로 둔 것인데, **이 파일 안에서 참조하는 곳이 없다.** */
+/* [한국어] INTx 비트 위치 계산의 기준값(12). INTA 가 BIT(13)이므로 이 값
+ * 자체는 어떤 비트도 가리키지 않는다 -- 1-기반 INTx 번호 n 에 대해
+ * 비트 = OFST + n 이 되도록 잡은 오프셋으로 읽힌다(INTA=1 → 13).
+ * **다만 이 파일 안에서 참조하는 곳이 한 군데도 없다** -- 위 INTA~INTD
+ * 상수를 직접 쓰는 방식으로 바뀌면서 남은 것으로 보인다. */
 #define PCIE_APP_INTX_OFST		12
 
-/* [한국어] [한국어] 이 드라이버가 다루는 인터럽트 비트를 모두 모은 마스크.
+/* [한국어] 이 드라이버가 다루는 인터럽트 비트를 모두 모은 마스크.
  * IRNEN 을 열 때와 IRNCR 을 지울 때 이 하나로 처리해, 쓰지 않는 비트는
  * 건드리지 않는다. */
 #define PCIE_APP_IRN_INT \
@@ -178,34 +181,34 @@
 	PCIE_APP_IRN_INTA | PCIE_APP_IRN_INTB | \
 	PCIE_APP_IRN_INTC | PCIE_APP_IRN_INTD)
 
-/* [한국어] [한국어] PERST# 유지 시간의 기본값(100ms). DT 에 'reset-assert-ms' 가 없으면
+/* [한국어] PERST# 유지 시간의 기본값(100ms). DT 에 'reset-assert-ms' 가 없으면
  * 이 값이 쓰인다. 짧으면 장치가 리셋을 마치지 못해 열거되지 않고, 길면
  * 부팅이 느려지므로 보드마다 조정하는 값이다. */
 #define RESET_INTERVAL_MS		100
 
 struct intel_pcie {
-	/* [한국어] [한국어] DWC 코어의 인스턴스. **포인터가 아니라 값으로** 품고 있다.
+	/* [한국어] DWC 코어의 인스턴스. **포인터가 아니라 값으로** 품고 있다.
 	 * 설정자: probe 가 dev / use_parent_dt_ranges / ops 를, host_setup 이 atu_base 를 채운다.
 	 * 읽는 자: DWC 코어 전체와 이 파일의 모든 함수(&pcie->pci 로 접근).
 	 * 값 범위: 항상 유효한 임베디드 구조체 -- NULL 이 될 수 없다.
 	 * 동기화: 첫 필드라 두 주소가 같지만, 이 파일은 역방향 변환에 container_of
 	 * 대신 dev_get_drvdata 를 쓴다(intel_pcie_rc_init 참조). */
 	struct dw_pcie		pci;
-	/* [한국어] [한국어] Intel 이 DWC IP 바깥에 덧붙인 APP 제어 창의 가상 주소.
+	/* [한국어] Intel 이 DWC IP 바깥에 덧붙인 APP 제어 창의 가상 주소.
 	 * 설정자: intel_pcie_get_resources 가 DT 의 'app' 자원을 ioremap.
 	 * 읽는 자: pcie_app_wr / pcie_app_wr_mask 만이 직접 쓴다.
 	 * 값 범위: 유효한 __iomem 포인터. 실패 시 프로브가 중단된다.
 	 * 동기화: 없음. 갱신이 pcie_update_bits 의 읽기-수정-쓰기라 잠금이 없지만,
 	 * 호출자가 모두 직렬화된 경로(프로브/서스펜드/재개)라 실제로 겹치지 않는다. */
 	void __iomem		*app_base;
-	/* [한국어] [한국어] PERST# 신호를 내보내는 GPIO 서술자.
+	/* [한국어] PERST# 신호를 내보내는 GPIO 서술자.
 	 * 설정자: intel_pcie_ep_rst_init 이 devm_gpiod_get 으로 얻는다.
 	 * 읽는 자: intel_pcie_device_rst_assert / _deassert.
 	 * 값 범위: **NULL 이 될 수 없다** -- optional 판이 아니라서 GPIO 가 없으면
 	 * 프로브가 실패한다. 이 SoC 는 PERST# 를 반드시 소프트웨어가 제어한다.
 	 * 동기화: 링크 기동/정지 경로에서만 다뤄져 경쟁이 없다. */
 	struct gpio_desc	*reset_gpio;
-	/* [한국어] [한국어] PERST# 를 assert 한 채로 유지할 시간(밀리초).
+	/* [한국어] PERST# 를 assert 한 채로 유지할 시간(밀리초).
 	 * 설정자: intel_pcie_get_resources 가 DT 의 'reset-assert-ms' 를 읽거나,
 	 * 없으면 RESET_INTERVAL_MS(100)를 넣는다.
 	 * 읽는 자: intel_pcie_device_rst_deassert 의 msleep.
@@ -213,7 +216,7 @@ struct intel_pcie {
 	 * 부팅이 느려지므로 보드마다 조정한다.
 	 * 동기화: 프로브에서 한 번 쓰고 이후 읽기만 한다. */
 	u32			rst_intrvl;
-	/* [한국어] [한국어] 컨트롤러 코어 클록.
+	/* [한국어] 컨트롤러 코어 클록.
 	 * 설정자: intel_pcie_get_resources 가 이름 없이(NULL) 하나 얻는다 --
 	 * 이 SoC 는 PCIe 클록이 하나뿐이다.
 	 * 읽는 자: host_setup 의 clk_prepare_enable, 되감기/서스펜드의
@@ -221,7 +224,7 @@ struct intel_pcie {
 	 * 값 범위: 유효한 clk 핸들. devm 이라 해제는 자동이다.
 	 * 동기화: 프로브·서스펜드·재개 경로에서만 다뤄진다. */
 	struct clk		*core_clk;
-	/* [한국어] [한국어] 컨트롤러 코어 리셋 라인.
+	/* [한국어] 컨트롤러 코어 리셋 라인.
 	 * 설정자: intel_pcie_get_resources 가 이름 없이 하나 얻는다.
 	 * 읽는 자: intel_pcie_core_rst_assert / _deassert.
 	 * 값 범위: 유효한 핸들.
@@ -261,12 +264,12 @@ static void pcie_update_bits(void __iomem *base, u32 ofs, u32 mask, u32 val)
 	u32 old;
 
 	old = readl(base + ofs);
-	/* [한국어] [한국어] 마스크 안의 비트만 새 값으로 갈아 끼운다. val 에도 마스크를 씌우는
+	/* [한국어] 마스크 안의 비트만 새 값으로 갈아 끼운다. val 에도 마스크를 씌우는
 	 * 것은 호출자가 마스크 밖의 비트를 실수로 담아도 무시하기 위해서다. */
 	val = (old & ~mask) | (val & mask);
 
 	if (val != old)
-		/* [한국어] [한국어] **값이 바뀔 때만 쓴다.** MMIO 쓰기는 버스를 오가는 비용이 크고,
+		/* [한국어] **값이 바뀔 때만 쓴다.** MMIO 쓰기는 버스를 오가는 비용이 크고,
 		 * 레지스터에 따라 쓰기 자체가 부작용(상태 소거 등)을 일으킬 수 있다. */
 		writel(val, base + ofs);
 }
@@ -468,11 +471,11 @@ static void intel_pcie_link_setup(struct intel_pcie *pcie)
 {
 	u32 val;
 	u8 offset = dw_pcie_find_capability(&pcie->pci, PCI_CAP_ID_EXP);
-	/* [한국어] [한국어] 현재 링크 제어 값을 읽는다. 아래에서 두 비트를 지운 뒤 되쓴다. */
+	/* [한국어] 현재 링크 제어 값을 읽는다. 아래에서 두 비트를 지운 뒤 되쓴다. */
 	val = pcie_rc_cfg_rd(pcie, offset + PCI_EXP_LNKCTL);
 
 	val &= ~(PCI_EXP_LNKCTL_LD | PCI_EXP_LNKCTL_ASPMC);
-	/* [한국어] [한국어] Link Disable 과 ASPM Control 을 함께 지운 값을 되쓴다.
+	/* [한국어] Link Disable 과 ASPM Control 을 함께 지운 값을 되쓴다.
 	 * 부트로더가 Link Disable 을 남겼으면 링크가 아예 서지 않으므로 필수다. */
 	pcie_rc_cfg_wr(pcie, offset + PCI_EXP_LNKCTL, val);
 }
@@ -503,12 +506,12 @@ static void intel_pcie_init_n_fts(struct dw_pcie *pci)
 {
 	switch (pci->max_link_speed) {
 	case 3:
-		/* [한국어] [한국어] Gen3(8GT/s)는 180개. 속도가 높을수록 수신단이 비트 동기를 되찾기
+		/* [한국어] Gen3(8GT/s)는 180개. 속도가 높을수록 수신단이 비트 동기를 되찾기
 		 * 어려워 더 많은 시퀀스가 필요하다. */
 		pci->n_fts[1] = PORT_AFR_N_FTS_GEN3;
 		break;
 	case 4:
-		/* [한국어] [한국어] Gen4(16GT/s)는 196개로 더 늘린다. */
+		/* [한국어] Gen4(16GT/s)는 196개로 더 늘린다. */
 		pci->n_fts[1] = PORT_AFR_N_FTS_GEN4;
 		break;
 	default:
@@ -549,17 +552,17 @@ static int intel_pcie_ep_rst_init(struct intel_pcie *pcie)
 	int ret;
 
 	pcie->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_LOW);
-	/* [한국어] [한국어] GPIO 조회 실패. optional 이 아니라 없으면 여기 걸린다. */
+	/* [한국어] GPIO 조회 실패. optional 이 아니라 없으면 여기 걸린다. */
 	if (IS_ERR(pcie->reset_gpio)) {
-		/* [한국어] [한국어] 오류 포인터에서 코드를 꺼낸다. */
+		/* [한국어] 오류 포인터에서 코드를 꺼낸다. */
 		ret = PTR_ERR(pcie->reset_gpio);
-		/* [한국어] [한국어] -EPROBE_DEFER 는 GPIO 공급자가 아직 프로브되지 않은 정상 상황이므로
+		/* [한국어] -EPROBE_DEFER 는 GPIO 공급자가 아직 프로브되지 않은 정상 상황이므로
 		 * 로그를 남기지 않는다. 부팅 로그가 재시도 메시지로 덮이는 것을 막는
 		 * 관용구다(dev_err_probe 도입 전 방식). */
 		if (ret != -EPROBE_DEFER)
-			/* [한국어] [한국어] 진짜 오류만 로그로 남긴다. */
+			/* [한국어] 진짜 오류만 로그로 남긴다. */
 			dev_err(dev, "Failed to request PCIe GPIO: %d\n", ret);
-		/* [한국어] [한국어] 실패값을 그대로 올려 프로브를 접는다. */
+		/* [한국어] 실패값을 그대로 올려 프로브를 접는다. */
 		return ret;
 	}
 
@@ -740,62 +743,62 @@ static int intel_pcie_get_resources(struct platform_device *pdev)
 {
 	struct intel_pcie *pcie = platform_get_drvdata(pdev);
 	struct dw_pcie *pci = &pcie->pci;
-	/* [한국어] [한국어] 오류 로그의 주체. */
+	/* [한국어] 오류 로그의 주체. */
 	struct device *dev = pci->dev;
-	/* [한국어] [한국어] 각 조회의 실패값을 담을 변수. */
+	/* [한국어] 각 조회의 실패값을 담을 변수. */
 	int ret;
 
 	pcie->core_clk = devm_clk_get(dev, NULL);
-	/* [한국어] [한국어] 클록 조회 실패. */
+	/* [한국어] 클록 조회 실패. */
 	if (IS_ERR(pcie->core_clk)) {
-		/* [한국어] [한국어] 오류 코드를 꺼낸다. */
+		/* [한국어] 오류 코드를 꺼낸다. */
 		ret = PTR_ERR(pcie->core_clk);
-		/* [한국어] [한국어] 아래 세 자원이 모두 같은 -EPROBE_DEFER 관용구를 쓴다. */
+		/* [한국어] 아래 세 자원이 모두 같은 -EPROBE_DEFER 관용구를 쓴다. */
 		if (ret != -EPROBE_DEFER)
-			/* [한국어] [한국어] 진짜 오류만 남긴다. */
+			/* [한국어] 진짜 오류만 남긴다. */
 			dev_err(dev, "Failed to get clks: %d\n", ret);
-		/* [한국어] [한국어] devm 이라 되감을 것이 없다. */
+		/* [한국어] devm 이라 되감을 것이 없다. */
 		return ret;
 	}
 
 	pcie->core_rst = devm_reset_control_get(dev, NULL);
-	/* [한국어] [한국어] 리셋 조회 실패. */
+	/* [한국어] 리셋 조회 실패. */
 	if (IS_ERR(pcie->core_rst)) {
-		/* [한국어] [한국어] 오류 코드를 꺼낸다. */
+		/* [한국어] 오류 코드를 꺼낸다. */
 		ret = PTR_ERR(pcie->core_rst);
-		/* [한국어] [한국어] 같은 관용구. */
+		/* [한국어] 같은 관용구. */
 		if (ret != -EPROBE_DEFER)
-			/* [한국어] [한국어] 리셋 공급자 문제일 수 있다. */
+			/* [한국어] 리셋 공급자 문제일 수 있다. */
 			dev_err(dev, "Failed to get resets: %d\n", ret);
-		/* [한국어] [한국어] 실패값을 올린다. */
+		/* [한국어] 실패값을 올린다. */
 		return ret;
 	}
 
 	ret = device_property_read_u32(dev, "reset-assert-ms",
-				       /* [한국어] [한국어] PERST# 유지 시간을 DT 에서 읽는다. */
+				       /* [한국어] PERST# 유지 시간을 DT 에서 읽는다. */
 				       &pcie->rst_intrvl);
 	if (ret)
-		/* [한국어] [한국어] **실패해도 진행한다** -- 이 속성은 선택이므로 없으면 기본값 100ms 를
+		/* [한국어] **실패해도 진행한다** -- 이 속성은 선택이므로 없으면 기본값 100ms 를
 		 * 넣는다. 위 세 자원과 달리 반환하지 않는 것이 요점이다. */
 		pcie->rst_intrvl = RESET_INTERVAL_MS;
 
 	pcie->app_base = devm_platform_ioremap_resource_byname(pdev, "app");
-	/* [한국어] [한국어] APP 창 매핑 실패. */
+	/* [한국어] APP 창 매핑 실패. */
 	if (IS_ERR(pcie->app_base))
-		/* [한국어] [한국어] 여기만 로그가 없다 -- devm_platform_ioremap_resource_byname 이
+		/* [한국어] 여기만 로그가 없다 -- devm_platform_ioremap_resource_byname 이
 		 * 자체적으로 오류를 찍기 때문이다. */
 		return PTR_ERR(pcie->app_base);
 
 	pcie->phy = devm_phy_get(dev, "pcie");
-	/* [한국어] [한국어] PHY 조회 실패. */
+	/* [한국어] PHY 조회 실패. */
 	if (IS_ERR(pcie->phy)) {
-		/* [한국어] [한국어] 오류 코드를 꺼낸다. */
+		/* [한국어] 오류 코드를 꺼낸다. */
 		ret = PTR_ERR(pcie->phy);
-		/* [한국어] [한국어] 같은 관용구. */
+		/* [한국어] 같은 관용구. */
 		if (ret != -EPROBE_DEFER)
-			/* [한국어] [한국어] PHY 공급자가 늦게 올라오는 경우가 흔하다. */
+			/* [한국어] PHY 공급자가 늦게 올라오는 경우가 흔하다. */
 			dev_err(dev, "Couldn't get pcie-phy: %d\n", ret);
-		/* [한국어] [한국어] 실패값을 올린다. */
+		/* [한국어] 실패값을 올린다. */
 		return ret;
 	}
 
@@ -835,11 +838,11 @@ static int intel_pcie_wait_l2(struct intel_pcie *pcie)
 {
 	u32 value;
 	int ret;
-	/* [한국어] [한국어] max_link_speed 를 보기 위해 DWC 인스턴스를 꺼낸다. */
+	/* [한국어] max_link_speed 를 보기 위해 DWC 인스턴스를 꺼낸다. */
 	struct dw_pcie *pci = &pcie->pci;
 
 	if (pci->max_link_speed < 3)
-		/* [한국어] [한국어] Gen3 미만에서는 L2 절차를 아예 밟지 않는다. 상류에 근거 주석이
+		/* [한국어] Gen3 미만에서는 L2 절차를 아예 밟지 않는다. 상류에 근거 주석이
 		 * 없어 이 트리만으로는 이유를 확인하지 못했다 -- 하드웨어 제약이거나,
 		 * 저속 링크에서는 이 절차가 불필요하다는 판단으로 보인다. */
 		return 0;
@@ -853,10 +856,10 @@ static int intel_pcie_wait_l2(struct intel_pcie *pcie)
 				 value & PCIE_APP_PMC_IN_L2, 20,
 				 jiffies_to_usecs(5 * HZ));
 	if (ret)
-		/* [한국어] [한국어] 5초 안에 L2 에 못 들어갔다. 응답하지 않는 장치가 있어도 시스템
+		/* [한국어] 5초 안에 L2 에 못 들어갔다. 응답하지 않는 장치가 있어도 시스템
 		 * 전체를 멈추지 않으려는 상한이다. */
 		dev_err(pcie->pci.dev, "PCIe link enter L2 timeout!\n");
-/* [한국어] [한국어] 실패를 그대로 올린다. suspend_noirq 는 이 값으로 서스펜드를
+/* [한국어] 실패를 그대로 올린다. suspend_noirq 는 이 값으로 서스펜드를
  * 취소하고, turn_off 는 무시한다. */
 
 	return ret;
@@ -941,39 +944,39 @@ static int intel_pcie_host_setup(struct intel_pcie *pcie)
 {
 	int ret;
 	struct dw_pcie *pci = &pcie->pci;
-/* [한국어] [한국어] 아래가 하드웨어를 세우는 본체다. 순서 하나하나가 의존 관계를 따른다. */
+/* [한국어] 아래가 하드웨어를 세우는 본체다. 순서 하나하나가 의존 관계를 따른다. */
 
 	intel_pcie_core_rst_assert(pcie);
 	intel_pcie_device_rst_assert(pcie);
 
 	ret = phy_init(pcie->phy);
-	/* [한국어] [한국어] PHY 초기화 실패. */
+	/* [한국어] PHY 초기화 실패. */
 	if (ret)
-		/* [한국어] [한국어] 아직 클록도 리셋도 건드리기 전이라 되감을 것이 없다. */
+		/* [한국어] 아직 클록도 리셋도 건드리기 전이라 되감을 것이 없다. */
 		return ret;
 
 	intel_pcie_core_rst_deassert(pcie);
 
 	ret = clk_prepare_enable(pcie->core_clk);
-	/* [한국어] [한국어] 코어 클록 인가 실패. */
+	/* [한국어] 코어 클록 인가 실패. */
 	if (ret) {
-		/* [한국어] [한국어] 어느 단계에서 막혔는지 알 수 있게 남긴다. */
+		/* [한국어] 어느 단계에서 막혔는지 알 수 있게 남긴다. */
 		dev_err(pcie->pci.dev, "Core clock enable failed: %d\n", ret);
-		/* [한국어] [한국어] 클록을 잡지 못했으므로 clk_err 로 -- 코어 리셋과 PHY 만 되돌린다. */
+		/* [한국어] 클록을 잡지 못했으므로 clk_err 로 -- 코어 리셋과 PHY 만 되돌린다. */
 		goto clk_err;
 	}
 
 	pci->atu_base = pci->dbi_base + 0xC0000;
-/* [한국어] [한국어] 여기부터가 DWC 코어에 넘기기 전의 IP 설정이다. */
+/* [한국어] 여기부터가 DWC 코어에 넘기기 전의 IP 설정이다. */
 
 	intel_pcie_ltssm_disable(pcie);
 	intel_pcie_link_setup(pcie);
 	intel_pcie_init_n_fts(pci);
 
 	ret = dw_pcie_setup_rc(&pci->pp);
-	/* [한국어] [한국어] DWC 코어의 RC 설정 실패. */
+	/* [한국어] DWC 코어의 RC 설정 실패. */
 	if (ret)
-		/* [한국어] [한국어] 클록까지 잡혔으므로 app_init_err 로 -- 클록부터 되돌린다. */
+		/* [한국어] 클록까지 잡혔으므로 app_init_err 로 -- 클록부터 되돌린다. */
 		goto app_init_err;
 
 	dw_pcie_upconfig_setup(pci);
@@ -982,9 +985,9 @@ static int intel_pcie_host_setup(struct intel_pcie *pcie)
 	intel_pcie_ltssm_enable(pcie);
 
 	ret = dw_pcie_wait_for_link(pci);
-	/* [한국어] [한국어] 링크 대기 실패. */
+	/* [한국어] 링크 대기 실패. */
 	if (ret)
-		/* [한국어] [한국어] 같은 라벨로 전부 되돌린다. */
+		/* [한국어] 같은 라벨로 전부 되돌린다. */
 		goto app_init_err;
 
 	/* Enable integrated interrupts */
@@ -1051,7 +1054,7 @@ static void intel_pcie_remove(struct platform_device *pdev)
 {
 	struct intel_pcie *pcie = platform_get_drvdata(pdev);
 	struct dw_pcie_rp *pp = &pcie->pci.pp;
-/* [한국어] [한국어] 아래는 제거·전원관리 경로다. */
+/* [한국어] 아래는 제거·전원관리 경로다. */
 
 	dw_pcie_host_deinit(pp);
 	__intel_pcie_remove(pcie);
@@ -1087,13 +1090,13 @@ static int intel_pcie_suspend_noirq(struct device *dev)
 {
 	struct intel_pcie *pcie = dev_get_drvdata(dev);
 	int ret;
-	/* [한국어] [한국어] **가장 먼저** 인터럽트를 막는다. 아래에서 하드웨어가 꺼지는 동안
+	/* [한국어] **가장 먼저** 인터럽트를 막는다. 아래에서 하드웨어가 꺼지는 동안
 	 * 인터럽트가 들어오면 사라진 컨트롤러를 향한 핸들러가 돈다. */
 	intel_pcie_core_irq_disable(pcie);
 	ret = intel_pcie_wait_l2(pcie);
-	/* [한국어] [한국어] L2 진입 실패. */
+	/* [한국어] L2 진입 실패. */
 	if (ret)
-		/* [한국어] [한국어] **여기서는 실패를 올려 서스펜드를 취소한다.** 링크가 정리되지 않은
+		/* [한국어] **여기서는 실패를 올려 서스펜드를 취소한다.** 링크가 정리되지 않은
 		 * 채 전원을 내릴 수 없기 때문이다. intel_pcie_turn_off 가 같은 함수의
 		 * 반환값을 무시하는 것과 대조된다 -- 그쪽은 제거 경로라 물러설 곳이 없다. */
 		return ret;
@@ -1150,22 +1153,22 @@ static int intel_pcie_rc_init(struct dw_pcie_rp *pp)
 {
 	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
 	struct intel_pcie *pcie = dev_get_drvdata(pci->dev);
-	/* [한국어] [한국어] 서스펜드에서 PHY 와 클록을 껐으므로 프로브와 똑같은 초기화가 필요하다.
+	/* [한국어] 서스펜드에서 PHY 와 클록을 껐으므로 프로브와 똑같은 초기화가 필요하다.
 	 * 그래서 host_setup 을 그대로 다시 부르는 것이 전부다. */
 	return intel_pcie_host_setup(pcie);
-/* [한국어] [한국어] DWC 코어의 dw_pcie_resume_noirq 를 쓰지 않는 점에 유의 -- 이
+/* [한국어] DWC 코어의 dw_pcie_resume_noirq 를 쓰지 않는 점에 유의 -- 이
  * 드라이버는 자체 L2 절차를 쓰므로 pci->suspended 경로와 무관하다. */
 }
 
 static const struct dw_pcie_ops intel_pcie_ops = {
-/* [한국어] [한국어] **비어 있는 ops 테이블.** link_up/start_link/stop_link 를 하나도
+/* [한국어] **비어 있는 ops 테이블.** link_up/start_link/stop_link 를 하나도
  * 등록하지 않는다. 링크 기동을 DWC 코어에 맡기지 않고 host_setup 이 직접
  * LTSSM 을 켜기 때문이고, 링크 판정은 코어의 기본 구현(PORT_DEBUG1 비트)이
  * 그대로 쓰인다. */
 };
 
 static const struct dw_pcie_host_ops intel_pcie_dw_ops = {
-	/* [한국어] [한국어] 되부를 훅은 init 하나뿐이다. 이 SoC 는 자체 MSI 도, post_init 도 없다. */
+	/* [한국어] 되부를 훅은 init 하나뿐이다. 이 SoC 는 자체 MSI 도, post_init 도 없다. */
 	.init = intel_pcie_rc_init,
 };
 
@@ -1206,54 +1209,54 @@ static int intel_pcie_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
 	struct intel_pcie *pcie;
-	/* [한국어] [한국어] DWC 루트 포트를 가리킬 포인터. */
+	/* [한국어] DWC 루트 포트를 가리킬 포인터. */
 	struct dw_pcie_rp *pp;
-	/* [한국어] [한국어] DWC 인스턴스를 가리킬 포인터. */
+	/* [한국어] DWC 인스턴스를 가리킬 포인터. */
 	struct dw_pcie *pci;
-	/* [한국어] [한국어] 각 단계의 실패값. */
+	/* [한국어] 각 단계의 실패값. */
 	int ret;
 
 	pcie = devm_kzalloc(dev, sizeof(*pcie), GFP_KERNEL);
-	/* [한국어] [한국어] 인스턴스 할당 실패. */
+	/* [한국어] 인스턴스 할당 실패. */
 	if (!pcie)
-		/* [한국어] [한국어] devm 이라 이후 자동 해제된다. */
+		/* [한국어] devm 이라 이후 자동 해제된다. */
 		return -ENOMEM;
 
 	platform_set_drvdata(pdev, pcie);
-	/* [한국어] [한국어] 임베디드 DWC 인스턴스의 주소를 잡아 둔다. */
+	/* [한국어] 임베디드 DWC 인스턴스의 주소를 잡아 둔다. */
 	pci = &pcie->pci;
-	/* [한국어] [한국어] DWC 코어가 로그와 DT 접근에 쓸 device. */
+	/* [한국어] DWC 코어가 로그와 DT 접근에 쓸 device. */
 	pci->dev = dev;
-	/* [한국어] [한국어] 이 컨트롤러의 주소 변환 정보가 자기 노드가 아니라 **부모 노드의**
+	/* [한국어] 이 컨트롤러의 주소 변환 정보가 자기 노드가 아니라 **부모 노드의**
 	 * ranges 에 기술되어 있다는 표시. DWC 코어가 이 플래그를 보고 어느 노드를
 	 * 읽을지 정한다. */
 	pci->use_parent_dt_ranges = true;
-	/* [한국어] [한국어] 루트 포트 구조체의 주소를 잡아 둔다. */
+	/* [한국어] 루트 포트 구조체의 주소를 잡아 둔다. */
 	pp = &pci->pp;
 
 	ret = intel_pcie_get_resources(pdev);
-	/* [한국어] [한국어] 자원 확보 실패. */
+	/* [한국어] 자원 확보 실패. */
 	if (ret)
-		/* [한국어] [한국어] devm 이라 되감을 것이 없다. */
+		/* [한국어] devm 이라 되감을 것이 없다. */
 		return ret;
 
 	ret = intel_pcie_ep_rst_init(pcie);
-	/* [한국어] [한국어] PERST# GPIO 확보 실패. */
+	/* [한국어] PERST# GPIO 확보 실패. */
 	if (ret)
-		/* [한국어] [한국어] 마찬가지로 devm 이 처리한다. */
+		/* [한국어] 마찬가지로 devm 이 처리한다. */
 		return ret;
 
 	pci->ops = &intel_pcie_ops;
-	/* [한국어] [한국어] 호스트 훅을 건다. 이것이 있어야 코어가 rc_init 을 되부른다. */
+	/* [한국어] 호스트 훅을 건다. 이것이 있어야 코어가 rc_init 을 되부른다. */
 	pp->ops = &intel_pcie_dw_ops;
 
 	ret = dw_pcie_host_init(pp);
-	/* [한국어] [한국어] 호스트 초기화 실패. 이 안에서 rc_init → host_setup 이 불리고,
+	/* [한국어] 호스트 초기화 실패. 이 안에서 rc_init → host_setup 이 불리고,
 	 * 실패하면 그쪽이 이미 클록·PHY 를 되감은 뒤다. */
 	if (ret) {
-		/* [한국어] [한국어] 어느 단계에서 막혔는지 구별할 수 있게 남긴다. */
+		/* [한국어] 어느 단계에서 막혔는지 구별할 수 있게 남긴다. */
 		dev_err(dev, "Cannot initialize host\n");
-		/* [한국어] [한국어] 실패값을 올려 프로브를 접는다. */
+		/* [한국어] 실패값을 올려 프로브를 접는다. */
 		return ret;
 	}
 
@@ -1261,7 +1264,7 @@ static int intel_pcie_probe(struct platform_device *pdev)
 }
 
 static const struct dev_pm_ops intel_pcie_pm_ops = {
-	/* [한국어] [한국어] noirq 단계에만 콜백을 등록하는 매크로. 일반 suspend/resume 은
+	/* [한국어] noirq 단계에만 콜백을 등록하는 매크로. 일반 suspend/resume 은
 	 * 두지 않는데, 이 드라이버가 하는 일이 모두 인터럽트가 꺼진 뒤에 해야 하는
 	 * 것이기 때문이다. */
 	NOIRQ_SYSTEM_SLEEP_PM_OPS(intel_pcie_suspend_noirq,
@@ -1269,21 +1272,21 @@ static const struct dev_pm_ops intel_pcie_pm_ops = {
 };
 
 static const struct of_device_id of_intel_pcie_match[] = {
-	/* [한국어] [한국어] Intel LGM(Lightning Mountain) SoC 의 PCIe 컨트롤러.
+	/* [한국어] Intel LGM(Lightning Mountain) SoC 의 PCIe 컨트롤러.
 	 * 이 드라이버가 지원하는 유일한 compatible 이다. */
 	{ .compatible = "intel,lgm-pcie" },
-	/* [한국어] [한국어] 표의 끝을 알리는 빈 항목. */
+	/* [한국어] 표의 끝을 알리는 빈 항목. */
 	{}
 };
 
 static struct platform_driver intel_pcie_driver = {
-	/* [한국어] [한국어] 프로브 진입점. */
+	/* [한국어] 프로브 진입점. */
 	.probe = intel_pcie_probe,
-	/* [한국어] [한국어] 제거 진입점. 반환형이 void 인 최신 규약을 따른다. */
+	/* [한국어] 제거 진입점. 반환형이 void 인 최신 규약을 따른다. */
 	.remove = intel_pcie_remove,
 	.driver = {
 		.name = "intel-gw-pcie",
-		/* [한국어] [한국어] 위 표를 걸어, DT 노드의 compatible 이 맞으면 probe 가 불린다. */
+		/* [한국어] 위 표를 걸어, DT 노드의 compatible 이 맞으면 probe 가 불린다. */
 		.of_match_table = of_intel_pcie_match,
 		.pm = &intel_pcie_pm_ops,
 	},

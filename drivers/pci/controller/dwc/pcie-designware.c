@@ -173,10 +173,10 @@ static const char * const dw_pcie_app_rsts[DW_PCIE_NUM_APP_RSTS] = {
 };
 
 static const char * const dw_pcie_core_rsts[DW_PCIE_NUM_CORE_RSTS] = {
-	/* [한국어] [한국어] non-sticky 리셋: 링크가 내려가면 함께 지워지는 상태를 담당한다.
+	/* [한국어] non-sticky 리셋: 링크가 내려가면 함께 지워지는 상태를 담당한다.
 	 * 이름 문자열은 DT 의 reset-names 와 대조하는 데 쓰인다. */
 	[DW_PCIE_NON_STICKY_RST] = "non-sticky",
-	/* [한국어] [한국어] sticky 리셋: 링크가 내려가도 유지되어야 하는 상태(오류 로그 등)를
+	/* [한국어] sticky 리셋: 링크가 내려가도 유지되어야 하는 상태(오류 로그 등)를
 	 * 담당한다. 두 리셋을 나눈 이유가 바로 이 유지/소거 차이다. */
 	[DW_PCIE_STICKY_RST] = "sticky",
 	[DW_PCIE_CORE_RST] = "core",
@@ -187,10 +187,10 @@ static const char * const dw_pcie_core_rsts[DW_PCIE_NUM_CORE_RSTS] = {
 };
 
 static const struct dwc_pcie_vsec_id dwc_pcie_ptm_vsec_ids[] = {
-	/* [한국어] [한국어] Qualcomm 엔드포인트 모드의 벤더 확장 능력. 주석의 EP 표기가
+	/* [한국어] Qualcomm 엔드포인트 모드의 벤더 확장 능력. 주석의 EP 표기가
 	 * 뒤의 RC 항목과 구별해 준다 -- 같은 벤더라도 모드마다 vsec_id 가 다르다. */
 	{ .vendor_id = PCI_VENDOR_ID_QCOM, /* EP */
-	  /* [한국어] [한국어] vsec_id 0x03, 개정 1. 세 값(vendor/id/rev)이 모두 맞아야
+	  /* [한국어] vsec_id 0x03, 개정 1. 세 값(vendor/id/rev)이 모두 맞아야
 	   * dw_pcie_find_vsec_capability 가 이 항목을 인정한다. */
 	  .vsec_id = 0x03, .vsec_rev = 0x1 },
 	{ .vendor_id = PCI_VENDOR_ID_QCOM, /* RC */
@@ -226,25 +226,25 @@ static int dw_pcie_get_clocks(struct dw_pcie *pci)
 	int i, ret;
 
 	for (i = 0; i < DW_PCIE_NUM_APP_CLKS; i++)
-		/* [한국어] [한국어] 이름만 채워 둔다. 실제 조회는 아래 벌크 호출이 이 이름들로 한다.
+		/* [한국어] 이름만 채워 둔다. 실제 조회는 아래 벌크 호출이 이 이름들로 한다.
 		 * app 클록은 IP 바깥 애플리케이션 로직용이다. */
 		pci->app_clks[i].id = dw_pcie_app_clks[i];
 
 	for (i = 0; i < DW_PCIE_NUM_CORE_CLKS; i++)
-		/* [한국어] [한국어] core 클록은 IP 내부 코어용. 두 묶음을 나눠 관리하는 이유는
+		/* [한국어] core 클록은 IP 내부 코어용. 두 묶음을 나눠 관리하는 이유는
 		 * 서스펜드/재개 때 한쪽만 끄고 켜는 SoC 가 있기 때문이다. */
 		pci->core_clks[i].id = dw_pcie_core_clks[i];
 
 	ret = devm_clk_bulk_get_optional(pci->dev, DW_PCIE_NUM_APP_CLKS,
-					 /* [한국어] [한국어] _optional 판이라 DT 에 없는 클록은 조용히 NULL 로 남는다.
+					 /* [한국어] _optional 판이라 DT 에 없는 클록은 조용히 NULL 로 남는다.
 					  * SoC 마다 필요한 클록이 달라 필수로 두면 대부분이 프로브에 실패한다. */
 					 pci->app_clks);
 	if (ret)
-		/* [한국어] [한국어] app 클록 조회 실패. -EPROBE_DEFER 를 포함해 그대로 위로 올린다. */
+		/* [한국어] app 클록 조회 실패. -EPROBE_DEFER 를 포함해 그대로 위로 올린다. */
 		return ret;
 
 	return devm_clk_bulk_get_optional(pci->dev, DW_PCIE_NUM_CORE_CLKS,
-					  /* [한국어] [한국어] core 클록도 같은 방식으로 얻는다. 반환값은 호출자가 검사한다. */
+					  /* [한국어] core 클록도 같은 방식으로 얻는다. 반환값은 호출자가 검사한다. */
 					  pci->core_clks);
 }
 
@@ -279,34 +279,34 @@ static int dw_pcie_get_resets(struct dw_pcie *pci)
 	int i, ret;
 
 	for (i = 0; i < DW_PCIE_NUM_APP_RSTS; i++)
-		/* [한국어] [한국어] app 리셋 이름을 채운다. 클록과 같은 구조다. */
+		/* [한국어] app 리셋 이름을 채운다. 클록과 같은 구조다. */
 		pci->app_rsts[i].id = dw_pcie_app_rsts[i];
 
 	for (i = 0; i < DW_PCIE_NUM_CORE_RSTS; i++)
-		/* [한국어] [한국어] core 리셋 이름을 채운다. */
+		/* [한국어] core 리셋 이름을 채운다. */
 		pci->core_rsts[i].id = dw_pcie_core_rsts[i];
 
 	ret = devm_reset_control_bulk_get_optional_shared(pci->dev,
-						  /* [한국어] [한국어] app 리셋을 벌크로 얻는다. exclusive 라 다른 드라이버와 공유되지 않는다. */
+						  /* [한국어] app 리셋을 벌크로 얻는다. exclusive 라 다른 드라이버와 공유되지 않는다. */
 						  DW_PCIE_NUM_APP_RSTS,
 						  pci->app_rsts);
 	if (ret)
-		/* [한국어] [한국어] app 리셋 조회 실패. */
+		/* [한국어] app 리셋 조회 실패. */
 		return ret;
 
 	ret = devm_reset_control_bulk_get_optional_exclusive(pci->dev,
-						     /* [한국어] [한국어] core 리셋을 벌크로 얻는다. */
+						     /* [한국어] core 리셋을 벌크로 얻는다. */
 						     DW_PCIE_NUM_CORE_RSTS,
 						     pci->core_rsts);
 	if (ret)
-		/* [한국어] [한국어] core 리셋 조회 실패. */
+		/* [한국어] core 리셋 조회 실패. */
 		return ret;
 
 	pci->pe_rst = devm_gpiod_get_optional(pci->dev, "reset", GPIOD_OUT_HIGH);
-	/* [한국어] [한국어] PERST# GPIO 조회 실패. optional 이므로 '없음'(NULL)은 오류가 아니고,
+	/* [한국어] PERST# GPIO 조회 실패. optional 이므로 '없음'(NULL)은 오류가 아니고,
 	 * 여기 걸리는 것은 DT 표기가 잘못된 경우뿐이다. */
 	if (IS_ERR(pci->pe_rst))
-		/* [한국어] [한국어] 오류 포인터에서 코드를 꺼내 올린다. */
+		/* [한국어] 오류 포인터에서 코드를 꺼내 올린다. */
 		return PTR_ERR(pci->pe_rst);
 
 	return 0;
@@ -352,44 +352,44 @@ int dw_pcie_get_resources(struct dw_pcie *pci)
 {
 	struct platform_device *pdev = to_platform_device(pci->dev);
 	struct device_node *np = dev_of_node(pci->dev);
-	/* [한국어] [한국어] platform_get_resource_byname 이 돌려줄 자원 서술자. 여러 이름에
+	/* [한국어] platform_get_resource_byname 이 돌려줄 자원 서술자. 여러 이름에
 	 * 재사용된다. */
 	struct resource *res;
-	/* [한국어] [한국어] 하위 호출들의 반환값. */
+	/* [한국어] 하위 호출들의 반환값. */
 	int ret;
 
 	if (!pci->dbi_base) {
-		/* [한국어] [한국어] SoC 드라이버가 dbi_base 를 미리 채워 두지 않았을 때만 여기서 얻는다.
+		/* [한국어] SoC 드라이버가 dbi_base 를 미리 채워 두지 않았을 때만 여기서 얻는다.
 		 * 일부 SoC 는 자기 방식으로 매핑해 두기 때문이다. */
 		res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "dbi");
-		/* [한국어] [한국어] devm_pci_remap_cfg_resource 는 설정공간 접근에 맞는 매핑을 만든다.
+		/* [한국어] devm_pci_remap_cfg_resource 는 설정공간 접근에 맞는 매핑을 만든다.
 		 * res 가 NULL 이어도 이 함수가 오류 포인터를 돌려주므로 별도 검사가 없다. */
 		pci->dbi_base = devm_pci_remap_cfg_resource(pci->dev, res);
-		/* [한국어] [한국어] 매핑 실패. */
+		/* [한국어] 매핑 실패. */
 		if (IS_ERR(pci->dbi_base))
-			/* [한국어] [한국어] DBI 없이는 IP 를 전혀 다룰 수 없으므로 프로브를 접는다. */
+			/* [한국어] DBI 없이는 IP 를 전혀 다룰 수 없으므로 프로브를 접는다. */
 			return PTR_ERR(pci->dbi_base);
-		/* [한국어] [한국어] 물리 주소도 보관한다. iATU 창 계산과 부모 버스 오프셋 판정에 쓰인다. */
+		/* [한국어] 물리 주소도 보관한다. iATU 창 계산과 부모 버스 오프셋 판정에 쓰인다. */
 		pci->dbi_phys_addr = res->start;
-	/* [한국어] [한국어] SoC 가 미리 채운 경우는 이 블록 전체를 건너뛴다. */
+	/* [한국어] SoC 가 미리 채운 경우는 이 블록 전체를 건너뛴다. */
 	}
 
 	/* DBI2 is mainly useful for the endpoint controller */
 	if (!pci->dbi_base2) {
 		res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "dbi2");
-		/* [한국어] [한국어] 'dbi2' 는 선택 자원이다. BAR 마스크를 쓰는 두 번째 창인데,
+		/* [한국어] 'dbi2' 는 선택 자원이다. BAR 마스크를 쓰는 두 번째 창인데,
 		 * SoC 에 따라 별도 reg 로 노출되기도 하고 DBI 로부터 고정 오프셋에 있기도 한다. */
 		if (res) {
-			/* [한국어] [한국어] 별도 reg 가 있으면 그것을 매핑한다. */
+			/* [한국어] 별도 reg 가 있으면 그것을 매핑한다. */
 			pci->dbi_base2 = devm_pci_remap_cfg_resource(pci->dev, res);
-			/* [한국어] [한국어] 매핑 실패. */
+			/* [한국어] 매핑 실패. */
 			if (IS_ERR(pci->dbi_base2))
-				/* [한국어] [한국어] 자원이 선언돼 있는데 매핑에 실패한 것은 진짜 오류다. */
+				/* [한국어] 자원이 선언돼 있는데 매핑에 실패한 것은 진짜 오류다. */
 				return PTR_ERR(pci->dbi_base2);
-		/* [한국어] [한국어] 별도 reg 가 없는 경우. */
+		/* [한국어] 별도 reg 가 없는 경우. */
 		} else {
 			pci->dbi_base2 = pci->dbi_base + SZ_4K;
-		/* [한국어] [한국어] DBI 로부터 고정 오프셋을 더해 쓴다. 자원이 없다고 실패로 보지
+		/* [한국어] DBI 로부터 고정 오프셋을 더해 쓴다. 자원이 없다고 실패로 보지
 		 * 않는 것이 요점 -- 대부분의 SoC 가 이쪽이다. */
 		}
 	}
@@ -397,23 +397,23 @@ int dw_pcie_get_resources(struct dw_pcie *pci)
 	/* For non-unrolled iATU/eDMA platforms this range will be ignored */
 	if (!pci->atu_base) {
 		res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "atu");
-		/* [한국어] [한국어] 'atu' 도 선택 자원이다. 신형 IP 는 iATU 를 별도 창(unrolled)으로
+		/* [한국어] 'atu' 도 선택 자원이다. 신형 IP 는 iATU 를 별도 창(unrolled)으로
 		 * 노출하고, 구형은 DBI 안의 뷰포트로 다룬다. */
 		if (res) {
-			/* [한국어] [한국어] 창 크기를 보관한다. 아래 eDMA 폴백 판정이 이 값을 쓴다. */
+			/* [한국어] 창 크기를 보관한다. 아래 eDMA 폴백 판정이 이 값을 쓴다. */
 			pci->atu_size = resource_size(res);
-			/* [한국어] [한국어] 일반 MMIO 매핑. 설정공간이 아니므로 remap_cfg_resource 가 아니다. */
+			/* [한국어] 일반 MMIO 매핑. 설정공간이 아니므로 remap_cfg_resource 가 아니다. */
 			pci->atu_base = devm_ioremap_resource(pci->dev, res);
-			/* [한국어] [한국어] 매핑 실패. */
+			/* [한국어] 매핑 실패. */
 			if (IS_ERR(pci->atu_base))
-				/* [한국어] [한국어] 자원이 선언됐는데 실패한 것이므로 프로브를 접는다. */
+				/* [한국어] 자원이 선언됐는데 실패한 것이므로 프로브를 접는다. */
 				return PTR_ERR(pci->atu_base);
-			/* [한국어] [한국어] 물리 주소도 보관한다. */
+			/* [한국어] 물리 주소도 보관한다. */
 			pci->atu_phys_addr = res->start;
-		/* [한국어] [한국어] 별도 창이 없는 구형 IP. */
+		/* [한국어] 별도 창이 없는 구형 IP. */
 		} else {
 			pci->atu_base = pci->dbi_base + DEFAULT_DBI_ATU_OFFSET;
-		/* [한국어] [한국어] DBI 안의 고정 오프셋을 쓴다. 이 경우 atu_size 가 0 으로 남아,
+		/* [한국어] DBI 안의 고정 오프셋을 쓴다. 이 경우 atu_size 가 0 으로 남아,
 		 * 아래 eDMA 폴백 조건이 자연히 거짓이 된다. */
 		}
 	}
@@ -425,21 +425,21 @@ int dw_pcie_get_resources(struct dw_pcie *pci)
 	/* eDMA region can be mapped to a custom base address */
 	if (!pci->edma.reg_base) {
 		res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "dma");
-		/* [한국어] [한국어] 'dma' 도 선택 자원. eDMA(embedded DMA) 엔진의 레지스터 창이다. */
+		/* [한국어] 'dma' 도 선택 자원. eDMA(embedded DMA) 엔진의 레지스터 창이다. */
 		if (res) {
-			/* [한국어] [한국어] 별도 reg 가 있으면 그것을 쓴다. */
+			/* [한국어] 별도 reg 가 있으면 그것을 쓴다. */
 			pci->edma.reg_base = devm_ioremap_resource(pci->dev, res);
-			/* [한국어] [한국어] 매핑 실패. */
+			/* [한국어] 매핑 실패. */
 			if (IS_ERR(pci->edma.reg_base))
-				/* [한국어] [한국어] 자원이 선언됐는데 실패했으므로 오류다. */
+				/* [한국어] 자원이 선언됐는데 실패했으므로 오류다. */
 				return PTR_ERR(pci->edma.reg_base);
-		/* [한국어] [한국어] 별도 reg 가 없을 때의 폴백 조건. atu 창이 기본 오프셋의 **두 배**
+		/* [한국어] 별도 reg 가 없을 때의 폴백 조건. atu 창이 기본 오프셋의 **두 배**
 		 * 이상이어야 그 뒤쪽에 eDMA 레지스터가 들어갈 자리가 있다는 판단이다.
 		 * atu_size 가 0(구형)이면 이 조건이 거짓이 되어 eDMA 를 쓰지 않는다. */
 		} else if (pci->atu_size >= 2 * DEFAULT_DBI_DMA_OFFSET) {
-			/* [한국어] [한국어] atu 창 안의 고정 오프셋을 eDMA 기준으로 삼는다. */
+			/* [한국어] atu 창 안의 고정 오프셋을 eDMA 기준으로 삼는다. */
 			pci->edma.reg_base = pci->atu_base + DEFAULT_DBI_DMA_OFFSET;
-		/* [한국어] [한국어] 둘 다 아니면 reg_base 가 NULL 로 남고, dw_pcie_edma_detect 가
+		/* [한국어] 둘 다 아니면 reg_base 가 NULL 로 남고, dw_pcie_edma_detect 가
 		 * 엔진 없음으로 처리한다. */
 		}
 	}
@@ -447,16 +447,16 @@ int dw_pcie_get_resources(struct dw_pcie *pci)
 	/* ELBI is an optional resource */
 	if (!pci->elbi_base) {
 		res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "elbi");
-		/* [한국어] [한국어] 'elbi'(External Local Bus Interface)도 선택 자원. SoC 고유 레지스터를
+		/* [한국어] 'elbi'(External Local Bus Interface)도 선택 자원. SoC 고유 레지스터를
 		 * IP 창에 얹어 노출하는 통로다. */
 		if (res) {
-			/* [한국어] [한국어] 있으면 매핑한다. */
+			/* [한국어] 있으면 매핑한다. */
 			pci->elbi_base = devm_ioremap_resource(pci->dev, res);
-			/* [한국어] [한국어] 매핑 실패. */
+			/* [한국어] 매핑 실패. */
 			if (IS_ERR(pci->elbi_base))
-				/* [한국어] [한국어] 자원이 선언됐는데 실패했으므로 오류다. */
+				/* [한국어] 자원이 선언됐는데 실패했으므로 오류다. */
 				return PTR_ERR(pci->elbi_base);
-		/* [한국어] [한국어] 없으면 elbi_base 가 NULL 로 남는다. 이것을 쓰는 SoC 드라이버만
+		/* [한국어] 없으면 elbi_base 가 NULL 로 남는다. 이것을 쓰는 SoC 드라이버만
 		 * 영향을 받으므로 여기서는 실패로 보지 않는다. */
 		}
 	}
@@ -464,20 +464,20 @@ int dw_pcie_get_resources(struct dw_pcie *pci)
 	/* LLDD is supposed to manually switch the clocks and resets state */
 	if (dw_pcie_cap_is(pci, REQ_RES)) {
 		ret = dw_pcie_get_clocks(pci);
-		/* [한국어] [한국어] 클록 확보 실패. */
+		/* [한국어] 클록 확보 실패. */
 		if (ret)
-			/* [한국어] [한국어] devm 이라 되감을 것이 없다. */
+			/* [한국어] devm 이라 되감을 것이 없다. */
 			return ret;
 
 		ret = dw_pcie_get_resets(pci);
-		/* [한국어] [한국어] 리셋 확보 실패. */
+		/* [한국어] 리셋 확보 실패. */
 		if (ret)
-			/* [한국어] [한국어] 마찬가지로 devm 이 처리한다. */
+			/* [한국어] 마찬가지로 devm 이 처리한다. */
 			return ret;
 	}
 
 	if (pci->max_link_speed < 1)
-		/* [한국어] [한국어] DT 가 지정한 최대 링크 속도. 지정이 없으면 음수가 들어오고,
+		/* [한국어] DT 가 지정한 최대 링크 속도. 지정이 없으면 음수가 들어오고,
 		 * dw_pcie_link_set_max_speed 가 그때는 하드웨어 기본값을 그대로 둔다. */
 		pci->max_link_speed = of_pci_get_max_link_speed(np);
 
@@ -526,23 +526,23 @@ void dw_pcie_version_detect(struct dw_pcie *pci)
 	/* The content of the CSR is zero on DWC PCIe older than v4.70a */
 	ver = dw_pcie_readl_dbi(pci, PCIE_VERSION_NUMBER);
 	if (!ver)
-		/* [한국어] [한국어] 이미 판별해 둔 값이 없으면(첫 호출) 아래 비교를 건너뛰고 그대로 채운다. */
+		/* [한국어] 이미 판별해 둔 값이 없으면(첫 호출) 아래 비교를 건너뛰고 그대로 채운다. */
 		return;
 
 	if (pci->version && pci->version != ver)
-		/* [한국어] [한국어] 두 번째 호출인데 값이 다르다 -- 같은 인스턴스에서 버전이 바뀔 수는
+		/* [한국어] 두 번째 호출인데 값이 다르다 -- 같은 인스턴스에서 버전이 바뀔 수는
 		 * 없으므로 레지스터 읽기가 잘못됐거나 IP 가 아직 깨어나지 않은 상태다. */
 		dev_warn(pci->dev, "Versions don't match (%08x != %08x)\n",
-			 /* [한국어] [한국어] 경고만 남기고 진행한다. 값이 틀려도 대부분의 동작은 가능하기 때문이다. */
+			 /* [한국어] 경고만 남기고 진행한다. 값이 틀려도 대부분의 동작은 가능하기 때문이다. */
 			 pci->version, ver);
 	else
 		pci->version = ver;
-/* [한국어] [한국어] 여기부터는 타입(RC/EP) 판별이다. 버전과 같은 레지스터의 다른 필드다. */
+/* [한국어] 여기부터는 타입(RC/EP) 판별이다. 버전과 같은 레지스터의 다른 필드다. */
 
 	ver = dw_pcie_readl_dbi(pci, PCIE_VERSION_TYPE);
 
 	if (pci->type && pci->type != ver)
-		/* [한국어] [한국어] 타입이 달라도 마찬가지로 경고에 그친다. */
+		/* [한국어] 타입이 달라도 마찬가지로 경고에 그친다. */
 		dev_warn(pci->dev, "Types don't match (%08x != %08x)\n",
 			 pci->type, ver);
 	else
@@ -630,30 +630,30 @@ void dw_pcie_remove_capability(struct dw_pcie *pci, u8 cap)
 {
 	u8 cap_pos, pre_pos, next_pos;
 	u16 reg;
-/* [한국어] [한국어] 능력 사슬은 단일 연결 리스트다. 항목을 빼려면 **앞 항목**의 next
+/* [한국어] 능력 사슬은 단일 연결 리스트다. 항목을 빼려면 **앞 항목**의 next
  * 포인터를 고쳐야 하므로, 찾을 때 앞 항목 위치(pre_pos)도 함께 받아 둔다. */
 
 	cap_pos = PCI_FIND_NEXT_CAP(dw_pcie_read_cfg, PCI_CAPABILITY_LIST, cap,
-				  /* [한국어] [한국어] 탐색 헬퍼에 pre_pos 주소를 넘겨 앞 항목 위치를 되받는다. */
+				  /* [한국어] 탐색 헬퍼에 pre_pos 주소를 넘겨 앞 항목 위치를 되받는다. */
 				  &pre_pos, pci);
 	if (!cap_pos)
-		/* [한국어] [한국어] 그 능력이 없으면 뺄 것도 없다. */
+		/* [한국어] 그 능력이 없으면 뺄 것도 없다. */
 		return;
 
 	reg = dw_pcie_readw_dbi(pci, cap_pos);
-	/* [한국어] [한국어] 표준 능력 헤더의 상위 바이트가 next 포인터다. 지울 항목의 next 를
+	/* [한국어] 표준 능력 헤더의 상위 바이트가 next 포인터다. 지울 항목의 next 를
 	 * 꺼내 두었다가 앞 항목에 이어 붙인다. */
 	next_pos = (reg & 0xff00) >> 8;
 
 	dw_pcie_dbi_ro_wr_en(pci);
 	if (pre_pos == PCI_CAPABILITY_LIST)
-		/* [한국어] [한국어] 앞 항목이 없다 = 지울 것이 사슬의 **첫 항목**이다. 그러면 사슬의
+		/* [한국어] 앞 항목이 없다 = 지울 것이 사슬의 **첫 항목**이다. 그러면 사슬의
 		 * 머리(PCI_CAPABILITY_LIST)를 직접 next 로 바꿔야 한다. */
 		dw_pcie_writeb_dbi(pci, PCI_CAPABILITY_LIST, next_pos);
-	/* [한국어] [한국어] 앞 항목이 있는 일반적인 경우. */
+	/* [한국어] 앞 항목이 있는 일반적인 경우. */
 	else
 		dw_pcie_writeb_dbi(pci, pre_pos + 1, next_pos);
-	/* [한국어] [한국어] 사슬 수정이 끝났으므로 DBI 쓰기 허용을 닫는다. 능력 헤더는 규약상
+	/* [한국어] 사슬 수정이 끝났으므로 DBI 쓰기 허용을 닫는다. 능력 헤더는 규약상
 	 * 읽기 전용이라 이 감싸기가 없으면 위 쓰기들이 무시된다. */
 	dw_pcie_dbi_ro_wr_dis(pci);
 }
@@ -686,17 +686,17 @@ void dw_pcie_remove_ext_capability(struct dw_pcie *pci, u8 cap)
 {
 	int cap_pos, next_pos, pre_pos;
 	u32 pre_header, header;
-/* [한국어] [한국어] 확장 능력도 같은 방식이지만 헤더 구조가 다르다 -- 32비트 헤더 안에
+/* [한국어] 확장 능력도 같은 방식이지만 헤더 구조가 다르다 -- 32비트 헤더 안에
  * ID, 개정, next 가 함께 들어 있다. */
 
 	cap_pos = PCI_FIND_NEXT_EXT_CAP(dw_pcie_read_cfg, 0, cap, &pre_pos, pci);
-	/* [한국어] [한국어] 해당 확장 능력이 없다. */
+	/* [한국어] 해당 확장 능력이 없다. */
 	if (!cap_pos)
-		/* [한국어] [한국어] 뺄 것이 없으므로 조용히 물러난다. */
+		/* [한국어] 뺄 것이 없으므로 조용히 물러난다. */
 		return;
 
 	header = dw_pcie_readl_dbi(pci, cap_pos);
-/* [한국어] [한국어] 지울 항목의 헤더를 읽어 그 next 를 꺼낸다. */
+/* [한국어] 지울 항목의 헤더를 읽어 그 next 를 꺼낸다. */
 
 	/*
 	 * If the first cap at offset PCI_CFG_SPACE_SIZE is removed,
@@ -705,7 +705,7 @@ void dw_pcie_remove_ext_capability(struct dw_pcie *pci, u8 cap)
 	if (cap_pos == PCI_CFG_SPACE_SIZE) {
 		dw_pcie_dbi_ro_wr_en(pci);
 		dw_pcie_writel_dbi(pci, cap_pos, header & 0xffff0000);
-		/* [한국어] [한국어] 앞 항목이 없으면 사슬의 첫 확장 능력이다. 확장 능력 사슬의 머리는
+		/* [한국어] 앞 항목이 없으면 사슬의 첫 확장 능력이다. 확장 능력 사슬의 머리는
 		 * 고정 오프셋(0x100)이라 표준 능력처럼 머리 포인터를 고칠 수 없다.
 		 * 그래서 이 경우 헤더 자체를 지우는 방식으로 처리하고 여기서 끝낸다. */
 		dw_pcie_dbi_ro_wr_dis(pci);
@@ -713,12 +713,12 @@ void dw_pcie_remove_ext_capability(struct dw_pcie *pci, u8 cap)
 	}
 
 	pre_header = dw_pcie_readl_dbi(pci, pre_pos);
-	/* [한국어] [한국어] 지울 항목의 next 오프셋을 꺼낸다. */
+	/* [한국어] 지울 항목의 next 오프셋을 꺼낸다. */
 	next_pos = PCI_EXT_CAP_NEXT(header);
 
 	dw_pcie_dbi_ro_wr_en(pci);
 	dw_pcie_writel_dbi(pci, pre_pos,
-			  /* [한국어] [한국어] 앞 항목 헤더에서 하위 20비트(ID + 개정)는 그대로 두고, 상위 12비트의
+			  /* [한국어] 앞 항목 헤더에서 하위 20비트(ID + 개정)는 그대로 두고, 상위 12비트의
 			   * next 자리만 새 값으로 바꾼다. 그래서 마스크가 0xfffff 다. */
 			  (pre_header & 0xfffff) | (next_pos << 20));
 	dw_pcie_dbi_ro_wr_dis(pci);
@@ -755,23 +755,23 @@ static u16 __dw_pcie_find_vsec_capability(struct dw_pcie *pci, u16 vendor_id,
 {
 	u16 vsec = 0;
 	u32 header;
-/* [한국어] [한국어] 벤더 확장 능력(VNDR)은 여러 개가 사슬에 있을 수 있어, 원하는
+/* [한국어] 벤더 확장 능력(VNDR)은 여러 개가 사슬에 있을 수 있어, 원하는
  * vsec_id 를 만날 때까지 계속 뒤져야 한다. */
 
 	if (vendor_id != dw_pcie_readw_dbi(pci, PCI_VENDOR_ID))
-		/* [한국어] [한국어] 벤더 ID 가 다르면 이 IP 의 것이 아니다. */
+		/* [한국어] 벤더 ID 가 다르면 이 IP 의 것이 아니다. */
 		return 0;
 
 	while ((vsec = PCI_FIND_NEXT_EXT_CAP(dw_pcie_read_cfg, vsec,
-					     /* [한국어] [한국어] pci_find_next_ext_capability 계열을 반복 호출해 VNDR 항목을 차례로
+					     /* [한국어] pci_find_next_ext_capability 계열을 반복 호출해 VNDR 항목을 차례로
 					      * 훑는다. vsec 가 0 이 되면 사슬 끝이라 루프가 끝난다. */
 					     PCI_EXT_CAP_ID_VNDR, NULL, pci))) {
 		header = dw_pcie_readl_dbi(pci, vsec + PCI_VNDR_HEADER);
-		/* [한국어] [한국어] VNDR 헤더 안의 ID 필드가 찾는 값과 맞는지 본다. */
+		/* [한국어] VNDR 헤더 안의 ID 필드가 찾는 값과 맞는지 본다. */
 		if (PCI_VNDR_HEADER_ID(header) == vsec_id)
-			/* [한국어] [한국어] 찾았다. 이 오프셋을 돌려준다. */
+			/* [한국어] 찾았다. 이 오프셋을 돌려준다. */
 			return vsec;
-	/* [한국어] [한국어] 끝까지 못 찾으면 루프를 빠져나가 0 을 돌려준다. */
+	/* [한국어] 끝까지 못 찾으면 루프를 빠져나가 0 을 돌려준다. */
 	}
 
 	return 0;
@@ -803,23 +803,23 @@ static u16 dw_pcie_find_vsec_capability(struct dw_pcie *pci,
 {
 	const struct dwc_pcie_vsec_id *vid;
 	u16 vsec;
-	/* [한국어] [한국어] VNDR 헤더를 읽어 개정(rev)까지 대조하기 위한 변수. */
+	/* [한국어] VNDR 헤더를 읽어 개정(rev)까지 대조하기 위한 변수. */
 	u32 header;
 
 	for (vid = vsec_ids; vid->vendor_id; vid++) {
-		/* [한국어] [한국어] 표의 각 항목에 대해 벤더 ID + vsec_id 로 먼저 찾는다. */
+		/* [한국어] 표의 각 항목에 대해 벤더 ID + vsec_id 로 먼저 찾는다. */
 		vsec = __dw_pcie_find_vsec_capability(pci, vid->vendor_id,
-						      /* [한국어] [한국어] 두 값이 모두 맞아야 후보가 된다. */
+						      /* [한국어] 두 값이 모두 맞아야 후보가 된다. */
 						      vid->vsec_id);
 		if (vsec) {
-			/* [한국어] [한국어] 후보를 찾았으면 헤더를 읽어 개정을 확인한다. */
+			/* [한국어] 후보를 찾았으면 헤더를 읽어 개정을 확인한다. */
 			header = dw_pcie_readl_dbi(pci, vsec + PCI_VNDR_HEADER);
-			/* [한국어] [한국어] 개정까지 맞아야 진짜다. 같은 ID 라도 개정이 다르면 레지스터 배치가
+			/* [한국어] 개정까지 맞아야 진짜다. 같은 ID 라도 개정이 다르면 레지스터 배치가
 			 * 달라 잘못 접근하게 된다. */
 			if (PCI_VNDR_HEADER_REV(header) == vid->vsec_rev)
-				/* [한국어] [한국어] 세 값이 모두 맞았다. */
+				/* [한국어] 세 값이 모두 맞았다. */
 				return vsec;
-		/* [한국어] [한국어] 개정이 다르면 다음 표 항목으로 넘어간다. */
+		/* [한국어] 개정이 다르면 다음 표 항목으로 넘어간다. */
 		}
 	}
 
@@ -941,17 +941,17 @@ int dw_pcie_write(void __iomem *addr, int size, u32 val)
 		return PCIBIOS_BAD_REGISTER_NUMBER;
 
 	if (size == 4)
-		/* [한국어] [한국어] 4바이트 접근. 가장 흔한 경우라 먼저 검사한다. */
+		/* [한국어] 4바이트 접근. 가장 흔한 경우라 먼저 검사한다. */
 		writel(val, addr);
-	/* [한국어] [한국어] 2바이트 접근. */
+	/* [한국어] 2바이트 접근. */
 	else if (size == 2)
-		/* [한국어] [한국어] writew 로 하프워드를 쓴다. */
+		/* [한국어] writew 로 하프워드를 쓴다. */
 		writew(val, addr);
-	/* [한국어] [한국어] 1바이트 접근. */
+	/* [한국어] 1바이트 접근. */
 	else if (size == 1)
-		/* [한국어] [한국어] writeb 로 바이트를 쓴다. */
+		/* [한국어] writeb 로 바이트를 쓴다. */
 		writeb(val, addr);
-	/* [한국어] [한국어] 1/2/4 가 아닌 크기 -- 호출자의 버그다. */
+	/* [한국어] 1/2/4 가 아닌 크기 -- 호출자의 버그다. */
 	else
 		return PCIBIOS_BAD_REGISTER_NUMBER;
 
@@ -989,22 +989,22 @@ u32 dw_pcie_read_dbi(struct dw_pcie *pci, u32 reg, size_t size)
 {
 	int ret;
 	u32 val;
-/* [한국어] [한국어] SoC 가 자체 DBI 읽기 구현을 등록했으면 그것을 쓴다. DBI 접근에
+/* [한국어] SoC 가 자체 DBI 읽기 구현을 등록했으면 그것을 쓴다. DBI 접근에
  * 추가 절차가 필요한 SoC(예: 창 전환)를 위한 갈래다. */
 
 	if (pci->ops && pci->ops->read_dbi)
-		/* [한국어] [한국어] 자체 구현의 결과를 그대로 돌려준다 -- 오류 보고도 그쪽 몫이다. */
+		/* [한국어] 자체 구현의 결과를 그대로 돌려준다 -- 오류 보고도 그쪽 몫이다. */
 		return pci->ops->read_dbi(pci, pci->dbi_base, reg, size);
 
 	ret = dw_pcie_read(pci->dbi_base + reg, size, &val);
-	/* [한국어] [한국어] 기본 경로에서 접근이 실패했다(정렬 오류 등). */
+	/* [한국어] 기본 경로에서 접근이 실패했다(정렬 오류 등). */
 	if (ret)
-		/* [한국어] [한국어] 읽기 실패는 반환값만으로는 구별할 수 없다(0xffffffff 가 유효한 값일
+		/* [한국어] 읽기 실패는 반환값만으로는 구별할 수 없다(0xffffffff 가 유효한 값일
 		 * 수도 있다). 그래서 로그로 남기는 것이 유일한 단서다. */
 		dev_err(pci->dev, "Read DBI address failed\n");
 
 	return val;
-/* [한국어] [한국어] 실패해도 읽은 값을 그대로 돌려준다. 호출자가 오류를 구별할 방법이
+/* [한국어] 실패해도 읽은 값을 그대로 돌려준다. 호출자가 오류를 구별할 방법이
  * 없다는 뜻이기도 하다. */
 }
 EXPORT_SYMBOL_GPL(dw_pcie_read_dbi);
@@ -1035,18 +1035,18 @@ void dw_pcie_write_dbi(struct dw_pcie *pci, u32 reg, size_t size, u32 val)
 	int ret;
 
 	if (pci->ops && pci->ops->write_dbi) {
-		/* [한국어] [한국어] 자체 쓰기 구현이 있으면 그쪽에 맡긴다. */
+		/* [한국어] 자체 쓰기 구현이 있으면 그쪽에 맡긴다. */
 		pci->ops->write_dbi(pci, pci->dbi_base, reg, size, val);
-		/* [한국어] [한국어] 자체 구현이 오류 보고까지 맡으므로 여기서는 바로 끝낸다. */
+		/* [한국어] 자체 구현이 오류 보고까지 맡으므로 여기서는 바로 끝낸다. */
 		return;
 	}
 
 	ret = dw_pcie_write(pci->dbi_base + reg, size, val);
-	/* [한국어] [한국어] 기본 경로 쓰기 실패. */
+	/* [한국어] 기본 경로 쓰기 실패. */
 	if (ret)
-		/* [한국어] [한국어] 반환형이 void 라 로그가 유일한 통로다. */
+		/* [한국어] 반환형이 void 라 로그가 유일한 통로다. */
 		dev_err(pci->dev, "Write DBI address failed\n");
-/* [한국어] [한국어] 실패해도 호출자는 알 수 없다. */
+/* [한국어] 실패해도 호출자는 알 수 없다. */
 }
 EXPORT_SYMBOL_GPL(dw_pcie_write_dbi);
 
@@ -1082,18 +1082,18 @@ void dw_pcie_write_dbi2(struct dw_pcie *pci, u32 reg, size_t size, u32 val)
 	int ret;
 
 	if (pci->ops && pci->ops->write_dbi2) {
-		/* [한국어] [한국어] DBI2 도 자체 구현이 있으면 그쪽에 맡긴다. */
+		/* [한국어] DBI2 도 자체 구현이 있으면 그쪽에 맡긴다. */
 		pci->ops->write_dbi2(pci, pci->dbi_base2, reg, size, val);
-		/* [한국어] [한국어] 자체 구현이 처리했으므로 끝. */
+		/* [한국어] 자체 구현이 처리했으므로 끝. */
 		return;
 	}
 
 	ret = dw_pcie_write(pci->dbi_base2 + reg, size, val);
-	/* [한국어] [한국어] DBI2 쓰기 실패. */
+	/* [한국어] DBI2 쓰기 실패. */
 	if (ret)
-		/* [한국어] [한국어] 메시지의 소문자 'write' 는 상류 그대로다(다른 두 함수는 대문자). */
+		/* [한국어] 메시지의 소문자 'write' 는 상류 그대로다(다른 두 함수는 대문자). */
 		dev_err(pci->dev, "write DBI address failed\n");
-/* [한국어] [한국어] 마찬가지로 실패를 알릴 통로가 로그뿐이다. */
+/* [한국어] 마찬가지로 실패를 알릴 통로가 로그뿐이다. */
 }
 EXPORT_SYMBOL_GPL(dw_pcie_write_dbi2);
 
@@ -1133,11 +1133,11 @@ static inline void __iomem *dw_pcie_select_atu(struct dw_pcie *pci, u32 dir,
 {
 	if (dw_pcie_cap_is(pci, IATU_UNROLL))
 		return pci->atu_base + PCIE_ATU_UNROLL_BASE(dir, index);
-/* [한국어] [한국어] 구형 IP -- 뷰포트를 쓰기만 하고 접근 주소는 DBI 안에 있다.
+/* [한국어] 구형 IP -- 뷰포트를 쓰기만 하고 접근 주소는 DBI 안에 있다.
  * 선택 단계와 접근 단계가 나뉘어 원자적이지 않은데 잠금이 없다. */
 
 	dw_pcie_writel_dbi(pci, PCIE_ATU_VIEWPORT, dir | index);
-	/* [한국어] [한국어] 신형 IP -- 창마다 별도 주소가 있어 선택 단계 자체가 없다.
+	/* [한국어] 신형 IP -- 창마다 별도 주소가 있어 선택 단계 자체가 없다.
 	 * atu_base 를 그대로 돌려주면 호출자가 오프셋을 더해 접근한다. */
 	return pci->atu_base;
 }
@@ -1167,24 +1167,24 @@ static u32 dw_pcie_readl_atu(struct dw_pcie *pci, u32 dir, u32 index, u32 reg)
 {
 	void __iomem *base;
 	int ret;
-	/* [한국어] [한국어] 읽은 값을 담을 변수. */
+	/* [한국어] 읽은 값을 담을 변수. */
 	u32 val;
 
 	base = dw_pcie_select_atu(pci, dir, index);
-/* [한국어] [한국어] 창 번호에 맞는 기준 주소를 얻는다. 구형이면 이 호출 안에서
+/* [한국어] 창 번호에 맞는 기준 주소를 얻는다. 구형이면 이 호출 안에서
  * 뷰포트 선택까지 함께 일어난다. */
 
 	if (pci->ops && pci->ops->read_dbi)
-		/* [한국어] [한국어] 자체 DBI 읽기 구현이 있으면 그쪽으로. iATU 가 DBI 안에 있는
+		/* [한국어] 자체 DBI 읽기 구현이 있으면 그쪽으로. iATU 가 DBI 안에 있는
 		 * 구형에서만 의미가 있다. */
 		return pci->ops->read_dbi(pci, base, reg, 4);
 
 	ret = dw_pcie_read(base + reg, 4, &val);
-	/* [한국어] [한국어] 접근 실패. */
+	/* [한국어] 접근 실패. */
 	if (ret)
-		/* [한국어] [한국어] DBI 쪽과 같은 이유로 로그가 유일한 통로다. */
+		/* [한국어] DBI 쪽과 같은 이유로 로그가 유일한 통로다. */
 		dev_err(pci->dev, "Read ATU address failed\n");
-/* [한국어] [한국어] 실패해도 읽은 값을 그대로 돌려준다. */
+/* [한국어] 실패해도 읽은 값을 그대로 돌려준다. */
 
 	return val;
 }
@@ -1211,21 +1211,21 @@ static void dw_pcie_writel_atu(struct dw_pcie *pci, u32 dir, u32 index,
 {
 	void __iomem *base;
 	int ret;
-/* [한국어] [한국어] 창 번호에 맞는 기준 주소를 얻는다(구형이면 뷰포트 선택 포함). */
+/* [한국어] 창 번호에 맞는 기준 주소를 얻는다(구형이면 뷰포트 선택 포함). */
 
 	base = dw_pcie_select_atu(pci, dir, index);
 
 	if (pci->ops && pci->ops->write_dbi) {
-		/* [한국어] [한국어] 자체 DBI 쓰기 구현이 있으면 그쪽으로 넘긴다. */
+		/* [한국어] 자체 DBI 쓰기 구현이 있으면 그쪽으로 넘긴다. */
 		pci->ops->write_dbi(pci, base, reg, 4, val);
-		/* [한국어] [한국어] 자체 구현이 처리했으므로 끝. */
+		/* [한국어] 자체 구현이 처리했으므로 끝. */
 		return;
 	}
 
 	ret = dw_pcie_write(base + reg, 4, val);
-	/* [한국어] [한국어] 접근 실패. */
+	/* [한국어] 접근 실패. */
 	if (ret)
-		/* [한국어] [한국어] 반환형이 void 라 로그가 유일한 통로다. */
+		/* [한국어] 반환형이 void 라 로그가 유일한 통로다. */
 		dev_err(pci->dev, "Write ATU address failed\n");
 }
 
@@ -1383,19 +1383,19 @@ int dw_pcie_prog_outbound_atu(struct dw_pcie *pci,
 {
 	u64 parent_bus_addr = atu->parent_bus_addr;
 	u32 retries, val;
-	/* [한국어] [한국어] 창의 끝 주소. base + size - 1 이며, 하드웨어는 시작과 끝을 각각
+	/* [한국어] 창의 끝 주소. base + size - 1 이며, 하드웨어는 시작과 끝을 각각
 	 * 받으므로 미리 계산해 둔다. */
 	u64 limit_addr;
 
 	if (atu->index >= pci->num_ob_windows)
-		/* [한국어] [한국어] 요청한 창 번호가 하드웨어가 가진 창 개수를 넘었다.
+		/* [한국어] 요청한 창 번호가 하드웨어가 가진 창 개수를 넘었다.
 		 * 호출자(iatu_setup)가 이 값을 보고 창 부족을 보고한다. */
 		return -ENOSPC;
 
 	limit_addr = parent_bus_addr + atu->size - 1;
 
 	if ((limit_addr & ~pci->region_limit) != (parent_bus_addr & ~pci->region_limit) ||
-	    /* [한국어] [한국어] 정렬 검사. iATU 는 창 시작 주소가 region_align 의 배수여야 하고,
+	    /* [한국어] 정렬 검사. iATU 는 창 시작 주소가 region_align 의 배수여야 하고,
 	     * 그렇지 않으면 하드웨어가 하위 비트를 무시해 엉뚱한 범위를 덮는다. */
 	    !IS_ALIGNED(parent_bus_addr, pci->region_align) ||
 	    !IS_ALIGNED(atu->pci_addr, pci->region_align) || !atu->size) {
@@ -1403,52 +1403,52 @@ int dw_pcie_prog_outbound_atu(struct dw_pcie *pci,
 	}
 
 	dw_pcie_writel_atu_ob(pci, atu->index, PCIE_ATU_LOWER_BASE,
-			      /* [한국어] [한국어] 부모 버스 쪽 시작 주소의 하위 32비트. '알아볼 범위' 의 시작이다. */
+			      /* [한국어] 부모 버스 쪽 시작 주소의 하위 32비트. '알아볼 범위' 의 시작이다. */
 			      lower_32_bits(parent_bus_addr));
 	dw_pcie_writel_atu_ob(pci, atu->index, PCIE_ATU_UPPER_BASE,
-			      /* [한국어] [한국어] 그 상위 32비트. 64비트 주소를 두 레지스터에 나눠 담는다. */
+			      /* [한국어] 그 상위 32비트. 64비트 주소를 두 레지스터에 나눠 담는다. */
 			      upper_32_bits(parent_bus_addr));
 
 	dw_pcie_writel_atu_ob(pci, atu->index, PCIE_ATU_LIMIT,
-			      /* [한국어] [한국어] 끝 주소의 하위 32비트. 시작과 끝으로 범위가 확정된다. */
+			      /* [한국어] 끝 주소의 하위 32비트. 시작과 끝으로 범위가 확정된다. */
 			      lower_32_bits(limit_addr));
 	if (dw_pcie_ver_is_ge(pci, 460A))
-		/* [한국어] [한국어] 상위 limit 레지스터는 신형 IP 에만 있다. 그래서 이 쓰기가
+		/* [한국어] 상위 limit 레지스터는 신형 IP 에만 있다. 그래서 이 쓰기가
 		 * 조건 안에 들어 있다 -- 구형에서 쓰면 엉뚱한 레지스터를 건드린다. */
 		dw_pcie_writel_atu_ob(pci, atu->index, PCIE_ATU_UPPER_LIMIT,
-			      /* [한국어] [한국어] 끝 주소의 상위 32비트. */
+			      /* [한국어] 끝 주소의 상위 32비트. */
 			      upper_32_bits(limit_addr));
 
 	dw_pcie_writel_atu_ob(pci, atu->index, PCIE_ATU_LOWER_TARGET,
-			      /* [한국어] [한국어] PCI 쪽 목적지 주소의 하위 32비트. '옮겨 갈 곳' 이다. */
+			      /* [한국어] PCI 쪽 목적지 주소의 하위 32비트. '옮겨 갈 곳' 이다. */
 			      lower_32_bits(atu->pci_addr));
 	dw_pcie_writel_atu_ob(pci, atu->index, PCIE_ATU_UPPER_TARGET,
-			      /* [한국어] [한국어] 그 상위 32비트. */
+			      /* [한국어] 그 상위 32비트. */
 			      upper_32_bits(atu->pci_addr));
 
 	val = atu->type | atu->routing | PCIE_ATU_FUNC_NUM(atu->func_no);
-	/* [한국어] [한국어] 창이 4GB 경계를 넘는 경우. 상위 32비트가 시작과 끝에서 다르다는
+	/* [한국어] 창이 4GB 경계를 넘는 경우. 상위 32비트가 시작과 끝에서 다르다는
 	 * 것이 곧 경계를 넘는다는 뜻이다. */
 	if (upper_32_bits(limit_addr) > upper_32_bits(parent_bus_addr) &&
-	    /* [한국어] [한국어] 그 처리를 위한 비트는 460A 이상에서만 존재하므로 버전도 함께 본다. */
+	    /* [한국어] 그 처리를 위한 비트는 460A 이상에서만 존재하므로 버전도 함께 본다. */
 	    dw_pcie_ver_is_ge(pci, 460A))
 		val |= PCIE_ATU_INCREASE_REGION_SIZE;
-	/* [한국어] [한국어] 490A 와 500A 두 판본에만 해당하는 처리. 범위가 아니라 정확히
+	/* [한국어] 490A 와 500A 두 판본에만 해당하는 처리. 범위가 아니라 정확히
 	 * 두 값과 비교하는 것은, 그 사이 판본에는 없다가 다시 생긴 특성이기 때문이다. */
 	if (dw_pcie_ver_is(pci, 490A) || dw_pcie_ver_is(pci, 500A))
-		/* [한국어] [한국어] ECRC(End-to-End CRC) 생성을 켠다. */
+		/* [한국어] ECRC(End-to-End CRC) 생성을 켠다. */
 		val = dw_pcie_enable_ecrc(val);
-	/* [한국어] [한국어] 모아 둔 제어 비트를 한 번에 쓴다. */
+	/* [한국어] 모아 둔 제어 비트를 한 번에 쓴다. */
 	dw_pcie_writel_atu_ob(pci, atu->index, PCIE_ATU_REGION_CTRL1, val);
 
 	val = PCIE_ATU_ENABLE | atu->ctrl2;
-	/* [한국어] [한국어] MSG 창은 일반 창과 다른 필드(코드, 라우팅)를 더 채워야 한다. */
+	/* [한국어] MSG 창은 일반 창과 다른 필드(코드, 라우팅)를 더 채워야 한다. */
 	if (atu->type == PCIE_ATU_TYPE_MSG) {
 		/* The data-less messages only for now */
 		val |= PCIE_ATU_INHIBIT_PAYLOAD | atu->code;
 	}
 	dw_pcie_writel_atu_ob(pci, atu->index, PCIE_ATU_REGION_CTRL2, val);
-/* [한국어] [한국어] 인바운드 창의 끝 주소. base + size - 1 이다. */
+/* [한국어] 인바운드 창의 끝 주소. base + size - 1 이다. */
 
 	/*
 	 * Make sure ATU enable takes effect before any subsequent config
@@ -1456,17 +1456,17 @@ int dw_pcie_prog_outbound_atu(struct dw_pcie *pci,
 	 */
 	for (retries = 0; retries < LINK_WAIT_MAX_IATU_RETRIES; retries++) {
 		val = dw_pcie_readl_atu_ob(pci, atu->index, PCIE_ATU_REGION_CTRL2);
-		/* [한국어] [한국어] 창이 실제로 켜졌는지 확인한다. 하드웨어가 설정을 반영하는 데
+		/* [한국어] 창이 실제로 켜졌는지 확인한다. 하드웨어가 설정을 반영하는 데
 		 * 시간이 걸릴 수 있어 폴링한다. */
 		if (val & PCIE_ATU_ENABLE)
-			/* [한국어] [한국어] 켜졌으면 성공. */
+			/* [한국어] 켜졌으면 성공. */
 			return 0;
 
 		mdelay(LINK_WAIT_IATU);
 	}
 
 	dev_err(pci->dev, "Outbound iATU is not being enabled\n");
-/* [한국어] [한국어] 여기서부터가 target 쪽 -- 잡아챈 트랜잭션을 돌려보낼 CPU 메모리 주소. */
+/* [한국어] 여기서부터가 target 쪽 -- 잡아챈 트랜잭션을 돌려보낼 CPU 메모리 주소. */
 
 	return -ETIMEDOUT;
 }
@@ -1550,53 +1550,53 @@ int dw_pcie_prog_inbound_atu(struct dw_pcie *pci, int index, int type,
 {
 	u64 limit_addr = pci_addr + size - 1;
 	u32 retries, val;
-/* [한국어] [한국어] 인바운드도 창 번호가 하드웨어 범위 안이어야 한다. */
+/* [한국어] 인바운드도 창 번호가 하드웨어 범위 안이어야 한다. */
 
 	if (index >= pci->num_ib_windows)
-		/* [한국어] [한국어] 창 부족. 호출자가 dma_ranges 배분을 접는다. */
+		/* [한국어] 창 부족. 호출자가 dma_ranges 배분을 접는다. */
 		return -ENOSPC;
 
 	if ((limit_addr & ~pci->region_limit) != (pci_addr & ~pci->region_limit) ||
-	    /* [한국어] [한국어] 아웃바운드와 같은 정렬 요구. 방향만 다를 뿐 하드웨어 제약은 같다. */
+	    /* [한국어] 아웃바운드와 같은 정렬 요구. 방향만 다를 뿐 하드웨어 제약은 같다. */
 	    !IS_ALIGNED(parent_bus_addr, pci->region_align) ||
 	    !IS_ALIGNED(pci_addr, pci->region_align) || !size) {
 		return -EINVAL;
 	}
 
 	dw_pcie_writel_atu_ib(pci, index, PCIE_ATU_LOWER_BASE,
-			      /* [한국어] [한국어] **인바운드는 base 가 PCI 쪽이다.** 엔드포인트가 보낸 주소 중
+			      /* [한국어] **인바운드는 base 가 PCI 쪽이다.** 엔드포인트가 보낸 주소 중
 			       * 어느 범위를 잡아챌지 정하는 값이므로, 아웃바운드와 역할이 뒤바뀐다. */
 			      lower_32_bits(pci_addr));
 	dw_pcie_writel_atu_ib(pci, index, PCIE_ATU_UPPER_BASE,
-			      /* [한국어] [한국어] 그 상위 32비트. */
+			      /* [한국어] 그 상위 32비트. */
 			      upper_32_bits(pci_addr));
 
 	dw_pcie_writel_atu_ib(pci, index, PCIE_ATU_LIMIT,
-			      /* [한국어] [한국어] 잡아챌 범위의 끝. */
+			      /* [한국어] 잡아챌 범위의 끝. */
 			      lower_32_bits(limit_addr));
 	if (dw_pcie_ver_is_ge(pci, 460A))
-		/* [한국어] [한국어] 상위 limit 레지스터는 신형에만 있으므로 조건 안에 둔다. */
+		/* [한국어] 상위 limit 레지스터는 신형에만 있으므로 조건 안에 둔다. */
 		dw_pcie_writel_atu_ib(pci, index, PCIE_ATU_UPPER_LIMIT,
-			      /* [한국어] [한국어] 끝 주소의 상위 32비트. */
+			      /* [한국어] 끝 주소의 상위 32비트. */
 			      upper_32_bits(limit_addr));
 
 	dw_pcie_writel_atu_ib(pci, index, PCIE_ATU_LOWER_TARGET,
-			      /* [한국어] [한국어] **인바운드의 target 은 부모 버스(CPU 메모리) 쪽이다.** 잡아챈
+			      /* [한국어] **인바운드의 target 은 부모 버스(CPU 메모리) 쪽이다.** 잡아챈
 			       * 트랜잭션을 여기로 돌려보낸다. */
 			      lower_32_bits(parent_bus_addr));
 	dw_pcie_writel_atu_ib(pci, index, PCIE_ATU_UPPER_TARGET,
-			      /* [한국어] [한국어] 그 상위 32비트. */
+			      /* [한국어] 그 상위 32비트. */
 			      upper_32_bits(parent_bus_addr));
 
 	val = type;
-	/* [한국어] [한국어] 아웃바운드와 같은 4GB 경계 판정. 비교 대상만 pci_addr 로 바뀐다. */
+	/* [한국어] 아웃바운드와 같은 4GB 경계 판정. 비교 대상만 pci_addr 로 바뀐다. */
 	if (upper_32_bits(limit_addr) > upper_32_bits(pci_addr) &&
-	    /* [한국어] [한국어] 해당 비트가 460A 이상에만 있다. */
+	    /* [한국어] 해당 비트가 460A 이상에만 있다. */
 	    dw_pcie_ver_is_ge(pci, 460A))
 		val |= PCIE_ATU_INCREASE_REGION_SIZE;
-	/* [한국어] [한국어] 제어 비트를 쓴다. */
+	/* [한국어] 제어 비트를 쓴다. */
 	dw_pcie_writel_atu_ib(pci, index, PCIE_ATU_REGION_CTRL1, val);
-	/* [한국어] [한국어] 인바운드는 CTRL2 에 활성 비트만 쓰면 된다 -- 아웃바운드처럼
+	/* [한국어] 인바운드는 CTRL2 에 활성 비트만 쓰면 된다 -- 아웃바운드처럼
 	 * ECRC 나 MSG 관련 추가 비트가 없다. */
 	dw_pcie_writel_atu_ib(pci, index, PCIE_ATU_REGION_CTRL2, PCIE_ATU_ENABLE);
 
@@ -1606,16 +1606,16 @@ int dw_pcie_prog_inbound_atu(struct dw_pcie *pci, int index, int type,
 	 */
 	for (retries = 0; retries < LINK_WAIT_MAX_IATU_RETRIES; retries++) {
 		val = dw_pcie_readl_atu_ib(pci, index, PCIE_ATU_REGION_CTRL2);
-		/* [한국어] [한국어] 창이 켜졌는지 폴링으로 확인한다. */
+		/* [한국어] 창이 켜졌는지 폴링으로 확인한다. */
 		if (val & PCIE_ATU_ENABLE)
-			/* [한국어] [한국어] 켜졌으면 성공. */
+			/* [한국어] 켜졌으면 성공. */
 			return 0;
 
 		mdelay(LINK_WAIT_IATU);
 	}
 
 	dev_err(pci->dev, "Inbound iATU is not being enabled\n");
-/* [한국어] [한국어] 아래는 EP 전용 인바운드 창이다. 주소가 아니라 BAR 번호로 대상을
+/* [한국어] 아래는 EP 전용 인바운드 창이다. 주소가 아니라 BAR 번호로 대상을
  * 잡는 것이 위 두 함수와 결정적으로 다르다. */
 
 	return -ETIMEDOUT;
@@ -1658,24 +1658,24 @@ int dw_pcie_prog_ep_inbound_atu(struct dw_pcie *pci, u8 func_no, int index,
 	u32 retries, val;
 
 	if (!IS_ALIGNED(parent_bus_addr, pci->region_align) ||
-	    /* [한국어] [한국어] 여기서는 region_align 이 아니라 **size 자체**로 정렬을 검사한다.
+	    /* [한국어] 여기서는 region_align 이 아니라 **size 자체**로 정렬을 검사한다.
 	     * BAR 는 크기가 곧 정렬 요구이기 때문이다(PCI 규약). */
 	    !IS_ALIGNED(parent_bus_addr, size))
 		return -EINVAL;
 
 	dw_pcie_writel_atu_ib(pci, index, PCIE_ATU_LOWER_TARGET,
-			      /* [한국어] [한국어] BAR 뒤에 놓을 로컬 메모리 주소의 하위 32비트. */
+			      /* [한국어] BAR 뒤에 놓을 로컬 메모리 주소의 하위 32비트. */
 			      lower_32_bits(parent_bus_addr));
 	dw_pcie_writel_atu_ib(pci, index, PCIE_ATU_UPPER_TARGET,
-			      /* [한국어] [한국어] 그 상위 32비트. */
+			      /* [한국어] 그 상위 32비트. */
 			      upper_32_bits(parent_bus_addr));
 
 	dw_pcie_writel_atu_ib(pci, index, PCIE_ATU_REGION_CTRL1, type |
-			      /* [한국어] [한국어] 어느 물리 함수의 BAR 인지 지정한다. SR-IOV 다중 함수 EP 에서
+			      /* [한국어] 어느 물리 함수의 BAR 인지 지정한다. SR-IOV 다중 함수 EP 에서
 			       * 같은 BAR 번호가 함수마다 따로 존재하기 때문이다. */
 			      PCIE_ATU_FUNC_NUM(func_no));
 	dw_pcie_writel_atu_ib(pci, index, PCIE_ATU_REGION_CTRL2,
-			      /* [한국어] [한국어] 활성 + 함수 번호 일치 검사 + BAR 모드. **BAR 모드가 핵심**이다 --
+			      /* [한국어] 활성 + 함수 번호 일치 검사 + BAR 모드. **BAR 모드가 핵심**이다 --
 			       * 엔드포인트 BAR 주소는 호스트가 열거하며 정하므로 소프트웨어가 미리 알 수
 			       * 없고, 그래서 주소 대신 BAR 번호로 대상을 잡는다. */
 			      PCIE_ATU_ENABLE | PCIE_ATU_FUNC_NUM_MATCH_EN |
@@ -1687,20 +1687,20 @@ int dw_pcie_prog_ep_inbound_atu(struct dw_pcie *pci, u8 func_no, int index,
 	 */
 	for (retries = 0; retries < LINK_WAIT_MAX_IATU_RETRIES; retries++) {
 		val = dw_pcie_readl_atu_ib(pci, index, PCIE_ATU_REGION_CTRL2);
-		/* [한국어] [한국어] 창이 켜졌는지 폴링으로 확인한다. */
+		/* [한국어] 창이 켜졌는지 폴링으로 확인한다. */
 		if (val & PCIE_ATU_ENABLE)
-			/* [한국어] [한국어] 켜졌으면 성공. */
+			/* [한국어] 켜졌으면 성공. */
 			return 0;
 
 		mdelay(LINK_WAIT_IATU);
 	}
 
-	/* [한국어] [한국어] 정해진 횟수만큼 폴링했는데도 활성 비트가 서지 않았다. 창 설정 자체는
+	/* [한국어] 정해진 횟수만큼 폴링했는데도 활성 비트가 서지 않았다. 창 설정 자체는
 	 * 레지스터에 들어갔지만 하드웨어가 받아들이지 않은 상태다 -- 정렬이나 크기가
 	 * 이 IP 가 지원하는 범위를 벗어났을 때 이렇게 된다. */
 	dev_err(pci->dev, "Inbound iATU is not being enabled\n");
 
-	/* [한국어] [한국어] 호출자(dw_pcie_iatu_setup)가 이 값을 보고 배분을 중단하고
+	/* [한국어] 호출자(dw_pcie_iatu_setup)가 이 값을 보고 배분을 중단하고
 	 * 프로브 전체를 접는다. */
 	return -ETIMEDOUT;
 }
@@ -1755,7 +1755,7 @@ const char *dw_pcie_ltssm_status_string(enum dw_pcie_ltssm ltssm)
 	const char *str;
 
 	switch (ltssm) {
-/* [한국어] [한국어] 열거값 이름을 문자열로 바꾸는 상용구를 매크로로 접었다.
+/* [한국어] 열거값 이름을 문자열로 바꾸는 상용구를 매크로로 접었다.
  * `#n` 이 전처리기의 문자열화 연산자라 `case DW_PCIE_LTSSM_L0: str =
  * "DW_PCIE_LTSSM_L0"; break;` 로 펼쳐진다. 상태가 수십 개라 손으로 쓰면
  * 이름과 문자열이 어긋나기 쉬운데, 이 방식은 그럴 수 없다. */
@@ -1804,7 +1804,7 @@ const char *dw_pcie_ltssm_status_string(enum dw_pcie_ltssm ltssm)
 	}
 
 	return str + strlen("DW_PCIE_LTSSM_");
-/* [한국어] [한국어] 매크로 정의를 여기서 #undef 하지 않는 점에 유의 -- 파일 끝까지
+/* [한국어] 매크로 정의를 여기서 #undef 하지 않는 점에 유의 -- 파일 끝까지
  * 살아 있지만 다른 곳에서 쓰지 않으므로 충돌하지 않는다. */
 }
 
@@ -1850,12 +1850,12 @@ int dw_pcie_wait_for_link(struct dw_pcie *pci)
 {
 	u32 offset, val, ltssm;
 	int retries;
-/* [한국어] [한국어] 링크가 설 때까지 정해진 횟수만큼 폴링한다. */
+/* [한국어] 링크가 설 때까지 정해진 횟수만큼 폴링한다. */
 
 	/* Check if the link is up or not */
 	for (retries = 0; retries < PCIE_LINK_WAIT_MAX_RETRIES; retries++) {
 		if (dw_pcie_link_up(pci))
-			/* [한국어] [한국어] 링크가 섰으면 루프를 빠져나간다. */
+			/* [한국어] 링크가 섰으면 루프를 빠져나간다. */
 			break;
 
 		msleep(PCIE_LINK_WAIT_SLEEP_MS);
@@ -1868,11 +1868,11 @@ int dw_pcie_wait_for_link(struct dw_pcie *pci)
 		 */
 		ltssm = dw_pcie_get_ltssm(pci);
 		if (ltssm == DW_PCIE_LTSSM_DETECT_QUIET ||
-		    /* [한국어] [한국어] LTSSM 이 Detect 단계에 머물러 있다 -- 상대 장치의 전기적 존재
+		    /* [한국어] LTSSM 이 Detect 단계에 머물러 있다 -- 상대 장치의 전기적 존재
 		     * 자체가 감지되지 않았다는 뜻이다. 슬롯이 비었거나 전원이 없는 경우다. */
 		    ltssm == DW_PCIE_LTSSM_DETECT_ACT) {
 			dev_info(pci->dev, "Device not found\n");
-			/* [한국어] [한국어] 그래서 타임아웃(-ETIMEDOUT)이 아니라 '장치 없음' 으로 구별해
+			/* [한국어] 그래서 타임아웃(-ETIMEDOUT)이 아니라 '장치 없음' 으로 구별해
 			 * 돌려준다. 호출자(dw_pcie_host_init)가 -ETIMEDOUT 만 실패로 보므로,
 			 * 이 값은 프로브를 접게 만든다. */
 			return -ENODEV;
@@ -1885,13 +1885,13 @@ int dw_pcie_wait_for_link(struct dw_pcie *pci)
 		} else if (ltssm == DW_PCIE_LTSSM_POLL_ACTIVE ||
 			   ltssm == DW_PCIE_LTSSM_POLL_COMPLIANCE) {
 			dev_info(pci->dev, "Device found, but not active\n");
-			/* [한국어] [한국어] Detect 는 넘었지만 링크가 서지 않았다 -- 신호는 있는데 학습이
+			/* [한국어] Detect 는 넘었지만 링크가 서지 않았다 -- 신호는 있는데 학습이
 			 * 실패한 경우다. 배선 품질이나 이퀄라이제이션 문제일 수 있다. */
 			return -EIO;
 		}
 
 		dev_err(pci->dev, "Link failed to come up. LTSSM: %s\n",
-			/* [한국어] [한국어] 어느 상태에서 멈췄는지 이름으로 찍어 준다. 위 문자열 변환 함수가
+			/* [한국어] 어느 상태에서 멈췄는지 이름으로 찍어 준다. 위 문자열 변환 함수가
 			 * 여기서 쓰인다. */
 			dw_pcie_ltssm_status_string(ltssm));
 		return -ETIMEDOUT;
@@ -1906,12 +1906,12 @@ int dw_pcie_wait_for_link(struct dw_pcie *pci)
 		msleep(PCIE_RESET_CONFIG_WAIT_MS);
 
 	offset = dw_pcie_find_capability(pci, PCI_CAP_ID_EXP);
-	/* [한국어] [한국어] 링크가 섰으므로 실제 협상 결과를 읽는다. */
+	/* [한국어] 링크가 섰으므로 실제 협상 결과를 읽는다. */
 	val = dw_pcie_readw_dbi(pci, offset + PCI_EXP_LNKSTA);
-/* [한국어] [한국어] 아래에서 속도와 폭을 각각 뽑아 로그로 남긴다. */
+/* [한국어] 아래에서 속도와 폭을 각각 뽑아 로그로 남긴다. */
 
 	dev_info(pci->dev, "PCIe Gen.%u x%u link up\n",
-		 /* [한국어] [한국어] Current Link Speed 필드. 목표 속도보다 낮게 협상되면 여기서 드러난다. */
+		 /* [한국어] Current Link Speed 필드. 목표 속도보다 낮게 협상되면 여기서 드러난다. */
 		 FIELD_GET(PCI_EXP_LNKSTA_CLS, val),
 		 FIELD_GET(PCI_EXP_LNKSTA_NLW, val));
 
@@ -1941,15 +1941,15 @@ bool dw_pcie_link_up(struct dw_pcie *pci)
 	u32 val;
 
 	if (pci->ops && pci->ops->link_up)
-		/* [한국어] [한국어] SoC 가 자체 판정 함수를 등록했으면 그것을 쓴다. APB 레지스터 등
+		/* [한국어] SoC 가 자체 판정 함수를 등록했으면 그것을 쓴다. APB 레지스터 등
 		 * IP 바깥에서 더 정확히 알 수 있는 SoC 가 있기 때문이다. */
 		return pci->ops->link_up(pci);
 
 	val = dw_pcie_readl_dbi(pci, PCIE_PORT_DEBUG1);
-	/* [한국어] [한국어] 기본 판정은 두 비트를 함께 본다: LINK_UP 이 서 있고,
+	/* [한국어] 기본 판정은 두 비트를 함께 본다: LINK_UP 이 서 있고,
 	 * **동시에** IN_TRAINING 이 꺼져 있어야 한다. */
 	return ((val & PCIE_PORT_DEBUG1_LINK_UP) &&
-		/* [한국어] [한국어] 학습 중에도 LINK_UP 이 잠깐 설 수 있어, 그 과도 상태를 링크 업으로
+		/* [한국어] 학습 중에도 LINK_UP 이 잠깐 설 수 있어, 그 과도 상태를 링크 업으로
 		 * 오인하지 않으려면 두 번째 조건이 필요하다. */
 		(!(val & PCIE_PORT_DEBUG1_LINK_IN_TRAINING)));
 }
@@ -1976,12 +1976,12 @@ void dw_pcie_upconfig_setup(struct dw_pcie *pci)
 	u32 val;
 
 	val = dw_pcie_readl_dbi(pci, PCIE_PORT_MULTI_LANE_CTRL);
-	/* [한국어] [한국어] 다중 레인 업컨피그(링크 폭을 동적으로 넓히는 기능)를 지원한다고
+	/* [한국어] 다중 레인 업컨피그(링크 폭을 동적으로 넓히는 기능)를 지원한다고
 	 * 표시한다. 이것이 없으면 레인 수를 줄여 협상한 뒤 다시 늘릴 수 없다. */
 	val |= PORT_MLTI_UPCFG_SUPPORT;
-	/* [한국어] [한국어] 갱신된 값을 되쓴다. */
+	/* [한국어] 갱신된 값을 되쓴다. */
 	dw_pcie_writel_dbi(pci, PCIE_PORT_MULTI_LANE_CTRL, val);
-/* [한국어] [한국어] 이 설정은 링크가 서기 전에 끝나 있어야 한다. */
+/* [한국어] 이 설정은 링크가 서기 전에 끝나 있어야 한다. */
 }
 EXPORT_SYMBOL_GPL(dw_pcie_upconfig_setup);
 
@@ -2008,10 +2008,10 @@ static void dw_pcie_link_set_max_speed(struct dw_pcie *pci)
 {
 	u32 cap, ctrl2, link_speed;
 	u8 offset = dw_pcie_find_capability(pci, PCI_CAP_ID_EXP);
-/* [한국어] [한국어] DT 가 최대 속도를 지정하지 않았으면 음수가 들어온다. */
+/* [한국어] DT 가 최대 속도를 지정하지 않았으면 음수가 들어온다. */
 
 	cap = dw_pcie_readl_dbi(pci, offset + PCI_EXP_LNKCAP);
-/* [한국어] [한국어] PCI Express 능력 구조를 찾는다. 아래 LNKCAP/LNKCTL2 접근의 기준점이다. */
+/* [한국어] PCI Express 능력 구조를 찾는다. 아래 LNKCAP/LNKCTL2 접근의 기준점이다. */
 
 	/*
 	 * Even if the platform doesn't want to limit the maximum link speed,
@@ -2020,49 +2020,49 @@ static void dw_pcie_link_set_max_speed(struct dw_pcie *pci)
 	 */
 	if (pci->max_link_speed < 1) {
 		pci->max_link_speed = FIELD_GET(PCI_EXP_LNKCAP_SLS, cap);
-		/* [한국어] [한국어] 능력 구조가 없거나 DT 지정이 없으면 하드웨어 기본값을 그대로 둔다. */
+		/* [한국어] 능력 구조가 없거나 DT 지정이 없으면 하드웨어 기본값을 그대로 둔다. */
 		return;
 	}
 
 	ctrl2 = dw_pcie_readl_dbi(pci, offset + PCI_EXP_LNKCTL2);
-	/* [한국어] [한국어] Target Link Speed 필드를 먼저 비운다. 아래 switch 가 새 값을 넣는다. */
+	/* [한국어] Target Link Speed 필드를 먼저 비운다. 아래 switch 가 새 값을 넣는다. */
 	ctrl2 &= ~PCI_EXP_LNKCTL2_TLS;
 
 	switch (pcie_get_link_speed(pci->max_link_speed)) {
-	/* [한국어] [한국어] 2.5GT/s (Gen1). */
+	/* [한국어] 2.5GT/s (Gen1). */
 	case PCIE_SPEED_2_5GT:
-		/* [한국어] [한국어] LNKCTL2 의 목표 속도 인코딩. LNKCAP 의 지원 속도 인코딩과 값이
+		/* [한국어] LNKCTL2 의 목표 속도 인코딩. LNKCAP 의 지원 속도 인코딩과 값이
 		 * 같아서 아래에서 두 레지스터에 같은 변수를 쓴다. */
 		link_speed = PCI_EXP_LNKCTL2_TLS_2_5GT;
 		break;
 	case PCIE_SPEED_5_0GT:
-		/* [한국어] [한국어] 5GT/s (Gen2). */
+		/* [한국어] 5GT/s (Gen2). */
 		link_speed = PCI_EXP_LNKCTL2_TLS_5_0GT;
 		break;
 	case PCIE_SPEED_8_0GT:
-		/* [한국어] [한국어] 8GT/s (Gen3). */
+		/* [한국어] 8GT/s (Gen3). */
 		link_speed = PCI_EXP_LNKCTL2_TLS_8_0GT;
 		break;
 	case PCIE_SPEED_16_0GT:
-		/* [한국어] [한국어] 16GT/s (Gen4). */
+		/* [한국어] 16GT/s (Gen4). */
 		link_speed = PCI_EXP_LNKCTL2_TLS_16_0GT;
 		break;
 	default:
 		/* Use hardware capability */
 		link_speed = FIELD_GET(PCI_EXP_LNKCAP_SLS, cap);
 		ctrl2 &= ~PCI_EXP_LNKCTL2_HASD;
-		/* [한국어] [한국어] 그 밖의 값 -- 표에 없는 속도이므로 아무것도 바꾸지 않고 빠져나간다. */
+		/* [한국어] 그 밖의 값 -- 표에 없는 속도이므로 아무것도 바꾸지 않고 빠져나간다. */
 		break;
 	}
 
 	dw_pcie_writel_dbi(pci, offset + PCI_EXP_LNKCTL2, ctrl2 | link_speed);
-/* [한국어] [한국어] LNKCAP 의 지원 속도 필드도 함께 낮춘다. 목표만 낮추고 능력을 그대로
+/* [한국어] LNKCAP 의 지원 속도 필드도 함께 낮춘다. 목표만 낮추고 능력을 그대로
  * 두면 상대가 더 높은 속도를 시도해 협상이 어긋날 수 있다. */
 
 	cap &= ~((u32)PCI_EXP_LNKCAP_SLS);
-	/* [한국어] [한국어] 갱신된 LNKCAP 을 되쓴다. */
+	/* [한국어] 갱신된 LNKCAP 을 되쓴다. */
 	dw_pcie_writel_dbi(pci, offset + PCI_EXP_LNKCAP, cap | link_speed);
-/* [한국어] [한국어] 아래에서 LNKCTL2 도 같은 값으로 맞춘다. */
+/* [한국어] 아래에서 LNKCTL2 도 같은 값으로 맞춘다. */
 
 }
 
@@ -2085,7 +2085,7 @@ int dw_pcie_link_get_max_link_width(struct dw_pcie *pci)
 {
 	u8 cap = dw_pcie_find_capability(pci, PCI_CAP_ID_EXP);
 	u32 lnkcap = dw_pcie_readl_dbi(pci, cap + PCI_EXP_LNKCAP);
-/* [한국어] [한국어] 여기부터 레인 수 설정. 속도와 달리 두 레지스터 계통(포트 링크 제어와
+/* [한국어] 여기부터 레인 수 설정. 속도와 달리 두 레지스터 계통(포트 링크 제어와
  * 링크 폭/속도 제어)을 함께 건드려야 한다. */
 
 	return FIELD_GET(PCI_EXP_LNKCAP_MLW, lnkcap);
@@ -2116,47 +2116,47 @@ static void dw_pcie_link_set_max_link_width(struct dw_pcie *pci, u32 num_lanes)
 {
 	u32 lnkcap, lwsc, plc;
 	u8 cap;
-/* [한국어] [한국어] DT 가 레인 수를 주지 않았으면 하드웨어 기본값을 그대로 둔다. */
+/* [한국어] DT 가 레인 수를 주지 않았으면 하드웨어 기본값을 그대로 둔다. */
 
 	if (!num_lanes)
-		/* [한국어] [한국어] 값이 0 이면 설정할 것이 없다. */
+		/* [한국어] 값이 0 이면 설정할 것이 없다. */
 		return;
 
 	/* Set the number of lanes */
 	plc = dw_pcie_readl_dbi(pci, PCIE_PORT_LINK_CONTROL);
 	plc &= ~PORT_LINK_FAST_LINK_MODE;
-	/* [한국어] [한국어] 포트 링크 모드 필드를 비운다. 아래 switch 가 레인 수에 맞는 값을 넣는다. */
+	/* [한국어] 포트 링크 모드 필드를 비운다. 아래 switch 가 레인 수에 맞는 값을 넣는다. */
 	plc &= ~PORT_LINK_MODE_MASK;
-/* [한국어] [한국어] 아래에서 링크 폭/속도 제어 레지스터도 함께 손본다. */
+/* [한국어] 아래에서 링크 폭/속도 제어 레지스터도 함께 손본다. */
 
 	/* Set link width speed control register */
 	lwsc = dw_pcie_readl_dbi(pci, PCIE_LINK_WIDTH_SPEED_CONTROL);
 	lwsc &= ~PORT_LOGIC_LINK_WIDTH_MASK;
-	/* [한국어] [한국어] **먼저 1레인으로 세워 둔다.** 그 뒤 switch 가 실제 값을 덮어쓰는
+	/* [한국어] **먼저 1레인으로 세워 둔다.** 그 뒤 switch 가 실제 값을 덮어쓰는
 	 * 구조라, 표에 없는 레인 수가 들어와도 안전한 기본값이 남는다. */
 	lwsc |= PORT_LOGIC_LINK_WIDTH_1_LANES;
-	/* [한국어] [한국어] 지원하는 레인 수는 1/2/4/8/16 뿐이다 -- PCIe 규약이 2의 거듭제곱만
+	/* [한국어] 지원하는 레인 수는 1/2/4/8/16 뿐이다 -- PCIe 규약이 2의 거듭제곱만
 	 * 허용하기 때문이다. */
 	switch (num_lanes) {
-	/* [한국어] [한국어] 1레인. */
+	/* [한국어] 1레인. */
 	case 1:
-		/* [한국어] [한국어] 포트 링크 모드에 1레인 값을 넣는다. */
+		/* [한국어] 포트 링크 모드에 1레인 값을 넣는다. */
 		plc |= PORT_LINK_MODE_1_LANES;
 		break;
 	case 2:
-		/* [한국어] [한국어] 2레인. */
+		/* [한국어] 2레인. */
 		plc |= PORT_LINK_MODE_2_LANES;
 		break;
 	case 4:
-		/* [한국어] [한국어] 4레인. */
+		/* [한국어] 4레인. */
 		plc |= PORT_LINK_MODE_4_LANES;
 		break;
 	case 8:
-		/* [한국어] [한국어] 8레인. */
+		/* [한국어] 8레인. */
 		plc |= PORT_LINK_MODE_8_LANES;
 		break;
 	case 16:
-		/* [한국어] [한국어] 16레인. */
+		/* [한국어] 16레인. */
 		plc |= PORT_LINK_MODE_16_LANES;
 		break;
 	default:
@@ -2164,18 +2164,18 @@ static void dw_pcie_link_set_max_link_width(struct dw_pcie *pci, u32 num_lanes)
 		return;
 	}
 	dw_pcie_writel_dbi(pci, PCIE_PORT_LINK_CONTROL, plc);
-	/* [한국어] [한국어] 링크 폭/속도 제어 레지스터를 되쓴다. */
+	/* [한국어] 링크 폭/속도 제어 레지스터를 되쓴다. */
 	dw_pcie_writel_dbi(pci, PCIE_LINK_WIDTH_SPEED_CONTROL, lwsc);
-/* [한국어] [한국어] 이제 설정공간 쪽 LNKCAP 도 맞춰 준다. */
+/* [한국어] 이제 설정공간 쪽 LNKCAP 도 맞춰 준다. */
 
 	cap = dw_pcie_find_capability(pci, PCI_CAP_ID_EXP);
-	/* [한국어] [한국어] 현재 LNKCAP 을 읽는다. */
+	/* [한국어] 현재 LNKCAP 을 읽는다. */
 	lnkcap = dw_pcie_readl_dbi(pci, cap + PCI_EXP_LNKCAP);
-	/* [한국어] [한국어] Maximum Link Width 필드를 비운다. */
+	/* [한국어] Maximum Link Width 필드를 비운다. */
 	lnkcap &= ~PCI_EXP_LNKCAP_MLW;
-	/* [한국어] [한국어] 새 레인 수를 그 자리에 넣는다. FIELD_PREP 이 시프트를 유도한다. */
+	/* [한국어] 새 레인 수를 그 자리에 넣는다. FIELD_PREP 이 시프트를 유도한다. */
 	lnkcap |= FIELD_PREP(PCI_EXP_LNKCAP_MLW, num_lanes);
-	/* [한국어] [한국어] LNKCAP 을 되쓴다. 이 함수 전체가 dbi_ro_wr_en 구간 안에서 불려야
+	/* [한국어] LNKCAP 을 되쓴다. 이 함수 전체가 dbi_ro_wr_en 구간 안에서 불려야
 	 * 이 쓰기가 실제로 반영된다. */
 	dw_pcie_writel_dbi(pci, cap + PCI_EXP_LNKCAP, lnkcap);
 }
@@ -2210,100 +2210,100 @@ void dw_pcie_iatu_detect(struct dw_pcie *pci)
 {
 	int max_region, ob, ib;
 	u32 val, min, dir;
-	/* [한국어] [한국어] 상위 limit 레지스터에서 읽어 낼 값. 창이 덮을 수 있는 최대 크기를
+	/* [한국어] 상위 limit 레지스터에서 읽어 낼 값. 창이 덮을 수 있는 최대 크기를
 	 * 하드웨어에 물어보는 데 쓴다. */
 	u64 max;
 
 	val = dw_pcie_readl_dbi(pci, PCIE_ATU_VIEWPORT);
-	/* [한국어] [한국어] 뷰포트 레지스터가 전부 1 로 읽힌다 = 그 레지스터가 존재하지 않는다.
+	/* [한국어] 뷰포트 레지스터가 전부 1 로 읽힌다 = 그 레지스터가 존재하지 않는다.
 	 * 즉 신형 unrolled 방식이다. */
 	if (val == 0xFFFFFFFF) {
-		/* [한국어] [한국어] 이후 접근자들이 이 표시를 보고 창별 주소를 계산한다. */
+		/* [한국어] 이후 접근자들이 이 표시를 보고 창별 주소를 계산한다. */
 		dw_pcie_cap_set(pci, IATU_UNROLL);
 
 		max_region = min((int)pci->atu_size / 512, 256);
-	/* [한국어] [한국어] 신형은 창 개수를 다른 방법으로 알아내야 하므로 아래 탐침 루프로 넘어간다. */
+	/* [한국어] 신형은 창 개수를 다른 방법으로 알아내야 하므로 아래 탐침 루프로 넘어간다. */
 	} else {
 		pci->atu_base = pci->dbi_base + PCIE_ATU_VIEWPORT_BASE;
-		/* [한국어] [한국어] 구형 뷰포트 방식. atu_base 가 DBI 안에 있고 창 크기가 고정이다. */
+		/* [한국어] 구형 뷰포트 방식. atu_base 가 DBI 안에 있고 창 크기가 고정이다. */
 		pci->atu_size = PCIE_ATU_VIEWPORT_SIZE;
-/* [한국어] [한국어] 뷰포트 레지스터의 값 자체가 최대 창 번호이므로 +1 이 개수다.
+/* [한국어] 뷰포트 레지스터의 값 자체가 최대 창 번호이므로 +1 이 개수다.
  * 하드웨어가 직접 알려 주는 셈이라 탐침이 필요 없다. */
 
 		dw_pcie_writel_dbi(pci, PCIE_ATU_VIEWPORT, 0xFF);
-		/* [한국어] [한국어] 구형은 여기서 개수가 확정된다. */
+		/* [한국어] 구형은 여기서 개수가 확정된다. */
 		max_region = dw_pcie_readl_dbi(pci, PCIE_ATU_VIEWPORT) + 1;
 	}
 
 	for (ob = 0; ob < max_region; ob++) {
-		/* [한국어] [한국어] 신형의 창 개수 탐침. 존재하지 않는 창에 쓰면 값이 되돌아오지 않는다는
+		/* [한국어] 신형의 창 개수 탐침. 존재하지 않는 창에 쓰면 값이 되돌아오지 않는다는
 		 * 성질을 이용한다. 0x11110000 은 우연히 맞을 가능성이 낮은 표식 값이다. */
 		dw_pcie_writel_atu_ob(pci, ob, PCIE_ATU_LOWER_TARGET, 0x11110000);
-		/* [한국어] [한국어] 방금 쓴 값을 다시 읽는다. */
+		/* [한국어] 방금 쓴 값을 다시 읽는다. */
 		val = dw_pcie_readl_atu_ob(pci, ob, PCIE_ATU_LOWER_TARGET);
-		/* [한국어] [한국어] 값이 그대로 돌아오지 않으면 그 번호의 창이 없다는 뜻이다. */
+		/* [한국어] 값이 그대로 돌아오지 않으면 그 번호의 창이 없다는 뜻이다. */
 		if (val != 0x11110000)
-			/* [한국어] [한국어] 루프를 빠져나가면 ob 가 곧 아웃바운드 창 개수가 된다. */
+			/* [한국어] 루프를 빠져나가면 ob 가 곧 아웃바운드 창 개수가 된다. */
 			break;
 	}
 
 	for (ib = 0; ib < max_region; ib++) {
-		/* [한국어] [한국어] 인바운드도 같은 방식으로 탐침한다. */
+		/* [한국어] 인바운드도 같은 방식으로 탐침한다. */
 		dw_pcie_writel_atu_ib(pci, ib, PCIE_ATU_LOWER_TARGET, 0x11110000);
-		/* [한국어] [한국어] 되읽기. */
+		/* [한국어] 되읽기. */
 		val = dw_pcie_readl_atu_ib(pci, ib, PCIE_ATU_LOWER_TARGET);
-		/* [한국어] [한국어] 값이 다르면 창이 없다. */
+		/* [한국어] 값이 다르면 창이 없다. */
 		if (val != 0x11110000)
-			/* [한국어] [한국어] ib 가 인바운드 창 개수가 된다. */
+			/* [한국어] ib 가 인바운드 창 개수가 된다. */
 			break;
 	}
 
 	if (ob) {
-		/* [한국어] [한국어] 아웃바운드 창이 있으면 그쪽을 기준으로 크기 특성을 잰다. */
+		/* [한국어] 아웃바운드 창이 있으면 그쪽을 기준으로 크기 특성을 잰다. */
 		dir = PCIE_ATU_REGION_DIR_OB;
-	/* [한국어] [한국어] 아웃바운드가 없고 인바운드만 있는 경우(EP 전용 구성 등). */
+	/* [한국어] 아웃바운드가 없고 인바운드만 있는 경우(EP 전용 구성 등). */
 	} else if (ib) {
-		/* [한국어] [한국어] 인바운드를 기준으로 삼는다. */
+		/* [한국어] 인바운드를 기준으로 삼는다. */
 		dir = PCIE_ATU_REGION_DIR_IB;
-	/* [한국어] [한국어] 양쪽 다 없다 -- iATU 가 없거나 아직 깨어나지 않았다. */
+	/* [한국어] 양쪽 다 없다 -- iATU 가 없거나 아직 깨어나지 않았다. */
 	} else {
 		dev_err(pci->dev, "No iATU regions found\n");
-		/* [한국어] [한국어] 잴 대상이 없으므로 region_align/limit 을 정하지 못한 채 물러난다.
+		/* [한국어] 잴 대상이 없으므로 region_align/limit 을 정하지 못한 채 물러난다.
 		 * 호출자가 num_ob_windows == 0 을 보고 오류를 낸다. */
 		return;
 	}
 
 	dw_pcie_writel_atu(pci, dir, 0, PCIE_ATU_LIMIT, 0x0);
-	/* [한국어] [한국어] limit 레지스터를 읽으면 하드웨어가 **고정해 둔 하위 비트**가 드러난다.
+	/* [한국어] limit 레지스터를 읽으면 하드웨어가 **고정해 둔 하위 비트**가 드러난다.
 	 * 그 비트 수가 곧 창의 최소 단위(정렬 요구)다. */
 	min = dw_pcie_readl_atu(pci, dir, 0, PCIE_ATU_LIMIT);
-/* [한국어] [한국어] 아래에서 그 값으로 region_align 을 계산한다. */
+/* [한국어] 아래에서 그 값으로 region_align 을 계산한다. */
 
 	if (dw_pcie_ver_is_ge(pci, 460A)) {
-		/* [한국어] [한국어] 상위 limit 에 전부 1 을 써 보고 되읽으면, 하드웨어가 실제로 지원하는
+		/* [한국어] 상위 limit 에 전부 1 을 써 보고 되읽으면, 하드웨어가 실제로 지원하는
 		 * 상위 비트 폭을 알 수 있다. */
 		dw_pcie_writel_atu(pci, dir, 0, PCIE_ATU_UPPER_LIMIT, 0xFFFFFFFF);
-		/* [한국어] [한국어] 되읽은 값이 곧 지원 폭이다. */
+		/* [한국어] 되읽은 값이 곧 지원 폭이다. */
 		max = dw_pcie_readl_atu(pci, dir, 0, PCIE_ATU_UPPER_LIMIT);
-	/* [한국어] [한국어] 상위 limit 레지스터가 없는 구형. */
+	/* [한국어] 상위 limit 레지스터가 없는 구형. */
 	} else {
 		max = 0;
-	/* [한국어] [한국어] 그러면 창 상한이 4GB - 1 로 고정된다(아래 계산에서 max 가 0 이 되어
+	/* [한국어] 그러면 창 상한이 4GB - 1 로 고정된다(아래 계산에서 max 가 0 이 되어
 	 * (0 << 32) | (SZ_4G - 1) 이 된다). */
 	}
 
 	pci->num_ob_windows = ob;
-	/* [한국어] [한국어] 인바운드 창 개수를 저장한다. */
+	/* [한국어] 인바운드 창 개수를 저장한다. */
 	pci->num_ib_windows = ib;
-	/* [한국어] [한국어] fls(min) 은 min 의 최상위 1 비트 위치다. 1 << 그 값이 곧 최소 창 단위이자
+	/* [한국어] fls(min) 은 min 의 최상위 1 비트 위치다. 1 << 그 값이 곧 최소 창 단위이자
 	 * 정렬 요구가 된다. */
 	pci->region_align = 1 << fls(min);
-	/* [한국어] [한국어] 창 하나가 덮을 수 있는 최대 크기. 상위 지원 폭과 4GB-1 을 합친다. */
+	/* [한국어] 창 하나가 덮을 수 있는 최대 크기. 상위 지원 폭과 4GB-1 을 합친다. */
 	pci->region_limit = (max << 32) | (SZ_4G - 1);
-/* [한국어] [한국어] 아래 로그가 이 판별 결과를 요약해 남긴다. */
+/* [한국어] 아래 로그가 이 판별 결과를 요약해 남긴다. */
 
 	dev_info(pci->dev, "iATU: unroll %s, %u ob, %u ib, align %uK, limit %lluG\n",
-		 /* [한국어] [한국어] unrolled 여부를 T/F 로 찍는다. 디버깅할 때 어느 접근 방식이 쓰이는지
+		 /* [한국어] unrolled 여부를 T/F 로 찍는다. 디버깅할 때 어느 접근 방식이 쓰이는지
 		  * 가장 먼저 확인할 값이다. */
 		 dw_pcie_cap_is(pci, IATU_UNROLL) ? "T" : "F",
 		 pci->num_ob_windows, pci->num_ib_windows,
@@ -2326,18 +2326,18 @@ static u32 dw_pcie_readl_dma(struct dw_pcie *pci, u32 reg)
 {
 	u32 val = 0;
 	int ret;
-/* [한국어] [한국어] eDMA 레지스터 읽기. DBI 와 별개의 창일 수도, DBI 안일 수도 있다. */
+/* [한국어] eDMA 레지스터 읽기. DBI 와 별개의 창일 수도, DBI 안일 수도 있다. */
 
 	if (pci->ops && pci->ops->read_dbi)
-		/* [한국어] [한국어] 자체 DBI 구현이 있으면 그쪽으로 -- eDMA 가 DBI 안에 있는 경우다. */
+		/* [한국어] 자체 DBI 구현이 있으면 그쪽으로 -- eDMA 가 DBI 안에 있는 경우다. */
 		return pci->ops->read_dbi(pci, pci->edma.reg_base, reg, 4);
 
 	ret = dw_pcie_read(pci->edma.reg_base + reg, 4, &val);
-	/* [한국어] [한국어] 접근 실패. */
+	/* [한국어] 접근 실패. */
 	if (ret)
-		/* [한국어] [한국어] 로그가 유일한 통로다. */
+		/* [한국어] 로그가 유일한 통로다. */
 		dev_err(pci->dev, "Read DMA address failed\n");
-/* [한국어] [한국어] 실패해도 읽은 값을 돌려준다. */
+/* [한국어] 실패해도 읽은 값을 돌려준다. */
 
 	return val;
 }
@@ -2365,29 +2365,29 @@ static int dw_pcie_edma_irq_vector(struct device *dev, unsigned int nr)
 {
 	struct platform_device *pdev = to_platform_device(dev);
 	char name[6];
-	/* [한국어] [한국어] platform_get_irq_byname 계열의 반환값. */
+	/* [한국어] platform_get_irq_byname 계열의 반환값. */
 	int ret;
 
 	if (nr >= EDMA_MAX_WR_CH + EDMA_MAX_RD_CH)
-		/* [한국어] [한국어] eDMA 는 채널마다 IRQ 가 따로일 수도, 하나를 공유할 수도 있다.
+		/* [한국어] eDMA 는 채널마다 IRQ 가 따로일 수도, 하나를 공유할 수도 있다.
 		 * 요청한 번호가 확보된 IRQ 수를 넘으면 잘못된 요청이다. */
 		return -EINVAL;
 
 	ret = platform_get_irq_byname_optional(pdev, "dma");
-	/* [한국어] [한국어] 양수면 유효한 IRQ 번호다. */
+	/* [한국어] 양수면 유효한 IRQ 번호다. */
 	if (ret > 0)
-		/* [한국어] [한국어] 그대로 dw-edma 코어에 돌려준다. */
+		/* [한국어] 그대로 dw-edma 코어에 돌려준다. */
 		return ret;
 
 	snprintf(name, sizeof(name), "dma%u", nr);
-/* [한국어] [한국어] 못 찾았으면 아래에서 다른 방법으로 찾는다. */
+/* [한국어] 못 찾았으면 아래에서 다른 방법으로 찾는다. */
 
 	return platform_get_irq_byname_optional(pdev, name);
-/* [한국어] [한국어] eDMA 코어가 채널별 IRQ 를 물을 때 이 함수를 쓴다. */
+/* [한국어] eDMA 코어가 채널별 IRQ 를 물을 때 이 함수를 쓴다. */
 }
 
 static struct dw_edma_plat_ops dw_pcie_edma_ops = {
-	/* [한국어] [한국어] dw-edma 코어에 넘길 콜백. 레지스터 접근과 IRQ 조회를 이 파일이 맡는다. */
+	/* [한국어] dw-edma 코어에 넘길 콜백. 레지스터 접근과 IRQ 조회를 이 파일이 맡는다. */
 	.irq_vector = dw_pcie_edma_irq_vector,
 };
 
@@ -2409,9 +2409,9 @@ static void dw_pcie_edma_init_data(struct dw_pcie *pci)
 	pci->edma.dev = pci->dev;
 
 	if (!pci->edma.ops)
-		/* [한국어] [한국어] 콜백 테이블을 걸어야 dw-edma 코어가 이 IP 의 레지스터에 닿을 수 있다. */
+		/* [한국어] 콜백 테이블을 걸어야 dw-edma 코어가 이 IP 의 레지스터에 닿을 수 있다. */
 		pci->edma.ops = &dw_pcie_edma_ops;
-/* [한국어] [한국어] 아래에서 채널 수와 매핑 방식을 판별한다. */
+/* [한국어] 아래에서 채널 수와 매핑 방식을 판별한다. */
 
 	pci->edma.flags |= DW_EDMA_CHIP_LOCAL;
 }
@@ -2444,7 +2444,7 @@ static int dw_pcie_edma_find_mf(struct dw_pcie *pci)
 	 */
 	if (pci->edma.mf != EDMA_MF_EDMA_LEGACY)
 		return pci->edma.reg_base ? 0 : -ENODEV;
-/* [한국어] [한국어] eDMA 레지스터가 어디 있는지에 따라 판별 방법이 갈린다. */
+/* [한국어] eDMA 레지스터가 어디 있는지에 따라 판별 방법이 갈린다. */
 
 	/*
 	 * Indirect eDMA CSRs access has been completely removed since v5.40a
@@ -2453,23 +2453,23 @@ static int dw_pcie_edma_find_mf(struct dw_pcie *pci)
 	 */
 	if (dw_pcie_ver_is_ge(pci, 540A))
 		val = 0xFFFFFFFF;
-	/* [한국어] [한국어] 별도 창이 없는 경우. */
+	/* [한국어] 별도 창이 없는 경우. */
 	else
 		val = dw_pcie_readl_dbi(pci, PCIE_DMA_VIEWPORT_BASE + PCIE_DMA_CTRL);
-/* [한국어] [한국어] DBI 안의 고정 오프셋에서 읽는다. */
+/* [한국어] DBI 안의 고정 오프셋에서 읽는다. */
 
 	if (val == 0xFFFFFFFF && pci->edma.reg_base) {
-		/* [한국어] [한국어] unrolled 매핑 -- 채널마다 별도 레지스터 블록이 있다. */
+		/* [한국어] unrolled 매핑 -- 채널마다 별도 레지스터 블록이 있다. */
 		pci->edma.mf = EDMA_MF_EDMA_UNROLL;
-	/* [한국어] [한국어] 전부 1 이 아니면 레지스터가 존재한다는 뜻이다. */
+	/* [한국어] 전부 1 이 아니면 레지스터가 존재한다는 뜻이다. */
 	} else if (val != 0xFFFFFFFF) {
-		/* [한국어] [한국어] legacy 매핑 -- 채널을 선택한 뒤 공용 블록으로 접근한다.
+		/* [한국어] legacy 매핑 -- 채널을 선택한 뒤 공용 블록으로 접근한다.
 		 * iATU 의 뷰포트 방식과 같은 구조다. */
 		pci->edma.mf = EDMA_MF_EDMA_LEGACY;
-/* [한국어] [한국어] 아래에서 채널 수를 읽는다. */
+/* [한국어] 아래에서 채널 수를 읽는다. */
 
 		pci->edma.reg_base = pci->dbi_base + PCIE_DMA_VIEWPORT_BASE;
-	/* [한국어] [한국어] 전부 1 = 레지스터 없음 = eDMA 엔진이 없다. */
+	/* [한국어] 전부 1 = 레지스터 없음 = eDMA 엔진이 없다. */
 	} else {
 		return -ENODEV;
 	}
@@ -2506,13 +2506,13 @@ static int dw_pcie_edma_find_channels(struct dw_pcie *pci)
 	 */
 	if (pci->edma.mf != EDMA_MF_HDMA_NATIVE) {
 		val = dw_pcie_readl_dma(pci, PCIE_DMA_CTRL);
-/* [한국어] [한국어] 읽기 채널 수를 뽑는다. 쓰기 채널과 별도로 관리되는 이유는
+/* [한국어] 읽기 채널 수를 뽑는다. 쓰기 채널과 별도로 관리되는 이유는
  * 두 방향의 채널 수가 다를 수 있기 때문이다. */
 
 		pci->edma.ll_wr_cnt = FIELD_GET(PCIE_DMA_NUM_WR_CHAN, val);
-		/* [한국어] [한국어] 링크드 리스트 방식의 읽기 채널 개수. 아래 LLP 메모리 할당량을 정한다. */
+		/* [한국어] 링크드 리스트 방식의 읽기 채널 개수. 아래 LLP 메모리 할당량을 정한다. */
 		pci->edma.ll_rd_cnt = FIELD_GET(PCIE_DMA_NUM_RD_CHAN, val);
-	/* [한국어] [한국어] 채널 수 판별 끝. */
+	/* [한국어] 채널 수 판별 끝. */
 	}
 
 	/* Sanity check the channels count if the mapping was incorrect */
@@ -2543,9 +2543,9 @@ static int dw_pcie_edma_find_chip(struct dw_pcie *pci)
 	dw_pcie_edma_init_data(pci);
 
 	ret = dw_pcie_edma_find_mf(pci);
-	/* [한국어] [한국어] IRQ 확보 실패. */
+	/* [한국어] IRQ 확보 실패. */
 	if (ret)
-		/* [한국어] [한국어] eDMA 없이 진행할 수 있으므로 호출자가 이 값을 어떻게 다루는지가 중요하다. */
+		/* [한국어] eDMA 없이 진행할 수 있으므로 호출자가 이 값을 어떻게 다루는지가 중요하다. */
 		return ret;
 
 	return dw_pcie_edma_find_channels(pci);
@@ -2571,33 +2571,33 @@ static int dw_pcie_edma_irq_verify(struct dw_pcie *pci)
 {
 	struct platform_device *pdev = to_platform_device(pci->dev);
 	u16 ch_cnt = pci->edma.ll_wr_cnt + pci->edma.ll_rd_cnt;
-	/* [한국어] [한국어] "dma%d" 이름을 만들 버퍼. 15바이트면 두 자리 숫자까지 넉넉하다. */
+	/* [한국어] "dma%d" 이름을 만들 버퍼. 15바이트면 두 자리 숫자까지 넉넉하다. */
 	char name[15];
-	/* [한국어] [한국어] IRQ 조회 결과. */
+	/* [한국어] IRQ 조회 결과. */
 	int ret;
 
 	if (pci->edma.nr_irqs > 1)
-		/* [한국어] [한국어] SoC 드라이버가 IRQ 수를 미리 채워 두었으면 채널 수와 맞는지만 본다.
+		/* [한국어] SoC 드라이버가 IRQ 수를 미리 채워 두었으면 채널 수와 맞는지만 본다.
 		 * 어긋나면 채널마다 IRQ 를 배정할 수 없다. */
 		return pci->edma.nr_irqs != ch_cnt ? -EINVAL : 0;
 
 	ret = platform_get_irq_byname_optional(pdev, "dma");
-	/* [한국어] [한국어] 이름 없는 단일 "dma" 인터럽트를 먼저 시도한다. */
+	/* [한국어] 이름 없는 단일 "dma" 인터럽트를 먼저 시도한다. */
 	if (ret > 0) {
-		/* [한국어] [한국어] 하나뿐이면 모든 채널이 그것을 공유한다. */
+		/* [한국어] 하나뿐이면 모든 채널이 그것을 공유한다. */
 		pci->edma.nr_irqs = 1;
-		/* [한국어] [한국어] 더 찾을 필요가 없다. */
+		/* [한국어] 더 찾을 필요가 없다. */
 		return 0;
 	}
 
 	for (; pci->edma.nr_irqs < ch_cnt; pci->edma.nr_irqs++) {
-		/* [한국어] [한국어] "dma0", "dma1", ... 을 차례로 만든다. 분리형 MSI 이름 짓기와 같은 방식이다. */
+		/* [한국어] "dma0", "dma1", ... 을 차례로 만든다. 분리형 MSI 이름 짓기와 같은 방식이다. */
 		snprintf(name, sizeof(name), "dma%d", pci->edma.nr_irqs);
 
 		ret = platform_get_irq_byname_optional(pdev, name);
-		/* [한국어] [한국어] 더 없으면 지금까지 찾은 개수로 확정된다. */
+		/* [한국어] 더 없으면 지금까지 찾은 개수로 확정된다. */
 		if (ret <= 0)
-			/* [한국어] [한국어] 코드 관찰 (상류 그대로, 수정하지 않음): 하나도 못 찾았을 때와
+			/* [한국어] 코드 관찰 (상류 그대로, 수정하지 않음): 하나도 못 찾았을 때와
 			 * 중간에 끊겼을 때를 구별하지 않고 모두 -EINVAL 로 처리한다. */
 			return -EINVAL;
 	}
@@ -2629,42 +2629,42 @@ static int dw_pcie_edma_ll_alloc(struct dw_pcie *pci)
 {
 	struct dw_edma_region *ll;
 	dma_addr_t paddr;
-	/* [한국어] [한국어] 쓰기/읽기 채널을 순회할 인덱스. */
+	/* [한국어] 쓰기/읽기 채널을 순회할 인덱스. */
 	int i;
 
 	for (i = 0; i < pci->edma.ll_wr_cnt; i++) {
-		/* [한국어] [한국어] 쓰기 채널 i 의 링크드 리스트 영역. */
+		/* [한국어] 쓰기 채널 i 의 링크드 리스트 영역. */
 		ll = &pci->edma.ll_region_wr[i];
-		/* [한국어] [한국어] 채널마다 같은 크기를 잡는다. */
+		/* [한국어] 채널마다 같은 크기를 잡는다. */
 		ll->sz = DMA_LLP_MEM_SIZE;
-		/* [한국어] [한국어] **coherent 메모리여야 한다** -- eDMA 하드웨어가 이 리스트를 직접
+		/* [한국어] **coherent 메모리여야 한다** -- eDMA 하드웨어가 이 리스트를 직접
 		 * 읽으므로 CPU 캐시와 어긋나면 안 된다. */
 		ll->vaddr.mem = dmam_alloc_coherent(pci->dev, ll->sz,
-							    /* [한국어] [한국어] 물리 주소를 paddr 로 되받아 아래에서 ll->paddr 에 담는다. */
+							    /* [한국어] 물리 주소를 paddr 로 되받아 아래에서 ll->paddr 에 담는다. */
 							    &paddr, GFP_KERNEL);
 		if (!ll->vaddr.mem)
-			/* [한국어] [한국어] 할당 실패. devm 이라 앞서 잡은 것들은 자동 해제된다. */
+			/* [한국어] 할당 실패. devm 이라 앞서 잡은 것들은 자동 해제된다. */
 			return -ENOMEM;
 
 		ll->paddr = paddr;
-	/* [한국어] [한국어] 쓰기 채널 순회 끝. */
+	/* [한국어] 쓰기 채널 순회 끝. */
 	}
 
 	for (i = 0; i < pci->edma.ll_rd_cnt; i++) {
-		/* [한국어] [한국어] 읽기 채널도 같은 방식으로 잡는다. */
+		/* [한국어] 읽기 채널도 같은 방식으로 잡는다. */
 		ll = &pci->edma.ll_region_rd[i];
-		/* [한국어] [한국어] 같은 크기. */
+		/* [한국어] 같은 크기. */
 		ll->sz = DMA_LLP_MEM_SIZE;
-		/* [한국어] [한국어] 같은 이유로 coherent 할당. */
+		/* [한국어] 같은 이유로 coherent 할당. */
 		ll->vaddr.mem = dmam_alloc_coherent(pci->dev, ll->sz,
-							    /* [한국어] [한국어] 물리 주소를 되받는다. */
+							    /* [한국어] 물리 주소를 되받는다. */
 							    &paddr, GFP_KERNEL);
 		if (!ll->vaddr.mem)
-			/* [한국어] [한국어] 할당 실패. */
+			/* [한국어] 할당 실패. */
 			return -ENOMEM;
 
 		ll->paddr = paddr;
-	/* [한국어] [한국어] 읽기 채널 순회 끝. */
+	/* [한국어] 읽기 채널 순회 끝. */
 	}
 
 	return 0;
@@ -2698,39 +2698,39 @@ int dw_pcie_edma_detect(struct dw_pcie *pci)
 	/* Don't fail if no eDMA was found (for the backward compatibility) */
 	ret = dw_pcie_edma_find_chip(pci);
 	if (ret)
-		/* [한국어] [한국어] eDMA 엔진이 없다 -- 오류가 아니라 이 SoC 에 그 기능이 없는 것뿐이다.
+		/* [한국어] eDMA 엔진이 없다 -- 오류가 아니라 이 SoC 에 그 기능이 없는 것뿐이다.
 		 * 그래서 0(성공)을 돌려주고 호출자가 그대로 진행한다. */
 		return 0;
 
 	/* Don't fail on the IRQs verification (for the backward compatibility) */
 	ret = dw_pcie_edma_irq_verify(pci);
 	if (ret) {
-		/* [한국어] [한국어] IRQ 확보 실패. */
+		/* [한국어] IRQ 확보 실패. */
 		dev_err(pci->dev, "Invalid eDMA IRQs found\n");
-		/* [한국어] [한국어] 여기서도 0 을 돌려준다 -- eDMA 를 못 쓸 뿐 호스트 초기화는 계속된다. */
+		/* [한국어] 여기서도 0 을 돌려준다 -- eDMA 를 못 쓸 뿐 호스트 초기화는 계속된다. */
 		return 0;
 	}
 
 	ret = dw_pcie_edma_ll_alloc(pci);
-	/* [한국어] [한국어] LLP 메모리 할당 실패. */
+	/* [한국어] LLP 메모리 할당 실패. */
 	if (ret) {
-		/* [한국어] [한국어] 메모리 부족은 진짜 오류다. */
+		/* [한국어] 메모리 부족은 진짜 오류다. */
 		dev_err(pci->dev, "Couldn't allocate LLP memory\n");
-		/* [한국어] [한국어] 위 두 경우와 달리 실패를 올려 프로브를 접는다. */
+		/* [한국어] 위 두 경우와 달리 실패를 올려 프로브를 접는다. */
 		return ret;
 	}
 
 	/* Don't fail if the DW eDMA driver can't find the device */
 	ret = dw_edma_probe(&pci->edma);
 	if (ret && ret != -ENODEV) {
-		/* [한국어] [한국어] dw-edma 코어 등록 실패. */
+		/* [한국어] dw-edma 코어 등록 실패. */
 		dev_err(pci->dev, "Couldn't register eDMA device\n");
-		/* [한국어] [한국어] 여기서도 실패를 올린다. */
+		/* [한국어] 여기서도 실패를 올린다. */
 		return ret;
 	}
 
 	dev_info(pci->dev, "eDMA: unroll %s, %hu wr, %hu rd\n",
-		 /* [한국어] [한국어] unrolled 매핑 여부를 T/F 로 찍는다. iATU 로그와 같은 형식이다. */
+		 /* [한국어] unrolled 매핑 여부를 T/F 로 찍는다. iATU 로그와 같은 형식이다. */
 		 pci->edma.mf == EDMA_MF_EDMA_UNROLL ? "T" : "F",
 		 pci->edma.ll_wr_cnt, pci->edma.ll_rd_cnt);
 
@@ -2780,16 +2780,16 @@ void dw_pcie_hide_unsupported_l1ss(struct dw_pcie *pci)
 {
 	u16 l1ss;
 	u32 l1ss_cap;
-/* [한국어] [한국어] PCI Express 능력 구조를 찾는다. */
+/* [한국어] PCI Express 능력 구조를 찾는다. */
 
 	if (pci->l1ss_support)
-		/* [한국어] [한국어] 없으면 L1SS 능력도 있을 수 없다. */
+		/* [한국어] 없으면 L1SS 능력도 있을 수 없다. */
 		return;
 
 	l1ss = dw_pcie_find_ext_capability(pci, PCI_EXT_CAP_ID_L1SS);
-	/* [한국어] [한국어] L1 하위상태 확장 능력이 없다. */
+	/* [한국어] L1 하위상태 확장 능력이 없다. */
 	if (!l1ss)
-		/* [한국어] [한국어] 가릴 것이 없으므로 물러난다. */
+		/* [한국어] 가릴 것이 없으므로 물러난다. */
 		return;
 
 	/*
@@ -2799,10 +2799,10 @@ void dw_pcie_hide_unsupported_l1ss(struct dw_pcie *pci)
 	 */
 	l1ss_cap = dw_pcie_readl_dbi(pci, l1ss + PCI_L1SS_CAP);
 	l1ss_cap &= ~(PCI_L1SS_CAP_PCIPM_L1_1 | PCI_L1SS_CAP_ASPM_L1_1 |
-		      /* [한국어] [한국어] PCIPM/ASPM 의 L1.2 지원 비트와 L1 PM Substates 지원 비트를 함께 지운다.
+		      /* [한국어] PCIPM/ASPM 의 L1.2 지원 비트와 L1 PM Substates 지원 비트를 함께 지운다.
 		       * 일부만 지우면 호스트가 반쪽짜리 조합을 시도할 수 있다. */
 		      PCI_L1SS_CAP_PCIPM_L1_2 | PCI_L1SS_CAP_ASPM_L1_2 |
-		      /* [한국어] [한국어] 세 비트를 한 번에 마스크로 만든다. */
+		      /* [한국어] 세 비트를 한 번에 마스크로 만든다. */
 		      PCI_L1SS_CAP_L1_PM_SS);
 	dw_pcie_writel_dbi(pci, l1ss + PCI_L1SS_CAP, l1ss_cap);
 }
@@ -2834,52 +2834,52 @@ void dw_pcie_setup(struct dw_pcie *pci)
 	/* Configure Gen1 N_FTS */
 	if (pci->n_fts[0]) {
 		val = dw_pcie_readl_dbi(pci, PCIE_PORT_AFR);
-		/* [한국어] [한국어] N_FTS(Fast Training Sequence 개수) 필드 두 개를 비운다.
+		/* [한국어] N_FTS(Fast Training Sequence 개수) 필드 두 개를 비운다.
 		 * CC 는 Common Clock 모드용 별도 값이다. */
 		val &= ~(PORT_AFR_N_FTS_MASK | PORT_AFR_CC_N_FTS_MASK);
-		/* [한국어] [한국어] Gen1 용 FTS 개수를 넣는다. */
+		/* [한국어] Gen1 용 FTS 개수를 넣는다. */
 		val |= PORT_AFR_N_FTS(pci->n_fts[0]);
-		/* [한국어] [한국어] Common Clock 모드용에도 같은 값을 넣는다. */
+		/* [한국어] Common Clock 모드용에도 같은 값을 넣는다. */
 		val |= PORT_AFR_CC_N_FTS(pci->n_fts[0]);
-		/* [한국어] [한국어] 갱신된 AFR 을 되쓴다. */
+		/* [한국어] 갱신된 AFR 을 되쓴다. */
 		dw_pcie_writel_dbi(pci, PCIE_PORT_AFR, val);
-	/* [한국어] [한국어] n_fts[0] 이 0 이면 이 블록 전체를 건너뛴다 -- 하드웨어 기본값을 쓴다. */
+	/* [한국어] n_fts[0] 이 0 이면 이 블록 전체를 건너뛴다 -- 하드웨어 기본값을 쓴다. */
 	}
 
 	/* Configure Gen2+ N_FTS */
 	if (pci->n_fts[1]) {
 		val = dw_pcie_readl_dbi(pci, PCIE_LINK_WIDTH_SPEED_CONTROL);
-		/* [한국어] [한국어] Gen2 이상용 N_FTS 필드를 비운다. */
+		/* [한국어] Gen2 이상용 N_FTS 필드를 비운다. */
 		val &= ~PORT_LOGIC_N_FTS_MASK;
-		/* [한국어] [한국어] n_fts[1] 을 넣는다. 여기는 시프트가 없어 값이 그대로 하위 비트에 들어간다. */
+		/* [한국어] n_fts[1] 을 넣는다. 여기는 시프트가 없어 값이 그대로 하위 비트에 들어간다. */
 		val |= pci->n_fts[1];
-		/* [한국어] [한국어] 갱신된 값을 되쓴다. */
+		/* [한국어] 갱신된 값을 되쓴다. */
 		dw_pcie_writel_dbi(pci, PCIE_LINK_WIDTH_SPEED_CONTROL, val);
-	/* [한국어] [한국어] n_fts[1] 이 0 이면 건너뛴다. */
+	/* [한국어] n_fts[1] 이 0 이면 건너뛴다. */
 	}
 
 	if (dw_pcie_cap_is(pci, CDM_CHECK)) {
-		/* [한국어] [한국어] CDM(Configuration Dependent Module) 레지스터 무결성 검사 제어.
+		/* [한국어] CDM(Configuration Dependent Module) 레지스터 무결성 검사 제어.
 		 * DT 바인딩 문서(snps,dw-pcie-common.yaml)에서 확인한 이름이다. */
 		val = dw_pcie_readl_dbi(pci, PCIE_PL_CHK_REG_CONTROL_STATUS);
-		/* [한국어] [한국어] 연속 검사 모드와 시작 비트를 함께 세운다. */
+		/* [한국어] 연속 검사 모드와 시작 비트를 함께 세운다. */
 		val |= PCIE_PL_CHK_REG_CHK_REG_CONTINUOUS |
-		       /* [한국어] [한국어] 두 비트를 한 번에. */
+		       /* [한국어] 두 비트를 한 번에. */
 		       PCIE_PL_CHK_REG_CHK_REG_START;
-		/* [한국어] [한국어] 검사를 시작시킨다. 설정 레지스터가 조용히 손상되는 것을 잡기 위한 기능이다. */
+		/* [한국어] 검사를 시작시킨다. 설정 레지스터가 조용히 손상되는 것을 잡기 위한 기능이다. */
 		dw_pcie_writel_dbi(pci, PCIE_PL_CHK_REG_CONTROL_STATUS, val);
-	/* [한국어] [한국어] DT 에 그 속성이 없으면 켜지 않는다. */
+	/* [한국어] DT 에 그 속성이 없으면 켜지 않는다. */
 	}
 
 	val = dw_pcie_readl_dbi(pci, PCIE_PORT_LINK_CONTROL);
-	/* [한국어] [한국어] Fast Link Mode 를 **끈다.** 이것은 시뮬레이션용 축약 모드라
+	/* [한국어] Fast Link Mode 를 **끈다.** 이것은 시뮬레이션용 축약 모드라
 	 * 실제 하드웨어에서 켜져 있으면 링크가 서지 않는다. */
 	val &= ~PORT_LINK_FAST_LINK_MODE;
-	/* [한국어] [한국어] 데이터 링크 계층 활성. 이것이 있어야 링크가 L0 까지 올라간다. */
+	/* [한국어] 데이터 링크 계층 활성. 이것이 있어야 링크가 L0 까지 올라간다. */
 	val |= PORT_LINK_DLL_LINK_EN;
-	/* [한국어] [한국어] 갱신된 포트 링크 제어를 되쓴다. */
+	/* [한국어] 갱신된 포트 링크 제어를 되쓴다. */
 	dw_pcie_writel_dbi(pci, PCIE_PORT_LINK_CONTROL, val);
-/* [한국어] [한국어] 여기까지가 링크가 서기 전에 끝나야 하는 설정이다. */
+/* [한국어] 여기까지가 링크가 서기 전에 끝나야 하는 설정이다. */
 
 	dw_pcie_link_set_max_link_width(pci, pci->num_lanes);
 }
@@ -2915,12 +2915,12 @@ resource_size_t dw_pcie_parent_bus_offset(struct dw_pcie *pci,
 {
 	struct device *dev = pci->dev;
 	struct device_node *np = dev->of_node;
-	/* [한국어] [한국어] DT 의 reg 배열에서 찾은 항목 번호. */
+	/* [한국어] DT 의 reg 배열에서 찾은 항목 번호. */
 	int index;
-	/* [한국어] [한국어] reg_addr 은 DT 가 말하는 주소, fixup_addr 은 보정 함수가 계산한 주소.
+	/* [한국어] reg_addr 은 DT 가 말하는 주소, fixup_addr 은 보정 함수가 계산한 주소.
 	 * 둘을 견주어 보정이 아직 필요한지 판정한다. */
 	u64 reg_addr, fixup_addr;
-	/* [한국어] [한국어] SoC 별 주소 보정 함수. DT 의 ranges 가 불완전하던 시절의 잔재를
+	/* [한국어] SoC 별 주소 보정 함수. DT 의 ranges 가 불완전하던 시절의 잔재를
 	 * 코드로 메우는 통로다. */
 	u64 (*fixup)(struct dw_pcie *pcie, u64 cpu_addr);
 
@@ -2928,43 +2928,43 @@ resource_size_t dw_pcie_parent_bus_offset(struct dw_pcie *pci,
 	index = of_property_match_string(np, "reg-names", reg_name);
 
 	if (index < 0) {
-		/* [한국어] [한국어] 그 이름의 reg 항목이 DT 에 없다. */
+		/* [한국어] 그 이름의 reg 항목이 DT 에 없다. */
 		dev_err(dev, "No %s in devicetree \"reg\" property\n", reg_name);
-		/* [한국어] [한국어] 0 을 돌려주면 보정 없이 그대로 쓰겠다는 뜻이 된다. */
+		/* [한국어] 0 을 돌려주면 보정 없이 그대로 쓰겠다는 뜻이 된다. */
 		return 0;
 	}
 
 	of_property_read_reg(np, index, &reg_addr, NULL);
-/* [한국어] [한국어] 이 SoC 에 등록된 보정 함수를 찾는다. */
+/* [한국어] 이 SoC 에 등록된 보정 함수를 찾는다. */
 
 	fixup = pci->ops ? pci->ops->cpu_addr_fixup : NULL;
-	/* [한국어] [한국어] 보정 함수가 있는 경우. */
+	/* [한국어] 보정 함수가 있는 경우. */
 	if (fixup) {
-		/* [한국어] [한국어] 보정 함수가 계산한 주소. */
+		/* [한국어] 보정 함수가 계산한 주소. */
 		fixup_addr = fixup(pci, cpu_phys_addr);
-		/* [한국어] [한국어] DT 가 말하는 주소와 같다 = DT 가 이미 올바르므로 보정이 불필요하다. */
+		/* [한국어] DT 가 말하는 주소와 같다 = DT 가 이미 올바르므로 보정이 불필요하다. */
 		if (reg_addr == fixup_addr) {
-			/* [한국어] [한국어] 그 사실을 로그로 알린다. %ps 로 함수 이름까지 찍어, 어느 보정 함수를
+			/* [한국어] 그 사실을 로그로 알린다. %ps 로 함수 이름까지 찍어, 어느 보정 함수를
 			 * 지워도 되는지 개발자에게 알려 준다. */
 			dev_info(dev, "%s reg[%d] %#010llx == %#010llx == fixup(cpu %#010llx); %ps is redundant with this devicetree\n",
-				 /* [한국어] [한국어] 로그 인자들. */
+				 /* [한국어] 로그 인자들. */
 				 reg_name, index, reg_addr, fixup_addr,
 				 (unsigned long long) cpu_phys_addr, fixup);
 		} else {
 			dev_warn(dev, "%s reg[%d] %#010llx != %#010llx == fixup(cpu %#010llx); devicetree is broken\n",
-				 /* [한국어] [한국어] 값이 다른 경우의 로그 인자들 -- 보정이 여전히 필요하다는 뜻이다. */
+				 /* [한국어] 값이 다른 경우의 로그 인자들 -- 보정이 여전히 필요하다는 뜻이다. */
 				 reg_name, index, reg_addr, fixup_addr,
 				 (unsigned long long) cpu_phys_addr);
 			reg_addr = fixup_addr;
-		/* [한국어] [한국어] 판정 끝. */
+		/* [한국어] 판정 끝. */
 		}
 
 		return cpu_phys_addr - reg_addr;
-	/* [한국어] [한국어] 보정 함수가 없는 경우로 이어진다. */
+	/* [한국어] 보정 함수가 없는 경우로 이어진다. */
 	}
 
 	if (pci->use_parent_dt_ranges) {
-/* [한국어] [한국어] 보정 없이 DT 주소와 CPU 주소를 직접 견준다. */
+/* [한국어] 보정 없이 DT 주소와 CPU 주소를 직접 견준다. */
 
 		/*
 		 * This platform once had a fixup, presumably because it
@@ -2973,15 +2973,15 @@ resource_size_t dw_pcie_parent_bus_offset(struct dw_pcie *pci,
 		 */
 		if (reg_addr == cpu_phys_addr)
 			dev_info(dev, "%s reg[%d] %#010llx == cpu %#010llx\n; no fixup was ever needed for this devicetree\n",
-				 /* [한국어] [한국어] 두 주소가 다른데 보정 함수가 없다 -- DT 의 ranges 가 불완전하다는 뜻이다. */
+				 /* [한국어] 두 주소가 다른데 보정 함수가 없다 -- DT 의 ranges 가 불완전하다는 뜻이다. */
 				 reg_name, index, reg_addr,
 				 (unsigned long long) cpu_phys_addr);
 	} else {
 		if (reg_addr != cpu_phys_addr) {
-			/* [한국어] [한국어] 그 경우 경고를 남긴다. 조용히 넘어가면 나중에 iATU 창이 엉뚱한
+			/* [한국어] 그 경우 경고를 남긴다. 조용히 넘어가면 나중에 iATU 창이 엉뚱한
 			 * 주소를 덮는 원인을 찾기 어렵다. */
 			dev_warn(dev, "%s reg[%d] %#010llx != cpu %#010llx; no fixup and devicetree \"ranges\" is broken, assuming no translation\n",
-				 /* [한국어] [한국어] 로그 인자들. */
+				 /* [한국어] 로그 인자들. */
 				 reg_name, index, reg_addr,
 				 (unsigned long long) cpu_phys_addr);
 			return 0;
@@ -2989,5 +2989,5 @@ resource_size_t dw_pcie_parent_bus_offset(struct dw_pcie *pci,
 	}
 
 	return cpu_phys_addr - reg_addr;
-/* [한국어] [한국어] 판정 결과가 곧 이후 모든 iATU 계산이 뺄 오프셋이 된다. */
+/* [한국어] 판정 결과가 곧 이후 모든 iATU 계산이 뺄 오프셋이 된다. */
 }

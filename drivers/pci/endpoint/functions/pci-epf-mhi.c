@@ -2701,11 +2701,11 @@ static int pci_epf_mhi_bus_master_enable(struct pci_epf *epf)
 {
 	struct pci_epf_mhi *epf_mhi = epf_get_drvdata(epf);
 	const struct pci_epf_mhi_ep_info *info = epf_mhi->info;
-	/* [한국어] [한국어] 전원을 올릴 대상. 인스턴스 안에 값으로 박혀 있으므로 주소만 취한다. */
+	/* [한국어] 전원을 올릴 대상. 인스턴스 안에 값으로 박혀 있으므로 주소만 취한다. */
 	struct mhi_ep_cntrl *mhi_cntrl = &epf_mhi->mhi_cntrl;
-	/* [한국어] [한국어] 실패 로그의 주체가 될 EPF 장치. */
+	/* [한국어] 실패 로그의 주체가 될 EPF 장치. */
 	struct device *dev = &epf->dev;
-	/* [한국어] [한국어] mhi_ep_power_up 의 반환값을 담을 임시 변수. */
+	/* [한국어] mhi_ep_power_up 의 반환값을 담을 임시 변수. */
 	int ret;
 
 	/*
@@ -2714,16 +2714,16 @@ static int pci_epf_mhi_bus_master_enable(struct pci_epf *epf)
 	 */
 	if (!mhi_cntrl->enabled && mhi_cntrl->mhi_dev) {
 		ret = mhi_ep_power_up(mhi_cntrl);
-		/* [한국어] [한국어] 전원 인가 실패. 여기서 되감지 않으면 link_up 이 잡아 둔 DMA 채널과
+		/* [한국어] 전원 인가 실패. 여기서 되감지 않으면 link_up 이 잡아 둔 DMA 채널과
 		 * 컨트롤러 등록이 영영 남는다 -- 이 콜백은 상위에 실패를 전할 수 없으므로
 		 * 정리 책임이 전부 이 자리에 있다. */
 		if (ret) {
-			/* [한국어] [한국어] 실패 원인을 남긴다. 반환값은 버려지므로 이 로그가 유일한 단서다. */
+			/* [한국어] 실패 원인을 남긴다. 반환값은 버려지므로 이 로그가 유일한 단서다. */
 			dev_err(dev, "Failed to power up MHI EP: %d\n", ret);
-			/* [한국어] [한국어] eDMA 를 쓰는 SoC(sm8450/sa8775p)에서만 DMA 자원을 잡아 두었다.
+			/* [한국어] eDMA 를 쓰는 SoC(sm8450/sa8775p)에서만 DMA 자원을 잡아 두었다.
 			 * iATU 복사만 쓰는 sdx55 에서는 반납할 채널이 없다. */
 			if (info->flags & MHI_EPF_USE_DMA)
-				/* [한국어] [한국어] 워크큐를 비워 진행 중인 완료 콜백을 소진한 뒤 채널을 놓는다.
+				/* [한국어] 워크큐를 비워 진행 중인 완료 콜백을 소진한 뒤 채널을 놓는다.
 				 * 순서상 power_up 이 실패했으므로 새 전송이 들어올 일은 없다. */
 				pci_epf_mhi_dma_deinit(epf_mhi);
 			mhi_ep_unregister_controller(mhi_cntrl);
@@ -2773,49 +2773,49 @@ static int pci_epf_mhi_bind(struct pci_epf *epf)
 {
 	struct pci_epf_mhi *epf_mhi = epf_get_drvdata(epf);
 	struct pci_epc *epc = epf->epc;
-	/* [한국어] [한국어] "mmio"/"doorbell" 조회 실패를 알릴 로그 주체. */
+	/* [한국어] "mmio"/"doorbell" 조회 실패를 알릴 로그 주체. */
 	struct device *dev = &epf->dev;
-	/* [한국어] [한국어] 자원의 실제 주인을 찾아 올라간다. EPF 는 가상 버스 위의 객체라
+	/* [한국어] 자원의 실제 주인을 찾아 올라간다. EPF 는 가상 버스 위의 객체라
 	 * 자기 DT 노드가 없고, MMIO 와 도어벨은 EPC 하드웨어 노드에 기술되어 있다.
 	 * epc->dev.parent 가 바로 그 노드를 소유한 플랫폼 디바이스다. */
 	struct platform_device *pdev = to_platform_device(epc->dev.parent);
-	/* [한국어] [한국어] platform_get_resource_byname 이 돌려줄 메모리 자원 서술자. */
+	/* [한국어] platform_get_resource_byname 이 돌려줄 메모리 자원 서술자. */
 	struct resource *res;
-	/* [한국어] [한국어] IRQ 번호(양수)와 오류(음수)를 함께 받는 변수. 그래서 아래에서
+	/* [한국어] IRQ 번호(양수)와 오류(음수)를 함께 받는 변수. 그래서 아래에서
 	 * !ret 이 아니라 ret < 0 으로 판정한다 -- 0 도 유효한 IRQ 일 수 있다. */
 	int ret;
 
 	/* Get MMIO base address from Endpoint controller */
 	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "mmio");
 	if (!res) {
-		/* [한국어] [한국어] DT 의 EP 컨트롤러 노드에 reg-names = "mmio" 항목이 없다는 뜻.
+		/* [한국어] DT 의 EP 컨트롤러 노드에 reg-names = "mmio" 항목이 없다는 뜻.
 		 * 이 드라이버는 MHI 레지스터 블록 없이는 아무것도 못 하므로 곧바로 실패한다. */
 		dev_err(dev, "Failed to get \"mmio\" resource\n");
-		/* [한국어] [한국어] 장치가 이 드라이버에 맞지 않는다는 표준 코드. 아직 잡은 자원이
+		/* [한국어] 장치가 이 드라이버에 맞지 않는다는 표준 코드. 아직 잡은 자원이
 		 * 없으므로 되감을 것도 없다. */
 		return -ENODEV;
 	}
 
 	epf_mhi->mmio_phys = res->start;
-	/* [한국어] [한국어] BAR 크기로도 쓰일 값. epc_init 이 epf_bar->size 에 그대로 싣는다. */
+	/* [한국어] BAR 크기로도 쓰일 값. epc_init 이 epf_bar->size 에 그대로 싣는다. */
 	epf_mhi->mmio_size = resource_size(res);
 
 	epf_mhi->mmio = ioremap(epf_mhi->mmio_phys, epf_mhi->mmio_size);
-	/* [한국어] [한국어] ioremap 실패. 가상 주소 공간이 모자라거나 범위가 겹칠 때 NULL 이다. */
+	/* [한국어] ioremap 실패. 가상 주소 공간이 모자라거나 범위가 겹칠 때 NULL 이다. */
 	if (!epf_mhi->mmio)
-		/* [한국어] [한국어] 아직 IRQ 를 잡기 전이므로 되감을 것 없이 바로 빠진다. */
+		/* [한국어] 아직 IRQ 를 잡기 전이므로 되감을 것 없이 바로 빠진다. */
 		return -ENOMEM;
 
 	ret = platform_get_irq_byname(pdev, "doorbell");
-	/* [한국어] [한국어] IRQ 조회 실패(-EPROBE_DEFER 포함). 음수만 오류로 본다. */
+	/* [한국어] IRQ 조회 실패(-EPROBE_DEFER 포함). 음수만 오류로 본다. */
 	if (ret < 0) {
-		/* [한국어] [한국어] 바로 위에서 성공한 ioremap 을 직접 되돌린다. 되감을 자원이
+		/* [한국어] 바로 위에서 성공한 ioremap 을 직접 되돌린다. 되감을 자원이
 		 * 하나뿐이라 goto 라벨 없이 인라인으로 처리한다. */
 		iounmap(epf_mhi->mmio);
 		return ret;
 	}
 
-	/* [한국어] [한국어] 도어벨 IRQ 번호를 인스턴스에 보관한다. 여기서 요청하지 않고
+	/* [한국어] 도어벨 IRQ 번호를 인스턴스에 보관한다. 여기서 요청하지 않고
 	 * 번호만 들고 있다가 link_up 이 mhi_cntrl->irq 로 넘기면, 핸들러 등록은
 	 * MHI 코어의 mhi_ep_register_controller 가 맡는다 -- 인터럽트가 실제로
 	 * 울리는 것은 호스트가 링에 항목을 넣은 뒤이므로 그때까지 미룬다. */
@@ -2859,11 +2859,11 @@ static void pci_epf_mhi_unbind(struct pci_epf *epf)
 {
 	struct pci_epf_mhi *epf_mhi = epf_get_drvdata(epf);
 	const struct pci_epf_mhi_ep_info *info = epf_mhi->info;
-	/* [한국어] [한국어] 닫아야 할 BAR 의 서술자. epc_init 이 열어 둔 바로 그 BAR 다. */
+	/* [한국어] 닫아야 할 BAR 의 서술자. epc_init 이 열어 둔 바로 그 BAR 다. */
 	struct pci_epf_bar *epf_bar = &epf->bar[info->bar_num];
-	/* [한국어] [한국어] 강제 전원 차단과 등록 해제의 대상. */
+	/* [한국어] 강제 전원 차단과 등록 해제의 대상. */
 	struct mhi_ep_cntrl *mhi_cntrl = &epf_mhi->mhi_cntrl;
-	/* [한국어] [한국어] pci_epc_clear_bar 를 부를 컨트롤러. */
+	/* [한국어] pci_epc_clear_bar 를 부를 컨트롤러. */
 	struct pci_epc *epc = epf->epc;
 
 	/*
@@ -2874,25 +2874,25 @@ static void pci_epf_mhi_unbind(struct pci_epf *epf)
 	if (mhi_cntrl->mhi_dev) {
 		mhi_ep_power_down(mhi_cntrl);
 		if (info->flags & MHI_EPF_USE_DMA)
-			/* [한국어] [한국어] eDMA SoC 에서만 채널/워크큐를 반납한다. power_down 이 먼저 왔으므로
+			/* [한국어] eDMA SoC 에서만 채널/워크큐를 반납한다. power_down 이 먼저 왔으므로
 			 * 새 전송은 더 들어오지 않고, 여기서 남은 완료만 소진된다. */
 			pci_epf_mhi_dma_deinit(epf_mhi);
 		mhi_ep_unregister_controller(mhi_cntrl);
 	}
 
-	/* [한국어] [한국어] bind 가 잡은 커널 가상 매핑을 푼다. 위에서 컨트롤러 등록을
+	/* [한국어] bind 가 잡은 커널 가상 매핑을 푼다. 위에서 컨트롤러 등록을
 	 * 해제했으므로 이 시점에 mmio 를 보는 주체는 더 이상 없다. */
 	iounmap(epf_mhi->mmio);
-	/* [한국어] [한국어] 호스트 쪽에서 BAR 를 지운다. epc_deinit 과 달리 언바인드는
+	/* [한국어] 호스트 쪽에서 BAR 를 지운다. epc_deinit 과 달리 언바인드는
 	 * 되돌아올 일이 없으므로 BAR 까지 함께 닫는다. func_no/vfunc_no 는
 	 * SR-IOV 다중 함수 EPC 에서 어느 함수의 BAR 인지 고르는 좌표다. */
 	pci_epc_clear_bar(epc, epf->func_no, epf->vfunc_no, epf_bar);
 }
 
 static const struct pci_epc_event_ops pci_epf_mhi_event_ops = {
-	/* [한국어] [한국어] EPC 가 초기화될 때 BAR/MSI/설정공간 헤더를 세운다. */
+	/* [한국어] EPC 가 초기화될 때 BAR/MSI/설정공간 헤더를 세운다. */
 	.epc_init = pci_epf_mhi_epc_init,
-	/* [한국어] [한국어] EPC 가 내려갈 때 MHI 스택을 접고 BAR 를 닫는다. */
+	/* [한국어] EPC 가 내려갈 때 MHI 스택을 접고 BAR 를 닫는다. */
 	.epc_deinit = pci_epf_mhi_epc_deinit,
 	.link_up = pci_epf_mhi_link_up,
 	.link_down = pci_epf_mhi_link_down,
@@ -2936,61 +2936,61 @@ static int pci_epf_mhi_probe(struct pci_epf *epf,
 	struct pci_epf_mhi_ep_info *info =
 			(struct pci_epf_mhi_ep_info *)id->driver_data;
 	struct pci_epf_mhi *epf_mhi;
-	/* [한국어] [한국어] 이 단계의 로그 주체. probe 는 아직 EPC 를 모르므로 EPF 장치를 쓴다. */
+	/* [한국어] 이 단계의 로그 주체. probe 는 아직 EPC 를 모르므로 EPF 장치를 쓴다. */
 	struct device *dev = &epf->dev;
 
 	epf_mhi = devm_kzalloc(dev, sizeof(*epf_mhi), GFP_KERNEL);
-	/* [한국어] [한국어] 인스턴스 할당 실패. devm 이므로 여기서만 실패를 보면 된다. */
+	/* [한국어] 인스턴스 할당 실패. devm 이므로 여기서만 실패를 보면 된다. */
 	if (!epf_mhi)
-		/* [한국어] [한국어] EPF 코어가 이 값을 보고 probe 를 실패로 처리한다. */
+		/* [한국어] EPF 코어가 이 값을 보고 probe 를 실패로 처리한다. */
 		return -ENOMEM;
 
 	epf->header = info->epf_header;
-	/* [한국어] [한국어] SoC 기술표를 인스턴스에 고정한다. 이후 모든 콜백이 BAR 번호,
+	/* [한국어] SoC 기술표를 인스턴스에 고정한다. 이후 모든 콜백이 BAR 번호,
 	 * MSI 개수, MRU, DMA 사용 여부를 오직 이 포인터에서 읽는다. */
 	epf_mhi->info = info;
-	/* [한국어] [한국어] 역방향 포인터. mhi_cntrl 만 받는 MHI 콜백들이 container_of 로
+	/* [한국어] 역방향 포인터. mhi_cntrl 만 받는 MHI 콜백들이 container_of 로
 	 * 인스턴스를 되찾은 뒤 여기서 다시 EPF 로 올라간다. */
 	epf_mhi->epf = epf;
 
 	epf->event_ops = &pci_epf_mhi_event_ops;
-/* [한국어] [한국어] EPC 코어가 init/deinit/link_up/link_down/BME 를 통지할 창구.
+/* [한국어] EPC 코어가 init/deinit/link_up/link_down/BME 를 통지할 창구.
  * 이걸 걸어 두지 않으면 링크 이벤트가 이 드라이버에 전혀 도달하지 않는다. */
 
 	mutex_init(&epf_mhi->lock);
 
 	epf_set_drvdata(epf, epf_mhi);
-/* [한국어] [한국어] 인스턴스를 EPF 장치에 매단다. 이후 모든 콜백의 첫 줄이
+/* [한국어] 인스턴스를 EPF 장치에 매단다. 이후 모든 콜백의 첫 줄이
  * epf_get_drvdata 로 이 포인터를 되찾는 것으로 시작한다. */
 
 	return 0;
 }
 
 static const struct pci_epf_device_id pci_epf_mhi_ids[] = {
-	/* [한국어] [한국어] sa8775p: eDMA 를 쓰는 자동차용 SoC. 사용자가 configfs 에서
+	/* [한국어] sa8775p: eDMA 를 쓰는 자동차용 SoC. 사용자가 configfs 에서
 	 * 이 이름으로 EPF 를 만들면 pci_epf_bus_type 의 match 가 이름을 견주어
 	 * driver_data 의 기술표를 probe 에 실어 보낸다. */
 	{ .name = "pci_epf_mhi_sa8775p", .driver_data = (kernel_ulong_t)&sa8775p_info },
-	/* [한국어] [한국어] sdx55: DMA 엔진 없이 iATU 창 매핑 + memcpy 로만 동작하는 모뎀 SoC. */
+	/* [한국어] sdx55: DMA 엔진 없이 iATU 창 매핑 + memcpy 로만 동작하는 모뎀 SoC. */
 	{ .name = "pci_epf_mhi_sdx55", .driver_data = (kernel_ulong_t)&sdx55_info },
 	{ .name = "pci_epf_mhi_sm8450", .driver_data = (kernel_ulong_t)&sm8450_info },
 	{},
 };
 
 static const struct pci_epf_ops pci_epf_mhi_ops = {
-	/* [한국어] [한국어] 언바인드 시 MHI 스택을 접고 BAR/매핑을 되돌린다. */
+	/* [한국어] 언바인드 시 MHI 스택을 접고 BAR/매핑을 되돌린다. */
 	.unbind	= pci_epf_mhi_unbind,
-	/* [한국어] [한국어] 바인드 시 "mmio" 자원과 "doorbell" IRQ 를 확보한다.
+	/* [한국어] 바인드 시 "mmio" 자원과 "doorbell" IRQ 를 확보한다.
 	 * EPF 코어는 bind/unbind 가 모두 있어야 등록을 받아 준다
 	 * (pci-epf-core.c 의 __pci_epf_register_driver 검사). */
 	.bind	= pci_epf_mhi_bind,
 };
 
 static struct pci_epf_driver pci_epf_mhi_driver = {
-	/* [한국어] [한국어] configfs 에 나타날 드라이버 이름. 사용자는 이 이름 아래에서
+	/* [한국어] configfs 에 나타날 드라이버 이름. 사용자는 이 이름 아래에서
 	 * id_table 의 각 항목 이름으로 EPF 인스턴스를 만든다. */
 	.driver.name	= "pci_epf_mhi",
-	/* [한국어] [한국어] id_table 이름이 맞아떨어졌을 때 불릴 인스턴스 생성자. */
+	/* [한국어] id_table 이름이 맞아떨어졌을 때 불릴 인스턴스 생성자. */
 	.probe		= pci_epf_mhi_probe,
 	.id_table	= pci_epf_mhi_ids,
 	.ops		= &pci_epf_mhi_ops,

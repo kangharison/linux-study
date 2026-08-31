@@ -103,7 +103,7 @@
 
 static struct pci_ops dw_pcie_ops;
 static struct pci_ops dw_pcie_ecam_ops;
-/* [한국어] [한국어] 세 ops 테이블을 앞서 선언해 두는 이유: 정의는 파일 아래쪽에 있는데
+/* [한국어] 세 ops 테이블을 앞서 선언해 두는 이유: 정의는 파일 아래쪽에 있는데
  * 초기화 경로(dw_pcie_host_get_resources)가 위쪽에서 주소를 필요로 한다.
  * static 이라 이 파일 밖에서는 보이지 않는다.
  *   dw_pcie_ops        -- 루트 버스 전용(DBI 직접 접근)
@@ -176,13 +176,13 @@ static bool dw_pcie_init_dev_msi_info(struct device *dev, struct irq_domain *dom
 
 #ifdef CONFIG_SMP
 	info->chip->irq_ack = dw_irq_noop;
-	/* [한국어] [한국어] affinity 를 바꾸기 직전에 부모의 ack(= dw_pci_bottom_ack)을 부르게
+	/* [한국어] affinity 를 바꾸기 직전에 부모의 ack(= dw_pci_bottom_ack)을 부르게
 	 * 한다. 재지향 구간에서 상태 비트 소거 시점을 맞추기 위한 것이다. */
 	info->chip->irq_pre_redirect = irq_chip_pre_redirect_parent;
-/* [한국어] [한국어] 비-SMP 빌드 -- affinity 재지향 자체가 없다. */
+/* [한국어] 비-SMP 빌드 -- affinity 재지향 자체가 없다. */
 #else
 	info->chip->irq_ack = irq_chip_ack_parent;
-/* [한국어] [한국어] CONFIG_SMP 분기 끝. */
+/* [한국어] CONFIG_SMP 분기 끝. */
 #endif
 	return true;
 }
@@ -197,10 +197,10 @@ static bool dw_pcie_init_dev_msi_info(struct device *dev, struct irq_domain *dom
 #define IS_256MB_ALIGNED(x) IS_ALIGNED(x, SZ_256M)
 
 static const struct msi_parent_ops dw_pcie_msi_parent_ops = {
-	/* [한국어] [한국어] 자식 도메인이 반드시 갖춰야 할 플래그. 기본 도메인/칩 연산을 쓰고,
+	/* [한국어] 자식 도메인이 반드시 갖춰야 할 플래그. 기본 도메인/칩 연산을 쓰고,
 	 * MSI 마스킹을 부모(iMSI-RX)에 위임한다는 뜻이다. */
 	.required_flags		= DW_PCIE_MSI_FLAGS_REQUIRED,
-	/* [한국어] [한국어] 자식 도메인이 쓸 수 있는 기능. 멀티 MSI 와 MSI-X 를 허용한다. */
+	/* [한국어] 자식 도메인이 쓸 수 있는 기능. 멀티 MSI 와 MSI-X 를 허용한다. */
 	.supported_flags	= DW_PCIE_MSI_FLAGS_SUPPORTED,
 	.bus_select_token	= DOMAIN_BUS_PCI_MSI,
 	.prefix			= "DW-",
@@ -242,30 +242,30 @@ void dw_handle_msi_irq(struct dw_pcie_rp *pp)
 {
 	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
 	unsigned int i, num_ctrls;
-/* [한국어] [한국어] 다음 블록으로 넘어간다. */
+/* [한국어] 다음 블록으로 넘어간다. */
 
 	num_ctrls = pp->num_vectors / MAX_MSI_IRQS_PER_CTRL;
 
 	for (i = 0; i < num_ctrls; i++) {
-		/* [한국어] [한국어] 블록 i 의 레지스터 오프셋. 한 블록이 ENABLE/MASK/STATUS 세 개의
+		/* [한국어] 블록 i 의 레지스터 오프셋. 한 블록이 ENABLE/MASK/STATUS 세 개의
 		 * 32비트 레지스터를 쓰므로 MSI_REG_CTRL_BLOCK_SIZE 가 12바이트다. */
 		unsigned int reg_off = i * MSI_REG_CTRL_BLOCK_SIZE;
-		/* [한국어] [한국어] 블록 i 의 첫 벡터 번호. 블록당 32개(MAX_MSI_IRQS_PER_CTRL)이므로
+		/* [한국어] 블록 i 의 첫 벡터 번호. 블록당 32개(MAX_MSI_IRQS_PER_CTRL)이므로
 		 * hwirq = irq_off + 비트위치 가 된다. */
 		unsigned int irq_off = i * MAX_MSI_IRQS_PER_CTRL;
-		/* [한국어] [한국어] status 는 읽어 온 상태 비트들, pos 는 그중 한 비트의 위치.
+		/* [한국어] status 는 읽어 온 상태 비트들, pos 는 그중 한 비트의 위치.
 		 * unsigned long 인 것은 for_each_set_bit 이 그 타입의 포인터를 받기 때문이다. */
 		unsigned long status, pos;
 
 		status = dw_pcie_readl_dbi(pci, PCIE_MSI_INTR0_STATUS + reg_off);
-		/* [한국어] [한국어] 이 블록에 걸린 벡터가 하나도 없으면 곧바로 넘어간다. 보통 한두
+		/* [한국어] 이 블록에 걸린 벡터가 하나도 없으면 곧바로 넘어간다. 보통 한두
 		 * 블록만 세워지므로 이 조기 탈출이 실질적인 비용을 줄인다. */
 		if (!status)
-			/* [한국어] [한국어] 다음 블록으로. */
+			/* [한국어] 다음 블록으로. */
 			continue;
 
 		for_each_set_bit(pos, &status, MAX_MSI_IRQS_PER_CTRL)
-			/* [한국어] [한국어] hwirq 를 도메인에 올린다. demux 판을 쓰는 이유는 이 호출이 부모
+			/* [한국어] hwirq 를 도메인에 올린다. demux 판을 쓰는 이유는 이 호출이 부모
 			 * 선 하나를 여러 하위 벡터로 나누는 문맥이기 때문이다. **상태 비트는 여기서
 			 * 지우지 않는다** -- 소거는 irq 코어가 각 벡터를 처리하며 부르는
 			 * dw_pci_bottom_ack 의 몫이다. */
@@ -300,13 +300,13 @@ static void dw_chained_msi_isr(struct irq_desc *desc)
 {
 	struct irq_chip *chip = irq_desc_get_chip(desc);
 	struct dw_pcie_rp *pp;
-/* [한국어] [한국어] 부모 컨트롤러의 EOI/마스크 해제를 마무리한다. enter 와 짝이 맞지
+/* [한국어] 부모 컨트롤러의 EOI/마스크 해제를 마무리한다. enter 와 짝이 맞지
  * 않으면 부모 선이 계속 울리거나 반대로 다시 울리지 않는다. */
 
 	chained_irq_enter(chip, desc);
 
 	pp = irq_desc_get_handler_data(desc);
-	/* [한국어] [한국어] 실제 분해 작업은 공유 함수에 맡긴다. 자체 ISR 을 가진 SoC 도
+	/* [한국어] 실제 분해 작업은 공유 함수에 맡긴다. 자체 ISR 을 가진 SoC 도
 	 * 같은 함수를 직접 부를 수 있도록 EXPORT 되어 있다. */
 	dw_handle_msi_irq(pp);
 
@@ -339,20 +339,20 @@ static void dw_pci_setup_msi_msg(struct irq_data *d, struct msi_msg *msg)
 {
 	struct dw_pcie_rp *pp = irq_data_get_irq_chip_data(d);
 	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
-	/* [한국어] [한국어] iMSI-RX 가 가로챌 목적지 주소. dw_pcie_msi_host_init 이 정해 둔다.
+	/* [한국어] iMSI-RX 가 가로챌 목적지 주소. dw_pcie_msi_host_init 이 정해 둔다.
 	 * dma_addr_t 를 u64 로 넓혀 아래에서 상·하위로 쪼갠다. */
 	u64 msi_target = (u64)pp->msi_data;
 
 	msg->address_lo = lower_32_bits(msi_target);
-	/* [한국어] [한국어] 주소 상위 32비트. MSI 능력 구조가 주소를 32비트 두 칸으로 담기
+	/* [한국어] 주소 상위 32비트. MSI 능력 구조가 주소를 32비트 두 칸으로 담기
 	 * 때문에 lo/hi 로 나눈다. */
 	msg->address_hi = upper_32_bits(msi_target);
-	/* [한국어] [한국어] 메시지 데이터로 벡터 번호를 그대로 쓴다. 디바이스가 이 값을 위
+	/* [한국어] 메시지 데이터로 벡터 번호를 그대로 쓴다. 디바이스가 이 값을 위
 	 * 주소에 쓰면, iMSI-RX 가 그 번호의 상태 비트를 세운다. */
 	msg->data = d->hwirq;
 
 	dev_dbg(pci->dev, "msi#%d address_hi %#x address_lo %#x\n",
-		/* [한국어] [한국어] hwirq 를 int 로 캐스팅하는 것은 irq_hw_number_t 의 폭이 아키텍처마다
+		/* [한국어] hwirq 를 int 로 캐스팅하는 것은 irq_hw_number_t 의 폭이 아키텍처마다
 		 * 달라 포맷 문자열과 어긋나는 것을 막기 위해서다. */
 		(int)d->hwirq, msg->address_hi, msg->address_lo);
 }
@@ -383,18 +383,18 @@ static void dw_pci_bottom_mask(struct irq_data *d)
 {
 	struct dw_pcie_rp *pp = irq_data_get_irq_chip_data(d);
 	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
-	/* [한국어] [한국어] res 는 블록 레지스터 오프셋, bit 는 블록 안 비트 위치, ctrl 은 블록 번호. */
+	/* [한국어] res 는 블록 레지스터 오프셋, bit 는 블록 안 비트 위치, ctrl 은 블록 번호. */
 	unsigned int res, bit, ctrl;
 
 	guard(raw_spinlock)(&pp->lock);
 	ctrl = d->hwirq / MAX_MSI_IRQS_PER_CTRL;
-	/* [한국어] [한국어] 블록 번호를 레지스터 오프셋으로 바꾼다. */
+	/* [한국어] 블록 번호를 레지스터 오프셋으로 바꾼다. */
 	res = ctrl * MSI_REG_CTRL_BLOCK_SIZE;
-	/* [한국어] [한국어] 블록 안에서의 비트 위치(0~31). */
+	/* [한국어] 블록 안에서의 비트 위치(0~31). */
 	bit = d->hwirq % MAX_MSI_IRQS_PER_CTRL;
 
 	pp->irq_mask[ctrl] |= BIT(bit);
-	/* [한국어] [한국어] 소프트웨어 사본을 통째로 써 넣는다. 하드웨어를 읽지 않으므로
+	/* [한국어] 소프트웨어 사본을 통째로 써 넣는다. 하드웨어를 읽지 않으므로
 	 * 읽기-수정-쓰기 경쟁이 사라지고, 레지스터 왕복도 준다. */
 	dw_pcie_writel_dbi(pci, PCIE_MSI_INTR0_MASK + res, pp->irq_mask[ctrl]);
 }
@@ -422,18 +422,18 @@ static void dw_pci_bottom_unmask(struct irq_data *d)
 {
 	struct dw_pcie_rp *pp = irq_data_get_irq_chip_data(d);
 	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
-	/* [한국어] [한국어] mask 와 같은 세 값. 계산식도 동일하다. */
+	/* [한국어] mask 와 같은 세 값. 계산식도 동일하다. */
 	unsigned int res, bit, ctrl;
 
 	guard(raw_spinlock)(&pp->lock);
 	ctrl = d->hwirq / MAX_MSI_IRQS_PER_CTRL;
-	/* [한국어] [한국어] 블록 레지스터 오프셋. */
+	/* [한국어] 블록 레지스터 오프셋. */
 	res = ctrl * MSI_REG_CTRL_BLOCK_SIZE;
-	/* [한국어] [한국어] 블록 안 비트 위치. */
+	/* [한국어] 블록 안 비트 위치. */
 	bit = d->hwirq % MAX_MSI_IRQS_PER_CTRL;
 
 	pp->irq_mask[ctrl] &= ~BIT(bit);
-	/* [한국어] [한국어] 비트를 지운 사본을 써 넣는다. mask 와 같은 잠금을 공유해야
+	/* [한국어] 비트를 지운 사본을 써 넣는다. mask 와 같은 잠금을 공유해야
 	 * read-modify-write 가 겹쳐 한쪽 변경이 사라지는 일을 막을 수 있다. */
 	dw_pcie_writel_dbi(pci, PCIE_MSI_INTR0_MASK + res, pp->irq_mask[ctrl]);
 }
@@ -468,37 +468,37 @@ static void dw_pci_bottom_ack(struct irq_data *d)
 {
 	struct dw_pcie_rp *pp  = irq_data_get_irq_chip_data(d);
 	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
-	/* [한국어] [한국어] mask/unmask 와 같은 분해. 다만 여기서는 사본을 쓰지 않는다. */
+	/* [한국어] mask/unmask 와 같은 분해. 다만 여기서는 사본을 쓰지 않는다. */
 	unsigned int res, bit, ctrl;
 
 	ctrl = d->hwirq / MAX_MSI_IRQS_PER_CTRL;
-	/* [한국어] [한국어] 블록 레지스터 오프셋. */
+	/* [한국어] 블록 레지스터 오프셋. */
 	res = ctrl * MSI_REG_CTRL_BLOCK_SIZE;
-	/* [한국어] [한국어] 블록 안 비트 위치. */
+	/* [한국어] 블록 안 비트 위치. */
 	bit = d->hwirq % MAX_MSI_IRQS_PER_CTRL;
 
 	dw_pcie_writel_dbi(pci, PCIE_MSI_INTR0_STATUS + res, BIT(bit));
-/* [한국어] [한국어] 잠금 없이 끝난다 -- STATUS 는 write-1-to-clear 라 다른 비트에 0 을
+/* [한국어] 잠금 없이 끝난다 -- STATUS 는 write-1-to-clear 라 다른 비트에 0 을
  * 쓰는 것이 무해하므로, 읽기 단계도 잠금도 필요 없다. */
 }
 
 static struct irq_chip dw_pci_msi_bottom_irq_chip = {
-	/* [한국어] [한국어] /proc/interrupts 에 나타날 칩 이름. */
+	/* [한국어] /proc/interrupts 에 나타날 칩 이름. */
 	.name			= "DWPCI-MSI",
-	/* [한국어] [한국어] 디바이스가 쓸 MSI 주소/데이터를 조립하는 콜백. */
+	/* [한국어] 디바이스가 쓸 MSI 주소/데이터를 조립하는 콜백. */
 	.irq_compose_msi_msg	= dw_pci_setup_msi_msg,
 	.irq_mask		= dw_pci_bottom_mask,
 	.irq_unmask		= dw_pci_bottom_unmask,
 #ifdef CONFIG_SMP
 	.irq_ack		= dw_irq_noop,
-	/* [한국어] [한국어] SMP 에서는 ack 을 여기(재지향 직전)로 옮긴다. irq_ack 자리는
+	/* [한국어] SMP 에서는 ack 을 여기(재지향 직전)로 옮긴다. irq_ack 자리는
 	 * dw_irq_noop 이 채운다 -- irq 코어가 handle_edge_irq 에서 irq_ack 를
 	 * 무조건 부르므로 NULL 을 둘 수 없기 때문이다. */
 	.irq_pre_redirect	= dw_pci_bottom_ack,
 	.irq_set_affinity	= irq_chip_redirect_set_affinity,
 #else
 	.irq_ack		= dw_pci_bottom_ack,
-/* [한국어] [한국어] CONFIG_SMP 분기 끝. */
+/* [한국어] CONFIG_SMP 분기 끝. */
 #endif
 };
 
@@ -538,23 +538,23 @@ static int dw_pcie_irq_domain_alloc(struct irq_domain *domain, unsigned int virq
 	int bit;
 
 	scoped_guard (raw_spinlock_irq, &pp->lock) {
-		/* [한국어] [한국어] multi-MSI 는 '연속되고 자연 정렬된' 벡터 묶음을 요구한다. 디바이스가
+		/* [한국어] multi-MSI 는 '연속되고 자연 정렬된' 벡터 묶음을 요구한다. 디바이스가
 		 * 받는 것은 시작 번호 하나뿐이고 나머지는 하위 비트를 바꿔 만들기 때문이다. */
 		bit = bitmap_find_free_region(pp->msi_irq_in_use, pp->num_vectors,
-					      /* [한국어] [한국어] 그래서 크기를 2의 지수로 올림해 그 경계에 맞춰 잡는다. */
+					      /* [한국어] 그래서 크기를 2의 지수로 올림해 그 경계에 맞춰 잡는다. */
 					      order_base_2(nr_irqs));
 	}
 
 	if (bit < 0)
-		/* [한국어] [한국어] 남은 연속 구간이 없다. 커널이 이 값을 보고 더 적은 벡터로 재시도한다. */
+		/* [한국어] 남은 연속 구간이 없다. 커널이 이 값을 보고 더 적은 벡터로 재시도한다. */
 		return -ENOSPC;
 
 	for (unsigned int i = 0; i < nr_irqs; i++) {
-		/* [한국어] [한국어] 벡터마다 hwirq(bit + i), irq_chip, chip_data(pp), 흐름 핸들러를 연결한다.
+		/* [한국어] 벡터마다 hwirq(bit + i), irq_chip, chip_data(pp), 흐름 핸들러를 연결한다.
 		 * scoped_guard 밖에서 부르는 이유는 이 함수가 잠들 수 있어 raw 스핀락을 쥔 채
 		 * 부르면 안 되기 때문이다. */
 		irq_domain_set_info(domain, virq + i, bit + i, pp->msi_irq_chip,
-				    /* [한국어] [한국어] handle_edge_irq 를 쓰는 이유: MSI 는 메시지 한 번이 곧 한 번의
+				    /* [한국어] handle_edge_irq 를 쓰는 이유: MSI 는 메시지 한 번이 곧 한 번의
 				     * 사건이고 되풀이 신호가 없다. INTx(레벨)와 대조된다. */
 				    pp, handle_edge_irq, NULL, NULL);
 	}
@@ -587,18 +587,18 @@ static void dw_pcie_irq_domain_free(struct irq_domain *domain, unsigned int virq
 {
 	struct irq_data *d = irq_domain_get_irq_data(domain, virq);
 	struct dw_pcie_rp *pp = domain->host_data;
-/* [한국어] [한국어] alloc 과 같은 pp->lock. 여기서는 뒤따르는 잠들 수 있는 호출이 없어
+/* [한국어] alloc 과 같은 pp->lock. 여기서는 뒤따르는 잠들 수 있는 호출이 없어
  * scoped_guard 대신 함수 전체를 덮는 guard 로 충분하다. */
 
 	guard(raw_spinlock_irq)(&pp->lock);
 	bitmap_release_region(pp->msi_irq_in_use, d->hwirq, order_base_2(nr_irqs));
-/* [한국어] [한국어] 반납 끝. 실패할 수 있는 동작이 없어 반환값이 없다. */
+/* [한국어] 반납 끝. 실패할 수 있는 동작이 없어 반환값이 없다. */
 }
 
 static const struct irq_domain_ops dw_pcie_msi_domain_ops = {
-	/* [한국어] [한국어] 이 도메인은 alloc/free 만 제공한다. 매핑 자체는 비트맵이 관리한다. */
+	/* [한국어] 이 도메인은 alloc/free 만 제공한다. 매핑 자체는 비트맵이 관리한다. */
 	.alloc	= dw_pcie_irq_domain_alloc,
-	/* [한국어] [한국어] 반납 콜백. */
+	/* [한국어] 반납 콜백. */
 	.free	= dw_pcie_irq_domain_free,
 };
 
@@ -636,21 +636,21 @@ int dw_pcie_allocate_domains(struct dw_pcie_rp *pp)
 {
 	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
 	struct irq_domain_info info = {
-		/* [한국어] [한국어] 이 컨트롤러의 펌웨어 노드. DT 의 msi-parent 참조가 이 노드를
+		/* [한국어] 이 컨트롤러의 펌웨어 노드. DT 의 msi-parent 참조가 이 노드를
 		 * 가리켜야 자식 도메인이 부모를 찾아온다. */
 		.fwnode		= dev_fwnode(pci->dev),
-		/* [한국어] [한국어] 위에서 정의한 alloc/free 쌍. */
+		/* [한국어] 위에서 정의한 alloc/free 쌍. */
 		.ops		= &dw_pcie_msi_domain_ops,
 		.size		= pp->num_vectors,
 		.host_data	= pp,
 	};
 
 	pp->irq_domain = msi_create_parent_irq_domain(&info, &dw_pcie_msi_parent_ops);
-	/* [한국어] [한국어] 도메인 생성 실패. 메모리 부족이나 fwnode 중복 등록이 원인일 수 있다. */
+	/* [한국어] 도메인 생성 실패. 메모리 부족이나 fwnode 중복 등록이 원인일 수 있다. */
 	if (!pp->irq_domain) {
-		/* [한국어] [한국어] MSI 없이는 대부분의 장치가 제대로 동작하지 못하므로 명확히 알린다. */
+		/* [한국어] MSI 없이는 대부분의 장치가 제대로 동작하지 못하므로 명확히 알린다. */
 		dev_err(pci->dev, "Failed to create IRQ domain\n");
-		/* [한국어] [한국어] 호출자(dw_pcie_msi_host_init)가 그대로 위로 전달해 프로브를 접는다. */
+		/* [한국어] 호출자(dw_pcie_msi_host_init)가 그대로 위로 전달해 프로브를 접는다. */
 		return -ENOMEM;
 	}
 
@@ -684,12 +684,12 @@ void dw_pcie_free_msi(struct dw_pcie_rp *pp)
 	u32 ctrl;
 
 	for (ctrl = 0; ctrl < MAX_MSI_CTRLS; ctrl++) {
-		/* [한국어] [한국어] 0 은 '등록 안 됨', 음수는 오류값이다. 두 경우를 한 번에 거른다. */
+		/* [한국어] 0 은 '등록 안 됨', 음수는 오류값이다. 두 경우를 한 번에 거른다. */
 		if (pp->msi_irq[ctrl] > 0)
-			/* [한국어] [한국어] 핸들러와 데이터를 함께 NULL 로 떼어 낸다. **도메인을 없애기 전에**
+			/* [한국어] 핸들러와 데이터를 함께 NULL 로 떼어 낸다. **도메인을 없애기 전에**
 			 * 해야 한다 -- 순서가 반대면 남아 있던 인터럽트가 이미 해제된 도메인을 참조한다. */
 			irq_set_chained_handler_and_data(pp->msi_irq[ctrl], NULL, NULL);
-	/* [한국어] [한국어] 루프가 num_ctrls 가 아니라 MAX_MSI_CTRLS 까지 도는 것은,
+	/* [한국어] 루프가 num_ctrls 가 아니라 MAX_MSI_CTRLS 까지 도는 것은,
 	 * num_vectors 가 도중에 줄었더라도 배열에 남은 IRQ 를 빠뜨리지 않기 위해서다. */
 	}
 
@@ -730,11 +730,11 @@ void dw_pcie_msi_init(struct dw_pcie_rp *pp)
 {
 	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
 	u64 msi_target = (u64)pp->msi_data;
-	/* [한국어] [한국어] ctrl 은 순회용 블록 번호, num_ctrls 는 실제 블록 개수. */
+	/* [한국어] ctrl 은 순회용 블록 번호, num_ctrls 는 실제 블록 개수. */
 	u32 ctrl, num_ctrls;
 
 	if (!pci_msi_enabled() || !pp->use_imsi_rx)
-		/* [한국어] [한국어] 커널이 MSI 를 쓰지 않거나(pci_msi_enabled 거짓), MSI 를 외부
+		/* [한국어] 커널이 MSI 를 쓰지 않거나(pci_msi_enabled 거짓), MSI 를 외부
 		 * 컨트롤러(GIC ITS 등)가 맡는 경우다. 후자에서 이 IP 의 iMSI-RX 를 건드리면
 		 * 외부 경로와 충돌한다. */
 		return;
@@ -744,12 +744,12 @@ void dw_pcie_msi_init(struct dw_pcie_rp *pp)
 	/* Initialize IRQ Status array */
 	for (ctrl = 0; ctrl < num_ctrls; ctrl++) {
 		dw_pcie_writel_dbi(pci, PCIE_MSI_INTR0_MASK +
-				    /* [한국어] [한국어] MASK 에는 소프트웨어 사본을 그대로 쓴다. 그래서 재개(resume) 시
+				    /* [한국어] MASK 에는 소프트웨어 사본을 그대로 쓴다. 그래서 재개(resume) 시
 				     * 서스펜드 전의 마스크 상태가 복원된다. */
 				    (ctrl * MSI_REG_CTRL_BLOCK_SIZE),
 				    pp->irq_mask[ctrl]);
 		dw_pcie_writel_dbi(pci, PCIE_MSI_INTR0_ENABLE +
-				    /* [한국어] [한국어] ENABLE 에는 ~0 -- 전부 허용. 실제 차단은 MASK 가 담당하므로
+				    /* [한국어] ENABLE 에는 ~0 -- 전부 허용. 실제 차단은 MASK 가 담당하므로
 				     * ENABLE 은 열어 두고 한 겹으로만 제어하는 설계다. */
 				    (ctrl * MSI_REG_CTRL_BLOCK_SIZE),
 				    ~0);
@@ -758,7 +758,7 @@ void dw_pcie_msi_init(struct dw_pcie_rp *pp)
 	/* Program the msi_data */
 	dw_pcie_writel_dbi(pci, PCIE_MSI_ADDR_LO, lower_32_bits(msi_target));
 	dw_pcie_writel_dbi(pci, PCIE_MSI_ADDR_HI, upper_32_bits(msi_target));
-/* [한국어] [한국어] 목적지 주소까지 쓰면 하드웨어 준비가 끝난다. 도메인·비트맵 같은
+/* [한국어] 목적지 주소까지 쓰면 하드웨어 준비가 끝난다. 도메인·비트맵 같은
  * 소프트웨어 쪽은 dw_pcie_msi_host_init 이 이미 마쳤다. */
 }
 EXPORT_SYMBOL_GPL(dw_pcie_msi_init);
@@ -796,38 +796,38 @@ static int dw_pcie_parse_split_msi_irq(struct dw_pcie_rp *pp)
 {
 	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
 	struct device *dev = pci->dev;
-	/* [한국어] [한국어] 'msiN' 인터럽트는 EP 컨트롤러 노드에 기술되어 있으므로 플랫폼
+	/* [한국어] 'msiN' 인터럽트는 EP 컨트롤러 노드에 기술되어 있으므로 플랫폼
 	 * 디바이스로 거슬러 올라가 조회한다. */
 	struct platform_device *pdev = to_platform_device(dev);
-	/* [한국어] [한국어] ctrl 은 찾은 선의 개수를 세는 동시에 순회 변수로 쓰인다 --
+	/* [한국어] ctrl 은 찾은 선의 개수를 세는 동시에 순회 변수로 쓰인다 --
 	 * 루프가 끝난 뒤의 값이 곧 '찾은 개수' 다. */
 	u32 ctrl, max_vectors;
-	/* [한국어] [한국어] platform_get_irq_byname_optional 의 반환값(양수 IRQ 또는 음수 오류). */
+	/* [한국어] platform_get_irq_byname_optional 의 반환값(양수 IRQ 또는 음수 오류). */
 	int irq;
 
 	/* Parse any "msiX" IRQs described in the devicetree */
 	for (ctrl = 0; ctrl < MAX_MSI_CTRLS; ctrl++) {
 		char msi_name[] = "msiX";
-/* [한국어] [한국어] 이름을 만들 버퍼. 배열로 잡아 아래에서 한 글자만 바꾼다. */
+/* [한국어] 이름을 만들 버퍼. 배열로 잡아 아래에서 한 글자만 바꾼다. */
 
 		msi_name[3] = '0' + ctrl;
-		/* [한국어] [한국어] _optional 판은 이름이 없을 때 -ENXIO 를 돌려주고 오류 로그를
+		/* [한국어] _optional 판은 이름이 없을 때 -ENXIO 를 돌려주고 오류 로그를
 		 * 남기지 않는다. 여기서는 '없음' 이 정상 종료 조건이므로 이 판이어야 한다. */
 		irq = platform_get_irq_byname_optional(pdev, msi_name);
-		/* [한국어] [한국어] 이름이 더 없다 = 선이 그만큼뿐. 정상 종료다. */
+		/* [한국어] 이름이 더 없다 = 선이 그만큼뿐. 정상 종료다. */
 		if (irq == -ENXIO)
-			/* [한국어] [한국어] 루프를 빠져나가면 ctrl 이 찾은 개수가 된다. */
+			/* [한국어] 루프를 빠져나가면 ctrl 이 찾은 개수가 된다. */
 			break;
 		if (irq < 0)
-			/* [한국어] [한국어] -ENXIO 가 아닌 음수는 진짜 오류다(-EPROBE_DEFER 포함). */
+			/* [한국어] -ENXIO 가 아닌 음수는 진짜 오류다(-EPROBE_DEFER 포함). */
 			return dev_err_probe(dev, irq,
-					     /* [한국어] [한국어] dev_err_probe 는 -EPROBE_DEFER 일 때 로그를 남기지 않아 부팅 로그가
+					     /* [한국어] dev_err_probe 는 -EPROBE_DEFER 일 때 로그를 남기지 않아 부팅 로그가
 					      * 재시도 메시지로 덮이지 않는다. */
 					     "Failed to parse MSI IRQ '%s'\n",
 					     msi_name);
 
 		pp->msi_irq[ctrl] = irq;
-	/* [한국어] [한국어] 다음 이름으로. */
+	/* [한국어] 다음 이름으로. */
 	}
 
 	/* If no "msiX" IRQs, caller should fallback to "msi" IRQ */
@@ -835,17 +835,17 @@ static int dw_pcie_parse_split_msi_irq(struct dw_pcie_rp *pp)
 		return -ENXIO;
 
 	max_vectors = ctrl * MAX_MSI_IRQS_PER_CTRL;
-	/* [한국어] [한국어] DT 가 요구한 벡터 수가 실제 선이 감당할 수 있는 양을 넘었다. */
+	/* [한국어] DT 가 요구한 벡터 수가 실제 선이 감당할 수 있는 양을 넘었다. */
 	if (pp->num_vectors > max_vectors) {
-		/* [한국어] [한국어] 조용히 깎으면 나중에 벡터가 모자라는 이유를 찾기 어려우므로 경고한다. */
+		/* [한국어] 조용히 깎으면 나중에 벡터가 모자라는 이유를 찾기 어려우므로 경고한다. */
 		dev_warn(dev, "Exceeding number of MSI vectors, limiting to %u\n",
-			 /* [한국어] [한국어] 실제 상한으로 낮춘다. */
+			 /* [한국어] 실제 상한으로 낮춘다. */
 			 max_vectors);
 		pp->num_vectors = max_vectors;
-	/* [한국어] [한국어] 조정 끝. */
+	/* [한국어] 조정 끝. */
 	}
 	if (!pp->num_vectors)
-		/* [한국어] [한국어] DT 가 벡터 수를 아예 지정하지 않았으면 상한만큼 쓴다. */
+		/* [한국어] DT 가 벡터 수를 아예 지정하지 않았으면 상한만큼 쓴다. */
 		pp->num_vectors = max_vectors;
 
 	return 0;
@@ -894,51 +894,51 @@ int dw_pcie_msi_host_init(struct dw_pcie_rp *pp)
 {
 	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
 	struct device *dev = pci->dev;
-	/* [한국어] [한국어] 'msi' 인터럽트도 EP 컨트롤러 노드에 있으므로 플랫폼 디바이스가 필요하다. */
+	/* [한국어] 'msi' 인터럽트도 EP 컨트롤러 노드에 있으므로 플랫폼 디바이스가 필요하다. */
 	struct platform_device *pdev = to_platform_device(dev);
-	/* [한국어] [한국어] dmam_alloc_coherent 의 반환값을 받을 변수. NULL 로 시작해 두어
+	/* [한국어] dmam_alloc_coherent 의 반환값을 받을 변수. NULL 로 시작해 두어
 	 * 아래 두 번의 시도 중 어느 것도 성공하지 못했을 때를 한 번에 가린다. */
 	u64 *msi_vaddr = NULL;
-	/* [한국어] [한국어] 하위 호출들의 반환값을 담을 임시 변수. */
+	/* [한국어] 하위 호출들의 반환값을 담을 임시 변수. */
 	int ret;
-	/* [한국어] [한국어] ctrl 은 순회용, num_ctrls 는 확정된 블록 개수. */
+	/* [한국어] ctrl 은 순회용, num_ctrls 는 확정된 블록 개수. */
 	u32 ctrl, num_ctrls;
 
 	for (ctrl = 0; ctrl < MAX_MSI_CTRLS; ctrl++)
-		/* [한국어] [한국어] 마스크 사본을 전부 ~0 으로 -- 처음에는 **모든 벡터가 막혀 있다.**
+		/* [한국어] 마스크 사본을 전부 ~0 으로 -- 처음에는 **모든 벡터가 막혀 있다.**
 		 * 디바이스가 벡터를 요청해 unmask 할 때 비로소 열린다. */
 		pp->irq_mask[ctrl] = ~0;
 
 	if (!pp->msi_irq[0]) {
-		/* [한국어] [한국어] msi_irq[0] 이 비어 있으면 SoC 드라이버가 미리 채우지 않았다는 뜻이므로
+		/* [한국어] msi_irq[0] 이 비어 있으면 SoC 드라이버가 미리 채우지 않았다는 뜻이므로
 		 * 분리형('msi0'..)을 먼저 시도한다. */
 		ret = dw_pcie_parse_split_msi_irq(pp);
-		/* [한국어] [한국어] -ENXIO 는 '분리형이 아니다' 라는 신호일 뿐 오류가 아니다. 그래서
+		/* [한국어] -ENXIO 는 '분리형이 아니다' 라는 신호일 뿐 오류가 아니다. 그래서
 		 * 그것만 통과시키고 나머지 음수는 실패로 올린다. */
 		if (ret < 0 && ret != -ENXIO)
-			/* [한국어] [한국어] DT 파싱 오류는 프로브를 접을 사유다. */
+			/* [한국어] DT 파싱 오류는 프로브를 접을 사유다. */
 			return ret;
 	}
 
 	if (!pp->num_vectors)
-		/* [한국어] [한국어] 분리형도 아니고 DT 지정도 없으면 기본값(32)을 쓴다. */
+		/* [한국어] 분리형도 아니고 DT 지정도 없으면 기본값(32)을 쓴다. */
 		pp->num_vectors = MSI_DEF_NUM_VECTORS;
-	/* [한국어] [한국어] 벡터 수가 확정됐으므로 블록 개수를 계산한다. 이후 루프의 상한이다. */
+	/* [한국어] 벡터 수가 확정됐으므로 블록 개수를 계산한다. 이후 루프의 상한이다. */
 	num_ctrls = pp->num_vectors / MAX_MSI_IRQS_PER_CTRL;
 
 	if (!pp->msi_irq[0]) {
-		/* [한국어] [한국어] 단일 'msi' 이름을 시도한다. _optional 이라 없어도 로그를 남기지 않는다. */
+		/* [한국어] 단일 'msi' 이름을 시도한다. _optional 이라 없어도 로그를 남기지 않는다. */
 		pp->msi_irq[0] = platform_get_irq_byname_optional(pdev, "msi");
-		/* [한국어] [한국어] 이름으로도 못 찾았다. */
+		/* [한국어] 이름으로도 못 찾았다. */
 		if (pp->msi_irq[0] < 0) {
-			/* [한국어] [한국어] 마지막 폴백 -- 인덱스 0 의 인터럽트. 이름을 붙이지 않던 오래된 DT 를
+			/* [한국어] 마지막 폴백 -- 인덱스 0 의 인터럽트. 이름을 붙이지 않던 오래된 DT 를
 			 * 받아들이기 위한 것이다. */
 			pp->msi_irq[0] = platform_get_irq(pdev, 0);
-			/* [한국어] [한국어] 그것마저 없으면 MSI 를 받을 길이 없다. */
+			/* [한국어] 그것마저 없으면 MSI 를 받을 길이 없다. */
 			if (pp->msi_irq[0] < 0)
-				/* [한국어] [한국어] 조회 실패값을 그대로 올린다(-EPROBE_DEFER 포함). */
+				/* [한국어] 조회 실패값을 그대로 올린다(-EPROBE_DEFER 포함). */
 				return pp->msi_irq[0];
-		/* [한국어] [한국어] 3단 폴백 끝. */
+		/* [한국어] 3단 폴백 끝. */
 		}
 	}
 
@@ -947,15 +947,15 @@ int dw_pcie_msi_host_init(struct dw_pcie_rp *pp)
 	pp->msi_irq_chip = &dw_pci_msi_bottom_irq_chip;
 
 	ret = dw_pcie_allocate_domains(pp);
-	/* [한국어] [한국어] 도메인 생성 실패. */
+	/* [한국어] 도메인 생성 실패. */
 	if (ret)
-		/* [한국어] [한국어] 아직 핸들러를 걸기 전이라 되감을 것이 없다. */
+		/* [한국어] 아직 핸들러를 걸기 전이라 되감을 것이 없다. */
 		return ret;
 
 	for (ctrl = 0; ctrl < num_ctrls; ctrl++) {
-		/* [한국어] [한국어] 확보된 선에만 핸들러를 건다. 분리형이 아니면 [0] 하나뿐이다. */
+		/* [한국어] 확보된 선에만 핸들러를 건다. 분리형이 아니면 [0] 하나뿐이다. */
 		if (pp->msi_irq[ctrl] > 0)
-			/* [한국어] [한국어] 핸들러 데이터로 pp 를 심어, 인터럽트 문맥의 ISR 이 그것을 되찾게 한다. */
+			/* [한국어] 핸들러 데이터로 pp 를 심어, 인터럽트 문맥의 ISR 이 그것을 되찾게 한다. */
 			irq_set_chained_handler_and_data(pp->msi_irq[ctrl],
 						    dw_chained_msi_isr, pp);
 	}
@@ -977,34 +977,34 @@ int dw_pcie_msi_host_init(struct dw_pcie_rp *pp)
 	 */
 	if (!(pp->cfg0_base & GENMASK_ULL(63, 32))) {
 		pp->msi_data = pp->cfg0_base;
-		/* [한국어] [한국어] cfg0_base 가 32비트 안에 들어간다 -- 할당 없이 그대로 목적지로 쓴다.
+		/* [한국어] cfg0_base 가 32비트 안에 들어간다 -- 할당 없이 그대로 목적지로 쓴다.
 		 * 상류 주석의 근거대로 이 주소로 향하는 쓰기는 iMSI-RX 에서 종결되어 AXI 에
 		 * 나타나지 않으므로, 실제 메모리를 뒤에 둘 필요가 없기 때문이다. */
 		return 0;
 	}
 
 	ret = dma_set_coherent_mask(dev, DMA_BIT_MASK(32));
-	/* [한국어] [한국어] 마스크 낮추기에 성공했을 때만 할당을 시도한다. 실패했다면 그
+	/* [한국어] 마스크 낮추기에 성공했을 때만 할당을 시도한다. 실패했다면 그
 	 * 장치가 32비트 DMA 를 지원하지 않는다는 뜻이라 시도할 이유가 없다. */
 	if (!ret)
-		/* [한국어] [한국어] 8바이트만 잡는다. 이 메모리를 실제로 읽고 쓰지는 않고, **주소만**
+		/* [한국어] 8바이트만 잡는다. 이 메모리를 실제로 읽고 쓰지는 않고, **주소만**
 		 * 필요하기 때문이다. */
 		msi_vaddr = dmam_alloc_coherent(dev, sizeof(u64), &pp->msi_data,
-						/* [한국어] [한국어] 프로브 문맥이라 GFP_KERNEL 로 잠들며 할당해도 된다. */
+						/* [한국어] 프로브 문맥이라 GFP_KERNEL 로 잠들며 할당해도 된다. */
 						GFP_KERNEL);
 
 	if (!msi_vaddr) {
-		/* [한국어] [한국어] 32비트 확보 실패. 치명적이지 않으므로 경고에 그치고 64비트를 시도한다. */
+		/* [한국어] 32비트 확보 실패. 치명적이지 않으므로 경고에 그치고 64비트를 시도한다. */
 		dev_warn(dev, "Failed to allocate 32-bit MSI address\n");
-		/* [한국어] [한국어] 마스크를 64비트로 되돌린다. 이 반환값을 검사하지 않는데,
+		/* [한국어] 마스크를 64비트로 되돌린다. 이 반환값을 검사하지 않는데,
 		 * 원래 마스크로 되돌리는 것이라 실패할 이유가 없다는 전제로 보인다. */
 		dma_set_coherent_mask(dev, DMA_BIT_MASK(64));
 		msi_vaddr = dmam_alloc_coherent(dev, sizeof(u64), &pp->msi_data,
 						GFP_KERNEL);
 		if (!msi_vaddr) {
-			/* [한국어] [한국어] 32비트도 64비트도 실패. 이제 MSI 목적지를 정할 방법이 없다. */
+			/* [한국어] 32비트도 64비트도 실패. 이제 MSI 목적지를 정할 방법이 없다. */
 			dev_err(dev, "Failed to allocate MSI address\n");
-			/* [한국어] [한국어] 방금 만든 도메인과 걸어 둔 연쇄 핸들러를 되감는다. 이 되감기가
+			/* [한국어] 방금 만든 도메인과 걸어 둔 연쇄 핸들러를 되감는다. 이 되감기가
 			 * 없으면 도메인이 살아남아 나중에 엉뚱한 곳에서 참조된다. */
 			dw_pcie_free_msi(pp);
 			return -ENOMEM;
@@ -1048,18 +1048,18 @@ static void dw_pcie_host_request_msg_tlp_res(struct dw_pcie_rp *pp)
 {
 	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
 	struct resource_entry *win;
-	/* [한국어] [한국어] 새로 잡을 자식 자원. win->res 의 뒤쪽 일부를 떼어 낸다. */
+	/* [한국어] 새로 잡을 자식 자원. win->res 의 뒤쪽 일부를 떼어 낸다. */
 	struct resource *res;
 
 	win = resource_list_first_type(&pp->bridge->windows, IORESOURCE_MEM);
-	/* [한국어] [한국어] MEM 윈도가 없으면 MSG 창을 둘 자리도 없다. msg_res 가 NULL 로 남고,
+	/* [한국어] MEM 윈도가 없으면 MSG 창을 둘 자리도 없다. msg_res 가 NULL 로 남고,
 	 * 이후 경로가 자연히 MSG 기능을 쓰지 않는다. */
 	if (win) {
-		/* [한국어] [한국어] devm 으로 잡아 EPF/브리지 수명에 묶는다. */
+		/* [한국어] devm 으로 잡아 EPF/브리지 수명에 묶는다. */
 		res = devm_kzalloc(pci->dev, sizeof(*res), GFP_KERNEL);
-		/* [한국어] [한국어] 할당 실패. 반환형이 void 라 알릴 곳이 없다. */
+		/* [한국어] 할당 실패. 반환형이 void 라 알릴 곳이 없다. */
 		if (!res)
-			/* [한국어] [한국어] msg_res 를 NULL 로 둔 채 조용히 물러난다. MSG 기능만 빠질 뿐
+			/* [한국어] msg_res 를 NULL 로 둔 채 조용히 물러난다. MSG 기능만 빠질 뿐
 			 * 프로브 전체는 계속 진행된다. */
 			return;
 
@@ -1069,18 +1069,18 @@ static void dw_pcie_host_request_msg_tlp_res(struct dw_pcie_rp *pp)
 		 */
 		res->start = win->res->end - pci->region_align + 1;
 		res->end = win->res->end;
-		/* [한국어] [한국어] /proc/iomem 에 나타날 이름. 다른 자원과 구별하기 위해 붙인다. */
+		/* [한국어] /proc/iomem 에 나타날 이름. 다른 자원과 구별하기 위해 붙인다. */
 		res->name = "msg";
-		/* [한국어] [한국어] 부모 윈도의 플래그를 물려받되 IORESOURCE_BUSY 를 더한다.
+		/* [한국어] 부모 윈도의 플래그를 물려받되 IORESOURCE_BUSY 를 더한다.
 		 * BUSY 는 '이미 누가 쓰고 있다' 는 표시라, PCI 코어가 이 범위를 디바이스
 		 * BAR 에 배정하지 못하게 막는다. */
 		res->flags = win->res->flags | IORESOURCE_BUSY;
 
 		if (!devm_request_resource(pci->dev, win->res, res))
-			/* [한국어] [한국어] **등록에 성공했을 때만** msg_res 를 채운다. 그래서 실패하면
+			/* [한국어] **등록에 성공했을 때만** msg_res 를 채운다. 그래서 실패하면
 			 * 이후 코드가 자동으로 MSG 기능을 건너뛴다. */
 			pp->msg_res = res;
-	/* [한국어] [한국어] MEM 윈도가 있었던 경우 끝. */
+	/* [한국어] MEM 윈도가 있었던 경우 끝. */
 	}
 }
 
@@ -1122,15 +1122,15 @@ static int dw_pcie_config_ecam_iatu(struct dw_pcie_rp *pp)
 {
 	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
 	struct dw_pcie_ob_atu_cfg atu = {0};
-	/* [한국어] [한국어] 버스 범위의 크기(= 버스 개수). CFG1 창의 크기를 정하는 데 쓴다. */
+	/* [한국어] 버스 범위의 크기(= 버스 개수). CFG1 창의 크기를 정하는 데 쓴다. */
 	resource_size_t bus_range_max;
-	/* [한국어] [한국어] 브리지 윈도 목록에서 찾은 IORESOURCE_BUS 항목. */
+	/* [한국어] 브리지 윈도 목록에서 찾은 IORESOURCE_BUS 항목. */
 	struct resource_entry *bus;
-	/* [한국어] [한국어] dw_pcie_prog_outbound_atu 의 반환값. */
+	/* [한국어] dw_pcie_prog_outbound_atu 의 반환값. */
 	int ret;
 
 	bus = resource_list_first_type(&pp->bridge->windows, IORESOURCE_BUS);
-/* [한국어] [한국어] 버스 범위 항목을 찾는다. NULL 검사가 없지만, 이 함수는
+/* [한국어] 버스 범위 항목을 찾는다. NULL 검사가 없지만, 이 함수는
  * dw_pcie_ecam_enabled 가 참일 때만 불리고 그 판정 자체가 버스 범위 존재를
  * 전제하므로 도달 가능한 NULL 은 아니다. */
 
@@ -1142,38 +1142,38 @@ static int dw_pcie_config_ecam_iatu(struct dw_pcie_rp *pp)
 	 */
 	atu.index = 0;
 	atu.type = PCIE_ATU_TYPE_CFG0;
-	/* [한국어] [한국어] cfg0_base 에서 **1MiB 뒤**부터 시작한다. 첫 1MiB 는 버스 0(루트 버스)의
+	/* [한국어] cfg0_base 에서 **1MiB 뒤**부터 시작한다. 첫 1MiB 는 버스 0(루트 버스)의
 	 * 몫인데, 루트 포트 설정공간은 DBI 로 접근하므로 창이 필요 없기 때문이다. */
 	atu.parent_bus_addr = pp->cfg0_base + SZ_1M;
 	/* 1MiB is to cover 1 (bus) * 32 (devices) * 8 (functions) */
 	atu.size = SZ_1M;
 	atu.ctrl2 = PCIE_ATU_CFG_SHIFT_MODE_ENABLE;
-	/* [한국어] [한국어] 창 0 을 실제로 프로그래밍한다. */
+	/* [한국어] 창 0 을 실제로 프로그래밍한다. */
 	ret = dw_pcie_prog_outbound_atu(pci, &atu);
-	/* [한국어] [한국어] 실패하면 CFG1 창을 세울 이유도 없다. */
+	/* [한국어] 실패하면 CFG1 창을 세울 이유도 없다. */
 	if (ret)
-		/* [한국어] [한국어] 호출자(dw_pcie_iatu_setup)가 그대로 위로 전달한다. */
+		/* [한국어] 호출자(dw_pcie_iatu_setup)가 그대로 위로 전달한다. */
 		return ret;
 
 	bus_range_max = resource_size(bus->res);
-/* [한국어] [한국어] DT 가 선언한 버스 개수. 창 1 의 크기 계산에 쓴다. */
+/* [한국어] DT 가 선언한 버스 개수. 창 1 의 크기 계산에 쓴다. */
 
 	if (bus_range_max < 2)
-		/* [한국어] [한국어] 버스가 1개뿐이면 Type 1 설정 트랜잭션이 필요 없다 -- 루트 버스
+		/* [한국어] 버스가 1개뿐이면 Type 1 설정 트랜잭션이 필요 없다 -- 루트 버스
 		 * 바로 아래까지만 존재하므로 CFG0 창 하나로 충분하다. */
 		return 0;
 
 	/* Configure remaining buses in type 1 iATU configuration */
 	atu.index = 1;
 	atu.type = PCIE_ATU_TYPE_CFG1;
-	/* [한국어] [한국어] 창 1 은 2MiB 뒤부터. 앞의 1MiB 는 버스 0, 다음 1MiB 는 창 0 이 덮는다. */
+	/* [한국어] 창 1 은 2MiB 뒤부터. 앞의 1MiB 는 버스 0, 다음 1MiB 는 창 0 이 덮는다. */
 	atu.parent_bus_addr = pp->cfg0_base + SZ_2M;
-	/* [한국어] [한국어] 전체 버스 공간(버스당 1MiB)에서 앞의 2MiB 를 뺀 나머지 전부. */
+	/* [한국어] 전체 버스 공간(버스당 1MiB)에서 앞의 2MiB 를 뺀 나머지 전부. */
 	atu.size = (SZ_1M * bus_range_max) - SZ_2M;
-	/* [한국어] [한국어] 이 비트가 켜져야 iATU 가 주소 하위 비트를 BDF 로 해석해 설정 TLP 를
+	/* [한국어] 이 비트가 켜져야 iATU 가 주소 하위 비트를 BDF 로 해석해 설정 TLP 를
 	 * 만든다 -- ECAM 의 주소 인코딩과 하드웨어를 이어 주는 스위치다. */
 	atu.ctrl2 = PCIE_ATU_CFG_SHIFT_MODE_ENABLE;
-/* [한국어] [한국어] 창 1 프로그래밍 결과를 그대로 돌려준다. */
+/* [한국어] 창 1 프로그래밍 결과를 그대로 돌려준다. */
 
 	return dw_pcie_prog_outbound_atu(pci, &atu);
 }
@@ -1204,22 +1204,22 @@ static int dw_pcie_create_ecam_window(struct dw_pcie_rp *pp, struct resource *re
 {
 	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
 	struct device *dev = pci->dev;
-	/* [한국어] [한국어] pci_ecam_create 에 넘길 버스 범위. */
+	/* [한국어] pci_ecam_create 에 넘길 버스 범위. */
 	struct resource_entry *bus;
 
 	bus = resource_list_first_type(&pp->bridge->windows, IORESOURCE_BUS);
-	/* [한국어] [한국어] 여기서는 반환 항목 자체를 NULL 검사한다 -- 같은 헬퍼를 쓰는
+	/* [한국어] 여기서는 반환 항목 자체를 NULL 검사한다 -- 같은 헬퍼를 쓰는
 	 * dw_pcie_ecam_enabled 가 ->res 를 먼저 역참조하는 것과 대조된다. */
 	if (!bus)
-		/* [한국어] [한국어] 버스 범위 없이는 ECAM 창을 만들 수 없다. */
+		/* [한국어] 버스 범위 없이는 ECAM 창을 만들 수 없다. */
 		return -ENODEV;
 
 	pp->cfg = pci_ecam_create(dev, res, bus->res, &pci_generic_ecam_ops);
-	/* [한국어] [한국어] pci_ecam_create 는 오류를 ERR_PTR 로 돌려주므로 IS_ERR 로 가린다. */
+	/* [한국어] pci_ecam_create 는 오류를 ERR_PTR 로 돌려주므로 IS_ERR 로 가린다. */
 	if (IS_ERR(pp->cfg))
-		/* [한국어] [한국어] 오류 코드를 꺼내 그대로 올린다. */
+		/* [한국어] 오류 코드를 꺼내 그대로 올린다. */
 		return PTR_ERR(pp->cfg);
-/* [한국어] [한국어] 성공. pp->cfg 가 채워졌고 호출자가 브리지에 걸어 준다. */
+/* [한국어] 성공. pp->cfg 가 채워졌고 호출자가 브리지에 걸어 준다. */
 
 	return 0;
 }
@@ -1266,7 +1266,7 @@ static bool dw_pcie_ecam_enabled(struct dw_pcie_rp *pp, struct resource *config_
 {
 	struct resource *bus_range;
 	u64 nr_buses;
-/* [한국어] [한국어] 벤더 글루가 자기만의 ECAM 을 구현했다는 표시. 코어가 끼어들면 안 된다. */
+/* [한국어] 벤더 글루가 자기만의 ECAM 을 구현했다는 표시. 코어가 끼어들면 안 된다. */
 
 	/* Vendor glue drivers may implement their own ECAM mechanism */
 	if (pp->native_ecam)
@@ -1283,16 +1283,16 @@ static bool dw_pcie_ecam_enabled(struct dw_pcie_rp *pp, struct resource *config_
 		return false;
 
 	bus_range = resource_list_first_type(&pp->bridge->windows, IORESOURCE_BUS)->res;
-	/* [한국어] [한국어] 코드 관찰 (상류 그대로, 수정하지 않음): 바로 위에서
+	/* [한국어] 코드 관찰 (상류 그대로, 수정하지 않음): 바로 위에서
 	 * resource_list_first_type(...)->res 로 **먼저 역참조한 뒤** 여기서 NULL 을
 	 * 검사한다. 같은 파일의 다른 두 곳은 반환 항목 자체를 검사하므로, 이 헬퍼의
 	 * 반환이 NULL 일 수 있다는 전제는 파일 안에서도 인정된다. */
 	if (!bus_range)
-		/* [한국어] [한국어] 버스 범위가 없으면 ECAM 크기를 견줄 기준이 없다. */
+		/* [한국어] 버스 범위가 없으면 ECAM 크기를 견줄 기준이 없다. */
 		return false;
 
 	nr_buses = resource_size(config_res) >> PCIE_ECAM_BUS_SHIFT;
-/* [한국어] [한국어] config 영역 크기를 버스 하나당 크기로 나눈 값. 이것이 DT 가 선언한
+/* [한국어] config 영역 크기를 버스 하나당 크기로 나눈 값. 이것이 DT 가 선언한
  * 버스 개수 이상이어야 ECAM 주소 계산이 영역 안에 머문다. */
 
 	return nr_buses >= resource_size(bus_range);
@@ -1340,69 +1340,69 @@ static int dw_pcie_host_get_resources(struct dw_pcie_rp *pp)
 {
 	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
 	struct device *dev = pci->dev;
-	/* [한국어] [한국어] 'config' reg 를 이름으로 조회하기 위해 플랫폼 디바이스가 필요하다. */
+	/* [한국어] 'config' reg 를 이름으로 조회하기 위해 플랫폼 디바이스가 필요하다. */
 	struct platform_device *pdev = to_platform_device(dev);
-	/* [한국어] [한국어] IO 윈도를 찾을 때 쓸 항목 포인터. */
+	/* [한국어] IO 윈도를 찾을 때 쓸 항목 포인터. */
 	struct resource_entry *win;
-	/* [한국어] [한국어] 'config' 메모리 자원. */
+	/* [한국어] 'config' 메모리 자원. */
 	struct resource *res;
-	/* [한국어] [한국어] 하위 호출들의 반환값. */
+	/* [한국어] 하위 호출들의 반환값. */
 	int ret;
 
 	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "config");
-	/* [한국어] [한국어] 'config' 없이는 설정공간에 접근할 방법이 없다. */
+	/* [한국어] 'config' 없이는 설정공간에 접근할 방법이 없다. */
 	if (!res) {
-		/* [한국어] [한국어] DT 의 reg-names 에 'config' 항목이 있어야 한다는 뜻이다. */
+		/* [한국어] DT 의 reg-names 에 'config' 항목이 있어야 한다는 뜻이다. */
 		dev_err(dev, "Missing \"config\" reg space\n");
-		/* [한국어] [한국어] 이 드라이버에 맞지 않는 장치라는 표준 코드. */
+		/* [한국어] 이 드라이버에 맞지 않는 장치라는 표준 코드. */
 		return -ENODEV;
 	}
 
 	pp->cfg0_size = resource_size(res);
-	/* [한국어] [한국어] CPU 쪽 시작 주소. ECAM 정렬 판정과 iATU 창 계산의 기준점이다. */
+	/* [한국어] CPU 쪽 시작 주소. ECAM 정렬 판정과 iATU 창 계산의 기준점이다. */
 	pp->cfg0_base = res->start;
 
 	pp->ecam_enabled = dw_pcie_ecam_enabled(pp, res);
-	/* [한국어] [한국어] ECAM 을 쓸 수 있다고 판정됐다. */
+	/* [한국어] ECAM 을 쓸 수 있다고 판정됐다. */
 	if (pp->ecam_enabled) {
-		/* [한국어] [한국어] 공용 ECAM 매핑 객체를 만든다. */
+		/* [한국어] 공용 ECAM 매핑 객체를 만든다. */
 		ret = dw_pcie_create_ecam_window(pp, res);
-		/* [한국어] [한국어] 만들기 실패. */
+		/* [한국어] 만들기 실패. */
 		if (ret)
-			/* [한국어] [한국어] 아직 다른 자원을 잡기 전이라 되감을 것이 없다. */
+			/* [한국어] 아직 다른 자원을 잡기 전이라 되감을 것이 없다. */
 			return ret;
 
 		pp->bridge->ops = &dw_pcie_ecam_ops;
-		/* [한국어] [한국어] sysdata 로 pci_config_window 를 준다. 그래서 ECAM 경로의 map_bus 는
+		/* [한국어] sysdata 로 pci_config_window 를 준다. 그래서 ECAM 경로의 map_bus 는
 		 * bus->sysdata 를 pp 가 아니라 cfg 로 받는다. */
 		pp->bridge->sysdata = pp->cfg;
-		/* [한국어] [한국어] 그 대신 cfg->priv 에 pp 를 심어, map_bus 가 루트 버스를 DBI 로
+		/* [한국어] 그 대신 cfg->priv 에 pp 를 심어, map_bus 가 루트 버스를 DBI 로
 		 * 우회시킬 때 되찾을 수 있게 한다. */
 		pp->cfg->priv = pp;
-	/* [한국어] [한국어] ECAM 을 쓸 수 없다 -- 기존 iATU 창 방식으로 간다. */
+	/* [한국어] ECAM 을 쓸 수 없다 -- 기존 iATU 창 방식으로 간다. */
 	} else {
 		pp->va_cfg0_base = devm_pci_remap_cfg_resource(dev, res);
-		/* [한국어] [한국어] 매핑 실패. */
+		/* [한국어] 매핑 실패. */
 		if (IS_ERR(pp->va_cfg0_base))
-			/* [한국어] [한국어] ERR_PTR 에서 오류 코드를 꺼내 올린다. */
+			/* [한국어] ERR_PTR 에서 오류 코드를 꺼내 올린다. */
 			return PTR_ERR(pp->va_cfg0_base);
-/* [한국어] [한국어] 여기서도 되감을 것이 없다(devm 매핑). */
+/* [한국어] 여기서도 되감을 것이 없다(devm 매핑). */
 
 		/* Set default bus ops */
 		pp->bridge->ops = &dw_pcie_ops;
 		pp->bridge->child_ops = &dw_child_pcie_ops;
-		/* [한국어] [한국어] 이쪽에서는 sysdata 가 pp 자신이다. child_ops 를 따로 두어 루트 버스와
+		/* [한국어] 이쪽에서는 sysdata 가 pp 자신이다. child_ops 를 따로 두어 루트 버스와
 		 * 하위 버스를 다른 함수로 처리하기 때문이다. */
 		pp->bridge->sysdata = pp;
-	/* [한국어] [한국어] 두 갈래 끝. 이 지점 이후로는 설정공간 접근 방식이 확정돼 있다. */
+	/* [한국어] 두 갈래 끝. 이 지점 이후로는 설정공간 접근 방식이 확정돼 있다. */
 	}
 
 	ret = dw_pcie_get_resources(pci);
-	/* [한국어] [한국어] DBI/ATU 등 IP 공통 자원 확보 실패. */
+	/* [한국어] DBI/ATU 등 IP 공통 자원 확보 실패. */
 	if (ret) {
-		/* [한국어] [한국어] 방금 만든 ECAM 매핑만 devm 이 아니므로 수동 해제가 필요하다. */
+		/* [한국어] 방금 만든 ECAM 매핑만 devm 이 아니므로 수동 해제가 필요하다. */
 		if (pp->cfg)
-			/* [한국어] [한국어] pp->cfg 가 NULL 이면(기존 경로) 아무것도 하지 않는다. */
+			/* [한국어] pp->cfg 가 NULL 이면(기존 경로) 아무것도 하지 않는다. */
 			pci_ecam_free(pp->cfg);
 		return ret;
 	}
@@ -1410,15 +1410,15 @@ static int dw_pcie_host_get_resources(struct dw_pcie_rp *pp)
 	/* Get the I/O range from DT */
 	win = resource_list_first_type(&pp->bridge->windows, IORESOURCE_IO);
 	if (win) {
-		/* [한국어] [한국어] IO 창 크기. iatu_setup 이 이 값으로 창을 잡는다. */
+		/* [한국어] IO 창 크기. iatu_setup 이 이 값으로 창을 잡는다. */
 		pp->io_size = resource_size(win->res);
-		/* [한국어] [한국어] PCI 버스 쪽에서 본 IO 시작 주소. win->offset 이 CPU 주소와 버스
+		/* [한국어] PCI 버스 쪽에서 본 IO 시작 주소. win->offset 이 CPU 주소와 버스
 		 * 주소의 차이이므로 그것을 빼면 버스 주소가 된다. */
 		pp->io_bus_addr = win->res->start - win->offset;
-		/* [한국어] [한국어] 리소스에는 커널의 추상 PIO 번호가 들어 있고 iATU 에는 진짜 물리
+		/* [한국어] 리소스에는 커널의 추상 PIO 번호가 들어 있고 iATU 에는 진짜 물리
 		 * 주소를 줘야 하므로 변환한다. */
 		pp->io_base = pci_pio_to_address(win->res->start);
-	/* [한국어] [한국어] IO 윈도가 있었던 경우 끝. 없으면 io_size 가 0 으로 남아
+	/* [한국어] IO 윈도가 있었던 경우 끝. 없으면 io_size 가 0 으로 남아
 	 * iatu_setup 이 IO 창을 만들지 않는다. */
 	}
 
@@ -1483,46 +1483,46 @@ int dw_pcie_host_init(struct dw_pcie_rp *pp)
 {
 	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
 	struct device *dev = pci->dev;
-	/* [한국어] [한국어] msi-parent / msi-map 속성을 확인할 DT 노드. */
+	/* [한국어] msi-parent / msi-map 속성을 확인할 DT 노드. */
 	struct device_node *np = dev->of_node;
-	/* [한국어] [한국어] PCI 코어가 요구하는 브리지 객체. */
+	/* [한국어] PCI 코어가 요구하는 브리지 객체. */
 	struct pci_host_bridge *bridge;
-	/* [한국어] [한국어] 각 단계의 반환값. */
+	/* [한국어] 각 단계의 반환값. */
 	int ret;
 
 	raw_spin_lock_init(&pp->lock);
 
 	bridge = devm_pci_alloc_host_bridge(dev, 0);
-	/* [한국어] [한국어] 브리지 할당 실패. */
+	/* [한국어] 브리지 할당 실패. */
 	if (!bridge)
-		/* [한국어] [한국어] 아직 아무것도 잡지 않았으므로 라벨 없이 바로 반환한다. */
+		/* [한국어] 아직 아무것도 잡지 않았으므로 라벨 없이 바로 반환한다. */
 		return -ENOMEM;
 
 	pp->bridge = bridge;
-/* [한국어] [한국어] 이후 모든 단계가 pp->bridge 를 통해 윈도 목록에 접근하므로
+/* [한국어] 이후 모든 단계가 pp->bridge 를 통해 윈도 목록에 접근하므로
  * 여기서 먼저 걸어 둔다. */
 
 	ret = dw_pcie_host_get_resources(pp);
-	/* [한국어] [한국어] 설정공간 접근 방식 확정 실패. */
+	/* [한국어] 설정공간 접근 방식 확정 실패. */
 	if (ret)
-		/* [한국어] [한국어] 여기서도 되감을 것이 없다 -- get_resources 가 자기 실패는 스스로 정리한다. */
+		/* [한국어] 여기서도 되감을 것이 없다 -- get_resources 가 자기 실패는 스스로 정리한다. */
 		return ret;
 
 	if (pp->ops->init) {
-		/* [한국어] [한국어] SoC 글루의 클록/PHY/리셋 해제. 하드웨어를 실제로 깨우는 첫 단계다. */
+		/* [한국어] SoC 글루의 클록/PHY/리셋 해제. 하드웨어를 실제로 깨우는 첫 단계다. */
 		ret = pp->ops->init(pp);
-		/* [한국어] [한국어] SoC 초기화 실패. */
+		/* [한국어] SoC 초기화 실패. */
 		if (ret)
-			/* [한국어] [한국어] ECAM 매핑만 되감으면 된다. */
+			/* [한국어] ECAM 매핑만 되감으면 된다. */
 			goto err_free_ecam;
 	}
 
 	if (pci_msi_enabled()) {
-		/* [한국어] [한국어] use_imsi_rx 는 '**외부 MSI 컨트롤러가 없을 때만** 참' 이다.
+		/* [한국어] use_imsi_rx 는 '**외부 MSI 컨트롤러가 없을 때만** 참' 이다.
 		 * SoC 가 자체 msi_init 을 갖거나, DT 에 msi-parent/msi-map 이 있으면 MSI 를
 		 * 그쪽이 맡으므로 내장 iMSI-RX 를 쓰면 안 된다. */
 		pp->use_imsi_rx = !(pp->ops->msi_init ||
-				     /* [한국어] [한국어] msi-parent 는 부모 MSI 컨트롤러를 직접 가리키는 속성. */
+				     /* [한국어] msi-parent 는 부모 MSI 컨트롤러를 직접 가리키는 속성. */
 				     of_property_present(np, "msi-parent") ||
 				     of_property_present(np, "msi-map"));
 
@@ -1532,28 +1532,28 @@ int dw_pcie_host_init(struct dw_pcie_rp *pp)
 		 */
 		if (!pp->use_imsi_rx && !pp->num_vectors) {
 			pp->num_vectors = MSI_DEF_NUM_VECTORS;
-		/* [한국어] [한국어] DT 가 요구한 벡터 수가 하드웨어 상한(256)을 넘었다. */
+		/* [한국어] DT 가 요구한 벡터 수가 하드웨어 상한(256)을 넘었다. */
 		} else if (pp->num_vectors > MAX_MSI_IRQS) {
-			/* [한국어] [한국어] 조용히 깎지 않고 오류로 처리한다 -- DT 를 고쳐야 하는 문제이기 때문이다. */
+			/* [한국어] 조용히 깎지 않고 오류로 처리한다 -- DT 를 고쳐야 하는 문제이기 때문이다. */
 			dev_err(dev, "Invalid number of vectors\n");
-			/* [한국어] [한국어] 잘못된 설정이라는 뜻. */
+			/* [한국어] 잘못된 설정이라는 뜻. */
 			ret = -EINVAL;
 			goto err_deinit_host;
 		}
 
 		if (pp->ops->msi_init) {
-			/* [한국어] [한국어] SoC 가 자체 MSI 구현을 갖고 있으면 그것을 쓴다. */
+			/* [한국어] SoC 가 자체 MSI 구현을 갖고 있으면 그것을 쓴다. */
 			ret = pp->ops->msi_init(pp);
-			/* [한국어] [한국어] 자체 구현 실패. */
+			/* [한국어] 자체 구현 실패. */
 			if (ret < 0)
-				/* [한국어] [한국어] SoC 의 deinit 을 거쳐 되감는다. */
+				/* [한국어] SoC 의 deinit 을 거쳐 되감는다. */
 				goto err_deinit_host;
 		} else if (pp->use_imsi_rx) {
-			/* [한국어] [한국어] 자체 구현이 없고 외부 컨트롤러도 없으면 내장 iMSI-RX 를 세운다. */
+			/* [한국어] 자체 구현이 없고 외부 컨트롤러도 없으면 내장 iMSI-RX 를 세운다. */
 			ret = dw_pcie_msi_host_init(pp);
-			/* [한국어] [한국어] 내장 MSI 초기화 실패. */
+			/* [한국어] 내장 MSI 초기화 실패. */
 			if (ret < 0)
-				/* [한국어] [한국어] 같은 라벨로 되감는다. free_msi 는 부르지 않는데,
+				/* [한국어] 같은 라벨로 되감는다. free_msi 는 부르지 않는데,
 				 * dw_pcie_msi_host_init 이 자기 실패 시 이미 되감았기 때문이다. */
 				goto err_deinit_host;
 		}
@@ -1564,15 +1564,15 @@ int dw_pcie_host_init(struct dw_pcie_rp *pp)
 	dw_pcie_iatu_detect(pci);
 
 	if (pci->num_lanes < 1)
-		/* [한국어] [한국어] DT 가 레인 수를 지정하지 않았으면 링크 능력에서 최대 폭을 읽어
+		/* [한국어] DT 가 레인 수를 지정하지 않았으면 링크 능력에서 최대 폭을 읽어
 		 * 채운다. 바로 다음의 이퀄라이제이션 프리셋 개수가 레인 수에 비례하므로
 		 * 이 순서가 필요하다. */
 		pci->num_lanes = dw_pcie_link_get_max_link_width(pci);
 
 	ret = of_pci_get_equalization_presets(dev, &pp->presets, pci->num_lanes);
-	/* [한국어] [한국어] 프리셋 파싱 실패. DT 표기가 잘못된 경우다. */
+	/* [한국어] 프리셋 파싱 실패. DT 표기가 잘못된 경우다. */
 	if (ret)
-		/* [한국어] [한국어] 이제 MSI 까지 잡혀 있으므로 free_msi 라벨로 간다. */
+		/* [한국어] 이제 MSI 까지 잡혀 있으므로 free_msi 라벨로 간다. */
 		goto err_free_msi;
 
 	/*
@@ -1588,24 +1588,24 @@ int dw_pcie_host_init(struct dw_pcie_rp *pp)
 		dw_pcie_host_request_msg_tlp_res(pp);
 
 	ret = dw_pcie_edma_detect(pci);
-	/* [한국어] [한국어] eDMA 엔진 등록 실패. */
+	/* [한국어] eDMA 엔진 등록 실패. */
 	if (ret)
-		/* [한국어] [한국어] 같은 라벨. edma_remove 는 아직 필요 없다. */
+		/* [한국어] 같은 라벨. edma_remove 는 아직 필요 없다. */
 		goto err_free_msi;
 
 	ret = dw_pcie_setup_rc(pp);
-	/* [한국어] [한국어] RC 설정공간과 iATU 프로그래밍 실패. */
+	/* [한국어] RC 설정공간과 iATU 프로그래밍 실패. */
 	if (ret)
-		/* [한국어] [한국어] eDMA 가 등록됐으므로 그것부터 되감는 라벨로 간다. */
+		/* [한국어] eDMA 가 등록됐으므로 그것부터 되감는 라벨로 간다. */
 		goto err_remove_edma;
 
 	if (!dw_pcie_link_up(pci)) {
-		/* [한국어] [한국어] 링크가 아직 서지 않았으면 기동한다. 이미 서 있으면(부트로더가
+		/* [한국어] 링크가 아직 서지 않았으면 기동한다. 이미 서 있으면(부트로더가
 		 * 올려 둔 경우) 다시 흔들지 않는다. */
 		ret = dw_pcie_start_link(pci);
-		/* [한국어] [한국어] 기동 실패. */
+		/* [한국어] 기동 실패. */
 		if (ret)
-			/* [한국어] [한국어] eDMA 부터 되감는다. */
+			/* [한국어] eDMA 부터 되감는다. */
 			goto err_remove_edma;
 	}
 
@@ -1615,22 +1615,22 @@ int dw_pcie_host_init(struct dw_pcie_rp *pp)
 	 */
 	ret = dw_pcie_wait_for_link(pci);
 	if (ret == -ETIMEDOUT)
-		/* [한국어] [한국어] **-ETIMEDOUT 만** 실패로 본다. 다른 값이나 타임아웃이 아닌 경우에는
+		/* [한국어] **-ETIMEDOUT 만** 실패로 본다. 다른 값이나 타임아웃이 아닌 경우에는
 		 * 그대로 진행해, 나중에 붙는 장치를 놓치지 않는다. */
 		goto err_stop_link;
 
 	ret = pci_host_probe(bridge);
-	/* [한국어] [한국어] 버스 열거 실패. 여기서 하위 장치 드라이버가 붙는다. */
+	/* [한국어] 버스 열거 실패. 여기서 하위 장치 드라이버가 붙는다. */
 	if (ret)
-		/* [한국어] [한국어] 링크부터 되감는다. */
+		/* [한국어] 링크부터 되감는다. */
 		goto err_stop_link;
 
 	if (pp->ops->post_init)
-		/* [한국어] [한국어] 열거가 끝난 뒤에야 할 수 있는 SoC 별 마무리. 훅이 없으면 건너뛴다. */
+		/* [한국어] 열거가 끝난 뒤에야 할 수 있는 SoC 별 마무리. 훅이 없으면 건너뛴다. */
 		pp->ops->post_init(pp);
 
 	dwc_pcie_debugfs_init(pci, DW_PCIE_RC_TYPE);
-/* [한국어] [한국어] 여기까지 오면 버스가 완전히 살아 있다. */
+/* [한국어] 여기까지 오면 버스가 완전히 살아 있다. */
 
 	return 0;
 
@@ -1694,16 +1694,16 @@ void dw_pcie_host_deinit(struct dw_pcie_rp *pp)
 	dw_pcie_edma_remove(pci);
 
 	if (pp->use_imsi_rx)
-		/* [한국어] [한국어] 내장 iMSI-RX 를 썼을 때만 도메인이 우리 것이다. 외부 컨트롤러를
+		/* [한국어] 내장 iMSI-RX 를 썼을 때만 도메인이 우리 것이다. 외부 컨트롤러를
 		 * 쓰는 SoC 에서는 이 파일이 도메인을 만들지 않았으므로 없앨 것도 없다. */
 		dw_pcie_free_msi(pp);
 
 	if (pp->ops->deinit)
-		/* [한국어] [한국어] SoC 글루의 클록/PHY 정리. 하드웨어를 실제로 재우는 마지막 단계다. */
+		/* [한국어] SoC 글루의 클록/PHY 정리. 하드웨어를 실제로 재우는 마지막 단계다. */
 		pp->ops->deinit(pp);
 
 	if (pp->cfg)
-		/* [한국어] [한국어] ECAM 매핑만 devm 이 아니므로 수동 해제한다. */
+		/* [한국어] ECAM 매핑만 devm 이 아니므로 수동 해제한다. */
 		pci_ecam_free(pp->cfg);
 }
 EXPORT_SYMBOL_GPL(dw_pcie_host_deinit);
@@ -1745,14 +1745,14 @@ static void __iomem *dw_pcie_other_conf_map_bus(struct pci_bus *bus,
 {
 	struct dw_pcie_rp *pp = bus->sysdata;
 	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
-	/* [한국어] [한국어] 매번 새로 채워 넣을 창 설정. { 0 } 초기화가 중요하다 --
+	/* [한국어] 매번 새로 채워 넣을 창 설정. { 0 } 초기화가 중요하다 --
 	 * 지정하지 않은 필드(ctrl2 등)가 이전 값으로 남으면 안 된다. */
 	struct dw_pcie_ob_atu_cfg atu = { 0 };
-	/* [한국어] [한국어] type 은 CFG0/CFG1 구분, ret 은 창 프로그래밍 결과. */
+	/* [한국어] type 은 CFG0/CFG1 구분, ret 은 창 프로그래밍 결과. */
 	int type, ret;
-	/* [한국어] [한국어] 버스/장치/함수를 iATU 가 요구하는 자리로 옮겨 담을 값. */
+	/* [한국어] 버스/장치/함수를 iATU 가 요구하는 자리로 옮겨 담을 값. */
 	u32 busdev;
-/* [한국어] [한국어] 이 값이 창의 'PCI 쪽 주소' 가 되어, CPU 가 va_cfg0_base 를 건드리면
+/* [한국어] 이 값이 창의 'PCI 쪽 주소' 가 되어, CPU 가 va_cfg0_base 를 건드리면
  * iATU 가 그 BDF 를 향한 설정 TLP 로 바꿔 낸다. */
 
 	/*
@@ -1767,30 +1767,30 @@ static void __iomem *dw_pcie_other_conf_map_bus(struct pci_bus *bus,
 		return NULL;
 
 	busdev = PCIE_ATU_BUS(bus->number) | PCIE_ATU_DEV(PCI_SLOT(devfn)) |
-		 /* [한국어] [한국어] 함수 번호까지 합쳐 BDF 한 벌을 완성한다. */
+		 /* [한국어] 함수 번호까지 합쳐 BDF 한 벌을 완성한다. */
 		 PCIE_ATU_FUNC(PCI_FUNC(devfn));
 
 	if (pci_is_root_bus(bus->parent))
-		/* [한국어] [한국어] 부모가 루트 버스면 대상은 링크 바로 건너편이므로 Type 0. */
+		/* [한국어] 부모가 루트 버스면 대상은 링크 바로 건너편이므로 Type 0. */
 		type = PCIE_ATU_TYPE_CFG0;
-	/* [한국어] [한국어] 그보다 깊으면 스위치가 중계해야 한다. */
+	/* [한국어] 그보다 깊으면 스위치가 중계해야 한다. */
 	else
 		type = PCIE_ATU_TYPE_CFG1;
-/* [한국어] [한국어] Type 1 -- 스위치가 목적지까지 전달한다. */
+/* [한국어] Type 1 -- 스위치가 목적지까지 전달한다. */
 
 	atu.type = type;
-	/* [한국어] [한국어] CPU 가 보는 주소와 IP 가 보는 부모 버스 주소의 차이를 뺀다. */
+	/* [한국어] CPU 가 보는 주소와 IP 가 보는 부모 버스 주소의 차이를 뺀다. */
 	atu.parent_bus_addr = pp->cfg0_base - pci->parent_bus_offset;
-	/* [한국어] [한국어] 위에서 만든 BDF 를 창의 목적지로 넣는다. */
+	/* [한국어] 위에서 만든 BDF 를 창의 목적지로 넣는다. */
 	atu.pci_addr = busdev;
-	/* [한국어] [한국어] 창 크기는 config 영역 전체. 설정 접근은 이 창 안에서만 일어난다. */
+	/* [한국어] 창 크기는 config 영역 전체. 설정 접근은 이 창 안에서만 일어난다. */
 	atu.size = pp->cfg0_size;
-/* [한국어] [한국어] 설정이 끝났으니 실제로 창을 프로그래밍한다. */
+/* [한국어] 설정이 끝났으니 실제로 창을 프로그래밍한다. */
 
 	ret = dw_pcie_prog_outbound_atu(pci, &atu);
-	/* [한국어] [한국어] 창 프로그래밍 실패. */
+	/* [한국어] 창 프로그래밍 실패. */
 	if (ret)
-		/* [한국어] [한국어] NULL 을 돌려주면 PCI 코어가 이 접근을 0xffffffff 로 처리한다. */
+		/* [한국어] NULL 을 돌려주면 PCI 코어가 이 접근을 0xffffffff 로 처리한다. */
 		return NULL;
 
 	return pp->va_cfg0_base + where;
@@ -1826,33 +1826,33 @@ static int dw_pcie_rd_other_conf(struct pci_bus *bus, unsigned int devfn,
 {
 	struct dw_pcie_rp *pp = bus->sysdata;
 	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
-	/* [한국어] [한국어] IO 창을 되돌릴 때 쓸 설정. */
+	/* [한국어] IO 창을 되돌릴 때 쓸 설정. */
 	struct dw_pcie_ob_atu_cfg atu = { 0 };
-	/* [한국어] [한국어] 읽기 결과와 창 복구 결과를 차례로 담는다. */
+	/* [한국어] 읽기 결과와 창 복구 결과를 차례로 담는다. */
 	int ret;
-/* [한국어] [한국어] 실제 읽기는 공용 헬퍼가 map_bus 를 거쳐 처리한다. */
+/* [한국어] 실제 읽기는 공용 헬퍼가 map_bus 를 거쳐 처리한다. */
 
 	ret = pci_generic_config_read(bus, devfn, where, size, val);
-	/* [한국어] [한국어] 읽기 자체가 실패했으면 IO 창을 되돌릴 필요도 없다 -- map_bus 가
+	/* [한국어] 읽기 자체가 실패했으면 IO 창을 되돌릴 필요도 없다 -- map_bus 가
 	 * 창을 건드리지 못하고 NULL 을 돌려준 경우이기 때문이다. */
 	if (ret != PCIBIOS_SUCCESSFUL)
 		return ret;
 
 	if (pp->cfg0_io_shared) {
-		/* [한국어] [한국어] 겸용 창을 IO 용으로 되돌린다. 방금 map_bus 가 설정 접근용으로
+		/* [한국어] 겸용 창을 IO 용으로 되돌린다. 방금 map_bus 가 설정 접근용으로
 		 * 덮어썼기 때문이다. */
 		atu.type = PCIE_ATU_TYPE_IO;
-		/* [한국어] [한국어] IO 창의 CPU 쪽 시작 주소에서 부모 버스 오프셋을 뺀다. */
+		/* [한국어] IO 창의 CPU 쪽 시작 주소에서 부모 버스 오프셋을 뺀다. */
 		atu.parent_bus_addr = pp->io_base - pci->parent_bus_offset;
-		/* [한국어] [한국어] PCI 버스 쪽에서 본 IO 시작 주소. */
+		/* [한국어] PCI 버스 쪽에서 본 IO 시작 주소. */
 		atu.pci_addr = pp->io_bus_addr;
-		/* [한국어] [한국어] IO 윈도 전체 크기. */
+		/* [한국어] IO 윈도 전체 크기. */
 		atu.size = pp->io_size;
 
 		ret = dw_pcie_prog_outbound_atu(pci, &atu);
-		/* [한국어] [한국어] 창 복구 실패. */
+		/* [한국어] 창 복구 실패. */
 		if (ret)
-			/* [한국어] [한국어] 읽기 자체는 성공했지만, 창 상태가 어긋난 채로 진행하는 것보다
+			/* [한국어] 읽기 자체는 성공했지만, 창 상태가 어긋난 채로 진행하는 것보다
 			 * 오류를 알리는 편이 안전하다. */
 			return PCIBIOS_SET_FAILED;
 	}
@@ -1883,33 +1883,33 @@ static int dw_pcie_wr_other_conf(struct pci_bus *bus, unsigned int devfn,
 {
 	struct dw_pcie_rp *pp = bus->sysdata;
 	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
-	/* [한국어] [한국어] 읽기 쪽과 같은 IO 창 복구 설정. */
+	/* [한국어] 읽기 쪽과 같은 IO 창 복구 설정. */
 	struct dw_pcie_ob_atu_cfg atu = { 0 };
-	/* [한국어] [한국어] 쓰기 결과와 창 복구 결과를 차례로 담는다. */
+	/* [한국어] 쓰기 결과와 창 복구 결과를 차례로 담는다. */
 	int ret;
 
 	ret = pci_generic_config_write(bus, devfn, where, size, val);
-	/* [한국어] [한국어] 쓰기가 실패했으면 map_bus 가 창을 건드리지 못한 경우이므로
+	/* [한국어] 쓰기가 실패했으면 map_bus 가 창을 건드리지 못한 경우이므로
 	 * 되돌릴 것도 없다. */
 	if (ret != PCIBIOS_SUCCESSFUL)
-		/* [한국어] [한국어] 실패 코드를 그대로 올린다. */
+		/* [한국어] 실패 코드를 그대로 올린다. */
 		return ret;
 
 	if (pp->cfg0_io_shared) {
-		/* [한국어] [한국어] 읽기 쪽과 같은 이유로 겸용 창을 IO 용으로 되돌린다. map_bus 는
+		/* [한국어] 읽기 쪽과 같은 이유로 겸용 창을 IO 용으로 되돌린다. map_bus 는
 		 * 읽기든 쓰기든 창을 설정용으로 덮어쓰므로 양쪽에 같은 뒤처리가 필요하다. */
 		atu.type = PCIE_ATU_TYPE_IO;
-		/* [한국어] [한국어] CPU 쪽 시작 주소. */
+		/* [한국어] CPU 쪽 시작 주소. */
 		atu.parent_bus_addr = pp->io_base - pci->parent_bus_offset;
-		/* [한국어] [한국어] PCI 버스 쪽 시작 주소. */
+		/* [한국어] PCI 버스 쪽 시작 주소. */
 		atu.pci_addr = pp->io_bus_addr;
-		/* [한국어] [한국어] 창 크기. */
+		/* [한국어] 창 크기. */
 		atu.size = pp->io_size;
 
 		ret = dw_pcie_prog_outbound_atu(pci, &atu);
-		/* [한국어] [한국어] 복구 실패. */
+		/* [한국어] 복구 실패. */
 		if (ret)
-			/* [한국어] [한국어] 쓰기는 이미 나갔지만 창 상태를 알리기 위해 오류를 돌려준다. */
+			/* [한국어] 쓰기는 이미 나갔지만 창 상태를 알리기 위해 오류를 돌려준다. */
 			return PCIBIOS_SET_FAILED;
 	}
 
@@ -1917,9 +1917,9 @@ static int dw_pcie_wr_other_conf(struct pci_bus *bus, unsigned int devfn,
 }
 
 static struct pci_ops dw_child_pcie_ops = {
-	/* [한국어] [한국어] 하위 버스는 접근할 때마다 창을 다시 겨눠야 한다. */
+	/* [한국어] 하위 버스는 접근할 때마다 창을 다시 겨눠야 한다. */
 	.map_bus = dw_pcie_other_conf_map_bus,
-	/* [한국어] [한국어] 읽기/쓰기에 뒤처리(IO 창 복구)가 필요해 공용 헬퍼를 그대로 쓰지 않는다. */
+	/* [한국어] 읽기/쓰기에 뒤처리(IO 창 복구)가 필요해 공용 헬퍼를 그대로 쓰지 않는다. */
 	.read = dw_pcie_rd_other_conf,
 	.write = dw_pcie_wr_other_conf,
 };
@@ -1952,15 +1952,15 @@ void __iomem *dw_pcie_own_conf_map_bus(struct pci_bus *bus, unsigned int devfn, 
 {
 	struct dw_pcie_rp *pp = bus->sysdata;
 	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
-/* [한국어] [한국어] 루트 버스에는 이 루트 포트 하나만 존재한다. */
+/* [한국어] 루트 버스에는 이 루트 포트 하나만 존재한다. */
 
 	if (PCI_SLOT(devfn) > 0)
-		/* [한국어] [한국어] 막지 않으면 열거가 같은 DBI 영역을 32개 장치로 착각해 유령 장치를
+		/* [한국어] 막지 않으면 열거가 같은 DBI 영역을 32개 장치로 착각해 유령 장치를
 		 * 만들어 낸다. */
 		return NULL;
 
 	return pci->dbi_base + where;
-/* [한국어] [한국어] iATU 도 링크도 개입하지 않는다 -- 루트 포트 설정공간은 IP 내부의
+/* [한국어] iATU 도 링크도 개입하지 않는다 -- 루트 포트 설정공간은 IP 내부의
  * DBI 창에 그대로 노출되어 있다. */
 }
 EXPORT_SYMBOL_GPL(dw_pcie_own_conf_map_bus);
@@ -1997,38 +1997,38 @@ static void __iomem *dw_pcie_ecam_conf_map_bus(struct pci_bus *bus, unsigned int
 {
 	struct pci_config_window *cfg = bus->sysdata;
 	struct dw_pcie_rp *pp = cfg->priv;
-	/* [한국어] [한국어] cfg->priv 에서 되찾은 pp 로 dw_pcie 를 얻는다. dbi_base 에 닿기 위해서다. */
+	/* [한국어] cfg->priv 에서 되찾은 pp 로 dw_pcie 를 얻는다. dbi_base 에 닿기 위해서다. */
 	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
-	/* [한국어] [한국어] 루트 버스인지 가르는 기준. */
+	/* [한국어] 루트 버스인지 가르는 기준. */
 	unsigned int busn = bus->number;
 
 	if (busn > 0)
-		/* [한국어] [한국어] 버스 0 이 아니면 공용 ECAM 매핑에 그대로 맡긴다 -- ECAM 은 주소
+		/* [한국어] 버스 0 이 아니면 공용 ECAM 매핑에 그대로 맡긴다 -- ECAM 은 주소
 		 * 산술만으로 위치가 정해지므로 추가로 할 일이 없다. */
 		return pci_ecam_map_bus(bus, devfn, where);
 
 	if (PCI_SLOT(devfn) > 0)
-		/* [한국어] [한국어] 루트 버스의 슬롯 0 만 유효하다. own_conf_map_bus 와 같은 이유다. */
+		/* [한국어] 루트 버스의 슬롯 0 만 유효하다. own_conf_map_bus 와 같은 이유다. */
 		return NULL;
 
 	return pci->dbi_base + where;
-/* [한국어] [한국어] 루트 포트만 DBI 로 우회한다. 그래서 config_ecam_iatu 도 창을
+/* [한국어] 루트 포트만 DBI 로 우회한다. 그래서 config_ecam_iatu 도 창을
  * cfg0_base + 1MiB 부터 잡는다 -- 첫 1MiB(버스 0 의 몫)는 애초에 쓰지 않는다. */
 }
 
 static struct pci_ops dw_pcie_ops = {
-	/* [한국어] [한국어] 루트 버스 전용. 하위 버스는 child_ops 가 맡는다. */
+	/* [한국어] 루트 버스 전용. 하위 버스는 child_ops 가 맡는다. */
 	.map_bus = dw_pcie_own_conf_map_bus,
-	/* [한국어] [한국어] map_bus 가 이미 DBI 주소를 돌려주므로 읽기/쓰기는 공용 헬퍼로 충분하다. */
+	/* [한국어] map_bus 가 이미 DBI 주소를 돌려주므로 읽기/쓰기는 공용 헬퍼로 충분하다. */
 	.read = pci_generic_config_read,
 	.write = pci_generic_config_write,
 };
 
 static struct pci_ops dw_pcie_ecam_ops = {
-	/* [한국어] [한국어] ECAM 경로는 하나의 map_bus 가 루트 버스와 하위 버스를 모두 처리하므로
+	/* [한국어] ECAM 경로는 하나의 map_bus 가 루트 버스와 하위 버스를 모두 처리하므로
 	 * child_ops 를 두지 않는다. */
 	.map_bus = dw_pcie_ecam_conf_map_bus,
-	/* [한국어] [한국어] 여기서도 뒤처리가 필요 없어 공용 헬퍼를 그대로 쓴다. */
+	/* [한국어] 여기서도 뒤처리가 필요 없어 공용 헬퍼를 그대로 쓴다. */
 	.read = pci_generic_config_read,
 	.write = pci_generic_config_write,
 };
@@ -2082,19 +2082,19 @@ static int dw_pcie_iatu_setup(struct dw_pcie_rp *pp)
 {
 	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
 	struct dw_pcie_ob_atu_cfg atu = { 0 };
-	/* [한국어] [한국어] 브리지 윈도와 dma_ranges 를 순회할 항목 포인터. */
+	/* [한국어] 브리지 윈도와 dma_ranges 를 순회할 항목 포인터. */
 	struct resource_entry *entry;
-	/* [한국어] [한국어] 다음에 쓸 아웃바운드 창 번호. 배분이 진행되며 증가한다. */
+	/* [한국어] 다음에 쓸 아웃바운드 창 번호. 배분이 진행되며 증가한다. */
 	int ob_iatu_index;
-	/* [한국어] [한국어] 다음에 쓸 인바운드 창 번호. */
+	/* [한국어] 다음에 쓸 인바운드 창 번호. */
 	int ib_iatu_index;
-	/* [한국어] [한국어] i 는 창 비활성화 루프용, ret 은 각 프로그래밍 결과. */
+	/* [한국어] i 는 창 비활성화 루프용, ret 은 각 프로그래밍 결과. */
 	int i, ret;
 
 	if (!pci->num_ob_windows) {
-		/* [한국어] [한국어] 아웃바운드 창이 하나도 없으면 어떤 트랜잭션도 내보낼 수 없다. */
+		/* [한국어] 아웃바운드 창이 하나도 없으면 어떤 트랜잭션도 내보낼 수 없다. */
 		dev_err(pci->dev, "No outbound iATU found\n");
-		/* [한국어] [한국어] IP 합성 설정이 잘못됐거나 iatu_detect 가 실패한 경우다. */
+		/* [한국어] IP 합성 설정이 잘못됐거나 iatu_detect 가 실패한 경우다. */
 		return -EINVAL;
 	}
 
@@ -2106,7 +2106,7 @@ static int dw_pcie_iatu_setup(struct dw_pcie_rp *pp)
 		dw_pcie_disable_atu(pci, PCIE_ATU_REGION_DIR_OB, i);
 
 	for (i = 0; i < pci->num_ib_windows; i++)
-		/* [한국어] [한국어] 인바운드 창도 모두 끈다. 부트로더가 남긴 설정이 살아 있으면
+		/* [한국어] 인바운드 창도 모두 끈다. 부트로더가 남긴 설정이 살아 있으면
 		 * 새 배분과 겹쳐 엉뚱한 주소로 트랜잭션이 샌다. */
 		dw_pcie_disable_atu(pci, PCIE_ATU_REGION_DIR_IB, i);
 
@@ -2120,39 +2120,39 @@ static int dw_pcie_iatu_setup(struct dw_pcie_rp *pp)
 	 */
 	if (pp->ecam_enabled) {
 		ob_iatu_index = 2;
-		/* [한국어] [한국어] ECAM 모드에서는 창 0,1 을 설정 접근이 가져간다. */
+		/* [한국어] ECAM 모드에서는 창 0,1 을 설정 접근이 가져간다. */
 		ret = dw_pcie_config_ecam_iatu(pp);
-		/* [한국어] [한국어] 설정 창 프로그래밍 실패. */
+		/* [한국어] 설정 창 프로그래밍 실패. */
 		if (ret) {
-			/* [한국어] [한국어] 이 실패는 이후 모든 설정 접근을 불가능하게 만드므로 명확히 알린다. */
+			/* [한국어] 이 실패는 이후 모든 설정 접근을 불가능하게 만드므로 명확히 알린다. */
 			dev_err(pci->dev, "Failed to configure iATU in ECAM mode\n");
-			/* [한국어] [한국어] 호출자(dw_pcie_setup_rc)가 그대로 위로 전달한다. */
+			/* [한국어] 호출자(dw_pcie_setup_rc)가 그대로 위로 전달한다. */
 			return ret;
 		}
 	} else {
 		ob_iatu_index = 1;
-	/* [한국어] [한국어] 기존 모드 -- 창 0 은 other_conf_map_bus 가 매번 다시 겨누는 설정
+	/* [한국어] 기존 모드 -- 창 0 은 other_conf_map_bus 가 매번 다시 겨누는 설정
 	 * 전용 창이므로 1부터 시작한다. */
 	}
 
 	resource_list_for_each_entry(entry, &pp->bridge->windows) {
-		/* [한국어] [한국어] 이 윈도에서 실제로 창에 배분할 크기. msg_res 를 뺀 값이 될 수 있다. */
+		/* [한국어] 이 윈도에서 실제로 창에 배분할 크기. msg_res 를 뺀 값이 될 수 있다. */
 		resource_size_t res_size;
 
 		if (resource_type(entry->res) != IORESOURCE_MEM)
-			/* [한국어] [한국어] MEM 이 아닌 윈도(IO, BUS)는 여기서 다루지 않는다. */
+			/* [한국어] MEM 이 아닌 윈도(IO, BUS)는 여기서 다루지 않는다. */
 			continue;
 
 		atu.type = PCIE_ATU_TYPE_MEM;
-		/* [한국어] [한국어] CPU 가 보는 주소와 IP 가 보는 부모 버스 주소의 차이를 뺀다. */
+		/* [한국어] CPU 가 보는 주소와 IP 가 보는 부모 버스 주소의 차이를 뺀다. */
 		atu.parent_bus_addr = entry->res->start - pci->parent_bus_offset;
-		/* [한국어] [한국어] PCI 버스 쪽에서 본 주소. entry->offset 이 두 주소의 차이다. */
+		/* [한국어] PCI 버스 쪽에서 본 주소. entry->offset 이 두 주소의 차이다. */
 		atu.pci_addr = entry->res->start - entry->offset;
 
 		/* Adjust iATU size if MSG TLP region was allocated before */
 		if (pp->msg_res && pp->msg_res->parent == entry->res)
 			res_size = resource_size(entry->res) -
-					/* [한국어] [한국어] MSG 용으로 떼어 낸 만큼 빼야 창이 그 구간을 덮지 않는다.
+					/* [한국어] MSG 용으로 떼어 낸 만큼 빼야 창이 그 구간을 덮지 않는다.
 					 * msg_res->parent 로 **이 윈도에서 잘려 나갔는지**를 확인하는 것이 요점이다. */
 					resource_size(pp->msg_res);
 		else
@@ -2166,56 +2166,56 @@ static int dw_pcie_iatu_setup(struct dw_pcie_rp *pp)
 			 */
 			if (ob_iatu_index >= pci->num_ob_windows) {
 				dev_err(pci->dev, "Cannot add outbound window for region: %pr\n",
-					/* [한국어] [한국어] 어느 범위에서 창이 모자랐는지 %pr 로 찍어 준다. */
+					/* [한국어] 어느 범위에서 창이 모자랐는지 %pr 로 찍어 준다. */
 					entry->res);
 				return -ENOMEM;
 			}
 
 			atu.index = ob_iatu_index;
-			/* [한국어] [한국어] 창 하나가 덮을 수 있는 최대 크기는 region_limit + 1 이다.
+			/* [한국어] 창 하나가 덮을 수 있는 최대 크기는 region_limit + 1 이다.
 			 * 그보다 큰 범위는 이 while 루프로 여러 창에 쪼개 배분한다. */
 			atu.size = MIN(pci->region_limit + 1, res_size);
 
 			ret = dw_pcie_prog_outbound_atu(pci, &atu);
-			/* [한국어] [한국어] 창 프로그래밍 실패. */
+			/* [한국어] 창 프로그래밍 실패. */
 			if (ret) {
-				/* [한국어] [한국어] 어느 MEM 범위에서 실패했는지 남긴다. */
+				/* [한국어] 어느 MEM 범위에서 실패했는지 남긴다. */
 				dev_err(pci->dev, "Failed to set MEM range %pr\n",
 					entry->res);
 				return ret;
 			}
 
 			ob_iatu_index++;
-			/* [한국어] [한국어] 다음 조각의 CPU 쪽 시작 주소로 전진한다. */
+			/* [한국어] 다음 조각의 CPU 쪽 시작 주소로 전진한다. */
 			atu.parent_bus_addr += atu.size;
-			/* [한국어] [한국어] PCI 쪽 주소도 같은 크기만큼 전진한다. 두 주소가 나란히 움직여야
+			/* [한국어] PCI 쪽 주소도 같은 크기만큼 전진한다. 두 주소가 나란히 움직여야
 			 * 변환 관계가 유지된다. */
 			atu.pci_addr += atu.size;
-			/* [한국어] [한국어] 남은 크기를 줄인다. 0 이 되면 이 윈도의 배분이 끝난다. */
+			/* [한국어] 남은 크기를 줄인다. 0 이 되면 이 윈도의 배분이 끝난다. */
 			res_size -= atu.size;
-		/* [한국어] [한국어] 쪼개기 루프 끝. */
+		/* [한국어] 쪼개기 루프 끝. */
 		}
 	}
 
 	if (pp->io_size) {
-		/* [한국어] [한국어] 남은 창이 있으면 IO 를 정상 배분한다. */
+		/* [한국어] 남은 창이 있으면 IO 를 정상 배분한다. */
 		if (ob_iatu_index < pci->num_ob_windows) {
-			/* [한국어] [한국어] 다음 빈 창 번호. */
+			/* [한국어] 다음 빈 창 번호. */
 			atu.index = ob_iatu_index;
-			/* [한국어] [한국어] 이 창의 쓰기를 IO 트랜잭션으로 바꾸라는 지정. */
+			/* [한국어] 이 창의 쓰기를 IO 트랜잭션으로 바꾸라는 지정. */
 			atu.type = PCIE_ATU_TYPE_IO;
-			/* [한국어] [한국어] IO 창의 CPU 쪽 시작 주소. */
+			/* [한국어] IO 창의 CPU 쪽 시작 주소. */
 			atu.parent_bus_addr = pp->io_base - pci->parent_bus_offset;
-			/* [한국어] [한국어] PCI 버스 쪽 IO 시작 주소. */
+			/* [한국어] PCI 버스 쪽 IO 시작 주소. */
 			atu.pci_addr = pp->io_bus_addr;
-			/* [한국어] [한국어] IO 윈도 전체 크기. MEM 과 달리 쪼개지 않는데, IO 공간은 보통
+			/* [한국어] IO 윈도 전체 크기. MEM 과 달리 쪼개지 않는데, IO 공간은 보통
 			 * 창 하나에 들어갈 만큼 작기 때문이다. */
 			atu.size = pp->io_size;
 
 			ret = dw_pcie_prog_outbound_atu(pci, &atu);
-			/* [한국어] [한국어] IO 창 프로그래밍 실패. */
+			/* [한국어] IO 창 프로그래밍 실패. */
 			if (ret) {
-				/* [한국어] [한국어] 코드 관찰 (상류 그대로, 수정하지 않음): 여기서 찍는 entry 는 위
+				/* [한국어] 코드 관찰 (상류 그대로, 수정하지 않음): 여기서 찍는 entry 는 위
 				 * MEM 순회 루프가 끝난 뒤의 값이라 IO 윈도가 아니다. 로그 내용이 실제
 				 * 실패 대상과 다를 수 있다. */
 				dev_err(pci->dev, "Failed to set IO range %pr\n",
@@ -2223,7 +2223,7 @@ static int dw_pcie_iatu_setup(struct dw_pcie_rp *pp)
 				return ret;
 			}
 			ob_iatu_index++;
-		/* [한국어] [한국어] 남은 창이 없다. 여기서 ECAM 모드와 기존 모드가 갈린다. */
+		/* [한국어] 남은 창이 없다. 여기서 ECAM 모드와 기존 모드가 갈린다. */
 		} else {
 			/*
 			 * If there are not enough outbound windows to give I/O
@@ -2237,44 +2237,44 @@ static int dw_pcie_iatu_setup(struct dw_pcie_rp *pp)
 			 */
 			if (pp->ecam_enabled) {
 				dev_err(pci->dev, "Cannot add outbound window for I/O\n");
-				/* [한국어] [한국어] ECAM 모드에서는 설정 창을 IO 와 겸용할 수 없다 -- 설정 창은
+				/* [한국어] ECAM 모드에서는 설정 창을 IO 와 겸용할 수 없다 -- 설정 창은
 				 * 주소 산술로 고정되어 있어 매번 다시 겨눌 수 없기 때문이다. */
 				return -ENOMEM;
 			}
 			pp->cfg0_io_shared = true;
-		/* [한국어] [한국어] 기존 모드에서는 겸용으로 넘어간다(cfg0_io_shared). */
+		/* [한국어] 기존 모드에서는 겸용으로 넘어간다(cfg0_io_shared). */
 		}
 	}
 
 	if (pp->use_atu_msg) {
-		/* [한국어] [한국어] MSG 용 창 번호를 예약할 자리가 없다. */
+		/* [한국어] MSG 용 창 번호를 예약할 자리가 없다. */
 		if (ob_iatu_index >= pci->num_ob_windows) {
-			/* [한국어] [한국어] 이러면 PME_Turn_Off 를 보낼 수 없어 서스펜드가 제한된다. */
+			/* [한국어] 이러면 PME_Turn_Off 를 보낼 수 없어 서스펜드가 제한된다. */
 			dev_err(pci->dev, "Cannot add outbound window for MSG TLP\n");
-			/* [한국어] [한국어] 창 부족을 알린다. */
+			/* [한국어] 창 부족을 알린다. */
 			return -ENOMEM;
 		}
 		pp->msg_atu_index = ob_iatu_index++;
-	/* [한국어] [한국어] 번호만 예약해 두고 실제 프로그래밍은 dw_pcie_pme_turn_off 가 한다.
+	/* [한국어] 번호만 예약해 두고 실제 프로그래밍은 dw_pcie_pme_turn_off 가 한다.
 	 * 서스펜드 때 한 번만 쓰는 창이라 미리 잡아 둘 이유가 없다. */
 	}
 
 	ib_iatu_index = 0;
-	/* [한국어] [한국어] 인바운드는 dma_ranges 를 순회한다. 이것이 없으면 엔드포인트의
+	/* [한국어] 인바운드는 dma_ranges 를 순회한다. 이것이 없으면 엔드포인트의
 	 * DMA 가 시스템 메모리에 닿지 못한다. */
 	resource_list_for_each_entry(entry, &pp->bridge->dma_ranges) {
-		/* [한국어] [한국어] 아웃바운드와 달리 시작 주소를 따로 들고 전진시킨다. */
+		/* [한국어] 아웃바운드와 달리 시작 주소를 따로 들고 전진시킨다. */
 		resource_size_t res_start, res_size, window_size;
 
 		if (resource_type(entry->res) != IORESOURCE_MEM)
-			/* [한국어] [한국어] MEM 이 아닌 항목은 인바운드 창의 대상이 아니다. */
+			/* [한국어] MEM 이 아닌 항목은 인바운드 창의 대상이 아니다. */
 			continue;
 
 		res_size = resource_size(entry->res);
-		/* [한국어] [한국어] 쪼개며 전진시킬 시작 주소. atu 구조체를 쓰지 않고 인자로 직접
+		/* [한국어] 쪼개며 전진시킬 시작 주소. atu 구조체를 쓰지 않고 인자로 직접
 		 * 넘기는 것이 아웃바운드와 다른 점이다. */
 		res_start = entry->res->start;
-		/* [한국어] [한국어] 아웃바운드와 같은 방식으로 큰 범위를 여러 창에 쪼갠다. */
+		/* [한국어] 아웃바운드와 같은 방식으로 큰 범위를 여러 창에 쪼갠다. */
 		while (res_size > 0) {
 			/*
 			 * Return failure if we run out of windows in the
@@ -2283,32 +2283,32 @@ static int dw_pcie_iatu_setup(struct dw_pcie_rp *pp)
 			 */
 			if (ib_iatu_index >= pci->num_ib_windows) {
 				dev_err(pci->dev, "Cannot add inbound window for region: %pr\n",
-					/* [한국어] [한국어] 어느 dma_range 에서 창이 모자랐는지 남긴다. */
+					/* [한국어] 어느 dma_range 에서 창이 모자랐는지 남긴다. */
 					entry->res);
 				return -ENOMEM;
 			}
 
 			window_size = MIN(pci->region_limit + 1, res_size);
-			/* [한국어] [한국어] 인바운드는 방향이 반대다 -- base 는 PCI 쪽에서 알아볼 범위,
+			/* [한국어] 인바운드는 방향이 반대다 -- base 는 PCI 쪽에서 알아볼 범위,
 			 * target 은 CPU 메모리다. */
 			ret = dw_pcie_prog_inbound_atu(pci, ib_iatu_index,
-						       /* [한국어] [한국어] res_start 가 base, res_start - entry->offset 이 target 이 된다. */
+						       /* [한국어] res_start 가 base, res_start - entry->offset 이 target 이 된다. */
 						       PCIE_ATU_TYPE_MEM, res_start,
 						       res_start - entry->offset, window_size);
 			if (ret) {
-				/* [한국어] [한국어] 인바운드 창 프로그래밍 실패. */
+				/* [한국어] 인바운드 창 프로그래밍 실패. */
 				dev_err(pci->dev, "Failed to set DMA range %pr\n",
-					/* [한국어] [한국어] 실패한 범위를 남긴다. */
+					/* [한국어] 실패한 범위를 남긴다. */
 					entry->res);
 				return ret;
 			}
 
 			ib_iatu_index++;
-			/* [한국어] [한국어] 다음 조각으로 전진. */
+			/* [한국어] 다음 조각으로 전진. */
 			res_start += window_size;
-			/* [한국어] [한국어] 남은 크기를 줄인다. */
+			/* [한국어] 남은 크기를 줄인다. */
 			res_size -= window_size;
-		/* [한국어] [한국어] 쪼개기 루프 끝. */
+		/* [한국어] 쪼개기 루프 끝. */
 		}
 	}
 
@@ -2354,68 +2354,68 @@ static void dw_pcie_program_presets(struct dw_pcie_rp *pp, enum pci_bus_speed sp
 {
 	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
 	u8 lane_eq_offset, lane_reg_size, cap_id;
-	/* [한국어] [한국어] DT 에서 읽어 둔 레인별 프리셋 배열의 시작. 속도마다 다른 배열을 가리킨다. */
+	/* [한국어] DT 에서 읽어 둔 레인별 프리셋 배열의 시작. 속도마다 다른 배열을 가리킨다. */
 	u8 *presets;
-	/* [한국어] [한국어] 해당 속도의 확장 능력 구조 오프셋. */
+	/* [한국어] 해당 속도의 확장 능력 구조 오프셋. */
 	u32 cap;
-	/* [한국어] [한국어] 레인 순회용 인덱스. */
+	/* [한국어] 레인 순회용 인덱스. */
 	int i;
 
 	if (speed == PCIE_SPEED_8_0GT) {
-		/* [한국어] [한국어] 8GT/s 프리셋은 별도 배열에 담긴다. u8* 로 캐스팅하는 것은 아래
+		/* [한국어] 8GT/s 프리셋은 별도 배열에 담긴다. u8* 로 캐스팅하는 것은 아래
 		 * 바이트 단위 쓰기와 자료형을 맞추기 위해서다. */
 		presets = (u8 *)pp->presets.eq_presets_8gts;
-		/* [한국어] [한국어] Secondary PCI Express 능력 안의 Lane Equalization Control 오프셋. */
+		/* [한국어] Secondary PCI Express 능력 안의 Lane Equalization Control 오프셋. */
 		lane_eq_offset =  PCI_SECPCI_LE_CTRL;
-		/* [한국어] [한국어] 8GT/s 만 Secondary PCI Express 확장 능력을 쓴다. */
+		/* [한국어] 8GT/s 만 Secondary PCI Express 확장 능력을 쓴다. */
 		cap_id = PCI_EXT_CAP_ID_SECPCI;
 		/* For data rate of 8 GT/S each lane equalization control is 16bits wide*/
 		lane_reg_size = 0x2;
 	} else if (speed == PCIE_SPEED_16_0GT) {
-		/* [한국어] [한국어] 16GT/s 이상은 공통 배열에서 속도별 칸을 고른다. -1 은 열거값이
+		/* [한국어] 16GT/s 이상은 공통 배열에서 속도별 칸을 고른다. -1 은 열거값이
 		 * 1부터 시작해 배열 인덱스로 맞추기 위한 보정이다. */
 		presets = pp->presets.eq_presets_Ngts[EQ_PRESET_TYPE_16GTS - 1];
-		/* [한국어] [한국어] 16GT/s 전용 Physical Layer 능력 안의 Lane Equalization Control. */
+		/* [한국어] 16GT/s 전용 Physical Layer 능력 안의 Lane Equalization Control. */
 		lane_eq_offset = PCI_PL_16GT_LE_CTRL;
-		/* [한국어] [한국어] 16GT/s 전용 확장 능력 ID. */
+		/* [한국어] 16GT/s 전용 확장 능력 ID. */
 		cap_id = PCI_EXT_CAP_ID_PL_16GT;
-		/* [한국어] [한국어] 레인당 1바이트. 8GT/s(2바이트)와 다른 점이다 -- 8GT/s 는 상하류
+		/* [한국어] 레인당 1바이트. 8GT/s(2바이트)와 다른 점이다 -- 8GT/s 는 상하류
 		 * 프리셋을 각각 담기 때문이다. */
 		lane_reg_size = 0x1;
-	/* [한국어] [한국어] 32GT/s 분기. */
+	/* [한국어] 32GT/s 분기. */
 	} else if (speed == PCIE_SPEED_32_0GT) {
-		/* [한국어] [한국어] 32GT/s 칸을 고른다. */
+		/* [한국어] 32GT/s 칸을 고른다. */
 		presets =  pp->presets.eq_presets_Ngts[EQ_PRESET_TYPE_32GTS - 1];
-		/* [한국어] [한국어] 32GT/s 전용 Lane Equalization Control 오프셋. */
+		/* [한국어] 32GT/s 전용 Lane Equalization Control 오프셋. */
 		lane_eq_offset = PCI_PL_32GT_LE_CTRL;
-		/* [한국어] [한국어] 32GT/s 전용 확장 능력 ID. */
+		/* [한국어] 32GT/s 전용 확장 능력 ID. */
 		cap_id = PCI_EXT_CAP_ID_PL_32GT;
-		/* [한국어] [한국어] 레인당 1바이트. */
+		/* [한국어] 레인당 1바이트. */
 		lane_reg_size = 0x1;
-	/* [한국어] [한국어] 64GT/s 분기. */
+	/* [한국어] 64GT/s 분기. */
 	} else if (speed == PCIE_SPEED_64_0GT) {
-		/* [한국어] [한국어] 64GT/s 칸을 고른다. */
+		/* [한국어] 64GT/s 칸을 고른다. */
 		presets =  pp->presets.eq_presets_Ngts[EQ_PRESET_TYPE_64GTS - 1];
-		/* [한국어] [한국어] 64GT/s 전용 Lane Equalization Control 오프셋. */
+		/* [한국어] 64GT/s 전용 Lane Equalization Control 오프셋. */
 		lane_eq_offset = PCI_PL_64GT_LE_CTRL;
-		/* [한국어] [한국어] 64GT/s 전용 확장 능력 ID. */
+		/* [한국어] 64GT/s 전용 확장 능력 ID. */
 		cap_id = PCI_EXT_CAP_ID_PL_64GT;
-		/* [한국어] [한국어] 레인당 1바이트. */
+		/* [한국어] 레인당 1바이트. */
 		lane_reg_size = 0x1;
-	/* [한국어] [한국어] 그 밖의 속도 -- 프리셋 개념 자체가 8GT/s(Gen3)부터이므로 해당 없음. */
+	/* [한국어] 그 밖의 속도 -- 프리셋 개념 자체가 8GT/s(Gen3)부터이므로 해당 없음. */
 	} else {
 		return;
 	}
 
 	if (presets[0] == PCI_EQ_RESV)
-		/* [한국어] [한국어] DT 가 이 속도에 대해 프리셋을 주지 않았다는 표시(PCI_EQ_RESV).
+		/* [한국어] DT 가 이 속도에 대해 프리셋을 주지 않았다는 표시(PCI_EQ_RESV).
 		 * 첫 칸만 봐도 되는 이유는 파서가 전부 채우거나 전부 비우기 때문이다. */
 		return;
 
 	cap = dw_pcie_find_ext_capability(pci, cap_id);
-	/* [한국어] [한국어] 이 IP 에 해당 확장 능력이 없다. */
+	/* [한국어] 이 IP 에 해당 확장 능력이 없다. */
 	if (!cap)
-		/* [한국어] [한국어] 쓸 대상이 없으므로 조용히 물러난다. 프리셋은 최적화이지 필수가 아니다. */
+		/* [한국어] 쓸 대상이 없으므로 조용히 물러난다. 프리셋은 최적화이지 필수가 아니다. */
 		return;
 
 	/*
@@ -2450,7 +2450,7 @@ static void dw_pcie_config_presets(struct dw_pcie_rp *pp)
 {
 	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
 	enum pci_bus_speed speed = pcie_get_link_speed(pci->max_link_speed);
-/* [한국어] [한국어] DT 가 지정한 최대 속도를 열거형 등급으로 바꾼다. 8GT/s 미만이면
+/* [한국어] DT 가 지정한 최대 속도를 열거형 등급으로 바꾼다. 8GT/s 미만이면
  * 아래 어떤 분기에도 들어가지 않는다. */
 
 	/*
@@ -2459,23 +2459,23 @@ static void dw_pcie_config_presets(struct dw_pcie_rp *pp)
 	 */
 
 	if (speed >= PCIE_SPEED_8_0GT)
-		/* [한국어] [한국어] 링크는 학습하며 속도를 단계적으로 올린다(2.5 → 5 → 8 → 16 → ...).
+		/* [한국어] 링크는 학습하며 속도를 단계적으로 올린다(2.5 → 5 → 8 → 16 → ...).
 		 * 그래서 최대 속도가 32GT/s 라도 8, 16, 32 프리셋이 **모두** 필요하다. */
 		dw_pcie_program_presets(pp, PCIE_SPEED_8_0GT);
-/* [한국어] [한국어] else 로 잇지 않고 >= 비교를 나열한 것이 바로 그 누적 적용이다. */
+/* [한국어] else 로 잇지 않고 >= 비교를 나열한 것이 바로 그 누적 적용이다. */
 
 	if (speed >= PCIE_SPEED_16_0GT)
-		/* [한국어] [한국어] 16GT/s 이상이면 그 프리셋도 넣는다. */
+		/* [한국어] 16GT/s 이상이면 그 프리셋도 넣는다. */
 		dw_pcie_program_presets(pp, PCIE_SPEED_16_0GT);
-/* [한국어] [한국어] 다음 등급으로. */
+/* [한국어] 다음 등급으로. */
 
 	if (speed >= PCIE_SPEED_32_0GT)
-		/* [한국어] [한국어] 32GT/s 이상이면 그 프리셋도 넣는다. */
+		/* [한국어] 32GT/s 이상이면 그 프리셋도 넣는다. */
 		dw_pcie_program_presets(pp, PCIE_SPEED_32_0GT);
-/* [한국어] [한국어] 다음 등급으로. */
+/* [한국어] 다음 등급으로. */
 
 	if (speed >= PCIE_SPEED_64_0GT)
-		/* [한국어] [한국어] 64GT/s 이상이면 마지막 프리셋까지 넣는다. */
+		/* [한국어] 64GT/s 이상이면 마지막 프리셋까지 넣는다. */
 		dw_pcie_program_presets(pp, PCIE_SPEED_64_0GT);
 }
 
@@ -2530,7 +2530,7 @@ int dw_pcie_setup_rc(struct dw_pcie_rp *pp)
 {
 	struct dw_pcie *pci = to_dw_pcie_from_pp(pp);
 	u32 val;
-	/* [한국어] [한국어] iatu_setup 의 반환값을 담는다. */
+	/* [한국어] iatu_setup 의 반환값을 담는다. */
 	int ret;
 
 	/*
@@ -2546,40 +2546,40 @@ int dw_pcie_setup_rc(struct dw_pcie_rp *pp)
 	/* Setup RC BARs */
 	dw_pcie_writel_dbi(pci, PCI_BASE_ADDRESS_0, 0x00000004);
 	dw_pcie_writel_dbi(pci, PCI_BASE_ADDRESS_1, 0x00000000);
-/* [한국어] [한국어] 이 아래의 쓰기들이 규약상 읽기 전용인 레지스터를 건드리므로,
+/* [한국어] 이 아래의 쓰기들이 규약상 읽기 전용인 레지스터를 건드리므로,
  * DWC 의 전용 스위치로 쓰기를 잠깐 허용한다. */
 
 	/* Setup interrupt pins */
 	val = dw_pcie_readl_dbi(pci, PCI_INTERRUPT_LINE);
 	val &= 0xffff00ff;
-	/* [한국어] [한국어] Interrupt Pin 을 INTA(1)로 고정한다. 하위 8비트(Interrupt Line)는
+	/* [한국어] Interrupt Pin 을 INTA(1)로 고정한다. 하위 8비트(Interrupt Line)는
 	 * 마스크로 보존했으므로 건드리지 않는다. */
 	val |= 0x00000100;
-	/* [한국어] [한국어] 갱신된 값을 되쓴다. */
+	/* [한국어] 갱신된 값을 되쓴다. */
 	dw_pcie_writel_dbi(pci, PCI_INTERRUPT_LINE, val);
-/* [한국어] [한국어] 다음 필드로. */
+/* [한국어] 다음 필드로. */
 
 	/* Setup bus numbers */
 	val = dw_pcie_readl_dbi(pci, PCI_PRIMARY_BUS);
 	val &= 0xff000000;
-	/* [한국어] [한국어] primary=0, secondary=1, subordinate=0xff. 열거가 시작될 수 있는
+	/* [한국어] primary=0, secondary=1, subordinate=0xff. 열거가 시작될 수 있는
 	 * 초기 버스 구간이다. 실제 값은 이후 PCI 코어가 열거하며 다시 정한다. */
 	val |= 0x00ff0100;
-	/* [한국어] [한국어] 갱신된 버스 번호를 되쓴다. */
+	/* [한국어] 갱신된 버스 번호를 되쓴다. */
 	dw_pcie_writel_dbi(pci, PCI_PRIMARY_BUS, val);
-/* [한국어] [한국어] 다음 필드로. */
+/* [한국어] 다음 필드로. */
 
 	/* Setup command register */
 	val = dw_pcie_readl_dbi(pci, PCI_COMMAND);
 	val &= 0xffff0000;
-	/* [한국어] [한국어] IO/MEMORY 는 트랜잭션 디코딩을, MASTER 는 스스로 트랜잭션을 일으킬
+	/* [한국어] IO/MEMORY 는 트랜잭션 디코딩을, MASTER 는 스스로 트랜잭션을 일으킬
 	 * 권한을, SERR 은 시스템 오류 보고를 연다. */
 	val |= PCI_COMMAND_IO | PCI_COMMAND_MEMORY |
-		/* [한국어] [한국어] 네 비트를 한 번에 세운다. */
+		/* [한국어] 네 비트를 한 번에 세운다. */
 		PCI_COMMAND_MASTER | PCI_COMMAND_SERR;
-	/* [한국어] [한국어] 갱신된 Command 를 되쓴다. */
+	/* [한국어] 갱신된 Command 를 되쓴다. */
 	dw_pcie_writel_dbi(pci, PCI_COMMAND, val);
-/* [한국어] [한국어] 설정공간 기본 정비 끝. */
+/* [한국어] 설정공간 기본 정비 끝. */
 
 	dw_pcie_hide_unsupported_l1ss(pci);
 
@@ -2591,26 +2591,26 @@ int dw_pcie_setup_rc(struct dw_pcie_rp *pp)
 	 */
 	if (pp->bridge->child_ops == &dw_child_pcie_ops || pp->ecam_enabled) {
 		ret = dw_pcie_iatu_setup(pp);
-		/* [한국어] [한국어] iATU 배분 실패. */
+		/* [한국어] iATU 배분 실패. */
 		if (ret)
-			/* [한국어] [한국어] 코드 관찰 (상류 그대로, 수정하지 않음): 여기서 반환하면
+			/* [한국어] 코드 관찰 (상류 그대로, 수정하지 않음): 여기서 반환하면
 			 * dw_pcie_dbi_ro_wr_dis 가 불리지 않아 DBI 쓰기 허용이 열린 채로 남는다. */
 			return ret;
 	}
 
 	dw_pcie_writel_dbi(pci, PCI_BASE_ADDRESS_0, 0);
-/* [한국어] [한국어] BAR0 을 0 으로 되돌린다. 루트 포트는 실제 BAR 를 노출하지 않으며,
+/* [한국어] BAR0 을 0 으로 되돌린다. 루트 포트는 실제 BAR 를 노출하지 않으며,
  * 앞에서 잠깐 세웠던 것은 IP 내부 상태를 정해진 값으로 만들기 위한 것이다. */
 
 	/* Program correct class for RC */
 	dw_pcie_writew_dbi(pci, PCI_CLASS_DEVICE, PCI_CLASS_BRIDGE_PCI);
 
 	val = dw_pcie_readl_dbi(pci, PCIE_LINK_WIDTH_SPEED_CONTROL);
-	/* [한국어] [한국어] 링크가 올라온 뒤 목표 속도로 협상을 다시 시도하게 하는 트리거. */
+	/* [한국어] 링크가 올라온 뒤 목표 속도로 협상을 다시 시도하게 하는 트리거. */
 	val |= PORT_LOGIC_SPEED_CHANGE;
-	/* [한국어] [한국어] 트리거를 실제로 건다. */
+	/* [한국어] 트리거를 실제로 건다. */
 	dw_pcie_writel_dbi(pci, PCIE_LINK_WIDTH_SPEED_CONTROL, val);
-/* [한국어] [한국어] 설정 끝. */
+/* [한국어] 설정 끝. */
 
 	dw_pcie_dbi_ro_wr_dis(pci);
 
@@ -2622,10 +2622,10 @@ int dw_pcie_setup_rc(struct dw_pcie_rp *pp)
 	 */
 	if (pp->use_imsi_rx && !pp->keep_rp_msi_en) {
 		dw_pcie_remove_capability(pci, PCI_CAP_ID_MSI);
-		/* [한국어] [한국어] MSI-X 능력도 함께 지운다. 루트 포트가 스스로 MSI/MSI-X 를 받는
+		/* [한국어] MSI-X 능력도 함께 지운다. 루트 포트가 스스로 MSI/MSI-X 를 받는
 		 * 것처럼 보이면 커널이 그쪽으로 벡터를 배정해 iMSI-RX 경로와 충돌한다. */
 		dw_pcie_remove_capability(pci, PCI_CAP_ID_MSIX);
-	/* [한국어] [한국어] keep_rp_msi_en 을 세운 SoC 는 이 제거를 건너뛴다 -- 루트 포트
+	/* [한국어] keep_rp_msi_en 을 세운 SoC 는 이 제거를 건너뛴다 -- 루트 포트
 	 * 자신이 MSI 를 받아야 하는 구성이 있기 때문이다. */
 	}
 
@@ -2669,43 +2669,43 @@ static int dw_pcie_pme_turn_off(struct dw_pcie *pci)
 {
 	struct dw_pcie_ob_atu_cfg atu = { 0 };
 	void __iomem *mem;
-	/* [한국어] [한국어] 창 프로그래밍 결과. */
+	/* [한국어] 창 프로그래밍 결과. */
 	int ret;
 
 	if (pci->num_ob_windows <= pci->pp.msg_atu_index)
-		/* [한국어] [한국어] 예약된 창 번호가 실제 창 개수 밖이다 -- iatu_setup 이 자리를 잡지
+		/* [한국어] 예약된 창 번호가 실제 창 개수 밖이다 -- iatu_setup 이 자리를 잡지
 		 * 못했다는 뜻이다. */
 		return -ENOSPC;
 
 	if (!pci->pp.msg_res)
-		/* [한국어] [한국어] MSG 를 쏠 주소 범위가 확보되지 않았다. 두 조건 중 하나라도 없으면
+		/* [한국어] MSG 를 쏠 주소 범위가 확보되지 않았다. 두 조건 중 하나라도 없으면
 		 * 이 방식을 쓸 수 없고, 호출자는 서스펜드를 접는다. */
 		return -ENOSPC;
 
 	atu.code = PCIE_MSG_CODE_PME_TURN_OFF;
-	/* [한국어] [한국어] 브로드캐스트 라우팅 -- 하위 전체에 뿌린다. PME_Turn_Off 는
+	/* [한국어] 브로드캐스트 라우팅 -- 하위 전체에 뿌린다. PME_Turn_Off 는
 	 * 연결된 모든 장치가 받아야 하는 메시지다. */
 	atu.routing = PCIE_MSG_TYPE_R_BC;
-	/* [한국어] [한국어] 이 창의 쓰기를 MSG TLP 로 바꾸라는 지정. */
+	/* [한국어] 이 창의 쓰기를 MSG TLP 로 바꾸라는 지정. */
 	atu.type = PCIE_ATU_TYPE_MSG;
-	/* [한국어] [한국어] 창 크기는 확보해 둔 자원의 크기(= region_align). */
+	/* [한국어] 창 크기는 확보해 둔 자원의 크기(= region_align). */
 	atu.size = resource_size(pci->pp.msg_res);
-	/* [한국어] [한국어] iatu_setup 이 예약해 둔 창 번호를 쓴다. */
+	/* [한국어] iatu_setup 이 예약해 둔 창 번호를 쓴다. */
 	atu.index = pci->pp.msg_atu_index;
 
 	atu.parent_bus_addr = pci->pp.msg_res->start - pci->parent_bus_offset;
-/* [한국어] [한국어] CPU 쪽 시작 주소에서 부모 버스 오프셋을 뺀다. */
+/* [한국어] CPU 쪽 시작 주소에서 부모 버스 오프셋을 뺀다. */
 
 	ret = dw_pcie_prog_outbound_atu(pci, &atu);
-	/* [한국어] [한국어] 창 프로그래밍 실패. */
+	/* [한국어] 창 프로그래밍 실패. */
 	if (ret)
-		/* [한국어] [한국어] 아직 ioremap 전이라 되감을 것이 없다. */
+		/* [한국어] 아직 ioremap 전이라 되감을 것이 없다. */
 		return ret;
 
 	mem = ioremap(pci->pp.msg_res->start, pci->region_align);
-	/* [한국어] [한국어] 매핑 실패. */
+	/* [한국어] 매핑 실패. */
 	if (!mem)
-		/* [한국어] [한국어] 창은 이미 프로그래밍됐지만 서스펜드가 취소되므로 그대로 둬도 무해하다. */
+		/* [한국어] 창은 이미 프로그래밍됐지만 서스펜드가 취소되므로 그대로 둬도 무해하다. */
 		return -ENOMEM;
 
 	/* A dummy write is converted to a Msg TLP */
@@ -2773,11 +2773,11 @@ int dw_pcie_suspend_noirq(struct dw_pcie *pci)
 {
 	u8 offset = dw_pcie_find_capability(pci, PCI_CAP_ID_EXP);
 	int ret = 0;
-	/* [한국어] [한국어] read_poll_timeout 이 LTSSM 값을 담을 변수. */
+	/* [한국어] read_poll_timeout 이 LTSSM 값을 담을 변수. */
 	u32 val;
 
 	if (!dw_pcie_link_up(pci))
-		/* [한국어] [한국어] 링크가 이미 내려가 있으면 PME_Turn_Off 를 보낼 상대가 없다. */
+		/* [한국어] 링크가 이미 내려가 있으면 PME_Turn_Off 를 보낼 상대가 없다. */
 		goto stop_link;
 
 	/*
@@ -2788,14 +2788,14 @@ int dw_pcie_suspend_noirq(struct dw_pcie *pci)
 		return 0;
 
 	if (pci->pp.ops->pme_turn_off) {
-		/* [한국어] [한국어] SoC 가 자체 훅을 두었으면 그것을 쓴다. 반환값이 없는 훅이라
+		/* [한국어] SoC 가 자체 훅을 두었으면 그것을 쓴다. 반환값이 없는 훅이라
 		 * 실패를 알 수 없다는 점이 아래 기본 경로와 다르다. */
 		pci->pp.ops->pme_turn_off(&pci->pp);
 	} else {
 		ret = dw_pcie_pme_turn_off(pci);
-		/* [한국어] [한국어] iATU MSG 방식 실패. */
+		/* [한국어] iATU MSG 방식 실패. */
 		if (ret)
-			/* [한국어] [한국어] 하위 장치가 정리되지 않은 채로 전원을 내릴 수 없으므로
+			/* [한국어] 하위 장치가 정리되지 않은 채로 전원을 내릴 수 없으므로
 			 * 서스펜드 자체를 취소한다. */
 			return ret;
 	}
@@ -2807,12 +2807,12 @@ int dw_pcie_suspend_noirq(struct dw_pcie *pci)
 	 */
 	if (pci->pp.skip_l23_ready) {
 		mdelay(PCIE_PME_TO_L2_TIMEOUT_US/1000);
-		/* [한국어] [한국어] LTSSM 을 읽을 수 없는 SoC 는 규약 권고대로 10ms 만 기다리고 넘어간다. */
+		/* [한국어] LTSSM 을 읽을 수 없는 SoC 는 규약 권고대로 10ms 만 기다리고 넘어간다. */
 		goto stop_link;
 	}
 
 	ret = read_poll_timeout(dw_pcie_get_ltssm, val,
-				/* [한국어] [한국어] L2_IDLE 이거나 DETECT_WAIT 이하로 떨어지면 링크가 내려간 것이다.
+				/* [한국어] L2_IDLE 이거나 DETECT_WAIT 이하로 떨어지면 링크가 내려간 것이다.
 				 * 두 조건을 OR 로 묶은 것은 하드웨어마다 최종 상태가 다르기 때문이다. */
 				val == DW_PCIE_LTSSM_L2_IDLE ||
 				val <= DW_PCIE_LTSSM_DETECT_WAIT,
@@ -2838,11 +2838,11 @@ int dw_pcie_suspend_noirq(struct dw_pcie *pci)
 stop_link:
 	dw_pcie_stop_link(pci);
 	if (pci->pp.ops->deinit)
-		/* [한국어] [한국어] SoC 글루의 클록/PHY 정리. 이 시점에는 링크가 이미 멈춰 있다. */
+		/* [한국어] SoC 글루의 클록/PHY 정리. 이 시점에는 링크가 이미 멈춰 있다. */
 		pci->pp.ops->deinit(&pci->pp);
 
 	pci->suspended = true;
-/* [한국어] [한국어] 이 표시가 있어야 resume 이 복구 절차를 밟는다. L1SS 때문에 조기
+/* [한국어] 이 표시가 있어야 resume 이 복구 절차를 밟는다. L1SS 때문에 조기
  * 반환한 경우에는 세워지지 않아, resume 이 즉시 0 을 돌려준다. */
 
 	return ret;
@@ -2887,22 +2887,22 @@ int dw_pcie_resume_noirq(struct dw_pcie *pci)
 	int ret;
 
 	if (!pci->suspended)
-		/* [한국어] [한국어] 서스펜드가 L1SS 때문에 조기 반환했다면 링크가 그대로 살아 있으므로
+		/* [한국어] 서스펜드가 L1SS 때문에 조기 반환했다면 링크가 그대로 살아 있으므로
 		 * 복구할 것이 없다. */
 		return 0;
 
 	pci->suspended = false;
-/* [한국어] [한국어] 이 지점 이후로는 실패해도 다음 재개가 다시 시도하지 않는다. */
+/* [한국어] 이 지점 이후로는 실패해도 다음 재개가 다시 시도하지 않는다. */
 
 	if (pci->pp.ops->init) {
-		/* [한국어] [한국어] SoC 글루의 클록/PHY/리셋 해제. 하드웨어가 전원을 잃었을 수 있어
+		/* [한국어] SoC 글루의 클록/PHY/리셋 해제. 하드웨어가 전원을 잃었을 수 있어
 		 * 프로브 때와 같은 초기화가 필요하다. */
 		ret = pci->pp.ops->init(&pci->pp);
-		/* [한국어] [한국어] SoC 초기화 실패. */
+		/* [한국어] SoC 초기화 실패. */
 		if (ret) {
-			/* [한국어] [한국어] 이 실패는 재개 자체를 막으므로 명확히 알린다. */
+			/* [한국어] 이 실패는 재개 자체를 막으므로 명확히 알린다. */
 			dev_err(pci->dev, "Host init failed: %d\n", ret);
-			/* [한국어] [한국어] 아직 링크를 건드리기 전이라 되감을 것이 없다. */
+			/* [한국어] 아직 링크를 건드리기 전이라 되감을 것이 없다. */
 			return ret;
 		}
 	}
@@ -2910,19 +2910,19 @@ int dw_pcie_resume_noirq(struct dw_pcie *pci)
 	dw_pcie_setup_rc(&pci->pp);
 
 	ret = dw_pcie_start_link(pci);
-	/* [한국어] [한국어] 링크 기동 실패. */
+	/* [한국어] 링크 기동 실패. */
 	if (ret)
-		/* [한국어] [한국어] SoC 의 deinit 까지 되감는다. */
+		/* [한국어] SoC 의 deinit 까지 되감는다. */
 		goto err_deinit;
 
 	ret = dw_pcie_wait_for_link(pci);
-	/* [한국어] [한국어] 서스펜드와 같은 판단 -- **-ETIMEDOUT 만** 실패로 본다. */
+	/* [한국어] 서스펜드와 같은 판단 -- **-ETIMEDOUT 만** 실패로 본다. */
 	if (ret == -ETIMEDOUT)
-		/* [한국어] [한국어] 링크를 멈춘 뒤 deinit 으로 이어진다. */
+		/* [한국어] 링크를 멈춘 뒤 deinit 으로 이어진다. */
 		goto err_stop_link;
 
 	if (pci->pp.ops->post_init)
-		/* [한국어] [한국어] 링크가 선 뒤에야 할 수 있는 SoC 별 마무리. */
+		/* [한국어] 링크가 선 뒤에야 할 수 있는 SoC 별 마무리. */
 		pci->pp.ops->post_init(&pci->pp);
 
 	return 0;
