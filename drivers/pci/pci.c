@@ -715,7 +715,7 @@ static int pci_dev_str_match(struct pci_dev *dev, const char *p,
 
 			subsystem_vendor = 0; /* [한국어] 생략된 subsystem 은 0 으로 둔다 — 아래 비교에서 0 은 "아무 값이나 허용"으로 쓰인다 */
 			subsystem_device = 0; /* [한국어] 같은 이유로 subsystem device 도 0 */
-		} /* NVMe: 코드 블록을 종료한다. */
+		}	/* [한국어] subsystem 지정 유무 분기 끝 */
 
 		p += count; /* [한국어] 소비한 만큼 커서를 앞으로 옮긴다. 호출자에게 돌려줄 endptr 의 기준이 된다 */
 
@@ -736,7 +736,7 @@ static int pci_dev_str_match(struct pci_dev *dev, const char *p,
 			return ret; /* [한국어] 그대로 상위에 전달한다 */
 		else if (ret) /* [한국어] 1 이면 일치 */
 			goto found; /* [한국어] 일치 처리 지점으로 */
-	} /* NVMe: 코드 블록을 종료한다. */
+	}	/* [한국어] 항목 순회 끝 — 여기까지 왔으면 어느 것도 일치하지 않았다 */
 
 	*endptr = p; /* [한국어] 불일치로 끝나더라도 이 항목을 어디까지 읽었는지는 알려 줘야 호출자가 다음 항목으로 넘어갈 수 있다 */
 	return 0; /* [한국어] 불일치 */
@@ -3000,7 +3000,14 @@ int pci_set_power_state_locked(struct pci_dev *dev, pci_power_t state)
 }
 EXPORT_SYMBOL(pci_set_power_state_locked);
 
-#define PCI_EXP_SAVE_REGS	7 /* NVMe: 매크로를 정의한다. */
+/* [한국어] PCIe capability 에서 저장/복원해야 하는 레지스터의 개수.
+ * 저장 버퍼(struct pci_cap_saved_data)의 크기를 정하는 데 쓴다.
+ * 7 이라는 값은 DEVCTL, LNKCTL, SLTCTL, RTCTL, DEVCTL2, LNKCTL2, SLTCTL2 —
+ * 즉 "제어" 레지스터들의 수에서 온다. 상태나 능력 레지스터는 하드웨어가
+ * 스스로 채우므로 복원할 필요가 없다.
+ * 새 제어 레지스터가 스펙에 추가되면 이 값도 함께 늘려야 하며, 그렇지
+ * 않으면 저장 버퍼가 모자라 전원 복귀 후 설정이 유실된다. */
+#define PCI_EXP_SAVE_REGS	7
 
 /*
  * [한국어]
@@ -7964,7 +7971,10 @@ int pci_set_cacheline_size(struct pci_dev *dev)
 		return -EINVAL; /* [한국어] 설정할 수 없다 */
 
 	/* Validate current setting: the PCI_CACHE_LINE_SIZE must be
-	   equal to or multiple of the right value. */ /* NVMe: 표현식을 이어서 작성한다. */
+	   equal to or multiple of the right value. */
+	/* [한국어] 위 영어 주석대로, 이미 설정된 값이 올바른 값의 배수이기만 하면
+	 * 그대로 둔다. 캐시라인보다 큰 값은 성능을 조금 손해 볼 뿐 정확성에는
+	 * 문제가 없기 때문이다. 펌웨어가 더 큰 값을 넣어 둔 경우를 존중한다. */
 	pci_read_config_byte(dev, PCI_CACHE_LINE_SIZE, &cacheline_size); /* [한국어] 현재 값을 읽는다 */
 	if (cacheline_size >= pci_cache_line_size && /* [한국어] 올바른 값 이상이면서 */
 	    (cacheline_size % pci_cache_line_size) == 0) /* [한국어] 그 배수이면 캐시라인 경계를 침범하지 않아 그대로 두어도 안전하다 */
@@ -10229,6 +10239,8 @@ int pci_reset_function(struct pci_dev *dev)
 	if (bridge)
 		pci_dev_unlock(bridge);
 
+	/* [한국어] __pci_reset_function_locked 의 결과가 그대로 이 함수의 결과다.
+	 * 복원은 성공/실패와 무관하게 이미 마쳤다. */
 	return rc;
 }
 EXPORT_SYMBOL_GPL(pci_reset_function);
@@ -10545,6 +10557,8 @@ static int __pci_bus_trylock(struct pci_bus *bus, struct pci_slot *slot)
 	if (bridge && !pci_dev_trylock(bridge))
 		return 0;
 
+	/* [한국어] 이 버스의 장치들을 차례로 잠근다. 하나라도 실패하면
+	 * unlock 레이블로 가서 여기까지 잠근 것을 되돌린다. */
 	list_for_each_entry(dev, &bus->devices, bus_list) {
 		if (slot && (!dev->slot || dev->slot != slot))
 			continue;
@@ -10967,6 +10981,8 @@ static int pci_slot_reset(struct pci_slot *slot, bool probe)
 	if (!probe)
 		pci_slot_unlock(slot);
 
+	/* [한국어] 핫플러그 컨트롤러가 준 결과를 그대로 올려 보낸다.
+	 * probe 였다면 "가능 여부", 아니었다면 "리셋 성공 여부"다. */
 	return rc;
 }
 
@@ -11723,6 +11739,9 @@ int pcie_set_readrq(struct pci_dev *dev, int rq)
 	if (pcie_bus_config == PCIE_BUS_PERFORMANCE) {
 		int mps = pcie_get_mps(dev);
 
+		/* [한국어] MPS 보다 큰 MRRS 를 요청하면 응답이 여러 TLP 로 쪼개져
+		 * 오는데, 일부 호스트 브리지가 그 재조립을 감당하지 못한다.
+		 * 그래서 MPS 이하로 깎는다. 요청값보다 작아질 수 있다. */
 		if (mps < rq)
 			rq = mps;
 	}
@@ -12592,6 +12611,8 @@ int pci_set_vga_state(struct pci_dev *dev, bool decode,
 				cmd |= PCI_BRIDGE_CTL_VGA;
 			else
 				cmd &= ~PCI_BRIDGE_CTL_VGA;
+			/* [한국어] 고친 값을 되쓴다. Secondary Bus Reset 비트를
+			 * 건드리지 않도록 반드시 읽은 값을 기반으로 해야 한다. */
 			pci_write_config_word(bridge, PCI_BRIDGE_CONTROL,
 					      cmd);
 
@@ -12607,6 +12628,9 @@ int pci_set_vga_state(struct pci_dev *dev, bool decode,
 			if (decode) {
 				pci_read_config_word(bridge, PCI_BRIDGE_CONTROL,
 						     &cmd);
+				/* [한국어] 방금 쓴 비트가 실제로 서지 않았다면 이 브리지는
+				 * VGA Enable 을 구현하지 않은 것이다. 경로가 끊겼으므로
+				 * 더 올라가 봐야 소용없어 즉시 실패를 알린다. */
 				if (!(cmd & PCI_BRIDGE_CTL_VGA))
 					return -EIO;
 			}
@@ -12616,7 +12640,9 @@ int pci_set_vga_state(struct pci_dev *dev, bool decode,
 	return 0;
 }
 
-#ifdef CONFIG_ACPI /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
+/* [한국어] 아래 pci_pr3_present() 는 ACPI 테이블을 조회하므로 ACPI 지원이
+ * 빌드에 포함된 커널에서만 존재한다. DT 시스템에는 _PR3 라는 개념 자체가 없다. */
+#ifdef CONFIG_ACPI
 /*
  * [한국어]
  * pci_pr3_present - 이 장치를 D3cold 로 보낼 수 있다고 펌웨어가 알려 주는가
@@ -12667,7 +12693,7 @@ bool pci_pr3_present(struct pci_dev *pdev)
 		acpi_has_method(adev->handle, "_PR3");
 }
 EXPORT_SYMBOL_GPL(pci_pr3_present);
-#endif /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
+#endif	/* [한국어] CONFIG_ACPI 끝 */
 
 /**
  * pci_add_dma_alias - Add a DMA devfn alias for a device
@@ -12758,6 +12784,7 @@ void pci_add_dma_alias(struct pci_dev *dev, u8 devfn_from,
 	if (nr_devfns == 1)
 		pci_info(dev, "Enabling fixed DMA alias to %02x.%d\n",
 				PCI_SLOT(devfn_from), PCI_FUNC(devfn_from));
+	/* [한국어] 범위 형태. 시작과 끝을 함께 보여 준다. */
 	else if (nr_devfns > 1)
 		pci_info(dev, "Enabling fixed DMA alias for devfn range from %02x.%d to %02x.%d\n",
 				PCI_SLOT(devfn_from), PCI_FUNC(devfn_from),
@@ -13123,18 +13150,27 @@ static resource_size_t pci_specified_resource_alignment(struct pci_dev *dev,
 			pr_err("PCI: Can't parse resource_alignment parameter: %s\n",
 			       p);
 			break;
-		} /* NVMe: 코드 블록을 종료한다. */
+		}	/* [한국어] 일치/오류 분기 끝. 0(불일치)이면 아래로 계속 진행한다 */
 
-		if (*p != ';' && *p != ',') { /* NVMe: 조건식을 평가해 분기를 결정한다. */
+		/* [한국어] 항목 구분자 확인. pci_dev_str_match() 가 커서를 이 항목의
+		 * 끝까지 옮겨 놓았으므로, 여기 있어야 할 것은 다음 항목을 잇는
+		 * 세미콜론이나 쉼표, 아니면 문자열의 끝(널)이다.
+		 * 그 셋 중 아무것도 아니면 형식이 깨진 것이고, 널이어도 여기서
+		 * 걸려 루프가 끝난다 — 두 경우를 한 조건으로 처리하는 것이 요령이다. */
+		if (*p != ';' && *p != ',') {
 			/* End of param or invalid format */
-			break; /* NVMe: 현재 반복문을 빠져나간다. */
-		} /* NVMe: 코드 블록을 종료한다. */
-		p++; /* NVMe: 표현식을 평가한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
-out: /* NVMe: 레이블을 정의한다. */
-	spin_unlock(&resource_alignment_lock); /* NVMe: spinlock 을 해제한다. */
-	return align; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+			break;
+		}
+		p++;	/* [한국어] 구분자를 건너뛰어 다음 항목의 첫 글자로 */
+	}	/* [한국어] 항목 순회 끝. 일치를 찾았으면 위에서 break 로 빠져나왔다 */
+out:
+	/* [한국어] 문자열 사용이 끝났으니 락을 놓는다. 이 시점 이후로는
+	 * resource_alignment_param 이 해제되어도 상관없다. */
+	spin_unlock(&resource_alignment_lock);
+	/* [한국어] 일치를 찾았으면 지정된 정렬, 아니면 진입 시의 기본값
+	 * (pcibios_default_alignment(), 보통 0)이 그대로 나간다. */
+	return align;
+}
 
 /*
  * [한국어]
@@ -13410,6 +13446,7 @@ static ssize_t resource_alignment_show(const struct bus_type *bus, char *buf)
 		count = sysfs_emit(buf, "%s\n", resource_alignment_param);
 	spin_unlock(&resource_alignment_lock);
 
+	/* [한국어] 설정이 없으면 0 이 그대로 나가 빈 파일로 보인다. */
 	return count;
 }
 
@@ -13520,18 +13557,48 @@ static int __init pci_resource_alignment_sysfs_init(void)
 late_initcall(pci_resource_alignment_sysfs_init);
 
 /*
- * pci_no_domains:
- *   domain 개념을 비활성화한다. NVMe pci_dev 의 domain 번호 체계에 영향을 준다.
+ * [한국어]
+ * pci_no_domains - PCI 도메인 지원을 런타임에 끈다
+ *
+ * @return: 없음.
+ *
+ * "pci=nodomains" 부팅 인자가 있을 때 불린다. 도메인(세그먼트)은 서로
+ * 독립된 PCI 버스 번호 공간이며, 한 시스템에 256개 버스로 부족할 때
+ * 여러 벌을 두는 방식이다. 장치 주소가 "0000:01:00.0" 처럼 네 자리
+ * 도메인으로 시작하는 것이 그것이다.
+ *
+ * 왜 끄고 싶은가. 도메인 번호가 붙으면 옛 userspace 도구나 스크립트가
+ * 장치 이름을 파싱하지 못하는 경우가 있었다. 그런 호환성 문제를
+ * 우회하려고 남겨 둔 스위치다. 도메인이 실제로 여러 개인 시스템에서
+ * 이것을 쓰면 장치를 구분할 수 없게 되므로 위험하다.
+ *
+ * #ifdef 로 감싼 것에 주의. CONFIG_PCI_DOMAINS 가 꺼진 커널에는
+ * pci_domains_supported 변수 자체가 없다. 그래도 함수는 정의되어야
+ * 호출부(pci_setup)를 #ifdef 로 지저분하게 만들지 않는다 —
+ * 그 경우 이 함수는 빈 함수가 되어 컴파일러가 지운다.
+ *
+ * 실행 컨텍스트: 부팅 중 인자 파싱 시점, 단일 스레드.
+ * 호출자: pci_setup().
  */
-static void pci_no_domains(void) /* NVMe: pci_no_domains 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-#ifdef CONFIG_PCI_DOMAINS /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
-	pci_domains_supported = 0; /* NVMe: 변수에 값을 할당한다. */
-#endif /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+static void pci_no_domains(void)
+{
+#ifdef CONFIG_PCI_DOMAINS
+	/* [한국어] 전역 플래그를 내린다. pci_domain_nr() 이 이 값을 보고
+	 * 항상 0 을 돌려주게 되어, 모든 장치가 도메인 0 에 있는 것처럼 보인다. */
+	pci_domains_supported = 0;
+#endif
+}
 
-#ifdef CONFIG_PCI_DOMAINS /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
-static DEFINE_IDA(pci_domain_nr_dynamic_ida); /* NVMe: DEFINE_IDA 함수를 선언한다. */
+#ifdef CONFIG_PCI_DOMAINS
+/* [한국어] 동적으로 배정하는 도메인 번호의 할당자.
+ * IDA(ID Allocator)는 "쓰이지 않는 가장 작은 정수" 를 찾아 주는 커널
+ * 자료구조로, 비트맵을 기수 트리로 관리해 희소한 범위도 효율적으로 다룬다.
+ * 설정자/읽는 자: pci_bus_find_emul_domain_nr(), of_pci_bus_find_domain_nr(),
+ *   pci_bus_release_emul_domain_nr().
+ * 동기화: IDA 자체가 내부 락을 갖고 있어 별도 보호가 필요 없다.
+ * 왜 필요한가: 도메인 번호는 시스템 전체에서 유일해야 한다. 호스트 브리지
+ *   드라이버들이 각자 번호를 정하면 충돌하므로, 한곳에서 발급한다. */
+static DEFINE_IDA(pci_domain_nr_dynamic_ida);
 
 /**
  * pci_bus_find_emul_domain_nr() - allocate a PCI domain number per constraints
@@ -13540,79 +13607,178 @@ static DEFINE_IDA(pci_domain_nr_dynamic_ida); /* NVMe: DEFINE_IDA 함수를 선�
  * @max: maximum allowable domain, no IDs higher than INT_MAX will be returned
  */
 /*
- * pci_bus_find_emul_domain_nr:
- *   에뮬레이션용 domain 번호를 할당한다. NVMe 가상화/에뮬레이션 환경에서 사용될 수 있다.
+ * [한국어]
+ * pci_bus_find_emul_domain_nr - 범위 안에서 빈 도메인 번호를 하나 얻는다
+ *
+ * @hint: 이 번호를 우선 원한다는 힌트. 0 이면 아무거나 상관없다.
+ * @min:  허용 하한
+ * @max:  허용 상한(INT_MAX 를 넘는 값은 나오지 않는다)
+ * @return: 배정된 도메인 번호, 또는 음수 errno(범위에 빈 번호가 없거나 할당 실패).
+ *
+ * 실제 하드웨어가 아니라 소프트웨어가 만들어 낸 PCI 계층 — 하이퍼바이저의
+ * 가상 버스, Thunderbolt 터널, Intel VMD 뒤의 내부 도메인 등 — 에 번호를
+ * 발급한다. 함수 이름의 emul 이 그 뜻이다.
+ *
+ * hint 를 min 으로 승격시키는 max(hint, min) 이 이 함수의 요령이다.
+ * ida_alloc_range 는 하한부터 위로 훑으며 빈 번호를 찾으므로, 하한을
+ * hint 로 올려 두면 "가능하면 hint, 이미 쓰였으면 그 다음 빈 번호" 가 된다.
+ * hint 가 0(요청 없음)이면 max 가 min 을 고르므로 원래 하한이 유지된다.
+ *
+ * NVMe 학습 관점: Intel VMD 가 켜진 시스템에서 NVMe SSD 들이 별도 도메인에
+ * 나타나는데, 그 도메인 번호를 VMD 드라이버가 이 함수로 받아 온다.
+ * lspci 에 "10000:00:00.0" 처럼 큰 도메인 번호가 보이는 이유다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트(GFP_KERNEL 할당).
+ * 호출자: controller/vmd.c, 하이퍼바이저용 가상 버스 드라이버.
  */
-int pci_bus_find_emul_domain_nr(u32 hint, u32 min, u32 max) /* NVMe: pci_bus_find_emul_domain_nr 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	return ida_alloc_range(&pci_domain_nr_dynamic_ida, max(hint, min), max, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-			       GFP_KERNEL); /* NVMe: 표현식을 평가한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+int pci_bus_find_emul_domain_nr(u32 hint, u32 min, u32 max)
+{
+	/* [한국어] max(hint, min) 으로 하한을 올려 hint 를 우선 시도하게 만든다.
+	 * IDA 가 하한부터 위로 훑으므로, hint 가 비어 있으면 그것이 배정된다. */
+	return ida_alloc_range(&pci_domain_nr_dynamic_ida, max(hint, min), max,
+			       GFP_KERNEL);
+}
 EXPORT_SYMBOL_GPL(pci_bus_find_emul_domain_nr);
 
 /*
- * pci_bus_release_emul_domain_nr:
- *   에뮬레이션용 domain 번호를 반납한다. NVMe 가상화 환경에서 domain 관리에 사용된다.
+ * [한국어]
+ * pci_bus_release_emul_domain_nr - 배정받은 도메인 번호를 돌려준다
+ *
+ * @domain_nr: 반납할 번호. pci_bus_find_emul_domain_nr() 이 돌려준 값이어야 한다.
+ * @return: 없음.
+ *
+ * 가상 PCI 계층이 사라질 때(드라이버 언로드, Thunderbolt 장치 분리 등)
+ * 번호를 풀어 다음 사용자가 쓸 수 있게 한다. 반납하지 않으면 번호가
+ * 영구히 소진되어, 장치를 반복해서 꽂았다 뺐다 하면 결국 고갈된다.
+ *
+ * 배정받지 않은 번호를 반납하면 IDA 가 경고를 띄운다 — 짝을 맞추는 것은
+ * 호출자의 책임이다.
+ *
+ * 실행 컨텍스트: 제약 없음(ida_free 는 잠들지 않는다).
+ * 호출자: pci_bus_find_emul_domain_nr() 을 부른 그 드라이버.
  */
-void pci_bus_release_emul_domain_nr(int domain_nr) /* NVMe: pci_bus_release_emul_domain_nr 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	ida_free(&pci_domain_nr_dynamic_ida, domain_nr); /* NVMe: ida_free 함수를 호출한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+void pci_bus_release_emul_domain_nr(int domain_nr)
+{
+	/* [한국어] IDA 에서 해당 번호의 비트를 지운다. 다음 할당에서 재사용된다. */
+	ida_free(&pci_domain_nr_dynamic_ida, domain_nr);
+}
 EXPORT_SYMBOL_GPL(pci_bus_release_emul_domain_nr);
-#endif /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
+#endif	/* [한국어] CONFIG_PCI_DOMAINS 끝 */
 
-#ifdef CONFIG_PCI_DOMAINS_GENERIC /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
-static DEFINE_IDA(pci_domain_nr_static_ida); /* NVMe: DEFINE_IDA 함수를 선언한다. */
+#ifdef CONFIG_PCI_DOMAINS_GENERIC
+/* [한국어] DeviceTree 가 명시적으로 지정한 도메인 번호의 할당자.
+ * 동적 IDA 와 별도로 두는 이유는 두 번호 공간의 성격이 다르기 때문이다 —
+ * 이쪽은 "DT 가 이미 정해 둔 번호" 라 우리가 고를 여지가 없고,
+ * 같은 번호가 DT 에 두 번 나오는 오류를 잡아내는 것이 목적이다.
+ * 동기화: IDA 내부 락. */
+static DEFINE_IDA(pci_domain_nr_static_ida);
 
 /*
- * of_pci_reserve_static_domain_nr:
- *   device-tree 기반 정적 domain 번호를 예약한다. NVMe 장치의 domain 번호를 DT 기준으로 고정한다.
+ * [한국어]
+ * of_pci_reserve_static_domain_nr - DT 에 적힌 도메인 번호들을 동적 풀에서 빼 둔다
+ *
+ * @return: 없음.
+ *
+ * DeviceTree 전체를 훑어 "pci" 타입 노드들의 linux,pci-domain 속성을 읽고,
+ * 거기 적힌 번호를 동적 IDA 에 영구 할당해 버린다. 반납하지 않으므로
+ * 그 번호는 동적 배정 후보에서 영원히 제외된다.
+ *
+ * 왜 이렇게 하는가. DT 에 도메인 0 과 2 가 적혀 있고 3 번째 호스트 브리지가
+ * DT 지정 없이 등장했다고 하자. 동적 배정이 아무 대비 없이 가장 작은
+ * 빈 번호를 고르면 0 을 줄 텐데, 그것은 DT 가 이미 다른 브리지에 준
+ * 번호다. 그 브리지가 아직 등록되지 않았을 뿐이라 충돌을 알아채지도
+ * 못한다. 미리 빼 두면 그런 사고가 원천적으로 없어진다.
+ *
+ * 부팅 중 한 번만 실행되며, 그 보장은 호출자(of_pci_bus_find_domain_nr)의
+ * static 플래그가 한다.
+ *
+ * ida_alloc_range 의 반환값을 확인하지 않는 것이 눈에 띄는데, 실패해도
+ * 할 수 있는 일이 없기 때문이다 — DT 에 중복된 번호가 있으면 두 번째
+ * 할당이 실패하지만, 그것은 DT 자체의 오류라 커널이 고칠 수 없다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트(GFP_KERNEL). 부팅 중 첫 브리지 등록 시.
+ * 호출자: of_pci_bus_find_domain_nr() — 첫 호출에서 한 번만.
  */
-static void of_pci_reserve_static_domain_nr(void) /* NVMe: of_pci_reserve_static_domain_nr 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	struct device_node *np; /* NVMe: 데이터 타입 변수를 선언한다. */
-	int domain_nr; /* NVMe: int 타입 변수를 선언한다. */
+static void of_pci_reserve_static_domain_nr(void)
+{
+	struct device_node *np;	/* [한국어] DT 노드 순회 커서 */
+	int domain_nr;
 
-	for_each_node_by_type(np, "pci") { /* NVMe: 표현식을 평가한다. */
-		domain_nr = of_get_pci_domain_nr(np); /* NVMe: 변수에 값을 할당한다. */
-		if (domain_nr < 0) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			continue; /* NVMe: 다음 반복으로 걸러뛴다. */
+	/* [한국어] device_type = "pci" 인 모든 DT 노드를 훑는다. */
+	for_each_node_by_type(np, "pci") {
+		/* [한국어] linux,pci-domain 속성을 읽는다. 없으면 음수. */
+		domain_nr = of_get_pci_domain_nr(np);
+		/* [한국어] 도메인을 지정하지 않은 노드는 동적 배정 대상이므로 건너뛴다. */
+		if (domain_nr < 0)
+			continue;
 		/*
 		 * Permanently allocate domain_nr in dynamic_ida
 		 * to prevent it from dynamic allocation.
 		 */
-		ida_alloc_range(&pci_domain_nr_dynamic_ida, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-				domain_nr, domain_nr, GFP_KERNEL); /* NVMe: 표현식을 평가한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+		/* [한국어] min=max=domain_nr 로 그 번호 하나만 콕 집어 할당한다.
+		 * 반납하지 않으므로 동적 배정에서 영구히 제외된다.
+		 * 반환값을 보지 않는 이유는 위 함수 주석 참고. */
+		ida_alloc_range(&pci_domain_nr_dynamic_ida,
+				domain_nr, domain_nr, GFP_KERNEL);
+	}
+}
 
 /*
- * of_pci_bus_find_domain_nr:
- *   device-tree 에서 bus 의 domain 번호를 찾는다. NVMe 장치의 domain 할당에 DT 정보를 반영한다.
+ * [한국어]
+ * of_pci_bus_find_domain_nr - DeviceTree 기반 시스템에서 도메인 번호를 정한다
+ *
+ * @parent: 호스트 브리지의 struct device. DT 노드를 여기서 얻는다. NULL 가능.
+ * @return: 배정된 도메인 번호, 또는 음수 errno.
+ *
+ * 두 갈래로 갈린다.
+ *   DT 에 linux,pci-domain 이 적혀 있으면 - 그 번호를 static IDA 에 할당한다.
+ *     번호는 이미 정해져 있으므로 고르는 것이 아니라 "중복이 없는지 확인" 하는
+ *     것이 목적이다. DT 에 같은 번호가 두 번 나오면 두 번째가 실패해 오류를
+ *     알린다(원문 주석의 "duplicate static allocations in case of errors in DT").
+ *   지정이 없으면 - dynamic IDA 에서 빈 번호를 고른다. 이때 DT 가 쓰는 번호는
+ *     of_pci_reserve_static_domain_nr() 이 미리 빼 두었으므로 충돌하지 않는다.
+ *
+ * 첫 호출에서만 DT 전체를 훑는다. static 지역 변수로 그 한 번을 기억하는데,
+ * 부팅 중 호스트 브리지 등록은 직렬화되어 있어 이 플래그에 락이 없어도 된다.
+ *
+ * 두 IDA 를 나눠 쓰는 구조가 처음에는 헷갈린다. 정리하면 —
+ *   dynamic IDA: 실제 배정 풀. DT 번호도 여기에 "예약" 되어 빠져 있다.
+ *   static IDA:  DT 번호의 중복 검사 전용. 배정과는 무관하다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트(GFP_KERNEL).
+ * 호출자: pci_bus_find_domain_nr().
  */
-static int of_pci_bus_find_domain_nr(struct device *parent) /* NVMe: of_pci_bus_find_domain_nr 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	static bool static_domains_reserved = false; /* NVMe: 정적 변수를 선언한다. */
-	int domain_nr; /* NVMe: int 타입 변수를 선언한다. */
+static int of_pci_bus_find_domain_nr(struct device *parent)
+{
+	/* [한국어] DT 스캔을 한 번만 하기 위한 표시. 부팅 중 브리지 등록이
+	 * 직렬화되어 있어 락 없이도 안전하다. */
+	static bool static_domains_reserved = false;
+	int domain_nr;
 
 	/* On the first call scan device tree for static allocations. */
-	if (!static_domains_reserved) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		of_pci_reserve_static_domain_nr(); /* NVMe: 정적 domain 번호를 예약한다. */
-		static_domains_reserved = true; /* NVMe: 변수에 값을 할당한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+	/* [한국어] 첫 호출에서 DT 전체를 훑어 지정된 번호들을 동적 풀에서 뺀다.
+	 * 이것을 먼저 해야 아래 동적 배정이 DT 번호와 충돌하지 않는다. */
+	if (!static_domains_reserved) {
+		of_pci_reserve_static_domain_nr();
+		static_domains_reserved = true;
+	}
 
-	if (parent) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
+	if (parent) {
 		/*
 		 * If domain is in DT, allocate it in static IDA.  This
 		 * prevents duplicate static allocations in case of errors
 		 * in DT.
 		 */
-		domain_nr = of_get_pci_domain_nr(parent->of_node); /* NVMe: 변수에 값을 할당한다. */
-		if (domain_nr >= 0) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			return ida_alloc_range(&pci_domain_nr_static_ida, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-					       domain_nr, domain_nr, /* NVMe: 표현식을 이어서 작성한다. */
-					       GFP_KERNEL); /* NVMe: 표현식을 평가한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
+		/* [한국어] 이 브리지의 DT 노드에 도메인이 적혀 있는가. */
+		domain_nr = of_get_pci_domain_nr(parent->of_node);
+		if (domain_nr >= 0)
+			/* [한국어] 적힌 번호를 그대로 쓴다. static IDA 에 할당하는 것은
+			 * 배정이 아니라 중복 검사가 목적이다 — 같은 번호가 두 번
+			 * 요청되면 여기서 -ENOSPC 가 나 DT 오류를 드러낸다. */
+			return ida_alloc_range(&pci_domain_nr_static_ida,
+					       domain_nr, domain_nr,
+					       GFP_KERNEL);
+	}
 
 	/*
 	 * If domain was not specified in DT, choose a free ID from dynamic
@@ -13620,46 +13786,113 @@ static int of_pci_bus_find_domain_nr(struct device *parent) /* NVMe: of_pci_bus_
 	 * dynamic allocations to prevent assigning them to other DT nodes
 	 * without static domain.
 	 */
-	return ida_alloc(&pci_domain_nr_dynamic_ida, GFP_KERNEL); /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	/* [한국어] DT 지정이 없다. 동적 풀에서 가장 작은 빈 번호를 받는다.
+	 * DT 가 쓰는 번호는 이미 빠져 있으므로 안전하다. */
+	return ida_alloc(&pci_domain_nr_dynamic_ida, GFP_KERNEL);
+}
 
 /*
  * of_pci_bus_release_domain_nr:
  *   device-tree domain 번호를 반납한다. NVMe 장치의 domain 자원을 정리한다.
  */
-static void of_pci_bus_release_domain_nr(struct device *parent, int domain_nr) /* NVMe: of_pci_bus_release_domain_nr 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	if (domain_nr < 0) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return; /* NVMe: 함수 실행을 종료한다. */
+/*
+ * [한국어]
+ * of_pci_bus_release_domain_nr - 도메인 번호를 원래 받은 IDA 로 돌려준다
+ *
+ * @parent:     호스트 브리지의 struct device. 어느 IDA 에서 받았는지 판정하는 근거.
+ * @domain_nr:  반납할 번호. 음수면 아무것도 하지 않는다.
+ * @return: 없음.
+ *
+ * 어려운 점은 "이 번호를 어느 IDA 에서 받았는가" 를 알아내는 것이다.
+ * 번호만 봐서는 알 수 없으므로, 할당 때와 같은 판정을 다시 한다 —
+ * DT 에 이 번호가 적혀 있었다면 static IDA 에서 받았고, 아니면 dynamic 이다.
+ * 엉뚱한 IDA 에 반납하면 그쪽 번호 공간이 오염되고, 원래 쪽은 영원히
+ * 그 번호를 잃는다.
+ *
+ * domain_nr < 0 검사는 할당 실패 후의 정리 경로를 위한 것이다.
+ * 할당이 실패하면 음수 errno 가 domain_nr 에 남는데, 호출자가 성공 여부를
+ * 따지지 않고 그냥 반납을 부를 수 있게 여기서 걸러 준다.
+ *
+ * 실행 컨텍스트: 제약 없음.
+ * 호출자: pci_bus_release_domain_nr().
+ */
+static void of_pci_bus_release_domain_nr(struct device *parent, int domain_nr)
+{
+	/* [한국어] 할당이 실패했던 경우(음수 errno). 반납할 것이 없다. */
+	if (domain_nr < 0)
+		return;
 
 	/* Release domain from IDA where it was allocated. */
-	if (parent && of_get_pci_domain_nr(parent->of_node) == domain_nr) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		ida_free(&pci_domain_nr_static_ida, domain_nr); /* NVMe: ida_free 함수를 호출한다. */
-	else /* NVMe: 이전 조건이 모두 거짓일 때 실행한다. */
-		ida_free(&pci_domain_nr_dynamic_ida, domain_nr); /* NVMe: ida_free 함수를 호출한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+	/* [한국어] 할당 때와 같은 판정을 반복해 어느 IDA 인지 알아낸다.
+	 * DT 에 이 번호가 적혀 있었다면 static, 아니면 dynamic 이다. */
+	if (parent && of_get_pci_domain_nr(parent->of_node) == domain_nr)
+		ida_free(&pci_domain_nr_static_ida, domain_nr);
+	else
+		/* [한국어] DT 지정이 없었으므로 동적 풀에서 받은 번호다. */
+		ida_free(&pci_domain_nr_dynamic_ida, domain_nr);
+}
 
 /*
- * pci_bus_find_domain_nr:
- *   bus 에 할당할 domain 번호를 결정한다. NVMe pci_dev 의 domain 식별자를 설정한다.
+ * [한국어]
+ * pci_bus_find_domain_nr - 이 버스가 쓸 도메인 번호를 정한다 (펌웨어 종류별 분기)
+ *
+ * @bus:    대상 버스. ACPI 경로에서 쓴다.
+ * @parent: 호스트 브리지의 struct device. DT 경로에서 쓴다.
+ * @return: 도메인 번호, 또는 음수 errno.
+ *
+ * 시스템이 어떤 펌웨어를 쓰느냐에 따라 도메인 번호의 출처가 다르다.
+ *   ACPI 시스템(x86 서버 대부분) - MCFG 테이블의 PCI Segment Group 번호를
+ *     쓴다. 펌웨어가 이미 정해 둔 값이라 커널이 고를 여지가 없다.
+ *   DT 시스템(ARM 임베디드 대부분) - linux,pci-domain 속성이 있으면 그것을,
+ *     없으면 커널이 빈 번호를 고른다.
+ *
+ * acpi_disabled 하나로 갈라지는 것이 조금 거칠어 보이지만, 한 시스템이
+ * 두 방식을 동시에 쓰는 경우가 없어서 이것으로 충분하다.
+ *
+ * 두 인자 중 하나씩만 쓰인다는 점이 특이하다 — ACPI 경로는 bus 를,
+ * DT 경로는 parent 를 본다. 호출자는 둘 다 넘기고 어느 쪽이 쓰일지는
+ * 이 함수가 정한다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트.
+ * 호출자: probe.c 의 pci_create_root_bus() 경로.
  */
-int pci_bus_find_domain_nr(struct pci_bus *bus, struct device *parent) /* NVMe: pci_bus_find_domain_nr 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	return acpi_disabled ? of_pci_bus_find_domain_nr(parent) : /* NVMe: 연산 결과를 반환한다. */
-			       acpi_pci_bus_find_domain_nr(bus); /* NVMe: acpi_pci_bus_find_domain_nr 함수를 호출한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+int pci_bus_find_domain_nr(struct pci_bus *bus, struct device *parent)
+{
+	/* [한국어] ACPI 가 꺼져 있으면 DT 시스템으로 본다. 삼항 연산자로
+	 * 두 경로 중 하나만 실행된다. */
+	return acpi_disabled ? of_pci_bus_find_domain_nr(parent) :
+			       acpi_pci_bus_find_domain_nr(bus);
+}
 
 /*
- * pci_bus_release_domain_nr:
- *   bus 의 domain 번호를 반납한다. NVMe bus 제거 시 domain 자원을 회수한다.
+ * [한국어]
+ * pci_bus_release_domain_nr - 도메인 번호를 반납한다 (DT 시스템에서만)
+ *
+ * @parent:    호스트 브리지의 struct device
+ * @domain_nr: 반납할 번호
+ * @return: 없음.
+ *
+ * pci_bus_find_domain_nr() 의 짝이지만 대칭적이지 않다. ACPI 시스템에서는
+ * 아무것도 하지 않고 돌아간다.
+ *
+ * 이유는 ACPI 쪽 번호가 애초에 "할당" 이 아니기 때문이다. MCFG 테이블에
+ * 펌웨어가 적어 둔 Segment Group 번호를 읽어 온 것뿐이라, 커널이 관리하는
+ * 자원이 아니고 따라서 반납할 대상도 없다. 반면 DT 시스템에서는 커널이
+ * IDA 로 번호를 발급했으므로 반드시 돌려줘야 한다.
+ *
+ * 실행 컨텍스트: 제약 없음.
+ * 호출자: 호스트 브리지 제거 경로(pci_remove_root_bus 등).
  */
-void pci_bus_release_domain_nr(struct device *parent, int domain_nr) /* NVMe: pci_bus_release_domain_nr 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	if (!acpi_disabled) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-		return; /* NVMe: 함수 실행을 종료한다. */
-	of_pci_bus_release_domain_nr(parent, domain_nr); /* NVMe: device-tree domain 번호를 반납한다. */
-} /* NVMe: 코드 블록을 종료한다. */
-#endif /* NVMe: 전처리기 조건 컴파일 분기를 처리한다. */
+void pci_bus_release_domain_nr(struct device *parent, int domain_nr)
+{
+	/* [한국어] ACPI 시스템이면 반납할 것이 없다. 펌웨어가 정한 번호를
+	 * 읽어 왔을 뿐 커널이 발급한 것이 아니기 때문이다. */
+	if (!acpi_disabled)
+		return;
+	/* [한국어] DT 시스템 — IDA 로 발급받은 번호이므로 돌려준다. */
+	of_pci_bus_release_domain_nr(parent, domain_nr);
+}
+#endif	/* [한국어] CONFIG_PCI_DOMAINS_GENERIC 끝 */
 
 /**
  * pci_ext_cfg_avail - can we access extended PCI config space?
@@ -13669,87 +13902,215 @@ void pci_bus_release_domain_nr(struct device *parent, int domain_nr) /* NVMe: pc
  * implementations can override this.
  */
 /*
- * pci_ext_cfg_avail:
- *   extended config space(256~4096바이트) 접근 가능 여부를 반환한다. NVMe PCIe extended capability 접근의 전제 조건이다.
+ * [한국어]
+ * pci_ext_cfg_avail - 확장 config space(오프셋 0x100 이상)에 접근할 수 있는가
+ *
+ * @return: 1 = 접근 가능(기본), 0 = 불가능.
+ *
+ * PCI 시절 config space 는 256바이트였고, PCIe 가 그것을 4096바이트로
+ * 늘렸다. 그 뒤쪽 3840바이트에 확장 capability 들이 놓인다 — AER, VC,
+ * ACS, SR-IOV, ATS, DPC, PASID 가 모두 거기 있다.
+ *
+ * 문제는 접근 방법이 다르다는 것이다. 레거시 0xCF8/0xCFC 포트 방식은
+ * 오프셋을 8비트로만 표현할 수 있어 256바이트까지밖에 못 간다.
+ * ECAM(메모리 매핑) 방식이어야 4096바이트 전체에 닿는다. 그래서 ECAM 을
+ * 설정하지 못한 시스템에서는 확장 capability 가 아예 보이지 않는다.
+ *
+ * __weak 기본 구현은 1(가능)을 돌려준다. 대부분의 현대 시스템이 ECAM 을
+ * 쓰기 때문이다. x86 은 이것을 덮어써서 MMCONFIG 설정 여부를 실제로 확인한다.
+ *
+ * NVMe 학습 관점: 이것이 0 이면 NVMe 의 여러 기능이 조용히 사라진다.
+ * SR-IOV(확장 capability 0x0010)로 VF 를 만들 수 없고, AER 로 오류를
+ * 보고받지 못하며, ATS/PASID 기반 기능도 쓸 수 없다. NVMe 자체는
+ * BAR0 로 동작하므로 기본 I/O 는 되지만, 고급 기능이 전부 빠진 상태가 된다.
+ *
+ * 실행 컨텍스트: 제약 없음.
+ * 호출자: probe.c 가 확장 capability 를 훑기 전에 확인한다.
  */
-int __weak pci_ext_cfg_avail(void) /* NVMe: pci_ext_cfg_avail 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	return 1; /* NVMe: 연산 결과를 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
+int __weak pci_ext_cfg_avail(void)
+{
+	/* [한국어] 기본은 "가능". ECAM 을 못 쓰는 아키텍처가 덮어쓴다. */
+	return 1;
+}
 
 /*
- * pci_setup:
- *   pci= 커널 커맨드라인 옵션을 파싱한다. NVMe 관련 pcie_bus_tune, aspm, mrrs, mps 등 boot 파라미터를 처리한다.
+ * [한국어]
+ * pci_setup - "pci=" 커널 부팅 인자를 해석한다
+ *
+ * @str: "pci=" 뒤에 붙은 문자열 전체. 쉼표로 여러 옵션을 이을 수 있다.
+ *       예: "pci=nomsi,realloc,pcie_bus_perf"
+ * @return: 항상 0. early_param 규약상 0 이 "처리했다" 는 뜻이다.
+ *
+ * PCI 서브시스템의 거의 모든 전역 정책이 여기서 정해진다. 파일 여기저기의
+ * 전역 변수(pcie_bus_config, pci_hotplug_*_size, resource_alignment_param
+ * 등)를 실제로 세팅하는 유일한 지점이라, 그 변수들의 출처를 찾을 때
+ * 반드시 들르게 되는 함수다.
+ *
+ * 구조는 단순한 문자열 매칭 사슬이다. 다만 몇 가지 요령이 있다.
+ *
+ *   1) 쉼표 자르기 — strchr 로 쉼표를 찾아 그 자리를 '\0' 으로 바꾸고,
+ *      다음 항목의 시작 주소를 k 에 챙긴다. 원본 문자열을 직접 고치므로
+ *      추가 할당이 없다. 부팅 초기에는 메모리 할당기가 아직 없을 수 있어
+ *      이런 제자리 처리가 필요하다.
+ *
+ *   2) 아키텍처 우선 처리 — pcibios_setup(str) 을 먼저 부른다. 아키텍처가
+ *      그 옵션을 알아보면 NULL 을 돌려주고, 모르면 문자열을 그대로 돌려준다.
+ *      즉 아키텍처 고유 옵션이 공통 옵션보다 우선한다.
+ *      `(str = pcibios_setup(str))` 로 대입과 검사를 한 식에 넣은 것이
+ *      처음에는 눈에 걸리지만, str 을 갱신해야 아래 비교가 맞아서 그렇다.
+ *
+ *   3) strcmp vs strncmp — 정확히 일치해야 하는 옵션(nomsi, noaer)은
+ *      strcmp 를, 뒤에 값이 붙는 옵션(realloc=, hpiosize=)은 strncmp 를 쓴다.
+ *      "realloc=" 를 "realloc" 보다 먼저 검사하는 순서도 그래서 중요하다 —
+ *      순서가 반대면 "realloc=off" 가 "realloc" 에 먼저 걸려 값이 무시된다.
+ *
+ * NVMe 학습에 직접 관계있는 옵션들:
+ *   nomsi           - MSI/MSI-X 를 전역으로 끈다. NVMe 가 INTx 로 떨어져
+ *                     큐당 인터럽트를 못 쓰게 되므로 성능이 크게 나빠진다.
+ *                     문제 격리용 디버그 옵션이다.
+ *   pcie_bus_perf   - MPS 를 최대한 크게 맞춘다. NVMe 의 TLP 개수가 줄어
+ *                     처리량이 올라가지만, 계층에 낡은 장치가 있으면 위험하다.
+ *   pcie_bus_safe   - 계층 전체의 공통 최소값으로 MPS 를 맞춘다(보수적).
+ *   realloc         - 펌웨어가 배정한 BAR 주소를 버리고 커널이 다시 배치한다.
+ *                     펌웨어가 NVMe 의 BAR 를 제대로 잡아 주지 못한 보드에서
+ *                     쓴다.
+ *   noaer           - AER 을 끈다. NVMe 오류가 보고되지 않는다.
+ *   noats           - ATS 를 끈다. IOMMU 변환 캐시를 장치가 갖지 못한다.
+ *
+ * 실행 컨텍스트: 부팅 아주 초기(early_param). 메모리 할당기도, printk
+ *   버퍼도 제한적으로만 동작한다. 그래서 문자열을 복사하지 않고
+ *   __initdata 를 그대로 가리키며, 그 뒤처리를 아래
+ *   pci_realloc_setup_params() 가 맡는다.
+ * 호출자: 커널 부팅 인자 파서.
  */
-static int __init pci_setup(char *str) /* NVMe: pci_setup 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	while (str) { /* NVMe: 조건이 참인 동안 반복한다. */
-		char *k = strchr(str, ','); /* NVMe: 변수에 값을 할당한다. */
-		if (k) /* NVMe: 조건식을 평가해 분기를 결정한다. */
+static int __init pci_setup(char *str)
+{
+	/* [한국어] 쉼표로 이어진 항목들을 하나씩 처리한다. */
+	while (str) {
+		char *k = strchr(str, ',');	/* [한국어] 다음 항목의 위치 */
+		if (k)
+			/* [한국어] 쉼표를 널로 바꿔 현재 항목을 끊고, k 를 다음
+			 * 항목의 첫 글자로 옮긴다. 후위 증가라 두 일이 한 줄에 담긴다. */
 			*k++ = 0;
-		if (*str && (str = pcibios_setup(str)) && *str) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
-			if (!pci_setup_cardbus(str)) { /* NVMe: 조건식을 평가해 분기를 결정한다. */
+		/* [한국어] 세 조건을 && 로 잇는다.
+		 * *str      : 빈 항목("pci=,foo" 같은 경우)을 건너뛴다.
+		 * pcibios_setup(str) : 아키텍처에게 먼저 기회를 준다. 처리했으면
+		 *                      NULL 을 돌려줘 아래 사슬을 건너뛰게 한다.
+		 *                      돌려준 값을 str 에 다시 담는 것에 주의.
+		 * *str      : 아키텍처가 문자열을 소비해 빈 것으로 만들었을 수 있다. */
+		if (*str && (str = pcibios_setup(str)) && *str) {
+			/* [한국어] CardBus 관련 옵션. 0 을 돌려주면 처리한 것이다
+			 * (다른 비교들과 반환값 규약이 반대라 헷갈리기 쉽다). */
+			if (!pci_setup_cardbus(str)) {
 				/* Function handled the parameters */
-			} else if (!strcmp(str, "nomsi")) { /* NVMe: if 함수를 정의한다. */
-				pci_no_msi(); /* NVMe: pci_no_msi 함수를 호출한다. */
-			} else if (!strncmp(str, "noats", 5)) { /* NVMe: if 함수를 정의한다. */
-				pr_info("PCIe: ATS is disabled\n"); /* NVMe: 정보 메시지를 출력한다. */
-				pcie_ats_disabled = true; /* NVMe: 변수에 값을 할당한다. */
-			} else if (!strcmp(str, "noaer")) { /* NVMe: if 함수를 정의한다. */
-				pci_no_aer(); /* NVMe: pci_no_aer 함수를 호출한다. */
-			} else if (!strcmp(str, "earlydump")) { /* NVMe: if 함수를 정의한다. */
-				pci_early_dump = true; /* NVMe: 변수에 값을 할당한다. */
-			} else if (!strncmp(str, "realloc=", 8)) { /* NVMe: if 함수를 정의한다. */
-				pci_realloc_get_opt(str + 8); /* NVMe: pci_realloc_get_opt 함수를 호출한다. */
-			} else if (!strncmp(str, "realloc", 7)) { /* NVMe: if 함수를 정의한다. */
-				pci_realloc_get_opt("on"); /* NVMe: pci_realloc_get_opt 함수를 호출한다. */
-			} else if (!strcmp(str, "nodomains")) { /* NVMe: if 함수를 정의한다. */
-				pci_no_domains(); /* NVMe: domain 을 비활성화한다. */
-			} else if (!strncmp(str, "noari", 5)) { /* NVMe: if 함수를 정의한다. */
-				pcie_ari_disabled = true; /* NVMe: 변수에 값을 할당한다. */
-			} else if (!strncmp(str, "notph", 5)) { /* NVMe: if 함수를 정의한다. */
-				pci_no_tph(); /* NVMe: pci_no_tph 함수를 호출한다. */
-			} else if (!strncmp(str, "resource_alignment=", 19)) { /* NVMe: if 함수를 정의한다. */
-				resource_alignment_param = str + 19; /* NVMe: 변수에 값을 할당한다. */
-			} else if (!strncmp(str, "ecrc=", 5)) { /* NVMe: if 함수를 정의한다. */
-				pcie_ecrc_get_policy(str + 5); /* NVMe: pcie_ecrc_get_policy 함수를 호출한다. */
-			} else if (!strncmp(str, "hpiosize=", 9)) { /* NVMe: if 함수를 정의한다. */
-				pci_hotplug_io_size = memparse(str + 9, &str); /* NVMe: 변수에 값을 할당한다. */
-			} else if (!strncmp(str, "hpmmiosize=", 11)) { /* NVMe: if 함수를 정의한다. */
-				pci_hotplug_mmio_size = memparse(str + 11, &str); /* NVMe: 변수에 값을 할당한다. */
-			} else if (!strncmp(str, "hpmmioprefsize=", 15)) { /* NVMe: if 함수를 정의한다. */
-				pci_hotplug_mmio_pref_size = memparse(str + 15, &str); /* NVMe: 변수에 값을 할당한다. */
-			} else if (!strncmp(str, "hpmemsize=", 10)) { /* NVMe: if 함수를 정의한다. */
-				pci_hotplug_mmio_size = memparse(str + 10, &str); /* NVMe: 변수에 값을 할당한다. */
-				pci_hotplug_mmio_pref_size = pci_hotplug_mmio_size; /* NVMe: 변수에 값을 할당한다. */
-			} else if (!strncmp(str, "hpbussize=", 10)) { /* NVMe: if 함수를 정의한다. */
-				pci_hotplug_bus_size = /* NVMe: 표현식을 평가한다. */
-					simple_strtoul(str + 10, &str, 0); /* NVMe: simple_strtoul 함수를 호출한다. */
-				if (pci_hotplug_bus_size > 0xff) /* NVMe: 조건식을 평가해 분기를 결정한다. */
-					pci_hotplug_bus_size = DEFAULT_HOTPLUG_BUS_SIZE; /* NVMe: 변수에 값을 할당한다. */
-			} else if (!strncmp(str, "pcie_bus_tune_off", 17)) { /* NVMe: if 함수를 정의한다. */
-				pcie_bus_config = PCIE_BUS_TUNE_OFF; /* NVMe: 변수에 값을 할당한다. */
-			} else if (!strncmp(str, "pcie_bus_safe", 13)) { /* NVMe: if 함수를 정의한다. */
-				pcie_bus_config = PCIE_BUS_SAFE; /* NVMe: 변수에 값을 할당한다. */
-			} else if (!strncmp(str, "pcie_bus_perf", 13)) { /* NVMe: if 함수를 정의한다. */
-				pcie_bus_config = PCIE_BUS_PERFORMANCE; /* NVMe: 변수에 값을 할당한다. */
-			} else if (!strncmp(str, "pcie_bus_peer2peer", 18)) { /* NVMe: if 함수를 정의한다. */
-				pcie_bus_config = PCIE_BUS_PEER2PEER; /* NVMe: 변수에 값을 할당한다. */
-			} else if (!strncmp(str, "pcie_scan_all", 13)) { /* NVMe: if 함수를 정의한다. */
-				pci_add_flags(PCI_SCAN_ALL_PCIE_DEVS); /* NVMe: pci_add_flags 함수를 호출한다. */
-			} else if (!strncmp(str, "disable_acs_redir=", 18)) { /* NVMe: if 함수를 정의한다. */
-				disable_acs_redir_param = str + 18; /* NVMe: 변수에 값을 할당한다. */
-			} else if (!strncmp(str, "config_acs=", 11)) { /* NVMe: if 함수를 정의한다. */
-				config_acs_param = str + 11; /* NVMe: 변수에 값을 할당한다. */
-			} else { /* NVMe: 표현식을 평가한다. */
-				pr_err("PCI: Unknown option `%s'\n", str); /* NVMe: 에러 메시지를 출력한다. */
-			} /* NVMe: 코드 블록을 종료한다. */
-		} /* NVMe: 코드 블록을 종료한다. */
-		str = k; /* NVMe: 변수에 값을 할당한다. */
-	} /* NVMe: 코드 블록을 종료한다. */
-	return 0; /* NVMe: 성공(0)을 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
-early_param("pci", pci_setup); /* NVMe: early_param 함수를 호출한다. */
+			} else if (!strcmp(str, "nomsi")) {
+				/* [한국어] MSI/MSI-X 전역 비활성화. msi/msi.c 의
+				 * pci_msi_enable 을 false 로 만든다. */
+				pci_no_msi();
+			} else if (!strncmp(str, "noats", 5)) {
+				/* [한국어] Address Translation Services 비활성화.
+				 * 장치가 IOMMU 변환 결과를 캐시하지 못하게 한다. */
+				pr_info("PCIe: ATS is disabled\n");
+				pcie_ats_disabled = true;
+			} else if (!strcmp(str, "noaer")) {
+				/* [한국어] Advanced Error Reporting 비활성화. */
+				pci_no_aer();
+			} else if (!strcmp(str, "earlydump")) {
+				/* [한국어] 열거 중 각 장치의 config space 를 통째로
+				 * 로그에 찍는다. 부팅이 매우 느려지므로 디버그 전용. */
+				pci_early_dump = true;
+			} else if (!strncmp(str, "realloc=", 8)) {
+				/* [한국어] 값이 붙은 형태("realloc=off"). 반드시
+				 * 아래 "realloc" 보다 먼저 검사해야 한다. */
+				pci_realloc_get_opt(str + 8);
+			} else if (!strncmp(str, "realloc", 7)) {
+				/* [한국어] 값 없는 형태 — "on" 으로 간주한다. */
+				pci_realloc_get_opt("on");
+			} else if (!strcmp(str, "nodomains")) {
+				pci_no_domains();	/* [한국어] 도메인 번호 표기 끄기 */
+			} else if (!strncmp(str, "noari", 5)) {
+				/* [한국어] ARI(Alternative Routing-ID) 비활성화.
+				 * 한 장치가 8개 넘는 function 을 갖는 확장 방식이며,
+				 * SR-IOV 의 VF 다수 배치에 쓰인다. */
+				pcie_ari_disabled = true;
+			} else if (!strncmp(str, "notph", 5)) {
+				/* [한국어] TPH(TLP Processing Hints) 비활성화.
+				 * 장치가 "이 데이터는 어느 캐시에 넣어 달라" 고
+				 * 힌트를 주는 기능이다. */
+				pci_no_tph();
+			} else if (!strncmp(str, "resource_alignment=", 19)) {
+				/* [한국어] 포인터만 저장한다. 복사하지 않는 이유는
+				 * 이 시점에 할당기가 없을 수 있어서이고, 그 뒷수습을
+				 * pci_realloc_setup_params() 가 한다. */
+				resource_alignment_param = str + 19;
+			} else if (!strncmp(str, "ecrc=", 5)) {
+				/* [한국어] ECRC(End-to-end CRC) 정책. TLP 에 CRC 를
+				 * 붙여 경로 전체의 데이터 무결성을 검사한다. */
+				pcie_ecrc_get_policy(str + 5);
+			} else if (!strncmp(str, "hpiosize=", 9)) {
+				/* [한국어] 핫플러그 슬롯에 미리 예약해 둘 I/O 공간 크기.
+				 * memparse 는 "1M", "256K" 같은 접미사를 해석하고,
+				 * &str 로 파싱이 끝난 위치를 돌려준다. */
+				pci_hotplug_io_size = memparse(str + 9, &str);
+			} else if (!strncmp(str, "hpmmiosize=", 11)) {
+				/* [한국어] 비프리페치 메모리 예약 크기. */
+				pci_hotplug_mmio_size = memparse(str + 11, &str);
+			} else if (!strncmp(str, "hpmmioprefsize=", 15)) {
+				/* [한국어] 프리페치 가능 메모리 예약 크기. */
+				pci_hotplug_mmio_pref_size = memparse(str + 15, &str);
+			} else if (!strncmp(str, "hpmemsize=", 10)) {
+				/* [한국어] 위 둘을 같은 값으로 한 번에 지정하는 단축 형태. */
+				pci_hotplug_mmio_size = memparse(str + 10, &str);
+				pci_hotplug_mmio_pref_size = pci_hotplug_mmio_size;
+			} else if (!strncmp(str, "hpbussize=", 10)) {
+				/* [한국어] 핫플러그 브리지에 예약할 버스 번호 개수. */
+				pci_hotplug_bus_size =
+					simple_strtoul(str + 10, &str, 0);
+				/* [한국어] 버스 번호는 8비트라 255 를 넘을 수 없다.
+				 * 범위를 벗어나면 조용히 기본값으로 되돌린다. */
+				if (pci_hotplug_bus_size > 0xff)
+					pci_hotplug_bus_size = DEFAULT_HOTPLUG_BUS_SIZE;
+			} else if (!strncmp(str, "pcie_bus_tune_off", 17)) {
+				/* [한국어] MPS 를 건드리지 않는다. 펌웨어 설정 그대로. */
+				pcie_bus_config = PCIE_BUS_TUNE_OFF;
+			} else if (!strncmp(str, "pcie_bus_safe", 13)) {
+				/* [한국어] 계층의 공통 최소 MPS 로 통일. 보수적이지만
+				 * 어떤 조합에서도 안전하다. */
+				pcie_bus_config = PCIE_BUS_SAFE;
+			} else if (!strncmp(str, "pcie_bus_perf", 13)) {
+				/* [한국어] MPS 를 최대한 크게. NVMe 처리량에 유리하지만
+				 * MRRS 를 MPS 로 클램프하는 부작용이 따른다
+				 * (pcie_set_readrq 주석 참고). */
+				pcie_bus_config = PCIE_BUS_PERFORMANCE;
+			} else if (!strncmp(str, "pcie_bus_peer2peer", 18)) {
+				/* [한국어] MPS 를 128 로 통일. 어떤 두 장치끼리도
+				 * 직접 통신(P2PDMA)할 수 있게 하는 최소 공통값이다. */
+				pcie_bus_config = PCIE_BUS_PEER2PEER;
+			} else if (!strncmp(str, "pcie_scan_all", 13)) {
+				/* [한국어] PCIe 링크 아래 장치 0 만 스캔한다는 규칙을
+				 * 무시하고 전부 훑는다. 규칙을 어기는 하드웨어용. */
+				pci_add_flags(PCI_SCAN_ALL_PCIE_DEVS);
+			} else if (!strncmp(str, "disable_acs_redir=", 18)) {
+				/* [한국어] 지정한 장치의 ACS 재지향 차단을 끈다.
+				 * P2PDMA 를 쓰려면 필요할 수 있으나 격리가 약해진다. */
+				disable_acs_redir_param = str + 18;
+			} else if (!strncmp(str, "config_acs=", 11)) {
+				/* [한국어] ACS 설정을 직접 지정한다. */
+				config_acs_param = str + 11;
+			} else {
+				/* [한국어] 모르는 옵션. 부팅을 막지 않고 로그만 남긴다 —
+				 * 오타 하나로 부팅이 안 되면 복구가 어렵기 때문이다. */
+				pr_err("PCI: Unknown option `%s'\n", str);
+			}
+		}
+		str = k;	/* [한국어] 다음 항목으로. 마지막이면 k 가 NULL 이라 루프가 끝난다 */
+	}
+	return 0;	/* [한국어] early_param 규약상 0 = 처리 완료 */
+}
+/* [한국어] "pci=" 인자를 위 함수가 처리하도록 등록한다. early_param 은
+ * 메모리 관리자가 준비되기도 전에 불리는 아주 이른 단계다 — 그래서
+ * 이 함수 안에서 kmalloc 을 쓸 수 없다. */
+early_param("pci", pci_setup);
 
 /*
  * 'resource_alignment_param' and 'disable_acs_redir_param' are initialized
@@ -13761,16 +14122,44 @@ early_param("pci", pci_setup); /* NVMe: early_param 함수를 호출한다. */
  *
  */
 /*
- * pci_realloc_setup_params:
- *   PCI 리소스 재할당 관련 커맨드라인 파라미터를 초기화한다. NVMe BAR 재배치 정책에 영향을 준다.
+ * [한국어]
+ * pci_realloc_setup_params - 부팅 인자 문자열을 해제되지 않을 메모리로 옮긴다
+ *
+ * @return: 항상 0.
+ *
+ * 위 원문 주석이 문제와 해법을 모두 설명한다. 요약하면 —
+ * pci_setup() 은 early_param 단계라 메모리를 할당할 수 없어서, 문자열을
+ * 복사하지 않고 __initdata 영역을 그대로 가리키게 해 두었다. 그런데
+ * __initdata 는 부팅이 끝나면 통째로 해제된다. 그 전에 힙으로 옮겨
+ * 놓아야 나중에 sysfs 로 읽거나 장치 열거에서 참조할 때 살아 있다.
+ *
+ * kstrdup 이 NULL 을 받으면 NULL 을 돌려준다는 성질을 이용해, 인자가
+ * 지정되지 않은 경우(포인터가 NULL)를 따로 검사하지 않는다.
+ *
+ * 할당 실패를 확인하지 않는 것이 눈에 띈다. 실패하면 포인터가 NULL 이 되어
+ * "그 옵션이 지정되지 않은 것" 과 같은 상태가 된다. 부팅 인자 하나를
+ * 잃는 것뿐이라 치명적이지 않고, 이 시점에 그만큼도 할당하지 못하는
+ * 시스템이면 어차피 곧 다른 데서 실패한다.
+ *
+ * pure_initcall 단계를 고른 이유: __initdata 해제(free_initmem)보다는
+ * 이르고, 장치 열거(subsys_initcall 이후)보다는 빨라야 한다.
+ * pure_initcall 은 initcall 중 가장 이른 단계라 두 조건을 모두 만족한다.
+ *
+ * 실행 컨텍스트: 부팅 중, 단일 스레드. 이 시점에는 할당기가 준비돼 있다.
  */
-static int __init pci_realloc_setup_params(void) /* NVMe: pci_realloc_setup_params 함수를 정의한다. */
-{ /* NVMe: 코드 블록을 시작한다. */
-	resource_alignment_param = kstrdup(resource_alignment_param, /* NVMe: 함수 호출 인자를 이어서 전달한다. */
-					   GFP_KERNEL); /* NVMe: 표현식을 평가한다. */
-	disable_acs_redir_param = kstrdup(disable_acs_redir_param, GFP_KERNEL); /* NVMe: 변수에 값을 할당한다. */
-	config_acs_param = kstrdup(config_acs_param, GFP_KERNEL); /* NVMe: 변수에 값을 할당한다. */
+static int __init pci_realloc_setup_params(void)
+{
+	/* [한국어] 세 문자열을 힙으로 복사한다. kstrdup 은 NULL 을 받으면
+	 * NULL 을 돌려주므로, 지정되지 않은 옵션도 그대로 통과한다.
+	 * 반환값을 원래 변수에 다시 담아 포인터를 갈아끼운다 — 옛 포인터는
+	 * __initdata 를 가리키므로 해제하면 안 된다(애초에 할당한 것이 아니다). */
+	resource_alignment_param = kstrdup(resource_alignment_param,
+					   GFP_KERNEL);
+	disable_acs_redir_param = kstrdup(disable_acs_redir_param, GFP_KERNEL);
+	config_acs_param = kstrdup(config_acs_param, GFP_KERNEL);
 
-	return 0; /* NVMe: 성공(0)을 반환한다. */
-} /* NVMe: 코드 블록을 종료한다. */
-pure_initcall(pci_realloc_setup_params); /* NVMe: pure_initcall 함수를 호출한다. */
+	return 0;	/* [한국어] 실패해도 0. 위 함수 주석 참고 */
+}
+/* [한국어] initcall 중 가장 이른 단계에 등록한다. __initdata 가 해제되기
+ * 전이면서 장치 열거보다는 앞서야 하기 때문이다. */
+pure_initcall(pci_realloc_setup_params);
