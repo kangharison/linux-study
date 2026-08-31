@@ -240,30 +240,30 @@ struct pci_dynid {
  *   외부 모듈도 EXPORT_SYMBOL_GPL 로 이 함수를 직접 부를 수 있다.
  */
 int pci_add_dynid(struct pci_driver *drv,
-		  unsigned int vendor, unsigned int device,
+		  unsigned int vendor, unsigned int device,	/* [한국어] @drv 는 이미 driver_register() 된 드라이버여야 한다 — 아직 등록 전이면 driver_attach 가 할 일이 없다 */
 		  unsigned int subvendor, unsigned int subdevice,
 		  unsigned int class, unsigned int class_mask,
 		  unsigned long driver_data)
 {
-	struct pci_dynid *dynid;
+	struct pci_dynid *dynid;	/* [한국어] 목록에 매달 새 ID 칸. 아래에서 kzalloc 으로 받는다 */
 
-	dynid = kzalloc_obj(*dynid);
-	if (!dynid)
-		return -ENOMEM;
+	dynid = kzalloc_obj(*dynid);	/* [한국어] kzalloc_obj(*dynid) 는 sizeof(*dynid) 만큼 0 초기화 할당. GFP_KERNEL 이라 잠들 수 있다 */
+	if (!dynid)	/* [한국어] 할당 실패 검사 */
+		return -ENOMEM;	/* [한국어] 목록을 건드리기 전이므로 되돌릴 것 없이 바로 나간다 */
 
-	dynid->id.vendor = vendor;
-	dynid->id.device = device;
-	dynid->id.subvendor = subvendor;
-	dynid->id.subdevice = subdevice;
-	dynid->id.class = class;
-	dynid->id.class_mask = class_mask;
-	dynid->id.driver_data = driver_data;
+	dynid->id.vendor = vendor;	/* [한국어] 이하 일곱 줄이 인자를 pci_device_id 로 옮겨 담는 부분. PCI_ANY_ID 를 그대로 받아 와일드카드로 쓴다 */
+	dynid->id.device = device;	/* [한국어] Device ID */
+	dynid->id.subvendor = subvendor;	/* [한국어] Subsystem Vendor ID */
+	dynid->id.subdevice = subdevice;	/* [한국어] Subsystem Device ID */
+	dynid->id.class = class;	/* [한국어] 클래스 코드(Base/Sub/ProgIF 3 바이트가 하나의 u32 에 들어 있다) */
+	dynid->id.class_mask = class_mask;	/* [한국어] 클래스 비교에 쓸 마스크. 이 비트가 1 인 자리만 비교한다 */
+	dynid->id.driver_data = driver_data;	/* [한국어] probe 에 함께 넘어갈 드라이버 사설 값. new_id_store 가 정적 표에 있는 값만 통과시킨다 */
 
-	spin_lock(&drv->dynids.lock);
-	list_add_tail(&dynid->node, &drv->dynids.list);
-	spin_unlock(&drv->dynids.lock);
+	spin_lock(&drv->dynids.lock);	/* [한국어] 목록 조작 구간 진입. pci_match_device 의 순회와 경쟁하므로 반드시 이 락이 필요하다 */
+	list_add_tail(&dynid->node, &drv->dynids.list);	/* [한국어] 꼬리에 붙인다 — 먼저 넣은 ID 가 먼저 대조되도록 */
+	spin_unlock(&drv->dynids.lock);	/* [한국어] 락 해제. 아래 driver_attach 는 잠들 수 있으므로 반드시 락 밖에서 부른다 */
 
-	return driver_attach(&drv->driver);
+	return driver_attach(&drv->driver);	/* [한국어] 등록된 모든 PCI 장치를 이 드라이버 기준으로 다시 훑는다. 그 안에서 pci_bus_match → pci_device_probe 가 돌 수 있다 */
 }
 EXPORT_SYMBOL_GPL(pci_add_dynid);	/* [한국어] GPL 모듈만 쓸 수 있게 공개. 드라이버가 자기 ID 표를 런타임에 늘릴 때 쓴다 */
 
@@ -291,14 +291,14 @@ EXPORT_SYMBOL_GPL(pci_add_dynid);	/* [한국어] GPL 모듈만 쓸 수 있게 �
  */
 static void pci_free_dynids(struct pci_driver *drv)
 {
-	struct pci_dynid *dynid, *n;
+	struct pci_dynid *dynid, *n;	/* [한국어] dynid 는 현재 노드, n 은 다음 노드를 미리 담아 둘 자리. 현재 노드를 free 하므로 반드시 필요하다 */
 
-	spin_lock(&drv->dynids.lock);
-	list_for_each_entry_safe(dynid, n, &drv->dynids.list, node) {
-		list_del(&dynid->node);
-		kfree(dynid);
+	spin_lock(&drv->dynids.lock);	/* [한국어] 목록 조작 구간 진입 */
+	list_for_each_entry_safe(dynid, n, &drv->dynids.list, node) {	/* [한국어] _safe 변형 — 본문에서 현재 노드를 kfree 하기 때문 */
+		list_del(&dynid->node);	/* [한국어] 먼저 목록에서 떼어 낸다. 순서를 바꾸면 해제된 메모리를 목록이 가리키게 된다 */
+		kfree(dynid);	/* [한국어] 그다음 해제 */
 	}
-	spin_unlock(&drv->dynids.lock);
+	spin_unlock(&drv->dynids.lock);	/* [한국어] 목록 조작 구간 종료 */
 }
 
 /**
@@ -347,14 +347,14 @@ static void pci_free_dynids(struct pci_driver *drv)
 const struct pci_device_id *pci_match_id(const struct pci_device_id *ids,
 					 struct pci_dev *dev)
 {
-	if (ids) {
-		while (ids->vendor || ids->subvendor || ids->class_mask) {
-			if (pci_match_one_device(ids, dev))
-				return ids;
-			ids++;
+	if (ids) {	/* [한국어] ids 가 NULL 인 드라이버(id_table 을 두지 않은 드라이버)도 있으므로 먼저 확인 */
+		while (ids->vendor || ids->subvendor || ids->class_mask) {	/* [한국어] 표의 끝 표시인 { 0, } 항목을 만나면 멈춘다. device 필드를 조건에 넣지 않는 이유는 벤더 없이 클래스만으로 매칭하는 항목을 허용하기 위해서다 */
+			if (pci_match_one_device(ids, dev))	/* [한국어] 실제 비교. 네 ID 는 PCI_ANY_ID 를 와일드카드로 인정하고 클래스는 마스크로 가려 비교한다 */
+				return ids;	/* [한국어] 맞았으면 그 항목의 주소를 그대로 돌려준다. 호출자는 이것을 probe 에 넘긴다 */
+			ids++;	/* [한국어] 다음 항목으로 */
 		}
 	}
-	return NULL;
+	return NULL;	/* [한국어] 끝까지 못 찾았거나 표가 없으면 NULL */
 }
 EXPORT_SYMBOL(pci_match_id);	/* [한국어] 라이선스 제한 없이 공개. 오래된 API 라 이렇게 남아 있다 */
 
@@ -430,47 +430,47 @@ static const struct pci_device_id pci_device_id_any = {
 static const struct pci_device_id *pci_match_device(struct pci_driver *drv,
 						    struct pci_dev *dev)
 {
-	struct pci_dynid *dynid;
-	const struct pci_device_id *found_id = NULL, *ids;
-	int ret;
+	struct pci_dynid *dynid;	/* [한국어] dynids 목록 순회용 커서 */
+	const struct pci_device_id *found_id = NULL, *ids;	/* [한국어] found_id 는 결과, ids 는 정적 표를 훑는 커서. found_id 를 NULL 로 시작해 두는 것이 아래 분기의 전제다 */
+	int ret;	/* [한국어] device_match_driver_override 의 결과. 0 = 다른 드라이버가 지정됨, 양수 = 이 드라이버가 지정됨, 음수 = 지정 없음 */
 
 	/* When driver_override is set, only bind to the matching driver */
-	ret = device_match_driver_override(&dev->dev, &drv->driver);
-	if (ret == 0)
-		return NULL;
+	ret = device_match_driver_override(&dev->dev, &drv->driver);	/* [한국어] 사용자가 driver_override 로 특정 드라이버를 지목했는지 확인한다 */
+	if (ret == 0)	/* [한국어] 0 이면 다른 드라이버가 지목된 것이므로 이 드라이버는 손대면 안 된다 */
+		return NULL;	/* [한국어] 즉시 실패. 정적 표에 있더라도 무시한다 */
 
 	/* Look at the dynamic ids first, before the static ones */
-	spin_lock(&drv->dynids.lock);
-	list_for_each_entry(dynid, &drv->dynids.list, node) {
-		if (pci_match_one_device(&dynid->id, dev)) {
-			found_id = &dynid->id;
-			break;
+	spin_lock(&drv->dynids.lock);	/* [한국어] dynids 목록 순회 구간 진입 */
+	list_for_each_entry(dynid, &drv->dynids.list, node) {	/* [한국어] sysfs new_id 로 넣은 항목들을 먼저 본다 — 사용자가 명시적으로 넣은 것이므로 정적 표보다 우선한다 */
+		if (pci_match_one_device(&dynid->id, dev)) {	/* [한국어] 정적 표와 같은 비교 함수를 쓴다 */
+			found_id = &dynid->id;	/* [한국어] 맞은 항목의 주소를 챙긴다 */
+			break;	/* [한국어] 첫 번째 것만 쓰고 멈춘다 */
 		}
 	}
-	spin_unlock(&drv->dynids.lock);
+	spin_unlock(&drv->dynids.lock);	/* [한국어] 락 해제. 아래에서 found_id 를 반환하지만 그 대상은 remove_id 가 지우기 전까지 유효하다(상류 코드 그대로) */
 
-	if (found_id)
-		return found_id;
+	if (found_id)	/* [한국어] dynids 에서 찾았으면 */
+		return found_id;	/* [한국어] 정적 표는 보지도 않고 그것을 돌려준다 */
 
-	for (ids = drv->id_table; (found_id = pci_match_id(ids, dev));
-	     ids = found_id + 1) {
+	for (ids = drv->id_table; (found_id = pci_match_id(ids, dev));	/* [한국어] 정적 id_table 순회. 조건식 안에서 pci_match_id 를 부르는 형태라, 한 번 맞을 때마다 루프 본문이 돈다 */
+	     ids = found_id + 1) {	/* [한국어] 다음 회차에는 방금 맞은 항목의 바로 다음부터 다시 훑는다 — override_only 때문에 건너뛴 뒤 계속 찾아야 하므로 */
 		/*
 		 * The match table is split based on driver_override.
 		 * In case override_only was set, enforce driver_override
 		 * matching.
 		 */
-		if (found_id->override_only) {
-			if (ret > 0)
-				return found_id;
-		} else {
-			return found_id;
+		if (found_id->override_only) {	/* [한국어] 이 항목이 driver_override 로 지목했을 때만 유효한 항목인가 */
+			if (ret > 0)	/* [한국어] 그렇다면 실제로 지목된 경우(ret 양수)에만 인정한다 */
+				return found_id;	/* [한국어] 인정 */
+		} else {	/* [한국어] 평범한 항목이면 */
+			return found_id;	/* [한국어] 조건 없이 그대로 돌려준다 */
 		}
 	}
 
 	/* driver_override will always match, send a dummy id */
-	if (ret > 0)
-		return &pci_device_id_any;
-	return NULL;
+	if (ret > 0)	/* [한국어] 표에서 못 찾았지만 사용자가 이 드라이버를 지목했다면 */
+		return &pci_device_id_any;	/* [한국어] probe 에 넘길 것이 없으므로 만능 더미 ID 의 주소를 돌려준다 */
+	return NULL;	/* [한국어] 어느 경로로도 못 맞췄다 — 정상적인 결과다 */
 }
 
 /**
@@ -518,60 +518,60 @@ static const struct pci_device_id *pci_match_device(struct pci_driver *drv,
 static ssize_t new_id_store(struct device_driver *driver, const char *buf,
 			    size_t count)
 {
-	struct pci_driver *pdrv = to_pci_driver(driver);
-	const struct pci_device_id *ids = pdrv->id_table;
-	u32 vendor, device, subvendor = PCI_ANY_ID,
-		subdevice = PCI_ANY_ID, class = 0, class_mask = 0;
-	unsigned long driver_data = 0;
-	int fields;
-	int retval = 0;
+	struct pci_driver *pdrv = to_pci_driver(driver);	/* [한국어] sysfs 는 일반 device_driver 를 넘겨 주므로 감싸고 있는 pci_driver 로 되돌린다 */
+	const struct pci_device_id *ids = pdrv->id_table;	/* [한국어] driver_data 검증에 쓸 정적 ID 표. 표가 없는 드라이버면 NULL 이다 */
+	u32 vendor, device, subvendor = PCI_ANY_ID,	/* [한국어] 지정하지 않은 필드의 기본값을 미리 넣어 둔다 — subvendor/subdevice 는 와일드카드, */
+		subdevice = PCI_ANY_ID, class = 0, class_mask = 0;	/* [한국어] class 는 0 이고 class_mask 도 0 이라 클래스 조건이 없는 셈이 된다 */
+	unsigned long driver_data = 0;	/* [한국어] driver_data 기본값 0 */
+	int fields;	/* [한국어] sscanf 가 실제로 채운 필드 개수 */
+	int retval = 0;	/* [한국어] 반환값 겸 중간 판정 저장소 */
 
-	fields = sscanf(buf, "%x %x %x %x %x %x %lx",
-			&vendor, &device, &subvendor, &subdevice,
-			&class, &class_mask, &driver_data);
-	if (fields < 2)
-		return -EINVAL;
+	fields = sscanf(buf, "%x %x %x %x %x %x %lx",	/* [한국어] %x 여섯 개와 %lx 하나. 사용자는 앞에서부터 원하는 만큼만 줄 수 있다 */
+			&vendor, &device, &subvendor, &subdevice,	/* [한국어] ID 네 개 */
+			&class, &class_mask, &driver_data);	/* [한국어] 클래스 두 개와 driver_data */
+	if (fields < 2)	/* [한국어] vendor 와 device 는 반드시 있어야 한다 */
+		return -EINVAL;	/* [한국어] 모자라면 잘못된 입력 */
 
-	if (fields != 7) {
-		struct pci_dev *pdev = kzalloc_obj(*pdev);
-		if (!pdev)
-			return -ENOMEM;
+	if (fields != 7) {	/* [한국어] 일곱 개를 다 주지 않았다 = driver_data 를 지정하지 않았다 */
+		struct pci_dev *pdev = kzalloc_obj(*pdev);	/* [한국어] 대조용 임시 껍데기. 진짜 장치가 아니라 pci_match_device 에 넘기기 위한 것이다 */
+		if (!pdev)	/* [한국어] 할당 실패 검사 */
+			return -ENOMEM;	/* [한국어] 즉시 실패 */
 
-		pdev->vendor = vendor;
-		pdev->device = device;
-		pdev->subsystem_vendor = subvendor;
-		pdev->subsystem_device = subdevice;
-		pdev->class = class;
+		pdev->vendor = vendor;	/* [한국어] 이하 다섯 줄이 껍데기에 사용자가 준 ID 를 채우는 부분 */
+		pdev->device = device;	/* [한국어] Device ID */
+		pdev->subsystem_vendor = subvendor;	/* [한국어] Subsystem Vendor ID */
+		pdev->subsystem_device = subdevice;	/* [한국어] Subsystem Device ID */
+		pdev->class = class;	/* [한국어] 클래스 코드 */
 
-		if (pci_match_device(pdrv, pdev))
-			retval = -EEXIST;
+		if (pci_match_device(pdrv, pdev))	/* [한국어] 이 ID 로 이미 매칭이 되는가 — 그렇다면 굳이 추가할 필요가 없다 */
+			retval = -EEXIST;	/* [한국어] 중복이므로 거절한다 */
 
-		kfree(pdev);
+		kfree(pdev);	/* [한국어] 껍데기는 역할이 끝났으니 즉시 해제. 반환 경로마다 free 를 흩뿌리지 않으려고 판정과 해제를 분리했다 */
 
-		if (retval)
-			return retval;
+		if (retval)	/* [한국어] 중복 판정이 났으면 */
+			return retval;	/* [한국어] 그 오류를 그대로 돌려준다 */
 	}
 
 	/* Only accept driver_data values that match an existing id_table
 	   entry */
-	if (ids) {
-		retval = -EINVAL;
-		while (ids->vendor || ids->subvendor || ids->class_mask) {
-			if (driver_data == ids->driver_data) {
-				retval = 0;
-				break;
+	if (ids) {	/* [한국어] 정적 표가 있는 드라이버라면 driver_data 값을 검증한다 */
+		retval = -EINVAL;	/* [한국어] 일단 실패로 놓고 시작 — 표 안에서 같은 값을 찾아야만 통과다 */
+		while (ids->vendor || ids->subvendor || ids->class_mask) {	/* [한국어] 표의 끝 표시를 만날 때까지 */
+			if (driver_data == ids->driver_data) {	/* [한국어] 사용자가 준 driver_data 가 이 항목의 값과 같은가 */
+				retval = 0;	/* [한국어] 같으면 통과 */
+				break;	/* [한국어] 더 볼 것 없다 */
 			}
-			ids++;
+			ids++;	/* [한국어] 다음 항목으로 */
 		}
 		if (retval)	/* No match */
-			return retval;
+			return retval;	/* [한국어] 거절한다. 임의의 정수를 드라이버 사설 값으로 주입하지 못하게 막는 안전장치다 */
 	}
 
-	retval = pci_add_dynid(pdrv, vendor, device, subvendor, subdevice,
-			       class, class_mask, driver_data);
-	if (retval)
-		return retval;
-	return count;
+	retval = pci_add_dynid(pdrv, vendor, device, subvendor, subdevice,	/* [한국어] 검증을 다 통과했으니 실제 등록으로 넘긴다 */
+			       class, class_mask, driver_data);	/* [한국어] 클래스 조건과 driver_data 를 함께 전달 */
+	if (retval)	/* [한국어] 등록 실패면 */
+		return retval;	/* [한국어] 그 오류를 그대로 사용자에게 */
+	return count;	/* [한국어] 성공. sysfs 규약상 소비한 바이트 수를 돌려줘야 한다 */
 }
 /* [한국어]
  * static DRIVER_ATTR_WO(new_id) — 쓰기 전용 sysfs 속성 하나를 만든다.
@@ -621,36 +621,36 @@ static DRIVER_ATTR_WO(new_id);
 static ssize_t remove_id_store(struct device_driver *driver, const char *buf,
 			       size_t count)
 {
-	struct pci_dynid *dynid, *n;
-	struct pci_driver *pdrv = to_pci_driver(driver);
-	u32 vendor, device, subvendor = PCI_ANY_ID,
-		subdevice = PCI_ANY_ID, class = 0, class_mask = 0;
-	int fields;
-	size_t retval = -ENODEV;
+	struct pci_dynid *dynid, *n;	/* [한국어] dynid 는 현재 노드, n 은 다음 노드. 찾으면 그 자리에서 free 하므로 필요하다 */
+	struct pci_driver *pdrv = to_pci_driver(driver);	/* [한국어] sysfs 가 준 device_driver 를 pci_driver 로 되돌린다 */
+	u32 vendor, device, subvendor = PCI_ANY_ID,	/* [한국어] new_id 와 같은 기본값. 지정하지 않은 서브시스템 ID 는 와일드카드로 둔다 */
+		subdevice = PCI_ANY_ID, class = 0, class_mask = 0;	/* [한국어] 클래스 조건도 기본은 없음 */
+	int fields;	/* [한국어] sscanf 가 채운 개수 */
+	size_t retval = -ENODEV;	/* [한국어] 못 찾았을 때의 반환값을 미리 넣어 둔다. size_t 에 음수를 담는 상류 코드의 기묘한 부분이다 */
 
-	fields = sscanf(buf, "%x %x %x %x %x %x",
-			&vendor, &device, &subvendor, &subdevice,
-			&class, &class_mask);
-	if (fields < 2)
-		return -EINVAL;
+	fields = sscanf(buf, "%x %x %x %x %x %x",	/* [한국어] new_id 와 달리 %lx(driver_data) 가 없다 — 지울 때는 식별만 하면 된다 */
+			&vendor, &device, &subvendor, &subdevice,	/* [한국어] ID 네 개 */
+			&class, &class_mask);	/* [한국어] 클래스 두 개 */
+	if (fields < 2)	/* [한국어] vendor 와 device 는 필수 */
+		return -EINVAL;	/* [한국어] 모자라면 잘못된 입력 */
 
-	spin_lock(&pdrv->dynids.lock);
-	list_for_each_entry_safe(dynid, n, &pdrv->dynids.list, node) {
-		struct pci_device_id *id = &dynid->id;
-		if ((id->vendor == vendor) &&
-		    (id->device == device) &&
-		    (subvendor == PCI_ANY_ID || id->subvendor == subvendor) &&
-		    (subdevice == PCI_ANY_ID || id->subdevice == subdevice) &&
-		    !((id->class ^ class) & class_mask)) {
-			list_del(&dynid->node);
-			kfree(dynid);
-			retval = count;
-			break;
+	spin_lock(&pdrv->dynids.lock);	/* [한국어] 목록 조작 구간 진입 */
+	list_for_each_entry_safe(dynid, n, &pdrv->dynids.list, node) {	/* [한국어] 찾으면 그 자리에서 떼어 내고 free 하므로 _safe 변형 */
+		struct pci_device_id *id = &dynid->id;	/* [한국어] 가독성을 위해 현재 항목의 ID 를 지역 포인터로 받는다 */
+		if ((id->vendor == vendor) &&	/* [한국어] Vendor 는 정확히 일치해야 한다 */
+		    (id->device == device) &&	/* [한국어] Device 도 정확히 일치 */
+		    (subvendor == PCI_ANY_ID || id->subvendor == subvendor) &&	/* [한국어] 사용자가 와일드카드를 줬으면 이 필드는 안 본다 */
+		    (subdevice == PCI_ANY_ID || id->subdevice == subdevice) &&	/* [한국어] Subsystem Device 도 마찬가지 */
+		    !((id->class ^ class) & class_mask)) {	/* [한국어] XOR 후 마스크 — 마스크 비트가 1 인 자리가 모두 같아야 0 이 되어 참이 된다 */
+			list_del(&dynid->node);	/* [한국어] 목록에서 떼어 내고 */
+			kfree(dynid);	/* [한국어] 해제 */
+			retval = count;	/* [한국어] 성공했으니 소비한 바이트 수로 바꾼다 */
+			break;	/* [한국어] 하나만 지우고 끝낸다 */
 		}
 	}
-	spin_unlock(&pdrv->dynids.lock);
+	spin_unlock(&pdrv->dynids.lock);	/* [한국어] 목록 조작 구간 종료 */
 
-	return retval;
+	return retval;	/* [한국어] 찾았으면 count, 못 찾았으면 -ENODEV */
 }
 /* [한국어]
  * static DRIVER_ATTR_WO(remove_id) — 같은 방식으로 driver_attr_remove_id 를
@@ -756,10 +756,10 @@ struct drv_dev_and_id {
  */
 static int local_pci_probe(struct drv_dev_and_id *ddi)
 {
-	struct pci_dev *pci_dev = ddi->dev;
-	struct pci_driver *pci_drv = ddi->drv;
-	struct device *dev = &pci_dev->dev;
-	int rc;
+	struct pci_dev *pci_dev = ddi->dev;	/* [한국어] 세 값을 지역 변수로 풀어 둔다 */
+	struct pci_driver *pci_drv = ddi->drv;	/* [한국어] probe 를 부를 드라이버 */
+	struct device *dev = &pci_dev->dev;	/* [한국어] 런타임 PM API 는 일반 struct device 를 받으므로 그 포인터도 미리 꺼내 둔다 */
+	int rc;	/* [한국어] probe 반환값 */
 
 	/*
 	 * Unbound PCI devices are always put in D0, regardless of
@@ -770,23 +770,23 @@ static int local_pci_probe(struct drv_dev_and_id *ddi)
 	 * count, in its probe routine and pm_runtime_get_noresume() in
 	 * its remove routine.
 	 */
-	pm_runtime_get_sync(dev);
-	pci_dev->driver = pci_drv;
+	pm_runtime_get_sync(dev);	/* [한국어] 사용 카운트를 올리고 필요하면 장치를 깨운다. _sync 라 실제로 깨어날 때까지 기다린다 */
+	pci_dev->driver = pci_drv;	/* [한국어] probe 안에서 부르는 PCI 헬퍼들이 이 값을 참조할 수 있도록 미리 세운다 */
 	rc = pci_drv->probe(pci_dev, ddi->id);	/* [한국어] 드라이버 코드로 넘어가는 유일한 지점. NVMe 라면 여기가 nvme_probe() 다 */
-	if (!rc)
-		return rc;
-	if (rc < 0) {
+	if (!rc)	/* [한국어] 0 이면 정상 성공 */
+		return rc;	/* [한국어] 런타임 PM 카운트는 올린 채로 둔다 — 바인딩된 동안 유지되어야 한다 */
+	if (rc < 0) {	/* [한국어] 음수는 실패 */
 		pci_dev->driver = NULL;		/* [한국어] probe 가 실패했으니 소유 표시를 되돌린다 — 실패한 드라이버가 붙어 있는 것처럼 보이면 안 된다 */
-		pm_runtime_put_sync(dev);
-		return rc;
+		pm_runtime_put_sync(dev);	/* [한국어] get_sync 로 올린 카운트를 내린다. _sync 라 필요하면 이 자리에서 다시 재운다 */
+		return rc;	/* [한국어] 실패 값을 그대로 올려보낸다 */
 	}
 	/*
 	 * Probe function should return < 0 for failure, 0 for success
 	 * Treat values > 0 as success, but warn.
 	 */
-	pci_warn(pci_dev, "Driver probe function unexpectedly returned %d\n",
-		 rc);
-	return 0;
+	pci_warn(pci_dev, "Driver probe function unexpectedly returned %d\n",	/* [한국어] 양수 반환은 규약 위반이지만 옛 드라이버 호환을 위해 성공으로 처리하고 경고만 남긴다 */
+		 rc);	/* [한국어] 실제 반환값을 함께 찍어 어느 드라이버인지 추적할 수 있게 한다 */
+	return 0;	/* [한국어] 경고했지만 성공으로 정규화 */
 }
 
 /* [한국어]
@@ -865,9 +865,9 @@ struct pci_probe_arg {
  */
 static void local_pci_probe_callback(struct work_struct *work)
 {
-	struct pci_probe_arg *arg = container_of(work, struct pci_probe_arg, work);
+	struct pci_probe_arg *arg = container_of(work, struct pci_probe_arg, work);	/* [한국어] work_struct 주소에서 그것을 품고 있는 pci_probe_arg 를 역산한다. 인자를 실을 자리가 없는 워크큐 콜백의 표준 기법이다 */
 
-	arg->ret = local_pci_probe(arg->ddi);
+	arg->ret = local_pci_probe(arg->ddi);	/* [한국어] 실제 probe 를 부르고 결과를 구조체에 적어 둔다. 호출자는 flush_work 뒤에 이 값을 읽는다 */
 }
 
 /* [한국어]
@@ -940,29 +940,29 @@ static bool pci_physfn_is_probed(struct pci_dev *dev)
 static int pci_call_probe(struct pci_driver *drv, struct pci_dev *dev,
 			  const struct pci_device_id *id)
 {
-	int error, node, cpu;
-	struct drv_dev_and_id ddi = { drv, dev, id };
+	int error, node, cpu;	/* [한국어] error 는 결과, node 는 장치의 NUMA 노드, cpu 는 고른 실행 CPU */
+	struct drv_dev_and_id ddi = { drv, dev, id };	/* [한국어] 세 값을 한 상자에 담는다. 지정 초기화가 아니라 순서 초기화라 구조체 필드 순서에 의존한다(상류 코드 그대로) */
 
 	/*
 	 * Execute driver initialization on node where the device is
 	 * attached.  This way the driver likely allocates its local memory
 	 * on the right node.
 	 */
-	node = dev_to_node(&dev->dev);
-	dev->is_probed = 1;
+	node = dev_to_node(&dev->dev);	/* [한국어] 이 장치가 어느 NUMA 노드에 붙어 있는지. 정보가 없으면 음수(NUMA_NO_NODE)가 나온다 */
+	dev->is_probed = 1;	/* [한국어] PF 의 probe 가 도는 동안 그 VF 들이 이 표시를 보고 중첩을 피한다 */
 
-	cpu_hotplug_disable();
+	cpu_hotplug_disable();	/* [한국어] CPU 를 고르고 그 CPU 에 워크를 던지는 동안 그 CPU 가 빠지면 안 되므로 핫플러그를 막는다 */
 	/*
 	 * Prevent nesting work_on_cpu() for the case where a Virtual Function
 	 * device is probed from work_on_cpu() of the Physical device.
 	 */
-	if (node < 0 || node >= MAX_NUMNODES || !node_online(node) ||
-	    pci_physfn_is_probed(dev)) {
-		error = local_pci_probe(&ddi);
-	} else {
-		struct pci_probe_arg arg = { .ddi = &ddi };
+	if (node < 0 || node >= MAX_NUMNODES || !node_online(node) ||	/* [한국어] 노드 번호가 없거나 범위 밖이거나 오프라인이면 옮길 곳이 없다 */
+	    pci_physfn_is_probed(dev)) {	/* [한국어] 또는 PF 가 probe 중인 VF 라면(워커 안에서 워커를 기다리는 중첩을 피한다) */
+		error = local_pci_probe(&ddi);	/* [한국어] 그냥 이 스레드에서 바로 부른다 */
+	} else {	/* [한국어] 그 밖의 경우는 워크큐로 옮긴다 */
+		struct pci_probe_arg arg = { .ddi = &ddi };	/* [한국어] 스택에 워크 인자를 잡는다 */
 
-		INIT_WORK_ONSTACK(&arg.work, local_pci_probe_callback);
+		INIT_WORK_ONSTACK(&arg.work, local_pci_probe_callback);	/* [한국어] ONSTACK 변형 — 스택 위의 work_struct 임을 디버그 객체 추적기에 알린다 */
 		/*
 		 * The target election and the enqueue of the work must be within
 		 * the same RCU read side section so that when the workqueue pool
@@ -970,30 +970,30 @@ static int pci_call_probe(struct pci_driver *drv, struct pci_dev *dev,
 		 * are guaranteed to queue the probing work to the appropriate
 		 * targets.
 		 */
-		rcu_read_lock();
-		cpu = cpumask_any_and(cpumask_of_node(node),
-				      housekeeping_cpumask(HK_TYPE_DOMAIN));
+		rcu_read_lock();	/* [한국어] CPU 선택과 큐잉을 한 RCU 읽기 구간에 묶는다(원본 주석의 이유 참조) */
+		cpu = cpumask_any_and(cpumask_of_node(node),	/* [한국어] 그 노드에 속하면서 */
+				      housekeeping_cpumask(HK_TYPE_DOMAIN));	/* [한국어] 격리되지 않은(housekeeping) CPU 를 하나 고른다. isolcpus 로 격리한 CPU 에 커널 워크를 던지면 격리가 깨진다 */
 
-		if (cpu < nr_cpu_ids) {
-			struct workqueue_struct *wq = pci_probe_wq;
+		if (cpu < nr_cpu_ids) {	/* [한국어] 유효한 CPU 를 찾았다면 */
+			struct workqueue_struct *wq = pci_probe_wq;	/* [한국어] 전용 워크큐를 쓴다 */
 
-			if (WARN_ON_ONCE(!wq))
-				wq = system_percpu_wq;
-			queue_work_on(cpu, wq, &arg.work);
-			rcu_read_unlock();
-			flush_work(&arg.work);
-			error = arg.ret;
-		} else {
-			rcu_read_unlock();
-			error = local_pci_probe(&ddi);
+			if (WARN_ON_ONCE(!wq))	/* [한국어] 초기화 순서 문제로 아직 없다면(있어서는 안 되는 상황) */
+				wq = system_percpu_wq;	/* [한국어] 시스템 기본 per-CPU 워크큐로 대체해 진행은 시킨다 */
+			queue_work_on(cpu, wq, &arg.work);	/* [한국어] 고른 CPU 에 워크를 올린다 */
+			rcu_read_unlock();	/* [한국어] 큐잉까지 끝났으니 RCU 읽기 구간 종료 */
+			flush_work(&arg.work);	/* [한국어] 그 워크가 끝날 때까지 잠들며 기다린다 */
+			error = arg.ret;	/* [한국어] 워커가 적어 둔 결과를 읽는다 */
+		} else {	/* [한국어] 그 노드에 쓸 수 있는 CPU 가 하나도 없으면 */
+			rcu_read_unlock();	/* [한국어] RCU 구간을 닫고 */
+			error = local_pci_probe(&ddi);	/* [한국어] 그냥 이 스레드에서 부른다 */
 		}
 
-		destroy_work_on_stack(&arg.work);
+		destroy_work_on_stack(&arg.work);	/* [한국어] 스택 위 work_struct 의 디버그 추적을 해제한다. 이것을 빼먹으면 스택이 사라진 뒤 추적기가 오탐한다 */
 	}
 
-	dev->is_probed = 0;
-	cpu_hotplug_enable();
-	return error;
+	dev->is_probed = 0;	/* [한국어] 중첩 방지 표시 해제 */
+	cpu_hotplug_enable();	/* [한국어] CPU 핫플러그 재허용 */
+	return error;	/* [한국어] probe 결과를 그대로 올려보낸다 */
 }
 
 /* [한국어]
@@ -1021,7 +1021,7 @@ static int pci_call_probe(struct pci_driver *drv, struct pci_dev *dev,
  */
 void pci_probe_flush_workqueue(void)
 {
-	flush_workqueue(pci_probe_wq);
+	flush_workqueue(pci_probe_wq);	/* [한국어] 큐 전체가 빌 때까지 잠들며 기다린다 */
 }
 
 /**
@@ -1060,17 +1060,17 @@ void pci_probe_flush_workqueue(void)
  */
 static int __pci_device_probe(struct pci_driver *drv, struct pci_dev *pci_dev)
 {
-	const struct pci_device_id *id;
-	int error = 0;
+	const struct pci_device_id *id;	/* [한국어] 대조에 성공한 ID 를 받을 자리 */
+	int error = 0;	/* [한국어] probe 콜백이 없는 드라이버는 이 초기값 0 이 그대로 반환된다 — 성공으로 취급된다 */
 
-	if (drv->probe) {
-		error = -ENODEV;
+	if (drv->probe) {	/* [한국어] probe 콜백이 있는 드라이버만 아래를 진행한다 */
+		error = -ENODEV;	/* [한국어] 일단 실패로 놓는다. 아래에서 ID 를 못 찾으면 이 값이 그대로 나간다 */
 
-		id = pci_match_device(drv, pci_dev);
-		if (id)
-			error = pci_call_probe(drv, pci_dev, id);
+		id = pci_match_device(drv, pci_dev);	/* [한국어] match 단계에서 버려진 ID 를 다시 찾는다. probe 에 넘겨야 하기 때문이다 */
+		if (id)	/* [한국어] 찾았으면 */
+			error = pci_call_probe(drv, pci_dev, id);	/* [한국어] 적절한 CPU 를 골라 probe 를 실행한다 */
 	}
-	return error;
+	return error;	/* [한국어] 0, -ENODEV, 또는 probe 가 돌려준 값 */
 }
 
 #ifdef CONFIG_PCI_IOV
@@ -1100,8 +1100,8 @@ static int __pci_device_probe(struct pci_driver *drv, struct pci_dev *pci_dev)
  */
 static inline bool pci_device_can_probe(struct pci_dev *pdev)
 {
-	return (!pdev->is_virtfn || pdev->physfn->sriov->drivers_autoprobe ||
-		device_has_driver_override(&pdev->dev));
+	return (!pdev->is_virtfn || pdev->physfn->sriov->drivers_autoprobe ||	/* [한국어] PF 는 무조건 허용. VF 는 PF 의 sriov_drivers_autoprobe 가 켜져 있을 때만 */
+		device_has_driver_override(&pdev->dev));	/* [한국어] 또는 이 VF 에 driver_override 가 걸려 있으면 허용(대개 vfio-pci 로 넘기려는 경우) */
 }
 #else
 /* [한국어]
@@ -1162,27 +1162,27 @@ static inline bool pci_device_can_probe(struct pci_dev *pdev)
  */
 static int pci_device_probe(struct device *dev)
 {
-	int error;
-	struct pci_dev *pci_dev = to_pci_dev(dev);
-	struct pci_driver *drv = to_pci_driver(dev->driver);
+	int error;	/* [한국어] probe 결과 */
+	struct pci_dev *pci_dev = to_pci_dev(dev);	/* [한국어] 일반 device 에서 감싸고 있는 pci_dev 를 얻는다 */
+	struct pci_driver *drv = to_pci_driver(dev->driver);	/* [한국어] 마찬가지로 device_driver 에서 pci_driver 를 얻는다 */
 
-	if (!pci_device_can_probe(pci_dev))
-		return -ENODEV;
+	if (!pci_device_can_probe(pci_dev))	/* [한국어] VF 자동 바인딩이 꺼져 있는 경우를 먼저 걸러낸다 */
+		return -ENODEV;	/* [한국어] 붙이지 않는다. 드라이버 코어는 이 값을 보고 조용히 넘어간다 */
 
-	pci_assign_irq(pci_dev);
+	pci_assign_irq(pci_dev);	/* [한국어] 레거시 INTx 인터럽트가 어느 IRQ 선으로 오는지 확정한다(ACPI _PRT 나 디바이스 트리 참조). MSI 를 쓸 드라이버라도 pci_dev->irq 는 채워져 있어야 한다 */
 
-	error = pcibios_alloc_irq(pci_dev);	/* 플랫폼별 IRQ 할당; MSI-X를 위한 vIRQ 준비 */
-	if (error < 0)
-		return error;
+	error = pcibios_alloc_irq(pci_dev);	/* [한국어] 아키텍처별 추가 IRQ 처리. 대부분의 플랫폼에서는 아무것도 하지 않는 __weak 빈 함수다(drivers/pci/irq.c:545) */
+	if (error < 0)	/* [한국어] 음수만 실패로 본다 */
+		return error;	/* [한국어] 참조를 올리기 전이므로 되돌릴 것이 없다 */
 
 	pci_dev_get(pci_dev);		/* [한국어] 드라이버가 물고 있는 동안 struct pci_dev 가 free 되지 않도록 참조를 하나 올린다. 짝은 pci_device_remove() 의 pci_dev_put() */
-	error = __pci_device_probe(drv, pci_dev);
-	if (error) {
-		pcibios_free_irq(pci_dev);
-		pci_dev_put(pci_dev);
+	error = __pci_device_probe(drv, pci_dev);	/* [한국어] 실제 probe 로 내려간다 */
+	if (error) {	/* [한국어] 실패했다면 */
+		pcibios_free_irq(pci_dev);	/* [한국어] IRQ 를 반납하고 */
+		pci_dev_put(pci_dev);	/* [한국어] 참조를 내린다. 이 순서는 pci_device_remove() 의 역순과 같다 */
 	}
 
-	return error;
+	return error;	/* [한국어] 0 또는 실패 값 */
 }
 
 /* [한국어]
@@ -1223,34 +1223,34 @@ static int pci_device_probe(struct device *dev)
  */
 static void pci_device_remove(struct device *dev)
 {
-	struct pci_dev *pci_dev = to_pci_dev(dev);
-	struct pci_driver *drv = pci_dev->driver;
+	struct pci_dev *pci_dev = to_pci_dev(dev);	/* [한국어] 일반 device 에서 pci_dev 로 */
+	struct pci_driver *drv = pci_dev->driver;	/* [한국어] 바인딩 시 세워 둔 드라이버 포인터. 아래에서 NULL 로 지운다 */
 
-	if (drv->remove) {
-		pm_runtime_get_sync(dev);
+	if (drv->remove) {	/* [한국어] remove 콜백이 있는 드라이버만 */
+		pm_runtime_get_sync(dev);	/* [한국어] 장치를 깨우고 사용 카운트를 올린다 — remove 는 레지스터를 만질 수 있어야 한다 */
 		/*
 		 * If the driver provides a .runtime_idle() callback and it has
 		 * started to run already, it may continue to run in parallel
 		 * with the code below, so wait until all of the runtime PM
 		 * activity has completed.
 		 */
-		pm_runtime_barrier(dev);
+		pm_runtime_barrier(dev);	/* [한국어] 런타임 PM 활동(특히 이미 돌기 시작한 runtime_idle)이 끝나기를 기다린다 */
 		drv->remove(pci_dev);		/* [한국어] 드라이버의 정리 콜백. 여기서 자기 자원(IRQ, 매핑, 큐)을 반납한다 */
-		pm_runtime_put_noidle(dev);
+		pm_runtime_put_noidle(dev);	/* [한국어] 1230 에서 올린 카운트를 내린다. _noidle 이라 여기서 유휴 판정을 촉발하지 않는다 */
 	}
-	pcibios_free_irq(pci_dev);		/* MSI-X 벡터 해제 및 INTx 복원 */
-	pci_dev->driver = NULL;			/* 드라이버 소유권 해제 */
-	pci_iov_remove(pci_dev);
+	pcibios_free_irq(pci_dev);		/* [한국어] pci_device_probe() 의 pcibios_alloc_irq() 짝 */
+	pci_dev->driver = NULL;			/* [한국어] 소유 표시 해제. 이후 pci_dev_driver() 는 이 장치를 임자 없음으로 본다 */
+	pci_iov_remove(pci_dev);	/* [한국어] 이 장치가 만들어 둔 SR-IOV 가상 함수들을 정리한다 */
 
 	/* Undo the runtime PM settings in local_pci_probe() */
-	pm_runtime_put_sync(dev);
+	pm_runtime_put_sync(dev);	/* [한국어] local_pci_probe() 가 올려 둔 카운트를 내린다. 이 시점부터 장치는 다시 잠들 수 있다 */
 
 	/*
 	 * If the device is still on, set the power state as "unknown",
 	 * since it might change by the next time we load the driver.
 	 */
-	if (pci_dev->current_state == PCI_D0)
-		pci_dev->current_state = PCI_UNKNOWN;
+	if (pci_dev->current_state == PCI_D0)	/* [한국어] 아직 켜져 있다면 */
+		pci_dev->current_state = PCI_UNKNOWN;	/* [한국어] 다음에 드라이버를 올릴 때까지 무슨 일이 있을지 모르므로 안다고 가정하지 않는다 */
 
 	/*
 	 * We would love to complain here if pci_dev->is_enabled is set, that
@@ -1261,7 +1261,7 @@ static void pci_device_remove(struct device *dev)
 	 * horrible the crap we have to deal with is when we are awake...
 	 */
 
-	pci_dev_put(pci_dev);
+	pci_dev_put(pci_dev);	/* [한국어] pci_device_probe() 가 올린 참조를 내린다. 마지막 참조였다면 여기서 pci_dev 가 해제된다 */
 }
 
 /* [한국어]
@@ -1299,13 +1299,13 @@ static void pci_device_remove(struct device *dev)
  */
 static void pci_device_shutdown(struct device *dev)
 {
-	struct pci_dev *pci_dev = to_pci_dev(dev);
-	struct pci_driver *drv = pci_dev->driver;
+	struct pci_dev *pci_dev = to_pci_dev(dev);	/* [한국어] 일반 device 에서 pci_dev 로 */
+	struct pci_driver *drv = pci_dev->driver;	/* [한국어] 드라이버가 없을 수도 있다 — 아래에서 NULL 검사를 한다 */
 
-	pm_runtime_resume(dev);
+	pm_runtime_resume(dev);	/* [한국어] 잠들어 있으면 깨운다. 잠든 장치에는 shutdown 콜백도 config 접근도 할 수 없다 */
 
-	if (drv && drv->shutdown)
-		drv->shutdown(pci_dev);
+	if (drv && drv->shutdown)	/* [한국어] 드라이버가 붙어 있고 shutdown 콜백을 주었다면 */
+		drv->shutdown(pci_dev);	/* [한국어] 드라이버 방식으로 장치를 정지시킨다 */
 
 	/*
 	 * If this is a kexec reboot, turn off Bus Master bit on the
@@ -1314,11 +1314,11 @@ static void pci_device_shutdown(struct device *dev)
 	 * If it is not a kexec reboot, firmware will hit the PCI
 	 * devices with big hammer and stop their DMA any way.
 	 */
-	if (kexec_in_progress && (pci_dev->current_state <= PCI_D3hot))
-		pci_clear_master(pci_dev);
+	if (kexec_in_progress && (pci_dev->current_state <= PCI_D3hot))	/* [한국어] kexec 이고, 상태를 알며 D3cold 가 아닌 장치만 */
+		pci_clear_master(pci_dev);	/* [한국어] PCI COMMAND 레지스터의 Bus Master 비트를 끈다. 이 비트가 0 이면 장치가 버스의 주인이 되어 메모리에 쓰기를 낼 수 없다 */
 }
 
-#ifdef CONFIG_PM_SLEEP
+#ifdef CONFIG_PM_SLEEP	/* [한국어] 이하는 시스템 절전(S3/S4)을 빌드할 때만 컴파일되는 구간 */
 
 /* Auxiliary functions used for system resume */
 
@@ -1358,21 +1358,21 @@ static void pci_device_shutdown(struct device *dev)
  */
 static int pci_restore_standard_config(struct pci_dev *pci_dev)
 {
-	pci_update_current_state(pci_dev, PCI_UNKNOWN);
+	pci_update_current_state(pci_dev, PCI_UNKNOWN);	/* [한국어] 하드웨어에서 전원 상태를 다시 읽어 온다. PCI_UNKNOWN 을 넘긴다는 것은 "커널이 기억하던 값을 믿지 말고 다시 확인하라" 는 뜻이다 */
 
-	if (pci_dev->current_state != PCI_D0) {
-		int error = pci_set_power_state(pci_dev, PCI_D0);
-		if (error)
-			return error;
+	if (pci_dev->current_state != PCI_D0) {	/* [한국어] D0 가 아니면 config 쓰기가 온전히 동작하지 않는다 */
+		int error = pci_set_power_state(pci_dev, PCI_D0);	/* [한국어] D0 로 올린다 */
+		if (error)	/* [한국어] 전원 전환 실패면 */
+			return error;	/* [한국어] 복원을 시도하지 않고 그대로 실패를 올려보낸다 */
 	}
 
-	pci_restore_state(pci_dev);	/* BAR0, COMMAND, MSI-X config 등 복원 */
-	pci_pme_restore(pci_dev);
-	return 0;
+	pci_restore_state(pci_dev);	/* [한국어] 저장해 둔 표준 헤더(BAR, COMMAND 등)와 확장 상태(MSI/MSI-X, PCIe capability)를 되쓴다 */
+	pci_pme_restore(pci_dev);	/* [한국어] PME(웨이크업 신호) 설정을 원래대로 되돌린다 */
+	return 0;	/* [한국어] 성공 */
 }
 #endif /* CONFIG_PM_SLEEP */
 
-#ifdef CONFIG_PM
+#ifdef CONFIG_PM	/* [한국어] 이하는 시스템 절전과 런타임 절전 양쪽에서 쓰는 헬퍼 구간(CONFIG_PM) */
 
 /* Auxiliary functions used for system resume and run-time resume */
 
@@ -1406,8 +1406,8 @@ static int pci_restore_standard_config(struct pci_dev *pci_dev)
  */
 static void pci_pm_default_resume(struct pci_dev *pci_dev)
 {
-	pci_fixup_device(pci_fixup_resume, pci_dev);
-	pci_enable_wake(pci_dev, PCI_D0, false);
+	pci_fixup_device(pci_fixup_resume, pci_dev);	/* [한국어] DECLARE_PCI_FIXUP_RESUME 로 등록된 하드웨어별 복귀 보정을 실행한다 */
+	pci_enable_wake(pci_dev, PCI_D0, false);	/* [한국어] 이미 깨어났으므로 웨이크업 신호를 끈다. 켜 둔 채로 두면 엉뚱한 시점에 시스템을 깨울 수 있다 */
 }
 
 /* [한국어]
@@ -1439,9 +1439,9 @@ static void pci_pm_default_resume(struct pci_dev *pci_dev)
  */
 static void pci_pm_default_resume_early(struct pci_dev *pci_dev)
 {
-	pci_pm_power_up_and_verify_state(pci_dev);	/* D0 복귀 및 상태 검증 */
-	pci_restore_state(pci_dev);			/* BAR, MSI-X config 복원 */
-	pci_pme_restore(pci_dev);
+	pci_pm_power_up_and_verify_state(pci_dev);	/* [한국어] D0 로 올리고 정말 올라왔는지 확인한다. 링크가 죽었거나 전원 자원이 살아나지 않았을 수 있다 */
+	pci_restore_state(pci_dev);			/* [한국어] config 복원. MSI-X 테이블은 MMIO 공간에 있으므로 반드시 D0 가 된 뒤여야 한다 */
+	pci_pme_restore(pci_dev);	/* [한국어] PME 설정 복원 */
 }
 
 /* [한국어]
@@ -1474,18 +1474,18 @@ static void pci_pm_default_resume_early(struct pci_dev *pci_dev)
  */
 static void pci_pm_bridge_power_up_actions(struct pci_dev *pci_dev)
 {
-	int ret;
+	int ret;	/* [한국어] 하위 링크 대기 결과 */
 
-	ret = pci_bridge_wait_for_secondary_bus(pci_dev, "resume");
-	if (ret) {
+	ret = pci_bridge_wait_for_secondary_bus(pci_dev, "resume");	/* [한국어] PCIe 규격이 정한 시간만큼 기다리며 하위 링크가 서는지 본다. "resume" 은 로그에 찍힐 문맥 문자열이다 */
+	if (ret) {	/* [한국어] 끝내 서지 않았다면 */
 		/*
 		 * The downstream link failed to come up, so mark the
 		 * devices below as disconnected to make sure we don't
 		 * attempt to resume them.
 		 */
-		pci_walk_bus(pci_dev->subordinate, pci_dev_set_disconnected,
-			     NULL);
-		return;
+		pci_walk_bus(pci_dev->subordinate, pci_dev_set_disconnected,	/* [한국어] 그 아래 모든 장치를 순회하며 */
+			     NULL);	/* [한국어] 연결 끊김으로 표시한다. 그래야 PM 코어가 없는 장치를 깨우려다 오래 매달리지 않는다 */
+		return;	/* [한국어] 더 할 일이 없다 */
 	}
 
 	/*
@@ -1493,12 +1493,12 @@ static void pci_pm_bridge_power_up_actions(struct pci_dev *pci_dev)
 	 * powered on into D0uninitialized state, resume them to give them a
 	 * chance to suspend again
 	 */
-	pci_resume_bus(pci_dev->subordinate);
+	pci_resume_bus(pci_dev->subordinate);	/* [한국어] 링크가 섰으니 하위 계층을 깨운다. 원본 주석대로 D0uninitialized 로 함께 올라온 장치들에 다시 잠들 기회를 주기 위해서다 */
 }
 
 #endif /* CONFIG_PM */
 
-#ifdef CONFIG_PM_SLEEP
+#ifdef CONFIG_PM_SLEEP	/* [한국어] 이하는 다시 시스템 절전 전용 구간 */
 
 /*
  * Default "suspend" method for devices that have no driver provided suspend,
@@ -1531,8 +1531,8 @@ static void pci_pm_set_unknown_state(struct pci_dev *pci_dev)
 	 * mark its power state as "unknown", since we don't know if
 	 * e.g. the BIOS will change its device state when we suspend.
 	 */
-	if (pci_dev->current_state == PCI_D0)
-		pci_dev->current_state = PCI_UNKNOWN;
+	if (pci_dev->current_state == PCI_D0)	/* [한국어] 아직 D0 라고 기억하고 있다면 */
+		pci_dev->current_state = PCI_UNKNOWN;	/* [한국어] 모른다고 바꾼다. 커널이 스스로 내린 D3 등은 그대로 두는데, 그 값은 여전히 유효한 정보이기 때문이다 */
 }
 
 /*
@@ -1570,18 +1570,18 @@ static void pci_pm_set_unknown_state(struct pci_dev *pci_dev)
  */
 static int pci_pm_reenable_device(struct pci_dev *pci_dev)
 {
-	int retval;
+	int retval;	/* [한국어] pci_reenable_device 의 결과 */
 
 	/* if the device was enabled before suspend, re-enable */
-	retval = pci_reenable_device(pci_dev);
+	retval = pci_reenable_device(pci_dev);	/* [한국어] 절전 전에 enable 상태였다면 하드웨어를 다시 켠다. enable 카운트는 건드리지 않는다 */
 	/*
 	 * if the device was busmaster before the suspend, make it busmaster
 	 * again
 	 */
-	if (pci_dev->is_busmaster)
-		pci_set_master(pci_dev);
+	if (pci_dev->is_busmaster)	/* [한국어] 절전 전에 Bus Master 였는지는 커널이 따로 기억하고 있다 */
+		pci_set_master(pci_dev);	/* [한국어] 그랬다면 다시 켠다. 이게 없으면 장치가 DMA 를 못 내면서도 조용히 동작하는 것처럼 보인다 */
 
-	return retval;
+	return retval;	/* [한국어] reenable 결과를 그대로 올려보낸다. Bus Master 복원 실패는 반영되지 않는다 */
 }
 
 /* [한국어]
@@ -1617,31 +1617,31 @@ static int pci_pm_reenable_device(struct pci_dev *pci_dev)
  */
 static int pci_legacy_suspend(struct device *dev, pm_message_t state)
 {
-	struct pci_dev *pci_dev = to_pci_dev(dev);
-	struct pci_driver *drv = pci_dev->driver;
+	struct pci_dev *pci_dev = to_pci_dev(dev);	/* [한국어] 일반 device 에서 pci_dev 로 */
+	struct pci_driver *drv = pci_dev->driver;	/* [한국어] 레거시 콜백을 가진 드라이버 */
 
-	pci_dev->state_saved = false;
+	pci_dev->state_saved = false;	/* [한국어] "아직 config 를 저장하지 않았다" 로 초기화. 드라이버가 pci_save_state 를 부르면 그 안에서 참이 된다 */
 
-	if (drv && drv->suspend) {
-		pci_power_t prev = pci_dev->current_state;
-		int error;
+	if (drv && drv->suspend) {	/* [한국어] 드라이버가 붙어 있고 레거시 suspend 를 주었다면 */
+		pci_power_t prev = pci_dev->current_state;	/* [한국어] 드라이버 호출 전의 전원 상태를 기억해 둔다. 아래 경고 조건에 쓰인다 */
+		int error;	/* [한국어] 드라이버 반환값 */
 
-		error = drv->suspend(pci_dev, state);
-		suspend_report_result(dev, drv->suspend, error);
-		if (error)
-			return error;
+		error = drv->suspend(pci_dev, state);	/* [한국어] 레거시 콜백은 목표 전원 상태를 pm_message_t 로 함께 받는다 */
+		suspend_report_result(dev, drv->suspend, error);	/* [한국어] 실패했다면 어느 함수가 실패했는지 커널 로그에 기록한다 */
+		if (error)	/* [한국어] 실패 검사 */
+			return error;	/* [한국어] 그대로 올려보내면 PM 코어가 절전 전체를 되감는다 */
 
-		if (!pci_dev->state_saved && pci_dev->current_state != PCI_D0
-		    && pci_dev->current_state != PCI_UNKNOWN) {
-			pci_WARN_ONCE(pci_dev, pci_dev->current_state != prev,
-				      "PCI PM: Device state not saved by %pS\n",
-				      drv->suspend);
+		if (!pci_dev->state_saved && pci_dev->current_state != PCI_D0	/* [한국어] 저장은 안 했는데 D0 도 UNKNOWN 도 아니다 = 저전력으로 내려가면서 config 를 버렸다 */
+		    && pci_dev->current_state != PCI_UNKNOWN) {	/* [한국어] UNKNOWN 은 상태를 모르는 것이므로 따지지 않는다 */
+			pci_WARN_ONCE(pci_dev, pci_dev->current_state != prev,	/* [한국어] 다만 드라이버가 실제로 상태를 바꾼 경우에만 경고한다 */
+				      "PCI PM: Device state not saved by %pS\n",	/* [한국어] %pS 는 함수 포인터를 심볼 이름으로 찍는 커널 전용 형식이다 */
+				      drv->suspend);	/* [한국어] 문제를 일으킨 드라이버 콜백을 지목한다 */
 		}
 	}
 
-	pci_fixup_device(pci_fixup_suspend, pci_dev);
+	pci_fixup_device(pci_fixup_suspend, pci_dev);	/* [한국어] suspend quirk 실행 */
 
-	return 0;
+	return 0;	/* [한국어] 드라이버가 실패하지 않았다면 언제나 성공 */
 }
 
 /* [한국어]
@@ -1672,16 +1672,16 @@ static int pci_legacy_suspend(struct device *dev, pm_message_t state)
  */
 static int pci_legacy_suspend_late(struct device *dev)
 {
-	struct pci_dev *pci_dev = to_pci_dev(dev);
+	struct pci_dev *pci_dev = to_pci_dev(dev);	/* [한국어] 일반 device 에서 pci_dev 로 */
 
-	if (!pci_dev->state_saved)
-		pci_save_state(pci_dev);
+	if (!pci_dev->state_saved)	/* [한국어] 드라이버가 저장하지 않았다면 */
+		pci_save_state(pci_dev);	/* [한국어] PCI 계층이 대신 저장한다 */
 
-	pci_pm_set_unknown_state(pci_dev);
+	pci_pm_set_unknown_state(pci_dev);	/* [한국어] 전원 상태를 모른다고 표시 */
 
-	pci_fixup_device(pci_fixup_suspend_late, pci_dev);
+	pci_fixup_device(pci_fixup_suspend_late, pci_dev);	/* [한국어] suspend_late quirk 실행 */
 
-	return 0;
+	return 0;	/* [한국어] 실패할 여지가 없다 */
 }
 
 /* [한국어]
@@ -1708,13 +1708,13 @@ static int pci_legacy_suspend_late(struct device *dev)
  */
 static int pci_legacy_resume(struct device *dev)
 {
-	struct pci_dev *pci_dev = to_pci_dev(dev);
-	struct pci_driver *drv = pci_dev->driver;
+	struct pci_dev *pci_dev = to_pci_dev(dev);	/* [한국어] 일반 device 에서 pci_dev 로 */
+	struct pci_driver *drv = pci_dev->driver;	/* [한국어] 레거시 콜백을 가진 드라이버 */
 
-	pci_fixup_device(pci_fixup_resume, pci_dev);
+	pci_fixup_device(pci_fixup_resume, pci_dev);	/* [한국어] resume quirk 를 먼저 실행한다 */
 
-	return drv && drv->resume ?
-			drv->resume(pci_dev) : pci_pm_reenable_device(pci_dev);
+	return drv && drv->resume ?	/* [한국어] 드라이버가 붙어 있고 레거시 resume 을 주었으면 그것을, */
+			drv->resume(pci_dev) : pci_pm_reenable_device(pci_dev);	/* [한국어] 아니면 최소한의 되살리기(enable + Bus Master)를 한다 */
 }
 
 /* Auxiliary functions used by the new power management framework */
@@ -1746,8 +1746,8 @@ static int pci_legacy_resume(struct device *dev)
 static void pci_pm_default_suspend(struct pci_dev *pci_dev)
 {
 	/* Disable non-bridge devices without PM support */
-	if (!pci_has_subordinate(pci_dev))
-		pci_disable_enabled_device(pci_dev);
+	if (!pci_has_subordinate(pci_dev))	/* [한국어] 하위 버스가 없는 장치, 즉 브리지가 아닌 장치만 */
+		pci_disable_enabled_device(pci_dev);	/* [한국어] disable 한다. 브리지를 끄면 그 아래 접근 경로가 통째로 끊긴다 */
 }
 
 /* [한국어]
@@ -1774,18 +1774,18 @@ static void pci_pm_default_suspend(struct pci_dev *pci_dev)
  */
 static bool pci_has_legacy_pm_support(struct pci_dev *pci_dev)
 {
-	struct pci_driver *drv = pci_dev->driver;
-	bool ret = drv && (drv->suspend || drv->resume);
+	struct pci_driver *drv = pci_dev->driver;	/* [한국어] 현재 바인딩된 드라이버 */
+	bool ret = drv && (drv->suspend || drv->resume);	/* [한국어] 레거시 콜백을 하나라도 가지고 있으면 레거시로 본다 */
 
 	/*
 	 * Legacy PM support is used by default, so warn if the new framework is
 	 * supported as well.  Drivers are supposed to support either the
 	 * former, or the latter, but not both at the same time.
 	 */
-	pci_WARN(pci_dev, ret && drv->driver.pm, "device %04x:%04x\n",
-		 pci_dev->vendor, pci_dev->device);
+	pci_WARN(pci_dev, ret && drv->driver.pm, "device %04x:%04x\n",	/* [한국어] 레거시와 dev_pm_ops 를 둘 다 가진 잘못된 드라이버를 경고한다 */
+		 pci_dev->vendor, pci_dev->device);	/* [한국어] 어느 장치인지 Vendor/Device ID 로 지목한다 */
 
-	return ret;
+	return ret;	/* [한국어] 참이면 호출자가 레거시 경로로 갈라진다 */
 }
 
 /* New power management framework */
@@ -1824,28 +1824,28 @@ static bool pci_has_legacy_pm_support(struct pci_dev *pci_dev)
  */
 static int pci_pm_prepare(struct device *dev)
 {
-	struct pci_dev *pci_dev = to_pci_dev(dev);
-	const struct dev_pm_ops *pm = dev->driver ? dev->driver->pm : NULL;
+	struct pci_dev *pci_dev = to_pci_dev(dev);	/* [한국어] 일반 device 에서 pci_dev 로 */
+	const struct dev_pm_ops *pm = dev->driver ? dev->driver->pm : NULL;	/* [한국어] 드라이버가 붙어 있으면 그 dev_pm_ops, 아니면 NULL. 이 관용구가 아래 모든 pci_pm_* 에 반복된다 */
 
-	dev_pm_set_strict_midlayer(dev, true);
+	dev_pm_set_strict_midlayer(dev, true);	/* [한국어] 이번 절전 사이클 동안 PCI 라는 중간 계층의 규약을 엄격히 적용하라고 PM 코어에 알린다 */
 
-	if (pm && pm->prepare) {
-		int error = pm->prepare(dev);
-		if (error < 0)
-			return error;
+	if (pm && pm->prepare) {	/* [한국어] 드라이버가 prepare 콜백을 주었다면 */
+		int error = pm->prepare(dev);	/* [한국어] 부른다. 반환값 규약은 이 함수와 같다 */
+		if (error < 0)	/* [한국어] 음수는 오류 */
+			return error;	/* [한국어] 그대로 올려보내면 절전이 중단된다 */
 
-		if (!error && dev_pm_test_driver_flags(dev, DPM_FLAG_SMART_PREPARE))
-			return 0;
+		if (!error && dev_pm_test_driver_flags(dev, DPM_FLAG_SMART_PREPARE))	/* [한국어] 드라이버가 0(정상)을 돌려주었고 SMART_PREPARE 플래그를 걸었다면 그 판단을 존중한다 */
+			return 0;	/* [한국어] direct-complete 를 하지 않고 정상 경로로 간다 */
 	}
-	if (pci_dev_need_resume(pci_dev))
-		return 0;
+	if (pci_dev_need_resume(pci_dev))	/* [한국어] PCI 계층이 보기에 이 장치를 꼭 깨워야 하는가 */
+		return 0;	/* [한국어] 그렇다면 건너뛰지 않는다 */
 
 	/*
 	 * The PME setting needs to be adjusted here in case the direct-complete
 	 * optimization is used with respect to this device.
 	 */
-	pci_dev_adjust_pme(pci_dev);
-	return 1;
+	pci_dev_adjust_pme(pci_dev);	/* [한국어] 건너뛸 것이므로 나중에 맞출 기회가 없다. PME 설정만 지금 조정해 둔다 */
+	return 1;	/* [한국어] 1 = direct-complete 허용. suspend/resume 단계를 통째로 건너뛴다 */
 }
 
 /* [한국어]
@@ -1880,16 +1880,16 @@ static int pci_pm_prepare(struct device *dev)
  */
 static void pci_pm_complete(struct device *dev)
 {
-	struct pci_dev *pci_dev = to_pci_dev(dev);
+	struct pci_dev *pci_dev = to_pci_dev(dev);	/* [한국어] 일반 device 에서 pci_dev 로 */
 
-	pci_dev_complete_resume(pci_dev);
-	pm_generic_complete(dev);
+	pci_dev_complete_resume(pci_dev);	/* [한국어] PCI 계층의 사이클 종료 처리 */
+	pm_generic_complete(dev);	/* [한국어] 드라이버의 complete 콜백을 부른다 */
 
 	/* Resume device if platform firmware has put it in reset-power-on */
-	if (pm_runtime_suspended(dev) && pm_resume_via_firmware()) {
-		pci_power_t pre_sleep_state = pci_dev->current_state;
+	if (pm_runtime_suspended(dev) && pm_resume_via_firmware()) {	/* [한국어] 런타임 절전 상태로 남아 있고, 이번 복귀가 펌웨어를 거친 것이라면(S3 등) */
+		pci_power_t pre_sleep_state = pci_dev->current_state;	/* [한국어] 커널이 기억하던 절전 전 상태를 챙겨 둔다 */
 
-		pci_refresh_power_state(pci_dev);
+		pci_refresh_power_state(pci_dev);	/* [한국어] 하드웨어에서 실제 전원 상태를 다시 읽는다 */
 		/*
 		 * On platforms with ACPI this check may also trigger for
 		 * devices sharing power resources if one of those power
@@ -1897,11 +1897,11 @@ static void pci_pm_complete(struct device *dev)
 		 * power state of another device sharing it.  However, in that
 		 * case it is also better to resume the device, in general.
 		 */
-		if (pci_dev->current_state < pre_sleep_state)
-			pm_request_resume(dev);
+		if (pci_dev->current_state < pre_sleep_state)	/* [한국어] D-state 는 숫자가 작을수록 높은 전력이다. 기억보다 작아졌다 = 펌웨어가 깨워 놓았다 */
+			pm_request_resume(dev);	/* [한국어] 그렇다면 정식 복귀를 요청해 커널의 인식과 하드웨어를 일치시킨다 */
 	}
 
-	dev_pm_set_strict_midlayer(dev, false);
+	dev_pm_set_strict_midlayer(dev, false);	/* [한국어] prepare 에서 켠 엄격 모드를 끈다 */
 }
 
 #else /* !CONFIG_PM_SLEEP */
@@ -1914,7 +1914,7 @@ static void pci_pm_complete(struct device *dev)
 
 #endif /* !CONFIG_PM_SLEEP */
 
-#ifdef CONFIG_SUSPEND
+#ifdef CONFIG_SUSPEND	/* [한국어] 이하는 서스펜드(S3 등)를 빌드할 때만 컴파일되는 구간 */
 /* [한국어]
  * pcie_pme_root_status_cleanup - 루트 포트의 PME Status 찌꺼기를 지운다
  *
@@ -1950,10 +1950,10 @@ static void pcie_pme_root_status_cleanup(struct pci_dev *pci_dev)
 	 * wakeup, which breaks ACPI-based runtime wakeup on PCI Express.
 	 * Clear those bits now just in case (shouldn't hurt).
 	 */
-	if (pci_is_pcie(pci_dev) &&
-	    (pci_pcie_type(pci_dev) == PCI_EXP_TYPE_ROOT_PORT ||
-	     pci_pcie_type(pci_dev) == PCI_EXP_TYPE_RC_EC))
-		pcie_clear_root_pme_status(pci_dev);
+	if (pci_is_pcie(pci_dev) &&	/* [한국어] PCIe 장치이면서 */
+	    (pci_pcie_type(pci_dev) == PCI_EXP_TYPE_ROOT_PORT ||	/* [한국어] 루트 포트이거나 */
+	     pci_pcie_type(pci_dev) == PCI_EXP_TYPE_RC_EC))	/* [한국어] 루트 컴플렉스 이벤트 컬렉터라면(루트 컴플렉스 내장 장치들의 이벤트를 모으는 기능) */
+		pcie_clear_root_pme_status(pci_dev);	/* [한국어] Root Status 의 PME Status 비트를 지운다 */
 }
 
 /* [한국어]
@@ -1990,23 +1990,23 @@ static void pcie_pme_root_status_cleanup(struct pci_dev *pci_dev)
  */
 static int pci_pm_suspend(struct device *dev)
 {
-	struct pci_dev *pci_dev = to_pci_dev(dev);
-	const struct dev_pm_ops *pm = dev->driver ? dev->driver->pm : NULL;
+	struct pci_dev *pci_dev = to_pci_dev(dev);	/* [한국어] 일반 device 에서 pci_dev 로 */
+	const struct dev_pm_ops *pm = dev->driver ? dev->driver->pm : NULL;	/* [한국어] 드라이버의 dev_pm_ops. 없으면 NULL */
 
-	pci_dev->skip_bus_pm = false;
+	pci_dev->skip_bus_pm = false;	/* [한국어] 이번 사이클에서 새로 판정할 값이므로 지우고 시작한다 */
 
 	/*
 	 * Disabling PTM allows some systems, e.g., Intel mobile chips
 	 * since Coffee Lake, to enter a lower-power PM state.
 	 */
-	pci_suspend_ptm(pci_dev);
+	pci_suspend_ptm(pci_dev);	/* [한국어] PTM(Precision Time Measurement)을 끈다. 켜져 있으면 일부 칩셋이 더 깊은 절전으로 못 내려간다 */
 
-	if (pci_has_legacy_pm_support(pci_dev))
-		return pci_legacy_suspend(dev, PMSG_SUSPEND);
+	if (pci_has_legacy_pm_support(pci_dev))	/* [한국어] 레거시 콜백을 쓰는 드라이버라면 */
+		return pci_legacy_suspend(dev, PMSG_SUSPEND);	/* [한국어] 그쪽 경로로 넘긴다. PMSG_SUSPEND 가 "S3 진입" 을 뜻한다 */
 
-	if (!pm) {
-		pci_pm_default_suspend(pci_dev);
-		return 0;
+	if (!pm) {	/* [한국어] dev_pm_ops 자체가 없으면 */
+		pci_pm_default_suspend(pci_dev);	/* [한국어] 브리지가 아닌 장치를 disable 하는 것으로 갈음한다 */
+		return 0;	/* [한국어] 더 할 일이 없다 */
 	}
 
 	/*
@@ -2022,31 +2022,31 @@ static int pci_pm_suspend(struct device *dev)
 	 * suspend callbacks can cope with runtime-suspended devices, it is
 	 * better to resume the device from runtime suspend here.
 	 */
-	if (!dev_pm_smart_suspend(dev) || pci_dev_need_resume(pci_dev)) {
-		pm_runtime_resume(dev);
-		pci_dev->state_saved = false;
-	} else {
-		pci_dev_adjust_pme(pci_dev);	/* 웨이크업 설정 조정 */
+	if (!dev_pm_smart_suspend(dev) || pci_dev_need_resume(pci_dev)) {	/* [한국어] 드라이버가 런타임 절전 상태를 감당한다고 밝히지 않았거나, PCI 계층이 보기에 깨워야 한다면 */
+		pm_runtime_resume(dev);	/* [한국어] 깨운다 */
+		pci_dev->state_saved = false;	/* [한국어] 깨웠으니 저장분이 무의미하다. 다시 저장하도록 지운다 */
+	} else {	/* [한국어] 그 밖의 경우는 잠든 채로 둔다 */
+		pci_dev_adjust_pme(pci_dev);	/* [한국어] 깨우지 않기로 했으므로 PME(웨이크업) 설정만 이번 절전에 맞게 조정해 둔다 */
 	}
 
-	if (pm->suspend) {
-		pci_power_t prev = pci_dev->current_state;
-		int error;
+	if (pm->suspend) {	/* [한국어] 드라이버가 suspend 콜백을 주었다면 */
+		pci_power_t prev = pci_dev->current_state;	/* [한국어] 호출 전 전원 상태를 기억해 둔다 */
+		int error;	/* [한국어] 드라이버 반환값 */
 
 		error = pm->suspend(dev);	/* [한국어] 드라이버의 시스템 suspend 콜백. 인터럽트가 아직 살아 있으므로 장치와 주고받는 명령을 낼 수 있는 마지막 단계다 */
-		suspend_report_result(dev, pm->suspend, error);
-		if (error)
-			return error;
+		suspend_report_result(dev, pm->suspend, error);	/* [한국어] 실패하면 어느 콜백이었는지 로그에 남긴다 */
+		if (error)	/* [한국어] 실패 검사 */
+			return error;	/* [한국어] 그대로 올려보내 절전을 되감게 한다 */
 
-		if (!pci_dev->state_saved && pci_dev->current_state != PCI_D0
-		    && pci_dev->current_state != PCI_UNKNOWN) {
-			pci_WARN_ONCE(pci_dev, pci_dev->current_state != prev,
-				      "PCI PM: State of device not saved by %pS\n",
-				      pm->suspend);
+		if (!pci_dev->state_saved && pci_dev->current_state != PCI_D0	/* [한국어] 저장 없이 저전력으로 내려간 경우를 잡아낸다 */
+		    && pci_dev->current_state != PCI_UNKNOWN) {	/* [한국어] UNKNOWN 은 판정에서 제외 */
+			pci_WARN_ONCE(pci_dev, pci_dev->current_state != prev,	/* [한국어] 드라이버가 실제로 상태를 바꾼 경우에만 경고 */
+				      "PCI PM: State of device not saved by %pS\n",	/* [한국어] 경고 문구 */
+				      pm->suspend);	/* [한국어] 문제의 콜백을 심볼 이름으로 지목 */
 		}
 	}
 
-	return 0;
+	return 0;	/* [한국어] 성공 */
 }
 
 /* [한국어]
@@ -2074,12 +2074,12 @@ static int pci_pm_suspend(struct device *dev)
  */
 static int pci_pm_suspend_late(struct device *dev)
 {
-	if (dev_pm_skip_suspend(dev))
-		return 0;
+	if (dev_pm_skip_suspend(dev))	/* [한국어] direct-complete 등으로 건너뛰기로 한 장치라면 */
+		return 0;	/* [한국어] 아무것도 하지 않는다 */
 
-	pci_fixup_device(pci_fixup_suspend, to_pci_dev(dev));
+	pci_fixup_device(pci_fixup_suspend, to_pci_dev(dev));	/* [한국어] suspend quirk 실행. 레거시 경로에서는 pci_legacy_suspend 안에서 같은 것을 돌린다 */
 
-	return pm_generic_suspend_late(dev);
+	return pm_generic_suspend_late(dev);	/* [한국어] PCI 계층이 이 단계에서 따로 할 일이 없어 드라이버 콜백만 부른다 */
 }
 
 /* [한국어]
@@ -2125,70 +2125,70 @@ static int pci_pm_suspend_late(struct device *dev)
  */
 static int pci_pm_suspend_noirq(struct device *dev)
 {
-	struct pci_dev *pci_dev = to_pci_dev(dev);
-	const struct dev_pm_ops *pm = dev->driver ? dev->driver->pm : NULL;
+	struct pci_dev *pci_dev = to_pci_dev(dev);	/* [한국어] 일반 device 에서 pci_dev 로 */
+	const struct dev_pm_ops *pm = dev->driver ? dev->driver->pm : NULL;	/* [한국어] 드라이버의 dev_pm_ops */
 
-	if (dev_pm_skip_suspend(dev))
-		return 0;
+	if (dev_pm_skip_suspend(dev))	/* [한국어] 건너뛰기로 한 장치면 */
+		return 0;	/* [한국어] 아무것도 하지 않는다 */
 
-	if (pci_has_legacy_pm_support(pci_dev))
-		return pci_legacy_suspend_late(dev);
+	if (pci_has_legacy_pm_support(pci_dev))	/* [한국어] 레거시 드라이버면 */
+		return pci_legacy_suspend_late(dev);	/* [한국어] 레거시 마무리 경로로 넘긴다 */
 
-	if (!pm) {
-		pci_save_state(pci_dev);
-		goto Fixup;
+	if (!pm) {	/* [한국어] dev_pm_ops 가 없으면 */
+		pci_save_state(pci_dev);	/* [한국어] config 만 저장하고 */
+		goto Fixup;	/* [한국어] quirk 만 돌리고 끝낸다 */
 	}
 
-	if (pm->suspend_noirq) {
-		pci_power_t prev = pci_dev->current_state;
-		int error;
+	if (pm->suspend_noirq) {	/* [한국어] 드라이버가 suspend_noirq 를 주었다면 */
+		pci_power_t prev = pci_dev->current_state;	/* [한국어] 호출 전 전원 상태 */
+		int error;	/* [한국어] 드라이버 반환값 */
 
 		error = pm->suspend_noirq(dev);		/* [한국어] 인터럽트가 꺼진 뒤의 드라이버 콜백. 완료 인터럽트를 기다리는 일은 여기서 할 수 없다 */
-		suspend_report_result(dev, pm->suspend_noirq, error);
-		if (error)
-			return error;
+		suspend_report_result(dev, pm->suspend_noirq, error);	/* [한국어] 실패 시 로그 */
+		if (error)	/* [한국어] 실패 검사 */
+			return error;	/* [한국어] 그대로 올려보낸다 */
 
-		if (!pci_dev->state_saved && pci_dev->current_state != PCI_D0
-		    && pci_dev->current_state != PCI_UNKNOWN) {
-			pci_WARN_ONCE(pci_dev, pci_dev->current_state != prev,
-				      "PCI PM: State of device not saved by %pS\n",
-				      pm->suspend_noirq);
-			goto Fixup;
+		if (!pci_dev->state_saved && pci_dev->current_state != PCI_D0	/* [한국어] 저장 없이 저전력으로 내려갔다면 */
+		    && pci_dev->current_state != PCI_UNKNOWN) {	/* [한국어] UNKNOWN 제외 */
+			pci_WARN_ONCE(pci_dev, pci_dev->current_state != prev,	/* [한국어] 경고하고 */
+				      "PCI PM: State of device not saved by %pS\n",	/* [한국어] 경고 문구 */
+				      pm->suspend_noirq);	/* [한국어] 문제의 콜백 지목 */
+			goto Fixup;	/* [한국어] 아래의 저장·전환은 해 봐야 소용없으므로 건너뛴다 */
 		}
 	}
 
-	if (!pci_dev->state_saved) {
-		pci_save_state(pci_dev);
+	if (!pci_dev->state_saved) {	/* [한국어] 아직 저장이 안 되어 있다면 */
+		pci_save_state(pci_dev);	/* [한국어] PCI 계층이 대신 저장한다 */
 
 		/*
 		 * If the device is a bridge with a child in D0 below it,
 		 * it needs to stay in D0, so check skip_bus_pm to avoid
 		 * putting it into a low-power state in that case.
 		 */
-		if (!pci_dev->skip_bus_pm && pci_power_manageable(pci_dev))
-			pci_prepare_to_sleep(pci_dev);
+		if (!pci_dev->skip_bus_pm && pci_power_manageable(pci_dev))	/* [한국어] 하위에 D0 장치가 있어 D0 로 남아야 하는 경우가 아니고, 전원 관리가 가능한 장치면 */
+			pci_prepare_to_sleep(pci_dev);	/* [한국어] 적절한 저전력 D-state 로 내리고 필요한 웨이크업 설정을 건다 */
 	}
 
-	pci_dbg(pci_dev, "PCI PM: Suspend power state: %s\n",
-		pci_power_name(pci_dev->current_state));
+	pci_dbg(pci_dev, "PCI PM: Suspend power state: %s\n",	/* [한국어] 실제로 어떤 전원 상태로 들어갔는지 디버그 로그로 남긴다 */
+		pci_power_name(pci_dev->current_state));	/* [한국어] D0/D1/D2/D3hot/D3cold 같은 문자열로 변환 */
 
-	if (pci_dev->current_state == PCI_D0) {
-		pci_dev->skip_bus_pm = true;
+	if (pci_dev->current_state == PCI_D0) {	/* [한국어] 끝내 D0 에 남았다면 */
+		pci_dev->skip_bus_pm = true;	/* [한국어] 이 장치는 버스 차원의 전원 관리에서 제외한다고 표시 */
 		/*
 		 * Per PCI PM r1.2, table 6-1, a bridge must be in D0 if any
 		 * downstream device is in D0, so avoid changing the power state
 		 * of the parent bridge by setting the skip_bus_pm flag for it.
 		 */
-		if (pci_dev->bus->self)
-			pci_dev->bus->self->skip_bus_pm = true;
+		if (pci_dev->bus->self)	/* [한국어] 루트 버스가 아니라 부모 브리지가 있다면 */
+			pci_dev->bus->self->skip_bus_pm = true;	/* [한국어] 그 브리지도 D0 에 남아야 한다. PCI PM 규격 1.2 표 6-1 의 요구다 */
 	}
 
-	if (pci_dev->skip_bus_pm && pm_suspend_no_platform()) {
-		pci_dbg(pci_dev, "PCI PM: Skipped\n");
-		goto Fixup;
+	if (pci_dev->skip_bus_pm && pm_suspend_no_platform()) {	/* [한국어] D0 로 남았고 플랫폼이 개입하지 않는 절전(suspend-to-idle)이라면 */
+		pci_dbg(pci_dev, "PCI PM: Skipped\n");	/* [한국어] 건너뛰었음을 기록하고 */
+		goto Fixup;	/* [한국어] 전원 상태 표시와 EHCI 특례를 건너뛴다 */
 	}
 
-	pci_pm_set_unknown_state(pci_dev);
+	pci_pm_set_unknown_state(pci_dev);	/* [한국어] 전원 상태를 모른다고 표시 */
 
 	/*
 	 * Some BIOSes from ASUS have a bug: If a USB EHCI host controller's
@@ -2199,11 +2199,11 @@ static int pci_pm_suspend_noirq(struct device *dev)
 	 * Since the value of the COMMAND register doesn't matter once the
 	 * device has been suspended, we can safely set it to 0 here.
 	 */
-	if (pci_dev->class == PCI_CLASS_SERIAL_USB_EHCI)
-		pci_write_config_word(pci_dev, PCI_COMMAND, 0);
+	if (pci_dev->class == PCI_CLASS_SERIAL_USB_EHCI)	/* [한국어] 클래스 코드가 EHCI USB 호스트 컨트롤러라면 */
+		pci_write_config_word(pci_dev, PCI_COMMAND, 0);	/* [한국어] COMMAND 레지스터(오프셋 0x04)를 0 으로 쓴다. 절전 후에는 이 값이 의미 없으므로 안전하다 */
 
-Fixup:
-	pci_fixup_device(pci_fixup_suspend_late, pci_dev);
+Fixup:	/* [한국어] 여러 경로가 모이는 마무리 지점 */
+	pci_fixup_device(pci_fixup_suspend_late, pci_dev);	/* [한국어] suspend_late quirk 실행 */
 
 	/*
 	 * If the target system sleep state is suspend-to-idle, it is sufficient
@@ -2212,10 +2212,10 @@ Fixup:
 	 * pci_pm_complete() to take care of fixing up the device's state
 	 * anyway, if need be.
 	 */
-	if (device_can_wakeup(dev) && !device_may_wakeup(dev))
-		dev->power.may_skip_resume = false;
+	if (device_can_wakeup(dev) && !device_may_wakeup(dev))	/* [한국어] 웨이크업이 가능한 장치인데 이번엔 웨이크업원으로 쓰지 않는다면 */
+		dev->power.may_skip_resume = false;	/* [한국어] 복귀 단계를 건너뛰지 못하게 한다. 건너뛰면 잘못된 웨이크업 설정이 그대로 남는다 */
 
-	return 0;
+	return 0;	/* [한국어] 성공 */
 }
 
 /* [한국어]
@@ -2253,13 +2253,13 @@ Fixup:
  */
 static int pci_pm_resume_noirq(struct device *dev)
 {
-	struct pci_dev *pci_dev = to_pci_dev(dev);
-	const struct dev_pm_ops *pm = dev->driver ? dev->driver->pm : NULL;
-	pci_power_t prev_state = pci_dev->current_state;
-	bool skip_bus_pm = pci_dev->skip_bus_pm;
+	struct pci_dev *pci_dev = to_pci_dev(dev);	/* [한국어] 일반 device 에서 pci_dev 로 */
+	const struct dev_pm_ops *pm = dev->driver ? dev->driver->pm : NULL;	/* [한국어] 드라이버의 dev_pm_ops */
+	pci_power_t prev_state = pci_dev->current_state;	/* [한국어] 복원 전의 전원 상태를 챙겨 둔다. 아래 pci_pm_default_resume_early 가 이 값을 바꿔 버리기 때문이다 */
+	bool skip_bus_pm = pci_dev->skip_bus_pm;	/* [한국어] 같은 이유로 skip_bus_pm 도 미리 복사해 둔다 */
 
-	if (dev_pm_skip_resume(dev))
-		return 0;
+	if (dev_pm_skip_resume(dev))	/* [한국어] 복귀를 건너뛰기로 한 장치라면 */
+		return 0;	/* [한국어] 아무것도 하지 않는다 */
 
 	/*
 	 * In the suspend-to-idle case, devices left in D0 during suspend will
@@ -2267,22 +2267,22 @@ static int pci_pm_resume_noirq(struct device *dev)
 	 * configuration here and attempting to put them into D0 again is
 	 * pointless, so avoid doing that.
 	 */
-	if (!(skip_bus_pm && pm_suspend_no_platform()))
-		pci_pm_default_resume_early(pci_dev);		/* D0+config 복원 */
+	if (!(skip_bus_pm && pm_suspend_no_platform()))	/* [한국어] D0 로 남겨 둔 채 플랫폼 개입 없이 절전했던 경우가 아니라면 */
+		pci_pm_default_resume_early(pci_dev);		/* [한국어] D0 로 올리고 저장해 둔 config 를 되쓴다 */
 
-	pci_fixup_device(pci_fixup_resume_early, pci_dev);
-	pcie_pme_root_status_cleanup(pci_dev);
+	pci_fixup_device(pci_fixup_resume_early, pci_dev);	/* [한국어] resume_early quirk 실행 */
+	pcie_pme_root_status_cleanup(pci_dev);	/* [한국어] 루트 포트라면 PME Status 찌꺼기를 지운다 */
 
-	if (!skip_bus_pm && prev_state == PCI_D3cold)
-		pci_pm_bridge_power_up_actions(pci_dev);
+	if (!skip_bus_pm && prev_state == PCI_D3cold)	/* [한국어] 버스 전원 관리를 건너뛴 것도 아니고 D3cold 에서 올라온 것이라면 */
+		pci_pm_bridge_power_up_actions(pci_dev);	/* [한국어] 하위 링크가 서기를 기다리고 아래 계층을 깨운다 */
 
-	if (pci_has_legacy_pm_support(pci_dev))
-		return 0;
+	if (pci_has_legacy_pm_support(pci_dev))	/* [한국어] 레거시 드라이버면 */
+		return 0;	/* [한국어] noirq 짝이 없으므로 여기서 끝 */
 
-	if (pm && pm->resume_noirq)
+	if (pm && pm->resume_noirq)	/* [한국어] 드라이버가 resume_noirq 를 주었다면 */
 		return pm->resume_noirq(dev);		/* [한국어] 인터럽트 재개 전 드라이버 콜백. config 는 위에서 이미 복원해 두었다 */
 
-	return 0;
+	return 0;	/* [한국어] 그 외에는 성공 */
 }
 
 /* [한국어]
@@ -2304,10 +2304,10 @@ static int pci_pm_resume_noirq(struct device *dev)
  */
 static int pci_pm_resume_early(struct device *dev)
 {
-	if (dev_pm_skip_resume(dev))
-		return 0;
+	if (dev_pm_skip_resume(dev))	/* [한국어] 복귀를 건너뛸 장치면 */
+		return 0;	/* [한국어] 아무것도 하지 않는다 */
 
-	return pm_generic_resume_early(dev);
+	return pm_generic_resume_early(dev);	/* [한국어] PCI 계층이 이 단계에서 할 일이 없어 드라이버 콜백만 부른다 */
 }
 
 /* [한국어]
@@ -2339,31 +2339,31 @@ static int pci_pm_resume_early(struct device *dev)
  */
 static int pci_pm_resume(struct device *dev)
 {
-	struct pci_dev *pci_dev = to_pci_dev(dev);
-	const struct dev_pm_ops *pm = dev->driver ? dev->driver->pm : NULL;
+	struct pci_dev *pci_dev = to_pci_dev(dev);	/* [한국어] 일반 device 에서 pci_dev 로 */
+	const struct dev_pm_ops *pm = dev->driver ? dev->driver->pm : NULL;	/* [한국어] 드라이버의 dev_pm_ops */
 
 	/*
 	 * This is necessary for the suspend error path in which resume is
 	 * called without restoring the standard config registers of the device.
 	 */
-	if (pci_dev->state_saved)
-		pci_restore_standard_config(pci_dev);
+	if (pci_dev->state_saved)	/* [한국어] 저장된 채로 남아 있다 = noirq 복원을 거치지 않고 왔다(절전 실패 되감기) */
+		pci_restore_standard_config(pci_dev);	/* [한국어] 그러면 여기서라도 D0 로 올리고 config 를 복원한다 */
 
-	pci_resume_ptm(pci_dev);
+	pci_resume_ptm(pci_dev);	/* [한국어] 절전 때 껐던 PTM 을 다시 켠다 */
 
-	if (pci_has_legacy_pm_support(pci_dev))
-		return pci_legacy_resume(dev);
+	if (pci_has_legacy_pm_support(pci_dev))	/* [한국어] 레거시 드라이버면 */
+		return pci_legacy_resume(dev);	/* [한국어] 그쪽 경로로 */
 
-	pci_pm_default_resume(pci_dev);
+	pci_pm_default_resume(pci_dev);	/* [한국어] quirk 실행과 웨이크업 해제 */
 
-	if (pm) {
-		if (pm->resume)
+	if (pm) {	/* [한국어] dev_pm_ops 를 가진 드라이버면 */
+		if (pm->resume)	/* [한국어] resume 콜백이 있을 때만 부른다. 없으면 아무것도 하지 않는다 — dev_pm_ops 를 주었다는 것 자체가 "내가 알아서 한다" 는 선언이다 */
 			return pm->resume(dev);			/* [한국어] 드라이버의 시스템 resume 콜백. 여기서 장치를 다시 동작 상태로 만든다 */
-	} else {
-		pci_pm_reenable_device(pci_dev);
+	} else {	/* [한국어] dev_pm_ops 자체가 없으면 */
+		pci_pm_reenable_device(pci_dev);	/* [한국어] 최소한의 되살리기(enable + Bus Master)를 대신 해 준다 */
 	}
 
-	return 0;
+	return 0;	/* [한국어] 성공 */
 }
 
 #else /* !CONFIG_SUSPEND */
@@ -2379,7 +2379,7 @@ static int pci_pm_resume(struct device *dev)
 
 #endif /* !CONFIG_SUSPEND */
 
-#ifdef CONFIG_HIBERNATE_CALLBACKS
+#ifdef CONFIG_HIBERNATE_CALLBACKS	/* [한국어] 이하는 하이버네이션(최대 절전)을 빌드할 때만 컴파일되는 구간 */
 
 /* [한국어]
  * pci_pm_freeze - 최대 절전(하이버네이션)의 이미지 뜨기 직전 단계
@@ -2411,17 +2411,17 @@ static int pci_pm_resume(struct device *dev)
  */
 static int pci_pm_freeze(struct device *dev)
 {
-	struct pci_dev *pci_dev = to_pci_dev(dev);
-	const struct dev_pm_ops *pm = dev->driver ? dev->driver->pm : NULL;
+	struct pci_dev *pci_dev = to_pci_dev(dev);	/* [한국어] 일반 device 에서 pci_dev 로 */
+	const struct dev_pm_ops *pm = dev->driver ? dev->driver->pm : NULL;	/* [한국어] 드라이버의 dev_pm_ops */
 
-	if (pci_has_legacy_pm_support(pci_dev))
-		return pci_legacy_suspend(dev, PMSG_FREEZE);
+	if (pci_has_legacy_pm_support(pci_dev))	/* [한국어] 레거시 드라이버면 */
+		return pci_legacy_suspend(dev, PMSG_FREEZE);	/* [한국어] PMSG_FREEZE 로 "이미지 뜨기 직전 정지" 임을 알린다 */
 
-	if (!pm) {
-		pci_pm_default_suspend(pci_dev);
-		if (!pm_runtime_suspended(dev))
-			pci_dev->state_saved = false;
-		return 0;
+	if (!pm) {	/* [한국어] dev_pm_ops 가 없으면 */
+		pci_pm_default_suspend(pci_dev);	/* [한국어] 브리지가 아닌 장치를 disable */
+		if (!pm_runtime_suspended(dev))	/* [한국어] 런타임 절전 상태가 아니라면(즉 깨어 있었다면) */
+			pci_dev->state_saved = false;	/* [한국어] 저장분을 무효로 만들어 아래 단계에서 다시 저장하게 한다 */
+		return 0;	/* [한국어] 더 할 일 없음 */
 	}
 
 	/*
@@ -2432,19 +2432,19 @@ static int pci_pm_freeze(struct device *dev)
 	 * so it is better to ensure that the state saved in the image will be
 	 * always consistent with that.
 	 */
-	pm_runtime_resume(dev);
-	pci_dev->state_saved = false;
+	pm_runtime_resume(dev);	/* [한국어] 런타임 절전된 장치를 모두 깨운다. 이미지에 담길 상태를 일관되게 만들기 위해서다 */
+	pci_dev->state_saved = false;	/* [한국어] 깨웠으니 저장분도 다시 뜬다 */
 
-	if (pm->freeze) {
-		int error;
+	if (pm->freeze) {	/* [한국어] 드라이버가 freeze 콜백을 주었다면 */
+		int error;	/* [한국어] 드라이버 반환값 */
 
-		error = pm->freeze(dev);
-		suspend_report_result(dev, pm->freeze, error);
-		if (error)
-			return error;
+		error = pm->freeze(dev);	/* [한국어] 부른다 */
+		suspend_report_result(dev, pm->freeze, error);	/* [한국어] 실패 시 로그 */
+		if (error)	/* [한국어] 실패 검사 */
+			return error;	/* [한국어] 그대로 올려보낸다 */
 	}
 
-	return 0;
+	return 0;	/* [한국어] 성공 */
 }
 
 /* [한국어]
@@ -2472,27 +2472,27 @@ static int pci_pm_freeze(struct device *dev)
  */
 static int pci_pm_freeze_noirq(struct device *dev)
 {
-	struct pci_dev *pci_dev = to_pci_dev(dev);
-	const struct dev_pm_ops *pm = dev->driver ? dev->driver->pm : NULL;
+	struct pci_dev *pci_dev = to_pci_dev(dev);	/* [한국어] 일반 device 에서 pci_dev 로 */
+	const struct dev_pm_ops *pm = dev->driver ? dev->driver->pm : NULL;	/* [한국어] 드라이버의 dev_pm_ops */
 
-	if (pci_has_legacy_pm_support(pci_dev))
-		return pci_legacy_suspend_late(dev);
+	if (pci_has_legacy_pm_support(pci_dev))	/* [한국어] 레거시 드라이버면 */
+		return pci_legacy_suspend_late(dev);	/* [한국어] 레거시 마무리 경로로 */
 
-	if (pm && pm->freeze_noirq) {
-		int error;
+	if (pm && pm->freeze_noirq) {	/* [한국어] 드라이버가 freeze_noirq 를 주었다면 */
+		int error;	/* [한국어] 드라이버 반환값 */
 
-		error = pm->freeze_noirq(dev);
-		suspend_report_result(dev, pm->freeze_noirq, error);
-		if (error)
-			return error;
+		error = pm->freeze_noirq(dev);	/* [한국어] 부른다 */
+		suspend_report_result(dev, pm->freeze_noirq, error);	/* [한국어] 실패 시 로그 */
+		if (error)	/* [한국어] 실패 검사 */
+			return error;	/* [한국어] 그대로 올려보낸다 */
 	}
 
-	if (!pci_dev->state_saved)
-		pci_save_state(pci_dev);
+	if (!pci_dev->state_saved)	/* [한국어] 아직 저장이 안 되어 있다면 */
+		pci_save_state(pci_dev);	/* [한국어] 저장한다. 이 저장분이 하이버네이션 이미지에 담긴다 */
 
-	pci_pm_set_unknown_state(pci_dev);
+	pci_pm_set_unknown_state(pci_dev);	/* [한국어] 전원 상태를 모른다고 표시. 다만 pci_prepare_to_sleep 은 부르지 않는다 — 곧 다시 쓸 것이므로 전원을 내리지 않는다 */
 
-	return 0;
+	return 0;	/* [한국어] 성공 */
 }
 
 /* [한국어]
@@ -2522,8 +2522,8 @@ static int pci_pm_freeze_noirq(struct device *dev)
  */
 static int pci_pm_thaw_noirq(struct device *dev)
 {
-	struct pci_dev *pci_dev = to_pci_dev(dev);
-	const struct dev_pm_ops *pm = dev->driver ? dev->driver->pm : NULL;
+	struct pci_dev *pci_dev = to_pci_dev(dev);	/* [한국어] 일반 device 에서 pci_dev 로 */
+	const struct dev_pm_ops *pm = dev->driver ? dev->driver->pm : NULL;	/* [한국어] 드라이버의 dev_pm_ops */
 
 	/*
 	 * The pm->thaw_noirq() callback assumes the device has been
@@ -2534,16 +2534,16 @@ static int pci_pm_thaw_noirq(struct device *dev)
 	 * in case the driver's "freeze" callbacks put it into a low-power
 	 * state.
 	 */
-	pci_pm_power_up_and_verify_state(pci_dev);
-	pci_restore_state(pci_dev);
+	pci_pm_power_up_and_verify_state(pci_dev);	/* [한국어] 조건 없이 D0 로 올린다. 드라이버의 freeze 콜백이 저전력으로 내려놓았을 수 있기 때문이다 */
+	pci_restore_state(pci_dev);	/* [한국어] 조건 없이 config 를 복원한다. MSI-X 상태가 MMIO 에 있어 D0 가 전제다 */
 
-	if (pci_has_legacy_pm_support(pci_dev))
-		return 0;
+	if (pci_has_legacy_pm_support(pci_dev))	/* [한국어] 레거시 드라이버면 */
+		return 0;	/* [한국어] thaw 계열 콜백이 없으므로 여기서 끝 */
 
-	if (pm && pm->thaw_noirq)
-		return pm->thaw_noirq(dev);
+	if (pm && pm->thaw_noirq)	/* [한국어] 드라이버가 thaw_noirq 를 주었다면 */
+		return pm->thaw_noirq(dev);	/* [한국어] 부르고 그 값을 그대로 돌려준다 */
 
-	return 0;
+	return 0;	/* [한국어] 그 외에는 성공 */
 }
 
 /* [한국어]
@@ -2567,21 +2567,21 @@ static int pci_pm_thaw_noirq(struct device *dev)
  */
 static int pci_pm_thaw(struct device *dev)
 {
-	struct pci_dev *pci_dev = to_pci_dev(dev);
-	const struct dev_pm_ops *pm = dev->driver ? dev->driver->pm : NULL;
-	int error = 0;
+	struct pci_dev *pci_dev = to_pci_dev(dev);	/* [한국어] 일반 device 에서 pci_dev 로 */
+	const struct dev_pm_ops *pm = dev->driver ? dev->driver->pm : NULL;	/* [한국어] 드라이버의 dev_pm_ops */
+	int error = 0;	/* [한국어] 드라이버 반환값을 담을 자리. 콜백이 없으면 0 그대로 나간다 */
 
-	if (pci_has_legacy_pm_support(pci_dev))
-		return pci_legacy_resume(dev);
+	if (pci_has_legacy_pm_support(pci_dev))	/* [한국어] 레거시 드라이버면 */
+		return pci_legacy_resume(dev);	/* [한국어] 레거시 복귀 경로로 */
 
-	if (pm) {
-		if (pm->thaw)
-			error = pm->thaw(dev);
-	} else {
-		pci_pm_reenable_device(pci_dev);
+	if (pm) {	/* [한국어] dev_pm_ops 가 있으면 */
+		if (pm->thaw)	/* [한국어] thaw 콜백이 있을 때만 */
+			error = pm->thaw(dev);	/* [한국어] 부른다 */
+	} else {	/* [한국어] dev_pm_ops 자체가 없으면 */
+		pci_pm_reenable_device(pci_dev);	/* [한국어] 최소한의 되살리기 */
 	}
 
-	return error;
+	return error;	/* [한국어] 드라이버 결과 또는 0 */
 }
 
 /* [한국어]
@@ -2608,35 +2608,35 @@ static int pci_pm_thaw(struct device *dev)
  */
 static int pci_pm_poweroff(struct device *dev)
 {
-	struct pci_dev *pci_dev = to_pci_dev(dev);
-	const struct dev_pm_ops *pm = dev->driver ? dev->driver->pm : NULL;
+	struct pci_dev *pci_dev = to_pci_dev(dev);	/* [한국어] 일반 device 에서 pci_dev 로 */
+	const struct dev_pm_ops *pm = dev->driver ? dev->driver->pm : NULL;	/* [한국어] 드라이버의 dev_pm_ops */
 
-	if (pci_has_legacy_pm_support(pci_dev))
-		return pci_legacy_suspend(dev, PMSG_HIBERNATE);
+	if (pci_has_legacy_pm_support(pci_dev))	/* [한국어] 레거시 드라이버면 */
+		return pci_legacy_suspend(dev, PMSG_HIBERNATE);	/* [한국어] PMSG_HIBERNATE 로 "전원 차단 직전" 임을 알린다 */
 
-	if (!pm) {
-		pci_pm_default_suspend(pci_dev);
-		return 0;
+	if (!pm) {	/* [한국어] dev_pm_ops 가 없으면 */
+		pci_pm_default_suspend(pci_dev);	/* [한국어] 브리지가 아닌 장치를 disable */
+		return 0;	/* [한국어] 끝 */
 	}
 
 	/* The reason to do that is the same as in pci_pm_suspend(). */
-	if (!dev_pm_smart_suspend(dev) || pci_dev_need_resume(pci_dev)) {
-		pm_runtime_resume(dev);
-		pci_dev->state_saved = false;
-	} else {
-		pci_dev_adjust_pme(pci_dev);
+	if (!dev_pm_smart_suspend(dev) || pci_dev_need_resume(pci_dev)) {	/* [한국어] pci_pm_suspend 과 같은 판정 — 런타임 절전 장치를 깨울 것인가 */
+		pm_runtime_resume(dev);	/* [한국어] 깨운다 */
+		pci_dev->state_saved = false;	/* [한국어] 저장분 무효화 */
+	} else {	/* [한국어] 깨우지 않기로 했으면 */
+		pci_dev_adjust_pme(pci_dev);	/* [한국어] PME 설정만 조정 */
 	}
 
-	if (pm->poweroff) {
-		int error;
+	if (pm->poweroff) {	/* [한국어] 드라이버가 poweroff 콜백을 주었다면 */
+		int error;	/* [한국어] 드라이버 반환값 */
 
-		error = pm->poweroff(dev);
-		suspend_report_result(dev, pm->poweroff, error);
-		if (error)
-			return error;
+		error = pm->poweroff(dev);	/* [한국어] 부른다 */
+		suspend_report_result(dev, pm->poweroff, error);	/* [한국어] 실패 시 로그 */
+		if (error)	/* [한국어] 실패 검사 */
+			return error;	/* [한국어] 그대로 올려보낸다 */
 	}
 
-	return 0;
+	return 0;	/* [한국어] 성공 */
 }
 
 /* [한국어]
@@ -2657,12 +2657,12 @@ static int pci_pm_poweroff(struct device *dev)
  */
 static int pci_pm_poweroff_late(struct device *dev)
 {
-	if (dev_pm_skip_suspend(dev))
-		return 0;
+	if (dev_pm_skip_suspend(dev))	/* [한국어] 건너뛸 장치면 */
+		return 0;	/* [한국어] 아무것도 하지 않는다 */
 
-	pci_fixup_device(pci_fixup_suspend, to_pci_dev(dev));
+	pci_fixup_device(pci_fixup_suspend, to_pci_dev(dev));	/* [한국어] suspend quirk 실행 — poweroff 도 장치를 끄는 동작이라 같은 보정이 필요하다 */
 
-	return pm_generic_poweroff_late(dev);
+	return pm_generic_poweroff_late(dev);	/* [한국어] 드라이버 콜백만 부른다 */
 }
 
 /* [한국어]
@@ -2695,42 +2695,42 @@ static int pci_pm_poweroff_late(struct device *dev)
  */
 static int pci_pm_poweroff_noirq(struct device *dev)
 {
-	struct pci_dev *pci_dev = to_pci_dev(dev);
-	const struct dev_pm_ops *pm = dev->driver ? dev->driver->pm : NULL;
+	struct pci_dev *pci_dev = to_pci_dev(dev);	/* [한국어] 일반 device 에서 pci_dev 로 */
+	const struct dev_pm_ops *pm = dev->driver ? dev->driver->pm : NULL;	/* [한국어] 드라이버의 dev_pm_ops */
 
-	if (dev_pm_skip_suspend(dev))
-		return 0;
+	if (dev_pm_skip_suspend(dev))	/* [한국어] 건너뛸 장치면 */
+		return 0;	/* [한국어] 끝 */
 
-	if (pci_has_legacy_pm_support(pci_dev))
-		return pci_legacy_suspend_late(dev);
+	if (pci_has_legacy_pm_support(pci_dev))	/* [한국어] 레거시 드라이버면 */
+		return pci_legacy_suspend_late(dev);	/* [한국어] 레거시 마무리 경로로 */
 
-	if (!pm) {
-		pci_fixup_device(pci_fixup_suspend_late, pci_dev);
-		return 0;
+	if (!pm) {	/* [한국어] dev_pm_ops 가 없으면 */
+		pci_fixup_device(pci_fixup_suspend_late, pci_dev);	/* [한국어] quirk 만 돌리고 */
+		return 0;	/* [한국어] 끝낸다 */
 	}
 
-	if (pm->poweroff_noirq) {
-		int error;
+	if (pm->poweroff_noirq) {	/* [한국어] 드라이버가 poweroff_noirq 를 주었다면 */
+		int error;	/* [한국어] 드라이버 반환값 */
 
-		error = pm->poweroff_noirq(dev);
-		suspend_report_result(dev, pm->poweroff_noirq, error);
-		if (error)
-			return error;
+		error = pm->poweroff_noirq(dev);	/* [한국어] 부른다 */
+		suspend_report_result(dev, pm->poweroff_noirq, error);	/* [한국어] 실패 시 로그 */
+		if (error)	/* [한국어] 실패 검사 */
+			return error;	/* [한국어] 그대로 올려보낸다 */
 	}
 
-	if (!pci_dev->state_saved && !pci_has_subordinate(pci_dev))
-		pci_prepare_to_sleep(pci_dev);
+	if (!pci_dev->state_saved && !pci_has_subordinate(pci_dev))	/* [한국어] 저장이 안 되어 있고 브리지가 아니라면 */
+		pci_prepare_to_sleep(pci_dev);	/* [한국어] 저전력 D-state 로 내린다. 브리지를 제외하는 조건이 pci_pm_suspend_noirq 의 skip_bus_pm 판정보다 단순하다 */
 
 	/*
 	 * The reason for doing this here is the same as for the analogous code
 	 * in pci_pm_suspend_noirq().
 	 */
-	if (pci_dev->class == PCI_CLASS_SERIAL_USB_EHCI)
-		pci_write_config_word(pci_dev, PCI_COMMAND, 0);
+	if (pci_dev->class == PCI_CLASS_SERIAL_USB_EHCI)	/* [한국어] EHCI USB 호스트 컨트롤러라면 */
+		pci_write_config_word(pci_dev, PCI_COMMAND, 0);	/* [한국어] COMMAND 를 0 으로. pci_pm_suspend_noirq 와 같은 ASUS BIOS 회피다 */
 
-	pci_fixup_device(pci_fixup_suspend_late, pci_dev);
+	pci_fixup_device(pci_fixup_suspend_late, pci_dev);	/* [한국어] suspend_late quirk 실행 */
 
-	return 0;
+	return 0;	/* [한국어] 성공 */
 }
 
 /* [한국어]
@@ -2760,19 +2760,19 @@ static int pci_pm_poweroff_noirq(struct device *dev)
  */
 static int pci_pm_restore_noirq(struct device *dev)
 {
-	struct pci_dev *pci_dev = to_pci_dev(dev);
-	const struct dev_pm_ops *pm = dev->driver ? dev->driver->pm : NULL;
+	struct pci_dev *pci_dev = to_pci_dev(dev);	/* [한국어] 일반 device 에서 pci_dev 로 */
+	const struct dev_pm_ops *pm = dev->driver ? dev->driver->pm : NULL;	/* [한국어] 드라이버의 dev_pm_ops */
 
-	pci_pm_default_resume_early(pci_dev);
-	pci_fixup_device(pci_fixup_resume_early, pci_dev);
+	pci_pm_default_resume_early(pci_dev);	/* [한국어] 조건 없이 D0 복귀 + config 복원. 방금 전원이 들어온 상태라 하드웨어와 커널의 인식이 완전히 어긋나 있다 */
+	pci_fixup_device(pci_fixup_resume_early, pci_dev);	/* [한국어] resume_early quirk 실행 */
 
-	if (pci_has_legacy_pm_support(pci_dev))
-		return 0;
+	if (pci_has_legacy_pm_support(pci_dev))	/* [한국어] 레거시 드라이버면 */
+		return 0;	/* [한국어] 여기서 끝 */
 
-	if (pm && pm->restore_noirq)
-		return pm->restore_noirq(dev);
+	if (pm && pm->restore_noirq)	/* [한국어] 드라이버가 restore_noirq 를 주었다면 */
+		return pm->restore_noirq(dev);	/* [한국어] 부르고 그 값을 돌려준다 */
 
-	return 0;
+	return 0;	/* [한국어] 그 외에는 성공 */
 }
 
 /* [한국어]
@@ -2797,29 +2797,29 @@ static int pci_pm_restore_noirq(struct device *dev)
  */
 static int pci_pm_restore(struct device *dev)
 {
-	struct pci_dev *pci_dev = to_pci_dev(dev);
-	const struct dev_pm_ops *pm = dev->driver ? dev->driver->pm : NULL;
+	struct pci_dev *pci_dev = to_pci_dev(dev);	/* [한국어] 일반 device 에서 pci_dev 로 */
+	const struct dev_pm_ops *pm = dev->driver ? dev->driver->pm : NULL;	/* [한국어] 드라이버의 dev_pm_ops */
 
 	/*
 	 * This is necessary for the hibernation error path in which restore is
 	 * called without restoring the standard config registers of the device.
 	 */
-	if (pci_dev->state_saved)
-		pci_restore_standard_config(pci_dev);
+	if (pci_dev->state_saved)	/* [한국어] 저장된 채로 남아 있다 = 복원 경로가 중간에 실패해 되감기는 중이다 */
+		pci_restore_standard_config(pci_dev);	/* [한국어] 그러면 여기서라도 복원한다 */
 
-	if (pci_has_legacy_pm_support(pci_dev))
-		return pci_legacy_resume(dev);
+	if (pci_has_legacy_pm_support(pci_dev))	/* [한국어] 레거시 드라이버면 */
+		return pci_legacy_resume(dev);	/* [한국어] 레거시 복귀 경로로 */
 
-	pci_pm_default_resume(pci_dev);
+	pci_pm_default_resume(pci_dev);	/* [한국어] quirk 실행과 웨이크업 해제 */
 
-	if (pm) {
-		if (pm->restore)
-			return pm->restore(dev);
-	} else {
-		pci_pm_reenable_device(pci_dev);
+	if (pm) {	/* [한국어] dev_pm_ops 가 있으면 */
+		if (pm->restore)	/* [한국어] restore 콜백이 있을 때만 */
+			return pm->restore(dev);	/* [한국어] 부르고 그 값을 돌려준다 */
+	} else {	/* [한국어] dev_pm_ops 자체가 없으면 */
+		pci_pm_reenable_device(pci_dev);	/* [한국어] 최소한의 되살리기 */
 	}
 
-	return 0;
+	return 0;	/* [한국어] 성공 */
 }
 
 #else /* !CONFIG_HIBERNATE_CALLBACKS */
@@ -2838,7 +2838,7 @@ static int pci_pm_restore(struct device *dev)
 
 #endif /* !CONFIG_HIBERNATE_CALLBACKS */
 
-#ifdef CONFIG_PM
+#ifdef CONFIG_PM	/* [한국어] 이하는 런타임 전원 관리 구간(시스템 절전과 별개의 CONFIG_PM) */
 
 /* [한국어]
  * pci_pm_runtime_suspend - 유휴 장치를 사용자 몰래 재우는 경로
@@ -2877,59 +2877,59 @@ static int pci_pm_restore(struct device *dev)
  */
 static int pci_pm_runtime_suspend(struct device *dev)
 {
-	struct pci_dev *pci_dev = to_pci_dev(dev);
-	const struct dev_pm_ops *pm = dev->driver ? dev->driver->pm : NULL;
-	pci_power_t prev = pci_dev->current_state;
-	int error;
+	struct pci_dev *pci_dev = to_pci_dev(dev);	/* [한국어] 일반 device 에서 pci_dev 로 */
+	const struct dev_pm_ops *pm = dev->driver ? dev->driver->pm : NULL;	/* [한국어] 드라이버의 dev_pm_ops */
+	pci_power_t prev = pci_dev->current_state;	/* [한국어] 드라이버 호출 전 전원 상태. 아래 경고 조건에 쓴다 */
+	int error;	/* [한국어] 드라이버 반환값 */
 
-	pci_suspend_ptm(pci_dev);
+	pci_suspend_ptm(pci_dev);	/* [한국어] PTM 을 끈다 */
 
 	/*
 	 * If pci_dev->driver is not set (unbound), we leave the device in D0,
 	 * but it may go to D3cold when the bridge above it runtime suspends.
 	 * Save its config space in case that happens.
 	 */
-	if (!pci_dev->driver) {
+	if (!pci_dev->driver) {	/* [한국어] 드라이버가 붙어 있지 않은 장치라면 */
 		pci_save_state(pci_dev);	/* [한국어] 임자 없는 장치라도 위 브리지가 잠들면 덩달아 D3cold 로 떨어져 config 가 날아간다. 그때를 대비한 저장 */
-		return 0;
+		return 0;	/* [한국어] D0 에 그대로 둔다. 실제 판단은 여기서 끝난다 */
 	}
 
-	pci_dev->state_saved = false;
-	if (pm && pm->runtime_suspend) {
+	pci_dev->state_saved = false;	/* [한국어] "아직 저장 안 함" 으로 놓고 시작 */
+	if (pm && pm->runtime_suspend) {	/* [한국어] 드라이버가 runtime_suspend 를 주었다면 */
 		error = pm->runtime_suspend(dev);	/* [한국어] 드라이버의 런타임 절전 콜백. 시스템 절전과 달리 사용자 몰래 수시로 불린다 */
 		/*
 		 * -EBUSY and -EAGAIN is used to request the runtime PM core
 		 * to schedule a new suspend, so log the event only with debug
 		 * log level.
 		 */
-		if (error == -EBUSY || error == -EAGAIN) {
-			pci_dbg(pci_dev, "can't suspend now (%ps returned %d)\n",
-				pm->runtime_suspend, error);
-			return error;
-		} else if (error) {
-			pci_err(pci_dev, "can't suspend (%ps returned %d)\n",
-				pm->runtime_suspend, error);
-			return error;
+		if (error == -EBUSY || error == -EAGAIN) {	/* [한국어] 재시도 요청은 흔한 정상 상황이다 */
+			pci_dbg(pci_dev, "can't suspend now (%ps returned %d)\n",	/* [한국어] 그래서 디버그 수준으로만 남긴다. err 로 찍으면 초당 여러 번 로그가 넘친다 */
+				pm->runtime_suspend, error);	/* [한국어] %ps 로 어느 드라이버 콜백인지와 반환값을 함께 */
+			return error;	/* [한국어] 런타임 PM 코어가 나중에 다시 시도한다 */
+		} else if (error) {	/* [한국어] 그 밖의 실패는 진짜 오류다 */
+			pci_err(pci_dev, "can't suspend (%ps returned %d)\n",	/* [한국어] 오류 수준으로 남긴다 */
+				pm->runtime_suspend, error);	/* [한국어] 콜백 이름과 반환값 */
+			return error;	/* [한국어] 실패를 올려보내면 코어가 장치를 활성 상태로 되돌린다 */
 		}
 	}
 
-	pci_fixup_device(pci_fixup_suspend, pci_dev);
+	pci_fixup_device(pci_fixup_suspend, pci_dev);	/* [한국어] suspend quirk 실행 */
 
-	if (pm && pm->runtime_suspend
-	    && !pci_dev->state_saved && pci_dev->current_state != PCI_D0
-	    && pci_dev->current_state != PCI_UNKNOWN) {
-		pci_WARN_ONCE(pci_dev, pci_dev->current_state != prev,
-			      "PCI PM: State of device not saved by %pS\n",
-			      pm->runtime_suspend);
-		return 0;
+	if (pm && pm->runtime_suspend	/* [한국어] 드라이버가 runtime_suspend 를 주었는데 */
+	    && !pci_dev->state_saved && pci_dev->current_state != PCI_D0	/* [한국어] 저장은 안 했고 D0 도 아니며 */
+	    && pci_dev->current_state != PCI_UNKNOWN) {	/* [한국어] UNKNOWN 도 아니라면 = 저장 없이 저전력으로 내려갔다 */
+		pci_WARN_ONCE(pci_dev, pci_dev->current_state != prev,	/* [한국어] 드라이버가 실제로 상태를 바꾼 경우에만 경고 */
+			      "PCI PM: State of device not saved by %pS\n",	/* [한국어] 경고 문구 */
+			      pm->runtime_suspend);	/* [한국어] 문제의 콜백 지목 */
+		return 0;	/* [한국어] 아래의 저장·전환은 소용없으므로 여기서 끝낸다 */
 	}
 
-	if (!pci_dev->state_saved) {
-		pci_save_state(pci_dev);
-		pci_finish_runtime_suspend(pci_dev);	/* D3hot/D3cold로 최종 진입 */
+	if (!pci_dev->state_saved) {	/* [한국어] 아직 저장이 안 되어 있다면(드라이버가 직접 D-state 를 다루지 않는 보통의 경우) */
+		pci_save_state(pci_dev);	/* [한국어] PCI 계층이 저장하고 */
+		pci_finish_runtime_suspend(pci_dev);	/* [한국어] 웨이크업 설정을 걸고 적절한 저전력 D-state(D3hot 또는 D3cold)로 최종 전환한다 */
 	}
 
-	return 0;
+	return 0;	/* [한국어] 성공 */
 }
 
 /* [한국어]
@@ -2961,32 +2961,32 @@ static int pci_pm_runtime_suspend(struct device *dev)
  */
 static int pci_pm_runtime_resume(struct device *dev)
 {
-	struct pci_dev *pci_dev = to_pci_dev(dev);
-	const struct dev_pm_ops *pm = dev->driver ? dev->driver->pm : NULL;
-	pci_power_t prev_state = pci_dev->current_state;
-	int error = 0;
+	struct pci_dev *pci_dev = to_pci_dev(dev);	/* [한국어] 일반 device 에서 pci_dev 로 */
+	const struct dev_pm_ops *pm = dev->driver ? dev->driver->pm : NULL;	/* [한국어] 드라이버의 dev_pm_ops */
+	pci_power_t prev_state = pci_dev->current_state;	/* [한국어] 복원 전 전원 상태. 아래 D3cold 판정에 쓰이므로 미리 챙긴다 */
+	int error = 0;	/* [한국어] 드라이버 반환값 */
 
 	/*
 	 * Restoring config space is necessary even if the device is not bound
 	 * to a driver because although we left it in D0, it may have gone to
 	 * D3cold when the bridge above it runtime suspended.
 	 */
-	pci_pm_default_resume_early(pci_dev);	/* D0 복귀 + config 복원 */
-	pci_resume_ptm(pci_dev);
+	pci_pm_default_resume_early(pci_dev);	/* [한국어] 드라이버 유무와 무관하게 D0 로 올리고 config 를 복원한다 */
+	pci_resume_ptm(pci_dev);	/* [한국어] 절전 때 껐던 PTM 을 되살린다 */
 
-	if (!pci_dev->driver)
-		return 0;
+	if (!pci_dev->driver)	/* [한국어] 드라이버가 붙어 있지 않으면 */
+		return 0;	/* [한국어] config 복원만 해 주고 끝낸다 */
 
-	pci_fixup_device(pci_fixup_resume_early, pci_dev);
-	pci_pm_default_resume(pci_dev);
+	pci_fixup_device(pci_fixup_resume_early, pci_dev);	/* [한국어] resume_early quirk 실행 */
+	pci_pm_default_resume(pci_dev);	/* [한국어] quirk 실행과 웨이크업 해제 */
 
-	if (prev_state == PCI_D3cold)
-		pci_pm_bridge_power_up_actions(pci_dev);
+	if (prev_state == PCI_D3cold)	/* [한국어] D3cold 에서 올라왔다면 */
+		pci_pm_bridge_power_up_actions(pci_dev);	/* [한국어] 하위 링크 대기와 하위 계층 깨우기 */
 
-	if (pm && pm->runtime_resume)
+	if (pm && pm->runtime_resume)	/* [한국어] 드라이버가 runtime_resume 을 주었다면 */
 		error = pm->runtime_resume(dev);		/* [한국어] 드라이버의 런타임 복귀 콜백. config 복원은 위에서 이미 끝났다 */
 
-	return error;
+	return error;	/* [한국어] 드라이버 결과 또는 0 */
 }
 
 /* [한국어]
@@ -3014,20 +3014,20 @@ static int pci_pm_runtime_resume(struct device *dev)
  */
 static int pci_pm_runtime_idle(struct device *dev)
 {
-	struct pci_dev *pci_dev = to_pci_dev(dev);
-	const struct dev_pm_ops *pm = dev->driver ? dev->driver->pm : NULL;
+	struct pci_dev *pci_dev = to_pci_dev(dev);	/* [한국어] 일반 device 에서 pci_dev 로 */
+	const struct dev_pm_ops *pm = dev->driver ? dev->driver->pm : NULL;	/* [한국어] 드라이버의 dev_pm_ops */
 
 	/*
 	 * If pci_dev->driver is not set (unbound), the device should
 	 * always remain in D0 regardless of the runtime PM status
 	 */
-	if (!pci_dev->driver)
-		return 0;
+	if (!pci_dev->driver)	/* [한국어] 드라이버가 붙어 있지 않으면 */
+		return 0;	/* [한국어] 0 을 돌려주지만, 실제로 재울지는 pci_pm_runtime_suspend 의 앞부분이 판단한다 */
 
-	if (pm && pm->runtime_idle)
-		return pm->runtime_idle(dev);
+	if (pm && pm->runtime_idle)	/* [한국어] 드라이버가 runtime_idle 을 주었다면 */
+		return pm->runtime_idle(dev);	/* [한국어] 그 판단을 그대로 따른다 */
 
-	return 0;
+	return 0;	/* [한국어] 콜백이 없으면 절전을 진행해도 좋다는 뜻의 0 */
 }
 
 /* [한국어]
@@ -3131,18 +3131,18 @@ int __pci_register_driver(struct pci_driver *drv, struct module *owner,
 			  const char *mod_name)
 {
 	/* initialize common driver fields */
-	drv->driver.name = drv->name;
-	drv->driver.bus = &pci_bus_type;
-	drv->driver.owner = owner;
-	drv->driver.mod_name = mod_name;
-	drv->driver.groups = drv->groups;
-	drv->driver.dev_groups = drv->dev_groups;
+	drv->driver.name = drv->name;	/* [한국어] sysfs 에 보일 드라이버 이름 */
+	drv->driver.bus = &pci_bus_type;	/* [한국어] 소속 버스를 PCI 로 못 박는다. 이 한 줄이 "이 드라이버는 PCI 장치를 맡는다" 는 선언이다 */
+	drv->driver.owner = owner;	/* [한국어] 모듈 참조 계산용. 장치가 바인딩된 동안 모듈이 언로드되지 않게 한다 */
+	drv->driver.mod_name = mod_name;	/* [한국어] 모듈 이름 문자열 */
+	drv->driver.groups = drv->groups;	/* [한국어] 드라이버 자신에게 붙일 추가 sysfs 속성군(있으면) */
+	drv->driver.dev_groups = drv->dev_groups;	/* [한국어] 이 드라이버가 맡는 장치들에 붙일 추가 sysfs 속성군(있으면) */
 
-	spin_lock_init(&drv->dynids.lock);
-	INIT_LIST_HEAD(&drv->dynids.list);
+	spin_lock_init(&drv->dynids.lock);	/* [한국어] 동적 ID 목록을 보호할 스핀락 초기화 */
+	INIT_LIST_HEAD(&drv->dynids.list);	/* [한국어] 동적 ID 목록 헤드 초기화. 이 두 줄이 없으면 첫 new_id 쓰기에서 터진다 */
 
 	/* register with core */
-	return driver_register(&drv->driver);
+	return driver_register(&drv->driver);	/* [한국어] 드라이버 코어에 넘긴다. 이 안에서 기존 장치들과의 매칭과 probe 가 돌 수 있다 */
 }
 EXPORT_SYMBOL(__pci_register_driver);	/* [한국어] 모든 PCI 드라이버 모듈이 pci_register_driver 매크로를 통해 이 심볼을 쓴다 */
 
@@ -3238,16 +3238,16 @@ static struct pci_driver pci_compat_driver = {
  */
 struct pci_driver *pci_dev_driver(const struct pci_dev *dev)
 {
-	int i;
+	int i;	/* [한국어] 자원 배열 순회용 인덱스 */
 
-	if (dev->driver)
-		return dev->driver;
+	if (dev->driver)	/* [한국어] 정식 드라이버가 붙어 있으면 */
+		return dev->driver;	/* [한국어] 그것을 돌려준다 */
 
-	for (i = 0; i <= PCI_ROM_RESOURCE; i++)
-		if (dev->resource[i].flags & IORESOURCE_BUSY)
-			return &pci_compat_driver;
+	for (i = 0; i <= PCI_ROM_RESOURCE; i++)	/* [한국어] 표준 BAR 여섯 개(0~5)에 확장 ROM BAR 를 더한 범위. PCI 타입 0 헤더의 주소 자원 전부다 */
+		if (dev->resource[i].flags & IORESOURCE_BUSY)	/* [한국어] IORESOURCE_BUSY 는 누군가 이 영역을 선점했다는 표시다 */
+			return &pci_compat_driver;	/* [한국어] 정식 드라이버는 없지만 임자는 있다 — 이름만 있는 껍데기를 돌려준다 */
 
-	return NULL;
+	return NULL;	/* [한국어] 정말 아무도 안 쓴다 */
 }
 EXPORT_SYMBOL(pci_dev_driver);	/* [한국어] 공개되어 있으나 이 트리 안에서는 호출자를 찾지 못했다 */
 
@@ -3289,19 +3289,19 @@ EXPORT_SYMBOL(pci_dev_driver);	/* [한국어] 공개되어 있으나 이 트리 
  */
 static int pci_bus_match(struct device *dev, const struct device_driver *drv)
 {
-	struct pci_dev *pci_dev = to_pci_dev(dev);
-	struct pci_driver *pci_drv;
-	const struct pci_device_id *found_id;
+	struct pci_dev *pci_dev = to_pci_dev(dev);	/* [한국어] 일반 device 에서 pci_dev 로 */
+	struct pci_driver *pci_drv;	/* [한국어] 아래에서 캐스팅해 받을 자리 */
+	const struct pci_device_id *found_id;	/* [한국어] 매칭 결과를 받을 자리 */
 
-	if (pci_dev_binding_disallowed(pci_dev))
-		return 0;
+	if (pci_dev_binding_disallowed(pci_dev))	/* [한국어] 사용자나 시스템 정책이 이 장치의 바인딩을 막아 두었는가 */
+		return 0;	/* [한국어] 그렇다면 어떤 드라이버와도 짝짓지 않는다 */
 
-	pci_drv = (struct pci_driver *)to_pci_driver(drv);
-	found_id = pci_match_device(pci_drv, pci_dev);
-	if (found_id)
-		return 1;
+	pci_drv = (struct pci_driver *)to_pci_driver(drv);	/* [한국어] const device_driver 에서 pci_driver 로. 인자가 const 라 명시적 캐스팅이 붙었다(상류 코드 그대로) */
+	found_id = pci_match_device(pci_drv, pci_dev);	/* [한국어] 실제 판정은 전부 여기에 위임한다 */
+	if (found_id)	/* [한국어] 맞았으면 */
+		return 1;	/* [한국어] 참. 어느 ID 로 맞았는지는 여기서 버려지고 __pci_device_probe 가 다시 찾는다 */
 
-	return 0;
+	return 0;	/* [한국어] 못 맞췄다 */
 }
 
 /**
@@ -3417,32 +3417,32 @@ EXPORT_SYMBOL(pci_dev_put);	/* [한국어] 위의 짝 */
  */
 static int pci_uevent(const struct device *dev, struct kobj_uevent_env *env)
 {
-	const struct pci_dev *pdev;
+	const struct pci_dev *pdev;	/* [한국어] 아래에서 캐스팅해 받을 자리 */
 
-	if (!dev)
-		return -ENODEV;
+	if (!dev)	/* [한국어] 방어적 검사 */
+		return -ENODEV;	/* [한국어] 장치가 없다 */
 
-	pdev = to_pci_dev(dev);
+	pdev = to_pci_dev(dev);	/* [한국어] 일반 device 에서 pci_dev 로 */
 
-	if (add_uevent_var(env, "PCI_CLASS=%04X", pdev->class))
-		return -ENOMEM;
+	if (add_uevent_var(env, "PCI_CLASS=%04X", pdev->class))	/* [한국어] 클래스 코드. %04X 라 3 바이트 클래스의 상위 한 바이트가 잘려 나가는 상류 코드의 특이점이 있다 */
+		return -ENOMEM;	/* [한국어] 환경 버퍼가 모자라면 uevent 자체를 포기한다 */
 
-	if (add_uevent_var(env, "PCI_ID=%04X:%04X", pdev->vendor, pdev->device))
-		return -ENOMEM;
+	if (add_uevent_var(env, "PCI_ID=%04X:%04X", pdev->vendor, pdev->device))	/* [한국어] Vendor:Device ID */
+		return -ENOMEM;	/* [한국어] 버퍼 부족 */
 
-	if (add_uevent_var(env, "PCI_SUBSYS_ID=%04X:%04X", pdev->subsystem_vendor,
-			   pdev->subsystem_device))
-		return -ENOMEM;
+	if (add_uevent_var(env, "PCI_SUBSYS_ID=%04X:%04X", pdev->subsystem_vendor,	/* [한국어] Subsystem Vendor ID 와 */
+			   pdev->subsystem_device))	/* [한국어] Subsystem Device ID */
+		return -ENOMEM;	/* [한국어] 버퍼 부족 */
 
-	if (add_uevent_var(env, "PCI_SLOT_NAME=%s", pci_name(pdev)))
-		return -ENOMEM;
+	if (add_uevent_var(env, "PCI_SLOT_NAME=%s", pci_name(pdev)))	/* [한국어] 도메인:버스:장치.함수 형태의 주소 문자열 */
+		return -ENOMEM;	/* [한국어] 버퍼 부족 */
 
-	if (add_uevent_var(env, "MODALIAS=pci:v%08Xd%08Xsv%08Xsd%08Xbc%02Xsc%02Xi%02X",
-			   pdev->vendor, pdev->device,
-			   pdev->subsystem_vendor, pdev->subsystem_device,
-			   (u8)(pdev->class >> 16), (u8)(pdev->class >> 8),
-			   (u8)(pdev->class)))
-		return -ENOMEM;
+	if (add_uevent_var(env, "MODALIAS=pci:v%08Xd%08Xsv%08Xsd%08Xbc%02Xsc%02Xi%02X",	/* [한국어] udev 가 올릴 모듈을 찾는 데 쓰는 핵심 문자열. 모듈들은 빌드 시 자기 id_table 을 이 형식의 패턴으로 뽑아 둔다 */
+			   pdev->vendor, pdev->device,	/* [한국어] v/d 자리 */
+			   pdev->subsystem_vendor, pdev->subsystem_device,	/* [한국어] sv/sd 자리 */
+			   (u8)(pdev->class >> 16), (u8)(pdev->class >> 8),	/* [한국어] bc = Base Class(클래스 코드의 상위 바이트), sc = Sub-Class(가운데 바이트) */
+			   (u8)(pdev->class)))	/* [한국어] i = Programming Interface(하위 바이트) */
+		return -ENOMEM;	/* [한국어] 버퍼 부족 */
 
 	return 0;
 }
@@ -3491,31 +3491,31 @@ static int pci_uevent(const struct device *dev, struct kobj_uevent_env *env)
  */
 void pci_uevent_ers(struct pci_dev *pdev, enum pci_ers_result err_type)
 {
-	int idx = 0;
-	char *envp[3];
+	int idx = 0;	/* [한국어] 담은 변수 개수 */
+	char *envp[3];	/* [한국어] 변수 두 개 + 마지막 NULL 종료자 */
 
-	switch (err_type) {
-	case PCI_ERS_RESULT_NONE:
-	case PCI_ERS_RESULT_CAN_RECOVER:
+	switch (err_type) {	/* [한국어] 복구 결과에 따라 갈라진다 */
+	case PCI_ERS_RESULT_NONE:	/* [한국어] 아직 판정 전이거나 */
+	case PCI_ERS_RESULT_CAN_RECOVER:	/* [한국어] 복구 가능하거나 */
 	case PCI_ERS_RESULT_NEED_RESET:
-		envp[idx++] = "ERROR_EVENT=BEGIN_RECOVERY";
-		envp[idx++] = "DEVICE_ONLINE=0";
-		break;
-	case PCI_ERS_RESULT_RECOVERED:
-		envp[idx++] = "ERROR_EVENT=SUCCESSFUL_RECOVERY";
-		envp[idx++] = "DEVICE_ONLINE=1";
-		break;
-	case PCI_ERS_RESULT_DISCONNECT:
-		envp[idx++] = "ERROR_EVENT=FAILED_RECOVERY";
-		envp[idx++] = "DEVICE_ONLINE=0";
-		break;
+		envp[idx++] = "ERROR_EVENT=BEGIN_RECOVERY";	/* [한국어] 셋 다 "복구를 시작한다" 는 뜻이다 */
+		envp[idx++] = "DEVICE_ONLINE=0";	/* [한국어] 그동안 이 장치는 쓸 수 없다 */
+		break;	/* [한국어] 다음 분기로 넘어가지 않게 */
+	case PCI_ERS_RESULT_RECOVERED:	/* [한국어] 복구 성공 */
+		envp[idx++] = "ERROR_EVENT=SUCCESSFUL_RECOVERY";	/* [한국어] 성공을 알린다 */
+		envp[idx++] = "DEVICE_ONLINE=1";	/* [한국어] 다시 쓸 수 있다 */
+		break;	/* [한국어] 분기 종료 */
+	case PCI_ERS_RESULT_DISCONNECT:	/* [한국어] 복구 실패, 장치와의 연결이 끊겼다 */
+		envp[idx++] = "ERROR_EVENT=FAILED_RECOVERY";	/* [한국어] 실패를 알린다 */
+		envp[idx++] = "DEVICE_ONLINE=0";	/* [한국어] 쓸 수 없다 */
+		break;	/* [한국어] 분기 종료 */
 	default:
-		break;
+		break;	/* [한국어] 그 밖의 값은 알릴 것이 없다 */
 	}
 
-	if (idx > 0) {
-		envp[idx++] = NULL;
-		kobject_uevent_env(&pdev->dev.kobj, KOBJ_CHANGE, envp);
+	if (idx > 0) {	/* [한국어] 담은 것이 있을 때만 발송한다 */
+		envp[idx++] = NULL;	/* [한국어] 배열 끝 표시 */
+		kobject_uevent_env(&pdev->dev.kobj, KOBJ_CHANGE, envp);	/* [한국어] KOBJ_CHANGE 로 udev 에 변화 이벤트를 쏜다 */
 	}
 }
 #endif	/* [한국어] CONFIG_PCIEAER || CONFIG_EEH || CONFIG_S390 끝 */
@@ -3594,20 +3594,20 @@ static int pci_bus_num_vf(struct device *dev)
  */
 static int pci_dma_configure(struct device *dev)
 {
-	const struct device_driver *drv = READ_ONCE(dev->driver);
-	struct device *bridge;
-	int ret = 0;
+	const struct device_driver *drv = READ_ONCE(dev->driver);	/* [한국어] 드라이버 포인터를 한 번만 읽어 둔다. IOMMU 계층에서 부를 때는 유효하지 않을 수 있어 재차 읽으면 값이 달라질 수 있다 */
+	struct device *bridge;	/* [한국어] DMA 속성을 읽어 올 대상 */
+	int ret = 0;	/* [한국어] 반환값 겸 중간 판정 */
 
-	bridge = pci_get_host_bridge_device(to_pci_dev(dev));
+	bridge = pci_get_host_bridge_device(to_pci_dev(dev));	/* [한국어] 이 장치가 매달린 호스트 브리지를 얻는다. 참조가 하나 올라가므로 아래에서 반드시 내려야 한다 */
 
-	if (IS_ENABLED(CONFIG_OF) && bridge->parent &&
-	    bridge->parent->of_node) {
-		ret = of_dma_configure(dev, bridge->parent->of_node, true);
-	} else if (has_acpi_companion(bridge)) {
-		struct acpi_device *adev = to_acpi_device_node(bridge->fwnode);
+	if (IS_ENABLED(CONFIG_OF) && bridge->parent &&	/* [한국어] 디바이스 트리 시스템이고 브리지에 부모 노드가 있으면 */
+	    bridge->parent->of_node) {	/* [한국어] 그 부모의 of_node 를 본다. DMA 의 성질은 장치가 아니라 그것을 매단 버스와 SoC 의 것이기 때문이다 */
+		ret = of_dma_configure(dev, bridge->parent->of_node, true);	/* [한국어] 주소 폭·오프셋·캐시 일관성을 읽어 dma_ops 를 세운다. 세 번째 인자 true 는 "강제로 설정하라" 는 뜻이다 */
+	} else if (has_acpi_companion(bridge)) {	/* [한국어] ACPI 시스템이면 */
+		struct acpi_device *adev = to_acpi_device_node(bridge->fwnode);	/* [한국어] 브리지의 ACPI 노드를 얻고 */
 
-		ret = acpi_dma_configure(dev, acpi_get_dma_attr(adev));
-	}
+		ret = acpi_dma_configure(dev, acpi_get_dma_attr(adev));	/* [한국어] _CCA 등에서 DMA 속성을 읽어 설정한다 */
+	}	/* [한국어] 둘 다 아니면 아무것도 하지 않는다(아키텍처 기본 dma_ops 를 그대로 쓴다) */
 
 	/*
 	 * Attempt to enable ACS regardless of capability because some Root
@@ -3615,18 +3615,18 @@ static int pci_dma_configure(struct device *dev)
 	 * the standard ACS capability but still support ACS via those
 	 * quirks.
 	 */
-	pci_enable_acs(to_pci_dev(dev));
+	pci_enable_acs(to_pci_dev(dev));	/* [한국어] ACS 를 켠다. 같은 스위치 아래 장치끼리 IOMMU 를 우회해 직접 통신하는 것을 막아 격리를 보장한다 */
 
-	pci_put_host_bridge_device(bridge);
+	pci_put_host_bridge_device(bridge);	/* [한국어] 3601 에서 올린 브리지 참조를 내린다 */
 
 	/* @drv may not be valid when we're called from the IOMMU layer */
-	if (!ret && drv && !to_pci_driver(drv)->driver_managed_dma) {
-		ret = iommu_device_use_default_domain(dev);
-		if (ret)
-			arch_teardown_dma_ops(dev);
+	if (!ret && drv && !to_pci_driver(drv)->driver_managed_dma) {	/* [한국어] 앞이 실패하지 않았고, 드라이버가 유효하며, IOMMU 를 직접 다루지 않는 드라이버라면 */
+		ret = iommu_device_use_default_domain(dev);	/* [한국어] IOMMU 기본 도메인 사용을 표시한다. vfio-pci 처럼 직접 다루는 드라이버는 이 표시를 하지 않는다 */
+		if (ret)	/* [한국어] 실패했다면 */
+			arch_teardown_dma_ops(dev);	/* [한국어] 앞서 세운 DMA ops 를 되돌린다 */
 	}
 
-	return ret;
+	return ret;	/* [한국어] 0 이면 바인딩 진행, 음수면 중단 */
 }
 
 /* [한국어]
@@ -3650,10 +3650,10 @@ static int pci_dma_configure(struct device *dev)
  */
 static void pci_dma_cleanup(struct device *dev)
 {
-	struct pci_driver *driver = to_pci_driver(dev->driver);
+	struct pci_driver *driver = to_pci_driver(dev->driver);	/* [한국어] 현재 바인딩된 드라이버 */
 
-	if (!driver->driver_managed_dma)
-		iommu_device_unuse_default_domain(dev);
+	if (!driver->driver_managed_dma)	/* [한국어] IOMMU 를 직접 다루지 않는 드라이버였다면 */
+		iommu_device_unuse_default_domain(dev);	/* [한국어] 기본 도메인 사용 표시를 지운다. DMA ops 와 ACS 는 되돌리지 않는다 */
 }
 
 /*
@@ -3758,15 +3758,15 @@ EXPORT_SYMBOL(pci_bus_type);	/* [한국어] 이 심볼이 있어야 모듈이 "�
  */
 static int __init pci_driver_init(void)
 {
-	int ret;
+	int ret;	/* [한국어] bus_register 반환값 */
 
-	pci_probe_wq = alloc_workqueue("sync_wq", WQ_PERCPU, 0);
-	if (!pci_probe_wq)
-		return -ENOMEM;
+	pci_probe_wq = alloc_workqueue("sync_wq", WQ_PERCPU, 0);	/* [한국어] probe 전용 per-CPU 워크큐를 만든다. 이름이 "sync_wq" 로 변수명과 어긋나 있다(상류 코드 그대로) */
+	if (!pci_probe_wq)	/* [한국어] 할당 실패 검사 */
+		return -ENOMEM;	/* [한국어] 부팅 실패로 이어진다 */
 
-	ret = bus_register(&pci_bus_type);
-	if (ret)
-		return ret;
+	ret = bus_register(&pci_bus_type);	/* [한국어] PCI 버스 타입을 등록한다. 이 순간 /sys/bus/pci 가 생긴다 */
+	if (ret)	/* [한국어] 실패하면 */
+		return ret;	/* [한국어] 앞서 만든 워크큐를 해제하지 않고 그대로 반환한다(상류 코드 그대로) */
 
 #ifdef CONFIG_PCIEPORTBUS	/* [한국어] PCIe 포트 서비스(AER·핫플러그·PME·DPC)를 쓰는 빌드에서만 */
 	ret = bus_register(&pcie_port_bus_type);	/* [한국어] 포트 서비스 드라이버들이 붙을 가상 버스를 하나 더 등록한다 */

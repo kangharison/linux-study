@@ -821,12 +821,12 @@ static const char *policy_str[] = {
  */
 static struct pci_dev *pci_function_0(struct pci_bus *linkbus)
 {
-	struct pci_dev *child;
+	struct pci_dev *child;	/* [한국어] 순회 커서 */
 
-	list_for_each_entry(child, &linkbus->devices, bus_list)
-		if (PCI_FUNC(child->devfn) == 0)
-			return child;
-	return NULL;
+	list_for_each_entry(child, &linkbus->devices, bus_list)	/* [한국어] 이 버스에 매달린 장치들을 훑는다. 목록 순서는 열거 과정에 따라 달라지므로 첫 항목이 function 0 이라고 가정할 수 없다 */
+		if (PCI_FUNC(child->devfn) == 0)	/* [한국어] devfn 하위 3비트가 함수 번호다. 0 번이 L1SS capability 를 들고 있는 대표 함수 */
+			return child;	/* [한국어] 찾는 즉시 돌려준다 */
+	return NULL;	/* [한국어] function 0 이 없는 버스 — 호출자가 NULL 을 처리해야 한다 */
 }
 
 /* [한국어]
@@ -857,20 +857,20 @@ static struct pci_dev *pci_function_0(struct pci_bus *linkbus)
  */
 static int policy_to_aspm_state(struct pcie_link_state *link)
 {
-	switch (aspm_policy) {
-	case POLICY_PERFORMANCE:
+	switch (aspm_policy) {	/* [한국어] 전역 정책 하나로 모든 링크의 요구 상태가 정해진다 */
+	case POLICY_PERFORMANCE:	/* [한국어] 성능 우선 정책 */
 		/* Disable ASPM and Clock PM */
-		return 0;
-	case POLICY_POWERSAVE:
+		return 0;	/* [한국어] 0 = 아무 상태도 켜지 마라. ASPM 도 CLKPM 도 전부 */
+	case POLICY_POWERSAVE:	/* [한국어] 절전 정책 */
 		/* Enable ASPM L0s/L1 */
-		return PCIE_LINK_STATE_L0S | PCIE_LINK_STATE_L1;
-	case POLICY_POWER_SUPERSAVE:
+		return PCIE_LINK_STATE_L0S | PCIE_LINK_STATE_L1;	/* [한국어] L0s 와 L1 만. L1 하위 상태는 복귀가 수십~수백 마이크로초라 기본으로 켜지 않는다 */
+	case POLICY_POWER_SUPERSAVE:	/* [한국어] 더 깊은 절전 정책 */
 		/* Enable Everything */
-		return PCIE_LINK_STATE_ASPM_ALL;
-	case POLICY_DEFAULT:
-		return link->aspm_default;
+		return PCIE_LINK_STATE_ASPM_ALL;	/* [한국어] ASPM_ALL — L1 하위 상태까지 전부. 상수 값은 include/linux/pci.h 에 있는데 이 트리에 없어 확인하지 못했다 */
+	case POLICY_DEFAULT:	/* [한국어] 펌웨어 존중 정책 */
+		return link->aspm_default;	/* [한국어] 이 링크가 부팅 시 갖고 있던 값. 링크마다 답이 다르므로 pcie_config_aspm_path 가 링크마다 다시 부른다 */
 	}
-	return 0;
+	return 0;	/* [한국어] 도달할 수 없는 자리지만, 예상 밖 정책 값이면 가장 안전한 답(전부 끄기)을 준다 */
 }
 
 /* [한국어]
@@ -892,18 +892,18 @@ static int policy_to_aspm_state(struct pcie_link_state *link)
  */
 static int policy_to_clkpm_state(struct pcie_link_state *link)
 {
-	switch (aspm_policy) {
-	case POLICY_PERFORMANCE:
+	switch (aspm_policy) {	/* [한국어] CLKPM 도 같은 전역 정책을 따른다 */
+	case POLICY_PERFORMANCE:	/* [한국어] 성능 우선 */
 		/* Disable ASPM and Clock PM */
-		return 0;
-	case POLICY_POWERSAVE:
-	case POLICY_POWER_SUPERSAVE:
+		return 0;	/* [한국어] 0 = CLKREQ# 기반 클럭 관리를 끈다 */
+	case POLICY_POWERSAVE:	/* [한국어] 절전과 */
+	case POLICY_POWER_SUPERSAVE:	/* [한국어] 더 깊은 절전은 CLKPM 에 대해서는 같은 답이다 — CLKPM 에는 "더 깊은 단계" 가 없다 */
 		/* Enable Clock PM */
-		return 1;
+		return 1;	/* [한국어] 1 = 켠다 */
 	case POLICY_DEFAULT:
-		return link->clkpm_default;
+		return link->clkpm_default;	/* [한국어] 펌웨어가 남긴 값 */
 	}
-	return 0;
+	return 0;	/* [한국어] 예상 밖 값이면 끄는 쪽 */
 }
 
 /* [한국어]
@@ -935,26 +935,26 @@ static int policy_to_clkpm_state(struct pcie_link_state *link)
  */
 static void pci_update_aspm_saved_state(struct pci_dev *dev)
 {
-	struct pci_cap_saved_state *save_state;
-	u16 *cap, lnkctl, aspm_ctl;
+	struct pci_cap_saved_state *save_state;	/* [한국어] PCIe capability 통째의 저장 버퍼(LNKCTL 이 그 안에 들어 있다) */
+	u16 *cap, lnkctl, aspm_ctl;	/* [한국어] cap = 버퍼 커서, lnkctl = 지금 읽은 값, aspm_ctl = 그중 우리가 관리하는 두 비트 묶음 */
 
-	save_state = pci_find_saved_cap(dev, PCI_CAP_ID_EXP);
-	if (!save_state)
-		return;
+	save_state = pci_find_saved_cap(dev, PCI_CAP_ID_EXP);	/* [한국어] 확장 capability 가 아니라 표준 PCIe capability 의 저장 버퍼 */
+	if (!save_state)	/* [한국어] 버퍼가 없으면 갱신할 곳이 없다 */
+		return;	/* [한국어] 조용히 끝낸다 */
 
-	pcie_capability_read_word(dev, PCI_EXP_LNKCTL, &lnkctl);
+	pcie_capability_read_word(dev, PCI_EXP_LNKCTL, &lnkctl);	/* [한국어] 하드웨어의 현재 LNKCTL */
 
 	/*
 	 * Update ASPM and CLKREQ bits of LNKCTL in save_state. We only
 	 * write PCI_EXP_LNKCTL_CCC during enumeration, so it shouldn't
 	 * change after being captured in save_state.
 	 */
-	aspm_ctl = lnkctl & (PCI_EXP_LNKCTL_ASPMC | PCI_EXP_LNKCTL_CLKREQ_EN);
-	lnkctl &= ~(PCI_EXP_LNKCTL_ASPMC | PCI_EXP_LNKCTL_CLKREQ_EN);
+	aspm_ctl = lnkctl & (PCI_EXP_LNKCTL_ASPMC | PCI_EXP_LNKCTL_CLKREQ_EN);	/* [한국어] 우리가 방금 바꾼 두 비트 묶음만 떼어 둔다 */
+	lnkctl &= ~(PCI_EXP_LNKCTL_ASPMC | PCI_EXP_LNKCTL_CLKREQ_EN);	/* [한국어] 본체에서는 그 두 비트를 지운다 — 나머지 비트는 저장본 쪽 값을 쓰지 않고 하드웨어 값을 쓴다는 뜻이 아니라, 아래에서 다시 OR 로 합칠 자리를 비워 두는 것 */
 
 	/* Depends on pci_save_pcie_state(): cap[1] is LNKCTL */
-	cap = (u16 *)&save_state->cap.data[0];
-	cap[1] = lnkctl | aspm_ctl;
+	cap = (u16 *)&save_state->cap.data[0];	/* [한국어] cap.data 는 u32 배열이지만 LNKCTL 은 16비트라 u16 포인터로 다시 본다 */
+	cap[1] = lnkctl | aspm_ctl;	/* [한국어] [1] 이 LNKCTL 자리 — 위 영어 주석이 밝히듯 pci_save_pcie_state() 의 저장 순서에 달려 있다. 저쪽이 바뀌면 여기가 조용히 엉뚱한 레지스터를 고친다 */
 }
 
 /* [한국어]
@@ -984,17 +984,17 @@ static void pci_update_aspm_saved_state(struct pci_dev *dev)
  */
 static void pcie_set_clkpm_nocheck(struct pcie_link_state *link, int enable)
 {
-	struct pci_dev *child;
-	struct pci_bus *linkbus = link->pdev->subordinate;
-	u32 val = enable ? PCI_EXP_LNKCTL_CLKREQ_EN : 0;
+	struct pci_dev *child;	/* [한국어] 순회 커서 */
+	struct pci_bus *linkbus = link->pdev->subordinate;	/* [한국어] 하류 버스. 여기 매달린 모든 함수에 같은 값을 써야 한다 */
+	u32 val = enable ? PCI_EXP_LNKCTL_CLKREQ_EN : 0;	/* [한국어] 켤 값이면 CLKREQ Enable 비트, 끌 값이면 0. clear_and_set 의 세 번째 인자로 들어간다 */
 
-	list_for_each_entry(child, &linkbus->devices, bus_list) {
-		pcie_capability_clear_and_set_word(child, PCI_EXP_LNKCTL,
-						   PCI_EXP_LNKCTL_CLKREQ_EN,
-						   val);
-		pci_update_aspm_saved_state(child);
+	list_for_each_entry(child, &linkbus->devices, bus_list) {	/* [한국어] 다중 함수 장치라면 모든 함수에 같은 설정을 해야 한다 — CLKREQ# 는 장치당 신호선 하나뿐이라 함수마다 설정이 다르면 동작이 정의되지 않는다 */
+		pcie_capability_clear_and_set_word(child, PCI_EXP_LNKCTL,	/* [한국어] LNKCTL 의 CLKREQ Enable 비트만 갈아 끼운다 */
+						   PCI_EXP_LNKCTL_CLKREQ_EN,	/* [한국어] 지울 마스크 */
+						   val);	/* [한국어] 세울 값(위에서 계산한 val) */
+		pci_update_aspm_saved_state(child);	/* [한국어] 바꾼 즉시 저장본도 갱신한다. 빠뜨리면 다음 resume 이 옛 값을 되살려 이 설정을 되돌린다 */
 	}
-	link->clkpm_enabled = !!enable;
+	link->clkpm_enabled = !!enable;	/* [한국어] !! 로 0/1 로 접어 1비트 필드에 넣는다 */
 }
 
 /* [한국어]
@@ -1062,28 +1062,28 @@ static void pcie_set_clkpm(struct pcie_link_state *link, int enable)
  */
 static void pcie_clkpm_cap_init(struct pcie_link_state *link, int blacklist)
 {
-	int capable = 1, enabled = 1;
-	u32 reg32;
-	u16 reg16;
-	struct pci_dev *child;
-	struct pci_bus *linkbus = link->pdev->subordinate;
+	int capable = 1, enabled = 1;	/* [한국어] 둘 다 1 로 시작해 "가장 나쁜 쪽" 으로 깎아 내려간다 */
+	u32 reg32;	/* [한국어] LNKCAP(32비트)을 담을 임시 변수 */
+	u16 reg16;	/* [한국어] LNKCTL(16비트)을 담을 임시 변수 */
+	struct pci_dev *child;	/* [한국어] 순회 커서 */
+	struct pci_bus *linkbus = link->pdev->subordinate;	/* [한국어] 하류 버스. 여기 매달린 모든 함수를 봐야 한다 */
 
 	/* All functions should have the same cap and state, take the worst */
-	list_for_each_entry(child, &linkbus->devices, bus_list) {
-		pcie_capability_read_dword(child, PCI_EXP_LNKCAP, &reg32);
-		if (!(reg32 & PCI_EXP_LNKCAP_CLKPM)) {
-			capable = 0;
-			enabled = 0;
-			break;
+	list_for_each_entry(child, &linkbus->devices, bus_list) {	/* [한국어] 함수마다 능력과 현재 상태를 확인한다 */
+		pcie_capability_read_dword(child, PCI_EXP_LNKCAP, &reg32);	/* [한국어] Link Capabilities 에서 Clock Power Management 지원 여부를 본다 */
+		if (!(reg32 & PCI_EXP_LNKCAP_CLKPM)) {	/* [한국어] 이 함수가 CLKPM 을 지원하지 않는다 */
+			capable = 0;	/* [한국어] 하나라도 못 하면 링크 전체가 못 하는 것으로 친다 — CLKREQ# 는 공유 신호선이라 부분 지원이 성립하지 않는다 */
+			enabled = 0;	/* [한국어] 능력이 없으면 켜져 있을 수도 없으므로 함께 0 */
+			break;	/* [한국어] 더 볼 필요가 없다 */
 		}
-		pcie_capability_read_word(child, PCI_EXP_LNKCTL, &reg16);
-		if (!(reg16 & PCI_EXP_LNKCTL_CLKREQ_EN))
-			enabled = 0;
+		pcie_capability_read_word(child, PCI_EXP_LNKCTL, &reg16);	/* [한국어] 현재 CLKREQ Enable 이 켜져 있는지 */
+		if (!(reg16 & PCI_EXP_LNKCTL_CLKREQ_EN))	/* [한국어] 한 함수라도 꺼져 있으면 */
+			enabled = 0;	/* [한국어] 링크 전체를 꺼진 것으로 본다 */
 	}
-	link->clkpm_enabled = enabled;
-	link->clkpm_default = enabled;
-	link->clkpm_capable = capable;
-	link->clkpm_disable = blacklist ? 1 : 0;
+	link->clkpm_enabled = enabled;	/* [한국어] 지금 실제 상태 */
+	link->clkpm_default = enabled;	/* [한국어] 펌웨어가 남긴 값 = 기본값. POLICY_DEFAULT 에서 여기로 돌아온다 */
+	link->clkpm_capable = capable;	/* [한국어] 켤 수 있는가 */
+	link->clkpm_disable = blacklist ? 1 : 0;	/* [한국어] 링크를 믿을 수 없으면(blacklist) 클럭 관리도 하지 않는다 */
 }
 
 /*
@@ -1129,69 +1129,69 @@ static void pcie_clkpm_cap_init(struct pcie_link_state *link, int blacklist)
  */
 static void pcie_aspm_configure_common_clock(struct pcie_link_state *link)
 {
-	int same_clock = 1;
-	u16 reg16, ccc, parent_old_ccc, child_old_ccc[8];
-	struct pci_dev *child, *parent = link->pdev;
-	struct pci_bus *linkbus = parent->subordinate;
+	int same_clock = 1;	/* [한국어] 1 로 시작해 한 곳이라도 어긋나면 0 이 된다 */
+	u16 reg16, ccc, parent_old_ccc, child_old_ccc[8];	/* [한국어] reg16 = 임시 읽기 버퍼, ccc = 새로 쓸 값, *_old_ccc = 재훈련 실패 시 되돌릴 원본. child_old_ccc 가 8칸인 것은 한 장치의 함수가 최대 8개(devfn 하위 3비트)이기 때문 */
+	struct pci_dev *child, *parent = link->pdev;	/* [한국어] parent 는 상류 포트, child 는 순회 커서 */
+	struct pci_bus *linkbus = parent->subordinate;	/* [한국어] 하류 버스 */
 	/*
 	 * All functions of a slot should have the same Slot Clock
 	 * Configuration, so just check one function
 	 */
-	child = list_entry(linkbus->devices.next, struct pci_dev, bus_list);
-	BUG_ON(!pci_is_pcie(child));
+	child = list_entry(linkbus->devices.next, struct pci_dev, bus_list);	/* [한국어] 위 영어 주석대로 한 슬롯의 모든 함수는 같은 Slot Clock Configuration 을 가지므로 첫 항목 하나만 본다 */
+	BUG_ON(!pci_is_pcie(child));	/* [한국어] PCIe 가 아니면 이 아래 모든 pcie_capability_ 접근이 성립하지 않는다. 열거 단계에서 이미 걸러졌어야 할 상황이라 BUG_ON 으로 못 박는다 */
 
 	/* Check downstream component if bit Slot Clock Configuration is 1 */
-	pcie_capability_read_word(child, PCI_EXP_LNKSTA, &reg16);
-	if (!(reg16 & PCI_EXP_LNKSTA_SLC))
-		same_clock = 0;
+	pcie_capability_read_word(child, PCI_EXP_LNKSTA, &reg16);	/* [한국어] Link Status 의 Slot Clock Configuration(SLC) 비트 */
+	if (!(reg16 & PCI_EXP_LNKSTA_SLC))	/* [한국어] SLC 가 0 이면 이 장치는 슬롯 클럭이 아니라 자체 클럭을 쓴다 */
+		same_clock = 0;	/* [한국어] 공통 클럭이 아니다 */
 
 	/* Check upstream component if bit Slot Clock Configuration is 1 */
-	pcie_capability_read_word(parent, PCI_EXP_LNKSTA, &reg16);
-	if (!(reg16 & PCI_EXP_LNKSTA_SLC))
-		same_clock = 0;
+	pcie_capability_read_word(parent, PCI_EXP_LNKSTA, &reg16);	/* [한국어] 상류 포트 쪽도 같은 비트를 본다 */
+	if (!(reg16 & PCI_EXP_LNKSTA_SLC))	/* [한국어] 한쪽만 슬롯 클럭을 써도 공통이 아니다 */
+		same_clock = 0;	/* [한국어] 공통 클럭이 아니다 */
 
 	/* Port might be already in common clock mode */
-	pcie_capability_read_word(parent, PCI_EXP_LNKCTL, &reg16);
-	parent_old_ccc = reg16 & PCI_EXP_LNKCTL_CCC;
-	if (same_clock && (reg16 & PCI_EXP_LNKCTL_CCC)) {
-		bool consistent = true;
+	pcie_capability_read_word(parent, PCI_EXP_LNKCTL, &reg16);	/* [한국어] 상류 포트의 현재 Link Control */
+	parent_old_ccc = reg16 & PCI_EXP_LNKCTL_CCC;	/* [한국어] 재훈련이 실패했을 때 되돌릴 원본 CCC 값을 챙겨 둔다 */
+	if (same_clock && (reg16 & PCI_EXP_LNKCTL_CCC)) {	/* [한국어] 공통 클럭이 맞고 상류에 이미 CCC 가 켜져 있다면 — 이미 설정이 끝났을 가능성이 높다 */
+		bool consistent = true;	/* [한국어] 하류 함수들도 모두 켜져 있는지 확인할 표시 */
 
-		list_for_each_entry(child, &linkbus->devices, bus_list) {
-			pcie_capability_read_word(child, PCI_EXP_LNKCTL,
-						  &reg16);
-			if (!(reg16 & PCI_EXP_LNKCTL_CCC)) {
-				consistent = false;
-				break;
+		list_for_each_entry(child, &linkbus->devices, bus_list) {	/* [한국어] 하류의 모든 함수를 확인한다 */
+			pcie_capability_read_word(child, PCI_EXP_LNKCTL,	/* [한국어] 각 함수의 Link Control */
+						  &reg16);	/* [한국어] 읽기 버퍼는 계속 재사용한다 */
+			if (!(reg16 & PCI_EXP_LNKCTL_CCC)) {	/* [한국어] 이 함수만 CCC 가 꺼져 있다 — 펌웨어가 일부만 설정하고 넘어간 경우 */
+				consistent = false;	/* [한국어] 어긋났다고 기록 */
+				break;	/* [한국어] 더 볼 필요가 없다 */
 			}
 		}
-		if (consistent)
-			return;
-		pci_info(parent, "ASPM: current common clock configuration is inconsistent, reconfiguring\n");
+		if (consistent)	/* [한국어] 전부 일치하면 */
+			return;	/* [한국어] 할 일이 없다. 링크를 재훈련하지 않고 끝내는 것이 중요하다 — 재훈련은 링크를 잠시 끊는 비용이 있다 */
+		pci_info(parent, "ASPM: current common clock configuration is inconsistent, reconfiguring\n");	/* [한국어] 어긋난 경우에는 다시 설정한다는 사실을 알린다 */
 	}
 
-	ccc = same_clock ? PCI_EXP_LNKCTL_CCC : 0;
+	ccc = same_clock ? PCI_EXP_LNKCTL_CCC : 0;	/* [한국어] 공통 클럭이면 CCC 를 켜고, 아니면 끈다 */
 	/* Configure downstream component, all functions */
-	list_for_each_entry(child, &linkbus->devices, bus_list) {
-		pcie_capability_read_word(child, PCI_EXP_LNKCTL, &reg16);
-		child_old_ccc[PCI_FUNC(child->devfn)] = reg16 & PCI_EXP_LNKCTL_CCC;
-		pcie_capability_clear_and_set_word(child, PCI_EXP_LNKCTL,
-						   PCI_EXP_LNKCTL_CCC, ccc);
+	list_for_each_entry(child, &linkbus->devices, bus_list) {	/* [한국어] 하류의 모든 함수에 같은 값을 쓴다 */
+		pcie_capability_read_word(child, PCI_EXP_LNKCTL, &reg16);	/* [한국어] 현재 값을 읽어 */
+		child_old_ccc[PCI_FUNC(child->devfn)] = reg16 & PCI_EXP_LNKCTL_CCC;	/* [한국어] 함수 번호를 첨자로 원본 CCC 를 보관한다. 재훈련이 실패하면 함수별로 정확히 되돌리기 위해서다 */
+		pcie_capability_clear_and_set_word(child, PCI_EXP_LNKCTL,	/* [한국어] CCC 비트만 갈아 끼운다 */
+						   PCI_EXP_LNKCTL_CCC, ccc);	/* [한국어] 지울 마스크와 세울 값 */
 	}
 
 	/* Configure upstream component */
-	pcie_capability_clear_and_set_word(parent, PCI_EXP_LNKCTL,
-					   PCI_EXP_LNKCTL_CCC, ccc);
+	pcie_capability_clear_and_set_word(parent, PCI_EXP_LNKCTL,	/* [한국어] 상류 포트도 같은 값으로 */
+					   PCI_EXP_LNKCTL_CCC, ccc);	/* [한국어] 하류를 먼저, 상류를 나중에 설정한 순서다 */
 
-	if (pcie_retrain_link(link->pdev, true)) {
+	if (pcie_retrain_link(link->pdev, true)) {	/* [한국어] 클럭 구성은 링크를 다시 훈련해야 실제로 반영된다. 두 번째 인자 true 는 재훈련을 실제로 수행하라는 뜻 */
 
 		/* Training failed. Restore common clock configurations */
-		pci_err(parent, "ASPM: Could not configure common clock\n");
-		list_for_each_entry(child, &linkbus->devices, bus_list)
-			pcie_capability_clear_and_set_word(child, PCI_EXP_LNKCTL,
-							   PCI_EXP_LNKCTL_CCC,
-							   child_old_ccc[PCI_FUNC(child->devfn)]);
-		pcie_capability_clear_and_set_word(parent, PCI_EXP_LNKCTL,
-						   PCI_EXP_LNKCTL_CCC, parent_old_ccc);
+		pci_err(parent, "ASPM: Could not configure common clock\n");	/* [한국어] 실패했음을 알린다. 아래에서 원래 구성으로 되돌린다 */
+		list_for_each_entry(child, &linkbus->devices, bus_list)	/* [한국어] 하류의 모든 함수를 */
+			pcie_capability_clear_and_set_word(child, PCI_EXP_LNKCTL,	/* [한국어] 원래 CCC 로 */
+							   PCI_EXP_LNKCTL_CCC,	/* [한국어] CCC 비트만 */
+							   child_old_ccc[PCI_FUNC(child->devfn)]);	/* [한국어] 함수 번호로 찾은 그 함수의 원본 값 */
+		pcie_capability_clear_and_set_word(parent, PCI_EXP_LNKCTL,	/* [한국어] 상류도 되돌린다 */
+						   PCI_EXP_LNKCTL_CCC, parent_old_ccc);	/* [한국어] 미리 챙겨 둔 원본 값 */
 	}
 }
 
@@ -1218,11 +1218,11 @@ static void pcie_aspm_configure_common_clock(struct pcie_link_state *link)
  */
 static u32 calc_l0s_latency(u32 lnkcap)
 {
-	u32 encoding = FIELD_GET(PCI_EXP_LNKCAP_L0SEL, lnkcap);
+	u32 encoding = FIELD_GET(PCI_EXP_LNKCAP_L0SEL, lnkcap);	/* [한국어] LNKCAP 의 L0s Exit Latency 3비트 필드를 꺼낸다 */
 
-	if (encoding == 0x7)
-		return 5 * NSEC_PER_USEC;	/* > 4us */
-	return (64 << encoding);
+	if (encoding == 0x7)	/* [한국어] 7 = "4us 초과" — 상한이 없어 비교가 불가능한 값 */
+		return 5 * NSEC_PER_USEC;	/* > 4us */	/* [한국어] 대표값 5us. 실제보다 작을 수 있지만 그 정도면 대부분의 acceptable latency 를 넘어 L0s 가 걸러진다 */
+	return (64 << encoding);	/* [한국어] 0~6 은 64ns 를 밑으로 하는 2의 거듭제곱(64, 128, ... 4096ns) */
 }
 
 /* Convert L0s acceptable latency encoding to ns */
@@ -1246,9 +1246,9 @@ static u32 calc_l0s_latency(u32 lnkcap)
  */
 static u32 calc_l0s_acceptable(u32 encoding)
 {
-	if (encoding == 0x7)
-		return U32_MAX;
-	return (64 << encoding);
+	if (encoding == 0x7)	/* [한국어] acceptable 쪽의 7 은 뜻이 정반대다 */
+		return U32_MAX;	/* [한국어] "얼마든 견딘다" — 어떤 비교도 통과하도록 최대값을 준다 */
+	return (64 << encoding);	/* [한국어] exit latency 쪽과 같은 64ns 배수 체계 */
 }
 
 /* Convert L1 latency encoding to ns */
@@ -1274,11 +1274,11 @@ static u32 calc_l0s_acceptable(u32 encoding)
  */
 static u32 calc_l1_latency(u32 lnkcap)
 {
-	u32 encoding = FIELD_GET(PCI_EXP_LNKCAP_L1EL, lnkcap);
+	u32 encoding = FIELD_GET(PCI_EXP_LNKCAP_L1EL, lnkcap);	/* [한국어] LNKCAP 의 L1 Exit Latency 3비트 필드 */
 
-	if (encoding == 0x7)
-		return 65 * NSEC_PER_USEC;	/* > 64us */
-	return NSEC_PER_USEC << encoding;
+	if (encoding == 0x7)	/* [한국어] 7 = "64us 초과" */
+		return 65 * NSEC_PER_USEC;	/* > 64us */	/* [한국어] 대표값 65us */
+	return NSEC_PER_USEC << encoding;	/* [한국어] 밑이 1us 다. L0s 의 밑(64ns)보다 세 자릿수 가까이 크다 — 양방향을 다 재우니 그만큼 늦게 깬다 */
 }
 
 /* Convert L1 acceptable latency encoding to ns */
@@ -1298,9 +1298,9 @@ static u32 calc_l1_latency(u32 lnkcap)
  */
 static u32 calc_l1_acceptable(u32 encoding)
 {
-	if (encoding == 0x7)
-		return U32_MAX;
-	return NSEC_PER_USEC << encoding;
+	if (encoding == 0x7)	/* [한국어] 여기서도 7 은 "무제한" 을 뜻한다 */
+		return U32_MAX;	/* [한국어] 어떤 비교도 통과시킨다 */
+	return NSEC_PER_USEC << encoding;	/* [한국어] 1us 를 밑으로 하는 2의 거듭제곱 */
 }
 
 /* Convert L1SS T_pwr encoding to usec */
@@ -1329,16 +1329,16 @@ static u32 calc_l1_acceptable(u32 encoding)
  */
 static u32 calc_l12_pwron(struct pci_dev *pdev, u32 scale, u32 val)
 {
-	switch (scale) {
-	case 0:
-		return val * 2;
-	case 1:
-		return val * 10;
-	case 2:
-		return val * 100;
+	switch (scale) {	/* [한국어] 2비트 배율 부호. 유효 값은 0, 1, 2 뿐 */
+	case 0:	/* [한국어] 배율 0 */
+		return val * 2;	/* [한국어] 2us 단위 */
+	case 1:	/* [한국어] 배율 1 */
+		return val * 10;	/* [한국어] 10us 단위 */
+	case 2:	/* [한국어] 배율 2 */
+		return val * 100;	/* [한국어] 100us 단위 */
 	}
-	pci_err(pdev, "%s: Invalid T_PwrOn scale: %u\n", __func__, scale);
-	return 0;
+	pci_err(pdev, "%s: Invalid T_PwrOn scale: %u\n", __func__, scale);	/* [한국어] 3 은 규격상 예약값이라 하드웨어가 그 값을 실으면 규격 위반이다. 조용히 넘기지 않고 반드시 알린다 */
+	return 0;	/* [한국어] 0 은 안전한 쪽이 아니다 — 이 값이 작으면 LTR_L1.2_THRESHOLD 도 작아져 링크가 필요 이상으로 공격적으로 L1.2 에 들어간다. 그래서 위에서 로그를 남긴 것 */
 }
 
 /*
@@ -1378,33 +1378,33 @@ static u32 calc_l12_pwron(struct pci_dev *pdev, u32 scale, u32 val)
  */
 static void encode_l12_threshold(u32 threshold_us, u32 *scale, u32 *value)
 {
-	u64 threshold_ns = (u64)threshold_us * NSEC_PER_USEC;
+	u64 threshold_ns = (u64)threshold_us * NSEC_PER_USEC;	/* [한국어] u64 로 올려 계산한다. 마이크로초 x 1000 이 32비트를 넘길 수 있어서다 */
 
 	/*
 	 * LTR_L1.2_THRESHOLD_Value ("value") is a 10-bit field with max
 	 * value of 0x3ff.
 	 */
-	if (threshold_ns <= 1 * FIELD_MAX(PCI_L1SS_CTL1_LTR_L12_TH_VALUE)) {
-		*scale = 0;		/* Value times 1ns */
-		*value = threshold_ns;
-	} else if (threshold_ns <= 32 * FIELD_MAX(PCI_L1SS_CTL1_LTR_L12_TH_VALUE)) {
-		*scale = 1;		/* Value times 32ns */
-		*value = roundup(threshold_ns, 32) / 32;
-	} else if (threshold_ns <= 1024 * FIELD_MAX(PCI_L1SS_CTL1_LTR_L12_TH_VALUE)) {
-		*scale = 2;		/* Value times 1024ns */
-		*value = roundup(threshold_ns, 1024) / 1024;
-	} else if (threshold_ns <= 32768 * FIELD_MAX(PCI_L1SS_CTL1_LTR_L12_TH_VALUE)) {
-		*scale = 3;		/* Value times 32768ns */
-		*value = roundup(threshold_ns, 32768) / 32768;
-	} else if (threshold_ns <= 1048576 * FIELD_MAX(PCI_L1SS_CTL1_LTR_L12_TH_VALUE)) {
-		*scale = 4;		/* Value times 1048576ns */
-		*value = roundup(threshold_ns, 1048576) / 1048576;
-	} else if (threshold_ns <= (u64)33554432 * FIELD_MAX(PCI_L1SS_CTL1_LTR_L12_TH_VALUE)) {
-		*scale = 5;		/* Value times 33554432ns */
-		*value = roundup(threshold_ns, 33554432) / 33554432;
-	} else {
-		*scale = 5;
-		*value = FIELD_MAX(PCI_L1SS_CTL1_LTR_L12_TH_VALUE);
+	if (threshold_ns <= 1 * FIELD_MAX(PCI_L1SS_CTL1_LTR_L12_TH_VALUE)) {	/* [한국어] 배율 1ns 로 10비트에 들어가는가. FIELD_MAX 가 그 필드의 최대값(0x3ff)을 준다 */
+		*scale = 0;		/* Value times 1ns */	/* [한국어] 값 x 1ns */
+		*value = threshold_ns;	/* [한국어] 이 가지에서는 나머지가 없으므로 올림이 필요 없다 */
+	} else if (threshold_ns <= 32 * FIELD_MAX(PCI_L1SS_CTL1_LTR_L12_TH_VALUE)) {	/* [한국어] 배율 32ns 로 들어가는가 */
+		*scale = 1;		/* Value times 32ns */	/* [한국어] 값 x 32ns */
+		*value = roundup(threshold_ns, 32) / 32;	/* [한국어] 올림해서 나눈다 — 내림하면 임계값이 실제 필요 시간보다 작아져 견딜 수 없는 상황에서도 L1.2 로 들어간다 */
+	} else if (threshold_ns <= 1024 * FIELD_MAX(PCI_L1SS_CTL1_LTR_L12_TH_VALUE)) {	/* [한국어] 배율 1024ns */
+		*scale = 2;		/* Value times 1024ns */	/* [한국어] 값 x 1024ns */
+		*value = roundup(threshold_ns, 1024) / 1024;	/* [한국어] 같은 이유로 올림 */
+	} else if (threshold_ns <= 32768 * FIELD_MAX(PCI_L1SS_CTL1_LTR_L12_TH_VALUE)) {	/* [한국어] 배율 32768ns */
+		*scale = 3;		/* Value times 32768ns */	/* [한국어] 값 x 32768ns */
+		*value = roundup(threshold_ns, 32768) / 32768;	/* [한국어] 올림 */
+	} else if (threshold_ns <= 1048576 * FIELD_MAX(PCI_L1SS_CTL1_LTR_L12_TH_VALUE)) {	/* [한국어] 배율 1048576ns(약 1ms) */
+		*scale = 4;		/* Value times 1048576ns */	/* [한국어] 값 x 1048576ns */
+		*value = roundup(threshold_ns, 1048576) / 1048576;	/* [한국어] 올림 */
+	} else if (threshold_ns <= (u64)33554432 * FIELD_MAX(PCI_L1SS_CTL1_LTR_L12_TH_VALUE)) {	/* [한국어] 배율 33554432ns(약 33.5ms). 곱셈이 32비트를 넘기므로 (u64) 캐스트가 필수다 */
+		*scale = 5;		/* Value times 33554432ns */	/* [한국어] 값 x 33554432ns */
+		*value = roundup(threshold_ns, 33554432) / 33554432;	/* [한국어] 올림 */
+	} else {	/* [한국어] 가장 큰 배율로도 표현할 수 없을 만큼 크다 */
+		*scale = 5;	/* [한국어] 최대 배율로 포화시킨다 */
+		*value = FIELD_MAX(PCI_L1SS_CTL1_LTR_L12_TH_VALUE);	/* [한국어] 최대 값으로 포화시킨다. 임계값이 너무 커져 사실상 L1.2 에 들어가지 않게 되는데, 그것이 안전한 쪽이다 */
 	}
 }
 
@@ -1453,52 +1453,52 @@ static void encode_l12_threshold(u32 threshold_us, u32 *scale, u32 *value)
  */
 static void pcie_aspm_check_latency(struct pci_dev *endpoint)
 {
-	u32 latency, encoding, lnkcap_up, lnkcap_dw;
-	u32 l1_switch_latency = 0, latency_up_l0s;
-	u32 latency_up_l1, latency_dw_l0s, latency_dw_l1;
-	u32 acceptable_l0s, acceptable_l1;
-	struct pcie_link_state *link;
+	u32 latency, encoding, lnkcap_up, lnkcap_dw;	/* [한국어] latency = 비교용 임시값, encoding = 필드에서 꺼낸 부호, lnkcap_up/dw = 링크 양 끝의 LNKCAP */
+	u32 l1_switch_latency = 0, latency_up_l0s;	/* [한국어] l1_switch_latency 는 경로를 거슬러 올라가며 스위치마다 1us 씩 쌓이는 누적항 */
+	u32 latency_up_l1, latency_dw_l0s, latency_dw_l1;	/* [한국어] 방향별 x 상태별로 네 개의 exit latency */
+	u32 acceptable_l0s, acceptable_l1;	/* [한국어] 엔드포인트가 견딜 수 있는 한계 두 개 */
+	struct pcie_link_state *link;	/* [한국어] 경로를 거슬러 올라갈 커서 */
 
 	/* Device not in D0 doesn't need latency check */
-	if ((endpoint->current_state != PCI_D0) &&
-	    (endpoint->current_state != PCI_UNKNOWN))
-		return;
+	if ((endpoint->current_state != PCI_D0) &&	/* [한국어] D0 가 아닌 장치는 트래픽을 만들지 않으므로 */
+	    (endpoint->current_state != PCI_UNKNOWN))	/* [한국어] PCI_UNKNOWN 은 아직 상태를 읽어 보지 않은 초기 열거 시점을 위한 것이다 */
+		return;	/* [한국어] 그 장치의 지연 요구로 링크를 제약할 이유가 없다 */
 
-	link = endpoint->bus->self->link_state;
+	link = endpoint->bus->self->link_state;	/* [한국어] 엔드포인트 바로 위 링크에서 시작한다. bus->self 가 그 버스의 브리지(= 링크의 상류 쪽) */
 
 	/* Calculate endpoint L0s acceptable latency */
-	encoding = FIELD_GET(PCI_EXP_DEVCAP_L0S, endpoint->devcap);
-	acceptable_l0s = calc_l0s_acceptable(encoding);
+	encoding = FIELD_GET(PCI_EXP_DEVCAP_L0S, endpoint->devcap);	/* [한국어] DEVCAP 의 Endpoint L0s Acceptable Latency 필드. devcap 은 열거 때 캐시해 둔 값이라 여기서 다시 읽지 않는다 */
+	acceptable_l0s = calc_l0s_acceptable(encoding);	/* [한국어] 부호를 나노초로 편다 */
 
 	/* Calculate endpoint L1 acceptable latency */
-	encoding = FIELD_GET(PCI_EXP_DEVCAP_L1, endpoint->devcap);
-	acceptable_l1 = calc_l1_acceptable(encoding);
+	encoding = FIELD_GET(PCI_EXP_DEVCAP_L1, endpoint->devcap);	/* [한국어] DEVCAP 의 Endpoint L1 Acceptable Latency 필드 */
+	acceptable_l1 = calc_l1_acceptable(encoding);	/* [한국어] 부호를 나노초로 편다 */
 
 	/* [한국어] 엔드포인트에서 루트까지 링크를 하나씩 거슬러 올라가며
 	 * 각 구간의 복귀 지연을 누적한다. 경로 전체의 합이 엔드포인트가
 	 * 견딜 수 있는 한계를 넘으면 그 ASPM 상태를 쓸 수 없다. */
-	while (link) {
-		struct pci_dev *dev = pci_function_0(link->pdev->subordinate);
+	while (link) {	/* [한국어] link 가 NULL 이 되면(뿌리를 지나면) 끝난다 */
+		struct pci_dev *dev = pci_function_0(link->pdev->subordinate);	/* [한국어] 이 링크의 하류 대표. L1SS 와 마찬가지로 function 0 을 기준으로 삼는다 */
 
 		/* Read direction exit latencies */
-		pcie_capability_read_dword(link->pdev, PCI_EXP_LNKCAP,
-					   &lnkcap_up);
-		pcie_capability_read_dword(dev, PCI_EXP_LNKCAP,
-					   &lnkcap_dw);
-		latency_up_l0s = calc_l0s_latency(lnkcap_up);
-		latency_up_l1 = calc_l1_latency(lnkcap_up);
-		latency_dw_l0s = calc_l0s_latency(lnkcap_dw);
-		latency_dw_l1 = calc_l1_latency(lnkcap_dw);
+		pcie_capability_read_dword(link->pdev, PCI_EXP_LNKCAP,	/* [한국어] 상류 쪽 LNKCAP */
+					   &lnkcap_up);	/* [한국어] exit latency 는 각자 자기 쪽 LNKCAP 에 실려 있다 */
+		pcie_capability_read_dword(dev, PCI_EXP_LNKCAP,	/* [한국어] 하류 쪽 LNKCAP */
+					   &lnkcap_dw);	/* [한국어] 두 값이 다를 수 있으므로 양쪽을 다 읽는다 */
+		latency_up_l0s = calc_l0s_latency(lnkcap_up);	/* [한국어] 상류가 광고한 L0s 복귀 시간 */
+		latency_up_l1 = calc_l1_latency(lnkcap_up);	/* [한국어] 상류가 광고한 L1 복귀 시간 */
+		latency_dw_l0s = calc_l0s_latency(lnkcap_dw);	/* [한국어] 하류가 광고한 L0s 복귀 시간 */
+		latency_dw_l1 = calc_l1_latency(lnkcap_dw);	/* [한국어] 하류가 광고한 L1 복귀 시간 */
 
 		/* Check upstream direction L0s latency */
-		if ((link->aspm_capable & PCIE_LINK_STATE_L0S_UP) &&
-		    (latency_up_l0s > acceptable_l0s))
-			link->aspm_capable &= ~PCIE_LINK_STATE_L0S_UP;
+		if ((link->aspm_capable & PCIE_LINK_STATE_L0S_UP) &&	/* [한국어] L0S_UP 이 아직 살아 있고 */
+		    (latency_up_l0s > acceptable_l0s))	/* [한국어] 상류 쪽 복귀가 한계를 넘으면 */
+			link->aspm_capable &= ~PCIE_LINK_STATE_L0S_UP;	/* [한국어] 그 방향만 지운다. 반대 방향은 여전히 쓸 수 있다 — L0s 를 방향별로 나눠 든 이유가 여기서 드러난다 */
 
 		/* Check downstream direction L0s latency */
-		if ((link->aspm_capable & PCIE_LINK_STATE_L0S_DW) &&
-		    (latency_dw_l0s > acceptable_l0s))
-			link->aspm_capable &= ~PCIE_LINK_STATE_L0S_DW;
+		if ((link->aspm_capable & PCIE_LINK_STATE_L0S_DW) &&	/* [한국어] L0S_DW 도 같은 방식으로 */
+		    (latency_dw_l0s > acceptable_l0s))	/* [한국어] 하류 쪽 복귀 시간과 비교 */
+			link->aspm_capable &= ~PCIE_LINK_STATE_L0S_DW;	/* [한국어] 그 방향만 지운다 */
 		/*
 		 * Check L1 latency.
 		 * Every switch on the path to root complex need 1
@@ -1512,13 +1512,13 @@ static void pcie_aspm_check_latency(struct pci_dev *endpoint)
 		 * L1 exit latencies advertised by a device include L1
 		 * substate latencies (and hence do not do any check).
 		 */
-		latency = max_t(u32, latency_up_l1, latency_dw_l1);
-		if ((link->aspm_capable & PCIE_LINK_STATE_L1) &&
-		    (latency + l1_switch_latency > acceptable_l1))
-			link->aspm_capable &= ~PCIE_LINK_STATE_L1;
-		l1_switch_latency += NSEC_PER_USEC;
+		latency = max_t(u32, latency_up_l1, latency_dw_l1);	/* [한국어] L1 은 양방향을 함께 재우므로 더 나쁜 쪽이 곧 그 링크의 복귀 시간이다 */
+		if ((link->aspm_capable & PCIE_LINK_STATE_L1) &&	/* [한국어] L1 이 아직 살아 있고 */
+		    (latency + l1_switch_latency > acceptable_l1))	/* [한국어] 이 구간의 복귀 시간에 여기까지 지나온 스위치 비용을 더한 값이 한계를 넘으면 */
+			link->aspm_capable &= ~PCIE_LINK_STATE_L1;	/* [한국어] 이 링크에서 L1 을 지운다 */
+		l1_switch_latency += NSEC_PER_USEC;	/* [한국어] 영어 주석대로 규격은 루트로 가는 경로의 스위치마다 L1 에 1us 가 더 든다고 정한다. L0s 에 대해서는 아무 말이 없어 누적항을 더하지 않는다 */
 
-		link = link->parent;
+		link = link->parent;	/* [한국어] 한 단계 위 링크로. 이 사슬이 곧 경로다 */
 	}
 }
 
@@ -1572,33 +1572,33 @@ static void pcie_aspm_check_latency(struct pci_dev *endpoint)
 static void aspm_calc_l12_info(struct pcie_link_state *link,
 				u32 parent_l1ss_cap, u32 child_l1ss_cap)
 {
-	struct pci_dev *child = link->downstream, *parent = link->pdev;
-	u32 val1, val2, scale1, scale2;
-	u32 t_common_mode, t_power_on, l1_2_threshold, scale, value;
-	u32 ctl1 = 0, ctl2 = 0;
-	u32 pctl1, pctl2, cctl1, cctl2;
-	u32 pl1_2_enables, cl1_2_enables;
+	struct pci_dev *child = link->downstream, *parent = link->pdev;	/* [한국어] parent = 상류 포트, child = 하류 function 0 */
+	u32 val1, val2, scale1, scale2;	/* [한국어] 양 끝에서 꺼낸 값과 배율을 담을 임시 변수 쌍 */
+	u32 t_common_mode, t_power_on, l1_2_threshold, scale, value;	/* [한국어] 계산 결과 세 가지와, 임계값을 접은 (scale, value) */
+	u32 ctl1 = 0, ctl2 = 0;	/* [한국어] 양쪽 포트에 쓸 새 CTL1/CTL2 값. 0 에서 시작해 필드를 얹어 나간다 */
+	u32 pctl1, pctl2, cctl1, cctl2;	/* [한국어] p = parent, c = child 의 현재 CTL1/CTL2. 이미 원하는 값인지 비교하는 데 쓴다 */
+	u32 pl1_2_enables, cl1_2_enables;	/* [한국어] 현재 켜져 있는 L1.2 enable 비트. 갱신 중 잠시 껐다가 되살리기 위해 보관 */
 
 	/* Choose the greater of the two Port Common_Mode_Restore_Times */
-	val1 = FIELD_GET(PCI_L1SS_CAP_CM_RESTORE_TIME, parent_l1ss_cap);
-	val2 = FIELD_GET(PCI_L1SS_CAP_CM_RESTORE_TIME, child_l1ss_cap);
-	t_common_mode = max(val1, val2);
+	val1 = FIELD_GET(PCI_L1SS_CAP_CM_RESTORE_TIME, parent_l1ss_cap);	/* [한국어] 상류가 광고한 공통 모드 복원 시간 */
+	val2 = FIELD_GET(PCI_L1SS_CAP_CM_RESTORE_TIME, child_l1ss_cap);	/* [한국어] 하류가 광고한 값 */
+	t_common_mode = max(val1, val2);	/* [한국어] 느린 쪽에 맞춘다 — 빠른 쪽 기준으로 잡으면 느린 쪽이 준비되기 전에 트래픽이 흐른다 */
 
 	/* Choose the greater of the two Port T_POWER_ON times */
-	val1   = FIELD_GET(PCI_L1SS_CAP_P_PWR_ON_VALUE, parent_l1ss_cap);
-	scale1 = FIELD_GET(PCI_L1SS_CAP_P_PWR_ON_SCALE, parent_l1ss_cap);
-	val2   = FIELD_GET(PCI_L1SS_CAP_P_PWR_ON_VALUE, child_l1ss_cap);
-	scale2 = FIELD_GET(PCI_L1SS_CAP_P_PWR_ON_SCALE, child_l1ss_cap);
+	val1   = FIELD_GET(PCI_L1SS_CAP_P_PWR_ON_VALUE, parent_l1ss_cap);	/* [한국어] 상류의 T_POWER_ON 값 */
+	scale1 = FIELD_GET(PCI_L1SS_CAP_P_PWR_ON_SCALE, parent_l1ss_cap);	/* [한국어] 그 배율 */
+	val2   = FIELD_GET(PCI_L1SS_CAP_P_PWR_ON_VALUE, child_l1ss_cap);	/* [한국어] 하류의 T_POWER_ON 값 */
+	scale2 = FIELD_GET(PCI_L1SS_CAP_P_PWR_ON_SCALE, child_l1ss_cap);	/* [한국어] 그 배율 */
 
-	if (calc_l12_pwron(parent, scale1, val1) >
-	    calc_l12_pwron(child, scale2, val2)) {
-		ctl2 |= FIELD_PREP(PCI_L1SS_CTL2_T_PWR_ON_SCALE, scale1) |
-			FIELD_PREP(PCI_L1SS_CTL2_T_PWR_ON_VALUE, val1);
-		t_power_on = calc_l12_pwron(parent, scale1, val1);
-	} else {
-		ctl2 |= FIELD_PREP(PCI_L1SS_CTL2_T_PWR_ON_SCALE, scale2) |
-			FIELD_PREP(PCI_L1SS_CTL2_T_PWR_ON_VALUE, val2);
-		t_power_on = calc_l12_pwron(child, scale2, val2);
+	if (calc_l12_pwron(parent, scale1, val1) >	/* [한국어] 펴 본 실제 시간으로 비교한다. (값, 배율) 쌍을 그대로 비교하면 배율이 달라 뜻이 없다 */
+	    calc_l12_pwron(child, scale2, val2)) {	/* [한국어] 상류 쪽이 더 오래 걸리는가 */
+		ctl2 |= FIELD_PREP(PCI_L1SS_CTL2_T_PWR_ON_SCALE, scale1) |	/* [한국어] 그렇다면 상류의 (배율, 값)을 그대로 CTL2 에 심는다 */
+			FIELD_PREP(PCI_L1SS_CTL2_T_PWR_ON_VALUE, val1);	/* [한국어] FIELD_PREP 이 값을 필드 자리로 옮겨 넣는다 */
+		t_power_on = calc_l12_pwron(parent, scale1, val1);	/* [한국어] 임계값 계산에 쓸 실제 시간도 상류 것으로 */
+	} else {	/* [한국어] 하류 쪽이 같거나 더 오래 걸리는 경우 */
+		ctl2 |= FIELD_PREP(PCI_L1SS_CTL2_T_PWR_ON_SCALE, scale2) |	/* [한국어] 하류의 (배율, 값)을 심는다 */
+			FIELD_PREP(PCI_L1SS_CTL2_T_PWR_ON_VALUE, val2);	/* [한국어] 같은 방식 */
+		t_power_on = calc_l12_pwron(child, scale2, val2);	/* [한국어] 임계값 계산에도 하류 것을 쓴다 */
 	}
 
 	/*
@@ -1611,67 +1611,67 @@ static void aspm_calc_l12_info(struct pcie_link_state *link,
 	 * Table 5-11.  T(POWER_OFF) is at most 2us and T(L1.2) is at
 	 * least 4us.
 	 */
-	l1_2_threshold = 2 + 4 + t_common_mode + t_power_on;
-	encode_l12_threshold(l1_2_threshold, &scale, &value);
-	ctl1 |= FIELD_PREP(PCI_L1SS_CTL1_CM_RESTORE_TIME, t_common_mode) |
-		FIELD_PREP(PCI_L1SS_CTL1_LTR_L12_TH_VALUE, value) |
-		FIELD_PREP(PCI_L1SS_CTL1_LTR_L12_TH_SCALE, scale);
+	l1_2_threshold = 2 + 4 + t_common_mode + t_power_on;	/* [한국어] L0 -> L1.2 -> L0 왕복에 드는 최소 시간. 2 는 T(POWER_OFF) 최대치, 4 는 T(L1.2) 최소치로 위 영어 주석이 근거를 밝힌다. 장치가 LTR 로 "이만큼은 견딘다" 고 말할 때만 L1.2 에 들인다는 뜻 */
+	encode_l12_threshold(l1_2_threshold, &scale, &value);	/* [한국어] 마이크로초 값을 (배율, 값) 쌍으로 접는다 */
+	ctl1 |= FIELD_PREP(PCI_L1SS_CTL1_CM_RESTORE_TIME, t_common_mode) |	/* [한국어] CTL1 에 공통 모드 복원 시간을 얹고 */
+		FIELD_PREP(PCI_L1SS_CTL1_LTR_L12_TH_VALUE, value) |	/* [한국어] 임계값의 값 부분과 */
+		FIELD_PREP(PCI_L1SS_CTL1_LTR_L12_TH_SCALE, scale);	/* [한국어] 배율 부분을 얹는다. 셋 다 같은 레지스터 안의 다른 필드다 */
 
 	/* Some broken devices only support dword access to L1 SS */
-	pci_read_config_dword(parent, parent->l1ss + PCI_L1SS_CTL1, &pctl1);
-	pci_read_config_dword(parent, parent->l1ss + PCI_L1SS_CTL2, &pctl2);
-	pci_read_config_dword(child, child->l1ss + PCI_L1SS_CTL1, &cctl1);
-	pci_read_config_dword(child, child->l1ss + PCI_L1SS_CTL2, &cctl2);
+	pci_read_config_dword(parent, parent->l1ss + PCI_L1SS_CTL1, &pctl1);	/* [한국어] 상류의 현재 CTL1 */
+	pci_read_config_dword(parent, parent->l1ss + PCI_L1SS_CTL2, &pctl2);	/* [한국어] 상류의 현재 CTL2. 위 영어 주석대로 word 접근을 제대로 못 하는 장치가 있어 dword 로 읽는다 */
+	pci_read_config_dword(child, child->l1ss + PCI_L1SS_CTL1, &cctl1);	/* [한국어] 하류의 현재 CTL1 */
+	pci_read_config_dword(child, child->l1ss + PCI_L1SS_CTL2, &cctl2);	/* [한국어] 하류의 현재 CTL2 */
 
-	if (ctl1 == pctl1 && ctl1 == cctl1 &&
-	    ctl2 == pctl2 && ctl2 == cctl2)
-		return;
+	if (ctl1 == pctl1 && ctl1 == cctl1 &&	/* [한국어] 양쪽 CTL1 이 이미 원하는 값이고 */
+	    ctl2 == pctl2 && ctl2 == cctl2)	/* [한국어] 양쪽 CTL2 도 그렇다면 */
+		return;	/* [한국어] 아무것도 하지 않는다. 불필요하게 L1.2 를 껐다 켜면 그 사이 링크가 절전에 들지 못한다 */
 
 	/* Disable L1.2 while updating.  See PCIe r5.0, sec 5.5.4, 7.8.3.3 */
-	pl1_2_enables = pctl1 & PCI_L1SS_CTL1_L1_2_MASK;
-	cl1_2_enables = cctl1 & PCI_L1SS_CTL1_L1_2_MASK;
+	pl1_2_enables = pctl1 & PCI_L1SS_CTL1_L1_2_MASK;	/* [한국어] 상류에 지금 켜져 있는 L1.2 enable 비트를 보관 */
+	cl1_2_enables = cctl1 & PCI_L1SS_CTL1_L1_2_MASK;	/* [한국어] 하류 쪽도 */
 
-	if (pl1_2_enables || cl1_2_enables) {
-		pci_clear_and_set_config_dword(child,
-					       child->l1ss + PCI_L1SS_CTL1,
-					       PCI_L1SS_CTL1_L1_2_MASK, 0);
-		pci_clear_and_set_config_dword(parent,
-					       parent->l1ss + PCI_L1SS_CTL1,
-					       PCI_L1SS_CTL1_L1_2_MASK, 0);
+	if (pl1_2_enables || cl1_2_enables) {	/* [한국어] 한쪽이라도 켜져 있으면 갱신 전에 꺼야 한다 */
+		pci_clear_and_set_config_dword(child,	/* [한국어] 하류를 먼저 끈다 */
+					       child->l1ss + PCI_L1SS_CTL1,	/* [한국어] 하류의 CTL1 */
+					       PCI_L1SS_CTL1_L1_2_MASK, 0);	/* [한국어] L1_2_MASK 를 지우고 0 을 세운다 = 끈다 */
+		pci_clear_and_set_config_dword(parent,	/* [한국어] 그다음 상류. 이 순서가 규격 요구다 */
+					       parent->l1ss + PCI_L1SS_CTL1,	/* [한국어] 상류의 CTL1 */
+					       PCI_L1SS_CTL1_L1_2_MASK, 0);	/* [한국어] 같은 방식으로 끈다 */
 	}
 
 	/* Program T_POWER_ON times in both ports */
-	pci_clear_and_set_config_dword(parent, parent->l1ss + PCI_L1SS_CTL2,
-				       PCI_L1SS_CTL2_T_PWR_ON_VALUE |
-				       PCI_L1SS_CTL2_T_PWR_ON_SCALE, ctl2);
-	pci_clear_and_set_config_dword(child, child->l1ss + PCI_L1SS_CTL2,
-				       PCI_L1SS_CTL2_T_PWR_ON_VALUE |
-				       PCI_L1SS_CTL2_T_PWR_ON_SCALE, ctl2);
+	pci_clear_and_set_config_dword(parent, parent->l1ss + PCI_L1SS_CTL2,	/* [한국어] 상류의 CTL2 에 T_POWER_ON 을 쓴다 */
+				       PCI_L1SS_CTL2_T_PWR_ON_VALUE |	/* [한국어] 값 필드와 */
+				       PCI_L1SS_CTL2_T_PWR_ON_SCALE, ctl2);	/* [한국어] 배율 필드를 함께 갈아 끼운다 */
+	pci_clear_and_set_config_dword(child, child->l1ss + PCI_L1SS_CTL2,	/* [한국어] 하류에도 같은 값을 쓴다 — 양 끝이 같은 타이밍을 알아야 한다 */
+				       PCI_L1SS_CTL2_T_PWR_ON_VALUE |	/* [한국어] 값 필드 */
+				       PCI_L1SS_CTL2_T_PWR_ON_SCALE, ctl2);	/* [한국어] 배율 필드 */
 
 	/* Program Common_Mode_Restore_Time in upstream device */
-	pci_clear_and_set_config_dword(parent, parent->l1ss + PCI_L1SS_CTL1,
-				       PCI_L1SS_CTL1_CM_RESTORE_TIME,
-				       ctl1 & PCI_L1SS_CTL1_CM_RESTORE_TIME);
+	pci_clear_and_set_config_dword(parent, parent->l1ss + PCI_L1SS_CTL1,	/* [한국어] Common_Mode_Restore_Time 은 상류에만 쓴다 */
+				       PCI_L1SS_CTL1_CM_RESTORE_TIME,	/* [한국어] 그 필드만 지우고 */
+				       ctl1 & PCI_L1SS_CTL1_CM_RESTORE_TIME);	/* [한국어] 계산해 둔 ctl1 에서 그 필드만 골라 세운다 */
 
 	/* Program LTR_L1.2_THRESHOLD time in both ports */
-	pci_clear_and_set_config_dword(parent, parent->l1ss + PCI_L1SS_CTL1,
-				       PCI_L1SS_CTL1_LTR_L12_TH_VALUE |
-				       PCI_L1SS_CTL1_LTR_L12_TH_SCALE,
-				       ctl1 & (PCI_L1SS_CTL1_LTR_L12_TH_VALUE |
-					       PCI_L1SS_CTL1_LTR_L12_TH_SCALE));
-	pci_clear_and_set_config_dword(child, child->l1ss + PCI_L1SS_CTL1,
-				       PCI_L1SS_CTL1_LTR_L12_TH_VALUE |
-				       PCI_L1SS_CTL1_LTR_L12_TH_SCALE,
-				       ctl1 & (PCI_L1SS_CTL1_LTR_L12_TH_VALUE |
-					       PCI_L1SS_CTL1_LTR_L12_TH_SCALE));
+	pci_clear_and_set_config_dword(parent, parent->l1ss + PCI_L1SS_CTL1,	/* [한국어] 임계값은 양 끝에 모두 쓴다. 먼저 상류 */
+				       PCI_L1SS_CTL1_LTR_L12_TH_VALUE |	/* [한국어] 값 필드와 */
+				       PCI_L1SS_CTL1_LTR_L12_TH_SCALE,	/* [한국어] 배율 필드를 함께 지우고 */
+				       ctl1 & (PCI_L1SS_CTL1_LTR_L12_TH_VALUE |	/* [한국어] ctl1 에서 그 두 필드만 골라 */
+					       PCI_L1SS_CTL1_LTR_L12_TH_SCALE));	/* [한국어] 세운다 */
+	pci_clear_and_set_config_dword(child, child->l1ss + PCI_L1SS_CTL1,	/* [한국어] 그다음 하류 */
+				       PCI_L1SS_CTL1_LTR_L12_TH_VALUE |	/* [한국어] 같은 값 필드 */
+				       PCI_L1SS_CTL1_LTR_L12_TH_SCALE,	/* [한국어] 같은 배율 필드 */
+				       ctl1 & (PCI_L1SS_CTL1_LTR_L12_TH_VALUE |	/* [한국어] 같은 값에서 */
+					       PCI_L1SS_CTL1_LTR_L12_TH_SCALE));	/* [한국어] 같은 두 필드를 세운다 */
 
-	if (pl1_2_enables || cl1_2_enables) {
-		pci_clear_and_set_config_dword(parent,
-					       parent->l1ss + PCI_L1SS_CTL1, 0,
-					       pl1_2_enables);
-		pci_clear_and_set_config_dword(child,
-					       child->l1ss + PCI_L1SS_CTL1, 0,
-					       cl1_2_enables);
+	if (pl1_2_enables || cl1_2_enables) {	/* [한국어] 원래 켜져 있던 L1.2 가 있었을 때만 되살린다 */
+		pci_clear_and_set_config_dword(parent,	/* [한국어] 켤 때는 상류 먼저 — 끌 때(하류 먼저)와 반대다 */
+					       parent->l1ss + PCI_L1SS_CTL1, 0,	/* [한국어] 지울 마스크는 0(아무것도 지우지 않는다) */
+					       pl1_2_enables);	/* [한국어] 보관해 둔 enable 비트만 다시 세운다 */
+		pci_clear_and_set_config_dword(child,	/* [한국어] 그다음 하류 */
+					       child->l1ss + PCI_L1SS_CTL1, 0,	/* [한국어] 하류의 CTL1 */
+					       cl1_2_enables);	/* [한국어] 하류의 원래 enable 비트 */
 	}
 }
 
@@ -1707,59 +1707,59 @@ static void aspm_calc_l12_info(struct pcie_link_state *link,
  */
 static void aspm_l1ss_init(struct pcie_link_state *link)
 {
-	struct pci_dev *child = link->downstream, *parent = link->pdev;
-	u32 parent_l1ss_cap, child_l1ss_cap;
-	u32 parent_l1ss_ctl1 = 0, child_l1ss_ctl1 = 0;
+	struct pci_dev *child = link->downstream, *parent = link->pdev;	/* [한국어] child = 하류 function 0, parent = 상류 포트 */
+	u32 parent_l1ss_cap, child_l1ss_cap;	/* [한국어] 양 끝의 L1SS Capabilities */
+	u32 parent_l1ss_ctl1 = 0, child_l1ss_ctl1 = 0;	/* [한국어] 양 끝의 현재 CTL1. cap 이 0 이면 읽지 않으므로 0 으로 초기화해 둔다 */
 
-	if (!parent->l1ss || !child->l1ss)
-		return;
+	if (!parent->l1ss || !child->l1ss)	/* [한국어] 한쪽이라도 L1SS capability 자체가 없으면 */
+		return;	/* [한국어] L1 하위 상태는 성립하지 않는다 */
 
 	/* Setup L1 substate */
-	pci_read_config_dword(parent, parent->l1ss + PCI_L1SS_CAP,
-			      &parent_l1ss_cap);
-	pci_read_config_dword(child, child->l1ss + PCI_L1SS_CAP,
-			      &child_l1ss_cap);
+	pci_read_config_dword(parent, parent->l1ss + PCI_L1SS_CAP,	/* [한국어] 상류의 L1SS Capabilities */
+			      &parent_l1ss_cap);	/* [한국어] 어떤 하위 상태를 지원하는지, 그리고 타이밍 값이 여기 들어 있다 */
+	pci_read_config_dword(child, child->l1ss + PCI_L1SS_CAP,	/* [한국어] 하류의 L1SS Capabilities */
+			      &child_l1ss_cap);	/* [한국어] 같은 내용 */
 
-	if (!(parent_l1ss_cap & PCI_L1SS_CAP_L1_PM_SS))
-		parent_l1ss_cap = 0;
-	if (!(child_l1ss_cap & PCI_L1SS_CAP_L1_PM_SS))
-		child_l1ss_cap = 0;
+	if (!(parent_l1ss_cap & PCI_L1SS_CAP_L1_PM_SS))	/* [한국어] "L1 PM Substates Supported" 비트가 없으면 나머지 필드가 의미 없다 */
+		parent_l1ss_cap = 0;	/* [한국어] 통째로 0 으로 만들어 아래 AND 에서 전부 걸러지게 한다 */
+	if (!(child_l1ss_cap & PCI_L1SS_CAP_L1_PM_SS))	/* [한국어] 하류 쪽도 같은 확인 */
+		child_l1ss_cap = 0;	/* [한국어] 통째로 0 */
 
 	/*
 	 * If we don't have LTR for the entire path from the Root Complex
 	 * to this device, we can't use ASPM L1.2 because it relies on the
 	 * LTR_L1.2_THRESHOLD.  See PCIe r4.0, secs 5.5.4, 6.18.
 	 */
-	if (!child->ltr_path)
-		child_l1ss_cap &= ~PCI_L1SS_CAP_ASPM_L1_2;
+	if (!child->ltr_path)	/* [한국어] 루트에서 이 장치까지 LTR 경로가 성립하지 않으면 */
+		child_l1ss_cap &= ~PCI_L1SS_CAP_ASPM_L1_2;	/* [한국어] ASPM L1.2 만 지운다. L1.2 는 LTR 보고와 임계값을 견주어 들어가는데 그 보고가 전달되지 않기 때문(영어 주석: PCIe r4.0 sec 5.5.4, 6.18). PCI-PM L1.2 는 D-state 로 들어가는 경로라 여기서 지우지 않는다 */
 
-	if (parent_l1ss_cap & child_l1ss_cap & PCI_L1SS_CAP_ASPM_L1_1)
-		link->aspm_support |= PCIE_LINK_STATE_L1_1;
-	if (parent_l1ss_cap & child_l1ss_cap & PCI_L1SS_CAP_ASPM_L1_2)
-		link->aspm_support |= PCIE_LINK_STATE_L1_2;
-	if (parent_l1ss_cap & child_l1ss_cap & PCI_L1SS_CAP_PCIPM_L1_1)
-		link->aspm_support |= PCIE_LINK_STATE_L1_1_PCIPM;
-	if (parent_l1ss_cap & child_l1ss_cap & PCI_L1SS_CAP_PCIPM_L1_2)
-		link->aspm_support |= PCIE_LINK_STATE_L1_2_PCIPM;
+	if (parent_l1ss_cap & child_l1ss_cap & PCI_L1SS_CAP_ASPM_L1_1)	/* [한국어] 양 끝이 모두 ASPM L1.1 을 지원하면 */
+		link->aspm_support |= PCIE_LINK_STATE_L1_1;	/* [한국어] 지원 목록에 넣는다 */
+	if (parent_l1ss_cap & child_l1ss_cap & PCI_L1SS_CAP_ASPM_L1_2)	/* [한국어] 양 끝이 모두 ASPM L1.2 를 지원하면 */
+		link->aspm_support |= PCIE_LINK_STATE_L1_2;	/* [한국어] 지원 목록에 넣는다 */
+	if (parent_l1ss_cap & child_l1ss_cap & PCI_L1SS_CAP_PCIPM_L1_1)	/* [한국어] 양 끝이 모두 PCI-PM L1.1 을 지원하면 */
+		link->aspm_support |= PCIE_LINK_STATE_L1_1_PCIPM;	/* [한국어] 지원 목록에 넣는다 */
+	if (parent_l1ss_cap & child_l1ss_cap & PCI_L1SS_CAP_PCIPM_L1_2)	/* [한국어] 양 끝이 모두 PCI-PM L1.2 를 지원하면 */
+		link->aspm_support |= PCIE_LINK_STATE_L1_2_PCIPM;	/* [한국어] 지원 목록에 넣는다 */
 
-	if (parent_l1ss_cap)
-		pci_read_config_dword(parent, parent->l1ss + PCI_L1SS_CTL1,
-				      &parent_l1ss_ctl1);
-	if (child_l1ss_cap)
-		pci_read_config_dword(child, child->l1ss + PCI_L1SS_CTL1,
-				      &child_l1ss_ctl1);
+	if (parent_l1ss_cap)	/* [한국어] 상류가 L1SS 를 지원할 때만 */
+		pci_read_config_dword(parent, parent->l1ss + PCI_L1SS_CTL1,	/* [한국어] 현재 설정을 읽는다 */
+				      &parent_l1ss_ctl1);	/* [한국어] 지원하지 않으면 0 인 채로 남아 아래 AND 를 전부 거른다 */
+	if (child_l1ss_cap)	/* [한국어] 하류도 마찬가지 */
+		pci_read_config_dword(child, child->l1ss + PCI_L1SS_CTL1,	/* [한국어] 현재 설정을 읽는다 */
+				      &child_l1ss_ctl1);	/* [한국어] 0 으로 초기화해 둔 덕에 안전하다 */
 
-	if (parent_l1ss_ctl1 & child_l1ss_ctl1 & PCI_L1SS_CTL1_ASPM_L1_1)
-		link->aspm_enabled |= PCIE_LINK_STATE_L1_1;
-	if (parent_l1ss_ctl1 & child_l1ss_ctl1 & PCI_L1SS_CTL1_ASPM_L1_2)
-		link->aspm_enabled |= PCIE_LINK_STATE_L1_2;
-	if (parent_l1ss_ctl1 & child_l1ss_ctl1 & PCI_L1SS_CTL1_PCIPM_L1_1)
-		link->aspm_enabled |= PCIE_LINK_STATE_L1_1_PCIPM;
-	if (parent_l1ss_ctl1 & child_l1ss_ctl1 & PCI_L1SS_CTL1_PCIPM_L1_2)
-		link->aspm_enabled |= PCIE_LINK_STATE_L1_2_PCIPM;
+	if (parent_l1ss_ctl1 & child_l1ss_ctl1 & PCI_L1SS_CTL1_ASPM_L1_1)	/* [한국어] 양 끝이 모두 ASPM L1.1 을 켜 두었으면 */
+		link->aspm_enabled |= PCIE_LINK_STATE_L1_1;	/* [한국어] 현재 상태로 기록한다 */
+	if (parent_l1ss_ctl1 & child_l1ss_ctl1 & PCI_L1SS_CTL1_ASPM_L1_2)	/* [한국어] 양 끝이 모두 ASPM L1.2 를 켜 두었으면 */
+		link->aspm_enabled |= PCIE_LINK_STATE_L1_2;	/* [한국어] 현재 상태로 기록 */
+	if (parent_l1ss_ctl1 & child_l1ss_ctl1 & PCI_L1SS_CTL1_PCIPM_L1_1)	/* [한국어] 양 끝이 모두 PCI-PM L1.1 을 켜 두었으면 */
+		link->aspm_enabled |= PCIE_LINK_STATE_L1_1_PCIPM;	/* [한국어] 현재 상태로 기록 */
+	if (parent_l1ss_ctl1 & child_l1ss_ctl1 & PCI_L1SS_CTL1_PCIPM_L1_2)	/* [한국어] 양 끝이 모두 PCI-PM L1.2 를 켜 두었으면 */
+		link->aspm_enabled |= PCIE_LINK_STATE_L1_2_PCIPM;	/* [한국어] 현재 상태로 기록 */
 
-	if (link->aspm_support & PCIE_LINK_STATE_L1_2_MASK)
-		aspm_calc_l12_info(link, parent_l1ss_cap, child_l1ss_cap);
+	if (link->aspm_support & PCIE_LINK_STATE_L1_2_MASK)	/* [한국어] L1.2 를 두 갈래 중 하나로라도 쓸 수 있으면 */
+		aspm_calc_l12_info(link, parent_l1ss_cap, child_l1ss_cap);	/* [한국어] 타이밍 파라미터를 계산해 심는다. L1.1 은 공통 모드 전압을 유지하므로 이 계산이 필요 없다 */
 }
 
 #define FLAG(x, y, d)	(((x) & (PCIE_LINK_STATE_##y)) ? d : "")
@@ -1790,20 +1790,20 @@ static void aspm_l1ss_init(struct pcie_link_state *link)
  */
 static void pcie_aspm_override_default_link_state(struct pcie_link_state *link)
 {
-	struct pci_dev *pdev = link->downstream;
-	u32 override;
+	struct pci_dev *pdev = link->downstream;	/* [한국어] 로그에 찍을 대상. 상류 포트가 아니라 하류 장치 이름으로 남기는 편이 사용자에게 알아보기 쉽다 */
+	u32 override;	/* [한국어] 이번에 새로 기본값이 된 비트만 담을 변수 */
 
 	/* For devicetree platforms, enable L0s and L1 by default */
-	if (of_have_populated_dt()) {
-		if (link->aspm_support & PCIE_LINK_STATE_L0S)
-			link->aspm_default |= PCIE_LINK_STATE_L0S;
-		if (link->aspm_support & PCIE_LINK_STATE_L1)
-			link->aspm_default |= PCIE_LINK_STATE_L1;
-		override = link->aspm_default & ~link->aspm_enabled;
-		if (override)
-			pci_info(pdev, "ASPM: default states%s%s\n",
-				 FLAG(override, L0S, " L0s"),
-				 FLAG(override, L1, " L1"));
+	if (of_have_populated_dt()) {	/* [한국어] devicetree 로 기술된 플랫폼인가. ACPI 처럼 펌웨어가 LNKCTL 을 설정해 두지 않아 링크가 늘 꺼진 채 남는다 */
+		if (link->aspm_support & PCIE_LINK_STATE_L0S)	/* [한국어] 하드웨어가 L0s 를 지원하면 */
+			link->aspm_default |= PCIE_LINK_STATE_L0S;	/* [한국어] 기본값에 넣는다 */
+		if (link->aspm_support & PCIE_LINK_STATE_L1)	/* [한국어] L1 도 지원하면 */
+			link->aspm_default |= PCIE_LINK_STATE_L1;	/* [한국어] 기본값에 넣는다. L1 하위 상태는 넣지 않는다 — 복귀가 느리고 LTR 경로 등 전제가 많아 기본으로 켜기에는 위험하다 */
+		override = link->aspm_default & ~link->aspm_enabled;	/* [한국어] 이미 켜져 있던 것을 빼면 "이번에 새로 기본값이 된 것" 만 남는다 */
+		if (override)	/* [한국어] 새로 생긴 것이 있을 때만 알린다 */
+			pci_info(pdev, "ASPM: default states%s%s\n",	/* [한국어] 두 조각의 문자열을 이어 붙여 한 줄로 찍는다 */
+				 FLAG(override, L0S, " L0s"),	/* [한국어] L0s 가 새로 켜졌으면 " L0s", 아니면 빈 문자열 */
+				 FLAG(override, L1, " L1"));	/* [한국어] L1 이 새로 켜졌으면 " L1", 아니면 빈 문자열 */
 	}
 }
 
@@ -1849,27 +1849,27 @@ static void pcie_aspm_override_default_link_state(struct pcie_link_state *link)
  */
 static void pcie_aspm_cap_init(struct pcie_link_state *link, int blacklist)
 {
-	struct pci_dev *child = link->downstream, *parent = link->pdev;
-	u16 parent_lnkctl, child_lnkctl;
-	struct pci_bus *linkbus = parent->subordinate;
+	struct pci_dev *child = link->downstream, *parent = link->pdev;	/* [한국어] child = 하류 function 0, parent = 상류 포트 */
+	u16 parent_lnkctl, child_lnkctl;	/* [한국어] 양 끝의 현재 Link Control. 여러 번 쓰이므로 한 번만 읽어 둔다 */
+	struct pci_bus *linkbus = parent->subordinate;	/* [한국어] 하류 버스. 마지막에 엔드포인트를 훑을 때 쓴다 */
 
-	if (blacklist) {
+	if (blacklist) {	/* [한국어] pcie_aspm_sanity_check 가 실패한 링크 */
 		/* Set enabled/disable so that we will disable ASPM later */
-		link->aspm_enabled = PCIE_LINK_STATE_ASPM_ALL;
-		link->aspm_disable = PCIE_LINK_STATE_ASPM_ALL;
-		return;
+		link->aspm_enabled = PCIE_LINK_STATE_ASPM_ALL;	/* [한국어] "지금 전부 켜져 있다" 고 기록하고 */
+		link->aspm_disable = PCIE_LINK_STATE_ASPM_ALL;	/* [한국어] "전부 금지" 로 표시한다. 그러면 다음 pcie_config_aspm_link 가 반드시 모두 끄게 된다 — 처음부터 0 으로 두면 "이미 꺼져 있다" 로 판단해 아무것도 하지 않는다 */
+		return;	/* [한국어] 클럭도 링크도 건드리지 않고 끝낸다 */
 	}
 
 	/*
 	 * If ASPM not supported, don't mess with the clocks and link,
 	 * bail out now.
 	 */
-	if (!(parent->aspm_l0s_support && child->aspm_l0s_support) &&
-	    !(parent->aspm_l1_support && child->aspm_l1_support))
-		return;
+	if (!(parent->aspm_l0s_support && child->aspm_l0s_support) &&	/* [한국어] 양 끝이 모두 L0s 를 지원하지도 않고 */
+	    !(parent->aspm_l1_support && child->aspm_l1_support))	/* [한국어] 양 끝이 모두 L1 을 지원하지도 않으면 */
+		return;	/* [한국어] 할 수 있는 것이 없다. 위 영어 주석대로 클럭과 링크를 건드리지 않고 나간다 */
 
 	/* Configure common clock before checking latencies */
-	pcie_aspm_configure_common_clock(link);
+	pcie_aspm_configure_common_clock(link);	/* [한국어] 클럭 설정이 exit latency 를 바꾸므로 반드시 지연 검사보다 먼저 한다 */
 
 	/*
 	 * Re-read upstream/downstream components' register state after
@@ -1877,16 +1877,16 @@ static void pcie_aspm_cap_init(struct pcie_link_state *link, int blacklist)
 	 * read-only Link Capabilities may change depending on common clock
 	 * configuration (PCIe r5.0, sec 7.5.3.6).
 	 */
-	pcie_capability_read_word(parent, PCI_EXP_LNKCTL, &parent_lnkctl);
-	pcie_capability_read_word(child, PCI_EXP_LNKCTL, &child_lnkctl);
+	pcie_capability_read_word(parent, PCI_EXP_LNKCTL, &parent_lnkctl);	/* [한국어] 클럭 설정 뒤에 다시 읽는다 — 위 영어 주석대로 읽기 전용인 LNKCAP 의 exit latency 조차 공통 클럭 구성에 따라 값이 달라진다(PCIe r5.0 sec 7.5.3.6) */
+	pcie_capability_read_word(child, PCI_EXP_LNKCTL, &child_lnkctl);	/* [한국어] 하류 쪽도 다시 읽는다 */
 
 	/* Disable L0s/L1 before updating L1SS config */
-	if (FIELD_GET(PCI_EXP_LNKCTL_ASPMC, child_lnkctl) ||
-	    FIELD_GET(PCI_EXP_LNKCTL_ASPMC, parent_lnkctl)) {
-		pcie_capability_write_word(child, PCI_EXP_LNKCTL,
-					   child_lnkctl & ~PCI_EXP_LNKCTL_ASPMC);
-		pcie_capability_write_word(parent, PCI_EXP_LNKCTL,
-					   parent_lnkctl & ~PCI_EXP_LNKCTL_ASPMC);
+	if (FIELD_GET(PCI_EXP_LNKCTL_ASPMC, child_lnkctl) ||	/* [한국어] 하류에 ASPM 이 켜져 있거나 */
+	    FIELD_GET(PCI_EXP_LNKCTL_ASPMC, parent_lnkctl)) {	/* [한국어] 상류에 켜져 있으면 L1SS 를 건드릴 수 없다 */
+		pcie_capability_write_word(child, PCI_EXP_LNKCTL,	/* [한국어] 하류의 ASPM 만 끈다 */
+					   child_lnkctl & ~PCI_EXP_LNKCTL_ASPMC);	/* [한국어] ~ASPMC 로 그 두 비트만 지운다 */
+		pcie_capability_write_word(parent, PCI_EXP_LNKCTL,	/* [한국어] 상류도 끈다 */
+					   parent_lnkctl & ~PCI_EXP_LNKCTL_ASPMC);	/* [한국어] 같은 방식 */
 	}
 
 	/*
@@ -1896,45 +1896,45 @@ static void pcie_aspm_cap_init(struct pcie_link_state *link, int blacklist)
 	 * given link unless components on both sides of the link each
 	 * support L0s.
 	 */
-	if (parent->aspm_l0s_support && child->aspm_l0s_support)
-		link->aspm_support |= PCIE_LINK_STATE_L0S;
+	if (parent->aspm_l0s_support && child->aspm_l0s_support)	/* [한국어] 양 끝이 모두 지원해야 한다. 위 영어 주석이 못 박듯 한쪽만 지원하는 L0s 는 어느 방향으로도 켜서는 안 된다 */
+		link->aspm_support |= PCIE_LINK_STATE_L0S;	/* [한국어] 지원 목록에 넣는다 */
 
-	if (child_lnkctl & PCI_EXP_LNKCTL_ASPM_L0S)
-		link->aspm_enabled |= PCIE_LINK_STATE_L0S_UP;
-	if (parent_lnkctl & PCI_EXP_LNKCTL_ASPM_L0S)
-		link->aspm_enabled |= PCIE_LINK_STATE_L0S_DW;
+	if (child_lnkctl & PCI_EXP_LNKCTL_ASPM_L0S)	/* [한국어] 하류 장치의 LNKCTL 에 L0s 가 켜져 있다는 것은 */
+		link->aspm_enabled |= PCIE_LINK_STATE_L0S_UP;	/* [한국어] 하류가 상류로 보내는 방향이 재워진다는 뜻 — 그래서 UP 비트다 */
+	if (parent_lnkctl & PCI_EXP_LNKCTL_ASPM_L0S)	/* [한국어] 상류 포트 쪽에 켜져 있으면 */
+		link->aspm_enabled |= PCIE_LINK_STATE_L0S_DW;	/* [한국어] 상류가 하류로 보내는 방향 — DW 비트. 비트 이름은 "재워지는 트래픽의 방향" 을 가리킨다 */
 
 	/* Setup L1 state */
-	if (parent->aspm_l1_support && child->aspm_l1_support)
-		link->aspm_support |= PCIE_LINK_STATE_L1;
+	if (parent->aspm_l1_support && child->aspm_l1_support)	/* [한국어] L1 도 양 끝이 모두 지원해야 한다 */
+		link->aspm_support |= PCIE_LINK_STATE_L1;	/* [한국어] 지원 목록에 넣는다 */
 
-	if (parent_lnkctl & child_lnkctl & PCI_EXP_LNKCTL_ASPM_L1)
-		link->aspm_enabled |= PCIE_LINK_STATE_L1;
+	if (parent_lnkctl & child_lnkctl & PCI_EXP_LNKCTL_ASPM_L1)	/* [한국어] L1 은 방향 구분이 없으므로 양 끝이 모두 켜져 있어야 켜진 것으로 본다 */
+		link->aspm_enabled |= PCIE_LINK_STATE_L1;	/* [한국어] 현재 상태로 기록 */
 
-	aspm_l1ss_init(link);
+	aspm_l1ss_init(link);	/* [한국어] 이제 L0s/L1 이 꺼진 상태이므로 L1SS 를 건드릴 수 있다 */
 
 	/* Restore L0s/L1 if they were enabled */
-	if (FIELD_GET(PCI_EXP_LNKCTL_ASPMC, child_lnkctl) ||
-	    FIELD_GET(PCI_EXP_LNKCTL_ASPMC, parent_lnkctl)) {
-		pcie_capability_write_word(parent, PCI_EXP_LNKCTL, parent_lnkctl);
-		pcie_capability_write_word(child, PCI_EXP_LNKCTL, child_lnkctl);
+	if (FIELD_GET(PCI_EXP_LNKCTL_ASPMC, child_lnkctl) ||	/* [한국어] 처음에 껐던 경우에만 */
+	    FIELD_GET(PCI_EXP_LNKCTL_ASPMC, parent_lnkctl)) {	/* [한국어] 판정 조건이 위와 같아야 원본을 정확히 되돌린다 */
+		pcie_capability_write_word(parent, PCI_EXP_LNKCTL, parent_lnkctl);	/* [한국어] 켤 때는 상류부터 */
+		pcie_capability_write_word(child, PCI_EXP_LNKCTL, child_lnkctl);	/* [한국어] 그다음 하류. 규격의 순서 규칙이다 */
 	}
 
 	/* Save default state */
-	link->aspm_default = link->aspm_enabled;
+	link->aspm_default = link->aspm_enabled;	/* [한국어] 지금 값을 기본값으로 박아 둔다 — "펌웨어가 남긴 상태" 가 곧 POLICY_DEFAULT 의 답이 된다 */
 
-	pcie_aspm_override_default_link_state(link);
+	pcie_aspm_override_default_link_state(link);	/* [한국어] devicetree 플랫폼이면 여기서 기본값을 덧칠한다 */
 
 	/* Setup initial capable state. Will be updated later */
-	link->aspm_capable = link->aspm_support;
+	link->aspm_capable = link->aspm_support;	/* [한국어] 가능 범위를 지원 범위로 초기화한다. 아래 지연 검사가 여기서 깎아 나간다 */
 
 	/* Get and check endpoint acceptable latencies */
-	list_for_each_entry(child, &linkbus->devices, bus_list) {
-		if (pci_pcie_type(child) != PCI_EXP_TYPE_ENDPOINT &&
-		    pci_pcie_type(child) != PCI_EXP_TYPE_LEG_END)
-			continue;
+	list_for_each_entry(child, &linkbus->devices, bus_list) {	/* [한국어] 하류 버스의 모든 장치를 훑는다 */
+		if (pci_pcie_type(child) != PCI_EXP_TYPE_ENDPOINT &&	/* [한국어] 엔드포인트가 아니고 */
+		    pci_pcie_type(child) != PCI_EXP_TYPE_LEG_END)	/* [한국어] legacy 엔드포인트도 아니면 — 브리지나 스위치 포트다 */
+			continue;	/* [한국어] acceptable latency 를 광고하는 것은 엔드포인트뿐이라 건너뛴다 */
 
-		pcie_aspm_check_latency(child);
+		pcie_aspm_check_latency(child);	/* [한국어] 이 엔드포인트를 기준으로 경로 전체의 지연을 검사해 capable 을 깎는다 */
 	}
 }
 
@@ -1970,17 +1970,17 @@ static void pcie_aspm_cap_init(struct pcie_link_state *link, int blacklist)
  */
 static void pcie_config_aspm_l1ss(struct pcie_link_state *link, u32 state)
 {
-	u32 val = 0;
-	struct pci_dev *child = link->downstream, *parent = link->pdev;
+	u32 val = 0;	/* [한국어] 레지스터에 쓸 값. 0 에서 시작해 필요한 비트를 얹는다 */
+	struct pci_dev *child = link->downstream, *parent = link->pdev;	/* [한국어] child = 하류 function 0, parent = 상류 포트 */
 
-	if (state & PCIE_LINK_STATE_L1_1)
-		val |= PCI_L1SS_CTL1_ASPM_L1_1;
-	if (state & PCIE_LINK_STATE_L1_2)
-		val |= PCI_L1SS_CTL1_ASPM_L1_2;
-	if (state & PCIE_LINK_STATE_L1_1_PCIPM)
-		val |= PCI_L1SS_CTL1_PCIPM_L1_1;
-	if (state & PCIE_LINK_STATE_L1_2_PCIPM)
-		val |= PCI_L1SS_CTL1_PCIPM_L1_2;
+	if (state & PCIE_LINK_STATE_L1_1)	/* [한국어] 커널 표현의 ASPM L1.1 이 요청되었으면 */
+		val |= PCI_L1SS_CTL1_ASPM_L1_1;	/* [한국어] 하드웨어 비트로 옮긴다 */
+	if (state & PCIE_LINK_STATE_L1_2)	/* [한국어] ASPM L1.2 가 요청되었으면 */
+		val |= PCI_L1SS_CTL1_ASPM_L1_2;	/* [한국어] 하드웨어 비트로 */
+	if (state & PCIE_LINK_STATE_L1_1_PCIPM)	/* [한국어] PCI-PM L1.1 이 요청되었으면 */
+		val |= PCI_L1SS_CTL1_PCIPM_L1_1;	/* [한국어] 하드웨어 비트로 */
+	if (state & PCIE_LINK_STATE_L1_2_PCIPM)	/* [한국어] PCI-PM L1.2 가 요청되었으면 */
+		val |= PCI_L1SS_CTL1_PCIPM_L1_2;	/* [한국어] 하드웨어 비트로 */
 
 	/*
 	 * PCIe r6.2, sec 5.5.4, rules for enabling L1 PM Substates:
@@ -1991,16 +1991,16 @@ static void pcie_config_aspm_l1ss(struct pcie_link_state *link, u32 state)
 	 */
 
 	/* Disable all L1 substates */
-	pci_clear_and_set_config_dword(child, child->l1ss + PCI_L1SS_CTL1,
-				       PCI_L1SS_CTL1_L1SS_MASK, 0);
-	pci_clear_and_set_config_dword(parent, parent->l1ss + PCI_L1SS_CTL1,
-				       PCI_L1SS_CTL1_L1SS_MASK, 0);
+	pci_clear_and_set_config_dword(child, child->l1ss + PCI_L1SS_CTL1,	/* [한국어] 먼저 하류의 모든 하위 상태를 끈다 */
+				       PCI_L1SS_CTL1_L1SS_MASK, 0);	/* [한국어] L1SS_MASK 는 네 enable 비트를 모두 가리킨다. 0 을 세운다 = 전부 끈다 */
+	pci_clear_and_set_config_dword(parent, parent->l1ss + PCI_L1SS_CTL1,	/* [한국어] 그다음 상류 — 끌 때는 하류 먼저라는 규격 순서 */
+				       PCI_L1SS_CTL1_L1SS_MASK, 0);	/* [한국어] 같은 마스크로 전부 끈다 */
 
 	/* Enable what we need to enable */
-	pci_clear_and_set_config_dword(parent, parent->l1ss + PCI_L1SS_CTL1,
-				       PCI_L1SS_CTL1_L1SS_MASK, val);
-	pci_clear_and_set_config_dword(child, child->l1ss + PCI_L1SS_CTL1,
-				       PCI_L1SS_CTL1_L1SS_MASK, val);
+	pci_clear_and_set_config_dword(parent, parent->l1ss + PCI_L1SS_CTL1,	/* [한국어] 이제 필요한 것만 켠다. 켤 때는 상류 먼저 */
+				       PCI_L1SS_CTL1_L1SS_MASK, val);	/* [한국어] 같은 마스크 자리에 계산해 둔 val 을 세운다 */
+	pci_clear_and_set_config_dword(child, child->l1ss + PCI_L1SS_CTL1,	/* [한국어] 그다음 하류 */
+				       PCI_L1SS_CTL1_L1SS_MASK, val);	/* [한국어] 같은 값. 원하는 상태만 골라 한 번에 쓰지 않고 네 번 쓰는 이유가 이 순서 제약이다 */
 }
 
 /* [한국어]
@@ -2081,34 +2081,34 @@ static void pcie_config_aspm_dev(struct pci_dev *pdev, u32 val)
  */
 static void pcie_config_aspm_link(struct pcie_link_state *link, u32 state)
 {
-	u32 upstream = 0, dwstream = 0;
-	struct pci_dev *child = link->downstream, *parent = link->pdev;
-	struct pci_bus *linkbus = parent->subordinate;
+	u32 upstream = 0, dwstream = 0;	/* [한국어] 레지스터에 쓸 값 두 벌. upstream 은 상류 포트에, dwstream 은 하류 함수들에 쓴다 */
+	struct pci_dev *child = link->downstream, *parent = link->pdev;	/* [한국어] child = 하류 function 0(뒤에서 순회 커서로 재사용된다), parent = 상류 포트 */
+	struct pci_bus *linkbus = parent->subordinate;	/* [한국어] 하류 버스. 다중 함수를 모두 훑기 위해 필요하다 */
 
 	/* Enable only the states that were not explicitly disabled */
-	state &= (link->aspm_capable & ~link->aspm_disable);
+	state &= (link->aspm_capable & ~link->aspm_disable);	/* [한국어] 세 벌의 필터 중 첫째 — 지연 검사를 통과했고(capable) 아무도 금지하지 않은(~disable) 것만 남긴다 */
 
 	/* Can't enable any substates if L1 is not enabled */
-	if (!(state & PCIE_LINK_STATE_L1))
-		state &= ~PCIE_LINK_STATE_L1SS;
+	if (!(state & PCIE_LINK_STATE_L1))	/* [한국어] L1 이 빠졌으면 */
+		state &= ~PCIE_LINK_STATE_L1SS;	/* [한국어] 그 안의 하위 상태도 전부 뺀다. L1 밖에서는 의미가 없기 때문 */
 
 	/* Spec says both ports must be in D0 before enabling PCI PM substates*/
-	if (parent->current_state != PCI_D0 || child->current_state != PCI_D0) {
-		state &= ~PCIE_LINK_STATE_L1_SS_PCIPM;
-		state |= (link->aspm_enabled & PCIE_LINK_STATE_L1_SS_PCIPM);
+	if (parent->current_state != PCI_D0 || child->current_state != PCI_D0) {	/* [한국어] 양 끝 중 하나라도 D0 가 아니면 PCI-PM 하위 상태를 건드릴 수 없다(PCIe r6.0 sec 5.5.4) */
+		state &= ~PCIE_LINK_STATE_L1_SS_PCIPM;	/* [한국어] 요청에서 그 비트들을 빼고 */
+		state |= (link->aspm_enabled & PCIE_LINK_STATE_L1_SS_PCIPM);	/* [한국어] 지금 켜져 있는 값을 도로 넣는다 — 건드리지 못하는 비트를 "꺼졌다" 고 기록하면 aspm_enabled 가 하드웨어와 어긋난다 */
 	}
 
 	/* Nothing to do if the link is already in the requested state */
-	if (link->aspm_enabled == state)
-		return;
+	if (link->aspm_enabled == state)	/* [한국어] 이미 원하는 상태면 */
+		return;	/* [한국어] 레지스터를 건드리지 않는다. 링크를 잠시라도 깨우는 비용을 아낀다 */
 	/* Convert ASPM state to upstream/downstream ASPM register state */
-	if (state & PCIE_LINK_STATE_L0S_UP)
-		dwstream |= PCI_EXP_LNKCTL_ASPM_L0S;
-	if (state & PCIE_LINK_STATE_L0S_DW)
-		upstream |= PCI_EXP_LNKCTL_ASPM_L0S;
-	if (state & PCIE_LINK_STATE_L1) {
-		upstream |= PCI_EXP_LNKCTL_ASPM_L1;
-		dwstream |= PCI_EXP_LNKCTL_ASPM_L1;
+	if (state & PCIE_LINK_STATE_L0S_UP)	/* [한국어] L0S_UP = 하류가 상류로 보내는 방향을 재운다 */
+		dwstream |= PCI_EXP_LNKCTL_ASPM_L0S;	/* [한국어] 그 방향을 제어하는 것은 하류 장치이므로 dwstream 에 얹는다 */
+	if (state & PCIE_LINK_STATE_L0S_DW)	/* [한국어] L0S_DW = 상류가 하류로 보내는 방향 */
+		upstream |= PCI_EXP_LNKCTL_ASPM_L0S;	/* [한국어] 그 방향을 제어하는 것은 상류 포트이므로 upstream 에 얹는다 */
+	if (state & PCIE_LINK_STATE_L1) {	/* [한국어] L1 은 방향 구분이 없다 */
+		upstream |= PCI_EXP_LNKCTL_ASPM_L1;	/* [한국어] 상류에도 */
+		dwstream |= PCI_EXP_LNKCTL_ASPM_L1;	/* [한국어] 하류에도 같은 비트를 얹는다 */
 	}
 
 	/*
@@ -2125,24 +2125,24 @@ static void pcie_config_aspm_link(struct pcie_link_state *link, u32 state)
 	 * Sec 7.5.3.7 also recommends programming the same ASPM Control
 	 * value for all functions of a multi-function device.
 	 */
-	list_for_each_entry(child, &linkbus->devices, bus_list)
-		pcie_config_aspm_dev(child, 0);
-	pcie_config_aspm_dev(parent, 0);
+	list_for_each_entry(child, &linkbus->devices, bus_list)	/* [한국어] 먼저 하류의 모든 함수에서 ASPM 을 끈다 */
+		pcie_config_aspm_dev(child, 0);	/* [한국어] 0 = 전부 끄기. 다중 함수 장치는 모든 함수에 같은 값을 쓰라는 권고가 있다(sec 7.5.3.7) */
+	pcie_config_aspm_dev(parent, 0);	/* [한국어] 그다음 상류 — 끌 때는 하류 먼저라는 규격 순서 */
 
-	if (link->aspm_capable & PCIE_LINK_STATE_L1SS)
-		pcie_config_aspm_l1ss(link, state);
+	if (link->aspm_capable & PCIE_LINK_STATE_L1SS)	/* [한국어] L1SS 를 쓸 수 있는 링크라면 */
+		pcie_config_aspm_l1ss(link, state);	/* [한국어] 지금 L1 이 꺼져 있으므로 L1SS 를 안전하게 설정할 수 있다 */
 
-	pcie_config_aspm_dev(parent, upstream);
-	list_for_each_entry(child, &linkbus->devices, bus_list)
-		pcie_config_aspm_dev(child, dwstream);
+	pcie_config_aspm_dev(parent, upstream);	/* [한국어] 켤 때는 상류 먼저 */
+	list_for_each_entry(child, &linkbus->devices, bus_list)	/* [한국어] 그다음 하류의 모든 함수 */
+		pcie_config_aspm_dev(child, dwstream);	/* [한국어] 각 함수에 같은 값 */
 
-	link->aspm_enabled = state;
+	link->aspm_enabled = state;	/* [한국어] 실제 레지스터와 맞춘 새 상태를 기록한다 */
 
 	/* Update latest ASPM configuration in saved context */
-	pci_save_aspm_l1ss_state(link->downstream);
-	pci_update_aspm_saved_state(link->downstream);
-	pci_save_aspm_l1ss_state(parent);
-	pci_update_aspm_saved_state(parent);
+	pci_save_aspm_l1ss_state(link->downstream);	/* [한국어] 하류 쪽 L1SS 저장본 갱신 */
+	pci_update_aspm_saved_state(link->downstream);	/* [한국어] 하류 쪽 LNKCTL 저장본 갱신 */
+	pci_save_aspm_l1ss_state(parent);	/* [한국어] 상류 쪽 L1SS 저장본. 이 갱신이 빠지면 다음 resume 이 옛 설정을 되살려 방금 한 일을 되돌린다 */
+	pci_update_aspm_saved_state(parent);	/* [한국어] 상류 쪽 LNKCTL 저장본 */
 }
 
 /* [한국어]
@@ -2232,16 +2232,16 @@ static void free_link_state(struct pcie_link_state *link)
  */
 static int pcie_aspm_sanity_check(struct pci_dev *pdev)
 {
-	struct pci_dev *child;
-	u32 reg32;
+	struct pci_dev *child;	/* [한국어] 순회 커서 */
+	u32 reg32;	/* [한국어] DEVCAP 을 담을 임시 변수 */
 
 	/*
 	 * Some functions in a slot might not all be PCIe functions,
 	 * very strange. Disable ASPM for the whole slot
 	 */
-	list_for_each_entry(child, &pdev->subordinate->devices, bus_list) {
-		if (!pci_is_pcie(child))
-			return -EINVAL;
+	list_for_each_entry(child, &pdev->subordinate->devices, bus_list) {	/* [한국어] 이 포트 아래의 모든 함수를 확인한다 */
+		if (!pci_is_pcie(child))	/* [한국어] PCIe 가 아닌 함수가 섞여 있으면 — 위 영어 주석이 "very strange" 라 적은 상황 */
+			return -EINVAL;	/* [한국어] 슬롯 전체를 blacklist 로 넘긴다 */
 
 		/*
 		 * If ASPM is disabled then we're not going to change
@@ -2249,20 +2249,20 @@ static int pcie_aspm_sanity_check(struct pci_dev *pdev)
 		 * pre-1.1 device
 		 */
 
-		if (aspm_disabled)
-			continue;
+		if (aspm_disabled)	/* [한국어] 커널이 어차피 레지스터를 건드리지 않는 상황이면 */
+			continue;	/* [한국어] 구형 장치라도 펌웨어 설정을 그대로 두는 것이 맞다. blacklist 로 표시하면 오히려 pcie_aspm_cap_init 이 "전부 끄라" 는 상태를 만들어 펌웨어 설정을 뒤엎는다 */
 
 		/*
 		 * Disable ASPM for pre-1.1 PCIe device, we follow MS to use
 		 * RBER bit to determine if a function is 1.1 version device
 		 */
-		pcie_capability_read_dword(child, PCI_EXP_DEVCAP, &reg32);
-		if (!(reg32 & PCI_EXP_DEVCAP_RBER) && !aspm_force) {
-			pci_info(child, "disabling ASPM on pre-1.1 PCIe device.  You can enable it with 'pcie_aspm=force'\n");
-			return -EINVAL;
+		pcie_capability_read_dword(child, PCI_EXP_DEVCAP, &reg32);	/* [한국어] Device Capabilities 를 읽는다 */
+		if (!(reg32 & PCI_EXP_DEVCAP_RBER) && !aspm_force) {	/* [한국어] RBER(Role-Based Error Reporting)은 PCIe 1.1 에서 추가된 비트라, 그 유무로 판 번호를 가늠한다(규격에 판 번호 필드가 없어 마이크로소프트가 쓰던 요령을 따른다). force 가 아니면 */
+			pci_info(child, "disabling ASPM on pre-1.1 PCIe device.  You can enable it with 'pcie_aspm=force'\n");	/* [한국어] 어떻게 되살릴 수 있는지까지 알려 준다 */
+			return -EINVAL;	/* [한국어] blacklist 로 넘긴다 */
 		}
 	}
-	return 0;
+	return 0;	/* [한국어] 모든 함수가 통과했다 = 이 링크에서 ASPM 을 믿고 써도 된다 */
 }
 
 /* [한국어]
@@ -2298,15 +2298,15 @@ static int pcie_aspm_sanity_check(struct pci_dev *pdev)
  */
 static struct pcie_link_state *alloc_pcie_link_state(struct pci_dev *pdev)
 {
-	struct pcie_link_state *link;
+	struct pcie_link_state *link;	/* [한국어] 만들 링크 상태 */
 
-	link = kzalloc_obj(*link);
-	if (!link)
-		return NULL;
+	link = kzalloc_obj(*link);	/* [한국어] kzalloc_obj 는 *link 의 크기만큼 0 으로 채워 할당한다. 0 초기화 덕에 parent/root 등이 NULL 로 시작한다 */
+	if (!link)	/* [한국어] 메모리가 없으면 */
+		return NULL;	/* [한국어] 호출자가 blacklist 처리 없이 그냥 포기한다 */
 
-	INIT_LIST_HEAD(&link->sibling);
-	link->pdev = pdev;
-	link->downstream = pci_function_0(pdev->subordinate);
+	INIT_LIST_HEAD(&link->sibling);	/* [한국어] 목록 고리를 자기 자신을 가리키게 초기화한다 */
+	link->pdev = pdev;	/* [한국어] 이 링크의 상류 쪽 = 이 구조체가 매달릴 장치 */
+	link->downstream = pci_function_0(pdev->subordinate);	/* [한국어] 하류 대표를 function 0 으로 잡는다. L1SS capability 가 거기에만 있기 때문 */
 
 	/*
 	 * Root Ports and PCI/PCI-X to PCIe Bridges are roots of PCIe
@@ -2315,26 +2315,26 @@ static struct pcie_link_state *alloc_pcie_link_state(struct pci_dev *pdev)
 	 * a switch may become the root of the link state chain for all
 	 * its subordinate endpoints.
 	 */
-	if (pci_pcie_type(pdev) == PCI_EXP_TYPE_ROOT_PORT ||
-	    pci_pcie_type(pdev) == PCI_EXP_TYPE_PCIE_BRIDGE ||
-	    !pdev->bus->parent->self) {
-		link->root = link;
-	} else {
-		struct pcie_link_state *parent;
+	if (pci_pcie_type(pdev) == PCI_EXP_TYPE_ROOT_PORT ||	/* [한국어] Root Port 이거나 */
+	    pci_pcie_type(pdev) == PCI_EXP_TYPE_PCIE_BRIDGE ||	/* [한국어] PCI/PCI-X to PCIe Bridge 이거나 */
+	    !pdev->bus->parent->self) {	/* [한국어] 상위 버스에 브리지가 없으면 — 위 영어 주석대로 Root Port 를 아예 두지 않는 호스트 구현에서는 스위치의 하류 포트가 사슬의 뿌리가 된다 */
+		link->root = link;	/* [한국어] 자기 자신이 뿌리다 */
+	} else {	/* [한국어] 그 밖의 경우 — 스위치 아래에 매달린 링크 */
+		struct pcie_link_state *parent;	/* [한국어] 상위 링크를 담을 임시 변수 */
 
-		parent = pdev->bus->parent->self->link_state;
-		if (!parent) {
-			kfree(link);
-			return NULL;
+		parent = pdev->bus->parent->self->link_state;	/* [한국어] 상위 버스의 브리지에 매달린 링크 상태 */
+		if (!parent) {	/* [한국어] 상위 링크가 아직 없으면 계층을 이을 수 없다 */
+			kfree(link);	/* [한국어] pdev->link_state 를 아직 건드리지 않았으므로 free_link_state 가 아니라 그냥 kfree 로 끝난다 */
+			return NULL;	/* [한국어] 호출자가 NULL 을 보고 포기한다 */
 		}
 
-		link->parent = parent;
-		link->root = link->parent->root;
+		link->parent = parent;	/* [한국어] 한 단계 위 링크를 건다. 이 사슬이 지연 누적과 정책 적용의 경로가 된다 */
+		link->root = link->parent->root;	/* [한국어] 뿌리는 상위 것을 그대로 물려받는다 */
 	}
 
-	list_add(&link->sibling, &link_list);
-	pdev->link_state = link;
-	return link;
+	list_add(&link->sibling, &link_list);	/* [한국어] 전역 평면 목록에 넣는다. 정책 변경 시 전부 순회하기 위해서다 */
+	pdev->link_state = link;	/* [한국어] 장치에서 링크로 가는 역방향 포인터 */
+	return link;	/* [한국어] 호출자가 이어서 cap_init 등을 부른다 */
 }
 
 /* [한국어]
@@ -2360,10 +2360,10 @@ static struct pcie_link_state *alloc_pcie_link_state(struct pci_dev *pdev)
  */
 static void pcie_aspm_update_sysfs_visibility(struct pci_dev *pdev)
 {
-	struct pci_dev *child;
+	struct pci_dev *child;	/* [한국어] 순회 커서 */
 
-	list_for_each_entry(child, &pdev->subordinate->devices, bus_list)
-		sysfs_update_group(&child->dev.kobj, &aspm_ctrl_attr_group);
+	list_for_each_entry(child, &pdev->subordinate->devices, bus_list)	/* [한국어] link/ 속성은 링크가 아니라 각 하류 장치의 kobject 아래에 달리므로 전부 돌아야 한다 */
+		sysfs_update_group(&child->dev.kobj, &aspm_ctrl_attr_group);	/* [한국어] is_visible 콜백을 다시 돌려 노출 여부를 재판정하게 한다. 링크 상태가 만들어지기 전에는 "능력 없음" 으로 감춰져 있었다 */
 }
 
 /*
@@ -2409,45 +2409,45 @@ static void pcie_aspm_update_sysfs_visibility(struct pci_dev *pdev)
  */
 void pcie_aspm_init_link_state(struct pci_dev *pdev)
 {
-	struct pcie_link_state *link;
-	int blacklist = !!pcie_aspm_sanity_check(pdev);
+	struct pcie_link_state *link;	/* [한국어] 만들 링크 상태 */
+	int blacklist = !!pcie_aspm_sanity_check(pdev);	/* [한국어] !! 로 0/1 로 접는다. sanity_check 는 -EINVAL 을 돌려주므로 그대로 쓰면 참/거짓이 뒤집힌다 */
 
-	if (!aspm_support_enabled)
-		return;
+	if (!aspm_support_enabled)	/* [한국어] "pcie_aspm=off" 이면 링크 상태 객체 자체를 만들지 않는다 */
+		return;	/* [한국어] ASPM 에 전혀 관여하지 않는다 */
 
-	if (pdev->link_state)
-		return;
+	if (pdev->link_state)	/* [한국어] 이미 만들어져 있으면 */
+		return;	/* [한국어] 중복 생성을 막는다 */
 
 	/*
 	 * We allocate pcie_link_state for the component on the upstream
 	 * end of a Link, so there's nothing to do unless this device is
 	 * downstream port.
 	 */
-	if (!pcie_downstream_port(pdev))
-		return;
+	if (!pcie_downstream_port(pdev))	/* [한국어] 링크 상태는 하류 포트에만 매단다. 엔드포인트나 상류 포트에 대해서는 만들 것이 없다 */
+		return;	/* [한국어] 해당 없음 */
 
 	/* VIA has a strange chipset, root port is under a bridge */
-	if (pci_pcie_type(pdev) == PCI_EXP_TYPE_ROOT_PORT &&
-	    pdev->bus->self)
-		return;
+	if (pci_pcie_type(pdev) == PCI_EXP_TYPE_ROOT_PORT &&	/* [한국어] Root Port 인데 */
+	    pdev->bus->self)	/* [한국어] 그 위에 또 브리지가 있는 이상한 구성(영어 주석: VIA 칩셋) */
+		return;	/* [한국어] 계층 계산이 성립하지 않으므로 건너뛴다 */
 
-	down_read(&pci_bus_sem);
-	if (list_empty(&pdev->subordinate->devices))
-		goto out;
+	down_read(&pci_bus_sem);	/* [한국어] 버스 목록을 훑는 동안 장치가 사라지면 안 된다. 잠금 순서는 pci_bus_sem -> aspm_lock */
+	if (list_empty(&pdev->subordinate->devices))	/* [한국어] 하류에 장치가 하나도 없으면 링크라 할 것이 없다 */
+		goto out;	/* [한국어] 아직 aspm_lock 을 잡기 전이라 out 라벨로(세마포어만 푼다) */
 
-	mutex_lock(&aspm_lock);
-	link = alloc_pcie_link_state(pdev);
-	if (!link)
-		goto unlock;
+	mutex_lock(&aspm_lock);	/* [한국어] 이제 링크 상태를 만지므로 aspm_lock 을 잡는다 */
+	link = alloc_pcie_link_state(pdev);	/* [한국어] 링크 상태를 만들어 계층과 목록에 건다 */
+	if (!link)	/* [한국어] 할당 실패나 부모 링크 부재 */
+		goto unlock;	/* [한국어] unlock 라벨로 — 뮤텍스와 세마포어를 모두 푼다 */
 	/*
 	 * Setup initial ASPM state. Note that we need to configure
 	 * upstream links also because capable state of them can be
 	 * update through pcie_aspm_cap_init().
 	 */
-	pcie_aspm_cap_init(link, blacklist);
+	pcie_aspm_cap_init(link, blacklist);	/* [한국어] 능력/현재 상태/기본값/가능 범위를 모두 채운다. 위 영어 주석대로 이 안의 지연 검사가 상위 링크들의 capable 도 함께 깎는다 */
 
 	/* Setup initial Clock PM state */
-	pcie_clkpm_cap_init(link, blacklist);
+	pcie_clkpm_cap_init(link, blacklist);	/* [한국어] CLKPM 쪽도 같은 방식으로 초기화 */
 
 	/*
 	 * At this stage drivers haven't had an opportunity to change the
@@ -2457,13 +2457,13 @@ void pcie_aspm_init_link_state(struct pci_dev *pdev)
 	 * the BIOS's expectation, we'll do so once pci_enable_device() is
 	 * called.
 	 */
-	if (aspm_policy != POLICY_POWERSAVE &&
-	    aspm_policy != POLICY_POWER_SUPERSAVE) {
-		pcie_config_aspm_path(link);
-		pcie_set_clkpm(link, policy_to_clkpm_state(link));
+	if (aspm_policy != POLICY_POWERSAVE &&	/* [한국어] 정책이 절전이 아니고 */
+	    aspm_policy != POLICY_POWER_SUPERSAVE) {	/* [한국어] 더 깊은 절전도 아니면 — 즉 performance 나 default 면 */
+		pcie_config_aspm_path(link);	/* [한국어] 지금 곧바로 적용한다. 이 방향은 상태를 끄거나 유지하는 쪽이라 언제 해도 안전하다 */
+		pcie_set_clkpm(link, policy_to_clkpm_state(link));	/* [한국어] CLKPM 도 함께. 절전 정책일 때 미루는 이유는 위 영어 주석이 밝힌다 — 드라이버가 붙기 전에 결함 있는 하드웨어에서 ASPM 을 켜면 드라이버가 끄기도 전에 장치가 망가질 수 있다 */
 	}
 
-	pcie_aspm_update_sysfs_visibility(pdev);
+	pcie_aspm_update_sysfs_visibility(pdev);	/* [한국어] 이제 capable 이 정해졌으므로 sysfs 속성의 노출 여부를 다시 판정하게 한다 */
 
 unlock:
 	mutex_unlock(&aspm_lock);
@@ -2497,16 +2497,16 @@ out:
  */
 void pci_bridge_reconfigure_ltr(struct pci_dev *pdev)
 {
-	struct pci_dev *bridge;
-	u32 ctl;
+	struct pci_dev *bridge;	/* [한국어] 상위 브리지 */
+	u32 ctl;	/* [한국어] DEVCTL2 를 담을 임시 변수 */
 
-	bridge = pci_upstream_bridge(pdev);
-	if (bridge && bridge->ltr_path) {
-		pcie_capability_read_dword(bridge, PCI_EXP_DEVCTL2, &ctl);
-		if (!(ctl & PCI_EXP_DEVCTL2_LTR_EN)) {
-			pci_dbg(bridge, "re-enabling LTR\n");
-			pcie_capability_set_word(bridge, PCI_EXP_DEVCTL2,
-						 PCI_EXP_DEVCTL2_LTR_EN);
+	bridge = pci_upstream_bridge(pdev);	/* [한국어] 한 단계 위 브리지 */
+	if (bridge && bridge->ltr_path) {	/* [한국어] 브리지가 있고 그 브리지까지 LTR 경로가 성립할 때만 — ltr_path 가 거짓인데 켜면 경로가 끊긴 채 보고만 나가 상류가 잘못 판단한다 */
+		pcie_capability_read_dword(bridge, PCI_EXP_DEVCTL2, &ctl);	/* [한국어] Device Control 2 를 읽는다. LTR Enable 이 여기 있다 */
+		if (!(ctl & PCI_EXP_DEVCTL2_LTR_EN)) {	/* [한국어] 링크가 내려갔다 올라오면 하드웨어가 이 비트를 스스로 지울 수 있다 */
+			pci_dbg(bridge, "re-enabling LTR\n");	/* [한국어] 되살린다는 사실을 디버그 로그로 남긴다 */
+			pcie_capability_set_word(bridge, PCI_EXP_DEVCTL2,	/* [한국어] 그 비트만 세운다 */
+						 PCI_EXP_DEVCTL2_LTR_EN);	/* [한국어] LTR Enable */
 		}
 	}
 }
@@ -2549,44 +2549,44 @@ void pci_bridge_reconfigure_ltr(struct pci_dev *pdev)
  */
 void pci_configure_ltr(struct pci_dev *pdev)
 {
-	struct pci_host_bridge *host = pci_find_host_bridge(pdev->bus);
-	struct pci_dev *bridge;
-	u32 cap, ctl;
+	struct pci_host_bridge *host = pci_find_host_bridge(pdev->bus);	/* [한국어] 이 장치가 속한 호스트 브리지. native_ltr(펌웨어가 LTR 소유권을 넘겼는가)을 보기 위해 필요하다 */
+	struct pci_dev *bridge;	/* [한국어] 상위 브리지 */
+	u32 cap, ctl;	/* [한국어] cap = DEVCAP2, ctl = DEVCTL2 */
 
-	if (!pci_is_pcie(pdev))
-		return;
+	if (!pci_is_pcie(pdev))	/* [한국어] 전통 PCI 장치에는 LTR 이 없다 */
+		return;	/* [한국어] 할 일 없음 */
 
-	pcie_capability_read_dword(pdev, PCI_EXP_DEVCAP2, &cap);
-	if (!(cap & PCI_EXP_DEVCAP2_LTR))
-		return;
+	pcie_capability_read_dword(pdev, PCI_EXP_DEVCAP2, &cap);	/* [한국어] Device Capabilities 2 에 LTR 지원 비트가 있다 */
+	if (!(cap & PCI_EXP_DEVCAP2_LTR))	/* [한국어] 장치가 LTR 을 구현하지 않았으면 */
+		return;	/* [한국어] 켤 수 없다 */
 
-	pcie_capability_read_dword(pdev, PCI_EXP_DEVCTL2, &ctl);
-	if (ctl & PCI_EXP_DEVCTL2_LTR_EN) {
-		if (pci_pcie_type(pdev) == PCI_EXP_TYPE_ROOT_PORT) {
-			pdev->ltr_path = 1;
-			return;
+	pcie_capability_read_dword(pdev, PCI_EXP_DEVCTL2, &ctl);	/* [한국어] 현재 LTR Enable 상태 */
+	if (ctl & PCI_EXP_DEVCTL2_LTR_EN) {	/* [한국어] 펌웨어가 이미 켜 두었다면 그 판단을 존중하고 ltr_path 만 계승한다 */
+		if (pci_pcie_type(pdev) == PCI_EXP_TYPE_ROOT_PORT) {	/* [한국어] 이 장치가 Root Port 면 */
+			pdev->ltr_path = 1;	/* [한국어] 경로의 시작점이므로 무조건 경로가 성립한다 */
+			return;	/* [한국어] 끝 */
 		}
 
-		bridge = pci_upstream_bridge(pdev);
-		if (bridge && bridge->ltr_path)
-			pdev->ltr_path = 1;
-
+		bridge = pci_upstream_bridge(pdev);	/* [한국어] Root Port 가 아니면 상위를 봐야 한다 */
+		if (bridge && bridge->ltr_path)	/* [한국어] 상위까지 경로가 성립할 때만 */
+			pdev->ltr_path = 1;	/* [한국어] 이 장치도 경로에 포함된다 */
+	/* [한국어] 상위가 없거나 경로가 끊겨 있으면 ltr_path 는 0 인 채로 남는다 */
 		return;
 	}
 
-	if (!host->native_ltr)
-		return;
+	if (!host->native_ltr)	/* [한국어] 펌웨어가 LTR 소유권을 넘겨주지 않았으면(_OSC 협상 결과) */
+		return;	/* [한국어] 커널이 켜서는 안 된다 */
 
 	/*
 	 * Software must not enable LTR in an Endpoint unless the Root
 	 * Complex and all intermediate Switches indicate support for LTR.
 	 * PCIe r4.0, sec 6.18.
 	 */
-	if (pci_pcie_type(pdev) == PCI_EXP_TYPE_ROOT_PORT) {
-		pcie_capability_set_word(pdev, PCI_EXP_DEVCTL2,
-					 PCI_EXP_DEVCTL2_LTR_EN);
-		pdev->ltr_path = 1;
-		return;
+	if (pci_pcie_type(pdev) == PCI_EXP_TYPE_ROOT_PORT) {	/* [한국어] 이 장치가 Root Port 면 경로의 시작점이다 */
+		pcie_capability_set_word(pdev, PCI_EXP_DEVCTL2,	/* [한국어] 위의 것을 기다릴 필요 없이 바로 켠다 */
+					 PCI_EXP_DEVCTL2_LTR_EN);	/* [한국어] LTR Enable 비트 */
+		pdev->ltr_path = 1;	/* [한국어] 경로가 여기서 시작한다고 기록 */
+		return;	/* [한국어] 끝 */
 	}
 
 	/*
@@ -2594,12 +2594,12 @@ void pci_configure_ltr(struct pci_dev *pdev)
 	 * disabled in the upstream bridge, so re-enable it before enabling
 	 * it in the new device.
 	 */
-	bridge = pci_upstream_bridge(pdev);
-	if (bridge && bridge->ltr_path) {
-		pci_bridge_reconfigure_ltr(pdev);
-		pcie_capability_set_word(pdev, PCI_EXP_DEVCTL2,
-					 PCI_EXP_DEVCTL2_LTR_EN);
-		pdev->ltr_path = 1;
+	bridge = pci_upstream_bridge(pdev);	/* [한국어] 스위치 아래 장치 — 상위를 먼저 확인해야 한다 */
+	if (bridge && bridge->ltr_path) {	/* [한국어] 상위까지 경로가 성립할 때만 이 장치를 켤 수 있다(PCIe r4.0 sec 6.18) */
+		pci_bridge_reconfigure_ltr(pdev);	/* [한국어] hot-add 된 장치라면 상위 브리지의 LTR 이 링크 다운 때 지워졌을 수 있으므로 먼저 되살린다 */
+		pcie_capability_set_word(pdev, PCI_EXP_DEVCTL2,	/* [한국어] 그다음 이 장치를 켠다 */
+					 PCI_EXP_DEVCTL2_LTR_EN);	/* [한국어] LTR Enable 비트 */
+		pdev->ltr_path = 1;	/* [한국어] 경로에 포함되었다고 기록. 이 값이 0 으로 남으면 aspm_l1ss_init 이 ASPM L1.2 를 지운다 */
 	}
 }
 
@@ -2633,23 +2633,23 @@ void pci_configure_ltr(struct pci_dev *pdev)
  */
 static void pcie_update_aspm_capable(struct pcie_link_state *root)
 {
-	struct pcie_link_state *link;
-	BUG_ON(root->parent);
-	list_for_each_entry(link, &link_list, sibling) {
-		if (link->root != root)
-			continue;
-		link->aspm_capable = link->aspm_support;
+	struct pcie_link_state *link;	/* [한국어] 순회 커서 */
+	BUG_ON(root->parent);	/* [한국어] 뿌리가 아닌 링크를 넘기면 아래 link->root 비교가 엉뚱한 부분집합만 잡아 조용히 틀린 결과가 난다. 계약 위반을 곧바로 드러낸다 */
+	list_for_each_entry(link, &link_list, sibling) {	/* [한국어] 1차 순회 — 전역 목록 전체를 훑는다 */
+		if (link->root != root)	/* [한국어] 다른 계층에 속한 링크는 */
+			continue;	/* [한국어] 건드리지 않는다 */
+		link->aspm_capable = link->aspm_support;	/* [한국어] 깎기 전 상태로 되돌린다. 지연 검사는 깎기만 하므로 다시 계산하려면 원점부터 시작해야 한다 */
 	}
-	list_for_each_entry(link, &link_list, sibling) {
-		struct pci_dev *child;
-		struct pci_bus *linkbus = link->pdev->subordinate;
-		if (link->root != root)
-			continue;
-		list_for_each_entry(child, &linkbus->devices, bus_list) {
-			if ((pci_pcie_type(child) != PCI_EXP_TYPE_ENDPOINT) &&
-			    (pci_pcie_type(child) != PCI_EXP_TYPE_LEG_END))
-				continue;
-			pcie_aspm_check_latency(child);
+	list_for_each_entry(link, &link_list, sibling) {	/* [한국어] 2차 순회 — 되돌리기가 끝난 뒤에야 검사를 돌린다. 한 번에 하면 아직 되돌리지 않은 상위 링크에 검사가 겹쳐 든다 */
+		struct pci_dev *child;	/* [한국어] 순회 커서 */
+		struct pci_bus *linkbus = link->pdev->subordinate;	/* [한국어] 이 링크의 하류 버스 */
+		if (link->root != root)	/* [한국어] 다른 계층이면 */
+			continue;	/* [한국어] 건너뛴다 */
+		list_for_each_entry(child, &linkbus->devices, bus_list) {	/* [한국어] 이 링크 아래 장치를 훑는다 */
+			if ((pci_pcie_type(child) != PCI_EXP_TYPE_ENDPOINT) &&	/* [한국어] 엔드포인트가 아니고 */
+			    (pci_pcie_type(child) != PCI_EXP_TYPE_LEG_END))	/* [한국어] legacy 엔드포인트도 아니면 */
+				continue;	/* [한국어] acceptable latency 를 광고하지 않으므로 건너뛴다 */
+			pcie_aspm_check_latency(child);	/* [한국어] 이 엔드포인트를 기준으로 경로 전체를 다시 검사한다 */
 		}
 	}
 }
@@ -2691,18 +2691,18 @@ static void pcie_update_aspm_capable(struct pcie_link_state *root)
  */
 void pcie_aspm_exit_link_state(struct pci_dev *pdev)
 {
-	struct pci_dev *parent = pdev->bus->self;
-	struct pcie_link_state *link, *root, *parent_link;
+	struct pci_dev *parent = pdev->bus->self;	/* [한국어] 제거되는 장치의 상위 브리지 = 링크의 상류 쪽 */
+	struct pcie_link_state *link, *root, *parent_link;	/* [한국어] link = 이 링크, root = 그 계층의 뿌리, parent_link = 한 단계 위 링크 */
 
-	if (!parent || !parent->link_state)
-		return;
+	if (!parent || !parent->link_state)	/* [한국어] 상위 브리지가 없거나 그 브리지에 링크 상태가 없으면 */
+		return;	/* [한국어] 정리할 것이 없다 */
 
-	down_read(&pci_bus_sem);
-	mutex_lock(&aspm_lock);
+	down_read(&pci_bus_sem);	/* [한국어] 잠금 순서는 pci_bus_sem -> aspm_lock */
+	mutex_lock(&aspm_lock);	/* [한국어] 링크 목록과 상태를 만지므로 */
 
-	link = parent->link_state;
-	root = link->root;
-	parent_link = link->parent;
+	link = parent->link_state;	/* [한국어] 이 장치가 매달린 링크 */
+	root = link->root;	/* [한국어] 해제 뒤에도 필요하므로 미리 챙겨 둔다 */
+	parent_link = link->parent;	/* [한국어] 마찬가지 — link 를 kfree 한 뒤에는 읽을 수 없다 */
 
 	/*
 	 * Free the parent link state, no later than function 0 (i.e.
@@ -2712,17 +2712,17 @@ void pcie_aspm_exit_link_state(struct pci_dev *pdev)
 	 * switch upstream port, this link state is parent_link to all
 	 * subordinate ones.
 	 */
-	if (pdev != link->downstream)
-		goto out;
+	if (pdev != link->downstream)	/* [한국어] function 0 이 아닌 함수가 빠지는 것이면 */
+		goto out;	/* [한국어] 아직 해제할 때가 아니다. 위 영어 주석대로 이 링크 상태는 그 아래 모든 링크의 parent 일 수 있어 먼저 없애면 자식들의 포인터가 허공을 가리킨다 */
 
-	pcie_config_aspm_link(link, 0);
-	list_del(&link->sibling);
-	free_link_state(link);
+	pcie_config_aspm_link(link, 0);	/* [한국어] 사라질 링크를 절전 상태로 남기지 않는다 — 상류가 응답 없는 링크를 깨우려 시도할 수 있다 */
+	list_del(&link->sibling);	/* [한국어] 전역 목록에서 뺀다. 이 조작을 free_link_state 밖에 둔 덕에 호출 자리에서 눈에 보인다 */
+	free_link_state(link);	/* [한국어] 장치 쪽 포인터를 끊고 메모리를 놓는다 */
 
 	/* Recheck latencies and configure upstream links */
-	if (parent_link) {
-		pcie_update_aspm_capable(root);
-		pcie_config_aspm_path(parent_link);
+	if (parent_link) {	/* [한국어] 뿌리가 아니었다면 위쪽에 아직 링크가 남아 있다 */
+		pcie_update_aspm_capable(root);	/* [한국어] 이 엔드포인트가 걸어 두었던 지연 제약이 사라졌으므로 계층 전체를 다시 계산한다 */
+		pcie_config_aspm_path(parent_link);	/* [한국어] 느슨해진 제약을 실제 레지스터에 반영한다 */
 	}
 
  out:
@@ -2762,22 +2762,22 @@ void pcie_aspm_exit_link_state(struct pci_dev *pdev)
  */
 void pcie_aspm_pm_state_change(struct pci_dev *pdev, bool locked)
 {
-	struct pcie_link_state *link = pdev->link_state;
+	struct pcie_link_state *link = pdev->link_state;	/* [한국어] 이 하류 포트의 링크 상태 */
 
-	if (aspm_disabled || !link)
-		return;
+	if (aspm_disabled || !link)	/* [한국어] 커널이 ASPM 을 관리하지 않거나 링크 상태가 없으면 */
+		return;	/* [한국어] 할 일이 없다 */
 	/*
 	 * Devices changed PM state, we should recheck if latency
 	 * meets all functions' requirement
 	 */
-	if (!locked)
-		down_read(&pci_bus_sem);
-	mutex_lock(&aspm_lock);
-	pcie_update_aspm_capable(link->root);
-	pcie_config_aspm_path(link);
-	mutex_unlock(&aspm_lock);
-	if (!locked)
-		up_read(&pci_bus_sem);
+	if (!locked)	/* [한국어] 호출자가 아직 안 잡았으면 */
+		down_read(&pci_bus_sem);	/* [한국어] 여기서 잡는다. 이미 잡은 채로 다시 잡으면 lockdep 경고나 교착이 난다 */
+	mutex_lock(&aspm_lock);	/* [한국어] 링크 상태를 만지므로 */
+	pcie_update_aspm_capable(link->root);	/* [한국어] D0 인 장치가 달라졌으니 지연 조건을 처음부터 다시 계산한다 */
+	pcie_config_aspm_path(link);	/* [한국어] 달라진 조건을 실제 레지스터에 반영한다 */
+	mutex_unlock(&aspm_lock);	/* [한국어] 먼저 뮤텍스를 푼다(잡은 역순) */
+	if (!locked)	/* [한국어] 우리가 잡았을 때만 */
+		up_read(&pci_bus_sem);	/* [한국어] 푼다 */
 }
 
 /* [한국어]
@@ -2806,21 +2806,21 @@ void pcie_aspm_pm_state_change(struct pci_dev *pdev, bool locked)
  */
 void pcie_aspm_powersave_config_link(struct pci_dev *pdev)
 {
-	struct pcie_link_state *link = pdev->link_state;
+	struct pcie_link_state *link = pdev->link_state;	/* [한국어] 이 브리지의 링크 상태 */
 
-	if (aspm_disabled || !link)
-		return;
+	if (aspm_disabled || !link)	/* [한국어] 커널이 ASPM 을 관리하지 않거나 링크 상태가 없으면 */
+		return;	/* [한국어] 할 일이 없다 */
 
-	if (aspm_policy != POLICY_POWERSAVE &&
-	    aspm_policy != POLICY_POWER_SUPERSAVE)
-		return;
+	if (aspm_policy != POLICY_POWERSAVE &&	/* [한국어] 절전 정책이 아니고 */
+	    aspm_policy != POLICY_POWER_SUPERSAVE)	/* [한국어] 더 깊은 절전도 아니면 — 이미 초기화 시점에 적용을 마쳤다 */
+		return;	/* [한국어] 미뤄 둔 것이 없으므로 끝 */
 
-	down_read(&pci_bus_sem);
-	mutex_lock(&aspm_lock);
-	pcie_config_aspm_path(link);
-	pcie_set_clkpm(link, policy_to_clkpm_state(link));
-	mutex_unlock(&aspm_lock);
-	up_read(&pci_bus_sem);
+	down_read(&pci_bus_sem);	/* [한국어] 잠금 순서는 pci_bus_sem -> aspm_lock */
+	mutex_lock(&aspm_lock);	/* [한국어] 링크 상태를 만진다 */
+	pcie_config_aspm_path(link);	/* [한국어] 이제 드라이버가 붙었으므로 미뤄 두었던 절전 설정을 적용한다 */
+	pcie_set_clkpm(link, policy_to_clkpm_state(link));	/* [한국어] CLKPM 도 함께 */
+	mutex_unlock(&aspm_lock);	/* [한국어] 잡은 역순으로 푼다 */
+	up_read(&pci_bus_sem);	/* [한국어] 세마포어도 푼다 */
 }
 
 /* [한국어]
@@ -2850,16 +2850,16 @@ void pcie_aspm_powersave_config_link(struct pci_dev *pdev)
  */
 static struct pcie_link_state *pcie_aspm_get_link(struct pci_dev *pdev)
 {
-	struct pci_dev *bridge;
+	struct pci_dev *bridge;	/* [한국어] 한 단계 위 브리지를 담을 변수 */
 
-	if (!pci_is_pcie(pdev))
-		return NULL;
+	if (!pci_is_pcie(pdev))	/* [한국어] 전통 PCI 장치에는 link_state 가 없다 */
+		return NULL;	/* [한국어] 엉뚱한 필드를 읽지 않도록 여기서 막는다 */
 
-	bridge = pci_upstream_bridge(pdev);
-	if (!bridge || !pci_is_pcie(bridge))
-		return NULL;
+	bridge = pci_upstream_bridge(pdev);	/* [한국어] 링크 상태는 상류 포트에 매달려 있으므로 한 단계 위로 올라간다 */
+	if (!bridge || !pci_is_pcie(bridge))	/* [한국어] 브리지가 없거나(루트 버스) PCIe 가 아니면 */
+		return NULL;	/* [한국어] 찾을 링크가 없다 */
 
-	return bridge->link_state;
+	return bridge->link_state;	/* [한국어] NULL 일 수도 있다 — 호출자가 그 경우를 처리한다 */
 }
 
 /* [한국어]
@@ -2888,13 +2888,13 @@ static struct pcie_link_state *pcie_aspm_get_link(struct pci_dev *pdev)
  */
 static u8 pci_calc_aspm_disable_mask(int state)
 {
-	state &= ~PCIE_LINK_STATE_CLKPM;
+	state &= ~PCIE_LINK_STATE_CLKPM;	/* [한국어] CLKPM 은 aspm_disable 이 아니라 clkpm_disable 이라는 별도 필드로 관리한다. 여기 섞이면 엉뚱한 ASPM 비트와 겹친다 */
 
 	/* L1 PM substates require L1 */
-	if (state & PCIE_LINK_STATE_L1)
-		state |= PCIE_LINK_STATE_L1SS;
+	if (state & PCIE_LINK_STATE_L1)	/* [한국어] L1 을 금지하면 */
+		state |= PCIE_LINK_STATE_L1SS;	/* [한국어] 그 안의 하위 상태도 함께 금지해야 앞뒤가 맞는다. 금지는 위에서 아래로 번진다 */
 
-	return state;
+	return state;	/* [한국어] 호출자가 aspm_disable 에 OR 로 얹는다 */
 }
 
 /* [한국어]
@@ -2918,13 +2918,13 @@ static u8 pci_calc_aspm_disable_mask(int state)
  */
 static u8 pci_calc_aspm_enable_mask(int state)
 {
-	state &= ~PCIE_LINK_STATE_CLKPM;
+	state &= ~PCIE_LINK_STATE_CLKPM;	/* [한국어] 허용 쪽에서도 CLKPM 은 따로 처리한다(clkpm_default) */
 
 	/* L1 PM substates require L1 */
-	if (state & PCIE_LINK_STATE_L1SS)
-		state |= PCIE_LINK_STATE_L1;
+	if (state & PCIE_LINK_STATE_L1SS)	/* [한국어] L1 하위 상태를 허용하려면 */
+		state |= PCIE_LINK_STATE_L1;	/* [한국어] L1 도 열려 있어야 도달할 수 있다. 허용은 아래에서 위로 번진다 — 금지 쪽과 방향이 정확히 반대다 */
 
-	return state;
+	return state;	/* [한국어] 호출자가 aspm_default 에 통째로 대입한다 */
 }
 
 /* [한국어]
@@ -2965,10 +2965,10 @@ static u8 pci_calc_aspm_enable_mask(int state)
  */
 static int __pci_disable_link_state(struct pci_dev *pdev, int state, bool locked)
 {
-	struct pcie_link_state *link = pcie_aspm_get_link(pdev);
+	struct pcie_link_state *link = pcie_aspm_get_link(pdev);	/* [한국어] 이 장치가 매달린 링크 */
 
-	if (!link)
-		return -EINVAL;
+	if (!link)	/* [한국어] 링크 상태가 없으면(전통 PCI, 루트 버스 직속 등) */
+		return -EINVAL;	/* [한국어] 금지할 대상이 없다 */
 	/*
 	 * A driver requested that ASPM be disabled on this device, but
 	 * if we don't have permission to manage ASPM (e.g., on ACPI
@@ -2977,25 +2977,25 @@ static int __pci_disable_link_state(struct pci_dev *pdev, int state, bool locked
 	 * a similar mechanism using "PciASPMOptOut", which is also
 	 * ignored in this situation.
 	 */
-	if (aspm_disabled) {
-		pci_warn(pdev, "can't disable ASPM; OS doesn't have ASPM control\n");
-		return -EPERM;
+	if (aspm_disabled) {	/* [한국어] 펌웨어가 ASPM 제어권을 넘기지 않았으면 — pci-acpi.c:1922 가 FADT 의 NO_ASPM 을 보고 pcie_no_aspm() 을 불렀을 때 이 값이 참이 된다 */
+		pci_warn(pdev, "can't disable ASPM; OS doesn't have ASPM control\n");	/* [한국어] 드라이버 요청을 들어줄 수 없다는 사실을 알린다. 조용히 무시하면 드라이버가 금지된 줄 알고 동작한다 */
+		return -EPERM;	/* [한국어] 권한 없음 */
 	}
 
-	if (!locked)
-		down_read(&pci_bus_sem);
-	mutex_lock(&aspm_lock);
-	link->aspm_disable |= pci_calc_aspm_disable_mask(state);
-	pcie_config_aspm_link(link, policy_to_aspm_state(link));
+	if (!locked)	/* [한국어] 호출자가 아직 안 잡았으면 */
+		down_read(&pci_bus_sem);	/* [한국어] 여기서 잡는다 */
+	mutex_lock(&aspm_lock);	/* [한국어] 링크 상태를 만진다 */
+	link->aspm_disable |= pci_calc_aspm_disable_mask(state);	/* [한국어] OR 로 얹는다 — 이미 금지된 것은 그대로 두고 더한다. 이 필드는 한 번 서면 이 API 로는 지워지지 않는다 */
+	pcie_config_aspm_link(link, policy_to_aspm_state(link));	/* [한국어] 금지가 추가되었으니 곧바로 반영한다. 정책 값은 그대로지만 필터가 달라져 결과가 바뀐다 */
 
-	if (state & PCIE_LINK_STATE_CLKPM)
-		link->clkpm_disable = 1;
-	pcie_set_clkpm(link, policy_to_clkpm_state(link));
-	mutex_unlock(&aspm_lock);
-	if (!locked)
-		up_read(&pci_bus_sem);
+	if (state & PCIE_LINK_STATE_CLKPM)	/* [한국어] CLKPM 도 함께 금지 요청되었으면 */
+		link->clkpm_disable = 1;	/* [한국어] 별도 필드에 기록 */
+	pcie_set_clkpm(link, policy_to_clkpm_state(link));	/* [한국어] CLKPM 도 반영 */
+	mutex_unlock(&aspm_lock);	/* [한국어] 잡은 역순으로 푼다 */
+	if (!locked)	/* [한국어] 우리가 잡았을 때만 */
+		up_read(&pci_bus_sem);	/* [한국어] 푼다 */
 
-	return 0;
+	return 0;	/* [한국어] 반영 완료 */
 }
 
 /* [한국어]
@@ -3023,9 +3023,9 @@ static int __pci_disable_link_state(struct pci_dev *pdev, int state, bool locked
  */
 int pci_disable_link_state_locked(struct pci_dev *pdev, int state)
 {
-	lockdep_assert_held_read(&pci_bus_sem);
+	lockdep_assert_held_read(&pci_bus_sem);	/* [한국어] 호출자가 정말 pci_bus_sem 읽기 잠금을 쥐고 있는지 검사한다. 잠그지 않고 이쪽으로 들어오면 락 없이 링크 목록을 만지는데, 그 버그는 드물게만 터져 찾기 어렵다 */
 
-	return __pci_disable_link_state(pdev, state, true);
+	return __pci_disable_link_state(pdev, state, true);	/* [한국어] locked=true 로 넘겨 안에서 다시 잡지 않게 한다 */
 }
 EXPORT_SYMBOL(pci_disable_link_state_locked);
 
@@ -3100,34 +3100,34 @@ EXPORT_SYMBOL(pci_disable_link_state);
  */
 static int __pci_enable_link_state(struct pci_dev *pdev, int state, bool locked)
 {
-	struct pcie_link_state *link = pcie_aspm_get_link(pdev);
+	struct pcie_link_state *link = pcie_aspm_get_link(pdev);	/* [한국어] 이 장치가 매달린 링크 */
 
-	if (!link)
-		return -EINVAL;
+	if (!link)	/* [한국어] 링크 상태가 없으면 */
+		return -EINVAL;	/* [한국어] 허용할 대상이 없다 */
 	/*
 	 * A driver requested that ASPM be enabled on this device, but
 	 * if we don't have permission to manage ASPM (e.g., on ACPI
 	 * systems we have to observe the FADT ACPI_FADT_NO_ASPM bit and
 	 * the _OSC method), we can't honor that request.
 	 */
-	if (aspm_disabled) {
-		pci_warn(pdev, "can't override BIOS ASPM; OS doesn't have ASPM control\n");
-		return -EPERM;
+	if (aspm_disabled) {	/* [한국어] 펌웨어가 제어권을 넘기지 않았으면 */
+		pci_warn(pdev, "can't override BIOS ASPM; OS doesn't have ASPM control\n");	/* [한국어] 펌웨어 설정을 덮어쓸 수 없다는 사실을 알린다 */
+		return -EPERM;	/* [한국어] 권한 없음 */
 	}
 
-	if (!locked)
-		down_read(&pci_bus_sem);
-	mutex_lock(&aspm_lock);
-	link->aspm_default = pci_calc_aspm_enable_mask(state);
-	pcie_config_aspm_link(link, policy_to_aspm_state(link));
+	if (!locked)	/* [한국어] 호출자가 아직 안 잡았으면 */
+		down_read(&pci_bus_sem);	/* [한국어] 여기서 잡는다 */
+	mutex_lock(&aspm_lock);	/* [한국어] 링크 상태를 만진다 */
+	link->aspm_default = pci_calc_aspm_enable_mask(state);	/* [한국어] OR 가 아니라 대입이다 — "기본값을 이것으로 갈아치운다" 가 이 API 의 뜻이다. 금지(aspm_disable)는 여전히 남아 pcie_config_aspm_link 에서 빠진다 */
+	pcie_config_aspm_link(link, policy_to_aspm_state(link));	/* [한국어] 바뀐 기본값을 반영한다. POLICY_DEFAULT 일 때만 실제 효과가 나타난다 */
 
-	link->clkpm_default = (state & PCIE_LINK_STATE_CLKPM) ? 1 : 0;
-	pcie_set_clkpm(link, policy_to_clkpm_state(link));
-	mutex_unlock(&aspm_lock);
-	if (!locked)
-		up_read(&pci_bus_sem);
+	link->clkpm_default = (state & PCIE_LINK_STATE_CLKPM) ? 1 : 0;	/* [한국어] CLKPM 기본값도 요청대로 세운다 */
+	pcie_set_clkpm(link, policy_to_clkpm_state(link));	/* [한국어] CLKPM 도 반영 */
+	mutex_unlock(&aspm_lock);	/* [한국어] 잡은 역순으로 푼다 */
+	if (!locked)	/* [한국어] 우리가 잡았을 때만 */
+		up_read(&pci_bus_sem);	/* [한국어] 푼다 */
 
-	return 0;
+	return 0;	/* [한국어] 반영 완료 */
 }
 
 /**
@@ -3215,9 +3215,9 @@ EXPORT_SYMBOL(pci_enable_link_state);
  */
 int pci_enable_link_state_locked(struct pci_dev *pdev, int state)
 {
-	lockdep_assert_held_read(&pci_bus_sem);
+	lockdep_assert_held_read(&pci_bus_sem);	/* [한국어] 호출자가 pci_bus_sem 읽기 잠금을 쥐고 있는지 검사. vmd.c 와 pcie-qcom.c 는 열거 콜백 안이라 이미 쥐고 있다 */
 
-	return __pci_enable_link_state(pdev, state, true);
+	return __pci_enable_link_state(pdev, state, true);	/* [한국어] locked=true 로 넘겨 중복 획득을 피한다 */
 }
 EXPORT_SYMBOL(pci_enable_link_state_locked);
 
@@ -3247,14 +3247,14 @@ EXPORT_SYMBOL(pci_enable_link_state_locked);
  */
 void pcie_aspm_remove_cap(struct pci_dev *pdev, u32 lnkcap)
 {
-	if (lnkcap & PCI_EXP_LNKCAP_ASPM_L0S)
-		pdev->aspm_l0s_support = 0;
-	if (lnkcap & PCI_EXP_LNKCAP_ASPM_L1)
-		pdev->aspm_l1_support = 0;
+	if (lnkcap & PCI_EXP_LNKCAP_ASPM_L0S)	/* [한국어] quirk 가 L0s 를 지우라고 했으면 */
+		pdev->aspm_l0s_support = 0;	/* [한국어] 커널이 들고 있는 사본을 지운다. 하드웨어 LNKCAP 은 읽기 전용이라 고칠 수 없다 */
+	if (lnkcap & PCI_EXP_LNKCAP_ASPM_L1)	/* [한국어] L1 을 지우라고 했으면 */
+		pdev->aspm_l1_support = 0;	/* [한국어] 그쪽 사본을 지운다. 이 두 필드가 pcie_aspm_cap_init 의 판단 근거다 */
 
-	pci_info(pdev, "ASPM: Link Capabilities%s%s treated as unsupported to avoid device defect\n",
-		 lnkcap & PCI_EXP_LNKCAP_ASPM_L0S ? " L0s" : "",
-		 lnkcap & PCI_EXP_LNKCAP_ASPM_L1 ? " L1" : "");
+	pci_info(pdev, "ASPM: Link Capabilities%s%s treated as unsupported to avoid device defect\n",	/* [한국어] 조용히 지우지 않고 반드시 알린다 — 사용자가 왜 이 장치는 ASPM 이 안 켜지는지 추적할 수 있어야 한다 */
+		 lnkcap & PCI_EXP_LNKCAP_ASPM_L0S ? " L0s" : "",	/* [한국어] L0s 를 지웠으면 그 이름을, 아니면 빈 문자열 */
+		 lnkcap & PCI_EXP_LNKCAP_ASPM_L1 ? " L1" : "");	/* [한국어] L1 도 같은 방식. 두 조각을 이어 붙여 한 줄로 만든다 */
 
 }
 
@@ -3289,27 +3289,27 @@ void pcie_aspm_remove_cap(struct pci_dev *pdev, u32 lnkcap)
 static int pcie_aspm_set_policy(const char *val,
 				const struct kernel_param *kp)
 {
-	int i;
-	struct pcie_link_state *link;
+	int i;	/* [한국어] 찾은 정책 번호 */
+	struct pcie_link_state *link;	/* [한국어] 순회 커서 */
 
-	if (aspm_disabled)
-		return -EPERM;
-	i = sysfs_match_string(policy_str, val);
-	if (i < 0)
-		return i;
-	if (i == aspm_policy)
-		return 0;
+	if (aspm_disabled)	/* [한국어] 펌웨어가 제어권을 넘기지 않았으면 정책만 바꿔 봐야 레지스터를 건드릴 수 없다 */
+		return -EPERM;	/* [한국어] 권한 없음 */
+	i = sysfs_match_string(policy_str, val);	/* [한국어] policy_str[] 에서 이름을 찾아 첨자를 돌려준다. 그래서 상수 값과 문자열 표의 순서가 곧 이 함수의 정확성이다 */
+	if (i < 0)	/* [한국어] 못 알아본 이름이면 */
+		return i;	/* [한국어] 그 음수를 그대로 돌려준다 */
+	if (i == aspm_policy)	/* [한국어] 이미 같은 정책이면 */
+		return 0;	/* [한국어] 아무것도 하지 않고 성공으로 끝낸다 */
 
-	down_read(&pci_bus_sem);
-	mutex_lock(&aspm_lock);
-	aspm_policy = i;
-	list_for_each_entry(link, &link_list, sibling) {
-		pcie_config_aspm_link(link, policy_to_aspm_state(link));
-		pcie_set_clkpm(link, policy_to_clkpm_state(link));
+	down_read(&pci_bus_sem);	/* [한국어] 잠금 순서는 pci_bus_sem -> aspm_lock */
+	mutex_lock(&aspm_lock);	/* [한국어] 전역 정책과 모든 링크를 만진다 */
+	aspm_policy = i;	/* [한국어] 먼저 전역 정책을 바꾼다. 아래 policy_to_ 계열이 이 값을 읽는다 */
+	list_for_each_entry(link, &link_list, sibling) {	/* [한국어] 계층이 아니라 전역 평면 목록을 훑는다 — 어차피 전부 손대야 하므로 순서가 상관없다 */
+		pcie_config_aspm_link(link, policy_to_aspm_state(link));	/* [한국어] 각 링크에 새 정책을 반영 */
+		pcie_set_clkpm(link, policy_to_clkpm_state(link));	/* [한국어] CLKPM 도 함께 */
 	}
-	mutex_unlock(&aspm_lock);
-	up_read(&pci_bus_sem);
-	return 0;
+	mutex_unlock(&aspm_lock);	/* [한국어] 잡은 역순으로 푼다 */
+	up_read(&pci_bus_sem);	/* [한국어] 세마포어도 푼다 */
+	return 0;	/* [한국어] 반영 완료 */
 }
 
 /* [한국어]
@@ -3337,18 +3337,18 @@ static int pcie_aspm_set_policy(const char *val,
  */
 static int pcie_aspm_get_policy(char *buffer, const struct kernel_param *kp)
 {
-	int i, cnt = 0;
+	int i, cnt = 0;	/* [한국어] i = 순회 첨자, cnt = 지금까지 쓴 바이트 수 */
 	for (i = 0; i < ARRAY_SIZE(policy_str); i++)	/* [한국어] 정책 이름 표를 훑어 일치하는 것을 찾는다 */
-		if (i == aspm_policy)
-			cnt += sprintf(buffer + cnt, "[%s] ", policy_str[i]);
-		else
-			cnt += sprintf(buffer + cnt, "%s ", policy_str[i]);
-	cnt += sprintf(buffer + cnt, "\n");
-	return cnt;
+		if (i == aspm_policy)	/* [한국어] 현재 선택된 정책이면 */
+			cnt += sprintf(buffer + cnt, "[%s] ", policy_str[i]);	/* [한국어] 대괄호로 감싸 표시한다. sprintf 가 돌려준 길이를 누적해 이어 붙인다 */
+		else	/* [한국어] 나머지는 */
+			cnt += sprintf(buffer + cnt, "%s ", policy_str[i]);	/* [한국어] 그냥 이름만 */
+	cnt += sprintf(buffer + cnt, "\n");	/* [한국어] 마지막 줄바꿈 */
+	return cnt;	/* [한국어] sysfs 가 이 길이만큼 사용자에게 넘긴다 */
 }
 
-module_param_call(policy, pcie_aspm_set_policy, pcie_aspm_get_policy,
-	NULL, 0644);
+module_param_call(policy, pcie_aspm_set_policy, pcie_aspm_get_policy,	/* [한국어] policy 파라미터를 set/get 콜백 쌍으로 등록한다. MODULE_PARAM_PREFIX 덕에 /sys/module/pcie_aspm/parameters/policy 로 나타난다 */
+	NULL, 0644);	/* [한국어] arg 는 NULL(콜백이 전역을 직접 만진다), 0644 = 소유자 쓰기 가능 */
 
 /**
  * pcie_aspm_enabled - Check if PCIe ASPM has been enabled for a device.
@@ -3387,12 +3387,12 @@ module_param_call(policy, pcie_aspm_set_policy, pcie_aspm_get_policy,
  */
 bool pcie_aspm_enabled(struct pci_dev *pdev)
 {
-	struct pcie_link_state *link = pcie_aspm_get_link(pdev);
+	struct pcie_link_state *link = pcie_aspm_get_link(pdev);	/* [한국어] 이 장치가 매달린 링크 */
 
-	if (!link)
-		return false;
+	if (!link)	/* [한국어] 링크 상태가 없으면(전통 PCI, 루트 버스 직속 등) */
+		return false;	/* [한국어] ASPM 이 켜져 있을 수 없다 */
 
-	return link->aspm_enabled;
+	return link->aspm_enabled;	/* [한국어] 비트필드를 bool 로 접어 돌려준다 — 어느 상태가 켜졌는지가 아니라 무엇이든 켜져 있는가만 답한다 */
 }
 EXPORT_SYMBOL_GPL(pcie_aspm_enabled);
 
@@ -3428,10 +3428,10 @@ static ssize_t aspm_attr_show_common(struct device *dev,
 				     struct device_attribute *attr,
 				     char *buf, u8 state)
 {
-	struct pci_dev *pdev = to_pci_dev(dev);
-	struct pcie_link_state *link = pcie_aspm_get_link(pdev);
+	struct pci_dev *pdev = to_pci_dev(dev);	/* [한국어] sysfs 의 device 를 pci_dev 로 되돌린다 */
+	struct pcie_link_state *link = pcie_aspm_get_link(pdev);	/* [한국어] 그 장치가 매달린 링크. NULL 검사가 없는 것은 aspm_ctrl_attrs_are_visible 이 link 가 없으면 파일 자체를 만들지 않기 때문이다 */
 
-	return sysfs_emit(buf, "%d\n", (link->aspm_enabled & state) ? 1 : 0);
+	return sysfs_emit(buf, "%d\n", (link->aspm_enabled & state) ? 1 : 0);	/* [한국어] capable 이나 default 가 아니라 지금 실제 켜져 있는 값을 보고한다. 무엇을 켤 수 있는지는 파일의 존재 여부로 드러난다 */
 }
 
 /* [한국어]
@@ -3467,33 +3467,33 @@ static ssize_t aspm_attr_store_common(struct device *dev,
 				      struct device_attribute *attr,
 				      const char *buf, size_t len, u8 state)
 {
-	struct pci_dev *pdev = to_pci_dev(dev);
-	struct pcie_link_state *link = pcie_aspm_get_link(pdev);
-	bool state_enable;
+	struct pci_dev *pdev = to_pci_dev(dev);	/* [한국어] sysfs 의 device 를 pci_dev 로 */
+	struct pcie_link_state *link = pcie_aspm_get_link(pdev);	/* [한국어] 그 장치가 매달린 링크 */
+	bool state_enable;	/* [한국어] 파싱 결과를 담을 변수 */
 
-	if (kstrtobool(buf, &state_enable) < 0)
-		return -EINVAL;
+	if (kstrtobool(buf, &state_enable) < 0)	/* [한국어] 0/1/y/n/on/off 등을 받아들인다 */
+		return -EINVAL;	/* [한국어] 알아볼 수 없으면 락을 잡기 전에 나간다 */
 
-	down_read(&pci_bus_sem);
-	mutex_lock(&aspm_lock);
+	down_read(&pci_bus_sem);	/* [한국어] 잠금 순서는 pci_bus_sem -> aspm_lock */
+	mutex_lock(&aspm_lock);	/* [한국어] 링크 상태를 만진다 */
 
-	if (state_enable) {
-		link->aspm_disable &= ~state;
+	if (state_enable) {	/* [한국어] 사용자가 1 을 썼다 = 금지 해제 */
+		link->aspm_disable &= ~state;	/* [한국어] 금지 목록에서 이 상태를 뺀다. enabled 를 직접 켜지 않는 것이 핵심 — 실제로 켤지는 정책과 지연 검사가 정한다 */
 		/* need to enable L1 for substates */
-		if (state & PCIE_LINK_STATE_L1SS)
-			link->aspm_disable &= ~PCIE_LINK_STATE_L1;
-	} else {
-		link->aspm_disable |= state;
-		if (state & PCIE_LINK_STATE_L1)
-			link->aspm_disable |= PCIE_LINK_STATE_L1SS;
+		if (state & PCIE_LINK_STATE_L1SS)	/* [한국어] 하위 상태를 허용한 경우 */
+			link->aspm_disable &= ~PCIE_LINK_STATE_L1;	/* [한국어] L1 도 함께 허용해야 도달할 수 있다 */
+	} else {	/* [한국어] 사용자가 0 을 썼다 = 금지 */
+		link->aspm_disable |= state;	/* [한국어] 금지 목록에 더한다 */
+		if (state & PCIE_LINK_STATE_L1)	/* [한국어] L1 을 금지한 경우 */
+			link->aspm_disable |= PCIE_LINK_STATE_L1SS;	/* [한국어] 하위 상태도 함께 금지한다. 허용 쪽과 방향이 반대다 */
 	}
 
-	pcie_config_aspm_link(link, policy_to_aspm_state(link));
+	pcie_config_aspm_link(link, policy_to_aspm_state(link));	/* [한국어] 바뀐 금지 목록을 곧바로 반영한다 */
 
-	mutex_unlock(&aspm_lock);
-	up_read(&pci_bus_sem);
+	mutex_unlock(&aspm_lock);	/* [한국어] 잡은 역순으로 푼다 */
+	up_read(&pci_bus_sem);	/* [한국어] 세마포어도 푼다 */
 
-	return len;
+	return len;	/* [한국어] sysfs 규약상 소비한 바이트 수를 돌려준다 */
 }
 
 /* [한국어] sysfs 의 ASPM 상태 속성 하나를 만드는 틀.
@@ -3559,10 +3559,10 @@ ASPM_ATTR(l1_2_pcipm, L1_2_PCIPM)
 static ssize_t clkpm_show(struct device *dev,
 			  struct device_attribute *attr, char *buf)
 {
-	struct pci_dev *pdev = to_pci_dev(dev);
-	struct pcie_link_state *link = pcie_aspm_get_link(pdev);
+	struct pci_dev *pdev = to_pci_dev(dev);	/* [한국어] sysfs 의 device 를 pci_dev 로 */
+	struct pcie_link_state *link = pcie_aspm_get_link(pdev);	/* [한국어] 그 장치가 매달린 링크 */
 
-	return sysfs_emit(buf, "%d\n", link->clkpm_enabled);
+	return sysfs_emit(buf, "%d\n", link->clkpm_enabled);	/* [한국어] 지금 실제로 켜져 있는 값. 1비트라 그대로 십진수로 찍는다 */
 }
 
 /* [한국어]
@@ -3593,23 +3593,23 @@ static ssize_t clkpm_store(struct device *dev,
 			   struct device_attribute *attr,
 			   const char *buf, size_t len)
 {
-	struct pci_dev *pdev = to_pci_dev(dev);
-	struct pcie_link_state *link = pcie_aspm_get_link(pdev);
-	bool state_enable;
+	struct pci_dev *pdev = to_pci_dev(dev);	/* [한국어] sysfs 의 device 를 pci_dev 로 */
+	struct pcie_link_state *link = pcie_aspm_get_link(pdev);	/* [한국어] 그 장치가 매달린 링크 */
+	bool state_enable;	/* [한국어] 파싱 결과를 담을 변수 */
 
-	if (kstrtobool(buf, &state_enable) < 0)
-		return -EINVAL;
+	if (kstrtobool(buf, &state_enable) < 0)	/* [한국어] 알아볼 수 없는 입력이면 */
+		return -EINVAL;	/* [한국어] 락을 잡기 전에 나간다 */
 
-	down_read(&pci_bus_sem);
-	mutex_lock(&aspm_lock);
+	down_read(&pci_bus_sem);	/* [한국어] 잠금 순서는 pci_bus_sem -> aspm_lock */
+	mutex_lock(&aspm_lock);	/* [한국어] 링크 상태를 만진다 */
 
-	link->clkpm_disable = !state_enable;
-	pcie_set_clkpm(link, policy_to_clkpm_state(link));
+	link->clkpm_disable = !state_enable;	/* [한국어] 1 을 쓰면 금지 해제, 0 을 쓰면 금지. 단일 비트라 부정 한 번으로 끝난다 */
+	pcie_set_clkpm(link, policy_to_clkpm_state(link));	/* [한국어] 실제로 켤지는 clkpm_capable 과 정책이 정한다 */
 
-	mutex_unlock(&aspm_lock);
-	up_read(&pci_bus_sem);
+	mutex_unlock(&aspm_lock);	/* [한국어] 잡은 역순으로 푼다 */
+	up_read(&pci_bus_sem);	/* [한국어] 세마포어도 푼다 */
 
-	return len;
+	return len;	/* [한국어] 소비한 바이트 수 */
 }
 
 /* [한국어] 위에서 만든 _show/_store 함수 쌍을 실제 sysfs 속성 객체로 묶는다.
@@ -3683,31 +3683,31 @@ static struct attribute *aspm_ctrl_attrs[] = {
 static umode_t aspm_ctrl_attrs_are_visible(struct kobject *kobj,
 					   struct attribute *a, int n)
 {
-	struct device *dev = kobj_to_dev(kobj);
-	struct pci_dev *pdev = to_pci_dev(dev);
-	struct pcie_link_state *link = pcie_aspm_get_link(pdev);
-	static const u8 aspm_state_map[] = {
-		PCIE_LINK_STATE_L0S,
-		PCIE_LINK_STATE_L1,
-		PCIE_LINK_STATE_L1_1,
-		PCIE_LINK_STATE_L1_2,
-		PCIE_LINK_STATE_L1_1_PCIPM,
-		PCIE_LINK_STATE_L1_2_PCIPM,
+	struct device *dev = kobj_to_dev(kobj);	/* [한국어] kobject 에서 device 로 */
+	struct pci_dev *pdev = to_pci_dev(dev);	/* [한국어] device 에서 pci_dev 로 */
+	struct pcie_link_state *link = pcie_aspm_get_link(pdev);	/* [한국어] 그 장치가 매달린 링크 */
+	static const u8 aspm_state_map[] = {	/* [한국어] aspm_ctrl_attrs 에서 clkpm 을 뺀 나머지 여섯 개와 순서가 같아야 한다. 어긋나면 엉뚱한 파일이 노출되는데 컴파일러는 잡아 주지 못한다 */
+		PCIE_LINK_STATE_L0S,	/* [한국어] n == 1 에 대응 */
+		PCIE_LINK_STATE_L1,	/* [한국어] n == 2 */
+		PCIE_LINK_STATE_L1_1,	/* [한국어] n == 3 */
+		PCIE_LINK_STATE_L1_2,	/* [한국어] n == 4 */
+		PCIE_LINK_STATE_L1_1_PCIPM,	/* [한국어] n == 5 */
+		PCIE_LINK_STATE_L1_2_PCIPM,	/* [한국어] n == 6 */
 	};
 
-	if (aspm_disabled || !link)
-		return 0;
+	if (aspm_disabled || !link)	/* [한국어] 커널이 ASPM 을 관리하지 않거나 링크 상태가 없으면 */
+		return 0;	/* [한국어] 0 = 파일을 만들지 않는다. 이 덕에 show/store 함수들이 link NULL 검사를 하지 않아도 된다 */
 
-	if (n == 0)
-		return link->clkpm_capable ? a->mode : 0;
+	if (n == 0)	/* [한국어] 첫 항목은 clkpm 이다 */
+		return link->clkpm_capable ? a->mode : 0;	/* [한국어] CLKPM 능력이 있을 때만 원래 권한(0644)으로 노출 */
 
-	return link->aspm_capable & aspm_state_map[n - 1] ? a->mode : 0;
+	return link->aspm_capable & aspm_state_map[n - 1] ? a->mode : 0;	/* [한국어] support 가 아니라 capable 로 판단한다 — 하드웨어가 지원해도 지연 예산을 넘어 쓸 수 없는 상태는 파일이 아예 나타나지 않는다 */
 }
 
-const struct attribute_group aspm_ctrl_attr_group = {
-	.name = "link",
-	.attrs = aspm_ctrl_attrs,
-	.is_visible = aspm_ctrl_attrs_are_visible,
+const struct attribute_group aspm_ctrl_attr_group = {	/* [한국어] 이 파일이 pci-sysfs.c:4959 에 내주는 속성 그룹. 선언은 drivers/pci/pci.h:3145 */
+	.name = "link",	/* [한국어] 장치 디렉터리 아래 link/ 하위 디렉터리를 만든다 */
+	.attrs = aspm_ctrl_attrs,	/* [한국어] 그 안에 놓을 속성 목록 */
+	.is_visible = aspm_ctrl_attrs_are_visible,	/* [한국어] 장치마다 어떤 것을 보일지 정하는 콜백 */
 };
 
 /* [한국어]
@@ -3737,19 +3737,19 @@ const struct attribute_group aspm_ctrl_attr_group = {
  */
 static int __init pcie_aspm_disable(char *str)
 {
-	if (!strcmp(str, "off")) {
-		aspm_policy = POLICY_DEFAULT;
-		aspm_disabled = true;
-		aspm_support_enabled = false;
-		pr_info("PCIe ASPM is disabled\n");
-	} else if (!strcmp(str, "force")) {
-		aspm_force = true;
-		pr_info("PCIe ASPM is forcibly enabled\n");
+	if (!strcmp(str, "off")) {	/* [한국어] 부팅 인자가 off 인 경우 */
+		aspm_policy = POLICY_DEFAULT;	/* [한국어] 정책을 DEFAULT 로 — 상태를 바꾸지 않겠다는 뜻 */
+		aspm_disabled = true;	/* [한국어] 레지스터를 건드리지 않고 sysfs 정책 변경도 막는다 */
+		aspm_support_enabled = false;	/* [한국어] 링크 상태 객체 자체를 만들지 않는다. pcie_no_aspm() 과 다른 점이 바로 이 줄이다 */
+		pr_info("PCIe ASPM is disabled\n");	/* [한국어] 부팅 로그에 남긴다 */
+	} else if (!strcmp(str, "force")) {	/* [한국어] 부팅 인자가 force 인 경우 */
+		aspm_force = true;	/* [한국어] PCIe 1.1 미만으로 보이는 장치에도 ASPM 을 허용하고 pcie_no_aspm() 의 무력화도 무시한다 */
+		pr_info("PCIe ASPM is forcibly enabled\n");	/* [한국어] 부팅 로그에 남긴다 */
 	}
-	return 1;
+	return 1;	/* [한국어] 1 = 이 인자를 처리했다. 0 을 돌려주면 커널이 이 문자열을 init 환경으로 넘긴다 */
 }
 
-__setup("pcie_aspm=", pcie_aspm_disable);
+__setup("pcie_aspm=", pcie_aspm_disable);	/* [한국어] 부팅 인자 파서에 이 핸들러를 등록한다. 등호 뒤의 문자열이 str 로 들어온다 */
 
 /* [한국어]
  * pcie_no_aspm - 펌웨어가 ASPM 제어권을 주지 않았음을 커널에 알린다
@@ -3785,9 +3785,9 @@ void pcie_no_aspm(void)
 	 * (a) set policy to POLICY_DEFAULT in order to avoid changing state
 	 * (b) prevent userspace from changing policy
 	 */
-	if (!aspm_force) {
-		aspm_policy = POLICY_DEFAULT;
-		aspm_disabled = true;
+	if (!aspm_force) {	/* [한국어] 사용자가 force 로 명시적으로 펌웨어 판단을 무시하겠다고 했으면 아무것도 하지 않는다 */
+		aspm_policy = POLICY_DEFAULT;	/* [한국어] (a) 정책을 DEFAULT 로 — 커널이 상태를 바꾸지 않게 한다 */
+		aspm_disabled = true;	/* [한국어] (b) 사용자가 sysfs 로 정책을 바꾸는 것도 막는다. 이미 켜져 있는 상태를 끄지는 않는다는 것이 위 영어 주석의 요점이다 */
 	}
 }
 

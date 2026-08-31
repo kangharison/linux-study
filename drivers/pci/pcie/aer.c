@@ -110,36 +110,36 @@
  * pci_enable_pcie_error_reporting() 계열 : 장치의 오류 보고를 켜고 끈다.
  */
 
-#define pr_fmt(fmt) "AER: " fmt /* AER 로그 접두사 매크로 정의 (NVMe PCIe 오류 메시지 식별에 사용) */
-#define dev_fmt pr_fmt /* AER 로그 접두사 별칭 매크로 정의 */
+#define pr_fmt(fmt) "AER: " fmt
+#define dev_fmt pr_fmt
 
-#include <linux/bitops.h> /* 필요한 커널 헤더 포함 (NVMe 장치의 PCIe 오류 처리 지원) */
-#include <linux/cper.h> /* 필요한 커널 헤더 포함 (NVMe 장치의 PCIe 오류 처리 지원) */
-#include <linux/dev_printk.h> /* 필요한 커널 헤더 포함 (NVMe 장치의 PCIe 오류 처리 지원) */
-#include <linux/pci.h> /* PCI/PCIe 관련 핵심 헤더 포함 (NVMe 장치의 PCIe 레지스터/상태 접근에 사용) */
-#include <linux/pci-acpi.h> /* 필요한 커널 헤더 포함 (NVMe 장치의 PCIe 오류 처리 지원) */
-#include <linux/sched.h> /* 필요한 커널 헤더 포함 (NVMe 장치의 PCIe 오류 처리 지원) */
-#include <linux/kernel.h> /* 필요한 커널 헤더 포함 (NVMe 장치의 PCIe 오류 처리 지원) */
-#include <linux/errno.h> /* 필요한 커널 헤더 포함 (NVMe 장치의 PCIe 오류 처리 지원) */
-#include <linux/pm.h> /* 필요한 커널 헤더 포함 (NVMe 장치의 PCIe 오류 처리 지원) */
-#include <linux/init.h> /* 필요한 커널 헤더 포함 (NVMe 장치의 PCIe 오류 처리 지원) */
-#include <linux/interrupt.h> /* 인터럽트 핸들러 헤더 포함 (Root Port AER MSI/MSI-X 처리) */
-#include <linux/delay.h> /* 필요한 커널 헤더 포함 (NVMe 장치의 PCIe 오류 처리 지원) */
-#include <linux/kfifo.h> /* kfifo 헤더 포함 (AER 오류 소스를 ISR에서 threaded handler로 전달) */
-#include <linux/ratelimit.h> /* 필요한 커널 헤더 포함 (NVMe 장치의 PCIe 오류 처리 지원) */
-#include <linux/slab.h> /* 필요한 커널 헤더 포함 (NVMe 장치의 PCIe 오류 처리 지원) */
-#include <linux/vmcore_info.h> /* 필요한 커널 헤더 포함 (NVMe 장치의 PCIe 오류 처리 지원) */
-#include <acpi/apei.h> /* ACPI/APEI 관련 헤더 포함 (firmware가 보고한 NVMe PCIe 오류 처리에 사용) */
-#include <acpi/ghes.h> /* ACPI/APEI 관련 헤더 포함 (firmware가 보고한 NVMe PCIe 오류 처리에 사용) */
-#include <ras/ras_event.h> /* RAS 이벤트 헤더 포함 (NVMe PCIe 오류를 ftrace/perf로 기록) */
+#include <linux/bitops.h>
+#include <linux/cper.h>
+#include <linux/dev_printk.h>
+#include <linux/pci.h>
+#include <linux/pci-acpi.h>
+#include <linux/sched.h>
+#include <linux/kernel.h>
+#include <linux/errno.h>
+#include <linux/pm.h>
+#include <linux/init.h>
+#include <linux/interrupt.h>
+#include <linux/delay.h>
+#include <linux/kfifo.h>
+#include <linux/ratelimit.h>
+#include <linux/slab.h>
+#include <linux/vmcore_info.h>
+#include <acpi/apei.h>
+#include <acpi/ghes.h>
+#include <ras/ras_event.h>
 
-#include "../pci.h" /* 필요한 커널 헤더 포함 (NVMe 장치의 PCIe 오류 처리 지원) */
-#include "portdrv.h" /* 필요한 커널 헤더 포함 (NVMe 장치의 PCIe 오류 처리 지원) */
+#include "../pci.h"
+#include "portdrv.h"
 
-#define aer_printk(level, pdev, fmt, arg...) /* AER 로그 출력 매크로 정의 (NVMe 장치의 PCIe 오류 메시지 출력에 사용) */ \
-	dev_printk(level, &(pdev)->dev, fmt, ##arg) /* AER/NVMe 관련 로그 메시지 출력 */
+#define aer_printk(level, pdev, fmt, arg...) \
+	dev_printk(level, &(pdev)->dev, fmt, ##arg)
 
-#define AER_ERROR_SOURCES_MAX		128 /* Root Port당 최대 AER 오류 소스 큐 크기 정의 (NVMe 오류 버퍼링) */
+#define AER_ERROR_SOURCES_MAX		128
 
 #define AER_MAX_TYPEOF_COR_ERRS		16	/* as per PCI_ERR_COR_STATUS */
 #define AER_MAX_TYPEOF_UNCOR_ERRS	32	/* as per PCI_ERR_UNCOR_STATUS*/
@@ -150,10 +150,10 @@
  *   NVMe: NVMe 장치에서 전달된 ERR_COR/ERR_NONFATAL/ERR_FATAL의
  *   source BDF와 Root Status가 이 구조체에 저장된다.
  */
-struct aer_err_source { /* AER 관련 데이터 구조체 정의 시작 */
+struct aer_err_source {
 	u32 status;			/* PCI_ERR_ROOT_STATUS */
 	u32 id;				/* PCI_ERR_ROOT_ERR_SRC */
-}; /* 구조체/배열/열거형 정의 종료 */
+};
 
 /*
  * aer_rpc:
@@ -161,10 +161,10 @@ struct aer_err_source { /* AER 관련 데이터 구조체 정의 시작 */
  *   오류 소스 큐를 관리한다.
  *   NVMe: NVMe SSD가 연결된 Root Port의 AER 인터럽트 컨텍스트.
  */
-struct aer_rpc { /* AER 관련 데이터 구조체 정의 시작 */
+struct aer_rpc {
 	struct pci_dev *rpd;		/* Root Port device */
-	DECLARE_KFIFO(aer_fifo, struct aer_err_source, AER_ERROR_SOURCES_MAX); /* 코드 동작 수행 */
-}; /* 구조체/배열/열거형 정의 종료 */
+	DECLARE_KFIFO(aer_fifo, struct aer_err_source, AER_ERROR_SOURCES_MAX);
+};
 
 /* AER info for the device */
 /*
@@ -174,7 +174,7 @@ struct aer_rpc { /* AER 관련 데이터 구조체 정의 시작 */
  *   sysfs를 통해 노출하며, 과도한 로그를 방지하기 위한 rate limiter를
  *   포함한다.
  */
-struct aer_info { /* AER 관련 데이터 구조체 정의 시작 */
+struct aer_info {
 
 	/*
 	 * Fields for all AER capable devices. They indicate the errors
@@ -211,40 +211,40 @@ struct aer_info { /* AER 관련 데이터 구조체 정의 시작 */
 	/* Ratelimits for errors */
 	struct ratelimit_state correctable_ratelimit;
 	struct ratelimit_state nonfatal_ratelimit;
-}; /* 구조체/배열/열거형 정의 종료 */
+};
 
-#define AER_LOG_TLP_MASKS		(PCI_ERR_UNC_POISON_TLP| /* TLP 헤더가 로깅되는 uncorrectable AER 오류 비트 마스크 정의 (NVMe 메모리 트랜잭션 추적용) */	\
-					PCI_ERR_UNC_POISON_BLK | /* Poisoned Block 오류 비트 (NVMe 데이터 무결성 관련) */	\
-					PCI_ERR_UNC_ECRC| /* ECRC 오류 비트 (NVMe 메모리 트랜잭션 무결성) */		\
-					PCI_ERR_UNC_UNSUP| /* Unsupported Request 오류 비트 (NVMe 장치가 지원하지 않는 요청) */		\
-					PCI_ERR_UNC_COMP_ABORT| /* Completer Abort 오류 비트 (NVMe 완료 응답 중단) */		\
-					PCI_ERR_UNC_UNX_COMP| /* Unexpected Completion 오류 비트 (NVMe 예상치 못한 완료) */		\
-					PCI_ERR_UNC_ACSV | /* ACS Violation 오류 비트 (NVMe ACS 위반) */		\
-					PCI_ERR_UNC_MCBTLP | /* MCB TLP 오류 비트 (NVMe TLP 처리 관련) */		\
-					PCI_ERR_UNC_ATOMEG | /* AtomicOp Egress Blocked 오류 비트 (NVMe 원자 연산 관련) */		\
-					PCI_ERR_UNC_DMWR_BLK | /* DMWr Blocked 오류 비트 (NVMe 디바이스 메모리 쓰기 관련) */		\
-					PCI_ERR_UNC_XLAT_BLK | /* Translation Blocked 오류 비트 (NVMe ATS/IOMMU 관련) */		\
-					PCI_ERR_UNC_TLPPRE | /* TLP Prefix 오류 비트 (NVMe TLP 프리픽스 관련) */		\
-					PCI_ERR_UNC_MALF_TLP | /* Malformed TLP 오류 비트 (NVMe 잘못된 TLP 형식) */		\
-					PCI_ERR_UNC_IDE_CHECK | /* IDE Check 오류 비트 (NVMe PCIe IDE 무결성 검사) */		\
-					PCI_ERR_UNC_MISR_IDE | /* Misrouted IDE TLP 오류 비트 (NVMe IDE 라우팅 오류) */		\
-					PCI_ERR_UNC_PCRC_CHECK) /* 코드 동작 수행 */
+#define AER_LOG_TLP_MASKS		(PCI_ERR_UNC_POISON_TLP|	\
+					PCI_ERR_UNC_POISON_BLK |	\
+					PCI_ERR_UNC_ECRC|		\
+					PCI_ERR_UNC_UNSUP|		\
+					PCI_ERR_UNC_COMP_ABORT|		\
+					PCI_ERR_UNC_UNX_COMP|		\
+					PCI_ERR_UNC_ACSV |		\
+					PCI_ERR_UNC_MCBTLP |		\
+					PCI_ERR_UNC_ATOMEG |		\
+					PCI_ERR_UNC_DMWR_BLK |		\
+					PCI_ERR_UNC_XLAT_BLK |		\
+					PCI_ERR_UNC_TLPPRE |		\
+					PCI_ERR_UNC_MALF_TLP |		\
+					PCI_ERR_UNC_IDE_CHECK |		\
+					PCI_ERR_UNC_MISR_IDE |		\
+					PCI_ERR_UNC_PCRC_CHECK)
 
-#define SYSTEM_ERROR_INTR_ON_MESG_MASK	(PCI_EXP_RTCTL_SECEE| /* 시스템 오류 메시지 발생 마스크 정의 (NVMe PCIe 오류 시 SMI/NMI 제어) */	\
-					PCI_EXP_RTCTL_SENFEE| /* Non-Fatal Error Reporting Enable 비트 (NVMe nonfatal 오류 보고) */	\
-					PCI_EXP_RTCTL_SEFEE) /* 코드 동작 수행 */
-#define ROOT_PORT_INTR_ON_MESG_MASK	(PCI_ERR_ROOT_CMD_COR_EN| /* Root Port AER 인터럽트 활성화 마스크 정의 (NVMe ERR 메시지 처리) */	\
-					PCI_ERR_ROOT_CMD_NONFATAL_EN| /* NonFatal/Fatal Error Reporting Enable 비트 (NVMe 오류 보고 활성화) */	\
-					PCI_ERR_ROOT_CMD_FATAL_EN) /* 코드 동작 수행 */
-#define ERR_COR_ID(d)			(d & 0xffff) /* ERR_COR 메시지의 Requester ID 추출 매크로 정의 (NVMe 장치 BDF 식별) */
-#define ERR_UNCOR_ID(d)			(d >> 16) /* ERR_NONFATAL/FATAL 메시지의 Requester ID 추출 매크로 정의 (NVMe 장치 BDF 식별) */
+#define SYSTEM_ERROR_INTR_ON_MESG_MASK	(PCI_EXP_RTCTL_SECEE|	\
+					PCI_EXP_RTCTL_SENFEE|	\
+					PCI_EXP_RTCTL_SEFEE)
+#define ROOT_PORT_INTR_ON_MESG_MASK	(PCI_ERR_ROOT_CMD_COR_EN|	\
+					PCI_ERR_ROOT_CMD_NONFATAL_EN|	\
+					PCI_ERR_ROOT_CMD_FATAL_EN)
+#define ERR_COR_ID(d)			(d & 0xffff)
+#define ERR_UNCOR_ID(d)			(d >> 16)
 
-#define AER_ERR_STATUS_MASK		(PCI_ERR_ROOT_UNCOR_RCV | /* Root Error Status에서 수신한 ERR 메시지 비트 마스크 정의 (NVMe 오류 감지) */	\
-					PCI_ERR_ROOT_COR_RCV | /* ERR_COR 수신 비트 (NVMe correctable 오류 메시지) */		\
-					PCI_ERR_ROOT_MULTI_COR_RCV | /* 다중 ERR_COR 수신 비트 (NVMe 다중 correctable 오류) */	\
-					PCI_ERR_ROOT_MULTI_UNCOR_RCV) /* 코드 동작 수행 */
+#define AER_ERR_STATUS_MASK		(PCI_ERR_ROOT_UNCOR_RCV |	\
+					PCI_ERR_ROOT_COR_RCV |		\
+					PCI_ERR_ROOT_MULTI_COR_RCV |	\
+					PCI_ERR_ROOT_MULTI_UNCOR_RCV)
 
-static bool pcie_aer_disable; /* 전역 플래그 변수 선언/초기화 (NVMe AER 동작 제어) */
+static bool pcie_aer_disable;
 /*
  * aer_root_reset:
  *   AER 복구 과정에서 Root Port 하위 계층이나 RCEC/RCiEP를 리셋한다.
@@ -253,7 +253,7 @@ static bool pcie_aer_disable; /* 전역 플래그 변수 선언/초기화 (NVMe 
  *   드라이버의 slot_reset/resume 콜백이 호출되어 queue와 CMB를
  *   재초기화한다. SR-IOV 환경에서는 PF 리셋이 여러 VF에 영향.
  */
-static pci_ers_result_t aer_root_reset(struct pci_dev *dev); /* AER 복구 관련 함수 선언/프로토타입 */
+static pci_ers_result_t aer_root_reset(struct pci_dev *dev);
 
 /*
  * pci_no_aer:
@@ -262,10 +262,10 @@ static pci_ers_result_t aer_root_reset(struct pci_dev *dev); /* AER 복구 관�
  *   correctable/nonfatal/fatal 오류가 커널에서 처리되지 않아
  *   NVMe의 err_handler 복구 경로가 실행되지 않을 수 있다.
  */
-void pci_no_aer(void) /* AER/NVMe 관련 함수 정의 시작 */
-{ /* 코드 블록 시작 */
+void pci_no_aer(void)
+{
 	pcie_aer_disable = true;
-} /* 코드 블록 종료 */
+}
 
 /*
  * pci_aer_available:
@@ -273,12 +273,12 @@ void pci_no_aer(void) /* AER/NVMe 관련 함수 정의 시작 */
  *   NVMe: MSI/MSI-X가 활성화되어 있고 AER이 비활성화되지 않은 경우에
  *   AER 인터럽트/복구 메커니즘이 동작한다.
  */
-bool pci_aer_available(void) /* AER/NVMe 관련 함수 정의 시작 */
-{ /* 코드 블록 시작 */
+bool pci_aer_available(void)
+{
 	return !pcie_aer_disable && pci_msi_enabled();
-} /* 코드 블록 종료 */
+}
 
-#ifdef CONFIG_PCIE_ECRC /* 코드 동작 수행 */
+#ifdef CONFIG_PCIE_ECRC
 
 #define ECRC_POLICY_DEFAULT 0		/* ECRC set by BIOS */
 #define ECRC_POLICY_OFF     1		/* ECRC off for performance */
@@ -286,11 +286,11 @@ bool pci_aer_available(void) /* AER/NVMe 관련 함수 정의 시작 */
 
 static int ecrc_policy = ECRC_POLICY_DEFAULT;
 
-static const char * const ecrc_policy_str[] = { /* 값 설정 */
-	[ECRC_POLICY_DEFAULT] = "bios", /* 값 설정 */
-	[ECRC_POLICY_OFF] = "off", /* 값 설정 */
-	[ECRC_POLICY_ON] = "on" /* 값 설정 */
-}; /* 구조체/배열/열거형 정의 종료 */
+static const char * const ecrc_policy_str[] = {
+	[ECRC_POLICY_DEFAULT] = "bios",
+	[ECRC_POLICY_OFF] = "off",
+	[ECRC_POLICY_ON] = "on"
+};
 
 /**
  * enable_ecrc_checking - enable PCIe ECRC checking for a device
@@ -304,8 +304,8 @@ static const char * const ecrc_policy_str[] = { /* 값 설정 */
  *   NVMe: ECRC는 NVMe와 호스트 간 메모리 트랜잭션의 데이터 무결성을
  *   보호하며, 특히 CMB/P2P DMA 경로에서 TLP corruption을 감지한다.
  */
-static int enable_ecrc_checking(struct pci_dev *dev) /* AER/NVMe 관련 함수 정의 시작 */
-{ /* 코드 블록 시작 */
+static int enable_ecrc_checking(struct pci_dev *dev)
+{
 	int aer = dev->aer_cap;
 	u32 reg32;
 
@@ -314,13 +314,13 @@ static int enable_ecrc_checking(struct pci_dev *dev) /* AER/NVMe 관련 함수 �
 
 	pci_read_config_dword(dev, aer + PCI_ERR_CAP, &reg32);
 	if (reg32 & PCI_ERR_CAP_ECRC_GENC)
-		reg32 |= PCI_ERR_CAP_ECRC_GENE; /* 값 설정 */
+		reg32 |= PCI_ERR_CAP_ECRC_GENE;
 	if (reg32 & PCI_ERR_CAP_ECRC_CHKC)
-		reg32 |= PCI_ERR_CAP_ECRC_CHKE; /* 값 설정 */
+		reg32 |= PCI_ERR_CAP_ECRC_CHKE;
 	pci_write_config_dword(dev, aer + PCI_ERR_CAP, reg32);
 
 	return 0;
-} /* 코드 블록 종료 */
+}
 
 /**
  * disable_ecrc_checking - disable PCIe ECRC checking for a device
@@ -334,8 +334,8 @@ static int enable_ecrc_checking(struct pci_dev *dev) /* AER/NVMe 관련 함수 �
  *   NVMe: 성능 우선 시 ECRC를 끌 수 있으나, CMB/P2P DMA 데이터
  *   무결성 보호가 약화된다.
  */
-static int disable_ecrc_checking(struct pci_dev *dev) /* AER/NVMe 관련 함수 정의 시작 */
-{ /* 코드 블록 시작 */
+static int disable_ecrc_checking(struct pci_dev *dev)
+{
 	int aer = dev->aer_cap;
 	u32 reg32;
 
@@ -343,11 +343,11 @@ static int disable_ecrc_checking(struct pci_dev *dev) /* AER/NVMe 관련 함수 
 		return -ENODEV;
 
 	pci_read_config_dword(dev, aer + PCI_ERR_CAP, &reg32);
-	reg32 &= ~(PCI_ERR_CAP_ECRC_GENE | PCI_ERR_CAP_ECRC_CHKE); /* 값 설정 */
+	reg32 &= ~(PCI_ERR_CAP_ECRC_GENE | PCI_ERR_CAP_ECRC_CHKE);
 	pci_write_config_dword(dev, aer + PCI_ERR_CAP, reg32);
 
 	return 0;
-} /* 코드 블록 종료 */
+}
 
 /**
  * pcie_set_ecrc_checking - set/unset PCIe ECRC checking for a device based
@@ -360,8 +360,8 @@ static int disable_ecrc_checking(struct pci_dev *dev) /* AER/NVMe 관련 함수 
  *   NVMe: NVMe 장치 초기화 시 AER capability를 찾은 후 ECRC 정책을
  *   적용하여 향후 PCIe 메모리 트랜잭션 무결성을 제어한다.
  */
-void pcie_set_ecrc_checking(struct pci_dev *dev) /* AER/NVMe 관련 함수 정의 시작 */
-{ /* 코드 블록 시작 */
+void pcie_set_ecrc_checking(struct pci_dev *dev)
+{
 	if (!pcie_aer_is_native(dev))
 		return;
 
@@ -370,14 +370,14 @@ void pcie_set_ecrc_checking(struct pci_dev *dev) /* AER/NVMe 관련 함수 정�
 		return;
 	case ECRC_POLICY_OFF:
 		disable_ecrc_checking(dev);
-		break; /* 반복문/switch 탈출 */
+		break;
 	case ECRC_POLICY_ON:
 		enable_ecrc_checking(dev);
-		break; /* 반복문/switch 탈출 */
+		break;
 	default:
 		return;
-	} /* 코드 블록 종료 */
-} /* 코드 블록 종료 */
+	}
+}
 
 /**
  * pcie_ecrc_get_policy - parse kernel command-line ecrc option
@@ -388,8 +388,8 @@ void pcie_set_ecrc_checking(struct pci_dev *dev) /* AER/NVMe 관련 함수 정�
  *   커널 부팅 인자로 전달된 ecrc 정책 문자열을 파싱한다.
  *   NVMe: NVMe 시스템 부팅 시 ECRC 설정을 bios/off/on 중 선택.
  */
-void pcie_ecrc_get_policy(char *str) /* AER/NVMe 관련 함수 정의 시작 */
-{ /* 코드 블록 시작 */
+void pcie_ecrc_get_policy(char *str)
+{
 	int i;
 
 	i = match_string(ecrc_policy_str, ARRAY_SIZE(ecrc_policy_str), str);
@@ -397,7 +397,7 @@ void pcie_ecrc_get_policy(char *str) /* AER/NVMe 관련 함수 정의 시작 */
 		return;
 
 	ecrc_policy = i;
-} /* 코드 블록 종료 */
+}
 #endif	/* CONFIG_PCIE_ECRC */
 
 /*
@@ -406,15 +406,15 @@ void pcie_ecrc_get_policy(char *str) /* AER/NVMe 관련 함수 정의 시작 */
  *   NVMe: native AER 제어가 가능해야 NVMe 드라이버의 err_handler가
  *   fatal/nonfatal 오류 복구에 참여할 수 있다.
  */
-int pcie_aer_is_native(struct pci_dev *dev) /* AER/NVMe 관련 함수 정의 시작 */
-{ /* 코드 블록 시작 */
+int pcie_aer_is_native(struct pci_dev *dev)
+{
 	struct pci_host_bridge *host = pci_find_host_bridge(dev->bus);
 
 	if (!dev->aer_cap)
 		return 0;
 
 	return pcie_ports_native || host->native_aer;
-} /* 코드 블록 종료 */
+}
 EXPORT_SYMBOL_NS_GPL(pcie_aer_is_native, "CXL");
 
 /*
@@ -424,8 +424,8 @@ EXPORT_SYMBOL_NS_GPL(pcie_aer_is_native, "CXL");
  *   NVMe: NVMe 장치가 Root Port로 ERR_COR/ERR_NONFATAL/ERR_FATAL
  *   메시지를 본 파일의 AER 핸들러로 볼 수 있도록 허용한다.
  */
-static int pci_enable_pcie_error_reporting(struct pci_dev *dev) /* AER/NVMe 관련 함수 정의 시작 */
-{ /* 코드 블록 시작 */
+static int pci_enable_pcie_error_reporting(struct pci_dev *dev)
+{
 	int rc;
 
 	if (!pcie_aer_is_native(dev))
@@ -433,15 +433,15 @@ static int pci_enable_pcie_error_reporting(struct pci_dev *dev) /* AER/NVMe 관�
 
 	rc = pcie_capability_set_word(dev, PCI_EXP_DEVCTL, PCI_EXP_AER_FLAGS);
 	return pcibios_err_to_errno(rc);
-} /* 코드 블록 종료 */
+}
 
 /*
  * pci_aer_clear_nonfatal_status:
  *   Uncorrectable Error Status 레지스터에서 nonfatal 비트만 클리어한다.
  *   NVMe: NVMe 복구 흐름에서 nonfatal 오류 상태를 정리할 때 사용.
  */
-int pci_aer_clear_nonfatal_status(struct pci_dev *dev) /* AER/NVMe 관련 함수 정의 시작 */
-{ /* 코드 블록 시작 */
+int pci_aer_clear_nonfatal_status(struct pci_dev *dev)
+{
 	int aer = dev->aer_cap;
 	u32 status, sev;
 
@@ -451,12 +451,12 @@ int pci_aer_clear_nonfatal_status(struct pci_dev *dev) /* AER/NVMe 관련 함수
 	/* Clear status bits for ERR_NONFATAL errors only */
 	pci_read_config_dword(dev, aer + PCI_ERR_UNCOR_STATUS, &status);
 	pci_read_config_dword(dev, aer + PCI_ERR_UNCOR_SEVER, &sev);
-	status &= ~sev; /* 값 설정 */
+	status &= ~sev;
 	if (status)
 		pci_write_config_dword(dev, aer + PCI_ERR_UNCOR_STATUS, status);
 
 	return 0;
-} /* 코드 블록 종료 */
+}
 EXPORT_SYMBOL_GPL(pci_aer_clear_nonfatal_status);
 
 /*
@@ -464,8 +464,8 @@ EXPORT_SYMBOL_GPL(pci_aer_clear_nonfatal_status);
  *   Uncorrectable Error Status 레지스터에서 fatal 비트만 클리어한다.
  *   NVMe: NVMe slot reset/link reset 후 fatal 오류 상태를 정리.
  */
-void pci_aer_clear_fatal_status(struct pci_dev *dev) /* AER/NVMe 관련 함수 정의 시작 */
-{ /* 코드 블록 시작 */
+void pci_aer_clear_fatal_status(struct pci_dev *dev)
+{
 	int aer = dev->aer_cap;
 	u32 status, sev;
 
@@ -475,10 +475,10 @@ void pci_aer_clear_fatal_status(struct pci_dev *dev) /* AER/NVMe 관련 함수 �
 	/* Clear status bits for ERR_FATAL errors only */
 	pci_read_config_dword(dev, aer + PCI_ERR_UNCOR_STATUS, &status);
 	pci_read_config_dword(dev, aer + PCI_ERR_UNCOR_SEVER, &sev);
-	status &= sev; /* 값 설정 */
+	status &= sev;
 	if (status)
 		pci_write_config_dword(dev, aer + PCI_ERR_UNCOR_STATUS, status);
-} /* 코드 블록 종료 */
+}
 
 /**
  * pci_aer_raw_clear_status - Clear AER error registers.
@@ -494,8 +494,8 @@ void pci_aer_clear_fatal_status(struct pci_dev *dev) /* AER/NVMe 관련 함수 �
  *   AER Root/Correctable/Uncorrectable 상태 레지스터를 모두 클리어한다.
  *   NVMe: NVMe 장치나 Root Port의 모든 AER 상태를 한 번에 초기화.
  */
-int pci_aer_raw_clear_status(struct pci_dev *dev) /* AER/NVMe 관련 함수 정의 시작 */
-{ /* 코드 블록 시작 */
+int pci_aer_raw_clear_status(struct pci_dev *dev)
+{
 	int aer = dev->aer_cap;
 	u32 status;
 	int port_type;
@@ -508,7 +508,7 @@ int pci_aer_raw_clear_status(struct pci_dev *dev) /* AER/NVMe 관련 함수 정�
 	    port_type == PCI_EXP_TYPE_RC_EC) {
 		pci_read_config_dword(dev, aer + PCI_ERR_ROOT_STATUS, &status);
 		pci_write_config_dword(dev, aer + PCI_ERR_ROOT_STATUS, status);
-	} /* 코드 블록 종료 */
+	}
 
 	pci_read_config_dword(dev, aer + PCI_ERR_COR_STATUS, &status);
 	pci_write_config_dword(dev, aer + PCI_ERR_COR_STATUS, status);
@@ -517,20 +517,20 @@ int pci_aer_raw_clear_status(struct pci_dev *dev) /* AER/NVMe 관련 함수 정�
 	pci_write_config_dword(dev, aer + PCI_ERR_UNCOR_STATUS, status);
 
 	return 0;
-} /* 코드 블록 종료 */
+}
 
 /*
  * pci_aer_clear_status:
  *   native AER 제어 시에만 AER 상태 레지스터를 클리어한다.
  *   NVMe: NVMe 장치의 AER 상태 초기화 시 firmware/OS 소유권을 고려.
  */
-int pci_aer_clear_status(struct pci_dev *dev) /* AER/NVMe 관련 함수 정의 시작 */
-{ /* 코드 블록 시작 */
+int pci_aer_clear_status(struct pci_dev *dev)
+{
 	if (!pcie_aer_is_native(dev))
 		return -EIO;
 
 	return pci_aer_raw_clear_status(dev);
-} /* 코드 블록 종료 */
+}
 
 /*
  * pci_save_aer_state:
@@ -538,8 +538,8 @@ int pci_aer_clear_status(struct pci_dev *dev) /* AER/NVMe 관련 함수 정의 �
  *   NVMe: NVMe 장치 절전이나 D3hot 진입 전 AER 마스크/severity 등을
  *   보존하여 resume 시 복원한다.
  */
-void pci_save_aer_state(struct pci_dev *dev) /* AER/NVMe 관련 함수 정의 시작 */
-{ /* 코드 블록 시작 */
+void pci_save_aer_state(struct pci_dev *dev)
+{
 	int aer = dev->aer_cap;
 	struct pci_cap_saved_state *save_state;
 	u32 *cap;
@@ -558,15 +558,15 @@ void pci_save_aer_state(struct pci_dev *dev) /* AER/NVMe 관련 함수 정의 �
 	pci_read_config_dword(dev, aer + PCI_ERR_CAP, cap++);
 	if (pcie_cap_has_rtctl(dev))
 		pci_read_config_dword(dev, aer + PCI_ERR_ROOT_COMMAND, cap++);
-} /* 코드 블록 종료 */
+}
 
 /*
  * pci_restore_aer_state:
  *   저장한 AER 레지스터 값을 복원한다.
  *   NVMe: NVMe 장치 resume 후 AER 설정을 이전 상태로 되돌린다.
  */
-void pci_restore_aer_state(struct pci_dev *dev) /* AER/NVMe 관련 함수 정의 시작 */
-{ /* 코드 블록 시작 */
+void pci_restore_aer_state(struct pci_dev *dev)
+{
 	int aer = dev->aer_cap;
 	struct pci_cap_saved_state *save_state;
 	u32 *cap;
@@ -585,7 +585,7 @@ void pci_restore_aer_state(struct pci_dev *dev) /* AER/NVMe 관련 함수 정의
 	pci_write_config_dword(dev, aer + PCI_ERR_CAP, *cap++);
 	if (pcie_cap_has_rtctl(dev))
 		pci_write_config_dword(dev, aer + PCI_ERR_ROOT_COMMAND, *cap++);
-} /* 코드 블록 종료 */
+}
 
 /*
  * pci_aer_init:
@@ -596,24 +596,24 @@ void pci_restore_aer_state(struct pci_dev *dev) /* AER/NVMe 관련 함수 정의
  *   준비된다. CMB/P2P DMA/ATS/SR-IOV 관련 PCIe 트랜잭션 오류를
  *   보고받기 위한 전제 조건이 된다.
  */
-void pci_aer_init(struct pci_dev *dev) /* AER/NVMe 관련 함수 정의 시작 */
-{ /* 코드 블록 시작 */
+void pci_aer_init(struct pci_dev *dev)
+{
 	int n;
 
 	dev->aer_cap = pci_find_ext_capability(dev, PCI_EXT_CAP_ID_ERR);
 	if (!dev->aer_cap)
 		return;
 
-	dev->aer_info = kzalloc_obj(*dev->aer_info); /* AER 정보 구조체 동적 할당 */
+	dev->aer_info = kzalloc_obj(*dev->aer_info);
 	if (!dev->aer_info) {
 		dev->aer_cap = 0;
 		return;
-	} /* 코드 블록 종료 */
+	}
 
-	ratelimit_state_init(&dev->aer_info->correctable_ratelimit, /* rate limit 상태 초기화 (NVMe 오류 로그 폭주 방지) */
-			     DEFAULT_RATELIMIT_INTERVAL, DEFAULT_RATELIMIT_BURST); /* 코드 동작 수행 */
-	ratelimit_state_init(&dev->aer_info->nonfatal_ratelimit, /* rate limit 상태 초기화 (NVMe 오류 로그 폭주 방지) */
-			     DEFAULT_RATELIMIT_INTERVAL, DEFAULT_RATELIMIT_BURST); /* 코드 동작 수행 */
+	ratelimit_state_init(&dev->aer_info->correctable_ratelimit,
+			     DEFAULT_RATELIMIT_INTERVAL, DEFAULT_RATELIMIT_BURST);
+	ratelimit_state_init(&dev->aer_info->nonfatal_ratelimit,
+			     DEFAULT_RATELIMIT_INTERVAL, DEFAULT_RATELIMIT_BURST);
 
 	/*
 	 * We save/restore PCI_ERR_UNCOR_MASK, PCI_ERR_UNCOR_SEVER,
@@ -621,91 +621,91 @@ void pci_aer_init(struct pci_dev *dev) /* AER/NVMe 관련 함수 정의 시작 *
 	 * Collectors also implement PCI_ERR_ROOT_COMMAND (PCIe r6.0, sec
 	 * 7.8.4.9).
 	 */
-	n = pcie_cap_has_rtctl(dev) ? 5 : 4; /* Root Port/RCEC의 RTCTL 레지스터 존재 여부 확인 */
-	pci_add_ext_cap_save_buffer(dev, PCI_EXT_CAP_ID_ERR, sizeof(u32) * n); /* AER 레지스터 저장 버퍼 등록 (NVMe 절전/reset 대비) */
+	n = pcie_cap_has_rtctl(dev) ? 5 : 4;
+	pci_add_ext_cap_save_buffer(dev, PCI_EXT_CAP_ID_ERR, sizeof(u32) * n);
 
 	pci_aer_clear_status(dev);
 
-	if (pci_aer_available()) /* AER 서비스 사용 가능 여부 확인 */
+	if (pci_aer_available())
 		pci_enable_pcie_error_reporting(dev);
 
 	pcie_set_ecrc_checking(dev);
-} /* 코드 블록 종료 */
+}
 
 /*
  * pci_aer_exit:
  *   AER 정보 구조체를 해제한다.
  *   NVMe: NVMe 장치 제거 시 AER 통계/레이트리미트 메모리를 반납.
  */
-void pci_aer_exit(struct pci_dev *dev) /* AER/NVMe 관련 함수 정의 시작 */
-{ /* 코드 블록 시작 */
+void pci_aer_exit(struct pci_dev *dev)
+{
 	kfree(dev->aer_info);
 	dev->aer_info = NULL;
-} /* 코드 블록 종료 */
+}
 
-#define AER_AGENT_RECEIVER		0 /* AER 오류 에이전트 상수/마스크 매크로 정의 (NVMe 오류 원인 분석) */
-#define AER_AGENT_REQUESTER		1 /* AER 오류 에이전트 상수/마스크 매크로 정의 (NVMe 오류 원인 분석) */
-#define AER_AGENT_COMPLETER		2 /* AER 오류 에이전트 상수/마스크 매크로 정의 (NVMe 오류 원인 분석) */
-#define AER_AGENT_TRANSMITTER		3 /* AER 오류 에이전트 상수/마스크 매크로 정의 (NVMe 오류 원인 분석) */
+#define AER_AGENT_RECEIVER		0
+#define AER_AGENT_REQUESTER		1
+#define AER_AGENT_COMPLETER		2
+#define AER_AGENT_TRANSMITTER		3
 
-#define AER_AGENT_REQUESTER_MASK(t)	((t == AER_CORRECTABLE) ? /* Requester 에이전트 마스크 매크로 정의 (NVMe 요청 장치 식별용) */	\
-	0 : (PCI_ERR_UNC_COMP_TIME|PCI_ERR_UNC_UNSUP)) /* 비트 OR 연산 */
-#define AER_AGENT_COMPLETER_MASK(t)	((t == AER_CORRECTABLE) ? /* Completer 에이전트 마스크 매크로 정의 (NVMe 완료 장치 식별용) */	\
-	0 : PCI_ERR_UNC_COMP_ABORT) /* 코드 동작 수행 */
-#define AER_AGENT_TRANSMITTER_MASK(t)	((t == AER_CORRECTABLE) ? /* Transmitter 에이전트 마스크 매크로 정의 (NVMe 송신 장치 식별용) */	\
-	(PCI_ERR_COR_REP_ROLL|PCI_ERR_COR_REP_TIMER) : 0) /* 비트 OR 연산 */
+#define AER_AGENT_REQUESTER_MASK(t)	((t == AER_CORRECTABLE) ?	\
+	0 : (PCI_ERR_UNC_COMP_TIME|PCI_ERR_UNC_UNSUP))
+#define AER_AGENT_COMPLETER_MASK(t)	((t == AER_CORRECTABLE) ?	\
+	0 : PCI_ERR_UNC_COMP_ABORT)
+#define AER_AGENT_TRANSMITTER_MASK(t)	((t == AER_CORRECTABLE) ?	\
+	(PCI_ERR_COR_REP_ROLL|PCI_ERR_COR_REP_TIMER) : 0)
 
-#define AER_GET_AGENT(t, e) /* AER 오류의 에이전트(Requester/Completer/Transmitter/Receiver) 판별 매크로 정의 (NVMe 오류 원인 분석) */						\
-	((e & AER_AGENT_COMPLETER_MASK(t)) ? AER_AGENT_COMPLETER : /* Completer 에이전트 비트가 설정되었는지 확인 (NVMe 완료 응답 장치) */	\
-	(e & AER_AGENT_REQUESTER_MASK(t)) ? AER_AGENT_REQUESTER : /* Requester 에이전트 비트가 설정되었는지 확인 (NVMe 요청 장치) */	\
-	(e & AER_AGENT_TRANSMITTER_MASK(t)) ? AER_AGENT_TRANSMITTER : /* Transmitter 에이전트 비트가 설정되었는지 확인 (NVMe 송신 장치) */	\
-	AER_AGENT_RECEIVER) /* 코드 동작 수행 */
+#define AER_GET_AGENT(t, e)						\
+	((e & AER_AGENT_COMPLETER_MASK(t)) ? AER_AGENT_COMPLETER :	\
+	(e & AER_AGENT_REQUESTER_MASK(t)) ? AER_AGENT_REQUESTER :	\
+	(e & AER_AGENT_TRANSMITTER_MASK(t)) ? AER_AGENT_TRANSMITTER :	\
+	AER_AGENT_RECEIVER)
 
-#define AER_PHYSICAL_LAYER_ERROR	0 /* Physical Layer 오류 상수 정의 (NVMe PHY 계층 오류) */
-#define AER_DATA_LINK_LAYER_ERROR	1 /* Data Link Layer 오류 상수 정의 (NVMe 링크 계층 오류) */
-#define AER_TRANSACTION_LAYER_ERROR	2 /* Transaction Layer 오류 상수 정의 (NVMe 트랜잭션 계층 오류) */
+#define AER_PHYSICAL_LAYER_ERROR	0
+#define AER_DATA_LINK_LAYER_ERROR	1
+#define AER_TRANSACTION_LAYER_ERROR	2
 
-#define AER_PHYSICAL_LAYER_ERROR_MASK(t) ((t == AER_CORRECTABLE) ? /* Physical Layer 오류 마스크 매크로 정의 (NVMe PHY 계층 오류) */	\
-	PCI_ERR_COR_RCVR : 0) /* 코드 동작 수행 */
-#define AER_DATA_LINK_LAYER_ERROR_MASK(t) ((t == AER_CORRECTABLE) ? /* Data Link Layer 오류 마스크 매크로 정의 (NVMe 링크 계층 오류) */	\
-	(PCI_ERR_COR_BAD_TLP| /* Bad TLP 오류 비트 (NVMe 잘못된 TLP 수신) */						\
-	PCI_ERR_COR_BAD_DLLP| /* Bad DLLP 오류 비트 (NVMe 데이터 링크 레이어 패킷 오류) */						\
-	PCI_ERR_COR_REP_ROLL| /* Replay Timer Rollover 오류 비트 (NVMe 링크 재전송 타이머 초과) */						\
-	PCI_ERR_COR_REP_TIMER) : PCI_ERR_UNC_DLP) /* 코드 동작 수행 */
+#define AER_PHYSICAL_LAYER_ERROR_MASK(t) ((t == AER_CORRECTABLE) ?	\
+	PCI_ERR_COR_RCVR : 0)
+#define AER_DATA_LINK_LAYER_ERROR_MASK(t) ((t == AER_CORRECTABLE) ?	\
+	(PCI_ERR_COR_BAD_TLP|						\
+	PCI_ERR_COR_BAD_DLLP|						\
+	PCI_ERR_COR_REP_ROLL|						\
+	PCI_ERR_COR_REP_TIMER) : PCI_ERR_UNC_DLP)
 
-#define AER_GET_LAYER_ERROR(t, e) /* AER 오류가 발생한 PCIe 계층(Physical/Data Link/Transaction) 판별 매크로 정의 (NVMe 오류 계층 분석) */					\
-	((e & AER_PHYSICAL_LAYER_ERROR_MASK(t)) ? AER_PHYSICAL_LAYER_ERROR : /* Physical Layer 오류 여부 확인 (NVMe 신호/PHY 계층) */ \
-	(e & AER_DATA_LINK_LAYER_ERROR_MASK(t)) ? AER_DATA_LINK_LAYER_ERROR : /* Data Link Layer 오류 여부 확인 (NVMe 링크 계층) */ \
-	AER_TRANSACTION_LAYER_ERROR) /* 코드 동작 수행 */
+#define AER_GET_LAYER_ERROR(t, e)					\
+	((e & AER_PHYSICAL_LAYER_ERROR_MASK(t)) ? AER_PHYSICAL_LAYER_ERROR : \
+	(e & AER_DATA_LINK_LAYER_ERROR_MASK(t)) ? AER_DATA_LINK_LAYER_ERROR : \
+	AER_TRANSACTION_LAYER_ERROR)
 
 /*
  * AER error strings
  */
-static const char * const aer_error_severity_string[] = { /* 값 설정 */
-	"Uncorrectable (Non-Fatal)", /* AER 오류 문자열 배열 초기화 항목 */
-	"Uncorrectable (Fatal)", /* AER 오류 문자열 배열 초기화 항목 */
-	"Correctable" /* 코드 동작 수행 */
-}; /* 구조체/배열/열거형 정의 종료 */
+static const char * const aer_error_severity_string[] = {
+	"Uncorrectable (Non-Fatal)",
+	"Uncorrectable (Fatal)",
+	"Correctable"
+};
 
-static const char *aer_error_layer[] = { /* AER 오류 문자열 배열 정의 및 초기화 시작 */
-	"Physical Layer", /* AER 오류 문자열 배열 초기화 항목 */
-	"Data Link Layer", /* AER 오류 문자열 배열 초기화 항목 */
-	"Transaction Layer" /* 코드 동작 수행 */
-}; /* 구조체/배열/열거형 정의 종료 */
+static const char *aer_error_layer[] = {
+	"Physical Layer",
+	"Data Link Layer",
+	"Transaction Layer"
+};
 
-static const char *aer_correctable_error_string[] = { /* AER 오류 문자열 배열 정의 및 초기화 시작 */
+static const char *aer_correctable_error_string[] = {
 	"RxErr",			/* Bit Position 0	*/
-	NULL, /* AER 오류 문자열 배열의 미사용 항목(NULL) */
-	NULL, /* AER 오류 문자열 배열의 미사용 항목(NULL) */
-	NULL, /* AER 오류 문자열 배열의 미사용 항목(NULL) */
-	NULL, /* AER 오류 문자열 배열의 미사용 항목(NULL) */
-	NULL, /* AER 오류 문자열 배열의 미사용 항목(NULL) */
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
 	"BadTLP",			/* Bit Position 6	*/
 	"BadDLLP",			/* Bit Position 7	*/
 	"Rollover",			/* Bit Position 8	*/
-	NULL, /* AER 오류 문자열 배열의 미사용 항목(NULL) */
-	NULL, /* AER 오류 문자열 배열의 미사용 항목(NULL) */
-	NULL, /* AER 오류 문자열 배열의 미사용 항목(NULL) */
+	NULL,
+	NULL,
+	NULL,
 	"Timeout",			/* Bit Position 12	*/
 	"NonFatalErr",			/* Bit Position 13	*/
 	"CorrIntErr",			/* Bit Position 14	*/
@@ -726,21 +726,21 @@ static const char *aer_correctable_error_string[] = { /* AER 오류 문자열 �
 	NULL,				/* Bit Position 29	*/
 	NULL,				/* Bit Position 30	*/
 	NULL,				/* Bit Position 31	*/
-}; /* 구조체/배열/열거형 정의 종료 */
+};
 
-static const char *aer_uncorrectable_error_string[] = { /* AER 오류 문자열 배열 정의 및 초기화 시작 */
+static const char *aer_uncorrectable_error_string[] = {
 	"Undefined",			/* Bit Position 0	*/
-	NULL, /* AER 오류 문자열 배열의 미사용 항목(NULL) */
-	NULL, /* AER 오류 문자열 배열의 미사용 항목(NULL) */
-	NULL, /* AER 오류 문자열 배열의 미사용 항목(NULL) */
+	NULL,
+	NULL,
+	NULL,
 	"DLP",				/* Bit Position 4	*/
 	"SDES",				/* Bit Position 5	*/
-	NULL, /* AER 오류 문자열 배열의 미사용 항목(NULL) */
-	NULL, /* AER 오류 문자열 배열의 미사용 항목(NULL) */
-	NULL, /* AER 오류 문자열 배열의 미사용 항목(NULL) */
-	NULL, /* AER 오류 문자열 배열의 미사용 항목(NULL) */
-	NULL, /* AER 오류 문자열 배열의 미사용 항목(NULL) */
-	NULL, /* AER 오류 문자열 배열의 미사용 항목(NULL) */
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
+	NULL,
 	"TLP",				/* Bit Position 12	*/
 	"FCP",				/* Bit Position 13	*/
 	"CmpltTO",			/* Bit Position 14	*/
@@ -761,82 +761,82 @@ static const char *aer_uncorrectable_error_string[] = { /* AER 오류 문자열 
 	"MisIDETLP",			/* Bit Position 29	*/
 	"PCRC_CHECK",			/* Bit Position 30	*/
 	"TLPXlatBlocked",		/* Bit Position 31	*/
-}; /* 구조체/배열/열거형 정의 종료 */
+};
 
-static const char *aer_agent_string[] = { /* AER 오류 문자열 배열 정의 및 초기화 시작 */
-	"Receiver ID", /* AER 오류 문자열 배열 초기화 항목 */
-	"Requester ID", /* AER 오류 문자열 배열 초기화 항목 */
-	"Completer ID", /* AER 오류 문자열 배열 초기화 항목 */
-	"Transmitter ID" /* 코드 동작 수행 */
-}; /* 구조체/배열/열거형 정의 종료 */
+static const char *aer_agent_string[] = {
+	"Receiver ID",
+	"Requester ID",
+	"Completer ID",
+	"Transmitter ID"
+};
 
 #define aer_stats_dev_attr(name, stats_array, strings_array,		\
-			   total_string, total_field) /* 통계 항목의 문자열 이름과 필드 이름 매개변수 정의 */			\
-	static ssize_t /* sysfs show 함수 선언 (NVMe AER 통계 sysfs 읽기) */							\
-	name##_show(struct device *dev, struct device_attribute *attr, /* show 함수 인자 정의 (NVMe 장치의 sysfs attribute) */	\
-		     char *buf) /* 출력 버퍼 인자 정의 */						\
-{ /* show 함수 본문 시작 */									\
-	unsigned int i; /* AER 오류 비트 순회용 인덱스 변수 선언 */							\
-	struct pci_dev *pdev = to_pci_dev(dev); /* sysfs에서 NVMe pci_dev 구조체 획득 */				\
+			   total_string, total_field)			\
+	static ssize_t							\
+	name##_show(struct device *dev, struct device_attribute *attr,	\
+		     char *buf)						\
+{									\
+	unsigned int i;							\
+	struct pci_dev *pdev = to_pci_dev(dev);				\
 	u64 *stats = pdev->aer_info->stats_array;			\
-	size_t len = 0; /* sysfs 출력 길이 초기화 */							\
+	size_t len = 0;							\
  /* 출력 서식 정렬용 빈 줄 */									\
-	for (i = 0; i < ARRAY_SIZE(pdev->aer_info->stats_array); i++) { /* AER 통계 배열의 모든 비트를 순회하며 sysfs에 출력 */	\
-		if (strings_array[i]) /* 해당 비트에 이름이 정의되어 있으면 이름과 카운터 출력 */					\
-			len += sysfs_emit_at(buf, len, "%s %llu\n", /* sysfs_emit_at으로 문자열과 카운터 값을 버퍼에 추가 */	\
-					     strings_array[i], /* 오류 이름 문자열 인자 */		\
-					     stats[i]); /* 해당 오류 발생 횟수 인자 */			\
-		else if (stats[i]) /* 이름이 없고 카운터가 0이 아니면 비트 번호로 출력 */					\
-			len += sysfs_emit_at(buf, len, /* 비트 번호 형식으로 카운터 값 추가 */			\
-					     #stats_array "_bit[%d] %llu\n", /* 비트 인덱스 포맷 문자열 */\
-					     i, stats[i]); /* 비트 인덱스와 카운터 값 인자 */		\
-	} /* 통계 배열 순회 종료 */								\
-	len += sysfs_emit_at(buf, len, "TOTAL_%s %llu\n", total_string, /* TOTAL 항목을 sysfs 버퍼에 추가 */	\
-			     pdev->aer_info->total_field); /* TOTAL 문자열과 누적 카운터 값 인자 */		\
-	return len; /* 출력된 총 바이트 수 반환 */							\
-} /* show 함수 본문 종료 */									\
-static DEVICE_ATTR_RO(name) /* 코드 동작 수행 */
+	for (i = 0; i < ARRAY_SIZE(pdev->aer_info->stats_array); i++) {	\
+		if (strings_array[i])					\
+			len += sysfs_emit_at(buf, len, "%s %llu\n",	\
+					     strings_array[i],		\
+					     stats[i]);			\
+		else if (stats[i])					\
+			len += sysfs_emit_at(buf, len,			\
+					     #stats_array "_bit[%d] %llu\n",\
+					     i, stats[i]);		\
+	}								\
+	len += sysfs_emit_at(buf, len, "TOTAL_%s %llu\n", total_string,	\
+			     pdev->aer_info->total_field);		\
+	return len;							\
+}									\
+static DEVICE_ATTR_RO(name)
 
-aer_stats_dev_attr(aer_dev_correctable, dev_cor_errs, /* 코드 동작 수행 */
-		   aer_correctable_error_string, "ERR_COR", /* 코드 동작 수행 */
-		   dev_total_cor_errs); /* 코드 동작 수행 */
-aer_stats_dev_attr(aer_dev_fatal, dev_fatal_errs, /* 코드 동작 수행 */
-		   aer_uncorrectable_error_string, "ERR_FATAL", /* 코드 동작 수행 */
-		   dev_total_fatal_errs); /* 코드 동작 수행 */
-aer_stats_dev_attr(aer_dev_nonfatal, dev_nonfatal_errs, /* 코드 동작 수행 */
-		   aer_uncorrectable_error_string, "ERR_NONFATAL", /* 코드 동작 수행 */
-		   dev_total_nonfatal_errs); /* 코드 동작 수행 */
+aer_stats_dev_attr(aer_dev_correctable, dev_cor_errs,
+		   aer_correctable_error_string, "ERR_COR",
+		   dev_total_cor_errs);
+aer_stats_dev_attr(aer_dev_fatal, dev_fatal_errs,
+		   aer_uncorrectable_error_string, "ERR_FATAL",
+		   dev_total_fatal_errs);
+aer_stats_dev_attr(aer_dev_nonfatal, dev_nonfatal_errs,
+		   aer_uncorrectable_error_string, "ERR_NONFATAL",
+		   dev_total_nonfatal_errs);
 
-#define aer_stats_rootport_attr(name, field) /* Root Port AER 누적 통계 sysfs show 매크로 정의 (NVMe 연결 Root Port의 ERR 메시지 집계) */				\
-	static ssize_t /* sysfs show 함수 선언 */							\
-	name##_show(struct device *dev, struct device_attribute *attr, /* show 함수 인자 정의 (NVMe Root Port sysfs attribute) */	\
-		     char *buf) /* 출력 버퍼 인자 정의 */						\
-{ /* show 함수 본문 시작 */									\
-	struct pci_dev *pdev = to_pci_dev(dev); /* sysfs에서 Root Port pci_dev 획득 */				\
-	return sysfs_emit(buf, "%llu\n", pdev->aer_info->field); /* 해당 필드의 누적 값을 sysfs 버퍼에 출력 */	\
-} /* show 함수 본문 종료 */									\
-static DEVICE_ATTR_RO(name) /* 코드 동작 수행 */
+#define aer_stats_rootport_attr(name, field)				\
+	static ssize_t							\
+	name##_show(struct device *dev, struct device_attribute *attr,	\
+		     char *buf)						\
+{									\
+	struct pci_dev *pdev = to_pci_dev(dev);				\
+	return sysfs_emit(buf, "%llu\n", pdev->aer_info->field);	\
+}									\
+static DEVICE_ATTR_RO(name)
 
-aer_stats_rootport_attr(aer_rootport_total_err_cor, /* 코드 동작 수행 */
-			 rootport_total_cor_errs); /* 코드 동작 수행 */
-aer_stats_rootport_attr(aer_rootport_total_err_fatal, /* 코드 동작 수행 */
-			 rootport_total_fatal_errs); /* 코드 동작 수행 */
-aer_stats_rootport_attr(aer_rootport_total_err_nonfatal, /* 코드 동작 수행 */
-			 rootport_total_nonfatal_errs); /* 코드 동작 수행 */
+aer_stats_rootport_attr(aer_rootport_total_err_cor,
+			 rootport_total_cor_errs);
+aer_stats_rootport_attr(aer_rootport_total_err_fatal,
+			 rootport_total_fatal_errs);
+aer_stats_rootport_attr(aer_rootport_total_err_nonfatal,
+			 rootport_total_nonfatal_errs);
 
 static struct attribute *aer_stats_attrs[] __ro_after_init = {
-	&dev_attr_aer_dev_correctable.attr, /* sysfs attribute 포인터 초기화 항목 */
-	&dev_attr_aer_dev_fatal.attr, /* sysfs attribute 포인터 초기화 항목 */
-	&dev_attr_aer_dev_nonfatal.attr, /* sysfs attribute 포인터 초기화 항목 */
-	&dev_attr_aer_rootport_total_err_cor.attr, /* sysfs attribute 포인터 초기화 항목 */
-	&dev_attr_aer_rootport_total_err_fatal.attr, /* sysfs attribute 포인터 초기화 항목 */
-	&dev_attr_aer_rootport_total_err_nonfatal.attr, /* sysfs attribute 포인터 초기화 항목 */
-	NULL /* 코드 동작 수행 */
-}; /* 구조체/배열/열거형 정의 종료 */
+	&dev_attr_aer_dev_correctable.attr,
+	&dev_attr_aer_dev_fatal.attr,
+	&dev_attr_aer_dev_nonfatal.attr,
+	&dev_attr_aer_rootport_total_err_cor.attr,
+	&dev_attr_aer_rootport_total_err_fatal.attr,
+	&dev_attr_aer_rootport_total_err_nonfatal.attr,
+	NULL
+};
 
-static umode_t aer_stats_attrs_are_visible(struct kobject *kobj, /* 코드 동작 수행 */
-					   struct attribute *a, int n) /* 코드 동작 수행 */
-{ /* 코드 블록 시작 */
+static umode_t aer_stats_attrs_are_visible(struct kobject *kobj,
+					   struct attribute *a, int n)
+{
 	struct device *dev = kobj_to_dev(kobj);
 	struct pci_dev *pdev = to_pci_dev(dev);
 
@@ -851,103 +851,103 @@ static umode_t aer_stats_attrs_are_visible(struct kobject *kobj, /* 코드 동�
 		return 0;
 
 	return a->mode;
-} /* 코드 블록 종료 */
+}
 
 const struct attribute_group aer_stats_attr_group = {
 	.attrs  = aer_stats_attrs,
 	.is_visible = aer_stats_attrs_are_visible,
-}; /* 구조체/배열/열거형 정의 종료 */
+};
 
 /*
  * Ratelimit interval
  * <=0: disabled with ratelimit.interval = 0
  * >0: enabled with ratelimit.interval in ms
  */
-#define aer_ratelimit_interval_attr(name, ratelimit) /* AER correctable/nonfatal 로그 출력 간격 sysfs attribute 매크로 정의 (NVMe 오류 로그 조절) */			\
-	static ssize_t /* interval show 함수 선언 */							\
-	name##_show(struct device *dev, struct device_attribute *attr, /* show 함수 인자 정의 */	\
-					 char *buf) /* 출력 버퍼 인자 정의 */			\
-	{ /* interval show 함수 본문 시작 */								\
-		struct pci_dev *pdev = to_pci_dev(dev); /* sysfs에서 NVMe pci_dev 구조체 획득 */			\
+#define aer_ratelimit_interval_attr(name, ratelimit)			\
+	static ssize_t							\
+	name##_show(struct device *dev, struct device_attribute *attr,	\
+					 char *buf)			\
+	{								\
+		struct pci_dev *pdev = to_pci_dev(dev);			\
  /* 출력 서식 정렬용 빈 줄 */									\
-		return sysfs_emit(buf, "%d\n", /* 현재 ratelimit interval 값을 sysfs 버퍼에 출력 */				\
+		return sysfs_emit(buf, "%d\n",				\
 				  pdev->aer_info->ratelimit.interval);	\
-	} /* interval show 함수 본문 종료 */								\
+	}								\
  /* store/show 함수 사이 빈 줄 */									\
-	static ssize_t /* interval store 함수 선언 */							\
-	name##_store(struct device *dev, struct device_attribute *attr, /* store 함수 인자 정의 (입력 버퍼과 크기) */ \
-		     const char *buf, size_t count) /* 입력 버퍼과 크기 인자 정의 */ 			\
-	{ /* interval store 함수 본문 시작 */								\
-		struct pci_dev *pdev = to_pci_dev(dev); /* sysfs에서 NVMe pci_dev 구조체 획득 */			\
-		int interval; /* 파싱된 interval 값을 저장할 변수 선언 */						\
+	static ssize_t							\
+	name##_store(struct device *dev, struct device_attribute *attr, \
+		     const char *buf, size_t count) 			\
+	{								\
+		struct pci_dev *pdev = to_pci_dev(dev);			\
+		int interval;						\
  /* 입력 처리용 빈 줄 */									\
-		if (!capable(CAP_SYS_ADMIN)) /* SYS_ADMIN 권한 확인 (NVMe AER 설정 변경 보호) */				\
-			return -EPERM; /* 권한 부족 시 -EPERM 반환 */					\
+		if (!capable(CAP_SYS_ADMIN))				\
+			return -EPERM;					\
  /* 권한 확인 후 빈 줄 */									\
-		if (kstrtoint(buf, 0, &interval) < 0) /* 입력 문자열을 정수로 변환 */			\
-			return -EINVAL; /* 변환 실패 시 -EINVAL 반환 */					\
+		if (kstrtoint(buf, 0, &interval) < 0)			\
+			return -EINVAL;					\
  /* 값 검증 전 빈 줄 */									\
-		if (interval <= 0) /* 입력값이 0 이하이면 레이트리미트 비활성화 */					\
-			interval = 0; /* interval을 0으로 설정하여 비활성화 */					\
-		else /* 양수인 경우 jiffies 단위로 변환 */							\
-			interval = msecs_to_jiffies(interval); /* 밀리초를 jiffies로 변환 */ 		\
+		if (interval <= 0)					\
+			interval = 0;					\
+		else							\
+			interval = msecs_to_jiffies(interval); 		\
  /* 변환 후 빈 줄 */									\
 		pdev->aer_info->ratelimit.interval = interval;		\
  /* 갱신 후 빈 줄 */									\
-		return count; /* 입력된 바이트 수 반환 */						\
-	} /* interval store 함수 본문 종료 */								\
-	static DEVICE_ATTR_RW(name); /* 코드 동작 수행 */
+		return count;						\
+	}								\
+	static DEVICE_ATTR_RW(name);
 
-#define aer_ratelimit_burst_attr(name, ratelimit) /* AER correctable/nonfatal 로그 버스트 크기 sysfs attribute 매크로 정의 (NVMe 오류 로그 폭주 방지) */			\
-	static ssize_t /* burst show 함수 선언 */							\
-	name##_show(struct device *dev, struct device_attribute *attr, /* show 함수 인자 정의 */	\
-		    char *buf) /* 출력 버퍼 인자 정의 */						\
-	{ /* burst show 함수 본문 시작 */								\
-		struct pci_dev *pdev = to_pci_dev(dev); /* sysfs에서 NVMe pci_dev 구조체 획득 */			\
+#define aer_ratelimit_burst_attr(name, ratelimit)			\
+	static ssize_t							\
+	name##_show(struct device *dev, struct device_attribute *attr,	\
+		    char *buf)						\
+	{								\
+		struct pci_dev *pdev = to_pci_dev(dev);			\
  /* 출력 서식 정렬용 빈 줄 */									\
-		return sysfs_emit(buf, "%d\n", /* 현재 ratelimit burst 값을 sysfs 버퍼에 출력 */				\
+		return sysfs_emit(buf, "%d\n",				\
 				  pdev->aer_info->ratelimit.burst);	\
-	} /* burst show 함수 본문 종료 */								\
+	}								\
  /* store/show 함수 사이 빈 줄 */									\
-	static ssize_t /* burst store 함수 선언 */							\
-	name##_store(struct device *dev, struct device_attribute *attr, /* store 함수 인자 정의 */	\
-		     const char *buf, size_t count) /* 입력 버퍼과 크기 인자 정의 */			\
-	{ /* burst store 함수 본문 시작 */								\
-		struct pci_dev *pdev = to_pci_dev(dev); /* sysfs에서 NVMe pci_dev 구조체 획득 */			\
-		int burst; /* 파싱된 burst 값을 저장할 변수 선언 */						\
+	static ssize_t							\
+	name##_store(struct device *dev, struct device_attribute *attr,	\
+		     const char *buf, size_t count)			\
+	{								\
+		struct pci_dev *pdev = to_pci_dev(dev);			\
+		int burst;						\
  /* 입력 처리용 빈 줄 */									\
-		if (!capable(CAP_SYS_ADMIN)) /* SYS_ADMIN 권한 확인 (NVMe AER 설정 변경 보호) */				\
-			return -EPERM; /* 권한 부족 시 -EPERM 반환 */					\
+		if (!capable(CAP_SYS_ADMIN))				\
+			return -EPERM;					\
  /* 권한 확인 후 빈 줄 */									\
-		if (kstrtoint(buf, 0, &burst) < 0) /* 입력 문자열을 정수로 변환 */			\
-			return -EINVAL; /* 변환 실패 시 -EINVAL 반환 */					\
+		if (kstrtoint(buf, 0, &burst) < 0)			\
+			return -EINVAL;					\
  /* 변환 후 빈 줄 */									\
 		pdev->aer_info->ratelimit.burst = burst;		\
  /* 갱신 후 빈 줄 */									\
-		return count; /* 입력된 바이트 수 반환 */						\
-	} /* burst store 함수 본문 종료 */								\
-	static DEVICE_ATTR_RW(name); /* 코드 동작 수행 */
+		return count;						\
+	}								\
+	static DEVICE_ATTR_RW(name);
 
-#define aer_ratelimit_attrs(name) /* AER 레이트리미트 interval/burst attribute 생성 매크로 정의 (NVMe 장치별 로그 제어) */					\
-	aer_ratelimit_interval_attr(name##_ratelimit_interval_ms, /* interval attribute 매크로 호출 */	\
-				    name##_ratelimit) /* interval attribute 대상 ratelimit 객체 인자 */			\
-	aer_ratelimit_burst_attr(name##_ratelimit_burst, /* burst attribute 매크로 호출 */		\
-				 name##_ratelimit) /* 코드 동작 수행 */
+#define aer_ratelimit_attrs(name)					\
+	aer_ratelimit_interval_attr(name##_ratelimit_interval_ms,	\
+				    name##_ratelimit)			\
+	aer_ratelimit_burst_attr(name##_ratelimit_burst,		\
+				 name##_ratelimit)
 
-aer_ratelimit_attrs(correctable) /* AER 로그 레이트리미트 처리 (NVMe 오류 로그 폭주 방지) */
-aer_ratelimit_attrs(nonfatal) /* AER 로그 레이트리미트 처리 (NVMe 오류 로그 폭주 방지) */
+aer_ratelimit_attrs(correctable)
+aer_ratelimit_attrs(nonfatal)
 
-static struct attribute *aer_attrs[] = { /* sysfs attribute 포인터 배열 정의 및 초기화 시작 */
-	&dev_attr_correctable_ratelimit_interval_ms.attr, /* sysfs attribute 포인터 초기화 항목 */
-	&dev_attr_correctable_ratelimit_burst.attr, /* sysfs attribute 포인터 초기화 항목 */
-	&dev_attr_nonfatal_ratelimit_interval_ms.attr, /* sysfs attribute 포인터 초기화 항목 */
-	&dev_attr_nonfatal_ratelimit_burst.attr, /* sysfs attribute 포인터 초기화 항목 */
-	NULL /* 코드 동작 수행 */
-}; /* 구조체/배열/열거형 정의 종료 */
+static struct attribute *aer_attrs[] = {
+	&dev_attr_correctable_ratelimit_interval_ms.attr,
+	&dev_attr_correctable_ratelimit_burst.attr,
+	&dev_attr_nonfatal_ratelimit_interval_ms.attr,
+	&dev_attr_nonfatal_ratelimit_burst.attr,
+	NULL
+};
 
-static umode_t aer_attrs_are_visible(struct kobject *kobj, /* 코드 동작 수행 */
-				     struct attribute *a, int n) /* 코드 동작 수행 */
-{ /* 코드 블록 시작 */
+static umode_t aer_attrs_are_visible(struct kobject *kobj,
+				     struct attribute *a, int n)
+{
 	struct device *dev = kobj_to_dev(kobj);
 	struct pci_dev *pdev = to_pci_dev(dev);
 
@@ -955,17 +955,17 @@ static umode_t aer_attrs_are_visible(struct kobject *kobj, /* 코드 동작 수�
 		return 0;
 
 	return a->mode;
-} /* 코드 블록 종료 */
+}
 
 const struct attribute_group aer_attr_group = {
 	.name = "aer",
 	.attrs = aer_attrs,
 	.is_visible = aer_attrs_are_visible,
-}; /* 구조체/배열/열거형 정의 종료 */
+};
 
-static void pci_dev_aer_stats_incr(struct pci_dev *pdev, /* AER/NVMe 관련 함수 정의 시작 */
-				   struct aer_err_info *info) /* 코드 동작 수행 */
-{ /* 코드 블록 시작 */
+static void pci_dev_aer_stats_incr(struct pci_dev *pdev,
+				   struct aer_err_info *info)
+{
 	unsigned long status = info->status & ~info->mask;
 	int i, max = -1;
 	u64 *counter = NULL;
@@ -976,45 +976,45 @@ static void pci_dev_aer_stats_incr(struct pci_dev *pdev, /* AER/NVMe 관련 함�
 
 	switch (info->severity) {
 	case AER_CORRECTABLE:
-		aer_info->dev_total_cor_errs++; /* 카운터 증가 */
+		aer_info->dev_total_cor_errs++;
 		counter = &aer_info->dev_cor_errs[0];
 		max = AER_MAX_TYPEOF_COR_ERRS;
-		break; /* 반복문/switch 탈출 */
+		break;
 	case AER_NONFATAL:
-		aer_info->dev_total_nonfatal_errs++; /* 카운터 증가 */
+		aer_info->dev_total_nonfatal_errs++;
 		hwerr_log_error_type(HWERR_RECOV_PCI);
 		counter = &aer_info->dev_nonfatal_errs[0];
 		max = AER_MAX_TYPEOF_UNCOR_ERRS;
-		break; /* 반복문/switch 탈출 */
+		break;
 	case AER_FATAL:
-		aer_info->dev_total_fatal_errs++; /* 카운터 증가 */
+		aer_info->dev_total_fatal_errs++;
 		counter = &aer_info->dev_fatal_errs[0];
 		max = AER_MAX_TYPEOF_UNCOR_ERRS;
-		break; /* 반복문/switch 탈출 */
-	} /* 코드 블록 종료 */
+		break;
+	}
 
-	for_each_set_bit(i, &status, max) /* 설정된 AER status 비트 순회 */
-		counter[i]++; /* 카운터 증가 */
-} /* 코드 블록 종료 */
+	for_each_set_bit(i, &status, max)
+		counter[i]++;
+}
 
-static void pci_rootport_aer_stats_incr(struct pci_dev *pdev, /* AER/NVMe 관련 함수 정의 시작 */
-				 struct aer_err_source *e_src) /* 코드 동작 수행 */
-{ /* 코드 블록 시작 */
+static void pci_rootport_aer_stats_incr(struct pci_dev *pdev,
+				 struct aer_err_source *e_src)
+{
 	struct aer_info *aer_info = pdev->aer_info;
 
 	if (!aer_info)
 		return;
 
 	if (e_src->status & PCI_ERR_ROOT_COR_RCV)
-		aer_info->rootport_total_cor_errs++; /* 카운터 증가 */
+		aer_info->rootport_total_cor_errs++;
 
 	if (e_src->status & PCI_ERR_ROOT_UNCOR_RCV) {
 		if (e_src->status & PCI_ERR_ROOT_FATAL_RCV)
-			aer_info->rootport_total_fatal_errs++; /* 카운터 증가 */
+			aer_info->rootport_total_fatal_errs++;
 		else
-			aer_info->rootport_total_nonfatal_errs++; /* 카운터 증가 */
-	} /* 코드 블록 종료 */
-} /* 코드 블록 종료 */
+			aer_info->rootport_total_nonfatal_errs++;
+	}
+}
 
 /*
  * aer_ratelimit:
@@ -1022,8 +1022,8 @@ static void pci_rootport_aer_stats_incr(struct pci_dev *pdev, /* AER/NVMe 관련
  *   NVMe: NVMe SSD에서 잦은 correctable/nonfatal PCIe 오류 발생 시
  *   dmesg가 과도하게 쌓이지 않도록 조절.
  */
-static int aer_ratelimit(struct pci_dev *dev, unsigned int severity) /* AER/NVMe 관련 함수 정의 시작 */
-{ /* 코드 블록 시작 */
+static int aer_ratelimit(struct pci_dev *dev, unsigned int severity)
+{
 	if (!dev->aer_info)
 		return 1;
 
@@ -1034,8 +1034,8 @@ static int aer_ratelimit(struct pci_dev *dev, unsigned int severity) /* AER/NVMe
 		return __ratelimit(&dev->aer_info->correctable_ratelimit);
 	default:
 		return 1;	/* Don't ratelimit fatal errors */
-	} /* 코드 블록 종료 */
-} /* 코드 블록 종료 */
+	}
+}
 
 /*
  * tlp_header_logged:
@@ -1043,19 +1043,19 @@ static int aer_ratelimit(struct pci_dev *dev, unsigned int severity) /* AER/NVMe
  *   NVMe: NVMe 메모리 요청/완료 TLP의 헤더가 남아 있으면 디버깅과
  *   P2P/CMB 트랜잭션 추적에 유용하다.
  */
-static bool tlp_header_logged(u32 status, u32 capctl) /* AER/NVMe 관련 함수 정의 시작 */
-{ /* 코드 블록 시작 */
+static bool tlp_header_logged(u32 status, u32 capctl)
+{
 	/* Errors for which a header is always logged (PCIe r7.0 sec 6.2.7) */
-	if (status & AER_LOG_TLP_MASKS) /* 조건 분기 (NVMe 장치 관련 상태/결과에 따라 동작 결정) */
-		return true; /* 값 반환/종료 */
+	if (status & AER_LOG_TLP_MASKS)
+		return true;
 
 	/* Completion Timeout header is only logged on capable devices */
-	if (status & PCI_ERR_UNC_COMP_TIME && /* 조건 분기 (NVMe 장치 관련 상태/결과에 따라 동작 결정) */
-	    capctl & PCI_ERR_CAP_COMP_TIME_LOG) /* 코드 동작 수행 */
-		return true; /* 값 반환/종료 */
+	if (status & PCI_ERR_UNC_COMP_TIME &&
+	    capctl & PCI_ERR_CAP_COMP_TIME_LOG)
+		return true;
 
-	return false; /* 값 반환/종료 */
-} /* 코드 블록 종료 */
+	return false;
+}
 
 /*
  * __aer_print_error:
@@ -1063,28 +1063,28 @@ static bool tlp_header_logged(u32 status, u32 capctl) /* AER/NVMe 관련 함수 
  *   NVMe: NVMe에서 보고된 Poisoned TLP, Completion Timeout, ECRC
  *   오류 등을 인간이 읽을 수 있는 문자열로 변환.
  */
-static void __aer_print_error(struct pci_dev *dev, struct aer_err_info *info) /* AER/NVMe 관련 함수 정의 시작 */
-{ /* 코드 블록 시작 */
-	const char **strings; /* 코드 동작 수행 */
-	unsigned long status = info->status & ~info->mask; /* 값 설정 */
-	const char *level = info->level; /* 값 설정 */
-	const char *errmsg; /* 코드 동작 수행 */
-	int i; /* 코드 동작 수행 */
+static void __aer_print_error(struct pci_dev *dev, struct aer_err_info *info)
+{
+	const char **strings;
+	unsigned long status = info->status & ~info->mask;
+	const char *level = info->level;
+	const char *errmsg;
+	int i;
 
-	if (info->severity == AER_CORRECTABLE) /* 조건 분기 (NVMe 장치 관련 상태/결과에 따라 동작 결정) */
-		strings = aer_correctable_error_string; /* 값 설정 */
-	else /* 이전 조건이 아닌 경우 분기 */
-		strings = aer_uncorrectable_error_string; /* 값 설정 */
+	if (info->severity == AER_CORRECTABLE)
+		strings = aer_correctable_error_string;
+	else
+		strings = aer_uncorrectable_error_string;
 
-	for_each_set_bit(i, &status, 32) { /* 설정된 AER status 비트 순회 */
-		errmsg = strings[i]; /* 값 설정 */
-		if (!errmsg) /* 조건 분기 (NVMe 장치 관련 상태/결과에 따라 동작 결정) */
-			errmsg = "Unknown Error Bit"; /* 값 설정 */
+	for_each_set_bit(i, &status, 32) {
+		errmsg = strings[i];
+		if (!errmsg)
+			errmsg = "Unknown Error Bit";
 
-		aer_printk(level, dev, "   [%2d] %-22s%s\n", i, errmsg, /* 코드 동작 수행 */
-				info->first_error == i ? " (First)" : ""); /* 값 설정 */
-	} /* 코드 블록 종료 */
-} /* 코드 블록 종료 */
+		aer_printk(level, dev, "   [%2d] %-22s%s\n", i, errmsg,
+				info->first_error == i ? " (First)" : "");
+	}
+}
 
 /*
  * aer_print_source:
@@ -1092,18 +1092,18 @@ static void __aer_print_error(struct pci_dev *dev, struct aer_err_info *info) /*
  *   NVMe: NVMe 장치의 BDF가 오류원으로 기록되면 해당 정보를 dmesg에
  *   남겨 sysadmin이 식별할 수 있게 한다.
  */
-static void aer_print_source(struct pci_dev *dev, struct aer_err_info *info, /* AER/NVMe 관련 함수 정의 시작 */
-			     bool found) /* 코드 동작 수행 */
-{ /* 코드 블록 시작 */
-	u16 source = info->id; /* 값 설정 */
+static void aer_print_source(struct pci_dev *dev, struct aer_err_info *info,
+			     bool found)
+{
+	u16 source = info->id;
 
-	pci_info(dev, "%s%s error message received from %04x:%02x:%02x.%d%s\n", /* NVMe/PCI 정보 로그 출력 */
-		 info->multi_error_valid ? "Multiple " : "", /* 코드 동작 수행 */
-		 aer_error_severity_string[info->severity], /* 코드 동작 수행 */
+	pci_info(dev, "%s%s error message received from %04x:%02x:%02x.%d%s\n",
+		 info->multi_error_valid ? "Multiple " : "",
+		 aer_error_severity_string[info->severity],
 		 pci_domain_nr(dev->bus), PCI_BUS_NUM(source),
-		 PCI_SLOT(source), PCI_FUNC(source), /* PCI Requester ID에서 슬롯 번호 추출 */
-		 found ? "" : " (no details found"); /* 코드 동작 수행 */
-} /* 코드 블록 종료 */
+		 PCI_SLOT(source), PCI_FUNC(source),
+		 found ? "" : " (no details found");
+}
 
 /*
  * aer_print_error:
@@ -1112,61 +1112,61 @@ static void aer_print_source(struct pci_dev *dev, struct aer_err_info *info, /* 
  *   Transaction Layer 및 Receiver/Requester/Completer/Transmitter
  *   정보를 포함해 로깅한다.
  */
-void aer_print_error(struct aer_err_info *info, int i) /* AER/NVMe 관련 함수 정의 시작 */
-{ /* 코드 블록 시작 */
-	struct pci_dev *dev; /* 코드 동작 수행 */
-	int layer, agent, id; /* 코드 동작 수행 */
-	const char *level = info->level; /* 값 설정 */
-	const char *bus_type = aer_err_bus(info); /* 값 설정 */
+void aer_print_error(struct aer_err_info *info, int i)
+{
+	struct pci_dev *dev;
+	int layer, agent, id;
+	const char *level = info->level;
+	const char *bus_type = aer_err_bus(info);
 
-	if (WARN_ON_ONCE(i >= AER_MAX_MULTI_ERR_DEVICES)) /* 개발 시 조건 위반 경고 */
-		return; /* 함수 종료 */
+	if (WARN_ON_ONCE(i >= AER_MAX_MULTI_ERR_DEVICES))
+		return;
 
-	dev = info->dev[i]; /* 값 설정 */
+	dev = info->dev[i];
 	id = pci_dev_id(dev);
 
 	pci_dev_aer_stats_incr(dev, info);
-	trace_aer_event(pci_name(dev), (info->status & ~info->mask), /* AER 이벤트를 ftrace/perf로 기록 (NVMe 모니터링) */
-			info->severity, info->tlp_header_valid, &info->tlp, bus_type); /* 코드 동작 수행 */
+	trace_aer_event(pci_name(dev), (info->status & ~info->mask),
+			info->severity, info->tlp_header_valid, &info->tlp, bus_type);
 
-	if (!info->ratelimit_print[i]) /* 조건 분기 (NVMe 장치 관련 상태/결과에 따라 동작 결정) */
-		return; /* 함수 종료 */
+	if (!info->ratelimit_print[i])
+		return;
 
-	if (!info->status) { /* 조건 분기 (NVMe 장치 관련 상태/결과에 따라 동작 결정) */
-		pci_err(dev, "%s Bus Error: severity=%s, type=Inaccessible, (Unregistered Agent ID)\n", /* NVMe/PCI 오류 로그 출력 */
-			bus_type, aer_error_severity_string[info->severity]); /* 코드 동작 수행 */
-		goto out; /* 에러 처리 점프 (정리 라벨로 이동) */
-	} /* 코드 블록 종료 */
+	if (!info->status) {
+		pci_err(dev, "%s Bus Error: severity=%s, type=Inaccessible, (Unregistered Agent ID)\n",
+			bus_type, aer_error_severity_string[info->severity]);
+		goto out;
+	}
 
-	layer = AER_GET_LAYER_ERROR(info->severity, info->status); /* 값 설정 */
-	agent = AER_GET_AGENT(info->severity, info->status); /* 값 설정 */
+	layer = AER_GET_LAYER_ERROR(info->severity, info->status);
+	agent = AER_GET_AGENT(info->severity, info->status);
 
-	aer_printk(level, dev, "%s Bus Error: severity=%s, type=%s, (%s)\n", /* 값 설정 */
-		   bus_type, aer_error_severity_string[info->severity], /* 코드 동작 수행 */
-		   aer_error_layer[layer], aer_agent_string[agent]); /* 코드 동작 수행 */
+	aer_printk(level, dev, "%s Bus Error: severity=%s, type=%s, (%s)\n",
+		   bus_type, aer_error_severity_string[info->severity],
+		   aer_error_layer[layer], aer_agent_string[agent]);
 
-	aer_printk(level, dev, "  device [%04x:%04x] error status/mask=%08x/%08x\n", /* 값 설정 */
-		   dev->vendor, dev->device, info->status, info->mask); /* 코드 동작 수행 */
+	aer_printk(level, dev, "  device [%04x:%04x] error status/mask=%08x/%08x\n",
+		   dev->vendor, dev->device, info->status, info->mask);
 
 	__aer_print_error(dev, info);
 
-	if (info->tlp_header_valid) /* 조건 분기 (NVMe 장치 관련 상태/결과에 따라 동작 결정) */
+	if (info->tlp_header_valid)
 		pcie_print_tlp_log(dev, &info->tlp, level, dev_fmt("  "));
 
-out: /* 코드 동작 수행 */
-	if (info->id && info->error_dev_num > 1 && info->id == id) /* 조건 분기 (NVMe 장치 관련 상태/결과에 따라 동작 결정) */
-		pci_err(dev, "  Error of this Agent is reported first\n"); /* NVMe/PCI 오류 로그 출력 */
-} /* 코드 블록 종료 */
+out:
+	if (info->id && info->error_dev_num > 1 && info->id == id)
+		pci_err(dev, "  Error of this Agent is reported first\n");
+}
 
-#ifdef CONFIG_ACPI_APEI_PCIEAER /* 코드 동작 수행 */
+#ifdef CONFIG_ACPI_APEI_PCIEAER
 /*
  * cper_severity_to_aer:
  *   ACPI CPER 심각도를 AER 심각도로 변환한다.
  *   NVMe: ACPI GHES를 통해 보고된 NVMe 관련 PCIe 오류를 AER 복구
  *   경로로 연결.
  */
-int cper_severity_to_aer(int cper_severity) /* AER/NVMe 관련 함수 정의 시작 */
-{ /* 코드 블록 시작 */
+int cper_severity_to_aer(int cper_severity)
+{
 	switch (cper_severity) {
 	case CPER_SEV_RECOVERABLE:
 		return AER_NONFATAL;
@@ -1174,10 +1174,10 @@ int cper_severity_to_aer(int cper_severity) /* AER/NVMe 관련 함수 정의 시
 		return AER_FATAL;
 	default:
 		return AER_CORRECTABLE;
-	} /* 코드 블록 종료 */
-} /* 코드 블록 종료 */
+	}
+}
 EXPORT_SYMBOL_GPL(cper_severity_to_aer);
-#endif /* 코드 동작 수행 */
+#endif
 
 /*
  * pci_print_aer:
@@ -1186,27 +1186,27 @@ EXPORT_SYMBOL_GPL(cper_severity_to_aer);
  *   NVMe: NVMe 장치의 AER capability dump 시 사용되며, cp_error_detected
  *   등에서 활용될 수 있다.
  */
-void pci_print_aer(struct pci_dev *dev, int aer_severity, /* AER/NVMe 관련 함수 정의 시작 */
-		   struct aer_capability_regs *aer) /* 코드 동작 수행 */
-{ /* 코드 블록 시작 */
-	const char *bus_type; /* 코드 동작 수행 */
+void pci_print_aer(struct pci_dev *dev, int aer_severity,
+		   struct aer_capability_regs *aer)
+{
+	const char *bus_type;
 	int layer, agent, tlp_header_valid = 0;
 	u32 status, mask;
 	struct aer_err_info info = {
 		.severity = aer_severity,
 		.first_error = PCI_ERR_CAP_FEP(aer->cap_control),
-	}; /* 구조체/배열/열거형 정의 종료 */
+	};
 
 	if (aer_severity == AER_CORRECTABLE) {
 		status = aer->cor_status;
 		mask = aer->cor_mask;
 		info.level = KERN_WARNING;
-	} else { /* 코드 동작 수행 */
+	} else {
 		status = aer->uncor_status;
 		mask = aer->uncor_mask;
 		info.level = KERN_ERR;
 		tlp_header_valid = tlp_header_logged(status, aer->cap_control);
-	} /* 코드 블록 종료 */
+	}
 
 	info.status = status;
 	info.mask = mask;
@@ -1215,8 +1215,8 @@ void pci_print_aer(struct pci_dev *dev, int aer_severity, /* AER/NVMe 관련 함
 	bus_type = aer_err_bus(&info);
 
 	pci_dev_aer_stats_incr(dev, &info);
-	trace_aer_event(pci_name(dev), (status & ~mask), aer_severity, /* AER 이벤트를 ftrace/perf로 기록 (NVMe 모니터링) */
-			tlp_header_valid, &aer->header_log, bus_type); /* 코드 동작 수행 */
+	trace_aer_event(pci_name(dev), (status & ~mask), aer_severity,
+			tlp_header_valid, &aer->header_log, bus_type);
 
 	if (!aer_ratelimit(dev, info.severity))
 		return;
@@ -1224,20 +1224,20 @@ void pci_print_aer(struct pci_dev *dev, int aer_severity, /* AER/NVMe 관련 함
 	layer = AER_GET_LAYER_ERROR(aer_severity, status);
 	agent = AER_GET_AGENT(aer_severity, status);
 
-	aer_printk(info.level, dev, "aer_status: 0x%08x, aer_mask: 0x%08x\n", /* 코드 동작 수행 */
-		   status, mask); /* 코드 동작 수행 */
+	aer_printk(info.level, dev, "aer_status: 0x%08x, aer_mask: 0x%08x\n",
+		   status, mask);
 	__aer_print_error(dev, &info);
 	aer_printk(info.level, dev, "aer_layer=%s, aer_agent=%s\n",
-		   aer_error_layer[layer], aer_agent_string[agent]); /* 코드 동작 수행 */
+		   aer_error_layer[layer], aer_agent_string[agent]);
 
 	if (aer_severity != AER_CORRECTABLE)
-		aer_printk(info.level, dev, "aer_uncor_severity: 0x%08x\n", /* 코드 동작 수행 */
-			   aer->uncor_severity); /* 코드 동작 수행 */
+		aer_printk(info.level, dev, "aer_uncor_severity: 0x%08x\n",
+			   aer->uncor_severity);
 
 	if (tlp_header_valid)
 		pcie_print_tlp_log(dev, &aer->header_log, info.level,
 				   dev_fmt("  "));
-} /* 코드 블록 종료 */
+}
 EXPORT_SYMBOL_GPL(pci_print_aer);
 
 /**
@@ -1251,15 +1251,15 @@ EXPORT_SYMBOL_GPL(pci_print_aer);
  *   NVMe: NVMe SSD가 Root Port 아래 여러 장치 중 오류원으로 확인되면
  *   이 목록에 추가되어 후속 복구 대상이 된다.
  */
-static int add_error_device(struct aer_err_info *e_info, struct pci_dev *dev) /* AER/NVMe 관련 함수 정의 시작 */
-{ /* 코드 블록 시작 */
-	int i = e_info->error_dev_num; /* 값 설정 */
+static int add_error_device(struct aer_err_info *e_info, struct pci_dev *dev)
+{
+	int i = e_info->error_dev_num;
 
-	if (i >= AER_MAX_MULTI_ERR_DEVICES) /* 조건 분기 (NVMe 장치 관련 상태/결과에 따라 동작 결정) */
-		return -ENOSPC; /* 값 반환/종료 */
+	if (i >= AER_MAX_MULTI_ERR_DEVICES)
+		return -ENOSPC;
 
 	e_info->dev[i] = pci_dev_get(dev);
-	e_info->error_dev_num++; /* 카운터 증가 */
+	e_info->error_dev_num++;
 
 	/*
 	 * Ratelimit AER log messages.  "dev" is either the source
@@ -1269,12 +1269,12 @@ static int add_error_device(struct aer_err_info *e_info, struct pci_dev *dev) /*
 	 * for a downstream device, make sure we print the Error Source ID
 	 * from the root as well.
 	 */
-	if (aer_ratelimit(dev, e_info->severity)) { /* AER 로그 레이트리미트 처리 (NVMe 오류 로그 폭주 방지) */
-		e_info->ratelimit_print[i] = 1; /* 값 설정 */
-		e_info->root_ratelimit_print = 1; /* 값 설정 */
-	} /* 코드 블록 종료 */
-	return 0; /* 값 반환/종료 */
-} /* 코드 블록 종료 */
+	if (aer_ratelimit(dev, e_info->severity)) {
+		e_info->ratelimit_print[i] = 1;
+		e_info->root_ratelimit_print = 1;
+	}
+	return 0;
+}
 
 /**
  * is_error_source - check whether the device is source of reported error
@@ -1288,26 +1288,26 @@ static int add_error_device(struct aer_err_info *e_info, struct pci_dev *dev) /*
  *   BDF를 비교하거나, NVMe 장치 자체의 AER status 레지스터를 읽어
  *   확인한다. SR-IOV VF의 경우 PF 아래에 매핑된 VF BDF와 비교.
  */
-static bool is_error_source(struct pci_dev *dev, struct aer_err_info *e_info) /* AER/NVMe 관련 함수 정의 시작 */
-{ /* 코드 블록 시작 */
-	int aer = dev->aer_cap; /* 값 설정 */
-	u32 status, mask; /* 코드 동작 수행 */
-	u16 reg16; /* 코드 동작 수행 */
+static bool is_error_source(struct pci_dev *dev, struct aer_err_info *e_info)
+{
+	int aer = dev->aer_cap;
+	u32 status, mask;
+	u16 reg16;
 
 	/*
 	 * When bus ID is equal to 0, it might be a bad ID
 	 * reported by Root Port.
 	 */
-	if ((PCI_BUS_NUM(e_info->id) != 0) && /* PCI Requester ID에서 버스 번호 추출 */
-	    !(dev->bus->bus_flags & PCI_BUS_FLAGS_NO_AERSID)) { /* 코드 동작 수행 */
+	if ((PCI_BUS_NUM(e_info->id) != 0) &&
+	    !(dev->bus->bus_flags & PCI_BUS_FLAGS_NO_AERSID)) {
 		/* Device ID match? */
 		if (e_info->id == pci_dev_id(dev))
-			return true; /* 값 반환/종료 */
+			return true;
 
 		/* Continue ID comparing if there is no multiple error */
-		if (!e_info->multi_error_valid) /* 조건 분기 (NVMe 장치 관련 상태/결과에 따라 동작 결정) */
-			return false; /* 값 반환/종료 */
-	} /* 코드 블록 종료 */
+		if (!e_info->multi_error_valid)
+			return false;
+	}
 
 	/*
 	 * When either
@@ -1319,26 +1319,26 @@ static bool is_error_source(struct pci_dev *dev, struct aer_err_info *e_info) /*
 	 */
 
 	/* Check if AER is enabled */
-	pcie_capability_read_word(dev, PCI_EXP_DEVCTL, &reg16); /* PCIe Capability 레지스터 읽기 (NVMe 장치/Root Port) */
-	if (!(reg16 & PCI_EXP_AER_FLAGS)) /* 조건 분기 (NVMe 장치 관련 상태/결과에 따라 동작 결정) */
-		return false; /* 값 반환/종료 */
+	pcie_capability_read_word(dev, PCI_EXP_DEVCTL, &reg16);
+	if (!(reg16 & PCI_EXP_AER_FLAGS))
+		return false;
 
-	if (!aer) /* 조건 분기 (NVMe 장치 관련 상태/결과에 따라 동작 결정) */
-		return false; /* 값 반환/종료 */
+	if (!aer)
+		return false;
 
 	/* Check if error is recorded */
-	if (e_info->severity == AER_CORRECTABLE) { /* 조건 분기 (NVMe 장치 관련 상태/결과에 따라 동작 결정) */
-		pci_read_config_dword(dev, aer + PCI_ERR_COR_STATUS, &status); /* PCIe/AER 레지스터 읽기 (NVMe 장치/Root Port 설정 읽기) */
-		pci_read_config_dword(dev, aer + PCI_ERR_COR_MASK, &mask); /* PCIe/AER 레지스터 읽기 (NVMe 장치/Root Port 설정 읽기) */
-	} else { /* 코드 동작 수행 */
-		pci_read_config_dword(dev, aer + PCI_ERR_UNCOR_STATUS, &status); /* PCIe/AER 레지스터 읽기 (NVMe 장치/Root Port 설정 읽기) */
-		pci_read_config_dword(dev, aer + PCI_ERR_UNCOR_MASK, &mask); /* PCIe/AER 레지스터 읽기 (NVMe 장치/Root Port 설정 읽기) */
-	} /* 코드 블록 종료 */
-	if (status & ~mask) /* 조건 분기 (NVMe 장치 관련 상태/결과에 따라 동작 결정) */
-		return true; /* 값 반환/종료 */
+	if (e_info->severity == AER_CORRECTABLE) {
+		pci_read_config_dword(dev, aer + PCI_ERR_COR_STATUS, &status);
+		pci_read_config_dword(dev, aer + PCI_ERR_COR_MASK, &mask);
+	} else {
+		pci_read_config_dword(dev, aer + PCI_ERR_UNCOR_STATUS, &status);
+		pci_read_config_dword(dev, aer + PCI_ERR_UNCOR_MASK, &mask);
+	}
+	if (status & ~mask)
+		return true;
 
-	return false; /* 값 반환/종료 */
-} /* 코드 블록 종료 */
+	return false;
+}
 
 /*
  * find_device_iter:
@@ -1347,25 +1347,25 @@ static bool is_error_source(struct pci_dev *dev, struct aer_err_info *e_info) /*
  *   NVMe: Root Port 아래 버스 트리를 순회하며 NVMe SSD를 포함한
  *   모든 엔드포인트를 검사.
  */
-static int find_device_iter(struct pci_dev *dev, void *data) /* AER/NVMe 관련 함수 정의 시작 */
-{ /* 코드 블록 시작 */
+static int find_device_iter(struct pci_dev *dev, void *data)
+{
 	struct aer_err_info *e_info = (struct aer_err_info *)data;
 
 	if (is_error_source(dev, e_info)) {
 		/* List this device */
 		if (add_error_device(e_info, dev)) {
 			/* We cannot handle more... Stop iteration */
-			pci_err(dev, "Exceeded max supported (%d) devices with errors logged\n", /* NVMe/PCI 오류 로그 출력 */
-				AER_MAX_MULTI_ERR_DEVICES); /* 코드 동작 수행 */
+			pci_err(dev, "Exceeded max supported (%d) devices with errors logged\n",
+				AER_MAX_MULTI_ERR_DEVICES);
 			return 1;
-		} /* 코드 블록 종료 */
+		}
 
 		/* If there is only a single error, stop iteration */
 		if (!e_info->multi_error_valid)
 			return 1;
-	} /* 코드 블록 종료 */
+	}
 	return 0;
-} /* 코드 블록 종료 */
+}
 
 /**
  * find_source_device - search through device hierarchy for source device
@@ -1386,29 +1386,29 @@ static int find_device_iter(struct pci_dev *dev, void *data) /* AER/NVMe 관련 
  *   특정 짓는다. 여러 NVMe 장치가 연결된 경우 multi_error_valid를
  *   통해 모두 수집할 수 있다.
  */
-static bool find_source_device(struct pci_dev *parent, /* AER/NVMe 관련 함수 정의 시작 */
-			       struct aer_err_info *e_info) /* 코드 동작 수행 */
-{ /* 코드 블록 시작 */
-	struct pci_dev *dev = parent; /* 값 설정 */
-	int result; /* 코드 동작 수행 */
+static bool find_source_device(struct pci_dev *parent,
+			       struct aer_err_info *e_info)
+{
+	struct pci_dev *dev = parent;
+	int result;
 
 	/* Must reset in this function */
-	e_info->error_dev_num = 0; /* 값 설정 */
+	e_info->error_dev_num = 0;
 
 	/* Is Root Port an agent that sends error message? */
-	result = find_device_iter(dev, e_info); /* 버스 트리 순회 콜백 (NVMe SSD 포함 모든 pci_dev 검사) */
-	if (result) /* 조건 분기 (NVMe 장치 관련 상태/결과에 따라 동작 결정) */
-		return true; /* 값 반환/종료 */
+	result = find_device_iter(dev, e_info);
+	if (result)
+		return true;
 
 	if (pci_pcie_type(parent) == PCI_EXP_TYPE_RC_EC)
-		pcie_walk_rcec(parent, find_device_iter, e_info); /* RCEC에 연결된 RCiEP 순회 */
-	else /* 이전 조건이 아닌 경우 분기 */
-		pci_walk_bus(parent->subordinate, find_device_iter, e_info); /* Root Port 하위 버스의 모든 pci_dev(NVMe 포함) 순회 */
+		pcie_walk_rcec(parent, find_device_iter, e_info);
+	else
+		pci_walk_bus(parent->subordinate, find_device_iter, e_info);
 
-	if (!e_info->error_dev_num) /* 조건 분기 (NVMe 장치 관련 상태/결과에 따라 동작 결정) */
-		return false; /* 값 반환/종료 */
-	return true; /* 값 반환/종료 */
-} /* 코드 블록 종료 */
+	if (!e_info->error_dev_num)
+		return false;
+	return true;
+}
 
 /**
  * pci_aer_unmask_internal_errors - unmask internal errors
@@ -1426,19 +1426,19 @@ static bool find_source_device(struct pci_dev *parent, /* AER/NVMe 관련 함수
  *   NVMe: 일반적으로 NVMe PCIe 장치는 사용하지 않으나, CXL/UCie 등
  *   메모리 확장 장치와 연계 시 확인.
  */
-void pci_aer_unmask_internal_errors(struct pci_dev *dev) /* AER/NVMe 관련 함수 정의 시작 */
-{ /* 코드 블록 시작 */
+void pci_aer_unmask_internal_errors(struct pci_dev *dev)
+{
 	int aer = dev->aer_cap;
 	u32 mask;
 
 	pci_read_config_dword(dev, aer + PCI_ERR_UNCOR_MASK, &mask);
-	mask &= ~PCI_ERR_UNC_INTN; /* 값 설정 */
+	mask &= ~PCI_ERR_UNC_INTN;
 	pci_write_config_dword(dev, aer + PCI_ERR_UNCOR_MASK, mask);
 
 	pci_read_config_dword(dev, aer + PCI_ERR_COR_MASK, &mask);
-	mask &= ~PCI_ERR_COR_INTERNAL; /* 값 설정 */
+	mask &= ~PCI_ERR_COR_INTERNAL;
 	pci_write_config_dword(dev, aer + PCI_ERR_COR_MASK, mask);
-} /* 코드 블록 종료 */
+}
 
 /*
  * Internal errors are too device-specific to enable generally, however for CXL
@@ -1446,20 +1446,20 @@ void pci_aer_unmask_internal_errors(struct pci_dev *dev) /* AER/NVMe 관련 함�
  */
 EXPORT_SYMBOL_FOR_MODULES(pci_aer_unmask_internal_errors, "cxl_core");
 
-#ifdef CONFIG_CXL_RAS /* 코드 동작 수행 */
+#ifdef CONFIG_CXL_RAS
 /*
  * is_aer_internal_error:
  *   보고된 오류가 internal error 비트인지 검사.
  *   NVMe: NVMe 장치 자체의 낮은 레벨 PCIe/PHY 난반 문제 식별.
  */
-bool is_aer_internal_error(struct aer_err_info *info) /* AER/NVMe 관련 함수 정의 시작 */
-{ /* 코드 블록 시작 */
+bool is_aer_internal_error(struct aer_err_info *info)
+{
 	if (info->severity == AER_CORRECTABLE)
 		return info->status & PCI_ERR_COR_INTERNAL;
 
 	return info->status & PCI_ERR_UNC_INTN;
-} /* 코드 블록 종료 */
-#endif /* 코드 동작 수행 */
+}
+#endif
 
 /**
  * pci_aer_handle_error - handle logging error into an event log
@@ -1476,58 +1476,58 @@ bool is_aer_internal_error(struct aer_err_info *info) /* AER/NVMe 관련 함수 
  *   slot_reset, resume 콜백이 순차적으로 호출되며, 이 과정에서
  *   NVMe queue/CMB/MSI-X 상태가 정리/재초기화된다.
  */
-static void pci_aer_handle_error(struct pci_dev *dev, struct aer_err_info *info) /* AER/NVMe 관련 함수 정의 시작 */
-{ /* 코드 블록 시작 */
-	int aer = dev->aer_cap; /* 값 설정 */
+static void pci_aer_handle_error(struct pci_dev *dev, struct aer_err_info *info)
+{
+	int aer = dev->aer_cap;
 
-	if (info->severity == AER_CORRECTABLE) { /* 조건 분기 (NVMe 장치 관련 상태/결과에 따라 동작 결정) */
+	if (info->severity == AER_CORRECTABLE) {
 		/*
 		 * Correctable error does not need software intervention.
 		 * No need to go through error recovery process.
 		 */
-		if (aer) /* 조건 분기 (NVMe 장치 관련 상태/결과에 따라 동작 결정) */
-			pci_write_config_dword(dev, aer + PCI_ERR_COR_STATUS, /* PCIe/AER 레지스터 쓰기 (NVMe 장치/Root Port 설정 쓰기) */
-					info->status); /* 코드 동작 수행 */
-		if (pcie_aer_is_native(dev)) { /* OS native AER 제어 여부 확인 (NVMe 복구 경로 가능 여부) */
-			struct pci_driver *pdrv = dev->driver; /* 값 설정 */
+		if (aer)
+			pci_write_config_dword(dev, aer + PCI_ERR_COR_STATUS,
+					info->status);
+		if (pcie_aer_is_native(dev)) {
+			struct pci_driver *pdrv = dev->driver;
 
-			if (pdrv && pdrv->err_handler && /* 조건 분기 (NVMe 장치 관련 상태/결과에 따라 동작 결정) */
-			    pdrv->err_handler->cor_error_detected) /* 코드 동작 수행 */
-				pdrv->err_handler->cor_error_detected(dev); /* 코드 동작 수행 */
+			if (pdrv && pdrv->err_handler &&
+			    pdrv->err_handler->cor_error_detected)
+				pdrv->err_handler->cor_error_detected(dev);
 			pcie_clear_device_status(dev);
-		} /* 코드 블록 종료 */
-	} else if (info->severity == AER_NONFATAL) /* 값 설정 */
+		}
+	} else if (info->severity == AER_NONFATAL)
 		pcie_do_recovery(dev, pci_channel_io_normal, aer_root_reset);
-	else if (info->severity == AER_FATAL) /* 추가 조건 분기 (NVMe 장치 관련 다른 경우 처리) */
+	else if (info->severity == AER_FATAL)
 		pcie_do_recovery(dev, pci_channel_io_frozen, aer_root_reset);
-} /* 코드 블록 종료 */
+}
 
 /*
  * handle_error_source:
  *   CXL RCH 오류 처리 후 pci_aer_handle_error()를 호출한다.
  *   NVMe: NVMe 장치의 표준 PCIe AER 복구 경로로 진입.
  */
-static void handle_error_source(struct pci_dev *dev, struct aer_err_info *info) /* AER/NVMe 관련 함수 정의 시작 */
-{ /* 코드 블록 시작 */
+static void handle_error_source(struct pci_dev *dev, struct aer_err_info *info)
+{
 	cxl_rch_handle_error(dev, info);
 	pci_aer_handle_error(dev, info);
 	pci_dev_put(dev);
-} /* 코드 블록 종료 */
+}
 
-#ifdef CONFIG_ACPI_APEI_PCIEAER /* 코드 동작 수행 */
+#ifdef CONFIG_ACPI_APEI_PCIEAER
 
-#define AER_RECOVER_RING_SIZE		16 /* ACPI APEI AER 복구 링 크기 정의 (NVMe 복구 항목 버퍼링) */
+#define AER_RECOVER_RING_SIZE		16
 
-struct aer_recover_entry { /* AER 관련 데이터 구조체 정의 시작 */
+struct aer_recover_entry {
 	u8	bus;
 	u8	devfn;
 	u16	domain;
 	int	severity;
 	struct aer_capability_regs *regs;
-}; /* 구조체/배열/열거형 정의 종료 */
+};
 
-static DEFINE_KFIFO(aer_recover_ring, struct aer_recover_entry, /* AER 복구 항목 kfifo 정의 (NVMe 복구 지연 처리) */
-		    AER_RECOVER_RING_SIZE); /* 코드 동작 수행 */
+static DEFINE_KFIFO(aer_recover_ring, struct aer_recover_entry,
+		    AER_RECOVER_RING_SIZE);
 
 /*
  * aer_recover_work_func:
@@ -1535,21 +1535,21 @@ static DEFINE_KFIFO(aer_recover_ring, struct aer_recover_entry, /* AER 복구 �
  *   NVMe: firmware가 먼저 감지한 NVMe 관련 PCIe 오류를 OS가 나중에
  *   수신해 복구할 때 사용.
  */
-static void aer_recover_work_func(struct work_struct *work) /* AER/NVMe 관련 함수 정의 시작 */
-{ /* 코드 블록 시작 */
-	struct aer_recover_entry entry; /* 코드 동작 수행 */
-	struct pci_dev *pdev; /* 코드 동작 수행 */
+static void aer_recover_work_func(struct work_struct *work)
+{
+	struct aer_recover_entry entry;
+	struct pci_dev *pdev;
 
-	while (kfifo_get(&aer_recover_ring, &entry)) { /* AER 오류 소스를 kfifo에서 추출 */
-		pdev = pci_get_domain_bus_and_slot(entry.domain, entry.bus, /* domain:bus:devfn으로 NVMe 장치 검색 */
-						   entry.devfn); /* 코드 동작 수행 */
-		if (!pdev) { /* 조건 분기 (NVMe 장치 관련 상태/결과에 따라 동작 결정) */
-			pr_err_ratelimited("%04x:%02x:%02x.%x: no pci_dev found\n", /* 커널 오류 메시지 출력 */
-					   entry.domain, entry.bus, /* 코드 동작 수행 */
-					   PCI_SLOT(entry.devfn), /* PCI Requester ID에서 슬롯 번호 추출 */
-					   PCI_FUNC(entry.devfn)); /* PCI Requester ID에서 함수 번호 추출 */
-			continue; /* 다음 반복으로 진행 */
-		} /* 코드 블록 종료 */
+	while (kfifo_get(&aer_recover_ring, &entry)) {
+		pdev = pci_get_domain_bus_and_slot(entry.domain, entry.bus,
+						   entry.devfn);
+		if (!pdev) {
+			pr_err_ratelimited("%04x:%02x:%02x.%x: no pci_dev found\n",
+					   entry.domain, entry.bus,
+					   PCI_SLOT(entry.devfn),
+					   PCI_FUNC(entry.devfn));
+			continue;
+		}
 		pci_print_aer(pdev, entry.severity, entry.regs);
 
 		/*
@@ -1559,26 +1559,26 @@ static void aer_recover_work_func(struct work_struct *work) /* AER/NVMe 관련 �
 		 * error status. Thus free the same after processing the
 		 * data.
 		 */
-		ghes_estatus_pool_region_free((unsigned long)entry.regs, /* GHES 오류 상태 메모리 반납 */
-					    sizeof(struct aer_capability_regs)); /* 코드 동작 수행 */
+		ghes_estatus_pool_region_free((unsigned long)entry.regs,
+					    sizeof(struct aer_capability_regs));
 
-		if (entry.severity == AER_NONFATAL) /* 조건 분기 (NVMe 장치 관련 상태/결과에 따라 동작 결정) */
+		if (entry.severity == AER_NONFATAL)
 			pcie_do_recovery(pdev, pci_channel_io_normal,
-					 aer_root_reset); /* AER 복구용 Root Port 리셋 (NVMe fatal/nonfatal 오류 복구) */
-		else if (entry.severity == AER_FATAL) /* 추가 조건 분기 (NVMe 장치 관련 다른 경우 처리) */
+					 aer_root_reset);
+		else if (entry.severity == AER_FATAL)
 			pcie_do_recovery(pdev, pci_channel_io_frozen,
-					 aer_root_reset); /* AER 복구용 Root Port 리셋 (NVMe fatal/nonfatal 오류 복구) */
+					 aer_root_reset);
 		pci_dev_put(pdev);
-	} /* 코드 블록 종료 */
-} /* 코드 블록 종료 */
+	}
+}
 
 /*
  * Mutual exclusion for writers of aer_recover_ring, reader side don't
  * need lock, because there is only one reader and lock is not needed
  * between reader and writer.
  */
-static DEFINE_SPINLOCK(aer_recover_ring_lock); /* AER 복구 링 동시 접근 보호용 스핀락 정의 */
-static DECLARE_WORK(aer_recover_work, aer_recover_work_func); /* AER 복구 workqueue 항목 정의 (NVMe 복구 지연 처리) */
+static DEFINE_SPINLOCK(aer_recover_ring_lock);
+static DECLARE_WORK(aer_recover_work, aer_recover_work_func);
 
 /*
  * aer_recover_queue:
@@ -1586,26 +1586,26 @@ static DECLARE_WORK(aer_recover_work, aer_recover_work_func); /* AER 복구 work
  *   NVMe: NVMe 장치의 BDF와 AER 레지스터 값을 큐에 넣어 복구
  *   워커가 처리하도록 한다.
  */
-void aer_recover_queue(int domain, unsigned int bus, unsigned int devfn, /* AER/NVMe 관련 함수 정의 시작 */
-		       int severity, struct aer_capability_regs *aer_regs) /* 코드 동작 수행 */
-{ /* 코드 블록 시작 */
+void aer_recover_queue(int domain, unsigned int bus, unsigned int devfn,
+		       int severity, struct aer_capability_regs *aer_regs)
+{
 	struct aer_recover_entry entry = {
 		.bus		= bus,
 		.devfn		= devfn,
 		.domain		= domain,
 		.severity	= severity,
 		.regs		= aer_regs,
-	}; /* 구조체/배열/열거형 정의 종료 */
+	};
 
 	if (kfifo_in_spinlocked(&aer_recover_ring, &entry, 1,
-				 &aer_recover_ring_lock)) /* 코드 동작 수행 */
+				 &aer_recover_ring_lock))
 		schedule_work(&aer_recover_work);
 	else
-		pr_err("buffer overflow in recovery for %04x:%02x:%02x.%x\n", /* 커널 오류 메시지 출력 */
+		pr_err("buffer overflow in recovery for %04x:%02x:%02x.%x\n",
 		       domain, bus, PCI_SLOT(devfn), PCI_FUNC(devfn));
-} /* 코드 블록 종료 */
+}
 EXPORT_SYMBOL_GPL(aer_recover_queue);
-#endif /* 코드 동작 수행 */
+#endif
 
 /**
  * aer_get_device_error_info - read error status from dev and store it to info
@@ -1623,79 +1623,79 @@ EXPORT_SYMBOL_GPL(aer_recover_queue);
  *   NVMe: NVMe SSD의 AER status/mask/cap/TLP header log를 읽어
  *   디버깅 및 복구 결정에 사용.
  */
-int aer_get_device_error_info(struct aer_err_info *info, int i) /* AER/NVMe 관련 함수 정의 시작 */
-{ /* 코드 블록 시작 */
-	struct pci_dev *dev; /* 코드 동작 수행 */
-	int type, aer; /* 코드 동작 수행 */
-	u32 aercc; /* 코드 동작 수행 */
+int aer_get_device_error_info(struct aer_err_info *info, int i)
+{
+	struct pci_dev *dev;
+	int type, aer;
+	u32 aercc;
 
-	if (i >= AER_MAX_MULTI_ERR_DEVICES) /* 조건 분기 (NVMe 장치 관련 상태/결과에 따라 동작 결정) */
-		return 0; /* 값 반환/종료 */
+	if (i >= AER_MAX_MULTI_ERR_DEVICES)
+		return 0;
 
-	dev = info->dev[i]; /* 값 설정 */
-	aer = dev->aer_cap; /* 값 설정 */
+	dev = info->dev[i];
+	aer = dev->aer_cap;
 	type = pci_pcie_type(dev);
 
 	/* Must reset in this function */
-	info->status = 0; /* 값 설정 */
-	info->tlp_header_valid = 0; /* 값 설정 */
+	info->status = 0;
+	info->tlp_header_valid = 0;
 	info->is_cxl = pcie_is_cxl(dev);
 
 	/* The device might not support AER */
-	if (!aer) /* 조건 분기 (NVMe 장치 관련 상태/결과에 따라 동작 결정) */
-		return 0; /* 값 반환/종료 */
+	if (!aer)
+		return 0;
 
-	if (info->severity == AER_CORRECTABLE) { /* 조건 분기 (NVMe 장치 관련 상태/결과에 따라 동작 결정) */
-		pci_read_config_dword(dev, aer + PCI_ERR_COR_STATUS, /* PCIe/AER 레지스터 읽기 (NVMe 장치/Root Port 설정 읽기) */
-			&info->status); /* 코드 동작 수행 */
-		pci_read_config_dword(dev, aer + PCI_ERR_COR_MASK, /* PCIe/AER 레지스터 읽기 (NVMe 장치/Root Port 설정 읽기) */
-			&info->mask); /* 코드 동작 수행 */
-		if (!(info->status & ~info->mask)) /* 조건 분기 (NVMe 장치 관련 상태/결과에 따라 동작 결정) */
-			return 0; /* 값 반환/종료 */
-	} else if (type == PCI_EXP_TYPE_ROOT_PORT || /* 값 설정 */
-		   type == PCI_EXP_TYPE_RC_EC || /* 값 설정 */
-		   type == PCI_EXP_TYPE_DOWNSTREAM || /* 값 설정 */
-		   info->severity == AER_NONFATAL) { /* 값 설정 */
+	if (info->severity == AER_CORRECTABLE) {
+		pci_read_config_dword(dev, aer + PCI_ERR_COR_STATUS,
+			&info->status);
+		pci_read_config_dword(dev, aer + PCI_ERR_COR_MASK,
+			&info->mask);
+		if (!(info->status & ~info->mask))
+			return 0;
+	} else if (type == PCI_EXP_TYPE_ROOT_PORT ||
+		   type == PCI_EXP_TYPE_RC_EC ||
+		   type == PCI_EXP_TYPE_DOWNSTREAM ||
+		   info->severity == AER_NONFATAL) {
 
 		/* Link is still healthy for IO reads */
-		pci_read_config_dword(dev, aer + PCI_ERR_UNCOR_STATUS, /* PCIe/AER 레지스터 읽기 (NVMe 장치/Root Port 설정 읽기) */
-			&info->status); /* 코드 동작 수행 */
-		pci_read_config_dword(dev, aer + PCI_ERR_UNCOR_MASK, /* PCIe/AER 레지스터 읽기 (NVMe 장치/Root Port 설정 읽기) */
-			&info->mask); /* 코드 동작 수행 */
-		if (!(info->status & ~info->mask)) /* 조건 분기 (NVMe 장치 관련 상태/결과에 따라 동작 결정) */
-			return 0; /* 값 반환/종료 */
+		pci_read_config_dword(dev, aer + PCI_ERR_UNCOR_STATUS,
+			&info->status);
+		pci_read_config_dword(dev, aer + PCI_ERR_UNCOR_MASK,
+			&info->mask);
+		if (!(info->status & ~info->mask))
+			return 0;
 
 		/* Get First Error Pointer */
-		pci_read_config_dword(dev, aer + PCI_ERR_CAP, &aercc); /* PCIe/AER 레지스터 읽기 (NVMe 장치/Root Port 설정 읽기) */
-		info->first_error = PCI_ERR_CAP_FEP(aercc); /* AER Capability/Control에서 첫 번째 오류 포인터 추출 */
+		pci_read_config_dword(dev, aer + PCI_ERR_CAP, &aercc);
+		info->first_error = PCI_ERR_CAP_FEP(aercc);
 
 		if (tlp_header_logged(info->status, aercc)) {
-			info->tlp_header_valid = 1; /* 값 설정 */
+			info->tlp_header_valid = 1;
 			pcie_read_tlp_log(dev, aer + PCI_ERR_HEADER_LOG,
-					  aer + PCI_ERR_PREFIX_LOG, /* 코드 동작 수행 */
+					  aer + PCI_ERR_PREFIX_LOG,
 					  aer_tlp_log_len(dev, aercc),
-					  aercc & PCI_ERR_CAP_TLP_LOG_FLIT, /* 코드 동작 수행 */
-					  &info->tlp); /* 코드 동작 수행 */
-		} /* 코드 블록 종료 */
-	} /* 코드 블록 종료 */
+					  aercc & PCI_ERR_CAP_TLP_LOG_FLIT,
+					  &info->tlp);
+		}
+	}
 
-	return 1; /* 값 반환/종료 */
-} /* 코드 블록 종료 */
+	return 1;
+}
 
-static inline void aer_process_err_devices(struct aer_err_info *e_info) /* 식별된 NVMe 오류원 장치들의 로깅 및 복구 수행 */
-{ /* 코드 블록 시작 */
-	int i; /* 코드 동작 수행 */
+static inline void aer_process_err_devices(struct aer_err_info *e_info)
+{
+	int i;
 
 	/* Report all before handling them, to not lose records by reset etc. */
-	for (i = 0; i < e_info->error_dev_num && e_info->dev[i]; i++) { /* 반복 순회 (NVMe 장치 목록이나 AER 상태 비트를 순회) */
+	for (i = 0; i < e_info->error_dev_num && e_info->dev[i]; i++) {
 		if (aer_get_device_error_info(e_info, i))
 			aer_print_error(e_info, i);
-	} /* 코드 블록 종료 */
-	for (i = 0; i < e_info->error_dev_num && e_info->dev[i]; i++) { /* 반복 순회 (NVMe 장치 목록이나 AER 상태 비트를 순회) */
+	}
+	for (i = 0; i < e_info->error_dev_num && e_info->dev[i]; i++) {
 		if (aer_get_device_error_info(e_info, i))
 			handle_error_source(e_info->dev[i], e_info);
-	} /* 코드 블록 종료 */
-} /* 코드 블록 종료 */
+	}
+}
 
 /**
  * aer_isr_one_error_type - consume a Correctable or Uncorrectable Error
@@ -1709,12 +1709,12 @@ static inline void aer_process_err_devices(struct aer_err_info *e_info) /* 식�
  *   NVMe: NVMe에서 발생한 ERR_COR 또는 ERR_NONFATAL/ERR_FATAL
  *   메시지를 해당 심각도로 처리.
  */
-static void aer_isr_one_error_type(struct pci_dev *root, /* AER/NVMe 관련 함수 정의 시작 */
-				   struct aer_err_info *info) /* 코드 동작 수행 */
-{ /* 코드 블록 시작 */
-	bool found; /* 코드 동작 수행 */
+static void aer_isr_one_error_type(struct pci_dev *root,
+				   struct aer_err_info *info)
+{
+	bool found;
 
-	found = find_source_device(root, info); /* Root Port 아래에서 NVMe 오류원 장치 탐색 */
+	found = find_source_device(root, info);
 
 	/*
 	 * If we're going to log error messages, we've already set
@@ -1727,13 +1727,13 @@ static void aer_isr_one_error_type(struct pci_dev *root, /* AER/NVMe 관련 함�
 	 * Requester ID from the ERR_* Message received by the Root Port or
 	 * RCEC, ratelimited by the RP or RCEC.
 	 */
-	if (info->root_ratelimit_print || /* 조건 분기 (NVMe 장치 관련 상태/결과에 따라 동작 결정) */
-	    (!found && aer_ratelimit(root, info->severity))) /* AER 로그 레이트리미트 처리 (NVMe 오류 로그 폭주 방지) */
-		aer_print_source(root, info, found); /* Root Port가 수신한 ERR 메시지 source ID 로깅 */
+	if (info->root_ratelimit_print ||
+	    (!found && aer_ratelimit(root, info->severity)))
+		aer_print_source(root, info, found);
 
-	if (found) /* 조건 분기 (NVMe 장치 관련 상태/결과에 따라 동작 결정) */
-		aer_process_err_devices(info); /* 식별된 NVMe 오류원 장치들의 로깅 및 복구 수행 */
-} /* 코드 블록 종료 */
+	if (found)
+		aer_process_err_devices(info);
+}
 
 /**
  * aer_isr_one_error - consume error(s) signaled by an AER interrupt from
@@ -1747,42 +1747,42 @@ static void aer_isr_one_error_type(struct pci_dev *root, /* AER/NVMe 관련 함�
  *   NVMe: correctable을 먼저 처리하고, uncorrectable은 fatal/nonfatal
  *   로 나누어 NVMe 복구 흐름으로 전달.
  */
-static void aer_isr_one_error(struct pci_dev *root, /* AER/NVMe 관련 함수 정의 시작 */
-			      struct aer_err_source *e_src) /* 코드 동작 수행 */
-{ /* 코드 블록 시작 */
-	u32 status = e_src->status; /* 값 설정 */
+static void aer_isr_one_error(struct pci_dev *root,
+			      struct aer_err_source *e_src)
+{
+	u32 status = e_src->status;
 
-	pci_rootport_aer_stats_incr(root, e_src); /* Root Port AER 통계 카운터 증가 (NVMe 포함 downstream 집계) */
+	pci_rootport_aer_stats_incr(root, e_src);
 
 	/*
 	 * There is a possibility that both correctable error and
 	 * uncorrectable error being logged. Report correctable error first.
 	 */
-	if (status & PCI_ERR_ROOT_COR_RCV) { /* 조건 분기 (NVMe 장치 관련 상태/결과에 따라 동작 결정) */
-		int multi = status & PCI_ERR_ROOT_MULTI_COR_RCV; /* 값 설정 */
-		struct aer_err_info e_info = { /* 값 설정 */
-			.id = ERR_COR_ID(e_src->id), /* 값 설정 */
-			.severity = AER_CORRECTABLE, /* 값 설정 */
-			.level = KERN_WARNING, /* 값 설정 */
-			.multi_error_valid = multi ? 1 : 0, /* 값 설정 */
-		}; /* 구조체/배열/열거형 정의 종료 */
+	if (status & PCI_ERR_ROOT_COR_RCV) {
+		int multi = status & PCI_ERR_ROOT_MULTI_COR_RCV;
+		struct aer_err_info e_info = {
+			.id = ERR_COR_ID(e_src->id),
+			.severity = AER_CORRECTABLE,
+			.level = KERN_WARNING,
+			.multi_error_valid = multi ? 1 : 0,
+		};
 
-		aer_isr_one_error_type(root, &e_info); /* Root Port AER threaded ISR 호출 */
-	} /* 코드 블록 종료 */
+		aer_isr_one_error_type(root, &e_info);
+	}
 
-	if (status & PCI_ERR_ROOT_UNCOR_RCV) { /* 조건 분기 (NVMe 장치 관련 상태/결과에 따라 동작 결정) */
-		int fatal = status & PCI_ERR_ROOT_FATAL_RCV; /* 값 설정 */
-		int multi = status & PCI_ERR_ROOT_MULTI_UNCOR_RCV; /* 값 설정 */
-		struct aer_err_info e_info = { /* 값 설정 */
-			.id = ERR_UNCOR_ID(e_src->id), /* 값 설정 */
-			.severity = fatal ? AER_FATAL : AER_NONFATAL, /* 값 설정 */
-			.level = KERN_ERR, /* 값 설정 */
-			.multi_error_valid = multi ? 1 : 0, /* 값 설정 */
-		}; /* 구조체/배열/열거형 정의 종료 */
+	if (status & PCI_ERR_ROOT_UNCOR_RCV) {
+		int fatal = status & PCI_ERR_ROOT_FATAL_RCV;
+		int multi = status & PCI_ERR_ROOT_MULTI_UNCOR_RCV;
+		struct aer_err_info e_info = {
+			.id = ERR_UNCOR_ID(e_src->id),
+			.severity = fatal ? AER_FATAL : AER_NONFATAL,
+			.level = KERN_ERR,
+			.multi_error_valid = multi ? 1 : 0,
+		};
 
-		aer_isr_one_error_type(root, &e_info); /* Root Port AER threaded ISR 호출 */
-	} /* 코드 블록 종료 */
-} /* 코드 블록 종료 */
+		aer_isr_one_error_type(root, &e_info);
+	}
+}
 
 /**
  * aer_isr - consume errors detected by Root Port
@@ -1797,8 +1797,8 @@ static void aer_isr_one_error(struct pci_dev *root, /* AER/NVMe 관련 함수 �
  *   NVMe: Root Port AER MSI/MSI-X 인터럽트의 하부(bottom half)에서
  *   NVMe 관련 오류를 복구 경로로 라우팅.
  */
-static irqreturn_t aer_isr(int irq, void *context) /* AER/NVMe 관련 함수 정의 시작 */
-{ /* 코드 블록 시작 */
+static irqreturn_t aer_isr(int irq, void *context)
+{
 	struct pcie_device *dev = (struct pcie_device *)context;
 	struct aer_rpc *rpc = get_service_data(dev);
 	struct aer_err_source e_src;
@@ -1809,7 +1809,7 @@ static irqreturn_t aer_isr(int irq, void *context) /* AER/NVMe 관련 함수 정
 	while (kfifo_get(&rpc->aer_fifo, &e_src))
 		aer_isr_one_error(rpc->rpd, &e_src);
 	return IRQ_HANDLED;
-} /* 코드 블록 종료 */
+}
 
 /**
  * aer_irq - Root Port's ISR
@@ -1824,26 +1824,26 @@ static irqreturn_t aer_isr(int irq, void *context) /* AER/NVMe 관련 함수 정
  *   NVMe: Root Port가 NVMe 장치의 ERR 메시지를 수신하면 이 ISR이
  *   먼저 실행되어 상태를 읽고 threaded handler에 전달.
  */
-static irqreturn_t aer_irq(int irq, void *context) /* AER/NVMe 관련 함수 정의 시작 */
-{ /* 코드 블록 시작 */
-	struct pcie_device *pdev = (struct pcie_device *)context; /* 값 설정 */
-	struct aer_rpc *rpc = get_service_data(pdev); /* pcie_device에서 AER context 획득 */
-	struct pci_dev *rp = rpc->rpd; /* 값 설정 */
-	int aer = rp->aer_cap; /* 값 설정 */
-	struct aer_err_source e_src = {}; /* 값 설정 */
+static irqreturn_t aer_irq(int irq, void *context)
+{
+	struct pcie_device *pdev = (struct pcie_device *)context;
+	struct aer_rpc *rpc = get_service_data(pdev);
+	struct pci_dev *rp = rpc->rpd;
+	int aer = rp->aer_cap;
+	struct aer_err_source e_src = {};
 
-	pci_read_config_dword(rp, aer + PCI_ERR_ROOT_STATUS, &e_src.status); /* PCIe/AER 레지스터 읽기 (NVMe 장치/Root Port 설정 읽기) */
-	if (!(e_src.status & AER_ERR_STATUS_MASK)) /* 조건 분기 (NVMe 장치 관련 상태/결과에 따라 동작 결정) */
-		return IRQ_NONE; /* 값 반환/종료 */
+	pci_read_config_dword(rp, aer + PCI_ERR_ROOT_STATUS, &e_src.status);
+	if (!(e_src.status & AER_ERR_STATUS_MASK))
+		return IRQ_NONE;
 
-	pci_read_config_dword(rp, aer + PCI_ERR_ROOT_ERR_SRC, &e_src.id); /* PCIe/AER 레지스터 읽기 (NVMe 장치/Root Port 설정 읽기) */
-	pci_write_config_dword(rp, aer + PCI_ERR_ROOT_STATUS, e_src.status); /* PCIe/AER 레지스터 쓰기 (NVMe 장치/Root Port 설정 쓰기) */
+	pci_read_config_dword(rp, aer + PCI_ERR_ROOT_ERR_SRC, &e_src.id);
+	pci_write_config_dword(rp, aer + PCI_ERR_ROOT_STATUS, e_src.status);
 
-	if (!kfifo_put(&rpc->aer_fifo, e_src)) /* AER 오류 소스를 kfifo에 추가 (ISR->threaded handler 전달) */
-		return IRQ_HANDLED; /* 값 반환/종료 */
+	if (!kfifo_put(&rpc->aer_fifo, e_src))
+		return IRQ_HANDLED;
 
-	return IRQ_WAKE_THREAD; /* 값 반환/종료 */
-} /* 코드 블록 종료 */
+	return IRQ_WAKE_THREAD;
+}
 
 /*
  * aer_enable_irq:
@@ -1851,32 +1851,32 @@ static irqreturn_t aer_irq(int irq, void *context) /* AER/NVMe 관련 함수 정
  *   NVMe: NVMe 장치에서 발생한 PCIe 오류가 Root Port를 통해 커널로
  *   전달되도록 허용.
  */
-static void aer_enable_irq(struct pci_dev *pdev) /* AER/NVMe 관련 함수 정의 시작 */
-{ /* 코드 블록 시작 */
+static void aer_enable_irq(struct pci_dev *pdev)
+{
 	int aer = pdev->aer_cap;
 	u32 reg32;
 
 	/* Enable Root Port's interrupt in response to error messages */
 	pci_read_config_dword(pdev, aer + PCI_ERR_ROOT_COMMAND, &reg32);
-	reg32 |= ROOT_PORT_INTR_ON_MESG_MASK; /* 값 설정 */
+	reg32 |= ROOT_PORT_INTR_ON_MESG_MASK;
 	pci_write_config_dword(pdev, aer + PCI_ERR_ROOT_COMMAND, reg32);
-} /* 코드 블록 종료 */
+}
 
 /*
  * aer_disable_irq:
  *   Root Port의 AER 인터럽트를 비활성화한다.
  *   NVMe: 복구/리셋 중 추가 AER 인터럽트가 발생하지 않도록 차단.
  */
-static void aer_disable_irq(struct pci_dev *pdev) /* AER/NVMe 관련 함수 정의 시작 */
-{ /* 코드 블록 시작 */
+static void aer_disable_irq(struct pci_dev *pdev)
+{
 	int aer = pdev->aer_cap;
 	u32 reg32;
 
 	/* Disable Root Port's interrupt in response to error messages */
 	pci_read_config_dword(pdev, aer + PCI_ERR_ROOT_COMMAND, &reg32);
-	reg32 &= ~ROOT_PORT_INTR_ON_MESG_MASK; /* 값 설정 */
+	reg32 &= ~ROOT_PORT_INTR_ON_MESG_MASK;
 	pci_write_config_dword(pdev, aer + PCI_ERR_ROOT_COMMAND, reg32);
-} /* 코드 블록 종료 */
+}
 
 /*
  * clear_status_iter:
@@ -1884,8 +1884,8 @@ static void aer_disable_irq(struct pci_dev *pdev) /* AER/NVMe 관련 함수 정�
  *   NVMe: Root Port enable 시 NVMe 장치를 포함한 downstream
  *   장치들의 남은 AER 상태를 정리.
  */
-static int clear_status_iter(struct pci_dev *dev, void *data) /* AER/NVMe 관련 함수 정의 시작 */
-{ /* 코드 블록 시작 */
+static int clear_status_iter(struct pci_dev *dev, void *data)
+{
 	u16 devctl;
 
 	/* Skip if pci_enable_pcie_error_reporting() hasn't been called yet */
@@ -1896,7 +1896,7 @@ static int clear_status_iter(struct pci_dev *dev, void *data) /* AER/NVMe 관련
 	pci_aer_clear_status(dev);
 	pcie_clear_device_status(dev);
 	return 0;
-} /* 코드 블록 종료 */
+}
 
 /**
  * aer_enable_rootport - enable Root Port's interrupts when receiving messages
@@ -1910,41 +1910,41 @@ static int clear_status_iter(struct pci_dev *dev, void *data) /* AER/NVMe 관련
  *   NVMe: NVMe SSD가 연결된 Root Port에서 AER 인터럽트를 받을 수
  *   있도록 설정하고 기존 상태를 클리어.
  */
-static void aer_enable_rootport(struct aer_rpc *rpc) /* AER/NVMe 관련 함수 정의 시작 */
-{ /* 코드 블록 시작 */
-	struct pci_dev *pdev = rpc->rpd; /* 값 설정 */
-	int aer = pdev->aer_cap; /* 값 설정 */
-	u16 reg16; /* 코드 동작 수행 */
-	u32 reg32; /* 코드 동작 수행 */
+static void aer_enable_rootport(struct aer_rpc *rpc)
+{
+	struct pci_dev *pdev = rpc->rpd;
+	int aer = pdev->aer_cap;
+	u16 reg16;
+	u32 reg32;
 
 	/* Clear PCIe Capability's Device Status */
-	pcie_capability_read_word(pdev, PCI_EXP_DEVSTA, &reg16); /* PCIe Capability 레지스터 읽기 (NVMe 장치/Root Port) */
-	pcie_capability_write_word(pdev, PCI_EXP_DEVSTA, reg16); /* PCIe Capability 레지스터 쓰기 (NVMe 장치/Root Port) */
+	pcie_capability_read_word(pdev, PCI_EXP_DEVSTA, &reg16);
+	pcie_capability_write_word(pdev, PCI_EXP_DEVSTA, reg16);
 
 	/* Disable system error generation in response to error messages */
-	pcie_capability_clear_word(pdev, PCI_EXP_RTCTL, /* PCIe Capability 워드에서 비트 클리어 */
-				   SYSTEM_ERROR_INTR_ON_MESG_MASK); /* 코드 동작 수행 */
+	pcie_capability_clear_word(pdev, PCI_EXP_RTCTL,
+				   SYSTEM_ERROR_INTR_ON_MESG_MASK);
 
 	/* Clear error status of this Root Port or RCEC */
-	pci_read_config_dword(pdev, aer + PCI_ERR_ROOT_STATUS, &reg32); /* PCIe/AER 레지스터 읽기 (NVMe 장치/Root Port 설정 읽기) */
-	pci_write_config_dword(pdev, aer + PCI_ERR_ROOT_STATUS, reg32); /* PCIe/AER 레지스터 쓰기 (NVMe 장치/Root Port 설정 쓰기) */
+	pci_read_config_dword(pdev, aer + PCI_ERR_ROOT_STATUS, &reg32);
+	pci_write_config_dword(pdev, aer + PCI_ERR_ROOT_STATUS, reg32);
 
 	/* Clear error status of agents reporting to this Root Port or RCEC */
-	if (reg32 & AER_ERR_STATUS_MASK) { /* 조건 분기 (NVMe 장치 관련 상태/결과에 따라 동작 결정) */
+	if (reg32 & AER_ERR_STATUS_MASK) {
 		if (pci_pcie_type(pdev) == PCI_EXP_TYPE_RC_EC)
-			pcie_walk_rcec(pdev, clear_status_iter, NULL); /* RCEC에 연결된 RCiEP 순회 */
-		else if (pdev->subordinate) /* 추가 조건 분기 (NVMe 장치 관련 다른 경우 처리) */
-			pci_walk_bus(pdev->subordinate, clear_status_iter, /* Root Port 하위 버스의 모든 pci_dev(NVMe 포함) 순회 */
-				     NULL); /* 코드 동작 수행 */
-	} /* 코드 블록 종료 */
+			pcie_walk_rcec(pdev, clear_status_iter, NULL);
+		else if (pdev->subordinate)
+			pci_walk_bus(pdev->subordinate, clear_status_iter,
+				     NULL);
+	}
 
-	pci_read_config_dword(pdev, aer + PCI_ERR_COR_STATUS, &reg32); /* PCIe/AER 레지스터 읽기 (NVMe 장치/Root Port 설정 읽기) */
-	pci_write_config_dword(pdev, aer + PCI_ERR_COR_STATUS, reg32); /* PCIe/AER 레지스터 쓰기 (NVMe 장치/Root Port 설정 쓰기) */
-	pci_read_config_dword(pdev, aer + PCI_ERR_UNCOR_STATUS, &reg32); /* PCIe/AER 레지스터 읽기 (NVMe 장치/Root Port 설정 읽기) */
-	pci_write_config_dword(pdev, aer + PCI_ERR_UNCOR_STATUS, reg32); /* PCIe/AER 레지스터 쓰기 (NVMe 장치/Root Port 설정 쓰기) */
+	pci_read_config_dword(pdev, aer + PCI_ERR_COR_STATUS, &reg32);
+	pci_write_config_dword(pdev, aer + PCI_ERR_COR_STATUS, reg32);
+	pci_read_config_dword(pdev, aer + PCI_ERR_UNCOR_STATUS, &reg32);
+	pci_write_config_dword(pdev, aer + PCI_ERR_UNCOR_STATUS, reg32);
 
-	aer_enable_irq(pdev); /* Root Port AER 인터럽트 활성화 */
-} /* 코드 블록 종료 */
+	aer_enable_irq(pdev);
+}
 
 /**
  * aer_disable_rootport - disable Root Port's interrupts when receiving messages
@@ -1957,18 +1957,18 @@ static void aer_enable_rootport(struct aer_rpc *rpc) /* AER/NVMe 관련 함수 �
  *   AER 서비스 드라이버 언로드 시 Root Port/RCEC의 AER를 비활성화한다.
  *   NVMe: NVMe 연결 Root Port의 AER 인터럽트를 끄고 상태를 정리.
  */
-static void aer_disable_rootport(struct aer_rpc *rpc) /* AER/NVMe 관련 함수 정의 시작 */
-{ /* 코드 블록 시작 */
-	struct pci_dev *pdev = rpc->rpd; /* 값 설정 */
-	int aer = pdev->aer_cap; /* 값 설정 */
-	u32 reg32; /* 코드 동작 수행 */
+static void aer_disable_rootport(struct aer_rpc *rpc)
+{
+	struct pci_dev *pdev = rpc->rpd;
+	int aer = pdev->aer_cap;
+	u32 reg32;
 
-	aer_disable_irq(pdev); /* Root Port AER 인터럽트 비활성화 */
+	aer_disable_irq(pdev);
 
 	/* Clear Root's error status reg */
-	pci_read_config_dword(pdev, aer + PCI_ERR_ROOT_STATUS, &reg32); /* PCIe/AER 레지스터 읽기 (NVMe 장치/Root Port 설정 읽기) */
-	pci_write_config_dword(pdev, aer + PCI_ERR_ROOT_STATUS, reg32); /* PCIe/AER 레지스터 쓰기 (NVMe 장치/Root Port 설정 쓰기) */
-} /* 코드 블록 종료 */
+	pci_read_config_dword(pdev, aer + PCI_ERR_ROOT_STATUS, &reg32);
+	pci_write_config_dword(pdev, aer + PCI_ERR_ROOT_STATUS, reg32);
+}
 
 /**
  * aer_remove - clean up resources
@@ -1981,12 +1981,12 @@ static void aer_disable_rootport(struct aer_rpc *rpc) /* AER/NVMe 관련 함수 
  *   AER 서비스가 제거될 때 Root Port 리소스를 정리한다.
  *   NVMe: NVMe 장치 제거/Root Port 언바인드 시 AER 인터럽트 비활성화.
  */
-static void aer_remove(struct pcie_device *dev) /* AER/NVMe 관련 함수 정의 시작 */
-{ /* 코드 블록 시작 */
+static void aer_remove(struct pcie_device *dev)
+{
 	struct aer_rpc *rpc = get_service_data(dev);
 
 	aer_disable_rootport(rpc);
-} /* 코드 블록 종료 */
+}
 
 /**
  * aer_probe - initialize resources
@@ -2001,56 +2001,56 @@ static void aer_remove(struct pcie_device *dev) /* AER/NVMe 관련 함수 정의
  *   등록하고 AER를 활성화. AER 인터럽트는 Root Port의 MSI/MSI-X를
  *   사용하므로 NVMe의 MSI/MSI-X 라우팅과 공존한다.
  */
-static int aer_probe(struct pcie_device *dev) /* AER/NVMe 관련 함수 정의 시작 */
-{ /* 코드 블록 시작 */
-	int status; /* 코드 동작 수행 */
-	struct aer_rpc *rpc; /* 코드 동작 수행 */
-	struct device *device = &dev->device; /* 값 설정 */
-	struct pci_dev *port = dev->port; /* 값 설정 */
+static int aer_probe(struct pcie_device *dev)
+{
+	int status;
+	struct aer_rpc *rpc;
+	struct device *device = &dev->device;
+	struct pci_dev *port = dev->port;
 
-	BUILD_BUG_ON(ARRAY_SIZE(aer_correctable_error_string) < /* 컴파일 타임 조건 검증 */
-		     AER_MAX_TYPEOF_COR_ERRS); /* 코드 동작 수행 */
-	BUILD_BUG_ON(ARRAY_SIZE(aer_uncorrectable_error_string) < /* 컴파일 타임 조건 검증 */
-		     AER_MAX_TYPEOF_UNCOR_ERRS); /* 코드 동작 수행 */
+	BUILD_BUG_ON(ARRAY_SIZE(aer_correctable_error_string) <
+		     AER_MAX_TYPEOF_COR_ERRS);
+	BUILD_BUG_ON(ARRAY_SIZE(aer_uncorrectable_error_string) <
+		     AER_MAX_TYPEOF_UNCOR_ERRS);
 
 	/* Limit to Root Ports or Root Complex Event Collectors */
 	if ((pci_pcie_type(port) != PCI_EXP_TYPE_RC_EC) &&
 	    (pci_pcie_type(port) != PCI_EXP_TYPE_ROOT_PORT))
-		return -ENODEV; /* 값 반환/종료 */
+		return -ENODEV;
 
-	rpc = devm_kzalloc(device, sizeof(struct aer_rpc), GFP_KERNEL); /* AER Root Port context 메모리 할당 */
-	if (!rpc) /* 조건 분기 (NVMe 장치 관련 상태/결과에 따라 동작 결정) */
-		return -ENOMEM; /* 값 반환/종료 */
+	rpc = devm_kzalloc(device, sizeof(struct aer_rpc), GFP_KERNEL);
+	if (!rpc)
+		return -ENOMEM;
 
-	rpc->rpd = port; /* 값 설정 */
-	INIT_KFIFO(rpc->aer_fifo); /* AER 오류 소스 큐 초기화 */
-	set_service_data(dev, rpc); /* pcie_device에 AER context 저장 */
+	rpc->rpd = port;
+	INIT_KFIFO(rpc->aer_fifo);
+	set_service_data(dev, rpc);
 
-	status = devm_request_threaded_irq(device, dev->irq, aer_irq, aer_isr, /* Root Port AER 인터럽트 상부 핸들러 호출 */
-					   IRQF_SHARED, "aerdrv", dev); /* 코드 동작 수행 */
-	if (status) { /* 조건 분기 (NVMe 장치 관련 상태/결과에 따라 동작 결정) */
-		pci_err(port, "request AER IRQ %d failed\n", dev->irq); /* NVMe/PCI 오류 로그 출력 */
-		return status; /* 값 반환/종료 */
-	} /* 코드 블록 종료 */
+	status = devm_request_threaded_irq(device, dev->irq, aer_irq, aer_isr,
+					   IRQF_SHARED, "aerdrv", dev);
+	if (status) {
+		pci_err(port, "request AER IRQ %d failed\n", dev->irq);
+		return status;
+	}
 
-	cxl_rch_enable_rcec(port); /* CXL RCEC 활성화 (표준 NVMe PCIe 장치에는 영향 없음) */
+	cxl_rch_enable_rcec(port);
 	aer_enable_rootport(rpc);
-	pci_info(port, "enabled with IRQ %d\n", dev->irq); /* NVMe/PCI 정보 로그 출력 */
-	return 0; /* 값 반환/종료 */
-} /* 코드 블록 종료 */
+	pci_info(port, "enabled with IRQ %d\n", dev->irq);
+	return 0;
+}
 
 /*
  * aer_suspend:
  *   시스템 절전 시 AER Root Port 인터럽트를 비활성화.
  *   NVMe: NVMe 장치가 포함된 PCIe 계층이 절전할 때 AER 동작 중지.
  */
-static int aer_suspend(struct pcie_device *dev) /* AER/NVMe 관련 함수 정의 시작 */
-{ /* 코드 블록 시작 */
+static int aer_suspend(struct pcie_device *dev)
+{
 	struct aer_rpc *rpc = get_service_data(dev);
 
 	aer_disable_rootport(rpc);
 	return 0;
-} /* 코드 블록 종료 */
+}
 
 /*
  * aer_resume:
@@ -2058,13 +2058,13 @@ static int aer_suspend(struct pcie_device *dev) /* AER/NVMe 관련 함수 정의
  *   NVMe: NVMe 장치가 포함된 PCIe 계층이 resume 후 AER 오류를
  *   다시 감지할 수 있게 설정.
  */
-static int aer_resume(struct pcie_device *dev) /* AER/NVMe 관련 함수 정의 시작 */
-{ /* 코드 블록 시작 */
+static int aer_resume(struct pcie_device *dev)
+{
 	struct aer_rpc *rpc = get_service_data(dev);
 
 	aer_enable_rootport(rpc);
 	return 0;
-} /* 코드 블록 종료 */
+}
 
 /**
  * aer_root_reset - reset Root Port hierarchy, RCEC, or RCiEP
@@ -2080,23 +2080,23 @@ static int aer_resume(struct pcie_device *dev) /* AER/NVMe 관련 함수 정의 
  *   드라이버의 slot_reset/resume 콜백이 호출되어 queue와 CMB를
  *   재초기화한다. SR-IOV 환경에서는 PF 리셋이 여러 VF에 영향.
  */
-static pci_ers_result_t aer_root_reset(struct pci_dev *dev) /* AER 복구 관련 함수 선언/프로토타입 */
-{ /* 코드 블록 시작 */
+static pci_ers_result_t aer_root_reset(struct pci_dev *dev)
+{
 	int type = pci_pcie_type(dev);
-	struct pci_dev *root; /* 코드 동작 수행 */
-	int aer; /* 코드 동작 수행 */
+	struct pci_dev *root;
+	int aer;
 	struct pci_host_bridge *host = pci_find_host_bridge(dev->bus);
-	u32 reg32; /* 코드 동작 수행 */
-	int rc; /* 코드 동작 수행 */
+	u32 reg32;
+	int rc;
 
 	/*
 	 * Only Root Ports and RCECs have AER Root Command and Root Status
 	 * registers.  If "dev" is an RCiEP, the relevant registers are in
 	 * the RCEC.
 	 */
-	if (type == PCI_EXP_TYPE_RC_END) /* 조건 분기 (NVMe 장치 관련 상태/결과에 따라 동작 결정) */
-		root = dev->rcec; /* 값 설정 */
-	else /* 이전 조건이 아닌 경우 분기 */
+	if (type == PCI_EXP_TYPE_RC_END)
+		root = dev->rcec;
+	else
 		root = pcie_find_root_port(dev);
 
 	/*
@@ -2104,33 +2104,33 @@ static pci_ers_result_t aer_root_reset(struct pci_dev *dev) /* AER 복구 관련
 	 * an RCEC visible to us, so dev->rcec ("root") may be NULL.  In
 	 * that case, firmware is responsible for these registers.
 	 */
-	aer = root ? root->aer_cap : 0; /* 값 설정 */
+	aer = root ? root->aer_cap : 0;
 
-	if ((host->native_aer || pcie_ports_native) && aer) /* 조건 분기 (NVMe 장치 관련 상태/결과에 따라 동작 결정) */
-		aer_disable_irq(root); /* Root Port AER 인터럽트 비활성화 */
+	if ((host->native_aer || pcie_ports_native) && aer)
+		aer_disable_irq(root);
 
-	if (type == PCI_EXP_TYPE_RC_EC || type == PCI_EXP_TYPE_RC_END) { /* 조건 분기 (NVMe 장치 관련 상태/결과에 따라 동작 결정) */
-		rc = pcie_reset_flr(dev, PCI_RESET_DO_RESET); /* Function Level Reset 수행 (NVMe RCEC/RCiEP 복구) */
-		if (!rc) /* 조건 분기 (NVMe 장치 관련 상태/결과에 따라 동작 결정) */
-			pci_info(dev, "has been reset\n"); /* NVMe/PCI 정보 로그 출력 */
-		else /* 이전 조건이 아닌 경우 분기 */
-			pci_info(dev, "not reset (no FLR support: %d)\n", rc); /* NVMe/PCI 정보 로그 출력 */
-	} else { /* 코드 동작 수행 */
-		rc = pci_bus_error_reset(dev); /* Root Port/Downstream 하위 버스 링크 리셋 (NVMe 장치 재초기화 유도) */
-		pci_info(dev, "%s Port link has been reset (%d)\n", /* NVMe/PCI 정보 로그 출력 */
-			pci_is_root_bus(dev->bus) ? "Root" : "Downstream", rc); /* 코드 동작 수행 */
-	} /* 코드 블록 종료 */
+	if (type == PCI_EXP_TYPE_RC_EC || type == PCI_EXP_TYPE_RC_END) {
+		rc = pcie_reset_flr(dev, PCI_RESET_DO_RESET);
+		if (!rc)
+			pci_info(dev, "has been reset\n");
+		else
+			pci_info(dev, "not reset (no FLR support: %d)\n", rc);
+	} else {
+		rc = pci_bus_error_reset(dev);
+		pci_info(dev, "%s Port link has been reset (%d)\n",
+			pci_is_root_bus(dev->bus) ? "Root" : "Downstream", rc);
+	}
 
-	if ((host->native_aer || pcie_ports_native) && aer) { /* 조건 분기 (NVMe 장치 관련 상태/결과에 따라 동작 결정) */
+	if ((host->native_aer || pcie_ports_native) && aer) {
 		/* Clear Root Error Status */
-		pci_read_config_dword(root, aer + PCI_ERR_ROOT_STATUS, &reg32); /* PCIe/AER 레지스터 읽기 (NVMe 장치/Root Port 설정 읽기) */
-		pci_write_config_dword(root, aer + PCI_ERR_ROOT_STATUS, reg32); /* PCIe/AER 레지스터 쓰기 (NVMe 장치/Root Port 설정 쓰기) */
+		pci_read_config_dword(root, aer + PCI_ERR_ROOT_STATUS, &reg32);
+		pci_write_config_dword(root, aer + PCI_ERR_ROOT_STATUS, reg32);
 
-		aer_enable_irq(root); /* Root Port AER 인터럽트 활성화 */
-	} /* 코드 블록 종료 */
+		aer_enable_irq(root);
+	}
 
-	return rc ? PCI_ERS_RESULT_DISCONNECT : PCI_ERS_RESULT_RECOVERED; /* 값 반환/종료 */
-} /* 코드 블록 종료 */
+	return rc ? PCI_ERS_RESULT_DISCONNECT : PCI_ERS_RESULT_RECOVERED;
+}
 
 static struct pcie_port_service_driver aerdriver = {
 	.name		= "aer",
@@ -2141,16 +2141,16 @@ static struct pcie_port_service_driver aerdriver = {
 	.suspend	= aer_suspend,
 	.resume		= aer_resume,
 	.remove		= aer_remove,
-}; /* 구조체/배열/열거형 정의 종료 */
+};
 
 /**
  * pcie_aer_init - register AER service driver
  *
  * Invoked when AER service driver is loaded.
  */
-int __init pcie_aer_init(void) /* 코드 동작 수행 */
-{ /* 코드 블록 시작 */
+int __init pcie_aer_init(void)
+{
 	if (!pci_aer_available())
 		return -ENXIO;
 	return pcie_port_service_register(&aerdriver);
-} /* 코드 블록 종료 */
+}

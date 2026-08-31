@@ -13,127 +13,214 @@
  * === 파일의 역할 ===
  * ACPI 는 펌웨어가 OS 에게 하드웨어를 기술하는 방식이다. PCI 장치에 대해
  * 펌웨어만 아는 정보가 여럿 있고, 이 파일이 그것을 커널로 가져온다.
+ * PCI 코어 쪽에서 ACPI 를 향해 내미는 손이 이 파일이고, 반대쪽 손인
+ * drivers/acpi/pci_root.c 는 이 스파스 체크아웃에 없다.
  *
- * 크게 네 갈래다.
+ * 이 파일이 실제로 하는 일은 크게 다섯 갈래다(파일을 전수로 훑어 정리했다).
  *
- *   1) 소유권 협상(_OSC) — 이 파일에서 가장 중요한 부분이다.
- *      펌웨어와 커널이 "PCIe 의 어떤 기능을 누가 관리할 것인가" 를 정한다.
- *      AER, 핫플러그, ASPM, DPC, LTR 같은 기능마다 소유권이 갈리며,
- *      펌웨어가 넘겨주지 않으면 커널의 해당 드라이버가 아예 붙지 않는다.
- *      pcie_aer_is_native() 나 DPC 소유권 판정이 그 결과를 본다.
+ *   1) 전원 관리 — 이 파일에서 가장 큰 덩어리 중 하나다. ACPI 의 D-state 와
+ *      PCI 의 D-state 를 잇는다. acpi_pci_set_power_state() 가 _PS0/_PS3 를
+ *      평가하고, acpi_pci_get_power_state() 가 현재 상태를 읽고,
+ *      acpi_pci_choose_state() 가 시스템 수면 상태에 맞는 D-state 를 고른다.
+ *      깨우기(_PRW/_DSW)와 D3cold 진입 판정(acpi_pci_bridge_d3)도 여기다.
+ *      pci.c:1969, 1996, 2022, 2045, 2071, 2098, 2123, 2150 이 전부 이 파일의
+ *      함수로 넘어오는 자리다.
  *
- *   2) 전원 관리 — ACPI 의 전원 상태와 PCI 의 D-state 를 잇는다.
- *      _PR3 가 있어야 D3cold 로 갈 수 있고(pci.c 의 pci_pr3_present 참고),
- *      _PS0/_PS3 메서드로 실제 전환이 이뤄진다. wakeup 소스 설정(_PRW)도
- *      여기서 다룬다.
+ *   2) _HPX/_HPP 권장값 적용 — 파일의 절반 가까이(약 900줄)를 차지한다.
+ *      펌웨어가 "이 슬롯의 장치는 이렇게 설정하라" 고 남긴 값을 Type 0/1/2/3
+ *      네 종류로 나눠 파싱하고 config space 에 써 넣는다. 진입점은
+ *      pci_acpi_program_hp_params() 하나이고, 그 아래로
+ *      acpi_run_hpx()/acpi_run_hpp() -> decode_*_hpx_record() ->
+ *      program_hpx_type*() 로 갈라진다.
  *
- *   3) 열거 보조 — MCFG 테이블로 ECAM 창을 만들고(ARM64/RISC-V),
- *      _CRS 로 루트 브리지의 주소 범위를 알아내고, _PRT 로 INTx 라우팅을
- *      해석한다. x86 은 상당 부분을 아키텍처 코드가 하고, ARM64 는
- *      이 파일에 더 많이 의존한다.
+ *   3) ACPI companion 연결 — PCI 장치와 ACPI 네임스페이스 노드를 짝지어
+ *      준다. acpi_pci_find_companion() 이 _ADR 로 짝을 찾고,
+ *      pci_acpi_setup()/pci_acpi_cleanup() 이 그 짝에 딸린 알림과 깨우기
+ *      설정을 붙이고 뗀다. 이 연결이 없으면 위 1)의 어떤 것도 동작하지 않는다.
  *
- *   4) 슬롯과 hotplug 보조 — _SUN(슬롯 번호), _DSM(장치별 메서드),
- *      _HPX(권장 설정값), 그리고 hotplug 알림 처리.
+ *   4) 소유권 판정 결과의 *소비* — pciehp_is_native()/shpchp_is_native() 가
+ *      "이 핫플러그 포트를 커널이 다루는가" 를 답한다. 여기서 주의할 점은,
+ *      그 소유권을 *정하는* _OSC 협상 코드는 이 파일에 없다는 것이다
+ *      (아래 "이 파일에 없는 것" 절 참고). 이 파일은 그 결과가 담긴
+ *      host->native_* 비트를 읽어 답할 뿐이다.
+ *
+ *   5) ARM64/RISC-V 전용 열거 지원 — 파일 끝의 #if 블록이다. MCFG 로
+ *      ECAM 창을 만들고(pci_acpi_setup_ecam_mapping), 루트 브리지를 열거하고
+ *      (pci_acpi_scan_root), _PRT 기반 INTx 를 배정한다(pcibios_alloc_irq).
+ *      x86 은 이 일들을 아키텍처 코드가 따로 한다.
+ *
+ * === 이 파일에 없는 것 (기존 주석의 오류를 코드로 바로잡음) ===
+ * 이전 주석은 "_OSC 소유권 협상이 이 파일에서 가장 중요한 부분" 이라 적고
+ * 요약에 negotiate_os_control() 과 acpi_pci_osc_control_set() 을 올렸다.
+ * 두 함수 모두 이 트리 전체에 존재하지 않는다(전수 grep). 상류 리눅스에서
+ * 그것들은 drivers/acpi/pci_root.c 에 있고, 그 디렉터리는 이 스파스
+ * 체크아웃에 포함되지 않았다. 같은 이유로 "부팅 흐름이 acpi_pci_root_add()
+ * 계열로 들어온다" 는 서술도 이 트리에서는 확인할 수 없다 — 그 이름 역시
+ * 여기 없다. 이 파일 안에서 _OSC 라는 문자열이 나오는 곳은 주석뿐이다.
  *
  * === 전체 아키텍처에서의 위치 ===
- * 부팅:  ACPI 코어가 루트 브리지 장치를 발견
- *          -> [이 파일] acpi_pci_root_add() 계열
- *             -> negotiate_os_control() 로 _OSC 협상
- *             -> pci_acpi_setup_ecam_mapping() 으로 ECAM 창 생성(ARM64/RISC-V)
- *             -> pci_create_root_bus() [probe.c] 로 버스 트리 시작
+ * 열거(모든 아키텍처):
+ *          probe.c:2489  -> [이 파일] pci_acpi_preserve_config()
+ *                           _DSM "PCI Boot Configuration" 으로
+ *                           "펌웨어 자원 배치를 그대로 두라" 인지 묻는다
+ *          probe.c:4933  -> [이 파일] pci_set_acpi_fwnode()
+ *                           -> acpi_pci_find_companion() 으로 짝을 찾아 건다
+ *          probe.c:5862  -> [이 파일] pci_acpi_program_hp_params()
+ *                           _HPX/_HPP 권장값을 config space 에 적용
+ *          probe.c:2386  -> [이 파일] pci_host_bridge_acpi_msi_domain()
+ *          probe.c:2608  -> [이 파일] pcibios_root_bridge_prepare() (ARM64/RISC-V)
+ *          probe.c:2672, 3071 -> [이 파일] pcibios_add_bus() (ARM64/RISC-V)
+ *          remove.c:183  -> [이 파일] pcibios_remove_bus() (ARM64/RISC-V)
  *
- * 장치별: probe.c 가 장치를 설정할 때
- *          -> [이 파일] pci_acpi_program_hp_params() — _HPX 권장값 적용
- *          -> [이 파일] pcibios_alloc_irq() — _PRT 로 INTx 배정(ARM64/RISC-V)
+ * 전원 관리:  pci.c 의 플랫폼 훅들
+ *          pci.c:1969 -> acpi_pci_power_manageable()
+ *          pci.c:1996 -> acpi_pci_set_power_state()   -> ACPI _PS0/_PS3
+ *          pci.c:2022 -> acpi_pci_get_power_state()
+ *          pci.c:2045 -> acpi_pci_refresh_power_state()
+ *          pci.c:2071 -> acpi_pci_choose_state()      -> ACPI _SxD/_SxW
+ *          pci.c:2098 -> acpi_pci_wakeup()            -> ACPI _PRW
+ *          pci.c:2123 -> acpi_pci_need_resume()
+ *          pci.c:2150 -> acpi_pci_bridge_d3()         -> _S0W, _DSD
  *
- * 전원:  pci.c 의 전원 상태 전환
- *          -> [이 파일] acpi_pci_set_power_state(), acpi_pci_get_power_state()
- *             -> ACPI 의 _PS0/_PS3 메서드 평가
+ * 리셋:    pci.c:9953 의 pci_reset_fn_methods[] 첫 항목이
+ *          pci_dev_acpi_reset() 이다 — ACPI _RST 를 쓰는 리셋 방법.
  *
- * 실행 컨텍스트: 대부분 프로세스 컨텍스트. ACPI 메서드 평가는 인터프리터를
- * 돌리므로 시간이 걸리고 잠들 수 있다.
+ * 핫플러그: hotplug/acpiphp_glue.c:1830 과 :1995 가 밝히듯, 이 파일의
+ *          acpi_pci_add_bus()/acpi_pci_remove_bus() 가 acpiphp 의
+ *          슬롯 열거·해제를 부른다.
+ *
+ * 실행 컨텍스트: 전부 프로세스 컨텍스트. ACPI 메서드 평가는 AML
+ * 인터프리터를 돌리므로 시간이 걸리고 잠들 수 있다. 그래서 이 파일의
+ * 어떤 함수도 인터럽트 문맥에서 부를 수 없다.
  *
  * === 타 모듈과의 연결 ===
- * 위쪽: drivers/acpi/ 의 ACPI 코어, probe.c(열거), pci.c(전원 관리).
- * 아래쪽: ecam.c 의 pci_ecam_create, access.c 의 config 접근.
- * 옆쪽: pcie/portdrv.c 와 각 서비스 드라이버 — _OSC 협상 결과를 보고
- *   자기가 붙을지 말지 정한다. pcie/edr.c 는 아예 ACPI 알림으로만 동작한다.
- * 공유 상태: struct pci_host_bridge 의 native_* 비트들(각 기능의 소유권),
- *   struct pci_dev 의 ACPI companion 연결.
+ * 위쪽: drivers/acpi/ 의 ACPI 코어(이 트리에 없음), probe.c(열거),
+ *   pci.c(전원 관리·리셋), remove.c(버스 제거).
+ * 아래쪽: ecam.c 의 pci_ecam_create(), access.c 의 config 접근 헬퍼,
+ *   그리고 acpi_evaluate_object()/acpi_evaluate_dsm_typed() 등 ACPI 평가 API.
+ * 옆쪽: hotplug/acpiphp_glue.c(슬롯 열거), pcie/edr.c(EDR 알림 등록·해제를
+ *   pci_acpi_setup/cleanup 이 대신 불러 준다), hotplug/shpchp_core.c
+ *   (shpc_managed 비트를 세우고 이 파일의 shpchp_is_native() 가 읽는다).
+ * 공유 상태: struct pci_host_bridge 의 native_* 비트(소유권 판정 결과.
+ *   probe.c:1754 등이 기본값 1 로 세우고, 트리 밖 _OSC 코드가 낮춘다),
+ *   struct pci_dev 의 ACPI companion 포인터, pdev->d3hot_delay/d3cold_delay.
  *
- * === NVMe 관점 ===
- * NVMe 드라이버는 이 파일의 함수를 직접 부르지 않는다(전수 확인).
- * 하지만 이 파일이 정하는 두 가지가 NVMe 의 동작을 크게 좌우한다.
+ * === 엔드포인트와의 접점 (근거를 확인한 것만) ===
+ * 이 파일은 엔드포인트의 종류를 가리지 않는 코어 계층이다. 어떤 장치
+ * 드라이버도 이 파일의 함수를 직접 부르지 않는다(drivers/nvme 전수 확인
+ * 결과 0건). 다만 이 파일이 만들어 주는 ACPI companion 연결이 있어야
+ * 장치 드라이버가 ACPI 속성을 조회할 수 있다. 이 트리에서 확인되는
+ * 유일한 실사용 예가 그것이다.
  *
- * 첫째, _OSC 협상 결과다. 펌웨어가 AER 소유권을 넘겨주지 않으면
- * pcie/aer.c 가 붙지 않고, NVMe 의 PCIe 오류가 커널에 보고되지 않는다.
- * 핫플러그 소유권도 마찬가지라, 넘겨받지 못하면 U.2 백플레인의
- * 드라이브 교체를 커널이 감지하지 못한다.
- *
- * 둘째, 전원 관리 정책이다. NVMe 는 절전 방식을 고를 때 펌웨어의 판단을
- * 참고한다:
- *
- *   nvme_pci_alloc_dev()  [drivers/nvme/host/pci.c]
- *     if (!noacpi && !(quirks & NVME_QUIRK_FORCE_NO_SIMPLE_SUSPEND) &&
+ *   nvme_pci_alloc_dev()  [drivers/nvme/host/pci.c:4686~4696]
+ *     if (!noacpi &&
+ *         !(quirks & NVME_QUIRK_FORCE_NO_SIMPLE_SUSPEND) &&
  *         acpi_storage_d3(&pdev->dev)) {
- *             dev_info(..., "platform quirk: setting simple suspend\n");
+ *             dev_info(&pdev->dev,
+ *                      "platform quirk: setting simple suspend\n");
+ *             quirks |= NVME_QUIRK_SIMPLE_SUSPEND;
  *     }
  *
- *   nvme_suspend()
- *     if (pm_suspend_via_firmware() || !ctrl->npss || ...)
- *             return nvme_disable_prepare_reset(ndev, true);
- *
  * acpi_storage_d3() 는 ACPI 의 StorageD3Enable 속성을 읽어 "이 플랫폼은
- * 스토리지를 D3 로 내려야 제대로 절전된다" 는 펌웨어의 지시를 확인한다.
- * 그 지시가 있으면 NVMe 는 자기 전력 상태 대신 PCI D3 를 쓴다.
- * 일부 노트북에서 이것이 없으면 절전이 되지 않아 배터리가 빨리 닳는다.
+ * 스토리지를 D3 로 내려야 제대로 절전된다" 는 펌웨어 지시를 확인한다.
+ * 그 함수 자체는 drivers/acpi/ 에 있어 이 트리에 없지만, 그것이 읽는
+ * ACPI companion 을 pci_set_acpi_fwnode() -> acpi_pci_find_companion() 이
+ * 걸어 준다. 즉 이 파일은 그 판단의 *토대* 를 만든다.
  *
- * 다만 acpi_storage_d3() 자체는 이 파일이 아니라 drivers/acpi/ 에 있다.
- * 이 파일은 그 판단의 토대가 되는 ACPI-PCI 연결을 만들 뿐이다.
- *
- * (기존 주석은 이 파일이 "MSI/MSI-X IRQ 도메인, ASPM, config space 접근" 을
- *  제어한다고 적었으나, MSI 도메인은 msi/irqdomain.c 가, ASPM 은
- *  pcie/aspm.c 가, config 접근은 access.c 가 담당한다. 이 파일은 그
- *  기능들의 *소유권* 을 펌웨어와 협상할 뿐이다.)
+ * (이전 주석의 다음 서술들은 코드로 반증되어 지웠다:
+ *  "이 파일이 MSI/MSI-X IRQ 도메인, ASPM, config space 접근을 제어한다" —
+ *  MSI 도메인은 msi/irqdomain.c, ASPM 은 pcie/aspm.c, config 접근은
+ *  access.c 가 담당한다. 이 파일이 MSI 에 대해 하는 일은
+ *  pci_msi_register_fwnode_provider() 로 콜백을 받아 두었다가
+ *  pci_host_bridge_acpi_msi_domain() 에서 fwnode 를 되찾아 주는 것뿐이다.
+ *  또 함수마다 "NVMe BAR", "NVMe doorbell", "NVMe MSI-X vector" 를 끌어다
+ *  붙였으나 이 파일에는 BAR 도 doorbell 도 등장하지 않는다 — 전부 지웠다.)
  *
  * === 주요 함수/구조체 요약 ===
- * negotiate_os_control()        : _OSC 로 기능별 소유권을 협상한다.
- *                                 이 파일의 가장 중요한 함수다.
- * acpi_pci_osc_control_set()    : 협상의 실제 메서드 호출.
  * pci_acpi_program_hp_params()  : _HPX/_HPP 권장값을 장치에 적용한다.
+ *                                 ACPI 노드를 위로 거슬러 올라가며 찾는다.
+ * acpi_run_hpx() / acpi_run_hpp(): 그 메서드를 실제로 평가하고 Type 별로 분배.
+ * program_hpx_type0/1/2/3()     : 각 Type 의 값을 config space 에 쓴다.
  * acpi_pci_set_power_state()    : _PS0/_PS3 로 전원 상태를 바꾼다.
+ *                                 D3cold 전후로 _REG 를 평가해 AML 에
+ *                                 "config space 를 쓸 수 있다/없다" 를 알린다.
  * acpi_pci_get_power_state()    : 현재 상태를 조회한다.
- * acpi_pci_power_manageable()   : ACPI 로 전원을 관리할 수 있는 장치인가.
- * acpi_pci_wakeup()             : wakeup 소스로 설정하거나 해제한다.
- * pci_acpi_setup_ecam_mapping() : MCFG 로 ECAM 창을 만든다(ARM64/RISC-V).
- * pcibios_alloc_irq()           : _PRT 로 INTx IRQ 를 배정한다(ARM64/RISC-V).
- * pci_acpi_scan_root()          : 루트 브리지 하나를 열거한다.
- * acpi_pci_find_companion()     : PCI 장치에 대응하는 ACPI 노드를 찾는다.
+ * acpi_pci_choose_state()       : 시스템 수면 시 들어갈 D-state 를 고른다.
+ * acpi_pci_bridge_d3()          : 이 브리지를 D3 로 내려도 핫플러그 이벤트를
+ *                                 놓치지 않는가. _S0W 와 _DSD 를 본다.
+ * acpi_pci_wakeup()             : 깨우기를 켜거나 끈다. 이 장치가 못 하면
+ *                                 상위 버스로 거슬러 올라간다.
+ * acpi_pci_find_companion()     : PCI 장치에 대응하는 ACPI 노드를 _ADR 로 찾는다.
+ * pci_acpi_setup() / _cleanup() : companion 이 연결된 뒤/끊기기 전의 일괄 설정.
  * pci_dev_acpi_reset()          : _RST 메서드로 장치를 리셋한다.
- *                                 pci_reset_fn_methods[] 의 "acpi" 항목이다.
+ *                                 pci.c:9953 의 pci_reset_fn_methods[] "acpi" 항목.
+ * pci_acpi_setup_ecam_mapping() : MCFG 로 ECAM 창을 만든다(ARM64/RISC-V).
+ * pci_acpi_scan_root()          : 루트 브리지 하나를 열거한다(ARM64/RISC-V).
+ * pcibios_alloc_irq()           : _PRT 로 INTx IRQ 를 배정한다(ARM64/RISC-V).
+ * struct hpx_type0/1/2/3        : _HPX 의 네 가지 레코드를 담는 구조체.
+ * struct acpi_pci_generic_root_info : 루트 브리지 정보 + ECAM 창 포인터.
+ *
+ * === 이 트리에서 확인하지 못한 것 ===
+ * include/linux/pci-acpi.h, include/linux/pci.h, include/acpi/ 가 이
+ * 스파스 체크아웃에 없다. 따라서 DSM_PCI_PRESERVE_BOOT_CONFIG,
+ * DSM_PCI_POWER_ON_RESET_DELAY, DSM_PCI_DEVICE_READINESS_DURATIONS 의
+ * 실제 함수 번호와, ACPI_STATE_D* / PCI_D* / ACPI_REG_CONNECT 등 상수의
+ * 값은 여기서 확인할 수 없다. 아래 주석은 값을 지어내지 않고 "무엇을
+ * 뜻하는가" 만 적는다.
  */
 
-#include <linux/delay.h>
-#include <linux/init.h>
-#include <linux/iommu.h>
-#include <linux/irqdomain.h>
-#include <linux/pci.h>
-#include <linux/msi.h>
-#include <linux/pci_hotplug.h>
-#include <linux/module.h>
-#include <linux/pci-acpi.h>
-#include <linux/pci-ecam.h>
-#include <linux/pm_runtime.h>
-#include <linux/pm_qos.h>
-#include <linux/rwsem.h>
-#include "pci.h"
+#include <linux/delay.h>	/* [한국어] 지연 헬퍼. 이 파일이 다루는 d3hot_delay/
+				 * d3cold_delay 값이 결국 여기 함수들로 쓰인다 */
+#include <linux/init.h>		/* [한국어] __init 과 arch_initcall(). 파일 끝의
+				 * acpi_pci_init() 을 부팅 단계에 등록한다 */
+#include <linux/iommu.h>	/* [한국어] pci_dev_acpi_reset() 이 리셋 전후로 IOMMU 를
+				 * 멈췄다 되살리기 때문에 필요하다 */
+#include <linux/irqdomain.h>	/* [한국어] irq_find_matching_fwnode(). 호스트 브리지의
+				 * MSI irq_domain 을 fwnode 로 찾아 준다 */
+#include <linux/pci.h>		/* [한국어] struct pci_dev / pci_bus / pci_host_bridge.
+				 * 이 헤더는 스파스 체크아웃에 없어 상수 값은 확인하지 못했다 */
+#include <linux/msi.h>		/* [한국어] DOMAIN_BUS_PCI_MSI 같은 MSI 도메인 식별자 */
+#include <linux/pci_hotplug.h>	/* [한국어] 핫플러그 공용 선언. acpiphp_enumerate_slots()
+				 * 계열과 pciehp/shpchp 판정에 필요하다 */
+#include <linux/module.h>	/* [한국어] EXPORT_SYMBOL_GPL. companion lookup 훅 두 개를
+				 * 모듈에 노출한다 */
+#include <linux/pci-acpi.h>	/* [한국어] PCI-ACPI 다리 선언. pci_acpi_dsm_guid,
+				 * DSM_PCI_* 함수 번호, acpi_pci_* 원형이 여기 있다.
+				 * 이 트리에 없어 DSM 번호의 실제 값은 확인하지 못했다 */
+#include <linux/pci-ecam.h>	/* [한국어] pci_ecam_create()/pci_ecam_free() 와
+				 * struct pci_config_window. ARM64/RISC-V 블록에서 쓴다 */
+#include <linux/pm_runtime.h>	/* [한국어] pm_request_resume(). 깨우기 알림을 받았을 때
+				 * 런타임 PM 에 "이 장치를 깨워 달라" 고 요청한다 */
+#include <linux/pm_qos.h>	/* [한국어] dev_pm_qos_flags()/PM_QOS_FLAG_NO_POWER_OFF.
+				 * 사용자나 상위 계층이 "전원을 끊지 마라" 고 걸어 둔
+				 * 제약을 D3cold 진입 전에 확인한다 */
+#include <linux/rwsem.h>	/* [한국어] DECLARE_RWSEM. companion lookup 훅을 보호하는
+				 * 읽기/쓰기 세마포어를 만든다 */
+#include "pci.h"		/* [한국어] PCI 코어 내부 헤더. pci_dev_is_added(),
+				 * pci_dev_reset_iommu_prepare(), pcie_ports_native,
+				 * acpi_pci_disabled 등의 선언이 여기서 온다 */
 
-/*
- * pci_acpi_dsm_guid:
- *   ACPI _DSM(Device Specific Method) 호출 시 사용하는 PCI Firmware
- *   Specification GUID. NVMe 장치/루트 브리지의 preserve boot config,
- *   reset delay, device readiness durations 등의 _DSM 함수 식별에
- *   사용된다.
+/* [한국어] PCI Firmware Specification 이 정한 _DSM 식별자(GUID).
+ *
+ * _DSM(Device Specific Method)은 ACPI 의 만능 확장 구멍이다. 한 장치가
+ * 여러 규격의 확장 메서드를 동시에 가질 수 있어야 하므로, 어느 규격의
+ * 어느 함수를 부르는지 GUID + 리비전 + 함수 번호로 지정한다. 이 GUID 가
+ * "PCI Firmware Spec 이 정의한 함수들" 을 가리킨다.
+ *
+ * 이 파일이 이 GUID 로 부르는 함수는 셋이다.
+ *   DSM_PCI_PRESERVE_BOOT_CONFIG      pci_acpi_preserve_config()
+ *   DSM_PCI_POWER_ON_RESET_DELAY      acpi_pci_add_bus()
+ *   DSM_PCI_DEVICE_READINESS_DURATIONS pci_acpi_optimize_delay()
+ * 세 상수의 실제 번호는 include/linux/pci-acpi.h 에 있는데, 그 헤더가
+ * 이 스파스 체크아웃에 없어 값을 확인하지 못했다.
+ *
+ * 설정자: 컴파일 시점 상수. GUID_INIT 이 리틀엔디언 필드 순서까지
+ *   규격대로 배치해 준다(앞의 세 필드는 정수, 뒤 여덟 바이트는 그대로).
+ * 읽는 자: 이 파일의 세 호출 자리, 그리고 trailing const 라 다른 파일에서도
+ *   참조할 수 있다(pci-acpi.h 가 extern 으로 내보낸다).
+ * 값 범위: 고정 GUID e5c937d0-3553-4d7a-9117-ea4d19c3434d.
+ * 동기화: 읽기 전용 상수라 불필요.
+ *
  * The GUID is defined in the PCI Firmware Specification available
  * here to PCI-SIG members:
  * https://members.pcisig.com/wg/PCI-SIG/document/15350
@@ -143,11 +230,34 @@ const guid_t pci_acpi_dsm_guid =
 		  0x91, 0x17, 0xea, 0x4d, 0x19, 0xc3, 0x43, 0x4d);
 
 #if defined(CONFIG_PCI_QUIRKS) && defined(CONFIG_ARM64)
-/*
- * acpi_get_rc_addr:
- *   ACPI _CRS(Current Resource Settings)에서 Root Complex의 메모리
- *   리소스를 파싱한다. NVMe BAR(DMA/MMIO window)가 속한 root bridge
- *   window를 결정하는 데 쓰인다.
+/* [한국어]
+ * acpi_get_rc_addr - ACPI 장치의 _CRS 에서 첫 메모리 자원을 꺼낸다
+ *
+ * @adev:   대상 ACPI 장치(여기서는 Root Complex 를 나타내는 노드).
+ * @res:    [출력] 찾은 자원을 복사해 넣을 자리.
+ * @return: 0 = 찾음, 음수 = 실패.
+ *
+ * _CRS(Current Resource Settings)는 ACPI 장치가 지금 쓰고 있는 자원
+ * 목록이다. 여기서는 메모리 자원만 걸러 첫 항목 하나를 가져온다.
+ *
+ * "첫 항목 하나" 라는 단순화가 성립하는 이유는 이 함수의 유일한 호출자를
+ * 보면 드러난다. acpi_get_rc_resources() 는 특정 _HID 로 지목한 노드
+ * 하나에서 컨트롤러 레지스터 창 하나를 얻으려는 것이라, 목록이 길 일이
+ * 없다. 범용 자원 파서가 아니다.
+ *
+ * flags 를 unsigned long 지역 변수에 담아 (void *) 로 넘기는 모양이
+ * 눈에 띄는데, acpi_dev_filter_resource_type_cb() 콜백이 문맥 포인터를
+ * 정수로 되읽는 규약이기 때문이다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트, 컨트롤러 드라이버 probe 중.
+ *   ACPI 평가가 잠들 수 있다.
+ * 에러 경로: 파싱 실패(-errno)와 "자원이 하나도 없음"(-EINVAL)을 나눠
+ *   보고한다. 앞의 경우 목록이 만들어지지 않았으므로 해제할 것도 없다.
+ *
+ * 호출 체인:
+ *   pci_thunder_pem_init() [controller/pci-thunder-pem.c:392]
+ *     -> acpi_get_rc_resources() -> [acpi_get_rc_addr]
+ *        -> acpi_dev_get_resources(), acpi_dev_free_resource_list()
  */
 static int acpi_get_rc_addr(struct acpi_device *adev, struct resource *res)
 {
@@ -179,11 +289,30 @@ static int acpi_get_rc_addr(struct acpi_device *adev, struct resource *res)
 	return 0;
 }
 
-/*
- * acpi_match_rc:
- *   ACPI namespace를 순회하며 주어진 PCI segment 번호와 _UID가
- *   일치하는 Root Complex 객체를 찾는다. NVMe 장치가 속한 PCIe segment를
- *   올바른 ACPI Root Complex에 매핑할 때 사용된다.
+/* [한국어]
+ * acpi_match_rc - _UID 가 찾는 세그먼트 번호와 같은 노드인지 판정하는 콜백
+ *
+ * @handle: 지금 방문 중인 ACPI 노드.
+ * @lvl:    네임스페이스 깊이. 쓰지 않는다.
+ * @context: 찾는 세그먼트 번호(u16 *). acpi_get_devices() 가 그대로 전달한다.
+ * @retval: [출력] 일치했을 때 그 노드의 핸들을 써 넣을 자리.
+ * @return: AE_CTRL_DEPTH = 이 가지 아래로 더 내려가지 마라(불일치),
+ *          AE_CTRL_TERMINATE = 찾았으니 순회를 끝내라.
+ *
+ * acpi_get_devices() 가 _HID 로 후보를 좁힌 뒤, 후보마다 이 콜백을 부른다.
+ * 같은 _HID 를 가진 Root Complex 가 여러 개인 시스템에서 세그먼트 번호로
+ * 하나를 고르는 것이 목적이다.
+ *
+ * 반환값 두 가지가 모두 "성공" 이 아니라는 점이 헷갈리기 쉽다.
+ * ACPI 순회 콜백은 반환값으로 순회를 제어하는데, AE_CTRL_DEPTH 는
+ * "이 노드는 아니니 하위로 내려가지 말고 다음 형제로" 라는 뜻이고
+ * AE_CTRL_TERMINATE 만이 "찾았다" 를 뜻한다. 실패도 AE_CTRL_DEPTH 로
+ * 표현되므로, _UID 평가가 실패한 경우와 값이 다른 경우가 한 줄에 묶여 있다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트, ACPI 네임스페이스 순회 중.
+ *
+ * 호출 체인:
+ *   acpi_get_rc_resources() -> acpi_get_devices() -> [acpi_match_rc]
  */
 static acpi_status acpi_match_rc(acpi_handle handle, u32 lvl, void *context,
 				 void **retval)
@@ -200,11 +329,31 @@ static acpi_status acpi_match_rc(acpi_handle handle, u32 lvl, void *context,
 	return AE_CTRL_TERMINATE;
 }
 
-/*
- * acpi_get_rc_resources:
- *   지정된 ACPI _HID와 segment 번호로 Root Complex를 찾아 _CRS
- *   리소스를 반환한다. NVMe SSD가 연결된 Root Complex의 ECAM/Base
- *   주소를 초기화할 때 활용된다.
+/* [한국어]
+ * acpi_get_rc_resources - _HID 와 세그먼트로 노드를 찾아 그 메모리 자원을 준다
+ *
+ * @dev:     오류를 보고할 장치(로그 접두사용).
+ * @hid:     찾을 ACPI _HID 문자열. 호출자가 자기 하드웨어의 ID 를 안다.
+ * @segment: PCI 세그먼트(도메인) 번호. 같은 _HID 가 여럿일 때의 구분자.
+ * @res:     [출력] 찾은 자원.
+ * @return:  0 = 성공, -ENODEV / 그 밖의 음수 = 실패.
+ *
+ * 이 함수가 이 파일에 있는 이유가 조금 특이하다. ARM64 의 특정 호스트
+ * 컨트롤러(Cavium ThunderX PEM)는 ACPI 가 기술한 루트 브리지 자원과 별개로
+ * 자기 컨트롤러 레지스터 창을 따로 찾아야 한다. 그 조회를 컨트롤러
+ * 드라이버마다 되풀이하지 않도록 코어에 한 벌 두었다.
+ *
+ * 그래서 #if 조건이 CONFIG_PCI_QUIRKS && CONFIG_ARM64 이다 — 특정 플랫폼의
+ * 우회를 위한 코드임을 조건 자체가 말한다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트, 컨트롤러 probe 중.
+ * 에러 경로: 세 갈래 모두 dev_err 로 무엇이 없었는지 남긴다 — 펌웨어
+ *   테이블 문제는 로그 없이는 추적이 거의 불가능하기 때문이다.
+ *
+ * 호출 체인:
+ *   thunder_pem_init() [controller/pci-thunder-pem.c:392]
+ *     -> [acpi_get_rc_resources]
+ *        -> acpi_get_devices(hid, acpi_match_rc, ...) -> acpi_get_rc_addr()
  */
 int acpi_get_rc_resources(struct device *dev, const char *hid, u16 segment,
 			  struct resource *res)
@@ -236,12 +385,30 @@ int acpi_get_rc_resources(struct device *dev, const char *hid, u16 segment,
 }
 #endif
 
-/*
- * acpi_pci_root_get_mcfg_addr:
- *   ACPI Root Complex의 _CBA(Configuration Base Address) 메서드를
- *   평가하여 ECAM(Configuration Space) 물리 주소를 반환한다. NVMe
- *   디바이스의 BAR, MSI-X capability, PCIe capability를 읽으려면 이
- *   ECAM 기반 config space 매핑이 선행되어야 한다.
+/* [한국어]
+ * acpi_pci_root_get_mcfg_addr - _CBA 를 평가해 ECAM 창의 물리 주소를 얻는다
+ *
+ * @handle: 루트 브리지의 ACPI 핸들. NULL 이어도 된다.
+ * @return: ECAM 기준 물리 주소, 없거나 실패하면 0.
+ *
+ * MCFG 테이블은 부팅 시점에 고정된 ECAM 창 목록을 담는데, 핫플러그되는
+ * 호스트 브리지처럼 부팅 후에 생기는 것은 거기에 없다. _CBA(Configuration
+ * Base Address)는 그런 경우에 루트 브리지 노드가 직접 자기 ECAM 주소를
+ * 알려 주는 메서드다.
+ *
+ * handle 이 NULL 이어도 되도록 만든 것이 이 함수의 편의점이다. status 를
+ * AE_NOT_EXIST 로 미리 초기화해 두어, handle 이 없으면 평가를 건너뛰고
+ * 그대로 실패 처리로 흘러간다. 호출자가 NULL 검사를 따로 하지 않아도 된다.
+ *
+ * 0 을 "없음" 으로 쓰는 것은 물리 주소 0 이 ECAM 창의 기준일 수 없다는
+ * 사실에 기댄 관용이다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. ACPI 평가가 잠들 수 있다.
+ * 에러 경로: 평가 실패와 메서드 부재를 구분하지 않고 모두 0.
+ *
+ * 호출 체인: 이 스파스 체크아웃 안에는 호출자가 없다(전수 grep).
+ *   상류에서는 drivers/acpi/pci_mcfg.c 와 아키텍처별 MMCONFIG 코드가
+ *   쓰는데, 그 디렉터리들이 이 트리에 없다.
  */
 phys_addr_t acpi_pci_root_get_mcfg_addr(acpi_handle handle)
 {
@@ -257,12 +424,36 @@ phys_addr_t acpi_pci_root_get_mcfg_addr(acpi_handle handle)
 	return (phys_addr_t)mcfg_addr;
 }
 
-/*
- * pci_acpi_preserve_config:
- *   PCI Firmware _DSM Function 0("PCI Boot Configuration")를 평가하여
- *   firmware가 할당한 NVMe BAR, bus 리소스를 운영체제가 재할당하지
- *   않고 보존해야 하는지 결정한다. NVMe BAR0의 doorbell/register 주소가
- *   firmware 설정 그대로 유지되어야 할 때 중요하다.
+/* [한국어]
+ * pci_acpi_preserve_config - 펌웨어가 배치해 둔 자원을 건드리지 말라는 지시인지 묻는다
+ *
+ * @host_bridge: 판정할 호스트 브리지.
+ * @return:      true = 펌웨어 배치를 보존하라, false = 커널이 재배치해도 된다.
+ *
+ * 보통 커널은 열거하면서 BAR 와 버스 번호를 자기 방식대로 다시 배치한다.
+ * 그런데 펌웨어가 이미 특정 배치를 전제로 무언가를 해 둔 경우가 있다 —
+ * 부팅 중인 콘솔 장치, 펌웨어가 계속 접근하는 관리 컨트롤러 따위다.
+ * 그런 플랫폼은 _DSM 의 "PCI Boot Configuration" 함수로 "그대로 두라" 고
+ * 알린다.
+ *
+ * 반환 규약이 뒤집혀 있어 헷갈리기 쉽다. _DSM 이 **0** 을 돌려줄 때가
+ * "보존하라" 다(위 영어 주석이 그 규약을 밝힌다). 그래서 코드는
+ * `obj->integer.value == 0` 일 때 true 를 준다.
+ *
+ * ACPI_TYPE_INTEGER 로 형을 지정해 부르므로, 반환형이 다르면
+ * acpi_evaluate_dsm_typed() 가 NULL 을 준다. 그래서 형 검사 코드가
+ * 따로 없다.
+ *
+ * ACPI_FREE 를 obj 가 NULL 일 때도 부르는 것이 눈에 띄는데,
+ * ACPI_FREE 는 NULL 을 받아도 안전하다(kfree 와 같은 규약).
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트, 루트 버스 생성 중.
+ * 에러 경로: ACPI 핸들이 없거나 _DSM 이 없으면 false — 즉 "커널이
+ *   재배치해도 된다" 는 기존 동작이 기본값이다.
+ *
+ * 호출 체인:
+ *   pci_register_host_bridge() [probe.c:2489] -> [pci_acpi_preserve_config]
+ *     -> acpi_evaluate_dsm_typed()
  */
 bool pci_acpi_preserve_config(struct pci_host_bridge *host_bridge)
 {
