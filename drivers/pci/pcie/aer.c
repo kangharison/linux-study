@@ -13,48 +13,101 @@
  */
 
 /*
- * ===================================================================
- * NVMe PCIe 호스트 드라이버 관점 파일 요약
- * -------------------------------------------------------------------
- * 본 파일(drivers/pci/pcie/aer.c)은 PCIe Advanced Error Reporting(AER)
- * 루트 포트 서비스 드라이버를 구현한다. NVMe SSD는 PCIe 엔드포인트로
- * 동작하며, 메모리/링크 계층에서 발생한 PCIe 오류는 대부분 Root Port가
- * 수신한 ERR_COR/ERR_NONFATAL/ERR_FATAL 메시지 형태로 이 드라이버에
- * 전달된다. 따라서 NVMe 장치의 안정성과 직접 연결된다.
+ * [한국어 설명] PCIe 오류를 수집하고 해석해 복구를 시작하는 곳 (aer.c)
  *
- * NVMe 드라이버(drivers/nvme/host/pci.c)는 struct pci_driver의
- * err_handler 콜백(error_detected, mmio_enabled, slot_reset, resume)을
- * 등록한다. AER fatal/nonfatal 오류 발생 시 본 드라이버는
- * pcie_do_recovery()를 호출하여 NVMe 드라이버의 에러 핸들러를 역순으로
- * 실행하고, 필요 시 링크/슬롯 리셋을 수행한다.
+ * === 파일의 역할 ===
+ * AER(Advanced Error Reporting)은 PCIe 가 오류를 보고하는 표준 방식이다.
+ * 이 파일은 Root Port 에 AER 서비스 드라이버를 붙여, 아래에서 올라온
+ * 오류 메시지를 인터럽트로 받아 처리한다.
  *
- * 특히 NVMe와 밀접한 PCIe 기능들과의 연관성:
- *   - P2P DMA/CMB: PCIe 메모리 트랜잭션(TLP) 오류 시 Poisoned TLP,
- *     Completion Timeout, Unsupported Request 등이 기록되며 CMB/P2P
- *     버퍼 접근의 무결성에 영향을 줄 수 있다.
- *   - SR-IOV: 가상 기능(VF)의 PCIe 오류는 물리 기능(PF)이나 Root Port
- *     에서 보고될 수 있으며, 본 드라이버가 VF/PF 트리를 탐색한다.
- *   - MSI/MSI-X: AER 인터럽트 자체는 Root Port의 MSI/MSI-X를 통해
- *     전달되며, 링크 오류로 인해 NVMe의 MSI/MSI-X 인터럽트가 중단될 수
- *     있다.
- *   - ATS/PRS: Address Translation Service 관련 오류(ACSViol,
- *     TLPXlatBlocked)는 IOMMU/ATS를 사용하는 NVMe 장치에서 중요하다.
- *   - ReBAR: 큰 BAR 리소스 매핑과 관련된 메모리 트랜잭션 오류가 AER
- *     상태 레지스터에 기록될 수 있다.
- *   - DPC(Downstream Port Containment): DPC와 AER는 함께 동작하여
- *     오류가 Downstream Port로 퍼지는 것을 억제하고 복구를 조율한다.
+ * 오류는 세 등급으로 나뉜다.
+ *   ERR_COR      - 정정 가능. 하드웨어가 이미 재전송 등으로 해결했다.
+ *                  기록만 하고 넘어간다. 다만 잦으면 링크가 불안정하다는
+ *                  신호이므로 rate limit 을 걸어 로그를 남긴다.
+ *   ERR_NONFATAL - 그 트랜잭션은 실패했지만 링크는 살아 있다.
+ *                  해당 장치만 복구하면 된다.
+ *   ERR_FATAL    - 링크 자체가 신뢰할 수 없다. 링크 리셋이 필요하다.
  *
- * 주요 호출 경로(NVMe 관점):
- *   Root Port AER MSI/MSI-X -> aer_irq() -> kfifo_put() -> aer_isr()
- *   -> aer_isr_one_error() -> find_source_device() ->
- *   aer_process_err_devices() -> pci_aer_handle_error() ->
- *   pcie_do_recovery(pdev, pci_channel_io_normal|frozen, aer_root_reset)
- *   -> nvme_err_handler->error_detected/slot_reset/resume
+ * 이 파일이 하는 일은 크게 넷이다.
+ *   1) 수집 - Root Error Status 를 읽어 어느 장치에서 무슨 오류가 났는지
+ *      알아낸다. 오류를 낸 장치의 requester ID 가 함께 기록된다.
+ *   2) 해석 - Uncorrectable/Correctable Error Status 의 각 비트를 사람이
+ *      읽을 수 있는 이름으로 바꾼다(aer_uncorrectable_error_string[] 등).
+ *      TLP 헤더 로그가 있으면 그것도 함께 출력한다.
+ *   3) 복구 - pcie_do_recovery() [err.c] 를 불러 절차를 넘긴다.
+ *   4) 통계 - sysfs 의 aer_dev_correctable / aer_dev_fatal 등에 누적한다.
  *
- * 또한 NVMe 장치의 pci_dev는 pci_aer_init()에서 AER capability를 찾고
- * error reporting을 활성화하며, 이 파일의 인터페이스를 통해 fatal/
- * nonfatal 상태를 클리어하거나 저장/복원한다.
- * ===================================================================
+ * 소유권 문제도 다룬다. 펌웨어가 AER 을 자기가 처리하겠다고 하면(_OSC
+ * 협상에서 커널에게 넘기지 않으면) 커널은 이 드라이버를 붙이지 않는다.
+ * pcie_aer_is_native() 가 그 판정이다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * 등록:  portdrv 가 AER 서비스를 가진 Root Port 마다 이 드라이버를 바인딩
+ *          -> aer_probe() -> IRQ 등록, Root Error Command 의 보고 활성화
+ *
+ * 발생:  엔드포인트에서 오류 -> ERR_* 메시지가 상류로
+ *          -> Root Port 가 기록하고 인터럽트
+ *          -> [이 파일] aer_irq()(하드 IRQ, 상태만 읽어 큐에 넣음)
+ *             -> aer_isr()(스레드) -> aer_process_err_devices()
+ *                -> handle_error_source()
+ *                   -> 정정 가능하면 로그만
+ *                   -> 아니면 pcie_do_recovery() [err.c]
+ *                      -> nvme_error_detected() 등 드라이버 콜백
+ *
+ * 실행 컨텍스트: aer_irq() 는 하드 IRQ. 실제 처리는 전부 스레드 문맥이다.
+ * 오류 처리가 오래 걸릴 수 있고 로그 출력과 리셋이 잠들 수 있기 때문이다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: pcie/portdrv.c(서비스 등록), ACPI 의 APEI/GHES(펌웨어가 먼저
+ *   오류를 받은 경우 이 파일의 출력 헬퍼를 재사용한다).
+ * 아래쪽: pcie/err.c 의 pcie_do_recovery(), pcie/tlp.c 의 TLP 헤더 출력,
+ *   access.c 의 config 접근.
+ * 옆쪽: pcie/dpc.c — 같은 AER capability 레지스터를 읽는다. DPC 가
+ *   트리거된 원인을 알아내려면 AER 상태를 봐야 하기 때문이다.
+ *   pcie/aer_inject.c — 테스트용으로 가짜 오류를 주입한다.
+ *   pcie/aer_cxl_rch.c — CXL Restricted CXL Host 의 특수 처리.
+ * 공유 상태: struct pci_dev 의 aer_cap(capability 오프셋),
+ *   aer_stats(sysfs 에 노출되는 누적 통계), aer_info.
+ *
+ * === NVMe 관점 ===
+ * NVMe 드라이버는 이 파일의 함수를 직접 부르지 않는다(전수 확인).
+ * 반대로 이 파일이 오류를 감지해 복구를 시작하면, err.c 를 거쳐
+ * NVMe 가 등록한 콜백이 불린다.
+ *
+ * NVMe 학습에서 이 파일이 중요한 이유는 진단 정보 때문이다. NVMe I/O 가
+ * 원인 불명으로 실패할 때, dmesg 의 AER 출력이 결정적 단서가 된다.
+ * 예를 들어:
+ *   "Completion Timeout" - 컨트롤러가 응답하지 않았다. 펌웨어 문제이거나
+ *      링크가 불안정하다.
+ *   "Poisoned TLP"       - 데이터에 오류 표시가 붙어 왔다. 메모리나
+ *      경로상의 문제일 수 있다.
+ *   "Unsupported Request"- 컨트롤러가 이해하지 못하는 트랜잭션이 갔다.
+ *      드라이버가 잘못된 주소로 접근했거나 BAR 설정이 어긋났다.
+ *   "Receiver Error"     - 물리 계층 오류. 정정 가능(ERR_COR)이지만 잦으면
+ *      케이블/커넥터/신호 품질 문제다.
+ *
+ * NVMe 가 등록한 err_handler 는 error_detected / slot_reset / resume
+ * 셋이며(mmio_enabled 는 없다), 그중 이 파일이 시작한 복구가 그것들을 부른다.
+ *
+ * (기존 주석은 NVMe 가 mmio_enabled 콜백을 등록한다고 적었으나
+ *  nvme_err_handler 에 그 필드는 없다. 또 "SR-IOV VF 의 오류가 PF 에
+ *  영향" 이나 "P2PDMA/CMB 무결성" 같은 서술은 이 파일의 코드에서
+ *  근거를 찾을 수 없어 삭제했다.)
+ *
+ * === 주요 함수/구조체 요약 ===
+ * aer_probe()             : Root Port 에 AER 서비스를 붙인다. IRQ 를 등록하고
+ *                           Root Error Command 로 보고를 활성화한다.
+ * aer_irq()               : 하드 IRQ. Root Error Status 를 읽어 큐에 넣고
+ *                           스레드를 깨운다. 여기서 오래 머물면 안 된다.
+ * aer_isr()               : 스레드 핸들러. 큐에서 꺼내 하나씩 처리한다.
+ * aer_process_err_devices(): 오류를 낸 장치를 찾아 handle_error_source() 로 넘긴다.
+ * handle_error_source()   : 등급에 따라 로그만 남기거나 복구를 시작한다.
+ * aer_print_error()       : 오류 비트를 사람이 읽을 이름으로 바꿔 출력한다.
+ *                           이것이 dmesg 에 보이는 그 메시지다.
+ * pci_aer_init()          : 열거 시 capability 오프셋을 찾고 통계 구조를 잡는다.
+ * pci_aer_clear_status()  : 오류 상태 비트를 지운다. RW1C 라 1 을 쓴다.
+ * pcie_aer_is_native()    : 커널이 AER 을 소유하는가(펌웨어가 아니라).
+ * pci_enable_pcie_error_reporting() 계열 : 장치의 오류 보고를 켜고 끈다.
  */
 
 #define pr_fmt(fmt) "AER: " fmt /* AER 로그 접두사 매크로 정의 (NVMe PCIe 오류 메시지 식별에 사용) */

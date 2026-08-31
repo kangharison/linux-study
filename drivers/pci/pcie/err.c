@@ -11,39 +11,96 @@
  */
 
 /*
- * ===================================================================
- * NVMe PCIe 호스트 드라이버 관점 파일 요약
- * -------------------------------------------------------------------
- * 본 파일(drivers/pci/pcie/err.c)은 PCIe Advanced Error Reporting(AER) 및
- * PCI error recovery 절차를 담당하는 PCIe 포트 드라이버의 핵심 부분이다.
- * NVMe SSD(drivers/nvme/host/pci.c) 입장에서는 본 파일이 다음과 같은
- * 역할을 수행한다.
- *   - NVMe endpoint에서 발생한 PCIe 오류(uncorrectable fatal/non-fatal,
- *     link down, completion timeout, UR/CA 등)를 Root Port/Downstream Port
- *     등에서 감지하면 해당 장치 트리에 error_detected 콜백을 브로드캐스트
- *   - NVMe 드라이버가 등록한 pci_error_handlers(nvme_err_handler)의
- *     .error_detected, .slot_reset, .resume 콜백을 단계적으로 호출
- *   - 복구 가능 여부에 따라 mmio_enabled, slot_reset, resume 단계를
- *     진행하거나 영구 disconnect 처리
- * 일반적인 NVMe 드라이버 호출 경로:
- *   Root Port AER ISR -> pcie_do_recovery() -> pci_walk_bridge() ->
- *   report_error_detected() -> nvme_error_detected()
- *     state == pci_channel_io_frozen -> nvme_dev_disable() ->
- *     PCI_ERS_RESULT_NEED_RESET 반환
- *   이후 reset_subordinates() 수행 -> report_slot_reset() ->
- *   nvme_slot_reset() -> pci_restore_state() -> nvme_try_sched_reset()
- *   최종 report_resume() -> nvme_error_resume() -> flush_work(reset_work)
- * NVMe와 직접 관련된 중요 사항:
- *   - NVMe는 Endpoint/RCiEP 형태이므로 오류가 발생하면 상위 bridge 범위로
- *     복구 메시지가 전파된다.
- *   - pci_channel_io_frozen 상태에서는 NVMe I/O가 멈추고 controller reset이
- *     필요하며, NVMe 드라이버는 NEED_RESET을 반환한다.
- *   - 복구가 실패하면 report_perm_failure_detected()를 통해 disconnect를
- *     알리고 NVMe 장치는 사용 불가 상태가 된다.
- *   - PME(Power Management Event), TPH(Processing Hints), VPD(Vital
- *     Product Data) 등과도 PCIe 레벨에서 상호작용할 수 있으나, 본 파일의
- *     핵심은 AER에 따른 error recovery 흐름이다.
- * ===================================================================
+ * [한국어 설명] PCIe 오류 복구 절차의 지휘부 (err.c)
+ *
+ * === 파일의 역할 ===
+ * PCIe 오류가 감지됐을 때 "무엇을 어떤 순서로 할지" 를 정하고 실행한다.
+ * 오류를 감지하는 것은 aer.c(AER)나 dpc.c(DPC)이고, 실제 복구 동작은
+ * 각 드라이버의 콜백이 한다. 이 파일은 그 사이에서 절차를 진행한다.
+ *
+ * 복구는 정해진 4단계로 진행되며, 각 단계에서 영향받는 모든 장치의
+ * 콜백을 호출한 뒤 그 결과를 모아 다음 단계로 갈지 판단한다.
+ *
+ *   1) error_detected  - "오류가 났다. 하드웨어를 더 건드리지 마라."
+ *      드라이버는 진행 중인 I/O 를 멈추고, 채널 상태(normal / frozen /
+ *      perm_failure)에 따라 대응한다. 반환값으로 다음 단계를 요청한다.
+ *   2) mmio_enabled    - "MMIO 는 다시 되지만 DMA 는 아직이다."
+ *      드라이버가 상태 레지스터를 읽어 더 자세히 진단할 기회다.
+ *      이 단계를 요청하는 드라이버는 드물다.
+ *   3) slot_reset      - "링크를 리셋했다. 하드웨어를 다시 초기화하라."
+ *      드라이버가 config 를 복원하고 컨트롤러를 재설정한다.
+ *   4) resume          - "정상 동작을 재개하라."
+ *
+ * 각 단계의 결과를 합치는 규칙이 이 파일의 핵심 논리다. 여러 장치가
+ * 서로 다른 답을 내면 "가장 나쁜 것" 이 이긴다 — 하나라도 복구 불가라고
+ * 하면 전체가 복구 불가다. merge_result() 가 그 우선순위를 정한다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * 감지:  aer.c 의 AER 인터럽트 핸들러, 또는 dpc.c 의 DPC 인터럽트
+ *          -> [이 파일] pcie_do_recovery(dev, state, reset_subordinates)
+ *
+ * 진행:  pci_walk_bridge() 로 영향받는 서브트리를 훑으며 단계마다 콜백 호출
+ *          -> report_error_detected() -> drv->err_handler->error_detected()
+ *          -> (필요하면) reset_subordinates() 로 링크 리셋
+ *          -> report_slot_reset()     -> drv->err_handler->slot_reset()
+ *          -> report_resume()         -> drv->err_handler->resume()
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. 인터럽트 핸들러가 워크큐에 넘긴 뒤
+ * 그 워커에서 실행된다. 리셋과 링크 대기가 있어 수백 밀리초가 걸릴 수 있다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: pcie/aer.c, pcie/dpc.c, pcie/edr.c — 오류를 감지하는 세 경로가
+ *   모두 이 파일의 pcie_do_recovery() 로 모인다.
+ * 아래쪽: 각 드라이버의 struct pci_error_handlers 콜백, pci.c 의
+ *   pci_bus_error_reset()(링크 리셋), bus.c 의 pci_walk_bridge().
+ * 공유 상태: struct pci_dev 의 error_state(pci_channel_state_t).
+ *   각 단계에서 이 값을 갱신해 드라이버가 참조할 수 있게 한다.
+ *
+ * === NVMe 관점 ===
+ * NVMe 드라이버는 이 파일의 함수를 직접 부르지 않는다(전수 확인).
+ * 반대로 이 파일이 NVMe 를 부른다. drivers/nvme/host/pci.c 가 등록한
+ * 콜백 묶음은 정확히 다음 다섯이다:
+ *
+ *   static const struct pci_error_handlers nvme_err_handler = {
+ *       .error_detected = nvme_error_detected,
+ *       .slot_reset     = nvme_slot_reset,
+ *       .resume         = nvme_error_resume,
+ *       .reset_prepare  = nvme_reset_prepare,
+ *       .reset_done     = nvme_reset_done,
+ *   };
+ *
+ * 이 중 앞의 셋이 이 파일이 부르는 것이고, 뒤의 둘(reset_prepare/
+ * reset_done)은 오류와 무관한 일반 리셋 경로(pci.c 의
+ * pci_dev_save_and_disable / pci_dev_restore)가 부른다.
+ *
+ * NVMe SSD 에서 치명적 오류가 났을 때의 실제 흐름:
+ *   1) Root Port 가 ERR_FATAL 을 받아 AER 인터럽트
+ *   2) [이 파일] pcie_do_recovery(state = pci_channel_io_frozen)
+ *   3) nvme_error_detected() — 컨트롤러를 죽은 것으로 표시하고 큐를 정지.
+ *      frozen 이면 PCI_ERS_RESULT_NEED_RESET 을 돌려 리셋을 요청한다.
+ *   4) 링크 리셋(pci_bus_error_reset)
+ *   5) nvme_slot_reset() — nvme_reset_ctrl() 을 큐잉해 컨트롤러 재초기화
+ *   6) nvme_error_resume() — I/O 재개
+ *
+ * mmio_enabled 단계는 NVMe 에서 쓰이지 않는다 — 위 콜백 묶음에 그 항목이
+ * 없기 때문이다. 그래서 NVMe 는 항상 3단계(감지 -> 리셋 -> 재개)로 간다.
+ *
+ * (기존 주석은 NVMe 가 mmio_enabled 콜백을 등록한다고 적었으나
+ *  nvme_err_handler 에 그 필드는 없다. 위 검증 결과로 대체했다.)
+ *
+ * === 주요 함수/구조체 요약 ===
+ * pcie_do_recovery()      : 복구 절차 전체를 진행하는 진입점. 4단계를
+ *                           순서대로 밟고, 중간에 실패하면 장치를 영구
+ *                           오류 상태로 표시한다.
+ * merge_result()          : 여러 장치의 결과를 합친다. "가장 나쁜 것" 이
+ *                           이기는 우선순위를 구현한다.
+ * report_error_detected() : 한 장치에 대해 error_detected 콜백을 부른다.
+ *                           드라이버가 없거나 콜백이 없으면 안전한 기본값
+ *                           (NEED_RESET 또는 NONE)을 대신 낸다.
+ * report_mmio_enabled() / report_slot_reset() / report_resume()
+ *                         : 나머지 세 단계의 같은 구조.
+ * report_normal_detected(): 오류가 아닌 정상 상태를 알릴 때 쓴다.
+ * pci_walk_bridge()       : 영향 범위를 정해 그 서브트리에 콜백을 적용한다.
  */
 
 #define dev_fmt(fmt) "AER: " fmt /* NVMe: AER 메시지 앞에 "AER: " 접두사를 붙인다. */
