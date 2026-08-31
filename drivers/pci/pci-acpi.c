@@ -8,43 +8,109 @@
  */
 
 /*
- * ==================================================================
- * NVMe PCIe 호스트 드라이버 관점 파일 요약
- * ------------------------------------------------------------------
- * 본 파일(drivers/pci/pci-acpi.c)은 ACPI와 PCI의 연동 레이어로서,
- * NVMe SSD가 탑재된 PCIe 루트/엔드포인트의 초기화, 전원 관리,
- * MSI/MSI-X IRQ 도메인, ASPM, config space 접근, hotplug, wake 등을
- * ACPI 네임스페이스 및 _DSM/_HPX/_SxD/_PRW 등의 메서드를 통해
- * 제어한다.
- * NVMe 드라이버(drivers/nvme/host/pci.c) 입장에서 본 파일의 주요
- * 관여 지점은 다음과 같다.
- *   - acpi_pci_init(pci-acpi.c:1361): FADT의 NO_MSI 플래그를 보고 pci_no_msi()로
- *     전역 MSI를 끈다. 함수 이름이 pci_acpi_init 이 아니라 acpi_pci_init 이며,
- *     arch_initcall 로 등록된다. MSI가 꺼지면 NVMe는 큐마다 인터럽트를 둘 수
- *     없어 레거시 INTx 로 떨어지고, 사실상 단일 큐로 동작하게 된다.
- *   - pci_host_bridge_acpi_msi_domain: NVMe 장치가 연결된 host bridge의
- *     MSI irq_domain을 조회한다. MSI-X vector 할당 시 사용된다.
- *   - acpi_pci_choose_state / acpi_pci_set_power_state: NVMe 디바이스의
- *     D0/D3hot/D3cold 전환을 ACPI _PSx 메서드로 수행한다. NVMe
- *     suspend/resume/reset 흐름에서 핵심 경로다.
- *   - acpi_pci_irq_enable (ARM64/RISCV): NVMe INT#x/MSI 라인을 ACPI
- *     _PRT에서 찾아 할당한다.
- *   - acpi_pci_setup / pci_acpi_optimize_delay: NVMe pci_dev에 대한
- *     wakeup, D3 delay, ExternalFacingPort 등의 ACPI 기반 설정을
- *     수행한다.
- *   - pci_acpi_scan_root: ACPI MCFG/ECAM을 통해 PCI config space를
- *     매핑하고 root bus를 생성한다. NVMe의 BAR0(BAR), PCIe capability,
- *     MSI-X capability 탐색이 이 config space를 통해 이뤄진다.
- *   - _HPX/_HPP Type 0/1/2/3: NVMe 장치의 PCIe capability, AER,
- *     DEVCTL/LNKCTL 등을 ACPI가 제어할 수 있게 한다.
- * 일반적인 NVMe 드라이버 호출 경로:
- *   nvme_probe -> pci_enable_device -> pcibios_add_bus ->
- *   acpi_pci_add_bus -> pci_acpi_setup -> pci_acpi_optimize_delay
- *   nvme_reset_work -> pci_set_power_state ->
- *   acpi_pci_set_power_state(_PS3/_PS0)
- *   nvme_setup_io_queues -> pci_alloc_irq_vectors(MSI-X) ->
- *   pci_host_bridge_acpi_msi_domain
- * ==================================================================
+ * [한국어 설명] PCI 와 ACPI 펌웨어를 잇는 계층 (pci-acpi.c)
+ *
+ * === 파일의 역할 ===
+ * ACPI 는 펌웨어가 OS 에게 하드웨어를 기술하는 방식이다. PCI 장치에 대해
+ * 펌웨어만 아는 정보가 여럿 있고, 이 파일이 그것을 커널로 가져온다.
+ *
+ * 크게 네 갈래다.
+ *
+ *   1) 소유권 협상(_OSC) — 이 파일에서 가장 중요한 부분이다.
+ *      펌웨어와 커널이 "PCIe 의 어떤 기능을 누가 관리할 것인가" 를 정한다.
+ *      AER, 핫플러그, ASPM, DPC, LTR 같은 기능마다 소유권이 갈리며,
+ *      펌웨어가 넘겨주지 않으면 커널의 해당 드라이버가 아예 붙지 않는다.
+ *      pcie_aer_is_native() 나 DPC 소유권 판정이 그 결과를 본다.
+ *
+ *   2) 전원 관리 — ACPI 의 전원 상태와 PCI 의 D-state 를 잇는다.
+ *      _PR3 가 있어야 D3cold 로 갈 수 있고(pci.c 의 pci_pr3_present 참고),
+ *      _PS0/_PS3 메서드로 실제 전환이 이뤄진다. wakeup 소스 설정(_PRW)도
+ *      여기서 다룬다.
+ *
+ *   3) 열거 보조 — MCFG 테이블로 ECAM 창을 만들고(ARM64/RISC-V),
+ *      _CRS 로 루트 브리지의 주소 범위를 알아내고, _PRT 로 INTx 라우팅을
+ *      해석한다. x86 은 상당 부분을 아키텍처 코드가 하고, ARM64 는
+ *      이 파일에 더 많이 의존한다.
+ *
+ *   4) 슬롯과 hotplug 보조 — _SUN(슬롯 번호), _DSM(장치별 메서드),
+ *      _HPX(권장 설정값), 그리고 hotplug 알림 처리.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * 부팅:  ACPI 코어가 루트 브리지 장치를 발견
+ *          -> [이 파일] acpi_pci_root_add() 계열
+ *             -> negotiate_os_control() 로 _OSC 협상
+ *             -> pci_acpi_setup_ecam_mapping() 으로 ECAM 창 생성(ARM64/RISC-V)
+ *             -> pci_create_root_bus() [probe.c] 로 버스 트리 시작
+ *
+ * 장치별: probe.c 가 장치를 설정할 때
+ *          -> [이 파일] pci_acpi_program_hp_params() — _HPX 권장값 적용
+ *          -> [이 파일] pcibios_alloc_irq() — _PRT 로 INTx 배정(ARM64/RISC-V)
+ *
+ * 전원:  pci.c 의 전원 상태 전환
+ *          -> [이 파일] acpi_pci_set_power_state(), acpi_pci_get_power_state()
+ *             -> ACPI 의 _PS0/_PS3 메서드 평가
+ *
+ * 실행 컨텍스트: 대부분 프로세스 컨텍스트. ACPI 메서드 평가는 인터프리터를
+ * 돌리므로 시간이 걸리고 잠들 수 있다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: drivers/acpi/ 의 ACPI 코어, probe.c(열거), pci.c(전원 관리).
+ * 아래쪽: ecam.c 의 pci_ecam_create, access.c 의 config 접근.
+ * 옆쪽: pcie/portdrv.c 와 각 서비스 드라이버 — _OSC 협상 결과를 보고
+ *   자기가 붙을지 말지 정한다. pcie/edr.c 는 아예 ACPI 알림으로만 동작한다.
+ * 공유 상태: struct pci_host_bridge 의 native_* 비트들(각 기능의 소유권),
+ *   struct pci_dev 의 ACPI companion 연결.
+ *
+ * === NVMe 관점 ===
+ * NVMe 드라이버는 이 파일의 함수를 직접 부르지 않는다(전수 확인).
+ * 하지만 이 파일이 정하는 두 가지가 NVMe 의 동작을 크게 좌우한다.
+ *
+ * 첫째, _OSC 협상 결과다. 펌웨어가 AER 소유권을 넘겨주지 않으면
+ * pcie/aer.c 가 붙지 않고, NVMe 의 PCIe 오류가 커널에 보고되지 않는다.
+ * 핫플러그 소유권도 마찬가지라, 넘겨받지 못하면 U.2 백플레인의
+ * 드라이브 교체를 커널이 감지하지 못한다.
+ *
+ * 둘째, 전원 관리 정책이다. NVMe 는 절전 방식을 고를 때 펌웨어의 판단을
+ * 참고한다:
+ *
+ *   nvme_pci_alloc_dev()  [drivers/nvme/host/pci.c]
+ *     if (!noacpi && !(quirks & NVME_QUIRK_FORCE_NO_SIMPLE_SUSPEND) &&
+ *         acpi_storage_d3(&pdev->dev)) {
+ *             dev_info(..., "platform quirk: setting simple suspend\n");
+ *     }
+ *
+ *   nvme_suspend()
+ *     if (pm_suspend_via_firmware() || !ctrl->npss || ...)
+ *             return nvme_disable_prepare_reset(ndev, true);
+ *
+ * acpi_storage_d3() 는 ACPI 의 StorageD3Enable 속성을 읽어 "이 플랫폼은
+ * 스토리지를 D3 로 내려야 제대로 절전된다" 는 펌웨어의 지시를 확인한다.
+ * 그 지시가 있으면 NVMe 는 자기 전력 상태 대신 PCI D3 를 쓴다.
+ * 일부 노트북에서 이것이 없으면 절전이 되지 않아 배터리가 빨리 닳는다.
+ *
+ * 다만 acpi_storage_d3() 자체는 이 파일이 아니라 drivers/acpi/ 에 있다.
+ * 이 파일은 그 판단의 토대가 되는 ACPI-PCI 연결을 만들 뿐이다.
+ *
+ * (기존 주석은 이 파일이 "MSI/MSI-X IRQ 도메인, ASPM, config space 접근" 을
+ *  제어한다고 적었으나, MSI 도메인은 msi/irqdomain.c 가, ASPM 은
+ *  pcie/aspm.c 가, config 접근은 access.c 가 담당한다. 이 파일은 그
+ *  기능들의 *소유권* 을 펌웨어와 협상할 뿐이다.)
+ *
+ * === 주요 함수/구조체 요약 ===
+ * negotiate_os_control()        : _OSC 로 기능별 소유권을 협상한다.
+ *                                 이 파일의 가장 중요한 함수다.
+ * acpi_pci_osc_control_set()    : 협상의 실제 메서드 호출.
+ * pci_acpi_program_hp_params()  : _HPX/_HPP 권장값을 장치에 적용한다.
+ * acpi_pci_set_power_state()    : _PS0/_PS3 로 전원 상태를 바꾼다.
+ * acpi_pci_get_power_state()    : 현재 상태를 조회한다.
+ * acpi_pci_power_manageable()   : ACPI 로 전원을 관리할 수 있는 장치인가.
+ * acpi_pci_wakeup()             : wakeup 소스로 설정하거나 해제한다.
+ * pci_acpi_setup_ecam_mapping() : MCFG 로 ECAM 창을 만든다(ARM64/RISC-V).
+ * pcibios_alloc_irq()           : _PRT 로 INTx IRQ 를 배정한다(ARM64/RISC-V).
+ * pci_acpi_scan_root()          : 루트 브리지 하나를 열거한다.
+ * acpi_pci_find_companion()     : PCI 장치에 대응하는 ACPI 노드를 찾는다.
+ * pci_dev_acpi_reset()          : _RST 메서드로 장치를 리셋한다.
+ *                                 pci_reset_fn_methods[] 의 "acpi" 항목이다.
  */
 
 #include <linux/delay.h>        /* NVMe: D3cold->D0 복귀 지연 등에 사용 */
@@ -785,7 +851,7 @@ static acpi_status program_type3_hpx_record(struct pci_dev *dev, 	/* NVMe: progr
 			reg_fields = fields + 3 + i * 14; /* NVMe: i번째 descriptor 필드 시작 주소 */
 			parse_hpx3_register(&hpx3, reg_fields); /* NVMe: descriptor 파싱 */
 			program_hpx_type3(dev, &hpx3); /* NVMe: NVMe 디바이스에 적용 */
-		}	/* NVMe: 반복문 블록 종료 */
+		}	/* [한국어] 순회 끝 */
 
 		break; /* NVMe: revision 1 처리 완료 */
 	default: 	/* NVMe: 기본 case 처리 */
@@ -911,7 +977,7 @@ static acpi_status acpi_run_hpp(struct pci_dev *dev, acpi_handle handle) 	/* NVM
 			status = AE_ERROR; /* NVMe: 형식 오류 */
 			goto exit; /* NVMe: 정리 후 종료 */
 		}	/* NVMe: 조건문 블록 종료 */
-	}	/* NVMe: 반복문 블록 종료 */
+	}	/* [한국어] 순회 끝 */
 
 	hpx0.revision        = 1;                       /* NVMe: _HPP는 revision 1 고정 */
 	hpx0.cache_line_size = fields[0].integer.value; /* NVMe: cache line size */
@@ -926,11 +992,34 @@ exit: 	/* NVMe: 정리/종료 레이블 */
 	return status;         /* NVMe: 최종 상태 반환 */
 }	/* NVMe: 코드 블록 종료 */
 
+/* pci_acpi_program_hp_params
+ *
+ * @dev - the pci_dev for which we want parameters
+ */
 /*
- * pci_acpi_program_hp_params:
- *   NVMe/PCI 디바이스에 대해 상위 bridge 범위에서 _HPX 또는 _HPP를
- *   찾아 평가하고 적용한다. NVMe SSD probe 시 호출되어 PCIe capability,
- *   cache line, error handling 등의 platform 권장값을 반영한다.
+ * [한국어]
+ * pci_acpi_program_hp_params - 펌웨어가 권장하는 PCIe 설정값을 장치에 적용한다
+ *
+ * @dev:    설정할 장치
+ * @return: 0 = 적용됨, 음수 = 적용할 값을 찾지 못함.
+ *
+ * _HPX(Hot Plug Parameter Extensions) 또는 그 이전 판인 _HPP 는 펌웨어가
+ * "이 슬롯에 꽂히는 장치는 이렇게 설정하라" 고 권장하는 값의 묶음이다.
+ * Cache Line Size, Latency Timer, SERR/PERR 활성화, 그리고 PCIe 쪽으로는
+ * Max Payload Size, 오류 보고, Completion Timeout, AER 마스크 등이 들어 있다.
+ *
+ * 왜 펌웨어가 정해 주는가. 같은 장치라도 어느 보드의 어느 슬롯에 꽂히느냐에
+ * 따라 안전한 설정이 달라지기 때문이다. 신호 품질이 나쁜 슬롯에서는
+ * 오류 보고를 더 촘촘히 켜야 하고, 특정 칩셋에서는 어떤 기능을 꺼야 한다.
+ * 보드 설계자만 아는 그 지식을 ACPI 테이블로 전달하는 것이다.
+ *
+ * 검색이 위로 올라가는 방식인 점이 중요하다. 이 장치의 ACPI 노드에
+ * _HPX 가 없으면 부모로, 또 없으면 그 부모로 계속 올라간다. 슬롯마다
+ * 값을 적어 두지 않고 브리지 하나에 적어 그 아래 전부에 적용하는 것이
+ * 흔한 구성이기 때문이다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. ACPI 메서드 평가가 잠들 수 있다.
+ * 호출자: pci_configure_device() 경로 — 장치를 발견해 설정할 때.
  */
 int pci_acpi_program_hp_params(struct pci_dev *dev) 	/* NVMe: pci_acpi_program_hp_params 함수 정의 */
 {	/* NVMe: 함수 본문 시작 */
@@ -946,7 +1035,7 @@ int pci_acpi_program_hp_params(struct pci_dev *dev) 	/* NVMe: pci_acpi_program_h
 		handle = acpi_pci_get_bridge_handle(pbus); /* NVMe: 각 bridge의 ACPI 핸들 획득 시도 */
 		if (handle) /* NVMe: 핸들을 찾으면 */
 			break; /* NVMe: 순회 종료 */
-	}	/* NVMe: 반복문 블록 종료 */
+	}	/* [한국어] 순회 끝 */
 
 	/*
 	 * _HPP settings apply to all child buses, until another _HPP is
@@ -969,7 +1058,7 @@ int pci_acpi_program_hp_params(struct pci_dev *dev) 	/* NVMe: pci_acpi_program_h
 		if (ACPI_FAILURE(status)) /* NVMe: 부모 획득 실패 시 */
 			break; /* NVMe: 검색 종료 */
 		handle = phandle; /* NVMe: 부모 핸들로 이동 */
-	}	/* NVMe: 반복문 블록 종료 */
+	}	/* [한국어] 순회 끝 */
 	return -ENODEV; /* NVMe: _HPX/_HPP 둘 다 없음 */
 }	/* NVMe: 함수 본문 종료 */
 
@@ -1405,7 +1494,7 @@ static int acpi_pci_propagate_wakeup(struct pci_bus *bus, bool enable) 	/* NVMe:
 			return acpi_pm_set_device_wakeup(&bus->self->dev, enable); /* NVMe: bridge wake 설정 */
 
 		bus = bus->parent; /* NVMe: 부모 bus로 이동 */
-	}	/* NVMe: 반복문 블록 종료 */
+	}	/* [한국어] 순회 끝 */
 
 	/* We have reached the root bus. */
 	if (bus->bridge) { /* NVMe: root bus에 bridge가 있으면 */
@@ -1850,9 +1939,28 @@ arch_initcall(acpi_pci_init); /* NVMe: 아키텍처 초기화 시 acpi_pci_init 
 #if defined(CONFIG_ARM64) || defined(CONFIG_RISCV) 	/* NVMe: ARM64/RISC-V ACPI PCI IRQ/scan 경로 */
 
 /*
- * pcibios_alloc_irq:
- *   ARM64/RISC-V에서 새 PCI 디바이스 probe 시 ACPI _PRT를 기반으로
- *   NVMe의 INT#x/MSI IRQ를 할당한다. x86의 PCI IRQ 라우팅과 대응.
+ * Try to assign the IRQ number when probing a new device
+ */
+/*
+ * [한국어]
+ * pcibios_alloc_irq - 장치를 발견했을 때 INTx IRQ 번호를 배정한다
+ *
+ * @dev:    대상 장치
+ * @return: 항상 0. 실패해도 0 을 돌려준다.
+ *
+ * irq.c 의 __weak 훅을 ARM64/RISC-V 가 덮어쓴 판이다. ACPI 의 _PRT
+ * (PCI Routing Table)를 보고 이 장치의 INTx 핀이 어느 인터럽트 컨트롤러의
+ * 몇 번 입력에 연결됐는지 알아내 dev->irq 에 채운다.
+ *
+ * 반환값이 항상 0 인 것이 눈에 띈다. IRQ 배정에 실패해도 probe 를 막지
+ * 않는다는 뜻이다. MSI/MSI-X 를 쓰는 장치는 INTx 가 없어도 잘 동작하므로,
+ * 여기서 실패했다고 장치를 포기할 이유가 없다.
+ *
+ * x86 에는 이 훅의 덮어쓰기가 없다. 그쪽은 pci_enable_device() 시점에
+ * 아키텍처 코드가 따로 처리한다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. 드라이버 바인딩 직전에 불린다.
+ * 호출자: pci-driver.c 의 pci_device_probe().
  */
 int pcibios_alloc_irq(struct pci_dev *dev) 	/* NVMe: pcibios_alloc_irq 함수 정의 */
 {	/* NVMe: 함수 본문 시작 */
@@ -1862,10 +1970,19 @@ int pcibios_alloc_irq(struct pci_dev *dev) 	/* NVMe: pcibios_alloc_irq 함수 �
 	return 0; /* NVMe: 항상 성공(할당 실패는 dev->irq=0 등으로 표현) */
 }	/* NVMe: 함수 본문 종료 */
 
-struct acpi_pci_generic_root_info { 	/* NVMe: 구조체/열거형 정의 시작 */
-	struct acpi_pci_root_info	common; 	/* NVMe: common 변수 선언 */
-	struct pci_config_window	*cfg;	/* NVMe: ECAM config space 매핑 윈도우 */
-};	/* NVMe: 코드 블록 종료 */
+/* [한국어] ACPI 기반 루트 브리지 하나의 정보. 공통 부분에 ECAM 창
+ * 포인터를 덧붙인 형태다. common 을 첫 필드로 두어 container_of 로
+ * 서로를 오갈 수 있게 한 것이 관용적인 확장 방식이다. */
+struct acpi_pci_generic_root_info {
+	struct acpi_pci_root_info	common;
+	/* [한국어] 이 루트 브리지의 ECAM 창.
+	 * 설정자: pci_acpi_setup_ecam_mapping() 이 MCFG 를 보고 만든다.
+	 * 읽는 자: 이 도메인의 모든 config 접근이 bus->sysdata 를 통해
+	 *   이 포인터에 닿는다(acpi_pci_bus_find_domain_nr 참고).
+	 * 값 범위: NULL 이 아닌 유효한 창. NULL 이면 루트 브리지 등록이 실패한다.
+	 * 동기화: 등록 시 한 번 설정되고 해제 시까지 바뀌지 않는다. */
+	struct pci_config_window	*cfg;	/* config space mapping */
+};
 
 /*
  * acpi_pci_bus_find_domain_nr:
@@ -1936,10 +2053,29 @@ static int pci_acpi_root_prepare_resources(struct acpi_pci_root_info *ci) 	/* NV
 }	/* NVMe: 함수 본문 종료 */
 
 /*
- * pci_acpi_setup_ecam_mapping:
- *   MCFG 테이블에서 root bridge의 ECAM 영역을 찾아 PCI config space
- *   매핑을 생성한다. NVMe의 BAR, capability, MSI-X table 등을 읽으려면
- *   이 config space 접근이 필수적이다.
+ * Lookup the bus range for the domain in MCFG, and set up config space
+ * mapping.
+ */
+/*
+ * [한국어]
+ * pci_acpi_setup_ecam_mapping - MCFG 테이블을 보고 ECAM 창을 만든다
+ *
+ * @root:   ACPI 가 기술한 루트 브리지
+ * @return: 만들어진 struct pci_config_window, 실패하면 NULL.
+ *
+ * MCFG 는 ACPI 테이블 중 하나로, "이 세그먼트의 버스 N~M 번은 물리 주소
+ * X 부터 시작하는 ECAM 창으로 접근하라" 는 정보를 담는다. 이 함수가 그것을
+ * 조회해 ecam.c 의 pci_ecam_create() 로 실제 매핑을 만든다.
+ *
+ * ACPI 시스템에서 config 접근이 시작되는 지점이다. 이 매핑이 없으면
+ * 어떤 장치의 config space 도 읽을 수 없어 열거 자체가 불가능하다.
+ *
+ * 버스 범위를 확인하는 이유: ACPI 가 기술한 버스 범위와 MCFG 가 커버하는
+ * 범위가 어긋날 수 있다. 그 경우 겹치는 부분만 쓰고 나머지는 포기한다 —
+ * 매핑되지 않은 버스에 접근하면 시스템이 죽기 때문이다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. 부팅 중 루트 브리지 등록 시.
+ * 호출자: pci_acpi_scan_root().
  */
 static struct pci_config_window * 	/* NVMe: 코드 연속 줄 */
 pci_acpi_setup_ecam_mapping(struct acpi_pci_root *root) 	/* NVMe: pci_acpi_setup_ecam_mapping 함수 정의 */
