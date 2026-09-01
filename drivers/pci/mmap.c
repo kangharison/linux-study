@@ -64,7 +64,19 @@
  *                             정한 뒤 페이지 테이블을 채운다.
  * pci_iobar_pfn()           : I/O 공간 BAR 의 pfn 을 구한다. 대부분의
  *                             아키텍처에서는 불가능해 실패를 돌려준다.
- * pci_mmap_page_range()     : 옛 인터페이스. /proc 경로가 쓴다.
+ *                             이 파일에는 정의가 없고 호출만 있다(:101) —
+ *                             아키텍처 코드가 제공하는 심볼이다.
+ * pci_mmap_fits()           : 요청한 vma 범위가 그 BAR 안에 온전히 들어가는지
+ *                             판정한다. mmap_api 가 PCI_MMAP_PROCFS 면
+ *                             pci_resource_to_user() 로 사용자에게 보이는
+ *                             주소로 바꿔 비교하고, PCI_MMAP_SYSFS 면
+ *                             오프셋 0 기준으로 비교한다 — 두 인터페이스가
+ *                             vm_pgoff 의 의미를 다르게 쓰기 때문이다.
+ *                             1 = 들어감, 0 = 벗어남(길이 0 인 BAR 도 0).
+ * (기존 요약에는 pci_mmap_page_range() 가 올라 있었으나 그런 이름의 함수는
+ *  이 파일에도 drivers/pci 어디에도 없다 — 전수 grep 으로 확인했다.
+ *  이 파일이 정의하는 함수는 위 두 개뿐이며, 그나마 각각
+ *  ARCH_GENERIC_PCI_MMAP_RESOURCE 와 SYSFS/PROC_FS 조건부로 컴파일된다.)
  */
 
 #include <linux/kernel.h>
