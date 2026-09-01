@@ -82,6 +82,8 @@
 #include "../pcie/portdrv.h"
 
 extern bool pciehp_poll_mode;
+/* [한국어] 폴링 모드일 때의 주기(밀리초). 정의는 pciehp_core.c 이고 모듈 파라미터로
+ * 노출된다. pciehp_poll_mode 가 참일 때만 의미가 있다. */
 extern int pciehp_poll_time;
 
 /*
@@ -145,6 +147,12 @@ extern int pciehp_poll_time;
  * unlike other drivers, the two aren't represented by separate structures.
  */
 struct controller {
+	/* [한국어] 이 컨트롤러가 붙어 있는 PCIe 포트 서비스 디바이스.
+	 * 설정자: pcie_init() 이 probe 인자로 받은 값을 저장한다.
+	 * 읽는 자: 거의 모든 함수가 ctrl->pcie->port 로 실제 PCI 장치에 닿는다 —
+	 *   config 접근, 인터럽트 번호, 로그 대상이 모두 그 경로다.
+	 * 값 범위: 항상 유효(NULL 불가).
+	 * 동기화: 설정 후 읽기 전용. */
 	struct pcie_device *pcie;
 	u64 dsn;
 
@@ -215,7 +223,20 @@ struct controller {
 	struct rw_semaphore reset_lock;
 	unsigned int depth;
 	unsigned int ist_running;
+	/* [한국어] sysfs 로 요청한 슬롯 활성화·비활성화의 결과.
+	 * 설정자: 인터럽트 스레드가 요청 처리를 마치고 결과를 남긴다.
+	 * 읽는 자: pciehp_sysfs_enable_slot()/disable_slot() 이 아래 requester
+	 *   대기 큐에서 깨어난 뒤 이 값을 읽어 사용자에게 돌려준다.
+	 * 값 범위: 0(성공) 또는 음수 errno. 요청 전에는 의미가 없다.
+	 * 동기화: 대기 큐의 wake_up 이 메모리 배리어 역할을 하므로 별도 락이 없다. */
 	int request_result;
+	/* [한국어] sysfs 요청자가 결과를 기다리는 대기 큐.
+	 * 설정자: pcie_init() 이 초기화한다.
+	 * 읽는 자: sysfs 경로가 wait_event 로 잠들고, 인터럽트 스레드가 wake_up 한다.
+	 * 값 범위: 대기 큐 서술자.
+	 * 동기화: 이 필드 자체가 동기화 수단이다 — sysfs 쓰기는 요청을 큐에 넣고
+	 *   여기서 잠들며, 실제 처리는 인터럽트 스레드가 하고 끝나면 깨운다.
+	 *   그 구조 덕분에 sysfs 경로와 인터럽트 경로가 같은 상태 기계를 공유할 수 있다. */
 	wait_queue_head_t requester;
 };
 
@@ -262,20 +283,39 @@ struct controller {
 #define NO_CMD_CMPL(ctrl)	((ctrl)->slot_cap & PCI_EXP_SLTCAP_NCCS)
 #define PSN(ctrl)		(((ctrl)->slot_cap & PCI_EXP_SLTCAP_PSN) >> 19)
 
+/* [한국어] 슬롯 상태 변경을 인터럽트 스레드에 요청한다. sysfs 경로와 인터럽트 경로가
+ * 같은 상태 기계를 쓰도록 모든 요청이 이 함수를 거친다. 정의는 pciehp_ctrl.c. */
 void pciehp_request(struct controller *ctrl, int action);
+/* [한국어] attention 버튼 눌림 이벤트를 처리한다. 규격상 5초의 취소 유예가 있어
+ * 곧바로 동작하지 않고 지연 워크를 예약한다. */
 void pciehp_handle_button_press(struct controller *ctrl);
+/* [한국어] 슬롯 비활성화 요청을 처리한다. */
 void pciehp_handle_disable_request(struct controller *ctrl);
+/* [한국어] 카드 존재 여부나 링크 상태가 바뀐 이벤트를 처리한다. 두 사건을 한 함수가
+ * 다루는 것은 서프라이즈 제거처럼 둘이 동시에 오는 경우가 흔하기 때문이다. */
 void pciehp_handle_presence_or_link_change(struct controller *ctrl, u32 events);
+/* [한국어] 슬롯의 PCI 장치를 스캔·구성해 커널에 등록한다. 정의는 pciehp_pci.c. */
 int pciehp_configure_device(struct controller *ctrl);
+/* [한국어] 그 장치를 제거한다. presence 인자로 카드가 아직 꽂혀 있는지 알려 준다 —
+ * 빠진 뒤라면 config 접근을 건너뛰어 타임아웃을 피한다. */
 void pciehp_unconfigure_device(struct controller *ctrl, bool presence);
+/* [한국어] attention 버튼의 5초 유예가 끝난 뒤 실제 동작을 수행하는 워크 함수. */
 void pciehp_queue_pushbutton_work(struct work_struct *work);
+/* [한국어] 컨트롤러 객체를 만들고 하드웨어 능력을 읽어 채운다. 정의는 pciehp_hpc.c. */
 struct controller *pcie_init(struct pcie_device *dev);
+/* [한국어] 핫플러그 인터럽트를 등록하고 이벤트 통지를 켠다. */
 int pcie_init_notification(struct controller *ctrl);
+/* [한국어] 그 통지를 끄고 인터럽트를 해제한다. */
 void pcie_shutdown_notification(struct controller *ctrl);
+/* [한국어] 쌓여 있는 핫플러그 이벤트 상태 비트를 지운다. */
 void pcie_clear_hotplug_events(struct controller *ctrl);
+/* [한국어] 인터럽트를 다시 허용한다. */
 void pcie_enable_interrupt(struct controller *ctrl);
+/* [한국어] 인터럽트를 차단한다. */
 void pcie_disable_interrupt(struct controller *ctrl);
+/* [한국어] 슬롯에 전원을 넣는다. */
 int pciehp_power_on_slot(struct controller *ctrl);
+/* [한국어] 슬롯 전원을 끊는다. */
 void pciehp_power_off_slot(struct controller *ctrl);
 void pciehp_get_power_status(struct controller *ctrl, u8 *status);
 
@@ -292,28 +332,88 @@ void pciehp_get_power_status(struct controller *ctrl, u8 *status);
 void pciehp_set_indicators(struct controller *ctrl, int pwr, int attn);
 
 void pciehp_get_latch_status(struct controller *ctrl, u8 *status);
+/* [한국어] 전원 결함(power fault)이 발생했는지 확인한다. */
 int pciehp_query_power_fault(struct controller *ctrl);
+/* [한국어] 카드가 물리적으로 꽂혀 있는지 확인한다(Presence Detect). */
 int pciehp_card_present(struct controller *ctrl);
+/* [한국어] 카드가 있거나 링크가 살아 있는지 확인한다. 두 조건을 OR 로 보는 이유는
+ * Presence Detect 를 구현하지 않는 슬롯이 있어 링크만으로 판단해야 하는
+ * 경우가 있기 때문이다. */
 int pciehp_card_present_or_link_active(struct controller *ctrl);
+/* [한국어] 링크가 올라올 때까지 기다리고 그 상태를 확인한다. */
 int pciehp_check_link_status(struct controller *ctrl);
+/* [한국어] 링크가 지금 살아 있는지만 확인한다(대기 없음). */
 int pciehp_check_link_active(struct controller *ctrl);
+/* [한국어] 같은 슬롯에 다른 카드가 꽂혔는지 DSN(Device Serial Number)으로 판별한다.
+ * 링크가 잠깐 끊겼다 붙었을 때 같은 카드인지 알아내는 용도다. */
 bool pciehp_device_replaced(struct controller *ctrl);
+/* [한국어] 컨트롤러 객체를 해제한다. */
 void pciehp_release_ctrl(struct controller *ctrl);
 
+/* [한국어] sysfs 의 power 파일에 1 을 쓸 때 불린다. 요청을 큐에 넣고 결과를 기다린다. */
 int pciehp_sysfs_enable_slot(struct hotplug_slot *hotplug_slot);
+/* [한국어] sysfs 의 power 파일에 0 을 쓸 때 불린다. */
 int pciehp_sysfs_disable_slot(struct hotplug_slot *hotplug_slot);
+/* [한국어] 슬롯 리셋을 수행한다. probe 가 참이면 실제로 리셋하지 않고 가능 여부만 답한다 —
+ * PCI 코어의 리셋 프레임워크가 쓰는 관례다. */
 int pciehp_reset_slot(struct hotplug_slot *hotplug_slot, bool probe);
+/* [한국어] attention 표시기 상태를 읽는다. */
 int pciehp_get_attention_status(struct hotplug_slot *hotplug_slot, u8 *status);
+/* [한국어] 표시기 비트를 가공 없이 그대로 쓴다. 표준 attention/power 표시기 추상화를
+ * 거치지 않는 저수준 경로다. */
 int pciehp_set_raw_indicator_status(struct hotplug_slot *h_slot, u8 status);
+/* [한국어] 그 원시 비트를 그대로 읽는다. */
 int pciehp_get_raw_indicator_status(struct hotplug_slot *h_slot, u8 *status);
 
+/* [한국어] PCI 코어의 err_handler 경로에서 슬롯 리셋 후 불린다. 정의는 pciehp_hpc.c. */
 int pciehp_slot_reset(struct pcie_device *dev);
 
+/* [한국어]
+ * slot_name - 컨트롤러가 관리하는 슬롯의 이름을 얻는다
+ *
+ * @ctrl: PCIe 핫플러그 컨트롤러.
+ * @return: 공용 코어가 관리하는 슬롯 이름 문자열.
+ *
+ * PCIe 핫플러그는 포트 하나에 슬롯 하나이므로 컨트롤러와 슬롯이 일대일이고,
+ * 그래서 컨트롤러 구조체가 hotplug_slot 을 값으로 내장한다. 이름 저장은
+ * 공용 코어에 맡기고 여기서는 조회만 한다.
+ *
+ * 이 파일의 로그 매크로 여러 곳에서 쓰이므로 인라인으로 두어 호출 비용을 없앴다.
+ *
+ * 실행 컨텍스트: 어디서든 안전하다. 포인터 역참조가 전부다.
+ *
+ * 에러 경로: 없다.
+ *
+ * 호출 체인:
+ *   pciehp_* 의 로그 매크로 → [slot_name] → hotplug_slot_name()
+ */
 static inline const char *slot_name(struct controller *ctrl)
 {
 	return hotplug_slot_name(&ctrl->hotplug_slot);
 }
 
+/* [한국어]
+ * to_ctrl - 공용 코어의 hotplug_slot 에서 컨트롤러 구조체를 되찾는다
+ *
+ * @hotplug_slot: PCI 핫플러그 공용 코어가 콜백에 넘겨 주는 포인터.
+ * @return: 그것을 감싸고 있는 struct controller 의 주소.
+ *
+ * 공용 코어는 드라이버별 구조를 모르고 struct hotplug_slot 만 다룬다.
+ * struct controller 가 그것을 포인터가 아니라 값으로 내장하고 있어
+ * container_of 가 성립하며, 별도 저장소가 필요 없다.
+ *
+ * 같은 트리의 rpaphp.h / shpchp.h / cpci_hotplug.h 도 정확히 같은 관용을 쓴다 —
+ * 핫플러그 드라이버들의 공통 패턴이다. 다만 이름이 to_slot 이 아니라 to_ctrl 인
+ * 것은 PCIe 에서 컨트롤러와 슬롯이 일대일이라 구조체 자체가 컨트롤러이기 때문이다.
+ *
+ * 실행 컨텍스트: 공용 코어의 sysfs 콜백 경로. 순수 주소 계산이다.
+ *
+ * 에러 경로: 없다.
+ *
+ * 호출 체인:
+ *   사용자의 sysfs 쓰기 → 공용 코어 → pciehp_core.c 의 콜백
+ *     → [to_ctrl] → struct controller
+ */
 static inline struct controller *to_ctrl(struct hotplug_slot *hotplug_slot)
 {
 	return container_of(hotplug_slot, struct controller, hotplug_slot);
