@@ -71,9 +71,16 @@
  * pciehp_suspend() / _resume() / _resume_noirq() : 절전 전후 처리.
  *                           복귀 시 상태를 다시 읽어 변화를 반영한다.
  * pciehp_runtime_suspend() / _runtime_resume() : 런타임 절전판.
- * set_bus_speed() / get_*_status() 계열 : hotplug 코어가 부르는 콜백.
- *                           슬롯의 전원/표시등/존재 상태를 읽고 쓴다.
- * pciehp_slot_ops         : 그 콜백들을 묶은 구조체.
+ * get_power_status() / get_latch_status() / get_adapter_status() /
+ * set_attention_status()  : hotplug 코어가 부르는 콜백. 슬롯의 전원,
+ *                           래치, 존재, 표시등 상태를 읽고 쓴다.
+ * init_slot()             : 그 콜백들을 묶은 표를 **실행 시점에** 만든다.
+ *                           정적인 표가 없는 이유는 컨트롤러가 가진 기능에
+ *                           따라 채우는 항목이 달라지기 때문이다 —
+ *                           MRL 센서가 있어야 get_latch_status 를 넣고,
+ *                           attention LED 유무에 따라 attention 콜백 쌍이
+ *                           pciehp_get/set_attention_status 가 되거나
+ *                           pciehp_get/set_raw_indicator_status 가 된다.
  * pciehp_driver           : 포트 서비스 드라이버 정의.
  */
 

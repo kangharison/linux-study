@@ -218,7 +218,10 @@ struct controller {
 	 * 분리하지만, 여기서는 그럴 필요가 없어 container_of 로 오갈 수 있게 했다.
 	 * 설정자: pciehp_probe() 가 ops 를 채워 pci_hp_initialize() 로 등록.
 	 * 읽는 자: 핫플러그 코어가 sysfs 접근을 이 구조체의 ops 로 전달한다.
-	 * 값 범위: ops 가 pciehp_slot_ops 를 가리킨다.
+	 * 값 범위: ops 는 init_slot()(pciehp_core.c:110)이 kzalloc 으로 만들어
+	 *   그 자리에서 채운 표를 가리킨다. 정적인 표가 아닌 이유는 컨트롤러가
+	 *   가진 기능에 따라 채우는 항목이 달라지기 때문이다 — MRL 센서가 있어야
+	 *   get_latch_status 를, attention LED 가 있어야 attention 콜백 쌍을 넣는다.
 	 * 동기화: 코어가 자체 잠금으로 등록·해제를 보호한다. */
 	struct rw_semaphore reset_lock;
 	unsigned int depth;

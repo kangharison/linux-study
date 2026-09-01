@@ -73,7 +73,7 @@
  * acpiphp_register_hotplug_slot() : glue 가 슬롯을 발견하면 이 함수로
  *                          핫플러그 코어에 등록한다.
  * acpiphp_unregister_hotplug_slot() : 그 반대.
- * acpiphp_hotplug_slot_ops : 위 콜백들을 묶은 표.
+ * acpi_hotplug_slot_ops : 위 콜백들을 묶은 표(:296).
  */
 
 #include <linux/init.h>
