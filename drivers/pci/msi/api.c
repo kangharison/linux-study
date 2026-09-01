@@ -139,7 +139,10 @@
 int pci_enable_msi(struct pci_dev *dev)
 {
 	int rc = __pci_enable_msi_range(dev, 1, 1, NULL);
+	/* [한국어] __pci_enable_msi_range() 는 실제로 배정한 벡터 수를 돌려주지만, 이 옛 API 는
+	 * 벡터가 하나뿐이라 개수를 알릴 필요가 없다. 그래서 음수만 오류로 걸러 낸다. */
 	if (rc < 0)
+		/* [한국어] 오류를 그대로 전달한다. */
 		return rc;
 	return 0;
 }
@@ -159,6 +162,10 @@ EXPORT_SYMBOL(pci_enable_msi);
  */
 void pci_disable_msi(struct pci_dev *dev)
 {
+	/* [한국어] 세 조건을 모두 확인한다 — MSI 자체가 부팅 인자로 꺼져 있지 않은지,
+	 * 장치 포인터가 유효한지, 그리고 실제로 MSI 가 켜져 있는지.
+	 * 해제 API 가 이렇게 관대한 이유는 드라이버의 오류 정리 경로가 상태를 확인하지
+	 * 않고 무조건 부르는 일이 흔하기 때문이다. */
 	if (!pci_msi_enabled() || !dev || !dev->msi_enabled)
 		return;
 
@@ -187,6 +194,7 @@ int pci_msix_vec_count(struct pci_dev *dev)
 {
 	u16 control;
 
+	/* [한국어] MSI-X capability 자체가 없으면 벡터 수를 물을 대상이 없다. */
 	if (!dev->msix_cap)
 		return -EINVAL;
 
@@ -224,6 +232,8 @@ EXPORT_SYMBOL(pci_msix_vec_count);	/* [한국어] 벡터 수를 미리 알아야
 int pci_enable_msix_range(struct pci_dev *dev, struct msix_entry *entries,
 			  int minvec, int maxvec)
 {
+	/* [한국어] 엔트리 배열을 그대로 넘기고 affinity 서술자는 NULL, 플래그는 0 으로 위임한다.
+	 * 새 API 인 pci_alloc_irq_vectors() 는 같은 내부 함수를 affinity 와 함께 부른다. */
 	return __pci_enable_msix_range(dev, entries, minvec, maxvec, NULL, 0);
 }
 EXPORT_SYMBOL(pci_enable_msix_range);
@@ -242,9 +252,13 @@ EXPORT_SYMBOL(pci_enable_msix_range);
  * NVMe 는 이 기능을 쓰지 않는다. 큐 수가 바뀌면 전체를 반납하고 재할당한다. */
 bool pci_msix_can_alloc_dyn(struct pci_dev *dev)
 {
+	/* [한국어] MSI-X capability 가 없으면 동적 할당도 불가능하다. */
 	if (!dev->msix_cap)
 		return false;
 
+	/* [한국어] MSI 도메인이 MSI_FLAG_PCI_MSIX_ALLOC_DYN 을 지원하는지 묻는다.
+	 * DENY_LEGACY 는 "도메인 없이 아키텍처 레거시 경로로 동작하는 경우는 불가로 친다"는
+	 * 뜻이다 — 레거시 경로에는 나중에 벡터를 하나 더 붙일 구조가 없기 때문이다. */
 	return pci_msi_domain_supports(dev, MSI_FLAG_PCI_MSIX_ALLOC_DYN, DENY_LEGACY);
 }
 EXPORT_SYMBOL_GPL(pci_msix_can_alloc_dyn);
@@ -269,12 +283,18 @@ EXPORT_SYMBOL_GPL(pci_msix_can_alloc_dyn);
 struct msi_map pci_msix_alloc_irq_at(struct pci_dev *dev, unsigned int index,
 				     const struct irq_affinity_desc *affdesc)
 {
+	/* [한국어] 실패를 기본값으로 두고 시작한다. 반환형이 구조체라 errno 를 index 필드에
+	 * 담아 돌려주는 관용을 쓴다. -ENOTSUPP 는 "이 장치/도메인에서는 지원하지 않음"이다. */
 	struct msi_map map = { .index = -ENOTSUPP };
 
+	/* [한국어] MSI-X 가 아직 켜지지 않았다면 동적으로 붙일 대상 자체가 없다. */
 	if (!dev->msix_enabled)
+		/* [한국어] 미리 만들어 둔 실패 구조체를 그대로 돌려준다. */
 		return map;
 
+	/* [한국어] 도메인이 동적 할당을 지원하는지 확인한다. */
 	if (!pci_msix_can_alloc_dyn(dev))
+		/* [한국어] 같은 실패 구조체를 돌려준다. */
 		return map;
 
 	return msi_domain_alloc_irq_at(&dev->dev, MSI_DEFAULT_DOMAIN, index, affdesc, NULL);
@@ -298,8 +318,13 @@ EXPORT_SYMBOL_GPL(pci_msix_alloc_irq_at);
  */
 void pci_msix_free_irq(struct pci_dev *dev, struct msi_map map)
 {
+	/* [한국어] 해제 요청이 올바른 map 을 담고 있는지 확인한다. index 가 음수면 애초에
+	 * 할당이 실패한 map 이고, virq 가 0 이하면 유효한 인터럽트가 아니다.
+	 * _ONCE 판이라 같은 버그로 로그가 넘치지 않는다. */
 	if (WARN_ON_ONCE(map.index < 0 || map.virq <= 0))
 		return;
+	/* [한국어] 동적 할당을 지원하지 않는 장치에 해제를 요청하는 것은 드라이버 버그다.
+	 * 할당이 애초에 불가능했으므로 해제할 것도 없다. */
 	if (WARN_ON_ONCE(!pci_msix_can_alloc_dyn(dev)))
 		return;
 
@@ -327,6 +352,8 @@ EXPORT_SYMBOL_GPL(pci_msix_free_irq);
  */
 void pci_disable_msix(struct pci_dev *dev)
 {
+	/* [한국어] disable_msi 와 같은 세 조건 검사다. 드라이버가 상태를 확인하지 않고
+	 * 부를 수 있도록 관대하게 처리한다. */
 	if (!pci_msi_enabled() || !dev || !dev->msix_enabled)
 		return;
 
@@ -367,6 +394,7 @@ EXPORT_SYMBOL(pci_disable_msix);
 int pci_alloc_irq_vectors(struct pci_dev *dev, unsigned int min_vecs,
 			  unsigned int max_vecs, unsigned int flags)
 {
+	/* [한국어] affinity 서술자 없이 위임한다. 이 함수와 _affinity 판의 유일한 차이가 그것이다. */
 	return pci_alloc_irq_vectors_affinity(dev, min_vecs, max_vecs,
 					      flags, NULL);
 }
@@ -388,45 +416,78 @@ int pci_alloc_irq_vectors_affinity(struct pci_dev *dev, unsigned int min_vecs,
 				   unsigned int max_vecs, unsigned int flags,
 				   struct irq_affinity *affd)
 {
+	/* [한국어] PCI_IRQ_AFFINITY 를 요청했는데 호출자가 서술자를 주지 않은 경우에 쓸 기본값.
+	 * {0} 으로 초기화하면 pre/post 예약 벡터가 없고 모든 벡터를 CPU 에 고르게
+	 * 분산하라는 뜻이 된다. */
 	struct irq_affinity msi_default_affd = {0};
+	/* [한국어] 어떤 방식도 성공하지 못했을 때 돌려줄 기본 오류. "요청한 최소 개수만큼
+	 * 확보할 수 없었다"는 뜻이다. */
 	int nvecs = -ENOSPC;
 
+	/* [한국어] 자동 어피니티 관리를 요청했는지 확인한다. */
 	if (flags & PCI_IRQ_AFFINITY) {
+		/* [한국어] 호출자가 서술자를 주지 않았으면, */
 		if (!affd)
+			/* [한국어] 위에서 준비한 기본값을 쓴다. */
 			affd = &msi_default_affd;
 	} else {
+		/* [한국어] [방어] 어피니티를 요청하지 않았는데 서술자를 넘겼다면 호출자의 실수다.
+		 * 경고를 남기고 무시한다 — 그대로 두면 요청하지도 않은 어피니티 분산이 일어난다. */
 		if (WARN_ON(affd))
+			/* [한국어] 서술자를 버린다. */
 			affd = NULL;
 	}
 
+	/* [한국어] MSI-X 를 먼저 시도한다. 위 커널독이 밝히는 우선순위 — MSI-X > MSI > INTx.
+	 * MSI-X 가 벡터마다 독립적인 주소·데이터와 마스킹을 제공해 가장 유연하기 때문이다. */
 	if (flags & PCI_IRQ_MSIX) {
+		/* [한국어] 엔트리 배열 없이(NULL) 개수만 요청하는 새 방식으로 부른다. */
 		nvecs = __pci_enable_msix_range(dev, NULL, min_vecs, max_vecs,
 						affd, flags);
+		/* [한국어] 하나라도 확보했으면, */
 		if (nvecs > 0)
+			/* [한국어] 그대로 성공을 돌려준다. 아래 MSI 나 INTx 는 시도하지 않는다. */
 			return nvecs;
 	}
 
+	/* [한국어] MSI-X 가 실패했으면 MSI 를 시도한다. */
 	if (flags & PCI_IRQ_MSI) {
+		/* [한국어] MSI 는 엔트리 배열 개념이 없어 인자가 하나 적다. */
 		nvecs = __pci_enable_msi_range(dev, min_vecs, max_vecs, affd);
+		/* [한국어] 성공했으면, */
 		if (nvecs > 0)
+			/* [한국어] 그대로 돌려준다. */
 			return nvecs;
 	}
 
 	/* use INTx IRQ if allowed */
+	/* [한국어] 위 영어 주석대로 마지막 수단은 레거시 INTx 다. */
 	if (flags & PCI_IRQ_INTX) {
+		/* [한국어] INTx 는 인터럽트 선이 하나뿐이라 min_vecs 가 1 일 때만 의미가 있고,
+		 * dev->irq 가 0 이 아니어야(펌웨어가 IRQ 를 배정해 두었어야) 쓸 수 있다. */
 		if (min_vecs == 1 && dev->irq) {
 			/*
 			 * Invoke the affinity spreading logic to ensure that
 			 * the device driver can adjust queue configuration
 			 * for the single interrupt case.
 			 */
+			/* [한국어] 위 영어 주석이 설명하는 미묘한 처리 — 벡터가 하나뿐이어도 어피니티 분산
+			 * 로직을 한 번 돌려 준다. 드라이버가 그 결과를 보고 큐 구성을 조정하기 때문에,
+			 * INTx 로 떨어졌다고 해서 그 단계를 건너뛰면 드라이버가 잘못된 큐 수를 쓰게 된다. */
 			if (affd)
+				/* [한국어] 벡터 1개짜리 어피니티 마스크를 만든다. 반환값을 쓰지 않고 버리는데,
+				 * 목적이 마스크 자체가 아니라 affd 안의 nr_sets 계산을 갱신하는 부수 효과이기 때문이다. */
 				irq_create_affinity_masks(1, affd);
+			/* [한국어] INTx 를 켠다(INTx Disable 비트를 지운다). MSI 를 시도하다 실패했으므로
+			 * 명시적으로 되돌려야 한다. */
 			pci_intx(dev, 1);
+			/* [한국어] INTx 는 언제나 벡터 1개다. */
 			return 1;
 		}
 	}
 
+	/* [한국어] 어떤 방식도 성공하지 못했다. nvecs 에는 마지막으로 시도한 방식의 오류가
+	 * 담겨 있거나, 아무것도 시도하지 않았으면 초기값 -ENOSPC 가 그대로 있다. */
 	return nvecs;
 }
 EXPORT_SYMBOL(pci_alloc_irq_vectors_affinity);
@@ -445,12 +506,20 @@ EXPORT_SYMBOL(pci_alloc_irq_vectors_affinity);
  */
 int pci_irq_vector(struct pci_dev *dev, unsigned int nr)
 {
+	/* [한국어] msi_get_virq() 결과를 담을 변수. 부호 없는 타입인 것은 그 함수가 0 을
+	 * 실패로 쓰기 때문이다. */
 	unsigned int irq;
 
+	/* [한국어] MSI 도 MSI-X 도 켜져 있지 않다면 INTx 모드다. */
 	if (!dev->msi_enabled && !dev->msix_enabled)
+		/* [한국어] INTx 는 벡터가 하나뿐이라 nr 이 0 일 때만 유효하고, 그 값은 펌웨어가 배정한
+		 * dev->irq 다. nr 이 0 이 아니면 범위를 벗어난 요청이다. */
 		return !nr ? dev->irq : -EINVAL;
 
+	/* [한국어] MSI 코어에 인덱스 nr 에 해당하는 리눅스 IRQ 번호를 묻는다. */
 	irq = msi_get_virq(&dev->dev, nr);
+	/* [한국어] 0 은 "그런 벡터 없음"을 뜻하므로 -EINVAL 로 바꾼다. 0 은 유효한 IRQ 번호가
+	 * 아니라는 커널 관례를 이용한 것이다. */
 	return irq ? irq : -EINVAL;
 }
 EXPORT_SYMBOL(pci_irq_vector);
@@ -474,26 +543,41 @@ EXPORT_SYMBOL(pci_irq_vector);
  */
 const struct cpumask *pci_irq_get_affinity(struct pci_dev *dev, int nr)
 {
+	/* [한국어] 먼저 리눅스 IRQ 번호를 얻는다. 선언과 동시에 호출하는 형태다. */
 	int idx, irq = pci_irq_vector(dev, nr);
+	/* [한국어] 그 IRQ 에 붙어 있는 MSI 서술자. */
 	struct msi_desc *desc;
 
+	/* [한국어] IRQ 번호를 못 얻었다면 호출자가 범위를 벗어난 nr 을 넘긴 것이다. */
 	if (WARN_ON_ONCE(irq <= 0))
 		return NULL;
 
+	/* [한국어] IRQ 번호로 MSI 서술자를 되찾는다. */
 	desc = irq_get_msi_desc(irq);
 	/* Non-MSI does not have the information handy */
+	/* [한국어] 위 영어 주석대로 MSI 가 아닌 인터럽트(INTx)에는 서술자가 없다. */
 	if (!desc)
+		/* [한국어] 그 경우 "모든 CPU 가 가능"이라는 일반적인 마스크를 돌려준다.
+		 * INTx 는 특정 CPU 로 조종할 수 없으므로 그것이 정확한 답이다. */
 		return cpu_possible_mask;
 
 	/* MSI[X] interrupts can be allocated without affinity descriptor */
+	/* [한국어] 위 영어 주석대로, PCI_IRQ_AFFINITY 없이 할당한 MSI(-X)에는 어피니티
+	 * 서술자가 아예 없다. */
 	if (!desc->affinity)
+		/* [한국어] NULL 을 돌려주어 "어피니티 정보 없음"을 알린다. cpu_possible_mask 와
+		 * 구분되는 이유는, 이쪽은 "모른다"이고 저쪽은 "모두 가능하다"이기 때문이다. */
 		return NULL;
 
 	/*
 	 * MSI has a mask array in the descriptor.
 	 * MSI-X has a single mask.
 	 */
+	/* [한국어] 위 영어 주석이 설명하는 자료 구조의 비대칭이다. MSI 는 서술자 하나가 여러
+	 * 벡터를 대표하므로 마스크가 배열이고 nr 로 색인해야 하지만, MSI-X 는 벡터마다
+	 * 서술자가 따로 있어 그 안의 마스크는 언제나 0번 하나뿐이다. */
 	idx = dev->msi_enabled ? nr : 0;
+	/* [한국어] 고른 인덱스의 마스크 주소를 돌려준다. */
 	return &desc->affinity[idx].mask;
 }
 EXPORT_SYMBOL(pci_irq_get_affinity);
@@ -541,6 +625,10 @@ EXPORT_SYMBOL_GPL(pci_restore_msi_state);
  */
 bool pci_msi_enabled(void)
 {
+	/* [한국어] 전역 플래그를 그대로 돌려준다. 그 플래그를 내리는 곳은 셋이다 —
+	 * 부팅 인자 pci=nomsi, ACPI FADT 의 MSI 금지 표시, 그리고 특정 브리지의 quirk.
+	 * 위 커널독이 그 셋을 나열한다. 이 함수가 별도 파일에 있는 이유는 pci_msi_enable
+	 * 변수가 msi.c 에 있고 외부에는 이 접근자만 공개하기 때문이다. */
 	return pci_msi_enable;
 }
 EXPORT_SYMBOL(pci_msi_enabled);

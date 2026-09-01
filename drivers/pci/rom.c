@@ -94,10 +94,16 @@
 int pci_enable_rom(struct pci_dev *pdev)
 {
 	struct resource *res = &pdev->resource[PCI_ROM_RESOURCE];
+	/* [한국어] pcibios_resource_to_bus() 가 채워 줄 버스 주소 표현. CPU 물리 주소와
+	 * PCI 버스 주소가 다른 플랫폼이 있어, BAR 에 쓸 값은 반드시 버스 주소여야 한다. */
 	struct pci_bus_region region;
+	/* [한국어] ROM BAR 의 현재 값을 담을 변수. */
 	u32 rom_addr;
 
+	/* [한국어] flags 가 0 이면 이 장치에 ROM 자원 자체가 없다는 뜻이다. */
 	if (!res->flags)
+		/* [한국어] [상류 코드 관찰] errno 가 아니라 -1 을 돌려준다. 호출자 pci_map_rom() 은
+		 * 0 이 아니면 실패로만 보므로 값 자체는 중요하지 않다. */
 		return -1;
 
 	/* Nothing to enable if we're using a shadow copy in RAM */
@@ -109,10 +115,21 @@ int pci_enable_rom(struct pci_dev *pdev)
 	 * and we would only set the enable bit here.  But apparently some
 	 * devices have buggy ROM BARs that read as zero when disabled.
 	 */
+	/* [한국어] CPU 물리 주소인 res->start 를 PCI 버스 주소로 변환한다. BAR 에는 장치가
+	 * 이해하는 버스 주소를 써야 하며, 두 주소가 같지 않은 플랫폼이 실제로 있다. */
 	pcibios_resource_to_bus(pdev->bus, &region, res);
+	/* [한국어] 현재 ROM BAR 값을 읽는다. 위 영어 주석이 밝히듯 이상적으로는
+	 * pci_update_resource() 가 주소를 채우고 여기서는 활성화 비트만 세우면 되지만,
+	 * 비활성 상태에서 BAR 를 0 으로 읽히게 하는 결함 장치들이 있어 매번 다시 쓴다. */
 	pci_read_config_dword(pdev, pdev->rom_base_reg, &rom_addr);
+	/* [한국어] 주소 필드를 지운다. PCI_ROM_ADDRESS_MASK 는 주소 비트들의 마스크이고,
+	 * AND ~ 로 그 자리를 비워 아래에서 새 주소를 넣을 자리를 만든다.
+	 * 마스크 밖의 비트(예약 비트 등)는 보존한다. */
 	rom_addr &= ~PCI_ROM_ADDRESS_MASK;
+	/* [한국어] 새 버스 주소와 활성화 비트(bit 0)를 한 번에 넣는다. */
 	rom_addr |= region.start | PCI_ROM_ADDRESS_ENABLE;
+	/* [한국어] 완성한 값을 되쓴다. 이 쓰기가 실제로 ROM 디코딩을 켠다 — 위 영어 주석의
+	 * 경고대로, 카드에 따라 이 순간 MMIO 레지스터 접근이 막힐 수 있다. */
 	pci_write_config_dword(pdev, pdev->rom_base_reg, rom_addr);
 	return 0;
 }
@@ -127,14 +144,22 @@ EXPORT_SYMBOL_GPL(pci_enable_rom);
  */
 void pci_disable_rom(struct pci_dev *pdev)
 {
+	/* [한국어] 이 장치의 ROM 자원. */
 	struct resource *res = &pdev->resource[PCI_ROM_RESOURCE];
+	/* [한국어] ROM BAR 의 현재 값을 담을 변수. */
 	u32 rom_addr;
 
+	/* [한국어] RAM 에 있는 그림자 복사본을 쓰는 중이면 실제 ROM 디코딩이 애초에 켜져 있지 않다. */
 	if (res->flags & IORESOURCE_ROM_SHADOW)
 		return;
 
+	/* [한국어] 현재 BAR 값을 읽는다. */
 	pci_read_config_dword(pdev, pdev->rom_base_reg, &rom_addr);
+	/* [한국어] 활성화 비트만 지운다. 주소 필드는 그대로 두어, 다음에 다시 켤 때
+	 * 같은 주소를 재사용할 수 있게 한다. */
 	rom_addr &= ~PCI_ROM_ADDRESS_ENABLE;
+	/* [한국어] 되쓴다. 이 시점부터 ROM 영역이 더 이상 디코딩되지 않으므로,
+	 * 그 주소로 접근하면 다른 자원(또는 아무것도 아닌 것)에 닿는다. */
 	pci_write_config_dword(pdev, pdev->rom_base_reg, rom_addr);
 }
 EXPORT_SYMBOL_GPL(pci_disable_rom);
@@ -153,38 +178,63 @@ EXPORT_SYMBOL_GPL(pci_disable_rom);
 static size_t pci_get_rom_size(struct pci_dev *pdev, void __iomem *rom,
 			       size_t size)
 {
+	/* [한국어] 현재 검사 중인 이미지의 시작 주소. rom 에서 시작해 이미지 하나씩 앞으로 나아간다. */
 	void __iomem *image;
+	/* [한국어] 이 이미지가 마지막인지 나타내는 플래그(0x80 비트). */
 	int last_image;
+	/* [한국어] 이 이미지의 길이(512바이트 블록 단위). */
 	unsigned int length;
 
+	/* [한국어] 첫 이미지부터 시작한다. */
 	image = rom;
 	do {
 		void __iomem *pds;
 		/* Standard PCI ROMs start out with these bytes 55 AA */
+		/* [한국어] 표준 PCI ROM 은 0x55 0xAA 로 시작한다(리틀엔디안 워드로 0xAA55).
+		 * 위 영어 주석이 그 사실을 밝힌다. */
 		if (readw(image) != 0xAA55) {
+			/* [한국어] 서명이 다르면 유효한 ROM 이 아니다. 지금까지 나아간 만큼만 유효 크기로 친다. */
 			pci_info(pdev, "Invalid PCI ROM header signature: expecting 0xaa55, got %#06x\n",
 				 readw(image));
 			break;
 		}
 		/* get the PCI data structure and check its "PCIR" signature */
+		/* [한국어] PCIR 데이터 구조의 위치는 헤더 오프셋 24(0x18)에 담긴 상대 오프셋으로 주어진다.
+		 * PCI 펌웨어 규격이 정한 배치이며, 이 구조체 안에 이미지 길이와 마지막 여부가 있다. */
 		pds = image + readw(image + 24);
+		/* [한국어] "PCIR" 네 글자의 리틀엔디안 32비트 표현이 0x52494350 이다.
+		 * 'P'=0x50, 'C'=0x43, 'I'=0x49, 'R'=0x52 이므로 역순으로 읽으면 그 값이 된다. */
 		if (readl(pds) != 0x52494350) {
+			/* [한국어] 서명이 다르면 PCIR 구조체가 없는 것이므로 더 진행할 수 없다. */
 			pci_info(pdev, "Invalid PCI ROM data signature: expecting 0x52494350, got %#010x\n",
 				 readl(pds));
 			break;
 		}
+		/* [한국어] PCIR 오프셋 21(0x15)의 최상위 비트가 "마지막 이미지" 표시다.
+		 * 하나의 ROM 에 여러 이미지(예: 레거시 x86 BIOS 와 UEFI 드라이버)가 이어져
+		 * 있을 수 있어, 그 끝을 알아야 실제 크기를 알 수 있다. */
 		last_image = readb(pds + 21) & 0x80;
+		/* [한국어] PCIR 오프셋 16(0x10)에 이 이미지의 길이가 512바이트 블록 단위로 들어 있다. */
 		length = readw(pds + 16);
+		/* [한국어] 다음 이미지의 시작으로 건너뛴다. 512 를 곱해 실제 바이트 수로 바꾼다. */
 		image += length * 512;
 		/* Avoid iterating through memory outside the resource window */
+		/* [한국어] 위 영어 주석대로, 계산된 다음 이미지 위치가 매핑한 창을 벗어나면 멈춘다.
+		 * ROM 이 잘못된 길이를 보고하는 경우가 실제로 있어, 그대로 따라가면
+		 * 매핑 밖 메모리를 읽게 된다. */
 		if (image >= rom + size)
 			break;
+		/* [한국어] 마지막 이미지가 아니라면 다음 이미지가 있어야 한다. */
 		if (!last_image) {
+			/* [한국어] 그런데 그 자리에 서명이 없다면 ROM 이 자기 구조를 잘못 보고한 것이다. */
 			if (readw(image) != 0xAA55) {
+				/* [한국어] 더 이상 이미지가 없다고 알리고 멈춘다. */
 				pci_info(pdev, "No more image in the PCI ROM\n");
 				break;
 			}
 		}
+	/* [한국어] 길이가 0 이면(진행하지 않음) 무한 루프가 되므로 함께 검사한다.
+	 * 마지막 이미지를 처리했으면 정상 종료다. */
 	} while (length && !last_image);
 
 	/* never return a size larger than the PCI resource window */
@@ -205,25 +255,39 @@ static size_t pci_get_rom_size(struct pci_dev *pdev, void __iomem *rom,
  */
 void __iomem *pci_map_rom(struct pci_dev *pdev, size_t *size)
 {
+	/* [한국어] 이 장치의 ROM 자원. */
 	struct resource *res = &pdev->resource[PCI_ROM_RESOURCE];
+	/* [한국어] 매핑할 물리 주소. loff_t 인 것은 파일 오프셋 타입을 재사용한 관례다. */
 	loff_t start;
+	/* [한국어] 매핑 결과 가상 주소. */
 	void __iomem *rom;
 
 	/* assign the ROM an address if it doesn't have one */
+	/* [한국어] 자원이 아직 부모 자원 트리에 붙어 있지 않으면(주소가 배정되지 않았으면)
+	 * 지금 배정한다. 위 영어 주석이 그 의도를 밝힌다.
+	 * ROM BAR 는 부팅 시 자원 배정에서 흔히 건너뛰어지므로 이 처리가 필요하다. */
 	if (res->parent == NULL && pci_assign_resource(pdev, PCI_ROM_RESOURCE))
 		return NULL;
 
+	/* [한국어] 배정된 물리 시작 주소. */
 	start = pci_resource_start(pdev, PCI_ROM_RESOURCE);
+	/* [한국어] 창 크기. 출력 인자로 호출자에게도 돌려준다. */
 	*size = pci_resource_len(pdev, PCI_ROM_RESOURCE);
+	/* [한국어] 크기가 0 이면 매핑할 것이 없다. */
 	if (*size == 0)
 		return NULL;
 
 	/* Enable ROM space decodes */
+	/* [한국어] ROM 디코딩을 켠다. 이 호출 전에는 그 주소를 읽어도 ROM 내용이 나오지 않는다. */
 	if (pci_enable_rom(pdev))
 		return NULL;
 
+	/* [한국어] ROM 창을 커널 주소 공간에 매핑한다. 캐시 불가 속성으로 매핑되므로
+	 * readw/readl 로 접근해야 한다. */
 	rom = ioremap(start, *size);
+	/* [한국어] 매핑 실패 검사. */
 	if (!rom)
+		/* [한국어] ROM 을 다시 꺼야 하므로 정리 구간으로 간다. */
 		goto err_ioremap;
 
 	/*
@@ -231,16 +295,25 @@ void __iomem *pci_map_rom(struct pci_dev *pdev, size_t *size)
 	 * size is much larger than the actual size of the ROM.
 	 * True size is important if the ROM is going to be copied.
 	 */
+	/* [한국어] 위 영어 주석대로, PCI 창 크기가 실제 ROM 이미지보다 훨씬 클 수 있다.
+	 * 이미지 체인을 따라가 진짜 크기를 구해 출력 인자를 갱신한다.
+	 * 복사할 때 이 크기가 정확해야 쓸데없는 바이트를 함께 가져가지 않는다. */
 	*size = pci_get_rom_size(pdev, rom, *size);
+	/* [한국어] 유효한 이미지가 하나도 없었다면, */
 	if (!*size)
+		/* [한국어] 매핑을 풀고 ROM 도 다시 끈다. */
 		goto invalid_rom;
 
 	return rom;
 
 invalid_rom:
+	/* [한국어] 매핑 해제. 아래로 이어져 ROM 비활성화까지 수행한다. */
 	iounmap(rom);
 err_ioremap:
 	/* restore enable if ioremap fails */
+	/* [한국어] 위 영어 주석대로, 원래 켜져 있던 ROM 이면 그대로 두어야 한다.
+	 * IORESOURCE_ROM_ENABLE 이 그 "원래 켜져 있었음"을 뜻하므로,
+	 * 그 플래그가 없을 때만 우리가 켠 것으로 보고 되돌린다. */
 	if (!(res->flags & IORESOURCE_ROM_ENABLE))
 		pci_disable_rom(pdev);
 	return NULL;
@@ -256,11 +329,15 @@ EXPORT_SYMBOL(pci_map_rom);
  */
 void pci_unmap_rom(struct pci_dev *pdev, void __iomem *rom)
 {
+	/* [한국어] 이 장치의 ROM 자원. 아래 플래그 검사에만 쓰인다. */
 	struct resource *res = &pdev->resource[PCI_ROM_RESOURCE];
 
+	/* [한국어] 먼저 매핑을 푼다. */
 	iounmap(rom);
 
 	/* Disable again before continuing */
+	/* [한국어] map 쪽과 같은 규칙이다 — 원래 켜져 있던 ROM 은 건드리지 않고,
+	 * 우리가 켠 경우에만 다시 끈다. */
 	if (!(res->flags & IORESOURCE_ROM_ENABLE))
 		pci_disable_rom(pdev);
 }
