@@ -267,7 +267,17 @@ static int pci_vc_do_save_buffer(struct pci_dev *dev, int pos,
 				 bool save)
 {
 	u32 cap1;
-	/* Extended VC Count, Low Priority EVCC, Port Arbitration entry size */
+	/* [한국어] Port VC Capability Register 1 에서 뽑아낼 세 값을 담는 지역 변수들.
+	 * evcc: Extended VC Count — VC0 을 제외하고 이 포트가 추가로 지원하는 VC 개수.
+	 *   아래에서 cap1 & PCI_VC_CAP1_EVCC 로 얻으며, 반복문의 상한이 되어
+	 *   저장/복원할 VC Resource 레지스터 쌍의 개수를 결정한다.
+	 * lpevcc: Low Priority Extended VC Count — 그중 저우선순위 VC 개수.
+	 *   VC Arbitration Table 의 존재 여부와 크기를 판단하는 데 쓰인다.
+	 * parb_size: Port Arbitration Table Entry Size(비트 단위).
+	 *   레지스터에는 지수로 저장되어 있어 1 << 값 으로 실제 비트 수를 얻는다.
+	 * 세 값 모두 char 로 선언되어 있지만 의미는 부호 없는 작은 정수다.
+	 * (이 자리에 있던 영어 한 줄 주석은 상류 원본에 없던 것이라 걷어냈다.
+	 *  원본의 영어 주석 세 줄은 각 값을 실제로 계산하는 곳에 그대로 남아 있다.) */
 	char evcc, lpevcc, parb_size;
 	int i, len = 0;
 	u8 *buf = save_state ? (u8 *)save_state->cap.data : NULL;
