@@ -76,6 +76,31 @@
  * This is the power on reset default so usually this should be a noop.
  */
 
+/* [한국어]
+ * pci_msi_init - MSI capability 위치를 캐시하고 켜져 있으면 끈다
+ *
+ * @dev: 열거 중인 장치.
+ *
+ * 두 가지를 한다. capability 오프셋을 dev->msi_cap 에 캐시하고,
+ * 그것이 이미 켜져 있으면 끈다.
+ *
+ * 끄는 쪽이 이 함수의 존재 이유다. 위 상류 주석이 밝히듯 전원 인가 직후에는
+ * 보통 꺼져 있지만, 부트로더나 킥스타트가 켜 둔 채 커널로 넘길 수 있다.
+ * 그 상태로 두면 커널이 MSI 를 설정하기도 전에 인터럽트가 들어와,
+ * 아무도 받지 않는 벡터로 향한다.
+ *
+ * 캐시가 필요한 이유는 pci_find_capability() 가 config 사슬을 훑어야 해서
+ * 비싸기 때문이다. 그 값이 0 이 아니라는 사실 자체가 이후 모든 경로에서
+ * "MSI 지원" 의 표시로 쓰인다.
+ *
+ * 실행 컨텍스트: 장치 열거. 프로세스 컨텍스트.
+ *
+ * 에러 경로: 없다. capability 가 없으면 0 이 남을 뿐이다.
+ *
+ * 호출 체인:
+ *   pci_init_capabilities() → [이 함수]
+ *     → pci_find_capability(PCI_CAP_ID_MSI) → pci_read/write_config_word()
+ */
 void pci_msi_init(struct pci_dev *dev)
 {
 	u16 ctrl;

@@ -1296,6 +1296,29 @@ static const struct config_item_type pci_epf_type = {
  * Returns an error pointer if this function is called for an unbound EPF device
  * or if the EPF driver add_cfs() method fails.
  */
+/* [한국어]
+ * pci_epf_type_add_cfs - EPF 드라이버가 노출할 configfs 그룹을 얻는다
+ *
+ * @epf: 대상 EPF 장치.
+ * @group: 부모 configfs 그룹.
+ * @return: 드라이버가 만든 그룹, NULL(그런 설정이 없음), 또는 ERR_PTR.
+ *
+ * EPF(Endpoint Function) 드라이버마다 사용자가 조정할 항목이 다르다.
+ * 그것을 코어가 미리 알 수 없으므로, 드라이버에게 물어 그 그룹을 받아
+ * configfs 트리에 붙인다.
+ *
+ * 세 가지 반환이 각각 다른 뜻이다. ERR_PTR 은 드라이버가 아직 바인딩되지
+ * 않아 물어볼 상대가 없다는 뜻이고, NULL 은 드라이버는 있으나 노출할 설정이
+ * 없다는 뜻이며, 유효한 포인터라야 실제 그룹이다. 호출자가 셋을 구분해
+ * 처리해야 한다.
+ *
+ * 실행 컨텍스트: configfs 조작. 프로세스 컨텍스트.
+ *
+ * 에러 경로: 드라이버 미바인딩만 ERR_PTR(-ENODEV)이며 로그를 남긴다.
+ *
+ * 호출 체인:
+ *   configfs 의 EPF 그룹 생성 → [이 함수] → epf->driver->ops->add_cfs()
+ */
 static struct config_group *pci_epf_type_add_cfs(struct pci_epf *epf,
 						 struct config_group *group)
 {
@@ -1602,7 +1625,7 @@ static const struct config_item_type pci_epf_group_type = {
  *
  * 호출 체인:
  *   EPF 드라이버 등록 → __pci_epf_register_driver() → pci_epf_add_cfs()
- *     [pci-epf-core.c] → [이 함수]
+ *   [pci-epf-core.c] → [이 함수]
  */
 struct config_group *pci_ep_cfs_add_epf_group(const char *name)
 {

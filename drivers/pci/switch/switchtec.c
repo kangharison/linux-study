@@ -360,6 +360,29 @@ struct switchtec_user {
  * due to a firmware reset which clears PCI state including the BARs and Memory
  * Space Enable bits.
  */
+/* [한국어]
+ * is_firmware_running - 스위치 펌웨어가 살아 있는지 확인한다
+ *
+ * @stdev: 대상 switchtec 장치.
+ * @return: 0 이 아니면 정상 동작 중.
+ *
+ * MMIO 로 읽은 장치 ID 를 PCI 열거 때 얻은 값과 비교한다.
+ *
+ * 이 단순한 비교가 판정으로 성립하는 이유가 있다. 펌웨어가 죽거나 갱신
+ * 중이면 MMIO 창이 응답하지 않아 모든 비트가 1(0xffffffff)로 읽히거나
+ * 0 이 읽히는데, 어느 쪽도 실제 장치 ID 와 같을 수 없다. 즉 "읽은 값이
+ * 기대한 값과 같다" 는 것이 곧 "창이 살아 있다" 는 뜻이 된다.
+ *
+ * MRPC(Management Remote Procedure Call)를 보내기 전에 확인하는 데 쓴다.
+ * 죽은 펌웨어에 명령을 보내면 응답을 영영 기다리게 된다.
+ *
+ * 실행 컨텍스트: MRPC 경로와 초기화. 잠들지 않는다.
+ *
+ * 에러 경로: 없다. 판정 결과가 반환값이다.
+ *
+ * 호출 체인:
+ *   switchtec 초기화와 MRPC 전송 경로 → [이 함수] → ioread32()
+ */
 static int is_firmware_running(struct switchtec_dev *stdev)
 {
 	/* [한국어] 시스템 정보 블록의 device_id 를 읽는다. 이 필드는 공용체 바깥에

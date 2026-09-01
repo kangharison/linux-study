@@ -757,6 +757,29 @@ EXPORT_SYMBOL_GPL(pci_create_slot);
  * just call kobject_put on its kobj and let our release methods do the
  * rest.
  */
+/* [한국어]
+ * pci_destroy_slot - 슬롯의 참조를 하나 놓는다
+ *
+ * @slot: 놓을 슬롯.
+ *
+ * 이름이 destroy 지만 실제로 해제하는 것은 마지막 참조가 사라졌을 때뿐이다.
+ * 같은 슬롯을 여러 주체(핫플러그 드라이버, ACPI, 플랫폼 코드)가 각각
+ * 등록할 수 있어, 참조 계수로 수명을 관리하기 때문이다.
+ *
+ * 실제 해제는 pci_slot_release() 가 kobject 소멸자로 불려 처리한다.
+ *
+ * pci_slot_mutex 를 잡는 이유는 pci_create_slot() 이 같은 락 아래에서
+ * 기존 슬롯을 찾아 참조를 올리기 때문이다. 그 사이에 마지막 참조가
+ * 사라지면 이미 해제된 슬롯을 돌려주게 된다.
+ *
+ * 실행 컨텍스트: 슬롯 해제 경로. 프로세스 컨텍스트.
+ *
+ * 에러 경로: 없다.
+ *
+ * 호출 체인:
+ *   핫플러그 드라이버의 슬롯 해제 → [이 함수] → kobject_put()
+ *     → (마지막 참조였으면) pci_slot_release()
+ */
 void pci_destroy_slot(struct pci_slot *slot)
 {
 	/* [한국어] 참조 카운트를 줄인 결과를 남긴다. 여러 주체가 같은 슬롯을 등록할 수 있어,

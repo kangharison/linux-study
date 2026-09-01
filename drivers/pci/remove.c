@@ -395,6 +395,29 @@ static void pci_remove_bus_device(struct pci_dev *dev)
  * device lists, remove the /proc entry, and notify userspace
  * (/sbin/hotplug).
  */
+/* [한국어]
+ * pci_stop_and_remove_bus_device - 장치와 그 아래 전부를 정지시키고 해제한다
+ *
+ * @dev: 제거할 장치.
+ *
+ * 위 상류 kernel-doc 이 하는 일을 밝히고, 이 블록은 그것이 왜 두 단계인지를 적는다.
+ *
+ * 몸통은 세 줄뿐이다 — 잠금 확인, 정지, 해제. 그 두 단계를 나눈 이유가
+ * 이 함수의 전부다. 트리 전체를 먼저 멈춰 세운 뒤에 해제해야, 아직 살아
+ * 있는 부모를 통해 이미 해제된 자식에 접근하는 일이 없다.
+ *
+ * lockdep_assert_held() 는 호출자가 pci_rescan_remove_lock 을 이미 쥐고
+ * 있어야 함을 못박는다. 락을 잡아 주는 판이 따로 있어
+ * (pci_stop_and_remove_bus_device_locked), 호출자의 사정에 따라 고른다.
+ *
+ * 실행 컨텍스트: 장치 제거 경로. 프로세스 컨텍스트이며 잠들 수 있다.
+ *
+ * 에러 경로: 없다. 반환값이 없어 실패를 알릴 방법도 없다.
+ *
+ * 호출 체인:
+ *   핫플러그 드라이버 / sysfs remove → [이 함수]
+ *     → pci_stop_bus_device() → pci_remove_bus_device()
+ */
 void pci_stop_and_remove_bus_device(struct pci_dev *dev)
 {
 	lockdep_assert_held(&pci_rescan_remove_lock);

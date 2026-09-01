@@ -594,6 +594,30 @@ out:
  * If the device provided has no subordinate bus, e.g., an RCEC or RCiEP,
  * call the callback on the device itself.
  */
+/* [한국어]
+ * pci_walk_bridge - 브리지 아래 전체(또는 브리지 자신)에 콜백을 적용한다
+ *
+ * @bridge: 기준이 될 브리지 또는 장치.
+ * @cb: 각 장치에 적용할 콜백.
+ * @userdata: 콜백에 함께 넘길 포인터.
+ *
+ * 두 줄짜리 함수지만 pcie_do_recovery() 의 모든 방송이 이것을 거친다.
+ *
+ * 하는 일은 "브리지면 그 아래를 훑고, 아니면 자기 자신에게만 적용" 이다.
+ * 그 덕분에 호출자가 대상이 브리지인지 아닌지 신경 쓰지 않아도 된다 —
+ * RCiEP 처럼 하위 버스가 없는 장치도 같은 코드로 다뤄진다.
+ *
+ * pcie_do_recovery() 가 기준점을 고를 때 루트 포트·다운스트림 포트·RCEC·
+ * RCiEP 는 자기 자신을, 그 밖은 상류 브리지를 잡는데, 그 두 경우가 여기서
+ * 자연스럽게 합류한다.
+ *
+ * 실행 컨텍스트: 복구 경로. pci_walk_bus() 가 pci_bus_sem 을 읽기로 잡는다.
+ *
+ * 에러 경로: 없다. 콜백의 반환값도 보지 않는다.
+ *
+ * 호출 체인:
+ *   pcie_do_recovery() → [이 함수] → pci_walk_bus() 또는 cb() 직접 호출
+ */
 static void pci_walk_bridge(struct pci_dev *bridge,
 			    int (*cb)(struct pci_dev *, void *),
 			    void *userdata)

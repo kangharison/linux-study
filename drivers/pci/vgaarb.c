@@ -648,6 +648,29 @@ static struct pci_dev *vga_default;
  *     -> [vgadev_find] -> list_for_each_entry()
  */
 /* Find somebody in our list */
+/* [한국어]
+ * vgadev_find - pci_dev 로 등록된 VGA 장치 항목을 찾는다
+ *
+ * @pdev: 찾을 장치.
+ * @return: 그 장치의 vga_device, 없으면 NULL.
+ *
+ * 전역 vga_list 를 선형 탐색한다. VGA 중재 대상 장치가 시스템에 많아야
+ * 서너 개라 자료구조를 더 얹을 값어치가 없다.
+ *
+ * 포인터 동일성으로 판정하는 것이 요점이다. 도메인·버스·devfn 을 비교하지
+ * 않는데, 같은 pci_dev 인스턴스인지가 곧 같은 장치인지이기 때문이다.
+ *
+ * 호출자가 vga_lock 을 쥔 상태에서만 불려야 한다. 반환한 포인터가 그 락을
+ * 놓는 순간부터 유효하지 않기 때문이며, 이 함수 자체는 락을 잡지 않는다.
+ *
+ * 실행 컨텍스트: VGA 중재 경로. 호출자가 vga_lock 을 쥔다.
+ *
+ * 에러 경로: 없다. 못 찾으면 NULL 이며, 중재 대상이 아닌 장치이거나 이미
+ * 제거된 장치라는 뜻이다.
+ *
+ * 호출 체인:
+ *   vga_get() / vga_put() / vga_set_legacy_decoding() 등 → [이 함수]
+ */
 static struct vga_device *vgadev_find(struct pci_dev *pdev)
 {
 	/* [한국어] 순회용 커서. list_for_each_entry 가 매 반복마다 채워 준다. */
@@ -1037,8 +1060,8 @@ static void vga_check_first_use(void)
  * 호출 체인:
  *   vga_get() / vga_tryget() -> [__vga_tryget]
  *     -> pci_set_vga_state() [drivers/pci/pci.c]
- *          -> pci_write_config_word(PCI_COMMAND) 와
- *             경로상 브리지의 pci_write_config_word(PCI_BRIDGE_CONTROL)
+ *     -> pci_write_config_word(PCI_COMMAND) 와
+ *   경로상 브리지의 pci_write_config_word(PCI_BRIDGE_CONTROL)
  */
 static struct vga_device *__vga_tryget(struct vga_device *vgadev,
 				       unsigned int rsrc)
@@ -1512,9 +1535,9 @@ static void __vga_put(struct vga_device *vgadev, unsigned int rsrc)
  * 호출 체인:
  *   GPU 드라이버 / vga_arb_write()(vga_get_uninterruptible 경유)
  *     -> [vga_get] -> vga_check_first_use()
- *                  -> spin_lock_irqsave(vga_lock) -> vgadev_find()
- *                  -> __vga_tryget() -> pci_set_vga_state()
- *                  -> schedule() (충돌 시)
+ *     -> spin_lock_irqsave(vga_lock) -> vgadev_find()
+ *     -> __vga_tryget() -> pci_set_vga_state()
+ *     -> schedule() (충돌 시)
  */
 int vga_get(struct pci_dev *pdev, unsigned int rsrc, int interruptible)
 {
@@ -2254,9 +2277,9 @@ static void vga_arbiter_check_bridge_sharing(struct vga_device *vgadev)
  * 호출 체인:
  *   pci_notify()(BUS_NOTIFY_ADD_DEVICE) 또는 vga_arb_device_init()
  *     -> [vga_arbiter_add_pci_device]
- *        -> kzalloc_obj() -> vgadev_find() -> pci_read_config_word()
- *        -> vga_is_boot_device() -> vga_set_default_device()
- *        -> vga_arbiter_check_bridge_sharing() -> list_add_tail()
+ *     -> kzalloc_obj() -> vgadev_find() -> pci_read_config_word()
+ *     -> vga_is_boot_device() -> vga_set_default_device()
+ *     -> vga_arbiter_check_bridge_sharing() -> list_add_tail()
  */
 static bool vga_arbiter_add_pci_device(struct pci_dev *pdev)
 {
@@ -2631,7 +2654,7 @@ static void vga_update_device_decodes(struct vga_device *vgadev,
  * 호출 체인:
  *   vga_set_legacy_decoding()(커널) / vga_arb_write()("decodes", 유저스페이스)
  *     -> [__vga_set_legacy_decoding] -> vgadev_find()
- *        -> vga_update_device_decodes()
+ *     -> vga_update_device_decodes()
  */
 static void __vga_set_legacy_decoding(struct pci_dev *pdev,
 				      unsigned int decodes,
