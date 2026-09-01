@@ -64,7 +64,8 @@
  * 소유권을 유지하는 서버로, 이때도 이쪽이 담당한다.
  *
  * === 주요 함수/구조체 요약 ===
- * init_acpi() / acpiphp_init() : 모듈 초기화. glue 계층을 준비한다.
+ * acpiphp_init()       : 모듈 초기화. 이 파일의 유일한 초기화 함수이며,
+ *                        acpiphp_disabled 를 확인하고 로그를 남긴다.
  * enable_slot() / disable_slot(): sysfs 전원 조작을 ACPI 쪽으로 넘긴다.
  * set_attention_status() / get_attention_status() : Attention LED.
  *                          ACPI 에서는 _STA 등으로 표현된다.

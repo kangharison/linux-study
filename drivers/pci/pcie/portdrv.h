@@ -229,7 +229,8 @@ struct pcie_port_service_driver {
 
 	int (*probe)(struct pcie_device *dev);
 	/* [한국어] 이 서비스를 제공하는 포트가 발견됐을 때 불린다.
-	 * 설정자: 서비스 드라이버. 읽는 자: pcie_port_probe_service().
+	 * 설정자: 서비스 드라이버. 읽는 자: pcie_port_bus_probe()(portdrv.c:1325)가
+	 *   driver->probe 로 이 포인터를 꺼내 부른다.
 	 * 반환: 0 이면 바인딩 성공, 음수면 이 포트에서는 서비스를 켜지 않는다.
 	 * 실행 컨텍스트: 프로세스 컨텍스트. 여기서 request_irq 를 건다. */
 

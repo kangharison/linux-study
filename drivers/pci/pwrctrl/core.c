@@ -33,18 +33,21 @@
  * 전원 인가: pwrctrl 드라이버(generic.c 등)가 그 device 에 바인딩
  *              -> 레귤레이터/클럭/리셋 제어
  *              -> [이 파일] pci_pwrctrl_device_set_ready()
- *                 -> 워크큐에 재스캔을 예약
- *                    -> pci_rescan_bus() -> 장치 발견 -> 드라이버 probe
+ *                 -> bus_register_notifier() 로 PCI 버스 알림을 구독한다.
+ *                    이 트리의 이 파일에는 재스캔 워크도 pci_rescan_bus()
+ *                    호출도 없다(전수 grep 확인). 알림을 받으면
+ *                    pci_pwrctrl_notify() 가 같은 DT 노드를 쓰는 PCI 장치에
+ *                    of_node_reused 를 표시할 뿐이다
  *
  * 제거:     [이 파일] pci_pwrctrl_device_unset_ready() / _cleanup()
  *
- * 실행 컨텍스트: 등록/해제는 프로세스 컨텍스트. 재스캔은 워크큐 스레드.
+ * 실행 컨텍스트: 전부 프로세스 컨텍스트다. 알림 콜백도 버스 알림 사슬
+ * 안에서 불리므로 마찬가지다.
  *
  * === 타 모듈과의 연결 ===
  * 위쪽: probe.c 와 of.c 의 열거 경로, 그리고 각 pwrctrl 드라이버.
- * 아래쪽: 플랫폼 장치 인프라, 그리고 pci_rescan_bus().
- * 공유 상태: struct pci_pwrctrl — 재스캔 워크, notifier 블록,
- *   그리고 대상 장치를 담는다.
+ * 아래쪽: 플랫폼 장치 인프라와 버스 알림(bus_register_notifier).
+ * 공유 상태: struct pci_pwrctrl — notifier 블록과 대상 장치를 담는다.
  *
  * === NVMe 관점 ===
  * NVMe 드라이버는 이 파일의 함수를 쓰지 않는다(전수 확인).
@@ -62,12 +65,20 @@
  *
  * === 주요 함수/구조체 요약 ===
  * pci_pwrctrl_init()              : struct pci_pwrctrl 을 초기화한다.
- * pci_pwrctrl_device_set_ready()  : "전원이 들어왔다" 를 알리고 재스캔을 예약한다.
- * pci_pwrctrl_device_unset_ready(): 그 예약을 취소하고 정리한다.
+ * pci_pwrctrl_device_set_ready()  : PCI 버스 알림을 구독한다(:151).
+ * pci_pwrctrl_device_unset_ready(): 구독을 해제한다. 함수 안의 영어 주석대로
+ *                                   링크를 따로 지울 필요는 없다.
  * devm_pci_pwrctrl_device_set_ready() : devres 판. 드라이버가 떨어질 때
  *                                   자동으로 unset 된다.
- * pci_pwrctrl_rescan()            : 워크큐가 실행하는 재스캔 본체.
- * pci_pwrctrl_notify()            : 장치 등록/해제 알림을 받아 처리한다.
+ * pci_pwrctrl_notify()            : 알림 콜백. 같은 DT 노드를 platform device 와
+ *                                   PCI device 가 함께 쓰는 상황에서, 나중에
+ *                                   온 PCI 쪽에 of_node_reused 를 표시해
+ *                                   핀을 두 번 잡지 않게 한다.
+ * pci_pwrctrl_power_on_devices() / _power_off_devices() : 부모 아래 DT 노드를
+ *                                   훑어 pwrctrl 장치들을 켜고 끈다.
+ * pci_pwrctrl_create_devices() / _destroy_devices() : 그 platform device 들을
+ *                                   만들고 없앤다. pci_pwrctrl_is_required() 가
+ *                                   대상 노드인지 판정한다.
  * struct pci_pwrctrl              : 이 인프라의 상태 묶음.
  */
 

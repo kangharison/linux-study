@@ -65,8 +65,11 @@
  *                         같은 번호가 두 번 등록되면 "-1" 을 붙인다.
  * pci_slot_attrs        : sysfs 속성. address(장치 주소)와
  *                         function 별 정보를 노출한다.
- * pci_hp_create_module_link() / _remove_module_link() : sysfs 에서 슬롯과
- *                         그것을 관리하는 모듈을 잇는 심볼릭 링크.
+ * pci_dev_assign_slot() : 새로 발견된 장치를 이미 등록된 슬롯에 이어 준다.
+ * get_slot()            : 같은 번호의 슬롯이 이미 있는지 찾는다.
+ * rename_slot()         : 이미 있는 슬롯의 이름을 바꾼다.
+ * bus_speed_read() / max_speed_read_file() / cur_speed_read_file() :
+ *                         버스 속도를 사람이 읽을 문자열로 내보내는 핸들러.
  */
 
 #include <linux/kobject.h>

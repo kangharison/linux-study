@@ -50,8 +50,10 @@
  *
  * === 전체 아키텍처에서의 위치 ===
  * 등록: pci-sysfs.c 가 장치의 속성을 만들 때
- *         -> [이 파일] pci_create_firmware_label_files()
- *            -> _DSM 또는 SMBIOS 를 조회해 값이 있으면 속성을 만든다
+ *         -> [이 파일] smbios_attr_is_visible() / acpi_attr_is_visible()
+ *            -> 속성을 만들지 말지를 그때그때 판정한다. 파일을 만드는
+ *               별도 함수가 있는 것이 아니라, sysfs 속성 그룹의 is_visible
+ *               콜백으로 노출 여부를 정하는 방식이다
  *
  * 읽기: cat /sys/bus/pci/devices/.../label
  *         -> [이 파일] label_show() / index_show()
@@ -71,13 +73,15 @@
  * 꽂는 형태라 이름표보다 슬롯 번호(slot.c)가 더 유용하다.
  *
  * === 주요 함수/구조체 요약 ===
- * pci_create_firmware_label_files() : label / index 속성을 만든다.
- *                                     값이 없으면 아무것도 만들지 않는다.
- * pci_remove_firmware_label_files() : 그 반대.
+ * smbios_attr_is_visible() / acpi_attr_is_visible() : sysfs 속성 그룹의
+ *                        is_visible 콜백. 값이 있을 때만 속성을 보이게 한다.
+ *                        "파일을 만드는 함수" 는 따로 없다.
  * dsm_get_label()      : ACPI _DSM 으로 이름표를 얻는다.
- * device_has_dsm()     : 이 장치에 해당 _DSM 이 있는지 확인.
- * label_show() / index_show() : sysfs 읽기 핸들러.
- * smbios_instance_string_exist() : SMBIOS type 41 항목이 있는지 확인.
+ * device_has_acpi_name() : 이 장치에 해당 _DSM 이 있는지 확인.
+ * label_show() / acpi_index_show() : ACPI 쪽 sysfs 읽기 핸들러.
+ * smbios_label_show() / index_show() : SMBIOS 쪽 sysfs 읽기 핸들러.
+ * find_smbios_instance_string() : SMBIOS type 41 항목을 찾는다.
+ * dsm_label_utf16s_to_utf8s() : _DSM 이 준 UTF-16 문자열을 UTF-8 로 옮긴다.
  */
 
 #include <linux/dmi.h>

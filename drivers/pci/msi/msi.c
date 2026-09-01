@@ -2492,13 +2492,13 @@ void pci_free_msi_irqs(struct pci_dev *dev)
  * 상류 주석이 이 방식을 "horrible hack" 이라 부르는 이유다.
  * 실행 컨텍스트: 프로세스 컨텍스트(뮤텍스를 잡는다).
  *
- * 이 트리에서 확인한 유일한 호출자는 drivers/pci/tph.c:449 의
- * pci_tph_set_st_entry() 이며, drivers/nvme/ 에는 호출이 하나도 없다
+ * 이 트리에서 확인한 유일한 호출자는 drivers/pci/tph.c 의
+ * pcie_tph_set_st_entry()(:904)이며, drivers/nvme/ 에는 호출이 하나도 없다
  * (전수 grep 확인). 앞선 주석이 "NVMe CMB/P2PDMA 지역성 최적화" 를
  * 말했으나 근거가 없어 삭제했다.
  *
  * 호출 체인:
- *   드라이버 -> pci_tph_set_st_entry() [tph.c]
+ *   드라이버 -> pcie_tph_set_st_entry() [tph.c:904]
  *     -> [이 함수] -> pci_msix_write_vector_ctrl() [msi.h] -> writel()
  */
 /**

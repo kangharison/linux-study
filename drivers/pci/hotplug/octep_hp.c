@@ -46,10 +46,12 @@
  * 소프트웨어가 만들어 내는 착탈이다.
  *
  * === 주요 함수/구조체 요약 ===
- * octep_hp_probe()        : OCTEON 장치에 바인딩되어 슬롯들을 등록한다.
- * octep_hp_remove()       : 그 반대.
+ * octep_hp_pci_probe()    : OCTEON 장치에 바인딩되어 슬롯들을 등록한다.
+ *                           pci_driver 에 .remove 가 없다(:478) — 정리는
+ *                           devres 와 module_pci_driver 에 맡긴다.
  * octep_hp_intr_handler() : 인터럽트를 받아 명령을 읽고 큐에 넣는다.
- * octep_hp_pfvf_cmd_handler() / 워크 함수 : 큐의 명령을 실제로 처리한다.
+ * octep_hp_cmd_handler() / octep_hp_work_handler() : 큐의 명령을 실제로
+ *                           처리한다.
  * octep_hp_enable_slot() / octep_hp_disable_slot() : 핫플러그 코어 콜백.
  * struct octep_hp_controller : 이 카드의 전체 상태.
  * struct octep_hp_device     : 슬롯 하나에 대응.

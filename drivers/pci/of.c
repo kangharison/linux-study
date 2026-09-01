@@ -304,10 +304,11 @@ void pci_set_bus_of_node(struct pci_bus *bus)
  *
  * 실행 컨텍스트: 프로세스 컨텍스트(버스 제거).
  *
- * 이 트리에서 확인한 호출자: drivers/pci/probe.c:273 (pci_release_bus).
+ * 이 트리에서 확인한 호출자: drivers/pci/probe.c:273 —
+ * 그 줄을 품은 함수는 release_pcibus_dev() 다.
  *
  * 호출 체인:
- *   pci_release_bus() [probe.c] -> [이 함수] -> of_node_put()
+ *   release_pcibus_dev() [probe.c:273] -> [이 함수] -> of_node_put()
  */
 void pci_release_bus_of_node(struct pci_bus *bus)
 {

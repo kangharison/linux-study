@@ -64,8 +64,11 @@
  * pci_rebar_set_size()          : BAR Control 에 새 크기를 쓴다.
  * pci_resize_resource()         : 크기 변경의 진입점. 자원을 놓고, 크기를
  *                                 바꾸고, 재배치가 필요하다고 표시한다.
- * pci_reassign_bridge_resources(): 바뀐 크기를 담도록 상위 브리지 윈도우를
- *                                 다시 계산한다.
+ * pci_resize_is_memory_decoding_enabled() : 메모리 디코딩이 켜져 있으면
+ *                                 크기를 바꿀 수 없으므로 먼저 확인한다.
+ * pci_resize_resource_set_size() : 크기 변경 뒤 자원 구조체를 갱신한다.
+ * 상위 브리지 윈도우 재계산은 이 파일에 없다. pci_resize_resource() 가
+ * setup-bus.c:6541 의 pci_do_resource_release_and_resize() 로 넘긴다.
  */
 
 #include <linux/bits.h>

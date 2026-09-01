@@ -77,9 +77,13 @@
  * aer_inject()              : 주입의 본체. ops 를 가로채고 가짜 상태를
  *                             등록한 뒤 aer_irq 를 부른다.
  * aer_inject_write()        : /dev/aer_inject 의 write 핸들러.
- * pci_read_aer() / pci_write_aer() : 가로챈 config 접근. AER 레지스터
- *                             범위면 가짜 값을, 아니면 원래 ops 로 넘긴다.
- * find_pci_bus_ops() / pci_bus_set_aer_ops() : ops 가로채기 관리.
+ * aer_inj_read_config() / aer_inj_write_config() : 가로챈 config 접근.
+ *                             AER 레지스터 범위면 가짜 값을, 아니면 원래
+ *                             ops 로 넘긴다. 실제 읽기·쓰기는 그 아래의
+ *                             aer_inj_read() / aer_inj_write() 가 한다.
+ * __find_pci_bus_ops() / pci_bus_set_aer_ops() / pci_bus_ops_pop() :
+ *                             ops 가로채기 관리.
+ * __find_aer_error() / __find_aer_error_by_dev() : 등록된 가짜 오류 찾기.
  * struct aer_error          : 주입된 가짜 오류 하나. 어느 장치의 어느
  *                             레지스터에 어떤 값을 보이게 할지 담는다.
  * struct pci_bus_ops        : 가로채기 전의 원래 ops 를 보관해 두는 구조.

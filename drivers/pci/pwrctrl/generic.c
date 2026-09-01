@@ -24,34 +24,49 @@
  * === 전체 아키텍처에서의 위치 ===
  * pwrctrl/core.c 가 DT 를 보고 만든 platform device
  *   -> 드라이버 코어가 compatible 로 이 드라이버를 바인딩
- *      -> [이 파일] pci_pwrctrl_generic_probe()
- *         -> devm_regulator_bulk_get_enable() 로 레귤레이터를 켜고
+ *      -> [이 파일] slot_pwrctrl_probe()
+ *         -> DT 에 of_graph 연결이 있으면 devm_pwrseq_get("pcie") 로
+ *            전원 시퀀서에 위임하고, 없으면 of_regulator_bulk_get_all() 로
+ *            전원 목록을 통째로 받아 클럭과 함께 직접 켠다
  *         -> devm_pci_pwrctrl_device_set_ready() 로 코어에 알린다
- *            -> 코어가 버스 재스캔을 예약 -> 장치 발견
+ *            -> 코어(pwrctrl/core.c)가 PCI 버스 알림을 구독한다.
+ *               이 트리의 core.c 에는 재스캔 워크가 없다 — 그쪽 헤더 참고
  *
  * 실행 컨텍스트: 프로세스 컨텍스트(probe).
  *
  * === 타 모듈과의 연결 ===
  * 위쪽: 플랫폼 드라이버 코어.
- * 아래쪽: pwrctrl/core.c 의 인프라, regulator 서브시스템.
- * 공유 상태: struct pci_pwrctrl 하나.
+ * 아래쪽: pwrctrl/core.c 의 인프라, regulator 서브시스템, clk 서브시스템,
+ * 그리고 pwrseq(전원 시퀀서).
+ * 공유 상태: struct slot_pwrctrl 안에 내장된 struct pci_pwrctrl 하나.
+ * 두 power 콜백이 container_of 로 그것을 거슬러 올라간다.
  *
  * === NVMe 관점 ===
  * NVMe 드라이버와 직접 관련이 없다(전수 확인).
  *
- * 임베디드 보드에 NVMe 를 붙였고 그 슬롯의 전원이 DT 에 단순 레귤레이터로
- * 기술돼 있다면, 이 드라이버가 전원을 넣은 뒤에야 NVMe 가 열거된다.
+ * 임베디드 보드에 NVMe 를 붙였고 그 슬롯의 전원이 DT 에 레귤레이터(또는
+ * 전원 시퀀서)로 기술돼 있다면, 이 드라이버가 전원을 넣은 뒤에야 NVMe 가
+ * 열거된다.
  * 자세한 흐름은 pwrctrl/core.c 의 헤더 참고.
  *
- * (기존 주석은 이 드라이버가 "전원/클록/리셋 시퀀스" 를 제어한다고 적었으나,
- *  이 파일이 실제로 다루는 것은 레귤레이터뿐이다. 클럭과 리셋을 다루는
- *  것은 같은 디렉터리의 보드 전용 드라이버들이다.)
+ * 이 드라이버가 다루는 것은 레귤레이터와 클럭이다. slot_pwrctrl_power_on()
+ * 이 둘을 함께 켜고 power_off() 가 반대로 끈다. 그와 별개로, DT 에
+ * of_graph 연결이 있으면 레귤레이터를 직접 다루지 않고 pwrseq(전원 시퀀서)에
+ * 위임하는 두 번째 경로가 있다 — probe 가 그 유무로 갈라진다.
  *
  * === 주요 함수/구조체 요약 ===
- * pci_pwrctrl_generic_probe()  : DT 의 레귤레이터 목록을 켜고 코어에 알린다.
- *                                devres 덕분에 정리 코드가 필요 없다.
- * pci_pwrctrl_generic_dt_ids[] : 이 드라이버가 담당할 DT compatible 목록.
- * pci_pwrctrl_generic_driver   : 플랫폼 드라이버 구조체.
+ * slot_pwrctrl_probe()      : of_graph 연결이 있으면 pwrseq 를 얻어 그쪽에
+ *                             맡기고, 없으면 of_regulator_bulk_get_all() 로
+ *                             DT 의 전원 목록을 통째로 받는다. 슬롯마다 필요한
+ *                             전원 종류가 달라 드라이버가 미리 알 수 없기
+ *                             때문에 이름을 지정하지 않고 받는다.
+ * slot_pwrctrl_power_on() / slot_pwrctrl_power_off() : 레귤레이터와 클럭을
+ *                             켜고 끈다. pci_pwrctrl 에서 container_of 로
+ *                             struct slot_pwrctrl 을 되찾아 쓴다.
+ * devm_slot_pwrctrl_release() : devres 해제 콜백.
+ * struct slot_pwrctrl       : 이 드라이버의 상태. pci_pwrctrl 을 품고 있어
+ *                             위 두 콜백이 container_of 로 거슬러 올라간다.
+ * slot_pwrctrl_of_match[] / slot_pwrctrl_driver : DT 매치 표와 드라이버 구조체.
  */
 
 /* [한국어] clk_prepare_enable()/clk_disable_unprepare() 와 devm_clk_get_optional(). */

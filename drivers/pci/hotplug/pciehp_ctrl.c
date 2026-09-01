@@ -80,7 +80,10 @@
  * pciehp_enable_slot()        : 전원을 넣고 링크를 기다린 뒤 열거한다.
  * pciehp_disable_slot()       : 제거하고 전원을 끈다.
  * __pciehp_enable_slot() / __pciehp_disable_slot() : 잠금 없는 내부 판.
- * pciehp_sync_bus_speed()     : 링크 속도를 다시 읽어 반영한다.
+ * pciehp_sysfs_enable_slot() / pciehp_sysfs_disable_slot() : sysfs 요청용
+ *                               바깥 진입점. 위 두 함수를 잠금과 함께 감싼다.
+ * set_slot_off()              : 전원과 표시등을 끄는 공통 뒤처리.
+ * board_added() / remove_board() : 열거와 해제의 실제 몸통.
  */
 
 #define dev_fmt(fmt) "pciehp: " fmt

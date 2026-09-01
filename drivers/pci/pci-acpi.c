@@ -255,7 +255,8 @@ const guid_t pci_acpi_dsm_guid =
  *   보고한다. 앞의 경우 목록이 만들어지지 않았으므로 해제할 것도 없다.
  *
  * 호출 체인:
- *   pci_thunder_pem_init() [controller/pci-thunder-pem.c:392]
+ *   thunder_pem_acpi_init() [controller/pci-thunder-pem.c:380]
+ *     — 그 안에서 thunder_pem_init()(:306)으로 이어진다
  *     -> acpi_get_rc_resources() -> [acpi_get_rc_addr]
  *        -> acpi_dev_get_resources(), acpi_dev_free_resource_list()
  */
@@ -1961,7 +1962,9 @@ bool shpchp_is_native(struct pci_dev *bridge)
  *   컨텍스트). 잠들 수 있다.
  *
  * 호출 체인:
- *   ACPI GPE -> acpi_pm_notify_handler() -> [pci_acpi_wake_bus]
+ *   ACPI GPE -> acpi_pm_notify_handler()(ACPI 코어. drivers/acpi 가 이
+ *     스파스 체크아웃에 없어 이 트리에서는 확인할 수 없다)
+ *       -> [pci_acpi_wake_bus]
  *     -> pci_pme_wakeup_bus()
  */
 static void pci_acpi_wake_bus(struct acpi_device_wakeup_context *context)

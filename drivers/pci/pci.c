@@ -10823,7 +10823,7 @@ static void pci_bus_save_and_disable_locked(struct pci_bus *bus)
  *
  * pci_bus_save_and_disable_locked() 의 짝이다. 저장 쪽과 달리 이쪽에는
  * 반드시 위에서 아래여야 하는 강한 이유가 있고, 원문 주석이 그것을 밝힌다 —
- * "Parent bridges need to be restored before we can get to subordinate devices."
+ * 하위 장치에 닿으려면 그 앞의 부모 브리지들이 먼저 복원되어 있어야 한다는 것이다.
  *
  * 왜 그런가. 브리지의 config 에는 그 아래 버스로 어떤 주소 범위를 통과시킬지
  * 정하는 윈도우 레지스터(Memory Base/Limit 등)와 버스 번호가 들어 있다.
@@ -12422,7 +12422,7 @@ EXPORT_SYMBOL(pcie_print_link_status);
  * @flags:  고를 기준. IORESOURCE_MEM, IORESOURCE_IO 등을 OR 로 조합한다.
  * @return: 비트 i 가 1 이면 i 번 자원이 조건에 맞는다는 뜻.
  *
- * pci_request_selected_regions() 나 pci_enable_device_bars() 처럼 "여러 BAR 을
+ * pci_request_selected_regions()(:7343)처럼 "여러 BAR 을
  * 한꺼번에" 다루는 함수들이 인자로 받는 마스크를 만들어 준다. BAR 번호를
  * 손으로 세어 (1<<0)|(1<<4) 같은 상수를 쓰는 대신, "메모리 자원 전부" 라는
  * 의도를 그대로 표현할 수 있다.

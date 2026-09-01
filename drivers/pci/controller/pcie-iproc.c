@@ -44,7 +44,7 @@
  *
  * 정방향(설정):
  *   iproc_bcma_pcie_probe() [pcie-iproc-bcma.c:340] 또는
- *   iproc_pcie_pltfm_probe() [pcie-iproc-platform.c:107]
+ *   iproc_pltfm_pcie_probe() [pcie-iproc-platform.c:247]
  *     -> [이 파일] iproc_pcie_setup():1445
  *        -> iproc_pcie_rev_init():1379   변종별 표와 플래그를 고른다
  *        -> iproc_pcie_check_link():766  PERST 를 풀고 링크 학습을 기다린다
@@ -1511,7 +1511,7 @@ static void iproc_pcie_perst_ctrl(struct iproc_pcie *pcie, bool assert)
  *
  * 실행 컨텍스트: 프로세스 컨텍스트(시스템 종료). 잠든다.
  *
- * 호출 체인:  iproc_pcie_pltfm_shutdown() [pcie-iproc-platform.c:128]
+ * 호출 체인:  iproc_pltfm_pcie_shutdown() [pcie-iproc-platform.c:452]
  *               → [이 함수] → iproc_pcie_perst_ctrl()
  */
 int iproc_pcie_shutdown(struct iproc_pcie *pcie)

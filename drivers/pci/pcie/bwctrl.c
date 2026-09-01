@@ -45,17 +45,21 @@
  *         -> pcie_bwnotif_probe() -> IRQ 등록, LNKCTL 의 알림 활성화
  *
  * 발생: 링크 속도/폭 변화
- *         -> [이 파일] pcie_bwnotif_irq()(하드 IRQ)
- *            -> pcie_bwnotif_irq_thread()(스레드)
- *               -> pcie_update_link_speed() 로 캐시 갱신
- *               -> LBMS/LABS 상태 비트를 지운다(RW1C)
+ *         -> [이 파일] pcie_bwnotif_irq() — 스레드로 넘기지 않고 이 핸들러
+ *            안에서 전부 처리한다(request_irq 를 IRQF_SHARED 로만 걸며,
+ *            :344 에 스레드 함수 인자가 없다)
+ *               -> LBMS/LABS 상태 비트를 먼저 지우고(RW1C)
+ *               -> 그 뒤에 pcie_update_link_speed() 로 캐시 갱신.
+ *                  순서가 반대면 지우는 사이에 일어난 변화를 놓친다
+ *                  (함수 안의 영어 주석이 그 이유를 밝힌다)
  *
  * 제어: thermal 코어 또는 커널 내부
  *         -> [이 파일] pcie_set_target_speed()
  *            -> LNKCTL2 설정 -> 링크 재훈련 -> 완료 대기
  *
- * 실행 컨텍스트: IRQ 핸들러는 하드 IRQ, 실제 처리는 스레드. 속도 제어는
- * 프로세스 컨텍스트(재훈련 대기가 있다).
+ * 실행 컨텍스트: 알림 처리는 전부 하드 IRQ 안이다 — config 접근과 캐시
+ * 갱신만 하므로 잠들지 않는다. 속도 제어는 프로세스 컨텍스트(재훈련 대기가
+ * 있다).
  *
  * === 타 모듈과의 연결 ===
  * 위쪽: pcie/portdrv.c(서비스 등록), thermal 서브시스템(cooling device).
@@ -78,10 +82,12 @@
  * === 주요 함수/구조체 요약 ===
  * pcie_bwnotif_probe()        : 포트에 이 서비스를 붙인다. IRQ 를 등록하고
  *                               LNKCTL 의 LBMIE/LABIE 알림 비트를 켠다.
- * pcie_bwnotif_irq()          : 하드 IRQ. 자기 인터럽트인지 확인하고
- *                               스레드를 깨운다.
- * pcie_bwnotif_irq_thread()   : 링크 속도를 다시 읽어 캐시를 갱신하고
- *                               상태 비트를 지운다.
+ * pcie_bwnotif_irq()          : 공유 하드 IRQ 핸들러. LNKSTA 를 읽어 자기
+ *                               인터럽트인지 확인하고(아니면 IRQ_NONE),
+ *                               LBMS 를 보았으면 그 사실을 priv_flags 에
+ *                               기록하고, 상태 비트를 지운 뒤 속도 캐시를
+ *                               갱신한다. 스레드 절반은 없다.
+ * pcie_reset_lbms()           : 기록해 둔 LBMS 표시와 상태 비트를 함께 지운다.
  * pcie_update_link_speed()    : 하위 버스의 속도 캐시를 갱신한다(pci.c 정의).
  * pcie_set_target_speed()     : 링크 속도 상한을 지정하고 재훈련한다.
  * pcie_bwctrl_select_speed()  : 여러 제약(thermal, 사용자 지정) 중
