@@ -307,25 +307,72 @@ EXPORT_SYMBOL(pci_free_irq);
 
 u8 pci_swizzle_interrupt_pin(const struct pci_dev *dev, u8 pin)
 {
+	/* [한국어] 슬롯 번호를 담을 곳. 회전량이 된다. */
 	int slot;
 
+	/* [한국어] ARI(Alternative Routing-ID)가 켜져 있으면, */
 	if (pci_ari_enabled(dev->bus))
+		/* [한국어] 위 영어 주석대로 슬롯 번호를 언제나 0 으로 본다. ARI 는 devfn 의
+		 * 상위 5비트를 슬롯이 아니라 함수 번호의 일부로 재해석하므로,
+		 * PCI_SLOT() 이 뽑아낸 값이 슬롯이 아니게 되기 때문이다.
+		 * 근거는 PCIe Base 2.1 의 2.2.8.1 구현 노트다. */
 		slot = 0;
 	else
+		/* [한국어] 보통은 devfn 의 상위 5비트가 슬롯 번호다. */
 		slot = PCI_SLOT(dev->devfn);
 
+	/* [한국어] 실제 회전. pin 은 1~4(INTA~INTD)인데 나머지 연산은 0 기준이라
+	 * 1 을 빼고 계산한 뒤 다시 1 을 더한다. 슬롯 번호만큼 돌리는 이 규칙이
+	 * PCI-to-PCI 브리지 규격 9.1 절이 정한 것으로, 카드 위의 여러 장치가
+	 * 같은 INTx 선에 몰리지 않게 흩뜨리는 효과가 있다. */
 	return (((pin - 1) + slot) % 4) + 1;
 }
+/* [한국어]
+ * pci_get_interrupt_pin - 루트 버스까지 회전시킨 최종 INTx 핀과 그 브리지를 얻는다
+ *
+ * @dev: 출발 장치.
+ * @bridge: 루트 버스 바로 아래의 최상단 브리지를 여기에 담아 준다.
+ * @return: 회전이 끝난 핀 번호(1~4), 또는 -1 = 이 장치는 INTx 를 쓰지 않음.
+ *
+ * 장치가 자기 config 에 적어 둔 핀 번호는 그 장치 바로 옆에서만 유효하다.
+ * 브리지를 하나 지날 때마다 규격이 정한 대로 핀이 회전하므로, 루트에서
+ * 실제로 어느 선에 실리는지 알려면 경로 전체를 따라가며 회전시켜야 한다.
+ *
+ * dev 를 지역에서 덮어쓰며 올라가는 것이 이 함수의 관용구다. 인자로 받은
+ * 포인터를 그대로 커서로 쓰며, 루프가 끝나면 그 자리에 최상단 브리지가
+ * 남아 있어 그것을 그대로 *bridge 에 담는다.
+ *
+ * 핀이 없을 때 0 이 아니라 -1 을 반환하는 것은, 0 이 유효한 핀 번호가 아니면서
+ * 동시에 "핀 없음" 을 뜻해 반환값으로 쓰면 호출자가 헷갈리기 때문이다.
+ *
+ * 아래 pci_common_swizzle() 과 루프가 완전히 같고 돌려주는 것만 다르다 —
+ * 그쪽은 최상단 브리지의 슬롯 번호를, 이쪽은 브리지 장치 자체를 준다.
+ *
+ * 실행 컨텍스트: IRQ 배정 경로. 프로세스 컨텍스트.
+ *
+ * 에러 경로: -1 뿐이다.
+ *
+ * 호출 체인:
+ *   아키텍처의 IRQ 매핑 코드 → [이 함수] → pci_swizzle_interrupt_pin()(브리지 수만큼)
+ */
 int pci_get_interrupt_pin(struct pci_dev *dev, struct pci_dev **bridge)
 {
+	/* [한국어] 따라 올라가며 회전시킬 핀 번호. */
 	u8 pin;
 
+	/* [한국어] 장치가 실제로 쓰는 핀. 0 이면 INTx 를 쓰지 않는다는 뜻이다. */
 	pin = dev->pin;
+	/* [한국어] 핀이 없으면, */
 	if (!pin)
+		/* [한국어] -1 로 실패를 알린다. 0 이 아니라 -1 인 것은 0 이 유효한 핀 번호가
+		 * 아니면서도 "핀 없음" 을 뜻하는 값이라 반환값으로 쓰면 헷갈리기 때문이다. */
 		return -1;
 
+	/* [한국어] 루트 버스에 닿을 때까지 브리지를 하나씩 거슬러 올라간다. */
 	while (!pci_is_root_bus(dev->bus)) {
+		/* [한국어] 브리지 하나를 지날 때마다 핀을 회전시킨다. */
 		pin = pci_swizzle_interrupt_pin(dev, pin);
+		/* [한국어] 부모 브리지로 올라간다. bus->self 가 그 버스를 만든 브리지 장치다. */
 		dev = dev->bus->self;
 	}
 	*bridge = dev;
@@ -343,10 +390,15 @@ int pci_get_interrupt_pin(struct pci_dev *dev, struct pci_dev **bridge)
 
 u8 pci_common_swizzle(struct pci_dev *dev, u8 *pinp)
 {
+	/* [한국어] 들어온 핀 값을 지역 변수로 받는다. */
 	u8 pin = *pinp;
 
+	/* [한국어] 루트 버스까지 올라가며, */
 	while (!pci_is_root_bus(dev->bus)) {
+		/* [한국어] 핀을 회전시키고, */
 		pin = pci_swizzle_interrupt_pin(dev, pin);
+		/* [한국어] 부모로 올라간다. pci_get_interrupt_pin() 과 루프가 같지만 돌려주는 것이
+		 * 다르다 — 그쪽은 최상단 브리지 장치를, 이쪽은 그 장치의 슬롯 번호를 준다. */
 		dev = dev->bus->self;
 	}
 	*pinp = pin;
@@ -354,14 +406,57 @@ u8 pci_common_swizzle(struct pci_dev *dev, u8 *pinp)
 }
 EXPORT_SYMBOL_GPL(pci_common_swizzle);
 
+/* [한국어]
+ * pci_assign_irq - 이 장치의 INTx 를 실제 IRQ 번호로 매핑해 배정한다
+ *
+ * @dev: IRQ 를 배정할 장치.
+ *
+ * 열거 중 장치마다 한 번 불려, config 의 핀 번호를 커널의 IRQ 번호로 바꾼다.
+ *
+ * 세 단계다. 핀을 읽고, 브리지들을 거슬러 올라가며 회전시키고, 호스트 브리지가
+ * 제공한 map_irq 콜백으로 최종 IRQ 를 얻는다.
+ *
+ * 호스트 브리지의 두 콜백이 이 함수의 확장점이다. map_irq 가 없으면 그
+ * 아키텍처가 런타임 매핑을 지원하지 않는다는 뜻이라 조용히 물러난다.
+ * swizzle_irq 는 선택 사항인데, 함수 안의 영어 주석대로 그것이 없으면
+ * map_irq 는 slot 인자를 무시해야 한다. slot 초기값이 -1(u8 에서 0xff)인 것이
+ * "쓰지 말라" 는 표시가 된다.
+ *
+ * 읽어 온 핀 값을 검사하는 대목이 방어적이다. config 공간의 값이 5 이상이면
+ * 규격 위반이므로 INTA(1)로 되돌린다.
+ *
+ * irq 초기값이 0 인 것도 의도적이다. 핀이 0 이면 아래 블록을 통째로 건너뛰고
+ * 그 0 이 그대로 dev->irq 에 들어가, 자연스럽게 "IRQ 없음" 이 된다.
+ *
+ * 마지막 config 쓰기는 하드웨어를 위한 것이 아니다. 함수 끝의 영어 주석대로
+ * 장치 자신은 PCI_INTERRUPT_LINE 을 쓰지 않으며, 드라이버와 사용자 공간이
+ * 읽어 볼 수 있도록 기록해 두는 것뿐이다.
+ *
+ * 실행 컨텍스트: 장치 열거 또는 핫플러그 추가 경로. 프로세스 컨텍스트.
+ *
+ * 에러 경로: 없다. 반환값이 없고, 실패는 dev->irq 가 0 으로 남는 것으로 표현된다.
+ *
+ * 호출 체인:
+ *   pci_device_add() 계열 → [이 함수]
+ *     → pci_find_host_bridge() → pci_read_config_byte(PCI_INTERRUPT_PIN)
+ *     → hbrg->swizzle_irq() → hbrg->map_irq()
+ *     → pci_write_config_byte(PCI_INTERRUPT_LINE)
+ */
 void pci_assign_irq(struct pci_dev *dev)
 {
+	/* [한국어] config 에서 읽어 올 핀 번호. */
 	u8 pin;
+	/* [한국어] 스위즐 함수가 알려 줄 슬롯 번호. -1 을 u8 에 넣어 0xff 가 되며,
+	 * 스위즐 함수가 없을 때 그대로 남는다. */
 	u8 slot = -1;
+	/* [한국어] 배정할 IRQ. 실패 시 0 이 남도록 초기값이 0 이다. */
 	int irq = 0;
+	/* [한국어] 이 장치가 매달린 호스트 브리지. map_irq 와 swizzle_irq 콜백이 거기 있다. */
 	struct pci_host_bridge *hbrg = pci_find_host_bridge(dev->bus);
 
+	/* [한국어] 아키텍처가 런타임 IRQ 매핑 함수를 제공하지 않으면, */
 	if (!(hbrg->map_irq)) {
+		/* [한국어] 그 사실만 남기고, */
 		pci_dbg(dev, "runtime IRQ mapping not provided by arch\n");
 		return;
 	}
@@ -376,11 +471,15 @@ void pci_assign_irq(struct pci_dev *dev)
 	pci_read_config_byte(dev, PCI_INTERRUPT_PIN, &pin);
 	/* Cope with illegal. */
 	if (pin > 4)
+		/* [한국어] 위 영어 주석대로 잘못된 값(5 이상)이면 INTA 로 되돌린다. config 공간의
+		 * 값을 그대로 믿을 수 없으므로 방어하는 것이다. */
 		pin = 1;
 
 	if (pin) {
 		/* Follow the chain of bridges, swizzling as we go. */
 		if (hbrg->swizzle_irq)
+			/* [한국어] 호스트 브리지가 스위즐 함수를 제공하면 그것으로 최상단까지 회전시키고
+			 * 슬롯 번호를 얻는다. pin 을 포인터로 넘겨 회전 결과가 그 자리에 반영된다. */
 			slot = (*(hbrg->swizzle_irq))(dev, &pin);
 
 		/*
@@ -388,10 +487,16 @@ void pci_assign_irq(struct pci_dev *dev)
 		 * ignore slot.
 		 */
 		irq = (*(hbrg->map_irq))(dev, slot, pin);
+		/* [한국어] 매핑 실패는 -1 로 온다. */
 		if (irq == -1)
+			/* [한국어] IRQ 없음(0)으로 바꾼다. 호출자와 드라이버가 0 을 "IRQ 없음" 으로
+			 * 약속하고 있기 때문이다. */
 			irq = 0;
 	}
+	/* [한국어] 결과를 장치에 기록한다. 핀이 0 이었으면 여기까지 오면서 irq 가 초기값
+	 * 0 인 채라, 자연스럽게 "IRQ 없음" 이 된다. */
 	dev->irq = irq;
+	/* [한국어] 배정 결과를 디버그 로그로 남긴다. */
 	pci_dbg(dev, "assign IRQ: got %d\n", dev->irq);
 
 	/*
@@ -400,13 +505,56 @@ void pci_assign_irq(struct pci_dev *dev)
 	 */
 	pci_write_config_byte(dev, PCI_INTERRUPT_LINE, irq);
 }
+/* [한국어]
+ * pci_check_and_set_intx_mask - 인터럽트 상태를 확인하고 조건이 맞을 때만 INTx 마스크를 바꾼다
+ *
+ * @dev: 대상 장치.
+ * @mask: true = 마스크하려 함, false = 마스크를 풀려 함.
+ * @return: true = 실제로 바꿨다, false = 조건이 맞지 않아 바꾸지 않았다.
+ *
+ * 공유 INTx 환경에서 "내 장치가 이 인터럽트를 올렸는가" 를 알아내는 함수다.
+ * 아래 두 공개 함수가 인자만 바꿔 이것을 부른다.
+ *
+ * 핵심은 확인과 변경이 하나의 원자적 동작이어야 한다는 점이다. 상태를 읽고
+ * "내 것이구나" 판단한 뒤 마스크하려는 사이에 다른 CPU 가 끼어들면 판정이
+ * 무의미해진다. 그래서 pci_lock 을 인터럽트까지 끈 채 잡고, 그 안에서
+ * 읽기와 쓰기를 모두 끝낸다. 이 함수가 인터럽트 핸들러에서 불리므로
+ * 잠들 수 있는 락은 쓸 수 없다.
+ *
+ * 락 안에서 pci_read_config_dword() 대신 bus->ops->read 를 직접 부르는 것도
+ * 그 때문이다. 공개 접근자는 같은 pci_lock 을 다시 잡으려 해 교착한다.
+ *
+ * Command 와 Status 를 dword 한 번에 읽는 최적화가 두 BUILD_BUG_ON 위에
+ * 서 있다 — PCI_COMMAND 가 4의 배수이고 PCI_STATUS 가 그 바로 뒤 2바이트라는
+ * 것. 규격상 바뀔 리 없지만 가정을 코드로 남겨 두었다.
+ *
+ * 판정 조건 `mask != irq_pending` 이 두 방향을 한 줄로 처리한다.
+ * 마스크하려면 인터럽트가 떠 있어야 하고(내 장치가 올린 것이므로),
+ * 마스크를 풀려면 떠 있지 않아야 한다(다음 인터럽트가 이미 대기 중이면
+ * 풀면 안 되므로). 두 경우 모두 mask 와 irq_pending 이 같아야 진행한다.
+ *
+ * 실행 컨텍스트: 공유 IRQ 핸들러. 인터럽트 문맥이며 잠들 수 없다.
+ *
+ * 에러 경로: 없다. "바꾸지 않았다" 를 false 로 알릴 뿐이다.
+ *
+ * 호출 체인:
+ *   pci_check_and_mask_intx() / pci_check_and_unmask_intx() → [이 함수]
+ *     → raw_spin_lock_irqsave(pci_lock) → bus->ops->read/write
+ */
 static bool pci_check_and_set_intx_mask(struct pci_dev *dev, bool mask)
 {
+	/* [한국어] config 접근에 쓸 버스. */
 	struct pci_bus *bus = dev->bus;
+	/* [한국어] 마스크를 실제로 갱신했는지. 기본값 true 이고 아래 조기 반환 경로에서만
+	 * false 가 된다. */
 	bool mask_updated = true;
+	/* [한국어] Command 와 Status 를 한 번에 담을 dword. */
 	u32 cmd_status_dword;
+	/* [한국어] 원래 Command 값과 새 값. */
 	u16 origcmd, newcmd;
+	/* [한국어] 인터럽트 저장용 플래그. */
 	unsigned long flags;
+	/* [한국어] 이 장치가 인터럽트를 올린 상태인지. */
 	bool irq_pending;
 
 	/*
@@ -414,12 +562,22 @@ static bool pci_check_and_set_intx_mask(struct pci_dev *dev, bool mask)
 	 * Document assumptions that make this possible.
 	 */
 	BUILD_BUG_ON(PCI_COMMAND % 4);
+	/* [한국어] 위 영어 주석대로 Command 와 Status 를 dword 한 번으로 읽기 위한 전제를
+	 * 컴파일 시점에 못박는다. 하나는 PCI_COMMAND 가 4의 배수라는 것, 다른 하나는
+	 * PCI_STATUS 가 그 바로 뒤 2바이트에 있다는 것이다. 규격이 바뀔 리는 없지만,
+	 * 이 최적화가 어떤 가정 위에 서 있는지를 코드로 남겨 둔 것이다. */
 	BUILD_BUG_ON(PCI_COMMAND + 2 != PCI_STATUS);
 
+	/* [한국어] pci_lock 을 인터럽트를 끈 채 잡는다. 이 함수가 인터럽트 핸들러에서
+	 * 불리므로 잠들 수 있는 락은 쓸 수 없고, 읽기와 쓰기 사이에 다른 config
+	 * 접근이 끼어들면 판정이 어긋나기 때문에 한 임계 구역으로 묶는다. */
 	raw_spin_lock_irqsave(&pci_lock, flags);
 
+	/* [한국어] bus->ops->read 를 직접 부른다. pci_read_config_dword() 를 쓰지 않는 이유는
+	 * 그 함수가 같은 pci_lock 을 다시 잡으려 해 교착하기 때문이다. */
 	bus->ops->read(bus, dev->devfn, PCI_COMMAND, 4, &cmd_status_dword);
 
+	/* [한국어] dword 의 상위 16비트가 Status 이므로 밀어 내린 뒤 인터럽트 비트를 본다. */
 	irq_pending = (cmd_status_dword >> 16) & PCI_STATUS_INTERRUPT;
 
 	/*
@@ -428,20 +586,32 @@ static bool pci_check_and_set_intx_mask(struct pci_dev *dev, bool mask)
 	 * already pending (when unmasking).
 	 */
 	if (mask != irq_pending) {
+		/* [한국어] 마스킹하려는데 인터럽트가 안 떠 있거나, 언마스킹하려는데 아직 떠 있으면
+		 * 지금은 손댈 때가 아니다. 갱신하지 않았음을 표시하고, */
 		mask_updated = false;
 		goto done;
 	}
 
+	/* [한국어] 하위 16비트가 Command 다. u16 대입이 상위를 잘라 낸다. */
 	origcmd = cmd_status_dword;
+	/* [한국어] INTx 비활성화 비트를 먼저 지운 값을 만든다. */
 	newcmd = origcmd & ~PCI_COMMAND_INTX_DISABLE;
+	/* [한국어] 마스크하려는 경우에만, */
 	if (mask)
+		/* [한국어] 그 비트를 세운다. 지웠다가 조건부로 세우는 방식이라 mask 인자 하나로
+		 * 양방향을 다룰 수 있다. */
 		newcmd |= PCI_COMMAND_INTX_DISABLE;
+	/* [한국어] 실제로 바뀔 때만, */
 	if (newcmd != origcmd)
+		/* [한국어] 쓴다. Command 는 2바이트이므로 폭을 2 로 준다. 값이 같으면 쓰지 않는 것은
+		 * 불필요한 config 쓰기를 줄이려는 것이다. */
 		bus->ops->write(bus, dev->devfn, PCI_COMMAND, 2, newcmd);
 
 done:
 	raw_spin_unlock_irqrestore(&pci_lock, flags);
 
+	/* [한국어] 갱신했는지를 돌려준다. 공유 IRQ 핸들러가 이 값으로 "내 장치가 올린
+	 * 인터럽트인가" 를 판단한다. */
 	return mask_updated;
 }
 
@@ -455,6 +625,8 @@ done:
 
 bool pci_check_and_mask_intx(struct pci_dev *dev)
 {
+	/* [한국어] mask 인자를 true 로 넘긴다. 이름이 길어진 대신 호출부에서 true/false 의
+	 * 의미를 헷갈릴 일이 없다. */
 	return pci_check_and_set_intx_mask(dev, true);
 }
 EXPORT_SYMBOL_GPL(pci_check_and_mask_intx);
@@ -470,6 +642,7 @@ EXPORT_SYMBOL_GPL(pci_check_and_mask_intx);
 
 bool pci_check_and_unmask_intx(struct pci_dev *dev)
 {
+	/* [한국어] false 로 넘긴다. 위와 완전히 대칭이다. */
 	return pci_check_and_set_intx_mask(dev, false);
 }
 EXPORT_SYMBOL_GPL(pci_check_and_unmask_intx);
@@ -484,13 +657,56 @@ EXPORT_SYMBOL_GPL(pci_check_and_unmask_intx);
  * implementations can override this.
  */
 
+/* [한국어] 기본 구현은 아무것도 하지 않는다. __weak 이므로 아키텍처가 같은 이름의
+ * 함수를 정의하면 그쪽이 링크된다. ISA IRQ 를 PCI 에 배정하지 않도록
+ * 표시해 두는 것이 원래 목적이고, 그런 사정이 있는 아키텍처만 채운다. */
 void __weak pcibios_penalize_isa_irq(int irq, int active) {}
 
+/* [한국어]
+ * pcibios_alloc_irq - 장치에 IRQ 자원을 배정하는 아키텍처 훅 (기본 구현)
+ *
+ * @dev: 대상 장치.
+ * @return: 0 = 성공. 기본 구현은 언제나 성공이다.
+ *
+ * __weak 이므로 아키텍처가 같은 이름의 함수를 정의하면 그쪽이 링크되고,
+ * 정의하지 않으면 이 무동작 판이 쓰인다. ACPI 기반 시스템에서 _PRT 를 보고
+ * IRQ 를 배정하는 일이 이 훅에서 이루어진다.
+ *
+ * 기본 구현이 실패하지 않는 것이 중요하다. 훅을 제공하지 않는 아키텍처에서는
+ * "할 일이 없었다" 가 곧 성공이어야, 드라이버 바인딩이 진행되기 때문이다.
+ *
+ * 실행 컨텍스트: 드라이버 바인딩 경로. 프로세스 컨텍스트.
+ *
+ * 에러 경로: 기본 구현에는 없다. 아키텍처 판은 실패할 수 있고, 그때는
+ * 드라이버가 붙지 않는다.
+ *
+ * 호출 체인:
+ *   pci_device_probe() → [이 함수]
+ */
 int __weak pcibios_alloc_irq(struct pci_dev *dev)
 {
 	return 0;
 }
 
+/* [한국어] 짝이 되는 해제 함수. 마찬가지로 기본은 무동작이다. */
+/* [한국어]
+ * pcibios_free_irq - 배정했던 IRQ 자원을 놓는 아키텍처 훅 (기본 구현)
+ *
+ * @dev: 대상 장치.
+ *
+ * pcibios_alloc_irq() 의 짝이다. 역시 __weak 이며 기본 구현은 아무것도 하지
+ * 않는다.
+ *
+ * 반환값이 없다는 점이 alloc 쪽과 다르다. 해제는 실패할 수 없어야 하고,
+ * 실패해도 드라이버 언바인드를 되돌릴 방법이 없기 때문이다.
+ *
+ * 실행 컨텍스트: 드라이버 언바인드 경로. 프로세스 컨텍스트.
+ *
+ * 에러 경로: 없다.
+ *
+ * 호출 체인:
+ *   pci_device_remove() → [이 함수]
+ */
 void __weak pcibios_free_irq(struct pci_dev *dev)
 {
 }
