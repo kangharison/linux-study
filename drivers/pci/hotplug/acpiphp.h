@@ -380,7 +380,8 @@ struct acpiphp_func {
 struct acpiphp_context {
 	/* [한국어] ACPI 코어가 다루는 핫플러그 컨텍스트. 이 구조체의 **첫 필드**라
 	 *   아래 to_acpiphp_context() 의 container_of 가 성립한다.
-	 * 설정자: ACPI 코어가 acpi_initialize_hp_context() 류로 초기화한다.
+	 * 설정자: ACPI 코어가 컨텍스트를 등록할 때 초기화한다. 그 등록 함수는
+  이 트리(drivers 만 체크아웃)에는 없어 이름을 단정하지 않는다.
 	 * 읽는 자: ACPI 이벤트가 도착하면 코어가 이 구조체를 넘겨 주고,
 	 *   to_acpiphp_context() 로 acpiphp 쪽 정보를 되찾는다.
 	 *   self 필드는 func_to_acpi_device() 가 꺼내 쓴다.
