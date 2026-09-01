@@ -179,6 +179,27 @@ static void devm_pci_epc_release(struct device *dev, void *res)
  *
  * release the refcount the caller obtained by invoking pci_epc_get()
  */
+/* [한국어]
+ * pci_epc_put - pci_epc_get() 이 올린 두 참조를 되돌린다
+ *
+ * @epc: pci_epc_get() 이 돌려준 EPC. ERR_PTR 이나 NULL 이어도 안전하다.
+ * @return: 없음.
+ *
+ * **get 과 정확히 대칭인 짝이다.** get 이 올리는 참조가 둘이라 여기서도
+ * 둘을 내린다 -- 컨트롤러 드라이버 모듈의 참조와 struct device 의 참조다.
+ * 모듈 참조가 있어야 EPC 를 쥐고 있는 동안 그 드라이버가 언로드되지 않고,
+ * device 참조가 있어야 struct pci_epc 자체가 해제되지 않는다.
+ *
+ * 맨 앞에서 IS_ERR_OR_NULL 을 보는 것이 이 함수의 쓰임새를 말해 준다 --
+ * 호출자가 get 의 성공 여부를 따로 기억하지 않고 정리 경로에서 무조건
+ * put 할 수 있게 하려는 것이다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. 락을 잡지 않는다.
+ *
+ * 호출 체인:
+ *   pci-ep-cfs.c 의 configfs 해제 경로 / EPF 정리 경로
+ *     → [이 함수] → module_put, put_device
+ */
 void pci_epc_put(struct pci_epc *epc)
 {
 	/* [한국어] pci_epc_get() 이 실패하면 ERR_PTR 을 돌려주므로, 그 값을
@@ -244,6 +265,26 @@ EXPORT_SYMBOL_GPL(pci_epc_get);
  *
  * Invoke to get the first unreserved BAR that can be used by the endpoint
  * function.
+ */
+/* [한국어]
+ * pci_epc_get_first_free_bar - EPF 가 쓸 수 있는 첫 BAR 번호를 찾는다
+ *
+ * @epc_features: EPC 가 보고한 능력 표. 예약·비활성 BAR 정보가 들어 있다.
+ * @return: 쓸 수 있는 첫 BAR 번호, 없으면 NO_BAR.
+ *
+ * **한 줄짜리 래퍼다.** BAR_0 부터 찾으라고 하면 곧 "첫 번째 빈 BAR" 이므로
+ * pci_epc_get_next_free_bar() 에 그대로 넘긴다. 따로 두는 이유는 EPF
+ * 드라이버가 가장 흔히 쓰는 형태에 이름을 붙여 주기 위함이다.
+ *
+ * **왜 BAR 를 골라 써야 하는가**: EPC 하드웨어가 자기 용도로 이미 쓰는
+ * BAR 가 있고(BAR_RESERVED), 아예 존재하지 않는 자리도 있다(BAR_DISABLED).
+ * EPF 가 그런 자리에 BAR 를 만들면 하드웨어와 충돌한다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. 순수 계산이며 락을 잡지 않는다.
+ *
+ * 호출 체인:
+ *   EPF 드라이버(예: functions/pci-epf-test.c)의 bind
+ *     → [이 함수] → pci_epc_get_next_free_bar()
  */
 enum pci_barno
 pci_epc_get_first_free_bar(const struct pci_epc_features *epc_features)
@@ -358,6 +399,33 @@ static bool pci_epc_function_is_valid(struct pci_epc *epc,
  * specific to an endpoint function. Returns pci_epc_features on success
  * and NULL for any failures.
  */
+/* [한국어]
+ * pci_epc_get_features - 이 EPC 가 무엇을 지원하는지 EPF 에게 알려 준다
+ *
+ * @epc: 능력을 물어볼 컨트롤러.
+ * @func_no: 물리 함수 번호. 함수마다 능력이 다를 수 있어 인자로 받는다.
+ * @vfunc_no: 가상 함수 번호. 0 이면 PF 자신.
+ * @return: 능력 표 포인터. 실패하거나 EPC 가 보고하지 않으면 NULL.
+ *
+ * **EPF 가 하드웨어의 제약을 알아내는 유일한 창구다.** BAR 마다 고정 크기인지
+ * 크기를 바꿀 수 있는지, 예약되어 있는지, MSI-X 를 지원하는지 같은 것이
+ * 이 표에 담긴다. EPF 는 이 정보를 보고 자기 설정을 하드웨어에 맞춘다.
+ *
+ * 이 파일의 표준 3단계를 그대로 따른다 -- 함수 번호 검증, ops 존재 확인,
+ * 락을 잡고 ops 호출. 조회일 뿐인데 락을 잡는 것은 EPC 드라이버의 구현이
+ * 내부 상태를 만질 수 있기 때문이며, 이 계층은 그 안을 모르므로 일률적으로
+ * 보호한다.
+ *
+ * 돌려주는 구조체는 대개 EPC 드라이버의 정적 데이터라 호출자가 해제할
+ * 것이 없다. **다만 락 밖에서 그 포인터를 계속 쓴다는 점은 이 API 의
+ * 전제이며**, EPC 드라이버가 그 표를 동적으로 바꾸지 않는다는 약속에 기댄다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. 뮤텍스를 잡으므로 잠들 수 있다.
+ *
+ * 호출 체인:
+ *   EPF 드라이버의 bind / pci_epc_set_bar()
+ *     → [이 함수] → epc->ops->get_features()
+ */
 const struct pci_epc_features *pci_epc_get_features(struct pci_epc *epc,
 						    u8 func_no, u8 vfunc_no)
 {
@@ -393,6 +461,30 @@ EXPORT_SYMBOL_GPL(pci_epc_get_features);
  *
  * Invoke to stop the PCI link
  */
+/* [한국어]
+ * pci_epc_stop - PCIe 링크를 내린다
+ *
+ * @epc: 링크를 내릴 컨트롤러.
+ * @return: 없음.
+ *
+ * **호스트 입장에서는 장치가 사라진 것처럼 보인다.** 핫플러그를 지원하는
+ * 슬롯이라면 제거 이벤트가 발생하고, 그렇지 않으면 호스트가 그 장치의
+ * 설정공간을 읽을 때 모두 1 을 보게 된다.
+ *
+ * **함수 번호를 검증하지 않는 것이 요점이다.** 링크는 EPC 전체의 성질이라
+ * 어느 함수의 일이 아니기 때문이다. 그래서 이 파일의 표준 1단계 대신
+ * 포인터 유효성과 ops 존재만 한 줄로 확인한다.
+ *
+ * **IS_ERR_OR_NULL 이 아니라 IS_ERR 인 점이 눈에 띈다** -- NULL 이 넘어오면
+ * 바로 다음 epc->ops 역참조에서 터진다. 다만 이 함수를 부르는 쪽은 EPC 를
+ * 이미 손에 쥔 코드라 실제로 그럴 일은 없다. 코드는 손대지 않고 사실만 적는다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. 뮤텍스를 잡는다.
+ *
+ * 호출 체인:
+ *   pci-ep-cfs.c 의 start 속성에 0 을 쓰는 경로 / EPF 정리 경로
+ *     → [이 함수] → epc->ops->stop()
+ */
 void pci_epc_stop(struct pci_epc *epc)
 {
 	/* [한국어] 여기서는 pci_epc_function_is_valid() 를 쓰지 않는다.
@@ -417,6 +509,28 @@ EXPORT_SYMBOL_GPL(pci_epc_stop);
  * @epc: the link of *this* EPC device has to be started
  *
  * Invoke to start the PCI link
+ */
+/* [한국어]
+ * pci_epc_start - PCIe 링크를 올린다
+ *
+ * @epc: 링크를 올릴 컨트롤러.
+ * @return: 성공 0, 인자가 잘못이면 -EINVAL, 그 밖에는 ops 의 결과.
+ *
+ * **엔드포인트 설정의 마지막 단추다.** 이 함수를 부르기 전에 config 헤더와
+ * BAR 와 인터럽트 설정이 모두 끝나 있어야 한다 -- 링크가 올라오면 호스트가
+ * 곧바로 설정공간을 읽기 시작하기 때문이다. 그래서 EPF 의 bind 에서 설정을
+ * 다 하고 마지막에 이것을 부르는 순서가 지켜져야 한다.
+ *
+ * **ops->start 가 없으면 오류가 아니라 0 을 돌려준다.** 링크가 늘 살아 있거나
+ * 하드웨어가 알아서 올리는 컨트롤러가 있기 때문이다. 이 파일 곳곳에서
+ * "ops 가 없으면 0" 과 "ops 가 없으면 -EINVAL" 이 갈리는데, 없어도 무방한
+ * 기능이면 0, 반드시 있어야 하는 기능이면 오류로 구분한 것이다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. 뮤텍스를 잡는다.
+ *
+ * 호출 체인:
+ *   pci-ep-cfs.c 의 start 속성에 1 을 쓰는 경로
+ *     → [이 함수] → epc->ops->start()
  */
 int pci_epc_start(struct pci_epc *epc)
 {
@@ -455,6 +569,36 @@ EXPORT_SYMBOL_GPL(pci_epc_start);
  * @interrupt_num: the MSI or MSI-X interrupt number with range (1-N)
  *
  * Invoke to raise an INTX, MSI or MSI-X interrupt
+ */
+/* [한국어]
+ * pci_epc_raise_irq - 호스트에 인터럽트를 올린다
+ *
+ * @epc: 인터럽트를 올릴 컨트롤러.
+ * @func_no: 물리 함수 번호.
+ * @vfunc_no: 가상 함수 번호.
+ * @type: INTX, MSI, MSI-X 중 무엇으로 올릴지.
+ * @interrupt_num: MSI/MSI-X 의 몇 번째 인터럽트인지. 1 부터 센다.
+ * @return: 성공 0, 인자가 잘못이면 -EINVAL.
+ *
+ * **엔드포인트가 호스트에게 말을 거는 유일한 방법이다.** 호스트 쪽에서 보면
+ * 이것이 곧 그 장치의 인터럽트 핸들러가 불리는 순간이다.
+ *
+ * **호스트 NVMe 드라이버와 짝을 이루는 자리다** -- 호스트가
+ * pci_alloc_irq_vectors() 로 MSI-X 를 요청하고 벡터마다 핸들러를 걸어 두면,
+ * 엔드포인트 쪽에서는 이 함수가 그 핸들러를 깨우는 쪽이 된다.
+ *
+ * interrupt_num 이 1 부터인 것은 PCI 규격의 관례를 따른 것이다. 실제 벡터
+ * 번호로의 변환은 EPC 드라이버가 맡는다.
+ *
+ * **ops->raise_irq 가 없으면 0 을 돌려준다** -- 폴링으로만 동작하는 구성이면
+ * 인터럽트를 올리지 못하는 것이 오류가 아니기 때문이다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. 뮤텍스를 잡으므로 인터럽트 문맥에서
+ * 부를 수 없다.
+ *
+ * 호출 체인:
+ *   EPF 드라이버(예: pci-epf-test 의 명령 처리)
+ *     → [이 함수] → epc->ops->raise_irq()
  */
 int pci_epc_raise_irq(struct pci_epc *epc, u8 func_no, u8 vfunc_no,
 		      unsigned int type, u16 interrupt_num)
@@ -509,6 +653,39 @@ EXPORT_SYMBOL_GPL(pci_epc_raise_irq);
  * physical address (in outbound region) of the other interface to ring
  * doorbell.
  */
+/* [한국어]
+ * pci_epc_map_msi_irq - MSI 주소를 아웃바운드 창에 매핑하고 데이터 값을 얻는다
+ *
+ * @epc: MSI 능력을 가진 컨트롤러.
+ * @func_no: 물리 함수 번호.
+ * @vfunc_no: 가상 함수 번호.
+ * @phys_addr: 아웃바운드 영역 안의 물리 주소.
+ * @interrupt_num: 몇 번째 MSI 인지. 1 부터 센다.
+ * @entry_size: 인터럽트 하나가 차지할 아웃바운드 영역의 크기.
+ * @msi_data: MSI 를 일으키려면 무엇을 써야 하는지 담아 돌려줄 자리.
+ * @msi_addr_offset: 정렬된 아웃바운드 주소에서 MSI 주소까지의 오프셋.
+ * @return: 성공 0, 실패면 음수.
+ *
+ * **pci_epc_raise_irq() 와 목적은 같지만 방식이 정반대다.** 그쪽은 EPC 에게
+ * "인터럽트를 올려라" 고 부탁하지만, 이쪽은 **"어디에 무엇을 쓰면 인터럽트가
+ * 올라가는지" 를 알아내어 그 주소를 아웃바운드 창에 뚫어 둔다.** 그러면
+ * 그 뒤로는 상대편이 그 주소에 직접 쓰기만 해도 인터럽트가 올라간다.
+ *
+ * **왜 그런 것이 필요한가**: 상류 주석이 밝히듯 NTB(Non-Transparent Bridge)의
+ * doorbell 때문이다. NTB 는 두 호스트 사이에 끼어 양쪽에 각각 장치처럼
+ * 보이는데, 한쪽 인터페이스가 다른 쪽 인터페이스의 아웃바운드 영역에
+ * 직접 쓰는 것만으로 상대 호스트를 깨울 수 있어야 한다. 매번 이 계층을
+ * 거치면 그 즉시성이 사라진다.
+ *
+ * **ops 가 없으면 -EINVAL 이다** -- raise_irq 와 달리 이 기능은 대체 경로가
+ * 없으므로 지원하지 않는 것이 곧 실패다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. 뮤텍스를 잡는다.
+ *
+ * 호출 체인:
+ *   NTB EPF 드라이버(functions/pci-epf-ntb.c 계열)
+ *     → [이 함수] → epc->ops->map_msi_irq()
+ */
 int pci_epc_map_msi_irq(struct pci_epc *epc, u8 func_no, u8 vfunc_no,
 			phys_addr_t phys_addr, u8 interrupt_num, u32 entry_size,
 			u32 *msi_data, u32 *msi_addr_offset)
@@ -555,6 +732,33 @@ EXPORT_SYMBOL_GPL(pci_epc_map_msi_irq);
  *
  * Invoke to get the number of MSI interrupts allocated by the RC
  */
+/* [한국어]
+ * pci_epc_get_msi - 호스트가 실제로 배정한 MSI 개수를 읽어 온다
+ *
+ * @epc: 대상 컨트롤러.
+ * @func_no: 물리 함수 번호.
+ * @vfunc_no: 가상 함수 번호.
+ * @return: 호스트가 배정한 인터럽트 개수. 알 수 없으면 0.
+ *
+ * **pci_epc_set_msi() 와 짝이며 방향이 반대다.** set 이 "나는 이만큼 필요하다"
+ * 고 광고하는 것이라면, get 은 **"호스트가 그중 몇 개를 실제로 줬는가"** 를
+ * 읽는 것이다. PCI 의 MSI 는 장치가 요청한 수보다 적게 배정될 수 있어,
+ * 엔드포인트는 반드시 배정 결과를 확인한 뒤 그 범위 안에서만 인터럽트를
+ * 올려야 한다.
+ *
+ * **모든 실패가 0 으로 수렴한다.** 인자가 잘못이든, EPC 가 지원하지 않든,
+ * ops 가 음수를 돌려주든 모두 0 이다. 0 은 "쓸 수 있는 MSI 가 없다" 는
+ * 뜻이라 호출자가 오류와 구분하지 않아도 안전하기 때문이다.
+ *
+ * **호스트 쪽 대응**: 호스트가 MSI Enable 비트를 켜고 Multiple Message Enable
+ * 필드에 개수를 적어 넣는 그 순간이, 엔드포인트에서 이 값이 바뀌는 순간이다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. 뮤텍스를 잡는다.
+ *
+ * 호출 체인:
+ *   EPF 드라이버가 링크 업 뒤 또는 명령 처리 중
+ *     → [이 함수] → epc->ops->get_msi()
+ */
 int pci_epc_get_msi(struct pci_epc *epc, u8 func_no, u8 vfunc_no)
 {
 	int interrupt;
@@ -598,6 +802,32 @@ EXPORT_SYMBOL_GPL(pci_epc_get_msi);
  *
  * Invoke to set the required number of MSI interrupts.
  */
+/* [한국어]
+ * pci_epc_set_msi - 이 함수가 필요로 하는 MSI 개수를 광고한다
+ *
+ * @epc: 대상 컨트롤러.
+ * @func_no: 물리 함수 번호.
+ * @vfunc_no: 가상 함수 번호.
+ * @nr_irqs: 필요한 MSI 인터럽트 개수.
+ * @return: 성공 0, 인자가 잘못이면 -EINVAL.
+ *
+ * **설정공간의 MSI 능력 구조에 "나는 이만큼 쓸 수 있다" 고 적어 두는 것이다.**
+ * 호스트가 이 장치를 열거할 때 그 값을 읽고, 자기 사정에 맞게 그중 일부만
+ * 배정한다. 그 결과는 pci_epc_get_msi() 로 읽는다.
+ *
+ * **1 이상 32 이하로 검사하는 근거**: MSI 능력 구조의 Multiple Message
+ * Capable 필드는 3비트이고 2의 거듭제곱 개수를 나타내므로, 표현할 수 있는
+ * 최대가 32 다. 그래서 규격상 MSI 는 장치당 최대 32개다.
+ *
+ * EPF 의 bind 안에서, 곧 링크를 올리기 전에 불러야 한다 -- 링크가 올라온
+ * 뒤에는 호스트가 이미 설정공간을 읽어 간 뒤이기 때문이다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. 뮤텍스를 잡는다.
+ *
+ * 호출 체인:
+ *   EPF 드라이버의 bind / epc_init 콜백
+ *     → [이 함수] → epc->ops->set_msi()
+ */
 int pci_epc_set_msi(struct pci_epc *epc, u8 func_no, u8 vfunc_no, u8 nr_irqs)
 {
 	/* [한국어] ops->set_msi 의 결과. */
@@ -639,6 +869,28 @@ EXPORT_SYMBOL_GPL(pci_epc_set_msi);
  *
  * Invoke to get the number of MSI-X interrupts allocated by the RC
  */
+/* [한국어]
+ * pci_epc_get_msix - 호스트가 실제로 배정한 MSI-X 개수를 읽어 온다
+ *
+ * @epc: 대상 컨트롤러.
+ * @func_no: 물리 함수 번호.
+ * @vfunc_no: 가상 함수 번호.
+ * @return: 호스트가 배정한 MSI-X 인터럽트 개수. 알 수 없으면 0.
+ *
+ * pci_epc_get_msi() 와 구조가 같고 보는 능력 구조만 다르다.
+ * **MSI 와 MSI-X 를 따로 두는 이유**: 둘은 설정공간의 다른 능력 구조에 있고
+ * 개수 상한도 다르다. 호스트는 둘 중 하나만 켜므로, EPF 는 어느 쪽이
+ * 켜졌는지 각각 물어봐서 알아내야 한다.
+ *
+ * 여기서도 모든 실패가 0 으로 수렴한다 -- MSI-X 가 꺼져 있는 것과 오류가
+ * 호출자에게는 같은 뜻이기 때문이다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. 뮤텍스를 잡는다.
+ *
+ * 호출 체인:
+ *   EPF 드라이버가 링크 업 뒤 또는 명령 처리 중
+ *     → [이 함수] → epc->ops->get_msix()
+ */
 int pci_epc_get_msix(struct pci_epc *epc, u8 func_no, u8 vfunc_no)
 {
 	int interrupt;
@@ -677,6 +929,36 @@ EXPORT_SYMBOL_GPL(pci_epc_get_msix);
  * @offset: Offset pointing to the start of MSI-X table
  *
  * Invoke to set the required number of MSI-X interrupts.
+ */
+/* [한국어]
+ * pci_epc_set_msix - 이 함수가 필요로 하는 MSI-X 개수와 표의 자리를 광고한다
+ *
+ * @epc: 대상 컨트롤러.
+ * @func_no: 물리 함수 번호.
+ * @vfunc_no: 가상 함수 번호.
+ * @nr_irqs: 필요한 MSI-X 인터럽트 개수.
+ * @bir: MSI-X 표가 놓일 BAR 번호(BAR Indicator Register).
+ * @offset: 그 BAR 안에서 표가 시작하는 오프셋.
+ * @return: 성공 0, 인자가 잘못이면 -EINVAL.
+ *
+ * **MSI 와 결정적으로 다른 점이 인자 둘에 드러난다.** MSI 는 개수만 광고하면
+ * 되지만, MSI-X 는 **벡터 표가 메모리에 실재해야 하고 그 자리를 설정공간에
+ * 적어 두어야 한다.** 그래서 어느 BAR 의 어느 오프셋인지를 함께 넘긴다.
+ * 호스트는 그 자리를 읽어 벡터 표를 찾아가 주소와 데이터를 써 넣는다.
+ *
+ * **1 이상 2048 이하로 검사하는 근거**: MSI-X 능력 구조의 Table Size 필드가
+ * 11비트라 최대 2048개를 표현할 수 있다. MSI 의 32개와 견주면 MSI-X 가
+ * 왜 많은 큐를 쓰는 장치에 필요한지가 드러난다.
+ *
+ * **NVMe 관점**: NVMe 컨트롤러가 큐마다 벡터를 하나씩 쓰는 구조는 바로 이
+ * 2048 이라는 여유 덕분에 가능하다. 호스트 쪽 NVMe 드라이버가 벡터 표를
+ * 읽는 그 자리를, 엔드포인트에서는 이 함수가 만들어 광고한다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. 뮤텍스를 잡는다.
+ *
+ * 호출 체인:
+ *   EPF 드라이버의 bind / epc_init 콜백
+ *     → [이 함수] → epc->ops->set_msix()
  */
 int pci_epc_set_msix(struct pci_epc *epc, u8 func_no, u8 vfunc_no, u16 nr_irqs,
 		     enum pci_barno bir, u32 offset)
@@ -722,6 +1004,32 @@ EXPORT_SYMBOL_GPL(pci_epc_set_msix);
  *
  * Invoke to unmap the CPU address from PCI address.
  */
+/* [한국어]
+ * pci_epc_unmap_addr - 로컬 물리 주소와 호스트 PCI 주소의 연결을 끊는다
+ *
+ * @epc: 매핑이 걸려 있는 컨트롤러.
+ * @func_no: 물리 함수 번호.
+ * @vfunc_no: 가상 함수 번호.
+ * @phys_addr: 끊을 매핑의 로컬 물리 주소.
+ * @return: 없음.
+ *
+ * **pci_epc_map_addr() 의 짝이다.** 아웃바운드 창 하나를 풀어 준다.
+ *
+ * **왜 반드시 풀어야 하는가**: 아웃바운드 창은 하드웨어 자원이라 개수가
+ * 정해져 있다. 쓰고 나서 풀지 않으면 다음 매핑 요청이 창을 얻지 못한다.
+ *
+ * 주소로 창을 식별하는 것이 이 API 의 방식이다 -- 매핑할 때 받은 로컬
+ * 물리 주소를 그대로 되돌려주면 EPC 드라이버가 어느 창인지 찾아낸다.
+ *
+ * **실패를 알리지 않는다(void).** 이미 풀린 창을 다시 푸는 것이 무해하고,
+ * 정리 경로에서 부르는 함수라 호출자가 할 수 있는 일이 없기 때문이다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. 뮤텍스를 잡는다.
+ *
+ * 호출 체인:
+ *   EPF 드라이버의 정리 경로 / pci_epc_mem_unmap()
+ *     → [이 함수] → epc->ops->unmap_addr()
+ */
 void pci_epc_unmap_addr(struct pci_epc *epc, u8 func_no, u8 vfunc_no,
 			phys_addr_t phys_addr)
 {
@@ -753,6 +1061,38 @@ EXPORT_SYMBOL_GPL(pci_epc_unmap_addr);
  * @size: the size of the allocation
  *
  * Invoke to map CPU address with PCI address.
+ */
+/* [한국어]
+ * pci_epc_map_addr - 로컬 물리 주소를 호스트의 PCI 주소에 연결한다
+ *
+ * @epc: 매핑을 걸 컨트롤러.
+ * @func_no: 물리 함수 번호.
+ * @vfunc_no: 가상 함수 번호.
+ * @phys_addr: 로컬 시스템의 물리 주소. 아웃바운드 영역 안이어야 한다.
+ * @pci_addr: 그 주소가 가리킬 호스트 쪽 PCI 주소.
+ * @size: 매핑할 크기.
+ * @return: 성공 0, 인자가 잘못이면 -EINVAL.
+ *
+ * **엔드포인트가 호스트 메모리를 읽고 쓸 수 있게 만드는 함수다.** 이 매핑이
+ * 걸린 뒤에는 로컬 CPU 가 phys_addr 에 접근하면 그것이 PCIe 트랜잭션이 되어
+ * 호스트의 pci_addr 로 나간다. **아웃바운드(outbound) 창** 이라 부르는 것이
+ * 이것이다.
+ *
+ * **하드웨어 제약이 있다**: 창의 시작 주소와 크기에 정렬 요구가 있는 경우가
+ * 많다. 이 함수는 그것을 다루지 않고 그대로 EPC 드라이버에 넘기므로,
+ * 정렬을 신경 쓰고 싶지 않은 호출자는 pci_epc_mem_map() 을 쓰면 된다.
+ *
+ * **NVMe 관점**: 호스트 NVMe 드라이버가 PRP/SGL 로 알려 준 메모리를 컨트롤러가
+ * DMA 로 읽는 그 동작이, 엔드포인트 쪽에서는 이 매핑을 통한 접근이다.
+ *
+ * **ops 가 없으면 0 을 돌려준다** -- 매핑 없이도 동작하는 구성이 있기 때문이나,
+ * 호출자가 실제로 접근하면 실패한다는 점은 이 API 가 알려 주지 않는다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. 뮤텍스를 잡는다.
+ *
+ * 호출 체인:
+ *   EPF 드라이버 / pci_epc_mem_map()
+ *     → [이 함수] → epc->ops->map_addr()
  */
 int pci_epc_map_addr(struct pci_epc *epc, u8 func_no, u8 vfunc_no,
 		     phys_addr_t phys_addr, u64 pci_addr, size_t size)
@@ -812,6 +1152,40 @@ EXPORT_SYMBOL_GPL(pci_epc_map_addr);
  * @map->phys_base for the physical address of @map->virt_base).
  *
  * Returns 0 on success and a negative error code in case of error.
+ */
+/* [한국어]
+ * pci_epc_mem_map - 창을 할당하고 정렬까지 맞춰 호스트 주소에 매핑한다
+ *
+ * @epc: 대상 컨트롤러.
+ * @func_no: 물리 함수 번호.
+ * @vfunc_no: 가상 함수 번호.
+ * @pci_addr: 매핑할 호스트 쪽 PCI 주소.
+ * @pci_size: 그 주소부터 매핑하고 싶은 바이트 수.
+ * @map: 결과를 담아 돌려줄 구조체.
+ * @return: 성공 0, 실패면 음수.
+ *
+ * **pci_epc_map_addr() 위에 얹은 상위 API 이며, 두 가지를 대신 해 준다.**
+ * 하나는 컨트롤러 메모리에서 창 자리를 잡아 주는 것(pci_epc_mem_alloc_addr),
+ * 다른 하나는 **하드웨어의 정렬 제약을 맞춰 주는 것** 이다.
+ *
+ * 정렬 처리가 이 함수의 핵심이다. EPC 가 align_addr 을 제공하면 그것을 불러
+ * 실제로 매핑할 주소와 크기를 다시 계산하고, 요청한 주소가 그 안에서 몇
+ * 바이트 뒤인지를 map_offset 으로 받는다. 그래서 map->map_pci_addr 은
+ * 정렬된 시작이고 map->pci_addr 은 호출자가 원한 주소이며, map->phys_addr 과
+ * map->virt_addr 이 그 오프셋만큼 밀린 자리를 가리킨다.
+ *
+ * **돌려주는 pci_size 가 요청보다 작을 수 있다.** 정렬된 창의 끝이 요청 범위의
+ * 끝보다 앞이면 그만큼만 매핑되기 때문이다. 상류 주석이 그 사실을 밝히며,
+ * 호출자는 map->pci_size 를 보고 나머지를 다시 요청해야 한다.
+ *
+ * 실패하면 잡아 둔 창 자리를 되돌려 놓고 나간다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. 뮤텍스를 잡는 함수를 부르므로 잠들 수 있다.
+ *
+ * 호출 체인:
+ *   EPF 드라이버(예: pci-epf-test 의 데이터 전송)
+ *     → [이 함수] → epc->ops->align_addr(), pci_epc_mem_alloc_addr(),
+ *       pci_epc_map_addr()
  */
 int pci_epc_mem_map(struct pci_epc *epc, u8 func_no, u8 vfunc_no,
 		    u64 pci_addr, size_t pci_size, struct pci_epc_map *map)
@@ -911,6 +1285,32 @@ EXPORT_SYMBOL_GPL(pci_epc_mem_map);
  * Unmap and free a CPU address region that was allocated and mapped with
  * pci_epc_mem_map().
  */
+/* [한국어]
+ * pci_epc_mem_unmap - pci_epc_mem_map() 이 잡은 창을 풀고 자리를 돌려준다
+ *
+ * @epc: 대상 컨트롤러.
+ * @func_no: 물리 함수 번호.
+ * @vfunc_no: 가상 함수 번호.
+ * @map: pci_epc_mem_map() 이 채워 준 매핑 정보.
+ * @return: 없음.
+ *
+ * **pci_epc_mem_map() 의 짝이며 그 함수가 한 두 가지를 역순으로 되돌린다** --
+ * 먼저 매핑을 풀고(pci_epc_unmap_addr), 그다음 컨트롤러 메모리의 창 자리를
+ * 반납한다(pci_epc_mem_free_addr).
+ *
+ * **map->virt_base 를 확인하는 것이 요점이다.** 매핑에 실패했거나 이미 푼
+ * 구조체를 다시 넘겨도 안전하게 빠져나가도록 한 것이며, 정리 경로에서
+ * 조건 없이 부를 수 있게 해 준다.
+ *
+ * **정렬된 시작 주소(phys_base)로 푼다.** 매핑을 건 것이 그 주소였기 때문이며,
+ * 호출자가 실제로 쓰던 phys_addr 로 풀면 EPC 드라이버가 창을 찾지 못한다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   EPF 드라이버의 전송 종료 경로
+ *     → [이 함수] → pci_epc_unmap_addr(), pci_epc_mem_free_addr()
+ */
 void pci_epc_mem_unmap(struct pci_epc *epc, u8 func_no, u8 vfunc_no,
 		       struct pci_epc_map *map)
 {
@@ -943,6 +1343,32 @@ EXPORT_SYMBOL_GPL(pci_epc_mem_unmap);
  * @epf_bar: the struct epf_bar that contains the BAR information
  *
  * Invoke to reset the BAR of the endpoint device.
+ */
+/* [한국어]
+ * pci_epc_clear_bar - BAR 를 없애 호스트에게 보이지 않게 한다
+ *
+ * @epc: 대상 컨트롤러.
+ * @func_no: 물리 함수 번호.
+ * @vfunc_no: 가상 함수 번호.
+ * @epf_bar: 없앨 BAR 의 정보. barno 와 flags 를 본다.
+ * @return: 없음.
+ *
+ * **pci_epc_set_bar() 의 짝이다.** EPF 가 언바인드될 때 자기가 노출했던
+ * BAR 를 거둬들이는 데 쓴다.
+ *
+ * **BAR_5 와 64비트 조합을 걸러 내는 것이 눈에 띈다.** 64비트 BAR 는 연속한
+ * 두 자리를 함께 쓰는데 BAR_5 는 마지막이라 짝이 될 자리가 없다. 애초에
+ * 만들 수 없는 조합이므로 없앨 것도 없다 -- set_bar 쪽의 같은 검사와
+ * 대칭을 이룬다.
+ *
+ * **실패를 알리지 않는다(void).** 정리 경로에서 부르는 함수라 호출자가 할 수
+ * 있는 일이 없기 때문이다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. 뮤텍스를 잡는다.
+ *
+ * 호출 체인:
+ *   EPF 드라이버의 unbind
+ *     → [이 함수] → epc->ops->clear_bar()
  */
 void pci_epc_clear_bar(struct pci_epc *epc, u8 func_no, u8 vfunc_no,
 		       struct pci_epf_bar *epf_bar)
@@ -977,6 +1403,40 @@ EXPORT_SYMBOL_GPL(pci_epc_clear_bar);
  * @epf_bar: the struct epf_bar that contains the BAR information
  *
  * Invoke to configure the BAR of the endpoint device.
+ */
+/* [한국어]
+ * pci_epc_set_bar - BAR 를 만들어 호스트가 주소 공간을 배정하게 한다
+ *
+ * @epc: 대상 컨트롤러.
+ * @func_no: 물리 함수 번호.
+ * @vfunc_no: 가상 함수 번호.
+ * @epf_bar: 만들 BAR 의 번호, 크기, 플래그, 그리고 매핑 정보.
+ * @return: 성공 0, 인자가 하드웨어 제약을 어기면 -EINVAL.
+ *
+ * **이 파일에서 검증이 가장 촘촘한 함수다.** BAR 는 호스트가 열거 때 읽어
+ * 주소 공간을 떼어 주는 자리라, 잘못 만들면 호스트 쪽 자원 배정이 통째로
+ * 어그러진다. 그래서 EPC 의 능력 표와 PCI 규격 양쪽에 대고 검사한다.
+ *
+ * 검사하는 것이 여섯 갈래다.
+ * 1. EPC 가 능력을 보고하지 않으면 아예 진행하지 않는다.
+ * 2. 서브맵을 요구했다면 그 개수와 배열이 짝이 맞아야 하고, EPC 가
+ *    동적 인바운드 매핑과 서브레인지 매핑을 모두 지원해야 한다.
+ * 3. BAR_RESIZABLE 이면 크기가 1MB 이상 128TB 이하여야 한다 --
+ *    Resizable BAR 능력 구조가 표현할 수 있는 범위다.
+ * 4. BAR_FIXED 면 하드웨어가 정한 크기와 정확히 같아야 한다.
+ * 5. 크기는 반드시 2의 거듭제곱이어야 한다 -- BAR 의 하위 비트가 크기만큼
+ *    고정 0 이 되는 PCI 의 방식 때문에 다른 크기는 표현할 수 없다.
+ * 6. BAR_5 에 64비트를 요구하거나, IO 공간에 주소 비트가 섞이거나,
+ *    32비트 BAR 에 4GB 넘는 크기를 요구하면 안 된다.
+ *
+ * **NVMe 관점**: 호스트 NVMe 드라이버가 BAR0 을 ioremap 해 컨트롤러
+ * 레지스터에 접근하는 그 BAR 를, 엔드포인트에서는 이 함수가 만든다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. 뮤텍스를 잡는다.
+ *
+ * 호출 체인:
+ *   EPF 드라이버의 bind / epc_init
+ *     → [이 함수] → pci_epc_get_features(), epc->ops->set_bar()
  */
 int pci_epc_set_bar(struct pci_epc *epc, u8 func_no, u8 vfunc_no,
 		    struct pci_epf_bar *epf_bar)
@@ -1066,6 +1526,32 @@ EXPORT_SYMBOL_GPL(pci_epc_set_bar);
  *
  * Returns 0 on success and a negative error code in case of error.
  */
+/* [한국어]
+ * pci_epc_bar_size_to_rebar_cap - 바이트 크기를 Resizable BAR 능력 비트로 바꾼다
+ *
+ * @size: 바꿀 크기(바이트).
+ * @cap: 결과 비트를 담아 돌려줄 자리.
+ * @return: 성공 0, 범위를 벗어나면 -EINVAL.
+ *
+ * **Resizable BAR 능력 레지스터는 크기를 비트 자리로 표현한다.** 지원하는
+ * 크기마다 비트 하나가 대응하며, 규격이 정한 대로 1MB 가 비트 4 다.
+ * 이 함수가 바이트 크기를 그 비트 자리로 옮겨 준다.
+ *
+ * 계산은 두 단계다. 먼저 `ilog2(size) - ilog2(SZ_1M)` 로 1MB 를 0 으로 삼는
+ * 지수를 구하고, 거기에 4 를 더한 자리의 비트를 세운다.
+ *
+ * **범위 검사의 근거가 상류 주석에 있다** -- PCIe r6.0 7.8.6.2 절이 정한
+ * Resizable BAR 의 최소 크기가 1MB 이고, 이 함수는 상한을 128TB 로 둔다.
+ *
+ * **size 가 2의 거듭제곱인지는 검사하지 않는다.** ilog2 가 내림이므로
+ * 어중간한 값을 넣으면 조용히 작은 쪽으로 내려간다. 호출자가 이미
+ * 2의 거듭제곱만 넘긴다는 전제이며, 코드는 손대지 않고 사실만 적는다.
+ *
+ * 실행 컨텍스트: 어디서든 부를 수 있다. 순수 계산이며 락도 하드웨어 접근도 없다.
+ *
+ * 호출 체인:
+ *   EPC 드라이버 / EPF 드라이버가 Resizable BAR 를 설정할 때 → [이 함수]
+ */
 int pci_epc_bar_size_to_rebar_cap(size_t size, u32 *cap)
 {
 	/*
@@ -1107,6 +1593,32 @@ EXPORT_SYMBOL_GPL(pci_epc_bar_size_to_rebar_cap);
  * endpoint controller will have a dedicated location to which the standard
  * configuration header would be written. The callback function should write
  * the header fields to this dedicated location.
+ */
+/* [한국어]
+ * pci_epc_write_header - 설정공간 표준 헤더를 써서 장치의 정체를 정한다
+ *
+ * @epc: 대상 컨트롤러.
+ * @func_no: 물리 함수 번호.
+ * @vfunc_no: 가상 함수 번호.
+ * @header: 벤더 ID, 장치 ID, 클래스 코드 등 표준 헤더 필드.
+ * @return: 성공 0, 인자가 잘못이면 -EINVAL.
+ *
+ * **호스트가 이 장치를 무엇으로 볼지 정하는 함수다.** 여기에 적은 벤더 ID 와
+ * 클래스 코드를 보고 호스트가 어느 드라이버를 붙일지 결정하므로, 엔드포인트
+ * 설정 중 가장 먼저 해야 하는 일에 속한다.
+ *
+ * **VF 번호가 1 을 넘으면 거절하는 근거는 상류 주석에 있다** -- SR-IOV 에서
+ * 장치 ID 는 VF 하나에만 있고 나머지 VF 는 그것을 공유한다. 그래서 두 번째
+ * 이후의 VF 에 헤더를 쓰려는 것은 규격상 말이 되지 않는다.
+ *
+ * **NVMe 관점**: 호스트가 클래스 코드 0x010802(NVM Express)를 보고 nvme
+ * 드라이버를 붙이는 그 판단의 근거가, 엔드포인트에서는 이 함수로 적힌다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. 뮤텍스를 잡는다.
+ *
+ * 호출 체인:
+ *   EPF 드라이버의 bind / epc_init 콜백
+ *     → [이 함수] → epc->ops->write_header()
  */
 int pci_epc_write_header(struct pci_epc *epc, u8 func_no, u8 vfunc_no,
 			 struct pci_epf_header *header)
@@ -1157,6 +1669,42 @@ EXPORT_SYMBOL_GPL(pci_epc_write_header);
  * A PCI endpoint device can have one or more functions. In the case of PCIe,
  * the specification allows up to 8 PCIe endpoint functions. Invoke
  * pci_epc_add_epf() to add a PCI endpoint function to an endpoint controller.
+ */
+/* [한국어]
+ * pci_epc_add_epf - EPF 를 EPC 에 붙이고 함수 번호를 배정한다
+ *
+ * @epc: 붙일 대상 컨트롤러.
+ * @epf: 붙일 엔드포인트 기능.
+ * @type: 이 EPC 가 EPF 의 Primary 쪽인지 Secondary 쪽인지.
+ * @return: 성공 0, 인자가 잘못이면 -EINVAL, 이미 붙어 있으면 -EBUSY.
+ *
+ * **EPC 와 EPF 라는 두 계층이 실제로 이어지는 자리다.** 이 함수가 성공한
+ * 뒤에야 EPF 드라이버가 pci_epc_ 계열 함수를 부를 수 있다.
+ *
+ * 하는 일이 셋이다.
+ * 1. **빈 함수 번호를 찾는다.** epc->function_num_map 비트맵에서 처음으로
+ *    0 인 비트를 찾아 그 번호를 이 EPF 에 준다. PCIe 규격이 장치당 최대
+ *    8개 함수를 허용하지만, 실제 상한은 EPC 가 보고한 max_functions 다.
+ * 2. **비트맵에 표시한다.** 다음 EPF 가 같은 번호를 받지 않게 한다.
+ * 3. **Primary 인지 Secondary 인지에 따라 다른 필드에 기록하고 다른
+ *    리스트에 매단다.**
+ *
+ * **Primary 와 Secondary 를 나누는 이유**: NTB 처럼 EPF 하나가 두 개의 EPC 에
+ * 동시에 붙는 구성이 있기 때문이다. 두 호스트 사이에 끼어 양쪽에 각각
+ * 장치처럼 보여야 하므로, EPF 는 자기가 어느 쪽 EPC 에 어떤 함수 번호로
+ * 붙어 있는지를 두 벌로 들고 있어야 한다.
+ *
+ * **VF 는 여기로 오지 않는다** -- epf->is_vf 면 곧바로 거절한다. VF 는 PF 에
+ * 딸린 것이라 EPC 에 직접 붙는 것이 아니라 pci_epf_add_vepf() 로 PF 에 붙는다.
+ *
+ * list_lock 을 잡는 것에 주의한다. epc->lock(레지스터 보호)과 다른 락이며,
+ * EPF 목록과 함수 번호 비트맵을 지킨다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. 뮤텍스를 잡는다.
+ *
+ * 호출 체인:
+ *   pci-ep-cfs.c 의 configfs 링크 생성 → pci_epf_bind() 경로
+ *     → [이 함수] → find_first_zero_bit(), set_bit(), list_add_tail()
  */
 int pci_epc_add_epf(struct pci_epc *epc, struct pci_epf *epf,
 		    enum pci_epc_interface_type type)
@@ -1248,6 +1796,32 @@ EXPORT_SYMBOL_GPL(pci_epc_add_epf);
  *
  * Invoke to remove PCI endpoint function from the endpoint controller.
  */
+/* [한국어]
+ * pci_epc_remove_epf - EPF 를 EPC 에서 떼고 함수 번호를 반납한다
+ *
+ * @epc: 뗄 대상 컨트롤러.
+ * @epf: 뗄 엔드포인트 기능.
+ * @type: Primary 쪽인지 Secondary 쪽인지.
+ * @return: 없음.
+ *
+ * **pci_epc_add_epf() 의 짝이며 그 세 단계를 역순으로 되돌린다** --
+ * EPF 쪽의 EPC 포인터를 NULL 로 만들고, 함수 번호 비트를 지우고,
+ * 리스트에서 뺀다.
+ *
+ * **포인터를 먼저 NULL 로 만드는 순서가 중요하다.** 그래야 리스트에서
+ * 빠지기 전이라도 EPF 쪽에서 이 EPC 를 다시 쓰지 않는다. 다만 그 사이
+ * list_lock 만 쥐고 있으므로, 이미 진행 중인 다른 문맥의 호출까지 막지는
+ * 못한다 -- 이 계층은 상위(configfs, EPF 드라이버)가 순서를 지킨다고 전제한다.
+ *
+ * **type 에 따라 다른 필드를 지운다.** Primary 면 epf->epc 와 epf->list,
+ * Secondary 면 epf->sec_epc 와 epf->sec_epc_list 다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. 뮤텍스를 잡는다.
+ *
+ * 호출 체인:
+ *   pci-ep-cfs.c 의 configfs 링크 해제 → pci_epf_unbind() 경로
+ *     → [이 함수] → clear_bit(), list_del()
+ */
 void pci_epc_remove_epf(struct pci_epc *epc, struct pci_epf *epf,
 			enum pci_epc_interface_type type)
 {
@@ -1291,6 +1865,38 @@ EXPORT_SYMBOL_GPL(pci_epc_remove_epf);
  * Invoke to Notify the EPF device that the EPC device has established a
  * connection with the Root Complex.
  */
+/* [한국어]
+ * pci_epc_linkup - 링크가 올라왔음을 붙어 있는 모든 EPF 에 알린다
+ *
+ * @epc: 링크를 세운 컨트롤러.
+ * @return: 없음.
+ *
+ * **EPC 드라이버가 호스트와의 연결이 성립했음을 위쪽에 전하는 통로다.**
+ * EPF 드라이버는 이 통지를 받고 나서야 호스트가 자기를 볼 수 있다는 것을
+ * 알 수 있다.
+ *
+ * 붙어 있는 EPF 를 모두 훑으며 각자의 link_up 콜백을 부른다.
+ * **콜백을 부르기 전에 epf->lock 을 잡는다** -- EPF 하나의 상태를 두 문맥이
+ * 동시에 만지지 못하게 하기 위함이며, 바깥의 list_lock 은 목록 자체를
+ * 지킨다. 락 두 개를 겹쳐 잡는 순서가 이 파일의 통지 함수 전부에서
+ * list_lock → epf->lock 으로 일정하다.
+ *
+ * **event_ops 와 그 안의 콜백을 둘 다 확인한다** -- EPF 드라이버가 이벤트에
+ * 관심이 없으면 표 자체를 두지 않을 수 있고, 표를 두더라도 일부 콜백만
+ * 채울 수 있기 때문이다.
+ *
+ * **Secondary 리스트는 훑지 않는다.** epc->pci_epf 하나만 도는데, 이는
+ * Primary 로 붙은 EPF 만 이 통지를 받는다는 뜻이다. 코드는 손대지 않고
+ * 사실만 적는다.
+ *
+ * 실행 컨텍스트: EPC 드라이버의 링크 업 처리 경로. **뮤텍스를 잡으므로
+ * 인터럽트 문맥에서 직접 부를 수 없으며**, EPC 드라이버는 보통 워크큐나
+ * 스레드 IRQ 로 미뤄 부른다.
+ *
+ * 호출 체인:
+ *   EPC 드라이버(예: dwc/pcie-designware-ep.c 계열)의 링크 업 처리
+ *     → [이 함수] → epf->event_ops->link_up()
+ */
 void pci_epc_linkup(struct pci_epc *epc)
 {
 	/* [한국어] 목록을 순회할 때 쓸 커서. */
@@ -1330,6 +1936,26 @@ EXPORT_SYMBOL_GPL(pci_epc_linkup);
  * Invoke to Notify the EPF device that the EPC device has dropped the
  * connection with the Root Complex.
  */
+/* [한국어]
+ * pci_epc_linkdown - 링크가 끊겼음을 붙어 있는 모든 EPF 에 알린다
+ *
+ * @epc: 링크를 잃은 컨트롤러.
+ * @return: 없음.
+ *
+ * **pci_epc_linkup() 의 짝이며 구조가 똑같고 부르는 콜백만 다르다.**
+ * 호스트가 꺼지거나 케이블이 빠지거나 호스트 쪽에서 링크를 내리면
+ * EPC 드라이버가 이것을 부른다.
+ *
+ * EPF 드라이버는 이 통지를 받고 진행 중이던 전송을 접고 상태를 초기로
+ * 되돌려야 한다 -- 링크가 다시 올라오면 호스트가 처음부터 다시 열거하기
+ * 때문이다.
+ *
+ * 실행 컨텍스트: EPC 드라이버의 링크 다운 처리 경로. 뮤텍스를 잡는다.
+ *
+ * 호출 체인:
+ *   EPC 드라이버의 링크 다운 처리
+ *     → [이 함수] → epf->event_ops->link_down()
+ */
 void pci_epc_linkdown(struct pci_epc *epc)
 {
 	/* [한국어] 목록 순회용 커서. */
@@ -1361,6 +1987,31 @@ EXPORT_SYMBOL_GPL(pci_epc_linkdown);
  *
  * Invoke to Notify the EPF device that the EPC device's initialization
  * is completed.
+ */
+/* [한국어]
+ * pci_epc_init_notify - EPC 초기화가 끝났음을 알리고 그 사실을 기억해 둔다
+ *
+ * @epc: 초기화를 마친 컨트롤러.
+ * @return: 없음.
+ *
+ * **EPF 가 하드웨어를 만져도 되는 시점을 알려 주는 통지다.** EPC 드라이버가
+ * 자기 하드웨어를 다 세운 뒤 이것을 부르면, EPF 드라이버는 epc_init 콜백
+ * 안에서 BAR 를 만들고 인터럽트를 광고한다.
+ *
+ * **다른 통지 함수와 결정적으로 다른 점은 마지막 한 줄이다** --
+ * epc->init_complete 를 true 로 남긴다. 이 기억이 있어야
+ * pci_epc_notify_pending_init() 이 늦게 붙은 EPF 를 구제할 수 있다.
+ * 초기화가 이미 끝난 뒤에 EPF 가 붙으면 이 통지를 영영 못 받기 때문이다.
+ *
+ * **플래그를 list_lock 안에서 세우는 것이 요점이다.** 통지를 다 돌린 뒤,
+ * 그러나 락을 놓기 전에 세우므로, 이 락을 잡고 들어오는
+ * pci_epc_add_epf 경로와 사이에 틈이 생기지 않는다.
+ *
+ * 실행 컨텍스트: EPC 드라이버의 초기화 완료 경로. 뮤텍스를 잡는다.
+ *
+ * 호출 체인:
+ *   EPC 드라이버의 초기화 완료 처리
+ *     → [이 함수] → epf->event_ops->epc_init()
  */
 void pci_epc_init_notify(struct pci_epc *epc)
 {
@@ -1405,6 +2056,34 @@ EXPORT_SYMBOL_GPL(pci_epc_init_notify);
  * device. This is used to deliver the notification if the EPC initialization
  * got completed before the EPF driver bind.
  */
+/* [한국어]
+ * pci_epc_notify_pending_init - 늦게 붙은 EPF 하나에게 밀린 초기화 통지를 전한다
+ *
+ * @epc: 이미 초기화가 끝나 있을 수 있는 컨트롤러.
+ * @epf: 방금 붙은 엔드포인트 기능.
+ * @return: 없음.
+ *
+ * **순서 문제를 푸는 함수다.** EPC 초기화와 EPF 바인드는 서로 다른 계기로
+ * 일어난다 -- 전자는 컨트롤러 드라이버의 probe 흐름, 후자는 사용자가
+ * configfs 를 조작하는 시점이다. 그래서 초기화가 먼저 끝나 버리면 그 뒤에
+ * 붙는 EPF 는 pci_epc_init_notify() 의 통지를 놓친다.
+ *
+ * 그것을 막으려고 pci_epc_init_notify() 가 init_complete 를 남겨 두고,
+ * EPF 가 붙는 경로에서 이 함수를 불러 **이미 끝났으면 지금 알려 준다.**
+ *
+ * **다른 통지 함수와 달리 목록을 돌지 않고 EPF 하나만 다룬다.** 방금 붙은
+ * 그 하나만 통지를 놓쳤기 때문이다. 그래서 list_lock 도 잡지 않고
+ * epf->lock 만 잡는다.
+ *
+ * **epc 포인터를 검사하지 않는 것이 이 파일에서 드문 점이다** -- 부르는
+ * 쪽이 EPF 바인드 경로라 EPC 가 유효함이 보장된다고 본 것이다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트(EPF 바인드 경로). 뮤텍스를 잡는다.
+ *
+ * 호출 체인:
+ *   pci-epf-core.c 의 pci_epf_bind()
+ *     → [이 함수] → epf->event_ops->epc_init()
+ */
 void pci_epc_notify_pending_init(struct pci_epc *epc, struct pci_epf *epf)
 {
 	/* [한국어] 이 함수가 푸는 문제가 이 파일에서 가장 실용적이다.
@@ -1435,6 +2114,29 @@ EXPORT_SYMBOL_GPL(pci_epc_notify_pending_init);
  * @epc: the EPC device whose deinitialization is completed
  *
  * Invoke to notify the EPF device that the EPC deinitialization is completed.
+ */
+/* [한국어]
+ * pci_epc_deinit_notify - EPC 가 초기화 상태를 잃었음을 알린다
+ *
+ * @epc: 초기화 해제된 컨트롤러.
+ * @return: 없음.
+ *
+ * **pci_epc_init_notify() 의 짝이다.** 하드웨어가 리셋되거나 전원이 내려가
+ * EPC 가 세워 둔 설정이 사라졌을 때 EPC 드라이버가 부른다.
+ *
+ * EPF 드라이버는 이 통지를 받고 자기가 만들어 둔 BAR 와 매핑이 더 이상
+ * 유효하지 않다고 보아야 한다. 다시 쓰려면 다음 epc_init 통지를 기다려
+ * 처음부터 세워야 한다.
+ *
+ * **여기서도 마지막에 init_complete 를 false 로 되돌린다.** 그래야 이 뒤에
+ * 붙는 EPF 가 pci_epc_notify_pending_init() 에서 잘못된 통지를 받지 않는다.
+ * init_notify 가 true 로 세우는 것과 정확히 대칭이다.
+ *
+ * 실행 컨텍스트: EPC 드라이버의 초기화 해제 경로. 뮤텍스를 잡는다.
+ *
+ * 호출 체인:
+ *   EPC 드라이버의 deinit 처리
+ *     → [이 함수] → epf->event_ops->epc_deinit()
  */
 void pci_epc_deinit_notify(struct pci_epc *epc)
 {
@@ -1472,6 +2174,35 @@ EXPORT_SYMBOL_GPL(pci_epc_deinit_notify);
  * Notify the EPF device that the EPC device has generated the Bus Master Enable
  * event due to host setting the Bus Master Enable bit in the Command register.
  */
+/* [한국어]
+ * pci_epc_bus_master_enable_notify - 호스트가 Bus Master 를 켰음을 알린다
+ *
+ * @epc: 그 사건을 받은 컨트롤러.
+ * @return: 없음.
+ *
+ * **엔드포인트가 호스트 메모리에 접근해도 되는 시점을 알려 준다.**
+ * 호스트가 설정공간 Command 레지스터의 Bus Master Enable 비트를 켜는 순간이
+ * 곧 "이제 이 장치가 DMA 를 시작해도 좋다" 는 허락이며, 그 사건을 EPC
+ * 하드웨어가 잡아 이 함수로 전한다.
+ *
+ * **왜 링크 업만으로는 부족한가**: 링크가 올라와도 호스트 드라이버가 아직
+ * 장치를 열지 않았을 수 있다. 그 상태에서 엔드포인트가 호스트 메모리에
+ * 쓰면 IOMMU 가 막거나 엉뚱한 곳을 건드린다. Bus Master Enable 이 켜지는
+ * 것은 호스트 드라이버가 pci_set_master() 를 불렀다는 신호다.
+ *
+ * **NVMe 관점**: 호스트 nvme 드라이버가 pci_set_master() 를 부르는 그 순간이,
+ * 엔드포인트에서는 이 통지가 올라오는 순간이다. 그 전에는 컨트롤러가
+ * 큐를 읽으러 갈 수 없다.
+ *
+ * 다른 통지 함수와 구조는 같다 -- list_lock 을 잡고 EPF 를 훑으며
+ * 각자의 콜백을 부른다.
+ *
+ * 실행 컨텍스트: EPC 드라이버의 이벤트 처리 경로. 뮤텍스를 잡는다.
+ *
+ * 호출 체인:
+ *   EPC 드라이버의 Bus Master Enable 이벤트 처리
+ *     → [이 함수] → epf->event_ops->bus_master_enable()
+ */
 void pci_epc_bus_master_enable_notify(struct pci_epc *epc)
 {
 	/* [한국어] 목록 순회용 커서. */
@@ -1506,6 +2237,34 @@ EXPORT_SYMBOL_GPL(pci_epc_bus_master_enable_notify);
  * @epc: the EPC device that has to be destroyed
  *
  * Invoke to destroy the PCI EPC device
+ */
+/* [한국어]
+ * pci_epc_destroy - EPC 등록을 해제하고 자원을 되돌린다
+ *
+ * @epc: 없앨 컨트롤러.
+ * @return: 없음.
+ *
+ * **__pci_epc_create() 가 만든 것을 역순으로 허문다** -- configfs 그룹을
+ * 지우고, 도메인 번호를 반납하고, device 등록을 해제한다.
+ *
+ * **struct pci_epc 자체를 여기서 kfree 하지 않는 것이 요점이다.**
+ * device_unregister() 는 참조가 0 이 될 때 release 콜백을 부르고, 그때서야
+ * pci_epc_release() 가 메모리를 놓는다. 아직 pci_epc_get() 으로 참조를 쥔
+ * 쪽이 있으면 그쪽이 놓을 때까지 구조체가 살아 있어야 하기 때문이다.
+ *
+ * 도메인 번호 반납이 CONFIG_PCI_DOMAINS_GENERIC 안에 있는 것은
+ * __pci_epc_create() 에서 그 설정일 때만 번호를 받았기 때문이다 --
+ * 받은 곳과 놓는 곳이 같은 조건으로 감싸져 짝이 맞는다.
+ *
+ * **devm 으로 만든 EPC 도 결국 이 함수로 온다** -- devm_pci_epc_release() 가
+ * 이것을 부른다. 정리 절차를 한 곳에 모아 둔 것이다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트(드라이버 언바인드 또는 명시적 해제).
+ *
+ * 호출 체인:
+ *   EPC 드라이버의 remove / devm_pci_epc_release()
+ *     → [이 함수] → pci_ep_cfs_remove_epc_group(), pci_bus_release_domain_nr(),
+ *       device_unregister()
  */
 void pci_epc_destroy(struct pci_epc *epc)
 {
@@ -1558,6 +2317,45 @@ static void pci_epc_release(struct device *dev)
  * @owner: the owner of the module that creates the EPC device
  *
  * Invoke to create a new EPC device and add it to pci_epc class.
+ */
+/* [한국어]
+ * __pci_epc_create - EPC 를 하나 만들어 커널 장치 모델과 configfs 에 등록한다
+ *
+ * @dev: 이 EPC 를 만드는 컨트롤러 드라이버의 device.
+ * @ops: 이 컨트롤러가 제공하는 동작 표.
+ * @owner: 이 EPC 를 만든 모듈. pci_epc_get() 이 참조를 올릴 대상이다.
+ * @return: 성공하면 EPC 포인터, 실패면 ERR_PTR.
+ *
+ * **컨트롤러 드라이버가 엔드포인트 세계에 들어오는 문이다.** 이 함수가
+ * 성공하면 /sys/class/pci_epc/ 아래에 이름이 나타나고, 사용자가 configfs
+ * 에서 그 이름으로 EPF 를 연결할 수 있게 된다.
+ *
+ * 하는 일이 다섯이다.
+ * 1. struct pci_epc 를 0 으로 채워 만든다.
+ * 2. 락 둘과 EPF 목록을 초기화한다. **lock 은 레지스터 조작을, list_lock 은
+ *    EPF 목록과 함수 번호 비트맵을 지킨다** -- 용도가 달라 둘로 나눴다.
+ * 3. device 를 초기화해 pci_epc_class 에 넣고, 부모를 컨트롤러 드라이버의
+ *    device 로 둔다. release 콜백을 걸어 두어야 마지막 참조가 사라질 때
+ *    메모리가 해제된다.
+ * 4. PCI 도메인 번호를 받는다. **일반 도메인을 지원하지 않는 아키텍처에서는
+ *    WARN_ONCE 로 알리고 넘어간다** -- 상류 주석의 TODO 가 그 자리다.
+ * 5. 이름을 짓고 device_add 로 등록한 뒤 configfs 그룹을 만든다.
+ *
+ * **이름을 부모 device 의 이름 그대로 쓴다.** 그래서 사용자가 configfs 에
+ * 적어야 하는 문자열이 그 컨트롤러의 device 이름과 같아진다.
+ *
+ * **ops 를 검사하지 않는다** -- NULL 이면 첫 pci_epc_ 호출에서 터진다.
+ * dev 만 WARN_ON 으로 확인한다. 코드는 손대지 않고 사실만 적는다.
+ *
+ * **앞에 밑줄 둘이 붙은 이유**: owner 인자를 호출자가 직접 넘기지 않도록
+ * 헤더가 THIS_MODULE 을 채워 주는 매크로로 감싸 두었기 때문이다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트(컨트롤러 드라이버의 probe). 잠들 수 있다.
+ *
+ * 호출 체인:
+ *   EPC 드라이버의 probe(pci_epc_create 매크로 경유)
+ *     → [이 함수] → device_initialize(), dev_set_name(), device_add(),
+ *       pci_ep_cfs_add_epc_group()
  */
 struct pci_epc *
 __pci_epc_create(struct device *dev, const struct pci_epc_ops *ops,
@@ -1665,6 +2463,35 @@ EXPORT_SYMBOL_GPL(__pci_epc_create);
  * While at that, it also associates the device with the pci_epc using devres.
  * On driver detach, release function is invoked on the devres data,
  * then, devres data is freed.
+ */
+/* [한국어]
+ * __devm_pci_epc_create - EPC 를 만들고 드라이버 언바인드 때 자동으로 정리되게 한다
+ *
+ * @dev: 이 EPC 를 만드는 컨트롤러 드라이버의 device.
+ * @ops: 이 컨트롤러가 제공하는 동작 표.
+ * @owner: 이 EPC 를 만든 모듈.
+ * @return: 성공하면 EPC 포인터, 실패면 ERR_PTR.
+ *
+ * **__pci_epc_create() 에 devres 를 덧씌운 것이다.** 컨트롤러 드라이버가
+ * 언바인드될 때 커널이 알아서 pci_epc_destroy() 를 불러 주므로, 드라이버의
+ * remove 경로에서 해제를 잊어 생기는 누수를 없앤다. 대부분의 EPC 드라이버가
+ * 이쪽을 쓴다.
+ *
+ * **devres 블록을 먼저 잡고 그다음 EPC 를 만드는 순서가 중요하다.** 반대로
+ * 하면 EPC 를 만든 뒤 블록 할당에 실패했을 때 이미 등록된 EPC 를 다시
+ * 허물어야 한다. 먼저 잡아 두면 실패 시 devres_free 한 번으로 끝난다.
+ *
+ * 블록 안에는 **EPC 포인터 하나만** 넣는다. 그래서 정리 함수인
+ * devm_pci_epc_release() 가 res 를 이중 포인터로 벗겨 EPC 를 꺼낸다.
+ *
+ * **앞에 밑줄 둘이 붙은 이유는 __pci_epc_create() 와 같다** -- 헤더의
+ * devm_pci_epc_create 매크로가 THIS_MODULE 을 대신 넣어 준다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트(컨트롤러 드라이버의 probe). 잠들 수 있다.
+ *
+ * 호출 체인:
+ *   EPC 드라이버의 probe(devm_pci_epc_create 매크로 경유)
+ *     → [이 함수] → devres_alloc(), __pci_epc_create(), devres_add()
  */
 struct pci_epc *
 __devm_pci_epc_create(struct device *dev, const struct pci_epc_ops *ops,
