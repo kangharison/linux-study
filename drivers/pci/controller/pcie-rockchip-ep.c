@@ -1891,6 +1891,31 @@ static const struct pci_epc_features rockchip_pcie_epc_features = {
 	.align = ROCKCHIP_PCIE_AT_SIZE_ALIGN,
 };
 
+/* [한국어]
+ * rockchip_pcie_ep_get_features - 이 EP 컨트롤러의 능력을 알려 준다
+ *
+ * @epc: EPC 객체. 쓰지 않는다.
+ * @func_no: 물리 함수 번호. 쓰지 않는다.
+ * @vfunc_no: 가상 함수 번호. 쓰지 않는다.
+ * @return: 정적 상수 rockchip_pcie_epc_features 의 주소.
+ *
+ * 능력이 인스턴스나 함수와 무관하게 고정이므로 같은 구조체를 그대로 돌려준다.
+ *
+ * 선언하는 네 가지가 각각 이 파일의 다른 부분과 짝을 이룬다.
+ *   - linkup_notifier: 이 파일이 실제로 pci_epc_linkup/linkdown 을 부르기 때문이다.
+ *     EPF 는 이 플래그를 보고 통지를 기다릴지 결정한다.
+ *   - msi_capable / intx_capable: raise_irq 가 그 둘만 처리하는 것과 일치한다.
+ *   - msix_capable 이 없는 것이 hide_broken_msix_cap() 의 존재 이유와 짝이다 —
+ *     하드웨어가 지원하지 않으면서 capability 만 광고하는 문제를 감춰야 했다.
+ *   - align: EPF 가 창을 나눌 때 기준으로 삼는 정렬 단위다.
+ *
+ * 실행 컨텍스트: EPC 코어의 능력 조회 경로, 프로세스 컨텍스트.
+ *
+ * 에러 경로: 없다.
+ *
+ * 호출 체인:
+ *   EPF → pci_epc_get_features() (pci-epc-core.c:381)
+ *     → pci_epc_ops.get_features == [이 함수] */
 static const struct pci_epc_features*
 rockchip_pcie_ep_get_features(struct pci_epc *epc, u8 func_no, u8 vfunc_no)
 {

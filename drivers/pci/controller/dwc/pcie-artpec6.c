@@ -1148,6 +1148,26 @@ static const struct pci_epc_features artpec6_pcie_epc_features = {
 	.msi_capable = true,
 };
 
+/* [한국어]
+ * artpec6_pcie_get_features - 이 EP 컨트롤러의 능력을 알려 준다(DWC 코어 콜백)
+ *
+ * @ep: DWC 엔드포인트 객체. 사용하지 않는다 — 능력이 인스턴스와 무관하기 때문이다.
+ * @return: 정적 상수 artpec6_pcie_epc_features 의 주소.
+ *
+ * EPC 코어와 EPF 드라이버는 이 정보를 보고 무엇을 할 수 있는지 판단한다.
+ * 예를 들어 msi_capable 이 false 면 EPF 가 MSI 설정을 아예 시도하지 않는다.
+ *
+ * 돌려주는 구조체는 DWC_EPC_COMMON_FEATURES 매크로(pcie-designware.h:649)로
+ * DWC 계열 공통 능력을 채운 뒤 msi_capable 만 추가로 켠 것이다.
+ * msix_capable 을 켜지 않았으므로 MSI-X 는 지원하지 않으며,
+ * 그 사실이 raise_irq 에 MSI-X 분기가 없는 것과 일관된다.
+ *
+ * 실행 컨텍스트: EPC 코어의 능력 조회 경로, 프로세스 컨텍스트.
+ *
+ * 에러 경로: 없다. NULL 을 돌려주는 경우가 없다.
+ *
+ * 호출 체인:
+ *   pci_epc_get_features() → dw_pcie_ep_ops.get_features == [이 함수] */
 static const struct pci_epc_features *
 artpec6_pcie_get_features(struct dw_pcie_ep *ep)
 {
