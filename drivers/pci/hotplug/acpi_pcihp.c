@@ -438,6 +438,32 @@ int acpi_pci_check_ejectable(struct pci_bus *pbus, acpi_handle handle)
 EXPORT_SYMBOL_GPL(acpi_pci_check_ejectable);
 
 static acpi_status
+/* [한국어]
+ * check_hotplug - acpi_walk_namespace 가 노드마다 부르는 콜백
+ *
+ * @handle: 지금 방문 중인 ACPI 노드.
+ * @lvl: 순회 깊이. 쓰지 않는다.
+ * @context: 호출자가 넘긴 문맥. 실제로는 "찾았다" 플래그를 가리키는 int 포인터다.
+ * @rv: 반환값 자리. 쓰지 않는다.
+ * @return: AE_OK = 계속 순회. AE_CTRL_TERMINATE = 즉시 멈춤.
+ *
+ * 배출 가능한 슬롯을 하나라도 찾으면 플래그를 세우고 순회를 멈춘다.
+ * "하나라도 있는가" 를 묻는 것이므로 나머지를 훑을 이유가 없고,
+ * AE_CTRL_TERMINATE 가 그 조기 종료를 ACPI 코어에 알리는 값이다.
+ *
+ * 결과를 반환값이 아니라 context 포인터로 전달하는 것은 콜백 시그니처가
+ * acpi_status 로 고정되어 있기 때문이다 — 순회 제어와 결과 전달을
+ * 분리해야 해서 나온 구조다.
+ *
+ * 실행 컨텍스트: acpi_walk_namespace 안, 프로세스 컨텍스트.
+ * pcihp_is_ejectable() 이 ACPI 메서드를 평가하므로 잠들 수 있다.
+ *
+ * 에러 경로: 없다. 판정에 실패하면 "아니다" 쪽으로 떨어져 순회가 계속된다.
+ *
+ * 호출 체인:
+ *   acpi_pci_detect_ejectable() → acpi_walk_namespace() → [이 함수]
+ *     → pcihp_is_ejectable()
+ */
 check_hotplug(acpi_handle handle, u32 lvl, void *context, void **rv)
 {
 	/* [한국어] acpi_walk_namespace 가 넘겨 준 문맥을 원래 타입으로 되돌린다.
