@@ -1676,7 +1676,7 @@ EXPORT_SYMBOL(pci_read_config_word);
  * 결국 이 경로다 — 다만 드라이버가 직접 부르지 않고 pci_resource_start() 가
  * 열거 때 저장해 둔 값을 쓴다. */
 int pci_read_config_dword(const struct pci_dev *dev, int where,
-			  u32 *val)
+					u32 *val)
 {
 	if (pci_dev_is_disconnected(dev)) {	/* [한국어] 사라진 장치 조기 차단 */
 		PCI_SET_ERROR_RESPONSE(val);	/* [한국어] 0xFFFFFFFF 로 채운다 */
@@ -1740,7 +1740,7 @@ EXPORT_SYMBOL(pci_write_config_word);
  * 동작이 이 함수로 이뤄진다(써 넣고 되읽으면 하드웨어가 무시한 하위 비트로
  * 크기를 역산할 수 있다). */
 int pci_write_config_dword(const struct pci_dev *dev, int where,
-			   u32 val)
+					 u32 val)
 {
 	if (pci_dev_is_disconnected(dev))	/* [한국어] 사라진 장치 조기 차단 */
 		return PCIBIOS_DEVICE_NOT_FOUND;

@@ -269,7 +269,10 @@ enum vmd_features {
 
 /* [한국어] 클라이언트(노트북·데스크톱)용 VMD 에 공통으로 필요한 네 기능을
  * 묶은 이름. vmd_ids[] 의 여러 항목이 이 하나로 driver_data 를 지정한다. */
-#define VMD_FEATS_CLIENT	(VMD_FEAT_HAS_MEMBAR_SHADOW_VSCAP |					 VMD_FEAT_HAS_BUS_RESTRICTIONS |					 VMD_FEAT_OFFSET_FIRST_VECTOR |						 VMD_FEAT_BIOS_PM_QUIRK)
+#define VMD_FEATS_CLIENT	(VMD_FEAT_HAS_MEMBAR_SHADOW_VSCAP |	\
+				 VMD_FEAT_HAS_BUS_RESTRICTIONS |	\
+				 VMD_FEAT_OFFSET_FIRST_VECTOR |		\
+				 VMD_FEAT_BIOS_PM_QUIRK)
 
 /* [한국어] VMD 인스턴스 번호 발급기(IDA = ID Allocator).
  * 설정자/읽는 자: vmd_probe() 가 ida_alloc 으로 번호를 받아 "vmd0", "vmd1"
@@ -1165,12 +1168,12 @@ static int vmd_create_irq_domain(struct vmd_dev *vmd)
 	};
 
 	info.fwnode = irq_domain_alloc_named_id_fwnode("VMD-MSI",	/* [한국어] 도메인을 식별할 이름표. "VMD-MSI" 에 도메인 번호를 붙여 */
-					       vmd->sysdata.domain);	/* [한국어] VMD 가 여럿이어도 debugfs 등에서 구분되게 한다 */
+						       vmd->sysdata.domain);	/* [한국어] VMD 가 여럿이어도 debugfs 등에서 구분되게 한다 */
 	if (!info.fwnode)	/* [한국어] 이름표 할당 실패 */
 		return -ENODEV;	/* [한국어] 도메인을 만들 수 없다 */
 
 	vmd->irq_domain = msi_create_parent_irq_domain(&info,	/* [한국어] MSI 부모 도메인을 만든다. 이때부터 하위 장치의 MSI 요청이 이리로 들어온다 */
-					       &vmd_msi_parent_ops);	/* [한국어] 부모로서의 성질(플래그, 자식 초기화 콜백)을 함께 넘긴다 */
+						       &vmd_msi_parent_ops);	/* [한국어] 부모로서의 성질(플래그, 자식 초기화 콜백)을 함께 넘긴다 */
 	if (!vmd->irq_domain) {	/* [한국어] 도메인 생성 실패면 */
 		irq_domain_free_fwnode(info.fwnode);	/* [한국어] 앞서 만든 이름표를 해제한다 — 되돌리기의 짝이다 */
 		return -ENODEV;	/* [한국어] 실패 반환 */
@@ -1628,14 +1631,14 @@ static void vmd_domain_reset(struct vmd_dev *vmd)
 	for (bus = 0; bus < max_buses; bus++) {	/* [한국어] 담당 버스 전부를 훑는다 */
 		for (dev = 0; dev < 32; dev++) {	/* [한국어] 한 버스에 장치 번호는 0~31 (PCI 규격의 5 비트 장치 번호) */
 			base = vmd->cfgbar + PCIE_ECAM_OFFSET(bus,	/* [한국어] 함수 0 의 config 시작 주소를 계산한다 */
-					    PCI_DEVFN(dev, 0), 0);	/* [한국어] PCI_DEVFN(dev, 0) 은 (dev << 3) | 0 */
+						PCI_DEVFN(dev, 0), 0);	/* [한국어] PCI_DEVFN(dev, 0) 은 (dev << 3) | 0 */
 
 			hdr_type = readb(base + PCI_HEADER_TYPE);	/* [한국어] Header Type 레지스터(오프셋 0x0e)를 읽는다 */
 
 			functions = (hdr_type & PCI_HEADER_TYPE_MFD) ? 8 : 1;	/* [한국어] bit 7(PCI_HEADER_TYPE_MFD)이 서 있으면 다기능 장치라 함수 8 개를 다 봐야 한다 */
 			for (fn = 0; fn < functions; fn++) {	/* [한국어] 각 함수를 순회 */
 				base = vmd->cfgbar + PCIE_ECAM_OFFSET(bus,	/* [한국어] 그 함수의 config 시작 주소 */
-						    PCI_DEVFN(dev, fn), 0);	/* [한국어] PCI_DEVFN(dev, fn) 은 (dev << 3) | fn */
+						PCI_DEVFN(dev, fn), 0);	/* [한국어] PCI_DEVFN(dev, fn) 은 (dev << 3) | fn */
 
 				hdr_type = readb(base + PCI_HEADER_TYPE) &	/* [한국어] Header Type 을 다시 읽되 */
 						PCI_HEADER_TYPE_MASK;	/* [한국어] 다기능 비트를 지우고 하위 7 비트의 타입만 남긴다 */

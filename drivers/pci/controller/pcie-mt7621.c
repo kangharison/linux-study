@@ -146,7 +146,6 @@ static u32 read_config(struct mt7621_pcie *pcie, unsigned int dev, u32 reg)
 	u32 address = PCI_CONF1_EXT_ADDRESS(0, dev, 0, reg);
 
 	pcie_write(pcie, address, RALINK_PCI_CONFIG_ADDR);
-
 	return pcie_read(pcie, RALINK_PCI_CONFIG_DATA);
 }
 
@@ -156,7 +155,6 @@ static void write_config(struct mt7621_pcie *pcie, unsigned int dev,
 	u32 address = PCI_CONF1_EXT_ADDRESS(0, dev, 0, reg);
 
 	pcie_write(pcie, address, RALINK_PCI_CONFIG_ADDR);
-
 	pcie_write(pcie, val, RALINK_PCI_CONFIG_DATA);
 }
 
@@ -244,7 +242,6 @@ static int mt7621_pcie_parse_port(struct mt7621_pcie *pcie,
 	}
 
 	port->slot = slot;
-
 	port->pcie = pcie;
 
 	INIT_LIST_HEAD(&port->list);
@@ -351,7 +348,6 @@ static int mt7621_pcie_init_ports(struct mt7621_pcie *pcie)
 	int err;
 
 	mt7621_pcie_reset_assert(pcie);
-
 	mt7621_pcie_reset_rc_deassert(pcie);
 
 	list_for_each_entry_safe(port, tmp, &pcie->ports, list) {
@@ -370,7 +366,6 @@ static int mt7621_pcie_init_ports(struct mt7621_pcie *pcie)
 	}
 
 	msleep(INIT_PORTS_DELAY_MS);
-
 	mt7621_pcie_reset_ep_deassert(pcie);
 
 	tmp = NULL;
@@ -380,11 +375,8 @@ static int mt7621_pcie_init_ports(struct mt7621_pcie *pcie)
 		if (!mt7621_pcie_port_is_linkup(port)) {
 			dev_info(dev, "pcie%d no card, disable it (RST & CLK)\n",
 				 slot);
-
 			mt7621_control_assert(port);
-
 			port->enabled = false;
-
 			num_disabled++;
 
 			if (slot == 0) {
@@ -408,9 +400,7 @@ static void mt7621_pcie_enable_port(struct mt7621_pcie_port *port)
 
 	/* enable pcie interrupt */
 	val = pcie_read(pcie, RALINK_PCI_PCIMSK_ADDR);
-
 	val |= PCIE_PORT_INT_EN(slot);
-
 	pcie_write(pcie, val, RALINK_PCI_PCIMSK_ADDR);
 
 	/* map 2G DDR region */
@@ -423,18 +413,14 @@ static void mt7621_pcie_enable_port(struct mt7621_pcie_port *port)
 
 	/* configure RC FTS number to 250 when it leaves L0s */
 	val = read_config(pcie, slot, PCIE_FTS_NUM);
-
 	val &= ~PCIE_FTS_NUM_MASK;
-
 	val |= PCIE_FTS_NUM_L0(0x50);
-
 	write_config(pcie, slot, PCIE_FTS_NUM, val);
 }
 
 static int mt7621_pcie_enable_ports(struct pci_host_bridge *host)
 {
 	struct mt7621_pcie *pcie = pci_host_bridge_priv(host);
-
 	struct device *dev = pcie->dev;
 	struct mt7621_pcie_port *port;
 	struct resource_entry *entry;
@@ -448,7 +434,6 @@ static int mt7621_pcie_enable_ports(struct pci_host_bridge *host)
 
 	/* Setup MEMWIN and IOWIN */
 	pcie_write(pcie, 0xffffffff, RALINK_PCI_MEMBASE);
-
 	pcie_write(pcie, entry->res->start - entry->offset, RALINK_PCI_IOBASE);
 
 	list_for_each_entry(port, &pcie->ports, list) {
@@ -461,7 +446,6 @@ static int mt7621_pcie_enable_ports(struct pci_host_bridge *host)
 			}
 
 			mt7621_pcie_enable_port(port);
-
 			dev_info(dev, "PCIE%d enabled\n", port->slot);
 		}
 	}
@@ -474,9 +458,7 @@ static int mt7621_pcie_register_host(struct pci_host_bridge *host)
 	struct mt7621_pcie *pcie = pci_host_bridge_priv(host);
 
 	host->ops = &mt7621_pcie_ops;
-
 	host->sysdata = pcie;
-
 	return pci_host_probe(host);
 }
 
@@ -502,11 +484,8 @@ static int mt7621_pcie_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	pcie = pci_host_bridge_priv(bridge);
-
 	pcie->dev = dev;
-
 	platform_set_drvdata(pdev, pcie);
-
 	INIT_LIST_HEAD(&pcie->ports);
 
 	attr = soc_device_match(mt7621_pcie_quirks_match);
@@ -543,7 +522,6 @@ remove_resets:
 static void mt7621_pcie_remove(struct platform_device *pdev)
 {
 	struct mt7621_pcie *pcie = platform_get_drvdata(pdev);
-
 	struct mt7621_pcie_port *port;
 
 	list_for_each_entry(port, &pcie->ports, list)
@@ -558,9 +536,7 @@ MODULE_DEVICE_TABLE(of, mt7621_pcie_ids);
 
 static struct platform_driver mt7621_pcie_driver = {
 	.probe = mt7621_pcie_probe,
-
 	.remove = mt7621_pcie_remove,
-
 	.driver = {
 		.name = "mt7621-pci",
 		.of_match_table = mt7621_pcie_ids,

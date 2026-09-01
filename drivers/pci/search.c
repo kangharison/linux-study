@@ -116,8 +116,7 @@ DECLARE_RWSEM(pci_bus_sem);
  */
 int pci_for_each_dma_alias(struct pci_dev *pdev,
 			   int (*fn)(struct pci_dev *pdev,
-				     u16 alias, void *data),
-			   void *data)
+				     u16 alias, void *data), void *data)
 {
 	struct pci_bus *bus;
 	int ret;
@@ -205,8 +204,7 @@ int pci_for_each_dma_alias(struct pci_dev *pdev,
 	return ret;
 }
 
-static struct pci_bus *pci_do_find_bus(struct pci_bus *bus,
-				       unsigned char busnr)
+static struct pci_bus *pci_do_find_bus(struct pci_bus *bus, unsigned char busnr)
 {
 	struct pci_bus *child;
 	struct pci_bus *tmp;
@@ -231,8 +229,7 @@ static struct pci_bus *pci_do_find_bus(struct pci_bus *bus,
  * in the global list of PCI buses.  If the bus is found, a pointer to its
  * data structure is returned.  If no bus is found, %NULL is returned.
  */
-struct pci_bus *pci_find_bus(int domain,
-			     int busnr)
+struct pci_bus *pci_find_bus(int domain, int busnr)
 {
 	struct pci_bus *bus = NULL;
 	struct pci_bus *tmp_bus;
@@ -285,8 +282,7 @@ EXPORT_SYMBOL(pci_find_next_bus);
  * decrement the reference count by calling pci_dev_put().
  * If no device is found, %NULL is returned.
  */
-struct pci_dev *pci_get_slot(struct pci_bus *bus,
-			     unsigned int devfn)
+struct pci_dev *pci_get_slot(struct pci_bus *bus, unsigned int devfn)
 {
 	struct pci_dev *dev;
 
@@ -320,9 +316,8 @@ EXPORT_SYMBOL(pci_get_slot);
  * reference count by calling pci_dev_put().  If no device is found,
  * %NULL is returned.
  */
-struct pci_dev *pci_get_domain_bus_and_slot(int domain,
-				    unsigned int bus,
-				    unsigned int devfn)
+struct pci_dev *pci_get_domain_bus_and_slot(int domain, unsigned int bus,
+					    unsigned int devfn)
 {
 	struct pci_dev *dev = NULL;
 
@@ -335,8 +330,7 @@ struct pci_dev *pci_get_domain_bus_and_slot(int domain,
 }
 EXPORT_SYMBOL(pci_get_domain_bus_and_slot);
 
-static int match_pci_dev_by_id(struct device *dev,
-			       const void *data)
+static int match_pci_dev_by_id(struct device *dev, const void *data)
 {
 	struct pci_dev *pdev = to_pci_dev(dev);
 	const struct pci_device_id *id = data;
@@ -401,12 +395,9 @@ enum pci_search_direction {
 	PCI_SEARCH_REVERSE,
 };
 
-static struct pci_dev *__pci_get_subsys(unsigned int vendor,
-					unsigned int device,
-					unsigned int ss_vendor,
-					unsigned int ss_device,
-					struct pci_dev *from,
-					enum pci_search_direction dir)
+static struct pci_dev *__pci_get_subsys(unsigned int vendor, unsigned int device,
+				 unsigned int ss_vendor, unsigned int ss_device,
+				 struct pci_dev *from, enum pci_search_direction dir)
 {
 	struct pci_device_id id = {
 		.vendor = vendor,
@@ -437,10 +428,8 @@ static struct pci_dev *__pci_get_subsys(unsigned int vendor,
  * searches continue from next device on the global list.
  * The reference count for @from is always decremented if it is not %NULL.
  */
-struct pci_dev *pci_get_subsys(unsigned int vendor,
-			       unsigned int device,
-			       unsigned int ss_vendor,
-			       unsigned int ss_device,
+struct pci_dev *pci_get_subsys(unsigned int vendor, unsigned int device,
+			       unsigned int ss_vendor, unsigned int ss_device,
 			       struct pci_dev *from)
 {
 	return __pci_get_subsys(vendor, device, ss_vendor, ss_device, from,
@@ -462,8 +451,7 @@ EXPORT_SYMBOL(pci_get_subsys);
  * from next device on the global list.  The reference count for @from is
  * always decremented if it is not %NULL.
  */
-struct pci_dev *pci_get_device(unsigned int vendor,
-			       unsigned int device,
+struct pci_dev *pci_get_device(unsigned int vendor, unsigned int device,
 			       struct pci_dev *from)
 {
 	return pci_get_subsys(vendor, device, PCI_ANY_ID, PCI_ANY_ID, from);
@@ -497,8 +485,7 @@ EXPORT_SYMBOL(pci_get_device_reverse);
  * on the global list.  The reference count for @from is always decremented
  * if it is not %NULL.
  */
-struct pci_dev *pci_get_class(unsigned int class,
-			      struct pci_dev *from)
+struct pci_dev *pci_get_class(unsigned int class, struct pci_dev *from)
 {
 	struct pci_device_id id = {
 		.vendor = PCI_ANY_ID,
@@ -529,8 +516,7 @@ EXPORT_SYMBOL(pci_get_class);
  * Returns:
  * A pointer to a matched PCI device, %NULL Otherwise.
  */
-struct pci_dev *pci_get_base_class(unsigned int class,
-				   struct pci_dev *from)
+struct pci_dev *pci_get_base_class(unsigned int class, struct pci_dev *from)
 {
 	struct pci_device_id id = {
 		.vendor = PCI_ANY_ID,

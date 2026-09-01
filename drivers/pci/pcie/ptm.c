@@ -711,7 +711,7 @@ EXPORT_SYMBOL(pcie_ptm_enabled);
  *     → ops->context_update_write
  */
 static ssize_t context_update_write(struct file *file, const char __user *ubuf,
-				     size_t count, loff_t *ppos)
+			     size_t count, loff_t *ppos)
 {
 	struct pci_ptm_debugfs *ptm_debugfs = file->private_data;
 	char buf[7];
@@ -787,7 +787,7 @@ static ssize_t context_update_write(struct file *file, const char __user *ubuf,
  *     → ops->context_update_read
  */
 static ssize_t context_update_read(struct file *file, char __user *ubuf,
-				    size_t count, loff_t *ppos)
+			     size_t count, loff_t *ppos)
 {
 	struct pci_ptm_debugfs *ptm_debugfs = file->private_data;
 	char buf[8]; /* Extra space for NULL termination at the end */
@@ -1218,11 +1218,9 @@ DEFINE_DEBUGFS_ATTRIBUTE(t4_fops, t4_get, NULL, "%llu\n");
 /* [한국어] t4: 요청자가 그 응답을 받은 시각. 이 넷으로 왕복 지연과 시각 차이를 구한다. */
 
 #define pcie_ptm_create_debugfs_file(pdata, mode, attr)			\
-	do {									\
-	\
-		if (ops->attr##_visible && ops->attr##_visible(pdata))		\
-		\
-			debugfs_create_file(#attr, mode, ptm_debugfs->debugfs,	\
+	do {								\
+		if (ops->attr##_visible && ops->attr##_visible(pdata))	\
+			debugfs_create_file(#attr, mode, ptm_debugfs->debugfs, \
 					    ptm_debugfs, &attr##_fops);	\
 	} while (0)
 

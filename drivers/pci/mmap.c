@@ -81,11 +81,9 @@ static const struct vm_operations_struct pci_phys_vm_ops = {
 #endif
 };
 
-int pci_mmap_resource_range(struct pci_dev *pdev,
-			    int bar,
+int pci_mmap_resource_range(struct pci_dev *pdev, int bar,
 			    struct vm_area_struct *vma,
-			    enum pci_mmap_state mmap_state,
-			    int write_combine)
+			    enum pci_mmap_state mmap_state, int write_combine)
 {
 	unsigned long size;
 	int ret;
@@ -109,8 +107,8 @@ int pci_mmap_resource_range(struct pci_dev *pdev,
 	vma->vm_ops = &pci_phys_vm_ops;
 
 	return io_remap_pfn_range(vma, vma->vm_start, vma->vm_pgoff,
-				vma->vm_end - vma->vm_start,
-				vma->vm_page_prot);
+				  vma->vm_end - vma->vm_start,
+				  vma->vm_page_prot);
 }
 
 #endif
@@ -118,10 +116,8 @@ int pci_mmap_resource_range(struct pci_dev *pdev,
 #if (defined(CONFIG_SYSFS) || defined(CONFIG_PROC_FS)) && \
     (defined(HAVE_PCI_MMAP) || defined(ARCH_GENERIC_PCI_MMAP_RESOURCE))
 
-int pci_mmap_fits(struct pci_dev *pdev,
-		int resno,
-		struct vm_area_struct *vma,
-		enum pci_mmap_api mmap_api)
+int pci_mmap_fits(struct pci_dev *pdev, int resno, struct vm_area_struct *vma,
+		  enum pci_mmap_api mmap_api)
 {
 	resource_size_t pci_start = 0, pci_end;
 	unsigned long nr, start, size;

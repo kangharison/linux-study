@@ -179,34 +179,29 @@ static int report_error_detected(struct pci_dev *dev,
 	return 0;
 }
 
-static int pci_pm_runtime_get_sync(struct pci_dev *pdev,
-				   void *data)
+static int pci_pm_runtime_get_sync(struct pci_dev *pdev, void *data)
 {
 	pm_runtime_get_sync(&pdev->dev);
 	return 0;
 }
 
-static int pci_pm_runtime_put(struct pci_dev *pdev,
-				void *data)
+static int pci_pm_runtime_put(struct pci_dev *pdev, void *data)
 {
 	pm_runtime_put(&pdev->dev);
 	return 0;
 }
 
-static int report_frozen_detected(struct pci_dev *dev,
-				  void *data)
+static int report_frozen_detected(struct pci_dev *dev, void *data)
 {
 	return report_error_detected(dev, pci_channel_io_frozen, data);
 }
 
-static int report_normal_detected(struct pci_dev *dev,
-				  void *data)
+static int report_normal_detected(struct pci_dev *dev, void *data)
 {
 	return report_error_detected(dev, pci_channel_io_normal, data);
 }
 
-static int report_perm_failure_detected(struct pci_dev *dev,
-				      void *data)
+static int report_perm_failure_detected(struct pci_dev *dev, void *data)
 {
 	struct pci_driver *pdrv;
 	const struct pci_error_handlers *err_handler;
@@ -224,8 +219,7 @@ out:
 	return 0;
 }
 
-static int report_mmio_enabled(struct pci_dev *dev,
-				 void *data)
+static int report_mmio_enabled(struct pci_dev *dev, void *data)
 {
 	struct pci_driver *pdrv;
 	pci_ers_result_t vote, *result = data;
@@ -244,8 +238,7 @@ out:
 	return 0;
 }
 
-static int report_slot_reset(struct pci_dev *dev,
-				void *data)
+static int report_slot_reset(struct pci_dev *dev, void *data)
 {
 	struct pci_driver *pdrv;
 	pci_ers_result_t vote, *result = data;
@@ -265,8 +258,7 @@ out:
 	return 0;
 }
 
-static int report_resume(struct pci_dev *dev,
-			       void *data)
+static int report_resume(struct pci_dev *dev, void *data)
 {
 	struct pci_driver *pdrv;
 	const struct pci_error_handlers *err_handler;
