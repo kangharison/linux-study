@@ -1409,7 +1409,7 @@ static inline u32 afi_readl(struct tegra_pcie *pcie, unsigned long offset)
  * @return: 없음.
  *
  * PADS 는 내장 PHY 와 그 PLL 을 다루는 레지스터 블록이다. AFI 와 달리
-**컨트롤러 전체에 하나뿐** 이라 포트별이 아니다 -- 그래서 인자가
+ * **컨트롤러 전체에 하나뿐** 이라 포트별이 아니다 -- 그래서 인자가
  * tegra_pcie 이지 tegra_pcie_port 가 아니다.
  *
  * 이 블록을 쓰는 곳은 두 갈래뿐이다. 하나는 내장 PHY 를 직접 켜고 끄는
@@ -1481,7 +1481,7 @@ static inline u32 pads_readl(struct tegra_pcie *pcie, unsigned long offset)
  * @return: 이 하드웨어가 요구하는 형식의 주소 오프셋.
  *
  * 위의 원문 주석이 비트 배치를 그대로 적고 있다. ECAM 과 비슷하되
-**확장 레지스터 4비트의 자리가 다른** 것이 핵심이다.
+ * **확장 레지스터 4비트의 자리가 다른** 것이 핵심이다.
  *   [27:24] 확장 레지스터 번호  ← where 의 비트 11:8
  *   [23:16] 버스 번호
  *   [15:11] 장치 번호
@@ -1517,7 +1517,7 @@ static unsigned int tegra_pcie_conf_offset(u8 bus, unsigned int devfn,
  * @where: config 오프셋.
  * @return: 접근할 MMIO 주소. 버스 0 에서 해당 슬롯의 포트를 못 찾으면 NULL.
  *
-**이 드라이버에서 가장 특이한 함수** 다. 보통의 map_bus 는 주소를
+ * **이 드라이버에서 가장 특이한 함수** 다. 보통의 map_bus 는 주소를
  * 계산해 돌려주기만 하지만, 이 함수는 경로에 따라 **하드웨어 상태를 바꾼다.**
  *
  * 버스 0 (루트 포트 자신):
@@ -1540,7 +1540,7 @@ static unsigned int tegra_pcie_conf_offset(u8 bus, unsigned int devfn,
  * 다른 BDF 의 접근이 끼어들면 엉뚱한 곳을 읽는다. PCI 코어의 config 락이
  * 그 구간을 직렬화해 주기 때문에 성립한다.
  *
-**뒷세대와의 대비**: pcie-tegra194.c 의 map_bus 는
+ * **뒷세대와의 대비**: pcie-tegra194.c 의 map_bus 는
  * dw_pcie_own_conf_map_bus(pcie-designware-host.c:1951) 한 줄이다. 창을
  * 옮기는 개념 자체가 없다.
  *
@@ -1612,7 +1612,7 @@ static void __iomem *tegra_pcie_map_bus(struct pci_bus *bus,
  * @value: 읽은 값을 담을 곳.
  * @return: 커널 공통 함수의 반환값.
  *
-**버스 0 이냐 아니냐로 커널 공통 함수를 갈라 부르는 것이 요점이다.**
+ * **버스 0 이냐 아니냐로 커널 공통 함수를 갈라 부르는 것이 요점이다.**
  *
  * 버스 0 은 pci_generic_config_read32(drivers/pci/access.c:431)를 쓴다.
  * 그 판은 map_bus 에 (where & ~0x3) 을 넘기고 항상 32비트를 읽은 뒤
@@ -1659,7 +1659,7 @@ static int tegra_pcie_config_read(struct pci_bus *bus, unsigned int devfn,
  * tegra_pcie_config_read 와 같은 기준으로 갈린다.
  *
  * 버스 0 은 pci_generic_config_write32 를 쓴다. size 가 4 가 아니면 그 판이
-**읽고-고쳐-쓰기** 를 한다. config 공간에는 읽으면 지워지는 비트가 있어
+ * **읽고-고쳐-쓰기** 를 한다. config 공간에는 읽으면 지워지는 비트가 있어
  * 일반적으로 위험한 방식이지만, 여기서는 하드웨어가 dword 접근만 허용하므로
  * 달리 방법이 없다. 이 점이 pcie-mediatek-gen3.c 와 대비되는데, 그쪽은
  * 하드웨어 byte enable 이 있어 size 를 4 로 바꿔 넘겨 그 경로를 피한다.
@@ -1755,7 +1755,7 @@ static unsigned long tegra_pcie_port_get_pex_ctrl(struct tegra_pcie_port *port)
  * 슬롯에 꽂힌 장치로 나가는 PERST 신호를 내렸다가 올린다. 링크를 처음
  * 세울 때와, 링크가 안 서서 재시도할 때 쓰인다.
  *
-**신호를 만드는 방법이 두 갈래** 인 것이 이 함수의 요점이다.
+ * **신호를 만드는 방법이 두 갈래** 인 것이 이 함수의 요점이다.
  *   reset_gpio 가 있으면 GPIO 를 직접 흔든다. 장치 트리에 reset-gpios 가
  *     있는 보드다.
  *   없으면 AFI 제어 레지스터의 리셋 비트를 흔든다. 이때 SFIO 로 나가는
@@ -1917,7 +1917,7 @@ static void tegra_pcie_enable_rp_features(struct tegra_pcie_port *port)
  * 확실한 것은 R1 조와 R2 조가 서로 다른 값을 받는다는 사실뿐이다
  * (tegra210_pcie 를 보면 rp_ectl_2_r1 = 0x0f 인데 rp_ectl_2_r2 = 0x8f 다).
  *
-**들어가는 값의 의미는 알 수 없다.** 필드 이름(RX_CTLE, RX_CDR_CTRL,
+ * **들어가는 값의 의미는 알 수 없다.** 필드 이름(RX_CTLE, RX_CDR_CTRL,
  * RX_EQ_CTRL_L, RX_EQ_CTRL_H)이 수신단 이퀄라이저와 클록 복원 관련임을
  * 가리킬 뿐이다. 이 파일에서 이 값을 쓰는 SoC 는 Tegra210 하나뿐이며,
  * 나머지는 ectl.enable 이 false 라 이 함수가 아예 불리지 않는다.
@@ -2034,7 +2034,7 @@ static void tegra_pcie_program_ectl_settings(struct tegra_pcie_port *port)
  *   tegra210_pcie 의 정의 위에 원문 주석이 "FC threshold is bit[25:18]"
  *   이라 적어 두었고 값은 0x01800000 이다.
  *
-**Gen1 만 광고하기 (무조건)**:
+ * **Gen1 만 광고하기 (무조건)**:
  *   이 함수에서 가장 중요한 대목이다. 위의 원문 주석이 배경을 밝히는데,
  *   루트 포트가 Gen1 과 Gen2 를 함께 광고하면 일부 구형 엔드포인트가
  *   링크를 세우지 못한다. 그래서 처음에는 Link Control Status 2 의 속도
@@ -2251,7 +2251,7 @@ static void tegra_pcie_port_disable(struct tegra_pcie_port *port)
  * 뺀다. 그 뒤로는 tegra_pcie_enable_ports 의 순회나
  * tegra_pcie_ports_seq_show 의 debugfs 출력에 나타나지 않는다.
  *
-**devm 자원을 명시적으로 놓는 것** 이 이 함수의 특징이다. devm 은 보통
+ * **devm 자원을 명시적으로 놓는 것** 이 이 함수의 특징이다. devm 은 보통
  * 드라이버가 떨어질 때 커널이 알아서 정리하지만, 여기서는 드라이버가
  * 계속 살아 있는 채로 포트 하나만 버리므로 직접 놓아야 한다. 그래서
  * devm_iounmap, devm_release_mem_region, devm_kfree 를 손으로 부른다.
@@ -2294,7 +2294,7 @@ static void tegra_pcie_port_free(struct tegra_pcie_port *port)
  * 틀리게 보고한다. 브리지가 아닌 것으로 보고하면 PCI 코어가 그 아래로
  * 버스를 확장하지 않으므로, 열거 초기에 값을 바로잡는다.
  *
-**이 함수는 드라이버가 부르지 않는다.** 아래의 DECLARE_PCI_FIXUP_EARLY 가
+ * **이 함수는 드라이버가 부르지 않는다.** 아래의 DECLARE_PCI_FIXUP_EARLY 가
  * 벤더/장치 ID 별 표에 등록해 두면, PCI 코어가 장치를 발견한 직후 자동으로
  * 불러 준다. 등록이 네 줄인 것은 이 IP 가 SoC 세대에 따라 서로 다른 장치
  * ID(0x0bf0, 0x0bf1, 0x0e1c, 0x0e1d)로 나타나기 때문이다.
@@ -2550,7 +2550,7 @@ static irqreturn_t tegra_pcie_isr(int irq, void *arg)
  * @pcie: 컨트롤러 상태.
  * @return: 없음. 창을 못 넣는 경우가 없어 실패하지 않는다.
  *
-**아웃바운드 주소 변환의 전부가 이 함수에 있다.** 위의 원문 주석이
+ * **아웃바운드 주소 변환의 전부가 이 함수에 있다.** 위의 원문 주석이
  * FPCI 주소 지도를 적어 두었는데, IO 공간, type 0/1 config 공간, type 0/1
  * 확장 config 공간이 각각 고정된 FPCI 주소에 놓여 있다.
  *
@@ -2585,7 +2585,7 @@ static irqreturn_t tegra_pcie_isr(int irq, void *arg)
  * 필요할 때 tegra_pcie_enable_msi 가 한다. 마지막 두 줄이 AFI_MSI_BAR_SZ 에
  * 두 번 0 을 쓰는데, 앞의 AXI 쪽과 짝을 맞추려는 반복으로 보인다.
  *
-**뒷세대와의 대비**: pcie-tegra194.c 에는 이런 함수가 없다. DWC 코어의
+ * **뒷세대와의 대비**: pcie-tegra194.c 에는 이런 함수가 없다. DWC 코어의
  * iATU 가 창을 관리하고, 그 드라이버는 APPL 레지스터에 iATU 블록의 기준
  * 주소만 알려 준다.
  *
@@ -2707,7 +2707,7 @@ static void tegra_pcie_setup_translations(struct tegra_pcie *pcie)
  * PLL 이 목표 주파수에 고정(lock)되어야 PHY 가 동작한다. 잠금 검출 비트를
  * 반복해서 읽는다.
  *
-**바쁜 대기(busy-wait)** 라는 점에 주의한다. 루프 안에 usleep 이나
+ * **바쁜 대기(busy-wait)** 라는 점에 주의한다. 루프 안에 usleep 이나
  * cpu_relax 가 없어 CPU 를 계속 돌린다. 다른 폴링 함수들(예:
  * tegra_pcie_port_check_link)이 usleep_range 를 넣는 것과 대비된다.
  * PLL 잠금이 보통 매우 빨라 실제로는 몇 바퀴 만에 끝나기 때문으로 보이나,
@@ -2774,7 +2774,7 @@ static int tegra_pcie_pll_wait(struct tegra_pcie *pcie, unsigned long timeout)
  *   6) IDDQ 를 끄고 TX/RX 데이터를 켠다. 이 두 단계로 PHY 가 실제로
  *      신호를 내보내기 시작한다.
  *
-**뒷세대와의 대비**: pcie-tegra194.c 는 이런 함수가 없다. UPHY 를
+ * **뒷세대와의 대비**: pcie-tegra194.c 는 이런 함수가 없다. UPHY 를
  * 드라이버가 직접 만지지 않고 BPMP 펌웨어에 메시지를 보내
  * (tegra_pcie_bpmp_set_pll_state) 맡긴다.
  *
@@ -2928,7 +2928,7 @@ static int tegra_pcie_phy_disable(struct tegra_pcie *pcie)
  * 신형 경로다. 보드가 별도 PHY 드라이버를 쓰면 레인마다 PHY 하나씩이
  * 장치 트리에 있고, 이 함수가 그것들을 차례로 켠다.
  *
-**실패해도 이미 켠 PHY 를 되돌리지 않는다.** 중간에서 반환해 버리므로
+ * **실패해도 이미 켠 PHY 를 되돌리지 않는다.** 중간에서 반환해 버리므로
  * i-1 개가 켜진 채 남는다. 상위인 tegra_pcie_pm_resume 이 실패 시
  * tegra_pcie_power_off 로 전원 자체를 내리므로 결과적으로 정리되지만,
  * 이 함수만 놓고 보면 대칭이 아니다.
@@ -3459,7 +3459,7 @@ regulator_disable:
  *
  * soc 기술자가 들고 있는 값을 PADS_REFCLK_CFG 레지스터에 그대로 밀어 넣는다.
  *
-**들어가는 값의 의미는 알 수 없다.** PADS_REFCLK_CFG 필드 정의 위의
+ * **들어가는 값의 의미는 알 수 없다.** PADS_REFCLK_CFG 필드 정의 위의
  * 원문 주석이 그 사실을 직접 밝히는데, "이 필드 정의와 원하는 값은 TRM 에
  * 없고 NVIDIA 에서 받은 것" 이라고 적혀 있다. 그 주석이 알려 주는 것은
  * 이 레지스터들이 16비트 항목의 배열이고 포트마다 한 항목이라는 사실,
@@ -3508,7 +3508,7 @@ static void tegra_pcie_apply_pad_settings(struct tegra_pcie *pcie)
  * 넷째만 조건부인데, 그 조건이 optional 판을 쓰는 것이 아니라 SoC 기술자의
  * 불리언으로 갈린다는 점에 주의한다 -- 즉 지원 SoC 에서는 반드시 있어야 한다.
  *
-**뒷세대와의 대비**: pcie-tegra194.c 는 클록이 core 와 core_m 둘뿐이다.
+ * **뒷세대와의 대비**: pcie-tegra194.c 는 클록이 core 와 core_m 둘뿐이다.
  * 클록 관리의 상당 부분이 BPMP 펌웨어 쪽으로 넘어갔기 때문이다.
  *
  * 실행 컨텍스트: probe 경로(프로세스 컨텍스트).
@@ -3737,7 +3737,7 @@ static struct phy *devm_of_phy_optional_get_index(struct device *dev,
  * 여기서도 phy_init 을 함께 부른다. tegra_pcie_phys_get_legacy 와 같은
  * 이유이며, 전원 인가는 tegra_pcie_port_phy_power_on 이 따로 한다.
  *
-**실패해도 이미 얻은 PHY 를 되돌리지 않는다.** 다만 배열과 PHY 핸들이
+ * **실패해도 이미 얻은 PHY 를 되돌리지 않는다.** 다만 배열과 PHY 핸들이
  * 모두 devm 이라 probe 가 실패하면 커널이 정리한다. 초기화한 PHY 의
  * phy_exit 은 호출되지 않은 채 남는데, 상위인 tegra_pcie_get_resources 의
  * phys_put 라벨이 tegra_pcie_phys_put 을 부르므로 결과적으로 정리된다.
@@ -3809,7 +3809,7 @@ static int tegra_pcie_port_get_phys(struct tegra_pcie_port *port)
  *   장치 트리에 "phys" 속성이 있으면 : 신형 SoC 라도 장치 트리가 구형
  *     방식으로 작성되어 있으면 그것을 따른다. 후방 호환을 위해서다.
  *
-**두 번째 조건이 직관과 반대인 데 주의한다.** "phys 속성이 있으면 신형"
+ * **두 번째 조건이 직관과 반대인 데 주의한다.** "phys 속성이 있으면 신형"
  * 이 아니라 "있으면 구형" 이다. 신형 바인딩은 PHY 를 컨트롤러 노드가 아니라
  * 각 포트 자식 노드에 두기 때문이며, 그래서 컨트롤러 노드에 phys 가
  * 있다는 것은 곧 구형 배치라는 뜻이 된다.
@@ -3864,7 +3864,7 @@ static int tegra_pcie_phys_get(struct tegra_pcie *pcie)
  * tegra_pcie_phys_get 이 부른 phy_init 들의 짝인 phy_exit 을 부른다.
  * 구형/신형 갈래가 그대로 유지된다.
  *
-**실패해도 계속 진행하는 것** 이 켜는 쪽과 다르다. 신형 경로의 이중
+ * **실패해도 계속 진행하는 것** 이 켜는 쪽과 다르다. 신형 경로의 이중
  * 루프에서 phy_exit 이 실패해도 오류를 찍고 다음 PHY 로 넘어간다.
  * 정리 경로에서는 하나가 실패했다고 나머지를 포기하면 자원이 더 많이
  * 새기 때문이다.
@@ -4122,7 +4122,7 @@ static int tegra_pcie_put_resources(struct tegra_pcie *pcie)
  *   4) turnoff 비트를 도로 지운다. 다음 절전 때 다시 세워야 하므로,
  *      세운 채로 두면 에지가 만들어지지 않는다.
  *
-**비트 위치가 포트마다, SoC 마다 다르다.** soc->ports[index].pme 에서
+ * **비트 위치가 포트마다, SoC 마다 다르다.** soc->ports[index].pme 에서
  * turnoff_bit 과 ack_bit 을 가져오는데, Tegra20 은 (0,5)와 (8,10),
  * Tegra30 은 거기에 (16,18)이 더해지고, Tegra186 은 셋째가 (12,14)로
  * 다르다. 그래서 표를 두고 참조한다.
@@ -4202,7 +4202,7 @@ static void tegra_pcie_pme_turnoff(struct tegra_pcie_port *port)
  * 전역 벡터 번호는 i * 32 + offset 으로 만든다. i 가 레지스터 번호,
  * offset 이 그 안의 비트 위치다.
  *
-**미처리 벡터의 정리 경로에 주목할 점이 있다.**
+ * **미처리 벡터의 정리 경로에 주목할 점이 있다.**
  * generic_handle_domain_irq 가 실패하면(그 벡터에 매핑된 핸들러가 없으면)
  * 직접 상태 비트를 지우는데, 그때 쓰는 레지스터가
  * AFI_MSI_VEC(index) -- 즉 **전역 벡터 번호** 를 레지스터 번호 자리에
@@ -4325,7 +4325,7 @@ static void tegra_msi_irq_ack(struct irq_data *d)
  * 활성화 레지스터(AFI_MSI_EN_VEC)에서 해당 비트를 내린다. 상태
  * 레지스터와는 별개의 레지스터 배열이다.
  *
-**읽고-고쳐-쓰기라 락이 필요하다.** 한 레지스터를 벡터 32개가 공유하므로,
+ * **읽고-고쳐-쓰기라 락이 필요하다.** 한 레지스터를 벡터 32개가 공유하므로,
  * 두 CPU 가 각기 다른 벡터를 동시에 마스크하면 한쪽의 변경이 사라진다.
  *
  * scoped_guard 를 쓰는 것에 주의 -- 블록을 벗어날 때 자동으로 락이 풀리는
@@ -4422,7 +4422,7 @@ static void tegra_msi_irq_unmask(struct irq_data *d)
  * 주소는 msi->phys -- tegra_pcie_msi_setup 이 dma_alloc_attrs 로 잡아 둔
  * 페이지의 **DMA 주소** 다. 데이터는 전역 벡터 번호(0~255)를 그대로 넣는다.
  *
-**주소가 벡터마다 같고 데이터만 다른 것** 이 이 하드웨어의 구조다.
+ * **주소가 벡터마다 같고 데이터만 다른 것** 이 이 하드웨어의 구조다.
  * pcie-mediatek-gen3.c 가 세트마다 다른 주소를 쓰는 것과 대비된다.
  * 그래서 여기서는 hwirq 를 나눌 필요 없이 통째로 데이터에 담는다.
  *
@@ -4552,7 +4552,7 @@ static int tegra_msi_domain_alloc(struct irq_domain *domain, unsigned int virq,
  * hwirq 를 인자로 받지 않고 irq_data 에서 꺼내는 이유는, 커널의 free 콜백
  * 규약이 가상 IRQ 번호만 넘기기 때문이다.
  *
-**irq_domain_free_irqs_common 을 부르지 않는다.** pcie-mediatek-gen3.c 의
+ * **irq_domain_free_irqs_common 을 부르지 않는다.** pcie-mediatek-gen3.c 의
  * 같은 자리(mtk_msi_bottom_domain_free)는 그것을 부르는데 여기는 없다.
  * 매핑 정리를 상위 계층에 맡기는 것으로 보이나, 그 차이의 이유는 코드에
  * 적혀 있지 않다.
@@ -4626,7 +4626,7 @@ static const struct msi_parent_ops tegra_msi_parent_ops = {
  * 크기는 INT_PCI_MSI_NR -- 8 * 32 = 256 이다. 상태 레지스터 8개 × 32비트와
  * 정확히 맞는다.
  *
-**뒷세대와의 대비**: pcie-tegra194.c 에는 이 함수에 해당하는 것이 없다.
+ * **뒷세대와의 대비**: pcie-tegra194.c 에는 이 함수에 해당하는 것이 없다.
  * DWC 코어가 iMSI-RX 기반으로 도메인을 만들고, 그 드라이버는
  * pp->num_vectors 만 지정한다.
  *
@@ -4700,7 +4700,7 @@ static void tegra_free_domains(struct tegra_msi *msi)
  *   1) 락 둘을 초기화한다. 종류가 다른 이유는 각 함수 설명에 있다.
  *   2) 도메인을 만든다(CONFIG_PCI_MSI 일 때만).
  *   3) MSI 전용 인터럽트 번호를 얻고 체인 핸들러를 건다. 오류 인터럽트와
-     **별개의 선** 이라는 점에 주의 -- 이름이 "msi" 로 따로 있다.
+ *      **별개의 선** 이라는 점에 주의 -- 이름이 "msi" 로 따로 있다.
  *   4) DMA 마스크를 32비트로 제한한다. 위의 원문 주석이 이유를 밝히는데,
  *      컨트롤러 자체는 32비트를 넘는 주소를 쓸 수 있지만 32비트 MSI 목표
  *      주소만 지원하는 엔드포인트를 위해 일부러 낮춘다. 즉 하드웨어 능력이
@@ -4959,7 +4959,7 @@ static int tegra_pcie_disable_msi(struct tegra_pcie *pcie)
  * 컨트롤러 인터럽트 마스크에서 INT 비트를 내린다. tegra_pcie_disable_msi 와
  * 같은 레지스터의 다른 비트를 다루는 짝이다.
  *
-**왜 필요한지가 호출자 쪽에 적혀 있다.** tegra_pcie_pm_suspend 위의
+ * **왜 필요한지가 호출자 쪽에 적혀 있다.** tegra_pcie_pm_suspend 위의
  * 원문 주석이 밝히듯, AFI 인터럽트는 tegra_pcie_enable_controller 에서
  * 켜지는데 pex_rst 를 어서트하면 AFI 가 원치 않는 인터럽트를 올리기
  * 때문에 그 전에 막아야 한다.
@@ -4994,7 +4994,7 @@ static void tegra_pcie_disable_interrupts(struct tegra_pcie *pcie)
  * @xbar:  결과를 담을 곳(출력).
  * @return: 0 성공. 알 수 없는 조합이면 -EINVAL.
  *
-**앞 세대 고유의 개념** 이다. 이 컨트롤러는 루트 포트 여럿이 레인 풀
+ * **앞 세대 고유의 개념** 이다. 이 컨트롤러는 루트 포트 여럿이 레인 풀
  * 하나를 나눠 쓰므로, 어느 포트에 몇 레인을 줄지를 하드웨어에 알려야 한다.
  * 뒷세대 pcie-tegra194.c 에는 이 개념이 없다 -- 컨트롤러 인스턴스마다
  * 별도의 장치 노드를 갖기 때문이다.
@@ -5003,7 +5003,7 @@ static void tegra_pcie_disable_interrupts(struct tegra_pcie *pcie)
  * 다시 갈린다. 예컨대 0x010004 는 포트 0 이 4레인, 포트 2 가 1레인이라는
  * 뜻이다(바이트 단위로 04, 00, 01).
  *
-**Tegra186 만 default 절이 있다.** 알 수 없는 조합이 와도 실패시키지
+ * **Tegra186 만 default 절이 있다.** 알 수 없는 조합이 와도 실패시키지
  * 않고 경고를 찍은 뒤 2x1,1x1,1x1 로 대체한다. 나머지 SoC 는 default 가
  * 없어 switch 를 빠져나가 함수 끝의 -EINVAL 에 도달하고, 그러면
  * tegra_pcie_parse_dt 가 probe 를 중단시킨다.
@@ -5141,7 +5141,7 @@ static int tegra_pcie_get_xbar_config(struct tegra_pcie *pcie, u32 lanes,
  * 긴 이름은 잘릴 수 있으나, 이 파일에서 쓰는 가장 긴 이름
  * "vddio-pexctl-aud" 도 "-supply" 를 붙여 24바이트라 문제가 없다.
  *
-**하나라도 없으면 곧바로 false** 다. 즉 새 바인딩은 전부 갖춰야 인정하며,
+ * **하나라도 없으면 곧바로 false** 다. 즉 새 바인딩은 전부 갖춰야 인정하며,
  * 부분적으로 갖춘 장치 트리는 구형으로 취급된다.
  *
  * 이름이 of_ 로 시작해 커널 공통 API 처럼 보이지만 이 파일 안의 static
@@ -5193,7 +5193,7 @@ static bool of_regulator_bulk_available(struct device_node *np,
  *
  * Tegra20 은 2개("pex-clk", "vdd"), Tegra30 은 3개(거기에 "avdd" 추가)다.
  * 그 밖의 SoC 는 num_supplies 가 0 으로 남아 -ENODEV 로 실패한다 -- 즉
-**구형 바인딩은 Tegra20/30 에서만 지원된다.**
+ * **구형 바인딩은 Tegra20/30 에서만 지원된다.**
  *
  * 배열을 채우는 방식에 주의: [0]과 [1]은 무조건 채우고 [2]만 조건부다.
  * num_supplies 가 2 이상임이 위의 검사로 보장되므로 안전하다.
@@ -5285,7 +5285,7 @@ static int tegra_pcie_get_legacy_regulators(struct tegra_pcie *pcie)
  * tegra_pcie_of_match 에 없는 compatible 로는 probe 가 불리지 않으므로
  * 실제로는 도달하지 않는다.
  *
-**마지막의 대체 경로가 이 함수의 요점이다.** 위에서 만든 새 바인딩
+ * **마지막의 대체 경로가 이 함수의 요점이다.** 위에서 만든 새 바인딩
  * 목록이 장치 트리에 다 있는지 확인해서, 없으면 방금 잡은 배열을 버리고
  * 구형 경로로 넘어간다. dev_info 로 그 사실을 알리므로 로그에서 어느
  * 바인딩을 썼는지 확인할 수 있다.
@@ -5485,7 +5485,7 @@ static int tegra_pcie_get_regulators(struct tegra_pcie *pcie, u32 lane_mask)
  *
  * 자식 노드를 순회하며 루트 포트를 하나씩 만든다. 각 포트에 대해:
  *   1) 장치 트리의 주소에서 devfn 을 얻고 슬롯 번호를 뽑는다.
-     **장치 트리는 포트를 1부터 세지만 드라이버는 0부터 센다** --
+ *      **장치 트리는 포트를 1부터 세지만 드라이버는 0부터 센다** --
  *      그래서 범위를 1~num_ports 로 검사한 뒤 index-- 로 바꾼다.
  *      tegra_pcie_map_bus 가 port->index + 1 == slot 으로 되돌리는 것이
  *      이 변환의 짝이다.
@@ -5716,7 +5716,7 @@ static int tegra_pcie_parse_dt(struct tegra_pcie *pcie)
  * 재시도는 포트 리셋 펄스를 다시 주는 것이다. do-while(--retries) 이므로
  * 총 3회 시도한다.
  *
-**뒷세대와의 대비**: pcie-tegra194.c 의 tegra_pcie_dw_start_link 도
+ * **뒷세대와의 대비**: pcie-tegra194.c 의 tegra_pcie_dw_start_link 도
  * 재시도를 하지만 성격이 다르다. 그쪽은 무작정 다시 하지 않고, LTSSM
  * 상태를 보고 DLF 가 원인이라고 판단될 때만 DLF 를 끄고 한 번 더 시도한다.
  *
@@ -5817,7 +5817,7 @@ retry:
  * 그대로 재훈련을 요청하고, 4)에서 실패하면 오류를 찍고 다음 포트로
  * 넘어간다. Gen1 으로라도 동작하는 것이 아예 못 쓰는 것보다 낫기 때문이다.
  *
-**이 함수가 이 세대의 성능 상한을 정한다.** Gen2(5.0GT/s)가 최대이며
+ * **이 함수가 이 세대의 성능 상한을 정한다.** Gen2(5.0GT/s)가 최대이며
  * Gen3 이상을 다루는 코드가 없다. 뒷세대 pcie-tegra194.c 는 Gen4 까지
  * 다룬다.
  *
@@ -5929,7 +5929,7 @@ static void tegra_pcie_change_link_speed(struct tegra_pcie *pcie)
  * 바꾸지 않으므로 _safe 가 필요 없지만, 두 번째는
  * tegra_pcie_port_free 가 원소를 지우므로 반드시 필요하다.
  *
-**링크가 안 선 포트를 조용히 버리는 것** 이 이 드라이버의 정책이다.
+ * **링크가 안 선 포트를 조용히 버리는 것** 이 이 드라이버의 정책이다.
  * dev_info 로 알리기만 하고 probe 는 계속 진행한다. 포트 하나가 비어
  * 있다고 나머지를 못 쓰게 할 이유가 없기 때문이다.
  *
@@ -6210,7 +6210,7 @@ MODULE_DEVICE_TABLE(of, tegra_pcie_of_match);
  * 링크가 안 선 포트는 tegra_pcie_port_free 가 이미 리스트에서 뺐으므로,
  * 여기 나오는 것은 실제로 동작하는 포트뿐이다.
  *
-**헤더 줄을 여기서 찍는다.** show 콜백이 아니라 start 에서 찍는 것은
+ * **헤더 줄을 여기서 찍는다.** show 콜백이 아니라 start 에서 찍는 것은
  * 그래야 한 번만 나오기 때문이다.
  *
  * seq_list_start 가 pos 만큼 건너뛴 원소를 돌려준다. 큰 출력이 여러 번에
@@ -6269,7 +6269,7 @@ static void *tegra_pcie_ports_seq_next(struct seq_file *s, void *v, loff_t *pos)
  * @v: 마지막 원소(또는 NULL).
  * @return: 없음.
  *
-**본문이 비어 있다.** 보통 이 콜백은 start 에서 잡은 락을 푸는 자리인데,
+ * **본문이 비어 있다.** 보통 이 콜백은 start 에서 잡은 락을 푸는 자리인데,
  * 이 드라이버는 순회 중 락을 잡지 않으므로 할 일이 없다.
  *
  * 그래도 함수를 두는 이유는 struct seq_operations 가 네 콜백을 모두
@@ -6298,7 +6298,7 @@ static void tegra_pcie_ports_seq_stop(struct seq_file *s, void *v)
  *
  * 포트 번호와 링크 상태를 한 줄로 찍는다.
  *
-**두 상태를 각각 다른 레지스터에서 읽는다.**
+ * **두 상태를 각각 다른 레지스터에서 읽는다.**
  *   up     : RP_VEND_XP 의 DL_UP -- 데이터 링크가 올라왔는가(벤더 확장).
  *   active : RP_LINK_CONTROL_STATUS 의 DL_LINK_ACTIVE -- 링크가 활성인가.
  * tegra_pcie_port_check_link 이 기다리는 두 조건과 정확히 같다. 즉 이
@@ -6388,7 +6388,7 @@ DEFINE_SEQ_ATTRIBUTE(tegra_pcie_ports);
  * debugfs 에 "pcie" 디렉터리를 만들고 그 안에 "ports" 파일을 둔다.
  * 사용자가 그것을 읽으면 위의 seq 콜백 넷이 돌아 포트별 링크 상태를 찍는다.
  *
-**디렉터리를 debugfs 루트에 만드는 데 주의한다.** 부모가 NULL 이므로
+ * **디렉터리를 debugfs 루트에 만드는 데 주의한다.** 부모가 NULL 이므로
  * 경로가 /sys/kernel/debug/pcie 가 된다. 컨트롤러가 여러 개면 이름이
  * 충돌하겠지만, 이 드라이버는 SoC 에 인스턴스가 하나뿐이라 문제가 되지
  * 않는다. 뒷세대 pcie-tegra194.c 는 컨트롤러가 여럿이라 장치 트리 경로를
@@ -6433,7 +6433,7 @@ static void tegra_pcie_debugfs_init(struct tegra_pcie *pcie)
  *   6) **runtime PM 을 켜고 동기 get 을 한다.** 이 한 줄이 실제로
  *      tegra_pcie_pm_resume 을 불러 하드웨어 전체를 기동한다 -- 전원, 컨트롤러
  *      설정, 변환 창, MSI 활성화, PHY, 포트 기동이 모두 그 안에서 일어난다.
-     **이 드라이버의 구조적 특징이 여기 있다.** probe 가 기동 순서를 직접
+ *      **이 드라이버의 구조적 특징이 여기 있다.** probe 가 기동 순서를 직접
  *      쥐지 않고 PM 콜백에 위임하므로, 부팅과 절전 복귀가 같은 코드를 탄다.
  *   7) pci_ops 와 map_irq 를 꽂고 PCI 코어에 넘긴다.
  *   8) debugfs 를 만든다.
@@ -6562,7 +6562,7 @@ put_resources:
  * @dev: 이 컨트롤러의 device. drvdata 에 struct tegra_pcie 가 있다.
  * @return: 항상 0. 중간 실패는 로그만 찍고 계속 진행한다.
  *
-**runtime PM 의 suspend 이자 시스템 절전의 suspend_noirq 로 둘 다
+ * **runtime PM 의 suspend 이자 시스템 절전의 suspend_noirq 로 둘 다
  * 등록되어 있다**(아래 tegra_pcie_pm_ops 참조). 그래서 런타임 절전과 시스템
  * 절전이 같은 코드를 탄다.
  *
@@ -6644,7 +6644,7 @@ static int tegra_pcie_pm_suspend(struct device *dev)
  * @dev: 이 컨트롤러의 device.
  * @return: 0 성공, 음수 오류.
  *
-**이 드라이버의 하드웨어 기동 전체가 이 함수에 있다.** probe 가
+ * **이 드라이버의 하드웨어 기동 전체가 이 함수에 있다.** probe 가
  * pm_runtime_get_sync 로 이 함수를 부르고, 시스템 복귀도 같은 함수를
  * 탄다. 그래서 부팅 경로와 복귀 경로가 갈라지지 않는다 -- 다른 여러
  * 호스트 브리지 드라이버가 probe 와 resume 에 비슷한 코드를 두 벌 두는

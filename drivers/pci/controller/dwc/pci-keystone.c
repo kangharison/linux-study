@@ -3344,7 +3344,7 @@ static struct platform_driver ks_pcie_driver = {
  *
  * 위 원문 영어 주석이 문제를 밝힌다 — config 사이클 중 장치가 없으면
  * Keystone 호스트는 0xffffffff(PCI_ERROR_RESPONSE)를 돌려주는 대신
-**버스 오류**를 낸다. ARM 에서 그것이 "External abort" 로 올라오고,
+ * **버스 오류**를 낸다. ARM 에서 그것이 "External abort" 로 올라오고,
  * 아무도 처리하지 않으면 커널이 죽는다.
  *
  * 그래서 이 핸들러가 그 abort 를 가로채 "장치 없음" 처럼 보이게 고친다.

@@ -1068,7 +1068,7 @@ static int mtk_pcie_config_read(struct pci_bus *bus, unsigned int devfn,
  * @val:   쓸 값. size 만큼의 하위 비트에 담겨 온다.
  * @return: 커널 공통 함수의 반환값.
  *
-**size 를 4 로 바꿔 넘기는 것이 이 함수의 핵심**이다. 이유는 두 겹이다.
+ * **size 를 4 로 바꿔 넘기는 것이 이 함수의 핵심**이다. 이유는 두 겹이다.
  *
  * 첫째, 하드웨어가 이미 바이트 단위를 안다. 직전에 쓴 byte enable 이 dword
  * 안에서 어느 바이트가 실제로 갱신될지 정하므로, 소프트웨어는 dword 를
@@ -1132,7 +1132,7 @@ static struct pci_ops mtk_pcie_ops = {
  * @return: 0 성공. 표 크기가 4KiB 미만이면 -EINVAL.
  *
  * 이 하드웨어의 주소 변환 표는 **크기가 2의 거듭제곱이어야** 하고
-**시작 주소가 그 크기에 정렬되어야** 한다. 그런데 장치 트리가 주는 창은
+ * **시작 주소가 그 크기에 정렬되어야** 한다. 그런데 장치 트리가 주는 창은
  * 그런 제약이 없다. 그래서 창 하나를 표 여러 개로 쪼개 덮는다.
  *
  * 한 바퀴가 하는 일:
@@ -1825,7 +1825,7 @@ static void mtk_msi_bottom_irq_ack(struct irq_data *data)
  * 세트의 활성화 레지스터에서 해당 비트를 내린다. 꺼진 벡터의 대기 비트는
  * mtk_pcie_msi_handler 가 msi_status 를 msi_enable 로 걸러 내므로 무시된다.
  *
-**읽고-고쳐-쓰기라 락이 필요하다.** 같은 세트의 벡터 32개가 이 레지스터
+ * **읽고-고쳐-쓰기라 락이 필요하다.** 같은 세트의 벡터 32개가 이 레지스터
  * 하나를 공유하므로, 두 CPU 가 각기 다른 벡터를 동시에 마스크하면 한쪽의
  * 변경이 사라질 수 있다. irq_lock 은 raw_spinlock 이고 irqsave 로 잡는다 —
  * 인터럽트 컨텍스트에서도 불릴 수 있고, PREEMPT_RT 에서도 잠들면 안 되는
@@ -2072,7 +2072,7 @@ static const struct irq_domain_ops mtk_msi_bottom_domain_ops = {
  * 컨트롤러 인터럽트 활성화 레지스터의 비트 24~27 이 INTA~INTD 다. hwirq 에
  * PCIE_INTX_SHIFT(24)를 더해 자리를 구하고 그 비트를 내린다.
  *
-**앞 세대와 가장 뚜렷이 갈리는 대목**이다. pcie-mediatek.c 의 v1/v2 는
+ * **앞 세대와 가장 뚜렷이 갈리는 대목**이다. pcie-mediatek.c 의 v1/v2 는
  * 하드웨어가 INTx 넷을 한 덩어리로만 마스크할 수 있어 dummy_irq_chip 을
  * 쓴다 — 즉 개별 마스크를 포기했다. 여기서는 비트가 하나씩 있으므로 진짜
  * 마스크가 가능하다.
@@ -2754,7 +2754,7 @@ static int mtk_pcie_parse_port(struct mtk_gen3_pcie *pcie)
  *
  * 셋째, 이퀄라이저 프리셋을 직접 쓴다. PCIE_EQ_PRESET_01_REG 에 레인 0/1 의
  * 상하류 값을, PCIE_PIPE4_PIE8_REG 에 프리셋 선택과 질의 관련 필드를 쓴다.
-**여기 쓰이는 0x47, 0x41, 0x80, 0x2, 0xf 는 이 트리에 근거가 없다.**
+ * **여기 쓰이는 0x47, 0x41, 0x80, 0x2, 0xf 는 이 트리에 근거가 없다.**
  * 필드 이름으로 미루어 신호 이퀄라이제이션 튜닝 값으로 보이지만, 각 숫자가
  * 무엇을 뜻하는지는 미디어텍/에어로하 문서 없이는 알 수 없다. 확실한 것은
  * FIELD_PREP 이 각 값을 해당 마스크 자리로 옮겨 넣는다는 것뿐이다.
@@ -2945,7 +2945,7 @@ err_phy_on:
  *   1) 모든 리셋을 어서트한다. 원문 주석대로 부트로더가 남겨 놓은 상태를
  *      지우기 위해서다. 10us 쉰다(PCIE_MTK_RESET_TIME_US, 최대 20us).
  *   2) PHY 리셋을 푼 뒤 phy_init / phy_power_on 으로 PHY 를 켠다.
-     **EN7581 과 정반대 순서** 다 — 그쪽은 PHY 를 켠 뒤 리셋을 푼다.
+ *      **EN7581 과 정반대 순서** 다 — 그쪽은 PHY 를 켠 뒤 리셋을 푼다.
  *   3) MAC 리셋을 푼다. 이제 트랜잭션 계층 클록이 돈다.
  *   4) pm_runtime 을 켜고 동기 get 으로 전원 도메인을 확보한다.
  *   5) 클록을 모두 켠다.
@@ -3052,7 +3052,7 @@ err_phy_init:
  * 전원을 올린 순서의 정확한 역순이다 — 클록, pm_runtime, MAC 리셋, PHY,
  * PHY 리셋.
  *
-**두 power_up 구현이 공유하는 유일한 내림 경로** 라는 점이 중요하다.
+ * **두 power_up 구현이 공유하는 유일한 내림 경로** 라는 점이 중요하다.
  * EN7581 은 올릴 때 순서가 다르지만 내릴 때는 이 함수 하나를 쓴다.
  * 그것이 성립하는 이유는, 내리는 쪽은 순서에 덜 민감하고(이미 동작을
  * 멈추는 중이므로) EN7581 고유의 syscon 설정이나 이퀄라이저 값은
@@ -3246,7 +3246,7 @@ err_setup:
  * -EPROBE_DEFER 를 걸러 내는 것에 주의 — 나중에 다시 시도할 것이므로 만든
  * 자식 장치를 지우지 않고 그대로 둔다.
  *
-**원문 코드의 특이점**: 4)의 오류 처리에서 goto 가 dev_err_probe 보다
+ * **원문 코드의 특이점**: 4)의 오류 처리에서 goto 가 dev_err_probe 보다
  * 앞에 있어, 그 dev_err_probe 는 실행되지 않는다. 즉 pwrctrl 장치 생성이
  * 실패해도 그 메시지는 찍히지 않는다. 코드는 손대지 않고 사실만 적어 둔다.
  *
@@ -3449,8 +3449,8 @@ static void mtk_pcie_irq_save(struct mtk_gen3_pcie *pcie)
  * mtk_pcie_irq_save 의 정확한 역동작이다. 저장할 때와 같은 두 층을 같은
  * 순서로 되쓴다.
  *
-**부르는 시점이 중요하다.** mtk_pcie_resume_noirq 가 링크를 세운
-**뒤에** 이 함수를 부른다. mtk_pcie_startup_port 가 도중에
+ * **부르는 시점이 중요하다.** mtk_pcie_resume_noirq 가 링크를 세운
+ * **뒤에** 이 함수를 부른다. mtk_pcie_startup_port 가 도중에
  * mtk_pcie_enable_msi 를 불러 MSI 세트를 다시 깔고 INTx 를 모두 마스크하기
  * 때문에, 그보다 먼저 복원하면 그 설정에 덮여 사라진다.
  *
