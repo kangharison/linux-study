@@ -121,29 +121,42 @@
 extern bool pcie_ports_dpc_native;
 
 #ifdef CONFIG_PCIEAER
+/* [한국어] AER 이 빌드에 포함되면 실제 초기화 함수가 있고, */
 int pcie_aer_init(void);
 #else
+/* [한국어] 없으면 아무것도 하지 않고 성공을 반환하는 인라인이 대신 쓰인다.
+ * 이 패턴이 아래 네 서비스에 똑같이 반복된다 — 호출부(portdrv.c 의 초기화
+ * 순서)를 #ifdef 로 어지럽히지 않고 헤더에서 흡수하려는 것이다.
+ * 0 을 반환하는 것도 의도적이다. "이 서비스는 없다" 가 오류가 아니기 때문이다. */
 static inline int pcie_aer_init(void) { return 0; }
 #endif
 
 #ifdef CONFIG_HOTPLUG_PCI_PCIE
+/* [한국어] 핫플러그 서비스도 같은 패턴. */
 int pcie_hp_init(void);
 #else
+/* [한국어] 꺼져 있으면 무동작 스텁. */
 static inline int pcie_hp_init(void) { return 0; }
 #endif
 
 #ifdef CONFIG_PCIE_PME
+/* [한국어] PME(Power Management Event) 서비스. */
 int pcie_pme_init(void);
 #else
+/* [한국어] 무동작 스텁. */
 static inline int pcie_pme_init(void) { return 0; }
 #endif
 
 #ifdef CONFIG_PCIE_DPC
+/* [한국어] DPC(Downstream Port Containment) 서비스. */
 int pcie_dpc_init(void);
 #else
+/* [한국어] 무동작 스텁. */
 static inline int pcie_dpc_init(void) { return 0; }
 #endif
 
+/* [한국어] 대역폭 제어만은 #ifdef 로 감싸지 않는다. 조건부 컴파일 없이 언제나
+ * 빌드에 들어간다는 뜻이다. */
 int pcie_bwctrl_init(void);
 
 /* Port Type */
@@ -201,11 +214,46 @@ struct pcie_device {
 };
 #define to_pcie_device(d) container_of(d, struct pcie_device, device)
 
+/* [한국어]
+ * set_service_data - 서비스 드라이버의 사설 데이터를 pcie_device 에 맡긴다
+ *
+ * @dev: 이 서비스의 pcie_device.
+ * @data: 맡길 포인터.
+ *
+ * 포트 서비스 드라이버(aer.c, dpc.c, pme.c, pciehp_core.c, bwctrl.c)는 자기
+ * 상태를 어딘가 매달아 두어야 하는데, pcie_device 구조체를 서비스마다 고칠 수는
+ * 없다. priv_data 한 칸을 두고 이 접근자 쌍으로 감싸는 것이 그 해법이다.
+ *
+ * 실행 컨텍스트: 서비스 probe. 프로세스 컨텍스트.
+ *
+ * 에러 경로: 없다.
+ *
+ * 호출 체인:
+ *   서비스 드라이버의 probe → [이 함수]
+ */
 static inline void set_service_data(struct pcie_device *dev, void *data)
 {
+	/* [한국어] 서비스 드라이버가 자기 사설 데이터를 이 자리에 맡긴다. */
 	dev->priv_data = data;
 }
 
+/* [한국어]
+ * get_service_data - 맡겨 둔 사설 데이터를 되찾는다
+ *
+ * @dev: 이 서비스의 pcie_device.
+ * @return: set_service_data() 로 맡긴 포인터. 맡긴 적이 없으면 NULL.
+ *
+ * set_service_data() 의 짝이다. 서비스의 인터럽트 핸들러나 remove 경로가
+ * 자기 상태를 되찾을 때 쓴다.
+ *
+ * 실행 컨텍스트: 어디서든. 필드 읽기뿐이라 잠들지 않으며 인터럽트 문맥에서도
+ * 안전하다.
+ *
+ * 에러 경로: 없다.
+ *
+ * 호출 체인:
+ *   서비스 드라이버의 IRQ 핸들러 / remove → [이 함수]
+ */
 static inline void *get_service_data(struct pcie_device *dev)
 {
 	return dev->priv_data;
@@ -286,44 +334,174 @@ struct pcie_port_service_driver {
 #define to_service_driver(d) \
 	container_of(d, struct pcie_port_service_driver, driver)
 
+/* [한국어] 서비스 드라이버(aer.c, dpc.c, pme.c, pciehp_core.c, bwctrl.c)가 자기
+ * 구조체를 등록한다. 이 함수가 bus 를 pcie_port_bus_type 으로 채워
+ * 드라이버 코어에 넘긴다. */
 int pcie_port_service_register(struct pcie_port_service_driver *new);
+/* [한국어] 그 반대. 모듈이 내려갈 때 부른다. */
 void pcie_port_service_unregister(struct pcie_port_service_driver *new);
 
+/* [한국어] 포트 서비스 전용 가상 버스. 일반 PCI 버스와 별개의 버스 타입을 두는
+ * 이유는, 포트 하나에 여러 서비스 드라이버가 동시에 붙어야 하는데
+ * 드라이버 코어는 장치 하나에 드라이버 하나만 허용하기 때문이다.
+ * 그래서 서비스마다 pcie_device 를 따로 만들어 이 버스에 올린다. */
 extern const struct bus_type pcie_port_bus_type;
 
+/* [한국어] 아래 선언들이 포인터로만 쓰므로 전방 선언으로 충분하다.
+ * linux/pci.h 를 여기서 포함하지 않아도 되게 한다. */
 struct pci_dev;
 
 #ifdef CONFIG_PCIE_PME
+/* [한국어] PME 에서 MSI 를 쓰지 않도록 꺼 두는 전역 플래그.
+ * 설정자: 아래 pcie_pme_disable_msi() 를 통해서만 세워진다. 실제로는
+ *   MSI 가 신뢰할 수 없다고 알려진 칩셋의 쿼크가 부른다.
+ * 읽는 자: pcie_pme_no_msi() 를 통해 pme.c 가 읽는다.
+ * 값 범위: 기본 false. 한 번 true 가 되면 되돌리는 경로가 없다 —
+ *   꺼야 할 이유가 생겼다면 그 이유가 사라지지 않기 때문이다.
+ * 동기화: 부팅 초기에 한 번 세워지고 이후 읽기만 하므로 보호가 없다. */
 extern bool pcie_pme_msi_disabled;
 
+/* [한국어]
+ * pcie_pme_disable_msi - PME 가 MSI 를 쓰지 않도록 전역 플래그를 세운다
+ *
+ * PME 인터럽트를 MSI 로 받으면 안 되는 칩셋이 있어, 그런 하드웨어의 쿼크가
+ * 이 함수를 부른다. 세우기만 하고 되돌리는 짝이 없는데, 끄기로 판단한 이유가
+ * 나중에 사라지지 않기 때문이다.
+ *
+ * CONFIG_PCIE_PME 가 꺼진 빌드에서는 아래 #else 쪽의 무동작 스텁이 쓰인다.
+ * 플래그 자체가 없으므로 세울 것도 없다.
+ *
+ * 실행 컨텍스트: 부팅 초기의 쿼크 적용 경로. 프로세스 컨텍스트.
+ *
+ * 에러 경로: 없다.
+ *
+ * 호출 체인:
+ *   칩셋 쿼크 → [이 함수] → pcie_pme_msi_disabled = true
+ */
 static inline void pcie_pme_disable_msi(void)
 {
+	/* [한국어] 단방향으로만 세운다. 끄는 함수가 없다는 점이 이 플래그의 성격을 말해 준다. */
 	pcie_pme_msi_disabled = true;
 }
 
+/* [한국어]
+ * pcie_pme_no_msi - PME 가 MSI 를 쓰지 말아야 하는지 묻는다
+ *
+ * @return: true = MSI 를 쓰지 말 것, false = 써도 됨.
+ *
+ * 위 함수가 세운 플래그를 읽는다. 전역 변수를 직접 읽지 않고 접근자를 두는
+ * 이유는, CONFIG_PCIE_PME 가 꺼진 빌드에서 변수 자체가 없어도 호출부가
+ * 그대로 컴파일되게 하려는 것이다.
+ *
+ * 그 스텁은 언제나 false 를 돌려준다. PME 가 없으면 MSI 를 막을 이유도
+ * 없기 때문이며, 반대로 true 를 돌려주면 PME 와 무관한 경로까지 MSI 를
+ * 포기하게 된다.
+ *
+ * 실행 컨텍스트: MSI 설정 경로. 프로세스 컨텍스트.
+ *
+ * 에러 경로: 없다.
+ *
+ * 호출 체인:
+ *   pme.c 의 인터럽트 설정 → [이 함수] → pcie_pme_msi_disabled
+ */
 static inline bool pcie_pme_no_msi(void)
 {
+	/* [한국어] 현재 값을 그대로 돌려준다. */
 	return pcie_pme_msi_disabled;
 }
 
+/* [한국어] PME 인터럽트를 켜고 끈다. pme.c 가 정의한다. */
 void pcie_pme_interrupt_enable(struct pci_dev *dev, bool enable);
 #else /* !CONFIG_PCIE_PME */
+/* [한국어] PME 가 빌드에 없으면 이 플래그를 세울 일도 없으므로 무동작. */
 static inline void pcie_pme_disable_msi(void) {}
+/* [한국어] 언제나 false — MSI 를 막을 이유가 없다. 여기서 true 를 돌려주면
+ * PME 와 무관한 다른 경로까지 MSI 를 포기하게 되므로 반대로 두면 안 된다. */
 static inline bool pcie_pme_no_msi(void) { return false; }
+/* [한국어] PME 가 없으면 켤 인터럽트도 없다. */
+/* [한국어]
+ * pcie_pme_interrupt_enable - PME 인터럽트를 켜고 끈다 (스텁)
+ *
+ * @dev: 대상 포트.
+ * @en: true = 켜기, false = 끄기.
+ *
+ * CONFIG_PCIE_PME 가 꺼진 빌드의 무동작 스텁이다. PME 서비스가 없으면 켤
+ * 인터럽트도 없으므로 아무 일도 하지 않는다.
+ *
+ * CONFIG_PCIE_PME 가 켜져 있으면 같은 이름의 실제 함수를 pme.c 가 정의한다
+ * (위 :309 의 선언).
+ *
+ * 실행 컨텍스트: 호출부를 따른다. 스텁은 아무 제약이 없다.
+ *
+ * 에러 경로: 없다.
+ *
+ * 호출 체인:
+ *   pcie_portdrv 의 절전/복귀 경로 → [이 함수](아무 일도 하지 않는다)
+ */
 static inline void pcie_pme_interrupt_enable(struct pci_dev *dev, bool en) {}
 #endif /* !CONFIG_PCIE_PME */
 
+/* [한국어] 특정 포트에서 특정 서비스의 device 를 찾아 준다. 예를 들어 어떤 포트의
+ * AER 서비스 device 가 필요할 때 쓴다. */
 struct device *pcie_port_find_device(struct pci_dev *dev, u32 service);
 
+/* [한국어] CXL 관련 선언이 이 타입을 포인터로만 쓰므로 전방 선언으로 충분하다.
+ * aer.c 의 내부 타입이라 헤더를 끌어오지 않는 편이 낫다. */
 struct aer_err_info;
 
 #ifdef CONFIG_CXL_RAS
+/* [한국어] CXL RAS 가 빌드에 있으면 aer.c 와 aer_cxl_rch.c 가 정의한다. */
 bool is_aer_internal_error(struct aer_err_info *info);
+/* [한국어] RCEC 내부 오류를 CXL 쪽으로 넘기는 진입점(aer_cxl_rch.c). */
 void cxl_rch_handle_error(struct pci_dev *dev, struct aer_err_info *info);
+/* [한국어] CXL 장치가 있는 RCEC 에서만 내부 오류 마스크를 푸는 초기화(aer_cxl_rch.c). */
 void cxl_rch_enable_rcec(struct pci_dev *rcec);
 #else
+/* [한국어] CXL RAS 가 없으면 "내부 오류가 아니다" 로 답한다. 이렇게 해 두면
+ * aer.c 의 호출부가 #ifdef 없이 그대로 컴파일되고, CXL 경로는 자연스럽게
+ * 죽는다. */
 static inline bool is_aer_internal_error(struct aer_err_info *info) { return false; }
+/* [한국어]
+ * cxl_rch_handle_error - RCEC 내부 오류를 CXL 쪽으로 넘긴다 (스텁)
+ *
+ * @dev: 오류를 보고한 장치.
+ * @info: aer.c 가 채운 오류 정보.
+ *
+ * CONFIG_CXL_RAS 가 꺼진 빌드의 무동작 스텁이다. aer.c 의
+ * handle_error_source() 가 표준 처리 앞에서 이것을 부르는데(:2932),
+ * 스텁이면 그 호출이 통째로 사라지고 표준 AER 처리만 남는다.
+ *
+ * CONFIG_CXL_RAS 가 켜져 있으면 aer_cxl_rch.c 가 실제 구현을 제공한다.
+ * 호출부를 #ifdef 로 감싸지 않아도 되게 하는 것이 이 스텁의 목적이다.
+ *
+ * 실행 컨텍스트: AER 스레드 핸들러. 스텁은 아무 일도 하지 않는다.
+ *
+ * 에러 경로: 없다.
+ *
+ * 호출 체인:
+ *   aer.c 의 handle_error_source() → [이 함수](아무 일도 하지 않는다)
+ */
 static inline void cxl_rch_handle_error(struct pci_dev *dev, struct aer_err_info *info) { }
+/* [한국어]
+ * cxl_rch_enable_rcec - CXL 장치가 있는 RCEC 의 내부 오류를 켠다 (스텁)
+ *
+ * @rcec: AER 서비스가 붙은 포트.
+ *
+ * CONFIG_CXL_RAS 가 꺼진 빌드의 무동작 스텁이다. AER 서비스 probe 가
+ * IRQ 를 얻은 직후 이것을 부르는데(aer.c:3981), 스텁이면 내부 오류 마스크를
+ * 건드리지 않아 기본값(마스크됨) 그대로 남는다.
+ *
+ * 그것이 옳은 동작이다. 내부 오류는 장치마다 의미가 달라 일반적으로 켜지
+ * 않으며, CXL 만이 그것을 표준화된 방식으로 쓰기 때문에 예외적으로 켜는
+ * 것이기 때문이다. CXL 지원이 없는 커널에서는 켤 이유가 없다.
+ *
+ * 실행 컨텍스트: AER 서비스 probe. 스텁은 아무 일도 하지 않는다.
+ *
+ * 에러 경로: 없다.
+ *
+ * 호출 체인:
+ *   aer.c 의 AER 서비스 probe(:3981) → [이 함수](아무 일도 하지 않는다)
+ */
 static inline void cxl_rch_enable_rcec(struct pci_dev *rcec) { }
 #endif /* CONFIG_CXL_RAS */
 #endif /* _PORTDRV_H_ */
