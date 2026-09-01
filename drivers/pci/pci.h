@@ -2139,11 +2139,27 @@ void pcie_print_tlp_log(const struct pci_dev *dev, /* [한국어] TLP 로그를 
 #ifdef CONFIG_PCIEPORTBUS
 /* Cached RCEC Endpoint Association */
 struct rcec_ea {
-	/* [한국어] 이 RCEC 가 담당하는 버스 번호 범위의 시작. 설정자: drivers/pci/pcie/rcec.c 의 초기화(RCEC Endpoint
- * Association capability 를 읽음). 읽는 자: rcec.c 의 순회 */
+	/* [한국어] 이 RCEC 가 담당하는 버스 번호 범위의 시작.
+	 * 설정자: pcie/rcec.c 의 pci_rcec_init(). RCEC Endpoint Association
+	 *   capability 의 BUSN 레지스터에서 PCI_RCEC_BUSN_NEXT 로 뽑아낸다.
+	 *   단, 그 레지스터가 없는 구형 capability(버전이 PCI_RCEC_BUSN_REG_VER
+	 *   미만)에서는 0xff 를 **일부러** 넣는다.
+	 * 읽는 자: 같은 파일의 walk_rcec() 이 훑을 버스 범위의 시작으로 쓴다.
+	 * 값 범위: 0~0xff. 0xff 는 lastbusn 0x00 과 짝을 이뤄 "담당 RCiEP 가 모두
+	 *   RCEC 와 같은 버스에 있다" 는 뜻이 된다 — 시작이 끝보다 커서 아래
+	 *   루프가 한 번도 돌지 않고, 덕분에 순회 쪽에서 capability 버전을
+	 *   다시 확인할 필요가 없다.
+	 * 동기화: 열거 시 한 번 쓰고 이후 읽기 전용. */
 	u8		nextbusn;
-	/* [한국어] 담당 버스 번호 범위의 끝
- * (위 한 줄이 이 필드 설명의 전부다.) */
+	/* [한국어] 담당 버스 번호 범위의 끝.
+	 * 설정자: 위와 같다. BUSN 레지스터에서 PCI_RCEC_BUSN_LAST 로 뽑아내며,
+	 *   레지스터가 없으면 0x00 을 넣는다.
+	 * 읽는 자: walk_rcec() 의 버스 순회 상한.
+	 * 값 범위: 0~0xff. 하드웨어가 선언한 범위라 실재하지 않는 버스 번호를
+	 *   포함할 수 있고, 그래서 순회 쪽이 pci_find_bus() 결과가 NULL 이면
+	 *   조용히 건너뛴다. 또 이 범위에 RCEC 자기 버스가 들어오면 규격상
+	 *   연관 없음을 뜻하므로(PCIe 5.0-1, 7.9.10.3) 그 번호도 건너뛴다.
+	 * 동기화: 열거 시 한 번 쓰고 이후 읽기 전용. */
 	u8		lastbusn;
 	/* [한국어] RCEC 와 같은 버스에 있는 RCiEP 들을 device 번호 비트맵으로 표시한 것.
 	 * 설정자: drivers/pci/pcie/rcec.c 의 pci_rcec_init().
