@@ -173,7 +173,14 @@ static const struct pci_ecam_ops pci_dw_ecam_bus_ops = {
 	}
 };
 
+/* [한국어] DT compatible 문자열과 config 접근 ops 를 짝지어 두는 매칭 테이블.
+ * 이 드라이버가 여러 SoC 를 한 코드로 다룰 수 있는 것은, SoC 마다 다른 부분이
+ * "config 공간을 어떻게 읽고 쓰는가" 하나뿐이고 그것을 여기서 데이터로 고르기
+ * 때문이다. 나머지 열거·자원 배정은 pci-host-common.c 의 공용 코드가 처리한다. */
 static const struct of_device_id gen_pci_of_match[] = {
+	/* [한국어] 레거시 CAM(Configuration Access Mechanism) 방식 컨트롤러.
+	 * ECAM 이전의 주소 배치를 쓰므로 버스당 오프셋이 16비트로 좁고,
+	 * 그래서 위 gen_pci_cfg_cam_bus_ops 가 bus_shift 를 16 으로 덮어쓴다. */
 	{ .compatible = "pci-host-cam-generic",
 	  .data = &gen_pci_cfg_cam_bus_ops },
 

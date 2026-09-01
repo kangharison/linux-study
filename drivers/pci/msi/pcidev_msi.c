@@ -80,30 +80,87 @@ void pci_msi_init(struct pci_dev *dev)
 {
 	u16 ctrl;
 
+	/* [한국어] MSI capability 구조체가 config space 안 어디에 있는지 찾아 pci_dev 에 캐시한다.
+	 * 이후 MSI 관련 코드는 모두 이 캐시된 오프셋을 쓰므로, 열거 시점에 한 번만
+	 * 탐색하면 된다. 없으면 0 이 담긴다. */
 	dev->msi_cap = pci_find_capability(dev, PCI_CAP_ID_MSI);
+	/* [한국어] MSI capability 자체가 없는 장치라면 끌 것도 없다. */
 	if (!dev->msi_cap)
 		return;
 
+	/* [한국어] Message Control 레지스터를 읽는다. 활성화 비트와 64비트 주소 지원 여부가
+	 * 모두 이 16비트 워드 안에 있다. */
 	pci_read_config_word(dev, dev->msi_cap + PCI_MSI_FLAGS, &ctrl);
+	/* [한국어] 위 영어 주석대로, 전원 인가 직후에는 보통 꺼져 있지만 부트로더나 킥스타트
+	 * 펌웨어가 켜 둔 채 넘겨줄 수 있다. 그 상태로 두면 커널이 핸들러를 등록하기
+	 * 전에 인터럽트가 올라와 "screaming interrupt"(끝없이 재발생하는 인터럽트)가 된다. */
 	if (ctrl & PCI_MSI_FLAGS_ENABLE) {
+		/* [한국어] 활성화 비트만 지워 되쓴다. 다른 비트(벡터 수 등)는 보존한다 — 나중에
+		 * MSI 를 정식으로 켤 때 그 값들이 필요하기 때문이다. */
 		pci_write_config_word(dev, dev->msi_cap + PCI_MSI_FLAGS,
 				      ctrl & ~PCI_MSI_FLAGS_ENABLE);
 	}
 
+	/* [한국어] 64비트 주소를 지원하지 않는 장치라면, */
 	if (!(ctrl & PCI_MSI_FLAGS_64BIT))
+		/* [한국어] MSI 메시지 주소를 32비트 안에 두어야 한다는 제약을 pci_dev 에 기록한다.
+		 * 나중에 MSI 도메인이 벡터를 배정할 때 이 마스크를 보고 32비트 주소 공간
+		 * 안에서만 목적지를 고른다. 지원하면 마스크를 건드리지 않아 기본값(전체 범위)이 유지된다. */
 		dev->msi_addr_mask = DMA_BIT_MASK(32);
 }
 
+/* [한국어] MSI-X 판. 아래 본문이 MSI 판과 거의 같지만 두 가지가 다르다 —
+ * 레지스터 이름이 PCI_MSIX_FLAGS 이고, 주소 폭 제약이 없다
+ * (MSI-X 는 규격상 항상 64비트 주소를 지원하므로 msi_addr_mask 조정이 없다). */
+/* [한국어]
+ * pci_msix_init - 열거 시점에 MSI-X capability 를 캐시하고 하드웨어를 꺼 둔다
+ *
+ * @dev: 방금 열거된 PCI 장치.
+ *
+ * pci_msi_init() 의 MSI-X 판이며, 위 영어 주석이 두 함수 모두를 설명한다 —
+ * 부팅 중 "screaming interrupt"(핸들러 없이 끝없이 재발생하는 인터럽트)를 막기 위해
+ * MSI/MSI-X 하드웨어를 꺼 둔다는 것이다. 전원 인가 직후의 기본값이 이미 꺼짐이라
+ * 대개는 아무 일도 하지 않지만, 부트로더나 킥스타트 펌웨어가 켜 둔 채 커널에
+ * 넘기는 경우가 있어 방어가 필요하다.
+ *
+ * 동작 과정:
+ *   1) MSI-X capability 오프셋을 찾아 dev->msix_cap 에 캐시한다. 이후 모든 MSI-X
+ *      코드가 이 값을 쓰므로 탐색은 열거 시점 한 번으로 끝난다.
+ *   2) 없으면 그대로 돌아간다.
+ *   3) Message Control 을 읽어 활성화 비트가 서 있으면 그 비트만 지워 되쓴다.
+ *      테이블 크기 같은 다른 필드는 보존한다.
+ *
+ * MSI 판과 다른 점 하나: 주소 폭 제약 처리가 없다. MSI 는 64비트 주소 지원이
+ * 선택 사항이라 미지원 장치에 msi_addr_mask 를 걸어야 하지만, MSI-X 는 규격상
+ * 언제나 64비트 주소를 지원하므로 그 조정이 필요 없다.
+ *
+ * 실행 컨텍스트: PCI 열거 경로(pci_setup_device 계열), 프로세스 컨텍스트.
+ * 장치마다 한 번만 불린다.
+ *
+ * 에러 경로: 없다. 반환값도 없다 — capability 가 없는 것은 오류가 아니고,
+ * config 쓰기 실패에 대응할 방법도 없기 때문이다.
+ *
+ * 호출 체인:
+ *   pci_scan_single_device() → pci_setup_device() → [pci_msix_init]
+ *     → pci_find_capability() / pci_read_config_word() / pci_write_config_word()
+ */
 void pci_msix_init(struct pci_dev *dev)
 {
+	/* [한국어] Message Control 레지스터 값을 담을 변수. */
 	u16 ctrl;
 
+	/* [한국어] MSI-X capability 오프셋을 찾아 캐시한다. */
 	dev->msix_cap = pci_find_capability(dev, PCI_CAP_ID_MSIX);
+	/* [한국어] 없으면 할 일이 없다. */
 	if (!dev->msix_cap)
 		return;
 
+	/* [한국어] MSI-X Message Control 레지스터를 읽는다. */
 	pci_read_config_word(dev, dev->msix_cap + PCI_MSIX_FLAGS, &ctrl);
+	/* [한국어] 펌웨어가 켜 둔 채 넘겼는지 확인한다. */
 	if (ctrl & PCI_MSIX_FLAGS_ENABLE) {
+		/* [한국어] 활성화 비트만 지워 되쓴다. MSI 판과 같은 이유이며, 테이블 크기 같은
+		 * 다른 필드는 보존한다. */
 		pci_write_config_word(dev, dev->msix_cap + PCI_MSIX_FLAGS,
 				      ctrl & ~PCI_MSIX_FLAGS_ENABLE);
 	}

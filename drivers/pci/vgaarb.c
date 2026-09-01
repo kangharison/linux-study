@@ -814,6 +814,22 @@ void vga_set_default_device(struct pci_dev *pdev)
  * 없는 경우. 떼어낼 콘솔이 없으므로 아무 일도 하지 않고 성공을 돌려준다.
  * 이 빈 구현이 있어야 호출하는 GPU 드라이버들이 #ifdef 없이 그냥 부를 수 있다. */
 #if !defined(CONFIG_VGA_CONSOLE)
+/* [한국어]
+ * vga_remove_vgacon - CONFIG_VGA_CONSOLE 이 꺼진 빌드용 빈 구현
+ *
+ * @pdev: 콘솔을 넘겨받으려는 GPU. 이 판에서는 쓰지 않는다.
+ * @return: 항상 0(성공).
+ *
+ * vgacon 자체가 빌드에 없으므로 떼어낼 콘솔이 없고, 따라서 할 일도 없다.
+ * 그래도 함수가 존재해야 하는 이유는 호출자인 GPU 드라이버들이 #ifdef 로
+ * 자기 코드를 감싸지 않고 그냥 부를 수 있게 하기 위해서다.
+ *
+ * 실행 컨텍스트: GPU 드라이버 probe, 프로세스 컨텍스트.
+ *
+ * 에러 경로: 없다.
+ *
+ * 호출 체인:
+ *   GPU 드라이버 probe → [vga_remove_vgacon] (즉시 반환) */
 int vga_remove_vgacon(struct pci_dev *pdev)
 {
 	/* [한국어] vgacon 이 존재하지 않으니 "이미 목적이 달성된" 상태다. */
@@ -824,6 +840,23 @@ int vga_remove_vgacon(struct pci_dev *pdev)
  * 바로 dummy_con 이다. 대체재가 없으면 떼는 순간 콘솔 출력이 사라지므로
  * 아예 시도하지 않고 실패를 알린다. */
 #elif !defined(CONFIG_DUMMY_CONSOLE)
+/* [한국어]
+ * vga_remove_vgacon - dummy_con 이 없는 빌드용 실패 구현
+ *
+ * @pdev: 콘솔을 넘겨받으려는 GPU. 이 판에서는 쓰지 않는다.
+ * @return: 항상 -ENODEV.
+ *
+ * vgacon 을 떼려면 그 자리를 대신할 콘솔 드라이버가 있어야 하는데,
+ * 그 대역이 바로 dummy_con 이다. 대체재가 없는 빌드에서 vgacon 을 떼면
+ * 콘솔 출력이 그대로 사라지므로, 아예 시도하지 않고 실패를 알린다.
+ * 호출자는 이 실패를 보고 vgacon 이 붙어 있는 채로 진행할지 결정한다.
+ *
+ * 실행 컨텍스트: GPU 드라이버 probe, 프로세스 컨텍스트.
+ *
+ * 에러 경로: 이 함수 자체가 오류 경로다.
+ *
+ * 호출 체인:
+ *   GPU 드라이버 probe → [vga_remove_vgacon] → -ENODEV */
 int vga_remove_vgacon(struct pci_dev *pdev)
 {
 	/* [한국어] -ENODEV = "그럴 장치(대체 콘솔)가 없다". 호출자는 이 값을 보고
@@ -833,6 +866,27 @@ int vga_remove_vgacon(struct pci_dev *pdev)
 /* [한국어] 갈래 3 -- vgacon 도 있고 dummy_con 도 있는 정상 경우. 실제로
  * 콘솔을 갈아 끼운다. */
 #else
+/* [한국어]
+ * vga_remove_vgacon - vgacon 을 떼고 dummy_con 으로 콘솔을 갈아 끼운다
+ *
+ * @pdev: 콘솔을 넘겨받으려는 GPU. vga_default 와 같을 때만 실제로 동작한다.
+ * @return: 0 = 성공(또는 떼어낼 것이 없었음).
+ *      음수 = 콘솔 교체 실패. do_unregister_con_driver() 의 -ENODEV 는
+ *      "이미 해제됨"이라 성공으로 접는다.
+ *
+ * 왜 필요한가: GPU 드라이버가 프레임버퍼를 차지하려면 그 메모리를 쓰고 있는
+ * vgacon 을 먼저 내보내야 한다. 그냥 떼기만 하면 콘솔 출력이 사라지므로,
+ * 아무것도 하지 않는 dummy_con 으로 자리를 채운 뒤 vgacon 을 해제한다.
+ *
+ * 실행 컨텍스트: GPU 드라이버 probe, 프로세스 컨텍스트.
+ * console_lock() 을 잡으므로 잠들 수 있는 곳에서만 불려야 한다.
+ *
+ * 에러 경로: 자세한 단계별 설명은 바로 위 블록 주석을 참조.
+ *
+ * 호출 체인:
+ *   GPU 드라이버 probe → [vga_remove_vgacon]
+ *     → console_lock() → con_is_bound() → do_take_over_console()
+ *     → do_unregister_con_driver() → console_unlock() */
 int vga_remove_vgacon(struct pci_dev *pdev)
 {
 	/* [한국어] 콘솔 API 들의 반환값을 모으는 변수. 0 으로 시작해야

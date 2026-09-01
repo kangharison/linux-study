@@ -73,14 +73,45 @@ static const struct pci_device_id pci_pf_stub_whitelist[] = {
 };
 MODULE_DEVICE_TABLE(pci, pci_pf_stub_whitelist);
 
+/* [한국어] PF(Physical Function)를 잡아 두기만 하는 probe. 아무 하드웨어 초기화도 하지 않는다. */
+/* [한국어]
+ * pci_pf_stub_probe - PF 를 소유만 하고 아무 일도 하지 않는다
+ *
+ * @dev: 매칭된 PCI 물리 기능(PF).
+ * @id: 매칭에 쓰인 pci_device_id 항목. 사용하지 않는다.
+ * @return: 항상 0(성공).
+ *
+ * 왜 아무것도 하지 않는 드라이버가 필요한가: SR-IOV 를 쓰려면 PF 에 드라이버가
+ * 바인딩되어 있어야 sysfs 의 sriov_numvfs 를 통해 VF 를 만들 수 있다. 그런데
+ * 가상화 전용 장치 중에는 PF 자체로는 아무 기능도 제공하지 않고 오직 VF 를
+ * 만들어 게스트에 넘기는 용도로만 쓰이는 것이 있다. 그런 PF 에 붙일 만한
+ * "진짜" 드라이버가 없으므로, 소유권만 주장하고 sriov_configure 를 코어의
+ * 기본 구현에 위임하는 이 stub 이 그 자리를 채운다.
+ *
+ * 동작 과정: 정보 로그 한 줄을 남기고 성공을 돌려준다. 그것이 전부다.
+ * 장치의 레지스터를 읽지도, 인터럽트를 등록하지도 않는다.
+ *
+ * 실행 컨텍스트: PCI 코어의 드라이버 바인딩 경로, 프로세스 컨텍스트.
+ *
+ * 에러 경로: 없다. 실패할 여지가 없다.
+ *
+ * 호출 체인:
+ *   pci_bus_add_devices() → pci_device_probe() → pci_driver.probe == [이 함수]
+ *   이후 사용자가 sriov_numvfs 를 쓰면
+ *     → pci_driver.sriov_configure == pci_sriov_configure_simple() (PCI 코어 구현)
+ */
 static int pci_pf_stub_probe(struct pci_dev *dev,
 			     const struct pci_device_id *id)
 {
+	/* [한국어] 이 PF 가 stub 드라이버에 잡혔음을 알리는 정보 로그. 관리자가 왜 실제 드라이버가
+	 * 붙지 않았는지 dmesg 에서 확인할 수 있게 하는 것이 이 한 줄의 존재 이유다. */
 	pci_info(dev, "claimed by pci-pf-stub\n");
 	return 0;
 }
 
+/* [한국어] PCI 드라이버 서술. 이 구조체가 이 파일의 전부라고 해도 될 만큼 단순하다. */
 static struct pci_driver pf_stub_driver = {
+	/* [한국어] 드라이버 이름 — sysfs 의 /sys/bus/pci/drivers/pci-pf-stub 에 나타난다. */
 	.name			= "pci-pf-stub",
 	.id_table		= pci_pf_stub_whitelist,
 	.probe			= pci_pf_stub_probe,

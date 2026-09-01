@@ -2366,6 +2366,24 @@ static inline int pci_iov_bus_range(struct pci_bus *bus) /* [한국어] 스텁 �
  * 호출 체인: drivers/pci/rebar.c 의 크기 변경 경로 → [이 스텁] */
 static inline void pci_iov_resource_set_size(struct pci_dev *dev, int resno, /* [한국어] 스텁: 크기를 바꿀 VF BAR 가 없다 */
 					     int size) { }
+/* [한국어]
+ * pci_iov_is_memory_decoding_enabled 스텁 (CONFIG_PCI_IOV 꺼짐)
+ *
+ * @dev: 질의 대상 장치.
+ * @return: 항상 false — VF 메모리 공간 자체가 존재하지 않으므로
+ *      "디코딩이 켜져 있는가" 라는 질문에 참일 수 없다.
+ *
+ * 왜 스텁이 필요한가: 호출자가 #ifdef CONFIG_PCI_IOV 로 자기 코드를 감싸지
+ * 않아도 되도록, 기능이 꺼진 빌드에서도 같은 이름의 함수를 제공한다.
+ * inline 이라 컴파일러가 false 상수로 접어 버리므로 코드 크기 부담도 없다.
+ *
+ * 실행 컨텍스트: 호출자를 따른다. 아무 상태도 읽지 않아 어디서든 안전하다.
+ *
+ * 에러 경로: 없다.
+ *
+ * 호출 체인:
+ *   VF BAR 크기 변경 경로 → [이 스텁] (CONFIG_PCI_IOV 가 켜지면 대신
+ *   drivers/pci/iov.c 의 실제 구현이 쓰인다) */
 static inline bool pci_iov_is_memory_decoding_enabled(struct pci_dev *dev) /* [한국어] 스텁 시작 */
 {
 	return false; /* [한국어] VF 메모리 공간 자체가 없으므로 항상 거짓 */
