@@ -160,11 +160,17 @@
 static void pci_std_update_resource(struct pci_dev *dev, int resno)
 {
 	struct pci_bus_region region;
+	/* [한국어] 64비트 BAR 을 쓰는 동안 디코딩을 잠시 꺼야 하는지. */
 	bool disable;
+	/* [한국어] 원래 Command 값을 보관할 곳. */
 	u16 cmd;
+	/* [한국어] 쓸 값, 되읽어 확인할 값, 비교에 쓸 마스크. */
 	u32 new, check, mask;
+	/* [한국어] BAR 레지스터의 config 오프셋. */
 	int reg;
+	/* [한국어] 갱신할 자원 구조체. */
 	struct resource *res = pci_resource_n(dev, resno);
+	/* [한국어] 진단 메시지에 쓸 자원 이름("BAR 0" 같은 문자열). */
 	const char *res_name = pci_resource_name(dev, resno);
 
 	/* Per SR-IOV spec 3.4.1.11, VF BARs are RO zero */
@@ -178,6 +184,7 @@ static void pci_std_update_resource(struct pci_dev *dev, int resno)
 	if (!res->flags)
 		return;
 
+	/* [한국어] 주소가 아직 배정되지 않았으면 쓸 값이 없다. */
 	if (res->flags & IORESOURCE_UNSET)
 		return;
 
@@ -189,21 +196,37 @@ static void pci_std_update_resource(struct pci_dev *dev, int resno)
 	if (res->flags & IORESOURCE_PCI_FIXED)
 		return;
 
+	/* [한국어] CPU 주소를 PCI 버스 주소로 바꾼다. 두 주소 공간이 다른 아키텍처가 있어
+	 * BAR 에 넣을 값은 반드시 버스 주소여야 한다. */
 	pcibios_resource_to_bus(dev->bus, &region, res);
+	/* [한국어] 하위 32비트가 이 레지스터에 들어갈 값이다. */
 	new = region.start;
 
+	/* [한국어] I/O 자원이면, */
 	if (res->flags & IORESOURCE_IO) {
+		/* [한국어] I/O BAR 의 주소 마스크를 쓴다. (u32) 캐스팅은 상수가 더 넓은 타입일 때
+		 * 비교가 어긋나지 않게 하려는 것이다. */
 		mask = (u32)PCI_BASE_ADDRESS_IO_MASK;
+		/* [한국어] 주소가 아닌 하위 플래그 비트(I/O 표시 등)를 되살려 넣는다. 마스크 바깥이
+		 * 곧 플래그 자리다. */
 		new |= res->flags & ~PCI_BASE_ADDRESS_IO_MASK;
+	/* [한국어] 확장 ROM 이면, */
 	} else if (resno == PCI_ROM_RESOURCE) {
+		/* [한국어] ROM 전용 마스크를 쓴다. 아래 205~223줄에서 ENABLE 비트를 따로 다루므로
+		 * 여기서는 플래그를 합치지 않는다. */
 		mask = PCI_ROM_ADDRESS_MASK;
 	} else {
+		/* [한국어] 메모리 자원이면 메모리 BAR 마스크. */
 		mask = (u32)PCI_BASE_ADDRESS_MEM_MASK;
+		/* [한국어] 역시 플래그 비트를 되살린다. */
 		new |= res->flags & ~PCI_BASE_ADDRESS_MEM_MASK;
 	}
 
+	/* [한국어] 일반 BAR 이면, */
 	if (resno < PCI_ROM_RESOURCE) {
+		/* [한국어] BAR 0 부터 4바이트 간격으로 놓이므로 번호에 4 를 곱해 오프셋을 얻는다. */
 		reg = PCI_BASE_ADDRESS_0 + 4 * resno;
+	/* [한국어] 확장 ROM 이면, */
 	} else if (resno == PCI_ROM_RESOURCE) {
 
 		/*
@@ -218,9 +241,14 @@ static void pci_std_update_resource(struct pci_dev *dev, int resno)
 		    !dev->rom_bar_overlap)
 			return;
 
+		/* [한국어] ROM BAR 의 오프셋은 헤더 종류마다 달라 열거 때 찾아 둔 값을 쓴다. */
 		reg = dev->rom_base_reg;
+		/* [한국어] ROM 을 켜 두기로 했으면, */
 		if (res->flags & IORESOURCE_ROM_ENABLE)
+			/* [한국어] 활성화 비트를 함께 넣는다. 다른 BAR 과 달리 주소와 활성화가 한 레지스터에
+			 * 있어 여기서 합쳐야 한다. */
 			new |= PCI_ROM_ADDRESS_ENABLE;
+	/* [한국어] 그 밖의 번호(브리지 윈도우, SR-IOV BAR)는 이 함수의 대상이 아니다. */
 	} else
 		return;
 
@@ -230,31 +258,51 @@ static void pci_std_update_resource(struct pci_dev *dev, int resno)
 	 * with another device.
 	 */
 	disable = (res->flags & IORESOURCE_MEM_64) && !dev->mmio_always_on;
+	/* [한국어] 디코딩을 꺼야 하는 경우면, */
 	if (disable) {
+		/* [한국어] 현재 Command 를 저장해 두고, */
 		pci_read_config_word(dev, PCI_COMMAND, &cmd);
+		/* [한국어] I/O·메모리 디코딩을 끈다. 64비트 BAR 은 하위·상위 워드를 두 번에 나눠
+		 * 써야 하는데, 그 사이의 중간 상태에서는 장치가 엉뚱한 주소 구간을
+		 * 디코딩하게 되기 때문이다. mmio_always_on 장치는 끌 수 없어 예외다. */
 		pci_write_config_word(dev, PCI_COMMAND,
 				      cmd & ~PCI_COMMAND_MEMORY);
 	}
 
+	/* [한국어] 하위 워드를 쓰고, */
 	pci_write_config_dword(dev, reg, new);
+	/* [한국어] 곧바로 되읽는다. */
 	pci_read_config_dword(dev, reg, &check);
 
+	/* [한국어] 주소 비트가 다르게 읽히면 하드웨어가 쓰기를 받아들이지 않은 것이다.
+	 * 마스크로 거르는 이유는 플래그 비트가 읽기 전용이라 쓴 값과 다를 수 있기
+	 * 때문이다. */
 	if ((new ^ check) & mask) {
+		/* [한국어] 어떤 값을 썼고 무엇이 읽혔는지 남긴다. */
 		pci_err(dev, "%s: error updating (%#010x != %#010x)\n",
 			res_name, new, check);
 	}
 
+	/* [한국어] 64비트 BAR 이면 상위 워드도 써야 한다. */
 	if (res->flags & IORESOURCE_MEM_64) {
+		/* [한국어] 32비트씩 두 번 미는 것은 32비트 아키텍처에서 `>> 32` 가 정의되지 않은
+		 * 동작이기 때문이다. */
 		new = region.start >> 16 >> 16;
+		/* [한국어] 다음 레지스터에 쓰고, */
 		pci_write_config_dword(dev, reg + 4, new);
+		/* [한국어] 되읽어, */
 		pci_read_config_dword(dev, reg + 4, &check);
+		/* [한국어] 다르면, */
 		if (check != new) {
+			/* [한국어] 상위 워드 오류임을 밝혀 남긴다. */
 			pci_err(dev, "%s: error updating (high %#010x != %#010x)\n",
 				res_name, new, check);
 		}
 	}
 
+	/* [한국어] 디코딩을 껐었다면, */
 	if (disable)
+		/* [한국어] 원래 Command 를 되돌린다. 이 시점이면 주소가 완전히 설정되어 있다. */
 		pci_write_config_word(dev, PCI_COMMAND, cmd);
 }
 
@@ -283,8 +331,12 @@ static void pci_std_update_resource(struct pci_dev *dev, int resno)
 void pci_update_resource(struct pci_dev *dev, int resno)
 {
 	if (resno <= PCI_ROM_RESOURCE)
+		/* [한국어] 표준 BAR 은 위 함수가 처리하고, */
 		pci_std_update_resource(dev, resno);
+	/* [한국어] SR-IOV VF BAR 이면, */
 	else if (pci_resource_is_iov(resno))
+		/* [한국어] 전용 함수가 처리한다. VF BAR 은 VF 개수만큼의 크기를 갖고 PF 의 SR-IOV
+		 * capability 안에 있어 레지스터 위치가 다르다. */
 		pci_iov_update_resource(dev, resno);
 }
 
@@ -326,10 +378,14 @@ void pci_update_resource(struct pci_dev *dev, int resno)
 int pci_claim_resource(struct pci_dev *dev, int resource)
 {
 	struct resource *res = &dev->resource[resource];
+	/* [한국어] 진단 메시지용 자원 이름. */
 	const char *res_name = pci_resource_name(dev, resource);
+	/* [한국어] 부모가 될 자원과, 충돌한 상대. */
 	struct resource *root, *conflict;
 
+	/* [한국어] 주소가 배정되지 않았으면 등록할 것이 없다. */
 	if (res->flags & IORESOURCE_UNSET) {
+		/* [한국어] 그 사실을 남기고, */
 		pci_info(dev, "%s %pR: can't claim; no address assigned\n",
 			 res_name, res);
 		return -EINVAL;
@@ -343,18 +399,26 @@ int pci_claim_resource(struct pci_dev *dev, int resource)
 	if (res->flags & IORESOURCE_ROM_SHADOW)
 		return 0;
 
+	/* [한국어] 이 자원을 담을 수 있는 상위 브리지 윈도우를 찾는다. */
 	root = pci_find_parent_resource(dev, res);
+	/* [한국어] 없으면 이 주소를 통과시켜 줄 경로가 없다는 뜻이다. */
 	if (!root) {
+		/* [한국어] 그 사실을 남기고, */
 		pci_info(dev, "%s %pR: can't claim; no compatible bridge window\n",
 			 res_name, res);
+		/* [한국어] 배정되지 않은 것으로 표시한다. 이후 재배정 대상이 된다. */
 		res->flags |= IORESOURCE_UNSET;
 		return -EINVAL;
 	}
 
+	/* [한국어] 자원 트리에 등록을 시도한다. 충돌하면 상대를 반환하는 판이라 진단에 쓸 수 있다. */
 	conflict = request_resource_conflict(root, res);
+	/* [한국어] 충돌했으면, */
 	if (conflict) {
+		/* [한국어] 누구와 겹쳤는지까지 남기고, */
 		pci_info(dev, "%s %pR: can't claim; address conflict with %s %pR\n",
 			 res_name, res, conflict->name, conflict);
+		/* [한국어] 역시 배정되지 않은 것으로 되돌린다. */
 		res->flags |= IORESOURCE_UNSET;
 		return -EBUSY;
 	}
@@ -407,7 +471,10 @@ void pci_disable_bridge_window(struct pci_dev *dev)
 
 	/* Prefetchable MMIO Base/Limit */
 	pci_write_config_dword(dev, PCI_PREF_LIMIT_UPPER32, 0);
+	/* [한국어] prefetchable 메모리 윈도우도 같은 방식으로 닫는다. base 를 limit 보다
+	 * 높게 만들어 빈 구간으로 만드는 것이 브리지 윈도우를 끄는 규격상의 방법이다. */
 	pci_write_config_dword(dev, PCI_PREF_MEMORY_BASE, 0x0000fff0);
+	/* [한국어] 상위 32비트는 base 를 최대로 올려 확실히 빈 구간이 되게 한다. */
 	pci_write_config_dword(dev, PCI_PREF_BASE_UPPER32, 0xffffffff);
 }
 
@@ -479,18 +546,27 @@ static int pci_revert_fw_address(struct resource *res, struct pci_dev *dev,
 		int resno, resource_size_t size)
 {
 	struct resource *root, *conflict;
+	/* [한국어] 펌웨어가 알려 준 주소와, 실패 시 되돌릴 원래 값들. */
 	resource_size_t fw_addr, start, end;
+	/* [한국어] 진단 메시지용 이름. */
 	const char *res_name = pci_resource_name(dev, resno);
 
+	/* [한국어] 펌웨어가 이 자원에 배정했던 주소를 아키텍처 코드에서 얻는다. */
 	fw_addr = pcibios_retrieve_fw_addr(dev, resno);
+	/* [한국어] 그런 주소가 없으면 되돌릴 곳이 없다. */
 	if (!fw_addr)
 		return -ENOMEM;
 
+	/* [한국어] 실패하면 되돌리려고 현재 값을 보관해 둔다. */
 	start = res->start;
+	/* [한국어] 끝 주소도. */
 	end = res->end;
+	/* [한국어] 펌웨어 주소로 바꿔 넣고, */
 	resource_set_range(res, fw_addr, size);
+	/* [한국어] 배정된 것으로 표시한다. 아래 등록이 이 상태를 전제로 한다. */
 	res->flags &= ~IORESOURCE_UNSET;
 
+	/* [한국어] 그 주소를 담을 부모 윈도우를 찾는다. */
 	root = pci_find_parent_resource(dev, res);
 	if (!root) {
 		/*
@@ -505,18 +581,29 @@ static int pci_revert_fw_address(struct resource *res, struct pci_dev *dev,
 		 * everything.
 		 */
 		if (res->flags & IORESOURCE_IO)
+			/* [한국어] I/O 자원이면 시스템 I/O 포트 트리를, */
 			root = &ioport_resource;
 		else
+			/* [한국어] 아니면 시스템 메모리 트리를 부모로 삼는다. 상위 브리지가 없는 루트
+			 * 장치라 부모 윈도우가 없을 때의 대비책이다. */
 			root = &iomem_resource;
 	}
 
+	/* [한국어] 펌웨어 주소로 시도한다는 사실을 남긴다. 이 경로는 흔치 않아 로그가
+	 * 진단에 도움이 된다. */
 	pci_info(dev, "%s: trying firmware assignment %pR\n", res_name, res);
+	/* [한국어] 등록을 시도한다. */
 	conflict = request_resource_conflict(root, res);
+	/* [한국어] 충돌하면, */
 	if (conflict) {
+		/* [한국어] 상대를 남기고, */
 		pci_info(dev, "%s %pR: conflicts with %s %pR\n", res_name, res,
 			 conflict->name, conflict);
+		/* [한국어] 보관해 둔 시작 주소와, */
 		res->start = start;
+		/* [한국어] 끝 주소를 되돌린 뒤, */
 		res->end = end;
+		/* [한국어] 배정되지 않은 것으로 표시한다. 완전히 원래 상태로 돌아간다. */
 		res->flags |= IORESOURCE_UNSET;
 		return -EBUSY;
 	}
@@ -560,10 +647,14 @@ resource_size_t pci_align_resource(struct pci_dev *dev,
 {
 	resource_size_t remainder, start_addr;
 
+	/* [한국어] 메모리 자원이 아니면 이 최적화의 대상이 아니다. */
 	if (!(res->flags & IORESOURCE_MEM))
+		/* [한국어] 현재 시작 주소를 그대로 쓴다. */
 		return res->start;
 
+	/* [한국어] 크기가 이미 정렬 단위의 배수면 조정할 것이 없다. */
 	if (IS_ALIGNED(size, align))
+		/* [한국어] 그대로 반환. */
 		return res->start;
 
 	remainder = size - ALIGN_DOWN(size, align);
@@ -572,13 +663,20 @@ resource_size_t pci_align_resource(struct pci_dev *dev,
 		return res->start;
 	/* Try to place remainder that doesn't fill align before */
 	if (res->start < remainder)
+		/* [한국어] 시작 주소가 나머지보다 작으면 빼는 순간 음수가 되므로 조정할 수 없다. */
 		return res->start;
+	/* [한국어] 나머지만큼 앞으로 당긴 후보 주소. */
 	start_addr = res->start - remainder;
+	/* [한국어] 빈 구간의 시작보다 앞이면 그 구간을 벗어나므로 쓸 수 없다. */
 	if (empty_res->start > start_addr)
+		/* [한국어] 원래 주소를 반환. */
 		return res->start;
 
+	/* [한국어] 조정했다는 사실을 디버그 로그에 남긴다. */
 	pci_dbg(dev, "%pR: moving candidate start address below align to %llx\n",
 		res, (unsigned long long)start_addr);
+	/* [한국어] 당긴 주소를 반환한다. 크기가 정렬 단위의 배수가 아닐 때 앞쪽으로 당겨
+	 * 빈 공간을 덜 낭비하려는 최적화다. */
 	return start_addr;
 }
 
@@ -617,6 +715,8 @@ resource_size_t __weak pcibios_align_resource(void *data,
 {
 	struct pci_dev *dev = data;
 
+	/* [한국어] 실제 정렬 계산은 위 함수에 맡긴다. 이 래퍼가 있는 이유는
+	 * pci_bus_alloc_resource() 가 요구하는 콜백 서명에 맞추기 위해서다. */
 	return pci_align_resource(dev, res, empty_res, size, align);
 }
 
@@ -664,9 +764,13 @@ static int __pci_assign_resource(struct pci_bus *bus, struct pci_dev *dev,
 		int resno, resource_size_t size, resource_size_t align)
 {
 	struct resource *res = pci_resource_n(dev, resno);
+	/* [한국어] 이 자원이 놓일 수 있는 최소 주소. */
 	resource_size_t min;
+	/* [한국어] 할당 결과. */
 	int ret;
 
+	/* [한국어] I/O 와 메모리의 하한이 다르다. 아키텍처가 낮은 주소 구간을 예약해 두는
+	 * 경우가 있어 그 아래로는 배정하지 않는다. */
 	min = (res->flags & IORESOURCE_IO) ? PCIBIOS_MIN_IO : PCIBIOS_MIN_MEM;
 
 	/*
@@ -679,6 +783,7 @@ static int __pci_assign_resource(struct pci_bus *bus, struct pci_dev *dev,
 	ret = pci_bus_alloc_resource(bus, res, size, align, min,
 				     IORESOURCE_PREFETCH | IORESOURCE_MEM_64,
 				     pcibios_align_resource, dev);
+	/* [한국어] 첫 시도가 성공하면, */
 	if (ret == 0)
 		return 0;
 
@@ -688,9 +793,11 @@ static int __pci_assign_resource(struct pci_bus *bus, struct pci_dev *dev,
 	 */
 	if ((res->flags & (IORESOURCE_PREFETCH | IORESOURCE_MEM_64)) ==
 	     (IORESOURCE_PREFETCH | IORESOURCE_MEM_64)) {
+		/* [한국어] prefetchable 이면서 64비트인 자원만 두 번째 시도를 한다. */
 		ret = pci_bus_alloc_resource(bus, res, size, align, min,
 					     IORESOURCE_PREFETCH,
 					     pcibios_align_resource, dev);
+		/* [한국어] 성공하면, */
 		if (ret == 0)
 			return 0;
 	}
@@ -702,6 +809,9 @@ static int __pci_assign_resource(struct pci_bus *bus, struct pci_dev *dev,
 	 * so we don't need to try again.
 	 */
 	if (res->flags & (IORESOURCE_PREFETCH | IORESOURCE_MEM_64))
+		/* [한국어] 마지막 시도는 아무 제약 없이 아무 윈도우에나 넣어 본다. 세 단계가
+		 * "가장 알맞은 곳부터 점점 느슨하게" 로 이어지는 구조다 — 64비트
+		 * prefetchable 윈도우가 가장 귀하므로 먼저 시도하고, 안 되면 점점 넓힌다. */
 		ret = pci_bus_alloc_resource(bus, res, size, align, min, 0,
 					     pcibios_align_resource, dev);
 
@@ -737,12 +847,19 @@ static int _pci_assign_resource(struct pci_dev *dev, int resno,
 				resource_size_t size, resource_size_t min_align)
 {
 	struct pci_bus *bus;
+	/* [한국어] 할당 결과. */
 	int ret;
 
+	/* [한국어] 이 장치가 매달린 버스에서 시작한다. */
 	bus = dev->bus;
+	/* [한국어] 실패하는 동안 위로 올라가며 반복한다. */
 	while ((ret = __pci_assign_resource(bus, dev, resno, size, min_align))) {
+		/* [한국어] 부모가 없거나 투명 브리지가 아니면 더 올라갈 수 없다. 투명 브리지는
+		 * 자기 윈도우를 갖지 않고 상위 윈도우를 그대로 통과시키므로, 그 위에서
+		 * 찾아도 되기 때문이다. */
 		if (!bus->parent || !bus->self->transparent)
 			break;
+		/* [한국어] 한 단계 위 버스로. */
 		bus = bus->parent;
 	}
 
@@ -787,22 +904,33 @@ static int _pci_assign_resource(struct pci_dev *dev, int resno,
 int pci_assign_resource(struct pci_dev *dev, int resno)
 {
 	struct resource *res = pci_resource_n(dev, resno);
+	/* [한국어] 진단 메시지용 이름. */
 	const char *res_name = pci_resource_name(dev, resno);
+	/* [한국어] 정렬 단위와 크기. */
 	resource_size_t align, size;
+	/* [한국어] 결과. */
 	int ret;
 
+	/* [한국어] 펌웨어가 고정한 자원이면 옮길 수 없다. */
 	if (res->flags & IORESOURCE_PCI_FIXED)
 		return 0;
 
+	/* [한국어] 먼저 배정되지 않은 것으로 표시한다. 할당이 실패했을 때 그 상태로 남게
+	 * 하려는 것이며, 성공하면 아래에서 다시 지운다. */
 	res->flags |= IORESOURCE_UNSET;
+	/* [한국어] 이 자원이 요구하는 정렬을 얻는다. */
 	align = pci_resource_alignment(dev, res);
+	/* [한국어] 0 이면 계산이 잘못된 것이다. */
 	if (!align) {
+		/* [한국어] 그 사실을 남기고, */
 		pci_info(dev, "%s %pR: can't assign; bogus alignment\n",
 			 res_name, res);
 		return -EINVAL;
 	}
 
+	/* [한국어] 현재 크기를 그대로 쓴다. */
 	size = resource_size(res);
+	/* [한국어] 실제 할당을 시도한다. */
 	ret = _pci_assign_resource(dev, resno, size, align);
 
 	/*
@@ -811,22 +939,35 @@ int pci_assign_resource(struct pci_dev *dev, int resno)
 	 * working, which is better than just leaving it disabled.
 	 */
 	if (ret < 0) {
+		/* [한국어] 공간이 없으면, */
 		pci_info(dev, "%s %pR: can't assign; no space\n", res_name, res);
+		/* [한국어] 펌웨어가 썼던 주소로 되돌려 본다. 커널의 할당기가 실패해도 펌웨어가
+		 * 쓰던 주소는 실제로 동작했던 곳이므로 마지막 시도로 삼는다. */
 		ret = pci_revert_fw_address(res, dev, resno, size);
 	}
 
+	/* [한국어] 그래도 실패하면, */
 	if (ret < 0) {
+		/* [한국어] 남기고, */
 		pci_info(dev, "%s %pR: failed to assign\n", res_name, res);
 		return ret;
 	}
 
+	/* [한국어] 배정되었음을 표시하고, */
 	res->flags &= ~IORESOURCE_UNSET;
+	/* [한국어] 시작 주소 정렬 요구 표시도 지운다. 할당이 끝났으므로 더는 의미가 없다. */
 	res->flags &= ~IORESOURCE_STARTALIGN;
+	/* [한국어] 브리지 윈도우면, */
 	if (pci_resource_is_bridge_win(resno))
+		/* [한국어] 비활성화 표시도 지운다. 윈도우가 실제 주소를 얻었으므로 켤 수 있다. */
 		res->flags &= ~IORESOURCE_DISABLED;
 
+	/* [한국어] 배정 결과를 남긴다. */
 	pci_info(dev, "%s %pR: assigned\n", res_name, res);
+	/* [한국어] 브리지 윈도우가 아닌 일반 자원이면, */
 	if (resno < PCI_BRIDGE_RESOURCES)
+		/* [한국어] BAR 에 실제로 써 넣는다. 브리지 윈도우는 상위 계층(setup-bus.c)이
+		 * 따로 쓰기 때문에 여기서 하지 않는다. */
 		pci_update_resource(dev, resno);
 
 	return 0;
@@ -861,36 +1002,57 @@ int pci_reassign_resource(struct pci_dev *dev, int resno,
 			  resource_size_t addsize, resource_size_t min_align)
 {
 	struct resource *res = pci_resource_n(dev, resno);
+	/* [한국어] 진단 메시지용 이름. */
 	const char *res_name = pci_resource_name(dev, resno);
+	/* [한국어] 원래 플래그를 보관할 곳. */
 	unsigned long flags;
+	/* [한국어] 늘린 크기. */
 	resource_size_t new_size;
+	/* [한국어] 결과. */
 	int ret;
 
+	/* [한국어] 고정 자원이면 옮길 수 없다. */
 	if (res->flags & IORESOURCE_PCI_FIXED)
 		return 0;
 
+	/* [한국어] 실패 시 되돌리려고 플래그 전체를 보관한다. pci_assign_resource() 가
+	 * 되돌리지 않는 것과 다른 점인데, 이쪽은 이미 배정된 자원을 늘리는 것이라
+	 * 실패해도 원래 상태를 유지해야 하기 때문이다. */
 	flags = res->flags;
+	/* [한국어] 할당을 위해 배정되지 않은 것으로 표시한다. */
 	res->flags |= IORESOURCE_UNSET;
+	/* [한국어] 부모가 없으면 애초에 배정된 적이 없는 자원이다. */
 	if (!res->parent) {
+		/* [한국어] 그 사실을 남기고, */
 		pci_info(dev, "%s %pR: can't reassign; unassigned resource\n",
 			 res_name, res);
 		return -EINVAL;
 	}
 
+	/* [한국어] 기존 크기에 추가분을 더한다. */
 	new_size = resource_size(res) + addsize;
+	/* [한국어] 새 크기로 할당을 시도한다. */
 	ret = _pci_assign_resource(dev, resno, new_size, min_align);
+	/* [한국어] 실패하면, */
 	if (ret) {
+		/* [한국어] 보관해 둔 플래그를 통째로 되돌리고, */
 		res->flags = flags;
+		/* [한국어] 얼마나 늘리려다 실패했는지 남긴다. */
 		pci_info(dev, "%s %pR: failed to expand by %#llx\n",
 			 res_name, res, (unsigned long long) addsize);
 		return ret;
 	}
 
+	/* [한국어] 성공했으면 배정 표시를 지우고, */
 	res->flags &= ~IORESOURCE_UNSET;
+	/* [한국어] 정렬 요구 표시도 지운다. */
 	res->flags &= ~IORESOURCE_STARTALIGN;
+	/* [한국어] 얼마나 늘었는지 남긴다. */
 	pci_info(dev, "%s %pR: reassigned; expanded by %#llx\n",
 		 res_name, res, (unsigned long long) addsize);
+	/* [한국어] 브리지 윈도우가 아니면, */
 	if (resno < PCI_BRIDGE_RESOURCES)
+		/* [한국어] BAR 에 써 넣는다. */
 		pci_update_resource(dev, resno);
 
 	return 0;
@@ -919,19 +1081,30 @@ int pci_reassign_resource(struct pci_dev *dev, int resno,
 int pci_release_resource(struct pci_dev *dev, int resno)
 {
 	struct resource *res = pci_resource_n(dev, resno);
+	/* [한국어] 진단 메시지용 이름. */
 	const char *res_name = pci_resource_name(dev, resno);
+	/* [한국어] 결과. */
 	int ret;
 
+	/* [한국어] 부모가 없으면 등록된 적이 없으므로 놓을 것도 없다. */
 	if (!res->parent)
 		return 0;
 
+	/* [한국어] 놓는다는 사실을 남긴다. */
 	pci_info(dev, "%s %pR: releasing\n", res_name, res);
 
+	/* [한국어] 자원 트리에서 뗀다. */
 	ret = release_resource(res);
+	/* [한국어] 실패하면 그대로 반환한다. 아래 크기·주소 초기화를 하지 않는 것이 중요한데,
+	 * 여전히 트리에 등록된 자원의 값을 바꾸면 트리가 깨지기 때문이다. */
 	if (ret)
 		return ret;
+	/* [한국어] 크기는 유지한 채 끝 주소를 크기-1 로 만들고, */
 	res->end = resource_size(res) - 1;
+	/* [한국어] 시작을 0 으로 옮긴다. 주소는 잃되 크기 정보는 남겨 두는 것으로,
+	 * 나중에 재배정할 때 그 크기가 필요하기 때문이다. */
 	res->start = 0;
+	/* [한국어] 배정되지 않은 것으로 표시한다. */
 	res->flags |= IORESOURCE_UNSET;
 
 	return 0;
@@ -980,48 +1153,73 @@ EXPORT_SYMBOL(pci_release_resource);
 int pci_enable_resources(struct pci_dev *dev, int mask)
 {
 	u16 cmd, old_cmd;
+	/* [한국어] 자원 순회 인덱스. */
 	int i;
+	/* [한국어] 순회 중인 자원. */
 	struct resource *r;
+	/* [한국어] 그 이름. */
 	const char *r_name;
 
+	/* [한국어] 현재 Command 를 읽고, */
 	pci_read_config_word(dev, PCI_COMMAND, &cmd);
+	/* [한국어] 원래 값을 보관한다. 아래에서 바뀌었을 때만 쓰기 위해서다. */
 	old_cmd = cmd;
 
+	/* [한국어] 이 장치의 모든 자원을 훑는다. */
 	pci_dev_for_each_resource(dev, r, i) {
+		/* [한국어] 호출자가 지정한 마스크에 없는 자원은, */
 		if (!(mask & (1 << i)))
 			continue;
 
+		/* [한국어] 진단에 쓸 이름을 얻는다. */
 		r_name = pci_resource_name(dev, i);
 
+		/* [한국어] I/O 도 메모리도 아니면 디코딩과 무관하므로, */
 		if (!(r->flags & (IORESOURCE_IO | IORESOURCE_MEM)))
 			continue;
+		/* [한국어] 선택적 자원(없어도 동작하는 것)이면 검사하지 않고 넘어간다. */
 		if (pci_resource_is_optional(dev, i))
 			continue;
 
+		/* [한국어] 일반 BAR 이면 두 가지를 확인한다. */
 		if (i < PCI_BRIDGE_RESOURCES) {
+			/* [한국어] 주소가 배정되지 않았으면, */
 			if (r->flags & IORESOURCE_UNSET) {
+				/* [한국어] 장치를 켤 수 없다. 배정되지 않은 BAR 을 디코딩하게 두면 엉뚱한 주소
+				 * 구간을 가로챈다. */
 				pci_err(dev, "%s %pR: not assigned; can't enable device\n",
 					r_name, r);
 				return -EINVAL;
 			}
 
+			/* [한국어] 자원 트리에 등록되지 않았으면, */
 			if (!r->parent) {
+				/* [한국어] 역시 켤 수 없다. 등록되지 않았다는 것은 다른 장치와 겹칠지 확인되지
+				 * 않았다는 뜻이다. */
 				pci_err(dev, "%s %pR: not claimed; can't enable device\n",
 					r_name, r);
 				return -EINVAL;
 			}
 		}
 
+		/* [한국어] 등록된 자원이면, */
 		if (r->parent) {
+			/* [한국어] I/O 자원이 하나라도 있으면, */
 			if (r->flags & IORESOURCE_IO)
+				/* [한국어] I/O 디코딩을 켠다. */
 				cmd |= PCI_COMMAND_IO;
+			/* [한국어] 메모리 자원이 있으면, */
 			if (r->flags & IORESOURCE_MEM)
+				/* [한국어] 메모리 디코딩을 켠다. 종류별로 한 번씩만 켜면 되므로 OR 로 누적한다. */
 				cmd |= PCI_COMMAND_MEMORY;
 		}
 	}
 
+	/* [한국어] 실제로 바뀐 것이 있을 때만, */
 	if (cmd != old_cmd) {
+		/* [한국어] 어떻게 바뀌는지 남기고, */
 		pci_info(dev, "enabling device (%04x -> %04x)\n", old_cmd, cmd);
+		/* [한국어] 쓴다. 값이 같으면 쓰지 않는 것은 불필요한 config 쓰기를 줄이려는 것이다. */
 		pci_write_config_word(dev, PCI_COMMAND, cmd);
 	}
 	return 0;
