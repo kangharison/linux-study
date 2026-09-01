@@ -98,15 +98,49 @@
 
 #include "../pci.h"
 
+/* [한국어]
+ * pci_pwrctrl_notify - 같은 DT 노드를 쓰는 PCI 장치에 of_node_reused 를 표시한다
+ *
+ * @nb: 등록해 둔 notifier_block. container_of 로 pwrctrl 을 되찾는다.
+ * @action: 알림 종류. BUS_NOTIFY_ADD_DEVICE 만 처리한다.
+ * @data: 알림 대상 device.
+ * @return: 언제나 NOTIFY_DONE — 다른 구독자를 막지 않는다.
+ *
+ * pci_pwrctrl_device_set_ready() 가 PCI 버스 알림에 등록해 둔 콜백이다.
+ *
+ * 해결하는 문제는 함수 안의 영어 주석에 있다. 하나의 DT 노드를 두 device 가
+ * 함께 쓰는 상황이 생긴다 — 먼저 pwrctrl 의 platform device 가 그 노드로
+ * 만들어지고, 전원이 들어온 뒤 같은 노드를 쓰는 PCI device 가 나타난다.
+ * 서로 다른 버스에 있는 두 device 가 같은 노드를 참조하는 것이라, 핀 설정을
+ * 두 번 적용하면 안 된다.
+ *
+ * 그래서 나중에 온 PCI 쪽에 of_node_reused 를 세워 "이 노드는 이미 누가
+ * 쓰고 있다" 고 알린다. 판정은 이름이 아니라 dev_fwnode() 비교로 한다.
+ *
+ * [상류 코드 관찰] 이 트리의 이 파일에는 버스 재스캔을 예약하는 코드가 없다.
+ * set_ready() 가 하는 일은 알림 구독뿐이고, 이 콜백은 위 표시만 남긴다.
+ *
+ * 실행 컨텍스트: PCI 버스 알림 사슬. 프로세스 컨텍스트.
+ *
+ * 에러 경로: 없다. 남의 장치면 그대로 NOTIFY_DONE 이다.
+ *
+ * 호출 체인:
+ *   device_add() → PCI 버스 알림 사슬 → [이 함수]
+ */
 static int pci_pwrctrl_notify(struct notifier_block *nb, unsigned long action,
 			      void *data)
 {
 	struct pci_pwrctrl *pwrctrl = container_of(nb, struct pci_pwrctrl, nb);
+	/* [한국어] 알림과 함께 온 device. 이 알림이 우리와 상관있는지 아래에서 판정한다. */
 	struct device *dev = data;
 
+	/* [한국어] 펌웨어 노드가 다르면 남의 장치다. **노드로** 비교하는 것이 핵심인데,
+	 * pwrctrl 의 platform device 와 그 뒤에 나타나는 PCI device 가 서로 다른
+	 * 버스에 있으면서 같은 DT 노드를 쓰기 때문이다. */
 	if (dev_fwnode(dev) != dev_fwnode(pwrctrl->dev))
 		return NOTIFY_DONE;
 
+	/* [한국어] 알림 종류에 따라 갈린다. 지금은 한 가지만 처리한다. */
 	switch (action) {
 	case BUS_NOTIFY_ADD_DEVICE:
 		/*
@@ -133,7 +167,10 @@ static int pci_pwrctrl_notify(struct notifier_block *nb, unsigned long action,
  */
 void pci_pwrctrl_init(struct pci_pwrctrl *pwrctrl, struct device *dev)
 {
+	/* [한국어] 어느 장치의 pwrctrl 인지 기록한다. */
 	pwrctrl->dev = dev;
+	/* [한국어] 반대 방향도 이어 둔다. 이렇게 해 두면 아래 __pci_pwrctrl_power_on/off_device()
+	 * 가 device 만으로 pwrctrl 을 되찾을 수 있다. */
 	dev_set_drvdata(dev, pwrctrl);
 }
 EXPORT_SYMBOL_GPL(pci_pwrctrl_init);
@@ -154,13 +191,19 @@ EXPORT_SYMBOL_GPL(pci_pwrctrl_init);
  */
 int pci_pwrctrl_device_set_ready(struct pci_pwrctrl *pwrctrl)
 {
+	/* [한국어] 알림 등록 결과. */
 	int ret;
 
+	/* [한국어] pci_pwrctrl_init() 을 거치지 않았으면 대상 장치를 모르므로, */
 	if (!pwrctrl->dev)
 		return -ENODEV;
 
+	/* [한국어] 알림 콜백을 연결한다. */
 	pwrctrl->nb.notifier_call = pci_pwrctrl_notify;
+	/* [한국어] PCI 버스의 알림 사슬에 등록한다. 이 시점부터 PCI 장치가 추가될 때마다
+	 * 위 콜백이 불린다. */
 	ret = bus_register_notifier(&pci_bus_type, &pwrctrl->nb);
+	/* [한국어] 실패하면, */
 	if (ret)
 		return ret;
 
@@ -186,8 +229,28 @@ void pci_pwrctrl_device_unset_ready(struct pci_pwrctrl *pwrctrl)
 }
 EXPORT_SYMBOL_GPL(pci_pwrctrl_device_unset_ready);
 
+/* [한국어] devres 가 넘겨 준 데이터가 곧 pwrctrl 이다. */
+/* [한국어]
+ * devm_pci_pwrctrl_device_unset_ready - devres 가 부르는 해제 어댑터
+ *
+ * @data: devm_add_action_or_reset() 에 맡긴 pwrctrl 포인터.
+ *
+ * devres 액션은 void * 하나만 받는 규약이라, 타입을 되돌려 실제 해제 함수로
+ * 넘기는 한 줄짜리 어댑터가 필요하다.
+ *
+ * 이 함수가 있는 덕분에 드라이버는 해제를 잊을 수 없다. 드라이버가 떨어질
+ * 때 devres 가 알아서 부른다.
+ *
+ * 실행 컨텍스트: 드라이버 언바인드 시 devres 해제. 프로세스 컨텍스트.
+ *
+ * 에러 경로: 없다.
+ *
+ * 호출 체인:
+ *   드라이버 언바인드 → devres → [이 함수] → pci_pwrctrl_device_unset_ready()
+ */
 static void devm_pci_pwrctrl_device_unset_ready(void *data)
 {
+	/* [한국어] 타입을 되돌린다. */
 	struct pci_pwrctrl *pwrctrl = data;
 
 	pci_pwrctrl_device_unset_ready(pwrctrl);
@@ -206,43 +269,116 @@ static void devm_pci_pwrctrl_device_unset_ready(void *data)
 int devm_pci_pwrctrl_device_set_ready(struct device *dev,
 				      struct pci_pwrctrl *pwrctrl)
 {
+	/* [한국어] 등록 결과. */
 	int ret;
 
+	/* [한국어] 먼저 알림을 등록하고, */
 	ret = pci_pwrctrl_device_set_ready(pwrctrl);
+	/* [한국어] 실패하면 devres 액션을 걸지 않고 그대로 반환한다. 등록되지 않은 것을
+	 * 해제하려 들면 안 되기 때문이다. */
 	if (ret)
 		return ret;
 
+	/* [한국어] 성공했으면 해제 액션을 devres 에 건다. _or_reset 판이라 액션 등록 자체가
+	 * 실패하면 그 자리에서 액션을 한 번 실행해 준다 — 그래야 방금 등록한 알림이
+	 * 누수되지 않는다. */
 	return devm_add_action_or_reset(dev,
 					devm_pci_pwrctrl_device_unset_ready,
 					pwrctrl);
 }
 EXPORT_SYMBOL_GPL(devm_pci_pwrctrl_device_set_ready);
 
+/* [한국어]
+ * __pci_pwrctrl_power_off_device - device 하나의 전원 차단 콜백을 부른다
+ *
+ * @dev: 전원을 끌 platform device.
+ * @return: 0 = 성공(또는 대상이 아님), 그 밖에 드라이버 콜백의 오류.
+ *
+ * drvdata 에 걸어 둔 pwrctrl 을 되찾아 그 power_off 콜백을 부른다.
+ * 실제 레귤레이터·클럭 조작은 generic.c 같은 개별 드라이버가 한다.
+ *
+ * pwrctrl 이 없으면 0 을 반환하는 것이 중요하다. 이 함수는 DT 트리를 훑다
+ * 만난 모든 노드에 대해 불릴 수 있고, 그중 상당수는 pwrctrl 대상이 아니다.
+ * "대상이 아님" 을 오류로 다루면 순회 전체가 실패한다.
+ *
+ * 이름 앞의 밑줄 둘은 "잠금이나 검사 없이 곧장 부른다" 는 관례 표시로,
+ * 아래 pci_pwrctrl_power_off_device() 가 노드 순회와 참조 관리를 맡는다.
+ *
+ * 실행 컨텍스트: 전원 차단 경로. 프로세스 컨텍스트이며 드라이버 콜백이
+ * 잠들 수 있다.
+ *
+ * 에러 경로: 드라이버 콜백의 오류를 그대로 올려보낸다.
+ *
+ * 호출 체인:
+ *   pci_pwrctrl_power_off_device() → [이 함수] → pwrctrl->power_off()
+ */
 static int __pci_pwrctrl_power_off_device(struct device *dev)
 {
+	/* [한국어] 이 장치에 매달린 pwrctrl 을 되찾는다. pci_pwrctrl_init() 이 걸어 둔 것이다. */
 	struct pci_pwrctrl *pwrctrl = dev_get_drvdata(dev);
 
+	/* [한국어] pwrctrl 이 없으면 이 장치는 전원 제어 대상이 아니므로, */
 	if (!pwrctrl)
 		return 0;
 
+	/* [한국어] 드라이버가 제공한 전원 차단 콜백을 부른다. 실제 레귤레이터·클럭 조작은
+	 * generic.c 같은 개별 드라이버가 한다. */
 	return pwrctrl->power_off(pwrctrl);
 }
 
+/* [한국어]
+ * pci_pwrctrl_power_off_device - DT 서브트리를 훑으며 아래에서 위로 전원을 끈다
+ *
+ * @np: 이 서브트리의 뿌리 노드.
+ *
+ * 재귀로 자식을 먼저 끄고 자기를 끈다. 전원은 위에서 아래로 공급되므로,
+ * 끌 때는 아래에서 위로 올라가야 아직 전원이 필요한 자식이 먼저 끊기지 않는다.
+ *
+ * _scoped 판 순회를 쓰는 덕분에 노드 참조가 자동으로 반환된다. 반면
+ * of_find_device_by_node() 가 올린 platform device 참조는 직접 놓아야 하며,
+ * 장치가 없어 조기 반환하는 경로에서는 애초에 참조를 잡지 않았으므로 문제가 없다.
+ *
+ * device_is_bound() 검사가 필요한 이유는 platform device 가 만들어졌더라도
+ * 드라이버가 아직 붙지 않았을 수 있기 때문이다. 그때는 부를 콜백이 없다.
+ *
+ * 실패해도 계속 진행한다. 반환값이 없어 알릴 방법이 없고, 해제 경로에서
+ * 중단하면 나머지가 켜진 채 남기 때문이다.
+ *
+ * 실행 컨텍스트: 전원 차단 경로. 프로세스 컨텍스트이며 잠들 수 있다.
+ *
+ * 에러 경로: 로그만 남긴다.
+ *
+ * 호출 체인:
+ *   pci_pwrctrl_power_off_devices() / pci_pwrctrl_power_on_devices() 의 되감기
+ *     → [이 함수](재귀) → of_find_device_by_node()
+ *     → __pci_pwrctrl_power_off_device() → platform_device_put()
+ */
 static void pci_pwrctrl_power_off_device(struct device_node *np)
 {
+	/* [한국어] 이 노드에 대응하는 platform device. */
 	struct platform_device *pdev;
+	/* [한국어] 차단 결과. */
 	int ret;
 
+	/* [한국어] **자식을 먼저** 끈다. 전원은 위에서 아래로 공급되므로, 끌 때는 아래에서
+	 * 위로 올라가야 아직 전원이 필요한 자식이 먼저 끊기지 않는다. */
 	for_each_available_child_of_node_scoped(np, child)
 		pci_pwrctrl_power_off_device(child);
 
+	/* [한국어] 이 노드의 platform device 를 찾는다. 참조를 올려 반환하므로 아래에서
+	 * 반드시 놓아야 한다. */
 	pdev = of_find_device_by_node(np);
+	/* [한국어] 장치가 없으면(pwrctrl 대상이 아닌 노드면), */
 	if (!pdev)
 		return;
 
+	/* [한국어] 드라이버가 붙어 있을 때만 콜백을 부를 수 있다. */
 	if (device_is_bound(&pdev->dev)) {
+		/* [한국어] 실제 차단. */
 		ret = __pci_pwrctrl_power_off_device(&pdev->dev);
+		/* [한국어] 실패하면, */
 		if (ret)
+			/* [한국어] 기록만 남긴다. 반환값이 없어 알릴 방법이 없고, 해제 경로라 중단할 수도 없다. */
 			dev_err(&pdev->dev, "Failed to power off device: %d", ret);
 	}
 
@@ -260,20 +396,47 @@ static void pci_pwrctrl_power_off_device(struct device_node *np)
  */
 void pci_pwrctrl_power_off_devices(struct device *parent)
 {
+	/* [한국어] 부모의 DT 노드. */
 	struct device_node *np = parent->of_node;
 
+	/* [한국어] 직속 자식마다 재귀 차단을 시작한다. _scoped 판이라 순회가 끝나면
+	 * 노드 참조가 자동으로 반환된다. */
 	for_each_available_child_of_node_scoped(np, child)
 		pci_pwrctrl_power_off_device(child);
 }
 EXPORT_SYMBOL_GPL(pci_pwrctrl_power_off_devices);
 
+/* [한국어]
+ * __pci_pwrctrl_power_on_device - device 하나의 전원 공급 콜백을 부른다
+ *
+ * @dev: 전원을 넣을 platform device.
+ * @return: 0 = 성공(또는 대상이 아님), 그 밖에 드라이버 콜백의 오류.
+ *
+ * __pci_pwrctrl_power_off_device() 와 완전히 대칭이며, 부르는 콜백만 다르다.
+ * pwrctrl 이 없을 때 0 을 반환하는 이유도 같다 — DT 트리에는 pwrctrl 대상이
+ * 아닌 노드가 훨씬 많다.
+ *
+ * 차단 쪽과 달리 이 반환값은 실제로 쓰인다. 공급이 실패하면 위에서
+ * 되감기를 해야 하기 때문이다.
+ *
+ * 실행 컨텍스트: 전원 공급 경로. 프로세스 컨텍스트이며 드라이버 콜백이
+ * 잠들 수 있다.
+ *
+ * 에러 경로: 드라이버 콜백의 오류를 그대로 올려보낸다.
+ *
+ * 호출 체인:
+ *   pci_pwrctrl_power_on_device() → [이 함수] → pwrctrl->power_on()
+ */
 static int __pci_pwrctrl_power_on_device(struct device *dev)
 {
+	/* [한국어] 이 장치의 pwrctrl. */
 	struct pci_pwrctrl *pwrctrl = dev_get_drvdata(dev);
 
+	/* [한국어] 없으면 대상이 아니므로, */
 	if (!pwrctrl)
 		return 0;
 
+	/* [한국어] 드라이버의 전원 공급 콜백을 부른다. 차단 쪽과 완전히 대칭이다. */
 	return pwrctrl->power_on(pwrctrl);
 }
 
@@ -283,20 +446,32 @@ static int __pci_pwrctrl_power_on_device(struct device *dev)
  */
 static int pci_pwrctrl_power_on_device(struct device_node *np)
 {
+	/* [한국어] platform device. */
 	struct platform_device *pdev;
+	/* [한국어] 결과. */
 	int ret;
 
+	/* [한국어] **자식을 먼저** 켠다. 차단이 아래에서 위로였던 것과 반대로, 공급은
+	 * 위에서 아래로 가야 할 것 같지만 여기서는 자식이 먼저다.
+	 * DT 트리에서 자식 노드가 전원 공급 장치를 나타내는 구조이기 때문으로,
+	 * 차단 쪽과 순서가 같아 두 함수가 대칭을 이룬다. */
 	for_each_available_child_of_node_scoped(np, child) {
+		/* [한국어] 재귀. */
 		ret = pci_pwrctrl_power_on_device(child);
+		/* [한국어] 하나라도 실패하면, */
 		if (ret)
 			return ret;
 	}
 
+	/* [한국어] 이 노드의 platform device 를 찾는다. */
 	pdev = of_find_device_by_node(np);
+	/* [한국어] 없으면 켤 것이 없으므로 성공으로 친다. */
 	if (!pdev)
 		return 0;
 
+	/* [한국어] 드라이버가 붙어 있을 때만. */
 	if (device_is_bound(&pdev->dev)) {
+		/* [한국어] 실제 공급. */
 		ret = __pci_pwrctrl_power_on_device(&pdev->dev);
 	} else {
 		/* FIXME: Use blocking wait instead of probe deferral */
@@ -323,12 +498,20 @@ static int pci_pwrctrl_power_on_device(struct device_node *np)
  */
 int pci_pwrctrl_power_on_devices(struct device *parent)
 {
+	/* [한국어] 부모의 DT 노드. */
 	struct device_node *np = parent->of_node;
+	/* [한국어] 순회 커서. **_scoped 판이 아니라** 일반 순회를 쓰는데, 실패 시 되감기에서
+	 * "어디까지 켰는가" 를 알아야 하므로 루프 밖에서도 이 값이 살아 있어야
+	 * 하기 때문이다. */
 	struct device_node *child = NULL;
+	/* [한국어] 결과. */
 	int ret;
 
+	/* [한국어] 자식마다 켠다. */
 	for_each_available_child_of_node(np, child) {
+		/* [한국어] 재귀 공급. */
 		ret = pci_pwrctrl_power_on_device(child);
+		/* [한국어] 실패하면, */
 		if (ret)
 			goto err_power_off;
 	}
@@ -337,6 +520,8 @@ int pci_pwrctrl_power_on_devices(struct device *parent)
 
 err_power_off:
 	for_each_available_child_of_node_scoped(np, tmp) {
+		/* [한국어] 되감기 루프. 방금 실패한 노드에 닿으면 멈춘다 — 그 노드는 켜지지 않았으므로
+		 * 끌 것이 없다. 그 앞까지 켜 둔 것만 차례로 끈다. */
 		if (tmp == child)
 			break;
 		pci_pwrctrl_power_off_device(tmp);
@@ -359,25 +544,40 @@ EXPORT_SYMBOL_GPL(pci_pwrctrl_power_on_devices);
  */
 static bool pci_pwrctrl_is_required(struct device_node *np)
 {
+	/* [한국어] of_graph 연결의 상대 노드를 찾을 때 쓸 임시 변수. */
 	struct device_node *endpoint;
+	/* [한국어] compatible 문자열. */
 	const char *compat;
+	/* [한국어] 조회 결과. */
 	int ret;
 
+	/* [한국어] 이 노드의 compatible 을 읽는다. */
 	ret = of_property_read_string(np, "compatible", &compat);
+	/* [한국어] 없으면 판단할 근거가 없으므로, */
 	if (ret < 0)
 		return false;
 
+	/* [한국어] "pci" 로 시작하지 않으면 PCI 장치를 나타내는 노드가 아니다. 문자열
+	 * 접두사로 거르는 것이라 느슨하지만, 아래 두 검사가 실제 판정을 한다. */
 	if (!strstarts(compat, "pci"))
 		return false;
 
+	/* [한국어] 노드 자체에 전원 공급 속성이 있으면 pwrctrl 이 필요하다. */
 	if (of_pci_supply_present(np))
 		return true;
 
+	/* [한국어] of_graph 연결이 있으면 한 단계 더 본다. */
 	if (of_graph_is_present(np)) {
+		/* [한국어] 연결점마다, */
 		for_each_endpoint_of_node(np, endpoint) {
+			/* [한국어] 상대편 노드를 얻는다. __free(device_node) 로 선언해 스코프를 벗어날 때
+			 * 참조가 자동 반환되므로, 아래 조기 반환 경로에서도 누수가 없다. */
 			struct device_node *remote __free(device_node) =
 				of_graph_get_remote_port_parent(endpoint);
+			/* [한국어] 상대가 있고, */
 			if (remote) {
+				/* [한국어] 그쪽에 전원 공급 속성이 있으면 이 노드도 pwrctrl 대상이다.
+				 * 전원 시퀀서를 별도 노드로 두는 구성을 잡아내기 위한 검사다. */
 				if (of_pci_supply_present(remote)) {
 					of_node_put(endpoint);
 					return true;
@@ -389,33 +589,71 @@ static bool pci_pwrctrl_is_required(struct device_node *np)
 	return false;
 }
 
+/* [한국어]
+ * pci_pwrctrl_create_device - DT 서브트리를 훑으며 필요한 pwrctrl platform device 를 만든다
+ *
+ * @np: 이 서브트리의 뿌리 노드.
+ * @parent: 만들어질 platform device 의 부모.
+ * @return: 0 = 성공(또는 만들 필요 없음), -EINVAL = 생성 실패.
+ *
+ * 재귀로 자식을 먼저 만들고 자기를 만든다. 전원 차단·공급과 같은 아래에서
+ * 위로의 순서다.
+ *
+ * 세 가지를 차례로 확인한다. 이미 platform device 가 있으면 만들 필요가 없고
+ * (그 경우 조회로 올라간 참조를 바로 놓는다), pci_pwrctrl_is_required() 가
+ * 아니라고 하면 건너뛰며, 둘 다 아니면 만든다.
+ *
+ * 건너뛰는 경우가 오류가 아니라는 점이 중요하다. PCI 노드 아래에는 pwrctrl 과
+ * 무관한 노드가 많고, 그 전부에 대해 device 를 만들 수는 없다.
+ *
+ * 실행 컨텍스트: 호스트 브리지 probe. 프로세스 컨텍스트.
+ *
+ * 에러 경로: 생성 실패만 -EINVAL 이며, 호출자가 그것을 받아 지금까지 만든
+ * 것을 전부 없앤다.
+ *
+ * 호출 체인:
+ *   pci_pwrctrl_create_devices() → [이 함수](재귀)
+ *     → of_find_device_by_node() → pci_pwrctrl_is_required()
+ *     → of_platform_device_create()
+ */
 static int pci_pwrctrl_create_device(struct device_node *np,
 				     struct device *parent)
 {
+	/* [한국어] 이 노드에 대응하는 platform device. */
 	struct platform_device *pdev;
+	/* [한국어] 결과. */
 	int ret;
 
+	/* [한국어] **자식을 먼저** 만든다. 아래에서 위로 만들어야 부모가 생길 때 자식이
+	 * 이미 있는 구조가 된다. */
 	for_each_available_child_of_node_scoped(np, child) {
+		/* [한국어] 재귀 생성. */
 		ret = pci_pwrctrl_create_device(child, parent);
+		/* [한국어] 실패하면, */
 		if (ret)
 			return ret;
 	}
 
 	/* Bail out if the platform device is already available for the node */
 	pdev = of_find_device_by_node(np);
+	/* [한국어] 이미 platform device 가 있으면 만들 필요가 없다. */
 	if (pdev) {
 		platform_device_put(pdev);
 		return 0;
 	}
 
+	/* [한국어] pwrctrl 이 필요한 노드가 아니면, */
 	if (!pci_pwrctrl_is_required(np)) {
+		/* [한국어] 건너뛴 사실만 디버그 로그에 남긴다. */
 		dev_dbg(parent, "Skipping OF node: %s\n", np->name);
 		return 0;
 	}
 
 	/* Now create the pwrctrl device */
 	pdev = of_platform_device_create(np, NULL, parent);
+	/* [한국어] 생성에 실패하면, */
 	if (!pdev) {
+		/* [한국어] 어느 노드였는지 남기고, */
 		dev_err(parent, "Failed to create pwrctrl device for node: %s\n", np->name);
 		return -EINVAL;
 	}
@@ -436,10 +674,16 @@ static int pci_pwrctrl_create_device(struct device_node *np,
  */
 int pci_pwrctrl_create_devices(struct device *parent)
 {
+	/* [한국어] 결과. */
 	int ret;
 
+	/* [한국어] 부모의 직속 자식마다, */
 	for_each_available_child_of_node_scoped(parent->of_node, child) {
+		/* [한국어] 재귀 생성을 시작한다. */
 		ret = pci_pwrctrl_create_device(child, parent);
+		/* [한국어] 하나라도 실패하면 지금까지 만든 것을 전부 없앤다. 개별 되감기 대신
+		 * 전체 해제를 부르는 것은 destroy 쪽이 없는 노드를 만나도 조용히 넘어가도록
+		 * 만들어져 있기 때문이다. */
 		if (ret) {
 			pci_pwrctrl_destroy_devices(parent);
 			return ret;
@@ -450,20 +694,56 @@ int pci_pwrctrl_create_devices(struct device *parent)
 }
 EXPORT_SYMBOL_GPL(pci_pwrctrl_create_devices);
 
+/* [한국어]
+ * pci_pwrctrl_destroy_device - DT 서브트리의 pwrctrl platform device 들을 없앤다
+ *
+ * @np: 이 서브트리의 뿌리 노드.
+ *
+ * pci_pwrctrl_create_device() 의 짝이며 순서도 같다 — 자식을 먼저 없앤다.
+ *
+ * 없는 장치를 만나면 조용히 넘어가는 관대함이 설계의 일부다. 그 덕분에
+ * pci_pwrctrl_create_devices() 가 도중에 실패했을 때 개별 되감기를 만들지 않고
+ * 전체 해제를 그대로 부를 수 있다.
+ *
+ * 마지막의 OF_POPULATED 플래그 지우기가 중요하다. DT 코어가 이 플래그로
+ * "이 노드로는 이미 device 를 만들었다" 를 기억하므로, 지워 두지 않으면
+ * 나중에 같은 노드로 다시 만들 수 없다. 호스트 브리지를 뺐다 꽂는 경우가
+ * 그 시나리오다.
+ *
+ * of_device_unregister() 와 platform_device_put() 이 나란히 오는 것은
+ * 전자가 등록을 해제하고 후자가 조회로 올린 참조를 놓기 때문이다.
+ *
+ * 실행 컨텍스트: 호스트 브리지 remove 또는 create 실패 경로. 프로세스 컨텍스트.
+ *
+ * 에러 경로: 없다.
+ *
+ * 호출 체인:
+ *   pci_pwrctrl_destroy_devices() → [이 함수](재귀)
+ *     → of_find_device_by_node() → of_device_unregister()
+ *     → platform_device_put() → of_node_clear_flag(OF_POPULATED)
+ */
 static void pci_pwrctrl_destroy_device(struct device_node *np)
 {
+	/* [한국어] platform device. */
 	struct platform_device *pdev;
 
+	/* [한국어] **자식을 먼저** 없앤다. 생성과 같은 순서다. */
 	for_each_available_child_of_node_scoped(np, child)
 		pci_pwrctrl_destroy_device(child);
 
+	/* [한국어] 이 노드의 platform device 를 찾는다. */
 	pdev = of_find_device_by_node(np);
+	/* [한국어] 없으면 없앨 것도 없다. 이 관대함 덕분에 위 create 실패 경로가
+	 * 전체 해제를 그대로 부를 수 있다. */
 	if (!pdev)
 		return;
 
 	of_device_unregister(pdev);
 	platform_device_put(pdev);
 
+	/* [한국어] OF_POPULATED 표시를 지운다. 이렇게 해야 나중에 같은 노드로 다시
+	 * platform device 를 만들 수 있다 — DT 코어가 이 플래그로 중복 생성을
+	 * 막기 때문이다. */
 	of_node_clear_flag(np, OF_POPULATED);
 }
 
@@ -477,8 +757,10 @@ static void pci_pwrctrl_destroy_device(struct device_node *np)
  */
 void pci_pwrctrl_destroy_devices(struct device *parent)
 {
+	/* [한국어] 부모의 DT 노드. */
 	struct device_node *np = parent->of_node;
 
+	/* [한국어] 자식마다 재귀 해제를 시작한다. */
 	for_each_available_child_of_node_scoped(np, child)
 		pci_pwrctrl_destroy_device(child);
 }
