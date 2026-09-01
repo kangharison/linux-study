@@ -114,12 +114,6 @@
 #include "portdrv.h"
 #include "../pci.h"
 
-/*
- * merge_result:
- *   여러 장치의 PCIe error recovery 투표 결과(orig와 new)를 병합한다.
- *   NVMe가 연결된 하위 트리에 여러 endpoint/bridge가 있을 때 각 장치의
- *   복구 의견을 하나로 모아 recovery 정책을 결정한다.
- */
 static pci_ers_result_t merge_result(enum pci_ers_result orig,
 				  enum pci_ers_result new)
 {
@@ -145,12 +139,6 @@ static pci_ers_result_t merge_result(enum pci_ers_result orig,
 	return orig;
 }
 
-/*
- * report_error_detected:
- *   특정 pci_dev에 대해 error_detected 콜백을 호출한다.
- *   NVMe endpoint의 pci_dev에 대해 nvme_error_detected()가 호출되는
- *   진입점이며, pci_channel_state_t 상태를 NVMe 드라이버에 전달한다.
- */
 static int report_error_detected(struct pci_dev *dev,
 				 pci_channel_state_t state,
 				 enum pci_ers_result *result)
@@ -191,11 +179,6 @@ static int report_error_detected(struct pci_dev *dev,
 	return 0;
 }
 
-/*
- * pci_pm_runtime_get_sync:
- *   복구 절차 중 bridge 아래 모든 장치의 runtime PM 참조 카운트를 증가시켜
- *   복구 중 장치가 suspend되지 않도록 한다. NVMe도 이 순회에서 활성화된다.
- */
 static int pci_pm_runtime_get_sync(struct pci_dev *pdev,
 				   void *data)
 {
@@ -203,11 +186,6 @@ static int pci_pm_runtime_get_sync(struct pci_dev *pdev,
 	return 0;
 }
 
-/*
- * pci_pm_runtime_put:
- *   복구 완료 후 bridge 아래 모든 장치의 runtime PM 참조를 감소시킨다.
- *   NVMe의 전원 상태도 원래대로 돌아갈 수 있게 한다.
- */
 static int pci_pm_runtime_put(struct pci_dev *pdev,
 				void *data)
 {
@@ -215,34 +193,18 @@ static int pci_pm_runtime_put(struct pci_dev *pdev,
 	return 0;
 }
 
-/*
- * report_frozen_detected:
- *   pci_channel_io_frozen 상태에서 report_error_detected()를 호출한다.
- *   NVMe가 frozen 상태로 오류를 감지하면 controller reset이 필요하다.
- */
 static int report_frozen_detected(struct pci_dev *dev,
 				  void *data)
 {
 	return report_error_detected(dev, pci_channel_io_frozen, data);
 }
 
-/*
- * report_normal_detected:
- *   pci_channel_io_normal 상태에서 report_error_detected()를 호출한다.
- *   NVMe는 normal 상태에서 CAN_RECOVER를 반환할 수 있다.
- */
 static int report_normal_detected(struct pci_dev *dev,
 				  void *data)
 {
 	return report_error_detected(dev, pci_channel_io_normal, data);
 }
 
-/*
- * report_perm_failure_detected:
- *   영구 오류(permanent failure) 상태에서 error_detected 콜백을 호출하고
- *   disconnect uevent를 발생시킨다. NVMe 장치를 더 이상 사용할 수 없게 된
- *   경우에 해당한다.
- */
 static int report_perm_failure_detected(struct pci_dev *dev,
 				      void *data)
 {
@@ -262,12 +224,6 @@ out:
 	return 0;
 }
 
-/*
- * report_mmio_enabled:
- *   mmio_enabled 단계에서 각 장치의 mmio_enabled 콜백을 호출한다.
- *   NVMe는 현재 이 콜백을 등록하지 않으므로, 이 단계는 주로 bridge나
- *   다른 endpoint를 대상으로 한다.
- */
 static int report_mmio_enabled(struct pci_dev *dev,
 				 void *data)
 {
@@ -288,11 +244,6 @@ out:
 	return 0;
 }
 
-/*
- * report_slot_reset:
- *   slot reset 단계에서 각 장치의 slot_reset 콜백을 호출한다.
- *   NVMe의 nvme_slot_reset()가 이 시점에 호출되어 controller를 재시작한다.
- */
 static int report_slot_reset(struct pci_dev *dev,
 				void *data)
 {
@@ -314,11 +265,6 @@ out:
 	return 0;
 }
 
-/*
- * report_resume:
- *   recovery 성공 후 각 장치의 resume 콜백을 호출한다.
- *   NVMe의 nvme_error_resume()가 이 시점에 호출되어 reset work를 기다린다.
- */
 static int report_resume(struct pci_dev *dev,
 			       void *data)
 {
@@ -352,13 +298,6 @@ out:
  * If the device provided has no subordinate bus, e.g., an RCEC or RCiEP,
  * call the callback on the device itself.
  */
-/*
- * pci_walk_bridge:
- *   오류 영향을 받을 수 있는 bridge 아래의 모든 장치를 순회하며 callback을
- *   호출한다. NVMe가 RCiEP 형태이면 bridge 자체에 대해 callback이 호출되고,
- *   일반 Endpoint이면 상위 bridge의 subordinate bus를 순회하며 NVMe에도
- *   callback이 전달된다.
- */
 static void pci_walk_bridge(struct pci_dev *bridge,
 			    int (*cb)(struct pci_dev *, void *),
 			    void *userdata)
@@ -369,12 +308,6 @@ static void pci_walk_bridge(struct pci_dev *bridge,
 		cb(bridge, userdata);
 }
 
-/*
- * pcie_do_recovery:
- *   PCIe 오류 발생 후 전체 recovery 절차를 수행한다.
- *   NVMe endpoint에서 오류가 감지되거나 상위 Port에서 오류가 전파되면
- *   이 함수가 NVMe의 error handlers를 단계적으로 호출하여 복구를 시도한다.
- */
 pci_ers_result_t pcie_do_recovery(struct pci_dev *dev,
 		pci_channel_state_t state,
 		pci_ers_result_t (*reset_subordinates)(struct pci_dev *pdev))

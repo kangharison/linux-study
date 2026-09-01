@@ -75,27 +75,12 @@
 
 #ifdef ARCH_GENERIC_PCI_MMAP_RESOURCE
 
-/*
- * pci_phys_vm_ops:
- *   mmap된 PCI 물리 영역에 대한 가상 메모리 동작 구조체이다.
- *   NVMe 입장에서는 사용자 공간에 노출된 NVMe BAR에 접근할 때(page fault,
- *   access permission 등) 커널이 처리할 콜백을 담고 있다.
- */
 static const struct vm_operations_struct pci_phys_vm_ops = {
 #ifdef CONFIG_HAVE_IOREMAP_PROT
 	.access = generic_access_phys,
 #endif
 };
 
-/*
- * pci_mmap_resource_range:
- *   지정된 PCI 장치의 특정 BAR를 사용자 프로세스의 VMA에 매핑한다.
- *   NVMe 관점에서는 /sys/bus/pci/devices/.../resource0 등을 통해 NVMe
- *   컨트롤러의 BAR0(MMIO register/doorbell 영역)를 사용자 공간으로
- *   노출할 때 이 함수가 호출된다. NVMe PCIe host driver가 커널 내에서
- *   ioremap()하는 것과 달리, 이 함수는 사용자 공간 mmap syscall의
- *   결과로 동작한다.
- */
 int pci_mmap_resource_range(struct pci_dev *pdev,
 			    int bar,
 			    struct vm_area_struct *vma,
@@ -133,15 +118,6 @@ int pci_mmap_resource_range(struct pci_dev *pdev,
 #if (defined(CONFIG_SYSFS) || defined(CONFIG_PROC_FS)) && \
     (defined(HAVE_PCI_MMAP) || defined(ARCH_GENERIC_PCI_MMAP_RESOURCE))
 
-/*
- * pci_mmap_fits:
- *   사용자 프로세스가 요청한 mmap 영역이 지정된 PCI 리소스(BAR) 범위 안에
- *   정확히 들어오는지 검증한다.
- *   NVMe 관점에서는 /sys/bus/pci/devices/.../resource0 등을 열어 NVMe
- *   BAR0의 일부 또는 전체를 mmap하려 할 때, 요청한 영역이 실제 NVMe
- *   컨트롤러가 노출한 BAR 크기 내에 있는지 확인하는 보안/정합성 검사다.
- *   이 검사를 통과해야 pci_mmap_resource_range()가 실제 매핑을 수행한다.
- */
 int pci_mmap_fits(struct pci_dev *pdev,
 		int resno,
 		struct vm_area_struct *vma,

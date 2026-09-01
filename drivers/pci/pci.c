@@ -13792,10 +13792,6 @@ static int of_pci_bus_find_domain_nr(struct device *parent)
 }
 
 /*
- * of_pci_bus_release_domain_nr:
- *   device-tree domain 번호를 반납한다. NVMe 장치의 domain 자원을 정리한다.
- */
-/*
  * [한국어]
  * of_pci_bus_release_domain_nr - 도메인 번호를 원래 받은 IDA 로 돌려준다
  *

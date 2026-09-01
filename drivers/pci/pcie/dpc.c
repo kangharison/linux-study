@@ -126,12 +126,6 @@ static const char * const rp_pio_error_string[] = {
 	"Memory Request Completion Timeout",		 /* Bit Position 18 */
 };
 
-/*
- * pci_save_dpc_state:
- *   NVMe 장치가 연결된 Root/Downstream Port의 DPC control 레지스터 값을
- *   suspend/hibernate 전에 저장한다. 이 값은 resume 시 복원되어 NVMe의
- *   DPC containment 동작이 유지된다.
- */
 void pci_save_dpc_state(struct pci_dev *dev)
 {
 	struct pci_cap_saved_state *save_state;
@@ -148,12 +142,6 @@ void pci_save_dpc_state(struct pci_dev *dev)
 	pci_read_config_word(dev, dev->dpc_cap + PCI_EXP_DPC_CTL, cap);
 }
 
-/*
- * pci_restore_dpc_state:
- *   저장해 둔 DPC control 값을 resume 시 복원한다. NVMe endpoint가 연결된
- *   포트의 DPC containment/interrupt enable 상태를 복구하여 NVMe의 fatal
- *   error 처리 능력을 되살린다.
- */
 void pci_restore_dpc_state(struct pci_dev *dev)
 {
 	struct pci_cap_saved_state *save_state;
@@ -173,12 +161,6 @@ void pci_restore_dpc_state(struct pci_dev *dev)
 static DECLARE_WAIT_QUEUE_HEAD(dpc_completed_waitqueue);
 
 #ifdef CONFIG_HOTPLUG_PCI_PCIE
-/*
- * dpc_completed:
- *   DPC 복구가 완료되었는지 확인한다. hotplug driver가 Link Down/Up
- *   이벤트를 무시할지 결정할 때 사용되며, NVMe 장치의 DPC trigger로
- *   인한 surprise removal와 일반 hotplug를 구분한다.
- */
 static bool dpc_completed(struct pci_dev *pdev)
 {
 	u16 status;
@@ -200,11 +182,6 @@ static bool dpc_completed(struct pci_dev *pdev)
  * Return true if DPC was triggered for @pdev and has recovered successfully.
  * Wait for recovery if it hasn't completed yet.  Called from the PCIe hotplug
  * driver to recognize and ignore Link Down/Up events caused by DPC.
- */
-/*
- * NVMe: DPC가 트리거되었고 성공적으로 복구되었는지 hotplug driver가
- * 판단할 때 호출된다. NVMe SSD에서 fatal error가 발생해 DPC에 의해
- * 링크가 끊어진 후, surprise hotplug 이벤트로 오인하지 않도록 한다.
  */
 bool pci_dpc_recovered(struct pci_dev *pdev)
 {
@@ -233,12 +210,6 @@ bool pci_dpc_recovered(struct pci_dev *pdev)
 }
 #endif /* CONFIG_HOTPLUG_PCI_PCIE */
 
-/*
- * dpc_wait_rp_inactive:
- *   DPC trigger 후 Root Port가 남아 있는 transaction을 모두 처리하고
- *   비활성 상태가 될 때까지 대기한다. NVMe의 DMA 요청 등이 RP에서
- *   정리되어야 다음 복구 단계로 진행할 수 있다.
- */
 static int dpc_wait_rp_inactive(struct pci_dev *pdev)
 {
 	unsigned long timeout = jiffies + HZ;
@@ -257,12 +228,6 @@ static int dpc_wait_rp_inactive(struct pci_dev *pdev)
 	return 0;
 }
 
-/*
- * dpc_reset_link:
- *   DPC에 의해 자동으로 disable된 PCIe 링크를 재초기화한다. NVMe
- *   endpoint가 연결된 다운스트림 포트를 다시 활성화하여 NVMe 장치를
- *   ERS(error recovery) 경로로 복구할 수 있게 한다.
- */
 pci_ers_result_t dpc_reset_link(struct pci_dev *pdev)
 {
 	pci_ers_result_t ret;
@@ -305,12 +270,6 @@ out:
 	return ret;
 }
 
-/*
- * dpc_process_rp_pio_error:
- *   Root Port PIO(per-port I/O) error 로그를 처리한다. NVMe 장치의
- *   메모리/IO/configuration 요청이 Root Port 수준에서 UR/CA/CTO 등으로
- *   실패했을 때 상세 정보를 출력하여 NVMe 디버깅에 사용된다.
- */
 static void dpc_process_rp_pio_error(struct pci_dev *pdev)
 {
 	u16 cap = pdev->dpc_cap, dpc_status, first_error;
@@ -357,12 +316,6 @@ static void dpc_process_rp_pio_error(struct pci_dev *pdev)
 	pci_write_config_dword(pdev, cap + PCI_EXP_DPC_RP_PIO_STATUS, status);
 }
 
-/*
- * dpc_get_aer_uncorrect_severity:
- *   DPC가 AER uncorrectable error로 트리거된 경우, AER uncorrectable
- *   status/mask/severity를 읽어 해당 에러가 fatal인지 non-fatal인지
- *   판단한다. NVMe 장치의 PCIe AER 로그를 ERS 복구에 전달한다.
- */
 static int dpc_get_aer_uncorrect_severity(struct pci_dev *dev,
 					  struct aer_err_info *info)
 {
@@ -391,12 +344,6 @@ static int dpc_get_aer_uncorrect_severity(struct pci_dev *dev,
 	return 1;
 }
 
-/*
- * dpc_process_error:
- *   DPC가 트리거된 원인(reason)을 분석하고 적절한 로그를 출력한다.
- *   NVMe endpoint에서 발생한 uncorrectable error, ERR_FATAL/ERR_NONFATAL
- *   메시지, RP PIO error 등을 구분하여 처리한다.
- */
 void dpc_process_error(struct pci_dev *pdev)
 {
 	u16 cap = pdev->dpc_cap, status, source, reason, ext_reason;
@@ -445,12 +392,6 @@ void dpc_process_error(struct pci_dev *pdev)
 	}
 }
 
-/*
- * pci_clear_surpdn_errors:
- *   Surprise Down 에러로 인해 설정된 PCIe status 레지스터 비트와
- *   Device Status의 Fatal Error Detected 비트를 클리어한다. NVMe
- *   장치의 갑작스러운 링크 다운으로 인한 오류 비트를 정리한다.
- */
 static void pci_clear_surpdn_errors(struct pci_dev *pdev)
 {
 	if (pdev->dpc_rp_extensions)
@@ -467,13 +408,6 @@ static void pci_clear_surpdn_errors(struct pci_dev *pdev)
 	pcie_capability_write_word(pdev, PCI_EXP_DEVSTA, PCI_EXP_DEVSTA_FED);
 }
 
-/*
- * dpc_handle_surprise_removal:
- *   Surprise Down으로 인식된 DPC 이벤트를 처리한다. NVMe SSD가
- *   물리적으로 분리되거나 링크가 예기치 않게 끊어진 경우 DPC 복구
- *   대신 surprise removal 경로로 전환하여 NVMe 드라이버가 장치를
- *   정리하도록 한다.
- */
 static void dpc_handle_surprise_removal(struct pci_dev *pdev)
 {
 	if (!pcie_wait_for_link(pdev, false)) {
@@ -495,12 +429,6 @@ out:
 	wake_up_all(&dpc_completed_waitqueue);
 }
 
-/*
- * dpc_is_surprise_removal:
- *   DPC 트리거가 NVMe endpoint의 실제 PCIe error 복구가 아니라
- *   surprise removal에 의한 것인지 AER Surprise Down 비트를 확인하여
- *   판단한다. hotplug bridge인 경우에만 의미가 있다.
- */
 static bool dpc_is_surprise_removal(struct pci_dev *pdev)
 {
 	u16 status;
@@ -515,12 +443,6 @@ static bool dpc_is_surprise_removal(struct pci_dev *pdev)
 	return status & PCI_ERR_UNC_SURPDN;
 }
 
-/*
- * dpc_handler:
- *   DPC threaded IRQ 핸들러. 실제 DPC 트리거를 처리하며, NVMe
- *   endpoint에서 발생한 PCIe fatal error에 대해 containment 후
- *   pcie_do_recovery()를 호출하여 NVMe ERS 콜백을 시작한다.
- */
 static irqreturn_t dpc_handler(int irq, void *context)
 {
 	struct pci_dev *pdev = context;
@@ -544,12 +466,6 @@ static irqreturn_t dpc_handler(int irq, void *context)
 	return IRQ_HANDLED;
 }
 
-/*
- * dpc_irq:
- *   DPC 상단 IRQ 핸들러. DPC Interrupt Status 비트를 확인하고, 실제
- *   DPC 트리거가 있으면 threaded handler(dpc_handler)를 깨운다.
- *   NVMe endpoint의 PCIe fatal error를 신속히 감지하는 역할을 한다.
- */
 static irqreturn_t dpc_irq(int irq, void *context)
 {
 	struct pci_dev *pdev = context;
@@ -567,12 +483,6 @@ static irqreturn_t dpc_irq(int irq, void *context)
 	return IRQ_HANDLED;
 }
 
-/*
- * pci_dpc_init:
- *   PCIe 장치 초기화 시 DPC capability를 탐지하고 Root Port 확장을
- *   설정한다. NVMe SSD가 연결될 다운스트림 포트의 DPC PIO 로그 크기를
- *   검증하여 추후 NVMe 관련 PIO error 진단 정보를 확보한다.
- */
 void pci_dpc_init(struct pci_dev *pdev)
 {
 	u16 cap;
@@ -611,12 +521,6 @@ void pci_dpc_init(struct pci_dev *pdev)
 	}
 }
 
-/*
- * dpc_enable:
- *   DPC 포트 서비스를 활성화한다. DPC interrupt status를 클리어하고
- *   ERR_FATAL trigger와 DPC interrupt enable을 설정한다. NVMe 장치에서
- *   fatal error가 발생하면 DPC가 링크를 억제하고 IRQ를 발생시킨다.
- */
 static void dpc_enable(struct pcie_device *dev)
 {
 	struct pci_dev *pdev = dev->port;
@@ -636,12 +540,6 @@ static void dpc_enable(struct pcie_device *dev)
 	pci_write_config_word(pdev, dpc + PCI_EXP_DPC_CTL, ctl);
 }
 
-/*
- * dpc_disable:
- *   DPC 포트 서비스를 비활성화한다. suspend/remove 시 호출되며, NVMe
- *   장치의 DPC trigger와 interrupt를 끄고 더 이상 containment 동작이
- *   일어나지 않도록 한다.
- */
 static void dpc_disable(struct pcie_device *dev)
 {
 	struct pci_dev *pdev = dev->port;
@@ -656,12 +554,6 @@ static void dpc_disable(struct pcie_device *dev)
 
 #define FLAG(x, y) (((x) & (y)) ? '+' : '-')
 
-/*
- * dpc_probe:
- *   PCIe 포트 서비스로서 DPC 드라이버를 probe한다. NVMe endpoint가
- *   연결된 포트에 threaded IRQ를 등록하고 DPC를 활성화하며, NVMe
- *   장치의 fatal PCIe error를 처리할 준비를 마친다.
- */
 static int dpc_probe(struct pcie_device *dev)
 {
 	struct pci_dev *pdev = dev->port;
@@ -695,36 +587,18 @@ static int dpc_probe(struct pcie_device *dev)
 	return status;
 }
 
-/*
- * dpc_suspend:
- *   시스템 suspend 시 DPC 포트 서비스를 비활성화한다. NVMe 장치가
- *   저전력 상태로 전환되기 전 DPC trigger/interrupt를 끄고, resume 시
- *   다시 활성화될 수 있도록 상태를 저장한다.
- */
 static int dpc_suspend(struct pcie_device *dev)
 {
 	dpc_disable(dev);
 	return 0;
 }
 
-/*
- * dpc_resume:
- *   시스템 resume 시 DPC 포트 서비스를 재활성화한다. NVMe 장치가
- *   다시 동작하기 전 DPC를 켜서 NVMe fatal error containment 기능을
- *   복원한다.
- */
 static int dpc_resume(struct pcie_device *dev)
 {
 	dpc_enable(dev);
 	return 0;
 }
 
-/*
- * dpc_remove:
- *   PCIe 포트 서비스 드라이버가 제거될 때 DPC를 비활성화한다. NVMe
- *   장치가 제거되거나 포트 서비스가 unload될 때 DPC trigger/interrupt를
- *   끄고 정리한다.
- */
 static void dpc_remove(struct pcie_device *dev)
 {
 	dpc_disable(dev);
@@ -740,11 +614,6 @@ static struct pcie_port_service_driver dpcdriver = {
 	.remove		= dpc_remove,
 };
 
-/*
- * pcie_dpc_init:
- *   DPC PCIe 포트 서비스 드라이버를 커널에 등록한다. NVMe SSD의
- *   PCIe fatal error 복구 인프라 초기화의 일부로, 부팅 시 호출된다.
- */
 int __init pcie_dpc_init(void)
 {
 	return pcie_port_service_register(&dpcdriver);

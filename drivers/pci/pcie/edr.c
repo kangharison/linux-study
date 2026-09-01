@@ -91,12 +91,6 @@
  *
  * returns 0 on success or errno on failure.
  */
-/*
- * acpi_enable_dpc:
- *   ACPI _DSM 0x0C를 호출해 펌웨어가 DPC(Downstream Port Containment)를
- *   활성화하도록 요청한다. NVMe 장치가 연결된 포트에서 DPC가 켜져 있어야
- *   EDR 이벤트 발생 시 링크를 안전하게 차단하고 복구할 수 있다.
- */
 static int acpi_enable_dpc(struct pci_dev *pdev)
 {
 	struct acpi_device *adev = ACPI_COMPANION(&pdev->dev);
@@ -143,12 +137,6 @@ static int acpi_enable_dpc(struct pci_dev *pdev)
  *
  * Returns pci_dev or NULL.  Caller is responsible for dropping a reference
  * on the returned pci_dev with pci_dev_put().
- */
-/*
- * acpi_dpc_port_get:
- *   ACPI _DSM 0x0D를 이용해 실제 DPC 이벤트가 발생한 포트의 BDF를
- *   조회한다. NVMe 장치가 단말(endpoint)일 때 EDR 알림은 상위 포트로
- *   전달될 수 있으므로, 정확한 DPC 포트를 찾아야 한다.
  */
 static struct pci_dev *acpi_dpc_port_get(struct pci_dev *pdev)
 {
@@ -204,11 +192,6 @@ static struct pci_dev *acpi_dpc_port_get(struct pci_dev *pdev)
  * @edev   : Device which experienced EDR event
  * @status : Status of EDR event
  */
-/*
- * acpi_send_edr_status:
- *   EDR 복구 완료 후 펌웨어에게 결과를 알리기 위해 _OST 메서드를
- *   호출한다. NVMe 복구가 성공하면 0x80, 실패하면 0x81을 전달한다.
- */
 static int acpi_send_edr_status(struct pci_dev *pdev, struct pci_dev *edev,
 				u16 status)
 {
@@ -227,13 +210,6 @@ static int acpi_send_edr_status(struct pci_dev *pdev, struct pci_dev *edev,
 
 	return 0;
 }
-/*
- * edr_handle_event:
- *   ACPI 시스템 알림(Notify 0xF)을 받아 EDR 이벤트를 처리하는 핵심
- *   핸들러. NVMe 장치가 연결된 포트에서 DPC가 트리거되면 이 함수가
- *   호출되며, dpc_process_error()와 pcie_do_recovery()를 연쇄 호출해
- *   NVMe를 포함한 하위 endpoint들을 복구한다.
- */
 static void edr_handle_event(acpi_handle handle, u32 event, void *data)
 {
 	struct pci_dev *pdev = data, *edev;
@@ -300,12 +276,6 @@ send_ost:
 	pci_dev_put(edev);
 }
 
-/*
- * pci_acpi_add_edr_notifier:
- *   NVMe 장치가 연결될 수 있는 포트(Root/Downstream Port)에 ACPI
- *   Disconnect Recover 알림 핸들러를 등록한다. DPC 이벤트 발생 시
- *   edr_handle_event()가 호출되어 NVMe 복구 시퀀스가 시작된다.
- */
 void pci_acpi_add_edr_notifier(struct pci_dev *pdev)
 {
 	struct acpi_device *adev = ACPI_COMPANION(&pdev->dev);
@@ -329,12 +299,6 @@ void pci_acpi_add_edr_notifier(struct pci_dev *pdev)
 	else
 		pci_dbg(pdev, "Notify handler installed\n");
 }
-/*
- * pci_acpi_remove_edr_notifier:
- *   포트 제거 시 ACPI Disconnect Recover 알림 핸들러를 해제한다.
- *   NVMe 장치가 제거되거나 포트가 사라질 때 호출되어 EDR 콜백이
- *   해제된 포인터를 참조하지 않도록 한다.
- */
 void pci_acpi_remove_edr_notifier(struct pci_dev *pdev)
 {
 	struct acpi_device *adev = ACPI_COMPANION(&pdev->dev);

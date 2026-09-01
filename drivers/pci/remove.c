@@ -90,12 +90,6 @@
 
 #include "pci.h"
 
-/*
- * pci_free_resources:
- *   NVMe 장치가 사용하던 PCI BAR 리소스(특히 BAR0 doorbell 영역)를
- *   부모 리소스 트리에서 반납한다. nvme_remove()에서 iounmap()된 후
- *   호출되어 물리 주소 공간을 시스템에 되돌린다.
- */
 static void pci_free_resources(struct pci_dev *dev)
 {
 	struct resource *res;
@@ -106,12 +100,6 @@ static void pci_free_resources(struct pci_dev *dev)
 	}
 }
 
-/*
- * pci_stop_dev:
- *   NVMe 장치를 더 이상 사용하지 않도록 중지한다. PME(Power Management
- *   Event)를 비활성화하고, NVMe 드라이버를 언바인드(device_release_driver
- *   -> nvme_remove())한 뒤 /proc 및 sysfs 진입점을 제거한다.
- */
 static void pci_stop_dev(struct pci_dev *dev)
 {
 	pci_pme_active(dev, false);
@@ -125,14 +113,6 @@ static void pci_stop_dev(struct pci_dev *dev)
 	of_pci_remove_node(dev);
 }
 
-/*
- * pci_destroy_dev:
- *   NVMe 장치의 struct pci_dev 및 연결된 kernel 객체를 완전히 제거한다.
- *   sysfs/proc에서 삭제하고, bus list에서 분리한 뒤 DOE(Integrity and
- *   Encryption), IDE, ASPM link state, bridge D3 상태를 정리하고 BAR
- *   리소스를 반납한다. 마지막으로 struct device 참조 카운트를 감소시켜
- *   DMA/IOMMU 등과 연결된 메모리를 해제할 수 있게 한다.
- */
 static void pci_destroy_dev(struct pci_dev *dev)
 {
 	if (pci_dev_test_and_set_removed(dev))
@@ -161,12 +141,6 @@ static void pci_destroy_dev(struct pci_dev *dev)
 	put_device(&dev->dev);
 }
 
-/*
- * pci_remove_bus:
- *   NVMe 장치가 연결된 하위 bus를 제거한다. proc/sysfs 진입점을 제거하고
- *   busn 리소스를 반납한 뒤, 아키텍처별 및 host bridge별 bus 제거 콜백을
- *   호출한다. 마지막으로 bus->dev를 unregister한다.
- */
 void pci_remove_bus(struct pci_bus *bus)
 {
 	pci_proc_detach_bus(bus);
@@ -185,13 +159,6 @@ void pci_remove_bus(struct pci_bus *bus)
 }
 EXPORT_SYMBOL(pci_remove_bus);
 
-/*
- * pci_stop_bus_device:
- *   NVMe 장치가 bridge인 경우 하위 bus의 모든 child 장치를 재귀적으로
- *   중지한다. SR-IOV PF 제거 시 VF부터 먼저 제거해야 하므로 reverse
- *   순회를 사용한다. leaf 장치까지 남방향으로 중지한 뒤 자기 자신을
- *   중지한다.
- */
 static void pci_stop_bus_device(struct pci_dev *dev)
 {
 	struct pci_bus *bus = dev->subordinate;
@@ -212,12 +179,6 @@ static void pci_stop_bus_device(struct pci_dev *dev)
 	pci_stop_dev(dev);
 }
 
-/*
- * pci_remove_bus_device:
- *   NVMe 장치 및 하위 bus/child 장치를 트리에서 완전히 제거한다.
- *   bridge 장치라면 하위 bus의 child들을 먼저 제거하고 bus를 제거한 뒤
- *   자신을 pci_destroy_dev()로 파괴한다.
- */
 static void pci_remove_bus_device(struct pci_dev *dev)
 {
 	struct pci_bus *bus = dev->subordinate;
@@ -247,12 +208,6 @@ static void pci_remove_bus_device(struct pci_dev *dev)
  * device lists, remove the /proc entry, and notify userspace
  * (/sbin/hotplug).
  */
-/*
- * pci_stop_and_remove_bus_device:
- *   NVMe 장치의 hot-remove 진입점. 호출자가 pci_rescan_remove_lock을
- *   이미 획득한 상태에서 NVMe 장치를 중지하고 제거한다. ACPI/UEFI
- *   hotplug 처리 경로에서 NVMe SSD 제거 시 호출된다.
- */
 void pci_stop_and_remove_bus_device(struct pci_dev *dev)
 {
 	lockdep_assert_held(&pci_rescan_remove_lock);
@@ -261,12 +216,6 @@ void pci_stop_and_remove_bus_device(struct pci_dev *dev)
 }
 EXPORT_SYMBOL(pci_stop_and_remove_bus_device);
 
-/*
- * pci_stop_and_remove_bus_device_locked:
- *   NVMe 장치 제거를 위한 lock 보호 래퍼. pci_rescan_remove_lock을
- *   획득한 후 stop_and_remove를 수행하고 lock을 해제한다. NVMe hotplug
- *   이벤트 처리 시 race를 방지한다.
- */
 void pci_stop_and_remove_bus_device_locked(struct pci_dev *dev)
 {
 	pci_lock_rescan_remove();
@@ -275,13 +224,6 @@ void pci_stop_and_remove_bus_device_locked(struct pci_dev *dev)
 }
 EXPORT_SYMBOL_GPL(pci_stop_and_remove_bus_device_locked);
 
-/*
- * pci_stop_root_bus:
- *   NVMe 장치가 연결된 root bus 아래의 모든 child 장치를 중지하고
- *   host bridge의 드라이버를 언바인드한다. 시스템 종료나 root complex
- *   hot-remove 시 호출되며, 이 후 pci_remove_root_bus()로 root bus를
- *   완전히 제거한다.
- */
 void pci_stop_root_bus(struct pci_bus *bus)
 {
 	struct pci_dev *child, *tmp;
@@ -302,13 +244,6 @@ void pci_stop_root_bus(struct pci_bus *bus)
 }
 EXPORT_SYMBOL_GPL(pci_stop_root_bus);
 
-/*
- * pci_remove_root_bus:
- *   NVMe 장치가 연결된 root bus를 완전히 제거한다. root bus 아래의
- *   모든 child 장치를 pci_remove_bus_device()로 제거하고, 동적으로
- *   할당된 PCI domain 번호를 반납하며, bus를 제거한 뒤 host bridge
- *   device를 sysfs에서 삭제한다.
- */
 void pci_remove_root_bus(struct pci_bus *bus)
 {
 	struct pci_dev *child, *tmp;

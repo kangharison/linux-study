@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0+
 /*
  * PCI Hotplug Driver for PowerPC PowerNV platform.
- * PCI/NVMe: PowerNV 서버의 PCIe 슬롯에 연결된 NVMe SSD를
- *          런타임에 삽입/제거할 때 PCIe 열거와 nvme_pci_probe 바인딩을
- *          가능하게 하는 핫플러그 드라이버.
  *
  * Copyright Gavin Shan, IBM Corporation 2016.
  * Copyright (C) 2025 Raptor Engineering, LLC

@@ -104,12 +104,6 @@
 
 #include "msi.h"
 
-/*
- * NVMe: NVMe 컨트롤러가 pci_enable_msi_range() 등을 호출하면
- *       커널이 이 함수를 통해 MSI/MSI-X IRQ를 실제로 할당한다.
- *       계층형(hierarchy) irq domain이면 msi_domain_alloc_irqs_all_locked()
- *       아니면 아키텍처별 레거시 경로로 분기한다.
- */
 int pci_msi_setup_msi_irqs(struct pci_dev *dev, int nvec, int type)
 {
 	struct irq_domain *domain;
@@ -121,11 +115,6 @@ int pci_msi_setup_msi_irqs(struct pci_dev *dev, int nvec, int type)
 	return pci_msi_legacy_setup_msi_irqs(dev, nvec, type);
 }
 
-/*
- * NVMe: NVMe 드라이버가 pci_free_irq_vectors() 또는 pci_disable_msi/msix()를
- *       호출하면 이 함수로 MSI/MSI-X 자원을 해제한다. remove/suspend/hotplug
- *       시에도 호출되어 NVMe 큐들의 인터럽트 라인을 정리한다.
- */
 void pci_msi_teardown_msi_irqs(struct pci_dev *dev)
 {
 	struct irq_domain *domain;
@@ -144,11 +133,6 @@ void pci_msi_teardown_msi_irqs(struct pci_dev *dev)
  * @irq_data:	Pointer to interrupt data of the MSI interrupt
  * @msg:	Pointer to the message
  */
-/*
- * NVMe: IRQ remapping이나 마이그레이션 발생 시 커널이 새 MSI message
- *       (address + data)를 NVMe 장치의 MSI/MSI-X 레지스터에 기록할 때
- *       호출된다. NVMe MSI-X의 경우 벡터당 별도 entry가 존재한다.
- */
 static void pci_msi_domain_write_msg(struct irq_data *irq_data, struct msi_msg *msg)
 {
 	struct msi_desc *desc = irq_data_get_msi_desc(irq_data);
@@ -164,22 +148,12 @@ static void pci_msi_domain_write_msg(struct irq_data *irq_data, struct msi_msg *
 /*
  * Per device MSI[-X] domain functionality
  */
-/*
- * NVMe: per-device MSI domain이 msi_desc와 hardware vector index(hwirq)를
- *       irqdomain alloc 인자에 채울 때 사용하는 helper.
- */
 static void pci_device_domain_set_desc(msi_alloc_info_t *arg, struct msi_desc *desc)
 {
 	arg->desc = desc;
 	arg->hwirq = desc->msi_index;
 }
 
-/*
- * NVMe: shutdown 시 parent irq chip에 대한 후처리.
- *       STARTUP_PARENT 플래그가 있으면 parent chip shutdown,
- *       MASK_PARENT 플래그가 있으면 parent chip mask를 수행한다.
- *       NVMe MSI-X 마스킹과 연계되어 인터럽트를 안전하게 정지한다.
- */
 static void cond_shutdown_parent(struct irq_data *data)
 {
 	struct msi_domain_info *info = data->domain->host_data;
@@ -190,10 +164,6 @@ static void cond_shutdown_parent(struct irq_data *data)
 		irq_chip_mask_parent(data);
 }
 
-/*
- * NVMe: startup 시 parent irq chip을 활성화(unmask)하거나 startup.
- *       NVMe 큐의 인터럽트 handler 등록 직전에 호출될 수 있다.
- */
 static unsigned int cond_startup_parent(struct irq_data *data)
 {
 	struct msi_domain_info *info = data->domain->host_data;
@@ -206,11 +176,6 @@ static unsigned int cond_startup_parent(struct irq_data *data)
 	return 0;
 }
 
-/*
- * NVMe: MSI vector 하나를 shutdown 할 때 호출.
- *       NVMe의 특정 IO queue에 할당된 MSI vector를 mask한 뒤
- *       parent irq chip 처리를 한다.
- */
 static void pci_irq_shutdown_msi(struct irq_data *data)
 {
 	struct msi_desc *desc = irq_data_get_msi_desc(data);
@@ -219,10 +184,6 @@ static void pci_irq_shutdown_msi(struct irq_data *data)
 	cond_shutdown_parent(data);
 }
 
-/*
- * NVMe: MSI vector 하나를 startup 할 때 호출.
- *       parent chip을 먼저 활성화한 뒤 MSI mask를 해제한다.
- */
 static unsigned int pci_irq_startup_msi(struct irq_data *data)
 {
 	struct msi_desc *desc = irq_data_get_msi_desc(data);
@@ -232,10 +193,6 @@ static unsigned int pci_irq_startup_msi(struct irq_data *data)
 	return ret;
 }
 
-/*
- * NVMe: NVMe MSI vector를 소프트웨어적으로 mask.
- *       nvme 장치의 특정 queue 인터럽트를 일시 차단할 때 사용.
- */
 static void pci_irq_mask_msi(struct irq_data *data)
 {
 	struct msi_desc *desc = irq_data_get_msi_desc(data);
@@ -243,10 +200,6 @@ static void pci_irq_mask_msi(struct irq_data *data)
 	pci_msi_mask(desc, BIT(data->irq - desc->irq));
 }
 
-/*
- * NVMe: NVMe MSI vector를 소프트웨어적으로 unmask.
- *       irq handler 등록 후 인터럽트를 다시 허용할 때 사용.
- */
 static void pci_irq_unmask_msi(struct irq_data *data)
 {
 	struct msi_desc *desc = irq_data_get_msi_desc(data);
@@ -265,11 +218,6 @@ static void pci_irq_unmask_msi(struct irq_data *data)
 				 MSI_FLAG_DEV_SYSFS |		\
 				 MSI_REACTIVATE)
 
-/*
- * NVMe: PCI-MSI (Message Signaled Interrupt) device domain 템플릿.
- *       NVMe가 MSI 모드로 동작할 때 이 템플릿으로 irq chip과 domain ops가
- *       구성된다.
- */
 static const struct msi_domain_template pci_msi_template = {
 	.chip = {
 		.name			= "PCI-MSI",
@@ -291,20 +239,12 @@ static const struct msi_domain_template pci_msi_template = {
 	},
 };
 
-/*
- * NVMe: MSI-X vector 하나를 shutdown.
- *       NVMe가 MSI-X를 사용할 때 특정 queue 인터럽트를 멈춘다.
- */
 static void pci_irq_shutdown_msix(struct irq_data *data)
 {
 	pci_msix_mask(irq_data_get_msi_desc(data));
 	cond_shutdown_parent(data);
 }
 
-/*
- * NVMe: MSI-X vector 하나를 startup.
- *       NVMe가 MSI-X를 사용할 때 특정 queue 인터럽트를 활성화한다.
- */
 static unsigned int pci_irq_startup_msix(struct irq_data *data)
 {
 	unsigned int ret = cond_startup_parent(data);
@@ -313,26 +253,16 @@ static unsigned int pci_irq_startup_msix(struct irq_data *data)
 	return ret;
 }
 
-/*
- * NVMe: MSI-X vector mask. NVMe 특정 queue의 인터럽트를 일시 차단.
- */
 static void pci_irq_mask_msix(struct irq_data *data)
 {
 	pci_msix_mask(irq_data_get_msi_desc(data));
 }
 
-/*
- * NVMe: MSI-X vector unmask. NVMe 특정 queue의 인터럽트를 다시 허용.
- */
 static void pci_irq_unmask_msix(struct irq_data *data)
 {
 	pci_msix_unmask(irq_data_get_msi_desc(data));
 }
 
-/*
- * NVMe: MSI-X descriptor 준비. NVMe 장치에 대한 MSI-X table entry를
- *       초기화하기 위해 호출. 이미 mask_base가 할당된 descriptor는 건드리지 않는다.
- */
 void pci_msix_prepare_desc(struct irq_domain *domain, msi_alloc_info_t *arg,
 			   struct msi_desc *desc)
 {
@@ -342,11 +272,6 @@ void pci_msix_prepare_desc(struct irq_domain *domain, msi_alloc_info_t *arg,
 }
 EXPORT_SYMBOL_GPL(pci_msix_prepare_desc);
 
-/*
- * NVMe: PCI-MSI-X device domain 템플릿.
- *       NVMe가 MSI-X 모드(일반적)로 동작할 때 이 템플릿으로 irq chip과
- *       domain ops가 구성된다.
- */
 static const struct msi_domain_template pci_msix_template = {
 	.chip = {
 		.name			= "PCI-MSIX",
@@ -370,19 +295,11 @@ static const struct msi_domain_template pci_msix_template = {
 	},
 };
 
-/*
- * NVMe: NVMe 장치가 이미 요청한 bus_token(MSI 또는 MSI-X)에 해당하는
- *       device domain이 존재하는지 확인.
- */
 static bool pci_match_device_domain(struct pci_dev *pdev, enum irq_domain_bus_token bus_token)
 {
 	return msi_match_device_irq_domain(&pdev->dev, MSI_DEFAULT_DOMAIN, bus_token);
 }
 
-/*
- * NVMe: NVMe 장치에 대한 per-device MSI/MSI-X domain을 실제로 생성.
- *       parent domain이 MSI parent domain이 아니면 true를 즉시 반환.
- */
 static bool pci_create_device_domain(struct pci_dev *pdev, const struct msi_domain_template *tmpl,
 				     unsigned int hwsize)
 {
@@ -414,10 +331,6 @@ static bool pci_create_device_domain(struct pci_dev *pdev, const struct msi_doma
  * The created MSI domain is preserved until:
  *	- The device is removed
  *	- MSI is disabled and a MSI-X domain is created
- */
-/*
- * NVMe: NVMe 장치에 PCI-MSI device domain을 설정.
- *       NVMe 드라이버가 MSI(멀티 MSI) 모드를 사용할 때 호출.
  */
 bool pci_setup_msi_device_domain(struct pci_dev *pdev, unsigned int hwsize)
 {
@@ -452,11 +365,6 @@ bool pci_setup_msi_device_domain(struct pci_dev *pdev, unsigned int hwsize)
  *	- The device is removed
  *	- MSI-X is disabled and a MSI domain is created
  */
-/*
- * NVMe: NVMe 장치에 PCI-MSI-X device domain을 설정.
- *       NVMe 드라이버가 pci_enable_msix_range() 등으로 MSI-X를 요청할 때
- *       이 함수를 통해 domain이 만들어진다.
- */
 bool pci_setup_msix_device_domain(struct pci_dev *pdev, unsigned int hwsize)
 {
 	if (WARN_ON_ONCE(pdev->msi_enabled))
@@ -477,10 +385,6 @@ bool pci_setup_msix_device_domain(struct pci_dev *pdev, unsigned int hwsize)
  * @mode:		If ALLOW_LEGACY this grants the feature when there is no irq domain
  *			associated to the device. If DENY_LEGACY the lack of an irq domain
  *			makes the feature unsupported
- */
-/*
- * NVMe: NVMe 장치의 MSI domain이 특정 기능을 지원하는지 검사.
- *       예를 들어 MSI_FLAG_MULTI_PCI_MSI, MSI_FLAG_PCI_MSIX 등을 확인.
  */
 bool pci_msi_domain_supports(struct pci_dev *pdev, unsigned int feature_mask,
 			     enum support_mode mode)
@@ -532,11 +436,6 @@ bool pci_msi_domain_supports(struct pci_dev *pdev, unsigned int feature_mask,
  * well enough in practice; in the face of the horrible PCIe<->PCI-X conditions
  * for taking ownership all we can really do is close our eyes and hope...
  */
-/*
- * NVMe: DMA alias를 순회하면서 MSI requester ID(RID)를 결정하는 콜백.
- *       IOMMU/IRQ remapping에서 NVMe 장치의 인터럽트가 올바른 StreamID/RID로
- *       라우팅되도록 하는 데 필수적이다.
- */
 static int get_msi_id_cb(struct pci_dev *pdev, u16 alias, void *data)
 {
 	u32 *pa = data;
@@ -557,10 +456,6 @@ static int get_msi_id_cb(struct pci_dev *pdev, u16 alias, void *data)
  * supplied mapping applied
  *
  * Returns: The RID.
- */
-/*
- * NVMe: NVMe 장치의 MSI requester ID(RID)를 산출.
- *       IRQ remapping, IOMMU, ITS 등에서 인터럽트 소스 식별에 사용.
  */
 u32 pci_msi_domain_get_msi_rid(struct irq_domain *domain, struct pci_dev *pdev)
 {
@@ -587,10 +482,6 @@ u32 pci_msi_domain_get_msi_rid(struct irq_domain *domain, struct pci_dev *pdev)
  * be set to NULL on entry.
  *
  * Returns: The RID.
- */
-/*
- * NVMe: NVMe 장치에 대한 MSI controller의 firmware node와 RID를 함께 구한다.
- *       ACPI IORT나 DeviceTree에서 MSI controller를 찾을 때 사용.
  */
 u32 pci_msi_map_rid_ctlr_node(struct irq_domain *domain, struct pci_dev *pdev,
 			      struct fwnode_handle **node)
@@ -621,11 +512,6 @@ u32 pci_msi_map_rid_ctlr_node(struct irq_domain *domain, struct pci_dev *pdev,
  * (i.e. not one that is set as a default).
  *
  * Returns: The corresponding MSI domain or NULL if none has been found.
- */
-/*
- * NVMe: firmware(DeviceTree/ACPI IORT) 정보를 이용해 NVMe 장치에
- *       할당된 device-specific MSI domain을 찾는다.
- *       기본 domain이 아닌 특정 MSI controller에 연결된 domain을 반환.
  */
 struct irq_domain *pci_msi_get_device_domain(struct pci_dev *pdev)
 {

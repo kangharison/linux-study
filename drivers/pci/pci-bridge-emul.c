@@ -410,11 +410,6 @@ struct pci_bridge_reg_behavior pcie_cap_regs_behavior[PCI_CAP_PCIE_SIZEOF / 4] =
 	},
 };
 
-/*
- * NVMe: Subsystem Vendor ID capability를 읽을 때 호출되는 헬퍼 함수.
- * PCI core나 NVMe 드라이버가 상위 브리지의 서브시스템 정보를 조회하면
- * capability chain을 따라 이 함수가 응답한다.
- */
 static pci_bridge_emul_read_status_t
 pci_bridge_emul_read_ssid(struct pci_bridge_emul *bridge, int reg, u32 *value)
 {
@@ -440,13 +435,6 @@ pci_bridge_emul_read_ssid(struct pci_bridge_emul *bridge, int reg, u32 *value)
  * the PCI configuration space with whatever values make sense
  * (typically at least vendor, device, revision), the ->ops pointer,
  * and optionally ->data and ->has_pcie.
- */
-/*
- * NVMe: pci_bridge_emul 구조체를 초기화하여 가짜 PCI 브리지 설정 공간을
- * 구성한다. PCI 컨트롤러 드라이버는 먼저 vendor/device/revision, ops,
- * has_pcie, subsystem 정보 등을 채워둔 후 이 함수를 호출해야 한다.
- * 초기화가 완료되면 NVMe 장치가 연결될 하위 버스를 위한 논리적 Root
- * Port가 생성된다.
  */
 int pci_bridge_emul_init(struct pci_bridge_emul *bridge,
 			 unsigned int flags)
@@ -578,10 +566,6 @@ EXPORT_SYMBOL_GPL(pci_bridge_emul_init);
  * Cleanup a pci_bridge_emul structure that was previously initialized
  * using pci_bridge_emul_init().
  */
-/*
- * NVMe: pci_bridge_emul_init()에서 할당한 동적 메모리를 해제한다.
- * NVMe 장치가 제거되거나 컨트롤러 드라이버가 unload될 때 호출된다.
- */
 void pci_bridge_emul_cleanup(struct pci_bridge_emul *bridge)
 {
 	if (bridge->has_pcie)
@@ -594,12 +578,6 @@ EXPORT_SYMBOL_GPL(pci_bridge_emul_cleanup);
  * Should be called by the PCI controller driver when reading the PCI
  * configuration space of the fake bridge. It will call back the
  * ->ops->read_base or ->ops->read_pcie operations.
- */
-/*
- * NVMe: PCI 컨트롤러 드라이버가 가짜 브리지의 설정 공간을 읽을 때
- * 호출된다. where는 읽을 바이트 오프셋, size는 1/2/4바이트, value는
- * 결과 저장 포인터이다. NVMe 엔드포인트가 상위 Root Port 상태를 읽거나
- * lspci 등이 브리지 설정 공간을 조회할 때 이 함수가 사용된다.
  */
 int pci_bridge_emul_conf_read(struct pci_bridge_emul *bridge, int where,
 			      int size, u32 *value)
@@ -677,12 +655,6 @@ EXPORT_SYMBOL_GPL(pci_bridge_emul_conf_read);
  * Should be called by the PCI controller driver when writing the PCI
  * configuration space of the fake bridge. It will call back the
  * ->ops->write_base or ->ops->write_pcie operations.
- */
-/*
- * NVMe: PCI 컨트롤러 드라이버가 가짜 브리지의 설정 공간에 쓸 때
- * 호출된다. PCI core가 NVMe 장치를 위해 버스 번호, 메모리 창, 인터럽트,
- * PCIe 제어/상태 등을 구성할 때 이 함수를 통해 브리지 설정 공간에
- * 기록된다.
  */
 int pci_bridge_emul_conf_write(struct pci_bridge_emul *bridge, int where,
 			       int size, u32 value)

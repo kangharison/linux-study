@@ -77,12 +77,6 @@
 
 #include "pci.h" /* for pci_bar_index_is_valid() */
 
-/*
- * pci_iomap_range:
- *   NVMe controller의 특정 BAR(주로 BAR0) 내 offset 위치부터 maxlen 길이만큼
- *   커널 가상 주소 공간으로 매핑한다. NVMe 드라이버는 이를 통해 controller
- *   registers와 doorbell registers에 MMIO로 접근한다.
- */
 
 /**
  * pci_iomap_range - create a virtual mapping cookie for a PCI BAR
@@ -130,12 +124,6 @@ void __iomem *pci_iomap_range(struct pci_dev *dev,
 }
 EXPORT_SYMBOL(pci_iomap_range);
 
-/*
- * pci_iomap_wc_range:
- *   pci_iomap_range()와 유사하되 write combining(WC) 속성으로 매핑한다.
- *   NVMe doorbell 쓰기는 빈번하므로 WC 매핑이 사용 가능한 경우 메모리
- *   쓰기 성능을 높일 수 있다. PIO 공간은 WC를 지원하지 않아 NULL을 반환한다.
- */
 
 /**
  * pci_iomap_wc_range - create a virtual WC mapping cookie for a PCI BAR
@@ -186,12 +174,6 @@ void __iomem *pci_iomap_wc_range(struct pci_dev *dev,
 }
 EXPORT_SYMBOL_GPL(pci_iomap_wc_range);
 
-/*
- * pci_iomap:
- *   NVMe BAR의 처음부터 maxlen까지 일반 메모리 속성으로 매핑한다.
- *   pci_iomap_range()에 offset 0을 전달하는 단순 래퍼로,
- *   NVMe 드라이버가 BAR0 전체를 매핑할 때 가장 자주 사용된다.
- */
 
 /**
  * pci_iomap - create a virtual mapping cookie for a PCI BAR
@@ -213,11 +195,6 @@ void __iomem *pci_iomap(struct pci_dev *dev, int bar, unsigned long maxlen)
 }
 EXPORT_SYMBOL(pci_iomap);
 
-/*
- * pci_iomap_wc:
- *   NVMe BAR의 처음부터 maxlen까지 write combining 속성으로 매핑한다.
- *   pci_iomap_wc_range()에 offset 0을 전달하는 래퍼이다.
- */
 
 /**
  * pci_iomap_wc - create a virtual WC mapping cookie for a PCI BAR
@@ -240,12 +217,6 @@ void __iomem *pci_iomap_wc(struct pci_dev *dev, int bar, unsigned long maxlen)
 }
 EXPORT_SYMBOL_GPL(pci_iomap_wc);
 
-/*
- * pci_iounmap:
- *   NVMe 제거, suspend, 재설정 시 pci_iomap()으로 매핑한 BAR 가상 주소를
- *   해제한다. 이후 doorbell/register 접근이 불가능하므로 NVMe 드라이버는
- *   먼저 controller를 정지한 후 호출해야 한다.
- */
 
 /*
  * pci_iounmap() somewhat illogically comes from lib/iomap.c for the

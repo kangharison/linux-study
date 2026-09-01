@@ -98,40 +98,21 @@
 #define PCI_VPD_STIN_END		0x0f
 #define PCI_VPD_INFO_FLD_HDR_SIZE	3
 
-/*
- * pci_vpd_lrdt_size:
- *   VPD Large Resource Data Type 항목의 데이터 길이를 추출한다.
- *   NVMe 장치의 VPD EEPROM에서 모델명/제조사 등 큰 데이터 블록 크기 파악에 사용.
- */
 static u16 pci_vpd_lrdt_size(const u8 *lrdt)
 {
 	return get_unaligned_le16(lrdt + 1);
 }
 
-/*
- * pci_vpd_srdt_tag:
- *   VPD Short Resource Data Type 태그 번호를 추출한다.
- *   NVMe VPD의 End tag 같은 짧은 항목 식별에 사용.
- */
 static u8 pci_vpd_srdt_tag(const u8 *srdt)
 {
 	return *srdt >> 3;
 }
 
-/*
- * pci_vpd_srdt_size:
- *   VPD Short Resource Data Type 항목의 데이터 길이를 추출한다.
- */
 static u8 pci_vpd_srdt_size(const u8 *srdt)
 {
 	return *srdt & PCI_VPD_SRDT_LEN_MASK;
 }
 
-/*
- * pci_vpd_info_field_size:
- *   VPD 정보 필드의 실제 데이터 길이를 추출한다.
- *   NVMe 장치 VPD 내 제품 일련번호(PN), 제조사(VN) 등 키워드 항목 길이 파악에 사용.
- */
 static u8 pci_vpd_info_field_size(const u8 *info_field)
 {
 	return info_field[2];
@@ -139,12 +120,6 @@ static u8 pci_vpd_info_field_size(const u8 *info_field)
 
 /* VPD access through PCI 2.2+ VPD capability */
 
-/*
- * pci_get_func0_dev:
- *   현재 PCIe function과 동일한 슬롯의 function 0 장치를 참조 획득한다.
- *   Multi-Function NVMe 컨트롤러에서 VPD가 function 0에 공유되어 있을 때
- *   function 0을 통해 VPD에 접근하기 위해 사용된다.
- */
 static struct pci_dev *pci_get_func0_dev(struct pci_dev *dev)
 {
 	return pci_get_slot(dev->bus, PCI_DEVFN(PCI_SLOT(dev->devfn), 0));
@@ -153,13 +128,6 @@ static struct pci_dev *pci_get_func0_dev(struct pci_dev *dev)
 #define PCI_VPD_MAX_SIZE	(PCI_VPD_ADDR_MASK + 1)
 #define PCI_VPD_SZ_INVALID	UINT_MAX
 
-/*
- * pci_vpd_size:
- *   NVMe 장치의 VPD EEPROM에서 Large/Short Resource Data Type 태그를
- *   순회하며 실제 VPD 데이터 크기를 결정한다. End tag(0x0f)를 만나면
- *   종료한다. NVMe SSD의 /sys/.../vpd 노출 범위나 pci_vpd_alloc()의
- *   버퍼 크기 계산에 직접 사용된다.
- */
 /**
  * pci_vpd_size - determine actual size of Vital Product Data
  * @dev:	pci device struct
@@ -208,12 +176,6 @@ error:
 	return off ?: PCI_VPD_SZ_INVALID;
 }
 
-/*
- * pci_vpd_available:
- *   NVMe 장치에 VPD capability가 있고, 필요한 경우 유효한 VPD 크기가
- *   결정되어 있는지 확인한다. 크기가 결정되지 않았으면 pci_vpd_size()를
- *   호출하여 측정한다.
- */
 static bool pci_vpd_available(struct pci_dev *dev, bool check_size)
 {
 	struct pci_vpd *vpd = &dev->vpd;
@@ -240,13 +202,6 @@ static bool pci_vpd_available(struct pci_dev *dev, bool check_size)
  * @set: if true wait for flag to be set, else wait for it to be cleared
  *
  * Returns 0 on success, negative values indicate error.
- */
-/*
- * pci_vpd_wait:
- *   VPD ADDR 레지스터의 F(Flag) 비트가 원하는 상태가 될 때까지 폴리한다.
- *   NVMe 장치의 VPD EEPROM은 serial 인터페이스로 연결되어 있어 읽기/쓰기
- *   완료까지 수 ms 걸릴 수 있으며, 이 함수에서 최대 125ms 동안 대기한다.
- *   PME나 D3cold 복구 후에도 VPD 접근 시 이 완료 대기가 필요하다.
  */
 static int pci_vpd_wait(struct pci_dev *dev, bool set)
 {
@@ -277,12 +232,6 @@ static int pci_vpd_wait(struct pci_dev *dev, bool set)
 	return -ETIMEDOUT;
 }
 
-/*
- * pci_vpd_read:
- *   NVMe 장치의 VPD capability를 통해 count 바이트를 읽어 buf에 저장한다.
- *   sysfs /vpd 파일이나 pci_vpd_alloc()에서 호출되며, mutex로 동시 접근을
- *   보호하고 pos가 4바이트 정렬이 아닐 경우에도 바이트 단위로 처리한다.
- */
 static ssize_t pci_vpd_read(struct pci_dev *dev, loff_t pos, size_t count,
 			    void *arg, bool check_size)
 {
@@ -347,13 +296,6 @@ static ssize_t pci_vpd_read(struct pci_dev *dev, loff_t pos, size_t count,
 	return ret ? ret : count;
 }
 
-/*
- * pci_vpd_write:
- *   NVMe 장치의 VPD EEPROM에 count 바이트를 쓴다. 쓰기는 4바이트 정렬
- *   단위로 이루어지며, ADDR 레지스터에 F 비트를 set하여 쓰기 동작을
- *   시작하고, F 비트가 clear될 때까지 pci_vpd_wait()로 대기한다.
- *   NVMe 장치의 VPD 업데이트(펌웨어 업데이트 전/후 설정 등) 시 사용.
- */
 static ssize_t pci_vpd_write(struct pci_dev *dev, loff_t pos, size_t count,
 			     const void *arg, bool check_size)
 {
@@ -399,12 +341,6 @@ static ssize_t pci_vpd_write(struct pci_dev *dev, loff_t pos, size_t count,
 	return ret ? ret : count;
 }
 
-/*
- * pci_vpd_init:
- *   NVMe 장치 probe 단계에서 VPD capability를 검색하고, VPD 접근을 위한
- *   mutex를 초기화한다. NVMe pci_dev의 vpd.cap이 설정되어야 sysfs /vpd
- *   파일이 노출되고, pci_read_vpd/write_vpd가 동작한다.
- */
 void pci_vpd_init(struct pci_dev *dev)
 {
 	if (dev->vpd.len == PCI_VPD_SZ_INVALID)
@@ -414,14 +350,6 @@ void pci_vpd_init(struct pci_dev *dev)
 	mutex_init(&dev->vpd.lock);
 }
 
-/*
- * vpd_read:
- *   sysfs /sys/bus/pci/devices/<NVMe BDF>/vpd 파일의 read 콜백.
- *   사용자가 cat 등으로 NVMe 장치의 VPD를 읽을 때 호출된다.
- *   PCI_DEV_FLAGS_VPD_REF_F0가 설정된 Multi-Function NVMe의 경우
- *   function 0을 통해 VPD를 읽는다. 런타임 전원 관리 참조를 획득하여
- *   NVMe 장치가 D3cold 등에서 깨어날 수 있도록 한다.
- */
 static ssize_t vpd_read(struct file *filp, struct kobject *kobj,
 			const struct bin_attribute *bin_attr, char *buf,
 			loff_t off, size_t count)
@@ -446,13 +374,6 @@ static ssize_t vpd_read(struct file *filp, struct kobject *kobj,
 	return ret;
 }
 
-/*
- * vpd_write:
- *   sysfs /sys/bus/pci/devices/<NVMe BDF>/vpd 파일의 write 콜백.
- *   관리자가 NVMe 장치의 VPD EEPROM에 데이터를 쓸 때 사용된다.
- *   Multi-Function NVMe에서 VPD 공유 quirk가 적용된 경우 function 0을
- *   통해 쓰기를 수행하며, 런타임 전원 관리를 통해 장치를 활성 상태로 유지.
- */
 static ssize_t vpd_write(struct file *filp, struct kobject *kobj,
 			 const struct bin_attribute *bin_attr, char *buf,
 			loff_t off, size_t count)
@@ -476,28 +397,13 @@ static ssize_t vpd_write(struct file *filp, struct kobject *kobj,
 
 	return ret;
 }
-/*
- * BIN_ATTR(vpd, 0600, ...):
- *   NVMe 장치의 /sys/bus/pci/devices/<BDF>/vpd 바이너리 sysfs 속성을
- *   정의한다. 소유주는 읽기/쓰기 모두 가능(0600), 다른 사용자는 접근 불가.
- */
 static const BIN_ATTR(vpd, 0600, vpd_read, vpd_write, 0);
 
-/*
- * vpd_attrs:
- *   NVMe 장치에 노출할 VPD 바이너리 속성 배열. pci_dev_vpd_attr_group에
- *   등록되어 sysfs tree에 /vpd 파일을 만든다.
- */
 static const struct bin_attribute *const vpd_attrs[] = {
 	&bin_attr_vpd,
 	NULL,
 };
 
-/*
- * vpd_attr_is_visible:
- *   NVMe 장치의 sysfs 그룹 등록 시 VPD capability가 있는 경우에만
- *   /vpd 파일을 노출한다. vpd.cap이 0이면 사용자에게 보이지 않는다.
- */
 static umode_t vpd_attr_is_visible(struct kobject *kobj,
 				   const struct bin_attribute *a, int n)
 {
@@ -509,22 +415,11 @@ static umode_t vpd_attr_is_visible(struct kobject *kobj,
 	return a->attr.mode;
 }
 
-/*
- * pci_dev_vpd_attr_group:
- *   NVMe pci_dev가 sysfs에 등록할 때 VPD 속성 그룹. bin_attrs에 vpd를
- *   등록하고, is_bin_visible 콜백으로 capability 유무에 따라 노출 제어.
- */
 const struct attribute_group pci_dev_vpd_attr_group = {
 	.bin_attrs = vpd_attrs,
 	.is_bin_visible = vpd_attr_is_visible,
 };
 
-/*
- * pci_vpd_alloc:
- *   NVMe 장치의 전체 VPD 데이터를 커널 메모리에 할당하여 반환한다.
- *   NVMe 드라이버나 기타 서브시스템이 VPD를 파싱하거나 checksum 검증
- *   시 사용한다. 반환된 버퍼는 호출자가 kfree()로 해제해야 한다.
- */
 void *pci_vpd_alloc(struct pci_dev *dev, unsigned int *size)
 {
 	unsigned int len;
@@ -552,12 +447,6 @@ void *pci_vpd_alloc(struct pci_dev *dev, unsigned int *size)
 }
 EXPORT_SYMBOL_GPL(pci_vpd_alloc);
 
-/*
- * pci_vpd_find_tag:
- *   NVMe 장치의 VPD 버퍼에서 지정한 Large Resource Data Type 태그를
- *   검색한다. ID String, Read-Only Data, Read-Write Data 등의 시작
- *   오프셋을 찾는 데 사용된다.
- */
 static int pci_vpd_find_tag(const u8 *buf, unsigned int len, u8 rdt, unsigned int *size)
 {
 	int i = 0;
@@ -582,23 +471,12 @@ static int pci_vpd_find_tag(const u8 *buf, unsigned int len, u8 rdt, unsigned in
 	return -ENOENT;
 }
 
-/*
- * pci_vpd_find_id_string:
- *   NVMe 장치 VPD에서 PCI_VPD_LRDT_ID_STRING 태그를 찾아 제품 식별
- *   문자열의 시작 오프셋을 반환한다. NVMe SSD 모델명/제조사 식별에 사용.
- */
 int pci_vpd_find_id_string(const u8 *buf, unsigned int len, unsigned int *size)
 {
 	return pci_vpd_find_tag(buf, len, PCI_VPD_LRDT_ID_STRING, size);
 }
 EXPORT_SYMBOL_GPL(pci_vpd_find_id_string);
 
-/*
- * pci_vpd_find_info_keyword:
- *   NVMe 장치 VPD의 Read-Only/Read-Write 데이터 영역 내에서 2글자
- *   키워드(PN, VN, EC 등)를 검색한다. 호출자가 영역 시작 off와 길이 len을
- *   지정하면 해당 범위 내에서 키워드를 찾는다.
- */
 static int pci_vpd_find_info_keyword(const u8 *buf, unsigned int off,
 			      unsigned int len, const char *kw)
 {
@@ -616,12 +494,6 @@ static int pci_vpd_find_info_keyword(const u8 *buf, unsigned int off,
 	return -ENOENT;
 }
 
-/*
- * __pci_read_vpd:
- *   NVMe 장치의 VPD를 읽는 낮은 수준 함수로, Multi-Function quirk에
- *   따라 function 0으로 라우팅하거나 현재 function에서 직접 읽는다.
- *   check_size가 true면 VPD 크기를 초과하지 않도록 검사한다.
- */
 static ssize_t __pci_read_vpd(struct pci_dev *dev, loff_t pos, size_t count, void *buf,
 			      bool check_size)
 {
@@ -647,12 +519,6 @@ static ssize_t __pci_read_vpd(struct pci_dev *dev, loff_t pos, size_t count, voi
  * @count:	number of bytes to read
  * @buf:	pointer to where to store result
  */
-/*
- * pci_read_vpd:
- *   NVMe 장치의 VPD에서 지정한 오프셋부터 count 바이트를 읽는다.
- *   VPD 크기를 초과하지 않도록 검사(check_size=true)하며, sysfs나
- *   pci_vpd_alloc() 등에서 호출된다.
- */
 ssize_t pci_read_vpd(struct pci_dev *dev, loff_t pos, size_t count, void *buf)
 {
 	return __pci_read_vpd(dev, pos, count, buf, true);
@@ -660,22 +526,12 @@ ssize_t pci_read_vpd(struct pci_dev *dev, loff_t pos, size_t count, void *buf)
 EXPORT_SYMBOL(pci_read_vpd);
 
 /* Same, but allow to access any address */
-/*
- * pci_read_vpd_any:
- *   pci_read_vpd와 동일하지만 VPD 크기 제한 없이 임의 주소에 접근한다.
- *   NVMe VPD 파싱/크기 측정 시 End tag 이전이나 비표준 영역에 접근할 때 사용.
- */
 ssize_t pci_read_vpd_any(struct pci_dev *dev, loff_t pos, size_t count, void *buf)
 {
 	return __pci_read_vpd(dev, pos, count, buf, false);
 }
 EXPORT_SYMBOL(pci_read_vpd_any);
 
-/*
- * __pci_write_vpd:
- *   NVMe 장치의 VPD를 쓰는 낮은 수준 함수로, Multi-Function quirk에
- *   따라 function 0으로 라우팅하거나 현재 function에서 직접 쓴다.
- */
 static ssize_t __pci_write_vpd(struct pci_dev *dev, loff_t pos, size_t count,
 			       const void *buf, bool check_size)
 {
@@ -701,11 +557,6 @@ static ssize_t __pci_write_vpd(struct pci_dev *dev, loff_t pos, size_t count,
  * @count:	number of bytes to write
  * @buf:	buffer containing write data
  */
-/*
- * pci_write_vpd:
- *   NVMe 장치의 VPD에 지정한 오프셋부터 count 바이트를 쓴다.
- *   VPD 크기를 초과하지 않도록 검사(check_size=true)한다.
- */
 ssize_t pci_write_vpd(struct pci_dev *dev, loff_t pos, size_t count, const void *buf)
 {
 	return __pci_write_vpd(dev, pos, count, buf, true);
@@ -713,22 +564,12 @@ ssize_t pci_write_vpd(struct pci_dev *dev, loff_t pos, size_t count, const void 
 EXPORT_SYMBOL(pci_write_vpd);
 
 /* Same, but allow to access any address */
-/*
- * pci_write_vpd_any:
- *   pci_write_vpd와 동일하지만 VPD 크기 제한 없이 임의 주소에 쓴다.
- */
 ssize_t pci_write_vpd_any(struct pci_dev *dev, loff_t pos, size_t count, const void *buf)
 {
 	return __pci_write_vpd(dev, pos, count, buf, false);
 }
 EXPORT_SYMBOL(pci_write_vpd_any);
 
-/*
- * pci_vpd_find_ro_info_keyword:
- *   NVMe 장치 VPD의 Read-Only 데이터 영역(RO Data)에서 지정한 2글자
- *   키워드의 시작 오프셋과 크기를 반환한다. PN(Product Name), SN(Serial
- *   Number), EC(Engineering Changes) 등 NVMe 장치 식별 정보 추출에 사용.
- */
 int pci_vpd_find_ro_info_keyword(const void *buf, unsigned int len,
 				 const char *kw, unsigned int *size)
 {
@@ -756,12 +597,6 @@ int pci_vpd_find_ro_info_keyword(const void *buf, unsigned int len,
 }
 EXPORT_SYMBOL_GPL(pci_vpd_find_ro_info_keyword);
 
-/*
- * pci_vpd_check_csum:
- *   NVMe 장치 VPD의 Read-Only 영역에 있는 CHKSUM 키워드 값을 이용해
- *   VPD 데이터 무결성을 검증한다. 체크섬은 VPD 시작부터 CHKSUM 바이트
- *   직전까지의 모든 바이트 합에 CHKSUM 값을 더해 0이 되어야 한다.
- */
 int pci_vpd_check_csum(const void *buf, unsigned int len)
 {
 	const u8 *vpd = buf;
@@ -791,13 +626,6 @@ EXPORT_SYMBOL_GPL(pci_vpd_check_csum);
  * devices that share VPD resources between functions.  The functions are
  * expected to be identical devices.
  */
-/*
- * quirk_f0_vpd_link:
- *   Multi-Function PCIe 장치(일부 NVMe 컨트롤러 포함)에서 VPD 리소스가
- *   function들 간에 공유되는 경우, function 0이 아닌 function의 VPD
- *   접근을 function 0으로 라우팅하도록 설정한다. 이로 인해 NVMe
- *   function에서도 /sys/.../vpd 접근 시 정상적인 데이터를 얻을 수 있다.
- */
 static void quirk_f0_vpd_link(struct pci_dev *dev)
 {
 	struct pci_dev *f0;
@@ -825,13 +653,6 @@ DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_INTEL, PCI_ANY_ID,
  * may behave unpredictably if we access too much.  Blacklist these devices
  * so we don't touch VPD at all.
  */
-/*
- * quirk_blacklist_vpd:
- *   VPD 형식을 따르지 않는 PCIe 장치(비표준 VPD EEPROM)에서 VPD 접근을
- *   완전히 차단한다. NVMe 장치 중에서도 비표준 VPD로 인해 config space
- *   접근 시 비정상 동작이나 PCIe 에러가 발생할 수 있는 경우를 보호하기
- *   위해 vpd.len을 PCI_VPD_SZ_INVALID로 설정한다.
- */
 static void quirk_blacklist_vpd(struct pci_dev *dev)
 {
 	dev->vpd.len = PCI_VPD_SZ_INVALID;
@@ -856,12 +677,6 @@ DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_ATTANSIC, PCI_ANY_ID, quirk_blacklist_vpd
 DECLARE_PCI_FIXUP_CLASS_HEADER(PCI_VENDOR_ID_AMAZON_ANNAPURNA_LABS, 0x0031,
 			       PCI_CLASS_BRIDGE_PCI, 8, quirk_blacklist_vpd);
 
-/*
- * quirk_chelsio_extend_vpd:
- *   Chelsio 어댑터의 VPD 영역이 표준 크기보다 큰 경우, 실제 접근 가능한
- *   VPD 크기를 수동으로 확장한다. NVMe 장치와 직접 관련은 없으나, VPD
- *   크기 측정 메커니즘의 한계를 보여주는 quirk 사례이다.
- */
 static void quirk_chelsio_extend_vpd(struct pci_dev *dev)
 {
 	int chip = (dev->device & 0xf000) >> 12;

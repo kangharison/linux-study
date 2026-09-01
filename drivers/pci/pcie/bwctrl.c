@@ -120,22 +120,11 @@ struct pcie_bwctrl_data {
 /* Prevent port removal during Link Speed changes. */
 static DECLARE_RWSEM(pcie_bwctrl_setspeed_rwsem);
 
-/*
- * pcie_valid_speed:
- *   주어진 PCIe bus speed가 유효한 범위 내에 있는지 검사한다.
- *   NVMe 장치가 지원하는 링크 속도가 올바른 값인지 확인할 때 사용된다.
- */
 static bool pcie_valid_speed(enum pci_bus_speed speed)
 {
 	return (speed >= PCIE_SPEED_2_5GT) && (speed <= PCIE_SPEED_64_0GT);
 }
 
-/*
- * pci_bus_speed2lnkctl2:
- *   enum pci_bus_speed 값을 PCI Express Link Control 2 레지스터의
- *   Target Link Speed(TLS) 필드에 쓸 값으로 변환한다.
- *   NVMe 장치의 링크 속도 변경 시 Root Port 레지스터에 기록할 값을 만든다.
- */
 static u16 pci_bus_speed2lnkctl2(enum pci_bus_speed speed)
 {
 	static const u8 speed_conv[] = {
@@ -153,11 +142,6 @@ static u16 pci_bus_speed2lnkctl2(enum pci_bus_speed speed)
 	return speed_conv[speed];
 }
 
-/*
- * pcie_supported_speeds2target_speed:
- *   supported_speeds 비트맵에서 가장 높은 속도 비트를 추출해 target speed로 변환.
- *   NVMe 장치와 Root Port가 공통으로 지원하는 최고 속도를 선택할 때 사용.
- */
 static inline u16 pcie_supported_speeds2target_speed(u8 supported_speeds)
 {
 	return __fls(supported_speeds);
@@ -172,12 +156,6 @@ static inline u16 pcie_supported_speeds2target_speed(u8 supported_speeds)
  * both the Root Port and the Endpoint.
  *
  * Return: Target Link Speed (1=2.5GT/s, 2=5GT/s, 3=8GT/s, etc.)
- */
-/*
- * NVMe: NVMe endpoint와 Root Port/Downstream Port가 모두 지원하는 속도 중
- * 요청된 speed_req에 가장 가까운(하지만 초과하지 않는) target speed를 선택.
- * NVMe SSD가 Gen4로 협상되도록 요청했으나 Root Port가 Gen3까지만 지원하면
- * Gen3로 낮춰 설정하는 등의 상황을 처리.
  */
 static u16 pcie_bwctrl_select_speed(struct pci_dev *port, enum pci_bus_speed speed_req)
 {
@@ -202,12 +180,6 @@ static u16 pcie_bwctrl_select_speed(struct pci_dev *port, enum pci_bus_speed spe
 	return pcie_supported_speeds2target_speed(supported_speeds & desired_speeds);
 }
 
-/*
- * pcie_bwctrl_change_speed:
- *   Root Port의 Link Control 2 레지스터 TLS 필드를 target_speed로 설정하고
- *   link retrain을 수행한다.
- *   NVMe 장치 아래 링크의 실제 속도를 변경하는 핵심 동작.
- */
 static int pcie_bwctrl_change_speed(struct pci_dev *port, u16 target_speed, bool use_lt)
 {
 	int ret;
@@ -236,12 +208,6 @@ static int pcie_bwctrl_change_speed(struct pci_dev *port, u16 target_speed, bool
  * * -ENODEV	- @port is not controllable
  * * -ETIMEDOUT	- changing Link Speed took too long
  * * -EAGAIN	- Link Speed was changed but @speed_req was not achieved
- */
-/*
- * NVMe: NVMe 장치가 연결된 downstream 포트의 링크 속도를 speed_req로 설정.
- * sysfs(thermal cooling 등)나 power management에서 호출될 수 있으며,
- * 설정 후 bus->cur_bus_speed가 갱신되어 NVMe 드라이버가 최대 링크 속도를
- * 확인할 수 있다.
  */
 int pcie_set_target_speed(struct pci_dev *port, enum pci_bus_speed speed_req,
 			  bool use_lt)
@@ -285,11 +251,6 @@ int pcie_set_target_speed(struct pci_dev *port, enum pci_bus_speed speed_req,
 	return ret;
 }
 
-/*
- * pcie_bwnotif_enable:
- *   Bandwidth Notification 인터럽트를 활성화하고 현재 LBMS 상태를 기록한다.
- *   NVMe 장치의 링크 속도/폭 변화를 OS에 알릴 수 있도록 준비.
- */
 static void pcie_bwnotif_enable(struct pcie_device *srv)
 {
 	struct pci_dev *port = srv->port;
@@ -313,23 +274,12 @@ static void pcie_bwnotif_enable(struct pcie_device *srv)
 	pcie_update_link_speed(port->subordinate, PCIE_BWCTRL_ENABLE);
 }
 
-/*
- * pcie_bwnotif_disable:
- *   Bandwidth Notification 인터럽트를 비활성화한다.
- *   NVMe 장치 제거/suspend 등에서 링크 변화 알림을 멈출 때 사용.
- */
 static void pcie_bwnotif_disable(struct pci_dev *port)
 {
 	pcie_capability_clear_word(port, PCI_EXP_LNKCTL,
 				   PCI_EXP_LNKCTL_LBMIE | PCI_EXP_LNKCTL_LABIE);
 }
 
-/*
- * pcie_bwnotif_irq:
- *   Bandwidth Notification 인터럽트 핸들러.
- *   NVMe 장치의 PCIe 링크 속도가 하드웨어적으로 변경되었을 때 호출되어
- *   sysfs에 노출된 bus->cur_bus_speed를 갱신한다.
- */
 static irqreturn_t pcie_bwnotif_irq(int irq, void *context)
 {
 	struct pcie_device *srv = context;
@@ -361,23 +311,12 @@ static irqreturn_t pcie_bwnotif_irq(int irq, void *context)
 	return IRQ_HANDLED;
 }
 
-/*
- * pcie_reset_lbms:
- *   LBMS(Link Bandwidth Management Status) 플래그와 상태 비트를 리셋.
- *   NVMe 링크 속도 재협상 전후에 상태를 초기화할 때 사용.
- */
 void pcie_reset_lbms(struct pci_dev *port)
 {
 	clear_bit(PCI_LINK_LBMS_SEEN, &port->priv_flags);
 	pcie_capability_write_word(port, PCI_EXP_LNKSTA, PCI_EXP_LNKSTA_LBMS);
 }
 
-/*
- * pcie_bwnotif_probe:
- *   PCIe bandwidth notification 서비스 드라이버의 probe 함수.
- *   NVMe 장치가 연결된 포트에서 bwctrl 서비스를 등록하고 인터럽트를
- *   활성화하며, thermal cooling device를 등록한다.
- */
 static int pcie_bwnotif_probe(struct pcie_device *srv)
 {
 	struct pci_dev *port = srv->port;
@@ -422,12 +361,6 @@ static int pcie_bwnotif_probe(struct pcie_device *srv)
 	return 0;
 }
 
-/*
- * pcie_bwnotif_remove:
- *   PCIe bandwidth notification 서비스 드라이버의 remove 함수.
- *   NVMe 장치가 제거되거나 서비스가 해제될 때 인터럽트와 cooling device를
- *   정리한다.
- */
 static void pcie_bwnotif_remove(struct pcie_device *srv)
 {
 	struct pcie_bwctrl_data *data = srv->port->link_bwctrl;
@@ -443,34 +376,18 @@ static void pcie_bwnotif_remove(struct pcie_device *srv)
 	}
 }
 
-/*
- * pcie_bwnotif_suspend:
- *   시스템 suspend 시 bandwidth notification 인터럽트를 비활성화.
- *   NVMe 장치가 있는 시스템의 절전 상태 진입 시 호출.
- */
 static int pcie_bwnotif_suspend(struct pcie_device *srv)
 {
 	pcie_bwnotif_disable(srv->port);
 	return 0;
 }
 
-/*
- * pcie_bwnotif_resume:
- *   시스템 resume 시 bandwidth notification 인터럽트를 다시 활성화.
- *   NVMe 장치가 있는 시스템이 절전에서 복귀할 때 호출.
- */
 static int pcie_bwnotif_resume(struct pcie_device *srv)
 {
 	pcie_bwnotif_enable(srv);
 	return 0;
 }
 
-/*
- * pcie_bwctrl_driver:
- *   PCIe port service driver 등록 구조체.
- *   NVMe 장치가 연결된 모든 PCIe 포트(PCIE_ANY_PORT)에서 bandwidth
- *   controller 서비스를 제공한다.
- */
 static struct pcie_port_service_driver pcie_bwctrl_driver = {
 	.name		= "pcie_bwctrl",
 	.port_type	= PCIE_ANY_PORT,
@@ -481,13 +398,6 @@ static struct pcie_port_service_driver pcie_bwctrl_driver = {
 	.remove		= pcie_bwnotif_remove,
 };
 
-/*
- * pcie_bwctrl_init:
- *   PCIe bandwidth controller 서비스 드라이버를 PCIe port service
- *   레지스트리에 등록.
- *   NVMe PCIe 호스트 드라이버가 로드되기 전에 PCI 서브시스템에서 먼저
- *   등록되어 NVMe 장치의 링크 대역폭 변화를 감시할 수 있게 한다.
- */
 int __init pcie_bwctrl_init(void)
 {
 	return pcie_port_service_register(&pcie_bwctrl_driver);

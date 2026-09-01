@@ -123,12 +123,6 @@ union st_info {
 	};
 	u64 value;
 };
-/*
- * tph_extract_tag:
- *   ACPI _DSM에서 받은 st_info에서 메모리 타입과 TPH 요청 타입에 맞는
- *   Steering Tag를 추출한다. NVMe 큐-CPU affinity 설정 시 특정 CPU에
- *   대응하는 ST 값을 얻는 데 사용된다.
- */
 static u16 tph_extract_tag(enum tph_mem_type mem_type, u8 req_type,
 			   union st_info *info)
 {
@@ -164,12 +158,6 @@ static u16 tph_extract_tag(enum tph_mem_type mem_type, u8 req_type,
 }
 
 #define TPH_ST_DSM_FUNC_INDEX	0xF
-/*
- * tph_invoke_dsm:
- *   Root Port의 ACPI _DSM을 호출해 특정 CPU(UID)에 연결된 ST 정보를
- *   가져온다. NVMe 드라이버가 큐를 특정 CPU에 바인딩할 때, 해당 CPU로
- *   향하는 DMA 트랜잭션의 캐시 근접성 힌트를 firmware에서 얻는 통로다.
- */
 static acpi_status tph_invoke_dsm(acpi_handle handle, u32 cpu_uid,
 				  union st_info *st_out)
 {
@@ -212,11 +200,6 @@ static acpi_status tph_invoke_dsm(acpi_handle handle, u32 cpu_uid,
 #endif
 
 /* Update the TPH Requester Enable field of TPH Control Register */
-/*
- * set_ctrl_reg_req_en:
- *   TPH Control Register의 Requester Enable 필드를 갱신한다. NVMe 장치의
- *   TPH 요청 기능을 켜거나 끄거나, 8bit/16bit 요청 형식을 선택할 때 사용.
- */
 static void set_ctrl_reg_req_en(struct pci_dev *pdev, u8 req_type)
 {
 	u32 reg;
@@ -229,12 +212,6 @@ static void set_ctrl_reg_req_en(struct pci_dev *pdev, u8 req_type)
 	pci_write_config_dword(pdev, pdev->tph_cap + PCI_TPH_CTRL, reg);
 }
 
-/*
- * get_st_modes:
- *   NVMe 장치가 지원하는 ST mode(Interrupt Vector, Device Specific,
- *   No ST) 비트를 TPH Capability 레지스터에서 읽어온다. pcie_enable_tph()
- *   에서 요청 mode가 지원되는지 검증할 때 사용.
- */
 static u8 get_st_modes(struct pci_dev *pdev)
 {
 	u32 reg;
@@ -254,12 +231,6 @@ static u8 get_st_modes(struct pci_dev *pdev)
  *  PCI_TPH_LOC_CAP  - Located in the TPH Requester Extended Capability
  *  PCI_TPH_LOC_MSIX - Located in the MSI-X Table
  */
-/*
- * pcie_tph_get_st_table_loc:
- *   NVMe 장치의 Steering Tag table이 위치한 곳(TPH capability 공간 또는
- *   MSI-X table)을 반환한다. NVMe가 MSI-X 벡터별로 ST를 설정할지, 아니면
- *   장치 고유 table을 사용할지 결정하는 데 필요.
- */
 u32 pcie_tph_get_st_table_loc(struct pci_dev *pdev)
 {
 	u32 reg;
@@ -273,11 +244,6 @@ EXPORT_SYMBOL(pcie_tph_get_st_table_loc);
 /*
  * Return the size of ST table. If ST table is not in TPH Requester Extended
  * Capability space, return 0. Otherwise return the ST Table Size + 1.
- */
-/*
- * pcie_tph_get_st_table_size:
- *   TPH capability 공간 내 ST table의 항목 개수를 반환한다. NVMe 큐/벡터
- *   개수에 맞춰 ST entry를 설정할 때 경계를 확인하는 데 사용.
  */
 u16 pcie_tph_get_st_table_size(struct pci_dev *pdev)
 {
@@ -299,12 +265,6 @@ u16 pcie_tph_get_st_table_size(struct pci_dev *pdev)
 EXPORT_SYMBOL(pcie_tph_get_st_table_size);
 
 /* Return device's Root Port completer capability */
-/*
- * get_rp_completer_type:
- *   NVMe 장치 뒤의 Root Port가 TPH completer로서 어떤 요청 형식(8bit/
- *   16bit)을 지원하는지 조회한다. device와 Root Port capability의 교집합을
- *   통해 실제 사용 가능한 req_type을 결정.
- */
 static u8 get_rp_completer_type(struct pci_dev *pdev)
 {
 	struct pci_dev *rp;
@@ -323,12 +283,6 @@ static u8 get_rp_completer_type(struct pci_dev *pdev)
 }
 
 /* Write tag to ST table - Return 0 if OK, otherwise -errno */
-/*
- * write_tag_to_st_table:
- *   TPH Extended Capability 공간 내 ST table의 특정 인덱스에 Steering Tag를
- *   기록한다. NVMe가 특정 큐/인터럽트에 해당하는 ST 값을 하드웨어에
- *   반영할 때 사용.
- */
 static int write_tag_to_st_table(struct pci_dev *pdev, int index, u16 tag)
 {
 	int st_table_size;
@@ -356,12 +310,6 @@ static int write_tag_to_st_table(struct pci_dev *pdev, int index, u16 tag)
  * specific CPU as indicated by cpu.
  *
  * Return: 0 if success, otherwise negative value (-errno)
- */
-/*
- * pcie_tph_get_cpu_st:
- *   지정한 CPU와 메모리 타입에 대해 ACPI _DSM으로부터 Steering Tag를
- *   획득한다. NVMe 드라이버가 큐를 특정 CPU에 affinity할 때, 해당 CPU로
- *   향하는 DMA 트랜잭션에 사용할 ST 값을 얻는 NVMe-직접 관련 인터페이스.
  */
 int pcie_tph_get_cpu_st(struct pci_dev *pdev, enum tph_mem_type mem_type,
 			unsigned int cpu, u16 *tag)
@@ -412,12 +360,6 @@ EXPORT_SYMBOL(pcie_tph_get_cpu_st);
  * the ST entry pointed by index.
  *
  * Return: 0 if success, otherwise negative value (-errno)
- */
-/*
- * pcie_tph_set_st_entry:
- *   NVMe 장치의 ST table(MSI-X table 또는 TPH capability 공간) 내 특정
- *   인덱스에 Steering Tag를 기록한다. NVMe 큐/MSI-X 벡터와 CPU/NUMA 노드
- *   간 스티어링 정책을 하드웨어에 반영하는 핵심 함수.
  */
 int pcie_tph_set_st_entry(struct pci_dev *pdev, unsigned int index, u16 tag)
 {
@@ -475,11 +417,6 @@ EXPORT_SYMBOL(pcie_tph_set_st_entry);
  *
  * Return: none
  */
-/*
- * pcie_disable_tph:
- *   NVMe 장치의 TPH를 완전히 끈다. NVMe 드라이버가 큐 초기화 실패, quirk,
- *   오류 복구, 또는 드라이버 unload 시 TPH 관련 리소스를 정리할 때 호출.
- */
 void pcie_disable_tph(struct pci_dev *pdev)
 {
 	if (!pdev->tph_cap)
@@ -511,12 +448,6 @@ EXPORT_SYMBOL(pcie_disable_tph);
  * capability and the Root Port's completer capability.
  *
  * Return: 0 on success, otherwise negative value (-errno)
- */
-/*
- * pcie_enable_tph:
- *   NVMe 장치의 TPH를 지정한 ST mode로 활성화한다. NVMe 큐-CPU affinity
- *   설정 전에 호출되어, NVMe endpoint와 Root Port가 모두 지원하는 요청
- *   형식(8bit/16bit TPH)과 mode를 결정.
  */
 int pcie_enable_tph(struct pci_dev *pdev, int mode)
 {
@@ -577,13 +508,6 @@ int pcie_enable_tph(struct pci_dev *pdev, int mode)
 }
 EXPORT_SYMBOL(pcie_enable_tph);
 
-/*
- * pci_restore_tph_state:
- *   NVMe 장치의 TPH 상태(Control register + ST table)를 이전에 저장한
- *   값으로 복원한다. PCIe AER, PME, D3cold wakeup, runtime resume, suspend
- *   resume 등 NVMe가 재초기화될 때 큐-CPU affinity 성능을 유지하기 위해
- *   PCI core가 호출한다.
- */
 void pci_restore_tph_state(struct pci_dev *pdev)
 {
 	struct pci_cap_saved_state *save_state;
@@ -614,12 +538,6 @@ void pci_restore_tph_state(struct pci_dev *pdev)
 	}
 }
 
-/*
- * pci_save_tph_state:
- *   NVMe 장치의 TPH 상태를 suspend, D3cold 진입, 또는 PCIe reset 전에
- *   저장한다. NVMe가 다시 켜질 때 pci_restore_tph_state()로 복원되어
- *   큐-CPU affinity 및 TPH 스티어링 설정이 유지된다.
- */
 void pci_save_tph_state(struct pci_dev *pdev)
 {
 	struct pci_cap_saved_state *save_state;
@@ -652,12 +570,6 @@ void pci_save_tph_state(struct pci_dev *pdev)
 	}
 }
 
-/*
- * pci_no_tph:
- *   "notph" 커널 파라미터가 지정된 경우 시스템 전체의 TPH를 비활성화한다.
- *   NVMe 장치도 TPH 요청을 하지 않게 되어, TPH 관련 호환성/안정성 문제를
- *   회피할 수 있다(성능은 저하될 수 있음).
- */
 void pci_no_tph(void)
 {
 	pci_tph_disabled = true;
@@ -665,13 +577,6 @@ void pci_no_tph(void)
 	pr_info("PCIe TPH is disabled\n");
 }
 
-/*
- * pci_tph_init:
- *   NVMe 장치 탐색(probe) 단계에서 TPH 확장 capability를 찾고, 이후
- *   save/restore를 위한 버퍼를 미리 할당한다. NVMe pdev 구조체의
- *   tph_cap 필드가 설정되며, 이후 NVMe 드라이버가 TPH를 활용할 수
- *   있는 기반이 마련된다.
- */
 void pci_tph_init(struct pci_dev *pdev)
 {
 	int num_entries;

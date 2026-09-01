@@ -91,13 +91,6 @@
  * between the ROM and other resources, so enabling it may disable access
  * to MMIO registers or other card memory.
  */
-/*
- * pci_enable_rom:
- *   지정된 PCI 장치(예: NVMe SSD)의 ROM BAR 디코딩을 활성화한다.
- *   ROM 이미지를 읽기 전에 반드시 호출해야 하며, 일부 장치는 ROM과
- *   MMIO(BAR0/1) 간 주소 디코더를 공유하므로 NVMe 레지스터 접근에
- *   영향을 줄 수 있음에 주의해야 한다.
- */
 int pci_enable_rom(struct pci_dev *pdev)
 {
 	struct resource *res = &pdev->resource[PCI_ROM_RESOURCE];
@@ -132,12 +125,6 @@ EXPORT_SYMBOL_GPL(pci_enable_rom);
  * Disable ROM decoding on a PCI device by turning off the last bit in the
  * ROM BAR.
  */
-/*
- * pci_disable_rom:
- *   NVMe 장치 등의 ROM BAR 디코딩을 비활성화한다.
- *   ROM 이미지를 다 읽은 후 또는 ROM 매핑 해제 시 호출되어, ROM이
- *   NVMe BAR 접근이나 다른 리소스와 충돌하지 않도록 한다.
- */
 void pci_disable_rom(struct pci_dev *pdev)
 {
 	struct resource *res = &pdev->resource[PCI_ROM_RESOURCE];
@@ -162,13 +149,6 @@ EXPORT_SYMBOL_GPL(pci_disable_rom);
  * Determine the actual length of the ROM image.
  * The PCI window size could be much larger than the
  * actual image size.
- */
-/*
- * pci_get_rom_size:
- *   NVMe 장치의 ROM 이미지 중 실제로 유효한 부분의 크기를 바이트 단위로
- *   계산한다. PCI ROM BAR가 할당받은 윈도우 크기는 실제 이미지보다 클
- *   수 있으므로, 헤더(0xAA55), PCIR 시그네처, 이미지 길이 필드를 검사해
- *   진짜 크기를 찾는다. /sys/.../rom 읽기 시 copy_to_user에 직접 영향.
  */
 static size_t pci_get_rom_size(struct pci_dev *pdev, void __iomem *rom,
 			       size_t size)
@@ -223,14 +203,6 @@ static size_t pci_get_rom_size(struct pci_dev *pdev, void __iomem *rom,
  * the shadow BIOS copy will be returned instead of the
  * actual ROM.
  */
-/*
- * pci_map_rom:
- *   NVMe 장치의 ROM을 커널 가상 주소 공간에 매핑한다.
- *   /sys/bus/pci/devices/<NVMe BDF>/rom 읽기, 드라이버의 ROM 복사,
- *   또는 초기화 시 Option ROM을 읽을 때 사용된다.
- *   필요 시 ROM BAR에 주소를 할당하고, ROM 디코딩을 활성화한 뒤
- *   ioremap()으로 커널에 매핑한다.
- */
 void __iomem *pci_map_rom(struct pci_dev *pdev, size_t *size)
 {
 	struct resource *res = &pdev->resource[PCI_ROM_RESOURCE];
@@ -281,12 +253,6 @@ EXPORT_SYMBOL(pci_map_rom);
  * @rom: virtual address of the previous mapping
  *
  * Remove a mapping of a previously mapped ROM
- */
-/*
- * pci_unmap_rom:
- *   pci_map_rom()으로 매핑한 NVMe 장치의 ROM을 커널 가상 주소 공간에서
- *   해제한다. /sys/.../rom 사용 종료, 드라이버 종료, 핫플러그 제거
- *   등에서 호출되며, ROM BAR enable 상태를 원래대로 복원한다.
  */
 void pci_unmap_rom(struct pci_dev *pdev, void __iomem *rom)
 {

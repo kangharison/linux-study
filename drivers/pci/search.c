@@ -114,11 +114,6 @@ DECLARE_RWSEM(pci_bus_sem);
  * Starting @pdev, walk up the bus calling @fn for each possible alias
  * of @pdev at the root bus.
  */
-/*
- * NVMe: NVMe 컨트롤러의 DMA alias(requester ID)를 root bus 방향으로 순회한다.
- *       NVMe의 PRP/SGL/HMB DMA, doorbell DMA 등이 IOMMU 뒤에서 어떤 alias로
- *       보이는지 파악할 때 사용된다. P2PDMA나 ATS 활성화 시 alias가 중요하다.
- */
 int pci_for_each_dma_alias(struct pci_dev *pdev,
 			   int (*fn)(struct pci_dev *pdev,
 				     u16 alias, void *data),
@@ -210,10 +205,6 @@ int pci_for_each_dma_alias(struct pci_dev *pdev,
 	return ret;
 }
 
-/*
- * NVMe: 재귀적으로 bus number에 해당하는 pci_bus를 찾는 낮은 수준 함수.
- *       NVMe 장치가 연결된 하위 bus를 root bus에서부터 탐색할 때 사용.
- */
 static struct pci_bus *pci_do_find_bus(struct pci_bus *bus,
 				       unsigned char busnr)
 {
@@ -240,11 +231,6 @@ static struct pci_bus *pci_do_find_bus(struct pci_bus *bus,
  * in the global list of PCI buses.  If the bus is found, a pointer to its
  * data structure is returned.  If no bus is found, %NULL is returned.
  */
-/*
- * NVMe: 지정된 PCI domain(segment)과 bus number에 해당하는 pci_bus를 찾는다.
- *       NVMe 컨트롤러가 연결된 bus를 식별해 Root Port/Upstream Port 정보를
- *       얻거나, BAR/DMA/MSI-X 설정 시 bus context를 확보할 때 사용.
- */
 struct pci_bus *pci_find_bus(int domain,
 			     int busnr)
 {
@@ -270,11 +256,6 @@ EXPORT_SYMBOL(pci_find_bus);
  * initiated by passing %NULL as the @from argument.  Otherwise if
  * @from is not %NULL, searches continue from next device on the
  * global list.
- */
-/*
- * NVMe: 전역 pci_root_buses 리스트에서 다음 root bus를 찾는다.
- *       멀티 도메인/멀티 Root Complex 시스템에서 NVMe 컨트롤러가 속한
- *       domain을 찾을 때 pci_find_bus() 낶에서 간접적으로 사용.
  */
 struct pci_bus *pci_find_next_bus(const struct pci_bus *from)
 {
@@ -303,12 +284,6 @@ EXPORT_SYMBOL(pci_find_next_bus);
  * function returns a pointer to its data structure.  The caller must
  * decrement the reference count by calling pci_dev_put().
  * If no device is found, %NULL is returned.
- */
-/*
- * NVMe: 주어진 bus와 slot/function(devfn)에 해당하는 pci_dev를 찾는다.
- *       NVMe 컨트롤러 자신이나 상위 Root Port, switch upstream/downstream
- *       port를 특정 bus:slot.fn으로 조회할 때 사용. 반환된 pci_dev는
- *       pci_dev_put()으로 참조 해제해야 한다.
  */
 struct pci_dev *pci_get_slot(struct pci_bus *bus,
 			     unsigned int devfn)
@@ -345,10 +320,6 @@ EXPORT_SYMBOL(pci_get_slot);
  * reference count by calling pci_dev_put().  If no device is found,
  * %NULL is returned.
  */
-/*
- * NVMe: domain+bus+devfn으로 NVMe 컨트롤러나 Root Port를 직접 찾는다.
- *       예: SR-IOV PF/VF, 특정 segment의 NVMe endpoint를 식별할 때.
- */
 struct pci_dev *pci_get_domain_bus_and_slot(int domain,
 				    unsigned int bus,
 				    unsigned int devfn)
@@ -364,10 +335,6 @@ struct pci_dev *pci_get_domain_bus_and_slot(int domain,
 }
 EXPORT_SYMBOL(pci_get_domain_bus_and_slot);
 
-/*
- * NVMe: pci_device_id 하나와 pci_dev가 매칭되는지 검사하는 helper.
- *       NVMe 드라이버의 nvme_id_table 매칭 로직과 동일한 pci_match_one_device 사용.
- */
 static int match_pci_dev_by_id(struct device *dev,
 			       const void *data)
 {
@@ -395,10 +362,6 @@ static int match_pci_dev_by_id(struct device *dev,
  * This is an internal function for use by the other search functions in
  * this file.
  */
-/*
- * NVMe: 주어진 pci_device_id 패턴과 일치하는 PCI 장치를 전역 리스트에서
- *       순방향으로 검색. NVMe quirk 매칭이나 class-based 검색의 밑바탕.
- */
 static struct pci_dev *pci_get_dev_by_id(const struct pci_device_id *id,
 					 struct pci_dev *from)
 {
@@ -416,10 +379,6 @@ static struct pci_dev *pci_get_dev_by_id(const struct pci_device_id *id,
 	return pdev;
 }
 
-/*
- * NVMe: pci_get_dev_by_id의 역순 검색 버전. NVMe hotplug/remove 시나리오에서
- *       발견 순서가 중요할 때 사용될 수 있음.
- */
 static struct pci_dev *pci_get_dev_by_id_reverse(const struct pci_device_id *id,
 						 struct pci_dev *from)
 {
@@ -442,10 +401,6 @@ enum pci_search_direction {
 	PCI_SEARCH_REVERSE,
 };
 
-/*
- * NVMe: vendor/device/subvendor/subdevice 기준으로 NVMe 컨트롤러를 검색하는
- *       실제 구현. direction에 따라 순방향/역방향 검색을 선택.
- */
 static struct pci_dev *__pci_get_subsys(unsigned int vendor,
 					unsigned int device,
 					unsigned int ss_vendor,
@@ -482,10 +437,6 @@ static struct pci_dev *__pci_get_subsys(unsigned int vendor,
  * searches continue from next device on the global list.
  * The reference count for @from is always decremented if it is not %NULL.
  */
-/*
- * NVMe: VID/DID/SSID 기준으로 특정 NVMe SSD 모델을 검색. 예: 특정 벤더의
- *       NVMe 컨트롤러를 quirk 적용 대상으로 찾을 때 사용.
- */
 struct pci_dev *pci_get_subsys(unsigned int vendor,
 			       unsigned int device,
 			       unsigned int ss_vendor,
@@ -511,10 +462,6 @@ EXPORT_SYMBOL(pci_get_subsys);
  * from next device on the global list.  The reference count for @from is
  * always decremented if it is not %NULL.
  */
-/*
- * NVMe: vendor/device ID만으로 NVMe 컨트롤러를 검색. drivers/nvme/host/pci.c의
- *       nvme_id_table에 정의된 VID/DID를 기반으로 매칭 가능.
- */
 struct pci_dev *pci_get_device(unsigned int vendor,
 			       unsigned int device,
 			       struct pci_dev *from)
@@ -526,10 +473,6 @@ EXPORT_SYMBOL(pci_get_device);
 /*
  * Same semantics as pci_get_device(), except walks the PCI device list
  * in reverse discovery order.
- */
-/*
- * NVMe: pci_get_device의 역순 버전. NVMe remove 경로나 후발견 장치를 먼저
- *       다뤄야 할 때 활용.
  */
 struct pci_dev *pci_get_device_reverse(unsigned int vendor,
 				       unsigned int device,
@@ -553,10 +496,6 @@ EXPORT_SYMBOL(pci_get_device_reverse);
  * Otherwise if @from is not %NULL, searches continue from next device
  * on the global list.  The reference count for @from is always decremented
  * if it is not %NULL.
- */
-/*
- * NVMe: class code 기반으로 NVMe 컨트롤러(0x010802)를 검색. PCI core가 NVMe
- *       장치를 찾아 nvme_probe()를 호출하는 과정에서 활용될 수 있다.
  */
 struct pci_dev *pci_get_class(unsigned int class,
 			      struct pci_dev *from)
@@ -590,10 +529,6 @@ EXPORT_SYMBOL(pci_get_class);
  * Returns:
  * A pointer to a matched PCI device, %NULL Otherwise.
  */
-/*
- * NVMe: base class만 매칭. 예: mass storage base class(0x01) 전체를 검색해
- *       NVMe(0x010802)를 포함한 저장 장치를 찾을 때 사용.
- */
 struct pci_dev *pci_get_base_class(unsigned int class,
 				   struct pci_dev *from)
 {
@@ -620,11 +555,6 @@ EXPORT_SYMBOL(pci_get_base_class);
  * this function is finished, the value will be stale.  Use this function to
  * find devices that are usually built into a system, or for a general hint as
  * to if another device happens to be present at this specific moment in time.
- */
-/*
- * NVMe: NVMe ID 테이블(nvme_id_table)에 등록된 VID/DID/Class 조합 중 하나라도
- *       현재 시스템에 존재하는지 확인. 단, 반환 직후 장치가 제거될 수 있으므로
- *       probe용 참조 카운트 확보는 별도로 해야 한다.
  */
 int pci_dev_present(const struct pci_device_id *ids)
 {

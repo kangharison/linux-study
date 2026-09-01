@@ -86,22 +86,14 @@
  * pci_allocate_vc_save_buffers() : 저장 버퍼를 미리 잡아 둔다.
  */
 
-/* Linux 커널 비트필드 헬퍼 포함: FIELD_GET 등 사용 */
 #include <linux/bitfield.h>
-/* 디바이스 모델(struct device) 관련 헤더 포함 */
 #include <linux/device.h>
-/* 커널 기본 매크로/함수 포함 */
 #include <linux/kernel.h>
-/* 모듈 관련 매크로 포함 */
 #include <linux/module.h>
-/* PCI 핵심 자료구조 및 함수 선언 포함 (struct pci_dev 등) */
 #include <linux/pci.h>
-/* PCIe 레지스터 오프셋/비트 정의 포함 (PCI_VC_* 등) */
 #include <linux/pci_regs.h>
-/* u8/u16/u32 등 고정폭 정수 타입 포함 */
 #include <linux/types.h>
 
-/* PCI 서브시스템 내부 헤더 (pci.h) 포함: pci_find_saved_ext_cap 등 */
 #include "pci.h"
 
 /**
@@ -115,19 +107,12 @@
 static void pci_vc_save_restore_dwords(struct pci_dev *dev, int pos,
 				       u32 *buf, int dwords, bool save)
 {
-	/* 반복 인덱스 변수 i 선언 */
 	int i;
 
-	/* dwords 개수만큼 반복하면서 buf 포인터도 함께 전진 */
 	for (i = 0; i < dwords; i++, buf++) {
-		/* save 플래그가 참이면 설정 공간에서 버퍼로 읽어옴 */
 		if (save)
-			/* pos + i*4 오프셋에서 32비트 읽기, NVMe 장치의
-			 * VC Arbitration Table 일부를 저장 */
 			pci_read_config_dword(dev, pos + (i * 4), buf);
 		else
-			/* save 플래그가 거짓이면 버퍼 값을 설정 공간에 씀,
-			 * resume/FLR 후 NVMe 링크 파트너 측 VC 상태 복원 */
 			pci_write_config_dword(dev, pos + (i * 4), *buf);
 	}
 }
@@ -143,22 +128,15 @@ static void pci_vc_save_restore_dwords(struct pci_dev *dev, int pos,
  */
 static void pci_vc_load_arb_table(struct pci_dev *dev, int pos)
 {
-	/* 16비트 Port VC Control 레지스터 값을 담을 변수 */
 	u16 ctrl;
 
-	/* 현재 Port VC Control 레지스터 값을 읽어옴 */
 	pci_read_config_word(dev, pos + PCI_VC_PORT_CTRL, &ctrl);
-	/* Load VC Arbitration Table 비트를 설정하여 하드웨어에 테이블
-	 * 적용을 요청, NVMe 링크의 VC 스케줄링 정책 갱신 */
 	pci_write_config_word(dev, pos + PCI_VC_PORT_CTRL,
 			      ctrl | PCI_VC_PORT_CTRL_LOAD_TABLE);
-	/* VC Arbitration Table Status 비트가 클리어될 때까지 대기,
-	 * 하드웨어가 테이블을 래치하면 반환 */
 	if (pci_wait_for_pending(dev, pos + PCI_VC_PORT_STATUS,
 				 PCI_VC_PORT_STATUS_TABLE))
 		return;
 
-	/* 타임아웃 시 NVMe 장치라도 dmesg에 에러 기록 */
 	pci_err(dev, "VC arbitration table failed to load\n");
 }
 
@@ -174,28 +152,19 @@ static void pci_vc_load_arb_table(struct pci_dev *dev, int pos)
  */
 static void pci_vc_load_port_arb_table(struct pci_dev *dev, int pos, int res)
 {
-	/* VC Resource Control/Status 오프셋 계산용 변수 */
 	int ctrl_pos, status_pos;
-	/* 32비트 VC Resource Control 값 저장 변수 */
 	u32 ctrl;
 
-	/* 해당 VCn 리소스의 Control 레지스터 오프셋 계산,
-	 * NVMe 장치가 속한 VCn 위치 */
 	ctrl_pos = pos + PCI_VC_RES_CTRL + (res * PCI_CAP_VC_PER_VC_SIZEOF);
-	/* 해당 VCn 리소스의 Status 레지스터 오프셋 계산 */
 	status_pos = pos + PCI_VC_RES_STATUS + (res * PCI_CAP_VC_PER_VC_SIZEOF);
 
-	/* VC Resource Control 현재 값 읽기 */
 	pci_read_config_dword(dev, ctrl_pos, &ctrl);
-	/* Load Port Arbitration Table 비트 설정 후 쓰기 */
 	pci_write_config_dword(dev, ctrl_pos,
 			       ctrl | PCI_VC_RES_CTRL_LOAD_TABLE);
 
-	/* Port Arbitration Table Status 비트가 클리어될 때까지 대기 */
 	if (pci_wait_for_pending(dev, status_pos, PCI_VC_RES_STATUS_TABLE))
 		return;
 
-	/* 대기 실패 시 에러 로그, NVMe DMA latency에 영향 가능 */
 	pci_err(dev, "VC%d port arbitration table failed to load\n", res);
 }
 
@@ -214,27 +183,20 @@ static void pci_vc_load_port_arb_table(struct pci_dev *dev, int pos, int res)
  */
 static void pci_vc_enable(struct pci_dev *dev, int pos, int res)
 {
-	/* 여러 오프셋/인덱스/id/상대편 capability 위치 변수들 */
 	int ctrl_pos, status_pos, id, pos2, evcc, i, ctrl_pos2, status_pos2;
-	/* 32비트 Control/capability/header 값 변수들 */
 	u32 ctrl, header, cap1, ctrl2;
-	/* 링크 반대편(upstream) pci_dev 포인터, 초기 NULL */
 	struct pci_dev *link = NULL;
 
 	/* Enable VCs from the downstream device */
 	if (!pci_is_pcie(dev) || !pcie_downstream_port(dev))
 		return;
 
-	/* 현재 포트의 VCn Control/Status 오프셋 계산 */
 	ctrl_pos = pos + PCI_VC_RES_CTRL + (res * PCI_CAP_VC_PER_VC_SIZEOF);
 	status_pos = pos + PCI_VC_RES_STATUS + (res * PCI_CAP_VC_PER_VC_SIZEOF);
 
-	/* 현재 VCn Resource Control 레지스터 읽기 */
 	pci_read_config_dword(dev, ctrl_pos, &ctrl);
-	/* 하위 8비트에서 VC ID 추출, 상대편과 매칭할 때 사용 */
 	id = ctrl & PCI_VC_RES_CTRL_ID;
 
-	/* VC capability 헤더(Extended Capability ID/버전 등) 읽기 */
 	pci_read_config_dword(dev, pos, &header);
 
 	/* If there is no opposite end of the link, skip to enable */
@@ -243,40 +205,31 @@ static void pci_vc_enable(struct pci_dev *dev, int pos, int res)
 		goto enable;
 
 	pos2 = pci_find_ext_capability(dev->bus->self, PCI_EXT_CAP_ID_VC);
-	/* 없으면 상대편과 매칭 불가, 현재 측만 enable 시도 */
 	if (!pos2)
 		goto enable;
 
-	/* 상대편 포트의 Port VC Capability Register 1 읽기 */
 	pci_read_config_dword(dev->bus->self, pos2 + PCI_VC_PORT_CAP1, &cap1);
-	/* Extended VC Count 추출: VC0 제외 추가 VC 개수 */
 	evcc = cap1 & PCI_VC_CAP1_EVCC;
 
 	/* VC0 is hardwired enabled, so we can start with 1 */
 	for (i = 1; i < evcc + 1; i++) {
-		/* 상대편 VCi Control/Status 오프셋 계산 */
 		ctrl_pos2 = pos2 + PCI_VC_RES_CTRL +
 				(i * PCI_CAP_VC_PER_VC_SIZEOF);
 		status_pos2 = pos2 + PCI_VC_RES_STATUS +
 				(i * PCI_CAP_VC_PER_VC_SIZEOF);
-		/* 상대편 VCi Control 값 읽기 */
 		pci_read_config_dword(dev->bus->self, ctrl_pos2, &ctrl2);
-		/* 상대편 VC ID가 현재 VC ID와 일치하면 link 포인터 저장 후 중단 */
 		if ((ctrl2 & PCI_VC_RES_CTRL_ID) == id) {
 			link = dev->bus->self;
 			break;
 		}
 	}
 
-	/* 일치하는 상대편 VC를 찾지 못하면 현재 측만 enable */
 	if (!link)
 		goto enable;
 
 	/* Disable if enabled */
 	if (ctrl2 & PCI_VC_RES_CTRL_ENABLE) {
-		/* enable 비트 클리어 */
 		ctrl2 &= ~PCI_VC_RES_CTRL_ENABLE;
-		/* 상대편 Control 레지스터에 씀 */
 		pci_write_config_dword(link, ctrl_pos2, ctrl2);
 	}
 
@@ -287,12 +240,9 @@ enable:
 	ctrl |= PCI_VC_RES_CTRL_ENABLE;
 	pci_write_config_dword(dev, ctrl_pos, ctrl);
 
-	/* 현재 포트의 VC Negotiation Pending Status가 클리어될 때까지 대기,
-	 * 하드웨어 간 VC 협상 완료 확인 */
 	if (!pci_wait_for_pending(dev, status_pos, PCI_VC_RES_STATUS_NEGO))
 		pci_err(dev, "VC%d negotiation stuck pending\n", id);
 
-	/* 상대편이 있으면 상대편 negotiation pending도 대기 */
 	if (link && !pci_wait_for_pending(link, status_pos2,
 					  PCI_VC_RES_STATUS_NEGO))
 		pci_err(link, "VC%d negotiation stuck pending\n", id);
@@ -316,25 +266,19 @@ static int pci_vc_do_save_buffer(struct pci_dev *dev, int pos,
 				 struct pci_cap_saved_state *save_state,
 				 bool save)
 {
-	/* Port VC Capability 1 값 저장 */
 	u32 cap1;
 	/* Extended VC Count, Low Priority EVCC, Port Arbitration entry size */
 	char evcc, lpevcc, parb_size;
-	/* 반복 인덱스, 누적 버퍼 길이 */
 	int i, len = 0;
-	/* save_state가 있으면 cap.data를 u8 버퍼로 사용, 없으면 NULL */
 	u8 *buf = save_state ? (u8 *)save_state->cap.data : NULL;
 
 	/* Sanity check buffer size for save/restore */
 	if (buf && save_state->cap.size !=
 	    pci_vc_do_save_buffer(dev, pos, NULL, save)) {
-		/* 크기 불일치 에러 로그 출력, NVMe 장치명과 capability 오프셋 포함 */
 		pci_err(dev, "VC save buffer size does not match @0x%x\n", pos);
-		/* 메모리 부족으로 간주하고 음수 반환 */
 		return -ENOMEM;
 	}
 
-	/* Port VC Capability Register 1 읽기 */
 	pci_read_config_dword(dev, pos + PCI_VC_PORT_CAP1, &cap1);
 	/* Extended VC Count (not counting VC0) */
 	evcc = cap1 & PCI_VC_CAP1_EVCC;
@@ -350,19 +294,14 @@ static int pci_vc_do_save_buffer(struct pci_dev *dev, int pos,
 	 * after device reset.
 	 */
 	if (buf) {
-		/* save 모드면 설정 공간에서 버퍼로 16비트 읽어옴 */
 		if (save)
 			pci_read_config_word(dev, pos + PCI_VC_PORT_CTRL,
 					     (u16 *)buf);
 		else
-			/* restore 모드면 버퍼 값을 설정 공간에 16비트 씀,
-			 * NVMe 장치의 VC Arbitration Select 정책 복원 */
 			pci_write_config_word(dev, pos + PCI_VC_PORT_CTRL,
 					      *(u16 *)buf);
-		/* 4바이트만큼 버퍼 포인터 전진 (32비트 정렬을 위해 4바이트 차지) */
 		buf += 4;
 	}
-	/* Port VC Control 부분이 차지하는 버퍼 길이 4바이트 추가 */
 	len += 4;
 
 	/*
@@ -370,22 +309,15 @@ static int pci_vc_do_save_buffer(struct pci_dev *dev, int pos,
 	 * in Port VC Capability Register 2 then save/restore it next.
 	 */
 	if (lpevcc) {
-		/* Port VC Capability Register 2 값 */
 		u32 cap2;
-		/* VC Arbitration Table 오프셋 (바이트 단위) */
 		int vcarb_offset;
 
-		/* Port VC Capability Register 2 읽기 */
 		pci_read_config_dword(dev, pos + PCI_VC_PORT_CAP2, &cap2);
-		/* ARB_OFF 필드를 16바이트 단위로 환산해 오프셋 계산 */
 		vcarb_offset = FIELD_GET(PCI_VC_CAP2_ARB_OFF, cap2) * 16;
 
-		/* 오프셋이 0이 아니면 VC Arbitration Table이 존재 */
 		if (vcarb_offset) {
-			/* 테이블 크기, phase 수 변수 */
 			int size, vcarb_phases = 0;
 
-			/* 가능한 phase 수 중 하나를 비트 검사로 결정 */
 			if (cap2 & PCI_VC_CAP2_128_PHASE)
 				vcarb_phases = 128;
 			/* [한국어] 아래로 갈수록 작은 단계 수. 여러 비트가 동시에
@@ -401,9 +333,7 @@ static int pci_vc_do_save_buffer(struct pci_dev *dev, int pos,
 			/* Fixed 4 bits per phase per lpevcc (plus VC0) */
 			size = ((lpevcc + 1) * vcarb_phases * 4) / 8;
 
-			/* 크기가 있고 버퍼가 주어졌을 때만 save/restore 수행 */
 			if (size && buf) {
-				/* 연속된 dword 단위로 테이블 save/restore */
 				pci_vc_save_restore_dwords(dev,
 							   pos + vcarb_offset,
 							   (u32 *)buf,
@@ -415,10 +345,8 @@ static int pci_vc_do_save_buffer(struct pci_dev *dev, int pos,
 				if (!save)
 					pci_vc_load_arb_table(dev, pos);
 
-				/* 버퍼를 테이블 크기만큼 전진 */
 				buf += size;
 			}
-			/* 누적 버퍼 길이에 VC Arbitration Table 크기 추가 */
 			len += size;
 		}
 	}
@@ -431,22 +359,15 @@ static int pci_vc_do_save_buffer(struct pci_dev *dev, int pos,
 	 * Register1 above.  The number of phases is determined per VC.
 	 */
 	for (i = 0; i < evcc + 1; i++) {
-		/* VC Resource Capability 레지스터 값 */
 		u32 cap;
-		/* Port Arbitration Table 오프셋 */
 		int parb_offset;
 
-		/* VCi Resource Capability 레지스터 읽기 */
 		pci_read_config_dword(dev, pos + PCI_VC_RES_CAP +
 				      (i * PCI_CAP_VC_PER_VC_SIZEOF), &cap);
-		/* Port Arbitration Table Offset 필드를 16바이트 단위로 변환 */
 		parb_offset = FIELD_GET(PCI_VC_RES_CAP_ARB_OFF, cap) * 16;
-		/* 오프셋이 0이 아니면 Port Arbitration Table 존재 */
 		if (parb_offset) {
-			/* 테이블 크기와 phase 수 변수 */
 			int size, parb_phases = 0;
 
-			/* Resource Capability 비트에 따라 phase 수 결정 */
 			if (cap & PCI_VC_RES_CAP_256_PHASE)
 				parb_phases = 256;
 			/* [한국어] 포트 중재 표의 단계 수. VC 중재와 달리 128 단계에
@@ -462,61 +383,44 @@ static int pci_vc_do_save_buffer(struct pci_dev *dev, int pos,
 			else if (cap & PCI_VC_RES_CAP_32_PHASE)
 				parb_phases = 32;
 
-			/* entry size * phase 수 / 8 로 테이블 바이트 크기 계산 */
 			size = (parb_size * parb_phases) / 8;
 
-			/* 크기와 버퍼가 유효하면 save/restore 실행 */
 			if (size && buf) {
-				/* Port Arbitration Table dword 단위 save/restore */
 				pci_vc_save_restore_dwords(dev,
 							   pos + parb_offset,
 							   (u32 *)buf,
 							   size / 4, save);
-				/* 버퍼 포인터 전진 */
 				buf += size;
 			}
-			/* 누적 길이에 Port Arbitration Table 크기 추가 */
 			len += size;
 		}
 
 		/* VC Resource Control Register */
 		if (buf) {
-			/* VCi Resource Control 오프셋 계산 */
 			int ctrl_pos = pos + PCI_VC_RES_CTRL +
 					(i * PCI_CAP_VC_PER_VC_SIZEOF);
-			/* save 모드면 Control 레지스터를 버퍼에 저장 */
 			if (save)
 				pci_read_config_dword(dev, ctrl_pos,
 						      (u32 *)buf);
 			else {
-				/* restore 모드면 FLR 후에도 enable 비트는 보존 */
 				u32 tmp, ctrl = *(u32 *)buf;
 				/*
 				 * For an FLR case, the VC config may remain.
 				 * Preserve enable bit, restore the rest.
 				 */
-				/* 현재 enable 비트만 읽어옴 */
 				pci_read_config_dword(dev, ctrl_pos, &tmp);
-				/* enable 비트만 남기고 나머지는 0으로 마스크 */
 				tmp &= PCI_VC_RES_CTRL_ENABLE;
-				/* 저장된 값에서 enable 비트를 제외한 나머지 병합 */
 				tmp |= ctrl & ~PCI_VC_RES_CTRL_ENABLE;
-				/* 복원된 Control 레지스터 쓰기 */
 				pci_write_config_dword(dev, ctrl_pos, tmp);
 				/* Load port arbitration table if used */
-				/* ARB_SELECT가 설정되어 있으면 Port Arbitration Table 로드 */
 				if (ctrl & PCI_VC_RES_CTRL_ARB_SELECT)
 					pci_vc_load_port_arb_table(dev, pos, i);
 				/* Re-enable if needed */
-				/* 저장된 enable 비트와 현재 enable 비트가 다륾면
-				 * VC를 다시 enable하여 negotiation 수행 */
 				if ((ctrl ^ tmp) & PCI_VC_RES_CTRL_ENABLE)
 					pci_vc_enable(dev, pos, i);
 			}
-			/* Control Register 4바이트만큼 버퍼 전진 */
 			buf += 4;
 		}
-		/* VC Resource Control Register가 차지하는 4바이트 추가 */
 		len += 4;
 	}
 
@@ -524,9 +428,7 @@ static int pci_vc_do_save_buffer(struct pci_dev *dev, int pos,
 }
 
 static struct {
-	/* 확장 capability ID (MFVC/VC/VC9) */
 	u16 id;
-	/* 사람이 읽을 수 있는 이름 */
 	const char *name;
 } vc_caps[] = { { PCI_EXT_CAP_ID_MFVC, "MFVC" },
 		{ PCI_EXT_CAP_ID_VC, "VC" },
@@ -541,35 +443,24 @@ static struct {
  */
 int pci_save_vc_state(struct pci_dev *dev)
 {
-	/* vc_caps 테이블 인덱스 */
 	int i;
 
-	/* 세 종류의 VC capability를 순회 */
 	for (i = 0; i < ARRAY_SIZE(vc_caps); i++) {
-		/* capability 위치, 함수 반환값 */
 		int pos, ret;
-		/* 미리 할당된 save buffer 구조체 포인터 */
 		struct pci_cap_saved_state *save_state;
 
-		/* 현재 장치에서 해당 VC capability 위치 검색 */
 		pos = pci_find_ext_capability(dev, vc_caps[i].id);
-		/* capability가 없으면 다음 종류로 건다 */
 		if (!pos)
 			continue;
 
-		/* 해당 capability에 대한 저장 버퍼 검색 */
 		save_state = pci_find_saved_ext_cap(dev, vc_caps[i].id);
-		/* 버퍼가 없으면 초기화 시 pci_allocate_vc_save_buffers()가
-		 * 호출되지 않은 것이므로 에러 반환 */
 		if (!save_state) {
 			pci_err(dev, "%s buffer not found in %s\n",
 				vc_caps[i].name, __func__);
 			return -ENOMEM;
 		}
 
-		/* 실제 VC 상태를 save buffer에 저장 */
 		ret = pci_vc_do_save_buffer(dev, pos, save_state, true);
-		/* 저장 실패 시 에러 로그와 함께 반환 */
 		if (ret) {
 			pci_err(dev, "%s save unsuccessful %s\n",
 				vc_caps[i].name, __func__);
@@ -577,7 +468,6 @@ int pci_save_vc_state(struct pci_dev *dev)
 		}
 	}
 
-	/* 모든 VC capability 저장 성공 */
 	return 0;
 }
 
@@ -590,25 +480,17 @@ int pci_save_vc_state(struct pci_dev *dev)
  */
 void pci_restore_vc_state(struct pci_dev *dev)
 {
-	/* vc_caps 테이블 인덱스 */
 	int i;
 
-	/* 세 종류 VC capability를 순회하며 복원 */
 	for (i = 0; i < ARRAY_SIZE(vc_caps); i++) {
-		/* capability 위치 */
 		int pos;
-		/* 저장 버퍼 구조체 포인터 */
 		struct pci_cap_saved_state *save_state;
 
-		/* 해당 VC capability 위치 검색 */
 		pos = pci_find_ext_capability(dev, vc_caps[i].id);
-		/* 저장 버퍼 검색 */
 		save_state = pci_find_saved_ext_cap(dev, vc_caps[i].id);
-		/* 둘 중 하나라도 없으면 복원 건다 */
 		if (!save_state || !pos)
 			continue;
 
-		/* VC 상태 복원 수행 (save=false) */
 		pci_vc_do_save_buffer(dev, pos, save_state, false);
 	}
 }
@@ -622,23 +504,16 @@ void pci_restore_vc_state(struct pci_dev *dev)
  */
 void pci_allocate_vc_save_buffers(struct pci_dev *dev)
 {
-	/* vc_caps 테이블 인덱스 */
 	int i;
 
-	/* 세 종류 VC capability에 대해 반복 */
 	for (i = 0; i < ARRAY_SIZE(vc_caps); i++) {
-		/* 필요 버퍼 길이, capability 위치를 한 줄에 선언 및 초기화 */
 		int len, pos = pci_find_ext_capability(dev, vc_caps[i].id);
 
-		/* capability가 없으면 할당할 필요 없음 */
 		if (!pos)
 			continue;
 
-		/* NULL 버퍼로 크기만 측정 */
 		len = pci_vc_do_save_buffer(dev, pos, NULL, false);
-		/* 측정한 크기로 확장 capability 저장 버퍼 할당 시도 */
 		if (pci_add_ext_cap_save_buffer(dev, vc_caps[i].id, len))
-			/* 할당 실패 시 에러 로그, NVMe 장치에서도 dmesg 확인 가능 */
 			pci_err(dev, "unable to preallocate %s save buffer\n",
 				vc_caps[i].name);
 	}

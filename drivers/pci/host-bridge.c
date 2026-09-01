@@ -93,12 +93,6 @@
 
 #include "pci.h"
 
-/*
- * find_pci_root_bus:
- *   주어진 pci_bus 구조체를 따라 최상위 root bus를 찾는다.
- *   NVMe 장치가 연결된 하위 bus에서 시작해 Root Complex 아래 root bus를
- *   얻는 데 사용된다. 이 root bus가 host bridge를 가리킨다.
- */
 static struct pci_bus *find_pci_root_bus(struct pci_bus *bus)
 {
 	while (bus->parent)
@@ -107,12 +101,6 @@ static struct pci_bus *find_pci_root_bus(struct pci_bus *bus)
 	return bus;
 }
 
-/*
- * pci_find_host_bridge:
- *   임의의 PCI bus가 속한 pci_host_bridge 구조체를 반환한다.
- *   NVMe 장치의 pci_dev->bus를 넘기면 해당 NVMe가 연결된 host bridge의
- *   메타정보(예: domain_nr, windows, MSI/IRQ 도메인)를 얻을 수 있다.
- */
 struct pci_host_bridge *pci_find_host_bridge(struct pci_bus *bus)
 {
 	struct pci_bus *root_bus = find_pci_root_bus(bus);
@@ -121,11 +109,6 @@ struct pci_host_bridge *pci_find_host_bridge(struct pci_bus *bus)
 }
 EXPORT_SYMBOL_GPL(pci_find_host_bridge);
 
-/*
- * pci_get_host_bridge_device:
- *   NVMe 장치가 연결된 host bridge의 struct device 참조 카운트를 증가시키고
- *   반환한다. host bridge의 전원/라이프사이클 관리에 사용된다.
- */
 struct device *pci_get_host_bridge_device(struct pci_dev *dev)
 {
 	struct pci_bus *root_bus = find_pci_root_bus(dev->bus);
@@ -136,23 +119,11 @@ struct device *pci_get_host_bridge_device(struct pci_dev *dev)
 }
 EXPORT_SYMBOL_GPL(pci_get_host_bridge_device);
 
-/*
- * pci_put_host_bridge_device:
- *   pci_get_host_bridge_device()로 획득한 host bridge device의 참조를
- *   해제한다. NVMe 드라이버가 host bridge 관련 리소스 사용 후 반납할 때
- *   호출된다.
- */
 void  pci_put_host_bridge_device(struct device *dev)
 {
 	kobject_put(&dev->kobj);
 }
 
-/*
- * pci_set_host_bridge_release:
- *   host bridge가 해제될 때 호출될 release 콜백과 데이터를 등록한다.
- *   NVMe 장치가 연결된 host bridge의 teardown 시 필요한 정리 작업을
- *   platform/driver specific하게 수행할 수 있게 한다.
- */
 void pci_set_host_bridge_release(struct pci_host_bridge *bridge,
 				 void (*release_fn)(struct pci_host_bridge *),
 				 void *release_data)
@@ -162,12 +133,6 @@ void pci_set_host_bridge_release(struct pci_host_bridge *bridge,
 }
 EXPORT_SYMBOL_GPL(pci_set_host_bridge_release);
 
-/*
- * pcibios_resource_to_bus:
- *   CPU 물리 주소(resource)를 PCI bus 주소 공간(bus_region)으로 변환한다.
- *   NVMe BAR가 가리키는 CPU 물리 주소를 bus 주소로 환산할 때 사용되며,
- *   P2PDMA, ATS, IOMMU 등에서 중요하다.
- */
 void pcibios_resource_to_bus(struct pci_bus *bus, struct pci_bus_region *region,
 			     struct resource *res)
 {
@@ -187,23 +152,12 @@ void pcibios_resource_to_bus(struct pci_bus *bus, struct pci_bus_region *region,
 }
 EXPORT_SYMBOL(pcibios_resource_to_bus);
 
-/*
- * region_contains:
- *   bus_region1이 bus_region2를 완전히 포함하는지 검사한다.
- *   NVMe BAR가 특정 host bridge window 안에 들어오는지 판단할 때 쓰인다.
- */
 static bool region_contains(struct pci_bus_region *region1,
 			    struct pci_bus_region *region2)
 {
 	return region1->start <= region2->start && region1->end >= region2->end;
 }
 
-/*
- * pcibios_bus_to_resource:
- *   PCI bus 주소(region)를 CPU 물리 주소(resource)로 변환한다.
- *   NVMe driver가 pci_resource_start()로 얻은 bus 주소를 ioremap()이나
- *   DMA 주소 설정에 사용하기 위해 CPU 물리 주소로 환산할 때 사용된다.
- */
 void pcibios_bus_to_resource(struct pci_bus *bus, struct resource *res,
 			     struct pci_bus_region *region)
 {

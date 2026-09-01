@@ -128,12 +128,6 @@ static int __init pcie_pme_setup(char *str)
 }
 __setup("pcie_pme=", pcie_pme_setup);
 
-/*
- * pcie_pme_service_data:
- *   PCIe 포트의 PME 서비스별 런타임 데이터.
- *   NVMe 장치가 연결된 Root Port의 PME 인터럽트, workqueue, lock 상태를
- *   관리한다. NVMe wakeup 이벤트는 이 구조체를 통해 처리된다.
- */
 struct pcie_pme_service_data {
 	spinlock_t lock;
 	struct pcie_device *srv;
@@ -141,13 +135,6 @@ struct pcie_pme_service_data {
 	bool noirq; /* If set, keep the PME interrupt disabled. */
 };
 
-/*
- * pcie_pme_interrupt_enable:
- *   Root Port 또는 Event Collector의 PCIe PME 인터럽트 생성을
- *   활성화/비활성화한다.
- *   NVMe 장치가 PME#로 깨어날 수 있도록 하려면 Root Port의
- *   Root Control.PME Interrupt Enable 비트가 켜져 있어야 한다.
- */
 /**
  * pcie_pme_interrupt_enable - Enable/disable PCIe PME interrupt generation.
  * @dev: PCIe root port or event collector.
@@ -163,14 +150,6 @@ void pcie_pme_interrupt_enable(struct pci_dev *dev, bool enable)
 					   PCI_EXP_RTCTL_PMEIE);
 }
 
-/*
- * pcie_pme_walk_bus:
- *   주어진 PCI bus 및 하위 bus에서 PME#를 어서팅(asserting)하는
- *   레거시 PCI 장치를 찾아 처리한다.
- *   NVMe는 PCIe 장치이므로 첫 번째 분기에서 스킵되지만, NVMe 뒤에
- *   PCIe-PCI bridge가 있는 구성이라면 bridge 하위의 레거시 장치에서
- *   올라온 PME를 찾을 때 사용된다.
- */
 /**
  * pcie_pme_walk_bus - Scan a PCI bus for devices asserting PME#.
  * @bus: PCI bus to scan.
@@ -200,12 +179,6 @@ static bool pcie_pme_walk_bus(struct pci_bus *bus)
 	return ret;
 }
 
-/*
- * pcie_pme_from_pci_bridge:
- *   PCIe-PCI bridge가 PME를 발생시켰는지 확인한다.
- *   NVMe 장치 뒤에 레거시 PCI bridge가 있는 특수 구성에서 bridge의
- *   secondary bus devfn 0이 PME Requester ID로 사용되는 경우를 처리.
- */
 /**
  * pcie_pme_from_pci_bridge - Check if PCIe-PCI bridge generated a PME.
  * @bus: Secondary bus of the bridge.
@@ -238,14 +211,6 @@ static bool pcie_pme_from_pci_bridge(struct pci_bus *bus, u8 devfn)
 	return found;
 }
 
-/*
- * pcie_pme_handle_request:
- *   Root Port/Event Collector가 보고한 PME의 실제 소스를 찾아
- *   처리한다.
- *   NVMe 입장에서 핵심 경로: Requester ID로 NVMe pdev를 찾은 뒤
- *   pci_check_pme_status()로 PME 상태를 확인하고,
- *   pm_request_resume()을 통해 NVMe resume 콜백을 트리거한다.
- */
 /**
  * pcie_pme_handle_request - Find device that generated PME and handle it.
  * @port: Root port or event collector that generated the PME interrupt.
@@ -331,12 +296,6 @@ static void pcie_pme_handle_request(struct pci_dev *port, u16 req_id)
 		pci_info(port, "Spurious native interrupt!\n");
 }
 
-/*
- * pcie_pme_work_fn:
- *   PCIe PME 인터럽트에 대한 work 핸들러.
- *   인터럽트 핸들러는 workqueue로 지연 처리되어 NVMe resume 같은
- *   상대적으로 무거운 작업을 프로세스 컨텍스트에서 수행할 수 있게 한다.
- */
 /**
  * pcie_pme_work_fn - Work handler for PCIe PME interrupt.
  * @work: Work structure giving access to service data.
@@ -388,12 +347,6 @@ static void pcie_pme_work_fn(struct work_struct *work)
 	spin_unlock_irq(&data->lock);
 }
 
-/*
- * pcie_pme_irq:
- *   PCIe Root Port PME 인터럽트 핸들러.
- *   NVMe 장치가 PME 메시지를 본 Root Port로부터 IRQ가 들어오면
- *   이 함수가 실행되고, 실제 PME 처리는 workqueue로 넘긴다.
- */
 /**
  * pcie_pme_irq - Interrupt handler for PCIe root port PME interrupt.
  * @irq: Interrupt vector.
@@ -426,12 +379,6 @@ static irqreturn_t pcie_pme_irq(int irq, void *context)
 	return IRQ_HANDLED;
 }
 
-/*
- * pcie_pme_can_wakeup:
- *   주어진 PCI 장치의 wakeup capable 플래그를 설정한다.
- *   NVMe 장치가 런타임이나 시스템 슬립에서 PME로 깨어날 수 있도록
- *   device_set_wakeup_capable()을 호출한다.
- */
 /**
  * pcie_pme_can_wakeup - Set the wakeup capability flag.
  * @dev: PCI device to handle.
@@ -443,12 +390,6 @@ static int pcie_pme_can_wakeup(struct pci_dev *dev, void *ign)
 	return 0;
 }
 
-/*
- * pcie_pme_mark_devices:
- *   주어진 포트 아래 모든 장치에 wakeup 플래그를 설정한다.
- *   NVMe SSD가 연결된 Root Port 하이라키 전체를 wakeup 가능으로
- *   마킹하여 PME 기반 resume을 활성화한다.
- */
 /**
  * pcie_pme_mark_devices - Set the wakeup flag for devices below a port.
  * @port: PCIe root port or event collector to handle.
@@ -467,13 +408,6 @@ static void pcie_pme_mark_devices(struct pci_dev *port)
 		pci_walk_bus(port->subordinate, pcie_pme_can_wakeup, NULL);
 }
 
-/*
- * pcie_pme_probe:
- *   PCIe PME 서비스를 Root Port 또는 RCEC에 초기화/등록한다.
- *   NVMe 장치가 연결될 Root Port에서 PME 인터럽트를 할당하고,
- *   wakeup capability를 설정하여 NVMe의 runtime/system suspend-resume
- *   동작이 가능하게 한다.
- */
 /**
  * pcie_pme_probe - Initialize PCIe PME service for given root port.
  * @srv: PCIe service to initialize.
@@ -515,12 +449,6 @@ static int pcie_pme_probe(struct pcie_device *srv)
 	return 0;
 }
 
-/*
- * pcie_pme_check_wakeup:
- *   bus 트리에 wakeup 가능한 장치가 있는지 재귀적으로 확인한다.
- *   NVMe 시스템 suspend 시 Root Port가 아닌 하위 NVMe 장치가
- *   wakeup 소스인 경우 enable_irq_wake()을 호출해야 하는지 판단.
- */
 static bool pcie_pme_check_wakeup(struct pci_bus *bus)
 {
 	struct pci_dev *dev;
@@ -536,11 +464,6 @@ static bool pcie_pme_check_wakeup(struct pci_bus *bus)
 	return false;
 }
 
-/*
- * pcie_pme_disable_interrupt:
- *   PME 인터럽트를 비활성화하고 noirq 플래그를 설정한다.
- *   NVMe 시스템 suspend 진입 시 PME 서비스를 일시 정지할 때 사용.
- */
 static void pcie_pme_disable_interrupt(struct pci_dev *port,
 				       struct pcie_pme_service_data *data)
 {
@@ -551,13 +474,6 @@ static void pcie_pme_disable_interrupt(struct pci_dev *port,
 	spin_unlock_irq(&data->lock);
 }
 
-/*
- * pcie_pme_suspend:
- *   PCIe PME 서비스를 시스템 suspend에 맞춰 정지한다.
- *   NVMe 장치가 wakeup 소스로 설정되어 있으면 enable_irq_wake()을
- *   통해 PME IRQ를 wakeup IRQ로 승격하여 NVMe PME에 의한 시스템
- *   resume이 가능하게 한다.
- */
 /**
  * pcie_pme_suspend - Suspend PCIe PME service device.
  * @srv: PCIe service device to suspend.
@@ -589,12 +505,6 @@ static int pcie_pme_suspend(struct pcie_device *srv)
 	return 0;
 }
 
-/*
- * pcie_pme_resume:
- *   PCIe PME 서비스를 시스템 resume 시 복구한다.
- *   NVMe 장치가 PME#로 시스템을 깨운 경우, resume 후 PME 인터럽트를
- *   다시 활성화하거나 wakeup IRQ 등록을 해제한다.
- */
 /**
  * pcie_pme_resume - Resume PCIe PME service device.
  * @srv: PCIe service device to resume.
@@ -618,12 +528,6 @@ static int pcie_pme_resume(struct pcie_device *srv)
 	return 0;
 }
 
-/*
- * pcie_pme_remove:
- *   PCIe PME 서비스를 제거한다.
- *   NVMe 드라이버가 아닌 PCIe 포트 드라이버의 일부이므로, 모듈
- *   unload나 hotplug 시 호출되며 PME 인터럽트와 work를 정리한다.
- */
 /**
  * pcie_pme_remove - Prepare PCIe PME service device for removal.
  * @srv: PCIe service device to remove.
@@ -638,12 +542,6 @@ static void pcie_pme_remove(struct pcie_device *srv)
 	kfree(data);
 }
 
-/*
- * pcie_pme_driver:
- *   PCIe 포트 서비스 드라이버 구조체.
- *   NVMe 장치가 연결된 Root Port에 대해 PME 서비스를 등록하고,
- *   probe/suspend/resume/remove 콜백을 제공한다.
- */
 static struct pcie_port_service_driver pcie_pme_driver = {
 	.name		= "pcie_pme",
 	.port_type	= PCIE_ANY_PORT,
@@ -655,12 +553,6 @@ static struct pcie_port_service_driver pcie_pme_driver = {
 	.remove		= pcie_pme_remove,
 };
 
-/*
- * pcie_pme_init:
- *   PCIe PME 포트 서비스 드라이버를 커널에 등록한다.
- *   이 등록을 통해 NVMe가 연결된 Root Port에서 PME 인터럽트를
- *   처리할 수 있게 된다.
- */
 /**
  * pcie_pme_init - Register the PCIe PME service driver.
  */

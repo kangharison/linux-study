@@ -81,12 +81,6 @@
 
 #include "pci-host-common.h"
 
-/*
- * NVMe: CAM(legacy Configuration Address Mapping)용 ops.
- *      bus_shift=16은 16비트 CAM에서 bus/dev/fn을 조합하는 방식을 의미.
- *      이 ops가 등록되면 루트 브리지 아래 NVMe 장치의 config read/write가
- *      pci_generic_config_read()/write()를 통해 이루어짐.
- */
 static const struct pci_ecam_ops gen_pci_cfg_cam_bus_ops = {
 	.bus_shift	= 16,
 	.pci_ops	= {
@@ -98,11 +92,6 @@ static const struct pci_ecam_ops gen_pci_cfg_cam_bus_ops = {
 	}
 };
 
-/*
- * NVMe: Synopsys DesignWare PCIe 컨트롤러의 ECAM 모드 특이점.
- *      루트 포트의 downstream port가 type 0 config TLP를 dev 1 이상으로도
- *      전달하여 버스 0에 동일 NVMe 장치가 여러 번 나타나는 문제를 방지.
- */
 /* [한국어]
  * pci_dw_valid_device - 루트 버스에서 슬롯 0 외의 장치를 걸러 낸다
  *
@@ -142,11 +131,6 @@ static bool pci_dw_valid_device(struct pci_bus *bus, unsigned int devfn)
 	return true;
 }
 
-/*
- * NVMe: DesignWare ECAM용 map_bus 콜백.
- *      pci_ecam_map_bus()로 NVMe config 공간 MMIO 주소를 만들기 전
- *      유효성 검사를 수행.
- */
 /* [한국어]
  * pci_dw_ecam_map_bus - 필터를 거친 뒤 공용 ECAM 매핑에 넘긴다
  *
@@ -179,10 +163,6 @@ static void __iomem *pci_dw_ecam_map_bus(struct pci_bus *bus,
  * read/write 는 양쪽 모두 공용 헬퍼다. */
 }
 
-/*
- * NVMe: DesignWare 기반 SoC(Armada8k, Synquacer, snps,dw-pcie-ecam)용 ops.
- *      map_bus에 위의 valid_device 필터를 적용해 중복 열거를 막음.
- */
 static const struct pci_ecam_ops pci_dw_ecam_bus_ops = {
 	.pci_ops	= {
 		.map_bus	= pci_dw_ecam_map_bus,
@@ -193,12 +173,6 @@ static const struct pci_ecam_ops pci_dw_ecam_bus_ops = {
 	}
 };
 
-/*
- * NVMe: DT compatible 매핑 테이블.
- *      firmware(DT)가 "pci-host-ecam-generic" 등을 선언하면 이 드라이버가
- *      PCIe 루트 브리지로 등록되고, NVMe SSD가 연결되었을 때
- *      drivers/nvme/host/pci.c의 nvme_probe()로 이어지는 열거 과정이 시작됨.
- */
 static const struct of_device_id gen_pci_of_match[] = {
 	{ .compatible = "pci-host-cam-generic",
 	  .data = &gen_pci_cfg_cam_bus_ops },
@@ -226,12 +200,6 @@ static const struct of_device_id gen_pci_of_match[] = {
 };
 MODULE_DEVICE_TABLE(of, gen_pci_of_match);
 
-/*
- * NVMe: generic PCI host platform_driver.
- *      .probe = pci_host_common_probe: 루트 브리지 생성 및 pci_host_probe() 호출.
- *      이후 PCI 버스 스캔이 NVMe 장치를 발견하면
- *      drivers/nvme/host/pci.c가 nvme_pci_driver로 바인딩함.
- */
 static struct platform_driver gen_pci_driver = {
 	.driver = {
 		.name = "pci-host-generic",

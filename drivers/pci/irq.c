@@ -305,12 +305,6 @@ EXPORT_SYMBOL(pci_free_irq);
  * the PCI Express Base Specification, Revision 2.1)
  */
 
-/*
- * pci_swizzle_interrupt_pin:
- *   한 단계 PCI-to-PCI bridge 뒤에 있는 NVMe 장치의 INTx 핀을 swizzling한다.
- *   NVMe SSD가 add-in card나 bridge 뒤에 장착된 경우, 하위 장치의 INTA~INTD가
- *   상위 bridge의 다른 핀으로 매핑되므로 이 함수로 올바른 핀을 계산한다.
- */
 u8 pci_swizzle_interrupt_pin(const struct pci_dev *dev, u8 pin)
 {
 	int slot;
@@ -322,12 +316,6 @@ u8 pci_swizzle_interrupt_pin(const struct pci_dev *dev, u8 pin)
 
 	return (((pin - 1) + slot) % 4) + 1;
 }
-/*
- * pci_get_interrupt_pin:
- *   NVMe 장치의 INTx 핀이 Root Complex에 도달할 때까지 bridge를 따라
- *   swizzling하고, 최종적으로 도달한 루트 bridge 측 장치를 *bridge에
- *   저장한다. 플랫폼 map_irq()에 넘길 pin과 bridge를 얻는 데 사용된다.
- */
 int pci_get_interrupt_pin(struct pci_dev *dev, struct pci_dev **bridge)
 {
 	u8 pin;
@@ -353,12 +341,6 @@ int pci_get_interrupt_pin(struct pci_dev *dev, struct pci_dev **bridge)
  * bridges all the way up to a PCI root bus.
  */
 
-/*
- * pci_common_swizzle:
- *   NVMe 장치의 INTx 핀을 Root Complex까지 누적 swizzling한다.
- *   *pinp에 최종 핀을 기록하고, root bus에 연결된 장치의 slot 번호를
- *   반환한다. 레거시 플랫폼 INTx 라우팅 테이블에서 사용된다.
- */
 u8 pci_common_swizzle(struct pci_dev *dev, u8 *pinp)
 {
 	u8 pin = *pinp;
@@ -372,13 +354,6 @@ u8 pci_common_swizzle(struct pci_dev *dev, u8 *pinp)
 }
 EXPORT_SYMBOL_GPL(pci_common_swizzle);
 
-/*
- * pci_assign_irq:
- *   NVMe 장치의 INTx 라인을 host bridge가 제공하는 map_irq() 콜백을 통해
- *   플랫폼 IRQ 번호로 할당한다. NVMe가 MSI/MSI-X를 쓰지 못하는 경우
- *   dev->irq에 플랫폼 IRQ 번호가 설정되며, PCI config space의
- *   INTERRUPT_LINE 레지스터에도 기록된다.
- */
 void pci_assign_irq(struct pci_dev *dev)
 {
 	u8 pin;
@@ -425,14 +400,6 @@ void pci_assign_irq(struct pci_dev *dev)
 	 */
 	pci_write_config_byte(dev, PCI_INTERRUPT_LINE, irq);
 }
-/*
- * pci_check_and_set_intx_mask:
- *   NVMe 장치의 PCI COMMAND/STATUS 레지스터를 원자적으로 읽고, INTx
- *   Disable 비트를 설정/해제한다. mask=true이면 pending 인터럽트가 있을
- *   때만 마스크를 설정하고, mask=false이면 pending이 없을 때만 언마스크.
- *   MSI/MSI-X를 지원하지 않는 NVMe 컨트롤러의 INTx 핸들링에서 사용될 수
- *   있다.
- */
 static bool pci_check_and_set_intx_mask(struct pci_dev *dev, bool mask)
 {
 	struct pci_bus *bus = dev->bus;
@@ -486,12 +453,6 @@ done:
  * true in that case. False is returned if no interrupt was pending.
  */
 
-/*
- * pci_check_and_mask_intx:
- *   NVMe 장치가 INTx 라인을 asserted했으면 INTx를 마스크하고 true 반환.
- *   pending 인터럽트가 없으면 false 반환. MSI/MSI-X 미지원 NVMe에서
- *   인터럽트 처리 후 재진입 방지에 사용될 수 있다.
- */
 bool pci_check_and_mask_intx(struct pci_dev *dev)
 {
 	return pci_check_and_set_intx_mask(dev, true);
@@ -507,12 +468,6 @@ EXPORT_SYMBOL_GPL(pci_check_and_mask_intx);
  * still an interrupt pending.
  */
 
-/*
- * pci_check_and_unmask_intx:
- *   NVMe 장치의 INTx pending이 없으면 마스크를 해제(true 반환).
- *   pending이 여전히 있으면 마스크 유지(false 반환). 인터럽트 핸들러
- *   종료 후 다음 인터럽트를 받기 위해 언마스크할 때 사용된다.
- */
 bool pci_check_and_unmask_intx(struct pci_dev *dev)
 {
 	return pci_check_and_set_intx_mask(dev, false);
@@ -529,29 +484,13 @@ EXPORT_SYMBOL_GPL(pci_check_and_unmask_intx);
  * implementations can override this.
  */
 
-/*
- * pcibios_penalize_isa_irq:
- *   ISA IRQ 우선순위를 낮추는 아키텍처별 훅의 기본 구현. NVMe PCIe
- *   장치는 ISA IRQ와 직접 관련 없지만, 일부 레거시 플랫폼에서 INTx
- *   라우팅 시 ISA 충돌을 회피하기 위해 호출될 수 있다.
- */
 void __weak pcibios_penalize_isa_irq(int irq, int active) {}
 
-/*
- * pcibios_alloc_irq:
- *   아키텍처별 추가 IRQ 할당 훅의 기본 구현. NVMe 장치의 INTx 할당
- *   과정에서 플랫폼별 추가 작업이 필요할 때 재정의될 수 있다.
- */
 int __weak pcibios_alloc_irq(struct pci_dev *dev)
 {
 	return 0;
 }
 
-/*
- * pcibios_free_irq:
- *   pcibios_alloc_irq()에서 할당한 아키텍처별 IRQ 리소스를 해제하는
- *   기본 구현. NVMe 장치 제거 시 플랫폼 정리 작업에 사용될 수 있다.
- */
 void __weak pcibios_free_irq(struct pci_dev *dev)
 {
 }

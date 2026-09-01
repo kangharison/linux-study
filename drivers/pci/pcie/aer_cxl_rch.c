@@ -64,12 +64,6 @@
 #include "../pci.h"
 #include "portdrv.h"
 
-/*
- * NVMe: 주어진 pci_dev가 CXL 메모리 장치인지 확인한다.
- * NVMe 입장에서는 이 장치가 NVMe SSD가 아니라 CXL.mem 장치인지 판별하여
- * AER 오류 처리 대상을 제한하는 역할을 한다. 즉, NVMe 장치는 CXL이 아니면
- * 이 파일의 오류 전파 경로를 타지 않는다.
- */
 static bool is_cxl_mem_dev(struct pci_dev *dev)
 {
 	/*
@@ -90,12 +84,6 @@ static bool is_cxl_mem_dev(struct pci_dev *dev)
 	return true;
 }
 
-/*
- * NVMe: 현재 CXL 장치가 속한 호스트 브리지에서 AER 오류를 native하게
- * 처리하는지 확인한다. NVMe 시스템에서 pcie_ports_native 모드나
- * host->native_aer 플래그가 설정되어 있어야 장치 드라이버의 AER 콜백을
- * 직접 호출할 수 있다.
- */
 static bool cxl_error_is_native(struct pci_dev *dev)
 {
 	struct pci_host_bridge *host = pci_find_host_bridge(dev->bus);
@@ -103,12 +91,6 @@ static bool cxl_error_is_native(struct pci_dev *dev)
 	return (pcie_ports_native || host->native_aer);
 }
 
-/*
- * NVMe: RCEC(Root Complex Event Collector) 아래에 연결된 각 CXL 메모리
- * 장치에 대해 AER 오류를 전파하는 반복 콜백 함수이다.
- * NVMe의 pci_error_handlers 구조체가 등록된 장치에게는
- * error_detected() 또는 cor_error_detected()가 호출된다.
- */
 static int cxl_rch_handle_error_iter(struct pci_dev *dev, void *data)
 {
 	struct aer_err_info *info = (struct aer_err_info *)data;
@@ -135,12 +117,6 @@ static int cxl_rch_handle_error_iter(struct pci_dev *dev, void *data)
 	return 0;
 }
 
-/*
- * NVMe: RCH(Root Complex Host)의 낶부 AER 오류를 CXL.mem 장치 드라이버로
- * 전달하는 진입점이다. NVMe PCIe 시스템에서 RC_EC 타입 장치의 낶부 오류는
- * 연결된 CXL 메모리 포트에서 발생한 AER로 해석되며, 이 함수는 그것을
- * 적절한 장치 드라이버(예: NVMe 드라이버의 AER 핸들러)로 라우팅한다.
- */
 void cxl_rch_handle_error(struct pci_dev *dev, struct aer_err_info *info)
 {
 	/*
@@ -153,10 +129,6 @@ void cxl_rch_handle_error(struct pci_dev *dev, struct aer_err_info *info)
 		pcie_walk_rcec(dev, cxl_rch_handle_error_iter, info);
 }
 
-/*
- * NVMe: RCEC 아래에 CXL 메모리 장치가 존재하고 native AER 처리가 가능한지
- * 확인하는 반복 콜백이다. 하나라도 존재하면 즉시 탐색을 중단한다.
- */
 static int handles_cxl_error_iter(struct pci_dev *dev, void *data)
 {
 	bool *handles_cxl = data;
@@ -168,11 +140,6 @@ static int handles_cxl_error_iter(struct pci_dev *dev, void *data)
 	return *handles_cxl;
 }
 
-/*
- * NVMe: 주어진 RCEC가 CXL AER 오류를 처리해야 하는지(즉, 하위에 CXL.mem
- * 장치가 있는지) 판단한다. pcie_aer_is_native()를 통해 포트 자체의 native
- * AER 지원 여부도 함께 확인한다.
- */
 static bool handles_cxl_errors(struct pci_dev *rcec)
 {
 	bool handles_cxl = false;
@@ -184,12 +151,6 @@ static bool handles_cxl_errors(struct pci_dev *rcec)
 	return handles_cxl;
 }
 
-/*
- * NVMe: RCEC에서 CXL 메모리 장치의 AER를 처리할 수 있음이 확인되면,
- * 해당 RCEC의 낶부 AER 오류 마스크를 해제(unmask)하여 오류 보고를
- * 활성화한다. NVMe 입장에서는 이로 인해 이후 AER 오류가 발생하면
- * nvme_error_detected()와 같은 드라이버 콜백으로 전달될 수 있다.
- */
 void cxl_rch_enable_rcec(struct pci_dev *rcec)
 {
 	if (!handles_cxl_errors(rcec))

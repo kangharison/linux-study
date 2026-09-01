@@ -64,14 +64,6 @@
 #include <linux/uaccess.h>
 #include "pci.h"
 
-/*
- * pciconfig_read:
- *   사용자 공간에서 지정한 PCI bus/devfn/offset/len의 config space를 읽어
- *   buf에 복사한다. NVMe 관점에서는 NVMe SSD의 PCIe config 레지스터(예:
- *   Vendor ID, BAR0, CAP_PTR)를 사용자 도구가 진단할 때 사용된다.
- *   CAP_SYS_ADMIN 권한이 필요하며, 존재하지 않는 장치는 -ENODEV로
- *   처리한다.
- */
 SYSCALL_DEFINE5(pciconfig_read,
 		unsigned long, bus,
 		unsigned long, dfn,
@@ -147,14 +139,6 @@ error:
 	return err;
 }
 
-/*
- * pciconfig_write:
- *   사용자 공간에서 PCI config space에 값을 쓴다. NVMe 관점에서는
- *   lspci/setpci 등이 NVMe SSD의 PCIe 레지스터(예: PCIe Capability,
- *   ASPM 제어, MPS, AER/EDR 관련 필드)를 진단/변경할 때 사용될 수
- *   있다. 단 커널 NVMe 드라이버가 런타임에 직접 호출하지는 않는다.
- *   CAP_SYS_ADMIN과 LOCKDOWN_PCI_ACCESS 검사를 수행한다.
- */
 SYSCALL_DEFINE5(pciconfig_write,
 		unsigned long, bus,
 		unsigned long, dfn,

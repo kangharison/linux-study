@@ -248,12 +248,6 @@ struct pci_doe_task {
 
 #ifdef CONFIG_SYSFS
 
-/*
- * doe_discovery_show:
- *   NVMe SSD의 doe_features sysfs 디렉터리 아래 "0001:00" 항목을 노출한다.
- *   PCI-SIG DOE Discovery feature를 통해 사용자공간(nvme-cli 등)에서
- *   장치가 지원하는 DOE feature 목록을 확인할 수 있게 한다.
- */
 /* [한국어]
  * doe_discovery_show - sysfs 에서 Discovery 기능의 고정 식별자를 보여 준다
  *
@@ -331,12 +325,6 @@ const struct attribute_group pci_doe_sysfs_group = {
 };
 
 
-/*
- * pci_doe_sysfs_feature_show:
- *   NVMe 장치의 개별 DOE feature 이름을 sysfs에 출력한다.
- *   사용자공간에서 /sys/bus/pci/devices/.../doe_features/ 아래 파일로
- *   NVMe 컨트롤러가 지원하는 DOE 기능을 확인하는 데 사용된다.
- */
 /* [한국어]
  * pci_doe_sysfs_feature_show - 기능 파일을 읽으면 자기 이름을 그대로 돌려준다
  *
@@ -363,12 +351,6 @@ static ssize_t pci_doe_sysfs_feature_show(struct device *dev,
 }
 
 
-/*
- * pci_doe_sysfs_feature_remove:
- *   NVMe 장치에서 DOE feature별 sysfs 파일을 제거하고 메모리를 해제한다.
- *   nvme_remove/hotplug 시 pci_doe_sysfs_teardown()을 통해 호출되어
- *   사용자공간 인터페이스를 정리한다.
- */
 /* [한국어]
  * pci_doe_sysfs_feature_remove - 이 우편함이 만든 기능 파일과 이름 문자열을 모두 해제한다
  *
@@ -427,12 +409,6 @@ static void pci_doe_sysfs_feature_remove(struct pci_dev *pdev,
 }
 
 
-/*
- * pci_doe_sysfs_feature_populate:
- *   NVMe 장치의 DOE mailbox가 지원하는 feature마다 sysfs 파일을 생성한다.
- *   discovery feature는 별도의 doe_discovery 항목으로 처리되며, 나머지는
- *   "VID:TYPE" 형태의 파일로 노출되어 관리 도구에서 확인할 수 있다.
- */
 /* [한국어]
  * pci_doe_sysfs_feature_populate - 열거된 기능마다 sysfs 파일을 만든다
  *
@@ -562,12 +538,6 @@ fail:
 }
 
 
-/*
- * pci_doe_sysfs_teardown:
- *   NVMe 장치에 연결된 모든 DOE mailbox의 sysfs 항목을 제거한다.
- *   장치 제거 단계에서 사용자공간이 DOE feature 정보를 더 이상 볼 수 없도록
- *   정리한다.
- */
 /* [한국어]
  * pci_doe_sysfs_teardown - 이 장치의 모든 우편함이 만든 sysfs 파일을 걷어낸다
  *
@@ -596,12 +566,6 @@ void pci_doe_sysfs_teardown(struct pci_dev *pdev)
 }
 
 
-/*
- * pci_doe_sysfs_init:
- *   NVMe 장치 probe 시 각 DOE mailbox에 대해 sysfs feature 파일을 생성한다.
- *   생성된 /sys/bus/pci/devices/.../doe_features 항목은 nvme-cli 등이
- *   NVMe 컨트롤러의 DOE capability를 확인하는 데 사용된다.
- */
 /* [한국어]
  * pci_doe_sysfs_init - 이 장치의 모든 우편함에 대해 sysfs 파일을 만든다
  *
@@ -640,12 +604,6 @@ void pci_doe_sysfs_init(struct pci_dev *pdev)
 #endif
 
 
-/*
- * pci_doe_wait:
- *   NVMe 장치의 DOE mailbox에서 취소 플래그가 설정될 때까지 대기한다.
- *   DOE 상태 머신이 폴링 중 firmware나 다른 주체에 의한 충돌을 감지하면
- *   작업을 중단하기 위해 이 대기를 사용한다.
- */
 /* [한국어]
  * pci_doe_wait - 취소 신호를 기다리며 정해진 시간만큼 잠든다
  *
@@ -680,11 +638,6 @@ static int pci_doe_wait(struct pci_doe_mb *doe_mb, unsigned long timeout)
 }
 
 
-/*
- * pci_doe_write_ctrl:
- *   NVMe 장치의 DOE 제어 레지스터(PCI_DOE_CTRL)에 값을 기록한다.
- *   GO/ABORT 비트를 설정하여 DOE 데이터 객체 교환을 시작하거나 중단한다.
- */
 /* [한국어]
  * pci_doe_write_ctrl - DOE 제어 레지스터에 값을 쓴다
  *
@@ -718,12 +671,6 @@ static void pci_doe_write_ctrl(struct pci_doe_mb *doe_mb, u32 val)
 }
 
 
-/*
- * pci_doe_abort:
- *   NVMe 장치의 DOE mailbox에 abort를 발행하여 상태 머신을 리셋한다.
- *   probe 시 메일박스 초기화는 물론, 장치 분리(hotplug)나 오류 복구 시
- *   진행 중인 DOE 교환을 정리하는 데 필수적이다.
- */
 /* [한국어]
  * pci_doe_abort - 우편함에 Abort 를 걸고 오류·바쁨이 모두 풀릴 때까지 기다린다
  *
@@ -796,12 +743,6 @@ static int pci_doe_abort(struct pci_doe_mb *doe_mb)
 }
 
 
-/*
- * pci_doe_send_req:
- *   NVMe 호스트가 DOE 요청 데이터 객체를 NVMe 장치의 mailbox 쓰기 포트로
- *   전송한다. Busy/Error 상태를 확인하고, 헤더와 payload를 DWORD 단위로
- *   기록한 뒤 GO 비트를 설정한다.
- */
 /* [한국어]
  * pci_doe_send_req - 요청 데이터 오브젝트를 설정공간 창으로 밀어 넣고 GO 를 건다
  *
@@ -929,11 +870,6 @@ static int pci_doe_send_req(struct pci_doe_mb *doe_mb,
 }
 
 
-/*
- * pci_doe_data_obj_ready:
- *   NVMe 장치가 DOE 응답 데이터 객체를 준비했는지 PCI_DOE_STATUS 레지스터의
- *   Data Object Ready 비트를 읽어 확인한다.
- */
 /* [한국어]
  * pci_doe_data_obj_ready - 응답 오브젝트가 준비됐는지 상태 비트 하나를 본다
  *
@@ -966,12 +902,6 @@ static bool pci_doe_data_obj_ready(struct pci_doe_mb *doe_mb)
 }
 
 
-/*
- * pci_doe_recv_resp:
- *   NVMe 장치의 DOE mailbox 읽기 포트에서 응답 데이터 객체를 수신한다.
- *   헤더(VID/type/length)를 검증하고, 사용자가 요청한 크기만큼 payload를
- *   복사하며 초과 데이터는 flush한다.
- */
 /* [한국어]
  * pci_doe_recv_resp - 응답 오브젝트를 읽어 요청자 버퍼에 담고 남는 것은 버린다
  *
@@ -1113,11 +1043,6 @@ static int pci_doe_recv_resp(struct pci_doe_mb *doe_mb, struct pci_doe_task *tas
 }
 
 
-/*
- * signal_task_complete:
- *   NVMe 측에 제출된 DOE 태스크의 결과를 기록하고 완료 콜백을 호출한다.
- *   동기 호출이라면 completion을 wake하여 NVMe 호출자가 깨어나게 한다.
- */
 /* [한국어]
  * signal_task_complete - 작업 결과를 담고 완료 콜백을 부른다
  *
@@ -1146,12 +1071,6 @@ static void signal_task_complete(struct pci_doe_task *task, int rv)
 }
 
 
-/*
- * signal_task_abort:
- *   DOE 태스크가 실패했을 때 NVMe 장치에 abort를 시도하고, abort마저
- *   실패하면 해당 mailbox를 dead로 표시한다. 이후 새로운 DOE 요청은
- *   차단되어 NVMe 호스트가 깨진 mailbox를 계속 사용하지 않도록 한다.
- */
 /* [한국어]
  * signal_task_abort - 우편함을 Abort 로 되돌린 뒤 작업을 실패로 끝낸다
  *
@@ -1194,12 +1113,6 @@ static void signal_task_abort(struct pci_doe_task *task, int rv)
 }
 
 
-/*
- * doe_statemachine_work:
- *   NVMe용 DOE 태스크를 비동기적으로 처리하는 상태 머신 work 함수.
- *   요청 전송 -> 응답 폴링 -> 응답 수신 -> 완료 시그널의 전체 흐름을
- *   담당하며, timeout/오류 시 abort를 수행한다.
- */
 /* [한국어]
  * doe_statemachine_work - 작업 하나의 전송·대기·수신을 순서대로 수행하는 워커
  *
@@ -1319,12 +1232,6 @@ retry_resp:
 }
 
 
-/*
- * pci_doe_task_complete:
- *   동기 방식 pci_doe() 호출 시 사용하는 낮은 수준 완료 콜백.
- *   NVMe 호스트가 wait_for_completion()으로 대기 중인 completion 객체를
- *   시그널링하여 결과를 반환한다.
- */
 /* [한국어]
  * pci_doe_task_complete - 동기 호출자를 깨우는 완료 콜백
  *
@@ -1348,12 +1255,6 @@ static void pci_doe_task_complete(struct pci_doe_task *task)
 }
 
 
-/*
- * pci_doe_discovery:
- *   NVMe 장치의 DOE Discovery 프로토콜을 이용해 지원 feature를 하나씩 조회한다.
- *   pci_doe_cache_features()에서 반복 호출되어 NVMe 컨트롤러가 지원하는
- *   vendor/type 조합 목록을 구성한다.
- */
 /* [한국어]
  * pci_doe_discovery - Discovery 기능으로 다음 기능 하나를 알아낸다
  *
@@ -1420,11 +1321,6 @@ static int pci_doe_discovery(struct pci_doe_mb *doe_mb, u8 capver, u8 *index, u1
 }
 
 
-/*
- * pci_doe_xa_feat_entry:
- *   NVMe 장치의 DOE feature 식별자(vendor ID + type)를 xarray에 저장할 값으로
- *   인코딩한다.
- */
 /* [한국어]
  * pci_doe_xa_feat_entry - [벤더, 타입] 한 쌍을 xarray 값 하나로 접는다
  *
@@ -1452,12 +1348,6 @@ static void *pci_doe_xa_feat_entry(u16 vid, u8 type)
 }
 
 
-/*
- * pci_doe_cache_features:
- *   NVMe 장치 probe 시 DOE Discovery를 반복 수행하여 지원 feature 목록을
- *   xarray에 캐시한다. 이 목록은 이후 NVMe 관련 코드가 DOE feature 사용 전
- *   pci_doe_supports_feat()로 지원 여부를 빠르게 확인하는 데 쓰인다.
- */
 /* [한국어]
  * pci_doe_cache_features - Discovery 를 반복해 기능 목록을 xarray 에 채운다
  *
@@ -1526,12 +1416,6 @@ static int pci_doe_cache_features(struct pci_doe_mb *doe_mb)
 }
 
 
-/*
- * pci_doe_cancel_tasks:
- *   NVMe 장치 제거, suspend, hot-unplug 등에서 DOE mailbox의 pending/in-progress
- *   작업을 모두 취소한다. DEAD/CANCEL 플래그를 설정하고 대기 중인 work를
- *   깨워 정리한다.
- */
 /* [한국어]
  * pci_doe_cancel_tasks - 우편함을 죽은 것으로 표시하고 대기 중인 작업을 깨운다
  *
@@ -1576,12 +1460,6 @@ static void pci_doe_cancel_tasks(struct pci_doe_mb *doe_mb)
  *	    ERR_PTR(-errno) on failure
  */
 
-/*
- * pci_doe_create_mb:
- *   NVMe 장치의 한 DOE 확장 capability에 대해 mailbox 객체를 생성한다.
- *   메모리 할당, workqueue 생성, abort로 리셋, feature 캐시까지 수행하며
- *   성공하면 NVMe pci_dev->doe_mbs에 등록된다.
- */
 /* [한국어]
  * pci_doe_create_mb - 우편함 하나를 만들고 Abort 로 비운 뒤 기능 목록을 캐시한다
  *
@@ -1689,12 +1567,6 @@ err_free:
  * Destroy all internal data structures created for the DOE mailbox.
  */
 
-/*
- * pci_doe_destroy_mb:
- *   NVMe 장치의 한 DOE mailbox를 완전히 해제한다.
- *   pending 작업 취소, feature xarray 제거, workqueue 파괴, 메모리 반납을
- *   순서대로 수행한다.
- */
 /* [한국어]
  * pci_doe_destroy_mb - 우편함 하나를 정리한다
  *
@@ -1732,11 +1604,6 @@ static void pci_doe_destroy_mb(struct pci_doe_mb *doe_mb)
  * RETURNS: True if the DOE mailbox supports the feature specified
  */
 
-/*
- * pci_doe_supports_feat:
- *   NVMe 장치의 특정 DOE mailbox가 지정한 vendor/type feature를 지원하는지
- *   확인한다. PCI-SIG DOE Discovery는 항상 지원되는 것으로 처리한다.
- */
 /* [한국어]
  * pci_doe_supports_feat - 이 우편함이 그 [벤더, 타입] 기능을 지원하는지 본다
  *
@@ -1800,12 +1667,6 @@ static bool pci_doe_supports_feat(struct pci_doe_mb *doe_mb, u16 vid, u8 type)
  * RETURNS: 0 when task has been successfully queued, -ERRNO on error
  */
 
-/*
- * pci_doe_submit_task:
- *   NVMe 측이나 보안 하위시스템이 DOE 교환을 요청할 때 태스크를 mailbox
- *   workqueue에 제출한다. 지원 feature 검사와 mailbox 상태(DEAD) 검사 후
- *   비동기 상태 머신 work를 예약한다.
- */
 /* [한국어]
  * pci_doe_submit_task - 작업을 검증하고 우편함 작업 큐에 넣는다
  *
@@ -1884,12 +1745,6 @@ static int pci_doe_submit_task(struct pci_doe_mb *doe_mb,
  * is responsible for checking that.
  */
 
-/*
- * pci_doe:
- *   NVMe/보안 모듈이 DOE 데이터 객체 교환을 동기적으로 수행하는 주요 API.
- *   요청 payload를 전송하고 응답이 도착할 때까지 sleep하며, 수신된
- *   응답 길이(또는 음수 errno)를 반환한다.
- */
 /* [한국어]
  * pci_doe - DOE 메시지를 보내고 응답을 받는 동기 API (외부 공개)
  *
@@ -1966,12 +1821,6 @@ EXPORT_SYMBOL_GPL(pci_doe);
  * RETURNS: Pointer to the DOE mailbox or NULL if none was found.
  */
 
-/*
- * pci_find_doe_mailbox:
- *   NVMe pci_dev가 지정한 vendor/type의 DOE feature를 지원하는 첫 번째
- *   mailbox를 반환한다. NVMe 관련 보안/인증 코드가 사용할 mailbox를
- *   찾을 때 사용된다.
- */
 /* [한국어]
  * pci_find_doe_mailbox - 그 기능을 지원하는 우편함을 이 장치에서 찾는다
  *
@@ -2011,12 +1860,6 @@ struct pci_doe_mb *pci_find_doe_mailbox(struct pci_dev *pdev, u16 vendor,
 EXPORT_SYMBOL_GPL(pci_find_doe_mailbox);
 
 
-/*
- * pci_doe_init:
- *   NVMe 장치 probe 시 PCI core가 호출하여 모든 DOE 확장 capability를
- *   찾고 각각에 대한 mailbox를 생성한다. 생성된 mailbox는 sysfs를 통해
- *   NVMe 사용자공간 도구에 노출될 수 있다.
- */
 /* [한국어]
  * pci_doe_init - 장치의 모든 DOE 확장 능력을 찾아 우편함을 만든다
  *
@@ -2080,11 +1923,6 @@ void pci_doe_init(struct pci_dev *pdev)
 }
 
 
-/*
- * pci_doe_destroy:
- *   NVMe 장치 제거 시 모든 DOE mailbox를 파괴하고 pci_dev->doe_mbs
- *   컬렉션을 제거한다.
- */
 /* [한국어]
  * pci_doe_destroy - 이 장치의 모든 우편함을 파괴하고 xarray 를 비운다
  *
@@ -2116,12 +1954,6 @@ void pci_doe_destroy(struct pci_dev *pdev)
 }
 
 
-/*
- * pci_doe_disconnected:
- *   NVMe 장치가 hotplug 등으로 연결이 끊어졌을 때 모든 DOE mailbox의
- *   pending/in-progress 작업을 즉시 취소한다. 장치가 응답하지 않는 상황에서
- *   무한 대기를 방지한다.
- */
 /* [한국어]
  * pci_doe_disconnected - 장치가 사라졌을 때 진행 중인 전송을 즉시 끊는다
  *

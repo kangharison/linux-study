@@ -103,22 +103,11 @@ module_param(pciehp_poll_time, int, 0644);
 MODULE_PARM_DESC(pciehp_poll_mode, "Using polling mechanism for hot-plug events or not");
 MODULE_PARM_DESC(pciehp_poll_time, "Polling mechanism frequency, in seconds");
 
-/*
- * pciehp 핫플러그 슬롯 operation 함수들의 전방 선언.
- * 이 함수들은 NVMe SSD가 장착된 슬롯의 전원, 래치, 어댑터 상태를 sysfs/procfs에
- * 노출하거나 사용자공간의 enable/disable 요청을 처리한다.
- */
 static int set_attention_status(struct hotplug_slot *slot, u8 value);
 static int get_power_status(struct hotplug_slot *slot, u8 *value);
 static int get_latch_status(struct hotplug_slot *slot, u8 *value);
 static int get_adapter_status(struct hotplug_slot *slot, u8 *value);
 
-/*
- * init_slot:
- *   PCIe 핫플러그 슬롯 하나를 초기화하고 PCI 핫플러그 코어에 등록한다.
- *   NVMe SSD가 연결될 수 있는 슬롯마다 이 함수가 호출되어 sysfs/procfs 상의
- *   슬롯 인터페이스를 생성한다.
- */
 static int init_slot(struct controller *ctrl)
 {
 	struct hotplug_slot_ops *ops;
@@ -159,11 +148,6 @@ static int init_slot(struct controller *ctrl)
 	return retval;
 }
 
-/*
- * cleanup_slot:
- *   init_slot()에서 등록한 핫플러그 슬롯을 해제한다.
- *   NVMe SSD가 탑재된 슬롯의 sysfs/procfs 노드를 제거할 때 사용된다.
- */
 static void cleanup_slot(struct controller *ctrl)
 {
 	struct hotplug_slot *hotplug_slot = &ctrl->hotplug_slot;
@@ -174,11 +158,6 @@ static void cleanup_slot(struct controller *ctrl)
 
 /*
  * set_attention_status - Turns the Attention Indicator on, off or blinking
- */
-/*
- * set_attention_status:
- *   Attention Indicator(주의 표시등)를 켜거나 끄거나 깜빡이게 한다.
- *   NVMe SSD가 탑재된 슬롯의 장애/유지보수 상태를 외부 LED로 알릴 때 사용된다.
  */
 static int set_attention_status(struct hotplug_slot *hotplug_slot, u8 status)
 {
@@ -196,11 +175,6 @@ static int set_attention_status(struct hotplug_slot *hotplug_slot, u8 status)
 	return 0;
 }
 
-/*
- * get_power_status:
- *   현재 핫플러그 슬롯의 전원 상태(Power Controller Control)를 읽는다.
- *   NVMe SSD가 전원을 공급받고 있는지 확인할 때 사용된다.
- */
 static int get_power_status(struct hotplug_slot *hotplug_slot, u8 *value)
 {
 	struct controller *ctrl = to_ctrl(hotplug_slot);
@@ -212,11 +186,6 @@ static int get_power_status(struct hotplug_slot *hotplug_slot, u8 *value)
 	return 0;
 }
 
-/*
- * get_latch_status:
- *   MRL(Manual Retention Latch) 상태를 읽는다.
- *   NVMe SSD가 물리적으로 고정/해제되었는지 확인하는 데 사용된다.
- */
 static int get_latch_status(struct hotplug_slot *hotplug_slot, u8 *value)
 {
 	struct controller *ctrl = to_ctrl(hotplug_slot);
@@ -228,11 +197,6 @@ static int get_latch_status(struct hotplug_slot *hotplug_slot, u8 *value)
 	return 0;
 }
 
-/*
- * get_adapter_status:
- *   슬롯에 NVMe 어댑터(카드)가 실제로 삽입되어 있거나 링크가 활성화되어
- *   있는지를 확인한다. NVMe 드라이버가 probe/remove를 결정하는 핵심 상태다.
- */
 static int get_adapter_status(struct hotplug_slot *hotplug_slot, u8 *value)
 {
 	struct controller *ctrl = to_ctrl(hotplug_slot);
@@ -260,13 +224,6 @@ static int get_adapter_status(struct hotplug_slot *hotplug_slot, u8 *value)
  * interrupt generation is disabled [when] interrupt generation is subsequently
  * enabled" is optional per PCIe r4.0, sec 6.7.3.4.
  */
-/*
- * pciehp_check_presence:
- *   probe나 resume 시점에 현재 슬롯 상태를 명시적으로 확인하고, 변화가 있으면
- *   Presence Detect Changed(PDC) 이벤트를 합성한다.
- *   NVMe SSD가 시스템 부팅 중이나 절전 복귀 후 이미 삽입/제거된 상태를
- *   올바르게 반영할 수 있도록 하는 핵심 함수다.
- */
 static void pciehp_check_presence(struct controller *ctrl)
 {
 	int occupied;
@@ -285,12 +242,6 @@ static void pciehp_check_presence(struct controller *ctrl)
 	up_read(&ctrl->reset_lock);
 }
 
-/*
- * pciehp_probe:
- *   PCIe 포트 서비스 드라이버의 probe 함수. 핫플러그 서비스를 지원하는
- *   PCIe 포트마다 호출되며, NVMe SSD가 연결될 수 있는 슬롯을 초기화하고
- *   사용자공간에 노출한다.
- */
 static int pciehp_probe(struct pcie_device *dev)
 {
 	int rc;
@@ -351,11 +302,6 @@ err_out_release_ctlr:
 	return -ENODEV;
 }
 
-/*
- * pciehp_remove:
- *   PCIe 포트 서비스 드라이버의 remove 함수. NVMe SSD가 연결된 슬롯의
- *   핫플러그 인프라를 제거한다.
- */
 static void pciehp_remove(struct pcie_device *dev)
 {
 	struct controller *ctrl = get_service_data(dev);
@@ -367,12 +313,6 @@ static void pciehp_remove(struct pcie_device *dev)
 }
 
 #ifdef CONFIG_PM
-/*
- * pme_is_native:
- *   현재 포트에서 PME(Power Management Event)를 네이티브하게 처리하는지
- *   확인한다. NVMe 장치가 절전/런타임 전원 이벤트를 보고할 때 핫플러그
- *   인터럽트 처리 방식에 영향을 준다.
- */
 static bool pme_is_native(struct pcie_device *dev)
 {
 	const struct pci_host_bridge *host;
@@ -381,12 +321,6 @@ static bool pme_is_native(struct pcie_device *dev)
 	return pcie_ports_native || host->native_pme;
 }
 
-/*
- * pciehp_disable_interrupt:
- *   절전/런타임 정지 시 하류 링크가 낮아질 때 불필요한 핫플러그 인터럽트가
- *   발생하지 않도록 인터럽트를 끈다. NVMe SSD가 런타임 절전에 들어갈 때
- *   사용된다.
- */
 static void pciehp_disable_interrupt(struct pcie_device *dev)
 {
 	/*
@@ -398,12 +332,6 @@ static void pciehp_disable_interrupt(struct pcie_device *dev)
 }
 
 #ifdef CONFIG_PM_SLEEP
-/*
- * pciehp_suspend:
- *   시스템 수면(S3/S4) 진입 전 핫플러그 인터럽트를 비활성화한다.
- *   NVMe SSD도 이 시점에 suspend가 시작되며, 슬롯 이벤트가 깨우지 않도록
- *   막는다.
- */
 static int pciehp_suspend(struct pcie_device *dev)
 {
 	/*
@@ -417,12 +345,6 @@ static int pciehp_suspend(struct pcie_device *dev)
 	return 0;
 }
 
-/*
- * pciehp_resume_noirq:
- *   시스템 수면 복귀(noirq 단계) 시 슬롯 상태를 복원하고, 수면 중에 NVMe
- *   SSD가 교첵되었는지 확인한다. 교첵되었으면 기존 NVMe 디바이스를
- *   disconnected로 표시하고 새로운 PDC 이벤트를 합성한다.
- */
 static int pciehp_resume_noirq(struct pcie_device *dev)
 {
 	struct controller *ctrl = get_service_data(dev);
@@ -453,11 +375,6 @@ static int pciehp_resume_noirq(struct pcie_device *dev)
 }
 #endif
 
-/*
- * pciehp_resume:
- *   시스템/런타임 resume 시 핫플러그 인터럽트를 다시 활성화하고 현재 슬롯
- *   상태를 확인한다. NVMe SSD가 복귀 후 다시 인식되도록 한다.
- */
 static int pciehp_resume(struct pcie_device *dev)
 {
 	struct controller *ctrl = get_service_data(dev);
@@ -470,24 +387,12 @@ static int pciehp_resume(struct pcie_device *dev)
 	return 0;
 }
 
-/*
- * pciehp_runtime_suspend:
- *   런타임 절전 시 핫플러그 인터럽트를 끈다. NVMe SSD가 런타임 PM으로
- *   절전되면 링크가 낮아질 수 있으므로, 이때 발생하는 핫플러그 이벤트를
- *   억제한다.
- */
 static int pciehp_runtime_suspend(struct pcie_device *dev)
 {
 	pciehp_disable_interrupt(dev);
 	return 0;
 }
 
-/*
- * pciehp_runtime_resume:
- *   런타임 복귀 시 Slot Control 명령 타이밍을 초기화하고, 가짜 이벤트를
- *   정리한 뒤 pciehp_resume()를 호출한다. NVMe SSD가 런타임 절전에서 깨어날
- *   때 호출된다.
- */
 static int pciehp_runtime_resume(struct pcie_device *dev)
 {
 	struct controller *ctrl = get_service_data(dev);
@@ -505,12 +410,6 @@ static int pciehp_runtime_resume(struct pcie_device *dev)
 }
 #endif
 
-/*
- * hpdriver_portdrv:
- *   PCIe 포트 서비스 드라이버 구조체. pciehp 드라이버를 PCIe 핫플러그
- *   서비스에 등록한다. NVMe SSD가 연결될 수 있는 모든 PCIe 포트에서
- *   .probe()가 호출될 수 있다.
- */
 static struct pcie_port_service_driver hpdriver_portdrv = {
 	.name		= "pciehp",
 	.port_type	= PCIE_ANY_PORT,
@@ -535,12 +434,6 @@ static struct pcie_port_service_driver hpdriver_portdrv = {
 	.slot_reset	= pciehp_slot_reset,
 };
 
-/*
- * pcie_hp_init:
- *   pciehp 모듈 초기화 함수. PCIe 포트 서비스 등록을 통해 핫플러그 드라이버를
- *   커널에 등록한다. 이후 NVMe SSD가 연결된 PCIe 슬롯에서 pciehp_probe()가
- *   호출된다.
- */
 int __init pcie_hp_init(void)
 {
 	int retval = 0;

@@ -102,24 +102,12 @@
 
 static int proc_initialized;
 
-/*
- * proc_bus_pci_lseek:
- *   /proc/bus/pci/<장치> 파일의 오프셋 이동을 처리한다.
- *   NVMe 장치의 config space 크기(dev->cfg_size)를 초과하지 않도록
- *   조정한다.
- */
 static loff_t proc_bus_pci_lseek(struct file *file, loff_t off, int whence)
 {
 	struct pci_dev *dev = pde_data(file_inode(file));
 	return fixed_size_llseek(file, off, whence, dev->cfg_size);
 }
 
-/*
- * proc_bus_pci_read:
- *   /proc/bus/pci/<장치>에서 userspace로 PCI config space를 읽는다.
- *   NVMe 장치의 Vendor ID, Device ID, Class Code, BAR, 그리고 DOE/PTM
- *   등의 capability가 이 통로로 노출될 수 있다.
- */
 static ssize_t proc_bus_pci_read(struct file *file, char __user *buf,
 				 size_t nbytes, loff_t *ppos)
 {
@@ -203,12 +191,6 @@ static ssize_t proc_bus_pci_read(struct file *file, char __user *buf,
 	return nbytes;
 }
 
-/*
- * proc_bus_pci_write:
- *   /proc/bus/pci/<장치>를 통해 userspace가 NVMe 장치의 config space에
- *   직접 쓴다. capability 활성화, 레지스터 변경, DOE/PTM 관련 설정 등에
- *   사용될 수 있으므로 보안 lockdown과 권한 검사가 중요하다.
- */
 static ssize_t proc_bus_pci_write(struct file *file, const char __user *buf,
 				  size_t nbytes, loff_t *ppos)
 {
@@ -286,24 +268,12 @@ static ssize_t proc_bus_pci_write(struct file *file, const char __user *buf,
 }
 
 #ifdef HAVE_PCI_MMAP
-/*
- * pci_filp_private:
- *   /proc/bus/pci/<장치> 파일을 open할 때 할당되는 사설 구조체이다.
- *   NVMe BAR(예: BAR0 doorbell/register 영역)를 mmap할 때 I/O인지
- *   메모리인지, write-combine인지 결정한다.
- */
 struct pci_filp_private {
 	enum pci_mmap_state mmap_state;
 	int write_combine;
 };
 #endif /* HAVE_PCI_MMAP */
 
-/*+
- * proc_bus_pci_ioctl:
- *   /proc/bus/pci/<장치> 파일에 대한 ioctl을 처리한다.
- *   NVMe BAR mmap 전 I/O 매핑인지 메모리 매핑인지, write-combine
- *   사용 여부를 설정할 수 있다.
- */
 static long proc_bus_pci_ioctl(struct file *file, unsigned int cmd,
 			       unsigned long arg)
 {
@@ -353,12 +323,6 @@ static long proc_bus_pci_ioctl(struct file *file, unsigned int cmd,
 }
 
 #ifdef HAVE_PCI_MMAP
-/*
- * proc_bus_pci_mmap:
- *   /proc/bus/pci/<장치> 파일에 대해 mmap을 수행한다.
- *   NVMe의 BAR0 등 doorbell/register 영역을 userspace에 직접 매핑할
- *   때 사용될 수 있다. 보안상 CAP_SYS_RAWIO와 lockdown 검사를 거친다.
- */
 static int proc_bus_pci_mmap(struct file *file, struct vm_area_struct *vma)
 {
 	struct pci_dev *dev = pde_data(file_inode(file));
@@ -414,11 +378,6 @@ static int proc_bus_pci_mmap(struct file *file, struct vm_area_struct *vma)
 	return 0;
 }
 
-/*
- * proc_bus_pci_open:
- *   /proc/bus/pci/<장치> 파일을 열 때 호출된다.
- *   NVMe BAR mmap을 위한 사설 구조체를 할당하고 기본값을 설정한다.
- */
 static int proc_bus_pci_open(struct inode *inode, struct file *file)
 {
 	struct pci_filp_private *fpriv = kmalloc_obj(*fpriv);
@@ -435,11 +394,6 @@ static int proc_bus_pci_open(struct inode *inode, struct file *file)
 	return 0;
 }
 
-/*
- * proc_bus_pci_release:
- *   /proc/bus/pci/<장치> 파일을 닫을 때 호출된다.
- *   open 시 할당한 NVMe mmap 설정 구조체를 해제한다.
- */
 static int proc_bus_pci_release(struct inode *inode, struct file *file)
 {
 	kfree(file->private_data);
@@ -449,12 +403,6 @@ static int proc_bus_pci_release(struct inode *inode, struct file *file)
 }
 #endif /* HAVE_PCI_MMAP */
 
-/*
- * proc_bus_pci_ops:
- *   /proc/bus/pci/<장치> 파일에 연결된 proc_ops 구조체이다.
- *   NVMe 장치의 config space 읽기/쓰기, ioctl, mmap 등이 이 ops를 통해
- *   userspace로 노출된다.
- */
 static const struct proc_ops proc_bus_pci_ops = {
 	.proc_lseek	= proc_bus_pci_lseek,
 	.proc_read	= proc_bus_pci_read,
@@ -473,12 +421,6 @@ static const struct proc_ops proc_bus_pci_ops = {
 #endif /* HAVE_PCI_MMAP */
 };
 
-/*
- * pci_seq_start / pci_seq_next / pci_seq_stop:
- *   /proc/bus/pci/devices 파일을 위한 seq_file 반복자(iterator)이다.
- *   시스템의 모든 PCI 장치(NVMe SSD 포함)를 순회하며 show_device()로
- *   한 줄씩 출력한다.
- */
 /* iterator */
 static void *pci_seq_start(struct seq_file *m, loff_t *pos)
 {
@@ -509,12 +451,6 @@ static void pci_seq_stop(struct seq_file *m, void *v)
 	}
 }
 
-/*
- * show_device:
- *   /proc/bus/pci/devices 파일에서 각 PCI 장치(NVMe 포함)를 한 줄로
- *   출력한다. bus/devfn, vendor/device, irq, BAR0~BAR5 및 ROM 주소/크기,
- *   바인딩된 드라이버 이름이 포함된다.
- */
 static int show_device(struct seq_file *m, void *v)
 {
 	const struct pci_dev *dev = v;
@@ -554,11 +490,6 @@ static int show_device(struct seq_file *m, void *v)
 	return 0;
 }
 
-/*
- * proc_bus_pci_devices_op:
- *   /proc/bus/pci/devices 파일의 seq_operations 이다.
- *   NVMe 장치를 포함한 모든 PCI 장치를 나열할 때 사용된다.
- */
 static const struct seq_operations proc_bus_pci_devices_op = {
 	.start	= pci_seq_start,
 	.next	= pci_seq_next,
@@ -568,11 +499,6 @@ static const struct seq_operations proc_bus_pci_devices_op = {
 
 static struct proc_dir_entry *proc_bus_pci_dir;
 
-/*
- * pci_proc_attach_device:
- *   주어진 PCI 장치(NVMe 포함)에 대해 /proc/bus/pci/<bus>/<dev>.<func>
- *   파일을 생성하고 proc_ops를 연결한다. NVMe pci_dev가 등록될 때 호출된다.
- */
 int pci_proc_attach_device(struct pci_dev *dev)
 {
 	struct pci_bus *bus = dev->bus;
@@ -605,11 +531,6 @@ int pci_proc_attach_device(struct pci_dev *dev)
 	return 0;
 }
 
-/*
- * pci_proc_detach_device:
- *   PCI 장치(NVMe 포함)가 제거되거나 핫플러그로 빠질 때 /proc 파일을
- *   삭제한다.
- */
 int pci_proc_detach_device(struct pci_dev *dev)
 {
 	proc_remove(dev->procent);
@@ -617,23 +538,12 @@ int pci_proc_detach_device(struct pci_dev *dev)
 	return 0;
 }
 
-/*
- * pci_proc_detach_bus:
- *   PCI bus가 제거될 때 해당 bus의 /proc 디렉터리를 삭제한다.
- *   NVMe 장치가 연결된 bus가 사라질 때 호출될 수 있다.
- */
 int pci_proc_detach_bus(struct pci_bus *bus)
 {
 	proc_remove(bus->procdir);
 	return 0;
 }
 
-/*
- * pci_proc_init:
- *   /proc/bus/pci 디렉터리와 /proc/bus/pci/devices를 생성하고, 이미
- *   등록된 모든 PCI 장치(NVMe SSD 포함)에 대해 per-device proc 파일을
- *   만든다. device_initcall 시점에 실행된다.
- */
 static int __init pci_proc_init(void)
 {
 	struct pci_dev *dev = NULL;

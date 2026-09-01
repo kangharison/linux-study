@@ -114,49 +114,6 @@
  * the kernel have been removed.
  */
 
-/*
- * ===================================================================
- * NVMe PCIe 호스트 드라이버 관점 파일 요약
- * -------------------------------------------------------------------
- * 본 파일(drivers/pci/devres.c)은 PCI 장치 드라이버가 사용하는 관리형
- * 리소스(devres) helper 함수들을 제공한다. 드라이버 detach(제거) 시
- * 자동으로 정리되어야 할 PCI 리소스(BAR region, BAR iomapping, INTx,
- * MWI, device enable 상태 등)를 device lifetime에 연결한다.
- *
- * NVMe PCIe SSD 입장에서 본 파일의 기능은 다음과 같다.
- *   - pcim_enable_device(): NVMe 컨트롤러의 PCI device 활성화를 관리형으로
- *     등록. 드라이버 제거 시 pci_disable_device()를 자동 수행.
- *   - pcim_iomap() / pcim_iomap_region() / pcim_iomap_range(): NVMe BAR0
- *     (register/doorbell 영역)이나 CMB가 위치한 BAR를 커널 가상 주소로
- *     매핑. 드라이버 제거 시 iounmap/release 를 자동 수행.
- *   - pcim_intx(): NVMe 장치가 MSI-X 대신 INTx를 사용하는 레거시 환경에서
- *     INTx enable/disable 을 관리하고, 드라이버 제거 시 원래 상태로 복원.
- *   - pcim_set_mwi(): Memory Write Invalidate 활성화를 관리형으로 등록.
- *   - pcim_pin_device(): NVMe 장치를 suspend/resume 중에도 비활성화되지
- *     않도록 고정할 때 사용.
- *   - devm_pci_remap_cfgspace()/devm_pci_remap_cfg_resource(): PCI
- *     configuration space 접근용 매핑을 관리형으로 수행. NVMe 드라이버는
- *     직접 호출하지 않지만 PCI core가 NVMe 장치의 config space를 다룰 때
- *     사용될 수 있다.
- *
- * 일반적인 NVMe 드라이버 호출 경로(예시):
- *   nvme_probe -> pci_enable_device_mem(pdev) (또는 pcim_enable_device)
- *              -> pci_set_master(pdev)
- *              -> pci_request_regions(pdev, DRV_NAME)
- *              -> pci_iomap(pdev, 0, ...) 또는 pcim_iomap_region(pdev, 0, ...)
- *              -> ioremap(pci_resource_start(pdev,0), size) (NVMe pci.c)
- *              -> readl/writel(dev->bar + NVME_REG_...)
- *              -> pci_alloc_irq_vectors() (MSI-X)
- *              -> dma_pool_create() (SQ/CQ/PRP/SGL descriptor)
- *              -> pci_save_state()/pci_restore_state() (suspend/resume)
- *              -> pci_disable_device() (remove/shutdown)
- *
- * 본 파일은 drivers/nvme/host/pci.c에서 직접 pcim_ 계열 함수를 모두
- * 사용하지는 않지만, NVMe 드라이버가 사용하는 PCI BAR, INTx, device enable
- * 등의 관리형 생명주기를 담당하는 핵심 코드이며, managed PCI API를 통해
- * 리소스 누수를 방지하는 역할을 한다.
- * ===================================================================
- */
 
 /*
  * Legacy struct storing addresses to whole mapped BARs.
@@ -225,11 +182,6 @@ struct pcim_addr_devres {
  * 어느 필드를 쓸지 정한다. */
 };
 
-/*
- * pcim_addr_devres_clear:
- *   pcim_addr_devres 구조체를 안전한 초기 상태로 만든다.
- *   NVMe BAR 매핑/region 등록 전 devres 템플릿을 초기화할 때 사용된다.
- */
 /* [한국어]
  * pcim_addr_devres_clear - 주소 자원 서술자를 '아무것도 잡지 않은' 상태로 만든다
  *
@@ -257,11 +209,6 @@ static inline void pcim_addr_devres_clear(struct pcim_addr_devres *res)
  * 0(= BAR0)이 되어 매칭이 잘못 걸린다. */
 }
 
-/*
- * pcim_addr_resource_release:
- *   드라이버 detach 시 devres에 의해 자동으로 호출되어,
- *   NVMe 장치가 사용하던 BAR region / iomapping 을 정리한다.
- */
 /* [한국어]
  * pcim_addr_resource_release - devres 가 자원을 되돌릴 때 부르는 해제 콜백
  *
@@ -317,10 +264,6 @@ static void pcim_addr_resource_release(struct device *dev, void *resource_raw)
 	}
 }
 
-/*
- * pcim_addr_devres_alloc:
- *   NVMe 장치가 속한 NUMA 노드를 고려해 BAR/region 관리용 devres를 할당한다.
- */
 /* [한국어]
  * pcim_addr_devres_alloc - 주소 자원 서술자를 NUMA 지역성을 고려해 할당한다
  *
@@ -442,11 +385,6 @@ static int pcim_addr_resources_match(struct device *dev,
 	}
 }
 
-/*
- * devm_pci_unmap_iospace:
- *   관리형 I/O space 매핑 해제 콜백. NVMe는 주로 MMIO를 사용하지만,
- *   일부 레거시 환경에서 I/O space 기반 PCI 접근 시 사용될 수 있다.
- */
 /* [한국어]
  * devm_pci_unmap_iospace - IO 공간 매핑을 되돌리는 devres 콜백
  *
@@ -702,11 +640,6 @@ void __iomem *devm_pci_remap_cfg_resource(struct device *dev,
 }
 EXPORT_SYMBOL(devm_pci_remap_cfg_resource);
 
-/*
- * __pcim_clear_mwi:
- *   pcim_set_mwi() 등록 시 드라이버 detach에 호출되어
- *   NVMe 장치의 Memory Write Invalidate(MWI)를 해제한다.
- */
 /* [한국어]
  * __pcim_clear_mwi - MWI 를 되돌리는 devm 액션 콜백
  *
@@ -797,11 +730,6 @@ static inline bool mask_contains_bar(int mask, int bar)
 	return mask & BIT(bar);
 }
 
-/*
- * pcim_intx_restore:
- *   드라이버 detach 시 원래 INTx 상태로 복원한다.
- *   NVMe가 MSI-X 대신 INTx를 쓰는 경우에 해당한다.
- */
 /* [한국어]
  * pcim_intx_restore - INTx 설정을 원래대로 되돌리는 devres 콜백
  *
@@ -827,11 +755,6 @@ static void pcim_intx_restore(struct device *dev, void *data)
 /* [한국어] 저장한 값을 그대로 pci_intx 에 넘기면 원래 상태로 돌아간다. */
 }
 
-/*
- * save_orig_intx:
- *   pcim_intx() 최초 호출 시 PCI command 레지스터를 읽어
- *   NVMe 장치의 원래 INTx 상태를 보관한다.
- */
 /* [한국어]
  * save_orig_intx - 현재 INTx 활성 여부를 서술자에 기록한다
  *
@@ -925,11 +848,6 @@ int pcim_intx(struct pci_dev *pdev, int enable)
 }
 EXPORT_SYMBOL_GPL(pcim_intx);
 
-/*
- * pcim_disable_device:
- *   pcim_enable_device()가 등록한 해제 콜백. 드라이버 detach 시
- *   NVMe 장치가 고정되지 않았다면 pci_disable_device()를 호출한다.
- */
 /* [한국어]
  * pcim_disable_device - 장치를 비활성화하는 devm 액션 콜백
  *
@@ -1054,11 +972,6 @@ void pcim_pin_device(struct pci_dev *pdev)
 }
 EXPORT_SYMBOL(pcim_pin_device);
 
-/*
- * pcim_iomap_release:
- *   레거시 iomap 테이블용 no-op 해제 콜백.
- *   실제 매핑 정리는 매핑 등록 시 사용된 콜백에서 수행된다.
- */
 /* [한국어]
  * pcim_iomap_release - 구형 iomap 테이블의 devres 해제 콜백 (지금은 빈 함수)
  *

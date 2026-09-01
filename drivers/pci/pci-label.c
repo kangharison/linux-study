@@ -91,11 +91,6 @@
 #include <linux/pci-acpi.h>
 #include "pci.h"
 
-/*
- * NVMe: 주어진 PCI 장치(예: NVMe 컨트롤러의 struct device)가 ACPI _DSM을 통해
- * firmware 이름을 제공하는지 확인한다. NVMe 장치가 ACPI namespace에 등록되어
- * 있고 _DSM 함수 0x2 비트 DSM_PCI_DEVICE_NAME를 지원하면 true를 반환한다.
- */
 static bool device_has_acpi_name(struct device *dev)
 {
 #ifdef CONFIG_ACPI
@@ -112,22 +107,12 @@ static bool device_has_acpi_name(struct device *dev)
 }
 
 #ifdef CONFIG_DMI
-/*
- * NVMe: SMBIOS type 41 레코드에서 노출할 attribute 종류를 구분하는 열거형.
- * NVMe 장치가 메인보드에 온보드로 장착된 경우 이 정보로 슬롯 label과
- * instance 번호를 sysfs에 노출한다.
- */
 enum smbios_attr_enum {
 	SMBIOS_ATTR_NONE = 0,
 	SMBIOS_ATTR_LABEL_SHOW,
 	SMBIOS_ATTR_INSTANCE_SHOW,
 };
 
-/*
- * NVMe: SMBIOS type 41(DEV_ONBOARD) 레코드를 순회하며, 주어진 pci_dev(예:
- * NVMe 컨트롤러)와 일치하는 segment/bus/devfn 항목을 찾아 label 문자열이나
- * instance 번호를 buf에 기록한다. buf가 NULL이면 문자열 길이만 반환한다.
- */
 static size_t find_smbios_instance_string(struct pci_dev *pdev, char *buf,
 					  enum smbios_attr_enum attribute)
 {
@@ -158,10 +143,6 @@ static size_t find_smbios_instance_string(struct pci_dev *pdev, char *buf,
 	return 0;
 }
 
-/*
- * NVMe: sysfs "smbios_label" 속성의 show 콜백. NVMe 컨트롤러에 연결된
- * device_attribute를 통해 SMBIOS 라벨 문자열을 사용자 공간에 반환한다.
- */
 static ssize_t smbios_label_show(struct device *dev,
 				 struct device_attribute *attr, char *buf)
 {
@@ -173,10 +154,6 @@ static ssize_t smbios_label_show(struct device *dev,
 static struct device_attribute dev_attr_smbios_label = __ATTR(label, 0444,
 						    smbios_label_show, NULL);
 
-/*
- * NVMe: sysfs "index" 속성의 show 콜백. SMBIOS type 41의 instance 번호를
- * 사용자 공간에 반환한다.
- */
 static ssize_t index_show(struct device *dev, struct device_attribute *attr,
 			  char *buf)
 {
@@ -187,20 +164,12 @@ static ssize_t index_show(struct device *dev, struct device_attribute *attr,
 }
 static DEVICE_ATTR_RO(index);
 
-/*
- * NVMe: SMBIOS 기반 sysfs 속성 배열. NVMe 컨트롤러의 attribute_group 등록 시
- * 사용되며, label과 index 속성을 포괄한다.
- */
 static struct attribute *smbios_attrs[] = {
 	&dev_attr_smbios_label.attr,
 	&dev_attr_index.attr,
 	NULL,
 };
 
-/*
- * NVMe: SMBIOS 속성이 sysfs에 보여질지 결정하는 콜백. NVMe 컨트롤러에 대해
- * ACPI _DSM 이름이 우선하면 숨기고, 일치하는 SMBIOS 레코드가 없으면 숨긴다.
- */
 static umode_t smbios_attr_is_visible(struct kobject *kobj, struct attribute *a,
 				      int n)
 {
@@ -216,10 +185,6 @@ static umode_t smbios_attr_is_visible(struct kobject *kobj, struct attribute *a,
 	return a->mode;
 }
 
-/*
- * NVMe: SMBIOS 기반 attribute_group. PCI core는 NVMe 컨트롤러 등록 시 이
- * 그룹을 사용해 label/index sysfs 파일을 생성할 수 있다.
- */
 const struct attribute_group pci_dev_smbios_attr_group = {
 	.attrs = smbios_attrs,
 	.is_visible = smbios_attr_is_visible,
@@ -227,21 +192,11 @@ const struct attribute_group pci_dev_smbios_attr_group = {
 #endif
 
 #ifdef CONFIG_ACPI
-/*
- * NVMe: ACPI _DSM에서 반환된 label/index를 노출할 종류를 구분하는 열거형.
- * PCI Firmware Spec 3.1 section 4.6.7에 정의된 이름/인스턴스 번호를
- * NVMe 컨트롤러에 대해 sysfs로 전달한다.
- */
 enum acpi_attr_enum {
 	ACPI_ATTR_LABEL_SHOW,
 	ACPI_ATTR_INDEX_SHOW,
 };
 
-/*
- * NVMe: ACPI _DSM이 UTF-16LE 버퍼로 라벨을 반환한 경우, 이를 UTF-8로
- * 변환하여 sysfs 버퍼에 담는다. NVMe 컨트롤러의 firmware 라벨이 유니코드일
- * 때 사용된다.
- */
 static int dsm_label_utf16s_to_utf8s(union acpi_object *obj, char *buf)
 {
 	int len;
@@ -255,11 +210,6 @@ static int dsm_label_utf16s_to_utf8s(union acpi_object *obj, char *buf)
 	return len;
 }
 
-/*
- * NVMe: ACPI _DSM(DSM_PCI_DEVICE_NAME)을 평가하여 NVMe 컨트롤러의 label 또는
- * instance 번호를 buf에 기록한다. _DSM은 Package { Integer instance, String|Buffer label }
- * 형태를 반환한다.
- */
 static int dsm_get_label(struct device *dev, char *buf,
 			 enum acpi_attr_enum attr)
 {
@@ -301,10 +251,6 @@ static int dsm_get_label(struct device *dev, char *buf,
 	return len > 0 ? len : -1;
 }
 
-/*
- * NVMe: sysfs "label" 속성의 show 콜백. ACPI _DSM에서 획득한 NVMe 컨트롤러의
- * firmware 라벨을 사용자 공간에 반환한다.
- */
 static ssize_t label_show(struct device *dev, struct device_attribute *attr,
 			  char *buf)
 {
@@ -312,10 +258,6 @@ static ssize_t label_show(struct device *dev, struct device_attribute *attr,
 }
 static DEVICE_ATTR_RO(label);
 
-/*
- * NVMe: sysfs "acpi_index" 속성의 show 콜백. ACPI _DSM에서 획득한 NVMe
- * 컨트롤러의 firmware instance 번호를 사용자 공간에 반환한다.
- */
 static ssize_t acpi_index_show(struct device *dev,
 			      struct device_attribute *attr, char *buf)
 {
@@ -323,20 +265,12 @@ static ssize_t acpi_index_show(struct device *dev,
 }
 static DEVICE_ATTR_RO(acpi_index);
 
-/*
- * NVMe: ACPI _DSM 기반 sysfs 속성 배열. NVMe 컨트롤러의 attribute_group
- * 등록 시 label과 acpi_index 파일을 생성한다.
- */
 static struct attribute *acpi_attrs[] = {
 	&dev_attr_label.attr,
 	&dev_attr_acpi_index.attr,
 	NULL,
 };
 
-/*
- * NVMe: ACPI 속성이 sysfs에 보여질지 결정하는 콜백. device_has_acpi_name()이
- * true일 때만 NVMe 컨트롤러에 label/acpi_index 파일을 노출한다.
- */
 static umode_t acpi_attr_is_visible(struct kobject *kobj, struct attribute *a,
 				    int n)
 {
@@ -348,13 +282,6 @@ static umode_t acpi_attr_is_visible(struct kobject *kobj, struct attribute *a,
 	return a->mode;
 }
 
-/*
- * NVMe: ACPI _DSM 기반 attribute_group. PCI core는 NVMe 컨트롤러 등록 시 이
- * 그룹으로 label과 acpi_index sysfs 파일을 만들 수 있다. 이 라벨은 NVMe
- * 장치가 연결된 PCIe 포트/슬롯의 물리적 식별자로, hotplug core의 slot
- * 이벤트, CXL/PCIe AER 복구, 전원 제어, TLP 라우팅 디버깅 등과 연동될 때
- * 활용된다.
- */
 const struct attribute_group pci_dev_acpi_attr_group = {
 	.attrs = acpi_attrs,
 	.is_visible = acpi_attr_is_visible,
