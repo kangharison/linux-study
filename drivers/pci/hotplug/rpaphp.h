@@ -12,6 +12,73 @@
 
 /* [한국어] 이 헤더가 한 번역 단위에 두 번 펼쳐지는 것을 막는 가드. 이름이 파일명과
  * 다른 것은 예전 파일명(ppc64php)의 흔적이다. */
+/*
+ * [한국어 설명] RPA 핫플러그 드라이버의 공용 정의 (rpaphp.h)
+ *
+ * === 파일의 역할 ===
+ * IBM POWER 의 RPA(RS/6000 Platform Architecture) 규격을 따르는 PPC64
+ * 플랫폼용 PCI 핫플러그 드라이버가 공유하는 정의를 모아 둔 헤더다. 함수 구현은
+ * 없고(인라인 하나 제외) 상수·구조체·로그 매크로·함수 선언만 담는다.
+ * 담고 있는 것은 네 묶음이다. (1) RTAS 토큰과 값 — DR_INDICATOR/DR_ENTITY_SENSE
+ * 같은 펌웨어 서비스 토큰, POWER_ON/OFF, LED 상태 네 가지, 센서 값 EMPTY/PRESENT.
+ * (2) 로그 매크로 dbg/err/info/warn — 모두 MY_NAME 접두사를 붙이고, dbg 만
+ * 전역 플래그로 켜고 끈다. (3) struct slot — 물리 슬롯 하나를 나타내며 DRC
+ * 정보, 상태, 그리고 공용 코어가 요구하는 hotplug_slot 을 값으로 내장한다.
+ * (4) 세 소스 파일이 서로 부르는 함수들의 선언.
+ * 눈에 띄는 점 하나: EMPTY 0 이 센서 값(:31)과 슬롯 상태(:51) 두 자리에
+ * 정의되어 있다. 치환 내용이 같아 C 규격상 무해한 재정의이지만, 서로 다른 두
+ * 값 공간이 한 이름을 공유한다는 사실은 읽을 때 주의가 필요하다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * IBM POWER 의 PCI 핫플러그 스택은 세 층이다. 위에는 sysfs 슬롯 인터페이스를
+ * 제공하는 공용 코어 pci_hotplug_core.c 가 있고, 아래에는 RTAS(Run-Time
+ * Abstraction Services)라는 펌웨어 호출 인터페이스가 있다. rpaphp 는 그 사이에서
+ * 공용 코어의 콜백을 RTAS 호출로 번역하는 어댑터다. 다른 플랫폼의 핫플러그
+ * 드라이버가 MMIO 레지스터를 직접 두드리는 것과 달리, 이 드라이버는 하드웨어
+ * 레지스터를 하나도 만지지 않는다 — 슬롯 전원도, LED 도, 카드 유무 감지도
+ * 전부 펌웨어에 요청한다. 슬롯 정보의 출처도 config space 가 아니라 디바이스
+ * 트리이며, 각 슬롯은 DRC(Dynamic Reconfiguration Connector)라는 논리
+ * 식별자로 구분된다.
+ * 드라이버는 네 파일로 나뉜다 — rpaphp_core.c(모듈 진입점, sysfs 콜백 구현,
+ * DT 순회), rpaphp_slot.c(슬롯 구조체의 생성·등록·해제), rpaphp_pci.c(RTAS
+ * 센서 조회와 PCI 장치 열거), 그리고 공용 정의를 담은 rpaphp.h.
+ * 실행 컨텍스트는 전부 프로세스 컨텍스트다. RTAS 호출과 PCI 열거가 잠들 수 있어
+ * 인터럽트 문맥에서는 어느 함수도 부를 수 없다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: linux/pci_hotplug.h 의 struct hotplug_slot 과 pci_hp_register/deregister.
+ * 이 드라이버의 struct slot 이 hotplug_slot 을 값으로 내장해 to_slot() 이
+ * container_of 로 역변환한다.
+ * 아래쪽: asm/rtas.h 의 rtas_token()/rtas_call()/rtas_get_sensor()/
+ * rtas_get_power_level()/rtas_set_power_level(), asm/pci-bridge.h 의 PCI_DN()
+ * 매크로와 pci_find_bus_by_node(), 그리고 EEH 서브시스템(eeh_dev_to_pe,
+ * pseries_eeh_init_edev_recursive). 모두 PowerPC 전용이라 이 드라이버는
+ * 아키텍처에 강하게 묶여 있다.
+ * 옆쪽: drivers/pci/pci.h 의 pci_hp_add_devices() — 핫플러그 전용 열거 경로다.
+ * 데이터 흐름: 디바이스 트리의 DRC 정보 → struct slot → 공용 코어의 sysfs 슬롯
+ * → 사용자 조작 → RTAS 호출 → 펌웨어 → 하드웨어. 반대 방향으로는 RTAS 센서
+ * 값이 slot->state 로, PCI 열거 결과가 slot->bus / pci_devs 로 들어온다.
+ * 공유 상태: 전역 리스트 rpaphp_slot_head(정의는 rpaphp_core.c)와 디버그
+ * 플래그 rpaphp_debug. 리스트 접근에 락이 없는데, 슬롯 추가·제거가 직렬화된다는
+ * 전제 위에 있다.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * - struct slot: 물리 슬롯 하나. rpaphp_slot_list(전역 리스트 노드),
+ *   state(EMPTY/NOT_CONFIGURED/CONFIGURED/NOT_VALID), index(DRC 인덱스),
+ *   type, power_domain(RTAS 전원 도메인), attention_status(LED),
+ *   name(DRC 이름의 복사본), dn(DT 노드 참조), bus, pci_devs,
+ *   그리고 값으로 내장된 hotplug_slot.
+ * - to_slot(): 공용 코어가 주는 hotplug_slot 포인터에서 struct slot 을 되찾는
+ *   유일한 인라인 함수. hotplug_slot 이 내장이라 container_of 가 성립한다.
+ * - dbg/err/info/warn: 로그 매크로 네 개. dbg 만 rpaphp_debug 로 제어되며,
+ *   do-while(0) 과 ## arg 라는 두 가지 커널 매크로 관용구를 쓴다.
+ * - rpaphp_enable_slot() / rpaphp_get_sensor_state(): rpaphp_pci.c 구현.
+ * - rpaphp_add_slot() / rpaphp_check_drc_props(): rpaphp_core.c 구현.
+ * - alloc_slot_struct() / dealloc_slot_struct() / rpaphp_register_slot() /
+ *   rpaphp_deregister_slot(): rpaphp_slot.c 구현.
+ * - 상수 묶음: DR_* 토큰, POWER_*, LED_*, 센서 값, 슬롯 상태, MAX_DRC_NAME_LEN.
+ */
+
 #ifndef _PPC64PHP_H
 /* [한국어] 가드 매크로 정의. */
 #define _PPC64PHP_H

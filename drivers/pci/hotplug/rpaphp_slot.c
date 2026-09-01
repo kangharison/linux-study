@@ -9,6 +9,74 @@
  *
  */
 /* [한국어] 커널 공통 정의(-EAGAIN 등 errno). */
+/*
+ * [한국어 설명] RPA 핫플러그 슬롯 객체의 생성·등록·해제 (rpaphp_slot.c)
+ *
+ * === 파일의 역할 ===
+ * struct slot 하나의 일생을 담당하는 파일이다. 디바이스 트리에서 얻은 DRC
+ * 정보로 슬롯 구조체를 만들고(alloc_slot_struct), PCI 핫플러그 공용 코어와
+ * 전역 리스트에 등록하고(rpaphp_register_slot), 그 역순으로 떼어 내
+ * 해제한다(rpaphp_deregister_slot, dealloc_slot_struct). 하드웨어도 펌웨어도
+ * 건드리지 않고 오직 객체 관리만 한다는 점에서, 같은 드라이버의
+ * rpaphp_pci.c(RTAS 호출과 PCI 열거)와 역할이 뚜렷이 갈린다.
+ * 이 파일의 주제는 "수명 관리"다. DRC 이름을 kstrdup 으로 복사하고 DT 노드를
+ * of_node_get 으로 잡아 두는 것은 외부 자원의 수명에 의존하지 않기 위해서이고,
+ * 해제 시 그 짝을 정확히 맞춘다. 등록·해제 순서에도 이유가 있다 — 등록은
+ * 공용 코어에 성공한 뒤에야 전역 리스트에 넣고, 해제는 리스트에서 먼저 뗀 뒤
+ * 공용 코어에서 지우고 마지막에 메모리를 푼다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * IBM POWER 의 PCI 핫플러그 스택은 세 층이다. 위에는 sysfs 슬롯 인터페이스를
+ * 제공하는 공용 코어 pci_hotplug_core.c 가 있고, 아래에는 RTAS(Run-Time
+ * Abstraction Services)라는 펌웨어 호출 인터페이스가 있다. rpaphp 는 그 사이에서
+ * 공용 코어의 콜백을 RTAS 호출로 번역하는 어댑터다. 다른 플랫폼의 핫플러그
+ * 드라이버가 MMIO 레지스터를 직접 두드리는 것과 달리, 이 드라이버는 하드웨어
+ * 레지스터를 하나도 만지지 않는다 — 슬롯 전원도, LED 도, 카드 유무 감지도
+ * 전부 펌웨어에 요청한다. 슬롯 정보의 출처도 config space 가 아니라 디바이스
+ * 트리이며, 각 슬롯은 DRC(Dynamic Reconfiguration Connector)라는 논리
+ * 식별자로 구분된다.
+ * 드라이버는 네 파일로 나뉜다 — rpaphp_core.c(모듈 진입점, sysfs 콜백 구현,
+ * DT 순회), rpaphp_slot.c(슬롯 구조체의 생성·등록·해제), rpaphp_pci.c(RTAS
+ * 센서 조회와 PCI 장치 열거), 그리고 공용 정의를 담은 rpaphp.h.
+ * 실행 컨텍스트는 전부 프로세스 컨텍스트다. RTAS 호출과 PCI 열거가 잠들 수 있어
+ * 인터럽트 문맥에서는 어느 함수도 부를 수 없다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 위쪽: linux/pci_hotplug.h 의 struct hotplug_slot 과 pci_hp_register/deregister.
+ * 이 드라이버의 struct slot 이 hotplug_slot 을 값으로 내장해 to_slot() 이
+ * container_of 로 역변환한다.
+ * 아래쪽: asm/rtas.h 의 rtas_token()/rtas_call()/rtas_get_sensor()/
+ * rtas_get_power_level()/rtas_set_power_level(), asm/pci-bridge.h 의 PCI_DN()
+ * 매크로와 pci_find_bus_by_node(), 그리고 EEH 서브시스템(eeh_dev_to_pe,
+ * pseries_eeh_init_edev_recursive). 모두 PowerPC 전용이라 이 드라이버는
+ * 아키텍처에 강하게 묶여 있다.
+ * 옆쪽: drivers/pci/pci.h 의 pci_hp_add_devices() — 핫플러그 전용 열거 경로다.
+ * 데이터 흐름: 디바이스 트리의 DRC 정보 → struct slot → 공용 코어의 sysfs 슬롯
+ * → 사용자 조작 → RTAS 호출 → 펌웨어 → 하드웨어. 반대 방향으로는 RTAS 센서
+ * 값이 slot->state 로, PCI 열거 결과가 slot->bus / pci_devs 로 들어온다.
+ * 공유 상태: 전역 리스트 rpaphp_slot_head(정의는 rpaphp_core.c)와 디버그
+ * 플래그 rpaphp_debug. 리스트 접근에 락이 없는데, 슬롯 추가·제거가 직렬화된다는
+ * 전제 위에 있다.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * - alloc_slot_struct(): kzalloc 으로 구조체를 만들고 DRC 이름을 복사, DT 노드
+ *   참조를 올리고 ops 를 건다. type 과 bus 는 채우지 않아 호출자의 몫으로 남긴다.
+ *   실패 되감기가 두 단계(error_slot / error_nomem)인 것은 DT 참조를 올리기
+ *   전과 후를 구분하기 위해서다.
+ * - dealloc_slot_struct(): of_node_put → kfree(name) → kfree(slot) 순서.
+ *   구조체를 마지막에 해제해야 그 안의 포인터를 읽을 수 있다.
+ * - is_registered(): 전역 리스트를 선형 탐색해 같은 DRC 이름이 있는지 본다.
+ *   인덱스가 아니라 이름으로 비교하는 이유는 이름이 곧 sysfs 디렉토리이기 때문이다.
+ * - rpaphp_register_slot(): 중복 검사 → DT 자식에서 슬롯 번호 탐색 →
+ *   pci_hp_register() → 전역 리스트 추가.
+ * - rpaphp_deregister_slot(): list_del → pci_hp_deregister → dealloc.
+ *   언제나 0 을 돌려준다(retval 이 한 번도 바뀌지 않는다).
+ * - [상류 코드 관찰, 수정하지 않음] rpaphp_register_slot() 이
+ *   of_property_read_u32() 반환값을 retval 에 담아 두고도 검사하지 않는다.
+ *   ibm,my-drc-index 속성이 없는 자식 노드를 만나면 my_index 가 갱신되지 않은
+ *   채 비교에 쓰이며, 첫 반복에서 그랬다면 초기화되지 않은 스택 값과 비교된다.
+ */
+
 #include <linux/kernel.h>
 /* [한국어] EXPORT_SYMBOL_GPL 매크로. */
 #include <linux/module.h>
