@@ -1205,6 +1205,33 @@ DEFINE_FREE(free_stream_id, struct pci_ide_stream_id *,
  * the stream in sysfs. The expectation is that @ide is immutable while
  * registered.
  */
+/* [한국어]
+ * pci_ide_stream_register - Stream ID 를 예약하고 sysfs 에 노출한다
+ *
+ * @ide: 등록할 IDE 스트림 서술자.
+ * @return: 0 = 성공, -EINVAL / -EBUSY 등.
+ *
+ * IDE(Integrity and Data Encryption)는 PCIe 링크 위를 오가는 TLP 를 암호화하고
+ * 무결성을 검증하는 기능이다. Stream ID 는 그 암호화 문맥 하나를 가리키는
+ * 번호이며, 호스트 브리지가 그 번호 공간을 관리한다.
+ *
+ * 이 함수는 하드웨어를 설정하지 않는다. 번호를 예약하고 sysfs 항목을 만드는
+ * 것이 전부이며, 실제 암호화 설정은 별도 경로가 한다. 등록과 설정을 나눈
+ * 덕분에 번호 충돌을 하드웨어에 손대기 전에 걸러 낼 수 있다.
+ *
+ * sysfs 이름을 엔드포인트 쪽과 루트 포트 쪽 두 인덱스로 짓는 것이 특징이다.
+ * 같은 스트림이 링크 양끝에서 서로 다른 번호를 가질 수 있어, 양쪽을 다 적어야
+ * 사람이 짝을 알아볼 수 있다.
+ *
+ * 실행 컨텍스트: IDE 설정 경로. 프로세스 컨텍스트.
+ *
+ * 에러 경로: 범위 밖 Stream ID 는 -EINVAL 이며 로그를 남긴다. 그 밖의 실패는
+ * 아래 호출의 결과를 올려보낸다.
+ *
+ * 호출 체인:
+ *   IDE 를 쓰는 드라이버 / TSM 계층 → [이 함수]
+ *     → pci_find_host_bridge() → Stream ID 예약 → sysfs 항목 생성
+ */
 int pci_ide_stream_register(struct pci_ide *ide)
 {
 	struct pci_dev *pdev = ide->pdev;

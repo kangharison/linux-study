@@ -303,6 +303,35 @@ struct rcar_pci {
 };
 
 /* PCI configuration space operations */
+/* [한국어]
+ * rcar_pci_cfg_base - devfn 을 이 브리지의 config 창 주소로 바꾼다
+ *
+ * @bus: 대상 버스.
+ * @devfn: 장치·기능 번호.
+ * @where: 레지스터 오프셋.
+ * @return: 접근할 주소, 대상이 아니면 NULL.
+ *
+ * 이 컨트롤러 아래에는 내장 EHCI 와 OHCI 두 개뿐이라(옆의 상류 주석) 일반적인
+ * config 공간 순회가 필요 없다. 그 둘의 자리만 계산해 주면 된다.
+ *
+ * NULL 을 돌려주면 코어가 "장치 없음" 으로 처리한다. 루트 버스가 아니거나
+ * 기능 번호가 0 이 아니거나 아는 슬롯이 아니면 그렇게 답한다.
+ *
+ * 주소 계산에서 슬롯을 1 비트 미는 것이 눈에 띈다. 슬롯 1 과 2 를 각각 0 과
+ * 0x100 오프셋에 대응시키는 것으로, 두 내장 장치의 레지스터 배치가 그렇게
+ * 되어 있기 때문이다.
+ *
+ * 이 함수가 pci_ops 의 map_bus 콜백으로 등록되어, 코어의 모든 config 접근이
+ * 이리로 들어온다.
+ *
+ * 실행 컨텍스트: config 접근 경로. 잠들지 않는다.
+ *
+ * 에러 경로: 대상이 아니면 NULL 이며, 코어가 그것을 없는 장치로 해석한다.
+ *
+ * 호출 체인:
+ *   PCI 코어의 config 접근 → pci_generic_config_read/write()
+ *     → map_bus == [이 함수]
+ */
 static void __iomem *rcar_pci_cfg_base(struct pci_bus *bus, unsigned int devfn,
 				       int where)
 {
@@ -346,6 +375,33 @@ static void __iomem *rcar_pci_cfg_base(struct pci_bus *bus, unsigned int devfn,
 #ifdef CONFIG_PCI_DEBUG
 /* if debug enabled, then attach an error handler irq to the bridge */
 
+/* [한국어]
+ * rcar_pci_err_irq - 브리지 오류 인터럽트를 로그로 남기고 지운다
+ *
+ * @irq: 인터럽트 번호. 쓰지 않는다.
+ * @pw: 등록 시 넘겨 둔 드라이버 상태.
+ * @return: IRQ_HANDLED = 우리 오류였다, IRQ_NONE = 아니다.
+ *
+ * CONFIG_PCI_DEBUG 일 때만 존재한다. 위 영어 주석이 그 조건을 밝히며, 정상
+ * 동작에는 필요 없고 문제를 쫓을 때만 쓰는 진단 수단이기 때문이다.
+ *
+ * 하는 일이 로그와 지우기뿐이다. 복구를 시도하지 않는데, 이 오류들은 보통
+ * 설정이 잘못됐다는 신호라 개발자가 보고 고쳐야 하는 것이지 런타임에
+ * 회복할 수 있는 것이 아니다.
+ *
+ * 상태를 되쓰는 것이 write-1-to-clear 로 지우는 동작이다. 지우지 않으면 같은
+ * 인터럽트가 계속 다시 들어와 시스템이 멈춘다.
+ *
+ * 우리 오류가 아니면 IRQ_NONE 을 돌려준다. 공유 인터럽트에서 다른 핸들러에게
+ * 차례를 넘기기 위해서다.
+ *
+ * 실행 컨텍스트: 인터럽트 문맥. 잠들 수 없다.
+ *
+ * 에러 경로: 없다.
+ *
+ * 호출 체인:
+ *   인터럽트 → [이 함수] → dev_err() → iowrite32()(상태 지우기)
+ */
 static irqreturn_t rcar_pci_err_irq(int irq, void *pw)
 {
 	/* [한국어] 등록 시 넘겨 둔 상태. */
@@ -431,6 +487,35 @@ static inline void rcar_pci_setup_errirq(struct rcar_pci *priv) { }
 #endif
 
 /* PCI host controller setup */
+/* [한국어]
+ * rcar_pci_setup - 컨트롤러 레지스터와 DMA 창을 초기화한다
+ *
+ * @priv: 드라이버 상태.
+ *
+ * probe 가 자원을 다 얻은 뒤, 버스를 스캔하기 전에 부르는 하드웨어 설정
+ * 단계다.
+ *
+ * DMA 창 설정이 이 함수의 핵심이다. 장치가 시스템 메모리로 DMA 를 하려면
+ * 컨트롤러가 PCI 주소를 물리 주소로 변환할 창을 알아야 하고, 그 창의 크기와
+ * 정렬 조건이 하드웨어로 정해져 있다. 그래서 디바이스 트리가 준 dma-ranges
+ * 를 그대로 쓰지 못하고 검사를 거친다 — 크기가 2 의 거듭제곱이어야 하고,
+ * 시작 주소가 그 크기에 정렬되어야 한다.
+ *
+ * 그 밖에 인터럽트를 켜고, 브리지의 자기 config 를 채우고, 내장 장치들이
+ * 쓸 레지스터를 초기화한다.
+ *
+ * 마지막의 rcar_pci_setup_errirq() 는 디버그 빌드에서만 실제 동작하고 그
+ * 밖에서는 빈 스텁이다. 그 덕분에 이 자리를 #ifdef 로 감쌀 필요가 없다.
+ *
+ * 실행 컨텍스트: probe. 프로세스 컨텍스트.
+ *
+ * 에러 경로: 반환값이 없어 창 설정 실패를 알리지 못한다. 조건에 맞지 않는
+ * DMA 범위는 경고만 남기고 건너뛴다.
+ *
+ * 호출 체인:
+ *   rcar_pci_probe() → [이 함수]
+ *     → iowrite32() 계열 → rcar_pci_setup_errirq()
+ */
 static void rcar_pci_setup(struct rcar_pci *priv)
 {
 	/* [한국어] 사설 영역에서 그것을 품은 호스트 브리지를 되찾는다. devm_pci_alloc_host_bridge()

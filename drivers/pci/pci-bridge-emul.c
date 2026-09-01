@@ -569,6 +569,41 @@ pci_bridge_emul_read_ssid(struct pci_bridge_emul *bridge, int reg, u32 *value)
  * (typically at least vendor, device, revision), the ->ops pointer,
  * and optionally ->data and ->has_pcie.
  */
+/* [한국어]
+ * pci_bridge_emul_init - 흉내 브리지의 config 공간과 동작 규칙 표를 세운다
+ *
+ * @bridge: 채울 서술자. 호출자가 벤더·장치·리비전과 ops 를 미리 넣어 둔다.
+ * @flags: 이 하드웨어가 지원하지 않는 기능을 꺼 두는 플래그 묶음.
+ * @return: 0 = 성공, -ENOMEM.
+ *
+ * 여러 컨트롤러 드라이버가 실제로는 존재하지 않는 루트 브리지를 소프트웨어로
+ * 흉내 낸다. PCI 코어가 브리지의 config 공간을 읽고 쓸 것을 기대하기 때문이며,
+ * 그 기대를 채워 주는 것이 이 파일이고 그 준비가 이 함수다.
+ *
+ * 세 가지를 세운다.
+ * 1. 고정 헤더 값 — class code, header type, 캐시 라인 크기, capability 목록 표시.
+ * 2. capability 배치 — SSID 와 PCIe capability 를 config 공간의 어디에 둘지.
+ *    요청된 것만, 그리고 자리가 충분할 때만 넣는다.
+ * 3. 동작 규칙 표 — 각 워드의 어느 비트가 읽기 전용이고 어느 비트가 쓰기 가능이며
+ *    어느 비트가 write-1-to-clear 인지. 정적 표를 **복사** 하는 것이 요점으로,
+ *    이어지는 flags 처리가 그 사본을 하드웨어에 맞게 고치기 때문이다.
+ *
+ * flags 처리가 이 함수 길이의 대부분이다. 예를 들어 I/O 공간을 지원하지 않는
+ * 컨트롤러라면 그 비트를 ro 에 넣고 rw 에서 빼는데, 그 한 쌍이 "읽으면 0, 써도
+ * 무시" 를 만든다.
+ *
+ * 맨 앞의 BUILD_BUG_ON 이 구조체 크기와 표준 헤더 크기가 어긋나는 실수를
+ * 빌드에서 잡는다.
+ *
+ * 실행 컨텍스트: 컨트롤러 드라이버 probe. 프로세스 컨텍스트이며 할당이 있어
+ * 잠들 수 있다.
+ *
+ * 에러 경로: 표 할당 실패는 -ENOMEM 이며, 두 번째 할당이 실패하면 첫 번째를
+ * 되돌린다.
+ *
+ * 호출 체인:
+ *   컨트롤러 드라이버 probe → [이 함수] → kmemdup()
+ */
 int pci_bridge_emul_init(struct pci_bridge_emul *bridge,
 			 unsigned int flags)
 {
@@ -765,6 +800,26 @@ EXPORT_SYMBOL_GPL(pci_bridge_emul_init);
  * Cleanup a pci_bridge_emul structure that was previously initialized
  * using pci_bridge_emul_init().
  */
+/* [한국어]
+ * pci_bridge_emul_cleanup - init 이 할당한 규칙 표들을 해제한다
+ *
+ * @bridge: 정리할 서술자.
+ *
+ * pci_bridge_emul_init() 의 짝이며 하는 일은 두 표의 해제뿐이다.
+ *
+ * PCIe 표는 has_pcie 일 때만 할당했으므로 그 조건을 그대로 되짚고, PCI 표는
+ * 언제나 할당되므로 조건 없이 해제한다.
+ *
+ * 서술자 자체는 해제하지 않는다. 보통 드라이버의 사설 구조체 안에 들어 있어
+ * 수명이 다르기 때문이다.
+ *
+ * 실행 컨텍스트: 컨트롤러 드라이버 remove. 프로세스 컨텍스트.
+ *
+ * 에러 경로: 없다.
+ *
+ * 호출 체인:
+ *   컨트롤러 드라이버 remove → [이 함수] → kfree()
+ */
 void pci_bridge_emul_cleanup(struct pci_bridge_emul *bridge)
 {
 	/* [한국어] PCIe 표는 has_pcie 일 때만 할당했으므로 그때만 해제한다. */
@@ -780,6 +835,39 @@ EXPORT_SYMBOL_GPL(pci_bridge_emul_cleanup);
  * Should be called by the PCI controller driver when reading the PCI
  * configuration space of the fake bridge. It will call back the
  * ->ops->read_base or ->ops->read_pcie operations.
+ */
+/* [한국어]
+ * pci_bridge_emul_conf_read - 흉내 브리지의 config 공간을 읽는다
+ *
+ * @bridge: 대상 서술자.
+ * @where: 읽을 오프셋.
+ * @size: 읽을 폭(1, 2, 4).
+ * @value: 결과를 담을 자리.
+ * @return: PCIBIOS_SUCCESSFUL.
+ *
+ * 컨트롤러 드라이버의 config 읽기가 루트 브리지 자신을 향할 때 이리로 온다.
+ *
+ * 언제나 워드 단위로 다루고 마지막에 요청한 폭으로 자른다. config 레지스터의
+ * 의미가 워드 단위로 정의되어 있어, 바이트 단위로 흩어 놓으면 규칙 표를 적용할
+ * 수 없기 때문이다.
+ *
+ * 오프셋으로 네 영역을 가른다 — 표준 브리지 헤더, SSID capability, PCIe
+ * capability, 확장 config. 각 영역마다 읽기 콜백·저장소·규칙 표 세 가지를 고르며,
+ * SSID 와 확장 영역은 저장소와 규칙 표가 없어 콜백이 답을 다 만들어야 한다.
+ *
+ * 콜백이 NOT_HANDLED 를 돌려주면 저장된 값을 쓴다. 이 두 단계가 이 계층의
+ * 설계다 — 드라이버는 실제 하드웨어를 봐야 하는 레지스터만 처리하고,
+ * 나머지는 저장된 값으로 자동 처리된다. 저장소가 없는 영역에서는 그 결과가
+ * 0 이 된다.
+ *
+ * 실행 컨텍스트: config 접근 경로. 잠들지 않는다.
+ *
+ * 에러 경로: 없다. 모르는 오프셋도 0 으로 답한다.
+ *
+ * 호출 체인:
+ *   컨트롤러 드라이버의 config 읽기 → [이 함수]
+ *     → ops->read_base / pci_bridge_emul_read_ssid()
+ *   / ops->read_pcie / ops->read_ext
  */
 int pci_bridge_emul_conf_read(struct pci_bridge_emul *bridge, int where,
 			      int size, u32 *value)
@@ -907,6 +995,38 @@ EXPORT_SYMBOL_GPL(pci_bridge_emul_conf_read);
  * Should be called by the PCI controller driver when writing the PCI
  * configuration space of the fake bridge. It will call back the
  * ->ops->write_base or ->ops->write_pcie operations.
+ */
+/* [한국어]
+ * pci_bridge_emul_conf_write - 흉내 브리지의 config 공간에 쓴다
+ *
+ * @bridge: 대상 서술자.
+ * @where: 쓸 오프셋.
+ * @size: 쓸 폭(1, 2, 4).
+ * @value: 쓸 값.
+ * @return: PCIBIOS_SUCCESSFUL.
+ *
+ * pci_bridge_emul_conf_read() 의 짝이며, 읽기보다 한 단계가 더 있다.
+ *
+ * 먼저 워드 전체를 읽는다. 부분 쓰기를 워드 단위로 처리하려면 기존 값이
+ * 필요하고, 드라이버 콜백에 "무엇이 어떻게 바뀌었는지" 를 알려 주려면 이전
+ * 값이 있어야 하기 때문이다.
+ *
+ * 그 다음 규칙 표로 값을 거른다. rw 비트만 새 값을 받고, w1c 비트는 1 을 쓰면
+ * 지워지고, ro 비트는 그대로 남는다. 이 세 규칙이 실제 PCI 레지스터의
+ * 동작을 흉내 내는 핵심이다.
+ *
+ * 저장은 규칙을 통과한 값으로 하고, 콜백에는 old·new·mask 셋을 다 넘긴다.
+ * 드라이버가 "이 쓰기로 어느 비트가 어떻게 바뀌었는지" 를 정확히 알아야
+ * 하드웨어에 반영할지 판단할 수 있기 때문이다.
+ *
+ * 실행 컨텍스트: config 접근 경로. 잠들지 않는다.
+ *
+ * 에러 경로: 읽기 단계가 실패하면 그 값을 그대로 올려보낸다.
+ *
+ * 호출 체인:
+ *   컨트롤러 드라이버의 config 쓰기 → [이 함수]
+ *     → pci_bridge_emul_conf_read() → ops->write_base / ops->write_pcie
+ *   / ops->write_ext
  */
 int pci_bridge_emul_conf_write(struct pci_bridge_emul *bridge, int where,
 			       int size, u32 value)

@@ -221,6 +221,32 @@ static inline void __iomem *pci_msix_desc_addr(struct msi_desc *desc)
  * that the device state is up to date, or returning out of this file.
  * It does not affect the msi_desc::msix_ctrl cache either. Use with care!
  */
+/* [한국어]
+ * pci_msix_write_vector_ctrl - 테이블 항목의 Vector Control 워드에 쓴다
+ *
+ * @desc: 대상 벡터의 descriptor.
+ * @ctrl: 쓸 값.
+ *
+ * 위 영어 주석이 세 가지를 경고한다. 이 함수는 쓰기를 장치까지 밀어내지
+ * 않고, msi_desc::msix_ctrl 캐시도 갱신하지 않으며, can_mask 가 꺼져 있으면
+ * 아무것도 하지 않는다. 그래서 "조심해서 쓰라" 고 적혀 있다.
+ *
+ * 그 셋을 감당하는 것이 호출자의 몫이다. pci_msix_mask() 와
+ * pci_msix_unmask() 가 캐시를 먼저 고쳐 그 값을 넘기고, 마스크 쪽만 뒤에
+ * MMIO 읽기로 쓰기를 밀어낸다.
+ *
+ * can_mask 검사가 여기 있는 이유는 MSI-X 의 벡터별 마스킹이 스펙상 필수인데도
+ * 일부 하드웨어 결함이나 가상화 환경에서 쓸 수 없기 때문이다. 그때는 조용히
+ * 건너뛰고, 상위 계층이 다른 방법으로 인터럽트를 막는다.
+ *
+ * 실행 컨텍스트: IRQ 코어의 마스킹 경로. 인터럽트 문맥일 수 있어 잠들지 않는다.
+ *
+ * 에러 경로: 없다. 반환값이 없어 실패를 알릴 방법도 없다.
+ *
+ * 호출 체인:
+ *   pci_msix_mask() / pci_msix_unmask() → [이 함수]
+ *     → pci_msix_desc_addr() → writel()
+ */
 static inline void pci_msix_write_vector_ctrl(struct msi_desc *desc, u32 ctrl)
 {
 	/* [한국어] 이 벡터의 테이블 항목 시작 주소. */
@@ -347,6 +373,38 @@ static inline void __pci_msi_unmask_desc(struct msi_desc *desc, u32 mask)
  * mask all MSI interrupts by clearing the MSI enable bit does not work
  * reliably as devices without an INTx disable bit will then generate a
  * level IRQ which will never be cleared.
+ */
+/* [한국어]
+ * msi_multi_mask - 이 MSI 가 가진 벡터 전부를 덮는 마스크를 만든다
+ *
+ * @desc: 대상 장치의 첫 벡터 descriptor.
+ * @return: 벡터 개수만큼의 하위 비트가 선 마스크.
+ *
+ * MSI 는 MSI-X 와 달리 여러 벡터가 Mask Bits 레지스터 하나를 나눠 쓴다.
+ * 그 전부를 한 번에 마스크하거나 풀려면 벡터 수만큼의 비트가 선 값이 필요하다.
+ *
+ * 계산이 두 겹의 시프트다. multi_cap 이 벡터 수의 로그값이므로 실제 벡터 수는
+ * 1 << multi_cap 이고, 그만큼의 하위 비트를 세우려면 다시 1 << 그 값에서
+ * 1 을 뺀다.
+ *
+ * multi_cap 이 5 면 폭이 32 가 되어 u32 의 비트 수와 같아지고, 그 시프트는
+ * 정의되지 않은 동작이다. 함수 안의 영어 주석이 그 경계를 지적하며,
+ * 그래서 그 경우만 0xffffffff 를 직접 돌려준다.
+ *
+ * 위 영어 주석은 더 근본적인 배경을 밝힌다 — PCI 2.3 이전에는 벡터별 마스크
+ * 비트가 아예 없었고, MSI Enable 을 꺼서 전부 막으려 하면 INTx 비활성화
+ * 비트가 없는 장치가 영영 지워지지 않는 레벨 인터럽트를 내기 때문에
+ * 그 방법을 쓸 수 없다.
+ *
+ * __attribute_const__ 는 같은 입력에 늘 같은 값을 돌려주고 메모리를 읽지
+ * 않는다는 표시로, 컴파일러가 중복 호출을 지울 수 있게 한다.
+ *
+ * 실행 컨텍스트: MSI 마스킹 경로. 잠들지 않는다.
+ *
+ * 에러 경로: 없다.
+ *
+ * 호출 체인:
+ *   msi.c 의 pci_msi_mask/unmask 호출부(:1096, :1139, :1545) → [이 함수]
  */
 static inline __attribute_const__ u32 msi_multi_mask(struct msi_desc *desc)
 {

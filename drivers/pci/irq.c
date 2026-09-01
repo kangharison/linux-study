@@ -305,6 +305,31 @@ EXPORT_SYMBOL(pci_free_irq);
  * the PCI Express Base Specification, Revision 2.1)
  */
 
+/* [한국어]
+ * pci_swizzle_interrupt_pin - 브리지 하나를 지날 때의 INTx 핀 회전을 계산한다
+ *
+ * @dev: 브리지 아래의 장치.
+ * @pin: 그 장치 쪽에서의 핀 번호(1=INTA ~ 4=INTD).
+ * @return: 브리지 위쪽에서의 핀 번호.
+ *
+ * 위 영어 주석이 근거를 밝힌다 — PCI-to-PCI 브리지 규격 9.1 절이 정한 규칙이며,
+ * 확장 카드 위의 장치들이 같은 INTx 선에 몰리지 않게 흩뜨리는 것이 목적이다.
+ *
+ * 계산은 슬롯 번호만큼 돌리는 것이다. 핀이 1~4 인데 나머지 연산은 0 기준이라
+ * 1 을 빼고 계산한 뒤 다시 더한다.
+ *
+ * ARI 가 켜진 경우 슬롯 번호를 0 으로 본다. 위 영어 주석이 인용하는
+ * PCIe Base 2.1 의 2.2.8.1 구현 노트가 그렇게 정하는데, ARI 는 devfn 의 상위
+ * 5비트를 슬롯이 아니라 함수 번호의 일부로 재해석하므로 PCI_SLOT() 이 뽑아낸
+ * 값이 더는 슬롯이 아니기 때문이다.
+ *
+ * 실행 컨텍스트: IRQ 배정 경로. 잠들지 않는다.
+ *
+ * 에러 경로: 없다.
+ *
+ * 호출 체인:
+ *   pci_get_interrupt_pin() / pci_common_swizzle() → [이 함수]
+ */
 u8 pci_swizzle_interrupt_pin(const struct pci_dev *dev, u8 pin)
 {
 	/* [한국어] 슬롯 번호를 담을 곳. 회전량이 된다. */
@@ -388,6 +413,30 @@ int pci_get_interrupt_pin(struct pci_dev *dev, struct pci_dev **bridge)
  * bridges all the way up to a PCI root bus.
  */
 
+/* [한국어]
+ * pci_common_swizzle - 루트 버스까지 회전시키고 최상단 슬롯 번호를 돌려준다
+ *
+ * @dev: 출발 장치.
+ * @pinp: 핀 번호. 회전 결과가 이 자리에 반영된다.
+ * @return: 루트 버스 바로 아래 브리지의 슬롯 번호.
+ *
+ * pci_get_interrupt_pin() 과 루프가 완전히 같고 돌려주는 것만 다르다.
+ * 그쪽은 최상단 브리지 장치를 주고 이쪽은 그 슬롯 번호를 준다.
+ *
+ * 핀을 포인터로 받는 것이 이 함수의 규약이다. 반환값 자리를 슬롯 번호가
+ * 차지하므로, 회전 결과는 인자를 통해 돌려준다.
+ *
+ * 호스트 브리지의 swizzle_irq 콜백으로 쓰이는 것이 주된 용도이며,
+ * pci_assign_irq() 가 그것을 통해 이 함수를 부른다.
+ *
+ * 실행 컨텍스트: IRQ 배정 경로. 잠들지 않는다.
+ *
+ * 에러 경로: 없다.
+ *
+ * 호출 체인:
+ *   pci_assign_irq() → hbrg->swizzle_irq → [이 함수]
+ *     → pci_swizzle_interrupt_pin()(브리지 수만큼)
+ */
 u8 pci_common_swizzle(struct pci_dev *dev, u8 *pinp)
 {
 	/* [한국어] 들어온 핀 값을 지역 변수로 받는다. */
@@ -623,6 +672,27 @@ done:
  * true in that case. False is returned if no interrupt was pending.
  */
 
+/* [한국어]
+ * pci_check_and_mask_intx - 인터럽트가 이 장치에서 왔으면 마스크한다
+ *
+ * @dev: 대상 장치.
+ * @return: true = 이 장치가 인터럽트를 올렸고 마스크했다, false = 아니다.
+ *
+ * 공유 INTx 핸들러가 "내 장치인가" 를 판단하는 데 쓴다. 판단과 마스킹이
+ * 하나의 원자적 동작이어야 하므로 둘을 나눌 수 없다.
+ *
+ * pci_check_and_set_intx_mask() 에 true 를 넘기는 한 줄 껍데기다. 그쪽에
+ * 직접 true/false 를 넘기게 하지 않고 이름이 다른 두 함수를 두는 이유는,
+ * 호출부에서 그 불리언이 무엇을 뜻하는지 헷갈릴 여지를 없애기 위해서다.
+ *
+ * 실행 컨텍스트: 공유 IRQ 핸들러. 인터럽트 문맥이라 잠들 수 없다.
+ *
+ * 에러 경로: 없다.
+ *
+ * 호출 체인:
+ *   드라이버의 공유 INTx 핸들러 → [이 함수]
+ *     → pci_check_and_set_intx_mask(mask=true)
+ */
 bool pci_check_and_mask_intx(struct pci_dev *dev)
 {
 	/* [한국어] mask 인자를 true 로 넘긴다. 이름이 길어진 대신 호출부에서 true/false 의
@@ -640,6 +710,27 @@ EXPORT_SYMBOL_GPL(pci_check_and_mask_intx);
  * still an interrupt pending.
  */
 
+/* [한국어]
+ * pci_check_and_unmask_intx - 대기 중인 인터럽트가 없으면 마스크를 푼다
+ *
+ * @dev: 대상 장치.
+ * @return: true = 마스크를 풀었다, false = 아직 인터럽트가 대기 중이라 두었다.
+ *
+ * pci_check_and_mask_intx() 의 짝이다. 스레드 핸들러가 처리를 마친 뒤 인터럽트를
+ * 다시 열 때 쓴다.
+ *
+ * false 를 돌려주는 경우가 중요하다. 다음 인터럽트가 이미 대기 중이면 마스크를
+ * 풀지 않는데, 풀자마자 다시 들어와 처리하지 못한 채 쌓이기 때문이다.
+ * 호출자는 그때 한 번 더 처리 루프를 돌아야 한다.
+ *
+ * 실행 컨텍스트: 공유 IRQ 처리의 마무리. 인터럽트 문맥일 수 있다.
+ *
+ * 에러 경로: 없다.
+ *
+ * 호출 체인:
+ *   드라이버의 INTx 처리 마무리 → [이 함수]
+ *     → pci_check_and_set_intx_mask(mask=false)
+ */
 bool pci_check_and_unmask_intx(struct pci_dev *dev)
 {
 	/* [한국어] false 로 넘긴다. 위와 완전히 대칭이다. */

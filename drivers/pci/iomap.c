@@ -93,6 +93,37 @@
  * @maxlen specifies the maximum length to map. If you want to get access to
  * the complete BAR from offset to the end, pass %0 here.
  * */
+/* [한국어]
+ * pci_iomap_range - BAR 의 일부 구간을 매핑한다 (I/O 와 메모리 공통)
+ *
+ * @dev: 대상 장치.
+ * @bar: BAR 번호.
+ * @offset: BAR 안에서의 시작 오프셋.
+ * @maxlen: 매핑할 최대 길이. 0 이면 BAR 끝까지.
+ * @return: 매핑된 주소, 실패하면 NULL.
+ *
+ * 이 파일의 네 함수가 모두 이것으로 모인다. 나머지 셋은 인자를 고정하거나
+ * 쓰기 결합 여부만 바꾼 얇은 껍데기다.
+ *
+ * I/O 자원과 메모리 자원을 한 함수로 다루는 것이 요점이다. 아키텍처에 따라
+ * I/O 포트가 메모리에 매핑되기도 하고 별도 명령으로 접근하기도 하는데,
+ * 그 차이를 ioport_map() 과 ioremap() 중 무엇을 부를지로 흡수한다.
+ * 호출자는 BAR 번호만 알면 되고 그것이 어느 종류인지 신경 쓰지 않는다.
+ *
+ * maxlen 이 0 일 때 BAR 끝까지로 해석하는 규약이 흔한 쓰임을 짧게 만든다 —
+ * BAR 전체를 매핑하는 pci_iomap() 이 그것을 이용한다.
+ *
+ * 길이 계산이 세 값의 최솟값이라는 점에 주의할 만하다. 요청 길이, BAR 의
+ * 남은 길이, 그리고 offset 을 뺀 크기 중 가장 작은 것을 쓴다.
+ *
+ * 실행 컨텍스트: 드라이버 probe. 프로세스 컨텍스트이며 잠들 수 있다.
+ *
+ * 에러 경로: 배정되지 않은 BAR, 범위를 벗어난 offset, 매핑 실패 모두 NULL.
+ * 셋이 구분되지 않는다.
+ *
+ * 호출 체인:
+ *   드라이버의 BAR 매핑 → [이 함수] → ioport_map() 또는 ioremap()
+ */
 void __iomem *pci_iomap_range(struct pci_dev *dev,
 			      int bar,
 			      unsigned long offset,
@@ -159,6 +190,35 @@ EXPORT_SYMBOL(pci_iomap_range);
  * @maxlen specifies the maximum length to map. If you want to get access to
  * the complete BAR from offset to the end, pass %0 here.
  * */
+/* [한국어]
+ * pci_iomap_wc_range - BAR 의 일부 구간을 쓰기 결합으로 매핑한다
+ *
+ * @dev: 대상 장치.
+ * @bar: BAR 번호.
+ * @offset: BAR 안에서의 시작 오프셋.
+ * @maxlen: 매핑할 최대 길이.
+ * @return: 매핑된 주소, 실패하면 NULL.
+ *
+ * pci_iomap_range() 와 구조가 같고 메모리 자원에 ioremap_wc() 를 쓰는 것만
+ * 다르다.
+ *
+ * 쓰기 결합(write-combining)은 CPU 가 연속된 쓰기를 모아 한 번에 내보내게
+ * 한다. 프레임버퍼처럼 순서가 중요하지 않고 양이 많은 쓰기에서 크게 빨라지지만,
+ * 레지스터에는 쓸 수 없다 — 쓰기가 미뤄지거나 합쳐지면 하드웨어가 명령을
+ * 놓친다.
+ *
+ * I/O 자원에는 쓰기 결합이라는 개념이 없어, 그 경우 일반 매핑과 같아진다.
+ *
+ * 위 영어 주석이 밝히듯, 이 매핑을 쓰려면 그 구간이 prefetchable 이어야 한다.
+ *
+ * 실행 컨텍스트: 드라이버 probe. 프로세스 컨텍스트.
+ *
+ * 에러 경로: pci_iomap_range() 와 같다.
+ *
+ * 호출 체인:
+ *   프레임버퍼 등 대량 쓰기 드라이버 → [이 함수]
+ *     → ioport_map() 또는 ioremap_wc()
+ */
 void __iomem *pci_iomap_wc_range(struct pci_dev *dev,
 				 int bar,
 				 unsigned long offset,
@@ -224,6 +284,27 @@ EXPORT_SYMBOL_GPL(pci_iomap_wc_range);
  * @maxlen specifies the maximum length to map. If you want to get access to
  * the complete BAR without checking for its length first, pass %0 here.
  * */
+/* [한국어]
+ * pci_iomap - BAR 전체를 매핑한다
+ *
+ * @dev: 대상 장치.
+ * @bar: BAR 번호.
+ * @maxlen: 매핑할 최대 길이. 0 이면 BAR 전체.
+ * @return: 매핑된 주소, 실패하면 NULL.
+ *
+ * 드라이버가 가장 흔히 쓰는 형태다. offset 0 으로 pci_iomap_range() 를 부르는
+ * 한 줄 껍데기이며, maxlen 이 0 이면 BAR 끝까지라는 그쪽 규약이 그대로 적용된다.
+ *
+ * maxlen 을 지정하는 쓰임이 남아 있는 이유는, BAR 이 크더라도 드라이버가
+ * 앞부분만 쓰는 경우 가상 주소 공간을 아끼기 위해서다.
+ *
+ * 실행 컨텍스트: 드라이버 probe. 프로세스 컨텍스트.
+ *
+ * 에러 경로: pci_iomap_range() 와 같다.
+ *
+ * 호출 체인:
+ *   드라이버의 BAR 매핑 → [이 함수] → pci_iomap_range(offset=0)
+ */
 void __iomem *pci_iomap(struct pci_dev *dev, int bar, unsigned long maxlen)
 {
 	/* [한국어] 오프셋 0 으로 고정해 범위 판에 위임한다. BAR 전체를 매핑하는 흔한 경우를 위한 편의 함수다. */
@@ -247,6 +328,26 @@ EXPORT_SYMBOL(pci_iomap);
  * @maxlen specifies the maximum length to map. If you want to get access to
  * the complete BAR without checking for its length first, pass %0 here.
  * */
+/* [한국어]
+ * pci_iomap_wc - BAR 전체를 쓰기 결합으로 매핑한다
+ *
+ * @dev: 대상 장치.
+ * @bar: BAR 번호.
+ * @maxlen: 매핑할 최대 길이.
+ * @return: 매핑된 주소, 실패하면 NULL.
+ *
+ * pci_iomap() 의 쓰기 결합 판이며, 마찬가지로 offset 0 을 넘기는 껍데기다.
+ *
+ * 네 함수가 이렇게 정렬된 결과, 드라이버는 두 축(구간 지정 여부, 쓰기 결합
+ * 여부)의 조합 중 필요한 것을 고르기만 하면 된다.
+ *
+ * 실행 컨텍스트: 드라이버 probe. 프로세스 컨텍스트.
+ *
+ * 에러 경로: pci_iomap_wc_range() 와 같다.
+ *
+ * 호출 체인:
+ *   드라이버의 BAR 매핑 → [이 함수] → pci_iomap_wc_range(offset=0)
+ */
 void __iomem *pci_iomap_wc(struct pci_dev *dev, int bar, unsigned long maxlen)
 {
 	/* [한국어] 쓰기 결합 판도 같은 방식으로 오프셋 0 을 넘겨 위임한다. */

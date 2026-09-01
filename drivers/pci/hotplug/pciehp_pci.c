@@ -86,6 +86,34 @@
  * Return 0 on success, %-EEXIST if the devices are already enumerated or
  * %-ENODEV if enumeration failed.
  */
+/* [한국어]
+ * pciehp_configure_device - 방금 꽂힌 카드를 열거하고 드라이버를 붙인다
+ *
+ * @ctrl: 이 슬롯의 컨트롤러.
+ * @return: 0 = 성공, -EEXIST = 이미 장치가 있음.
+ *
+ * 슬롯에 전원이 들어오고 링크가 선 뒤 불린다.
+ *
+ * 먼저 그 자리에 이미 장치가 있는지 확인한다. 있다면 앞선 제거가 끝나지
+ * 않았다는 뜻이므로 -EEXIST 로 거절한다. 그대로 진행하면 같은 위치에 두
+ * pci_dev 가 생긴다.
+ *
+ * 그 다음은 PCI 코어에 맡긴다 — 슬롯을 스캔해 장치를 만들고, 브리지가
+ * 있으면 핫플러그 브리지로 등록하고, 미배정 자원을 배정하고, 드라이버
+ * 모델에 올린다. 마지막 단계에서 드라이버가 붙어 카드가 동작하기 시작한다.
+ *
+ * pci_lock_rescan_remove() 를 잡지 않는다. 호출자인 pciehp_ctrl.c 의
+ * board_added() 가 이미 쥐고 있기 때문이다.
+ *
+ * 실행 컨텍스트: 핫플러그 삽입 처리. 프로세스 컨텍스트이며 잠들 수 있다.
+ *
+ * 에러 경로: -EEXIST 뿐이다. 스캔이나 배정의 실패는 알리지 않는다.
+ *
+ * 호출 체인:
+ *   pciehp_ctrl.c 의 board_added() → [이 함수]
+ *     → pci_get_slot() → pci_scan_slot() → pci_hp_add_bridge()
+ *     → pci_assign_unassigned_bridge_resources() → pci_bus_add_devices()
+ */
 int pciehp_configure_device(struct controller *ctrl)
 {
 	struct pci_dev *dev;
@@ -173,6 +201,32 @@ int pciehp_configure_device(struct controller *ctrl)
  * Unbind PCI devices below a hotplug bridge from their drivers and remove
  * them from the system.  Safely removed devices are quiesced.  Surprise
  * removed devices are marked as such to prevent further accesses.
+ */
+/* [한국어]
+ * pciehp_unconfigure_device - 슬롯의 장치들을 모두 제거한다
+ *
+ * @ctrl: 이 슬롯의 컨트롤러.
+ * @presence: 지금 카드가 아직 꽂혀 있는지.
+ *
+ * pciehp_configure_device() 의 짝이다.
+ *
+ * presence 인자가 이 함수의 특징이다. 카드가 이미 뽑힌 뒤라면 그 장치에
+ * config 접근을 해도 응답이 없으므로, 제거 전에 하는 정리 작업(브리지의
+ * 버스 마스터 끄기 등)을 건너뛴다. 없는 장치에 쓰기를 시도하면 시간만
+ * 낭비하고 오류 로그가 쌓인다.
+ *
+ * 슬롯 번호가 같은 장치를 모두 제거하는 것도 요점이다. 다중 기능 카드면
+ * 기능마다 pci_dev 가 하나씩 있으므로 하나만 제거해서는 안 된다.
+ *
+ * 호출자가 이미 pci_lock_rescan_remove() 를 쥐고 있다.
+ *
+ * 실행 컨텍스트: 핫플러그 제거 처리. 프로세스 컨텍스트이며 잠들 수 있다.
+ *
+ * 에러 경로: 없다. 반환값이 없어 개별 제거의 실패를 알릴 방법이 없다.
+ *
+ * 호출 체인:
+ *   pciehp_ctrl.c 의 remove_board() → [이 함수]
+ *     → pci_dev_get() → pci_stop_and_remove_bus_device() → pci_dev_put()
  */
 void pciehp_unconfigure_device(struct controller *ctrl, bool presence)
 {

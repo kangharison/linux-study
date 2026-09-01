@@ -77,6 +77,30 @@
  *
  * Return: TLP Header/Prefix Log length
  */
+/* [한국어]
+ * aer_tlp_log_len - AER 이 기록한 TLP 헤더 로그의 길이를 구한다
+ *
+ * @dev: 대상 장치.
+ * @aercc: AER Capabilities and Control 레지스터 값.
+ * @return: 로그로 읽어야 할 dword 개수.
+ *
+ * TLP 헤더는 보통 4 dword 지만, End-to-End TLP Prefix 를 쓰는 장치는 그 앞에
+ * 접두사가 최대 4 dword 더 붙는다. 그 길이가 고정이 아니라서 이 계산이 필요하다.
+ *
+ * aercc 의 접두사 로그 지원 비트와 장치의 eetlp_prefix_max 를 함께 본다.
+ * 하드웨어가 접두사를 기록할 수 있고 장치가 실제로 접두사를 쓸 때만 그만큼
+ * 길이를 늘린다.
+ *
+ * 이 값이 아래 pcie_read_tlp_log() 가 몇 dword 를 읽을지, 그리고
+ * pcie_print_tlp_log() 가 몇 개를 찍을지를 정한다.
+ *
+ * 실행 컨텍스트: AER 오류 처리. 프로세스 컨텍스트.
+ *
+ * 에러 경로: 없다.
+ *
+ * 호출 체인:
+ *   aer.c 의 오류 로그 수집 → [이 함수]
+ */
 unsigned int aer_tlp_log_len(struct pci_dev *dev, u32 aercc)
 {
 	if (aercc & PCI_ERR_CAP_TLP_LOG_FLIT)
@@ -100,6 +124,28 @@ unsigned int aer_tlp_log_len(struct pci_dev *dev, u32 aercc)
  * @dev: PCIe device
  *
  * Return: TLP Header/Prefix Log length
+ */
+/* [한국어]
+ * dpc_tlp_log_len - DPC 가 기록한 TLP 헤더 로그의 길이를 구한다
+ *
+ * @dev: 대상 장치.
+ * @return: 로그로 읽어야 할 dword 개수.
+ *
+ * aer_tlp_log_len() 의 DPC 판이다. 같은 TLP 헤더를 다루지만 길이를 알려 주는
+ * 자리가 다르다 — AER 은 자기 Capabilities and Control 레지스터에서,
+ * DPC 는 dev->dpc_rp_log_size 에서 얻는다.
+ *
+ * DPC 쪽이 더 단순한 것은 그 크기가 열거 시점에 이미 읽혀 있기 때문이다.
+ *
+ * 두 함수가 따로 있는 이유는 그 출처의 차이뿐이며, 결과는 같은 형식의
+ * dword 개수라 아래 두 함수가 양쪽을 구분 없이 받는다.
+ *
+ * 실행 컨텍스트: DPC 오류 처리. 프로세스 컨텍스트.
+ *
+ * 에러 경로: 없다.
+ *
+ * 호출 체인:
+ *   dpc.c 의 오류 로그 수집 → [이 함수]
  */
 unsigned int dpc_tlp_log_len(struct pci_dev *dev)
 {
@@ -128,6 +174,36 @@ unsigned int dpc_tlp_log_len(struct pci_dev *dev)
  * Fill @log from TLP Header Log registers, e.g., AER or DPC.
  *
  * Return: 0 on success and filled TLP Log structure, <0 on error.
+ */
+/* [한국어]
+ * pcie_read_tlp_log - config 공간에서 TLP 헤더 로그를 읽어 담는다
+ *
+ * @dev: 대상 장치.
+ * @where: 헤더 로그 레지스터의 오프셋.
+ * @where2: 접두사 로그 레지스터의 오프셋.
+ * @tlp_len: 읽을 dword 개수.
+ * @flit: Flit 모드인지.
+ * @log: 결과를 담을 구조체.
+ * @return: 0 = 성공, 그 밖에 config 접근 오류.
+ *
+ * AER 과 DPC 가 공유하는 읽기 함수다. 두 오류 처리 경로가 같은 형식의 로그를
+ * 서로 다른 자리에 두므로, 오프셋을 인자로 받아 하나로 합쳤다.
+ *
+ * 읽는 자리가 둘로 나뉘는 것이 이 함수의 구조다. 앞의 4 dword 는 header 에서,
+ * 그 뒤의 접두사는 where2 에서 읽는다. 두 구역이 config 공간에서 떨어져 있기
+ * 때문이다.
+ *
+ * Flit 모드는 PCIe 6.0 이 도입한 새 전송 방식으로, 그때는 헤더 형식이 달라
+ * 찍는 쪽에서 구분이 필요하다. 이 함수는 그 표시만 기록해 둔다.
+ *
+ * 실행 컨텍스트: 오류 처리 경로. 프로세스 컨텍스트.
+ *
+ * 에러 경로: config 읽기 실패를 그대로 올려보낸다. 그 경우 log 의 내용은
+ * 믿을 수 없다.
+ *
+ * 호출 체인:
+ *   aer.c / dpc.c 의 오류 로그 수집 → [이 함수]
+ *     → pci_read_config_dword()
  */
 int pcie_read_tlp_log(struct pci_dev *dev, int where, int where2,
 		      unsigned int tlp_len, bool flit, struct pcie_tlp_log *log)
@@ -190,6 +266,33 @@ int pcie_read_tlp_log(struct pci_dev *dev, int where, int where2,
  * @pfx: String prefix
  *
  * Prints TLP Header and Prefix Log information held by @log.
+ */
+/* [한국어]
+ * pcie_print_tlp_log - 읽어 둔 TLP 헤더 로그를 사람이 읽을 형식으로 찍는다
+ *
+ * @dev: 대상 장치.
+ * @log: 읽어 둔 로그.
+ * @level: 로그 수준.
+ * @pfx: 각 줄 앞에 붙일 접두 문자열.
+ *
+ * 오류가 났을 때 어떤 트랜잭션이었는지를 dmesg 에 남긴다. 그 헤더가 있으면
+ * 어느 주소로 향한 무슨 요청이 실패했는지 추적할 수 있다.
+ *
+ * Flit 모드 여부로 형식을 가른다. PCIe 6.0 의 Flit 모드는 헤더 배치가 달라
+ * 같은 dword 를 다르게 해석해야 하기 때문이다.
+ *
+ * 접두사 로그는 실제로 있을 때만 찍는다. 대부분의 장치는 End-to-End TLP
+ * Prefix 를 쓰지 않아 그 부분이 비어 있다.
+ *
+ * 한 줄로 모아 찍는 것이 요점이다. 여러 줄로 나누면 다른 CPU 의 로그와
+ * 섞여 어느 줄이 한 트랜잭션인지 알 수 없게 된다.
+ *
+ * 실행 컨텍스트: 오류 처리 경로. 프로세스 컨텍스트.
+ *
+ * 에러 경로: 없다.
+ *
+ * 호출 체인:
+ *   aer.c / dpc.c 의 오류 보고 → [이 함수]
  */
 void pcie_print_tlp_log(const struct pci_dev *dev,
 			const struct pcie_tlp_log *log, const char *level,

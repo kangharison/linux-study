@@ -243,6 +243,36 @@ static inline u16 pcie_supported_speeds2target_speed(u8 supported_speeds)
  *
  * Return: Target Link Speed (1=2.5GT/s, 2=5GT/s, 3=8GT/s, etc.)
  */
+/* [한국어]
+ * pcie_bwctrl_select_speed - 양쪽이 지원하는 범위 안에서 실제 목표 속도를 고른다
+ *
+ * @port: 대상 포트.
+ * @speed_req: 요청받은 속도.
+ * @return: LNKCTL2 에 넣을 목표 속도 인코딩.
+ *
+ * 요청 속도를 그대로 쓰지 않는 이유가 이 함수의 존재 이유다. 링크는 양쪽이
+ * 합의해야 성립하므로, 한쪽만 지원하는 속도를 목표로 걸면 협상이 실패한다.
+ *
+ * 세 단계로 좁힌다. 먼저 요청 속도 **이하** 의 모든 속도를 담은 마스크를
+ * 만들고(정확히 그 속도가 아니라 "그 이하 중 가장 높은 것" 을 고르려는 것이다),
+ * 포트와 링크 상대의 supported_speeds 를 AND 로 교집합을 내고, 그 교집합과
+ * 요청 범위의 교집합에서 가장 높은 비트를 고른다.
+ *
+ * 링크 상대를 하위 버스의 **첫 장치** 로 삼는 것이 성립하는 이유는 PCIe 링크가
+ * 점대점이기 때문이다. 하위 버스에 장치가 하나뿐인 것이 정상이다.
+ *
+ * 교집합이 비면 최저 속도로 물러난다. 하드웨어가 supported_speeds 를 보고하지
+ * 않는 경우가 그에 해당하며, 안전한 쪽을 택하는 것이다.
+ *
+ * 실행 컨텍스트: 속도 설정 경로. pci_bus_sem 을 읽기로 잡는 구간이 있어
+ * 프로세스 컨텍스트여야 한다.
+ *
+ * 에러 경로: 없다. 언제나 유효한 인코딩을 돌려준다.
+ *
+ * 호출 체인:
+ *   pcie_set_target_speed() → [이 함수]
+ *     → pci_bus_speed2lnkctl2() → pcie_supported_speeds2target_speed()
+ */
 static u16 pcie_bwctrl_select_speed(struct pci_dev *port, enum pci_bus_speed speed_req)
 {
 	/* [한국어] 이 포트 아래의 버스. 없을 수도 있다. */
@@ -341,6 +371,41 @@ static int pcie_bwctrl_change_speed(struct pci_dev *port, u16 target_speed, bool
  * * -ENODEV	- @port is not controllable
  * * -ETIMEDOUT	- changing Link Speed took too long
  * * -EAGAIN	- Link Speed was changed but @speed_req was not achieved
+ */
+/* [한국어]
+ * pcie_set_target_speed - 링크 속도 상한을 정하고 재훈련시킨다
+ *
+ * @port: 대상 포트.
+ * @speed_req: 원하는 속도.
+ * @use_lt: 재훈련 완료를 Link Training 비트로 기다릴지.
+ * @return: 0 = 성공, -EINVAL, -EAGAIN, 또는 config/재훈련 오류.
+ *
+ * thermal 냉각 장치와 커널 내부가 링크 속도를 낮추거나 되돌릴 때 부르는
+ * 공개 진입점이다.
+ *
+ * 이미 그 속도면 곧바로 성공을 답한다. 재훈련이 링크를 잠시 끊으므로
+ * 불필요하게 하지 않는다.
+ *
+ * 잠금이 두 겹인 것이 이 함수의 요점이다. 바깥의 rwsem 읽기 잠금은
+ * port->link_bwctrl 포인터를 읽는 동안 probe/remove 가 그것을 갈아 끼우지
+ * 못하게 막고, 안쪽의 뮤텍스는 여러 주체가 동시에 속도를 바꾸지 못하게 막는다.
+ * 서비스가 붙지 않은 포트에서는 그 포인터가 NULL 이라 뮤텍스를 건너뛰는데,
+ * 대역폭 알림 없이도 속도 설정 자체는 가능하기 때문이다.
+ *
+ * 마지막의 -EAGAIN 이 세밀한 처리다. 재훈련이 성공했는데도 협상된 속도가
+ * 요청과 다르고 하위 버스에 장치가 있다면, 링크가 이유를 알 수 없이 다른
+ * 속도로 합의한 것이므로 호출자에게 다시 시도할 여지를 준다. 장치가 없는
+ * 빈 포트에서는 속도가 맞지 않는 것이 정상이라 그 경우를 제외한다.
+ *
+ * 실행 컨텍스트: thermal 콜백과 커널 내부. 재훈련 대기가 있어 잠들 수 있다.
+ *
+ * 에러 경로: 유효하지 않은 속도는 -EINVAL, 협상 결과 불일치는 -EAGAIN,
+ * 그 밖은 아래 호출의 오류를 그대로 올려보낸다.
+ *
+ * 호출 체인:
+ *   thermal 냉각 장치 / 커널 내부 → [이 함수]
+ *     → pcie_bwctrl_select_speed() → pcie_bwctrl_change_speed()
+ *     → pcie_retrain_link()
  */
 int pcie_set_target_speed(struct pci_dev *port, enum pci_bus_speed speed_req,
 			  bool use_lt)

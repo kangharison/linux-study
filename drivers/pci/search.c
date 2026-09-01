@@ -114,6 +114,38 @@ DECLARE_RWSEM(pci_bus_sem);
  * Starting @pdev, walk up the bus calling @fn for each possible alias
  * of @pdev at the root bus.
  */
+/* [한국어]
+ * pci_for_each_dma_alias - 이 장치가 낼 수 있는 모든 requester ID 를 훑는다
+ *
+ * @pdev: 출발 장치.
+ * @fn: 각 별칭에 적용할 콜백.
+ * @data: 콜백에 함께 넘길 포인터.
+ * @return: 콜백이 0 이 아닌 값을 돌려주면 그 값, 아니면 마지막 콜백의 결과.
+ *
+ * IOMMU 가 이 장치를 위해 매핑을 만들려면, 그 장치가 실제로 낼 수 있는
+ * requester ID 를 **모두** 알아야 한다. 하나라도 빠뜨리면 그 ID 로 온 DMA 가
+ * 매핑을 찾지 못해 오류가 난다.
+ *
+ * 세 갈래로 별칭이 생긴다.
+ * 1. 장치 자신의 ID. 정상적인 장치는 이것뿐이다.
+ * 2. dma_alias_mask 에 표시된 ID. 고장 난 장치가 자기 것이 아닌 requester ID 로
+ *    DMA 를 내는 경우이며, 쿼크가 그 비트맵을 채워 둔다.
+ * 3. 상류 브리지들이 만드는 별칭. 브리지마다 규칙이 다르다 — 루트·업스트림·
+ *    다운스트림 포트는 만들지 않고, PCIe-to-PCI 브리지는 세컨더리 버스의
+ *    (0,0)으로, PCI-to-PCIe 브리지는 자기 ID 로 바꾼다. 전통적인 PCI 브리지는
+ *    쿼크 플래그가 어느 쪽인지 정한다.
+ *
+ * PCI_DEV_FLAGS_BRIDGE_XLATE_ROOT 를 만나면 거기서 멈춘다. 그 브리지에 IOMMU
+ * 변환 단위가 붙어 있어 그 위로는 별칭이 전파되지 않기 때문이다.
+ *
+ * 실행 컨텍스트: IOMMU 매핑 설정. 프로세스 컨텍스트.
+ *
+ * 에러 경로: 콜백이 0 이 아닌 값을 돌려주면 즉시 그 값으로 중단한다.
+ *
+ * 호출 체인:
+ *   IOMMU 드라이버의 장치 등록 → [이 함수]
+ *     → pci_real_dma_dev() → fn() (별칭마다)
+ */
 int pci_for_each_dma_alias(struct pci_dev *pdev,
 			   int (*fn)(struct pci_dev *pdev,
 				     u16 alias, void *data), void *data)
@@ -469,6 +501,33 @@ static int match_pci_dev_by_id(struct device *dev, const void *data)
  * This is an internal function for use by the other search functions in
  * this file.
  */
+/* [한국어]
+ * pci_get_dev_by_id - 조건에 맞는 장치를 앞에서부터 찾는다
+ *
+ * @id: 찾을 조건.
+ * @from: 이전 결과. NULL 이면 처음부터.
+ * @return: 찾은 장치(참조가 올라간 상태), 없으면 NULL.
+ *
+ * 드라이버 코어의 버스 순회에 맡긴다. 직접 리스트를 돌지 않는 이유는 코어가
+ * 잠금과 참조 관리를 대신해 주기 때문이며, 그 덕분에 이 함수가 여섯 줄로 끝난다.
+ *
+ * from 인자가 "이어서 찾기" 규약을 만든다. 호출자가 이전 결과를 넘기면 그
+ * 다음부터 찾으므로, 같은 조건에 맞는 장치가 여럿일 때 하나씩 훑을 수 있다.
+ *
+ * 반환된 장치의 참조는 호출자 몫이다. 코어가 올려 준 것을 그대로 넘겨받는
+ * 구조이므로 pci_dev_put() 해야 한다.
+ *
+ * pci_get_dev_by_id_reverse() 와 방향만 다른 쌍을 이루며,
+ * __pci_get_subsys() 가 그 둘 중 하나를 고른다.
+ *
+ * 실행 컨텍스트: 장치 조회. 프로세스 컨텍스트.
+ *
+ * 에러 경로: 없다. 못 찾으면 NULL 이다.
+ *
+ * 호출 체인:
+ *   __pci_get_subsys() / pci_get_class() 계열 → [이 함수]
+ *     → bus_find_device() → match_pci_dev_by_id()
+ */
 static struct pci_dev *pci_get_dev_by_id(const struct pci_device_id *id,
 					 struct pci_dev *from)
 {
@@ -746,6 +805,28 @@ EXPORT_SYMBOL(pci_get_base_class);
  * this function is finished, the value will be stale.  Use this function to
  * find devices that are usually built into a system, or for a general hint as
  * to if another device happens to be present at this specific moment in time.
+ */
+/* [한국어]
+ * pci_dev_present - 표에 있는 장치가 시스템에 하나라도 있는지 답한다
+ *
+ * @ids: 조건 표. 벤더·서브벤더·클래스 마스크가 모두 0 인 항목이 끝 표시다.
+ * @return: 1 = 하나라도 있음, 0 = 없음.
+ *
+ * 쿼크가 "이 칩셋이 있으면 저 우회를 켠다" 를 판단하는 데 쓴다.
+ *
+ * 표의 끝을 세 필드로 판정하는 것이 눈에 띈다. 어느 하나만으로는 유효한
+ * 조건과 끝 표시를 구분할 수 없기 때문이다 — 벤더가 0 인 조건도,
+ * 클래스 마스크가 0 인 조건도 있을 수 있다.
+ *
+ * 찾은 장치의 참조를 그 자리에서 놓는다. 존재 여부만 알면 되므로 장치를
+ * 붙잡아 둘 이유가 없다.
+ *
+ * 실행 컨텍스트: 쿼크 적용과 드라이버 초기화. 프로세스 컨텍스트.
+ *
+ * 에러 경로: 없다.
+ *
+ * 호출 체인:
+ *   쿼크 / 드라이버의 칩셋 확인 → [이 함수] → pci_get_dev_by_id()
  */
 int pci_dev_present(const struct pci_device_id *ids)
 {
