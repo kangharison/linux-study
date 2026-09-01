@@ -160,6 +160,40 @@ EXPORT_SYMBOL(pci_enable_msi);
  * NOTE: The newer pci_alloc_irq_vectors() / pci_free_irq_vectors() API
  * pair should, in general, be used instead.
  */
+/* [한국어]
+ * pci_disable_msi - 장치의 MSI 모드를 끄고 벡터를 되돌린다
+ *
+ * @dev: 대상 장치.
+ * @return: 없음.
+ *
+ * **pci_enable_msi() 의 짝인 옛 API 다.** 상류 주석이 밝히듯 지금은
+ * pci_alloc_irq_vectors() / pci_free_irq_vectors() 쌍을 쓰는 것이 권장되며,
+ * 이 함수는 그 아래에서 여전히 불린다.
+ *
+ * **이 파일의 성격이 드러나는 함수다** -- 검증만 하고 실제 일은 msi.c 의
+ * 내부 함수 둘에 위임한다. 검증이 셋이다.
+ * 1. `pci_msi_enabled()` -- MSI 가 시스템 전체에서 꺼져 있으면 할 일이 없다.
+ * 2. `dev` 가 NULL 이 아닌가.
+ * 3. `dev->msi_enabled` -- 켠 적이 없으면 끌 것도 없다.
+ *
+ * **세 검사 모두 조용히 물러난다.** 오류를 알리지 않는 것은 정리 경로에서
+ * 조건 없이 부를 수 있게 하려는 것이며, void 반환이라 알릴 자리도 없다.
+ *
+ * **`guard(msi_descs_lock)` 이 요점이다.** 이 매크로가 잡은 락은 스코프를
+ * 벗어날 때 자동으로 풀리므로, 아래 두 호출 사이에서 빠져나가는 경로가
+ * 생겨도 락이 새지 않는다.
+ *
+ * **끄는 순서**: pci_msi_shutdown() 이 하드웨어의 MSI Enable 비트를 내리고
+ * INTx 를 되살린 뒤, pci_free_msi_irqs() 가 Linux IRQ 번호와 서술자를 놓는다.
+ * **하드웨어를 먼저 조용히 만든 뒤 자료구조를 놓는 순서** 여야 그사이에
+ * 인터럽트가 들어와 해제된 서술자를 건드리지 않는다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. 뮤텍스를 잡는다.
+ *
+ * 호출 체인:
+ *   장치 드라이버 / pci_free_irq_vectors()
+ *     → [이 함수] → pci_msi_shutdown(), pci_free_msi_irqs()
+ */
 void pci_disable_msi(struct pci_dev *dev)
 {
 	/* [한국어] 세 조건을 모두 확인한다 — MSI 자체가 부팅 인자로 꺼져 있지 않은지,
@@ -316,6 +350,37 @@ EXPORT_SYMBOL_GPL(pci_msix_alloc_irq_at);
  *
  * Undo an interrupt vector allocation. Does not disable MSI-X.
  */
+/* [한국어]
+ * pci_msix_free_irq - 동적으로 받아 둔 MSI-X 벡터 하나를 되돌린다
+ *
+ * @dev: 대상 장치.
+ * @map: 되돌릴 인터럽트를 가리키는 msi_map.
+ * @return: 없음.
+ *
+ * **pci_msix_alloc_irq_at() 의 짝이다.** 상류 주석이 못박듯 **MSI-X 자체를
+ * 끄지는 않는다** -- 벡터 하나만 반납하고 나머지는 그대로 둔다.
+ *
+ * **동적 MSI-X 가 무엇인가**: 예전에는 MSI-X 를 켤 때 필요한 벡터 수를
+ * 한꺼번에 정해야 했다. 지금은 도메인이 지원하면 동작 중에 벡터를 하나씩
+ * 더 받고 하나씩 돌려줄 수 있으며, 이 함수가 그 반납 쪽이다.
+ *
+ * **두 WARN_ON_ONCE 가 각각 다른 잘못을 잡는다.**
+ * 1. map 의 index 나 virq 가 유효하지 않다 -- 할당에 실패한 map 을 그대로
+ *    넘겼거나 이미 반납한 것을 다시 넘긴 경우다.
+ * 2. 이 장치의 도메인이 동적 할당을 지원하지 않는다 -- 애초에 이 API 로
+ *    받을 수 없었던 벡터를 반납하려는 것이므로 프로그래밍 오류다.
+ *
+ * **ONCE 를 쓰는 것은 같은 실수가 반복될 때 로그를 채우지 않기 위해서다.**
+ *
+ * 같은 index 를 시작과 끝으로 넘겨 **한 칸짜리 범위** 를 해제한다 --
+ * 아래 계층이 범위 단위 API 라 하나만 놓을 때도 그 형태를 쓴다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   장치 드라이버(동적 MSI-X 를 쓰는 것)
+ *     → [이 함수] → msi_domain_free_irqs_range()
+ */
 void pci_msix_free_irq(struct pci_dev *dev, struct msi_map map)
 {
 	/* [한국어] 해제 요청이 올바른 map 을 담고 있는지 확인한다. index 가 음수면 애초에
@@ -349,6 +414,34 @@ EXPORT_SYMBOL_GPL(pci_msix_free_irq);
  *
  * NOTE: The newer pci_alloc_irq_vectors() / pci_free_irq_vectors() API
  * pair should, in general, be used instead.
+ */
+/* [한국어]
+ * pci_disable_msix - 장치의 MSI-X 모드를 끄고 벡터를 모두 되돌린다
+ *
+ * @dev: 대상 장치.
+ * @return: 없음.
+ *
+ * **pci_enable_msix_range() 의 짝인 옛 API 이며, pci_disable_msi() 와
+ * 구조가 완전히 같다.** 보는 플래그(`msix_enabled`)와 부르는 shutdown 함수만
+ * 다르다.
+ *
+ * **두 함수를 따로 두는 이유**: MSI 와 MSI-X 는 설정공간의 다른 능력 구조를
+ * 쓰고 끄는 절차도 다르다. 다만 서술자를 놓는 뒷일은 같아서
+ * pci_free_msi_irqs() 를 공유한다.
+ *
+ * **pci_free_irq_vectors() 가 이 둘을 나란히 부른다.** 어느 모드였는지
+ * 따지지 않고 둘 다 부르면, 켜지지 않은 쪽은 플래그 검사에서 조용히
+ * 물러나므로 결과가 맞는다 -- 이 파일이 검사를 조용히 처리하는 이유가
+ * 그 쓰임새에서 드러난다.
+ *
+ * **`guard(msi_descs_lock)` 로 락을 자동 해제한다.** 스코프를 벗어나면
+ * 풀리므로 해제를 잊을 여지가 없다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. 뮤텍스를 잡는다.
+ *
+ * 호출 체인:
+ *   장치 드라이버 / pci_free_irq_vectors()
+ *     → [이 함수] → pci_msix_shutdown(), pci_free_msi_irqs()
  */
 void pci_disable_msix(struct pci_dev *dev)
 {
@@ -391,6 +484,38 @@ EXPORT_SYMBOL(pci_disable_msix);
  * @max_vecs), -ENOSPC if less than @min_vecs interrupt vectors are
  * available, other errnos otherwise.
  */
+/* [한국어]
+ * pci_alloc_irq_vectors - 장치에 인터럽트 벡터를 받아 온다
+ *
+ * @dev: 대상 장치.
+ * @min_vecs: 최소한 필요한 벡터 수. 1 이상이어야 한다.
+ * @max_vecs: 받고 싶은 최대 벡터 수.
+ * @flags: 어떤 방식을 허용할지, 친화도를 자동 관리할지.
+ * @return: 받은 벡터 수, 부족하면 -ENOSPC, 그 밖에는 음수 오류.
+ *
+ * **지금 커널에서 드라이버가 인터럽트를 받는 표준 방법이다.** 옛 API 인
+ * pci_enable_msi() / pci_enable_msix_range() 를 이것 하나가 대신한다.
+ *
+ * **한 줄짜리 래퍼이며, 친화도 요구 없이 부르는 형태에 이름을 붙인 것이다.**
+ * 실제 일은 pci_alloc_irq_vectors_affinity() 가 하고 affd 자리에 NULL 이 간다.
+ *
+ * **min/max 두 값을 받는 것이 이 API 의 핵심 설계다.** 드라이버는 "많으면
+ * 좋지만 최소 이만큼은 있어야 한다" 고 말할 수 있고, 커널이 사정에 맞게
+ * 그 사이에서 정해 준다. 그래서 반환값이 곧 실제로 받은 개수이며,
+ * 드라이버는 그 수에 맞춰 큐 구성을 조정해야 한다.
+ *
+ * **우선순위가 정해져 있다** -- MSI-X → MSI → INTx. 상류 주석이 그 순서를
+ * 밝히며, flags 로 허용한 것 중 앞선 것부터 시도한다.
+ *
+ * **NVMe 관점**: nvme_setup_irqs() 가 이 계열 함수로 큐 수만큼 벡터를 받고,
+ * 받은 개수에 맞춰 I/O 큐 수를 다시 정한다. 그 협상이 성립하는 것이
+ * min/max 구조 덕이다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   장치 드라이버의 probe → [이 함수] → pci_alloc_irq_vectors_affinity()
+ */
 int pci_alloc_irq_vectors(struct pci_dev *dev, unsigned int min_vecs,
 			  unsigned int max_vecs, unsigned int flags)
 {
@@ -411,6 +536,48 @@ EXPORT_SYMBOL(pci_alloc_irq_vectors);
  *
  * Same as pci_alloc_irq_vectors(), but with the extra @affd parameter.
  * Check that function docs, and &struct irq_affinity, for more details.
+ */
+/* [한국어]
+ * pci_alloc_irq_vectors_affinity - 친화도 요구까지 받아 인터럽트 벡터를 배정한다
+ *
+ * @dev: 대상 장치.
+ * @min_vecs: 최소한 필요한 벡터 수.
+ * @max_vecs: 받고 싶은 최대 벡터 수.
+ * @flags: 허용할 방식과 옵션.
+ * @affd: CPU 친화도 요구. NULL 일 수 있다.
+ * @return: 받은 벡터 수, 부족하면 -ENOSPC, 그 밖에는 음수 오류.
+ *
+ * **이 파일에서 실제로 정책을 판단하는 유일한 함수다.** 다른 함수들이
+ * 검증만 하고 위임하는 것과 달리, 여기서는 **어떤 방식을 어떤 순서로
+ * 시도할지** 를 정한다.
+ *
+ * **flags 와 affd 의 짝을 먼저 맞춘다.**
+ * - PCI_IRQ_AFFINITY 를 줬는데 affd 가 없으면 기본값(0으로 채운 구조체)을
+ *   쓴다. 벡터를 가용 CPU 에 고르게 퍼뜨리라는 뜻이 된다.
+ * - 반대로 그 플래그가 없는데 affd 를 줬으면 **WARN_ON 으로 알리고 무시한다.**
+ *   드라이버가 두 가지를 헷갈린 것이므로 잘못을 드러내되 진행은 한다.
+ *
+ * **우선순위대로 세 번 시도한다.**
+ * 1. **MSI-X** -- 벡터마다 주소·데이터를 따로 두므로 개수가 많고 친화도를
+ *    벡터별로 줄 수 있다. 성공하면 곧바로 돌려준다.
+ * 2. **MSI** -- 최대 32개이고 벡터가 연속이어야 한다는 제약이 있다.
+ * 3. **INTx** -- **min_vecs 가 정확히 1 이고 장치에 IRQ 가 있을 때만** 된다.
+ *    핀 하나를 공유하는 방식이라 벡터가 하나뿐이기 때문이다.
+ *
+ * **INTx 경로에서도 친화도 로직을 부르는 것이 눈에 띈다.** 원문 주석이
+ * 그 이유를 밝힌다 -- 결과를 쓰지 않더라도 드라이버가 "벡터 하나뿐인
+ * 경우" 의 큐 구성을 같은 방식으로 계산할 수 있게 하려는 것이다.
+ *
+ * **실패하면 nvecs 를 그대로 돌려준다.** 초기값이 -ENOSPC 이므로,
+ * 아무 방식도 허용되지 않았거나 모두 실패했을 때 그 값이 나간다.
+ * 마지막으로 시도한 방식이 다른 오류를 냈다면 그 오류가 나간다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   장치 드라이버 / pci_alloc_irq_vectors()
+ *     → [이 함수] → __pci_enable_msix_range(), __pci_enable_msi_range(),
+ *       irq_create_affinity_masks(), pci_intx()
  */
 int pci_alloc_irq_vectors_affinity(struct pci_dev *dev, unsigned int min_vecs,
 				   unsigned int max_vecs, unsigned int flags,
@@ -504,6 +671,37 @@ EXPORT_SYMBOL(pci_alloc_irq_vectors_affinity);
  *
  * Return: the Linux IRQ number, or -EINVAL if @nr is out of range
  */
+/* [한국어]
+ * pci_irq_vector - 장치 상대 벡터 번호를 Linux IRQ 번호로 바꾼다
+ *
+ * @dev: 대상 장치.
+ * @nr: 장치 기준 벡터 색인(0부터).
+ * @return: Linux IRQ 번호, 범위를 벗어나면 -EINVAL.
+ *
+ * **벡터를 받은 드라이버가 request_irq() 에 넘길 번호를 얻는 함수다.**
+ * pci_alloc_irq_vectors() 가 개수만 알려 주므로, 그 각각에 해당하는 실제
+ * IRQ 번호는 이 함수로 하나씩 물어봐야 한다.
+ *
+ * **nr 의 뜻이 모드마다 다르다.** 상류 주석이 셋을 밝힌다 --
+ * MSI-X 면 벡터 표 안의 색인, MSI 면 활성화된 벡터들 중 몇 번째,
+ * INTx 면 반드시 0 이다.
+ *
+ * **INTx 경로가 먼저 처리된다.** 둘 다 꺼져 있으면 이 장치는 핀 인터럽트를
+ * 쓰는 것이므로 `dev->irq` 를 돌려준다. 다만 **nr 이 0 일 때만** 그렇고,
+ * 0 이 아니면 -EINVAL 이다 -- INTx 에는 벡터가 하나뿐이기 때문이다.
+ *
+ * **MSI/MSI-X 는 MSI 코어에 물어본다.** msi_get_virq() 가 서술자에서
+ * Linux IRQ 번호를 찾아 주며, 없으면 0 을 돌려준다. **0 은 유효한 IRQ
+ * 번호가 아니므로** 그것을 -EINVAL 로 바꿔 내보낸다.
+ *
+ * **NVMe 관점**: nvme_pci 가 큐마다 이 함수로 IRQ 번호를 얻어
+ * `request_threaded_irq` 로 완료 핸들러를 건다. 큐 인덱스가 곧 nr 이 된다.
+ *
+ * 실행 컨텍스트: 어디서든 부를 수 있다. 락을 잡지 않는다.
+ *
+ * 호출 체인:
+ *   장치 드라이버 / pci_irq_get_affinity() → [이 함수] → msi_get_virq()
+ */
 int pci_irq_vector(struct pci_dev *dev, unsigned int nr)
 {
 	/* [한국어] msi_get_virq() 결과를 담을 변수. 부호 없는 타입인 것은 그 함수가 0 을
@@ -540,6 +738,39 @@ EXPORT_SYMBOL(pci_irq_vector);
  * pci_alloc_irq_vectors() without the %PCI_IRQ_AFFINITY flag). Return a
  * generic set of CPU IDs representing all possible CPUs available
  * during system boot if the device is in legacy INTx mode.
+ */
+/* [한국어]
+ * pci_irq_get_affinity - 벡터 하나에 배정된 CPU 친화도 마스크를 얻는다
+ *
+ * @dev: 대상 장치.
+ * @nr: 장치 기준 벡터 색인(0부터). 뜻은 pci_irq_vector() 와 같다.
+ * @return: 친화도 마스크, 없으면 NULL 또는 cpu_possible_mask.
+ *
+ * **드라이버가 자기 큐를 CPU 에 매핑할 때 쓰는 정보다.** 커널이 벡터를
+ * CPU 에 고르게 퍼뜨려 두었으므로, 드라이버는 그 배치를 그대로 따라
+ * 큐를 배치하면 인터럽트가 처리되는 CPU 와 큐를 다루는 CPU 가 맞는다.
+ *
+ * **세 가지 다른 결과를 돌려주며 각각 뜻이 다르다.**
+ * 1. **cpu_possible_mask** -- MSI 서술자가 없다. 곧 INTx 모드다.
+ *    특정 CPU 로 한정되지 않으므로 "모든 CPU" 를 돌려준다.
+ * 2. **NULL** -- MSI/MSI-X 이긴 한데 친화도 없이 받은 벡터다.
+ *    PCI_IRQ_AFFINITY 없이 할당했거나 옛 API 로 켠 경우이며,
+ *    상류 주석이 그 조건을 나열한다.
+ * 3. **실제 마스크** -- 친화도를 요구해 받은 경우다.
+ *
+ * **마지막 색인 계산이 요점이다.** 원문 주석이 밝히듯 **MSI 는 서술자
+ * 하나에 마스크 배열을 두고, MSI-X 는 벡터마다 서술자가 따로 있어 마스크가
+ * 하나뿐이다.** 그래서 MSI 면 nr 로 배열을 색인하고, MSI-X 면 0 을 쓴다.
+ * 서술자를 얻는 방식은 같은데 그 안의 배치가 달라 생기는 갈림이다.
+ *
+ * **WARN_ON_ONCE 로 잘못된 nr 을 잡는다** -- pci_irq_vector() 가 음수를
+ * 돌려준 것이므로 호출자가 범위를 벗어난 색인을 준 것이다.
+ *
+ * 실행 컨텍스트: 어디서든 부를 수 있다. 락을 잡지 않는다.
+ *
+ * 호출 체인:
+ *   장치 드라이버(큐-CPU 매핑을 만들 때)
+ *     → [이 함수] → pci_irq_vector(), irq_get_msi_desc()
  */
 const struct cpumask *pci_irq_get_affinity(struct pci_dev *dev, int nr)
 {
@@ -595,6 +826,34 @@ EXPORT_SYMBOL(pci_irq_get_affinity);
  * managed via pcim_msi_release() and calling pci_free_irq_vectors() can
  * lead to double-free issues.
  */
+/* [한국어]
+ * pci_free_irq_vectors - 받아 두었던 인터럽트 벡터를 모두 되돌린다
+ *
+ * @dev: 대상 장치.
+ * @return: 없음.
+ *
+ * **pci_alloc_irq_vectors() 계열의 짝이다.** 두 줄뿐이지만 그 두 줄이
+ * 어느 모드였든 상관없이 동작하게 만든다.
+ *
+ * **어느 모드였는지 따지지 않고 둘 다 부른다.** 켜지지 않은 쪽은 각자의
+ * 플래그 검사(`msix_enabled` / `msi_enabled`)에서 조용히 물러나므로
+ * 결과가 맞는다. **이 파일의 disable 함수들이 오류를 알리지 않고 조용히
+ * 빠져나가도록 만든 이유가 여기서 드러난다.**
+ *
+ * **MSI-X 를 먼저 끄는 순서에는 실질적 의미가 없다** -- 둘이 동시에
+ * 켜져 있을 수 없기 때문이다. 다만 우선순위가 높은 쪽을 먼저 적은 것이
+ * pci_alloc_irq_vectors_affinity() 의 시도 순서와 결이 같다.
+ *
+ * **pcim_enable_device() 로 켠 장치에는 부르면 안 된다.** 상류 주석이
+ * 경고하듯 그 경우 pcim_msi_release() 가 자동으로 정리하므로 여기서
+ * 또 놓으면 이중 해제가 된다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. 아래에서 뮤텍스를 잡는다.
+ *
+ * 호출 체인:
+ *   장치 드라이버의 remove → [이 함수]
+ *     → pci_disable_msix(), pci_disable_msi()
+ */
 void pci_free_irq_vectors(struct pci_dev *dev)
 {
 	pci_disable_msix(dev);
@@ -610,6 +869,33 @@ EXPORT_SYMBOL(pci_free_irq_vectors);
  * typically useful upon system resume, or after an error-recovery PCI
  * adapter reset.
  */
+/* [한국어]
+ * pci_restore_msi_state - 캐시해 둔 MSI(-X) 설정을 장치에 되쓴다
+ *
+ * @dev: 대상 장치.
+ * @return: 없음.
+ *
+ * **전원이 나갔다 오거나 리셋된 장치의 인터럽트 설정을 되살린다.**
+ * 상류 주석이 두 경우를 든다 -- 시스템 재개, 그리고 오류 복구 뒤의
+ * 어댑터 리셋.
+ *
+ * **커널이 값을 들고 있다는 것이 전제다.** MSI 주소와 데이터, MSI-X 벡터
+ * 표의 내용은 커널이 정해 장치에 써 넣은 것이므로, 장치 쪽이 비워져도
+ * 커널의 서술자에는 그대로 남아 있다. 그것을 다시 쓰는 것이 전부다.
+ *
+ * **MSI 와 MSI-X 를 나란히 부르는 것이 pci_free_irq_vectors() 와 같은
+ * 관용이다** -- 켜지지 않은 쪽은 아래에서 조용히 물러난다.
+ *
+ * **config space 일반 복원만으로는 부족하다.** MSI-X 벡터 표는 설정공간이
+ * 아니라 BAR 안의 메모리에 있어, config 저장/복원 경로가 다루지 못하기
+ * 때문이다. 그래서 별도의 복원 함수가 필요하다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트(재개 또는 오류 복구 경로).
+ *
+ * 호출 체인:
+ *   pci_restore_state() / 오류 복구 경로
+ *     → [이 함수] → __pci_restore_msi_state(), __pci_restore_msix_state()
+ */
 void pci_restore_msi_state(struct pci_dev *dev)
 {
 	__pci_restore_msi_state(dev);
@@ -622,6 +908,32 @@ EXPORT_SYMBOL_GPL(pci_restore_msi_state);
  *
  * Return: true if MSI has not been globally disabled through ACPI FADT,
  * PCI bridge quirks, or the "pci=nomsi" kernel command-line option.
+ */
+/* [한국어]
+ * pci_msi_enabled - MSI(-X)가 시스템 전체에서 켜져 있는지 알려 준다
+ *
+ * @return: 켜져 있으면 true.
+ *
+ * **전역 스위치 하나를 읽어 돌려주는 함수다.** 그 값이 꺼지는 경로가
+ * 셋이며, 상류 주석이 모두 밝힌다 -- ACPI FADT 가 MSI 를 쓰지 말라고
+ * 표시한 경우, 브리지 quirk 가 MSI 를 전달하지 못한다고 판단한 경우,
+ * 그리고 커널 명령줄에 `pci=nomsi` 를 준 경우다.
+ *
+ * **quirks.c 와 이어지는 자리다.** 그 파일의 quirk_disable_msi() 계열이
+ * MSI 를 전달하지 못하는 브리지를 만나면 이 전역을 내리거나 해당 버스에
+ * 표시를 남긴다. 하드웨어 결함이 시스템 전체의 인터럽트 방식을 바꾸는 셈이다.
+ *
+ * **함수로 감싸 두는 이유**: `pci_msi_enable` 전역 자체는 msi.c 안에 있고
+ * 바깥에 노출되지 않는다. 그것을 읽는 통로를 함수 하나로 좁혀 두면
+ * 값이 바뀌는 조건이 늘어나도 호출자를 고치지 않아도 된다.
+ *
+ * **이 파일의 disable 함수 둘이 맨 앞에서 이것을 부른다** -- MSI 가 아예
+ * 꺼진 시스템이면 끌 것도 없기 때문이다.
+ *
+ * 실행 컨텍스트: 어디서든 부를 수 있다. 락도 하드웨어 접근도 없다.
+ *
+ * 호출 체인:
+ *   장치 드라이버 / pci_disable_msi() / pci_disable_msix() → [이 함수]
  */
 bool pci_msi_enabled(void)
 {

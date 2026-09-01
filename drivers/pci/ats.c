@@ -159,6 +159,28 @@ void pci_ats_init(struct pci_dev *dev)
  * Returns true if the device supports ATS and is allowed to use it, false
  * otherwise.
  */
+/* [한국어]
+ * pci_ats_supported - 이 장치에 ATS 를 켜도 되는지 판단한다
+ *
+ * @dev: 확인할 장치.
+ * @return: 켜도 되면 true, 아니면 false.
+ *
+ * **두 가지를 한꺼번에 묻는다** -- 하드웨어가 ATS 를 갖고 있는가,
+ * 그리고 **그것을 쓰도록 허락해도 되는가.** 뒤쪽이 이 함수의 요점이다.
+ *
+ * `dev->ats_cap` 은 pci_ats_init() 이 열거 때 찾아 캐시해 둔 capability
+ * 오프셋이다. 0 이면 이 장치에는 ATS capability 자체가 없다.
+ *
+ * **untrusted 검사가 보안 판단이다.** ATS 를 켜면 장치가 "이미 변환된 주소"
+ * 를 내보내고 IOMMU 는 그것을 다시 검사하지 않는다. 즉 ATS 를 켠 장치는
+ * 임의의 물리 주소에 DMA 할 수 있다. 그래서 Thunderbolt 처럼 사용자가
+ * 바깥에서 꽂을 수 있는 경로의 장치는 untrusted 로 표시되어 여기서 걸린다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. 순수 검사이며 config 접근도 없다.
+ *
+ * 호출 체인:
+ *   IOMMU 드라이버 / pci_prepare_ats() / pci_enable_ats() → [이 함수]
+ */
 bool pci_ats_supported(struct pci_dev *dev)
 {
 	/* [한국어] capability 가 없으면 지원하지 않는다. */
@@ -181,6 +203,35 @@ EXPORT_SYMBOL_GPL(pci_ats_supported);
  * ensure that the VF can have ATS enabled.
  *
  * Returns 0 on success, or negative on failure.
+ */
+/* [한국어]
+ * pci_prepare_ats - VF 를 만들기 전에 PF 의 STU 를 미리 정해 둔다
+ *
+ * @dev: 대상 장치. 보통 PF 다.
+ * @ps: IOMMU 가 쓰는 페이지 시프트. STU 의 근거가 된다.
+ * @return: 성공 0, 조건이 맞지 않으면 음수.
+ *
+ * **pci_enable_ats() 와 거의 같은 일을 하지만 Enable 비트는 켜지 않는다.**
+ * STU(Smallest Translation Unit)만 레지스터에 적어 두는 것이 전부다.
+ *
+ * **왜 그런 함수가 필요한가**: VF 는 자기 STU 를 정할 수 없고 PF 의 값을
+ * 따라야 한다. 그런데 VF 에 ATS 를 켜려면 그 시점에 PF 의 STU 가 이미
+ * 맞게 설정되어 있어야 한다. 상류 주석이 밝히듯 **VF 를 만들기 전에 PF 에
+ * 대해 이것을 불러 두어야** VF 쪽 ATS 활성화가 성공한다.
+ *
+ * VF 로 불리면 `dev->ats_stu` 도 건드리지 않고 그냥 0 을 돌려준다 --
+ * VF 는 설정할 것이 없기 때문이다.
+ *
+ * **STU 를 쓰는 방식**: 레지스터에는 절대값이 아니라 PCI_ATS_MIN_STU 를
+ * 0 으로 삼은 상대값을 적는다. 그래서 `ps - PCI_ATS_MIN_STU` 를 넣는다.
+ * STU 는 장치가 한 번에 변환을 요청하는 최소 단위이며, IOMMU 의 페이지
+ * 크기보다 작아야 변환 결과를 그대로 쓸 수 있다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트. config 쓰기가 있다.
+ *
+ * 호출 체인:
+ *   IOMMU 드라이버(SR-IOV 활성화 전)
+ *     → [이 함수] → pci_ats_supported(), pci_write_config_word()
  */
 int pci_prepare_ats(struct pci_dev *dev, int ps)
 {
@@ -222,6 +273,35 @@ EXPORT_SYMBOL_GPL(pci_prepare_ats);
  * @ps: the IOMMU page shift
  *
  * Returns 0 on success, or negative on failure.
+ */
+/* [한국어]
+ * pci_enable_ats - ATS capability 를 켠다
+ *
+ * @dev: 대상 장치.
+ * @ps: IOMMU 페이지 시프트.
+ * @return: 성공 0, 조건이 맞지 않으면 음수.
+ *
+ * **이 파일의 세 capability 가 공유하는 형태의 첫 번째 예다** --
+ * 지원 여부 확인 → 이미 켜져 있는지 확인 → Enable 비트를 켜고
+ * `dev->ats_enabled` 플래그를 남긴다.
+ *
+ * **PF 와 VF 가 갈리는 자리가 이 함수의 핵심이다.**
+ * - PF: 자기 STU 를 정하고 Enable 비트와 함께 써 넣는다.
+ * - VF: **STU 를 쓰지 않고 Enable 비트만 쓴다.** 대신 PF 의 STU 가 요청한
+ *   값과 같은지 먼저 확인하고, 다르면 -EINVAL 로 물러난다. 상류 주석이
+ *   밝히듯 PF 에 같은 STU 로 ATS 가 이미 켜져 있지 않으면 VF 의 활성화는
+ *   하드웨어 차원에서 실패하기 때문이다.
+ *
+ * **플래그를 따로 두는 이유**: 레지스터를 다시 읽지 않고도 상태를 알아야
+ * 하는 곳이 많고(pci_disable_ats 의 WARN_ON, 복원 경로), 무엇보다 D3 에서
+ * 돌아온 뒤에는 레지스터 값이 사라져 있어도 "켜져 있었다" 는 사실은
+ * 기억하고 있어야 하기 때문이다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   IOMMU 드라이버가 장치를 도메인에 붙일 때
+ *     → [이 함수] → pci_ats_supported(), pci_physfn(), pci_write_config_word()
  */
 int pci_enable_ats(struct pci_dev *dev, int ps)
 {
@@ -273,6 +353,32 @@ EXPORT_SYMBOL_GPL(pci_enable_ats);
 /**
  * pci_disable_ats - disable the ATS capability
  * @dev: the PCI device
+ */
+/* [한국어]
+ * pci_disable_ats - ATS capability 를 끈다
+ *
+ * @dev: 대상 장치.
+ * @return: 없음.
+ *
+ * **pci_enable_ats() 의 짝이다.** 읽고-고쳐-쓰기로 Enable 비트만 지우고
+ * 플래그를 내린다.
+ *
+ * **STU 는 지우지 않는다.** 그래서 다시 켤 때 PF 의 STU 가 그대로 남아
+ * 있으며, VF 쪽 활성화가 여전히 성립한다. Enable 비트만 건드리는 것이
+ * 이 파일의 disable 함수들이 공유하는 방식이다.
+ *
+ * **VF 를 따로 다루지 않는다.** PRI 와 PASID 의 disable 이 `is_virtfn` 이면
+ * 곧바로 물러나는 것과 대비되는데, ATS 는 VF 도 자기 Enable 비트를
+ * 갖기 때문이다 -- VF 가 PF 에서 물려받는 것은 STU 뿐이다.
+ *
+ * **켜져 있지 않은데 부르면 WARN_ON 으로 알린다.** 호출자가 켜고 끄는 짝을
+ * 맞추지 못한 것이므로 프로그래밍 오류다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   IOMMU 드라이버가 장치를 도메인에서 뗄 때
+ *     → [이 함수] → pci_read_config_word(), pci_write_config_word()
  */
 void pci_disable_ats(struct pci_dev *dev)
 {
@@ -350,6 +456,31 @@ void pci_restore_ats_state(struct pci_dev *dev)
  * Depth; and 0 indicates the function shares the Queue with
  * other functions (doesn't exclusively own a Queue).
  */
+/* [한국어]
+ * pci_ats_queue_depth - 장치가 한 번에 받을 수 있는 무효화 요청 수를 읽는다
+ *
+ * @dev: 대상 장치.
+ * @return: 큐 깊이(1~32), VF 면 0, capability 가 없으면 -EINVAL.
+ *
+ * **IOMMU 가 얼마나 많은 무효화 요청을 한꺼번에 보낼 수 있는지 알려 준다.**
+ * 장치가 변환 결과를 캐시해 두었으므로, 매핑이 바뀌면 IOMMU 가 그 캐시를
+ * 비우라고(Invalidate) 알려야 한다. 그 요청을 장치가 몇 개까지 쌓아 둘 수
+ * 있는지가 이 값이다.
+ *
+ * **상류 주석이 밝히는 값의 재해석이 이 함수의 요점이다.** ATS 규격은
+ * 필드 값 0 을 "32개를 받을 수 있다" 는 뜻으로 쓴다. 그대로 돌려주면
+ * 호출자가 0 을 "받을 수 없다" 로 오해하므로, 여기서 32(PCI_ATS_MAX_QDEP)로
+ * 바꿔 준다. 그래서 이 함수의 0 은 규격의 0 과 뜻이 다르다 --
+ * **"전용 큐를 갖지 않고 다른 함수와 나눠 쓴다"** 는 뜻이다.
+ *
+ * VF 가 그 0 을 받는다. VF 는 PF 의 큐를 공유하기 때문이다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   IOMMU 드라이버(무효화 요청을 보내기 전)
+ *     → [이 함수] → pci_read_config_word()
+ */
 int pci_ats_queue_depth(struct pci_dev *dev)
 {
 	/* [한국어] capability 레지스터 값. */
@@ -382,6 +513,30 @@ int pci_ats_queue_depth(struct pci_dev *dev)
  * Per PCIe spec r4.0, sec 10.5.1.2, if the Page Aligned Request bit
  * is set, it indicates the Untranslated Addresses generated by the
  * device are always aligned to a 4096 byte boundary.
+ */
+/* [한국어]
+ * pci_ats_page_aligned - 장치가 내보내는 미변환 주소가 늘 4KB 정렬인지 본다
+ *
+ * @pdev: 대상 장치.
+ * @return: 늘 정렬되어 있으면 1, 아니면 0.
+ *
+ * **IOMMU 가 변환 요청을 다루는 방식을 결정하는 정보다.** 장치가 보내는
+ * 주소의 하위 12비트가 늘 0 이라고 보장되면, IOMMU 는 페이지 단위로만
+ * 생각하면 되고 페이지 안 오프셋을 따로 처리하지 않아도 된다.
+ *
+ * **근거가 상류 주석에 적혀 있다** -- PCIe r4.0 10.5.1.2 절의
+ * Page Aligned Request 비트다. 그 비트가 서 있으면 장치가 내보내는
+ * 미변환 주소가 늘 4096바이트 경계에 맞는다.
+ *
+ * **capability 가 없으면 0 을 돌려준다.** -EINVAL 이 아니라 0 인 것은
+ * 반환값이 참/거짓이라 오류를 따로 표현할 자리가 없기 때문이다.
+ * 호출자에게는 "정렬을 보장하지 않는다" 와 같은 뜻이 되므로 안전한 쪽이다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   IOMMU 드라이버(도메인 설정 시)
+ *     → [이 함수] → pci_read_config_word()
  */
 int pci_ats_page_aligned(struct pci_dev *pdev)
 {
@@ -455,6 +610,38 @@ void pci_pri_init(struct pci_dev *pdev)
  *
  * Returns 0 on success, negative value on error
  */
+/* [한국어]
+ * pci_enable_pri - PRI capability 를 켜고 요청 슬롯 수를 배정한다
+ *
+ * @pdev: 대상 장치.
+ * @reqs: 동시에 미해결로 둘 수 있는 페이지 요청 수.
+ * @return: 성공 0, 조건이 맞지 않으면 음수.
+ *
+ * **ATS 위에 얹혀 장치 DMA 에 demand paging 을 가능하게 하는 기능이다.**
+ * 이것이 켜지면 장치는 없는 페이지에 접근할 때 실패하는 대신 호스트에게
+ * 올려 달라고 요청할 수 있고, 그 덕에 DMA 대상 메모리를 미리 전부
+ * 고정(pin)해 두지 않아도 된다.
+ *
+ * **VF 처리가 ATS 와 다르다.** 상류 주석이 밝히듯 **VF 는 PRI capability 를
+ * 아예 구현하지 않는다.** 그래서 VF 로 불리면 PF 쪽이 이미 켜져 있는지만
+ * 보고 그 결과를 돌려준다 -- 켜져 있으면 VF 도 이미 켜진 것과 같으므로 0,
+ * 아니면 -EINVAL 이다. 레지스터는 건드리지 않는다.
+ *
+ * PF 경로에서 하는 일이 넷이다.
+ * 1. **STOPPED 비트를 확인한다.** 장치가 아직 이전 요청을 처리 중이면
+ *    설정을 바꿀 수 없으므로 -EBUSY 로 물러난다.
+ * 2. 하드웨어가 감당할 수 있는 최대치(MAX_REQ)를 읽어 요청한 수를 그
+ *    안으로 깎는다.
+ * 3. 깎은 값을 ALLOC_REQ 에 쓰고 **pdev->pri_reqs_alloc 에도 남긴다** --
+ *    D3 에서 돌아온 뒤 복원할 때 이 값이 필요하다.
+ * 4. Enable 비트를 켜고 플래그를 세운다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   IOMMU 드라이버(SVA 설정 경로)
+ *     → [이 함수] → pci_physfn(), pci_read_config_dword(), pci_write_config_dword()
+ */
 int pci_enable_pri(struct pci_dev *pdev, u32 reqs)
 {
 	/* [한국어] 제어 값과 상태 값. */
@@ -520,6 +707,28 @@ int pci_enable_pri(struct pci_dev *pdev, u32 reqs)
  *
  * Only clears the enabled-bit, regardless of its former value
  */
+/* [한국어]
+ * pci_disable_pri - PRI capability 를 끈다
+ *
+ * @pdev: 대상 장치.
+ * @return: 없음.
+ *
+ * **pci_enable_pri() 의 짝이다.** 상류 주석이 밝히듯 Enable 비트만 지우며,
+ * 그 전에 어떤 값이었든 상관하지 않는다.
+ *
+ * **VF 면 곧바로 물러난다.** VF 는 PRI capability 를 갖지 않고 PF 의 설정을
+ * 공유하므로 끌 것이 없다 -- 원문 주석의 "VFs share the PF PRI" 가 그
+ * 뜻이다. ATS 의 disable 이 VF 를 따로 다루지 않는 것과 대비되는 자리다.
+ *
+ * **배정해 둔 요청 수(ALLOC_REQ)는 지우지 않는다.** pdev->pri_reqs_alloc 도
+ * 그대로 남으므로, 다시 켜거나 전원 복귀 후 복원할 때 같은 값을 쓸 수 있다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   IOMMU 드라이버의 정리 경로
+ *     → [이 함수] → pci_read_config_word(), pci_write_config_word()
+ */
 void pci_disable_pri(struct pci_dev *pdev)
 {
 	/* [한국어] 제어 레지스터 값. */
@@ -555,6 +764,34 @@ EXPORT_SYMBOL_GPL(pci_disable_pri);
  * pci_restore_pri_state - Restore PRI
  * @pdev: PCI device structure
  */
+/* [한국어]
+ * pci_restore_pri_state - 전원 복귀 후 PRI 설정을 되살린다
+ *
+ * @pdev: 대상 장치.
+ * @return: 없음.
+ *
+ * **config space 저장/복원만으로는 채워지지 않는 부분을 메운다.**
+ * PRI 는 확장 capability 라 일반 복원 경로가 다루지 않으므로, 켜져 있던
+ * 장치라면 여기서 다시 써 넣어야 한다.
+ *
+ * **되살리는 것이 둘이다** -- 배정해 두었던 요청 수(pri_reqs_alloc)와
+ * Enable 비트다. 순서가 중요하다: **요청 수를 먼저 쓰고 그다음 Enable 을
+ * 켠다.** 켜진 상태에서 배정을 바꾸는 것은 허용되지 않기 때문이며,
+ * pci_enable_pri() 의 순서와도 같다.
+ *
+ * **pdev->pri_enabled 를 보고 판단한다.** 그 플래그가 D3 를 건너 살아남는
+ * 소프트웨어 상태이기 때문이다 -- 하드웨어 레지스터는 이미 비워져 있으므로
+ * 읽어서는 알 수 없다. 이 파일이 플래그를 따로 들고 있는 이유가 여기서
+ * 드러난다.
+ *
+ * **여기서는 STOPPED 비트를 확인하지 않는다.** 방금 전원이 들어온 장치라
+ * 진행 중인 요청이 있을 수 없기 때문이다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트(전원 복귀 경로).
+ *
+ * 호출 체인:
+ *   pci_restore_state() → [이 함수] → pci_write_config_dword/word()
+ */
 void pci_restore_pri_state(struct pci_dev *pdev)
 {
 	/* [한국어] 활성화 비트를 미리 세워 둔다. */
@@ -588,6 +825,31 @@ void pci_restore_pri_state(struct pci_dev *pdev)
  *
  * The PRI capability must be disabled before this function is called.
  * Returns 0 on success, negative value on error.
+ */
+/* [한국어]
+ * pci_reset_pri - 장치의 PRI 상태를 초기로 되돌린다
+ *
+ * @pdev: 대상 장치.
+ * @return: 성공 0, 조건이 맞지 않으면 음수.
+ *
+ * **enable/disable 과 다른 종류의 조작이다.** Enable 비트를 건드리는 것이
+ * 아니라 Reset 비트를 써서 **장치 안의 PRI 상태 기계 자체를 초기로**
+ * 되돌린다. 미해결로 남은 페이지 요청과 STOPPED 상태가 여기서 정리된다.
+ *
+ * **반드시 PRI 가 꺼진 뒤에 불러야 한다.** 상류 주석이 그것을 못박고 있고,
+ * 코드도 `WARN_ON(pdev->pri_enabled)` 로 확인한 뒤 -EBUSY 를 돌려준다.
+ * 켜진 채로 리셋하면 진행 중인 요청이 어떻게 될지 정의되지 않기 때문이다.
+ *
+ * **Reset 비트만 담은 값을 통째로 쓴다** -- 읽고-고쳐-쓰기가 아니라 대입이다.
+ * 다른 비트를 함께 0 으로 미는 셈이지만, 어차피 리셋으로 다 지워질
+ * 상태라 문제가 되지 않는다.
+ *
+ * VF 는 PRI 를 갖지 않으므로 0 을 돌려주고 아무 일도 하지 않는다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   IOMMU 드라이버(오류 복구 경로) → [이 함수] → pci_write_config_word()
  */
 int pci_reset_pri(struct pci_dev *pdev)
 {
@@ -623,6 +885,29 @@ int pci_reset_pri(struct pci_dev *pdev)
  *
  * Returns 1 if PASID is required in PRG Response Message, 0 otherwise.
  */
+/* [한국어]
+ * pci_prg_resp_pasid_required - 페이지 요청 응답에 PASID 를 실어야 하는지 알려 준다
+ *
+ * @pdev: 대상 장치.
+ * @return: 실어야 하면 1, 아니면 0.
+ *
+ * **PRI 와 PASID 가 만나는 자리다.** 장치가 페이지 요청을 보낼 때 PASID 를
+ * 붙였다면, 호스트의 응답에도 같은 PASID 가 실려야 장치가 어느 요청에 대한
+ * 답인지 알 수 있다. 그것을 요구하는 장치인지가 이 값이다.
+ *
+ * **레지스터를 읽지 않고 캐시해 둔 값을 돌려준다.** `pdev->pasid_required` 는
+ * pci_pri_init() 이 열거 때 PRI capability 에서 읽어 넣어 둔 것이다.
+ * 이 함수가 자주 불릴 수 있어 config 접근을 피한 형태로 보인다.
+ *
+ * **VF 면 PF 의 값을 본다.** VF 는 PRI capability 를 갖지 않으므로 자기
+ * `pasid_required` 필드에는 의미 있는 값이 없고, pci_physfn() 으로 PF 를
+ * 찾아 그쪽을 봐야 한다. 이 파일의 조회 함수 넷이 모두 같은 관용을 쓴다.
+ *
+ * 실행 컨텍스트: 어디서든 부를 수 있다. config 접근도 락도 없다.
+ *
+ * 호출 체인:
+ *   IOMMU 드라이버(페이지 요청 응답을 만들 때) → [이 함수] → pci_physfn()
+ */
 int pci_prg_resp_pasid_required(struct pci_dev *pdev)
 {
 	/* [한국어] VF 라면, */
@@ -639,6 +924,30 @@ int pci_prg_resp_pasid_required(struct pci_dev *pdev)
  * @pdev: PCI device structure
  *
  * Returns true if PRI capability is present, false otherwise.
+ */
+/* [한국어]
+ * pci_pri_supported - 이 장치가 PRI 를 쓸 수 있는지 본다
+ *
+ * @pdev: 대상 장치.
+ * @return: 쓸 수 있으면 true, 아니면 false.
+ *
+ * **capability 오프셋이 있는지 한 줄로 확인한다.** pci_pri_init() 이 열거 때
+ * 찾아 캐시해 둔 `pri_cap` 이 0 이 아니면 이 장치에 PRI 가 있다.
+ *
+ * **pci_physfn() 을 거치는 것이 요점이다.** VF 는 PRI capability 를 갖지
+ * 않으므로 자기 `pri_cap` 은 늘 0 이다. 그러나 PF 가 PRI 를 가지면 VF 도
+ * 그것을 공유하므로 "쓸 수 있다" 가 맞다. 원문 주석의
+ * "VFs share the PF PRI" 가 그 뜻이며, pci_physfn() 은 PF 에 대해서는
+ * 자기 자신을 돌려주므로 한 줄로 두 경우를 모두 처리한다.
+ *
+ * **pci_ats_supported() 와 달리 신뢰 여부를 보지 않는다.** ATS 는 켜면
+ * IOMMU 검사를 우회하지만 PRI 는 그렇지 않아, 같은 종류의 보안 판단이
+ * 필요하지 않기 때문이다.
+ *
+ * 실행 컨텍스트: 어디서든 부를 수 있다. config 접근도 락도 없다.
+ *
+ * 호출 체인:
+ *   IOMMU 드라이버 → [이 함수] → pci_physfn()
  */
 bool pci_pri_supported(struct pci_dev *pdev)
 {
@@ -686,6 +995,45 @@ void pci_pasid_init(struct pci_dev *pdev)
  * Returns 0 on success, negative value on error. This function checks
  * whether the features are actually supported by the device and returns
  * an error if not.
+ */
+/* [한국어]
+ * pci_enable_pasid - PASID capability 를 켜고 쓸 기능을 고른다
+ *
+ * @pdev: 대상 장치.
+ * @features: 켤 기능 비트(실행 권한, 특권 모드).
+ * @return: 성공 0, 조건이 맞지 않으면 음수.
+ *
+ * **한 장치가 여러 프로세스의 주소 공간을 동시에 다루게 하는 기능이다.**
+ * DMA 요청에 20비트 PASID 를 붙이면 IOMMU 가 그에 맞는 페이지 테이블로
+ * 변환하며, 이것이 SVA(Shared Virtual Addressing)의 토대가 된다.
+ *
+ * **이 파일에서 검사가 가장 많은 함수이며, 그 셋이 각각 다른 종류다.**
+ *
+ * 1. **TLP 접두어 능력** -- PASID 는 TLP 앞에 붙는 확장 접두어로 전달되므로,
+ *    경로 위의 모든 구간이 그것을 통과시켜야 한다. `eetlp_prefix_max` 가
+ *    0 이면 그것이 보장되지 않는다. `pasid_no_tlp` 로 그 검사를 건너뛰는
+ *    장치가 따로 있는데, TLP 접두어 없이 PASID 를 다루는 구현을 위한 예외다.
+ *
+ * 2. **ACS 경로 검사** -- PCI_ACS_RR(Request Redirect)과
+ *    PCI_ACS_UF(Upstream Forwarding)가 경로 전체에 켜져 있어야 한다.
+ *    그래야 peer-to-peer 트래픽이 IOMMU 를 거치지 않고 새어 나가지 못한다.
+ *    **PASID 로 여러 주소 공간을 섞어 쓰는 만큼 격리가 더 중요해지므로**
+ *    ATS 나 PRI 에는 없는 이 검사가 여기에만 있다.
+ *
+ * 3. **요청한 기능을 하드웨어가 지원하는지** -- CAP 레지스터를 읽어
+ *    EXEC 와 PRIV 만 남긴 뒤 요청과 견준다. 하나라도 없으면 -EINVAL 이다.
+ *
+ * **VF 처리는 PRI 와 같다.** 상류 주석이 밝히듯 VF 는 PASID capability 를
+ * 구현하지 않고 PF 의 설정을 공유하므로, PF 가 켜져 있으면 0, 아니면
+ * -EINVAL 을 돌려주고 레지스터는 건드리지 않는다.
+ *
+ * 고른 기능은 `pdev->pasid_features` 에 남는다 -- 복원할 때 쓴다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   IOMMU 드라이버(SVA 설정 경로)
+ *     → [이 함수] → pci_physfn(), pci_acs_path_enabled(), pci_write_config_word()
  */
 int pci_enable_pasid(struct pci_dev *pdev, int features)
 {
@@ -755,6 +1103,28 @@ EXPORT_SYMBOL_GPL(pci_enable_pasid);
  * pci_disable_pasid - Disable the PASID capability
  * @pdev: PCI device structure
  */
+/* [한국어]
+ * pci_disable_pasid - PASID capability 를 끈다
+ *
+ * @pdev: 대상 장치.
+ * @return: 없음.
+ *
+ * **pci_enable_pasid() 의 짝이다.** 다만 방식이 ATS/PRI 의 disable 과 다르다 --
+ * 읽고-고쳐-쓰기로 Enable 비트만 지우는 것이 아니라 **0 을 통째로 써 넣는다.**
+ * 그래서 Enable 뿐 아니라 EXEC 와 PRIV 기능 비트도 함께 꺼진다.
+ *
+ * **그래도 문제가 없는 이유**: 그 세 비트가 CTRL 레지스터의 전부이고,
+ * 다시 켤 때는 pci_enable_pasid() 가 features 를 새로 받아 쓰기 때문이다.
+ * 복원 경로도 `pdev->pasid_features` 에 남아 있는 값을 쓰므로 잃는 것이 없다.
+ *
+ * **VF 면 곧바로 물러난다.** VF 는 PASID capability 를 갖지 않고 PF 의
+ * 설정을 공유하므로 끌 것이 없다 -- PRI 의 disable 과 같은 관용이다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   IOMMU 드라이버의 정리 경로 → [이 함수] → pci_write_config_word()
+ */
 void pci_disable_pasid(struct pci_dev *pdev)
 {
 	/* [한국어] 제어 값 0 — 활성화와 모든 기능 비트를 한 번에 지운다. */
@@ -786,6 +1156,29 @@ EXPORT_SYMBOL_GPL(pci_disable_pasid);
 /**
  * pci_restore_pasid_state - Restore PASID capabilities
  * @pdev: PCI device structure
+ */
+/* [한국어]
+ * pci_restore_pasid_state - 전원 복귀 후 PASID 설정을 되살린다
+ *
+ * @pdev: 대상 장치.
+ * @return: 없음.
+ *
+ * **pci_restore_pri_state() 와 같은 자리의 같은 일이다.** PASID 도 확장
+ * capability 라 일반 config 복원 경로가 다루지 않으므로 따로 되살린다.
+ *
+ * **되살리는 것이 한 번의 쓰기로 끝난다.** Enable 비트와
+ * `pdev->pasid_features` 에 남겨 둔 기능 비트를 OR 로 합쳐 CTRL 에 쓴다.
+ * PRI 가 요청 수와 Enable 을 두 번에 나눠 쓰는 것과 대비되는데,
+ * PASID 는 그 셋이 한 레지스터에 있어 순서를 나눌 필요가 없기 때문이다.
+ *
+ * **pdev->pasid_enabled 플래그가 판단 근거다.** 하드웨어 레지스터는
+ * 전원이 나갔다 오면 비어 있으므로, 켜져 있었다는 사실은 소프트웨어
+ * 쪽에만 남아 있다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트(전원 복귀 경로).
+ *
+ * 호출 체인:
+ *   pci_restore_state() → [이 함수] → pci_write_config_word()
  */
 void pci_restore_pasid_state(struct pci_dev *pdev)
 {
@@ -821,6 +1214,34 @@ void pci_restore_pasid_state(struct pci_dev *pdev)
  * features reported are:
  * PCI_PASID_CAP_EXEC - Execute permission supported
  * PCI_PASID_CAP_PRIV - Privileged mode supported
+ */
+/* [한국어]
+ * pci_pasid_features - 이 장치가 지원하는 PASID 기능 비트를 읽는다
+ *
+ * @pdev: 대상 장치.
+ * @return: 지원 기능 비트마스크, capability 가 없으면 -EINVAL.
+ *
+ * **pci_enable_pasid() 에 무엇을 요구할 수 있는지 미리 알아보는 함수다.**
+ * 상류 주석이 밝히듯 지금 보고하는 것은 둘이다 --
+ * PCI_PASID_CAP_EXEC(실행 권한)와 PCI_PASID_CAP_PRIV(특권 모드).
+ *
+ * **CAP 레지스터의 다른 비트를 마스크로 걸러 내는 것이 요점이다.**
+ * 그 레지스터에는 PASID 폭 같은 다른 정보도 들어 있는데, 그것이 기능
+ * 비트로 오해되면 안 되기 때문이다. 그래서 EXEC 와 PRIV 만 남긴다.
+ *
+ * **VF 면 PF 를 본다.** VF 는 capability 를 갖지 않으므로 pci_physfn() 으로
+ * PF 를 찾아 그쪽 오프셋으로 읽는다. 이 파일의 조회 함수 넷이 모두
+ * 같은 첫 줄로 시작한다.
+ *
+ * **반환값이 오류와 정상값을 한 int 에 섞는다** -- 음수면 오류, 0 이상이면
+ * 비트마스크다. 0 은 "capability 는 있으나 두 기능 모두 없다" 는 뜻이라
+ * 오류와 구분된다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   IOMMU 드라이버(pci_enable_pasid 를 부르기 전)
+ *     → [이 함수] → pci_physfn(), pci_read_config_word()
  */
 int pci_pasid_features(struct pci_dev *pdev)
 {
@@ -858,6 +1279,30 @@ EXPORT_SYMBOL_GPL(pci_pasid_features);
  *
  * Returns negative value when PASID capability is not present.
  * Otherwise it returns the number of supported PASIDs.
+ */
+/* [한국어]
+ * pci_max_pasids - 이 장치가 다룰 수 있는 PASID 개수를 구한다
+ *
+ * @pdev: 대상 장치.
+ * @return: 지원하는 PASID 개수, capability 가 없으면 -EINVAL.
+ *
+ * **IOMMU 가 이 장치에 몇 개의 주소 공간을 붙일 수 있는지 알려 준다.**
+ * 장치마다 PASID 를 저장할 테이블 크기가 달라 이 값이 다르다.
+ *
+ * **레지스터에는 개수가 아니라 폭이 들어 있다.** PCI_PASID_CAP_WIDTH 필드를
+ * FIELD_GET 으로 꺼내면 몇 비트를 쓸 수 있는지가 나오고, 그 지수만큼
+ * 2를 거듭제곱해야 개수가 된다. 그래서 `1 << 폭` 이다.
+ *
+ * **PASID 는 규격상 최대 20비트다.** 폭이 20 이면 약 백만 개의 주소 공간을
+ * 동시에 다룰 수 있다는 뜻이다. 실제 장치는 그보다 훨씬 작은 값을 보고한다.
+ *
+ * VF 면 PF 를 보는 것은 이 파일의 다른 조회 함수와 같다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   IOMMU 드라이버(PASID 테이블 크기를 정할 때)
+ *     → [이 함수] → pci_physfn(), pci_read_config_word(), FIELD_GET()
  */
 int pci_max_pasids(struct pci_dev *pdev)
 {
@@ -897,6 +1342,33 @@ EXPORT_SYMBOL_GPL(pci_max_pasids);
  * PCI_PASID_CTRL_ENABLE - PASID enabled
  * PCI_PASID_CTRL_EXEC - Execute permission enabled
  * PCI_PASID_CTRL_PRIV - Privileged mode enabled
+ */
+/* [한국어]
+ * pci_pasid_status - 지금 켜져 있는 PASID 설정을 읽어 온다
+ *
+ * @pdev: 대상 장치.
+ * @return: CTRL 레지스터의 관련 비트, capability 가 없으면 -EINVAL.
+ *
+ * **pci_pasid_features() 와 짝이며 보는 레지스터가 다르다.** 그쪽은 CAP 을
+ * 읽어 "무엇을 할 수 있는가" 를 알려 주고, 이쪽은 CTRL 을 읽어
+ * **"지금 무엇이 켜져 있는가"** 를 알려 준다.
+ *
+ * 상류 주석이 세 비트를 밝힌다 -- ENABLE(켜져 있음), EXEC(실행 권한 켜짐),
+ * PRIV(특권 모드 켜짐). 마스크로 그 셋만 남기는 것도 features 쪽과 같은
+ * 이유다.
+ *
+ * **소프트웨어 플래그가 아니라 하드웨어를 읽는다.** `pdev->pasid_enabled` 를
+ * 보는 것과 달리 실제 레지스터를 읽으므로, 둘이 어긋났는지 확인하는 데
+ * 쓸 수 있다. 다만 D3 에서 돌아온 직후처럼 레지스터가 비어 있는 시점에는
+ * 플래그와 다른 값이 나온다.
+ *
+ * VF 면 PF 를 보는 것은 이 파일의 다른 조회 함수와 같다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   IOMMU 드라이버 / 디버깅 경로
+ *     → [이 함수] → pci_physfn(), pci_read_config_word()
  */
 int pci_pasid_status(struct pci_dev *pdev)
 {

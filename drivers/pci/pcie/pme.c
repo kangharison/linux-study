@@ -194,6 +194,38 @@ struct pcie_pme_service_data {
  * @dev: PCIe root port or event collector.
  * @enable: Enable or disable the interrupt.
  */
+/* [한국어]
+ * pcie_pme_interrupt_enable - 루트 포트의 PME 인터럽트 생성을 켜고 끈다
+ *
+ * @dev: PCIe 루트 포트 또는 루트 컴플렉스 이벤트 컬렉터.
+ * @enable: 켤 것인지 끌 것인지.
+ * @return: 없음.
+ *
+ * **이 파일 설계의 한 축을 이루는 함수다.** IRQ 핸들러가 인터럽트를 끄고
+ * 워크를 걸면, 워크 함수만이 그것을 다시 켠다 -- 그 켜고 끄는 동작이
+ * 전부 이 한 함수를 거친다.
+ *
+ * **왜 인터럽트를 끄는가**: PME 는 레벨 트리거처럼 동작한다. 상태 비트를
+ * 지우기 전까지 인터럽트가 계속 올라오므로, 핸들러가 그것을 끄지 않으면
+ * 인터럽트 폭풍이 된다. 그런데 상태를 지우고 실제 처리를 하는 일은
+ * 잠들 수 있어 인터럽트 문맥에서 할 수 없다. 그래서 **끄고 → 미루고 →
+ * 처리한 뒤 다시 켠다** 는 구조가 나온다.
+ *
+ * PCI_EXP_RTCTL 의 PMEIE(PME Interrupt Enable) 비트 하나를 다룬다.
+ * pcie_capability_set_word/clear_word 는 읽고-고쳐-쓰기를 대신해 주므로
+ * 같은 레지스터의 다른 비트가 보존된다.
+ *
+ * **락을 잡지 않는다.** 호출자가 이미 data->lock 을 쥐고 있어야 하며,
+ * 이 파일의 모든 호출 자리가 그 규약을 지킨다.
+ *
+ * 실행 컨텍스트: 인터럽트 문맥(pcie_pme_irq)과 프로세스 문맥(워크, probe,
+ * suspend/resume) 양쪽에서 불린다.
+ *
+ * 호출 체인:
+ *   pcie_pme_irq / pcie_pme_work_fn / pcie_pme_probe /
+ *   pcie_pme_disable_interrupt / pcie_pme_resume
+ *     → [이 함수] → pcie_capability_set_word/clear_word()
+ */
 void pcie_pme_interrupt_enable(struct pci_dev *dev, bool enable)
 {
 	/* [한국어] 켜는 방향이면, */
@@ -213,6 +245,38 @@ void pcie_pme_interrupt_enable(struct pci_dev *dev, bool enable)
  * @bus: PCI bus to scan.
  *
  * Scan given PCI bus and all buses under it for devices asserting PME#.
+ */
+/* [한국어]
+ * pcie_pme_walk_bus - 버스를 훑어 PME# 를 올린 장치를 찾아 깨운다
+ *
+ * @bus: 훑기 시작할 버스.
+ * @return: PME 를 올린 장치를 하나라도 찾았으면 true.
+ *
+ * **PME 를 보낸 장치가 자기를 밝히지 못할 때 쓰는 마지막 수단이다.**
+ * in-band PME 메시지에는 Requester ID 가 실리지만, PCIe 이전 장치나
+ * 브리지를 거친 PME 는 그 정보가 정확하지 않을 수 있다. 그때 이 함수가
+ * 버스를 전부 뒤져 상태 비트가 서 있는 장치를 찾아낸다.
+ *
+ * **PCIe 장치를 건너뛰는 것이 요점이다.** 원문 주석대로 루트 포트에서
+ * 시작했을 수 있는데, PCIe 장치라면 애초에 자기 Requester ID 를 실은
+ * 메시지를 보냈을 것이므로 이 경로로 찾을 필요가 없다. 여기서 찾는 것은
+ * **메시지를 스스로 보내지 못하는 옛 PCI 장치들** 이다.
+ *
+ * 찾은 장치에 대해 셋을 한다 -- `pme_poll` 을 끄고(인터럽트가 실제로
+ * 동작함이 확인되었으므로 더 이상 주기적으로 긁을 필요가 없다),
+ * 깨움 이벤트를 기록하고, 런타임 PM 재개를 요청한다.
+ *
+ * **브리지 아래로 재귀한다.** subordinate 버스가 있으면 그쪽도 훑으므로
+ * 트리 전체가 대상이 된다.
+ *
+ * **호출자가 pci_bus_sem 을 읽기 모드로 쥐고 있어야 한다** -- 이 함수가
+ * 버스 장치 목록을 락 없이 훑기 때문이다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트(워크 함수 아래).
+ *
+ * 호출 체인:
+ *   pcie_pme_handle_request / pcie_pme_from_pci_bridge
+ *     → [이 함수] → pci_check_pme_status(), pci_wakeup_event(), pm_request_resume()
  */
 static bool pcie_pme_walk_bus(struct pci_bus *bus)
 {
@@ -253,6 +317,36 @@ static bool pcie_pme_walk_bus(struct pci_bus *bus)
  * PCIe PME message.  In such that case the bridge should use the Requester ID
  * of device/function number 0 on its secondary bus.
  */
+/* [한국어]
+ * pcie_pme_from_pci_bridge - PME 를 보낸 것이 PCIe-PCI 브리지인지 확인한다
+ *
+ * @bus: 브리지의 secondary 버스.
+ * @devfn: 확인할 장치/함수 번호.
+ * @return: 브리지 아래에서 PME 원인을 찾았으면 true.
+ *
+ * **옛 PCI 장치의 PME 가 PCIe 세계로 넘어오는 통로를 다룬다.** 상류 주석이
+ * 밝히듯 PCIe-PCI 브리지는 아래쪽 PCI 장치의 PME# 신호를 in-band PCIe PME
+ * 메시지로 바꿔 올려 보내는데, 그때 **자기 secondary 버스의 devfn 0 을
+ * Requester ID 로 쓴다.** 그래서 devfn 이 0 이 아니면 이 경우가 아니다 --
+ * 맨 앞의 검사가 그것이다.
+ *
+ * devfn 이 0 이면 그 버스의 브리지(bus->self)를 잡아 정말 PCIe-PCI 브리지
+ * 타입인지 확인하고, 맞으면 그 아래를 통째로 훑는다.
+ *
+ * **pci_dev_get / pci_dev_put 으로 참조를 쥔다.** 훑는 동안 브리지가
+ * 제거되지 않게 하려는 것이다. pci_bus_sem 은 그 안쪽에서 따로 잡는데,
+ * 버스 목록을 실제로 걷는 것은 pcie_pme_walk_bus 뿐이기 때문이다.
+ *
+ * **pcie_pme_handle_request 가 이 함수를 두 번 부를 수 있다** -- 한 번은
+ * 받은 devfn 그대로, 그러고도 못 찾으면 devfn 0 으로 다시. 규격을 지키지
+ * 않는 브리지에 대한 복구 시도다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트(워크 함수 아래).
+ *
+ * 호출 체인:
+ *   pcie_pme_handle_request
+ *     → [이 함수] → pci_dev_get(), pcie_pme_walk_bus(), pci_dev_put()
+ */
 static bool pcie_pme_from_pci_bridge(struct pci_bus *bus, u8 devfn)
 {
 	/* [한국어] 브리지 장치. */
@@ -292,6 +386,49 @@ static bool pcie_pme_from_pci_bridge(struct pci_bus *bus, u8 devfn)
  * pcie_pme_handle_request - Find device that generated PME and handle it.
  * @port: Root port or event collector that generated the PME interrupt.
  * @req_id: PCIe Requester ID of the device that generated the PME.
+ */
+/* [한국어]
+ * pcie_pme_handle_request - PME 를 보낸 장치를 찾아 깨운다
+ *
+ * @port: PME 인터럽트를 올린 루트 포트 또는 이벤트 컬렉터.
+ * @req_id: PME 메시지에 실려 온 Requester ID.
+ * @return: 없음.
+ *
+ * **이 파일에서 가장 긴 함수이며, 하는 일은 "누가 깨워 달라고 했는가" 를
+ * 찾아내는 것 하나다.** Requester ID 를 믿을 수 없는 경우가 많아 단계가
+ * 넷으로 늘어난다.
+ *
+ * **1단계 -- 루트 포트 자신인가.** 버스·devfn 이 포트와 같으면 먼저 포트의
+ * PME 상태 비트를 본다. 서 있으면 포트가 진짜 원인이다. **서 있지 않으면**
+ * 상류 주석이 인용하는 PCIe Base 2.0 6.1.9 절의 사정이 적용된다 --
+ * 루트 포트가 아래쪽 비-PCIe 장치를 대신해 PME 를 올릴 때 Requester ID
+ * 필드에 자기 정보를 넣을 수도, 원래 장치의 정보를 넣을 수도 있다.
+ * 그래서 아래를 통째로 훑는다.
+ *
+ * **2단계 -- 그 버스를 찾는다.** Requester ID 의 상위 8비트가 버스 번호다.
+ * 없는 버스면 여기서 끝난다.
+ *
+ * **3단계 -- PCIe-PCI 브리지인가.** devfn 0 이라면 브리지가 아래쪽 PCI
+ * 장치를 대신해 올린 것일 수 있다.
+ *
+ * **4단계 -- 그 버스에서 devfn 이 맞는 장치를 찾는다.** 찾으면 상태 비트를
+ * 확인하고 깨운다. **없으면 devfn 0 으로 브리지 경로를 한 번 더 시도한다** --
+ * 규격을 어기고 0 이 아닌 devfn 을 쓴 브리지에 대한 복구다. 그때
+ * pci_info 로 존재하지 않는 장치였음을 남긴다.
+ *
+ * **끝까지 못 찾으면 "Spurious native interrupt!" 를 남긴다.** 실제로
+ * 아무것도 하지 않았다는 뜻이며, 하드웨어나 펌웨어 문제를 가리킨다.
+ *
+ * **목록을 걷는 동안 pci_bus_sem 을 잡고, 찾은 장치에는 참조를 쥔다.**
+ * 락을 놓은 뒤에도 그 장치를 다뤄야 하기 때문이다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트(워크 함수). **호출자가 data->lock 을
+ * 놓은 상태로 부른다** -- 이 안에서 잠들 수 있는 일을 하기 때문이다.
+ *
+ * 호출 체인:
+ *   pcie_pme_work_fn
+ *     → [이 함수] → pci_find_bus(), pcie_pme_from_pci_bridge(),
+ *       pcie_pme_walk_bus(), pci_check_pme_status(), pm_request_resume()
  */
 static void pcie_pme_handle_request(struct pci_dev *port, u16 req_id)
 {
@@ -404,6 +541,44 @@ static void pcie_pme_handle_request(struct pci_dev *port, u16 req_id)
  * pcie_pme_work_fn - Work handler for PCIe PME interrupt.
  * @work: Work structure giving access to service data.
  */
+/* [한국어]
+ * pcie_pme_work_fn - 인터럽트가 미룬 PME 처리를 실제로 수행한다
+ *
+ * @work: 워크 구조체. 여기서 서비스 데이터를 되찾는다.
+ * @return: 없음.
+ *
+ * **pcie_pme_irq() 와 짝을 이루며, 이 파일 설계의 나머지 절반이다.**
+ * 핸들러가 인터럽트를 끄고 이 워크를 걸었으므로, **인터럽트를 다시 켜는
+ * 것은 오직 이 함수뿐이다.** 마지막 줄이 그것이다.
+ *
+ * 가운데의 무한 루프가 요점이다. PME 는 하나만 오지 않으므로, 상태 비트를
+ * 지운 뒤에도 다른 장치의 PME 가 곧바로 다시 세울 수 있다. 그래서
+ * **더 이상 대기 중인 것이 없을 때까지 계속 돈다.**
+ *
+ * 루프의 네 갈래.
+ * 1. `data->noirq` 가 서 있으면 곧바로 빠진다 -- 절전 경로가 이미 인터럽트를
+ *    껐다는 뜻이므로 여기서 다시 켜서는 안 된다. **이 플래그가 워크와
+ *    suspend 사이의 경쟁을 막는 장치다.**
+ * 2. 읽은 값이 모두 1 이면(PCI_POSSIBLE_ERROR) 장치가 사라진 것이므로 빠진다.
+ * 3. PME 비트가 서 있으면 상태를 지우고 **락을 놓은 채**
+ *    pcie_pme_handle_request 를 부른다 -- 그 안에서 잠들 수 있기 때문이다.
+ *    원문 주석대로 지운 뒤에도 대기 중인 것이 있으면 상태가 다시 선다.
+ * 4. PENDING 도 없으면 더 볼 것이 없으므로 빠진다. 있는데 PME 는 아직
+ *    안 섰다면 **락을 놓고 cpu_relax() 로 잠깐 양보한 뒤 다시 본다** --
+ *    하드웨어가 상태를 갱신할 틈을 주는 것이다.
+ *
+ * **spin_lock_irq 를 쓰는 것에 주의한다.** 같은 락을 인터럽트 핸들러가
+ * spin_lock_irqsave 로 잡으므로, 프로세스 문맥에서는 인터럽트를 막은 채
+ * 잡아야 교착이 생기지 않는다.
+ *
+ * 실행 컨텍스트: 워크큐(프로세스 컨텍스트). **pm_wq 가 아니라 일반
+ * 워크큐를 쓴다** -- 그 이유는 pcie_pme_irq 쪽 주석에 적혀 있다.
+ *
+ * 호출 체인:
+ *   워크큐 코어 → [이 함수]
+ *     → pcie_clear_root_pme_status(), pcie_pme_handle_request(),
+ *       pcie_pme_interrupt_enable(true)
+ */
 static void pcie_pme_work_fn(struct work_struct *work)
 {
 	/* [한국어] work_struct 에서 바깥 상태 구조체를 되찾는다. */
@@ -467,6 +642,40 @@ static void pcie_pme_work_fn(struct work_struct *work)
  * @irq: Interrupt vector.
  * @context: Interrupt context pointer.
  */
+/* [한국어]
+ * pcie_pme_irq - 루트 포트 PME 인터럽트 핸들러
+ *
+ * @irq: 인터럽트 번호.
+ * @context: struct pcie_device 포인터.
+ * @return: 이 포트의 PME 였으면 IRQ_HANDLED, 아니면 IRQ_NONE.
+ *
+ * **하는 일이 셋뿐이며, 그것이 이 파일 설계의 전부다** --
+ * 내 것인지 확인하고, 인터럽트를 끄고, 워크를 건다.
+ *
+ * **IRQ_NONE 을 돌려주는 경우가 중요하다.** IRQF_SHARED 로 걸었으므로 같은
+ * 선을 다른 장치와 나눠 쓴다. 읽은 값이 모두 1 이거나(장치가 사라짐)
+ * PME 비트가 서 있지 않으면 내 인터럽트가 아니므로 그대로 물러난다.
+ * 그래야 커널이 다른 핸들러에게 차례를 넘긴다.
+ *
+ * **인터럽트를 끄는 것이 이 핸들러의 핵심 동작이다.** PME 상태 비트를
+ * 지우는 일과 원인 장치를 찾는 일은 잠들 수 있어 여기서 할 수 없다.
+ * 그런데 상태 비트가 선 채로 두면 인터럽트가 계속 올라온다. 그래서
+ * **끄고 물러난 뒤, 워크 함수가 처리하고 다시 켜는** 구조가 된다.
+ * 이 파일에서 인터럽트를 다시 켜는 곳은 워크 함수와 resume 둘뿐이다.
+ *
+ * **pm_wq 를 쓰지 않는 이유가 원문 주석에 있다** -- 그것은 freezable 이라
+ * 절전 진행 중에는 멈춰 있다. PME 는 절전에서 깨우는 신호이므로 그때도
+ * 돌아야 한다.
+ *
+ * **schedule_work 는 락 밖에서 부른다.** 락을 쥔 구간을 레지스터 접근과
+ * 인터럽트 끄기로 최소화한 것이다.
+ *
+ * 실행 컨텍스트: 인터럽트 컨텍스트. 잠들 수 없다.
+ *
+ * 호출 체인:
+ *   커널 인터럽트 코어 → [이 함수]
+ *     → pcie_pme_interrupt_enable(false), schedule_work()
+ */
 static irqreturn_t pcie_pme_irq(int irq, void *context)
 {
 	/* [한국어] 이 서비스가 붙은 포트. */
@@ -514,6 +723,30 @@ static irqreturn_t pcie_pme_irq(int irq, void *context)
  * @dev: PCI device to handle.
  * @ign: Ignored.
  */
+/* [한국어]
+ * pcie_pme_can_wakeup - 장치 하나에 깨움 능력 플래그를 세운다
+ *
+ * @dev: 표시할 장치.
+ * @ign: 쓰지 않는 인자. 순회 콜백 규약을 맞추려고 둔 자리다.
+ * @return: 늘 0. 0 이 아니면 순회가 중단되므로 계속 돌라는 뜻이다.
+ *
+ * **한 줄짜리 콜백이다.** 그러나 따로 함수로 있어야 하는 이유가 있다 --
+ * pci_walk_bus() 와 pcie_walk_rcec() 가 요구하는 시그니처
+ * `int (*)(struct pci_dev *, void *)` 에 맞춰야 하기 때문이다.
+ *
+ * **무엇을 표시하는가**: 이 장치가 런타임 깨움 이벤트를 낼 수 있다는 사실을
+ * 전원 관리 코어에 알린다. 그래야 사용자 공간에 wakeup 속성이 나타나고,
+ * 런타임 PM 이 이 장치를 절전시켜도 깨어날 수 있다고 판단한다.
+ *
+ * **능력이 있다고만 표시하고 켜지는 않는다.** 실제로 깨움을 허용할지는
+ * 사용자나 상위 정책이 정한다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트(probe 경로).
+ *
+ * 호출 체인:
+ *   pcie_pme_mark_devices → pci_walk_bus/pcie_walk_rcec → [이 함수]
+ *     → device_set_wakeup_capable()
+ */
 static int pcie_pme_can_wakeup(struct pci_dev *dev, void *ign)
 {
 	/* [한국어] 이 장치가 절전에서 깨울 수 있음을 PM 코어에 알린다. 이렇게 해 두어야
@@ -530,6 +763,34 @@ static int pcie_pme_can_wakeup(struct pci_dev *dev, void *ign)
  * For each device below given root port, including the port itself (or for each
  * root complex integrated endpoint if @port is a root complex event collector)
  * set the flag indicating that it can signal run-time wake-up events.
+ */
+/* [한국어]
+ * pcie_pme_mark_devices - 포트와 그 아래 모든 장치에 깨움 능력을 표시한다
+ *
+ * @port: PCIe 루트 포트 또는 루트 컴플렉스 이벤트 컬렉터.
+ * @return: 없음.
+ *
+ * **이 포트가 PME 를 받을 수 있게 되었으므로, 그 아래 장치들도 깨움을
+ * 낼 수 있다고 표시하는 것이다.** 상류 주석이 밝히듯 포트 자신도 포함한다.
+ *
+ * **포트의 종류에 따라 순회 방법이 갈린다.**
+ * - 루트 컴플렉스 이벤트 컬렉터(RC_EC)면 pcie_walk_rcec() 로 돈다.
+ *   이 종류는 자기 아래 버스를 갖지 않고, 대신 루트 컴플렉스에 통합된
+ *   엔드포인트들을 대표한다. 그것들은 보통의 버스 위상에 놓여 있지 않아
+ *   전용 순회 함수가 따로 있다.
+ * - 루트 포트면 subordinate 버스를 pci_walk_bus() 로 돈다.
+ *
+ * **포트 자신은 순회와 별개로 먼저 처리한다.** 두 순회 함수 모두 포트
+ * 자신을 포함하지 않기 때문이다.
+ *
+ * **subordinate 가 NULL 이면 아무것도 하지 않는다** -- 아래에 버스를
+ * 만들지 못한 포트라도 자기 표시는 이미 끝났으므로 문제가 없다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트(probe 경로).
+ *
+ * 호출 체인:
+ *   pcie_pme_probe → [이 함수]
+ *     → pcie_pme_can_wakeup(), pcie_walk_rcec(), pci_walk_bus()
  */
 static void pcie_pme_mark_devices(struct pci_dev *port)
 {
@@ -550,6 +811,40 @@ static void pcie_pme_mark_devices(struct pci_dev *port)
 /**
  * pcie_pme_probe - Initialize PCIe PME service for given root port.
  * @srv: PCIe service to initialize.
+ */
+/* [한국어]
+ * pcie_pme_probe - 루트 포트 하나에 PME 서비스를 붙인다
+ *
+ * @srv: 초기화할 PCIe 포트 서비스.
+ * @return: 성공 0, 대상이 아니면 -ENODEV, 실패면 음수.
+ *
+ * **포트 서비스 드라이버의 진입점이다.** portdrv 가 루트 포트마다 서비스를
+ * 나눠 붙이는데, 그중 PME 담당이 이 파일이다.
+ *
+ * **루트 포트와 이벤트 컬렉터만 받는다.** 그 둘만이 PME 메시지를 받아
+ * 인터럽트로 바꿔 주는 자리이기 때문이다. 스위치 포트나 엔드포인트에는
+ * PME 를 받을 레지스터가 없다.
+ *
+ * 순서가 이 함수의 요점이다.
+ * 1. 서비스 데이터를 만들고 **스핀락과 워크를 먼저 초기화한다** --
+ *    인터럽트를 열기 전에 준비가 끝나 있어야 한다.
+ * 2. **인터럽트를 끄고 밀린 상태를 지운다.** 부팅 전이나 펌웨어가 남긴
+ *    PME 가 있을 수 있는데, 핸들러를 걸자마자 그것이 올라오면 아직
+ *    준비되지 않은 상태에서 처리하게 된다.
+ * 3. request_irq 로 핸들러를 건다. **IRQF_SHARED 라 다른 장치와 선을
+ *    나눠 쓸 수 있고**, 그래서 핸들러가 IRQ_NONE 을 제대로 돌려주어야 한다.
+ * 4. 아래 장치들에 깨움 능력을 표시한다.
+ * 5. **마지막에 인터럽트를 켠다.** 모든 준비가 끝난 뒤여야 한다.
+ *
+ * **실패하면 data 만 해제한다.** 그 시점에는 인터럽트를 아직 걸지 않았고
+ * 워크도 돌지 않으므로 다른 정리가 필요 없다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트(포트 서비스 probe).
+ *
+ * 호출 체인:
+ *   portdrv → [이 함수]
+ *     → pcie_pme_interrupt_enable(), pcie_clear_root_pme_status(),
+ *       request_irq(), pcie_pme_mark_devices()
  */
 static int pcie_pme_probe(struct pcie_device *srv)
 {
@@ -688,6 +983,39 @@ static void pcie_pme_disable_interrupt(struct pci_dev *port,
  * pcie_pme_suspend - Suspend PCIe PME service device.
  * @srv: PCIe service device to suspend.
  */
+/* [한국어]
+ * pcie_pme_suspend - 시스템 절전에 들어가며 PME 서비스를 재운다
+ *
+ * @srv: 재울 서비스 장치.
+ * @return: 늘 0.
+ *
+ * **깨움을 쓸 것인가 아닌가에 따라 정반대의 일을 한다.** 그 판단이 이
+ * 함수의 전부다.
+ *
+ * **깨움을 쓴다면** -- 포트 자신이 깨움 허용이거나 그 아래에 깨움을 허용한
+ * 장치가 하나라도 있으면, **인터럽트를 그대로 두고 enable_irq_wake() 만
+ * 부른다.** 그래야 시스템이 잠든 동안에도 이 IRQ 가 살아 있어 깨울 수 있다.
+ * 성공하면 여기서 끝이다.
+ *
+ * **깨움을 쓰지 않는다면**(또는 enable_irq_wake 가 실패하면) --
+ * pcie_pme_disable_interrupt() 로 인터럽트를 끄고 `data->noirq` 를 세운다.
+ * 그다음 **synchronize_irq() 로 진행 중인 핸들러가 끝나기를 기다린다.**
+ *
+ * **noirq 플래그가 여기서 결정적이다.** 인터럽트를 끄는 그 순간에도 이미
+ * 걸려 있는 워크가 남아 있을 수 있다. 그 워크가 마지막에 인터럽트를 다시
+ * 켜 버리면 절전 준비가 무너진다. noirq 를 보고 워크가 스스로 물러나므로
+ * 그 경쟁이 막힌다 -- **워크가 인터럽트를 켜는 유일한 곳이라는 설계가
+ * 이 플래그 하나로 안전해진다.**
+ *
+ * pcie_pme_check_wakeup() 이 pci_bus_sem 아래에서 트리를 재귀로 훑는다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트(시스템 절전 경로).
+ *
+ * 호출 체인:
+ *   포트 서비스 절전 경로 → [이 함수]
+ *     → device_may_wakeup(), pcie_pme_check_wakeup(), enable_irq_wake(),
+ *       pcie_pme_disable_interrupt(), synchronize_irq()
+ */
 static int pcie_pme_suspend(struct pcie_device *srv)
 {
 	/* [한국어] 이 서비스의 상태. */
@@ -732,6 +1060,34 @@ static int pcie_pme_suspend(struct pcie_device *srv)
  * pcie_pme_resume - Resume PCIe PME service device.
  * @srv: PCIe service device to resume.
  */
+/* [한국어]
+ * pcie_pme_resume - 절전에서 돌아와 PME 서비스를 되살린다
+ *
+ * @srv: 되살릴 서비스 장치.
+ * @return: 늘 0.
+ *
+ * **pcie_pme_suspend() 가 갈랐던 두 갈래를 그대로 되돌린다.**
+ * 어느 쪽이었는지는 `data->noirq` 가 기억하고 있다.
+ *
+ * **noirq 가 서 있으면** -- 절전에 들어가며 인터럽트를 껐다는 뜻이다.
+ * 밀린 상태를 지우고, 인터럽트를 다시 켜고, 플래그를 내린다. 상태를
+ * 먼저 지우는 순서가 중요하다 -- 잠든 사이 쌓인 PME 가 있으면 켜자마자
+ * 인터럽트가 몰려들기 때문이다.
+ *
+ * **noirq 가 내려가 있으면** -- 깨움용으로 인터럽트를 살려 둔 경우다.
+ * enable_irq_wake() 의 짝인 disable_irq_wake() 만 부르면 되고,
+ * 인터럽트 자체는 계속 켜져 있었으므로 건드릴 것이 없다.
+ *
+ * **여기가 워크 함수 말고 인터럽트를 다시 켜는 유일한 곳이다.**
+ * 그 둘 다 락 안에서 noirq 를 확인하므로 서로 어긋나지 않는다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트(시스템 재개 경로).
+ *
+ * 호출 체인:
+ *   포트 서비스 재개 경로 → [이 함수]
+ *     → pcie_clear_root_pme_status(), pcie_pme_interrupt_enable(true),
+ *       disable_irq_wake()
+ */
 static int pcie_pme_resume(struct pcie_device *srv)
 {
 	/* [한국어] 이 서비스의 상태. */
@@ -759,6 +1115,32 @@ static int pcie_pme_resume(struct pcie_device *srv)
 /**
  * pcie_pme_remove - Prepare PCIe PME service device for removal.
  * @srv: PCIe service device to remove.
+ */
+/* [한국어]
+ * pcie_pme_remove - PME 서비스를 떼고 자원을 되돌린다
+ *
+ * @srv: 제거할 서비스 장치.
+ * @return: 없음.
+ *
+ * **pcie_pme_probe() 가 세운 것을 역순으로 허물며, 순서가 곧 안전성이다.**
+ *
+ * 1. **인터럽트를 먼저 끈다.** pcie_pme_disable_interrupt() 가 noirq 도
+ *    함께 세우므로, 이 뒤로는 남아 있는 워크가 인터럽트를 다시 켜지 않는다.
+ * 2. free_irq 로 핸들러를 뗀다. 이 함수는 진행 중인 핸들러가 끝날 때까지
+ *    기다린 뒤 돌아오므로, 이후 새 워크가 걸리는 일이 없다.
+ * 3. **cancel_work_sync 로 이미 걸린 워크가 끝나기를 기다린다.**
+ *    1번과 2번을 거쳤어도 그 전에 걸린 워크가 아직 돌고 있을 수 있다.
+ * 4. 그제야 data 를 해제한다. **워크 함수가 data 를 역참조하므로
+ *    3번보다 먼저 놓으면 해제된 메모리를 읽게 된다.**
+ *
+ * **세 단계 모두가 필요하다** -- 인터럽트만 끄면 이미 걸린 워크가 남고,
+ * free_irq 만 하면 그 워크가 인터럽트를 다시 켠다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트(서비스 제거 경로). 잠들 수 있다.
+ *
+ * 호출 체인:
+ *   portdrv → [이 함수]
+ *     → pcie_pme_disable_interrupt(), free_irq(), cancel_work_sync(), kfree()
  */
 static void pcie_pme_remove(struct pcie_device *srv)
 {
@@ -790,6 +1172,28 @@ static struct pcie_port_service_driver pcie_pme_driver = {
 
 /**
  * pcie_pme_init - Register the PCIe PME service driver.
+ */
+/* [한국어]
+ * pcie_pme_init - PME 포트 서비스 드라이버를 등록한다
+ *
+ * @return: pcie_port_service_register() 의 결과.
+ *
+ * **한 줄짜리 진입점이다.** 이 파일이 하는 일은 서비스 드라이버 구조체
+ * 하나를 포트 서비스 계층에 넘기는 것뿐이며, 그 뒤로는 portdrv 가 루트
+ * 포트를 만날 때마다 pcie_pme_probe() 를 불러 준다.
+ *
+ * **모듈이 아니라 커널에 붙박이로 들어간다.** `__init` 표시가 붙어 있어
+ * 부팅이 끝나면 이 코드가 버려지며, 짝이 되는 exit 함수가 없다.
+ * PME 는 전원 관리의 기반이라 뺐다 꽂았다 할 성격이 아니기 때문이다.
+ *
+ * **pcie_pme_driver 구조체가 probe/suspend/resume/remove 네 콜백을 담고
+ * 있으며**, 이 파일의 나머지가 전부 그 넷의 아래에 매달려 있다.
+ *
+ * 실행 컨텍스트: 프로세스 컨텍스트(부팅 초기화).
+ *
+ * 호출 체인:
+ *   pcie_portdrv_init 계열의 초기화 → [이 함수]
+ *     → pcie_port_service_register()
  */
 int __init pcie_pme_init(void)
 {
