@@ -66,7 +66,7 @@
  *      : SET_CONTAINER ioctl 이 iommufd ctx 인 경우 compat 경로 사용
  *        (vfio_iommufd_compat_attach_ioas).
  *  - drivers/vfio/pci/vfio_pci_core.c, mdev/* 등
- *      : 기본 ops 로 _physical_*/_emulated_* 콜백을 채택. 자체 변형
+ *      : 기본 ops 로 _physical_* / _emulated_* 콜백을 채택. 자체 변형
  *        구현 시 본 파일 함수를 helper 로 호출하기도 함.
  *  - include/linux/vfio.h
  *      : vfio_device 구조체의 iommufd_device, iommufd_access,
