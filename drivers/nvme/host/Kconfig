@@ -1,11 +1,44 @@
 # SPDX-License-Identifier: GPL-2.0-only
-config NVME_CORE
-	tristate
+#
+# ============================================================================
+# [한국어 설명] NVMe 호스트 드라이버 설정 (drivers/nvme/host/Kconfig)
+#
+# === 파일의 역할 ===
+# NVMe 호스트 스택에서 무엇을 빌드할지 정한다. 크게 세 갈래다 -- 트랜스포트에
+# 무관한 코어(NVME_CORE), 실제 매체별 트랜스포트(PCIe/RDMA/FC/TCP/Apple),
+# 그리고 코어에 얹히는 선택 기능(다중 경로, ZNS, hwmon, 인증, 상세 오류).
+# NVME_CORE 자체는 프롬프트가 없어 사용자가 직접 고르지 않고, 트랜스포트를
+# 하나라도 켜면 select 로 따라 들어온다.
+#
+# === 전체 아키텍처에서의 위치 ===
+# drivers/nvme/Kconfig -> [이 파일]
+# 선택 결과는 같은 디렉토리의 Makefile 이 모듈 구성으로 번역한다.
+# 의존 방향은 코어 <- fabrics <- 각 Fabrics 트랜스포트 순이고, PCIe 와 Apple 은
+# fabrics 를 거치지 않고 코어에 바로 붙는다. 이 차이가 Kconfig 의 select
+# 구조에 그대로 드러난다.
+#
+# === 타 모듈과의 연결 ===
+# - block/Kconfig: BLK_DEV_NVME 가 BLOCK 에 의존한다. 블록 계층 없이는
+#   /dev/nvme*n* 가 존재할 수 없다.
+# - drivers/pci/Kconfig: PCIe NVMe 는 PCI 서브시스템이 있어야 열거된다.
+# - net/, drivers/infiniband/Kconfig: TCP 는 INET, RDMA 는 INFINIBAND 에 의존한다.
+# - crypto/, security/keys: TLS 와 대역 내 인증이 키링과 암호 인프라를 끌어온다.
+#
+# === 주요 함수/구조체 요약 ===
+# - NVME_CORE      : 공통 코어. 프롬프트 없는 내부 심볼.
+# - BLK_DEV_NVME   : PCIe NVMe. 대부분의 시스템에서 실제로 쓰이는 항목.
+# - NVME_MULTIPATH : 여러 경로를 하나의 디스크로 묶을지. 끄면 경로마다 디스크가 생긴다.
+# - NVME_FABRICS   : 원격 NVMe 공통부. rdma/fc/tcp 가 select 한다.
+# - NVME_TCP_TLS   : TCP 연결의 TLS 암호화. 유저스페이스 핸드셰이크 데몬과 협조한다.
+# - NVME_HOST_AUTH : DH-HMAC-CHAP 대역 내 인증.
+# ============================================================================
+config NVME_CORE	# [한국어] 트랜스포트 공통 코어. 프롬프트가 없어 사용자 메뉴에 뜨지 않고 트랜스포트가 select 로만 켠다
+	tristate	# [한국어] 프롬프트 없는 tristate — 이를 select 하는 쪽의 모듈/내장 선택을 따른다
 
-config BLK_DEV_NVME
-	tristate "NVM Express block device"
-	depends on PCI && BLOCK
-	select NVME_CORE
+config BLK_DEV_NVME	# [한국어] PCIe 에 직접 붙은 NVMe SSD. 가장 흔한 구성이다
+	tristate "NVM Express block device"	# [한국어] tristate — nvme.ko 로 뺄 수 있다. 다만 루트 파일시스템이 NVMe 위에 있으면 initramfs 에 포함돼야 한다
+	depends on PCI && BLOCK	# [한국어] PCI 로 열거되고 블록 계층 위에 디스크를 올리므로 둘 다 필요하다
+	select NVME_CORE	# [한국어] 공통 코어를 함께 빌드
 	help
 	  The NVM Express driver is for solid state drives directly
 	  connected to the PCI or PCI Express bus.  If you know you
@@ -14,9 +47,9 @@ config BLK_DEV_NVME
 	  To compile this driver as a module, choose M here: the
 	  module will be called nvme.
 
-config NVME_MULTIPATH
-	bool "NVMe multipath support"
-	depends on NVME_CORE
+config NVME_MULTIPATH	# [한국어] 한 네임스페이스에 이르는 여러 경로를 하나의 디스크로 묶을지
+	bool "NVMe multipath support"	# [한국어] bool — 코어에 함께 링크된다. 끄면 원문 설명대로 컨트롤러/네임스페이스마다 별도 /dev/nvmeXnY 가 생긴다
+	depends on NVME_CORE	# [한국어] 코어가 있어야 얹힐 자리가 있다
 	help
 	  This option controls support for multipath access to NVMe
 	  subsystems. If this option is enabled support for NVMe multipath
@@ -28,32 +61,32 @@ config NVME_MULTIPATH
 
 	  If unsure, say Y.
 
-config NVME_VERBOSE_ERRORS
-	bool "NVMe verbose error reporting"
-	depends on NVME_CORE
+config NVME_VERBOSE_ERRORS	# [한국어] 오류를 숫자 대신 스펙 명칭으로 보고할지
+	bool "NVMe verbose error reporting"	# [한국어] bool — 원문이 밝히듯 문자열 테이블 때문에 커널 이미지가 약 4KB 늘어난다
+	depends on NVME_CORE	# [한국어] 코어가 있어야 얹힐 자리가 있다
 	help
 	   This option enables verbose reporting for NVMe errors. The
 	   error translation table will grow the kernel image size by
 	   about 4 KB.
 
-config NVME_HWMON
-	bool "NVMe hardware monitoring"
-	depends on (NVME_CORE=y && HWMON=y) || (NVME_CORE=m && HWMON)
+config NVME_HWMON	# [한국어] SSD 온도 등을 hwmon 서브시스템에 노출할지
+	bool "NVMe hardware monitoring"	# [한국어] bool — 코어에 함께 링크된다
+	depends on (NVME_CORE=y && HWMON=y) || (NVME_CORE=m && HWMON)	# [한국어] 코어가 내장이면 hwmon 도 내장이어야 한다. 내장 코드가 모듈 심볼을 참조할 수 없기 때문이다
 	help
 	  This provides support for NVMe hardware monitoring. If enabled,
 	  a hardware monitoring device will be created for each NVMe drive
 	  in the system.
 
-config NVME_FABRICS
-	select NVME_CORE
-	select NVME_KEYRING if NVME_TCP_TLS
-	tristate
+config NVME_FABRICS	# [한국어] 원격 NVMe 공통부. 연결 옵션 파싱과 Connect/Property 명령을 담당한다
+	select NVME_CORE	# [한국어] 공통 코어를 함께 빌드
+	select NVME_KEYRING if NVME_TCP_TLS	# [한국어] TLS 를 쓸 때만 키링을 끌어온다. 조건부 select 로 불필요한 의존을 피한다
+	tristate	# [한국어] 프롬프트 없는 tristate — 이를 select 하는 쪽의 모듈/내장 선택을 따른다
 
-config NVME_RDMA
-	tristate "NVM Express over Fabrics RDMA host driver"
-	depends on INFINIBAND && INFINIBAND_ADDR_TRANS && BLOCK
-	select NVME_FABRICS
-	select SG_POOL
+config NVME_RDMA	# [한국어] InfiniBand/RoCE/iWARP 위의 NVMe
+	tristate "NVM Express over Fabrics RDMA host driver"	# [한국어] tristate — nvme-rdma.ko
+	depends on INFINIBAND && INFINIBAND_ADDR_TRANS && BLOCK	# [한국어] RDMA 코어와 주소 변환(CM)이 필요하다
+	select NVME_FABRICS	# [한국어] Fabrics 공통부를 함께 빌드
+	select SG_POOL	# [한국어] 큰 스캐터리스트를 풀에서 얻는다. 요청당 세그먼트가 많을 수 있기 때문
 	help
 	  This provides support for the NVMe over Fabrics protocol using
 	  the RDMA (Infiniband, RoCE, iWarp) transport.  This allows you
@@ -64,12 +97,12 @@ config NVME_RDMA
 
 	  If unsure, say N.
 
-config NVME_FC
-	tristate "NVM Express over Fabrics FC host driver"
-	depends on BLOCK
-	depends on HAS_DMA
-	select NVME_FABRICS
-	select SG_POOL
+config NVME_FC	# [한국어] Fibre Channel 위의 NVMe
+	tristate "NVM Express over Fabrics FC host driver"	# [한국어] tristate — nvme-fc.ko
+	depends on BLOCK	# [한국어] 블록 계층 위에 디스크를 올린다
+	depends on HAS_DMA	# [한국어] LLDD 가 DMA 로 프레임을 주고받는다
+	select NVME_FABRICS	# [한국어] Fabrics 공통부를 함께 빌드
+	select SG_POOL	# [한국어] 큰 스캐터리스트를 풀에서 얻는다. 요청당 세그먼트가 많을 수 있기 때문
 	help
 	  This provides support for the NVMe over Fabrics protocol using
 	  the FC transport.  This allows you to use remote block devices
@@ -80,13 +113,13 @@ config NVME_FC
 
 	  If unsure, say N.
 
-config NVME_TCP
-	tristate "NVM Express over Fabrics TCP host driver"
-	depends on INET
-	depends on BLOCK
-	select CRC32
-	select NET_CRC32C
-	select NVME_FABRICS
+config NVME_TCP	# [한국어] 평범한 TCP/IP 위의 NVMe. 특별한 하드웨어가 필요 없다
+	tristate "NVM Express over Fabrics TCP host driver"	# [한국어] tristate — nvme-tcp.ko
+	depends on INET	# [한국어] TCP 소켓을 쓴다
+	depends on BLOCK	# [한국어] 블록 계층 위에 디스크를 올린다
+	select CRC32	# [한국어] 헤더 다이제스트 계산에 필요
+	select NET_CRC32C	# [한국어] 데이터 다이제스트(CRC32C) 계산에 필요
+	select NVME_FABRICS	# [한국어] Fabrics 공통부를 함께 빌드
 	help
 	  This provides support for the NVMe over Fabrics protocol using
 	  the TCP transport.  This allows you to use remote block devices
@@ -97,12 +130,12 @@ config NVME_TCP
 
 	  If unsure, say N.
 
-config NVME_TCP_TLS
-	bool "NVMe over Fabrics TCP TLS encryption support"
-	depends on NVME_TCP
-	select NET_HANDSHAKE
-	select KEYS
-	select TLS
+config NVME_TCP_TLS	# [한국어] TCP 연결을 TLS 로 암호화할지
+	bool "NVMe over Fabrics TCP TLS encryption support"	# [한국어] bool — nvme-tcp 에 함께 링크된다
+	depends on NVME_TCP	# [한국어] TCP 트랜스포트 위에서만 의미가 있다
+	select NET_HANDSHAKE	# [한국어] 핸드셰이크를 유저스페이스 데몬에 넘기는 netlink API. 커널이 TLS 협상을 직접 하지 않는다
+	select KEYS	# [한국어] 협상된 세션 키를 커널 키링에 둔다
+	select TLS	# [한국어] 커널 TLS(kTLS) 로 소켓 위에 암호 계층을 얹는다
 	help
 	  Enables TLS encryption for NVMe TCP using the netlink handshake API.
 
@@ -111,23 +144,23 @@ config NVME_TCP_TLS
 
 	  If unsure, say N.
 
-config NVME_HOST_AUTH
-	bool "NVMe over Fabrics In-Band Authentication in host side"
-	depends on NVME_CORE
-	select NVME_AUTH
-	select NVME_KEYRING
+config NVME_HOST_AUTH	# [한국어] 호스트 측 대역 내 인증(DH-HMAC-CHAP)
+	bool "NVMe over Fabrics In-Band Authentication in host side"	# [한국어] bool — 코어에 함께 링크된다
+	depends on NVME_CORE	# [한국어] 코어가 있어야 얹힐 자리가 있다
+	select NVME_AUTH	# [한국어] 인증 알고리즘 공통 구현을 끌어온다
+	select NVME_KEYRING	# [한국어] 인증에 쓰는 비밀을 키링으로 관리
 	help
 	  This provides support for NVMe over Fabrics In-Band Authentication in
 	  host side.
 
 	  If unsure, say N.
 
-config NVME_APPLE
-	tristate "Apple ANS2 NVM Express host driver"
-	depends on OF && BLOCK
-	depends on APPLE_RTKIT && APPLE_SART
-	depends on ARCH_APPLE || COMPILE_TEST
-	select NVME_CORE
+config NVME_APPLE	# [한국어] Apple SoC(M1 등)에 내장된 ANS2 컨트롤러
+	tristate "Apple ANS2 NVM Express host driver"	# [한국어] tristate — nvme-apple.ko
+	depends on OF && BLOCK	# [한국어] 디바이스 트리로 기술되는 platform_device 다 — PCI 가 아니다
+	depends on APPLE_RTKIT && APPLE_SART	# [한국어] RTKit 코프로세서 펌웨어 부팅과 SART DMA 허용 창이 선행돼야 한다
+	depends on ARCH_APPLE || COMPILE_TEST	# [한국어] Apple Silicon 이거나 컴파일 검증 목적일 때만 노출
+	select NVME_CORE	# [한국어] 공통 코어를 함께 빌드
 	help
 	  This provides support for the NVMe controller embedded in Apple SoCs
 	  such as the M1.

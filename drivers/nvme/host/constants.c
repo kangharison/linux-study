@@ -23,6 +23,39 @@
  * === 주요 심볼 ===
  * nvme_ops / nvme_admin_ops / nvme_fabrics_ops / nvme_statuses — 정적 테이블
  * nvme_get_*_str() — 범위 검사 후 문자열 또는 "Unknown"
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * 스펙 상수와 사람이 읽는 로그 사이에 놓인 얇은 번역 계층이다. I/O 경로 어디에도
+ * 끼어들지 않고, 무언가 잘못되어 보고할 때만 불린다.
+ * 호출 체인:
+ *   nvme_complete_rq / nvme_log_error (core.c) → nvme_get_opcode_str /
+ *     nvme_get_error_status_str → 정적 테이블 조회 → dmesg 문자열
+ *   ftrace 의 show_opcode_name (trace.h) → 같은 헬퍼 → 추적 출력
+ * 실행 컨텍스트는 호출자를 따른다. 완료 경로에서 불리면 인터럽트 문맥일 수 있으므로,
+ * 이 파일의 함수들은 잠들지 않고 할당도 하지 않는다 -- 정적 테이블 인덱싱이 전부다.
+ *
+ * === 타 모듈과의 연결 ===
+ * - include/linux/nvme.h: 테이블의 인덱스가 되는 nvme_cmd_*, nvme_admin_*,
+ *   nvme_fabrics_type_*, NVME_SC_* 의 정의처. 스펙이 개정되어 값이 늘면
+ *   이 파일의 테이블도 같이 늘어야 한다.
+ * - drivers/nvme/host/core.c: 오류 로그를 찍을 때의 최대 소비자.
+ * - drivers/nvme/host/trace.h: 추적점 출력에서 같은 헬퍼를 쓴다.
+ * - drivers/nvme/host/tcp.c, rdma.c, fc.c: EXPORT 된 심볼을 통해 각 트랜스포트도
+ *   같은 문자열을 공유한다. 그래서 트랜스포트가 달라도 로그 어휘는 일치한다.
+ * 데이터 흐름은 단방향이다 -- 숫자가 들어와 문자열 포인터가 나가고, 상태는 없다.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * - nvme_ops[]: NVM I/O 명령 opcode → 이름. Flush/Read/Write 부터 DSM, ZNS,
+ *   Reservation 까지 데이터 평면 명령을 망라한다.
+ * - nvme_admin_ops[]: Admin 명령 opcode → 이름. Identify, Get/Set Features,
+ *   Create/Delete SQ·CQ, Firmware Commit 등.
+ * - nvme_fabrics_ops[]: Fabrics 전용 명령 타입 → 이름. Property Get/Set, Connect,
+ *   Authentication Send/Receive. PCIe 에는 없는 계열이라 표가 따로 있다.
+ * - nvme_statuses[]: 상태 코드 → 설명. Generic/Command Specific/Media 세 계열이
+ *   하나의 희소 배열에 상위 비트를 포함한 값으로 색인된다.
+ * - nvme_get_opcode_str / nvme_get_admin_opcode_str / nvme_get_fabrics_opcode_str /
+ *   nvme_get_error_status_str: 범위를 검사하고 빈 슬롯이면 NULL 을 돌려주는 조회
+ *   함수들. 호출자가 그 경우 숫자를 그대로 찍도록 되어 있다.
  */
 
 #include "nvme.h"	/* [한국어] opcode·status 매크로/enum 및 이 파일이 구현하는 조회 API 선언 */

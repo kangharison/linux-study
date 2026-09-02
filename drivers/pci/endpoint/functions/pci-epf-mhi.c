@@ -731,7 +731,7 @@ static size_t get_align_offset(struct pci_epf_mhi *epf_mhi, u64 addr)
  * (iatu_read/write) MHI 코어의 워커 문맥이다(alloc_map).
  *
  * 에러 경로: 2단계가 실패하면 1단계에서 예약한 주소 공간을 반드시 되돌려야
- * 하므로 pci_epc_mem_free_addr() 를 부른 뒤 오류를 반환한다. 이때 *paddr/*vaddr
+ * 하므로 pci_epc_mem_free_addr() 를 부른 뒤 오류를 반환한다. 이때 paddr 과 vaddr
  * 에는 이미 값이 들어가 있지만 호출자는 오류 시 이를 쓰지 않는다.
  *
  * 호출 체인:

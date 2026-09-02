@@ -76,6 +76,31 @@
  * === CMB / HMB ===
  * CMB: 장치 로컬 버퍼에 I/O SQ 배치 가능(use_cmb_sqes) — host→dev DMA 절감.
  * HMB: 호스트 DRAM 을 컨트롤러 캐시로 제공(Set Features). optional, 실패해도 I/O 가능.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * - nvme_probe / nvme_remove: PCI 장치 바인딩의 양 끝. BAR 매핑, DMA 마스크 설정,
+ *   admin 큐 구성, nvme_ctrl 등록까지가 probe 의 몫이다.
+ * - nvme_reset_work: 리셋 상태 기계의 본체. 컨트롤러를 끄고 다시 켠 뒤 admin 큐를
+ *   세우고, I/O 큐를 재생성하고, 네임스페이스를 다시 스캔한다. 오류 복구가
+ *   결국 이 함수로 수렴한다.
+ * - nvme_queue_rq / nvme_queue_rqs: 핫패스 제출. 후자는 blk-mq 가 모아 준 요청
+ *   묶음을 한 번에 처리해 도어벨 쓰기를 줄인다.
+ * - nvme_map_data / nvme_pci_setup_prps / nvme_pci_setup_sgls: 데이터 전송 서술자
+ *   구성. 세그먼트 모양과 컨트롤러 지원에 따라 PRP 와 SGL 중 하나를 고른다.
+ * - nvme_irq / nvme_poll / nvme_process_cq: 완료 수확. phase 비트로 새 CQE 를
+ *   구분하고, poll 큐는 인터럽트 없이 이 경로만 쓴다.
+ * - nvme_timeout: 응답 없는 명령 처리. Abort 를 먼저 시도하고, 그것마저 실패하면
+ *   컨트롤러 리셋으로 올라간다.
+ * - nvme_setup_io_queues / nvme_create_queue / nvme_delete_queue: I/O 큐 개수 협상과
+ *   개별 큐의 생성·삭제. MSI-X 벡터 수가 큐 개수의 상한을 만든다.
+ * - nvme_map_cmb: Controller Memory Buffer 매핑. P2PDMA 로 호스트 메모리를 우회하는
+ *   경로의 출발점이다.
+ * - nvme_setup_host_mem: Host Memory Buffer 설정. 컨트롤러가 호스트 DRAM 일부를
+ *   자기 캐시로 빌려 쓰게 한다.
+ * - struct nvme_dev: PCI 컨트롤러 전역 상태. nvme_ctrl 을 품고 BAR, 큐 배열,
+ *   descriptor 풀, CMB/HMB 상태를 갖는다.
+ * - struct nvme_queue: SQ/CQ 한 쌍. DMA 링, 도어벨 주소, phase, 벡터 번호.
+ * - struct nvme_iod: 요청별 매핑 상태. PRP/SGL 서술자와 sg 테이블을 추적한다.
  */
 
 #include <linux/acpi.h>		/* [한국어] ACPI storage D3 / 플랫폼 suspend quirk 조회 */

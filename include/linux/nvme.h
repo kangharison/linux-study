@@ -41,6 +41,37 @@
  * enum nvme_opcode / nvme_admin_opcode — 명령 코드
  * NVME_SC_* / NVME_SCT_* — 완료 status
  * NVMF_* / nvmf_* — Fabrics NQN·Connect·Discovery·Auth
+ *
+ * === 타 모듈과의 연결 ===
+ * 이 헤더는 아래를 향해서만 의존한다 -- 커널의 기본 타입 외에는 아무것도 포함하지
+ * 않으며, 그래서 호스트와 타겟, 그리고 트랜스포트 어디서든 안전하게 포함된다.
+ * - drivers/nvme/host 아래 전부: 명령을 조립하고 응답을 해석하는 모든 코드가 이 정의를 쓴다.
+ *   nvme_setup_cmd 가 채우는 struct nvme_command, Identify 결과를 읽는
+ *   struct nvme_id_ctrl / nvme_id_ns 가 대표적이다.
+ * - drivers/nvme/target 아래 전부: 타겟은 같은 구조체를 반대 방향으로 쓴다. 호스트가 채운
+ *   필드를 읽고 응답을 채운다. 한 헤더를 공유하므로 양쪽 해석이 어긋나지 않는다.
+ * - drivers/nvme/host/constants.c: 여기 정의된 opcode/status 열거를 인덱스로 삼아
+ *   문자열 테이블을 만든다.
+ * - drivers/nvme/host/trace.h: 추적점이 같은 열거로 명령을 해석한다.
+ * - include/uapi/linux/nvme_ioctl.h: 유저스페이스로 넘어가는 부분은 그쪽에 있고,
+ *   이 헤더는 커널 내부 표현이다.
+ * 데이터 흐름 관점에서 이 파일은 흐르는 것이 아니라 흐름의 '모양'을 정한다.
+ * 호스트가 SQE 를 채워 보내고 CQE 를 받아 읽는 그 바이트 배치가 전부 여기 있다.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * - struct nvme_command: 64바이트 SQE 의 유니온. 명령 계열마다 다른 레이아웃
+ *   (rw, identify, features, create_sq/cq, dsm, zns, fabrics 등)을 한 크기로 겹쳐
+ *   둔 것이라, 어느 멤버를 쓰든 하드웨어가 보는 바이트 수는 같다.
+ * - struct nvme_completion: 16바이트 CQE. result, sq_head, sq_id, command_id,
+ *   status 로 이뤄지며 status 의 phase 비트가 새 항목 판별의 근거다.
+ * - struct nvme_id_ctrl: Identify Controller 응답 4KB. 모델·시리얼, 지원 기능,
+ *   최대 전송 크기(mdts), 큐 개수 힌트, HMB/CMB 능력이 여기서 온다.
+ * - struct nvme_id_ns: Identify Namespace 응답. 용량(nsze/ncap/nuse), LBA 형식
+ *   목록(lbaf), 메타데이터 설정이 담긴다. 블록 계층의 queue_limits 가 이것에서 파생된다.
+ * - enum nvme_opcode / nvme_admin_opcode / nvme_fabrics_type: 명령 번호의 정의처.
+ * - NVME_SC_*: 상태 코드. 상위 비트가 계열(Generic/Command Specific/Media)을 가른다.
+ * - NVME_REG_*: 컨트롤러 레지스터 오프셋(CAP, VS, CC, CSTS, AQA, ASQ, ACQ).
+ *   PCIe 는 BAR0 에서 MMIO 로, Fabrics 는 Property Get/Set 으로 같은 값을 다룬다.
  */
 
 #ifndef _LINUX_NVME_H

@@ -36,6 +36,17 @@
  * === 주요 심볼 ===
  * nvme_fault_inject_init/fini — 장치별 debugfs 생명주기
  * nvme_should_fail — 요청 단위 주입 판정·적용 (핫 훅)
+ *
+ * === 주요 함수/구조체 요약 ===
+ * - nvme_fault_inject_init: 컨트롤러나 네임스페이스의 debugfs 디렉토리 아래에
+ *   fault_inject 노드를 만든다. 확률, 간격, 상태 코드를 사용자가 조정할 수 있다.
+ * - nvme_fault_inject_fini: 위에서 만든 debugfs 항목을 지운다.
+ * - nvme_should_fail: 완료 직전에 불려, 주입 조건에 걸리면 요청의 상태를 강제로
+ *   실패로 바꾼다. 실제 하드웨어 오류 없이 상위 계층의 오류 경로 --
+ *   재시도, 다중 경로 페일오버, 컨트롤러 리셋 -- 를 시험하기 위한 장치다.
+ * - struct nvme_fault_inject: 주입 설정과 통계. should_fail_attr 로 커널의 범용
+ *   fault-injection 프레임워크에 얹히고, status 필드로 어떤 NVMe 상태 코드를
+ *   돌려줄지 지정한다.
  */
 
 #include <linux/moduleparam.h>	/* [한국어] module_param/charp — fail_request 부팅·모듈 파라미터 등록 API */

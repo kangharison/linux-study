@@ -78,6 +78,25 @@
  * nvme_wq/reset_wq/delete_wq — 스캔/리셋/삭제 직렬화 워커 큐
  * nvme_cid / nvme_find_rq / nvme_try_complete_req — 핫패스 완료 경로
  * nvme_*_tag_set, freeze/quiesce, multipath/auth/hwmon 선언
+ *
+ * === 주요 함수/구조체 요약 ===
+ * - struct nvme_ctrl: 컨트롤러 하나의 전부. 상태 기계(state), admin/io tagset,
+ *   트랜스포트 ops, 식별 정보, keep-alive, 큐 개수, quirk 비트를 담는다.
+ *   core.c 가 소유하고 각 트랜스포트가 자신의 구조체 안에 품는다.
+ * - struct nvme_ctrl_ops: 트랜스포트가 구현해야 하는 vtable. reg_read32/reg_write32/
+ *   reg_read64, free_ctrl, submit_async_event, delete_ctrl, get_address 등으로
+ *   pci/rdma/tcp/fc/apple 의 차이를 이 한 겹이 흡수한다.
+ * - struct nvme_ns: 하나의 경로에서 본 네임스페이스. gendisk, 큐, LBA 형식,
+ *   ns_head 로의 연결을 갖는다.
+ * - struct nvme_ns_head: 여러 경로가 공유하는 네임스페이스 정체성. 다중 경로에서
+ *   사용자에게 보이는 디스크는 ns 가 아니라 이쪽이다.
+ * - struct nvme_request: blk-mq 요청에 얹히는 NVMe 사적 데이터. 명령 본문(cmd),
+ *   결과(result), 상태(status), 재시도 횟수가 여기 있다. blk_mq_rq_to_pdu 로 얻는다.
+ * - nvme_change_ctrl_state: 컨트롤러 상태 전이의 유일한 관문. NEW/LIVE/RESETTING/
+ *   CONNECTING/DELETING/DEAD 사이의 허용된 전이만 통과시킨다.
+ * - nvme_setup_cmd: bio/request 를 NVMe 명령으로 번역하는 핫패스 함수의 선언.
+ * - nvme_complete_rq: 완료 처리와 재시도/페일오버 판정의 공통 진입점 선언.
+ * - NVME_QUIRK_* 비트: 특정 하드웨어의 결함을 표시해 코어가 우회 경로를 타게 한다.
  */
 
 #ifndef _NVME_H	/* [한국어] 인클루드 가드 — 이 내부 헤더 중복 포함 방지 */

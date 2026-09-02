@@ -39,6 +39,20 @@
  * nvme_queue_auth_work — 단계 머신 본체
  * nvme_auth_negotiate/wait — fabrics 연동 API
  * nvme_auth_init_ctrl / free / stop — 수명주기
+ *
+ * === 주요 함수/구조체 요약 ===
+ * - nvme_auth_init_ctrl / nvme_auth_free: 컨트롤러의 큐 개수만큼 dhchap 컨텍스트를
+ *   잡고 해제한다. 인증은 큐마다 독립적으로 진행되므로 배열로 관리한다.
+ * - nvme_auth_negotiate / nvme_auth_wait: 한 큐의 인증을 시작하고 완료를 기다리는
+ *   쌍. 실제 협상은 워크큐에서 돌고 이 둘이 그 경계를 이룬다.
+ * - nvme_queue_auth_work: DH-HMAC-CHAP 협상의 본체. Negotiate → Challenge →
+ *   Reply → Success1/2 를 상태에 따라 이어 가며, 각 단계는 Authentication Send/
+ *   Receive 명령으로 컨트롤러와 주고받는다.
+ * - nvme_ctrl_auth_work: 재인증 타이머가 만료되면 admin 큐부터 다시 인증한다.
+ * - nvme_auth_revoke_tls_key: TLS 로 파생된 키를 무효화한다. 인증 실패나 연결
+ *   종료 시 세션 키가 남지 않게 하는 정리 경로다.
+ * - struct nvme_dhchap_queue_context: 큐 하나의 협상 상태. 트랜잭션 ID, 해시/DH
+ *   그룹 선택, 챌린지와 응답 버퍼, 파생된 키를 담는다.
  */
 
 #include <linux/crc32.h>	/* [한국어] (간접) 무결성 유틸 — 키링/헬퍼 경로 */

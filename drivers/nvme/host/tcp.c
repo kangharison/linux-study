@@ -21,6 +21,51 @@
  *
  * === 주요 구조 ===
  * nvme_tcp_ctrl/queue/request — 소켓, send/recv 상태, PDU 스크래치, TLS 키
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * NVMe/TCP 트랜스포트다. 하드웨어 큐 대신 커널 소켓이 있고, 도어벨 대신 PDU 를
+ * 바이트 스트림으로 흘려보낸다. 그래서 다른 트랜스포트에 없는 두 가지 일을 한다 --
+ * 스트림에서 PDU 경계를 되찾는 수신 상태 기계와, 부분 전송을 이어 가는 송신 상태 기계다.
+ * 호출 체인(제출):
+ *   blk-mq → nvme_tcp_queue_rq → 큐의 송신 목록에 걸기
+ *     → io_work → nvme_tcp_try_send → try_send_cmd_pdu / try_send_data /
+ *       try_send_ddgst → kernel_sendmsg
+ * 호출 체인(완료):
+ *   소켓 데이터 도착 → data_ready 콜백 → io_work → nvme_tcp_try_recv
+ *     → recv_pdu → recv_data / recv_ddgst → nvme_complete_rq
+ * 큐마다 io_work 하나가 송신과 수신을 모두 담당하며, 그 직렬화가 곧 큐 단위 잠금
+ * 역할을 한다. poll 큐는 인터럽트 대신 nvme_tcp_poll 로 같은 경로를 돈다.
+ *
+ * === 타 모듈과의 연결 ===
+ * - net/ipv4, net/socket.c: 실제 전송 수단. kernel_sendmsg / kernel_recvmsg 와
+ *   소켓 콜백(data_ready, write_space, state_change)이 접점이다.
+ * - net/tls: TLS 가 켜진 연결에서는 소켓 위에 커널 TLS 가 얹힌다. 핸드셰이크는
+ *   유저스페이스 도우미와 협조해 이뤄진다.
+ * - drivers/nvme/host/fabrics.c: 연결 옵션 파싱과 Connect 명령. 이 파일은
+ *   nvmf_transport_ops 로 "tcp" 이름을 등록한다.
+ * - drivers/nvme/host/core.c: nvme_ctrl_ops 를 통해 상태 기계와 Identify 를 위임한다.
+ * - crypto: 데이터 다이제스트(ddgst)와 헤더 다이제스트의 CRC32C 계산.
+ * 데이터 흐름은 요청 → PDU(헤더+데이터+다이제스트) → 소켓 → 네트워크이고,
+ * 반대 방향은 그 역순으로 되짚어 요청을 되찾는다.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * - nvme_tcp_queue_rq: 핫패스 제출 진입점. 명령 PDU 를 준비하고 큐의 송신 목록에
+ *   걸어 io_work 를 깨운다. 실제 write 는 여기서 하지 않는다.
+ * - nvme_tcp_try_send / _try_send_cmd_pdu / _try_send_data / _try_send_ddgst:
+ *   송신 상태 기계. 소켓이 받아 주는 만큼만 보내고 남으면 다음 기회에 이어 간다.
+ * - nvme_tcp_try_recv / _recv_pdu / _recv_data / _recv_ddgst: 수신 상태 기계.
+ *   스트림에서 PDU 헤더를 모으고, 길이를 읽어 본문 경계를 정하고, 다이제스트를 검증한다.
+ * - nvme_tcp_init_connection: 소켓을 연 뒤 ICReq/ICResp 를 주고받아 최대 데이터 길이,
+ *   다이제스트 사용 여부 같은 연결 파라미터를 합의한다.
+ * - nvme_tcp_setup_ctrl / nvme_tcp_teardown_ctrl: 컨트롤러 전체의 큐 구성과 해체.
+ * - nvme_tcp_error_recovery / _error_recovery_work / _reconnect_ctrl_work:
+ *   연결이 끊겼을 때의 복구. 큐를 내리고 일정 간격으로 재연결을 시도한다.
+ * - nvme_tcp_timeout: 응답 없는 요청 처리. 네트워크 트랜스포트라 abort 대신
+ *   오류 복구 경로로 넘긴다.
+ * - struct nvme_tcp_queue: 큐 하나의 전부 -- 소켓, io_work, 송수신 상태, 다이제스트
+ *   컨텍스트, 송신 대기 목록.
+ * - struct nvme_tcp_request: 요청별 전송 상태. 남은 바이트, 현재 스캐터리스트 위치,
+ *   PDU 버퍼를 추적한다.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt	/* [한국어] 상수/매크로 — PDU·큐·타임아웃·플래그 */

@@ -40,6 +40,21 @@
  * Capsule: nvmf_reg_read32/64, nvmf_reg_write32, connect_admin/io_queue
  * Policy: nvmf_should_reconnect, nvmf_set_io_queues, nvmf_map_queues
  * UI: /dev/nvme-fabrics misc + class nvme-fabrics
+ *
+ * === 주요 함수/구조체 요약 ===
+ * - nvmf_create_ctrl: /dev/nvme-fabrics 에 쓰인 연결 문자열을 파싱해 해당 트랜스포트의
+ *   create_ctrl 을 부르는 진입점. 사용자 공간의 'nvme connect' 가 여기로 들어온다.
+ * - nvmf_parse_options / nvmf_free_options: 연결 옵션 문자열을 struct nvmf_ctrl_options
+ *   로 옮기고 되돌린다. transport, traddr, nqn, keep-alive, 큐 개수 등이 여기서 정해진다.
+ * - nvmf_connect_admin_queue / nvmf_connect_io_queue: Fabrics Connect 명령을 보내
+ *   큐를 세운다. admin 쪽이 컨트롤러 ID 를 받아 오고 I/O 쪽은 그것을 재사용한다.
+ * - nvmf_reg_read32 / nvmf_reg_read64 / nvmf_reg_write32: PCIe 의 MMIO 레지스터 접근을
+ *   Property Get/Set 명령으로 대신한다. Fabrics 에는 BAR 가 없기 때문이다.
+ * - nvmf_register_transport / nvmf_unregister_transport: rdma/tcp/fc 트랜스포트가
+ *   자신을 등록하는 창구. nvmf_create_ctrl 이 이 목록에서 이름으로 찾는다.
+ * - nvmf_should_reconnect: 재연결을 더 시도할지 판정. 남은 시도 횟수와 지연을 본다.
+ * - struct nvmf_ctrl_options: 파싱된 연결 옵션 전체.
+ * - struct nvmf_transport_ops: 트랜스포트가 제공해야 하는 vtable(name, create_ctrl 등).
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt	/* [한국어] 로그 접두를 모듈명으로 통일 */

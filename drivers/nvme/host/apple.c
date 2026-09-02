@@ -47,6 +47,22 @@
  * === 핫패스 vs 컨트롤 플레인 ===
  * 핫패스: queue_rq → map_data/setup_prps → TCB → doorbell → irq/poll
  * 컨트롤: probe/remove, rtkit boot, reset_work, suspend/resume, create sq/cq
+ *
+ * === 주요 함수/구조체 요약 ===
+ * - apple_nvme_probe / apple_nvme_alloc: 플랫폼 장치에서 MMIO·RTKit·SART·genpd 를
+ *   갖추고 nvme_ctrl 을 등록하는 진입점. 여기서 실패하면 컨트롤러가 존재하지 않는다.
+ * - apple_nvme_reset_work: CC.EN 재인가와 큐 재생성을 묶은 리셋 상태 기계.
+ *   RTKit 펌웨어 부팅과 NVMMU 초기화가 이 안에서 순서대로 일어난다.
+ * - apple_nvme_queue_rq: 핫패스 제출. PRP 를 채우고 태그별 TCB 를 기록한 뒤
+ *   도어벨에 태그를 써 넣는다. 표준 NVMe 가 SQ tail 을 쓰는 것과 다른 지점이다.
+ * - apple_nvme_handle_cq / apple_nvme_irq: 완료 수확. phase 비트로 새 CQE 를
+ *   가려내고 NVMMU 무효화 후 blk-mq 에 완료를 넘긴다.
+ * - apple_nvme_timeout: 응답 없는 명령의 처리. 표준 abort 대신 컨트롤러 리셋으로
+ *   간다 -- 단일 공유 태그 공간이라 개별 abort 의 이득이 적기 때문이다.
+ * - struct apple_nvme: 장치 전역 상태(MMIO, rtk/sart, adminq/ioq, tagset).
+ * - struct apple_nvme_queue: SQE/CQE/TCB DMA 링과 도어벨, phase.
+ * - struct apple_nvmmu_tcb: 태그마다 하나씩 있는 128B 변환 제어 블록.
+ * - struct apple_nvme_iod: 요청별 PRP/sg 매핑 상태.
  */
 
 #include <linux/async.h>	/* [한국어] async_schedule — probe 후 reset/scan flush 비동기화 */

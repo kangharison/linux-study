@@ -44,6 +44,24 @@
  * failover: nvme_failover_req, nvme_requeue_work, nvme_kick_requeue_lists
  * ANA: nvme_read_ana_log, nvme_parse_ana_log, nvme_update_ns_ana_state
  * 생명주기: nvme_mpath_alloc_disk, set_live, add/remove_disk, init_identify
+ *
+ * === 주요 함수/구조체 요약 ===
+ * - nvme_ns_head_submit_bio: 다중 경로의 핫패스 진입점. ns_head 의 가상 디스크로
+ *   들어온 bio 를 살아 있는 경로 하나로 골라 그쪽 ns 의 큐로 다시 제출한다.
+ * - nvme_find_path / __nvme_find_path: 경로 선택의 본체. current_path 캐시를 먼저
+ *   보고, 없거나 죽었으면 정책에 따라 다시 고른다.
+ * - nvme_round_robin_path / nvme_queue_depth_path / nvme_numa_path: 세 가지 iopolicy
+ *   구현. 각각 순환, 큐 깊이 최소, NUMA 거리 우선으로 경로를 정한다.
+ * - nvme_failover_req: 실패한 요청을 다른 경로로 넘긴다. 경로 오류로 판정된
+ *   상태 코드만 여기로 오고, 매체 오류 같은 것은 그대로 상위로 올라간다.
+ * - nvme_mpath_clear_current_path: 죽은 경로를 캐시에서 지워 다음 I/O 가 다시
+ *   고르게 만든다. 컨트롤러 리셋과 경로 제거가 이 함수로 수렴한다.
+ * - nvme_read_ana_log / nvme_ana_work: ANA(Asymmetric Namespace Access) 로그를 읽어
+ *   각 경로의 상태(optimized/non-optimized/inaccessible)를 갱신한다.
+ * - nvme_mpath_alloc_disk / nvme_mpath_add_disk / nvme_mpath_remove_disk:
+ *   ns_head 의 가상 디스크 생명주기. 사용자에게 보이는 /dev/nvmeXnY 가 이것이다.
+ * - struct nvme_ns_head: 같은 네임스페이스를 가리키는 여러 경로(ns)를 묶는 머리.
+ *   disk, siblings 목록, current_path 배열, ANA 상태를 담는다.
  */
 
 #include <linux/backing-dev.h>	/* [한국어] bdi/acct 연동 — head part0 I/O 통계에 간접 사용 */

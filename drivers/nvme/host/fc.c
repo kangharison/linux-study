@@ -18,6 +18,54 @@
  *
  * === 주요 구조 ===
  * nvme_fc_ctrl/queue/fcp_op/ls_op/lport/rport — exchange, LS 상태, ops 벡터
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * NVMe over Fibre Channel 호스트 트랜스포트다. 다른 트랜스포트와 달리 이 파일은
+ * 네트워크를 직접 다루지 않는다 -- FC 프레임 송수신은 HBA 의 LLDD(low-level
+ * driver)가 하고, 이 파일은 그 위에서 Association 과 Connection 이라는 FC-NVME
+ * 고유의 세션 계층을 관리한다.
+ * 호출 체인(연결):
+ *   nvme_fc_create_ctrl → nvme_fc_create_association
+ *     → Create Association LS → LLDD 의 ls_req 콜백 → FC 프레임
+ *       → Association ID 수신 → 큐마다 Create Connection LS
+ *         → nvmf_connect_admin_queue / _io_queue (Fabrics Connect 명령)
+ * 호출 체인(제출):
+ *   blk-mq → nvme_fc_queue_rq → FC-NVME IU 조립 → LLDD 의 fcp_io 콜백
+ *     → 완료 콜백 → nvme_fc_fcpio_done → nvme_complete_rq
+ * localport(로컬 HBA 포트)와 remoteport(원격 타겟 포트)가 등록·해제되는 것을 축으로,
+ * 그 위에 컨트롤러들이 매달리는 구조다.
+ *
+ * === 타 모듈과의 연결 ===
+ * - drivers/scsi 의 FC LLDD(lpfc, qla2xxx 등): 실제 프레임 송수신 주체.
+ *   nvme_fc_register_localport / _register_remoteport 로 이 파일에 자신을 알리고,
+ *   nvme_fc_port_template 의 콜백으로 요청을 받는다.
+ * - drivers/nvme/host/fc.h: 호스트와 타겟이 공유하는 LS PDU 포맷과 검증 루틴.
+ * - drivers/nvme/target/fc: 반대편 구현. 같은 LS 를 반대 방향으로 처리한다.
+ * - drivers/nvme/host/fabrics.c: 연결 옵션과 Connect 명령. "fc" 이름으로 등록한다.
+ * - drivers/nvme/host/core.c: 상태 기계와 Identify 를 위임한다.
+ * FC 는 포트가 사라졌다 다시 나타나는 일이 잦은 매체라, 이 파일에는 다른
+ * 트랜스포트보다 정교한 참조 계수와 재연결 정책이 들어 있다.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * - nvme_fc_register_localport / _unregister_localport: HBA 의 로컬 포트 등록.
+ *   LLDD 가 부팅 시 또는 포트가 올라올 때 부른다.
+ * - nvme_fc_register_remoteport / _unregister_remoteport: 발견된 원격 타겟 포트 등록.
+ *   포트가 사라지면 그 아래 컨트롤러들이 재연결 대기로 들어간다.
+ * - nvme_fc_create_ctrl: 'nvme connect -t fc' 의 종착점. traddr/host-traddr 로
+ *   local/remote 포트 짝을 찾아 컨트롤러를 만든다.
+ * - nvme_fc_create_association / nvme_fc_delete_association: FC-NVME 세션의 수립과
+ *   해체. Create Association LS 로 시작해 큐마다 Connection 을 세운다.
+ * - nvme_fc_queue_rq: 핫패스 제출. 요청을 FC-NVME IU 로 만들어 LLDD 에 넘긴다.
+ * - nvme_fc_fcpio_done: LLDD 의 완료 콜백. 응답 IU 를 해석해 요청을 완료시킨다.
+ * - nvme_fc_send_ls_req / nvme_fc_handle_ls_rqst: LS 송신과 수신 처리. 후자는
+ *   타겟이 보낸 Disconnect Association 같은 통지를 받는다.
+ * - nvme_fc_error_recovery / nvme_fc_reset_ctrl_work: 오류 복구와 리셋. 포트가
+ *   돌아오기를 기다리며 정해진 횟수만큼 재연결을 시도한다.
+ * - nvme_fc_timeout: 응답 없는 요청 처리. FC 는 abort 개념이 있어 LLDD 에 abort 를
+ *   요청한 뒤 그래도 안 되면 컨트롤러 리셋으로 올라간다.
+ * - struct nvme_fc_ctrl: 컨트롤러 하나 -- Association ID, 큐 배열, 로컬/원격 포트 참조.
+ * - struct nvme_fc_queue: 큐 하나 -- Connection ID 와 큐 번호.
+ * - struct nvme_fc_fcp_op: 요청 하나의 FC 측 상태 -- IU 버퍼와 LLDD 요청 구조체.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt	/* [한국어] 상수/매크로 — PDU·큐·타임아웃·플래그 */

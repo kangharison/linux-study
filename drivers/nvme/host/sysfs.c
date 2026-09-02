@@ -62,6 +62,19 @@
  * SUBSYS: nvme_subsys_attrs_groups, nqn/type/model/serial/fw
  * 매크로: nvme_show_str_function, nvme_show_int_function,
  *         nvme_subsys_show_str_function, SUBSYS_ATTR_RO
+ *
+ * === 주요 함수/구조체 요약 ===
+ * - nvme_sysfs_add_ctrl_attrs 계열: /sys/class/nvme/nvmeX/ 아래에 모델, 시리얼,
+ *   펌웨어 리비전, 상태, 주소 같은 컨트롤러 속성을 노출한다.
+ * - ns_head_update_nuse / ns_update_nuse: nuse(사용 중 블록 수) 속성을 읽을 때
+ *   Identify Namespace 를 다시 발행해 값을 갱신한다. 캐시가 아니라 질의라
+ *   읽을 때마다 컨트롤러 왕복이 일어난다.
+ * - dev_to_ns_head: sysfs 의 struct device 에서 nvme_ns_head 를 되찾는 헬퍼.
+ *   다중 경로 구성에서 노출 주체가 ns 가 아니라 ns_head 이기 때문에 필요하다.
+ * - multipath_sysfs_group_visible: 다중 경로 관련 속성 그룹을 보일지 결정한다.
+ *   CONFIG_NVME_MULTIPATH 가 꺼져 있거나 헤드가 없으면 감춘다.
+ * - nvme_dev_attrs_group / nvme_ns_attr_group 등 attribute_group: 어떤 파일이
+ *   어느 디렉토리에 나타나는지를 정하는 표. 커널 sysfs 코어가 이를 읽어 노드를 만든다.
  */
 
 #include <linux/nvme-auth.h>

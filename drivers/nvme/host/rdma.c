@@ -19,6 +19,49 @@
  *
  * === 주요 구조 ===
  * nvme_rdma_ctrl/queue/request/device — CM id, QP, MR, SGE, tagset
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * NVMe over RDMA 트랜스포트다. TCP 와 달리 데이터가 CPU 를 거치지 않는다 -- 원격
+ * 장치가 메모리 영역에 직접 읽고 쓴다. 그래서 이 파일의 일은 '전송'보다 '등록'에
+ * 가깝다. 요청마다 메모리 영역을 등록해 원격에 rkey 를 넘기고, 완료 후 무효화한다.
+ * 호출 체인(제출):
+ *   blk-mq → nvme_rdma_queue_rq → nvme_rdma_map_data (MR 등록)
+ *     → ib_post_send (명령 캡슐 전송)
+ *       → 원격이 RDMA Read/Write 로 데이터를 직접 옮김
+ * 호출 체인(완료):
+ *   CQ 이벤트 → nvme_rdma_recv_done / _send_done → MR 무효화 확인
+ *     → nvme_complete_rq
+ * 큐마다 QP(Queue Pair) 하나와 CQ 하나가 대응한다. 완료는 ib_cq 의 폴링 문맥에서
+ * 처리되며, poll 큐는 blk-mq 의 poll 경로에서 같은 CQ 를 직접 훑는다.
+ *
+ * === 타 모듈과의 연결 ===
+ * - drivers/infiniband/core: ib_verbs API(QP/CQ/MR/PD)와 RDMA CM. 연결 수립부터
+ *   메모리 등록까지 모두 이쪽 인터페이스를 쓴다.
+ * - drivers/nvme/host/fabrics.c: 연결 옵션과 Connect 명령. "rdma" 이름으로 등록한다.
+ * - drivers/nvme/host/core.c: 상태 기계와 Identify 를 위임한다.
+ * - block layer: MR 등록 가능한 세그먼트 수가 queue_limits 의 max_segments 를
+ *   좌우한다. RDMA 는 한 요청이 하나의 MR 로 표현되는 것이 이상적이라,
+ *   세그먼트가 많으면 등록 비용이 올라간다.
+ * 데이터 흐름에서 이 파일이 실제로 옮기는 것은 명령 캡슐과 완료뿐이고,
+ * 페이로드는 하드웨어가 직접 옮긴다는 점이 다른 트랜스포트와의 가장 큰 차이다.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * - nvme_rdma_queue_rq: 핫패스 제출. 명령을 캡슐에 담고 필요하면 MR 을 등록한 뒤
+ *   ib_post_send 로 내보낸다.
+ * - nvme_rdma_map_data / nvme_rdma_unmap_data: 요청 데이터를 RDMA 가 접근할 수 있는
+ *   형태로 만든다. 인라인으로 보낼지, 단일 SGE 로 보낼지, MR 을 등록할지를 크기와
+ *   세그먼트 수를 보고 고른다.
+ * - nvme_rdma_recv_done / nvme_rdma_send_done: CQ 완료 콜백. 응답 캡슐을 해석하고
+ *   MR 무효화가 끝났는지 확인한 뒤 요청을 완료시킨다.
+ * - nvme_rdma_create_queue_ib / nvme_rdma_destroy_queue_ib / nvme_rdma_create_qp:
+ *   큐별 RDMA 자원(PD, CQ, QP, MR 풀)의 생성과 해제.
+ * - nvme_rdma_cm_handler: RDMA CM 이벤트 처리. ADDR_RESOLVED → ROUTE_RESOLVED →
+ *   ESTABLISHED 로 이어지는 연결 수립과, DISCONNECTED 같은 단절 통지를 받는다.
+ * - nvme_rdma_setup_ctrl / nvme_rdma_teardown_io_queues: 컨트롤러 단위 큐 구성과 해체.
+ * - nvme_rdma_error_recovery / _error_recovery_work / _reconnect_ctrl_work:
+ *   링크 단절 후 복구 절차.
+ * - struct nvme_rdma_queue: 큐 하나의 RDMA 자원 -- QP, CQ, CM ID, MR 풀, 플래그.
+ * - struct nvme_rdma_request: 요청별 등록 상태 -- 사용한 MR, sg 테이블, 캡슐 버퍼.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt	/* [한국어] 상수/매크로 — PDU·큐·타임아웃·플래그 */

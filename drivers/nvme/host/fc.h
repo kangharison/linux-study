@@ -48,6 +48,33 @@
  * VERR_* / validation_errors[] — LS 검증 실패 코드·문자열
  * nvmefc_ls_names[] — LS 명령 이름 테이블
  * nvmefc_fmt_lsreq_discon_assoc / nvmefc_vldt_lsreq_discon_assoc
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * FC-NVME 제어 평면의 공통 언어를 정의하는 자리다. 호스트(fc.c)와 타겟(nvmet_fc)이
+ * 같은 헤더를 포함해 같은 PDU 를 만들고 검증하므로, 양쪽 구현이 어긋날 여지를
+ * 컴파일 시점에 줄인다.
+ * 호출 체인(호스트 쪽):
+ *   nvme_fc_create_ctrl (fc.c) → nvme_fc_connect_admin_queue
+ *     → Create Association LS 조립 [이 헤더의 유니온과 빌더]
+ *       → LLDD 의 ls_req 콜백 → FC 프레임 송신
+ *     → 응답 도착 → nvmefc_ls_acc 검증 [이 헤더의 밸리데이터]
+ * 타겟 쪽은 같은 구조체를 반대 방향으로 쓴다 -- 요청을 검증하고 ACC/RJT 를 짓는다.
+ * 이 헤더 자체에는 상태가 없고, 전부 인라인 함수와 구조체 정의다.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * - union nvmefc_ls_requests / union nvmefc_ls_responses: 모든 LS 요청·응답 PDU 를
+ *   한 버퍼에 담기 위한 유니온. 가장 큰 멤버 크기가 곧 버퍼 크기가 되므로,
+ *   송수신 버퍼를 한 번만 잡아 어떤 LS 든 처리할 수 있다.
+ * - nvme_fc_format_rsp_hdr: ACC(수락) 응답의 공통 머리말을 채운다. 요청의 LS 코드와
+ *   길이를 그대로 되비추는 것이 FC-NVME 규약이다.
+ * - nvme_fc_format_rjt: RJT(거절) 응답을 짓는다. 거절 사유와 설명 코드를 실어
+ *   상대가 무엇이 잘못됐는지 알 수 있게 한다.
+ * - nvme_fc_validate_ls_hdr 계열: 수신한 LS 의 코드, 길이, 필드 크기가 스펙과
+ *   맞는지 검사한다. 어긋나면 위 RJT 로 이어진다.
+ * - Disconnect Association 요청 빌더/밸리데이터: 세션 해체 LS 를 짓고 검증한다.
+ *   호스트가 정상 종료할 때와 타겟이 강제로 끊을 때 양쪽에서 쓰인다.
+ * - struct fcnvme_ls_*: Create Association, Create Connection, Disconnect 각각의
+ *   요청·응답 레이아웃. 필드는 FC 규약대로 빅엔디안이다.
  */
 
 /*

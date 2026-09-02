@@ -68,6 +68,59 @@
  * 핫패스: nvme_setup_cmd, nvme_complete_rq, nvme_fail_nonready_command
  * 프로브: nvme_init_ctrl, nvme_init_ctrl_finish, nvme_scan_work
  * 생명주기: nvme_start_ctrl, nvme_stop_ctrl, nvme_uninit_ctrl
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * NVMe 호스트 스택의 중심이다. 위로는 블록 계층과 캐릭터 장치에, 아래로는 트랜스포트
+ * (pci/tcp/rdma/fc/apple)에 맞닿아 있으며, 어느 쪽에도 상대의 사정을 노출하지 않는다.
+ * 트랜스포트는 nvme_ctrl_ops 라는 얇은 vtable 만 채우고, 나머지 -- 상태 기계,
+ * Identify 해석, 네임스페이스 스캔, keep-alive, 재시도 정책 -- 는 전부 이 파일이 한다.
+ * 호출 체인(제출):
+ *   submit_bio → blk-mq → <transport>_queue_rq → nvme_setup_cmd [이 파일]
+ *     → 트랜스포트가 하드웨어/네트워크로 전달
+ * 호출 체인(완료):
+ *   트랜스포트 완료 수확 → nvme_complete_rq [이 파일]
+ *     → 상태 해석 → 재시도 / 페일오버 / blk_mq_end_request
+ * 호출 체인(초기화):
+ *   <transport>_probe → nvme_init_ctrl → nvme_init_identify → nvme_scan_work
+ *     → nvme_alloc_ns → device_add_disk
+ * 실행 컨텍스트는 함수마다 다르다. 핫패스는 인터럽트 문맥까지 내려가고, 스캔과 리셋은
+ * 워크큐에서 잠들 수 있는 문맥으로 돈다. 이 구분이 잠금 선택의 근거다.
+ *
+ * === 타 모듈과의 연결 ===
+ * - block/blk-mq.c: 요청 배분과 완료 보고의 상대. nvme_alloc_disk 가
+ *   blk_mq_alloc_disk 로 gendisk 를 만들고, queue_limits 를 Identify 결과에서 채운다.
+ * - drivers/nvme/host/nvme.h: struct nvme_ctrl / nvme_ns / nvme_ns_head 와 ops 의
+ *   정의처. 이 파일이 그 계약의 주된 구현자다.
+ * - drivers/nvme/host/pci.c, tcp.c, rdma.c, fc.c, apple.c: nvme_ctrl_ops 를 채워
+ *   등록하는 쪽. 레지스터 접근과 큐 생성만 그쪽이 하고 의미론은 이쪽이 갖는다.
+ * - drivers/nvme/host/multipath.c: ns_head 아래 여러 경로를 묶는다. 스캔에서
+ *   같은 NSID·NGUID 를 발견하면 이 파일이 그쪽에 붙인다.
+ * - drivers/nvme/host/ioctl.c: 유저스페이스 패스스루의 입구. 명령 조립과 완료는
+ *   결국 이 파일의 헬퍼를 쓴다.
+ * - drivers/nvme/host/auth.c, fabrics.c: Fabrics 연결과 인증. 상태 기계의
+ *   CONNECTING 구간에서 맞물린다.
+ * 공유 상태는 struct nvme_ctrl 하나로 수렴한다 -- 상태 필드, 태그셋, 네임스페이스
+ * 목록, keep-alive 워크가 모두 그 안에 있고 ctrl->lock 과 subsys->lock 이 지킨다.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * - nvme_init_ctrl / nvme_uninit_ctrl / nvme_free_ctrl: 컨트롤러 객체의 생명주기.
+ *   트랜스포트가 probe 에서 처음 부르고, 마지막 참조가 사라질 때 해제된다.
+ * - nvme_change_ctrl_state: 상태 전이의 유일한 관문. 허용되지 않은 전이를 막아
+ *   리셋과 삭제가 서로를 밟지 않게 한다.
+ * - nvme_enable_ctrl / nvme_disable_ctrl / nvme_shutdown_ctrl: CC.EN 과 CSTS.RDY 를
+ *   다루는 켜기·끄기 절차. 트랜스포트의 reg_read/write 위에서 동작하므로
+ *   PCIe 와 Fabrics 양쪽에 같은 코드가 쓰인다.
+ * - nvme_init_identify: Identify Controller 를 읽어 컨트롤러 능력을 확정한다.
+ *   mdts, 큐 개수, 기능 비트, quirk 적용이 여기서 정해진다.
+ * - nvme_setup_cmd: 블록 요청을 NVMe 명령으로 번역하는 핫패스. Read/Write/Flush/
+ *   Discard/Write Zeroes 를 각각 대응 opcode 와 필드로 옮긴다.
+ * - nvme_complete_rq: 완료의 공통 처리. 상태 코드를 보고 재시도할지, 다중 경로로
+ *   넘길지, 상위에 오류를 올릴지 판정한다.
+ * - nvme_scan_work / nvme_alloc_ns / nvme_remove_namespaces: 네임스페이스 발견과
+ *   디스크 등록·해제. AEN 이나 리셋 뒤 다시 돈다.
+ * - nvme_keep_alive_work: 주기적 Keep Alive 발행. Fabrics 에서 연결 생존을 알린다.
+ * - nvme_submit_sync_cmd / __nvme_submit_sync_cmd: 제어 평면 동기 제출 헬퍼.
+ *   Identify, Get/Set Features 같은 admin 명령이 전부 이 경로를 지난다.
  */
 
 #include <linux/async.h>		/* [한국어] 병렬 NS 스캔 async_schedule_domain */

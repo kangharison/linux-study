@@ -48,6 +48,20 @@
  * nvmf_host / nvmf_ctrl_options / nvmf_transport_ops
  * NVMF_OPT_* 비트 — sysfs/connect 문자열 파싱 마스크
  * nvmf_reg_*, nvmf_connect_*, nvmf_should_reconnect, nvmf_map_queues …
+ *
+ * === 주요 함수/구조체 요약 ===
+ * - struct nvmf_ctrl_options: 연결 옵션의 정규 표현. 트랜스포트 이름, traddr/trsvcid,
+ *   subsysnqn/hostnqn, 큐 개수, keep-alive 주기, 재연결 정책, TLS/인증 키를 담는다.
+ *   fabrics.c 가 문자열에서 채우고 각 트랜스포트가 읽어 간다.
+ * - struct nvmf_transport_ops: 트랜스포트가 fabrics 코어에 등록하는 vtable.
+ *   name/module/required_opts/allowed_opts 와 create_ctrl 콜백으로 이뤄진다.
+ * - nvmf_ctrl_subsysnqn: 컨트롤러의 서브시스템 NQN 을 꺼내는 인라인. opts 가 아직
+ *   없는 시점에도 안전하도록 ctrl 쪽 값을 우선한다.
+ * - nvmf_complete_timed_out_request: 타임아웃된 요청을 취소 상태로 완료시킨다.
+ *   트랜스포트들이 자신의 timeout 콜백에서 공통으로 부른다.
+ * - nvmf_nr_io_queues: 옵션에 적힌 I/O/write/poll 큐 개수를 합산한다.
+ * - NVMF_OPT_* 비트: 각 옵션의 존재 여부를 나타내는 마스크. required_opts 와
+ *   allowed_opts 가 이 비트로 트랜스포트별 허용 조합을 표현한다.
  */
 
 #include <linux/in.h>		/* [한국어] IP 주소 계열 타입 — traddr 파싱/매칭 경로와 간접 연결 */

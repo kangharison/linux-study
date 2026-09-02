@@ -44,6 +44,22 @@
  * nvme_trace_parse_{admin,nvm,fabrics}_cmd — 공개 디스패처
  * nvme_trace_disk_name — disk= 접두 포맷
  * 정적 nvme_trace_* — opcode 별 필드 추출 헬퍼
+ *
+ * === 주요 함수/구조체 요약 ===
+ * - nvme_trace_parse_admin_cmd / _nvm_cmd / _fabrics_cmd: trace.h 의 TP_printk 가
+ *   부르는 디스패처. opcode 를 보고 아래 opcode 별 해석기로 넘긴다.
+ * - nvme_trace_read_write: Read/Write 명령의 SLBA, 길이, 제어 필드를 사람이 읽을
+ *   수 있는 문자열로 편다. I/O 핫패스를 추적할 때 가장 많이 보게 되는 출력이다.
+ * - nvme_trace_admin_identify: Identify 의 CNS 와 CNTID 를 푼다. 컨트롤러 초기화
+ *   과정을 따라갈 때 어떤 구조를 물었는지 알려 준다.
+ * - nvme_trace_create_sq / _create_cq / _delete_sq / _delete_cq: 큐 생성·삭제 명령의
+ *   큐 ID, 크기, 인터럽트 벡터를 보여 준다. 큐 개수 협상 결과를 확인할 때 쓴다.
+ * - nvme_trace_dsm / _zone_mgmt_send / _zone_mgmt_recv / _resv_*: Dataset Management,
+ *   ZNS 존 관리, 예약(reservation) 명령의 인자 해석기.
+ * - nvme_trace_fabrics_connect / _property_get / _property_set / _auth_send 등:
+ *   Fabrics 전용 명령의 해석기. PCIe 에는 없는 명령들이라 별도 계열로 나뉜다.
+ * - nvme_trace_disk_name: 추적 항목에 디스크 이름을 붙여 어느 네임스페이스의
+ *   I/O 인지 구분할 수 있게 한다.
  */
 
 #include <linux/unaligned.h>	/* [한국어] get_unaligned_le16/32/64 — CDW 바이트 배열에서 LE 필드 안전 추출 */

@@ -51,6 +51,20 @@
  * parse_nvme_cmd / __print_disk_name — TP_printk 용 디코드 매크로
  * __assign_disk_name — TP_fast_assign 용 disk_name 복사
  * TRACE_EVENT(nvme_setup_cmd|complete_rq|async_event|sq)
+ *
+ * === 주요 함수/구조체 요약 ===
+ * - TRACE_EVENT(nvme_setup_cmd): 명령이 하드웨어로 나가기 직전에 찍히는 추적점.
+ *   큐 ID, 명령 ID, 네임스페이스, opcode, flags, metadata 와 opcode 별 상세
+ *   문자열(cdw10)을 남긴다. 제출 시점의 진실을 기록하는 자리다.
+ * - TRACE_EVENT(nvme_complete_rq): 완료 시점의 추적점. 결과값과 상태 코드를 남겨
+ *   제출과 짝지어 지연 시간과 실패 원인을 볼 수 있게 한다.
+ * - TRACE_EVENT(nvme_async_event): 비동기 이벤트 통지(AEN) 수신 기록.
+ * - TRACE_EVENT(nvme_sq): SQ 도어벨 갱신 추적점. 제출 큐가 얼마나 차 있는지를 본다.
+ * - __assign_disk_name: 디스크 이름을 추적 버퍼에 복사하는 헬퍼 매크로용 인라인.
+ *   ns 가 없는 admin 명령에서는 컨트롤러 이름을 대신 넣는다.
+ * - TRACE_INCLUDE_PATH / TRACE_INCLUDE_FILE: 이 헤더를 두 번째로 포함시켜 실제
+ *   추적점 코드를 생성하게 하는 ftrace 관례. 그래서 이 파일에는 통상적인
+ *   중복 포함 방지 가드가 온전한 형태로 있지 않다.
  */
 
 #undef TRACE_SYSTEM

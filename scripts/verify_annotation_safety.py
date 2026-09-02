@@ -99,6 +99,25 @@ def check_leaks(src: str) -> list[str]:
     return problems
 
 
+def check_nested_open(src: str) -> list[str]:
+    """Style: a '/*' sequence inside a block comment.
+
+    C does not nest comments, so this cannot break a build -- the outer comment
+    simply runs on. It still matters twice over: annotation.md forbids it, and
+    it makes the '/*' vs '*/' totals in verify_nvme_annotations.py disagree, so
+    a file trips the density gate for a reason that has nothing to do with
+    density. It usually comes from writing a path glob such as
+    "drivers/nvme/host/*" inside prose. Reported, but not fatal, because
+    pre-existing occurrences predate this check.
+    """
+    problems: list[str] = []
+    for lineno, line in enumerate(src.split("\n"), 1):
+        for match in re.finditer(r"[A-Za-z0-9_)]/\*", line):
+            problems.append(f"L{lineno}: '/*' inside prose: {line.strip()[:60]}")
+            break
+    return problems
+
+
 def check_macros(src: str) -> list[str]:
     r"""Mode 2: a stray backslash left inside code by a badly placed comment.
 
@@ -170,6 +189,7 @@ def main() -> int:
     sources = iter_sources(tuple(args.paths) or DEFAULT_PATHS)
     leaks: dict[str, list[str]] = {}
     macros: dict[str, list[str]] = {}
+    nested: dict[str, list[str]] = {}
     drift: list[str] = []
 
     for path in sources:
@@ -179,6 +199,8 @@ def main() -> int:
             leaks[path] = found
         if found := check_macros(src):
             macros[path] = found
+        if found := check_nested_open(src):
+            nested[path] = found
         original = git_show(args.base, path)
         if original is not None and code_fingerprint(original) != code_fingerprint(src):
             drift.append(path)
@@ -190,6 +212,9 @@ def main() -> int:
             print(f"  {path}")
             for item in found[:5]:
                 print(f"      {item}")
+    nested_total = sum(len(v) for v in nested.values())
+    print(f"nested '/*' in prose (style, not fatal): "
+          f"{nested_total} in {len(nested)} file(s)")
     print(f"code drift: {len(drift)} file(s)")
     for path in drift:
         print(f"  {path}")
