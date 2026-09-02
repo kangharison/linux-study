@@ -181,16 +181,23 @@
 /* [한국어] 벡터 번호 필드(5비트). 0부터 세므로 EPF 가 준 번호에서 1 을 뺀다. */
 #define PCL_APP_VEN_MSI_VECTOR_MASK	GENMASK(4, 0)
 
+/* [한국어] 벤더 MSI 레지스터 1 — 실제로 보내는 요청 비트가 여기 있다. */
 #define PCL_APP_MSI1			0x8044
+/* [한국어] 요청 비트. 위 레지스터에 대상을 지정한 뒤 이것을 세워야 나간다. */
 #define PCL_APP_MSI_REQ			BIT(0)
 
+/* [한국어] INTx 제어 레지스터. */
 #define PCL_APP_INTX			0x8074
+/* [한국어] 시스템 인터럽트 비트. 세웠다 지우는 것이 곧 펄스다. */
 #define PCL_APP_INTX_SYS_INT		BIT(0)
 
+/* [한국어] 전원 관리 레지스터 0. */
 #define PCL_APP_PM0			0x8078
+/* [한국어] 보조 전원 감지 비트. NX1 판이 이것을 켠다. */
 #define PCL_SYS_AUX_PWR_DET		BIT(8)
 
 /* assertion time of INTx in usec */
+/* [한국어] INTx 어서션 유지 시간(옆의 상류 주석). 30µs 로 짧아 udelay 로 기다린다. */
 #define PCL_INTX_WIDTH_USEC		30
 
 struct uniphier_pcie_ep_priv {
@@ -265,6 +272,10 @@ struct uniphier_pcie_ep_soc_data {
 /* [한국어] 세대별 차이를 담은 표. 이 표 하나가 Pro5 와 NX1 의 모든 차이를 흡수한다. */
 };
 
+/* [한국어] dw_pcie 포인터에서 이 드라이버의 상태를 되찾는 통로.
+ * container_of 가 아니라 drvdata 인 것은, **이 구조체에서 dw_pcie 가
+ * 맨 앞이 아니라 두 번째 필드** 이기 때문이다 — base 가 앞에 있다.
+ * 전제: probe 가 platform_set_drvdata 로 상태를 미리 심어 두어야 한다. */
 #define to_uniphier_pcie(x)	dev_get_drvdata((x)->dev)
 
 /* [한국어]
