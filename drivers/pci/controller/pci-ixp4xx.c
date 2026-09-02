@@ -672,8 +672,12 @@ static int ixp4xx_pci_write_indirect(struct ixp4xx_pci *p, u32 addr, u32 cmd, u3
  * 실제로 지목할 수 있는 슬롯은 1~8 로 좁혀지는 셈인데, 그 사실이 이 파일에
  * 적혀 있지는 않다. 원본 스냅숏(1f0e418bb6)에서 코드가 이대로임을 확인했으며
  * 손대지 않았다. (PCI_CONF1_ADDRESS 와 PCI_CONF1_ENABLE 의 정확한 비트 배치는
- * include/uapi/linux/pci_regs.h 에 있고 그 헤더는 이 트리에 없다. 같은 매크로를
- * 같은 방식으로 쓰는 예로 pci-ftpci100.c 와 pcie-mt7621.c 가 있다.)
+ * include/uapi/linux/pci_regs.h 에 있고 그 헤더는 이 트리에 없다. 이 트리에서
+ * 같은 매크로를 쓰는 곳은 pci-ftpci100.c 뿐이며, **쓰는 방식은 이 파일과 다르다** —
+ * 그쪽은 매크로 결과를 손대지 않고 그대로 레지스터에 쓴다. enable 비트를 지우지도,
+ * type 0/1 을 가르지도, IDSEL 을 얹지도 않는다. pcie-mt7621.c 는 그 매크로가 아니라
+ * 확장 판인 PCI_CONF1_EXT_ADDRESS() 를 쓴다. 즉 세 파일이 같은 계열의 주소 형식을
+ * 쓰되 변형은 제각각이다.)
  *
  * 두 갈래 모두 PCI_CONF1_ENABLE 을 지운다는 점도 눈여겨볼 것. 그 비트는
  * x86 의 CF8 포트 방식에서 "지금 이 주소가 유효하다" 를 뜻하는데, 이
