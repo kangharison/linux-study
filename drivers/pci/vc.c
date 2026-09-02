@@ -104,6 +104,33 @@
  * @dwords: number of dwords to save/restore
  * @save: whether to save or restore
  */
+/* [한국어]
+ * pci_vc_save_restore_dwords - 연속된 dword 들을 버퍼와 config 사이에 오간다
+ *
+ * @dev: 대상 장치.
+ * @pos: config 공간의 시작 오프셋.
+ * @buf: 저장할 버퍼 또는 복원할 값이 든 버퍼.
+ * @dwords: 옮길 dword 개수.
+ * @save: true = config → 버퍼, false = 버퍼 → config.
+ *
+ * VC 상태 저장·복원의 가장 낮은 벽돌이다. 방향만 다르고 나머지가 같은 두
+ * 루프를 하나로 합친 것으로, save 플래그가 그 방향을 정한다.
+ *
+ * 이 파일 전체가 그 방식을 쓴다 — pci_vc_do_save_buffer() 도 같은 플래그로
+ * 저장과 복원을 겸한다. 저장과 복원이 **정확히 같은 순서로 같은 자리** 를
+ * 훑어야 하므로, 두 함수로 나누면 한쪽만 고쳐 어긋날 위험이 생긴다.
+ *
+ * 옮기는 대상은 중재 표(arbitration table)다. 그 크기가 장치마다 달라
+ * 개수를 인자로 받는다.
+ *
+ * 실행 컨텍스트: 절전 진입·복귀. 프로세스 컨텍스트.
+ *
+ * 에러 경로: 없다. config 접근 실패를 확인하지 않는다.
+ *
+ * 호출 체인:
+ *   pci_vc_do_save_buffer() → [이 함수]
+ *     → pci_read_config_dword() / pci_write_config_dword()
+ */
 static void pci_vc_save_restore_dwords(struct pci_dev *dev, int pos,
 				       u32 *buf, int dwords, bool save)
 {
@@ -131,6 +158,32 @@ static void pci_vc_save_restore_dwords(struct pci_dev *dev, int pos,
  * Set Load VC Arbitration Table bit requesting hardware to apply the VC
  * Arbitration Table (previously loaded).  When the VC Arbitration Table
  * Status clears, hardware has latched the table into VC arbitration logic.
+ */
+/* [한국어]
+ * pci_vc_load_arb_table - VC 중재 표를 하드웨어에 적재시킨다
+ *
+ * @dev: 대상 장치.
+ * @pos: VC capability 의 위치.
+ *
+ * 중재 표를 config 공간에 써 넣는 것만으로는 반영되지 않는다. Load VC
+ * Arbitration Table 비트를 세워 "이제 읽어 가라" 고 알려야 하고, 하드웨어가
+ * 다 읽으면 그 비트가 스스로 내려간다.
+ *
+ * 그래서 세우고 기다리는 두 단계다. 기다림이 필요한 이유는 적재가 끝나기
+ * 전에 다음 설정을 하면 표가 반쯤 반영된 상태가 될 수 있기 때문이다.
+ *
+ * 읽기-수정-쓰기로 그 비트만 세우는 것도 요점이다. 같은 레지스터의 다른
+ * 필드가 VC 중재 방식을 정하고 있어 통째로 쓸 수 없다.
+ *
+ * 시간이 다 되면 오류 기록만 남기고 돌아간다. 복원 경로에서 불리는 함수라
+ * 여기서 실패해도 되돌릴 곳이 없다 — 남길 수 있는 것이 기록뿐이다.
+ *
+ * 실행 컨텍스트: 절전 복귀. 대기가 있어 프로세스 컨텍스트여야 한다.
+ *
+ * 에러 경로: 반환값이 없어 실패를 알리지 못하고 로그만 남는다.
+ *
+ * 호출 체인:
+ *   pci_vc_enable() → [이 함수] → pci_wait_for_pending()
  */
 static void pci_vc_load_arb_table(struct pci_dev *dev, int pos)
 {
@@ -163,6 +216,29 @@ static void pci_vc_load_arb_table(struct pci_dev *dev, int pos)
  * Set Load Port Arbitration Table bit requesting hardware to apply the Port
  * Arbitration Table (previously loaded).  When the Port Arbitration Table
  * Status clears, hardware has latched the table into port arbitration logic.
+ */
+/* [한국어]
+ * pci_vc_load_port_arb_table - 한 VC 자원의 포트 중재 표를 적재시킨다
+ *
+ * @dev: 대상 장치.
+ * @pos: VC capability 의 위치.
+ * @res: VC 자원 번호.
+ *
+ * pci_vc_load_arb_table() 과 구조가 같고 대상이 다르다. 그쪽은 VC 들 사이의
+ * 중재를, 이쪽은 한 VC 안에서 포트들 사이의 중재를 다룬다.
+ *
+ * 두 중재가 나뉘어 있는 이유는 계층이 다르기 때문이다 — 먼저 어느 VC 에
+ * 차례를 줄지 정하고, 그 안에서 어느 포트의 트래픽을 보낼지 정한다.
+ *
+ * 오프셋 계산에 res 가 곱해지는 것이 그래서다. VC 자원마다 제어·상태
+ * 레지스터 한 벌씩이 일정한 간격으로 늘어서 있다.
+ *
+ * 실행 컨텍스트: 절전 복귀. 대기가 있어 프로세스 컨텍스트여야 한다.
+ *
+ * 에러 경로: 반환값이 없어 실패를 알리지 못하고 로그만 남는다.
+ *
+ * 호출 체인:
+ *   pci_vc_enable() → [이 함수] → pci_wait_for_pending()
  */
 static void pci_vc_load_port_arb_table(struct pci_dev *dev, int pos, int res)
 {
@@ -204,6 +280,39 @@ static void pci_vc_load_port_arb_table(struct pci_dev *dev, int pos, int res)
  * RC devices do not have an upstream device, nor does it seem that VC9 do
  * (spec is unclear).  Once we find the upstream device, match the VC ID to
  * get the correct resource, disable and enable on both ends.
+ */
+/* [한국어]
+ * pci_vc_enable - 링크 양끝에서 한 VC 자원을 함께 켠다
+ *
+ * @dev: 대상 장치.
+ * @pos: VC capability 의 위치.
+ * @res: 켤 VC 자원 번호.
+ *
+ * 이 파일에서 가장 까다로운 함수이며, 그 이유가 하나다 — **VC 는 링크
+ * 양끝이 함께 켜야 성립한다**. 한쪽만 켜면 그 VC 로 보낸 트래픽을 반대편이
+ * 받지 못한다.
+ *
+ * 그래서 순서가 정해져 있다. 양쪽을 다 켠 **뒤** 에 협상이 끝나기를 기다린다.
+ * 한쪽을 켜고 그쪽 협상을 기다렸다가 다른 쪽을 켜면, 첫 협상이 영영 끝나지
+ * 않는다 — 상대가 아직 켜지지 않았기 때문이다.
+ *
+ * 상대편을 찾는 과정도 만만치 않다. 링크 반대편 장치를 찾고, 그쪽의 VC
+ * capability 를 찾고, 그 안에서 **같은 VC ID** 를 가진 자원을 찾아야 한다.
+ * 자원 번호가 아니라 ID 로 맞추는 것이 요점으로, 같은 VC 가 양쪽에서 서로
+ * 다른 번호를 가질 수 있다.
+ *
+ * 상대를 찾지 못하면 한쪽만 켠다. 그것이 옳은 동작인 경우가 있는데,
+ * 루트 포트 아래에 장치가 없는 등의 상황이다.
+ *
+ * 협상이 끝나지 않아도 기록만 남긴다. 복원 경로라 되돌릴 곳이 없다.
+ *
+ * 실행 컨텍스트: 절전 복귀. 대기가 있어 프로세스 컨텍스트여야 한다.
+ *
+ * 에러 경로: 반환값이 없다. 상대 없음도, 협상 실패도 로그로만 남는다.
+ *
+ * 호출 체인:
+ *   pci_vc_do_save_buffer(복원) → [이 함수]
+ *     → pci_vc_load_port_arb_table() → pci_wait_for_pending()
  */
 static void pci_vc_enable(struct pci_dev *dev, int pos, int res)
 {
@@ -317,6 +426,40 @@ enable:
  * @save_state, return the size of the necessary save buffer.  When called
  * with a non-NULL @save_state, @save determines whether we save to the
  * buffer or restore from it.
+ */
+/* [한국어]
+ * pci_vc_do_save_buffer - VC 상태를 버퍼에 담거나 버퍼에서 되돌린다, 또는 크기만 잰다
+ *
+ * @dev: 대상 장치.
+ * @pos: VC capability 의 위치.
+ * @save_state: 저장 버퍼. NULL 이면 크기만 계산한다.
+ * @save: true = 저장, false = 복원.
+ * @return: 필요한 버퍼 크기(바이트).
+ *
+ * 한 함수가 **세 가지 일** 을 겸한다. 저장, 복원, 그리고 크기 계산이다.
+ *
+ * 셋을 합친 이유가 이 함수의 존재 이유다. VC 상태의 크기는 고정이 아니라
+ * capability 레지스터가 알려 주는 VC 개수와 중재 표 크기로 정해진다. 저장할
+ * 자리를 순회하는 코드와 크기를 세는 코드가 따로 있으면 반드시 어긋나고,
+ * 어긋나면 버퍼를 넘겨 쓰게 된다. 하나로 합치면 그 어긋남이 원천적으로
+ * 불가능해진다.
+ *
+ * 버퍼가 NULL 이면 쓰기 없이 길이만 누적하는 방식으로 그 셋을 구현한다.
+ *
+ * 맨 앞의 크기 검사가 그 설계를 한 번 더 지킨다 — 미리 할당해 둔 버퍼 크기와
+ * 지금 계산한 크기를 비교하고, 다르면 쓰지 않고 물러난다. 할당 시점과 저장
+ * 시점 사이에 장치 상태가 달라졌다면 그럴 수 있다.
+ *
+ * 복원 경로에서만 pci_vc_enable() 을 부른다. 값을 되쓰는 것만으로는 VC 가
+ * 켜지지 않고, 링크 양끝의 협상이 따로 필요하기 때문이다.
+ *
+ * 실행 컨텍스트: 열거(크기 계산)와 절전 진입·복귀. 프로세스 컨텍스트.
+ *
+ * 에러 경로: 크기 불일치는 -ENOMEM 이며 그때 버퍼는 건드리지 않는다.
+ *
+ * 호출 체인:
+ *   pci_save_vc_state() / pci_restore_vc_state() / pci_allocate_vc_save_buffers()
+ *     → [이 함수] → pci_vc_save_restore_dwords() → pci_vc_enable()
  */
 static int pci_vc_do_save_buffer(struct pci_dev *dev, int pos,
 				 struct pci_cap_saved_state *save_state,
@@ -574,6 +717,31 @@ static struct {
  * For each type of VC capability, VC/VC9/MFVC, find the capability and
  * save it to the pre-allocated save buffer.
  */
+/* [한국어]
+ * pci_save_vc_state - 세 VC capability 의 상태를 모두 저장한다
+ *
+ * @dev: 대상 장치.
+ * @return: 0 = 성공, 또는 음수 오류.
+ *
+ * 절전 진입 시 불린다. D3 에서 config 공간이 비워지므로 미리 담아 두어야 한다.
+ *
+ * vc_caps 표를 도는 것이 이 함수의 뼈대다. VC 계열 capability 가 셋(MFVC, VC,
+ * VC9)이고 셋의 구조가 같아, 표로 두고 같은 코드를 세 번 돌린다.
+ *
+ * 버퍼가 없으면 오류로 답하는 것이 중요하다. pci_allocate_vc_save_buffers()
+ * 가 열거 시점에 미리 잡아 두는데, 그것이 빠졌거나 실패했다는 뜻이다.
+ * 그대로 진행하면 복원할 것이 없는 채로 절전에 들어가 복귀 후 VC 가 죽는다.
+ *
+ * 실행 컨텍스트: 절전 진입. 프로세스 컨텍스트.
+ *
+ * 에러 경로: 버퍼 부재는 -ENOMEM 이며 어느 capability 였는지 로그로 남는다.
+ * 아래 저장이 실패하면 그 오류를 올려보낸다.
+ *
+ * 호출 체인:
+ *   pci_save_state() → [이 함수]
+ *     → pci_find_ext_capability() → pci_find_saved_ext_cap()
+ *     → pci_vc_do_save_buffer(save=true)
+ */
 int pci_save_vc_state(struct pci_dev *dev)
 {
 	/* [한국어] 표 순회 인덱스. */
@@ -623,6 +791,28 @@ int pci_save_vc_state(struct pci_dev *dev)
  * For each type of VC capability, VC/VC9/MFVC, find the capability and
  * restore it from the previously saved buffer.
  */
+/* [한국어]
+ * pci_restore_vc_state - 저장해 둔 VC 상태를 되돌린다
+ *
+ * @dev: 대상 장치.
+ *
+ * pci_save_vc_state() 의 짝이며 절전 복귀 시 불린다.
+ *
+ * 버퍼가 없어도 조용히 건너뛰는 것이 저장 쪽과 다르다. 저장 쪽은 버퍼 부재를
+ * 오류로 알리는데, 여기서는 그때 이미 알렸으므로 다시 알릴 필요가 없다.
+ * 복원할 것이 없으면 그저 할 일이 없는 것이다.
+ *
+ * 되쓰기만으로 끝나지 않고 아래에서 pci_vc_enable() 까지 부른다. VC 는 링크
+ * 양끝의 협상이 있어야 실제로 살아나기 때문이다.
+ *
+ * 실행 컨텍스트: 절전 복귀. 프로세스 컨텍스트.
+ *
+ * 에러 경로: 반환값이 없다. 복원 실패를 알릴 방법이 없다.
+ *
+ * 호출 체인:
+ *   pci_restore_state() → [이 함수]
+ *     → pci_vc_do_save_buffer(save=false) → pci_vc_enable()
+ */
 void pci_restore_vc_state(struct pci_dev *dev)
 {
 	/* [한국어] 표 순회 인덱스. */
@@ -657,6 +847,29 @@ void pci_restore_vc_state(struct pci_dev *dev)
  *
  * For each type of VC capability, VC/VC9/MFVC, find the capability, size
  * it, and allocate a buffer for save/restore.
+ */
+/* [한국어]
+ * pci_allocate_vc_save_buffers - 저장에 쓸 버퍼를 미리 잡아 둔다
+ *
+ * @dev: 대상 장치.
+ *
+ * 열거 시점에 불린다. 절전 진입 경로에서는 할당이 실패해도 되돌릴 방법이
+ * 마땅치 않으므로, 여유 있을 때 미리 잡는 것이다.
+ *
+ * 크기를 pci_vc_do_save_buffer() 에 NULL 을 넘겨 얻는다. 실제로 저장할 때
+ * 훑는 것과 똑같은 코드가 세어 준 크기라, 나중에 모자랄 수 없다.
+ *
+ * 할당이 실패해도 기록만 남기고 계속한다. 나머지 capability 는 여전히
+ * 잡아 둘 수 있고, 실패한 것은 저장 시점에 다시 걸러진다.
+ *
+ * 실행 컨텍스트: 열거. 할당이 있어 프로세스 컨텍스트여야 한다.
+ *
+ * 에러 경로: 할당 실패는 로그로만 남으며, 그 결과가 pci_save_vc_state() 의
+ * -ENOMEM 으로 나타난다.
+ *
+ * 호출 체인:
+ *   pci_init_capabilities() → [이 함수]
+ *     → pci_vc_do_save_buffer(NULL) → pci_add_ext_cap_save_buffer()
  */
 void pci_allocate_vc_save_buffers(struct pci_dev *dev)
 {

@@ -165,6 +165,30 @@ static int pci_pwrctrl_notify(struct notifier_block *nb, unsigned long action,
  * @pwrctrl: PCI power control data
  * @dev: Parent device
  */
+/* [한국어]
+ * pci_pwrctrl_init - 전원 제어 문맥을 초기화한다
+ *
+ * @pwrctrl: 초기화할 문맥.
+ * @dev: 이 문맥을 소유하는 플랫폼 장치.
+ *
+ * pwrctrl 드라이버가 probe 에서 가장 먼저 부르는 함수다.
+ *
+ * 두 방향의 연결을 세우는 것이 하는 일의 전부다. 문맥이 자기 장치를 가리키고,
+ * 장치의 drvdata 가 그 문맥을 가리킨다. 뒤의 연결이 있어야 이 파일의
+ * __pci_pwrctrl_power_on/off_device() 가 device 포인터만 들고도 문맥을 되찾을
+ * 수 있다 — 그 함수들은 디바이스 트리를 훑다가 만난 장치를 다루므로 문맥을
+ * 직접 받을 방법이 없다.
+ *
+ * 알림 구독은 여기서 하지 않는다. pci_pwrctrl_device_set_ready() 가 따로
+ * 하는데, 전원이 실제로 들어온 뒤에 구독해야 하기 때문이다.
+ *
+ * 실행 컨텍스트: pwrctrl 드라이버 probe. 프로세스 컨텍스트.
+ *
+ * 에러 경로: 없다.
+ *
+ * 호출 체인:
+ *   pwrctrl 드라이버 probe → [이 함수]
+ */
 void pci_pwrctrl_init(struct pci_pwrctrl *pwrctrl, struct device *dev)
 {
 	/* [한국어] 어느 장치의 pwrctrl 인지 기록한다. */
@@ -188,6 +212,33 @@ EXPORT_SYMBOL_GPL(pci_pwrctrl_init);
  * This function returning 0 doesn't mean the device was detected. It means,
  * that the bus rescan was successfully started. The device will get bound to
  * its PCI driver asynchronously.
+ */
+/* [한국어]
+ * pci_pwrctrl_device_set_ready - 전원 준비가 끝났음을 알리고 PCI 버스 알림을 구독한다
+ *
+ * @pwrctrl: 준비된 문맥.
+ * @return: 0 = 성공, -ENODEV = 초기화되지 않음, 또는 구독 오류.
+ *
+ * 이 파일의 설계가 이 함수에 모인다. pwrctrl 장치와 그것이 전원을 대는 PCI
+ * 장치는 **같은 디바이스 트리 노드** 를 쓰는데, 커널의 장치 모델은 한 노드에
+ * 장치가 하나인 것을 전제한다. 그 충돌을 알림으로 푼다.
+ *
+ * 버스 알림을 구독하면, 나중에 그 노드로 PCI 장치가 추가될 때 이 파일의
+ * pci_pwrctrl_notify() 가 불려 "이 노드는 이미 쓰이고 있다" 고 표시할 수
+ * 있다. 그 표시가 없으면 장치 모델이 노드 중복을 문제 삼는다.
+ *
+ * dev 가 없으면 -ENODEV 로 물러난다. pci_pwrctrl_init() 을 부르지 않았다는
+ * 뜻이며, 그 상태로 구독하면 알림이 와도 어느 장치인지 알 수 없다.
+ *
+ * pci_pwrctrl_device_unset_ready() 와 짝을 이루며, 드라이버가 떨어질 때 반드시
+ * 구독을 풀어야 한다.
+ *
+ * 실행 컨텍스트: 전원을 넣은 뒤의 pwrctrl 드라이버 probe. 프로세스 컨텍스트.
+ *
+ * 에러 경로: 초기화 누락은 -ENODEV, 구독 실패는 그 오류를 그대로 올려보낸다.
+ *
+ * 호출 체인:
+ *   pwrctrl 드라이버 probe → [이 함수] → bus_register_notifier()
  */
 int pci_pwrctrl_device_set_ready(struct pci_pwrctrl *pwrctrl)
 {
@@ -216,6 +267,28 @@ EXPORT_SYMBOL_GPL(pci_pwrctrl_device_set_ready);
  * device is about to be powered-down.
  *
  * @pwrctrl: PCI power control data.
+ */
+/* [한국어]
+ * pci_pwrctrl_device_unset_ready - PCI 버스 알림 구독을 푼다
+ *
+ * @pwrctrl: 대상 문맥.
+ *
+ * pci_pwrctrl_device_set_ready() 의 짝이며 구독 해제가 전부다.
+ *
+ * 반드시 풀어야 하는 이유는 알림 블록이 문맥 안에 들어 있기 때문이다.
+ * 문맥이 해제된 뒤에도 구독이 남아 있으면 다음 알림이 사라진 메모리를
+ * 건드린다.
+ *
+ * pci_pwrctrl_init() 이 세운 dev 와 drvdata 는 되돌리지 않는다 — 옆의 상류
+ * 주석이 그 이유를 밝히며, 그 정리는 장치 모델이 알아서 한다.
+ *
+ * 실행 컨텍스트: pwrctrl 드라이버 remove. 프로세스 컨텍스트.
+ *
+ * 에러 경로: 없다.
+ *
+ * 호출 체인:
+ *   pwrctrl 드라이버 remove / devm 정리 → [이 함수]
+ *     → bus_unregister_notifier()
  */
 void pci_pwrctrl_device_unset_ready(struct pci_pwrctrl *pwrctrl)
 {
@@ -265,6 +338,31 @@ static void devm_pci_pwrctrl_device_unset_ready(void *data)
  *
  * Returns:
  * 0 on success, negative error number on error.
+ */
+/* [한국어]
+ * devm_pci_pwrctrl_device_set_ready - 구독을 devres 에 맡겨 자동으로 풀리게 한다
+ *
+ * @dev: 수명을 맡길 장치.
+ * @pwrctrl: 준비된 문맥.
+ * @return: 0 = 성공, 또는 음수 오류.
+ *
+ * pci_pwrctrl_device_set_ready() 의 devres 판이다. 드라이버가 떨어질 때
+ * 자동으로 구독이 풀려, remove 에서 짝을 맞출 필요가 없다.
+ *
+ * devm_add_action_or_reset() 이 그 자동화의 핵심이다. 이름의 or_reset 이
+ * 중요한데, 등록 자체가 실패하면 방금 넘긴 정리 동작을 **그 자리에서** 한 번
+ * 실행하고 오류를 돌려준다. 그 덕분에 호출자는 "성공이면 아무것도, 실패면
+ * 아무것도" 라는 단순한 규약만 지키면 되고, 구독이 남은 채로 실패하는 상태가
+ * 생기지 않는다.
+ *
+ * 실행 컨텍스트: pwrctrl 드라이버 probe. 프로세스 컨텍스트.
+ *
+ * 에러 경로: 구독 실패는 그대로 올려보낸다. devres 등록 실패는 구독을
+ * 되돌린 뒤 오류를 돌려준다.
+ *
+ * 호출 체인:
+ *   pwrctrl 드라이버 probe → [이 함수]
+ *     → pci_pwrctrl_device_set_ready() → devm_add_action_or_reset()
  */
 int devm_pci_pwrctrl_device_set_ready(struct device *dev,
 				      struct pci_pwrctrl *pwrctrl)
@@ -394,6 +492,29 @@ static void pci_pwrctrl_power_off_device(struct device_node *np)
  * below the specified PCI host controller and power them off in a depth
  * first manner.
  */
+/* [한국어]
+ * pci_pwrctrl_power_off_devices - 이 노드 아래 pwrctrl 장치들의 전원을 끊는다
+ *
+ * @parent: 부모 장치. 그 디바이스 트리 노드의 자식들이 대상이다.
+ *
+ * 컨트롤러 드라이버가 절전에 들어가거나 내려갈 때 부른다.
+ *
+ * 바로 아래 자식만 훑는다. 켜는 쪽(pci_pwrctrl_power_on_device)이 재귀로
+ * 손자까지 내려가는 것과 다르며, 상류 코드가 그렇게 되어 있다.
+ *
+ * _scoped 순회 매크로를 쓰는 것이 눈에 띈다. 순회 중 얻은 노드 참조를
+ * 매 반복 끝에서 자동으로 놓아 주므로, 중간에 빠져나가도 참조가 새지 않는다.
+ *
+ * 반환값이 없다. 전원을 끄는 것은 실패해도 되돌릴 수 없는 정리 동작이라,
+ * 호출자가 할 수 있는 일이 없기 때문이다.
+ *
+ * 실행 컨텍스트: 컨트롤러 드라이버의 절전·remove. 프로세스 컨텍스트.
+ *
+ * 에러 경로: 없다. 개별 실패는 아래에서 로그로만 남는다.
+ *
+ * 호출 체인:
+ *   컨트롤러 드라이버 → [이 함수] → pci_pwrctrl_power_off_device()
+ */
 void pci_pwrctrl_power_off_devices(struct device *parent)
 {
 	/* [한국어] 부모의 DT 노드. */
@@ -443,6 +564,38 @@ static int __pci_pwrctrl_power_on_device(struct device *dev)
 /*
  * Power on the devices in a depth first manner. Before powering on the device,
  * make sure its driver is bound.
+ */
+/* [한국어]
+ * pci_pwrctrl_power_on_device - 한 노드와 그 아래 전부의 전원을 켠다
+ *
+ * @np: 대상 디바이스 트리 노드.
+ * @return: 0 = 성공, -EPROBE_DEFER, 또는 아래의 오류.
+ *
+ * 자기 자신을 부르는 재귀 함수다. 자식을 먼저 다 켜고 자신을 켠다.
+ *
+ * 그 순서가 이 함수의 요점이다. 전원 공급이 사슬을 이룰 수 있어 — 어떤
+ * 장치의 전원이 다른 장치를 거쳐 오는 경우 — 안쪽부터 켜야 바깥이 켜질 때
+ * 이미 준비가 되어 있다.
+ *
+ * 노드에 대응하는 플랫폼 장치가 없으면 성공으로 답한다. 전원 제어가 필요
+ * 없는 노드라는 뜻이므로 할 일이 없는 것이다.
+ *
+ * 장치는 있는데 드라이버가 아직 붙지 않았으면 -EPROBE_DEFER 를 돌려준다.
+ * 호출자인 컨트롤러의 probe 를 미뤘다가 다시 시도하게 하는 것이다. 옆의
+ * FIXME 가 이것을 임시 방편으로 표시하고 있는데, 기다림으로 바꾸는 것이
+ * 더 나은 해법이라는 상류 개발자의 메모다.
+ *
+ * 찾은 장치의 참조를 반드시 놓는다. of_find_device_by_node() 가 참조를
+ * 올려 주기 때문이다.
+ *
+ * 실행 컨텍스트: 컨트롤러 드라이버 probe. 프로세스 컨텍스트.
+ *
+ * 에러 경로: 자식 하나라도 실패하면 즉시 그 오류로 중단한다. 되감기는
+ * 상위의 pci_pwrctrl_power_on_devices() 가 한다.
+ *
+ * 호출 체인:
+ *   pci_pwrctrl_power_on_devices() → [이 함수](재귀)
+ *     → of_find_device_by_node() → __pci_pwrctrl_power_on_device()
  */
 static int pci_pwrctrl_power_on_device(struct device_node *np)
 {
@@ -496,6 +649,32 @@ static int pci_pwrctrl_power_on_device(struct device_node *np)
  * Return: 0 on success, -EPROBE_DEFER if any pwrctrl driver is not bound, an
  * appropriate error code otherwise.
  */
+/* [한국어]
+ * pci_pwrctrl_power_on_devices - 이 노드 아래 pwrctrl 장치들의 전원을 켠다
+ *
+ * @parent: 부모 장치.
+ * @return: 0 = 성공, 또는 음수 오류.
+ *
+ * pci_pwrctrl_power_off_devices() 의 짝이며, 컨트롤러가 버스를 스캔하기
+ * **전에** 불려야 한다. 전원이 없는 장치는 config 접근에 응답하지 않아
+ * 스캔에서 보이지 않는다.
+ *
+ * 되감기가 있는 것이 끄는 쪽과 다르다. 중간에 실패하면 지금까지 켠 것들을
+ * 다시 끄고 오류를 돌려주는데, 절반만 켜진 상태로 두면 다음 시도에서
+ * 어디까지 켜졌는지 알 수 없기 때문이다.
+ *
+ * 그래서 순회 매크로도 _scoped 판이 아니다. 되감기 경로에서 순회를 이어
+ * 가야 해 노드 포인터를 함수 범위에서 직접 들고 있어야 한다.
+ *
+ * 실행 컨텍스트: 컨트롤러 드라이버 probe. 프로세스 컨텍스트.
+ *
+ * 에러 경로: 실패하면 goto 로 되감기 경로에 들어가 지금까지 켠 것을 끈다.
+ * -EPROBE_DEFER 가 올라오면 컨트롤러의 probe 가 미뤄진다.
+ *
+ * 호출 체인:
+ *   컨트롤러 드라이버 probe → [이 함수]
+ *     → pci_pwrctrl_power_on_device() → (실패 시) pci_pwrctrl_power_off_device()
+ */
 int pci_pwrctrl_power_on_devices(struct device *parent)
 {
 	/* [한국어] 부모의 DT 노드. */
@@ -541,6 +720,38 @@ EXPORT_SYMBOL_GPL(pci_pwrctrl_power_on_devices);
  * 2. At least one of the power supplies defined in the devicetree node of the
  *    device (OR) in the remote endpoint parent node to indicate pwrctrl
  *    requirement.
+ */
+/* [한국어]
+ * pci_pwrctrl_is_required - 이 노드에 전원 제어 장치를 만들어야 하는지 판단한다
+ *
+ * @np: 검사할 디바이스 트리 노드.
+ * @return: true = 필요, false = 불필요.
+ *
+ * 디바이스 트리의 모든 노드에 pwrctrl 장치를 만들 수는 없다. 대부분은
+ * 전원 제어가 필요 없고, 만들면 쓸데없는 장치가 늘어난다. 그 선별이
+ * 이 함수의 일이다.
+ *
+ * 세 단계로 좁힌다.
+ * 1. compatible 문자열이 "pci" 로 시작하는가. PCI 장치를 서술하는 노드만
+ *    대상이다.
+ * 2. 전원 공급이 명시되어 있는가. 그렇다면 그 전원을 켜 줄 주체가 필요하다.
+ * 3. 그렇지 않더라도, graph 로 연결된 상대가 전원 공급을 갖고 있는가.
+ *    전원이 물리적으로 다른 노드에 적혀 있는 배치가 있어 그쪽까지 본다.
+ *
+ * 3번이 이 함수에서 가장 미묘한 부분이다. of_graph 는 노드끼리의 연결을
+ * 서술하는 별도 표현이며, 이 판단이 그것을 따라간다.
+ *
+ * __free(device_node) 로 얻은 참조가 범위를 벗어날 때 자동으로 놓인다.
+ * 검사 중간에 true 로 빠져나가는 경로가 여럿이라 수동 해제로는 놓치기 쉽다.
+ *
+ * 실행 컨텍스트: 컨트롤러 드라이버 probe. 프로세스 컨텍스트.
+ *
+ * 에러 경로: 없다. 판단이 서지 않는 모든 경우가 false 로 합쳐진다.
+ *
+ * 호출 체인:
+ *   pci_pwrctrl_create_device() → [이 함수]
+ *     → of_property_read_string() → of_pci_supply_present()
+ *     → of_graph_get_remote_port_parent()
  */
 static bool pci_pwrctrl_is_required(struct device_node *np)
 {
@@ -672,6 +883,32 @@ static int pci_pwrctrl_create_device(struct device_node *np,
  *
  * Return: 0 on success, negative error number on error.
  */
+/* [한국어]
+ * pci_pwrctrl_create_devices - 이 노드 아래에 필요한 pwrctrl 장치들을 만든다
+ *
+ * @parent: 부모 장치.
+ * @return: 0 = 성공, 또는 음수 오류.
+ *
+ * 컨트롤러 드라이버 probe 의 이른 단계에서 불린다. 전원을 켜려면 켤 주체가
+ * 먼저 있어야 하기 때문이다.
+ *
+ * 노드마다 만들지 말지는 pci_pwrctrl_is_required() 가 아래에서 판단하므로,
+ * 이 함수는 자식을 훑으며 넘기기만 한다.
+ *
+ * 실패하면 지금까지 만든 것을 모두 없앤다. 절반만 만들어진 상태로 두면
+ * 컨트롤러 probe 가 실패해 되감을 때 무엇이 만들어졌는지 알 수 없다.
+ * 되감기가 pci_pwrctrl_destroy_devices() 하나로 끝나는 것은 그쪽이 노드
+ * 전체를 훑으며 있는 것만 없애기 때문이다.
+ *
+ * 실행 컨텍스트: 컨트롤러 드라이버 probe. 프로세스 컨텍스트.
+ *
+ * 에러 경로: 실패 시 pci_pwrctrl_destroy_devices() 로 전부 되감고 오류를
+ * 돌려준다.
+ *
+ * 호출 체인:
+ *   컨트롤러 드라이버 probe → [이 함수]
+ *     → pci_pwrctrl_create_device() → (실패 시) pci_pwrctrl_destroy_devices()
+ */
 int pci_pwrctrl_create_devices(struct device *parent)
 {
 	/* [한국어] 결과. */
@@ -754,6 +991,29 @@ static void pci_pwrctrl_destroy_device(struct device_node *np)
  *
  * Recursively destroy pwrctrl devices for the devicetree hierarchy below
  * the specified PCI host controller in a depth first manner.
+ */
+/* [한국어]
+ * pci_pwrctrl_destroy_devices - 이 노드 아래 pwrctrl 장치들을 없앤다
+ *
+ * @parent: 부모 장치.
+ *
+ * pci_pwrctrl_create_devices() 의 짝이며, 그쪽의 되감기 경로에서도 쓰인다.
+ *
+ * 한 함수가 정상 정리와 되감기를 겸할 수 있는 이유는 아래 함수가 없는 것을
+ * 건너뛰기 때문이다. 절반만 만들어진 상태에서 불려도 만들어진 것만 없앤다.
+ *
+ * 바로 아래 자식만 훑는 것이 pci_pwrctrl_power_off_devices() 와 같다.
+ *
+ * 반환값이 없다. 정리 동작이라 실패해도 호출자가 할 수 있는 일이 없다.
+ *
+ * 실행 컨텍스트: 컨트롤러 드라이버 remove, 또는 create 의 되감기.
+ * 프로세스 컨텍스트.
+ *
+ * 에러 경로: 없다.
+ *
+ * 호출 체인:
+ *   컨트롤러 드라이버 remove / pci_pwrctrl_create_devices() 의 되감기
+ *     → [이 함수] → pci_pwrctrl_destroy_device()
  */
 void pci_pwrctrl_destroy_devices(struct device *parent)
 {

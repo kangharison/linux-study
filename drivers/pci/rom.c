@@ -92,6 +92,36 @@
  * between the ROM and other resources, so enabling it may disable access
  * to MMIO registers or other card memory.
  */
+/* [한국어]
+ * pci_enable_rom - 확장 ROM BAR 의 디코딩을 켠다
+ *
+ * @pdev: 대상 장치.
+ * @return: 0 = 성공(또는 켤 필요 없음), -1 = ROM 자원이 없음.
+ *
+ * 확장 ROM 은 다른 BAR 과 달리 자기 Enable 비트를 따로 갖는다. 부팅 뒤에는
+ * 쓸 일이 거의 없어 평소 꺼 두고 필요할 때만 켜기 위해서다.
+ *
+ * 주소와 Enable 비트를 **한 번에** 쓰는 것이 이 함수의 요점이다. 주소를
+ * 먼저 쓰고 나중에 켜면, 그 사이에 잘못된 주소로 디코딩이 켜지는 순간이
+ * 생길 수 있다.
+ *
+ * 주소를 다시 계산하는 이유는 자원이 재배정됐을 수 있기 때문이다. 커널이
+ * 아는 CPU 주소를 버스 주소로 되돌려야 레지스터에 쓸 값이 된다.
+ *
+ * shadow ROM 이면 아무것도 하지 않고 성공을 답한다. 그때 ROM 사본이 이미
+ * 시스템 메모리(0xC0000 영역)에 올라와 있어, 장치의 ROM 을 켤 이유가 없다.
+ *
+ * pci_disable_rom() 과 짝을 이루며, 호출자는 다 읽은 뒤 반드시 꺼야 한다.
+ *
+ * 실행 컨텍스트: ROM 읽기 준비. 프로세스 컨텍스트.
+ *
+ * 에러 경로: ROM 자원이 아예 없으면 -1 이다. 다른 관용과 달리 -errno 가
+ * 아니라 -1 인 점에 주의할 만하다.
+ *
+ * 호출 체인:
+ *   pci_map_rom() / 드라이버 → [이 함수]
+ *     → pcibios_resource_to_bus() → pci_write_config_dword()
+ */
 int pci_enable_rom(struct pci_dev *pdev)
 {
 	struct resource *res = &pdev->resource[PCI_ROM_RESOURCE];
@@ -143,6 +173,30 @@ EXPORT_SYMBOL_GPL(pci_enable_rom);
  * Disable ROM decoding on a PCI device by turning off the last bit in the
  * ROM BAR.
  */
+/* [한국어]
+ * pci_disable_rom - 확장 ROM BAR 의 디코딩을 끈다
+ *
+ * @pdev: 대상 장치.
+ *
+ * pci_enable_rom() 의 짝이다. Enable 비트만 지우고 주소는 남겨 둔다 —
+ * 다음에 켤 때 다시 쓰므로 지울 이유가 없다.
+ *
+ * 읽기-수정-쓰기인 것이 그래서다. 통째로 0 을 쓰면 주소까지 지워진다.
+ *
+ * 꺼야 하는 이유는 주소 공간 때문이다. ROM 이 차지하는 범위는 보통 크고
+ * 평소에는 아무도 읽지 않아, 켜 둔 채로 두면 다른 장치가 쓸 수 있었을
+ * 주소 공간을 낭비한다.
+ *
+ * shadow ROM 이면 켠 적이 없으므로 끄지도 않는다. enable 쪽과 같은 조건이다.
+ *
+ * 실행 컨텍스트: ROM 읽기 마무리. 프로세스 컨텍스트.
+ *
+ * 에러 경로: 없다.
+ *
+ * 호출 체인:
+ *   pci_unmap_rom() / pci_map_rom() 의 오류 경로 → [이 함수]
+ *     → pci_write_config_dword()
+ */
 void pci_disable_rom(struct pci_dev *pdev)
 {
 	/* [한국어] 이 장치의 ROM 자원. */
@@ -175,6 +229,42 @@ EXPORT_SYMBOL_GPL(pci_disable_rom);
  * Determine the actual length of the ROM image.
  * The PCI window size could be much larger than the
  * actual image size.
+ */
+/* [한국어]
+ * pci_get_rom_size - ROM 안의 이미지들을 훑어 실제 크기를 알아낸다
+ *
+ * @pdev: 대상 장치.
+ * @rom: 매핑된 ROM 의 시작 주소.
+ * @size: 자원 창의 크기(상한).
+ * @return: 실제 ROM 내용의 크기.
+ *
+ * BAR 이 알려 주는 크기는 **자원 창** 의 크기일 뿐 내용의 크기가 아니다.
+ * 2MB 창에 512KB 만 들어 있는 것이 흔하다. 그 차이를 알아내는 것이 이
+ * 함수의 일이다.
+ *
+ * ROM 안에는 이미지가 여러 개 이어 붙어 있을 수 있다. 같은 카드를 x86 BIOS
+ * 와 UEFI, 또는 여러 아키텍처에서 쓰려고 각각의 이미지를 담기 때문이다.
+ * 그래서 하나씩 따라가며 마지막 표시가 나올 때까지 세는 구조가 된다.
+ *
+ * 각 이미지의 형식이 두 겹의 서명으로 확인된다. 앞의 0xAA55 는 PCI ROM 의
+ * 표준 시작 바이트이고(옆의 상류 주석), 그 안에서 가리키는 PCI Data Structure
+ * 의 "PCIR" 서명이 두 번째다. 둘 중 하나라도 어긋나면 거기서 멈춘다 —
+ * 쓰레기 데이터를 이미지 길이로 읽어 엉뚱한 곳으로 뛰지 않기 위해서다.
+ *
+ * 길이 단위가 512바이트인 것은 규격이 정한 것이다.
+ *
+ * 마지막 min() 이 안전장치다. 옆의 상류 주석이 그 이유를 밝히는데,
+ * 크기를 틀리게 적어 둔 ROM 이 실제로 존재하기 때문이다. 창 밖을 읽으면
+ * 매핑되지 않은 주소에 접근하게 된다. 루프 안에도 같은 취지의 검사가 있어
+ * 두 겹으로 막는다.
+ *
+ * 실행 컨텍스트: ROM 읽기. 프로세스 컨텍스트.
+ *
+ * 에러 경로: 서명이 어긋나면 그 자리까지의 크기를 돌려주며 로그를 남긴다.
+ * 첫 이미지부터 어긋나면 0 이 되고, 호출자가 그것을 실패로 해석한다.
+ *
+ * 호출 체인:
+ *   pci_map_rom() → [이 함수] → readw() / readl() / readb()
  */
 static size_t pci_get_rom_size(struct pci_dev *pdev, void __iomem *rom,
 			       size_t size)
@@ -254,6 +344,41 @@ static size_t pci_get_rom_size(struct pci_dev *pdev, void __iomem *rom,
  * the shadow BIOS copy will be returned instead of the
  * actual ROM.
  */
+/* [한국어]
+ * pci_map_rom - 확장 ROM 을 매핑하고 실제 크기를 알려 준다
+ *
+ * @pdev: 대상 장치.
+ * @size: 결과 크기를 담을 자리.
+ * @return: 매핑된 주소, 실패하면 NULL.
+ *
+ * 비디오 카드의 VBIOS 를 읽는 것이 대표적인 쓰임이다.
+ *
+ * 네 단계가 순서대로 있고, 각 단계가 실패하면 앞 단계를 되돌린다.
+ * 1. 자원이 배정되어 있지 않으면 배정한다. ROM 은 평소 꺼 두는 자원이라
+ *    부팅 시점에 주소가 없을 수 있다.
+ * 2. 디코딩을 켠다.
+ * 3. ioremap 으로 매핑한다.
+ * 4. 실제 크기를 재고, 그 결과로 *size 를 좁힌다.
+ *
+ * 되돌리기에서 눈여겨볼 것이 하나 있다 — 원래 켜져 있었다면 끄지 않는다.
+ * IORESOURCE_ROM_ENABLE 이 그 사실을 기억하고 있어, 우리가 켠 것만 우리가
+ * 끈다.
+ *
+ * 크기가 0 이면 실패로 다룬다. 유효한 이미지가 하나도 없다는 뜻이라
+ * 매핑을 유지할 이유가 없다.
+ *
+ * 호출자는 반드시 pci_unmap_rom() 으로 짝을 맞춰야 한다.
+ *
+ * 실행 컨텍스트: 드라이버 probe 등. 프로세스 컨텍스트이며 잠들 수 있다.
+ *
+ * 에러 경로: 각 단계의 실패가 모두 NULL 로 합쳐지며, goto 로 앞 단계를
+ * 차례로 되돌린다.
+ *
+ * 호출 체인:
+ *   드라이버 / sysfs 의 rom 읽기 → [이 함수]
+ *     → pci_assign_resource() → pci_enable_rom() → ioremap()
+ *     → pci_get_rom_size()
+ */
 void __iomem *pci_map_rom(struct pci_dev *pdev, size_t *size)
 {
 	/* [한국어] 이 장치의 ROM 자원. */
@@ -327,6 +452,25 @@ EXPORT_SYMBOL(pci_map_rom);
  * @rom: virtual address of the previous mapping
  *
  * Remove a mapping of a previously mapped ROM
+ */
+/* [한국어]
+ * pci_unmap_rom - pci_map_rom() 이 만든 매핑을 되돌린다
+ *
+ * @pdev: 대상 장치.
+ * @rom: 매핑된 주소.
+ *
+ * 매핑을 풀고, 우리가 켠 디코딩이라면 끈다.
+ *
+ * 여기서도 IORESOURCE_ROM_ENABLE 을 본다. pci_map_rom() 의 오류 경로와
+ * 같은 판단이며, 원래 켜져 있던 것을 우리가 끄면 그것을 켜 둔 쪽이
+ * 곤란해진다.
+ *
+ * 실행 컨텍스트: 드라이버 정리. 프로세스 컨텍스트.
+ *
+ * 에러 경로: 없다.
+ *
+ * 호출 체인:
+ *   드라이버 / sysfs → [이 함수] → iounmap() → pci_disable_rom()
  */
 void pci_unmap_rom(struct pci_dev *pdev, void __iomem *rom)
 {

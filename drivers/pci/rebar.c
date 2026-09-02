@@ -95,6 +95,32 @@
  *
  * Return: encoded BAR Size as defined in the PCIe spec (0=1MB, 31=128TB)
  */
+/* [한국어]
+ * pci_rebar_bytes_to_size - 바이트 크기를 규격의 BAR Size 인코딩으로 바꾼다
+ *
+ * @bytes: 원하는 크기(바이트).
+ * @return: 인코딩된 값(0 = 1MB, 31 = 128TB).
+ *
+ * Resizable BAR 은 크기를 바이트가 아니라 작은 정수로 주고받는다.
+ * PCIe r6.2 의 7.8.6.3 절이 정한 인코딩이며(위 영어 주석), 1MB 를 0 으로 삼아
+ * 2배마다 1 씩 오른다.
+ *
+ * 두 단계다. 먼저 2 의 거듭제곱으로 올리는데 BAR 크기가 언제나 그래야 하기
+ * 때문이고, 다음에 로그를 취해 1MB 의 로그값만큼 뺀다.
+ *
+ * max() 로 하한을 거는 것이 이 함수의 유일한 함정 처리다. 1MB 보다 작은
+ * 크기를 요청받아도 인코딩이 음수가 되지 않게 막는다 — 규격상 그보다 작은
+ * BAR 은 표현할 수 없어 1MB 로 올리는 것이 유일한 답이다.
+ *
+ * pci_rebar_size_to_bytes() 와 역변환 쌍을 이룬다.
+ *
+ * 실행 컨텍스트: 어디서든. 순수 계산이라 잠들지 않는다.
+ *
+ * 에러 경로: 없다.
+ *
+ * 호출 체인:
+ *   드라이버의 BAR 크기 조정 / sysfs 의 resource_resize 쓰기 → [이 함수]
+ */
 int pci_rebar_bytes_to_size(u64 bytes)
 {
 	int rebar_minsize = ilog2(PCI_REBAR_MIN_SIZE);
@@ -115,6 +141,25 @@ EXPORT_SYMBOL_GPL(pci_rebar_bytes_to_size);
  * @size: encoded BAR Size as defined in the PCIe spec (0=1MB, 31=128TB)
  *
  * Return: BAR size in bytes
+ */
+/* [한국어]
+ * pci_rebar_size_to_bytes - BAR Size 인코딩을 바이트 크기로 되돌린다
+ *
+ * @size: 인코딩된 값(0 = 1MB, 31 = 128TB).
+ * @return: 바이트 크기.
+ *
+ * pci_rebar_bytes_to_size() 의 역변환이다. 인코딩 값에 1MB 의 로그값을 더해
+ * 2 의 거듭제곱으로 되돌린다.
+ *
+ * 1ULL 로 시작하는 것이 중요하다. 인코딩 31 이면 128TB 라 32비트로는 표현할
+ * 수 없고, 1U 로 썼다면 조용히 넘쳐 엉뚱한 값이 나온다.
+ *
+ * 실행 컨텍스트: 어디서든. 순수 계산이라 잠들지 않는다.
+ *
+ * 에러 경로: 없다. 범위 밖 인자를 검사하지 않으므로 호출자가 책임진다.
+ *
+ * 호출 체인:
+ *   sysfs 의 크기 목록 표시 / 자원 배정 → [이 함수]
  */
 resource_size_t pci_rebar_size_to_bytes(int size)
 {
@@ -164,6 +209,36 @@ void pci_rebar_init(struct pci_dev *pdev)
  * Return:
  * * %-ENOTSUPP if resizable BARs are not supported at all,
  * * %-ENOENT if no control register for the BAR could be found.
+ */
+/* [한국어]
+ * pci_rebar_find_pos - 이 BAR 을 담당하는 제어 레지스터의 오프셋을 찾는다
+ *
+ * @pdev: 대상 장치.
+ * @bar: 찾을 BAR 번호.
+ * @return: config 오프셋, 또는 -ENOTSUPP / -ENOENT.
+ *
+ * 아래 조회·설정 함수 다섯이 모두 이것으로 시작한다. Resizable BAR
+ * capability 안에 BAR 마다 항목이 하나씩 있고 그 순서가 BAR 번호와 같지
+ * 않기 때문에, 매번 찾아야 한다.
+ *
+ * PF 와 VF 의 갈림이 첫 단계다. SR-IOV 가상 기능용 BAR 은 **별개의**
+ * capability 를 쓰므로 위치가 다르고, 커널이 PF 와 VF 의 BAR 을 한 번호
+ * 공간에 몰아 두므로 번호도 VF 기준으로 되돌려야 한다.
+ *
+ * 찾는 방법은 순회다. NBAR 필드가 항목 개수를 알려 주고, 항목이 8바이트씩
+ * 떨어져 있으므로 pos 를 8 씩 밀며 각 항목의 BAR Index 를 확인한다.
+ *
+ * 두 오류를 구분하는 것이 호출자에게 의미가 있다. -ENOTSUPP 은 이 장치에
+ * Resizable BAR 이 아예 없다는 뜻이고, -ENOENT 는 있지만 이 BAR 은 크기를
+ * 바꿀 수 없다는 뜻이다.
+ *
+ * 실행 컨텍스트: config 읽기가 있어 프로세스 컨텍스트가 적절하다.
+ *
+ * 에러 경로: capability 없음은 -ENOTSUPP, 항목 없음은 -ENOENT.
+ *
+ * 호출 체인:
+ *   pci_rebar_get_possible_sizes() / get_current_size() / set_size()
+ *     → [이 함수] → pci_iov_vf_rebar_cap() → pci_read_config_dword()
  */
 static int pci_rebar_find_pos(struct pci_dev *pdev, int bar)
 {
@@ -224,6 +299,34 @@ static int pci_rebar_find_pos(struct pci_dev *pdev, int bar)
  * Return: A bitmask of possible sizes (bit 0=1MB, bit 31=128TB), or %0 if
  *	   BAR isn't resizable.
  */
+/* [한국어]
+ * pci_rebar_get_possible_sizes - 이 BAR 이 가질 수 있는 크기들을 비트마스크로 얻는다
+ *
+ * @pdev: 대상 장치.
+ * @bar: 조회할 BAR.
+ * @return: 가능한 크기의 비트마스크(비트 0 = 1MB, 비트 31 = 128TB), 크기를
+ *          바꿀 수 없으면 0.
+ *
+ * 하드웨어가 어떤 크기들을 지원하는지는 연속 범위가 아니라 임의의 집합이다.
+ * 그래서 최소·최대가 아니라 비트마스크로 답한다.
+ *
+ * capability 레지스터 하나에서 그 마스크를 읽는데, 규격이 그 필드를 두 곳에
+ * 나눠 두어 합치는 과정이 필요하다.
+ *
+ * 아래 세 함수(size_supported, get_max_size, 그리고 sysfs 표시)가 모두 이
+ * 결과를 해석해 쓴다.
+ *
+ * 0 이 두 가지를 뜻한다 — capability 가 없거나, 있어도 이 BAR 은 대상이
+ * 아니거나. 호출자가 둘을 구분할 필요가 없어 하나로 합쳤다.
+ *
+ * 실행 컨텍스트: config 읽기가 있어 프로세스 컨텍스트가 적절하다.
+ *
+ * 에러 경로: 항목을 못 찾으면 0 을 돌려준다.
+ *
+ * 호출 체인:
+ *   pci_rebar_size_supported() / pci_rebar_get_max_size() / sysfs
+ *     → [이 함수] → pci_rebar_find_pos() → pci_read_config_dword()
+ */
 u64 pci_rebar_get_possible_sizes(struct pci_dev *pdev, int bar)
 {
 	/* [한국어] 제어 레지스터 위치. */
@@ -265,6 +368,30 @@ EXPORT_SYMBOL(pci_rebar_get_possible_sizes);
  * Return: %true if @bar is resizable and @size is supported, otherwise
  *	   %false.
  */
+/* [한국어]
+ * pci_rebar_size_supported - 이 크기를 이 BAR 이 받아들일 수 있는지 답한다
+ *
+ * @pdev: 대상 장치.
+ * @bar: 대상 BAR.
+ * @size: 인코딩된 크기.
+ * @return: true = 가능, false = 불가능.
+ *
+ * pci_rebar_set_size() 를 부르기 전의 검사다.
+ *
+ * 범위 검사가 먼저인 이유는 BIT(size) 때문이다. size 가 음수이거나 64 이상이면
+ * 그 시프트가 정의되지 않은 동작이라, 마스크를 보기 전에 걸러야 한다.
+ * 상한을 128TB 로 잡는 것은 규격이 정한 최대 크기다.
+ *
+ * 그 다음은 마스크에서 해당 비트를 확인하는 한 줄이다.
+ *
+ * 실행 컨텍스트: config 읽기가 있어 프로세스 컨텍스트가 적절하다.
+ *
+ * 에러 경로: 없다. 불가능한 경우가 false 로 합쳐진다.
+ *
+ * 호출 체인:
+ *   pci_resize_resource() / 드라이버 → [이 함수]
+ *     → pci_rebar_get_possible_sizes()
+ */
 bool pci_rebar_size_supported(struct pci_dev *pdev, int bar, int size)
 {
 	/* [한국어] 지원 크기 비트맵을 얻는다. */
@@ -289,6 +416,27 @@ EXPORT_SYMBOL_GPL(pci_rebar_size_supported);
  *
  * Return: the encoded maximum BAR size as defined in the PCIe spec
  *	   (0=1MB, 31=128TB), or %-NOENT on error.
+ */
+/* [한국어]
+ * pci_rebar_get_max_size - 이 BAR 이 가질 수 있는 가장 큰 크기를 얻는다
+ *
+ * @pdev: 대상 장치.
+ * @bar: 대상 BAR.
+ * @return: 인코딩된 최대 크기, 크기를 바꿀 수 없으면 음수 오류.
+ *
+ * 드라이버가 "가능한 한 크게" 를 원할 때 쓴다. GPU 드라이버가 VRAM 전체를
+ * BAR 로 노출하려 할 때가 대표적인 쓰임이다.
+ *
+ * 비트마스크의 최상위 비트를 찾는 것이 계산의 전부다. 마스크가 0 이면
+ * 가능한 크기가 하나도 없다는 뜻이라 오류로 답한다.
+ *
+ * 실행 컨텍스트: config 읽기가 있어 프로세스 컨텍스트가 적절하다.
+ *
+ * 에러 경로: 가능한 크기가 없으면 음수 오류를 돌려준다.
+ *
+ * 호출 체인:
+ *   드라이버의 BAR 확장 시도 → [이 함수]
+ *     → pci_rebar_get_possible_sizes()
  */
 int pci_rebar_get_max_size(struct pci_dev *pdev, int bar)
 {
@@ -315,6 +463,29 @@ EXPORT_SYMBOL_GPL(pci_rebar_get_max_size);
  *
  * Return: BAR Size if @bar is resizable (0=1MB, 31=128TB), or negative on
  *         error.
+ */
+/* [한국어]
+ * pci_rebar_get_current_size - 이 BAR 의 지금 크기를 읽는다
+ *
+ * @pdev: 대상 장치.
+ * @bar: 대상 BAR.
+ * @return: 인코딩된 현재 크기, 또는 음수 오류.
+ *
+ * 제어 레지스터의 BAR Size 필드를 그대로 읽는다.
+ *
+ * 크기를 되돌려야 할 때 쓰인다 — 조정에 실패하면 원래 크기로 복구해야 하고,
+ * 그러려면 바꾸기 전의 값을 알아야 한다.
+ *
+ * pci_rebar_set_size() 와 읽기·쓰기 쌍을 이루며, 둘 다 같은 레지스터의 같은
+ * 필드를 다룬다.
+ *
+ * 실행 컨텍스트: config 읽기가 있어 프로세스 컨텍스트가 적절하다.
+ *
+ * 에러 경로: 항목을 못 찾으면 그 오류를 그대로 올려보낸다.
+ *
+ * 호출 체인:
+ *   자원 배정 / 크기 복구 → [이 함수]
+ *     → pci_rebar_find_pos() → pci_read_config_dword()
  */
 int pci_rebar_get_current_size(struct pci_dev *pdev, int bar)
 {
@@ -346,6 +517,35 @@ int pci_rebar_get_current_size(struct pci_dev *pdev, int bar)
  * Set the new size of a BAR as defined in the spec.
  *
  * Return: %0 if resizing was successful, or negative on error.
+ */
+/* [한국어]
+ * pci_rebar_set_size - 이 BAR 의 크기를 바꾼다
+ *
+ * @pdev: 대상 장치.
+ * @bar: 대상 BAR.
+ * @size: 인코딩된 새 크기.
+ * @return: 0 = 성공, 또는 음수 오류.
+ *
+ * 읽기-수정-쓰기로 BAR Size 필드만 갈아 끼운다. 같은 레지스터의 다른 필드
+ * (BAR Index, NBAR)를 보존해야 하므로 통째로 쓸 수 없다.
+ *
+ * 이 함수를 부르기 전에 메모리 디코딩이 꺼져 있어야 한다. 크기를 바꾸면 BAR 이
+ * 차지하는 주소 범위가 달라지는데, 디코딩이 켜진 채로 바꾸면 그 순간 장치가
+ * 엉뚱한 주소에 응답하게 된다. 그 검사는 상위의 pci_resize_resource() 가 한다.
+ *
+ * SR-IOV BAR 이면 끝에서 커널 쪽 기록도 갱신한다. VF 의 BAR 크기가 VF 전체의
+ * 자원 배정에 영향을 주기 때문에, 하드웨어만 바꾸고 커널이 모르면 배정이
+ * 어긋난다.
+ *
+ * 실행 컨텍스트: config 쓰기가 있어 프로세스 컨텍스트가 적절하다.
+ *
+ * 에러 경로: 항목을 못 찾으면 그 오류를 올려보낸다. 쓰기 자체의 실패는
+ * 확인하지 않는다.
+ *
+ * 호출 체인:
+ *   pci_do_resource_release_and_resize() → [이 함수]
+ *     → pci_rebar_find_pos() → pci_write_config_dword()
+ *     → pci_iov_resource_set_size()
  */
 int pci_rebar_set_size(struct pci_dev *pdev, int bar, int size)
 {
@@ -563,6 +763,43 @@ void pci_resize_resource_set_size(struct pci_dev *dev, int resno, int size)
  *
  * Return: 0 on success, or negative on error. In case of an error, the
  *         resources are restored to their original places.
+ */
+/* [한국어]
+ * pci_resize_resource - BAR 크기를 바꾸고 자원을 다시 배정한다
+ *
+ * @dev: 대상 장치.
+ * @resno: 자원 번호.
+ * @size: 인코딩된 새 크기.
+ * @exclude_bars: 재배정에서 제외할 BAR 들의 마스크.
+ * @return: 0 = 성공, -ENOTSUPP / -EBUSY / -EINVAL, 또는 재배정 오류.
+ *
+ * 드라이버와 sysfs 가 쓰는 공개 진입점이다. 크기 변경은 레지스터 하나를
+ * 고치는 것으로 끝나지 않는데, 커진 BAR 이 들어갈 주소 공간을 상위 브리지에서
+ * 다시 확보해야 하기 때문이다.
+ *
+ * 세 검사가 순서대로 있다.
+ * 1. preserve_config — 펌웨어가 정한 배치를 그대로 쓰기로 한 시스템이면
+ *    건드리지 않는다. 그 시스템에서는 커널이 자원을 재배정하지 않으므로,
+ *    BAR 만 키우면 상위 브리지 창을 벗어난다.
+ * 2. 메모리 디코딩이 켜져 있으면 -EBUSY. 위에 적었듯 켜진 채로 바꾸면 장치가
+ *    엉뚱한 주소에 응답한다.
+ * 3. 하드웨어가 그 크기를 지원하지 않으면 -EINVAL.
+ *
+ * 셋을 통과하면 실제 작업을 아래에 맡긴다 — 자원을 놓고, 크기를 바꾸고,
+ * 다시 배정하는 세 단계다.
+ *
+ * exclude_bars 는 재배정 중 건드리지 말아야 할 BAR 을 지정한다. 드라이버가
+ * 이미 매핑해 쓰고 있는 BAR 이 옮겨지면 그 매핑이 무효가 되기 때문이다.
+ *
+ * 실행 컨텍스트: 드라이버 / sysfs 쓰기. 프로세스 컨텍스트.
+ *
+ * 에러 경로: 세 검사 각각의 오류 코드가 원인을 구분해 준다. 재배정이 실패하면
+ * 아래 함수가 원래 크기로 되돌린다.
+ *
+ * 호출 체인:
+ *   드라이버 / sysfs 의 resource_resize 쓰기 → [이 함수]
+ *     → pci_find_host_bridge() → pci_rebar_size_supported()
+ *     → pci_do_resource_release_and_resize()
  */
 int pci_resize_resource(struct pci_dev *dev, int resno, int size,
 			int exclude_bars)

@@ -109,186 +109,18 @@ module_param_named(disable, acpiphp_disabled, bool, 0444);
 
 /* [한국어] 아래 ops 테이블에서 참조하기 위한 전방 선언. 정의가 테이블보다 뒤에 있어
  * 일곱 개를 미리 선언해 둔다. */
-/* [한국어]
- * enable_slot - 슬롯에 전원을 넣고 장치를 구성한다(공용 코어 콜백)
- *
- * @hotplug_slot: 공용 코어가 주는 슬롯 포인터.
- * @return: acpiphp_enable_slot() 의 결과.
- *
- * 위 커널독대로 실제 작업은 acpiphp_glue.c 의 acpiphp_enable_slot() 이 한다.
- * 이 함수는 공용 코어의 hotplug_slot 을 acpiphp 의 slot 으로 바꾸고 넘기는
- * 얇은 어댑터일 뿐이다.
- *
- * 이 파일 전체가 그런 어댑터 계층이라는 점이 중요하다 — 공용 코어와
- * acpiphp 코어 사이의 타입 변환과 로그만 담당하고, ACPI 메서드 평가나
- * PCI 열거는 전혀 하지 않는다.
- *
- * 실행 컨텍스트: 사용자의 sysfs power 쓰기 문맥, 프로세스 컨텍스트.
- * 하위에서 ACPI 메서드와 PCI 열거가 일어나므로 오래 걸린다.
- *
- * 에러 경로: 하위 결과를 그대로 전달한다.
- *
- * 호출 체인:
- *   사용자의 echo 1 > .../power → 공용 코어
- *     → hotplug_slot_ops.enable_slot == [이 함수]
- *     → to_slot() → acpiphp_enable_slot()
- */
 static int enable_slot(struct hotplug_slot *slot);
 /* [한국어] 슬롯 비활성화 콜백 선언. */
-/* [한국어]
- * disable_slot - 슬롯의 장치를 제거하고 전원을 끊는다(공용 코어 콜백)
- *
- * @hotplug_slot: 공용 코어가 주는 슬롯 포인터.
- * @return: acpiphp_disable_slot() 의 결과.
- *
- * enable_slot 과 정확히 대칭인 어댑터다. 실제 작업은 acpiphp_glue.c 가 한다.
- *
- * 실행 컨텍스트: 사용자의 sysfs power 쓰기 문맥, 프로세스 컨텍스트.
- * 하위 장치의 드라이버 remove 가 연쇄로 불린다.
- *
- * 에러 경로: 하위 결과를 그대로 전달한다.
- *
- * 호출 체인:
- *   사용자의 echo 0 > .../power → 공용 코어
- *     → hotplug_slot_ops.disable_slot == [이 함수]
- *     → to_slot() → acpiphp_disable_slot()
- */
 static int disable_slot(struct hotplug_slot *slot);
 /* [한국어] attention LED 설정 콜백 선언. */
-/* [한국어]
- * set_attention_status - 등록된 확장을 통해 attention LED 를 설정한다
- *
- * @hotplug_slot: 대상 슬롯.
- * @status: 설정할 값.
- * @return: 확장 콜백의 결과, 또는 -ENODEV(확장이 없거나 모듈을 잡을 수 없음).
- *
- * 위 커널독이 설명하듯 ACPI 에는 LED 를 제어하는 표준 메서드가 없어,
- * 등록된 플랫폼별 확장에 위임한다.
- *
- * try_module_get() 이 이 함수의 핵심이다. 확장 모듈이 지금 언로드 중일 수
- * 있으므로, 콜백을 부르기 전에 그 모듈의 참조를 잡아야 한다. 참조를 잡는 데
- * 성공했다면 호출이 끝날 때까지 모듈이 사라지지 않음이 보장된다.
- *
- * 다른 조회 콜백들과 달리 to_slot() 을 쓰지 않고 hotplug_slot 을 그대로
- * 확장에 넘긴다 — 확장 드라이버가 acpiphp 내부 구조를 알 필요가 없게 하려는
- * 설계다.
- *
- * [상류 코드 관찰, 수정하지 않음] else 갈래가 전역 attention_info 를 NULL 로
- * 지운다. 모듈이 언로드 중이라면 합리적인 정리이지만, 확장이 애초에 등록되지
- * 않아 여기 온 경우에는 이미 NULL 인 것을 다시 쓰는 셈이다. 그리고 이 쓰기에
- * 락이 없어, 동시에 register 가 진행 중이라면 방금 등록된 확장을 지울 수 있다.
- *
- * 실행 컨텍스트: 사용자의 sysfs attention 쓰기 문맥, 프로세스 컨텍스트.
- *
- * 에러 경로: 확장 부재와 모듈 참조 실패가 같은 갈래로 처리된다.
- *
- * 호출 체인:
- *   사용자의 sysfs attention 쓰기 → 공용 코어
- *     → hotplug_slot_ops.set_attention_status == [이 함수]
- *     → try_module_get() → attention_info->set_attn() → module_put()
- */
 static int set_attention_status(struct hotplug_slot *slot, u8 value);
 /* [한국어] 전원 상태 조회 콜백 선언. */
-/* [한국어]
- * get_power_status - 슬롯의 전원 상태를 조회한다(공용 코어 콜백)
- *
- * @hotplug_slot: 대상 슬롯.
- * @value: 결과를 담을 출력 인자.
- * @return: 언제나 0.
- *
- * acpiphp 코어의 acpiphp_get_power_status() 에 위임한다. 그 함수는 ACPI 의
- * _STA 메서드를 평가해 상태를 얻는다.
- *
- * 위 커널독이 경고를 담고 있다 — 일부 플랫폼이 _STA 를 제대로 구현하지 않아
- * 돌려주는 값을 신뢰할 수 없을 수 있다. 그럼에도 오류를 돌려줄 방법이 없어
- * 언제나 성공으로 답한다.
- *
- * 실행 컨텍스트: 사용자의 sysfs power 읽기 문맥, 프로세스 컨텍스트.
- * ACPI 메서드 평가가 잠들 수 있다.
- *
- * 에러 경로: 없다.
- *
- * 호출 체인:
- *   사용자의 cat .../power → 공용 코어
- *     → hotplug_slot_ops.get_power_status == [이 함수]
- *     → to_slot() → acpiphp_get_power_status()
- */
 static int get_power_status(struct hotplug_slot *slot, u8 *value);
 /* [한국어] attention LED 조회 콜백 선언. */
-/* [한국어]
- * get_attention_status - 등록된 확장을 통해 attention LED 상태를 조회한다
- *
- * @hotplug_slot: 대상 슬롯.
- * @value: 결과를 담을 출력 인자.
- * @return: 확장 콜백의 결과, 또는 -EINVAL(확장이 없거나 모듈을 잡을 수 없음).
- *
- * set_attention_status 와 완전히 같은 구조다 — 위 커널독이 밝히듯 ACPI 에
- * LED 상태를 알아낼 표준 메서드가 없어 확장에 위임하고, try_module_get 으로
- * 확장 모듈의 수명을 보장한다.
- *
- * [상류 코드 관찰] 같은 조건에서 set 쪽은 -ENODEV 를, 이쪽은 -EINVAL 을
- * 돌려준다. 두 함수의 오류 코드가 비대칭이다.
- * else 갈래가 전역을 NULL 로 지우는 문제도 set 쪽과 같다.
- *
- * 실행 컨텍스트: 사용자의 sysfs attention 읽기 문맥, 프로세스 컨텍스트.
- *
- * 에러 경로: 확장 부재와 모듈 참조 실패가 같은 갈래다.
- *
- * 호출 체인:
- *   사용자의 cat .../attention → 공용 코어
- *     → hotplug_slot_ops.get_attention_status == [이 함수]
- *     → try_module_get() → attention_info->get_attn() → module_put()
- */
 static int get_attention_status(struct hotplug_slot *slot, u8 *value);
 /* [한국어] 래치 상태 조회 콜백 선언. */
-/* [한국어]
- * get_latch_status - 슬롯의 이젝터 래치 상태를 조회한다(공용 코어 콜백)
- *
- * @hotplug_slot: 대상 슬롯.
- * @value: 결과를 담을 출력 인자.
- * @return: 언제나 0.
- *
- * 위 커널독이 솔직하게 밝힌다 — ACPI 에는 래치 상태에 접근할 공식 수단이
- * 없어서 _STA 값에서 "지어낸다(fake)". 물리적으로 래치가 열렸는지를 알 수 없고,
- * 장치가 살아 있는지만 알 수 있기 때문이다.
- *
- * 그래서 이 값은 진짜 래치 상태가 아니라 근사이며, sysfs 를 읽는 사용자가
- * 그것을 구분할 방법은 없다.
- *
- * 실행 컨텍스트: 사용자의 sysfs latch 읽기 문맥, 프로세스 컨텍스트.
- *
- * 에러 경로: 없다.
- *
- * 호출 체인:
- *   사용자의 cat .../latch → 공용 코어
- *     → hotplug_slot_ops.get_latch_status == [이 함수]
- *     → to_slot() → acpiphp_get_latch_status()
- */
 static int get_latch_status(struct hotplug_slot *slot, u8 *value);
 /* [한국어] 어댑터(카드) 존재 조회 콜백 선언. */
-/* [한국어]
- * get_adapter_status - 슬롯에 카드가 꽂혀 있는지 조회한다(공용 코어 콜백)
- *
- * @hotplug_slot: 대상 슬롯.
- * @value: 결과를 담을 출력 인자.
- * @return: 언제나 0.
- *
- * get_latch_status 와 같은 사정이다 — 위 커널독대로 ACPI 에 어댑터 존재를
- * 확인할 공식 수단이 없어 _STA 에서 지어낸다.
- *
- * 래치와 어댑터가 같은 _STA 값에서 나온다는 것은, 두 상태를 실제로 구분할 수
- * 없다는 뜻이기도 하다. 물리적 감지기를 갖춘 SHPC 나 PCIe 핫플러그와 대비되는
- * ACPI 핫플러그의 근본적 한계다.
- *
- * 실행 컨텍스트: 사용자의 sysfs adapter 읽기 문맥, 프로세스 컨텍스트.
- *
- * 에러 경로: 없다.
- *
- * 호출 체인:
- *   사용자의 cat .../adapter → 공용 코어
- *     → hotplug_slot_ops.get_adapter_status == [이 함수]
- *     → to_slot() → acpiphp_get_adapter_status()
- */
 static int get_adapter_status(struct hotplug_slot *slot, u8 *value);
 
 /* [한국어] PCI 핫플러그 공용 코어에 제공할 콜백 테이블. 이 테이블 하나가 acpiphp 와
@@ -408,6 +240,30 @@ EXPORT_SYMBOL_GPL(acpiphp_unregister_attention);
  *
  * Actual tasks are done in acpiphp_enable_slot()
  */
+/* [한국어]
+ * enable_slot - 슬롯에 전원을 넣고 장치를 구성한다(공용 코어 콜백)
+ *
+ * @hotplug_slot: 공용 코어가 주는 슬롯 포인터.
+ * @return: acpiphp_enable_slot() 의 결과.
+ *
+ * 위 커널독대로 실제 작업은 acpiphp_glue.c 의 acpiphp_enable_slot() 이 한다.
+ * 이 함수는 공용 코어의 hotplug_slot 을 acpiphp 의 slot 으로 바꾸고 넘기는
+ * 얇은 어댑터일 뿐이다.
+ *
+ * 이 파일 전체가 그런 어댑터 계층이라는 점이 중요하다 — 공용 코어와
+ * acpiphp 코어 사이의 타입 변환과 로그만 담당하고, ACPI 메서드 평가나
+ * PCI 열거는 전혀 하지 않는다.
+ *
+ * 실행 컨텍스트: 사용자의 sysfs power 쓰기 문맥, 프로세스 컨텍스트.
+ * 하위에서 ACPI 메서드와 PCI 열거가 일어나므로 오래 걸린다.
+ *
+ * 에러 경로: 하위 결과를 그대로 전달한다.
+ *
+ * 호출 체인:
+ *   사용자의 echo 1 > .../power → 공용 코어
+ *     → hotplug_slot_ops.enable_slot == [이 함수]
+ *     → to_slot() → acpiphp_enable_slot()
+ */
 static int enable_slot(struct hotplug_slot *hotplug_slot)
 {
 	/* [한국어] 공용 코어가 준 포인터에서 acpiphp 의 슬롯 객체를 되찾는다. */
@@ -427,6 +283,24 @@ static int enable_slot(struct hotplug_slot *hotplug_slot)
  * @hotplug_slot: slot to disable
  *
  * Actual tasks are done in acpiphp_disable_slot()
+ */
+/* [한국어]
+ * disable_slot - 슬롯의 장치를 제거하고 전원을 끊는다(공용 코어 콜백)
+ *
+ * @hotplug_slot: 공용 코어가 주는 슬롯 포인터.
+ * @return: acpiphp_disable_slot() 의 결과.
+ *
+ * enable_slot 과 정확히 대칭인 어댑터다. 실제 작업은 acpiphp_glue.c 가 한다.
+ *
+ * 실행 컨텍스트: 사용자의 sysfs power 쓰기 문맥, 프로세스 컨텍스트.
+ * 하위 장치의 드라이버 remove 가 연쇄로 불린다.
+ *
+ * 에러 경로: 하위 결과를 그대로 전달한다.
+ *
+ * 호출 체인:
+ *   사용자의 echo 0 > .../power → 공용 코어
+ *     → hotplug_slot_ops.disable_slot == [이 함수]
+ *     → to_slot() → acpiphp_disable_slot()
  */
 static int disable_slot(struct hotplug_slot *hotplug_slot)
 {
@@ -450,6 +324,38 @@ static int disable_slot(struct hotplug_slot *hotplug_slot)
  * attention status LED, so we use a callback that
  * was registered with us.  This allows hardware specific
  * ACPI implementations to blink the light for us.
+ */
+/* [한국어]
+ * set_attention_status - 등록된 확장을 통해 attention LED 를 설정한다
+ *
+ * @hotplug_slot: 대상 슬롯.
+ * @status: 설정할 값.
+ * @return: 확장 콜백의 결과, 또는 -ENODEV(확장이 없거나 모듈을 잡을 수 없음).
+ *
+ * 위 커널독이 설명하듯 ACPI 에는 LED 를 제어하는 표준 메서드가 없어,
+ * 등록된 플랫폼별 확장에 위임한다.
+ *
+ * try_module_get() 이 이 함수의 핵심이다. 확장 모듈이 지금 언로드 중일 수
+ * 있으므로, 콜백을 부르기 전에 그 모듈의 참조를 잡아야 한다. 참조를 잡는 데
+ * 성공했다면 호출이 끝날 때까지 모듈이 사라지지 않음이 보장된다.
+ *
+ * 다른 조회 콜백들과 달리 to_slot() 을 쓰지 않고 hotplug_slot 을 그대로
+ * 확장에 넘긴다 — 확장 드라이버가 acpiphp 내부 구조를 알 필요가 없게 하려는
+ * 설계다.
+ *
+ * [상류 코드 관찰, 수정하지 않음] else 갈래가 전역 attention_info 를 NULL 로
+ * 지운다. 모듈이 언로드 중이라면 합리적인 정리이지만, 확장이 애초에 등록되지
+ * 않아 여기 온 경우에는 이미 NULL 인 것을 다시 쓰는 셈이다. 그리고 이 쓰기에
+ * 락이 없어, 동시에 register 가 진행 중이라면 방금 등록된 확장을 지울 수 있다.
+ *
+ * 실행 컨텍스트: 사용자의 sysfs attention 쓰기 문맥, 프로세스 컨텍스트.
+ *
+ * 에러 경로: 확장 부재와 모듈 참조 실패가 같은 갈래로 처리된다.
+ *
+ * 호출 체인:
+ *   사용자의 sysfs attention 쓰기 → 공용 코어
+ *     → hotplug_slot_ops.set_attention_status == [이 함수]
+ *     → try_module_get() → attention_info->set_attn() → module_put()
  */
 static int set_attention_status(struct hotplug_slot *hotplug_slot, u8 status)
 {
@@ -490,6 +396,30 @@ static int set_attention_status(struct hotplug_slot *hotplug_slot, u8 status)
  * Some platforms may not implement _STA method properly.
  * In that case, the value returned may not be reliable.
  */
+/* [한국어]
+ * get_power_status - 슬롯의 전원 상태를 조회한다(공용 코어 콜백)
+ *
+ * @hotplug_slot: 대상 슬롯.
+ * @value: 결과를 담을 출력 인자.
+ * @return: 언제나 0.
+ *
+ * acpiphp 코어의 acpiphp_get_power_status() 에 위임한다. 그 함수는 ACPI 의
+ * _STA 메서드를 평가해 상태를 얻는다.
+ *
+ * 위 커널독이 경고를 담고 있다 — 일부 플랫폼이 _STA 를 제대로 구현하지 않아
+ * 돌려주는 값을 신뢰할 수 없을 수 있다. 그럼에도 오류를 돌려줄 방법이 없어
+ * 언제나 성공으로 답한다.
+ *
+ * 실행 컨텍스트: 사용자의 sysfs power 읽기 문맥, 프로세스 컨텍스트.
+ * ACPI 메서드 평가가 잠들 수 있다.
+ *
+ * 에러 경로: 없다.
+ *
+ * 호출 체인:
+ *   사용자의 cat .../power → 공용 코어
+ *     → hotplug_slot_ops.get_power_status == [이 함수]
+ *     → to_slot() → acpiphp_get_power_status()
+ */
 static int get_power_status(struct hotplug_slot *hotplug_slot, u8 *value)
 {
 	/* [한국어] 슬롯 객체를 되찾는다. */
@@ -517,6 +447,30 @@ static int get_power_status(struct hotplug_slot *hotplug_slot, u8 *value)
  * of the attention status LED, so we use a callback that
  * was registered with us.  This allows hardware specific
  * ACPI implementations to determine its state.
+ */
+/* [한국어]
+ * get_attention_status - 등록된 확장을 통해 attention LED 상태를 조회한다
+ *
+ * @hotplug_slot: 대상 슬롯.
+ * @value: 결과를 담을 출력 인자.
+ * @return: 확장 콜백의 결과, 또는 -EINVAL(확장이 없거나 모듈을 잡을 수 없음).
+ *
+ * set_attention_status 와 완전히 같은 구조다 — 위 커널독이 밝히듯 ACPI 에
+ * LED 상태를 알아낼 표준 메서드가 없어 확장에 위임하고, try_module_get 으로
+ * 확장 모듈의 수명을 보장한다.
+ *
+ * [상류 코드 관찰] 같은 조건에서 set 쪽은 -ENODEV 를, 이쪽은 -EINVAL 을
+ * 돌려준다. 두 함수의 오류 코드가 비대칭이다.
+ * else 갈래가 전역을 NULL 로 지우는 문제도 set 쪽과 같다.
+ *
+ * 실행 컨텍스트: 사용자의 sysfs attention 읽기 문맥, 프로세스 컨텍스트.
+ *
+ * 에러 경로: 확장 부재와 모듈 참조 실패가 같은 갈래다.
+ *
+ * 호출 체인:
+ *   사용자의 cat .../attention → 공용 코어
+ *     → hotplug_slot_ops.get_attention_status == [이 함수]
+ *     → try_module_get() → attention_info->get_attn() → module_put()
  */
 static int get_attention_status(struct hotplug_slot *hotplug_slot, u8 *value)
 {
@@ -551,6 +505,29 @@ static int get_attention_status(struct hotplug_slot *hotplug_slot, u8 *value)
  * ACPI doesn't provide any formal means to access latch status.
  * Instead, we fake latch status from _STA.
  */
+/* [한국어]
+ * get_latch_status - 슬롯의 이젝터 래치 상태를 조회한다(공용 코어 콜백)
+ *
+ * @hotplug_slot: 대상 슬롯.
+ * @value: 결과를 담을 출력 인자.
+ * @return: 언제나 0.
+ *
+ * 위 커널독이 솔직하게 밝힌다 — ACPI 에는 래치 상태에 접근할 공식 수단이
+ * 없어서 _STA 값에서 "지어낸다(fake)". 물리적으로 래치가 열렸는지를 알 수 없고,
+ * 장치가 살아 있는지만 알 수 있기 때문이다.
+ *
+ * 그래서 이 값은 진짜 래치 상태가 아니라 근사이며, sysfs 를 읽는 사용자가
+ * 그것을 구분할 방법은 없다.
+ *
+ * 실행 컨텍스트: 사용자의 sysfs latch 읽기 문맥, 프로세스 컨텍스트.
+ *
+ * 에러 경로: 없다.
+ *
+ * 호출 체인:
+ *   사용자의 cat .../latch → 공용 코어
+ *     → hotplug_slot_ops.get_latch_status == [이 함수]
+ *     → to_slot() → acpiphp_get_latch_status()
+ */
 static int get_latch_status(struct hotplug_slot *hotplug_slot, u8 *value)
 {
 	/* [한국어] 슬롯 객체를 되찾는다. */
@@ -576,6 +553,29 @@ static int get_latch_status(struct hotplug_slot *hotplug_slot, u8 *value)
  *
  * ACPI doesn't provide any formal means to access adapter status.
  * Instead, we fake adapter status from _STA.
+ */
+/* [한국어]
+ * get_adapter_status - 슬롯에 카드가 꽂혀 있는지 조회한다(공용 코어 콜백)
+ *
+ * @hotplug_slot: 대상 슬롯.
+ * @value: 결과를 담을 출력 인자.
+ * @return: 언제나 0.
+ *
+ * get_latch_status 와 같은 사정이다 — 위 커널독대로 ACPI 에 어댑터 존재를
+ * 확인할 공식 수단이 없어 _STA 에서 지어낸다.
+ *
+ * 래치와 어댑터가 같은 _STA 값에서 나온다는 것은, 두 상태를 실제로 구분할 수
+ * 없다는 뜻이기도 하다. 물리적 감지기를 갖춘 SHPC 나 PCIe 핫플러그와 대비되는
+ * ACPI 핫플러그의 근본적 한계다.
+ *
+ * 실행 컨텍스트: 사용자의 sysfs adapter 읽기 문맥, 프로세스 컨텍스트.
+ *
+ * 에러 경로: 없다.
+ *
+ * 호출 체인:
+ *   사용자의 cat .../adapter → 공용 코어
+ *     → hotplug_slot_ops.get_adapter_status == [이 함수]
+ *     → to_slot() → acpiphp_get_adapter_status()
  */
 static int get_adapter_status(struct hotplug_slot *hotplug_slot, u8 *value)
 {
