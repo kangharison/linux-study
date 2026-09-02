@@ -270,11 +270,29 @@ enum pci_message_type {
  */
 
 union pci_version {
+	/* [한국어] 판본을 두 갈래로 볼 수 있게 하는 공용체의 구조체 쪽. */
 	struct {
+		/* [한국어] 부 판본.
+		 * 설정자: 판본 상수를 만드는 매크로.
+		 * 읽는 자: 협상 결과를 비교하는 코드가 통짜 u32 로 보므로 이 갈래는 사람이 읽기 위한 것이다.
+		 * 값 범위: 0 이상.
+		 * 동기화: 상수라 불변. */
 		u16 minor_version;
+		/* [한국어] 주 판본. 부 판본보다 **뒤에** 오는 것이 리틀엔디언 배치에서
+		 * 통짜 u32 로 봤을 때 주 판본이 상위가 되게 한다.
+		 * 설정자·읽는 자: 위와 같다.
+		 * 값 범위: 0 이상.
+		 * 동기화: 상수라 불변. */
 		u16 major_version;
+	/* [한국어] 두 갈래 중 사람이 읽는 쪽. */
 	} parts;
+	/* [한국어] 같은 4바이트를 통짜로 보는 갈래.
+	 * 설정자: 판본 상수.
+	 * 읽는 자: 협상과 비교가 모두 이 값을 쓴다 — 크기 비교로 신구를 가릴 수 있다.
+	 * 값 범위: 상위 16비트가 주 판본, 하위가 부 판본.
+	 * 동기화: 상수라 불변. */
 	u32 version;
+/* [한국어] 프로토콜 판본. 전선에 나가므로 __packed 다. */
 } __packed;
 
 /*
@@ -285,11 +303,25 @@ union pci_version {
  */
 union win_slot_encoding {
 	struct {
+		/* [한국어] 장치 번호 5비트.
+		 * 설정자: devfn_to_wslot() 이 devfn 에서 뽑아 넣는다.
+		 * 읽는 자: wslot_to_devfn() 이 되돌린다.
+		 * 값 범위: 0~31.
+		 * 동기화: 값으로 다뤄져 공유되지 않는다. */
 		u32	dev:5;
+		/* [한국어] 기능 번호 3비트. 위와 합쳐 devfn 8비트가 된다. */
 		u32	func:3;
+		/* [한국어] 나머지 24비트는 예약이다. 슬롯 번호가 사실상 devfn 하나뿐이라는 뜻이다. */
 		u32	reserved:24;
+	/* [한국어] 비트 갈래. */
 	} bits;
+	/* [한국어] 같은 4바이트를 통짜로 보는 갈래.
+	 * 설정자: devfn_to_wslot().
+	 * 읽는 자: get_pcichild_wslot() 의 비교와 모든 요청 메시지의 wslot 필드.
+	 * 값 범위: 0~255 가 유효 범위다(상위 24비트는 0).
+	 * 동기화: 값으로 다뤄져 공유되지 않는다. */
 	u32 slot;
+/* [한국어] Windows 슬롯 인코딩. 이 파일 전체가 장치를 이 번호로 지목한다. */
 } __packed;
 
 /*
@@ -297,34 +329,136 @@ union win_slot_encoding {
  */
 struct pci_function_description {
 	u16	v_id;	/* vendor ID */
+	/* [한국어] 장치 ID(옆의 상류 주석).
+	 * 설정자: 호스트가 보낸 장치 서술.
+	 * 읽는 자: 이 파일이 커널 쪽 서술로 복사한 뒤 config 읽기가 흉내 낼 값으로 쓴다.
+	 * 값 범위: PCI 규격의 해당 필드.
+	 * 동기화: 수신 버퍼 위에서 읽어 복사한 뒤로는 소유자만 본다. */
 	u16	d_id;	/* device ID */
+	/* [한국어] 리비전.
+	 * 설정자: 호스트가 보낸 장치 서술.
+	 * 읽는 자: 이 파일이 커널 쪽 서술로 복사한 뒤 config 읽기가 흉내 낼 값으로 쓴다.
+	 * 값 범위: PCI 규격의 해당 필드.
+	 * 동기화: 수신 버퍼 위에서 읽어 복사한 뒤로는 소유자만 본다. */
 	u8	rev;
+	/* [한국어] 프로그래밍 인터페이스.
+	 * 설정자: 호스트가 보낸 장치 서술.
+	 * 읽는 자: 이 파일이 커널 쪽 서술로 복사한 뒤 config 읽기가 흉내 낼 값으로 쓴다.
+	 * 값 범위: PCI 규격의 해당 필드.
+	 * 동기화: 수신 버퍼 위에서 읽어 복사한 뒤로는 소유자만 본다. */
 	u8	prog_intf;
+	/* [한국어] 서브클래스.
+	 * 설정자: 호스트가 보낸 장치 서술.
+	 * 읽는 자: 이 파일이 커널 쪽 서술로 복사한 뒤 config 읽기가 흉내 낼 값으로 쓴다.
+	 * 값 범위: PCI 규격의 해당 필드.
+	 * 동기화: 수신 버퍼 위에서 읽어 복사한 뒤로는 소유자만 본다. */
 	u8	subclass;
+	/* [한국어] 기본 클래스. 위 셋이 24비트 클래스 코드를 이룬다.
+	 * 설정자: 호스트가 보낸 장치 서술.
+	 * 읽는 자: 이 파일이 커널 쪽 서술로 복사한 뒤 config 읽기가 흉내 낼 값으로 쓴다.
+	 * 값 범위: PCI 규격의 해당 필드.
+	 * 동기화: 수신 버퍼 위에서 읽어 복사한 뒤로는 소유자만 본다. */
 	u8	base_class;
+	/* [한국어] 서브시스템 ID.
+	 * 설정자: 호스트가 보낸 장치 서술.
+	 * 읽는 자: 이 파일이 커널 쪽 서술로 복사한 뒤 config 읽기가 흉내 낼 값으로 쓴다.
+	 * 값 범위: PCI 규격의 해당 필드.
+	 * 동기화: 수신 버퍼 위에서 읽어 복사한 뒤로는 소유자만 본다. */
 	u32	subsystem_id;
+	/* [한국어] 이 장치의 슬롯 번호.
+	 * 설정자: 호스트가 보낸 장치 서술.
+	 * 읽는 자: 이 파일이 커널 쪽 서술로 복사한 뒤 config 읽기가 흉내 낼 값으로 쓴다.
+	 * 값 범위: PCI 규격의 해당 필드.
+	 * 동기화: 수신 버퍼 위에서 읽어 복사한 뒤로는 소유자만 본다. */
 	union win_slot_encoding win_slot;
+	/* [한국어] 일련번호(옆의 상류 주석).
+	 * 설정자: 호스트가 보낸 장치 서술.
+	 * 읽는 자: 이 파일이 커널 쪽 서술로 복사한 뒤 config 읽기가 흉내 낼 값으로 쓴다.
+	 * 값 범위: PCI 규격의 해당 필드.
+	 * 동기화: 수신 버퍼 위에서 읽어 복사한 뒤로는 소유자만 본다. */
 	u32	ser;	/* serial number */
+/* [한국어] 장치 서술(구판). 프로토콜 1.1 이하가 이 형식을 쓴다. */
 } __packed;
 
 enum pci_device_description_flags {
+	/* [한국어] 특별한 속성이 없음. */
 	HV_PCI_DEVICE_FLAG_NONE			= 0x0,
+	/* [한국어] NUMA 친화도 정보가 유효하다는 표시 — 아래 확장 서술의
+	 * virtual_numa_node 를 믿어도 된다는 뜻이다. */
 	HV_PCI_DEVICE_FLAG_NUMA_AFFINITY	= 0x1,
 };
 
 struct pci_function_description2 {
+	/* [한국어] 벤더 ID(옆의 상류 주석).
+	 * 설정자: 호스트가 보낸 장치 서술.
+	 * 읽는 자: 이 파일이 커널 쪽 서술로 복사한 뒤 config 읽기가 흉내 낼 값으로 쓴다.
+	 * 값 범위: PCI 규격의 해당 필드.
+	 * 동기화: 수신 버퍼 위에서 읽어 복사한 뒤로는 소유자만 본다. */
 	u16	v_id;	/* vendor ID */
+	/* [한국어] 장치 ID(옆의 상류 주석).
+	 * 설정자: 호스트가 보낸 장치 서술.
+	 * 읽는 자: 이 파일이 커널 쪽 서술로 복사한 뒤 config 읽기가 흉내 낼 값으로 쓴다.
+	 * 값 범위: PCI 규격의 해당 필드.
+	 * 동기화: 수신 버퍼 위에서 읽어 복사한 뒤로는 소유자만 본다. */
 	u16	d_id;	/* device ID */
+	/* [한국어] 리비전.
+	 * 설정자: 호스트가 보낸 장치 서술.
+	 * 읽는 자: 이 파일이 커널 쪽 서술로 복사한 뒤 config 읽기가 흉내 낼 값으로 쓴다.
+	 * 값 범위: PCI 규격의 해당 필드.
+	 * 동기화: 수신 버퍼 위에서 읽어 복사한 뒤로는 소유자만 본다. */
 	u8	rev;
+	/* [한국어] 프로그래밍 인터페이스.
+	 * 설정자: 호스트가 보낸 장치 서술.
+	 * 읽는 자: 이 파일이 커널 쪽 서술로 복사한 뒤 config 읽기가 흉내 낼 값으로 쓴다.
+	 * 값 범위: PCI 규격의 해당 필드.
+	 * 동기화: 수신 버퍼 위에서 읽어 복사한 뒤로는 소유자만 본다. */
 	u8	prog_intf;
+	/* [한국어] 서브클래스.
+	 * 설정자: 호스트가 보낸 장치 서술.
+	 * 읽는 자: 이 파일이 커널 쪽 서술로 복사한 뒤 config 읽기가 흉내 낼 값으로 쓴다.
+	 * 값 범위: PCI 규격의 해당 필드.
+	 * 동기화: 수신 버퍼 위에서 읽어 복사한 뒤로는 소유자만 본다. */
 	u8	subclass;
+	/* [한국어] 기본 클래스.
+	 * 설정자: 호스트가 보낸 장치 서술.
+	 * 읽는 자: 이 파일이 커널 쪽 서술로 복사한 뒤 config 읽기가 흉내 낼 값으로 쓴다.
+	 * 값 범위: PCI 규격의 해당 필드.
+	 * 동기화: 수신 버퍼 위에서 읽어 복사한 뒤로는 소유자만 본다. */
 	u8	base_class;
+	/* [한국어] 서브시스템 ID.
+	 * 설정자: 호스트가 보낸 장치 서술.
+	 * 읽는 자: 이 파일이 커널 쪽 서술로 복사한 뒤 config 읽기가 흉내 낼 값으로 쓴다.
+	 * 값 범위: PCI 규격의 해당 필드.
+	 * 동기화: 수신 버퍼 위에서 읽어 복사한 뒤로는 소유자만 본다. */
 	u32	subsystem_id;
+	/* [한국어] 이 장치의 슬롯 번호.
+	 * 설정자: 호스트가 보낸 장치 서술.
+	 * 읽는 자: 이 파일이 커널 쪽 서술로 복사한 뒤 config 읽기가 흉내 낼 값으로 쓴다.
+	 * 값 범위: PCI 규격의 해당 필드.
+	 * 동기화: 수신 버퍼 위에서 읽어 복사한 뒤로는 소유자만 본다. */
 	union	win_slot_encoding win_slot;
+	/* [한국어] 일련번호(옆의 상류 주석).
+	 * 설정자: 호스트가 보낸 장치 서술.
+	 * 읽는 자: 이 파일이 커널 쪽 서술로 복사한 뒤 config 읽기가 흉내 낼 값으로 쓴다.
+	 * 값 범위: PCI 규격의 해당 필드.
+	 * 동기화: 수신 버퍼 위에서 읽어 복사한 뒤로는 소유자만 본다. */
 	u32	ser;	/* serial number */
+	/* [한국어] 속성 플래그. **구판에 없던 필드다** — 위 enum 의 값이 들어온다.
+	 * 설정자: 호스트가 보낸 장치 서술.
+	 * 읽는 자: 이 파일이 커널 쪽 서술로 복사한 뒤 config 읽기가 흉내 낼 값으로 쓴다.
+	 * 값 범위: PCI 규격의 해당 필드.
+	 * 동기화: 수신 버퍼 위에서 읽어 복사한 뒤로는 소유자만 본다. */
 	u32	flags;
+	/* [한국어] 가상 NUMA 노드 번호. 역시 구판에 없다. 위 플래그의 NUMA_AFFINITY 가
+	 * 서 있을 때만 유효하다.
+	 * 설정자: 호스트가 보낸 장치 서술.
+	 * 읽는 자: 이 파일이 커널 쪽 서술로 복사한 뒤 config 읽기가 흉내 낼 값으로 쓴다.
+	 * 값 범위: PCI 규격의 해당 필드.
+	 * 동기화: 수신 버퍼 위에서 읽어 복사한 뒤로는 소유자만 본다. */
 	u16	virtual_numa_node;
+	/* [한국어] 예약 필드. 구조체 크기를 맞추는 자리다. */
 	u16	reserved;
+/* [한국어] 장치 서술(확장판). 프로토콜 1.2 이상이 이 형식을 쓴다. */
 } __packed;
 
 /**
@@ -345,11 +479,35 @@ struct pci_function_description2 {
  */
 struct hv_msi_desc {
 	u8	vector;
+	/* [한국어] 전달 방식.
+	 * 설정자: hv_compose_msi_req_v1().
+	 * 읽는 자: 호스트.
+	 * 값 범위: 아키텍처별 DELIVERY_MODE 상수.
+	 * 동기화: 패킷마다 독립이다. */
 	u8	delivery_mode;
+	/* [한국어] 연속 벡터 개수.
+	 * 설정자: hv_compose_msi_req_v1().
+	 * 읽는 자: 호스트.
+	 * 값 범위: 1 이상.
+	 * 동기화: 패킷마다 독립이다. */
 	u16	vector_count;
+	/* [한국어] 예약 필드.
+	 * 설정자: memset 으로 0 이 된 채로 간다.
+	 * 읽는 자: 호스트가 무시한다.
+	 * 값 범위: 0.
+	 * 동기화: 해당 없음. */
 	u32	reserved;
+	/* [한국어] 대상 CPU 마스크.
+	 * 설정자: hv_compose_msi_req_v1() 이 CPU_AFFINITY_ALL 을 넣는다 —
+	 * 실제 대상은 나중에 hv_irq_unmask() 의 재타게팅 하이퍼콜이 정한다.
+	 * 읽는 자: 호스트.
+	 * 값 범위: 64비트 마스크. **64개를 넘는 vCPU 를 표현할 수 없어**
+	 * 2판이 프로세서 배열로 바뀌었다.
+	 * 동기화: 패킷마다 독립이다. */
 	u64	cpu_mask;
+/* [한국어] MSI 서술(1판). */
 } __packed;
+/* [한국어] 세 판본이 대상 CPU 표현과 벡터 폭에서 갈린다. */
 
 /**
  * struct hv_msi_desc2 - 1.2 version of hv_msi_desc
@@ -369,11 +527,34 @@ struct hv_msi_desc {
  */
 struct hv_msi_desc2 {
 	u8	vector;
+	/* [한국어] 전달 방식.
+	 * 설정자: hv_compose_msi_req_v2().
+	 * 읽는 자: 호스트.
+	 * 값 범위: 아키텍처별 DELIVERY_MODE 상수.
+	 * 동기화: 패킷마다 독립이다. */
 	u8	delivery_mode;
+	/* [한국어] 연속 벡터 개수.
+	 * 설정자: hv_compose_msi_req_v2().
+	 * 읽는 자: 호스트가 그만큼의 벡터를 한 번에 만든다.
+	 * 값 범위: 1 이상. multi-MSI 에서 1 보다 커진다.
+	 * 동기화: 패킷마다 독립이다. */
 	u16	vector_count;
+	/* [한국어] 아래 배열에서 유효한 항목 수.
+	 * 설정자: hv_compose_msi_req_v2() 가 1 을 넣는다 — 대상 CPU 하나만 지정한다.
+	 * 읽는 자: 호스트.
+	 * 값 범위: 1~32.
+	 * 동기화: 패킷마다 독립이다. */
 	u16	processor_count;
+	/* [한국어] 대상 가상 프로세서 번호 배열. **1.1 의 64비트 마스크를 대신하는 것** 이라,
+	 * 64개를 넘는 vCPU 를 가진 게스트도 대상을 정확히 지정할 수 있다.
+	 * 설정자: hv_compose_msi_req_v2().
+	 * 읽는 자: 호스트.
+	 * 값 범위: 위 processor_count 개만 유효하다.
+	 * 동기화: 패킷마다 독립이다. */
 	u16	processor_array[32];
+/* [한국어] MSI 서술(2판). */
 } __packed;
+/* [한국어] 판본 사이의 차이가 대상 CPU 표현과 벡터 폭 둘뿐이다. */
 
 /*
  * struct hv_msi_desc3 - 1.3 version of hv_msi_desc
@@ -383,11 +564,18 @@ struct hv_msi_desc2 {
  */
 struct hv_msi_desc3 {
 	u32	vector;
+	/* [한국어] 전달 방식. 2판과 같다. */
 	u8	delivery_mode;
+	/* [한국어] 예약 필드. 벡터가 32비트로 넓어지며 정렬을 맞추려고 생겼다. */
 	u8	reserved;
+	/* [한국어] 연속 벡터 개수. 2판과 같다. */
 	u16	vector_count;
+	/* [한국어] 유효한 프로세서 항목 수. 2판과 같다. */
 	u16	processor_count;
+	/* [한국어] 대상 가상 프로세서 번호 배열. 2판과 같다. */
 	u16	processor_array[32];
+/* [한국어] MSI 서술(3판). 위 상류 주석대로 2판과 **벡터 폭만** 다르며,
+ * ARM 의 LPI 처럼 큰 벡터 번호를 쓰는 곳을 위한 것이다. */
 } __packed;
 
 /**
@@ -404,9 +592,26 @@ struct hv_msi_desc3 {
  */
 struct tran_int_desc {
 	u16	reserved;
+	/* [한국어] 이 서술이 덮는 연속 벡터 개수.
+	 * 설정자: 호스트.
+	 * 읽는 자: 이 파일이 multi-MSI 에서 벡터 번호 차이를 계산하는 근거로 쓴다.
+	 * 값 범위: 1 이상.
+	 * 동기화: 응답에서 복사한 뒤로는 소유자만 본다. */
 	u16	vector_count;
+	/* [한국어] 장치가 인터럽트를 낼 때 쓸 MSI 데이터 값.
+	 * 설정자: 호스트.
+	 * 읽는 자: hv_compose_msi_msg() 가 msi_msg 에 그대로 담는다.
+	 * 값 범위: 호스트가 정한 값.
+	 * 동기화: 응답에서 복사한 뒤로는 소유자만 본다. */
 	u32	data;
+	/* [한국어] 장치가 인터럽트를 낼 때 쓸 MSI 주소.
+	 * 설정자: 호스트.
+	 * 읽는 자: hv_compose_msi_msg() 가 상·하위 32비트로 나눠 담는다.
+	 * 값 범위: 호스트가 정한 물리 주소.
+	 * 동기화: 응답에서 복사한 뒤로는 소유자만 본다. */
 	u64	address;
+/* [한국어] 호스트가 만들어 준 인터럽트의 변환 서술. **이 구조체가
+ * hv_compose_msi_msg() 의 목적 전부** 다. */
 } __packed;
 
 /*
@@ -415,28 +620,63 @@ struct tran_int_desc {
  */
 
 struct pci_message {
+	/* [한국어] 메시지 종류.
+	 * 설정자: 요청을 만드는 함수.
+	 * 읽는 자: 호스트, 또는 알림이면 hv_pci_onchannelcallback().
+	 * 값 범위: PCI_ 계열 상수.
+	 * 동기화: 패킷마다 독립이다. */
 	u32 type;
+/* [한국어] 모든 메시지의 공통 머리(위 상류 주석 참조). */
 } __packed;
 
 struct pci_child_message {
+	/* [한국어] 메시지 종류. */
 	struct pci_message message_type;
+	/* [한국어] 대상 장치의 슬롯 번호.
+	 * 설정자: 요청을 만드는 함수가 devfn_to_wslot() 결과를 넣는다.
+	 * 읽는 자: 호스트.
+	 * 값 범위: Windows 슬롯 인코딩.
+	 * 동기화: 패킷마다 독립이다. */
 	union win_slot_encoding wslot;
+/* [한국어] 장치 하나를 지목하는 가장 짧은 요청. 자원 질의와 자원 반납이 이 형식을 쓴다. */
 } __packed;
 
 struct pci_incoming_message {
+	/* [한국어] VMBus 패킷의 공통 머리. 알림에는 이것이 앞에 붙는다. */
 	struct vmpacket_descriptor hdr;
+	/* [한국어] 그 뒤의 메시지 종류.
+	 * 설정자: 호스트.
+	 * 읽는 자: hv_pci_onchannelcallback() 이 이 값으로 갈래를 나눈다.
+	 * 값 범위: PCI_ 계열 상수.
+	 * 동기화: 수신 버퍼 위에서만 읽는다. */
 	struct pci_message message_type;
+/* [한국어] 호스트가 먼저 보내는 알림의 공통 머리. */
 } __packed;
 
 struct pci_response {
+	/* [한국어] VMBus 패킷의 공통 머리. */
 	struct vmpacket_descriptor hdr;
+	/* [한국어] 요청 처리 결과(옆의 상류 주석대로 음수가 실패).
+	 * 설정자: 호스트.
+	 * 읽는 자: 각 완료 콜백.
+	 * 값 범위: 0 이상이 성공.
+	 * 동기화: 완료 콜백 안에서만 읽는다. */
 	s32 status;			/* negative values are failures */
+/* [한국어] 모든 응답의 공통 머리. */
 } __packed;
 
 struct pci_packet {
+	/* [한국어] 응답이 왔을 때 부를 콜백.
+	 * 설정자: 요청을 보내는 함수.
+	 * 읽는 자: hv_pci_onchannelcallback() 이 요청 ID 로 이 패킷을 되찾아 부른다.
+	 * 값 범위: 이 파일의 완료 함수 중 하나.
+	 * 동기화: 요청 하나당 패킷 하나라 공유되지 않는다. */
 	void (*completion_func)(void *context, struct pci_response *resp,
+				/* [한국어] 응답 크기를 함께 받아, 콜백이 잘린 패킷을 걸러 낼 수 있게 한다. */
 				int resp_packet_size);
 	void *compl_ctxt;
+/* [한국어] 요청 패킷의 공통 머리. **전선에 나가지 않고 게스트 안에서만 쓰인다** —
+ * 그래서 __packed 가 없고, 요청 ID 로 이 구조체의 주소를 그대로 쓴다. */
 };
 
 /*
@@ -1013,6 +1253,7 @@ struct hv_pcibus_device {
 	struct irq_domain *irq_domain;
 
 	struct workqueue_struct *wq;
+/* [한국어] 워크큐가 준비됐다. */
 
 	/* Highest slot of child device with resources allocated */
 	int wslot_res_allocated;
@@ -1299,6 +1540,7 @@ static unsigned int hv_msi_get_int_vector(struct irq_data *data)
 	struct irq_cfg *cfg = irqd_cfg(data);
 
 	return cfg->vector;
+/* [한국어] x86 에서는 IRQ 설정 구조에서 벡터를 꺼낸다. */
 }
 
 #define hv_msi_prepare		pci_msi_prepare
@@ -1354,24 +1596,41 @@ static void hv_irq_retarget_interrupt(struct irq_data *data)
 {
 	struct msi_desc *msi_desc = irq_data_get_msi_desc(data);
 	struct hv_retarget_device_interrupt *params;
+	/* [한국어] 이 인터럽트의 변환 서술. 호스트에게 어느 인터럽트를 옮길지 알리는 근거다. */
 	struct tran_int_desc *int_desc;
+	/* [한국어] 이 장치가 속한 가상 버스. */
 	struct hv_pcibus_device *hbus;
+	/* [한국어] 옮길 대상 CPU 집합. */
 	const struct cpumask *dest;
+	/* [한국어] CPU 집합을 임시로 담을 자리. */
 	cpumask_var_t tmp;
+	/* [한국어] 장치가 붙은 PCI 버스. */
 	struct pci_bus *pbus;
+	/* [한국어] 커널 쪽 PCI 장치. */
 	struct pci_dev *pdev;
+	/* [한국어] 저장할 인터럽트 상태. */
 	unsigned long flags;
+	/* [한국어] 하이퍼콜 인자의 가변 부분 크기. 프로세서 뱅크를 쓸 때만 0 이 아니다. */
 	u32 var_size = 0;
+	/* [한국어] 대상 CPU 와 프로세서 뱅크 수. */
 	int cpu, nr_bank;
+	/* [한국어] 하이퍼콜의 결과. */
 	u64 res;
 
 	dest = irq_data_get_effective_affinity_mask(data);
+	/* [한국어] MSI 서술자에서 PCI 장치를 되찾는다. */
 	pdev = msi_desc_to_pci_dev(msi_desc);
+	/* [한국어] 그 장치가 붙은 버스. */
 	pbus = pdev->bus;
+	/* [한국어] sysdata 가 hbus 의 맨 앞 필드라 이 변환이 성립한다. */
 	hbus = container_of(pbus->sysdata, struct hv_pcibus_device, sysdata);
+	/* [한국어] 인터럽트 생성 때 받아 둔 변환 서술. */
 	int_desc = data->chip_data;
+	/* [한국어] 그것이 없으면 — 아직 호스트에 인터럽트를 만들지 않았다는 뜻이다. */
 	if (!int_desc) {
+		/* [한국어] 경고만 남기고, */
 		dev_warn(&hbus->hdev->device, "%s() can not unmask irq %u\n",
+			 /* [한국어] 어느 IRQ 였는지 함께 남긴다. */
 			 __func__, data->irq);
 		return;
 	}
@@ -1379,17 +1638,28 @@ static void hv_irq_retarget_interrupt(struct irq_data *data)
 	local_irq_save(flags);
 
 	params = *this_cpu_ptr(hyperv_pcpu_input_arg);
+	/* [한국어] 이 CPU 의 하이퍼콜 입력 버퍼를 지운다 — 공유 버퍼라 이전 값이 남아 있다. */
 	memset(params, 0, sizeof(*params));
+	/* [한국어] 자기 파티션을 대상으로 지정한다. */
 	params->partition_id = HV_PARTITION_ID_SELF;
+	/* [한국어] MSI 인터럽트를 옮긴다는 표시. */
 	params->int_entry.source = HV_INTERRUPT_SOURCE_MSI;
+	/* [한국어] 어느 인터럽트인지를 주소로 지목한다. */
 	params->int_entry.msi_entry.address.as_uint32 = int_desc->address & 0xffffffff;
+	/* [한국어] 데이터 값까지 함께 넘겨야 인터럽트가 특정된다. */
 	params->int_entry.msi_entry.data.as_uint32 = int_desc->data;
+	/* [한국어] 장치 ID 를 VMBus 인스턴스 GUID 에서 조립한다 — */
 	params->device_id = (hbus->hdev->dev_instance.b[5] << 24) |
+			   /* [한국어] 바이트 순서가 뒤섞여 있는 것은 GUID 의 바이트 배치와 */
 			   (hbus->hdev->dev_instance.b[4] << 16) |
+			   /* [한국어] 호스트가 기대하는 장치 ID 배치가 다르기 때문이다. */
 			   (hbus->hdev->dev_instance.b[7] << 8) |
+			   /* [한국어] 하위 3비트를 지우는 것은 그 자리에 기능 번호가 들어가기 때문이다. */
 			   (hbus->hdev->dev_instance.b[6] & 0xf8) |
+			   /* [한국어] 그 자리에 기능 번호를 넣어 장치 ID 를 완성한다. */
 			   PCI_FUNC(pdev->devfn);
 	params->int_target.vector = hv_msi_get_int_vector(data);
+/* [한국어] 인터럽트를 받을 벡터까지 채웠다. */
 
 	if (hbus->protocol_version >= PCI_PROTOCOL_VERSION_1_2) {
 		/*
@@ -1403,16 +1673,24 @@ static void hv_irq_retarget_interrupt(struct irq_data *data)
 			HV_DEVICE_INTERRUPT_TARGET_PROCESSOR_SET;
 
 		if (!alloc_cpumask_var(&tmp, GFP_ATOMIC)) {
+			/* [한국어] CPU 집합을 잡지 못하면 실패로 표시하고, */
 			res = 1;
+			/* [한국어] 인터럽트를 다시 켜는 정리 경로로 간다. */
 			goto out;
 		}
 
 		cpumask_and(tmp, dest, cpu_online_mask);
+		/* [한국어] 요청 대상 중 **온라인인 CPU 만** 골라 프로세서 집합으로 바꾼다 —
+		 * 오프라인 CPU 를 대상으로 지정하면 인터럽트가 갈 곳이 없다. */
 		nr_bank = cpumask_to_vpset(&params->int_target.vp_set, tmp);
+		/* [한국어] 변환이 끝났으니 임시 마스크를 놓는다. */
 		free_cpumask_var(tmp);
 
+		/* [한국어] 유효한 뱅크가 하나도 없으면 — */
 		if (nr_bank <= 0) {
+			/* [한국어] 실패로 표시하고, */
 			res = 1;
+			/* [한국어] 정리 경로로 간다. */
 			goto out;
 		}
 
@@ -1424,12 +1702,17 @@ static void hv_irq_retarget_interrupt(struct irq_data *data)
 		var_size = 1 + nr_bank;
 	} else {
 		for_each_cpu_and(cpu, dest, cpu_online_mask) {
+			/* [한국어] 1.2 미만이면 64비트 마스크에 비트를 세운다 — */
 			params->int_target.vp_mask |=
+				/* [한국어] CPU 번호를 하이퍼바이저가 아는 가상 프로세서 번호로 바꿔야 한다.
+				 * **64개를 넘는 vCPU 는 이 방식으로 표현할 수 없어** 위 뱅크 방식이 생겼다. */
 				(1ULL << hv_cpu_number_to_vp_number(cpu));
 		}
 	}
 
+	/* [한국어] 가변 크기를 상위 비트에 실어 하이퍼콜을 건다. */
 	res = hv_do_hypercall(HVCALL_RETARGET_INTERRUPT | (var_size << 17),
+			      /* [한국어] 가변 부분은 입력 버퍼 안에 이미 있어 출력 인자는 필요 없다. */
 			      params, NULL);
 
 out:
@@ -1508,8 +1791,18 @@ static void hv_arch_irq_unmask(struct irq_data *data)
 #define hv_msi_prepare		NULL
 
 struct hv_pci_chip_data {
+	/* [한국어] SPI 벡터의 사용 여부 비트맵.
+	 * 설정자: hv_pci_vec_alloc_device_irq() 가 영역을 잡고, 해제 쪽이 놓는다.
+	 * 읽는 자: 같은 두 함수.
+	 * 값 범위: 비트 n 이 서면 n 번 SPI 가 쓰이고 있다는 뜻이다.
+	 * 동기화: 아래 map_lock 이 지킨다. */
 	DECLARE_BITMAP(spi_map, HV_PCI_MSI_SPI_NR);
+	/* [한국어] 위 비트맵을 지키는 뮤텍스.
+	 * 설정자·읽는 자: 할당과 해제 두 함수.
+	 * 값 범위: 뮤텍스.
+	 * 동기화: 두 함수가 모두 프로세스 컨텍스트에서만 불려 뮤텍스로 충분하다. */
 	struct mutex	map_lock;
+/* [한국어] ARM64 판의 MSI 벡터 관리 상태. */
 };
 
 /* Hyper-V vPCI MSI GIC IRQ domain */
@@ -1518,6 +1811,8 @@ static struct irq_domain *hv_msi_gic_irq_domain;
 /* Hyper-V PCI MSI IRQ chip */
 static struct irq_chip hv_arm64_msi_irq_chip = {
 	.name = "MSI",
+	/* [한국어] 친화도 설정을 상위 GIC 도메인에 그대로 넘긴다 — 이 계층은
+	 * 벡터 번호만 관리하고 실제 라우팅은 GIC 가 한다. */
 	.irq_set_affinity = irq_chip_set_affinity_parent,
 	.irq_eoi = irq_chip_eoi_parent,
 	.irq_mask = irq_chip_mask_parent,
@@ -1587,8 +1882,11 @@ static void hv_pci_vec_irq_free(struct irq_domain *domain,
 {
 	struct hv_pci_chip_data *chip_data = domain->host_data;
 	struct irq_data *d = irq_domain_get_irq_data(domain, virq);
+	/* [한국어] 비트맵 안에서의 시작 위치. 하드웨어 번호에서 SPI 시작 오프셋을 뺀 값이다. */
 	int first = d->hwirq - HV_PCI_MSI_SPI_START;
+	/* [한국어] 도메인 IRQ 순회 인덱스. */
 	int i;
+/* [한국어] 비트맵을 먼저 되돌린다. */
 
 	mutex_lock(&chip_data->map_lock);
 	bitmap_release_region(chip_data->spi_map,
@@ -1596,8 +1894,11 @@ static void hv_pci_vec_irq_free(struct irq_domain *domain,
 			      get_count_order(nr_bm_irqs));
 	mutex_unlock(&chip_data->map_lock);
 	for (i = 0; i < nr_dom_irqs; i++) {
+		/* [한국어] 첫 항목의 irq_data 는 위에서 이미 얻었으므로, */
 		if (i)
+			/* [한국어] 두 번째부터만 새로 얻는다. */
 			d = irq_domain_get_irq_data(domain, virq + i);
+		/* [한국어] 각 항목의 도메인 데이터를 초기화한다. */
 		irq_domain_reset_irq_data(d);
 	}
 
@@ -1659,14 +1960,17 @@ static int hv_pci_vec_alloc_device_irq(struct irq_domain *domain,
 {
 	struct hv_pci_chip_data *chip_data = domain->host_data;
 	int index;
+/* [한국어] 비트맵에서 찾은 영역의 시작 위치. */
 
 	/* Find and allocate region from the SPI bitmap */
 	mutex_lock(&chip_data->map_lock);
 	index = bitmap_find_free_region(chip_data->spi_map,
+					/* [한국어] 전체 SPI 개수 안에서 찾는다. */
 					HV_PCI_MSI_SPI_NR,
 					get_count_order(nr_irqs));
 	mutex_unlock(&chip_data->map_lock);
 	if (index < 0)
+		/* [한국어] 빈 자리가 없으면 -ENOSPC 다 — 이 게스트가 쓸 수 있는 SPI 를 다 썼다는 뜻이다. */
 		return -ENOSPC;
 
 	*hwirq = index + HV_PCI_MSI_SPI_START;
@@ -1709,23 +2013,36 @@ static int hv_pci_vec_irq_gic_domain_alloc(struct irq_domain *domain,
 {
 	struct irq_fwspec fwspec;
 	struct irq_data *d;
+	/* [한국어] 각 단계의 결과. */
 	int ret;
+/* [한국어] 상위 도메인에 넘길 인터럽트 명세를 채운다. */
 
 	fwspec.fwnode = domain->parent->fwnode;
+	/* [한국어] 디바이스 트리 기반이면 — */
 	if (is_of_node(fwspec.fwnode)) {
 		/* SPI lines for OF translations start at offset 32 */
 		fwspec.param_count = 3;
 		fwspec.param[0] = 0;
+		/* [한국어] **SPI 번호가 32 부터 시작하므로 그만큼 뺀다**(옆의 상류 주석).
+		 * GIC 의 SPI 는 하드웨어 번호 32 가 SPI 0 이다. */
 		fwspec.param[1] = hwirq - 32;
+		/* [한국어] 에지 상승 트리거로 지정한다 — MSI 는 언제나 에지다. */
 		fwspec.param[2] = IRQ_TYPE_EDGE_RISING;
+	/* [한국어] ACPI 기반이면 — */
 	} else {
+		/* [한국어] 인자가 둘뿐이라 오프셋 보정도 없다. */
 		fwspec.param_count = 2;
+		/* [한국어] 하드웨어 번호를 그대로 넘긴다. */
 		fwspec.param[0] = hwirq;
+		/* [한국어] 트리거 종류는 같다. */
 		fwspec.param[1] = IRQ_TYPE_EDGE_RISING;
+	/* [한국어] 펌웨어 종류에 따라 명세 형식이 다른 것이 이 갈림의 이유다. */
 	}
 
 	ret = irq_domain_alloc_irqs_parent(domain, virq, 1, &fwspec);
+	/* [한국어] 상위 도메인에서 자리를 얻지 못하면, */
 	if (ret)
+		/* [한국어] 그 오류를 올려보낸다. */
 		return ret;
 
 	/*
@@ -1771,14 +2088,22 @@ static int hv_pci_vec_irq_domain_alloc(struct irq_domain *domain,
 {
 	irq_hw_number_t hwirq;
 	unsigned int i;
+	/* [한국어] 각 단계의 결과. */
 	int ret;
+/* [한국어] 먼저 하드웨어 인터럽트 번호를 확보한다. */
 
+	/* [한국어] 요청한 개수만큼 연속된 번호를 잡는다. */
 	ret = hv_pci_vec_alloc_device_irq(domain, nr_irqs, &hwirq);
+	/* [한국어] 잡지 못하면, */
 	if (ret)
+		/* [한국어] 그 오류를 올려보낸다. */
 		return ret;
 
+	/* [한국어] 잡은 번호마다 상위 GIC 도메인에도 자리를 만든다. */
 	for (i = 0; i < nr_irqs; i++) {
+		/* [한국어] 가상 IRQ 와 하드웨어 번호를 짝지어 넘긴다. */
 		ret = hv_pci_vec_irq_gic_domain_alloc(domain, virq + i,
+						      /* [한국어] 둘 다 i 만큼 밀어 연속으로 대응시킨다. */
 						      hwirq + i);
 		if (ret) {
 			hv_pci_vec_irq_free(domain, virq, nr_irqs, i);
@@ -1786,10 +2111,12 @@ static int hv_pci_vec_irq_domain_alloc(struct irq_domain *domain,
 		}
 
 		irq_domain_set_hwirq_and_chip(domain, virq + i,
+					      /* [한국어] 하드웨어 번호를 i 만큼 밀어 연속으로 대응시킨다. */
 					      hwirq + i,
 					      &hv_arm64_msi_irq_chip,
 					      domain->host_data);
 		pr_debug("pID:%d vID:%u\n", (int)(hwirq + i), virq + i);
+	/* [한국어] 이 벡터 처리 끝. */
 	}
 
 	return 0;
@@ -1831,12 +2158,15 @@ static int hv_pci_vec_irq_domain_activate(struct irq_domain *domain,
 	int cpu = cpumask_first(cpu_present_mask);
 
 	irq_data_update_effective_affinity(irqd, cpumask_of(cpu));
+/* [한국어] 실제로 적용된 친화도를 기록한다 — 이후 재타게팅이 이 값을 근거로 삼는다. */
 
 	return 0;
 }
 
 static const struct irq_domain_ops hv_pci_domain_ops = {
+	/* [한국어] 벡터를 잡는 콜백. */
 	.alloc	= hv_pci_vec_irq_domain_alloc,
+	/* [한국어] 놓는 콜백. */
 	.free	= hv_pci_vec_irq_domain_free,
 	.activate = hv_pci_vec_irq_domain_activate,
 };
@@ -1871,14 +2201,19 @@ static struct irq_domain *hv_pci_of_irq_domain_parent(void)
 {
 	struct device_node *parent;
 	struct irq_domain *domain;
+/* [한국어] VMBus 루트 장치의 인터럽트 부모를 찾는다. */
 
 	parent = of_irq_find_parent(hv_get_vmbus_root_device()->of_node);
+	/* [한국어] 부모 노드를 못 찾으면 — */
 	if (!parent)
+		/* [한국어] NULL 을 돌려주고, 호출자가 ACPI 쪽을 시도한다. */
 		return NULL;
 	domain = irq_find_host(parent);
+	/* [한국어] 도메인을 찾은 뒤 노드 참조를 놓는다. */
 	of_node_put(parent);
 
 	return domain;
+/* [한국어] 찾은 도메인, 또는 NULL 이 나간다. */
 }
 
 #endif
@@ -1915,9 +2250,12 @@ static struct irq_domain *hv_pci_acpi_irq_domain_parent(void)
 	acpi_gsi_domain_disp_fn gsi_domain_disp_fn;
 
 	gsi_domain_disp_fn = acpi_get_gsi_dispatcher();
+	/* [한국어] GSI 디스패처를 얻지 못하면 — */
 	if (!gsi_domain_disp_fn)
+		/* [한국어] NULL 을 돌려주고, 호출자가 다른 방법을 시도한다. */
 		return NULL;
 	return irq_find_matching_fwnode(gsi_domain_disp_fn(0),
+				     /* [한국어] 버스 종류를 가리지 않고 그 fwnode 의 도메인을 찾는다. */
 				     DOMAIN_BUS_ANY);
 }
 
@@ -1957,16 +2295,23 @@ static int hv_pci_irqchip_init(void)
 {
 	static struct hv_pci_chip_data *chip_data;
 	struct fwnode_handle *fn = NULL;
+	/* [한국어] 이 도메인이 얹힐 상위 도메인. 펌웨어 종류에 따라 찾는 방법이 다르다. */
 	struct irq_domain *irq_domain_parent = NULL;
+	/* [한국어] 기본값을 -ENOMEM 으로 둔다 — 아래 두 할당 실패가 그 값 그대로 나가고,
+	 * 펌웨어 설정 오류만 따로 덮어쓴다. */
 	int ret = -ENOMEM;
 
 	chip_data = kzalloc_obj(*chip_data);
+	/* [한국어] 칩 데이터를 잡지 못하면, */
 	if (!chip_data)
+		/* [한국어] 메모리 부족으로 물러난다. */
 		return ret;
 
 	mutex_init(&chip_data->map_lock);
 	fn = irq_domain_alloc_named_fwnode("hv_vpci_arm64");
+	/* [한국어] fwnode 를 잡지 못하면, */
 	if (!fn)
+		/* [한국어] 칩 데이터를 되돌린다. */
 		goto free_chip;
 
 	/*
@@ -1976,25 +2321,35 @@ static int hv_pci_irqchip_init(void)
 	 */
 #ifdef CONFIG_ACPI
 	if (!acpi_disabled)
+		/* [한국어] ACPI 가 살아 있으면 그쪽에서 상위 도메인을 찾는다. */
 		irq_domain_parent = hv_pci_acpi_irq_domain_parent();
+/* [한국어] ACPI 분기 끝. */
 #endif
 #ifdef CONFIG_OF
 	if (!irq_domain_parent)
+		/* [한국어] ACPI 로 못 찾았으면 디바이스 트리에서 찾는다 — 두 펌웨어를 모두 지원한다. */
 		irq_domain_parent = hv_pci_of_irq_domain_parent();
+/* [한국어] 디바이스 트리 분기 끝. */
 #endif
 	if (!irq_domain_parent) {
+		/* [한국어] 어느 쪽으로도 못 찾으면 펌웨어 설정이 잘못된 것이다.
+		 * WARN_ONCE 라 같은 경고가 반복해 쌓이지는 않는다. */
 		WARN_ONCE(1, "Invalid firmware configuration for VMBus interrupts\n");
+		/* [한국어] 이 경우만 -EINVAL 로 덮어쓴다 — 메모리 문제가 아니라 설정 문제다. */
 		ret = -EINVAL;
 		goto free_chip;
 	}
 
 	hv_msi_gic_irq_domain = irq_domain_create_hierarchy(irq_domain_parent, 0,
+		/* [한국어] SPI(Shared Peripheral Interrupt) 로 쓸 수 있는 벡터 수만큼 도메인을 만든다. */
 		HV_PCI_MSI_SPI_NR,
 		fn, &hv_pci_domain_ops,
 		chip_data);
 
 	if (!hv_msi_gic_irq_domain) {
+		/* [한국어] 도메인 생성이 실패하면 그 사실을 남기고, */
 		pr_err("Failed to create Hyper-V arm64 vPCI MSI IRQ domain\n");
+		/* [한국어] 칩 데이터를 되돌린다. */
 		goto free_chip;
 	}
 
@@ -2003,6 +2358,7 @@ static int hv_pci_irqchip_init(void)
 free_chip:
 	kfree(chip_data);
 	if (fn)
+		/* [한국어] fwnode 는 잡았을 때만 놓는다 — 첫 할당에서 실패하면 아직 NULL 이다. */
 		irq_domain_free_fwnode(fn);
 
 	return ret;
@@ -2101,6 +2457,8 @@ static void hv_pci_generic_compl(void *context, struct pci_response *resp,
 	struct hv_pci_compl *comp_pkt = context;
 
 	comp_pkt->completion_status = resp->status;
+	/* [한국어] 상태를 담은 뒤 기다리던 쪽을 깨운다 — 이 파일의 완료 함수 중
+	 * 가장 단순한 형태로, 돌려받을 데이터가 없는 요청이 이것을 쓴다. */
 	complete(&comp_pkt->host_event);
 }
 
@@ -2201,11 +2559,15 @@ static int wait_for_response(struct hv_device *hdev,
 {
 	while (true) {
 		if (hdev->channel->rescind) {
+			/* [한국어] 채널이 이미 끊겼으면 — 호스트가 장치를 회수했다는 뜻이다. */
 			dev_warn_once(&hdev->device, "The device is gone.\n");
+			/* [한국어] 더 기다려도 응답이 올 수 없다. */
 			return -ENODEV;
 		}
 
 		if (wait_for_completion_timeout(comp, HZ / 10))
+			/* [한국어] 응답이 왔으면 루프를 빠져나간다. **0.1초씩 나눠 기다리는 것** 이 요점으로,
+			 * 그 사이마다 채널이 끊겼는지 확인해 영영 기다리는 일이 없게 한다. */
 			break;
 	}
 
@@ -2251,10 +2613,14 @@ static u32 devfn_to_wslot(int devfn)
 	union win_slot_encoding wslot;
 
 	wslot.slot = 0;
+	/* [한국어] devfn 의 상위 5비트가 장치 번호다. */
 	wslot.bits.dev = PCI_SLOT(devfn);
+	/* [한국어] 하위 3비트가 기능 번호다. */
 	wslot.bits.func = PCI_FUNC(devfn);
+/* [한국어] 나머지 24비트는 0 으로 남는다. */
 
 	return wslot.slot;
+/* [한국어] 합쳐진 32비트 값이 Windows 슬롯 번호다. */
 }
 
 /**
@@ -2294,6 +2660,7 @@ static int wslot_to_devfn(u32 wslot)
 	union win_slot_encoding slot_no;
 
 	slot_no.slot = wslot;
+	/* [한국어] 반대 방향 변환 — 두 비트 필드를 다시 devfn 으로 합친다. */
 	return PCI_DEVFN(slot_no.bits.dev, slot_no.bits.func);
 }
 
@@ -2333,7 +2700,10 @@ static void hv_pci_read_mmio(struct device *dev, phys_addr_t gpa, int size, u32 
 {
 	struct hv_mmio_read_input *in;
 	struct hv_mmio_read_output *out;
+	/* [한국어] 하이퍼콜의 결과. */
 	u64 ret;
+/* [한국어] 위 상류 주석이 전제를 밝힌다 — 인터럽트가 꺼진 상태여야 CPU 별
+ * 입력 페이지를 안전하게 쓸 수 있다. */
 
 	/*
 	 * Must be called with interrupts disabled so it is safe
@@ -2342,12 +2712,19 @@ static void hv_pci_read_mmio(struct device *dev, phys_addr_t gpa, int size, u32 
 	 */
 	in = *this_cpu_ptr(hyperv_pcpu_input_arg);
 	out = *this_cpu_ptr(hyperv_pcpu_input_arg) + sizeof(*in);
+	/* [한국어] 읽을 게스트 물리 주소. */
 	in->gpa = gpa;
+	/* [한국어] 읽을 폭. 아래에서 이 값으로 결과를 해석한다. */
 	in->size = size;
+/* [한국어] 입력이 준비됐다. */
 
+	/* [한국어] MMIO 읽기를 하이퍼바이저에 맡긴다 — 매핑된 창에 직접 접근하는 대신이다. */
 	ret = hv_do_hypercall(HVCALL_MMIO_READ, in, out);
+	/* [한국어] 성공했으면 — */
 	if (hv_result_success(ret)) {
+		/* [한국어] 요청한 폭에 맞춰 결과를 꺼낸다. */
 		switch (size) {
+		/* [한국어] 1바이트면, */
 		case 1:
 			*val = *(u8 *)(out->data);
 			break;
@@ -2358,8 +2735,12 @@ static void hv_pci_read_mmio(struct device *dev, phys_addr_t gpa, int size, u32 
 			*val = *(u32 *)(out->data);
 			break;
 		}
+	/* [한국어] 실패했으면 — */
 	} else
+		/* [한국어] 무엇이 왜 실패했는지 남긴다. 값은 채우지 않으므로 호출자의 변수가
+		 * 초기화되지 않은 채로 남는다. */
 		dev_err(dev, "MMIO read hypercall error %llx addr %llx size %d\n",
+				/* [한국어] 오류 코드와 주소, 폭을 함께 남겨 추적할 수 있게 한다. */
 				ret, gpa, size);
 }
 
@@ -2393,6 +2774,7 @@ static void hv_pci_write_mmio(struct device *dev, phys_addr_t gpa, int size, u32
 {
 	struct hv_mmio_write_input *in;
 	u64 ret;
+/* [한국어] 위 상류 주석이 같은 전제를 밝힌다 — 인터럽트가 꺼진 상태여야 한다. */
 
 	/*
 	 * Must be called with interrupts disabled so it is safe
@@ -2400,8 +2782,11 @@ static void hv_pci_write_mmio(struct device *dev, phys_addr_t gpa, int size, u32
 	 */
 	in = *this_cpu_ptr(hyperv_pcpu_input_arg);
 	in->gpa = gpa;
+	/* [한국어] 쓸 폭. */
 	in->size = size;
+	/* [한국어] 폭에 맞춰 입력 버퍼에 값을 담는다. */
 	switch (size) {
+	/* [한국어] 1바이트면, */
 	case 1:
 		*(u8 *)(in->data) = val;
 		break;
@@ -2413,9 +2798,13 @@ static void hv_pci_write_mmio(struct device *dev, phys_addr_t gpa, int size, u32
 		break;
 	}
 
+	/* [한국어] MMIO 쓰기를 하이퍼바이저에 맡긴다. */
 	ret = hv_do_hypercall(HVCALL_MMIO_WRITE, in, NULL);
+	/* [한국어] 실패했으면 — */
 	if (!hv_result_success(ret))
+		/* [한국어] 무엇이 왜 실패했는지 남긴다. 읽기와 달리 호출자에게 알릴 방법이 없다. */
 		dev_err(dev, "MMIO write hypercall error %llx addr %llx size %d\n",
+				/* [한국어] 오류 코드와 주소, 폭을 함께 남긴다. */
 				ret, gpa, size);
 }
 
@@ -2484,7 +2873,9 @@ static void _hv_pcifront_read_config(struct hv_pci_dev *hpdev, int where,
 {
 	struct hv_pcibus_device *hbus = hpdev->hbus;
 	struct device *dev = &hbus->hdev->device;
+	/* [한국어] config 페이지 안에서의 실제 오프셋. */
 	int offset = where + CFG_PAGE_OFFSET;
+	/* [한국어] 저장할 인터럽트 상태. */
 	unsigned long flags;
 
 	/*
@@ -2492,15 +2883,26 @@ static void _hv_pcifront_read_config(struct hv_pci_dev *hpdev, int where,
 	 */
 	if (where + size <= PCI_COMMAND) {
 		memcpy(val, ((u8 *)&hpdev->desc.v_id) + where, size);
+	/* [한국어] 클래스·리비전 구간이면 — */
 	} else if (where >= PCI_CLASS_REVISION && where + size <=
+		   /* [한국어] 캐시 라인 크기 앞까지가 그 범위다. */
 		   PCI_CACHE_LINE_SIZE) {
+		/* [한국어] 호스트가 준 서술에서 그 자리를 복사한다. */
 		memcpy(val, ((u8 *)&hpdev->desc.rev) + where -
+		       /* [한국어] 구간 시작을 빼서 서술 안의 오프셋으로 바꾼다. */
 		       PCI_CLASS_REVISION, size);
+	/* [한국어] 서브시스템 ID 구간이면 — */
 	} else if (where >= PCI_SUBSYSTEM_VENDOR_ID && where + size <=
+		   /* [한국어] ROM BAR 앞까지가 그 범위다. */
 		   PCI_ROM_ADDRESS) {
+		/* [한국어] 역시 서술에서 복사한다. */
 		memcpy(val, (u8 *)&hpdev->desc.subsystem_id + where -
+		       /* [한국어] 여기도 구간 시작을 빼서 오프셋을 맞춘다. */
 		       PCI_SUBSYSTEM_VENDOR_ID, size);
+	/* [한국어] ROM BAR 구간이면 — */
 	} else if (where >= PCI_ROM_ADDRESS && where + size <=
+		   /* [한국어] capability 목록 앞까지가 그 범위다. 이 셋은 실제 하드웨어를 읽지 않고
+		    * 호스트가 준 서술로 흉내 내는 자리다. */
 		   PCI_CAPABILITY_LIST) {
 		/* ROM BARs are unimplemented */
 		*val = 0;
@@ -2515,14 +2917,21 @@ static void _hv_pcifront_read_config(struct hv_pci_dev *hpdev, int where,
 	} else if (where + size <= CFG_PAGE_SIZE) {
 
 		spin_lock_irqsave(&hbus->config_lock, flags);
+		/* [한국어] 하이퍼콜 경로면, */
 		if (hbus->use_calls) {
+			/* [한국어] 읽을 물리 주소를 계산하고, */
 			phys_addr_t addr = hbus->mem_config->start + offset;
+/* [한국어] 대상을 지목한 뒤 읽는다. */
 
+			/* [한국어] 먼저 창의 시작에 슬롯 번호를 쓰고, */
 			hv_pci_write_mmio(dev, hbus->mem_config->start, 4,
+						/* [한국어] 그 값이 이후 읽기의 대상을 정한다. */
 						hpdev->desc.win_slot.slot);
 			hv_pci_read_mmio(dev, addr, size, val);
+		/* [한국어] 하이퍼콜을 쓰지 않으면 — */
 		} else {
 			void __iomem *addr = hbus->cfg_addr + offset;
+/* [한국어] 매핑된 창에서 같은 자리를 계산한다. */
 
 			/* Choose the function to be read. (See comment above) */
 			writel(hpdev->desc.win_slot.slot, hbus->cfg_addr);
@@ -2547,8 +2956,10 @@ static void _hv_pcifront_read_config(struct hv_pci_dev *hpdev, int where,
 			mb();
 		}
 		spin_unlock_irqrestore(&hbus->config_lock, flags);
+	/* [한국어] 그 밖의 오프셋이면 — */
 	} else {
 		dev_err(dev, "Attempt to read beyond a function's config space.\n");
+	/* [한국어] 범위를 벗어난 접근이므로 기록만 남기고 값을 채우지 않는다. */
 	}
 }
 
@@ -2585,22 +2996,37 @@ static u16 hv_pcifront_get_vendor_id(struct hv_pci_dev *hpdev)
 {
 	struct hv_pcibus_device *hbus = hpdev->hbus;
 	struct device *dev = &hbus->hdev->device;
+	/* [한국어] 하이퍼콜 경로가 32비트로 읽어 올 값. */
 	u32 val;
+	/* [한국어] 16비트로 잘라 돌려줄 벤더 ID. */
 	u16 ret;
+	/* [한국어] 저장할 인터럽트 상태. */
 	unsigned long flags;
 
+	/* [한국어] 슬롯 선택과 읽기가 두 단계라 그 사이를 잠근다. */
 	spin_lock_irqsave(&hbus->config_lock, flags);
+/* [한국어] 이제 대상을 지목하고 읽는다. */
 
+	/* [한국어] 하이퍼콜 경로면, */
 	if (hbus->use_calls) {
+		/* [한국어] 벤더 ID 의 물리 주소를 계산한다. */
 		phys_addr_t addr = hbus->mem_config->start +
+					 /* [한국어] config 페이지 오프셋에 벤더 ID 위치를 더한 자리다. */
 					 CFG_PAGE_OFFSET + PCI_VENDOR_ID;
 
+		/* [한국어] 먼저 창의 시작에 슬롯 번호를 써서 대상을 지목하고, */
 		hv_pci_write_mmio(dev, hbus->mem_config->start, 4,
+					/* [한국어] 그 값이 이후 읽기의 대상을 정한다. */
 					hpdev->desc.win_slot.slot);
+		/* [한국어] 그 다음 2바이트를 읽는다. */
 		hv_pci_read_mmio(dev, addr, 2, &val);
+		/* [한국어] u32 로 받은 값을 u16 으로 자른다(옆의 상류 주석). */
 		ret = val;  /* Truncates to 16 bits */
+	/* [한국어] 하이퍼콜을 쓰지 않으면 — */
 	} else {
+		/* [한국어] 매핑된 창에서 같은 자리를 계산하고, */
 		void __iomem *addr = hbus->cfg_addr + CFG_PAGE_OFFSET +
+					     /* [한국어] 직접 읽는다. */
 					     PCI_VENDOR_ID;
 		/* Choose the function to be read. (See comment above) */
 		writel(hpdev->desc.win_slot.slot, hbus->cfg_addr);
@@ -2615,6 +3041,7 @@ static u16 hv_pcifront_get_vendor_id(struct hv_pci_dev *hpdev)
 	}
 
 	spin_unlock_irqrestore(&hbus->config_lock, flags);
+/* [한국어] 읽기가 끝났으니 잠금을 놓는다. */
 
 	return ret;
 }
@@ -2666,21 +3093,34 @@ static void _hv_pcifront_write_config(struct hv_pci_dev *hpdev, int where,
 {
 	struct hv_pcibus_device *hbus = hpdev->hbus;
 	struct device *dev = &hbus->hdev->device;
+	/* [한국어] config 페이지 안에서의 실제 오프셋. 이 창이 슬롯 선택 워드 뒤에
+	 * config 공간을 두는 배치라 고정 오프셋을 더한다. */
 	int offset = where + CFG_PAGE_OFFSET;
+	/* [한국어] 저장할 인터럽트 상태. */
 	unsigned long flags;
 
 	if (where >= PCI_SUBSYSTEM_VENDOR_ID &&
+	    /* [한국어] 서브시스템 ID 부터 capability 목록 앞까지는 — */
 	    where + size <= PCI_CAPABILITY_LIST) {
 		/* SSIDs and ROM BARs are read-only */
 	} else if (where >= PCI_COMMAND && where + size <= CFG_PAGE_SIZE) {
 		spin_lock_irqsave(&hbus->config_lock, flags);
+/* [한국어] 슬롯 선택과 데이터 접근이 두 단계라, 그 사이에 다른 스레드가
+ * 슬롯을 덮지 못하게 잠근다. */
 
+		/* [한국어] 하이퍼콜 경로를 쓰는 호스트면, */
 		if (hbus->use_calls) {
+			/* [한국어] 접근할 물리 주소를 계산하고, */
 			phys_addr_t addr = hbus->mem_config->start + offset;
+/* [한국어] 그 주소로 하이퍼콜을 건다. */
 
+			/* [한국어] 먼저 창의 시작에 슬롯 번호를 써서 대상을 지목하고, */
 			hv_pci_write_mmio(dev, hbus->mem_config->start, 4,
+						/* [한국어] 그 슬롯 번호가 이후 접근의 대상을 정한다. */
 						hpdev->desc.win_slot.slot);
+			/* [한국어] 그 다음 실제 값을 쓴다. 두 단계가 나뉘어 있어 위 잠금이 필요하다. */
 			hv_pci_write_mmio(dev, addr, size, val);
+		/* [한국어] 하이퍼콜을 쓰지 않으면 — 매핑된 창에 직접 쓴다. */
 		} else {
 			void __iomem *addr = hbus->cfg_addr + offset;
 
@@ -2691,9 +3131,12 @@ static void _hv_pcifront_write_config(struct hv_pci_dev *hpdev, int where,
 			/* Write to that function's config space. */
 			switch (size) {
 			case 1:
+				/* [한국어] 1바이트면 그 폭으로 쓰고, */
 				writeb(val, addr);
 				break;
 			case 2:
+				/* [한국어] 2바이트면 그 폭으로 쓴다. 폭을 맞춰야 하드웨어가 부분 쓰기를
+				 * 올바르게 해석한다. */
 				writew(val, addr);
 				break;
 			default:
@@ -2707,8 +3150,10 @@ static void _hv_pcifront_write_config(struct hv_pci_dev *hpdev, int where,
 			mb();
 		}
 		spin_unlock_irqrestore(&hbus->config_lock, flags);
+	/* [한국어] 그 밖의 오프셋이면 — */
 	} else {
 		dev_err(dev, "Attempt to write beyond a function's config space.\n");
+	/* [한국어] 범위를 벗어난 쓰기이므로 기록만 남기고 아무것도 하지 않는다. */
 	}
 }
 
@@ -2761,12 +3206,16 @@ static int hv_pcifront_read_config(struct pci_bus *bus, unsigned int devfn,
 	struct hv_pcibus_device *hbus =
 		container_of(bus->sysdata, struct hv_pcibus_device, sysdata);
 	struct hv_pci_dev *hpdev;
+/* [한국어] 이 devfn 의 게스트 쪽 장치를 찾는다. */
 
 	hpdev = get_pcichild_wslot(hbus, devfn_to_wslot(devfn));
+	/* [한국어] 없으면 — */
 	if (!hpdev)
+		/* [한국어] PCI 코어에 '장치 없음' 으로 답한다. */
 		return PCIBIOS_DEVICE_NOT_FOUND;
 
 	_hv_pcifront_read_config(hpdev, where, size, val);
+/* [한국어] 실제 읽기는 아래 계층이 했다. */
 
 	put_pcichild(hpdev);
 	return PCIBIOS_SUCCESSFUL;
@@ -2813,12 +3262,16 @@ static int hv_pcifront_write_config(struct pci_bus *bus, unsigned int devfn,
 	struct hv_pcibus_device *hbus =
 	    container_of(bus->sysdata, struct hv_pcibus_device, sysdata);
 	struct hv_pci_dev *hpdev;
+/* [한국어] 이 devfn 의 게스트 쪽 장치를 찾는다. */
 
 	hpdev = get_pcichild_wslot(hbus, devfn_to_wslot(devfn));
+	/* [한국어] 없으면 — */
 	if (!hpdev)
+		/* [한국어] PCI 코어에 '장치 없음' 으로 답한다. 코어는 그때 0xffffffff 를 읽은 것처럼 다룬다. */
 		return PCIBIOS_DEVICE_NOT_FOUND;
 
 	_hv_pcifront_write_config(hpdev, where, size, val);
+/* [한국어] 실제 쓰기는 아래 계층이 한다. */
 
 	put_pcichild(hpdev);
 	return PCIBIOS_SUCCESSFUL;
@@ -2827,6 +3280,7 @@ static int hv_pcifront_write_config(struct pci_bus *bus, unsigned int devfn,
 /* PCIe operations */
 static struct pci_ops hv_pcifront_ops = {
 	.read  = hv_pcifront_read_config,
+	/* [한국어] 읽기·쓰기 두 콜백이 이 파일이 PCI 코어에 제공하는 접점 전부다. */
 	.write = hv_pcifront_write_config,
 };
 
@@ -2856,10 +3310,31 @@ static struct pci_ops hv_pcifront_ops = {
  */
 
 struct hv_read_config_compl {
+	/* [한국어] 공통 완료 문맥. 맨 앞에 두어 일반 완료 콜백과도 호환된다.
+	 * 설정자: hv_read_config_block().
+	 * 읽는 자: hv_pci_read_config_compl().
+	 * 값 범위: 완료 객체와 상태.
+	 * 동기화: completion 이 동기화 수단이다. */
 	struct hv_pci_compl comp_pkt;
+	/* [한국어] 호출자의 버퍼. **콜백이 여기로 직접 복사한다.**
+	 * 설정자: hv_read_config_block() 이 호출자가 준 포인터를 담는다.
+	 * 읽는 자: hv_pci_read_config_compl().
+	 * 값 범위: 유효한 버퍼 포인터.
+	 * 동기화: 요청 하나당 문맥 하나라 공유되지 않는다. */
 	void *buf;
+	/* [한국어] 그 버퍼의 크기. 콜백이 이 값을 넘겨 쓰지 않는다.
+	 * 설정자: hv_read_config_block().
+	 * 읽는 자: hv_pci_read_config_compl() 이 min() 의 한쪽으로 쓴다.
+	 * 값 범위: 1 ~ HV_CONFIG_BLOCK_SIZE_MAX.
+	 * 동기화: 요청마다 독립이다. */
 	unsigned int len;
+	/* [한국어] 실제로 복사한 바이트 수.
+	 * 설정자: hv_pci_read_config_compl().
+	 * 읽는 자: hv_read_config_block() 이 0 이면 실패로 다룬다.
+	 * 값 범위: 0 ~ 위 len.
+	 * 동기화: 완료 신호가 이 값의 가시성을 보장한다. */
 	unsigned int bytes_returned;
+/* [한국어] 블록 읽기 전용 완료 문맥. 일반 문맥과 달리 목적지 버퍼를 함께 든다. */
 };
 
 /**
@@ -2905,24 +3380,40 @@ static void hv_pci_read_config_compl(void *context, struct pci_response *resp,
 {
 	struct hv_read_config_compl *comp = context;
 	struct pci_read_block_response *read_resp =
+		/* [한국어] 받은 버퍼를 읽기 응답으로 겹쳐 본다. */
 		(struct pci_read_block_response *)resp;
 	unsigned int data_len, hdr_len;
+/* [한국어] 머리 길이와 데이터 길이를 따로 계산한다. */
 
+	/* [한국어] bytes 필드 앞까지가 머리다. */
 	hdr_len = offsetof(struct pci_read_block_response, bytes);
+	/* [한국어] 머리조차 담기지 않는 크기면 — 잘린 패킷이다. */
 	if (resp_packet_size < hdr_len) {
+		/* [한국어] 실패로 표시하고, */
 		comp->comp_pkt.completion_status = -1;
+		/* [한국어] 완료만 부르는 자리로 뛴다 — 아래 복사를 건너뛰어야 쓰레기를 읽지 않는다. */
 		goto out;
 	}
 
+	/* [한국어] 머리를 뺀 나머지가 실제 데이터다. */
 	data_len = resp_packet_size - hdr_len;
+	/* [한국어] 데이터가 있고 호스트도 성공을 알렸으면 — */
 	if (data_len > 0 && read_resp->status == 0) {
+		/* [한국어] **요청한 길이와 실제 받은 길이 중 작은 쪽만** 복사한다 —
+		 * 호스트가 더 보냈더라도 호출자의 버퍼를 넘어 쓰면 안 된다. */
 		comp->bytes_returned = min(comp->len, data_len);
+		/* [한국어] 그만큼만 호출자의 버퍼로 옮긴다. */
 		memcpy(comp->buf, read_resp->bytes, comp->bytes_returned);
+	/* [한국어] 그렇지 않으면 — */
 	} else {
+		/* [한국어] 0 바이트를 받았다고 기록한다. 호출자가 이 값으로 실패를 판단한다. */
 		comp->bytes_returned = 0;
+	/* [한국어] 복사 판단 끝. */
 	}
 
+	/* [한국어] 호스트의 상태를 그대로 전한다. */
 	comp->comp_pkt.completion_status = read_resp->status;
+/* [한국어] 어느 경로로든 완료를 부르는 자리다. */
 out:
 	complete(&comp->comp_pkt.host_event);
 }
@@ -2985,41 +3476,65 @@ static int hv_read_config_block(struct pci_dev *pdev, void *buf,
 		container_of(pdev->bus->sysdata, struct hv_pcibus_device,
 			     sysdata);
 	struct {
+		/* [한국어] VMBus 요청의 공통 머리. */
 		struct pci_packet pkt;
+		/* [한국어] 그 뒤에 오는 메시지 본문 자리. */
 		char buf[sizeof(struct pci_read_block)];
+	/* [한국어] 둘을 한 덩어리로 둔다. 쓰기 쪽과 달리 여분 4바이트가 없다 —
+	 * 그 우회는 쓰기에만 필요하다. */
 	} pkt;
+	/* [한국어] 읽기 전용 완료 문맥. 호출자의 버퍼와 길이를 담아 콜백이 직접 복사하게 한다. */
 	struct hv_read_config_compl comp_pkt;
+	/* [한국어] 본문을 가리킬 포인터. */
 	struct pci_read_block *read_blk;
+	/* [한국어] 각 단계의 결과. */
 	int ret;
 
 	if (len == 0 || len > HV_CONFIG_BLOCK_SIZE_MAX)
+		/* [한국어] 길이가 0 이거나 상한을 넘으면 요청할 수 없다. */
 		return -EINVAL;
 
 	init_completion(&comp_pkt.comp_pkt.host_event);
 	comp_pkt.buf = buf;
+	/* [한국어] 콜백이 이 길이를 넘겨 복사하지 않도록 함께 알려 준다. */
 	comp_pkt.len = len;
+/* [한국어] 완료 문맥이 준비됐다. */
 
 	memset(&pkt, 0, sizeof(pkt));
+	/* [한국어] 읽기 전용 완료 콜백을 건다 — 응답의 데이터를 호출자 버퍼로 옮겨야 한다. */
 	pkt.pkt.completion_func = hv_pci_read_config_compl;
+	/* [한국어] 완료 문맥을 매단다. */
 	pkt.pkt.compl_ctxt = &comp_pkt;
+	/* [한국어] 패킷 뒤의 버퍼를 읽기 요청으로 겹쳐 본다. */
 	read_blk = (struct pci_read_block *)pkt.buf;
+	/* [한국어] 블록 읽기 메시지임을 알린다. */
 	read_blk->message_type.type = PCI_READ_BLOCK;
+	/* [한국어] devfn 을 슬롯 번호로 바꿔 대상을 지목한다. */
 	read_blk->wslot.slot = devfn_to_wslot(pdev->devfn);
+	/* [한국어] 어느 블록을 읽을지. */
 	read_blk->block_id = block_id;
+	/* [한국어] 몇 바이트를 원하는지. */
 	read_blk->bytes_requested = len;
+/* [한국어] 요청이 준비됐다. */
 
 	ret = vmbus_sendpacket(hbus->hdev->channel, read_blk,
+			       /* [한국어] 본문 크기가 고정이다 — 쓰기와 달리 데이터를 싣지 않기 때문이다. */
 			       sizeof(*read_blk), (unsigned long)&pkt.pkt,
 			       VM_PKT_DATA_INBAND,
 			       VMBUS_DATA_PACKET_FLAG_COMPLETION_REQUESTED);
 	if (ret)
+		/* [한국어] 전송이 실패하면 그대로 물러난다. */
 		return ret;
 
 	ret = wait_for_response(hbus->hdev, &comp_pkt.comp_pkt.host_event);
+	/* [한국어] 응답 대기가 실패하면, */
 	if (ret)
+		/* [한국어] 그 오류를 올려보낸다. */
 		return ret;
 
 	if (comp_pkt.comp_pkt.completion_status != 0 ||
+	    /* [한국어] **돌려받은 바이트가 0 인 경우도 실패로 다룬다** — 상태가 성공이어도
+	     * 읽어 온 것이 없으면 호출자의 버퍼가 채워지지 않았다는 뜻이다. */
 	    comp_pkt.bytes_returned == 0) {
 		dev_err(&hbus->hdev->device,
 			"Read Config Block failed: 0x%x, bytes_returned=%d\n",
@@ -3065,6 +3580,7 @@ static void hv_pci_write_config_compl(void *context, struct pci_response *resp,
 	struct hv_pci_compl *comp_pkt = context;
 
 	comp_pkt->completion_status = resp->status;
+	/* [한국어] 쓰기 완료 함수. 돌려받을 데이터가 없어 상태만 담고 깨운다. */
 	complete(&comp_pkt->host_event);
 }
 
@@ -3114,29 +3630,47 @@ static int hv_write_config_block(struct pci_dev *pdev, void *buf,
 		container_of(pdev->bus->sysdata, struct hv_pcibus_device,
 			     sysdata);
 	struct {
+		/* [한국어] VMBus 요청의 공통 머리. */
 		struct pci_packet pkt;
+		/* [한국어] 그 뒤에 오는 메시지 본문 자리. */
 		char buf[sizeof(struct pci_write_block)];
+		/* [한국어] **호스트 우회용 여분 4바이트.** 아래 상류 주석이 그 사정을 밝힌다. */
 		u32 reserved;
+	/* [한국어] 셋을 한 덩어리로 두어 패킷 바로 뒤가 본문이 되게 한다. */
 	} pkt;
+	/* [한국어] 호스트 응답을 기다릴 완료 문맥. */
 	struct hv_pci_compl comp_pkt;
+	/* [한국어] 본문을 가리킬 포인터. */
 	struct pci_write_block *write_blk;
+	/* [한국어] 실제로 보낼 크기. 본문 길이가 데이터 길이에 따라 달라진다. */
 	u32 pkt_size;
+	/* [한국어] 각 단계의 결과. */
 	int ret;
 
 	if (len == 0 || len > HV_CONFIG_BLOCK_SIZE_MAX)
+		/* [한국어] 길이가 0 이거나 상한을 넘으면 보낼 수 없다. */
 		return -EINVAL;
 
 	init_completion(&comp_pkt.host_event);
 
 	memset(&pkt, 0, sizeof(pkt));
+	/* [한국어] 쓰기 전용 완료 콜백을 건다 — 읽기와 달리 돌려받을 데이터가 없다. */
 	pkt.pkt.completion_func = hv_pci_write_config_compl;
+	/* [한국어] 완료 문맥을 매단다. */
 	pkt.pkt.compl_ctxt = &comp_pkt;
+	/* [한국어] 패킷 뒤의 버퍼를 쓰기 요청으로 겹쳐 본다. */
 	write_blk = (struct pci_write_block *)pkt.buf;
+	/* [한국어] 블록 쓰기 메시지임을 알린다. */
 	write_blk->message_type.type = PCI_WRITE_BLOCK;
+	/* [한국어] devfn 을 Windows 슬롯 번호로 바꿔 대상을 지목한다. */
 	write_blk->wslot.slot = devfn_to_wslot(pdev->devfn);
+	/* [한국어] 어느 블록에 쓸지. */
 	write_blk->block_id = block_id;
+	/* [한국어] **호스트가 실제로 보는 길이는 이 필드다**(아래 상류 주석 참조). */
 	write_blk->byte_count = len;
+	/* [한국어] 호출자의 버퍼를 패킷 안으로 복사한다. */
 	memcpy(write_blk->bytes, buf, len);
+	/* [한국어] 본문 크기는 헤더 뒤에 실제 데이터 길이만 더한 값이다. */
 	pkt_size = offsetof(struct pci_write_block, bytes) + len;
 	/*
 	 * This quirk is required on some hosts shipped around 2018, because
@@ -3148,16 +3682,21 @@ static int hv_write_config_block(struct pci_dev *pdev, void *buf,
 	pkt_size += sizeof(pkt.reserved);
 
 	ret = vmbus_sendpacket(hbus->hdev->channel, write_blk, pkt_size,
+			       /* [한국어] 패킷 주소를 요청 ID 로 삼는다. */
 			       (unsigned long)&pkt.pkt, VM_PKT_DATA_INBAND,
 			       VMBUS_DATA_PACKET_FLAG_COMPLETION_REQUESTED);
 	if (ret)
+		/* [한국어] 전송이 실패하면 그대로 물러난다. */
 		return ret;
 
 	ret = wait_for_response(hbus->hdev, &comp_pkt.host_event);
+	/* [한국어] 응답 대기가 실패하면, */
 	if (ret)
+		/* [한국어] 그 오류를 올려보낸다. */
 		return ret;
 
 	if (comp_pkt.completion_status != 0) {
+		/* [한국어] 호스트가 거절했으면 어떤 상태였는지 남긴다. */
 		dev_err(&hbus->hdev->device,
 			"Write Config Block failed: 0x%x\n",
 			comp_pkt.completion_status);
@@ -3213,13 +3752,19 @@ static int hv_register_block_invalidate(struct pci_dev *pdev, void *context,
 		container_of(pdev->bus->sysdata, struct hv_pcibus_device,
 			     sysdata);
 	struct hv_pci_dev *hpdev;
+/* [한국어] 이 장치의 게스트 쪽 표현을 찾는다. */
 
 	hpdev = get_pcichild_wslot(hbus, devfn_to_wslot(pdev->devfn));
+	/* [한국어] 없으면 — */
 	if (!hpdev)
+		/* [한국어] 등록할 대상이 없다. */
 		return -ENODEV;
 
 	hpdev->block_invalidate = block_invalidate;
+	/* [한국어] 콜백과 함께 넘길 문맥도 기록한다 — 무효화 알림이 오면
+	 * 이 둘을 짝지어 부른다. */
 	hpdev->invalidate_context = context;
+/* [한국어] 등록이 끝났다. */
 
 	put_pcichild(hpdev);
 	return 0;
@@ -3259,21 +3804,34 @@ static void hv_int_desc_free(struct hv_pci_dev *hpdev,
 {
 	struct pci_delete_interrupt *int_pkt;
 	struct {
+		/* [한국어] VMBus 요청의 공통 머리. */
 		struct pci_packet pkt;
+		/* [한국어] 그 뒤에 오는 메시지 본문 자리. */
 		u8 buffer[sizeof(struct pci_delete_interrupt)];
+	/* [한국어] 삭제 요청 패킷을 **스택에** 둔다 — 응답을 기다리지 않으므로 안전하다. */
 	} ctxt;
+/* [한국어] 먼저 보낼 필요가 있는지 확인한다. */
 
+	/* [한국어] 벡터 수가 0 이면 호스트에 만들어 둔 것이 없다는 뜻이라, */
 	if (!int_desc->vector_count) {
+		/* [한국어] 메모리만 놓고 돌아간다. */
 		kfree(int_desc);
 		return;
 	}
 	memset(&ctxt, 0, sizeof(ctxt));
+	/* [한국어] 패킷 뒤의 버퍼를 삭제 요청으로 겹쳐 본다. */
 	int_pkt = (struct pci_delete_interrupt *)ctxt.buffer;
+	/* [한국어] 인터럽트 삭제 메시지임을 알린다. */
 	int_pkt->message_type.type =
+		/* [한국어] 메시지 종류가 정해졌다. */
 		PCI_DELETE_INTERRUPT_MESSAGE;
 	int_pkt->wslot.slot = hpdev->desc.win_slot.slot;
+	/* [한국어] **생성 때 받아 둔 서술을 그대로 되돌려 보낸다** —
+	 * 호스트가 그 값으로 어느 인터럽트인지 가른다. */
 	int_pkt->int_desc = *int_desc;
+	/* [한국어] 요청 ID 를 0 으로 넘겨 단방향으로 보낸다. */
 	vmbus_sendpacket(hpdev->hbus->hdev->channel, int_pkt, sizeof(*int_pkt),
+			 /* [한국어] 응답을 기다리지 않는다 — 이 함수가 인터럽트 문맥에서도 불릴 수 있기 때문이다. */
 			 0, VM_PKT_DATA_INBAND, 0);
 	kfree(int_desc);
 }
@@ -3323,25 +3881,39 @@ static void hv_msi_free(struct irq_domain *domain, unsigned int irq)
 {
 	struct hv_pcibus_device *hbus;
 	struct hv_pci_dev *hpdev;
+	/* [한국어] 커널 쪽 PCI 장치. */
 	struct pci_dev *pdev;
+	/* [한국어] 호스트에 만들어 둔 인터럽트의 변환 서술. */
 	struct tran_int_desc *int_desc;
+	/* [한국어] 이 가상 IRQ 의 인터럽트 데이터. */
 	struct irq_data *irq_data = irq_domain_get_irq_data(domain, irq);
+	/* [한국어] 그것에 달린 MSI 서술자. */
 	struct msi_desc *msi = irq_data_get_msi_desc(irq_data);
 
 	pdev = msi_desc_to_pci_dev(msi);
+	/* [한국어] 도메인을 만들 때 넘겨 둔 버스를 되찾는다. */
 	hbus = domain->host_data;
+	/* [한국어] 칩 데이터에 담아 둔 변환 서술을 꺼낸다. */
 	int_desc = irq_data_get_irq_chip_data(irq_data);
+	/* [한국어] 없으면 — 아직 호스트에 인터럽트를 만들지 않았다는 뜻이라, */
 	if (!int_desc)
+		/* [한국어] 지울 것이 없다. */
 		return;
 
+	/* [한국어] 먼저 칩 데이터를 비운다 — 아래에서 해제하므로 포인터를 남겨 두면 안 된다. */
 	irq_data->chip_data = NULL;
+	/* [한국어] devfn 을 슬롯 번호로 바꿔 게스트 쪽 장치를 찾는다. */
 	hpdev = get_pcichild_wslot(hbus, devfn_to_wslot(pdev->devfn));
+	/* [한국어] 장치가 이미 사라졌으면 — */
 	if (!hpdev) {
+		/* [한국어] 호스트에 알릴 방법이 없으므로 게스트 쪽 메모리만 놓는다. */
 		kfree(int_desc);
 		return;
 	}
 
+	/* [한국어] 장치가 있으면 호스트에도 삭제를 알린다. */
 	hv_int_desc_free(hpdev, int_desc);
+	/* [한국어] 위에서 올린 참조를 놓는다. */
 	put_pcichild(hpdev);
 }
 
@@ -3406,11 +3978,23 @@ static void hv_irq_unmask(struct irq_data *data)
 	hv_arch_irq_unmask(data);
 
 	if (data->parent_data->chip->irq_unmask)
+		/* [한국어] 상위 도메인에 마스크 해제 콜백이 있을 때만 넘긴다 —
+		 * 없는 도메인도 있어 조건이 필요하다. */
 		irq_chip_unmask_parent(data);
 }
 
 struct compose_comp_ctxt {
+	/* [한국어] 공통 완료 문맥. 맨 앞에 두어 일반 완료 콜백과도 호환된다.
+	 * 설정자: hv_compose_msi_msg().
+	 * 읽는 자: hv_pci_compose_compl().
+	 * 값 범위: 완료 객체와 상태.
+	 * 동기화: completion 이 동기화 수단이다. */
 	struct hv_pci_compl comp_pkt;
+	/* [한국어] 호스트가 만들어 준 변환 서술을 담을 자리.
+	 * 설정자: hv_pci_compose_compl() 이 응답에서 복사한다.
+	 * 읽는 자: hv_compose_msi_msg() 가 이 값으로 MSI 주소·데이터를 만든다.
+	 * 값 범위: 호스트가 정한 값.
+	 * 동기화: 완료 신호가 이 값의 가시성을 보장한다. */
 	struct tran_int_desc int_desc;
 };
 
@@ -3446,14 +4030,19 @@ static void hv_pci_compose_compl(void *context, struct pci_response *resp,
 {
 	struct compose_comp_ctxt *comp_pkt = context;
 	struct pci_create_int_response *int_resp =
+		/* [한국어] 받은 버퍼를 인터럽트 생성 응답으로 겹쳐 본다. */
 		(struct pci_create_int_response *)resp;
 
 	if (resp_packet_size < sizeof(*int_resp)) {
+		/* [한국어] 잘린 패킷이면 실패로 표시하고, */
 		comp_pkt->comp_pkt.completion_status = -1;
+		/* [한국어] 아래 복사를 건너뛰는 자리로 뛴다. */
 		goto out;
 	}
 	comp_pkt->comp_pkt.completion_status = resp->status;
+	/* [한국어] **호스트가 만들어 준 변환 서술을 복사한다** — 이 값이 이 요청의 목적 전부다. */
 	comp_pkt->int_desc = int_resp->int_desc;
+/* [한국어] 어느 경로로든 완료를 부르는 자리다. */
 out:
 	complete(&comp_pkt->comp_pkt.host_event);
 }
@@ -3492,9 +4081,13 @@ static u32 hv_compose_msi_req_v1(
 {
 	int_pkt->message_type.type = PCI_CREATE_INTERRUPT_MESSAGE;
 	int_pkt->wslot.slot = slot;
+	/* [한국어] 요청할 벡터 번호. */
 	int_pkt->int_desc.vector = vector;
+	/* [한국어] 연속 벡터 개수. */
 	int_pkt->int_desc.vector_count = vector_count;
+	/* [한국어] 전달 방식. */
 	int_pkt->int_desc.delivery_mode = DELIVERY_MODE;
+/* [한국어] 1.1 형식이 채우는 필드가 여기까지다. */
 
 	/*
 	 * Create MSI w/ dummy vCPU set, overwritten by subsequent retarget in
@@ -3503,6 +4096,7 @@ static u32 hv_compose_msi_req_v1(
 	int_pkt->int_desc.cpu_mask = CPU_AFFINITY_ALL;
 
 	return sizeof(*int_pkt);
+/* [한국어] 채운 요청의 크기를 돌려준다 — 호출자가 그만큼만 보낸다. */
 }
 
 /*
@@ -3610,14 +4204,23 @@ static int hv_compose_multi_msi_req_get_cpu(void)
 	static int cpu_next = -1;
 
 	unsigned long flags;
+	/* [한국어] 이번에 고른 CPU. */
 	int cpu;
+/* [한국어] 여러 요청이 같은 CPU 를 고르지 않게 잠근다. */
 
+	/* [한국어] 전역 회전 포인터를 다루므로 잠금이 필요하다. */
 	spin_lock_irqsave(&multi_msi_cpu_lock, flags);
 
+	/* [한국어] 온라인 CPU 를 돌아가며 고른다 — 여러 multi-MSI 요청을 CPU 에 흩뜨려
+	 * 한 CPU 에 인터럽트가 몰리지 않게 한다. */
 	cpu_next = cpumask_next_wrap(cpu_next, cpu_online_mask);
+	/* [한국어] 고른 값을 지역 변수에 담는다. */
 	cpu = cpu_next;
+/* [한국어] 잠금 밖에서 쓰려면 복사해 두어야 한다. */
 
+	/* [한국어] 잠금을 놓는다. */
 	spin_unlock_irqrestore(&multi_msi_cpu_lock, flags);
+/* [한국어] 이제 그 값을 돌려준다. */
 
 	return cpu;
 }
@@ -3655,12 +4258,18 @@ static u32 hv_compose_msi_req_v2(
 {
 	int_pkt->message_type.type = PCI_CREATE_INTERRUPT_MESSAGE2;
 	int_pkt->wslot.slot = slot;
+	/* [한국어] 요청할 벡터 번호. **2판은 8비트라 호출자가 캐스팅해서 넘긴다.** */
 	int_pkt->int_desc.vector = vector;
+	/* [한국어] 연속 벡터 개수. */
 	int_pkt->int_desc.vector_count = vector_count;
+	/* [한국어] 전달 방식. */
 	int_pkt->int_desc.delivery_mode = DELIVERY_MODE;
+	/* [한국어] 대상 가상 프로세서를 배열의 첫 자리에 넣는다 — */
 	int_pkt->int_desc.processor_array[0] =
+		/* [한국어] CPU 번호를 하이퍼바이저가 아는 번호로 바꿔서. */
 		hv_cpu_number_to_vp_number(cpu);
 	int_pkt->int_desc.processor_count = 1;
+/* [한국어] 2판 요청이 완성됐다. */
 
 	return sizeof(*int_pkt);
 }
@@ -3698,15 +4307,24 @@ static u32 hv_compose_msi_req_v3(
 {
 	int_pkt->message_type.type = PCI_CREATE_INTERRUPT_MESSAGE3;
 	int_pkt->wslot.slot = slot;
+	/* [한국어] 요청할 벡터 번호. **3판은 32비트라 캐스팅이 없다.** */
 	int_pkt->int_desc.vector = vector;
+	/* [한국어] 예약 필드를 명시적으로 0 으로 둔다. */
 	int_pkt->int_desc.reserved = 0;
+	/* [한국어] 연속 벡터 개수. */
 	int_pkt->int_desc.vector_count = vector_count;
+	/* [한국어] 전달 방식. */
 	int_pkt->int_desc.delivery_mode = DELIVERY_MODE;
+	/* [한국어] 대상 가상 프로세서를 배열의 첫 자리에 넣는다 — */
 	int_pkt->int_desc.processor_array[0] =
+		/* [한국어] CPU 번호를 하이퍼바이저가 아는 번호로 바꿔서. */
 		hv_cpu_number_to_vp_number(cpu);
+	/* [한국어] **하나만 지정한다** — 1.1 의 CPU_AFFINITY_ALL 과 달리 대상이 정확하다. */
 	int_pkt->int_desc.processor_count = 1;
+/* [한국어] 3판 요청이 완성됐다. */
 
 	return sizeof(*int_pkt);
+/* [한국어] 채운 요청의 크기를 돌려준다. */
 }
 
 /**
@@ -3983,10 +4601,12 @@ static void hv_compose_msi_msg(struct irq_data *data, struct msi_msg *msg)
 	}
 
 	ret = vmbus_sendpacket_getid(hpdev->hbus->hdev->channel, &ctxt.int_pkts,
+				     /* [한국어] **요청 ID 를 돌려받는다** — 아래 대기가 실패하면 그것으로 요청을 회수해야 한다. */
 				     size, (unsigned long)&ctxt.pci_pkt,
 				     &trans_id, VM_PKT_DATA_INBAND,
 				     VMBUS_DATA_PACKET_FLAG_COMPLETION_REQUESTED);
 	if (ret) {
+		/* [한국어] 전송이 실패하면 그 사실을 남긴다. */
 		dev_err(&hbus->hdev->device,
 			"Sending request for interrupt failed: 0x%x",
 			comp.comp_pkt.completion_status);
@@ -4005,6 +4625,7 @@ static void hv_compose_msi_msg(struct irq_data *data, struct msi_msg *msg)
 	 */
 	while (!try_wait_for_completion(&comp.comp_pkt.host_event)) {
 		unsigned long flags;
+/* [한국어] 저장할 인터럽트 상태. 아래에서 채널 잠금을 직접 잡는다. */
 
 		/* 0xFFFF means an invalid PCI VENDOR ID. */
 		if (hv_pcifront_get_vendor_id(hpdev) == 0xFFFF) {
@@ -4022,18 +4643,24 @@ static void hv_compose_msi_msg(struct irq_data *data, struct msi_msg *msg)
 		 */
 		spin_lock_irqsave(&channel->sched_lock, flags);
 		if (unlikely(channel->onchannel_callback == NULL)) {
+			/* [한국어] 콜백이 이미 떼어졌으면 잠금을 놓고, */
 			spin_unlock_irqrestore(&channel->sched_lock, flags);
+			/* [한국어] tasklet 을 다시 켜는 정리 경로로 간다. */
 			goto enable_tasklet;
 		}
 		hv_pci_onchannelcallback(hbus);
 		spin_unlock_irqrestore(&channel->sched_lock, flags);
+/* [한국어] 직접 부른 콜백이 응답을 처리했다. */
 
+		/* [한국어] **tasklet 을 끈 채로 콜백을 직접 돌린다** — 이 함수가 인터럽트를
+		 * 기다리는 동안 tasklet 이 돌 수 없어, 응답을 스스로 받아 와야 한다. */
 		udelay(100);
 	}
 
 	tasklet_enable(&channel->callback_event);
 
 	if (comp.comp_pkt.completion_status < 0) {
+		/* [한국어] 호스트가 인터럽트 생성을 거절했으면 그 상태를 남긴다. */
 		dev_err(&hbus->hdev->device,
 			"Request for interrupt failed: 0x%x",
 			comp.comp_pkt.completion_status);
@@ -4051,7 +4678,9 @@ static void hv_compose_msi_msg(struct irq_data *data, struct msi_msg *msg)
 	/* Pass up the result. */
 	msg->address_hi = comp.int_desc.address >> 32;
 	msg->address_lo = comp.int_desc.address & 0xffffffff;
+	/* [한국어] 데이터까지 채우면 장치가 인터럽트를 낼 준비가 끝난다. */
 	msg->data = comp.int_desc.data;
+/* [한국어] 이제 참조를 놓는다. */
 
 	put_pcichild(hpdev);
 	return;
@@ -4074,6 +4703,8 @@ drop_reference:
 return_null_message:
 	msg->address_hi = 0;
 	msg->address_lo = 0;
+	/* [한국어] 실패 경로에서는 주소와 데이터를 모두 0 으로 둔다 —
+	 * 장치가 그 값으로 인터럽트를 내면 아무 데도 가지 않는다. */
 	msg->data = 0;
 }
 
@@ -4116,14 +4747,23 @@ static bool hv_pcie_init_dev_msi_info(struct device *dev, struct irq_domain *dom
 	struct irq_chip *chip = info->chip;
 
 	if (!msi_lib_init_dev_msi_info(dev, domain, real_parent, info))
+		/* [한국어] 공용 라이브러리 초기화가 실패하면 그대로 실패다. */
 		return false;
 
+	/* [한국어] MSI 준비 콜백만 이 파일의 것으로 덮는다 — 나머지는 라이브러리 기본값을 쓴다. */
 	info->ops->msi_prepare = hv_msi_prepare;
+/* [한국어] 이제 칩 쪽을 조정한다. */
 
+	/* [한국어] 친화도 설정은 상위 도메인에 맡긴다. */
 	chip->irq_set_affinity = irq_chip_set_affinity_parent;
+/* [한국어] 아키텍처별 조정이 이어진다. */
 
+	/* [한국어] x86 에서는 — */
 	if (IS_ENABLED(CONFIG_X86))
+		/* [한국어] 친화도 변경을 다음 인터럽트까지 미루게 한다. 벡터를 바꾸는 도중에
+		 * 인터럽트가 오면 놓칠 수 있어, 안전한 시점까지 미루는 것이다. */
 		chip->flags |= IRQCHIP_MOVE_DEFERRED;
+/* [한국어] 조정이 끝났다. */
 
 	return true;
 }
@@ -4137,7 +4777,9 @@ static bool hv_pcie_init_dev_msi_info(struct device *dev, struct irq_domain *dom
 				     MSI_GENERIC_FLAGS_MASK)
 
 static const struct msi_parent_ops hv_pcie_msi_parent_ops = {
+	/* [한국어] 이 부모가 위층에 요구하는 플래그. */
 	.required_flags		= HV_PCIE_MSI_FLAGS_REQUIRED,
+	/* [한국어] 이 부모가 지원하는 플래그. */
 	.supported_flags	= HV_PCIE_MSI_FLAGS_SUPPORTED,
 	.bus_select_token	= DOMAIN_BUS_PCI_MSI,
 	.chip_flags		= HV_MSI_CHIP_FLAGS,
@@ -4148,6 +4790,8 @@ static const struct msi_parent_ops hv_pcie_msi_parent_ops = {
 /* HW Interrupt Chip Descriptor */
 static struct irq_chip hv_msi_irq_chip = {
 	.name			= "Hyper-V PCIe MSI",
+	/* [한국어] **이 파일의 핵심 콜백** — 호스트에게 인터럽트를 만들어 달라고 요청해
+	 * 그 결과로 MSI 주소·데이터를 채운다. */
 	.irq_compose_msi_msg	= hv_compose_msi_msg,
 	.irq_set_affinity	= irq_chip_set_affinity_parent,
 	.irq_ack		= irq_chip_ack_parent,
@@ -4197,13 +4841,21 @@ static int hv_pcie_domain_alloc(struct irq_domain *d, unsigned int virq, unsigne
 	int ret;
 
 	ret = irq_domain_alloc_irqs_parent(d, virq, nr_irqs, arg);
+	/* [한국어] 상위 도메인에서 자리를 얻지 못하면, */
 	if (ret < 0)
+		/* [한국어] 그 오류를 올려보낸다. */
 		return ret;
 
 	for (int i = 0; i < nr_irqs; i++) {
+		/* [한국어] **하드웨어 번호를 0 으로 둔다** — 이 계층은 번호를 관리하지 않고
+		 * 호스트가 준 변환 서술이 실제 대상을 정하기 때문이다. */
 		irq_domain_set_hwirq_and_chip(d, virq + i, 0, &hv_msi_irq_chip, NULL);
+		/* [한국어] x86 에서는 — */
 		if (IS_ENABLED(CONFIG_X86))
+			/* [한국어] 에지 처리기를 명시적으로 지정한다. MSI 는 언제나 에지이며,
+			 * 상위 도메인이 다른 처리기를 걸어 두었을 수 있다. */
 			__irq_set_handler(virq + i, handle_edge_irq, 0, "edge");
+	/* [한국어] 이 벡터 처리 끝. */
 	}
 
 	return 0;
@@ -4236,12 +4888,18 @@ static void hv_pcie_domain_free(struct irq_domain *d, unsigned int virq, unsigne
 {
 	for (int i = 0; i < nr_irqs; i++)
 		hv_msi_free(d, virq + i);
+/* [한국어] 각 벡터의 호스트 쪽 인터럽트를 먼저 지웠다. */
 
+	/* [한국어] 그 다음 도메인 쪽 자리를 놓는다 — 순서를 바꾸면 이미 사라진
+	 * 도메인 데이터로 호스트에 삭제를 알리게 된다. */
 	irq_domain_free_irqs_top(d, virq, nr_irqs);
+/* [한국어] 해제 끝. */
 }
 
 static const struct irq_domain_ops hv_pcie_domain_ops = {
+	/* [한국어] 벡터를 잡는 콜백. */
 	.alloc	= hv_pcie_domain_alloc,
+	/* [한국어] 놓는 콜백. 이 둘이 이 도메인의 전부다. */
 	.free	= hv_pcie_domain_free,
 };
 
@@ -4291,19 +4949,23 @@ static int hv_pcie_init_irq_domain(struct hv_pcibus_device *hbus)
 {
 	struct irq_domain_info info = {
 		.fwnode		= hbus->fwnode,
+		/* [한국어] 도메인 정보를 채워 한 번에 만든다. */
 		.ops		= &hv_pcie_domain_ops,
 		.host_data	= hbus,
 		.parent		= hv_pci_get_root_domain(),
 	};
 
 	hbus->irq_domain = msi_create_parent_irq_domain(&info, &hv_pcie_msi_parent_ops);
+	/* [한국어] 도메인을 만들지 못하면 — */
 	if (!hbus->irq_domain) {
+		/* [한국어] 그 사실을 남기고 물러난다. */
 		dev_err(&hbus->hdev->device,
 			"Failed to build an MSI IRQ domain\n");
 		return -ENODEV;
 	}
 
 	dev_set_msi_domain(&hbus->bridge->dev, hbus->irq_domain);
+/* [한국어] 브리지에 이 도메인을 매달아, 그 아래 장치들이 MSI 를 이 도메인에서 얻게 한다. */
 
 	return 0;
 }
@@ -4396,14 +5058,20 @@ static void survey_child_resources(struct hv_pcibus_device *hbus)
 {
 	struct hv_pci_dev *hpdev;
 	resource_size_t bar_size = 0;
+	/* [한국어] 저장할 인터럽트 상태. 이 목록을 인터럽트 문맥에서도 다룬다. */
 	unsigned long flags;
+	/* [한국어] 결과를 기다리는 쪽을 깨울 완료 객체. */
 	struct completion *event;
+	/* [한국어] BAR 값을 64비트로 합칠 자리. */
 	u64 bar_val;
+	/* [한국어] BAR 순회 인덱스. 64비트 BAR 에서는 루프 안에서 한 번 더 증가한다. */
 	int i;
 
 	/* If nobody is waiting on the answer, don't compute it. */
 	event = xchg(&hbus->survey_event, NULL);
 	if (!event)
+		/* [한국어] 기다리는 쪽이 없으면 계산할 이유가 없다(옆의 상류 주석).
+		 * xchg 로 꺼내면서 동시에 NULL 로 지워, 두 번 계산하지 않는다. */
 		return;
 
 	/* If the answer has already been computed, go with it. */
@@ -4413,6 +5081,8 @@ static void survey_child_resources(struct hv_pcibus_device *hbus)
 	}
 
 	spin_lock_irqsave(&hbus->device_list_lock, flags);
+/* [한국어] 이미 계산해 둔 값이 있으면 그대로 쓴다(옆의 상류 주석) —
+ * 같은 장치 목록에 대해 다시 셀 이유가 없다. */
 
 	/*
 	 * Due to an interesting quirk of the PCI spec, all memory regions
@@ -4421,7 +5091,10 @@ static void survey_child_resources(struct hv_pcibus_device *hbus)
 	 */
 	list_for_each_entry(hpdev, &hbus->children, list_entry) {
 		for (i = 0; i < PCI_STD_NUM_BARS; i++) {
+			/* [한국어] I/O BAR 이 있으면 — */
 			if (hpdev->probed_bar[i] & PCI_BASE_ADDRESS_SPACE_IO)
+				/* [한국어] 기록만 남긴다. Hyper-V 는 I/O 공간을 지원하지 않으므로
+				 * 여기 있으면 안 되는 값이지만, 처리를 멈추지는 않는다. */
 				dev_err(&hbus->hdev->device,
 					"There's an I/O BAR in this list!\n");
 
@@ -4432,23 +5105,34 @@ static void survey_child_resources(struct hv_pcibus_device *hbus)
 				 */
 
 				bar_val = hpdev->probed_bar[i];
+				/* [한국어] 64비트 BAR 이면, */
 				if (bar_val & PCI_BASE_ADDRESS_MEM_TYPE_64)
+					/* [한국어] 다음 워드를 상위 32비트로 삼는다. */
 					bar_val |=
+					/* [한국어] **++i 로 인덱스를 함께 밀어** 그 워드를 다시 BAR 로 세지 않게 한다 —
+					 * 64비트 BAR 이 두 자리를 차지하기 때문이다. */
 					((u64)hpdev->probed_bar[++i] << 32);
 				else
 					bar_val |= 0xffffffff00000000ULL;
+/* [한국어] 32비트 BAR 이면 상위를 모두 1 로 채운다 — 아래 크기 계산이
+ * 64비트 값을 전제로 하기 때문이다. */
 
 				bar_size = get_bar_size(bar_val);
+/* [한국어] 0 이 아닌 최하위 비트의 위치가 곧 크기다. */
 
 				if (bar_val & PCI_BASE_ADDRESS_MEM_TYPE_64)
+					/* [한국어] 64비트 BAR 은 4GB 위 창으로 합산하고, */
 					hbus->high_mmio_space += bar_size;
 				else
 					hbus->low_mmio_space += bar_size;
+			/* [한국어] 32비트 BAR 은 아래 창으로 합산한다. 이 두 합계가
+			 * hv_pci_allocate_bridge_windows() 가 호스트에 요청할 크기가 된다. */
 			}
 		}
 	}
 
 	spin_unlock_irqrestore(&hbus->device_list_lock, flags);
+	/* [한국어] 계산이 끝났으니 기다리던 쪽을 깨운다. */
 	complete(event);
 }
 
@@ -4511,28 +5195,47 @@ static void prepopulate_bars(struct hv_pcibus_device *hbus)
 {
 	resource_size_t high_size = 0;
 	resource_size_t low_size = 0;
+	/* [한국어] 4GB 위 창에서 다음에 배정할 주소. */
 	resource_size_t high_base = 0;
+	/* [한국어] 4GB 아래 창에서 다음에 배정할 주소. */
 	resource_size_t low_base = 0;
+	/* [한국어] 이번에 다루는 BAR 의 크기. */
 	resource_size_t bar_size;
+	/* [한국어] 순회 중인 자식 장치. */
 	struct hv_pci_dev *hpdev;
+	/* [한국어] 저장할 인터럽트 상태. */
 	unsigned long flags;
+	/* [한국어] 64비트로 합친 BAR 값. */
 	u64 bar_val;
+	/* [한국어] COMMAND 레지스터 값. 메모리 디코딩을 껐다 켜는 데 쓴다. */
 	u32 command;
+	/* [한국어] 이 BAR 이 64비트인지. */
 	bool high;
+	/* [한국어] BAR 순회 인덱스. */
 	int i;
 
+	/* [한국어] 아래 창이 있으면 — */
 	if (hbus->low_mmio_space) {
+		/* [한국어] **가장 큰 BAR 크기부터** 시작한다. 큰 것부터 배치해야 정렬 요구를
+		 * 만족시키면서 빈틈을 줄일 수 있다. */
 		low_size = 1ULL << (63 - __builtin_clzll(hbus->low_mmio_space));
+		/* [한국어] 배정 시작 주소는 창의 시작이다. */
 		low_base = hbus->low_mmio_res->start;
+	/* [한국어] 아래 창 준비 끝. */
 	}
 
+	/* [한국어] 위 창이 있으면 — */
 	if (hbus->high_mmio_space) {
+		/* [한국어] 같은 방식으로 가장 큰 크기를 구한다. */
 		high_size = 1ULL <<
+			/* [한국어] __builtin_clzll 이 최상위 1비트 위치를 알려 준다. */
 			(63 - __builtin_clzll(hbus->high_mmio_space));
 		high_base = hbus->high_mmio_res->start;
+	/* [한국어] 위 창 준비 끝. */
 	}
 
 	spin_lock_irqsave(&hbus->device_list_lock, flags);
+/* [한국어] 목록을 훑는 동안 잠근다. */
 
 	/*
 	 * Clear the memory enable bit, in case it's already set. This occurs
@@ -4547,48 +5250,71 @@ static void prepopulate_bars(struct hv_pcibus_device *hbus)
 	 */
 	list_for_each_entry(hpdev, &hbus->children, list_entry) {
 		_hv_pcifront_read_config(hpdev, PCI_COMMAND, 2, &command);
+		/* [한국어] **메모리 디코딩을 먼저 끈다.** BAR 주소를 바꾸는 동안 켜 두면
+		 * 장치가 엉뚱한 주소에 응답하게 된다. */
 		command &= ~PCI_COMMAND_MEMORY;
+		/* [한국어] 그 값을 되쓴다. */
 		_hv_pcifront_write_config(hpdev, PCI_COMMAND, 2, command);
+	/* [한국어] 모든 자식 장치에 대해 같은 처리를 한다. */
 	}
 
 	/* Pick addresses for the BARs. */
 	do {
 		list_for_each_entry(hpdev, &hbus->children, list_entry) {
+			/* [한국어] 이 장치의 BAR 을 하나씩 본다. */
 			for (i = 0; i < PCI_STD_NUM_BARS; i++) {
+				/* [한국어] 탐색 단계에서 받아 둔 값을 꺼낸다. */
 				bar_val = hpdev->probed_bar[i];
+				/* [한국어] 0 이면 그 BAR 이 없다는 뜻이라, */
 				if (bar_val == 0)
+					/* [한국어] 건너뛴다. */
 					continue;
 				high = bar_val & PCI_BASE_ADDRESS_MEM_TYPE_64;
+				/* [한국어] 64비트 BAR 이면, */
 				if (high) {
+					/* [한국어] 다음 워드를 상위 32비트로 합친다. */
 					bar_val |=
+						/* [한국어] 여기서는 인덱스를 아직 밀지 않는다 — 아래에서 조건에 따라 민다. */
 						((u64)hpdev->probed_bar[i + 1]
+						 /* [한국어] 64비트 값이 완성됐다. */
 						 << 32);
+				/* [한국어] 32비트 BAR 이면 — */
 				} else {
 					bar_val |= 0xffffffffULL << 32;
+				/* [한국어] 상위를 모두 1 로 채워 크기 계산을 64비트로 통일한다. */
 				}
 				bar_size = get_bar_size(bar_val);
+				/* [한국어] 64비트 BAR 이고, */
 				if (high) {
+					/* [한국어] 이번 회차에서 배치할 크기와 다르면 — */
 					if (high_size != bar_size) {
+						/* [한국어] **두 워드를 차지하므로 인덱스를 밀고**, */
 						i++;
+						/* [한국어] 다음 BAR 로 넘어간다. 큰 것부터 배치하려고 크기별로 여러 번 도는 구조다. */
 						continue;
 					}
 					_hv_pcifront_write_config(hpdev,
 						PCI_BASE_ADDRESS_0 + (4 * i),
 						4,
 						(u32)(high_base & 0xffffff00));
+					/* [한국어] 하위 32비트를 쓴 뒤 인덱스를 밀어, */
 					i++;
+					/* [한국어] 상위 32비트를 다음 워드에 쓴다. */
 					_hv_pcifront_write_config(hpdev,
 						PCI_BASE_ADDRESS_0 + (4 * i),
 						4, (u32)(high_base >> 32));
 					high_base += bar_size;
+				/* [한국어] 32비트 BAR 이면 — */
 				} else {
 					if (low_size != bar_size)
+						/* [한국어] 크기가 다르면 건너뛴다. 여기서는 인덱스를 밀지 않는다 — 한 워드만 쓰기 때문이다. */
 						continue;
 					_hv_pcifront_write_config(hpdev,
 						PCI_BASE_ADDRESS_0 + (4 * i),
 						4,
 						(u32)(low_base & 0xffffff00));
 					low_base += bar_size;
+				/* [한국어] 이 BAR 배치 끝. */
 				}
 			}
 			if (high_size <= 1 && low_size <= 1) {
@@ -4608,10 +5334,15 @@ static void prepopulate_bars(struct hv_pcibus_device *hbus)
 		}
 
 		high_size >>= 1;
+		/* [한국어] **크기를 절반씩 줄이며 반복한다** — 큰 BAR 부터 배치해야
+		 * 정렬 요구를 만족시키면서 빈틈을 줄일 수 있다. */
 		low_size >>= 1;
+	/* [한국어] 양쪽 창의 크기가 0 이 될 때까지 돈다. */
 	}  while (high_size || low_size);
+/* [한국어] 배치가 끝났다. */
 
 	spin_unlock_irqrestore(&hbus->device_list_lock, flags);
+/* [한국어] 메모리 디코딩은 이 함수가 켜지 않는다 — 나중에 드라이버가 켠다. */
 }
 
 /*
@@ -4654,19 +5385,31 @@ static void hv_pci_assign_slots(struct hv_pcibus_device *hbus)
 {
 	struct hv_pci_dev *hpdev;
 	char name[SLOT_NAME_SIZE];
+	/* [한국어] 이 슬롯의 PCI 슬롯 번호. */
 	int slot_nr;
+/* [한국어] 자식 장치를 하나씩 훑는다. */
 
 	list_for_each_entry(hpdev, &hbus->children, list_entry) {
+		/* [한국어] 이미 슬롯 객체가 있으면, */
 		if (hpdev->pci_slot)
+			/* [한국어] 건너뛴다 — 목록 갱신 때마다 불려도 두 번 만들지 않는다. */
 			continue;
 
+		/* [한국어] Windows 슬롯 번호를 devfn 으로 바꾼 뒤 그 상위 5비트를 슬롯 번호로 쓴다. */
 		slot_nr = PCI_SLOT(wslot_to_devfn(hpdev->desc.win_slot.slot));
+		/* [한국어] **슬롯 이름을 일련번호로 짓는다** — 위치가 아니라 장치의 고유 번호라,
+		 * 장치가 옮겨져도 이름이 따라간다. */
 		snprintf(name, SLOT_NAME_SIZE, "%u", hpdev->desc.ser);
+		/* [한국어] sysfs 슬롯 객체를 만든다. */
 		hpdev->pci_slot = pci_create_slot(hbus->bridge->bus, slot_nr,
+					  /* [한국어] 핫플러그 슬롯이 아니므로 ops 는 NULL 이다. */
 					  name, NULL);
 		if (IS_ERR(hpdev->pci_slot)) {
+			/* [한국어] 만들지 못하면 경고만 남기고, */
 			pr_warn("pci_create slot %s failed\n", name);
+			/* [한국어] NULL 로 두어 다음 호출이 다시 시도하게 한다. */
 			hpdev->pci_slot = NULL;
+		/* [한국어] 이 장치 처리 끝. */
 		}
 	}
 }
@@ -4699,10 +5442,13 @@ static void hv_pci_remove_slots(struct hv_pcibus_device *hbus)
 	struct hv_pci_dev *hpdev;
 
 	list_for_each_entry(hpdev, &hbus->children, list_entry) {
+		/* [한국어] 슬롯 객체가 없으면, */
 		if (!hpdev->pci_slot)
+			/* [한국어] 건너뛴다. */
 			continue;
 		pci_destroy_slot(hpdev->pci_slot);
 		hpdev->pci_slot = NULL;
+	/* [한국어] 이 장치 처리 끝. */
 	}
 }
 
@@ -4746,11 +5492,16 @@ static void hv_pci_assign_numa_node(struct hv_pcibus_device *hbus)
 {
 	struct pci_dev *dev;
 	struct pci_bus *bus = hbus->bridge->bus;
+	/* [한국어] 각 PCI 장치에 대응하는 게스트 쪽 장치. */
 	struct hv_pci_dev *hv_dev;
+/* [한국어] 버스의 장치를 하나씩 훑는다. */
 
 	list_for_each_entry(dev, &bus->devices, bus_list) {
+		/* [한국어] devfn 으로 게스트 쪽 장치를 찾는다. */
 		hv_dev = get_pcichild_wslot(hbus, devfn_to_wslot(dev->devfn));
+		/* [한국어] 없으면 — */
 		if (!hv_dev)
+			/* [한국어] 건너뛴다. 호스트가 알려 준 목록과 커널이 스캔한 결과가 어긋날 수 있다. */
 			continue;
 
 		/*
@@ -4761,7 +5512,10 @@ static void hv_pci_assign_numa_node(struct hv_pcibus_device *hbus)
 		 */
 		set_dev_node(&dev->dev, 0);
 
+		/* [한국어] 호스트가 NUMA 정보를 준다고 표시했고, */
 		if (hv_dev->desc.flags & HV_PCI_DEVICE_FLAG_NUMA_AFFINITY &&
+		    /* [한국어] 그 노드 번호가 이 시스템의 범위 안이면 — 두 조건을 모두 확인해야
+		     * 호스트가 보낸 값을 믿고 쓸 수 있다. */
 		    hv_dev->desc.virtual_numa_node < num_possible_nodes())
 			/*
 			 * The kernel may boot with some NUMA nodes offline
@@ -4822,13 +5576,20 @@ static int create_root_hv_pci_bus(struct hv_pcibus_device *hbus)
 {
 	int error;
 	struct pci_host_bridge *bridge = hbus->bridge;
+/* [한국어] 브리지에 필요한 것을 채운다. */
 
+	/* [한국어] sysdata 를 매단다 — config 접근 함수들이 여기서 hbus 를 되찾는다. */
 	bridge->dev.parent = &hbus->hdev->device;
+	/* [한국어] 이 파일의 config 접근 함수 표를 건다. */
 	bridge->sysdata = &hbus->sysdata;
+	/* [한국어] 브리지가 준비됐다. */
 	bridge->ops = &hv_pcifront_ops;
 
+	/* [한국어] 루트 버스를 스캔한다 — 이때부터 config 접근이 이 파일로 들어온다. */
 	error = pci_scan_root_bus_bridge(bridge);
+	/* [한국어] 스캔이 실패하면, */
 	if (error)
+		/* [한국어] 그 오류를 올려보낸다. */
 		return error;
 
 	pci_lock_rescan_remove();
@@ -4838,12 +5599,24 @@ static int create_root_hv_pci_bus(struct hv_pcibus_device *hbus)
 	pci_bus_add_devices(bridge->bus);
 	pci_unlock_rescan_remove();
 	hbus->state = hv_pcibus_installed;
+	/* [한국어] 여기까지 오면 버스가 완전히 세워졌다. */
 	return 0;
 }
 
 struct q_res_req_compl {
+	/* [한국어] 응답을 기다릴 완료 객체.
+	 * 설정자: new_pcichild_device() 가 초기화한다.
+	 * 읽는 자: q_resource_requirements() 가 응답을 받으면 깨운다.
+	 * 값 범위: completion 구조체.
+	 * 동기화: completion 자체가 동기화 수단이다. */
 	struct completion host_event;
+	/* [한국어] 응답의 probed_bar 를 채워 넣을 장치.
+	 * 설정자: new_pcichild_device().
+	 * 읽는 자: q_resource_requirements() 가 이 포인터로 값을 옮긴다.
+	 * 값 범위: 유효한 장치 포인터.
+	 * 동기화: 요청 하나당 문맥 하나라 공유되지 않는다. */
 	struct hv_pci_dev *hpdev;
+/* [한국어] 자원 요구 질의의 완료 문맥. 일반 문맥과 달리 결과를 담을 장치를 함께 든다. */
 };
 
 /**
@@ -4892,18 +5665,26 @@ static void q_resource_requirements(void *context, struct pci_response *resp,
 {
 	struct q_res_req_compl *completion = context;
 	struct pci_q_res_req_response *q_res_req =
+		/* [한국어] 받은 버퍼를 자원 질의 응답으로 겹쳐 본다. */
 		(struct pci_q_res_req_response *)resp;
 	s32 status;
+	/* [한국어] BAR 순회 인덱스. */
 	int i;
+/* [한국어] 먼저 응답이 온전한지 확인한다. */
 
+	/* [한국어] 잘린 패킷이면 -1 로, 아니면 호스트의 상태를 쓴다. */
 	status = (resp_packet_size < sizeof(*q_res_req)) ? -1 : resp->status;
+	/* [한국어] 실패했으면 — */
 	if (status < 0) {
+		/* [한국어] 어느 장치의 질의였는지와 함께 남긴다. */
 		dev_err(&completion->hpdev->hbus->hdev->device,
 			"query resource requirements failed: %x\n",
 			status);
 	} else {
 		for (i = 0; i < PCI_STD_NUM_BARS; i++) {
+			/* [한국어] 성공했으면 BAR 탐색 결과를 장치에 복사한다 — */
 			completion->hpdev->probed_bar[i] =
+				/* [한국어] **실제 하드웨어를 탐색할 수 없어 이 값이 그 자리를 대신한다.** */
 				q_res_req->probed_bar[i];
 		}
 	}
@@ -4959,48 +5740,77 @@ static struct hv_pci_dev *new_pcichild_device(struct hv_pcibus_device *hbus,
 {
 	struct hv_pci_dev *hpdev;
 	struct pci_child_message *res_req;
+	/* [한국어] 자원 요구 질의의 완료 문맥. 응답의 probed_bar 도 여기 담긴다. */
 	struct q_res_req_compl comp_pkt;
+	/* [한국어] 질의 패킷을 **스택에** 둔다. */
 	struct {
+		/* [한국어] VMBus 요청의 공통 머리. */
 		struct pci_packet init_packet;
+		/* [한국어] 그 뒤에 오는 메시지 본문 자리. */
 		u8 buffer[sizeof(struct pci_child_message)];
+	/* [한국어] 둘을 한 덩어리로 둔다. */
 	} pkt;
+	/* [한국어] 저장할 인터럽트 상태. */
 	unsigned long flags;
+	/* [한국어] 각 단계의 결과. */
 	int ret;
 
 	hpdev = kzalloc_obj(*hpdev);
+	/* [한국어] 장치 구조를 잡지 못하면, */
 	if (!hpdev)
+		/* [한국어] NULL 을 돌려준다 — 호출자가 그것을 실패로 읽는다. */
 		return NULL;
 
 	hpdev->hbus = hbus;
+/* [한국어] 이 장치가 속한 버스를 기록했다. */
 
 	memset(&pkt, 0, sizeof(pkt));
+	/* [한국어] 응답을 기다릴 준비. */
 	init_completion(&comp_pkt.host_event);
 	comp_pkt.hpdev = hpdev;
+	/* [한국어] 완료 문맥을 매단다. */
 	pkt.init_packet.compl_ctxt = &comp_pkt;
+	/* [한국어] 자원 질의 전용 완료 콜백을 건다 — 응답의 probed_bar 를 복사해야 한다. */
 	pkt.init_packet.completion_func = q_resource_requirements;
+	/* [한국어] 패킷 뒤의 버퍼를 질의 메시지로 겹쳐 본다. */
 	res_req = (struct pci_child_message *)pkt.buffer;
+	/* [한국어] 자원 요구 질의 메시지임을 알린다. */
 	res_req->message_type.type = PCI_QUERY_RESOURCE_REQUIREMENTS;
+	/* [한국어] 어느 슬롯의 자원을 물어볼지. */
 	res_req->wslot.slot = desc->win_slot.slot;
+/* [한국어] 질의가 준비됐다. */
 
 	ret = vmbus_sendpacket(hbus->hdev->channel, res_req,
+			       /* [한국어] 본문 크기는 고정이다. */
 			       sizeof(struct pci_child_message),
 			       (unsigned long)&pkt.init_packet,
 			       VM_PKT_DATA_INBAND,
 			       VMBUS_DATA_PACKET_FLAG_COMPLETION_REQUESTED);
 	if (ret)
+		/* [한국어] 전송이 실패하면 장치 구조를 해제하는 자리로 뛴다. */
 		goto error;
 
+	/* [한국어] 응답 대기가 실패하면, */
 	if (wait_for_response(hbus->hdev, &comp_pkt.host_event))
+		/* [한국어] 같은 정리 경로로 간다. */
 		goto error;
 
+	/* [한국어] 호스트가 준 서술을 통째로 복사해 둔다. */
 	hpdev->desc = *desc;
+	/* [한국어] 참조를 1 로 시작한다 — 목록이 들고 있을 몫이다. */
 	refcount_set(&hpdev->refs, 1);
+	/* [한국어] **한 번 더 올린다** — 호출자에게 넘길 몫이다.
+	 * 그래서 이 함수가 돌려준 포인터는 호출자가 놓아야 한다. */
 	get_pcichild(hpdev);
 	spin_lock_irqsave(&hbus->device_list_lock, flags);
+/* [한국어] 목록을 고치는 동안 잠근다. */
 
 	list_add_tail(&hpdev->list_entry, &hbus->children);
+	/* [한국어] 목록에 넣었으니 잠금을 놓는다. */
 	spin_unlock_irqrestore(&hbus->device_list_lock, flags);
+	/* [한국어] 참조가 올라간 장치를 돌려준다. */
 	return hpdev;
+/* [한국어] 정상 경로 끝. */
 
 error:
 	kfree(hpdev);
@@ -5051,18 +5861,26 @@ static struct hv_pci_dev *get_pcichild_wslot(struct hv_pcibus_device *hbus,
 {
 	unsigned long flags;
 	struct hv_pci_dev *iter, *hpdev = NULL;
+/* [한국어] 목록을 훑는 동안 잠근다. */
 
+	/* [한국어] 이 목록을 인터럽트 문맥에서도 다루므로 irqsave 판이다. */
 	spin_lock_irqsave(&hbus->device_list_lock, flags);
+	/* [한국어] 자식을 하나씩 본다. */
 	list_for_each_entry(iter, &hbus->children, list_entry) {
+		/* [한국어] 슬롯 번호가 맞으면, */
 		if (iter->desc.win_slot.slot == wslot) {
+			/* [한국어] 그것을 결과로 삼고, */
 			hpdev = iter;
+			/* [한국어] **참조를 올린다** — 잠금을 놓은 뒤에도 살아 있어야 하기 때문이다. */
 			get_pcichild(hpdev);
 			break;
 		}
 	}
 	spin_unlock_irqrestore(&hbus->device_list_lock, flags);
+/* [한국어] 찾았거나 다 훑었다. */
 
 	return hpdev;
+/* [한국어] 참조가 올라간 장치, 또는 NULL 이 나간다. */
 }
 
 /**
@@ -5283,6 +6101,8 @@ static void pci_devices_present_work(struct work_struct *work)
 		break;
 
 	case hv_pcibus_init:
+	/* [한국어] 아직 세워지지 않은 버스면 — 목록을 반영하는 대신 자원 크기를 조사한다.
+	 * probe 가 그 결과를 기다리고 있기 때문이다. */
 	case hv_pcibus_probed:
 		survey_child_resources(hbus);
 		break;
@@ -5341,20 +6161,27 @@ static int hv_pci_start_relations_work(struct hv_pcibus_device *hbus,
 {
 	struct hv_dr_work *dr_wrk;
 	unsigned long flags;
+	/* [한국어] 이미 워크가 걸려 있는지. 그 여부로 새 워크를 걸지 정한다. */
 	bool pending_dr;
+/* [한국어] 제거 중인 버스에는 목록 갱신을 반영하지 않는다. */
 
 	if (hbus->state == hv_pcibus_removing) {
+		/* [한국어] 무시했다는 사실은 남긴다 — 조용히 버리면 나중에 추적할 단서가 없다. */
 		dev_info(&hbus->hdev->device,
 			 "PCI VMBus BUS_RELATIONS: ignored\n");
 		return -ENOENT;
 	}
 
 	dr_wrk = kzalloc_obj(*dr_wrk, GFP_NOWAIT);
+	/* [한국어] 워크 포장을 잡지 못하면, */
 	if (!dr_wrk)
+		/* [한국어] 메모리 부족으로 물러난다. GFP_NOWAIT 라 실패할 수 있다. */
 		return -ENOMEM;
 
 	INIT_WORK(&dr_wrk->wrk, pci_devices_present_work);
+	/* [한국어] 워크가 어느 버스의 것인지 기록한다. */
 	dr_wrk->bus = hbus;
+/* [한국어] 워크가 준비됐다. */
 
 	spin_lock_irqsave(&hbus->device_list_lock, flags);
 	/*
@@ -5364,12 +6191,17 @@ static int hv_pci_start_relations_work(struct hv_pcibus_device *hbus,
 	 */
 	pending_dr = !list_empty(&hbus->dr_list);
 	list_add_tail(&dr->list_entry, &hbus->dr_list);
+	/* [한국어] 목록에 넣었으니 잠금을 놓는다. */
 	spin_unlock_irqrestore(&hbus->device_list_lock, flags);
+/* [한국어] 이제 워크를 걸지 판단한다. */
 
 	if (pending_dr)
+		/* [한국어] **이미 걸린 워크가 새 목록도 볼 것이므로**(위 상류 주석) 방금 만든
+		 * 포장을 그냥 놓는다 — 워크를 두 번 걸면 같은 목록을 두 번 처리한다. */
 		kfree(dr_wrk);
 	else
 		queue_work(hbus->wq, &dr_wrk->wrk);
+/* [한국어] 워크 처리가 예약됐거나, 이미 예약돼 있다. */
 
 	return 0;
 }
@@ -5417,25 +6249,43 @@ static void hv_pci_devices_present(struct hv_pcibus_device *hbus,
 {
 	struct hv_dr_state *dr;
 	int i;
+/* [한국어] 구판 서술에서 게스트 쪽 스냅샷으로 옮긴다. */
 
+	/* [한국어] 가변 길이 배열까지 한 번에 잡는다. 인터럽트 문맥이라 GFP_NOWAIT 다. */
 	dr = kzalloc_flex(*dr, func, relations->device_count, GFP_NOWAIT);
+	/* [한국어] 잡지 못하면, */
 	if (!dr)
+		/* [한국어] 그냥 돌아간다 — 이 갱신은 사라진다. */
 		return;
 
+	/* [한국어] 개수를 먼저 옮긴다. */
 	dr->device_count = relations->device_count;
+	/* [한국어] 장치마다 필드를 하나씩 옮긴다. */
 	for (i = 0; i < dr->device_count; i++) {
+		/* [한국어] 벤더 ID 와, */
 		dr->func[i].v_id = relations->func[i].v_id;
+		/* [한국어] 장치 ID, */
 		dr->func[i].d_id = relations->func[i].d_id;
+		/* [한국어] 리비전, */
 		dr->func[i].rev = relations->func[i].rev;
+		/* [한국어] 프로그래밍 인터페이스, */
 		dr->func[i].prog_intf = relations->func[i].prog_intf;
+		/* [한국어] 서브클래스, */
 		dr->func[i].subclass = relations->func[i].subclass;
+		/* [한국어] 기본 클래스, */
 		dr->func[i].base_class = relations->func[i].base_class;
+		/* [한국어] 서브시스템 ID, */
 		dr->func[i].subsystem_id = relations->func[i].subsystem_id;
+		/* [한국어] 슬롯 번호, */
 		dr->func[i].win_slot = relations->func[i].win_slot;
+		/* [한국어] 일련번호까지 옮긴다. **확장판과 달리 flags 와 virtual_numa_node 가 없어**
+		 * 그 둘은 0 으로 남고, NUMA 배정이 기본값 0 을 쓰게 된다. */
 		dr->func[i].ser = relations->func[i].ser;
+	/* [한국어] 이 장치 옮기기 끝. */
 	}
 
 	if (hv_pci_start_relations_work(hbus, dr))
+		/* [한국어] 워크를 걸지 못했으면 스냅샷을 놓는다. */
 		kfree(dr);
 }
 
@@ -5474,28 +6324,50 @@ static void hv_pci_devices_present2(struct hv_pcibus_device *hbus,
 {
 	struct hv_dr_state *dr;
 	int i;
+/* [한국어] 호스트가 보낸 목록을 게스트 쪽 스냅샷으로 옮긴다. */
 
+	/* [한국어] 가변 길이 배열까지 한 번에 잡는다. GFP_NOWAIT 인 것은
+	 * 이 함수가 인터럽트 문맥에서 불리기 때문이다. */
 	dr = kzalloc_flex(*dr, func, relations->device_count, GFP_NOWAIT);
+	/* [한국어] 잡지 못하면, */
 	if (!dr)
+		/* [한국어] 그냥 돌아간다 — 이 목록 갱신은 사라지고, 다음 알림에서 만회된다. */
 		return;
 
+	/* [한국어] 개수를 먼저 옮긴다 — 아래 배열의 길이를 정하는 값이다. */
 	dr->device_count = relations->device_count;
+	/* [한국어] 장치마다 필드를 하나씩 옮긴다. */
 	for (i = 0; i < dr->device_count; i++) {
+		/* [한국어] 벤더 ID 와, */
 		dr->func[i].v_id = relations->func[i].v_id;
+		/* [한국어] 장치 ID, */
 		dr->func[i].d_id = relations->func[i].d_id;
+		/* [한국어] 리비전, */
 		dr->func[i].rev = relations->func[i].rev;
+		/* [한국어] 프로그래밍 인터페이스, */
 		dr->func[i].prog_intf = relations->func[i].prog_intf;
+		/* [한국어] 서브클래스, */
 		dr->func[i].subclass = relations->func[i].subclass;
+		/* [한국어] 기본 클래스, */
 		dr->func[i].base_class = relations->func[i].base_class;
+		/* [한국어] 서브시스템 ID, */
 		dr->func[i].subsystem_id = relations->func[i].subsystem_id;
+		/* [한국어] 슬롯 번호, */
 		dr->func[i].win_slot = relations->func[i].win_slot;
+		/* [한국어] 일련번호까지 옮긴다. */
 		dr->func[i].ser = relations->func[i].ser;
+		/* [한국어] **여기부터가 확장판에만 있는 필드다** — 구판 경로에서는 0 으로 남는다. */
 		dr->func[i].flags = relations->func[i].flags;
+		/* [한국어] 가상 NUMA 노드도 옮긴다. */
 		dr->func[i].virtual_numa_node =
+			/* [한국어] 구조체를 통째로 복사하지 않고 필드를 하나씩 옮기는 이유는,
+			 * 호스트 쪽 서술과 게스트 쪽 서술의 배치가 같다는 보장이 없기 때문이다. */
 			relations->func[i].virtual_numa_node;
 	}
 
 	if (hv_pci_start_relations_work(hbus, dr))
+		/* [한국어] 워크를 걸지 못했으면 방금 만든 스냅샷을 놓는다 —
+		 * 그 함수가 실패하면 목록에 넣지 않은 상태다. */
 		kfree(dr);
 }
 
@@ -5547,17 +6419,28 @@ static void hv_eject_device_work(struct work_struct *work)
 {
 	struct pci_eject_response *ejct_pkt;
 	struct hv_pcibus_device *hbus;
+	/* [한국어] 제거할 장치. */
 	struct hv_pci_dev *hpdev;
+	/* [한국어] 그것에 대응하는 커널 쪽 PCI 장치. 아직 없을 수도 있다. */
 	struct pci_dev *pdev;
+	/* [한국어] 저장할 인터럽트 상태. */
 	unsigned long flags;
+	/* [한국어] devfn 으로 바꾼 슬롯 번호. */
 	int wslot;
+	/* [한국어] 제거 완료 응답 패킷을 **스택에** 둔다. */
 	struct {
+		/* [한국어] VMBus 요청의 공통 머리. */
 		struct pci_packet pkt;
+		/* [한국어] 그 뒤에 오는 응답 본문 자리. */
 		u8 buffer[sizeof(struct pci_eject_response)];
+	/* [한국어] 둘을 한 덩어리로 둔다. */
 	} ctxt;
+/* [한국어] 제거 절차를 시작한다. */
 
 	hpdev = container_of(work, struct hv_pci_dev, wrk);
+	/* [한국어] 이 장치가 속한 버스를 꺼낸다. */
 	hbus = hpdev->hbus;
+/* [한국어] 상태를 바꾸는 동안 다른 경로와 겹치지 않게 잠근다. */
 
 	mutex_lock(&hbus->state_lock);
 
@@ -5569,7 +6452,10 @@ static void hv_eject_device_work(struct work_struct *work)
 	 */
 	wslot = wslot_to_devfn(hpdev->desc.win_slot.slot);
 	pdev = pci_get_domain_bus_and_slot(hbus->bridge->domain_nr, 0, wslot);
+	/* [한국어] 커널 쪽 장치가 이미 만들어져 있으면 — 위 상류 주석대로 제거 요청은
+	 * 버스가 세워지기 전에도 올 수 있다. */
 	if (pdev) {
+		/* [한국어] 스캔·제거 잠금을 잡고 그 장치를 내린다. */
 		pci_lock_rescan_remove();
 		pci_stop_and_remove_bus_device(pdev);
 		pci_dev_put(pdev);
@@ -5577,17 +6463,26 @@ static void hv_eject_device_work(struct work_struct *work)
 	}
 
 	spin_lock_irqsave(&hbus->device_list_lock, flags);
+	/* [한국어] 게스트 쪽 목록에서도 뺀다. */
 	list_del(&hpdev->list_entry);
 	spin_unlock_irqrestore(&hbus->device_list_lock, flags);
+/* [한국어] 목록에서 뺐다. */
 
+	/* [한국어] sysfs 슬롯이 있으면, */
 	if (hpdev->pci_slot)
+		/* [한국어] 없앤다 — 잠금 밖이라 잠들 수 있는 이 작업이 가능하다. */
 		pci_destroy_slot(hpdev->pci_slot);
 
 	memset(&ctxt, 0, sizeof(ctxt));
+	/* [한국어] 패킷 뒤의 버퍼를 제거 응답으로 겹쳐 본다. */
 	ejct_pkt = (struct pci_eject_response *)ctxt.buffer;
+	/* [한국어] 제거 완료 메시지임을 알린다. */
 	ejct_pkt->message_type.type = PCI_EJECTION_COMPLETE;
+	/* [한국어] 어느 슬롯을 제거했는지 알린다. */
 	ejct_pkt->wslot.slot = hpdev->desc.win_slot.slot;
+	/* [한국어] **응답을 기다리지 않는다** — 요청 ID 를 0 으로 넘겨 단방향 알림으로 보낸다. */
 	vmbus_sendpacket(hbus->hdev->channel, ejct_pkt,
+			 /* [한국어] 본문 크기는 고정이다. */
 			 sizeof(*ejct_pkt), 0,
 			 VM_PKT_DATA_INBAND, 0);
 
@@ -5637,15 +6532,22 @@ static void hv_pci_eject_device(struct hv_pci_dev *hpdev)
 {
 	struct hv_pcibus_device *hbus = hpdev->hbus;
 	struct hv_device *hdev = hbus->hdev;
+/* [한국어] 제거 요청을 워크큐로 넘길 준비를 한다. */
 
+	/* [한국어] 이미 제거 중인 버스면 — */
 	if (hbus->state == hv_pcibus_removing) {
+		/* [한국어] 무시했다는 사실만 남기고, */
 		dev_info(&hdev->device, "PCI VMBus EJECT: ignored\n");
+		/* [한국어] 돌아간다. 어차피 전체가 내려가는 중이다. */
 		return;
 	}
 
 	get_pcichild(hpdev);
 	INIT_WORK(&hpdev->wrk, hv_eject_device_work);
+	/* [한국어] **워크에 넘기기 전에 참조를 올려 두었다** — 워크가 도는 동안
+	 * 장치가 사라지면 안 되기 때문이다. */
 	queue_work(hbus->wq, &hpdev->wrk);
+/* [한국어] 실제 제거는 워크 문맥에서 일어난다. */
 }
 
 /**
@@ -5700,37 +6602,61 @@ static void hv_pci_onchannelcallback(void *context)
 {
 	const int packet_size = 0x100;
 	int ret;
+	/* [한국어] 채널을 열 때 넘겨 둔 이 버스. */
 	struct hv_pcibus_device *hbus = context;
+	/* [한국어] 호스트와 주고받을 채널. */
 	struct vmbus_channel *chan = hbus->hdev->channel;
+	/* [한국어] 실제로 받은 바이트 수. 크기 검사의 기준이 된다. */
 	u32 bytes_recvd;
+	/* [한국어] 요청 ID 와 그것으로 되찾은 원래 패킷의 주소. */
 	u64 req_id, req_addr;
+	/* [한국어] 받은 버퍼를 VMBus 서술자로 겹쳐 볼 포인터. */
 	struct vmpacket_descriptor *desc;
+	/* [한국어] 수신 버퍼. */
 	unsigned char *buffer;
+	/* [한국어] 그 크기. -ENOBUFS 를 받으면 늘어난다. */
 	int bufferlen = packet_size;
+	/* [한국어] 응답이면 되찾을 원래 요청 패킷. */
 	struct pci_packet *comp_packet;
+	/* [한국어] 받은 버퍼를 응답으로 겹쳐 볼 포인터. */
 	struct pci_response *response;
+	/* [한국어] 알림으로 겹쳐 볼 포인터. */
 	struct pci_incoming_message *new_message;
+	/* [한국어] 장치 목록 알림(구판)으로 겹쳐 볼 포인터. */
 	struct pci_bus_relations *bus_rel;
+	/* [한국어] 확장판으로 겹쳐 볼 포인터. */
 	struct pci_bus_relations2 *bus_rel2;
+	/* [한국어] 블록 무효화 알림으로 겹쳐 볼 포인터. */
 	struct pci_dev_inval_block *inval;
+	/* [한국어] 장치 제거 알림으로 겹쳐 볼 포인터. */
 	struct pci_dev_incoming *dev_message;
+	/* [한국어] 슬롯 번호로 찾아 낼 게스트 쪽 장치. */
 	struct hv_pci_dev *hpdev;
+	/* [한국어] 저장할 인터럽트 상태. */
 	unsigned long flags;
 
 	buffer = kmalloc(bufferlen, GFP_ATOMIC);
+	/* [한국어] **GFP_ATOMIC 이라 실패할 수 있다.** 인터럽트 문맥이라 잠들 수 없기 때문이다. */
 	if (!buffer)
+		/* [한국어] 실패하면 그냥 돌아간다 — 그 메시지는 처리되지 않고,
+		 * 그것이 요청 응답이었다면 기다리던 쪽이 시간 초과로 끝난다. */
 		return;
 
 	while (1) {
+		/* [한국어] 받은 크기와 요청 ID 를 함께 돌려받는다. */
 		ret = vmbus_recvpacket_raw(chan, buffer, bufferlen,
+					   /* [한국어] 그 둘이 아래 갈래 판단의 입력이다. */
 					   &bytes_recvd, &req_id);
 
 		if (ret == -ENOBUFS) {
+			/* [한국어] 버퍼가 작으면 놓고 다시 잡는다. */
 			kfree(buffer);
 			/* Handle large packet */
 			bufferlen = bytes_recvd;
 			buffer = kmalloc(bytes_recvd, GFP_ATOMIC);
+			/* [한국어] 다시 잡는 것도 실패할 수 있다. */
 			if (!buffer)
+				/* [한국어] 그때도 그냥 돌아간다 — 버퍼가 이미 해제됐으므로 아래 kfree 로 가면 안 된다. */
 				return;
 			continue;
 		}
@@ -5748,19 +6674,25 @@ static void hv_pci_onchannelcallback(void *context)
 		desc = (struct vmpacket_descriptor *)buffer;
 
 		switch (desc->type) {
+		/* [한국어] 우리가 보낸 요청의 응답이면 — */
 		case VM_PKT_COMP:
 
 			lock_requestor(chan, flags);
+			/* [한국어] 요청 ID 로 원래 패킷의 주소를 되찾는다. ADDR_ANY 는 어느 주소든 받아들이겠다는 뜻이다. */
 			req_addr = __vmbus_request_addr_match(chan, req_id,
+							      /* [한국어] 요청자 잠금을 쥔 채로 찾는다 — 그 사이에 같은 ID 가 재사용되면 안 된다. */
 							      VMBUS_RQST_ADDR_ANY);
 			if (req_addr == VMBUS_RQST_ERROR) {
+				/* [한국어] 찾지 못했으면 잠금부터 놓고, */
 				unlock_requestor(chan, flags);
+				/* [한국어] 어떤 ID 였는지 남긴다. 호스트가 우리가 보내지 않은 ID 로 답했다는 뜻이다. */
 				dev_err(&hbus->hdev->device,
 					"Invalid transaction ID %llx\n",
 					req_id);
 				break;
 			}
 			comp_packet = (struct pci_packet *)req_addr;
+			/* [한국어] 받은 버퍼를 응답 형식으로 겹쳐 읽는다. */
 			response = (struct pci_response *)buffer;
 			/*
 			 * Call ->completion_func() within the critical section to make
@@ -5773,16 +6705,25 @@ static void hv_pci_onchannelcallback(void *context)
 						     response,
 						     bytes_recvd);
 			unlock_requestor(chan, flags);
+			/* [한국어] 완료 콜백을 **잠금 안에서** 부른 뒤에야 놓는다 —
+			 * 그 사이에 ID 가 회수되면 콜백이 이미 사라진 문맥을 건드릴 수 있다. */
 			break;
 
 		case VM_PKT_DATA_INBAND:
+/* [한국어] 호스트가 먼저 보내는 알림이면 — */
 
 			new_message = (struct pci_incoming_message *)buffer;
+			/* [한국어] 그 안의 종류로 다시 갈래를 나눈다. */
 			switch (new_message->message_type.type) {
+			/* [한국어] 장치 목록 알림(구판)이면, */
 			case PCI_BUS_RELATIONS:
+/* [한국어] 받은 버퍼를 그 형식으로 겹쳐 읽고, */
 
 				bus_rel = (struct pci_bus_relations *)buffer;
+				/* [한국어] **크기를 두 번 확인한다.** 먼저 구조체 자체가 들어갈 만한지 보고, */
 				if (bytes_recvd < sizeof(*bus_rel) ||
+				    /* [한국어] 그 다음 호스트가 알려 준 개수만큼의 배열까지 담기는지 본다 —
+				     * 게스트는 호스트가 보낸 개수를 신뢰하지 않는다. */
 				    bytes_recvd <
 					struct_size(bus_rel, func,
 						    bus_rel->device_count)) {
@@ -5792,12 +6733,16 @@ static void hv_pci_onchannelcallback(void *context)
 				}
 
 				hv_pci_devices_present(hbus, bus_rel);
+				/* [한국어] 목록 갱신을 워크큐에 넘기고 다음 메시지로 간다. */
 				break;
 
 			case PCI_BUS_RELATIONS2:
+/* [한국어] 장치 목록 알림(확장판)도, */
 
 				bus_rel2 = (struct pci_bus_relations2 *)buffer;
+				/* [한국어] 같은 두 겹의 크기 검사를 거친다. */
 				if (bytes_recvd < sizeof(*bus_rel2) ||
+				    /* [한국어] 항목 타입만 다르고 검사 방식은 같다. */
 				    bytes_recvd <
 					struct_size(bus_rel2, func,
 						    bus_rel2->device_count)) {
@@ -5807,37 +6752,50 @@ static void hv_pci_onchannelcallback(void *context)
 				}
 
 				hv_pci_devices_present2(hbus, bus_rel2);
+				/* [한국어] 확장판 처리 함수로 넘긴다. */
 				break;
 
 			case PCI_EJECT:
+/* [한국어] 장치 제거 요청이면, */
 
 				dev_message = (struct pci_dev_incoming *)buffer;
+				/* [한국어] 역시 크기를 먼저 확인한다. */
 				if (bytes_recvd < sizeof(*dev_message)) {
+					/* [한국어] 모자라면 기록만 남기고 건너뛴다. */
 					dev_err(&hbus->hdev->device,
 						"eject message too small\n");
 					break;
 				}
 				hpdev = get_pcichild_wslot(hbus,
+						      /* [한국어] 슬롯 번호로 게스트 쪽 장치를 찾는다. */
 						      dev_message->wslot.slot);
 				if (hpdev) {
+					/* [한국어] 제거 절차를 시작한다 — 실제 제거는 워크큐로 미뤄진다. */
 					hv_pci_eject_device(hpdev);
 					put_pcichild(hpdev);
 				}
 				break;
 
 			case PCI_INVALIDATE_BLOCK:
+/* [한국어] 블록 무효화 알림이면, */
 
 				inval = (struct pci_dev_inval_block *)buffer;
+				/* [한국어] 크기를 확인하고, */
 				if (bytes_recvd < sizeof(*inval)) {
+					/* [한국어] 모자라면 기록만 남긴다. */
 					dev_err(&hbus->hdev->device,
 						"invalidate message too small\n");
 					break;
 				}
 				hpdev = get_pcichild_wslot(hbus,
+							   /* [한국어] 슬롯 번호로 장치를 찾는다. */
 							   inval->wslot.slot);
 				if (hpdev) {
+					/* [한국어] 그 장치에 무효화 콜백이 등록돼 있으면 — */
 					if (hpdev->block_invalidate) {
+						/* [한국어] 그 콜백을 부른다. */
 						hpdev->block_invalidate(
+						    /* [한국어] 등록할 때 함께 받아 둔 문맥과 무효화된 블록 마스크를 넘긴다. */
 						    hpdev->invalidate_context,
 						    inval->block_mask);
 					}
@@ -5925,9 +6883,13 @@ static int hv_pci_protocol_negotiation(struct hv_device *hdev,
 {
 	struct hv_pcibus_device *hbus = hv_get_drvdata(hdev);
 	struct pci_version_request *version_req;
+	/* [한국어] 호스트 응답을 기다릴 완료 문맥. */
 	struct hv_pci_compl comp_pkt;
+	/* [한국어] 재사용할 요청 패킷. */
 	struct pci_packet *pkt;
+	/* [한국어] 각 단계의 결과. */
 	int ret;
+	/* [한국어] 판본 목록 순회 인덱스. */
 	int i;
 
 	/*
@@ -5938,24 +6900,34 @@ static int hv_pci_protocol_negotiation(struct hv_device *hdev,
 	 */
 	pkt = kzalloc(sizeof(*pkt) + sizeof(*version_req), GFP_KERNEL);
 	if (!pkt)
+		/* [한국어] 패킷을 잡지 못하면 물러난다. */
 		return -ENOMEM;
 
 	init_completion(&comp_pkt.host_event);
 	pkt->completion_func = hv_pci_generic_compl;
+	/* [한국어] 완료 문맥을 매단다. */
 	pkt->compl_ctxt = &comp_pkt;
+	/* [한국어] 패킷 바로 뒤가 메시지 본문이다. */
 	version_req = (struct pci_version_request *)(pkt + 1);
+	/* [한국어] 판본 질의 메시지임을 알린다. */
 	version_req->message_type.type = PCI_QUERY_PROTOCOL_VERSION;
 
 	for (i = 0; i < num_version; i++) {
+		/* [한국어] 이번에 시도할 판본을 넣는다 — 목록의 앞이 새 판본이다. */
 		version_req->protocol_version = version[i];
+		/* [한국어] 같은 패킷을 판본만 바꿔 다시 보낸다. */
 		ret = vmbus_sendpacket(hdev->channel, version_req,
+				/* [한국어] 본문 크기는 판본과 무관하게 고정이다. */
 				sizeof(struct pci_version_request),
 				(unsigned long)pkt, VM_PKT_DATA_INBAND,
 				VMBUS_DATA_PACKET_FLAG_COMPLETION_REQUESTED);
 		if (!ret)
+			/* [한국어] 응답이 올 때까지 기다린다. */
 			ret = wait_for_response(hdev, &comp_pkt.host_event);
 
 		if (ret) {
+			/* [한국어] 전송이나 대기가 실패하면 그 사실을 남기고 물러난다 —
+			 * 협상 자체가 불가능한 상황이다. */
 			dev_err(&hdev->device,
 				"PCI Pass-through VSP failed to request version: %d",
 				ret);
@@ -5963,7 +6935,10 @@ static int hv_pci_protocol_negotiation(struct hv_device *hdev,
 		}
 
 		if (comp_pkt.completion_status >= 0) {
+			/* [한국어] 호스트가 받아들였으면 그 판본으로 확정한다.
+			 * **이 값이 이후 모든 메시지의 형식을 정한다.** */
 			hbus->protocol_version = version[i];
+			/* [한국어] 어느 판본으로 합의했는지 알린다. */
 			dev_info(&hdev->device,
 				"PCI VMBus probing: Using version %#x\n",
 				hbus->protocol_version);
@@ -5971,6 +6946,7 @@ static int hv_pci_protocol_negotiation(struct hv_device *hdev,
 		}
 
 		if (comp_pkt.completion_status != STATUS_REVISION_MISMATCH) {
+			/* [한국어] REVISION_MISMATCH 가 아닌 실패면 — 다음 판본을 시도할 상황이 아니다. */
 			dev_err(&hdev->device,
 				"PCI Pass-through VSP failed version request: %#x",
 				comp_pkt.completion_status);
@@ -6026,13 +7002,18 @@ static void hv_pci_free_bridge_windows(struct hv_pcibus_device *hbus)
 	 */
 
 	if (hbus->low_mmio_space && hbus->low_mmio_res) {
+		/* [한국어] **돌려주기 전에 BUSY 를 다시 세운다** — 할당 때 지워 두었던 것으로,
+		 * 그 사이에 아무도 새로 가져가지 못하게 한다. */
 		hbus->low_mmio_res->flags |= IORESOURCE_BUSY;
+		/* [한국어] 호스트에 창을 반납한다. */
 		vmbus_free_mmio(hbus->low_mmio_res->start,
 				resource_size(hbus->low_mmio_res));
 	}
 
 	if (hbus->high_mmio_space && hbus->high_mmio_res) {
+		/* [한국어] 위 창도 같은 방식으로 BUSY 를 세우고, */
 		hbus->high_mmio_res->flags |= IORESOURCE_BUSY;
+		/* [한국어] 반납한다. */
 		vmbus_free_mmio(hbus->high_mmio_res->start,
 				resource_size(hbus->high_mmio_res));
 	}
@@ -6101,14 +7082,22 @@ static int hv_pci_allocate_bridge_windows(struct hv_pcibus_device *hbus)
 {
 	resource_size_t align;
 	int ret;
+/* [한국어] 필요한 크기가 정해져 있다. */
 
 	if (hbus->low_mmio_space) {
+		/* [한국어] **필요한 크기 이하의 가장 큰 2의 거듭제곱** 을 정렬로 삼는다 —
+		 * PCI 창이 자기 크기에 정렬되어야 하기 때문이다.
+		 * __builtin_clzll 이 최상위 1비트까지의 0 개수를 세어 그 위치를 알려 준다. */
 		align = 1ULL << (63 - __builtin_clzll(hbus->low_mmio_space));
+		/* [한국어] 호스트에 그만큼의 MMIO 공간을 요청한다. */
 		ret = vmbus_allocate_mmio(&hbus->low_mmio_res, hbus->hdev, 0,
+					  /* [한국어] 상한을 4GB 로 제한한다 — 32비트 BAR 만 쓸 수 있는 장치를 위한 창이다. */
 					  (u64)(u32)0xffffffff,
 					  hbus->low_mmio_space,
 					  align, false);
 		if (ret) {
+			/* [한국어] 얻지 못하면 얼마가 필요했는지와 함께 남긴다 —
+			 * 사용자가 VM 설정을 고칠 수 있게 하려는 안내다. */
 			dev_err(&hbus->hdev->device,
 				"Need %#llx of low MMIO space. Consider reconfiguring the VM.\n",
 				hbus->low_mmio_space);
@@ -6118,16 +7107,22 @@ static int hv_pci_allocate_bridge_windows(struct hv_pcibus_device *hbus)
 		/* Modify this resource to become a bridge window. */
 		hbus->low_mmio_res->flags |= IORESOURCE_WINDOW;
 		hbus->low_mmio_res->flags &= ~IORESOURCE_BUSY;
+		/* [한국어] 브리지 창 목록에 등록해, PCI 코어가 그 안에서 자식 BAR 에 자리를 준다. */
 		pci_add_resource(&hbus->bridge->windows, hbus->low_mmio_res);
+	/* [한국어] 아래 창 준비 끝. */
 	}
 
 	if (hbus->high_mmio_space) {
+		/* [한국어] 위 창도 같은 방식으로 정렬을 계산한다. */
 		align = 1ULL << (63 - __builtin_clzll(hbus->high_mmio_space));
+		/* [한국어] 호스트에 요청한다. */
 		ret = vmbus_allocate_mmio(&hbus->high_mmio_res, hbus->hdev,
+					  /* [한국어] **하한이 4GB** 다 — 아래 창과 겹치지 않게 4GB 위에서만 잡는다. */
 					  0x100000000, -1,
 					  hbus->high_mmio_space, align,
 					  false);
 		if (ret) {
+			/* [한국어] 얻지 못하면 얼마가 필요했는지와 함께 남긴다. */
 			dev_err(&hbus->hdev->device,
 				"Need %#llx of high MMIO space. Consider reconfiguring the VM.\n",
 				hbus->high_mmio_space);
@@ -6137,7 +7132,9 @@ static int hv_pci_allocate_bridge_windows(struct hv_pcibus_device *hbus)
 		/* Modify this resource to become a bridge window. */
 		hbus->high_mmio_res->flags |= IORESOURCE_WINDOW;
 		hbus->high_mmio_res->flags &= ~IORESOURCE_BUSY;
+		/* [한국어] 역시 브리지 창 목록에 등록한다. */
 		pci_add_resource(&hbus->bridge->windows, hbus->high_mmio_res);
+	/* [한국어] 위 창 준비 끝. */
 	}
 
 	return 0;
@@ -6197,6 +7194,7 @@ static int hv_allocate_config_window(struct hv_pcibus_device *hbus)
 	ret = vmbus_allocate_mmio(&hbus->mem_config, hbus->hdev, 0, -1,
 				  PCI_CONFIG_MMIO_LENGTH, 0x1000, false);
 	if (ret)
+		/* [한국어] 창을 얻지 못하면 그대로 물러난다. */
 		return ret;
 
 	/*
@@ -6208,6 +7206,8 @@ static int hv_allocate_config_window(struct hv_pcibus_device *hbus)
 	 */
 
 	hbus->mem_config->flags |= IORESOURCE_BUSY;
+/* [한국어] **BUSY 를 세운 채로 둔다** — 브리지 창과 정반대인데,
+ * 이 창은 게스트만 쓰고 누구에게도 나눠 주지 않기 때문이다. */
 
 	return 0;
 }
@@ -6239,6 +7239,8 @@ static void hv_free_config_window(struct hv_pcibus_device *hbus)
 }
 
 static int hv_pci_bus_exit(struct hv_device *hdev, bool keep_devs);
+/* [한국어] 정의가 아래에 있어 미리 선언해 둔다 — hv_pci_enter_d0() 의
+ * 재시도 경로가 이 함수를 먼저 부른다. */
 
 /**
  * hv_pci_enter_d0() - Bring the "bus" into the D0 power state
@@ -6283,9 +7285,13 @@ static int hv_pci_enter_d0(struct hv_device *hdev)
 {
 	struct hv_pcibus_device *hbus = hv_get_drvdata(hdev);
 	struct pci_bus_d0_entry *d0_entry;
+	/* [한국어] 호스트 응답을 기다릴 완료 문맥. */
 	struct hv_pci_compl comp_pkt;
+	/* [한국어] 보낼 요청 패킷. */
 	struct pci_packet *pkt;
+	/* [한국어] 재시도 기회가 남았는지. **한 번만** 재시도한다. */
 	bool retry = true;
+	/* [한국어] 각 단계의 결과. */
 	int ret;
 
 enter_d0_retry:
@@ -6297,22 +7303,32 @@ enter_d0_retry:
 	 */
 	pkt = kzalloc(sizeof(*pkt) + sizeof(*d0_entry), GFP_KERNEL);
 	if (!pkt)
+		/* [한국어] 패킷을 잡지 못하면 물러난다. 재시도 경로에서 다시 오므로 라벨 뒤에 있다. */
 		return -ENOMEM;
 
 	init_completion(&comp_pkt.host_event);
 	pkt->completion_func = hv_pci_generic_compl;
+	/* [한국어] 완료 문맥을 매단다. */
 	pkt->compl_ctxt = &comp_pkt;
+	/* [한국어] 패킷 바로 뒤가 메시지 본문이다 — 한 번의 할당으로 둘을 함께 잡았다. */
 	d0_entry = (struct pci_bus_d0_entry *)(pkt + 1);
+	/* [한국어] D0 진입 메시지임을 알린다. */
 	d0_entry->message_type.type = PCI_BUS_D0ENTRY;
+	/* [한국어] **config 창의 시작 주소를 함께 보낸다.** 이 값을 받은 뒤부터
+	 * 호스트가 그 범위의 접근을 config 요청으로 해석한다. */
 	d0_entry->mmio_base = hbus->mem_config->start;
+/* [한국어] 요청이 준비됐다. */
 
 	ret = vmbus_sendpacket(hdev->channel, d0_entry, sizeof(*d0_entry),
+			       /* [한국어] 패킷 주소를 요청 ID 로 삼는다 — 응답이 오면 그 주소로 완료 문맥을 되찾는다. */
 			       (unsigned long)pkt, VM_PKT_DATA_INBAND,
 			       VMBUS_DATA_PACKET_FLAG_COMPLETION_REQUESTED);
 	if (!ret)
+		/* [한국어] 응답이 올 때까지 기다린다. */
 		ret = wait_for_response(hdev, &comp_pkt.host_event);
 
 	if (ret)
+		/* [한국어] 전송이나 대기가 실패하면 패킷을 해제하는 자리로 뛴다. */
 		goto exit;
 
 	/*
@@ -6324,8 +7340,10 @@ enter_d0_retry:
 	 */
 	if (comp_pkt.completion_status < 0 && retry) {
 		retry = false;
+/* [한국어] 호스트가 거절했고 재시도 기회가 남았으면 — */
 
 		dev_err(&hdev->device, "Retrying D0 Entry\n");
+/* [한국어] 재시도는 한 번뿐이므로 플래그를 내린다. */
 
 		/*
 		 * Hv_pci_bus_exit() calls hv_send_resource_released()
@@ -6338,8 +7356,10 @@ enter_d0_retry:
 		hbus->wslot_res_allocated = 255;
 
 		ret = hv_pci_bus_exit(hdev, true);
+/* [한국어] 이전 세션의 상태를 정리한다. 장치 목록은 남긴다(keep_devs). */
 
 		if (ret == 0) {
+			/* [한국어] 정리에 성공했으면 패킷을 놓고 처음부터 다시 시도한다. */
 			kfree(pkt);
 			goto enter_d0_retry;
 		}
@@ -6348,6 +7368,7 @@ enter_d0_retry:
 	}
 
 	if (comp_pkt.completion_status < 0) {
+		/* [한국어] 재시도마저 실패했으면 그 사실을 남긴다. */
 		dev_err(&hdev->device,
 			"PCI Pass-through VSP failed D0 Entry with status %x\n",
 			comp_pkt.completion_status);
@@ -6405,21 +7426,30 @@ static int hv_pci_query_relations(struct hv_device *hdev)
 {
 	struct hv_pcibus_device *hbus = hv_get_drvdata(hdev);
 	struct pci_message message;
+	/* [한국어] 응답을 기다릴 완료 객체를 **스택에** 둔다. */
 	struct completion comp;
+	/* [한국어] 각 단계의 결과. */
 	int ret;
 
 	/* Ask the host to send along the list of child devices */
 	init_completion(&comp);
 	if (cmpxchg(&hbus->survey_event, NULL, &comp))
+		/* [한국어] 이미 다른 질의가 진행 중이면 거절한다 — 두 응답을 구분할 수 없다. */
 		return -ENOTEMPTY;
 
 	memset(&message, 0, sizeof(message));
+	/* [한국어] 장치 목록 질의 메시지임을 알린다. */
 	message.type = PCI_QUERY_BUS_RELATIONS;
+/* [한국어] 이 메시지는 슬롯 번호도 필요 없다 — 버스 전체를 묻는 것이다. */
 
 	ret = vmbus_sendpacket(hdev->channel, &message, sizeof(message),
+			       /* [한국어] **요청 ID 를 0 으로 넘긴다** — 응답이 VM_PKT_COMP 가 아니라
+			        * PCI_BUS_RELATIONS 알림으로 오기 때문이다. */
 			       0, VM_PKT_DATA_INBAND, 0);
 	if (!ret)
+		/* [한국어] 그 알림을 처리하는 쪽이 위 완료 객체를 깨워 준다. */
 		ret = wait_for_response(hdev, &comp);
+/* [한국어] 응답이 왔거나 실패했다. */
 
 	/*
 	 * In the case of fast device addition/removal, it's possible that
@@ -6498,58 +7528,88 @@ static int hv_send_resources_allocated(struct hv_device *hdev)
 {
 	struct hv_pcibus_device *hbus = hv_get_drvdata(hdev);
 	struct pci_resources_assigned *res_assigned;
+	/* [한국어] 확장판 요청 구조체를 가리킬 포인터. */
 	struct pci_resources_assigned2 *res_assigned2;
+	/* [한국어] 호스트 응답을 기다릴 완료 문맥. */
 	struct hv_pci_compl comp_pkt;
+	/* [한국어] 슬롯마다 찾아 낼 게스트 쪽 장치. */
 	struct hv_pci_dev *hpdev;
+	/* [한국어] 재사용할 요청 패킷. */
 	struct pci_packet *pkt;
+	/* [한국어] 판본에 따라 달라지는 요청 본문의 크기. */
 	size_t size_res;
+	/* [한국어] 훑을 슬롯 번호. */
 	int wslot;
+	/* [한국어] 각 단계의 결과. */
 	int ret;
 
 	size_res = (hbus->protocol_version < PCI_PROTOCOL_VERSION_1_2)
+			/* [한국어] **협상된 판본이 크기를 정한다** — 1.2 미만은 구판 구조체를, 그 이상은
+			 * 확장판을 쓰며 크기가 다르다. */
 			? sizeof(*res_assigned) : sizeof(*res_assigned2);
+/* [한국어] 이 값이 아래 할당과 전송 양쪽에 쓰인다. */
 
 	pkt = kmalloc(sizeof(*pkt) + size_res, GFP_KERNEL);
+	/* [한국어] 패킷을 잡지 못하면, */
 	if (!pkt)
+		/* [한국어] 메모리 부족으로 물러난다. */
 		return -ENOMEM;
 
 	ret = 0;
 
 	for (wslot = 0; wslot < 256; wslot++) {
+		/* [한국어] 이 슬롯의 장치를 찾는다. 참조가 올라간다. */
 		hpdev = get_pcichild_wslot(hbus, wslot);
+		/* [한국어] 없는 슬롯이면, */
 		if (!hpdev)
+			/* [한국어] 건너뛴다 — 256개 중 실제로 쓰이는 것은 몇 개뿐이다. */
 			continue;
 
 		memset(pkt, 0, sizeof(*pkt) + size_res);
+		/* [한국어] 슬롯마다 완료 문맥을 새로 초기화한다. */
 		init_completion(&comp_pkt.host_event);
 		pkt->completion_func = hv_pci_generic_compl;
+		/* [한국어] 완료 문맥을 매단다. */
 		pkt->compl_ctxt = &comp_pkt;
+/* [한국어] 요청 본문을 판본에 맞게 채운다. */
 
 		if (hbus->protocol_version < PCI_PROTOCOL_VERSION_1_2) {
+			/* [한국어] 1.2 미만이면 구판 구조체를, */
 			res_assigned =
+				/* [한국어] 패킷 바로 뒤 자리에 겹쳐 놓고, */
 				(struct pci_resources_assigned *)(pkt + 1);
 			res_assigned->message_type.type =
+				/* [한국어] 구판 메시지 종류를 넣는다. */
 				PCI_RESOURCES_ASSIGNED;
 			res_assigned->wslot.slot = hpdev->desc.win_slot.slot;
+		/* [한국어] 1.2 이상이면 — */
 		} else {
 			res_assigned2 =
+				/* [한국어] 확장판 구조체를 같은 자리에 겹쳐 놓고, */
 				(struct pci_resources_assigned2 *)(pkt + 1);
 			res_assigned2->message_type.type =
+				/* [한국어] 확장판 메시지 종류를 넣는다. */
 				PCI_RESOURCES_ASSIGNED2;
 			res_assigned2->wslot.slot = hpdev->desc.win_slot.slot;
+		/* [한국어] 두 갈래가 채우는 필드는 슬롯 번호 하나로 같다. */
 		}
 		put_pcichild(hpdev);
 
 		ret = vmbus_sendpacket(hdev->channel, pkt + 1,
+				/* [한국어] 본문 크기도 판본에 맞춘 값을 넘긴다. */
 				size_res, (unsigned long)pkt,
 				VM_PKT_DATA_INBAND,
 				VMBUS_DATA_PACKET_FLAG_COMPLETION_REQUESTED);
 		if (!ret)
+			/* [한국어] 응답이 올 때까지 기다린다. */
 			ret = wait_for_response(hdev, &comp_pkt.host_event);
+		/* [한국어] 전송이나 대기가 실패하면, */
 		if (ret)
+			/* [한국어] 루프를 빠져나간다 — 그때까지의 wslot_res_allocated 가 되감기 기준이 된다. */
 			break;
 
 		if (comp_pkt.completion_status < 0) {
+			/* [한국어] 호스트가 거절했으면 프로토콜 오류로 다룬다. */
 			ret = -EPROTO;
 			dev_err(&hdev->device,
 				"resource allocated returned 0x%x",
@@ -6558,6 +7618,7 @@ static int hv_send_resources_allocated(struct hv_device *hdev)
 		}
 
 		hbus->wslot_res_allocated = wslot;
+	/* [한국어] 이 슬롯 처리 끝. */
 	}
 
 	kfree(pkt);
@@ -6606,30 +7667,46 @@ static int hv_send_resources_released(struct hv_device *hdev)
 {
 	struct hv_pcibus_device *hbus = hv_get_drvdata(hdev);
 	struct pci_child_message pkt;
+	/* [한국어] 슬롯마다 찾아 낼 게스트 쪽 장치. */
 	struct hv_pci_dev *hpdev;
+	/* [한국어] 훑을 슬롯 번호. */
 	int wslot;
+	/* [한국어] 각 단계의 결과. */
 	int ret;
 
 	for (wslot = hbus->wslot_res_allocated; wslot >= 0; wslot--) {
+		/* [한국어] 이 슬롯의 장치를 찾는다. 참조가 올라간다. */
 		hpdev = get_pcichild_wslot(hbus, wslot);
+		/* [한국어] 없는 슬롯이면, */
 		if (!hpdev)
+			/* [한국어] 건너뛴다. */
 			continue;
 
 		memset(&pkt, 0, sizeof(pkt));
+		/* [한국어] 자원 반납 메시지임을 알린다. */
 		pkt.message_type.type = PCI_RESOURCES_RELEASED;
+		/* [한국어] 어느 슬롯을 반납하는지. */
 		pkt.wslot.slot = hpdev->desc.win_slot.slot;
+/* [한국어] 요청이 준비됐다. */
 
 		put_pcichild(hpdev);
 
+		/* [한국어] **요청 ID 를 0 으로 넘겨 단방향으로 보낸다** — 반납은 호스트의 확인이 필요 없다. */
 		ret = vmbus_sendpacket(hdev->channel, &pkt, sizeof(pkt), 0,
+				       /* [한국어] 완료 요청 플래그도 없다. */
 				       VM_PKT_DATA_INBAND, 0);
 		if (ret)
+			/* [한국어] 전송이 실패하면 즉시 물러난다 — 그때까지 줄어든 값이 남아
+			 * 다음 호출이 이어서 반납한다. */
 			return ret;
 
+		/* [한국어] 하나 반납할 때마다 기준을 하나 내린다. */
 		hbus->wslot_res_allocated = wslot - 1;
+	/* [한국어] 이 슬롯 반납 끝. */
 	}
 
 	hbus->wslot_res_allocated = -1;
+/* [한국어] 반납할 것이 없다는 표시로 -1 을 둔다. */
 
 	return 0;
 }
@@ -6691,22 +7768,36 @@ static int hv_pci_probe(struct hv_device *hdev,
 {
 	struct pci_host_bridge *bridge;
 	struct hv_pcibus_device *hbus;
+	/* [한국어] 각 단계의 결과와 배정받은 도메인 번호. */
 	int ret, dom;
+	/* [한국어] GUID 에서 뽑은 도메인 번호 힌트. */
 	u16 dom_req;
+	/* [한국어] 인터럽트 도메인 이름을 담을 자리. */
 	char *name;
+/* [한국어] 브리지부터 잡는다. */
 
 	bridge = devm_pci_alloc_host_bridge(&hdev->device, 0);
+	/* [한국어] 브리지를 잡지 못하면, */
 	if (!bridge)
+		/* [한국어] 메모리 부족으로 물러난다. */
 		return -ENOMEM;
 
+	/* [한국어] 이 드라이버의 상태를 잡는다. */
 	hbus = kzalloc_obj(*hbus);
+	/* [한국어] 잡지 못하면, */
 	if (!hbus)
+		/* [한국어] 메모리 부족으로 물러난다. 브리지는 devm 판이라 자동으로 놓인다. */
 		return -ENOMEM;
 
+	/* [한국어] 브리지를 상태에 매단다. */
 	hbus->bridge = bridge;
+	/* [한국어] 상태 전환을 지킬 뮤텍스를 초기화한다. */
 	mutex_init(&hbus->state_lock);
 	hbus->state = hv_pcibus_init;
+	/* [한국어] **-1 로 시작한다** — '배정된 자원이 없다' 는 표시이며,
+	 * hv_send_resources_released() 가 이 값부터 거꾸로 훑는다. */
 	hbus->wslot_res_allocated = -1;
+/* [한국어] 기본 상태가 준비됐다. */
 
 	/*
 	 * The PCI bus "domain" is what is called "segment" in ACPI and other
@@ -6956,15 +8047,25 @@ static int hv_pci_bus_exit(struct hv_device *hdev, bool keep_devs)
 {
 	struct hv_pcibus_device *hbus = hv_get_drvdata(hdev);
 	struct vmbus_channel *chan = hdev->channel;
+	/* [한국어] 종료 요청 패킷을 **스택에** 둔다. */
 	struct {
+		/* [한국어] VMBus 요청의 공통 머리. */
 		struct pci_packet teardown_packet;
+		/* [한국어] 그 뒤에 메시지 본문이 올 자리. */
 		u8 buffer[sizeof(struct pci_message)];
+	/* [한국어] 둘을 한 덩어리로 두어 패킷 바로 뒤가 본문이 되게 한다. */
 	} pkt;
+	/* [한국어] 본문을 가리킬 포인터. */
 	struct pci_message *msg;
+	/* [한국어] 호스트 응답을 기다릴 완료 문맥. */
 	struct hv_pci_compl comp_pkt;
+	/* [한국어] 자식 목록을 안전하게 훑기 위한 두 포인터. */
 	struct hv_pci_dev *hpdev, *tmp;
+	/* [한국어] 저장할 인터럽트 상태. */
 	unsigned long flags;
+	/* [한국어] 보낸 요청의 ID. **시간 초과 시 이것으로 요청을 회수한다.** */
 	u64 trans_id;
+	/* [한국어] 각 단계의 결과. */
 	int ret;
 
 	/*
@@ -6975,19 +8076,24 @@ static int hv_pci_bus_exit(struct hv_device *hdev, bool keep_devs)
 		return 0;
 
 	if (!keep_devs) {
+		/* [한국어] 사라질 장치를 잠시 옮겨 둘 스택 위 목록. */
 		struct list_head removed;
 
 		/* Move all present children to the list on stack */
 		INIT_LIST_HEAD(&removed);
 		spin_lock_irqsave(&hbus->device_list_lock, flags);
+		/* [한국어] _safe 순회로 훑으며 — */
 		list_for_each_entry_safe(hpdev, tmp, &hbus->children, list_entry)
+			/* [한국어] **잠금 안에서는 옮기기만** 한다. 정리는 아래에서 잠금을 놓고 한다. */
 			list_move_tail(&hpdev->list_entry, &removed);
+		/* [한국어] 옮기기가 끝났으니 잠금을 놓는다. */
 		spin_unlock_irqrestore(&hbus->device_list_lock, flags);
 
 		/* Remove all children in the list */
 		list_for_each_entry_safe(hpdev, tmp, &removed, list_entry) {
 			list_del(&hpdev->list_entry);
 			if (hpdev->pci_slot)
+				/* [한국어] sysfs 슬롯 제거는 잠들 수 있어, 잠금 밖인 여기서만 할 수 있다. */
 				pci_destroy_slot(hpdev->pci_slot);
 			/* For the two refs got in new_pcichild_device() */
 			put_pcichild(hpdev);
@@ -6996,24 +8102,34 @@ static int hv_pci_bus_exit(struct hv_device *hdev, bool keep_devs)
 	}
 
 	ret = hv_send_resources_released(hdev);
+	/* [한국어] 자원 반납이 실패하면, */
 	if (ret) {
+		/* [한국어] 그 사실을 남기고 물러난다 — D0 에서 나가기 전에 자원을 정리해야 한다. */
 		dev_err(&hdev->device,
 			"Couldn't send resources released packet(s)\n");
 		return ret;
 	}
 
 	memset(&pkt.teardown_packet, 0, sizeof(pkt.teardown_packet));
+	/* [한국어] 종료 응답을 기다릴 준비. */
 	init_completion(&comp_pkt.host_event);
 	pkt.teardown_packet.completion_func = hv_pci_generic_compl;
+	/* [한국어] 완료 문맥을 매단다. */
 	pkt.teardown_packet.compl_ctxt = &comp_pkt;
+	/* [한국어] 패킷 뒤의 버퍼를 메시지로 겹쳐 본다. */
 	msg = (struct pci_message *)pkt.buffer;
+	/* [한국어] D0 종료 메시지임을 알린다. */
 	msg->type = PCI_BUS_D0EXIT;
+/* [한국어] 요청이 준비됐다. */
 
 	ret = vmbus_sendpacket_getid(chan, msg, sizeof(*msg),
+				     /* [한국어] 패킷 주소를 요청 ID 로 삼고, **그 ID 를 돌려받는다** —
+				      * 시간 초과 시 회수하려면 그 값이 필요하다. */
 				     (unsigned long)&pkt.teardown_packet,
 				     &trans_id, VM_PKT_DATA_INBAND,
 				     VMBUS_DATA_PACKET_FLAG_COMPLETION_REQUESTED);
 	if (ret)
+		/* [한국어] 전송이 실패하면 그대로 물러난다. */
 		return ret;
 
 	if (wait_for_completion_timeout(&comp_pkt.host_event, 10 * HZ) == 0) {
@@ -7075,9 +8191,13 @@ static void hv_pci_remove(struct hv_device *hdev)
 	struct hv_pcibus_device *hbus;
 
 	hbus = hv_get_drvdata(hdev);
+	/* [한국어] 설치된 상태일 때만 버스를 내린다 — probe 가 중간에 실패했다면
+	 * 버스가 만들어지지 않았다. */
 	if (hbus->state == hv_pcibus_installed) {
+		/* [한국어] 채널 콜백이 tasklet 문맥에서 도므로, 그것을 끈 사이에 상태를 바꾼다. */
 		tasklet_disable(&hdev->channel->callback_event);
 		hbus->state = hv_pcibus_removing;
+		/* [한국어] 상태를 바꿨으니 다시 켠다 — 잠금 없이 같은 효과를 내는 관용이다. */
 		tasklet_enable(&hdev->channel->callback_event);
 		destroy_workqueue(hbus->wq);
 		hbus->wq = NULL;
@@ -7096,6 +8216,8 @@ static void hv_pci_remove(struct hv_device *hdev)
 	}
 
 	hv_pci_bus_exit(hdev, false);
+/* [한국어] 세션 정리가 끝났다. 실패해도 계속 진행한다 — 정리 경로라
+ * 되돌릴 방법이 없다. */
 
 	vmbus_close(hdev->channel);
 
@@ -7140,7 +8262,9 @@ static int hv_pci_suspend(struct hv_device *hdev)
 {
 	struct hv_pcibus_device *hbus = hv_get_drvdata(hdev);
 	enum hv_pcibus_state old_state;
+	/* [한국어] 각 단계의 결과. */
 	int ret;
+/* [한국어] 먼저 상태를 제거 중으로 바꾼다. */
 
 	/*
 	 * hv_pci_suspend() must make sure there are no pending work items
@@ -7165,17 +8289,23 @@ static int hv_pci_suspend(struct hv_device *hdev)
 	/* Change the hbus state to prevent new work items. */
 	old_state = hbus->state;
 	if (hbus->state == hv_pcibus_installed)
+		/* [한국어] 설치된 상태였을 때만 제거 중으로 바꾼다. */
 		hbus->state = hv_pcibus_removing;
+/* [한국어] tasklet 을 끈 사이에 바꿔, 채널 콜백과 겹치지 않게 한다. */
 
 	tasklet_enable(&hdev->channel->callback_event);
 
 	if (old_state != hv_pcibus_installed)
+		/* [한국어] 설치된 상태가 아니었으면 절전시킬 수 없다. */
 		return -EINVAL;
 
 	flush_workqueue(hbus->wq);
 
 	ret = hv_pci_bus_exit(hdev, true);
+	/* [한국어] 세션 정리가 실패하면, */
 	if (ret)
+		/* [한국어] 채널을 닫지 않고 그 오류를 올려보낸다 — 정리되지 않은 채로 닫으면
+		 * 호스트 쪽에 상태가 남는다. */
 		return ret;
 
 	vmbus_close(hdev->channel);
@@ -7220,16 +8350,22 @@ static int hv_pci_restore_msi_msg(struct pci_dev *pdev, void *arg)
 {
 	struct irq_data *irq_data;
 	struct msi_desc *entry;
+/* [한국어] MSI 를 쓰는 장치인지 먼저 본다. */
 
 	if (!pdev->msi_enabled && !pdev->msix_enabled)
+		/* [한국어] 둘 다 아니면 되살릴 것이 없다. */
 		return 0;
 
 	guard(msi_descs_lock)(&pdev->dev);
 	msi_for_each_desc(entry, &pdev->dev, MSI_DESC_ASSOCIATED) {
+		/* [한국어] 이 벡터의 인터럽트 데이터를 얻는다. */
 		irq_data = irq_get_irq_data(entry->irq);
+		/* [한국어] ASSOCIATED 서술자에는 반드시 있어야 하는 것이라, */
 		if (WARN_ON_ONCE(!irq_data))
+			/* [한국어] 없다면 커널 내부의 모순이므로 경고와 함께 물러난다. */
 			return -EINVAL;
 		hv_compose_msi_msg(irq_data, &entry->msg);
+	/* [한국어] 이 벡터 처리 끝. */
 	}
 	return 0;
 }
@@ -7308,37 +8444,53 @@ static int hv_pci_resume(struct hv_device *hdev)
 {
 	struct hv_pcibus_device *hbus = hv_get_drvdata(hdev);
 	enum pci_protocol_version_t version[1];
+	/* [한국어] 각 단계의 결과. */
 	int ret;
+/* [한국어] 복귀는 초기 상태에서 다시 시작한다. */
 
 	hbus->state = hv_pcibus_init;
+/* [한국어] 호스트 쪽에 이전 세션의 상태가 남아 있지 않으므로 처음부터 세운다. */
 
+	/* [한국어] 요청 ID 를 만드는 콜백. */
 	hdev->channel->next_request_id_callback = vmbus_next_request_id;
+	/* [한국어] 응답에서 원래 요청을 찾는 콜백. */
 	hdev->channel->request_addr_callback = vmbus_request_addr;
+	/* [한국어] 동시에 띄울 수 있는 요청 수. probe 와 같은 값을 다시 설정한다. */
 	hdev->channel->rqstor_size = HV_PCI_RQSTOR_SIZE;
+/* [한국어] 채널을 열 준비가 끝났다. */
 
 	ret = vmbus_open(hdev->channel, pci_ring_size, pci_ring_size, NULL, 0,
+			 /* [한국어] 수신 콜백과 문맥도 probe 와 같다. */
 			 hv_pci_onchannelcallback, hbus);
 	if (ret)
+		/* [한국어] 채널을 열지 못하면 그대로 물러난다 — 아직 되돌릴 것이 없다. */
 		return ret;
 
 	/* Only use the version that was in use before hibernation. */
 	version[0] = hbus->protocol_version;
 	ret = hv_pci_protocol_negotiation(hdev, version, 1);
+	/* [한국어] 판본 협상이 실패하면, */
 	if (ret)
+		/* [한국어] 채널을 닫는 자리로 뛴다. */
 		goto out;
 
 	ret = hv_pci_query_relations(hdev);
+	/* [한국어] 장치 목록 질의가 실패하면, */
 	if (ret)
+		/* [한국어] 역시 채널을 닫는다. */
 		goto out;
 
 	mutex_lock(&hbus->state_lock);
 
 	ret = hv_pci_enter_d0(hdev);
+	/* [한국어] D0 진입이 실패하면, */
 	if (ret)
+		/* [한국어] **잠금을 놓은 뒤** 채널을 닫는 자리로 뛴다 — 여기부터는 잠금을 쥔 상태다. */
 		goto release_state_lock;
 
 	ret = hv_send_resources_allocated(hdev);
 	if (ret)
+		/* [한국어] 자원 배정 통보가 실패하면 잠금을 놓고 채널을 닫는 자리로 뛴다. */
 		goto release_state_lock;
 
 	prepopulate_bars(hbus);
@@ -7346,6 +8498,8 @@ static int hv_pci_resume(struct hv_device *hdev)
 	hv_pci_restore_msi_state(hbus);
 
 	hbus->state = hv_pcibus_installed;
+	/* [한국어] 상태를 확정했으니 잠금을 놓는다 — 이제 채널 콜백이 장치 목록 갱신을
+	 * 반영해도 안전하다. */
 	mutex_unlock(&hbus->state_lock);
 	return 0;
 
@@ -7366,7 +8520,9 @@ static const struct hv_vmbus_device_id hv_pci_id_table[] = {
 MODULE_DEVICE_TABLE(vmbus, hv_pci_id_table);
 
 static struct hv_driver hv_pci_drv = {
+	/* [한국어] 이 드라이버의 이름. sysfs 와 로그에 나온다. */
 	.name		= "hv_pci",
+	/* [한국어] 이 드라이버가 붙을 VMBus 장치 종류 — 가상 PCI 장치 하나뿐이다. */
 	.id_table	= hv_pci_id_table,
 	.probe		= hv_pci_probe,
 	.remove		= hv_pci_remove,
@@ -7401,7 +8557,10 @@ static void __exit exit_hv_pci_drv(void)
 	vmbus_driver_unregister(&hv_pci_drv);
 
 	hvpci_block_ops.read_block = NULL;
+	/* [한국어] 쓰기 훅도 지운다. */
 	hvpci_block_ops.write_block = NULL;
+	/* [한국어] 무효화 등록 훅까지 지운다. 셋을 모두 지워야 이 모듈이 내려간 뒤
+	 * 다른 서브시스템이 사라진 코드를 부르지 않는다. */
 	hvpci_block_ops.reg_blk_invalidate = NULL;
 }
 
@@ -7439,21 +8598,30 @@ static int __init init_hv_pci_drv(void)
 	int ret;
 
 	if (!hv_is_hyperv_initialized())
+		/* [한국어] Hyper-V 게스트가 아니면 이 드라이버가 할 일이 없다. */
 		return -ENODEV;
 
+	/* [한국어] 루트 파티션이면서 중첩이 아니면 — 그쪽에서는 실제 하드웨어 드라이버가
+	 * PCI 를 다루므로 이 준가상화 경로가 필요 없다. */
 	if (hv_root_partition() && !hv_nested)
 		return -ENODEV;
 
 	ret = hv_pci_irqchip_init();
+	/* [한국어] 아키텍처별 인터럽트 칩 초기화가 실패하면, */
 	if (ret)
+		/* [한국어] 그 오류를 올려보낸다. */
 		return ret;
 
 	/* Initialize PCI block r/w interface */
 	hvpci_block_ops.read_block = hv_read_config_block;
 	hvpci_block_ops.write_block = hv_write_config_block;
+	/* [한국어] 블록 무효화 등록 훅까지 채운다. **드라이버 등록 전** 이라야 하는데,
+	 * 등록되면 곧바로 장치가 붙어 이 훅을 쓸 수 있기 때문이다. */
 	hvpci_block_ops.reg_blk_invalidate = hv_register_block_invalidate;
+/* [한국어] 훅이 준비됐다. */
 
 	return vmbus_driver_register(&hv_pci_drv);
+/* [한국어] 이 뒤로는 장치가 붙을 때마다 hv_pci_probe() 가 불린다. */
 }
 
 module_init(init_hv_pci_drv);
