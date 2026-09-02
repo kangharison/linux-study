@@ -64,11 +64,14 @@
 /* [한국어] 호스트가 핫리셋을 걸었다. */
 #define XILINX_PCIE_INTR_HOT_RESET		3
 /* [한국어] 설정 트랜잭션이 PCIe 쪽에서 시간 초과됐다.
- * **이 트리의 어느 드라이버도 참조하지 않는다** -- 판본에 따라 존재하는
- * 사건을 표에만 적어 둔 것으로 보인다. */
+ * **pcie-xilinx-cpm.c 가 토큰 붙이기로 참조한다** -- 그 파일의
+ * `#define IMR(x) BIT(XILINX_PCIE_INTR_ ##x)` 와
+ * `#define _IC(x, s) [XILINX_PCIE_INTR_ ## x] = ...` 가 이름을
+ * 전처리 단계에서 조립하므로, 이 이름 그대로는 grep 에 잡히지 않는다. */
 #define XILINX_PCIE_INTR_CFG_PCIE_TIMEOUT	4
-/* [한국어] 설정 트랜잭션이 시간 초과됐다. 위 CFG_PCIE_TIMEOUT 과 달리 두
- * 드라이버가 모두 쓴다. */
+/* [한국어] 설정 트랜잭션이 시간 초과됐다. 위 CFG_PCIE_TIMEOUT 과 달리
+ * pcie-xilinx.c 가 이 이름 그대로 참조하고, cpm 은 다른 이름들과 마찬가지로
+ * 토큰 붙이기로 참조한다. */
 #define XILINX_PCIE_INTR_CFG_TIMEOUT		8
 /* [한국어] AER 의 correctable 오류를 받았다. 링크가 스스로 복구한 오류라
  * 보고만 하고 넘어간다. */
@@ -78,17 +81,26 @@
 /* [한국어] AER 의 fatal 오류. 링크 자체가 신뢰할 수 없는 상태다. */
 #define XILINX_PCIE_INTR_FATAL			11
 /* [한국어] 설정 트랜잭션에 오염(poisoned) 표시가 붙어 왔다.
- * **이 트리의 어느 드라이버도 참조하지 않는다.** */
+ * **pcie-xilinx-cpm.c 가 토큰 붙이기로 참조한다** -- 그 파일의
+ * `#define IMR(x) BIT(XILINX_PCIE_INTR_ ##x)` 와
+ * `#define _IC(x, s) [XILINX_PCIE_INTR_ ## x] = ...` 가 이름을
+ * 전처리 단계에서 조립하므로, 이 이름 그대로는 grep 에 잡히지 않는다. */
 #define XILINX_PCIE_INTR_CFG_ERR_POISON		12
 /* [한국어] PME_TO_Ack 를 받았다 -- 서스펜드 절차에서 하위 장치가 응답했다는 뜻이다.
- * **이 트리의 어느 드라이버도 참조하지 않는다.** */
+ * **pcie-xilinx-cpm.c 가 토큰 붙이기로 참조한다** -- 그 파일의
+ * `#define IMR(x) BIT(XILINX_PCIE_INTR_ ##x)` 와
+ * `#define _IC(x, s) [XILINX_PCIE_INTR_ ## x] = ...` 가 이름을
+ * 전처리 단계에서 조립하므로, 이 이름 그대로는 grep 에 잡히지 않는다. */
 #define XILINX_PCIE_INTR_PME_TO_ACK_RCVD	15
 /* [한국어] 레거시 INTx 인터럽트가 도착했다. 컨트롤러가 이 비트로 알리면 드라이버가
  * INTx 하위 도메인으로 넘긴다. */
 #define XILINX_PCIE_INTR_INTX			16
 /* [한국어] PM_PME 메시지를 받았다 -- 하위 장치가 절전 상태에서 깨어나고 싶다는
- * 신호다. **값이 아래 MSI 와 같은 17 이고, 이 트리의 어느 드라이버도
- * 이 이름으로는 참조하지 않는다.** */
+ * 신호다. **값이 아래 MSI 와 같은 17 이다.**
+ * **pcie-xilinx-cpm.c 가 토큰 붙이기로 참조한다** -- 그 파일의
+ * `#define IMR(x) BIT(XILINX_PCIE_INTR_ ##x)` 와
+ * `#define _IC(x, s) [XILINX_PCIE_INTR_ ## x] = ...` 가 이름을
+ * 전처리 단계에서 조립하므로, 이 이름 그대로는 grep 에 잡히지 않는다. */
 #define XILINX_PCIE_INTR_PM_PME_RCVD		17
 /* [한국어] MSI 가 도착했다. **위 PM_PME_RCVD 와 같은 비트 17 이다** -- 같은 비트를
  * 판본에 따라 다른 뜻으로 쓴다는 뜻이고, 실제로 이 이름을 쓰는 드라이버와
@@ -112,5 +124,8 @@
 /* [한국어] AXI 마스터 쪽에서 슬레이브 오류 응답을 받았다. */
 #define XILINX_PCIE_INTR_MST_SLVERR		27
 /* [한국어] 슬레이브 쪽 PCIe 트랜잭션이 시간 초과됐다.
- * **이 트리의 어느 드라이버도 참조하지 않는다.** */
+ * **pcie-xilinx-cpm.c 가 토큰 붙이기로 참조한다** -- 그 파일의
+ * `#define IMR(x) BIT(XILINX_PCIE_INTR_ ##x)` 와
+ * `#define _IC(x, s) [XILINX_PCIE_INTR_ ## x] = ...` 가 이름을
+ * 전처리 단계에서 조립하므로, 이 이름 그대로는 grep 에 잡히지 않는다. */
 #define XILINX_PCIE_INTR_SLV_PCIE_TIMEOUT	28
