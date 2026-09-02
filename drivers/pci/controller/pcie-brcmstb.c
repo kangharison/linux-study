@@ -640,6 +640,12 @@ struct brcm_msi {
 	int			nr; /* No. of MSI available, depends on chip */
 	/* This is the base pointer for interrupt status/set/clr regs */
 	void __iomem		*intr_base;
+	/* [한국어] MSI 상태/설정/해제 레지스터 묶음의 시작 주소. 위 영어 주석이
+	 * 밝힌 그대로다.
+	 * 설정자: brcm_pcie_enable_msi() 가 칩 세대에 맞는 오프셋을 더해 만든다.
+	 * 읽는 자: MSI 인터럽트 핸들러가 어떤 벡터가 올라왔는지 읽고 지울 때.
+	 * 값 범위: 유효한 iomem 포인터. 세대마다 오프셋이 달라 이 필드로 흡수한다.
+	 * 동기화: 초기화 이후 불변이며, 레지스터 접근은 msi->lock 이 지킨다. */
 };
 
 /* Internal PCIe Host Controller Information.*/

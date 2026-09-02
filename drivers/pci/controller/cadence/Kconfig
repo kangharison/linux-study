@@ -1,52 +1,80 @@
 # SPDX-License-Identifier: GPL-2.0
+#
+# ============================================================================
+# [한국어 설명] Cadence PCIe 컨트롤러 설정 (controller/cadence/Kconfig)
+#
+# === 파일의 역할 ===
+# Cadence PCIe IP를 쓰는 호스트/엔드포인트 드라이버의 빌드 여부를 정한다.
+# 프롬프트 없는 내부 심볼(PCIE_CADENCE, _HOST, _EP, _PLAT)로 공통 코어를 두고,
+# 사용자에게는 실제 보드 옵션만 노출한 뒤 그것이 필요한 코어를 select 하는
+# 구조다. 덕분에 사용자는 IP 계층 구조를 몰라도 자기 SoC만 고르면 된다.
+#
+# === 전체 아키텍처에서의 위치 ===
+# drivers/pci/controller/Kconfig -> [이 파일]
+# 이 계층이 링크를 올리고 pci_host_bridge를 등록해야 drivers/pci/probe.c가
+# 하위를 열거한다. TI J721E 같은 차량/산업용 SoC에서 NVMe를 붙이는 경로다.
+# HPA(High Performance Architecture)는 Cadence IP의 2세대 레지스터 맵으로,
+# 같은 드라이버 안에서 런타임 분기로 처리된다.
+#
+# === 타 모듈과의 연결 ===
+# - controller/cadence/Makefile: 선택 결과를 오브젝트로 번역.
+# - drivers/pci/endpoint/: EP 모드일 때 EPC로 등록되는 상대편 프레임워크.
+# - drivers/pci/ecam.c: PCI_SKY1_HOST가 select 하는 표준 config 접근자.
+#
+# === 주요 함수/구조체 요약 ===
+# - PCIE_CADENCE      : 공통 레지스터/윈도우 코어(내부 심볼).
+# - PCIE_CADENCE_HOST : 루트 콤플렉스 동작(내부 심볼).
+# - PCIE_CADENCE_EP   : 엔드포인트 동작(내부 심볼).
+# - PCI_J721E / _HOST / _EP: TI K3 계열 결합. 모드별로 코어를 조건부 select.
+# ============================================================================
 
-menu "Cadence-based PCIe controllers"
-	depends on PCI
+menu "Cadence-based PCIe controllers"	# [한국어] Cadence IP 기반 컨트롤러 메뉴 시작
+	depends on PCI	# [한국어] PCI 코어 없이는 브리지를 등록할 대상이 없다
 
-config PCIE_CADENCE
-	tristate
+config PCIE_CADENCE	# [한국어] 공통 코어. 프롬프트가 없어 아래 보드 옵션이 select 로만 켠다
+	tristate	# [한국어] 프롬프트 없는 tristate — 이를 select 하는 쪽의 모듈/내장 선택을 그대로 따른다
 
-config PCIE_CADENCE_HOST
-	tristate
-	depends on OF
-	select IRQ_DOMAIN
-	select PCIE_CADENCE
+config PCIE_CADENCE_HOST	# [한국어] 루트 콤플렉스 동작 계층(내부 심볼)
+	tristate	# [한국어] 프롬프트 없는 tristate — 이를 select 하는 쪽의 모듈/내장 선택을 그대로 따른다
+	depends on OF	# [한국어] 레지스터 창과 인터럽트 배선을 디바이스 트리에서 읽는다
+	select IRQ_DOMAIN	# [한국어] INTx/MSI를 계층형 IRQ 도메인으로 다루기 위해 필요
+	select PCIE_CADENCE	# [한국어] 공통 코어를 함께 빌드
 
-config PCIE_CADENCE_EP
-	tristate
-	depends on OF
-	depends on PCI_ENDPOINT
-	select PCIE_CADENCE
+config PCIE_CADENCE_EP	# [한국어] 엔드포인트 동작 계층(내부 심볼)
+	tristate	# [한국어] 프롬프트 없는 tristate — 이를 select 하는 쪽의 모듈/내장 선택을 그대로 따른다
+	depends on OF	# [한국어] 레지스터 창과 인터럽트 배선을 디바이스 트리에서 읽는다
+	depends on PCI_ENDPOINT	# [한국어] 엔드포인트 프레임워크가 있어야 EPC로 등록할 수 있다
+	select PCIE_CADENCE	# [한국어] 공통 코어를 함께 빌드
 
-config PCIE_CADENCE_PLAT
-	tristate
+config PCIE_CADENCE_PLAT	# [한국어] 범용 플랫폼 결합 코어(내부 심볼)
+	tristate	# [한국어] 프롬프트 없는 tristate — 이를 select 하는 쪽의 모듈/내장 선택을 그대로 따른다
 
-config PCIE_CADENCE_PLAT_HOST
-	tristate "Cadence platform PCIe controller (host mode)"
-	depends on OF
-	select PCIE_CADENCE_HOST
-	select PCIE_CADENCE_PLAT
+config PCIE_CADENCE_PLAT_HOST	# [한국어] 범용 Cadence 플랫폼 호스트 모드. 벤더 고유 초기화가 없는 SoC용
+	tristate "Cadence platform PCIe controller (host mode)"	# [한국어] tristate — 모듈화 가능
+	depends on OF	# [한국어] 레지스터 창과 인터럽트 배선을 디바이스 트리에서 읽는다
+	select PCIE_CADENCE_HOST	# [한국어] 루트 콤플렉스 계층을 함께 빌드
+	select PCIE_CADENCE_PLAT	# [한국어] 범용 플랫폼 결합 코드를 함께 빌드
 	help
 	  Say Y here if you want to support the Cadence PCIe platform controller in
 	  host mode. This PCIe controller may be embedded into many different
 	  vendors SoCs.
 
-config PCIE_CADENCE_PLAT_EP
-	tristate "Cadence platform PCIe controller (endpoint mode)"
-	depends on OF
-	depends on PCI_ENDPOINT
-	select PCIE_CADENCE_EP
-	select PCIE_CADENCE_PLAT
+config PCIE_CADENCE_PLAT_EP	# [한국어] 범용 Cadence 플랫폼 엔드포인트 모드
+	tristate "Cadence platform PCIe controller (endpoint mode)"	# [한국어] tristate — 모듈화 가능
+	depends on OF	# [한국어] 레지스터 창과 인터럽트 배선을 디바이스 트리에서 읽는다
+	depends on PCI_ENDPOINT	# [한국어] 엔드포인트 프레임워크가 있어야 EPC로 등록할 수 있다
+	select PCIE_CADENCE_EP	# [한국어] 엔드포인트 계층을 함께 빌드
+	select PCIE_CADENCE_PLAT	# [한국어] 범용 플랫폼 결합 코드를 함께 빌드
 	help
 	  Say Y here if you want to support the Cadence PCIe platform controller in
 	  endpoint mode. This PCIe controller may be embedded into many
 	  different vendors SoCs.
 
-config PCI_SKY1_HOST
-	tristate "CIX SKY1 PCIe controller (host mode)"
-	depends on OF && (ARCH_CIX || COMPILE_TEST)
-	select PCIE_CADENCE_HOST
-	select PCI_ECAM
+config PCI_SKY1_HOST	# [한국어] CIX SKY1 호스트 결합. Cadence HPA(2세대 IP)를 쓴다
+	tristate "CIX SKY1 PCIe controller (host mode)"	# [한국어] tristate — 모듈화 가능
+	depends on OF && (ARCH_CIX || COMPILE_TEST)	# [한국어] DT가 필요하고, 해당 SoC이거나 컴파일 검증 목적일 때만 노출
+	select PCIE_CADENCE_HOST	# [한국어] 루트 콤플렉스 계층을 함께 빌드
+	select PCI_ECAM	# [한국어] config space 접근이 표준 ECAM 규약을 따르므로 그 구현을 끌어온다
 	help
 	  Say Y here if you want to support the CIX SKY1 PCIe platform
 	  controller in host mode. CIX SKY1 PCIe controller uses Cadence
@@ -57,39 +85,39 @@ config PCI_SKY1_HOST
 	  (PCIE_CADENCE_HOST) and hardware platform adaptation layer
 	  to function.
 
-config PCIE_SG2042_HOST
-	tristate "Sophgo SG2042 PCIe controller (host mode)"
-	depends on OF && (ARCH_SOPHGO || COMPILE_TEST)
-	select PCIE_CADENCE_HOST
+config PCIE_SG2042_HOST	# [한국어] Sophgo SG2042(RISC-V 64코어) 호스트 결합
+	tristate "Sophgo SG2042 PCIe controller (host mode)"	# [한국어] tristate — 모듈화 가능
+	depends on OF && (ARCH_SOPHGO || COMPILE_TEST)	# [한국어] DT가 필요하고, 해당 SoC이거나 컴파일 검증 목적일 때만 노출
+	select PCIE_CADENCE_HOST	# [한국어] 루트 콤플렉스 계층을 함께 빌드
 	help
 	  Say Y here if you want to support the Sophgo SG2042 PCIe platform
 	  controller in host mode. Sophgo SG2042 PCIe controller uses Cadence
 	  PCIe core.
 
-config PCI_J721E
-	tristate
-	select PCIE_CADENCE_HOST if PCI_J721E_HOST != n
-	select PCIE_CADENCE_EP if PCI_J721E_EP != n
+config PCI_J721E	# [한국어] TI J721E 공통 결합. 프롬프트가 없고 아래 모드 옵션이 select 한다
+	tristate	# [한국어] 프롬프트 없는 tristate — 이를 select 하는 쪽의 모듈/내장 선택을 그대로 따른다
+	select PCIE_CADENCE_HOST if PCI_J721E_HOST != n	# [한국어] 호스트 모드가 선택된 경우에만 루트 콤플렉스 계층을 끌어온다. 조건부 select 로 불필요한 코드를 배제
+	select PCIE_CADENCE_EP if PCI_J721E_EP != n	# [한국어] 엔드포인트 모드가 선택된 경우에만 EP 계층을 끌어온다
 
-config PCI_J721E_HOST
-	tristate "TI J721E PCIe controller (host mode)"
-	depends on ARCH_K3 || COMPILE_TEST
-	depends on OF
-	select PCI_J721E
+config PCI_J721E_HOST	# [한국어] TI J721E 호스트 모드. 이 SoC에 NVMe를 붙이는 경로
+	tristate "TI J721E PCIe controller (host mode)"	# [한국어] tristate — 모듈화 가능
+	depends on ARCH_K3 || COMPILE_TEST	# [한국어] TI K3 계열이거나 컴파일 검증 목적일 때만 노출
+	depends on OF	# [한국어] 레지스터 창과 인터럽트 배선을 디바이스 트리에서 읽는다
+	select PCI_J721E	# [한국어] 공통 결합 코드를 함께 빌드
 	help
 	  Say Y here if you want to support the TI J721E PCIe platform
 	  controller in host mode. TI J721E PCIe controller uses Cadence PCIe
 	  core.
 
-config PCI_J721E_EP
-	tristate "TI J721E PCIe controller (endpoint mode)"
-	depends on ARCH_K3 || COMPILE_TEST
-	depends on OF
-	depends on PCI_ENDPOINT
-	select PCI_J721E
+config PCI_J721E_EP	# [한국어] TI J721E 엔드포인트 모드
+	tristate "TI J721E PCIe controller (endpoint mode)"	# [한국어] tristate — 모듈화 가능
+	depends on ARCH_K3 || COMPILE_TEST	# [한국어] TI K3 계열이거나 컴파일 검증 목적일 때만 노출
+	depends on OF	# [한국어] 레지스터 창과 인터럽트 배선을 디바이스 트리에서 읽는다
+	depends on PCI_ENDPOINT	# [한국어] 엔드포인트 프레임워크가 있어야 EPC로 등록할 수 있다
+	select PCI_J721E	# [한국어] 공통 결합 코드를 함께 빌드
 	help
 	  Say Y here if you want to support the TI J721E PCIe platform
 	  controller in endpoint mode. TI J721E PCIe controller uses Cadence PCIe
 	  core.
 
-endmenu
+endmenu	# [한국어] Cadence 메뉴 끝

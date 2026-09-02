@@ -205,6 +205,12 @@
  * @intx_irq: INTx IRQ interrupt number
  */
 struct amd_mdb_pcie {
+	/* [한국어] DesignWare 공통 컨트롤러 구조체를 **값으로** 품는다.
+	 * 그래서 to_amd_mdb_pcie() 가 container_of 로 이 글루 구조체를 되찾을 수 있다.
+	 * 설정자: amd_mdb_pcie_probe() 가 dev/ops 등을 채운다.
+	 * 읽는 자: DWC 코어(dw_pcie_host_init 등)와 이 파일의 인터럽트 설정.
+	 * 값 범위: 내장 구조체라 항상 유효하다.
+	 * 동기화: probe 이후 구성은 불변이고, 런타임 접근은 dw_pcie_rp 의 잠금이 지킨다. */
 	struct dw_pcie			pci;
 	/* [한국어] SLCR(시스템 수준 제어·상태) 레지스터 창의 가상 주소.
 	 * 설정자: amd_mdb_add_pcie_port() 가 "slcr" 이라는 **이름으로** 매핑한다.

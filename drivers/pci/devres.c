@@ -119,11 +119,24 @@
  * Legacy struct storing addresses to whole mapped BARs.
  */
 struct pcim_iomap_devres {
+	/* [한국어] BAR 번호로 색인하는 매핑 주소 표. 위 영어 주석대로 레거시 구조이며,
+	 * pcim_iomap_table() 호출이 커널에서 모두 사라지면 통째로 없어질 예정이다.
+	 * 설정자: pcim_iomap() 이 해당 BAR 칸에 매핑 주소를 넣는다.
+	 * 읽는 자: pcim_iomap_table() 이 이 배열을 그대로 드라이버에 돌려준다.
+	 * 값 범위: 매핑되지 않은 BAR 는 NULL. 인덱스는 0..PCI_NUM_RESOURCES-1.
+	 * 동기화: devres 코어의 잠금이 목록을 지키며, 표 자체는 해당 장치의
+	 *   프로브 경로에서만 갱신된다. */
 	void __iomem *table[PCI_NUM_RESOURCES];
 };
 
 /* Used to restore the old INTx state on driver detach. */
 struct pcim_intx_devres {
+	/* [한국어] pcim_intx() 를 부르기 직전의 INTx 활성 상태를 보관한다.
+	 * 설정자: pcim_intx() 가 PCI_COMMAND 의 INTX_DISABLE 비트를 읽어 저장한다.
+	 * 읽는 자: 해제 콜백 pcim_intx_restore() 가 드라이버 detach 시 이 값으로
+	 *   원상 복구한다. 위 영어 주석이 밝힌 목적 그대로다.
+	 * 값 범위: 0 또는 1. 1 이면 원래 INTx 가 켜져 있었다는 뜻.
+	 * 동기화: 장치별 devres 항목이라 경합이 없다. */
 	int orig_intx;
 /* [한국어] 이 구조체가 필드 하나뿐인 것은 devres 가 '해제 콜백 + 데이터' 쌍으로만
  * 동작하기 때문이다. 데이터가 하나라도 구조체로 감싸야 devres 슬롯이 된다. */
@@ -155,6 +168,13 @@ enum pcim_addr_devres_type {
  * together.
  */
 struct pcim_addr_devres {
+	/* [한국어] 이 항목이 무엇을 잡고 있는지 -- 영역 요청인지, 매핑인지, 둘 다인지.
+	 * 설정자: pcim_iomap / pcim_request_region 계열이 자신에 맞는 값으로 채운다.
+	 * 읽는 자: 해제 콜백이 이 값으로 무엇을 되돌릴지 가른다. REGION 이면
+	 *   release 만, MAPPING 이면 iounmap 만, REGION_MAPPING 이면 둘 다 한다.
+	 * 값 범위: 위 enum 의 네 값. INVALID 는 기본 초기값이라 실제로 등록되면
+	 *   나타나지 않는다.
+	 * 동기화: devres 코어의 잠금이 목록을 지킨다. */
 	enum pcim_addr_devres_type type;
 	/* [한국어] 매핑된 커널 가상 주소.
 	 * 설정자: pcim_iomap / pcim_iomap_region / pcim_iomap_range.

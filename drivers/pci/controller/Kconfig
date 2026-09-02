@@ -1,52 +1,84 @@
 # SPDX-License-Identifier: GPL-2.0
+#
+# ============================================================================
+# [한국어 설명] PCIe 호스트 컨트롤러 드라이버 설정 (controller/Kconfig)
+#
+# === 파일의 역할 ===
+# 루트 콤플렉스/호스트 브리지 드라이버의 빌드 여부를 정한다. 이 계층은 "PCI
+# 버스를 존재하게 만드는" 층으로, CPU 주소 공간과 PCI 버스 주소 공간을 잇고
+# 링크 트레이닝을 마쳐야 비로소 하위 장치가 열거된다. 자체 IP를 쓰는 벤더는
+# 여기에 직접 항목을 두고, 공용 IP(Cadence/DesignWare/Mobiveil/PLDA)는 하위
+# Kconfig를 source 로 끌어온다.
+#
+# === 전체 아키텍처에서의 위치 ===
+# drivers/pci/Kconfig -> [이 파일] -> cadence/, dwc/, mobiveil/, plda/ Kconfig
+# NVMe 기준 시간 순서: 컨트롤러 probe -> 링크 업 -> pci_host_probe()
+#   -> drivers/pci/probe.c 열거 -> pci_dev 생성 -> nvme_probe().
+# 여기서 실패하면 NVMe는 존재조차 하지 않으므로, 임베디드 보드에서 "SSD가
+# 안 보인다"를 추적할 때 가장 먼저 확인할 계층이다.
+#
+# === 타 모듈과의 연결 ===
+# - drivers/pci/controller/Makefile: 선택 결과를 오브젝트로 번역.
+# - drivers/pci/ecam.c: PCI_HOST_COMMON이 select 하는 표준 config 접근자.
+# - drivers/pci/msi/: 대부분 항목이 PCI_MSI에 의존한다. NVMe가 큐마다 벡터를
+#   받으려면 컨트롤러가 MSI 도메인을 제공해야 하기 때문이다.
+# - drivers/pci/pci-bridge-emul.c: 하드웨어에 브리지 config space가 없는
+#   컨트롤러(Aardvark, MVEBU)가 select 해서 소프트웨어로 흉내낸다.
+#
+# === 주요 함수/구조체 요약 ===
+# - PCI_HOST_COMMON  : DT 파싱과 브리지 등록의 공통 절차(내부 심볼).
+# - PCI_HOST_GENERIC : ECAM만 있으면 되는 표준 호스트. QEMU virt의 기본 경로.
+# - VMD              : Intel VMD. NVMe를 별도 도메인으로 감싸는 특수 경로.
+# - PCIE_BRCMSTB     : 라즈베리파이 4/5의 NVMe가 올라오는 컨트롤러.
+# ============================================================================
 
-menu "PCI controller drivers"
-	depends on PCI
+menu "PCI controller drivers"	# [한국어] 호스트 컨트롤러 메뉴 시작
+	depends on PCI	# [한국어] PCI 코어 없이는 호스트 브리지를 등록할 대상이 없다
 
-config PCI_HOST_COMMON
-	tristate
-	select PCI_ECAM
+config PCI_HOST_COMMON	# [한국어] DT 파싱과 브리지 등록의 공통 절차. 프롬프트가 없어 아래 드라이버들이 select 로만 켠다
+	tristate	# [한국어] 프롬프트 없는 tristate — 이를 select 하는 쪽의 모듈/내장 선택을 따른다
+	select PCI_ECAM	# [한국어] config space 접근이 표준 ECAM 규약을 따르므로 그 구현을 함께 빌드
 
-config PCI_AARDVARK
-	tristate "Aardvark PCIe controller"
-	depends on (ARCH_MVEBU && ARM64) || COMPILE_TEST
-	depends on OF
-	depends on PCI_MSI
-	select PCI_BRIDGE_EMUL
-	select IRQ_MSI_LIB
+config PCI_AARDVARK	# [한국어] Marvell Armada 3700 Aardvark 컨트롤러
+	tristate "Aardvark PCIe controller"	# [한국어] tristate — 모듈화 가능
+	depends on (ARCH_MVEBU && ARM64) || COMPILE_TEST	# [한국어] 해당 SoC이거나 컴파일 검증 목적일 때만 노출
+	depends on OF	# [한국어] 레지스터 창과 인터럽트 배선을 디바이스 트리에서 읽는다
+	depends on PCI_MSI	# [한국어] MSI 도메인이 있어야 한다. NVMe가 I/O 큐마다 벡터를 받는 전제
+	select PCI_BRIDGE_EMUL	# [한국어] 하드웨어에 브리지 config space가 없어 소프트웨어로 흉내낸다
+	select IRQ_MSI_LIB	# [한국어] MSI 도메인 구성 헬퍼를 끌어온다
 	help
 	 Add support for Aardvark 64bit PCIe Host Controller. This
 	 controller is part of the South Bridge of the Marvel Armada
 	 3700 SoC.
 
-config PCIE_ALTERA
-	tristate "Altera PCIe controller"
-	depends on ARM || NIOS2 || ARM64 || COMPILE_TEST
+config PCIE_ALTERA	# [한국어] Altera/Intel FPGA soft IP 브리지
+	tristate "Altera PCIe controller"	# [한국어] tristate — 모듈화 가능
+	depends on ARM || NIOS2 || ARM64 || COMPILE_TEST	# [한국어] FPGA가 얹히는 아키텍처들, 또는 컴파일 검증 목적
 	help
 	  Say Y here if you want to enable PCIe controller support on Altera
 	  FPGA.
 
-config PCIE_ALTERA_MSI
-	tristate "Altera PCIe MSI feature"
-	depends on PCIE_ALTERA
-	depends on PCI_MSI
-	select IRQ_MSI_LIB
+config PCIE_ALTERA_MSI	# [한국어] Altera FPGA 전용 MSI 컨트롤러
+	tristate "Altera PCIe MSI feature"	# [한국어] tristate — 모듈화 가능
+	depends on PCIE_ALTERA	# [한국어] 해당 호스트 브리지가 있어야 MSI 블록이 의미를 갖는다
+	depends on PCI_MSI	# [한국어] MSI 도메인이 있어야 한다. NVMe가 I/O 큐마다 벡터를 받는 전제
+	select IRQ_MSI_LIB	# [한국어] MSI 도메인 구성 헬퍼를 끌어온다
 	help
 	  Say Y here if you want PCIe MSI support for the Altera FPGA.
 	  This MSI driver supports Altera MSI to GIC controller IP.
 
-config PCIE_APPLE_MSI_DOORBELL_ADDR
-	hex
-	default 0xfffff000
-	depends on PCIE_APPLE
+config PCIE_APPLE_MSI_DOORBELL_ADDR	# [한국어] Apple 컨트롤러가 MSI 도어벨로 쓸 물리 주소
+	hex	# [한국어] hex — 물리 주소라 16진수로 입력받는다
+	default 0xfffff000	# [한국어] 다른 용도로 쓰이지 않는 고정 주소를 기본값으로 둔다
+	depends on PCIE_APPLE	# [한국어] Apple 컨트롤러가 켜진 경우에만 의미가 있다
 
-config PCIE_APPLE
-	tristate "Apple PCIe controller"
-	depends on ARCH_APPLE || COMPILE_TEST
-	depends on OF
-	depends on PCI_MSI
-	select PCI_HOST_COMMON
-	select IRQ_MSI_LIB
+config PCIE_APPLE	# [한국어] Apple M1/M2 컨트롤러. Asahi Linux에서 내장 NVMe를 올리는 경로
+	tristate "Apple PCIe controller"	# [한국어] tristate — 모듈화 가능
+	depends on ARCH_APPLE || COMPILE_TEST	# [한국어] Apple Silicon이거나 컴파일 검증 목적일 때만 노출
+	depends on OF	# [한국어] 레지스터 창과 인터럽트 배선을 디바이스 트리에서 읽는다
+	depends on PCI_MSI	# [한국어] MSI 도메인이 있어야 한다. NVMe가 I/O 큐마다 벡터를 받는 전제
+	select PCI_HOST_COMMON	# [한국어] 공통 DT 파싱/브리지 등록 절차를 재사용
+	select IRQ_MSI_LIB	# [한국어] MSI 도메인 구성 헬퍼를 끌어온다
 	help
 	  Say Y here if you want to enable PCIe controller support on Apple
 	  system-on-chips, like the Apple M1. This is required for the USB
@@ -54,16 +86,16 @@ config PCIE_APPLE
 
 	  If unsure, say Y if you have an Apple Silicon system.
 
-config PCI_VERSATILE
-	bool "ARM Versatile PB PCI controller"
-	depends on ARCH_VERSATILE || COMPILE_TEST
+config PCI_VERSATILE	# [한국어] ARM Versatile 개발 보드 브리지
+	bool "ARM Versatile PB PCI controller"	# [한국어] bool — 내장 전용
+	depends on ARCH_VERSATILE || COMPILE_TEST	# [한국어] 해당 보드이거나 컴파일 검증 목적
 
-config PCIE_ASPEED
-	bool "ASPEED PCIe controller"
-	depends on ARCH_ASPEED || COMPILE_TEST
-	depends on OF
-	depends on PCI_MSI
-	select IRQ_MSI_LIB
+config PCIE_ASPEED	# [한국어] ASPEED BMC 컨트롤러. 서버 관리 프로세서 쪽 경로
+	bool "ASPEED PCIe controller"	# [한국어] bool — 내장 전용
+	depends on ARCH_ASPEED || COMPILE_TEST	# [한국어] 해당 SoC이거나 컴파일 검증 목적
+	depends on OF	# [한국어] 레지스터 창과 인터럽트 배선을 디바이스 트리에서 읽는다
+	depends on PCI_MSI	# [한국어] MSI 도메인이 있어야 한다. NVMe가 I/O 큐마다 벡터를 받는 전제
+	select IRQ_MSI_LIB	# [한국어] MSI 도메인 구성 헬퍼를 끌어온다
 	help
 	  Enable this option to support the PCIe controller found on ASPEED
 	  SoCs.
@@ -74,105 +106,105 @@ config PCIE_ASPEED
 	  Select Y if your platform uses an ASPEED SoC and requires PCIe
 	  connectivity.
 
-config PCIE_BRCMSTB
-	tristate "Broadcom Brcmstb PCIe controller"
+config PCIE_BRCMSTB	# [한국어] Broadcom STB 컨트롤러. 라즈베리파이 4/5의 NVMe가 여기로 올라온다
+	tristate "Broadcom Brcmstb PCIe controller"	# [한국어] tristate — 모듈화 가능
 	depends on ARCH_BRCMSTB || ARCH_BCM2835 || ARCH_BCMBCA || \
-		   BMIPS_GENERIC || COMPILE_TEST
-	depends on OF
-	depends on PCI_MSI
-	select IRQ_MSI_LIB
-	default ARCH_BRCMSTB || BMIPS_GENERIC
+		   BMIPS_GENERIC || COMPILE_TEST	# [한국어] Broadcom STB/BCM2835(라즈베리파이)/BCMBCA/BMIPS 계열, 또는 컴파일 검증 목적일 때만 노출 (앞 줄에서 이어짐)
+	depends on OF	# [한국어] 레지스터 창과 인터럽트 배선을 디바이스 트리에서 읽는다
+	depends on PCI_MSI	# [한국어] MSI 도메인이 있어야 한다. NVMe가 I/O 큐마다 벡터를 받는 전제
+	select IRQ_MSI_LIB	# [한국어] MSI 도메인 구성 헬퍼를 끌어온다
+	default ARCH_BRCMSTB || BMIPS_GENERIC	# [한국어] 해당 아키텍처에서는 기본으로 켠다
 	help
 	  Say Y here to enable PCIe host controller support for
 	  Broadcom STB based SoCs, like the Raspberry Pi 4.
 
-config PCIE_IPROC
-	tristate
+config PCIE_IPROC	# [한국어] Broadcom iProc 코어 로직. 버스 인터페이스 드라이버가 select 해야 켜진다
+	tristate	# [한국어] 프롬프트 없는 tristate — 이를 select 하는 쪽의 모듈/내장 선택을 따른다
 	help
 	  This enables the iProc PCIe core controller support for Broadcom's
 	  iProc family of SoCs. An appropriate bus interface driver needs
 	  to be enabled to select this.
 
-config PCIE_IPROC_PLATFORM
-	tristate "Broadcom iProc PCIe platform bus driver"
-	depends on ARCH_BCM_IPROC || (ARM && COMPILE_TEST)
-	depends on OF
-	select PCIE_IPROC
-	default ARCH_BCM_IPROC
+config PCIE_IPROC_PLATFORM	# [한국어] iProc의 DT 플랫폼 결합
+	tristate "Broadcom iProc PCIe platform bus driver"	# [한국어] tristate — 모듈화 가능
+	depends on ARCH_BCM_IPROC || (ARM && COMPILE_TEST)	# [한국어] 해당 SoC이거나 ARM 컴파일 검증 목적
+	depends on OF	# [한국어] 레지스터 창과 인터럽트 배선을 디바이스 트리에서 읽는다
+	select PCIE_IPROC	# [한국어] iProc 코어 로직을 함께 빌드
+	default ARCH_BCM_IPROC	# [한국어] 해당 아키텍처에서는 기본으로 켠다
 	help
 	  Say Y here if you want to use the Broadcom iProc PCIe controller
 	  through the generic platform bus interface
 
-config PCIE_IPROC_BCMA
-	tristate "Broadcom iProc BCMA PCIe controller"
-	depends on ARM && (ARCH_BCM_IPROC || COMPILE_TEST)
-	select PCIE_IPROC
-	select BCMA
-	default ARCH_BCM_5301X
+config PCIE_IPROC_BCMA	# [한국어] iProc의 BCMA 버스 결합
+	tristate "Broadcom iProc BCMA PCIe controller"	# [한국어] tristate — 모듈화 가능
+	depends on ARM && (ARCH_BCM_IPROC || COMPILE_TEST)	# [한국어] ARM 전용. BCMA 버스 코드가 ARM에만 있다
+	select PCIE_IPROC	# [한국어] iProc 코어 로직을 함께 빌드
+	select BCMA	# [한국어] Broadcom 전용 버스 인프라를 켠다
+	default ARCH_BCM_5301X	# [한국어] 해당 SoC에서는 기본으로 켠다
 	help
 	  Say Y here if you want to use the Broadcom iProc PCIe controller
 	  through the BCMA bus interface
 
-config PCIE_IPROC_MSI
-	bool "Broadcom iProc PCIe MSI support"
-	depends on PCIE_IPROC_PLATFORM || PCIE_IPROC_BCMA
-	depends on PCI_MSI
-	select IRQ_MSI_LIB
-	default ARCH_BCM_IPROC
+config PCIE_IPROC_MSI	# [한국어] iProc 전용 MSI 컨트롤러
+	bool "Broadcom iProc PCIe MSI support"	# [한국어] bool — 호스트 드라이버에 함께 링크된다
+	depends on PCIE_IPROC_PLATFORM || PCIE_IPROC_BCMA	# [한국어] 둘 중 한 결합 방식이 켜져 있어야 한다
+	depends on PCI_MSI	# [한국어] MSI 도메인이 있어야 한다. NVMe가 I/O 큐마다 벡터를 받는 전제
+	select IRQ_MSI_LIB	# [한국어] MSI 도메인 구성 헬퍼를 끌어온다
+	default ARCH_BCM_IPROC	# [한국어] 해당 아키텍처에서는 기본으로 켠다
 	help
 	  Say Y here if you want to enable MSI support for Broadcom's iProc
 	  PCIe controller
 
-config PCI_HOST_THUNDER_PEM
-	bool "Cavium Thunder PCIe controller to off-chip devices"
-	depends on ARM64 || COMPILE_TEST
-	depends on OF || (ACPI && PCI_QUIRKS)
-	select PCI_HOST_COMMON
+config PCI_HOST_THUNDER_PEM	# [한국어] Cavium ThunderX PEM(외부 장치용) 브리지
+	bool "Cavium Thunder PCIe controller to off-chip devices"	# [한국어] bool — 내장 전용
+	depends on ARM64 || COMPILE_TEST	# [한국어] ARM64 서버이거나 컴파일 검증 목적
+	depends on OF || (ACPI && PCI_QUIRKS)	# [한국어] DT 경로, 또는 ACPI 경로에서 MCFG quirk로 접근자를 갈아끼우는 경로
+	select PCI_HOST_COMMON	# [한국어] 공통 DT 파싱/브리지 등록 절차를 재사용
 	help
 	  Say Y here if you want PCIe support for CN88XX Cavium Thunder SoCs.
 
-config PCI_HOST_THUNDER_ECAM
-	bool "Cavium Thunder ECAM controller to on-chip devices on pass-1.x silicon"
-	depends on ARM64 || COMPILE_TEST
-	depends on OF || (ACPI && PCI_QUIRKS)
-	select PCI_HOST_COMMON
+config PCI_HOST_THUNDER_ECAM	# [한국어] ThunderX pass-1.x 실리콘의 온칩 장치용 비표준 ECAM 보정
+	bool "Cavium Thunder ECAM controller to on-chip devices on pass-1.x silicon"	# [한국어] bool — 내장 전용
+	depends on ARM64 || COMPILE_TEST	# [한국어] ARM64 서버이거나 컴파일 검증 목적
+	depends on OF || (ACPI && PCI_QUIRKS)	# [한국어] DT 경로, 또는 ACPI 경로에서 MCFG quirk로 접근자를 갈아끼우는 경로
+	select PCI_HOST_COMMON	# [한국어] 공통 DT 파싱/브리지 등록 절차를 재사용
 	help
 	  Say Y here if you want ECAM support for CN88XX-Pass-1.x Cavium Thunder SoCs.
 
-config PCI_FTPCI100
-	bool "Faraday Technology FTPCI100 PCI controller"
-	depends on OF
-	default ARCH_GEMINI
+config PCI_FTPCI100	# [한국어] Faraday FTPCI100 브리지. 구형 ARM SoC
+	bool "Faraday Technology FTPCI100 PCI controller"	# [한국어] bool — 내장 전용
+	depends on OF	# [한국어] 레지스터 창과 인터럽트 배선을 디바이스 트리에서 읽는다
+	default ARCH_GEMINI	# [한국어] Gemini SoC에서는 기본으로 켠다
 
-config PCI_HOST_GENERIC
-	tristate "Generic PCI host controller"
-	depends on OF
-	select PCI_HOST_COMMON
-	select IRQ_DOMAIN
+config PCI_HOST_GENERIC	# [한국어] 표준 ECAM 호스트 브리지. QEMU virt 머신에서 NVMe를 붙이는 기본 경로
+	tristate "Generic PCI host controller"	# [한국어] tristate — 모듈화 가능
+	depends on OF	# [한국어] 레지스터 창과 인터럽트 배선을 디바이스 트리에서 읽는다
+	select PCI_HOST_COMMON	# [한국어] 공통 DT 파싱/브리지 등록 절차를 재사용
+	select IRQ_DOMAIN	# [한국어] INTx를 계층형 IRQ 도메인으로 다루기 위해 필요
 	help
 	  Say Y here if you want to support a simple generic PCI host
 	  controller, such as the one emulated by kvmtool.
 
-config PCIE_HISI_ERR
-	depends on ACPI_APEI_GHES && (ARM64 || COMPILE_TEST)
-	bool "HiSilicon HIP PCIe controller error handling driver"
+config PCIE_HISI_ERR	# [한국어] HiSilicon HIP 컨트롤러 오류 처리기
+	depends on ACPI_APEI_GHES && (ARM64 || COMPILE_TEST)	# [한국어] 펌웨어가 APEI/GHES로 보고한 오류를 해석하므로 그 인프라가 필요
+	bool "HiSilicon HIP PCIe controller error handling driver"	# [한국어] bool — 오류 처리 경로라 내장
 	help
 	  Say Y here if you want error handling support
 	  for the PCIe controller's errors on HiSilicon HIP SoCs
 
-config PCI_IXP4XX
-	bool "Intel IXP4xx PCI controller"
-	depends on OF
-	depends on ARCH_IXP4XX || COMPILE_TEST
-	default ARCH_IXP4XX
+config PCI_IXP4XX	# [한국어] Intel IXP4xx 네트워크 프로세서 브리지
+	bool "Intel IXP4xx PCI controller"	# [한국어] bool — 내장 전용
+	depends on OF	# [한국어] 레지스터 창과 인터럽트 배선을 디바이스 트리에서 읽는다
+	depends on ARCH_IXP4XX || COMPILE_TEST	# [한국어] 해당 SoC이거나 컴파일 검증 목적
+	default ARCH_IXP4XX	# [한국어] 해당 아키텍처에서는 기본으로 켠다
 	help
 	  Say Y here if you want support for the PCI host controller found
 	  in the Intel IXP4xx XScale-based network processor SoC.
 
-config VMD
-	depends on PCI_MSI && X86_64 && !UML
-	tristate "Intel Volume Management Device Driver"
-	select IRQ_MSI_LIB
+config VMD	# [한국어] Intel VMD. 루트 포트 하위 NVMe를 별도 PCI 도메인으로 감싸 OS에는 하나의 장치로 보이게 한다. NVMe 열거 방식이 통째로 달라지는 특수 경로
+	depends on PCI_MSI && X86_64 && !UML	# [한국어] x86_64 서버 전용이며, 감싼 도메인 안에서 자체 MSI 도메인을 만들므로 PCI_MSI가 필수
+	tristate "Intel Volume Management Device Driver"	# [한국어] tristate — vmd.ko로 뺄 수 있다. 다만 부팅 디스크가 VMD 뒤에 있으면 initramfs에 포함돼야 한다
+	select IRQ_MSI_LIB	# [한국어] MSI 도메인 구성 헬퍼를 끌어온다
 	help
 	  Adds support for the Intel Volume Management Device (VMD). VMD is a
 	  secondary PCI host bridge that allows PCI Express root ports,
@@ -185,44 +217,44 @@ config VMD
 	  To compile this driver as a module, choose M here: the
 	  module will be called vmd.
 
-config PCI_LOONGSON
-	bool "LOONGSON PCIe controller"
-	depends on MACH_LOONGSON64 || COMPILE_TEST
-	depends on OF || ACPI
-	depends on PCI_QUIRKS
-	default MACH_LOONGSON64
+config PCI_LOONGSON	# [한국어] Loongson 브리지
+	bool "LOONGSON PCIe controller"	# [한국어] bool — 내장 전용
+	depends on MACH_LOONGSON64 || COMPILE_TEST	# [한국어] 해당 플랫폼이거나 컴파일 검증 목적
+	depends on OF || ACPI	# [한국어] DT 또는 ACPI 중 하나로 장치를 기술받는다
+	depends on PCI_QUIRKS	# [한국어] 이 브리지는 quirk로 보정해야 정상 동작하므로 quirk 인프라가 필수
+	default MACH_LOONGSON64	# [한국어] 해당 플랫폼에서는 기본으로 켠다
 	help
 	  Say Y here if you want to enable PCI controller support on
 	  Loongson systems.
 
-config PCI_MVEBU
-	tristate "Marvell EBU PCIe controller"
-	depends on ARCH_MVEBU || ARCH_DOVE || COMPILE_TEST
-	depends on MVEBU_MBUS
-	depends on ARM
-	depends on OF
-	select PCI_BRIDGE_EMUL
+config PCI_MVEBU	# [한국어] Marvell EBU(Armada 370/XP) 컨트롤러
+	tristate "Marvell EBU PCIe controller"	# [한국어] tristate — 모듈화 가능
+	depends on ARCH_MVEBU || ARCH_DOVE || COMPILE_TEST	# [한국어] 해당 SoC들이거나 컴파일 검증 목적
+	depends on MVEBU_MBUS	# [한국어] Marvell 내부 버스 창 설정 인프라가 필요
+	depends on ARM	# [한국어] ARM 32비트 전용 구현
+	depends on OF	# [한국어] 레지스터 창과 인터럽트 배선을 디바이스 트리에서 읽는다
+	select PCI_BRIDGE_EMUL	# [한국어] 하드웨어에 브리지 config space가 없어 소프트웨어로 흉내낸다
 	help
 	 Add support for Marvell EBU PCIe controller. This PCIe controller
 	 is used on 32-bit Marvell ARM SoCs: Dove, Kirkwood, Armada 370,
 	 Armada XP, Armada 375, Armada 38x and Armada 39x.
 
-config PCIE_MEDIATEK
-	tristate "MediaTek PCIe controller"
-	depends on ARCH_AIROHA || ARCH_MEDIATEK || COMPILE_TEST
-	depends on OF
-	depends on PCI_MSI
-	select IRQ_MSI_LIB
+config PCIE_MEDIATEK	# [한국어] MediaTek 구세대 컨트롤러
+	tristate "MediaTek PCIe controller"	# [한국어] tristate — 모듈화 가능
+	depends on ARCH_AIROHA || ARCH_MEDIATEK || COMPILE_TEST	# [한국어] 해당 SoC들이거나 컴파일 검증 목적
+	depends on OF	# [한국어] 레지스터 창과 인터럽트 배선을 디바이스 트리에서 읽는다
+	depends on PCI_MSI	# [한국어] MSI 도메인이 있어야 한다. NVMe가 I/O 큐마다 벡터를 받는 전제
+	select IRQ_MSI_LIB	# [한국어] MSI 도메인 구성 헬퍼를 끌어온다
 	help
 	  Say Y here if you want to enable PCIe controller support on
 	  MediaTek SoCs.
 
-config PCIE_MEDIATEK_GEN3
-	tristate "MediaTek Gen3 PCIe controller"
-	depends on ARCH_AIROHA || ARCH_MEDIATEK || COMPILE_TEST
-	depends on PCI_MSI
-	select IRQ_MSI_LIB
-	select PCI_PWRCTRL_GENERIC
+config PCIE_MEDIATEK_GEN3	# [한국어] MediaTek Gen3 컨트롤러
+	tristate "MediaTek Gen3 PCIe controller"	# [한국어] tristate — 모듈화 가능
+	depends on ARCH_AIROHA || ARCH_MEDIATEK || COMPILE_TEST	# [한국어] 해당 SoC들이거나 컴파일 검증 목적
+	depends on PCI_MSI	# [한국어] MSI 도메인이 있어야 한다. NVMe가 I/O 큐마다 벡터를 받는 전제
+	select IRQ_MSI_LIB	# [한국어] MSI 도메인 구성 헬퍼를 끌어온다
+	select PCI_PWRCTRL_GENERIC	# [한국어] 슬롯 전원 시퀀스를 범용 전원 제어 드라이버에 맡긴다
 	help
 	  Adds support for PCIe Gen3 MAC controller for MediaTek SoCs.
 	  This PCIe controller is compatible with Gen3, Gen2 and Gen1 speed,
@@ -232,161 +264,161 @@ config PCIE_MEDIATEK_GEN3
 	  Say Y here if you want to enable Gen3 PCIe controller support on
 	  MediaTek SoCs.
 
-config PCIE_MT7621
-	tristate "MediaTek MT7621 PCIe controller"
-	depends on SOC_MT7621 || COMPILE_TEST
-	select PHY_MT7621_PCI
-	default SOC_MT7621
+config PCIE_MT7621	# [한국어] MediaTek MT7621 MIPS SoC 컨트롤러
+	tristate "MediaTek MT7621 PCIe controller"	# [한국어] tristate — 모듈화 가능
+	depends on SOC_MT7621 || COMPILE_TEST	# [한국어] 해당 SoC이거나 컴파일 검증 목적
+	select PHY_MT7621_PCI	# [한국어] SerDes PHY 드라이버가 있어야 링크 트레이닝이 가능하다
+	default SOC_MT7621	# [한국어] 해당 SoC에서는 기본으로 켠다
 	help
 	  This selects a driver for the MediaTek MT7621 PCIe Controller.
 
-config PCI_HYPERV_INTERFACE
-	tristate "Microsoft Hyper-V PCI Interface"
-	depends on ((X86 && X86_64) || ARM64) && HYPERV && PCI_MSI
+config PCI_HYPERV_INTERFACE	# [한국어] Hyper-V PCI 프론트엔드와 다른 모듈 사이의 인터페이스 계층
+	tristate "Microsoft Hyper-V PCI Interface"	# [한국어] tristate — 모듈화 가능
+	depends on ((X86 && X86_64) || ARM64) && HYPERV && PCI_MSI	# [한국어] Hyper-V 게스트에서만 의미가 있고, 가상 장치도 MSI로 인터럽트를 받는다
 	help
 	  The Hyper-V PCI Interface is a helper driver that allows other
 	  drivers to have a common interface with the Hyper-V PCI frontend
 	  driver.
 
-config PCI_TEGRA
-	tristate "NVIDIA Tegra PCIe controller"
-	depends on ARCH_TEGRA || COMPILE_TEST
-	depends on PCI_MSI
-	select IRQ_MSI_LIB
+config PCI_TEGRA	# [한국어] NVIDIA Tegra 20/30/K1 구형 자체 IP
+	tristate "NVIDIA Tegra PCIe controller"	# [한국어] tristate — 모듈화 가능
+	depends on ARCH_TEGRA || COMPILE_TEST	# [한국어] 해당 SoC이거나 컴파일 검증 목적
+	depends on PCI_MSI	# [한국어] MSI 도메인이 있어야 한다. NVMe가 I/O 큐마다 벡터를 받는 전제
+	select IRQ_MSI_LIB	# [한국어] MSI 도메인 구성 헬퍼를 끌어온다
 	help
 	  Say Y here if you want support for the PCIe host controller found
 	  on NVIDIA Tegra SoCs.
 
-config PCIE_RCAR_HOST
-	bool "Renesas R-Car PCIe controller (host mode)"
-	depends on ARCH_RENESAS || COMPILE_TEST
-	depends on OF
-	depends on PCI_MSI
-	select IRQ_MSI_LIB
+config PCIE_RCAR_HOST	# [한국어] Renesas R-Car Gen2/3 호스트 모드
+	bool "Renesas R-Car PCIe controller (host mode)"	# [한국어] bool — 내장 전용
+	depends on ARCH_RENESAS || COMPILE_TEST	# [한국어] 해당 SoC이거나 컴파일 검증 목적
+	depends on OF	# [한국어] 레지스터 창과 인터럽트 배선을 디바이스 트리에서 읽는다
+	depends on PCI_MSI	# [한국어] MSI 도메인이 있어야 한다. NVMe가 I/O 큐마다 벡터를 받는 전제
+	select IRQ_MSI_LIB	# [한국어] MSI 도메인 구성 헬퍼를 끌어온다
 	help
 	  Say Y here if you want PCIe controller support on R-Car SoCs in host
 	  mode.
 
-config PCIE_RCAR_EP
-	bool "Renesas R-Car PCIe controller (endpoint mode)"
-	depends on ARCH_RENESAS || COMPILE_TEST
-	depends on PCI_ENDPOINT
+config PCIE_RCAR_EP	# [한국어] Renesas R-Car 엔드포인트 모드
+	bool "Renesas R-Car PCIe controller (endpoint mode)"	# [한국어] bool — 내장 전용
+	depends on ARCH_RENESAS || COMPILE_TEST	# [한국어] 해당 SoC이거나 컴파일 검증 목적
+	depends on PCI_ENDPOINT	# [한국어] 엔드포인트 프레임워크가 있어야 EPC로 등록할 수 있다
 	help
 	  Say Y here if you want PCIe controller support on R-Car SoCs in
 	  endpoint mode.
 
-config PCI_RCAR_GEN2
-	bool "Renesas R-Car Gen2 Internal PCI controller"
-	depends on (ARCH_RENESAS && ARM) || COMPILE_TEST
+config PCI_RCAR_GEN2	# [한국어] R-Car Gen2의 내부 PCI(USB 컨트롤러 부착용)
+	bool "Renesas R-Car Gen2 Internal PCI controller"	# [한국어] bool — 내장 전용
+	depends on (ARCH_RENESAS && ARM) || COMPILE_TEST	# [한국어] ARM32 R-Car이거나 컴파일 검증 목적
 	help
 	  Say Y here if you want internal PCI support on R-Car Gen2 SoC.
 	  Each internal PCI controller contains a single built-in EHCI/OHCI
 	  host controller.
 
-config PCIE_RENESAS_RZG3S_HOST
-	bool "Renesas RZ/G3S PCIe host controller"
-	depends on ARCH_RENESAS || COMPILE_TEST
-	select MFD_SYSCON
-	select IRQ_MSI_LIB
+config PCIE_RENESAS_RZG3S_HOST	# [한국어] Renesas RZ/G3S 호스트 컨트롤러
+	bool "Renesas RZ/G3S PCIe host controller"	# [한국어] bool — 내장 전용
+	depends on ARCH_RENESAS || COMPILE_TEST	# [한국어] 해당 SoC이거나 컴파일 검증 목적
+	select MFD_SYSCON	# [한국어] 시스템 제어 레지스터를 regmap으로 공유해서 접근한다
+	select IRQ_MSI_LIB	# [한국어] MSI 도메인 구성 헬퍼를 끌어온다
 	help
 	  Say Y here if you want PCIe host controller support on Renesas RZ/G3S
 	  SoC.
 
-config PCIE_ROCKCHIP
-	bool
-	depends on PCI
+config PCIE_ROCKCHIP	# [한국어] Rockchip 구형 자체 IP 공통부(RK3399). 신형 DWC 기반과는 별개
+	bool	# [한국어] 프롬프트 없는 bool — 내부 심볼이라 아래 모드 옵션이 select 로 켠다
+	depends on PCI	# [한국어] PCI 코어 없이는 호스트 브리지를 등록할 대상이 없다
 
-config PCIE_ROCKCHIP_HOST
-	tristate "Rockchip PCIe controller (host mode)"
-	depends on ARCH_ROCKCHIP || COMPILE_TEST
-	depends on OF
-	depends on PCI_MSI
-	select MFD_SYSCON
-	select PCIE_ROCKCHIP
+config PCIE_ROCKCHIP_HOST	# [한국어] Rockchip 자체 IP 호스트 모드. RK3399 보드의 NVMe 경로
+	tristate "Rockchip PCIe controller (host mode)"	# [한국어] tristate — 모듈화 가능
+	depends on ARCH_ROCKCHIP || COMPILE_TEST	# [한국어] 해당 SoC이거나 컴파일 검증 목적
+	depends on OF	# [한국어] 레지스터 창과 인터럽트 배선을 디바이스 트리에서 읽는다
+	depends on PCI_MSI	# [한국어] MSI 도메인이 있어야 한다. NVMe가 I/O 큐마다 벡터를 받는 전제
+	select MFD_SYSCON	# [한국어] 시스템 제어 레지스터를 regmap으로 공유해서 접근한다
+	select PCIE_ROCKCHIP	# [한국어] 공통부를 함께 빌드
 	help
 	  Say Y here if you want internal PCI support on Rockchip SoC.
 	  There is 1 internal PCIe port available to support GEN2 with
 	  4 slots.
 
-config PCIE_ROCKCHIP_EP
-	bool "Rockchip PCIe controller (endpoint mode)"
-	depends on ARCH_ROCKCHIP || COMPILE_TEST
-	depends on OF
-	depends on PCI_ENDPOINT
-	select MFD_SYSCON
-	select PCIE_ROCKCHIP
+config PCIE_ROCKCHIP_EP	# [한국어] Rockchip 자체 IP 엔드포인트 모드
+	bool "Rockchip PCIe controller (endpoint mode)"	# [한국어] bool — 내장 전용
+	depends on ARCH_ROCKCHIP || COMPILE_TEST	# [한국어] 해당 SoC이거나 컴파일 검증 목적
+	depends on OF	# [한국어] 레지스터 창과 인터럽트 배선을 디바이스 트리에서 읽는다
+	depends on PCI_ENDPOINT	# [한국어] 엔드포인트 프레임워크가 있어야 EPC로 등록할 수 있다
+	select MFD_SYSCON	# [한국어] 시스템 제어 레지스터를 regmap으로 공유해서 접근한다
+	select PCIE_ROCKCHIP	# [한국어] 공통부를 함께 빌드
 	help
 	  Say Y here if you want to support Rockchip PCIe controller in
 	  endpoint mode on Rockchip SoC. There is 1 internal PCIe port
 	  available to support GEN2 with 4 slots.
 
-config PCI_V3_SEMI
-	bool "V3 Semiconductor PCI controller"
-	depends on OF
-	depends on ARM || COMPILE_TEST
-	default ARCH_INTEGRATOR_AP
+config PCI_V3_SEMI	# [한국어] V3 Semiconductor V360EPC 브리지. 구형 ARM Integrator
+	bool "V3 Semiconductor PCI controller"	# [한국어] bool — 내장 전용
+	depends on OF	# [한국어] 레지스터 창과 인터럽트 배선을 디바이스 트리에서 읽는다
+	depends on ARM || COMPILE_TEST	# [한국어] ARM이거나 컴파일 검증 목적
+	default ARCH_INTEGRATOR_AP	# [한국어] 해당 보드에서는 기본으로 켠다
 
-config PCI_XGENE
-	bool "X-Gene PCIe controller"
-	depends on ARM64 || COMPILE_TEST
-	depends on OF || (ACPI && PCI_QUIRKS)
+config PCI_XGENE	# [한국어] APM X-Gene 호스트 컨트롤러
+	bool "X-Gene PCIe controller"	# [한국어] bool — 내장 전용
+	depends on ARM64 || COMPILE_TEST	# [한국어] ARM64 서버이거나 컴파일 검증 목적
+	depends on OF || (ACPI && PCI_QUIRKS)	# [한국어] DT 경로, 또는 ACPI 경로에서 MCFG quirk로 접근자를 갈아끼우는 경로
 	help
 	  Say Y here if you want internal PCI support on APM X-Gene SoC.
 	  There are 5 internal PCIe ports available. Each port is GEN3 capable
 	  and have varied lanes from x1 to x8.
 
-config PCI_XGENE_MSI
-	bool "X-Gene v1 PCIe MSI feature"
-	depends on PCI_XGENE
-	depends on PCI_MSI
-	select IRQ_MSI_LIB
-	default y
+config PCI_XGENE_MSI	# [한국어] X-Gene v1 전용 MSI 컨트롤러. NVMe 벡터가 여기서 할당된다
+	bool "X-Gene v1 PCIe MSI feature"	# [한국어] bool — 호스트 드라이버에 함께 링크
+	depends on PCI_XGENE	# [한국어] 해당 호스트 브리지가 있어야 의미가 있다
+	depends on PCI_MSI	# [한국어] MSI 도메인이 있어야 한다. NVMe가 I/O 큐마다 벡터를 받는 전제
+	select IRQ_MSI_LIB	# [한국어] MSI 도메인 구성 헬퍼를 끌어온다
+	default y	# [한국어] 해당 브리지가 켜지면 MSI도 함께 켜는 것이 정상 구성이다
 	help
 	  Say Y here if you want PCIe MSI support for the APM X-Gene v1 SoC.
 	  This MSI driver supports 5 PCIe ports on the APM X-Gene v1 SoC.
 
-config PCIE_XILINX
-	bool "Xilinx AXI PCIe controller"
-	depends on OF
-	depends on PCI_MSI
-	select IRQ_MSI_LIB
+config PCIE_XILINX	# [한국어] Xilinx AXI PCIe 브리지
+	bool "Xilinx AXI PCIe controller"	# [한국어] bool — 내장 전용
+	depends on OF	# [한국어] 레지스터 창과 인터럽트 배선을 디바이스 트리에서 읽는다
+	depends on PCI_MSI	# [한국어] MSI 도메인이 있어야 한다. NVMe가 I/O 큐마다 벡터를 받는 전제
+	select IRQ_MSI_LIB	# [한국어] MSI 도메인 구성 헬퍼를 끌어온다
 	help
 	  Say 'Y' here if you want kernel to support the Xilinx AXI PCIe
 	  Host Bridge driver.
 
-config PCIE_XILINX_DMA_PL
-	bool "Xilinx DMA PL PCIe host bridge support"
-	depends on ARCH_ZYNQMP || COMPILE_TEST
-	depends on PCI_MSI
-	select PCI_HOST_COMMON
-	select IRQ_MSI_LIB
+config PCIE_XILINX_DMA_PL	# [한국어] Xilinx PL DMA 브리지
+	bool "Xilinx DMA PL PCIe host bridge support"	# [한국어] bool — 내장 전용
+	depends on ARCH_ZYNQMP || COMPILE_TEST	# [한국어] ZynqMP이거나 컴파일 검증 목적
+	depends on PCI_MSI	# [한국어] MSI 도메인이 있어야 한다. NVMe가 I/O 큐마다 벡터를 받는 전제
+	select PCI_HOST_COMMON	# [한국어] 공통 DT 파싱/브리지 등록 절차를 재사용
+	select IRQ_MSI_LIB	# [한국어] MSI 도메인 구성 헬퍼를 끌어온다
 	help
 	  Say 'Y' here if you want kernel support for the Xilinx PL DMA
 	  PCIe host bridge. The controller is a Soft IP which can act as
 	  Root Port. If your system provides Xilinx PCIe host controller
 	  bridge DMA as Soft IP say 'Y'; if you are not sure, say 'N'.
 
-config PCIE_XILINX_NWL
-	bool "Xilinx NWL PCIe controller"
-	depends on ARCH_ZYNQMP || COMPILE_TEST
-	depends on PCI_MSI
-	select IRQ_MSI_LIB
+config PCIE_XILINX_NWL	# [한국어] Xilinx NWL(ZynqMP) 브리지
+	bool "Xilinx NWL PCIe controller"	# [한국어] bool — 내장 전용
+	depends on ARCH_ZYNQMP || COMPILE_TEST	# [한국어] ZynqMP이거나 컴파일 검증 목적
+	depends on PCI_MSI	# [한국어] MSI 도메인이 있어야 한다. NVMe가 I/O 큐마다 벡터를 받는 전제
+	select IRQ_MSI_LIB	# [한국어] MSI 도메인 구성 헬퍼를 끌어온다
 	help
 	 Say 'Y' here if you want kernel support for Xilinx
 	 NWL PCIe controller. The controller can act as Root Port
 	 or End Point. The current option selection will only
 	 support root port enabling.
 
-config PCIE_XILINX_CPM
-	bool "Xilinx Versal CPM PCI controller"
-	depends on ARCH_ZYNQMP || COMPILE_TEST
-	select PCI_HOST_COMMON
+config PCIE_XILINX_CPM	# [한국어] Xilinx Versal CPM 브리지
+	bool "Xilinx Versal CPM PCI controller"	# [한국어] bool — 내장 전용
+	depends on ARCH_ZYNQMP || COMPILE_TEST	# [한국어] ZynqMP이거나 컴파일 검증 목적
+	select PCI_HOST_COMMON	# [한국어] 공통 DT 파싱/브리지 등록 절차를 재사용
 	help
 	  Say 'Y' here if you want kernel support for the
 	  Xilinx Versal CPM host bridge.
 
-source "drivers/pci/controller/cadence/Kconfig"
-source "drivers/pci/controller/dwc/Kconfig"
-source "drivers/pci/controller/mobiveil/Kconfig"
-source "drivers/pci/controller/plda/Kconfig"
-endmenu
+source "drivers/pci/controller/cadence/Kconfig"	# [한국어] Cadence IP 하위 메뉴 삽입
+source "drivers/pci/controller/dwc/Kconfig"	# [한국어] DesignWare IP 하위 메뉴 삽입
+source "drivers/pci/controller/mobiveil/Kconfig"	# [한국어] Mobiveil IP 하위 메뉴 삽입
+source "drivers/pci/controller/plda/Kconfig"	# [한국어] PLDA IP 하위 메뉴 삽입
+endmenu	# [한국어] 호스트 컨트롤러 메뉴 끝

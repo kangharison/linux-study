@@ -61,6 +61,13 @@
 
 /* PCI configuration space of a PCI-to-PCI bridge. */
 struct pci_bridge_emul_conf {
+	/* [한국어] Vendor ID(오프셋 0x00). config space 헤더의 첫 필드다.
+	 * __le16 인 이유는 바로 아래 device 필드의 설명과 같다 -- config space 는
+	 * 규격상 리틀엔디안이고 이 구조체가 그 바이트 배치를 그대로 흉내 낸다.
+	 * 설정자: 각 컨트롤러 드라이버가 pci_bridge_emul_init() 뒤에 채운다.
+	 * 읽는 자: pci_bridge_emul_conf_read() 가 이 바이트열을 그대로 돌려준다.
+	 * 값 범위: PCI-SIG 가 배정한 16비트 벤더 번호.
+	 * 동기화: 초기화 이후 불변. */
 	__le16 vendor;
 	/* [한국어] Device ID(오프셋 0x02). __le16/__le32 로 선언한 이유: config space 는 규격상 리틀엔디안이고,
 	 * 이 구조체가 그 바이트 배치를 그대로 흉내 내기 때문에 빅엔디안 CPU 에서도

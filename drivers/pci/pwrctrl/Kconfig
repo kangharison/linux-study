@@ -1,20 +1,50 @@
 # SPDX-License-Identifier: GPL-2.0-only
+#
+# ============================================================================
+# [한국어 설명] PCI 슬롯 전원 제어 설정 (drivers/pci/pwrctrl/Kconfig)
+#
+# === 파일의 역할 ===
+# PCIe 슬롯/엔드포인트에 전원을 넣고 클럭을 대는 드라이버의 빌드 여부를 정한다.
+# x86 서버는 보드가 알아서 전원을 대므로 이 계층이 필요 없지만, 임베디드
+# 보드는 규제기(regulator)와 클럭을 소프트웨어가 정해진 순서로 켜 줘야 한다.
+# 순서가 어긋나면 링크 트레이닝이 실패하고 장치는 아예 열거되지 않는다.
+#
+# === 전체 아키텍처에서의 위치 ===
+# drivers/pci/Kconfig -> [이 파일]
+# 시간 순서상 가장 앞단이다: 전원 -> 클럭 -> 리셋 해제 -> 링크 트레이닝
+# -> config space 접근 -> probe.c 열거 -> nvme_probe(). 여기가 실패하면
+# 뒤의 어떤 단계도 시작되지 않으므로, "NVMe가 안 보인다"의 첫 용의자다.
+#
+# === 타 모듈과의 연결 ===
+# - drivers/pci/pwrctrl/Makefile: 선택 결과를 오브젝트로 번역.
+# - drivers/pci/of.c: DT의 슬롯 노드를 찾아 이 드라이버와 짝지어 준다.
+# - drivers/regulator, drivers/clk, drivers/power/sequencing: 실제 공급원.
+#
+# === 주요 함수/구조체 요약 ===
+# - HAVE_PWRCTRL       : 플랫폼이 전원 제어를 필요로 함을 표시하는 내부 심볼.
+# - PCI_PWRCTRL        : 코어 프레임워크(내부 심볼).
+# - PCI_PWRCTRL_PWRSEQ : 전원 시퀀스를 pwrseq 서브시스템에 위임하는 구현.
+# - PCI_PWRCTRL_GENERIC: DT의 regulator 목록만으로 동작하는 범용 구현.
+# - PCI_PWRCTRL_TC9563 : TC9563 스위치를 I2C로 구성해야 하단 포트가 사는 사례.
+# - HAVE_PWRCTL / PCI_PWRCTL_PWRSEQ: 철자가 빠진 구 심볼. 원본 주석대로
+#   deprecated 이며, 신규 심볼을 select 하는 호환용 껍데기로만 남아 있다.
+# ============================================================================
 
-config HAVE_PWRCTRL
-	bool
+config HAVE_PWRCTRL	# [한국어] 플랫폼이 슬롯 전원 제어를 요구함을 알리는 표식
+	bool	# [한국어] 프롬프트 없는 bool — 사용자 메뉴에 뜨지 않고 select 로만 켜지는 내부 심볼
 
-config PCI_PWRCTRL
-	tristate
+config PCI_PWRCTRL	# [한국어] 전원 제어 코어. 역시 프롬프트가 없어 아래 구현들이 select 로 끌어온다
+	tristate	# [한국어] 프롬프트 없는 tristate — 구현 옵션이 select 할 때 모듈/내장 여부가 함께 결정된다
 
-config PCI_PWRCTRL_PWRSEQ
-	tristate
-	select POWER_SEQUENCING
-	select PCI_PWRCTRL
+config PCI_PWRCTRL_PWRSEQ	# [한국어] 전원 시퀀스를 pwrseq 서브시스템에 위임하는 구현
+	tristate	# [한국어] 프롬프트 없는 tristate — 구현 옵션이 select 할 때 모듈/내장 여부가 함께 결정된다
+	select POWER_SEQUENCING	# [한국어] 순서가 정해진 전원 인가를 담당하는 프레임워크를 켠다
+	select PCI_PWRCTRL	# [한국어] 코어 프레임워크를 함께 빌드
 
-config PCI_PWRCTRL_GENERIC
-	tristate "Generic PCI Power Control driver for PCI slots and endpoints"
-	select POWER_SEQUENCING
-	select PCI_PWRCTRL
+config PCI_PWRCTRL_GENERIC	# [한국어] DT의 regulator 목록만 보고 동작하는 범용 구현
+	tristate "Generic PCI Power Control driver for PCI slots and endpoints"	# [한국어] tristate — 모듈화 가능
+	select POWER_SEQUENCING	# [한국어] 순서가 정해진 전원 인가를 담당하는 프레임워크를 켠다
+	select PCI_PWRCTRL	# [한국어] 코어 프레임워크를 함께 빌드
 	help
 	  Say Y here to enable the generic PCI Power Control driver to control
 	  the power state of PCI slots and endpoints.
@@ -24,11 +54,11 @@ config PCI_PWRCTRL_GENERIC
 	  of the PCI slots or endpoints are expected to be defined in the
 	  devicetree node of the PCI bridge or endpoint.
 
-config PCI_PWRCTRL_TC9563
-	tristate "PCI Power Control driver for TC9563 PCIe switch"
-	select PCI_PWRCTRL
-	default m if ARCH_QCOM
-	depends on I2C
+config PCI_PWRCTRL_TC9563	# [한국어] Toshiba TC9563 PCIe 스위치 전용. I2C로 스위치를 구성해야 하단 3개 포트가 살아난다
+	tristate "PCI Power Control driver for TC9563 PCIe switch"	# [한국어] tristate — 모듈화 가능
+	select PCI_PWRCTRL	# [한국어] 코어 프레임워크를 함께 빌드
+	default m if ARCH_QCOM	# [한국어] Qualcomm 플랫폼에서는 기본값을 모듈로 둔다. 해당 보드에 흔히 쓰이기 때문
+	depends on I2C	# [한국어] 스위치 구성을 I2C로 하므로 I2C 버스가 필수
 	help
 	  Say Y here to enable the PCI Power Control driver of TC9563 PCIe
 	  switch.
@@ -40,11 +70,11 @@ config PCI_PWRCTRL_TC9563
 	  supposed to connect to external device.
 
 # deprecated
-config HAVE_PWRCTL
-	bool
-	select HAVE_PWRCTRL
+config HAVE_PWRCTL	# [한국어] deprecated — 철자가 빠진 구 이름. 신규 심볼로 넘겨주는 호환 껍데기
+	bool	# [한국어] 프롬프트 없는 bool — 사용자 메뉴에 뜨지 않고 select 로만 켜지는 내부 심볼
+	select HAVE_PWRCTRL	# [한국어] 구 이름을 신규 심볼로 전달
 
 # deprecated
-config PCI_PWRCTL_PWRSEQ
-	tristate
-	select PCI_PWRCTRL_PWRSEQ
+config PCI_PWRCTL_PWRSEQ	# [한국어] deprecated — 구 이름. 아래 select로 신규 심볼에 위임
+	tristate	# [한국어] 프롬프트 없는 tristate — 구현 옵션이 select 할 때 모듈/내장 여부가 함께 결정된다
+	select PCI_PWRCTRL_PWRSEQ	# [한국어] 구 이름을 신규 심볼로 전달

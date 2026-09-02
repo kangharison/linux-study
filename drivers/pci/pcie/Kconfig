@@ -1,10 +1,40 @@
 # SPDX-License-Identifier: GPL-2.0
 #
+# ============================================================================
+# [한국어 설명] PCIe 포트 서비스와 고급 기능 설정 (drivers/pci/pcie/Kconfig)
+#
+# === 파일의 역할 ===
+# PCIe 스펙이 규정한 포트 서비스(핫플러그, AER, PME, DPC, PTM, EDR)와 링크
+# 전력 관리(ASPM)의 활성 여부를 정한다. 벤더 고유 기능이 아니라 루트 포트와
+# 스위치 포트가 공통으로 갖는 규격 기능이며, 엔드포인트인 NVMe의 오류 복구와
+# 절전 동작을 바깥에서 관장한다.
+#
+# === 전체 아키텍처에서의 위치 ===
+# drivers/pci/Kconfig -> [이 파일]
+# NVMe 오류 발생 시 순서: 엔드포인트가 error TLP 보고 -> 상위 루트 포트의
+# AER가 수집 -> err.c가 복구 절차 조율 -> NVMe의 pci_error_handlers 콜백
+# (nvme_error_detected / nvme_slot_reset / nvme_error_resume) 호출.
+# 즉 NVMe의 .err_handler는 여기서 켜진 코드가 불러 준다. PCIEPORTBUS가 꺼져
+# 있으면 그 경로 자체가 존재하지 않는다.
+#
+# === 타 모듈과의 연결 ===
+# - drivers/nvme/host/pci.c: nvme_err_handler의 콜백들이 최종 소비자.
+# - drivers/pci/pcie/Makefile: 선택 결과를 오브젝트로 번역.
+# - drivers/pci/hotplug/pciehp*: HOTPLUG_PCI_PCIE가 그쪽 빌드를 좌우한다.
+# - drivers/pci/pci-acpi.c: EDR은 펌웨어가 주도하는 하이브리드 DPC 경로다.
+#
+# === 주요 함수/구조체 요약 ===
+# - PCIEPORTBUS : 포트 서비스 버스. 아래 대부분 기능의 전제 조건.
+# - PCIEAER     : 오류 보고 수집과 복구 조율.
+# - PCIEASPM    : 링크 유휴 시 L0s/L1 진입 정책. NVMe 지연 시간에 직결된다.
+# - PCIE_DPC    : 고장난 하위 장치를 링크 차단으로 격리.
+# ============================================================================
+#
 # PCI Express Port Bus Configuration
 #
-config PCIEPORTBUS
-	bool "PCI Express Port Bus support"
-	default y if USB4
+config PCIEPORTBUS	# [한국어] 포트 서비스 버스. 핫플러그/AER/PME/DPC가 모두 이 위에 얹힌다
+	bool "PCI Express Port Bus support"	# [한국어] bool — 코어 인프라라 모듈로 빼지 않는다
+	default y if USB4	# [한국어] USB4/Thunderbolt는 PCIe 터널링에 포트 서비스가 필수라 자동으로 켠다
 	help
 	  This enables PCI Express Port Bus support. Users can then enable
 	  support for Native Hot-Plug, Advanced Error Reporting, Power
@@ -13,10 +43,10 @@ config PCIEPORTBUS
 #
 # Include service Kconfig here
 #
-config HOTPLUG_PCI_PCIE
-	bool "PCI Express Hotplug driver"
-	depends on HOTPLUG_PCI && PCIEPORTBUS
-	default y if USB4
+config HOTPLUG_PCI_PCIE	# [한국어] PCIe 네이티브 핫플러그. NVMe 서버의 U.2/EDSFF 베이가 쓰는 경로
+	bool "PCI Express Hotplug driver"	# [한국어] bool — 포트 서비스에 함께 링크된다
+	depends on HOTPLUG_PCI && PCIEPORTBUS	# [한국어] 핫플러그 코어와 포트 서비스 버스가 모두 있어야 한다
+	default y if USB4	# [한국어] USB4/Thunderbolt는 PCIe 터널링에 포트 서비스가 필수라 자동으로 켠다
 	help
 	  Say Y here if you have a motherboard that supports PCIe native
 	  hotplug.
@@ -25,19 +55,19 @@ config HOTPLUG_PCI_PCIE
 
 	  When in doubt, say N.
 
-config PCIEAER
-	bool "PCI Express Advanced Error Reporting support"
-	depends on PCIEPORTBUS
-	select RAS
+config PCIEAER	# [한국어] Advanced Error Reporting. NVMe의 오류 복구 콜백을 불러 주는 주체
+	bool "PCI Express Advanced Error Reporting support"	# [한국어] bool — 오류 처리 경로라 항상 내장
+	depends on PCIEPORTBUS	# [한국어] 루트 포트에 서비스로 붙어야 오류 메시지를 받을 수 있다
+	select RAS	# [한국어] Reliability/Availability/Serviceability 인프라로 오류를 보고
 	help
 	  This enables PCI Express Root Port Advanced Error Reporting
 	  (AER) driver support. Error reporting messages sent to Root
 	  Port will be handled by PCI Express AER driver.
 
-config PCIEAER_INJECT
-	tristate "PCI Express error injection support"
-	depends on PCIEAER
-	select GENERIC_IRQ_INJECTION
+config PCIEAER_INJECT	# [한국어] 오류 주입 도구. 실제 하드웨어 고장 없이 NVMe 복구 경로를 시험한다
+	tristate "PCI Express error injection support"	# [한국어] tristate — 디버깅 도구라 필요할 때만 올리는 모듈이 자연스럽다
+	depends on PCIEAER	# [한국어] 주입한 오류를 받아 처리할 AER 드라이버가 있어야 의미가 있다
+	select GENERIC_IRQ_INJECTION	# [한국어] 가짜 인터럽트를 발생시키는 범용 인프라를 켠다
 	help
 	  This enables PCI Express Root Port Advanced Error Reporting
 	  (AER) software error injector.
@@ -52,9 +82,9 @@ config PCIEAER_INJECT
 #
 # PCI Express ECRC
 #
-config PCIE_ECRC
-	bool "PCI Express ECRC settings control"
-	depends on PCIEAER
+config PCIE_ECRC	# [한국어] End-to-end CRC 제어. TLP 전 구간 무결성 검사를 펌웨어 설정과 무관하게 강제/해제
+	bool "PCI Express ECRC settings control"	# [한국어] bool — 설정 제어라 내장
+	depends on PCIEAER	# [한국어] 주입한 오류를 받아 처리할 AER 드라이버가 있어야 의미가 있다
 	help
 	  Used to override firmware/bios settings for PCI Express ECRC
 	  (transaction layer end-to-end CRC checking).
@@ -64,9 +94,9 @@ config PCIE_ECRC
 #
 # PCI Express ASPM
 #
-config PCIEASPM
-	bool "PCI Express ASPM control" if EXPERT
-	default y
+config PCIEASPM	# [한국어] 링크 전력 관리. NVMe 지연 시간과 절전이 정면으로 맞바꿔지는 지점
+	bool "PCI Express ASPM control" if EXPERT	# [한국어] EXPERT 모드에서만 끌 수 있게 숨긴다. 잘못 끄면 전력 소비가 크게 늘기 때문
+	default y	# [한국어] 기본 활성. 아래 정책 choice가 실제 동작 수준을 정한다
 	help
 	  This enables OS control over PCI Express ASPM (Active State
 	  Power Management) and Clock Power Management. ASPM supports
@@ -81,46 +111,46 @@ config PCIEASPM
 
 	  When in doubt, say Y.
 
-choice
-	prompt "Default ASPM policy"
-	default PCIEASPM_DEFAULT
-	depends on PCIEASPM
+choice	# [한국어] ASPM 기본 정책 선택 그룹. 넷 중 하나만 고를 수 있다
+	prompt "Default ASPM policy"	# [한국어] 부팅 시 적용할 초기 정책. 런타임에는 /sys/module/pcie_aspm/parameters/policy 로 바꾼다
+	default PCIEASPM_DEFAULT	# [한국어] 기본값은 BIOS 설정 존중
+	depends on PCIEASPM	# [한국어] ASPM 제어가 꺼져 있으면 정책 선택이 무의미하다
 
-config PCIEASPM_DEFAULT
-	bool "BIOS default"
-	depends on PCIEASPM
+config PCIEASPM_DEFAULT	# [한국어] BIOS/펌웨어가 설정한 상태를 그대로 둔다
+	bool "BIOS default"	# [한국어] 가장 보수적인 선택. 플랫폼 검증 결과를 신뢰한다
+	depends on PCIEASPM	# [한국어] ASPM 제어가 꺼져 있으면 정책 선택이 무의미하다
 	help
 	  Use the BIOS defaults for PCI Express ASPM.
 
-config PCIEASPM_POWERSAVE
-	bool "Powersave"
-	depends on PCIEASPM
+config PCIEASPM_POWERSAVE	# [한국어] BIOS가 껐더라도 가능한 곳에서 L0s/L1을 켠다
+	bool "Powersave"	# [한국어] 절전 우선. NVMe 첫 접근 지연(exit latency)이 늘어날 수 있다
+	depends on PCIEASPM	# [한국어] ASPM 제어가 꺼져 있으면 정책 선택이 무의미하다
 	help
 	  Enable PCI Express ASPM L0s and L1 where possible, even if the
 	  BIOS did not.
 
-config PCIEASPM_POWER_SUPERSAVE
-	bool "Power Supersave"
-	depends on PCIEASPM
+config PCIEASPM_POWER_SUPERSAVE	# [한국어] L1 하위 상태(L1.1/L1.2)까지 켠다. 절전 폭이 가장 크다
+	bool "Power Supersave"	# [한국어] 가장 공격적인 절전. 복귀 지연이 가장 길어 NVMe 응답 편차가 커진다
+	depends on PCIEASPM	# [한국어] ASPM 제어가 꺼져 있으면 정책 선택이 무의미하다
 	help
 	  Same as PCIEASPM_POWERSAVE, except it also enables L1 substates where
 	  possible. This would result in higher power savings while staying in L1
 	  where the components support it.
 
-config PCIEASPM_PERFORMANCE
-	bool "Performance"
-	depends on PCIEASPM
+config PCIEASPM_PERFORMANCE	# [한국어] BIOS가 켰더라도 L0s/L1을 끈다
+	bool "Performance"	# [한국어] 지연 시간 우선. NVMe 저지연이 중요한 서버에서 흔히 쓰이는 선택
+	depends on PCIEASPM	# [한국어] ASPM 제어가 꺼져 있으면 정책 선택이 무의미하다
 	help
 	  Disable PCI Express ASPM L0s and L1, even if the BIOS enabled them.
-endchoice
+endchoice	# [한국어] ASPM 정책 choice 종료
 
-config PCIE_PME
-	def_bool y
-	depends on PCIEPORTBUS && PM
+config PCIE_PME	# [한국어] Power Management Event. 절전 상태의 장치가 호스트를 깨우는 통지 경로
+	def_bool y	# [한국어] 조건이 맞으면 자동으로 켜진다. 사용자에게 묻지 않는 파생 옵션
+	depends on PCIEPORTBUS && PM	# [한국어] 포트 서비스와 전원 관리가 모두 있어야 성립
 
-config PCIE_DPC
-	bool "PCI Express Downstream Port Containment support"
-	depends on PCIEPORTBUS && PCIEAER
+config PCIE_DPC	# [한국어] Downstream Port Containment. 고장난 NVMe를 링크 차단으로 격리해 오염 확산을 막는다
+	bool "PCI Express Downstream Port Containment support"	# [한국어] bool — 오류 격리 경로라 내장
+	depends on PCIEPORTBUS && PCIEAER	# [한국어] 포트 서비스와 AER가 함께 있어야 오류를 받아 차단할 수 있다
 	help
 	  This enables PCI Express Downstream Port Containment (DPC)
 	  driver support.  DPC events from Root and Downstream ports
@@ -128,8 +158,8 @@ config PCIE_DPC
 	  have this capability or you do not want to use this feature,
 	  it is safe to answer N.
 
-config PCIE_PTM
-	bool "PCI Express Precision Time Measurement support"
+config PCIE_PTM	# [한국어] Precision Time Measurement. 호스트와 장치의 시계를 정밀 정렬한다
+	bool "PCI Express Precision Time Measurement support"	# [한국어] bool — 지원 장치가 없어도 켜 두는 것이 안전하다고 원문이 밝힌다
 	help
 	  This enables PCI Express Precision Time Measurement (PTM)
 	  support.
@@ -137,9 +167,9 @@ config PCIE_PTM
 	  This is only useful if you have devices that support PTM, but it
 	  is safe to enable even if you don't.
 
-config PCIE_EDR
-	bool "PCI Express Error Disconnect Recover support"
-	depends on PCIE_DPC && ACPI
+config PCIE_EDR	# [한국어] Error Disconnect Recover. 펌웨어가 DPC를 소유한 구성에서 ACPI 통지로 복구를 개시
+	bool "PCI Express Error Disconnect Recover support"	# [한국어] bool — 오류 복구 경로라 내장
+	depends on PCIE_DPC && ACPI	# [한국어] DPC 하드웨어 기능과 ACPI 펌웨어 통지가 모두 필요한 하이브리드 모델
 	help
 	  This option adds Error Disconnect Recover support as specified
 	  in the Downstream Port Containment Related Enhancements ECN to

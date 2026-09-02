@@ -401,6 +401,13 @@ enum iproc_pcie_ib_map_type {
  * @imap_window_offset: register offset between each IMAP window
  */
 struct iproc_pcie_ib_map {
+	/* [한국어] 이 인바운드 매핑 영역이 어떤 메모리를 대상으로 하는지.
+	 * 설정자: 아래 paxb_v2_ib_map[] 의 정적 초기화.
+	 * 읽는 자: iproc_pcie_setup_ib() 가 요청한 종류와 맞는 영역을 고를 때.
+	 * 값 범위: IPROC_PCIE_IB_MAP_IO 또는 IPROC_PCIE_IB_MAP_MEM. 인바운드 매핑은
+	 *   PCI 버스 주소를 시스템 메모리로 되돌리는 창이므로, 종류가 다르면 창의
+	 *   크기 제약과 정렬 규칙도 달라진다.
+	 * 동기화: const 정적 데이터. */
 	enum iproc_pcie_ib_map_type type;
 	/* [한국어] 크기 목록의 단위. SZ_1K / SZ_1M / SZ_1G 중 하나다. 영역마다 다루는 크기
 	 * 규모가 크게 달라(32KB 부터 512GB 까지) 목록 값을 작게 유지하려고 단위를 뗐다.

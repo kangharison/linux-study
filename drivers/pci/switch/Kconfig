@@ -1,10 +1,38 @@
 # SPDX-License-Identifier: GPL-2.0
+#
+# ============================================================================
+# [한국어 설명] PCIe 스위치 관리 드라이버 설정 (drivers/pci/switch/Kconfig)
+#
+# === 파일의 역할 ===
+# PCIe 스위치를 데이터 경로가 아니라 "관리 대상 장치"로 다루는 드라이버의
+# 빌드 여부를 정한다. 일반 PCI 코드는 스위치를 투명한 브리지 묶음으로만 보고
+# 지나가지만, 스위치 벤더는 별도 관리 엔드포인트를 노출해 펌웨어 갱신, 포트
+# 상태 조회, NTB 구성 같은 대역외 제어를 제공한다. 그 통로를 여는 스위치다.
+#
+# === 전체 아키텍처에서의 위치 ===
+# drivers/pci/Kconfig가 이 메뉴를 포함하고, 선택 결과는
+# drivers/pci/switch/Makefile이 오브젝트로 번역한다.
+# NVMe 서버는 CPU 루트 포트 하나에 여러 SSD를 물리기 위해 PCIe 스위치를 두는데,
+# 그 스위치는 NVMe I/O 경로 위에 그대로 놓인다. 링크 폭/속도와 포트 분할이
+# NVMe 대역폭 상한을 정하므로, 스위치 상태 조회는 성능 진단의 출발점이 된다.
+#
+# === 타 모듈과의 연결 ===
+# - drivers/pci/switch/Makefile: 여기 선택을 오브젝트 빌드로 옮긴다.
+# - drivers/pci/quirks.c: 같은 스위치 계열의 DMA alias/ACS 보정이 별도로 있다.
+# - drivers/pci/p2pdma.c: 두 NVMe가 같은 스위치 아래 있는지가 P2PDMA 허용
+#   여부를 가르므로, 스위치 토폴로지는 P2P 판정의 근거이기도 하다.
+#
+# === 주요 함수/구조체 요약 ===
+# - PCI_SW_SWITCHTEC: Microsemi/Microchip Switchtec 관리 인터페이스를 켠다.
+#   /dev/switchtecX 캐릭터 장치로 MRPC(Management Remote Procedure Call)를
+#   유저스페이스에 노출한다.
+# ============================================================================
 
-menu "PCI switch controller drivers"
-	depends on PCI
+menu "PCI switch controller drivers"	# [한국어] 스위치 관리 드라이버 메뉴 시작
+	depends on PCI	# [한국어] PCI 서브시스템이 없으면 스위치 관리 자체가 무의미하므로 메뉴 전체를 숨긴다
 
-config PCI_SW_SWITCHTEC
-	tristate "MicroSemi Switchtec PCIe Switch Management Driver"
+config PCI_SW_SWITCHTEC	# [한국어] Switchtec 관리 드라이버 스위치
+	tristate "MicroSemi Switchtec PCIe Switch Management Driver"	# [한국어] tristate — 모듈(switchtec.ko)로 뺄 수 있다. 관리 기능이라 부팅 필수 경로가 아니기 때문
 	help
 	 Enables support for the management interface for the MicroSemi
 	 Switchtec series of PCIe switches. Supports userspace access
@@ -12,4 +40,4 @@ config PCI_SW_SWITCHTEC
 	 devices. See <file:Documentation/driver-api/switchtec.rst> for more
 	 information.
 
-endmenu
+endmenu	# [한국어] 스위치 메뉴 끝

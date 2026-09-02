@@ -1,26 +1,52 @@
 # SPDX-License-Identifier: GPL-2.0
+#
+# ============================================================================
+# [한국어 설명] PLDA 계열 PCIe 호스트 컨트롤러 설정 (controller/plda/Kconfig)
+#
+# === 파일의 역할 ===
+# PLDA(현 Rambus) XpressRICH PCIe IP를 채용한 호스트 브리지 드라이버의 빌드
+# 여부를 정한다. 공통 로직은 PCIE_PLDA_HOST 하나에 모으고, 각 SoC 벤더 옵션이
+# 그것을 select 하는 구조라 사용자는 자기 보드만 고르면 된다.
+#
+# === 전체 아키텍처에서의 위치 ===
+# drivers/pci/controller/Kconfig -> [이 파일]
+# 이 계층이 링크를 올리고 pci_host_bridge를 등록해야 drivers/pci/probe.c가
+# 하위를 열거할 수 있다. RISC-V 개발 보드(StarFive VisionFive 등)에서 M.2
+# NVMe가 인식되는 경로가 정확히 여기다.
+#
+# === 타 모듈과의 연결 ===
+# - controller/plda/Makefile: 선택 결과를 오브젝트로 번역.
+# - drivers/pci/pci-host-common.c: PCIE_MICROCHIP_HOST가 select 하는 공통 DT 파싱.
+# - drivers/pci/msi/: PCI_MSI 의존으로 MSI 도메인이 보장돼야 NVMe가 큐마다
+#   벡터를 받을 수 있다.
+#
+# === 주요 함수/구조체 요약 ===
+# - PCIE_PLDA_HOST      : 사용자에게 보이지 않는 공통 코어(프롬프트 없는 bool).
+# - PCIE_MICROCHIP_HOST : PolarFire SoC 루트 포트.
+# - PCIE_STARFIVE_HOST  : StarFive JH7110 루트 포트.
+# ============================================================================
 
-menu "PLDA-based PCIe controllers"
-	depends on PCI
+menu "PLDA-based PCIe controllers"	# [한국어] PLDA IP 기반 컨트롤러 메뉴 시작
+	depends on PCI	# [한국어] PCI 코어가 없으면 호스트 브리지를 등록할 대상이 없다
 
-config PCIE_PLDA_HOST
-	bool
-	select IRQ_MSI_LIB
+config PCIE_PLDA_HOST	# [한국어] 공통 코어. 프롬프트가 없어 사용자가 직접 못 고르고, 아래 벤더 옵션이 select 로만 켠다
+	bool	# [한국어] 프롬프트 없는 bool — 사용자 메뉴에 뜨지 않고 다른 옵션의 select 로만 켜지는 내부 심볼
+	select IRQ_MSI_LIB	# [한국어] MSI 도메인 구성 헬퍼를 끌어온다. NVMe의 다중 벡터 할당이 이 위에서 이뤄진다
 
-config PCIE_MICROCHIP_HOST
-	tristate "Microchip AXI PCIe controller"
-	depends on PCI_MSI && OF
-	select PCI_HOST_COMMON
-	select PCIE_PLDA_HOST
+config PCIE_MICROCHIP_HOST	# [한국어] Microchip PolarFire SoC 루트 포트
+	tristate "Microchip AXI PCIe controller"	# [한국어] tristate — 모듈화 가능. 다만 루트 브리지가 모듈이면 부트 디스크로는 쓰기 어렵다
+	depends on PCI_MSI && OF	# [한국어] MSI 도메인과 디바이스 트리가 모두 있어야 한다. NVMe가 큐마다 벡터를 받으려면 MSI가 필수
+	select PCI_HOST_COMMON	# [한국어] DT 파싱과 브리지 등록의 공통 절차를 재사용
+	select PCIE_PLDA_HOST	# [한국어] 위 공통 코어를 함께 빌드
 	help
 	  Say Y here if you want kernel to support the Microchip AXI PCIe
 	  Host Bridge driver.
 
-config PCIE_STARFIVE_HOST
-	tristate "StarFive PCIe host controller"
-	depends on PCI_MSI && OF
-	depends on ARCH_STARFIVE || COMPILE_TEST
-	select PCIE_PLDA_HOST
+config PCIE_STARFIVE_HOST	# [한국어] StarFive JH7110 루트 포트. RISC-V 보드의 NVMe 경로
+	tristate "StarFive PCIe host controller"	# [한국어] tristate — pcie-starfive.ko로 분리 가능
+	depends on PCI_MSI && OF	# [한국어] MSI 도메인과 디바이스 트리가 모두 있어야 한다. NVMe가 큐마다 벡터를 받으려면 MSI가 필수
+	depends on ARCH_STARFIVE || COMPILE_TEST	# [한국어] 해당 SoC이거나 컴파일 검증 목적일 때만 노출. COMPILE_TEST는 다른 아키텍처에서도 빌드 오류를 잡기 위한 관례
+	select PCIE_PLDA_HOST	# [한국어] PLDA 공통 코어를 함께 빌드
 	help
 	  Say Y here if you want to support the StarFive PCIe controller in
 	  host mode. StarFive PCIe controller uses PLDA PCIe core.
@@ -28,4 +54,4 @@ config PCIE_STARFIVE_HOST
 	  If you choose to build this driver as module it will be dynamically
 	  linked and module will be called pcie-starfive.ko.
 
-endmenu
+endmenu	# [한국어] PLDA 메뉴 끝

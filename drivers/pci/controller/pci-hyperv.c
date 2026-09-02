@@ -328,6 +328,11 @@ union win_slot_encoding {
  * Pretty much as defined in the PCI Specifications.
  */
 struct pci_function_description {
+	/* [한국어] 벤더 ID(옆의 상류 주석).
+	 * 설정자: 호스트가 보낸 장치 서술.
+	 * 읽는 자: 이 파일이 커널 쪽 서술로 복사한 뒤 config 읽기가 흉내 낼 값으로 쓴다.
+	 * 값 범위: PCI 규격의 해당 필드.
+	 * 동기화: 수신 버퍼 위에서 읽어 복사한 뒤로는 소유자만 본다. */
 	u16	v_id;	/* vendor ID */
 	/* [한국어] 장치 ID(옆의 상류 주석).
 	 * 설정자: 호스트가 보낸 장치 서술.
@@ -478,6 +483,11 @@ struct pci_function_description2 {
  * @cpu_mask:		All the target virtual processors.
  */
 struct hv_msi_desc {
+	/* [한국어] 게스트가 이 인터럽트에 배정한 벡터 번호.
+	 * 설정자: hv_compose_msi_req_v1() 이 커널이 고른 벡터를 넣는다.
+	 * 읽는 자: 호스트가 이 값으로 게스트에 인터럽트를 주입한다.
+	 * 값 범위: 8비트. 1판 프로토콜이라 x86 벡터 폭에 맞춰져 있다.
+	 * 동기화: 메시지 조립 중에만 쓰이고 전송 후에는 참조되지 않는다. */
 	u8	vector;
 	/* [한국어] 전달 방식.
 	 * 설정자: hv_compose_msi_req_v1().
@@ -526,6 +536,11 @@ struct hv_msi_desc {
  * @processor_array:	All the target virtual processors.
  */
 struct hv_msi_desc2 {
+	/* [한국어] 벡터 번호. 1판과 같은 8비트다.
+	 * 설정자: hv_compose_msi_req_v2().
+	 * 읽는 자: 호스트.
+	 * 값 범위: 8비트. 2판은 대상 vCPU 를 배열로 늘렸을 뿐 벡터 폭은 그대로다.
+	 * 동기화: 메시지 조립 중에만 유효. */
 	u8	vector;
 	/* [한국어] 전달 방식.
 	 * 설정자: hv_compose_msi_req_v2().
@@ -563,6 +578,12 @@ struct hv_msi_desc2 {
  *	vectors on ARM.
  */
 struct hv_msi_desc3 {
+	/* [한국어] 벡터 번호. 3판에서 32비트로 넓어졌다.
+	 * 왜 넓혔나: 아래 상류 주석이 밝히듯 ARM 은 x86 보다 넓은 인터럽트 번호
+	 *   공간을 쓰므로 8비트로는 표현할 수 없다.
+	 * 설정자: hv_compose_msi_req_v3().
+	 * 읽는 자: 호스트.
+	 * 동기화: 메시지 조립 중에만 유효. */
 	u32	vector;
 	/* [한국어] 전달 방식. 2판과 같다. */
 	u8	delivery_mode;
@@ -591,6 +612,11 @@ struct hv_msi_desc3 {
  *			generation.
  */
 struct tran_int_desc {
+	/* [한국어] 예약 필드. 뒤따르는 필드들의 정렬을 맞추기 위한 자리다.
+	 * 설정자: 아무도 쓰지 않는다 -- 호스트와 게스트 모두 0 으로 둔다.
+	 * 읽는 자: 없음.
+	 * 값 범위: 0.
+	 * 동기화: 해당 없음. */
 	u16	reserved;
 	/* [한국어] 이 서술이 덮는 연속 벡터 개수.
 	 * 설정자: 호스트.
@@ -1013,6 +1039,12 @@ struct pci_delete_interrupt {
  * Note: the VM must pass a valid block id, wslot and bytes_requested.
  */
 struct pci_read_block {
+	/* [한국어] 이 메시지가 어떤 요청인지 알리는 공통 머리말.
+	 * 설정자: hv_read_config_block() 이 PCI_READ_BLOCK 으로 채운다.
+	 * 읽는 자: 호스트가 이 값을 보고 메시지 본문을 어떻게 해석할지 정한다.
+	 * 값 범위: pci_message_type 열거값. 모든 호스트 요청 구조체가 이 필드를
+	 *   맨 앞에 두는 것은 프로토콜이 태그 있는 공용체 형태이기 때문이다.
+	 * 동기화: 메시지 조립 중에만 유효. */
 	struct pci_message message_type;
 	/* [한국어] 읽을 블록의 번호.
 	 * 설정자: hv_read_config_block().
@@ -1060,6 +1092,11 @@ struct pci_read_block_response {
  * Note: the VM must pass a valid block id, wslot and byte_count.
  */
 struct pci_write_block {
+	/* [한국어] 이 메시지가 어떤 요청인지 알리는 공통 머리말.
+	 * 설정자: hv_write_config_block() 이 PCI_WRITE_BLOCK 으로 채운다.
+	 * 읽는 자: 호스트.
+	 * 값 범위: pci_message_type 열거값. 위 pci_read_block 과 같은 규약이다.
+	 * 동기화: 메시지 조립 중에만 유효. */
 	struct pci_message message_type;
 	/* [한국어] 쓸 블록의 번호.
 	 * 설정자: hv_write_config_block().
@@ -1268,6 +1305,13 @@ struct hv_pcibus_device {
  * of the incoming packet callback.
  */
 struct hv_dr_work {
+	/* [한국어] 워크큐에 걸리는 작업 항목.
+	 * 왜 필요한가: 위 영어 주석이 밝히듯 장치 목록 변경 통지는 수신 콜백
+	 *   컨텍스트에서 도착하는데, 그 자리에서 PCI 열거를 할 수는 없다. 그래서
+	 *   작업을 워크큐로 넘겨 잠들 수 있는 문맥에서 처리한다.
+	 * 설정자: 통지를 받은 쪽이 INIT_WORK 으로 걸고 큐에 넣는다.
+	 * 읽는 자: 워크 함수가 container_of 로 이 구조체를 되찾는다.
+	 * 동기화: 워크큐 코어가 실행 시점을 직렬화한다. */
 	struct work_struct wrk;
 	/* [한국어] 이 워크가 속한 버스.
 	 * 설정자: 워크를 거는 쪽.
@@ -1405,6 +1449,15 @@ struct hv_pci_dev {
 	 * read it back, for each of the BAR offsets within config space.
 	 */
 	u32 probed_bar[PCI_STD_NUM_BARS];
+	/* [한국어] 각 BAR 에 0xFFFFFFFF 를 쓴 뒤 되읽었을 때 나올 값. 위 영어 주석이
+	 * 설명한 그대로다.
+	 * 왜 필요한가: BAR 크기 탐지는 원래 전부 1 을 쓰고 되읽어 하위 비트가 얼마나
+	 *   0 으로 고정되는지를 보는 방식이다. 가상화 환경에서는 게스트가 실제 BAR 를
+	 *   그렇게 만질 수 없으므로, 호스트가 미리 그 결과를 계산해 넘겨준다.
+	 * 설정자: 호스트가 장치 서술과 함께 보낸다.
+	 * 읽는 자: 이 파일의 config 읽기 흉내 코드가 BAR 크기 질의에 이 값을 돌려준다.
+	 * 값 범위: BAR 개수만큼의 배열. 미사용 BAR 는 0.
+	 * 동기화: 장치 추가 시 한 번 채워지고 이후 불변. */
 };
 
 struct hv_pci_compl {

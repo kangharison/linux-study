@@ -1,37 +1,70 @@
 # SPDX-License-Identifier: GPL-2.0
+#
+# ============================================================================
+# [한국어 설명] Synopsys DesignWare PCIe 컨트롤러 설정 (controller/dwc/Kconfig)
+#
+# === 파일의 역할 ===
+# DesignWare(DWC) PCIe IP를 채용한 SoC들의 호스트/엔드포인트 드라이버 빌드
+# 여부를 정한다. DWC는 상용 SoC에서 가장 널리 쓰이는 PCIe IP라 이 파일이 PCI
+# 트리에서 가장 큰 Kconfig이며, 58개 항목 대부분이 같은 패턴을 따른다:
+# 프롬프트 없는 벤더 공통 심볼 하나 + 호스트 모드 + 엔드포인트 모드.
+#
+# === 전체 아키텍처에서의 위치 ===
+# drivers/pci/controller/Kconfig -> [이 파일]
+# 계층 구조는 세 단이다:
+#   PCIE_DW            공통 코어(iATU 주소 변환, 링크 상태 판정)
+#   PCIE_DW_HOST / _EP 동작 모드(루트 콤플렉스 / 엔드포인트)
+#   <벤더>_HOST / _EP  전원·클럭·PHY·리셋 등 SoC 고유 결합
+# 사용자는 맨 아래 벤더 항목만 고르고, 그것이 위 두 단을 select 로 끌어온다.
+# NVMe 관점에서 이 계층은 링크를 올리고 iATU를 프로그래밍하는 층이다. iATU가
+# CPU 물리 주소를 PCI 버스 주소로 옮겨 주어야 BAR0 접근과 DMA가 성립한다.
+#
+# === 타 모듈과의 연결 ===
+# - controller/dwc/Makefile: 선택 결과를 오브젝트로 번역.
+# - drivers/phy/: 대부분 항목이 SerDes PHY 드라이버와 짝을 이뤄야 링크가 선다.
+# - drivers/pci/endpoint/: _EP 항목들이 PCI_ENDPOINT에 의존하는 이유.
+# - drivers/pci/msi/: PCI_MSI 의존이 29곳에 걸쳐 있다. NVMe가 큐마다 벡터를
+#   받으려면 컨트롤러가 MSI 도메인을 제공해야 하기 때문이다.
+#
+# === 주요 함수/구조체 요약 ===
+# - PCIE_DW        : 공통 코어(내부 심볼). 모든 파생이 결국 이것을 켠다.
+# - PCIE_DW_HOST   : 루트 콤플렉스 동작(내부 심볼). NVMe 열거의 전제.
+# - PCIE_DW_EP     : 엔드포인트 동작(내부 심볼).
+# - PCIE_DW_DEBUGFS: 링크 속도/폭과 오류 카운터를 런타임에 관측.
+# ============================================================================
 
-menu "DesignWare-based PCIe controllers"
-	depends on PCI
+menu "DesignWare-based PCIe controllers"	# [한국어] DesignWare IP 기반 컨트롤러 메뉴 시작
+	depends on PCI	# [한국어] PCI 코어 없이는 호스트 브리지를 등록할 대상이 없다
 
-config PCIE_DW
-	bool
+config PCIE_DW	# [한국어] DWC 공통 코어. 모든 파생이 결국 이것을 켠다
+	bool	# [한국어] 프롬프트 없는 bool — 사용자 메뉴에 뜨지 않고 벤더 항목이 select 로만 켜는 내부 심볼
 
-config PCIE_DW_DEBUGFS
-	bool "DesignWare PCIe debugfs entries"
-	depends on DEBUG_FS
-	depends on PCIE_DW_HOST || PCIE_DW_EP
+config PCIE_DW_DEBUGFS	# [한국어] debugfs 노출. 링크 속도/폭과 오류 카운터를 런타임에 들여다볼 때
+	bool "DesignWare PCIe debugfs entries"	# [한국어] debugfs 노출. 링크 속도/폭과 오류 카운터를 런타임에 들여다볼 때 — 사용자에게 보이는 항목 이름
+	depends on DEBUG_FS	# [한국어] debugfs 파일시스템이 있어야 노드를 만들 수 있다
+	depends on PCIE_DW_HOST || PCIE_DW_EP	# [한국어] 호스트든 엔드포인트든 DWC 동작 계층 하나는 켜져 있어야 관측할 대상이 생긴다
 	help
 	  Say Y here to enable debugfs entries for the PCIe controller. These
 	  entries provide various debug features related to the controller and
 	  expose the RAS DES capabilities such as Silicon Debug, Error Injection
 	  and Statistical Counters.
 
-config PCIE_DW_HOST
-	bool
-	select PCIE_DW
-	select IRQ_MSI_LIB
-	select PCI_HOST_COMMON
+config PCIE_DW_HOST	# [한국어] 루트 콤플렉스 동작 계층. NVMe 열거의 전제
+	bool	# [한국어] 프롬프트 없는 bool — 사용자 메뉴에 뜨지 않고 벤더 항목이 select 로만 켜는 내부 심볼
+	select PCIE_DW	# [한국어] DWC 공통 코어(iATU, 링크 판정)를 함께 빌드
+	select IRQ_MSI_LIB	# [한국어] MSI 도메인 구성 헬퍼를 끌어온다
+	select PCI_HOST_COMMON	# [한국어] DT 파싱과 브리지 등록의 공통 절차를 재사용
 
-config PCIE_DW_EP
-	bool
-	select PCIE_DW
+config PCIE_DW_EP	# [한국어] 엔드포인트 동작 계층
+	bool	# [한국어] 프롬프트 없는 bool — 사용자 메뉴에 뜨지 않고 벤더 항목이 select 로만 켜는 내부 심볼
+	select PCIE_DW	# [한국어] DWC 공통 코어(iATU, 링크 판정)를 함께 빌드
 
-config PCIE_AL
-	bool "Amazon Annapurna Labs PCIe controller"
-	depends on OF && (ARM64 || COMPILE_TEST)
-	depends on PCI_MSI
-	select PCIE_DW_HOST
-	select PCI_ECAM
+config PCIE_AL	# [한국어] Amazon Annapurna Labs 컨트롤러. AWS Graviton 계열
+	bool "Amazon Annapurna Labs PCIe controller"	# [한국어] Amazon Annapurna Labs 컨트롤러. AWS Graviton 계열 — 사용자에게 보이는 항목 이름
+	depends on OF && (ARM64 || COMPILE_TEST)	# [한국어] DT가 필요하고, ARM64이거나 컴파일 검증 목적일 때만 노출
+	depends on PCI_MSI	# [한국어] MSI 도메인이 있어야 한다. NVMe가 I/O 큐마다 완료 벡터를 받는 전제
+	select PCIE_DW_HOST	# [한국어] 루트 콤플렉스 동작 계층을 함께 빌드. NVMe가 하위에 열거되려면 필요하다
+	select PCI_ECAM	# [한국어] config space 접근이 표준 ECAM 규약을 따르므로 그 구현을 함께 빌드
 	help
 	  Say Y here to enable support of the Amazon's Annapurna Labs PCIe
 	  controller IP on Amazon SoCs. The PCIe controller uses the DesignWare
@@ -39,105 +72,105 @@ config PCIE_AL
 	  required only for DT-based platforms. ACPI platforms with the
 	  Annapurna Labs PCIe controller don't need to enable this.
 
-config PCIE_AMD_MDB
-	bool "AMD MDB Versal2 PCIe controller"
-	depends on OF && (ARM64 || COMPILE_TEST)
-	depends on PCI_MSI
-	select PCIE_DW_HOST
+config PCIE_AMD_MDB	# [한국어] AMD MDB Versal2 컨트롤러
+	bool "AMD MDB Versal2 PCIe controller"	# [한국어] AMD MDB Versal2 컨트롤러 — 사용자에게 보이는 항목 이름
+	depends on OF && (ARM64 || COMPILE_TEST)	# [한국어] DT가 필요하고, ARM64이거나 컴파일 검증 목적일 때만 노출
+	depends on PCI_MSI	# [한국어] MSI 도메인이 있어야 한다. NVMe가 I/O 큐마다 완료 벡터를 받는 전제
+	select PCIE_DW_HOST	# [한국어] 루트 콤플렉스 동작 계층을 함께 빌드. NVMe가 하위에 열거되려면 필요하다
 	help
 	  Say Y here if you want to enable PCIe controller support on AMD
 	  Versal2 SoCs. The AMD MDB Versal2 PCIe controller is based on
 	  DesignWare IP and therefore the driver re-uses the DesignWare
 	  core functions to implement the driver.
 
-config PCI_MESON
-	tristate "Amlogic Meson PCIe controller"
-	default m if ARCH_MESON
-	depends on PCI_MSI
-	select PCIE_DW_HOST
+config PCI_MESON	# [한국어] Amlogic Meson 컨트롤러
+	tristate "Amlogic Meson PCIe controller"	# [한국어] Amlogic Meson 컨트롤러 — 사용자에게 보이는 항목 이름
+	default m if ARCH_MESON	# [한국어] Amlogic 플랫폼에서는 기본값을 모듈로 둔다
+	depends on PCI_MSI	# [한국어] MSI 도메인이 있어야 한다. NVMe가 I/O 큐마다 완료 벡터를 받는 전제
+	select PCIE_DW_HOST	# [한국어] 루트 콤플렉스 동작 계층을 함께 빌드. NVMe가 하위에 열거되려면 필요하다
 	help
 	  Say Y here if you want to enable PCI controller support on Amlogic
 	  SoCs. The PCI controller on Amlogic is based on DesignWare hardware
 	  and therefore the driver re-uses the DesignWare core functions to
 	  implement the driver.
 
-config PCIE_ANDES_QILAI
-	tristate "Andes QiLai PCIe controller"
-	depends on ARCH_ANDES || COMPILE_TEST
-	depends on PCI_MSI
-	select PCIE_DW_HOST
+config PCIE_ANDES_QILAI	# [한국어] Andes QiLai RISC-V SoC 컨트롤러
+	tristate "Andes QiLai PCIe controller"	# [한국어] Andes QiLai RISC-V SoC 컨트롤러 — 사용자에게 보이는 항목 이름
+	depends on ARCH_ANDES || COMPILE_TEST	# [한국어] Andes SoC이거나 컴파일 검증 목적일 때만 노출
+	depends on PCI_MSI	# [한국어] MSI 도메인이 있어야 한다. NVMe가 I/O 큐마다 완료 벡터를 받는 전제
+	select PCIE_DW_HOST	# [한국어] 루트 콤플렉스 동작 계층을 함께 빌드. NVMe가 하위에 열거되려면 필요하다
 	help
 	  Say Y here to enable PCIe controller support on Andes QiLai SoCs,
 	  which operate in Root Complex mode. The Andes QiLai SoC PCIe
 	  controller is based on DesignWare IP and therefore the driver
 	  re-uses the DesignWare core functions to implement the driver.
 
-config PCIE_ARTPEC6
-	bool
+config PCIE_ARTPEC6	# [한국어] Axis ARTPEC-6 공통 결합
+	bool	# [한국어] 프롬프트 없는 bool — 사용자 메뉴에 뜨지 않고 벤더 항목이 select 로만 켜는 내부 심볼
 
-config PCIE_ARTPEC6_HOST
-	bool "Axis ARTPEC-6 PCIe controller (host mode)"
-	depends on MACH_ARTPEC6 || COMPILE_TEST
-	depends on PCI_MSI
-	select PCIE_DW_HOST
-	select PCIE_ARTPEC6
+config PCIE_ARTPEC6_HOST	# [한국어] ARTPEC-6 호스트 모드
+	bool "Axis ARTPEC-6 PCIe controller (host mode)"	# [한국어] ARTPEC-6 호스트 모드 — 사용자에게 보이는 항목 이름
+	depends on MACH_ARTPEC6 || COMPILE_TEST	# [한국어] Axis ARTPEC-6이거나 컴파일 검증 목적
+	depends on PCI_MSI	# [한국어] MSI 도메인이 있어야 한다. NVMe가 I/O 큐마다 완료 벡터를 받는 전제
+	select PCIE_DW_HOST	# [한국어] 루트 콤플렉스 동작 계층을 함께 빌드. NVMe가 하위에 열거되려면 필요하다
+	select PCIE_ARTPEC6	# [한국어] ARTPEC-6 공통 결합 코드를 함께 빌드
 	help
 	  Enables support for the PCIe controller in the ARTPEC-6 SoC to work in
 	  host mode. This uses the DesignWare core.
 
-config PCIE_ARTPEC6_EP
-	bool "Axis ARTPEC-6 PCIe controller (endpoint mode)"
-	depends on MACH_ARTPEC6 || COMPILE_TEST
-	depends on PCI_ENDPOINT
-	select PCIE_DW_EP
-	select PCIE_ARTPEC6
+config PCIE_ARTPEC6_EP	# [한국어] ARTPEC-6 엔드포인트 모드
+	bool "Axis ARTPEC-6 PCIe controller (endpoint mode)"	# [한국어] ARTPEC-6 엔드포인트 모드 — 사용자에게 보이는 항목 이름
+	depends on MACH_ARTPEC6 || COMPILE_TEST	# [한국어] Axis ARTPEC-6이거나 컴파일 검증 목적
+	depends on PCI_ENDPOINT	# [한국어] 엔드포인트 프레임워크가 있어야 EPC로 등록할 수 있다
+	select PCIE_DW_EP	# [한국어] 엔드포인트 동작 계층을 함께 빌드
+	select PCIE_ARTPEC6	# [한국어] ARTPEC-6 공통 결합 코드를 함께 빌드
 	help
 	  Enables support for the PCIe controller in the ARTPEC-6 SoC to work in
 	  endpoint mode. This uses the DesignWare core.
 
-config PCIE_ESWIN
-	tristate "ESWIN PCIe controller"
-	depends on ARCH_ESWIN || COMPILE_TEST
-	depends on PCI_MSI
-	select PCIE_DW_HOST
+config PCIE_ESWIN	# [한국어] ESWIN EIC7700 SoC 컨트롤러
+	tristate "ESWIN PCIe controller"	# [한국어] ESWIN EIC7700 SoC 컨트롤러 — 사용자에게 보이는 항목 이름
+	depends on ARCH_ESWIN || COMPILE_TEST	# [한국어] ESWIN SoC이거나 컴파일 검증 목적일 때만 노출
+	depends on PCI_MSI	# [한국어] MSI 도메인이 있어야 한다. NVMe가 I/O 큐마다 완료 벡터를 받는 전제
+	select PCIE_DW_HOST	# [한국어] 루트 콤플렉스 동작 계층을 함께 빌드. NVMe가 하위에 열거되려면 필요하다
 	help
 	  Say Y here if you want PCIe controller support for the ESWIN SoCs.
 	  The PCIe controller in ESWIN SoCs is based on DesignWare hardware, and
 	  works only in host mode.
 
-config PCI_IMX6
-	bool
+config PCI_IMX6	# [한국어] NXP i.MX6/7/8 공통 결합
+	bool	# [한국어] 프롬프트 없는 bool — 사용자 메뉴에 뜨지 않고 벤더 항목이 select 로만 켜는 내부 심볼
 
-config PCI_IMX6_HOST
-	bool "Freescale i.MX6/7/8 PCIe controller (host mode)"
-	depends on ARCH_MXC || COMPILE_TEST
-	depends on PCI_MSI
-	select PCIE_DW_HOST
-	select PCI_IMX6
+config PCI_IMX6_HOST	# [한국어] i.MX6/7/8 호스트 모드. 임베디드 보드에서 NVMe를 붙이는 흔한 경로
+	bool "Freescale i.MX6/7/8 PCIe controller (host mode)"	# [한국어] i.MX6/7/8 호스트 모드. 임베디드 보드에서 NVMe를 붙이는 흔한 경로 — 사용자에게 보이는 항목 이름
+	depends on ARCH_MXC || COMPILE_TEST	# [한국어] NXP i.MX이거나 컴파일 검증 목적
+	depends on PCI_MSI	# [한국어] MSI 도메인이 있어야 한다. NVMe가 I/O 큐마다 완료 벡터를 받는 전제
+	select PCIE_DW_HOST	# [한국어] 루트 콤플렉스 동작 계층을 함께 빌드. NVMe가 하위에 열거되려면 필요하다
+	select PCI_IMX6	# [한국어] i.MX6 공통 결합 코드를 함께 빌드
 	help
 	  Enables support for the PCIe controller in the i.MX SoCs to
 	  work in Root Complex mode. The PCI controller on i.MX is based
 	  on DesignWare hardware and therefore the driver re-uses the
 	  DesignWare core functions to implement the driver.
 
-config PCI_IMX6_EP
-	bool "Freescale i.MX6/7/8 PCIe controller (endpoint mode)"
-	depends on ARCH_MXC || COMPILE_TEST
-	depends on PCI_ENDPOINT
-	select PCIE_DW_EP
-	select PCI_IMX6
+config PCI_IMX6_EP	# [한국어] i.MX6/7/8 엔드포인트 모드
+	bool "Freescale i.MX6/7/8 PCIe controller (endpoint mode)"	# [한국어] i.MX6/7/8 엔드포인트 모드 — 사용자에게 보이는 항목 이름
+	depends on ARCH_MXC || COMPILE_TEST	# [한국어] NXP i.MX이거나 컴파일 검증 목적
+	depends on PCI_ENDPOINT	# [한국어] 엔드포인트 프레임워크가 있어야 EPC로 등록할 수 있다
+	select PCIE_DW_EP	# [한국어] 엔드포인트 동작 계층을 함께 빌드
+	select PCI_IMX6	# [한국어] i.MX6 공통 결합 코드를 함께 빌드
 	help
 	  Enables support for the PCIe controller in the i.MX SoCs to
 	  work in endpoint mode. The PCI controller on i.MX is based
 	  on DesignWare hardware and therefore the driver re-uses the
 	  DesignWare core functions to implement the driver.
 
-config PCI_LAYERSCAPE
-	tristate "Freescale Layerscape PCIe controller (host mode)"
-	depends on OF && (ARM || ARCH_LAYERSCAPE || COMPILE_TEST)
-	depends on PCI_MSI
-	select PCIE_DW_HOST
-	select MFD_SYSCON
+config PCI_LAYERSCAPE	# [한국어] NXP Layerscape 호스트 모드
+	tristate "Freescale Layerscape PCIe controller (host mode)"	# [한국어] NXP Layerscape 호스트 모드 — 사용자에게 보이는 항목 이름
+	depends on OF && (ARM || ARCH_LAYERSCAPE || COMPILE_TEST)	# [한국어] ARM32 또는 Layerscape이거나 컴파일 검증 목적
+	depends on PCI_MSI	# [한국어] MSI 도메인이 있어야 한다. NVMe가 I/O 큐마다 완료 벡터를 받는 전제
+	select PCIE_DW_HOST	# [한국어] 루트 콤플렉스 동작 계층을 함께 빌드. NVMe가 하위에 열거되려면 필요하다
+	select MFD_SYSCON	# [한국어] 시스템 제어 레지스터를 regmap으로 공유해서 접근한다
 	help
 	  Say Y here if you want to enable PCIe controller support on Layerscape
 	  SoCs to work in Host mode.
@@ -145,11 +178,11 @@ config PCI_LAYERSCAPE
 	  determines which PCIe controller works in EP mode and which PCIe
 	  controller works in RC mode.
 
-config PCI_LAYERSCAPE_EP
-	bool "Freescale Layerscape PCIe controller (endpoint mode)"
-	depends on OF && (ARM || ARCH_LAYERSCAPE || COMPILE_TEST)
-	depends on PCI_ENDPOINT
-	select PCIE_DW_EP
+config PCI_LAYERSCAPE_EP	# [한국어] NXP Layerscape 엔드포인트 모드
+	bool "Freescale Layerscape PCIe controller (endpoint mode)"	# [한국어] NXP Layerscape 엔드포인트 모드 — 사용자에게 보이는 항목 이름
+	depends on OF && (ARM || ARCH_LAYERSCAPE || COMPILE_TEST)	# [한국어] ARM32 또는 Layerscape이거나 컴파일 검증 목적
+	depends on PCI_ENDPOINT	# [한국어] 엔드포인트 프레임워크가 있어야 EPC로 등록할 수 있다
+	select PCIE_DW_EP	# [한국어] 엔드포인트 동작 계층을 함께 빌드
 	help
 	  Say Y here if you want to enable PCIe controller support on Layerscape
 	  SoCs to work in Endpoint mode.
@@ -157,94 +190,94 @@ config PCI_LAYERSCAPE_EP
 	  determines which PCIe controller works in EP mode and which PCIe
 	  controller works in RC mode.
 
-config PCI_HISI
-	depends on OF && (ARM64 || COMPILE_TEST)
-	bool "HiSilicon Hip05 and Hip06 SoCs PCIe controller"
-	depends on PCI_MSI
-	select PCIE_DW_HOST
-	select PCI_HOST_COMMON
+config PCI_HISI	# [한국어] HiSilicon Hip05/Hip06 서버 SoC 컨트롤러
+	depends on OF && (ARM64 || COMPILE_TEST)	# [한국어] DT가 필요하고, ARM64이거나 컴파일 검증 목적일 때만 노출
+	bool "HiSilicon Hip05 and Hip06 SoCs PCIe controller"	# [한국어] HiSilicon Hip05/Hip06 서버 SoC 컨트롤러 — 사용자에게 보이는 항목 이름
+	depends on PCI_MSI	# [한국어] MSI 도메인이 있어야 한다. NVMe가 I/O 큐마다 완료 벡터를 받는 전제
+	select PCIE_DW_HOST	# [한국어] 루트 콤플렉스 동작 계층을 함께 빌드. NVMe가 하위에 열거되려면 필요하다
+	select PCI_HOST_COMMON	# [한국어] DT 파싱과 브리지 등록의 공통 절차를 재사용
 	help
 	  Say Y here if you want PCIe controller support on HiSilicon
 	  Hip05 and Hip06 SoCs
 
-config PCIE_KIRIN
-	depends on OF && (ARM64 || COMPILE_TEST)
-	tristate "HiSilicon Kirin PCIe controller"
-	depends on PCI_MSI
-	select PCIE_DW_HOST
-	select REGMAP_MMIO
+config PCIE_KIRIN	# [한국어] HiSilicon Kirin 모바일 SoC 컨트롤러
+	depends on OF && (ARM64 || COMPILE_TEST)	# [한국어] DT가 필요하고, ARM64이거나 컴파일 검증 목적일 때만 노출
+	tristate "HiSilicon Kirin PCIe controller"	# [한국어] HiSilicon Kirin 모바일 SoC 컨트롤러 — 사용자에게 보이는 항목 이름
+	depends on PCI_MSI	# [한국어] MSI 도메인이 있어야 한다. NVMe가 I/O 큐마다 완료 벡터를 받는 전제
+	select PCIE_DW_HOST	# [한국어] 루트 콤플렉스 동작 계층을 함께 빌드. NVMe가 하위에 열거되려면 필요하다
+	select REGMAP_MMIO	# [한국어] MMIO 기반 regmap으로 시스템 제어 레지스터를 다룬다
 	help
 	  Say Y here if you want PCIe controller support
 	  on HiSilicon Kirin series SoCs.
 
-config PCIE_HISI_STB
-	bool "HiSilicon STB PCIe controller"
-	depends on ARCH_HISI || COMPILE_TEST
-	depends on PCI_MSI
-	select PCIE_DW_HOST
+config PCIE_HISI_STB	# [한국어] HiSilicon STB(셋톱박스) 컨트롤러
+	bool "HiSilicon STB PCIe controller"	# [한국어] HiSilicon STB(셋톱박스) 컨트롤러 — 사용자에게 보이는 항목 이름
+	depends on ARCH_HISI || COMPILE_TEST	# [한국어] HiSilicon SoC이거나 컴파일 검증 목적일 때만 노출
+	depends on PCI_MSI	# [한국어] MSI 도메인이 있어야 한다. NVMe가 I/O 큐마다 완료 벡터를 받는 전제
+	select PCIE_DW_HOST	# [한국어] 루트 콤플렉스 동작 계층을 함께 빌드. NVMe가 하위에 열거되려면 필요하다
 	help
 	  Say Y here if you want PCIe controller support on HiSilicon STB SoCs
 
-config PCIE_INTEL_GW
-	bool "Intel Gateway PCIe controller "
-	depends on OF && (X86 || COMPILE_TEST)
-	depends on PCI_MSI
-	select PCIE_DW_HOST
+config PCIE_INTEL_GW	# [한국어] Intel Gateway(LGM) SoC 컨트롤러
+	bool "Intel Gateway PCIe controller "	# [한국어] Intel Gateway(LGM) SoC 컨트롤러 — 사용자에게 보이는 항목 이름
+	depends on OF && (X86 || COMPILE_TEST)	# [한국어] DT가 필요하고, x86이거나 컴파일 검증 목적. Intel Gateway는 x86 SoC이다
+	depends on PCI_MSI	# [한국어] MSI 도메인이 있어야 한다. NVMe가 I/O 큐마다 완료 벡터를 받는 전제
+	select PCIE_DW_HOST	# [한국어] 루트 콤플렉스 동작 계층을 함께 빌드. NVMe가 하위에 열거되려면 필요하다
 	help
 	  Say 'Y' here to enable PCIe Host controller support on Intel
 	  Gateway SoCs.
 	  The PCIe controller uses the DesignWare core plus Intel-specific
 	  hardware wrappers.
 
-config PCIE_KEEMBAY
-	bool
+config PCIE_KEEMBAY	# [한국어] Intel Keem Bay 공통 결합
+	bool	# [한국어] 프롬프트 없는 bool — 사용자 메뉴에 뜨지 않고 벤더 항목이 select 로만 켜는 내부 심볼
 
-config PCIE_KEEMBAY_HOST
-	bool "Intel Keem Bay PCIe controller (host mode)"
-	depends on ARCH_KEEMBAY || COMPILE_TEST
-	depends on PCI_MSI
-	select PCIE_DW_HOST
-	select PCIE_KEEMBAY
+config PCIE_KEEMBAY_HOST	# [한국어] Keem Bay 호스트 모드
+	bool "Intel Keem Bay PCIe controller (host mode)"	# [한국어] Keem Bay 호스트 모드 — 사용자에게 보이는 항목 이름
+	depends on ARCH_KEEMBAY || COMPILE_TEST	# [한국어] Intel Keem Bay이거나 컴파일 검증 목적
+	depends on PCI_MSI	# [한국어] MSI 도메인이 있어야 한다. NVMe가 I/O 큐마다 완료 벡터를 받는 전제
+	select PCIE_DW_HOST	# [한국어] 루트 콤플렉스 동작 계층을 함께 빌드. NVMe가 하위에 열거되려면 필요하다
+	select PCIE_KEEMBAY	# [한국어] Keem Bay 공통 결합 코드를 함께 빌드
 	help
 	  Say 'Y' here to enable support for the PCIe controller in Keem Bay
 	  to work in host mode.
 	  The PCIe controller is based on DesignWare Hardware and uses
 	  DesignWare core functions.
 
-config PCIE_KEEMBAY_EP
-	bool "Intel Keem Bay PCIe controller (endpoint mode)"
-	depends on ARCH_KEEMBAY || COMPILE_TEST
-	depends on PCI_MSI
-	depends on PCI_ENDPOINT
-	select PCIE_DW_EP
-	select PCIE_KEEMBAY
+config PCIE_KEEMBAY_EP	# [한국어] Keem Bay 엔드포인트 모드
+	bool "Intel Keem Bay PCIe controller (endpoint mode)"	# [한국어] Keem Bay 엔드포인트 모드 — 사용자에게 보이는 항목 이름
+	depends on ARCH_KEEMBAY || COMPILE_TEST	# [한국어] Intel Keem Bay이거나 컴파일 검증 목적
+	depends on PCI_MSI	# [한국어] MSI 도메인이 있어야 한다. NVMe가 I/O 큐마다 완료 벡터를 받는 전제
+	depends on PCI_ENDPOINT	# [한국어] 엔드포인트 프레임워크가 있어야 EPC로 등록할 수 있다
+	select PCIE_DW_EP	# [한국어] 엔드포인트 동작 계층을 함께 빌드
+	select PCIE_KEEMBAY	# [한국어] Keem Bay 공통 결합 코드를 함께 빌드
 	help
 	  Say 'Y' here to enable support for the PCIe controller in Keem Bay
 	  to work in endpoint mode.
 	  The PCIe controller is based on DesignWare Hardware and uses
 	  DesignWare core functions.
 
-config PCIE_ARMADA_8K
-	bool "Marvell Armada-8K PCIe controller"
-	depends on ARCH_MVEBU || COMPILE_TEST
-	depends on PCI_MSI
-	select PCIE_DW_HOST
+config PCIE_ARMADA_8K	# [한국어] Marvell Armada-8K 컨트롤러
+	bool "Marvell Armada-8K PCIe controller"	# [한국어] Marvell Armada-8K 컨트롤러 — 사용자에게 보이는 항목 이름
+	depends on ARCH_MVEBU || COMPILE_TEST	# [한국어] Marvell EBU이거나 컴파일 검증 목적일 때만 노출
+	depends on PCI_MSI	# [한국어] MSI 도메인이 있어야 한다. NVMe가 I/O 큐마다 완료 벡터를 받는 전제
+	select PCIE_DW_HOST	# [한국어] 루트 콤플렉스 동작 계층을 함께 빌드. NVMe가 하위에 열거되려면 필요하다
 	help
 	  Say Y here if you want to enable PCIe controller support on
 	  Armada-8K SoCs. The PCIe controller on Armada-8K is based on
 	  DesignWare hardware and therefore the driver re-uses the
 	  DesignWare core functions to implement the driver.
 
-config PCIE_TEGRA194
-	tristate
+config PCIE_TEGRA194	# [한국어] NVIDIA Tegra194 공통 결합
+	tristate	# [한국어] 프롬프트 없는 tristate — 이를 select 하는 쪽의 모듈/내장 선택을 따른다
 
-config PCIE_TEGRA194_HOST
-	tristate "NVIDIA Tegra194 (and later) PCIe controller (host mode)"
-	depends on (ARCH_TEGRA && ARM64) || COMPILE_TEST
-	depends on PCI_MSI
-	select PCIE_DW_HOST
-	select PHY_TEGRA194_P2U
-	select PCIE_TEGRA194
+config PCIE_TEGRA194_HOST	# [한국어] Tegra194 이후 호스트 모드
+	tristate "NVIDIA Tegra194 (and later) PCIe controller (host mode)"	# [한국어] Tegra194 이후 호스트 모드 — 사용자에게 보이는 항목 이름
+	depends on (ARCH_TEGRA && ARM64) || COMPILE_TEST	# [한국어] ARM64 Tegra이거나 컴파일 검증 목적
+	depends on PCI_MSI	# [한국어] MSI 도메인이 있어야 한다. NVMe가 I/O 큐마다 완료 벡터를 받는 전제
+	select PCIE_DW_HOST	# [한국어] 루트 콤플렉스 동작 계층을 함께 빌드. NVMe가 하위에 열거되려면 필요하다
+	select PHY_TEGRA194_P2U	# [한국어] Tegra194의 P2U(PIPE to UPHY) PHY 드라이버가 있어야 링크가 선다
+	select PCIE_TEGRA194	# [한국어] Tegra194 공통 결합 코드를 함께 빌드
 	help
 	  Enables support for the PCIe controller in the NVIDIA Tegra194 SoC to
 	  work in host mode. There are two instances of PCIe controllers in
@@ -253,13 +286,13 @@ config PCIE_TEGRA194_HOST
 	  in order to enable device-specific features PCIE_TEGRA194_EP must be
 	  selected. This uses the DesignWare core.
 
-config PCIE_TEGRA194_EP
-	tristate "NVIDIA Tegra194 (and later) PCIe controller (endpoint mode)"
-	depends on (ARCH_TEGRA && ARM64) || COMPILE_TEST
-	depends on PCI_ENDPOINT
-	select PCIE_DW_EP
-	select PHY_TEGRA194_P2U
-	select PCIE_TEGRA194
+config PCIE_TEGRA194_EP	# [한국어] Tegra194 이후 엔드포인트 모드
+	tristate "NVIDIA Tegra194 (and later) PCIe controller (endpoint mode)"	# [한국어] Tegra194 이후 엔드포인트 모드 — 사용자에게 보이는 항목 이름
+	depends on (ARCH_TEGRA && ARM64) || COMPILE_TEST	# [한국어] ARM64 Tegra이거나 컴파일 검증 목적
+	depends on PCI_ENDPOINT	# [한국어] 엔드포인트 프레임워크가 있어야 EPC로 등록할 수 있다
+	select PCIE_DW_EP	# [한국어] 엔드포인트 동작 계층을 함께 빌드
+	select PHY_TEGRA194_P2U	# [한국어] Tegra194의 P2U(PIPE to UPHY) PHY 드라이버가 있어야 링크가 선다
+	select PCIE_TEGRA194	# [한국어] Tegra194 공통 결합 코드를 함께 빌드
 	help
 	  Enables support for the PCIe controller in the NVIDIA Tegra194 SoC to
 	  work in endpoint mode. There are two instances of PCIe controllers in
@@ -268,24 +301,24 @@ config PCIE_TEGRA194_EP
 	  in order to enable device-specific features PCIE_TEGRA194_EP must be
 	  selected. This uses the DesignWare core.
 
-config PCIE_NXP_S32G
-	bool "NXP S32G PCIe controller (host mode)"
-	depends on ARCH_S32 || COMPILE_TEST
-	select PCIE_DW_HOST
+config PCIE_NXP_S32G	# [한국어] NXP S32G 차량용 네트워킹 SoC 호스트 모드
+	bool "NXP S32G PCIe controller (host mode)"	# [한국어] NXP S32G 차량용 네트워킹 SoC 호스트 모드 — 사용자에게 보이는 항목 이름
+	depends on ARCH_S32 || COMPILE_TEST	# [한국어] NXP S32이거나 컴파일 검증 목적일 때만 노출
+	select PCIE_DW_HOST	# [한국어] 루트 콤플렉스 동작 계층을 함께 빌드. NVMe가 하위에 열거되려면 필요하다
 	help
 	  Enable support for the PCIe controller in NXP S32G based boards to
 	  work in Host mode. The controller is based on DesignWare IP and
 	  can work either as RC or EP. In order to enable host-specific
 	  features PCIE_NXP_S32G must be selected.
 
-config PCIE_DW_PLAT
-	bool
+config PCIE_DW_PLAT	# [한국어] 범용 플랫폼 결합 코어. 벤더 고유 초기화가 없는 보드용
+	bool	# [한국어] 프롬프트 없는 bool — 사용자 메뉴에 뜨지 않고 벤더 항목이 select 로만 켜는 내부 심볼
 
-config PCIE_DW_PLAT_HOST
-	bool "Platform bus based DesignWare PCIe controller (host mode)"
-	depends on PCI_MSI
-	select PCIE_DW_HOST
-	select PCIE_DW_PLAT
+config PCIE_DW_PLAT_HOST	# [한국어] 범용 플랫폼 호스트 모드
+	bool "Platform bus based DesignWare PCIe controller (host mode)"	# [한국어] 범용 플랫폼 호스트 모드 — 사용자에게 보이는 항목 이름
+	depends on PCI_MSI	# [한국어] MSI 도메인이 있어야 한다. NVMe가 I/O 큐마다 완료 벡터를 받는 전제
+	select PCIE_DW_HOST	# [한국어] 루트 콤플렉스 동작 계층을 함께 빌드. NVMe가 하위에 열거되려면 필요하다
+	select PCIE_DW_PLAT	# [한국어] 범용 플랫폼 결합 코드를 함께 빌드
 	help
 	  Enables support for the PCIe controller in the Designware IP to
 	  work in host mode. There are two instances of PCIe controller in
@@ -295,12 +328,12 @@ config PCIE_DW_PLAT_HOST
 	  order to enable device-specific features PCI_DW_PLAT_EP must be
 	  selected.
 
-config PCIE_DW_PLAT_EP
-	bool "Platform bus based DesignWare PCIe controller (endpoint mode)"
-	depends on PCI && PCI_MSI
-	depends on PCI_ENDPOINT
-	select PCIE_DW_EP
-	select PCIE_DW_PLAT
+config PCIE_DW_PLAT_EP	# [한국어] 범용 플랫폼 엔드포인트 모드
+	bool "Platform bus based DesignWare PCIe controller (endpoint mode)"	# [한국어] 범용 플랫폼 엔드포인트 모드 — 사용자에게 보이는 항목 이름
+	depends on PCI && PCI_MSI	# [한국어] PCI 코어와 MSI가 모두 필요. 엔드포인트도 호스트에게 MSI를 쏘아야 한다
+	depends on PCI_ENDPOINT	# [한국어] 엔드포인트 프레임워크가 있어야 EPC로 등록할 수 있다
+	select PCIE_DW_EP	# [한국어] 엔드포인트 동작 계층을 함께 빌드
+	select PCIE_DW_PLAT	# [한국어] 범용 플랫폼 결합 코드를 함께 빌드
 	help
 	  Enables support for the PCIe controller in the Designware IP to
 	  work in endpoint mode. There are two instances of PCIe controller
@@ -310,160 +343,160 @@ config PCIE_DW_PLAT_EP
 	  order to enable device-specific features PCI_DW_PLAT_EP must be
 	  selected.
 
-config PCIE_QCOM_COMMON
-	bool
+config PCIE_QCOM_COMMON	# [한국어] Qualcomm 호스트/EP가 공유하는 PHY·클럭 시퀀스
+	bool	# [한국어] 프롬프트 없는 bool — 사용자 메뉴에 뜨지 않고 벤더 항목이 select 로만 켜는 내부 심볼
 
-config PCIE_QCOM
-	bool "Qualcomm PCIe controller (host mode)"
-	depends on OF && (ARCH_QCOM || COMPILE_TEST)
-	depends on PCI_MSI
-	select PCIE_DW_HOST
-	select CRC8
-	select PCIE_QCOM_COMMON
-	select PCI_HOST_COMMON
-	select PCI_PWRCTRL_GENERIC
+config PCIE_QCOM	# [한국어] Qualcomm 호스트 모드. 모바일/노트북 SoC의 NVMe 경로
+	bool "Qualcomm PCIe controller (host mode)"	# [한국어] Qualcomm 호스트 모드. 모바일/노트북 SoC의 NVMe 경로 — 사용자에게 보이는 항목 이름
+	depends on OF && (ARCH_QCOM || COMPILE_TEST)	# [한국어] Qualcomm SoC이거나 컴파일 검증 목적
+	depends on PCI_MSI	# [한국어] MSI 도메인이 있어야 한다. NVMe가 I/O 큐마다 완료 벡터를 받는 전제
+	select PCIE_DW_HOST	# [한국어] 루트 콤플렉스 동작 계층을 함께 빌드. NVMe가 하위에 열거되려면 필요하다
+	select CRC8	# [한국어] 링크 설정 값 검증에 CRC8을 사용
+	select PCIE_QCOM_COMMON	# [한국어] Qualcomm 호스트/EP가 공유하는 PHY·클럭 시퀀스를 함께 빌드
+	select PCI_HOST_COMMON	# [한국어] DT 파싱과 브리지 등록의 공통 절차를 재사용
+	select PCI_PWRCTRL_GENERIC	# [한국어] 슬롯 전원 시퀀스를 범용 전원 제어 드라이버에 맡긴다
 	help
 	  Say Y here to enable PCIe controller support on Qualcomm SoCs. The
 	  PCIe controller uses the DesignWare core plus Qualcomm-specific
 	  hardware wrappers.
 
-config PCIE_QCOM_EP
-	tristate "Qualcomm PCIe controller (endpoint mode)"
-	depends on OF && (ARCH_QCOM || COMPILE_TEST)
-	depends on PCI_ENDPOINT
-	select PCIE_DW_EP
-	select PCIE_QCOM_COMMON
+config PCIE_QCOM_EP	# [한국어] Qualcomm 엔드포인트 모드
+	tristate "Qualcomm PCIe controller (endpoint mode)"	# [한국어] Qualcomm 엔드포인트 모드 — 사용자에게 보이는 항목 이름
+	depends on OF && (ARCH_QCOM || COMPILE_TEST)	# [한국어] Qualcomm SoC이거나 컴파일 검증 목적
+	depends on PCI_ENDPOINT	# [한국어] 엔드포인트 프레임워크가 있어야 EPC로 등록할 수 있다
+	select PCIE_DW_EP	# [한국어] 엔드포인트 동작 계층을 함께 빌드
+	select PCIE_QCOM_COMMON	# [한국어] Qualcomm 호스트/EP가 공유하는 PHY·클럭 시퀀스를 함께 빌드
 	help
 	  Say Y here to enable support for the PCIe controllers on Qualcomm SoCs
 	  to work in endpoint mode. The PCIe controller uses the DesignWare core
 	  plus Qualcomm-specific hardware wrappers.
 
-config PCIE_RCAR_GEN4
-	tristate
+config PCIE_RCAR_GEN4	# [한국어] Renesas R-Car Gen4 공통 결합. Gen2/3의 자체 IP와 달리 Gen4는 DWC 기반이다
+	tristate	# [한국어] 프롬프트 없는 tristate — 이를 select 하는 쪽의 모듈/내장 선택을 따른다
 
-config PCIE_RCAR_GEN4_HOST
-	tristate "Renesas R-Car Gen4 PCIe controller (host mode)"
-	depends on ARCH_RENESAS || COMPILE_TEST
-	depends on PCI_MSI
-	select PCIE_DW_HOST
-	select PCIE_RCAR_GEN4
+config PCIE_RCAR_GEN4_HOST	# [한국어] R-Car Gen4 호스트 모드
+	tristate "Renesas R-Car Gen4 PCIe controller (host mode)"	# [한국어] R-Car Gen4 호스트 모드 — 사용자에게 보이는 항목 이름
+	depends on ARCH_RENESAS || COMPILE_TEST	# [한국어] Renesas이거나 컴파일 검증 목적
+	depends on PCI_MSI	# [한국어] MSI 도메인이 있어야 한다. NVMe가 I/O 큐마다 완료 벡터를 받는 전제
+	select PCIE_DW_HOST	# [한국어] 루트 콤플렉스 동작 계층을 함께 빌드. NVMe가 하위에 열거되려면 필요하다
+	select PCIE_RCAR_GEN4	# [한국어] R-Car Gen4 공통 결합 코드를 함께 빌드
 	help
 	  Say Y here if you want PCIe controller (host mode) on R-Car Gen4 SoCs.
 	  To compile this driver as a module, choose M here: the module will be
 	  called pcie-rcar-gen4.ko. This uses the DesignWare core.
 
-config PCIE_RCAR_GEN4_EP
-	tristate "Renesas R-Car Gen4 PCIe controller (endpoint mode)"
-	depends on ARCH_RENESAS || COMPILE_TEST
-	depends on PCI_ENDPOINT
-	select PCIE_DW_EP
-	select PCIE_RCAR_GEN4
+config PCIE_RCAR_GEN4_EP	# [한국어] R-Car Gen4 엔드포인트 모드
+	tristate "Renesas R-Car Gen4 PCIe controller (endpoint mode)"	# [한국어] R-Car Gen4 엔드포인트 모드 — 사용자에게 보이는 항목 이름
+	depends on ARCH_RENESAS || COMPILE_TEST	# [한국어] Renesas이거나 컴파일 검증 목적
+	depends on PCI_ENDPOINT	# [한국어] 엔드포인트 프레임워크가 있어야 EPC로 등록할 수 있다
+	select PCIE_DW_EP	# [한국어] 엔드포인트 동작 계층을 함께 빌드
+	select PCIE_RCAR_GEN4	# [한국어] R-Car Gen4 공통 결합 코드를 함께 빌드
 	help
 	  Say Y here if you want PCIe controller (endpoint mode) on R-Car Gen4
 	  SoCs. To compile this driver as a module, choose M here: the module
 	  will be called pcie-rcar-gen4.ko. This uses the DesignWare core.
 
-config PCIE_ROCKCHIP_DW
-	bool
+config PCIE_ROCKCHIP_DW	# [한국어] Rockchip DWC 기반 세대(RK3568/3588) 공통 결합
+	bool	# [한국어] 프롬프트 없는 bool — 사용자 메뉴에 뜨지 않고 벤더 항목이 select 로만 켜는 내부 심볼
 
-config PCIE_ROCKCHIP_DW_HOST
-	bool "Rockchip DesignWare PCIe controller (host mode)"
-	depends on PCI_MSI
-	depends on ARCH_ROCKCHIP || COMPILE_TEST
-	depends on OF
-	select PCIE_DW_HOST
-	select PCIE_ROCKCHIP_DW
+config PCIE_ROCKCHIP_DW_HOST	# [한국어] Rockchip DWC 호스트 모드
+	bool "Rockchip DesignWare PCIe controller (host mode)"	# [한국어] Rockchip DWC 호스트 모드 — 사용자에게 보이는 항목 이름
+	depends on PCI_MSI	# [한국어] MSI 도메인이 있어야 한다. NVMe가 I/O 큐마다 완료 벡터를 받는 전제
+	depends on ARCH_ROCKCHIP || COMPILE_TEST	# [한국어] Rockchip이거나 컴파일 검증 목적
+	depends on OF	# [한국어] 레지스터 창과 인터럽트 배선을 디바이스 트리에서 읽는다
+	select PCIE_DW_HOST	# [한국어] 루트 콤플렉스 동작 계층을 함께 빌드. NVMe가 하위에 열거되려면 필요하다
+	select PCIE_ROCKCHIP_DW	# [한국어] Rockchip DWC 공통 결합 코드를 함께 빌드
 	help
 	  Enables support for the DesignWare PCIe controller in the
 	  Rockchip SoC (except RK3399) to work in host mode.
 
-config PCIE_ROCKCHIP_DW_EP
-	bool "Rockchip DesignWare PCIe controller (endpoint mode)"
-	depends on ARCH_ROCKCHIP || COMPILE_TEST
-	depends on OF
-	depends on PCI_ENDPOINT
-	select PCIE_DW_EP
-	select PCIE_ROCKCHIP_DW
+config PCIE_ROCKCHIP_DW_EP	# [한국어] Rockchip DWC 엔드포인트 모드
+	bool "Rockchip DesignWare PCIe controller (endpoint mode)"	# [한국어] Rockchip DWC 엔드포인트 모드 — 사용자에게 보이는 항목 이름
+	depends on ARCH_ROCKCHIP || COMPILE_TEST	# [한국어] Rockchip이거나 컴파일 검증 목적
+	depends on OF	# [한국어] 레지스터 창과 인터럽트 배선을 디바이스 트리에서 읽는다
+	depends on PCI_ENDPOINT	# [한국어] 엔드포인트 프레임워크가 있어야 EPC로 등록할 수 있다
+	select PCIE_DW_EP	# [한국어] 엔드포인트 동작 계층을 함께 빌드
+	select PCIE_ROCKCHIP_DW	# [한국어] Rockchip DWC 공통 결합 코드를 함께 빌드
 	help
 	  Enables support for the DesignWare PCIe controller in the
 	  Rockchip SoC (except RK3399) to work in endpoint mode.
 
-config PCI_EXYNOS
-	tristate "Samsung Exynos PCIe controller"
-	depends on ARCH_EXYNOS || COMPILE_TEST
-	depends on PCI_MSI
-	select PCIE_DW_HOST
+config PCI_EXYNOS	# [한국어] Samsung Exynos 컨트롤러
+	tristate "Samsung Exynos PCIe controller"	# [한국어] Samsung Exynos 컨트롤러 — 사용자에게 보이는 항목 이름
+	depends on ARCH_EXYNOS || COMPILE_TEST	# [한국어] Samsung Exynos이거나 컴파일 검증 목적일 때만 노출
+	depends on PCI_MSI	# [한국어] MSI 도메인이 있어야 한다. NVMe가 I/O 큐마다 완료 벡터를 받는 전제
+	select PCIE_DW_HOST	# [한국어] 루트 콤플렉스 동작 계층을 함께 빌드. NVMe가 하위에 열거되려면 필요하다
 	help
 	  Enables support for the PCIe controller in the Samsung Exynos SoCs
 	  to work in host mode. The PCI controller is based on the DesignWare
 	  hardware and therefore the driver re-uses the DesignWare core
 	  functions to implement the driver.
 
-config PCIE_FU740
-	bool "SiFive FU740 PCIe controller"
-	depends on PCI_MSI
-	depends on ARCH_SIFIVE || COMPILE_TEST
-	select PCIE_DW_HOST
+config PCIE_FU740	# [한국어] SiFive FU740(HiFive Unmatched) 컨트롤러. RISC-V 보드에서 NVMe를 올리는 대표 경로
+	bool "SiFive FU740 PCIe controller"	# [한국어] SiFive FU740(HiFive Unmatched) 컨트롤러. RISC-V 보드에서 NVMe를 올리는 대표 경로 — 사용자에게 보이는 항목 이름
+	depends on PCI_MSI	# [한국어] MSI 도메인이 있어야 한다. NVMe가 I/O 큐마다 완료 벡터를 받는 전제
+	depends on ARCH_SIFIVE || COMPILE_TEST	# [한국어] SiFive SoC이거나 컴파일 검증 목적일 때만 노출
+	select PCIE_DW_HOST	# [한국어] 루트 콤플렉스 동작 계층을 함께 빌드. NVMe가 하위에 열거되려면 필요하다
 	help
 	  Say Y here if you want PCIe controller support for the SiFive
 	  FU740.
 
-config PCIE_UNIPHIER
-	bool "Socionext UniPhier PCIe controller (host mode)"
-	depends on ARCH_UNIPHIER || COMPILE_TEST
-	depends on OF && HAS_IOMEM
-	depends on PCI_MSI
-	select PCIE_DW_HOST
+config PCIE_UNIPHIER	# [한국어] Socionext UniPhier 호스트 모드
+	bool "Socionext UniPhier PCIe controller (host mode)"	# [한국어] Socionext UniPhier 호스트 모드 — 사용자에게 보이는 항목 이름
+	depends on ARCH_UNIPHIER || COMPILE_TEST	# [한국어] Socionext UniPhier이거나 컴파일 검증 목적
+	depends on OF && HAS_IOMEM	# [한국어] DT와 MMIO 접근이 모두 필요
+	depends on PCI_MSI	# [한국어] MSI 도메인이 있어야 한다. NVMe가 I/O 큐마다 완료 벡터를 받는 전제
+	select PCIE_DW_HOST	# [한국어] 루트 콤플렉스 동작 계층을 함께 빌드. NVMe가 하위에 열거되려면 필요하다
 	help
 	  Say Y here if you want PCIe host controller support on UniPhier SoCs.
 	  This driver supports LD20 and PXs3 SoCs.
 
-config PCIE_UNIPHIER_EP
-	bool "Socionext UniPhier PCIe controller (endpoint mode)"
-	depends on ARCH_UNIPHIER || COMPILE_TEST
-	depends on OF && HAS_IOMEM
-	depends on PCI_ENDPOINT
-	select PCIE_DW_EP
+config PCIE_UNIPHIER_EP	# [한국어] Socionext UniPhier 엔드포인트 모드
+	bool "Socionext UniPhier PCIe controller (endpoint mode)"	# [한국어] Socionext UniPhier 엔드포인트 모드 — 사용자에게 보이는 항목 이름
+	depends on ARCH_UNIPHIER || COMPILE_TEST	# [한국어] Socionext UniPhier이거나 컴파일 검증 목적
+	depends on OF && HAS_IOMEM	# [한국어] DT와 MMIO 접근이 모두 필요
+	depends on PCI_ENDPOINT	# [한국어] 엔드포인트 프레임워크가 있어야 EPC로 등록할 수 있다
+	select PCIE_DW_EP	# [한국어] 엔드포인트 동작 계층을 함께 빌드
 	help
 	  Say Y here if you want PCIe endpoint controller support on
 	  UniPhier SoCs. This driver supports Pro5 SoC.
 
-config PCIE_SOPHGO_DW
-	bool "Sophgo DesignWare PCIe controller (host mode)"
-	depends on ARCH_SOPHGO || COMPILE_TEST
-	depends on PCI_MSI
-	depends on OF
-	select PCIE_DW_HOST
+config PCIE_SOPHGO_DW	# [한국어] Sophgo SG2044 호스트 모드
+	bool "Sophgo DesignWare PCIe controller (host mode)"	# [한국어] Sophgo SG2044 호스트 모드 — 사용자에게 보이는 항목 이름
+	depends on ARCH_SOPHGO || COMPILE_TEST	# [한국어] Sophgo SoC이거나 컴파일 검증 목적일 때만 노출
+	depends on PCI_MSI	# [한국어] MSI 도메인이 있어야 한다. NVMe가 I/O 큐마다 완료 벡터를 받는 전제
+	depends on OF	# [한국어] 레지스터 창과 인터럽트 배선을 디바이스 트리에서 읽는다
+	select PCIE_DW_HOST	# [한국어] 루트 콤플렉스 동작 계층을 함께 빌드. NVMe가 하위에 열거되려면 필요하다
 	help
 	  Say Y here if you want PCIe host controller support on
 	  Sophgo SoCs.
 
-config PCIE_SPACEMIT_K1
-	tristate "SpacemiT K1 PCIe controller (host mode)"
-	depends on ARCH_SPACEMIT || COMPILE_TEST
-	depends on HAS_IOMEM
-	select PCIE_DW_HOST
-	select PCI_PWRCTRL_GENERIC
-	default ARCH_SPACEMIT
+config PCIE_SPACEMIT_K1	# [한국어] SpacemiT K1(RISC-V) 호스트 모드
+	tristate "SpacemiT K1 PCIe controller (host mode)"	# [한국어] SpacemiT K1(RISC-V) 호스트 모드 — 사용자에게 보이는 항목 이름
+	depends on ARCH_SPACEMIT || COMPILE_TEST	# [한국어] SpacemiT SoC이거나 컴파일 검증 목적일 때만 노출
+	depends on HAS_IOMEM	# [한국어] MMIO 접근이 가능한 아키텍처여야 한다
+	select PCIE_DW_HOST	# [한국어] 루트 콤플렉스 동작 계층을 함께 빌드. NVMe가 하위에 열거되려면 필요하다
+	select PCI_PWRCTRL_GENERIC	# [한국어] 슬롯 전원 시퀀스를 범용 전원 제어 드라이버에 맡긴다
+	default ARCH_SPACEMIT	# [한국어] 해당 SoC에서는 기본으로 켠다
 	help
 	  Enables support for the DesignWare based PCIe controller in
 	  the SpacemiT K1 SoC operating in host mode.  Three controllers
 	  are available on the K1 SoC; the first of these shares a PHY
 	  with a USB 3.0 host controller (one or the other can be used).
 
-config PCIE_SPEAR13XX
-	bool "STMicroelectronics SPEAr PCIe controller"
-	depends on ARCH_SPEAR13XX || COMPILE_TEST
-	depends on PCI_MSI
-	select PCIE_DW_HOST
+config PCIE_SPEAR13XX	# [한국어] ST SPEAr13xx 컨트롤러
+	bool "STMicroelectronics SPEAr PCIe controller"	# [한국어] ST SPEAr13xx 컨트롤러 — 사용자에게 보이는 항목 이름
+	depends on ARCH_SPEAR13XX || COMPILE_TEST	# [한국어] ST SPEAr13xx이거나 컴파일 검증 목적일 때만 노출
+	depends on PCI_MSI	# [한국어] MSI 도메인이 있어야 한다. NVMe가 I/O 큐마다 완료 벡터를 받는 전제
+	select PCIE_DW_HOST	# [한국어] 루트 콤플렉스 동작 계층을 함께 빌드. NVMe가 하위에 열거되려면 필요하다
 	help
 	  Say Y here if you want PCIe support on SPEAr13XX SoCs.
 
-config PCIE_STM32_HOST
-	tristate "STMicroelectronics STM32MP25 PCIe Controller (host mode)"
-	depends on ARCH_STM32 || COMPILE_TEST
-	depends on PCI_MSI
-	select PCIE_DW_HOST
+config PCIE_STM32_HOST	# [한국어] ST STM32MP25 호스트 모드
+	tristate "STMicroelectronics STM32MP25 PCIe Controller (host mode)"	# [한국어] ST STM32MP25 호스트 모드 — 사용자에게 보이는 항목 이름
+	depends on ARCH_STM32 || COMPILE_TEST	# [한국어] ST STM32이거나 컴파일 검증 목적
+	depends on PCI_MSI	# [한국어] MSI 도메인이 있어야 한다. NVMe가 I/O 큐마다 완료 벡터를 받는 전제
+	select PCIE_DW_HOST	# [한국어] 루트 콤플렉스 동작 계층을 함께 빌드. NVMe가 하위에 열거되려면 필요하다
 	help
 	  Enables Root Complex (RC) support for the DesignWare core based PCIe
 	  controller found in STM32MP25 SoC.
@@ -471,11 +504,11 @@ config PCIE_STM32_HOST
 	  This driver can also be built as a module. If so, the module
 	  will be called pcie-stm32.
 
-config PCIE_STM32_EP
-	tristate "STMicroelectronics STM32MP25 PCIe Controller (endpoint mode)"
-	depends on ARCH_STM32 || COMPILE_TEST
-	depends on PCI_ENDPOINT
-	select PCIE_DW_EP
+config PCIE_STM32_EP	# [한국어] ST STM32MP25 엔드포인트 모드
+	tristate "STMicroelectronics STM32MP25 PCIe Controller (endpoint mode)"	# [한국어] ST STM32MP25 엔드포인트 모드 — 사용자에게 보이는 항목 이름
+	depends on ARCH_STM32 || COMPILE_TEST	# [한국어] ST STM32이거나 컴파일 검증 목적
+	depends on PCI_ENDPOINT	# [한국어] 엔드포인트 프레임워크가 있어야 EPC로 등록할 수 있다
+	select PCIE_DW_EP	# [한국어] 엔드포인트 동작 계층을 함께 빌드
 	help
 	  Enables Endpoint (EP) support for the DesignWare core based PCIe
 	  controller found in STM32MP25 SoC.
@@ -483,17 +516,17 @@ config PCIE_STM32_EP
 	  This driver can also be built as a module. If so, the module
 	  will be called pcie-stm32-ep.
 
-config PCI_DRA7XX
-	tristate
+config PCI_DRA7XX	# [한국어] TI DRA7xx 공통 결합
+	tristate	# [한국어] 프롬프트 없는 tristate — 이를 select 하는 쪽의 모듈/내장 선택을 따른다
 
-config PCI_DRA7XX_HOST
-	tristate "TI DRA7xx PCIe controller (host mode)"
-	depends on SOC_DRA7XX || COMPILE_TEST
-	depends on OF && HAS_IOMEM && TI_PIPE3
-	depends on PCI_MSI
-	select PCIE_DW_HOST
-	select PCI_DRA7XX
-	default y if SOC_DRA7XX
+config PCI_DRA7XX_HOST	# [한국어] DRA7xx 호스트 모드
+	tristate "TI DRA7xx PCIe controller (host mode)"	# [한국어] DRA7xx 호스트 모드 — 사용자에게 보이는 항목 이름
+	depends on SOC_DRA7XX || COMPILE_TEST	# [한국어] TI DRA7xx이거나 컴파일 검증 목적
+	depends on OF && HAS_IOMEM && TI_PIPE3	# [한국어] TI PIPE3 PHY까지 있어야 SerDes가 동작한다
+	depends on PCI_MSI	# [한국어] MSI 도메인이 있어야 한다. NVMe가 I/O 큐마다 완료 벡터를 받는 전제
+	select PCIE_DW_HOST	# [한국어] 루트 콤플렉스 동작 계층을 함께 빌드. NVMe가 하위에 열거되려면 필요하다
+	select PCI_DRA7XX	# [한국어] DRA7xx 공통 결합 코드를 함께 빌드
+	default y if SOC_DRA7XX	# [한국어] DRA7xx SoC에서는 기본으로 켠다
 	help
 	  Enables support for the PCIe controller in the DRA7xx SoC to work in
 	  host mode. There are two instances of PCIe controller in DRA7xx.
@@ -502,13 +535,13 @@ config PCI_DRA7XX_HOST
 	  to enable device-specific features PCI_DRA7XX_EP must be selected.
 	  This uses the DesignWare core.
 
-config PCI_DRA7XX_EP
-	tristate "TI DRA7xx PCIe controller (endpoint mode)"
-	depends on SOC_DRA7XX || COMPILE_TEST
-	depends on OF && HAS_IOMEM && TI_PIPE3
-	depends on PCI_ENDPOINT
-	select PCIE_DW_EP
-	select PCI_DRA7XX
+config PCI_DRA7XX_EP	# [한국어] DRA7xx 엔드포인트 모드
+	tristate "TI DRA7xx PCIe controller (endpoint mode)"	# [한국어] DRA7xx 엔드포인트 모드 — 사용자에게 보이는 항목 이름
+	depends on SOC_DRA7XX || COMPILE_TEST	# [한국어] TI DRA7xx이거나 컴파일 검증 목적
+	depends on OF && HAS_IOMEM && TI_PIPE3	# [한국어] TI PIPE3 PHY까지 있어야 SerDes가 동작한다
+	depends on PCI_ENDPOINT	# [한국어] 엔드포인트 프레임워크가 있어야 EPC로 등록할 수 있다
+	select PCIE_DW_EP	# [한국어] 엔드포인트 동작 계층을 함께 빌드
+	select PCI_DRA7XX	# [한국어] DRA7xx 공통 결합 코드를 함께 빌드
 	help
 	  Enables support for the PCIe controller in the DRA7xx SoC to work in
 	  endpoint mode. There are two instances of PCIe controller in DRA7xx.
@@ -518,46 +551,46 @@ config PCI_DRA7XX_EP
 	  This uses the DesignWare core.
 
 # ARM32 platforms use hook_fault_code() and cannot support loadable module.
-config PCI_KEYSTONE
-	bool
+config PCI_KEYSTONE	# [한국어] TI Keystone 공통 결합(ARM32 내장 전용 경로)
+	bool	# [한국어] 프롬프트 없는 bool — 사용자 메뉴에 뜨지 않고 벤더 항목이 select 로만 켜는 내부 심볼
 
 # On non-ARM32 platforms, loadable module can be supported.
-config PCI_KEYSTONE_TRISTATE
-	tristate
+config PCI_KEYSTONE_TRISTATE	# [한국어] 같은 결합의 모듈 가능 변형. ARM32가 아닌 플랫폼에서 쓰인다
+	tristate	# [한국어] 프롬프트 없는 tristate — 이를 select 하는 쪽의 모듈/내장 선택을 따른다
 
-config PCI_KEYSTONE_HOST
-	tristate "TI Keystone PCIe controller (host mode)"
-	depends on ARCH_KEYSTONE || ARCH_K3 || COMPILE_TEST
-	depends on PCI_MSI
-	select PCIE_DW_HOST
-	select PCI_KEYSTONE if ARM
-	select PCI_KEYSTONE_TRISTATE if !ARM
+config PCI_KEYSTONE_HOST	# [한국어] Keystone 호스트 모드
+	tristate "TI Keystone PCIe controller (host mode)"	# [한국어] Keystone 호스트 모드 — 사용자에게 보이는 항목 이름
+	depends on ARCH_KEYSTONE || ARCH_K3 || COMPILE_TEST	# [한국어] TI Keystone/K3이거나 컴파일 검증 목적
+	depends on PCI_MSI	# [한국어] MSI 도메인이 있어야 한다. NVMe가 I/O 큐마다 완료 벡터를 받는 전제
+	select PCIE_DW_HOST	# [한국어] 루트 콤플렉스 동작 계층을 함께 빌드. NVMe가 하위에 열거되려면 필요하다
+	select PCI_KEYSTONE if ARM	# [한국어] ARM32에서는 내장 전용 심볼을 켠다. hook_fault_code() 사용 때문에 모듈이 될 수 없다
+	select PCI_KEYSTONE_TRISTATE if !ARM	# [한국어] ARM32가 아니면 모듈 가능 심볼을 켠다
 	help
 	  Enables support for the PCIe controller in the Keystone SoC to
 	  work in host mode. The PCI controller on Keystone is based on
 	  DesignWare hardware and therefore the driver re-uses the
 	  DesignWare core functions to implement the driver.
 
-config PCI_KEYSTONE_EP
-	tristate "TI Keystone PCIe controller (endpoint mode)"
-	depends on ARCH_KEYSTONE || ARCH_K3 || COMPILE_TEST
-	depends on PCI_ENDPOINT
-	select PCIE_DW_EP
-	select PCI_KEYSTONE if ARM
-	select PCI_KEYSTONE_TRISTATE if !ARM
+config PCI_KEYSTONE_EP	# [한국어] Keystone 엔드포인트 모드
+	tristate "TI Keystone PCIe controller (endpoint mode)"	# [한국어] Keystone 엔드포인트 모드 — 사용자에게 보이는 항목 이름
+	depends on ARCH_KEYSTONE || ARCH_K3 || COMPILE_TEST	# [한국어] TI Keystone/K3이거나 컴파일 검증 목적
+	depends on PCI_ENDPOINT	# [한국어] 엔드포인트 프레임워크가 있어야 EPC로 등록할 수 있다
+	select PCIE_DW_EP	# [한국어] 엔드포인트 동작 계층을 함께 빌드
+	select PCI_KEYSTONE if ARM	# [한국어] ARM32에서는 내장 전용 심볼을 켠다. hook_fault_code() 사용 때문에 모듈이 될 수 없다
+	select PCI_KEYSTONE_TRISTATE if !ARM	# [한국어] ARM32가 아니면 모듈 가능 심볼을 켠다
 	help
 	  Enables support for the PCIe controller in the Keystone SoC to
 	  work in endpoint mode. The PCI controller on Keystone is based
 	  on DesignWare hardware and therefore the driver re-uses the
 	  DesignWare core functions to implement the driver.
 
-config PCIE_VISCONTI_HOST
-	bool "Toshiba Visconti PCIe controller"
-	depends on ARCH_VISCONTI || COMPILE_TEST
-	depends on PCI_MSI
-	select PCIE_DW_HOST
+config PCIE_VISCONTI_HOST	# [한국어] Toshiba Visconti5 호스트 모드
+	bool "Toshiba Visconti PCIe controller"	# [한국어] Toshiba Visconti5 호스트 모드 — 사용자에게 보이는 항목 이름
+	depends on ARCH_VISCONTI || COMPILE_TEST	# [한국어] Toshiba Visconti이거나 컴파일 검증 목적일 때만 노출
+	depends on PCI_MSI	# [한국어] MSI 도메인이 있어야 한다. NVMe가 I/O 큐마다 완료 벡터를 받는 전제
+	select PCIE_DW_HOST	# [한국어] 루트 콤플렉스 동작 계층을 함께 빌드. NVMe가 하위에 열거되려면 필요하다
 	help
 	  Say Y here if you want PCIe controller support on Toshiba Visconti SoC.
 	  This driver supports TMPV7708 SoC.
 
-endmenu
+endmenu	# [한국어] DesignWare 메뉴 끝

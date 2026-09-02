@@ -1,35 +1,60 @@
 # SPDX-License-Identifier: GPL-2.0
+#
+# ============================================================================
+# [한국어 설명] Mobiveil 계열 PCIe 컨트롤러 설정 (controller/mobiveil/Kconfig)
+#
+# === 파일의 역할 ===
+# Mobiveil GPEX IP 기반 호스트 브리지의 빌드 여부를 정한다. 공통 레지스터
+# 계층(PCIE_MOBIVEIL)과 루트 콤플렉스 동작(PCIE_MOBIVEIL_HOST)을 프롬프트 없는
+# 내부 심볼로 두고, 사용자에게는 실제 보드 옵션만 노출하는 3층 구조다.
+#
+# === 전체 아키텍처에서의 위치 ===
+# drivers/pci/controller/Kconfig -> [이 파일]
+# NXP Layerscape 네트워킹 SoC나 Xilinx ZynqMP에서 PCIe 링크를 올리는 계층이며,
+# 이 위에 NVMe가 열거된다. 최대 8개의 아웃바운드/인바운드 윈도우로 주소 변환을
+# 수행하므로, NVMe DMA가 도달할 수 있는 호스트 메모리 범위도 여기서 정해진다.
+#
+# === 타 모듈과의 연결 ===
+# - controller/mobiveil/Makefile: 선택 결과를 오브젝트로 번역.
+# - drivers/pci/setup-bus.c: 여기서 신고한 버스/자원 범위 안에서 BAR를 배치.
+#
+# === 주요 함수/구조체 요약 ===
+# - PCIE_MOBIVEIL       : GPEX 레지스터 접근 공통 계층(내부 심볼).
+# - PCIE_MOBIVEIL_HOST  : 루트 콤플렉스 동작과 인터럽트 도메인(내부 심볼).
+# - PCIE_LAYERSCAPE_GEN4: NXP Layerscape Gen4 보드 옵션.
+# - PCIE_MOBIVEIL_PLAT  : 범용 AXI PCIe(ZynqMP 등) 보드 옵션.
+# ============================================================================
 
-menu "Mobiveil-based PCIe controllers"
-	depends on PCI
+menu "Mobiveil-based PCIe controllers"	# [한국어] Mobiveil IP 기반 컨트롤러 메뉴 시작
+	depends on PCI	# [한국어] PCI 코어 없이는 브리지를 등록할 곳이 없다
 
-config PCIE_MOBIVEIL
-	bool
+config PCIE_MOBIVEIL	# [한국어] GPEX 공통 계층. 프롬프트 없는 내부 심볼이라 아래 옵션이 select 로만 켠다
+	bool	# [한국어] 프롬프트 없는 bool — 내부 심볼이라 사용자가 직접 고르지 않는다
 
-config PCIE_MOBIVEIL_HOST
-	bool
-	depends on PCI_MSI
-	select IRQ_MSI_LIB
-	select PCIE_MOBIVEIL
+config PCIE_MOBIVEIL_HOST	# [한국어] 루트 콤플렉스 동작. 역시 내부 심볼
+	bool	# [한국어] 프롬프트 없는 bool — 내부 심볼이라 사용자가 직접 고르지 않는다
+	depends on PCI_MSI	# [한국어] MSI가 없으면 인터럽트 도메인을 만들 수 없어 호스트 모드가 성립하지 않는다
+	select IRQ_MSI_LIB	# [한국어] MSI 도메인 구성 헬퍼를 끌어온다
+	select PCIE_MOBIVEIL	# [한국어] 공통 레지스터 계층을 함께 빌드
 
-config PCIE_LAYERSCAPE_GEN4
-	bool "Freescale Layerscape Gen4 PCIe controller"
-	depends on ARCH_LAYERSCAPE || COMPILE_TEST
-	depends on PCI_MSI
-	select PCIE_MOBIVEIL_HOST
+config PCIE_LAYERSCAPE_GEN4	# [한국어] NXP Layerscape Gen4 보드 옵션
+	bool "Freescale Layerscape Gen4 PCIe controller"	# [한국어] bool — 모듈이 아닌 내장 전용. 루트 브리지는 부팅 초기에 필요해 모듈화하지 않는다
+	depends on ARCH_LAYERSCAPE || COMPILE_TEST	# [한국어] 해당 SoC이거나 컴파일 검증 목적일 때만 노출
+	depends on PCI_MSI	# [한국어] MSI 없이는 인터럽트 도메인을 만들 수 없다
+	select PCIE_MOBIVEIL_HOST	# [한국어] 루트 콤플렉스 동작 계층을 함께 빌드
 	help
 	  Say Y here if you want PCIe Gen4 controller support on
 	  Layerscape SoCs.
 
-config PCIE_MOBIVEIL_PLAT
-	bool "Mobiveil AXI PCIe controller"
-	depends on ARCH_ZYNQMP || COMPILE_TEST
-	depends on OF
-	depends on PCI_MSI
-	select PCIE_MOBIVEIL_HOST
+config PCIE_MOBIVEIL_PLAT	# [한국어] ZynqMP 등 범용 AXI PCIe 보드 옵션
+	bool "Mobiveil AXI PCIe controller"	# [한국어] bool — 내장 전용
+	depends on ARCH_ZYNQMP || COMPILE_TEST	# [한국어] Xilinx ZynqMP이거나 컴파일 검증 목적일 때만 노출
+	depends on OF	# [한국어] 디바이스 트리에서 레지스터 창과 인터럽트 배선을 읽어야 한다
+	depends on PCI_MSI	# [한국어] MSI 없이는 인터럽트 도메인을 만들 수 없다
+	select PCIE_MOBIVEIL_HOST	# [한국어] 루트 콤플렉스 동작 계층을 함께 빌드
 	help
 	  Say Y here if you want to enable support for the Mobiveil AXI PCIe
 	  Soft IP. It has up to 8 outbound and inbound windows
 	  for address translation and it is a PCIe Gen4 IP.
 
-endmenu
+endmenu	# [한국어] Mobiveil 메뉴 끝

@@ -74,7 +74,18 @@
 #define OF_PCI_MAX_INT_PIN		4
 
 struct of_pci_addr_pair {
+	/* [한국어] PCI 3셀 형식의 물리 주소. 첫 셀이 위치·공간 종류(설정/IO/MEM32/MEM64)
+	 * 이고 나머지 두 셀이 64비트 주소를 상위·하위로 나눠 담는다.
+	 * 설정자: of_pci_prop_reg() 가 of_pci_set_address() 로 채운다.
+	 * 읽는 자: 생성된 디바이스 트리 노드의 reg 속성을 읽는 쪽.
+	 * 값 범위: PCI 바인딩이 규정한 3셀 인코딩.
+	 * 동기화: 함수 지역 배열이라 공유되지 않는다. */
 	u32		phys_addr[OF_PCI_ADDRESS_CELLS];
+	/* [한국어] 해당 영역의 크기를 2셀(64비트)로 담는다.
+	 * 설정자: of_pci_prop_reg().
+	 * 읽는 자: 위와 같다.
+	 * 값 범위: 상위 셀이 크기의 상위 32비트, 하위 셀이 하위 32비트.
+	 * 동기화: 함수 지역 배열. */
 	u32		size[OF_PCI_SIZE_CELLS];
 /* [한국어] reg 속성 하나가 갖는 형태 — 주소 3셀 + 크기 2셀. */
 };
@@ -87,6 +98,13 @@ struct of_pci_addr_pair {
  * side.
  */
 struct of_pci_range_entry {
+	/* [한국어] 자식(하위 버스) 쪽 주소 3셀. 위 영어 주석대로 ranges 항목은
+	 * (자식 주소, 부모 주소, 크기) 세 짝이며, PCI 에서는 자식이 세컨더리 쪽,
+	 * 부모가 프라이머리 쪽 주소다.
+	 * 설정자: of_pci_prop_ranges() 가 of_pci_set_address() 로 채운다.
+	 * 읽는 자: 디바이스 트리를 읽는 쪽이 이 주소를 부모 주소로 변환한다.
+	 * 값 범위: PCI 3셀 형식.
+	 * 동기화: 함수 지역 배열. */
 	u32		child_addr[OF_PCI_ADDRESS_CELLS];
 	/* [한국어] 부모(상위 버스) 쪽 주소 3셀.
 	 * 설정자: of_pci_prop_ranges() 가 of_pci_set_address() 로 채운다.

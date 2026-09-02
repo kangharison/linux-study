@@ -9466,6 +9466,34 @@ DECLARE_PCI_FIXUP_CLASS_EARLY(PCI_VENDOR_ID_AMD, 0x1a02, PCI_CLASS_NOT_DEFINED, 
  * Attributes, so we're safe waiting till after any Configuration Space
  * accesses to do the Root Port fixup.
  */
+/*
+ * [한국어]
+ * quirk_disable_root_port_attributes - 상위 루트 포트의 RO/NoSnoop 을 꺼 준다
+ *
+ * @pdev: 스펙을 어기는 당사자 장치. 고치는 대상은 이 장치가 아니라 그 위의 루트 포트다.
+ * @return: 없음. 실패해도 경고만 남기고 진행한다 - quirk 는 부팅을 막지 않는다.
+ *
+ * [왜 필요한가] 위 영어 주석이 배경을 설명한다. PCIe 규약상 Completion 은
+ * 대응하는 Request 의 TLP Attribute(Relaxed Ordering, No Snoop)를 그대로
+ * 복사해야 한다. 일부 장치가 이를 어기고 속성이 0 인 Completion 을 돌려주면,
+ * 요청자는 자신이 보낸 것과 다른 속성의 응답을 받고 이를 짝짓지 못해
+ * 장치 접근 타임아웃에 빠진다.
+ *
+ * [우회 방법] 고장난 장치를 고칠 수는 없으므로 반대편을 맞춘다. 상위 루트
+ * 포트에서 두 속성을 아예 꺼 두면 그 포트를 지나는 요청은 늘 속성이 0 이 되고,
+ * 속성 0 인 Completion 과 일치하게 되어 짝짓기가 성립한다.
+ *
+ * [부작용] 같은 루트 포트 아래의 다른 장치도 RO/NoSnoop 을 잃는다. 다만 이
+ * 두 속성은 성능 힌트일 뿐이라 기능적 문제는 없다는 것이 위 영어 주석의 판단이다.
+ *
+ * [실행 컨텍스트] DECLARE_PCI_FIXUP_CLASS_EARLY 계열 fixup 으로 열거 도중
+ * 호출된다. 위 영어 주석이 밝히듯 Configuration Space 접근에는 TLP Attribute 가
+ * 실리지 않으므로, config 접근이 끝난 뒤 루트 포트를 고쳐도 안전하다.
+ *
+ * 호출 체인:
+ *   pci_fixup_device() → quirk_chelsio_T5_disable_root_port_attributes()
+ *     → [이 함수] → pcie_find_root_port() / pcie_capability_clear_word()
+ */
 static void quirk_disable_root_port_attributes(struct pci_dev *pdev)
 {
 	struct pci_dev *root_port = pcie_find_root_port(pdev);	/* [한국어] 이 장치가 매달린 루트 포트를 거슬러 올라가 찾는다. 실제로 고칠 대상이다. */
@@ -9638,6 +9666,34 @@ static int pci_acs_ctrl_enabled(u16 acs_ctrl_req, u16 acs_ctrl_ena)
  *
  * 1022:780f [AMD] FCH PCI Bridge
  * 1022:7809 [AMD] FCH USB OHCI Controller
+ */
+/*
+ * [한국어]
+ * pci_quirk_amd_sb_acs - AMD 사우스브리지가 ACS 를 갖춘 것처럼 취급한다
+ *
+ * @dev: 검사 대상 장치. 위 영어 주석이 나열한 SBx00/FCH 계열이 해당한다.
+ * @return: 요청한 격리 수준을 만족하면 1, 아니면 0. 대상이 아니면 -ENODEV 로
+ *          "판단 보류"를 알려 호출자가 표준 ACS 검사로 넘어가게 한다.
+ *
+ * [무엇이 문제인가] 이들 사우스브리지 장치는 ACS(Access Control Services)
+ * capability 를 광고하지 않는다. 그대로 두면 커널은 같은 다기능 장치의 함수들
+ * 사이에 P2P 트래픽이 새는 것을 막을 수 없다고 보고, 전부 하나의 IOMMU 그룹에
+ * 묶어 버린다. 그러면 그중 하나만 VFIO 로 넘기는 일이 불가능해진다.
+ *
+ * [근거] AMD 가 하드웨어적으로는 격리가 보장된다고 밝혔고, 그 전제가 성립하는
+ * 시스템인지를 IVRS 테이블 존재 여부로 확인한다. IVRS 는 AMD IOMMU 를 기술하는
+ * ACPI 테이블이므로, 그것이 있다는 것은 AMD IOMMU 를 갖춘 플랫폼이라는 뜻이다.
+ *
+ * [반환값 세 갈래의 의미] -ENODEV 는 실패가 아니라 "이 quirk 의 대상이 아님"이다.
+ * 1/0 은 요청한 acs_flags 를 만족하는지에 대한 실제 판정이다. 호출자
+ * pci_dev_specific_acs_enabled() 는 -ENODEV 를 받으면 다음 판정 경로로 넘어간다.
+ *
+ * [실행 컨텍스트] IOMMU 그룹 구성 시점에 호출된다. ACPI 테이블을 읽으므로
+ * 인터럽트 컨텍스트가 아니며, acpi_get_table 과 acpi_put_table 이 짝을 이룬다.
+ *
+ * 호출 체인:
+ *   iommu_group_get_for_dev() → pci_acs_enabled()
+ *     → pci_dev_specific_acs_enabled() → [이 함수] → acpi_get_table("IVRS")
  */
 static int pci_quirk_amd_sb_acs(struct pci_dev *dev, u16 acs_flags)
 {
@@ -10121,6 +10177,33 @@ static int pci_quirk_al_acs(struct pci_dev *dev, u16 acs_flags)
  * [5] https://www.intel.com/content/www/us/en/chipsets/200-series-chipset-pch-datasheet-vol-1.html
  * [6] https://www.intel.com/content/www/us/en/processors/core/7th-gen-core-family-mobile-u-y-processor-lines-i-o-spec-update.html
  * [7] https://www.intel.com/content/www/us/en/processors/core/7th-gen-core-family-mobile-u-y-processor-lines-i-o-datasheet-vol-1.html
+ */
+/*
+ * [한국어]
+ * pci_quirk_intel_spt_pch_acs_match - 이 quirk 를 적용할 Intel PCH 루트 포트인가
+ *
+ * @dev: 검사할 장치
+ * @return: 위 영어 주석이 나열한 세 device ID 대역에 드는 루트 포트면 true
+ *
+ * [왜 필요한가] Sunrise Point / Union Point PCH 와 7·8세대 모바일 PCH 의 루트
+ * 포트는 ACS 를 지원하면서도 capability 로 광고하지 않는다(위 영어 주석이 인용한
+ * Errata 22, 수정 예정 없음). 그래서 커널이 ACS 유무를 표준 경로로는 알아낼 수
+ * 없고, device ID 로 직접 식별해야 한다.
+ *
+ * [식별 방식] 위 영어 주석이 데이터시트에서 옮겨 온 세 대역을 그대로 대조한다.
+ * 0xa110~0xa11f 와 0xa167~0xa16a 는 Sunrise Point, 0xa290~0xa29f 와
+ * 0xa2e7~0xa2ee 는 Union Point, 0x9d10~0x9d1b 는 7·8세대 모바일이다.
+ *
+ * [이 판정 뒤에 오는 것] true 를 받은 장치에 대해서는 같은 파일의
+ * pci_quirk_intel_spt_pch_acs 계열이 INTEL_SPT_ACS_CTRL 오프셋으로 ACS Control
+ * 레지스터를 직접 다룬다. 바로 아래 정의된 그 매크로가 +4 를 쓰는 이유도
+ * 이 칩셋이 스펙과 다른 배치를 갖기 때문이다.
+ *
+ * [실행 컨텍스트] IOMMU 그룹 구성과 ACS 활성화 시점에 호출되는 순수 판정
+ * 함수다. 부수 효과가 없고 레지스터도 건드리지 않는다.
+ *
+ * 호출 체인:
+ *   pci_dev_specific_enable_acs() / _acs_enabled() → [이 함수]
  */
 static bool pci_quirk_intel_spt_pch_acs_match(struct pci_dev *dev)
 {

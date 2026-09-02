@@ -141,6 +141,13 @@
  * @sysfs_attrs: Array of sysfs device attributes
  */
 struct pci_doe_mb {
+	/* [한국어] 이 DOE 우편함이 속한 PCI 장치.
+	 * 설정자: pci_doe_create_mb().
+	 * 읽는 자: 모든 설정공간 접근(pci_read_config_dword 등)의 첫 인자이자
+	 *   로그의 주체. cap_offset 과 짝을 이뤄 '어느 장치의 어느 우편함인지'를
+	 *   완성한다 -- 한 장치가 여러 DOE 우편함을 가질 수 있기 때문이다.
+	 * 값 범위: 유효한 포인터. 우편함 수명 동안 참조가 유지된다.
+	 * 동기화: 생성 후 불변. */
 	struct pci_dev *pdev;
 	/* [한국어] 이 우편함의 DOE 확장 능력 오프셋.
 	 * 설정자: pci_doe_create_mb.
@@ -206,6 +213,14 @@ struct pci_doe_feature {
  * @doe_mb: Used internally by the mailbox
  */
 struct pci_doe_task {
+	/* [한국어] 이 작업이 어떤 DOE 기능을 대상으로 하는지 -- 벤더 ID 와 데이터
+	 * 오브젝트 타입의 쌍이다.
+	 * 설정자: pci_doe() 가 호출자가 지정한 (vid, type) 으로 채운다.
+	 * 읽는 자: pci_doe_send_req() 가 요청 헤더 첫 두 워드에 이 값을 실어 보낸다.
+	 *   응답을 받을 때도 같은 값이 돌아오는지 확인해 엉뚱한 응답을 걸러낸다.
+	 * 값 범위: 우편함이 지원한다고 신고한 기능 중 하나여야 한다. 지원하지 않는
+	 *   조합이면 pci_doe() 가 -EINVAL 로 미리 거른다.
+	 * 동기화: 작업이 큐에 있는 동안 불변. */
 	struct pci_doe_feature feat;
 	/* [한국어] 보낼 페이로드. **헤더 두 워드는 포함하지 않는다** -- 그것은
 	 * pci_doe_send_req 가 붙인다.

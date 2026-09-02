@@ -1,12 +1,43 @@
 # SPDX-License-Identifier: GPL-2.0
 #
+# ============================================================================
+# [한국어 설명] PCI 핫플러그 컨트롤러 설정 (drivers/pci/hotplug/Kconfig)
+#
+# === 파일의 역할 ===
+# 동작 중인 시스템에서 PCI/PCIe 장치를 넣고 뺄 수 있게 하는 컨트롤러 드라이버의
+# 빌드 여부를 정한다. 각 항목은 슬롯 하드웨어를 다루는 방식(네이티브 레지스터,
+# 펌웨어 통지, 하이퍼바이저 협조)이 다를 뿐, 최종적으로는 모두 PCI 코어의
+# 열거/제거 함수를 호출한다는 점에서 같다.
+#
+# === 전체 아키텍처에서의 위치 ===
+# drivers/pci/Kconfig -> [이 파일]
+# U.2/EDSFF NVMe를 서버 전면에서 뽑았을 때:
+#   슬롯 인터럽트 -> pciehp_ist() -> pciehp_handle_presence_or_link_change()
+#     -> pciehp_unconfigure_device() -> pci_stop_and_remove_bus_device()
+#       -> nvme_remove() -> 네임스페이스 정리와 진행 중 I/O 실패 처리.
+# 삽입 시에는 같은 경로가 pci_scan_slot() -> nvme_probe()로 이어진다.
+#
+# === 타 모듈과의 연결 ===
+# - drivers/pci/hotplug/Makefile: 선택 결과를 오브젝트로 번역.
+# - drivers/pci/pcie/Kconfig: 실제 PCIe 네이티브 핫플러그 옵션
+#   (HOTPLUG_PCI_PCIE)은 그쪽에 있고, 여기 HOTPLUG_PCI가 그 전제 조건이다.
+# - drivers/pci/probe.c / remove.c: 장치 생성과 파괴의 실제 수행자.
+# - drivers/pci/hotplug/acpi_pcihp.c: 펌웨어와 슬롯 제어권을 협상(_OSC)한다.
+#
+# === 주요 함수/구조체 요약 ===
+# - HOTPLUG_PCI            : 핫플러그 코어의 마스터 스위치.
+# - HOTPLUG_PCI_ACPI       : 펌웨어 주도 핫플러그. 네이티브가 없을 때의 폴백.
+# - HOTPLUG_PCI_SHPC       : 구형 병렬 PCI 표준 컨트롤러.
+# - HOTPLUG_PCI_S390       : s390 zPCI. 하이퍼바이저가 장치를 붙였다 뗀다.
+# ============================================================================
+#
 # PCI Hotplug support
 #
 
-menuconfig HOTPLUG_PCI
-	bool "Support for PCI Hotplug"
-	depends on PCI && SYSFS
-	default y if USB4
+menuconfig HOTPLUG_PCI	# [한국어] 핫플러그 코어 마스터 스위치. 이것이 꺼지면 아래 모든 컨트롤러가 사라진다
+	bool "Support for PCI Hotplug"	# [한국어] bool — 코어 프레임워크라 내장 전용
+	depends on PCI && SYSFS	# [한국어] 슬롯 상태를 sysfs로 노출하므로 SYSFS가 필수
+	default y if USB4	# [한국어] Thunderbolt/USB4는 PCIe 터널 장치를 동적으로 붙이므로 핫플러그가 사실상 필수
 	help
 	  Say Y here if you have a motherboard with a PCI Hotplug controller.
 	  This allows you to add and remove PCI cards while the machine is
@@ -16,11 +47,11 @@ menuconfig HOTPLUG_PCI
 
 	  When in doubt, say N.
 
-if HOTPLUG_PCI
+if HOTPLUG_PCI	# [한국어] 코어가 켜진 경우에만 개별 컨트롤러를 노출
 
-config HOTPLUG_PCI_COMPAQ
-	tristate "Compaq PCI Hotplug driver"
-	depends on X86 && PCI_BIOS
+config HOTPLUG_PCI_COMPAQ	# [한국어] Compaq 서버용 구형 컨트롤러
+	tristate "Compaq PCI Hotplug driver"	# [한국어] tristate — 특정 구형 하드웨어용이라 모듈이 자연스럽다
+	depends on X86 && PCI_BIOS	# [한국어] x86 PCI BIOS 인터페이스에 의존하는 레거시 구현
 	help
 	  Say Y here if you have a motherboard with a Compaq PCI Hotplug
 	  controller.
@@ -30,9 +61,9 @@ config HOTPLUG_PCI_COMPAQ
 
 	  When in doubt, say N.
 
-config HOTPLUG_PCI_COMPAQ_NVRAM
-	bool "Save configuration into NVRAM on Compaq servers"
-	depends on HOTPLUG_PCI_COMPAQ
+config HOTPLUG_PCI_COMPAQ_NVRAM	# [한국어] Compaq 슬롯 설정을 NVRAM에 저장하는 선택 기능
+	bool "Save configuration into NVRAM on Compaq servers"	# [한국어] bool — 위 드라이버에 함께 링크되는 부가 기능
+	depends on HOTPLUG_PCI_COMPAQ	# [한국어] 해당 드라이버가 없으면 저장할 설정도 없다
 	help
 	  Say Y here if you have a Compaq server that has a PCI Hotplug
 	  controller.  This will allow the PCI Hotplug driver to store the PCI
@@ -40,9 +71,9 @@ config HOTPLUG_PCI_COMPAQ_NVRAM
 
 	  When in doubt, say N.
 
-config HOTPLUG_PCI_IBM
-	tristate "IBM PCI Hotplug driver"
-	depends on X86_IO_APIC && X86 && PCI_BIOS
+config HOTPLUG_PCI_IBM	# [한국어] IBM 서버용 구형 컨트롤러
+	tristate "IBM PCI Hotplug driver"	# [한국어] tristate — 모듈화 가능
+	depends on X86_IO_APIC && X86 && PCI_BIOS	# [한국어] IO-APIC와 PCI BIOS를 직접 다루는 레거시 구현
 	help
 	  Say Y here if you have a motherboard with a IBM PCI Hotplug
 	  controller.
@@ -52,19 +83,19 @@ config HOTPLUG_PCI_IBM
 
 	  When in doubt, say N.
 
-config HOTPLUG_PCI_ACPI
-	bool "ACPI PCI Hotplug driver"
-	depends on HOTPLUG_PCI=y && ((!ACPI_DOCK && ACPI) || (ACPI_DOCK))
+config HOTPLUG_PCI_ACPI	# [한국어] 펌웨어(ACPI) 주도 핫플러그. 네이티브 컨트롤러가 없거나 펌웨어가 슬롯을 소유할 때
+	bool "ACPI PCI Hotplug driver"	# [한국어] bool — 부팅 초기 열거와 얽혀 내장이어야 한다
+	depends on HOTPLUG_PCI=y && ((!ACPI_DOCK && ACPI) || (ACPI_DOCK))	# [한국어] 코어가 모듈이 아닌 내장이어야 하고, ACPI 도킹 스테이션 지원과의 조합을 정리한 조건
 	help
 	  Say Y here if you have a system that supports PCI Hotplug using
 	  ACPI.
 
 	  When in doubt, say N.
 
-config HOTPLUG_PCI_ACPI_AMPERE_ALTRA
-	tristate "ACPI PCI Hotplug driver Ampere Altra extensions"
-	depends on HOTPLUG_PCI_ACPI
-	depends on HAVE_ARM_SMCCC_DISCOVERY
+config HOTPLUG_PCI_ACPI_AMPERE_ALTRA	# [한국어] Ampere Altra 서버의 표시등 제어 확장
+	tristate "ACPI PCI Hotplug driver Ampere Altra extensions"	# [한국어] tristate — 모듈화 가능
+	depends on HOTPLUG_PCI_ACPI	# [한국어] acpiphp를 확장하는 형태라 그것이 먼저 있어야 한다
+	depends on HAVE_ARM_SMCCC_DISCOVERY	# [한국어] 펌웨어 호출(SMCCC)로 표시등을 제어하므로 그 인터페이스가 필요
 	help
 	  Say Y here if you have an Ampere Altra system.
 
@@ -73,9 +104,9 @@ config HOTPLUG_PCI_ACPI_AMPERE_ALTRA
 
 	  When in doubt, say N.
 
-config HOTPLUG_PCI_ACPI_IBM
-	tristate "ACPI PCI Hotplug driver IBM extensions"
-	depends on HOTPLUG_PCI_ACPI
+config HOTPLUG_PCI_ACPI_IBM	# [한국어] IBM 전용 acpiphp 확장
+	tristate "ACPI PCI Hotplug driver IBM extensions"	# [한국어] tristate — 모듈화 가능. Makefile이 acpiphp 뒤에 링크되도록 순서를 잡아 둔다
+	depends on HOTPLUG_PCI_ACPI	# [한국어] acpiphp를 확장하는 형태라 그것이 먼저 있어야 한다
 	help
 	  Say Y here if you have an IBM system that supports PCI Hotplug using
 	  ACPI.
@@ -85,17 +116,17 @@ config HOTPLUG_PCI_ACPI_IBM
 
 	  When in doubt, say N.
 
-config HOTPLUG_PCI_CPCI
-	bool "CompactPCI Hotplug driver"
+config HOTPLUG_PCI_CPCI	# [한국어] CompactPCI 핫플러그 공통 계층
+	bool "CompactPCI Hotplug driver"	# [한국어] bool — 코어에 함께 링크된다. Makefile의 ifdef 블록이 이 값을 본다
 	help
 	  Say Y here if you have a CompactPCI system card with CompactPCI
 	  hotswap support per the PICMG 2.1 specification.
 
 	  When in doubt, say N.
 
-config HOTPLUG_PCI_CPCI_ZT5550
-	tristate "Ziatech ZT5550 CompactPCI Hotplug driver"
-	depends on HOTPLUG_PCI_CPCI && X86
+config HOTPLUG_PCI_CPCI_ZT5550	# [한국어] Ziatech ZT5550 섀시 컨트롤러
+	tristate "Ziatech ZT5550 CompactPCI Hotplug driver"	# [한국어] tristate — 모듈화 가능
+	depends on HOTPLUG_PCI_CPCI && X86	# [한국어] CompactPCI 공통 계층과 x86 포트 I/O에 의존
 	help
 	  Say Y here if you have a Performance Technologies (formerly Intel,
 	  formerly just Ziatech) Ziatech ZT5550 CompactPCI system card.
@@ -105,9 +136,9 @@ config HOTPLUG_PCI_CPCI_ZT5550
 
 	  When in doubt, say N.
 
-config HOTPLUG_PCI_CPCI_GENERIC
-	tristate "Generic port I/O CompactPCI Hotplug driver"
-	depends on HOTPLUG_PCI_CPCI && X86
+config HOTPLUG_PCI_CPCI_GENERIC	# [한국어] 범용 포트 I/O 기반 CompactPCI 컨트롤러
+	tristate "Generic port I/O CompactPCI Hotplug driver"	# [한국어] tristate — 모듈화 가능
+	depends on HOTPLUG_PCI_CPCI && X86	# [한국어] CompactPCI 공통 계층과 x86 포트 I/O에 의존
 	help
 	  Say Y here if you have a CompactPCI system card that exposes the #ENUM
 	  hotswap signal as a bit in a system register that can be read through
@@ -118,9 +149,9 @@ config HOTPLUG_PCI_CPCI_GENERIC
 
 	  When in doubt, say N.
 
-config HOTPLUG_PCI_OCTEONEP
-	bool "Marvell OCTEON PCI Hotplug driver"
-	depends on HOTPLUG_PCI
+config HOTPLUG_PCI_OCTEONEP	# [한국어] Marvell OCTEON 엔드포인트 핫플러그
+	bool "Marvell OCTEON PCI Hotplug driver"	# [한국어] bool — 내장 전용
+	depends on HOTPLUG_PCI	# [한국어] 핫플러그 코어가 전제. if 블록 안이라 이미 참이지만 명시해 둔 형태
 	help
 	  Say Y here if you have an OCTEON PCIe device with a hotplug
 	  controller. This driver enables the non-controller functions of the
@@ -128,18 +159,18 @@ config HOTPLUG_PCI_OCTEONEP
 
 	  When in doubt, say N.
 
-config HOTPLUG_PCI_SHPC
-	bool "SHPC PCI Hotplug driver"
+config HOTPLUG_PCI_SHPC	# [한국어] 구형 병렬 PCI 표준 핫플러그 컨트롤러
+	bool "SHPC PCI Hotplug driver"	# [한국어] bool — 내장 전용
 	help
 	  Say Y here if you have a motherboard with a SHPC PCI Hotplug
 	  controller.
 
 	  When in doubt, say N.
 
-config HOTPLUG_PCI_POWERNV
-	tristate "PowerPC PowerNV PCI Hotplug driver"
-	depends on PPC_POWERNV && EEH
-	select OF_DYNAMIC
+config HOTPLUG_PCI_POWERNV	# [한국어] IBM PowerNV 플랫폼 핫플러그
+	tristate "PowerPC PowerNV PCI Hotplug driver"	# [한국어] tristate — 모듈화 가능
+	depends on PPC_POWERNV && EEH	# [한국어] PowerNV 플랫폼과 EEH(오류 격리) 인프라가 필요
+	select OF_DYNAMIC	# [한국어] 슬롯 변화에 맞춰 디바이스 트리 노드를 런타임에 추가/제거해야 한다
 	help
 	  Say Y here if you run PowerPC PowerNV platform that supports
 	  PCI Hotplug
@@ -149,9 +180,9 @@ config HOTPLUG_PCI_POWERNV
 
 	  When in doubt, say N.
 
-config HOTPLUG_PCI_RPA
-	tristate "RPA PCI Hotplug driver"
-	depends on PPC_PSERIES && EEH
+config HOTPLUG_PCI_RPA	# [한국어] IBM pSeries RPA 핫플러그
+	tristate "RPA PCI Hotplug driver"	# [한국어] tristate — 모듈화 가능
+	depends on PPC_PSERIES && EEH	# [한국어] pSeries 논리 파티션 환경과 EEH가 필요
 	help
 	  Say Y here if you have a RPA system that supports PCI Hotplug.
 
@@ -160,9 +191,9 @@ config HOTPLUG_PCI_RPA
 
 	  When in doubt, say N.
 
-config HOTPLUG_PCI_RPA_DLPAR
-	tristate "RPA Dynamic Logical Partitioning for I/O slots"
-	depends on HOTPLUG_PCI_RPA
+config HOTPLUG_PCI_RPA_DLPAR	# [한국어] RPA 동적 논리 파티션 슬롯 조작
+	tristate "RPA Dynamic Logical Partitioning for I/O slots"	# [한국어] tristate — 모듈화 가능
+	depends on HOTPLUG_PCI_RPA	# [한국어] RPA 기본 드라이버 위에 얹히는 확장
 	help
 	  Say Y here if your system supports Dynamic Logical Partitioning
 	  for I/O slots.
@@ -172,9 +203,9 @@ config HOTPLUG_PCI_RPA_DLPAR
 
 	  When in doubt, say N.
 
-config HOTPLUG_PCI_S390
-	bool "System z PCI Hotplug Support"
-	depends on S390 && 64BIT
+config HOTPLUG_PCI_S390	# [한국어] s390 zPCI 핫플러그. 하이퍼바이저가 장치를 붙였다 뗀다
+	bool "System z PCI Hotplug Support"	# [한국어] bool — 내장 전용
+	depends on S390 && 64BIT	# [한국어] s390 64비트 전용
 	help
 	  Say Y here if you want to use the System z PCI Hotplug
 	  driver for PCI devices. Without this driver it is not
@@ -183,4 +214,4 @@ config HOTPLUG_PCI_S390
 
 	  When in doubt, say Y.
 
-endif # HOTPLUG_PCI
+endif # HOTPLUG_PCI	# [한국어] HOTPLUG_PCI if 블록 종료

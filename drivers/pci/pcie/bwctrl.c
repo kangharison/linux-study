@@ -119,6 +119,14 @@
  * @cdev:		Thermal cooling device associated with the port
  */
 struct pcie_bwctrl_data {
+	/* [한국어] 링크 속도 변경을 직렬화하는 뮤텍스.
+	 * 설정자: probe 가 mutex_init 으로 초기화한다.
+	 * 읽는 자: pcie_bwctrl_change_speed() 가 잡고, thermal 냉각 장치 콜백과
+	 *   사용자 요청이 동시에 속도를 바꾸려 할 때 순서를 세운다.
+	 * 왜 필요한가: 속도 변경은 Link Control2 에 목표 속도를 쓴 뒤 링크 재훈련을
+	 *   기다리는 다단계 절차다. 두 주체가 겹치면 한쪽이 쓴 목표를 다른 쪽이
+	 *   덮어쓴 채 재훈련을 기다리게 되어 결과가 어긋난다.
+	 * 동기화: 잠자는 잠금이라 인터럽트 컨텍스트에서 잡을 수 없다. */
 	struct mutex set_speed_mutex;
 	/* [한국어] 이 포트를 thermal 서브시스템에 냉각 장치로 등록한 결과.
 	 * 설정자: probe 의 pcie_cooling_device_register(). 실패하면 NULL 로 둔다.

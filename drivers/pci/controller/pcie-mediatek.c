@@ -351,6 +351,14 @@ enum mtk_pcie_quirks {
  * @quirks: PCIe device quirks.
  */
 struct mtk_pcie_soc {
+	/* [한국어] 이 SoC 의 루트 포트가 광고하는 device ID. 위 영어 주석대로
+	 * '고쳐 주어야 하는' 값이다.
+	 * 설정자: 파일 끝의 정적 mtk_pcie_soc_* 인스턴스들.
+	 * 읽는 자: mtk_pcie_fixup_class 계열 quirk 가 이 ID 와 대조해 클래스 코드를
+	 *   브리지로 바로잡는다. 일부 MediaTek 루트 포트가 자신을 브리지가 아닌
+	 *   다른 클래스로 신고해 열거가 어긋나기 때문이다.
+	 * 값 범위: 16비트 PCI device ID.
+	 * 동기화: const 정적 데이터. */
 	unsigned int device_id;
 	/* [한국어] 이 SoC 가 쓸 설정공간 접근 방식.
 	 * 설정자: 파일 끝의 정적 mtk_pcie_soc_* 인스턴스들.
@@ -406,6 +414,13 @@ struct mtk_pcie_soc {
  * @msi_irq_in_use: bit map for assigned MSI IRQ
  */
 struct mtk_pcie_port {
+	/* [한국어] 이 포트 전용 레지스터 창의 가상 주소.
+	 * 설정자: mtk_pcie_parse_port() 가 DT 의 포트 노드에서 매핑한다.
+	 * 읽는 자: 이 포트의 링크 기동, LTSSM 제어, INTx/MSI 레지스터 접근 전부.
+	 * 값 범위: 유효한 iomem 포인터. 컨트롤러 전체가 공유하는 mtk_pcie.base 와는
+	 *   별개로, 포트마다 독립된 창이다.
+	 * 동기화: 창 자체는 프로브 이후 불변이고, 레지스터 접근의 경합은 포트별
+	 *   인터럽트 처리 경로에서 조정된다. */
 	void __iomem *base;
 	/* [한국어] ports 목록에 매달리기 위한 연결 고리.
 	 * 설정자: mtk_pcie_parse_port 가 list_add_tail 로 붙인다.
@@ -507,6 +522,11 @@ struct mtk_pcie_port {
  * @soc: pointer to SoC-dependent operations
  */
 struct mtk_pcie {
+	/* [한국어] 이 컨트롤러의 platform device. 로그와 devm_* 할당의 기준점이 된다.
+	 * 설정자: mtk_pcie_probe() 가 &pdev->dev 를 저장한다.
+	 * 읽는 자: 이 파일 전반의 dev_err/dev_info 와 모든 devm_ 계열 호출.
+	 * 값 범위: 항상 유효한 포인터.
+	 * 동기화: probe 이후 불변. */
 	struct device *dev;
 	/* [한국어] 'subsys' MMIO 창의 가상 주소.
 	 * 설정자: mtk_pcie_subsys_powerup 이 있으면 매핑한다.

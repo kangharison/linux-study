@@ -75,7 +75,19 @@
 #include "pcie-designware.h"
 
 struct dw_plat_pcie {
+	/* [한국어] DesignWare 공통 컨트롤러 구조체를 가리킨다.
+	 * 설정자: dw_plat_pcie_probe() 가 별도로 devm_kzalloc 한 dw_pcie 를 건다.
+	 * 읽는 자: 이 파일의 host/ep 초기화 경로 전부.
+	 * 값 범위: 유효한 포인터. probe 가 실패하면 이 구조체 자체가 버려진다.
+	 * 동기화: probe 이후 불변이라 별도 보호가 없다. */
 	struct dw_pcie			*pci;
+	/* [한국어] 이 인스턴스가 루트 콤플렉스인지 엔드포인트인지.
+	 * 설정자: probe 가 of_device_get_match_data() 로 얻은
+	 *   dw_plat_pcie_of_data.mode 를 그대로 옮긴다.
+	 * 읽는 자: probe 가 이 값으로 dw_pcie_host_init 과 dw_pcie_ep_init 중
+	 *   무엇을 부를지 가른다.
+	 * 값 범위: DW_PCIE_RC_TYPE 또는 DW_PCIE_EP_TYPE.
+	 * 동기화: probe 이후 불변. */
 	enum dw_pcie_device_mode	mode;
 /* [한국어] 이 구조체가 dw_pcie 를 **포인터로** 들고 있는 점에 유의 -- 다른 글루는
  * 대개 값으로 품는다. 그래서 probe 가 두 번 할당한다. */

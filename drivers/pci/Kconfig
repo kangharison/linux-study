@@ -1,49 +1,83 @@
 # SPDX-License-Identifier: GPL-2.0
 #
+# ============================================================================
+# [한국어 설명] PCI 서브시스템 최상위 설정 (drivers/pci/Kconfig)
+#
+# === 파일의 역할 ===
+# PCI/PCIe 스택 전체의 스위치보드다. 서브시스템 존재 여부(PCI)부터 MSI, IOV,
+# ATS/PASID, P2PDMA, 링크 계층 튜닝까지, NVMe가 딛고 서는 모든 하부 기능의
+# 활성 여부가 여기서 정해진다. 하위 디렉토리 Kconfig도 이 파일이 source 로
+# 끌어오므로, PCI 설정 메뉴의 뼈대 자체가 이 파일이다.
+#
+# === 전체 아키텍처에서의 위치 ===
+# drivers/Kconfig -> [이 파일] -> pcie/, hotplug/, controller/, endpoint/,
+#                                 switch/, pwrctrl/ Kconfig
+# NVMe 관점에서 특히 결정적인 항목:
+#   PCI_MSI    -> I/O 큐마다 완료 벡터 하나. 꺼지면 INTx 4개로 몰려 성능이 붕괴.
+#   PCI_IOV    -> NVMe 컨트롤러를 VF로 쪼개 게스트에 직접 할당.
+#   PCI_P2PDMA -> NVMe CMB를 DMA 목적지로 삼아 호스트 메모리를 우회.
+#   PCIE_TPH   -> DMA 쓰기의 캐시 배치 힌트로 완료 지연을 줄인다.
+#   PCIE_BUS_* -> MPS(Max Payload Size) 정책. NVMe 전송 효율에 직결.
+#
+# === 타 모듈과의 연결 ===
+# - drivers/pci/Makefile: 여기 선택을 오브젝트 빌드로 번역한다.
+# - drivers/nvme/host/Kconfig: NVMe 자신은 BLK_DEV_NVME가 PCI에 의존한다.
+# - drivers/iommu/: ATS/PASID/PRI는 IOMMU와 짝을 이뤄야 의미를 갖는다.
+# - block layer: PCI가 정한 DMA 마스크와 세그먼트 제약이 queue_limits로
+#   흘러가 bio 분할 단위를 결정한다.
+#
+# === 주요 함수/구조체 요약 ===
+# - PCI          : 서브시스템 마스터 스위치. 꺼지면 struct pci_dev가 없다.
+# - PCI_MSI      : 메시지 기반 인터럽트. NVMe 다중 큐의 전제 조건.
+# - PCI_QUIRKS   : 하드웨어 결함 우회. 실장비에서는 사실상 필수.
+# - PCI_P2PDMA   : 장치 간 직접 DMA. CMB 기반 경로의 근거.
+# - PCIE_BUS_*   : 계층 전체의 MPS/MRRS 튜닝 정책 choice.
+# ============================================================================
+#
 # PCI configuration
 #
 
 # select this to offer the PCI prompt
-config HAVE_PCI
-	bool
+config HAVE_PCI	# [한국어] 아키텍처가 PCI를 지원함을 알리는 표식. 아키텍처 Kconfig가 select 한다
+	bool	# [한국어] 프롬프트 없는 bool — 사용자 메뉴에 뜨지 않고 select 로만 켜지는 내부 심볼
 
 # select this to unconditionally force on PCI support
-config FORCE_PCI
-	bool
-	select HAVE_PCI
-	select PCI
+config FORCE_PCI	# [한국어] PCI를 선택 불가능하게 강제로 켜는 심볼. PCI 없이는 성립하지 않는 플랫폼용
+	bool	# [한국어] 프롬프트 없는 bool — 사용자 메뉴에 뜨지 않고 select 로만 켜지는 내부 심볼
+	select HAVE_PCI	# [한국어] 아키텍처 지원 표식을 함께 켠다
+	select PCI	# [한국어] PCI 서브시스템 자체를 강제로 켠다
 
 # select this to provide a generic PCI iomap,
 # without PCI itself having to be defined
-config GENERIC_PCI_IOMAP
-	bool
+config GENERIC_PCI_IOMAP	# [한국어] pci_iomap() 범용 구현 사용 여부. NVMe BAR0 매핑이 이 경로를 탄다
+	bool	# [한국어] 프롬프트 없는 bool — 사용자 메뉴에 뜨지 않고 select 로만 켜지는 내부 심볼
 
-menuconfig PCI
-	bool "PCI support"
-	depends on HAVE_PCI
-	depends on MMU
+menuconfig PCI	# [한국어] PCI 서브시스템 마스터 스위치. 꺼지면 struct pci_dev도 /dev/nvme*도 없다
+	bool "PCI support"	# [한국어] bool — 코어 서브시스템이라 모듈로 뺄 수 없다
+	depends on HAVE_PCI	# [한국어] 아키텍처가 PCI를 지원해야 한다
+	depends on MMU	# [한국어] ioremap 기반 config/BAR 접근에 MMU가 필요
 	help
 	  This option enables support for the PCI local bus, including
 	  support for PCI-X and the foundations for PCI Express support.
 	  Say 'Y' here unless you know what you are doing.
 
-if PCI
+if PCI	# [한국어] PCI가 켜진 경우에만 아래 하위 옵션을 노출
 
-config PCI_DOMAINS
-	bool
+config PCI_DOMAINS	# [한국어] 다중 PCI 도메인(세그먼트) 지원. 대형 서버에서 버스 번호 256개를 넘길 때 필요
+	bool	# [한국어] 프롬프트 없는 bool — 사용자 메뉴에 뜨지 않고 select 로만 켜지는 내부 심볼
 
-config PCI_DOMAINS_GENERIC
-	bool
-	select PCI_DOMAINS
+config PCI_DOMAINS_GENERIC	# [한국어] 도메인 번호를 코어가 자동 부여하는 범용 구현
+	bool	# [한국어] 프롬프트 없는 bool — 사용자 메뉴에 뜨지 않고 select 로만 켜지는 내부 심볼
+	select PCI_DOMAINS	# [한국어] 도메인 지원을 함께 켠다
 
-config PCI_SYSCALL
-	bool
+config PCI_SYSCALL	# [한국어] pciconfig_read/write 시스템 콜 제공 여부. setpci 계열 도구가 쓰는 통로
+	bool	# [한국어] 프롬프트 없는 bool — 사용자 메뉴에 뜨지 않고 select 로만 켜지는 내부 심볼
 
-source "drivers/pci/pcie/Kconfig"
+source "drivers/pci/pcie/Kconfig"	# [한국어] PCIe 포트 서비스(AER/DPC/ASPM) 메뉴를 이 자리에 삽입
 
-config PCI_MSI
-	bool "Message Signaled Interrupts (MSI and MSI-X)"
-	select GENERIC_MSI_IRQ
+config PCI_MSI	# [한국어] 메시지 기반 인터럽트. NVMe가 I/O 큐마다 벡터를 받는 근거이자 성능의 전제
+	bool "Message Signaled Interrupts (MSI and MSI-X)"	# [한국어] bool — 인터럽트 인프라라 내장 전용
+	select GENERIC_MSI_IRQ	# [한국어] 범용 MSI IRQ 도메인 프레임워크를 끌어온다
 	help
 	   This allows device drivers to enable MSI (Message Signaled
 	   Interrupts).  Message Signaled Interrupts enable a device to
@@ -56,20 +90,20 @@ config PCI_MSI
 
 	   If you don't know what to do here, say Y.
 
-config PCI_MSI_ARCH_FALLBACKS
-	bool
+config PCI_MSI_ARCH_FALLBACKS	# [한국어] irqdomain을 갖추지 못한 구형 아키텍처용 폴백 훅
+	bool	# [한국어] 프롬프트 없는 bool — 사용자 메뉴에 뜨지 않고 select 로만 켜지는 내부 심볼
 
-config PCI_QUIRKS
-	default y
-	bool "Enable PCI quirk workarounds" if EXPERT
+config PCI_QUIRKS	# [한국어] 하드웨어 결함 우회 모음. 실장비에서는 사실상 필수라 기본값이 y다
+	default y	# [한국어] 기본 활성
+	bool "Enable PCI quirk workarounds" if EXPERT	# [한국어] EXPERT 모드에서만 끌 수 있게 숨긴다. 끄면 특정 NVMe/스위치가 오작동한다
 	help
 	  This enables workarounds for various PCI chipset bugs/quirks.
 	  Disable this only if your target machine is unaffected by PCI
 	  quirks.
 
-config PCI_DEBUG
-	bool "PCI Debugging"
-	depends on DEBUG_KERNEL
+config PCI_DEBUG	# [한국어] PCI 트리 전체에 -DDEBUG를 전파해 pr_debug()를 켠다
+	bool "PCI Debugging"	# [한국어] bool — 디버그 빌드 옵션
+	depends on DEBUG_KERNEL	# [한국어] 커널 디버깅이 켜진 구성에서만 노출
 	help
 	  Say Y here if you want the PCI core to produce a bunch of debug
 	  messages to the system log.  Select this if you are having a
@@ -77,9 +111,9 @@ config PCI_DEBUG
 
 	  When in doubt, say N.
 
-config PCI_REALLOC_ENABLE_AUTO
-	bool "Enable PCI resource re-allocation detection"
-	depends on PCI_IOV
+config PCI_REALLOC_ENABLE_AUTO	# [한국어] BAR 공간이 부족하면 자동으로 재할당을 시도. SR-IOV VF BAR 확보에 쓰인다
+	bool "Enable PCI resource re-allocation detection"	# [한국어] bool — 리소스 배치 정책
+	depends on PCI_IOV	# [한국어] SR-IOV가 있어야 재할당이 필요한 상황이 생긴다
 	help
 	  Say Y here if you want the PCI core to detect if PCI resource
 	  re-allocation needs to be enabled. You can always use pci=realloc=on
@@ -89,17 +123,17 @@ config PCI_REALLOC_ENABLE_AUTO
 
 	  When in doubt, say N.
 
-config PCI_STUB
-	tristate "PCI Stub driver"
+config PCI_STUB	# [한국어] 아무 일도 하지 않는 드라이버. NVMe를 호스트에서 떼어 VFIO 패스스루로 넘길 때 자리를 잡아둔다
+	tristate "PCI Stub driver"	# [한국어] tristate — 모듈화 가능
 	help
 	  Say Y or M here if you want be able to reserve a PCI device
 	  when it is going to be assigned to a guest operating system.
 
 	  When in doubt, say N.
 
-config PCI_PF_STUB
-	tristate "PCI PF Stub driver"
-	depends on PCI_IOV
+config PCI_PF_STUB	# [한국어] SR-IOV PF 전용 stub. VF만 게스트에 주고 PF는 유휴로 둘 때
+	tristate "PCI PF Stub driver"	# [한국어] tristate — 모듈화 가능
+	depends on PCI_IOV	# [한국어] SR-IOV가 있어야 재할당이 필요한 상황이 생긴다
 	help
 	  Say Y or M here if you want to enable support for devices that
 	  require SR-IOV support, while at the same time the PF (Physical
@@ -108,27 +142,27 @@ config PCI_PF_STUB
 
 	  When in doubt, say N.
 
-config XEN_PCIDEV_FRONTEND
-	tristate "Xen PCI Frontend"
-	depends on XEN_PV
-	select PCI_XEN
-	select XEN_XENBUS_FRONTEND
-	default y
+config XEN_PCIDEV_FRONTEND	# [한국어] Xen 반가상화 프론트엔드. 게스트가 PCI 장치를 하이퍼바이저 경유로 볼 때
+	tristate "Xen PCI Frontend"	# [한국어] tristate — 모듈화 가능
+	depends on XEN_PV	# [한국어] Xen 반가상화 게스트에서만 의미가 있다
+	select PCI_XEN	# [한국어] Xen용 PCI 백엔드 연동 코드를 켠다
+	select XEN_XENBUS_FRONTEND	# [한국어] 프론트엔드/백엔드 통신 채널을 켠다
+	default y	# [한국어] 기본 활성
 	help
 	  The PCI device frontend driver allows the kernel to import arbitrary
 	  PCI devices from a PCI backend to support PCI driver domains.
 
-config PCI_ATS
-	bool
+config PCI_ATS	# [한국어] Address Translation Service. 장치가 IOMMU 변환 결과를 캐시하는 기능으로 PASID/PRI의 전제
+	bool	# [한국어] 프롬프트 없는 bool — 사용자 메뉴에 뜨지 않고 select 로만 켜지는 내부 심볼
 
-config PCI_IDE
-	bool
+config PCI_IDE	# [한국어] Integrity and Data Encryption. PCIe 링크 자체를 암호화해 기밀 컴퓨팅에서 NVMe 트래픽을 보호
+	bool	# [한국어] 프롬프트 없는 bool — 사용자 메뉴에 뜨지 않고 select 로만 켜지는 내부 심볼
 
-config PCI_TSM
-	bool "PCI TSM: Device security protocol support"
-	select PCI_IDE
-	select PCI_DOE
-	select TSM
+config PCI_TSM	# [한국어] TEE Security Manager 연동. 신뢰 실행 환경에 장치를 안전하게 귀속시킨다
+	bool "PCI TSM: Device security protocol support"	# [한국어] bool — 보안 인프라라 내장
+	select PCI_IDE	# [한국어] 링크 암호화가 함께 있어야 장치 보안이 성립
+	select PCI_DOE	# [한국어] 인증 메시지를 DOE mailbox로 주고받는다
+	select TSM	# [한국어] TEE 보안 관리자 코어를 켠다
 	help
 	  The TEE (Trusted Execution Environment) Device Interface
 	  Security Protocol (TDISP) defines a "TSM" as a platform agent
@@ -139,24 +173,24 @@ config PCI_TSM
 
 	  Enable a platform TSM driver to use this capability.
 
-config PCI_DOE
-	bool "Enable PCI Data Object Exchange (DOE) support"
+config PCI_DOE	# [한국어] Data Object Exchange. CMA/SPDM 기반 장치 인증 메시지의 전송 계층
+	bool "Enable PCI Data Object Exchange (DOE) support"	# [한국어] bool — 내장 전용
 	help
 	  Say Y here if you want be able to communicate with PCIe DOE
 	  mailboxes.
 
-config PCI_ECAM
-	bool
+config PCI_ECAM	# [한국어] Enhanced Configuration Access Mechanism. config space 전체를 MMIO로 평면 매핑
+	bool	# [한국어] 프롬프트 없는 bool — 사용자 메뉴에 뜨지 않고 select 로만 켜지는 내부 심볼
 
-config PCI_LOCKLESS_CONFIG
-	bool
+config PCI_LOCKLESS_CONFIG	# [한국어] config 접근에 pci_lock을 쓰지 않아도 되는 플랫폼 표식
+	bool	# [한국어] 프롬프트 없는 bool — 사용자 메뉴에 뜨지 않고 select 로만 켜지는 내부 심볼
 
-config PCI_BRIDGE_EMUL
-	bool
+config PCI_BRIDGE_EMUL	# [한국어] 실제 브리지 config space가 없는 컨트롤러용 소프트웨어 에뮬레이션
+	bool	# [한국어] 프롬프트 없는 bool — 사용자 메뉴에 뜨지 않고 select 로만 켜지는 내부 심볼
 
-config PCI_IOV
-	bool "PCI IOV support"
-	select PCI_ATS
+config PCI_IOV	# [한국어] SR-IOV. NVMe 컨트롤러를 VF로 쪼개 게스트에 직접 할당하는 가상화 경로
+	bool "PCI IOV support"	# [한국어] bool — 열거 경로와 얽혀 내장 전용
+	select PCI_ATS	# [한국어] VF의 IOMMU 변환 캐시가 필요하므로 ATS를 함께 켠다
 	help
 	  I/O Virtualization is a PCI feature supported by some devices
 	  which allows them to create virtual devices which share their
@@ -164,27 +198,27 @@ config PCI_IOV
 
 	  If unsure, say N.
 
-config PCI_NPEM
-	bool "Native PCIe Enclosure Management"
-	depends on LEDS_CLASS=y
+config PCI_NPEM	# [한국어] Native PCIe Enclosure Management. NVMe 백플레인의 LED 표시 제어
+	bool "Native PCIe Enclosure Management"	# [한국어] bool — 내장 전용
+	depends on LEDS_CLASS=y	# [한국어] LED 클래스가 모듈이 아닌 내장이어야 한다. 부팅 초기 슬롯 표시에 필요하기 때문
 	help
 	  Support for Native PCIe Enclosure Management. It allows managing LED
 	  indications in storage enclosures. Enclosure must support following
 	  indications: OK, Locate, Fail, Rebuild, other indications are
 	  optional.
 
-config PCI_PRI
-	bool "PCI PRI support"
-	select PCI_ATS
+config PCI_PRI	# [한국어] Page Request Interface. 장치가 미매핑 페이지를 요구해 SVM(공유 가상 메모리)을 성립시킨다
+	bool "PCI PRI support"	# [한국어] bool — 내장 전용
+	select PCI_ATS	# [한국어] VF의 IOMMU 변환 캐시가 필요하므로 ATS를 함께 켠다
 	help
 	  PRI is the PCI Page Request Interface. It allows PCI devices that are
 	  behind an IOMMU to recover from page faults.
 
 	  If unsure, say N.
 
-config PCI_PASID
-	bool "PCI PASID support"
-	select PCI_ATS
+config PCI_PASID	# [한국어] Process Address Space ID. 하나의 장치가 여러 프로세스 주소 공간에 DMA 하도록 구분
+	bool "PCI PASID support"	# [한국어] bool — 내장 전용
+	select PCI_ATS	# [한국어] VF의 IOMMU 변환 캐시가 필요하므로 ATS를 함께 켠다
 	help
 	  Process Address Space Identifiers (PASIDs) can be used by PCI devices
 	  to access more than one IO address space at the same time. To make
@@ -194,8 +228,8 @@ config PCI_PASID
 
 	  If unsure, say N.
 
-config PCIE_TPH
-	bool "TLP Processing Hints"
+config PCIE_TPH	# [한국어] TLP Processing Hints. DMA 쓰기의 캐시 배치를 힌트로 주어 NVMe 완료 지연을 줄인다
+	bool "TLP Processing Hints"	# [한국어] bool — 내장 전용
 	help
 	  This option adds support for PCIe TLP Processing Hints (TPH).
 	  TPH allows endpoint devices to provide optimization hints, such as
@@ -203,16 +237,16 @@ config PCIE_TPH
 	  These hints, called Steering Tags, can empower the system hardware
 	  to optimize the utilization of platform resources.
 
-config PCI_P2PDMA
-	bool "PCI peer-to-peer transfer support"
-	depends on ZONE_DEVICE
+config PCI_P2PDMA	# [한국어] 장치 간 직접 DMA. NVMe CMB를 목적지로 삼아 호스트 메모리를 우회하는 경로의 근거
+	bool "PCI peer-to-peer transfer support"	# [한국어] bool — 메모리 모델과 얽혀 내장 전용
+	depends on ZONE_DEVICE	# [한국어] 장치 메모리를 struct page로 다뤄야 하므로 ZONE_DEVICE가 필수
 	#
 	# The need for the scatterlist DMA bus address flag means PCI P2PDMA
 	# requires 64bit
 	#
-	depends on 64BIT
-	select GENERIC_ALLOCATOR
-	select NEED_SG_DMA_FLAGS
+	depends on 64BIT	# [한국어] 장치 메모리를 주소 공간에 펼치려면 넉넉한 주소 폭이 필요
+	select GENERIC_ALLOCATOR	# [한국어] CMB 같은 장치 메모리 영역을 잘라 쓰는 할당자
+	select NEED_SG_DMA_FLAGS	# [한국어] scatterlist 항목에 P2P 여부 플래그를 실어야 한다
 	help
 	  Enables drivers to do PCI peer-to-peer transactions to and from
 	  BARs that are exposed in other devices that are the part of
@@ -226,23 +260,23 @@ config PCI_P2PDMA
 
 	  If unsure, say N.
 
-config PCI_LABEL
-	def_bool y if (DMI || ACPI)
-	select NLS
+config PCI_LABEL	# [한국어] SMBIOS/ACPI 기반 슬롯 라벨. 다수 NVMe 장착 시 물리 슬롯 식별에 쓰인다
+	def_bool y if (DMI || ACPI)	# [한국어] 라벨 정보원(DMI 또는 ACPI)이 있으면 묻지 않고 자동으로 켠다
+	select NLS	# [한국어] 펌웨어가 준 라벨 문자열을 변환하는 데 필요
 
-config PCI_HYPERV
-	tristate "Hyper-V PCI Frontend"
-	depends on ((X86 && X86_64) || ARM64) && HYPERV_VMBUS && PCI_MSI && SYSFS
-	select PCI_HYPERV_INTERFACE
-	select IRQ_MSI_LIB
+config PCI_HYPERV	# [한국어] Hyper-V 가상 PCI. 게스트가 NVMe를 패스스루로 받을 때 이 경로로 열거된다
+	tristate "Hyper-V PCI Frontend"	# [한국어] tristate — 모듈화 가능
+	depends on ((X86 && X86_64) || ARM64) && HYPERV_VMBUS && PCI_MSI && SYSFS	# [한국어] Hyper-V VMBus 위에서 동작하며, 가상 장치도 MSI로 인터럽트를 받으므로 PCI_MSI가 필요
+	select PCI_HYPERV_INTERFACE	# [한국어] 다른 Hyper-V 모듈과의 인터페이스 계층을 켠다
+	select IRQ_MSI_LIB	# [한국어] MSI 도메인 구성 헬퍼를 끌어온다
 	help
 	  The PCI device frontend driver allows the kernel to import arbitrary
 	  PCI devices from a PCI backend to support PCI driver domains.
 
-config PCI_DYNAMIC_OF_NODES
-	bool "Create Device tree nodes for PCI devices"
-	depends on OF_IRQ
-	select OF_DYNAMIC
+config PCI_DYNAMIC_OF_NODES	# [한국어] 열거된 PCI 장치에 대응하는 디바이스 트리 노드를 런타임 생성
+	bool "Create Device tree nodes for PCI devices"	# [한국어] bool — 내장 전용
+	depends on OF_IRQ	# [한국어] DT 기반 인터럽트 매핑이 있어야 노드가 의미를 갖는다
+	select OF_DYNAMIC	# [한국어] DT 노드를 런타임에 추가/제거하는 기능을 켠다
 	help
 	  This option enables support for generating device tree nodes for some
 	  PCI devices. Thus, the driver of this kind can load and overlay
@@ -251,10 +285,10 @@ config PCI_DYNAMIC_OF_NODES
 	  Once this option is selected, the device tree nodes will be generated
 	  for all PCI bridges.
 
-choice
-	prompt "PCI Express hierarchy optimization setting"
-	default PCIE_BUS_DEFAULT
-	depends on EXPERT
+choice	# [한국어] PCIe 계층 최적화 정책 선택 그룹. MPS/MRRS를 어떻게 맞출지 정한다
+	prompt "PCI Express hierarchy optimization setting"	# [한국어] MPS(Max Payload Size) 정책. NVMe 전송 효율과 호환성이 맞바꿔지는 지점
+	default PCIE_BUS_DEFAULT	# [한국어] 기본값은 안전한 자동 조정
+	depends on EXPERT	# [한국어] 잘못 고르면 링크가 불안정해질 수 있어 EXPERT 모드에서만 노출
 	help
 	  MPS (Max Payload Size) and MRRS (Max Read Request Size) are PCIe
 	  device parameters that affect performance and the ability to
@@ -269,35 +303,35 @@ choice
 	  This is a compile-time setting and can be overridden by the above
 	  command-line parameters.  If unsure, choose PCIE_BUS_DEFAULT.
 
-config PCIE_BUS_TUNE_OFF
-	bool "Tune Off"
+config PCIE_BUS_TUNE_OFF	# [한국어] 커널이 MPS를 건드리지 않고 펌웨어 설정을 그대로 둔다
+	bool "Tune Off"	# [한국어] 가장 보수적. 펌웨어를 신뢰한다
 	help
 	  Use the BIOS defaults; don't touch MPS at all.  This is the same
 	  as booting with 'pci=pcie_bus_tune_off'.
 
-config PCIE_BUS_DEFAULT
-	bool "Default"
+config PCIE_BUS_DEFAULT	# [한국어] 장치가 지원하는 범위에서 안전하게 MPS를 맞춘다
+	bool "Default"	# [한국어] 권장 기본값
 	help
 	  Default choice; ensure that the MPS matches upstream bridge.
 
-config PCIE_BUS_SAFE
-	bool "Safe"
+config PCIE_BUS_SAFE	# [한국어] 계층 내 모든 장치가 감당 가능한 최대값으로 통일
+	bool "Safe"	# [한국어] 핫플러그로 나중에 꽂힐 장치까지 고려한 보수적 통일
 	help
 	  Use largest MPS that boot-time devices support.  If you have a
 	  closed system with no possibility of adding new devices, this
 	  will use the largest MPS that's supported by all devices.  This
 	  is the same as booting with 'pci=pcie_bus_safe'.
 
-config PCIE_BUS_PERFORMANCE
-	bool "Performance"
+config PCIE_BUS_PERFORMANCE	# [한국어] 각 링크에서 가능한 최대 MPS/MRRS를 쓴다. NVMe 대역폭에 유리
+	bool "Performance"	# [한국어] 성능 우선. 나중에 작은 MPS만 지원하는 장치를 꽂으면 문제가 될 수 있다
 	help
 	  Use MPS and MRRS for best performance.  Ensure that a given
 	  device's MPS is no larger than its parent MPS, which allows us to
 	  keep all switches/bridges to the max MPS supported by their
 	  parent.  This is the same as booting with 'pci=pcie_bus_perf'.
 
-config PCIE_BUS_PEER2PEER
-	bool "Peer2peer"
+config PCIE_BUS_PEER2PEER	# [한국어] MPS를 128B로 통일해 어떤 장치 쌍이든 P2P DMA가 성립하게 한다
+	bool "Peer2peer"	# [한국어] P2PDMA 호환성 우선. 대역폭은 희생된다
 	help
 	  Set MPS = 128 for all devices.  MPS configuration effected by the
 	  other options could cause the MPS on one root port to be
@@ -306,13 +340,13 @@ config PCIE_BUS_PEER2PEER
 	  smallest possible value (128B) system-wide to avoid these issues.
 	  This is the same as booting with 'pci=pcie_bus_peer2peer'.
 
-endchoice
+endchoice	# [한국어] PCIe 계층 최적화 choice 종료
 
-config VGA_ARB
-	bool "VGA Arbitration" if EXPERT
-	default y
-	depends on !S390
-	select SCREEN_INFO if X86
+config VGA_ARB	# [한국어] VGA 자원 중재. 레거시 IO 자원 충돌 조정으로 NVMe와는 무관
+	bool "VGA Arbitration" if EXPERT	# [한국어] EXPERT 모드에서만 끌 수 있다
+	default y	# [한국어] 기본 활성
+	depends on !S390	# [한국어] s390에는 VGA 개념이 없다
+	select SCREEN_INFO if X86	# [한국어] x86에서는 부트 콘솔 화면 정보가 필요
 	help
 	  Some "legacy" VGA devices implemented on PCI typically have the same
 	  hard-decoded addresses as they did on ISA. When multiple PCI devices
@@ -320,18 +354,18 @@ config VGA_ARB
 	  see Documentation/gpu/vgaarbiter.rst for more details. Select this to
 	  enable VGA arbiter.
 
-config VGA_ARB_MAX_GPUS
-	int "Maximum number of GPUs"
-	default 16
-	depends on VGA_ARB
+config VGA_ARB_MAX_GPUS	# [한국어] 중재 대상 GPU 최대 개수
+	int "Maximum number of GPUs"	# [한국어] int — 개수를 직접 입력받는다
+	default 16	# [한국어] 기본 16개. GPU 하나당 오버헤드가 작아 넉넉히 잡아 둔다
+	depends on VGA_ARB	# [한국어] 중재기가 꺼져 있으면 개수 설정이 무의미
 	help
 	  Reserves space in the kernel to maintain resource locking for
 	  multiple GPUS.  The overhead for each GPU is very small.
 
-source "drivers/pci/hotplug/Kconfig"
-source "drivers/pci/controller/Kconfig"
-source "drivers/pci/endpoint/Kconfig"
-source "drivers/pci/switch/Kconfig"
-source "drivers/pci/pwrctrl/Kconfig"
+source "drivers/pci/hotplug/Kconfig"	# [한국어] 핫플러그 컨트롤러 메뉴 삽입
+source "drivers/pci/controller/Kconfig"	# [한국어] 호스트 브리지 컨트롤러 메뉴 삽입
+source "drivers/pci/endpoint/Kconfig"	# [한국어] 엔드포인트 프레임워크 메뉴 삽입
+source "drivers/pci/switch/Kconfig"	# [한국어] 스위치 관리 드라이버 메뉴 삽입
+source "drivers/pci/pwrctrl/Kconfig"	# [한국어] 슬롯 전원 제어 메뉴 삽입
 
-endif # PCI
+endif # PCI	# [한국어] PCI if 블록 종료

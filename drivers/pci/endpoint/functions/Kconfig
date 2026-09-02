@@ -1,23 +1,48 @@
 # SPDX-License-Identifier: GPL-2.0
 #
+# ============================================================================
+# [한국어 설명] PCIe 엔드포인트 기능 드라이버 설정 (endpoint/functions/Kconfig)
+#
+# === 파일의 역할 ===
+# 리눅스가 엔드포인트로 동작할 때 상대 호스트에게 "무엇으로 보일지"를 고른다.
+# 각 항목은 하나의 PCIe 기능(function)이며, 선택된 드라이버가 config space
+# 헤더(Vendor/Device ID, Class)와 BAR 레이아웃을 만들어 호스트에 제시한다.
+#
+# === 전체 아키텍처에서의 위치 ===
+# endpoint/Kconfig가 source 로 이 파일을 끌어온다.
+# 결합 순서: EPF 드라이버 등록 -> configfs에서 인스턴스 생성
+#   -> EPC(컨트롤러)에 바인딩 -> 헤더/BAR 기록 -> 링크 업 -> 호스트가 열거.
+#
+# === 타 모듈과의 연결 ===
+# - drivers/pci/endpoint/pci-epf-core.c: 여기 드라이버들이 등록하는 프레임워크.
+# - drivers/pci/endpoint/pci-ep-cfs.c: 인스턴스 생성/결합의 사용자 인터페이스.
+# - drivers/ntb/: VNTB는 NTB 서브시스템과 맞물려 동작한다.
+#
+# === 주요 함수/구조체 요약 ===
+# - PCI_EPF_TEST: 참조 구현이자 검증 장치. BAR 읽기쓰기와 DMA를 시험한다.
+# - PCI_EPF_NTB : 다중 엔드포인트 인스턴스로 NTB 컨트롤러를 구성.
+# - PCI_EPF_VNTB: 루트 포트와 엔드포인트 사이에 NTB를 세우는 가상 구현.
+# - PCI_EPF_MHI : Qualcomm 모뎀(SDX55 등)의 MHI 프로토콜 엔드포인트.
+# ============================================================================
+#
 # PCI Endpoint Functions
 #
 
-config PCI_EPF_TEST
-	tristate "PCI Endpoint Test driver"
-	depends on PCI_ENDPOINT
-	select CONFIGFS_FS
-	select CRC32
+config PCI_EPF_TEST	# [한국어] 엔드포인트 테스트/참조 기능
+	tristate "PCI Endpoint Test driver"	# [한국어] tristate — 검증용이라 필요할 때만 올리는 모듈로 두는 편이 자연스럽다
+	depends on PCI_ENDPOINT	# [한국어] 엔드포인트 코어가 있어야 등록할 프레임워크가 존재한다
+	select CONFIGFS_FS	# [한국어] 인스턴스를 configfs로 만들어야 하므로 강제로 켠다
+	select CRC32	# [한국어] 전송 데이터 무결성 검증에 CRC32를 사용
 	help
 	   Enable this configuration option to enable the test driver
 	   for PCI Endpoint.
 
 	   If in doubt, say "N" to disable Endpoint test driver.
 
-config PCI_EPF_NTB
-	tristate "PCI Endpoint NTB driver"
-	depends on PCI_ENDPOINT
-	select CONFIGFS_FS
+config PCI_EPF_NTB	# [한국어] 다중 엔드포인트 기반 NTB 기능
+	tristate "PCI Endpoint NTB driver"	# [한국어] tristate — 모듈화 가능
+	depends on PCI_ENDPOINT	# [한국어] 엔드포인트 코어가 있어야 등록할 프레임워크가 존재한다
+	select CONFIGFS_FS	# [한국어] 인스턴스를 configfs로 만들어야 하므로 강제로 켠다
 	help
 	  Select this configuration option to enable the Non-Transparent
 	  Bridge (NTB) driver for PCI Endpoint. NTB driver implements NTB
@@ -27,11 +52,11 @@ config PCI_EPF_NTB
 
 	  If in doubt, say "N" to disable Endpoint NTB driver.
 
-config PCI_EPF_VNTB
-	tristate "PCI Endpoint Virtual NTB driver"
-	depends on PCI_ENDPOINT
-	depends on NTB
-	select CONFIGFS_FS
+config PCI_EPF_VNTB	# [한국어] 가상 NTB 기능. 물리 NTB 하드웨어 없이 동등한 인터페이스를 제공
+	tristate "PCI Endpoint Virtual NTB driver"	# [한국어] tristate — 모듈화 가능
+	depends on PCI_ENDPOINT	# [한국어] 엔드포인트 코어가 있어야 등록할 프레임워크가 존재한다
+	depends on NTB	# [한국어] NTB 서브시스템이 있어야 상위 인터페이스를 노출할 수 있다
+	select CONFIGFS_FS	# [한국어] 인스턴스를 configfs로 만들어야 하므로 강제로 켠다
 	help
 	  Select this configuration option to enable the Non-Transparent
 	  Bridge (NTB) driver for PCIe Endpoint. NTB driver implements NTB
@@ -39,9 +64,9 @@ config PCI_EPF_VNTB
 
 	  If in doubt, say "N" to disable Endpoint NTB driver.
 
-config PCI_EPF_MHI
-	tristate "PCI Endpoint driver for MHI bus"
-	depends on PCI_ENDPOINT && MHI_BUS_EP
+config PCI_EPF_MHI	# [한국어] Qualcomm MHI 프로토콜 엔드포인트
+	tristate "PCI Endpoint driver for MHI bus"	# [한국어] tristate — 모듈화 가능
+	depends on PCI_ENDPOINT && MHI_BUS_EP	# [한국어] 엔드포인트 코어와 MHI 엔드포인트 버스가 모두 필요
 	help
 	   Enable this configuration option to enable the PCI Endpoint
 	   driver for Modem Host Interface (MHI) bus in Qualcomm Endpoint
