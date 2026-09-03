@@ -159,110 +159,282 @@ static void nvme_tcp_reclassify_socket(struct socket *sock)	/* [한국어] NVMe/
 static void nvme_tcp_reclassify_socket(struct socket *sock) { }	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 #endif	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
-enum nvme_tcp_send_state {	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	NVME_TCP_SEND_CMD_PDU = 0,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	NVME_TCP_SEND_H2C_PDU,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	NVME_TCP_SEND_DATA,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	NVME_TCP_SEND_DDGST,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+/* [한국어] 요청 하나를 소켓으로 내보내는 동안 거쳐 가는 단계.
+ * TCP 는 한 번의 write 로 다 나간다는 보장이 없다. 소켓이 받아 준 만큼만
+ * 보내고 나머지는 다음 기회에 이어야 하므로, "어디까지 보냈는가"를 요청마다
+ * 들고 있어야 한다. 그 위치가 이 열거값이다. */
+enum nvme_tcp_send_state {
+	/* [한국어] 명령 PDU 를 보내는 중. 모든 요청이 여기서 시작한다. */
+	NVME_TCP_SEND_CMD_PDU = 0,
+	/* [한국어] H2C(Host to Controller) 데이터 PDU 헤더를 보내는 중.
+	 * 쓰기 요청에서 타겟이 R2T 로 "이제 데이터를 보내라"고 하면 이 단계가 온다. */
+	NVME_TCP_SEND_H2C_PDU,
+	/* [한국어] 데이터 본문을 보내는 중. 요청 크기에 따라 이 단계에 여러 번 머문다. */
+	NVME_TCP_SEND_DATA,
+	/* [한국어] 데이터 다이제스트(CRC32C) 4바이트를 보내는 중.
+	 * data_digest 를 협상한 연결에서만 나타나는 마지막 단계다. */
+	NVME_TCP_SEND_DDGST,
 };	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
-struct nvme_tcp_request {	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	struct nvme_request	req;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	void			*pdu;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	struct nvme_tcp_queue	*queue;	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	u32			data_len;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	u32			pdu_len;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	u32			pdu_sent;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	u32			h2cdata_left;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	u32			h2cdata_offset;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	u16			ttag;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	__le16			status;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	struct list_head	entry;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	struct llist_node	lentry;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	__le32			ddgst;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+/* [한국어] 요청 하나의 TCP 측 상태.
+ * blk-mq 가 태그마다 미리 잡아 두며, 하드웨어 큐가 없는 트랜스포트라
+ * "지금 어디까지 보냈고 얼마나 남았는가"를 전부 여기에 들고 있어야 한다. */
+struct nvme_tcp_request {
+	/* [한국어] NVMe 코어가 보는 요청 부분. 반드시 맨 앞이어야 blk_mq_rq_to_pdu()
+	 * 가 돌려준 주소를 코어가 struct nvme_request 로 읽을 수 있다.
+	 * 설정자: nvme_tcp_init_request / nvme_setup_cmd.
+	 * 읽는 자: nvme_complete_rq 의 재시도·페일오버 판정. */
+	struct nvme_request	req;
+	/* [한국어] 이 요청이 보낼 PDU 헤더 버퍼(명령 PDU 또는 H2C 데이터 PDU).
+	 * 왜 요청마다 두나: 여러 요청이 동시에 전송 대기에 있을 수 있고, 각자
+	 *   부분 전송 상태가 다르므로 헤더를 공유할 수 없다.
+	 * 설정자: nvme_tcp_init_request 가 큐 생성 시 할당.
+	 * 값 범위: 헤더 다이제스트를 쓰면 그만큼 더 큰 버퍼다. */
+	void			*pdu;
+	/* [한국어] 이 요청이 속한 큐. 완료·재큐잉 시 소켓과 상태로 돌아가는 통로다. */
+	struct nvme_tcp_queue	*queue;
+	/* [한국어] 이 요청이 옮겨야 할 전체 데이터 바이트 수.
+	 * 설정자: nvme_tcp_setup_cmd_pdu 가 blk_rq_nr_phys_segments 로부터 계산.
+	 * 읽는 자: 인라인 전송 가능 여부 판정과 남은 양 계산의 기준. */
+	u32			data_len;
+	/* [한국어] 지금 보내는 중인 PDU 의 전체 길이(헤더 + 인라인 데이터 + 다이제스트).
+	 * 읽는 자: try_send_cmd_pdu 가 이만큼 다 나갔는지 판정한다. */
+	u32			pdu_len;
+	/* [한국어] 그 PDU 중 이미 소켓이 받아 간 바이트 수.
+	 * 왜 필요한가: 부분 전송이 정상이므로 다음 시도에서 어디부터 이어야 할지
+	 *   알아야 한다. pdu_sent == pdu_len 이 되어야 다음 단계로 넘어간다. */
+	u32			pdu_sent;
+	/* [한국어] 타겟이 R2T 로 요구한 데이터 중 아직 보내지 않은 바이트 수.
+	 * 왜 필요한가: 쓰기 데이터는 타겟이 준비됐다고 알릴 때만 보낼 수 있고,
+	 *   한 번의 R2T 가 maxh2cdata 보다 크면 여러 H2C PDU 로 쪼개 보내야 한다.
+	 * 설정자: R2T PDU 를 받은 nvme_tcp_handle_r2t.
+	 * 값 범위: 0 이면 이번 R2T 분을 다 보낸 것. */
+	u32			h2cdata_left;
+	/* [한국어] 그 데이터가 요청 전체에서 시작하는 오프셋. 쪼개 보낼 때마다 전진한다. */
+	u32			h2cdata_offset;
+	/* [한국어] Transfer Tag. 타겟이 R2T 에 실어 준 식별자를 그대로 H2C PDU 에 되돌려
+	 * 어느 전송 요구에 대한 응답인지 짝지어 준다.
+	 * 설정자: handle_r2t 가 받은 값을 저장. 읽는 자: setup_h2c_data_pdu. */
+	u16			ttag;
+	/* [한국어] 응답에서 꺼낸 NVMe 상태 코드. 완료 시점까지 보관한다. */
+	__le16			status;
+	/* [한국어] 큐의 send_list 에 매달리기 위한 고리. io_work 가 이 목록을 훑어 보낸다.
+	 * 동기화: send_mutex 아래에서만 조작한다. */
+	struct list_head	entry;
+	/* [한국어] 잠금 없는 입력 목록(req_list)용 고리.
+	 * 왜 두 개인가: queue_rq 는 어느 CPU 에서든 불릴 수 있어 잠금 없이 넣을 수
+	 *   있어야 하고(llist), io_work 는 그것을 한 번에 걷어 자기 send_list 로
+	 *   옮긴 뒤 순서대로 처리한다. 제출 경로와 전송 경로의 경합을 없애는 구조다. */
+	struct llist_node	lentry;
+	/* [한국어] 이 요청이 보낸 데이터의 CRC32C 누적값. 마지막에 4바이트로 나간다. */
+	__le32			ddgst;
 
-	struct bio		*curr_bio;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	struct iov_iter		iter;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
+	/* [한국어] 지금 데이터를 읽어 내고 있는 bio.
+	 * 왜 필요한가: 한 요청이 여러 bio 에 걸칠 수 있고 전송이 중간에 끊기므로,
+	 *   다음에 이어갈 위치를 bio 단위로도 기억해야 한다.
+	 * 설정자: nvme_tcp_init_iter 가 첫 bio 로 세우고, 소진되면 다음으로 넘긴다. */
+	struct bio		*curr_bio;
+	/* [한국어] 현재 bio 안에서의 읽기 위치를 담은 반복자.
+	 * 소켓 전송 함수에 그대로 넘겨져, 보낸 만큼 자동으로 전진한다.
+	 * 이것이 부분 전송을 이어 갈 수 있게 하는 실제 장치다. */
+	struct iov_iter		iter;
 
 	/* send state */
-	size_t			offset;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	size_t			data_sent;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	enum nvme_tcp_send_state state;	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+	/* [한국어] 현재 단계 안에서의 오프셋(헤더 몇 바이트째, 다이제스트 몇 바이트째).
+	 * pdu_sent 와 달리 단계가 바뀔 때마다 0 으로 되돌아간다. */
+	size_t			offset;
+	/* [한국어] 이 요청에서 지금까지 보낸 데이터 본문의 총 바이트 수.
+	 * 읽는 자: data_len 과 비교해 전송이 끝났는지 판정한다. */
+	size_t			data_sent;
+	/* [한국어] 위 enum 이 정의한 현재 전송 단계.
+	 * 이 필드 하나가 "이 요청이 다음에 무엇을 보내야 하는가"의 답이다. */
+	enum nvme_tcp_send_state state;
 };	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
-enum nvme_tcp_queue_flags {	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	NVME_TCP_Q_ALLOCATED	= 0,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	NVME_TCP_Q_LIVE		= 1,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	NVME_TCP_Q_POLLING	= 2,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	NVME_TCP_Q_IO_CPU_SET	= 3,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+/* [한국어] 큐의 생애·동작 상태 비트. test_and_set/clear 로 다뤄
+ * 여러 경로가 동시에 같은 큐를 조작해도 한 쪽만 통과하게 한다. */
+enum nvme_tcp_queue_flags {
+	/* [한국어] 소켓이 만들어지고 큐 구조체가 초기화됐다. 아직 Connect 전이라
+	 * 명령을 보낼 수는 없지만, 해체 시 정리할 자원은 이미 있다는 표시다. */
+	NVME_TCP_Q_ALLOCATED	= 0,
+	/* [한국어] Fabrics Connect 까지 끝나 이 큐로 I/O 를 보낼 수 있다.
+	 * 읽는 자: queue_rq 가 아직 준비 안 된 큐의 요청을 걸러내는 기준. */
+	NVME_TCP_Q_LIVE		= 1,
+	/* [한국어] 지금 blk-mq poll 경로가 이 큐를 훑고 있다.
+	 * 왜 필요한가: 폴링 중에는 소켓 콜백이 io_work 를 깨우면 안 된다.
+	 *   같은 큐를 두 문맥이 동시에 수신 처리하면 PDU 파싱 상태가 깨진다. */
+	NVME_TCP_Q_POLLING	= 2,
+	/* [한국어] 이 큐의 io_work 를 특정 CPU 에 고정했다.
+	 * 왜: 큐마다 다른 CPU 에 붙여야 여러 큐의 송수신이 한 코어에 몰리지 않는다.
+	 *   설정에 실패했을 수도 있어 성공 여부를 비트로 남긴다. */
+	NVME_TCP_Q_IO_CPU_SET	= 3,
 };	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
-enum nvme_tcp_recv_state {	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	NVME_TCP_RECV_PDU = 0,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	NVME_TCP_RECV_DATA,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	NVME_TCP_RECV_DDGST,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+/* [한국어] 바이트 스트림에서 PDU 를 되짚어 읽는 수신 상태 기계.
+ * TCP 에는 메시지 경계가 없다. 한 번의 read 가 PDU 하나의 절반일 수도,
+ * 두 개 반일 수도 있다. 그래서 "지금 무엇을 모으는 중인가"를 큐가 기억하고,
+ * 도착한 바이트를 그 단계에 따라 나눠 담는다. 이 열거값이 그 위치다. */
+enum nvme_tcp_recv_state {
+	/* [한국어] PDU 헤더를 모으는 중. 헤더가 다 모여야 그 안의 길이 필드를 읽어
+	 * 본문이 어디서 끝나는지 알 수 있다. 모든 수신이 여기서 시작한다. */
+	NVME_TCP_RECV_PDU = 0,
+	/* [한국어] 헤더가 알려 준 길이만큼 데이터 본문을 받는 중.
+	 * C2H(Controller to Host) 데이터 PDU 에서만 이 단계로 들어간다. */
+	NVME_TCP_RECV_DATA,
+	/* [한국어] 데이터 다이제스트 4바이트를 받는 중. 받고 나서 직접 계산한
+	 * CRC32C 와 비교해 어긋나면 연결을 오류로 처리한다. */
+	NVME_TCP_RECV_DDGST,
 };	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
 struct nvme_tcp_ctrl;	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-struct nvme_tcp_queue {	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	struct socket		*sock;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	struct work_struct	io_work;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	int			io_cpu;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+/* [한국어] 큐 하나가 소유하는 소켓과 송수신 상태 전부.
+ * RDMA 의 QP/CQ 자리에 여기서는 소켓 하나와 io_work 하나가 들어간다.
+ * 송신과 수신을 같은 work 가 처리하므로, 그 직렬화가 곧 큐 단위 잠금이 된다. */
+struct nvme_tcp_queue {
+	/* [한국어] 이 큐의 TCP 소켓. 모든 PDU 가 여기를 지난다.
+	 * 설정자: nvme_tcp_alloc_queue 가 sock_create 후 연결한다.
+	 * 값 범위: TLS 를 쓰면 이 소켓 위에 커널 TLS 계층이 얹힌다. */
+	struct socket		*sock;
+	/* [한국어] 이 큐의 송신과 수신을 모두 담당하는 작업.
+	 * 왜 하나인가: 둘을 나누면 같은 소켓을 두 문맥이 만지게 되어 잠금이 필요하다.
+	 *   하나로 두면 work 실행 자체가 직렬화라 추가 잠금 없이 일관성이 선다. */
+	struct work_struct	io_work;
+	/* [한국어] 위 work 를 돌릴 CPU. 큐마다 다른 CPU 로 흩어 한 코어 쏠림을 막는다.
+	 * 설정자: nvme_tcp_set_queue_io_cpu. 성공 여부는 Q_IO_CPU_SET 비트에 남는다. */
+	int			io_cpu;
 
-	struct mutex		queue_lock;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	struct mutex		send_mutex;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	struct llist_head	req_list;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	struct list_head	send_list;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
+	/* [한국어] 큐의 시작·정지를 직렬화한다. 오류 복구와 정상 해체가 동시에
+	 * 같은 큐를 내리려 할 때 한 쪽만 통과시킨다. */
+	struct mutex		queue_lock;
+	/* [한국어] 실제 소켓 쓰기를 직렬화한다.
+	 * 왜 queue_lock 과 별개인가: 제출 경로가 직접 보내는 경우와 io_work 가
+	 *   보내는 경우가 겹칠 수 있는데, 이때 필요한 것은 큐 생명주기가 아니라
+	 *   쓰기 순서의 보호다. 둘을 나누어 제출이 해체를 기다리지 않게 한다. */
+	struct mutex		send_mutex;
+	/* [한국어] queue_rq 가 잠금 없이 요청을 밀어 넣는 입력 목록.
+	 * 왜 llist 인가: 제출은 어느 CPU 에서든 들어오므로 잠금을 잡으면 그것이
+	 *   곧 경합 지점이 된다. llist 는 원자적 push 만으로 넣을 수 있다. */
+	struct llist_head	req_list;
+	/* [한국어] io_work 가 req_list 를 통째로 걷어 옮겨 놓고 순서대로 처리하는 목록.
+	 * 이 두 단계 구조 덕에 제출자와 전송자가 서로를 기다리지 않는다. */
+	struct list_head	send_list;
 
 	/* recv state */
-	void			*pdu;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	int			pdu_remaining;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	int			pdu_offset;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	size_t			data_remaining;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	size_t			ddgst_remaining;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	unsigned int		nr_cqe;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	/* [한국어] 수신 중인 PDU 헤더를 모으는 버퍼. 큐마다 하나면 충분하다 --
+	 * 스트림은 순서대로 오므로 동시에 두 PDU 를 파싱할 일이 없다. */
+	void			*pdu;
+	/* [한국어] 헤더에서 아직 못 받은 바이트 수. 0 이 되어야 헤더 해석이 가능하다. */
+	int			pdu_remaining;
+	/* [한국어] 헤더 버퍼에서 다음에 채워 넣을 위치. 부분 수신을 이어 가는 지점이다. */
+	int			pdu_offset;
+	/* [한국어] 데이터 본문에서 아직 못 받은 바이트 수.
+	 * 설정자: 헤더를 다 받고 그 안의 길이 필드로 세운다. */
+	size_t			data_remaining;
+	/* [한국어] 다이제스트 4바이트 중 아직 못 받은 바이트 수. */
+	size_t			ddgst_remaining;
+	/* [한국어] 이번 io_work 실행에서 완료시킨 요청 수.
+	 * 읽는 자: blk-mq poll 이 "몇 개를 수확했는가"로 돌려줄 값이다. */
+	unsigned int		nr_cqe;
 
 	/* send state */
-	struct nvme_tcp_request *request;	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+	/* [한국어] 지금 전송 중인 요청. 부분 전송이라 다음 기회에 이 요청부터 이어야 한다.
+	 * NULL 이면 새 요청을 send_list 에서 꺼낼 차례라는 뜻이다. */
+	struct nvme_tcp_request *request;
 
-	u32			maxh2cdata;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	size_t			cmnd_capsule_len;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	struct nvme_tcp_ctrl	*ctrl;	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	unsigned long		flags;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	bool			rd_enabled;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	/* [한국어] 타겟이 한 번의 H2C PDU 로 받을 수 있는 최대 데이터 바이트.
+	 * 설정자: ICResp 협상 결과. 읽는 자: R2T 분량을 이 크기로 쪼개 보낸다. */
+	u32			maxh2cdata;
+	/* [한국어] 명령 캡슐의 크기. 인라인 데이터를 함께 실을 수 있는지가 여기서 갈린다.
+	 * admin 큐는 SQE 크기 그대로라 인라인 여유가 없다. */
+	size_t			cmnd_capsule_len;
+	/* [한국어] 이 큐가 속한 컨트롤러. 초기화 후 불변. */
+	struct nvme_tcp_ctrl	*ctrl;
+	/* [한국어] 위 enum nvme_tcp_queue_flags 의 비트 집합. */
+	unsigned long		flags;
+	/* [한국어] 소켓의 data_ready 콜백이 io_work 를 깨워도 되는지.
+	 * 왜 필요한가: 큐를 내리는 중에는 깨우면 안 된다. 이미 정리한 자원을
+	 *   io_work 가 다시 만지게 되기 때문이다. */
+	bool			rd_enabled;
 
-	bool			hdr_digest;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	bool			data_digest;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	bool			tls_enabled;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	u32			rcv_crc;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	u32			snd_crc;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	__le32			exp_ddgst;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	__le32			recv_ddgst;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	struct completion       tls_complete;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	int                     tls_err;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	struct page_frag_cache	pf_cache;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
+	/* [한국어] 헤더 다이제스트를 쓰는 연결인가. ICReq/ICResp 협상 결과다.
+	 * 켜지면 모든 PDU 헤더 뒤에 CRC32C 4바이트가 붙어 길이 계산이 달라진다. */
+	bool			hdr_digest;
+	/* [한국어] 데이터 다이제스트를 쓰는 연결인가. 켜지면 송수신 양쪽에
+	 * SEND_DDGST / RECV_DDGST 단계가 추가된다. */
+	bool			data_digest;
+	/* [한국어] 이 소켓 위에 커널 TLS 가 얹혀 있는가.
+	 * 켜지면 평문 write 가 아니라 TLS 레코드로 나가고, 핸드셰이크는
+	 * 유저스페이스 데몬이 netlink 로 수행한 뒤 키를 커널에 넘긴 것이다. */
+	bool			tls_enabled;
+	/* [한국어] 수신 중인 데이터의 CRC32C 누적값. 마지막에 recv_ddgst 와 비교한다. */
+	u32			rcv_crc;
+	/* [한국어] 송신 중인 데이터의 CRC32C 누적값. 다 보내면 ddgst 로 나간다. */
+	u32			snd_crc;
+	/* [한국어] 우리가 직접 계산한 기대 다이제스트. */
+	__le32			exp_ddgst;
+	/* [한국어] 상대가 실제로 보내 온 다이제스트. 위와 다르면 데이터가 손상된 것이다. */
+	__le32			recv_ddgst;
+	/* [한국어] TLS 핸드셰이크 완료를 기다리는 객체.
+	 * 핸드셰이크는 유저스페이스 데몬이 하므로, 커널은 여기서 잠들어 결과를 기다린다. */
+	struct completion       tls_complete;
+	/* [한국어] 그 핸드셰이크의 결과. 콜백이 값을 돌려줄 수 없어 여기 남긴다. */
+	int                     tls_err;
+	/* [한국어] PDU 헤더 같은 작은 버퍼를 페이지 조각에서 잘라 쓰는 캐시.
+	 * 요청마다 kmalloc 을 부르지 않기 위한 것이다. */
+	struct page_frag_cache	pf_cache;
 
-	void (*state_change)(struct sock *);	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	void (*data_ready)(struct sock *);	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	void (*write_space)(struct sock *);	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
+	/* [한국어] 원래 소켓이 갖고 있던 콜백들. 이 드라이버가 자기 것으로 바꿔 달면서
+	 * 원본을 보관해 두었다가, 큐를 내릴 때 그대로 되돌려 놓는다.
+	 * 그러지 않으면 소켓을 닫는 과정에서 이미 사라진 큐를 가리키는 콜백이 불린다. */
+	void (*state_change)(struct sock *);
+	/* [한국어] 데이터 도착 알림. 이 드라이버는 io_work 를 깨우는 것으로 바꾼다. */
+	void (*data_ready)(struct sock *);
+	/* [한국어] 송신 버퍼에 여유가 생겼다는 알림. 부분 전송을 이어 갈 기회다. */
+	void (*write_space)(struct sock *);
 };	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
-struct nvme_tcp_ctrl {	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+/* [한국어] TCP 컨트롤러 하나. nvme_ctrl 을 값으로 품어
+ * to_tcp_ctrl() 이 container_of 로 되찾을 수 있게 한다. */
+/* [한국어] TCP 컨트롤러 하나. nvme_ctrl 을 값으로 품어
+ * to_tcp_ctrl() 이 container_of 로 되찾을 수 있게 한다. */
+struct nvme_tcp_ctrl {
 	/* read only in the hot path */
-	struct nvme_tcp_queue	*queues;	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	struct blk_mq_tag_set	tag_set;	/* [한국어] blk-mq — 태그·hctx·타임아웃·맵·완료 연동 */
+	/* [한국어] 큐 배열. 0 번이 admin, 1 번부터 I/O 다.
+	 * 위 영어 주석대로 핫패스에서는 읽기만 하므로 잠금 없이 접근한다. */
+	struct nvme_tcp_queue	*queues;
+	/* [한국어] I/O 큐용 태그셋. 태그 하나가 동시 처리 가능한 요청 하나이며,
+	 * 태그마다 nvme_tcp_request 가 미리 붙어 있다. */
+	struct blk_mq_tag_set	tag_set;
 
 	/* other member variables */
-	struct list_head	list;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	struct blk_mq_tag_set	admin_tag_set;	/* [한국어] blk-mq — 태그·hctx·타임아웃·맵·완료 연동 */
-	struct sockaddr_storage addr;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	struct sockaddr_storage src_addr;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	struct nvme_ctrl	ctrl;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
+	/* [한국어] 전역 nvme_tcp_ctrl_list 에 매달리는 고리. nvme_tcp_ctrl_mutex 가 지킨다. */
+	struct list_head	list;
+	/* [한국어] admin 전용 태그셋. I/O 와 분리해야 I/O 가 모두 막힌 상태에서도
+	 * 리셋·삭제 같은 admin 명령이 태그를 얻어 통과할 수 있다. */
+	struct blk_mq_tag_set	admin_tag_set;
+	/* [한국어] 접속할 타겟 주소. 'nvme connect' 의 traddr/trsvcid 가 담긴다. */
+	struct sockaddr_storage addr;
+	/* [한국어] 출발지 주소. host-traddr 로 특정 로컬 인터페이스를 강제할 때 쓴다.
+	 * 지정하지 않으면 0 으로 남고 커널 라우팅이 고른다. */
+	struct sockaddr_storage src_addr;
+	/* [한국어] 코어가 보는 컨트롤러. 상태 기계와 Identify 결과가 여기 있고,
+	 * to_tcp_ctrl() 이 이 필드에서 바깥을 되찾는다. */
+	struct nvme_ctrl	ctrl;
 
-	struct work_struct	err_work;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	struct delayed_work	connect_work;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	struct nvme_tcp_request async_req;	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	u32			io_queues[HCTX_MAX_TYPES];	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	/* [한국어] 오류 복구 작업. 소켓이 끊기거나 타임아웃이 나면 여기로 넘긴다.
+	 * 워크큐인 이유: 복구는 큐를 내리고 다시 세우는 잠들 수 있는 작업이라
+	 * 소켓 콜백이나 완료 문맥에서 직접 할 수 없다. */
+	struct work_struct	err_work;
+	/* [한국어] 재연결 시도 작업. 지연 워크라 옵션에 적힌 간격만큼 쉬었다 돈다. */
+	struct delayed_work	connect_work;
+	/* [한국어] 비동기 이벤트(AEN) 전용 요청.
+	 * 왜 따로 두나: AEN 은 태그를 소비하지 않는 상주 명령이라 태그별 요청
+	 * 구조체를 쓸 수 없다. 컨트롤러당 하나면 충분하다. */
+	struct nvme_tcp_request async_req;
+	/* [한국어] 기본·읽기 전용·폴링 큐 각각의 개수.
+	 * 읽기 전용 큐를 두면 쓰기가 읽기 지연을 밀어내지 않고,
+	 * 폴링 큐는 인터럽트 없이 blk-mq poll 로만 돈다. */
+	u32			io_queues[HCTX_MAX_TYPES];
 };	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
 static LIST_HEAD(nvme_tcp_ctrl_list);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
@@ -272,10 +444,12 @@ static const struct blk_mq_ops nvme_tcp_mq_ops;	/* [한국어] NVMe/TCP 큐·PDU
 static const struct blk_mq_ops nvme_tcp_admin_mq_ops;	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 static int nvme_tcp_try_send(struct nvme_tcp_queue *queue);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 
-static inline struct nvme_tcp_ctrl *to_tcp_ctrl(struct nvme_ctrl *ctrl)	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-{	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	return container_of(ctrl, struct nvme_tcp_ctrl, ctrl);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+static inline struct nvme_tcp_ctrl *to_tcp_ctrl(struct nvme_ctrl *ctrl)	/* [한국어] 코어가 넘긴 nvme_ctrl 에서 이 트랜스포트의 바깥 구조체를 되찾는다 */
+{
+	/* [한국어] nvme_ctrl 이 nvme_tcp_ctrl 안에 값으로 박혀 있어 가능한 되짚기다.
+	 * 코어는 늘 nvme_ctrl 포인터만 넘기므로 트랜스포트 진입점마다 이 변환이 첫 줄에 온다. */
+	return container_of(ctrl, struct nvme_tcp_ctrl, ctrl);
+}
 
 static inline int nvme_tcp_queue_id(struct nvme_tcp_queue *queue)	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 {	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
@@ -800,64 +974,91 @@ static void nvme_tcp_setup_h2c_data_pdu(struct nvme_tcp_request *req)	/* [한국
 	data->data_length = cpu_to_le32(req->pdu_len);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 }	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
-static int nvme_tcp_handle_r2t(struct nvme_tcp_queue *queue,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		struct nvme_tcp_r2t_pdu *pdu)	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-{	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	struct nvme_tcp_request *req;	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	struct request *rq;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	u32 r2t_length = le32_to_cpu(pdu->r2t_length);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	u32 r2t_offset = le32_to_cpu(pdu->r2t_offset);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+/*
+ * [한국어]
+ * nvme_tcp_handle_r2t - 타겟의 "쓰기 데이터를 보내라" 요구를 받아 송신을 예약한다
+ *
+ * @queue: 대상 큐
+ * @pdu:   R2T(Ready to Transfer) PDU. 어느 요청의 어느 구간을 달라는지 담겨 있다.
+ * @return: 0 이면 정상. 음수면 프로토콜 위반이며 연결을 끊는다.
+ *
+ * NVMe/TCP 의 쓰기는 두 걸음이다. 호스트가 명령을 보내면 타겟이 버퍼를 마련한
+ * 뒤 R2T 로 "이 구간을 지금 보내라"고 알리고, 그제서야 호스트가 H2C 데이터
+ * PDU 를 보낸다. 인라인으로 실어 보낸 분량을 뺀 나머지가 이 경로를 탄다.
+ * 이 흐름 덕에 타겟이 자기 메모리 사정에 맞춰 흐름을 조절할 수 있다.
+ *
+ * 검사가 넷이나 있는 이유는 이 PDU 가 신뢰할 수 없는 원격 입력이기 때문이다.
+ * 길이가 0 이거나, 요청 크기를 넘거나, 이미 보낸 지점보다 뒤로 돌아가는
+ * 오프셋이거나, 이미 전송 목록에 올라 있는 요청에 대한 R2T 라면 모두
+ * 프로토콜 위반이다. 특히 세 번째와 네 번째는 방치하면 같은 요청을 두 번
+ * 전송 목록에 넣어 목록이 꼬이거나, 이미 보낸 데이터를 덮어쓰게 된다.
+ *
+ * 처리를 마치면 요청을 다시 입력 목록에 넣고 io_work 를 깨운다. 즉 R2T 를
+ * 받은 요청은 새로 제출된 요청과 같은 경로로 다시 전송 대기에 들어간다.
+ *
+ * 실행 컨텍스트: 수신 파싱 문맥(lock_sock 보유). 잠들면 안 된다.
+ *
+ * 호출 체인:
+ *   nvme_tcp_recv_pdu → [이 함수] → nvme_tcp_setup_h2c_data_pdu → io_work
+ */
+static int nvme_tcp_handle_r2t(struct nvme_tcp_queue *queue,
+		struct nvme_tcp_r2t_pdu *pdu)
+{
+	struct nvme_tcp_request *req;
+	struct request *rq;
+	u32 r2t_length = le32_to_cpu(pdu->r2t_length);	/* [한국어] 타겟이 이번에 받겠다는 바이트 수 */
+	u32 r2t_offset = le32_to_cpu(pdu->r2t_offset);	/* [한국어] 요청 전체에서 그 구간이 시작하는 위치 */
 
-	rq = nvme_find_rq(nvme_tcp_tagset(queue), pdu->command_id);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	if (!rq) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		dev_err(queue->ctrl->ctrl.device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			"got bad r2t.command_id %#x on queue %d\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			pdu->command_id, nvme_tcp_queue_id(queue));	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		return -ENOENT;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
-	}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	req = blk_mq_rq_to_pdu(rq);	/* [한국어] blk-mq — 태그·hctx·타임아웃·맵·완료 연동 */
+	rq = nvme_find_rq(nvme_tcp_tagset(queue), pdu->command_id);	/* [한국어] command_id 로 원래 요청을 되찾는다 */
+	if (!rq) {
+		dev_err(queue->ctrl->ctrl.device,	/* [한국어] 없는 태그를 가리킨다 — 타겟이 잘못 보냈거나 이미 완료된 요청이다 */
+			"got bad r2t.command_id %#x on queue %d\n",
+			pdu->command_id, nvme_tcp_queue_id(queue));
+		return -ENOENT;
+	}
+	req = blk_mq_rq_to_pdu(rq);
 
-	if (unlikely(!r2t_length)) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		dev_err(queue->ctrl->ctrl.device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			"req %d r2t len is %u, probably a bug...\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			rq->tag, r2t_length);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		return -EPROTO;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
-	}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	if (unlikely(!r2t_length)) {	/* [한국어] 0바이트를 요구하는 R2T 는 의미가 없다 */
+		dev_err(queue->ctrl->ctrl.device,
+			"req %d r2t len is %u, probably a bug...\n",
+			rq->tag, r2t_length);
+		return -EPROTO;
+	}
 
-	if (unlikely(req->data_sent + r2t_length > req->data_len)) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		dev_err(queue->ctrl->ctrl.device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			"req %d r2t len %u exceeded data len %u (%zu sent)\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			rq->tag, r2t_length, req->data_len, req->data_sent);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		return -EPROTO;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
-	}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	if (unlikely(req->data_sent + r2t_length > req->data_len)) {	/* [한국어] 요청이 가진 것보다 많이 요구한다 */
+		dev_err(queue->ctrl->ctrl.device,	/* [한국어] 그대로 따르면 남의 메모리를 읽어 보내게 된다 */
+			"req %d r2t len %u exceeded data len %u (%zu sent)\n",
+			rq->tag, r2t_length, req->data_len, req->data_sent);
+		return -EPROTO;
+	}
 
-	if (unlikely(r2t_offset < req->data_sent)) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		dev_err(queue->ctrl->ctrl.device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			"req %d unexpected r2t offset %u (expected %zu)\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			rq->tag, r2t_offset, req->data_sent);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		return -EPROTO;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
-	}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	if (unlikely(r2t_offset < req->data_sent)) {	/* [한국어] 이미 보낸 지점보다 뒤로 돌아가라는 요구 */
+		dev_err(queue->ctrl->ctrl.device,	/* [한국어] iov_iter 는 전진만 하므로 되감을 수 없고, 따르면 데이터가 어긋난다 */
+			"req %d unexpected r2t offset %u (expected %zu)\n",
+			rq->tag, r2t_offset, req->data_sent);
+		return -EPROTO;
+	}
 
-	if (llist_on_list(&req->lentry) ||	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-	    !list_empty(&req->entry)) {	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		dev_err(queue->ctrl->ctrl.device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			"req %d unexpected r2t while processing request\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			rq->tag);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		return -EPROTO;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
-	}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	if (llist_on_list(&req->lentry) ||	/* [한국어] 이 요청이 이미 입력 목록에 있거나 */
+	    !list_empty(&req->entry)) {	/* [한국어] 이미 전송 목록에 올라 있다면 */
+		dev_err(queue->ctrl->ctrl.device,	/* [한국어] 같은 요청을 두 번 넣게 되어 목록이 꼬인다 */
+			"req %d unexpected r2t while processing request\n",
+			rq->tag);
+		return -EPROTO;
+	}
 
-	req->pdu_len = 0;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	req->h2cdata_left = r2t_length;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	req->h2cdata_offset = r2t_offset;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	req->ttag = pdu->ttag;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	req->pdu_len = 0;	/* [한국어] 새 PDU 를 처음부터 조립하므로 이전 길이를 지운다 */
+	req->h2cdata_left = r2t_length;	/* [한국어] 이번 R2T 분량. maxh2cdata 보다 크면 여러 PDU 로 쪼개 나간다 */
+	req->h2cdata_offset = r2t_offset;
+	req->ttag = pdu->ttag;	/* [한국어] 타겟이 준 전송 태그를 그대로 되돌려 어느 R2T 에 대한 응답인지 짝지어 준다 */
 
-	nvme_tcp_setup_h2c_data_pdu(req);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+	nvme_tcp_setup_h2c_data_pdu(req);	/* [한국어] H2C 헤더를 만들고 전송 단계를 SEND_H2C_PDU 로 옮긴다 */
 
-	llist_add(&req->lentry, &queue->req_list);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	queue_work_on(queue->io_cpu, nvme_tcp_wq, &queue->io_work);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+	llist_add(&req->lentry, &queue->req_list);	/* [한국어] 새 제출과 같은 경로로 전송 대기에 넣는다 */
+	queue_work_on(queue->io_cpu, nvme_tcp_wq, &queue->io_work);	/* [한국어] 이 큐의 전용 CPU 에서 io_work 를 깨운다 */
 
-	return 0;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
-}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	return 0;
+}
 
 static void nvme_tcp_handle_c2h_term(struct nvme_tcp_queue *queue,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 		struct nvme_tcp_term_pdu *pdu)	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
@@ -893,77 +1094,108 @@ static void nvme_tcp_handle_c2h_term(struct nvme_tcp_queue *queue,	/* [한국어
 		"Received C2HTermReq (FES = %s)\n", msg);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 }	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
-static int nvme_tcp_recv_pdu(struct nvme_tcp_queue *queue, struct sk_buff *skb,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		unsigned int *offset, size_t *len)	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-{	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	struct nvme_tcp_hdr *hdr;	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	char *pdu = queue->pdu;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	size_t rcv_len = min_t(size_t, *len, queue->pdu_remaining);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	int ret;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+/*
+ * [한국어]
+ * nvme_tcp_recv_pdu - PDU 헤더를 모으고, 다 모이면 종류에 따라 분기한다
+ *
+ * @queue:  대상 큐
+ * @skb:    도착한 소켓 버퍼
+ * @offset: skb 안 현재 위치(이 함수가 소비한 만큼 전진시킨다)
+ * @len:    남은 바이트 수(마찬가지로 줄여 준다)
+ * @return: 0 이면 정상. 음수면 프로토콜 위반이나 검증 실패.
+ *
+ * 스트림에서 메시지를 되찾는 첫 단계다. 헤더가 다 모이기 전에는 아무 판단도
+ * 할 수 없다 -- 본문 길이가 헤더 안에 있기 때문이다. 그래서 pdu_remaining 이
+ * 0 이 될 때까지는 모으기만 하고 0 을 돌려준다(오류가 아니라 "아직"이라는 뜻).
+ *
+ * 헤더가 완성되면 순서대로 검사한다:
+ *   1) 헤더 길이가 기대와 맞는가 -- 알려진 타입인지 먼저 보고 메시지를 가른다.
+ *   2) C2HTermReq 인가 -- 위 영어 주석대로 이것만은 다이제스트를 싣지 않으므로
+ *      검증을 건너뛰어야 한다. 순서를 바꾸면 종료 통지를 다이제스트 오류로
+ *      오인하게 된다.
+ *   3) 헤더/데이터 다이제스트 검증.
+ *   4) 타입별 처리로 분기.
+ *
+ * rsp 와 r2t 에서 init_recv_ctx 를 부르는 이유: 이 둘은 뒤따르는 본문이 없어
+ * 곧바로 다음 PDU 헤더를 기다리는 상태로 되돌려야 한다. c2h_data 는 본문이
+ * 이어지므로 그쪽 핸들러가 상태를 DATA 로 옮긴다.
+ *
+ * 호출 체인:
+ *   nvme_tcp_recv_skb → [이 함수] → handle_c2h_data / handle_comp / handle_r2t
+ */
+static int nvme_tcp_recv_pdu(struct nvme_tcp_queue *queue, struct sk_buff *skb,
+		unsigned int *offset, size_t *len)
+{
+	struct nvme_tcp_hdr *hdr;
+	char *pdu = queue->pdu;	/* [한국어] 큐가 들고 있는 헤더 조립 버퍼 */
+	size_t rcv_len = min_t(size_t, *len, queue->pdu_remaining);	/* [한국어] 이번에 채울 수 있는 만큼만 — 헤더를 넘겨 읽으면 다음 PDU 를 먹는다 */
+	int ret;
 
-	ret = skb_copy_bits(skb, *offset,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		&pdu[queue->pdu_offset], rcv_len);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	if (unlikely(ret))	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		return ret;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	ret = skb_copy_bits(skb, *offset,	/* [한국어] skb 에서 조립 버퍼로 복사 */
+		&pdu[queue->pdu_offset], rcv_len);	/* [한국어] 이어붙일 위치는 지금까지 모은 만큼 뒤 */
+	if (unlikely(ret))
+		return ret;
 
-	queue->pdu_remaining -= rcv_len;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	queue->pdu_offset += rcv_len;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	*offset += rcv_len;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	*len -= rcv_len;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	if (queue->pdu_remaining)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		return 0;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	queue->pdu_remaining -= rcv_len;	/* [한국어] 헤더에서 아직 못 받은 양을 줄인다 */
+	queue->pdu_offset += rcv_len;	/* [한국어] 다음에 이어붙일 위치를 전진 */
+	*offset += rcv_len;	/* [한국어] 호출자의 skb 위치도 함께 전진시킨다 */
+	*len -= rcv_len;
+	if (queue->pdu_remaining)	/* [한국어] 헤더가 아직 다 안 왔다 — 오류가 아니라 "다음 skb 를 기다린다" */
+		return 0;
 
-	hdr = queue->pdu;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	if (unlikely(hdr->hlen != sizeof(struct nvme_tcp_rsp_pdu))) {	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		if (!nvme_tcp_recv_pdu_supported(hdr->type))	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-			goto unsupported_pdu;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
+	hdr = queue->pdu;	/* [한국어] 이제 헤더 전체가 모였으니 해석할 수 있다 */
+	if (unlikely(hdr->hlen != sizeof(struct nvme_tcp_rsp_pdu))) {	/* [한국어] 기대한 헤더 길이와 다르다 */
+		if (!nvme_tcp_recv_pdu_supported(hdr->type))	/* [한국어] 아예 모르는 타입이면 길이 얘기를 할 필요가 없다 */
+			goto unsupported_pdu;
 
-		dev_err(queue->ctrl->ctrl.device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			"pdu type %d has unexpected header length (%d)\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			hdr->type, hdr->hlen);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		return -EPROTO;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
-	}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		dev_err(queue->ctrl->ctrl.device,	/* [한국어] 아는 타입인데 길이가 틀렸다 — 프로토콜 위반이다 */
+			"pdu type %d has unexpected header length (%d)\n",
+			hdr->type, hdr->hlen);
+		return -EPROTO;
+	}
 
-	if (unlikely(hdr->type == nvme_tcp_c2h_term)) {	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+	if (unlikely(hdr->type == nvme_tcp_c2h_term)) {
 		/*
 		 * C2HTermReq never includes Header or Data digests.
 		 * Skip the checks.
 		 */
-		nvme_tcp_handle_c2h_term(queue, (void *)queue->pdu);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		return -EINVAL;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
-	}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		/* [한국어] 위 영어 주석대로 종료 통지에는 다이제스트가 없다. 아래 검증보다
+		 * 먼저 처리해야 정상적인 종료 통지를 다이제스트 오류로 오인하지 않는다. */
+		nvme_tcp_handle_c2h_term(queue, (void *)queue->pdu);
+		return -EINVAL;	/* [한국어] 타겟이 연결을 끝내겠다는 뜻이므로 오류로 올려 복구 경로를 태운다 */
+	}
 
-	if (queue->hdr_digest) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		ret = nvme_tcp_verify_hdgst(queue, queue->pdu, hdr->hlen);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		if (unlikely(ret))	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-			return ret;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
-	}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	if (queue->hdr_digest) {	/* [한국어] 헤더 다이제스트를 협상한 연결이면 */
+		ret = nvme_tcp_verify_hdgst(queue, queue->pdu, hdr->hlen);	/* [한국어] 헤더 뒤에 붙은 CRC32C 를 확인 */
+		if (unlikely(ret))
+			return ret;
+	}
 
 
-	if (queue->data_digest) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		ret = nvme_tcp_check_ddgst(queue, queue->pdu);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		if (unlikely(ret))	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-			return ret;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
-	}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	if (queue->data_digest) {	/* [한국어] 데이터 다이제스트를 쓰는 연결이면 */
+		ret = nvme_tcp_check_ddgst(queue, queue->pdu);	/* [한국어] 이 PDU 가 다이제스트를 실어야 하는 종류인지 확인하고 준비한다 */
+		if (unlikely(ret))
+			return ret;
+	}
 
-	switch (hdr->type) {	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	case nvme_tcp_c2h_data:	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		return nvme_tcp_handle_c2h_data(queue, (void *)queue->pdu);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	case nvme_tcp_rsp:	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		nvme_tcp_init_recv_ctx(queue);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		return nvme_tcp_handle_comp(queue, (void *)queue->pdu);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	case nvme_tcp_r2t:	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		nvme_tcp_init_recv_ctx(queue);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		return nvme_tcp_handle_r2t(queue, (void *)queue->pdu);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	default:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		goto unsupported_pdu;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
-	}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	switch (hdr->type) {	/* [한국어] 헤더가 온전하다 — 이제 종류별로 갈라 처리한다 */
+	case nvme_tcp_c2h_data:
+		return nvme_tcp_handle_c2h_data(queue, (void *)queue->pdu);	/* [한국어] 데이터가 뒤따른다. 핸들러가 상태를 RECV_DATA 로 옮긴다 */
+	case nvme_tcp_rsp:
+		nvme_tcp_init_recv_ctx(queue);	/* [한국어] 뒤따르는 본문이 없으므로 곧바로 다음 헤더를 기다리는 상태로 되돌린다 */
+		return nvme_tcp_handle_comp(queue, (void *)queue->pdu);	/* [한국어] 응답 캡슐 — 요청을 완료시킨다 */
+	case nvme_tcp_r2t:
+		nvme_tcp_init_recv_ctx(queue);	/* [한국어] 마찬가지로 본문이 없다 */
+		return nvme_tcp_handle_r2t(queue, (void *)queue->pdu);	/* [한국어] "쓰기 데이터를 보내라"는 요구 — 송신 쪽에 H2C 단계를 예약한다 */
+	default:
+		goto unsupported_pdu;
+	}
 
-unsupported_pdu:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	dev_err(queue->ctrl->ctrl.device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		"unsupported pdu type (%d)\n", hdr->type);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	return -EINVAL;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
-}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+unsupported_pdu:
+	dev_err(queue->ctrl->ctrl.device,
+		"unsupported pdu type (%d)\n", hdr->type);
+	return -EINVAL;	/* [한국어] 해석할 수 없는 PDU 는 스트림 동기를 잃은 것과 같아 연결을 끊는다 */
+}
 
 static inline void nvme_tcp_end_request(struct request *rq, u16 status)	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 {	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
@@ -1089,41 +1321,66 @@ static int nvme_tcp_recv_ddgst(struct nvme_tcp_queue *queue,	/* [한국어] NVMe
 	return 0;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 }	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
-static int nvme_tcp_recv_skb(read_descriptor_t *desc, struct sk_buff *skb,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-			     unsigned int offset, size_t len)	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-{	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	struct nvme_tcp_queue *queue = desc->arg.data;	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	size_t consumed = len;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	int result;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+/*
+ * [한국어]
+ * nvme_tcp_recv_skb - 도착한 skb 하나를 수신 상태 기계에 밀어 넣는다
+ *
+ * @desc:   read_sock 이 넘긴 문맥. arg.data 에 큐가 들어 있다.
+ * @skb:    도착한 소켓 버퍼
+ * @offset: skb 안에서 아직 처리하지 않은 시작 위치
+ * @len:    그 위치부터 남은 바이트 수
+ * @return: 소비한 바이트 수. 음수면 오류이며 read_sock 이 멈춘다.
+ *
+ * TCP 에 메시지 경계가 없다는 사실이 이 while 루프의 존재 이유다. 한 skb 안에
+ * PDU 가 몇 개 들어 있을지, 혹은 PDU 하나가 몇 개의 skb 에 걸쳐 있을지 알 수
+ * 없다. 그래서 큐가 들고 있는 "지금 무엇을 모으는 중인가"(recv_state)에 따라
+ * 남은 바이트를 나눠 담고, 다 쓸 때까지 반복한다. 상태는 skb 사이를 넘어
+ * 유지되므로 PDU 가 잘려 도착해도 이어서 조립된다.
+ *
+ * 오류를 만나면 rd_enabled 를 내리는 것이 중요하다. 스트림 파싱이 어긋난
+ * 시점에서 이후 바이트는 의미가 없고, 콜백이 io_work 를 다시 깨우면 깨진
+ * 상태로 계속 읽게 된다. 그래서 수신을 봉인하고 복구 경로로 넘긴다.
+ *
+ * 실행 컨텍스트: read_sock 안, lock_sock 을 잡은 상태. 잠들면 안 된다.
+ *
+ * 호출 체인:
+ *   nvme_tcp_try_recv → read_sock → [이 함수] → recv_pdu / recv_data / recv_ddgst
+ */
+static int nvme_tcp_recv_skb(read_descriptor_t *desc, struct sk_buff *skb,
+			     unsigned int offset, size_t len)
+{
+	struct nvme_tcp_queue *queue = desc->arg.data;	/* [한국어] try_recv 가 심어 둔 큐를 되찾는다 */
+	size_t consumed = len;	/* [한국어] 전부 소비하는 것이 정상 — 성공 시 이 값을 돌려준다 */
+	int result;
 
-	if (unlikely(!queue->rd_enabled))	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		return -EFAULT;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	if (unlikely(!queue->rd_enabled))	/* [한국어] 큐가 내려가는 중이면 더 파싱하지 않는다 */
+		return -EFAULT;
 
-	while (len) {	/* [한국어] 순회 — 큐·요청·세그먼트·이벤트 처리 */
-		switch (nvme_tcp_recv_state(queue)) {	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		case NVME_TCP_RECV_PDU:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			result = nvme_tcp_recv_pdu(queue, skb, &offset, &len);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-			break;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		case NVME_TCP_RECV_DATA:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			result = nvme_tcp_recv_data(queue, skb, &offset, &len);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-			break;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		case NVME_TCP_RECV_DDGST:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			result = nvme_tcp_recv_ddgst(queue, skb, &offset, &len);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-			break;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		default:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			result = -EFAULT;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		if (result) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-			dev_err(queue->ctrl->ctrl.device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-				"receive failed:  %d\n", result);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			queue->rd_enabled = false;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			nvme_tcp_error_recovery(&queue->ctrl->ctrl);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-			return result;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
-		}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	while (len) {	/* [한국어] 이 skb 의 바이트를 다 쓸 때까지. PDU 여러 개가 들어 있을 수 있다 */
+		switch (nvme_tcp_recv_state(queue)) {	/* [한국어] 큐가 기억하는 현재 단계에 따라 나눠 담는다 */
+		case NVME_TCP_RECV_PDU:
+			result = nvme_tcp_recv_pdu(queue, skb, &offset, &len);	/* [한국어] 헤더를 모은다. 다 모이면 그 안에서 다음 단계가 정해진다 */
+			break;
+		case NVME_TCP_RECV_DATA:
+			result = nvme_tcp_recv_data(queue, skb, &offset, &len);	/* [한국어] 헤더가 알려 준 길이만큼 본문을 받는다 */
+			break;
+		case NVME_TCP_RECV_DDGST:
+			result = nvme_tcp_recv_ddgst(queue, skb, &offset, &len);	/* [한국어] 다이제스트 4바이트를 받아 검증한다 */
+			break;
+		default:
+			result = -EFAULT;	/* [한국어] 있을 수 없는 상태 — 방어적으로 오류 처리 */
+		}
+		if (result) {
+			dev_err(queue->ctrl->ctrl.device,
+				"receive failed:  %d\n", result);
+			queue->rd_enabled = false;	/* [한국어] 파싱이 어긋난 뒤의 바이트는 의미가 없다. 수신을 봉인해 깨진 상태로 계속 읽는 것을 막는다 */
+			nvme_tcp_error_recovery(&queue->ctrl->ctrl);	/* [한국어] 큐를 내리고 재연결을 시도하는 복구 경로로 넘긴다 */
+			return result;
+		}
+	}
 
-	return consumed;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
-}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	return consumed;
+}
 
 static void nvme_tcp_data_ready(struct sock *sk)	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 {	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
@@ -1372,109 +1629,193 @@ static int nvme_tcp_try_send_ddgst(struct nvme_tcp_request *req)	/* [한국어] 
 	return -EAGAIN;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 }	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
-static int nvme_tcp_try_send(struct nvme_tcp_queue *queue)	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-{	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	struct nvme_tcp_request *req;	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	unsigned int noreclaim_flag;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	int ret = 1;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+/*
+ * [한국어]
+ * nvme_tcp_try_send - 요청 하나를 보낼 수 있는 데까지 보낸다
+ *
+ * @queue: 대상 큐
+ * @return: 1 이면 진전이 있었고 더 보낼 것이 있을 수 있다. 0 이면 지금은 더
+ *          보낼 수 없다(보낼 요청이 없거나 소켓이 가득 찼다). 음수는 오류.
+ *
+ * 이것이 송신 상태 기계의 본체다. 아래 if 들이 else 없이 연달아 오는 것이
+ * 핵심 구조다 -- 한 번의 호출에서 여러 단계를 이어서 진행할 수 있어야 하기
+ * 때문이다. 명령 PDU 를 다 보내고 소켓에 여유가 남아 있으면 그 자리에서
+ * 데이터까지 밀어 넣는다.
+ *
+ * 단계 순서는 CMD_PDU → (H2C_PDU) → DATA → DDGST 다. 인라인 데이터가 없는
+ * 요청은 명령 PDU 만 보내고 out 으로 빠진다 -- 데이터는 타겟이 R2T 를 보낼
+ * 때까지 기다려야 하기 때문이다.
+ *
+ * -EAGAIN 을 0 으로 바꾸는 이유: 소켓 버퍼가 찬 것은 오류가 아니라 정상적인
+ * 배압이다. 남은 분량은 write_space 콜백이 깨워 줄 때 이어서 보낸다.
+ *
+ * memalloc_noreclaim 으로 감싸는 이유: 이 경로에서 메모리 회수가 일어나면
+ * 회수가 다시 이 블록 장치에 쓰기를 시도해 자기 자신을 기다리는 교착이 된다.
+ * 전송 중에는 회수를 금지해 그 고리를 끊는다.
+ *
+ * 실행 컨텍스트: io_work 또는 blk-mq poll. send_mutex 는 호출자가 잡는다.
+ *
+ * 호출 체인:
+ *   nvme_tcp_io_work → [이 함수] → try_send_cmd_pdu / _data_pdu / _data / _ddgst
+ */
+static int nvme_tcp_try_send(struct nvme_tcp_queue *queue)
+{
+	struct nvme_tcp_request *req;
+	unsigned int noreclaim_flag;	/* [한국어] 회수 금지 이전 상태 — 나갈 때 되돌린다 */
+	int ret = 1;
 
-	if (!queue->request) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		queue->request = nvme_tcp_fetch_request(queue);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		if (!queue->request)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-			return 0;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
-	}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	req = queue->request;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	if (!queue->request) {	/* [한국어] 이어서 보낼 요청이 없으면 새로 꺼낸다 */
+		queue->request = nvme_tcp_fetch_request(queue);	/* [한국어] req_list 를 걷어 send_list 로 옮기고 하나를 집는다 */
+		if (!queue->request)
+			return 0;	/* [한국어] 보낼 것이 없다 — io_work 는 여기서 수신 쪽으로 넘어간다 */
+	}
+	req = queue->request;
 
-	noreclaim_flag = memalloc_noreclaim_save();	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	if (req->state == NVME_TCP_SEND_CMD_PDU) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		ret = nvme_tcp_try_send_cmd_pdu(req);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		if (ret <= 0)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-			goto done;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
-		if (!nvme_tcp_has_inline_data(req))	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-			goto out;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
-	}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	noreclaim_flag = memalloc_noreclaim_save();	/* [한국어] 전송 중 메모리 회수 금지 — 자기 장치에 쓰기를 유발하는 교착을 막는다 */
+	if (req->state == NVME_TCP_SEND_CMD_PDU) {	/* [한국어] 1단계: 명령 PDU 헤더(+인라인 데이터) */
+		ret = nvme_tcp_try_send_cmd_pdu(req);
+		if (ret <= 0)	/* [한국어] 다 못 보냈거나 오류 — 다음 기회에 이어 간다 */
+			goto done;
+		if (!nvme_tcp_has_inline_data(req))	/* [한국어] 인라인 데이터가 없는 요청이면 */
+			goto out;	/* [한국어] 여기서 끝. 데이터는 타겟의 R2T 를 받고 나서야 보낸다 */
+	}
 
-	if (req->state == NVME_TCP_SEND_H2C_PDU) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		ret = nvme_tcp_try_send_data_pdu(req);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		if (ret <= 0)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-			goto done;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
-	}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	if (req->state == NVME_TCP_SEND_H2C_PDU) {	/* [한국어] 2단계: R2T 에 응답하는 H2C 데이터 PDU 헤더 */
+		ret = nvme_tcp_try_send_data_pdu(req);
+		if (ret <= 0)
+			goto done;
+	}
 
-	if (req->state == NVME_TCP_SEND_DATA) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		ret = nvme_tcp_try_send_data(req);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		if (ret <= 0)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-			goto done;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
-	}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	if (req->state == NVME_TCP_SEND_DATA) {	/* [한국어] 3단계: 데이터 본문. 크기에 따라 여러 번 머문다 */
+		ret = nvme_tcp_try_send_data(req);
+		if (ret <= 0)
+			goto done;
+	}
 
-	if (req->state == NVME_TCP_SEND_DDGST)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		ret = nvme_tcp_try_send_ddgst(req);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-done:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	if (ret == -EAGAIN) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		ret = 0;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	} else if (ret < 0) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		dev_err(queue->ctrl->ctrl.device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			"failed to send request %d\n", ret);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		nvme_tcp_fail_request(queue->request);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		nvme_tcp_done_send_req(queue);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-out:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	memalloc_noreclaim_restore(noreclaim_flag);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	return ret;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
-}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	if (req->state == NVME_TCP_SEND_DDGST)	/* [한국어] 4단계: 데이터 다이제스트 4바이트. data_digest 협상 시에만 */
+		ret = nvme_tcp_try_send_ddgst(req);
+done:
+	if (ret == -EAGAIN) {	/* [한국어] 소켓 버퍼가 찼다 — 오류가 아니라 배압이다 */
+		ret = 0;	/* [한국어] 0 으로 바꿔 "지금은 못 보낸다"로 보고. write_space 가 깨워 주면 이어 간다 */
+	} else if (ret < 0) {	/* [한국어] 진짜 오류 — 소켓이 끊겼거나 프로토콜이 깨졌다 */
+		dev_err(queue->ctrl->ctrl.device,
+			"failed to send request %d\n", ret);
+		nvme_tcp_fail_request(queue->request);	/* [한국어] 이 요청을 실패로 완료시킨다 */
+		nvme_tcp_done_send_req(queue);	/* [한국어] 큐의 현재 요청 자리를 비워 다음 요청으로 넘어가게 한다 */
+	}
+out:
+	memalloc_noreclaim_restore(noreclaim_flag);	/* [한국어] 회수 금지를 해제 — 반드시 짝을 맞춰야 한다 */
+	return ret;
+}
 
-static int nvme_tcp_try_recv(struct nvme_tcp_queue *queue)	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-{	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	struct socket *sock = queue->sock;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	struct sock *sk = sock->sk;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	read_descriptor_t rd_desc;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	int consumed;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+/*
+ * [한국어]
+ * nvme_tcp_try_recv - 소켓에 쌓인 바이트를 수신 상태 기계에 흘려 넣는다
+ *
+ * @queue: 대상 큐
+ * @return: 소비한 바이트 수. 읽을 것이 없으면 0. 음수면 오류.
+ *
+ * 직접 recvmsg 를 부르지 않고 read_sock 을 쓰는 것이 요점이다. read_sock 은
+ * 소켓에 도착한 skb 를 복사 없이 콜백(nvme_tcp_recv_skb)에 그대로 넘겨 준다.
+ * 그래서 PDU 파싱이 커널 버퍼 위에서 바로 이뤄지고, 중간 복사가 한 번 줄어든다.
+ *
+ * nr_cqe 를 여기서 0 으로 되돌리는 이유: 이번 수신에서 몇 개의 요청을 완료
+ * 시켰는지 세기 위해서다. blk-mq poll 은 그 개수를 반환값으로 요구한다.
+ *
+ * -EAGAIN 을 0 으로 바꾸는 것은 송신 쪽과 같은 이유다. 읽을 것이 없는 것은
+ * 오류가 아니라 정상 상태이며, data_ready 콜백이 다음 도착을 알려 준다.
+ *
+ * lock_sock 으로 감싸는 이유: read_sock 은 소켓의 수신 큐를 직접 훑으므로,
+ * 소프트IRQ 문맥의 네트워크 스택이 동시에 그것을 건드리면 안 된다.
+ *
+ * 실행 컨텍스트: io_work 또는 blk-mq poll. lock_sock 은 잠들 수 있다.
+ *
+ * 호출 체인:
+ *   nvme_tcp_io_work / nvme_tcp_poll → [이 함수] → read_sock → nvme_tcp_recv_skb
+ */
+static int nvme_tcp_try_recv(struct nvme_tcp_queue *queue)
+{
+	struct socket *sock = queue->sock;
+	struct sock *sk = sock->sk;
+	read_descriptor_t rd_desc;	/* [한국어] read_sock 이 콜백에 함께 넘길 문맥 */
+	int consumed;
 
-	rd_desc.arg.data = queue;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	rd_desc.count = 1;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	lock_sock(sk);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	queue->nr_cqe = 0;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	consumed = sock->ops->read_sock(sk, &rd_desc, nvme_tcp_recv_skb);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	release_sock(sk);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	return consumed == -EAGAIN ? 0 : consumed;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
-}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	rd_desc.arg.data = queue;	/* [한국어] 콜백이 이 큐를 되찾을 수 있게 심어 둔다 */
+	rd_desc.count = 1;	/* [한국어] 0 이 아니기만 하면 된다 — read_sock 이 계속 진행할지 판단하는 값이다 */
+	lock_sock(sk);	/* [한국어] 수신 큐를 직접 훑으므로 네트워크 스택과의 동시 접근을 막는다 */
+	queue->nr_cqe = 0;	/* [한국어] 이번 수신에서 완료시킨 요청 수를 새로 센다 — poll 이 이 값을 요구한다 */
+	consumed = sock->ops->read_sock(sk, &rd_desc, nvme_tcp_recv_skb);	/* [한국어] 도착한 skb 를 복사 없이 파서에 그대로 넘긴다 */
+	release_sock(sk);
+	return consumed == -EAGAIN ? 0 : consumed;	/* [한국어] 읽을 것이 없는 것은 오류가 아니다 — data_ready 가 다음을 알려 준다 */
+}
 
-static void nvme_tcp_io_work(struct work_struct *w)	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-{	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	struct nvme_tcp_queue *queue =	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		container_of(w, struct nvme_tcp_queue, io_work);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	unsigned long deadline = jiffies + msecs_to_jiffies(1);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+/*
+ * [한국어]
+ * nvme_tcp_io_work - 이 큐의 송신과 수신을 한 문맥에서 번갈아 처리한다
+ *
+ * @w: 큐에 박혀 있는 io_work
+ * @return: 없음
+ *
+ * 이 파일의 동시성 설계가 여기 압축돼 있다. 큐마다 work 가 하나뿐이고 송신과
+ * 수신을 모두 이것이 맡으므로, work 실행 자체가 직렬화 장치가 된다. 소켓을
+ * 두 문맥이 동시에 만지는 일이 없어 별도 잠금이 대부분 필요 없다.
+ *
+ * 루프를 도는 이유: 한 번 깨어났을 때 가능한 한 많이 처리해야 재스케줄 비용을
+ * 아낀다. 다만 무한정 붙잡으면 같은 CPU 의 다른 work 가 굶으므로, 1밀리초
+ * 예산을 두고 그것을 넘기면 스스로를 다시 큐에 넣어 양보한다.
+ *
+ * send_mutex 를 trylock 으로만 잡는 이유: 제출 경로(queue_rq)도 직접 보낼 수
+ * 있어 이 잠금을 들고 있을 수 있다. 여기서 기다리면 io_work 가 그 제출을
+ * 막는 셈이 되므로, 실패하면 송신을 건너뛰고 수신부터 처리한다. 못 보낸
+ * 분량은 다음 순회나 write_space 콜백이 처리한다.
+ *
+ * 수신 후 다시 송신 여지를 확인하는 것(위 영어 주석의 "did we get some space")
+ * 은, 수신을 처리하는 동안 상대가 ACK 를 보내 송신 버퍼가 비었을 수 있기
+ * 때문이다. 그 경우 곧바로 한 바퀴 더 돈다.
+ *
+ * 실행 컨텍스트: 워크큐. io_cpu 에 고정되어 큐마다 다른 코어에서 돈다.
+ *
+ * 호출 체인:
+ *   data_ready / write_space 콜백, queue_rq → queue_work_on → [이 함수]
+ *     → nvme_tcp_try_send / nvme_tcp_try_recv
+ */
+static void nvme_tcp_io_work(struct work_struct *w)
+{
+	struct nvme_tcp_queue *queue =
+		container_of(w, struct nvme_tcp_queue, io_work);
+	unsigned long deadline = jiffies + msecs_to_jiffies(1);	/* [한국어] 1밀리초 예산 — 이 CPU 의 다른 work 를 굶기지 않기 위한 상한 */
 
-	do {	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		bool pending = false;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		int result;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	do {
+		bool pending = false;	/* [한국어] 이번 바퀴에 진전이 있었는가 — 없으면 더 돌 이유가 없다 */
+		int result;
 
-		if (mutex_trylock(&queue->send_mutex)) {	/* [한국어] 동기화 — 큐/연결/상태 공유 보호 */
-			result = nvme_tcp_try_send(queue);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-			mutex_unlock(&queue->send_mutex);	/* [한국어] 동기화 — 큐/연결/상태 공유 보호 */
-			if (result > 0)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-				pending = true;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			else if (unlikely(result < 0))	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-				break;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		if (mutex_trylock(&queue->send_mutex)) {	/* [한국어] 제출 경로가 들고 있으면 기다리지 않고 건너뛴다 */
+			result = nvme_tcp_try_send(queue);
+			mutex_unlock(&queue->send_mutex);
+			if (result > 0)
+				pending = true;	/* [한국어] 뭔가 보냈다 — 더 보낼 것이 남았을 수 있다 */
+			else if (unlikely(result < 0))
+				break;	/* [한국어] 송신 오류. 루프를 빠져나가 아래에서 재스케줄한다 */
+		}
 
-		result = nvme_tcp_try_recv(queue);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		if (result > 0)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-			pending = true;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		else if (unlikely(result < 0))	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-			return;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+		result = nvme_tcp_try_recv(queue);	/* [한국어] 송신을 건너뛰었더라도 수신은 항상 시도한다 */
+		if (result > 0)
+			pending = true;
+		else if (unlikely(result < 0))
+			return;	/* [한국어] 수신 오류는 연결이 끊긴 것이므로 재스케줄하지 않고 끝낸다 */
 
 		/* did we get some space after spending time in recv? */
-		if (nvme_tcp_queue_has_pending(queue) &&	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		    sk_stream_is_writeable(queue->sock->sk))	/* [한국어] 커널 소켓 송수신 — TCP 바이트 스트림 PDU 운반 */
-			pending = true;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		if (nvme_tcp_queue_has_pending(queue) &&	/* [한국어] 보낼 것이 남아 있고 */
+		    sk_stream_is_writeable(queue->sock->sk))	/* [한국어] 수신 처리 사이에 ACK 로 송신 버퍼가 비었다면 */
+			pending = true;	/* [한국어] 곧바로 한 바퀴 더 돈다 */
 
-		if (!pending || !queue->rd_enabled)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-			return;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+		if (!pending || !queue->rd_enabled)	/* [한국어] 진전이 없거나 큐가 내려가는 중이면 */
+			return;	/* [한국어] 재스케줄 없이 끝낸다 — 다음 콜백이 깨워 줄 것이다 */
 
-	} while (!time_after(jiffies, deadline)); /* quota is exhausted */	/* [한국어] 순회 — 큐·요청·세그먼트·이벤트 처리 */
+	} while (!time_after(jiffies, deadline)); /* quota is exhausted */
 
-	queue_work_on(queue->io_cpu, nvme_tcp_wq, &queue->io_work);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	queue_work_on(queue->io_cpu, nvme_tcp_wq, &queue->io_work);	/* [한국어] 예산을 다 썼지만 할 일이 남았다 — 자신을 다시 큐에 넣어 양보한다 */
+}
 
 static void nvme_tcp_free_async_req(struct nvme_tcp_ctrl *ctrl)	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 {	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
@@ -2823,29 +3164,56 @@ static void nvme_tcp_commit_rqs(struct blk_mq_hw_ctx *hctx)	/* [한국어] NVMe/
 		queue_work_on(queue->io_cpu, nvme_tcp_wq, &queue->io_work);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 }	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
-static blk_status_t nvme_tcp_queue_rq(struct blk_mq_hw_ctx *hctx,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		const struct blk_mq_queue_data *bd)	/* [한국어] blk-mq — 태그·hctx·타임아웃·맵·완료 연동 */
-{	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	struct nvme_ns *ns = hctx->queue->queuedata;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	struct nvme_tcp_queue *queue = hctx->driver_data;	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	struct request *rq = bd->rq;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	struct nvme_tcp_request *req = blk_mq_rq_to_pdu(rq);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	bool queue_ready = test_bit(NVME_TCP_Q_LIVE, &queue->flags);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	blk_status_t ret;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+/*
+ * [한국어]
+ * nvme_tcp_queue_rq - blk-mq 가 요청 하나를 이 트랜스포트에 넘기는 진입점
+ *
+ * @hctx: 이 요청이 배정된 하드웨어 큐 문맥. driver_data 에 nvme_tcp_queue 가 들어 있다.
+ * @bd:   요청과 배치 힌트(last). last 가 false 면 뒤에 더 올 것이 있다는 뜻이다.
+ * @return: BLK_STS_OK 면 접수. 그 밖의 값은 blk-mq 가 재큐잉하거나 실패시킨다.
+ *
+ * 여기서 실제로 소켓에 쓰지 않는다는 점이 RDMA/PCI 와 크게 다르다. 이 함수는
+ * PDU 를 준비해 큐의 입력 목록(req_list)에 밀어 넣고 끝난다. 실제 전송은
+ * io_work 가 자기 CPU 에서 한다. 그래야 제출자가 소켓 쓰기의 블로킹에
+ * 붙잡히지 않고, 큐당 전송이 한 문맥으로 직렬화된다.
+ *
+ * nvme_check_ready 가 앞에 오는 이유: 큐가 아직 LIVE 가 아니거나 컨트롤러가
+ * 재연결 중이면 요청을 보낼 수 없다. 그때 그냥 실패시킬지, 재시도로 돌릴지,
+ * 다중 경로로 넘길지는 코어의 정책이라 nvme_fail_nonready_command 에 맡긴다.
+ *
+ * bd->last 를 넘기는 이유: 마지막 요청이면 io_work 를 즉시 깨워야 하고,
+ * 뒤에 더 올 것이 있으면 모아서 한 번에 처리하는 편이 낫다. 배치 힌트가
+ * 소켓 write 횟수를 줄인다.
+ *
+ * 실행 컨텍스트: blk-mq 제출 경로. 잠들 수 없다.
+ *
+ * 호출 체인:
+ *   submit_bio → blk-mq → [이 함수] → nvme_tcp_setup_cmd_pdu
+ *     → nvme_tcp_queue_request → (io_work 가 실제 전송)
+ */
+static blk_status_t nvme_tcp_queue_rq(struct blk_mq_hw_ctx *hctx,
+		const struct blk_mq_queue_data *bd)
+{
+	struct nvme_ns *ns = hctx->queue->queuedata;	/* [한국어] 이 요청이 향하는 네임스페이스. admin 명령이면 NULL 이다 */
+	struct nvme_tcp_queue *queue = hctx->driver_data;	/* [한국어] blk-mq 하드웨어 큐에 붙여 둔 우리 큐 */
+	struct request *rq = bd->rq;
+	struct nvme_tcp_request *req = blk_mq_rq_to_pdu(rq);	/* [한국어] 태그에 미리 붙어 있는 이 요청의 TCP 상태 */
+	bool queue_ready = test_bit(NVME_TCP_Q_LIVE, &queue->flags);	/* [한국어] Connect 까지 끝나 명령을 받을 수 있는 큐인가 */
+	blk_status_t ret;
 
-	if (!nvme_check_ready(&queue->ctrl->ctrl, rq, queue_ready))	/* [한국어] NVMe core API — SQE 조립·완료·상태기계·수명 */
-		return nvme_fail_nonready_command(&queue->ctrl->ctrl, rq);	/* [한국어] NVMe core API — SQE 조립·완료·상태기계·수명 */
+	if (!nvme_check_ready(&queue->ctrl->ctrl, rq, queue_ready))	/* [한국어] 컨트롤러 상태와 큐 준비 여부를 코어 정책으로 판정 */
+		return nvme_fail_nonready_command(&queue->ctrl->ctrl, rq);	/* [한국어] 재시도할지 다중 경로로 넘길지는 코어가 정한다 */
 
-	ret = nvme_tcp_setup_cmd_pdu(ns, rq);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	if (unlikely(ret))	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		return ret;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	ret = nvme_tcp_setup_cmd_pdu(ns, rq);	/* [한국어] 명령을 PDU 로 조립하고 인라인 여부·전송 단계를 정한다 */
+	if (unlikely(ret))
+		return ret;
 
-	nvme_start_request(rq);	/* [한국어] NVMe core API — SQE 조립·완료·상태기계·수명 */
+	nvme_start_request(rq);	/* [한국어] 타임아웃 시계를 시작하고 통계를 연다 — 이 시점부터 요청이 '진행 중'이다 */
 
-	nvme_tcp_queue_request(req, bd->last);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+	nvme_tcp_queue_request(req, bd->last);	/* [한국어] 입력 목록에 넣는다. 여기서 소켓에 쓰지 않는 것이 이 트랜스포트의 특징이다 */
 
-	return BLK_STS_OK;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
-}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	return BLK_STS_OK;	/* [한국어] 접수 완료. 실제 전송과 완료는 io_work 와 수신 경로가 맡는다 */
+}
 
 static void nvme_tcp_map_queues(struct blk_mq_tag_set *set)	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 {	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
