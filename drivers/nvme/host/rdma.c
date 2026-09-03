@@ -64,59 +64,129 @@
  * - struct nvme_rdma_request: 요청별 등록 상태 -- 사용한 MR, sg 테이블, 캡슐 버퍼.
  */
 
-#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt	/* [한국어] 상수/매크로 — PDU·큐·타임아웃·플래그 */
-#include <linux/module.h>	/* [한국어] 의존 헤더 — 스펙·블록·네트/RDMA/FC API */
-#include <linux/init.h>	/* [한국어] 의존 헤더 — 스펙·블록·네트/RDMA/FC API */
-#include <linux/slab.h>	/* [한국어] 의존 헤더 — 스펙·블록·네트/RDMA/FC API */
-#include <rdma/mr_pool.h>	/* [한국어] 의존 헤더 — 스펙·블록·네트/RDMA/FC API */
-#include <linux/err.h>	/* [한국어] 의존 헤더 — 스펙·블록·네트/RDMA/FC API */
-#include <linux/string.h>	/* [한국어] 의존 헤더 — 스펙·블록·네트/RDMA/FC API */
-#include <linux/atomic.h>	/* [한국어] 의존 헤더 — 스펙·블록·네트/RDMA/FC API */
-#include <linux/blk-mq.h>	/* [한국어] 의존 헤더 — 스펙·블록·네트/RDMA/FC API */
-#include <linux/blk-integrity.h>	/* [한국어] 의존 헤더 — 스펙·블록·네트/RDMA/FC API */
-#include <linux/types.h>	/* [한국어] 의존 헤더 — 스펙·블록·네트/RDMA/FC API */
-#include <linux/list.h>	/* [한국어] 의존 헤더 — 스펙·블록·네트/RDMA/FC API */
-#include <linux/mutex.h>	/* [한국어] 의존 헤더 — 스펙·블록·네트/RDMA/FC API */
-#include <linux/scatterlist.h>	/* [한국어] 의존 헤더 — 스펙·블록·네트/RDMA/FC API */
-#include <linux/nvme.h>	/* [한국어] 의존 헤더 — 스펙·블록·네트/RDMA/FC API */
-#include <linux/unaligned.h>	/* [한국어] 의존 헤더 — 스펙·블록·네트/RDMA/FC API */
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt	/* [한국어] pr_fmt 재정의 — 이 파일의 모든 pr_* 로그 앞에 "nvme_rdma: " 가 붙는다 */
+#include <linux/module.h>	/* [한국어] module_init/exit, MODULE_* 매크로 — 이 파일은 nvme-rdma.ko 로 빌드된다 */
+#include <linux/init.h>	/* [한국어] __init/__exit 섹션 표시 */
+#include <linux/slab.h>	/* [한국어] kmalloc/kfree — 큐 배열과 응답 링 할당 */
+#include <rdma/mr_pool.h>	/* [한국어] ib_mr_pool_* — QP 마다 MR 을 미리 잡아 두는 풀. 요청마다 MR 을 새로 만들면 등록 비용이 감당되지 않는다 */
+#include <linux/err.h>	/* [한국어] IS_ERR/PTR_ERR — RDMA API 는 오류를 포인터에 실어 돌려주는 관례를 쓴다 */
+#include <linux/string.h>	/* [한국어] memcpy/strcmp 등 문자열·메모리 헬퍼 */
+#include <linux/atomic.h>	/* [한국어] atomic_t — 큐 상태 플래그와 참조 계수 */
+#include <linux/blk-mq.h>	/* [한국어] blk-mq tagset/hctx/request — 이 트랜스포트가 블록 계층에 붙는 접점 */
+#include <linux/blk-integrity.h>	/* [한국어] blk_integrity — T10-PI 보호 정보. RDMA 는 signature MR 로 이를 오프로드한다 */
+#include <linux/types.h>	/* [한국어] u8/u16/__le16 등 고정폭 타입 */
+#include <linux/list.h>	/* [한국어] list_head — 장치 목록과 컨트롤러 목록 */
+#include <linux/mutex.h>	/* [한국어] mutex — 장치 목록과 컨트롤러 목록의 보호 */
+#include <linux/scatterlist.h>	/* [한국어] scatterlist — 요청 데이터를 페이지 조각 목록으로 표현 */
+#include <linux/nvme.h>	/* [한국어] NVMe 스펙 구조체와 상수 (nvme_command, NVME_SC_* 등) */
+#include <linux/unaligned.h>	/* [한국어] get_unaligned_le* — 캡슐 안 정렬되지 않은 필드 읽기 */
 
-#include <rdma/ib_verbs.h>	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
-#include <rdma/rdma_cm.h>	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
-#include <linux/nvme-rdma.h>	/* [한국어] 의존 헤더 — 스펙·블록·네트/RDMA/FC API */
+#include <rdma/ib_verbs.h>	/* [한국어] ib_verbs 핵심 API — QP/CQ/MR/PD 생성과 WR 게시. 이 파일의 실질적 하위 계층 */
+#include <rdma/rdma_cm.h>	/* [한국어] RDMA Connection Manager — 주소 해석, 라우팅, 연결 수립/단절 이벤트 */
+#include <linux/nvme-rdma.h>	/* [한국어] NVMe-over-RDMA 와이어 포맷 — 명령 캡슐과 SGL 서술자 레이아웃 */
 
-#include "nvme.h"	/* [한국어] 의존 헤더 — 스펙·블록·네트/RDMA/FC API */
-#include "fabrics.h"	/* [한국어] 의존 헤더 — 스펙·블록·네트/RDMA/FC API */
+#include "nvme.h"	/* [한국어] nvme_ctrl / nvme_ctrl_ops 등 코어 계약. 이 파일이 채워 등록한다 */
+#include "fabrics.h"	/* [한국어] Fabrics 공통부 — 연결 옵션 파싱과 Connect/Property 명령 */
 
 
-#define NVME_RDMA_CM_TIMEOUT_MS		3000		/* 3 second */	/* [한국어] 상수/매크로 — PDU·큐·타임아웃·플래그 */
+#define NVME_RDMA_CM_TIMEOUT_MS		3000		/* 3 second */	/* [한국어] RDMA CM 연산의 타임아웃(ms). 주소 해석과 라우팅 각 단계에 적용된다 */
 
-#define NVME_RDMA_MAX_SEGMENTS		256	/* [한국어] 상수/매크로 — PDU·큐·타임아웃·플래그 */
+#define NVME_RDMA_MAX_SEGMENTS		256	/* [한국어] 한 요청이 가질 수 있는 최대 세그먼트 수. 이 값이 queue_limits 의 max_segments 가 되어 블록 계층의 bio 분할 단위를 정한다 */
 
-#define NVME_RDMA_MAX_INLINE_SEGMENTS	4	/* [한국어] 상수/매크로 — PDU·큐·타임아웃·플래그 */
+#define NVME_RDMA_MAX_INLINE_SEGMENTS	4	/* [한국어] 인라인으로 실을 수 있는 최대 세그먼트 수. 이보다 작은 전송은 MR 등록 없이 명령 캡슐에 데이터를 함께 담아 왕복을 줄인다 */
 
+/* [한국어] 요청에 미리 박아 두는 데이터 scatterlist 의 바이트 크기.
+ * 이만큼은 별도 할당 없이 요청 구조체 안에서 해결되므로, 세그먼트가 적은
+ * 흔한 요청은 추가 할당 없이 처리된다. 줄 연속(\) 뒤에는 주석을 둘 수 없어
+ * 매크로 위에 적는다. */
 #define NVME_RDMA_DATA_SGL_SIZE \
-	(sizeof(struct scatterlist) * NVME_INLINE_SG_CNT)	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
+	(sizeof(struct scatterlist) * NVME_INLINE_SG_CNT)
+/* [한국어] 메타데이터(보호 정보) scatterlist 의 바이트 크기. 데이터와 별도
+ * SGL 을 쓰기 때문에 따로 잡는다. T10-PI 가 꺼진 네임스페이스에서는 쓰이지 않는다. */
 #define NVME_RDMA_METADATA_SGL_SIZE \
-	(sizeof(struct scatterlist) * NVME_INLINE_METADATA_SG_CNT)	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
+	(sizeof(struct scatterlist) * NVME_INLINE_METADATA_SG_CNT)
 
-struct nvme_rdma_device {	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	struct ib_device	*dev;	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
-	struct ib_pd		*pd;	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
-	struct kref		ref;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	struct list_head	entry;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	unsigned int		num_inline_segments;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+/* [한국어] 하나의 RDMA 장치(HCA)를 나타내는 공유 객체.
+ * 여러 컨트롤러가 같은 HCA 를 쓸 수 있으므로 장치별로 하나만 두고 참조 계수로
+ * 공유한다. PD 는 장치 단위 자원이라 컨트롤러마다 새로 만들 이유가 없다. */
+struct nvme_rdma_device {
+	/* [한국어] ib_verbs 가 보는 실제 HCA.
+	 * 설정자: nvme_rdma_find_get_device() 가 CM ID 의 verbs 포인터에서 얻는다.
+	 * 읽는 자: DMA 매핑, MR 등록, QP 생성 등 모든 verbs 호출의 첫 인자.
+	 * 값 범위: 유효한 포인터. 장치가 제거되면 이 객체 전체가 해제된다.
+	 * 동기화: device_list_mutex 가 목록을, ref 가 수명을 지킨다. */
+	struct ib_device	*dev;
+	/* [한국어] Protection Domain — 이 장치에서 만드는 MR 과 QP 가 속하는 보호 영역.
+	 * 같은 PD 안의 자원끼리만 서로를 참조할 수 있어, 컨트롤러 사이의 격리 경계가 된다.
+	 * 설정자: nvme_rdma_find_get_device() 가 ib_alloc_pd() 로 한 번 만든다.
+	 * 읽는 자: MR 풀 초기화와 QP 생성.
+	 * 동기화: 생성 후 불변. */
+	struct ib_pd		*pd;
+	/* [한국어] 이 장치 객체의 참조 계수.
+	 * 왜 필요한가: 여러 컨트롤러가 같은 HCA 를 공유하므로, 마지막 사용자가
+	 *   사라질 때만 PD 를 풀어야 한다.
+	 * 설정자/읽는 자: nvme_rdma_find_get_device 가 올리고
+	 *   nvme_rdma_dev_put 이 내린다. 0 이 되면 nvme_rdma_free_dev 가 불린다.
+	 * 동기화: kref 자체가 원자적이지만, 목록에서 빼는 일은 device_list_mutex 아래서 한다. */
+	struct kref		ref;
+	/* [한국어] 전역 device_list 에 매달리기 위한 연결 고리.
+	 * 설정자: 장치를 처음 만들 때 list_add.
+	 * 읽는 자: nvme_rdma_find_get_device 가 같은 HCA 가 이미 있는지 훑을 때.
+	 * 동기화: device_list_mutex. */
+	struct list_head	entry;
+	/* [한국어] 이 HCA 가 한 WR 에 실을 수 있는 인라인 세그먼트 수.
+	 * 왜 중요한가: 인라인으로 보낼 수 있으면 MR 등록 없이 명령 캡슐에 데이터를
+	 *   함께 담아 왕복을 줄일 수 있다. 작은 I/O 의 지연이 여기서 갈린다.
+	 * 설정자: 장치 생성 시 HCA 의 max_send_sge 와 NVME_RDMA_MAX_INLINE_SEGMENTS
+	 *   중 작은 값으로 정한다.
+	 * 읽는 자: nvme_rdma_map_sg_inline 이 인라인 가능 여부를 판정할 때.
+	 * 동기화: 생성 후 불변. */
+	unsigned int		num_inline_segments;
 };	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
-struct nvme_rdma_qe {	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	struct ib_cqe		cqe;	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
-	void			*data;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	u64			dma;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+/* [한국어] Queue Element — DMA 로 주고받는 버퍼 하나와 그 완료 콜백을 묶은 것.
+ * 명령 캡슐(송신)과 응답 캡슐(수신) 양쪽에 같은 모양이 쓰인다. */
+struct nvme_rdma_qe {
+	/* [한국어] 이 버퍼에 대한 완료가 올라올 때 불릴 콜백.
+	 * 왜 구조체 안에 두나: ib_verbs 는 완료 큐 항목에 ib_cqe 포인터만 실어 주므로,
+	 *   콜백에서 container_of 로 이 qe 를 되찾는 것이 유일한 연결 수단이다.
+	 * 설정자: 송신은 nvme_rdma_send_done, 수신은 nvme_rdma_recv_done 을 건다.
+	 * 읽는 자: ib_poll_cq 가 완료를 꺼내며 이 함수를 부른다.
+	 * 동기화: 완료 처리 문맥에서만 다뤄진다. */
+	struct ib_cqe		cqe;
+	/* [한국어] 캡슐 내용이 담긴 커널 가상 주소.
+	 * 설정자: nvme_rdma_alloc_qe 가 kzalloc 으로 잡는다.
+	 * 읽는 자: 송신 전 명령을 채울 때, 수신 후 응답을 읽을 때.
+	 * 값 범위: 캡슐 크기(보통 명령 64B, 응답 16B + 여유)만큼 유효.
+	 * 동기화: 요청 하나에 묶여 있어 공유되지 않는다. */
+	void			*data;
+	/* [한국어] 위 버퍼를 HCA 가 접근할 수 있게 매핑한 DMA 주소.
+	 * 왜 따로 두나: HCA 는 CPU 가상 주소를 모르므로 WR 의 SGE 에는 이 값을 실어야 한다.
+	 * 설정자: nvme_rdma_alloc_qe 의 ib_dma_map_single.
+	 * 읽는 자: WR 을 조립할 때, 그리고 해제 시 ib_dma_unmap_single.
+	 * 동기화: 매핑 이후 불변. */
+	u64			dma;
 };	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
-struct nvme_rdma_sgl {	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	int			nents;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	struct sg_table		sg_table;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
+/* [한국어] 요청 데이터를 표현하는 scatterlist 와 그 유효 항목 수를 묶은 것.
+ * 데이터용과 메타데이터용으로 각각 하나씩 쓰인다. */
+struct nvme_rdma_sgl {
+	/* [한국어] DMA 매핑을 마친 뒤 실제로 유효한 항목 수.
+	 * 왜 sg_table.nents 와 따로 두나: ib_dma_map_sg 는 인접한 조각을 합칠 수 있어
+	 *   매핑 후 개수가 매핑 전보다 줄어들 수 있다. 이 값이 매핑 후 개수이고,
+	 *   WR 을 조립하거나 MR 을 등록할 때 기준이 되는 쪽이다.
+	 * 설정자: nvme_rdma_map_data 의 ib_dma_map_sg 반환값.
+	 * 읽는 자: 인라인/단일 SGE/MR 등록 중 무엇을 쓸지 고르는 판정과 해제 경로.
+	 * 동기화: 요청 단위. */
+	int			nents;
+	/* [한국어] 요청의 데이터 조각 목록. 블록 계층의 bio 를 훑어 채운다.
+	 * 설정자: nvme_rdma_map_data 가 sg_alloc_table_chained 로 잡고
+	 *   blk_rq_map_sg 로 채운다.
+	 * 읽는 자: DMA 매핑, MR 등록, 인라인 복사 경로.
+	 * 값 범위: 항목 수는 NVME_RDMA_MAX_SEGMENTS 이하. 작은 요청은 요청 구조체
+	 *   안의 예약 공간(NVME_RDMA_DATA_SGL_SIZE)으로 해결돼 별도 할당이 없다.
+	 * 동기화: 요청 단위. */
+	struct sg_table		sg_table;
 };	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
 struct nvme_rdma_queue;	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
