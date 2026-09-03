@@ -86,9 +86,16 @@
 /* *************************** Data Structures/Defines ****************** */
 
 
-enum nvme_fc_queue_flags {	/* [한국어] NVMe/FC LS·FCP·rport 경로 헬퍼 */
-	NVME_FC_Q_CONNECTED = 0,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	NVME_FC_Q_LIVE,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+/* [한국어] FC 큐의 두 단계. FC 는 세션 계층이 따로 있어 "채널이 열렸는가"와
+ * "NVMe 명령을 받을 수 있는가"가 별개의 사건이다. */
+enum nvme_fc_queue_flags {
+	/* [한국어] Create Connection LS 가 성공해 이 큐에 대응하는 FC 채널이 열렸다.
+	 * 아직 Fabrics Connect 전이라 NVMe 명령은 보낼 수 없지만, 해체 시
+	 * Disconnect LS 를 보내야 할 대상은 이미 존재한다는 표시다. */
+	NVME_FC_Q_CONNECTED = 0,
+	/* [한국어] Fabrics Connect 까지 끝나 이 큐로 I/O 를 보낼 수 있다.
+	 * 읽는 자: queue_rq 가 아직 준비 안 된 큐의 요청을 거르는 기준. */
+	NVME_FC_Q_LIVE,
 };	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
 #define NVME_FC_DEFAULT_DEV_LOSS_TMO	60	/* seconds */	/* [한국어] 상수/매크로 — PDU·큐·타임아웃·플래그 */
@@ -97,39 +104,90 @@ enum nvme_fc_queue_flags {	/* [한국어] NVMe/FC LS·FCP·rport 경로 헬퍼 *
 						 * connection failure.
 						 */
 
-struct nvme_fc_queue {	/* [한국어] NVMe/FC LS·FCP·rport 경로 헬퍼 */
-	struct nvme_fc_ctrl	*ctrl;	/* [한국어] NVMe/FC LS·FCP·rport 경로 헬퍼 */
-	struct device		*dev;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	struct blk_mq_hw_ctx	*hctx;	/* [한국어] blk-mq — 태그·hctx·타임아웃·맵·완료 연동 */
-	void			*lldd_handle;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	size_t			cmnd_capsule_len;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	u32			qnum;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	u32			rqcnt;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	u32			seqno;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+/* [한국어] FC 큐 하나. 다른 트랜스포트와 달리 여기에는 하드웨어 자원이 없다 --
+ * 프레임 송수신은 HBA 의 LLDD 가 하고, 이 구조체는 그 위에 얹힌 세션 정보다. */
+struct nvme_fc_queue {
+	/* [한국어] 이 큐가 속한 컨트롤러. 초기화 후 불변. */
+	struct nvme_fc_ctrl	*ctrl;
+	/* [한국어] DMA 매핑의 기준이 되는 장치. LLDD 의 struct device 를 그대로 쓴다.
+	 * 프레임을 실제로 옮기는 것이 HBA 이므로 매핑도 그쪽 장치 기준이어야 한다. */
+	struct device		*dev;
+	/* [한국어] 이 큐에 대응하는 blk-mq 하드웨어 큐 문맥. */
+	struct blk_mq_hw_ctx	*hctx;
+	/* [한국어] LLDD 가 이 큐를 식별하기 위해 돌려준 불투명 핸들.
+	 * 왜 불투명한가: 큐 자원을 어떻게 표현할지는 HBA 마다 다르므로 이 계층은
+	 *   내용을 해석하지 않고 콜백에 그대로 되돌려 준다.
+	 * 설정자: LLDD 의 create_queue 콜백. 읽는 자: 모든 fcp_io 요청. */
+	void			*lldd_handle;
+	/* [한국어] 명령 캡슐의 크기. 인라인 데이터 여부가 여기서 갈린다. */
+	size_t			cmnd_capsule_len;
+	/* [한국어] 큐 번호. 0 이 admin, 1 부터 I/O 다. */
+	u32			qnum;
+	/* [한국어] 이 큐로 보낸 요청 수. 통계 겸 디버깅용. */
+	u32			rqcnt;
+	/* [한국어] FC 익스체인지 시퀀스 번호. */
+	u32			seqno;
 
-	u64			connection_id;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	atomic_t		csn;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	/* [한국어] Create Connection LS 가 발급받은 Connection ID.
+	 * 왜 중요한가: 이후 이 큐로 나가는 모든 IU 가 이 값을 실어야 타겟이
+	 *   어느 큐의 명령인지 안다. PCIe 의 큐 ID 에 해당하지만, 값은 타겟이 정한다.
+	 * 설정자: nvme_fc_connect_queue 가 LS 응답에서 꺼낸다. */
+	u64			connection_id;
+	/* [한국어] Command Sequence Number. 명령마다 하나씩 증가한다.
+	 * 왜 원자적인가: 같은 큐에 여러 CPU 가 동시에 제출할 수 있고, 타겟은
+	 *   이 번호로 순서와 유실을 판단하므로 건너뛰거나 겹치면 안 된다. */
+	atomic_t		csn;
 
-	unsigned long		flags;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-} __aligned(sizeof(u64));	/* alignment for other things alloc'd with */	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	/* [한국어] 위 enum nvme_fc_queue_flags 의 비트 집합. */
+	unsigned long		flags;
+} __aligned(sizeof(u64));	/* alignment for other things alloc'd with */
+/* [한국어] 위 영어 주석대로, 이 구조체 뒤에 다른 것을 이어 할당하는 곳이 있어
+ * 8바이트 정렬을 강제한다. 정렬이 어긋나면 뒤따르는 구조체의 u64 필드가
+ * 비정렬 접근이 된다. */	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
-enum nvme_fcop_flags {	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	FCOP_FLAGS_TERMIO	= (1 << 0),	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	FCOP_FLAGS_AEN		= (1 << 1),	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+/* [한국어] FCP 오퍼레이션의 성격을 나타내는 플래그. */
+enum nvme_fcop_flags {
+	/* [한국어] 이 오퍼레이션은 종료(termination) 처리 중이다.
+	 * 왜 필요한가: 컨트롤러를 내릴 때 진행 중인 요청을 LLDD 에 abort 요청하는데,
+	 *   그 완료가 정상 완료와 구분되어야 한다. 이 비트가 서 있으면 완료 경로가
+	 *   재시도나 페일오버로 넘기지 않고 취소로 처리한다. */
+	FCOP_FLAGS_TERMIO	= (1 << 0),
+	/* [한국어] 이 오퍼레이션은 비동기 이벤트(AEN)용이다.
+	 * AEN 은 태그를 소비하지 않는 상주 명령이라 blk-mq 요청이 없고,
+	 * 완료 시 요청을 끝내는 대신 다시 제출해야 한다. 그 분기의 근거가 이 비트다. */
+	FCOP_FLAGS_AEN		= (1 << 1),
 };	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
-struct nvmefc_ls_req_op {	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	struct nvmefc_ls_req	ls_req;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
+/* [한국어] Link Service 요청 하나의 진행 상태.
+ * LS 는 데이터 I/O 와 별개의 제어 평면 메시지다 -- Create Association,
+ * Create Connection, Disconnect 가 모두 이 경로로 오간다. */
+struct nvmefc_ls_req_op {
+	/* [한국어] LLDD 에 넘길 요청 서술자. 반드시 맨 앞이어야 완료 콜백에서
+	 * container_of 로 이 구조체를 되찾을 수 있다. */
+	struct nvmefc_ls_req	ls_req;
 
-	struct nvme_fc_rport	*rport;	/* [한국어] NVMe/FC LS·FCP·rport 경로 헬퍼 */
-	struct nvme_fc_queue	*queue;	/* [한국어] NVMe/FC LS·FCP·rport 경로 헬퍼 */
-	struct request		*rq;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	u32			flags;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	/* [한국어] 이 LS 를 보낼 원격 포트. 참조를 하나 들고 있어, LS 가 끝나기 전에
+	 * 포트가 사라지지 않도록 한다. */
+	struct nvme_fc_rport	*rport;
+	/* [한국어] 이 LS 가 관련된 큐. Create/Disconnect Connection 에서 쓰인다. */
+	struct nvme_fc_queue	*queue;
+	/* [한국어] 이 LS 를 유발한 blk-mq 요청. 순수 제어 경로면 NULL 이다. */
+	struct request		*rq;
+	/* [한국어] 위 enum nvme_fcop_flags 조합. */
+	u32			flags;
 
-	int			ls_error;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	struct completion	ls_done;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	struct list_head	lsreq_list;	/* rport->ls_req_list */	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	bool			req_queued;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	/* [한국어] LS 의 결과. 완료 콜백은 값을 돌려줄 수 없어 여기 남긴다. */
+	int			ls_error;
+	/* [한국어] LS 완료를 기다리는 객체. 송신은 비동기지만 호출자는 대개
+	 * 여기서 잠들어 응답을 기다린다 -- 세션 수립은 순서가 있는 절차이기 때문이다. */
+	struct completion	ls_done;
+	/* [한국어] rport->ls_req_list 에 매달리는 고리. 포트가 사라질 때
+	 * 진행 중인 LS 를 찾아 취소하기 위해 목록으로 관리한다. */
+	struct list_head	lsreq_list;	/* rport->ls_req_list */
+	/* [한국어] 이 요청이 위 목록에 올라 있는가.
+	 * 왜 별도 플래그인가: 취소 경로와 완료 경로가 동시에 목록에서 빼려 할 수
+	 *   있어, 한 번만 빼도록 하는 판정이 필요하다. */
+	bool			req_queued;
 };	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
 struct nvmefc_ls_rcv_op {	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
@@ -143,15 +201,25 @@ struct nvmefc_ls_rcv_op {	/* [한국어] 트랜스포트 상태/요청 모델 �
 	struct list_head		lsrcv_list;	/* rport->ls_rcv_list */	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
 } __aligned(sizeof(u64));	/* alignment for other things alloc'd with */	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
-enum nvme_fcpop_state {	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	FCPOP_STATE_UNINIT	= 0,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	FCPOP_STATE_IDLE	= 1,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	FCPOP_STATE_ACTIVE	= 2,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	FCPOP_STATE_ABORTED	= 3,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	FCPOP_STATE_COMPLETE	= 4,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+/* [한국어] FCP 오퍼레이션 하나의 생애 상태.
+ * atomic_t 로 다뤄지며, 상태 전이를 atomic_cmpxchg 로 시도해 "내가 먼저
+ * 바꾼 쪽인가"를 판정한다. 완료와 abort 가 동시에 같은 요청에 도착할 수
+ * 있는데 둘 중 하나만 처리해야 하기 때문이다. */
+enum nvme_fcpop_state {
+	/* [한국어] 아직 초기화되지 않았다. 큐 할당 직후의 상태. */
+	FCPOP_STATE_UNINIT	= 0,
+	/* [한국어] 초기화는 끝났고 제출을 기다린다. */
+	FCPOP_STATE_IDLE	= 1,
+	/* [한국어] LLDD 에 넘겨져 진행 중이다. 이 상태에서만 abort 가 의미를 갖는다. */
+	FCPOP_STATE_ACTIVE	= 2,
+	/* [한국어] abort 를 요청했다. 완료 콜백이 와도 정상 완료로 처리하지 않는다. */
+	FCPOP_STATE_ABORTED	= 3,
+	/* [한국어] 완료 처리를 마쳤다. 이 상태로 바꾸는 데 성공한 쪽만 요청을 끝낸다. */
+	FCPOP_STATE_COMPLETE	= 4,
 };	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
-struct nvme_fc_fcp_op {	/* [한국어] NVMe/FC LS·FCP·rport 경로 헬퍼 */
+/* [한국어] 요청 하나의 FC 측 상태. blk-mq 태그마다 미리 잡혀 있다. */
+struct nvme_fc_fcp_op {
 	struct nvme_request	nreq;		/*
 						 * nvme/host/core.c
 						 * requires this to be
@@ -160,19 +228,39 @@ struct nvme_fc_fcp_op {	/* [한국어] NVMe/FC LS·FCP·rport 경로 헬퍼 */
 						 * associated with the
 						 * request.
 						 */
-	struct nvmefc_fcp_req	fcp_req;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
+	/* [한국어] 위 영어 주석이 이유를 밝힌다 -- 코어가 blk_mq_rq_to_pdu() 의
+	 * 결과를 그대로 struct nvme_request 로 읽으므로 반드시 첫 필드여야 한다. */
+	/* [한국어] LLDD 에 넘길 FCP 요청 서술자. 명령 IU, 응답 IU, 데이터 SG 목록의
+	 * 위치와 길이를 담아 HBA 가 프레임으로 옮긴다.
+	 * 설정자: nvme_fc_init_request 가 버퍼 주소를 채우고, queue_rq 가 길이를 정한다.
+	 * 읽는 자: LLDD 의 fcp_io 콜백. */
+	struct nvmefc_fcp_req	fcp_req;
 
-	struct nvme_fc_ctrl	*ctrl;	/* [한국어] NVMe/FC LS·FCP·rport 경로 헬퍼 */
-	struct nvme_fc_queue	*queue;	/* [한국어] NVMe/FC LS·FCP·rport 경로 헬퍼 */
-	struct request		*rq;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
+	/* [한국어] 이 요청이 속한 컨트롤러. 완료 시 통계와 오류 처리의 기준이다. */
+	struct nvme_fc_ctrl	*ctrl;
+	/* [한국어] 이 요청이 나가는 큐. connection_id 와 csn 을 여기서 얻는다. */
+	struct nvme_fc_queue	*queue;
+	/* [한국어] 대응하는 blk-mq 요청. AEN 이면 NULL 이다. */
+	struct request		*rq;
 
-	atomic_t		state;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	u32			flags;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	u32			rqno;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	u32			nents;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	/* [한국어] 위 enum nvme_fcpop_state 의 현재 값.
+	 * atomic 인 이유: 완료 콜백과 abort 요청이 동시에 도착할 수 있어,
+	 *   cmpxchg 로 상태를 바꾸는 데 성공한 쪽만 처리하게 해야 한다.
+	 *   그러지 않으면 요청이 두 번 완료되거나 이미 끝난 것을 abort 하게 된다. */
+	atomic_t		state;
+	/* [한국어] 위 enum nvme_fcop_flags 조합. TERMIO 와 AEN 여부. */
+	u32			flags;
+	/* [한국어] 이 큐에서 몇 번째 요청인가. 디버깅용 일련번호. */
+	u32			rqno;
+	/* [한국어] DMA 매핑을 마친 scatterlist 항목 수. 해제 시 같은 값으로 unmap 한다. */
+	u32			nents;
 
-	struct nvme_fc_cmd_iu	cmd_iu;	/* [한국어] NVMe/FC LS·FCP·rport 경로 헬퍼 */
-	struct nvme_fc_ersp_iu	rsp_iu;	/* [한국어] NVMe/FC LS·FCP·rport 경로 헬퍼 */
+	/* [한국어] 보낼 명령 IU. NVMe SQE 를 FC 프레임에 담는 형식으로 감싼 것이다.
+	 * 요청마다 값으로 품는 이유는 여러 요청이 동시에 전송 중일 수 있기 때문이다. */
+	struct nvme_fc_cmd_iu	cmd_iu;
+	/* [한국어] 받을 확장 응답 IU. 완료 상태와 전송된 바이트 수가 들어온다.
+	 * LLDD 가 여기에 직접 써 넣으므로 DMA 가능한 메모리여야 한다. */
+	struct nvme_fc_ersp_iu	rsp_iu;
 };	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
 struct nvme_fcp_op_w_sgl {	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
@@ -181,68 +269,148 @@ struct nvme_fcp_op_w_sgl {	/* [한국어] 트랜스포트 상태/요청 모델 �
 	uint8_t			priv[];	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 };	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
-struct nvme_fc_lport {	/* [한국어] NVMe/FC LS·FCP·rport 경로 헬퍼 */
-	struct nvme_fc_local_port	localport;	/* [한국어] NVMe/FC LS·FCP·rport 경로 헬퍼 */
+/* [한국어] 로컬 FC 포트 하나 -- 이 호스트에 꽂힌 HBA 포트를 나타낸다.
+ * LLDD 가 등록하며, 그 아래에 발견된 원격 포트들이 매달린다. */
+struct nvme_fc_lport {
+	/* [한국어] LLDD 와 공유하는 공개 부분(WWNN/WWPN, 포트 ID 등).
+	 * 반드시 맨 앞이어야 LLDD 가 준 포인터에서 이 구조체를 되찾을 수 있다. */
+	struct nvme_fc_local_port	localport;
 
-	struct ida			endp_cnt;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	struct list_head		port_list;	/* nvme_fc_port_list */	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	struct list_head		endp_list;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	struct device			*dev;	/* physical device for dma */	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	struct nvme_fc_port_template	*ops;	/* [한국어] NVMe/FC LS·FCP·rport 경로 헬퍼 */
-	struct kref			ref;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	atomic_t                        act_rport_cnt;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-} __aligned(sizeof(u64));	/* alignment for other things alloc'd with */	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	/* [한국어] 이 포트 아래 원격 포트에 번호를 부여하는 ID 할당자. */
+	struct ida			endp_cnt;
+	/* [한국어] 전역 nvme_fc_port_list 에 매달리는 고리. */
+	struct list_head		port_list;	/* nvme_fc_port_list */
+	/* [한국어] 이 포트에서 발견한 원격 포트들의 목록. */
+	struct list_head		endp_list;
+	/* [한국어] DMA 매핑의 기준 장치. 위 영어 주석대로 물리 장치다 --
+	 * 실제로 메모리를 읽고 쓰는 것이 HBA 이므로 매핑도 그쪽 기준이어야 한다. */
+	struct device			*dev;	/* physical device for dma */
+	/* [한국어] LLDD 가 제공하는 콜백 모음(ls_req, fcp_io, create_queue 등).
+	 * 이 계층이 FC 프레임을 직접 다루지 않고 전부 여기로 위임한다. */
+	struct nvme_fc_port_template	*ops;
+	/* [한국어] 이 포트 객체의 참조 계수. LLDD 가 포트를 내려도 아직 이 포트를
+	 * 쓰는 컨트롤러가 있으면 객체는 살아 있어야 한다. */
+	struct kref			ref;
+	/* [한국어] 활성 상태인 원격 포트 수.
+	 * 왜 세는가: 하나라도 살아 있으면 LLDD 모듈을 언로드할 수 없다. */
+	atomic_t                        act_rport_cnt;
+} __aligned(sizeof(u64));	/* alignment for other things alloc'd with */
+/* [한국어] 위 영어 주석대로 이 구조체 뒤에 LLDD 전용 영역을 이어 할당하므로
+ * 8바이트 정렬을 강제한다. */	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
-struct nvme_fc_rport {	/* [한국어] NVMe/FC LS·FCP·rport 경로 헬퍼 */
-	struct nvme_fc_remote_port	remoteport;	/* [한국어] NVMe/FC LS·FCP·rport 경로 헬퍼 */
+/* [한국어] 원격 FC 포트 하나 -- 발견된 NVMe 타겟 포트를 나타낸다.
+ * FC 는 포트가 사라졌다 다시 나타나는 일이 잦은 매체라, 이 객체의 수명 관리가
+ * 다른 트랜스포트보다 정교하다. */
+struct nvme_fc_rport {
+	/* [한국어] LLDD 와 공유하는 공개 부분(WWNN/WWPN, 포트 상태 등).
+	 * 맨 앞이어야 LLDD 가 준 포인터에서 이 구조체를 되찾을 수 있다. */
+	struct nvme_fc_remote_port	remoteport;
 
-	struct list_head		endp_list; /* for lport->endp_list */	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	struct list_head		ctrl_list;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	struct list_head		ls_req_list;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	struct list_head		ls_rcv_list;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	struct list_head		disc_list;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	struct device			*dev;	/* physical device for dma */	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	struct nvme_fc_lport		*lport;	/* [한국어] NVMe/FC LS·FCP·rport 경로 헬퍼 */
-	spinlock_t			lock;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	struct kref			ref;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	atomic_t                        act_ctrl_cnt;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	unsigned long			dev_loss_end;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	struct work_struct		lsrcv_work;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-} __aligned(sizeof(u64));	/* alignment for other things alloc'd with */	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	/* [한국어] 소속 로컬 포트의 endp_list 에 매달리는 고리. */
+	struct list_head		endp_list; /* for lport->endp_list */
+	/* [한국어] 이 원격 포트로 연결된 컨트롤러들의 목록.
+	 * 포트가 사라지면 이 목록을 훑어 모두에게 알린다. */
+	struct list_head		ctrl_list;
+	/* [한국어] 진행 중인 LS 요청들의 목록.
+	 * 왜 목록으로 두나: 포트가 사라질 때 응답이 영영 오지 않을 LS 를 찾아
+	 *   취소해야 한다. 그러지 않으면 그것을 기다리는 쪽이 영원히 잠든다. */
+	struct list_head		ls_req_list;
+	/* [한국어] 타겟이 보내 온, 아직 처리하지 않은 LS 들의 목록.
+	 * Disconnect Association 같은 통지가 여기로 들어온다. */
+	struct list_head		ls_rcv_list;
+	/* [한국어] 디스커버리 중 임시로 매다는 고리. */
+	struct list_head		disc_list;
+	/* [한국어] DMA 매핑 기준 장치. 로컬 포트의 것과 같은 물리 HBA 다. */
+	struct device			*dev;	/* physical device for dma */
+	/* [한국어] 이 원격 포트를 발견한 로컬 포트. */
+	struct nvme_fc_lport		*lport;
+	/* [한국어] 위 목록들을 보호하는 스핀락.
+	 * 스핀락인 이유: LS 수신 콜백이 인터럽트 문맥에서 들어올 수 있어
+	 *   잠자는 잠금을 쓸 수 없다. */
+	spinlock_t			lock;
+	/* [한국어] 이 포트 객체의 참조 계수. LLDD 가 포트 제거를 알려도 아직
+	 * 컨트롤러가 붙어 있으면 객체는 유지된다. */
+	struct kref			ref;
+	/* [한국어] 이 포트에 붙어 활성 상태인 컨트롤러 수. */
+	atomic_t                        act_ctrl_cnt;
+	/* [한국어] 포트가 사라진 뒤 재등장을 기다리는 시한(jiffies).
+	 * 왜 필요한가: FC 는 케이블을 뽑았다 꽂거나 스위치가 재구성되면 포트가
+	 *   잠시 사라진다. 곧바로 컨트롤러를 지우면 그때마다 I/O 가 실패하므로,
+	 *   이 시한 안에 돌아오면 같은 세션을 이어 간다. 넘기면 포기한다. */
+	unsigned long			dev_loss_end;
+	/* [한국어] 수신한 LS 를 처리하는 작업. 콜백은 인터럽트 문맥일 수 있어
+	 * 실제 처리를 워크큐로 넘긴다. */
+	struct work_struct		lsrcv_work;
+} __aligned(sizeof(u64));	/* alignment for other things alloc'd with */
+/* [한국어] 로컬 포트와 같은 이유로 8바이트 정렬을 강제한다. */	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
 /* fc_ctrl flags values - specified as bit positions */
 #define ASSOC_ACTIVE		0	/* [한국어] 상수/매크로 — PDU·큐·타임아웃·플래그 */
 #define ASSOC_FAILED		1	/* [한국어] 상수/매크로 — PDU·큐·타임아웃·플래그 */
 #define FCCTRL_TERMIO		2	/* [한국어] 상수/매크로 — PDU·큐·타임아웃·플래그 */
 
-struct nvme_fc_ctrl {	/* [한국어] NVMe/FC LS·FCP·rport 경로 헬퍼 */
-	spinlock_t		lock;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	struct nvme_fc_queue	*queues;	/* [한국어] NVMe/FC LS·FCP·rport 경로 헬퍼 */
-	struct device		*dev;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	struct nvme_fc_lport	*lport;	/* [한국어] NVMe/FC LS·FCP·rport 경로 헬퍼 */
-	struct nvme_fc_rport	*rport;	/* [한국어] NVMe/FC LS·FCP·rport 경로 헬퍼 */
-	u32			cnum;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+/* [한국어] FC 컨트롤러 하나. 로컬 포트와 원격 포트의 짝 위에 세워진 세션이다. */
+struct nvme_fc_ctrl {
+	/* [한국어] 아래 iocnt·flags·큐 상태를 보호하는 스핀락.
+	 * 스핀락인 이유: 완료 콜백이 인터럽트 문맥에서 들어올 수 있다. */
+	spinlock_t		lock;
+	/* [한국어] 큐 배열. 0 이 admin, 1 부터 I/O 다. */
+	struct nvme_fc_queue	*queues;
+	/* [한국어] DMA 매핑 기준 장치(HBA). */
+	struct device		*dev;
+	/* [한국어] 이 세션이 쓰는 로컬 포트. 참조를 들고 있다. */
+	struct nvme_fc_lport	*lport;
+	/* [한국어] 접속한 원격 포트. 참조를 들고 있다. */
+	struct nvme_fc_rport	*rport;
+	/* [한국어] 컨트롤러 인스턴스 번호. /dev/nvmeX 의 X 에 대응한다. */
+	u32			cnum;
 
-	bool			ioq_live;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	u64			association_id;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	struct nvmefc_ls_rcv_op	*rcv_disconn;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
+	/* [한국어] I/O 큐들이 살아 있는가.
+	 * 왜 별도 플래그인가: 재연결 시 admin 큐만 세운 상태와 I/O 큐까지
+	 *   세운 상태를 구분해야 해체 절차가 달라진다. */
+	bool			ioq_live;
+	/* [한국어] Create Association LS 가 발급받은 Association ID.
+	 * 이 값이 곧 FC 상의 세션 식별자다. 모든 큐의 Connection 이 이 아래 매달리고,
+	 * Disconnect Association 하나로 전부 정리된다. */
+	u64			association_id;
+	/* [한국어] 타겟이 보내 온 Disconnect Association 요청.
+	 * 왜 보관하나: 그 요청에 응답(ACC)을 보내야 하는데, 세션 정리가 끝난
+	 *   뒤에 보내야 순서가 맞다. 그때까지 들고 있는다. */
+	struct nvmefc_ls_rcv_op	*rcv_disconn;
 
-	struct list_head	ctrl_list;	/* rport->ctrl_list */	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
+	/* [한국어] 원격 포트의 ctrl_list 에 매달리는 고리. */
+	struct list_head	ctrl_list;	/* rport->ctrl_list */
 
-	struct blk_mq_tag_set	admin_tag_set;	/* [한국어] blk-mq — 태그·hctx·타임아웃·맵·완료 연동 */
-	struct blk_mq_tag_set	tag_set;	/* [한국어] blk-mq — 태그·hctx·타임아웃·맵·완료 연동 */
+	/* [한국어] admin 전용 태그셋. I/O 가 모두 막혀도 리셋·삭제가 통과하도록 분리한다. */
+	struct blk_mq_tag_set	admin_tag_set;
+	/* [한국어] I/O 큐용 태그셋. */
+	struct blk_mq_tag_set	tag_set;
 
-	struct work_struct	ioerr_work;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	struct delayed_work	connect_work;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
+	/* [한국어] I/O 오류 처리 작업. 완료 콜백에서 발견한 오류를 잠들 수 있는
+	 * 문맥으로 옮겨 세션 재수립을 진행한다. */
+	struct work_struct	ioerr_work;
+	/* [한국어] 재연결 작업. 원격 포트가 돌아오기를 기다리며 주기적으로 시도한다. */
+	struct delayed_work	connect_work;
 
-	struct kref		ref;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	unsigned long		flags;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	u32			iocnt;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	wait_queue_head_t	ioabort_wait;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	/* [한국어] 컨트롤러 객체의 참조 계수. */
+	struct kref		ref;
+	/* [한국어] ASSOC_ACTIVE / ASSOC_FAILED / FCCTRL_TERMIO 비트 집합.
+	 * 위에 #define 으로 비트 위치가 정의돼 있다. */
+	unsigned long		flags;
+	/* [한국어] 아직 완료되지 않은 abort 요청 수.
+	 * 왜 세는가: 세션을 내릴 때 진행 중인 I/O 를 모두 abort 하고, 그 완료를
+	 *   전부 받은 뒤에야 큐를 해제할 수 있다. 남은 개수가 0 이 되면 아래
+	 *   대기열을 깨운다. */
+	u32			iocnt;
+	/* [한국어] 위 iocnt 가 0 이 되기를 기다리는 대기열. */
+	wait_queue_head_t	ioabort_wait;
 
-	struct nvme_fc_fcp_op	aen_ops[NVME_NR_AEN_COMMANDS];	/* [한국어] NVMe/FC LS·FCP·rport 경로 헬퍼 */
+	/* [한국어] 비동기 이벤트(AEN) 전용 오퍼레이션들.
+	 * 태그를 소비하지 않는 상주 명령이라 태그셋 밖에 따로 잡아 둔다. */
+	struct nvme_fc_fcp_op	aen_ops[NVME_NR_AEN_COMMANDS];
 
-	struct nvme_ctrl	ctrl;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
+	/* [한국어] 코어가 보는 컨트롤러. to_fc_ctrl() 이 이 필드에서 바깥을 되찾는다. */
+	struct nvme_ctrl	ctrl;
 };	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
 static inline struct nvme_fc_ctrl *	/* [한국어] NVMe/FC LS·FCP·rport 경로 헬퍼 */
@@ -2814,27 +2982,51 @@ nvme_fc_start_fcp_op(struct nvme_fc_ctrl *ctrl, struct nvme_fc_queue *queue,	/* 
 	return BLK_STS_OK;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 }	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
-static blk_status_t	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-nvme_fc_queue_rq(struct blk_mq_hw_ctx *hctx,	/* [한국어] NVMe/FC LS·FCP·rport 경로 헬퍼 */
-			const struct blk_mq_queue_data *bd)	/* [한국어] blk-mq — 태그·hctx·타임아웃·맵·완료 연동 */
-{	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	struct nvme_ns *ns = hctx->queue->queuedata;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	struct nvme_fc_queue *queue = hctx->driver_data;	/* [한국어] NVMe/FC LS·FCP·rport 경로 헬퍼 */
-	struct nvme_fc_ctrl *ctrl = queue->ctrl;	/* [한국어] NVMe/FC LS·FCP·rport 경로 헬퍼 */
-	struct request *rq = bd->rq;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	struct nvme_fc_fcp_op *op = blk_mq_rq_to_pdu(rq);	/* [한국어] NVMe/FC LS·FCP·rport 경로 헬퍼 */
-	enum nvmefc_fcp_datadir	io_dir;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	bool queue_ready = test_bit(NVME_FC_Q_LIVE, &queue->flags);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	u32 data_len;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	blk_status_t ret;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+/*
+ * [한국어]
+ * nvme_fc_queue_rq - blk-mq 가 요청 하나를 FC 트랜스포트에 넘기는 진입점
+ *
+ * @hctx: 배정된 하드웨어 큐 문맥. driver_data 에 nvme_fc_queue 가 들어 있다.
+ * @bd:   요청과 배치 힌트
+ * @return: BLK_STS_OK 면 LLDD 에 넘겼다는 뜻. 그 밖은 blk-mq 가 처리한다.
+ *
+ * 다른 트랜스포트와 다른 첫 줄은 port_state 검사다. FC 는 케이블·스위치·
+ * 존 구성 때문에 원격 포트가 수시로 사라졌다 나타난다. 큐가 LIVE 여도 포트가
+ * 오프라인이면 프레임을 실어 보낼 매체 자체가 없으므로, 큐 상태와 별개로
+ * 포트 상태를 먼저 본다.
+ *
+ * 데이터 방향 판정에서 blk_rq_nr_phys_segments 를 쓰는 이유는 위 영어 주석이
+ * 밝힌다 -- WRITE ZEROES 처럼 payload_bytes 는 0 이 아니면서 실제로 옮길
+ * 데이터는 없는 명령이 있다. 그 경우까지 WRITE 로 보내면 LLDD 가 있지도 않은
+ * 버퍼를 읽으려 한다. 물리 세그먼트 유무가 "진짜 옮길 것이 있는가"의 답이다.
+ *
+ * 실행 컨텍스트: blk-mq 제출 경로. 잠들 수 없다.
+ *
+ * 호출 체인:
+ *   submit_bio → blk-mq → [이 함수] → nvme_setup_cmd
+ *     → nvme_fc_start_fcp_op → LLDD 의 fcp_io 콜백 → FC 프레임
+ */
+static blk_status_t
+nvme_fc_queue_rq(struct blk_mq_hw_ctx *hctx,
+			const struct blk_mq_queue_data *bd)
+{
+	struct nvme_ns *ns = hctx->queue->queuedata;	/* [한국어] 대상 네임스페이스. admin 명령이면 NULL */
+	struct nvme_fc_queue *queue = hctx->driver_data;
+	struct nvme_fc_ctrl *ctrl = queue->ctrl;
+	struct request *rq = bd->rq;
+	struct nvme_fc_fcp_op *op = blk_mq_rq_to_pdu(rq);	/* [한국어] 태그에 미리 붙어 있는 FC 오퍼레이션 */
+	enum nvmefc_fcp_datadir	io_dir;
+	bool queue_ready = test_bit(NVME_FC_Q_LIVE, &queue->flags);
+	u32 data_len;
+	blk_status_t ret;
 
-	if (ctrl->rport->remoteport.port_state != FC_OBJSTATE_ONLINE ||	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-	    !nvme_check_ready(&queue->ctrl->ctrl, rq, queue_ready))	/* [한국어] NVMe core API — SQE 조립·완료·상태기계·수명 */
-		return nvme_fail_nonready_command(&queue->ctrl->ctrl, rq);	/* [한국어] NVMe core API — SQE 조립·완료·상태기계·수명 */
+	if (ctrl->rport->remoteport.port_state != FC_OBJSTATE_ONLINE ||	/* [한국어] 원격 포트가 사라졌으면 실어 보낼 매체가 없다 — FC 특유의 선행 검사다 */
+	    !nvme_check_ready(&queue->ctrl->ctrl, rq, queue_ready))	/* [한국어] 그리고 코어가 보는 컨트롤러·큐 준비 상태 */
+		return nvme_fail_nonready_command(&queue->ctrl->ctrl, rq);	/* [한국어] 재시도할지 페일오버할지는 코어 정책에 맡긴다 */
 
-	ret = nvme_setup_cmd(ns, rq);	/* [한국어] NVMe core API — SQE 조립·완료·상태기계·수명 */
-	if (ret)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		return ret;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	ret = nvme_setup_cmd(ns, rq);	/* [한국어] 블록 요청을 NVMe 명령으로 번역 — 이 부분은 트랜스포트와 무관하다 */
+	if (ret)
+		return ret;
 
 	/*
 	 * nvme core doesn't quite treat the rq opaquely. Commands such
@@ -2844,18 +3036,20 @@ nvme_fc_queue_rq(struct blk_mq_hw_ctx *hctx,	/* [한국어] NVMe/FC LS·FCP·rpo
 	 * more physical segments in the sg list. If there are no
 	 * physical segments, there is no payload.
 	 */
-	if (blk_rq_nr_phys_segments(rq)) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		data_len = blk_rq_payload_bytes(rq);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		io_dir = ((rq_data_dir(rq) == WRITE) ?	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-					NVMEFC_FCP_WRITE : NVMEFC_FCP_READ);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	} else {	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		data_len = 0;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		io_dir = NVMEFC_FCP_NODATA;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	/* [한국어] 위 영어 주석대로 payload_bytes 만 믿으면 WRITE ZEROES 에서
+	 * 있지도 않은 버퍼를 LLDD 가 읽으려 한다. 물리 세그먼트 유무가 진짜 판정 기준이다. */
+	if (blk_rq_nr_phys_segments(rq)) {	/* [한국어] 옮길 데이터가 실제로 있다 */
+		data_len = blk_rq_payload_bytes(rq);
+		io_dir = ((rq_data_dir(rq) == WRITE) ?	/* [한국어] FC 는 방향을 명시해야 한다 — 프레임 흐름이 방향마다 다르다 */
+					NVMEFC_FCP_WRITE : NVMEFC_FCP_READ);
+	} else {
+		data_len = 0;
+		io_dir = NVMEFC_FCP_NODATA;	/* [한국어] 데이터 프레임 없이 명령과 응답만 오간다 */
+	}
 
 
-	return nvme_fc_start_fcp_op(ctrl, queue, op, data_len, io_dir);	/* [한국어] NVMe/FC LS·FCP·rport 경로 헬퍼 */
-}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	return nvme_fc_start_fcp_op(ctrl, queue, op, data_len, io_dir);	/* [한국어] IU 를 채워 LLDD 에 넘긴다. 여기서부터는 HBA 의 몫이다 */
+}
 
 static void	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 nvme_fc_submit_async_event(struct nvme_ctrl *arg)	/* [한국어] NVMe/FC LS·FCP·rport 경로 헬퍼 */
