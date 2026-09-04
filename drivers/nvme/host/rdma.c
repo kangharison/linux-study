@@ -2393,32 +2393,64 @@ static void nvme_rdma_async_done(struct ib_cq *cq, struct ib_wc *wc)
 		nvme_rdma_wr_error(cq, wc, "ASYNC");
 }
 
-static void nvme_rdma_submit_async_event(struct nvme_ctrl *arg)	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-{	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	struct nvme_rdma_ctrl *ctrl = to_rdma_ctrl(arg);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	struct nvme_rdma_queue *queue = &ctrl->queues[0];	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	struct ib_device *dev = queue->device->dev;	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
-	struct nvme_rdma_qe *sqe = &ctrl->async_event_sqe;	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	struct nvme_command *cmd = sqe->data;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	struct ib_sge sge;	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
-	int ret;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+/*
+ * [한국어]
+ * nvme_rdma_submit_async_event - 비동기 이벤트 명령을 걸어 둔다
+ *
+ * @arg: 코어가 넘긴 nvme_ctrl
+ * @return: 없음
+ *
+ * AEN 은 완료를 기다리는 명령이 아니라 통지를 예약하는 명령이다. 컨트롤러가
+ * 알릴 것이 생길 때까지 미완료로 남으므로, blk-mq 태그를 붙들면 I/O 에 쓸
+ * 태그가 영구히 하나 줄어든다. 그래서 태그셋 밖의 전용 버퍼(async_event_sqe)
+ * 하나를 컨트롤러가 들고 있고, 이 함수가 그것을 채워 보낸다.
+ *
+ * command_id 가 NVME_AQ_BLK_MQ_DEPTH 인 것이 그 분리의 표현이다. admin 태그
+ * 범위 바로 위라 실제 태그와 겹치지 않고, 응답이 왔을 때 recv_done 이
+ * nvme_is_aen_req 로 이 값을 알아보고 코어의 AEN 경로로 넘긴다.
+ *
+ * DMA sync 가 앞뒤로 한 쌍인 이유: 이 버퍼는 컨트롤러 수명 내내 재사용된다.
+ * 앞의 for_cpu 로 이전 사용분의 캐시 상태를 정리한 뒤 새 명령을 채우고,
+ * 뒤의 for_device 로 HCA 가 읽을 수 있게 되돌린다.
+ *
+ * set_sg_null 은 데이터가 없는 명령임을 서술자에 표시한다. AEN 은 통지만
+ * 받으므로 옮길 페이로드가 없다.
+ *
+ * 실패를 WARN 으로만 잡는 것은 되돌릴 것이 없기 때문이다. 이벤트를 못 받게
+ * 될 뿐 다른 동작에는 영향이 없다.
+ *
+ * 실행 컨텍스트: 코어의 AEN 재무장 경로.
+ *
+ * 호출 체인:
+ *   nvme_complete_async_event → ops->submit_async_event → [이 함수]
+ *     → nvme_rdma_post_send
+ */
+static void nvme_rdma_submit_async_event(struct nvme_ctrl *arg)
+{
+	struct nvme_rdma_ctrl *ctrl = to_rdma_ctrl(arg);
+	struct nvme_rdma_queue *queue = &ctrl->queues[0];	/* [한국어] AEN 은 admin 큐로만 나간다 */
+	struct ib_device *dev = queue->device->dev;
+	struct nvme_rdma_qe *sqe = &ctrl->async_event_sqe;	/* [한국어] 태그셋 밖의 전용 버퍼 — 컨트롤러당 하나면 충분하다 */
+	struct nvme_command *cmd = sqe->data;
+	struct ib_sge sge;
+	int ret;
 
-	ib_dma_sync_single_for_cpu(dev, sqe->dma, sizeof(*cmd), DMA_TO_DEVICE);	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
+	ib_dma_sync_single_for_cpu(dev, sqe->dma, sizeof(*cmd), DMA_TO_DEVICE);	/* [한국어] 재사용 버퍼라 CPU 가 새로 채우기 전에 캐시를 맞춘다 */
 
-	memset(cmd, 0, sizeof(*cmd));	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	cmd->common.opcode = nvme_admin_async_event;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	cmd->common.command_id = NVME_AQ_BLK_MQ_DEPTH;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	cmd->common.flags |= NVME_CMD_SGL_METABUF;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	nvme_rdma_set_sg_null(cmd);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+	memset(cmd, 0, sizeof(*cmd));	/* [한국어] 이전 사용분이 남지 않게 */
+	cmd->common.opcode = nvme_admin_async_event;
+	cmd->common.command_id = NVME_AQ_BLK_MQ_DEPTH;	/* [한국어] admin 태그 범위 바로 위 — recv_done 이 이 값으로 AEN 을 알아본다 */
+	cmd->common.flags |= NVME_CMD_SGL_METABUF;	/* [한국어] Fabrics 는 늘 SGL 로 데이터를 기술한다 */
+	nvme_rdma_set_sg_null(cmd);	/* [한국어] 옮길 데이터가 없다 — 통지만 기다리는 명령이다 */
 
-	sqe->cqe.done = nvme_rdma_async_done;	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+	sqe->cqe.done = nvme_rdma_async_done;	/* [한국어] 송신 완료 시 오류만 확인하는 콜백 */
 
-	ib_dma_sync_single_for_device(dev, sqe->dma, sizeof(*cmd),	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
-			DMA_TO_DEVICE);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	ib_dma_sync_single_for_device(dev, sqe->dma, sizeof(*cmd),	/* [한국어] HCA 가 읽을 수 있게 되돌린다 */
+			DMA_TO_DEVICE);
 
-	ret = nvme_rdma_post_send(queue, sqe, &sge, 1, NULL);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	WARN_ON_ONCE(ret);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	ret = nvme_rdma_post_send(queue, sqe, &sge, 1, NULL);	/* [한국어] 캡슐만 보낸다(SGE 하나), 앞에 붙일 등록 WR 도 없다 */
+	WARN_ON_ONCE(ret);	/* [한국어] 되돌릴 것이 없다 — 이벤트를 못 받을 뿐이다 */
+}
 
 static void nvme_rdma_process_nvme_rsp(struct nvme_rdma_queue *queue,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 		struct nvme_completion *cqe, struct ib_wc *wc)	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
@@ -2464,45 +2496,75 @@ static void nvme_rdma_process_nvme_rsp(struct nvme_rdma_queue *queue,	/* [한국
 	nvme_rdma_end_request(req);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 }	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
-static void nvme_rdma_recv_done(struct ib_cq *cq, struct ib_wc *wc)	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-{	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	struct nvme_rdma_qe *qe =	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-		container_of(wc->wr_cqe, struct nvme_rdma_qe, cqe);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	struct nvme_rdma_queue *queue = wc->qp->qp_context;	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	struct ib_device *ibdev = queue->device->dev;	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
-	struct nvme_completion *cqe = qe->data;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	const size_t len = sizeof(struct nvme_completion);	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
+/*
+ * [한국어]
+ * nvme_rdma_recv_done - 응답 캡슐이 도착했을 때 불린다
+ *
+ * @cq: 완료가 올라온 완료 큐
+ * @wc: 완료 항목. byte_len 에 실제 수신 길이가 들어 있다.
+ * @return: 없음
+ *
+ * RDMA 완료 경로의 종착점이다. 응답 캡슐을 해석해 요청을 완료시키고,
+ * 마지막에 같은 버퍼를 수신 큐에 다시 올린다. 다시 올리지 않으면 수신
+ * 버퍼가 하나씩 줄어들어 결국 상대가 보낼 곳이 없어진다.
+ *
+ * byte_len 검사가 필요한 이유: 이것은 원격이 보낸 길이다. 기대보다 짧으면
+ * 아직 초기화되지 않은 버퍼 부분을 CQE 로 읽게 되므로, 해석하기 전에 막는다.
+ *
+ * DMA sync 가 앞뒤로 한 쌍인 것에 주목할 것. 앞의 for_cpu 는 HCA 가 써 넣은
+ * 내용을 CPU 가 읽기 전에 캐시를 맞추고, 뒤의 for_device 는 같은 버퍼를 다시
+ * 수신용으로 넘기기 전에 되돌린다. 버퍼를 재사용하기 때문에 두 방향이 모두 필요하다.
+ *
+ * AEN 을 특별 취급하는 이유는 위 영어 주석이 밝힌다 -- 타임아웃이 없고 큐
+ * 정지를 견디며 abort 에도 응답하지 않는다. blk-mq 요청을 아예 할당하지
+ * 않으므로 command_id 로 구분해 코어의 AEN 경로로 직접 넘긴다.
+ *
+ * 실행 컨텍스트: CQ 폴링(소프트IRQ 또는 blk-mq poll). 잠들 수 없다.
+ *
+ * 호출 체인:
+ *   ib_poll_cq → [이 함수] → nvme_rdma_process_nvme_rsp → nvme_rdma_post_recv
+ */
+static void nvme_rdma_recv_done(struct ib_cq *cq, struct ib_wc *wc)
+{
+	struct nvme_rdma_qe *qe =
+		container_of(wc->wr_cqe, struct nvme_rdma_qe, cqe);	/* [한국어] 완료가 실어 준 cqe 에서 수신 버퍼를 되찾는다 */
+	struct nvme_rdma_queue *queue = wc->qp->qp_context;	/* [한국어] QP 생성 시 심어 둔 큐 포인터 */
+	struct ib_device *ibdev = queue->device->dev;
+	struct nvme_completion *cqe = qe->data;	/* [한국어] 버퍼 내용이 곧 NVMe 완료 항목이다 */
+	const size_t len = sizeof(struct nvme_completion);
 
-	if (unlikely(wc->status != IB_WC_SUCCESS)) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		nvme_rdma_wr_error(cq, wc, "RECV");	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-		return;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
-	}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	if (unlikely(wc->status != IB_WC_SUCCESS)) {	/* [한국어] 수신 자체가 실패했다 — 링크 문제다 */
+		nvme_rdma_wr_error(cq, wc, "RECV");
+		return;
+	}
 
 	/* sanity checking for received data length */
-	if (unlikely(wc->byte_len < len)) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		dev_err(queue->ctrl->ctrl.device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			"Unexpected nvme completion length(%d)\n", wc->byte_len);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		nvme_rdma_error_recovery(queue->ctrl);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-		return;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
-	}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	if (unlikely(wc->byte_len < len)) {	/* [한국어] 원격이 보낸 길이다 — 짧으면 초기화되지 않은 부분을 CQE 로 읽게 된다 */
+		dev_err(queue->ctrl->ctrl.device,
+			"Unexpected nvme completion length(%d)\n", wc->byte_len);
+		nvme_rdma_error_recovery(queue->ctrl);	/* [한국어] 프로토콜이 깨진 것이므로 연결을 다시 세운다 */
+		return;
+	}
 
-	ib_dma_sync_single_for_cpu(ibdev, qe->dma, len, DMA_FROM_DEVICE);	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
+	ib_dma_sync_single_for_cpu(ibdev, qe->dma, len, DMA_FROM_DEVICE);	/* [한국어] HCA 가 써 넣은 내용을 CPU 가 읽기 전에 캐시를 맞춘다 */
 	/*
 	 * AEN requests are special as they don't time out and can
 	 * survive any kind of queue freeze and often don't respond to
 	 * aborts.  We don't even bother to allocate a struct request
 	 * for them but rather special case them here.
 	 */
-	if (unlikely(nvme_is_aen_req(nvme_rdma_queue_idx(queue),	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-				     cqe->command_id)))	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		nvme_complete_async_event(&queue->ctrl->ctrl, cqe->status,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-				&cqe->result);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	else	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		nvme_rdma_process_nvme_rsp(queue, cqe, wc);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	ib_dma_sync_single_for_device(ibdev, qe->dma, len, DMA_FROM_DEVICE);	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
+	/* [한국어] 위 영어 주석대로 AEN 은 타임아웃도 없고 큐 정지를 견디며 abort 에도
+	 * 응답하지 않는다. blk-mq 요청을 아예 만들지 않으므로 여기서 갈라 처리한다. */
+	if (unlikely(nvme_is_aen_req(nvme_rdma_queue_idx(queue),
+				     cqe->command_id)))	/* [한국어] command_id 가 태그 범위 위쪽이면 AEN 이다 */
+		nvme_complete_async_event(&queue->ctrl->ctrl, cqe->status,
+				&cqe->result);
+	else
+		nvme_rdma_process_nvme_rsp(queue, cqe, wc);	/* [한국어] 일반 요청 — 태그로 되찾아 완료시킨다 */
+	ib_dma_sync_single_for_device(ibdev, qe->dma, len, DMA_FROM_DEVICE);	/* [한국어] 같은 버퍼를 다시 수신용으로 넘기기 전에 되돌린다 */
 
-	nvme_rdma_post_recv(queue, qe);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	nvme_rdma_post_recv(queue, qe);	/* [한국어] 반드시 다시 올린다 — 없으면 수신 버퍼가 줄어 상대가 보낼 곳이 사라진다 */
+}
 
 static int nvme_rdma_conn_established(struct nvme_rdma_queue *queue)	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 {	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
@@ -2543,78 +2605,138 @@ static int nvme_rdma_conn_rejected(struct nvme_rdma_queue *queue,	/* [한국어]
 	return -ECONNRESET;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 }	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
-static int nvme_rdma_addr_resolved(struct nvme_rdma_queue *queue)	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-{	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	struct nvme_ctrl *ctrl = &queue->ctrl->ctrl;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	int ret;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+/*
+ * [한국어]
+ * nvme_rdma_addr_resolved - 주소 해석이 끝났으니 QP 를 만들고 경로를 찾는다
+ *
+ * @queue: 주소 해석이 완료된 큐
+ * @return: 0 이면 라우팅 해석을 시작했다. 음수면 실패이며 되감았다.
+ *
+ * RDMA 연결은 세 단계를 거친다: 주소 해석 → 라우팅 해석 → 연결 수립.
+ * 각 단계가 비동기 CM 이벤트로 끝나며, 이 함수는 첫 단계가 끝났을 때
+ * 불려 다음 단계를 시작한다.
+ *
+ * QP 를 여기서 만드는 이유: 주소가 해석돼야 어느 HCA 를 쓸지 정해지고,
+ * 그래야 그 장치의 PD 로 QP 를 만들 수 있다. 그전에는 만들 수 없다.
+ *
+ * ToS 를 설정하는 것은 라우팅 해석 직전이어야 한다. 경로를 찾을 때
+ * 서비스 등급이 반영되어야 하기 때문이다. 옵션이 음수면(지정 안 함)
+ * 건드리지 않는다.
+ *
+ * 실행 컨텍스트: CM 이벤트 핸들러. 잠들면 안 된다.
+ *
+ * 호출 체인:
+ *   nvme_rdma_cm_handler(ADDR_RESOLVED) → [이 함수] → rdma_resolve_route
+ *     → (ROUTE_RESOLVED 이벤트) → nvme_rdma_route_resolved
+ */
+static int nvme_rdma_addr_resolved(struct nvme_rdma_queue *queue)
+{
+	struct nvme_ctrl *ctrl = &queue->ctrl->ctrl;
+	int ret;
 
-	ret = nvme_rdma_create_queue_ib(queue);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	if (ret)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		return ret;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	ret = nvme_rdma_create_queue_ib(queue);	/* [한국어] 주소가 풀려 HCA 가 정해졌으니 이제 QP·CQ·MR 풀을 만들 수 있다 */
+	if (ret)
+		return ret;
 
-	if (ctrl->opts->tos >= 0)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		rdma_set_service_type(queue->cm_id, ctrl->opts->tos);	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
-	ret = rdma_resolve_route(queue->cm_id, NVME_RDMA_CM_TIMEOUT_MS);	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
-	if (ret) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		dev_err(ctrl->device, "rdma_resolve_route failed (%d).\n",	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
-			queue->cm_error);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		goto out_destroy_queue;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
-	}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	if (ctrl->opts->tos >= 0)	/* [한국어] 사용자가 서비스 등급을 지정했다면 */
+		rdma_set_service_type(queue->cm_id, ctrl->opts->tos);	/* [한국어] 경로 탐색 전에 설정해야 라우팅에 반영된다 */
+	ret = rdma_resolve_route(queue->cm_id, NVME_RDMA_CM_TIMEOUT_MS);	/* [한국어] 두 번째 단계 시작 — 결과는 다시 CM 이벤트로 온다 */
+	if (ret) {
+		dev_err(ctrl->device, "rdma_resolve_route failed (%d).\n",
+			queue->cm_error);
+		goto out_destroy_queue;
+	}
 
-	return 0;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	return 0;
 
-out_destroy_queue:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	nvme_rdma_destroy_queue_ib(queue);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	return ret;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
-}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+out_destroy_queue:
+	nvme_rdma_destroy_queue_ib(queue);	/* [한국어] 방금 만든 자원을 되돌린다 */
+	return ret;
+}
 
-static int nvme_rdma_route_resolved(struct nvme_rdma_queue *queue)	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-{	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	struct nvme_rdma_ctrl *ctrl = queue->ctrl;	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	struct rdma_conn_param param = { };	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
-	struct nvme_rdma_cm_req priv = { };	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	int ret;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+/*
+ * [한국어]
+ * nvme_rdma_route_resolved - 경로가 정해졌으니 연결을 요청한다
+ *
+ * @queue: 라우팅 해석이 끝난 큐
+ * @return: 0 이면 연결 요청을 보냈다. 음수면 실패.
+ *
+ * 세 단계 중 마지막이다. rdma_connect 에 실어 보내는 private_data 가
+ * NVMe-oF 의 연결 파라미터이며, 타겟은 그것을 보고 큐를 준비한다.
+ *
+ * responder_resources 를 HCA 의 max_qp_rd_atom 으로 주는 이유: 상대가
+ * 동시에 몇 개의 RDMA Read 를 우리에게 걸 수 있는지를 알리는 값이고,
+ * 우리 HCA 가 감당할 수 있는 최대치가 곧 그 한도다.
+ *
+ * retry_count 와 rnr_retry_count 를 7(최대)로 두는 것은 링크 수준 재시도를
+ * 최대한 허용한다는 뜻이다. 일시적인 수신 자원 부족(RNR)으로 연결이 끊기는
+ * 것보다 하드웨어가 재시도하는 편이 낫다.
+ *
+ * admin 큐와 I/O 큐의 큐 크기 계산이 다른 것이 이 함수의 미묘한 부분이고,
+ * 두 영어 주석이 각각 그 근거를 밝힌다. admin 은 Fabrics 규격이 정한 최소
+ * 크기를 그대로 쓰고, I/O 는 hrqsize 를 sqsize+1 로 둔다 -- 규격 해석상
+ * hrqsize 는 1-based 이고 hsqsize 는 0-based 이기 때문이다.
+ *
+ * cntlid 를 I/O 큐에서만 싣는 이유도 명시돼 있다. admin 연결 시점에는
+ * 아직 컨트롤러 ID 를 받지 못했고, 그것을 받아 오는 것이 admin 연결의
+ * 목적 중 하나다.
+ *
+ * 실행 컨텍스트: CM 이벤트 핸들러. rdma_connect_locked 는 CM 락을 이미
+ * 들고 있는 문맥에서 부르는 변형이다.
+ *
+ * 호출 체인:
+ *   nvme_rdma_cm_handler(ROUTE_RESOLVED) → [이 함수] → rdma_connect_locked
+ *     → (ESTABLISHED 이벤트)
+ */
+static int nvme_rdma_route_resolved(struct nvme_rdma_queue *queue)
+{
+	struct nvme_rdma_ctrl *ctrl = queue->ctrl;
+	struct rdma_conn_param param = { };	/* [한국어] RDMA 수준 연결 파라미터 */
+	struct nvme_rdma_cm_req priv = { };	/* [한국어] 그 안에 실어 보낼 NVMe-oF 수준 파라미터 */
+	int ret;
 
-	param.qp_num = queue->qp->qp_num;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	param.flow_control = 1;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	param.qp_num = queue->qp->qp_num;
+	param.flow_control = 1;
 
-	param.responder_resources = queue->device->dev->attrs.max_qp_rd_atom;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	param.responder_resources = queue->device->dev->attrs.max_qp_rd_atom;	/* [한국어] 상대가 우리에게 동시에 걸 수 있는 RDMA Read 수 — 우리 HCA 의 한도가 그 상한이다 */
 	/* maximum retry count */
-	param.retry_count = 7;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	param.rnr_retry_count = 7;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	param.private_data = &priv;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	param.private_data_len = sizeof(priv);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	param.retry_count = 7;	/* [한국어] 최대값. 일시적 오류로 연결이 끊기는 것보다 하드웨어가 재시도하는 편이 낫다 */
+	param.rnr_retry_count = 7;	/* [한국어] 상대의 수신 자원이 잠시 부족할 때(RNR)도 마찬가지 */
+	param.private_data = &priv;	/* [한국어] 타겟은 이 데이터를 보고 큐를 준비한다 */
+	param.private_data_len = sizeof(priv);
 
-	priv.recfmt = cpu_to_le16(NVME_RDMA_CM_FMT_1_0);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	priv.qid = cpu_to_le16(nvme_rdma_queue_idx(queue));	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+	priv.recfmt = cpu_to_le16(NVME_RDMA_CM_FMT_1_0);	/* [한국어] 이 private_data 의 형식 버전 */
+	priv.qid = cpu_to_le16(nvme_rdma_queue_idx(queue));	/* [한국어] 몇 번 큐를 여는지 */
 	/*
 	 * set the admin queue depth to the minimum size
 	 * specified by the Fabrics standard.
 	 */
-	if (priv.qid == 0) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		priv.hrqsize = cpu_to_le16(NVME_AQ_DEPTH);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		priv.hsqsize = cpu_to_le16(NVME_AQ_DEPTH - 1);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	} else {	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	if (priv.qid == 0) {	/* [한국어] admin 큐 */
+		priv.hrqsize = cpu_to_le16(NVME_AQ_DEPTH);	/* [한국어] 위 영어 주석대로 Fabrics 규격이 정한 최소 크기를 그대로 쓴다 */
+		priv.hsqsize = cpu_to_le16(NVME_AQ_DEPTH - 1);	/* [한국어] hsqsize 는 0-based 라 하나 뺀다 */
+	} else {
 		/*
 		 * current interpretation of the fabrics spec
 		 * is at minimum you make hrqsize sqsize+1, or a
 		 * 1's based representation of sqsize.
 		 */
-		priv.hrqsize = cpu_to_le16(queue->queue_size);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		priv.hsqsize = cpu_to_le16(queue->ctrl->ctrl.sqsize);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		/* [한국어] 위 영어 주석대로 규격 해석상 hrqsize 는 1-based,
+		 * hsqsize 는 0-based 이므로 둘의 값이 하나 차이가 난다. */
+		priv.hrqsize = cpu_to_le16(queue->queue_size);
+		priv.hsqsize = cpu_to_le16(queue->ctrl->ctrl.sqsize);
 		/* cntlid should only be set when creating an I/O queue */
-		priv.cntlid = cpu_to_le16(ctrl->ctrl.cntlid);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		priv.cntlid = cpu_to_le16(ctrl->ctrl.cntlid);	/* [한국어] 위 영어 주석대로 I/O 큐에서만 싣는다 — admin 연결 시점에는 아직 이 ID 를 받지 못했다 */
+	}
 
-	ret = rdma_connect_locked(queue->cm_id, &param);	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
-	if (ret) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		dev_err(ctrl->ctrl.device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			"rdma_connect_locked failed (%d).\n", ret);	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
-		return ret;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
-	}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	ret = rdma_connect_locked(queue->cm_id, &param);	/* [한국어] _locked 변형 — CM 락을 이미 들고 있는 이벤트 핸들러 문맥이다 */
+	if (ret) {
+		dev_err(ctrl->ctrl.device,
+			"rdma_connect_locked failed (%d).\n", ret);
+		return ret;
+	}
 
-	return 0;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
-}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	return 0;
+}
 
 static int nvme_rdma_cm_handler(struct rdma_cm_id *cm_id,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 		struct rdma_cm_event *ev)	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
@@ -2810,36 +2932,64 @@ static int nvme_rdma_poll(struct blk_mq_hw_ctx *hctx, struct io_comp_batch *iob)
 	return ib_process_cq_direct(queue->ib_cq, -1);	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
 }	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
-static void nvme_rdma_check_pi_status(struct nvme_rdma_request *req)	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-{	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	struct request *rq = blk_mq_rq_from_pdu(req);	/* [한국어] blk-mq — 태그·hctx·타임아웃·맵·완료 연동 */
-	struct ib_mr_status mr_status;	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
-	int ret;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+/*
+ * [한국어]
+ * nvme_rdma_check_pi_status - signature MR 이 검출한 보호 정보 오류를 확인한다
+ *
+ * @req: signature MR 을 썼던 요청
+ * @return: 없음. 결과는 nvme_req(rq)->status 에 기록한다.
+ *
+ * T10-PI 검증을 HCA 에 맡긴 경우의 뒤처리다. signature MR 은 데이터를 옮기면서
+ * 보호 정보를 함께 검사하는데, 어긋나도 그 자리에서 오류를 내지 않고 MR 에
+ * 기록해 둔다. 그래서 완료 후 이렇게 따로 물어봐야 한다.
+ *
+ * CPU 가 검증하는 경우와 비교하면 이 구조의 이유가 드러난다. 소프트웨어
+ * 검증은 데이터를 한 번 더 읽어야 하지만, 오프로드하면 HCA 가 전송 중에
+ * 함께 처리하므로 추가 메모리 접근이 없다. 대신 결과를 나중에 회수한다.
+ *
+ * 오류 종류를 세 가지로 나누어 각각 다른 NVMe 상태 코드로 옮기는 것이
+ * 중요하다. Guard 는 데이터 자체의 CRC 불일치, Reference Tag 는 블록 주소
+ * 불일치(엉뚱한 블록을 읽었다는 뜻), Application Tag 는 상위가 붙인 표식
+ * 불일치다. 상위 계층이 원인을 구분해야 대응이 달라진다.
+ *
+ * ib_check_mr_status 자체가 실패하면 검증 결과를 알 수 없으므로, 안전한
+ * 쪽으로 INVALID_PI 를 기록한다 -- 모르는 것을 성공으로 넘기지 않는다.
+ *
+ * 실행 컨텍스트: 완료 처리 경로.
+ *
+ * 호출 체인:
+ *   nvme_rdma_process_nvme_rsp → [이 함수] → ib_check_mr_status
+ */
+static void nvme_rdma_check_pi_status(struct nvme_rdma_request *req)
+{
+	struct request *rq = blk_mq_rq_from_pdu(req);
+	struct ib_mr_status mr_status;
+	int ret;
 
-	ret = ib_check_mr_status(req->mr, IB_MR_CHECK_SIG_STATUS, &mr_status);	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
-	if (ret) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		pr_err("ib_check_mr_status failed, ret %d\n", ret);	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
-		nvme_req(rq)->status = NVME_SC_INVALID_PI;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		return;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
-	}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	ret = ib_check_mr_status(req->mr, IB_MR_CHECK_SIG_STATUS, &mr_status);	/* [한국어] 전송 중 검사 결과를 MR 에서 회수한다 */
+	if (ret) {
+		pr_err("ib_check_mr_status failed, ret %d\n", ret);
+		nvme_req(rq)->status = NVME_SC_INVALID_PI;	/* [한국어] 결과를 알 수 없다 — 모르는 것을 성공으로 넘기지 않는다 */
+		return;
+	}
 
-	if (mr_status.fail_status & IB_MR_CHECK_SIG_STATUS) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		switch (mr_status.sig_err.err_type) {	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		case IB_SIG_BAD_GUARD:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			nvme_req(rq)->status = NVME_SC_GUARD_CHECK;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			break;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		case IB_SIG_BAD_REFTAG:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			nvme_req(rq)->status = NVME_SC_REFTAG_CHECK;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			break;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		case IB_SIG_BAD_APPTAG:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			nvme_req(rq)->status = NVME_SC_APPTAG_CHECK;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			break;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		pr_err("PI error found type %d expected 0x%x vs actual 0x%x\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		       mr_status.sig_err.err_type, mr_status.sig_err.expected,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		       mr_status.sig_err.actual);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	if (mr_status.fail_status & IB_MR_CHECK_SIG_STATUS) {	/* [한국어] 실제로 불일치가 있었다 */
+		switch (mr_status.sig_err.err_type) {
+		case IB_SIG_BAD_GUARD:	/* [한국어] 데이터 자체의 CRC 가 어긋났다 — 전송 중 손상 */
+			nvme_req(rq)->status = NVME_SC_GUARD_CHECK;
+			break;
+		case IB_SIG_BAD_REFTAG:	/* [한국어] 블록 주소가 어긋났다 — 엉뚱한 블록을 읽어 온 것이다 */
+			nvme_req(rq)->status = NVME_SC_REFTAG_CHECK;
+			break;
+		case IB_SIG_BAD_APPTAG:	/* [한국어] 상위가 붙인 표식이 어긋났다 */
+			nvme_req(rq)->status = NVME_SC_APPTAG_CHECK;
+			break;
+		}
+		pr_err("PI error found type %d expected 0x%x vs actual 0x%x\n",	/* [한국어] 기대값과 실제값을 함께 남긴다 — 원인 추적의 근거다 */
+		       mr_status.sig_err.err_type, mr_status.sig_err.expected,
+		       mr_status.sig_err.actual);
+	}
+}
 
 static void nvme_rdma_complete_rq(struct request *rq)	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 {	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
