@@ -4,6 +4,73 @@
  * Author: Joerg Roedel <jroedel@suse.de>
  */
 
+/*
+ * [한국어 설명] IOMMU 서브시스템 코어 (drivers/iommu/iommu.c)
+ *
+ * === 파일의 역할 ===
+ * 장치가 내는 DMA 주소를 실제 물리 주소로 번역하는 하드웨어(IOMMU)를 커널이
+ * 다루는 공통 계층이다. 벤더별 IOMMU(Intel VT-d, AMD-Vi, ARM SMMU 등)는 각자
+ * 레지스터도 페이지 테이블 형식도 다르지만, 이 파일이 정의한 세 가지 개념
+ * 위에서 모두 같은 모양으로 보인다 -- 장치(device), 그룹(group), 도메인(domain).
+ *
+ * 그룹은 "하드웨어가 서로 격리해 낼 수 있는 가장 작은 장치 묶음"이다. PCIe
+ * 스위치 뒤에 붙어 요청자 ID 를 공유하는 장치들이나, ACS 를 지원하지 않아
+ * 서로의 트래픽을 가로챌 수 있는 장치들은 한 그룹이 된다. 이것이 소유권의
+ * 단위인 이유가 여기 있다 -- 같은 그룹의 장치 하나만 가상 머신에 넘기고
+ * 나머지를 호스트에 두는 것은 격리가 되지 않으므로 허용되지 않는다.
+ *
+ * 도메인은 주소 공간, 즉 페이지 테이블 하나다. 한 그룹의 모든 장치는 같은
+ * 도메인을 본다. 그룹마다 default_domain 이 있어 아무도 따로 요구하지 않으면
+ * 거기에 붙어 있고, VFIO 나 iommufd 가 장치를 가져가면 자기 도메인으로
+ * 갈아 끼운다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * 위쪽으로는 두 종류의 사용자가 있다. 하나는 평범한 장치 드라이버로,
+ * dma_map_*() 를 부르면 dma-iommu.c 가 이 파일의 map/unmap 을 호출해 IOVA 를
+ * 만든다. 다른 하나는 사용자 공간에 장치를 통째로 넘기는 경로(VFIO,
+ * iommufd)로, 그쪽은 도메인을 직접 만들어 붙인다.
+ *
+ * 아래쪽으로는 벤더 드라이버가 struct iommu_ops 를 등록해 붙는다. 이 파일은
+ * 그 vtable 만 알고 하드웨어를 직접 건드리지 않는다.
+ *
+ *   장치 드라이버 --dma_map--> dma-iommu.c --+
+ *   VFIO / iommufd ----------------------> [이 파일] --ops--> intel/ amd/ arm/
+ *
+ * 실행 컨텍스트: 커널 모듈. 대부분 프로세스 문맥이며 잠들 수 있다. 다만
+ * map/unmap 은 DMA API 경로에서 인터럽트 문맥으로도 불릴 수 있어 잠들지
+ * 않는다.
+ *
+ * === 타 모듈과의 연결 ===
+ * - 버스 계층: 장치가 나타나고 사라질 때마다 통지를 받아(iommu_bus_notifier)
+ *   그 장치를 어느 그룹에 넣을지 정하고 IOMMU 에 등록한다. PCI, platform,
+ *   AMBA, fsl-mc, CDX 등 여러 버스가 같은 통로를 쓴다.
+ * - dma-iommu.c: DMA API 구현. IOVA 할당(iova.c)과 이 파일의 map/unmap 을
+ *   묶어 dma_addr_t 를 만들어 낸다.
+ * - iommufd / VFIO: 사용자 공간에 장치를 넘기는 경로. 소유권(owner_cnt,
+ *   owner)이 이 파일에서 관리되고, 그것이 "이 그룹은 지금 누구 것인가"를
+ *   정한다.
+ * - 벤더 드라이버: struct iommu_ops 를 통해서만 불린다. 그 vtable 이
+ *   include/linux/iommu.h 에 정의돼 있고, 이 파일이 유일한 호출자다.
+ *
+ * 데이터 흐름: 장치 발견 -> 그룹 배정 -> 기본 도메인 붙이기 -> (DMA API 이면)
+ * IOVA 할당과 매핑, (VFIO 이면) 소유권 이전과 도메인 교체.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * - struct iommu_group: 격리 단위. 소속 장치 목록, 현재 도메인, 소유권,
+ *   PASID 배열을 들고 있다. 이 파일의 거의 모든 함수가 이것을 중심으로 돈다.
+ * - struct group_device: 그룹에 속한 장치 하나. 그룹과 장치는 일대다다.
+ * - iommu_probe_device(): 새 장치를 IOMMU 아래로 들인다. 그룹을 찾거나
+ *   만들고, 기본 도메인을 정해 붙인다.
+ * - iommu_release_device(): 그 반대. 장치가 사라질 때 그룹에서 뺀다.
+ * - __iommu_group_set_domain(): 그룹 전체를 다른 도메인으로 옮긴다. 도메인
+ *   교체의 유일한 통로이며, 중간에 실패했을 때 되돌리는 규약도 여기 있다.
+ * - iommu_map() / iommu_unmap(): 도메인의 페이지 테이블에 매핑을 넣고 뺀다.
+ * - iommu_group_claim_dma_owner(): 그룹 소유권을 가져간다. VFIO 가 장치를
+ *   사용자 공간에 넘기기 전에 부르는 문이다.
+ */
+
+/* [한국어] 이 파일의 모든 pr_ 로그 앞에 "iommu: " 를 붙인다 -- 어느 계층이 낸
+ * 메시지인지 로그만 보고 구별하기 위해서다. */
 #define pr_fmt(fmt)    "iommu: " fmt
 
 #include <linux/amba/bus.h>
@@ -39,81 +106,242 @@
 #include "dma-iommu.h"
 #include "iommu-priv.h"
 
+/* [한국어] /sys/kernel/iommu_groups 아래에 그룹들이 매달리는 sysfs 집합.
+ * 사용자 공간이 "어느 장치가 같은 그룹인가"를 확인하는 유일한 통로이며,
+ * VFIO 를 쓰려면 반드시 봐야 하는 정보다. */
 static struct kset *iommu_group_kset;
+/* [한국어] 그룹 번호 할당기. 번호가 곧 sysfs 디렉토리 이름이 된다.
+ * IDA 라 해제된 번호가 재사용된다 -- 그룹은 장치가 붙고 떨어지며 계속
+ * 생겼다 사라지므로 단조 증가 카운터로는 번호가 금방 커진다. */
 static DEFINE_IDA(iommu_group_ida);
+/* [한국어] 전역 PASID 할당기. PASID 는 한 장치 안에서 여러 주소 공간을
+ * 구별하는 번호이고, 일부 구현은 그 번호 공간을 시스템 전체가 공유한다.
+ * 그런 경우 여기서 할당해야 두 장치가 같은 번호를 쓰지 않는다. */
 static DEFINE_IDA(iommu_global_pasid_ida);
 
+/* [한국어] 새 그룹의 기본 도메인 종류. 0 이면 각 IOMMU 드라이버가 정한
+ * 기본값을 쓰고, 부팅 인자(iommu.passthrough=)로 덮을 수 있다.
+ * 설정자: 부팅 인자 파서. 읽는 자: 그룹을 만들 때 기본 도메인을 고르는 곳. */
 static unsigned int iommu_def_domain_type __read_mostly;
+/* [한국어] 언맵 후 TLB 무효화를 즉시 할 것인가(strict), 모아서 할 것인가(lazy).
+ * lazy 는 훨씬 빠르지만 무효화 전까지 옛 매핑이 살아 있어, 그 창 동안
+ * 장치가 이미 반환된 메모리에 접근할 수 있다. 그래서 보안과 성능의 맞바꿈이며
+ * 기본값을 빌드 설정으로 정한다. */
 static bool iommu_dma_strict __read_mostly = IS_ENABLED(CONFIG_IOMMU_DEFAULT_DMA_STRICT);
+/* [한국어] 위 두 값이 부팅 인자로 지정됐는지 기억하는 비트들(IOMMU_CMD_LINE_*).
+ * 왜 필요한가: 사용자가 명시한 값은 드라이버가 덮어쓰면 안 되기 때문이다.
+ * 이 비트가 서 있으면 드라이버의 기본값 제안을 무시한다. */
 static u32 iommu_cmd_line __read_mostly;
 
 /* Tags used with xa_tag_pointer() in group->pasid_array */
+/* [한국어] 위 영어 주석대로 pasid_array 의 포인터에 붙는 태그다. 같은 배열이
+ * 두 종류의 것을 담기 때문에 구별이 필요하다 -- 도메인 자체를 담은 항목과,
+ * 그 도메인에 딸린 폴트 처리 핸들을 담은 항목이다. 포인터의 하위 비트를
+ * 태그로 쓰는 xa_tag_pointer() 규약이라 별도 필드가 들지 않는다. */
 enum { IOMMU_PASID_ARRAY_DOMAIN = 0, IOMMU_PASID_ARRAY_HANDLE = 1 };
 
+/*
+ * [한국어] IOMMU 그룹 -- 하드웨어가 서로 격리해 낼 수 있는 가장 작은 장치 묶음.
+ *
+ * 이 구조체가 이 파일의 중심이다. 왜 장치가 아니라 그룹이 단위인가: PCIe
+ * 스위치 뒤의 장치들은 요청자 ID 를 공유해 IOMMU 가 구별하지 못하고, ACS 가
+ * 없는 브리지 아래에서는 장치끼리 서로의 DMA 를 가로챌 수 있다. 그런 장치들을
+ * 따로 떼어 다른 주소 공간에 두는 것은 격리처럼 보이지만 실제로는 아니다.
+ * 그래서 커널은 격리가 실제로 성립하는 최소 묶음을 찾아 그것을 단위로 삼는다.
+ */
 struct iommu_group {
+	/* [한국어] sysfs 객체. /sys/kernel/iommu_groups/<id>/ 가 이것이다.
+	 * 왜 여기 박혀 있는가: 그룹의 수명을 sysfs 참조가 관리하기 때문이다.
+	 *   마지막 참조가 놓일 때 kobject release 콜백이 그룹을 해제한다.
+	 * 설정자: iommu_group_alloc(). 읽는 자: sysfs 계층. */
 	struct kobject kobj;
+
+	/* [한국어] 그 아래 devices/ 하위 디렉토리.
+	 * 왜 별도인가: 각 소속 장치가 이 디렉토리 아래 심볼릭 링크로 노출되고,
+	 *   사용자 공간은 그 링크 목록을 읽어 "이 그룹에 무엇이 묶여 있는가"를
+	 *   확인한다. VFIO 로 장치를 넘기기 전에 반드시 봐야 하는 정보다. */
 	struct kobject *devices_kobj;
+
+	/* [한국어] 소속 장치들의 목록. 원소는 struct group_device 다.
+	 * 설정자: iommu_group_add_device(). 읽는 자: 도메인을 갈아 끼울 때
+	 *   그룹의 모든 장치를 돌아야 하므로 이 파일 곳곳에서 순회한다.
+	 * 동기화: 아래 @mutex 가 보호한다. for_each_group_device() 로 돈다. */
 	struct list_head devices;
+
+	/* [한국어] PASID 별 도메인 표. 키는 PASID, 값은 도메인이거나 폴트 핸들이다.
+	 * 무엇인가: 한 장치가 여러 주소 공간을 동시에 쓸 수 있게 하는 것이 PASID 이며
+	 *   (SVA 에서 프로세스마다 하나씩), 어느 PASID 가 어느 도메인에 붙어 있는지를
+	 *   여기서 관리한다. PASID 0 은 이 표에 넣지 않고 @domain 이 맡는다.
+	 * 값 구별: 위 IOMMU_PASID_ARRAY_* 태그로 도메인과 핸들을 가른다.
+	 * 동기화: @mutex. */
 	struct xarray pasid_array;
+
+	/* [한국어] 이 그룹의 모든 상태를 보호하는 락.
+	 * 무엇을 보호하는가: 장치 목록, 현재 도메인, 소유권, PASID 배열.
+	 * 왜 뮤텍스인가: 도메인을 갈아 끼우는 일이 벤더 드라이버를 거쳐
+	 *   하드웨어를 만지고 잠들 수 있기 때문이다. 스핀락으로는 불가능하다. */
 	struct mutex mutex;
+
+	/* [한국어] 이 그룹을 가져간 쪽이 자기 상태를 매달아 두는 자리.
+	 * 설정자: iommu_group_set_iommudata(). 주로 VFIO 가 자기 문맥을 건다.
+	 * 읽는 자: 그 소유자만. 이 파일은 내용을 해석하지 않는다. */
 	void *iommu_data;
+
+	/* [한국어] 위 iommu_data 를 해제하는 콜백.
+	 * 왜 필요한가: 그룹이 사라질 때 소유자가 이미 없을 수 있어, 무엇을 어떻게
+	 *   풀어야 하는지 그룹 자신은 모른다. 그래서 해제 방법을 함께 받아 둔다. */
 	void (*iommu_data_release)(void *iommu_data);
+
+	/* [한국어] 그룹 이름. sysfs 에 그대로 쓰인다.
+	 * 값 범위: 벤더 드라이버가 지어 준 이름이거나 NULL.
+	 * NULL 이면 @id 만으로 디렉토리 이름을 만든다. */
 	char *name;
+
+	/* [한국어] 그룹 번호. /sys/kernel/iommu_groups/<id> 의 그 숫자다.
+	 * 설정자: iommu_group_alloc() 이 IDA 에서 받는다.
+	 * 값 범위: 0 이상. 그룹이 해제되면 반납되어 재사용된다. */
 	int id;
+
+	/* [한국어] 아무도 따로 요구하지 않을 때 돌아가는 도메인.
+	 * 왜 필요한가: 장치가 IOMMU 아래에 있는 동안에는 항상 어떤 주소 공간에
+	 *   붙어 있어야 한다. 붙어 있지 않은 장치의 DMA 는 IOMMU 가 막거나
+	 *   그냥 통과시키는데, 둘 다 안전한 기본값이 아니다.
+	 * 종류: DMA 번역용이거나 identity(주소를 그대로 통과)이며, 어느 쪽인지는
+	 *   iommu_def_domain_type 과 드라이버의 제안이 함께 정한다.
+	 * 수명: 그룹이 살아 있는 내내. VFIO 가 장치를 가져가도 해제되지 않고,
+	 *   돌려받을 때 여기로 되돌아온다. */
 	struct iommu_domain *default_domain;
+
+	/* [한국어] 모든 DMA 를 막는 도메인.
+	 * 왜 필요한가: 도메인을 갈아 끼우는 사이에 장치가 옛 페이지 테이블로
+	 *   접근하는 창을 없애기 위해서다. 먼저 여기로 옮겨 DMA 를 끊고,
+	 *   그다음 새 도메인으로 옮긴다.
+	 * 값 범위: 드라이버가 지원하지 않으면 NULL 일 수 있고, 그때는 대신
+	 *   기본 도메인을 거쳐 간다. */
 	struct iommu_domain *blocking_domain;
+
 	/*
 	 * During a group device reset, @resetting_domain points to the physical
 	 * domain, while @domain points to the attached domain before the reset.
 	 */
+	/* [한국어] 위 영어 주석대로, 장치를 리셋하는 동안에만 쓰인다.
+	 * 왜 두 필드가 필요한가: 리셋 중에는 하드웨어가 물리 주소로 동작해야
+	 *   하지만, 리셋이 끝나면 원래 붙어 있던 도메인으로 되돌아가야 한다.
+	 *   @domain 을 덮어쓰면 그 "원래"를 잃어버리므로 따로 둔다.
+	 * 값 범위: 리셋 중이 아니면 NULL. */
 	struct iommu_domain *resetting_domain;
+
+	/* [한국어] 지금 이 그룹이 붙어 있는 도메인.
+	 * 설정자: __iommu_group_set_domain() 계열만. 다른 곳에서 직접 쓰지 않는다.
+	 * 읽는 자: 매핑 API 가 어느 페이지 테이블에 넣을지 정할 때.
+	 * 값 범위: 보통 @default_domain 과 같고, VFIO 등이 가져가면 그쪽 도메인.
+	 * 동기화: @mutex. */
 	struct iommu_domain *domain;
+
+	/* [한국어] 전역 그룹 목록에 매달리는 고리.
+	 * 왜 필요한가: 버스 단위로 모든 그룹을 훑어야 하는 경우가 있다
+	 *   (probe 지연 처리 등). 그때 이 목록을 돈다. */
 	struct list_head entry;
+
+	/* [한국어] 이 그룹을 몇 명이 소유하고 있는가.
+	 * 왜 계수인가: 같은 소유자가 그룹 안의 여러 장치를 각각 가져갈 수 있고,
+	 *   마지막 하나를 놓을 때 소유권이 풀려야 하기 때문이다.
+	 * 0 이면 커널(DMA API)이 쓰는 상태. 1 이상이면 @owner 것이다.
+	 * 동기화: @mutex. */
 	unsigned int owner_cnt;
+
+	/* [한국어] 소유자를 식별하는 불투명 포인터. 보통 VFIO 의 문맥이다.
+	 * 왜 포인터로 비교하는가: 소유권은 "같은 주체인가"만 판정하면 되고,
+	 *   내용을 해석할 필요가 없다. 다른 주체가 claim 하려 하면 거부된다.
+	 * 값 범위: @owner_cnt 가 0 이면 의미 없음. */
 	void *owner;
 };
 
+/*
+ * [한국어] 그룹에 속한 장치 하나를 나타내는 항목.
+ * 왜 struct device 를 목록에 직접 넣지 않는가: 장치는 여러 목록에 동시에
+ * 속할 수 있고 IOMMU 만의 것이 아니기 때문이다. 그래서 고리를 따로 둔다.
+ */
 struct group_device {
+	/* [한국어] 그룹의 devices 목록에 매달리는 고리. */
 	struct list_head list;
+
+	/* [한국어] 실제 장치.
+	 * 설정자: iommu_group_add_device(). 읽는 자: 도메인을 붙이거나 뗄 때
+	 *   벤더 드라이버에 넘기는 대상이 이것이다. */
 	struct device *dev;
+
+	/* [한국어] sysfs 링크 이름.
+	 * 왜 저장해 두는가: 장치를 뗄 때 같은 이름으로 링크를 지워야 하는데,
+	 *   그 시점에는 이름을 다시 만들 근거가 사라졌을 수 있기 때문이다. */
 	char *name;
 };
 
 /* Iterate over each struct group_device in a struct iommu_group */
+/* [한국어] 위 영어 주석대로 그룹의 장치들을 도는 매크로. 호출자가
+ * group->mutex 를 들고 있어야 한다는 것이 암묵적 규약이다. */
 #define for_each_group_device(group, pos) \
 	list_for_each_entry(pos, &(group)->devices, list)
 
+/*
+ * [한국어] 그룹 sysfs 속성 하나를 기술하는 구조체.
+ * 왜 표준 device_attribute 가 아닌가: 이 속성들의 대상은 struct device 가
+ * 아니라 struct iommu_group 이기 때문이다. show/store 가 그룹을 직접 받도록
+ * 자체 형을 정의하고, 아래에서 kobject 계층과 이어 붙인다.
+ */
 struct iommu_group_attribute {
+	/* [한국어] sysfs 가 요구하는 공통 헤더. 이름과 권한이 들어 있다. */
 	struct attribute attr;
+
+	/* [한국어] 읽기 콜백. 그룹을 받아 버퍼에 쓴 바이트 수를 돌려준다. */
 	ssize_t (*show)(struct iommu_group *group, char *buf);
+
+	/* [한국어] 쓰기 콜백. NULL 이면 읽기 전용 속성이다. */
 	ssize_t (*store)(struct iommu_group *group,
 			 const char *buf, size_t count);
 };
 
+/*
+ * [한국어] 예약 구간 종류를 sysfs 에 보일 이름으로 바꾸는 표.
+ * 예약 구간이란 무엇인가: IOMMU 가 자유롭게 쓸 수 없는 주소 영역이다.
+ * 어떤 것은 반드시 항등 매핑이어야 하고(펌웨어가 쓰는 버퍼), 어떤 것은
+ * 아무도 쓰면 안 되며, MSI 창처럼 특별한 취급이 필요한 것도 있다.
+ * IOVA 할당기가 이 구간들을 피해야 하므로 사용자 공간에도 노출한다.
+ */
 static const char * const iommu_group_resv_type_string[] = {
-	[IOMMU_RESV_DIRECT]			= "direct",
-	[IOMMU_RESV_DIRECT_RELAXABLE]		= "direct-relaxable",
-	[IOMMU_RESV_RESERVED]			= "reserved",
-	[IOMMU_RESV_MSI]			= "msi",
-	[IOMMU_RESV_SW_MSI]			= "msi",
+	[IOMMU_RESV_DIRECT]			= "direct",	/* [한국어] 반드시 항등 매핑 -- 펌웨어가 이미 이 주소로 접근 중이다 */
+	[IOMMU_RESV_DIRECT_RELAXABLE]		= "direct-relaxable",	/* [한국어] 항등이면 좋지만 필수는 아니다. 부팅 후에는 회수해도 된다 */
+	[IOMMU_RESV_RESERVED]			= "reserved",	/* [한국어] 아무도 쓰면 안 되는 구멍 */
+	[IOMMU_RESV_MSI]			= "msi",	/* [한국어] 하드웨어가 정한 MSI 창 -- 인터럽트 메시지가 이리로 간다 */
+	[IOMMU_RESV_SW_MSI]			= "msi",	/* [한국어] 소프트웨어가 잡아 주는 MSI 창. 사용자에게는 같은 이름으로 보인다 */
 };
 
-#define IOMMU_CMD_LINE_DMA_API		BIT(0)
-#define IOMMU_CMD_LINE_STRICT		BIT(1)
+/* [한국어] iommu_cmd_line 의 비트들 -- 부팅 인자로 명시된 설정을 기억한다.
+ * 이 비트가 서 있으면 드라이버가 제안하는 기본값을 무시한다. 사용자가
+ * 직접 지정한 값을 코드가 덮어쓰지 않게 하는 것이 목적이다. */
+#define IOMMU_CMD_LINE_DMA_API		BIT(0)	/* [한국어] 기본 도메인 종류를 사용자가 정했다 */
+#define IOMMU_CMD_LINE_STRICT		BIT(1)	/* [한국어] strict/lazy 무효화를 사용자가 정했다 */
 
-static int bus_iommu_probe(const struct bus_type *bus);
-static int iommu_bus_notifier(struct notifier_block *nb,
+/* [한국어] 아래 전방 선언들 -- 이 파일 안에서 서로를 앞뒤로 부르기 때문에
+ * 정의보다 먼저 이름을 알려야 한다. */
+static int bus_iommu_probe(const struct bus_type *bus);	/* [한국어] 버스에 이미 붙어 있던 장치들을 뒤늦게 IOMMU 아래로 들인다 */
+static int iommu_bus_notifier(struct notifier_block *nb,	/* [한국어] 장치가 나타나고 사라질 때 받는 통지 */
 			      unsigned long action, void *data);
-static void iommu_release_device(struct device *dev);
-static int __iommu_attach_device(struct iommu_domain *domain,
+static void iommu_release_device(struct device *dev);	/* [한국어] 장치를 그룹에서 빼고 IOMMU 등록을 되돌린다 */
+static int __iommu_attach_device(struct iommu_domain *domain,	/* [한국어] 장치 하나를 도메인에 붙인다. old 는 되돌릴 대상이다 */
 				 struct device *dev, struct iommu_domain *old);
-static int __iommu_attach_group(struct iommu_domain *domain,
+static int __iommu_attach_group(struct iommu_domain *domain,	/* [한국어] 그룹 전체를 도메인에 붙인다 */
 				struct iommu_group *group);
-static struct iommu_domain *__iommu_paging_domain_alloc_flags(struct device *dev,
+static struct iommu_domain *__iommu_paging_domain_alloc_flags(struct device *dev,	/* [한국어] 번역용 도메인을 만든다 */
 						       unsigned int type,
 						       unsigned int flags);
 
 enum {
+	/* [한국어] 이 도메인 전환은 실패해서는 안 된다는 표시.
+	 * 왜 이런 것이 필요한가: 해체 경로에서 그룹을 기본 도메인으로 되돌릴 때는
+	 *   물러설 곳이 없다. 실패하면 장치가 어느 주소 공간에도 붙어 있지 않은
+	 *   상태로 남기 때문이다. 그래서 그 경로는 이 플래그를 세워 부르고,
+	 *   구현은 실패 시 되돌리는 대신 경고를 내고 밀고 나간다. */
 	IOMMU_SET_DOMAIN_MUST_SUCCEED = 1 << 0,
 };
 
