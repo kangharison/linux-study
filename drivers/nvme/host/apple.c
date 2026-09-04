@@ -1776,153 +1776,194 @@ static void devm_apple_nvme_mempool_destroy(void *data)	/* [한국어] Apple-ANS
 	mempool_destroy(data);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
 }	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
 
-static struct apple_nvme *apple_nvme_alloc(struct platform_device *pdev)	/* [한국어] Apple-ANS: 자료구조/열거 — 트랜스포트 상태 모델 */
-{	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	struct device *dev = &pdev->dev;	/* [한국어] Apple-ANS: 자료구조/열거 — 트랜스포트 상태 모델 */
-	struct apple_nvme *anv;	/* [한국어] Apple-ANS: 자료구조/열거 — 트랜스포트 상태 모델 */
-	int ret;	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+/*
+ * [한국어]
+ * apple_nvme_alloc - 플랫폼 장치에서 필요한 자원을 모두 확보한다
+ *
+ * @pdev: 디바이스 트리에서 매칭된 플랫폼 장치
+ * @return: 준비된 apple_nvme. 실패하면 ERR_PTR.
+ *
+ * PCI NVMe 의 probe 가 BAR 하나를 매핑하고 MSI-X 를 잡으면 끝나는 것과
+ * 달리, 여기서는 SoC 에 흩어진 자원을 하나씩 모아야 한다. 이 함수가 그
+ * 목록이고, 무엇이 없으면 ANS 가 동작하지 않는지를 그대로 보여 준다:
+ * 전원 도메인, 두 개의 MMIO 창, SART, 리셋 라인, IRQ, RTKit.
+ *
+ * devm_ 계열을 일관되게 쓰는 것이 이 함수의 구조를 단순하게 만든다.
+ * 대부분의 자원이 장치 해제 시 자동으로 풀리므로, 실패 경로가
+ * genpd 분리와 장치 참조 반납 두 줄로 끝난다. 그 둘만 devm 이 다루지
+ * 못하는 것이다.
+ *
+ * MMIO 창이 둘인 것이 이 하드웨어의 구조를 드러낸다. "ans" 는 코프로세서
+ * 제어(CPU 시작/정지)이고 "nvme" 는 NVMe 레지스터와 ANS 확장 레지스터다.
+ * 두 창이 별개라 코프로세서를 세우는 일과 NVMe 를 세우는 일이 분리된다.
+ *
+ * 도어벨 주소를 세대별로 다르게 잡는 것이 이 함수의 핵심 분기다.
+ * NVMMU 세대는 선형 SQ 도어벨(태그를 쓰는 곳)이 ANS 전용 레지스터에 있고,
+ * 구세대는 표준 NVMe 도어벨 영역을 쓴다. 이 주소가 제출 경로의 마지막
+ * 한 줄이 쓰는 곳이므로, 여기서 잘못 잡으면 명령이 하드웨어에 닿지 않는다.
+ *
+ * SART 는 코프로세서가 접근해도 되는 물리 주소 범위를 정하는 장치다.
+ * 이것 없이는 ANS 가 호스트 메모리를 읽지 못한다.
+ *
+ * 두 DMA 풀을 크기별로 나누는 이유는 PRP 리스트 대부분이 작기 때문이다.
+ * 256바이트 풀이 흔한 경우를 받아 페이지 하나를 통째로 쓰는 낭비를 막는다.
+ *
+ * quirk 두 개를 붙여 코어를 등록한다. SKIP_CID_GEN 은 명령 ID 를 코어가
+ * 생성하지 않게 하는 것이고 -- 이 하드웨어는 태그가 곧 ID 다 --
+ * IDENTIFY_CNS 는 Identify 의 일부 CNS 값을 쓰지 않게 한다.
+ *
+ * 실행 컨텍스트: probe 경로. 잠들 수 있다.
+ *
+ * 호출 체인:
+ *   apple_nvme_probe → [이 함수] → nvme_init_ctrl
+ */
+static struct apple_nvme *apple_nvme_alloc(struct platform_device *pdev)
+{
+	struct device *dev = &pdev->dev;
+	struct apple_nvme *anv;
+	int ret;
 
-	anv = devm_kzalloc(dev, sizeof(*anv), GFP_KERNEL);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	if (!anv)	/* [한국어] Apple-ANS: 제어 분기 — 오류·상태·자원 조건에 따른 경로 선택 */
-		return ERR_PTR(-ENOMEM);	/* [한국어] Apple-ANS: 반환 — 상위 계층에 성공/에러/상태 전달 */
+	anv = devm_kzalloc(dev, sizeof(*anv), GFP_KERNEL);	/* [한국어] devm — 장치 해제 시 자동으로 풀린다 */
+	if (!anv)
+		return ERR_PTR(-ENOMEM);
 
-	anv->dev = get_device(dev);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	anv->adminq.is_adminq = true;	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	platform_set_drvdata(pdev, anv);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	anv->dev = get_device(dev);	/* [한국어] devm 이 다루지 못하는 참조. 실패 경로가 직접 놓는다 */
+	anv->adminq.is_adminq = true;	/* [한국어] 두 큐를 구분하는 유일한 표식 */
+	platform_set_drvdata(pdev, anv);
 
-	anv->hw = of_device_get_match_data(&pdev->dev);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	if (!anv->hw) {	/* [한국어] Apple-ANS: 제어 분기 — 오류·상태·자원 조건에 따른 경로 선택 */
-		ret = -ENODEV;	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-		goto put_dev;	/* [한국어] Apple-ANS: 공통 정리 라벨로 점프 — 부분 성공 롤백 */
-	}	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	anv->hw = of_device_get_match_data(&pdev->dev);	/* [한국어] SoC 세대별 차이(has_lsq_nvmmu, max_queue_depth)가 여기서 온다 */
+	if (!anv->hw) {
+		ret = -ENODEV;
+		goto put_dev;
+	}
 
-	ret = apple_nvme_attach_genpd(anv);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	if (ret < 0) {	/* [한국어] Apple-ANS: 제어 분기 — 오류·상태·자원 조건에 따른 경로 선택 */
-		dev_err_probe(dev, ret, "Failed to attach power domains");	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-		goto put_dev;	/* [한국어] Apple-ANS: 공통 정리 라벨로 점프 — 부분 성공 롤백 */
-	}	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	if (dma_set_mask_and_coherent(dev, DMA_BIT_MASK(64))) {	/* [한국어] Apple-ANS: 제어 분기 — 오류·상태·자원 조건에 따른 경로 선택 */
-		ret = -ENXIO;	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-		goto put_dev;	/* [한국어] Apple-ANS: 공통 정리 라벨로 점프 — 부분 성공 롤백 */
-	}	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	ret = apple_nvme_attach_genpd(anv);	/* [한국어] 전원 도메인 — 켜지지 않으면 코프로세서가 존재하지 않는다 */
+	if (ret < 0) {
+		dev_err_probe(dev, ret, "Failed to attach power domains");
+		goto put_dev;
+	}
+	if (dma_set_mask_and_coherent(dev, DMA_BIT_MASK(64))) {	/* [한국어] 64비트 DMA — SART 가 허용하는 범위 안에서 쓴다 */
+		ret = -ENXIO;
+		goto put_dev;
+	}
 
-	anv->irq = platform_get_irq(pdev, 0);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	if (anv->irq < 0) {	/* [한국어] Apple-ANS: 제어 분기 — 오류·상태·자원 조건에 따른 경로 선택 */
-		ret = anv->irq;	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-		goto put_dev;	/* [한국어] Apple-ANS: 공통 정리 라벨로 점프 — 부분 성공 롤백 */
-	}	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	if (!anv->irq) {	/* [한국어] Apple-ANS: 제어 분기 — 오류·상태·자원 조건에 따른 경로 선택 */
-		ret = -ENXIO;	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-		goto put_dev;	/* [한국어] Apple-ANS: 공통 정리 라벨로 점프 — 부분 성공 롤백 */
-	}	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	anv->irq = platform_get_irq(pdev, 0);	/* [한국어] 완료 인터럽트. PCI 와 달리 MSI-X 가 아니라 SoC 인터럽트 하나다 */
+	if (anv->irq < 0) {
+		ret = anv->irq;
+		goto put_dev;
+	}
+	if (!anv->irq) {	/* [한국어] 0 은 유효한 IRQ 번호가 아니다 */
+		ret = -ENXIO;
+		goto put_dev;
+	}
 
-	anv->mmio_coproc = devm_platform_ioremap_resource_byname(pdev, "ans");	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	if (IS_ERR(anv->mmio_coproc)) {	/* [한국어] Apple-ANS: 제어 분기 — 오류·상태·자원 조건에 따른 경로 선택 */
-		ret = PTR_ERR(anv->mmio_coproc);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-		goto put_dev;	/* [한국어] Apple-ANS: 공통 정리 라벨로 점프 — 부분 성공 롤백 */
-	}	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	anv->mmio_nvme = devm_platform_ioremap_resource_byname(pdev, "nvme");	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	if (IS_ERR(anv->mmio_nvme)) {	/* [한국어] Apple-ANS: 제어 분기 — 오류·상태·자원 조건에 따른 경로 선택 */
-		ret = PTR_ERR(anv->mmio_nvme);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-		goto put_dev;	/* [한국어] Apple-ANS: 공통 정리 라벨로 점프 — 부분 성공 롤백 */
-	}	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	anv->mmio_coproc = devm_platform_ioremap_resource_byname(pdev, "ans");	/* [한국어] 코프로세서 제어 창 — CPU 시작/정지가 여기 있다 */
+	if (IS_ERR(anv->mmio_coproc)) {
+		ret = PTR_ERR(anv->mmio_coproc);
+		goto put_dev;
+	}
+	anv->mmio_nvme = devm_platform_ioremap_resource_byname(pdev, "nvme");	/* [한국어] NVMe 레지스터와 ANS 확장 레지스터 창 */
+	if (IS_ERR(anv->mmio_nvme)) {	/* [한국어] 두 창이 별개라 코프로세서를 세우는 일과 NVMe 를 세우는 일이 분리된다 */
+		ret = PTR_ERR(anv->mmio_nvme);
+		goto put_dev;
+	}
 
-	if (anv->hw->has_lsq_nvmmu) {	/* [한국어] Apple-ANS: 제어 분기 — 오류·상태·자원 조건에 따른 경로 선택 */
-		anv->adminq.sq_db = anv->mmio_nvme + APPLE_ANS_LINEAR_ASQ_DB;	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-		anv->adminq.cq_db = anv->mmio_nvme + APPLE_ANS_ACQ_DB;	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-		anv->ioq.sq_db = anv->mmio_nvme + APPLE_ANS_LINEAR_IOSQ_DB;	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-		anv->ioq.cq_db = anv->mmio_nvme + APPLE_ANS_IOCQ_DB;	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	} else {	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-		anv->adminq.sq_db = anv->mmio_nvme + NVME_REG_DBS;	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-		anv->adminq.cq_db = anv->mmio_nvme + APPLE_ANS_ACQ_DB;	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-		anv->ioq.sq_db = anv->mmio_nvme + NVME_REG_DBS + 8;	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-		anv->ioq.cq_db = anv->mmio_nvme + APPLE_ANS_IOCQ_DB;	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	}	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	if (anv->hw->has_lsq_nvmmu) {	/* [한국어] 도어벨 주소가 세대별로 다르다 — 제출 경로의 마지막 한 줄이 쓰는 곳이다 */
+		anv->adminq.sq_db = anv->mmio_nvme + APPLE_ANS_LINEAR_ASQ_DB;	/* [한국어] 선형 SQ 도어벨 — 태그를 쓰는 ANS 전용 레지스터 */
+		anv->adminq.cq_db = anv->mmio_nvme + APPLE_ANS_ACQ_DB;
+		anv->ioq.sq_db = anv->mmio_nvme + APPLE_ANS_LINEAR_IOSQ_DB;
+		anv->ioq.cq_db = anv->mmio_nvme + APPLE_ANS_IOCQ_DB;
+	} else {
+		anv->adminq.sq_db = anv->mmio_nvme + NVME_REG_DBS;	/* [한국어] 구세대는 표준 NVMe 도어벨 영역을 쓴다 */
+		anv->adminq.cq_db = anv->mmio_nvme + APPLE_ANS_ACQ_DB;
+		anv->ioq.sq_db = anv->mmio_nvme + NVME_REG_DBS + 8;	/* [한국어] 큐 하나당 8바이트 간격 — 표준 도어벨 배치다 */
+		anv->ioq.cq_db = anv->mmio_nvme + APPLE_ANS_IOCQ_DB;
+	}
 
-	anv->sart = devm_apple_sart_get(dev);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	if (IS_ERR(anv->sart)) {	/* [한국어] Apple-ANS: 제어 분기 — 오류·상태·자원 조건에 따른 경로 선택 */
-		ret = dev_err_probe(dev, PTR_ERR(anv->sart),	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-				    "Failed to initialize SART");	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-		goto put_dev;	/* [한국어] Apple-ANS: 공통 정리 라벨로 점프 — 부분 성공 롤백 */
-	}	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	anv->sart = devm_apple_sart_get(dev);	/* [한국어] 코프로세서가 접근해도 되는 물리 주소 범위를 정한다 — 없으면 ANS 가 호스트 메모리를 못 읽는다 */
+	if (IS_ERR(anv->sart)) {
+		ret = dev_err_probe(dev, PTR_ERR(anv->sart),
+				    "Failed to initialize SART");
+		goto put_dev;
+	}
 
-	anv->reset = devm_reset_control_array_get_exclusive(anv->dev);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	if (IS_ERR(anv->reset)) {	/* [한국어] Apple-ANS: 제어 분기 — 오류·상태·자원 조건에 따른 경로 선택 */
-		ret = dev_err_probe(dev, PTR_ERR(anv->reset),	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-				    "Failed to get reset control");	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-		goto put_dev;	/* [한국어] Apple-ANS: 공통 정리 라벨로 점프 — 부분 성공 롤백 */
-	}	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	anv->reset = devm_reset_control_array_get_exclusive(anv->dev);	/* [한국어] 소프트 리셋에 쓸 리셋 라인 */
+	if (IS_ERR(anv->reset)) {
+		ret = dev_err_probe(dev, PTR_ERR(anv->reset),
+				    "Failed to get reset control");
+		goto put_dev;
+	}
 
-	INIT_WORK(&anv->ctrl.reset_work, apple_nvme_reset_work);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	INIT_WORK(&anv->remove_work, apple_nvme_remove_dead_ctrl_work);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	spin_lock_init(&anv->lock);	/* [한국어] Apple-ANS: 동기화 — 큐/연결/상태 보호 */
+	INIT_WORK(&anv->ctrl.reset_work, apple_nvme_reset_work);
+	INIT_WORK(&anv->remove_work, apple_nvme_remove_dead_ctrl_work);
+	spin_lock_init(&anv->lock);	/* [한국어] 단일 공유 태그 공간이라 제출과 완료를 이 하나로 직렬화한다 */
 
-	ret = apple_nvme_queue_alloc(anv, &anv->adminq);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	if (ret)	/* [한국어] Apple-ANS: 제어 분기 — 오류·상태·자원 조건에 따른 경로 선택 */
-		goto put_dev;	/* [한국어] Apple-ANS: 공통 정리 라벨로 점프 — 부분 성공 롤백 */
-	ret = apple_nvme_queue_alloc(anv, &anv->ioq);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	if (ret)	/* [한국어] Apple-ANS: 제어 분기 — 오류·상태·자원 조건에 따른 경로 선택 */
-		goto put_dev;	/* [한국어] Apple-ANS: 공통 정리 라벨로 점프 — 부분 성공 롤백 */
+	ret = apple_nvme_queue_alloc(anv, &anv->adminq);	/* [한국어] SQE/CQE/TCB 링을 DMA 로 잡는다 */
+	if (ret)
+		goto put_dev;
+	ret = apple_nvme_queue_alloc(anv, &anv->ioq);
+	if (ret)
+		goto put_dev;
 
-	anv->prp_page_pool = dmam_pool_create("prp list page", anv->dev,	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-					      NVME_CTRL_PAGE_SIZE,	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-					      NVME_CTRL_PAGE_SIZE, 0);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	if (!anv->prp_page_pool) {	/* [한국어] Apple-ANS: 제어 분기 — 오류·상태·자원 조건에 따른 경로 선택 */
-		ret = -ENOMEM;	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-		goto put_dev;	/* [한국어] Apple-ANS: 공통 정리 라벨로 점프 — 부분 성공 롤백 */
-	}	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	anv->prp_page_pool = dmam_pool_create("prp list page", anv->dev,	/* [한국어] 큰 PRP 리스트용 — 페이지 크기 */
+					      NVME_CTRL_PAGE_SIZE,
+					      NVME_CTRL_PAGE_SIZE, 0);
+	if (!anv->prp_page_pool) {
+		ret = -ENOMEM;
+		goto put_dev;
+	}
 
-	anv->prp_small_pool =	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-		dmam_pool_create("prp list 256", anv->dev, 256, 256, 0);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	if (!anv->prp_small_pool) {	/* [한국어] Apple-ANS: 제어 분기 — 오류·상태·자원 조건에 따른 경로 선택 */
-		ret = -ENOMEM;	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-		goto put_dev;	/* [한국어] Apple-ANS: 공통 정리 라벨로 점프 — 부분 성공 롤백 */
-	}	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	anv->prp_small_pool =
+		dmam_pool_create("prp list 256", anv->dev, 256, 256, 0);	/* [한국어] PRP 리스트 대부분이 작아 흔한 경우를 여기서 받는다 — 페이지를 통째로 쓰는 낭비를 막는다 */
+	if (!anv->prp_small_pool) {
+		ret = -ENOMEM;
+		goto put_dev;
+	}
 
-	WARN_ON_ONCE(apple_nvme_iod_alloc_size() > PAGE_SIZE);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	anv->iod_mempool =	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-		mempool_create_kmalloc_pool(1, apple_nvme_iod_alloc_size());	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	if (!anv->iod_mempool) {	/* [한국어] Apple-ANS: 제어 분기 — 오류·상태·자원 조건에 따른 경로 선택 */
-		ret = -ENOMEM;	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-		goto put_dev;	/* [한국어] Apple-ANS: 공통 정리 라벨로 점프 — 부분 성공 롤백 */
-	}	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	ret = devm_add_action_or_reset(anv->dev,	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-			devm_apple_nvme_mempool_destroy, anv->iod_mempool);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	if (ret)	/* [한국어] Apple-ANS: 제어 분기 — 오류·상태·자원 조건에 따른 경로 선택 */
-		goto put_dev;	/* [한국어] Apple-ANS: 공통 정리 라벨로 점프 — 부분 성공 롤백 */
+	WARN_ON_ONCE(apple_nvme_iod_alloc_size() > PAGE_SIZE);	/* [한국어] 요청별 상태가 한 페이지를 넘으면 mempool 전제가 깨진다 */
+	anv->iod_mempool =
+		mempool_create_kmalloc_pool(1, apple_nvme_iod_alloc_size());	/* [한국어] 메모리 압박에서도 최소 하나는 확보되도록 예비를 둔다 */
+	if (!anv->iod_mempool) {
+		ret = -ENOMEM;
+		goto put_dev;
+	}
+	ret = devm_add_action_or_reset(anv->dev,	/* [한국어] mempool 은 devm 이 직접 다루지 않아 해제 동작을 등록해 준다 */
+			devm_apple_nvme_mempool_destroy, anv->iod_mempool);
+	if (ret)
+		goto put_dev;
 
-	ret = apple_nvme_alloc_tagsets(anv);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	if (ret)	/* [한국어] Apple-ANS: 제어 분기 — 오류·상태·자원 조건에 따른 경로 선택 */
-		goto put_dev;	/* [한국어] Apple-ANS: 공통 정리 라벨로 점프 — 부분 성공 롤백 */
+	ret = apple_nvme_alloc_tagsets(anv);	/* [한국어] admin 과 I/O 태그셋. 이 하드웨어는 태그 공간을 공유한다 */
+	if (ret)
+		goto put_dev;
 
-	ret = devm_request_irq(anv->dev, anv->irq, apple_nvme_irq, 0,	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-			       "nvme-apple", anv);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	if (ret) {	/* [한국어] Apple-ANS: 제어 분기 — 오류·상태·자원 조건에 따른 경로 선택 */
-		dev_err_probe(dev, ret, "Failed to request IRQ");	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-		goto put_dev;	/* [한국어] Apple-ANS: 공통 정리 라벨로 점프 — 부분 성공 롤백 */
-	}	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	ret = devm_request_irq(anv->dev, anv->irq, apple_nvme_irq, 0,	/* [한국어] 완료 인터럽트를 건다. 두 큐가 하나의 IRQ 를 공유한다 */
+			       "nvme-apple", anv);
+	if (ret) {
+		dev_err_probe(dev, ret, "Failed to request IRQ");
+		goto put_dev;
+	}
 
-	anv->rtk =	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-		devm_apple_rtkit_init(dev, anv, NULL, 0, &apple_nvme_rtkit_ops);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	if (IS_ERR(anv->rtk)) {	/* [한국어] Apple-ANS: 제어 분기 — 오류·상태·자원 조건에 따른 경로 선택 */
-		ret = dev_err_probe(dev, PTR_ERR(anv->rtk),	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-				    "Failed to initialize RTKit");	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-		goto put_dev;	/* [한국어] Apple-ANS: 공통 정리 라벨로 점프 — 부분 성공 롤백 */
-	}	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	anv->rtk =
+		devm_apple_rtkit_init(dev, anv, NULL, 0, &apple_nvme_rtkit_ops);	/* [한국어] 코프로세서 펌웨어와의 메시지 채널 */
+	if (IS_ERR(anv->rtk)) {
+		ret = dev_err_probe(dev, PTR_ERR(anv->rtk),
+				    "Failed to initialize RTKit");
+		goto put_dev;
+	}
 
-	ret = nvme_init_ctrl(&anv->ctrl, anv->dev, &nvme_ctrl_ops,	/* [한국어] Apple-ANS: NVMe 코어/호스트 API 호출 — 컨트롤러·요청 생명주기와 연결 */
-			     NVME_QUIRK_SKIP_CID_GEN | NVME_QUIRK_IDENTIFY_CNS);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	if (ret) {	/* [한국어] Apple-ANS: 제어 분기 — 오류·상태·자원 조건에 따른 경로 선택 */
-		dev_err_probe(dev, ret, "Failed to initialize nvme_ctrl");	/* [한국어] Apple-ANS: NVMe 코어/호스트 API 호출 — 컨트롤러·요청 생명주기와 연결 */
-		goto put_dev;	/* [한국어] Apple-ANS: 공통 정리 라벨로 점프 — 부분 성공 롤백 */
-	}	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	ret = nvme_init_ctrl(&anv->ctrl, anv->dev, &nvme_ctrl_ops,	/* [한국어] 이제 코어에 등록한다 */
+			     NVME_QUIRK_SKIP_CID_GEN | NVME_QUIRK_IDENTIFY_CNS);	/* [한국어] 태그가 곧 명령 ID 라 코어가 ID 를 생성하면 안 되고, 일부 Identify CNS 도 쓰지 않는다 */
+	if (ret) {
+		dev_err_probe(dev, ret, "Failed to initialize nvme_ctrl");
+		goto put_dev;
+	}
 
-	return anv;	/* [한국어] Apple-ANS: 반환 — 상위 계층에 성공/에러/상태 전달 */
-put_dev:	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	apple_nvme_detach_genpd(anv);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	put_device(anv->dev);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	return ERR_PTR(ret);	/* [한국어] Apple-ANS: 반환 — 상위 계층에 성공/에러/상태 전달 */
-}	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	return anv;
+put_dev:	/* [한국어] 대부분이 devm 이라 되감을 것이 둘뿐이다 */
+	apple_nvme_detach_genpd(anv);
+	put_device(anv->dev);
+	return ERR_PTR(ret);
+}
 
 static int apple_nvme_probe(struct platform_device *pdev)	/* [한국어] Apple-ANS: 자료구조/열거 — 트랜스포트 상태 모델 */
 {	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
