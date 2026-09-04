@@ -290,7 +290,7 @@ void nvme_failover_req(struct request *req)
 	 * information page, and just try any other available path for now.
 	 */
 	/* [한국어] ANA 에러: 컨트롤러는 살아 있으나 이 NS 서비스 불가 → 로그 재조회 + 타 경로 시도 */
-	if (nvme_is_ana_error(status) && ns->ctrl->ana_log_buf) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (nvme_is_ana_error(status) && ns->ctrl->ana_log_buf) {	/* [한국어] ANA 로그 버퍼가 있어야 재조회가 의미가 있다 — 없는 컨트롤러면 그냥 실패로 넘긴다 */
 		set_bit(NVME_NS_ANA_PENDING, &ns->flags);	/* [한국어] ANA 재조회 전까지 이 경로를 path_is_disabled 로 배제 */
 		queue_work(nvme_wq, &ns->ctrl->ana_work);	/* [한국어] ANA 로그 비동기 재읽기 — 제출 핫패스 밖으로 이관 */
 	}
@@ -374,7 +374,7 @@ void nvme_kick_requeue_lists(struct nvme_ctrl *ctrl)
 		if (nvme_ctrl_state(ns->ctrl) == NVME_CTRL_LIVE)	/* [한국어] 살아 있는 경로에서만 uevent 를 낸다 — 죽은 컨트롤러의 변경 통지는 udev 를 헛돌게 한다 */
 			disk_uevent(ns->head->disk, KOBJ_CHANGE);	/* [한국어] 경로 복구를 사용자 공간(udev 등)에 알림 */
 	}
-	srcu_read_unlock(&ctrl->srcu, srcu_idx);	/* [한국어] SRCU 읽기 측 종료 */
+	srcu_read_unlock(&ctrl->srcu, srcu_idx);	/* [한국어] 순회가 끝났으므로 이제 네임스페이스 제거가 진행될 수 있다 */
 }
 
 static const char *nvme_ana_state_names[] = {
@@ -423,7 +423,7 @@ void nvme_mpath_clear_ctrl_paths(struct nvme_ctrl *ctrl)
 	int srcu_idx;	/* [한국어] SRCU 쿠키 */
 
 	srcu_idx = srcu_read_lock(&ctrl->srcu);	/* [한국어] 리스트 안정 순회 */
-	list_for_each_entry_srcu(ns, &ctrl->namespaces, list,	/* [한국어] 리스트 토폴로지 조작 */
+	list_for_each_entry_srcu(ns, &ctrl->namespaces, list,	/* [한국어] srcu 순회 — 경로 제거와 겹쳐도 이 구간 안에서는 포인터가 유효하다 */
 				 srcu_read_lock_held(&ctrl->srcu)) {
 		nvme_mpath_clear_current_path(ns);	/* [한국어] 이 경로가 캐시된 모든 노드 슬롯 클리어 */
 		kblockd_schedule_work(&ns->head->requeue_work);	/* [한국어] 정책 재적용 위해 대기 bio 재처리 */
@@ -446,7 +446,7 @@ void nvme_mpath_revalidate_paths(struct nvme_ns *ns)
 	int srcu_idx;	/* [한국어] head SRCU 쿠키 */
 
 	srcu_idx = srcu_read_lock(&head->srcu);	/* [한국어] 형제 경로 리스트 순회 보호 */
-	list_for_each_entry_srcu(ns, &head->list, siblings,	/* [한국어] 리스트 토폴로지 조작 */
+	list_for_each_entry_srcu(ns, &head->list, siblings,	/* [한국어] 이번에는 head 기준 — 같은 네임스페이스를 보는 여러 컨트롤러를 훑는다 */
 				 srcu_read_lock_held(&head->srcu)) {
 		if (capacity != get_capacity(ns->disk))
 			clear_bit(NVME_NS_READY, &ns->flags);	/* [한국어] 용량 불일치 경로는 준비 안 됨 — 선택 배제 */
@@ -512,20 +512,20 @@ static struct nvme_ns *__nvme_find_path(struct nvme_ns_head *head, int node)
 		else
 			distance = LOCAL_DISTANCE;	/* [한국어] NUMA 정책 아니거나 노드 정보 없음 — ANA 만 비교 */
 
-		switch (ns->ana_state) {	/* [한국어] 상태/유형 디스패치 */
+		switch (ns->ana_state) {	/* [한국어] ANA 상태가 경로 등급을 정한다: 최적 > 비최적 > 나머지는 제외 */
 		case NVME_ANA_OPTIMIZED:	/* [한국어] 스펙상 최적 접근 — 1순위 풀 */
-			if (distance < found_distance) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+			if (distance < found_distance) {	/* [한국어] 같은 등급 안에서는 NUMA 거리가 가까운 쪽이 이긴다 */
 				found_distance = distance;	/* [한국어] 더 가까운 Optimized 로 갱신 */
-				found = ns;	/* [한국어] found 상수 — 상위 enum 역할 참고 */
+				found = ns;	/* [한국어] 최적 경로 후보를 갱신한다 */
 			}
-			break;	/* [한국어] 루프/스위치 종료 */
+			break;	/* [한국어] 최적을 찾았어도 더 가까운 최적이 있을 수 있어 순회는 계속된다 */
 		case NVME_ANA_NONOPTIMIZED:	/* [한국어] 서비스 가능 비최적 — Optimized 전무 시 fallback */
-			if (distance < fallback_distance) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
-				fallback_distance = distance;	/* [한국어] fallback_distance 상수 — 상위 enum 역할 참고 */
-				fallback = ns;	/* [한국어] fallback 상수 — 상위 enum 역할 참고 */
+			if (distance < fallback_distance) {	/* [한국어] 비최적끼리도 거리로 비교한다 */
+				fallback_distance = distance;	/* [한국어] 최적이 하나도 없을 때만 쓰일 후보 */
+				fallback = ns;
 			}
-			break;	/* [한국어] 루프/스위치 종료 */
-		default:	/* [한국어] 예약/미지 값 방어 */
+			break;
+		default:	/* [한국어] INACCESSIBLE·PERSISTENT_LOSS·CHANGE 는 후보로 삼지 않는다 */
 			break;	/* [한국어] INACCESSIBLE/CHANGE/LOSS 등은 후보에서 제외 */
 		}
 	}
@@ -578,14 +578,14 @@ static struct nvme_ns *nvme_round_robin_path(struct nvme_ns_head *head)
 	}
 
 	for (ns = nvme_next_ns(head, old);	/* [한국어] old 다음부터 한 바퀴 (old 자신은 루프 조건으로 제외) */
-	     ns && ns != old;	/* [한국어] old — 함수/구조 문맥의 상태 */
-	     ns = nvme_next_ns(head, ns)) {	/* [한국어] ns 상수 — 상위 enum 역할 참고 */
+	     ns && ns != old;	/* [한국어] 한 바퀴 돌아 출발점으로 오면 멈춘다 — 원형 순회라 종료 조건이 필요하다 */
+	     ns = nvme_next_ns(head, ns)) {	/* [한국어] 다음 경로로 — 라운드로빈은 매번 다른 곳에서 시작해 부하를 흩는다 */
 		if (nvme_path_is_disabled(ns))
 			continue;	/* [한국어] 비활성 스킵 */
 
-		if (ns->ana_state == NVME_ANA_OPTIMIZED) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+		if (ns->ana_state == NVME_ANA_OPTIMIZED) {	/* [한국어] 최적을 만나면 더 볼 것 없이 그것을 쓴다 */
 			found = ns;	/* [한국어] Optimized 즉시 채택 */
-			goto out;	/* [한국어] out — 함수/구조 문맥의 상태 */
+			goto out;	/* [한국어] 현재 경로로 기록하고 나간다 */
 		}
 		if (ns->ana_state == NVME_ANA_NONOPTIMIZED)
 			found = ns;	/* [한국어] Non-Optimized 후보 유지 — 더 나은 Optimized 탐색 계속 */
@@ -607,7 +607,7 @@ static struct nvme_ns *nvme_round_robin_path(struct nvme_ns_head *head)
 		return NULL;	/* [한국어] usable 경로 전무 */
 out:
 	rcu_assign_pointer(head->current_path[node], found);	/* [한국어] 새 RR 선택을 노드 캐시에 게시 */
-	return found;	/* [한국어] 호출 결과 반환 */
+	return found;	/* [한국어] 다음 I/O 는 이 지점 다음부터 순회를 시작한다 */
 }
 
 /*
@@ -623,27 +623,27 @@ static struct nvme_ns *nvme_queue_depth_path(struct nvme_ns_head *head)
 	unsigned int min_depth_opt = UINT_MAX, min_depth_nonopt = UINT_MAX;	/* [한국어] 각 풀의 최소 nr_active */
 	unsigned int depth;	/* [한국어] 후보 컨트롤러 현재 활성 I/O 수 */
 
-	list_for_each_entry_srcu(ns, &head->list, siblings,	/* [한국어] 리스트 토폴로지 조작 */
+	list_for_each_entry_srcu(ns, &head->list, siblings,	/* [한국어] 큐 깊이 정책도 같은 경로 집합을 훑는다 */
 				 srcu_read_lock_held(&head->srcu)) {
 		if (nvme_path_is_disabled(ns))
 			continue;	/* [한국어] 비활성 제외 */
 
 		depth = atomic_read(&ns->ctrl->nr_active);	/* [한국어] QD 정책 입력: 컨트롤러별 진행 중 multipath I/O */
 
-		switch (ns->ana_state) {	/* [한국어] 상태/유형 디스패치 */
-		case NVME_ANA_OPTIMIZED:	/* [한국어] 다중 분기 케이스 */
-			if (depth < min_depth_opt) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+		switch (ns->ana_state) {	/* [한국어] 거리 대신 in-flight 개수로 비교한다는 점만 NUMA 정책과 다르다 */
+		case NVME_ANA_OPTIMIZED:	/* [한국어] 최적 경로들 중에서 */
+			if (depth < min_depth_opt) {	/* [한국어] 가장 한가한 컨트롤러를 고른다 */
 				min_depth_opt = depth;	/* [한국어] 더 한가한 Optimized 갱신 */
-				best_opt = ns;	/* [한국어] best_opt 상수 — 상위 enum 역할 참고 */
+				best_opt = ns;
 			}
-			break;	/* [한국어] 루프/스위치 종료 */
-		case NVME_ANA_NONOPTIMIZED:	/* [한국어] 다중 분기 케이스 */
-			if (depth < min_depth_nonopt) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
-				min_depth_nonopt = depth;	/* [한국어] min_depth_nonopt 상수 — 상위 enum 역할 참고 */
-				best_nonopt = ns;	/* [한국어] best_nonopt 상수 — 상위 enum 역할 참고 */
+			break;
+		case NVME_ANA_NONOPTIMIZED:	/* [한국어] 최적이 없을 때를 대비한 후보군 */
+			if (depth < min_depth_nonopt) {
+				min_depth_nonopt = depth;
+				best_nonopt = ns;
 			}
-			break;	/* [한국어] 루프/스위치 종료 */
-		default:	/* [한국어] 예약/미지 값 방어 */
+			break;
+		default:	/* [한국어] 접근 불가 상태는 후보에서 제외한다 */
 			break;	/* [한국어] I/O 불가 ANA 상태 제외 */
 		}
 
@@ -694,11 +694,11 @@ static struct nvme_ns *nvme_numa_path(struct nvme_ns_head *head)
 inline struct nvme_ns *nvme_find_path(struct nvme_ns_head *head)
 {
 	switch (READ_ONCE(head->subsys->iopolicy)) {	/* [한국어] sysfs 동시 갱신과 경합 완화하며 정책 분기 */
-	case NVME_IOPOLICY_QD:	/* [한국어] 다중 분기 케이스 */
+	case NVME_IOPOLICY_QD:	/* [한국어] 서브시스템별 정책이 경로 선택 함수를 가른다 */
 		return nvme_queue_depth_path(head);	/* [한국어] 부하 분산 정책 */
-	case NVME_IOPOLICY_RR:	/* [한국어] 다중 분기 케이스 */
+	case NVME_IOPOLICY_RR:	/* [한국어] 라운드로빈 — 경로를 순환하며 균등하게 나눈다 */
 		return nvme_round_robin_path(head);	/* [한국어] 순환 균등 정책 */
-	default:	/* [한국어] 예약/미지 값 방어 */
+	default:	/* [한국어] NUMA 가 기본 — 알 수 없는 값이 들어와도 동작이 멈추지 않는다 */
 		return nvme_numa_path(head);	/* [한국어] 기본 NUMA+ANA 캐시 경로 */
 	}
 }
@@ -718,7 +718,7 @@ static bool nvme_available_path(struct nvme_ns_head *head)
 	if (!test_bit(NVME_NSHEAD_DISK_LIVE, &head->flags))
 		return false;	/* [한국어] head 자체가 아직/이미 비-live 면 requeue 무의미 */
 
-	list_for_each_entry_srcu(ns, &head->list, siblings,	/* [한국어] 리스트 토폴로지 조작 */
+	list_for_each_entry_srcu(ns, &head->list, siblings,	/* [한국어] "쓸 만한 경로가 하나라도 있는가"를 묻는 순회 — 하나 찾으면 즉시 참 */
 				 srcu_read_lock_held(&head->srcu)) {
 		if (test_bit(NVME_CTRL_FAILFAST_EXPIRED, &ns->ctrl->flags))
 			continue;	/* [한국어] fast_io_fail 만료 — 복구 대기 대상에서 제외 */
@@ -727,7 +727,7 @@ static bool nvme_available_path(struct nvme_ns_head *head)
 		case NVME_CTRL_RESETTING:	/* [한국어] 리셋 중 — LIVE 복귀 기대 → requeue 가치 */
 		case NVME_CTRL_CONNECTING:	/* [한국어] 재연결 중 — 일시 경로 없음으로 즉시 fail 금지 */
 			return true;	/* [한국어] 양성 판정 */
-		default:	/* [한국어] 예약/미지 값 방어 */
+		default:	/* [한국어] DELETING·DEAD 는 곧 사라질 경로라 기다릴 가치가 없다 */
 			break;	/* [한국어] DEAD/DELETING 등 — 이 경로는 복구 기대 낮음 */
 		}
 	}
@@ -742,7 +742,7 @@ static bool nvme_available_path(struct nvme_ns_head *head)
 	 * non-zero, this flag is set to true. When zero, the flag is cleared.
 	 */
 	/* [한국어] 경로 0개여도 유예 플래그가 있으면 requeue 허용 (순간 단절 흡수) */
-	return nvme_mpath_queue_if_no_path(head);	/* [한국어] 네이티브 multipath 헬퍼 */
+	return nvme_mpath_queue_if_no_path(head);	/* [한국어] 경로가 없을 때 실패시킬지 붙들지는 사용자 설정이 정한다 */
 }
 
 /*
@@ -772,19 +772,19 @@ static void nvme_ns_head_submit_bio(struct bio *bio)
 	 * pool from the original queue to allocate the bvecs from.
 	 */
 	/* [한국어] steal 이후에도 원 풀에서 bvec 할당되도록 head 큐 limits 로 선행 split */
-	bio = bio_split_to_limits(bio);	/* [한국어] bio 상수 — 상위 enum 역할 참고 */
+	bio = bio_split_to_limits(bio);	/* [한국어] head 의 한계가 아니라 실제로 갈 경로의 한계로 잘라야 하므로 여기서 먼저 나눈다 */
 	if (!bio)
 		return;	/* [한국어] split 이 원본을 완료 처리한 경우 */
 
 	srcu_idx = srcu_read_lock(&head->srcu);	/* [한국어] 경로 리스트·current_path 안정 관측 */
 	ns = nvme_find_path(head);	/* [한국어] 현재 iopolicy 로 실제 전송 경로 선택 */
-	if (likely(ns)) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (likely(ns)) {	/* [한국어] 정상 경로 — 경로가 있는 것이 압도적으로 흔하다 */
 		bio_set_dev(bio, ns->disk->part0);	/* [한국어] bio 를 경로 gendisk 로 재지정 — 하위 nvme 큐 진입 */
 		bio->bi_opf |= REQ_NVME_MPATH;	/* [한국어] multipath 경유 bio 표시 — 하위 에러/acct 구분 */
 		trace_block_bio_remap(bio, disk_devt(ns->head->disk),	/* [한국어] 추적점에 원래 head 장치를 남긴다 — blktrace 가 다중경로 재지정을 따라갈 수 있게 */
 				      bio->bi_iter.bi_sector);	/* [한국어] head→path 리맵 트레이스 */
 		submit_bio_noacct(bio);	/* [한국어] acct 중복 없이 경로 큐로 재제출 */
-	} else if (nvme_available_path(head)) {	/* [한국어] 대안 조건 경로 */
+	} else if (nvme_available_path(head)) {	/* [한국어] 지금은 못 쓰지만 곧 돌아올 경로가 있다면 실패시키지 않고 붙든다 */
 		dev_warn_ratelimited(dev, "no usable path - requeuing I/O\n");	/* [한국어] 당장 쓸 경로 없음 — 복구 대기 */
 
 		spin_lock_irq(&head->requeue_lock);	/* [한국어] 재제출 목록 조작 전 락 */
@@ -831,11 +831,11 @@ static int nvme_ns_head_get_unique_id(struct gendisk *disk, u8 id[16],
 	int srcu_idx, ret = -EWOULDBLOCK;	/* [한국어] 경로 없으면 would-block 계열 */
 
 	srcu_idx = srcu_read_lock(&head->srcu);	/* [한국어] 경로 선택 보호 */
-	ns = nvme_find_path(head);	/* [한국어] ns 상수 — 상위 enum 역할 참고 */
+	ns = nvme_find_path(head);	/* [한국어] 고유 ID 는 어느 경로로 물어도 같으므로 아무 경로나 쓴다 */
 	if (ns)
 		ret = nvme_ns_get_unique_id(ns, id, type);	/* [한국어] 실제 매체 ID 는 경로 ns 가 보유 — 위임 */
-	srcu_read_unlock(&head->srcu, srcu_idx);	/* [한국어] SRCU 읽기 측 종료 */
-	return ret;	/* [한국어] 결과 코드 전파 */
+	srcu_read_unlock(&head->srcu, srcu_idx);	/* [한국어] 조회가 끝나면 곧바로 놓는다 — 오래 쥐면 경로 제거가 지연된다 */
+	return ret;	/* [한국어] 경로가 없었다면 -EWOULDBLOCK 이 그대로 나간다 */
 }
 
 #ifdef CONFIG_BLK_DEV_ZONED
@@ -846,16 +846,16 @@ static int nvme_ns_head_get_unique_id(struct gendisk *disk, u8 id[16],
 static int nvme_ns_head_report_zones(struct gendisk *disk, sector_t sector,
 		unsigned int nr_zones, struct blk_report_zones_args *args)
 {
-	struct nvme_ns_head *head = disk->private_data;	/* [한국어] 지역/멤버 상태 — 상위 함수·구조 아키텍처 참고 */
-	struct nvme_ns *ns;	/* [한국어] ns — 함수/구조 문맥의 상태 */
-	int srcu_idx, ret = -EWOULDBLOCK;	/* [한국어] 지역/멤버 상태 — 상위 함수·구조 아키텍처 참고 */
+	struct nvme_ns_head *head = disk->private_data;	/* [한국어] 다중경로 디스크의 private 는 head 다 — 개별 경로가 아니다 */
+	struct nvme_ns *ns;	/* [한국어] 실제로 명령을 보낼 경로 */
+	int srcu_idx, ret = -EWOULDBLOCK;	/* [한국어] 경로를 못 찾았을 때의 기본값 — 상위가 재시도할 수 있는 오류다 */
 
-	srcu_idx = srcu_read_lock(&head->srcu);	/* [한국어] srcu_idx 상수 — 상위 enum 역할 참고 */
-	ns = nvme_find_path(head);	/* [한국어] ns 상수 — 상위 enum 역할 참고 */
+	srcu_idx = srcu_read_lock(&head->srcu);	/* [한국어] 경로 목록을 읽는 동안 제거를 유예시킨다 */
+	ns = nvme_find_path(head);	/* [한국어] 존 보고는 아무 경로로나 가능하다 — 같은 미디어를 본다 */
 	if (ns)
 		ret = nvme_ns_report_zones(ns, sector, nr_zones, args);	/* [한국어] ZNS 존 리포트도 활성 경로에 위임 */
-	srcu_read_unlock(&head->srcu, srcu_idx);	/* [한국어] SRCU 읽기 측 종료 */
-	return ret;	/* [한국어] 결과 코드 전파 */
+	srcu_read_unlock(&head->srcu, srcu_idx);
+	return ret;
 }
 #else
 #define nvme_ns_head_report_zones	NULL	/* [한국어] 비 ZNS 빌드에서 ops 필드용 NULL 대체 */
@@ -892,7 +892,7 @@ static int nvme_ns_head_chr_open(struct inode *inode, struct file *file)
 {
 	if (!nvme_tryget_ns_head(cdev_to_ns_head(inode->i_cdev)))
 		return -ENXIO;	/* [한국어] head 제거 중 */
-	return 0;	/* [한국어] 성공/no-op 완료 */
+	return 0;	/* [한국어] head 참조를 얻었으므로 파일이 닫힐 때까지 사라지지 않는다 */
 }
 
 /*
@@ -902,7 +902,7 @@ static int nvme_ns_head_chr_open(struct inode *inode, struct file *file)
 static int nvme_ns_head_chr_release(struct inode *inode, struct file *file)
 {
 	nvme_put_ns_head(cdev_to_ns_head(inode->i_cdev));	/* [한국어] open 과 대칭 참조 해제 */
-	return 0;	/* [한국어] 성공/no-op 완료 */
+	return 0;	/* [한국어] open 에서 든 참조를 놓는다 — 마지막이면 head 가 해제된다 */
 }
 
 /* [한국어] multipath head 문자장치 fops — ioctl/io_uring 패스스루 진입 */
@@ -933,7 +933,7 @@ static int nvme_add_ns_head_cdev(struct nvme_ns_head *head)
 		return ret;	/* [한국어] 이름 설정 실패 */
 	ret = nvme_cdev_add(&head->cdev, &head->cdev_device,
 			    &nvme_ns_head_chr_fops, THIS_MODULE);	/* [한국어] cdev + device 등록 헬퍼 */
-	return ret;	/* [한국어] 결과 코드 전파 */
+	return ret;	/* [한국어] 문자 장치 등록 결과를 그대로 올린다 — 실패하면 호출자가 디스크 등록을 되감는다 */
 }
 
 /*
@@ -1023,9 +1023,9 @@ static void nvme_remove_head_work(struct work_struct *work)
 	mutex_lock(&head->subsys->lock);	/* [한국어] 서브시스템 전역 토폴로지 변경과 직렬화 */
 	if (list_empty(&head->list)) {	/* [한국어] 형제 경로가 모두 사라졌는지 */
 		list_del_init(&head->entry);	/* [한국어] 서브시스템 nsheads 에서 head 연결 해제 */
-		remove = true;	/* [한국어] remove 상수 — 상위 enum 역할 참고 */
+		remove = true;	/* [한국어] 마지막 경로가 사라졌다 — 락 밖에서 head 를 지우도록 표시만 남긴다 */
 	}
-	mutex_unlock(&head->subsys->lock);	/* [한국어] 컨트롤 플레인 뮤텍스 해제 */
+	mutex_unlock(&head->subsys->lock);	/* [한국어] 실제 제거는 락을 놓은 뒤에 한다 — 디스크 제거가 잠들기 때문 */
 	if (remove)
 		nvme_remove_head(head);	/* [한국어] 즉시 제거 — delayed work 완료 경로 */
 
@@ -1062,7 +1062,7 @@ int nvme_mpath_alloc_disk(struct nvme_ctrl *ctrl, struct nvme_ns_head *head)
 	 * unique.
 	 */
 	/* [한국어] always_on 아니면 CMIC multi-ctrl + multipath 파라미터 둘 다 필요 */
-	if (!multipath_always_on) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (!multipath_always_on) {	/* [한국어] always_on 이 아니면 예전 규칙대로 공유 네임스페이스에만 head 디스크를 만든다 */
 		if (!(ctrl->subsys->cmic & NVME_CTRL_CMIC_MULTI_CTRL) ||	/* [한국어] Identify CMIC 다중 컨트롤러 비트 */
 				!multipath)	/* [한국어] 모듈 multipath 비활성 시 head 비생성 */
 			return 0;	/* [한국어] head disk 불필요 — 에러 아님 */
@@ -1093,7 +1093,7 @@ int nvme_mpath_alloc_disk(struct nvme_ctrl *ctrl, struct nvme_ns_head *head)
 	 * scan_work.
 	 */
 	/* [한국어] device_add_disk 시 동기 파티션 스캔 억제 — scan_work 데드락 회피 */
-	set_bit(GD_SUPPRESS_PART_SCAN, &head->disk->state);	/* [한국어] 상태 플래그 비트 */
+	set_bit(GD_SUPPRESS_PART_SCAN, &head->disk->state);	/* [한국어] 경로 디스크가 아니라 head 에서만 파티션을 읽어야 같은 파티션이 여러 번 보이지 않는다 */
 	sprintf(head->disk->disk_name, "nvme%dn%d",	/* [한국어] 포맷 작성 */
 			ctrl->subsys->instance, head->instance);	/* [한국어] 사용자 가시 블록 노드 이름 */
 	nvme_tryget_ns_head(head);	/* [한국어] disk 가 head 를 참조하는 동안 수명 보장 */
@@ -1122,10 +1122,10 @@ static void nvme_mpath_set_live(struct nvme_ns *ns)
 	 * head.
 	 */
 	/* [한국어] 최초 live 전환 한 경로만 device_add_disk 수행 */
-	if (!test_and_set_bit(NVME_NSHEAD_DISK_LIVE, &head->flags)) {	/* [한국어] 상태 플래그 비트 */
+	if (!test_and_set_bit(NVME_NSHEAD_DISK_LIVE, &head->flags)) {	/* [한국어] 여러 경로가 동시에 올라와도 디스크 등록은 한 번뿐이어야 한다 */
 		rc = device_add_disk(&head->subsys->dev, head->disk,
 				     nvme_ns_attr_groups);	/* [한국어] sysfs/블록 계층에 multipath 디스크 노출 */
-		if (rc) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+		if (rc) {	/* [한국어] 등록 실패 — 비트를 되돌리지 않으면 다음 경로도 시도하지 못한다 */
 			clear_bit(NVME_NSHEAD_DISK_LIVE, &head->flags);	/* [한국어] device_add_disk 실패 시 live 비트 롤백 */
 			return;	/* [한국어] 디스크 등록이 실패했으므로 cdev 도 스캔도 걸지 않고 되돌린다 */
 		}
@@ -1136,13 +1136,13 @@ static void nvme_mpath_set_live(struct nvme_ns *ns)
 	nvme_mpath_add_sysfs_link(ns->head);	/* [한국어] head↔path sysfs 토폴로지 링크 갱신 */
 
 	mutex_lock(&head->lock);	/* [한국어] 경로 선계산 구간 직렬화 */
-	if (nvme_path_is_optimized(ns)) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
-		int node, srcu_idx;	/* [한국어] srcu_idx — 함수/구조 문맥의 상태 */
+	if (nvme_path_is_optimized(ns)) {	/* [한국어] 최적 경로가 새로 생겼다면 캐시된 선택을 다시 계산할 가치가 있다 */
+		int node, srcu_idx;	/* [한국어] 노드별로 현재 경로가 따로 캐시되어 있다 */
 
-		srcu_idx = srcu_read_lock(&head->srcu);	/* [한국어] srcu_idx 상수 — 상위 enum 역할 참고 */
+		srcu_idx = srcu_read_lock(&head->srcu);	/* [한국어] __nvme_find_path 가 경로 목록을 읽는다 */
 		for_each_online_node(node)
 			__nvme_find_path(head, node);	/* [한국어] 온라인 각 NUMA 노드에 최적 경로 사전 채움 */
-		srcu_read_unlock(&head->srcu, srcu_idx);	/* [한국어] SRCU 읽기 측 종료 */
+		srcu_read_unlock(&head->srcu, srcu_idx);	/* [한국어] 모든 노드의 캐시를 갱신했다 */
 	}
 	mutex_unlock(&head->lock);	/* [한국어] head 경로 선계산 직렬화 해제 */
 
@@ -1175,7 +1175,7 @@ static int nvme_parse_ana_log(struct nvme_ctrl *ctrl, void *data,
 		if (WARN_ON_ONCE(offset > ctrl->ana_log_size - sizeof(*desc)))
 			return -EINVAL;	/* [한국어] 버퍼 경계 초과 — 손상 로그 */
 
-		nr_nsids = le32_to_cpu(desc->nnsids);	/* [한국어] nr_nsids 상수 — 상위 enum 역할 참고 */
+		nr_nsids = le32_to_cpu(desc->nnsids);	/* [한국어] 이 ANA 그룹에 속한 네임스페이스 개수 — 뒤따르는 NSID 배열의 길이다 */
 		nsid_buf_size = flex_array_size(desc, nsids, nr_nsids);	/* [한국어] 가변 배열 크기 계산 */
 
 		if (WARN_ON_ONCE(desc->grpid == 0))
@@ -1254,8 +1254,8 @@ static void nvme_update_ns_ana_state(struct nvme_ana_group_desc *desc,
 		 * head node if head node of the path has already come alive.
 		 */
 		/* [한국어] 비-live ANA 여도 head 가 떠 있으면 path sysfs 링크는 생성 */
-		if (test_bit(NVME_NSHEAD_DISK_LIVE, &ns->head->flags))	/* [한국어] 상태 플래그 비트 */
-			nvme_mpath_add_sysfs_link(ns->head);	/* [한국어] 네이티브 multipath 헬퍼 */
+		if (test_bit(NVME_NSHEAD_DISK_LIVE, &ns->head->flags))	/* [한국어] head 디스크가 이미 등록된 뒤에만 링크를 걸 수 있다 */
+			nvme_mpath_add_sysfs_link(ns->head);	/* [한국어] 새로 살아난 경로를 head 아래에 노출한다 */
 	}
 }
 
@@ -1272,7 +1272,7 @@ static int nvme_update_ana_state(struct nvme_ctrl *ctrl,
 	u32 nr_nsids = le32_to_cpu(desc->nnsids), n = 0;	/* [한국어] 그룹 NS 수 / 로그 nsid 인덱스 */
 	unsigned *nr_change_groups = data;	/* [한국어] CHANGE 그룹 카운터 출력 */
 	struct nvme_ns *ns;	/* [한국어] 컨트롤러 NS 순회 */
-	int srcu_idx;	/* [한국어] srcu_idx — 함수/구조 문맥의 상태 */
+	int srcu_idx;	/* [한국어] 네임스페이스 목록을 읽는 동안 제거를 유예시킬 토큰 */
 
 	dev_dbg(ctrl->device, "ANA group %d: %s.\n",	/* [한국어] 진단 로그 */
 			le32_to_cpu(desc->grpid),	/* [한국어] LE 온와이어 엔디안 변환 */
@@ -1284,10 +1284,10 @@ static int nvme_update_ana_state(struct nvme_ctrl *ctrl,
 	if (!nr_nsids)
 		return 0;	/* [한국어] 이 그룹에 NS 목록 없음 — 상태만 카운트하고 통과 */
 
-	srcu_idx = srcu_read_lock(&ctrl->srcu);	/* [한국어] srcu_idx 상수 — 상위 enum 역할 참고 */
-	list_for_each_entry_srcu(ns, &ctrl->namespaces, list,	/* [한국어] 리스트 토폴로지 조작 */
+	srcu_idx = srcu_read_lock(&ctrl->srcu);	/* [한국어] ANA 갱신 중에 네임스페이스가 사라져도 포인터가 유효하도록 */
+	list_for_each_entry_srcu(ns, &ctrl->namespaces, list,	/* [한국어] 로그의 NSID 배열과 컨트롤러의 네임스페이스를 맞춰 나간다 */
 				 srcu_read_lock_held(&ctrl->srcu)) {
-		unsigned nsid;	/* [한국어] nsid — 함수/구조 문맥의 상태 */
+		unsigned nsid;	/* [한국어] 두 정렬된 목록을 병합하듯 비교하기 위한 현재 값 */
 again:
 		nsid = le32_to_cpu(desc->nsids[n]);	/* [한국어] 로그의 n 번째 NSID (정렬됨) */
 		if (ns->head->ns_id < nsid)
@@ -1299,7 +1299,7 @@ again:
 		if (ns->head->ns_id > nsid)
 			goto again;	/* [한국어] 로그 nsid 가 뒤처짐 — 같은 ns 로 다음 로그 nsid 재시도 */
 	}
-	srcu_read_unlock(&ctrl->srcu, srcu_idx);	/* [한국어] SRCU 읽기 측 종료 */
+	srcu_read_unlock(&ctrl->srcu, srcu_idx);	/* [한국어] 이 그룹의 네임스페이스를 모두 갱신했다 */
 	return 0;	/* [한국어] 이 그룹 처리 완료 — 다음 그룹 계속 */
 }
 
@@ -1319,15 +1319,15 @@ static int nvme_read_ana_log(struct nvme_ctrl *ctrl)
 	mutex_lock(&ctrl->ana_lock);	/* [한국어] ANA 로그 읽기·파싱 임계구역 진입 */
 	error = nvme_get_log(ctrl, NVME_NSID_ALL, NVME_LOG_ANA, 0, NVME_CSI_NVM,
 			ctrl->ana_log_buf, ctrl->ana_log_size, 0);	/* [한국어] Admin Get Log Page 로 ANA 로그 전체 수신 */
-	if (error) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (error) {	/* [한국어] 로그를 못 읽었다 — 경로 상태를 바꿀 근거가 없으므로 그대로 둔다 */
 		dev_warn(ctrl->device, "Failed to get ANA log: %d\n", error);	/* [한국어] 로그 읽기 실패 — 상태 미갱신 */
-		goto out_unlock;	/* [한국어] out_unlock — 함수/구조 문맥의 상태 */
+		goto out_unlock;	/* [한국어] 락만 놓고 나간다. 재조회는 다음 AEN 이나 워크가 맡는다 */
 	}
 
 	error = nvme_parse_ana_log(ctrl, &nr_change_groups,
 			nvme_update_ana_state);	/* [한국어] 수신 버퍼를 그룹 단위 콜백으로 해석 */
-	if (error)	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
-		goto out_unlock;	/* [한국어] out_unlock — 함수/구조 문맥의 상태 */
+	if (error)	/* [한국어] 파싱 실패 — 로그가 잘렸거나 컨트롤러가 규격을 어겼다 */
+		goto out_unlock;
 
 	/*
 	 * In theory we should have an ANATT timer per group as they might enter
@@ -1347,7 +1347,7 @@ static int nvme_read_ana_log(struct nvme_ctrl *ctrl)
 		timer_delete_sync(&ctrl->anatt_timer);	/* [한국어] 모든 그룹 전이 완료 — 타임아웃 불필요 */
 out_unlock:
 	mutex_unlock(&ctrl->ana_lock);	/* [한국어] ANA 임계구역 종료 */
-	return error;	/* [한국어] 결과 코드 전파 */
+	return error;	/* [한국어] 호출자는 이 값으로 재시도 여부를 정한다 */
 }
 
 /*
@@ -1356,7 +1356,7 @@ out_unlock:
  */
 static void nvme_ana_work(struct work_struct *work)
 {
-	struct nvme_ctrl *ctrl = container_of(work, struct nvme_ctrl, ana_work);	/* [한국어] work → ctrl */
+	struct nvme_ctrl *ctrl = container_of(work, struct nvme_ctrl, ana_work);	/* [한국어] 워크가 컨트롤러 안에 박혀 있어 역산으로 찾는다 */
 
 	if (nvme_ctrl_state(ctrl) != NVME_CTRL_LIVE)	/* [한국어] LIVE 가 아니면 ANA 로그를 읽을 admin 큐가 없다 */
 		return;	/* [한국어] 비-LIVE 면 ANA 작업 무의미 */
@@ -1377,9 +1377,9 @@ void nvme_mpath_update(struct nvme_ctrl *ctrl)
 	if (!ctrl->ana_log_buf)
 		return;	/* [한국어] ANA 미초기화 — no-op */
 
-	mutex_lock(&ctrl->ana_lock);	/* [한국어] 컨트롤 플레인 뮤텍스 획득 */
+	mutex_lock(&ctrl->ana_lock);	/* [한국어] 로그 버퍼가 컨트롤러당 하나뿐이라 파싱을 직렬화한다 */
 	nvme_parse_ana_log(ctrl, &nr_change_groups, nvme_update_ana_state);	/* [한국어] 버퍼 재파싱으로 set_live 보완 */
-	mutex_unlock(&ctrl->ana_lock);	/* [한국어] 컨트롤 플레인 뮤텍스 해제 */
+	mutex_unlock(&ctrl->ana_lock);
 }
 
 /*
@@ -1412,7 +1412,7 @@ void nvme_mpath_stop(struct nvme_ctrl *ctrl)
 /* [한국어] 서브시스템 디바이스용 RW attr 심볼 이름 규칙 매크로 */
 #define SUBSYS_ATTR_RW(_name, _mode, _show, _store)  \
 	struct device_attribute subsys_attr_##_name =	\
-		__ATTR(_name, _mode, _show, _store)	/* [한국어] 인자/선언 연속행 */
+		__ATTR(_name, _mode, _show, _store)	/* [한국어] 서브시스템 단위 sysfs 속성을 한 줄로 정의하는 매크로 */
 
 /*
  * [한국어]
@@ -1450,7 +1450,7 @@ static void nvme_subsys_iopolicy_update(struct nvme_subsystem *subsys,
 	mutex_lock(&nvme_subsystems_lock);	/* [한국어] 전역 서브시스템/컨트롤러 목록 보호 */
 	list_for_each_entry(ctrl, &subsys->ctrls, subsys_entry)
 		nvme_mpath_clear_ctrl_paths(ctrl);	/* [한국어] 각 컨트롤러 경로 캐시 클리어 + requeue */
-	mutex_unlock(&nvme_subsystems_lock);	/* [한국어] 컨트롤 플레인 뮤텍스 해제 */
+	mutex_unlock(&nvme_subsystems_lock);	/* [한국어] 모든 서브시스템의 캐시된 경로를 지웠다 — 다음 I/O 가 새로 고른다 */
 
 	pr_notice("subsysnqn %s iopolicy changed from %s to %s\n",	/* [한국어] 진단 로그 */
 			subsys->subnqn,
@@ -1465,11 +1465,11 @@ static void nvme_subsys_iopolicy_update(struct nvme_subsystem *subsys,
 static ssize_t nvme_subsys_iopolicy_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t count)
 {
-	struct nvme_subsystem *subsys =	/* [한국어] 지역/멤버 상태 — 상위 함수·구조 아키텍처 참고 */
-		container_of(dev, struct nvme_subsystem, dev);	/* [한국어] 임베디드 멤버→부모 구조체 */
+	struct nvme_subsystem *subsys =	/* [한국어] sysfs 장치에서 서브시스템으로 되짚는다 */
+		container_of(dev, struct nvme_subsystem, dev);
 	int i;	/* [한국어] 정책 이름 테이블 인덱스 */
 
-	for (i = 0; i < ARRAY_SIZE(nvme_iopolicy_names); i++) {	/* [한국어] 정적 배열 크기 */
+	for (i = 0; i < ARRAY_SIZE(nvme_iopolicy_names); i++) {	/* [한국어] 이름 표에서 일치하는 정책을 찾는다 — 사용자는 문자열로 쓴다 */
 		if (sysfs_streq(buf, nvme_iopolicy_names[i])) {	/* [한국어] 사용자 입력 정책 이름 매칭 */
 			nvme_subsys_iopolicy_update(subsys, i);	/* [한국어] 이름이 맞은 정책 번호로 서브시스템 전체를 바꾼다 */
 			return count;	/* [한국어] sysfs store 성공 시 소비 바이트 수 */
@@ -1512,7 +1512,7 @@ DEVICE_ATTR_RO(ana_state);	/* [한국어] sysfs RO: ana_state */
 static ssize_t queue_depth_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
-	struct nvme_ns *ns = nvme_get_ns_from_dev(dev);	/* [한국어] 블록 device↔디스크 역참조 */
+	struct nvme_ns *ns = nvme_get_ns_from_dev(dev);	/* [한국어] 이 속성은 경로(개별 NS)에 걸려 있다 */
 
 	if (ns->head->subsys->iopolicy != NVME_IOPOLICY_QD)
 		return 0;	/* [한국어] QD 정책이 아니면 의미 없음 — 빈 출력 */
@@ -1528,25 +1528,25 @@ DEVICE_ATTR_RO(queue_depth);	/* [한국어] sysfs RO: queue_depth */
 static ssize_t numa_nodes_show(struct device *dev, struct device_attribute *attr,
 		char *buf)
 {
-	int node, srcu_idx;	/* [한국어] srcu_idx — 함수/구조 문맥의 상태 */
+	int node, srcu_idx;	/* [한국어] 노드별 캐시를 훑기 위한 인덱스와 srcu 토큰 */
 	nodemask_t numa_nodes;	/* [한국어] 이 path 가 선택된 노드 집합 */
 	struct nvme_ns *current_ns;	/* [한국어] 노드별 캐시 경로 */
-	struct nvme_ns *ns = nvme_get_ns_from_dev(dev);	/* [한국어] 블록 device↔디스크 역참조 */
-	struct nvme_ns_head *head = ns->head;	/* [한국어] 지역/멤버 상태 — 상위 함수·구조 아키텍처 참고 */
+	struct nvme_ns *ns = nvme_get_ns_from_dev(dev);	/* [한국어] 속성이 걸린 경로 */
+	struct nvme_ns_head *head = ns->head;	/* [한국어] 캐시는 경로가 아니라 head 에 노드별로 있다 */
 
 	if (head->subsys->iopolicy != NVME_IOPOLICY_NUMA)
 		return 0;	/* [한국어] NUMA 정책이 아니면 비해당 */
 
 	nodes_clear(numa_nodes);	/* [한국어] 결과 마스크 초기화 */
 
-	srcu_idx = srcu_read_lock(&head->srcu);	/* [한국어] srcu_idx 상수 — 상위 enum 역할 참고 */
-	for_each_node(node) {	/* [한국어] 집합/비트 순회 */
+	srcu_idx = srcu_read_lock(&head->srcu);	/* [한국어] 캐시가 가리키는 경로가 읽는 동안 사라지지 않게 */
+	for_each_node(node) {	/* [한국어] 어느 NUMA 노드가 이 경로를 현재 경로로 쓰는지 모은다 */
 		current_ns = srcu_dereference(head->current_path[node],
 				&head->srcu);	/* [한국어] 해당 노드 캐시 경로 */
 		if (ns == current_ns)
 			node_set(node, numa_nodes);	/* [한국어] 이 path 가 해당 노드 선택이면 마스크 포함 */
 	}
-	srcu_read_unlock(&head->srcu, srcu_idx);	/* [한국어] SRCU 읽기 측 종료 */
+	srcu_read_unlock(&head->srcu, srcu_idx);
 
 	return sysfs_emit(buf, "%*pbl\n", nodemask_pr_args(&numa_nodes));	/* [한국어] 노드 마스크 리스트 형식 출력 */
 }
@@ -1560,13 +1560,13 @@ static ssize_t delayed_removal_secs_show(struct device *dev,
 		struct device_attribute *attr, char *buf)
 {
 	struct gendisk *disk = dev_to_disk(dev);	/* [한국어] head disk */
-	struct nvme_ns_head *head = disk->private_data;	/* [한국어] 지역/멤버 상태 — 상위 함수·구조 아키텍처 참고 */
-	int ret;	/* [한국어] ret — 함수/구조 문맥의 상태 */
+	struct nvme_ns_head *head = disk->private_data;	/* [한국어] 이 속성은 head 디스크에 걸린다 */
+	int ret;	/* [한국어] sysfs_emit 이 쓴 바이트 수 */
 
 	mutex_lock(&head->subsys->lock);	/* [한국어] delayed_removal 필드 일관 읽기 */
-	ret = sysfs_emit(buf, "%u\n", head->delayed_removal_secs);	/* [한국어] ret 상수 — 상위 enum 역할 참고 */
-	mutex_unlock(&head->subsys->lock);	/* [한국어] 컨트롤 플레인 뮤텍스 해제 */
-	return ret;	/* [한국어] 결과 코드 전파 */
+	ret = sysfs_emit(buf, "%u\n", head->delayed_removal_secs);	/* [한국어] 락 안에서 읽어야 store 와 찢어진 값을 보지 않는다 */
+	mutex_unlock(&head->subsys->lock);
+	return ret;
 }
 
 /*
@@ -1578,22 +1578,22 @@ static ssize_t delayed_removal_secs_show(struct device *dev,
 static ssize_t delayed_removal_secs_store(struct device *dev,
 		struct device_attribute *attr, const char *buf, size_t count)
 {
-	struct gendisk *disk = dev_to_disk(dev);	/* [한국어] 블록 device↔디스크 역참조 */
-	struct nvme_ns_head *head = disk->private_data;	/* [한국어] 지역/멤버 상태 — 상위 함수·구조 아키텍처 참고 */
+	struct gendisk *disk = dev_to_disk(dev);	/* [한국어] sysfs 장치에서 디스크로 */
+	struct nvme_ns_head *head = disk->private_data;	/* [한국어] 그리고 head 로 */
 	unsigned int sec;	/* [한국어] 파싱된 유예 초 */
-	int ret;	/* [한국어] ret — 함수/구조 문맥의 상태 */
+	int ret;	/* [한국어] 파싱 결과 */
 
 	ret = kstrtouint(buf, 0, &sec);	/* [한국어] 사용자 문자열을 초 단위 부호 없는 정수로 */
 	if (ret < 0)
 		return ret;	/* [한국어] 파싱 실패 */
 
-	mutex_lock(&head->subsys->lock);	/* [한국어] 컨트롤 플레인 뮤텍스 획득 */
-	head->delayed_removal_secs = sec;	/* [한국어] sec — 함수/구조 문맥의 상태 */
+	mutex_lock(&head->subsys->lock);	/* [한국어] 값과 플래그를 함께 바꿔야 하므로 한 락 안에서 */
+	head->delayed_removal_secs = sec;	/* [한국어] 0 이면 즉시 제거, 그 외에는 그 초만큼 I/O 를 붙든다 */
 	if (sec)
 		set_bit(NVME_NSHEAD_QUEUE_IF_NO_PATH, &head->flags);	/* [한국어] 유예>0 → 무경로 requeue 허용 */
 	else
 		clear_bit(NVME_NSHEAD_QUEUE_IF_NO_PATH, &head->flags);	/* [한국어] 유예 0 — 경로 없으면 즉시 에러 */
-	mutex_unlock(&head->subsys->lock);	/* [한국어] 컨트롤 플레인 뮤텍스 해제 */
+	mutex_unlock(&head->subsys->lock);
 	/*
 	 * Ensure that update to NVME_NSHEAD_QUEUE_IF_NO_PATH is seen
 	 * by its reader.
@@ -1601,7 +1601,7 @@ static ssize_t delayed_removal_secs_store(struct device *dev,
 	/* [한국어] 제출측 available_path 가 새 플래그를 관측하도록 grace */
 	synchronize_srcu(&head->srcu);	/* [한국어] SRCU grace period 대기 */
 
-	return count;	/* [한국어] store 성공 */
+	return count;	/* [한국어] sysfs store 규약 — 전부 소비했음을 알린다 */
 }
 
 DEVICE_ATTR_RW(delayed_removal_secs);	/* [한국어] sysfs RW: delayed_removal_secs */
@@ -1634,8 +1634,8 @@ static int nvme_lookup_ana_group_desc(struct nvme_ctrl *ctrl,
 void nvme_mpath_add_sysfs_link(struct nvme_ns_head *head)
 {
 	struct device *target;	/* [한국어] path gendisk 의 device */
-	int rc, srcu_idx;	/* [한국어] srcu_idx — 함수/구조 문맥의 상태 */
-	struct nvme_ns *ns;	/* [한국어] ns — 함수/구조 문맥의 상태 */
+	int rc, srcu_idx;	/* [한국어] 링크 생성 결과와 srcu 토큰 */
+	struct nvme_ns *ns;	/* [한국어] head 아래 각 경로 */
 	struct kobject *kobj;	/* [한국어] head disk kobject */
 
 	/*
@@ -1652,9 +1652,9 @@ void nvme_mpath_add_sysfs_link(struct nvme_ns_head *head)
 	 * sysfs link from head node to the ns path node
 	 */
 	/* [한국어] head->list 의 각 path 에 대해 head→path 심볼릭 링크 생성 */
-	srcu_idx = srcu_read_lock(&head->srcu);	/* [한국어] srcu_idx 상수 — 상위 enum 역할 참고 */
+	srcu_idx = srcu_read_lock(&head->srcu);	/* [한국어] 링크를 거는 동안 경로가 사라지지 않게 */
 
-	list_for_each_entry_srcu(ns, &head->list, siblings,	/* [한국어] 리스트 토폴로지 조작 */
+	list_for_each_entry_srcu(ns, &head->list, siblings,	/* [한국어] head 에 속한 모든 경로에 링크를 건다 */
 				 srcu_read_lock_held(&head->srcu)) {
 		/*
 		 * Ensure that ns path disk node is already added otherwise we
@@ -1686,7 +1686,7 @@ void nvme_mpath_add_sysfs_link(struct nvme_ns_head *head)
 		 */
 		rc = sysfs_add_link_to_group(kobj, nvme_ns_mpath_attr_group.name,
 				&target->kobj, dev_name(target));	/* [한국어] head multipath attr 그룹 아래 path 링크 */
-		if (unlikely(rc)) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+		if (unlikely(rc)) {	/* [한국어] 이미 있는 링크이거나 메모리 부족 — 나머지 경로는 계속 시도한다 */
 			dev_err(disk_to_dev(ns->head->disk),	/* [한국어] 진단 로그 */
 					"failed to create link to %s\n",
 					dev_name(target));	/* [한국어] 링크 실패 로그 */
@@ -1694,7 +1694,7 @@ void nvme_mpath_add_sysfs_link(struct nvme_ns_head *head)
 		}
 	}
 
-	srcu_read_unlock(&head->srcu, srcu_idx);	/* [한국어] SRCU 읽기 측 종료 */
+	srcu_read_unlock(&head->srcu, srcu_idx);
 }
 
 /*
@@ -1703,14 +1703,14 @@ void nvme_mpath_add_sysfs_link(struct nvme_ns_head *head)
  */
 void nvme_mpath_remove_sysfs_link(struct nvme_ns *ns)
 {
-	struct device *target;	/* [한국어] target — 함수/구조 문맥의 상태 */
-	struct kobject *kobj;	/* [한국어] kobj — 함수/구조 문맥의 상태 */
+	struct device *target;	/* [한국어] 링크가 가리킬 경로 디스크 */
+	struct kobject *kobj;	/* [한국어] 링크가 걸려 있는 head 쪽 객체 */
 
 	if (!test_bit(NVME_NS_SYSFS_ATTR_LINK, &ns->flags))
 		return;	/* [한국어] 링크 미존재 시 remove 는 no-op */
 
-	target = disk_to_dev(ns->disk);	/* [한국어] target 상수 — 상위 enum 역할 참고 */
-	kobj = &disk_to_dev(ns->head->disk)->kobj;	/* [한국어] kobj 상수 — 상위 enum 역할 참고 */
+	target = disk_to_dev(ns->disk);	/* [한국어] 이름을 만들 때 쓴 것과 같은 장치여야 링크를 찾을 수 있다 */
+	kobj = &disk_to_dev(ns->head->disk)->kobj;	/* [한국어] 링크는 head 디스크 아래에 있다 */
 	sysfs_remove_link_from_group(kobj, nvme_ns_mpath_attr_group.name,	/* [한국어] head 디스크 쪽에 걸어 둔 이 경로의 심볼릭 링크를 뗀다 */
 			dev_name(target));	/* [한국어] path 제거 시 대칭 링크 삭제 */
 	clear_bit(NVME_NS_SYSFS_ATTR_LINK, &ns->flags);	/* [한국어] 링크 플래그 클리어 */
@@ -1735,8 +1735,8 @@ void nvme_mpath_add_disk(struct nvme_ns *ns, __le32 anagrpid)
 		mutex_lock(&ns->ctrl->ana_lock);	/* [한국어] 해당 컨트롤러 ANA 로그 접근 직렬화 */
 		ns->ana_grpid = le32_to_cpu(anagrpid);	/* [한국어] LE 온와이어 엔디안 변환 */
 		nvme_parse_ana_log(ns->ctrl, &desc, nvme_lookup_ana_group_desc);	/* [한국어] 기존 로그에서 이 NS 그룹 검색 */
-		mutex_unlock(&ns->ctrl->ana_lock);	/* [한국어] 컨트롤 플레인 뮤텍스 해제 */
-		if (desc.state) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+		mutex_unlock(&ns->ctrl->ana_lock);	/* [한국어] 로그 버퍼 사용이 끝났다 */
+		if (desc.state) {	/* [한국어] 그룹 서술자를 찾았다면 그 상태를 경로에 반영한다 */
 			/* found the group desc: update */
 			nvme_update_ns_ana_state(&desc, ns);	/* [한국어] 로그에서 그룹을 찾았으면 즉시 상태 적용 */
 		} else {	/* [한국어] 대안 경로 */
@@ -1769,7 +1769,7 @@ void nvme_mpath_remove_disk(struct nvme_ns_head *head)
 	if (!head->disk)
 		return;	/* [한국어] head disk 미할당 구성에서는 정리할 것 없음 */
 
-	mutex_lock(&head->subsys->lock);	/* [한국어] 컨트롤 플레인 뮤텍스 획득 */
+	mutex_lock(&head->subsys->lock);	/* [한국어] head 목록에서 빼는 동안 다른 경로가 끼어들면 안 된다 */
 	/*
 	 * We are called when all paths have been removed, and at that point
 	 * head->list is expected to be empty. However, nvme_ns_remove() and
@@ -1837,12 +1837,12 @@ int nvme_mpath_init_identify(struct nvme_ctrl *ctrl, struct nvme_id_ctrl *id)
 {
 	size_t max_transfer_size = ctrl->max_hw_sectors << SECTOR_SHIFT;	/* [한국어] MDTS 환산 바이트 — 로그 크기 상한 */
 	size_t ana_log_size;	/* [한국어] 헤더+그룹+nsid 배열 ANA 로그 바이트 */
-	int error = 0;	/* [한국어] 지역/멤버 상태 — 상위 함수·구조 아키텍처 참고 */
+	int error = 0;	/* [한국어] ANA 를 쓰지 않는 컨트롤러도 성공으로 돌아간다 */
 
 	/* check if multipath is enabled and we have the capability */
 	if (!multipath || !ctrl->subsys ||
 	    !(ctrl->subsys->cmic & NVME_CTRL_CMIC_ANA))	/* [한국어] 기능 오프·서브시스템 미결합·CMIC.ANA 미지원 시 스킵 */
-		return 0;	/* [한국어] 성공/no-op 완료 */
+		return 0;	/* [한국어] ANA 미지원이면 다중경로 상태 추적 자체가 필요 없다 */
 
 	/* initialize this in the identify path to cover controller resets */
 	atomic_set(&ctrl->nr_active, 0);	/* [한국어] 리셋/identify 경로에서 QD 카운터 재시작 */
@@ -1851,7 +1851,7 @@ int nvme_mpath_init_identify(struct nvme_ctrl *ctrl, struct nvme_id_ctrl *id)
 	    ctrl->max_namespaces > le32_to_cpu(id->nn)) {	/* [한국어] LE 온와이어 엔디안 변환 */
 		dev_err(ctrl->device,	/* [한국어] 진단 로그 */
 			"Invalid MNAN value %u\n", ctrl->max_namespaces);	/* [한국어] MNAN 비정합 — ANA 버퍼 크기 산출 불가 */
-		return -EINVAL;	/* [한국어] 인자·프로토콜 불변식 위반 */
+		return -EINVAL;	/* [한국어] MNAN 이 스펙 범위를 벗어났다 — 로그 크기를 신뢰할 수 없다 */
 	}
 
 	ctrl->anacap = id->anacap;	/* [한국어] ANA 역량 비트 저장 */
@@ -1862,14 +1862,14 @@ int nvme_mpath_init_identify(struct nvme_ctrl *ctrl, struct nvme_id_ctrl *id)
 	ana_log_size = sizeof(struct nvme_ana_rsp_hdr) +
 		ctrl->nanagrpid * sizeof(struct nvme_ana_group_desc) +
 		ctrl->max_namespaces * sizeof(__le32);	/* [한국어] 최악 크기: 모든 그룹+모든 NSID */
-	if (ana_log_size > max_transfer_size) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (ana_log_size > max_transfer_size) {	/* [한국어] 한 번에 못 받을 크기의 로그는 이 구현이 다루지 않는다 */
 		dev_err(ctrl->device,	/* [한국어] 진단 로그 */
 			"ANA log page size (%zd) larger than MDTS (%zd).\n",
 			ana_log_size, max_transfer_size);	/* [한국어] MDTS 보다 큰 ANA 로그는 한 번에 못 읽음 */
 		dev_err(ctrl->device, "disabling ANA support.\n");	/* [한국어] ANA multipath 비활성 고지 */
 		goto out_uninit;	/* [한국어] ANA 포기 */
 	}
-	if (ana_log_size > ctrl->ana_log_size) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (ana_log_size > ctrl->ana_log_size) {	/* [한국어] 필요한 크기가 커졌을 때만 다시 잡는다 — 재연결마다 재할당하지 않는다 */
 		nvme_mpath_stop(ctrl);	/* [한국어] 로그 버퍼 재할당 전 비동기 ANA 작업 정지 */
 		nvme_mpath_uninit(ctrl);	/* [한국어] 기존 버퍼 해제 */
 		ctrl->ana_log_buf = kvmalloc(ana_log_size, GFP_KERNEL);	/* [한국어] 잠재적 대형 로그용 kv 할당 */
@@ -1884,7 +1884,7 @@ int nvme_mpath_init_identify(struct nvme_ctrl *ctrl, struct nvme_id_ctrl *id)
 
 out_uninit:
 	nvme_mpath_uninit(ctrl);	/* [한국어] 부분 초기화 실패 시 정리 */
-	return error;	/* [한국어] 결과 코드 전파 */
+	return error;	/* [한국어] 실패하면 호출자가 컨트롤러 초기화를 중단한다 */
 }
 
 /*
