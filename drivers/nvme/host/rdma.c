@@ -457,10 +457,10 @@ static DEFINE_MUTEX(nvme_rdma_ctrl_mutex);	/* [한국어] NVMe/RDMA QP·CM·MR �
 static bool register_always = true;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 module_param(register_always, bool, 0444);	/* [한국어] 모듈 경계·파라미터·심볼 공개 */
 MODULE_PARM_DESC(register_always,	/* [한국어] 모듈 경계·파라미터·심볼 공개 */
-	 "Use memory registration even for contiguous memory regions");	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	 "Use memory registration even for contiguous memory regions");
 
 static int nvme_rdma_cm_handler(struct rdma_cm_id *cm_id,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-		struct rdma_cm_event *event);	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
+		struct rdma_cm_event *event);
 static void nvme_rdma_recv_done(struct ib_cq *cq, struct ib_wc *wc);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 static void nvme_rdma_complete_rq(struct request *rq);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 
@@ -509,14 +509,14 @@ static inline size_t nvme_rdma_inline_data_size(struct nvme_rdma_queue *queue)	/
 }
 
 static void nvme_rdma_free_qe(struct ib_device *ibdev, struct nvme_rdma_qe *qe,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-		size_t capsule_size, enum dma_data_direction dir)	/* [한국어] DMA 매핑 — 장치가 접근할 주소 확보 */
+		size_t capsule_size, enum dma_data_direction dir)
 {
 	ib_dma_unmap_single(ibdev, qe->dma, capsule_size, dir);	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
 	kfree(qe->data);	/* [한국어] 커널 메모리 생명주기 */
 }
 
 static int nvme_rdma_alloc_qe(struct ib_device *ibdev, struct nvme_rdma_qe *qe,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-		size_t capsule_size, enum dma_data_direction dir)	/* [한국어] DMA 매핑 — 장치가 접근할 주소 확보 */
+		size_t capsule_size, enum dma_data_direction dir)
 {
 	qe->data = kzalloc(capsule_size, GFP_KERNEL);	/* [한국어] 커널 메모리 생명주기 */
 	if (!qe->data)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
@@ -533,19 +533,19 @@ static int nvme_rdma_alloc_qe(struct ib_device *ibdev, struct nvme_rdma_qe *qe,	
 }
 
 static void nvme_rdma_free_ring(struct ib_device *ibdev,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-		struct nvme_rdma_qe *ring, size_t ib_queue_size,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-		size_t capsule_size, enum dma_data_direction dir)	/* [한국어] DMA 매핑 — 장치가 접근할 주소 확보 */
+		struct nvme_rdma_qe *ring, size_t ib_queue_size,
+		size_t capsule_size, enum dma_data_direction dir)
 {
 	int i;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
 	for (i = 0; i < ib_queue_size; i++)	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
-		nvme_rdma_free_qe(ibdev, &ring[i], capsule_size, dir);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+		nvme_rdma_free_qe(ibdev, &ring[i], capsule_size, dir);
 	kfree(ring);	/* [한국어] 커널 메모리 생명주기 */
 }
 
 static struct nvme_rdma_qe *nvme_rdma_alloc_ring(struct ib_device *ibdev,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-		size_t ib_queue_size, size_t capsule_size,	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
-		enum dma_data_direction dir)	/* [한국어] DMA 매핑 — 장치가 접근할 주소 확보 */
+		size_t ib_queue_size, size_t capsule_size,
+		enum dma_data_direction dir)
 {
 	struct nvme_rdma_qe *ring;	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 	int i;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
@@ -566,7 +566,7 @@ static struct nvme_rdma_qe *nvme_rdma_alloc_ring(struct ib_device *ibdev,	/* [�
 
 	return ring;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 
-out_free_ring:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+out_free_ring:
 	nvme_rdma_free_ring(ibdev, ring, i, capsule_size, dir);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 	return NULL;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 }
@@ -677,7 +677,7 @@ static void nvme_rdma_exit_request(struct blk_mq_tag_set *set,	/* [한국어] NV
 
 static int nvme_rdma_init_request(struct blk_mq_tag_set *set,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 		struct request *rq, unsigned int hctx_idx,	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-		unsigned int numa_node)	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		unsigned int numa_node)
 {
 	struct nvme_rdma_ctrl *ctrl = to_rdma_ctrl(set->driver_data);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 	struct nvme_rdma_request *req = blk_mq_rq_to_pdu(rq);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
@@ -691,9 +691,9 @@ static int nvme_rdma_init_request(struct blk_mq_tag_set *set,	/* [한국어] NVM
 
 	/* metadata nvme_rdma_sgl struct is located after command's data SGL */
 	if (queue->pi_support)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		req->metadata_sgl = (void *)nvme_req(rq) +	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			sizeof(struct nvme_rdma_request) +	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-			NVME_RDMA_DATA_SGL_SIZE;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		req->metadata_sgl = (void *)nvme_req(rq) +
+			sizeof(struct nvme_rdma_request) +
+			NVME_RDMA_DATA_SGL_SIZE;
 
 	req->queue = queue;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	nvme_req(rq)->cmd = req->sqe.data;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
@@ -702,7 +702,7 @@ static int nvme_rdma_init_request(struct blk_mq_tag_set *set,	/* [한국어] NVM
 }
 
 static int nvme_rdma_init_hctx(struct blk_mq_hw_ctx *hctx, void *data,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-		unsigned int hctx_idx)	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		unsigned int hctx_idx)
 {
 	struct nvme_rdma_ctrl *ctrl = to_rdma_ctrl(data);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 	struct nvme_rdma_queue *queue = &ctrl->queues[hctx_idx + 1];	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
@@ -714,7 +714,7 @@ static int nvme_rdma_init_hctx(struct blk_mq_hw_ctx *hctx, void *data,	/* [한�
 }
 
 static int nvme_rdma_init_admin_hctx(struct blk_mq_hw_ctx *hctx, void *data,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-		unsigned int hctx_idx)	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		unsigned int hctx_idx)
 {
 	struct nvme_rdma_ctrl *ctrl = to_rdma_ctrl(data);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 	struct nvme_rdma_queue *queue = &ctrl->queues[0];	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
@@ -1098,7 +1098,7 @@ out_put_dev:
 }
 
 static int nvme_rdma_alloc_queue(struct nvme_rdma_ctrl *ctrl,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-		int idx, size_t queue_size)	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		int idx, size_t queue_size)
 {
 	struct nvme_rdma_queue *queue;	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 	struct sockaddr *src_addr = NULL;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
@@ -1108,23 +1108,23 @@ static int nvme_rdma_alloc_queue(struct nvme_rdma_ctrl *ctrl,	/* [한국어] NVM
 	mutex_init(&queue->queue_lock);	/* [한국어] 동기화 — 큐/연결/상태 공유 보호 */
 	queue->ctrl = ctrl;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	if (idx && ctrl->ctrl.max_integrity_segments)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		queue->pi_support = true;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		queue->pi_support = true;
 	else	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		queue->pi_support = false;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		queue->pi_support = false;
 	init_completion(&queue->cm_done);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
 	if (idx > 0)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		queue->cmnd_capsule_len = ctrl->ctrl.ioccsz * 16;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		queue->cmnd_capsule_len = ctrl->ctrl.ioccsz * 16;
 	else	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 		queue->cmnd_capsule_len = sizeof(struct nvme_command);	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
 
 	queue->queue_size = queue_size;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
 	queue->cm_id = rdma_create_id(&init_net, nvme_rdma_cm_handler, queue,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-			RDMA_PS_TCP, IB_QPT_RC);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			RDMA_PS_TCP, IB_QPT_RC);
 	if (IS_ERR(queue->cm_id)) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 		dev_info(ctrl->ctrl.device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			"failed to create CM ID: %ld\n", PTR_ERR(queue->cm_id));	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			"failed to create CM ID: %ld\n", PTR_ERR(queue->cm_id));
 		ret = PTR_ERR(queue->cm_id);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 		goto out_destroy_mutex;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
 	}
@@ -1135,17 +1135,17 @@ static int nvme_rdma_alloc_queue(struct nvme_rdma_ctrl *ctrl,	/* [한국어] NVM
 	queue->cm_error = -ETIMEDOUT;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	ret = rdma_resolve_addr(queue->cm_id, src_addr,	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
 			(struct sockaddr *)&ctrl->addr,	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-			NVME_RDMA_CM_TIMEOUT_MS);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			NVME_RDMA_CM_TIMEOUT_MS);
 	if (ret) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 		dev_info(ctrl->ctrl.device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			"rdma_resolve_addr failed (%d).\n", ret);	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
+			"rdma_resolve_addr failed (%d).\n", ret);
 		goto out_destroy_cm_id;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
 	}
 
 	ret = nvme_rdma_wait_for_cm(queue);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 	if (ret) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 		dev_info(ctrl->ctrl.device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			"rdma connection establishment failed (%d)\n", ret);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			"rdma connection establishment failed (%d)\n", ret);
 		goto out_destroy_cm_id;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
 	}
 
@@ -1153,10 +1153,10 @@ static int nvme_rdma_alloc_queue(struct nvme_rdma_ctrl *ctrl,	/* [한국어] NVM
 
 	return 0;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 
-out_destroy_cm_id:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+out_destroy_cm_id:
 	rdma_destroy_id(queue->cm_id);	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
 	nvme_rdma_destroy_queue_ib(queue);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-out_destroy_mutex:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+out_destroy_mutex:
 	mutex_destroy(&queue->queue_lock);	/* [한국어] 동기화 — 큐/연결/상태 공유 보호 */
 	return ret;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 }
@@ -1174,7 +1174,7 @@ static void nvme_rdma_stop_queue(struct nvme_rdma_queue *queue)	/* [한국어] N
 
 	mutex_lock(&queue->queue_lock);	/* [한국어] 동기화 — 큐/연결/상태 공유 보호 */
 	if (test_and_clear_bit(NVME_RDMA_Q_LIVE, &queue->flags))	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		__nvme_rdma_stop_queue(queue);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		__nvme_rdma_stop_queue(queue);
 	mutex_unlock(&queue->queue_lock);	/* [한국어] 동기화 — 큐/연결/상태 공유 보호 */
 }
 
@@ -1193,7 +1193,7 @@ static void nvme_rdma_free_io_queues(struct nvme_rdma_ctrl *ctrl)	/* [한국어]
 	int i;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
 	for (i = 1; i < ctrl->ctrl.queue_count; i++)	/* [한국어] 순회 — 큐·요청·세그먼트·이벤트 처리 */
-		nvme_rdma_free_queue(&ctrl->queues[i]);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+		nvme_rdma_free_queue(&ctrl->queues[i]);
 }
 
 static void nvme_rdma_stop_io_queues(struct nvme_rdma_ctrl *ctrl)	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
@@ -1201,7 +1201,7 @@ static void nvme_rdma_stop_io_queues(struct nvme_rdma_ctrl *ctrl)	/* [한국어]
 	int i;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
 	for (i = 1; i < ctrl->ctrl.queue_count; i++)	/* [한국어] 순회 — 큐·요청·세그먼트·이벤트 처리 */
-		nvme_rdma_stop_queue(&ctrl->queues[i]);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+		nvme_rdma_stop_queue(&ctrl->queues[i]);
 }
 
 static int nvme_rdma_start_queue(struct nvme_rdma_ctrl *ctrl, int idx)	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
@@ -1210,23 +1210,23 @@ static int nvme_rdma_start_queue(struct nvme_rdma_ctrl *ctrl, int idx)	/* [한�
 	int ret;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
 	if (idx)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		ret = nvmf_connect_io_queue(&ctrl->ctrl, idx);	/* [한국어] fabrics 공통(Connect/옵션/재연결) API */
+		ret = nvmf_connect_io_queue(&ctrl->ctrl, idx);
 	else	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		ret = nvmf_connect_admin_queue(&ctrl->ctrl);	/* [한국어] fabrics 공통(Connect/옵션/재연결) API */
+		ret = nvmf_connect_admin_queue(&ctrl->ctrl);
 
 	if (!ret) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 		set_bit(NVME_RDMA_Q_LIVE, &queue->flags);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	} else {
 		if (test_bit(NVME_RDMA_Q_ALLOCATED, &queue->flags))	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-			__nvme_rdma_stop_queue(queue);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			__nvme_rdma_stop_queue(queue);
 		dev_info(ctrl->ctrl.device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			"failed to connect queue: %d ret=%d\n", idx, ret);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			"failed to connect queue: %d ret=%d\n", idx, ret);
 	}
 	return ret;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 }
 
 static int nvme_rdma_start_io_queues(struct nvme_rdma_ctrl *ctrl,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-				     int first, int last)	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+				     int first, int last)
 {
 	int i, ret = 0;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
@@ -1238,9 +1238,9 @@ static int nvme_rdma_start_io_queues(struct nvme_rdma_ctrl *ctrl,	/* [한국어]
 
 	return 0;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 
-out_stop_queues:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+out_stop_queues:
 	for (i--; i >= first; i--)	/* [한국어] 순회 — 큐·요청·세그먼트·이벤트 처리 */
-		nvme_rdma_stop_queue(&ctrl->queues[i]);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+		nvme_rdma_stop_queue(&ctrl->queues[i]);
 	return ret;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 }
 
@@ -1310,16 +1310,16 @@ out_free_queues:
 static int nvme_rdma_alloc_tag_set(struct nvme_ctrl *ctrl)	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 {
 	unsigned int cmd_size = sizeof(struct nvme_rdma_request) +	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-				NVME_RDMA_DATA_SGL_SIZE;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+				NVME_RDMA_DATA_SGL_SIZE;
 
 	if (ctrl->max_integrity_segments)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		cmd_size += sizeof(struct nvme_rdma_sgl) +	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-			    NVME_RDMA_METADATA_SGL_SIZE;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		cmd_size += sizeof(struct nvme_rdma_sgl) +
+			    NVME_RDMA_METADATA_SGL_SIZE;
 
 	return nvme_alloc_io_tag_set(ctrl, &to_rdma_ctrl(ctrl)->tag_set,	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
-			&nvme_rdma_mq_ops,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-			ctrl->opts->nr_poll_queues ? HCTX_MAX_TYPES : 2,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			cmd_size);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			&nvme_rdma_mq_ops,
+			ctrl->opts->nr_poll_queues ? HCTX_MAX_TYPES : 2,
+			cmd_size);
 }
 
 static void nvme_rdma_destroy_admin_queue(struct nvme_rdma_ctrl *ctrl)	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
@@ -1334,7 +1334,7 @@ static void nvme_rdma_destroy_admin_queue(struct nvme_rdma_ctrl *ctrl)	/* [한�
 }
 
 static int nvme_rdma_configure_admin_queue(struct nvme_rdma_ctrl *ctrl,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-		bool new)	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		bool new)
 {
 	bool pi_capable = false;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	int error;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
@@ -1348,11 +1348,11 @@ static int nvme_rdma_configure_admin_queue(struct nvme_rdma_ctrl *ctrl,	/* [한�
 
 	/* T10-PI support */
 	if (ctrl->device->dev->attrs.kernel_cap_flags &	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-	    IBK_INTEGRITY_HANDOVER)	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		pi_capable = true;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	    IBK_INTEGRITY_HANDOVER)
+		pi_capable = true;
 
 	ctrl->max_fr_pages = nvme_rdma_get_max_fr_pages(ctrl->device->dev,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-							pi_capable);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+							pi_capable);
 
 	/*
 	 * Bind the async event SQE DMA mapping to the admin queue lifetime.
@@ -1366,9 +1366,9 @@ static int nvme_rdma_configure_admin_queue(struct nvme_rdma_ctrl *ctrl,	/* [한�
 
 	if (new) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 		error = nvme_alloc_admin_tag_set(&ctrl->ctrl,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-				&ctrl->admin_tag_set, &nvme_rdma_admin_mq_ops,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-				sizeof(struct nvme_rdma_request) +	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-				NVME_RDMA_DATA_SGL_SIZE);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+				&ctrl->admin_tag_set, &nvme_rdma_admin_mq_ops,
+				sizeof(struct nvme_rdma_request) +
+				NVME_RDMA_DATA_SGL_SIZE);
 		if (error)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 			goto out_free_async_qe;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
 
@@ -1385,9 +1385,9 @@ static int nvme_rdma_configure_admin_queue(struct nvme_rdma_ctrl *ctrl,	/* [한�
 	ctrl->ctrl.max_segments = ctrl->max_fr_pages;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	ctrl->ctrl.max_hw_sectors = ctrl->max_fr_pages << (ilog2(SZ_4K) - 9);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	if (pi_capable)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		ctrl->ctrl.max_integrity_segments = ctrl->max_fr_pages;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		ctrl->ctrl.max_integrity_segments = ctrl->max_fr_pages;
 	else	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		ctrl->ctrl.max_integrity_segments = 0;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		ctrl->ctrl.max_integrity_segments = 0;
 
 	nvme_unquiesce_admin_queue(&ctrl->ctrl);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
@@ -1397,22 +1397,22 @@ static int nvme_rdma_configure_admin_queue(struct nvme_rdma_ctrl *ctrl,	/* [한�
 
 	return 0;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 
-out_quiesce_queue:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+out_quiesce_queue:
 	nvme_quiesce_admin_queue(&ctrl->ctrl);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	blk_sync_queue(ctrl->ctrl.admin_q);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-out_stop_queue:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+out_stop_queue:
 	nvme_rdma_stop_queue(&ctrl->queues[0]);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 	nvme_cancel_admin_tagset(&ctrl->ctrl);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-out_remove_admin_tag_set:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+out_remove_admin_tag_set:
 	if (new)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		nvme_remove_admin_tag_set(&ctrl->ctrl);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-out_free_async_qe:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		nvme_remove_admin_tag_set(&ctrl->ctrl);
+out_free_async_qe:
 	if (ctrl->async_event_sqe.data) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 		nvme_rdma_free_qe(ctrl->device->dev, &ctrl->async_event_sqe,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 			sizeof(struct nvme_command), DMA_TO_DEVICE);	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
 		ctrl->async_event_sqe.data = NULL;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	}
-out_free_queue:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+out_free_queue:
 	nvme_rdma_free_queue(&ctrl->queues[0]);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 	return error;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 }
@@ -1518,7 +1518,7 @@ out_free_io_queues:
 }
 
 static void nvme_rdma_teardown_admin_queue(struct nvme_rdma_ctrl *ctrl,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-		bool remove)	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		bool remove)
 {
 	nvme_quiesce_admin_queue(&ctrl->ctrl);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	blk_sync_queue(ctrl->ctrl.admin_q);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
@@ -1532,7 +1532,7 @@ static void nvme_rdma_teardown_admin_queue(struct nvme_rdma_ctrl *ctrl,	/* [한�
 }
 
 static void nvme_rdma_teardown_io_queues(struct nvme_rdma_ctrl *ctrl,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-		bool remove)	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		bool remove)
 {
 	if (ctrl->ctrl.queue_count > 1) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 		nvme_quiesce_io_queues(&ctrl->ctrl);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
@@ -1567,13 +1567,13 @@ static void nvme_rdma_free_ctrl(struct nvme_ctrl *nctrl)	/* [한국어] NVMe/RDM
 	mutex_unlock(&nvme_rdma_ctrl_mutex);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 
 	nvmf_free_options(nctrl->opts);	/* [한국어] fabrics 공통(Connect/옵션/재연결) API */
-free_ctrl:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+free_ctrl:
 	kfree(ctrl->queues);	/* [한국어] 커널 메모리 생명주기 */
 	kfree(ctrl);	/* [한국어] 커널 메모리 생명주기 */
 }
 
 static void nvme_rdma_reconnect_or_remove(struct nvme_rdma_ctrl *ctrl,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-					  int status)	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+					  int status)
 {
 	enum nvme_ctrl_state state = nvme_ctrl_state(&ctrl->ctrl);	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
 
@@ -1585,9 +1585,9 @@ static void nvme_rdma_reconnect_or_remove(struct nvme_rdma_ctrl *ctrl,	/* [한�
 
 	if (nvmf_should_reconnect(&ctrl->ctrl, status)) {	/* [한국어] fabrics 공통(Connect/옵션/재연결) API */
 		dev_info(ctrl->ctrl.device, "Reconnecting in %d seconds...\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			ctrl->ctrl.opts->reconnect_delay);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			ctrl->ctrl.opts->reconnect_delay);
 		queue_delayed_work(nvme_wq, &ctrl->reconnect_work,	/* [한국어] 워크큐 — 송수신/재연결/복구 비동기 실행 */
-				ctrl->ctrl.opts->reconnect_delay * HZ);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+				ctrl->ctrl.opts->reconnect_delay * HZ);
 	} else {
 		nvme_delete_ctrl(&ctrl->ctrl);	/* [한국어] NVMe core API — SQE 조립·완료·상태기계·수명 */
 	}
@@ -1840,42 +1840,42 @@ static void nvme_rdma_end_request(struct nvme_rdma_request *req)	/* [한국어] 
 	if (!refcount_dec_and_test(&req->ref))	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 		return;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 	if (!nvme_try_complete_req(rq, req->status, req->result))	/* [한국어] NVMe core API — SQE 조립·완료·상태기계·수명 */
-		nvme_rdma_complete_rq(rq);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+		nvme_rdma_complete_rq(rq);
 }
 
 static void nvme_rdma_wr_error(struct ib_cq *cq, struct ib_wc *wc,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-		const char *op)	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		const char *op)
 {
 	struct nvme_rdma_queue *queue = wc->qp->qp_context;	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 	struct nvme_rdma_ctrl *ctrl = queue->ctrl;	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 
 	if (nvme_ctrl_state(&ctrl->ctrl) == NVME_CTRL_LIVE)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		dev_info(ctrl->ctrl.device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			     "%s for CQE 0x%p failed with status %s (%d)\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			     op, wc->wr_cqe,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			     ib_wc_status_msg(wc->status), wc->status);	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
+		dev_info(ctrl->ctrl.device,
+			     "%s for CQE 0x%p failed with status %s (%d)\n",
+			     op, wc->wr_cqe,
+			     ib_wc_status_msg(wc->status), wc->status);
 	nvme_rdma_error_recovery(ctrl);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 }
 
 static void nvme_rdma_memreg_done(struct ib_cq *cq, struct ib_wc *wc)	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 {
 	if (unlikely(wc->status != IB_WC_SUCCESS))	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		nvme_rdma_wr_error(cq, wc, "MEMREG");	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+		nvme_rdma_wr_error(cq, wc, "MEMREG");
 }
 
 static void nvme_rdma_inv_rkey_done(struct ib_cq *cq, struct ib_wc *wc)	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 {
 	struct nvme_rdma_request *req =	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-		container_of(wc->wr_cqe, struct nvme_rdma_request, reg_cqe);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+		container_of(wc->wr_cqe, struct nvme_rdma_request, reg_cqe);
 
 	if (unlikely(wc->status != IB_WC_SUCCESS))	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		nvme_rdma_wr_error(cq, wc, "LOCAL_INV");	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+		nvme_rdma_wr_error(cq, wc, "LOCAL_INV");
 	else	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		nvme_rdma_end_request(req);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+		nvme_rdma_end_request(req);
 }
 
 static int nvme_rdma_inv_rkey(struct nvme_rdma_queue *queue,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-		struct nvme_rdma_request *req)	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+		struct nvme_rdma_request *req)
 {
 	struct ib_send_wr wr = {	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
 		.opcode		    = IB_WR_LOCAL_INV,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
@@ -1897,13 +1897,13 @@ static void nvme_rdma_dma_unmap_req(struct ib_device *ibdev, struct request *rq)
 
 	if (blk_integrity_rq(rq)) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 		ib_dma_unmap_sg(ibdev, req->metadata_sgl->sg_table.sgl,	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
-				req->metadata_sgl->nents, rq_dma_dir(rq));	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+				req->metadata_sgl->nents, rq_dma_dir(rq));
 		sg_free_table_chained(&req->metadata_sgl->sg_table,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-				      NVME_INLINE_METADATA_SG_CNT);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+				      NVME_INLINE_METADATA_SG_CNT);
 	}
 
 	ib_dma_unmap_sg(ibdev, req->data_sgl.sg_table.sgl, req->data_sgl.nents,	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
-			rq_dma_dir(rq));	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			rq_dma_dir(rq));
 	sg_free_table_chained(&req->data_sgl.sg_table, NVME_INLINE_SG_CNT);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 }
 
@@ -1919,7 +1919,7 @@ static void nvme_rdma_unmap_data(struct nvme_rdma_queue *queue,	/* [한국어] N
 		return;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 
 	if (req->use_sig_mr)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		pool = &queue->qp->sig_mrs;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		pool = &queue->qp->sig_mrs;
 
 	if (req->mr) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 		ib_mr_pool_put(queue->qp, pool, req->mr);	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
@@ -2102,26 +2102,26 @@ static int nvme_rdma_map_sg_fr(struct nvme_rdma_queue *queue,
 }
 
 static void nvme_rdma_set_sig_domain(struct blk_integrity *bi,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-		struct nvme_command *cmd, struct ib_sig_domain *domain,	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
-		u16 control, u8 pi_type)	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		struct nvme_command *cmd, struct ib_sig_domain *domain,
+		u16 control, u8 pi_type)
 {
 	domain->sig_type = IB_SIG_TYPE_T10_DIF;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	domain->sig.dif.bg_type = IB_T10DIF_CRC;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	domain->sig.dif.pi_interval = 1 << bi->interval_exp;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	domain->sig.dif.ref_tag = le32_to_cpu(cmd->rw.reftag);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	if (control & NVME_RW_PRINFO_PRCHK_REF)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		domain->sig.dif.ref_remap = true;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		domain->sig.dif.ref_remap = true;
 
 	domain->sig.dif.app_tag = le16_to_cpu(cmd->rw.lbat);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	domain->sig.dif.apptag_check_mask = le16_to_cpu(cmd->rw.lbatm);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	domain->sig.dif.app_escape = true;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	if (pi_type == NVME_NS_DPS_PI_TYPE3)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		domain->sig.dif.ref_escape = true;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		domain->sig.dif.ref_escape = true;
 }
 
 static void nvme_rdma_set_sig_attrs(struct blk_integrity *bi,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-		struct nvme_command *cmd, struct ib_sig_attrs *sig_attrs,	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
-		u8 pi_type)	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		struct nvme_command *cmd, struct ib_sig_attrs *sig_attrs,
+		u8 pi_type)
 {
 	u16 control = le16_to_cpu(cmd->rw.control);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
@@ -2130,16 +2130,16 @@ static void nvme_rdma_set_sig_attrs(struct blk_integrity *bi,	/* [한국어] NVM
 		/* for WRITE_INSERT/READ_STRIP no memory domain */
 		sig_attrs->mem.sig_type = IB_SIG_TYPE_NONE;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 		nvme_rdma_set_sig_domain(bi, cmd, &sig_attrs->wire, control,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-					 pi_type);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+					 pi_type);
 		/* Clear the PRACT bit since HCA will generate/verify the PI */
 		control &= ~NVME_RW_PRINFO_PRACT;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 		cmd->rw.control = cpu_to_le16(control);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	} else {
 		/* for WRITE_PASS/READ_PASS both wire/memory domains exist */
 		nvme_rdma_set_sig_domain(bi, cmd, &sig_attrs->wire, control,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-					 pi_type);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+					 pi_type);
 		nvme_rdma_set_sig_domain(bi, cmd, &sig_attrs->mem, control,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-					 pi_type);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+					 pi_type);
 	}
 }
 
@@ -2147,20 +2147,20 @@ static void nvme_rdma_set_prot_checks(struct nvme_command *cmd, u8 *mask)	/* [�
 {
 	*mask = 0;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	if (le16_to_cpu(cmd->rw.control) & NVME_RW_PRINFO_PRCHK_REF)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		*mask |= IB_SIG_CHECK_REFTAG;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		*mask |= IB_SIG_CHECK_REFTAG;
 	if (le16_to_cpu(cmd->rw.control) & NVME_RW_PRINFO_PRCHK_GUARD)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		*mask |= IB_SIG_CHECK_GUARD;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		*mask |= IB_SIG_CHECK_GUARD;
 }
 
 static void nvme_rdma_sig_done(struct ib_cq *cq, struct ib_wc *wc)	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 {
 	if (unlikely(wc->status != IB_WC_SUCCESS))	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		nvme_rdma_wr_error(cq, wc, "SIG");	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+		nvme_rdma_wr_error(cq, wc, "SIG");
 }
 
 static int nvme_rdma_map_sg_pi(struct nvme_rdma_queue *queue,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-		struct nvme_rdma_request *req, struct nvme_command *c,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-		int count, int pi_count)	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		struct nvme_rdma_request *req, struct nvme_command *c,
+		int count, int pi_count)
 {
 	struct nvme_rdma_sgl *sgl = &req->data_sgl;	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 	struct ib_reg_wr *wr = &req->reg_wr;	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
@@ -2177,8 +2177,8 @@ static int nvme_rdma_map_sg_pi(struct nvme_rdma_queue *queue,	/* [한국어] NVM
 		return -EAGAIN;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 
 	nr = ib_map_mr_sg_pi(req->mr, sgl->sg_table.sgl, count, NULL,	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
-			     req->metadata_sgl->sg_table.sgl, pi_count, NULL,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			     SZ_4K);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			     req->metadata_sgl->sg_table.sgl, pi_count, NULL,
+			     SZ_4K);
 	if (unlikely(nr))	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 		goto mr_put;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
 
@@ -2196,21 +2196,21 @@ static int nvme_rdma_map_sg_pi(struct nvme_rdma_queue *queue,	/* [한국어] NVM
 	wr->mr = req->mr;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	wr->key = req->mr->rkey;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	wr->access = IB_ACCESS_LOCAL_WRITE |	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		     IB_ACCESS_REMOTE_READ |	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		     IB_ACCESS_REMOTE_WRITE;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		     IB_ACCESS_REMOTE_READ |
+		     IB_ACCESS_REMOTE_WRITE;
 
 	sg->addr = cpu_to_le64(req->mr->iova);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	xfer_len = req->mr->length;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	/* Check if PI is added by the HW */
 	if (!pi_count)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		xfer_len += (xfer_len >> bi->interval_exp) * ns->head->pi_size;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		xfer_len += (xfer_len >> bi->interval_exp) * ns->head->pi_size;
 	put_unaligned_le24(xfer_len, sg->length);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	put_unaligned_le32(req->mr->rkey, sg->key);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	sg->type = NVME_KEY_SGL_FMT_DATA_DESC << 4;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
 	return 0;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 
-mr_put:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+mr_put:
 	ib_mr_pool_put(queue->qp, &queue->qp->sig_mrs, req->mr);	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
 	req->mr = NULL;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	if (nr < 0)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
@@ -2219,22 +2219,22 @@ mr_put:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/
 }
 
 static int nvme_rdma_dma_map_req(struct ib_device *ibdev, struct request *rq,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-		int *count, int *pi_count)	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		int *count, int *pi_count)
 {
 	struct nvme_rdma_request *req = blk_mq_rq_to_pdu(rq);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 	int ret;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
 	req->data_sgl.sg_table.sgl = (struct scatterlist *)(req + 1);	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
 	ret = sg_alloc_table_chained(&req->data_sgl.sg_table,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			blk_rq_nr_phys_segments(rq), req->data_sgl.sg_table.sgl,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			NVME_INLINE_SG_CNT);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			blk_rq_nr_phys_segments(rq), req->data_sgl.sg_table.sgl,
+			NVME_INLINE_SG_CNT);
 	if (ret)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 		return -ENOMEM;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 
 	req->data_sgl.nents = blk_rq_map_sg(rq, req->data_sgl.sg_table.sgl);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
 	*count = ib_dma_map_sg(ibdev, req->data_sgl.sg_table.sgl,	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
-			       req->data_sgl.nents, rq_dma_dir(rq));	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			       req->data_sgl.nents, rq_dma_dir(rq));
 	if (unlikely(*count <= 0)) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 		ret = -EIO;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 		goto out_free_table;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
@@ -2244,20 +2244,20 @@ static int nvme_rdma_dma_map_req(struct ib_device *ibdev, struct request *rq,	/*
 		req->metadata_sgl->sg_table.sgl =	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 			(struct scatterlist *)(req->metadata_sgl + 1);	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
 		ret = sg_alloc_table_chained(&req->metadata_sgl->sg_table,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-				rq->nr_integrity_segments,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-				req->metadata_sgl->sg_table.sgl,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-				NVME_INLINE_METADATA_SG_CNT);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+				rq->nr_integrity_segments,
+				req->metadata_sgl->sg_table.sgl,
+				NVME_INLINE_METADATA_SG_CNT);
 		if (unlikely(ret)) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 			ret = -ENOMEM;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 			goto out_unmap_sg;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
 		}
 
 		req->metadata_sgl->nents = blk_rq_map_integrity_sg(rq,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-				req->metadata_sgl->sg_table.sgl);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+				req->metadata_sgl->sg_table.sgl);
 		*pi_count = ib_dma_map_sg(ibdev,	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
-					  req->metadata_sgl->sg_table.sgl,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-					  req->metadata_sgl->nents,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-					  rq_dma_dir(rq));	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+					  req->metadata_sgl->sg_table.sgl,
+					  req->metadata_sgl->nents,
+					  rq_dma_dir(rq));
 		if (unlikely(*pi_count <= 0)) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 			ret = -EIO;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 			goto out_free_pi_table;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
@@ -2266,13 +2266,13 @@ static int nvme_rdma_dma_map_req(struct ib_device *ibdev, struct request *rq,	/*
 
 	return 0;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 
-out_free_pi_table:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+out_free_pi_table:
 	sg_free_table_chained(&req->metadata_sgl->sg_table,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			      NVME_INLINE_METADATA_SG_CNT);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-out_unmap_sg:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			      NVME_INLINE_METADATA_SG_CNT);
+out_unmap_sg:
 	ib_dma_unmap_sg(ibdev, req->data_sgl.sg_table.sgl, req->data_sgl.nents,	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
-			rq_dma_dir(rq));	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-out_free_table:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			rq_dma_dir(rq));
+out_free_table:
 	sg_free_table_chained(&req->data_sgl.sg_table, NVME_INLINE_SG_CNT);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	return ret;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 }
@@ -2601,7 +2601,7 @@ static void nvme_rdma_submit_async_event(struct nvme_ctrl *arg)
 }
 
 static void nvme_rdma_process_nvme_rsp(struct nvme_rdma_queue *queue,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-		struct nvme_completion *cqe, struct ib_wc *wc)	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
+		struct nvme_completion *cqe, struct ib_wc *wc)
 {
 	struct request *rq;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
 	struct nvme_rdma_request *req;	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
@@ -2609,8 +2609,8 @@ static void nvme_rdma_process_nvme_rsp(struct nvme_rdma_queue *queue,	/* [한국
 	rq = nvme_find_rq(nvme_rdma_tagset(queue), cqe->command_id);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 	if (!rq) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 		dev_err(queue->ctrl->ctrl.device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			"got bad command_id %#x on QP %#x\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			cqe->command_id, queue->qp->qp_num);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			"got bad command_id %#x on QP %#x\n",
+			cqe->command_id, queue->qp->qp_num);
 		nvme_rdma_error_recovery(queue->ctrl);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 		return;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 	}
@@ -2621,10 +2621,10 @@ static void nvme_rdma_process_nvme_rsp(struct nvme_rdma_queue *queue,	/* [한국
 
 	if (wc->wc_flags & IB_WC_WITH_INVALIDATE) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 		if (unlikely(!req->mr ||	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-			     wc->ex.invalidate_rkey != req->mr->rkey)) {	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			     wc->ex.invalidate_rkey != req->mr->rkey)) {
 			dev_err(queue->ctrl->ctrl.device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-				"Bogus remote invalidation for rkey %#x\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-				req->mr ? req->mr->rkey : 0);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+				"Bogus remote invalidation for rkey %#x\n",
+				req->mr ? req->mr->rkey : 0);
 			nvme_rdma_error_recovery(queue->ctrl);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 		}
 	} else if (req->mr) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
@@ -2633,8 +2633,8 @@ static void nvme_rdma_process_nvme_rsp(struct nvme_rdma_queue *queue,	/* [한국
 		ret = nvme_rdma_inv_rkey(queue, req);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 		if (unlikely(ret < 0)) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 			dev_err(queue->ctrl->ctrl.device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-				"Queueing INV WR for rkey %#x failed (%d)\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-				req->mr->rkey, ret);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+				"Queueing INV WR for rkey %#x failed (%d)\n",
+				req->mr->rkey, ret);
 			nvme_rdma_error_recovery(queue->ctrl);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 		}
 		/* the local invalidation completion will end the request */
@@ -2728,7 +2728,7 @@ static int nvme_rdma_conn_established(struct nvme_rdma_queue *queue)	/* [한국�
 }
 
 static int nvme_rdma_conn_rejected(struct nvme_rdma_queue *queue,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-		struct rdma_cm_event *ev)	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
+		struct rdma_cm_event *ev)
 {
 	struct rdma_cm_id *cm_id = queue->cm_id;	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
 	int status = ev->status;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
@@ -2743,11 +2743,11 @@ static int nvme_rdma_conn_rejected(struct nvme_rdma_queue *queue,	/* [한국어]
 		u16 sts = le16_to_cpu(rej_data->sts);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
 		dev_err(queue->ctrl->ctrl.device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		      "Connect rejected: status %d (%s) nvme status %d (%s).\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		      status, rej_msg, sts, nvme_rdma_cm_msg(sts));	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+		      "Connect rejected: status %d (%s) nvme status %d (%s).\n",
+		      status, rej_msg, sts, nvme_rdma_cm_msg(sts));
 	} else {
 		dev_err(queue->ctrl->ctrl.device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			"Connect rejected: status %d (%s).\n", status, rej_msg);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			"Connect rejected: status %d (%s).\n", status, rej_msg);
 	}
 
 	return -ECONNRESET;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
@@ -2887,14 +2887,14 @@ static int nvme_rdma_route_resolved(struct nvme_rdma_queue *queue)
 }
 
 static int nvme_rdma_cm_handler(struct rdma_cm_id *cm_id,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-		struct rdma_cm_event *ev)	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
+		struct rdma_cm_event *ev)
 {
 	struct nvme_rdma_queue *queue = cm_id->context;	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 	int cm_error = 0;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
 	dev_dbg(queue->ctrl->ctrl.device, "%s (%d): status %d id %p\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		rdma_event_msg(ev->event), ev->event,	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
-		ev->status, cm_id);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		rdma_event_msg(ev->event), ev->event,
+		ev->status, cm_id);
 
 	switch (ev->event) {	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	case RDMA_CM_EVENT_ADDR_RESOLVED:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
@@ -2916,22 +2916,22 @@ static int nvme_rdma_cm_handler(struct rdma_cm_id *cm_id,	/* [한국어] NVMe/RD
 	case RDMA_CM_EVENT_UNREACHABLE:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	case RDMA_CM_EVENT_ADDR_ERROR:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 		dev_dbg(queue->ctrl->ctrl.device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			"CM error event %d\n", ev->event);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			"CM error event %d\n", ev->event);
 		cm_error = -ECONNRESET;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 		break;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	case RDMA_CM_EVENT_DISCONNECTED:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	case RDMA_CM_EVENT_ADDR_CHANGE:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	case RDMA_CM_EVENT_TIMEWAIT_EXIT:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 		dev_dbg(queue->ctrl->ctrl.device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			"disconnect received - connection closed\n");	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			"disconnect received - connection closed\n");
 		nvme_rdma_error_recovery(queue->ctrl);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 		break;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	case RDMA_CM_EVENT_DEVICE_REMOVAL:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 		/* device removal is handled via the ib_client API */
 		break;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	default:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	default:
 		dev_err(queue->ctrl->ctrl.device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			"Unexpected RDMA CM event (%d)\n", ev->event);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			"Unexpected RDMA CM event (%d)\n", ev->event);
 		nvme_rdma_error_recovery(queue->ctrl);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 		break;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	}
@@ -2962,9 +2962,9 @@ static enum blk_eh_timer_return nvme_rdma_timeout(struct request *rq)	/* [한국
 	int qid = nvme_rdma_queue_idx(queue);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 
 	dev_warn(ctrl->ctrl.device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		 "I/O tag %d (%04x) opcode %#x (%s) QID %d timeout\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		 rq->tag, nvme_cid(rq), cmd->common.opcode,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		 nvme_fabrics_opcode_str(qid, cmd), qid);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		 "I/O tag %d (%04x) opcode %#x (%s) QID %d timeout\n",
+		 rq->tag, nvme_cid(rq), cmd->common.opcode,
+		 nvme_fabrics_opcode_str(qid, cmd), qid);
 
 	if (nvme_ctrl_state(&ctrl->ctrl) != NVME_CTRL_LIVE) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 		/*
@@ -3009,13 +3009,13 @@ static blk_status_t nvme_rdma_queue_rq(struct blk_mq_hw_ctx *hctx,	/* [한국어
 	WARN_ON_ONCE(rq->tag < 0);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
 	if (!nvme_check_ready(&queue->ctrl->ctrl, rq, queue_ready))	/* [한국어] NVMe core API — SQE 조립·완료·상태기계·수명 */
-		return nvme_fail_nonready_command(&queue->ctrl->ctrl, rq);	/* [한국어] NVMe core API — SQE 조립·완료·상태기계·수명 */
+		return nvme_fail_nonready_command(&queue->ctrl->ctrl, rq);
 
 	dev = queue->device->dev;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
 	req->sqe.dma = ib_dma_map_single(dev, req->sqe.data,	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
 					 sizeof(struct nvme_command),	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-					 DMA_TO_DEVICE);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+					 DMA_TO_DEVICE);
 	err = ib_dma_mapping_error(dev, req->sqe.dma);	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
 	if (unlikely(err))	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 		return BLK_STS_RESOURCE;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
@@ -3030,18 +3030,18 @@ static blk_status_t nvme_rdma_queue_rq(struct blk_mq_hw_ctx *hctx,	/* [한국어
 	nvme_start_request(rq);	/* [한국어] NVMe core API — SQE 조립·완료·상태기계·수명 */
 
 	if (IS_ENABLED(CONFIG_BLK_DEV_INTEGRITY) &&	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-	    queue->pi_support &&	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	    (c->common.opcode == nvme_cmd_write ||	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	     c->common.opcode == nvme_cmd_read) &&	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	    nvme_ns_has_pi(ns->head))	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		req->use_sig_mr = true;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	    queue->pi_support &&
+	    (c->common.opcode == nvme_cmd_write ||
+	     c->common.opcode == nvme_cmd_read) &&
+	    nvme_ns_has_pi(ns->head))
+		req->use_sig_mr = true;
 	else	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		req->use_sig_mr = false;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		req->use_sig_mr = false;
 
 	err = nvme_rdma_map_data(queue, rq, c);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 	if (unlikely(err < 0)) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 		dev_err(queue->ctrl->ctrl.device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			     "Failed to map data (%d)\n", err);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			     "Failed to map data (%d)\n", err);
 		goto err;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
 	}
 
@@ -3051,25 +3051,25 @@ static blk_status_t nvme_rdma_queue_rq(struct blk_mq_hw_ctx *hctx,	/* [한국어
 			sizeof(struct nvme_command), DMA_TO_DEVICE);	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
 
 	err = nvme_rdma_post_send(queue, sqe, req->sge, req->num_sge,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-			req->mr ? &req->reg_wr.wr : NULL);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			req->mr ? &req->reg_wr.wr : NULL);
 	if (unlikely(err))	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 		goto err_unmap;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
 
 	return BLK_STS_OK;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 
-err_unmap:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+err_unmap:
 	nvme_rdma_unmap_data(queue, rq);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-err:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+err:
 	if (err == -EIO)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		ret = nvme_host_path_error(rq);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		ret = nvme_host_path_error(rq);
 	else if (err == -ENOMEM || err == -EAGAIN)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		ret = BLK_STS_RESOURCE;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		ret = BLK_STS_RESOURCE;
 	else	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		ret = BLK_STS_IOERR;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		ret = BLK_STS_IOERR;
 	nvme_cleanup_cmd(rq);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-unmap_qe:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+unmap_qe:
 	ib_dma_unmap_single(dev, req->sqe.dma, sizeof(struct nvme_command),	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
-			    DMA_TO_DEVICE);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			    DMA_TO_DEVICE);
 	return ret;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 }
 
@@ -3146,11 +3146,11 @@ static void nvme_rdma_complete_rq(struct request *rq)	/* [한국어] NVMe/RDMA Q
 	struct ib_device *ibdev = queue->device->dev;	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
 
 	if (req->use_sig_mr)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		nvme_rdma_check_pi_status(req);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+		nvme_rdma_check_pi_status(req);
 
 	nvme_rdma_unmap_data(queue, rq);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 	ib_dma_unmap_single(ibdev, req->sqe.dma, sizeof(struct nvme_command),	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
-			    DMA_TO_DEVICE);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			    DMA_TO_DEVICE);
 	nvme_complete_rq(rq);	/* [한국어] NVMe core API — SQE 조립·완료·상태기계·수명 */
 }
 
@@ -3163,22 +3163,22 @@ static void nvme_rdma_map_queues(struct blk_mq_tag_set *set)	/* [한국어] NVMe
 
 static const struct blk_mq_ops nvme_rdma_mq_ops = {	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 	.queue_rq	= nvme_rdma_queue_rq,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	.complete	= nvme_rdma_complete_rq,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	.init_request	= nvme_rdma_init_request,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	.exit_request	= nvme_rdma_exit_request,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	.init_hctx	= nvme_rdma_init_hctx,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	.timeout	= nvme_rdma_timeout,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	.map_queues	= nvme_rdma_map_queues,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	.poll		= nvme_rdma_poll,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+	.complete	= nvme_rdma_complete_rq,
+	.init_request	= nvme_rdma_init_request,
+	.exit_request	= nvme_rdma_exit_request,
+	.init_hctx	= nvme_rdma_init_hctx,
+	.timeout	= nvme_rdma_timeout,
+	.map_queues	= nvme_rdma_map_queues,
+	.poll		= nvme_rdma_poll,
 };
 
 static const struct blk_mq_ops nvme_rdma_admin_mq_ops = {	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 	.queue_rq	= nvme_rdma_queue_rq,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	.complete	= nvme_rdma_complete_rq,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	.init_request	= nvme_rdma_init_request,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	.exit_request	= nvme_rdma_exit_request,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	.init_hctx	= nvme_rdma_init_admin_hctx,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	.timeout	= nvme_rdma_timeout,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+	.complete	= nvme_rdma_complete_rq,
+	.init_request	= nvme_rdma_init_request,
+	.exit_request	= nvme_rdma_exit_request,
+	.init_hctx	= nvme_rdma_init_admin_hctx,
+	.timeout	= nvme_rdma_timeout,
 };
 
 static void nvme_rdma_shutdown_ctrl(struct nvme_rdma_ctrl *ctrl, bool shutdown)	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
@@ -3248,18 +3248,18 @@ out_fail:
 
 static const struct nvme_ctrl_ops nvme_rdma_ctrl_ops = {	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 	.name			= "rdma",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	.module			= THIS_MODULE,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	.flags			= NVME_F_FABRICS | NVME_F_METADATA_SUPPORTED,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	.reg_read32		= nvmf_reg_read32,	/* [한국어] fabrics 공통(Connect/옵션/재연결) API */
-	.reg_read64		= nvmf_reg_read64,	/* [한국어] fabrics 공통(Connect/옵션/재연결) API */
-	.reg_write32		= nvmf_reg_write32,	/* [한국어] fabrics 공통(Connect/옵션/재연결) API */
-	.subsystem_reset	= nvmf_subsystem_reset,	/* [한국어] fabrics 공통(Connect/옵션/재연결) API */
-	.free_ctrl		= nvme_rdma_free_ctrl,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	.submit_async_event	= nvme_rdma_submit_async_event,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	.delete_ctrl		= nvme_rdma_delete_ctrl,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	.get_address		= nvmf_get_address,	/* [한국어] fabrics 공통(Connect/옵션/재연결) API */
-	.stop_ctrl		= nvme_rdma_stop_ctrl,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	.get_virt_boundary	= nvme_get_virt_boundary,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	.module			= THIS_MODULE,
+	.flags			= NVME_F_FABRICS | NVME_F_METADATA_SUPPORTED,
+	.reg_read32		= nvmf_reg_read32,
+	.reg_read64		= nvmf_reg_read64,
+	.reg_write32		= nvmf_reg_write32,
+	.subsystem_reset	= nvmf_subsystem_reset,
+	.free_ctrl		= nvme_rdma_free_ctrl,
+	.submit_async_event	= nvme_rdma_submit_async_event,
+	.delete_ctrl		= nvme_rdma_delete_ctrl,
+	.get_address		= nvmf_get_address,
+	.stop_ctrl		= nvme_rdma_stop_ctrl,
+	.get_virt_boundary	= nvme_get_virt_boundary,
 };
 
 /*
@@ -3274,8 +3274,8 @@ static const struct nvme_ctrl_ops nvme_rdma_ctrl_ops = {	/* [한국어] NVMe/RDM
  * The ports don't need to be compared as they are intrinsically
  * already matched by the port pointers supplied.
  */
-static bool	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-nvme_rdma_existing_controller(struct nvmf_ctrl_options *opts)	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+static bool
+nvme_rdma_existing_controller(struct nvmf_ctrl_options *opts)
 {
 	struct nvme_rdma_ctrl *ctrl;	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 	bool found = false;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
@@ -3284,7 +3284,7 @@ nvme_rdma_existing_controller(struct nvmf_ctrl_options *opts)	/* [한국어] NVM
 	list_for_each_entry(ctrl, &nvme_rdma_ctrl_list, list) {	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 		found = nvmf_ip_options_match(&ctrl->ctrl, opts);	/* [한국어] fabrics 공통(Connect/옵션/재연결) API */
 		if (found)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-			break;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			break;
 	}
 	mutex_unlock(&nvme_rdma_ctrl_mutex);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 
@@ -3292,7 +3292,7 @@ nvme_rdma_existing_controller(struct nvmf_ctrl_options *opts)	/* [한국어] NVM
 }
 
 static struct nvme_rdma_ctrl *nvme_rdma_alloc_ctrl(struct device *dev,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-		struct nvmf_ctrl_options *opts)	/* [한국어] fabrics 공통(Connect/옵션/재연결) API */
+		struct nvmf_ctrl_options *opts)
 {
 	struct nvme_rdma_ctrl *ctrl;	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 	int ret;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
@@ -3305,7 +3305,7 @@ static struct nvme_rdma_ctrl *nvme_rdma_alloc_ctrl(struct device *dev,	/* [한�
 
 	if (!(opts->mask & NVMF_OPT_TRSVCID)) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 		opts->trsvcid =	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			kstrdup(__stringify(NVME_RDMA_IP_PORT), GFP_KERNEL);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			kstrdup(__stringify(NVME_RDMA_IP_PORT), GFP_KERNEL);
 		if (!opts->trsvcid) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 			ret = -ENOMEM;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 			goto out_free_ctrl;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
@@ -3314,19 +3314,19 @@ static struct nvme_rdma_ctrl *nvme_rdma_alloc_ctrl(struct device *dev,	/* [한�
 	}
 
 	ret = inet_pton_with_scope(&init_net, AF_UNSPEC,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			opts->traddr, opts->trsvcid, &ctrl->addr);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			opts->traddr, opts->trsvcid, &ctrl->addr);
 	if (ret) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 		pr_err("malformed address passed: %s:%s\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			opts->traddr, opts->trsvcid);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			opts->traddr, opts->trsvcid);
 		goto out_free_ctrl;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
 	}
 
 	if (opts->mask & NVMF_OPT_HOST_TRADDR) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 		ret = inet_pton_with_scope(&init_net, AF_UNSPEC,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			opts->host_traddr, NULL, &ctrl->src_addr);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			opts->host_traddr, NULL, &ctrl->src_addr);
 		if (ret) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 			pr_err("malformed src address passed: %s\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			       opts->host_traddr);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			       opts->host_traddr);
 			goto out_free_ctrl;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
 		}
 	}
@@ -3337,12 +3337,12 @@ static struct nvme_rdma_ctrl *nvme_rdma_alloc_ctrl(struct device *dev,	/* [한�
 	}
 
 	INIT_DELAYED_WORK(&ctrl->reconnect_work,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			nvme_rdma_reconnect_ctrl_work);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+			nvme_rdma_reconnect_ctrl_work);
 	INIT_WORK(&ctrl->err_work, nvme_rdma_error_recovery_work);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 	INIT_WORK(&ctrl->ctrl.reset_work, nvme_rdma_reset_ctrl_work);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 
 	ctrl->ctrl.queue_count = opts->nr_io_queues + opts->nr_write_queues +	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-				opts->nr_poll_queues + 1;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+				opts->nr_poll_queues + 1;
 	ctrl->ctrl.sqsize = opts->queue_size - 1;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	ctrl->ctrl.kato = opts->kato;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
@@ -3352,21 +3352,21 @@ static struct nvme_rdma_ctrl *nvme_rdma_alloc_ctrl(struct device *dev,	/* [한�
 		goto out_free_ctrl;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
 
 	ret = nvme_init_ctrl(&ctrl->ctrl, dev, &nvme_rdma_ctrl_ops,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-				0 /* no quirks, we're perfect! */);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+				0 /* no quirks, we're perfect! */);
 	if (ret)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 		goto out_kfree_queues;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
 
 	return ctrl;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 
-out_kfree_queues:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+out_kfree_queues:
 	kfree(ctrl->queues);	/* [한국어] 커널 메모리 생명주기 */
-out_free_ctrl:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+out_free_ctrl:
 	kfree(ctrl);	/* [한국어] 커널 메모리 생명주기 */
 	return ERR_PTR(ret);	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 }
 
 static struct nvme_ctrl *nvme_rdma_create_ctrl(struct device *dev,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-		struct nvmf_ctrl_options *opts)	/* [한국어] fabrics 공통(Connect/옵션/재연결) API */
+		struct nvmf_ctrl_options *opts)
 {
 	struct nvme_rdma_ctrl *ctrl;	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 	bool changed;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
@@ -3388,7 +3388,7 @@ static struct nvme_ctrl *nvme_rdma_create_ctrl(struct device *dev,	/* [한국어
 		goto out_uninit_ctrl;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
 
 	dev_info(ctrl->ctrl.device, "new ctrl: NQN \"%s\", addr %pISpcs, hostnqn: %s\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		nvmf_ctrl_subsysnqn(&ctrl->ctrl), &ctrl->addr, opts->host->nqn);	/* [한국어] fabrics 공통(Connect/옵션/재연결) API */
+		nvmf_ctrl_subsysnqn(&ctrl->ctrl), &ctrl->addr, opts->host->nqn);
 
 	mutex_lock(&nvme_rdma_ctrl_mutex);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 	list_add_tail(&ctrl->list, &nvme_rdma_ctrl_list);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
@@ -3396,24 +3396,24 @@ static struct nvme_ctrl *nvme_rdma_create_ctrl(struct device *dev,	/* [한국어
 
 	return &ctrl->ctrl;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 
-out_uninit_ctrl:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+out_uninit_ctrl:
 	nvme_uninit_ctrl(&ctrl->ctrl);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-out_put_ctrl:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+out_put_ctrl:
 	nvme_put_ctrl(&ctrl->ctrl);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	if (ret > 0)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		ret = -EIO;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		ret = -EIO;
 	return ERR_PTR(ret);	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 }
 
 static struct nvmf_transport_ops nvme_rdma_transport = {	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 	.name		= "rdma",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	.module		= THIS_MODULE,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	.required_opts	= NVMF_OPT_TRADDR,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	.allowed_opts	= NVMF_OPT_TRSVCID | NVMF_OPT_RECONNECT_DELAY |	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			  NVMF_OPT_HOST_TRADDR | NVMF_OPT_CTRL_LOSS_TMO |	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			  NVMF_OPT_NR_WRITE_QUEUES | NVMF_OPT_NR_POLL_QUEUES |	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			  NVMF_OPT_TOS,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	.create_ctrl	= nvme_rdma_create_ctrl,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+	.module		= THIS_MODULE,
+	.required_opts	= NVMF_OPT_TRADDR,
+	.allowed_opts	= NVMF_OPT_TRSVCID | NVMF_OPT_RECONNECT_DELAY |
+			  NVMF_OPT_HOST_TRADDR | NVMF_OPT_CTRL_LOSS_TMO |
+			  NVMF_OPT_NR_WRITE_QUEUES | NVMF_OPT_NR_POLL_QUEUES |
+			  NVMF_OPT_TOS,
+	.create_ctrl	= nvme_rdma_create_ctrl,
 };
 
 /*
@@ -3477,7 +3477,7 @@ static void nvme_rdma_remove_one(struct ib_device *ib_device, void *client_data)
 
 static struct ib_client nvme_rdma_ib_client = {	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 	.name   = "nvme_rdma",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	.remove = nvme_rdma_remove_one	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+	.remove = nvme_rdma_remove_one
 };
 
 static int __init nvme_rdma_init_module(void)	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
@@ -3494,7 +3494,7 @@ static int __init nvme_rdma_init_module(void)	/* [한국어] NVMe/RDMA QP·CM·M
 
 	return 0;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 
-err_unreg_client:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+err_unreg_client:
 	ib_unregister_client(&nvme_rdma_ib_client);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 	return ret;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 }
@@ -3508,7 +3508,7 @@ static void __exit nvme_rdma_cleanup_module(void)	/* [한국어] NVMe/RDMA QP·C
 
 	mutex_lock(&nvme_rdma_ctrl_mutex);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 	list_for_each_entry(ctrl, &nvme_rdma_ctrl_list, list)	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-		nvme_delete_ctrl(&ctrl->ctrl);	/* [한국어] NVMe core API — SQE 조립·완료·상태기계·수명 */
+		nvme_delete_ctrl(&ctrl->ctrl);
 	mutex_unlock(&nvme_rdma_ctrl_mutex);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 	flush_workqueue(nvme_delete_wq);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 }

@@ -1457,8 +1457,8 @@ static inline struct request *nvme_find_rq(struct blk_mq_tags *tags,	/* [한국�
 	}
 	if (unlikely(nvme_genctr_mask(nvme_req(rq)->genctr) != genctr)) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
 		dev_err(nvme_req(rq)->ctrl->device,	/* [한국어] 진단 로그 */
-			"request %#x genctr mismatch (got %#x expected %#x)\n",	/* [한국어] 실행 단계 — 주변 함수 한국어 블록과 함께 해석 */
-			tag, genctr, nvme_genctr_mask(nvme_req(rq)->genctr));	/* [한국어] 실행 단계 — 주변 함수 한국어 블록과 함께 해석 */
+			"request %#x genctr mismatch (got %#x expected %#x)\n",
+			tag, genctr, nvme_genctr_mask(nvme_req(rq)->genctr));
 		/* [한국어] tag 재사용 후 늦은 CQE — 데이터 오염 방지를 위해 무시 */
 		return NULL;	/* [한국어] 대상 없음 */
 	}
@@ -1503,10 +1503,10 @@ static inline void nvme_print_device_info(struct nvme_ctrl *ctrl)	/* [한국어]
 	}
 
 	dev_err(ctrl->device,	/* [한국어] 진단 로그 */
-		"VID:%04x model:%.*s firmware:%.*s\n", subsys->vendor_id,	/* [한국어] 실행 단계 — 주변 함수 한국어 블록과 함께 해석 */
-		nvme_strlen(subsys->model, sizeof(subsys->model)),	/* [한국어] 실행 단계 — 주변 함수 한국어 블록과 함께 해석 */
-		subsys->model, nvme_strlen(subsys->firmware_rev,	/* [한국어] 실행 단계 — 주변 함수 한국어 블록과 함께 해석 */
-					   sizeof(subsys->firmware_rev)),	/* [한국어] 실행 단계 — 주변 함수 한국어 블록과 함께 해석 */
+		"VID:%04x model:%.*s firmware:%.*s\n", subsys->vendor_id,
+		nvme_strlen(subsys->model, sizeof(subsys->model)),
+		subsys->model, nvme_strlen(subsys->firmware_rev,
+					   sizeof(subsys->firmware_rev)),
 		subsys->firmware_rev);	/* [한국어] 서브시스템 Identify 기반 폴백 로그 */
 }
 
@@ -1683,7 +1683,7 @@ static inline void nvme_put_ctrl(struct nvme_ctrl *ctrl)	/* [한국어] 함수 �
 static inline bool nvme_is_aen_req(u16 qid, __u16 command_id)	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
 {
 	return !qid &&	/* [한국어] 호출 결과 반환 */
-		nvme_tag_from_cid(command_id) >= NVME_AQ_BLK_MQ_DEPTH;	/* [한국어] 실행 단계 — 주변 함수 한국어 블록과 함께 해석 */
+		nvme_tag_from_cid(command_id) >= NVME_AQ_BLK_MQ_DEPTH;
 }
 
 /*
@@ -1750,7 +1750,7 @@ void nvme_cancel_tagset(struct nvme_ctrl *ctrl);	/* [한국어] 실행 단계 �
 void nvme_cancel_admin_tagset(struct nvme_ctrl *ctrl);	/* [한국어] 실행 단계 — 주변 함수 한국어 블록과 함께 해석 */
 /* [한국어] admin tagset 취소 — AER 포함 정리 */
 bool nvme_change_ctrl_state(struct nvme_ctrl *ctrl,	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
-		enum nvme_ctrl_state new_state);	/* [한국어] 컨트롤러 상태 원자 스냅샷 */
+		enum nvme_ctrl_state new_state);
 /* [한국어] 합법 전이만 수행·state_wq 웨이크. 성공 여부 반환. 상태 머신 핵심 API */
 int nvme_disable_ctrl(struct nvme_ctrl *ctrl, bool shutdown);	/* [한국어] 실행 단계 — 주변 함수 한국어 블록과 함께 해석 */
 /* [한국어] CC.EN=0 또는 shutdown 통지 — RDY/SHST 대기 포함 */
@@ -1770,12 +1770,12 @@ void nvme_stop_ctrl(struct nvme_ctrl *ctrl);	/* [한국어] 실행 단계 — �
 int nvme_init_ctrl_finish(struct nvme_ctrl *ctrl, bool was_suspended);	/* [한국어] 실행 단계 — 주변 함수 한국어 블록과 함께 해석 */
 /* [한국어] Identify 이후 한계 적용·hwmon 등 마무리. 재개 시 was_suspended */
 int nvme_alloc_admin_tag_set(struct nvme_ctrl *ctrl, struct blk_mq_tag_set *set,	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
-		const struct blk_mq_ops *ops, unsigned int cmd_size);	/* [한국어] blk-mq/큐 계층 API */
+		const struct blk_mq_ops *ops, unsigned int cmd_size);
 /* [한국어] admin blk-mq tag set+큐 생성. cmd_size 에 nvme_request+private */
 void nvme_remove_admin_tag_set(struct nvme_ctrl *ctrl);	/* [한국어] 실행 단계 — 주변 함수 한국어 블록과 함께 해석 */
 /* [한국어] admin tag set 제거 */
 int nvme_alloc_io_tag_set(struct nvme_ctrl *ctrl, struct blk_mq_tag_set *set,	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
-		const struct blk_mq_ops *ops, unsigned int nr_maps,	/* [한국어] blk-mq/큐 계층 API */
+		const struct blk_mq_ops *ops, unsigned int nr_maps,
 		unsigned int cmd_size);	/* [한국어] 지역/멤버 상태 — 상위 함수·구조 아키텍처 참고 */
 /* [한국어] I/O tag set. nr_maps 는 read/write/poll 맵 수 */
 void nvme_remove_io_tag_set(struct nvme_ctrl *ctrl);	/* [한국어] 실행 단계 — 주변 함수 한국어 블록과 함께 해석 */
@@ -1785,7 +1785,7 @@ void nvme_remove_namespaces(struct nvme_ctrl *ctrl);	/* [한국어] 실행 단�
 /* [한국어] 컨트롤러의 모든 NS 경로 제거 — 삭제/리셋 경로 */
 
 void nvme_complete_async_event(struct nvme_ctrl *ctrl, __le16 status,	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
-		volatile union nvme_result *res);	/* [한국어] 실행 단계 — 주변 함수 한국어 블록과 함께 해석 */
+		volatile union nvme_result *res);
 /* [한국어] AER CQE 도착 처리 — aen_result 저장 후 async_event_work 스케줄 */
 
 void nvme_quiesce_io_queues(struct nvme_ctrl *ctrl);	/* [한국어] 실행 단계 — 주변 함수 한국어 블록과 함께 해석 */
@@ -1832,7 +1832,7 @@ blk_status_t nvme_fail_nonready_command(struct nvme_ctrl *ctrl,	/* [한국어] �
 		struct request *req);	/* [한국어] 지역/멤버 상태 — 상위 함수·구조 아키텍처 참고 */
 /* [한국어] 비LIVE 에서 실패한 명령에 적절한 blk_status 부여 */
 bool __nvme_check_ready(struct nvme_ctrl *ctrl, struct request *rq,	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
-		bool queue_live, enum nvme_ctrl_state state);	/* [한국어] 컨트롤러 상태 원자 스냅샷 */
+		bool queue_live, enum nvme_ctrl_state state);
 /* [한국어] 상태별 상세 제출 허용 여부 — LIVE 빠른 경로 밖의 슬로우 패스 */
 
 /*
@@ -1871,7 +1871,7 @@ static inline bool nvme_is_unique_nsid(struct nvme_ctrl *ctrl,	/* [한국어] �
 	return head->shared ||	/* [한국어] 호출 결과 반환 */
 		(ctrl->oacs & NVME_CTRL_OACS_NS_MNGT_SUPP) ||
 		(ctrl->subsys->cmic & NVME_CTRL_CMIC_ANA) ||
-		(ctrl->ctratt & NVME_CTRL_CTRATT_NVM_SETS);	/* [한국어] 실행 단계 — 주변 함수 한국어 블록과 함께 해석 */
+		(ctrl->ctratt & NVME_CTRL_CTRATT_NVM_SETS);
 }
 
 /*
@@ -2060,7 +2060,7 @@ static inline void nvme_trace_bio_complete(struct request *req)	/* [한국어] �
 	struct nvme_ns *ns = req->q->queuedata;	/* [한국어] 지역/멤버 상태 — 상위 함수·구조 아키텍처 참고 */
 
 	if ((req->cmd_flags & REQ_NVME_MPATH) && req->bio)	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
-		trace_block_bio_complete(ns->head->disk->queue, req->bio);	/* [한국어] 실행 단계 — 주변 함수 한국어 블록과 함께 해석 */
+		trace_block_bio_complete(ns->head->disk->queue, req->bio);
 }
 
 extern bool multipath;	/* [한국어] multipath 필드 — 상위 구조 작성자·동기화 참고 */
@@ -2160,7 +2160,7 @@ static inline int nvme_mpath_init_identify(struct nvme_ctrl *ctrl,	/* [한국어
 {
 	if (ctrl->subsys->cmic & NVME_CTRL_CMIC_ANA)	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
 		dev_warn(ctrl->device,	/* [한국어] 진단 로그 */
-"Please enable CONFIG_NVME_MULTIPATH for full support of multi-port devices.\n");	/* [한국어] 실행 단계 — 주변 함수 한국어 블록과 함께 해석 */
+"Please enable CONFIG_NVME_MULTIPATH for full support of multi-port devices.\n");
 	/* [한국어] 장치가 ANA 인데 커널 multipath 꺼짐 — 관리자에게 설정 경고 */
 	return 0;	/* [한국어] 성공/no-op 완료 */
 }
@@ -2292,7 +2292,7 @@ static inline void nvme_start_request(struct request *rq)	/* [한국어] 함수 
 static inline bool nvme_ctrl_sgl_supported(struct nvme_ctrl *ctrl)	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
 {
 	return ctrl->sgls & (NVME_CTRL_SGLS_BYTE_ALIGNED |	/* [한국어] 호출 결과 반환 */
-			     NVME_CTRL_SGLS_DWORD_ALIGNED);	/* [한국어] 실행 단계 — 주변 함수 한국어 블록과 함께 해석 */
+			     NVME_CTRL_SGLS_DWORD_ALIGNED);
 }
 
 /*

@@ -951,7 +951,7 @@ static void nvme_partition_scan_work(struct work_struct *work)	/* [한국어] �
 
 	if (WARN_ON_ONCE(!test_and_clear_bit(GD_SUPPRESS_PART_SCAN,	/* [한국어] 불변식 위반 경고 */
 					     &head->disk->state)))	/* [한국어] 억제 비트가 있어야 정상 — 없으면 이중 스캔 의심 */
-		return;	/* [한국어] 실행 단계 — 주변 함수 한국어 블록과 함께 해석 */
+		return;
 
 	mutex_lock(&head->disk->open_mutex);	/* [한국어] 파티션 스캔과 open/close 경합 방지 */
 	bdev_disk_changed(head->disk, false);	/* [한국어] 파티션 테이블 재스캔 */
@@ -1235,7 +1235,7 @@ static void nvme_update_ns_ana_state(struct nvme_ana_group_desc *desc,	/* [한�
 	 */
 	/* [한국어] I/O 가능 ANA + 컨트롤러 LIVE 일 때만 set_live — identify 중 교착 방지 */
 	if (nvme_state_is_live(ns->ana_state) &&	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
-	    nvme_ctrl_state(ns->ctrl) == NVME_CTRL_LIVE)	/* [한국어] 컨트롤러 상태 원자 스냅샷 */
+	    nvme_ctrl_state(ns->ctrl) == NVME_CTRL_LIVE)
 		nvme_mpath_set_live(ns);	/* [한국어] head 노출·캐시·requeue */
 	else {
 		/*
@@ -1453,8 +1453,8 @@ static void nvme_subsys_iopolicy_update(struct nvme_subsystem *subsys,	/* [한�
 	mutex_unlock(&nvme_subsystems_lock);	/* [한국어] 컨트롤 플레인 뮤텍스 해제 */
 
 	pr_notice("subsysnqn %s iopolicy changed from %s to %s\n",	/* [한국어] 진단 로그 */
-			subsys->subnqn,	/* [한국어] 실행 단계 — 주변 함수 한국어 블록과 함께 해석 */
-			nvme_iopolicy_names[old_iopolicy],	/* [한국어] 실행 단계 — 주변 함수 한국어 블록과 함께 해석 */
+			subsys->subnqn,
+			nvme_iopolicy_names[old_iopolicy],
 			nvme_iopolicy_names[iopolicy]);	/* [한국어] 운영자 가시 정책 전환 로그 */
 }
 
@@ -1688,7 +1688,7 @@ void nvme_mpath_add_sysfs_link(struct nvme_ns_head *head)	/* [한국어] 함수 
 				&target->kobj, dev_name(target));	/* [한국어] head multipath attr 그룹 아래 path 링크 */
 		if (unlikely(rc)) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
 			dev_err(disk_to_dev(ns->head->disk),	/* [한국어] 진단 로그 */
-					"failed to create link to %s\n",	/* [한국어] 실행 단계 — 주변 함수 한국어 블록과 함께 해석 */
+					"failed to create link to %s\n",
 					dev_name(target));	/* [한국어] 링크 실패 로그 */
 			clear_bit(NVME_NS_SYSFS_ATTR_LINK, &ns->flags);	/* [한국어] 실패 시 플래그 원복 — 재시도 가능 */
 		}
@@ -1864,7 +1864,7 @@ int nvme_mpath_init_identify(struct nvme_ctrl *ctrl, struct nvme_id_ctrl *id)	/*
 		ctrl->max_namespaces * sizeof(__le32);	/* [한국어] 최악 크기: 모든 그룹+모든 NSID */
 	if (ana_log_size > max_transfer_size) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
 		dev_err(ctrl->device,	/* [한국어] 진단 로그 */
-			"ANA log page size (%zd) larger than MDTS (%zd).\n",	/* [한국어] 실행 단계 — 주변 함수 한국어 블록과 함께 해석 */
+			"ANA log page size (%zd) larger than MDTS (%zd).\n",
 			ana_log_size, max_transfer_size);	/* [한국어] MDTS 보다 큰 ANA 로그는 한 번에 못 읽음 */
 		dev_err(ctrl->device, "disabling ANA support.\n");	/* [한국어] ANA multipath 비활성 고지 */
 		goto out_uninit;	/* [한국어] ANA 포기 */

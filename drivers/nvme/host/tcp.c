@@ -116,7 +116,7 @@ static int tls_handshake_timeout = 10;	/* [한국어] 트랜스포트 파이프�
 #ifdef CONFIG_NVME_TCP_TLS	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 module_param(tls_handshake_timeout, int, 0644);	/* [한국어] 모듈 경계·파라미터·심볼 공개 */
 MODULE_PARM_DESC(tls_handshake_timeout,	/* [한국어] 모듈 경계·파라미터·심볼 공개 */
-		 "nvme TLS handshake timeout in seconds (default 10)");	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		 "nvme TLS handshake timeout in seconds (default 10)");
 #endif	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
 static atomic_t nvme_tcp_cpu_queues[NR_CPUS];	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
@@ -489,7 +489,7 @@ static inline bool nvme_tcp_recv_pdu_supported(enum nvme_tcp_pdu_type type)	/* [
 	case nvme_tcp_r2t:	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 	case nvme_tcp_rsp:	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 		return true;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
-	default:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	default:
 		return false;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 	}
 }
@@ -544,7 +544,7 @@ static inline void *nvme_tcp_req_data_pdu(struct nvme_tcp_request *req)	/* [한�
 {
 	/* use the pdu space in the back for the data pdu */
 	return req->pdu + sizeof(struct nvme_tcp_cmd_pdu) -	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		sizeof(struct nvme_tcp_data_pdu);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+		sizeof(struct nvme_tcp_data_pdu);
 }
 
 static inline size_t nvme_tcp_inline_data_size(struct nvme_tcp_request *req)	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
@@ -569,7 +569,7 @@ static inline bool nvme_tcp_has_inline_data(struct nvme_tcp_request *req)	/* [�
 	rq = blk_mq_rq_from_pdu(req);	/* [한국어] blk-mq — 태그·hctx·타임아웃·맵·완료 연동 */
 
 	return rq_data_dir(rq) == WRITE && req->data_len &&	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
-		req->data_len <= nvme_tcp_inline_data_size(req);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+		req->data_len <= nvme_tcp_inline_data_size(req);
 }
 
 static inline struct page *nvme_tcp_req_cur_page(struct nvme_tcp_request *req)	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
@@ -585,23 +585,23 @@ static inline size_t nvme_tcp_req_cur_offset(struct nvme_tcp_request *req)	/* [�
 static inline size_t nvme_tcp_req_cur_length(struct nvme_tcp_request *req)	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 {
 	return min_t(size_t, iov_iter_single_seg_count(&req->iter),	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
-			req->pdu_len - req->pdu_sent);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			req->pdu_len - req->pdu_sent);
 }
 
 static inline size_t nvme_tcp_pdu_data_left(struct nvme_tcp_request *req)	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 {
 	return rq_data_dir(blk_mq_rq_from_pdu(req)) == WRITE ?	/* [한국어] blk-mq — 태그·hctx·타임아웃·맵·완료 연동 */
-			req->pdu_len - req->pdu_sent : 0;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			req->pdu_len - req->pdu_sent : 0;
 }
 
 static inline size_t nvme_tcp_pdu_last_send(struct nvme_tcp_request *req,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		int len)	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		int len)
 {
 	return nvme_tcp_pdu_data_left(req) <= len;	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 }
 
 static void nvme_tcp_init_iter(struct nvme_tcp_request *req,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		unsigned int dir)	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		unsigned int dir)
 {
 	struct request *rq = blk_mq_rq_from_pdu(req);	/* [한국어] blk-mq — 태그·hctx·타임아웃·맵·완료 연동 */
 	struct bio_vec *vec;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
@@ -633,13 +633,13 @@ static void nvme_tcp_init_iter(struct nvme_tcp_request *req,	/* [한국어] NVMe
 }
 
 static inline void nvme_tcp_advance_req(struct nvme_tcp_request *req,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		int len)	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		int len)
 {
 	req->data_sent += len;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	req->pdu_sent += len;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	iov_iter_advance(&req->iter, len);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	if (!iov_iter_count(&req->iter) &&	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-	    req->data_sent < req->data_len) {	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	    req->data_sent < req->data_len) {
 		req->curr_bio = req->curr_bio->bi_next;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 		nvme_tcp_init_iter(req, ITER_SOURCE);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 	}
@@ -658,23 +658,23 @@ static inline void nvme_tcp_send_all(struct nvme_tcp_queue *queue)	/* [한국어
 static inline bool nvme_tcp_queue_has_pending(struct nvme_tcp_queue *queue)	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 {
 	return !list_empty(&queue->send_list) ||	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
-		!llist_empty(&queue->req_list);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		!llist_empty(&queue->req_list);
 }
 
 static inline bool nvme_tcp_queue_more(struct nvme_tcp_queue *queue)	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 {
 	return !nvme_tcp_queue_tls(queue) &&	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		nvme_tcp_queue_has_pending(queue);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+		nvme_tcp_queue_has_pending(queue);
 }
 
 static inline void nvme_tcp_queue_request(struct nvme_tcp_request *req,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		bool last)	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		bool last)
 {
 	struct nvme_tcp_queue *queue = req->queue;	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 	bool empty;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
 	empty = llist_add(&req->lentry, &queue->req_list) &&	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		list_empty(&queue->send_list) && !queue->request;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		list_empty(&queue->send_list) && !queue->request;
 
 	/*
 	 * if we're the first on the send_list and we can try to send
@@ -688,7 +688,7 @@ static inline void nvme_tcp_queue_request(struct nvme_tcp_request *req,	/* [한�
 	}
 
 	if (last && nvme_tcp_queue_has_pending(queue))	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		queue_work_on(queue->io_cpu, nvme_tcp_wq, &queue->io_work);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+		queue_work_on(queue->io_cpu, nvme_tcp_wq, &queue->io_work);
 }
 
 static void nvme_tcp_process_req_list(struct nvme_tcp_queue *queue)	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
@@ -703,16 +703,16 @@ static void nvme_tcp_process_req_list(struct nvme_tcp_queue *queue)	/* [한국�
 }
 
 static inline struct nvme_tcp_request *	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-nvme_tcp_fetch_request(struct nvme_tcp_queue *queue)	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+nvme_tcp_fetch_request(struct nvme_tcp_queue *queue)
 {
 	struct nvme_tcp_request *req;	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 
 	req = list_first_entry_or_null(&queue->send_list,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			struct nvme_tcp_request, entry);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+			struct nvme_tcp_request, entry);
 	if (!req) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 		nvme_tcp_process_req_list(queue);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 		req = list_first_entry_or_null(&queue->send_list,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-				struct nvme_tcp_request, entry);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+				struct nvme_tcp_request, entry);
 		if (unlikely(!req))	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 			return NULL;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 	}
@@ -757,7 +757,7 @@ static inline void nvme_tcp_set_hdgst(void *pdu, size_t len)	/* [한국어] NVMe
 }
 
 static int nvme_tcp_verify_hdgst(struct nvme_tcp_queue *queue,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		void *pdu, size_t pdu_len)	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		void *pdu, size_t pdu_len)
 {
 	struct nvme_tcp_hdr *hdr = pdu;	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 	__le32 recv_digest;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
@@ -765,8 +765,8 @@ static int nvme_tcp_verify_hdgst(struct nvme_tcp_queue *queue,	/* [한국어] NV
 
 	if (unlikely(!(hdr->flags & NVME_TCP_F_HDGST))) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 		dev_err(queue->ctrl->ctrl.device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			"queue %d: header digest flag is cleared\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			nvme_tcp_queue_id(queue));	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+			"queue %d: header digest flag is cleared\n",
+			nvme_tcp_queue_id(queue));
 		return -EPROTO;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 	}
 
@@ -774,8 +774,8 @@ static int nvme_tcp_verify_hdgst(struct nvme_tcp_queue *queue,	/* [한국어] NV
 	exp_digest = nvme_tcp_hdgst(pdu, pdu_len);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 	if (recv_digest != exp_digest) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 		dev_err(queue->ctrl->ctrl.device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			"header digest error: recv %#x expected %#x\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			le32_to_cpu(recv_digest), le32_to_cpu(exp_digest));	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			"header digest error: recv %#x expected %#x\n",
+			le32_to_cpu(recv_digest), le32_to_cpu(exp_digest));
 		return -EIO;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 	}
 
@@ -789,12 +789,12 @@ static int nvme_tcp_check_ddgst(struct nvme_tcp_queue *queue, void *pdu)	/* [한
 	u32 len;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
 	len = le32_to_cpu(hdr->plen) - hdr->hlen -	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		((hdr->flags & NVME_TCP_F_HDGST) ? digest_len : 0);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		((hdr->flags & NVME_TCP_F_HDGST) ? digest_len : 0);
 
 	if (unlikely(len && !(hdr->flags & NVME_TCP_F_DDGST))) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 		dev_err(queue->ctrl->ctrl.device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			"queue %d: data digest flag is cleared\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		nvme_tcp_queue_id(queue));	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+			"queue %d: data digest flag is cleared\n",
+		nvme_tcp_queue_id(queue));
 		return -EPROTO;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 	}
 	queue->rcv_crc = NVME_TCP_CRC_SEED;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
@@ -812,7 +812,7 @@ static void nvme_tcp_exit_request(struct blk_mq_tag_set *set,	/* [한국어] NVM
 
 static int nvme_tcp_init_request(struct blk_mq_tag_set *set,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 		struct request *rq, unsigned int hctx_idx,	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-		unsigned int numa_node)	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		unsigned int numa_node)
 {
 	struct nvme_tcp_ctrl *ctrl = to_tcp_ctrl(set->driver_data);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 	struct nvme_tcp_request *req = blk_mq_rq_to_pdu(rq);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
@@ -822,8 +822,8 @@ static int nvme_tcp_init_request(struct blk_mq_tag_set *set,	/* [한국어] NVMe
 	u8 hdgst = nvme_tcp_hdgst_len(queue);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 
 	req->pdu = page_frag_alloc(&queue->pf_cache,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		sizeof(struct nvme_tcp_cmd_pdu) + hdgst,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		GFP_KERNEL | __GFP_ZERO);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		sizeof(struct nvme_tcp_cmd_pdu) + hdgst,
+		GFP_KERNEL | __GFP_ZERO);
 	if (!req->pdu)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 		return -ENOMEM;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 
@@ -838,7 +838,7 @@ static int nvme_tcp_init_request(struct blk_mq_tag_set *set,	/* [한국어] NVMe
 }
 
 static int nvme_tcp_init_hctx(struct blk_mq_hw_ctx *hctx, void *data,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		unsigned int hctx_idx)	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		unsigned int hctx_idx)
 {
 	struct nvme_tcp_ctrl *ctrl = to_tcp_ctrl(data);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 	struct nvme_tcp_queue *queue = &ctrl->queues[hctx_idx + 1];	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
@@ -848,7 +848,7 @@ static int nvme_tcp_init_hctx(struct blk_mq_hw_ctx *hctx, void *data,	/* [한국
 }
 
 static int nvme_tcp_init_admin_hctx(struct blk_mq_hw_ctx *hctx, void *data,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		unsigned int hctx_idx)	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		unsigned int hctx_idx)
 {
 	struct nvme_tcp_ctrl *ctrl = to_tcp_ctrl(data);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 	struct nvme_tcp_queue *queue = &ctrl->queues[0];	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
@@ -858,7 +858,7 @@ static int nvme_tcp_init_admin_hctx(struct blk_mq_hw_ctx *hctx, void *data,	/* [
 }
 
 static enum nvme_tcp_recv_state	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-nvme_tcp_recv_state(struct nvme_tcp_queue *queue)	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+nvme_tcp_recv_state(struct nvme_tcp_queue *queue)
 {
 	return  (queue->pdu_remaining) ? NVME_TCP_RECV_PDU :	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 		(queue->ddgst_remaining) ? NVME_TCP_RECV_DDGST :	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
@@ -868,7 +868,7 @@ nvme_tcp_recv_state(struct nvme_tcp_queue *queue)	/* [한국어] NVMe/TCP 큐·P
 static void nvme_tcp_init_recv_ctx(struct nvme_tcp_queue *queue)	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 {
 	queue->pdu_remaining = sizeof(struct nvme_tcp_rsp_pdu) +	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-				nvme_tcp_hdgst_len(queue);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+				nvme_tcp_hdgst_len(queue);
 	queue->pdu_offset = 0;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	queue->data_remaining = -1;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	queue->ddgst_remaining = 0;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
@@ -914,50 +914,50 @@ static int nvme_tcp_process_nvme_cqe(struct nvme_tcp_queue *queue,	/* [한국어
 	rq = nvme_find_rq(nvme_tcp_tagset(queue), cqe->command_id);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 	if (!rq) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 		dev_err(queue->ctrl->ctrl.device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			"got bad cqe.command_id %#x on queue %d\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			cqe->command_id, nvme_tcp_queue_id(queue));	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+			"got bad cqe.command_id %#x on queue %d\n",
+			cqe->command_id, nvme_tcp_queue_id(queue));
 		nvme_tcp_error_recovery(&queue->ctrl->ctrl);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 		return -EINVAL;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 	}
 
 	req = blk_mq_rq_to_pdu(rq);	/* [한국어] blk-mq — 태그·hctx·타임아웃·맵·완료 연동 */
 	if (req->status == cpu_to_le16(NVME_SC_SUCCESS))	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		req->status = cqe->status;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		req->status = cqe->status;
 
 	if (!nvme_try_complete_req(rq, req->status, cqe->result))	/* [한국어] NVMe core API — SQE 조립·완료·상태기계·수명 */
-		nvme_complete_rq(rq);	/* [한국어] NVMe core API — SQE 조립·완료·상태기계·수명 */
+		nvme_complete_rq(rq);
 	queue->nr_cqe++;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
 	return 0;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 }
 
 static int nvme_tcp_handle_c2h_data(struct nvme_tcp_queue *queue,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		struct nvme_tcp_data_pdu *pdu)	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+		struct nvme_tcp_data_pdu *pdu)
 {
 	struct request *rq;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
 
 	rq = nvme_find_rq(nvme_tcp_tagset(queue), pdu->command_id);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 	if (!rq) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 		dev_err(queue->ctrl->ctrl.device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			"got bad c2hdata.command_id %#x on queue %d\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			pdu->command_id, nvme_tcp_queue_id(queue));	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+			"got bad c2hdata.command_id %#x on queue %d\n",
+			pdu->command_id, nvme_tcp_queue_id(queue));
 		return -ENOENT;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 	}
 
 	if (!blk_rq_payload_bytes(rq)) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 		dev_err(queue->ctrl->ctrl.device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			"queue %d tag %#x unexpected data\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			nvme_tcp_queue_id(queue), rq->tag);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+			"queue %d tag %#x unexpected data\n",
+			nvme_tcp_queue_id(queue), rq->tag);
 		return -EIO;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 	}
 
 	queue->data_remaining = le32_to_cpu(pdu->data_length);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
 	if (pdu->hdr.flags & NVME_TCP_F_DATA_SUCCESS &&	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-	    unlikely(!(pdu->hdr.flags & NVME_TCP_F_DATA_LAST))) {	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	    unlikely(!(pdu->hdr.flags & NVME_TCP_F_DATA_LAST))) {
 		dev_err(queue->ctrl->ctrl.device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			"queue %d tag %#x SUCCESS set but not last PDU\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			nvme_tcp_queue_id(queue), rq->tag);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+			"queue %d tag %#x SUCCESS set but not last PDU\n",
+			nvme_tcp_queue_id(queue), rq->tag);
 		nvme_tcp_error_recovery(&queue->ctrl->ctrl);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 		return -EPROTO;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 	}
@@ -966,7 +966,7 @@ static int nvme_tcp_handle_c2h_data(struct nvme_tcp_queue *queue,	/* [한국어]
 }
 
 static int nvme_tcp_handle_comp(struct nvme_tcp_queue *queue,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		struct nvme_tcp_rsp_pdu *pdu)	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+		struct nvme_tcp_rsp_pdu *pdu)
 {
 	struct nvme_completion *cqe = &pdu->cqe;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
 	int ret = 0;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
@@ -978,11 +978,11 @@ static int nvme_tcp_handle_comp(struct nvme_tcp_queue *queue,	/* [한국어] NVM
 	 * for them but rather special case them here.
 	 */
 	if (unlikely(nvme_is_aen_req(nvme_tcp_queue_id(queue),	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-				     cqe->command_id)))	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		nvme_complete_async_event(&queue->ctrl->ctrl, cqe->status,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-				&cqe->result);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+				     cqe->command_id)))
+		nvme_complete_async_event(&queue->ctrl->ctrl, cqe->status,
+				&cqe->result);
 	else	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		ret = nvme_tcp_process_nvme_cqe(queue, cqe);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+		ret = nvme_tcp_process_nvme_cqe(queue, cqe);
 
 	return ret;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 }
@@ -1139,7 +1139,7 @@ static int nvme_tcp_handle_r2t(struct nvme_tcp_queue *queue,
 }
 
 static void nvme_tcp_handle_c2h_term(struct nvme_tcp_queue *queue,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		struct nvme_tcp_term_pdu *pdu)	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+		struct nvme_tcp_term_pdu *pdu)
 {
 	u16 fes;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	const char *msg;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
@@ -1147,29 +1147,29 @@ static void nvme_tcp_handle_c2h_term(struct nvme_tcp_queue *queue,	/* [한국어
 
 	static const char * const msg_table[] = {	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 		[NVME_TCP_FES_INVALID_PDU_HDR] = "Invalid PDU Header Field",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		[NVME_TCP_FES_PDU_SEQ_ERR] = "PDU Sequence Error",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		[NVME_TCP_FES_HDR_DIGEST_ERR] = "Header Digest Error",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		[NVME_TCP_FES_DATA_OUT_OF_RANGE] = "Data Transfer Out Of Range",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		[NVME_TCP_FES_DATA_LIMIT_EXCEEDED] = "Data Transfer Limit Exceeded",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		[NVME_TCP_FES_UNSUPPORTED_PARAM] = "Unsupported Parameter",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		[NVME_TCP_FES_PDU_SEQ_ERR] = "PDU Sequence Error",
+		[NVME_TCP_FES_HDR_DIGEST_ERR] = "Header Digest Error",
+		[NVME_TCP_FES_DATA_OUT_OF_RANGE] = "Data Transfer Out Of Range",
+		[NVME_TCP_FES_DATA_LIMIT_EXCEEDED] = "Data Transfer Limit Exceeded",
+		[NVME_TCP_FES_UNSUPPORTED_PARAM] = "Unsupported Parameter",
 	};
 
 	if (plen < NVME_TCP_MIN_C2HTERM_PLEN ||	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-	    plen > NVME_TCP_MAX_C2HTERM_PLEN) {	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	    plen > NVME_TCP_MAX_C2HTERM_PLEN) {
 		dev_err(queue->ctrl->ctrl.device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			"Received a malformed C2HTermReq PDU (plen = %u)\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			plen);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			"Received a malformed C2HTermReq PDU (plen = %u)\n",
+			plen);
 		return;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 	}
 
 	fes = le16_to_cpu(pdu->fes);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	if (fes && fes < ARRAY_SIZE(msg_table))	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		msg = msg_table[fes];	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		msg = msg_table[fes];
 	else	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		msg = "Unknown";	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		msg = "Unknown";
 
 	dev_err(queue->ctrl->ctrl.device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		"Received C2HTermReq (FES = %s)\n", msg);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		"Received C2HTermReq (FES = %s)\n", msg);
 }
 
 /*
@@ -1280,7 +1280,7 @@ static inline void nvme_tcp_end_request(struct request *rq, u16 status)	/* [한�
 	union nvme_result res = {};	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
 	if (!nvme_try_complete_req(rq, cpu_to_le16(status << 1), res))	/* [한국어] NVMe core API — SQE 조립·완료·상태기계·수명 */
-		nvme_complete_rq(rq);	/* [한국어] NVMe core API — SQE 조립·완료·상태기계·수명 */
+		nvme_complete_rq(rq);
 }
 
 /*
@@ -1387,7 +1387,7 @@ static int nvme_tcp_recv_data(struct nvme_tcp_queue *queue, struct sk_buff *skb,
 }
 
 static int nvme_tcp_recv_ddgst(struct nvme_tcp_queue *queue,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		struct sk_buff *skb, unsigned int *offset, size_t *len)	/* [한국어] 커널 소켓 송수신 — TCP 바이트 스트림 PDU 운반 */
+		struct sk_buff *skb, unsigned int *offset, size_t *len)
 {
 	struct nvme_tcp_data_pdu *pdu = (void *)queue->pdu;	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 	char *ddgst = (char *)&queue->recv_ddgst;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
@@ -1407,20 +1407,20 @@ static int nvme_tcp_recv_ddgst(struct nvme_tcp_queue *queue,	/* [한국어] NVMe
 
 	if (queue->recv_ddgst != queue->exp_ddgst) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 		struct request *rq = nvme_cid_to_rq(nvme_tcp_tagset(queue),	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-					pdu->command_id);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+					pdu->command_id);
 		struct nvme_tcp_request *req = blk_mq_rq_to_pdu(rq);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 
 		req->status = cpu_to_le16(NVME_SC_DATA_XFER_ERROR);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
 		dev_err(queue->ctrl->ctrl.device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			"data digest error: recv %#x expected %#x\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			le32_to_cpu(queue->recv_ddgst),	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			le32_to_cpu(queue->exp_ddgst));	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			"data digest error: recv %#x expected %#x\n",
+			le32_to_cpu(queue->recv_ddgst),
+			le32_to_cpu(queue->exp_ddgst));
 	}
 
 	if (pdu->hdr.flags & NVME_TCP_F_DATA_SUCCESS) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 		struct request *rq = nvme_cid_to_rq(nvme_tcp_tagset(queue),	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-					pdu->command_id);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+					pdu->command_id);
 		struct nvme_tcp_request *req = blk_mq_rq_to_pdu(rq);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 
 		nvme_tcp_end_request(rq, le16_to_cpu(req->status));	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
@@ -1501,8 +1501,8 @@ static void nvme_tcp_data_ready(struct sock *sk)	/* [한국어] NVMe/TCP 큐·PD
 	read_lock_bh(&sk->sk_callback_lock);	/* [한국어] 커널 소켓 송수신 — TCP 바이트 스트림 PDU 운반 */
 	queue = sk->sk_user_data;	/* [한국어] 커널 소켓 송수신 — TCP 바이트 스트림 PDU 운반 */
 	if (likely(queue && queue->rd_enabled) &&	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-	    !test_bit(NVME_TCP_Q_POLLING, &queue->flags))	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		queue_work_on(queue->io_cpu, nvme_tcp_wq, &queue->io_work);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+	    !test_bit(NVME_TCP_Q_POLLING, &queue->flags))
+		queue_work_on(queue->io_cpu, nvme_tcp_wq, &queue->io_work);
 	read_unlock_bh(&sk->sk_callback_lock);	/* [한국어] 커널 소켓 송수신 — TCP 바이트 스트림 PDU 운반 */
 }
 
@@ -1516,7 +1516,7 @@ static void nvme_tcp_write_space(struct sock *sk)	/* [한국어] NVMe/TCP 큐·P
 		clear_bit(SOCK_NOSPACE, &sk->sk_socket->flags);	/* [한국어] 커널 소켓 송수신 — TCP 바이트 스트림 PDU 운반 */
 		/* Ensure pending TLS partial records are retried */
 		if (nvme_tcp_queue_tls(queue))	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-			queue->write_space(sk);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			queue->write_space(sk);
 		queue_work_on(queue->io_cpu, nvme_tcp_wq, &queue->io_work);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 	}
 	read_unlock_bh(&sk->sk_callback_lock);	/* [한국어] 커널 소켓 송수신 — TCP 바이트 스트림 PDU 운반 */
@@ -1590,10 +1590,10 @@ static void nvme_tcp_fail_request(struct nvme_tcp_request *req)	/* [한국어] N
 		union nvme_result res = {};	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
 		nvme_complete_async_event(&req->queue->ctrl->ctrl,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-				cpu_to_le16(NVME_SC_HOST_PATH_ERROR), &res);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+				cpu_to_le16(NVME_SC_HOST_PATH_ERROR), &res);
 	} else {
 		nvme_tcp_end_request(blk_mq_rq_from_pdu(req),	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-				NVME_SC_HOST_PATH_ERROR);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+				NVME_SC_HOST_PATH_ERROR);
 	}
 }
 
@@ -2086,8 +2086,8 @@ static int nvme_tcp_alloc_async_req(struct nvme_tcp_ctrl *ctrl)	/* [한국어] N
 	u8 hdgst = nvme_tcp_hdgst_len(queue);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 
 	async->pdu = page_frag_alloc(&queue->pf_cache,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		sizeof(struct nvme_tcp_cmd_pdu) + hdgst,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		GFP_KERNEL | __GFP_ZERO);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		sizeof(struct nvme_tcp_cmd_pdu) + hdgst,
+		GFP_KERNEL | __GFP_ZERO);
 	if (!async->pdu)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 		return -ENOMEM;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 
@@ -2298,7 +2298,7 @@ static bool nvme_tcp_default_queue(struct nvme_tcp_queue *queue)	/* [한국어] 
 	int qid = nvme_tcp_queue_id(queue);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 
 	return !nvme_tcp_admin_queue(queue) &&	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		qid < 1 + ctrl->io_queues[HCTX_TYPE_DEFAULT];	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		qid < 1 + ctrl->io_queues[HCTX_TYPE_DEFAULT];
 }
 
 /*
@@ -2505,8 +2505,8 @@ out_complete:
 }
 
 static int nvme_tcp_start_tls(struct nvme_ctrl *nctrl,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-			      struct nvme_tcp_queue *queue,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-			      key_serial_t pskid)	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			      struct nvme_tcp_queue *queue,
+			      key_serial_t pskid)
 {
 	int qid = nvme_tcp_queue_id(queue);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 	int ret;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
@@ -2515,7 +2515,7 @@ static int nvme_tcp_start_tls(struct nvme_ctrl *nctrl,	/* [한국어] NVMe/TCP �
 	key_serial_t keyring = nvme_keyring_id();	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
 	dev_dbg(nctrl->device, "queue %d: start TLS with key %x\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		qid, pskid);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		qid, pskid);
 	memset(&args, 0, sizeof(args));	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	args.ta_sock = queue->sock;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	args.ta_done = nvme_tcp_tls_done;	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
@@ -2523,7 +2523,7 @@ static int nvme_tcp_start_tls(struct nvme_ctrl *nctrl,	/* [한국어] NVMe/TCP �
 	args.ta_my_peerids[0] = pskid;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	args.ta_num_peerids = 1;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	if (nctrl->opts->keyring)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		keyring = key_serial(nctrl->opts->keyring);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		keyring = key_serial(nctrl->opts->keyring);
 	args.ta_keyring = keyring;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	args.ta_timeout_ms = tls_handshake_timeout * 1000;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	queue->tls_err = -EOPNOTSUPP;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
@@ -2531,26 +2531,26 @@ static int nvme_tcp_start_tls(struct nvme_ctrl *nctrl,	/* [한국어] NVMe/TCP �
 	ret = tls_client_hello_psk(&args, GFP_KERNEL);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	if (ret) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 		dev_err(nctrl->device, "queue %d: failed to start TLS: %d\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			qid, ret);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			qid, ret);
 		return ret;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 	}
 	ret = wait_for_completion_interruptible_timeout(&queue->tls_complete, tmo);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	if (ret <= 0) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 		if (ret == 0)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-			ret = -ETIMEDOUT;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			ret = -ETIMEDOUT;
 
 		dev_err(nctrl->device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			"queue %d: TLS handshake failed, error %d\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			qid, ret);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			"queue %d: TLS handshake failed, error %d\n",
+			qid, ret);
 		tls_handshake_cancel(queue->sock->sk);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	} else {
 		if (queue->tls_err) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 			dev_err(nctrl->device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-				"queue %d: TLS handshake complete, error %d\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-				qid, queue->tls_err);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+				"queue %d: TLS handshake complete, error %d\n",
+				qid, queue->tls_err);
 		} else {
 			dev_dbg(nctrl->device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-				"queue %d: TLS handshake complete\n", qid);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+				"queue %d: TLS handshake complete\n", qid);
 		}
 		ret = queue->tls_err;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	}
@@ -2558,7 +2558,7 @@ static int nvme_tcp_start_tls(struct nvme_ctrl *nctrl,	/* [한국어] NVMe/TCP �
 }
 
 static int nvme_tcp_alloc_queue(struct nvme_ctrl *nctrl, int qid,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-				key_serial_t pskid)	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+				key_serial_t pskid)
 {
 	struct nvme_tcp_ctrl *ctrl = to_tcp_ctrl(nctrl);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 	struct nvme_tcp_queue *queue = &ctrl->queues[qid];	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
@@ -2573,17 +2573,17 @@ static int nvme_tcp_alloc_queue(struct nvme_ctrl *nctrl, int qid,	/* [한국어]
 	INIT_WORK(&queue->io_work, nvme_tcp_io_work);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 
 	if (qid > 0)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		queue->cmnd_capsule_len = nctrl->ioccsz * 16;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		queue->cmnd_capsule_len = nctrl->ioccsz * 16;
 	else	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 		queue->cmnd_capsule_len = sizeof(struct nvme_command) +	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-						NVME_TCP_ADMIN_CCSZ;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+						NVME_TCP_ADMIN_CCSZ;
 
 	ret = sock_create_kern(current->nsproxy->net_ns,	/* [한국어] 커널 소켓 송수신 — TCP 바이트 스트림 PDU 운반 */
-			ctrl->addr.ss_family, SOCK_STREAM,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			IPPROTO_TCP, &queue->sock);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			ctrl->addr.ss_family, SOCK_STREAM,
+			IPPROTO_TCP, &queue->sock);
 	if (ret) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 		dev_err(nctrl->device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			"failed to create socket: %d\n", ret);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			"failed to create socket: %d\n", ret);
 		goto err_destroy_mutex;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
 	}
 
@@ -2610,11 +2610,11 @@ static int nvme_tcp_alloc_queue(struct nvme_ctrl *nctrl, int qid,	/* [한국어]
 	sock_no_linger(queue->sock->sk);	/* [한국어] 커널 소켓 송수신 — TCP 바이트 스트림 PDU 운반 */
 
 	if (so_priority > 0)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		sock_set_priority(queue->sock->sk, so_priority);	/* [한국어] 커널 소켓 송수신 — TCP 바이트 스트림 PDU 운반 */
+		sock_set_priority(queue->sock->sk, so_priority);
 
 	/* Set socket type of service */
 	if (nctrl->opts->tos >= 0)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		ip_sock_set_tos(queue->sock->sk, nctrl->opts->tos);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		ip_sock_set_tos(queue->sock->sk, nctrl->opts->tos);
 
 	/* Set 10 seconds timeout for icresp recvmsg */
 	queue->sock->sk->sk_rcvtimeo = 10 * HZ;	/* [한국어] 커널 소켓 송수신 — TCP 바이트 스트림 PDU 운반 */
@@ -2631,11 +2631,11 @@ static int nvme_tcp_alloc_queue(struct nvme_ctrl *nctrl, int qid,	/* [한국어]
 
 	if (nctrl->opts->mask & NVMF_OPT_HOST_TRADDR) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 		ret = kernel_bind(queue->sock, (struct sockaddr_unsized *)&ctrl->src_addr,	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-			sizeof(ctrl->src_addr));	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			sizeof(ctrl->src_addr));
 		if (ret) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 			dev_err(nctrl->device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-				"failed to bind queue %d socket %d\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-				qid, ret);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+				"failed to bind queue %d socket %d\n",
+				qid, ret);
 			goto err_sock;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
 		}
 	}
@@ -2645,11 +2645,11 @@ static int nvme_tcp_alloc_queue(struct nvme_ctrl *nctrl, int qid,	/* [한국어]
 		sockptr_t optval = KERNEL_SOCKPTR(iface);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
 		ret = sock_setsockopt(queue->sock, SOL_SOCKET, SO_BINDTODEVICE,	/* [한국어] 커널 소켓 송수신 — TCP 바이트 스트림 PDU 운반 */
-				      optval, strlen(iface));	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+				      optval, strlen(iface));
 		if (ret) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 			dev_err(nctrl->device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			  "failed to bind to interface %s queue %d err %d\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			  iface, qid, ret);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			  "failed to bind to interface %s queue %d err %d\n",
+			  iface, qid, ret);
 			goto err_sock;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
 		}
 	}
@@ -2658,7 +2658,7 @@ static int nvme_tcp_alloc_queue(struct nvme_ctrl *nctrl, int qid,	/* [한국어]
 	queue->data_digest = nctrl->opts->data_digest;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
 	rcv_pdu_size = sizeof(struct nvme_tcp_rsp_pdu) +	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-			nvme_tcp_hdgst_len(queue);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+			nvme_tcp_hdgst_len(queue);
 	queue->pdu = kmalloc(rcv_pdu_size, GFP_KERNEL);	/* [한국어] 커널 메모리 생명주기 */
 	if (!queue->pdu) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 		ret = -ENOMEM;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
@@ -2666,13 +2666,13 @@ static int nvme_tcp_alloc_queue(struct nvme_ctrl *nctrl, int qid,	/* [한국어]
 	}
 
 	dev_dbg(nctrl->device, "connecting queue %d\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			nvme_tcp_queue_id(queue));	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+			nvme_tcp_queue_id(queue));
 
 	ret = kernel_connect(queue->sock, (struct sockaddr_unsized *)&ctrl->addr,	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-		sizeof(ctrl->addr), 0);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		sizeof(ctrl->addr), 0);
 	if (ret) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 		dev_err(nctrl->device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			"failed to connect socket: %d\n", ret);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			"failed to connect socket: %d\n", ret);
 		goto err_rcv_pdu;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
 	}
 
@@ -2691,15 +2691,15 @@ static int nvme_tcp_alloc_queue(struct nvme_ctrl *nctrl, int qid,	/* [한국어]
 
 	return 0;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 
-err_init_connect:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+err_init_connect:
 	kernel_sock_shutdown(queue->sock, SHUT_RDWR);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-err_rcv_pdu:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+err_rcv_pdu:
 	kfree(queue->pdu);	/* [한국어] 커널 메모리 생명주기 */
-err_sock:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+err_sock:
 	/* ->sock will be released by fput() */
 	fput(queue->sock->file);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	queue->sock = NULL;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-err_destroy_mutex:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+err_destroy_mutex:
 	mutex_destroy(&queue->send_mutex);	/* [한국어] 동기화 — 큐/연결/상태 공유 보호 */
 	mutex_destroy(&queue->queue_lock);	/* [한국어] 동기화 — 큐/연결/상태 공유 보호 */
 	return ret;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
@@ -2733,11 +2733,11 @@ static void nvme_tcp_stop_queue_nowait(struct nvme_ctrl *nctrl, int qid)	/* [한
 		return;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 
 	if (test_and_clear_bit(NVME_TCP_Q_IO_CPU_SET, &queue->flags))	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		atomic_dec(&nvme_tcp_cpu_queues[queue->io_cpu]);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+		atomic_dec(&nvme_tcp_cpu_queues[queue->io_cpu]);
 
 	mutex_lock(&queue->queue_lock);	/* [한국어] 동기화 — 큐/연결/상태 공유 보호 */
 	if (test_and_clear_bit(NVME_TCP_Q_LIVE, &queue->flags))	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		__nvme_tcp_stop_queue(queue);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		__nvme_tcp_stop_queue(queue);
 	/* Stopping the queue will disable TLS */
 	queue->tls_enabled = false;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	mutex_unlock(&queue->queue_lock);	/* [한국어] 동기화 — 큐/연결/상태 공유 보호 */
@@ -2751,14 +2751,14 @@ static void nvme_tcp_wait_queue(struct nvme_ctrl *nctrl, int qid)	/* [한국어]
 
 	while (timeout > 0) {	/* [한국어] 순회 — 큐·요청·세그먼트·이벤트 처리 */
 		if (!test_bit(NVME_TCP_Q_ALLOCATED, &queue->flags) ||	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		    !sk_wmem_alloc_get(queue->sock->sk))	/* [한국어] 커널 소켓 송수신 — TCP 바이트 스트림 PDU 운반 */
+		    !sk_wmem_alloc_get(queue->sock->sk))
 			return;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 		msleep(2);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 		timeout -= 2;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	}
 	dev_warn(nctrl->device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		 "qid %d: timeout draining sock wmem allocation expired\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		 qid);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		 "qid %d: timeout draining sock wmem allocation expired\n",
+		 qid);
 }
 
 static void nvme_tcp_stop_queue(struct nvme_ctrl *nctrl, int qid)	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
@@ -2855,7 +2855,7 @@ static void nvme_tcp_free_io_queues(struct nvme_ctrl *ctrl)	/* [한국어] NVMe/
 	int i;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
 	for (i = 1; i < ctrl->queue_count; i++)	/* [한국어] 순회 — 큐·요청·세그먼트·이벤트 처리 */
-		nvme_tcp_free_queue(ctrl, i);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+		nvme_tcp_free_queue(ctrl, i);
 }
 
 static void nvme_tcp_stop_io_queues(struct nvme_ctrl *ctrl)	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
@@ -2863,13 +2863,13 @@ static void nvme_tcp_stop_io_queues(struct nvme_ctrl *ctrl)	/* [한국어] NVMe/
 	int i;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
 	for (i = 1; i < ctrl->queue_count; i++)	/* [한국어] 순회 — 큐·요청·세그먼트·이벤트 처리 */
-		nvme_tcp_stop_queue_nowait(ctrl, i);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+		nvme_tcp_stop_queue_nowait(ctrl, i);
 	for (i = 1; i < ctrl->queue_count; i++)	/* [한국어] 순회 — 큐·요청·세그먼트·이벤트 처리 */
-		nvme_tcp_wait_queue(ctrl, i);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+		nvme_tcp_wait_queue(ctrl, i);
 }
 
 static int nvme_tcp_start_io_queues(struct nvme_ctrl *ctrl,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-				    int first, int last)	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+				    int first, int last)
 {
 	int i, ret;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
@@ -2881,9 +2881,9 @@ static int nvme_tcp_start_io_queues(struct nvme_ctrl *ctrl,	/* [한국어] NVMe/
 
 	return 0;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 
-out_stop_queues:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+out_stop_queues:
 	for (i--; i >= first; i--)	/* [한국어] 순회 — 큐·요청·세그먼트·이벤트 처리 */
-		nvme_tcp_stop_queue(ctrl, i);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+		nvme_tcp_stop_queue(ctrl, i);
 	return ret;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 }
 
@@ -3024,16 +3024,16 @@ static int nvme_tcp_alloc_io_queues(struct nvme_ctrl *ctrl)	/* [한국어] NVMe/
 
 	if (nr_io_queues == 0) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 		dev_err(ctrl->device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			"unable to set any I/O queues\n");	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			"unable to set any I/O queues\n");
 		return -ENOMEM;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 	}
 
 	ctrl->queue_count = nr_io_queues + 1;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	dev_info(ctrl->device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		"creating %d I/O queues.\n", nr_io_queues);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		"creating %d I/O queues.\n", nr_io_queues);
 
 	nvmf_set_io_queues(ctrl->opts, nr_io_queues,	/* [한국어] fabrics 공통(Connect/옵션/재연결) API */
-			   to_tcp_ctrl(ctrl)->io_queues);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			   to_tcp_ctrl(ctrl)->io_queues);
 	return __nvme_tcp_alloc_io_queues(ctrl);	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 }
 
@@ -3225,7 +3225,7 @@ out_free_queue:
 }
 
 static void nvme_tcp_teardown_admin_queue(struct nvme_ctrl *ctrl,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		bool remove)	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		bool remove)
 {
 	nvme_quiesce_admin_queue(ctrl);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	blk_sync_queue(ctrl->admin_q);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
@@ -3238,13 +3238,13 @@ static void nvme_tcp_teardown_admin_queue(struct nvme_ctrl *ctrl,	/* [한국어]
 	nvme_tcp_free_admin_queue(ctrl);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 	if (ctrl->tls_pskid) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 		dev_dbg(ctrl->device, "Wipe negotiated TLS_PSK %08x\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			ctrl->tls_pskid);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			ctrl->tls_pskid);
 		ctrl->tls_pskid = 0;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	}
 }
 
 static void nvme_tcp_teardown_io_queues(struct nvme_ctrl *ctrl,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		bool remove)	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		bool remove)
 {
 	if (ctrl->queue_count <= 1)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 		return;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
@@ -3260,7 +3260,7 @@ static void nvme_tcp_teardown_io_queues(struct nvme_ctrl *ctrl,	/* [한국어] N
 }
 
 static void nvme_tcp_reconnect_or_remove(struct nvme_ctrl *ctrl,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		int status)	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		int status)
 {
 	enum nvme_ctrl_state state = nvme_ctrl_state(ctrl);	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
 
@@ -3272,12 +3272,12 @@ static void nvme_tcp_reconnect_or_remove(struct nvme_ctrl *ctrl,	/* [한국어] 
 
 	if (nvmf_should_reconnect(ctrl, status)) {	/* [한국어] fabrics 공통(Connect/옵션/재연결) API */
 		dev_info(ctrl->device, "Reconnecting in %d seconds...\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			ctrl->opts->reconnect_delay);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			ctrl->opts->reconnect_delay);
 		queue_delayed_work(nvme_wq, &to_tcp_ctrl(ctrl)->connect_work,	/* [한국어] 워크큐 — 송수신/재연결/복구 비동기 실행 */
-				ctrl->opts->reconnect_delay * HZ);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+				ctrl->opts->reconnect_delay * HZ);
 	} else {
 		dev_info(ctrl->device, "Removing controller (%d)...\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			 status);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			 status);
 		nvme_delete_ctrl(ctrl);	/* [한국어] NVMe core API — SQE 조립·완료·상태기계·수명 */
 	}
 }
@@ -3621,7 +3621,7 @@ static void nvme_tcp_free_ctrl(struct nvme_ctrl *nctrl)	/* [한국어] NVMe/TCP 
 	mutex_unlock(&nvme_tcp_ctrl_mutex);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 
 	nvmf_free_options(nctrl->opts);	/* [한국어] fabrics 공통(Connect/옵션/재연결) API */
-free_ctrl:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+free_ctrl:
 	kfree(ctrl->queues);	/* [한국어] 커널 메모리 생명주기 */
 	kfree(ctrl);	/* [한국어] 커널 메모리 생명주기 */
 }
@@ -3633,7 +3633,7 @@ static void nvme_tcp_set_sg_null(struct nvme_command *c)	/* [한국어] NVMe/TCP
 	sg->addr = 0;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	sg->length = 0;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	sg->type = (NVME_TRANSPORT_SGL_DATA_DESC << 4) |	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			NVME_SGL_FMT_TRANSPORT_A;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			NVME_SGL_FMT_TRANSPORT_A;
 }
 
 static void nvme_tcp_set_sg_inline(struct nvme_tcp_queue *queue,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
@@ -3647,14 +3647,14 @@ static void nvme_tcp_set_sg_inline(struct nvme_tcp_queue *queue,	/* [한국어] 
 }
 
 static void nvme_tcp_set_sg_host_data(struct nvme_command *c,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		u32 data_len)	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		u32 data_len)
 {
 	struct nvme_sgl_desc *sg = &c->common.dptr.sgl;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
 
 	sg->addr = 0;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	sg->length = cpu_to_le32(data_len);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	sg->type = (NVME_TRANSPORT_SGL_DATA_DESC << 4) |	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			NVME_SGL_FMT_TRANSPORT_A;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			NVME_SGL_FMT_TRANSPORT_A;
 }
 
 /*
@@ -3809,12 +3809,12 @@ static blk_status_t nvme_tcp_map_data(struct nvme_tcp_queue *queue,	/* [한국�
 	c->common.flags |= NVME_CMD_SGL_METABUF;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
 	if (!blk_rq_nr_phys_segments(rq))	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		nvme_tcp_set_sg_null(c);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+		nvme_tcp_set_sg_null(c);
 	else if (rq_data_dir(rq) == WRITE &&	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-	    req->data_len <= nvme_tcp_inline_data_size(req))	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		nvme_tcp_set_sg_inline(queue, c, req->data_len);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+	    req->data_len <= nvme_tcp_inline_data_size(req))
+		nvme_tcp_set_sg_inline(queue, c, req->data_len);
 	else	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		nvme_tcp_set_sg_host_data(c, req->data_len);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+		nvme_tcp_set_sg_host_data(c, req->data_len);
 
 	return 0;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 }
@@ -3840,19 +3840,19 @@ static blk_status_t nvme_tcp_setup_cmd_pdu(struct nvme_ns *ns,	/* [한국어] NV
 	req->pdu_sent = 0;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	req->h2cdata_left = 0;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	req->data_len = blk_rq_nr_phys_segments(rq) ?	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-				blk_rq_payload_bytes(rq) : 0;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+				blk_rq_payload_bytes(rq) : 0;
 	req->curr_bio = rq->bio;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	if (req->curr_bio && req->data_len)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		nvme_tcp_init_iter(req, rq_data_dir(rq));	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+		nvme_tcp_init_iter(req, rq_data_dir(rq));
 
 	if (rq_data_dir(rq) == WRITE &&	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-	    req->data_len <= nvme_tcp_inline_data_size(req))	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		req->pdu_len = req->data_len;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	    req->data_len <= nvme_tcp_inline_data_size(req))
+		req->pdu_len = req->data_len;
 
 	pdu->hdr.type = nvme_tcp_cmd;	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 	pdu->hdr.flags = 0;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	if (queue->hdr_digest)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		pdu->hdr.flags |= NVME_TCP_F_HDGST;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		pdu->hdr.flags |= NVME_TCP_F_HDGST;
 	if (queue->data_digest && req->pdu_len) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 		pdu->hdr.flags |= NVME_TCP_F_DDGST;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 		ddgst = nvme_tcp_ddgst_len(queue);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
@@ -3860,13 +3860,13 @@ static blk_status_t nvme_tcp_setup_cmd_pdu(struct nvme_ns *ns,	/* [한국어] NV
 	pdu->hdr.hlen = sizeof(*pdu);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	pdu->hdr.pdo = req->pdu_len ? pdu->hdr.hlen + hdgst : 0;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	pdu->hdr.plen =	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		cpu_to_le32(pdu->hdr.hlen + hdgst + req->pdu_len + ddgst);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		cpu_to_le32(pdu->hdr.hlen + hdgst + req->pdu_len + ddgst);
 
 	ret = nvme_tcp_map_data(queue, rq);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 	if (unlikely(ret)) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 		nvme_cleanup_cmd(rq);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 		dev_err(queue->ctrl->ctrl.device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			"Failed to map data (%d)\n", ret);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			"Failed to map data (%d)\n", ret);
 		return ret;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 	}
 
@@ -3878,7 +3878,7 @@ static void nvme_tcp_commit_rqs(struct blk_mq_hw_ctx *hctx)	/* [한국어] NVMe/
 	struct nvme_tcp_queue *queue = hctx->driver_data;	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 
 	if (!llist_empty(&queue->req_list))	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		queue_work_on(queue->io_cpu, nvme_tcp_wq, &queue->io_work);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+		queue_work_on(queue->io_cpu, nvme_tcp_wq, &queue->io_work);
 }
 
 /*
@@ -3999,9 +3999,9 @@ static int nvme_tcp_get_address(struct nvme_ctrl *ctrl, char *buf, int size)	/* 
 	ret = kernel_getsockname(queue->sock, (struct sockaddr *)&src_addr);	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
 	if (ret > 0) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 		if (len > 0)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-			len--; /* strip trailing newline */	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			len--; /* strip trailing newline */
 		len += scnprintf(buf + len, size - len, "%ssrc_addr=%pISc\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-				(len) ? "," : "", &src_addr);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+				(len) ? "," : "", &src_addr);
 	}
 
 	mutex_unlock(&queue->queue_lock);	/* [한국어] 동기화 — 큐/연결/상태 공유 보호 */
@@ -4011,43 +4011,43 @@ static int nvme_tcp_get_address(struct nvme_ctrl *ctrl, char *buf, int size)	/* 
 
 static const struct blk_mq_ops nvme_tcp_mq_ops = {	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 	.queue_rq	= nvme_tcp_queue_rq,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	.commit_rqs	= nvme_tcp_commit_rqs,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	.complete	= nvme_complete_rq,	/* [한국어] NVMe core API — SQE 조립·완료·상태기계·수명 */
-	.init_request	= nvme_tcp_init_request,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	.exit_request	= nvme_tcp_exit_request,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	.init_hctx	= nvme_tcp_init_hctx,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	.timeout	= nvme_tcp_timeout,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	.map_queues	= nvme_tcp_map_queues,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	.poll		= nvme_tcp_poll,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+	.commit_rqs	= nvme_tcp_commit_rqs,
+	.complete	= nvme_complete_rq,
+	.init_request	= nvme_tcp_init_request,
+	.exit_request	= nvme_tcp_exit_request,
+	.init_hctx	= nvme_tcp_init_hctx,
+	.timeout	= nvme_tcp_timeout,
+	.map_queues	= nvme_tcp_map_queues,
+	.poll		= nvme_tcp_poll,
 };
 
 static const struct blk_mq_ops nvme_tcp_admin_mq_ops = {	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 	.queue_rq	= nvme_tcp_queue_rq,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	.complete	= nvme_complete_rq,	/* [한국어] NVMe core API — SQE 조립·완료·상태기계·수명 */
-	.init_request	= nvme_tcp_init_request,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	.exit_request	= nvme_tcp_exit_request,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	.init_hctx	= nvme_tcp_init_admin_hctx,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	.timeout	= nvme_tcp_timeout,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+	.complete	= nvme_complete_rq,
+	.init_request	= nvme_tcp_init_request,
+	.exit_request	= nvme_tcp_exit_request,
+	.init_hctx	= nvme_tcp_init_admin_hctx,
+	.timeout	= nvme_tcp_timeout,
 };
 
 static const struct nvme_ctrl_ops nvme_tcp_ctrl_ops = {	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 	.name			= "tcp",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	.module			= THIS_MODULE,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	.flags			= NVME_F_FABRICS | NVME_F_BLOCKING,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	.reg_read32		= nvmf_reg_read32,	/* [한국어] fabrics 공통(Connect/옵션/재연결) API */
-	.reg_read64		= nvmf_reg_read64,	/* [한국어] fabrics 공통(Connect/옵션/재연결) API */
-	.reg_write32		= nvmf_reg_write32,	/* [한국어] fabrics 공통(Connect/옵션/재연결) API */
-	.subsystem_reset	= nvmf_subsystem_reset,	/* [한국어] fabrics 공통(Connect/옵션/재연결) API */
-	.free_ctrl		= nvme_tcp_free_ctrl,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	.submit_async_event	= nvme_tcp_submit_async_event,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	.delete_ctrl		= nvme_tcp_delete_ctrl,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	.get_address		= nvme_tcp_get_address,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	.stop_ctrl		= nvme_tcp_stop_ctrl,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	.get_virt_boundary	= nvmf_get_virt_boundary,	/* [한국어] fabrics 공통(Connect/옵션/재연결) API */
+	.module			= THIS_MODULE,
+	.flags			= NVME_F_FABRICS | NVME_F_BLOCKING,
+	.reg_read32		= nvmf_reg_read32,
+	.reg_read64		= nvmf_reg_read64,
+	.reg_write32		= nvmf_reg_write32,
+	.subsystem_reset	= nvmf_subsystem_reset,
+	.free_ctrl		= nvme_tcp_free_ctrl,
+	.submit_async_event	= nvme_tcp_submit_async_event,
+	.delete_ctrl		= nvme_tcp_delete_ctrl,
+	.get_address		= nvme_tcp_get_address,
+	.stop_ctrl		= nvme_tcp_stop_ctrl,
+	.get_virt_boundary	= nvmf_get_virt_boundary,
 };
 
-static bool	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-nvme_tcp_existing_controller(struct nvmf_ctrl_options *opts)	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+static bool
+nvme_tcp_existing_controller(struct nvmf_ctrl_options *opts)
 {
 	struct nvme_tcp_ctrl *ctrl;	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 	bool found = false;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
@@ -4056,7 +4056,7 @@ nvme_tcp_existing_controller(struct nvmf_ctrl_options *opts)	/* [한국어] NVMe
 	list_for_each_entry(ctrl, &nvme_tcp_ctrl_list, list) {	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 		found = nvmf_ip_options_match(&ctrl->ctrl, opts);	/* [한국어] fabrics 공통(Connect/옵션/재연결) API */
 		if (found)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-			break;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			break;
 	}
 	mutex_unlock(&nvme_tcp_ctrl_mutex);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 
@@ -4064,7 +4064,7 @@ nvme_tcp_existing_controller(struct nvmf_ctrl_options *opts)	/* [한국어] NVMe
 }
 
 static struct nvme_tcp_ctrl *nvme_tcp_alloc_ctrl(struct device *dev,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		struct nvmf_ctrl_options *opts)	/* [한국어] fabrics 공통(Connect/옵션/재연결) API */
+		struct nvmf_ctrl_options *opts)
 {
 	struct nvme_tcp_ctrl *ctrl;	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 	int ret;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
@@ -4076,18 +4076,18 @@ static struct nvme_tcp_ctrl *nvme_tcp_alloc_ctrl(struct device *dev,	/* [한국�
 	INIT_LIST_HEAD(&ctrl->list);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	ctrl->ctrl.opts = opts;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	ctrl->ctrl.queue_count = opts->nr_io_queues + opts->nr_write_queues +	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-				opts->nr_poll_queues + 1;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+				opts->nr_poll_queues + 1;
 	ctrl->ctrl.sqsize = opts->queue_size - 1;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	ctrl->ctrl.kato = opts->kato;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
 	INIT_DELAYED_WORK(&ctrl->connect_work,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			nvme_tcp_reconnect_ctrl_work);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+			nvme_tcp_reconnect_ctrl_work);
 	INIT_WORK(&ctrl->err_work, nvme_tcp_error_recovery_work);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 	INIT_WORK(&ctrl->ctrl.reset_work, nvme_reset_ctrl_work);	/* [한국어] NVMe core API — SQE 조립·완료·상태기계·수명 */
 
 	if (!(opts->mask & NVMF_OPT_TRSVCID)) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 		opts->trsvcid =	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			kstrdup(__stringify(NVME_TCP_DISC_PORT), GFP_KERNEL);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			kstrdup(__stringify(NVME_TCP_DISC_PORT), GFP_KERNEL);
 		if (!opts->trsvcid) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 			ret = -ENOMEM;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 			goto out_free_ctrl;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
@@ -4096,19 +4096,19 @@ static struct nvme_tcp_ctrl *nvme_tcp_alloc_ctrl(struct device *dev,	/* [한국�
 	}
 
 	ret = inet_pton_with_scope(&init_net, AF_UNSPEC,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			opts->traddr, opts->trsvcid, &ctrl->addr);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			opts->traddr, opts->trsvcid, &ctrl->addr);
 	if (ret) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 		pr_err("malformed address passed: %s:%s\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			opts->traddr, opts->trsvcid);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			opts->traddr, opts->trsvcid);
 		goto out_free_ctrl;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
 	}
 
 	if (opts->mask & NVMF_OPT_HOST_TRADDR) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 		ret = inet_pton_with_scope(&init_net, AF_UNSPEC,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			opts->host_traddr, NULL, &ctrl->src_addr);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			opts->host_traddr, NULL, &ctrl->src_addr);
 		if (ret) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 			pr_err("malformed src address passed: %s\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			       opts->host_traddr);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			       opts->host_traddr);
 			goto out_free_ctrl;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
 		}
 	}
@@ -4116,7 +4116,7 @@ static struct nvme_tcp_ctrl *nvme_tcp_alloc_ctrl(struct device *dev,	/* [한국�
 	if (opts->mask & NVMF_OPT_HOST_IFACE) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 		if (!__dev_get_by_name(&init_net, opts->host_iface)) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 			pr_err("invalid interface passed: %s\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			       opts->host_iface);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			       opts->host_iface);
 			ret = -ENODEV;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 			goto out_free_ctrl;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
 		}
@@ -4138,15 +4138,15 @@ static struct nvme_tcp_ctrl *nvme_tcp_alloc_ctrl(struct device *dev,	/* [한국�
 		goto out_kfree_queues;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
 
 	return ctrl;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
-out_kfree_queues:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+out_kfree_queues:
 	kfree(ctrl->queues);	/* [한국어] 커널 메모리 생명주기 */
-out_free_ctrl:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+out_free_ctrl:
 	kfree(ctrl);	/* [한국어] 커널 메모리 생명주기 */
 	return ERR_PTR(ret);	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 }
 
 static struct nvme_ctrl *nvme_tcp_create_ctrl(struct device *dev,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		struct nvmf_ctrl_options *opts)	/* [한국어] fabrics 공통(Connect/옵션/재연결) API */
+		struct nvmf_ctrl_options *opts)
 {
 	struct nvme_tcp_ctrl *ctrl;	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 	int ret;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
@@ -4170,7 +4170,7 @@ static struct nvme_ctrl *nvme_tcp_create_ctrl(struct device *dev,	/* [한국어]
 		goto out_uninit_ctrl;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
 
 	dev_info(ctrl->ctrl.device, "new ctrl: NQN \"%s\", addr %pISp, hostnqn: %s\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		nvmf_ctrl_subsysnqn(&ctrl->ctrl), &ctrl->addr, opts->host->nqn);	/* [한국어] fabrics 공통(Connect/옵션/재연결) API */
+		nvmf_ctrl_subsysnqn(&ctrl->ctrl), &ctrl->addr, opts->host->nqn);
 
 	mutex_lock(&nvme_tcp_ctrl_mutex);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 	list_add_tail(&ctrl->list, &nvme_tcp_ctrl_list);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
@@ -4178,26 +4178,26 @@ static struct nvme_ctrl *nvme_tcp_create_ctrl(struct device *dev,	/* [한국어]
 
 	return &ctrl->ctrl;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 
-out_uninit_ctrl:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+out_uninit_ctrl:
 	nvme_uninit_ctrl(&ctrl->ctrl);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-out_put_ctrl:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+out_put_ctrl:
 	nvme_put_ctrl(&ctrl->ctrl);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	if (ret > 0)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		ret = -EIO;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		ret = -EIO;
 	return ERR_PTR(ret);	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 }
 
 static struct nvmf_transport_ops nvme_tcp_transport = {	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 	.name		= "tcp",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	.module		= THIS_MODULE,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	.required_opts	= NVMF_OPT_TRADDR,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	.allowed_opts	= NVMF_OPT_TRSVCID | NVMF_OPT_RECONNECT_DELAY |	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			  NVMF_OPT_HOST_TRADDR | NVMF_OPT_CTRL_LOSS_TMO |	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			  NVMF_OPT_HDR_DIGEST | NVMF_OPT_DATA_DIGEST |	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			  NVMF_OPT_NR_WRITE_QUEUES | NVMF_OPT_NR_POLL_QUEUES |	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			  NVMF_OPT_TOS | NVMF_OPT_HOST_IFACE | NVMF_OPT_TLS |	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			  NVMF_OPT_KEYRING | NVMF_OPT_TLS_KEY | NVMF_OPT_CONCAT,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	.create_ctrl	= nvme_tcp_create_ctrl,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+	.module		= THIS_MODULE,
+	.required_opts	= NVMF_OPT_TRADDR,
+	.allowed_opts	= NVMF_OPT_TRSVCID | NVMF_OPT_RECONNECT_DELAY |
+			  NVMF_OPT_HOST_TRADDR | NVMF_OPT_CTRL_LOSS_TMO |
+			  NVMF_OPT_HDR_DIGEST | NVMF_OPT_DATA_DIGEST |
+			  NVMF_OPT_NR_WRITE_QUEUES | NVMF_OPT_NR_POLL_QUEUES |
+			  NVMF_OPT_TOS | NVMF_OPT_HOST_IFACE | NVMF_OPT_TLS |
+			  NVMF_OPT_KEYRING | NVMF_OPT_TLS_KEY | NVMF_OPT_CONCAT,
+	.create_ctrl	= nvme_tcp_create_ctrl,
 };
 
 static int __init nvme_tcp_init_module(void)	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
@@ -4215,14 +4215,14 @@ static int __init nvme_tcp_init_module(void)	/* [한국어] NVMe/TCP 큐·PDU·�
 	BUILD_BUG_ON(sizeof(struct nvme_tcp_term_pdu) != 24);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 
 	if (wq_unbound)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		wq_flags |= WQ_UNBOUND;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		wq_flags |= WQ_UNBOUND;
 
 	nvme_tcp_wq = alloc_workqueue("nvme_tcp_wq", wq_flags, 0);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 	if (!nvme_tcp_wq)	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 		return -ENOMEM;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 
 	for_each_possible_cpu(cpu)	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		atomic_set(&nvme_tcp_cpu_queues[cpu], 0);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+		atomic_set(&nvme_tcp_cpu_queues[cpu], 0);
 
 	nvmf_register_transport(&nvme_tcp_transport);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 	return 0;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
@@ -4236,7 +4236,7 @@ static void __exit nvme_tcp_cleanup_module(void)	/* [한국어] NVMe/TCP 큐·PD
 
 	mutex_lock(&nvme_tcp_ctrl_mutex);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 	list_for_each_entry(ctrl, &nvme_tcp_ctrl_list, list)	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		nvme_delete_ctrl(&ctrl->ctrl);	/* [한국어] NVMe core API — SQE 조립·완료·상태기계·수명 */
+		nvme_delete_ctrl(&ctrl->ctrl);
 	mutex_unlock(&nvme_tcp_ctrl_mutex);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 	flush_workqueue(nvme_delete_wq);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
