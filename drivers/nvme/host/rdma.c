@@ -443,29 +443,29 @@ static inline struct nvme_rdma_ctrl *to_rdma_ctrl(struct nvme_ctrl *ctrl)	/* [�
 	return container_of(ctrl, struct nvme_rdma_ctrl, ctrl);
 }
 
-static LIST_HEAD(device_list);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-static DEFINE_MUTEX(device_list_mutex);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+static LIST_HEAD(device_list);	/* [한국어] 같은 IB 장치를 여러 컨트롤러가 공유한다 — PD 와 MR 풀을 한 번만 만들기 위한 목록 */
+static DEFINE_MUTEX(device_list_mutex);	/* [한국어] 그 목록의 조회와 등록을 직렬화한다 */
 
-static LIST_HEAD(nvme_rdma_ctrl_list);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-static DEFINE_MUTEX(nvme_rdma_ctrl_mutex);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+static LIST_HEAD(nvme_rdma_ctrl_list);	/* [한국어] 중복 연결 검사와 모듈 언로드 시 일괄 삭제에 쓰인다 */
+static DEFINE_MUTEX(nvme_rdma_ctrl_mutex);	/* [한국어] 그 목록을 보호한다 */
 
 /*
  * Disabling this option makes small I/O goes faster, but is fundamentally
  * unsafe.  With it turned off we will have to register a global rkey that
  * allows read and write access to all physical memory.
  */
-static bool register_always = true;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-module_param(register_always, bool, 0444);	/* [한국어] 모듈 경계·파라미터·심볼 공개 */
-MODULE_PARM_DESC(register_always,	/* [한국어] 모듈 경계·파라미터·심볼 공개 */
+static bool register_always = true;	/* [한국어] 기본은 항상 등록 — 위 영어 주석대로, 등록을 생략하면 원격이 전체 물리 메모리를 읽고 쓸 수 있는 키를 쓰게 된다 */
+module_param(register_always, bool, 0444);	/* [한국어] 성능을 위해 끌 수 있지만 보안 대가가 위 주석에 있다 */
+MODULE_PARM_DESC(register_always,	/* [한국어] 연속 메모리에도 MR 등록을 강제한다는 뜻 */
 	 "Use memory registration even for contiguous memory regions");
 
-static int nvme_rdma_cm_handler(struct rdma_cm_id *cm_id,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+static int nvme_rdma_cm_handler(struct rdma_cm_id *cm_id,	/* [한국어] CM 이벤트 콜백 — 주소 해석·경로 해석·연결 수립이 모두 여기로 온다 */
 		struct rdma_cm_event *event);
-static void nvme_rdma_recv_done(struct ib_cq *cq, struct ib_wc *wc);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-static void nvme_rdma_complete_rq(struct request *rq);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+static void nvme_rdma_recv_done(struct ib_cq *cq, struct ib_wc *wc);	/* [한국어] 수신 완료 — 응답 캡슐이 도착했을 때 */
+static void nvme_rdma_complete_rq(struct request *rq);	/* [한국어] blk-mq 완료 콜백. 아래에서 정의된다 */
 
-static const struct blk_mq_ops nvme_rdma_mq_ops;	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-static const struct blk_mq_ops nvme_rdma_admin_mq_ops;	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+static const struct blk_mq_ops nvme_rdma_mq_ops;	/* [한국어] 아래 정의를 앞당겨 참조하기 위한 전방 선언 */
+static const struct blk_mq_ops nvme_rdma_admin_mq_ops;
 
 static inline int nvme_rdma_queue_idx(struct nvme_rdma_queue *queue)	/* [한국어] 이 큐가 배열에서 몇 번째인가 — 0 이면 admin, 1 이상이면 I/O */
 {
@@ -508,67 +508,145 @@ static inline size_t nvme_rdma_inline_data_size(struct nvme_rdma_queue *queue)	/
 	return queue->cmnd_capsule_len - sizeof(struct nvme_command);
 }
 
-static void nvme_rdma_free_qe(struct ib_device *ibdev, struct nvme_rdma_qe *qe,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+/*
+ * [한국어]
+ * nvme_rdma_free_qe - 큐 항목 하나의 버퍼와 DMA 매핑을 되돌린다
+ *
+ * @ibdev:        이 매핑을 만든 IB 장치
+ * @qe:           해제할 항목
+ * @capsule_size: 매핑할 때 쓴 크기. 언매핑에도 같은 값이 필요하다
+ * @dir:          매핑 방향. 이것도 매핑 때와 같아야 한다
+ * @return: 없음
+ *
+ * 순서가 중요하다. 언매핑이 먼저이고 kfree 가 나중이다 -- 반대로 하면
+ * HCA 가 아직 접근할 수 있는 메모리를 반납하는 셈이 된다.
+ *
+ * 실행 컨텍스트: 큐 해체 경로. 잠들 수 있다.
+ *
+ * 호출 체인: nvme_rdma_free_ring / 큐 해체 → [이 함수] → ib_dma_unmap_single
+ */
+static void nvme_rdma_free_qe(struct ib_device *ibdev, struct nvme_rdma_qe *qe,
 		size_t capsule_size, enum dma_data_direction dir)
 {
-	ib_dma_unmap_single(ibdev, qe->dma, capsule_size, dir);	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
-	kfree(qe->data);	/* [한국어] 커널 메모리 생명주기 */
+	ib_dma_unmap_single(ibdev, qe->dma, capsule_size, dir);	/* [한국어] 언매핑이 먼저 — 반대로 하면 HCA 가 접근할 수 있는 메모리를 반납하게 된다 */
+	kfree(qe->data);	/* [한국어] 그다음에야 버퍼를 놓는다 */
 }
 
-static int nvme_rdma_alloc_qe(struct ib_device *ibdev, struct nvme_rdma_qe *qe,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+/*
+ * [한국어]
+ * nvme_rdma_alloc_qe - 큐 항목 하나의 버퍼를 잡고 HCA 가 볼 수 있게 매핑한다
+ *
+ * @ibdev:        매핑할 IB 장치
+ * @qe:           채울 항목
+ * @capsule_size: 이 항목이 담을 캡슐 크기(명령 또는 완료)
+ * @dir:          어느 방향으로 쓸지. 송신이면 TO_DEVICE, 수신이면 FROM_DEVICE
+ * @return: 0 이면 성공, -ENOMEM 이면 할당 또는 매핑 실패
+ *
+ * RDMA 에서는 커널 가상 주소를 HCA 에게 줄 수 없다. 버퍼를 잡은 뒤 반드시
+ * DMA 주소로 바꿔야 하고, 그 주소를 work request 에 싣는다.
+ *
+ * 매핑 실패 시 버퍼를 해제하고 포인터를 NULL 로 지우는 것이 중요하다.
+ * 링 할당 실패 경로가 "data 가 NULL 이 아니면 해제"로 판단하기 때문에,
+ * 지우지 않으면 이중 해제가 된다.
+ *
+ * 실행 컨텍스트: 큐 생성 경로. GFP_KERNEL 이라 잠들 수 있다.
+ *
+ * 호출 체인: nvme_rdma_alloc_ring / 큐 초기화 → [이 함수] → ib_dma_map_single
+ */
+static int nvme_rdma_alloc_qe(struct ib_device *ibdev, struct nvme_rdma_qe *qe,
 		size_t capsule_size, enum dma_data_direction dir)
 {
-	qe->data = kzalloc(capsule_size, GFP_KERNEL);	/* [한국어] 커널 메모리 생명주기 */
-	if (!qe->data)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		return -ENOMEM;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	qe->data = kzalloc(capsule_size, GFP_KERNEL);	/* [한국어] 캡슐 하나를 담을 버퍼 */
+	if (!qe->data)
+		return -ENOMEM;
 
-	qe->dma = ib_dma_map_single(ibdev, qe->data, capsule_size, dir);	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
-	if (ib_dma_mapping_error(ibdev, qe->dma)) {	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
-		kfree(qe->data);	/* [한국어] 커널 메모리 생명주기 */
-		qe->data = NULL;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	qe->dma = ib_dma_map_single(ibdev, qe->data, capsule_size, dir);	/* [한국어] HCA 는 커널 가상 주소를 모른다 — DMA 주소로 바꿔야 work request 에 실을 수 있다 */
+	if (ib_dma_mapping_error(ibdev, qe->dma)) {	/* [한국어] IOMMU 자원이 부족하거나 주소가 장치 범위를 넘었다 */
+		kfree(qe->data);	/* [한국어] 매핑이 없으므로 버퍼만 되돌린다 */
+		qe->data = NULL;	/* [한국어] 링 정리 경로가 "NULL 이 아니면 해제"로 판단하므로 반드시 지운다 */
 		return -ENOMEM;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 	}
 
-	return 0;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	return 0;
 }
 
-static void nvme_rdma_free_ring(struct ib_device *ibdev,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+/*
+ * [한국어]
+ * nvme_rdma_free_ring - 큐 항목 링 전체를 되돌린다
+ *
+ * @ibdev:        매핑을 만든 IB 장치
+ * @ring:         해제할 링
+ * @ib_queue_size: 실제로 초기화된 항목 수
+ * @capsule_size: 항목 하나의 크기
+ * @dir:          매핑 방향
+ * @return: 없음
+ *
+ * 인자로 개수를 받는 것이 요점이다. 할당 중간에 실패한 경우 링 전체가
+ * 아니라 "여기까지 성공한" 개수만 되돌려야 하고, 그 값을 호출자가 안다.
+ *
+ * 실행 컨텍스트: 큐 해체 또는 할당 실패 경로. 잠들 수 있다.
+ *
+ * 호출 체인: 큐 해체 / nvme_rdma_alloc_ring(실패) → [이 함수]
+ */
+static void nvme_rdma_free_ring(struct ib_device *ibdev,
 		struct nvme_rdma_qe *ring, size_t ib_queue_size,
 		size_t capsule_size, enum dma_data_direction dir)
 {
-	int i;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	int i;	/* [한국어] 되돌릴 개수만큼만 도는 인덱스 */
 
-	for (i = 0; i < ib_queue_size; i++)	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
+	for (i = 0; i < ib_queue_size; i++)	/* [한국어] 호출자가 넘긴 개수까지만 — 부분 실패를 정확히 되감기 위한 인자다 */
 		nvme_rdma_free_qe(ibdev, &ring[i], capsule_size, dir);
-	kfree(ring);	/* [한국어] 커널 메모리 생명주기 */
+	kfree(ring);	/* [한국어] 항목을 모두 푼 뒤 배열 자체를 놓는다 */
 }
 
-static struct nvme_rdma_qe *nvme_rdma_alloc_ring(struct ib_device *ibdev,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+/*
+ * [한국어]
+ * nvme_rdma_alloc_ring - 큐 항목 링을 통째로 잡는다
+ *
+ * @ibdev:        매핑할 IB 장치
+ * @ib_queue_size: 만들 항목 수
+ * @capsule_size: 항목 하나의 크기
+ * @dir:          매핑 방향
+ * @return: 링 포인터. 실패하면 NULL.
+ *
+ * RDMA 는 수신 버퍼를 미리 걸어 두어야 하므로, 큐를 만들 때 받을 수 있는
+ * 최대 개수만큼의 버퍼를 한꺼번에 준비한다. 송신 쪽도 같은 구조로
+ * 미리 잡아 두어 제출 경로에서 할당이 일어나지 않게 한다.
+ *
+ * 실패 시 i 를 그대로 넘겨 되돌리는 것에 주의할 것. 아래 영어 주석이
+ * 밝히듯, 부분 실패를 그 자리에서 정확히 되감아야 오류 복구가 큐를
+ * 다시 만들 때 이전 잔재와 부딪히지 않는다.
+ *
+ * 실행 컨텍스트: 큐 생성 경로. 잠들 수 있다.
+ *
+ * 호출 체인: nvme_rdma_alloc_queue → [이 함수] → nvme_rdma_alloc_qe
+ */
+static struct nvme_rdma_qe *nvme_rdma_alloc_ring(struct ib_device *ibdev,
 		size_t ib_queue_size, size_t capsule_size,
 		enum dma_data_direction dir)
 {
-	struct nvme_rdma_qe *ring;	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	int i;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	struct nvme_rdma_qe *ring;	/* [한국어] 항목 배열 */
+	int i;	/* [한국어] 실패 시 여기까지의 개수를 그대로 되돌리기에 쓴다 */
 
-	ring = kzalloc_objs(struct nvme_rdma_qe, ib_queue_size);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	if (!ring)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		return NULL;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	ring = kzalloc_objs(struct nvme_rdma_qe, ib_queue_size);	/* [한국어] 항목 서술자 배열 — 버퍼는 아래에서 하나씩 붙인다 */
+	if (!ring)
+		return NULL;
 
 	/*
 	 * Bind the CQEs (post recv buffers) DMA mapping to the RDMA queue
 	 * lifetime. It's safe, since any change in the underlying RDMA device
 	 * will issue error recovery and queue re-creation.
 	 */
-	for (i = 0; i < ib_queue_size; i++) {	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
-		if (nvme_rdma_alloc_qe(ibdev, &ring[i], capsule_size, dir))	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-			goto out_free_ring;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
+	for (i = 0; i < ib_queue_size; i++) {	/* [한국어] RDMA 는 수신 버퍼를 미리 걸어 두어야 해서 최대 개수만큼 한꺼번에 준비한다 */
+		if (nvme_rdma_alloc_qe(ibdev, &ring[i], capsule_size, dir))	/* [한국어] 하나라도 실패하면 여기까지를 정확히 되감는다 */
+			goto out_free_ring;
 	}
 
-	return ring;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	return ring;	/* [한국어] 제출 경로에서 할당이 일어나지 않도록 여기서 다 잡아 둔다 */
 
 out_free_ring:
-	nvme_rdma_free_ring(ibdev, ring, i, capsule_size, dir);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	return NULL;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	nvme_rdma_free_ring(ibdev, ring, i, capsule_size, dir);	/* [한국어] i 가 성공한 개수 — 전체가 아니라 그만큼만 되돌린다 */
+	return NULL;
 }
 
 /*
@@ -667,62 +745,146 @@ static int nvme_rdma_create_qp(struct nvme_rdma_queue *queue, const int factor)
 	return ret;
 }
 
-static void nvme_rdma_exit_request(struct blk_mq_tag_set *set,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+/*
+ * [한국어]
+ * nvme_rdma_exit_request - 요청 하나가 들고 있던 SQE 버퍼를 반납한다
+ *
+ * @set:      이 요청이 속한 태그셋
+ * @rq:       해제할 요청
+ * @hctx_idx: 하드웨어 큐 번호(쓰지 않는다)
+ * @return: 없음
+ *
+ * init_request 의 짝이다. 매핑을 풀지 않는 것에 주의할 것 -- 이 SQE 는
+ * 제출할 때마다 매핑하고 완료할 때 푸는 방식이라, 여기 도달한 시점에는
+ * 이미 매핑이 없다. 남은 것은 버퍼뿐이다.
+ *
+ * 실행 컨텍스트: 태그셋 해제. 잠들 수 있다.
+ *
+ * 호출 체인: blk_mq_free_tag_set → ops->exit_request → [이 함수]
+ */
+static void nvme_rdma_exit_request(struct blk_mq_tag_set *set,
 		struct request *rq, unsigned int hctx_idx)
 {
-	struct nvme_rdma_request *req = blk_mq_rq_to_pdu(rq);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+	struct nvme_rdma_request *req = blk_mq_rq_to_pdu(rq);	/* [한국어] 요청 뒤에 붙은 드라이버 전용 영역 */
 
-	kfree(req->sqe.data);	/* [한국어] 커널 메모리 생명주기 */
+	kfree(req->sqe.data);	/* [한국어] 매핑은 제출마다 걸고 완료에서 풀므로 여기 남은 것은 버퍼뿐이다 */
 }
 
-static int nvme_rdma_init_request(struct blk_mq_tag_set *set,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+/*
+ * [한국어]
+ * nvme_rdma_init_request - 요청 하나의 고정 상태를 한 번만 세운다
+ *
+ * @set:       이 요청이 속한 태그셋(admin 인지 I/O 인지 구별에 쓴다)
+ * @rq:        초기화할 요청
+ * @hctx_idx:  하드웨어 큐 번호
+ * @numa_node: 할당된 NUMA 노드(쓰지 않는다)
+ * @return: 0 이면 성공, -ENOMEM 이면 SQE 버퍼 할당 실패
+ *
+ * 태그셋을 만들 때 요청마다 한 번씩 불린다. 여기서 채우는 것은 요청의
+ * 수명 내내 변하지 않는 것들이고, I/O 마다 달라지는 값은 queue_rq 가
+ * 채운다.
+ *
+ * 큐 번호 계산이 이 함수의 요령이다. admin 태그셋이면 0번 큐, I/O
+ * 태그셋이면 hctx_idx + 1 -- I/O 큐는 admin 다음부터 번호가 붙는다.
+ * 태그셋 포인터를 비교해 어느 쪽인지 가른다.
+ *
+ * SQE 버퍼를 따로 잡는 이유는 RDMA 가 명령을 캡슐로 보내기 때문이다.
+ * PCIe 처럼 큐 메모리에 써 넣는 것이 아니라, 매 제출마다 이 버퍼를
+ * 매핑해 work request 에 싣는다.
+ *
+ * PI 를 쓰는 큐에서는 메타데이터용 SGL 이 데이터 SGL 뒤에 이어 붙는다.
+ * 그 오프셋을 여기서 계산해 두어 제출 경로가 다시 세지 않게 한다.
+ *
+ * 실행 컨텍스트: 태그셋 초기화. 잠들 수 있다.
+ *
+ * 호출 체인: blk_mq_alloc_tag_set → ops->init_request → [이 함수]
+ */
+static int nvme_rdma_init_request(struct blk_mq_tag_set *set,
 		struct request *rq, unsigned int hctx_idx,
 		unsigned int numa_node)
 {
-	struct nvme_rdma_ctrl *ctrl = to_rdma_ctrl(set->driver_data);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	struct nvme_rdma_request *req = blk_mq_rq_to_pdu(rq);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	int queue_idx = (set == &ctrl->tag_set) ? hctx_idx + 1 : 0;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	struct nvme_rdma_queue *queue = &ctrl->queues[queue_idx];	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+	struct nvme_rdma_ctrl *ctrl = to_rdma_ctrl(set->driver_data);	/* [한국어] 태그셋에 새겨 둔 컨트롤러 */
+	struct nvme_rdma_request *req = blk_mq_rq_to_pdu(rq);	/* [한국어] 채울 드라이버 전용 영역 */
+	int queue_idx = (set == &ctrl->tag_set) ? hctx_idx + 1 : 0;	/* [한국어] 태그셋 포인터로 admin 인지 I/O 인지 가른다 — I/O 는 0번 admin 다음부터다 */
+	struct nvme_rdma_queue *queue = &ctrl->queues[queue_idx];	/* [한국어] 이 요청이 늘 갈 큐 */
 
-	nvme_req(rq)->ctrl = &ctrl->ctrl;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	req->sqe.data = kzalloc_obj(struct nvme_command);	/* [한국어] 커널 메모리 생명주기 */
-	if (!req->sqe.data)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		return -ENOMEM;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	nvme_req(rq)->ctrl = &ctrl->ctrl;	/* [한국어] 코어가 오류 정책을 판단할 때 쓴다 */
+	req->sqe.data = kzalloc_obj(struct nvme_command);	/* [한국어] RDMA 는 명령을 캡슐로 보낸다 — 큐 메모리에 쓰는 것이 아니라 매 제출마다 이 버퍼를 매핑한다 */
+	if (!req->sqe.data)
+		return -ENOMEM;
 
 	/* metadata nvme_rdma_sgl struct is located after command's data SGL */
-	if (queue->pi_support)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
+	if (queue->pi_support)	/* [한국어] 위 영어 주석대로 메타데이터 SGL 은 데이터 SGL 뒤에 이어 붙는다 */
 		req->metadata_sgl = (void *)nvme_req(rq) +
 			sizeof(struct nvme_rdma_request) +
 			NVME_RDMA_DATA_SGL_SIZE;
 
-	req->queue = queue;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	nvme_req(rq)->cmd = req->sqe.data;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	req->queue = queue;	/* [한국어] 완료 경로가 이 포인터로 큐를 되찾는다 */
+	nvme_req(rq)->cmd = req->sqe.data;	/* [한국어] 코어가 조립할 SQE 의 자리를 방금 잡은 버퍼로 고정한다 */
 
-	return 0;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	return 0;
 }
 
-static int nvme_rdma_init_hctx(struct blk_mq_hw_ctx *hctx, void *data,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+/*
+ * [한국어]
+ * nvme_rdma_init_hctx - blk-mq I/O 하드웨어 큐를 이 드라이버의 큐에 잇는다
+ *
+ * @hctx:     blk-mq 가 만든 하드웨어 큐 문맥
+ * @data:     태그셋의 driver_data — 컨트롤러다
+ * @hctx_idx: 몇 번째 I/O 하드웨어 큐인가
+ * @return: 항상 0
+ *
+ * +1 이 admin 큐 자리를 건너뛴다. 큐 배열은 0번이 admin 이고 I/O 는
+ * 1번부터이므로, blk-mq 의 0-based 인덱스를 그대로 쓰면 admin 큐로
+ * I/O 를 보내게 된다.
+ *
+ * BUG_ON 은 그 계산이 배열 밖을 가리키지 않는지 확인한다. 여기서 넘치면
+ * 이후 제출 경로가 엉뚱한 메모리를 큐로 다루므로, 조용히 진행시키는
+ * 것보다 즉시 멈추는 편이 낫다.
+ *
+ * 실행 컨텍스트: 태그셋 초기화. 잠들 수 있다.
+ *
+ * 호출 체인: blk_mq_alloc_tag_set → ops->init_hctx → [이 함수]
+ */
+static int nvme_rdma_init_hctx(struct blk_mq_hw_ctx *hctx, void *data,
 		unsigned int hctx_idx)
 {
-	struct nvme_rdma_ctrl *ctrl = to_rdma_ctrl(data);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	struct nvme_rdma_queue *queue = &ctrl->queues[hctx_idx + 1];	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+	struct nvme_rdma_ctrl *ctrl = to_rdma_ctrl(data);	/* [한국어] 태그셋의 driver_data */
+	struct nvme_rdma_queue *queue = &ctrl->queues[hctx_idx + 1];	/* [한국어] +1 이 admin 큐 자리를 건너뛴다 — 안 하면 I/O 가 admin 큐로 간다 */
 
-	BUG_ON(hctx_idx >= ctrl->ctrl.queue_count);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	BUG_ON(hctx_idx >= ctrl->ctrl.queue_count);	/* [한국어] 배열 밖을 가리키면 이후 제출이 엉뚱한 메모리를 큐로 다룬다 — 조용히 진행시키지 않는다 */
 
-	hctx->driver_data = queue;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	return 0;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	hctx->driver_data = queue;	/* [한국어] queue_rq 가 이 포인터로 큐를 찾는다 */
+	return 0;
 }
 
-static int nvme_rdma_init_admin_hctx(struct blk_mq_hw_ctx *hctx, void *data,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+/*
+ * [한국어]
+ * nvme_rdma_init_admin_hctx - admin 하드웨어 큐를 0번 큐에 잇는다
+ *
+ * @hctx:     blk-mq 가 만든 하드웨어 큐 문맥
+ * @data:     태그셋의 driver_data — 컨트롤러다
+ * @hctx_idx: 항상 0이어야 한다
+ * @return: 항상 0
+ *
+ * admin 태그셋은 하드웨어 큐가 하나뿐이므로 인덱스 계산이 필요 없다.
+ * I/O 쪽과 콜백을 나눈 것도 그 때문이다 -- 조건 분기 대신 태그셋마다
+ * 맞는 함수를 걸어 둔다.
+ *
+ * 실행 컨텍스트: 태그셋 초기화. 잠들 수 있다.
+ *
+ * 호출 체인: blk_mq_alloc_tag_set → ops->init_hctx → [이 함수]
+ */
+static int nvme_rdma_init_admin_hctx(struct blk_mq_hw_ctx *hctx, void *data,
 		unsigned int hctx_idx)
 {
-	struct nvme_rdma_ctrl *ctrl = to_rdma_ctrl(data);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	struct nvme_rdma_queue *queue = &ctrl->queues[0];	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+	struct nvme_rdma_ctrl *ctrl = to_rdma_ctrl(data);
+	struct nvme_rdma_queue *queue = &ctrl->queues[0];	/* [한국어] admin 은 늘 0번이라 계산이 필요 없다 */
 
-	BUG_ON(hctx_idx != 0);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	BUG_ON(hctx_idx != 0);	/* [한국어] admin 태그셋은 하드웨어 큐가 하나뿐이다 */
 
-	hctx->driver_data = queue;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	return 0;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	hctx->driver_data = queue;
+	return 0;
 }
 
 /*
@@ -1097,151 +1259,302 @@ out_put_dev:
 	return ret;
 }
 
-static int nvme_rdma_alloc_queue(struct nvme_rdma_ctrl *ctrl,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+/*
+ * [한국어]
+ * nvme_rdma_alloc_queue - 큐 하나의 RDMA 연결을 주소 해석까지 세운다
+ *
+ * @ctrl:       대상 컨트롤러
+ * @idx:        큐 번호. 0이면 admin.
+ * @queue_size: 이 큐의 깊이
+ * @return: 0 이면 성공, 음수 errno
+ *
+ * RDMA 연결은 세 단계다. 주소 해석(로컬 장치 찾기) → 경로 해석 → 연결.
+ * 이 함수는 첫 단계를 걸고 CM 콜백이 나머지를 이어 가며, 마지막에
+ * wait_for_cm 이 전 과정의 결과를 기다린다. 그래서 rdma_resolve_addr
+ * 한 줄이 성공해도 아직 연결된 것이 아니다.
+ *
+ * 캡슐 길이가 큐 종류마다 다른 것이 이 함수의 결정적 분기다. admin 은
+ * SQE 크기 그대로지만, I/O 큐는 컨트롤러가 알린 ioccsz(16바이트 단위)를
+ * 쓴다. 그 길이가 데이터를 명령과 함께 인라인으로 보낼 수 있는지를
+ * 정하므로, 제출 경로의 매핑 선택이 여기서 갈린다.
+ *
+ * cm_error 를 -ETIMEDOUT 으로 미리 채워 두는 것에 주의할 것. CM 콜백이
+ * 한 번도 불리지 않고 타임아웃이 나는 경우, 그 값이 그대로 결과가 된다.
+ *
+ * 실행 컨텍스트: 연결/재연결 경로. 잠들 수 있다.
+ *
+ * 호출 체인:
+ *   nvme_rdma_configure_admin_queue / _io_queues → [이 함수]
+ *     → rdma_resolve_addr → nvme_rdma_cm_handler → nvme_rdma_wait_for_cm
+ */
+static int nvme_rdma_alloc_queue(struct nvme_rdma_ctrl *ctrl,
 		int idx, size_t queue_size)
 {
-	struct nvme_rdma_queue *queue;	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	struct sockaddr *src_addr = NULL;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	int ret;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	struct nvme_rdma_queue *queue;	/* [한국어] 채울 큐. 배열에서 꺼내 쓴다 */
+	struct sockaddr *src_addr = NULL;	/* [한국어] 로컬 주소를 고정하지 않으면 NULL — 커널이 라우팅으로 고른다 */
+	int ret;
 
-	queue = &ctrl->queues[idx];	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	mutex_init(&queue->queue_lock);	/* [한국어] 동기화 — 큐/연결/상태 공유 보호 */
-	queue->ctrl = ctrl;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	if (idx && ctrl->ctrl.max_integrity_segments)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
+	queue = &ctrl->queues[idx];	/* [한국어] 큐 배열은 컨트롤러 할당 때 통째로 잡혀 있다 */
+	mutex_init(&queue->queue_lock);	/* [한국어] stop/start 가 겹치는 것을 막는 큐별 락 */
+	queue->ctrl = ctrl;	/* [한국어] CM 콜백이 이 포인터로 컨트롤러를 되찾는다 */
+	if (idx && ctrl->ctrl.max_integrity_segments)	/* [한국어] admin 큐에는 T10-PI 를 쓸 일이 없다 */
 		queue->pi_support = true;
 	else	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 		queue->pi_support = false;
-	init_completion(&queue->cm_done);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	init_completion(&queue->cm_done);	/* [한국어] CM 콜백이 이것으로 결과를 알린다 */
 
-	if (idx > 0)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
+	if (idx > 0)	/* [한국어] I/O 큐는 컨트롤러가 알린 캡슐 길이를 쓴다 */
 		queue->cmnd_capsule_len = ctrl->ctrl.ioccsz * 16;
-	else	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		queue->cmnd_capsule_len = sizeof(struct nvme_command);	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
+	else
+		queue->cmnd_capsule_len = sizeof(struct nvme_command);	/* [한국어] admin 은 SQE 크기 그대로 — 인라인 데이터를 쓰지 않는다 */
 
-	queue->queue_size = queue_size;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	queue->queue_size = queue_size;	/* [한국어] 수신 링 크기와 Connect 에 실을 값이 여기서 정해진다 */
 
-	queue->cm_id = rdma_create_id(&init_net, nvme_rdma_cm_handler, queue,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+	queue->cm_id = rdma_create_id(&init_net, nvme_rdma_cm_handler, queue,	/* [한국어] CM ID 를 만든다. RDMA_PS_TCP + RC 는 신뢰성 있는 연결형 QP 를 뜻한다 */
 			RDMA_PS_TCP, IB_QPT_RC);
-	if (IS_ERR(queue->cm_id)) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		dev_info(ctrl->ctrl.device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	if (IS_ERR(queue->cm_id)) {	/* [한국어] CM 자원 부족이거나 모듈이 준비되지 않았다 */
+		dev_info(ctrl->ctrl.device,	/* [한국어] 사용자에게 어느 단계에서 막혔는지 알린다 */
 			"failed to create CM ID: %ld\n", PTR_ERR(queue->cm_id));
-		ret = PTR_ERR(queue->cm_id);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		goto out_destroy_mutex;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
+		ret = PTR_ERR(queue->cm_id);
+		goto out_destroy_mutex;	/* [한국어] 아직 CM ID 가 없으므로 락만 되돌린다 */
 	}
 
-	if (ctrl->ctrl.opts->mask & NVMF_OPT_HOST_TRADDR)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		src_addr = (struct sockaddr *)&ctrl->src_addr;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
+	if (ctrl->ctrl.opts->mask & NVMF_OPT_HOST_TRADDR)	/* [한국어] 사용자가 출구 주소를 고정했다 */
+		src_addr = (struct sockaddr *)&ctrl->src_addr;	/* [한국어] 다중 경로 구성에서 어느 HCA 로 나갈지 정한다 */
 
-	queue->cm_error = -ETIMEDOUT;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	ret = rdma_resolve_addr(queue->cm_id, src_addr,	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
-			(struct sockaddr *)&ctrl->addr,	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
+	queue->cm_error = -ETIMEDOUT;	/* [한국어] 콜백이 한 번도 안 불리면 이 값이 그대로 결과가 된다 */
+	ret = rdma_resolve_addr(queue->cm_id, src_addr,	/* [한국어] 비동기다 — 성공 반환은 "요청을 걸었다"는 뜻뿐이다 */
+			(struct sockaddr *)&ctrl->addr,	/* [한국어] 사용자가 준 대상 주소 */
 			NVME_RDMA_CM_TIMEOUT_MS);
-	if (ret) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		dev_info(ctrl->ctrl.device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	if (ret) {	/* [한국어] 요청 자체를 걸지 못했다 */
+		dev_info(ctrl->ctrl.device,
 			"rdma_resolve_addr failed (%d).\n", ret);
-		goto out_destroy_cm_id;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
+		goto out_destroy_cm_id;
 	}
 
-	ret = nvme_rdma_wait_for_cm(queue);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	if (ret) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		dev_info(ctrl->ctrl.device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	ret = nvme_rdma_wait_for_cm(queue);	/* [한국어] 주소 해석 → 경로 해석 → 연결까지 전 과정의 결과를 여기서 기다린다 */
+	if (ret) {	/* [한국어] 어느 단계든 실패하면 cm_error 로 전달된다 */
+		dev_info(ctrl->ctrl.device,
 			"rdma connection establishment failed (%d)\n", ret);
-		goto out_destroy_cm_id;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
+		goto out_destroy_cm_id;
 	}
 
-	set_bit(NVME_RDMA_Q_ALLOCATED, &queue->flags);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	set_bit(NVME_RDMA_Q_ALLOCATED, &queue->flags);	/* [한국어] 이 비트가 서야 해체 경로가 이 큐를 정리 대상으로 본다 */
 
-	return 0;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	return 0;	/* [한국어] RDMA 연결까지다. NVMe Connect 는 start_queue 가 보낸다 */
 
 out_destroy_cm_id:
-	rdma_destroy_id(queue->cm_id);	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
-	nvme_rdma_destroy_queue_ib(queue);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+	rdma_destroy_id(queue->cm_id);
+	nvme_rdma_destroy_queue_ib(queue);	/* [한국어] CM 콜백이 이미 QP 를 만들었을 수 있다 */
 out_destroy_mutex:
-	mutex_destroy(&queue->queue_lock);	/* [한국어] 동기화 — 큐/연결/상태 공유 보호 */
-	return ret;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	mutex_destroy(&queue->queue_lock);
+	return ret;
 }
 
-static void __nvme_rdma_stop_queue(struct nvme_rdma_queue *queue)	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+/*
+ * [한국어]
+ * __nvme_rdma_stop_queue - 큐 하나를 실제로 끊고 진행 중 작업을 배출시킨다
+ *
+ * @queue: 대상 큐
+ * @return: 없음
+ *
+ * 두 줄이지만 순서가 전부다. 먼저 끊어야 새 작업이 들어오지 않고,
+ * 그다음 drain 이 이미 하드웨어에 걸린 work request 가 모두 완료
+ * 통지를 낼 때까지 기다린다. drain 없이 QP 를 없애면 완료 콜백이
+ * 이미 해제된 자료구조를 건드린다.
+ *
+ * ib_drain_qp 는 자체적으로 더미 work request 를 걸어 그것이 완료되는
+ * 것으로 앞선 것들이 모두 끝났음을 확인한다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥. 오래 잠들 수 있다.
+ *
+ * 호출 체인: nvme_rdma_stop_queue / _start_queue(실패) → [이 함수]
+ */
+static void __nvme_rdma_stop_queue(struct nvme_rdma_queue *queue)
 {
-	rdma_disconnect(queue->cm_id);	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
-	ib_drain_qp(queue->qp);	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
+	rdma_disconnect(queue->cm_id);	/* [한국어] 먼저 끊어야 새 작업이 들어오지 않는다 */
+	ib_drain_qp(queue->qp);	/* [한국어] 걸린 work request 가 모두 완료 통지를 낼 때까지 — 없으면 완료가 해제된 메모리로 온다 */
 }
 
-static void nvme_rdma_stop_queue(struct nvme_rdma_queue *queue)	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+/*
+ * [한국어]
+ * nvme_rdma_stop_queue - 살아 있는 큐만 한 번씩 끊는다
+ *
+ * @queue: 대상 큐
+ * @return: 없음
+ *
+ * __nvme_rdma_stop_queue 를 두 겹으로 감싼다. 바깥은 큐가 아예 할당되지
+ * 않았는지 보고, 안쪽은 LIVE 비트를 test_and_clear 로 다뤄 두 경로가
+ * 동시에 들어와도 실제 종료는 한 번만 일어나게 한다.
+ *
+ * 오류 복구와 삭제가 겹치는 것이 흔한 상황이라 이 중복 방지가 필요하다.
+ * ib_drain_qp 를 두 번 부르면 이미 없어진 QP 를 건드린다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥. 잠들 수 있다.
+ *
+ * 호출 체인: 큐 해체 / 오류 복구 → [이 함수] → __nvme_rdma_stop_queue
+ */
+static void nvme_rdma_stop_queue(struct nvme_rdma_queue *queue)
 {
-	if (!test_bit(NVME_RDMA_Q_ALLOCATED, &queue->flags))	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		return;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	if (!test_bit(NVME_RDMA_Q_ALLOCATED, &queue->flags))	/* [한국어] 아예 만들어지지 않은 큐다 */
+		return;
 
-	mutex_lock(&queue->queue_lock);	/* [한국어] 동기화 — 큐/연결/상태 공유 보호 */
-	if (test_and_clear_bit(NVME_RDMA_Q_LIVE, &queue->flags))	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
+	mutex_lock(&queue->queue_lock);	/* [한국어] 오류 복구와 삭제가 동시에 들어올 수 있다 */
+	if (test_and_clear_bit(NVME_RDMA_Q_LIVE, &queue->flags))	/* [한국어] 실제 종료는 한 번만 — drain 을 두 번 부르면 없어진 QP 를 건드린다 */
 		__nvme_rdma_stop_queue(queue);
-	mutex_unlock(&queue->queue_lock);	/* [한국어] 동기화 — 큐/연결/상태 공유 보호 */
+	mutex_unlock(&queue->queue_lock);
 }
 
-static void nvme_rdma_free_queue(struct nvme_rdma_queue *queue)	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+/*
+ * [한국어]
+ * nvme_rdma_free_queue - 큐가 잡은 CM ID 와 IB 자원을 반납한다
+ *
+ * @queue: 대상 큐
+ * @return: 없음
+ *
+ * ALLOCATED 비트를 test_and_clear 로 다뤄 두 번 해제되지 않게 한다.
+ * stop 과 마찬가지로 오류 복구와 삭제가 겹칠 수 있기 때문이다.
+ *
+ * 호출자가 먼저 stop 을 부른 뒤에만 여기 와야 한다. 진행 중 work
+ * request 가 남은 채로 QP 를 없애면 완료가 해제된 메모리로 온다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥. 잠들 수 있다.
+ *
+ * 호출 체인: 큐 해체 경로 → [이 함수] → rdma_destroy_id
+ */
+static void nvme_rdma_free_queue(struct nvme_rdma_queue *queue)
 {
-	if (!test_and_clear_bit(NVME_RDMA_Q_ALLOCATED, &queue->flags))	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		return;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	if (!test_and_clear_bit(NVME_RDMA_Q_ALLOCATED, &queue->flags))	/* [한국어] 같은 이유로 해제도 한 번만 */
+		return;
 
-	rdma_destroy_id(queue->cm_id);	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
-	nvme_rdma_destroy_queue_ib(queue);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	mutex_destroy(&queue->queue_lock);	/* [한국어] 동기화 — 큐/연결/상태 공유 보호 */
+	rdma_destroy_id(queue->cm_id);	/* [한국어] CM ID 를 없앤다 */
+	nvme_rdma_destroy_queue_ib(queue);	/* [한국어] QP·CQ·MR 풀을 반납한다 */
+	mutex_destroy(&queue->queue_lock);	/* [한국어] 마지막에 락 — 위 두 단계가 이 락 규약 아래 끝난 뒤여야 한다 */
 }
 
-static void nvme_rdma_free_io_queues(struct nvme_rdma_ctrl *ctrl)	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+/*
+ * [한국어]
+ * nvme_rdma_free_io_queues - I/O 큐를 모두 반납한다
+ *
+ * @ctrl: 대상 컨트롤러
+ * @return: 없음
+ *
+ * 1부터 도는 이유는 0번이 admin 이기 때문이다. admin 큐는 수명이 달라
+ * 별도 경로가 다룬다.
+ *
+ * 실행 컨텍스트: 세션 해체. 잠들 수 있다.
+ *
+ * 호출 체인: nvme_rdma_teardown_io_queues → [이 함수] → nvme_rdma_free_queue
+ */
+static void nvme_rdma_free_io_queues(struct nvme_rdma_ctrl *ctrl)
 {
-	int i;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	int i;	/* [한국어] 큐 인덱스 */
 
-	for (i = 1; i < ctrl->ctrl.queue_count; i++)	/* [한국어] 순회 — 큐·요청·세그먼트·이벤트 처리 */
+	for (i = 1; i < ctrl->ctrl.queue_count; i++)	/* [한국어] 0번은 admin 이라 건너뛴다 — 수명이 다르다 */
 		nvme_rdma_free_queue(&ctrl->queues[i]);
 }
 
-static void nvme_rdma_stop_io_queues(struct nvme_rdma_ctrl *ctrl)	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+/*
+ * [한국어]
+ * nvme_rdma_stop_io_queues - I/O 큐를 모두 끊는다
+ *
+ * @ctrl: 대상 컨트롤러
+ * @return: 없음
+ *
+ * free 의 짝이며 반드시 먼저 온다. 여기서 각 큐의 진행 중 작업이
+ * 배출되고, 그 뒤에야 자원을 반납할 수 있다. 역시 admin 을 건너뛴다.
+ *
+ * 실행 컨텍스트: 세션 해체. 오래 잠들 수 있다.
+ *
+ * 호출 체인: nvme_rdma_teardown_io_queues → [이 함수] → nvme_rdma_stop_queue
+ */
+static void nvme_rdma_stop_io_queues(struct nvme_rdma_ctrl *ctrl)
 {
-	int i;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	int i;
 
-	for (i = 1; i < ctrl->ctrl.queue_count; i++)	/* [한국어] 순회 — 큐·요청·세그먼트·이벤트 처리 */
+	for (i = 1; i < ctrl->ctrl.queue_count; i++)	/* [한국어] 마찬가지로 I/O 큐만 */
 		nvme_rdma_stop_queue(&ctrl->queues[i]);
 }
 
-static int nvme_rdma_start_queue(struct nvme_rdma_ctrl *ctrl, int idx)	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+/*
+ * [한국어]
+ * nvme_rdma_start_queue - 큐에 Fabrics Connect 를 보내 실제로 쓸 수 있게 한다
+ *
+ * @ctrl: 대상 컨트롤러
+ * @idx:  큐 번호. 0이면 admin.
+ * @return: 0 이면 성공, 음수 errno 또는 NVMe 상태
+ *
+ * alloc_queue 가 RDMA 연결까지 세웠다면 이 함수가 NVMe 수준의 연결을
+ * 맺는다. 그 둘은 별개다 -- QP 가 붙었어도 Connect 를 보내기 전에는
+ * 컨트롤러가 이 큐를 인정하지 않는다.
+ *
+ * 실패 시 곧바로 큐를 끊는 것이 요점이다. Connect 가 실패한 큐를
+ * 열어 두면 오류 복구가 그것을 살아 있는 큐로 오인한다.
+ *
+ * 실행 컨텍스트: 연결/재연결 경로. 잠들 수 있다.
+ *
+ * 호출 체인:
+ *   nvme_rdma_start_io_queues / _configure_admin_queue → [이 함수]
+ *     → nvmf_connect_io_queue / nvmf_connect_admin_queue
+ */
+static int nvme_rdma_start_queue(struct nvme_rdma_ctrl *ctrl, int idx)
 {
-	struct nvme_rdma_queue *queue = &ctrl->queues[idx];	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	int ret;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	struct nvme_rdma_queue *queue = &ctrl->queues[idx];	/* [한국어] LIVE 비트를 세울 대상 */
+	int ret;
 
-	if (idx)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
+	if (idx)	/* [한국어] admin 과 I/O 는 Connect 명령이 다르다 */
 		ret = nvmf_connect_io_queue(&ctrl->ctrl, idx);
 	else	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 		ret = nvmf_connect_admin_queue(&ctrl->ctrl);
 
-	if (!ret) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		set_bit(NVME_RDMA_Q_LIVE, &queue->flags);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	if (!ret) {	/* [한국어] Connect 성공 — 이제 이 큐로 명령을 보낼 수 있다 */
+		set_bit(NVME_RDMA_Q_LIVE, &queue->flags);	/* [한국어] 제출 경로가 이 비트를 보고 큐를 쓴다 */
 	} else {
-		if (test_bit(NVME_RDMA_Q_ALLOCATED, &queue->flags))	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
+		if (test_bit(NVME_RDMA_Q_ALLOCATED, &queue->flags))	/* [한국어] 실패한 큐를 열어 두면 복구가 살아 있는 큐로 오인한다 */
 			__nvme_rdma_stop_queue(queue);
-		dev_info(ctrl->ctrl.device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		dev_info(ctrl->ctrl.device,	/* [한국어] 어느 큐가 왜 실패했는지 남긴다 */
 			"failed to connect queue: %d ret=%d\n", idx, ret);
 	}
-	return ret;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	return ret;
 }
 
-static int nvme_rdma_start_io_queues(struct nvme_rdma_ctrl *ctrl,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+/*
+ * [한국어]
+ * nvme_rdma_start_io_queues - 지정한 구간의 I/O 큐에 Connect 를 보낸다
+ *
+ * @ctrl:  대상 컨트롤러
+ * @first: 시작 큐 번호(포함)
+ * @last:  끝 큐 번호(제외)
+ * @return: 0 이면 전부 성공, 아니면 실패한 큐의 오류
+ *
+ * 구간을 인자로 받는 이유는 큐 수를 늘리는 경우가 있기 때문이다.
+ * 재연결에서 컨트롤러가 더 많은 큐를 허락하면 새로 늘어난 구간만
+ * Connect 하면 된다.
+ *
+ * 실패 시 i-- 부터 거꾸로 되돌리는 것에 주의할 것. 실패한 큐 자신은
+ * start_queue 가 이미 끊었으므로 그 앞의 것들만 되감는다.
+ *
+ * 실행 컨텍스트: 연결/재연결 경로. 잠들 수 있다.
+ *
+ * 호출 체인: nvme_rdma_configure_io_queues → [이 함수] → nvme_rdma_start_queue
+ */
+static int nvme_rdma_start_io_queues(struct nvme_rdma_ctrl *ctrl,
 				     int first, int last)
 {
-	int i, ret = 0;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	int i, ret = 0;	/* [한국어] 실패 시 되돌릴 위치를 i 가 기억한다 */
 
-	for (i = first; i < last; i++) {	/* [한국어] 순회 — 큐·요청·세그먼트·이벤트 처리 */
-		ret = nvme_rdma_start_queue(ctrl, i);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-		if (ret)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-			goto out_stop_queues;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
+	for (i = first; i < last; i++) {	/* [한국어] 구간을 받는 이유: 재연결에서 큐가 늘면 새 구간만 Connect 한다 */
+		ret = nvme_rdma_start_queue(ctrl, i);
+		if (ret)
+			goto out_stop_queues;
 	}
 
-	return 0;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	return 0;	/* [한국어] 구간 전체가 살아났다 */
 
 out_stop_queues:
-	for (i--; i >= first; i--)	/* [한국어] 순회 — 큐·요청·세그먼트·이벤트 처리 */
+	for (i--; i >= first; i--)	/* [한국어] 실패한 큐 자신은 start_queue 가 이미 끊었으므로 그 앞만 되감는다 */
 		nvme_rdma_stop_queue(&ctrl->queues[i]);
-	return ret;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	return ret;
 }
 
 /*
@@ -1307,51 +1620,119 @@ out_free_queues:
 	return ret;
 }
 
-static int nvme_rdma_alloc_tag_set(struct nvme_ctrl *ctrl)	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+/*
+ * [한국어]
+ * nvme_rdma_alloc_tag_set - I/O 태그셋을 만든다. 요청 하나의 크기를 여기서 정한다
+ *
+ * @ctrl: 대상 컨트롤러
+ * @return: 0 이면 성공, 음수 errno
+ *
+ * cmd_size 계산이 이 함수의 전부다. blk-mq 는 요청마다 이 크기의 영역을
+ * 붙여 주므로, 요청 구조체와 그 뒤에 오는 SGL 들이 모두 들어가야 한다.
+ * 데이터 SGL 은 항상이고, PI 를 쓰는 구성에서는 메타데이터 SGL 이
+ * 하나 더 붙는다.
+ *
+ * 이 크기를 여기서 한 번 정해 두면 제출 경로에서 SGL 을 따로 할당할
+ * 일이 없다 -- RDMA I/O 경로에 할당이 없는 이유다.
+ *
+ * 실행 컨텍스트: 연결 경로. 잠들 수 있다.
+ *
+ * 호출 체인: nvme_rdma_configure_io_queues → [이 함수] → nvme_alloc_io_tag_set
+ */
+static int nvme_rdma_alloc_tag_set(struct nvme_ctrl *ctrl)
 {
-	unsigned int cmd_size = sizeof(struct nvme_rdma_request) +	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+	unsigned int cmd_size = sizeof(struct nvme_rdma_request) +	/* [한국어] 요청 구조체 뒤에 데이터 SGL 이 이어 붙는다 */
 				NVME_RDMA_DATA_SGL_SIZE;
 
-	if (ctrl->max_integrity_segments)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
+	if (ctrl->max_integrity_segments)	/* [한국어] PI 를 쓰면 메타데이터 SGL 이 하나 더 */
 		cmd_size += sizeof(struct nvme_rdma_sgl) +
 			    NVME_RDMA_METADATA_SGL_SIZE;
 
-	return nvme_alloc_io_tag_set(ctrl, &to_rdma_ctrl(ctrl)->tag_set,	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	return nvme_alloc_io_tag_set(ctrl, &to_rdma_ctrl(ctrl)->tag_set,	/* [한국어] 이 크기를 미리 정해 두어 제출 경로에 할당이 없다 */
 			&nvme_rdma_mq_ops,
 			ctrl->opts->nr_poll_queues ? HCTX_MAX_TYPES : 2,
 			cmd_size);
 }
 
-static void nvme_rdma_destroy_admin_queue(struct nvme_rdma_ctrl *ctrl)	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+/*
+ * [한국어]
+ * nvme_rdma_destroy_admin_queue - admin 큐와 AEN 전용 SQE 를 되돌린다
+ *
+ * @ctrl: 대상 컨트롤러
+ * @return: 없음
+ *
+ * 순서가 안전성이다. async_event_work 를 먼저 취소해야 한다 -- 그 워크가
+ * 하는 일이 이 SQE 로 AEN 을 다시 거는 것이므로, 버퍼를 푼 뒤에 돌면
+ * 해제된 메모리를 매핑해 보낸다. _sync 라 실행 중인 것이 끝날 때까지
+ * 기다린다.
+ *
+ * 포인터를 NULL 로 지우는 것도 필수다. 재연결에서 다시 잡을 때 이 값이
+ * 남아 있으면 이 블록을 또 지나 이중 해제가 된다.
+ *
+ * 실행 컨텍스트: 세션 해체. 잠들 수 있다.
+ *
+ * 호출 체인: nvme_rdma_teardown_admin_queue → [이 함수] → nvme_rdma_free_queue
+ */
+static void nvme_rdma_destroy_admin_queue(struct nvme_rdma_ctrl *ctrl)
 {
-	if (ctrl->async_event_sqe.data) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		cancel_work_sync(&ctrl->ctrl.async_event_work);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		nvme_rdma_free_qe(ctrl->device->dev, &ctrl->async_event_sqe,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-				sizeof(struct nvme_command), DMA_TO_DEVICE);	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-		ctrl->async_event_sqe.data = NULL;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	if (ctrl->async_event_sqe.data) {	/* [한국어] AEN 용 SQE 를 잡아 둔 구성에서만 */
+		cancel_work_sync(&ctrl->ctrl.async_event_work);	/* [한국어] 먼저 취소해야 한다 — 이 워크가 하는 일이 아래에서 풀 버퍼로 AEN 을 거는 것이다 */
+		nvme_rdma_free_qe(ctrl->device->dev, &ctrl->async_event_sqe,	/* [한국어] 매핑을 풀고 버퍼를 놓는다 */
+				sizeof(struct nvme_command), DMA_TO_DEVICE);	/* [한국어] 매핑할 때와 같은 크기·방향이어야 한다 */
+		ctrl->async_event_sqe.data = NULL;	/* [한국어] 재연결에서 이 블록을 또 지나 이중 해제가 되지 않도록 */
 	}
-	nvme_rdma_free_queue(&ctrl->queues[0]);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+	nvme_rdma_free_queue(&ctrl->queues[0]);	/* [한국어] admin 큐 자체를 반납한다 */
 }
 
-static int nvme_rdma_configure_admin_queue(struct nvme_rdma_ctrl *ctrl,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+/*
+ * [한국어]
+ * nvme_rdma_configure_admin_queue - admin 큐를 세우고 컨트롤러 능력을 읽는다
+ *
+ * @ctrl: 대상 컨트롤러
+ * @new:  처음 연결인가. 재연결이면 태그셋을 다시 만들지 않는다.
+ * @return: 0 이면 성공, 음수 errno
+ *
+ * 세션 수립의 첫 단계이며, 여기가 끝나야 컨트롤러가 무엇을 할 수 있는지
+ * 알게 된다. 순서가 곧 의존 관계다: RDMA 연결 → 태그셋 → NVMe Connect →
+ * CC.EN → Identify.
+ *
+ * new 인자로 재연결을 구분하는 이유는 태그셋의 수명이 세션보다 길기
+ * 때문이다. 재연결에서 태그셋을 새로 만들면 이미 큐에 있던 요청이
+ * 갈 곳을 잃는다.
+ *
+ * 한계값을 enable 뒤에 정하는 것에 주의할 것. max_fr_pages 는 HCA 가
+ * 한 번에 등록할 수 있는 페이지 수이고, 그것이 곧 이 트랜스포트의
+ * 최대 전송 크기다. PI 지원 여부도 여기서 코어에 알린다 -- 이 값이
+ * 0 이면 코어가 메타데이터 있는 네임스페이스를 다르게 다룬다.
+ *
+ * 실패 라벨이 다섯 단계인 것은 그만큼 되돌릴 것이 층층이 쌓이기
+ * 때문이다. 각 라벨은 그 지점까지 성공한 것만 정확히 되감는다.
+ *
+ * 실행 컨텍스트: 연결/재연결 워크. 오래 잠든다.
+ *
+ * 호출 체인:
+ *   nvme_rdma_setup_ctrl → [이 함수]
+ *     → nvme_rdma_alloc_queue → nvme_rdma_start_queue → nvme_enable_ctrl
+ */
+static int nvme_rdma_configure_admin_queue(struct nvme_rdma_ctrl *ctrl,
 		bool new)
 {
-	bool pi_capable = false;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	int error;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	bool pi_capable = false;	/* [한국어] HCA 가 T10-PI 오프로드를 지원하는지. 아래에서 코어에 전달된다 */
+	int error;
 
-	error = nvme_rdma_alloc_queue(ctrl, 0, NVME_AQ_DEPTH);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	if (error)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		return error;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	error = nvme_rdma_alloc_queue(ctrl, 0, NVME_AQ_DEPTH);	/* [한국어] admin 큐는 깊이가 스펙 고정값이다 */
+	if (error)
+		return error;	/* [한국어] 아직 아무것도 잡지 않았다 */
 
-	ctrl->device = ctrl->queues[0].device;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	ctrl->ctrl.numa_node = ibdev_to_node(ctrl->device->dev);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	ctrl->device = ctrl->queues[0].device;	/* [한국어] CM 이 고른 IB 장치를 컨트롤러 수준으로 올린다 */
+	ctrl->ctrl.numa_node = ibdev_to_node(ctrl->device->dev);	/* [한국어] HCA 가 붙은 노드에서 메모리를 잡아야 DMA 가 원격 노드를 넘지 않는다 */
 
 	/* T10-PI support */
-	if (ctrl->device->dev->attrs.kernel_cap_flags &	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
+	if (ctrl->device->dev->attrs.kernel_cap_flags &	/* [한국어] 시그니처 MR 을 지원하는 HCA 만 PI 를 하드웨어로 검사할 수 있다 */
 	    IBK_INTEGRITY_HANDOVER)
 		pi_capable = true;
 
-	ctrl->max_fr_pages = nvme_rdma_get_max_fr_pages(ctrl->device->dev,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+	ctrl->max_fr_pages = nvme_rdma_get_max_fr_pages(ctrl->device->dev,	/* [한국어] 한 번의 빠른 등록으로 덮을 수 있는 페이지 수 — 이것이 최대 전송 크기를 정한다 */
 							pi_capable);
 
 	/*
@@ -1359,62 +1740,62 @@ static int nvme_rdma_configure_admin_queue(struct nvme_rdma_ctrl *ctrl,	/* [한�
 	 * It's safe, since any change in the underlying RDMA device will issue
 	 * error recovery and queue re-creation.
 	 */
-	error = nvme_rdma_alloc_qe(ctrl->device->dev, &ctrl->async_event_sqe,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-			sizeof(struct nvme_command), DMA_TO_DEVICE);	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	if (error)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		goto out_free_queue;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
+	error = nvme_rdma_alloc_qe(ctrl->device->dev, &ctrl->async_event_sqe,	/* [한국어] AEN 은 태그를 쓰지 않으므로 전용 SQE 를 따로 잡아 둔다 */
+			sizeof(struct nvme_command), DMA_TO_DEVICE);	/* [한국어] 호스트가 쓰고 HCA 가 읽는 방향 */
+	if (error)
+		goto out_free_queue;
 
-	if (new) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		error = nvme_alloc_admin_tag_set(&ctrl->ctrl,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	if (new) {	/* [한국어] 재연결이면 태그셋이 이미 있다 — 다시 만들면 대기 중 요청이 갈 곳을 잃는다 */
+		error = nvme_alloc_admin_tag_set(&ctrl->ctrl,	/* [한국어] 요청 하나에 SQE 구조체와 데이터 SGL 이 붙는다 */
 				&ctrl->admin_tag_set, &nvme_rdma_admin_mq_ops,
 				sizeof(struct nvme_rdma_request) +
 				NVME_RDMA_DATA_SGL_SIZE);
-		if (error)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-			goto out_free_async_qe;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
+		if (error)
+			goto out_free_async_qe;
 
 	}
 
-	error = nvme_rdma_start_queue(ctrl, 0);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	if (error)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		goto out_remove_admin_tag_set;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
+	error = nvme_rdma_start_queue(ctrl, 0);	/* [한국어] RDMA 연결 위에 NVMe Connect 를 얹는다 */
+	if (error)
+		goto out_remove_admin_tag_set;
 
-	error = nvme_enable_ctrl(&ctrl->ctrl);	/* [한국어] NVMe core API — SQE 조립·완료·상태기계·수명 */
-	if (error)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		goto out_stop_queue;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
+	error = nvme_enable_ctrl(&ctrl->ctrl);	/* [한국어] CC.EN 을 세우고 CSTS.RDY 를 기다린다 */
+	if (error)
+		goto out_stop_queue;
 
-	ctrl->ctrl.max_segments = ctrl->max_fr_pages;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	ctrl->ctrl.max_hw_sectors = ctrl->max_fr_pages << (ilog2(SZ_4K) - 9);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	if (pi_capable)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
+	ctrl->ctrl.max_segments = ctrl->max_fr_pages;	/* [한국어] 한 번에 등록 가능한 페이지 수가 곧 세그먼트 상한이다 */
+	ctrl->ctrl.max_hw_sectors = ctrl->max_fr_pages << (ilog2(SZ_4K) - 9);	/* [한국어] 페이지 수를 512바이트 섹터 수로 — 4K/512 = 8, 즉 3비트 시프트 */
+	if (pi_capable)	/* [한국어] HCA 가 지원할 때만 PI 세그먼트를 허용한다 */
 		ctrl->ctrl.max_integrity_segments = ctrl->max_fr_pages;
 	else	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 		ctrl->ctrl.max_integrity_segments = 0;
 
-	nvme_unquiesce_admin_queue(&ctrl->ctrl);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	nvme_unquiesce_admin_queue(&ctrl->ctrl);	/* [한국어] 이제 Identify 를 보낼 수 있다 */
 
-	error = nvme_init_ctrl_finish(&ctrl->ctrl, false);	/* [한국어] NVMe core API — SQE 조립·완료·상태기계·수명 */
-	if (error)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		goto out_quiesce_queue;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
+	error = nvme_init_ctrl_finish(&ctrl->ctrl, false);	/* [한국어] Identify 로 능력을 읽어 코어 구성을 완성한다 */
+	if (error)
+		goto out_quiesce_queue;
 
-	return 0;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	return 0;	/* [한국어] admin 큐가 살아났다 — 다음은 I/O 큐다 */
 
 out_quiesce_queue:
-	nvme_quiesce_admin_queue(&ctrl->ctrl);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	blk_sync_queue(ctrl->ctrl.admin_q);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	nvme_quiesce_admin_queue(&ctrl->ctrl);	/* [한국어] 열었던 큐를 다시 멈춘다 */
+	blk_sync_queue(ctrl->ctrl.admin_q);	/* [한국어] 진행 중 완료 처리가 끝나기를 기다린다 */
 out_stop_queue:
-	nvme_rdma_stop_queue(&ctrl->queues[0]);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	nvme_cancel_admin_tagset(&ctrl->ctrl);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	nvme_rdma_stop_queue(&ctrl->queues[0]);	/* [한국어] RDMA 연결을 끊고 배출시킨다 */
+	nvme_cancel_admin_tagset(&ctrl->ctrl);	/* [한국어] 남은 요청을 취소로 완료시켜 태그를 반납한다 */
 out_remove_admin_tag_set:
-	if (new)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
+	if (new)	/* [한국어] 이번에 만든 태그셋만 되돌린다 */
 		nvme_remove_admin_tag_set(&ctrl->ctrl);
 out_free_async_qe:
-	if (ctrl->async_event_sqe.data) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		nvme_rdma_free_qe(ctrl->device->dev, &ctrl->async_event_sqe,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-			sizeof(struct nvme_command), DMA_TO_DEVICE);	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-		ctrl->async_event_sqe.data = NULL;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	if (ctrl->async_event_sqe.data) {	/* [한국어] 잡혔을 때만 */
+		nvme_rdma_free_qe(ctrl->device->dev, &ctrl->async_event_sqe,
+			sizeof(struct nvme_command), DMA_TO_DEVICE);
+		ctrl->async_event_sqe.data = NULL;	/* [한국어] 다음 시도가 이중 해제하지 않도록 */
 	}
 out_free_queue:
-	nvme_rdma_free_queue(&ctrl->queues[0]);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	return error;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	nvme_rdma_free_queue(&ctrl->queues[0]);
+	return error;
 }
 
 /*
@@ -1517,79 +1898,177 @@ out_free_io_queues:
 	return ret;
 }
 
-static void nvme_rdma_teardown_admin_queue(struct nvme_rdma_ctrl *ctrl,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+/*
+ * [한국어]
+ * nvme_rdma_teardown_admin_queue - admin 큐를 접는다
+ *
+ * @ctrl:   대상 컨트롤러
+ * @remove: 태그셋까지 없앨 것인가. 재연결이면 false 로 남겨 둔다.
+ * @return: 없음
+ *
+ * 순서가 전부다. 먼저 큐를 멈춰 새 명령을 막고, blk_sync_queue 로
+ * 진행 중 완료 처리를 배출시키고, 그다음에야 RDMA 연결을 끊는다.
+ * 그 뒤 남은 요청을 취소로 완료시켜야 태그가 반납된다.
+ *
+ * remove 가 참일 때만 unquiesce 하는 것이 요점이다. 태그셋을 없애려면
+ * 멈춘 큐에 남은 요청이 빠져나가야 하므로 먼저 열어야 한다. 재연결에서는
+ * 멈춘 채로 두어야 새 세션이 설 때까지 요청이 기다린다.
+ *
+ * 실행 컨텍스트: 오류 복구/삭제 경로. 오래 잠든다.
+ *
+ * 호출 체인:
+ *   nvme_rdma_error_recovery_work / _delete_ctrl → [이 함수]
+ *     → nvme_rdma_stop_queue → nvme_rdma_destroy_admin_queue
+ */
+static void nvme_rdma_teardown_admin_queue(struct nvme_rdma_ctrl *ctrl,
 		bool remove)
 {
-	nvme_quiesce_admin_queue(&ctrl->ctrl);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	blk_sync_queue(ctrl->ctrl.admin_q);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	nvme_rdma_stop_queue(&ctrl->queues[0]);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	nvme_cancel_admin_tagset(&ctrl->ctrl);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	if (remove) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		nvme_unquiesce_admin_queue(&ctrl->ctrl);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		nvme_remove_admin_tag_set(&ctrl->ctrl);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	nvme_quiesce_admin_queue(&ctrl->ctrl);	/* [한국어] 새 명령을 막는 것이 먼저다 */
+	blk_sync_queue(ctrl->ctrl.admin_q);	/* [한국어] 진행 중 완료 처리를 배출시킨다 */
+	nvme_rdma_stop_queue(&ctrl->queues[0]);	/* [한국어] 그 뒤에야 RDMA 연결을 끊는다 */
+	nvme_cancel_admin_tagset(&ctrl->ctrl);	/* [한국어] 남은 요청을 취소로 완료시켜야 태그가 돌아온다 */
+	if (remove) {	/* [한국어] 태그셋까지 없앨 때만 */
+		nvme_unquiesce_admin_queue(&ctrl->ctrl);	/* [한국어] 멈춘 큐에 남은 요청이 태그셋 해제를 막으므로 먼저 연다 */
+		nvme_remove_admin_tag_set(&ctrl->ctrl);
 	}
-	nvme_rdma_destroy_admin_queue(ctrl);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+	nvme_rdma_destroy_admin_queue(ctrl);	/* [한국어] AEN SQE 와 큐 자원을 반납한다 */
 }
 
-static void nvme_rdma_teardown_io_queues(struct nvme_rdma_ctrl *ctrl,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+/*
+ * [한국어]
+ * nvme_rdma_teardown_io_queues - I/O 큐를 모두 접는다
+ *
+ * @ctrl:   대상 컨트롤러
+ * @remove: 태그셋까지 없앨 것인가
+ * @return: 없음
+ *
+ * admin 쪽과 같은 순서를 I/O 큐 전체에 적용한다. queue_count > 1 검사가
+ * 앞에 있는 이유는 admin 만 세운 상태에서도 이 경로가 불릴 수 있기
+ * 때문이다 -- I/O 큐가 없으면 할 일도 없다.
+ *
+ * sync_io_queues 가 quiesce 다음인 것이 중요하다. 멈추기 전에 기다리면
+ * 그 사이 들어온 요청 때문에 영원히 끝나지 않는다.
+ *
+ * 실행 컨텍스트: 오류 복구/삭제 경로. 오래 잠든다.
+ *
+ * 호출 체인:
+ *   nvme_rdma_error_recovery_work / _delete_ctrl → [이 함수]
+ *     → nvme_rdma_stop_io_queues → nvme_rdma_free_io_queues
+ */
+static void nvme_rdma_teardown_io_queues(struct nvme_rdma_ctrl *ctrl,
 		bool remove)
 {
-	if (ctrl->ctrl.queue_count > 1) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		nvme_quiesce_io_queues(&ctrl->ctrl);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		nvme_sync_io_queues(&ctrl->ctrl);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		nvme_rdma_stop_io_queues(ctrl);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-		nvme_cancel_tagset(&ctrl->ctrl);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		if (remove) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-			nvme_unquiesce_io_queues(&ctrl->ctrl);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			nvme_remove_io_tag_set(&ctrl->ctrl);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	if (ctrl->ctrl.queue_count > 1) {	/* [한국어] admin 만 세운 상태에서도 불리므로 확인한다 */
+		nvme_quiesce_io_queues(&ctrl->ctrl);	/* [한국어] 새 I/O 를 막는다 */
+		nvme_sync_io_queues(&ctrl->ctrl);	/* [한국어] 멈춘 뒤에 기다려야 끝난다 — 순서를 바꾸면 새 요청이 계속 들어온다 */
+		nvme_rdma_stop_io_queues(ctrl);	/* [한국어] 각 큐를 끊고 배출시킨다 */
+		nvme_cancel_tagset(&ctrl->ctrl);	/* [한국어] 남은 요청을 취소로 완료시킨다 */
+		if (remove) {
+			nvme_unquiesce_io_queues(&ctrl->ctrl);	/* [한국어] 태그셋을 없애려면 큐를 열어 남은 요청을 빼야 한다 */
+			nvme_remove_io_tag_set(&ctrl->ctrl);
 		}
-		nvme_rdma_free_io_queues(ctrl);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+		nvme_rdma_free_io_queues(ctrl);	/* [한국어] 큐 자원을 반납한다 */
 	}
 }
 
-static void nvme_rdma_stop_ctrl(struct nvme_ctrl *nctrl)	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+/*
+ * [한국어]
+ * nvme_rdma_stop_ctrl - 이 트랜스포트의 백그라운드 워크를 멈춘다
+ *
+ * @nctrl: 대상 컨트롤러
+ * @return: 없음
+ *
+ * 코어의 stop_ctrl vtable 진입점이다. 두 워크를 다루는 방식이 다른
+ * 것에 주의할 것 -- err_work 는 flush 하고 reconnect_work 는 cancel 한다.
+ * 진행 중인 오류 복구는 끝까지 가는 편이 안전하지만(중간에 끊으면
+ * 자원이 어정쩡하게 남는다), 아직 시작하지 않은 재연결은 시작할
+ * 이유가 없기 때문이다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥. 오래 잠든다.
+ *
+ * 호출 체인: nvme_stop_ctrl → ops->stop_ctrl → [이 함수]
+ */
+static void nvme_rdma_stop_ctrl(struct nvme_ctrl *nctrl)
 {
-	struct nvme_rdma_ctrl *ctrl = to_rdma_ctrl(nctrl);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+	struct nvme_rdma_ctrl *ctrl = to_rdma_ctrl(nctrl);
 
-	flush_work(&ctrl->err_work);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	cancel_delayed_work_sync(&ctrl->reconnect_work);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	flush_work(&ctrl->err_work);	/* [한국어] 진행 중 복구는 끝까지 가는 편이 안전하다 — 중간에 끊으면 자원이 어정쩡하게 남는다 */
+	cancel_delayed_work_sync(&ctrl->reconnect_work);	/* [한국어] 아직 시작 안 한 재연결은 시작할 이유가 없다 */
 }
 
-static void nvme_rdma_free_ctrl(struct nvme_ctrl *nctrl)	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+/*
+ * [한국어]
+ * nvme_rdma_free_ctrl - 컨트롤러 구조체와 큐 배열을 반납한다
+ *
+ * @nctrl: 해제되는 컨트롤러
+ * @return: 없음
+ *
+ * 코어가 마지막 참조를 놓을 때 불린다. 전역 목록에서 빼는 일이 먼저이며,
+ * list_empty 검사는 초기화 도중 실패해 목록에 오르지 못한 컨트롤러를
+ * 위한 것이다. 그런 경우 옵션도 아직 이 컨트롤러 소유가 아니라
+ * 해제하면 안 된다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥. 잠들 수 있다.
+ *
+ * 호출 체인: nvme_free_ctrl → ops->free_ctrl → [이 함수]
+ */
+static void nvme_rdma_free_ctrl(struct nvme_ctrl *nctrl)
 {
-	struct nvme_rdma_ctrl *ctrl = to_rdma_ctrl(nctrl);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+	struct nvme_rdma_ctrl *ctrl = to_rdma_ctrl(nctrl);
 
-	if (list_empty(&ctrl->list))	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		goto free_ctrl;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
+	if (list_empty(&ctrl->list))	/* [한국어] 초기화 도중 실패해 전역 목록에 오르지 못한 컨트롤러다 */
+		goto free_ctrl;	/* [한국어] 옵션도 아직 이 컨트롤러 소유가 아니라 해제하면 안 된다 */
 
-	mutex_lock(&nvme_rdma_ctrl_mutex);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	list_del(&ctrl->list);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	mutex_unlock(&nvme_rdma_ctrl_mutex);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+	mutex_lock(&nvme_rdma_ctrl_mutex);	/* [한국어] 중복 연결 검사가 이 목록을 훑는다 */
+	list_del(&ctrl->list);
+	mutex_unlock(&nvme_rdma_ctrl_mutex);
 
-	nvmf_free_options(nctrl->opts);	/* [한국어] fabrics 공통(Connect/옵션/재연결) API */
+	nvmf_free_options(nctrl->opts);	/* [한국어] 목록에 올랐다면 옵션 소유권도 이 컨트롤러에 있다 */
 free_ctrl:
-	kfree(ctrl->queues);	/* [한국어] 커널 메모리 생명주기 */
-	kfree(ctrl);	/* [한국어] 커널 메모리 생명주기 */
+	kfree(ctrl->queues);	/* [한국어] 큐 배열 */
+	kfree(ctrl);
 }
 
-static void nvme_rdma_reconnect_or_remove(struct nvme_rdma_ctrl *ctrl,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+/*
+ * [한국어]
+ * nvme_rdma_reconnect_or_remove - 다시 시도할지 포기할지 정한다
+ *
+ * @ctrl:   대상 컨트롤러
+ * @status: 직전 시도가 남긴 오류. 재시도 가치 판단의 입력이다.
+ * @return: 없음
+ *
+ * 연결 시도가 실패할 때마다 불리는 갈림길이다. 상태가 CONNECTING 이
+ * 아니면 아무것도 하지 않는다 -- 리셋이나 삭제가 이미 이 컨트롤러를
+ * 가져갔다는 뜻이므로, 여기서 재연결을 걸면 그 경로와 부딪힌다.
+ *
+ * WARN 이 NEW 와 LIVE 만 잡는 것에 주의할 것. 그 두 상태로 여기 오는
+ * 것은 상태 기계가 깨졌다는 뜻이지만, DELETING 이나 RESETTING 은
+ * 정상적인 경쟁이라 경고 없이 조용히 물러난다.
+ *
+ * 실행 컨텍스트: 연결/복구 워크. 잠들지 않는다(예약만 한다).
+ *
+ * 호출 체인:
+ *   nvme_rdma_reconnect_ctrl_work / _error_recovery_work → [이 함수]
+ *     → queue_delayed_work 또는 nvme_delete_ctrl
+ */
+static void nvme_rdma_reconnect_or_remove(struct nvme_rdma_ctrl *ctrl,
 					  int status)
 {
-	enum nvme_ctrl_state state = nvme_ctrl_state(&ctrl->ctrl);	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
+	enum nvme_ctrl_state state = nvme_ctrl_state(&ctrl->ctrl);	/* [한국어] 한 번만 읽는다 — 아래 판단이 일관되게 같은 값을 봐야 한다 */
 
 	/* If we are resetting/deleting then do nothing */
-	if (state != NVME_CTRL_CONNECTING) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		WARN_ON_ONCE(state == NVME_CTRL_NEW || state == NVME_CTRL_LIVE);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	if (state != NVME_CTRL_CONNECTING) {	/* [한국어] 위 영어 주석대로 리셋이나 삭제가 이미 이 컨트롤러를 가져갔다 */
+		WARN_ON_ONCE(state == NVME_CTRL_NEW || state == NVME_CTRL_LIVE);	/* [한국어] 그 둘로 여기 오는 것은 상태 기계가 깨진 것이다. DELETING·RESETTING 은 정상 경쟁이라 조용히 물러난다 */
 		return;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 	}
 
-	if (nvmf_should_reconnect(&ctrl->ctrl, status)) {	/* [한국어] fabrics 공통(Connect/옵션/재연결) API */
-		dev_info(ctrl->ctrl.device, "Reconnecting in %d seconds...\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	if (nvmf_should_reconnect(&ctrl->ctrl, status)) {	/* [한국어] ctrl_loss_tmo 안이고 오류가 재시도할 만한 것인지 묻는다 */
+		dev_info(ctrl->ctrl.device, "Reconnecting in %d seconds...\n",	/* [한국어] 사용자가 장치가 왜 안 보이는지 알 수 있게 남긴다 */
 			ctrl->ctrl.opts->reconnect_delay);
-		queue_delayed_work(nvme_wq, &ctrl->reconnect_work,	/* [한국어] 워크큐 — 송수신/재연결/복구 비동기 실행 */
+		queue_delayed_work(nvme_wq, &ctrl->reconnect_work,	/* [한국어] 간격을 두고 다시 시도한다 — 즉시 재시도는 대상을 두드린다 */
 				ctrl->ctrl.opts->reconnect_delay * HZ);
 	} else {
-		nvme_delete_ctrl(&ctrl->ctrl);	/* [한국어] NVMe core API — SQE 조립·완료·상태기계·수명 */
+		nvme_delete_ctrl(&ctrl->ctrl);	/* [한국어] 더 시도할 가치가 없다 — 컨트롤러를 지운다 */
 	}
 }
 
@@ -3184,7 +3663,7 @@ static const struct blk_mq_ops nvme_rdma_admin_mq_ops = {	/* [한국어] NVMe/RD
 static void nvme_rdma_shutdown_ctrl(struct nvme_rdma_ctrl *ctrl, bool shutdown)	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 {
 	nvme_rdma_teardown_io_queues(ctrl, shutdown);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	nvme_quiesce_admin_queue(&ctrl->ctrl);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	nvme_quiesce_admin_queue(&ctrl->ctrl);	/* [한국어] 새 명령을 막는 것이 먼저다 */
 	nvme_disable_ctrl(&ctrl->ctrl, shutdown);	/* [한국어] NVMe core API — SQE 조립·완료·상태기계·수명 */
 	nvme_rdma_teardown_admin_queue(ctrl, shutdown);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 }
@@ -3280,13 +3759,13 @@ nvme_rdma_existing_controller(struct nvmf_ctrl_options *opts)
 	struct nvme_rdma_ctrl *ctrl;	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 	bool found = false;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
-	mutex_lock(&nvme_rdma_ctrl_mutex);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+	mutex_lock(&nvme_rdma_ctrl_mutex);	/* [한국어] 중복 연결 검사가 이 목록을 훑는다 */
 	list_for_each_entry(ctrl, &nvme_rdma_ctrl_list, list) {	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 		found = nvmf_ip_options_match(&ctrl->ctrl, opts);	/* [한국어] fabrics 공통(Connect/옵션/재연결) API */
 		if (found)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 			break;
 	}
-	mutex_unlock(&nvme_rdma_ctrl_mutex);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+	mutex_unlock(&nvme_rdma_ctrl_mutex);
 
 	return found;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 }
@@ -3359,9 +3838,9 @@ static struct nvme_rdma_ctrl *nvme_rdma_alloc_ctrl(struct device *dev,	/* [한�
 	return ctrl;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 
 out_kfree_queues:
-	kfree(ctrl->queues);	/* [한국어] 커널 메모리 생명주기 */
+	kfree(ctrl->queues);	/* [한국어] 큐 배열 */
 out_free_ctrl:
-	kfree(ctrl);	/* [한국어] 커널 메모리 생명주기 */
+	kfree(ctrl);
 	return ERR_PTR(ret);	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 }
 
