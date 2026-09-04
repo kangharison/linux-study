@@ -2260,47 +2260,47 @@ static bool nvme_init_integrity(struct nvme_ns_head *head,
 
 	switch (head->pi_type) { /* [한국어] DPS PI type → blk csum/ref 태그 매핑 */
 	case NVME_NS_DPS_PI_TYPE3: /* [한국어] type3 — reftag 없음, app+guard */
-		switch (head->guard_type) {	/* [한국어] 다중 분기 — 상태·opcode·CSI 축 */
+		switch (head->guard_type) {	/* [한국어] TYPE3 은 참조 태그를 쓰지 않아 REF_TAG 플래그가 없다 */
 		case NVME_NVM_NS_16B_GUARD: /* [한국어] 레거시 T10 8B 튜플 */
 			bi->csum_type = BLK_INTEGRITY_CSUM_CRC; /* [한국어] CRC16 guard */
 			bi->tag_size = sizeof(u16) + sizeof(u32); /* [한국어] app+ref 저장 공간 */
 			bi->flags |= BLK_INTEGRITY_DEVICE_CAPABLE; /* [한국어] 장치 PRACT 가능 */
 			break; /* [한국어] type3/16B 설정 완료 */
 		case NVME_NVM_NS_64B_GUARD: /* [한국어] 확장 CRC64 가드 */
-			bi->csum_type = BLK_INTEGRITY_CSUM_CRC64;	/* [한국어] nvme_init_integrity 상태/필드 갱신 — 후속 정책 입력 */
+			bi->csum_type = BLK_INTEGRITY_CSUM_CRC64;	/* [한국어] 64비트 가드 */
 			bi->tag_size = sizeof(u16) + 6; /* [한국어] 확장 태그 폭 */
-			bi->flags |= BLK_INTEGRITY_DEVICE_CAPABLE;	/* [한국어] nvme_init_integrity 상태/필드 갱신 — 후속 정책 입력 */
-			break;	/* [한국어] 루프/switch 탈출 */
-		default:	/* [한국어] default 분기 — 폴백 정책 */
+			bi->flags |= BLK_INTEGRITY_DEVICE_CAPABLE;	/* [한국어] 컨트롤러가 검사를 대신할 수 있다 */
+			break;
+		default:	/* [한국어] 알 수 없는 가드 형식 — 무결성을 켜지 않는다 */
 			break; /* [한국어] 미지원 guard — csum_type=0 유지 */
 		}
-		break;	/* [한국어] 루프/switch 탈출 */
+		break;
 	case NVME_NS_DPS_PI_TYPE1: /* [한국어] type1 — 논리 블록 기반 reftag */
 	case NVME_NS_DPS_PI_TYPE2: /* [한국어] type2 — 호스트 제공 reftag */
-		switch (head->guard_type) {	/* [한국어] 다중 분기 — 상태·opcode·CSI 축 */
-		case NVME_NVM_NS_16B_GUARD:	/* [한국어] switch 케이스 — 아키텍처 정책 선택 */
-			bi->csum_type = BLK_INTEGRITY_CSUM_CRC;	/* [한국어] nvme_init_integrity 상태/필드 갱신 — 후속 정책 입력 */
+		switch (head->guard_type) {	/* [한국어] TYPE1/2 는 참조 태그를 쓰므로 REF_TAG 가 붙는다 */
+		case NVME_NVM_NS_16B_GUARD:	/* [한국어] 전통적인 T10-PI */
+			bi->csum_type = BLK_INTEGRITY_CSUM_CRC;
 			bi->tag_size = sizeof(u16); /* [한국어] app tag 만(ref 는 별도 플래그) */
 			bi->flags |= BLK_INTEGRITY_DEVICE_CAPABLE |
 				     BLK_INTEGRITY_REF_TAG; /* [한국어] reftag 검증 경로 */
-			break;	/* [한국어] 루프/switch 탈출 */
-		case NVME_NVM_NS_64B_GUARD:	/* [한국어] switch 케이스 — 아키텍처 정책 선택 */
-			bi->csum_type = BLK_INTEGRITY_CSUM_CRC64;	/* [한국어] nvme_init_integrity 상태/필드 갱신 — 후속 정책 입력 */
-			bi->tag_size = sizeof(u16);	/* [한국어] nvme_init_integrity 상태/필드 갱신 — 후속 정책 입력 */
-			bi->flags |= BLK_INTEGRITY_DEVICE_CAPABLE |	/* [한국어] nvme_init_integrity 실행 단계 — 상태기계·blk-mq·에러복구 맥락 */
-				     BLK_INTEGRITY_REF_TAG;	/* [한국어] nvme_init_integrity 실행 단계 — 상태기계·blk-mq·에러복구 맥락 */
-			break;	/* [한국어] 루프/switch 탈출 */
-		default:	/* [한국어] default 분기 — 폴백 정책 */
-			break;	/* [한국어] 루프/switch 탈출 */
+			break;
+		case NVME_NVM_NS_64B_GUARD:	/* [한국어] 확장 PI — 태그가 더 크다 */
+			bi->csum_type = BLK_INTEGRITY_CSUM_CRC64;
+			bi->tag_size = sizeof(u16);	/* [한국어] TYPE3 과 달리 참조 태그가 따로 있어 앱 태그만 센다 */
+			bi->flags |= BLK_INTEGRITY_DEVICE_CAPABLE |
+				     BLK_INTEGRITY_REF_TAG;
+			break;
+		default:
+			break;
 		}
-		break;	/* [한국어] 루프/switch 탈출 */
-	default:	/* [한국어] default 분기 — 폴백 정책 */
+		break;
+	default:	/* [한국어] PI 를 쓰지 않는 네임스페이스 */
 		break; /* [한국어] PI 타입 없음 — csum 미설정 */
 	}
 
 	bi->flags |= BLK_SPLIT_INTERVAL_CAPABLE; /* [한국어] interval 경계 분할 허용 */
 	bi->metadata_size = head->ms; /* [한국어] LBA 당 메타 바이트 */
-	if (bi->csum_type) {	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
+	if (bi->csum_type) {	/* [한국어] 체크섬 종류가 정해졌을 때만 무결성을 켠다 */
 		bi->pi_tuple_size = head->pi_size; /* [한국어] 튜플 크기(8/16…) */
 		bi->pi_offset = info->pi_offset; /* [한국어] 메타 내 PI 오프셋 */
 	}
@@ -2333,7 +2333,7 @@ static int nvme_identify_ns_nvm(struct nvme_ctrl *ctrl, unsigned int nsid,
 		.identify.csi		= NVME_CSI_NVM, /* [한국어] NVM 커맨드셋 */
 	};
 	struct nvme_id_ns_nvm *nvm; /* [한국어] CSI-specific Identify 버퍼 */
-	int ret; /* [한국어] 함수 누적 결과 — 에러 언와인드 축 */
+	int ret;
 
 	nvm = kzalloc_obj(*nvm); /* [한국어] 0-초기화 할당 */
 	if (!nvm)
@@ -2344,7 +2344,7 @@ static int nvme_identify_ns_nvm(struct nvme_ctrl *ctrl, unsigned int nsid,
 		kfree(nvm); /* [한국어] 실패 시 여기서 해제 */
 	else
 		*nvmp = nvm; /* [한국어] 성공 — 호출자 소유 */
-	return ret; /* [한국어] 누적 결과 전파 — 에러 언와인드 포함 */
+	return ret;
 }
 
 /*
@@ -2367,14 +2367,14 @@ static void nvme_configure_pi_elbas(struct nvme_ns_head *head,
 		guard_type = nvme_elbaf_qualified_guard_type(elbaf); /* [한국어] qualified PI 포맷 해석 */
 
 	head->guard_type = guard_type; /* [한국어] head 에 캐시 — setup_rw/integrity 사용 */
-	switch (head->guard_type) {	/* [한국어] 다중 분기 — 상태·opcode·CSI 축 */
-	case NVME_NVM_NS_64B_GUARD:	/* [한국어] switch 케이스 — 아키텍처 정책 선택 */
+	switch (head->guard_type) {	/* [한국어] 가드 형식이 보호 정보 튜플의 크기를 정한다 */
+	case NVME_NVM_NS_64B_GUARD:
 		head->pi_size = sizeof(struct crc64_pi_tuple); /* [한국어] 16B CRC64 튜플 */
-		break;	/* [한국어] 루프/switch 탈출 */
-	case NVME_NVM_NS_16B_GUARD:	/* [한국어] switch 케이스 — 아키텍처 정책 선택 */
+		break;
+	case NVME_NVM_NS_16B_GUARD:
 		head->pi_size = sizeof(struct t10_pi_tuple); /* [한국어] 8B T10 튜플 */
-		break;	/* [한국어] 루프/switch 탈출 */
-	default:	/* [한국어] default 분기 — 폴백 정책 */
+		break;
+	default:	/* [한국어] 모르는 형식이면 크기를 0 으로 두어 PI 를 쓰지 않게 한다 */
 		break; /* [한국어] 미지 guard — pi_size 미설정 */
 	}
 }
@@ -2391,23 +2391,23 @@ static void nvme_configure_metadata(struct nvme_ctrl *ctrl,
 	if (!head->ms || !(ctrl->ops->flags & NVME_F_METADATA_SUPPORTED))
 		return;	/* [한국어] 메타 없음 또는 트랜스포트 미지원 */
 
-	if (nvm && (ctrl->ctratt & NVME_CTRL_ATTR_ELBAS)) {	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
+	if (nvm && (ctrl->ctratt & NVME_CTRL_ATTR_ELBAS)) {	/* [한국어] 확장 LBA 형식을 지원하면 가드 종류가 여러 가지다 */
 		nvme_configure_pi_elbas(head, id, nvm);	/* [한국어] 확장 LBA 포맷 guard */
-	} else {	/* [한국어] nvme_configure_metadata 실행 단계 — 상태기계·blk-mq·에러복구 맥락 */
+	} else {	/* [한국어] 아니면 전통적인 16바이트 T10-PI 하나뿐이다 */
 		head->pi_size = sizeof(struct t10_pi_tuple);	/* [한국어] 레거시 8B T10 */
-		head->guard_type = NVME_NVM_NS_16B_GUARD;	/* [한국어] nvme_configure_metadata 상태/필드 갱신 — 후속 정책 입력 */
+		head->guard_type = NVME_NVM_NS_16B_GUARD;
 	}
 
 	if (head->pi_size && head->ms >= head->pi_size)
 		head->pi_type = id->dps & NVME_NS_DPS_PI_MASK;	/* [한국어] type1/2/3 */
-	if (!(id->dps & NVME_NS_DPS_PI_FIRST)) {	/* [한국어] NVMe/blk 상수 — 정책 분기 입력 */
+	if (!(id->dps & NVME_NS_DPS_PI_FIRST)) {	/* [한국어] 보호 정보가 메타데이터의 앞이 아니라 뒤에 온다 */
 		if (disable_pi_offsets)
 			head->pi_type = 0;	/* [한국어] 호환: 오프셋 PI 비활성 */
 		else
 			info->pi_offset = head->ms - head->pi_size;	/* [한국어] 후미 PI */
 	}
 
-	if (ctrl->ops->flags & NVME_F_FABRICS) {	/* [한국어] 트랜스포트 ops 콜백 위임 */
+	if (ctrl->ops->flags & NVME_F_FABRICS) {	/* [한국어] fabrics 는 메타데이터를 별도 버퍼로 보낼 수 없다 */
 		/*
 		 * The NVMe over Fabrics specification only supports metadata as
 		 * part of the extended data LBA.  We rely on HCA/HBA support to
@@ -2429,7 +2429,7 @@ static void nvme_configure_metadata(struct nvme_ctrl *ctrl,
 		 */
 		if (ctrl->max_integrity_segments && nvme_ns_has_pi(head))
 			head->features |= NVME_NS_METADATA_SUPPORTED;	/* [한국어] PI 만 블록 경로 허용 */
-	} else {	/* [한국어] nvme_configure_metadata 실행 단계 — 상태기계·blk-mq·에러복구 맥락 */
+	} else {	/* [한국어] PCIe 는 별도 버퍼도 가능하다 */
 		/*
 		 * For PCIe controllers, we can't easily remap the separate
 		 * metadata buffer from the block layer and thus require a
@@ -2456,14 +2456,14 @@ static u32 nvme_configure_atomic_write(struct nvme_ns *ns,
 	if (id->nabo)
 		return bs;	/* [한국어] 오프셋 경계 미지원 — 원자성 비활성 */
 
-	if ((id->nsfeat & NVME_NS_FEAT_ATOMICS) && id->nawupf) {	/* [한국어] NVMe/blk 상수 — 정책 분기 입력 */
+	if ((id->nsfeat & NVME_NS_FEAT_ATOMICS) && id->nawupf) {	/* [한국어] 네임스페이스가 원자 쓰기 크기를 알렸다 */
 		/*
 		 * Use the per-namespace atomic write unit when available.
 		 */
 		atomic_bs = (1 + le16_to_cpu(id->nawupf)) * bs;	/* [한국어] 0's based NAWUPF */
 		if (id->nabspf)
 			boundary = (le16_to_cpu(id->nabspf) + 1) * bs;	/* [한국어] 원자 경계 */
-	} else {	/* [한국어] nvme_configure_atomic_write 실행 단계 — 상태기계·blk-mq·에러복구 맥락 */
+	} else {	/* [한국어] 알리지 않았으면 컨트롤러 수준 값을 쓴다 */
 		if (ns->ctrl->awupf)
 			dev_info_once(ns->ctrl->device,
 				"AWUPF ignored, only NAWUPF accepted\n");	/* [한국어] 컨트롤러 AWUPF 무시 정책 */
@@ -2478,16 +2478,16 @@ static u32 nvme_configure_atomic_write(struct nvme_ns *ns,
 	return atomic_bs; /* [한국어] 원자 쓰기 바이트 단위(queue_limits 반영 후) */
 }
 
-static u32 nvme_max_drv_segments(struct nvme_ctrl *ctrl)	/* [한국어] NVMe host 코어 헬퍼 API */
+static u32 nvme_max_drv_segments(struct nvme_ctrl *ctrl)	/* [한국어] 트랜스포트가 한 요청에 실을 수 있는 세그먼트 상한 */
 {
 	return ctrl->max_hw_sectors / (NVME_CTRL_PAGE_SIZE >> SECTOR_SHIFT) + 1; /* [한국어] MDTS→세그먼트 추정 */
 }
 
-static void nvme_set_ctrl_limits(struct nvme_ctrl *ctrl,	/* [한국어] NVMe host 코어 헬퍼 API */
+static void nvme_set_ctrl_limits(struct nvme_ctrl *ctrl,	/* [한국어] 컨트롤러 능력을 블록 계층 한계로 옮긴다 */
 		struct queue_limits *lim, bool is_admin)
 {
 	lim->max_hw_sectors = ctrl->max_hw_sectors; /* [한국어] MDTS 기반 하드웨어 섹터 상한 */
-	lim->max_segments = min_t(u32, USHRT_MAX,	/* [한국어] nvme_set_ctrl_limits 연속 인자/초기화 항목 */
+	lim->max_segments = min_t(u32, USHRT_MAX,	/* [한국어] 블록 계층 필드가 16비트라 그 이상은 담기지 않는다 */
 		min_not_zero(nvme_max_drv_segments(ctrl), ctrl->max_segments));
 	lim->max_integrity_segments = ctrl->max_integrity_segments; /* [한국어] PI 메타 세그먼트 상한 */
 	lim->virt_boundary_mask = ctrl->ops->get_virt_boundary(ctrl, is_admin); /* [한국어] 트랜스포트 virt 경계 */
@@ -2512,20 +2512,20 @@ static bool nvme_update_disk_info(struct nvme_ns *ns, struct nvme_id_ns *id,
 	 * or smaller than a sector size yet, so catch this early and don't
 	 * allow block I/O.
 	 */
-	if (blk_validate_block_size(bs)) {	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
+	if (blk_validate_block_size(bs)) {	/* [한국어] 위 영어 주석대로 블록 계층이 다룰 수 없는 크기다 */
 		bs = (1 << 9);	/* [한국어] 폴백 512B — valid=false 로 용량 0 */
-		valid = false;	/* [한국어] nvme_update_disk_info 상태/필드 갱신 — 후속 정책 입력 */
+		valid = false;	/* [한국어] 512 로 대체하되 I/O 는 막는다 — 크기가 틀린 채 읽고 쓰면 데이터가 어긋난다 */
 	}
 
 	phys_bs = bs; /* [한국어] 기본 물리 블록 = 논리 블록 */
 	atomic_bs = nvme_configure_atomic_write(ns, id, lim, bs);	/* [한국어] NAWUPF 반영 */
 
 	optperf = id->nsfeat >> NVME_NS_FEAT_OPTPERF_SHIFT;	/* [한국어] 최적 성능 힌트 비트 */
-	if (ctrl->vs >= NVME_VS(2, 1, 0))	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
+	if (ctrl->vs >= NVME_VS(2, 1, 0))	/* [한국어] 2.1 에서 마스크가 넓어졌다 */
 		optperf &= NVME_NS_FEAT_OPTPERF_MASK_2_1;
-	else	/* [한국어] 나머지 경로 — 기본/폴백 */
+	else	/* [한국어] 그 이전 스펙의 좁은 마스크 */
 		optperf &= NVME_NS_FEAT_OPTPERF_MASK;
-	if (optperf) {	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
+	if (optperf) {	/* [한국어] 최적 성능 필드가 유효하면 정렬 힌트로 쓴다 */
 		/* NPWG = Namespace Preferred Write Granularity */
 		phys_bs = bs * (1 + le16_to_cpu(id->npwg));	/* [한국어] 선호 쓰기 단위 */
 		/* NOWS = Namespace Optimal Write Size */
@@ -2551,8 +2551,8 @@ static bool nvme_update_disk_info(struct nvme_ns *ns, struct nvme_id_ns *id,
 	if (ctrl->dmrsl && ctrl->dmrsl <= nvme_sect_to_lba(ns->head, UINT_MAX))
 		lim->max_hw_discard_sectors =
 			nvme_lba_to_sect(ns->head, ctrl->dmrsl);	/* [한국어] Dataset Management 범위 한도 */
-	else if (ctrl->oncs & NVME_CTRL_ONCS_DSM)	/* [한국어] 대안 정책 분기 */
-		lim->max_hw_discard_sectors = UINT_MAX;	/* [한국어] nvme_update_disk_info 상태/필드 갱신 — 후속 정책 입력 */
+	else if (ctrl->oncs & NVME_CTRL_ONCS_DSM)	/* [한국어] DSM 만 지원하고 상한을 알리지 않았다 */
+		lim->max_hw_discard_sectors = UINT_MAX;	/* [한국어] 제한 없음 — 블록 계층이 세그먼트 수로만 나눈다 */
 	else
 		lim->max_hw_discard_sectors = 0;	/* [한국어] discard 미지원 */
 
@@ -2574,37 +2574,37 @@ static bool nvme_update_disk_info(struct nvme_ns *ns, struct nvme_id_ns *id,
 	 * NPDG(L) is the larger. If neither NPDG, NPDGL, NPDA, nor NPDAL are
 	 * supported, default the discard_granularity to the logical block size.
 	 */
-	if (optperf & 0x2 && nvm && nvm->npdgl)	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
+	if (optperf & 0x2 && nvm && nvm->npdgl)	/* [한국어] 확장 필드가 있으면 32비트 값을 쓴다 — 큰 granularity 를 표현할 수 있다 */
 		npdg = le32_to_cpu(nvm->npdgl);
-	else if (optperf & 0x1)	/* [한국어] 대안 정책 분기 */
-		npdg = from0based(id->npdg);	/* [한국어] nvme_update_disk_info 상태/필드 갱신 — 후속 정책 입력 */
-	if (optperf & 0x2 && nvm && nvm->npdal)	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
+	else if (optperf & 0x1)	/* [한국어] 아니면 좁은 0-based 필드 */
+		npdg = from0based(id->npdg);
+	if (optperf & 0x2 && nvm && nvm->npdal)	/* [한국어] 정렬 값도 같은 규칙 */
 		npda = le32_to_cpu(nvm->npdal);
-	else if (optperf)	/* [한국어] 대안 정책 분기 */
-		npda = from0based(id->npda);	/* [한국어] nvme_update_disk_info 상태/필드 갱신 — 후속 정책 입력 */
-	if (check_mul_overflow(max(npdg, npda), lim->logical_block_size,	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
-			       &lim->discard_granularity))	/* [한국어] nvme_update_disk_info 하위 헬퍼 호출 — 계층 경계 위임 */
-		lim->discard_granularity = lim->logical_block_size;	/* [한국어] nvme_update_disk_info 상태/필드 갱신 — 후속 정책 입력 */
+	else if (optperf)
+		npda = from0based(id->npda);
+	if (check_mul_overflow(max(npdg, npda), lim->logical_block_size,	/* [한국어] 블록 수를 바이트로 바꾸다 넘칠 수 있다 */
+			       &lim->discard_granularity))
+		lim->discard_granularity = lim->logical_block_size;	/* [한국어] 위 영어 주석대로 넘치면 논리 블록 크기로 되돌린다 */
 
-	if (ctrl->dmrl)	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
-		lim->max_discard_segments = ctrl->dmrl;	/* [한국어] nvme_update_disk_info 상태/필드 갱신 — 후속 정책 입력 */
-	else	/* [한국어] 나머지 경로 — 기본/폴백 */
-		lim->max_discard_segments = NVME_DSM_MAX_RANGES;	/* [한국어] nvme_update_disk_info 상태/필드 갱신 — 후속 정책 입력 */
+	if (ctrl->dmrl)	/* [한국어] 컨트롤러가 한 명령의 최대 범위 수를 알렸다 */
+		lim->max_discard_segments = ctrl->dmrl;
+	else	/* [한국어] 안 알렸으면 스펙 상한 */
+		lim->max_discard_segments = NVME_DSM_MAX_RANGES;
 	return valid; /* [한국어] false 면 호출자가 capacity 0 으로 I/O 차단 */
 }
 
-static bool nvme_ns_is_readonly(struct nvme_ns *ns, struct nvme_ns_info *info)	/* [한국어] NVMe host 코어 헬퍼 API */
+static bool nvme_ns_is_readonly(struct nvme_ns *ns, struct nvme_ns_info *info)	/* [한국어] 네임스페이스가 읽기 전용인가 — 미디어나 예약 때문일 수 있다 */
 {
 	return info->is_readonly || test_bit(NVME_NS_FORCE_RO, &ns->flags); /* [한국어] 장치 RO 또는 호스트 FORCE_RO */
 }
 
-static inline bool nvme_first_scan(struct gendisk *disk)	/* [한국어] NVMe host 코어 헬퍼 API */
+static inline bool nvme_first_scan(struct gendisk *disk)	/* [한국어] 아직 등록 전인 디스크인가. 경고를 한 번만 내는 판단에 쓴다 */
 {
 	/* nvme_alloc_ns() scans the disk prior to adding it */
 	return !disk_live(disk); /* [한국어] add_disk 전 첫 스캔 여부 */
 }
 
-static void nvme_set_chunk_sectors(struct nvme_ns *ns, struct nvme_id_ns *id,	/* [한국어] NVMe host 코어 헬퍼 API */
+static void nvme_set_chunk_sectors(struct nvme_ns *ns, struct nvme_id_ns *id,	/* [한국어] I/O 경계를 블록 계층에 알려 요청이 그 경계를 넘지 않게 한다 */
 		struct queue_limits *lim)
 {
 	struct nvme_ctrl *ctrl = ns->ctrl; /* [한국어] quirk/MDTS 조회용 */
@@ -2619,18 +2619,18 @@ static void nvme_set_chunk_sectors(struct nvme_ns *ns, struct nvme_id_ns *id,	/*
 	if (!iob)
 		return;	/* [한국어] 경계 없음 — chunk 미설정 */
 
-	if (!is_power_of_2(iob)) {	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
+	if (!is_power_of_2(iob)) {	/* [한국어] 블록 계층의 chunk_sectors 는 2의 거듭제곱만 다룬다 */
 		if (nvme_first_scan(ns->disk))
 			pr_warn("%s: ignoring unaligned IO boundary:%u\n",
 				ns->disk->disk_name, iob);	/* [한국어] 비 2승은 블록 계층 미지원 */
-		return;	/* [한국어] void 조기 반환 — no-op/가드 */
+		return;
 	}
 
-	if (blk_queue_is_zoned(ns->disk->queue)) {	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
+	if (blk_queue_is_zoned(ns->disk->queue)) {	/* [한국어] ZNS 는 존 크기가 이미 경계 역할을 한다 */
 		if (nvme_first_scan(ns->disk))
 			pr_warn("%s: ignoring zoned namespace IO boundary\n",
 				ns->disk->disk_name);	/* [한국어] ZNS 는 zone 경계가 우선 */
-		return;	/* [한국어] void 조기 반환 — no-op/가드 */
+		return;
 	}
 
 	lim->chunk_sectors = iob;	/* [한국어] bio 분할 청크 */
@@ -2642,7 +2642,7 @@ static int nvme_update_ns_info_generic(struct nvme_ns *ns,
 {
 	struct queue_limits lim; /* [한국어] 미지원 CSI limits 스냅숏 */
 	unsigned int memflags; /* [한국어] freeze 플래그 */
-	int ret; /* [한국어] 함수 누적 결과 — 에러 언와인드 축 */
+	int ret;
 
 	lim = queue_limits_start_update(ns->disk->queue);	/* [한국어] limits 스냅숏 시작 */
 	nvme_set_ctrl_limits(ns->ctrl, &lim, false);	/* [한국어] 컨트롤러 MDTS/segments */
@@ -2655,7 +2655,7 @@ static int nvme_update_ns_info_generic(struct nvme_ns *ns,
 	/* Hide the block-interface for these devices */
 	if (!ret)
 		ret = -ENODEV;	/* [한국어] 호출자가 GENHD_FL_HIDDEN 로 해석 */
-	return ret; /* [한국어] 누적 결과 전파 — 에러 언와인드 포함 */
+	return ret;
 }
 
 /* [한국어] nvme_query_fdp_granularity - FDP 구성 로그에서 선택 인덱스의 RUNS 추출 */
@@ -2670,17 +2670,17 @@ static int nvme_query_fdp_granularity(struct nvme_ctrl *ctrl,
 
 	ret = nvme_get_log_lsi(ctrl, 0, NVME_LOG_FDP_CONFIGS, 0,	/* [한국어] Get Log Page — AER/FW/ANA */
 			       NVME_CSI_NVM, &hdr, size, 0, info->endgid);	/* [한국어] endgid=LSI */
-	if (ret) {	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
-		dev_warn(ctrl->device,	/* [한국어] 장치/전역 로그 */
-			 "FDP configs log header status:0x%x endgid:%d\n", ret,	/* [한국어] nvme_query_fdp_granularity 실행 단계 — 상태기계·blk-mq·에러복구 맥락 */
-			 info->endgid);	/* [한국어] nvme_query_fdp_granularity 하위 헬퍼 호출 — 계층 경계 위임 */
-		return ret; /* [한국어] 조기 실패 전파 — 호출자 복구/롤백 */
+	if (ret) {	/* [한국어] FDP 설정 로그의 헤더를 못 읽었다 */
+		dev_warn(ctrl->device,
+			 "FDP configs log header status:0x%x endgid:%d\n", ret,
+			 info->endgid);
+		return ret;
 	}
 
 	size = le32_to_cpu(hdr.sze);	/* [한국어] 전체 로그 바이트 */
-	if (size > PAGE_SIZE * MAX_ORDER_NR_PAGES) {	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
-		dev_warn(ctrl->device, "FDP config size too large:%zu\n",	/* [한국어] 장치/전역 로그 */
-			 size);	/* [한국어] nvme_query_fdp_granularity 하위 헬퍼 호출 — 계층 경계 위임 */
+	if (size > PAGE_SIZE * MAX_ORDER_NR_PAGES) {	/* [한국어] 헤더가 알린 크기를 그대로 믿고 잡으면 안 된다 */
+		dev_warn(ctrl->device, "FDP config size too large:%zu\n",
+			 size);
 		return 0; /* [한국어] 비치명 — FDP 없이 진행 */
 	}
 
@@ -2690,20 +2690,20 @@ static int nvme_query_fdp_granularity(struct nvme_ctrl *ctrl,
 
 	ret = nvme_get_log_lsi(ctrl, 0, NVME_LOG_FDP_CONFIGS, 0,	/* [한국어] Get Log Page — AER/FW/ANA */
 			       NVME_CSI_NVM, h, size, 0, info->endgid);
-	if (ret) {	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
-		dev_warn(ctrl->device,	/* [한국어] 장치/전역 로그 */
-			 "FDP configs log status:0x%x endgid:%d\n", ret,	/* [한국어] nvme_query_fdp_granularity 실행 단계 — 상태기계·blk-mq·에러복구 맥락 */
-			 info->endgid);	/* [한국어] nvme_query_fdp_granularity 하위 헬퍼 호출 — 계층 경계 위임 */
-		goto out;	/* [한국어] 에러 언와인드/공통 정리 라벨 */
+	if (ret) {	/* [한국어] 본문을 못 읽었다 */
+		dev_warn(ctrl->device,
+			 "FDP configs log status:0x%x endgid:%d\n", ret,
+			 info->endgid);
+		goto out;
 	}
 
 	n = le16_to_cpu(h->numfdpc) + 1;	/* [한국어] 0's based 구성 개수 */
-	if (fdp_idx > n) {	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
-		dev_warn(ctrl->device, "FDP index:%d out of range:%d\n",	/* [한국어] 장치/전역 로그 */
-			 fdp_idx, n);	/* [한국어] nvme_query_fdp_granularity 하위 헬퍼 호출 — 계층 경계 위임 */
+	if (fdp_idx > n) {	/* [한국어] 컨트롤러가 알린 설정 번호가 목록 범위를 벗어났다 */
+		dev_warn(ctrl->device, "FDP index:%d out of range:%d\n",
+			 fdp_idx, n);
 		/* Proceed without registering FDP streams */
-		ret = 0;	/* [한국어] nvme_query_fdp_granularity 상태/필드 갱신 — 후속 정책 입력 */
-		goto out;	/* [한국어] 에러 언와인드/공통 정리 라벨 */
+		ret = 0;	/* [한국어] 위 영어 주석대로 FDP 없이 진행한다 — 성능 최적화일 뿐 필수가 아니다 */
+		goto out;
 	}
 
 	log = h + 1;	/* [한국어] 헤더 다음 첫 descriptor */
@@ -2711,25 +2711,25 @@ static int nvme_query_fdp_granularity(struct nvme_ctrl *ctrl,
 	end = log + size - sizeof(*h); /* [한국어] 오버리드 방지 끝 경계 */
 	for (i = 0; i < fdp_idx; i++) {	/* [한국어] 선택 인덱스까지 스킵 */
 		log += le16_to_cpu(desc->dsze);	/* [한국어] 엔디안 변환 — 스펙 온와이어 */
-		desc = log;	/* [한국어] nvme_query_fdp_granularity 상태/필드 갱신 — 후속 정책 입력 */
-		if (log >= end) {	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
-			dev_warn(ctrl->device,	/* [한국어] 장치/전역 로그 */
-				 "FDP invalid config descriptor list\n");	/* [한국어] nvme_query_fdp_granularity 하위 헬퍼 호출 — 계층 경계 위임 */
-			ret = 0;	/* [한국어] nvme_query_fdp_granularity 상태/필드 갱신 — 후속 정책 입력 */
-			goto out;	/* [한국어] 에러 언와인드/공통 정리 라벨 */
+		desc = log;	/* [한국어] 서술자는 가변 길이라 dsze 만큼씩 건너뛴다 */
+		if (log >= end) {	/* [한국어] 목록 끝을 넘었다 — 로그가 손상됐다 */
+			dev_warn(ctrl->device,
+				 "FDP invalid config descriptor list\n");
+			ret = 0;	/* [한국어] 역시 FDP 없이 진행한다 */
+			goto out;
 		}
 	}
 
 	if (le32_to_cpu(desc->nrg) > 1) {	/* [한국어] 엔디안 변환 — 스펙 온와이어 */
 		dev_warn(ctrl->device, "FDP NRG > 1 not supported\n");	/* [한국어] multi-RG 미구현 */
-		ret = 0;	/* [한국어] nvme_query_fdp_granularity 상태/필드 갱신 — 후속 정책 입력 */
-		goto out;	/* [한국어] 에러 언와인드/공통 정리 라벨 */
+		ret = 0;
+		goto out;
 	}
 
 	info->runs = le64_to_cpu(desc->runs);	/* [한국어] Reclaim Unit Nominal Size → stream 입도 */
-out:	/* [한국어] nvme_query_fdp_granularity 에러 언와인드 라벨 */
+out:
 	kvfree(h); /* [한국어] FDP 구성 로그 버퍼 해제 */
-	return ret; /* [한국어] 누적 결과 전파 — 에러 언와인드 포함 */
+	return ret;
 }
 
 /* [한국어] nvme_query_fdp_info - FDP enable 시 RUHS 로 placement ID 배열 구축 */
@@ -2751,19 +2751,19 @@ static int nvme_query_fdp_info(struct nvme_ns *ns, struct nvme_ns_info *info)
 	if (head->nr_plids)
 		return 0; /* [한국어] 성공 */
 
-	ret = nvme_get_features(ctrl, NVME_FEAT_FDP, info->endgid, NULL, 0,	/* [한국어] Identify/Features 제어 평면 */
-				&fdp);	/* [한국어] nvme_query_fdp_info 하위 헬퍼 호출 — 계층 경계 위임 */
-	if (ret) {	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
-		dev_warn(ctrl->device, "FDP get feature status:0x%x\n", ret);	/* [한국어] 장치/전역 로그 */
-		return ret; /* [한국어] 조기 실패 전파 — 호출자 복구/롤백 */
+	ret = nvme_get_features(ctrl, NVME_FEAT_FDP, info->endgid, NULL, 0,	/* [한국어] 어느 FDP 설정이 켜져 있는지 묻는다 */
+				&fdp);
+	if (ret) {
+		dev_warn(ctrl->device, "FDP get feature status:0x%x\n", ret);
+		return ret;
 	}
 
 	if (!(fdp.flags & FDPCFG_FDPE))
 		return 0; /* [한국어] 성공 */
 
 	ret = nvme_query_fdp_granularity(ctrl, info, fdp.fdpcidx); /* [한국어] RUNS 단위 조회 */
-	if (!info->runs)	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
-		return ret; /* [한국어] 조기 실패 전파 — 호출자 복구/롤백 */
+	if (!info->runs)	/* [한국어] 회수 단위 크기를 못 얻었으면 스트림을 등록해도 소용이 없다 */
+		return ret;
 
 	size = struct_size(ruhs, ruhsd, S8_MAX - 1); /* [한국어] 최대 RUHS 엔트리 크기 */
 	ruhs = kzalloc(size, GFP_KERNEL); /* [한국어] RUHS 버퍼 할당 */
@@ -2775,31 +2775,31 @@ static int nvme_query_fdp_info(struct nvme_ns *ns, struct nvme_ns_info *info)
 	c.imr.mo = NVME_IO_MGMT_RECV_MO_RUHS; /* [한국어] Reclaim Unit Handle Status */
 	c.imr.numd = cpu_to_le32(nvme_bytes_to_numd(size)); /* [한국어] dword 수 */
 	ret = nvme_submit_sync_cmd(ns->queue, &c, ruhs, size); /* [한국어] IO 큐 동기 제출 */
-	if (ret) {	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
-		dev_warn(ctrl->device, "FDP io-mgmt status:0x%x\n", ret);	/* [한국어] 장치/전역 로그 */
-		goto free;	/* [한국어] 에러 언와인드/공통 정리 라벨 */
+	if (ret) {	/* [한국어] RUH 상태를 못 읽었다 */
+		dev_warn(ctrl->device, "FDP io-mgmt status:0x%x\n", ret);
+		goto free;
 	}
 
 	head->nr_plids = le16_to_cpu(ruhs->nruhsd); /* [한국어] placement ID 개수 */
-	if (!head->nr_plids)	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
-		goto free;	/* [한국어] 에러 언와인드/공통 정리 라벨 */
+	if (!head->nr_plids)	/* [한국어] 쓸 수 있는 배치 식별자가 없다 */
+		goto free;
 
-	head->plids = kcalloc(head->nr_plids, sizeof(*head->plids),	/* [한국어] 커널 힙 할당/해제 */
-			      GFP_KERNEL);	/* [한국어] nvme_query_fdp_info 하위 헬퍼 호출 — 계층 경계 위임 */
-	if (!head->plids) {	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
-		dev_warn(ctrl->device,	/* [한국어] 장치/전역 로그 */
-			 "failed to allocate %u FDP placement IDs\n",	/* [한국어] nvme_query_fdp_info 실행 단계 — 상태기계·blk-mq·에러복구 맥락 */
-			 head->nr_plids);	/* [한국어] nvme_query_fdp_info 하위 헬퍼 호출 — 계층 경계 위임 */
-		head->nr_plids = 0;	/* [한국어] nvme_query_fdp_info 상태/필드 갱신 — 후속 정책 입력 */
-		ret = -ENOMEM;	/* [한국어] nvme_query_fdp_info 상태/필드 갱신 — 후속 정책 입력 */
-		goto free;	/* [한국어] 에러 언와인드/공통 정리 라벨 */
+	head->plids = kcalloc(head->nr_plids, sizeof(*head->plids),	/* [한국어] 쓰기 스트림 번호를 배치 식별자로 바꾸는 표 */
+			      GFP_KERNEL);
+	if (!head->plids) {
+		dev_warn(ctrl->device,
+			 "failed to allocate %u FDP placement IDs\n",
+			 head->nr_plids);
+		head->nr_plids = 0;	/* [한국어] 개수를 0 으로 지워야 제출 경로가 없는 배열을 색인하지 않는다 */
+		ret = -ENOMEM;
+		goto free;
 	}
 
-	for (i = 0; i < head->nr_plids; i++)	/* [한국어] 순회 — NS·세그먼트·파워스테이트 */
+	for (i = 0; i < head->nr_plids; i++)	/* [한국어] 스트림 번호 n 은 plids[n-1] 로 매핑된다 */
 		head->plids[i] = le16_to_cpu(ruhs->ruhsd[i].pid);
-free:	/* [한국어] nvme_query_fdp_info 에러 언와인드 라벨 */
+free:
 	kfree(ruhs); /* [한국어] RUHS 상태 버퍼 해제 */
-	return ret; /* [한국어] 누적 결과 전파 — 에러 언와인드 포함 */
+	return ret;
 }
 
 /* [한국어] nvme_update_ns_info_block - 블록 NS 용량·메타·존·FDP·integrity 일괄 갱신 (큐 freeze) */
@@ -2813,13 +2813,13 @@ static int nvme_update_ns_info_block(struct nvme_ns *ns,
 	unsigned int memflags; /* [한국어] freeze 반환 플래그 */
 	sector_t capacity; /* [한국어] 512B 섹터 단위 가시 용량 */
 	unsigned lbaf; /* [한국어] 활성 LBA 포맷 인덱스 */
-	int ret; /* [한국어] 함수 누적 결과 — 에러 언와인드 축 */
+	int ret;
 
 	ret = nvme_identify_ns(ns->ctrl, info->nsid, &id); /* [한국어] CNS_NS 동기 */
-	if (ret)	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
-		return ret; /* [한국어] 조기 실패 전파 — 호출자 복구/롤백 */
+	if (ret)
+		return ret;
 
-	if (id->ncap == 0) {	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
+	if (id->ncap == 0) {	/* [한국어] 활성이 아닌 네임스페이스 */
 		/* namespace not allocated or attached */
 		info->is_removed = true; /* [한국어] 스캔 제거 대상 표시 */
 		ret = -ENXIO; /* [한국어] 미할당 NS */
@@ -2827,23 +2827,23 @@ static int nvme_update_ns_info_block(struct nvme_ns *ns,
 	}
 	lbaf = nvme_lbaf_index(id->flbas); /* [한국어] flbas 하위 니블 → 인덱스 */
 
-	if (nvme_id_cns_ok(ns->ctrl, NVME_ID_CNS_CS_NS)) {	/* [한국어] NVMe host 코어 헬퍼 API */
+	if (nvme_id_cns_ok(ns->ctrl, NVME_ID_CNS_CS_NS)) {	/* [한국어] 커맨드셋별 Identify 를 지원하는 컨트롤러 */
 		ret = nvme_identify_ns_nvm(ns->ctrl, info->nsid, &nvm); /* [한국어] ELBAF/PI 확장 */
 		if (ret < 0)
 			goto out; /* [한국어] 에러 언와인드 */
 	}
 
-	if (IS_ENABLED(CONFIG_BLK_DEV_ZONED) &&	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
-	    ns->head->ids.csi == NVME_CSI_ZNS) {	/* [한국어] nvme_update_ns_info_block 실행 단계 — 상태기계·blk-mq·에러복구 맥락 */
+	if (IS_ENABLED(CONFIG_BLK_DEV_ZONED) &&	/* [한국어] ZNS 네임스페이스면 존 정보를 더 읽는다 */
+	    ns->head->ids.csi == NVME_CSI_ZNS) {
 		ret = nvme_query_zone_info(ns, lbaf, &zi); /* [한국어] ZNS 존 기하 조회 */
-		if (ret < 0)	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
-			goto out;	/* [한국어] 에러 언와인드/공통 정리 라벨 */
+		if (ret < 0)
+			goto out;
 	}
 
-	if (ns->ctrl->ctratt & NVME_CTRL_ATTR_FDPS) {	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
+	if (ns->ctrl->ctratt & NVME_CTRL_ATTR_FDPS) {	/* [한국어] FDP 를 지원하면 배치 식별자를 읽는다 */
 		ret = nvme_query_fdp_info(ns, info); /* [한국어] FDP placement/RUNS */
-		if (ret < 0)	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
-			goto out;	/* [한국어] 에러 언와인드/공통 정리 라벨 */
+		if (ret < 0)
+			goto out;
 	}
 
 	lim = queue_limits_start_update(ns->disk->queue); /* [한국어] limits 스냅숏 시작 */
@@ -2891,15 +2891,15 @@ static int nvme_update_ns_info_block(struct nvme_ns *ns,
 	 * require that, it must be a no-op if reads from deallocated data
 	 * do not return zeroes.
 	 */
-	if ((id->dlfeat & 0x7) == 0x1 && (id->dlfeat & (1 << 3))) {	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
+	if ((id->dlfeat & 0x7) == 0x1 && (id->dlfeat & (1 << 3))) {	/* [한국어] 위 영어 주석대로 deallocate 후 읽기가 0 을 돌려준다고 보장한 경우만 */
 		ns->head->features |= NVME_NS_DEAC;	/* [한국어] Write Zeroes DEAC 허용 */
 		lim.max_hw_wzeroes_unmap_sectors = lim.max_write_zeroes_sectors; /* [한국어] unmap=zeroes 한도 */
 	}
 
 	ret = queue_limits_commit_update(ns->disk->queue, &lim);	/* [한국어] freeze 하 한계 확정 */
-	if (ret) {	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
+	if (ret) {	/* [한국어] 한계 갱신이 거부됐다 */
 		blk_mq_unfreeze_queue(ns->disk->queue, memflags); /* [한국어] commit 실패 시 즉시 unfreeze */
-		goto out;	/* [한국어] 에러 언와인드/공통 정리 라벨 */
+		goto out;	/* [한국어] 얼린 큐를 반드시 풀고 나간다 */
 	}
 
 	set_capacity_and_notify(ns->disk, capacity);	/* [한국어] 사용자 가시 용량 + uevent */
@@ -2907,7 +2907,7 @@ static int nvme_update_ns_info_block(struct nvme_ns *ns,
 	set_bit(NVME_NS_READY, &ns->flags);	/* [한국어] 제출 경로 허용 */
 	blk_mq_unfreeze_queue(ns->disk->queue, memflags);	/* [한국어] I/O 재개 */
 
-	if (blk_queue_is_zoned(ns->queue)) {	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
+	if (blk_queue_is_zoned(ns->queue)) {	/* [한국어] 존 정보를 블록 계층에 반영해야 한다 */
 		ret = blk_revalidate_disk_zones(ns->disk);	/* [한국어] 존 메타 재검증 */
 		if (ret && !nvme_first_scan(ns->disk))
 			goto out; /* [한국어] 재검증 실패(첫 스캔 제외) */
