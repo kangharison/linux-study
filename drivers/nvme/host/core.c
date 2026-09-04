@@ -4474,29 +4474,29 @@ static int nvme_global_check_duplicate_ids(struct nvme_subsystem *this,	/* [한�
 	 * a sanity check anyway.
 	 */
 	mutex_lock(&nvme_subsystems_lock);	/* [한국어] 전역 subsystem 목록 락 */
-	list_for_each_entry(s, &nvme_subsystems, entry) {	/* [한국어] 연결 리스트 순회(락 보유 전제) */
-		if (s == this)	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
-			continue;	/* [한국어] 다음 순회 스킵 */
+	list_for_each_entry(s, &nvme_subsystems, entry) {	/* [한국어] 다른 서브시스템까지 훑는다 — 식별자는 전역에서 유일해야 한다 */
+		if (s == this)	/* [한국어] 자기 자신은 호출자가 따로 검사한다 */
+			continue;
 		mutex_lock(&s->lock);	/* [한국어] 뮤텍스 진입 — sleep 가능 컨트롤 플레인 */
-		ret = nvme_subsys_check_duplicate_ids(s, ids);	/* [한국어] NVMe host 코어 헬퍼 API */
+		ret = nvme_subsys_check_duplicate_ids(s, ids);
 		mutex_unlock(&s->lock);	/* [한국어] 뮤텍스 해제 */
-		if (ret)	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
-			break;	/* [한국어] 루프/switch 탈출 */
+		if (ret)
+			break;
 	}
 	mutex_unlock(&nvme_subsystems_lock);	/* [한국어] 전역 subsystem 락 해제 */
 
-	return ret; /* [한국어] 누적 결과 전파 — 에러 언와인드 포함 */
+	return ret;
 }
 
 /* [한국어] nvme_init_ns_head - 중복 ID 정책, head 재사용/생성, siblings 연결 (multipath 핵심) */
 static int nvme_init_ns_head(struct nvme_ns *ns, struct nvme_ns_info *info)
 {
-	struct nvme_ctrl *ctrl = ns->ctrl;	/* [한국어] NVMe host 코어 헬퍼 API */
-	struct nvme_ns_head *head = NULL;	/* [한국어] NVMe host 코어 헬퍼 API */
-	int ret; /* [한국어] 함수 누적 결과 — 에러 언와인드 축 */
+	struct nvme_ctrl *ctrl = ns->ctrl;
+	struct nvme_ns_head *head = NULL;	/* [한국어] 찾거나 새로 만들 head */
+	int ret;
 
-	ret = nvme_global_check_duplicate_ids(ctrl->subsys, &info->ids);	/* [한국어] NVMe host 코어 헬퍼 API */
-	if (ret) {	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
+	ret = nvme_global_check_duplicate_ids(ctrl->subsys, &info->ids);	/* [한국어] 전역 중복부터 확인한다 */
+	if (ret) {	/* [한국어] 다른 장치가 같은 식별자를 쓰고 있다 */
 		/*
 		 * We've found two different namespaces on two different
 		 * subsystems that report the same ID.  This is pretty nasty
@@ -4513,102 +4513,102 @@ static int nvme_init_ns_head(struct nvme_ns *ns, struct nvme_ns_info *info)
 		 * device taking longer to startup) the other device could show
 		 * up at any time.
 		 */
-		nvme_print_device_info(ctrl);	/* [한국어] NVMe host 코어 헬퍼 API */
-		if ((ns->ctrl->ops->flags & NVME_F_FABRICS) || /* !PCIe */ /* [한국어] 트랜스포트 ops 콜백 위임 */
-		    ((ns->ctrl->subsys->cmic & NVME_CTRL_CMIC_MULTI_CTRL) &&	/* [한국어] nvme_init_ns_head 실행 단계 — 상태기계·blk-mq·에러복구 맥락 */
-		     info->is_shared)) {	/* [한국어] nvme_init_ns_head 실행 단계 — 상태기계·blk-mq·에러복구 맥락 */
+		nvme_print_device_info(ctrl);	/* [한국어] 어느 장치가 문제인지 사용자가 알 수 있게 남긴다 */
+		if ((ns->ctrl->ops->flags & NVME_F_FABRICS) || /* !PCIe */	/* [한국어] fabrics 이거나 공유 네임스페이스면 */
+		    ((ns->ctrl->subsys->cmic & NVME_CTRL_CMIC_MULTI_CTRL) &&	/* [한국어] 식별자가 실제로 의미를 갖는 구성이다 */
+		     info->is_shared)) {
 			dev_err(ctrl->device,	/* [한국어] 같은 NQN 을 알렸으면서 다중 컨트롤러를 지원하지 않는다 */
-				"ignoring nsid %d because of duplicate IDs\n",	/* [한국어] nvme_init_ns_head 실행 단계 — 상태기계·blk-mq·에러복구 맥락 */
-				info->nsid);	/* [한국어] nvme_init_ns_head 하위 헬퍼 호출 — 계층 경계 위임 */
-			return ret; /* [한국어] 중첩 가드 실패 — 상위 정책에 errno/status 전달 */
+				"ignoring nsid %d because of duplicate IDs\n",
+				info->nsid);
+			return ret;	/* [한국어] 그런 구성에서는 지우고 진행할 수 없다 — 잘못 묶으면 데이터가 섞인다 */
 		}
 
-		dev_err(ctrl->device,	/* [한국어] 장치/전역 로그 */
-			"clearing duplicate IDs for nsid %d\n", info->nsid);	/* [한국어] nvme_init_ns_head 하위 헬퍼 호출 — 계층 경계 위임 */
-		dev_err(ctrl->device,	/* [한국어] 장치/전역 로그 */
-			"use of /dev/disk/by-id/ may cause data corruption\n");	/* [한국어] nvme_init_ns_head 하위 헬퍼 호출 — 계층 경계 위임 */
-		memset(&info->ids.nguid, 0, sizeof(info->ids.nguid));	/* [한국어] 버퍼/식별자 조작 */
-		memset(&info->ids.uuid, 0, sizeof(info->ids.uuid));	/* [한국어] 버퍼/식별자 조작 */
-		memset(&info->ids.eui64, 0, sizeof(info->ids.eui64));	/* [한국어] 버퍼/식별자 조작 */
-		ctrl->quirks |= NVME_QUIRK_BOGUS_NID;	/* [한국어] NVMe/blk 상수 — 정책 분기 입력 */
+		dev_err(ctrl->device,	/* [한국어] PCIe 단독 장치면 식별자를 버리고 진행한다 */
+			"clearing duplicate IDs for nsid %d\n", info->nsid);
+		dev_err(ctrl->device,	/* [한국어] 다만 by-id 이름이 흔들린다는 것을 분명히 알린다 */
+			"use of /dev/disk/by-id/ may cause data corruption\n");
+		memset(&info->ids.nguid, 0, sizeof(info->ids.nguid));	/* [한국어] 세 식별자를 모두 지운다 */
+		memset(&info->ids.uuid, 0, sizeof(info->ids.uuid));
+		memset(&info->ids.eui64, 0, sizeof(info->ids.eui64));
+		ctrl->quirks |= NVME_QUIRK_BOGUS_NID;	/* [한국어] 이후 스캔도 이 장치의 식별자를 읽지 않게 한다 */
 	}
 
-	mutex_lock(&ctrl->subsys->lock);	/* [한국어] subsystem 락 — head/ctrls siblings */
-	head = nvme_find_ns_head(ctrl, info->nsid);	/* [한국어] NVMe host 코어 헬퍼 API */
-	if (!head) {	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
-		ret = nvme_subsys_check_duplicate_ids(ctrl->subsys, &info->ids);	/* [한국어] NVMe host 코어 헬퍼 API */
-		if (ret) {	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
-			dev_err(ctrl->device,	/* [한국어] 장치/전역 로그 */
-				"duplicate IDs in subsystem for nsid %d\n",	/* [한국어] nvme_init_ns_head 실행 단계 — 상태기계·blk-mq·에러복구 맥락 */
-				info->nsid);	/* [한국어] nvme_init_ns_head 하위 헬퍼 호출 — 계층 경계 위임 */
-			goto out_unlock;
-		}
-		head = nvme_alloc_ns_head(ctrl, info);	/* [한국어] NS 스캔·등록·제거 */
-		if (IS_ERR(head)) {	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
-			ret = PTR_ERR(head);	/* [한국어] nvme_init_ns_head 상태/필드 갱신 — 후속 정책 입력 */
-			goto out_unlock;
-		}
-	} else {	/* [한국어] nvme_init_ns_head 실행 단계 — 상태기계·blk-mq·에러복구 맥락 */
-		ret = -EINVAL;	/* [한국어] nvme_init_ns_head 상태/필드 갱신 — 후속 정책 입력 */
-		if ((!info->is_shared || !head->shared) &&	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
-		    !list_empty(&head->list)) {	/* [한국어] nvme_init_ns_head 실행 단계 — 상태기계·blk-mq·에러복구 맥락 */
+	mutex_lock(&ctrl->subsys->lock);	/* [한국어] head 목록 조회와 등록이 하나로 묶여야 한다 */
+	head = nvme_find_ns_head(ctrl, info->nsid);	/* [한국어] 같은 NSID 의 head 가 이미 있는가 */
+	if (!head) {	/* [한국어] 없으면 새로 만든다 */
+		ret = nvme_subsys_check_duplicate_ids(ctrl->subsys, &info->ids);	/* [한국어] 같은 서브시스템 안에서도 중복이 없어야 한다 */
+		if (ret) {
 			dev_err(ctrl->device,
-				"Duplicate unshared namespace %d\n",	/* [한국어] nvme_init_ns_head 실행 단계 — 상태기계·blk-mq·에러복구 맥락 */
-				info->nsid);	/* [한국어] nvme_init_ns_head 하위 헬퍼 호출 — 계층 경계 위임 */
-			goto out_put_ns_head;	/* [한국어] 에러 언와인드/공통 정리 라벨 */
+				"duplicate IDs in subsystem for nsid %d\n",
+				info->nsid);
+			goto out_unlock;
 		}
-		if (!nvme_ns_ids_equal(&head->ids, &info->ids)) {	/* [한국어] NVMe host 코어 헬퍼 API */
-			dev_err(ctrl->device,	/* [한국어] 장치/전역 로그 */
-				"IDs don't match for shared namespace %d\n",	/* [한국어] nvme_init_ns_head 실행 단계 — 상태기계·blk-mq·에러복구 맥락 */
-					info->nsid);	/* [한국어] nvme_init_ns_head 하위 헬퍼 호출 — 계층 경계 위임 */
-			goto out_put_ns_head;	/* [한국어] 에러 언와인드/공통 정리 라벨 */
+		head = nvme_alloc_ns_head(ctrl, info);
+		if (IS_ERR(head)) {
+			ret = PTR_ERR(head);
+			goto out_unlock;
+		}
+	} else {	/* [한국어] 이미 있으면 이 경로를 그 head 에 합류시킨다 */
+		ret = -EINVAL;	/* [한국어] 아래 세 검사가 모두 이 값을 쓴다 */
+		if ((!info->is_shared || !head->shared) &&	/* [한국어] 공유가 아닌데 이미 경로가 붙어 있다 */
+		    !list_empty(&head->list)) {
+			dev_err(ctrl->device,
+				"Duplicate unshared namespace %d\n",
+				info->nsid);
+			goto out_put_ns_head;	/* [한국어] 같은 NSID 를 두 컨트롤러가 각자의 것으로 알린 것이다 */
+		}
+		if (!nvme_ns_ids_equal(&head->ids, &info->ids)) {	/* [한국어] 공유라면서 식별자가 다르다 */
+			dev_err(ctrl->device,
+				"IDs don't match for shared namespace %d\n",
+					info->nsid);
+			goto out_put_ns_head;	/* [한국어] 같은 네임스페이스가 아니라는 뜻이다 */
 		}
 
-		if (!multipath) {	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
-			dev_warn(ctrl->device,	/* [한국어] 장치/전역 로그 */
-				"Found shared namespace %d, but multipathing not supported.\n",	/* [한국어] nvme_init_ns_head 실행 단계 — 상태기계·blk-mq·에러복구 맥락 */
-				info->nsid);	/* [한국어] nvme_init_ns_head 하위 헬퍼 호출 — 계층 경계 위임 */
-			dev_warn_once(ctrl->device,	/* [한국어] 장치/전역 로그 */
-				"Shared namespace support requires core_nvme.multipath=Y.\n");	/* [한국어] nvme_init_ns_head 상태/필드 갱신 — 후속 정책 입력 */
+		if (!multipath) {	/* [한국어] 공유 네임스페이스인데 다중경로가 꺼져 있다 */
+			dev_warn(ctrl->device,
+				"Found shared namespace %d, but multipathing not supported.\n",
+				info->nsid);
+			dev_warn_once(ctrl->device,	/* [한국어] 설정을 어떻게 바꿔야 하는지 한 번만 알린다 */
+				"Shared namespace support requires core_nvme.multipath=Y.\n");
 		}
 	}
 
 	list_add_tail_rcu(&ns->siblings, &head->list);	/* [한국어] RCU 발행 리스트 삽입 */
-	ns->head = head;	/* [한국어] nvme_init_ns_head 상태/필드 갱신 — 후속 정책 입력 */
-	mutex_unlock(&ctrl->subsys->lock);	/* [한국어] subsystem 락 해제 */
+	ns->head = head;	/* [한국어] 이 경로가 어느 head 에 속하는가 */
+	mutex_unlock(&ctrl->subsys->lock);
 
-#ifdef CONFIG_NVME_MULTIPATH	/* [한국어] 조건부 컴파일 게이트 */
-	cancel_delayed_work(&head->remove_work);	/* [한국어] nvme_init_ns_head 하위 헬퍼 호출 — 계층 경계 위임 */
+#ifdef CONFIG_NVME_MULTIPATH	/* [한국어] 지연 제거가 걸려 있었다면 */
+	cancel_delayed_work(&head->remove_work);	/* [한국어] 경로가 돌아왔으니 취소한다 */
 #endif
 	return 0; /* [한국어] 성공 */
 
-out_put_ns_head:	/* [한국어] nvme_init_ns_head 에러 언와인드 라벨 */
-	nvme_put_ns_head(head);	/* [한국어] kref 수명 가감 */
+out_put_ns_head:	/* [한국어] head 참조까지 놓아야 하는 경로 */
+	nvme_put_ns_head(head);
 out_unlock:	/* [한국어] 락만 놓으면 되는 경로 */
-	mutex_unlock(&ctrl->subsys->lock);	/* [한국어] subsystem 락 해제 */
+	mutex_unlock(&ctrl->subsys->lock);
 	return ret;
 }
 
 /* [한국어] nvme_find_get_ns - ctrl namespaces 정렬 리스트에서 nsid 검색 + get (srcu) */
 struct nvme_ns *nvme_find_get_ns(struct nvme_ctrl *ctrl, unsigned nsid)
 {
-	struct nvme_ns *ns, *ret = NULL;	/* [한국어] NVMe host 코어 헬퍼 API */
+	struct nvme_ns *ns, *ret = NULL;	/* [한국어] 찾은 네임스페이스 */
 	int srcu_idx;	/* [한국어] nvme_find_get_ns 지역 상태 — 정책 계산 입력 */
 
-	srcu_idx = srcu_read_lock(&ctrl->srcu);	/* [한국어] srcu 읽기 측 — NS/path 조회 중 제거 유예 */
-	list_for_each_entry_srcu(ns, &ctrl->namespaces, list,	/* [한국어] srcu 보호 NS 순회 */
-				 srcu_read_lock_held(&ctrl->srcu)) {	/* [한국어] srcu 읽기 측 — NS/path 조회 중 제거 유예 */
-		if (ns->head->ns_id == nsid) {	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
-			if (!nvme_get_ns(ns))	/* [한국어] kref 수명 가감 */
-				continue;	/* [한국어] 다음 순회 스킵 */
-			ret = ns;	/* [한국어] nvme_find_get_ns 상태/필드 갱신 — 후속 정책 입력 */
-			break;	/* [한국어] 루프/switch 탈출 */
+	srcu_idx = srcu_read_lock(&ctrl->srcu);	/* [한국어] 목록을 읽는 동안 제거를 유예시킨다 */
+	list_for_each_entry_srcu(ns, &ctrl->namespaces, list,	/* [한국어] NSID 오름차순으로 정렬돼 있다 */
+				 srcu_read_lock_held(&ctrl->srcu)) {
+		if (ns->head->ns_id == nsid) {	/* [한국어] 찾았다 */
+			if (!nvme_get_ns(ns))	/* [한국어] 사라지는 중이면 없는 것으로 친다 */
+				continue;
+			ret = ns;
+			break;
 		}
-		if (ns->head->ns_id > nsid)	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
-			break;	/* [한국어] 루프/switch 탈출 */
+		if (ns->head->ns_id > nsid)	/* [한국어] 정렬돼 있으므로 지나쳤으면 없는 것이다 */
+			break;
 	}
 	srcu_read_unlock(&ctrl->srcu, srcu_idx);	/* [한국어] srcu 읽기 측 종료 */
-	return ret; /* [한국어] 누적 결과 전파 — 에러 언와인드 포함 */
+	return ret;
 }
 EXPORT_SYMBOL_NS_GPL(nvme_find_get_ns, "NVME_TARGET_PASSTHRU"); /* [한국어] nsid 검색+get — 패스스루 타깃 */
 
@@ -4618,12 +4618,12 @@ EXPORT_SYMBOL_NS_GPL(nvme_find_get_ns, "NVME_TARGET_PASSTHRU"); /* [한국어] n
 /* [한국어] nvme_ns_add_to_ctrl_list - nsid 오름차순으로 ctrl->namespaces 에 RCU 삽입 */
 static void nvme_ns_add_to_ctrl_list(struct nvme_ns *ns)
 {
-	struct nvme_ns *tmp;	/* [한국어] NVMe host 코어 헬퍼 API */
+	struct nvme_ns *tmp;	/* [한국어] 삽입 위치를 찾는 커서 */
 
 	list_for_each_entry_reverse(tmp, &ns->ctrl->namespaces, list) {	/* [한국어] 뒤에서 탐색이 삽입에 유리 */
-		if (tmp->head->ns_id < ns->head->ns_id) {	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
+		if (tmp->head->ns_id < ns->head->ns_id) {	/* [한국어] 뒤에서부터 훑어 자기보다 작은 것 뒤에 넣는다 */
 			list_add_rcu(&ns->list, &tmp->list);	/* [한국어] tmp 다음 = 정렬 위치 */
-			return;	/* [한국어] void 조기 반환 — no-op/가드 */
+			return;	/* [한국어] 정렬을 유지해야 위 조회가 조기 종료할 수 있다 */
 		}
 	}
 	list_add_rcu(&ns->list, &ns->ctrl->namespaces);	/* [한국어] 최소 nsid — 헤드 다음 */
@@ -4638,15 +4638,15 @@ static void nvme_ns_add_to_ctrl_list(struct nvme_ns *ns)
  */
 static void nvme_alloc_ns(struct nvme_ctrl *ctrl, struct nvme_ns_info *info)
 {
-	struct queue_limits lim = { };	/* [한국어] nvme_alloc_ns 상태/필드 갱신 — 후속 정책 입력 */
-	struct nvme_ns *ns;	/* [한국어] NVMe host 코어 헬퍼 API */
+	struct queue_limits lim = { };	/* [한국어] 0 초기화 — 아래에서 컨트롤러 능력으로 채운다 */
+	struct nvme_ns *ns;
 	struct gendisk *disk;	/* [한국어] nvme_alloc_ns 지역 상태 — 정책 계산 입력 */
-	int node = ctrl->numa_node;	/* [한국어] nvme_alloc_ns 상태/필드 갱신 — 후속 정책 입력 */
-	bool last_path = false;	/* [한국어] nvme_alloc_ns 상태/필드 갱신 — 후속 정책 입력 */
+	int node = ctrl->numa_node;	/* [한국어] 컨트롤러가 붙은 노드에서 잡아 DMA 가 원격 노드를 넘지 않게 한다 */
+	bool last_path = false;	/* [한국어] 실패 경로에서 head 를 지워야 하는지 판단한다 */
 
 	ns = kzalloc_node(sizeof(*ns), GFP_KERNEL, node);	/* [한국어] NUMA 로컬 NS 구조 */
-	if (!ns)	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
-		return;	/* [한국어] void 조기 반환 — no-op/가드 */
+	if (!ns)
+		return;
 
 	if (ctrl->opts && ctrl->opts->data_digest)
 		lim.features |= BLK_FEAT_STABLE_WRITES;	/* [한국어] fabrics digest 안정 쓰기 */
@@ -4655,14 +4655,14 @@ static void nvme_alloc_ns(struct nvme_ctrl *ctrl, struct nvme_ns_info *info)
 		lim.features |= BLK_FEAT_PCI_P2PDMA;	/* [한국어] P2PDMA 가능 표시 */
 
 	disk = blk_mq_alloc_disk(ctrl->tagset, &lim, ns);	/* [한국어] IO 태그셋 공유 디스크 */
-	if (IS_ERR(disk))	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
-		goto out_free_ns;	/* [한국어] 에러 언와인드/공통 정리 라벨 */
+	if (IS_ERR(disk))	/* [한국어] 태그셋에서 요청 큐와 디스크를 함께 만든다 */
+		goto out_free_ns;
 	disk->fops = &nvme_bdev_ops;	/* [한국어] open/ioctl/pr/zones */
-	disk->private_data = ns;	/* [한국어] nvme_alloc_ns 상태/필드 갱신 — 후속 정책 입력 */
+	disk->private_data = ns;	/* [한국어] 블록 연산이 이 포인터로 네임스페이스를 되찾는다 */
 
-	ns->disk = disk;	/* [한국어] nvme_alloc_ns 상태/필드 갱신 — 후속 정책 입력 */
-	ns->queue = disk->queue;	/* [한국어] nvme_alloc_ns 상태/필드 갱신 — 후속 정책 입력 */
-	ns->ctrl = ctrl;	/* [한국어] nvme_alloc_ns 상태/필드 갱신 — 후속 정책 입력 */
+	ns->disk = disk;
+	ns->queue = disk->queue;
+	ns->ctrl = ctrl;
 	kref_init(&ns->kref);	/* [한국어] kref 수명 */
 
 	if (nvme_init_ns_head(ns, info))	/* [한국어] subsystem head 결합/생성 */
@@ -4679,12 +4679,12 @@ static void nvme_alloc_ns(struct nvme_ctrl *ctrl, struct nvme_ns_info *info)
 	 * instance as shared namespaces will show up as multiple block
 	 * devices.
 	 */
-	if (nvme_ns_head_multipath(ns->head)) {	/* [한국어] NVMe host 코어 헬퍼 API */
-		sprintf(disk->disk_name, "nvme%dc%dn%d", ctrl->subsys->instance,	/* [한국어] nvme_alloc_ns 연속 인자/초기화 항목 */
-			ctrl->instance, ns->head->instance);	/* [한국어] nvme_alloc_ns 하위 헬퍼 호출 — 계층 경계 위임 */
-		disk->flags |= GENHD_FL_HIDDEN;	/* [한국어] nvme_alloc_ns 상태/필드 갱신 — 후속 정책 입력 */
-	} else if (multipath) {	/* [한국어] nvme_alloc_ns 실행 단계 — 상태기계·blk-mq·에러복구 맥락 */
-		sprintf(disk->disk_name, "nvme%dn%d", ctrl->subsys->instance,	/* [한국어] nvme_alloc_ns 연속 인자/초기화 항목 */
+	if (nvme_ns_head_multipath(ns->head)) {	/* [한국어] head 디스크가 따로 있으면 */
+		sprintf(disk->disk_name, "nvme%dc%dn%d", ctrl->subsys->instance,	/* [한국어] 경로마다 c 를 넣은 이름을 준다 — head 의 nvmeXnY 와 구별된다 */
+			ctrl->instance, ns->head->instance);
+		disk->flags |= GENHD_FL_HIDDEN;	/* [한국어] 위 영어 주석대로 사용자에게는 head 만 보인다 */
+	} else if (multipath) {	/* [한국어] 다중경로가 켜졌지만 이 네임스페이스는 head 가 없다 */
+		sprintf(disk->disk_name, "nvme%dn%d", ctrl->subsys->instance,	/* [한국어] 서브시스템 번호로 이름을 짓는다 */
 			ns->head->instance);	/* [한국어] nvme_alloc_ns 하위 헬퍼 호출 — 계층 경계 위임 */
 	} else {	/* [한국어] nvme_alloc_ns 실행 단계 — 상태기계·blk-mq·에러복구 맥락 */
 		sprintf(disk->disk_name, "nvme%dn%d", ctrl->instance,	/* [한국어] nvme_alloc_ns 연속 인자/초기화 항목 */
@@ -4778,64 +4778,64 @@ static void nvme_ns_remove(struct nvme_ns *ns)
 	if (nvme_mpath_clear_current_path(ns))
 		synchronize_srcu(&ns->head->srcu);	/* [한국어] path 클리어 후 재동기 */
 
-	mutex_lock(&ns->ctrl->subsys->lock);	/* [한국어] subsystem 락 — head/ctrls siblings */
-	list_del_rcu(&ns->siblings);	/* [한국어] RCU 안전 삭제 */
-	if (list_empty(&ns->head->list)) {	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
+	mutex_lock(&ns->ctrl->subsys->lock);	/* [한국어] head 목록에서 빼는 동안 다른 경로가 끼어들면 안 된다 */
+	list_del_rcu(&ns->siblings);	/* [한국어] RCU 순회 중인 쪽이 있을 수 있어 전용 삭제를 쓴다 */
+	if (list_empty(&ns->head->list)) {	/* [한국어] 이 경로가 마지막이었다 */
 		if (!nvme_mpath_queue_if_no_path(ns->head))
 			list_del_init(&ns->head->entry);	/* [한국어] 리스트 노드 제거 */
-		last_path = true;	/* [한국어] nvme_ns_remove 상태/필드 갱신 — 후속 정책 입력 */
+		last_path = true;	/* [한국어] 락 밖에서 head 를 지우도록 표시만 남긴다 */
 	}
-	mutex_unlock(&ns->ctrl->subsys->lock);	/* [한국어] subsystem 락 해제 */
+	mutex_unlock(&ns->ctrl->subsys->lock);
 
 	/* guarantee not available in head->list */
-	synchronize_srcu(&ns->head->srcu);	/* [한국어] srcu grace — path/NS 제거 안전점 */
+	synchronize_srcu(&ns->head->srcu);	/* [한국어] 위 영어 주석대로 아무도 이 경로를 head 목록에서 보지 못함을 보장한다 */
 
-	if (!nvme_ns_head_multipath(ns->head))	/* [한국어] NVMe host 코어 헬퍼 API */
+	if (!nvme_ns_head_multipath(ns->head))	/* [한국어] head 디스크가 없으면 이 경로가 문자 장치를 직접 갖는다 */
 		nvme_cdev_del(&ns->cdev, &ns->cdev_device);
 
-	nvme_mpath_remove_sysfs_link(ns);	/* [한국어] multipath 경로/failover */
+	nvme_mpath_remove_sysfs_link(ns);	/* [한국어] head 아래의 링크를 뗀다 */
 
-	del_gendisk(ns->disk);	/* [한국어] gendisk 수명/노출 */
+	del_gendisk(ns->disk);	/* [한국어] 블록 장치를 없앤다 — 이 뒤로 새 I/O 가 오지 않는다 */
 
 	mutex_lock(&ns->ctrl->namespaces_lock);	/* [한국어] 뮤텍스 진입 — sleep 가능 컨트롤 플레인 */
-	list_del_rcu(&ns->list);	/* [한국어] RCU 안전 삭제 */
+	list_del_rcu(&ns->list);	/* [한국어] 컨트롤러의 네임스페이스 목록에서도 뺀다 */
 	mutex_unlock(&ns->ctrl->namespaces_lock);	/* [한국어] 뮤텍스 해제 */
-	synchronize_srcu(&ns->ctrl->srcu);	/* [한국어] srcu grace — path/NS 제거 안전점 */
+	synchronize_srcu(&ns->ctrl->srcu);	/* [한국어] 순회 중인 쪽이 끝나기를 기다린다 */
 
-	if (last_path)	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
-		nvme_mpath_remove_disk(ns->head);	/* [한국어] multipath 경로/failover */
-	nvme_put_ns(ns); /* [한국어] ns kref 해제 */
+	if (last_path)	/* [한국어] 마지막 경로였다면 */
+		nvme_mpath_remove_disk(ns->head);	/* [한국어] head 디스크도 없앤다 */
+	nvme_put_ns(ns);	/* [한국어] 마지막 참조면 해제로 이어진다 */
 }
 
-static void nvme_ns_remove_by_nsid(struct nvme_ctrl *ctrl, u32 nsid)	/* [한국어] NS 스캔·등록·제거 */
+static void nvme_ns_remove_by_nsid(struct nvme_ctrl *ctrl, u32 nsid)	/* [한국어] NSID 로 찾아 제거한다 */
 {
-	struct nvme_ns *ns = nvme_find_get_ns(ctrl, nsid);	/* [한국어] NVMe host 코어 헬퍼 API */
+	struct nvme_ns *ns = nvme_find_get_ns(ctrl, nsid);	/* [한국어] 참조를 든 채 받는다 */
 
-	if (ns) {	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
-		nvme_ns_remove(ns);	/* [한국어] NS 스캔·등록·제거 */
-		nvme_put_ns(ns); /* [한국어] ns kref 해제 */
+	if (ns) {	/* [한국어] 이미 없어졌을 수 있다 */
+		nvme_ns_remove(ns);
+		nvme_put_ns(ns);	/* [한국어] 방금 든 참조를 놓는다 */
 	}
 }
 
-static void nvme_validate_ns(struct nvme_ns *ns, struct nvme_ns_info *info)	/* [한국어] NS 스캔·등록·제거 */
+static void nvme_validate_ns(struct nvme_ns *ns, struct nvme_ns_info *info)	/* [한국어] 이미 있는 네임스페이스의 정보를 다시 확인한다 */
 {
-	int ret = NVME_SC_INVALID_NS | NVME_STATUS_DNR;	/* [한국어] NVMe/blk 상수 — 정책 분기 입력 */
+	int ret = NVME_SC_INVALID_NS | NVME_STATUS_DNR;	/* [한국어] 기본값은 "이 네임스페이스는 무효" — 아래 검사를 통과해야 바뀐다 */
 
-	if (!nvme_ns_ids_equal(&ns->head->ids, &info->ids)) {	/* [한국어] NVMe host 코어 헬퍼 API */
-		dev_err(ns->ctrl->device,	/* [한국어] 장치/전역 로그 */
-			"identifiers changed for nsid %d\n", ns->head->ns_id);	/* [한국어] nvme_validate_ns 하위 헬퍼 호출 — 계층 경계 위임 */
-		goto out;	/* [한국어] 에러 언와인드/공통 정리 라벨 */
+	if (!nvme_ns_ids_equal(&ns->head->ids, &info->ids)) {	/* [한국어] 식별자가 바뀌었다 — 다른 네임스페이스가 같은 번호를 차지한 것이다 */
+		dev_err(ns->ctrl->device,
+			"identifiers changed for nsid %d\n", ns->head->ns_id);
+		goto out;	/* [한국어] 기존 것을 제거해야 한다 */
 	}
 
-	ret = nvme_update_ns_info(ns, info);	/* [한국어] NS 스캔·등록·제거 */
-out:	/* [한국어] nvme_validate_ns 에러 언와인드 라벨 */
+	ret = nvme_update_ns_info(ns, info);	/* [한국어] 크기나 포맷이 바뀌었을 수 있다 */
+out:
 	/*
 	 * Only remove the namespace if we got a fatal error back from the
 	 * device, otherwise ignore the error and just move on.
 	 *
 	 * TODO: we should probably schedule a delayed retry here.
 	 */
-	if (ret > 0 && (ret & NVME_STATUS_DNR))	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
+	if (ret > 0 && (ret & NVME_STATUS_DNR))	/* [한국어] 위 영어 주석대로 DNR 이면 재시도해도 소용없다 */
 		nvme_ns_remove(ns);
 }
 
@@ -4848,16 +4848,16 @@ out:	/* [한국어] nvme_validate_ns 에러 언와인드 라벨 */
 static void nvme_scan_ns(struct nvme_ctrl *ctrl, unsigned nsid)
 {
 	struct nvme_ns_info info = { .nsid = nsid };	/* [한국어] 스택 임시 메타 */
-	struct nvme_ns *ns;	/* [한국어] NVMe host 코어 헬퍼 API */
-	int ret = 1;	/* [한국어] nvme_scan_ns 상태/필드 갱신 — 후속 정책 입력 */
+	struct nvme_ns *ns;
+	int ret = 1;	/* [한국어] 양수로 시작해 아래 조회가 성공해야 0 이 된다 */
 
 	if (nvme_identify_ns_descs(ctrl, &info))	/* [한국어] UUID/NGUID/CSI */
 		return;
 
-	if (info.ids.csi != NVME_CSI_NVM && !nvme_multi_css(ctrl)) {	/* [한국어] NVMe host 코어 헬퍼 API */
-		dev_warn(ctrl->device,	/* [한국어] 장치/전역 로그 */
-			"command set not reported for nsid: %d\n", nsid);	/* [한국어] nvme_scan_ns 하위 헬퍼 호출 — 계층 경계 위임 */
-		return;	/* [한국어] void 조기 반환 — no-op/가드 */
+	if (info.ids.csi != NVME_CSI_NVM && !nvme_multi_css(ctrl)) {	/* [한국어] NVM 이 아닌 커맨드셋인데 컨트롤러가 다중 커맨드셋을 지원하지 않는다 */
+		dev_warn(ctrl->device,
+			"command set not reported for nsid: %d\n", nsid);
+		return;	/* [한국어] 모순된 정보라 이 네임스페이스를 만들지 않는다 */
 	}
 
 	/*
@@ -4882,11 +4882,11 @@ static void nvme_scan_ns(struct nvme_ctrl *ctrl, unsigned nsid)
 	if (ret || !info.is_ready)
 		return;	/* [한국어] 오류 또는 미준비 — 이후 AEN */
 
-	ns = nvme_find_get_ns(ctrl, nsid);	/* [한국어] NVMe host 코어 헬퍼 API */
-	if (ns) {	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
+	ns = nvme_find_get_ns(ctrl, nsid);	/* [한국어] 이미 있는가 */
+	if (ns) {	/* [한국어] 있으면 정보를 다시 확인한다 */
 		nvme_validate_ns(ns, &info);	/* [한국어] 기존: 용량/ID 재검증 */
-		nvme_put_ns(ns); /* [한국어] ns kref 해제 */
-	} else {	/* [한국어] nvme_scan_ns 실행 단계 — 상태기계·blk-mq·에러복구 맥락 */
+		nvme_put_ns(ns);
+	} else {	/* [한국어] 없으면 새로 만든다 */
 		nvme_alloc_ns(ctrl, &info);	/* [한국어] 신규 gendisk */
 	}
 }
@@ -4908,104 +4908,104 @@ struct async_scan_info {	/* [한국어] nvme_scan_ns 자료구조/열거 정의 
 	__le32 *ns_list;	/* [한국어] Identify 가 채운 활성 NSID 배열. 읽기 전용으로 공유된다 */
 };
 
-static void nvme_scan_ns_async(void *data, async_cookie_t cookie)	/* [한국어] NS 스캔·등록·제거 */
+static void nvme_scan_ns_async(void *data, async_cookie_t cookie)	/* [한국어] 네임스페이스 하나를 병렬로 스캔한다 */
 {
-	struct async_scan_info *scan_info = data;	/* [한국어] nvme_scan_ns_async 상태/필드 갱신 — 후속 정책 입력 */
+	struct async_scan_info *scan_info = data;	/* [한국어] 여러 인스턴스가 공유하는 문맥 */
 	int idx;	/* [한국어] nvme_scan_ns_async 지역 상태 — 정책 계산 입력 */
 	u32 nsid;	/* [한국어] nvme_scan_ns_async 지역 상태 — 정책 계산 입력 */
 
 	idx = (u32)atomic_fetch_inc(&scan_info->next_nsid);	/* [한국어] 원자 카운터 — 병렬 스캔/참조 */
 	nsid = le32_to_cpu(scan_info->ns_list[idx]);	/* [한국어] 엔디안 변환 — 스펙 온와이어 */
 
-	nvme_scan_ns(scan_info->ctrl, nsid);	/* [한국어] NS 스캔·등록·제거 */
+	nvme_scan_ns(scan_info->ctrl, nsid);
 }
 
-static void nvme_remove_invalid_namespaces(struct nvme_ctrl *ctrl,	/* [한국어] NVMe host 코어 헬퍼 API */
+static void nvme_remove_invalid_namespaces(struct nvme_ctrl *ctrl,	/* [한국어] 목록에 없던 네임스페이스를 제거한다 */
 					unsigned nsid)
 {
-	struct nvme_ns *ns, *next;	/* [한국어] NVMe host 코어 헬퍼 API */
-	LIST_HEAD(rm_list);	/* [한국어] 리스트 헤드 초기화 */
+	struct nvme_ns *ns, *next;	/* [한국어] 제거하며 순회하므로 _safe 가 필요하다 */
+	LIST_HEAD(rm_list);	/* [한국어] 락 안에서 제거할 수 없어 지역 목록으로 옮긴다 */
 
-	mutex_lock(&ctrl->namespaces_lock);	/* [한국어] namespaces_lock — NS 리스트 변형 보호 */
-	list_for_each_entry_safe(ns, next, &ctrl->namespaces, list) {	/* [한국어] 삭제 안전 이중 커서 순회 */
-		if (ns->head->ns_id > nsid) {	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
-			list_del_rcu(&ns->list);	/* [한국어] RCU 안전 삭제 */
-			synchronize_srcu(&ctrl->srcu);	/* [한국어] srcu grace — path/NS 제거 안전점 */
+	mutex_lock(&ctrl->namespaces_lock);
+	list_for_each_entry_safe(ns, next, &ctrl->namespaces, list) {
+		if (ns->head->ns_id > nsid) {	/* [한국어] 스캔이 본 마지막 번호보다 큰 것은 사라진 것이다 */
+			list_del_rcu(&ns->list);
+			synchronize_srcu(&ctrl->srcu);	/* [한국어] 순회 중인 쪽이 이 항목을 보지 않게 한다 */
 			list_add_tail_rcu(&ns->list, &rm_list);	/* [한국어] RCU 발행 리스트 삽입 */
 		}
 	}
-	mutex_unlock(&ctrl->namespaces_lock);	/* [한국어] namespaces_lock 해제 */
+	mutex_unlock(&ctrl->namespaces_lock);
 
-	list_for_each_entry_safe(ns, next, &rm_list, list)	/* [한국어] 삭제 안전 이중 커서 순회 */
+	list_for_each_entry_safe(ns, next, &rm_list, list)	/* [한국어] 실제 제거는 락 밖에서 — 잠들 수 있기 때문 */
 		nvme_ns_remove(ns);
 }
 
 /* [한국어] nvme_scan_ns_list - Active NS List Identify + async 병렬 스캔 + 구멍 NS 제거 */
 static int nvme_scan_ns_list(struct nvme_ctrl *ctrl)
 {
-	const int nr_entries = NVME_IDENTIFY_DATA_SIZE / sizeof(__le32);	/* [한국어] nvme_scan_ns_list 상태/필드 갱신 — 후속 정책 입력 */
-	__le32 *ns_list;	/* [한국어] nvme_scan_ns_list 실행 단계 — 상태기계·blk-mq·에러복구 맥락 */
-	u32 prev = 0;	/* [한국어] nvme_scan_ns_list 상태/필드 갱신 — 후속 정책 입력 */
-	int ret = 0, i;	/* [한국어] nvme_scan_ns_list 상태/필드 갱신 — 후속 정책 입력 */
-	ASYNC_DOMAIN(domain);	/* [한국어] async 도메인 병렬 스캔 */
+	const int nr_entries = NVME_IDENTIFY_DATA_SIZE / sizeof(__le32);	/* [한국어] 한 페이지에 담기는 NSID 개수 */
+	__le32 *ns_list;	/* [한국어] 활성 NSID 배열 */
+	u32 prev = 0;	/* [한국어] 마지막으로 본 번호 — 다음 페이지를 요청하는 데 쓴다 */
+	int ret = 0, i;
+	ASYNC_DOMAIN(domain);	/* [한국어] 이 스캔의 병렬 작업만 모아 기다리기 위한 도메인 */
 	struct async_scan_info scan_info;	/* [한국어] nvme_scan_ns_list 지역 상태 — 정책 계산 입력 */
 
-	ns_list = kzalloc(NVME_IDENTIFY_DATA_SIZE, GFP_KERNEL);	/* [한국어] 커널 힙 할당/해제 */
+	ns_list = kzalloc(NVME_IDENTIFY_DATA_SIZE, GFP_KERNEL);
 	if (!ns_list)
 		return -ENOMEM; /* [한국어] 메모리 부족 */
 
-	scan_info.ctrl = ctrl;	/* [한국어] nvme_scan_ns_list 상태/필드 갱신 — 후속 정책 입력 */
-	scan_info.ns_list = ns_list;	/* [한국어] nvme_scan_ns_list 상태/필드 갱신 — 후속 정책 입력 */
-	for (;;) {	/* [한국어] 순회 — NS·세그먼트·파워스테이트 */
+	scan_info.ctrl = ctrl;	/* [한국어] 병렬 인스턴스들이 공유한다 */
+	scan_info.ns_list = ns_list;
+	for (;;) {	/* [한국어] 목록이 끝날 때까지 페이지 단위로 받는다 */
 		struct nvme_command cmd = {
 			.identify.opcode	= nvme_admin_identify,	/* [한국어] Identify(06h) */
 			.identify.cns		= NVME_ID_CNS_NS_ACTIVE_LIST,	/* [한국어] CNS 02h Active Namespace ID List — 존재하는 NSID 를 오름차순으로 받는다 */
 			.identify.nsid		= cpu_to_le32(prev),	/* [한국어] "이 번호보다 큰 것부터" — 목록이 한 페이지를 넘으면 마지막 값을 넣어 이어 받는다 */
 		};
 
-		ret = nvme_submit_sync_cmd(ctrl->admin_q, &cmd, ns_list,	/* [한국어] admin/IO 동기 제출 */
-					    NVME_IDENTIFY_DATA_SIZE);	/* [한국어] nvme_scan_ns_list 하위 헬퍼 호출 — 계층 경계 위임 */
+		ret = nvme_submit_sync_cmd(ctrl->admin_q, &cmd, ns_list,
+					    NVME_IDENTIFY_DATA_SIZE);
 		if (ret) {	/* [한국어] sysfs 링크 생성 실패 */
-			dev_warn(ctrl->device,	/* [한국어] 장치/전역 로그 */
-				"Identify NS List failed (status=0x%x)\n", ret);	/* [한국어] nvme_scan_ns_list 상태/필드 갱신 — 후속 정책 입력 */
-			goto free;	/* [한국어] 에러 언와인드/공통 정리 라벨 */
+			dev_warn(ctrl->device,
+				"Identify NS List failed (status=0x%x)\n", ret);
+			goto free;
 		}
 
 		atomic_set(&scan_info.next_nsid, 0);	/* [한국어] 원자 카운터 — 병렬 스캔/참조 */
-		for (i = 0; i < nr_entries; i++) {	/* [한국어] 순회 — NS·세그먼트·파워스테이트 */
+		for (i = 0; i < nr_entries; i++) {	/* [한국어] 이 페이지의 항목들 */
 			u32 nsid = le32_to_cpu(ns_list[i]);	/* [한국어] 엔디안 변환 — 스펙 온와이어 */
 
-			if (!nsid)	/* end of the list? */ /* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
-				goto out;	/* [한국어] 에러 언와인드/공통 정리 라벨 */
-			async_schedule_domain(nvme_scan_ns_async, &scan_info,	/* [한국어] NS 스캔·등록·제거 */
-						&domain);	/* [한국어] nvme_scan_ns_list 하위 헬퍼 호출 — 계층 경계 위임 */
+			if (!nsid)	/* end of the list? */	/* [한국어] 0 이 목록의 끝이다 */
+				goto out;
+			async_schedule_domain(nvme_scan_ns_async, &scan_info,	/* [한국어] 병렬로 스캔한다 — 네임스페이스가 많으면 순차 스캔이 부팅을 늦춘다 */
+						&domain);
 			while (++prev < nsid)	/* [한국어] 루프 — 폴링·드레인·재시도 */
 				nvme_ns_remove_by_nsid(ctrl, prev);
 		}
-		async_synchronize_full_domain(&domain);	/* [한국어] async 도메인 병렬 스캔 */
+		async_synchronize_full_domain(&domain);	/* [한국어] 다음 페이지를 요청하기 전에 이 페이지의 작업을 모두 기다린다 */
 	}
- out:	/* [한국어] nvme_scan_ns_list 에러 언와인드 라벨 */
-	nvme_remove_invalid_namespaces(ctrl, prev);	/* [한국어] NVMe host 코어 헬퍼 API */
- free:	/* [한국어] nvme_scan_ns_list 에러 언와인드 라벨 */
-	async_synchronize_full_domain(&domain);	/* [한국어] async 도메인 병렬 스캔 */
-	kfree(ns_list);	/* [한국어] 커널 힙 할당/해제 */
+ out:
+	nvme_remove_invalid_namespaces(ctrl, prev);	/* [한국어] 목록에 없던 것들을 제거한다 */
+ free:
+	async_synchronize_full_domain(&domain);	/* [한국어] 오류 경로에서도 걸린 작업을 반드시 기다려야 한다 */
+	kfree(ns_list);
 	return ret;
 }
 
-static void nvme_scan_ns_sequential(struct nvme_ctrl *ctrl)	/* [한국어] NS 스캔·등록·제거 */
+static void nvme_scan_ns_sequential(struct nvme_ctrl *ctrl)	/* [한국어] 목록 명령을 지원하지 않는 옛 컨트롤러용 */
 {
-	struct nvme_id_ctrl *id;	/* [한국어] NVMe host 코어 헬퍼 API */
+	struct nvme_id_ctrl *id;
 	u32 nn, i;	/* [한국어] nvme_scan_ns_sequential 지역 상태 — 정책 계산 입력 */
 
-	if (nvme_identify_ctrl(ctrl, &id))	/* [한국어] Identify/Features 제어 평면 */
-		return;	/* [한국어] void 조기 반환 — no-op/가드 */
+	if (nvme_identify_ctrl(ctrl, &id))	/* [한국어] 네임스페이스 개수를 알아야 한다 */
+		return;
 	nn = le32_to_cpu(id->nn);	/* [한국어] 엔디안 변환 — 스펙 온와이어 */
 	kfree(id);
 
-	for (i = 1; i <= nn; i++)	/* [한국어] 순회 — NS·세그먼트·파워스테이트 */
+	for (i = 1; i <= nn; i++)	/* [한국어] 1부터 nn 까지 하나씩 물어본다 */
 		nvme_scan_ns(ctrl, i);
 
-	nvme_remove_invalid_namespaces(ctrl, nn);	/* [한국어] NVMe host 코어 헬퍼 API */
+	nvme_remove_invalid_namespaces(ctrl, nn);	/* [한국어] nn 을 넘는 것은 사라진 것이다 */
 }
 
 static void nvme_clear_changed_ns_log(struct nvme_ctrl *ctrl)	/* [한국어] NVMe host 코어 헬퍼 API */
