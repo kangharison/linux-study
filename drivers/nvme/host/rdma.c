@@ -1720,55 +1720,109 @@ destroy_admin:
 	return ret;
 }
 
-static void nvme_rdma_reconnect_ctrl_work(struct work_struct *work)	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-{	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	struct nvme_rdma_ctrl *ctrl = container_of(to_delayed_work(work),	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-			struct nvme_rdma_ctrl, reconnect_work);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	int ret;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+/*
+ * [한국어]
+ * nvme_rdma_reconnect_ctrl_work - 재연결을 한 번 시도하고 결과를 넘긴다
+ *
+ * @work: reconnect_work(지연 워크)
+ * @return: 없음
+ *
+ * 재연결 루프의 한 바퀴다. 실패하면 reconnect_or_remove 가 다시 이 워크를
+ * 예약하므로, 둘이 서로를 부르며 시도 횟수가 소진될 때까지 반복한다.
+ *
+ * nr_reconnects 를 여기서 올리고 성공 시 0 으로 되돌리는 것이 그 횟수 관리의
+ * 전부다. 로그에 시도 횟수를 함께 남기는 것은, 몇 번 만에 붙었는지가
+ * 링크 품질을 가늠하는 단서가 되기 때문이다.
+ *
+ * setup_ctrl 에 false 를 넘기는 것이 중요하다 -- 재연결이므로 태그셋을
+ * 다시 만들지 않고 기존 것을 쓴다. 그 위에 gendisk 와 진행 중 요청이
+ * 매달려 있기 때문이다.
+ *
+ * 실행 컨텍스트: nvme_wq 워크큐. 연결 전체가 여기서 일어나 오래 잠든다.
+ *
+ * 호출 체인:
+ *   nvme_rdma_reconnect_or_remove → queue_delayed_work → [이 함수]
+ *     → nvme_rdma_setup_ctrl
+ */
+static void nvme_rdma_reconnect_ctrl_work(struct work_struct *work)
+{
+	struct nvme_rdma_ctrl *ctrl = container_of(to_delayed_work(work),
+			struct nvme_rdma_ctrl, reconnect_work);
+	int ret;
 
-	++ctrl->ctrl.nr_reconnects;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	++ctrl->ctrl.nr_reconnects;	/* [한국어] 시도 횟수. 성공하면 아래에서 0 으로 되돌린다 */
 
-	ret = nvme_rdma_setup_ctrl(ctrl, false);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	if (ret)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		goto requeue;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
+	ret = nvme_rdma_setup_ctrl(ctrl, false);	/* [한국어] false — 재연결이므로 태그셋을 재사용한다 */
+	if (ret)
+		goto requeue;
 
-	dev_info(ctrl->ctrl.device, "Successfully reconnected (%d attempts)\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			ctrl->ctrl.nr_reconnects);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	dev_info(ctrl->ctrl.device, "Successfully reconnected (%d attempts)\n",	/* [한국어] 몇 번 만에 붙었는지가 링크 품질을 가늠하는 단서다 */
+			ctrl->ctrl.nr_reconnects);
 
-	ctrl->ctrl.nr_reconnects = 0;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	ctrl->ctrl.nr_reconnects = 0;	/* [한국어] 다음 단절을 위해 초기화 */
 
-	return;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	return;
 
-requeue:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	dev_info(ctrl->ctrl.device, "Failed reconnect attempt %d/%d\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		 ctrl->ctrl.nr_reconnects, ctrl->ctrl.opts->max_reconnects);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	nvme_rdma_reconnect_or_remove(ctrl, ret);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+requeue:
+	dev_info(ctrl->ctrl.device, "Failed reconnect attempt %d/%d\n",
+		 ctrl->ctrl.nr_reconnects, ctrl->ctrl.opts->max_reconnects);
+	nvme_rdma_reconnect_or_remove(ctrl, ret);	/* [한국어] 다시 시도할지 포기할지는 그쪽이 정한다. 다시면 이 워크가 재예약된다 */
+}
 
-static void nvme_rdma_error_recovery_work(struct work_struct *work)	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-{	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	struct nvme_rdma_ctrl *ctrl = container_of(work,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-			struct nvme_rdma_ctrl, err_work);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+/*
+ * [한국어]
+ * nvme_rdma_error_recovery_work - 연결을 통째로 내리고 재연결 루프에 넘긴다
+ *
+ * @work: err_work
+ * @return: 없음
+ *
+ * error_recovery 가 상태만 옮기고 깨운 워크다. 실제 복구가 여기서 일어난다.
+ *
+ * 해체 순서에 이유가 있다:
+ *   1) keep-alive 정지 -- 내리는 중에 새 admin 명령이 나가면 안 된다.
+ *   2) async_event_work flush -- AEN 재무장이 진행 중일 수 있고, 큐를 내린
+ *      뒤에 그것이 돌면 사라진 큐로 명령을 보낸다.
+ *   3) I/O 큐 해체 후 곧바로 unquiesce -- 멈춘 채 두면 새 요청이 쌓여
+ *      기다리지만, 열어 두면 즉시 실패해 상위가 대응할 수 있다.
+ *   4) admin 큐도 같은 순서로.
+ *   5) 인증 중단 -- 진행 중인 DH-HMAC-CHAP 협상을 끊는다.
+ *
+ * false 를 넘기는 것은 태그셋을 남긴다는 뜻이다. 재연결에서 다시 쓴다.
+ *
+ * CONNECTING 전이 실패는 삭제가 시작된 경우이며, 그때는 그쪽이 정리하므로
+ * 여기서 그대로 돌아간다.
+ *
+ * 실행 컨텍스트: nvme_reset_wq 워크큐. 오래 잠들 수 있다.
+ *
+ * 호출 체인:
+ *   nvme_rdma_error_recovery → [이 함수] → nvme_rdma_teardown_io_queues
+ *     → nvme_rdma_reconnect_or_remove
+ */
+static void nvme_rdma_error_recovery_work(struct work_struct *work)
+{
+	struct nvme_rdma_ctrl *ctrl = container_of(work,
+			struct nvme_rdma_ctrl, err_work);
 
-	nvme_stop_keep_alive(&ctrl->ctrl);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	flush_work(&ctrl->ctrl.async_event_work);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	nvme_rdma_teardown_io_queues(ctrl, false);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	nvme_unquiesce_io_queues(&ctrl->ctrl);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	nvme_rdma_teardown_admin_queue(ctrl, false);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	nvme_unquiesce_admin_queue(&ctrl->ctrl);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	nvme_auth_stop(&ctrl->ctrl);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	nvme_stop_keep_alive(&ctrl->ctrl);	/* [한국어] 내리는 중에 새 admin 명령이 나가면 안 된다 */
+	flush_work(&ctrl->ctrl.async_event_work);	/* [한국어] AEN 재무장이 진행 중일 수 있다 — 큐를 내린 뒤 돌면 사라진 큐로 명령을 보낸다 */
+	nvme_rdma_teardown_io_queues(ctrl, false);	/* [한국어] false — 태그셋은 남긴다. 재연결에서 다시 쓴다 */
+	nvme_unquiesce_io_queues(&ctrl->ctrl);	/* [한국어] 해체하면서 여는 것이 의도적이다 — 새 요청이 쌓이는 대신 즉시 실패해 상위가 대응한다 */
+	nvme_rdma_teardown_admin_queue(ctrl, false);
+	nvme_unquiesce_admin_queue(&ctrl->ctrl);
+	nvme_auth_stop(&ctrl->ctrl);	/* [한국어] 진행 중인 대역 내 인증 협상을 끊는다 */
 
-	if (!nvme_change_ctrl_state(&ctrl->ctrl, NVME_CTRL_CONNECTING)) {	/* [한국어] NVMe core API — SQE 조립·완료·상태기계·수명 */
+	if (!nvme_change_ctrl_state(&ctrl->ctrl, NVME_CTRL_CONNECTING)) {
 		/* state change failure is ok if we started ctrl delete */
-		enum nvme_ctrl_state state = nvme_ctrl_state(&ctrl->ctrl);	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
+		/* [한국어] 위 영어 주석대로 삭제가 시작된 경우라면 정상이다 */
+		enum nvme_ctrl_state state = nvme_ctrl_state(&ctrl->ctrl);
 
-		WARN_ON_ONCE(state != NVME_CTRL_DELETING &&	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			     state != NVME_CTRL_DELETING_NOIO);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		return;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
-	}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		WARN_ON_ONCE(state != NVME_CTRL_DELETING &&	/* [한국어] 그 밖의 상태라면 상태 기계가 어긋난 것이다 */
+			     state != NVME_CTRL_DELETING_NOIO);
+		return;	/* [한국어] 삭제 경로가 정리하므로 여기서 물러난다 */
+	}
 
-	nvme_rdma_reconnect_or_remove(ctrl, 0);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	nvme_rdma_reconnect_or_remove(ctrl, 0);	/* [한국어] 재연결 루프에 넘긴다 */
+}
 
 static void nvme_rdma_error_recovery(struct nvme_rdma_ctrl *ctrl)	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 {	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
@@ -3140,31 +3194,57 @@ static void nvme_rdma_delete_ctrl(struct nvme_ctrl *ctrl)	/* [한국어] NVMe/RD
 	nvme_rdma_shutdown_ctrl(to_rdma_ctrl(ctrl), true);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 }	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
-static void nvme_rdma_reset_ctrl_work(struct work_struct *work)	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-{	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	struct nvme_rdma_ctrl *ctrl =	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-		container_of(work, struct nvme_rdma_ctrl, ctrl.reset_work);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	int ret;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+/*
+ * [한국어]
+ * nvme_rdma_reset_ctrl_work - 사용자나 코어가 요청한 리셋을 수행한다
+ *
+ * @work: ctrl.reset_work
+ * @return: 없음
+ *
+ * error_recovery_work 와 목적이 비슷하지만 진입 경로가 다르다. 이쪽은
+ * 오류가 아니라 명시적 요청(sysfs write, 코어의 복구 정책)으로 불린다.
+ *
+ * 그 차이가 상태 전이 처리에 드러난다. 여기서는 CONNECTING 전이 실패를
+ * WARN_ON_ONCE(1) 로 잡는다 -- 리셋은 코어가 이미 상태를 RESETTING 으로
+ * 옮긴 뒤에 부르므로, 그 상태에서 CONNECTING 으로 못 가는 경우가 없어야
+ * 한다. 반면 error_recovery_work 는 삭제와 겹칠 수 있어 그 경우를 정상으로 본다.
+ *
+ * shutdown_ctrl 이 teardown 대신 쓰이는 것도 다르다. 리셋에서는 컨트롤러에
+ * 정상 종료를 알릴 기회가 있으므로 그 절차를 밟는다.
+ *
+ * 실행 컨텍스트: nvme_reset_wq 워크큐. 오래 잠들 수 있다.
+ *
+ * 호출 체인:
+ *   nvme_reset_ctrl → [이 함수] → nvme_rdma_shutdown_ctrl → nvme_rdma_setup_ctrl
+ */
+static void nvme_rdma_reset_ctrl_work(struct work_struct *work)
+{
+	struct nvme_rdma_ctrl *ctrl =
+		container_of(work, struct nvme_rdma_ctrl, ctrl.reset_work);
+	int ret;
 
-	nvme_stop_ctrl(&ctrl->ctrl);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	nvme_rdma_shutdown_ctrl(ctrl, false);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+	nvme_stop_ctrl(&ctrl->ctrl);	/* [한국어] keep-alive 와 스캔을 멈춘다 */
+	nvme_rdma_shutdown_ctrl(ctrl, false);	/* [한국어] 정상 종료 절차를 밟는다 — 오류 복구와 달리 알릴 기회가 있다 */
 
-	if (!nvme_change_ctrl_state(&ctrl->ctrl, NVME_CTRL_CONNECTING)) {	/* [한국어] NVMe core API — SQE 조립·완료·상태기계·수명 */
+	if (!nvme_change_ctrl_state(&ctrl->ctrl, NVME_CTRL_CONNECTING)) {
 		/* state change failure should never happen */
-		WARN_ON_ONCE(1);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		return;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
-	}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		/* [한국어] 위 영어 주석대로 여기서는 실패할 수 없다 — 코어가 이미
+		 * RESETTING 으로 옮긴 뒤에 부르기 때문이다. 오류 복구 경로가
+		 * 같은 실패를 정상으로 보는 것과 대비된다. */
+		WARN_ON_ONCE(1);
+		return;
+	}
 
-	ret = nvme_rdma_setup_ctrl(ctrl, false);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	if (ret)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		goto out_fail;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
+	ret = nvme_rdma_setup_ctrl(ctrl, false);	/* [한국어] 태그셋을 재사용해 다시 세운다 */
+	if (ret)
+		goto out_fail;
 
-	return;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	return;
 
-out_fail:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	++ctrl->ctrl.nr_reconnects;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	nvme_rdma_reconnect_or_remove(ctrl, ret);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+out_fail:
+	++ctrl->ctrl.nr_reconnects;	/* [한국어] 실패했으니 재연결 시도로 계산한다 */
+	nvme_rdma_reconnect_or_remove(ctrl, ret);
+}
 
 static const struct nvme_ctrl_ops nvme_rdma_ctrl_ops = {	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 	.name			= "rdma",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
@@ -3336,35 +3416,64 @@ static struct nvmf_transport_ops nvme_rdma_transport = {	/* [한국어] NVMe/RDM
 	.create_ctrl	= nvme_rdma_create_ctrl,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 };	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
-static void nvme_rdma_remove_one(struct ib_device *ib_device, void *client_data)	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-{	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	struct nvme_rdma_ctrl *ctrl;	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	struct nvme_rdma_device *ndev;	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	bool found = false;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+/*
+ * [한국어]
+ * nvme_rdma_remove_one - HCA 가 제거될 때 그것을 쓰던 컨트롤러를 모두 지운다
+ *
+ * @ib_device:   사라지는 RDMA 장치
+ * @client_data: ib_client 등록 시 넘긴 데이터(이 드라이버는 쓰지 않는다)
+ * @return: 없음
+ *
+ * ib_client 콜백이다. HCA 가 뽑히거나 그 드라이버가 언로드되면 불린다.
+ * 장치가 사라진 뒤에도 컨트롤러가 남아 있으면 이미 없는 QP 와 PD 를
+ * 가리키게 되므로, 여기서 전부 지워야 한다.
+ *
+ * 먼저 device_list 를 훑어 우리가 이 장치를 쓰고 있었는지 확인한다.
+ * 쓰지 않았다면 할 일이 없다 -- 시스템에 여러 HCA 가 있고 그중 우리와
+ * 무관한 것이 빠지는 경우다.
+ *
+ * flush_workqueue 가 마지막에 오는 것이 중요하다. nvme_delete_ctrl 은
+ * 삭제를 예약만 하므로, 기다리지 않으면 아직 지워지는 중에 이 콜백이
+ * 반환되고 ib 코어가 장치 구조체를 해제한다. 그러면 해체 도중의 코드가
+ * 사라진 장치를 만진다.
+ *
+ * 두 락을 따로 잡는 것은 잠금 순서를 지키기 위해서다. 장치 목록을 놓은 뒤
+ * 컨트롤러 목록을 잡으므로, 두 락을 동시에 들지 않는다.
+ *
+ * 실행 컨텍스트: ib_client 제거 콜백. flush 로 오래 잠들 수 있다.
+ *
+ * 호출 체인:
+ *   ib 코어(장치 제거) → [이 함수] → nvme_delete_ctrl
+ */
+static void nvme_rdma_remove_one(struct ib_device *ib_device, void *client_data)
+{
+	struct nvme_rdma_ctrl *ctrl;
+	struct nvme_rdma_device *ndev;
+	bool found = false;
 
-	mutex_lock(&device_list_mutex);	/* [한국어] 동기화 — 큐/연결/상태 공유 보호 */
-	list_for_each_entry(ndev, &device_list, entry) {	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		if (ndev->dev == ib_device) {	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
-			found = true;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			break;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	mutex_unlock(&device_list_mutex);	/* [한국어] 동기화 — 큐/연결/상태 공유 보호 */
+	mutex_lock(&device_list_mutex);
+	list_for_each_entry(ndev, &device_list, entry) {	/* [한국어] 우리가 이 HCA 를 쓰고 있었는가 */
+		if (ndev->dev == ib_device) {
+			found = true;
+			break;
+		}
+	}
+	mutex_unlock(&device_list_mutex);	/* [한국어] 컨트롤러 목록을 잡기 전에 놓는다 — 두 락을 동시에 들지 않는다 */
 
-	if (!found)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		return;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	if (!found)
+		return;	/* [한국어] 무관한 HCA 가 빠진 경우 — 할 일이 없다 */
 
 	/* Delete all controllers using this device */
-	mutex_lock(&nvme_rdma_ctrl_mutex);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	list_for_each_entry(ctrl, &nvme_rdma_ctrl_list, list) {	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-		if (ctrl->device->dev != ib_device)	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
-			continue;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		nvme_delete_ctrl(&ctrl->ctrl);	/* [한국어] NVMe core API — SQE 조립·완료·상태기계·수명 */
-	}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	mutex_unlock(&nvme_rdma_ctrl_mutex);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+	mutex_lock(&nvme_rdma_ctrl_mutex);
+	list_for_each_entry(ctrl, &nvme_rdma_ctrl_list, list) {
+		if (ctrl->device->dev != ib_device)	/* [한국어] 다른 HCA 를 쓰는 컨트롤러는 건드리지 않는다 */
+			continue;
+		nvme_delete_ctrl(&ctrl->ctrl);	/* [한국어] 예약만 한다 — 실제 삭제는 워크큐에서 일어난다 */
+	}
+	mutex_unlock(&nvme_rdma_ctrl_mutex);
 
-	flush_workqueue(nvme_delete_wq);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	flush_workqueue(nvme_delete_wq);	/* [한국어] 반드시 기다린다. 안 그러면 삭제 중에 ib 코어가 장치를 해제해 사라진 장치를 만지게 된다 */
+}
 
 static struct ib_client nvme_rdma_ib_client = {	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 	.name   = "nvme_rdma",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
