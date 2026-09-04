@@ -2887,80 +2887,130 @@ out_stop_queues:	/* [한국어] 트랜스포트 파이프라인 단계 — 제�
 	return ret;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 }	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
-static int nvme_tcp_alloc_admin_queue(struct nvme_ctrl *ctrl)	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-{	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	int ret;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	key_serial_t pskid = 0;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+/*
+ * [한국어]
+ * nvme_tcp_alloc_admin_queue - admin 큐 소켓을 열고 AEN 요청을 준비한다
+ *
+ * @ctrl: 대상 컨트롤러
+ * @return: 0 이면 소켓과 AEN 버퍼가 준비됐다. -ENOKEY 면 TLS 키를 못 찾았다.
+ *
+ * 이 함수의 대부분은 TLS 키를 고르는 일이다. 세 갈래가 있다:
+ *   - 사용자가 tls_key 를 직접 지정했으면 그것을 쓴다.
+ *   - tls 만 켜져 있으면 호스트 NQN 과 서브시스템 NQN 으로 키링에서 찾는다.
+ *     이름 쌍이 곧 키의 식별자다.
+ *   - TLS 를 안 쓰면 pskid 가 0 으로 남고, alloc_queue 가 평문 소켓을 연다.
+ *
+ * 키를 못 찾으면 연결 자체를 실패시킨다. TLS 를 요구했는데 평문으로 붙는
+ * 것은 사용자의 의도에 반하기 때문이다.
+ *
+ * AEN 요청 버퍼를 여기서 잡는 이유: 그것은 admin 큐에만 딸리고, 태그셋
+ * 밖의 단일 객체라 큐 수명과 함께 관리해야 한다.
+ *
+ * 실행 컨텍스트: 연결 경로. 잠들 수 있다.
+ *
+ * 호출 체인:
+ *   nvme_tcp_configure_admin_queue → [이 함수] → nvme_tcp_alloc_queue
+ */
+static int nvme_tcp_alloc_admin_queue(struct nvme_ctrl *ctrl)
+{
+	int ret;
+	key_serial_t pskid = 0;	/* [한국어] 0 이면 평문 — alloc_queue 가 이 값으로 TLS 여부를 가른다 */
 
-	if (nvme_tcp_tls_configured(ctrl)) {	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		if (ctrl->opts->tls_key)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-			pskid = key_serial(ctrl->opts->tls_key);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		else if (ctrl->opts->tls) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-			pskid = nvme_tls_psk_default(ctrl->opts->keyring,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-						      ctrl->opts->host->nqn,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-						      ctrl->opts->subsysnqn);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			if (!pskid) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-				dev_err(ctrl->device, "no valid PSK found\n");	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-				return -ENOKEY;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
-			}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	if (nvme_tcp_tls_configured(ctrl)) {
+		if (ctrl->opts->tls_key)	/* [한국어] 사용자가 키를 직접 지정했다 */
+			pskid = key_serial(ctrl->opts->tls_key);
+		else if (ctrl->opts->tls) {	/* [한국어] tls 만 켜져 있으면 키링에서 찾는다 */
+			pskid = nvme_tls_psk_default(ctrl->opts->keyring,
+						      ctrl->opts->host->nqn,	/* [한국어] 호스트와 서브시스템 NQN 쌍이 곧 키의 식별자다 */
+						      ctrl->opts->subsysnqn);
+			if (!pskid) {
+				dev_err(ctrl->device, "no valid PSK found\n");
+				return -ENOKEY;	/* [한국어] TLS 를 요구했는데 평문으로 붙는 것은 사용자 의도에 반한다 */
+			}
+		}
+	}
 
-	ret = nvme_tcp_alloc_queue(ctrl, 0, pskid);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	if (ret)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		return ret;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	ret = nvme_tcp_alloc_queue(ctrl, 0, pskid);	/* [한국어] 소켓을 열고 필요하면 TLS 핸드셰이크까지 */
+	if (ret)
+		return ret;
 
-	ret = nvme_tcp_alloc_async_req(to_tcp_ctrl(ctrl));	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	if (ret)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		goto out_free_queue;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
+	ret = nvme_tcp_alloc_async_req(to_tcp_ctrl(ctrl));	/* [한국어] AEN 은 admin 큐에만 딸리므로 큐 수명과 함께 관리한다 */
+	if (ret)
+		goto out_free_queue;
 
-	return 0;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	return 0;
 
-out_free_queue:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	nvme_tcp_free_queue(ctrl, 0);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	return ret;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
-}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+out_free_queue:
+	nvme_tcp_free_queue(ctrl, 0);
+	return ret;
+}
 
-static int __nvme_tcp_alloc_io_queues(struct nvme_ctrl *ctrl)	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-{	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	int i, ret;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+/*
+ * [한국어]
+ * __nvme_tcp_alloc_io_queues - I/O 큐 소켓들을 연다
+ *
+ * @ctrl: 큐 개수가 이미 협상된 컨트롤러
+ * @return: 0 이면 모두 열렸다. -ENOKEY 면 TLS 키가 준비되지 않았다.
+ *
+ * I/O 큐는 admin 큐가 확보한 PSK 를 재사용한다. 큐마다 핸드셰이크를 다시
+ * 하지 않는 것이 요점이며, 그래서 여기서는 키를 찾는 대신 "쓸 수 있는
+ * 상태인가"를 확인만 한다.
+ *
+ * 확인이 두 갈래인 것은 concat 여부 때문이다. secure concatenation 에서는
+ * PSK 가 인증 결과로부터 파생되어 fabric 옵션에 저장되므로(위 영어 주석),
+ * 그 키가 실제로 생겼는지 보고, 아울러 ctrl->tls_pskid 가 그 키와 다르면
+ * 낡은 것으로 판단해 지운다 -- 재연결에서 이전 세션의 PSK 가 남아 있을 수
+ * 있는데, 그것으로 붙으면 타겟이 거절한다.
+ *
+ * concat 이 아니면 admin 연결에서 이미 협상된 tls_pskid 가 있어야 한다.
+ * 없다면 admin 은 TLS 로 붙었는데 I/O 는 평문으로 붙는 모순이 생긴다.
+ *
+ * 실행 컨텍스트: 연결 경로. 큐마다 핸드셰이크가 없어 admin 보다 빠르다.
+ *
+ * 호출 체인:
+ *   nvme_tcp_alloc_io_queues → [이 함수] → nvme_tcp_alloc_queue
+ */
+static int __nvme_tcp_alloc_io_queues(struct nvme_ctrl *ctrl)
+{
+	int i, ret;
 
-	if (nvme_tcp_tls_configured(ctrl)) {	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		if (ctrl->opts->concat) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
+	if (nvme_tcp_tls_configured(ctrl)) {
+		if (ctrl->opts->concat) {
 			/*
 			 * The generated PSK is stored in the
 			 * fabric options
 			 */
-			if (!ctrl->opts->tls_key) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-				dev_err(ctrl->device, "no PSK generated\n");	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-				return -ENOKEY;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
-			}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			if (ctrl->tls_pskid &&	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-			    ctrl->tls_pskid != key_serial(ctrl->opts->tls_key)) {	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-				dev_err(ctrl->device, "Stale PSK id %08x\n", ctrl->tls_pskid);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-				ctrl->tls_pskid = 0;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		} else if (!ctrl->tls_pskid) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-			dev_err(ctrl->device, "no PSK negotiated\n");	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			return -ENOKEY;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
-		}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			/* [한국어] 위 영어 주석대로 인증에서 파생된 PSK 는 옵션에 저장된다 */
+			if (!ctrl->opts->tls_key) {
+				dev_err(ctrl->device, "no PSK generated\n");
+				return -ENOKEY;	/* [한국어] 파생이 아직 안 됐다 — admin 인증이 끝나지 않았다는 뜻 */
+			}
+			if (ctrl->tls_pskid &&
+			    ctrl->tls_pskid != key_serial(ctrl->opts->tls_key)) {	/* [한국어] 재연결에서 이전 세션의 PSK 가 남아 있을 수 있다 */
+				dev_err(ctrl->device, "Stale PSK id %08x\n", ctrl->tls_pskid);
+				ctrl->tls_pskid = 0;	/* [한국어] 낡은 키로 붙으면 타겟이 거절하므로 지운다 */
+			}
+		} else if (!ctrl->tls_pskid) {	/* [한국어] 일반 TLS — admin 연결에서 협상된 것이 있어야 한다 */
+			dev_err(ctrl->device, "no PSK negotiated\n");
+			return -ENOKEY;	/* [한국어] 없으면 admin 은 TLS 인데 I/O 는 평문이 되는 모순이 생긴다 */
+		}
+	}
 
-	for (i = 1; i < ctrl->queue_count; i++) {	/* [한국어] 순회 — 큐·요청·세그먼트·이벤트 처리 */
-		ret = nvme_tcp_alloc_queue(ctrl, i,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-				ctrl->tls_pskid);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		if (ret)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-			goto out_free_queues;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
-	}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	for (i = 1; i < ctrl->queue_count; i++) {	/* [한국어] 1 부터 — 0 번 admin 은 이미 열려 있다 */
+		ret = nvme_tcp_alloc_queue(ctrl, i,
+				ctrl->tls_pskid);	/* [한국어] admin 이 확보한 PSK 를 재사용한다 — 큐마다 핸드셰이크를 다시 하지 않는다 */
+		if (ret)
+			goto out_free_queues;
+	}
 
-	return 0;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	return 0;
 
-out_free_queues:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	for (i--; i >= 1; i--)	/* [한국어] 순회 — 큐·요청·세그먼트·이벤트 처리 */
-		nvme_tcp_free_queue(ctrl, i);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+out_free_queues:
+	for (i--; i >= 1; i--)	/* [한국어] 실패한 것 직전부터 역순으로 되감는다 */
+		nvme_tcp_free_queue(ctrl, i);
 
-	return ret;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
-}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	return ret;
+}
 
 static int nvme_tcp_alloc_io_queues(struct nvme_ctrl *ctrl)	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 {	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
@@ -3378,60 +3428,111 @@ destroy_admin:
 	return ret;
 }
 
-static void nvme_tcp_reconnect_ctrl_work(struct work_struct *work)	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-{	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	struct nvme_tcp_ctrl *tcp_ctrl = container_of(to_delayed_work(work),	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-			struct nvme_tcp_ctrl, connect_work);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	struct nvme_ctrl *ctrl = &tcp_ctrl->ctrl;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	int ret;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+/*
+ * [한국어]
+ * nvme_tcp_reconnect_ctrl_work - 재연결을 한 번 시도한다
+ *
+ * @work: connect_work(지연 워크)
+ * @return: 없음
+ *
+ * 재연결 루프의 한 바퀴다. 실패하면 reconnect_or_remove 가 이 워크를 다시
+ * 예약하므로, 둘이 서로를 부르며 시도 횟수가 소진될 때까지 반복한다.
+ *
+ * setup_ctrl 에 false 를 넘기는 것이 핵심이다 -- 소켓은 새로 열되 태그셋은
+ * 유지한다. 그 위에 gendisk 와 진행 중인 요청이 매달려 있기 때문이다.
+ *
+ * 성공 시 nr_reconnects 를 0 으로 되돌려 다음 단절이 처음부터 세도록 한다.
+ * 로그에 시도 횟수를 함께 남기는 것은 몇 번 만에 붙었는지가 연결 품질을
+ * 가늠하는 단서가 되기 때문이다.
+ *
+ * 실행 컨텍스트: nvme_wq 워크큐. 연결 전체가 여기서 일어나 오래 잠든다.
+ *
+ * 호출 체인:
+ *   nvme_tcp_reconnect_or_remove → queue_delayed_work → [이 함수]
+ *     → nvme_tcp_setup_ctrl
+ */
+static void nvme_tcp_reconnect_ctrl_work(struct work_struct *work)
+{
+	struct nvme_tcp_ctrl *tcp_ctrl = container_of(to_delayed_work(work),
+			struct nvme_tcp_ctrl, connect_work);
+	struct nvme_ctrl *ctrl = &tcp_ctrl->ctrl;
+	int ret;
 
-	++ctrl->nr_reconnects;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	++ctrl->nr_reconnects;	/* [한국어] 시도 횟수. 성공하면 아래에서 되돌린다 */
 
-	ret = nvme_tcp_setup_ctrl(ctrl, false);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	if (ret)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		goto requeue;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
+	ret = nvme_tcp_setup_ctrl(ctrl, false);	/* [한국어] false — 소켓은 새로, 태그셋은 그대로 */
+	if (ret)
+		goto requeue;
 
-	dev_info(ctrl->device, "Successfully reconnected (attempt %d/%d)\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		 ctrl->nr_reconnects, ctrl->opts->max_reconnects);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	dev_info(ctrl->device, "Successfully reconnected (attempt %d/%d)\n",	/* [한국어] 몇 번 만에 붙었는지가 연결 품질의 단서다 */
+		 ctrl->nr_reconnects, ctrl->opts->max_reconnects);
 
-	ctrl->nr_reconnects = 0;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	ctrl->nr_reconnects = 0;	/* [한국어] 다음 단절이 처음부터 세도록 */
 
-	return;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	return;
 
-requeue:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	dev_info(ctrl->device, "Failed reconnect attempt %d/%d\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		 ctrl->nr_reconnects, ctrl->opts->max_reconnects);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	nvme_tcp_reconnect_or_remove(ctrl, ret);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+requeue:
+	dev_info(ctrl->device, "Failed reconnect attempt %d/%d\n",
+		 ctrl->nr_reconnects, ctrl->opts->max_reconnects);
+	nvme_tcp_reconnect_or_remove(ctrl, ret);	/* [한국어] 다시 시도할지 포기할지는 그쪽이 정하며, 다시면 이 워크가 재예약된다 */
+}
 
-static void nvme_tcp_error_recovery_work(struct work_struct *work)	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-{	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	struct nvme_tcp_ctrl *tcp_ctrl = container_of(work,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-				struct nvme_tcp_ctrl, err_work);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	struct nvme_ctrl *ctrl = &tcp_ctrl->ctrl;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
+/*
+ * [한국어]
+ * nvme_tcp_error_recovery_work - 연결을 통째로 내리고 재연결 루프에 넘긴다
+ *
+ * @work: err_work
+ * @return: 없음
+ *
+ * error_recovery 가 상태만 옮기고 깨운 워크다. 실제 복구가 여기서 일어난다.
+ *
+ * 해체 순서에 각각 이유가 있다:
+ *   1) TLS 키 폐기 -- 인증에서 파생한 키는 세션과 함께 무효가 된다. 남겨
+ *      두면 다음 연결이 낡은 키로 붙으려 하고 타겟이 거절한다.
+ *   2) keep-alive 정지 -- 내리는 중에 새 admin 명령이 나가면 안 된다.
+ *   3) async_event_work flush -- AEN 재무장이 진행 중일 수 있고, 큐를 내린
+ *      뒤에 그것이 돌면 이미 닫힌 소켓으로 명령을 보낸다.
+ *   4) 큐 해체 후 곧바로 unquiesce -- 위 영어 주석대로 대기 중인 요청을
+ *      빨리 실패시키기 위해서다. 멈춘 채 두면 쌓여 기다리기만 한다.
+ *   5) 인증 중단 -- 진행 중인 DH-HMAC-CHAP 협상을 끊는다.
+ *
+ * false 를 넘겨 태그셋은 남긴다. 재연결에서 다시 쓴다.
+ *
+ * 실행 컨텍스트: nvme_reset_wq 워크큐. 오래 잠들 수 있다.
+ *
+ * 호출 체인:
+ *   nvme_tcp_error_recovery → [이 함수] → nvme_tcp_teardown_io_queues
+ *     → nvme_tcp_reconnect_or_remove
+ */
+static void nvme_tcp_error_recovery_work(struct work_struct *work)
+{
+	struct nvme_tcp_ctrl *tcp_ctrl = container_of(work,
+				struct nvme_tcp_ctrl, err_work);
+	struct nvme_ctrl *ctrl = &tcp_ctrl->ctrl;
 
-	if (nvme_tcp_key_revoke_needed(ctrl))	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		nvme_auth_revoke_tls_key(ctrl);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	nvme_stop_keep_alive(ctrl);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	flush_work(&ctrl->async_event_work);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	nvme_tcp_teardown_io_queues(ctrl, false);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+	if (nvme_tcp_key_revoke_needed(ctrl))	/* [한국어] 인증에서 파생한 키는 세션과 함께 무효가 된다 */
+		nvme_auth_revoke_tls_key(ctrl);	/* [한국어] 남겨 두면 다음 연결이 낡은 키로 붙으려 하고 타겟이 거절한다 */
+	nvme_stop_keep_alive(ctrl);	/* [한국어] 내리는 중에 새 admin 명령이 나가면 안 된다 */
+	flush_work(&ctrl->async_event_work);	/* [한국어] AEN 재무장이 진행 중일 수 있다 — 큐를 내린 뒤 돌면 닫힌 소켓으로 명령을 보낸다 */
+	nvme_tcp_teardown_io_queues(ctrl, false);	/* [한국어] false — 태그셋은 남긴다 */
 	/* unquiesce to fail fast pending requests */
-	nvme_unquiesce_io_queues(ctrl);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	nvme_tcp_teardown_admin_queue(ctrl, false);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	nvme_unquiesce_admin_queue(ctrl);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	nvme_auth_stop(ctrl);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	nvme_unquiesce_io_queues(ctrl);	/* [한국어] 위 영어 주석대로 대기 요청을 빨리 실패시킨다. 멈춘 채 두면 쌓여 기다리기만 한다 */
+	nvme_tcp_teardown_admin_queue(ctrl, false);
+	nvme_unquiesce_admin_queue(ctrl);
+	nvme_auth_stop(ctrl);	/* [한국어] 진행 중인 대역 내 인증 협상을 끊는다 */
 
-	if (!nvme_change_ctrl_state(ctrl, NVME_CTRL_CONNECTING)) {	/* [한국어] NVMe core API — SQE 조립·완료·상태기계·수명 */
+	if (!nvme_change_ctrl_state(ctrl, NVME_CTRL_CONNECTING)) {
 		/* state change failure is ok if we started ctrl delete */
-		enum nvme_ctrl_state state = nvme_ctrl_state(ctrl);	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
+		/* [한국어] 위 영어 주석대로 삭제가 시작된 경우라면 정상이다 */
+		enum nvme_ctrl_state state = nvme_ctrl_state(ctrl);
 
-		WARN_ON_ONCE(state != NVME_CTRL_DELETING &&	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			     state != NVME_CTRL_DELETING_NOIO);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		return;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
-	}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		WARN_ON_ONCE(state != NVME_CTRL_DELETING &&	/* [한국어] 그 밖의 상태라면 상태 기계가 어긋난 것이다 */
+			     state != NVME_CTRL_DELETING_NOIO);
+		return;	/* [한국어] 삭제 경로가 정리한다 */
+	}
 
-	nvme_tcp_reconnect_or_remove(ctrl, 0);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	nvme_tcp_reconnect_or_remove(ctrl, 0);	/* [한국어] 재연결 루프에 넘긴다 */
+}
 
 static void nvme_tcp_teardown_ctrl(struct nvme_ctrl *ctrl, bool shutdown)	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 {	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
@@ -3446,36 +3547,61 @@ static void nvme_tcp_delete_ctrl(struct nvme_ctrl *ctrl)	/* [한국어] NVMe/TCP
 	nvme_tcp_teardown_ctrl(ctrl, true);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 }	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
-static void nvme_reset_ctrl_work(struct work_struct *work)	/* [한국어] NVMe core API — SQE 조립·완료·상태기계·수명 */
-{	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	struct nvme_ctrl *ctrl =	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-		container_of(work, struct nvme_ctrl, reset_work);	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	int ret;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+/*
+ * [한국어]
+ * nvme_reset_ctrl_work - 명시적 리셋 요청을 수행한다
+ *
+ * @work: ctrl.reset_work
+ * @return: 없음
+ *
+ * error_recovery_work 와 하는 일이 겹치지만 진입 경로가 다르다. 이쪽은
+ * 오류가 아니라 사용자나 코어의 요청으로 불린다.
+ *
+ * 그래서 teardown_ctrl 을 쓴다 -- I/O 큐와 admin 큐를 함께 내리면서
+ * 컨트롤러에 정상 종료를 알릴 기회를 갖는다. 오류 복구가 각 큐를 따로
+ * 내리며 곧바로 unquiesce 하는 것과 대비된다.
+ *
+ * TLS 키 폐기는 같은 이유로 여기에도 있다. 세션이 바뀌면 파생 키도 무효다.
+ *
+ * 상태 전이 실패를 삭제 중으로만 허용하는 것은 error_recovery_work 와 같다
+ * -- rdma.c 의 reset 이 WARN_ON_ONCE(1) 로 잡는 것과는 다른데, tcp 쪽은
+ * 리셋과 삭제가 겹칠 수 있는 경로가 더 있기 때문이다.
+ *
+ * 실행 컨텍스트: nvme_reset_wq 워크큐. 오래 잠들 수 있다.
+ *
+ * 호출 체인:
+ *   nvme_reset_ctrl → [이 함수] → nvme_tcp_teardown_ctrl → nvme_tcp_setup_ctrl
+ */
+static void nvme_reset_ctrl_work(struct work_struct *work)
+{
+	struct nvme_ctrl *ctrl =
+		container_of(work, struct nvme_ctrl, reset_work);
+	int ret;
 
-	if (nvme_tcp_key_revoke_needed(ctrl))	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		nvme_auth_revoke_tls_key(ctrl);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	nvme_stop_ctrl(ctrl);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	nvme_tcp_teardown_ctrl(ctrl, false);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+	if (nvme_tcp_key_revoke_needed(ctrl))	/* [한국어] 세션이 바뀌면 파생 키도 무효다 */
+		nvme_auth_revoke_tls_key(ctrl);
+	nvme_stop_ctrl(ctrl);	/* [한국어] keep-alive 와 스캔을 멈춘다 */
+	nvme_tcp_teardown_ctrl(ctrl, false);	/* [한국어] 두 큐를 함께 내린다 — 정상 종료를 알릴 기회가 있는 경로다 */
 
-	if (!nvme_change_ctrl_state(ctrl, NVME_CTRL_CONNECTING)) {	/* [한국어] NVMe core API — SQE 조립·완료·상태기계·수명 */
+	if (!nvme_change_ctrl_state(ctrl, NVME_CTRL_CONNECTING)) {
 		/* state change failure is ok if we started ctrl delete */
-		enum nvme_ctrl_state state = nvme_ctrl_state(ctrl);	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
+		enum nvme_ctrl_state state = nvme_ctrl_state(ctrl);
 
-		WARN_ON_ONCE(state != NVME_CTRL_DELETING &&	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			     state != NVME_CTRL_DELETING_NOIO);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		return;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
-	}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		WARN_ON_ONCE(state != NVME_CTRL_DELETING &&	/* [한국어] tcp 는 리셋과 삭제가 겹칠 경로가 더 있어 이 실패를 정상으로 본다 */
+			     state != NVME_CTRL_DELETING_NOIO);
+		return;
+	}
 
-	ret = nvme_tcp_setup_ctrl(ctrl, false);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	if (ret)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		goto out_fail;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
+	ret = nvme_tcp_setup_ctrl(ctrl, false);	/* [한국어] 태그셋을 재사용해 다시 세운다 */
+	if (ret)
+		goto out_fail;
 
-	return;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	return;
 
-out_fail:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	++ctrl->nr_reconnects;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	nvme_tcp_reconnect_or_remove(ctrl, ret);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+out_fail:
+	++ctrl->nr_reconnects;	/* [한국어] 실패했으니 재연결 시도로 계산한다 */
+	nvme_tcp_reconnect_or_remove(ctrl, ret);
+}
 
 static void nvme_tcp_stop_ctrl(struct nvme_ctrl *ctrl)	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 {	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
