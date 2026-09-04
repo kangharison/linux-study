@@ -433,7 +433,7 @@ int ibmphp_configure_card(struct pci_func *func, u8 slotno)
 							if (flag) { /* [한국어] 이미 하나 이상 이었으면 */
 								for (prev_func = cur_func; prev_func->next; prev_func = prev_func->next) ; /* [한국어] 목록 끝을 찾아 */
 								prev_func->next = newfunc; /* [한국어] 거기에 잇는다 */
-							} else /* [한국어] 첫 번째이면 */
+							} else
 								cur_func->next = newfunc; /* [한국어] 브리지 노드 바로 뒤에 잇는다 */
 
 							rc = ibmphp_configure_card(newfunc, slotno); /* [한국어] **자기 자신을 재귀 호출**해 그 장치를 구성한다 */
@@ -505,7 +505,7 @@ int ibmphp_configure_card(struct pci_func *func, u8 slotno)
 							if (flag) { /* [한국어] 이미 하나 이상 이었으면 */
 								for (prev_func = cur_func; prev_func->next; prev_func = prev_func->next); /* [한국어] 목록 끝을 찾아 */
 								prev_func->next = newfunc; /* [한국어] 거기에 잇는다 */
-							} else /* [한국어] 첫 번째이면 */
+							} else
 								cur_func->next = newfunc; /* [한국어] 브리지 노드 바로 뒤에 잇는다 */
 
 							rc = ibmphp_configure_card(newfunc, slotno); /* [한국어] **자기 자신을 재귀 호출**해 그 장치를 구성한다 */
@@ -672,7 +672,7 @@ static int configure_device(struct pci_func *func)
 			if (ibmphp_check_resource(io[count], 0) == 0) { /* [한국어] **장부에서 자리를 고른다**. 두 번째 인자 0 은 일반 장치라는 뜻이다 */
 				ibmphp_add_resource(io[count]); /* [한국어] 고른 자리를 장부에 등록하고 */
 				func->io[count] = io[count]; /* [한국어] 함수 구조체에도 매달아 둔다 — 나중에 제거할 때 이 포인터로 지운다 */
-			} else { /* [한국어] 자리를 못 찾으면 */
+			} else {
 				err("cannot allocate requested io for bus %x device %x function %x len %x\n",
 				     func->busno, func->device, func->function, len[count]); /* [한국어] 무엇이 안 되었는지 알리고 */
 				kfree(io[count]); /* [한국어] 만든 노드를 버린 뒤 */
@@ -686,7 +686,7 @@ static int configure_device(struct pci_func *func)
 			debug("after writing.... the start address is %x\n", bar[count]); /* [한국어] 실제로 반영되었는지 확인한다 */
 			/* _________________________________________________________________________*/
 
-		} else { /* [한국어] 최하위 비트가 0 이면 메모리 공간이다 */
+		} else {
 			/* This is Memory */
 			if (bar[count] & PCI_BASE_ADDRESS_MEM_PREFETCH) { /* [한국어] 프리페치 비트가 서 있으면 PFMEM 이다 */
 				/* pfmem */
@@ -710,7 +710,7 @@ static int configure_device(struct pci_func *func)
 				if (ibmphp_check_resource(pfmem[count], 0) == 0) { /* [한국어] 프리페치 창에서 자리를 고른다 */
 					ibmphp_add_resource(pfmem[count]); /* [한국어] 찾았으면 장부에 등록하고 */
 					func->pfmem[count] = pfmem[count]; /* [한국어] 함수 구조체에 매단다 */
-				} else { /* [한국어] 못 찾으면 **일반 MEM 창에서 떼어 쓴다** */
+				} else {
 					mem_tmp = kzalloc_obj(*mem_tmp); /* [한국어] 임시 MEM 노드를 만든다 */
 					if (!mem_tmp) { /* [한국어] 메모리가 없으면 */
 						kfree(pfmem[count]); /* [한국어] PFMEM 노드도 버리고 */
@@ -729,7 +729,7 @@ static int configure_device(struct pci_func *func)
 						pfmem[count]->end = mem_tmp->end; /* [한국어] 끝을 그 MEM 노드에서 베낀다 */
 						ibmphp_add_pfmem_from_mem(pfmem[count]); /* [한국어] 곁가지 목록(firstPFMemFromMem)에 매단다 */
 						func->pfmem[count] = pfmem[count]; /* [한국어] 함수 구조체에는 PFMEM 노드를 매단다 */
-					} else { /* [한국어] 거기서도 못 찾으면 */
+					} else {
 						err("cannot allocate requested pfmem for bus %x, device %x, len %x\n",
 						     func->busno, func->device, len[count]); /* [한국어] 알리고 */
 						kfree(mem_tmp); /* [한국어] 임시 노드와 */
@@ -752,7 +752,7 @@ static int configure_device(struct pci_func *func)
 					/* on the 2nd dword, write all 0s, since we can't handle them n.e.ways */
 					pci_bus_write_config_dword(ibmphp_pci_bus, devfn, address[count], 0x00000000); /* [한국어] 상류 주석대로 상위 워드에는 0 을 쓴다 — 이 드라이버가 4GB 위를 다루지 못하기 때문이다 */
 				}
-			} else { /* [한국어] 프리페치가 아니면 일반 메모리다 */
+			} else {
 				/* regular memory */
 				debug("REGULAR MEM SPACE\n"); /* [한국어] 일반 메모리 갈래임을 남긴다 */
 
@@ -773,7 +773,7 @@ static int configure_device(struct pci_func *func)
 				if (ibmphp_check_resource(mem[count], 0) == 0) { /* [한국어] 메모리 창에서 자리를 고른다 */
 					ibmphp_add_resource(mem[count]); /* [한국어] 찾았으면 장부에 등록하고 */
 					func->mem[count] = mem[count]; /* [한국어] 함수 구조체에 매단다 */
-				} else { /* [한국어] 못 찾으면 */
+				} else {
 					err("cannot allocate requested mem for bus %x, device %x, len %x\n",
 					     func->busno, func->device, len[count]); /* [한국어] 알리고 */
 					kfree(mem[count]); /* [한국어] 만든 노드를 버린 뒤 */
@@ -1001,7 +1001,7 @@ static int configure_bridge(struct pci_func **func_passed, u8 slotno)
 			if (ibmphp_check_resource(bus_io[count], 0) == 0) { /* [한국어] 장부에서 자리를 고른다. 두 번째 인자 0 은 브리지 창이 아니라 일반 BAR 라는 뜻이다 */
 				ibmphp_add_resource(bus_io[count]); /* [한국어] 고른 자리를 장부에 등록하고 */
 				func->io[count] = bus_io[count]; /* [한국어] 함수 구조체에 매단다 */
-			} else { /* [한국어] 자리를 못 찾으면 */
+			} else {
 				err("cannot allocate requested io for bus %x, device %x, len %x\n", /* [한국어] 무엇이 안 되었는지 알리고 */
 				     func->busno, func->device, len[count]);
 				kfree(bus_io[count]); /* [한국어] 만든 노드를 버린 뒤 */
@@ -1010,7 +1010,7 @@ static int configure_bridge(struct pci_func **func_passed, u8 slotno)
 
 			pci_bus_write_config_dword(ibmphp_pci_bus, devfn, address[count], func->io[count]->start); /* [한국어] 고른 시작 주소를 BAR 에 써 넣는다 */
 
-		} else { /* [한국어] 최하위 비트가 0 이면 메모리 공간이다 */
+		} else {
 			/* This is Memory */
 			if (bar[count] & PCI_BASE_ADDRESS_MEM_PREFETCH) { /* [한국어] 프리페치 비트가 서 있으면 PFMEM 이다 */
 				/* pfmem */
@@ -1033,7 +1033,7 @@ static int configure_bridge(struct pci_func **func_passed, u8 slotno)
 				if (ibmphp_check_resource(bus_pfmem[count], 0) == 0) { /* [한국어] 프리페치 창에서 자리를 고른다 */
 					ibmphp_add_resource(bus_pfmem[count]); /* [한국어] 찾았으면 장부에 등록하고 */
 					func->pfmem[count] = bus_pfmem[count]; /* [한국어] 함수 구조체에 매단다 */
-				} else { /* [한국어] 못 찾으면 일반 MEM 창에서 떼어 쓴다 */
+				} else {
 					mem_tmp = kzalloc_obj(*mem_tmp); /* [한국어] 임시 MEM 노드를 만든다 */
 					if (!mem_tmp) { /* [한국어] 메모리가 없으면 */
 						retval = -ENOMEM; /* [한국어] ENOMEM 을 담아 */
@@ -1087,7 +1087,7 @@ static int configure_bridge(struct pci_func **func_passed, u8 slotno)
 				if (ibmphp_check_resource(bus_mem[count], 0) == 0) { /* [한국어] 메모리 창에서 자리를 고른다 */
 					ibmphp_add_resource(bus_mem[count]); /* [한국어] 찾았으면 장부에 등록하고 */
 					func->mem[count] = bus_mem[count]; /* [한국어] 함수 구조체에 매단다 */
-				} else { /* [한국어] 못 찾으면 */
+				} else {
 					err("cannot allocate requested mem for bus %x, device %x, len %x\n", /* [한국어] 무엇이 안 되었는지 알리고 */
 					     func->busno, func->device, len[count]);
 					kfree(bus_mem[count]); /* [한국어] 만든 노드를 버린 뒤 */
@@ -1199,7 +1199,7 @@ static int configure_bridge(struct pci_func **func_passed, u8 slotno)
 		if (ibmphp_check_resource(pfmem, 1) == 0) { /* [한국어] 브리지 창이므로 1MB 경계로 정렬해 프리페치 창에서 자리를 고른다 */
 			ibmphp_add_resource(pfmem); /* [한국어] 장부에 등록하고 */
 			flag_pfmem = 1; /* [한국어] 프리페치 준비 완료로 표시한다 */
-		} else { /* [한국어] 프리페치 창에서 못 찾으면 일반 MEM 창에서 떼어 쓴다 */
+		} else {
 			mem_tmp = kzalloc_obj(*mem_tmp); /* [한국어] 임시 MEM 노드를 만든다 */
 			if (!mem_tmp) { /* [한국어] 메모리가 없으면 */
 				retval = -ENOMEM; /* [한국어] ENOMEM 을 담아 */
@@ -1240,7 +1240,7 @@ static int configure_bridge(struct pci_func **func_passed, u8 slotno)
 			rc = add_new_bus(bus, io, mem, pfmem, func->busno); /* [한국어] 세 창을 이 버스의 범위로 등록한다. 마지막 인자는 부모 버스 번호다 */
 		} else if (!(bus->rangeIO) && !(bus->rangeMem) && !(bus->rangePFMem)) /* [한국어] 노드는 있는데 범위가 셋 다 비어 있으면 껍데기만 남은 것이다 */
 			rc = add_new_bus(bus, io, mem, pfmem, 0xFF); /* [한국어] 부모 번호 자리에 0xFF 를 넘겨 부모 범위를 다시 쪼개지 않도록 한다 */
-		else { /* [한국어] 범위가 이미 차 있으면 예상 밖 상태다 */
+		else {
 			err("expected bus structure not empty?\n"); /* [한국어] 무엇이 이상한지 알리고 */
 			retval = -EIO; /* [한국어] 입출력 오류로 */
 			goto error; /* [한국어] 공통 정리 경로로 간다 */
@@ -1346,7 +1346,7 @@ static int configure_bridge(struct pci_func **func_passed, u8 slotno)
 		debug("func->busno b4 returning in the other structure is %x\n", (*func_passed)->busno); /* [한국어] 같은 값을 포인터 경유로도 남긴다 */
 		kfree(amount_needed); /* [한국어] 요구량 구조체를 버리고 */
 		return 0; /* [한국어] 성공으로 돌아간다 */
-	} else { /* [한국어] 셋 중 하나라도 준비되지 않았으면 */
+	} else {
 		err("Configuring bridge was unsuccessful...\n"); /* [한국어] 실패를 알리고 */
 		mem_tmp = NULL; /* [한국어] 임시 노드는 이미 장부에 들어갔으므로 아래에서 두 번 지우지 않도록 끊는다 */
 		retval = -EIO; /* [한국어] 입출력 오류로 */
@@ -1538,7 +1538,7 @@ static struct res_needed *scan_behind_bridge(struct pci_func *func, u8 busno)
 
 	if (!howmany) /* [한국어] 브리지 뒤에서 장치를 하나도 못 찾았으면 */
 		amount->not_correct = 1; /* [한국어] 구성이 부적합하다고 표시한다 — 빈 브리지에 창을 열 이유가 없다 */
-	else /* [한국어] 하나라도 찾았으면 */
+	else
 		amount->not_correct = 0; /* [한국어] 구성이 적합하다고 표시한다 */
 	if ((amount->io) && (amount->io < IOBRIDGE)) /* [한국어] I/O 를 쓰는데 그 합이 브리지 최소 단위보다 작으면 */
 		amount->io = IOBRIDGE; /* [한국어] 브리지 I/O 창의 최소 크기(4KB)로 올린다 — 규격상 그보다 잘게 열 수 없다 */
@@ -1668,7 +1668,7 @@ static int unconfigure_boot_device(u8 busno, u8 device, u8 function)
 			}
 
 			/* ????????? DO WE NEED TO WRITE ANYTHING INTO THE PCI CONFIG SPACE BACK ?????????? */
-		} else { /* [한국어] 최하위 비트가 0 이면 메모리 공간이다 */
+		} else {
 			/* This is Memory */
 			if (start_address & PCI_BASE_ADDRESS_MEM_PREFETCH) { /* [한국어] 프리페치 비트가 서 있으면 PFMEM 이다 */
 				/* pfmem */
@@ -1825,7 +1825,7 @@ static int unconfigure_boot_bridge(u8 busno, u8 device, u8 function)
 			ibmphp_remove_resource(io); /* [한국어] 장부에서 지운다. 여기서는 unconfigure_boot_device() 와 달리 조각 이어 지우기를 하지 않는다 */
 
 			/* ????????? DO WE NEED TO WRITE ANYTHING INTO THE PCI CONFIG SPACE BACK ?????????? */
-		} else { /* [한국어] 최하위 비트가 0 이면 메모리 공간이다 */
+		} else {
 			/* This is Memory */
 			if (start_address & PCI_BASE_ADDRESS_MEM_PREFETCH) { /* [한국어] 프리페치 비트가 서 있으면 PFMEM 이다 */
 				/* pfmem */
@@ -2068,7 +2068,7 @@ int ibmphp_unconfigure_card(struct slot **slot_cur, int the_end)
 			if (cur_func->bus) { /* [한국어] 브리지(PPB)로 표시된 함수면 */
 				/* in other words, it's a PPB */
 				count = 2; /* [한국어] BAR 가 둘뿐이다 */
-			} else { /* [한국어] 일반 장치면 */
+			} else {
 				count = 6; /* [한국어] BAR 가 여섯이다 */
 			}
 

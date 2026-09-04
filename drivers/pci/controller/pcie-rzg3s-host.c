@@ -1056,7 +1056,7 @@ static int rzg3s_pcie_child_write(struct pci_bus *bus, unsigned int devfn,
 		shift = BITS_PER_BYTE * (where & 2); /* [한국어] 2번 비트만 본다 — 2바이트 접근은 짝수 경계에만 오기 때문이다 */
 		data &= ~(0xffff << shift); /* [한국어] 그 하프워드를 비우고 */
 		data |= ((val & 0xffff) << shift); /* [한국어] 새 값을 넣는다 */
-	} else { /* [한국어] [관찰] size 가 1도 2도 아닌 경우인데, 4 는 위에서 이미 돌아갔고 PCI 코어는 1/2/4 만 넘기므로 실제로는 오지 않는 것으로 보인다 */
+	} else {
 		data = val; /* [한국어] 그래도 정의된 동작을 두어, 값을 그대로 쓴다 */
 	}
 
@@ -3094,18 +3094,18 @@ static int rzg3s_soc_pcie_init_phy(struct rzg3s_pcie_host *host)
 		[19] = 0x00880000, 0x000005c0, 0x07000000, 0x00780920,
 		       0xc9400ce2, 0x90000c0c, 0x000c1414, 0x00005034,
 		       0x00006000, 0x00000001,
-	}; /* [한국어] PHY 디지털 설정 값들. 지정 초기화로 값이 있는 구간만 적고 나머지는 0 이며, 각 값의 의미는 이 트리에서 확인 못 함 */
+	};
 	static const u32 xcfga_cmn_settings[RZG3S_PCI_PHY_XCFGA_CMN_NUM] = {
 		0x00000d10, 0x08310100, 0x00c21404, 0x013c0010, 0x01874440,
 		0x1a216082, 0x00103440, 0x00000080, 0x00000010, 0x0c1000c1,
 		0x1000c100, 0x0222000c, 0x00640019, 0x00a00028, 0x01d11228,
 		0x0201001d,
-	}; /* [한국어] PHY 아날로그 공통 설정 값들. 16개 자리를 모두 채운다 */
+	};
 	static const u32 xcfga_rx_settings[RZG3S_PCI_PHY_XCFGA_RX_NUM] = {
 		0x07d55000, 0x030e3f00, 0x00000288, 0x102c5880, 0x0000000b,
 		0x04141441, 0x00641641, 0x00d63d63, 0x00641641, 0x01970377,
 		0x00190287, 0x00190028, 0x00000028,
-	}; /* [한국어] PHY 아날로그 수신 설정 값들. 13개 자리를 모두 채운다 */
+	};
 	unsigned int i; /* [한국어] 세 루프가 공유하는 인덱스 */
 
 	/*

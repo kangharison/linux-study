@@ -971,7 +971,7 @@ static void advk_pcie_train_link(struct advk_pcie *pcie)
 		reg |= SPEED_GEN_3;	/* [한국어] 8.0GT/s 값을, */
 	else if (pcie->link_gen == 2)	/* [한국어] Gen2 를 요구했으면 */
 		reg |= SPEED_GEN_2;	/* [한국어] 5.0GT/s 값을, */
-	else	/* [한국어] 그 밖이면 */
+	else
 		reg |= SPEED_GEN_1;	/* [한국어] 2.5GT/s 값을 넣는다 */
 	advk_writel(pcie, reg, PCIE_CORE_CTRL0_REG);	/* [한국어] 고친 값을 되쓴다 */
 
@@ -986,7 +986,7 @@ static void advk_pcie_train_link(struct advk_pcie *pcie)
 		reg |= PCI_EXP_LNKCTL2_TLS_8_0GT;	/* [한국어] 8.0GT/s, */
 	else if (pcie->link_gen == 2)	/* [한국어] Gen2 이면 */
 		reg |= PCI_EXP_LNKCTL2_TLS_5_0GT;	/* [한국어] 5.0GT/s, */
-	else	/* [한국어] 그 밖이면 */
+	else
 		reg |= PCI_EXP_LNKCTL2_TLS_2_5GT;	/* [한국어] 2.5GT/s 를 넣는다 */
 	advk_writel(pcie, reg, PCIE_CORE_PCIEXP_CAP + PCI_EXP_LNKCTL2);	/* [한국어] 고친 값을 되쓴다 */
 
@@ -1015,7 +1015,7 @@ static void advk_pcie_train_link(struct advk_pcie *pcie)
 	ret = advk_pcie_wait_for_link(pcie);	/* [한국어] **링크가 서기를 기다린다.** 바로 위 상류 주석대로 이 대기가 규격이 요구하는 100ms 를 함께 채운다 */
 	if (ret < 0)	/* [한국어] 안 서면 */
 		dev_err(dev, "link never came up\n");	/* [한국어] 그 사실을 알린다. **오류로 돌아가지는 않는다** — 카드가 없는 슬롯도 정상이기 때문이다 */
-	else	/* [한국어] 섰으면 */
+	else
 		dev_info(dev, "link up\n");	/* [한국어] 그 사실을 알린다 */
 }
 
@@ -1451,7 +1451,7 @@ static int advk_pcie_check_pio_status(struct advk_pcie *pcie, bool allow_rrs, u3
 
 	if (reg & PIO_NON_POSTED_REQ)	/* [한국어] non-posted 요청이었으면 */
 		str_posted = "Non-posted";	/* [한국어] 그렇게 적고 */
-	else	/* [한국어] 아니면 */
+	else
 		str_posted = "Posted";	/* [한국어] posted 로 적는다 */
 
 	dev_dbg(dev, "%s PIO Response Status: %s, %#x @ %#x\n",	/* [한국어] 무엇이 어떻게 끝났는지 남긴다 */
@@ -1558,11 +1558,11 @@ advk_pci_bridge_emul_base_conf_read(struct pci_bridge_emul *bridge,
 		u32 val = le32_to_cpu(cfgspace[PCI_INTERRUPT_LINE / 4]);	/* [한국어] 그 워드의 현재 값을 가져온다. 바로 위 상류 주석대로 하드웨어에서 읽는 것은 두 비트뿐이고 나머지는 이 버퍼 값을 쓴다 */
 		if (advk_readl(pcie, PCIE_ISR0_MASK_REG) & PCIE_ISR0_ERR_MASK)	/* [한국어] **ISR0 마스크에 오류 마스크가 걸려 있으면** */
 			val &= ~(PCI_BRIDGE_CTL_SERR << 16);	/* [한국어] SERR 를 끈 것으로 보고 그 비트를 지운다 — 마스크와 SERR 의 뜻이 반대다 */
-		else	/* [한국어] 마스크가 없으면 */
+		else
 			val |= PCI_BRIDGE_CTL_SERR << 16;	/* [한국어] SERR 가 켜진 것으로 보고 비트를 세운다 */
 		if (advk_readl(pcie, PCIE_CORE_CTRL1_REG) & HOT_RESET_GEN)	/* [한국어] CTRL1 에 핫 리셋 비트가 서 있으면 */
 			val |= PCI_BRIDGE_CTL_BUS_RESET << 16;	/* [한국어] Bridge Control 의 BUS_RESET 비트를 세우고 */
-		else	/* [한국어] 아니면 */
+		else
 			val &= ~(PCI_BRIDGE_CTL_BUS_RESET << 16);	/* [한국어] 지운다. 이쪽은 뜻이 그대로 대응한다 */
 		*value = val;	/* [한국어] 만든 값을 돌려주고 */
 		return PCI_BRIDGE_EMUL_HANDLED;	/* [한국어] 처리했다고 알린다 */
@@ -1626,7 +1626,7 @@ advk_pci_bridge_emul_base_conf_write(struct pci_bridge_emul *bridge,
 			u32 val = advk_readl(pcie, PCIE_ISR0_MASK_REG);	/* [한국어] ISR0 마스크를 읽어 */
 			if (new & (PCI_BRIDGE_CTL_SERR << 16))	/* [한국어] SERR 를 켜라는 것이면 */
 				val &= ~PCIE_ISR0_ERR_MASK;	/* [한국어] 오류 마스크를 지우고 — 마스크를 푸는 것이 SERR 를 켜는 것이다. 바로 위 상류 주석이 규격의 Figure 6-3 을 근거로 든다 */
-			else	/* [한국어] 끄라는 것이면 */
+			else
 				val |= PCIE_ISR0_ERR_MASK;	/* [한국어] 오류 마스크를 건다 */
 			advk_writel(pcie, val, PCIE_ISR0_MASK_REG);	/* [한국어] 고친 값을 되쓴다 */
 		}
@@ -1634,7 +1634,7 @@ advk_pci_bridge_emul_base_conf_write(struct pci_bridge_emul *bridge,
 			u32 val = advk_readl(pcie, PCIE_CORE_CTRL1_REG);	/* [한국어] CTRL1 을 읽어 */
 			if (new & (PCI_BRIDGE_CTL_BUS_RESET << 16))	/* [한국어] 리셋을 걸라는 것이면 */
 				val |= HOT_RESET_GEN;	/* [한국어] 핫 리셋 비트를 세우고 — **실제로 핫 리셋이 발생한다** */
-			else	/* [한국어] 풀라는 것이면 */
+			else
 				val &= ~HOT_RESET_GEN;	/* [한국어] 그 비트를 지운다 */
 			advk_writel(pcie, val, PCIE_CORE_CTRL1_REG);	/* [한국어] 고친 값을 되쓴다 */
 		}
@@ -2198,7 +2198,7 @@ static int advk_pcie_rd_conf(struct pci_bus *bus, u32 devfn,
 	reg &= ~PIO_CTRL_TYPE_MASK;	/* [한국어] 기존 종류 필드를 지우고 */
 	if (pci_is_root_bus(bus->parent))	/* [한국어] **부모가 루트 버스이면** 바로 아래 버스의 장치이므로 */
 		reg |= PCIE_CONFIG_RD_TYPE0;	/* [한국어] config 읽기 type 0 을, */
-	else	/* [한국어] 아니면 브리지를 거쳐 더 아래로 가므로 */
+	else
 		reg |= PCIE_CONFIG_RD_TYPE1;	/* [한국어] type 1 을 넣는다 */
 	advk_writel(pcie, reg, PIO_CTRL);	/* [한국어] 고친 값을 되쓴다 */
 
@@ -2310,7 +2310,7 @@ static int advk_pcie_wr_conf(struct pci_bus *bus, u32 devfn,
 	reg &= ~PIO_CTRL_TYPE_MASK;	/* [한국어] 기존 종류 필드를 지우고 */
 	if (pci_is_root_bus(bus->parent))	/* [한국어] 부모가 루트 버스이면 */
 		reg |= PCIE_CONFIG_WR_TYPE0;	/* [한국어] config 쓰기 type 0 을, */
-	else	/* [한국어] 아니면 */
+	else
 		reg |= PCIE_CONFIG_WR_TYPE1;	/* [한국어] type 1 을 넣는다 */
 	advk_writel(pcie, reg, PIO_CTRL);	/* [한국어] 고친 값을 되쓴다 */
 
@@ -3186,7 +3186,7 @@ static int advk_pcie_map_irq(const struct pci_dev *dev, u8 slot, u8 pin)
 	 */
 	if (pci_is_root_bus(dev->bus))	/* [한국어] **루트 버스이면 에뮬레이션 루트 포트 자신의 인터럽트다** */
 		return irq_create_mapping(pcie->rp_irq_domain, pin - 1);	/* [한국어] 바로 위 상류 주석대로 pin 은 1 부터, hwirq 는 0 부터라 1 을 뺀다 */
-	else	/* [한국어] 그 아래 장치이면 */
+	else
 		return of_irq_parse_and_map_pci(dev, slot, pin);	/* [한국어] 장치 트리의 interrupt-map 을 따라가는 공용 헬퍼에 맡긴다 — 그 경로가 INTx 도메인으로 이어진다 */
 }
 
@@ -3427,7 +3427,7 @@ static int advk_pcie_probe(struct platform_device *pdev)
 			if (type == IORESOURCE_IO) {	/* [한국어] I/O 자원이면 */
 				pcie->wins[pcie->wins_count].actions = OB_WIN_TYPE_IO;	/* [한국어] 종류를 I/O 로 두고 */
 				pcie->wins[pcie->wins_count].match = pci_pio_to_address(start);	/* [한국어] **I/O 포트 번호를 물리 주소로 바꿔 담는다** */
-			} else {	/* [한국어] 메모리 자원이면 */
+			} else {
 				pcie->wins[pcie->wins_count].actions = OB_WIN_TYPE_MEM;	/* [한국어] 종류를 메모리로 두고 */
 				pcie->wins[pcie->wins_count].match = start;	/* [한국어] 시작 주소를 그대로 담는다 */
 			}
@@ -3484,7 +3484,7 @@ static int advk_pcie_probe(struct platform_device *pdev)
 	ret = of_pci_get_max_link_speed(dev->of_node);	/* [한국어] **장치 트리의 max-link-speed 를 읽는다** */
 	if (ret <= 0 || ret > 3)	/* [한국어] 1~3 이 아니면(없거나 이상한 값이면) */
 		pcie->link_gen = 3;	/* [한국어] **기본값 Gen3 을 쓴다** — pci-imx6.c 가 같은 상황에서 Gen1 을 기본으로 두는 것과 반대다 */
-	else	/* [한국어] 유효한 값이면 */
+	else
 		pcie->link_gen = ret;	/* [한국어] 그대로 쓴다 */
 
 	ret = advk_pcie_setup_phy(pcie);	/* [한국어] **PHY 를 켠다.** 없어도 계속 진행하지만 켜기가 실패하면 접는다 */

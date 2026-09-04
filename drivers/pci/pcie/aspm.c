@@ -1402,7 +1402,7 @@ static void encode_l12_threshold(u32 threshold_us, u32 *scale, u32 *value)
 	} else if (threshold_ns <= (u64)33554432 * FIELD_MAX(PCI_L1SS_CTL1_LTR_L12_TH_VALUE)) {	/* [한국어] 배율 33554432ns(약 33.5ms). 곱셈이 32비트를 넘기므로 (u64) 캐스트가 필수다 */
 		*scale = 5;		/* Value times 33554432ns */	/* [한국어] 값 x 33554432ns */
 		*value = roundup(threshold_ns, 33554432) / 33554432;	/* [한국어] 올림 */
-	} else {	/* [한국어] 가장 큰 배율로도 표현할 수 없을 만큼 크다 */
+	} else {
 		*scale = 5;	/* [한국어] 최대 배율로 포화시킨다 */
 		*value = FIELD_MAX(PCI_L1SS_CTL1_LTR_L12_TH_VALUE);	/* [한국어] 최대 값으로 포화시킨다. 임계값이 너무 커져 사실상 L1.2 에 들어가지 않게 되는데, 그것이 안전한 쪽이다 */
 	}
@@ -1595,7 +1595,7 @@ static void aspm_calc_l12_info(struct pcie_link_state *link,
 		ctl2 |= FIELD_PREP(PCI_L1SS_CTL2_T_PWR_ON_SCALE, scale1) |	/* [한국어] 그렇다면 상류의 (배율, 값)을 그대로 CTL2 에 심는다 */
 			FIELD_PREP(PCI_L1SS_CTL2_T_PWR_ON_VALUE, val1);	/* [한국어] FIELD_PREP 이 값을 필드 자리로 옮겨 넣는다 */
 		t_power_on = calc_l12_pwron(parent, scale1, val1);	/* [한국어] 임계값 계산에 쓸 실제 시간도 상류 것으로 */
-	} else {	/* [한국어] 하류 쪽이 같거나 더 오래 걸리는 경우 */
+	} else {
 		ctl2 |= FIELD_PREP(PCI_L1SS_CTL2_T_PWR_ON_SCALE, scale2) |	/* [한국어] 하류의 (배율, 값)을 심는다 */
 			FIELD_PREP(PCI_L1SS_CTL2_T_PWR_ON_VALUE, val2);	/* [한국어] 같은 방식 */
 		t_power_on = calc_l12_pwron(child, scale2, val2);	/* [한국어] 임계값 계산에도 하류 것을 쓴다 */
@@ -2319,7 +2319,7 @@ static struct pcie_link_state *alloc_pcie_link_state(struct pci_dev *pdev)
 	    pci_pcie_type(pdev) == PCI_EXP_TYPE_PCIE_BRIDGE ||	/* [한국어] PCI/PCI-X to PCIe Bridge 이거나 */
 	    !pdev->bus->parent->self) {	/* [한국어] 상위 버스에 브리지가 없으면 — 위 영어 주석대로 Root Port 를 아예 두지 않는 호스트 구현에서는 스위치의 하류 포트가 사슬의 뿌리가 된다 */
 		link->root = link;	/* [한국어] 자기 자신이 뿌리다 */
-	} else {	/* [한국어] 그 밖의 경우 — 스위치 아래에 매달린 링크 */
+	} else {
 		struct pcie_link_state *parent;	/* [한국어] 상위 링크를 담을 임시 변수 */
 
 		parent = pdev->bus->parent->self->link_state;	/* [한국어] 상위 버스의 브리지에 매달린 링크 상태 */
@@ -3341,7 +3341,7 @@ static int pcie_aspm_get_policy(char *buffer, const struct kernel_param *kp)
 	for (i = 0; i < ARRAY_SIZE(policy_str); i++)	/* [한국어] 정책 이름 표를 훑어 일치하는 것을 찾는다 */
 		if (i == aspm_policy)	/* [한국어] 현재 선택된 정책이면 */
 			cnt += sprintf(buffer + cnt, "[%s] ", policy_str[i]);	/* [한국어] 대괄호로 감싸 표시한다. sprintf 가 돌려준 길이를 누적해 이어 붙인다 */
-		else	/* [한국어] 나머지는 */
+		else
 			cnt += sprintf(buffer + cnt, "%s ", policy_str[i]);	/* [한국어] 그냥 이름만 */
 	cnt += sprintf(buffer + cnt, "\n");	/* [한국어] 마지막 줄바꿈 */
 	return cnt;	/* [한국어] sysfs 가 이 길이만큼 사용자에게 넘긴다 */
@@ -3482,7 +3482,7 @@ static ssize_t aspm_attr_store_common(struct device *dev,
 		/* need to enable L1 for substates */
 		if (state & PCIE_LINK_STATE_L1SS)	/* [한국어] 하위 상태를 허용한 경우 */
 			link->aspm_disable &= ~PCIE_LINK_STATE_L1;	/* [한국어] L1 도 함께 허용해야 도달할 수 있다 */
-	} else {	/* [한국어] 사용자가 0 을 썼다 = 금지 */
+	} else {
 		link->aspm_disable |= state;	/* [한국어] 금지 목록에 더한다 */
 		if (state & PCIE_LINK_STATE_L1)	/* [한국어] L1 을 금지한 경우 */
 			link->aspm_disable |= PCIE_LINK_STATE_L1SS;	/* [한국어] 하위 상태도 함께 금지한다. 허용 쪽과 방향이 반대다 */

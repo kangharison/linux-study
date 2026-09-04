@@ -1597,7 +1597,7 @@ static acpi_status program_type3_hpx_record(struct pci_dev *dev,
 			reg_fields = fields + 3 + i * 14;	/* [한국어] 3 은 머리말, 14 는 규칙 하나의 길이. i 번째 규칙의 시작 위치 */
 			parse_hpx3_register(&hpx3, reg_fields);	/* [한국어] 14개 필드를 구조체로 옮기고 */
 			program_hpx_type3(dev, &hpx3);	/* [한국어] 조건 검사와 적용으로 넘긴다 */
-		}	/* [한국어] 순회 끝 */
+		}
 
 		break;	/* [한국어] 성공 경로로 */
 	default:	/* [한국어] 알 수 없는 판 */
@@ -1772,7 +1772,7 @@ static acpi_status acpi_run_hpp(struct pci_dev *dev, acpi_handle handle)
 			status = AE_ERROR;	/* [한국어] 오류로 표시하고 */
 			goto exit;	/* [한국어] 해제를 거쳐 나간다 */
 		}
-	}	/* [한국어] 순회 끝 */
+	}
 
 	hpx0.revision        = 1;	/* [한국어] _HPP 에는 판 번호 필드가 없다. 공유하는 적용 함수가 그 필드를 보므로 1 을 손으로 채워 넣는다 */
 	hpx0.cache_line_size = fields[0].integer.value;	/* [한국어] [0] Cache Line Size */
@@ -1830,7 +1830,7 @@ int pci_acpi_program_hp_params(struct pci_dev *dev)
 		handle = acpi_pci_get_bridge_handle(pbus);	/* [한국어] ACPI 핸들이 붙은 브리지를 찾는다 */
 		if (handle)	/* [한국어] 찾았으면 */
 			break;	/* [한국어] 거기서 시작한다 */
-	}	/* [한국어] 순회 끝 */
+	}
 
 	/*
 	 * _HPP settings apply to all child buses, until another _HPP is
@@ -1855,7 +1855,7 @@ int pci_acpi_program_hp_params(struct pci_dev *dev)
 		if (ACPI_FAILURE(status))	/* [한국어] 부모가 없으면 */
 			break;	/* [한국어] 거기서 멈춘다 */
 		handle = phandle;	/* [한국어] 한 단계 올라가 다시 시도 */
-	}	/* [한국어] 순회 끝 */
+	}
 	return -ENODEV;	/* [한국어] 어디에서도 못 찾았다. 실패가 아니라 "권장값이 없다" 는 뜻이라 호출자는 그냥 넘어간다 */
 }
 
@@ -2155,7 +2155,7 @@ pci_power_t acpi_pci_choose_state(struct pci_dev *pdev)
 
 	if (pdev->no_d3cold || !pdev->d3cold_allowed)	/* [한국어] no_d3cold 나 !d3cold_allowed 는 "이 장치의 전원을 끊지 마라" 는 커널 쪽 제약이다 */
 		d_max = ACPI_STATE_D3_HOT;	/* [한국어] D3hot 까지만 허용한다 — 전원은 유지된다 */
-	else	/* [한국어] 제약이 없으면 */
+	else
 		d_max = ACPI_STATE_D3_COLD;	/* [한국어] D3cold 까지 허용한다 */
 	acpi_state = acpi_pm_device_sleep_state(&pdev->dev, NULL, d_max);	/* [한국어] 실제 판단은 ACPI 코어가 한다. 두 번째 인자 NULL 은 "목표 시스템 상태를 코어가 알아서 보라" 는 뜻 */
 	if (acpi_state < 0)	/* [한국어] 판단에 실패했으면 */
@@ -2391,7 +2391,7 @@ bool acpi_pci_bridge_d3(struct pci_dev *dev)
 
 	if (rpdev == dev)	/* [한국어] 이 브리지가 Root Port 자신이면 */
 		rpadev = adev;	/* [한국어] 위에서 이미 얻은 companion 을 그대로 쓴다 */
-	else	/* [한국어] 아니면 */
+	else
 		rpadev = ACPI_COMPANION(&rpdev->dev);	/* [한국어] Root Port 쪽 companion 을 따로 얻는다 */
 
 	if (!rpadev)	/* [한국어] Root Port 에 companion 이 없으면 */
@@ -2690,7 +2690,7 @@ static int acpi_pci_propagate_wakeup(struct pci_bus *bus, bool enable)
 			return acpi_pm_set_device_wakeup(&bus->self->dev, enable);	/* [한국어] 처음 찾은 곳에 설정하고 곧바로 반환한다. 여러 곳에 중복 설정하지 않는다 */
 
 		bus = bus->parent;	/* [한국어] 한 단계 위로 */
-	}	/* [한국어] 순회 끝 */
+	}
 
 	/* We have reached the root bus. */
 	if (bus->bridge) {	/* [한국어] 루트 버스에는 self 가 없으므로(위에 브리지가 없다) 호스트 브리지의 device 를 대신 본다 */
@@ -3760,7 +3760,7 @@ pci_acpi_setup_ecam_mapping(struct acpi_pci_root *root)
 	if (adev)	/* [한국어] 예약되어 있으면 */
 		dev_info(dev, "ECAM area %pR reserved by %s\n", &cfgres,	/* [한국어] 누가 예약했는지 알린다 */
 			 dev_name(&adev->dev));	/* [한국어] 그 장치 이름 */
-	else	/* [한국어] 예약되어 있지 않으면 */
+	else
 		dev_warn(dev, FW_BUG "ECAM area %pR not reserved in ACPI namespace\n",	/* [한국어] FW_BUG 접두사로 펌웨어 결함임을 표시한다. 예약 없이 쓰면 다른 드라이버가 같은 영역을 잡을 수 있다 */
 			 &cfgres);	/* [한국어] 어느 영역인지 */
 

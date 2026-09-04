@@ -768,7 +768,7 @@ err_pdev:	/* [한국어] PF 락을 푸는 지점 */
 	return ret ? : count;	/* [한국어] GNU 확장 문법: ret 가 0 이 아니면 ret(오류), 0 이면 count 를 돌려준다. sysfs 규약상 "전부 소비했다"는 뜻으로 count 를 준다 */
 }
 static DEVICE_ATTR_WO(sriov_vf_msix_count);	/* [한국어] 쓰기 전용 속성 dev_attr_sriov_vf_msix_count 를 만든다(모드 0200). VF 디렉터리에 붙는다 */
-#endif	/* [한국어] CONFIG_PCI_MSI 블록의 끝 */
+#endif
 
 /*
  * [한국어]
@@ -784,7 +784,7 @@ static DEVICE_ATTR_WO(sriov_vf_msix_count);	/* [한국어] 쓰기 전용 속성 
 static struct attribute *sriov_vf_dev_attrs[] = {	/* [한국어] static — pci-sysfs.c 는 아래 group 만 참조하고 이 배열을 직접 보지 않는다 */
 #ifdef CONFIG_PCI_MSI	/* [한국어] MSI-X 가 꺼진 커널에서는 dev_attr_sriov_vf_msix_count 자체가 없다 */
 	&dev_attr_sriov_vf_msix_count.attr,	/* [한국어] VF 당 MSI-X 벡터 수를 쓰는 파일 */
-#endif	/* [한국어] CONFIG_PCI_MSI 조건부 항목 끝 */
+#endif
 	NULL,	/* [한국어] 배열의 끝을 알리는 표지. sysfs 코어가 이것을 보고 순회를 멈춘다 */
 };
 
@@ -1389,7 +1389,7 @@ static struct attribute *sriov_pf_dev_attrs[] = {	/* [한국어] static — 외�
 	&dev_attr_sriov_drivers_autoprobe.attr,	/* [한국어] VF 자동 바인딩 정책 파일 */
 #ifdef CONFIG_PCI_MSI	/* [한국어] MSI-X 가 켜진 커널에서만 존재하는 항목 */
 	&dev_attr_sriov_vf_total_msix.attr,	/* [한국어] VF 들이 나눠 쓸 MSI-X 벡터 총수 파일(PF 쪽에 붙는다) */
-#endif	/* [한국어] CONFIG_PCI_MSI 조건부 항목 끝 */
+#endif
 	NULL,	/* [한국어] 배열 끝 표지 */
 };
 
@@ -1870,7 +1870,7 @@ found:	/* [한국어] 앞선 PF 를 찾은 경로와 못 찾은 경로가 합류
 		 */
 		if (res->flags & IORESOURCE_PCI_FIXED)	/* [한국어] IORESOURCE_PCI_FIXED 면 누군가(EA capability 나 헤더 quirk)가 이미 주소를 확정해 둔 것이라 다시 재면 안 된다 */
 			bar64 = (res->flags & IORESOURCE_MEM_64) ? 1 : 0;	/* [한국어] 그때는 크기만 그대로 두고 64비트 BAR 인지 여부만 플래그에서 알아낸다 */
-		else	/* [한국어] 고정된 것이 아니라면 */
+		else
 			bar64 = __pci_read_base(dev, pci_bar_unknown, res,	/* [한국어] 표준 BAR 파싱 루틴으로 크기와 속성을 해석해 res 에 채운다. 반환값은 이 BAR 가 64비트면 1, 32비트면 0 */
 						pos + PCI_SRIOV_BAR + i * 4,	/* [한국어] 읽을 config 오프셋: capability + 0x24 + (BAR 번호 x 4바이트) */
 						&sriovbars[i]);	/* [한국어] 위에서 미리 읽어 둔 크기 마스크를 넘겨 다시 측정하지 않게 한다 */
@@ -1905,7 +1905,7 @@ found:	/* [한국어] 앞선 PF 를 찾은 경로와 못 찾은 경로가 합류
 
 	if (pdev)	/* [한국어] 같은 버스에 먼저 초기화된 PF 가 있었다면 */
 		iov->dev = pci_dev_get(pdev);	/* [한국어] 그 "가장 낮은 번호의 PF" 를 참조 카운트를 올려 붙잡아 둔다 */
-	else	/* [한국어] 없었다면 */
+	else
 		iov->dev = dev;	/* [한국어] 자기 자신이 가장 낮은 번호의 PF 다(참조를 따로 올리지 않는다) */
 
 	dev->sriov = iov;	/* [한국어] 완성된 구조체를 pci_dev 에 연결한다. 이 순간부터 다른 코드가 dev->sriov 를 볼 수 있다 */

@@ -2059,7 +2059,7 @@ static void __pci_tsm_destroy(struct pci_dev *pdev, struct tsm_dev *tsm_dev)
 
 	if (is_link_tsm(tsm_dev) && is_pci_tsm_pf0(pdev))	/* [한국어] link TSM 이고 대상이 DSM 후보라면 딸린 함수들까지 정리해야 한다 */
 		pci_tsm_disconnect(pdev);	/* [한국어] TDI 해제, 하위 컨텍스트 제거, 세션 종료를 순서대로 수행한다 */
-	else	/* [한국어] 그 밖의 경우 - devsec TSM 이거나 DSM 이 아닌 함수 */
+	else
 		pci_tsm_fn_exit(pdev);	/* [한국어] 자기 TDI 와 컨텍스트만 정리한다 */
 }
 

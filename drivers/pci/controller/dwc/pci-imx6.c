@@ -968,7 +968,7 @@ static void imx_pcie_configure_type(struct imx_pcie *imx_pcie)
 
 	if (drvdata->mode == DW_PCIE_EP_TYPE)	/* [한국어] 표가 이 항목을 엔드포인트로 지정했으면 */
 		mode = PCI_EXP_TYPE_ENDPOINT;	/* [한국어] 규격의 엔드포인트 종류 값을 쓰고 */
-	else	/* [한국어] 아니면 */
+	else
 		mode = PCI_EXP_TYPE_ROOT_PORT;	/* [한국어] 루트 포트 종류 값을 쓴다 */
 
 	id = imx_pcie->controller_id;	/* [한국어] 컨트롤러 번호를 첨자로 삼는다 */
@@ -1578,7 +1578,7 @@ static int imx6q_pcie_abort_handler(unsigned long addr,
 
 		if (instr & 0x00400000)	/* [한국어] 바이트 적재 비트가 서 있으면 */
 			val = 255;	/* [한국어] 바이트 폭의 전부 1 인 255 를, */
-		else	/* [한국어] 아니면 */
+		else
 			val = -1;	/* [한국어] 워드 폭의 전부 1 인 -1 을 쓴다 */
 
 		regs->uregs[reg] = val;	/* [한국어] **목적 레지스터에 그 값을 넣는다** — 읽기가 성공해 전부 1 을 읽은 것처럼 보이게 하는 것이다 */
@@ -1594,7 +1594,7 @@ static int imx6q_pcie_abort_handler(unsigned long addr,
 
 	return 1;	/* [한국어] 읽기가 아니면(즉 쓰기이면) 처리하지 못했다고 알려 원래의 어보트 처리로 넘긴다 */
 }
-#endif	/* [한국어] 32비트 ARM 조건부의 끝 */
+#endif
 
 /* [한국어]
  * imx_pcie_attach_pd - PCIe 와 PCIe PHY 전원 도메인을 이 장치에 붙인다
@@ -1720,7 +1720,7 @@ static int imx6q_pcie_enable_ref_clk(struct imx_pcie *imx_pcie, bool enable)
 		 */
 		usleep_range(10, 100);	/* [한국어] 바로 위 상류 주석이 이 지연의 이유를 밝힌다 — 비동기 리셋 입력이 내부에서 동기화되려면 레퍼런스 클럭이 필요한데, 클럭이 리셋보다 늦게 오면 동기화된 리셋 시간이 요구 조건에 못 미친다 */
 		regmap_set_bits(imx_pcie->iomuxc_gpr, IOMUXC_GPR1, IMX6Q_GPR1_PCIE_REF_CLK_EN);	/* [한국어] **그 뒤에 레퍼런스 클럭을 켠다** */
-	} else {	/* [한국어] 끌 때는 반대 순서다 */
+	} else {
 		regmap_clear_bits(imx_pcie->iomuxc_gpr, IOMUXC_GPR1, IMX6Q_GPR1_PCIE_REF_CLK_EN);	/* [한국어] 클럭을 먼저 끄고 */
 		regmap_set_bits(imx_pcie->iomuxc_gpr, IOMUXC_GPR1, IMX6Q_GPR1_PCIE_TEST_PD);	/* [한국어] PHY 전원을 내린다 */
 	}
@@ -2152,7 +2152,7 @@ static int imx7d_pcie_core_reset(struct imx_pcie *imx_pcie, bool assert)
 		       imx_pcie->phy_base + PCIE_PHY_CMN_REG24);	/* [한국어] phy_base 기준의 CMN_REG24 에 쓴다. 이 PHY 는 i.MX6 자체 PHY 와 달리 메모리 맵이라 writel 로 직접 쓴다 */
 		/* Assert ATT_MODE */
 		writel(PCIE_PHY_CMN_REG26_ATT_MODE, imx_pcie->phy_base + PCIE_PHY_CMN_REG26);	/* [한국어] **4단계** — ATT_MODE 를 어서트한다(값 0xBC) */
-	} else {	/* [한국어] phandle 이 없어 매핑이 안 되어 있으면 */
+	} else {
 		dev_warn(dev, "Unable to apply ERR010728 workaround. DT missing fsl,imx7d-pcie-phy phandle ?\n");	/* [한국어] 우회를 적용할 수 없다고 경고만 남긴다. 그래도 아래 PLL 대기는 진행한다 */
 	}
 	imx7d_pcie_wait_for_phy_pll_lock(imx_pcie);	/* [한국어] PLL 이 잠기기를 기다린다. **결과를 확인하지 않는다** — 그 함수가 반환값이 없다 */
@@ -2484,7 +2484,7 @@ static int imx_pcie_start_link(struct dw_pcie *pci)
 			dev_err(dev, "Failed to bring link up!\n");	/* [한국어] 그 사실을 알리고 */
 			goto err_reset_phy;	/* [한국어] PHY 를 흔들어 보는 경로로 간다 */
 		}
-	} else {	/* [한국어] Gen1 만 요구했으면 */
+	} else {
 		dev_info(dev, "Link: Only Gen1 is enabled\n");	/* [한국어] 그 사실을 알리고 그대로 둔다 */
 	}
 
@@ -2612,7 +2612,7 @@ static int imx_pcie_add_lut(struct imx_pcie *imx_pcie, u16 rid, u8 sid)
 
 	if (imx_pcie->drvdata->mode == DW_PCIE_EP_TYPE)	/* [한국어] **엔드포인트 모드이면** */
 		data2 = 0x7;	/* In the EP mode, only 'Device ID' is required */ /* [한국어] 옆 상류 주석대로 Device ID 만 비교하도록 마스크를 0x7 로 둔다 */
-	else	/* [한국어] 루트 컴플렉스 모드이면 */
+	else
 		data2 = IMX95_PE0_LUT_MASK;	/* Match all bits of RID */ /* [한국어] 옆 상류 주석대로 RID 전 비트를 비교하도록 전체 마스크를 둔다 */
 	data2 |= FIELD_PREP(IMX95_PE0_LUT_REQID, rid);	/* [한국어] 그 위에 RID 를 얹는다 */
 	regmap_write(imx_pcie->iomuxc_gpr, IMX95_PE0_LUT_DATA2, data2);	/* [한국어] 둘째 워드를 쓴다 */
@@ -2872,7 +2872,7 @@ static void imx_pcie_assert_perst(struct imx_pcie *imx_pcie, bool assert)
 {
 	if (assert) {	/* [한국어] 리셋을 거는 경우 */
 		gpiod_set_value_cansleep(imx_pcie->reset_gpiod, 1);	/* [한국어] **GPIO 를 1 로 만들어 PERST# 를 어서트한다.** GPIO 가 없으면 이 호출이 조용히 넘어간다 */
-	} else {	/* [한국어] 리셋을 푸는 경우 */
+	} else {
 		if (imx_pcie->reset_gpiod) {	/* [한국어] **GPIO 가 실제로 있을 때만** 아래 대기를 지킨다 */
 			msleep(PCIE_T_PVPERL_MS);	/* [한국어] 규격이 정한, 전원이 안정된 뒤 PERST# 를 풀기까지 기다려야 하는 시간 */
 			gpiod_set_value_cansleep(imx_pcie->reset_gpiod, 0);	/* [한국어] PERST# 를 해제한다 */
@@ -3391,7 +3391,7 @@ static void imx_pcie_msi_save_restore(struct imx_pcie *imx_pcie, bool save)
 		if (save) {	/* [한국어] 저장하는 경우 */
 			val = dw_pcie_readw_dbi(pci, offset + PCI_MSI_FLAGS);	/* [한국어] 현재 MSI_FLAGS 를 읽어 */
 			imx_pcie->msi_ctrl = val;	/* [한국어] 인스턴스에 담아 둔다 */
-		} else {	/* [한국어] 복원하는 경우 */
+		} else {
 			dw_pcie_dbi_ro_wr_en(pci);	/* [한국어] **MSI_FLAGS 의 일부가 읽기 전용이라** 쓰기를 허용해야 한다 */
 			val = imx_pcie->msi_ctrl;	/* [한국어] 담아 둔 값을 꺼내 */
 			dw_pcie_writew_dbi(pci, offset + PCI_MSI_FLAGS, val);	/* [한국어] 되쓴다 */
@@ -3433,7 +3433,7 @@ static void imx_pcie_lut_save(struct imx_pcie *imx_pcie)
 		if (data1 & IMX95_PE0_LUT_VLD) {	/* [한국어] **유효 비트가 있으면 실제로 쓰이던 칸이다** */
 			imx_pcie->luts[i].data1 = data1;	/* [한국어] 첫 워드를 보관하고 */
 			imx_pcie->luts[i].data2 = data2;	/* [한국어] 둘째 워드도 보관한다 */
-		} else {	/* [한국어] 빈 칸이면 */
+		} else {
 			imx_pcie->luts[i].data1 = 0;	/* [한국어] 첫 워드를 0 으로 두고 */
 			imx_pcie->luts[i].data2 = 0;	/* [한국어] 둘째 워드도 0 으로 둔다 — 복원 때 이 칸을 건너뛰게 하는 표시다 */
 		}
@@ -3523,7 +3523,7 @@ static int imx_pcie_suspend_noirq(struct device *dev)
 		imx_pcie_assert_core_reset(imx_pcie);	/* [한국어] 정상적인 L2 진입 대신 코어 리셋을 걸고 */
 		imx_pcie_assert_perst(imx_pcie, true);	/* [한국어] PERST# 를 어서트하고 */
 		imx_pcie->drvdata->enable_ref_clk(imx_pcie, false);	/* [한국어] 레퍼런스 클럭을 끈다. 바로 위 상류 주석대로 최소한의 우회는 PERST# 와 PCIE_TEST_PD 를 세우는 것이지만 클럭까지 끄면 전력을 더 아낄 수 있다 */
-	} else {	/* [한국어] 그 밖의 세대는 */
+	} else {
 		return dw_pcie_suspend_noirq(imx_pcie->pci);	/* [한국어] **DWC 공용 구현에 맡긴다** — PME_Turn_Off 를 보내고 L2 로 내려가는 정규 절차다 */
 	}
 
@@ -3580,7 +3580,7 @@ static int imx_pcie_resume_noirq(struct device *dev)
 		ret = dw_pcie_setup_rc(&imx_pcie->pci->pp);	/* [한국어] **루트 컴플렉스를 다시 세운다.** 바로 위 상류 주석이 이유를 밝힌다 — PCIE_TEST_PD 를 쓰면 MSI 가 꺼지고 루트 컴플렉스의 전원이 내려가는 것으로 보이므로 RC 설정을 다시 해야 한다 */
 		if (ret)	/* [한국어] 실패하면 */
 			return ret;	/* [한국어] 그 코드를 돌려준다 */
-	} else {	/* [한국어] 그 밖의 세대는 */
+	} else {
 		ret = dw_pcie_resume_noirq(imx_pcie->pci);	/* [한국어] DWC 공용 구현이 L2 에서 복귀시킨다 */
 		if (ret)	/* [한국어] 실패하면 */
 			return ret;	/* [한국어] 그 코드를 돌려준다 */
@@ -3685,7 +3685,7 @@ static int imx_pcie_probe(struct platform_device *pdev)
 
 	if (imx_pcie->drvdata->ops)	/* [한국어] 표에 host_ops 가 적혀 있으면 */
 		pci->pp.ops = imx_pcie->drvdata->ops;	/* [한국어] 그것을 쓰고 */
-	else	/* [한국어] 없으면 */
+	else
 		pci->pp.ops = &imx_pcie_host_dw_pme_ops;	/* [한국어] post_init 을 채운 기본 묶음을 쓴다 */
 
 	/* Find the PHY if one is defined, only imx7d uses it */
@@ -3843,7 +3843,7 @@ static int imx_pcie_probe(struct platform_device *pdev)
 		 * Endpoint framework limitation.
 		 */
 		imx_pcie_add_lut_by_rid(imx_pcie, 0);	/* [한국어] RID 0 으로 LUT 를 하나 넣는다. 바로 위 상류 주석이 FIXME 로 이유를 적는다 — 엔드포인트 프레임워크의 제약 때문에 EPF 가 하나만 지원된다 */
-	} else {	/* [한국어] 루트 컴플렉스이면 */
+	} else {
 		if (imx_check_flag(imx_pcie, IMX_PCIE_FLAG_SKIP_L23_READY))	/* [한국어] L23 Ready 대기를 건너뛰는 세대이면 */
 			pci->pp.skip_l23_ready = true;	/* [한국어] DWC 코어 쪽에 그 표시를 전한다 */
 		if (imx_check_flag(imx_pcie, IMX_PCIE_FLAG_KEEP_MSI_CAP))	/* [한국어] MSI capability 를 보존해야 하는 세대이면 */
@@ -4204,7 +4204,7 @@ static int __init imx_pcie_init(void)
 	 */
 	hook_fault_code(8, imx6q_pcie_abort_handler, SIGBUS, 0,	/* [한국어] **fsr 8(비-라인페치 외부 어보트)에 핸들러를 건다.** 바로 위 상류 주석이 probe 가 아니라 여기서 거는 이유를 밝힌다 — probe 는 미뤄질 수 있는데 그 사이 __init 메모리가 해제되면 이 함수를 부를 수 없고, 핸들러 자신이 드라이버 상태를 만지지 않아 미리 걸어도 안전하다 */
 			"external abort on non-linefetch");	/* [한국어] 어보트 이름 */
-#endif	/* [한국어] 32비트 ARM 조건부의 끝 */
+#endif
 
 	return platform_driver_register(&imx_pcie_driver);	/* [한국어] **플랫폼 드라이버를 등록한다.** 이 뒤로 커널이 맞는 노드를 찾아 probe 를 부른다 */
 }

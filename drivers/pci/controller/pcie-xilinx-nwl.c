@@ -1114,7 +1114,7 @@ static const struct msi_parent_ops nwl_msi_parent_ops = {	/* [한국어] **MSI �
 	.init_dev_msi_info	= msi_lib_init_dev_msi_info,	/* [한국어] 자식 도메인 정보를 채우는 공용 헬퍼 */
 };
 
-#endif	/* [한국어] MSI 조건부의 끝 */
+#endif
 
 /* [한국어]
  * nwl_compose_msi_msg - 장치에 알려 줄 MSI 주소와 데이터를 만든다
@@ -1293,7 +1293,7 @@ static int nwl_pcie_init_msi_irq_domain(struct nwl_pcie *pcie)
 		dev_err(dev, "failed to create dev IRQ domain\n");	/* [한국어] 그 사실을 알리고 */
 		return -ENOMEM;	/* [한국어] 메모리 부족으로 돌아간다 */
 	}
-#endif	/* [한국어] MSI 조건부의 끝 */
+#endif
 	return 0;	/* [한국어] MSI 가 꺼져 있거나 도메인을 만들었으면 성공 */
 }
 
@@ -1697,7 +1697,7 @@ static int nwl_pcie_bridge_init(struct nwl_pcie *pcie)
 
 	if (nwl_pcie_link_up(pcie))	/* [한국어] 링크가 섰는지 보고 */
 		dev_info(dev, "Link is UP\n");	/* [한국어] 섰다고 알리거나 */
-	else	/* [한국어] 아니면 */
+	else
 		dev_info(dev, "Link is DOWN\n");	/* [한국어] 안 섰다고 알린다. 어느 쪽이든 초기화는 계속된다 */
 
 	/* Get misc IRQ number */

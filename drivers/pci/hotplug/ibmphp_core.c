@@ -351,7 +351,7 @@ static inline int get_cur_bus_info(struct slot **sl)
 	if (READ_BUS_MODE(slot_cur->ctrl)) /* [한국어] 모드 읽기까지 지원하는 컨트롤러이면 */
 		slot_cur->bus_on->current_bus_mode = /* [한국어] busstatus 의 모드 비트도 풀어 담고 */
 				CURRENT_BUS_MODE(slot_cur->busstatus);
-	else /* [한국어] 지원하지 않으면 */
+	else
 		slot_cur->bus_on->current_bus_mode = 0xFF; /* [한국어] 모름을 뜻하는 0xFF 로 둔다. ibmphp_update_slot_info() 가 이 값을 만나면 PCI_SPEED_UNKNOWN 으로 접는다 */
 
 	debug("busstatus = %x, bus_speed = %x, bus_mode = %x\n", /* [한국어] 읽은 세 값을 남긴다 */
@@ -665,7 +665,7 @@ static int set_attention_status(struct hotplug_slot *hotplug_slot, u8 value)
 			pslot = to_slot(hotplug_slot); /* [한국어] 핫플러그 코어 쪽 구조체에서 이 드라이버의 슬롯을 되찾는다 */
 			rc = ibmphp_hpc_writeslot(pslot, cmd); /* [한국어] **컨트롤러에 명령을 보낸다** */
 		}
-	} else /* [한국어] 슬롯이 안 넘어왔으면 */
+	} else
 		rc = -ENODEV; /* [한국어] 장치 없음으로 끝낸다 */
 
 	ibmphp_unlock_operations(); /* [한국어] 잠금을 푼다. 성공·실패 어느 쪽이든 반드시 지나는 자리다 */
@@ -851,7 +851,7 @@ static int get_adapter_present(struct hotplug_slot *hotplug_slot, u8 *value)
 			present = SLOT_PRESENT(myslot.status); /* [한국어] **참/거짓이 아니라 네 가지 값이 나온다** — 두 개의 존재 감지 핀 조합으로 빈 슬롯인지, 그리고 카드가 7.5W/15W/25W 중 어느 급인지까지 구분하기 때문이다 */
 			if (present == HPC_SLOT_EMPTY) /* [한국어] 빈 슬롯이면 */
 				*value = 0; /* [한국어] 없다고 답하고 */
-			else /* [한국어] 그 밖의 세 값이면 */
+			else
 				*value = 1; /* [한국어] 있다고 답한다 — 와트 구분은 이 콜백이 답할 것이 아니다 */
 		}
 	}
@@ -1136,7 +1136,7 @@ int ibmphp_update_slot_info(struct slot *slot_cur)
 				bus_speed += 0x01; /* [한국어] 한 칸 올린다 */
 			else if (mode == BUS_MODE_PCI) /* [한국어] 통상 PCI 이면 */
 				; /* [한국어] 값을 그대로 둔다는 뜻을 빈 문장으로 명시했다 */
-			else /* [한국어] 둘 다 아니면 — get_cur_bus_info() 가 모드를 못 읽어 0xFF 를 넣어 둔 경우다 */
+			else
 				bus_speed = PCI_SPEED_UNKNOWN; /* [한국어] 모른다고 표시한다 */
 			break; /* [한국어] 갈래를 벗어난다 */
 		case BUS_SPEED_100: /* [한국어] 100MHz 와 */
@@ -1607,12 +1607,12 @@ static int set_bus(struct slot *slot_cur)
 					and there's no bus mode mismatch, then
 					the adapter supports 66 pci */
 					cmd = HPC_BUS_66CONVMODE; /* [한국어] 통상 66 으로 간다 */
-				else /* [한국어] 모드가 어긋나면 */
+				else
 					cmd = HPC_BUS_33CONVMODE; /* [한국어] 통상 33 으로 낮춘다 */
-			} else { /* [한국어] 카드가 PCI-X 가 아니면 */
+			} else {
 				if (slot_cur->supported_speed >= BUS_SPEED_66) /* [한국어] 슬롯이 66 이상을 지원하면 */
 					cmd = HPC_BUS_66CONVMODE; /* [한국어] 통상 66, */
-				else /* [한국어] 아니면 */
+				else
 					cmd = HPC_BUS_33CONVMODE; /* [한국어] 통상 33 으로 간다 */
 			}
 			break; /* [한국어] 갈래를 벗어난다 */
@@ -1727,7 +1727,7 @@ static int check_limitations(struct slot *slot_cur)
 	case BUS_SPEED_66: /* [한국어] 66MHz 로 돌면 모드를 더 봐야 한다 */
 		if (slot_cur->bus_on->current_bus_mode == BUS_MODE_PCIX) /* [한국어] PCI-X 모드이면 */
 			limitation = slot_cur->bus_on->slots_at_66_pcix; /* [한국어] 66MHz PCI-X 슬롯 수를, */
-		else /* [한국어] 통상 PCI 이면 */
+		else
 			limitation = slot_cur->bus_on->slots_at_66_conv; /* [한국어] 66MHz 통상 슬롯 수를 한계로 쓴다 */
 		break; /* [한국어] 갈래를 벗어난다 */
 	case BUS_SPEED_100: /* [한국어] 100MHz 로 돌면 */
@@ -1772,7 +1772,7 @@ static inline void print_card_capability(struct slot *slot_cur)
 		info("    66 MHz PCI-X\n"); /* [한국어] 66MHz PCI-X 카드 */
 	else if ((slot_cur->ext_status & CARD_INFO) == PCI66) /* [한국어] 그 다음 값이면 */
 		info("    66 MHz PCI\n"); /* [한국어] 66MHz 통상 PCI 카드 */
-	else /* [한국어] 셋 다 아니면 */
+	else
 		info("    33 MHz PCI\n"); /* [한국어] 33MHz 통상 PCI 카드로 본다 — if/else 사슬이라 마지막이 기본값 역할을 한다 */
 
 }

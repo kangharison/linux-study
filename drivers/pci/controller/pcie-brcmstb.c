@@ -1705,7 +1705,7 @@ static int brcm_pcie_enable_msi(struct brcm_pcie *pcie)
 		msi->intr_base = msi->base + INTR2_CPU_BASE(pcie); /* [한국어] 전용 블록이 없어 INTR2_CPU 블록을 나눠 쓴다 */
 		msi->nr = BRCM_INT_PCI_MSI_LEGACY_NR; /* [한국어] 쓸 수 있는 벡터가 8개뿐 */
 		msi->legacy_shift = 24; /* [한국어] 벡터가 [31..24] 에 있어 24 만큼 밀어야 0번부터 센다 */
-	} else { /* [한국어] HW_REV_33 이상 */
+	} else {
 		msi->intr_base = msi->base + PCIE_MSI_INTR2_BASE; /* [한국어] 전용 MSI 인터럽트 블록을 쓴다 */
 		msi->nr = BRCM_INT_PCI_MSI_NR; /* [한국어] 벡터 32개 */
 		msi->legacy_shift = 0; /* [한국어] 벡터가 0번부터라 밀 필요가 없다 */
@@ -2352,7 +2352,7 @@ static u32 brcm_bar_reg_offset(int bar)
 {
 	if (bar <= 3) /* [한국어] BAR1~3 은 한 덩어리로 이어져 있다 */
 		return PCIE_MISC_RC_BAR1_CONFIG_LO + 8 * (bar - 1); /* [한국어] BAR1 을 기준으로 8바이트 간격(LO/HI 두 워드)으로 센다 */
-	else /* [한국어] BAR4 부터는 자리가 끊겨 있다 */
+	else
 		return PCIE_MISC_RC_BAR4_CONFIG_LO + 8 * (bar - 4); /* [한국어] BAR4 를 새 기준으로 삼아 같은 간격으로 센다 */
 }
 
@@ -2377,7 +2377,7 @@ static u32 brcm_ubus_reg_offset(int bar)
 {
 	if (bar <= 3) /* [한국어] BAR1~3 은 한 덩어리 */
 		return PCIE_MISC_UBUS_BAR1_CONFIG_REMAP + 8 * (bar - 1); /* [한국어] BAR1 remap 을 기준으로 8바이트 간격 */
-	else /* [한국어] BAR4 부터는 다른 자리 */
+	else
 		return PCIE_MISC_UBUS_BAR4_CONFIG_REMAP + 8 * (bar - 4); /* [한국어] BAR4 remap 을 새 기준으로 삼는다 */
 }
 
@@ -2561,7 +2561,7 @@ static int brcm_pcie_setup(struct brcm_pcie *pcie)
 		burst = 0x0; /* [한국어] 128 바이트 */
 	else if (pcie->cfg->soc_base == BCM7278) /* [한국어] BCM7278 은 인코딩이 한 칸 밀려 있다 */
 		burst = 0x3; /* [한국어] 그 칩에서 512 바이트는 3 */
-	else /* [한국어] 그 밖의 칩 */
+	else
 		burst = 0x2; /* [한국어] 일반 인코딩에서 512 바이트는 2 */
 
 	/*
@@ -2825,7 +2825,7 @@ static void brcm_config_clkreq(struct brcm_pcie *pcie)
 		clkreq_cntl |= PCIE_MISC_HARD_PCIE_HARD_DEBUG_L1SS_ENABLE_MASK; /* [한국어] L1SS 활성 비트를 켠다 */
 		brcm_extend_rbus_timeout(pcie); /* [한국어] L1SS 수면 중 내부 버스 타임아웃이 잘못 나지 않게 타이머를 늘린다 */
 
-	} else { /* [한국어] 그 밖의 문자열은 모두 safe 로 본다 */
+	} else {
 		/*
 		 * "safe" -- No power savings; refclk is driven by RC
 		 * unconditionally.
@@ -3474,7 +3474,7 @@ static int brcm_pcie_resume_noirq(struct device *dev)
 			 * usage count).
 			 */
 			pcie->ep_wakeup_capable = false; /* [한국어] 켤 필요가 없다. 표시만 되돌려 다음 주기를 깨끗하게 만든다 */
-		} else { /* [한국어] 꺼 두었다면 */
+		} else {
 			ret = regulator_bulk_enable(pcie->sr->num_supplies,
 						    pcie->sr->supplies); /* [한국어] 다시 켠다 */
 			if (ret) { /* [한국어] 켜지 못했으면 */

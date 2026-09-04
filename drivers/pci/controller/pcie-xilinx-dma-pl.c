@@ -539,7 +539,7 @@ static inline void pcie_write(struct pl_dma_pcie *port, u32 val, u32 reg)
 {
 	if (port->variant->version == QDMA)	/* [한국어] 같은 변종 분기 */
 		writel(val, port->reg_base + reg + QDMA_BRIDGE_BASE_OFF);	/* [한국어] QDMA 이면 오프셋을 보정해 쓰고 */
-	else	/* [한국어] 아니면 */
+	else
 		writel(val, port->reg_base + reg);	/* [한국어] 그대로 쓴다. 읽기 쪽이 early return 을 쓴 반면 이쪽은 if/else 로 갈랐을 뿐 뜻은 같다 */
 }
 
@@ -1037,7 +1037,7 @@ static irqreturn_t xilinx_pl_dma_pcie_intr_handler(int irq, void *dev_id)
 	default:	/* [한국어] 그 밖의 사건은 문장만 남긴다 */
 		if (intr_cause[d->hwirq].str)	/* [한국어] 표에 문장이 있으면 */
 			dev_warn(dev, "%s\n", intr_cause[d->hwirq].str);	/* [한국어] 그 문장을 경고로 남긴다 */
-		else	/* [한국어] 없으면 */
+		else
 			dev_warn(dev, "Unknown IRQ %ld\n", d->hwirq);	/* [한국어] 번호만 남긴다. **setup_irq 가 문장 있는 칸에만 IRQ 를 만들므로 정상 흐름에서는 닿지 않는다** */
 	}
 

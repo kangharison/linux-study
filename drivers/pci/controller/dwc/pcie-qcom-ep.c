@@ -1275,7 +1275,7 @@ static irqreturn_t qcom_pcie_ep_global_irq_thread(int irq, void *data)
 		dev_dbg(dev, "Received Linkup event. Enumeration complete!\n");
 		dw_pcie_ep_linkup(&pci->ep); /* [한국어] EPF 에 알린다(pcie-designware-ep.c:2812) */
 		pcie_ep->link_status = QCOM_PCIE_EP_LINK_UP; /* [한국어] 상태 기계를 UP 으로 옮긴다. 다른 갈래와 달리 알림이 상태 갱신보다 먼저인데, 상류 코드 그대로다 */
-	} else { /* [한국어] 다루지 않는 이벤트이면 */
+	} else {
 		dev_WARN_ONCE(dev, 1, "Received unknown event. INT_STATUS: 0x%08x\n",
 			      status); /* [한국어] 한 번만 경고한다. 함수 위의 상류 TODO 주석과 함께 이 처리가 완성형이 아님을 보여 준다 */
 	}
@@ -1322,7 +1322,7 @@ static irqreturn_t qcom_pcie_ep_perst_irq_thread(int irq, void *data)
 	if (perst) { /* [한국어] PERST# 가 걸려 있으면 */
 		dev_dbg(dev, "PERST asserted by host. Shutting down the PCIe link!\n");
 		qcom_pcie_perst_assert(pci); /* [한국어] 링크를 내리고 자원을 끈다 */
-	} else { /* [한국어] 놓여 있으면 */
+	} else {
 		dev_dbg(dev, "PERST de-asserted by host. Starting link training!\n");
 		qcom_pcie_perst_deassert(pci); /* [한국어] 컨트롤러 전체를 세운다 — 이 드라이버의 실질적 기동이 여기서 일어난다 */
 	}

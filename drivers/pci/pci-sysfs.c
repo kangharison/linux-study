@@ -235,7 +235,7 @@
  * 확인할 수 없다. */
 #ifndef ARCH_PCI_DEV_GROUPS /* [한국어] 아키텍처 헤더가 먼저 정의했는지 확인 */
 #define ARCH_PCI_DEV_GROUPS /* [한국어] 정의가 없으면 빈 것으로 -> 배열에 추가 없음 */
-#endif /* [한국어] ARCH_PCI_DEV_GROUPS 기본 정의 분기 끝 */
+#endif
 
 /* [한국어] sysfs_initialized - sysfs 서브시스템이 PCI 자원 파일을 만들 준비가
  * 되었는지를 나타내는 파일 스코프 플래그.
@@ -354,7 +354,7 @@ pci_config_attr(class, "0x%06x\n"); /* [한국어] /sys/.../class — Class Code
 static ssize_t irq_show(struct device *dev, /* [한국어] 읽힌 sysfs 파일의 주인 device */
 			struct device_attribute *attr, /* [한국어] 속성 서술자 — 여기서는 미사용 */
 			char *buf) /* [한국어] 출력 버퍼(페이지 시작 주소) */
-{ /* [한국어] 함수 본문 시작 */
+{
 	struct pci_dev *pdev = to_pci_dev(dev); /* [한국어] struct device 를 감싸고 있는 pci_dev 복원 */
 
 #ifdef CONFIG_PCI_MSI /* [한국어] MSI 지원이 빌드에 들어간 경우에만 아래 분기가 존재 */
@@ -369,10 +369,10 @@ static ssize_t irq_show(struct device *dev, /* [한국어] 읽힌 sysfs 파일�
 	 * 레거시 INTx 번호를 보여 준다. */
 	if (pdev->msi_enabled) /* [한국어] MSI(MSI-X 는 아님)가 활성화된 장치인가 */
 		return sysfs_emit(buf, "%u\n", pci_irq_vector(pdev, 0)); /* [한국어] 0번 벡터의 리눅스 IRQ 번호를 찍는다 */
-#endif /* [한국어] CONFIG_PCI_MSI 분기 끝 */
+#endif
 
 	return sysfs_emit(buf, "%u\n", pdev->irq); /* [한국어] 그 외 전부: 열거 때 설정공간 0x3c(Interrupt Line)에서 온 레거시 INTx 번호 */
-} /* [한국어] 함수 본문 종료 */
+}
 static DEVICE_ATTR_RO(irq); /* [한국어] dev_attr_irq 생성 -> pci_dev_attrs[] 에 등록되어 /sys/.../irq 가 된다 */
 
 /*
@@ -398,10 +398,10 @@ static DEVICE_ATTR_RO(irq); /* [한국어] dev_attr_irq 생성 -> pci_dev_attrs[
 static ssize_t broken_parity_status_show(struct device *dev, /* [한국어] 대상 device */
 					 struct device_attribute *attr, /* [한국어] 속성 서술자 — 미사용 */
 					 char *buf) /* [한국어] 출력 버퍼 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	struct pci_dev *pdev = to_pci_dev(dev); /* [한국어] device -> pci_dev 복원 */
 	return sysfs_emit(buf, "%u\n", pdev->broken_parity_status); /* [한국어] 비트필드 값을 그대로 0/1 로 출력 */
-} /* [한국어] 함수 본문 종료 */
+}
 
 /*
  * [한국어]
@@ -434,7 +434,7 @@ static ssize_t broken_parity_status_show(struct device *dev, /* [한국어] 대�
 static ssize_t broken_parity_status_store(struct device *dev, /* [한국어] 대상 device */
 					  struct device_attribute *attr, /* [한국어] 속성 서술자 — 미사용 */
 					  const char *buf, size_t count) /* [한국어] 사용자 입력 문자열과 그 길이 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	struct pci_dev *pdev = to_pci_dev(dev); /* [한국어] device -> pci_dev 복원 */
 	unsigned long val; /* [한국어] 파싱된 사용자 값을 받을 자리 */
 
@@ -444,7 +444,7 @@ static ssize_t broken_parity_status_store(struct device *dev, /* [한국어] 대
 	pdev->broken_parity_status = !!val; /* [한국어] !! 로 0/1 로 정규화 — 이 필드는 1비트 비트필드라 2 이상을 넣으면 잘린다 */
 
 	return count; /* [한국어] 입력을 전부 소비했다고 알림. 이보다 작으면 사용자 공간이 재시도한다 */
-} /* [한국어] 함수 본문 종료 */
+}
 static DEVICE_ATTR_RW(broken_parity_status); /* [한국어] dev_attr_broken_parity_status 생성(읽기+쓰기) */
 
 /*
@@ -484,19 +484,19 @@ static DEVICE_ATTR_RW(broken_parity_status); /* [한국어] dev_attr_broken_pari
  */
 static ssize_t pci_dev_show_local_cpu(struct device *dev, bool list, /* [한국어] list=false 면 마스크, true 면 범위 목록 형식 */
 				      struct device_attribute *attr, char *buf) /* [한국어] 속성 서술자(미사용)와 출력 버퍼 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	const struct cpumask *mask; /* [한국어] 출력할 CPU 집합을 가리킬 포인터. 전역/노드 마스크를 가리키므로 해제 대상 아님 */
 
 #ifdef CONFIG_NUMA /* [한국어] NUMA 를 아는 커널에서는 노드 정보를 쓴다 */
 	if (dev_to_node(dev) == NUMA_NO_NODE) /* [한국어] 이 장치의 노드가 미지정인가(펌웨어가 알려 주지 않은 경우) */
 		mask = cpu_online_mask; /* [한국어] 미지정이면 특정 노드로 좁힐 근거가 없으므로 온라인 CPU 전체 */
-	else /* [한국어] 노드가 확정된 경우 */
+	else
 		mask = cpumask_of_node(dev_to_node(dev)); /* [한국어] 그 노드에 속한 CPU 들만 */
 #else /* [한국어] NUMA 가 꺼진 빌드 — 노드 개념 자체가 없다 */
 	mask = cpumask_of_pcibus(to_pci_dev(dev)->bus); /* [한국어] 버스에서 유도한 마스크(아키텍처가 정의). 보통 전체 CPU */
-#endif /* [한국어] CONFIG_NUMA 분기 끝 */
+#endif
 	return cpumap_print_to_pagebuf(list, buf, mask); /* [한국어] 마스크를 buf 에 형식대로 찍고 길이 반환. PAGE_SIZE 경계는 이 함수가 지킨다 */
-} /* [한국어] 함수 본문 종료 */
+}
 
 /*
  * [한국어]
@@ -522,9 +522,9 @@ static ssize_t pci_dev_show_local_cpu(struct device *dev, bool list, /* [한국�
  */
 static ssize_t local_cpus_show(struct device *dev, /* [한국어] 대상 device */
 			       struct device_attribute *attr, char *buf) /* [한국어] 속성 서술자와 출력 버퍼 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	return pci_dev_show_local_cpu(dev, false, attr, buf); /* [한국어] false = 비트마스크 형식으로 출력 */
-} /* [한국어] 함수 본문 종료 */
+}
 static DEVICE_ATTR_RO(local_cpus); /* [한국어] dev_attr_local_cpus 생성 -> /sys/.../local_cpus */
 
 /*
@@ -550,9 +550,9 @@ static DEVICE_ATTR_RO(local_cpus); /* [한국어] dev_attr_local_cpus 생성 -> 
  */
 static ssize_t local_cpulist_show(struct device *dev, /* [한국어] 대상 device */
 				  struct device_attribute *attr, char *buf) /* [한국어] 속성 서술자와 출력 버퍼 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	return pci_dev_show_local_cpu(dev, true, attr, buf); /* [한국어] true = "0-7" 같은 범위 목록 형식으로 출력 */
-} /* [한국어] 함수 본문 종료 */
+}
 static DEVICE_ATTR_RO(local_cpulist); /* [한국어] dev_attr_local_cpulist 생성 -> /sys/.../local_cpulist */
 
 /*
@@ -585,11 +585,11 @@ static DEVICE_ATTR_RO(local_cpulist); /* [한국어] dev_attr_local_cpulist 생�
  */
 static ssize_t cpuaffinity_show(struct device *dev, /* [한국어] pci_bus 에 박힌 device */
 				struct device_attribute *attr, char *buf) /* [한국어] 속성 서술자(미사용)와 출력 버퍼 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	const struct cpumask *cpumask = cpumask_of_pcibus(to_pci_bus(dev)); /* [한국어] device -> pci_bus 복원 후, 그 버스에 가까운 CPU 마스크 조회 */
 
 	return cpumap_print_to_pagebuf(false, buf, cpumask); /* [한국어] false = 비트마스크 16진 형식. 길이 관리는 이 함수가 한다 */
-} /* [한국어] 함수 본문 종료 */
+}
 static DEVICE_ATTR_RO(cpuaffinity); /* [한국어] dev_attr_cpuaffinity 생성 -> pcibus_attrs[] 를 거쳐 버스 디렉터리에 붙는다 */
 
 /*
@@ -613,11 +613,11 @@ static DEVICE_ATTR_RO(cpuaffinity); /* [한국어] dev_attr_cpuaffinity 생성 -
  */
 static ssize_t cpulistaffinity_show(struct device *dev, /* [한국어] pci_bus 에 박힌 device */
 				    struct device_attribute *attr, char *buf) /* [한국어] 속성 서술자(미사용)와 출력 버퍼 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	const struct cpumask *cpumask = cpumask_of_pcibus(to_pci_bus(dev)); /* [한국어] 버스에 가까운 CPU 마스크 조회 */
 
 	return cpumap_print_to_pagebuf(true, buf, cpumask); /* [한국어] true = "0-15" 같은 범위 목록 형식 */
-} /* [한국어] 함수 본문 종료 */
+}
 static DEVICE_ATTR_RO(cpulistaffinity); /* [한국어] dev_attr_cpulistaffinity 생성 -> 버스 디렉터리에 붙는다 */
 
 /*
@@ -650,11 +650,11 @@ static DEVICE_ATTR_RO(cpulistaffinity); /* [한국어] dev_attr_cpulistaffinity 
  */
 static ssize_t power_state_show(struct device *dev, /* [한국어] 대상 device */
 				struct device_attribute *attr, char *buf) /* [한국어] 속성 서술자(미사용)와 출력 버퍼 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	struct pci_dev *pdev = to_pci_dev(dev); /* [한국어] device -> pci_dev 복원 */
 
 	return sysfs_emit(buf, "%s\n", pci_power_name(pdev->current_state)); /* [한국어] 커널이 기록해 둔 현재 D 상태를 이름 문자열로 변환해 출력 */
-} /* [한국어] 함수 본문 종료 */
+}
 static DEVICE_ATTR_RO(power_state); /* [한국어] dev_attr_power_state 생성 -> /sys/.../power_state */
 
 /* show resources */
@@ -701,7 +701,7 @@ static DEVICE_ATTR_RO(power_state); /* [한국어] dev_attr_power_state 생성 -
 /* show resources */
 static ssize_t resource_show(struct device *dev, struct device_attribute *attr, /* [한국어] 대상 device 와 속성 서술자(미사용) */
 			     char *buf) /* [한국어] 출력 버퍼 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	struct pci_dev *pci_dev = to_pci_dev(dev); /* [한국어] device -> pci_dev 복원 */
 	int i; /* [한국어] resource[] 를 훑는 인덱스 */
 	int max; /* [한국어] 어디까지 찍을지의 상한 — 브리지인지에 따라 달라진다 */
@@ -710,7 +710,7 @@ static ssize_t resource_show(struct device *dev, struct device_attribute *attr, 
 
 	if (pci_dev->subordinate) /* [한국어] 하위 버스를 거느린 장치인가 = 브리지인가 */
 		max = DEVICE_COUNT_RESOURCE; /* [한국어] 브리지면 브리지 윈도우까지 배열 전체를 찍는다 */
-	else /* [한국어] 일반 엔드포인트(예: NVMe SSD) */
+	else
 		max = PCI_BRIDGE_RESOURCES; /* [한국어] 브리지 윈도우 구획 직전까지만 — 그 뒤는 의미가 없다 */
 
 	for (i = 0; i < max; i++) { /* [한국어] 자원 하나마다 한 줄씩 */
@@ -732,9 +732,9 @@ static ssize_t resource_show(struct device *dev, struct device_attribute *attr, 
 				     (unsigned long long)start, /* [한국어] 시작 물리 주소. resource_size_t 폭이 아키텍처마다 달라 형식과 맞추려 캐스팅 */
 				     (unsigned long long)end, /* [한국어] 끝 물리 주소(이 주소까지 포함). 크기는 end - start + 1 */
 				     (unsigned long long)res->flags); /* [한국어] IORESOURCE_MEM/IO/PREFETCH 등 속성 비트. 어떤 BAR 가 prefetchable 인지 여기서 읽는다 */
-	} /* [한국어] 자원 루프 종료 */
+	}
 	return len; /* [한국어] 누적 길이 = read(2) 가 돌려받을 바이트 수 */
-} /* [한국어] 함수 본문 종료 */
+}
 static DEVICE_ATTR_RO(resource); /* [한국어] dev_attr_resource 생성 -> /sys/.../resource */
 
 /*
@@ -768,12 +768,12 @@ static DEVICE_ATTR_RO(resource); /* [한국어] dev_attr_resource 생성 -> /sys
  */
 static ssize_t max_link_speed_show(struct device *dev, /* [한국어] 대상 device */
 				   struct device_attribute *attr, char *buf) /* [한국어] 속성 서술자(미사용)와 출력 버퍼 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	struct pci_dev *pdev = to_pci_dev(dev); /* [한국어] device -> pci_dev 복원 */
 
 	return sysfs_emit(buf, "%s\n", /* [한국어] 문자열 한 줄로 출력 */
 			  pci_speed_string(pcie_get_speed_cap(pdev))); /* [한국어] 링크 능력 레지스터에서 최대 속도를 얻어(pcie_get_speed_cap) 사람이 읽는 이름으로 변환(pci_speed_string) */
-} /* [한국어] 함수 본문 종료 */
+}
 static DEVICE_ATTR_RO(max_link_speed); /* [한국어] dev_attr_max_link_speed 생성 -> pcie_dev_attrs[] 경유로 PCIe 장치에만 생긴다 */
 
 /*
@@ -807,7 +807,7 @@ static DEVICE_ATTR_RO(max_link_speed); /* [한국어] dev_attr_max_link_speed �
  */
 static ssize_t max_link_width_show(struct device *dev, /* [한국어] 대상 device */
 				   struct device_attribute *attr, char *buf) /* [한국어] 속성 서술자(미사용)와 출력 버퍼 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	struct pci_dev *pdev = to_pci_dev(dev); /* [한국어] device -> pci_dev 복원 */
 	ssize_t ret; /* [한국어] sysfs_emit 결과를 담아 뒀다가 PM 해제 뒤에 반환하기 위한 임시 변수 */
 
@@ -817,7 +817,7 @@ static ssize_t max_link_width_show(struct device *dev, /* [한국어] 대상 dev
 	pci_config_pm_runtime_put(pdev); /* [한국어] get 과 반드시 짝을 이뤄야 한다. 여기서 놓아 줘야 장치가 다시 절전 상태로 갈 수 있다 */
 
 	return ret; /* [한국어] PM 해제를 먼저 하려고 값을 잡아 두었다가 이제 반환 */
-} /* [한국어] 함수 본문 종료 */
+}
 static DEVICE_ATTR_RO(max_link_width); /* [한국어] dev_attr_max_link_width 생성 -> PCIe 장치에만 생긴다 */
 
 /*
@@ -860,7 +860,7 @@ static DEVICE_ATTR_RO(max_link_width); /* [한국어] dev_attr_max_link_width �
  */
 static ssize_t current_link_speed_show(struct device *dev, /* [한국어] 대상 device */
 				       struct device_attribute *attr, char *buf) /* [한국어] 속성 서술자(미사용)와 출력 버퍼 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	struct pci_dev *pci_dev = to_pci_dev(dev); /* [한국어] device -> pci_dev 복원 */
 	u16 linkstat; /* [한국어] PCIe Link Status 레지스터 원본 16비트 값 */
 	int err; /* [한국어] 설정공간 읽기 성공 여부(0 이 성공) */
@@ -876,7 +876,7 @@ static ssize_t current_link_speed_show(struct device *dev, /* [한국어] 대상
 	speed = pcie_link_speed[linkstat & PCI_EXP_LNKSTA_CLS]; /* [한국어] 하위 4비트 Current Link Speed 필드를 그대로 인덱스로. 표가 16칸이라 범위 초과가 구조적으로 불가능하다 */
 
 	return sysfs_emit(buf, "%s\n", pci_speed_string(speed)); /* [한국어] "8.0 GT/s PCIe" 같은 문자열로 변환해 출력 */
-} /* [한국어] 함수 본문 종료 */
+}
 static DEVICE_ATTR_RO(current_link_speed); /* [한국어] dev_attr_current_link_speed 생성 -> PCIe 장치에만 생긴다 */
 
 /*
@@ -907,7 +907,7 @@ static DEVICE_ATTR_RO(current_link_speed); /* [한국어] dev_attr_current_link_
  */
 static ssize_t current_link_width_show(struct device *dev, /* [한국어] 대상 device */
 				       struct device_attribute *attr, char *buf) /* [한국어] 속성 서술자(미사용)와 출력 버퍼 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	struct pci_dev *pci_dev = to_pci_dev(dev); /* [한국어] device -> pci_dev 복원 */
 	u16 linkstat; /* [한국어] Link Status 레지스터 원본 16비트 값 */
 	int err; /* [한국어] 설정공간 읽기 성공 여부(0 이 성공) */
@@ -920,7 +920,7 @@ static ssize_t current_link_width_show(struct device *dev, /* [한국어] 대상
 		return -EINVAL; /* [한국어] 값을 지어내지 않고 오류 반환 */
 
 	return sysfs_emit(buf, "%u\n", FIELD_GET(PCI_EXP_LNKSTA_NLW, linkstat)); /* [한국어] Negotiated Link Width 필드만 뽑아 레인 수로 출력. FIELD_GET 이 마스크에 맞춰 시프트까지 처리한다 */
-} /* [한국어] 함수 본문 종료 */
+}
 static DEVICE_ATTR_RO(current_link_width); /* [한국어] dev_attr_current_link_width 생성 -> PCIe 장치에만 생긴다 */
 
 /*
@@ -961,7 +961,7 @@ static DEVICE_ATTR_RO(current_link_width); /* [한국어] dev_attr_current_link_
 static ssize_t secondary_bus_number_show(struct device *dev, /* [한국어] 대상 device(브리지) */
 					 struct device_attribute *attr, /* [한국어] 속성 서술자 — 미사용 */
 					 char *buf) /* [한국어] 출력 버퍼 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	struct pci_dev *pci_dev = to_pci_dev(dev); /* [한국어] device -> pci_dev 복원 */
 	u8 sec_bus; /* [한국어] 읽어 올 Secondary Bus Number(1바이트, 0~255) */
 	int err; /* [한국어] 설정공간 읽기 성공 여부(0 이 성공) */
@@ -974,7 +974,7 @@ static ssize_t secondary_bus_number_show(struct device *dev, /* [한국어] 대�
 		return -EINVAL; /* [한국어] 값을 지어내지 않고 오류 반환 */
 
 	return sysfs_emit(buf, "%u\n", sec_bus); /* [한국어] 버스 번호를 10진수로 출력 */
-} /* [한국어] 함수 본문 종료 */
+}
 static DEVICE_ATTR_RO(secondary_bus_number); /* [한국어] dev_attr_secondary_bus_number 생성 -> 브리지에만 생긴다 */
 
 /*
@@ -1006,7 +1006,7 @@ static DEVICE_ATTR_RO(secondary_bus_number); /* [한국어] dev_attr_secondary_b
 static ssize_t subordinate_bus_number_show(struct device *dev, /* [한국어] 대상 device(브리지) */
 					   struct device_attribute *attr, /* [한국어] 속성 서술자 — 미사용 */
 					   char *buf) /* [한국어] 출력 버퍼 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	struct pci_dev *pci_dev = to_pci_dev(dev); /* [한국어] device -> pci_dev 복원 */
 	u8 sub_bus; /* [한국어] 읽어 올 Subordinate Bus Number(1바이트, 0~255) */
 	int err; /* [한국어] 설정공간 읽기 성공 여부(0 이 성공) */
@@ -1019,7 +1019,7 @@ static ssize_t subordinate_bus_number_show(struct device *dev, /* [한국어] �
 		return -EINVAL; /* [한국어] 값을 지어내지 않고 오류 반환 */
 
 	return sysfs_emit(buf, "%u\n", sub_bus); /* [한국어] 버스 번호를 10진수로 출력 */
-} /* [한국어] 함수 본문 종료 */
+}
 static DEVICE_ATTR_RO(subordinate_bus_number); /* [한국어] dev_attr_subordinate_bus_number 생성 -> 브리지에만 생긴다 */
 
 /*
@@ -1051,11 +1051,11 @@ static DEVICE_ATTR_RO(subordinate_bus_number); /* [한국어] dev_attr_subordina
 static ssize_t ari_enabled_show(struct device *dev, /* [한국어] 대상 device */
 				struct device_attribute *attr, /* [한국어] 속성 서술자 — 미사용 */
 				char *buf) /* [한국어] 출력 버퍼 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	struct pci_dev *pci_dev = to_pci_dev(dev); /* [한국어] device -> pci_dev 복원 */
 
 	return sysfs_emit(buf, "%u\n", pci_ari_enabled(pci_dev->bus)); /* [한국어] 장치가 아니라 그 장치가 앉은 버스에 ARI 포워딩이 켜졌는지를 묻는다 */
-} /* [한국어] 함수 본문 종료 */
+}
 static DEVICE_ATTR_RO(ari_enabled); /* [한국어] dev_attr_ari_enabled 생성 -> /sys/.../ari_enabled */
 
 /*
@@ -1092,7 +1092,7 @@ static DEVICE_ATTR_RO(ari_enabled); /* [한국어] dev_attr_ari_enabled 생성 -
  */
 static ssize_t modalias_show(struct device *dev, struct device_attribute *attr, /* [한국어] 대상 device 와 속성 서술자(미사용) */
 			     char *buf) /* [한국어] 출력 버퍼 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	struct pci_dev *pci_dev = to_pci_dev(dev); /* [한국어] device -> pci_dev 복원 */
 
 	return sysfs_emit(buf, "pci:v%08Xd%08Xsv%08Xsd%08Xbc%02Xsc%02Xi%02X\n", /* [한국어] 별칭 형식. 폭이 고정(%08X, %02X)이라야 modprobe 의 패턴 매칭이 성립한다 */
@@ -1100,7 +1100,7 @@ static ssize_t modalias_show(struct device *dev, struct device_attribute *attr, 
 			  pci_dev->subsystem_vendor, pci_dev->subsystem_device, /* [한국어] sv = Subsystem Vendor ID, sd = Subsystem Device ID */
 			  (u8)(pci_dev->class >> 16), (u8)(pci_dev->class >> 8), /* [한국어] bc = base class(클래스 24비트의 상위 바이트), sc = subclass(가운데 바이트) */
 			  (u8)(pci_dev->class)); /* [한국어] i = programming interface(하위 바이트). NVMe 는 이 세 바이트로 매칭된다 */
-} /* [한국어] 함수 본문 종료 */
+}
 static DEVICE_ATTR_RO(modalias); /* [한국어] dev_attr_modalias 생성 -> /sys/.../modalias */
 
 /*
@@ -1147,7 +1147,7 @@ static DEVICE_ATTR_RO(modalias); /* [한국어] dev_attr_modalias 생성 -> /sys
  */
 static ssize_t enable_store(struct device *dev, struct device_attribute *attr, /* [한국어] 대상 device 와 속성 서술자(미사용) */
 			     const char *buf, size_t count) /* [한국어] 사용자 입력 문자열과 길이 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	struct pci_dev *pdev = to_pci_dev(dev); /* [한국어] device -> pci_dev 복원 */
 	unsigned long val; /* [한국어] 파싱된 사용자 값(0 = 끄기, 그 외 = 켜기) */
 	ssize_t result = 0; /* [한국어] 분기별 결과. 0 으로 시작해 "성공" 을 기본값으로 둔다 */
@@ -1166,12 +1166,12 @@ static ssize_t enable_store(struct device *dev, struct device_attribute *attr, /
 		result = pci_enable_device(pdev); /* [한국어] Command 레지스터의 I/O/Memory 디코딩을 켜고 참조 계수를 올린다 */
 	else if (pci_is_enabled(pdev)) /* [한국어] 끄라는 요청인데, 실제로 켜져 있는가 */
 		pci_disable_device(pdev); /* [한국어] 참조 계수를 내리고 0 이 되면 디코딩을 끈다. 반환값이 없어 result 는 0 그대로 */
-	else /* [한국어] 끄라는 요청인데 애초에 켜져 있지 않은 경우 */
+	else
 		result = -EIO; /* [한국어] 짝이 맞지 않는 해제 — 사용자에게 알린다 */
 	device_unlock(dev); /* [한국어] 모든 분기가 여기로 모이므로 락 해제가 한 번뿐이다 */
 
 	return result < 0 ? result : count; /* [한국어] 오류면 그 오류를, 성공이면 "입력 전부 소비" 를 뜻하는 count 를 반환 */
-} /* [한국어] 함수 본문 종료 */
+}
 
 /*
  * [한국어]
@@ -1200,12 +1200,12 @@ static ssize_t enable_store(struct device *dev, struct device_attribute *attr, /
  */
 static ssize_t enable_show(struct device *dev, struct device_attribute *attr, /* [한국어] 대상 device 와 속성 서술자(미사용) */
 			    char *buf) /* [한국어] 출력 버퍼 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	struct pci_dev *pdev; /* [한국어] 복원할 pci_dev. 선언과 대입을 나눈 것은 상류의 표기 습관이며 의미 차이는 없다 */
 
 	pdev = to_pci_dev(dev); /* [한국어] device -> pci_dev 복원 */
 	return sysfs_emit(buf, "%u\n", atomic_read(&pdev->enable_cnt)); /* [한국어] 원자적으로 읽은 활성화 참조 계수를 출력 */
-} /* [한국어] 함수 본문 종료 */
+}
 static DEVICE_ATTR_RW(enable); /* [한국어] dev_attr_enable 생성. show 와 store 가 모두 있으므로 읽기+쓰기 속성 */
 
 #ifdef CONFIG_NUMA /* [한국어] NUMA 를 아는 커널에서만 numa_node 파일이 존재한다 */
@@ -1251,7 +1251,7 @@ static DEVICE_ATTR_RW(enable); /* [한국어] dev_attr_enable 생성. show 와 s
 static ssize_t numa_node_store(struct device *dev, /* [한국어] 대상 device */
 			       struct device_attribute *attr, const char *buf, /* [한국어] 속성 서술자(미사용)와 사용자 입력 */
 			       size_t count) /* [한국어] 입력 길이 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	struct pci_dev *pdev = to_pci_dev(dev); /* [한국어] 아래 pci_alert() 로 장치 이름이 붙은 로그를 찍기 위해 필요하다 */
 	int node; /* [한국어] 파싱된 노드 번호. 음수(NUMA_NO_NODE)가 있을 수 있어 부호 있는 정수 */
 
@@ -1276,7 +1276,7 @@ static ssize_t numa_node_store(struct device *dev, /* [한국어] 대상 device 
 
 	dev->numa_node = node; /* [한국어] 이 PCI 장치가 속한 것으로 간주할 NUMA 노드를 덮어쓴다. 이후 DMA 버퍼 할당과 IRQ affinity 판단이 이 값을 따른다 */
 	return count; /* [한국어] 입력을 전부 소비했다고 알림 */
-} /* [한국어] 함수 본문 종료 */
+}
 
 /*
  * [한국어]
@@ -1306,11 +1306,11 @@ static ssize_t numa_node_store(struct device *dev, /* [한국어] 대상 device 
  */
 static ssize_t numa_node_show(struct device *dev, struct device_attribute *attr, /* [한국어] 대상 device 와 속성 서술자(미사용) */
 			      char *buf) /* [한국어] 출력 버퍼 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	return sysfs_emit(buf, "%d\n", dev->numa_node); /* [한국어] PCI 가 아니라 struct device 공통 필드를 그대로 출력. -1 은 "모름" */
-} /* [한국어] 함수 본문 종료 */
+}
 static DEVICE_ATTR_RW(numa_node); /* [한국어] dev_attr_numa_node 생성(읽기+쓰기) */
-#endif /* [한국어] CONFIG_NUMA 블록 끝 — NUMA 가 없으면 이 속성 자체가 존재하지 않는다 */
+#endif
 
 /*
  * [한국어]
@@ -1345,11 +1345,11 @@ static DEVICE_ATTR_RW(numa_node); /* [한국어] dev_attr_numa_node 생성(읽�
  */
 static ssize_t dma_mask_bits_show(struct device *dev, /* [한국어] 대상 device */
 				  struct device_attribute *attr, char *buf) /* [한국어] 속성 서술자(미사용)와 출력 버퍼 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	struct pci_dev *pdev = to_pci_dev(dev); /* [한국어] 스트리밍 DMA 마스크는 pci_dev 쪽에 있으므로 복원이 필요하다 */
 
 	return sysfs_emit(buf, "%d\n", fls64(pdev->dma_mask)); /* [한국어] 마스크의 최상위 1 비트 위치 = 사용 가능한 주소 비트 수 */
-} /* [한국어] 함수 본문 종료 */
+}
 static DEVICE_ATTR_RO(dma_mask_bits); /* [한국어] dev_attr_dma_mask_bits 생성 -> /sys/.../dma_mask_bits */
 
 /*
@@ -1383,9 +1383,9 @@ static DEVICE_ATTR_RO(dma_mask_bits); /* [한국어] dev_attr_dma_mask_bits 생�
 static ssize_t consistent_dma_mask_bits_show(struct device *dev, /* [한국어] 대상 device */
 					     struct device_attribute *attr, /* [한국어] 속성 서술자 — 미사용 */
 					     char *buf) /* [한국어] 출력 버퍼 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	return sysfs_emit(buf, "%d\n", fls64(dev->coherent_dma_mask)); /* [한국어] struct device 공통 필드를 그대로 읽어 비트 수로 환산 */
-} /* [한국어] 함수 본문 종료 */
+}
 static DEVICE_ATTR_RO(consistent_dma_mask_bits); /* [한국어] dev_attr_consistent_dma_mask_bits 생성 */
 
 /*
@@ -1420,14 +1420,14 @@ static DEVICE_ATTR_RO(consistent_dma_mask_bits); /* [한국어] dev_attr_consist
  */
 static ssize_t msi_bus_show(struct device *dev, struct device_attribute *attr, /* [한국어] 대상 device 와 속성 서술자(미사용) */
 			    char *buf) /* [한국어] 출력 버퍼 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	struct pci_dev *pdev = to_pci_dev(dev); /* [한국어] device -> pci_dev 복원 */
 	struct pci_bus *subordinate = pdev->subordinate; /* [한국어] 이 장치가 브리지라면 그 아래 버스, 엔드포인트라면 NULL. 아래 두 분기를 가르는 기준이다 */
 
 	return sysfs_emit(buf, "%u\n", subordinate ? /* [한국어] 브리지인지 엔드포인트인지에 따라 보는 곳이 달라진다 */
 			  !(subordinate->bus_flags & PCI_BUS_FLAGS_NO_MSI) /* [한국어] 브리지: 하위 버스의 "MSI 금지" 비트를 뒤집어 "허용" 으로 표시 */
 			    : !pdev->no_msi); /* [한국어] 엔드포인트: 자기 자신의 no_msi 를 뒤집어 표시 */
-} /* [한국어] 함수 본문 종료 */
+}
 
 /*
  * [한국어]
@@ -1475,7 +1475,7 @@ static ssize_t msi_bus_show(struct device *dev, struct device_attribute *attr, /
  */
 static ssize_t msi_bus_store(struct device *dev, struct device_attribute *attr, /* [한국어] 대상 device 와 속성 서술자(미사용) */
 			     const char *buf, size_t count) /* [한국어] 사용자 입력 문자열과 길이 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	struct pci_dev *pdev = to_pci_dev(dev); /* [한국어] device -> pci_dev 복원 */
 	struct pci_bus *subordinate = pdev->subordinate; /* [한국어] 브리지면 하위 버스, 엔드포인트면 NULL */
 	unsigned long val; /* [한국어] 파싱된 사용자 값(0 = 금지, 그 외 = 허용) */
@@ -1500,17 +1500,17 @@ static ssize_t msi_bus_store(struct device *dev, struct device_attribute *attr, 
 		pci_info(pdev, "MSI/MSI-X %s for future drivers\n", /* [한국어] 정책 변경을 커널 로그에 남긴다 — 나중에 원인 추적용 */
 			 val ? "allowed" : "disallowed"); /* [한국어] 사람이 읽을 문자열 선택 */
 		return count; /* [한국어] 엔드포인트 처리는 여기서 끝 */
-	} /* [한국어] 엔드포인트 분기 종료 */
+	}
 
 	if (val) /* [한국어] 여기부터는 브리지 — 허용하라는 요청인가 */
 		subordinate->bus_flags &= ~PCI_BUS_FLAGS_NO_MSI; /* [한국어] AND NOT 으로 "MSI 금지" 비트만 지운다. 다른 버스 플래그는 건드리지 않는다 */
-	else /* [한국어] 금지하라는 요청 */
+	else
 		subordinate->bus_flags |= PCI_BUS_FLAGS_NO_MSI; /* [한국어] OR 로 그 비트만 세운다. 이 버스 아래 모든 장치에 영향이 간다 */
 
 	dev_info(&subordinate->dev, "MSI/MSI-X %s for future drivers of devices on this bus\n", /* [한국어] 브리지가 아니라 "그 아래 버스" 이름으로 로그를 남겨 영향 범위를 분명히 한다 */
 		 val ? "allowed" : "disallowed"); /* [한국어] 사람이 읽을 문자열 선택 */
 	return count; /* [한국어] 입력을 전부 소비했다고 알림 */
-} /* [한국어] 함수 본문 종료 */
+}
 static DEVICE_ATTR_RW(msi_bus); /* [한국어] dev_attr_msi_bus 생성(읽기+쓰기) */
 
 /*
@@ -1549,7 +1549,7 @@ static DEVICE_ATTR_RW(msi_bus); /* [한국어] dev_attr_msi_bus 생성(읽기+�
  *     -> pci_lock_rescan_remove -> pci_find_next_bus / pci_rescan_bus
  */
 static ssize_t rescan_store(const struct bus_type *bus, const char *buf, size_t count) /* [한국어] 장치가 아니라 bus_type 단위 속성이라 시그니처가 다르다 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	unsigned long val; /* [한국어] 파싱된 사용자 값. 0 이면 아무 일도 하지 않는다 */
 	struct pci_bus *b = NULL; /* [한국어] 순회 커서. NULL 로 시작해야 "처음부터" 라는 뜻이 된다 */
 
@@ -1561,9 +1561,9 @@ static ssize_t rescan_store(const struct bus_type *bus, const char *buf, size_t 
 		while ((b = pci_find_next_bus(b)) != NULL) /* [한국어] 루트 버스를 하나씩 넘겨받는다. 커서를 갱신하며 끝(NULL)까지 */
 			pci_rescan_bus(b); /* [한국어] 그 버스 아래를 다시 열거해 새 장치를 찾고 자원을 배정한다 */
 		pci_unlock_rescan_remove(); /* [한국어] 반드시 짝을 맞춰 푼다. 여기서 못 풀면 이후 모든 hotplug 가 멈춘다 */
-	} /* [한국어] 재스캔 블록 종료 */
+	}
 	return count; /* [한국어] 입력을 전부 소비했다고 알림 */
-} /* [한국어] 함수 본문 종료 */
+}
 static BUS_ATTR_WO(rescan); /* [한국어] bus_attr_rescan 생성. WO = 쓰기 전용(읽으면 의미가 없으므로 show 가 없다) */
 
 /* [한국어] pci_bus_attrs - pci_bus_type 자체(/sys/bus/pci/)에 붙는 속성 목록.
@@ -1571,7 +1571,7 @@ static BUS_ATTR_WO(rescan); /* [한국어] bus_attr_rescan 생성. WO = 쓰기 �
 static struct attribute *pci_bus_attrs[] = { /* [한국어] 배열 시작 */
 	&bus_attr_rescan.attr, /* [한국어] /sys/bus/pci/rescan 파일을 만든다. 위 rescan_store 가 그 쓰기 콜백 */
 	NULL, /* [한국어] 배열의 끝을 알리는 센티널. sysfs 코어가 NULL 을 만날 때까지 순회하므로 반드시 있어야 한다 */
-}; /* [한국어] 배열 종료 */
+};
 
 /* [한국어] pci_bus_group - 위 배열 하나를 담은 속성 그룹. */
 static const struct attribute_group pci_bus_group = { /* [한국어] 구조체 초기화 시작 */
@@ -1582,7 +1582,7 @@ static const struct attribute_group pci_bus_group = { /* [한국어] 구조체 �
 		 * 동기화: const 정적 데이터라 읽기 전용, 락 불필요.
 		 * is_visible 을 두지 않았으므로 조건 없이 항상 만들어진다 —
 		 * 버스 타입은 하나뿐이라 장치별로 가릴 이유가 없다. */
-}; /* [한국어] 구조체 초기화 종료 */
+};
 
 /* [한국어] pci_bus_groups - 드라이버 코어에 넘겨질 최상위 그룹 배열.
  * drivers/pci/pci-driver.c 의 pci_bus_type 이 .bus_groups = pci_bus_groups
@@ -1590,7 +1590,7 @@ static const struct attribute_group pci_bus_group = { /* [한국어] 구조체 �
 const struct attribute_group *pci_bus_groups[] = { /* [한국어] 배열 시작 */
 	&pci_bus_group, /* [한국어] 위에서 만든 그룹 하나 — /sys/bus/pci/rescan 을 만든다 */
 	NULL, /* [한국어] 끝 센티널 */
-}; /* [한국어] 배열 종료 */
+};
 
 /*
  * [한국어]
@@ -1626,7 +1626,7 @@ const struct attribute_group *pci_bus_groups[] = { /* [한국어] 배열 시작 
 static ssize_t dev_rescan_store(struct device *dev, /* [한국어] 대상 device */
 				struct device_attribute *attr, const char *buf, /* [한국어] 속성 서술자(미사용)와 사용자 입력 */
 				size_t count) /* [한국어] 입력 길이 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	unsigned long val; /* [한국어] 파싱된 사용자 값 */
 	struct pci_dev *pdev = to_pci_dev(dev); /* [한국어] 이 장치가 앉은 버스(pdev->bus)를 알아내기 위해 복원한다 */
 
@@ -1637,9 +1637,9 @@ static ssize_t dev_rescan_store(struct device *dev, /* [한국어] 대상 device
 		pci_lock_rescan_remove(); /* [한국어] 전역 열거/제거 직렬화 락 — 범위는 버스 하나여도 락은 전역이다 */
 		pci_rescan_bus(pdev->bus); /* [한국어] 이 장치가 앉은 버스만 다시 훑는다. 시스템 전체를 건드리지 않는다 */
 		pci_unlock_rescan_remove(); /* [한국어] 락 해제 */
-	} /* [한국어] 재스캔 블록 종료 */
+	}
 	return count; /* [한국어] 입력을 전부 소비했다고 알림 */
-} /* [한국어] 함수 본문 종료 */
+}
 /* [한국어] dev_attr_dev_rescan - 파일 이름은 "rescan", C 심볼은 dev_attr_dev_rescan.
  * __ATTR(name, mode, show, store) 의 네 인자가 각각
  * 파일 이름 / 파일 모드 / 읽기 콜백 / 쓰기 콜백이다.
@@ -1698,7 +1698,7 @@ static struct device_attribute dev_attr_dev_rescan = __ATTR(rescan, 0200, NULL, 
  */
 static ssize_t remove_store(struct device *dev, struct device_attribute *attr, /* [한국어] 대상 device 와 자기 자신의 속성 서술자(여기서는 실제로 쓰인다) */
 			    const char *buf, size_t count) /* [한국어] 사용자 입력 문자열과 길이 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	unsigned long val; /* [한국어] 파싱된 사용자 값. 0 이면 아무 일도 하지 않는다 */
 
 	if (kstrtoul(buf, 0, &val) < 0) /* [한국어] 진법 자동 판별 파싱 */
@@ -1707,7 +1707,7 @@ static ssize_t remove_store(struct device *dev, struct device_attribute *attr, /
 	if (val && device_remove_file_self(dev, attr)) /* [한국어] 단락 평가가 핵심: 0 이면 헬퍼조차 부르지 않고, 동시 요청 중 딱 하나만 true 를 받아 아래로 진입한다 */
 		pci_stop_and_remove_bus_device_locked(to_pci_dev(dev)); /* [한국어] 드라이버 언바인드 -> sysfs/proc 정리 -> pci_dev 해제까지. 이름의 _locked 는 내부에서 rescan/remove 전역 락을 잡아 준다는 뜻 */
 	return count; /* [한국어] 제거 여부와 무관하게 입력은 소비했다고 알린다 */
-} /* [한국어] 함수 본문 종료 */
+}
 /* [한국어] dev_attr_remove - 파일 이름 "remove", 모드 0220(쓰기 전용),
  * show 없음, store 는 위 remove_store.
  * IGNORE_LOCKDEP 판이라 이 속성에 한해 lockdep 의 자기참조 경고가 면제된다.
@@ -1749,7 +1749,7 @@ static DEVICE_ATTR_IGNORE_LOCKDEP(remove, 0220, NULL, /* [한국어] 이름/모�
 static ssize_t bus_rescan_store(struct device *dev, /* [한국어] pci_bus 에 박힌 device */
 				struct device_attribute *attr, /* [한국어] 속성 서술자 — 미사용 */
 				const char *buf, size_t count) /* [한국어] 사용자 입력 문자열과 길이 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	unsigned long val; /* [한국어] 파싱된 사용자 값 */
 	struct pci_bus *bus = to_pci_bus(dev); /* [한국어] device -> pci_bus 복원. to_pci_dev 가 아님에 주의 */
 
@@ -1760,12 +1760,12 @@ static ssize_t bus_rescan_store(struct device *dev, /* [한국어] pci_bus 에 �
 		pci_lock_rescan_remove(); /* [한국어] 전역 열거/제거 직렬화 락 */
 		if (!pci_is_root_bus(bus) && list_empty(&bus->devices)) /* [한국어] 루트가 아니면서 비어 있는 버스인가. 루트를 먼저 거르므로 아래의 bus->self 가 NULL 일 수 없다 */
 			pci_rescan_bus_bridge_resize(bus->self); /* [한국어] 상위 브리지부터 다시 열며 브리지 윈도우 크기를 재조정한다. 창이 닫힌 빈 브리지에 새 장치를 넣으려면 필요하다 */
-		else /* [한국어] 루트 버스이거나 이미 장치가 있는 버스 */
+		else
 			pci_rescan_bus(bus); /* [한국어] 창이 이미 잡혀 있으므로 평범하게 다시 훑기만 하면 된다 */
 		pci_unlock_rescan_remove(); /* [한국어] 락 해제 */
-	} /* [한국어] 재스캔 블록 종료 */
+	}
 	return count; /* [한국어] 입력을 전부 소비했다고 알림 */
-} /* [한국어] 함수 본문 종료 */
+}
 /* [한국어] dev_attr_bus_rescan - 파일 이름은 역시 "rescan" 이지만 C 심볼이
  * 달라서 위 dev_attr_dev_rescan 과 공존한다. 모드 0200(소유자 쓰기 전용),
  * show 없음. 아래 pcibus_attrs[] 에 들어가 버스 디렉터리에 붙는다. */
@@ -1810,7 +1810,7 @@ static struct device_attribute dev_attr_bus_rescan = __ATTR(rescan, 0200, NULL, 
 static ssize_t reset_subordinate_store(struct device *dev, /* [한국어] 대상 device(브리지) */
 				struct device_attribute *attr, /* [한국어] 속성 서술자 — 미사용 */
 				const char *buf, size_t count) /* [한국어] 사용자 입력 문자열과 길이 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	struct pci_dev *pdev = to_pci_dev(dev); /* [한국어] device -> pci_dev 복원 */
 	unsigned long val; /* [한국어] 파싱된 사용자 값 */
 
@@ -1825,10 +1825,10 @@ static ssize_t reset_subordinate_store(struct device *dev, /* [한국어] 대상
 
 		if (ret) /* [한국어] 리셋 실패(사용 중이거나 지원하지 않음) */
 			return ret; /* [한국어] 실패를 감추지 않고 그대로 사용자에게 전달한다 */
-	} /* [한국어] 리셋 블록 종료 */
+	}
 
 	return count; /* [한국어] 성공했거나 0 을 썼을 때 */
-} /* [한국어] 함수 본문 종료 */
+}
 static DEVICE_ATTR_WO(reset_subordinate); /* [한국어] dev_attr_reset_subordinate 생성. WO = 쓰기 전용(읽을 상태가 없다) */
 
 #if defined(CONFIG_PM) && defined(CONFIG_ACPI) /* [한국어] D3cold 진입은 슬롯 전원을 끄는 플랫폼 동작이라 전원 관리와 ACPI 가 모두 있어야 의미가 있다 */
@@ -1880,7 +1880,7 @@ static DEVICE_ATTR_WO(reset_subordinate); /* [한국어] dev_attr_reset_subordin
 static ssize_t d3cold_allowed_store(struct device *dev, /* [한국어] 대상 device */
 				    struct device_attribute *attr, /* [한국어] 속성 서술자 — 미사용 */
 				    const char *buf, size_t count) /* [한국어] 사용자 입력 문자열과 길이 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	struct pci_dev *pdev = to_pci_dev(dev); /* [한국어] device -> pci_dev 복원 */
 	unsigned long val; /* [한국어] 파싱된 사용자 값(0 = 금지, 그 외 = 허용) */
 
@@ -1893,7 +1893,7 @@ static ssize_t d3cold_allowed_store(struct device *dev, /* [한국어] 대상 de
 	pm_runtime_resume(dev); /* [한국어] 이미 절전에 들어가 있을 수 있으므로 한 번 깨워서 새 정책이 다음 진입부터 반영되게 한다 */
 
 	return count; /* [한국어] 입력을 전부 소비했다고 알림 */
-} /* [한국어] 함수 본문 종료 */
+}
 
 /*
  * [한국어]
@@ -1916,12 +1916,12 @@ static ssize_t d3cold_allowed_store(struct device *dev, /* [한국어] 대상 de
  */
 static ssize_t d3cold_allowed_show(struct device *dev, /* [한국어] 대상 device */
 				   struct device_attribute *attr, char *buf) /* [한국어] 속성 서술자(미사용)와 출력 버퍼 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	struct pci_dev *pdev = to_pci_dev(dev); /* [한국어] device -> pci_dev 복원 */
 	return sysfs_emit(buf, "%u\n", pdev->d3cold_allowed); /* [한국어] 정책 비트를 그대로 0/1 로 출력 */
-} /* [한국어] 함수 본문 종료 */
+}
 static DEVICE_ATTR_RW(d3cold_allowed); /* [한국어] dev_attr_d3cold_allowed 생성(읽기+쓰기) */
-#endif /* [한국어] CONFIG_PM && CONFIG_ACPI 블록 끝 — 둘 다 없으면 이 속성 자체가 없다 */
+#endif
 
 #ifdef CONFIG_OF /* [한국어] 디바이스 트리를 쓰는 빌드(주로 임베디드/ARM)에만 존재한다 */
 /*
@@ -1955,16 +1955,16 @@ static DEVICE_ATTR_RW(d3cold_allowed); /* [한국어] dev_attr_d3cold_allowed �
  */
 static ssize_t devspec_show(struct device *dev, /* [한국어] 대상 device */
 			    struct device_attribute *attr, char *buf) /* [한국어] 속성 서술자(미사용)와 출력 버퍼 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	struct pci_dev *pdev = to_pci_dev(dev); /* [한국어] device -> pci_dev 복원 */
 	struct device_node *np = pci_device_to_OF_node(pdev); /* [한국어] 이 PCI 장치에 대응하는 디바이스 트리 노드를 찾는다. 없으면 NULL */
 
 	if (np == NULL) /* [한국어] 디바이스 트리에 기술되지 않은 장치인가 */
 		return 0; /* [한국어] 오류가 아니라 "내용 없음". 사용자에게는 빈 파일로 보인다 */
 	return sysfs_emit(buf, "%pOF\n", np); /* [한국어] %pOF 는 device_node 를 전체 경로 문자열로 찍는 커널 printf 확장 */
-} /* [한국어] 함수 본문 종료 */
+}
 static DEVICE_ATTR_RO(devspec); /* [한국어] dev_attr_devspec 생성 -> CONFIG_OF 빌드에만 존재 */
-#endif /* [한국어] CONFIG_OF 블록 끝 — 디바이스 트리가 없는 플랫폼에는 이 속성 자체가 없다 */
+#endif
 
 /* [한국어] pci_dev_attrs - 모든 PCI 장치에 조건 없이 만들어지는 기본 속성 목록.
  * 아래 pci_dev_group 에 담기고, 그 그룹은 pci_dev_groups[] 를 거쳐
@@ -1991,7 +1991,7 @@ static struct attribute *pci_dev_attrs[] = { /* [한국어] 배열 시작 */
 	&dev_attr_modalias.attr, /* [한국어] modalias — udev/modprobe 가 드라이버를 고르는 별칭 문자열 */
 #ifdef CONFIG_NUMA /* [한국어] NUMA 를 아는 커널에서만 */
 	&dev_attr_numa_node.attr, /* [한국어] numa_node — 이 장치가 속한 노드(쓰기도 가능하지만 커널이 taint 된다) */
-#endif /* [한국어] CONFIG_NUMA 끝 */
+#endif
 	&dev_attr_dma_mask_bits.attr, /* [한국어] dma_mask_bits — 스트리밍 DMA 주소 비트 수(NVMe 는 보통 64) */
 	&dev_attr_consistent_dma_mask_bits.attr, /* [한국어] consistent_dma_mask_bits — 코히런트 DMA 주소 비트 수 */
 	&dev_attr_enable.attr, /* [한국어] enable — 활성화 참조 계수(읽기) / 활성화·비활성화(쓰기) */
@@ -1999,13 +1999,13 @@ static struct attribute *pci_dev_attrs[] = { /* [한국어] 배열 시작 */
 	&dev_attr_msi_bus.attr, /* [한국어] msi_bus — 앞으로의 MSI/MSI-X 사용 허용 여부 */
 #if defined(CONFIG_PM) && defined(CONFIG_ACPI) /* [한국어] 전원 관리와 ACPI 가 모두 있을 때만 */
 	&dev_attr_d3cold_allowed.attr, /* [한국어] d3cold_allowed — D3cold 진입 허용 정책 */
-#endif /* [한국어] CONFIG_PM && CONFIG_ACPI 끝 */
+#endif
 #ifdef CONFIG_OF /* [한국어] 디바이스 트리를 쓰는 빌드에서만 */
 	&dev_attr_devspec.attr, /* [한국어] devspec — 대응하는 디바이스 트리 노드 경로 */
-#endif /* [한국어] CONFIG_OF 끝 */
+#endif
 	&dev_attr_ari_enabled.attr, /* [한국어] ari_enabled — 이 장치가 앉은 버스에서 ARI 가 켜졌는지 */
 	NULL, /* [한국어] 끝 센티널 — sysfs 코어가 NULL 을 만날 때까지 순회한다 */
-}; /* [한국어] 배열 종료 */
+};
 
 /* [한국어] pci_bridge_attrs - 브리지에만 의미가 있는 속성 목록.
  * 아래 pci_bridge_attr_group 에 담기고, 그 그룹의 is_visible 인
@@ -2018,7 +2018,7 @@ static struct attribute *pci_bridge_attrs[] = { /* [한국어] 배열 시작 */
 	&dev_attr_secondary_bus_number.attr, /* [한국어] secondary_bus_number — 이 브리지 바로 아래 버스 번호 */
 	&dev_attr_reset_subordinate.attr, /* [한국어] reset_subordinate — 하위 버스 전체에 SBR 을 거는 쓰기 전용 파일 */
 	NULL, /* [한국어] 끝 센티널 */
-}; /* [한국어] 배열 종료 */
+};
 
 /* [한국어] pcie_dev_attrs - PCIe 장치에만 의미가 있는 링크 관련 속성 목록.
  * 아래 pcie_dev_attr_group 에 담기고, 그 is_visible 인
@@ -2034,7 +2034,7 @@ static struct attribute *pcie_dev_attrs[] = { /* [한국어] 배열 시작 */
 	&dev_attr_max_link_width.attr, /* [한국어] max_link_width — 장치가 지원하는 최대 레인 수 */
 	&dev_attr_max_link_speed.attr, /* [한국어] max_link_speed — 장치가 지원하는 최대 속도 */
 	NULL, /* [한국어] 끝 센티널 */
-}; /* [한국어] 배열 종료 */
+};
 
 /* [한국어] pcibus_attrs - PCI 장치가 아니라 PCI "버스" 객체에 붙는 속성 목록.
  * /sys/class/pci_bus/<도메인:버스>/ 아래에 만들어진다.
@@ -2044,7 +2044,7 @@ static struct attribute *pcibus_attrs[] = { /* [한국어] 배열 시작 */
 	&dev_attr_cpuaffinity.attr, /* [한국어] cpuaffinity — 이 버스에 가까운 CPU 집합(비트마스크) */
 	&dev_attr_cpulistaffinity.attr, /* [한국어] cpulistaffinity — 같은 정보의 범위 목록 형식 */
 	NULL, /* [한국어] 끝 센티널 */
-}; /* [한국어] 배열 종료 */
+};
 
 /* [한국어] pcibus_group - 위 버스 속성 배열 하나를 담은 그룹. */
 static const struct attribute_group pcibus_group = { /* [한국어] 구조체 초기화 시작 */
@@ -2054,7 +2054,7 @@ static const struct attribute_group pcibus_group = { /* [한국어] 구조체 �
 		 * 값 범위: NULL 로 끝나는 struct attribute 포인터 배열.
 		 * 동기화: const 정적 데이터라 락 불필요.
 		 * is_visible 이 없어 모든 pci_bus 에 세 파일이 항상 생긴다. */
-}; /* [한국어] 구조체 초기화 종료 */
+};
 
 /* [한국어] pcibus_groups - 버스 객체용 최상위 그룹 배열.
  * drivers/pci/probe.c 의 pcibus_class 가 .dev_groups = pcibus_groups 로
@@ -2062,7 +2062,7 @@ static const struct attribute_group pcibus_group = { /* [한국어] 구조체 �
 const struct attribute_group *pcibus_groups[] = { /* [한국어] 배열 시작 */
 	&pcibus_group, /* [한국어] 위에서 만든 그룹 하나 */
 	NULL, /* [한국어] 끝 센티널 */
-}; /* [한국어] 배열 종료 */
+};
 
 /*
  * [한국어]
@@ -2102,7 +2102,7 @@ const struct attribute_group *pcibus_groups[] = { /* [한국어] 배열 시작 *
  */
 static ssize_t boot_vga_show(struct device *dev, struct device_attribute *attr, /* [한국어] 대상 device 와 속성 서술자(미사용) */
 			     char *buf) /* [한국어] 출력 버퍼 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	struct pci_dev *pdev = to_pci_dev(dev); /* [한국어] device -> pci_dev 복원 */
 	struct pci_dev *vga_dev = vga_default_device(); /* [한국어] VGA 중재 계층이 알고 있는 "기본" VGA 장치. 없으면 NULL */
 
@@ -2112,7 +2112,7 @@ static ssize_t boot_vga_show(struct device *dev, struct device_attribute *attr, 
 	return sysfs_emit(buf, "%u\n", /* [한국어] 모를 때의 대체 판정 */
 			  !!(pdev->resource[PCI_ROM_RESOURCE].flags & /* [한국어] 확장 ROM 자원 슬롯의 플래그를 본다 */
 			     IORESOURCE_ROM_SHADOW)); /* [한국어] 펌웨어가 VGA BIOS 를 레거시 주소로 그림자 복사한 흔적. !! 로 0/1 정규화 */
-} /* [한국어] 함수 본문 종료 */
+}
 static DEVICE_ATTR_RO(boot_vga); /* [한국어] dev_attr_boot_vga 생성 -> pci_dev_dev_attrs[] 경유로 VGA 장치에만 생긴다 */
 
 /*
@@ -2162,7 +2162,7 @@ static DEVICE_ATTR_RO(boot_vga); /* [한국어] dev_attr_boot_vga 생성 -> pci_
  */
 static ssize_t serial_number_show(struct device *dev, /* [한국어] 대상 device */
 				  struct device_attribute *attr, char *buf) /* [한국어] 속성 서술자(미사용)와 출력 버퍼 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	struct pci_dev *pci_dev = to_pci_dev(dev); /* [한국어] device -> pci_dev 복원 */
 	u64 dsn; /* [한국어] 읽어 올 64비트 Device Serial Number 원본 값 */
 	u8 bytes[8]; /* [한국어] 사람이 읽는 순서로 펴 담을 바이트 배열. 스택이라 8바이트 정렬 보장이 없다 */
@@ -2173,7 +2173,7 @@ static ssize_t serial_number_show(struct device *dev, /* [한국어] 대상 devi
 
 	put_unaligned_be64(dsn, bytes); /* [한국어] 정렬 요구 없이, 항상 빅엔디언(사람이 읽는 순서)으로 8바이트에 펴 넣는다 */
 	return sysfs_emit(buf, "%8phD\n", bytes); /* [한국어] 8바이트를 하이픈으로 이어 16진수로 출력하는 커널 printf 확장 */
-} /* [한국어] 함수 본문 종료 */
+}
 static DEVICE_ATTR_ADMIN_RO(serial_number); /* [한국어] dev_attr_serial_number 생성. ADMIN 판이라 관리자만 읽는 모드로 만들어진다 */
 
 /*
@@ -2259,7 +2259,7 @@ static DEVICE_ATTR_ADMIN_RO(serial_number); /* [한국어] dev_attr_serial_numbe
 static ssize_t pci_read_config(struct file *filp, struct kobject *kobj, /* [한국어] 파일 핸들(권한 검사용)과 이 속성이 붙은 kobject */
 			       const struct bin_attribute *bin_attr, char *buf, /* [한국어] 바이너리 속성 서술자(미사용)와 커널 공간 출력 버퍼 */
 			       loff_t off, size_t count) /* [한국어] 읽기 시작 오프셋과 요청 바이트 수 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	struct pci_dev *dev = to_pci_dev(kobj_to_dev(kobj)); /* [한국어] kobject -> device -> pci_dev 두 단계 복원. 바이너리 속성은 device 가 아니라 kobject 를 받는다 */
 	unsigned int size = 64; /* [한국어] 권한 없는 사용자에게 보여 줄 기본 상한. 표준 헤더 앞 64바이트뿐이다 */
 	loff_t init_off = off; /* [한국어] 시작 오프셋을 보존한다. 아래에서 off 가 계속 전진하므로 버퍼 위치는 off - init_off 로 구한다 */
@@ -2279,9 +2279,9 @@ static ssize_t pci_read_config(struct file *filp, struct kobject *kobj, /* [한�
 	if (off + count > size) { /* [한국어] 요청 끝이 상한을 넘는가 */
 		size -= off; /* [한국어] 여기서 size 의 의미가 "상한" 에서 "남은 바이트 수" 로 바뀐다 */
 		count = size; /* [한국어] 사용자에게도 줄어든 길이를 보고할 수 있게 count 를 맞춘다 */
-	} else { /* [한국어] 요청이 상한 안에 완전히 들어오는 경우 */
+	} else {
 		size = count; /* [한국어] 이후 로직이 size 를 "옮길 바이트 수" 로만 쓰도록 의미를 통일한다 */
-	} /* [한국어] 경계 조정 종료 */
+	}
 
 	pci_config_pm_runtime_get(dev); /* [한국어] 설정공간을 실제로 접근하므로 장치를 D0 로 깨운다. 아래 모든 접근이 끝날 때까지 유지된다 */
 
@@ -2291,7 +2291,7 @@ static ssize_t pci_read_config(struct file *filp, struct kobject *kobj, /* [한�
 		data[off - init_off] = val; /* [한국어] 버퍼 안의 대응 위치에 저장. init_off 기준 상대 위치다 */
 		off++; /* [한국어] 설정공간 커서 전진 */
 		size--; /* [한국어] 남은 바이트 감소 */
-	} /* [한국어] 1바이트 정렬 맞춤 종료 */
+	}
 
 	if ((off & 3) && size > 2) { /* [한국어] 아직 4의 배수가 아니고, 2바이트를 옮겨도 남는 것이 있는가. size > 2 조건이 있어야 꼬리를 여기서 먹어 버리지 않는다 */
 		u16 val; /* [한국어] 읽어 온 2바이트 */
@@ -2300,7 +2300,7 @@ static ssize_t pci_read_config(struct file *filp, struct kobject *kobj, /* [한�
 		data[off - init_off + 1] = (val >> 8) & 0xff; /* [한국어] 상위 바이트를 다음 위치에 */
 		off += 2; /* [한국어] 커서 전진 */
 		size -= 2; /* [한국어] 남은 바이트 감소 */
-	} /* [한국어] 4바이트 정렬 맞춤 종료 */
+	}
 
 	while (size > 3) { /* [한국어] 본체 루프 — 4바이트씩 옮길 수 있는 동안 반복. 접근 횟수를 최소화한다 */
 		u32 val; /* [한국어] 읽어 온 4바이트 */
@@ -2312,7 +2312,7 @@ static ssize_t pci_read_config(struct file *filp, struct kobject *kobj, /* [한�
 		off += 4; /* [한국어] 커서 전진 */
 		size -= 4; /* [한국어] 남은 바이트 감소 */
 		cond_resched(); /* [한국어] 확장 설정공간 4096바이트면 이 루프가 1024번 돈다. 자발적으로 CPU 를 양보해 다른 태스크가 굶지 않게 한다 */
-	} /* [한국어] 본체 루프 종료 */
+	}
 
 	if (size >= 2) { /* [한국어] 꼬리 처리 — 2바이트 이상 남았다면 */
 		u16 val; /* [한국어] 읽어 온 2바이트 */
@@ -2321,18 +2321,18 @@ static ssize_t pci_read_config(struct file *filp, struct kobject *kobj, /* [한�
 		data[off - init_off + 1] = (val >> 8) & 0xff; /* [한국어] 상위 바이트 */
 		off += 2; /* [한국어] 커서 전진 */
 		size -= 2; /* [한국어] 남은 바이트 감소 */
-	} /* [한국어] 2바이트 꼬리 종료 */
+	}
 
 	if (size > 0) { /* [한국어] 마지막 1바이트가 남았는가 */
 		u8 val; /* [한국어] 읽어 온 1바이트 */
 		pci_user_read_config_byte(dev, off, &val); /* [한국어] 1바이트 접근 */
 		data[off - init_off] = val; /* [한국어] 버퍼 마지막 자리에 저장. 여기서는 off 를 더 전진시킬 필요가 없다 */
-	} /* [한국어] 1바이트 꼬리 종료 */
+	}
 
 	pci_config_pm_runtime_put(dev); /* [한국어] 모든 접근이 끝났으므로 PM 참조를 놓는다. get 과 반드시 짝이다 */
 
 	return count; /* [한국어] 경계 조정 단계에서 확정된 실제 전송 길이를 반환 */
-} /* [한국어] 함수 본문 종료 */
+}
 
 /*
  * [한국어]
@@ -2403,7 +2403,7 @@ static ssize_t pci_read_config(struct file *filp, struct kobject *kobj, /* [한�
 static ssize_t pci_write_config(struct file *filp, struct kobject *kobj, /* [한국어] 파일 핸들(여기서는 미사용)과 이 속성이 붙은 kobject */
 				const struct bin_attribute *bin_attr, char *buf, /* [한국어] 바이너리 속성 서술자(미사용)와 사용자가 쓴 내용이 담긴 커널 버퍼 */
 				loff_t off, size_t count) /* [한국어] 쓰기 시작 오프셋과 요청 바이트 수 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	struct pci_dev *dev = to_pci_dev(kobj_to_dev(kobj)); /* [한국어] kobject -> device -> pci_dev 복원 */
 	unsigned int size = count; /* [한국어] 아직 쓰지 않은 바이트 수. 읽기 쪽과 달리 처음부터 count 로 시작한다 */
 	loff_t init_off = off; /* [한국어] 시작 오프셋 보존 — 버퍼 위치는 off - init_off */
@@ -2419,14 +2419,14 @@ static ssize_t pci_write_config(struct file *filp, struct kobject *kobj, /* [한
 		pci_warn_once(dev, "%s: Unexpected write to kernel-exclusive config offset %llx", /* [한국어] 막지는 않되 한 번만 경고. _once 라 같은 경고로 로그가 넘치지 않는다 */
 			      current->comm, off); /* [한국어] 어떤 프로세스가 무슨 오프셋에 썼는지 남긴다. current 를 쓰기 위해 sched.h 가 필요했다 */
 		add_taint(TAINT_USER, LOCKDEP_STILL_OK); /* [한국어] "사용자가 직접 하드웨어를 건드린 커널" 이라고 표시. 이후 버그 리포트의 신뢰도 판단에 쓰인다 */
-	} /* [한국어] 경고 블록 종료 */
+	}
 
 	if (off > dev->cfg_size) /* [한국어] 시작 위치가 설정공간 밖인가. 읽기와 달리 권한별 상한이 없다 */
 		return 0; /* [한국어] 0 = 아무것도 쓰지 않음 */
 	if (off + count > dev->cfg_size) { /* [한국어] 요청 끝이 설정공간을 넘는가 */
 		size = dev->cfg_size - off; /* [한국어] 실제로 쓸 수 있는 만큼으로 줄인다 */
 		count = size; /* [한국어] 사용자에게 보고할 길이도 같이 줄인다 */
-	} /* [한국어] 경계 조정 종료. 읽기와 달리 else 절이 없는데, size 가 이미 count 로 시작했기 때문이다 */
+	}
 
 	pci_config_pm_runtime_get(dev); /* [한국어] 설정공간에 실제로 쓰므로 장치를 D0 로 깨운다 */
 
@@ -2434,7 +2434,7 @@ static ssize_t pci_write_config(struct file *filp, struct kobject *kobj, /* [한
 		pci_user_write_config_byte(dev, off, data[off - init_off]); /* [한국어] 버퍼의 대응 바이트를 그대로 1바이트 쓰기 */
 		off++; /* [한국어] 커서 전진 */
 		size--; /* [한국어] 남은 바이트 감소 */
-	} /* [한국어] 1바이트 정렬 맞춤 종료 */
+	}
 
 	if ((off & 3) && size > 2) { /* [한국어] 아직 4의 배수가 아니고 2바이트를 써도 남는 것이 있는가 */
 		u16 val = data[off - init_off]; /* [한국어] 낮은 주소 바이트가 하위 8비트로 — 설정공간은 리틀엔디언 */
@@ -2442,7 +2442,7 @@ static ssize_t pci_write_config(struct file *filp, struct kobject *kobj, /* [한
 		pci_user_write_config_word(dev, off, val); /* [한국어] 조립한 16비트를 2바이트 쓰기 */
 		off += 2; /* [한국어] 커서 전진 */
 		size -= 2; /* [한국어] 남은 바이트 감소 */
-	} /* [한국어] 4바이트 정렬 맞춤 종료 */
+	}
 
 	while (size > 3) { /* [한국어] 본체 루프 — 4바이트씩 쓸 수 있는 동안 반복 */
 		u32 val = data[off - init_off]; /* [한국어] 바이트 0 -> 비트 0..7 */
@@ -2452,7 +2452,7 @@ static ssize_t pci_write_config(struct file *filp, struct kobject *kobj, /* [한
 		pci_user_write_config_dword(dev, off, val); /* [한국어] 조립한 32비트를 4바이트 쓰기. off 는 4의 배수임이 보장된다 */
 		off += 4; /* [한국어] 커서 전진 */
 		size -= 4; /* [한국어] 남은 바이트 감소 */
-	} /* [한국어] 본체 루프 종료. 읽기 쪽에 있던 cond_resched 가 여기 없는 이유는 이 트리의 정보만으로는 확인할 수 없다 */
+	}
 
 	if (size >= 2) { /* [한국어] 꼬리 처리 — 2바이트 이상 남았다면 */
 		u16 val = data[off - init_off]; /* [한국어] 하위 바이트 */
@@ -2460,7 +2460,7 @@ static ssize_t pci_write_config(struct file *filp, struct kobject *kobj, /* [한
 		pci_user_write_config_word(dev, off, val); /* [한국어] 2바이트 쓰기 */
 		off += 2; /* [한국어] 커서 전진 */
 		size -= 2; /* [한국어] 남은 바이트 감소 */
-	} /* [한국어] 2바이트 꼬리 종료 */
+	}
 
 	if (size) /* [한국어] 마지막 1바이트가 남았는가 */
 		pci_user_write_config_byte(dev, off, data[off - init_off]); /* [한국어] 남은 1바이트 쓰기 */
@@ -2468,7 +2468,7 @@ static ssize_t pci_write_config(struct file *filp, struct kobject *kobj, /* [한
 	pci_config_pm_runtime_put(dev); /* [한국어] 모든 접근이 끝났으므로 PM 참조를 놓는다 */
 
 	return count; /* [한국어] 경계 조정 단계에서 확정된 실제 전송 길이를 반환 */
-} /* [한국어] 함수 본문 종료 */
+}
 /* [한국어] bin_attr_config - /sys/bus/pci/devices/<BDF>/config 파일을 만드는
  * 바이너리 속성. BIN_ATTR(이름, 모드, read, write, size) 의 다섯 인자다.
  * 모드 0644 는 "누구나 읽고 소유자만 쓴다" 는 뜻 — 읽기 쪽은 권한에 따라
@@ -2488,7 +2488,7 @@ static const BIN_ATTR(config, 0644, pci_read_config, pci_write_config, 0); /* [�
 static const struct bin_attribute *const pci_dev_config_attrs[] = { /* [한국어] 배열 시작 */
 	&bin_attr_config, /* [한국어] 위에서 만든 config 바이너리 속성 */
 	NULL, /* [한국어] 끝 센티널 */
-}; /* [한국어] 배열 종료 */
+};
 
 /*
  * [한국어]
@@ -2523,13 +2523,13 @@ static const struct bin_attribute *const pci_dev_config_attrs[] = { /* [한국�
 static size_t pci_dev_config_attr_bin_size(struct kobject *kobj, /* [한국어] 대상 kobject */
 					   const struct bin_attribute *a, /* [한국어] 어느 속성인지 — config 하나뿐이라 미사용 */
 					   int n) /* [한국어] 그룹 내 인덱스 — 미사용 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	struct pci_dev *pdev = to_pci_dev(kobj_to_dev(kobj)); /* [한국어] kobject -> device -> pci_dev 복원 */
 
 	if (pdev->cfg_size > PCI_CFG_SPACE_SIZE) /* [한국어] 표준 256바이트를 넘는가 = PCIe 확장 설정공간이 있는가 */
 		return PCI_CFG_SPACE_EXP_SIZE; /* [한국어] 확장 크기 4096바이트로 보고한다 */
 	return PCI_CFG_SPACE_SIZE; /* [한국어] 그렇지 않으면 표준 256바이트 */
-} /* [한국어] 함수 본문 종료 */
+}
 
 /* [한국어] pci_dev_config_attr_group - config 바이너리 파일을 만드는 그룹.
  * pci_dev_groups[] 에 들어가 pci_bus_type.dev_groups 로 등록되므로,
@@ -2550,7 +2550,7 @@ static const struct attribute_group pci_dev_config_attr_group = { /* [한국어]
 		 * 값 범위: 함수 포인터(NULL 이면 BIN_ATTR 의 정적 크기를 쓴다).
 		 * 동기화: 콜백 자신이 락을 잡지 않으며 pci_dev 의 불변 필드만 읽는다.
 		 * 이 콜백이 있어야 PCIe 확장 장치의 config 가 4096바이트로 보인다. */
-}; /* [한국어] 구조체 초기화 종료 */
+};
 
 /*
  * llseek operation for mmappable PCI resources.
@@ -2591,9 +2591,9 @@ pci_llseek_resource(struct file *filep, /* [한국어] 현재 파일 위치를 �
 		    struct kobject *kobj __always_unused, /* [한국어] 콜백 규약상 받지만 쓰지 않는다 — 크기는 attr 에서 온다 */
 		    const struct bin_attribute *attr, /* [한국어] 이 파일의 바이너리 속성. attr->size 가 파일 크기 */
 		    loff_t offset, int whence) /* [한국어] lseek(2) 인자 그대로 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	return fixed_size_llseek(filep, offset, whence, attr->size); /* [한국어] 크기가 고정된 파일의 seek 의미를 구현해 준다. SEEK_END 가 제대로 동작하게 되는 핵심 */
-} /* [한국어] 함수 본문 종료 */
+}
 
 /* [한국어] --- 레거시 ISA 창(legacy_io / legacy_mem) 구역 ---
  * HAVE_PCI_LEGACY 는 "이 아키텍처가 버스별 레거시 I/O 포트 공간과 ISA 메모리
@@ -2655,7 +2655,7 @@ pci_llseek_resource(struct file *filep, /* [한국어] 현재 파일 위치를 �
 static ssize_t pci_read_legacy_io(struct file *filp, struct kobject *kobj, /* [한국어] 파일 핸들(미사용)과 이 속성이 붙은 kobject */
 				  const struct bin_attribute *bin_attr, /* [한국어] 바이너리 속성 서술자 — 미사용 */
 				  char *buf, loff_t off, size_t count) /* [한국어] 결과 버퍼, 포트 오프셋, 요청 폭 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	struct pci_bus *bus = to_pci_bus(kobj_to_dev(kobj)); /* [한국어] 이 파일은 장치가 아니라 버스에 붙으므로 pci_bus 로 복원한다 */
 
 	/* Only support 1, 2 or 4 byte accesses */
@@ -2665,7 +2665,7 @@ static ssize_t pci_read_legacy_io(struct file *filp, struct kobject *kobj, /* [�
 		return -EINVAL; /* [한국어] 하드웨어로 옮길 방법이 없으므로 거절 */
 
 	return pci_legacy_read(bus, off, (u32 *)buf, count); /* [한국어] 아키텍처가 제공하는 실제 포트 읽기. 최대 4바이트라 u32 포인터로 넘긴다 */
-} /* [한국어] 함수 본문 종료 */
+}
 
 /**
  * pci_write_legacy_io - write byte(s) to legacy I/O port space
@@ -2708,7 +2708,7 @@ static ssize_t pci_read_legacy_io(struct file *filp, struct kobject *kobj, /* [�
 static ssize_t pci_write_legacy_io(struct file *filp, struct kobject *kobj, /* [한국어] 파일 핸들(미사용)과 이 속성이 붙은 kobject */
 				   const struct bin_attribute *bin_attr, /* [한국어] 바이너리 속성 서술자 — 미사용 */
 				   char *buf, loff_t off, size_t count) /* [한국어] 쓸 값이 담긴 버퍼, 포트 오프셋, 폭 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	struct pci_bus *bus = to_pci_bus(kobj_to_dev(kobj)); /* [한국어] 버스 단위 속성이므로 pci_bus 로 복원 */
 
 	/* Only support 1, 2 or 4 byte accesses */
@@ -2717,7 +2717,7 @@ static ssize_t pci_write_legacy_io(struct file *filp, struct kobject *kobj, /* [
 		return -EINVAL; /* [한국어] 거절 */
 
 	return pci_legacy_write(bus, off, *(u32 *)buf, count); /* [한국어] 버퍼에서 최대 4바이트를 값으로 꺼내 아키텍처 구현에 넘긴다 */
-} /* [한국어] 함수 본문 종료 */
+}
 
 /**
  * pci_mmap_legacy_mem - map legacy PCI memory into user memory space
@@ -2757,11 +2757,11 @@ static ssize_t pci_write_legacy_io(struct file *filp, struct kobject *kobj, /* [
 static int pci_mmap_legacy_mem(struct file *filp, struct kobject *kobj, /* [한국어] 파일 핸들(미사용)과 이 속성이 붙은 kobject */
 			       const struct bin_attribute *attr, /* [한국어] 바이너리 속성 서술자 — 미사용 */
 			       struct vm_area_struct *vma) /* [한국어] 채워 넣을 사용자 가상 메모리 영역 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	struct pci_bus *bus = to_pci_bus(kobj_to_dev(kobj)); /* [한국어] 버스 단위 속성이므로 pci_bus 로 복원 */
 
 	return pci_mmap_legacy_page_range(bus, vma, pci_mmap_mem); /* [한국어] 아키텍처 구현에 위임. pci_mmap_mem 은 "메모리 공간" 을 뜻하는 열거값 */
-} /* [한국어] 함수 본문 종료 */
+}
 
 /**
  * pci_mmap_legacy_io - map legacy PCI IO into user memory space
@@ -2804,11 +2804,11 @@ static int pci_mmap_legacy_mem(struct file *filp, struct kobject *kobj, /* [한�
 static int pci_mmap_legacy_io(struct file *filp, struct kobject *kobj, /* [한국어] 파일 핸들(미사용)과 이 속성이 붙은 kobject */
 			      const struct bin_attribute *attr, /* [한국어] 바이너리 속성 서술자 — 미사용 */
 			      struct vm_area_struct *vma) /* [한국어] 채워 넣을 사용자 가상 메모리 영역 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	struct pci_bus *bus = to_pci_bus(kobj_to_dev(kobj)); /* [한국어] 버스 단위 속성이므로 pci_bus 로 복원 */
 
 	return pci_mmap_legacy_page_range(bus, vma, pci_mmap_io); /* [한국어] pci_mmap_io 는 "I/O 공간" 을 뜻하는 열거값. 지원하지 않는 아키텍처면 -ENOSYS */
-} /* [한국어] 함수 본문 종료 */
+}
 
 /**
  * pci_adjust_legacy_attr - adjustment of legacy file attributes
@@ -2846,8 +2846,8 @@ static int pci_mmap_legacy_io(struct file *filp, struct kobject *kobj, /* [한�
  */
 void __weak pci_adjust_legacy_attr(struct pci_bus *b, /* [한국어] 대상 버스 */
 				   enum pci_mmap_state mmap_type) /* [한국어] I/O 공간인지 메모리 공간인지 구분 */
-{ /* [한국어] 함수 본문 시작 */
-} /* [한국어] 기본 구현은 아무것도 하지 않는다. 아키텍처가 필요하면 __weak 을 덮어써 자기 구현을 넣는다 */
+{
+}
 
 /**
  * pci_create_legacy_files - create legacy I/O port and memory files
@@ -2908,7 +2908,7 @@ void __weak pci_adjust_legacy_attr(struct pci_bus *b, /* [한국어] 대상 버�
  *     -> kzalloc_objs -> pci_adjust_legacy_attr -> device_create_bin_file
  */
 void pci_create_legacy_files(struct pci_bus *b) /* [한국어] 이 버스에 legacy_io/legacy_mem 두 파일을 만든다 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	int error; /* [한국어] device_create_bin_file 의 결과. 0 이 성공 */
 
 	if (!sysfs_initialized) /* [한국어] pci_sysfs_init() 이 아직 실행되지 않았는가 */
@@ -2957,7 +2957,7 @@ legacy_io_err: /* [한국어] legacy_io 생성 실패: 파일은 없고 메모�
 	b->legacy_io = NULL; /* [한국어] 반드시 NULL 로. pci_remove_legacy_files() 가 이 포인터로 "만들어졌는지" 를 판단하므로, 남겨 두면 해제된 메모리를 다시 건드린다 */
 kzalloc_err: /* [한국어] 할당 자체가 실패: 되돌릴 것이 없다 */
 	dev_warn(&b->dev, "could not create legacy I/O port and ISA memory resources in sysfs\n"); /* [한국어] 세 경로가 모두 여기로 모인다. 실패를 호출자에게 전파하지 않고 경고만 남긴다 — 이 파일이 없어도 버스는 동작한다 */
-} /* [한국어] 함수 본문 종료 */
+}
 
 /*
  * [한국어]
@@ -2984,7 +2984,7 @@ kzalloc_err: /* [한국어] 할당 자체가 실패: 되돌릴 것이 없다 */
  *   drivers/pci/remove.c -> [pci_remove_legacy_files] -> device_remove_bin_file
  */
 void pci_remove_legacy_files(struct pci_bus *b) /* [한국어] 이 버스의 레거시 파일 두 개를 없앤다 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	if (b->legacy_io) { /* [한국어] NULL 이 아니면 생성에 성공한 적이 있다는 뜻. 생성 실패 경로가 NULL 로 되돌려 두었다 */
 		device_remove_bin_file(&b->dev, b->legacy_io); /* [한국어] legacy_io 파일 제거 */
 		device_remove_bin_file(&b->dev, b->legacy_mem); /* [한국어] legacy_mem 파일 제거. 둘은 항상 함께 존재하므로 따로 검사하지 않는다 */
@@ -2992,8 +2992,8 @@ void pci_remove_legacy_files(struct pci_bus *b) /* [한국어] 이 버스의 레
 		/* [한국어] 위 영어 주석대로 두 속성이 한 번의 할당으로 만들어졌으므로
 		 * 해제도 한 번이면 된다. legacy_mem 을 따로 kfree 하면 할당 블록
 		 * 중간을 해제하는 것이 되어 힙이 망가진다. */
-	} /* [한국어] 제거 블록 종료 */
-} /* [한국어] 함수 본문 종료 */
+	}
+}
 #endif /* HAVE_PCI_LEGACY */
 
 /* [한국어] --- BAR 파일(resourceN, resourceN_wc) 구역 ---
@@ -3068,7 +3068,7 @@ void pci_remove_legacy_files(struct pci_bus *b) /* [한국어] 이 버스의 레
  */
 static int pci_mmap_resource(struct kobject *kobj, const struct bin_attribute *attr, /* [한국어] 이 속성이 붙은 kobject 와 매핑 대상 속성 */
 			     struct vm_area_struct *vma, int write_combine) /* [한국어] 채울 사용자 가상 영역과 캐시 정책(0=uncached, 1=write-combining) */
-{ /* [한국어] 함수 본문 시작 */
+{
 	struct pci_dev *pdev = to_pci_dev(kobj_to_dev(kobj)); /* [한국어] kobject -> device -> pci_dev 복원 */
 	int bar = (unsigned long)attr->private; /* [한국어] private 에 숫자로 넣어 둔 BAR 번호를 꺼낸다. 포인터 크기 정수를 거쳐야 경고 없이 왕복한다 */
 	enum pci_mmap_state mmap_type; /* [한국어] 아래에서 메모리 공간인지 I/O 공간인지 정한다 */
@@ -3088,7 +3088,7 @@ static int pci_mmap_resource(struct kobject *kobj, const struct bin_attribute *a
 	mmap_type = res->flags & IORESOURCE_MEM ? pci_mmap_mem : pci_mmap_io; /* [한국어] 자원 플래그로 메모리 공간인지 I/O 공간인지 결정. 하위 계층이 페이지 속성을 다르게 잡는다 */
 
 	return pci_mmap_resource_range(pdev, bar, vma, mmap_type, write_combine); /* [한국어] 실제 페이지 매핑은 drivers/pci/mmap.c 에 위임 */
-} /* [한국어] 함수 본문 종료 */
+}
 
 /*
  * [한국어]
@@ -3117,9 +3117,9 @@ static int pci_mmap_resource(struct kobject *kobj, const struct bin_attribute *a
 static int pci_mmap_resource_uc(struct file *filp, struct kobject *kobj, /* [한국어] 파일 핸들(미사용)과 kobject */
 				const struct bin_attribute *attr, /* [한국어] 매핑 대상 속성 */
 				struct vm_area_struct *vma) /* [한국어] 사용자 가상 메모리 영역 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	return pci_mmap_resource(kobj, attr, vma, 0); /* [한국어] 0 = uncached. 레지스터 접근은 순서와 횟수가 보존돼야 하므로 기본값이다 */
-} /* [한국어] 함수 본문 종료 */
+}
 
 /*
  * [한국어]
@@ -3149,9 +3149,9 @@ static int pci_mmap_resource_uc(struct file *filp, struct kobject *kobj, /* [한
 static int pci_mmap_resource_wc(struct file *filp, struct kobject *kobj, /* [한국어] 파일 핸들(미사용)과 kobject */
 				const struct bin_attribute *attr, /* [한국어] 매핑 대상 속성 */
 				struct vm_area_struct *vma) /* [한국어] 사용자 가상 메모리 영역 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	return pci_mmap_resource(kobj, attr, vma, 1); /* [한국어] 1 = write-combining. prefetchable BAR 에만 이 파일이 만들어진다 */
-} /* [한국어] 함수 본문 종료 */
+}
 
 /*
  * [한국어]
@@ -3205,7 +3205,7 @@ static int pci_mmap_resource_wc(struct file *filp, struct kobject *kobj, /* [한
 static ssize_t pci_resource_io(struct file *filp, struct kobject *kobj, /* [한국어] 파일 핸들(미사용)과 kobject */
 			       const struct bin_attribute *attr, char *buf, /* [한국어] 속성(private=BAR 번호)과 데이터 버퍼 */
 			       loff_t off, size_t count, bool write) /* [한국어] BAR 상대 오프셋, 접근 폭, 방향 */
-{ /* [한국어] 함수 본문 시작 */
+{
 #ifdef CONFIG_HAS_IOPORT /* [한국어] I/O 포트 명령이 존재하는 아키텍처에서만 실제 구현을 컴파일한다 */
 	struct pci_dev *pdev = to_pci_dev(kobj_to_dev(kobj)); /* [한국어] kobject -> device -> pci_dev 복원 */
 	int bar = (unsigned long)attr->private; /* [한국어] 속성에 숫자로 심어 둔 BAR 번호를 꺼낸다 */
@@ -3223,27 +3223,27 @@ static ssize_t pci_resource_io(struct file *filp, struct kobject *kobj, /* [한�
 	case 1: /* [한국어] 1바이트 접근 */
 		if (write) /* [한국어] 방향 분기 */
 			outb(*(u8 *)buf, port); /* [한국어] 버퍼의 1바이트를 포트에 내보낸다 */
-		else /* [한국어] 읽기 */
+		else
 			*(u8 *)buf = inb(port); /* [한국어] 포트에서 1바이트를 읽어 버퍼에 담는다 */
 		return 1; /* [한국어] 옮긴 바이트 수 */
 	case 2: /* [한국어] 2바이트 접근 */
 		if (write) /* [한국어] 방향 분기 */
 			outw(*(u16 *)buf, port); /* [한국어] 버퍼의 2바이트를 포트에 내보낸다 */
-		else /* [한국어] 읽기 */
+		else
 			*(u16 *)buf = inw(port); /* [한국어] 포트에서 2바이트를 읽어 버퍼에 담는다 */
 		return 2; /* [한국어] 옮긴 바이트 수 */
 	case 4: /* [한국어] 4바이트 접근 */
 		if (write) /* [한국어] 방향 분기 */
 			outl(*(u32 *)buf, port); /* [한국어] 버퍼의 4바이트를 포트에 내보낸다 */
-		else /* [한국어] 읽기 */
+		else
 			*(u32 *)buf = inl(port); /* [한국어] 포트에서 4바이트를 읽어 버퍼에 담는다 */
 		return 4; /* [한국어] 옮긴 바이트 수 */
-	} /* [한국어] switch 종료 — 여기 도달했다면 폭이 1/2/4 가 아니었다는 뜻 */
+	}
 	return -EINVAL; /* [한국어] I/O 포트 명령이 지원하지 않는 폭이므로 거절 */
 #else /* [한국어] I/O 포트 개념이 없는 아키텍처 */
 	return -ENXIO; /* [한국어] 함수 전체를 이 한 줄로 대체해, 호출부를 조건부로 감싸지 않아도 되게 한다 */
-#endif /* [한국어] CONFIG_HAS_IOPORT 분기 끝 */
-} /* [한국어] 함수 본문 종료 */
+#endif
+}
 
 /*
  * [한국어]
@@ -3270,9 +3270,9 @@ static ssize_t pci_resource_io(struct file *filp, struct kobject *kobj, /* [한�
 static ssize_t pci_read_resource_io(struct file *filp, struct kobject *kobj, /* [한국어] 파일 핸들과 kobject */
 				    const struct bin_attribute *attr, char *buf, /* [한국어] 속성과 결과 버퍼 */
 				    loff_t off, size_t count) /* [한국어] BAR 상대 오프셋과 접근 폭 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	return pci_resource_io(filp, kobj, attr, buf, off, count, false); /* [한국어] false = 읽기 방향 */
-} /* [한국어] 함수 본문 종료 */
+}
 
 /*
  * [한국어]
@@ -3300,7 +3300,7 @@ static ssize_t pci_read_resource_io(struct file *filp, struct kobject *kobj, /* 
 static ssize_t pci_write_resource_io(struct file *filp, struct kobject *kobj, /* [한국어] 파일 핸들과 kobject */
 				     const struct bin_attribute *attr, char *buf, /* [한국어] 속성과 쓸 값이 담긴 버퍼 */
 				     loff_t off, size_t count) /* [한국어] BAR 상대 오프셋과 접근 폭 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	int ret; /* [한국어] 락다운 검사 결과 */
 
 	ret = security_locked_down(LOCKDOWN_PCI_ACCESS); /* [한국어] 임의 I/O 쓰기는 락다운 커널에서 금지. 읽기 경로에는 이 검사가 없다 */
@@ -3308,7 +3308,7 @@ static ssize_t pci_write_resource_io(struct file *filp, struct kobject *kobj, /*
 		return ret; /* [한국어] 하드웨어를 건드리기 전에 반환 */
 
 	return pci_resource_io(filp, kobj, attr, buf, off, count, true); /* [한국어] true = 쓰기 방향 */
-} /* [한국어] 함수 본문 종료 */
+}
 
 /**
  * pci_remove_resource_files - cleanup resource files
@@ -3349,7 +3349,7 @@ static ssize_t pci_write_resource_io(struct file *filp, struct kobject *kobj, /*
  *     -> [pci_remove_resource_files] -> sysfs_remove_bin_file -> kfree
  */
 static void pci_remove_resource_files(struct pci_dev *pdev) /* [한국어] 이 장치의 resourceN, resourceN_wc 파일을 전부 정리한다 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	int i; /* [한국어] BAR 인덱스 */
 
 	for (i = 0; i < PCI_STD_NUM_BARS; i++) { /* [한국어] 표준 BAR 0~5 만 훑는다. ROM 과 브리지 윈도우에는 이 파일들이 없다 */
@@ -3359,15 +3359,15 @@ static void pci_remove_resource_files(struct pci_dev *pdev) /* [한국어] 이 �
 		if (res_attr) { /* [한국어] 실제로 만들어진 경우에만 */
 			sysfs_remove_bin_file(&pdev->dev.kobj, res_attr); /* [한국어] sysfs 에서 파일을 먼저 없앤다. 열려 있는 사용자가 있어도 안전하게 처리된다 */
 			kfree(res_attr); /* [한국어] 속성 구조체와 그 뒤에 붙여 둔 이름 문자열을 한 번에 해제. 이름은 같은 할당 안에 있다 */
-		} /* [한국어] uncached 판 정리 종료 */
+		}
 
 		res_attr = pdev->res_attr_wc[i]; /* [한국어] write-combining 판(resourceN_wc) 포인터. prefetchable BAR 에만 존재한다 */
 		if (res_attr) { /* [한국어] 실제로 만들어진 경우에만 */
 			sysfs_remove_bin_file(&pdev->dev.kobj, res_attr); /* [한국어] sysfs 에서 파일 제거 */
 			kfree(res_attr); /* [한국어] 구조체와 이름을 한 번에 해제 */
-		} /* [한국어] write-combining 판 정리 종료 */
-	} /* [한국어] BAR 루프 종료 */
-} /* [한국어] 함수 본문 종료 */
+		}
+	}
+}
 
 /*
  * [한국어]
@@ -3426,7 +3426,7 @@ static void pci_remove_resource_files(struct pci_dev *pdev) /* [한국어] 이 �
  *     -> kzalloc -> sysfs_bin_attr_init -> sysfs_create_bin_file
  */
 static int pci_create_attr(struct pci_dev *pdev, int num, int write_combine) /* [한국어] BAR num 에 대한 파일 하나를 만든다 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	/* allocate attribute structure, piggyback attribute name */
 	int name_len = write_combine ? 13 : 10; /* [한국어] "resource%d_wc"(8+1+3+NUL=13) 또는 "resource%d"(8+1+NUL=10). BAR 번호가 한 자리라는 전제가 깔려 있다 */
 	struct bin_attribute *res_attr; /* [한국어] 만들 바이너리 속성. 아래에서 이름 자리까지 함께 할당한다 */
@@ -3443,17 +3443,17 @@ static int pci_create_attr(struct pci_dev *pdev, int num, int write_combine) /* 
 	if (write_combine) { /* [한국어] write-combining 판을 만드는 경우 */
 		sprintf(res_attr_name, "resource%d_wc", num); /* [한국어] 위에서 13바이트를 정확히 계산해 잡았으므로 오버런이 없다. 그래서 snprintf 가 아니어도 안전하다 */
 		res_attr->mmap = pci_mmap_resource_wc; /* [한국어] wc 판은 mmap 만 제공한다 — 쓰기를 모으는 매핑이라 바이트 단위 접근은 의미가 없다 */
-	} else { /* [한국어] 기본(uncached) 판 */
+	} else {
 		sprintf(res_attr_name, "resource%d", num); /* [한국어] 10바이트 자리에 정확히 들어간다 */
 		if (pci_resource_flags(pdev, num) & IORESOURCE_IO) { /* [한국어] 이 BAR 가 I/O 공간인가 */
 			res_attr->read = pci_read_resource_io; /* [한국어] I/O 는 포트 명령으로만 접근되므로 read 콜백을 제공한다 */
 			res_attr->write = pci_write_resource_io; /* [한국어] 쓰기도 마찬가지. 락다운 검사는 그 함수 안에 있다 */
 			if (arch_can_pci_mmap_io()) /* [한국어] 이 아키텍처가 I/O 공간을 물리 창으로 매핑할 수 있는가 */
 				res_attr->mmap = pci_mmap_resource_uc; /* [한국어] 가능하면 mmap 도 함께 제공한다 */
-		} else { /* [한국어] 메모리 공간 BAR */
+		} else {
 			res_attr->mmap = pci_mmap_resource_uc; /* [한국어] 메모리 BAR 는 mmap 만. read/write 를 두지 않는 것은 MMIO 접근 순서를 사용자에게 맡기지 않기 위해서다 */
-		} /* [한국어] 자원 종류 분기 종료 */
-	} /* [한국어] wc / 기본 판 분기 종료 */
+		}
+	}
 	if (res_attr->mmap) { /* [한국어] mmap 을 제공하는 경우에만 아래 두 설정이 필요하다 */
 		res_attr->f_mapping = iomem_get_mapping; /* [한국어] 매핑을 iomem 주소 공간에 소속시켜, 장치가 사라질 때 일괄 무효화가 가능하게 한다 */
 		/*
@@ -3466,7 +3466,7 @@ static int pci_create_attr(struct pci_dev *pdev, int num, int write_combine) /* 
 		 * 그 inode 는 이 속성의 크기를 모른다. 그래서 llseek 도 반드시
 		 * 함께 갈아 끼워야 한다 — 위 f_mapping 대입과 짝으로 다니는 설정이다. */
 		res_attr->llseek = pci_llseek_resource; /* [한국어] attr->size 를 기준으로 seek 하는 구현으로 교체 */
-	} /* [한국어] mmap 전용 설정 종료 */
+	}
 	res_attr->attr.name = res_attr_name; /* [한국어] 방금 만든 이름 문자열을 속성에 연결. 같은 할당 안이라 수명이 함께 간다 */
 	res_attr->attr.mode = 0600; /* [한국어] 소유자(루트)만 읽고 쓴다. BAR 직접 접근은 위험하므로 좁힌다 */
 	res_attr->size = pci_resource_len(pdev, num); /* [한국어] 이 BAR 의 실제 길이 = 파일 크기. llseek 과 mmap 경계 검사의 기준이 된다 */
@@ -3475,15 +3475,15 @@ static int pci_create_attr(struct pci_dev *pdev, int num, int write_combine) /* 
 	if (retval) { /* [한국어] 생성 실패 */
 		kfree(res_attr); /* [한국어] 구조체와 이름을 한 번에 해제 */
 		return retval; /* [한국어] 배열에 기록하기 전에 반환 — 그래야 나중에 해제된 포인터를 건드리지 않는다 */
-	} /* [한국어] 실패 처리 종료 */
+	}
 
 	if (write_combine) /* [한국어] 성공했으므로 어느 배열에 기록할지 고른다 */
 		pdev->res_attr_wc[num] = res_attr; /* [한국어] write-combining 판 보관. 나중에 pci_remove_resource_files 가 이걸 보고 지운다 */
-	else /* [한국어] 기본 판 */
+	else
 		pdev->res_attr[num] = res_attr; /* [한국어] uncached 판 보관 */
 
 	return 0; /* [한국어] 성공 */
-} /* [한국어] 함수 본문 종료 */
+}
 
 /*
  * [한국어]
@@ -3527,7 +3527,7 @@ static int pci_create_attr(struct pci_dev *pdev, int num, int write_combine) /* 
  * Walk the resources in @pdev creating files for each resource available.
  */
 static int pci_create_resource_files(struct pci_dev *pdev) /* [한국어] 이 장치의 BAR 들에 대한 sysfs 파일을 일괄 생성 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	int i; /* [한국어] BAR 인덱스 */
 	int retval; /* [한국어] 각 파일 생성 결과 */
 
@@ -3552,10 +3552,10 @@ static int pci_create_resource_files(struct pci_dev *pdev) /* [한국어] 이 �
 		if (retval) { /* [한국어] 둘 중 하나라도 실패했다면 */
 			pci_remove_resource_files(pdev); /* [한국어] 지금까지 만든 파일을 전부 되돌린다. 반쯤 만들어진 상태를 남기지 않는다 */
 			return retval; /* [한국어] 실패를 호출자에게 전달 */
-		} /* [한국어] 실패 처리 종료 */
-	} /* [한국어] BAR 루프 종료 */
+		}
+	}
 	return 0; /* [한국어] 모든 BAR 처리 성공 */
-} /* [한국어] 함수 본문 종료 */
+}
 #else /* !(defined(HAVE_PCI_MMAP) || defined(ARCH_GENERIC_PCI_MMAP_RESOURCE)) */
 /* [한국어] 여기부터는 PCI mmap 을 전혀 지원하지 않는 아키텍처용 대체 구현이다.
  * 위 구역 전체가 컴파일되지 않으므로, 호출자(pci_create_sysfs_dev_files,
@@ -3568,7 +3568,7 @@ static int pci_create_resource_files(struct pci_dev *pdev) /* [한국어] 이 �
  * 판과 달리 아키텍처 코드에서 덮어쓸 수 있어야 하기 때문이다. */
 int __weak pci_create_resource_files(struct pci_dev *dev) { return 0; } /* [한국어] 만들 파일이 없으므로 성공만 반환한다 */
 void __weak pci_remove_resource_files(struct pci_dev *dev) { return; } /* [한국어] 지울 파일도 없으므로 그냥 돌아간다 */
-#endif /* [한국어] PCI mmap 지원 여부 분기 끝 */
+#endif
 
 /**
  * pci_write_rom - used to enable access to the PCI ROM display
@@ -3625,16 +3625,16 @@ void __weak pci_remove_resource_files(struct pci_dev *dev) { return; } /* [한�
 static ssize_t pci_write_rom(struct file *filp, struct kobject *kobj, /* [한국어] 파일 핸들(미사용)과 kobject */
 			     const struct bin_attribute *bin_attr, char *buf, /* [한국어] 속성 서술자(미사용)와 사용자 입력 */
 			     loff_t off, size_t count) /* [한국어] 파일 오프셋과 입력 길이 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	struct pci_dev *pdev = to_pci_dev(kobj_to_dev(kobj)); /* [한국어] kobject -> device -> pci_dev 복원 */
 
 	if ((off ==  0) && (*buf == '0') && (count == 2)) /* [한국어] 정확히 "0\n" 두 바이트를 파일 처음에 썼을 때만 끈다. 문자 '0' 이지 숫자 0 이 아니다 */
 		pdev->rom_attr_enabled = 0; /* [한국어] 읽기 금지로 되돌린다 */
-	else /* [한국어] 그 밖의 모든 입력 */
+	else
 		pdev->rom_attr_enabled = 1; /* [한국어] 켠다. 애매한 입력은 켜는 쪽으로 해석된다는 점에 유의 */
 
 	return count; /* [한국어] 입력을 전부 소비했다고 알림 */
-} /* [한국어] 함수 본문 종료 */
+}
 
 /*
  * [한국어]
@@ -3693,7 +3693,7 @@ static ssize_t pci_write_rom(struct file *filp, struct kobject *kobj, /* [한국
 static ssize_t pci_read_rom(struct file *filp, struct kobject *kobj, /* [한국어] 파일 핸들(미사용)과 kobject */
 			    const struct bin_attribute *bin_attr, char *buf, /* [한국어] 속성 서술자(미사용)와 결과 버퍼 */
 			    loff_t off, size_t count) /* [한국어] ROM 안 오프셋과 요청 바이트 수 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	struct pci_dev *pdev = to_pci_dev(kobj_to_dev(kobj)); /* [한국어] kobject -> device -> pci_dev 복원 */
 	void __iomem *rom; /* [한국어] 매핑된 ROM 창의 커널 가상 주소. __iomem 표시가 "일반 메모리처럼 역참조하지 말라" 는 뜻이다 */
 	size_t size; /* [한국어] 입출력 겸용 — 들어갈 때는 창 크기, 나올 때는 실제 이미지 크기 */
@@ -3710,16 +3710,16 @@ static ssize_t pci_read_rom(struct file *filp, struct kobject *kobj, /* [한국�
 
 	if (off >= size) /* [한국어] 시작 위치가 이미 이미지 끝을 넘었는가 */
 		count = 0; /* [한국어] 0 바이트를 읽은 것으로 처리 = EOF. 아래 unmap 을 거쳐야 하므로 여기서 return 하지 않는다 */
-	else { /* [한국어] 읽을 것이 남아 있는 경우 */
+	else {
 		if (off + count > size) /* [한국어] 요청 끝이 이미지를 넘어가는가 */
 			count = size - off; /* [한국어] 남은 만큼으로 줄인다. 오류가 아니라 짧은 읽기로 처리하는 것이 파일 규약이다 */
 
 		memcpy_fromio(buf, rom + off, count); /* [한국어] MMIO 창에서 커널 버퍼로 복사. 일반 memcpy 를 쓰면 아키텍처에 따라 잘못된 폭/순서로 접근하게 된다 */
-	} /* [한국어] 복사 블록 종료 */
+	}
 	pci_unmap_rom(pdev, rom); /* [한국어] 매핑을 되돌리고 ROM 디코딩도 다시 끈다. 위 조기 return 들이 모두 매핑 전에 있어 누수가 없다 */
 
 	return count; /* [한국어] 실제로 옮긴 바이트 수(0 이면 EOF) */
-} /* [한국어] 함수 본문 종료 */
+}
 /* [한국어] bin_attr_rom - /sys/bus/pci/devices/<BDF>/rom 파일을 만드는 바이너리 속성.
  * 모드 0600 이라 루트만 열 수 있다 — config(0644)와 달리 읽기도 제한하는데,
  * ROM 접근이 하드웨어 디코딩 창을 켜는 부작용을 동반하기 때문이다.
@@ -3730,7 +3730,7 @@ static const BIN_ATTR(rom, 0600, pci_read_rom, pci_write_rom, 0); /* [한국어]
 static const struct bin_attribute *const pci_dev_rom_attrs[] = { /* [한국어] 배열 시작 */
 	&bin_attr_rom, /* [한국어] 위에서 만든 rom 바이너리 속성 */
 	NULL, /* [한국어] 끝 센티널 */
-}; /* [한국어] 배열 종료 */
+};
 
 /*
  * [한국어]
@@ -3763,7 +3763,7 @@ static const struct bin_attribute *const pci_dev_rom_attrs[] = { /* [한국어] 
  */
 static umode_t pci_dev_rom_attr_is_visible(struct kobject *kobj, /* [한국어] 대상 kobject */
 					   const struct bin_attribute *a, int n) /* [한국어] 가시성을 묻는 속성과 그룹 내 인덱스(미사용) */
-{ /* [한국어] 함수 본문 시작 */
+{
 	struct pci_dev *pdev = to_pci_dev(kobj_to_dev(kobj)); /* [한국어] kobject -> device -> pci_dev 복원 */
 
 	/* If the device has a ROM, try to expose it in sysfs. */
@@ -3772,7 +3772,7 @@ static umode_t pci_dev_rom_attr_is_visible(struct kobject *kobj, /* [한국어] 
 		return 0; /* [한국어] 0 을 돌려주면 sysfs 는 이 파일을 아예 만들지 않는다 */
 
 	return a->attr.mode; /* [한국어] 속성이 원래 갖고 있던 모드(0600)를 그대로. 권한 정의를 BIN_ATTR 한 곳에만 두기 위한 관례다 */
-} /* [한국어] 함수 본문 종료 */
+}
 
 /*
  * [한국어]
@@ -3799,11 +3799,11 @@ static umode_t pci_dev_rom_attr_is_visible(struct kobject *kobj, /* [한국어] 
  */
 static size_t pci_dev_rom_attr_bin_size(struct kobject *kobj, /* [한국어] 대상 kobject */
 					const struct bin_attribute *a, int n) /* [한국어] 속성과 그룹 내 인덱스 — 둘 다 미사용 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	struct pci_dev *pdev = to_pci_dev(kobj_to_dev(kobj)); /* [한국어] kobject -> device -> pci_dev 복원 */
 
 	return pci_resource_len(pdev, PCI_ROM_RESOURCE); /* [한국어] ROM 창의 길이. 실제 이미지는 이보다 작을 수 있고 그 조정은 pci_read_rom 이 한다 */
-} /* [한국어] 함수 본문 종료 */
+}
 
 /* [한국어] pci_dev_rom_attr_group - rom 파일을 만드는 그룹.
  * pci_dev_groups[] 를 거쳐 pci_bus_type.dev_groups 로 등록된다.
@@ -3826,7 +3826,7 @@ static const struct attribute_group pci_dev_rom_attr_group = { /* [한국어] �
 		 * 읽는 자: sysfs 코어가 파일을 만들거나 크기를 물을 때.
 		 * 값 범위: 함수 포인터. NULL 이면 BIN_ATTR 의 정적 크기를 쓴다.
 		 * 동기화: 락 없이 자원 길이만 읽는다. */
-}; /* [한국어] 구조체 초기화 종료 */
+};
 
 /*
  * [한국어]
@@ -3875,7 +3875,7 @@ static const struct attribute_group pci_dev_rom_attr_group = { /* [한국어] �
  */
 static ssize_t reset_store(struct device *dev, struct device_attribute *attr, /* [한국어] 대상 device 와 속성 서술자(미사용) */
 			   const char *buf, size_t count) /* [한국어] 사용자 입력 문자열과 길이 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	struct pci_dev *pdev = to_pci_dev(dev); /* [한국어] device -> pci_dev 복원 */
 	unsigned long val; /* [한국어] 파싱된 사용자 값 */
 	ssize_t result; /* [한국어] 리셋 결과. 음수면 오류 */
@@ -3893,7 +3893,7 @@ static ssize_t reset_store(struct device *dev, struct device_attribute *attr, /*
 		return result; /* [한국어] 실패를 감추지 않고 그대로 전달 */
 
 	return count; /* [한국어] 리셋 성공 — 입력을 전부 소비했다고 알림 */
-} /* [한국어] 함수 본문 종료 */
+}
 static DEVICE_ATTR_WO(reset); /* [한국어] dev_attr_reset 생성. WO = 쓰기 전용(읽을 상태가 없다) */
 
 /* [한국어] pci_dev_reset_attrs - reset 파일 하나를 담은 속성 배열.
@@ -3902,7 +3902,7 @@ static DEVICE_ATTR_WO(reset); /* [한국어] dev_attr_reset 생성. WO = 쓰기 
 static struct attribute *pci_dev_reset_attrs[] = { /* [한국어] 배열 시작 */
 	&dev_attr_reset.attr, /* [한국어] reset — 이 장치 하나를 리셋하는 쓰기 전용 파일 */
 	NULL, /* [한국어] 끝 센티널 */
-}; /* [한국어] 배열 종료 */
+};
 
 /*
  * [한국어]
@@ -3931,14 +3931,14 @@ static struct attribute *pci_dev_reset_attrs[] = { /* [한국어] 배열 시작 
  */
 static umode_t pci_dev_reset_attr_is_visible(struct kobject *kobj, /* [한국어] 대상 kobject */
 					     struct attribute *a, int n) /* [한국어] 가시성을 묻는 속성과 그룹 내 인덱스(미사용) */
-{ /* [한국어] 함수 본문 시작 */
+{
 	struct pci_dev *pdev = to_pci_dev(kobj_to_dev(kobj)); /* [한국어] kobject -> device -> pci_dev 복원 */
 
 	if (!pci_reset_supported(pdev)) /* [한국어] 이 장치에 쓸 수 있는 리셋 방법이 하나도 없는가 */
 		return 0; /* [한국어] 그렇다면 파일을 아예 만들지 않는다 */
 
 	return a->mode; /* [한국어] 속성이 원래 갖고 있던 모드를 그대로. 바이너리 속성의 a->attr.mode 와 달리 일반 속성은 a->mode 다 */
-} /* [한국어] 함수 본문 종료 */
+}
 
 /* [한국어] pci_dev_reset_attr_group - reset 파일을 만드는 그룹.
  * pci_dev_groups[] 를 거쳐 모든 PCI 장치에 시도되지만, is_visible 이
@@ -3955,7 +3955,7 @@ static const struct attribute_group pci_dev_reset_attr_group = { /* [한국어] 
 		 * 값 범위: 함수 포인터. 0 을 돌려주면 파일이 생기지 않는다.
 		 * 동기화: 콜백이 락 없이 pci_dev 를 읽는다.
 		 * 아래 reset_method 그룹과 같은 콜백을 공유한다. */
-}; /* [한국어] 구조체 초기화 종료 */
+};
 
 /*
  * [한국어]
@@ -4002,7 +4002,7 @@ static const struct attribute_group pci_dev_reset_attr_group = { /* [한국어] 
  */
 static ssize_t reset_method_show(struct device *dev, /* [한국어] 대상 device */
 				 struct device_attribute *attr, char *buf) /* [한국어] 속성 서술자(미사용)와 출력 버퍼 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	struct pci_dev *pdev = to_pci_dev(dev); /* [한국어] device -> pci_dev 복원 */
 	ssize_t len = 0; /* [한국어] 지금까지 찍은 누적 길이. 구분자 판단과 sysfs_emit_at 의 오프셋에 함께 쓰인다 */
 	int i, m; /* [한국어] i 는 우선순위 배열 인덱스, m 은 거기 담긴 방법 번호 */
@@ -4014,13 +4014,13 @@ static ssize_t reset_method_show(struct device *dev, /* [한국어] 대상 devic
 
 		len += sysfs_emit_at(buf, len, "%s%s", len ? " " : "", /* [한국어] 첫 항목 앞에는 구분자를 붙이지 않고 두 번째부터만 공백을 넣는다 */
 				     pci_reset_fn_methods[m].name); /* [한국어] 번호를 사람이 읽는 이름으로 바꾼다. 배열은 drivers/pci/pci.c 에 있다 */
-	} /* [한국어] 목록 루프 종료 */
+	}
 
 	if (len) /* [한국어] 무언가 찍었을 때에만 */
 		len += sysfs_emit_at(buf, len, "\n"); /* [한국어] 줄바꿈을 붙인다. 빈 목록을 줄바꿈만 있는 파일로 만들지 않기 위한 조건이다 */
 
 	return len; /* [한국어] 0 이면 "허용된 리셋 방법이 하나도 없음" 을 뜻하는 빈 파일이 된다 */
-} /* [한국어] 함수 본문 종료 */
+}
 
 /*
  * [한국어]
@@ -4044,16 +4044,16 @@ static ssize_t reset_method_show(struct device *dev, /* [한국어] 대상 devic
  *   reset_method_store -> [reset_method_lookup] -> sysfs_streq
  */
 static int reset_method_lookup(const char *name) /* [한국어] 이름 -> 방법 번호 변환 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	int m; /* [한국어] pci_reset_fn_methods[] 를 훑을 인덱스 */
 
 	for (m = 1; m < PCI_NUM_RESET_METHODS; m++) { /* [한국어] 0번은 빈 항목이자 "못 찾음" 의 반환값이므로 1 부터 시작해야 한다 */
 		if (sysfs_streq(name, pci_reset_fn_methods[m].name)) /* [한국어] 끝의 줄바꿈을 무시하고 비교한다. sysfs 입력에는 개행이 붙어 오기 때문 */
 			return m; /* [한국어] 찾은 방법 번호 */
-	} /* [한국어] 검색 루프 종료 */
+	}
 
 	return 0;	/* not found */
-} /* [한국어] 함수 본문 종료 */
+}
 
 /*
  * [한국어]
@@ -4127,7 +4127,7 @@ static int reset_method_lookup(const char *name) /* [한국어] 이름 -> 방법
 static ssize_t reset_method_store(struct device *dev, /* [한국어] 대상 device */
 				  struct device_attribute *attr, /* [한국어] 속성 서술자 — 미사용 */
 				  const char *buf, size_t count) /* [한국어] 사용자 입력 문자열과 길이 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	struct pci_dev *pdev = to_pci_dev(dev); /* [한국어] device -> pci_dev 복원 */
 	char *tmp_options, *name; /* [한국어] tmp_options 는 strsep 이 전진시킬 커서, name 은 잘라 낸 토막 */
 	int m, n; /* [한국어] m 은 방법 번호, n 은 지역 배열에 채운 개수 */
@@ -4137,7 +4137,7 @@ static ssize_t reset_method_store(struct device *dev, /* [한국어] 대상 devi
 		pdev->reset_methods[0] = 0; /* [한국어] 첫 칸에 목록 끝 표시를 넣으면 그것만으로 목록 전체가 비워진다 */
 		pci_warn(pdev, "All device reset methods disabled by user"); /* [한국어] 이제 이 장치는 리셋할 수 없다 — 위험한 상태이므로 로그를 남긴다 */
 		return count; /* [한국어] 하드웨어 접근이 없으므로 아래 PM 획득 전에 끝낸다 */
-	} /* [한국어] 빈 입력 처리 종료 */
+	}
 
 	PM_RUNTIME_ACQUIRE(dev, pm); /* [한국어] 아래에서 각 방법의 지원 여부를 조사하려면 설정공간 접근이 필요하므로 장치를 깨워 둔다. 범위를 벗어날 때 자동 해제되는 형태로 보이며, 매크로 정의는 이 트리에 없어 확인할 수 없다 */
 	if (PM_RUNTIME_ACQUIRE_ERR(&pm)) /* [한국어] 장치를 깨우지 못했는가 */
@@ -4146,7 +4146,7 @@ static ssize_t reset_method_store(struct device *dev, /* [한국어] 대상 devi
 	if (sysfs_streq(buf, "default")) { /* [한국어] "default" = 커널이 스스로 정한 기본 목록으로 되돌리라는 뜻 */
 		pci_init_reset_methods(pdev); /* [한국어] 장치를 다시 조사해 우선순위 배열을 처음부터 채운다 */
 		return count; /* [한국어] 사용자 목록을 파싱할 필요가 없으므로 여기서 끝 */
-	} /* [한국어] default 처리 종료 */
+	}
 
 	char *options __free(kfree) = kstrndup(buf, count, GFP_KERNEL); /* [한국어] strsep 이 원본을 파괴적으로 자르므로 사본이 필요하다. __free(kfree)로 어느 return 에서든 자동 해제된다 — 아래 return 이 네 곳이나 되어 수동 해제는 실수하기 쉽다 */
 	if (!options) /* [한국어] 복사 실패 */
@@ -4168,20 +4168,20 @@ static ssize_t reset_method_store(struct device *dev, /* [한국어] 대상 devi
 		if (!m) { /* [한국어] 그런 이름의 리셋 방법이 없다 */
 			pci_err(pdev, "Invalid reset method '%s'", name); /* [한국어] 어떤 이름이 문제였는지 로그로 알려 준다 */
 			return -EINVAL; /* [한국어] 기존 목록은 그대로 둔 채 실패 */
-		} /* [한국어] 이름 검증 실패 처리 종료 */
+		}
 
 		if (pci_reset_fn_methods[m].reset_fn(pdev, PCI_RESET_PROBE)) { /* [한국어] PROBE 모드로 불러 "이 장치에서 이 방법을 쓸 수 있는가" 만 조사한다. 실제로 리셋하지는 않는다 */
 			pci_err(pdev, "Unsupported reset method '%s'", name); /* [한국어] 이름은 맞지만 이 장치가 지원하지 않는 경우 */
 			return -EINVAL; /* [한국어] 쓸 수 없는 방법을 목록에 넣어 두면 리셋 때 헛돌게 되므로 거절 */
-		} /* [한국어] 지원 여부 검증 실패 처리 종료 */
+		}
 
 		if (n == PCI_NUM_RESET_METHODS - 1) { /* [한국어] 마지막 한 칸은 목록 끝 표시(0) 자리로 남겨 둬야 한다 */
 			pci_err(pdev, "Too many reset methods\n"); /* [한국어] 배열 용량 초과 */
 			return -EINVAL; /* [한국어] 넘치기 전에 거절 — 배열을 넘어 쓰지 않도록 */
-		} /* [한국어] 개수 검증 실패 처리 종료 */
+		}
 
 		reset_methods[n++] = m; /* [한국어] 세 검사를 모두 통과했으므로 지역 배열에 순서대로 담는다. 아직 장치에는 반영하지 않는다 */
-	} /* [한국어] 토막 파싱 루프 종료 */
+	}
 
 	reset_methods[n] = 0; /* [한국어] 마지막에 목록 끝 표시를 명시적으로 넣는다. 배열이 0 으로 초기화되어 있어 사실상 이미 0 이지만, 의도를 분명히 하는 코드다 */
 
@@ -4194,14 +4194,14 @@ static ssize_t reset_method_store(struct device *dev, /* [한국어] 대상 devi
 		pci_warn(pdev, "Device-specific reset disabled/de-prioritized by user"); /* [한국어] 막지는 않고 경고만. 사용자의 선택을 존중하되 위험을 기록한다 */
 	memcpy(pdev->reset_methods, reset_methods, sizeof(pdev->reset_methods)); /* [한국어] 모든 검증을 통과한 뒤에야 한 번에 반영한다. 이 한 줄 앞에서 실패했다면 장치 목록은 손대지 않은 상태다 */
 	return count; /* [한국어] 입력을 전부 소비했다고 알림 */
-} /* [한국어] 함수 본문 종료 */
+}
 static DEVICE_ATTR_RW(reset_method); /* [한국어] dev_attr_reset_method 생성(읽기+쓰기) */
 
 /* [한국어] pci_dev_reset_method_attrs - reset_method 파일 하나를 담은 배열. */
 static struct attribute *pci_dev_reset_method_attrs[] = { /* [한국어] 배열 시작 */
 	&dev_attr_reset_method.attr, /* [한국어] reset_method — 허용 리셋 방법 목록을 읽고 쓰는 파일 */
 	NULL, /* [한국어] 끝 센티널 */
-}; /* [한국어] 배열 종료 */
+};
 
 /* [한국어] pci_dev_reset_method_attr_group - reset_method 파일을 만드는 그룹.
  * is_visible 로 위 reset 그룹과 같은 콜백을 재사용한다 — 리셋이 불가능한
@@ -4218,7 +4218,7 @@ static const struct attribute_group pci_dev_reset_method_attr_group = { /* [한�
 		 * 값 범위: 함수 포인터. pci_reset_supported() 가 거짓이면 0.
 		 * 동기화: 콜백이 락 없이 pci_dev 를 읽는다.
 		 * 두 그룹이 같은 함수를 쓰는 것은 판정 근거가 동일하기 때문이다. */
-}; /* [한국어] 구조체 초기화 종료 */
+};
 
 /*
  * [한국어]
@@ -4254,7 +4254,7 @@ static const struct attribute_group pci_dev_reset_method_attr_group = { /* [한�
  *     -> pci_rebar_get_possible_sizes
  */
 static ssize_t __resource_resize_show(struct device *dev, int n, char *buf) /* [한국어] BAR n 의 가능한 크기 비트맵을 찍는다 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	struct pci_dev *pdev = to_pci_dev(dev); /* [한국어] device -> pci_dev 복원 */
 	ssize_t ret; /* [한국어] 출력 길이. PM 해제를 먼저 하려고 잡아 둔다 */
 
@@ -4266,7 +4266,7 @@ static ssize_t __resource_resize_show(struct device *dev, int n, char *buf) /* [
 	pci_config_pm_runtime_put(pdev); /* [한국어] get 과 짝을 맞춰 놓는다 */
 
 	return ret; /* [한국어] PM 해제 뒤에 반환 */
-} /* [한국어] 함수 본문 종료 */
+}
 
 /*
  * [한국어]
@@ -4325,7 +4325,7 @@ static ssize_t __resource_resize_show(struct device *dev, int n, char *buf) /* [
  */
 static ssize_t __resource_resize_store(struct device *dev, int n, /* [한국어] 대상 device 와 BAR 번호 */
 				       const char *buf, size_t count) /* [한국어] 사용자 입력(크기 지수)과 길이 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	struct pci_dev *pdev = to_pci_dev(dev); /* [한국어] device -> pci_dev 복원 */
 	struct pci_bus *bus = pdev->bus; /* [한국어] 나중에 버스 단위 자원 재배치를 부르려고 미리 잡아 둔다 */
 	unsigned long size; /* [한국어] 사용자가 요청한 크기 지수(비트 번호) */
@@ -4339,7 +4339,7 @@ static ssize_t __resource_resize_store(struct device *dev, int n, /* [한국어]
 	if (dev->driver || pci_num_vf(pdev)) { /* [한국어] 커널 드라이버가 쓰고 있거나 SR-IOV VF 가 살아 있는가 */
 		ret = -EBUSY; /* [한국어] 사용 중인 장치의 BAR 를 옮기면 기존 매핑이 전부 무효가 된다 */
 		goto unlock; /* [한국어] 아직 PM 을 잡지 않았으므로 락만 풀면 된다 */
-	} /* [한국어] 사용 중 검사 종료 */
+	}
 
 	pci_config_pm_runtime_get(pdev); /* [한국어] 아래에서 설정공간을 여러 번 읽고 쓰므로 장치를 깨운다 */
 
@@ -4348,7 +4348,7 @@ static ssize_t __resource_resize_store(struct device *dev, int n, /* [한국어]
 						"resourceN_resize"); /* [한국어] 로그에 남을 요청자 이름 */
 		if (ret) /* [한국어] 쫓아내지 못했다면 */
 			goto pm_put; /* [한국어] PM 과 락을 순서대로 풀고 나간다 */
-	} /* [한국어] VGA 특례 처리 종료 */
+	}
 
 	pci_read_config_word(pdev, PCI_COMMAND, &cmd); /* [한국어] Command 레지스터 원본을 보관. 마지막에 그대로 복원하기 위해서다 */
 	pci_write_config_word(pdev, PCI_COMMAND, /* [한국어] 크기를 바꾸는 동안 BAR 디코딩이 살아 있으면 정리되지 않은 주소로 트랜잭션이 들어와 위험하다 */
@@ -4370,7 +4370,7 @@ unlock: /* [한국어] PM 을 잡기도 전에 실패한 경로가 여기로 온
 	device_unlock(dev); /* [한국어] 잡은 것의 역순으로 정확히 풀린다 */
 
 	return ret ? ret : count; /* [한국어] 어느 단계든 실패했으면 그 오류를, 전부 성공했으면 소비한 길이를 반환 */
-} /* [한국어] 함수 본문 종료 */
+}
 
 /* [한국어] pci_dev_resource_resize_attr(n) - BAR 하나에 대한 resize 속성 한 벌을
  * 통째로 찍어내는 매크로.
@@ -4431,7 +4431,7 @@ static struct attribute *resource_resize_attrs[] = { /* [한국어] 배열 시�
 	&dev_attr_resource4_resize.attr, /* [한국어] 인덱스 4 = BAR4 */
 	&dev_attr_resource5_resize.attr, /* [한국어] 인덱스 5 = BAR5 */
 	NULL, /* [한국어] 끝 센티널 */
-}; /* [한국어] 배열 종료 */
+};
 
 /*
  * [한국어]
@@ -4461,11 +4461,11 @@ static struct attribute *resource_resize_attrs[] = { /* [한국어] 배열 시�
  */
 static umode_t resource_resize_is_visible(struct kobject *kobj, /* [한국어] 대상 kobject */
 					  struct attribute *a, int n) /* [한국어] 속성과 배열 인덱스 — 인덱스가 곧 BAR 번호다 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	struct pci_dev *pdev = to_pci_dev(kobj_to_dev(kobj)); /* [한국어] kobject -> device -> pci_dev 복원 */
 
 	return pci_rebar_get_current_size(pdev, n) < 0 ? 0 : a->mode; /* [한국어] 음수 = 이 BAR 에 Resizable BAR capability 가 없다 -> 파일을 만들지 않는다. 있으면 원래 모드 그대로 */
-} /* [한국어] 함수 본문 종료 */
+}
 
 /* [한국어] pci_dev_resource_resize_group - resourceN_resize 파일들을 만드는 그룹.
  * pci_dev_groups[] 를 거쳐 모든 PCI 장치에 시도되지만, is_visible 이 BAR
@@ -4482,7 +4482,7 @@ static const struct attribute_group pci_dev_resource_resize_group = { /* [한국
 		 * 읽는 자: sysfs 코어가 그룹을 만들 때 속성마다 한 번씩(인덱스를 함께 넘긴다).
 		 * 값 범위: 함수 포인터. 0 을 돌려주면 그 파일은 생기지 않는다.
 		 * 동기화: 콜백이 락 없이 설정공간을 조회한다. */
-}; /* [한국어] 구조체 초기화 종료 */
+};
 
 /*
  * [한국어]
@@ -4518,12 +4518,12 @@ static const struct attribute_group pci_dev_resource_resize_group = { /* [한국
  *     -> pci_create_resource_files -> pci_create_attr
  */
 int __must_check pci_create_sysfs_dev_files(struct pci_dev *pdev) /* [한국어] 이 장치의 동적 sysfs 파일(BAR 창)을 만든다 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	if (!sysfs_initialized) /* [한국어] 아직 pci_sysfs_init() 이 실행되지 않았는가 */
 		return -EACCES; /* [한국어] 지금은 만들 수 없다. 나중에 pci_sysfs_init() 이 일괄로 만들어 준다 */
 
 	return pci_create_resource_files(pdev); /* [한국어] 실제 작업은 전부 여기에. BAR 별 resourceN, resourceN_wc 를 만든다 */
-} /* [한국어] 함수 본문 종료 */
+}
 
 /*
  * [한국어]
@@ -4554,12 +4554,12 @@ int __must_check pci_create_sysfs_dev_files(struct pci_dev *pdev) /* [한국어]
  * Cleanup when @pdev is removed from sysfs.
  */
 void pci_remove_sysfs_dev_files(struct pci_dev *pdev) /* [한국어] 이 장치의 동적 sysfs 파일을 정리한다 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	if (!sysfs_initialized) /* [한국어] 초기화 전이었다면 만들어진 파일도 없다 */
 		return; /* [한국어] 지울 것이 없으므로 그냥 돌아간다 */
 
 	pci_remove_resource_files(pdev); /* [한국어] resourceN, resourceN_wc 를 전부 지우고 메모리를 해제한다 */
-} /* [한국어] 함수 본문 종료 */
+}
 
 /*
  * [한국어]
@@ -4607,7 +4607,7 @@ void pci_remove_sysfs_dev_files(struct pci_dev *pdev) /* [한국어] 이 장치�
  *     -> pci_create_legacy_files (버스마다)
  */
 static int __init pci_sysfs_init(void) /* [한국어] __init 이라 부팅이 끝나면 이 코드는 메모리에서 해제된다 */
-{ /* [한국어] 함수 본문 시작 */
+{
 	struct pci_dev *pdev = NULL; /* [한국어] 장치 순회 커서. NULL 로 시작해야 "처음부터" 라는 뜻이 된다 */
 	struct pci_bus *pbus = NULL; /* [한국어] 버스 순회 커서. 마찬가지로 NULL 로 시작 */
 	int retval; /* [한국어] 파일 생성 결과 */
@@ -4618,14 +4618,14 @@ static int __init pci_sysfs_init(void) /* [한국어] __init 이라 부팅이 �
 		if (retval) { /* [한국어] 생성 실패 */
 			pci_dev_put(pdev); /* [한국어] 루프를 중간에 빠져나가므로 지금 들고 있는 참조를 손으로 놓아야 한다. 이 줄이 없으면 이 장치는 영원히 해제되지 않는다 */
 			return retval; /* [한국어] initcall 실패로 보고. 나머지 장치는 파일 없이 남는다 */
-		} /* [한국어] 실패 처리 종료 */
-	} /* [한국어] 장치 루프 종료 — 끝까지 돌면 순회가 참조를 모두 정리하므로 여기서는 put 이 필요 없다 */
+		}
+	}
 
 	while ((pbus = pci_find_next_bus(pbus))) /* [한국어] 이번에는 버스를 훑는다. 이 순회는 참조를 잡지 않아 대칭되는 put 이 없다 */
 		pci_create_legacy_files(pbus); /* [한국어] legacy_io/legacy_mem 을 뒤늦게 만든다. HAVE_PCI_LEGACY 가 없으면 이 함수 자체가 없다 */
 
 	return 0; /* [한국어] 모든 따라잡기 성공 */
-} /* [한국어] 함수 본문 종료 */
+}
 late_initcall(pci_sysfs_init); /* [한국어] 부팅 후반에 한 번 실행되도록 등록. sysfs 와 PCI 코어가 모두 올라온 뒤여야 파일을 만들 수 있기 때문이다 */
 
 /* [한국어] pci_dev_dev_attrs - 장치마다 있을 수도 없을 수도 있는 두 속성.
@@ -4639,7 +4639,7 @@ static struct attribute *pci_dev_dev_attrs[] = { /* [한국어] 배열 시작 */
 	&dev_attr_boot_vga.attr, /* [한국어] boot_vga — 이 장치가 부팅 화면을 담당한 VGA 인가. VGA 장치에만 생긴다 */
 	&dev_attr_serial_number.attr, /* [한국어] serial_number — PCIe DSN. DSN capability 가 있는 장치에만 생기고, 관리자만 읽는다 */
 	NULL, /* [한국어] 끝 센티널 */
-}; /* [한국어] 배열 종료 */
+};
 
 /*
  * [한국어]
@@ -4678,7 +4678,7 @@ static struct attribute *pci_dev_dev_attrs[] = { /* [한국어] 배열 시작 */
  */
 static umode_t pci_dev_attrs_are_visible(struct kobject *kobj, /* [한국어] 대상 kobject */
 					 struct attribute *a, int n) /* [한국어] 판정 중인 속성과 인덱스(미사용) */
-{ /* [한국어] 함수 본문 시작 */
+{
 	struct device *dev = kobj_to_dev(kobj); /* [한국어] kobject -> device. 아래에서 한 번 더 변환하므로 중간 변수를 둔다 */
 	struct pci_dev *pdev = to_pci_dev(dev); /* [한국어] device -> pci_dev */
 
@@ -4689,7 +4689,7 @@ static umode_t pci_dev_attrs_are_visible(struct kobject *kobj, /* [한국어] �
 		return a->mode; /* [한국어] 조건 충족 — 파일을 만든다 */
 
 	return 0; /* [한국어] 기본값은 "보이지 않음". 새 속성을 추가하고 조건을 빠뜨리면 그 파일은 생기지 않는다 */
-} /* [한국어] 함수 본문 종료 */
+}
 
 /* [한국어] pci_dev_hp_attrs - hotplug 조작용 속성 두 개.
  * 아래 pci_dev_hp_attr_group 에 담기며, is_visible 이 SR-IOV VF 를 걸러 낸다.
@@ -4699,7 +4699,7 @@ static struct attribute *pci_dev_hp_attrs[] = { /* [한국어] 배열 시작 */
 	&dev_attr_remove.attr, /* [한국어] remove — 이 장치를 커널에서 논리적으로 뽑는다(쓰기 전용 0220) */
 	&dev_attr_dev_rescan.attr, /* [한국어] rescan — 이 장치가 앉은 버스를 다시 열거한다(쓰기 전용 0200) */
 	NULL, /* [한국어] 끝 센티널 */
-}; /* [한국어] 배열 종료 */
+};
 
 /*
  * [한국어]
@@ -4727,7 +4727,7 @@ static struct attribute *pci_dev_hp_attrs[] = { /* [한국어] 배열 시작 */
  */
 static umode_t pci_dev_hp_attrs_are_visible(struct kobject *kobj, /* [한국어] 대상 kobject */
 					    struct attribute *a, int n) /* [한국어] 판정 중인 속성과 인덱스(미사용) */
-{ /* [한국어] 함수 본문 시작 */
+{
 	struct device *dev = kobj_to_dev(kobj); /* [한국어] kobject -> device */
 	struct pci_dev *pdev = to_pci_dev(dev); /* [한국어] device -> pci_dev */
 
@@ -4735,7 +4735,7 @@ static umode_t pci_dev_hp_attrs_are_visible(struct kobject *kobj, /* [한국어]
 		return 0; /* [한국어] VF 는 개별 제거/재열거 대상이 아니므로 두 파일을 만들지 않는다 */
 
 	return a->mode; /* [한국어] 그 밖의 모든 장치에는 원래 모드 그대로 만든다 — 기본값이 "보임" 이다 */
-} /* [한국어] 함수 본문 종료 */
+}
 
 /*
  * [한국어]
@@ -4765,7 +4765,7 @@ static umode_t pci_dev_hp_attrs_are_visible(struct kobject *kobj, /* [한국어]
  */
 static umode_t pci_bridge_attrs_are_visible(struct kobject *kobj, /* [한국어] 대상 kobject */
 					    struct attribute *a, int n) /* [한국어] 판정 중인 속성과 인덱스(미사용) */
-{ /* [한국어] 함수 본문 시작 */
+{
 	struct device *dev = kobj_to_dev(kobj); /* [한국어] kobject -> device */
 	struct pci_dev *pdev = to_pci_dev(dev); /* [한국어] device -> pci_dev */
 
@@ -4773,7 +4773,7 @@ static umode_t pci_bridge_attrs_are_visible(struct kobject *kobj, /* [한국어]
 		return a->mode; /* [한국어] 브리지에만 세 파일을 만든다 */
 
 	return 0; /* [한국어] 엔드포인트에는 만들지 않는다 — 그래서 각 show 함수가 브리지 여부를 다시 검사하지 않아도 된다 */
-} /* [한국어] 함수 본문 종료 */
+}
 
 /*
  * [한국어]
@@ -4805,7 +4805,7 @@ static umode_t pci_bridge_attrs_are_visible(struct kobject *kobj, /* [한국어]
  */
 static umode_t pcie_dev_attrs_are_visible(struct kobject *kobj, /* [한국어] 대상 kobject */
 					  struct attribute *a, int n) /* [한국어] 판정 중인 속성과 인덱스(미사용) */
-{ /* [한국어] 함수 본문 시작 */
+{
 	struct device *dev = kobj_to_dev(kobj); /* [한국어] kobject -> device */
 	struct pci_dev *pdev = to_pci_dev(dev); /* [한국어] device -> pci_dev */
 
@@ -4813,7 +4813,7 @@ static umode_t pcie_dev_attrs_are_visible(struct kobject *kobj, /* [한국어] �
 		return a->mode; /* [한국어] PCIe 장치에만 링크 관련 네 파일을 만든다 */
 
 	return 0; /* [한국어] 구형 병렬 PCI 장치에는 링크 개념이 없어 만들지 않는다 */
-} /* [한국어] 함수 본문 종료 */
+}
 
 /* [한국어] pci_dev_group - 모든 PCI 장치에 조건 없이 붙는 기본 속성 그룹.
  * is_visible 이 없어 pci_dev_attrs[] 의 모든 파일이 항상 만들어진다. */
@@ -4825,7 +4825,7 @@ static const struct attribute_group pci_dev_group = { /* [한국어] 구조체 �
 		 * 동기화: const 정적 데이터라 락 불필요.
 		 * is_visible 을 두지 않은 것은 이 파일들이 장치 종류를 가리지 않고
 		 * 항상 의미가 있기 때문이다. */
-}; /* [한국어] 구조체 초기화 종료 */
+};
 
 /* [한국어] pci_dev_groups - PCI 버스 타입에 등록되는 최상위 그룹 배열.
  * drivers/pci/pci-driver.c 의 pci_bus_type 이 .dev_groups = pci_dev_groups
@@ -4844,14 +4844,14 @@ const struct attribute_group *pci_dev_groups[] = { /* [한국어] 배열 시작 
 	&pci_dev_vpd_attr_group, /* [한국어] vpd — Vital Product Data. 정의는 다른 파일이고 선언은 drivers/pci/pci.h */
 #ifdef CONFIG_DMI /* [한국어] DMI(SMBIOS) 지원이 있을 때만 */
 	&pci_dev_smbios_attr_group, /* [한국어] label, index 등 펌웨어가 알려 주는 슬롯 이름. 선언은 drivers/pci/pci.h */
-#endif /* [한국어] CONFIG_DMI 끝 */
+#endif
 #ifdef CONFIG_ACPI /* [한국어] ACPI 펌웨어를 쓰는 플랫폼에서만 */
 	&pci_dev_acpi_attr_group, /* [한국어] ACPI 경로 등 펌웨어 관련 속성. 선언은 drivers/pci/pci.h */
-#endif /* [한국어] CONFIG_ACPI 끝 */
+#endif
 	&pci_dev_resource_resize_group, /* [한국어] resourceN_resize — Resizable BAR 를 가진 BAR 에만 */
 	ARCH_PCI_DEV_GROUPS /* [한국어] 아키텍처가 끼워 넣는 자리. 파일 위쪽에서 빈 매크로로 정의되면 아무것도 전개되지 않는다. 그래서 이 줄 끝에 쉼표가 없다 — 쉼표까지 매크로 쪽이 갖고 있어야 빈 전개가 성립한다 */
 	NULL, /* [한국어] 끝 센티널 */
-}; /* [한국어] 배열 종료 */
+};
 
 /* [한국어] pci_dev_hp_attr_group - hotplug 조작 파일(remove, rescan)의 그룹.
  * VF 에는 만들어지지 않는다. */
@@ -4864,7 +4864,7 @@ static const struct attribute_group pci_dev_hp_attr_group = { /* [한국어] 구
 		 * 읽는 자: sysfs 코어가 그룹을 만들 때 속성마다.
 		 * 값 범위: 함수 포인터. VF 이면 0 을 돌려준다.
 		 * 동기화: 콜백이 락 없이 pci_dev 플래그만 읽는다. */
-}; /* [한국어] 구조체 초기화 종료 */
+};
 
 /* [한국어] pci_dev_attr_group - boot_vga 와 serial_number 의 그룹.
  * 두 속성의 조건이 서로 달라 콜백 안에서 속성별로 갈린다. */
@@ -4877,7 +4877,7 @@ static const struct attribute_group pci_dev_attr_group = { /* [한국어] 구조
 		 * 읽는 자: sysfs 코어가 그룹을 만들 때 속성마다.
 		 * 값 범위: 함수 포인터. 기본값이 0(감춤)이라는 점에 유의.
 		 * 동기화: serial_number 판정에서 설정공간을 읽는다. */
-}; /* [한국어] 구조체 초기화 종료 */
+};
 
 /* [한국어] pci_bridge_attr_group - 브리지 전용 세 파일의 그룹. */
 static const struct attribute_group pci_bridge_attr_group = { /* [한국어] 구조체 초기화 시작 */
@@ -4889,7 +4889,7 @@ static const struct attribute_group pci_bridge_attr_group = { /* [한국어] 구
 		 * 읽는 자: sysfs 코어가 그룹을 만들 때 속성마다.
 		 * 값 범위: 함수 포인터. 엔드포인트면 0.
 		 * 동기화: 락 없이 헤더 타입만 확인한다. */
-}; /* [한국어] 구조체 초기화 종료 */
+};
 
 /* [한국어] pcie_dev_attr_group - PCIe 링크 상태 네 파일의 그룹.
  * NVMe SSD 에서 성능 진단 때 읽는 파일들이 여기 모여 있다. */
@@ -4902,7 +4902,7 @@ static const struct attribute_group pcie_dev_attr_group = { /* [한국어] 구�
 		 * 읽는 자: sysfs 코어가 그룹을 만들 때 속성마다.
 		 * 값 범위: 함수 포인터. 구형 병렬 PCI 면 0.
 		 * 동기화: 락 없이 PCIe Capability 유무만 확인한다. */
-}; /* [한국어] 구조체 초기화 종료 */
+};
 
 /* [한국어] pci_dev_attr_groups - device_type 에 등록되는 최상위 그룹 배열.
  * drivers/pci/probe.c 의 device_type pci_dev_type 이 .groups = pci_dev_attr_groups
@@ -4919,22 +4919,22 @@ const struct attribute_group *pci_dev_attr_groups[] = { /* [한국어] 배열 �
 #ifdef CONFIG_PCI_IOV /* [한국어] SR-IOV 지원이 있을 때만 */
 	&sriov_pf_dev_attr_group, /* [한국어] PF 쪽 속성(VF 개수 조절 등). 정의는 다른 파일, 선언은 drivers/pci/pci.h */
 	&sriov_vf_dev_attr_group, /* [한국어] VF 쪽 속성. 정의는 다른 파일 */
-#endif /* [한국어] CONFIG_PCI_IOV 끝 */
+#endif
 	&pci_bridge_attr_group, /* [한국어] 브리지 전용 버스 번호와 하위 버스 리셋 */
 	&pcie_dev_attr_group, /* [한국어] PCIe 링크 속도/폭 — NVMe 진단의 출발점 */
 #ifdef CONFIG_PCIEAER /* [한국어] PCIe 고급 오류 보고를 쓸 때만 */
 	&aer_stats_attr_group, /* [한국어] AER 오류 통계. 정정 가능/불가능 오류 누적 횟수를 보여 준다. 선언은 drivers/pci/pci.h */
 	&aer_attr_group, /* [한국어] AER 제어 속성. 정의는 다른 파일 */
-#endif /* [한국어] CONFIG_PCIEAER 끝 */
+#endif
 #ifdef CONFIG_PCIEASPM /* [한국어] ASPM(링크 전력 관리)을 쓸 때만 */
 	&aspm_ctrl_attr_group, /* [한국어] L0s/L1 등 링크 절전 상태의 허용 여부를 조절한다. 선언은 drivers/pci/pci.h */
-#endif /* [한국어] CONFIG_PCIEASPM 끝 */
+#endif
 #ifdef CONFIG_PCI_DOE /* [한국어] Data Object Exchange 를 쓸 때만 */
 	&pci_doe_sysfs_group, /* [한국어] DOE 프로토콜 목록 등. 선언은 drivers/pci/pci.h */
-#endif /* [한국어] CONFIG_PCI_DOE 끝 */
+#endif
 #ifdef CONFIG_PCI_TSM /* [한국어] TEE 보안 관련 기능을 쓸 때만 */
 	&pci_tsm_auth_attr_group, /* [한국어] 장치 인증 관련 속성. 선언은 drivers/pci/pci.h */
 	&pci_tsm_attr_group, /* [한국어] TSM 제어 속성. 선언은 drivers/pci/pci.h */
-#endif /* [한국어] CONFIG_PCI_TSM 끝 */
+#endif
 	NULL, /* [한국어] 끝 센티널 — 이 파일의 마지막 자료구조다 */
-}; /* [한국어] 배열 종료 */
+};

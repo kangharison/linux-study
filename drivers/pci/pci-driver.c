@@ -462,7 +462,7 @@ static const struct pci_device_id *pci_match_device(struct pci_driver *drv,
 		if (found_id->override_only) {	/* [한국어] 이 항목이 driver_override 로 지목했을 때만 유효한 항목인가 */
 			if (ret > 0)	/* [한국어] 그렇다면 실제로 지목된 경우(ret 양수)에만 인정한다 */
 				return found_id;	/* [한국어] 인정 */
-		} else {	/* [한국어] 평범한 항목이면 */
+		} else {
 			return found_id;	/* [한국어] 조건 없이 그대로 돌려준다 */
 		}
 	}
@@ -959,7 +959,7 @@ static int pci_call_probe(struct pci_driver *drv, struct pci_dev *dev,
 	if (node < 0 || node >= MAX_NUMNODES || !node_online(node) ||	/* [한국어] 노드 번호가 없거나 범위 밖이거나 오프라인이면 옮길 곳이 없다 */
 	    pci_physfn_is_probed(dev)) {	/* [한국어] 또는 PF 가 probe 중인 VF 라면(워커 안에서 워커를 기다리는 중첩을 피한다) */
 		error = local_pci_probe(&ddi);	/* [한국어] 그냥 이 스레드에서 바로 부른다 */
-	} else {	/* [한국어] 그 밖의 경우는 워크큐로 옮긴다 */
+	} else {
 		struct pci_probe_arg arg = { .ddi = &ddi };	/* [한국어] 스택에 워크 인자를 잡는다 */
 
 		INIT_WORK_ONSTACK(&arg.work, local_pci_probe_callback);	/* [한국어] ONSTACK 변형 — 스택 위의 work_struct 임을 디버그 객체 추적기에 알린다 */
@@ -983,7 +983,7 @@ static int pci_call_probe(struct pci_driver *drv, struct pci_dev *dev,
 			rcu_read_unlock();	/* [한국어] 큐잉까지 끝났으니 RCU 읽기 구간 종료 */
 			flush_work(&arg.work);	/* [한국어] 그 워크가 끝날 때까지 잠들며 기다린다 */
 			error = arg.ret;	/* [한국어] 워커가 적어 둔 결과를 읽는다 */
-		} else {	/* [한국어] 그 노드에 쓸 수 있는 CPU 가 하나도 없으면 */
+		} else {
 			rcu_read_unlock();	/* [한국어] RCU 구간을 닫고 */
 			error = local_pci_probe(&ddi);	/* [한국어] 그냥 이 스레드에서 부른다 */
 		}
@@ -2025,7 +2025,7 @@ static int pci_pm_suspend(struct device *dev)
 	if (!dev_pm_smart_suspend(dev) || pci_dev_need_resume(pci_dev)) {	/* [한국어] 드라이버가 런타임 절전 상태를 감당한다고 밝히지 않았거나, PCI 계층이 보기에 깨워야 한다면 */
 		pm_runtime_resume(dev);	/* [한국어] 깨운다 */
 		pci_dev->state_saved = false;	/* [한국어] 깨웠으니 저장분이 무의미하다. 다시 저장하도록 지운다 */
-	} else {	/* [한국어] 그 밖의 경우는 잠든 채로 둔다 */
+	} else {
 		pci_dev_adjust_pme(pci_dev);	/* [한국어] 깨우지 않기로 했으므로 PME(웨이크업) 설정만 이번 절전에 맞게 조정해 둔다 */
 	}
 
@@ -2359,7 +2359,7 @@ static int pci_pm_resume(struct device *dev)
 	if (pm) {	/* [한국어] dev_pm_ops 를 가진 드라이버면 */
 		if (pm->resume)	/* [한국어] resume 콜백이 있을 때만 부른다. 없으면 아무것도 하지 않는다 — dev_pm_ops 를 주었다는 것 자체가 "내가 알아서 한다" 는 선언이다 */
 			return pm->resume(dev);			/* [한국어] 드라이버의 시스템 resume 콜백. 여기서 장치를 다시 동작 상태로 만든다 */
-	} else {	/* [한국어] dev_pm_ops 자체가 없으면 */
+	} else {
 		pci_pm_reenable_device(pci_dev);	/* [한국어] 최소한의 되살리기(enable + Bus Master)를 대신 해 준다 */
 	}
 
@@ -2577,7 +2577,7 @@ static int pci_pm_thaw(struct device *dev)
 	if (pm) {	/* [한국어] dev_pm_ops 가 있으면 */
 		if (pm->thaw)	/* [한국어] thaw 콜백이 있을 때만 */
 			error = pm->thaw(dev);	/* [한국어] 부른다 */
-	} else {	/* [한국어] dev_pm_ops 자체가 없으면 */
+	} else {
 		pci_pm_reenable_device(pci_dev);	/* [한국어] 최소한의 되살리기 */
 	}
 
@@ -2623,7 +2623,7 @@ static int pci_pm_poweroff(struct device *dev)
 	if (!dev_pm_smart_suspend(dev) || pci_dev_need_resume(pci_dev)) {	/* [한국어] pci_pm_suspend 과 같은 판정 — 런타임 절전 장치를 깨울 것인가 */
 		pm_runtime_resume(dev);	/* [한국어] 깨운다 */
 		pci_dev->state_saved = false;	/* [한국어] 저장분 무효화 */
-	} else {	/* [한국어] 깨우지 않기로 했으면 */
+	} else {
 		pci_dev_adjust_pme(pci_dev);	/* [한국어] PME 설정만 조정 */
 	}
 
@@ -2815,7 +2815,7 @@ static int pci_pm_restore(struct device *dev)
 	if (pm) {	/* [한국어] dev_pm_ops 가 있으면 */
 		if (pm->restore)	/* [한국어] restore 콜백이 있을 때만 */
 			return pm->restore(dev);	/* [한국어] 부르고 그 값을 돌려준다 */
-	} else {	/* [한국어] dev_pm_ops 자체가 없으면 */
+	} else {
 		pci_pm_reenable_device(pci_dev);	/* [한국어] 최소한의 되살리기 */
 	}
 
@@ -3518,7 +3518,7 @@ void pci_uevent_ers(struct pci_dev *pdev, enum pci_ers_result err_type)
 		kobject_uevent_env(&pdev->dev.kobj, KOBJ_CHANGE, envp);	/* [한국어] KOBJ_CHANGE 로 udev 에 변화 이벤트를 쏜다 */
 	}
 }
-#endif	/* [한국어] CONFIG_PCIEAER || CONFIG_EEH || CONFIG_S390 끝 */
+#endif
 
 /* [한국어]
  * pci_bus_num_vf - pci_bus_type.num_vf 슬롯. 활성 VF 개수를 알려 준다
@@ -3607,7 +3607,7 @@ static int pci_dma_configure(struct device *dev)
 		struct acpi_device *adev = to_acpi_device_node(bridge->fwnode);	/* [한국어] 브리지의 ACPI 노드를 얻고 */
 
 		ret = acpi_dma_configure(dev, acpi_get_dma_attr(adev));	/* [한국어] _CCA 등에서 DMA 속성을 읽어 설정한다 */
-	}	/* [한국어] 둘 다 아니면 아무것도 하지 않는다(아키텍처 기본 dma_ops 를 그대로 쓴다) */
+	}
 
 	/*
 	 * Attempt to enable ACS regardless of capability because some Root

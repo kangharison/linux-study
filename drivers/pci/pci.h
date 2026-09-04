@@ -489,7 +489,7 @@ bool pcie_cap_has_rtctl(const struct pci_dev *dev); /* [한국어] Root Control 
  * 선언만 #ifdef 로 감싼 몇 안 되는 사례다. */
 #ifdef CONFIG_DMI
 extern const struct attribute_group pci_dev_smbios_attr_group; /* [한국어] DMI 기반 슬롯 라벨 sysfs 속성 그룹. 실체는 drivers/pci/pci-label.c 에 있다 */
-#endif /* [한국어] CONFIG_DMI 분기 종료 */
+#endif
 
 /* [한국어] mmap 요청이 어느 유저스페이스 인터페이스로 들어왔는지 구분하는 열거형.
  * 두 인터페이스의 주소 해석 규칙이 다르기 때문에 필요하다.
@@ -503,7 +503,7 @@ enum pci_mmap_api {
  * 시작으로부터의 오프셋"이다 */
 	PCI_MMAP_SYSFS,	/* mmap on /sys/bus/pci/devices/<BDF>/resource<N> */
 	PCI_MMAP_PROCFS	/* mmap on /proc/bus/pci/<BDF> */ /* [한국어] procfs 경로: /proc/bus/pci/<BDF> 를 mmap 하는 경우. 레거시 인터페이스라 주소 해석 규칙이 다르다 */
-}; /* [한국어] enum 정의 종료 */
+};
 /* [한국어]
  * pci_mmap_fits() - 유저가 요청한 mmap 범위가 해당 BAR 안에 들어오는지 검사
  *
@@ -849,7 +849,7 @@ int pci_proc_detach_bus(struct pci_bus *bus); /* [한국어] 버스 단위 디�
 static inline int pci_proc_attach_device(struct pci_dev *dev) { return 0; } /* [한국어] 스텁: /proc 노드를 만들지 않고 성공만 반환 */
 static inline int pci_proc_detach_device(struct pci_dev *dev) { return 0; } /* [한국어] 스텁: 지울 것이 없으므로 성공 */
 static inline int pci_proc_detach_bus(struct pci_bus *bus) { return 0; } /* [한국어] 스텁: 지울 것이 없으므로 성공 */
-#endif /* [한국어] CONFIG_PROC_FS 분기 종료 */
+#endif
 
 /* [한국어] --- 핫플러그 드라이버가 쓰는 내부 함수 ---
  * drivers/pci/hotplug/ 아래의 pciehp/acpiphp 등이 이 둘을 쓴다. */
@@ -869,7 +869,7 @@ void pci_remove_legacy_files(struct pci_bus *bus); /* [한국어] 그 파일들�
 #else /* [한국어] 조건이 맞지 않는 경우 */
 static inline void pci_create_legacy_files(struct pci_bus *bus) { } /* [한국어] 스텁: 레거시 I/O 공간 sysfs 파일을 만들지 않는다 */
 static inline void pci_remove_legacy_files(struct pci_bus *bus) { } /* [한국어] 스텁: 지울 파일이 없다 */
-#endif /* [한국어] CONFIG_SYSFS + HAVE_PCI_LEGACY 분기 종료 */
+#endif
 
 /* [한국어] --- PCI 코어의 전역 락 세 개 ---
  * 세 락은 보호 대상과 컨텍스트 제약이 서로 다르다. 이 구분을 놓치면
@@ -905,7 +905,7 @@ extern unsigned int pci_pm_d3hot_delay;
 void pci_no_msi(void); /* [한국어] MSI 사용을 전역으로 끈다("pci=nomsi"). 정의 drivers/pci/msi/msi.c. NVMe 는 MSI-X 를 못 쓰면 큐당 인터럽트를 포기하고 단일 벡터/INTx 로 떨어진다 */
 #else /* [한국어] CONFIG_PCI_MSI 가 꺼진 경우 */
 static inline void pci_no_msi(void) { } /* [한국어] 스텁: 끌 MSI 자체가 없으므로 아무 일도 하지 않는다 */
-#endif /* [한국어] CONFIG_PCI_MSI 분기 종료 */
+#endif
 
 /* [한국어] "pci=realloc" 커널 파라미터 파서.
  * 정의: drivers/pci/setup-bus.c (__init).
@@ -963,7 +963,7 @@ static inline void pci_remove_sysfs_dev_files(struct pci_dev *pdev) { } /* [한�
 #define pci_dev_attr_groups NULL /* [한국어] 같은 이유로 NULL */
 #define pcibus_groups NULL /* [한국어] 같은 이유로 NULL */
 #define pci_bus_groups NULL /* [한국어] 같은 이유로 NULL */
-#endif /* [한국어] CONFIG_SYSFS 분기 종료 */
+#endif
 
 /* [한국어] --- 핫플러그 슬롯에 미리 잡아 둘 여유 공간 크기 ---
  * 빈 핫플러그 슬롯 뒤에 나중에 카드가 꽂힐 것에 대비해, 브리지 윈도우를
@@ -1438,7 +1438,7 @@ static inline int pcie_dev_speed_mbps(enum pci_bus_speed speed)
 		return 64000; /* [한국어] 64000 Mb/s */
 	default: /* [한국어] 위 목록에 없는 값(PCI_SPEED_UNKNOWN 또는 PCI/PCI-X 속도) */
 		break; /* [한국어] switch 를 빠져나가 아래 에러 반환으로 간다 */
-	} /* [한국어] switch 종료 */
+	}
 
 	return -EINVAL; /* [한국어] 알 수 없는 속도 — 음수 errno 로 실패를 알린다. 반환형이 int 인 이유가 여기 있다 */
 }
@@ -1723,7 +1723,7 @@ void pci_doe_disconnected(struct pci_dev *pdev); /* [한국어] 장치가 사라
 static inline void pci_doe_init(struct pci_dev *pdev) { } /* [한국어] 스텁: 초기화할 메일박스가 없다 */
 static inline void pci_doe_destroy(struct pci_dev *pdev) { } /* [한국어] 스텁: 해제할 것이 없다 */
 static inline void pci_doe_disconnected(struct pci_dev *pdev) { } /* [한국어] 스텁: 아래 pci_dev_set_disconnected 가 무조건 부르므로 반드시 존재해야 한다 */
-#endif /* [한국어] CONFIG_PCI_DOE 분기 종료 */
+#endif
 
 /* [한국어] --- NPEM(Native PCIe Enclosure Management), CONFIG_PCI_NPEM ---
  * NPEM 은 드라이브 베이의 상태 LED(정상/장애/위치확인/재구축 등)를 표준
@@ -1737,7 +1737,7 @@ void pci_npem_remove(struct pci_dev *dev); /* [한국어] 그 인터페이스를
 #else /* [한국어] CONFIG_PCI_NPEM 이 꺼진 경우 */
 static inline void pci_npem_create(struct pci_dev *dev) { } /* [한국어] 스텁: LED 제어를 제공하지 않는다 */
 static inline void pci_npem_remove(struct pci_dev *dev) { } /* [한국어] 스텁: 해제할 것이 없다 */
-#endif /* [한국어] CONFIG_PCI_NPEM 분기 종료 */
+#endif
 
 /* [한국어] --- DOE 의 sysfs 노출 (CONFIG_PCI_DOE + CONFIG_SYSFS) ---
  * 두 조건이 모두 켜져야 의미가 있으므로 AND 로 갈린다. DOE 기능은 있는데
@@ -1748,7 +1748,7 @@ void pci_doe_sysfs_teardown(struct pci_dev *pdev); /* [한국어] 그 파일들�
 #else /* [한국어] 둘 중 하나라도 꺼진 경우 */
 static inline void pci_doe_sysfs_init(struct pci_dev *pdev) { } /* [한국어] 스텁: 보여 줄 곳이 없다 */
 static inline void pci_doe_sysfs_teardown(struct pci_dev *pdev) { } /* [한국어] 스텁: 지울 것이 없다 */
-#endif /* [한국어] 조건 분기 종료 */
+#endif
 
 /* [한국어] --- IDE(Integrity and Data Encryption), CONFIG_PCI_IDE ---
  * PCIe IDE 는 링크 위를 흐르는 TLP 자체를 암호화·무결성 보호하는 기능이다
@@ -1765,7 +1765,7 @@ extern const struct attribute_group pci_ide_attr_group; /* [한국어] IDE 상�
 static inline void pci_ide_init(struct pci_dev *dev) { } /* [한국어] 스텁: 링크 암호화를 제공하지 않는다 */
 static inline void pci_ide_init_host_bridge(struct pci_host_bridge *hb) { } /* [한국어] 스텁: 브리지 쪽 준비도 없다 */
 static inline void pci_ide_destroy(struct pci_dev *dev) { } /* [한국어] 스텁: 해제할 것이 없다 */
-#endif /* [한국어] CONFIG_PCI_IDE 분기 종료 */
+#endif
 
 /* [한국어] --- TSM(TEE Security Manager), CONFIG_PCI_TSM ---
  * 기밀 컴퓨팅(Confidential Computing)에서 장치를 신뢰 실행 환경에 안전하게
@@ -1779,7 +1779,7 @@ extern const struct attribute_group pci_tsm_auth_attr_group; /* [한국어] 장�
 #else /* [한국어] CONFIG_PCI_TSM 이 꺼진 경우 */
 static inline void pci_tsm_init(struct pci_dev *pdev) { } /* [한국어] 스텁: TEE 연동을 제공하지 않는다 */
 static inline void pci_tsm_destroy(struct pci_dev *pdev) { } /* [한국어] 스텁: 해제할 것이 없다 */
-#endif /* [한국어] CONFIG_PCI_TSM 분기 종료 */
+#endif
 
 /* [한국어] 아래 함수의 한국어 해설:
  * pci_dev_set_io_state() - 장치의 오류 채널 상태를 원자적으로 전이시킨다
@@ -2168,7 +2168,7 @@ struct rcec_ea {
 	 * 동기화: 초기화 후 읽기 전용. */
 	u32		bitmap;
 };
-#endif /* [한국어] CONFIG_PCIEPORTBUS 분기 종료 */
+#endif
 
 /* [한국어] --- DPC(Downstream Port Containment), CONFIG_PCIE_DPC ---
  * DPC 는 하위 포트에서 치명적 오류가 감지되면 하드웨어가 즉시 링크를
@@ -2195,7 +2195,7 @@ static inline void pci_save_dpc_state(struct pci_dev *dev) { } /* [한국어] �
 static inline void pci_restore_dpc_state(struct pci_dev *dev) { } /* [한국어] 스텁: 복원할 것이 없다 */
 static inline void pci_dpc_init(struct pci_dev *pdev) { } /* [한국어] 스텁: 초기화할 것이 없다 */
 static inline bool pci_dpc_recovered(struct pci_dev *pdev) { return false; } /* [한국어] 스텁: DPC 복구를 기다릴 일이 없으므로 항상 false */
-#endif /* [한국어] CONFIG_PCIE_DPC 분기 종료 */
+#endif
 
 /* [한국어] --- RCEC 관련 API (CONFIG_PCIEPORTBUS) ---
  * 위에서 선언한 struct rcec_ea 를 채우고 활용하는 함수들이다.
@@ -2218,7 +2218,7 @@ static inline void pcie_link_rcec(struct pci_dev *rcec) { } /* [한국어] 스�
 static inline void pcie_walk_rcec(struct pci_dev *rcec, /* [한국어] 스텁 시작 — 콜백을 한 번도 부르지 않는다(담당 RCiEP 가 없음과 같다) */
 				  int (*cb)(struct pci_dev *, void *),
 				  void *userdata) { }
-#endif /* [한국어] CONFIG_PCIEPORTBUS 분기 종료 */
+#endif
 
 /* [한국어] --- ATS(Address Translation Service), CONFIG_PCI_ATS ---
  * ATS 는 장치가 IOMMU 에 "이 IOVA 의 실제 물리 주소가 뭐냐"고 미리 물어
@@ -2246,7 +2246,7 @@ void pci_restore_pri_state(struct pci_dev *pdev); /* [한국어] resume 후 PRI 
 #else /* [한국어] CONFIG_PCI_PRI 가 꺼진 경우 */
 static inline void pci_pri_init(struct pci_dev *dev) { } /* [한국어] 스텁: PRI 없음 */
 static inline void pci_restore_pri_state(struct pci_dev *pdev) { } /* [한국어] 스텁: 복원할 것 없음 */
-#endif /* [한국어] CONFIG_PCI_PRI 분기 종료 */
+#endif
 
 /* [한국어] --- PASID(Process Address Space ID), CONFIG_PCI_PASID ---
  * PASID 는 TLP 에 20비트 주소 공간 식별자를 붙여, 하나의 장치가 여러 프로세스의
@@ -2257,7 +2257,7 @@ void pci_restore_pasid_state(struct pci_dev *pdev); /* [한국어] resume 후 PA
 #else /* [한국어] CONFIG_PCI_PASID 가 꺼진 경우 */
 static inline void pci_pasid_init(struct pci_dev *dev) { } /* [한국어] 스텁: PASID 없음 */
 static inline void pci_restore_pasid_state(struct pci_dev *pdev) { } /* [한국어] 스텁: 복원할 것 없음 */
-#endif /* [한국어] CONFIG_PCI_PASID 분기 종료 */
+#endif
 
 /* [한국어] --- SR-IOV API (CONFIG_PCI_IOV) ---
  * 위 struct pci_sriov 를 다루는 함수들이다. 이 블록의 #else 스텁들이
@@ -2465,7 +2465,7 @@ static inline void pci_restore_tph_state(struct pci_dev *dev) { } /* [한국어]
 static inline void pci_save_tph_state(struct pci_dev *dev) { } /* [한국어] 스텁: 저장할 것 없음 */
 static inline void pci_no_tph(void) { } /* [한국어] 스텁: 끌 대상 없음 */
 static inline void pci_tph_init(struct pci_dev *dev) { } /* [한국어] 스텁: 초기화할 것 없음 */
-#endif /* [한국어] CONFIG_PCIE_TPH 분기 종료 */
+#endif
 
 /* [한국어] --- PTM(Precision Time Measurement), CONFIG_PCIE_PTM ---
  * PTM 은 루트 컴플렉스와 장치가 나노초 단위로 시계를 맞추는 기능이다.
@@ -2484,7 +2484,7 @@ static inline void pci_save_ptm_state(struct pci_dev *dev) { } /* [한국어] �
 static inline void pci_restore_ptm_state(struct pci_dev *dev) { } /* [한국어] 스텁: 복원할 것 없음 */
 static inline void pci_suspend_ptm(struct pci_dev *dev) { } /* [한국어] 스텁: 끌 것 없음 */
 static inline void pci_resume_ptm(struct pci_dev *dev) { } /* [한국어] 스텁: 켤 것 없음 */
-#endif /* [한국어] CONFIG_PCIE_PTM 분기 종료 */
+#endif
 
 /* [한국어]
  * pci_resource_alignment() - 이 리소스가 요구하는 주소 정렬을 계산한다
@@ -2587,7 +2587,7 @@ static inline int pcie_failed_link_retrain(struct pci_dev *dev) /* [한국어] �
 {
 	return -ENOTTY; /* [한국어] 손으로 재훈련할 대상이 아니다 */
 }
-#endif /* [한국어] CONFIG_PCI_QUIRKS 분기 종료 */
+#endif
 
 /* [한국어] --- PCIe 오류 보고와 복구의 중심 진입점 ---
  * pcie_do_recovery() 는 AER 과 DPC, EDR 이 공유하는 복구 상태 기계다.
@@ -2662,7 +2662,7 @@ static inline void pcie_aspm_pm_state_change(struct pci_dev *pdev, bool locked) 
 static inline void pcie_aspm_powersave_config_link(struct pci_dev *pdev) { } /* [한국어] 스텁: 재설정할 것이 없다 */
 static inline void pci_configure_ltr(struct pci_dev *pdev) { } /* [한국어] 스텁: LTR 을 건드리지 않는다 */
 static inline void pci_bridge_reconfigure_ltr(struct pci_dev *pdev) { } /* [한국어] 스텁: 브리지 LTR 재계산 없음 */
-#endif /* [한국어] CONFIG_PCIEASPM 분기 종료 */
+#endif
 
 /* [한국어] --- ECRC(End-to-End CRC), CONFIG_PCIE_ECRC ---
  * ECRC 는 TLP 끝에 32비트 CRC 를 붙여, 링크 계층 CRC 가 잡지 못하는
@@ -2677,7 +2677,7 @@ void pcie_ecrc_get_policy(char *str); /* [한국어] "pcie_ecrc=" 부팅 파라�
 #else /* [한국어] CONFIG_PCIE_ECRC 가 꺼진 경우 */
 static inline void pcie_set_ecrc_checking(struct pci_dev *dev) { } /* [한국어] 스텁: ECRC 를 건드리지 않는다 */
 static inline void pcie_ecrc_get_policy(char *str) { } /* [한국어] 스텁: 파라미터를 무시한다 */
-#endif /* [한국어] CONFIG_PCIE_ECRC 분기 종료 */
+#endif
 
 /* [한국어] --- LBMS(Link Bandwidth Management Status) 초기화 ---
  * LBMS 는 "링크 대역폭이 바뀌었다"를 알리는 상태 비트다. 링크가 스스로
@@ -2688,7 +2688,7 @@ static inline void pcie_ecrc_get_policy(char *str) { } /* [한국어] 스텁: �
 void pcie_reset_lbms(struct pci_dev *port); /* [한국어] Link Status 의 LBMS 비트와 priv_flags 의 PCI_LINK_LBMS_SEEN 을 초기화한다. 정의 drivers/pci/pcie/bwctrl.c */
 #else /* [한국어] CONFIG_PCIEPORTBUS 가 꺼진 경우 */
 static inline void pcie_reset_lbms(struct pci_dev *port) {} /* [한국어] 스텁: 정리할 LBMS 상태가 없다 */
-#endif /* [한국어] CONFIG_PCIEPORTBUS 분기 종료 */
+#endif
 
 /* [한국어]
  * struct pci_dev_reset_methods - 특정 하드웨어 전용 리셋 방법 표의 한 줄
@@ -2749,7 +2749,7 @@ static inline int pci_dev_specific_reset(struct pci_dev *dev, bool probe) /* [�
 {
 	return -ENOTTY; /* [한국어] -ENOTTY = 특화 리셋 없음. 호출자는 표준 리셋으로 넘어간다 */
 }
-#endif /* [한국어] CONFIG_PCI_QUIRKS 분기 종료 */
+#endif
 
 /* [한국어] --- ARM64 + quirk 전용: ACPI 로 Root Complex 리소스 얻기 ---
  * 두 조건의 AND 인 이유: 이 함수는 일부 ARM64 서버 SoC 의 호스트 브리지가
@@ -2773,7 +2773,7 @@ static inline int acpi_get_rc_resources(struct device *dev, const char *hid, /* 
 {
 	return -ENODEV; /* [한국어] -ENODEV = 그런 ACPI 장치가 없다. 호출자는 일반 경로로 진행한다 */
 }
-#endif /* [한국어] 조건 분기 종료 */
+#endif
 
 /* [한국어] --- Resizable BAR (rebar) ---
  * Resizable BAR 확장 capability 는 장치가 지원하는 BAR 크기 후보들을
@@ -3008,7 +3008,7 @@ static inline void of_pci_make_dev_node(struct pci_dev *pdev) { } /* [한국어]
 static inline void of_pci_remove_node(struct pci_dev *pdev) { } /* [한국어] 스텁: 없앨 노드가 없다 */
 static inline void of_pci_make_host_bridge_node(struct pci_host_bridge *bridge) { } /* [한국어] 스텁: 호스트 브리지용 디바이스트리 노드를 만들지 않는다 */
 static inline void of_pci_remove_host_bridge_node(struct pci_host_bridge *bridge) { } /* [한국어] 스텁: 없앨 노드가 없다. of_pci_add_properties() 와 of_pci_add_host_bridge_properties() 에는 스텁이 없는데, 그 둘은 위 make 계열 함수 안에서만 불리므로 여기서는 도달할 수 없기 때문이다 */
-#endif /* [한국어] CONFIG_PCI_DYNAMIC_OF_NODES 분기 종료 */
+#endif
 
 /* [한국어] --- AER 초기화/상태 정리 API (CONFIG_PCIEAER) ---
  * 위쪽 CONFIG_PCIEAER 블록이 자료구조와 로그 출력이었다면, 이 블록은
@@ -3037,7 +3037,7 @@ static inline int pci_aer_clear_status(struct pci_dev *dev) { return -EINVAL; } 
 static inline int pci_aer_raw_clear_status(struct pci_dev *dev) { return -EINVAL; } /* [한국어] 스텁: 같은 이유로 -EINVAL */
 static inline void pci_save_aer_state(struct pci_dev *dev) { } /* [한국어] 스텁: 저장할 AER 상태가 없다 */
 static inline void pci_restore_aer_state(struct pci_dev *dev) { } /* [한국어] 스텁: 복원할 것이 없다 */
-#endif /* [한국어] CONFIG_PCIEAER 분기 종료 */
+#endif
 
 /* [한국어] --- ACPI 연동 (CONFIG_ACPI) ---
  * x86 서버/PC 에서는 펌웨어(ACPI)가 PCI 장치의 전원 상태를 직접 제어하는
@@ -3170,14 +3170,14 @@ static inline pci_power_t acpi_pci_choose_state(struct pci_dev *pdev) /* [한국
 {
 	return PCI_POWER_ERROR; /* [한국어] PCI_POWER_ERROR = 플랫폼이 목표 상태를 골라 주지 못했다. 호출자는 커널 기본 정책으로 결정한다 */
 }
-#endif /* [한국어] CONFIG_ACPI 분기 종료 */
+#endif
 
 /* [한국어] ASPM 제어용 sysfs 속성 그룹(link_pm 관련 파일들).
  * CONFIG_PCIEASPM 이 꺼지면 보여 줄 것이 없으므로 선언 자체가 사라지고,
  * 이 심볼을 참조하는 코드도 같은 #ifdef 안에 있어 스텁이 필요 없다. */
 #ifdef CONFIG_PCIEASPM
 extern const struct attribute_group aspm_ctrl_attr_group; /* [한국어] ASPM 제어용 sysfs 속성 그룹. 실체는 drivers/pci/pcie/aspm.c 에 있다 */
-#endif /* [한국어] CONFIG_PCIEASPM 분기 종료 */
+#endif
 
 /* [한국어] --- Intel MID 플랫폼 전용 전원 관리 (CONFIG_X86_INTEL_MID) ---
  * MID(Mobile Internet Device)는 인텔의 옛 Atom 기반 모바일 SoC 계열이다.
@@ -3213,7 +3213,7 @@ static inline pci_power_t mid_pci_get_power_state(struct pci_dev *pdev) /* [한�
 {
 	return PCI_UNKNOWN; /* [한국어] PCI_UNKNOWN = 알 수 없음 */
 }
-#endif /* [한국어] CONFIG_X86_INTEL_MID 분기 종료 */
+#endif
 
 /* [한국어] --- MSI-X 항목에 TPH Steering Tag 쓰기 (CONFIG_PCI_MSI) ---
  * 위에서 본 TPH 는 "이 데이터를 어느 캐시에 두라"는 힌트인데, 그 힌트에
@@ -3227,7 +3227,7 @@ static inline int pci_msix_write_tph_tag(struct pci_dev *pdev, unsigned int inde
 {
 	return -ENODEV; /* [한국어] -ENODEV = MSI-X 테이블이 없다 */
 }
-#endif /* [한국어] CONFIG_PCI_MSI 분기 종료 */
+#endif
 
 /* [한국어] === 이 파일의 마지막 절: Configuration Mechanism #1 주소 조립 ===
  *

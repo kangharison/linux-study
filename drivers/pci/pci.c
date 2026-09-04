@@ -530,7 +530,7 @@ void __iomem *pci_ioremap_wc_bar(struct pci_dev *pdev, int bar)
 	return __pci_ioremap_resource(pdev, bar, true); /* [한국어] write_combine=true — 쓰기 결합 매핑 */
 }
 EXPORT_SYMBOL_GPL(pci_ioremap_wc_bar);
-#endif /* [한국어] CONFIG_HAS_IOMEM 블록의 끝 */
+#endif
 
 /**
  * pci_dev_str_match_path - test if a path string matches a device
@@ -715,7 +715,7 @@ static int pci_dev_str_match(struct pci_dev *dev, const char *p,
 
 			subsystem_vendor = 0; /* [한국어] 생략된 subsystem 은 0 으로 둔다 — 아래 비교에서 0 은 "아무 값이나 허용"으로 쓰인다 */
 			subsystem_device = 0; /* [한국어] 같은 이유로 subsystem device 도 0 */
-		}	/* [한국어] subsystem 지정 유무 분기 끝 */
+		}
 
 		p += count; /* [한국어] 소비한 만큼 커서를 앞으로 옮긴다. 호출자에게 돌려줄 endptr 의 기준이 된다 */
 
@@ -726,7 +726,7 @@ static int pci_dev_str_match(struct pci_dev *dev, const char *p,
 		    (!subsystem_device || /* [한국어] subsystem device 도 마찬가지로 0 이면 무시하고 */
 			    subsystem_device == dev->subsystem_device)) /* [한국어] 0 이 아니면 일치해야 한다 */
 			goto found; /* [한국어] 네 조건이 모두 통과하면 일치 처리 지점으로 간다 */
-	} else { /* [한국어] "pci:" 로 시작하지 않으면 주소/경로 형식이다 */
+	} else {
 		/*
 		 * PCI Bus, Device, Function IDs are specified
 		 * (optionally, may include a path of devfns following it)
@@ -736,7 +736,7 @@ static int pci_dev_str_match(struct pci_dev *dev, const char *p,
 			return ret; /* [한국어] 그대로 상위에 전달한다 */
 		else if (ret) /* [한국어] 1 이면 일치 */
 			goto found; /* [한국어] 일치 처리 지점으로 */
-	}	/* [한국어] 항목 순회 끝 — 여기까지 왔으면 어느 것도 일치하지 않았다 */
+	}
 
 	*endptr = p; /* [한국어] 불일치로 끝나더라도 이 항목을 어디까지 읽었는지는 알려 줘야 호출자가 다음 항목으로 넘어갈 수 있다 */
 	return 0; /* [한국어] 불일치 */
@@ -1141,7 +1141,7 @@ static u8 __pci_find_next_ht_cap(struct pci_dev *dev, u8 pos, int ht_cap)
 
 	if (ht_cap == HT_CAPTYPE_SLAVE || ht_cap == HT_CAPTYPE_HOST) /* [한국어] SLAVE/HOST 는 상위 3비트만으로 구분되는 타입이다 */
 		mask = HT_3BIT_CAP_MASK; /* [한국어] 상위 3비트 마스크 */
-	else /* [한국어] 그 밖의 HT 타입은 */
+	else
 		mask = HT_5BIT_CAP_MASK; /* [한국어] 상위 5비트로 구분한다 */
 
 	pos = PCI_FIND_NEXT_CAP(pci_bus_read_config, pos, /* [한국어] 먼저 PCI_CAP_ID_HT(0x08) 인 capability 를 찾는다 */
@@ -1519,7 +1519,7 @@ const char *pci_resource_name(struct pci_dev *dev, unsigned int i)
 		"VF BAR 3", /* [한국어] VF BAR 3 */
 		"VF BAR 4", /* [한국어] VF BAR 4 */
 		"VF BAR 5", /* [한국어] VF BAR 5 */
-#endif /* [한국어] SR-IOV 가 꺼지면 위 여섯 칸이 사라지고 뒤 항목의 인덱스가 당겨진다 */
+#endif
 		"bridge window",	/* "io" included in %pR */
 		"bridge window",	/* "mem" included in %pR */
 		"bridge window",	/* "mem pref" included in %pR */
@@ -1539,7 +1539,7 @@ const char *pci_resource_name(struct pci_dev *dev, unsigned int i)
 		"unknown", /* [한국어] 인덱스 정렬용 자리 */
 		"unknown", /* [한국어] 인덱스 정렬용 자리 */
 		"unknown", /* [한국어] 인덱스 정렬용 자리 */
-#endif /* [한국어] VF BAR 칸의 끝 */
+#endif
 		"CardBus bridge window 0",	/* I/O */
 		"CardBus bridge window 1",	/* I/O */
 		"CardBus bridge window 0",	/* mem */
@@ -1716,13 +1716,13 @@ static void __pci_config_acs(struct pci_dev *dev, struct pci_acs *caps,
 					} else if ((*(p + end) == 'x') || (*(p + end) == 'X')) { /* [한국어] 'x'/'X' — 이 비트는 건드리지 않는다 */
 						shift++; /* [한국어] 마스크를 세우지 않으므로 아래 합성식에서 펌웨어 값이 그대로 남는다 */
 						end--; /* [한국어] 왼쪽 글자로 */
-					} else { /* [한국어] 0/1/x 가 아닌 글자 */
+					} else {
 						pci_err(dev, "Invalid ACS flags... Ignoring\n"); /* [한국어] 형식 오류를 알린다 */
 						return; /* [한국어] 잘못된 파라미터로 ACS 를 건드리느니 아무 것도 하지 않는다 */
 					}
 				}
 				p = delimit + 1; /* [한국어] 비트열을 다 읽었으니 "@" 다음의 장치 지정자로 커서를 옮긴다 */
-			} else { /* [한국어] "@" 가 없으면 비트열이 빠진 것이다 */
+			} else {
 				pci_err(dev, "ACS Flags missing\n"); /* [한국어] 형식 오류를 알리고 */
 				return; /* [한국어] 중단한다 */
 			}
@@ -2204,7 +2204,7 @@ void pci_update_current_state(struct pci_dev *dev, pci_power_t state)
 			return; /* [한국어] 더 볼 것이 없다 */
 		}
 		dev->current_state = pmcsr & PCI_PM_CTRL_STATE_MASK; /* [한국어] PMCSR 하위 2비트(PCI_PM_CTRL_STATE_MASK)가 곧 현재 D-state 다. 0=D0, 1=D1, 2=D2, 3=D3hot */
-	} else { /* [한국어] PM capability 가 없는 장치 — 전원 상태를 물어볼 레지스터 자체가 없다 */
+	} else {
 		dev->current_state = state; /* [한국어] 호출자가 알려 준 값을 그대로 믿는다 */
 	}
 }
@@ -2414,7 +2414,7 @@ static int pci_dev_wait(struct pci_dev *dev, char *reset_type, int timeout)
 			pci_read_config_dword(dev, PCI_VENDOR_ID, &id); /* [한국어] Vendor ID(오프셋 0x00)를 32비트로 읽는다 — Device ID 까지 함께 온다 */
 			if (!pci_bus_rrs_vendor_id(id)) /* [한국어] RRS 를 뜻하는 특별한 Vendor ID 값이 아니면 장치가 준비된 것이다 */
 				break; /* [한국어] 대기 종료 */
-		} else { /* [한국어] RRS 가시성이 없으면 RRS 와 "장치 없음"을 구분할 수 없다 */
+		} else {
 			pci_read_config_dword(dev, PCI_COMMAND, &id); /* [한국어] 그래서 Command 레지스터(오프셋 0x04)를 읽는다. 정상 장치라면 all-ones 일 수 없다 */
 			if (!PCI_POSSIBLE_ERROR(id)) /* [한국어] all-ones 가 아니면 정상 응답이다 */
 				break; /* [한국어] 대기 종료 */
@@ -2445,7 +2445,7 @@ static int pci_dev_wait(struct pci_dev *dev, char *reset_type, int timeout)
 	if (delay > PCI_RESET_WAIT) /* [한국어] 1초를 넘겨 걸렸다면 눈에 띄게 남길 가치가 있다 */
 		pci_info(dev, "ready %dms after %s\n", delay - 1, /* [한국어] 정보 수준으로 기록한다 */
 			 reset_type); /* [한국어] 어떤 리셋 뒤였는지도 함께 */
-	else /* [한국어] 평범하게 끝났으면 */
+	else
 		pci_dbg(dev, "ready %dms after %s\n", delay - 1, /* [한국어] 디버그 수준으로만 남긴다 */
 			reset_type); /* [한국어] 어떤 리셋 뒤였는지 */
 
@@ -2508,7 +2508,7 @@ int pci_power_up(struct pci_dev *dev)
 		state = platform_pci_get_power_state(dev); /* [한국어] 그래도 플랫폼이 아는 상태는 기록해 둔다 */
 		if (state == PCI_UNKNOWN) /* [한국어] 플랫폼도 모른다면 */
 			dev->current_state = PCI_D0; /* [한국어] 전원이 켜져 있다고 보는 쪽이 안전하다 */
-		else /* [한국어] 플랫폼이 답을 주었으면 */
+		else
 			dev->current_state = state; /* [한국어] 그 값을 그대로 기록한다 */
 
 		return -EIO; /* [한국어] 상태 기록과 별개로, PCI PM 으로 D0 를 만들지는 못했으므로 실패로 보고한다 */
@@ -2725,7 +2725,7 @@ static void __pci_bus_set_current_state(struct pci_bus *bus, pci_power_t state, 
 
 	if (locked) /* [한국어] 호출자가 이미 pci_bus_sem 을 쥐고 있으면 */
 		pci_walk_bus_locked(bus, __pci_dev_set_current_state, &state); /* [한국어] 락을 다시 잡지 않는 판을 쓴다 — 그러지 않으면 자기 자신과 교착한다 */
-	else /* [한국어] 락이 없으면 */
+	else
 		pci_walk_bus(bus, __pci_dev_set_current_state, &state); /* [한국어] 스스로 pci_bus_sem 을 잡는 일반 순회를 쓴다 */
 }
 
@@ -2920,7 +2920,7 @@ static int __pci_set_power_state(struct pci_dev *dev, pci_power_t state, bool lo
 		/* Powering off a bridge may power off the whole hierarchy */
 		if (dev->current_state == PCI_D3cold) /* [한국어] 브리지 자신이 D3cold 에 들어갔다면 */
 			__pci_bus_set_current_state(dev->subordinate, PCI_D3cold, locked); /* [한국어] 그 아래 모든 장치도 전원을 잃었다. config 로 확인할 수 없으니 캐시만 일괄로 맞춘다 */
-	} else { /* [한국어] D1/D2/D3hot 로 내려가는 경우 */
+	} else {
 		error = pci_set_low_power_state(dev, state, locked); /* [한국어] 장치의 PMCSR 로 전이한다 */
 
 		if (pci_platform_power_transition(dev, state)) /* [한국어] 플랫폼에도 같은 상태를 알린다. 실패하면 */
@@ -3479,7 +3479,7 @@ static void pci_restore_config_space(struct pci_dev *pdev)
 		 */
 		pci_restore_config_space_range(pdev, 9, 11, 0, true); /* [한국어] DWORD 9~11 — prefetchable 메모리 창의 상위 32비트 레지스터들. force=true 로 값이 같아도 반드시 다시 쓴다 */
 		pci_restore_config_space_range(pdev, 0, 8, 0, false); /* [한국어] DWORD 0~8 — Command 와 나머지 브리지 창 설정 */
-	} else { /* [한국어] CardBus 등 그 밖의 헤더 타입 */
+	} else {
 		pci_restore_config_space_range(pdev, 0, 15, 0, false); /* [한국어] 순서를 따질 근거가 없어 전 구간을 한 번에 되돌린다 */
 	}
 }
@@ -4416,7 +4416,7 @@ void pcie_clear_device_status(struct pci_dev *dev)
 				   PCI_EXP_DEVSTA_CED | PCI_EXP_DEVSTA_NFED | /* [한국어] Correctable / Non-Fatal 오류 검출 비트 */
 				   PCI_EXP_DEVSTA_FED | PCI_EXP_DEVSTA_URD); /* [한국어] Fatal / Unsupported Request 검출 비트 */
 }
-#endif /* [한국어] CONFIG_PCIEAER 블록의 끝 */
+#endif
 
 /**
  * pcie_clear_root_pme_status - Clear root port PME interrupt status.
@@ -4694,7 +4694,7 @@ static void pci_pme_list_scan(struct work_struct *work)
 put_bridge: /* [한국어] 브리지 참조를 놓기 위한 공통 출구 */
 			if (bref > 0) /* [한국어] 참조를 실제로 잡았을 때만 */
 				pm_runtime_put(bdev); /* [한국어] 놓는다. 그래야 브리지가 다시 절전에 들어갈 수 있다 */
-		} else { /* [한국어] pme_poll 이 내려간 장치 — 인터럽트가 제대로 온다고 판명됐다 */
+		} else {
 			list_del(&pme_dev->list); /* [한국어] 폴링 리스트에서 뺀다 */
 			kfree(pme_dev); /* [한국어] 항목 메모리를 해제한다. _safe 순회라 삭제해도 안전하다 */
 		}
@@ -4781,7 +4781,7 @@ void pci_pme_restore(struct pci_dev *dev)
 	if (dev->wakeup_prepared) { /* [한국어] 소프트웨어가 "이 장치로 깨어날 것"이라 기대하는 상태라면 */
 		pmcsr |= PCI_PM_CTRL_PME_ENABLE; /* [한국어] PME 발생을 켠다 */
 		pmcsr &= ~PCI_PM_CTRL_PME_STATUS; /* [한국어] Status 비트는 0 으로 남긴다 — W1C 라 0 을 쓰면 지워지지 않아, 그 사이 실제로 도착한 PME 를 잃지 않는다 */
-	} else { /* [한국어] 깨우기를 원하지 않는 상태라면 */
+	} else {
 		pmcsr &= ~PCI_PM_CTRL_PME_ENABLE; /* [한국어] PME 발생을 끄고 */
 		pmcsr |= PCI_PM_CTRL_PME_STATUS; /* [한국어] Status 에 1 을 세워 묵은 흔적을 지운다 */
 	}
@@ -4866,7 +4866,7 @@ void pci_pme_active(struct pci_dev *dev, bool enable)
 						   &pci_pme_work, /* [한국어] 예약할 지연 워크 */
 						   msecs_to_jiffies(PME_TIMEOUT)); /* [한국어] 1초 뒤 */
 			mutex_unlock(&pci_pme_list_mutex); /* [한국어] 리스트 보호를 푼다 */
-		} else { /* [한국어] 끄는 경우 */
+		} else {
 			mutex_lock(&pci_pme_list_mutex); /* [한국어] 리스트를 보호한다 */
 			list_for_each_entry(pme_dev, &pci_pme_list, list) { /* [한국어] 해당 장치의 항목을 찾는다 */
 				if (pme_dev->dev == dev) { /* [한국어] 같은 장치를 가리키는 항목이면 */
@@ -4968,14 +4968,14 @@ static int __pci_enable_wake(struct pci_dev *dev, pci_power_t state, bool enable
 		 */
 		if (pci_pme_capable(dev, state) || pci_pme_capable(dev, PCI_D3cold)) /* [한국어] 목표 상태에서 PME 를 낼 수 있거나, D3cold 에서 낼 수 있으면 — 후자는 위 계층이 D3cold 로 내려갈 때를 대비한 것이다 */
 			pci_pme_active(dev, true); /* [한국어] 장치 쪽 PME 를 켠다 */
-		else /* [한국어] 어느 쪽도 아니면 */
+		else
 			ret = 1; /* [한국어] 장치 쪽은 실패로 표시해 둔다. 플랫폼 쪽이 성공하면 아래에서 덮인다 */
 		error = platform_pci_set_wakeup(dev, true); /* [한국어] 플랫폼 쪽 깨우기 경로를 연다 */
 		if (ret) /* [한국어] 장치 쪽이 실패했을 때만 */
 			ret = error; /* [한국어] 플랫폼 쪽 결과를 최종 결과로 삼는다. 둘 중 하나라도 되면 깨울 수 있다 */
 		if (!ret) /* [한국어] 어느 한쪽이라도 성공했으면 */
 			dev->wakeup_prepared = true; /* [한국어] 깨우기 준비 완료로 표시한다. pci_pme_restore() 가 이 플래그를 기준으로 복원한다 */
-	} else { /* [한국어] 끄는 경우 */
+	} else {
 		platform_pci_set_wakeup(dev, false); /* [한국어] 대칭을 위해 플랫폼 쪽을 먼저 끈다 */
 		pci_pme_active(dev, false); /* [한국어] 그 다음 장치 쪽 PME 를 끈다 */
 		dev->wakeup_prepared = false; /* [한국어] 표시를 내린다 */
@@ -5671,7 +5671,7 @@ static const struct dmi_system_id bridge_d3_blacklist[] = {
 			DMI_MATCH(DMI_BOARD_VERSION, "95.33"), /* [한국어] BIOS/보드 버전 */
 		},
 	},
-#endif /* [한국어] x86 전용 항목의 끝 */
+#endif
 	{ } /* [한국어] 빈 항목이 표의 끝 표식이다. dmi_check_system() 이 이것을 만나면 순회를 멈춘다 */
 };
 
@@ -6205,10 +6205,10 @@ static struct resource *pci_ea_get_resource(struct pci_dev *dev, u8 bei,
 		 (prop == PCI_EA_P_VF_MEM || prop == PCI_EA_P_VF_MEM_PREFETCH)) /* [한국어] Property 도 VF 용이어야 앞뒤가 맞는 엔트리다 */
 		return &dev->resource[PCI_IOV_RESOURCES + /* [한국어] VF 자원 구간의 시작에서 */
 				      bei - PCI_EA_BEI_VF_BAR0]; /* [한국어] BEI 의 상대 위치만큼 떨어진 슬롯이다 */
-#endif /* [한국어] SR-IOV 갈래의 끝 */
+#endif
 	else if (bei == PCI_EA_BEI_ROM) /* [한국어] Expansion ROM 을 가리키는 BEI 면 */
 		return &dev->resource[PCI_ROM_RESOURCE]; /* [한국어] ROM 전용 슬롯을 준다 */
-	else /* [한국어] 그 밖의 BEI(브리지 윈도 등)는 */
+	else
 		return NULL; /* [한국어] 이 코드가 다루지 않는다 */
 }
 
@@ -6363,7 +6363,7 @@ static int pci_ea_read(struct pci_dev *dev, int offset)
 	else if (bei >= PCI_EA_BEI_VF_BAR0 && bei <= PCI_EA_BEI_VF_BAR5) /* [한국어] VF BAR 범위면 */
 		pci_info(dev, "%s %pR: from Enhanced Allocation, properties %#02x\n", /* [한국어] 역시 같은 형식으로 남긴다 */
 			 res_name, res, prop); /* [한국어] 자원 이름, 구간, Property */
-	else /* [한국어] 이름표를 붙일 수 없는 BEI 면 */
+	else
 		pci_info(dev, "BEI %d %pR: from Enhanced Allocation, properties %#02x\n", /* [한국어] BEI 번호를 그대로 찍는다 */
 			   bei, res, prop); /* [한국어] BEI 번호, 구간, Property */
 
@@ -6490,7 +6490,7 @@ static int _pci_add_cap_save_buffer(struct pci_dev *dev, u16 cap,
 
 	if (extended) /* [한국어] 확장 capability 면 */
 		pos = pci_find_ext_capability(dev, cap); /* [한국어] 0x100 이후 리스트에서 찾고 */
-	else /* [한국어] 표준 capability 면 */
+	else
 		pos = pci_find_capability(dev, cap); /* [한국어] 0x34 에서 시작하는 리스트에서 찾는다 */
 
 	if (!pos) /* [한국어] 이 장치에 해당 capability 가 없으면 */
@@ -6681,7 +6681,7 @@ void pci_configure_ari(struct pci_dev *dev)
 		pcie_capability_set_word(bridge, PCI_EXP_DEVCTL2, /* [한국어] 브리지의 ARI Forwarding 을 켠다 */
 					 PCI_EXP_DEVCTL2_ARI); /* [한국어] Device Control 2 의 ARI Forwarding Enable 비트 */
 		bridge->ari_enabled = 1; /* [한국어] 소프트웨어 쪽 표시도 세운다. SR-IOV 코드가 VF 의 devfn 을 계산할 때 이 값을 본다 */
-	} else { /* [한국어] 장치가 ARI 를 쓰지 않으면 */
+	} else {
 		pcie_capability_clear_word(bridge, PCI_EXP_DEVCTL2, /* [한국어] 브리지의 ARI Forwarding 을 끈다. 켜 둔 채로 두면 devfn 해석이 어긋난다 */
 					   PCI_EXP_DEVCTL2_ARI); /* [한국어] 같은 비트를 지운다 */
 		bridge->ari_enabled = 0; /* [한국어] 소프트웨어 표시도 내린다 */
@@ -7552,7 +7552,7 @@ int pci_register_io_range(const struct fwnode_handle *fwnode, phys_addr_t addr,
 	/* Ignore duplicates due to deferred probing */
 	if (ret == -EEXIST) /* [한국어] 이미 같은 창이 등록돼 있다면 — 지연 프로브로 같은 등록이 두 번 오는 경우다 */
 		ret = 0; /* [한국어] 목적은 이미 이뤄졌으므로 성공으로 처리한다 */
-#endif /* [한국어] PCI_IOBASE 갈래의 끝 */
+#endif
 
 	return ret; /* [한국어] PCI_IOBASE 가 없으면 언제나 0 이다 */
 }
@@ -7581,7 +7581,7 @@ phys_addr_t pci_pio_to_address(unsigned long pio)
 #ifdef PCI_IOBASE /* [한국어] 논리 PIO 계층이 있는 아키텍처에서만 실제 변환이 가능하다 */
 	if (pio < MMIO_UPPER_LIMIT) /* [한국어] 논리 PIO 가 관리하는 번호 공간 안이면 */
 		return logic_pio_to_hwaddr(pio); /* [한국어] 등록된 대응 관계로 물리 주소를 찾는다 */
-#endif /* [한국어] PCI_IOBASE 갈래의 끝 */
+#endif
 
 	return (phys_addr_t) OF_BAD_ADDR; /* [한국어] 변환할 수 없음을 뜻하는 관례적인 값 */
 }
@@ -7615,7 +7615,7 @@ unsigned long __weak pci_address_to_pio(phys_addr_t address)
 		return (unsigned long)-1; /* [한국어] 변환할 수 없음을 뜻하는 전부 1 인 값 */
 
 	return (unsigned long) address; /* [한국어] 상한 안이면 값 그대로가 포트 번호다 */
-#endif /* [한국어] 갈래의 끝 */
+#endif
 }
 
 /**
@@ -7674,10 +7674,10 @@ int pci_remap_iospace(const struct resource *res, phys_addr_t phys_addr)
 	 */
 	WARN_ONCE(1, "This architecture does not support memory mapped I/O\n"); /* [한국어] 여기에 도달했다는 것 자체가 호출자의 버그다. 한 번만 경고한다 */
 	return -ENODEV; /* [한국어] 지원하지 않음을 알린다 */
-#endif /* [한국어] 갈래의 끝 */
+#endif
 }
 EXPORT_SYMBOL(pci_remap_iospace);
-#endif /* [한국어] pci_remap_iospace 기본 구현 블록의 끝 */
+#endif
 
 /**
  * pci_unmap_iospace - Unmap the memory mapped I/O space
@@ -7709,7 +7709,7 @@ void pci_unmap_iospace(struct resource *res)
 	unsigned long vaddr = (unsigned long)PCI_IOBASE + res->start; /* [한국어] 매핑할 때와 같은 규칙으로 가상 주소를 계산한다 */
 
 	vunmap_range(vaddr, vaddr + resource_size(res)); /* [한국어] 그 구간의 페이지 매핑을 푼다 */
-#endif /* [한국어] 갈래의 끝 */
+#endif
 }
 EXPORT_SYMBOL(pci_unmap_iospace);
 
@@ -7758,7 +7758,7 @@ static void __pci_set_master(struct pci_dev *dev, bool enable)
 	pci_read_config_word(dev, PCI_COMMAND, &old_cmd); /* [한국어] config space 오프셋 0x04 의 Command 레지스터를 읽는다. 다른 비트(MEM/IO 디코딩 등)를 보존하려면 먼저 읽어야 한다 */
 	if (enable) /* [한국어] 켜는 경우 */
 		cmd = old_cmd | PCI_COMMAND_MASTER; /* [한국어] PCI_COMMAND_MASTER(비트 2)를 세운다. 이 비트가 서야 장치가 스스로 트랜잭션을 시작할 수 있다 */
-	else /* [한국어] 끄는 경우 */
+	else
 		cmd = old_cmd & ~PCI_COMMAND_MASTER; /* [한국어] 같은 비트를 지운다. 이 순간부터 장치는 새 DMA 를 시작할 수 없다 */
 	if (cmd != old_cmd) { /* [한국어] 값이 실제로 달라졌을 때만 쓴다 — 불필요한 config 쓰기를 피한다 */
 		pci_dbg(dev, "%s bus mastering\n", /* [한국어] 상태 변화를 디버그 로그로 남긴다 */
@@ -7844,7 +7844,7 @@ void __weak pcibios_set_master(struct pci_dev *dev)
 		lat = (64 <= pcibios_max_latency) ? 64 : pcibios_max_latency; /* [한국어] 64 로 올리되, 관리자가 정한 상한(pcibios_max_latency)을 넘지 않게 한다 */
 	else if (lat > pcibios_max_latency) /* [한국어] 상한보다 크면 */
 		lat = pcibios_max_latency; /* [한국어] 상한으로 낮춘다. 한 장치가 버스를 독점하지 않게 하는 것이다 */
-	else /* [한국어] 그 사이의 값이면 */
+	else
 		return; /* [한국어] 손대지 않고 그대로 둔다. 아래 쓰기도 건너뛴다 */
 
 	pci_write_config_byte(dev, PCI_LATENCY_TIMER, lat); /* [한국어] 보정한 값을 써 넣는다 */
@@ -8047,7 +8047,7 @@ int pci_set_mwi(struct pci_dev *dev)
 		pci_write_config_word(dev, PCI_COMMAND, cmd); /* [한국어] 써 넣는다 */
 	}
 	return 0; /* [한국어] 성공 */
-#endif /* [한국어] PCI_DISABLE_MWI 갈래의 끝 */
+#endif
 }
 EXPORT_SYMBOL(pci_set_mwi);
 
@@ -8082,7 +8082,7 @@ int pci_try_set_mwi(struct pci_dev *dev)
 	return 0; /* [한국어] 아무 일도 하지 않는다 */
 #else /* [한국어] MWI 를 쓰는 아키텍처면 */
 	return pci_set_mwi(dev); /* [한국어] 평범하게 켜기를 시도한다 */
-#endif /* [한국어] 갈래의 끝 */
+#endif
 }
 EXPORT_SYMBOL(pci_try_set_mwi);
 
@@ -8121,7 +8121,7 @@ void pci_clear_mwi(struct pci_dev *dev)
 		cmd &= ~PCI_COMMAND_INVALIDATE; /* [한국어] 그 비트만 지운다. 다른 비트는 보존한다 */
 		pci_write_config_word(dev, PCI_COMMAND, cmd); /* [한국어] 써 넣는다 */
 	}
-#endif /* [한국어] 갈래의 끝 */
+#endif
 }
 EXPORT_SYMBOL(pci_clear_mwi);
 
@@ -8206,7 +8206,7 @@ void pci_intx(struct pci_dev *pdev, int enable)
 
 	if (enable) /* [한국어] INTx 를 허용하려면 */
 		new = pci_command & ~PCI_COMMAND_INTX_DISABLE; /* [한국어] INTx Disable 비트를 지운다 — 이름이 Disable 이라 켜는 쪽이 "지우기"다 */
-	else /* [한국어] INTx 를 막으려면 */
+	else
 		new = pci_command | PCI_COMMAND_INTX_DISABLE; /* [한국어] 같은 비트를 세운다 */
 
 	if (new == pci_command) /* [한국어] 값이 그대로면 */
@@ -12693,7 +12693,7 @@ bool pci_pr3_present(struct pci_dev *pdev)
 		acpi_has_method(adev->handle, "_PR3");
 }
 EXPORT_SYMBOL_GPL(pci_pr3_present);
-#endif	/* [한국어] CONFIG_ACPI 끝 */
+#endif
 
 /**
  * pci_add_dma_alias - Add a DMA devfn alias for a device
@@ -13150,7 +13150,7 @@ static resource_size_t pci_specified_resource_alignment(struct pci_dev *dev,
 			pr_err("PCI: Can't parse resource_alignment parameter: %s\n",
 			       p);
 			break;
-		}	/* [한국어] 일치/오류 분기 끝. 0(불일치)이면 아래로 계속 진행한다 */
+		}
 
 		/* [한국어] 항목 구분자 확인. pci_dev_str_match() 가 커서를 이 항목의
 		 * 끝까지 옮겨 놓았으므로, 여기 있어야 할 것은 다음 항목을 잇는
@@ -13162,7 +13162,7 @@ static resource_size_t pci_specified_resource_alignment(struct pci_dev *dev,
 			break;
 		}
 		p++;	/* [한국어] 구분자를 건너뛰어 다음 항목의 첫 글자로 */
-	}	/* [한국어] 항목 순회 끝. 일치를 찾았으면 위에서 break 로 빠져나왔다 */
+	}
 out:
 	/* [한국어] 문자열 사용이 끝났으니 락을 놓는다. 이 시점 이후로는
 	 * resource_alignment_param 이 해제되어도 상관없다. */
@@ -13663,7 +13663,7 @@ void pci_bus_release_emul_domain_nr(int domain_nr)
 	ida_free(&pci_domain_nr_dynamic_ida, domain_nr);
 }
 EXPORT_SYMBOL_GPL(pci_bus_release_emul_domain_nr);
-#endif	/* [한국어] CONFIG_PCI_DOMAINS 끝 */
+#endif
 
 #ifdef CONFIG_PCI_DOMAINS_GENERIC
 /* [한국어] DeviceTree 가 명시적으로 지정한 도메인 번호의 할당자.
@@ -13888,7 +13888,7 @@ void pci_bus_release_domain_nr(struct device *parent, int domain_nr)
 	/* [한국어] DT 시스템 — IDA 로 발급받은 번호이므로 돌려준다. */
 	of_pci_bus_release_domain_nr(parent, domain_nr);
 }
-#endif	/* [한국어] CONFIG_PCI_DOMAINS_GENERIC 끝 */
+#endif
 
 /**
  * pci_ext_cfg_avail - can we access extended PCI config space?

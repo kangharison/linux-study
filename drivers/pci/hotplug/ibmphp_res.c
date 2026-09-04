@@ -249,7 +249,7 @@ static struct bus_node * __init alloc_error_bus(struct ebda_pci_rsrc *curr, u8 b
 
 	if (flag) /* [한국어] flag 가 1 이면 인자로 받은 번호를 쓰고 */
 		newbus->busno = busno; /* [한국어] 그 값을 넣는다 */
-	else /* [한국어] 0 이면 EBDA 항목의 번호를 쓴다 */
+	else
 		newbus->busno = curr->bus_num; /* [한국어] 그 값을 넣는다 */
 	list_add_tail(&newbus->bus_list, &gbuses); /* [한국어] 전역 목록 끝에 매단다. 목록이 정렬되어 있지 않아 끝에 붙이면 된다 */
 	return newbus; /* [한국어] 호출자가 이 노드에 자원을 직접 매단다 */
@@ -342,7 +342,7 @@ static int __init alloc_bus_range(struct bus_node **new_bus, struct range_node *
 			return -ENOMEM; /* [한국어] 그대로 돌아간다 */
 
 		newbus->busno = curr->bus_num; /* [한국어] EBDA 항목의 버스 번호를 넣는다 */
-	} else { /* [한국어] 이미 있는 버스에 창만 보태는 경우 */
+	} else {
 		newbus = *new_bus; /* [한국어] 호출자가 찾아 둔 노드를 쓴다 */
 		switch (flag) { /* [한국어] 종류에 따라 기존 창 개수를 꺼낸다 */
 			case MEM:
@@ -379,7 +379,7 @@ static int __init alloc_bus_range(struct bus_node **new_bus, struct range_node *
 			newbus->rangeMem = newrange; /* [한국어] 버스의 메모리 창 목록 머리를 이 창으로 둔다 */
 			if (first_bus) /* [한국어] 첫 창이면 */
 				newbus->noMemRanges = 1; /* [한국어] 개수를 1 로 세운다 */
-			else { /* [한국어] 보태는 경우이면 */
+			else {
 				debug("First Memory Primary on bus %x, [%x - %x]\n", newbus->busno, newrange->start, newrange->end);
 				++newbus->noMemRanges; /* [한국어] 개수를 하나 올린다. add_bus_range() 가 이 값을 "밀 대상 수" 로 썼으므로 그 뒤에 올려야 맞는다 */
 				fix_resources(newbus); /* [한국어] 새 창이 생겼으니 rangeno 가 -1 로 남아 있던 자원들이 자리를 찾을 수 있다 */
@@ -389,7 +389,7 @@ static int __init alloc_bus_range(struct bus_node **new_bus, struct range_node *
 			newbus->rangeIO = newrange; /* [한국어] 버스의 I/O 창 목록 머리 */
 			if (first_bus) /* [한국어] 첫 창이면 */
 				newbus->noIORanges = 1; /* [한국어] 개수를 1 로 */
-			else { /* [한국어] 보태는 경우이면 */
+			else {
 				debug("First IO Primary on bus %x, [%x - %x]\n", newbus->busno, newrange->start, newrange->end);
 				++newbus->noIORanges; /* [한국어] 개수를 올리고 */
 				fix_resources(newbus); /* [한국어] -1 자원들을 맞춘다 */
@@ -399,7 +399,7 @@ static int __init alloc_bus_range(struct bus_node **new_bus, struct range_node *
 			newbus->rangePFMem = newrange; /* [한국어] 버스의 프리페치 메모리 창 목록 머리 */
 			if (first_bus) /* [한국어] 첫 창이면 */
 				newbus->noPFMemRanges = 1; /* [한국어] 개수를 1 로 */
-			else { /* [한국어] 보태는 경우이면 */
+			else {
 				debug("1st PFMemory Primary on Bus %x [%x - %x]\n", newbus->busno, newrange->start, newrange->end);
 				++newbus->noPFMemRanges; /* [한국어] 개수를 올리고 */
 				fix_resources(newbus); /* [한국어] -1 자원들을 맞춘다 */
@@ -514,7 +514,7 @@ int __init ibmphp_rsrc_init(void)
 						rc = alloc_bus_range(&bus_cur, &newrange, curr, MEM, 0); /* [한국어] 그 버스에 창만 보탠다(first_bus 0) */
 						if (rc)
 							return rc; /* [한국어] 실패하면 그대로 올린다 */
-					} else { /* [한국어] 없으면 */
+					} else {
 						/* went through all the buses and didn't find ours, need to create a new bus node */
 						rc = alloc_bus_range(&newbus, &newrange, curr, MEM, 1); /* [한국어] 상류 주석대로 새 버스 노드를 만든다 */
 						if (rc)
@@ -540,7 +540,7 @@ int __init ibmphp_rsrc_init(void)
 						rc = alloc_bus_range(&bus_cur, &newrange, curr, PFMEM, 0); /* [한국어] 창만 보탠다 */
 						if (rc)
 							return rc; /* [한국어] 실패하면 올린다 */
-					} else { /* [한국어] 없으면 */
+					} else {
 						/* went through all the buses and didn't find ours, need to create a new bus node */
 						rc = alloc_bus_range(&newbus, &newrange, curr, PFMEM, 1); /* [한국어] 새 버스를 만든다 */
 						if (rc)
@@ -564,7 +564,7 @@ int __init ibmphp_rsrc_init(void)
 						rc = alloc_bus_range(&bus_cur, &newrange, curr, IO, 0); /* [한국어] 창만 보탠다 */
 						if (rc)
 							return rc; /* [한국어] 실패하면 올린다 */
-					} else { /* [한국어] 없으면 */
+					} else {
 						/* went through all the buses and didn't find ours, need to create a new bus node */
 						rc = alloc_bus_range(&newbus, &newrange, curr, IO, 1); /* [한국어] 새 버스를 만든다 */
 						if (rc)
@@ -574,11 +574,11 @@ int __init ibmphp_rsrc_init(void)
 					}
 				}
 
-			} else { /* [한국어] RESTYPE 이 셋 중 어느 것도 아니면 */
+			} else {
 				;	/* type is reserved  WHAT TO DO IN THIS CASE???
 					   NOTHING TO DO??? */ /* [한국어] 상류 주석대로 예약 값이라 아무 일도 하지 않는다 */
 			}
-		} else { /* [한국어] 1차 버스 자원이 아니면 장치가 이미 쓰고 있는 구간이다 */
+		} else {
 			/* regular pci device resource */
 			if ((curr->rsrc_type & RESTYPE) == MMASK) { /* [한국어] 메모리 자원이면 */
 				/* Memory resource */
@@ -747,7 +747,7 @@ static int add_bus_range(int type, struct range_node *range, struct bus_node *bu
 		range_prev->next = range; /* [한국어] 앞 창에 잇는다 */
 		range->rangeno = range_prev->rangeno + 1; /* [한국어] 앞 창의 번호 + 1 */
 		return 0; /* [한국어] 밀릴 창이 없으므로 update_resources() 도 부르지 않고 여기서 끝낸다 */
-	} else { /* [한국어] 그 밖은 목록 중간이다 */
+	} else {
 		/* the range is in the middle */
 		range_prev->next = range; /* [한국어] 앞 창에 잇고 */
 		range->next = range_cur; /* [한국어] 뒤 창을 물린다 */
@@ -828,7 +828,7 @@ static void update_resources(struct bus_node *bus_cur, int type, int rangeno)
 				res = res->next; /* [한국어] 그리로 가고 */
 			else if (res->nextRange) /* [한국어] 없고 다음 창의 첫 자원이 있으면 */
 				res = res->nextRange; /* [한국어] 그리로 건너뛴다 */
-			else { /* [한국어] 둘 다 없으면 */
+			else {
 				eol = 1; /* [한국어] 목록 끝이다 */
 				break;
 			}
@@ -911,7 +911,7 @@ static void fix_me(struct resource_node *res, struct bus_node *bus_cur, struct r
 		}
 		if (res->next) /* [한국어] 이 파일의 관용구 — 같은 창 안의 다음이 있으면 */
 			res = res->next; /* [한국어] 그리로 */
-		else /* [한국어] 없으면 */
+		else
 			res = res->nextRange; /* [한국어] 다음 창의 첫 자원으로 건너뛴다 */
 	}
 
@@ -1109,7 +1109,7 @@ int ibmphp_add_resource(struct resource_node *res)
 		}
 		res->next = NULL; /* [한국어] 뒤에 아무것도 없다 */
 		res->nextRange = NULL; /* [한국어] 다음 창도 없다 */
-	} else { /* [한국어] 이미 자원이 있으면 자리를 찾아 끼운다 */
+	} else {
 		res_cur = res_start; /* [한국어] 목록 머리부터 걷는다 */
 		res_prev = NULL; /* [한국어] 앞 자원을 아직 못 봤다 */
 
@@ -1161,13 +1161,13 @@ int ibmphp_add_resource(struct resource_node *res)
 					}
 				} else if (res_prev->rangeno == res_cur->rangeno) /* [한국어] 앞 자원과 창이 같으면 같은 창 링크로 잇고 */
 					res_prev->next = res; /* [한국어] 그 자리에 끼운다 */
-				else /* [한국어] 창이 다르면 */
+				else
 					res_prev->nextRange = res; /* [한국어] 창 경계 링크로 잇는다 */
 
 				res->next = res_cur; /* [한국어] 뒤 자원을 물린다 */
 				res->nextRange = NULL; /* [한국어] 같은 창 안에 끼웠으므로 창 경계 링크는 없다 */
 			}
-		} else { /* [한국어] 더 큰 창을 만났으면 이 창의 첫 자원이 된다 */
+		} else {
 			/* this is the case where it is 1st occurrence of the range */
 			if (!res_prev) { /* [한국어] 앞 자원이 없으면 목록 전체의 머리가 된다 */
 				/* at the beginning of the resource list */
@@ -1319,7 +1319,7 @@ int ibmphp_remove_resource(struct resource_node *res)
 					ibmphp_remove_resource(mem_cur); /* [한국어] **재귀 호출**로 MEM 쪽을 먼저 지운다. 그쪽은 정상 목록에 있으므로 위 경로로 처리된다 */
 					if (!res_prev) /* [한국어] PFMemFromMem 목록의 머리였으면 */
 						bus_cur->firstPFMemFromMem = res_cur->next; /* [한국어] 머리를 다음으로 옮기고 */
-					else /* [한국어] 아니면 */
+					else
 						res_prev->next = res_cur->next; /* [한국어] 앞 노드에 다음을 잇는다. 이 목록은 next 만 쓰므로 분기가 단순하다 */
 					kfree(res_cur); /* [한국어] 노드를 해제하고 */
 					return 0; /* [한국어] 끝낸다 */
@@ -1334,7 +1334,7 @@ int ibmphp_remove_resource(struct resource_node *res)
 				err("cannot find pfmem to delete...\n"); /* [한국어] 알리고 */
 				return -EINVAL; /* [한국어] 그대로 돌아간다 */
 			}
-		} else { /* [한국어] 프리페치 메모리가 아니면 더 볼 곳이 없다 */
+		} else {
 			err("the %s resource is not in the list to be deleted...\n", type); /* [한국어] 어느 종류를 못 찾았는지 알리고 */
 			return -EINVAL; /* [한국어] 그대로 돌아간다 */
 		}
@@ -1365,7 +1365,7 @@ int ibmphp_remove_resource(struct resource_node *res)
 					bus_cur->firstPFMem = res_cur->nextRange; /* [한국어] 프리페치 메모리 목록의 머리를 */
 					break;
 			}
-		} else { /* [한국어] 둘 다 없으면 이 종류의 마지막 자원이었다 */
+		} else {
 			switch (res->type) { /* [한국어] 종류에 따라 */
 				case IO:
 					bus_cur->firstIO = NULL; /* [한국어] I/O 목록을 비운다 */
@@ -1380,16 +1380,16 @@ int ibmphp_remove_resource(struct resource_node *res)
 		}
 		kfree(res_cur); /* [한국어] 노드를 해제하고 */
 		return 0; /* [한국어] 끝낸다 */
-	} else { /* [한국어] 중간이었으면 앞 노드의 링크를 고친다 */
+	} else {
 		if (res_cur->next) { /* [한국어] 같은 창에 뒤가 있으면 */
 			if (res_prev->rangeno == res_cur->rangeno) /* [한국어] 앞 노드와 창이 같은지 보고 */
 				res_prev->next = res_cur->next; /* [한국어] 같으면 같은 창 링크로 */
-			else /* [한국어] 다르면 */
+			else
 				res_prev->nextRange = res_cur->next; /* [한국어] 창 경계 링크로 잇는다 */
 		} else if (res_cur->nextRange) { /* [한국어] 같은 창에는 없고 다음 창이 있으면 */
 			res_prev->next = NULL; /* [한국어] 앞 노드는 그 창의 마지막이 된다 */
 			res_prev->nextRange = res_cur->nextRange; /* [한국어] 다음 창 링크를 물려준다 */
-		} else { /* [한국어] 둘 다 없으면 목록 전체의 마지막이었다 */
+		} else {
 			res_prev->next = NULL; /* [한국어] 앞 노드의 두 링크를 모두 끊는다 */
 			res_prev->nextRange = NULL; /* [한국어] 그래야 앞 노드가 새 마지막이 된다 */
 		}
@@ -1532,7 +1532,7 @@ int ibmphp_check_resource(struct resource_node *res, u8 bridge)
 			tmp_divide = IOBRIDGE; /* [한국어] 상류 주석대로 4KB 단위 */
 		else
 			tmp_divide = MEMBRIDGE; /* [한국어] 메모리·프리페치 메모리이면 */
-	} else /* [한국어] 상류 주석대로 1MB 단위 */
+	} else
 		tmp_divide = res->len; /* [한국어] 일반 장치는 요구 길이 자체가 정렬 단위다 — PCI BAR 의 자연 정렬 규칙이다 */
 
 	bus_cur = find_bus_wprev(res->busno, NULL, 0); /* [한국어] 이 자원이 놓일 버스를 찾는다 */
@@ -1593,7 +1593,7 @@ int ibmphp_check_resource(struct resource_node *res, u8 bridge)
 						flag = 1; /* [한국어] 정렬이 맞아떨어지면 그대로 후보로 잡는다 */
 						len_cur = len_tmp; /* [한국어] 그 길이와 */
 						start_cur = range->start; /* [한국어] 시작을 후보로 기억한다 */
-					} else { /* [한국어] 나눠떨어지지 않으면 */
+					} else {
 						/* Needs adjusting */
 						tmp_start = range->start; /* [한국어] 창의 시작에서 출발해 */
 						flag = 0; /* [한국어] 정렬이 어긋나면 시작을 다음 경계로 밀어 가며 다시 잰다 */
@@ -1634,7 +1634,7 @@ int ibmphp_check_resource(struct resource_node *res, u8 bridge)
 						flag = 1; /* [한국어] 정렬이 맞아떨어지면 그대로 후보로 잡는다 */
 						len_cur = len_tmp; /* [한국어] 그 길이와 */
 						start_cur = res_cur->end + 1; /* [한국어] 시작을 기억한다 */
-					} else { /* [한국어] 나눠떨어지지 않으면 */
+					} else {
 						/* Needs adjusting */
 						tmp_start = res_cur->end + 1; /* [한국어] 자원 바로 뒤에서 출발해 */
 						flag = 0; /* [한국어] 정렬이 어긋나면 시작을 다음 경계로 밀어 가며 다시 잰다 */
@@ -1674,7 +1674,7 @@ int ibmphp_check_resource(struct resource_node *res, u8 bridge)
 							flag = 1; /* [한국어] 정렬이 맞아떨어지면 그대로 후보로 잡는다 */
 							len_cur = len_tmp; /* [한국어] 그 길이와 */
 							start_cur = range->start; /* [한국어] 시작을 기억한다 */
-						} else { /* [한국어] 나눠떨어지지 않으면 */
+						} else {
 							/* Needs adjusting */
 							tmp_start = range->start; /* [한국어] 창의 시작에서 출발해 */
 							flag = 0; /* [한국어] 정렬이 어긋나면 시작을 다음 경계로 밀어 가며 다시 잰다 */
@@ -1700,7 +1700,7 @@ int ibmphp_check_resource(struct resource_node *res, u8 bridge)
 						}
 					}
 				}
-			} else { /* [한국어] 앞 자원과 창이 같으면 */
+			} else {
 				/* [한국어] **(d) 같은 창 안의 두 자원 사이** */
 				len_tmp = res_cur->start - 1 - res_prev->end - 1; /* [한국어] [관찰] 1 을 두 번 뺀다. 다른 세 갈래는 한 번만 빼므로 이 갈래의 틈만 실제보다 1 작게 계산된다. 상류 코드 그대로다 */
 
@@ -1711,7 +1711,7 @@ int ibmphp_check_resource(struct resource_node *res, u8 bridge)
 							flag = 1; /* [한국어] 정렬이 맞아떨어지면 그대로 후보로 잡는다 */
 							len_cur = len_tmp; /* [한국어] 그 길이와 */
 							start_cur = res_prev->end + 1; /* [한국어] 시작을 기억한다 */
-						} else { /* [한국어] 나눠떨어지지 않으면 */
+						} else {
 							/* Needs adjusting */
 							tmp_start = res_prev->end + 1; /* [한국어] 앞 자원 바로 뒤에서 출발해 */
 							flag = 0; /* [한국어] 정렬이 어긋나면 시작을 다음 경계로 밀어 가며 다시 잰다 */
@@ -1772,7 +1772,7 @@ int ibmphp_check_resource(struct resource_node *res, u8 bridge)
 						flag = 1; /* [한국어] 정렬이 맞아떨어지면 그대로 후보로 잡는다 */
 						len_cur = len_tmp; /* [한국어] 그 길이와 */
 						start_cur = range->start; /* [한국어] 시작을 기억한다 */
-					} else { /* [한국어] 나눠떨어지지 않으면 */
+					} else {
 						/* Needs adjusting */
 						tmp_start = range->start; /* [한국어] 창의 시작에서 출발해 */
 						flag = 0; /* [한국어] 정렬이 어긋나면 시작을 다음 경계로 밀어 가며 다시 잰다 */
@@ -1838,7 +1838,7 @@ int ibmphp_check_resource(struct resource_node *res, u8 bridge)
 							flag = 1; /* [한국어] 정렬이 맞아떨어지면 그대로 후보로 잡는다 */
 							len_cur = len_tmp; /* [한국어] 그 길이와 */
 							start_cur = range->start; /* [한국어] 시작을 기억한다 */
-						} else { /* [한국어] 나눠떨어지지 않으면 */
+						} else {
 							/* Needs adjusting */
 							tmp_start = range->start; /* [한국어] 창의 시작에서 출발해 */
 							flag = 0; /* [한국어] 정렬이 어긋나면 시작을 다음 경계로 밀어 가며 다시 잰다 */
@@ -1877,14 +1877,14 @@ int ibmphp_check_resource(struct resource_node *res, u8 bridge)
 				res->end = res->start + res->len - 1; /* [한국어] 끝을 계산한 뒤 */
 				return 0; /* [한국어] 성공 */
 			}
-		} else { /* [한국어] 상류 주석대로 더 볼 창이 없으면 */
+		} else {
 			/* no more ranges to check on */
 			if (len_cur) { /* [한국어] 앞서 잰 틈 중 후보가 있으면 */
 				res->start = start_cur; /* [한국어] 그 시작을 적고 */
 				res->len += 1; /* To restore the balance */ /* [한국어] 함수 첫머리에서 1 줄여 둔 길이를 되돌린다 */
 				res->end = res->start + res->len - 1; /* [한국어] 끝을 계산한 뒤 */
 				return 0; /* [한국어] 성공 */
-			} else { /* [한국어] 후보가 없으면 */
+			} else {
 				/* have gone through the list of devices and haven't found n.e.thing */
 				err("no appropriate range.. bailing out...\n"); /* [한국어] 맞는 자리가 없다 */
 				return -EINVAL; /* [한국어] 실패로 돌아간다 */
@@ -2177,7 +2177,7 @@ int ibmphp_find_resource(struct bus_node *bus, u32 start_address, struct resourc
 				debug("SOS...cannot find %s resource in the bus.\n", type); /* [한국어] 알리고 */
 				return -EINVAL; /* [한국어] 그대로 돌아간다 */
 			}
-		} else { /* [한국어] 프리페치 메모리가 아니면 더 볼 곳이 없다 */
+		} else {
 			debug("SOS... cannot find %s resource in the bus.\n", type); /* [한국어] 알리고 */
 			return -EINVAL; /* [한국어] 그대로 돌아간다 */
 		}
@@ -2387,12 +2387,12 @@ static int __init once_over(void)
 				pfmem_cur->fromMem = 1; /* [한국어] MEM 에서 떼어 왔다고 표시한다 */
 				if (pfmem_prev) /* [한국어] 앞 노드가 있으면 */
 					pfmem_prev->next = pfmem_cur->next; /* [한국어] PFMEM 목록에서 떼어 낸다 */
-				else /* [한국어] 머리였으면 */
+				else
 					bus_cur->firstPFMem = pfmem_cur->next; /* [한국어] 머리를 다음으로 옮긴다 */
 
 				if (!bus_cur->firstPFMemFromMem) /* [한국어] 곁가지 목록이 비어 있으면 */
 					pfmem_cur->next = NULL; /* [한국어] 이 노드가 유일하다 */
-				else /* [한국어] 있으면 */
+				else
 					/* we don't need to sort PFMemFromMem since we're using mem node for
 					   all the real work anyways, so just insert at the beginning of the
 					   list
@@ -2453,7 +2453,7 @@ int ibmphp_add_pfmem_from_mem(struct resource_node *pfmem)
 
 	if (bus_cur->firstPFMemFromMem) /* [한국어] 곁가지 목록이 이미 있으면 */
 		pfmem->next = bus_cur->firstPFMemFromMem; /* [한국어] 옛 머리를 뒤에 잇고 */
-	else /* [한국어] 비어 있으면 */
+	else
 		pfmem->next = NULL; /* [한국어] 뒤에 아무것도 없다 — 인자 노드에 남아 있을 수 있는 값을 명시적으로 끊는다 */
 
 	bus_cur->firstPFMemFromMem = pfmem; /* [한국어] 맨 앞에 끼운다. once_over() 와 달리 짝 MEM 노드는 호출자가 따로 만든다 */
@@ -2621,7 +2621,7 @@ void ibmphp_print_test(void)
 					res = res->next; /* [한국어] 그리로 */
 				else if (res->nextRange) /* [한국어] 없고 다음 창의 첫 자원이 있으면 */
 					res = res->nextRange; /* [한국어] 그리로 건너뛴다 */
-				else /* [한국어] 둘 다 없으면 */
+				else
 					break; /* [한국어] 목록 끝이다 */
 			}
 		}
@@ -2636,7 +2636,7 @@ void ibmphp_print_test(void)
 					res = res->next; /* [한국어] 그리로 */
 				else if (res->nextRange) /* [한국어] 없고 다음 창이 있으면 */
 					res = res->nextRange; /* [한국어] 그리로 */
-				else /* [한국어] 둘 다 없으면 */
+				else
 					break; /* [한국어] 끝이다 */
 			}
 		}
@@ -2651,7 +2651,7 @@ void ibmphp_print_test(void)
 					res = res->next; /* [한국어] 그리로 */
 				else if (res->nextRange) /* [한국어] 없고 다음 창이 있으면 */
 					res = res->nextRange; /* [한국어] 그리로 */
-				else /* [한국어] 둘 다 없으면 */
+				else
 					break; /* [한국어] 끝이다 */
 			}
 		}
@@ -2860,11 +2860,11 @@ static int __init update_bridge_ranges(struct bus_node **bus)
 								if (!range_exists_already(range, bus_sec, IO)) { /* [한국어] 같은 구간이 아직 없을 때만 */
 									add_bus_range(IO, range, bus_sec); /* [한국어] 주소순 자리에 끼우고 */
 									++bus_sec->noIORanges; /* [한국어] 개수를 올린다 */
-								} else { /* [한국어] 이미 있으면 */
+								} else {
 									kfree(range); /* [한국어] 만든 창을 버린다 */
 									range = NULL; /* [한국어] 포인터를 지운다 */
 								}
-							} else { /* [한국어] 첫 I/O 창이면 */
+							} else {
 								/* 1st IO Range on the bus */
 								range->rangeno = 1; /* [한국어] 번호는 1 */
 								bus_sec->rangeIO = range; /* [한국어] 목록의 머리로 삼고 */
@@ -2907,11 +2907,11 @@ static int __init update_bridge_ranges(struct bus_node **bus)
 								if (!range_exists_already(range, bus_sec, MEM)) { /* [한국어] 같은 구간이 아직 없을 때만 */
 									add_bus_range(MEM, range, bus_sec); /* [한국어] 주소순 자리에 끼우고 */
 									++bus_sec->noMemRanges; /* [한국어] 개수를 올린다 */
-								} else { /* [한국어] 이미 있으면 */
+								} else {
 									kfree(range); /* [한국어] 만든 창을 버린다 */
 									range = NULL; /* [한국어] 포인터를 지운다 */
 								}
-							} else { /* [한국어] 첫 메모리 창이면 */
+							} else {
 								/* 1st Mem Range on the bus */
 								range->rangeno = 1; /* [한국어] 번호는 1 */
 								bus_sec->rangeMem = range; /* [한국어] 목록의 머리로 삼고 */
@@ -2959,11 +2959,11 @@ static int __init update_bridge_ranges(struct bus_node **bus)
 								if (!range_exists_already(range, bus_sec, PFMEM)) { /* [한국어] 같은 구간이 아직 없을 때만 */
 									add_bus_range(PFMEM, range, bus_sec); /* [한국어] 주소순 자리에 끼우고 */
 									++bus_sec->noPFMemRanges; /* [한국어] 개수를 올린다 */
-								} else { /* [한국어] 이미 있으면 */
+								} else {
 									kfree(range); /* [한국어] 만든 창을 버린다 */
 									range = NULL; /* [한국어] 포인터를 지운다 */
 								}
-							} else { /* [한국어] 첫 프리페치 메모리 창이면 */
+							} else {
 								/* 1st PFMem Range on the bus */
 								range->rangeno = 1; /* [한국어] 번호는 1 */
 								bus_sec->rangePFMem = range; /* [한국어] 목록의 머리로 삼고 */

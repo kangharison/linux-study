@@ -3130,7 +3130,7 @@ static void qcom_pcie_icc_opp_update(struct qcom_pcie *pcie)
 			 /* opp-level is not defined use only frequency */
 			opp = dev_pm_opp_find_freq_exact(pci->dev, freq_kbps * width, /* [한국어] 상류 주석대로 주파수만으로 찾는다. 주파수는 레인 수를 곱해 구한다 */
 							 true);
-		} else { /* [한국어] 있으면 */
+		} else {
 			/* put opp-level OPP */
 			dev_pm_opp_put(opp); /* [한국어] 상류 주석대로 조회로 든 참조를 먼저 놓는다 — 이 조회는 존재 확인용이었다 */
 
@@ -3751,7 +3751,7 @@ static int qcom_pcie_probe(struct platform_device *pdev)
 		}
 
 		pcie->use_pm_opp = true; /* [한국어] 이후 전력 관리를 OPP 로 한다고 표시한다 */
-	} else { /* [한국어] 표가 없었으면(-ENODEV) */
+	} else {
 		/* Skip ICC init if OPP is supported as it is handled by OPP */
 		ret = qcom_pcie_icc_init(pcie); /* [한국어] 상류 주석대로 인터커넥트를 직접 다룬다. OPP 를 쓰면 그쪽이 대역폭까지 함께 다루므로 이 갈래를 건너뛴다 */
 		if (ret) /* [한국어] 실패했으면 */

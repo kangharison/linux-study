@@ -706,7 +706,7 @@ static void vmd_irq_enable(struct irq_data *data)
 		WARN_ON(vmdirq->enabled);	/* [한국어] 이미 목록에 있는데 또 넣으려는 상황을 잡는다. 그대로 두면 목록이 순환한다 */
 		list_add_tail_rcu(&vmdirq->node, &vmdirq->irq->irq_list);	/* [한국어] 꼬리에 매단다. _rcu 변형이라 노드가 완전히 준비된 뒤에야 독자에게 보인다 */
 		vmdirq->enabled = true;	/* [한국어] 목록에 들어갔음을 기록. disable 이 이 값을 보고 이중 제거를 피한다 */
-	}	/* [한국어] 여기서 락이 자동으로 풀린다 */
+	}
 }
 
 /* [한국어]
@@ -792,7 +792,7 @@ static void vmd_irq_disable(struct irq_data *data)
 		if (vmdirq->enabled) {	/* [한국어] 이미 꺼져 있으면 아무것도 하지 않는다. 이중 disable 은 정상적으로 일어날 수 있다 */
 			list_del_rcu(&vmdirq->node);	/* [한국어] 목록에서 뗀다. 실제 해제는 vmd_msi_free() 가 SRCU 유예 뒤에 한다 */
 			vmdirq->enabled = false;	/* [한국어] 꺼졌음을 기록 */
-		}	/* [한국어] if 끝 */
+		}
 	}
 }
 
@@ -922,7 +922,7 @@ static struct vmd_irq_list *vmd_next_irq(struct vmd_dev *vmd, struct msi_desc *d
 			if (vmd->irqs[i].count < vmd->irqs[best].count)	/* [한국어] 배정된 하위 인터럽트가 가장 적은 것을 찾는다 */
 				best = i;	/* [한국어] 그것을 후보로 삼는다 */
 		vmd->irqs[best].count++;	/* [한국어] 고른 벡터의 사용 수를 올린다. 다음 호출이 다른 벡터를 고르게 된다 */
-	}	/* [한국어] 락 자동 해제 */
+	}
 
 	return &vmd->irqs[best];	/* [한국어] 고른 벡터 */
 }
@@ -1665,7 +1665,7 @@ static void vmd_domain_reset(struct vmd_dev *vmd)
 				writel(0, base + PCI_PREF_LIMIT_UPPER32);	/* [한국어] prefetchable 상위 32 비트의 limit 을 0 으로 */
 				writel(0x0000fff0, base + PCI_PREF_MEMORY_BASE);	/* [한국어] prefetchable base=0xfff0, limit=0x0000 */
 				writel(0xffffffff, base + PCI_PREF_BASE_UPPER32);	/* [한국어] prefetchable 상위 32 비트의 base 를 0xffffffff 로. base 가 limit 보다 크므로 창이 닫힌 상태가 된다 */
-			}	/* [한국어] 함수 루프 끝 */
+			}
 		}
 	}
 }
@@ -1789,9 +1789,9 @@ static int vmd_get_phys_offsets(struct vmd_dev *vmd, bool native_hint,
 			phys1 = readq(membar2 + MB2_SHADOW_OFFSET);	/* [한국어] MEMBAR2 시작에서 0x2000 지점의 64 비트 값 = MEMBAR1 의 호스트 물리 주소 */
 			phys2 = readq(membar2 + MB2_SHADOW_OFFSET + 8);	/* [한국어] 그 다음 8 바이트 = MEMBAR2 의 호스트 물리 주소 */
 			pci_iounmap(dev, membar2);	/* [한국어] 읽었으니 곧바로 매핑을 푼다. 오래 잡고 있을 이유가 없다 */
-		} else	/* [한국어] shadow 가 꺼져 있으면 */
+		} else
 			return 0;	/* [한국어] 보정 없이 성공으로 돌아간다. offset 은 호출자가 0 으로 초기화해 두었다 */
-	} else {	/* [한국어] 가상화 경로 — shadow 가 벤더 고유 capability 안에 있는 경우 */
+	} else {
 		/* Hypervisor-Emulated Vendor-Specific Capability */
 		int pos = pci_find_capability(dev, PCI_CAP_ID_VNDR);	/* [한국어] 벤더 고유 capability(ID 0x09)를 찾는다. 없으면 0 */
 		u32 reg, regu;	/* [한국어] 32 비트 두 조각을 담을 자리 */
@@ -1807,7 +1807,7 @@ static int vmd_get_phys_offsets(struct vmd_dev *vmd, bool native_hint,
 			pci_read_config_dword(dev, pos + 16, &reg);	/* [한국어] MEMBAR2 물리 주소의 하위 32 비트 */
 			pci_read_config_dword(dev, pos + 20, &regu);	/* [한국어] 상위 32 비트 */
 			phys2 = (u64) regu << 32 | reg;	/* [한국어] 합친다 */
-		} else	/* [한국어] 서명이 없으면 */
+		} else
 			return 0;	/* [한국어] 보정 없이 성공 */
 	}
 
@@ -2276,7 +2276,7 @@ static int vmd_enable_domain(struct vmd_dev *vmd, unsigned long features)
 		ret = vmd_create_irq_domain(vmd);	/* [한국어] 하위 장치의 MSI 요청을 받을 도메인을 만든다 */
 		if (ret)	/* [한국어] 실패면 */
 			return ret;	/* [한국어] 중단 */
-	} else {	/* [한국어] 우회 가능한 경우 */
+	} else {
 		vmd_set_msi_remapping(vmd, false);	/* [한국어] 재매핑을 꺼서 하위 장치의 MSI 가 그대로 통과하게 한다. 이 경우 msix_count 는 0 으로 남는다 */
 	}
 
@@ -2313,7 +2313,7 @@ static int vmd_enable_domain(struct vmd_dev *vmd, unsigned long features)
 	vmd_attach_resources(vmd);	/* [한국어] 자원 트리에서 부모-자식 관계를 잇는다 */
 	if (vmd->irq_domain)	/* [한국어] 중계 모드라면 */
 		dev_set_msi_domain(&vmd->bus->dev, vmd->irq_domain);	/* [한국어] 새 버스의 MSI 도메인을 이 드라이버가 만든 것으로 지정한다 */
-	else	/* [한국어] 우회 모드라면 */
+	else
 		dev_set_msi_domain(&vmd->bus->dev,	/* [한국어] VMD 엔드포인트 자신의 MSI 도메인을 */
 				   dev_get_msi_domain(&vmd->dev->dev));	/* [한국어] 그대로 물려준다. 하위 장치의 MSI 가 중계 없이 상위로 간다 */
 
@@ -2676,7 +2676,7 @@ static int vmd_resume(struct device *dev)
 
 	return 0;	/* [한국어] 성공 */
 }
-#endif	/* [한국어] CONFIG_PM_SLEEP 끝 */
+#endif
 /* [한국어] SIMPLE_DEV_PM_OPS 는 struct dev_pm_ops vmd_dev_pm_ops 를 만들면서
  * .suspend/.resume 뿐 아니라 하이버네이션 계열(.freeze/.thaw/.poweroff/
  * .restore)까지 같은 두 함수로 채워 준다. VMD 는 절전 종류에 따라 다르게

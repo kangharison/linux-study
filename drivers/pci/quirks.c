@@ -1248,7 +1248,7 @@ static void quirk_vialatency(struct pci_dev *dev)
 		 */
 		if (p->revision < 0x40 || p->revision > 0x42)	/* [한국어] 결함은 686B(리비전 0x40~0x42)에만 있다. 686A(0x10~0x2f) 나 범위 밖이면 손대지 않고 exit 로 빠져 참조수만 놓는다. */
 			goto exit;	/* [한국어] 결함 리비전이 아니면 아무것도 고치지 않고 정리 지점으로 뛴다. */
-	} else {	/* [한국어] 82C686 이 아예 없으면 다른 후보인 VT8231 사우스브리지를 찾아본다. */
+	} else {
 		p = pci_get_device(PCI_VENDOR_ID_VIA, PCI_DEVICE_ID_VIA_8231, NULL);	/* [한국어] VT8231 을 찾는다. 여기서도 참조수가 올라간다. */
 		/* [한국어] 두 사우스브리지 중 아무것도 없으면 이 보드는 문제가 없다.
 		 * p 가 NULL 이지만 pci_dev_put(NULL) 은 안전하므로 그대로 exit 로 간다. */
@@ -2268,7 +2268,7 @@ static void ich6_lpc_generic_decode(struct pci_dev *dev, unsigned int reg,
 		 * But this gets us at least _part_ of it.
 		 */
 		size = 16;	/* [한국어] 가변 창은 실제로 16/32/64 중 하나지만, 그 값을 읽지 않고 최소값 16 으로 가정한다(위 영어 주석의 한계). */
-	} else {	/* [한국어] 고정 크기 창인 경우. */
+	} else {
 		size = 128;	/* [한국어] 고정 창은 128바이트다. */
 	}
 	base &= ~(size-1);	/* [한국어] 베이스를 창 크기 경계로 내림 정렬한다. */
@@ -4751,7 +4751,7 @@ static const struct dmi_system_id boot_interrupt_dmi_table[] = {
 	/*
 	 * Systems to exclude from boot interrupt reroute quirks
 	 */
-	{	/* [한국어] 표의 첫 항목 시작. */
+	{
 		.callback = dmi_disable_ioapicreroute,	/* [한국어] 이 보드가 매칭되면 부를 함수. */
 		.ident = "ASUSTek Computer INC. M2N-LR",	/* [한국어] 로그에 찍을 사람이 읽을 수 있는 보드 이름. */
 		.matches = {	/* [한국어] 아래 조건이 모두 맞아야 이 항목이 매칭된다. */
@@ -6684,7 +6684,7 @@ static void __nv_msi_ht_cap_quirk(struct pci_dev *dev, int all)
 			/* it is not enabled, try to enable it */
 			if (all)	/* [한국어] all 이면 조건 없이 켠다(ALi 계열). */
 				ht_enable_msi_mapping(dev);	/* [한국어] 모든 매핑을 켠다. */
-			else	/* [한국어] all 이 아니면 leaf 판정을 거친다(NVIDIA 계열). */
+			else
 				nv_ht_enable_msi_mapping(dev);	/* [한국어] 예외 조건을 따진 뒤에만 켠다. */
 		}
 		goto out;	/* [한국어] 이미 켜져 있었다면 아무것도 하지 않고 나간다. */
@@ -9720,7 +9720,7 @@ static int pci_quirk_amd_sb_acs(struct pci_dev *dev, u16 acs_flags)
 	return pci_acs_ctrl_enabled(acs_flags, PCI_ACS_RR | PCI_ACS_CR);	/* [한국어] 그중 이 하드웨어가 실질적으로 제공하는 것은 RR 과 CR 이다. 요청이 그 안에 들어오면 1 을 돌려준다. */
 #else	/* [한국어] ACPI 가 없는 빌드에서는 */
 	return -ENODEV;	/* [한국어] 판정할 수 없으므로 해당 없음을 알린다. */
-#endif	/* [한국어] 조건부 컴파일 블록의 끝. */
+#endif
 }
 
 /*
@@ -11428,7 +11428,7 @@ static void quirk_amd_harvest_no_ats(struct pci_dev *pdev)
 		     pdev->subsystem_device == 0xcc10 ||	/* [한국어] 0xcc10 이거나 */
 		     pdev->subsystem_device == 0xcc08))	/* [한국어] 0xcc08 인 조합에서만 문제가 확인되었다. */
 			quirk_no_ats(pdev);	/* [한국어] 그때만 ATS 를 끈다. */
-	} else {	/* [한국어] 그 밖의 등록 대상은 */
+	} else {
 		quirk_no_ats(pdev);	/* [한국어] 조건 없이 ATS 를 끈다. */
 	}
 }
@@ -11594,7 +11594,7 @@ static void pci_create_device_link(struct pci_dev *pdev, unsigned int consumer,
 			    DL_FLAG_STATELESS | DL_FLAG_PM_RUNTIME))	/* [한국어] STATELESS 는 드라이버 바인딩 상태와 무관하게 유지한다는 뜻이고, PM_RUNTIME 은 런타임 전원 순서를 강제한다는 뜻이다. */
 		pci_info(pdev, "D0 power state depends on %s\n",	/* [한국어] 어느 장치에 의존하는지 남긴다. */
 			 pci_name(supplier_pdev));
-	else	/* [한국어] 링크 생성에 실패하면 */
+	else
 		pci_err(pdev, "Cannot enforce power dependency on %s\n",	/* [한국어] 의존성을 강제할 수 없다고 오류로 남긴다. */
 			pci_name(supplier_pdev));
 

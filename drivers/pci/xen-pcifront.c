@@ -682,11 +682,11 @@ static int pci_frontend_enable_msix(struct pci_dev *dev,
 				}
 				vector[i] = op.msix_entries[i].vector;	/* [한국어] 백엔드가 배정한 IRQ 번호를 호출자 배열에 옮긴다 */
 			}
-		} else {	/* [한국어] value 가 0 이 아니면 백엔드가 부가 결과 코드를 실어 보낸 것이다 */
+		} else {
 			pr_info("enable msix get value %x\n", op.value);	/* [한국어] 그 값을 로그로 남긴다 */
 			err = op.value;	/* [한국어] 그대로 반환값으로 쓴다 */
 		}
-	} else {	/* [한국어] do_pci_op() 자체가 실패한 경우 */
+	} else {
 		pci_err(dev, "enable msix get err %x\n", err);	/* [한국어] 전송 오류를 남긴다 */
 	}
 	return err;	/* [한국어] 0 이면 vector[] 가 모두 유효하다 */
@@ -767,7 +767,7 @@ static int pci_frontend_enable_msi(struct pci_dev *dev, int vector[])
 			err = -EINVAL;	/* [한국어] 실패로 처리한다 */
 			vector[0] = -1;	/* [한국어] 호출자가 알아볼 수 있도록 -1 로 덮어쓴다 */
 		}
-	} else {	/* [한국어] do_pci_op() 자체가 실패한 경우 */
+	} else {
 		pci_err(dev, "pci frontend enable msi failed for dev "
 				    "%x:%x\n", op.bus, op.devfn);	/* [한국어] 어느 장치에서 실패했는지 버스/devfn 과 함께 남긴다 */
 		err = -EINVAL;	/* [한국어] 백엔드 오류 코드 대신 -EINVAL 로 통일해 돌려준다 */
@@ -854,7 +854,7 @@ static void pci_frontend_registrar(int enable)
 {
 	if (enable)	/* [한국어] 등록 요청 */
 		xen_pci_frontend = &pci_frontend_ops;	/* [한국어] 전역 훅에 위 콜백 묶음을 꽂는다. 이후 Xen MSI 코드가 이 경로를 탄다 */
-	else	/* [한국어] 해제 요청 */
+	else
 		xen_pci_frontend = NULL;	/* [한국어] 훅을 비운다. 이후 MSI 요청은 PV 경로를 타지 못한다 */
 };
 /* [한국어] CONFIG_PCI_MSI 가 꺼진 빌드에서는 위 함수들이 아예 없다. */
@@ -1453,7 +1453,7 @@ static int pcifront_connect_and_init_dma(struct pcifront_device *pdev)
 	if (!pcifront_dev) {	/* [한국어] 아직 아무도 등록하지 않았다면 이 pdev 가 주인이 된다 */
 		dev_info(&pdev->xdev->dev, "Installing PCI frontend\n");	/* [한국어] 설치 사실을 로그로 남긴다 */
 		pcifront_dev = pdev;	/* [한국어] 전역 포인터를 이 pdev 로 세운다. 해제는 pcifront_disconnect() 가 한다 */
-	} else	/* [한국어] 이미 다른 pdev 가 등록돼 있는 경우 */
+	} else
 		err = -EEXIST;	/* [한국어] 중복임을 알린다. 호출자는 이 값을 오류로 보지 않는다 */
 
 	spin_unlock(&pcifront_dev_lock);	/* [한국어] 임계 구역 종료 */
@@ -1671,7 +1671,7 @@ do_publish:
 		xenbus_dev_fatal(pdev->xdev, err,
 				 "Error writing configuration for backend");	/* [한국어] 실패 사유를 XenStore 에 남긴다 */
 		goto out;	/* [한국어] 이벤트 채널/IRQ 정리는 호출자의 free_pdev() 가 맡는다 */
-	} else {	/* [한국어] 세 키를 모두 성공적으로 썼으므로 커밋을 시도한다 */
+	} else {
 		err = xenbus_transaction_end(trans, 0);	/* [한국어] 두 번째 인자 0 = commit */
 		if (err == -EAGAIN)	/* [한국어] -EAGAIN 은 다른 트랜잭션과 충돌했다는 뜻이다 */
 			goto do_publish;	/* [한국어] do_publish 로 돌아가 처음부터 다시 쓴다. 이때 이벤트 채널은 이미 있으므로 다시 만들지 않는다 */

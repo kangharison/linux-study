@@ -838,7 +838,7 @@ int __init ibmphp_access_ebda(void)
 			debug("offset of rsrc data structure entries: %x\n ", sub_addr); /* [한국어] 항목 배열의 오프셋 */
 
 			hs_complete = 1; /* [한국어] 핫스왑 블록을 다 읽었다고 표시한다 */
-		} else { /* [한국어] **RIO 블록** — 위 조건 검사에서 걸러졌으므로 여기 오면 blk_id 는 0x4752 다 */
+		} else {
 		/* found rio table, blk_id == 0x4752 */
 			debug("now enter io table ---\n"); /* [한국어] 어느 블록에 들어왔는지 남긴다 */
 			debug("rio blk id: %x\n", blk_id); /* [한국어] 블록 id 도 남긴다 */
@@ -954,7 +954,7 @@ static int __init ebda_rio_table(void)
 		//create linked list of expansion box
 		else if (rio_detail_ptr->rio_type == 6 || rio_detail_ptr->rio_type == 7) /* [한국어] 종류가 6 이나 7 이면 확장 상자다 */
 			list_add(&rio_detail_ptr->rio_detail_list, &rio_lo_head); /* [한국어] 확장 상자 목록에 매단다 */
-		else /* [한국어] 그 밖의 종류면 */
+		else
 			// not in my concern
 			kfree(rio_detail_ptr); /* [한국어] 상류 주석대로 관심 대상이 아니므로 그 자리에서 버린다 */
 		offset += 15; /* [한국어] **항목 하나가 15바이트 고정**이므로 그만큼 밀어 다음 항목으로 간다 */
@@ -1034,7 +1034,7 @@ static int __init combine_wpg_for_chassis(void)
 			opt_rio_ptr->first_slot_num = rio_detail_ptr->first_slot_num; /* [한국어] 구간의 아래쪽 끝을 이 항목의 첫 슬롯 번호로 둔다 */
 			opt_rio_ptr->middle_num = rio_detail_ptr->first_slot_num; /* [한국어] 구간의 위쪽 끝도 같은 값으로 시작한다 */
 			list_add(&opt_rio_ptr->opt_rio_list, &opt_vg_head); /* [한국어] 뭉친 목록에 매단다 */
-		} else { /* [한국어] 이미 본 섀시면 구간만 넓힌다 */
+		} else {
 			opt_rio_ptr->first_slot_num = min(opt_rio_ptr->first_slot_num, rio_detail_ptr->first_slot_num); /* [한국어] 아래쪽 끝은 더 작은 쪽으로 낮춘다 */
 			opt_rio_ptr->middle_num = max(opt_rio_ptr->middle_num, rio_detail_ptr->first_slot_num); /* [한국어] 위쪽 끝은 더 큰 쪽으로 올린다 — 이름과 달리 middle_num 은 가운데 값이 아니다 */
 		}
@@ -1107,7 +1107,7 @@ static int combine_wpg_for_expansion(void)
 			opt_rio_lo_ptr->pack_count = 1; /* [한국어] 섀시 쪽 opt_rio 에는 없는 필드. 항목이 하나뿐이라는 표시로 1 을 둔다 */
 
 			list_add(&opt_rio_lo_ptr->opt_rio_lo_list, &opt_lo_head); /* [한국어] 뭉친 목록에 매단다 */
-		} else { /* [한국어] 이미 본 섀시면 구간만 넓힌다 */
+		} else {
 			opt_rio_lo_ptr->first_slot_num = min(opt_rio_lo_ptr->first_slot_num, rio_detail_ptr->first_slot_num); /* [한국어] 아래쪽 끝은 더 작은 쪽으로 낮춘다 */
 			opt_rio_lo_ptr->middle_num = max(opt_rio_lo_ptr->middle_num, rio_detail_ptr->first_slot_num); /* [한국어] 위쪽 끝은 더 큰 쪽으로 올린다 */
 			opt_rio_lo_ptr->pack_count = 2; /* [한국어] 항목이 둘 이상이라는 표시로 2 를 둔다. 2 를 넘겨 세지 않으며, 이 값을 읽는 곳은 드라이버 안에 없다(전수 grep 확인) */
@@ -1159,7 +1159,7 @@ static int first_slot_num(u8 slot_num, u8 first_slot, u8 var)
 				break; /* [한국어] 더 볼 것 없이 멈춘다 */
 			}
 		}
-	} else { /* [한국어] var 가 0 이 아니면 확장 상자 목록을 본다 */
+	} else {
 		list_for_each_entry(opt_lo_ptr, &opt_lo_head, opt_rio_lo_list) { /* [한국어] 뭉쳐 둔 확장 상자를 하나씩 본다 */
 			if ((first_slot < opt_lo_ptr->first_slot_num) && (slot_num >= opt_lo_ptr->first_slot_num)) { /* [한국어] 섀시 쪽과 똑같은 판정을 상자 목록에 대해 한다 */
 				rc = -ENODEV; /* [한국어] 후보가 틀렸다고 표시하고 */
@@ -1347,7 +1347,7 @@ static char *create_file_name(struct slot *slot_cur)
 				number = opt_vg_ptr->chassis_num; /* [한국어] 섀시 번호를 쓰고 */
 				which = 0; /* [한국어] 섀시로 표시한다 */
 			}
-		} else { /* [한국어] 상자는 못 찾고 섀시만 찾았으면 */
+		} else {
 			first_slot = opt_vg_ptr->first_slot_num; /* [한국어] 섀시의 첫 슬롯을 기준으로 삼고 */
 			number = opt_vg_ptr->chassis_num; /* [한국어] 섀시 번호를 쓰고 */
 			which = 0; /* [한국어] 섀시로 표시한다 */
@@ -1368,7 +1368,7 @@ static char *create_file_name(struct slot *slot_cur)
 		if (slot_cur->ctrl->ctlr_type == 4) { /* [한국어] 컨트롤러가 확장 상자형이면 */
 			first_slot = calculate_first_slot(slot_num); /* [한국어] 앞선 컨트롤러들의 슬롯 수로 시작 번호를 어림하고 */
 			which = 1; /* [한국어] 상자로 표시한다 */
-		} else { /* [한국어] 그 밖에는 */
+		} else {
 			which = 0; /* [한국어] 섀시로 보고 1 번부터 센다 */
 		}
 	}
@@ -1544,7 +1544,7 @@ static int __init ebda_rsrc_controller(void)
 
 				list_add_tail(&bus_info_ptr1->bus_info_list, &bus_info_head); /* [한국어] **목록 끝에 매단다.** list_add 가 아니라 list_add_tail 이라 표에 적힌 순서가 목록에 그대로 남는다 */
 
-			} else { /* [한국어] 이미 있는 버스면 범위만 넓힌다 */
+			} else {
 				bus_info_ptr2->slot_min = min(bus_info_ptr2->slot_min, slot_ptr->slot_num); /* [한국어] 가장 작은 슬롯 번호를 낮추고 */
 				bus_info_ptr2->slot_max = max(bus_info_ptr2->slot_max, slot_ptr->slot_num); /* [한국어] 가장 큰 슬롯 번호를 올린다. 이 두 값이 ibmphp_pci.c 의 find_sec_number() 가 2차 버스 번호를 고르는 근거가 된다 */
 				bus_info_ptr2->slot_count += 1; /* [한국어] 슬롯 개수를 하나 더 센다 */
@@ -1647,7 +1647,7 @@ static int __init ebda_rsrc_controller(void)
 
 			if ((hpc_ptr->slots[index].slot_cap & EBDA_SLOT_PCIX_CAP) == EBDA_SLOT_PCIX_CAP) /* [한국어] PCI-X 능력 비트(0x08)가 서 있으면 */
 				tmp_slot->supported_bus_mode = 1; /* [한국어] PCI-X 모드를 지원한다고 표시하고 */
-			else /* [한국어] 아니면 */
+			else
 				tmp_slot->supported_bus_mode = 0; /* [한국어] 통상 PCI 만 지원한다고 표시한다 */
 
 
