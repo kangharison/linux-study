@@ -123,7 +123,7 @@ static struct nvmf_host *nvmf_host_add(const char *hostnqn, uuid_t *id)	/* [한�
 	 * different Host IDs. This'll maintain unambiguous host identification.
 	 */
 	/* [한국어] 타깃이 보는 host 정체성: NQN↔ID 1:1 불변식 강제 */
-	list_for_each_entry(host, &nvmf_hosts, list) {	/* [한국어] Fabrics 공통 라이브러리 */
+	list_for_each_entry(host, &nvmf_hosts, list) {	/* [한국어] 위 영어 주석의 규칙을 강제하기 위해 전체를 훑는다 — NQN 과 ID 는 반드시 1:1 이어야 한다 */
 		bool same_hostnqn = !strcmp(host->nqn, hostnqn);	/* [한국어] NQN 문자열 일치 */
 		bool same_hostid = uuid_equal(&host->id, id);	/* [한국어] Host UUID 일치 */
 
@@ -153,7 +153,7 @@ static struct nvmf_host *nvmf_host_add(const char *hostnqn, uuid_t *id)	/* [한�
 
 	list_add_tail(&host->list, &nvmf_hosts);	/* [한국어] 전역 목록에 등록 */
 out_unlock:
-	mutex_unlock(&nvmf_hosts_mutex);	/* [한국어] Fabrics 공통 라이브러리 */
+	mutex_unlock(&nvmf_hosts_mutex);	/* [한국어] 성공·실패 모두 이 라벨을 지나 락을 놓는다 */
 	return host;	/* [한국어] host 포인터 또는 ERR_PTR */
 }
 
@@ -178,9 +178,9 @@ static struct nvmf_host *nvmf_host_default(void)	/* [한국어] 함수 시그니
 	if (!host)	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
 		return NULL;	/* [한국어] 모듈 init 실패 유발 */
 
-	mutex_lock(&nvmf_hosts_mutex);	/* [한국어] Fabrics 공통 라이브러리 */
+	mutex_lock(&nvmf_hosts_mutex);	/* [한국어] 기본 host 도 같은 목록에 올라야 이후 조회에서 발견된다 */
 	list_add_tail(&host->list, &nvmf_hosts);	/* [한국어] 기본 host 도 전역 목록에 등록 */
-	mutex_unlock(&nvmf_hosts_mutex);	/* [한국어] Fabrics 공통 라이브러리 */
+	mutex_unlock(&nvmf_hosts_mutex);
 
 	return host;	/* [한국어] 호출 결과 반환 */
 }
@@ -195,9 +195,9 @@ static void nvmf_host_destroy(struct kref *ref)	/* [한국어] 함수 시그니�
 {
 	struct nvmf_host *host = container_of(ref, struct nvmf_host, ref);	/* [한국어] kref → host */
 
-	mutex_lock(&nvmf_hosts_mutex);	/* [한국어] Fabrics 공통 라이브러리 */
+	mutex_lock(&nvmf_hosts_mutex);	/* [한국어] kref 가 0 이 된 뒤라도 목록에서 빼는 동안은 배타적이어야 한다 */
 	list_del(&host->list);	/* [한국어] 전역 목록에서 제거 */
-	mutex_unlock(&nvmf_hosts_mutex);	/* [한국어] Fabrics 공통 라이브러리 */
+	mutex_unlock(&nvmf_hosts_mutex);	/* [한국어] 목록에서 빠졌으므로 이제 아무도 이 host 를 찾을 수 없다 */
 
 	kfree(host);	/* [한국어] host 구조체 해제 */
 }
@@ -282,7 +282,7 @@ int nvmf_reg_read32(struct nvme_ctrl *ctrl, u32 off, u32 *val)	/* [한국어] �
 
 	return ret;	/* [한국어] 결과 코드 전파 */
 }
-EXPORT_SYMBOL_GPL(nvmf_reg_read32);	/* [한국어] Fabrics 공통 라이브러리 */
+EXPORT_SYMBOL_GPL(nvmf_reg_read32);	/* [한국어] tcp/rdma/fc 가 CSTS 등 32비트 레지스터를 읽을 때 쓴다 */
 
 /**
  * nvmf_reg_read64() -  NVMe Fabrics "Property Get" API function (64-bit).
@@ -315,7 +315,7 @@ int nvmf_reg_read64(struct nvme_ctrl *ctrl, u32 off, u64 *val)	/* [한국어] �
 			ret > 0 ? ret & ~NVME_STATUS_DNR : ret, off);
 	return ret;	/* [한국어] 결과 코드 전파 */
 }
-EXPORT_SYMBOL_GPL(nvmf_reg_read64);	/* [한국어] Fabrics 공통 라이브러리 */
+EXPORT_SYMBOL_GPL(nvmf_reg_read64);	/* [한국어] CAP 처럼 64비트인 레지스터용 */
 
 /**
  * nvmf_reg_write32() -  NVMe Fabrics "Property Write" API function.
@@ -345,7 +345,7 @@ int nvmf_reg_write32(struct nvme_ctrl *ctrl, u32 off, u32 val)	/* [한국어] �
 			ret > 0 ? ret & ~NVME_STATUS_DNR : ret, off);
 	return ret;	/* [한국어] 결과 코드 전파 */
 }
-EXPORT_SYMBOL_GPL(nvmf_reg_write32);	/* [한국어] Fabrics 공통 라이브러리 */
+EXPORT_SYMBOL_GPL(nvmf_reg_write32);	/* [한국어] CC 를 써서 컨트롤러를 켜고 끄는 경로 */
 
 /*
  * [한국어]
@@ -366,7 +366,7 @@ int nvmf_subsystem_reset(struct nvme_ctrl *ctrl)	/* [한국어] 함수 시그니
 
 	return nvme_try_sched_reset(ctrl);	/* [한국어] 호스트 측 리셋 워크 스케줄 */
 }
-EXPORT_SYMBOL_GPL(nvmf_subsystem_reset);	/* [한국어] Fabrics 공통 라이브러리 */
+EXPORT_SYMBOL_GPL(nvmf_subsystem_reset);	/* [한국어] NSSR 레지스터 — PCIe 의 하드웨어 리셋에 해당하는 fabrics 수단 */
 
 /**
  * nvmf_log_connect_error() - Error-parsing-diagnostic print out function for
@@ -395,7 +395,7 @@ static void nvmf_log_connect_error(struct nvme_ctrl *ctrl,	/* [한국어] 함수
 	if (errval < 0) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
 		dev_err(ctrl->device,	/* [한국어] 진단 로그 */
 			"Connect command failed, errno: %d\n", errval);	/* [한국어] 호스트측 errno (타임아웃·전송 실패 등) */
-		return;	/* [한국어] 실행 단계 — 주변 함수 한국어 블록과 함께 해석 */
+		return;	/* [한국어] 음수는 전송 자체가 실패한 것이라 아래의 스펙 해석이 의미가 없다 */
 	}
 
 	switch (err_sctype) {	/* [한국어] 상태/유형 디스패치 */
@@ -404,17 +404,17 @@ static void nvmf_log_connect_error(struct nvme_ctrl *ctrl,	/* [한국어] 함수
 			char *inv_data = "Connect Invalid Data Parameter";	/* [한국어] data 페이로드 쪽 오류 */
 
 			switch (offset & 0xffff) {	/* [한국어] 상태/유형 디스패치 */
-			case (offsetof(struct nvmf_connect_data, cntlid)):	/* [한국어] Fabrics 공통 라이브러리 */
+			case (offsetof(struct nvmf_connect_data, cntlid)):	/* [한국어] 컨트롤러가 "데이터 몇 번째 바이트가 잘못됐다"고 알려 준 것을 필드 이름으로 되짚는다 */
 				dev_err(ctrl->device,	/* [한국어] 진단 로그 */
 					"%s, cntlid: %d\n",
 					inv_data, data->cntlid);	/* [한국어] 잘못된 컨트롤러 ID */
 				break;	/* [한국어] 루프/스위치 종료 */
-			case (offsetof(struct nvmf_connect_data, hostnqn)):	/* [한국어] Fabrics 공통 라이브러리 */
+			case (offsetof(struct nvmf_connect_data, hostnqn)):	/* [한국어] 호스트 NQN 이 거부됐다 — 대상이 이 호스트를 모른다 */
 				dev_err(ctrl->device,	/* [한국어] 진단 로그 */
 					"%s, hostnqn \"%s\"\n",
 					inv_data, data->hostnqn);	/* [한국어] 거부/형식 오류 Host NQN */
 				break;	/* [한국어] 루프/스위치 종료 */
-			case (offsetof(struct nvmf_connect_data, subsysnqn)):	/* [한국어] Fabrics 공통 라이브러리 */
+			case (offsetof(struct nvmf_connect_data, subsysnqn)):	/* [한국어] 서브시스템 NQN 이 틀렸다 — 오타이거나 대상에 없는 이름 */
 				dev_err(ctrl->device,	/* [한국어] 진단 로그 */
 					"%s, subsysnqn \"%s\"\n",
 					inv_data, data->subsysnqn);	/* [한국어] 알 수 없는/거부된 서브시스템 NQN */
@@ -429,7 +429,7 @@ static void nvmf_log_connect_error(struct nvme_ctrl *ctrl,	/* [한국어] 함수
 			char *inv_sqe = "Connect Invalid SQE Parameter";	/* [한국어] SQE 쪽 오류 */
 
 			switch (offset) {	/* [한국어] 상태/유형 디스패치 */
-			case (offsetof(struct nvmf_connect_command, qid)):	/* [한국어] Fabrics 공통 라이브러리 */
+			case (offsetof(struct nvmf_connect_command, qid)):	/* [한국어] 데이터가 아니라 SQE 쪽 오류다. 큐 번호가 대상이 아는 범위를 벗어났다 */
 				dev_err(ctrl->device,	/* [한국어] 진단 로그 */
 				       "%s, qid %d\n",
 					inv_sqe, cmd->connect.qid);	/* [한국어] 잘못된 큐 ID */
@@ -555,7 +555,7 @@ int nvmf_connect_admin_queue(struct nvme_ctrl *ctrl)	/* [한국어] 함수 시�
 			NVME_SUBMIT_NOWAIT |
 			NVME_SUBMIT_RESERVED);	/* [한국어] 연결 큐 헤드 우선·예약 태그·대기 없이 동기 완료 */
 	if (ret) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
-		nvmf_log_connect_error(ctrl, ret, le32_to_cpu(res.u32),	/* [한국어] Fabrics 공통 라이브러리 */
+		nvmf_log_connect_error(ctrl, ret, le32_to_cpu(res.u32),	/* [한국어] 실패 원인을 스펙 오프셋으로 풀어 로그에 남긴다 — 사용자가 어떤 인자를 고쳐야 하는지 알 수 있게 */
 				       &cmd, data);	/* [한국어] 실패 원인 상세 로그 */
 		goto out_free_data;	/* [한국어] out_free_data — 함수/구조 문맥의 상태 */
 	}
@@ -591,7 +591,7 @@ out_free_data:
 	kfree(data);	/* [한국어] Connect data 페이로드 해제 */
 	return ret;	/* [한국어] 결과 코드 전파 */
 }
-EXPORT_SYMBOL_GPL(nvmf_connect_admin_queue);	/* [한국어] Fabrics 공통 라이브러리 */
+EXPORT_SYMBOL_GPL(nvmf_connect_admin_queue);	/* [한국어] 각 트랜스포트가 세션 수립의 첫 단계로 부른다 */
 
 /**
  * nvmf_connect_io_queue() - NVMe Fabrics I/O Queue "Connect"
@@ -623,7 +623,7 @@ int nvmf_connect_io_queue(struct nvme_ctrl *ctrl, u16 qid)	/* [한국어] 함수
 			NVME_SUBMIT_RESERVED |
 			NVME_SUBMIT_NOWAIT);	/* [한국어] 해당 I/O qid 컨텍스트로 Connect 제출 */
 	if (ret) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
-		nvmf_log_connect_error(ctrl, ret, le32_to_cpu(res.u32),	/* [한국어] Fabrics 공통 라이브러리 */
+		nvmf_log_connect_error(ctrl, ret, le32_to_cpu(res.u32),	/* [한국어] I/O 큐 Connect 도 같은 해석기를 쓴다 */
 				       &cmd, data);
 		goto out_free_data;	/* [한국어] out_free_data — 함수/구조 문맥의 상태 */
 	}
@@ -654,7 +654,7 @@ out_free_data:
 	kfree(data);	/* [한국어] 동적 메모리 해제 */
 	return ret;	/* [한국어] 결과 코드 전파 */
 }
-EXPORT_SYMBOL_GPL(nvmf_connect_io_queue);	/* [한국어] Fabrics 공통 라이브러리 */
+EXPORT_SYMBOL_GPL(nvmf_connect_io_queue);	/* [한국어] I/O 큐마다 한 번씩 불린다 */
 
 /*
  * Evaluate the status information returned by the transport in order to decided
@@ -690,7 +690,7 @@ bool nvmf_should_reconnect(struct nvme_ctrl *ctrl, int status)	/* [한국어] �
 
 	return false;	/* [한국어] ctrl_loss_tmo 환산 재시도 한도 소진 */
 }
-EXPORT_SYMBOL_GPL(nvmf_should_reconnect);	/* [한국어] Fabrics 공통 라이브러리 */
+EXPORT_SYMBOL_GPL(nvmf_should_reconnect);	/* [한국어] 트랜스포트의 오류 복구 워크가 재시도 여부를 물을 때 */
 
 /**
  * nvmf_register_transport() - NVMe Fabrics Library registration function.
@@ -708,11 +708,11 @@ int nvmf_register_transport(struct nvmf_transport_ops *ops)	/* [한국어] 함�
 
 	down_write(&nvmf_transports_rwsem);	/* [한국어] 등록은 배타 write 락 */
 	list_add_tail(&ops->entry, &nvmf_transports);	/* [한국어] 전역 트랜스포트 목록 추가 */
-	up_write(&nvmf_transports_rwsem);	/* [한국어] Fabrics 공통 라이브러리 */
+	up_write(&nvmf_transports_rwsem);	/* [한국어] 등록이 끝나 이제 조회가 이 트랜스포트를 볼 수 있다 */
 
 	return 0;	/* [한국어] 성공/no-op 완료 */
 }
-EXPORT_SYMBOL_GPL(nvmf_register_transport);	/* [한국어] Fabrics 공통 라이브러리 */
+EXPORT_SYMBOL_GPL(nvmf_register_transport);	/* [한국어] 각 트랜스포트 모듈의 init 이 부른다 */
 
 /**
  * nvmf_unregister_transport() - NVMe Fabrics Library unregistration function.
@@ -723,11 +723,11 @@ EXPORT_SYMBOL_GPL(nvmf_register_transport);	/* [한국어] Fabrics 공통 라이
  */
 void nvmf_unregister_transport(struct nvmf_transport_ops *ops)	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
 {
-	down_write(&nvmf_transports_rwsem);	/* [한국어] Fabrics 공통 라이브러리 */
+	down_write(&nvmf_transports_rwsem);	/* [한국어] 조회 중에 목록이 바뀌면 안 되므로 쓰기 잠금 */
 	list_del(&ops->entry);	/* [한국어] 등록 해제 — 이후 create_ctrl 조회 실패 */
-	up_write(&nvmf_transports_rwsem);	/* [한국어] Fabrics 공통 라이브러리 */
+	up_write(&nvmf_transports_rwsem);	/* [한국어] 이 시점 이후로는 아무도 이 트랜스포트를 찾지 못한다 */
 }
-EXPORT_SYMBOL_GPL(nvmf_unregister_transport);	/* [한국어] Fabrics 공통 라이브러리 */
+EXPORT_SYMBOL_GPL(nvmf_unregister_transport);	/* [한국어] 각 트랜스포트 모듈의 exit 이 부른다 */
 
 /*
  * [한국어]
@@ -742,7 +742,7 @@ static struct nvmf_transport_ops *nvmf_lookup_transport(	/* [한국어] 함수 �
 
 	lockdep_assert_held(&nvmf_transports_rwsem);	/* [한국어] 조회 중 등록/해제 경합 방지 전제 */
 
-	list_for_each_entry(ops, &nvmf_transports, entry) {	/* [한국어] Fabrics 공통 라이브러리 */
+	list_for_each_entry(ops, &nvmf_transports, entry) {	/* [한국어] 트랜스포트 수가 몇 개뿐이라 선형 탐색으로 충분하다 */
 		if (strcmp(ops->name, opts->transport) == 0)	/* [한국어] 메모리/문자열 연산 */
 			return ops;	/* [한국어] 이름 일치 트랜스포트 발견 */
 	}
@@ -858,8 +858,8 @@ static int nvmf_parse_options(struct nvmf_ctrl_options *opts,	/* [한국어] 함
 
 	/* use default host if not given by user space */
 	/* [한국어] hostnqn/hostid 미지정 시 모듈 기본 host 정체성 사용 */
-	uuid_copy(&hostid, &nvmf_default_host->id);	/* [한국어] Fabrics 공통 라이브러리 */
-	strscpy(hostnqn, nvmf_default_host->nqn, NVMF_NQN_SIZE);	/* [한국어] Fabrics 공통 라이브러리 */
+	uuid_copy(&hostid, &nvmf_default_host->id);	/* [한국어] 위 영어 주석대로, 사용자가 지정하지 않았을 때의 출발점 */
+	strscpy(hostnqn, nvmf_default_host->nqn, NVMF_NQN_SIZE);	/* [한국어] NQN 도 기본값에서 시작해 파싱 중 덮어쓰일 수 있다 */
 
 	while ((p = strsep(&o, ",\n")) != NULL) {	/* [한국어] 콤마/개행으로 옵션 토큰 분리 */
 		if (!*p)	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
@@ -942,7 +942,7 @@ static int nvmf_parse_options(struct nvmf_ctrl_options *opts,	/* [한국어] 함
 				break;	/* [한국어] 루프/스위치 종료 */
 			}
 
-			opts->nr_io_queues = min_t(unsigned int,	/* [한국어] 실행 단계 — 주변 함수 한국어 블록과 함께 해석 */
+			opts->nr_io_queues = min_t(unsigned int,	/* [한국어] CPU 수를 넘겨 봐야 큐가 놀 뿐이라 상한을 씌운다 */
 					num_online_cpus(), token);
 			break;	/* [한국어] 루프/스위치 종료 */
 		case NVMF_OPT_KATO:	/* [한국어] 다중 분기 케이스 */
@@ -1188,8 +1188,8 @@ static int nvmf_parse_options(struct nvmf_ctrl_options *opts,	/* [한국어] 함
 
 	if (opts->discovery_nqn) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
 		opts->nr_io_queues = 0;	/* [한국어] 디스커버리는 Admin 큐만 — I/O 큐 불필요 */
-		opts->nr_write_queues = 0;	/* [한국어] 실행 단계 — 주변 함수 한국어 블록과 함께 해석 */
-		opts->nr_poll_queues = 0;	/* [한국어] 실행 단계 — 주변 함수 한국어 블록과 함께 해석 */
+		opts->nr_write_queues = 0;	/* [한국어] 디스커버리 컨트롤러는 I/O 를 하지 않으므로 세 종류 모두 0 이다 */
+		opts->nr_poll_queues = 0;
 		opts->duplicate_connect = true;	/* [한국어] 다중 디스커버리 세션 허용 */
 	} else {	/* [한국어] 대안 경로 */
 		if (!opts->kato)	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
@@ -1252,7 +1252,7 @@ void nvmf_set_io_queues(struct nvmf_ctrl_options *opts, u32 nr_io_queues,	/* [�
 		 * sufficient read queues.
 		 */
 		/* [한국어] 읽기 전용 큐를 먼저 확보한 뒤 나머지를 write(DEFAULT) 에 */
-		io_queues[HCTX_TYPE_READ] = opts->nr_io_queues;	/* [한국어] 실행 단계 — 주변 함수 한국어 블록과 함께 해석 */
+		io_queues[HCTX_TYPE_READ] = opts->nr_io_queues;	/* [한국어] 위 영어 주석대로 읽기 큐를 먼저 채운다 — 남는 것이 있어야 전용 기본 큐를 준다 */
 		nr_io_queues -= io_queues[HCTX_TYPE_READ];	/* [한국어] io_queues — 함수/구조 문맥의 상태 */
 		io_queues[HCTX_TYPE_DEFAULT] =
 			min(opts->nr_write_queues, nr_io_queues);
@@ -1275,7 +1275,7 @@ void nvmf_set_io_queues(struct nvmf_ctrl_options *opts, u32 nr_io_queues,	/* [�
 			min(opts->nr_poll_queues, nr_io_queues);	/* [한국어] 잔여 큐를 폴링 hctx 에 */
 	}
 }
-EXPORT_SYMBOL_GPL(nvmf_set_io_queues);	/* [한국어] Fabrics 공통 라이브러리 */
+EXPORT_SYMBOL_GPL(nvmf_set_io_queues);	/* [한국어] tcp/rdma 가 큐 종류별 개수를 정할 때 공통으로 쓴다 */
 
 /*
  * [한국어]
@@ -1287,13 +1287,13 @@ EXPORT_SYMBOL_GPL(nvmf_set_io_queues);	/* [한국어] Fabrics 공통 라이브�
 void nvmf_map_queues(struct blk_mq_tag_set *set, struct nvme_ctrl *ctrl,	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
 		     u32 io_queues[HCTX_MAX_TYPES])	/* [한국어] 지역/멤버 상태 — 상위 함수·구조 아키텍처 참고 */
 {
-	struct nvmf_ctrl_options *opts = ctrl->opts;	/* [한국어] Fabrics 공통 라이브러리 */
+	struct nvmf_ctrl_options *opts = ctrl->opts;	/* [한국어] 사용자가 준 큐 종류별 개수가 여기 들어 있다 */
 
 	if (opts->nr_write_queues && io_queues[HCTX_TYPE_READ]) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
 		/* separate read/write queues */
 		set->map[HCTX_TYPE_DEFAULT].nr_queues =
 			io_queues[HCTX_TYPE_DEFAULT];	/* [한국어] write 쪽 DEFAULT 맵 큐 수 */
-		set->map[HCTX_TYPE_DEFAULT].queue_offset = 0;	/* [한국어] 실행 단계 — 주변 함수 한국어 블록과 함께 해석 */
+		set->map[HCTX_TYPE_DEFAULT].queue_offset = 0;	/* [한국어] 기본(쓰기) 큐가 0 번부터 — 매핑은 오프셋과 개수의 나열이다 */
 		set->map[HCTX_TYPE_READ].nr_queues =
 			io_queues[HCTX_TYPE_READ];
 		set->map[HCTX_TYPE_READ].queue_offset =
@@ -1302,10 +1302,10 @@ void nvmf_map_queues(struct blk_mq_tag_set *set, struct nvme_ctrl *ctrl,	/* [한
 		/* shared read/write queues */
 		set->map[HCTX_TYPE_DEFAULT].nr_queues =
 			io_queues[HCTX_TYPE_DEFAULT];
-		set->map[HCTX_TYPE_DEFAULT].queue_offset = 0;	/* [한국어] 실행 단계 — 주변 함수 한국어 블록과 함께 해석 */
+		set->map[HCTX_TYPE_DEFAULT].queue_offset = 0;	/* [한국어] 분리하지 않는 구성이면 기본 큐가 전부를 덮는다 */
 		set->map[HCTX_TYPE_READ].nr_queues =
 			io_queues[HCTX_TYPE_DEFAULT];	/* [한국어] 공유: READ 맵도 동일 큐 집합 */
-		set->map[HCTX_TYPE_READ].queue_offset = 0;	/* [한국어] 실행 단계 — 주변 함수 한국어 블록과 함께 해석 */
+		set->map[HCTX_TYPE_READ].queue_offset = 0;	/* [한국어] 읽기 맵은 개수 0 이라 오프셋은 형식상 채운다 */
 	}
 
 	blk_mq_map_queues(&set->map[HCTX_TYPE_DEFAULT]);	/* [한국어] CPU→hctx 기본 매핑 */
@@ -1325,7 +1325,7 @@ void nvmf_map_queues(struct blk_mq_tag_set *set, struct nvme_ctrl *ctrl,	/* [한
 		io_queues[HCTX_TYPE_READ],
 		io_queues[HCTX_TYPE_POLL]);	/* [한국어] 운영자 가시 큐 매핑 요약 */
 }
-EXPORT_SYMBOL_GPL(nvmf_map_queues);	/* [한국어] Fabrics 공통 라이브러리 */
+EXPORT_SYMBOL_GPL(nvmf_map_queues);	/* [한국어] 트랜스포트의 map_queues 콜백이 그대로 위임한다 */
 
 /*
  * [한국어]
@@ -1363,7 +1363,7 @@ static int nvmf_check_required_opts(struct nvmf_ctrl_options *opts,	/* [한국�
 bool nvmf_ip_options_match(struct nvme_ctrl *ctrl,	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
 		struct nvmf_ctrl_options *opts)
 {
-	if (!nvmf_ctlr_matches_baseopts(ctrl, opts) ||	/* [한국어] Fabrics 공통 라이브러리 */
+	if (!nvmf_ctlr_matches_baseopts(ctrl, opts) ||	/* [한국어] NQN·host 가 같아야 같은 대상이고, 그 위에 주소까지 봐야 같은 경로다 */
 	    strcmp(opts->traddr, ctrl->opts->traddr) ||	/* [한국어] 메모리/문자열 연산 */
 	    strcmp(opts->trsvcid, ctrl->opts->trsvcid))	/* [한국어] 메모리/문자열 연산 */
 		return false;	/* [한국어] 서브시스템/host/원격 주소 불일치 */
@@ -1402,7 +1402,7 @@ bool nvmf_ip_options_match(struct nvme_ctrl *ctrl,	/* [한국어] 함수 시그�
 
 	return true;	/* [한국어] 동일 연결 엔드포인트 */
 }
-EXPORT_SYMBOL_GPL(nvmf_ip_options_match);	/* [한국어] Fabrics 공통 라이브러리 */
+EXPORT_SYMBOL_GPL(nvmf_ip_options_match);	/* [한국어] IP 기반 트랜스포트(tcp/rdma)가 중복 연결을 거를 때 쓴다 */
 
 /*
  * [한국어]
@@ -1449,7 +1449,7 @@ void nvmf_free_options(struct nvmf_ctrl_options *opts)	/* [한국어] 함수 시
 	kfree_sensitive(opts->dhchap_ctrl_secret);	/* [한국어] 컨트롤러 시크릿 안전 해제 */
 	kfree(opts);	/* [한국어] 옵션 구조체 자체 */
 }
-EXPORT_SYMBOL_GPL(nvmf_free_options);	/* [한국어] Fabrics 공통 라이브러리 */
+EXPORT_SYMBOL_GPL(nvmf_free_options);	/* [한국어] 컨트롤러 해제 경로에서 트랜스포트가 부른다 */
 
 /* [한국어] 모든 트랜스포트 공통 필수: transport= 와 nqn= */
 #define NVMF_REQUIRED_OPTS	(NVMF_OPT_TRANSPORT | NVMF_OPT_NQN)	/* [한국어] NVMF_REQUIRED_OPTS 매크로 — 상위 섹션 계약 참고 */
@@ -1512,7 +1512,7 @@ nvmf_create_ctrl(struct device *dev, const char *buf)	/* [한국어] class ctl �
 		ret = -EBUSY;	/* [한국어] 언로드 경합 — 모듈 핀 실패 */
 		goto out_unlock;	/* [한국어] out_unlock — 함수/구조 문맥의 상태 */
 	}
-	up_read(&nvmf_transports_rwsem);	/* [한국어] Fabrics 공통 라이브러리 */
+	up_read(&nvmf_transports_rwsem);	/* [한국어] 모듈 참조를 잡았으니 목록 락은 놓아도 안전하다 — create_ctrl 이 오래 걸릴 수 있어 먼저 푼다 */
 
 	ret = nvmf_check_required_opts(opts, ops->required_opts);	/* [한국어] 트랜스포트 고유 필수 (예: traddr) */
 	if (ret)	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
@@ -1535,13 +1535,13 @@ out_module_put:
 	module_put(ops->module);	/* [한국어] 모듈 수명/로드 */
 	goto out_free_opts;	/* [한국어] out_free_opts — 함수/구조 문맥의 상태 */
 out_unlock:
-	up_read(&nvmf_transports_rwsem);	/* [한국어] Fabrics 공통 라이브러리 */
+	up_read(&nvmf_transports_rwsem);	/* [한국어] 트랜스포트를 못 찾았거나 모듈을 못 잡은 경로 */
 out_free_opts:
 	nvmf_free_options(opts);	/* [한국어] 실패 시 옵션 전부 해제 */
 	return ERR_PTR(ret);	/* [한국어] 에러 포인터 규약 */
 }
 
-static const struct class nvmf_class = {	/* [한국어] Fabrics 공통 라이브러리 */
+static const struct class nvmf_class = {	/* [한국어] /sys/class/nvme-fabrics — 사용자 공간 connect 진입점의 뿌리 */
 	.name = "nvme-fabrics",	/* [한국어] sysfs class: /sys/class/nvme-fabrics */
 };
 
@@ -1610,10 +1610,10 @@ static void __nvmf_concat_opt_tokens(struct seq_file *seq_file)	/* [한국어] �
 		tok = &opt_tokens[idx];	/* [한국어] tok 상수 — 상위 enum 역할 참고 */
 		if (tok->token == NVMF_OPT_ERR)	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
 			continue;	/* [한국어] ERR 센티널 패턴 제외 */
-		seq_putc(seq_file, ',');	/* [한국어] 실행 단계 — 주변 함수 한국어 블록과 함께 해석 */
+		seq_putc(seq_file, ',');	/* [한국어] 옵션 이름들을 쉼표로 이어 붙인다 — 사용자 공간이 지원 옵션을 알아내는 방법 */
 		seq_puts(seq_file, tok->pattern);	/* [한국어] 사용자 공간 도움용 옵션 문법 */
 	}
-	seq_putc(seq_file, '\n');	/* [한국어] 실행 단계 — 주변 함수 한국어 블록과 함께 해석 */
+	seq_putc(seq_file, '\n');	/* [한국어] 목록의 끝 */
 }
 
 /*
@@ -1624,18 +1624,18 @@ static int nvmf_dev_show(struct seq_file *seq_file, void *private)	/* [한국어
 {
 	struct nvme_ctrl *ctrl;	/* [한국어] ctrl — 함수/구조 문맥의 상태 */
 
-	mutex_lock(&nvmf_dev_mutex);	/* [한국어] Fabrics 공통 라이브러리 */
+	mutex_lock(&nvmf_dev_mutex);	/* [한국어] 열린 파일의 private 가 write 경로와 경쟁한다 */
 	ctrl = seq_file->private;	/* [한국어] ctrl 상수 — 상위 enum 역할 참고 */
 	if (!ctrl) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
 		__nvmf_concat_opt_tokens(seq_file);	/* [한국어] connect 전 도움 출력 */
 		goto out_unlock;	/* [한국어] out_unlock — 함수/구조 문맥의 상태 */
 	}
 
-	seq_printf(seq_file, "instance=%d,cntlid=%d\n",	/* [한국어] 실행 단계 — 주변 함수 한국어 블록과 함께 해석 */
+	seq_printf(seq_file, "instance=%d,cntlid=%d\n",	/* [한국어] 연결이 성사된 뒤라 사용자 공간이 어느 /dev/nvmeX 인지 알 수 있게 돌려준다 */
 			ctrl->instance, ctrl->cntlid);	/* [한국어] 생성된 컨트롤러 식별자 — nvme-cli 가 후속 조작에 사용 */
 
 out_unlock:
-	mutex_unlock(&nvmf_dev_mutex);	/* [한국어] Fabrics 공통 라이브러리 */
+	mutex_unlock(&nvmf_dev_mutex);
 	return 0;	/* [한국어] 성공/no-op 완료 */
 }
 
@@ -1667,7 +1667,7 @@ static int nvmf_dev_release(struct inode *inode, struct file *file)	/* [한국�
 	return single_release(inode, file);	/* [한국어] seq_file 정리 */
 }
 
-static const struct file_operations nvmf_dev_fops = {	/* [한국어] Fabrics 공통 라이브러리 */
+static const struct file_operations nvmf_dev_fops = {	/* [한국어] write 로 옵션 문자열을 받고 read 로 결과를 돌려주는 단일 파일 인터페이스 */
 	.owner		= THIS_MODULE,	/* [한국어] 모듈 수명 */
 	.write		= nvmf_dev_write,	/* [한국어] connect 문자열 수신 */
 	.read		= seq_read,	/* [한국어] seq_file 표준 read */
@@ -1675,7 +1675,7 @@ static const struct file_operations nvmf_dev_fops = {	/* [한국어] Fabrics 공
 	.release	= nvmf_dev_release,
 };
 
-static struct miscdevice nvmf_misc = {	/* [한국어] Fabrics 공통 라이브러리 */
+static struct miscdevice nvmf_misc = {	/* [한국어] /dev/nvme-fabrics — nvme-cli 의 connect 가 여는 파일 */
 	.minor		= MISC_DYNAMIC_MINOR,	/* [한국어] 동적 minor 할당 */
 	.name           = "nvme-fabrics",	/* [한국어] /dev/nvme-fabrics */
 	.fops		= &nvmf_dev_fops,
@@ -1692,7 +1692,7 @@ static int __init nvmf_init(void)	/* [한국어] 함수 시그니처 — 직전 
 	int ret;	/* [한국어] ret — 함수/구조 문맥의 상태 */
 
 	nvmf_default_host = nvmf_host_default();	/* [한국어] 기본 Host NQN/ID 생성 */
-	if (!nvmf_default_host)	/* [한국어] Fabrics 공통 라이브러리 */
+	if (!nvmf_default_host)	/* [한국어] 기본 host 없이는 어떤 connect 도 신원을 만들 수 없다 */
 		return -ENOMEM;	/* [한국어] 할당 실패 전파 */
 
 	ret = class_register(&nvmf_class);	/* [한국어] sysfs class 등록 */
@@ -1703,7 +1703,7 @@ static int __init nvmf_init(void)	/* [한국어] 함수 시그니처 — 직전 
 
 	nvmf_device =	/* [한국어] nvmf_device 상수 — 상위 enum 역할 참고 */
 		device_create(&nvmf_class, NULL, MKDEV(0, 0), NULL, "ctl");	/* [한국어] create_ctrl 부모 장치 */
-	if (IS_ERR(nvmf_device)) {	/* [한국어] Fabrics 공통 라이브러리 */
+	if (IS_ERR(nvmf_device)) {	/* [한국어] class 아래 "ctl" 장치 — sysfs 쪽 진입점 */
 		pr_err("couldn't create nvme-fabrics device!\n");	/* [한국어] 진단 로그 */
 		ret = PTR_ERR(nvmf_device);	/* [한국어] ret 상수 — 상위 enum 역할 참고 */
 		goto out_destroy_class;	/* [한국어] out_destroy_class — 함수/구조 문맥의 상태 */
@@ -1718,11 +1718,11 @@ static int __init nvmf_init(void)	/* [한국어] 함수 시그니처 — 직전 
 	return 0;	/* [한국어] 성공/no-op 완료 */
 
 out_destroy_device:
-	device_destroy(&nvmf_class, MKDEV(0, 0));	/* [한국어] Fabrics 공통 라이브러리 */
+	device_destroy(&nvmf_class, MKDEV(0, 0));	/* [한국어] 만든 역순으로 되감는다 */
 out_destroy_class:
-	class_unregister(&nvmf_class);	/* [한국어] Fabrics 공통 라이브러리 */
+	class_unregister(&nvmf_class);
 out_free_host:
-	nvmf_host_put(nvmf_default_host);	/* [한국어] Fabrics 공통 라이브러리 */
+	nvmf_host_put(nvmf_default_host);	/* [한국어] 기본 host 참조까지 놓으면 완전히 적재 이전으로 돌아간다 */
 	return ret;	/* [한국어] 결과 코드 전파 */
 }
 

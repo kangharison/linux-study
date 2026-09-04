@@ -330,7 +330,7 @@ void nvme_mpath_start_request(struct request *rq)	/* [한국어] 함수 시그�
 		return;	/* [한국어] head 기준 acct 불필요 */
 
 	nvme_req(rq)->flags |= NVME_MPATH_IO_STATS;	/* [한국어] head part0 기준 acct 시작됨 표시 */
-	nvme_req(rq)->start_time = bdev_start_io_acct(disk->part0, req_op(rq),	/* [한국어] 실행 단계 — 주변 함수 한국어 블록과 함께 해석 */
+	nvme_req(rq)->start_time = bdev_start_io_acct(disk->part0, req_op(rq),	/* [한국어] 시작 시각을 요청에 새겨 둔다 — 완료 시 이것으로 지연을 계산한다 */
 						      jiffies);	/* [한국어] 통계를 path 가 아닌 multipath head 디스크에 귀속 */
 }
 EXPORT_SYMBOL_GPL(nvme_mpath_start_request);	/* [한국어] core/트랜스포트 모듈에서 링크 가능한 공개 심볼 */
@@ -348,7 +348,7 @@ void nvme_mpath_end_request(struct request *rq)	/* [한국어] 함수 시그니�
 
 	if (!(nvme_req(rq)->flags & NVME_MPATH_IO_STATS))	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
 		return;	/* [한국어] start 에서 acct 안 했으면 end 도 스킵 */
-	bdev_end_io_acct(ns->head->disk->part0, req_op(rq),	/* [한국어] 실행 단계 — 주변 함수 한국어 블록과 함께 해석 */
+	bdev_end_io_acct(ns->head->disk->part0, req_op(rq),	/* [한국어] 통계는 개별 경로가 아니라 head 의 디스크에 쌓는다 — 사용자에게는 경로가 보이지 않아야 하기 때문 */
 			 blk_rq_bytes(rq) >> SECTOR_SHIFT,	/* [한국어] 지역/멤버 상태 — 상위 함수·구조 아키텍처 참고 */
 			 nvme_req(rq)->start_time);	/* [한국어] head 기준 바이트·시간 통계 마감 */
 }
@@ -371,7 +371,7 @@ void nvme_kick_requeue_lists(struct nvme_ctrl *ctrl)	/* [한국어] 함수 시�
 		if (!ns->head->disk)	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
 			continue;	/* [한국어] multipath head 없는 경로는 requeue 대상 아님 */
 		kblockd_schedule_work(&ns->head->requeue_work);	/* [한국어] 대기 bio 재투입 워크 깨우기 */
-		if (nvme_ctrl_state(ns->ctrl) == NVME_CTRL_LIVE)	/* [한국어] 컨트롤러 상태 원자 스냅샷 */
+		if (nvme_ctrl_state(ns->ctrl) == NVME_CTRL_LIVE)	/* [한국어] 살아 있는 경로에서만 uevent 를 낸다 — 죽은 컨트롤러의 변경 통지는 udev 를 헛돌게 한다 */
 			disk_uevent(ns->head->disk, KOBJ_CHANGE);	/* [한국어] 경로 복구를 사용자 공간(udev 등)에 알림 */
 	}
 	srcu_read_unlock(&ctrl->srcu, srcu_idx);	/* [한국어] SRCU 읽기 측 종료 */
@@ -660,7 +660,7 @@ static struct nvme_ns *nvme_queue_depth_path(struct nvme_ns_head *head)	/* [한�
  */
 static inline bool nvme_path_is_optimized(struct nvme_ns *ns)	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
 {
-	return nvme_ctrl_state(ns->ctrl) == NVME_CTRL_LIVE &&	/* [한국어] 컨트롤러 상태 원자 스냅샷 */
+	return nvme_ctrl_state(ns->ctrl) == NVME_CTRL_LIVE &&	/* [한국어] 최적 경로의 조건 두 개: 컨트롤러가 살아 있고 */
 		ns->ana_state == NVME_ANA_OPTIMIZED;	/* [한국어] 캐시 히트 유효 조건 — 아니면 재탐색 */
 }
 
@@ -722,7 +722,7 @@ static bool nvme_available_path(struct nvme_ns_head *head)	/* [한국어] 함수
 				 srcu_read_lock_held(&head->srcu)) {
 		if (test_bit(NVME_CTRL_FAILFAST_EXPIRED, &ns->ctrl->flags))	/* [한국어] 상태 플래그 비트 */
 			continue;	/* [한국어] fast_io_fail 만료 — 복구 대기 대상에서 제외 */
-		switch (nvme_ctrl_state(ns->ctrl)) {	/* [한국어] 컨트롤러 상태 원자 스냅샷 */
+		switch (nvme_ctrl_state(ns->ctrl)) {	/* [한국어] 복구 중인 경로도 "가능"으로 친다 — 곧 살아날 것이므로 I/O 를 실패시키지 않고 재큐한다 */
 		case NVME_CTRL_LIVE:	/* [한국어] 정상 — 곧 find_path 성공 가능 */
 		case NVME_CTRL_RESETTING:	/* [한국어] 리셋 중 — LIVE 복귀 기대 → requeue 가치 */
 		case NVME_CTRL_CONNECTING:	/* [한국어] 재연결 중 — 일시 경로 없음으로 즉시 fail 금지 */
@@ -781,7 +781,7 @@ static void nvme_ns_head_submit_bio(struct bio *bio)	/* [한국어] 함수 시�
 	if (likely(ns)) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
 		bio_set_dev(bio, ns->disk->part0);	/* [한국어] bio 를 경로 gendisk 로 재지정 — 하위 nvme 큐 진입 */
 		bio->bi_opf |= REQ_NVME_MPATH;	/* [한국어] multipath 경유 bio 표시 — 하위 에러/acct 구분 */
-		trace_block_bio_remap(bio, disk_devt(ns->head->disk),	/* [한국어] 실행 단계 — 주변 함수 한국어 블록과 함께 해석 */
+		trace_block_bio_remap(bio, disk_devt(ns->head->disk),	/* [한국어] 추적점에 원래 head 장치를 남긴다 — blktrace 가 다중경로 재지정을 따라갈 수 있게 */
 				      bio->bi_iter.bi_sector);	/* [한국어] head→path 리맵 트레이스 */
 		submit_bio_noacct(bio);	/* [한국어] acct 중복 없이 경로 큐로 재제출 */
 	} else if (nvme_available_path(head)) {	/* [한국어] 대안 조건 경로 */
@@ -1127,7 +1127,7 @@ static void nvme_mpath_set_live(struct nvme_ns *ns)	/* [한국어] 함수 시그
 				     nvme_ns_attr_groups);	/* [한국어] sysfs/블록 계층에 multipath 디스크 노출 */
 		if (rc) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
 			clear_bit(NVME_NSHEAD_DISK_LIVE, &head->flags);	/* [한국어] device_add_disk 실패 시 live 비트 롤백 */
-			return;	/* [한국어] 실행 단계 — 주변 함수 한국어 블록과 함께 해석 */
+			return;	/* [한국어] 디스크 등록이 실패했으므로 cdev 도 스캔도 걸지 않고 되돌린다 */
 		}
 		nvme_add_ns_head_cdev(head);	/* [한국어] 패스스루용 ng 노드 추가 */
 		queue_work(nvme_wq, &head->partition_scan_work);	/* [한국어] 파티션 스캔을 nvme_wq 로 비동기화 */
@@ -1358,7 +1358,7 @@ static void nvme_ana_work(struct work_struct *work)	/* [한국어] 함수 시그
 {
 	struct nvme_ctrl *ctrl = container_of(work, struct nvme_ctrl, ana_work);	/* [한국어] work → ctrl */
 
-	if (nvme_ctrl_state(ctrl) != NVME_CTRL_LIVE)	/* [한국어] 컨트롤러 상태 원자 스냅샷 */
+	if (nvme_ctrl_state(ctrl) != NVME_CTRL_LIVE)	/* [한국어] LIVE 가 아니면 ANA 로그를 읽을 admin 큐가 없다 */
 		return;	/* [한국어] 비-LIVE 면 ANA 작업 무의미 */
 
 	nvme_read_ana_log(ctrl);	/* [한국어] 최신 ANA 스냅샷 수집·적용 */
@@ -1471,7 +1471,7 @@ static ssize_t nvme_subsys_iopolicy_store(struct device *dev,	/* [한국어] 함
 
 	for (i = 0; i < ARRAY_SIZE(nvme_iopolicy_names); i++) {	/* [한국어] 정적 배열 크기 */
 		if (sysfs_streq(buf, nvme_iopolicy_names[i])) {	/* [한국어] 사용자 입력 정책 이름 매칭 */
-			nvme_subsys_iopolicy_update(subsys, i);	/* [한국어] 실행 단계 — 주변 함수 한국어 블록과 함께 해석 */
+			nvme_subsys_iopolicy_update(subsys, i);	/* [한국어] 이름이 맞은 정책 번호로 서브시스템 전체를 바꾼다 */
 			return count;	/* [한국어] sysfs store 성공 시 소비 바이트 수 */
 		}
 	}
@@ -1711,7 +1711,7 @@ void nvme_mpath_remove_sysfs_link(struct nvme_ns *ns)	/* [한국어] 함수 시�
 
 	target = disk_to_dev(ns->disk);	/* [한국어] target 상수 — 상위 enum 역할 참고 */
 	kobj = &disk_to_dev(ns->head->disk)->kobj;	/* [한국어] kobj 상수 — 상위 enum 역할 참고 */
-	sysfs_remove_link_from_group(kobj, nvme_ns_mpath_attr_group.name,	/* [한국어] 실행 단계 — 주변 함수 한국어 블록과 함께 해석 */
+	sysfs_remove_link_from_group(kobj, nvme_ns_mpath_attr_group.name,	/* [한국어] head 디스크 쪽에 걸어 둔 이 경로의 심볼릭 링크를 뗀다 */
 			dev_name(target));	/* [한국어] path 제거 시 대칭 링크 삭제 */
 	clear_bit(NVME_NS_SYSFS_ATTR_LINK, &ns->flags);	/* [한국어] 링크 플래그 클리어 */
 }
