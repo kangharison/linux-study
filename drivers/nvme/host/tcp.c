@@ -645,7 +645,7 @@ static void nvme_tcp_init_iter(struct nvme_tcp_request *req,
 		vec = __bvec_iter_bvec(bio->bi_io_vec, bio->bi_iter);	/* [한국어] 현재 위치의 벡터부터 시작한다 */
 		nr_bvec = 0;
 		bio_for_each_bvec(bv, bio, bi) {	/* [한국어] 개수를 알아야 iov_iter_bvec 에 넘길 수 있다 */
-			nr_bvec++;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			nr_bvec++;	/* [한국어] 반복자에 넘길 개수를 미리 세어 둔다 */
 		}
 		size = bio->bi_iter.bi_size;	/* [한국어] 이 bio 의 남은 바이트 */
 		offset = bio->bi_iter.bi_bvec_done;	/* [한국어] 앞서 일부가 처리됐을 수 있어 그 지점부터 이어야 한다 */
@@ -1741,34 +1741,75 @@ static int nvme_tcp_recv_skb(read_descriptor_t *desc, struct sk_buff *skb,
 	return consumed;
 }
 
-static void nvme_tcp_data_ready(struct sock *sk)	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+/*
+ * [한국어]
+ * nvme_tcp_data_ready - 소켓에 데이터가 도착했다는 통지를 받는다
+ *
+ * @sk: 데이터가 온 소켓
+ * @return: 없음
+ *
+ * 여기서 직접 읽지 않고 워크를 깨우기만 하는 것이 요점이다. 이 콜백은
+ * 소프트 IRQ 문맥에서 불릴 수 있어 오래 머물면 안 되고, PDU 하나를
+ * 처리하는 일은 요청 완료까지 이어져 길다.
+ *
+ * POLLING 비트를 보는 이유: 폴링 큐는 이미 누군가 소켓을 직접 훑고
+ * 있으므로 워크를 깨우면 두 경로가 같은 소켓을 두고 부딪힌다.
+ *
+ * sk_callback_lock 은 소켓이 우리 큐를 가리키는 동안만 이 콜백이
+ * 유효하게 만든다. 큐 해체가 그 락 아래에서 포인터를 지우므로,
+ * 락을 들고 읽으면 사라진 큐를 건드리지 않는다.
+ *
+ * 실행 컨텍스트: 소프트 IRQ. 잠들 수 없다.
+ *
+ * 호출 체인: TCP 스택 → sk->sk_data_ready → [이 함수] → io_work
+ */
+static void nvme_tcp_data_ready(struct sock *sk)
 {
-	struct nvme_tcp_queue *queue;	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+	struct nvme_tcp_queue *queue;	/* [한국어] 소켓에 새겨 둔 큐 */
 
-	trace_sk_data_ready(sk);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	trace_sk_data_ready(sk);	/* [한국어] 소켓 추적점 — 지연 분석에 쓴다 */
 
-	read_lock_bh(&sk->sk_callback_lock);	/* [한국어] 커널 소켓 송수신 — TCP 바이트 스트림 PDU 운반 */
-	queue = sk->sk_user_data;	/* [한국어] 커널 소켓 송수신 — TCP 바이트 스트림 PDU 운반 */
-	if (likely(queue && queue->rd_enabled) &&	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
+	read_lock_bh(&sk->sk_callback_lock);	/* [한국어] 해체가 이 락 아래에서 포인터를 지우므로 들고 읽어야 안전하다 */
+	queue = sk->sk_user_data;	/* [한국어] 소켓 생성 시 걸어 둔 큐 */
+	if (likely(queue && queue->rd_enabled) &&	/* [한국어] 수신을 멈춘 큐에는 깨울 것이 없다 */
 	    !test_bit(NVME_TCP_Q_POLLING, &queue->flags))
 		queue_work_on(queue->io_cpu, nvme_tcp_wq, &queue->io_work);
-	read_unlock_bh(&sk->sk_callback_lock);	/* [한국어] 커널 소켓 송수신 — TCP 바이트 스트림 PDU 운반 */
+	read_unlock_bh(&sk->sk_callback_lock);
 }
 
-static void nvme_tcp_write_space(struct sock *sk)	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+/*
+ * [한국어]
+ * nvme_tcp_write_space - 송신 버퍼에 자리가 생겼다는 통지를 받는다
+ *
+ * @sk: 여유가 생긴 소켓
+ * @return: 없음
+ *
+ * 전송이 -EAGAIN 으로 멈췄던 요청을 다시 밀어 줄 시점이다. data_ready 와
+ * 마찬가지로 여기서는 워크를 깨우기만 한다.
+ *
+ * TLS 인 경우 원래 콜백을 한 번 더 부르는 것에 주의할 것. 위 영어
+ * 주석대로 TLS 계층이 레코드 하나를 절반만 내보낸 상태로 붙들고 있을
+ * 수 있고, 그것을 이어서 내보내게 하려면 TLS 자신의 write_space 가
+ * 돌아야 한다. 우리 워크만 깨우면 그 절반이 영영 나가지 않는다.
+ *
+ * 실행 컨텍스트: 소프트 IRQ. 잠들 수 없다.
+ *
+ * 호출 체인: TCP 스택 → sk->sk_write_space → [이 함수] → io_work
+ */
+static void nvme_tcp_write_space(struct sock *sk)
 {
-	struct nvme_tcp_queue *queue;	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+	struct nvme_tcp_queue *queue;
 
-	read_lock_bh(&sk->sk_callback_lock);	/* [한국어] 커널 소켓 송수신 — TCP 바이트 스트림 PDU 운반 */
-	queue = sk->sk_user_data;	/* [한국어] 커널 소켓 송수신 — TCP 바이트 스트림 PDU 운반 */
-	if (likely(queue && sk_stream_is_writeable(sk))) {	/* [한국어] 커널 소켓 송수신 — TCP 바이트 스트림 PDU 운반 */
-		clear_bit(SOCK_NOSPACE, &sk->sk_socket->flags);	/* [한국어] 커널 소켓 송수신 — TCP 바이트 스트림 PDU 운반 */
+	read_lock_bh(&sk->sk_callback_lock);
+	queue = sk->sk_user_data;
+	if (likely(queue && sk_stream_is_writeable(sk))) {	/* [한국어] 실제로 쓸 만한 여유가 생겼을 때만 */
+		clear_bit(SOCK_NOSPACE, &sk->sk_socket->flags);	/* [한국어] 다음 전송이 다시 시도하도록 표시를 지운다 */
 		/* Ensure pending TLS partial records are retried */
-		if (nvme_tcp_queue_tls(queue))	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+		if (nvme_tcp_queue_tls(queue))	/* [한국어] 위 영어 주석대로 TLS 가 절반 내보낸 레코드를 붙들고 있을 수 있다 */
 			queue->write_space(sk);
-		queue_work_on(queue->io_cpu, nvme_tcp_wq, &queue->io_work);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+		queue_work_on(queue->io_cpu, nvme_tcp_wq, &queue->io_work);	/* [한국어] 전송을 이어 갈 워크를 깨운다 */
 	}
-	read_unlock_bh(&sk->sk_callback_lock);	/* [한국어] 커널 소켓 송수신 — TCP 바이트 스트림 PDU 운반 */
+	read_unlock_bh(&sk->sk_callback_lock);
 }
 
 /*
@@ -1828,20 +1869,37 @@ done:
 	read_unlock_bh(&sk->sk_callback_lock);
 }
 
-static inline void nvme_tcp_done_send_req(struct nvme_tcp_queue *queue)	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+static inline void nvme_tcp_done_send_req(struct nvme_tcp_queue *queue)	/* [한국어] 현재 전송 중인 요청을 비운다 */
 {
-	queue->request = NULL;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	queue->request = NULL;	/* [한국어] 다음 fetch 가 새 요청을 꺼내게 한다 */
 }
 
-static void nvme_tcp_fail_request(struct nvme_tcp_request *req)	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+/*
+ * [한국어]
+ * nvme_tcp_fail_request - 전송에 실패한 요청을 경로 오류로 끝낸다
+ *
+ * @req: 실패한 요청
+ * @return: 없음
+ *
+ * AEN 과 보통 요청이 갈리는 것은 AEN 에 짝지을 블록 요청이 없기 때문이다.
+ * 코어에 직접 완료를 알리는 경로를 쓴다.
+ *
+ * HOST_PATH_ERROR 를 쓰는 것이 중요하다. 미디어 오류가 아니라 이 경로로
+ * 보내지 못했다는 뜻이므로, 다중경로가 다른 경로로 재시도할 수 있다.
+ *
+ * 실행 컨텍스트: 전송 워크. 잠들지 않는다.
+ *
+ * 호출 체인: nvme_tcp_try_send(실패) → [이 함수]
+ */
+static void nvme_tcp_fail_request(struct nvme_tcp_request *req)
 {
-	if (nvme_tcp_async_req(req)) {	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		union nvme_result res = {};	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	if (nvme_tcp_async_req(req)) {	/* [한국어] AEN 은 짝지을 블록 요청이 없다 */
+		union nvme_result res = {};	/* [한국어] AEN 완료에는 결과 값이 없다 */
 
-		nvme_complete_async_event(&req->queue->ctrl->ctrl,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		nvme_complete_async_event(&req->queue->ctrl->ctrl,	/* [한국어] 코어에 직접 알린다 */
 				cpu_to_le16(NVME_SC_HOST_PATH_ERROR), &res);
 	} else {
-		nvme_tcp_end_request(blk_mq_rq_from_pdu(req),	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+		nvme_tcp_end_request(blk_mq_rq_from_pdu(req),	/* [한국어] 경로 오류로 끝내 다중경로가 다른 경로를 시도하게 한다 */
 				NVME_SC_HOST_PATH_ERROR);
 	}
 }
@@ -2321,49 +2379,104 @@ static void nvme_tcp_io_work(struct work_struct *w)
 	queue_work_on(queue->io_cpu, nvme_tcp_wq, &queue->io_work);	/* [한국어] 예산을 다 썼지만 할 일이 남았다 — 자신을 다시 큐에 넣어 양보한다 */
 }
 
-static void nvme_tcp_free_async_req(struct nvme_tcp_ctrl *ctrl)	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+/*
+ * [한국어]
+ * nvme_tcp_free_async_req - AEN 전용 요청의 PDU 버퍼를 반납한다
+ *
+ * @ctrl: 대상 컨트롤러
+ * @return: 없음
+ *
+ * AEN 은 blk-mq 태그를 쓰지 않으므로 태그셋 해제로는 정리되지 않는다.
+ * 컨트롤러 안에 하나뿐인 요청이고, 그 버퍼를 여기서 손으로 놓는다.
+ *
+ * 실행 컨텍스트: admin 큐 해체. 잠들 수 있다.
+ *
+ * 호출 체인: nvme_tcp_destroy_admin_queue → [이 함수]
+ */
+static void nvme_tcp_free_async_req(struct nvme_tcp_ctrl *ctrl)
 {
-	struct nvme_tcp_request *async = &ctrl->async_req;	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+	struct nvme_tcp_request *async = &ctrl->async_req;	/* [한국어] 컨트롤러에 하나뿐인 AEN 요청 */
 
-	page_frag_free(async->pdu);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	page_frag_free(async->pdu);	/* [한국어] 태그셋이 관여하지 않아 손으로 놓는다 */
 }
 
-static int nvme_tcp_alloc_async_req(struct nvme_tcp_ctrl *ctrl)	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+/*
+ * [한국어]
+ * nvme_tcp_alloc_async_req - AEN 전용 요청을 준비한다
+ *
+ * @ctrl: 대상 컨트롤러
+ * @return: 0 이면 성공, -ENOMEM 이면 실패
+ *
+ * 태그를 쓰지 않는 대신 admin 큐에 고정된 요청 하나를 미리 잡아 둔다.
+ * 보통 요청의 init_request 가 하는 일과 같지만, 태그셋이 관여하지 않아
+ * 여기서 직접 한다.
+ *
+ * 다이제스트 자리까지 포함해 잡는 것도 같은 이유다 -- 이 PDU 도 다른
+ * 명령과 똑같이 선로에 나간다.
+ *
+ * 실행 컨텍스트: admin 큐 구성. 잠들 수 있다.
+ *
+ * 호출 체인: nvme_tcp_configure_admin_queue → [이 함수]
+ */
+static int nvme_tcp_alloc_async_req(struct nvme_tcp_ctrl *ctrl)
 {
-	struct nvme_tcp_queue *queue = &ctrl->queues[0];	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	struct nvme_tcp_request *async = &ctrl->async_req;	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	u8 hdgst = nvme_tcp_hdgst_len(queue);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+	struct nvme_tcp_queue *queue = &ctrl->queues[0];	/* [한국어] AEN 은 admin 큐로만 나간다 */
+	struct nvme_tcp_request *async = &ctrl->async_req;
+	u8 hdgst = nvme_tcp_hdgst_len(queue);	/* [한국어] 이 PDU 도 다른 명령과 똑같이 다이제스트가 붙는다 */
 
-	async->pdu = page_frag_alloc(&queue->pf_cache,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	async->pdu = page_frag_alloc(&queue->pf_cache,
 		sizeof(struct nvme_tcp_cmd_pdu) + hdgst,
 		GFP_KERNEL | __GFP_ZERO);
-	if (!async->pdu)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		return -ENOMEM;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	if (!async->pdu)
+		return -ENOMEM;
 
-	async->queue = &ctrl->queues[0];	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	return 0;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	async->queue = &ctrl->queues[0];	/* [한국어] 전송 경로가 이 포인터로 큐를 찾는다 */
+	return 0;
 }
 
-static void nvme_tcp_free_queue(struct nvme_ctrl *nctrl, int qid)	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+/*
+ * [한국어]
+ * nvme_tcp_free_queue - 큐가 잡은 소켓과 버퍼를 반납한다
+ *
+ * @nctrl: 컨트롤러
+ * @qid:   반납할 큐 번호
+ * @return: 없음
+ *
+ * ALLOCATED 비트를 test_and_clear 로 다뤄 두 번 해제되지 않게 한다.
+ * 오류 복구와 삭제가 겹치는 것이 흔하기 때문이다.
+ *
+ * noreclaim 구간이 이 함수의 미묘한 지점이다. 소켓을 닫으면 TCP 가
+ * 메모리를 반납하는 과정에서 회수(reclaim)를 유발할 수 있고, 그
+ * 회수가 이 컨트롤러로 I/O 를 내려 보내면 지금 해체 중인 큐를 쓰려
+ * 하게 된다. memalloc_noreclaim 이 그 재귀를 끊는다.
+ *
+ * 위 영어 주석대로 소켓 자체는 fput 이 놓는다 -- 핸드셰이크를 사용자
+ * 공간 데몬에 넘기기 위해 파일로 감쌌기 때문에 파일 참조가 소유자다.
+ *
+ * 실행 컨텍스트: 큐 해체. 잠들 수 있다.
+ *
+ * 호출 체인: nvme_tcp_free_io_queues / _destroy_admin_queue → [이 함수]
+ */
+static void nvme_tcp_free_queue(struct nvme_ctrl *nctrl, int qid)
 {
-	struct nvme_tcp_ctrl *ctrl = to_tcp_ctrl(nctrl);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	struct nvme_tcp_queue *queue = &ctrl->queues[qid];	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	unsigned int noreclaim_flag;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	struct nvme_tcp_ctrl *ctrl = to_tcp_ctrl(nctrl);
+	struct nvme_tcp_queue *queue = &ctrl->queues[qid];
+	unsigned int noreclaim_flag;	/* [한국어] 아래 재귀 방지 구간의 저장 값 */
 
-	if (!test_and_clear_bit(NVME_TCP_Q_ALLOCATED, &queue->flags))	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		return;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	if (!test_and_clear_bit(NVME_TCP_Q_ALLOCATED, &queue->flags))	/* [한국어] 복구와 삭제가 겹쳐도 한 번만 해제한다 */
+		return;
 
-	page_frag_cache_drain(&queue->pf_cache);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	page_frag_cache_drain(&queue->pf_cache);	/* [한국어] 이 큐가 쓰던 페이지 조각 캐시를 비운다 */
 
-	noreclaim_flag = memalloc_noreclaim_save();	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	noreclaim_flag = memalloc_noreclaim_save();	/* [한국어] 소켓을 닫다 회수가 일어나면 그 I/O 가 지금 해체 중인 큐로 온다 */
 	/* ->sock will be released by fput() */
-	fput(queue->sock->file);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	queue->sock = NULL;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	memalloc_noreclaim_restore(noreclaim_flag);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	fput(queue->sock->file);	/* [한국어] 핸드셰이크를 데몬에 넘기려 파일로 감쌌으므로 파일 참조가 소유자다 */
+	queue->sock = NULL;	/* [한국어] 콜백들이 이 포인터를 보므로 반드시 지운다 */
+	memalloc_noreclaim_restore(noreclaim_flag);	/* [한국어] 재귀 위험 구간이 끝났다 */
 
-	kfree(queue->pdu);	/* [한국어] 커널 메모리 생명주기 */
-	mutex_destroy(&queue->send_mutex);	/* [한국어] 동기화 — 큐/연결/상태 공유 보호 */
-	mutex_destroy(&queue->queue_lock);	/* [한국어] 동기화 — 큐/연결/상태 공유 보호 */
+	kfree(queue->pdu);	/* [한국어] 수신 PDU 조립 버퍼 */
+	mutex_destroy(&queue->send_mutex);
+	mutex_destroy(&queue->queue_lock);
 }
 
 /*
@@ -2536,17 +2649,17 @@ free_icreq:
 	return ret;
 }
 
-static bool nvme_tcp_admin_queue(struct nvme_tcp_queue *queue)	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+static bool nvme_tcp_admin_queue(struct nvme_tcp_queue *queue)	/* [한국어] 0번이면 admin — 소켓 옵션과 큐 크기가 달라진다 */
 {
-	return nvme_tcp_queue_id(queue) == 0;	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+	return nvme_tcp_queue_id(queue) == 0;
 }
 
-static bool nvme_tcp_default_queue(struct nvme_tcp_queue *queue)	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+static bool nvme_tcp_default_queue(struct nvme_tcp_queue *queue)	/* [한국어] 이 큐가 기본(읽기·쓰기 공용) 종류인가 */
 {
-	struct nvme_tcp_ctrl *ctrl = queue->ctrl;	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	int qid = nvme_tcp_queue_id(queue);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+	struct nvme_tcp_ctrl *ctrl = queue->ctrl;	/* [한국어] 큐 종류별 개수가 컨트롤러에 있다 */
+	int qid = nvme_tcp_queue_id(queue);
 
-	return !nvme_tcp_admin_queue(queue) &&	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+	return !nvme_tcp_admin_queue(queue) &&	/* [한국어] admin 을 뺀 뒤 번호가 기본 큐 구간에 드는지 본다 */
 		qid < 1 + ctrl->io_queues[HCTX_TYPE_DEFAULT];
 }
 
@@ -2753,187 +2866,247 @@ out_complete:
 	complete(&queue->tls_complete);	/* [한국어] 연결을 진행하던 쪽을 깨운다. 모든 경로가 여기를 지나야 한다 */
 }
 
-static int nvme_tcp_start_tls(struct nvme_ctrl *nctrl,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+/*
+ * [한국어]
+ * nvme_tcp_start_tls - 사용자 공간 데몬에 TLS 핸드셰이크를 맡기고 기다린다
+ *
+ * @nctrl: 컨트롤러
+ * @queue: 핸드셰이크할 큐
+ * @pskid: 쓸 PSK 의 키 일련번호
+ * @return: 0 이면 성공, 음수 errno
+ *
+ * 커널이 직접 핸드셰이크를 하지 않는 것이 이 함수의 전제다. TLS 프로토콜
+ * 협상은 복잡하고 정책이 많아 사용자 공간 데몬(tlshd)이 하고, 커널은
+ * 넷링크로 요청을 올린 뒤 결과만 받는다. 소켓을 파일로 감싸 두는 것도
+ * 그 데몬에게 넘기기 위해서다.
+ *
+ * 그래서 타임아웃이 필수다. 데몬이 없거나 죽어 있으면 응답이 영영 오지
+ * 않는다. tls_err 을 -EOPNOTSUPP 로 미리 채워 두는 것도 같은 이유 --
+ * 콜백이 한 번도 불리지 않은 경우와 구별하기 위해서다.
+ *
+ * 타임아웃 시 handshake_cancel 을 부르는 것이 중요하다. 그러지 않으면
+ * 데몬이 나중에 완료 콜백을 부르는데, 그때는 이미 이 큐가 해체되고
+ * 있을 수 있다.
+ *
+ * 실행 컨텍스트: 연결 경로. 오래 잠든다.
+ *
+ * 호출 체인:
+ *   nvme_tcp_alloc_queue → [이 함수] → tls_client_hello_psk
+ *     → (사용자 공간 tlshd) → nvme_tcp_tls_done
+ */
+static int nvme_tcp_start_tls(struct nvme_ctrl *nctrl,
 			      struct nvme_tcp_queue *queue,
 			      key_serial_t pskid)
 {
-	int qid = nvme_tcp_queue_id(queue);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	int ret;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	struct tls_handshake_args args;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	unsigned long tmo = tls_handshake_timeout * HZ;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	key_serial_t keyring = nvme_keyring_id();	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	int qid = nvme_tcp_queue_id(queue);	/* [한국어] 로그에만 쓴다 */
+	int ret;
+	struct tls_handshake_args args;	/* [한국어] 넷링크로 데몬에 넘길 요청 */
+	unsigned long tmo = tls_handshake_timeout * HZ;	/* [한국어] 데몬이 없으면 응답이 영영 오지 않는다 */
+	key_serial_t keyring = nvme_keyring_id();	/* [한국어] 기본은 NVMe 전용 키링 */
 
-	dev_dbg(nctrl->device, "queue %d: start TLS with key %x\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	dev_dbg(nctrl->device, "queue %d: start TLS with key %x\n",	/* [한국어] 어느 키로 시도하는지 남긴다 */
 		qid, pskid);
-	memset(&args, 0, sizeof(args));	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	args.ta_sock = queue->sock;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	args.ta_done = nvme_tcp_tls_done;	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	args.ta_data = queue;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	args.ta_my_peerids[0] = pskid;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	args.ta_num_peerids = 1;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	if (nctrl->opts->keyring)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
+	memset(&args, 0, sizeof(args));	/* [한국어] 안 쓰는 필드가 0 이어야 한다 */
+	args.ta_sock = queue->sock;	/* [한국어] 데몬이 이 소켓 위에서 핸드셰이크한다 */
+	args.ta_done = nvme_tcp_tls_done;	/* [한국어] 끝나면 이 콜백이 결과를 남긴다 */
+	args.ta_data = queue;	/* [한국어] 그 콜백이 큐를 되찾는 통로 */
+	args.ta_my_peerids[0] = pskid;	/* [한국어] 쓸 PSK */
+	args.ta_num_peerids = 1;	/* [한국어] 하나만 제안한다 */
+	if (nctrl->opts->keyring)	/* [한국어] 사용자가 키링을 지정했다 */
 		keyring = key_serial(nctrl->opts->keyring);
-	args.ta_keyring = keyring;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	args.ta_timeout_ms = tls_handshake_timeout * 1000;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	queue->tls_err = -EOPNOTSUPP;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	init_completion(&queue->tls_complete);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	ret = tls_client_hello_psk(&args, GFP_KERNEL);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	if (ret) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		dev_err(nctrl->device, "queue %d: failed to start TLS: %d\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	args.ta_keyring = keyring;	/* [한국어] 데몬이 이 키링에서 키를 찾는다 */
+	args.ta_timeout_ms = tls_handshake_timeout * 1000;	/* [한국어] 데몬 쪽 상한도 함께 준다 */
+	queue->tls_err = -EOPNOTSUPP;	/* [한국어] 콜백이 한 번도 안 불린 경우와 구별하기 위해 */
+	init_completion(&queue->tls_complete);	/* [한국어] 콜백이 이것으로 깨운다 */
+	ret = tls_client_hello_psk(&args, GFP_KERNEL);	/* [한국어] 넷링크로 요청을 올린다 — 비동기다 */
+	if (ret) {	/* [한국어] 요청 자체를 올리지 못했다 */
+		dev_err(nctrl->device, "queue %d: failed to start TLS: %d\n",	/* [한국어] 데몬이 없거나 넷링크가 막혔다 */
 			qid, ret);
-		return ret;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+		return ret;
 	}
-	ret = wait_for_completion_interruptible_timeout(&queue->tls_complete, tmo);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	if (ret <= 0) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		if (ret == 0)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
+	ret = wait_for_completion_interruptible_timeout(&queue->tls_complete, tmo);	/* [한국어] 상한을 두고 기다린다 */
+	if (ret <= 0) {	/* [한국어] 타임아웃이거나 시그널로 깨어났다 */
+		if (ret == 0)	/* [한국어] 0 은 시간이 다 됐다는 뜻 */
 			ret = -ETIMEDOUT;
 
-		dev_err(nctrl->device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		dev_err(nctrl->device,
 			"queue %d: TLS handshake failed, error %d\n",
 			qid, ret);
-		tls_handshake_cancel(queue->sock->sk);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		tls_handshake_cancel(queue->sock->sk);	/* [한국어] 취소하지 않으면 데몬이 나중에 해체된 큐로 콜백을 부른다 */
 	} else {
-		if (queue->tls_err) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-			dev_err(nctrl->device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		if (queue->tls_err) {	/* [한국어] 핸드셰이크는 끝났지만 실패했다 */
+			dev_err(nctrl->device,
 				"queue %d: TLS handshake complete, error %d\n",
 				qid, queue->tls_err);
 		} else {
-			dev_dbg(nctrl->device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			dev_dbg(nctrl->device,	/* [한국어] 성공 */
 				"queue %d: TLS handshake complete\n", qid);
 		}
-		ret = queue->tls_err;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		ret = queue->tls_err;	/* [한국어] 콜백이 남긴 결과가 최종 답이다 */
 	}
-	return ret;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	return ret;
 }
 
-static int nvme_tcp_alloc_queue(struct nvme_ctrl *nctrl, int qid,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+/*
+ * [한국어]
+ * nvme_tcp_alloc_queue - 큐 하나의 소켓을 만들어 연결하고 프로토콜을 협상한다
+ *
+ * @nctrl: 컨트롤러
+ * @qid:   큐 번호. 0이면 admin.
+ * @pskid: TLS 를 쓸 경우의 PSK 키 번호. 0이면 평문.
+ * @return: 0 이면 성공, 음수 errno
+ *
+ * 소켓 생성부터 ICReq/ICResp 협상까지가 한 함수에 있다. 소켓 옵션마다
+ * 이유가 다르다.
+ *
+ * syncnt=1 은 재시도를 한 번으로 줄여 연결 실패를 빨리 알아채기 위한
+ * 것이고, nodelay 는 명령 PDU 가 Nagle 알고리즘에 붙들리지 않게 한다 --
+ * 작은 PDU 를 모아 보내면 지연이 그대로 I/O 지연이 된다.
+ *
+ * no_linger 의 이유는 위 영어 주석에 있다. 연결이 끊겼을 때 TCP 가
+ * 재전송을 오래 시도하며 소켓을 붙들면, 그동안 재연결을 시작할 수 없다.
+ *
+ * sk_allocation 을 GFP_ATOMIC 으로, sk_set_memalloc 을 거는 것은 이
+ * 소켓이 스왑 경로에 놓일 수 있기 때문이다. 메모리가 부족해 스왑이
+ * 필요한 상황에서 그 스왑을 나르는 소켓이 메모리를 기다리면 교착이 된다.
+ *
+ * 수신 버퍼를 hdgst 길이까지 포함해 잡는 것에 주의할 것. 다이제스트가
+ * 켜지면 헤더 뒤에 4바이트가 더 붙고, 그것까지 한 번에 받아야 한다.
+ *
+ * 실행 컨텍스트: 연결/재연결 경로. 오래 잠든다.
+ *
+ * 호출 체인:
+ *   nvme_tcp_configure_admin_queue / _io_queues → [이 함수]
+ *     → kernel_connect → nvme_tcp_start_tls → nvme_tcp_init_connection
+ */
+static int nvme_tcp_alloc_queue(struct nvme_ctrl *nctrl, int qid,
 				key_serial_t pskid)
 {
-	struct nvme_tcp_ctrl *ctrl = to_tcp_ctrl(nctrl);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	struct nvme_tcp_queue *queue = &ctrl->queues[qid];	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	int ret, rcv_pdu_size;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	struct file *sock_file;	/* [한국어] 커널 소켓 송수신 — TCP 바이트 스트림 PDU 운반 */
+	struct nvme_tcp_ctrl *ctrl = to_tcp_ctrl(nctrl);
+	struct nvme_tcp_queue *queue = &ctrl->queues[qid];
+	int ret, rcv_pdu_size;	/* [한국어] 결과와 수신 버퍼 크기 */
+	struct file *sock_file;	/* [한국어] 소켓을 파일로 감싼 것 — 데몬에 넘기기 위해 */
 
-	mutex_init(&queue->queue_lock);	/* [한국어] 동기화 — 큐/연결/상태 공유 보호 */
-	queue->ctrl = ctrl;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	init_llist_head(&queue->req_list);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	INIT_LIST_HEAD(&queue->send_list);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	mutex_init(&queue->send_mutex);	/* [한국어] 동기화 — 큐/연결/상태 공유 보호 */
-	INIT_WORK(&queue->io_work, nvme_tcp_io_work);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+	mutex_init(&queue->queue_lock);	/* [한국어] stop/start 가 겹치는 것을 막는다 */
+	queue->ctrl = ctrl;	/* [한국어] 콜백들이 이 포인터로 컨트롤러를 찾는다 */
+	init_llist_head(&queue->req_list);	/* [한국어] 락 없는 제출 대기열 */
+	INIT_LIST_HEAD(&queue->send_list);	/* [한국어] 전송 워크만 만지는 목록 */
+	mutex_init(&queue->send_mutex);	/* [한국어] 전송을 한 번에 하나만 돌게 한다 */
+	INIT_WORK(&queue->io_work, nvme_tcp_io_work);	/* [한국어] 송수신을 함께 처리하는 워크 */
 
-	if (qid > 0)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
+	if (qid > 0)	/* [한국어] I/O 큐는 컨트롤러가 알린 캡슐 길이를 쓴다 */
 		queue->cmnd_capsule_len = nctrl->ioccsz * 16;
 	else	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		queue->cmnd_capsule_len = sizeof(struct nvme_command) +	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
+		queue->cmnd_capsule_len = sizeof(struct nvme_command) +	/* [한국어] admin 은 스펙 고정값이다 */
 						NVME_TCP_ADMIN_CCSZ;
 
-	ret = sock_create_kern(current->nsproxy->net_ns,	/* [한국어] 커널 소켓 송수신 — TCP 바이트 스트림 PDU 운반 */
+	ret = sock_create_kern(current->nsproxy->net_ns,	/* [한국어] 현재 네트워크 네임스페이스에서 만든다 */
 			ctrl->addr.ss_family, SOCK_STREAM,
 			IPPROTO_TCP, &queue->sock);
-	if (ret) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		dev_err(nctrl->device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	if (ret) {
+		dev_err(nctrl->device,
 			"failed to create socket: %d\n", ret);
-		goto err_destroy_mutex;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
+		goto err_destroy_mutex;
 	}
 
-	sock_file = sock_alloc_file(queue->sock, O_CLOEXEC, NULL);	/* [한국어] 커널 소켓 송수신 — TCP 바이트 스트림 PDU 운반 */
-	if (IS_ERR(sock_file)) {	/* [한국어] 커널 소켓 송수신 — TCP 바이트 스트림 PDU 운반 */
-		ret = PTR_ERR(sock_file);	/* [한국어] 커널 소켓 송수신 — TCP 바이트 스트림 PDU 운반 */
-		goto err_destroy_mutex;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
+	sock_file = sock_alloc_file(queue->sock, O_CLOEXEC, NULL);	/* [한국어] 파일로 감싸야 TLS 데몬에 넘길 수 있다 */
+	if (IS_ERR(sock_file)) {
+		ret = PTR_ERR(sock_file);
+		goto err_destroy_mutex;	/* [한국어] 파일이 없으면 소켓은 sock_release 가 아니라 이 경로가 놓는다 */
 	}
 
-	sk_net_refcnt_upgrade(queue->sock->sk);	/* [한국어] 커널 소켓 송수신 — TCP 바이트 스트림 PDU 운반 */
-	nvme_tcp_reclassify_socket(queue->sock);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+	sk_net_refcnt_upgrade(queue->sock->sk);	/* [한국어] 커널 소켓이지만 네임스페이스 참조를 정식으로 든다 */
+	nvme_tcp_reclassify_socket(queue->sock);	/* [한국어] lockdep 이 커널 소켓과 사용자 소켓을 구별하게 한다 */
 
 	/* Single syn retry */
-	tcp_sock_set_syncnt(queue->sock->sk, 1);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	tcp_sock_set_syncnt(queue->sock->sk, 1);	/* [한국어] 위 영어 주석대로 재시도 한 번 — 연결 실패를 빨리 알아챈다 */
 
 	/* Set TCP no delay */
-	tcp_sock_set_nodelay(queue->sock->sk);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	tcp_sock_set_nodelay(queue->sock->sk);	/* [한국어] 작은 PDU 를 모아 보내면 그 지연이 I/O 지연이 된다 */
 
 	/*
 	 * Cleanup whatever is sitting in the TCP transmit queue on socket
 	 * close. This is done to prevent stale data from being sent should
 	 * the network connection be restored before TCP times out.
 	 */
-	sock_no_linger(queue->sock->sk);	/* [한국어] 커널 소켓 송수신 — TCP 바이트 스트림 PDU 운반 */
+	sock_no_linger(queue->sock->sk);	/* [한국어] 위 영어 주석대로 재전송에 붙들려 재연결이 막히는 것을 피한다 */
 
-	if (so_priority > 0)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
+	if (so_priority > 0)	/* [한국어] 사용자가 지정했을 때만 */
 		sock_set_priority(queue->sock->sk, so_priority);
 
 	/* Set socket type of service */
-	if (nctrl->opts->tos >= 0)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
+	if (nctrl->opts->tos >= 0)	/* [한국어] 음수는 "트랜스포트 기본값"이라는 표시다 */
 		ip_sock_set_tos(queue->sock->sk, nctrl->opts->tos);
 
 	/* Set 10 seconds timeout for icresp recvmsg */
-	queue->sock->sk->sk_rcvtimeo = 10 * HZ;	/* [한국어] 커널 소켓 송수신 — TCP 바이트 스트림 PDU 운반 */
+	queue->sock->sk->sk_rcvtimeo = 10 * HZ;	/* [한국어] 위 영어 주석대로 ICResp 를 기다리는 데만 쓰는 상한 */
 
-	queue->sock->sk->sk_allocation = GFP_ATOMIC;	/* [한국어] 커널 소켓 송수신 — TCP 바이트 스트림 PDU 운반 */
-	queue->sock->sk->sk_use_task_frag = false;	/* [한국어] 커널 소켓 송수신 — TCP 바이트 스트림 PDU 운반 */
-	queue->io_cpu = WORK_CPU_UNBOUND;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	queue->request = NULL;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	queue->data_remaining = 0;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	queue->ddgst_remaining = 0;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	queue->pdu_remaining = 0;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	queue->pdu_offset = 0;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	sk_set_memalloc(queue->sock->sk);	/* [한국어] 커널 소켓 송수신 — TCP 바이트 스트림 PDU 운반 */
+	queue->sock->sk->sk_allocation = GFP_ATOMIC;	/* [한국어] 이 소켓이 스왑을 나를 수 있어 메모리를 기다리면 교착이 된다 */
+	queue->sock->sk->sk_use_task_frag = false;	/* [한국어] 같은 이유로 태스크 조각 캐시를 쓰지 않는다 */
+	queue->io_cpu = WORK_CPU_UNBOUND;	/* [한국어] 실제 CPU 는 연결이 선 뒤에 정한다 */
+	queue->request = NULL;	/* [한국어] 전송 중인 요청 없음 */
+	queue->data_remaining = 0;	/* [한국어] 수신 상태를 처음으로 */
+	queue->ddgst_remaining = 0;
+	queue->pdu_remaining = 0;
+	queue->pdu_offset = 0;
+	sk_set_memalloc(queue->sock->sk);	/* [한국어] 메모리 압박에서도 이 소켓은 예비 풀을 쓸 수 있다 */
 
-	if (nctrl->opts->mask & NVMF_OPT_HOST_TRADDR) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		ret = kernel_bind(queue->sock, (struct sockaddr_unsized *)&ctrl->src_addr,	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
+	if (nctrl->opts->mask & NVMF_OPT_HOST_TRADDR) {	/* [한국어] 사용자가 출구 주소를 고정했다 */
+		ret = kernel_bind(queue->sock, (struct sockaddr_unsized *)&ctrl->src_addr,
 			sizeof(ctrl->src_addr));
-		if (ret) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-			dev_err(nctrl->device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		if (ret) {
+			dev_err(nctrl->device,
 				"failed to bind queue %d socket %d\n",
 				qid, ret);
-			goto err_sock;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
+			goto err_sock;
 		}
 	}
 
-	if (nctrl->opts->mask & NVMF_OPT_HOST_IFACE) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		char *iface = nctrl->opts->host_iface;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		sockptr_t optval = KERNEL_SOCKPTR(iface);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	if (nctrl->opts->mask & NVMF_OPT_HOST_IFACE) {	/* [한국어] 주소 대신 인터페이스로 출구를 고정했다 */
+		char *iface = nctrl->opts->host_iface;
+		sockptr_t optval = KERNEL_SOCKPTR(iface);	/* [한국어] 커널 포인터임을 명시해야 setsockopt 이 복사하지 않는다 */
 
-		ret = sock_setsockopt(queue->sock, SOL_SOCKET, SO_BINDTODEVICE,	/* [한국어] 커널 소켓 송수신 — TCP 바이트 스트림 PDU 운반 */
+		ret = sock_setsockopt(queue->sock, SOL_SOCKET, SO_BINDTODEVICE,
 				      optval, strlen(iface));
-		if (ret) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-			dev_err(nctrl->device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		if (ret) {
+			dev_err(nctrl->device,
 			  "failed to bind to interface %s queue %d err %d\n",
 			  iface, qid, ret);
-			goto err_sock;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
+			goto err_sock;
 		}
 	}
 
-	queue->hdr_digest = nctrl->opts->hdr_digest;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	queue->data_digest = nctrl->opts->data_digest;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	queue->hdr_digest = nctrl->opts->hdr_digest;	/* [한국어] 희망 값 — 실제 사용 여부는 ICResp 가 정한다 */
+	queue->data_digest = nctrl->opts->data_digest;
 
-	rcv_pdu_size = sizeof(struct nvme_tcp_rsp_pdu) +	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+	rcv_pdu_size = sizeof(struct nvme_tcp_rsp_pdu) +	/* [한국어] 가장 큰 헤더에 맞춰 잡는다 */
 			nvme_tcp_hdgst_len(queue);
-	queue->pdu = kmalloc(rcv_pdu_size, GFP_KERNEL);	/* [한국어] 커널 메모리 생명주기 */
-	if (!queue->pdu) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		ret = -ENOMEM;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		goto err_sock;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
+	queue->pdu = kmalloc(rcv_pdu_size, GFP_KERNEL);	/* [한국어] 헤더를 조각조각 받아 여기서 조립한다 */
+	if (!queue->pdu) {
+		ret = -ENOMEM;
+		goto err_sock;
 	}
 
-	dev_dbg(nctrl->device, "connecting queue %d\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	dev_dbg(nctrl->device, "connecting queue %d\n",
 			nvme_tcp_queue_id(queue));
 
-	ret = kernel_connect(queue->sock, (struct sockaddr_unsized *)&ctrl->addr,	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
+	ret = kernel_connect(queue->sock, (struct sockaddr_unsized *)&ctrl->addr,	/* [한국어] 3-way 핸드셰이크가 여기서 끝난다 */
 		sizeof(ctrl->addr), 0);
-	if (ret) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		dev_err(nctrl->device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	if (ret) {
+		dev_err(nctrl->device,
 			"failed to connect socket: %d\n", ret);
-		goto err_rcv_pdu;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
+		goto err_rcv_pdu;
 	}
 
 	/* If PSKs are configured try to start TLS */
-	if (nvme_tcp_tls_configured(nctrl) && pskid) {	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		ret = nvme_tcp_start_tls(nctrl, queue, pskid);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		if (ret)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-			goto err_init_connect;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
+	if (nvme_tcp_tls_configured(nctrl) && pskid) {	/* [한국어] 위 영어 주석대로 PSK 가 있을 때만 */
+		ret = nvme_tcp_start_tls(nctrl, queue, pskid);	/* [한국어] 이 뒤로는 모든 바이트가 TLS 를 거친다 */
+		if (ret)
+			goto err_init_connect;
 	}
 
-	ret = nvme_tcp_init_connection(queue);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	if (ret)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
+	ret = nvme_tcp_init_connection(queue);	/* [한국어] ICReq/ICResp 로 다이제스트와 데이터 정렬을 협상한다 */
+	if (ret)
 		goto err_init_connect;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
 
 	set_bit(NVME_TCP_Q_ALLOCATED, &queue->flags);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
