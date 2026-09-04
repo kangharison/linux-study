@@ -2784,32 +2784,60 @@ static void nvme_tcp_setup_sock_ops(struct nvme_tcp_queue *queue)	/* [한국어]
 	write_unlock_bh(&queue->sock->sk->sk_callback_lock);	/* [한국어] 커널 소켓 송수신 — TCP 바이트 스트림 PDU 운반 */
 }	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
-static int nvme_tcp_start_queue(struct nvme_ctrl *nctrl, int idx)	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-{	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	struct nvme_tcp_ctrl *ctrl = to_tcp_ctrl(nctrl);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	struct nvme_tcp_queue *queue = &ctrl->queues[idx];	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	int ret;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+/*
+ * [한국어]
+ * nvme_tcp_start_queue - 소켓이 열린 큐를 실제로 가동시킨다
+ *
+ * @nctrl: 컨트롤러
+ * @idx:   큐 번호. 0 이면 admin, 1 이상이면 I/O.
+ * @return: 0 이면 LIVE. 음수면 연결 실패이며 큐를 다시 멈춘다.
+ *
+ * alloc_queue 가 소켓을 열고 ICReq/ICResp 협상까지 마친 뒤, 이 함수가
+ * 수신을 켜고 Fabrics Connect 를 보낸다. 그 둘을 나눈 이유는 재연결에서
+ * 소켓은 새로 열되 태그셋은 유지해야 하고, 그 경계가 여기이기 때문이다.
+ *
+ * 순서가 중요하다. rd_enabled 를 세우고 수신 상태를 초기화한 뒤에야 소켓
+ * 콜백을 건다(setup_sock_ops). 반대로 하면 콜백이 걸린 직후 도착한 데이터가
+ * 아직 초기화되지 않은 수신 상태로 흘러든다.
+ *
+ * io_cpu 배정을 I/O 큐에서만 하는 이유: admin 큐는 트래픽이 적어 특정
+ * 코어에 고정할 이득이 없고, 무엇보다 blk-mq 의 mq_map 은 I/O 큐만 담는다.
+ *
+ * 실패 시 ALLOCATED 비트를 확인하고 멈추는 것은, 소켓이 실제로 열려 있을
+ * 때만 정리할 것이 있기 때문이다.
+ *
+ * 실행 컨텍스트: 연결 경로. Connect 응답을 기다리며 잠든다.
+ *
+ * 호출 체인:
+ *   nvme_tcp_configure_admin_queue / _start_io_queues → [이 함수]
+ *     → nvmf_connect_admin_queue / _io_queue
+ */
+static int nvme_tcp_start_queue(struct nvme_ctrl *nctrl, int idx)
+{
+	struct nvme_tcp_ctrl *ctrl = to_tcp_ctrl(nctrl);
+	struct nvme_tcp_queue *queue = &ctrl->queues[idx];
+	int ret;
 
-	queue->rd_enabled = true;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	nvme_tcp_init_recv_ctx(queue);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	nvme_tcp_setup_sock_ops(queue);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+	queue->rd_enabled = true;	/* [한국어] 이제 콜백이 io_work 를 깨워도 된다 */
+	nvme_tcp_init_recv_ctx(queue);	/* [한국어] 수신 상태를 헤더 대기로 세운다 */
+	nvme_tcp_setup_sock_ops(queue);	/* [한국어] 콜백은 마지막에 건다 — 먼저 걸면 초기화 전 상태로 데이터가 흘러든다 */
 
-	if (idx) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		nvme_tcp_set_queue_io_cpu(queue);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		ret = nvmf_connect_io_queue(nctrl, idx);	/* [한국어] fabrics 공통(Connect/옵션/재연결) API */
-	} else	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		ret = nvmf_connect_admin_queue(nctrl);	/* [한국어] fabrics 공통(Connect/옵션/재연결) API */
+	if (idx) {	/* [한국어] I/O 큐 */
+		nvme_tcp_set_queue_io_cpu(queue);	/* [한국어] mq_map 은 I/O 큐만 담으므로 admin 에는 적용하지 않는다 */
+		ret = nvmf_connect_io_queue(nctrl, idx);
+	} else
+		ret = nvmf_connect_admin_queue(nctrl);
 
-	if (!ret) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		set_bit(NVME_TCP_Q_LIVE, &queue->flags);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	} else {	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		if (test_bit(NVME_TCP_Q_ALLOCATED, &queue->flags))	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-			__nvme_tcp_stop_queue(queue);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		dev_err(nctrl->device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			"failed to connect queue: %d ret=%d\n", idx, ret);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	return ret;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
-}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	if (!ret) {
+		set_bit(NVME_TCP_Q_LIVE, &queue->flags);	/* [한국어] 이제 이 큐로 명령을 보낼 수 있다 */
+	} else {
+		if (test_bit(NVME_TCP_Q_ALLOCATED, &queue->flags))	/* [한국어] 소켓이 실제로 열려 있을 때만 정리할 것이 있다 */
+			__nvme_tcp_stop_queue(queue);
+		dev_err(nctrl->device,
+			"failed to connect queue: %d ret=%d\n", idx, ret);
+	}
+	return ret;
+}
 
 static void nvme_tcp_free_admin_queue(struct nvme_ctrl *ctrl)	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 {	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
@@ -2959,124 +2987,192 @@ static int nvme_tcp_alloc_io_queues(struct nvme_ctrl *ctrl)	/* [한국어] NVMe/
 	return __nvme_tcp_alloc_io_queues(ctrl);	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 }	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
-static int nvme_tcp_configure_io_queues(struct nvme_ctrl *ctrl, bool new)	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-{	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	int ret, nr_queues;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+/*
+ * [한국어]
+ * nvme_tcp_configure_io_queues - I/O 큐를 만들고 태그셋과 짝지어 가동한다
+ *
+ * @ctrl: 대상 컨트롤러
+ * @new:  최초 생성이면 태그셋도 만든다. 재연결이면 기존 것을 쓴다.
+ * @return: 0 이면 모든 큐가 LIVE. 음수면 되감았다.
+ *
+ * rdma.c 의 같은 이름 함수와 구조가 같고, 그 이유도 같다. 재연결에서 큐
+ * 개수가 달라질 수 있는데 태그셋은 다시 만들 수 없다 -- gendisk 와 진행 중인
+ * 요청이 그 위에 매달려 있기 때문이다. 그래서 개수 변경을 태그셋에 반영해야
+ * 하고, 그 반영은 진행 중 I/O 가 없을 때만 안전하다. freeze 가 그 상태를
+ * 만든다.
+ *
+ * 태그셋 맵 개수를 정하는 삼항식이 TCP 고유다. 폴링 큐를 쓰면 기본·읽기·
+ * 폴링 세 종류가 모두 필요하고(HCTX_MAX_TYPES), 아니면 기본과 읽기 둘이면
+ * 충분하다. 이 값이 map_queues 가 돌 맵의 개수가 된다.
+ *
+ * freeze 대기가 타임아웃되면 초기화를 실패시키는 것은 위 영어 주석의 판단
+ * 그대로다 -- 끝나지 않는다는 것은 이미 무언가에 막혀 있다는 뜻이므로
+ * 억지로 진행하지 않는다. 그 경로에서도 unfreeze 는 반드시 부른다.
+ * 빠뜨리면 큐가 영구히 멈춘 채 남는다.
+ *
+ * 큐 가동이 두 번으로 나뉜 것도 같은 제약에서 나온다. freeze 를 기다리는
+ * 동안에는 태그셋이 아는 큐만 돌아야 하고, 늘어난 몫은 갱신 뒤에 가동한다.
+ *
+ * 실행 컨텍스트: 연결 경로. freeze 대기로 오래 잠들 수 있다.
+ *
+ * 호출 체인:
+ *   nvme_tcp_setup_ctrl → [이 함수] → nvme_tcp_alloc_io_queues
+ *     → blk_mq_update_nr_hw_queues → nvme_tcp_start_io_queues
+ */
+static int nvme_tcp_configure_io_queues(struct nvme_ctrl *ctrl, bool new)
+{
+	int ret, nr_queues;
 
-	ret = nvme_tcp_alloc_io_queues(ctrl);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	if (ret)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		return ret;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	ret = nvme_tcp_alloc_io_queues(ctrl);	/* [한국어] 개수 협상과 소켓 생성 */
+	if (ret)
+		return ret;
 
-	if (new) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		ret = nvme_alloc_io_tag_set(ctrl, &to_tcp_ctrl(ctrl)->tag_set,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-				&nvme_tcp_mq_ops,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-				ctrl->opts->nr_poll_queues ? HCTX_MAX_TYPES : 2,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-				sizeof(struct nvme_tcp_request));	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		if (ret)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-			goto out_free_io_queues;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
-	}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	if (new) {
+		ret = nvme_alloc_io_tag_set(ctrl, &to_tcp_ctrl(ctrl)->tag_set,
+				&nvme_tcp_mq_ops,
+				ctrl->opts->nr_poll_queues ? HCTX_MAX_TYPES : 2,	/* [한국어] 폴링 큐를 쓰면 세 종류 맵이 필요하고, 아니면 기본·읽기 둘이면 된다 */
+				sizeof(struct nvme_tcp_request));
+		if (ret)
+			goto out_free_io_queues;
+	}
 
 	/*
 	 * Only start IO queues for which we have allocated the tagset
 	 * and limited it to the available queues. On reconnects, the
 	 * queue number might have changed.
 	 */
-	nr_queues = min(ctrl->tagset->nr_hw_queues + 1, ctrl->queue_count);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	ret = nvme_tcp_start_io_queues(ctrl, 1, nr_queues);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	if (ret)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		goto out_cleanup_connect_q;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
+	/* [한국어] 위 영어 주석대로 태그셋이 아는 범위만 먼저 가동한다.
+	 * 아래 freeze 를 기다리는 동안 태그셋이 모르는 큐로 요청이 가면 안 된다. */
+	nr_queues = min(ctrl->tagset->nr_hw_queues + 1, ctrl->queue_count);
+	ret = nvme_tcp_start_io_queues(ctrl, 1, nr_queues);
+	if (ret)
+		goto out_cleanup_connect_q;
 
-	if (!new) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		nvme_start_freeze(ctrl);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		nvme_unquiesce_io_queues(ctrl);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		if (!nvme_wait_freeze_timeout(ctrl, NVME_IO_TIMEOUT)) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
+	if (!new) {	/* [한국어] 재연결 — 태그셋을 재사용하므로 개수 변경을 반영해야 한다 */
+		nvme_start_freeze(ctrl);	/* [한국어] 새 요청을 막고 */
+		nvme_unquiesce_io_queues(ctrl);	/* [한국어] 이미 들어온 것은 흘려보내 끝나게 한다 */
+		if (!nvme_wait_freeze_timeout(ctrl, NVME_IO_TIMEOUT)) {
 			/*
 			 * If we timed out waiting for freeze we are likely to
 			 * be stuck.  Fail the controller initialization just
 			 * to be safe.
 			 */
-			ret = -ENODEV;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			nvme_unfreeze(ctrl);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			goto out_wait_freeze_timed_out;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
-		}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		blk_mq_update_nr_hw_queues(ctrl->tagset,	/* [한국어] blk-mq — 태그·hctx·타임아웃·맵·완료 연동 */
-			ctrl->queue_count - 1);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		nvme_unfreeze(ctrl);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+			/* [한국어] 위 영어 주석대로 freeze 가 끝나지 않는다는 것은 이미
+			 * 막혀 있다는 뜻이다. 억지로 진행하지 않고 실패시킨다. */
+			ret = -ENODEV;
+			nvme_unfreeze(ctrl);	/* [한국어] 실패 경로에서도 반드시 푼다 — 빠뜨리면 큐가 영구히 멈춘다 */
+			goto out_wait_freeze_timed_out;
+		}
+		blk_mq_update_nr_hw_queues(ctrl->tagset,	/* [한국어] 진행 중 I/O 가 없는 지금이 개수를 바꿀 수 있는 유일한 시점이다 */
+			ctrl->queue_count - 1);
+		nvme_unfreeze(ctrl);
+	}
 
 	/*
 	 * If the number of queues has increased (reconnect case)
 	 * start all new queues now.
 	 */
-	ret = nvme_tcp_start_io_queues(ctrl, nr_queues,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-				       ctrl->tagset->nr_hw_queues + 1);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	if (ret)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		goto out_wait_freeze_timed_out;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
+	/* [한국어] 위 영어 주석대로 늘어난 몫은 태그셋 갱신 뒤에야 가동할 수 있다. */
+	ret = nvme_tcp_start_io_queues(ctrl, nr_queues,
+				       ctrl->tagset->nr_hw_queues + 1);
+	if (ret)
+		goto out_wait_freeze_timed_out;
 
-	return 0;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	return 0;
 
-out_wait_freeze_timed_out:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	nvme_quiesce_io_queues(ctrl);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	nvme_sync_io_queues(ctrl);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	nvme_tcp_stop_io_queues(ctrl);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-out_cleanup_connect_q:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	nvme_cancel_tagset(ctrl);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	if (new)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		nvme_remove_io_tag_set(ctrl);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-out_free_io_queues:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	nvme_tcp_free_io_queues(ctrl);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	return ret;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
-}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+out_wait_freeze_timed_out:
+	nvme_quiesce_io_queues(ctrl);
+	nvme_sync_io_queues(ctrl);
+	nvme_tcp_stop_io_queues(ctrl);
+out_cleanup_connect_q:
+	nvme_cancel_tagset(ctrl);	/* [한국어] 남은 요청을 실패로 완료시킨다 */
+	if (new)
+		nvme_remove_io_tag_set(ctrl);	/* [한국어] 우리가 만든 것일 때만 해제한다 */
+out_free_io_queues:
+	nvme_tcp_free_io_queues(ctrl);
+	return ret;
+}
 
-static int nvme_tcp_configure_admin_queue(struct nvme_ctrl *ctrl, bool new)	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-{	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	int error;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+/*
+ * [한국어]
+ * nvme_tcp_configure_admin_queue - admin 큐를 세우고 컨트롤러를 초기화한다
+ *
+ * @ctrl: 대상 컨트롤러
+ * @new:  최초 생성이면 admin 태그셋도 만든다.
+ * @return: 0 이면 Identify 까지 끝났다. 음수면 역순으로 되감았다.
+ *
+ * 연결의 첫 관문이다. 소켓 → 태그셋 → Connect → CC.EN → Identify 순으로
+ * 세우며, 여기가 끝나야 컨트롤러의 능력을 알 수 있고 I/O 큐 개수를
+ * 협상할 수 있다.
+ *
+ * concat 조기 반환이 이 함수의 특이한 부분이다. TLS PSK 를 인증 결과로부터
+ * 파생하는 구성에서는, 첫 연결이 평문으로 인증만 마치고 여기서 멈춘다.
+ * PSK 가 생긴 뒤 setup_ctrl 이 이 함수를 다시 부르며, 그때 비로소
+ * CC.EN 부터 이어 간다. 그래서 enable/Identify 를 건너뛰고 0 을 돌려준다.
+ *
+ * unquiesce 를 enable 과 Identify 사이에 두는 이유: CC.EN 이 끝나야
+ * 컨트롤러가 명령을 받을 준비가 되고, Identify 는 그 큐로 나가는 첫
+ * 실제 명령이다. 그전에 열면 준비되지 않은 컨트롤러로 요청이 나간다.
+ *
+ * 되감기 사다리가 quiesce → stop → cancel → tagset → queue 순인 것도
+ * 같은 논리의 역순이다. 새 요청을 막고, 큐를 멈추고, 남은 것을 실패시킨 뒤
+ * 자원을 푼다.
+ *
+ * 실행 컨텍스트: 연결 경로. 잠들 수 있다.
+ *
+ * 호출 체인:
+ *   nvme_tcp_setup_ctrl → [이 함수] → nvme_tcp_alloc_admin_queue
+ *     → nvme_tcp_start_queue → nvme_enable_ctrl → nvme_init_ctrl_finish
+ */
+static int nvme_tcp_configure_admin_queue(struct nvme_ctrl *ctrl, bool new)
+{
+	int error;
 
-	error = nvme_tcp_alloc_admin_queue(ctrl);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	if (error)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		return error;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	error = nvme_tcp_alloc_admin_queue(ctrl);	/* [한국어] 소켓을 열고 ICReq/ICResp 협상까지 */
+	if (error)
+		return error;
 
-	if (new) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		error = nvme_alloc_admin_tag_set(ctrl,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-				&to_tcp_ctrl(ctrl)->admin_tag_set,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-				&nvme_tcp_admin_mq_ops,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-				sizeof(struct nvme_tcp_request));	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		if (error)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-			goto out_free_queue;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
-	}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	if (new) {
+		error = nvme_alloc_admin_tag_set(ctrl,	/* [한국어] 최초 생성에서만 — 재연결은 기존 태그셋을 쓴다 */
+				&to_tcp_ctrl(ctrl)->admin_tag_set,
+				&nvme_tcp_admin_mq_ops,
+				sizeof(struct nvme_tcp_request));
+		if (error)
+			goto out_free_queue;
+	}
 
-	error = nvme_tcp_start_queue(ctrl, 0);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	if (error)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		goto out_cleanup_tagset;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
+	error = nvme_tcp_start_queue(ctrl, 0);	/* [한국어] 수신을 켜고 Fabrics Connect 를 보낸다 */
+	if (error)
+		goto out_cleanup_tagset;
 
-	if (ctrl->opts->concat && !ctrl->tls_pskid)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		return 0;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	if (ctrl->opts->concat && !ctrl->tls_pskid)	/* [한국어] secure concatenation 의 첫 연결 — 인증만 마치고 여기서 멈춘다 */
+		return 0;	/* [한국어] PSK 가 생긴 뒤 setup_ctrl 이 이 함수를 다시 부르며 그때 아래를 이어 간다 */
 
-	error = nvme_enable_ctrl(ctrl);	/* [한국어] NVMe core API — SQE 조립·완료·상태기계·수명 */
-	if (error)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		goto out_stop_queue;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
+	error = nvme_enable_ctrl(ctrl);	/* [한국어] CC.EN 을 세우고 CSTS.RDY 를 기다린다(Property Set 으로) */
+	if (error)
+		goto out_stop_queue;
 
-	nvme_unquiesce_admin_queue(ctrl);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	nvme_unquiesce_admin_queue(ctrl);	/* [한국어] CC.EN 이 끝난 지금에야 연다 — 그전에 열면 준비 안 된 컨트롤러로 요청이 나간다 */
 
-	error = nvme_init_ctrl_finish(ctrl, false);	/* [한국어] NVMe core API — SQE 조립·완료·상태기계·수명 */
-	if (error)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		goto out_quiesce_queue;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
+	error = nvme_init_ctrl_finish(ctrl, false);	/* [한국어] Identify 를 읽는다. 이 큐로 나가는 첫 실제 명령이다 */
+	if (error)
+		goto out_quiesce_queue;
 
-	return 0;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	return 0;
 
-out_quiesce_queue:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	nvme_quiesce_admin_queue(ctrl);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	blk_sync_queue(ctrl->admin_q);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-out_stop_queue:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	nvme_tcp_stop_queue(ctrl, 0);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	nvme_cancel_admin_tagset(ctrl);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-out_cleanup_tagset:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	if (new)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		nvme_remove_admin_tag_set(ctrl);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-out_free_queue:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	nvme_tcp_free_admin_queue(ctrl);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-	return error;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
-}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+out_quiesce_queue:	/* [한국어] 아래는 세운 순서의 역순이다 */
+	nvme_quiesce_admin_queue(ctrl);	/* [한국어] 새 요청을 막고 */
+	blk_sync_queue(ctrl->admin_q);	/* [한국어] 진입한 것이 끝나기를 기다린다 */
+out_stop_queue:
+	nvme_tcp_stop_queue(ctrl, 0);	/* [한국어] 소켓을 닫는다 */
+	nvme_cancel_admin_tagset(ctrl);	/* [한국어] 남은 요청을 실패로 완료시킨다 */
+out_cleanup_tagset:
+	if (new)
+		nvme_remove_admin_tag_set(ctrl);	/* [한국어] 우리가 만든 것일 때만 */
+out_free_queue:
+	nvme_tcp_free_admin_queue(ctrl);
+	return error;
+}
 
 static void nvme_tcp_teardown_admin_queue(struct nvme_ctrl *ctrl,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 		bool remove)	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
