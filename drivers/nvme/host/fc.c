@@ -1429,122 +1429,160 @@ nvme_fc_send_ls_req_async(struct nvme_fc_rport *rport,	/* [한국어] NVMe/FC LS
 	return __nvme_fc_send_ls_req(rport, lsop, done);	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 }	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
-static int	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-nvme_fc_connect_admin_queue(struct nvme_fc_ctrl *ctrl,	/* [한국어] NVMe/FC LS·FCP·rport 경로 헬퍼 */
-	struct nvme_fc_queue *queue, u16 qsize, u16 ersp_ratio)	/* [한국어] NVMe/FC LS·FCP·rport 경로 헬퍼 */
-{	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	struct nvmefc_ls_req_op *lsop;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	struct nvmefc_ls_req *lsreq;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	struct fcnvme_ls_cr_assoc_rqst *assoc_rqst;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	struct fcnvme_ls_cr_assoc_acc *assoc_acc;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	unsigned long flags;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	int ret, fcret = 0;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+/*
+ * [한국어]
+ * nvme_fc_connect_admin_queue - Create Association LS 를 보내 세션을 개설한다
+ *
+ * @ctrl:       세션을 세울 컨트롤러
+ * @queue:      admin 큐(0번). 여기에 connection_id 가 채워진다.
+ * @qsize:      큐 깊이. LS 에는 sqsize(0-based)로 담긴다.
+ * @ersp_ratio: 확장 응답(ERSP)을 몇 번에 한 번 받을지에 대한 힌트.
+ *              타겟이 매 완료마다 전체 응답 IU 를 보내지 않아도 되게 해
+ *              링크 대역폭을 아낀다.
+ * @return: 0 이면 association_id 와 connection_id 를 받았다. 음수면 실패.
+ *
+ * FC 세션의 첫 대화다. 이 LS 하나가 두 가지를 한꺼번에 얻어 온다 --
+ * association_id(세션 전체의 식별자)와 admin 큐의 connection_id. 이후
+ * I/O 큐들은 Create Connection LS 로 각자의 connection_id 만 추가로 받는다.
+ *
+ * 할당이 한 번에 이뤄지는 구조를 눈여겨볼 것. lsop 뒤에 요청 버퍼, 응답 버퍼,
+ * 그리고 LLDD 전용 영역이 차례로 붙어 하나의 kzalloc 으로 처리된다. 그래서
+ * 아래에서 &lsop[1], &assoc_rqst[1] 같은 포인터 산술로 각 영역을 가른다.
+ * 해제도 kfree(lsop) 하나로 끝난다.
+ *
+ * cntlid 에 0xffff 를 넣는 이유는 위 영어 주석이 밝힌다 -- 리눅스는 동적
+ * 컨트롤러만 지원하므로, 특정 컨트롤러 ID 를 요구하지 않고 타겟이 배정하게 한다.
+ *
+ * 응답 검증이 열 갈래로 늘어선 이유: 이것은 원격이 보낸 데이터이고, 여기서
+ * 얻는 association_id 와 connection_id 는 이후 모든 명령에 실린다. 형식이
+ * 어긋난 응답을 그대로 믿으면 잘못된 식별자로 세션을 세우게 되고, 그 오류는
+ * 훨씬 뒤에 엉뚱한 모습으로 드러난다. 그래서 각 서술자의 태그와 길이를
+ * 하나씩 대조하고, 실패 시 어느 검사에서 걸렸는지 이름으로 남긴다.
+ *
+ * 실행 컨텍스트: create_association 경로. LS 응답을 기다리며 잠든다.
+ *
+ * 호출 체인:
+ *   nvme_fc_create_association → [이 함수] → nvme_fc_send_ls_req → LLDD
+ */
+static int
+nvme_fc_connect_admin_queue(struct nvme_fc_ctrl *ctrl,
+	struct nvme_fc_queue *queue, u16 qsize, u16 ersp_ratio)
+{
+	struct nvmefc_ls_req_op *lsop;
+	struct nvmefc_ls_req *lsreq;
+	struct fcnvme_ls_cr_assoc_rqst *assoc_rqst;	/* [한국어] 보낼 요청 */
+	struct fcnvme_ls_cr_assoc_acc *assoc_acc;	/* [한국어] 받을 응답 */
+	unsigned long flags;
+	int ret, fcret = 0;	/* [한국어] fcret 은 응답 검증 실패 지점을 가리키는 별도 코드 */
 
-	lsop = kzalloc((sizeof(*lsop) +	/* [한국어] 커널 메모리 생명주기 */
-			 sizeof(*assoc_rqst) + sizeof(*assoc_acc) +	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			 ctrl->lport->ops->lsrqst_priv_sz), GFP_KERNEL);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	if (!lsop) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		dev_info(ctrl->ctrl.device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			"NVME-FC{%d}: send Create Association failed: ENOMEM\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			ctrl->cnum);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		ret = -ENOMEM;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		goto out_no_memory;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
-	}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	lsop = kzalloc((sizeof(*lsop) +	/* [한국어] 서술자와 두 버퍼, LLDD 전용 영역을 한 덩어리로 잡는다 */
+			 sizeof(*assoc_rqst) + sizeof(*assoc_acc) +
+			 ctrl->lport->ops->lsrqst_priv_sz), GFP_KERNEL);	/* [한국어] LLDD 가 요구하는 사적 공간 크기는 드라이버마다 다르다 */
+	if (!lsop) {
+		dev_info(ctrl->ctrl.device,
+			"NVME-FC{%d}: send Create Association failed: ENOMEM\n",
+			ctrl->cnum);
+		ret = -ENOMEM;
+		goto out_no_memory;
+	}
 
-	assoc_rqst = (struct fcnvme_ls_cr_assoc_rqst *)&lsop[1];	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	assoc_acc = (struct fcnvme_ls_cr_assoc_acc *)&assoc_rqst[1];	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	lsreq = &lsop->ls_req;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	if (ctrl->lport->ops->lsrqst_priv_sz)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		lsreq->private = &assoc_acc[1];	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	else	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		lsreq->private = NULL;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	assoc_rqst = (struct fcnvme_ls_cr_assoc_rqst *)&lsop[1];	/* [한국어] 서술자 바로 뒤가 요청 버퍼 */
+	assoc_acc = (struct fcnvme_ls_cr_assoc_acc *)&assoc_rqst[1];	/* [한국어] 그 뒤가 응답 버퍼 */
+	lsreq = &lsop->ls_req;
+	if (ctrl->lport->ops->lsrqst_priv_sz)
+		lsreq->private = &assoc_acc[1];	/* [한국어] 마지막 영역을 LLDD 에 넘긴다 — 내용은 이 계층이 해석하지 않는다 */
+	else
+		lsreq->private = NULL;
 
-	assoc_rqst->w0.ls_cmd = FCNVME_LS_CREATE_ASSOCIATION;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	assoc_rqst->desc_list_len =	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			cpu_to_be32(sizeof(struct fcnvme_lsdesc_cr_assoc_cmd));	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
+	assoc_rqst->w0.ls_cmd = FCNVME_LS_CREATE_ASSOCIATION;	/* [한국어] 세션 개설 요청 */
+	assoc_rqst->desc_list_len =
+			cpu_to_be32(sizeof(struct fcnvme_lsdesc_cr_assoc_cmd));	/* [한국어] FC 는 빅엔디안이다 */
 
-	assoc_rqst->assoc_cmd.desc_tag =	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			cpu_to_be32(FCNVME_LSDESC_CREATE_ASSOC_CMD);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	assoc_rqst->assoc_cmd.desc_len =	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			fcnvme_lsdesc_len(	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-				sizeof(struct fcnvme_lsdesc_cr_assoc_cmd));	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
+	assoc_rqst->assoc_cmd.desc_tag =
+			cpu_to_be32(FCNVME_LSDESC_CREATE_ASSOC_CMD);	/* [한국어] 서술자 종류 태그. 상대는 이 값으로 내용을 해석한다 */
+	assoc_rqst->assoc_cmd.desc_len =
+			fcnvme_lsdesc_len(
+				sizeof(struct fcnvme_lsdesc_cr_assoc_cmd));
 
-	assoc_rqst->assoc_cmd.ersp_ratio = cpu_to_be16(ersp_ratio);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	assoc_rqst->assoc_cmd.sqsize = cpu_to_be16(qsize - 1);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	assoc_rqst->assoc_cmd.ersp_ratio = cpu_to_be16(ersp_ratio);	/* [한국어] 전체 응답 IU 를 몇 번에 한 번 보낼지 — 링크 대역폭 절약 힌트 */
+	assoc_rqst->assoc_cmd.sqsize = cpu_to_be16(qsize - 1);	/* [한국어] sqsize 는 0-based 라 하나 뺀다 */
 	/* Linux supports only Dynamic controllers */
-	assoc_rqst->assoc_cmd.cntlid = cpu_to_be16(0xffff);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	uuid_copy(&assoc_rqst->assoc_cmd.hostid, &ctrl->ctrl.opts->host->id);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	strscpy(assoc_rqst->assoc_cmd.hostnqn, ctrl->ctrl.opts->host->nqn,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		sizeof(assoc_rqst->assoc_cmd.hostnqn));	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	strscpy(assoc_rqst->assoc_cmd.subnqn, ctrl->ctrl.opts->subsysnqn,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		sizeof(assoc_rqst->assoc_cmd.subnqn));	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	assoc_rqst->assoc_cmd.cntlid = cpu_to_be16(0xffff);	/* [한국어] 위 영어 주석대로 동적 컨트롤러만 지원하므로 타겟이 ID 를 배정하게 한다 */
+	uuid_copy(&assoc_rqst->assoc_cmd.hostid, &ctrl->ctrl.opts->host->id);	/* [한국어] 호스트 식별자 — 타겟이 접근 제어에 쓴다 */
+	strscpy(assoc_rqst->assoc_cmd.hostnqn, ctrl->ctrl.opts->host->nqn,
+		sizeof(assoc_rqst->assoc_cmd.hostnqn));
+	strscpy(assoc_rqst->assoc_cmd.subnqn, ctrl->ctrl.opts->subsysnqn,	/* [한국어] 접속할 서브시스템 NQN */
+		sizeof(assoc_rqst->assoc_cmd.subnqn));
 
-	lsop->queue = queue;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	lsreq->rqstaddr = assoc_rqst;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	lsreq->rqstlen = sizeof(*assoc_rqst);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	lsreq->rspaddr = assoc_acc;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	lsreq->rsplen = sizeof(*assoc_acc);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	lsreq->timeout = NVME_FC_LS_TIMEOUT_SEC;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	lsop->queue = queue;
+	lsreq->rqstaddr = assoc_rqst;	/* [한국어] 아래 send_ls_req 가 이 두 버퍼를 한 번에 DMA 매핑한다 */
+	lsreq->rqstlen = sizeof(*assoc_rqst);
+	lsreq->rspaddr = assoc_acc;
+	lsreq->rsplen = sizeof(*assoc_acc);
+	lsreq->timeout = NVME_FC_LS_TIMEOUT_SEC;	/* [한국어] 응답이 없으면 이 시간 뒤 실패로 처리된다 */
 
-	ret = nvme_fc_send_ls_req(ctrl->rport, lsop);	/* [한국어] NVMe/FC LS·FCP·rport 경로 헬퍼 */
-	if (ret)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		goto out_free_buffer;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
+	ret = nvme_fc_send_ls_req(ctrl->rport, lsop);	/* [한국어] 보내고 응답을 기다린다(내부에서 ls_done 대기) */
+	if (ret)
+		goto out_free_buffer;
 
 	/* process connect LS completion */
 
 	/* validate the ACC response */
-	if (assoc_acc->hdr.w0.ls_cmd != FCNVME_LS_ACC)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		fcret = VERR_LSACC;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	else if (assoc_acc->hdr.desc_list_len !=	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-			fcnvme_lsdesc_len(	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-				sizeof(struct fcnvme_ls_cr_assoc_acc)))	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-		fcret = VERR_CR_ASSOC_ACC_LEN;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	else if (assoc_acc->hdr.rqst.desc_tag !=	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-			cpu_to_be32(FCNVME_LSDESC_RQST))	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		fcret = VERR_LSDESC_RQST;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	else if (assoc_acc->hdr.rqst.desc_len !=	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-			fcnvme_lsdesc_len(sizeof(struct fcnvme_lsdesc_rqst)))	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-		fcret = VERR_LSDESC_RQST_LEN;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	else if (assoc_acc->hdr.rqst.w0.ls_cmd != FCNVME_LS_CREATE_ASSOCIATION)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		fcret = VERR_CR_ASSOC;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	else if (assoc_acc->associd.desc_tag !=	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-			cpu_to_be32(FCNVME_LSDESC_ASSOC_ID))	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		fcret = VERR_ASSOC_ID;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	else if (assoc_acc->associd.desc_len !=	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-			fcnvme_lsdesc_len(	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-				sizeof(struct fcnvme_lsdesc_assoc_id)))	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-		fcret = VERR_ASSOC_ID_LEN;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	else if (assoc_acc->connectid.desc_tag !=	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-			cpu_to_be32(FCNVME_LSDESC_CONN_ID))	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		fcret = VERR_CONN_ID;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	else if (assoc_acc->connectid.desc_len !=	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-			fcnvme_lsdesc_len(sizeof(struct fcnvme_lsdesc_conn_id)))	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-		fcret = VERR_CONN_ID_LEN;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	/* [한국어] 아래 검증이 열 갈래인 이유: 여기서 얻는 두 식별자가 이후 모든
+	 * 명령에 실린다. 어긋난 응답을 믿으면 잘못된 세션이 서고, 그 오류는 훨씬
+	 * 뒤에 엉뚱한 모습으로 드러난다. 그래서 서술자마다 태그와 길이를 대조한다. */
+	if (assoc_acc->hdr.w0.ls_cmd != FCNVME_LS_ACC)	/* [한국어] 수락이 아니라 거절이 왔다 */
+		fcret = VERR_LSACC;
+	else if (assoc_acc->hdr.desc_list_len !=	/* [한국어] 전체 서술자 길이가 기대와 다르다 */
+			fcnvme_lsdesc_len(
+				sizeof(struct fcnvme_ls_cr_assoc_acc)))
+		fcret = VERR_CR_ASSOC_ACC_LEN;
+	else if (assoc_acc->hdr.rqst.desc_tag !=	/* [한국어] 응답이 어떤 요청에 대한 것인지 밝히는 서술자가 없다 */
+			cpu_to_be32(FCNVME_LSDESC_RQST))
+		fcret = VERR_LSDESC_RQST;
+	else if (assoc_acc->hdr.rqst.desc_len !=
+			fcnvme_lsdesc_len(sizeof(struct fcnvme_lsdesc_rqst)))
+		fcret = VERR_LSDESC_RQST_LEN;
+	else if (assoc_acc->hdr.rqst.w0.ls_cmd != FCNVME_LS_CREATE_ASSOCIATION)	/* [한국어] 우리가 보낸 것과 다른 요청에 대한 응답이다 */
+		fcret = VERR_CR_ASSOC;
+	else if (assoc_acc->associd.desc_tag !=	/* [한국어] association_id 서술자가 없다 — 세션 식별자를 못 받는다 */
+			cpu_to_be32(FCNVME_LSDESC_ASSOC_ID))
+		fcret = VERR_ASSOC_ID;
+	else if (assoc_acc->associd.desc_len !=
+			fcnvme_lsdesc_len(
+				sizeof(struct fcnvme_lsdesc_assoc_id)))
+		fcret = VERR_ASSOC_ID_LEN;
+	else if (assoc_acc->connectid.desc_tag !=	/* [한국어] connection_id 서술자가 없다 — admin 큐를 쓸 수 없다 */
+			cpu_to_be32(FCNVME_LSDESC_CONN_ID))
+		fcret = VERR_CONN_ID;
+	else if (assoc_acc->connectid.desc_len !=
+			fcnvme_lsdesc_len(sizeof(struct fcnvme_lsdesc_conn_id)))
+		fcret = VERR_CONN_ID_LEN;
 
-	if (fcret) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		ret = -EBADF;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		dev_err(ctrl->dev,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			"q %d Create Association LS failed: %s\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			queue->qnum, validation_errors[fcret]);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	} else {	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		spin_lock_irqsave(&ctrl->lock, flags);	/* [한국어] 동기화 — 큐/연결/상태 공유 보호 */
-		ctrl->association_id =	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			be64_to_cpu(assoc_acc->associd.association_id);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		queue->connection_id =	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			be64_to_cpu(assoc_acc->connectid.connection_id);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		set_bit(NVME_FC_Q_CONNECTED, &queue->flags);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		spin_unlock_irqrestore(&ctrl->lock, flags);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	if (fcret) {
+		ret = -EBADF;
+		dev_err(ctrl->dev,	/* [한국어] 어느 검사에서 걸렸는지 이름으로 남긴다 — 상호운용 문제 추적의 출발점이다 */
+			"q %d Create Association LS failed: %s\n",
+			queue->qnum, validation_errors[fcret]);
+	} else {
+		spin_lock_irqsave(&ctrl->lock, flags);
+		ctrl->association_id =	/* [한국어] 세션 전체의 식별자. 이후 모든 큐가 이 아래 매달린다 */
+			be64_to_cpu(assoc_acc->associd.association_id);
+		queue->connection_id =	/* [한국어] admin 큐 전용 채널 식별자 */
+			be64_to_cpu(assoc_acc->connectid.connection_id);
+		set_bit(NVME_FC_Q_CONNECTED, &queue->flags);	/* [한국어] FC 채널이 열렸다. NVMe Connect 는 아직이다 */
+		spin_unlock_irqrestore(&ctrl->lock, flags);
+	}
 
-out_free_buffer:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	kfree(lsop);	/* [한국어] 커널 메모리 생명주기 */
-out_no_memory:	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	if (ret)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		dev_err(ctrl->dev,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			"queue %d connect admin queue failed (%d).\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			queue->qnum, ret);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	return ret;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
-}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+out_free_buffer:
+	kfree(lsop);	/* [한국어] 한 덩어리로 잡았으므로 해제도 하나면 된다 */
+out_no_memory:
+	if (ret)
+		dev_err(ctrl->dev,
+			"queue %d connect admin queue failed (%d).\n",
+			queue->qnum, ret);
+	return ret;
+}
 
 static int	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 nvme_fc_connect_queue(struct nvme_fc_ctrl *ctrl, struct nvme_fc_queue *queue,	/* [한국어] NVMe/FC LS·FCP·rport 경로 헬퍼 */
@@ -2142,32 +2180,62 @@ nvme_fc_exit_request(struct blk_mq_tag_set *set, struct request *rq,	/* [한국�
 	return __nvme_fc_exit_request(to_fc_ctrl(set->driver_data), op);	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 }	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 
-static int	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-__nvme_fc_abort_op(struct nvme_fc_ctrl *ctrl, struct nvme_fc_fcp_op *op)	/* [한국어] NVMe/FC LS·FCP·rport 경로 헬퍼 */
-{	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	unsigned long flags;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	int opstate;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+/*
+ * [한국어]
+ * __nvme_fc_abort_op - 진행 중인 오퍼레이션 하나를 LLDD 수준에서 취소한다
+ *
+ * @ctrl: 소속 컨트롤러
+ * @op:   취소할 오퍼레이션
+ * @return: 0 이면 LLDD 에 abort 를 요청했다. -ECANCELED 면 이미 끝났거나
+ *          아직 시작하지 않아 취소할 것이 없다.
+ *
+ * 이 함수의 전부는 첫 두 줄의 경합 처리다. abort 를 걸려는 순간에 완료가
+ * 도착할 수 있으므로, atomic_xchg 로 상태를 ABORTED 로 바꾸면서 이전 값을
+ * 받아 온다. 이전 값이 ACTIVE 가 아니었다면 이미 다른 쪽이 처리한 것이므로
+ * 바꿔 놓은 상태를 원래대로 되돌리고 물러난다. 되돌리지 않으면 이미 완료된
+ * 오퍼레이션이 ABORTED 로 남아 다음 재사용 때 오작동한다.
+ *
+ * FCCTRL_TERMIO 를 확인하는 이유: 세션 해체 중이라면 이 abort 의 완료를
+ * delete_association 이 기다린다. 그래서 iocnt 를 올려 두고, 완료 경로가
+ * 내려 0 이 되면 대기하던 쪽을 깨운다. 해체 중이 아니라면(예: 단순 타임아웃)
+ * 아무도 기다리지 않으므로 세지 않는다.
+ *
+ * 실제 취소는 LLDD 의 fcp_abort 가 한다. FC 는 I/O 마다 익스체인지가 있어
+ * 하드웨어 수준에서 그것을 끝내야 자원이 풀린다.
+ *
+ * 실행 컨텍스트: 타임아웃 문맥과 해체 워크 양쪽에서 불린다. 스핀락을 쓰므로
+ * 잠들지 않는다.
+ *
+ * 호출 체인:
+ *   nvme_fc_timeout / nvme_fc_terminate_exchange / _abort_aen_ops
+ *     → [이 함수] → LLDD 의 fcp_abort
+ */
+static int
+__nvme_fc_abort_op(struct nvme_fc_ctrl *ctrl, struct nvme_fc_fcp_op *op)
+{
+	unsigned long flags;
+	int opstate;
 
-	spin_lock_irqsave(&ctrl->lock, flags);	/* [한국어] 동기화 — 큐/연결/상태 공유 보호 */
-	opstate = atomic_xchg(&op->state, FCPOP_STATE_ABORTED);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	if (opstate != FCPOP_STATE_ACTIVE)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		atomic_set(&op->state, opstate);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	else if (test_bit(FCCTRL_TERMIO, &ctrl->flags)) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		op->flags |= FCOP_FLAGS_TERMIO;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		ctrl->iocnt++;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	spin_unlock_irqrestore(&ctrl->lock, flags);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	spin_lock_irqsave(&ctrl->lock, flags);	/* [한국어] iocnt 와 flags 를 완료 콜백과 함께 보호한다 */
+	opstate = atomic_xchg(&op->state, FCPOP_STATE_ABORTED);	/* [한국어] 바꾸면서 이전 값을 받는다 — 완료와 겹쳐도 한 쪽만 이긴다 */
+	if (opstate != FCPOP_STATE_ACTIVE)	/* [한국어] 이미 끝났거나 시작 전이었다 */
+		atomic_set(&op->state, opstate);	/* [한국어] 방금 덮어쓴 값을 되돌린다. 안 하면 완료된 것이 ABORTED 로 남아 재사용 때 오작동한다 */
+	else if (test_bit(FCCTRL_TERMIO, &ctrl->flags)) {	/* [한국어] 세션 해체 중이라면 이 abort 의 완료를 기다리는 쪽이 있다 */
+		op->flags |= FCOP_FLAGS_TERMIO;	/* [한국어] 완료 경로가 정상 완료와 구분할 수 있게 표시 */
+		ctrl->iocnt++;	/* [한국어] 기다릴 개수를 올린다. 완료가 내려 0 이 되면 delete_association 이 깨어난다 */
+	}
+	spin_unlock_irqrestore(&ctrl->lock, flags);
 
-	if (opstate != FCPOP_STATE_ACTIVE)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		return -ECANCELED;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	if (opstate != FCPOP_STATE_ACTIVE)
+		return -ECANCELED;	/* [한국어] 취소할 것이 없었다 — 호출자는 이를 오류로 보지 않는다 */
 
-	ctrl->lport->ops->fcp_abort(&ctrl->lport->localport,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-					&ctrl->rport->remoteport,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-					op->queue->lldd_handle,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-					&op->fcp_req);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	ctrl->lport->ops->fcp_abort(&ctrl->lport->localport,	/* [한국어] FC 익스체인지를 하드웨어 수준에서 끝낸다 */
+					&ctrl->rport->remoteport,
+					op->queue->lldd_handle,
+					&op->fcp_req);
 
-	return 0;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
-}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	return 0;
+}
 
 static void	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 nvme_fc_abort_aen_ops(struct nvme_fc_ctrl *ctrl)	/* [한국어] NVMe/FC LS·FCP·rport 경로 헬퍼 */
@@ -2978,34 +3046,65 @@ nvme_fc_error_recovery(struct nvme_fc_ctrl *ctrl, char *errmsg)
 	nvme_reset_ctrl(&ctrl->ctrl);	/* [한국어] 정상 동작 중 처음 만난 오류 — 세션을 다시 세운다 */
 }
 
-static enum blk_eh_timer_return nvme_fc_timeout(struct request *rq)	/* [한국어] NVMe/FC LS·FCP·rport 경로 헬퍼 */
-{	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	struct nvme_fc_fcp_op *op = blk_mq_rq_to_pdu(rq);	/* [한국어] NVMe/FC LS·FCP·rport 경로 헬퍼 */
-	struct nvme_fc_ctrl *ctrl = op->ctrl;	/* [한국어] NVMe/FC LS·FCP·rport 경로 헬퍼 */
-	u16 qnum = op->queue->qnum;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	struct nvme_fc_cmd_iu *cmdiu = &op->cmd_iu;	/* [한국어] NVMe/FC LS·FCP·rport 경로 헬퍼 */
-	struct nvme_command *sqe = &cmdiu->sqe;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
+/*
+ * [한국어]
+ * nvme_fc_timeout - 응답이 오지 않는 요청에 abort 를 걸고 시계를 다시 건다
+ *
+ * @rq: 시한을 넘긴 요청
+ * @return: 항상 BLK_EH_RESET_TIMER
+ *
+ * TCP·RDMA 와 달리 FC 에는 개별 명령을 취소하는 수단이 있다. 익스체인지마다
+ * ABTS 를 보낼 수 있으므로, 연결 전체를 끊지 않고 이 요청 하나만 취소를
+ * 시도한다. 그래서 이 함수는 짧다.
+ *
+ * 항상 RESET_TIMER 를 돌려주는 것이 요점이다. 위 영어 주석이 밝히듯 abort 는
+ * 이미 시작됐고, 그 완료가 곧 이 요청을 실패 상태로 끝낸다. 여기서 동기적으로
+ * 기다리면 blk-mq 타임아웃 문맥이 그동안 묶이므로, 시계만 다시 걸고 물러난다.
+ *
+ * abort 요청 자체가 실패하면 -- LLDD 가 거부했거나 이미 끝난 상태였다면 --
+ * 그때는 개별 취소로 해결되지 않는다는 뜻이므로 세션 수준 복구로 올린다.
+ *
+ * 로그에 opcode 와 cdw10/11 까지 남기는 이유: FC 는 링크가 길고 장비가 여러
+ * 단을 거치므로, 어떤 명령이 어느 큐에서 막혔는지가 문제 구간을 좁히는
+ * 첫 단서가 된다.
+ *
+ * 실행 컨텍스트: blk-mq 타임아웃 문맥. 잠들 수 없다.
+ *
+ * 호출 체인:
+ *   blk-mq 타임아웃 → [이 함수] → __nvme_fc_abort_op → LLDD 의 fcp_abort
+ */
+static enum blk_eh_timer_return nvme_fc_timeout(struct request *rq)
+{
+	struct nvme_fc_fcp_op *op = blk_mq_rq_to_pdu(rq);
+	struct nvme_fc_ctrl *ctrl = op->ctrl;
+	u16 qnum = op->queue->qnum;
+	struct nvme_fc_cmd_iu *cmdiu = &op->cmd_iu;
+	struct nvme_command *sqe = &cmdiu->sqe;	/* [한국어] 로그에 어떤 명령이었는지 남기기 위해 꺼낸다 */
 
 	/*
 	 * Attempt to abort the offending command. Command completion
 	 * will detect the aborted io and will fail the connection.
 	 */
-	dev_info(ctrl->ctrl.device,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		"NVME-FC{%d.%d}: io timeout: opcode %d fctype %d (%s) w10/11: "	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		"x%08x/x%08x\n",	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		ctrl->cnum, qnum, sqe->common.opcode, sqe->fabrics.fctype,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		nvme_fabrics_opcode_str(qnum, sqe),	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		sqe->common.cdw10, sqe->common.cdw11);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	if (__nvme_fc_abort_op(ctrl, op))	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		nvme_fc_error_recovery(ctrl, "io timeout abort failed");	/* [한국어] NVMe/FC LS·FCP·rport 경로 헬퍼 */
+	/* [한국어] 위 영어 주석대로 실제 실패 처리는 abort 완료가 한다.
+	 * 여기서는 요청만 걸어 두고 돌아간다. */
+	dev_info(ctrl->ctrl.device,	/* [한국어] 큐 번호·opcode·cdw10/11 까지 남긴다 — 여러 단을 거치는 FC 에서 문제 구간을 좁히는 단서다 */
+		"NVME-FC{%d.%d}: io timeout: opcode %d fctype %d (%s) w10/11: "
+		"x%08x/x%08x\n",
+		ctrl->cnum, qnum, sqe->common.opcode, sqe->fabrics.fctype,
+		nvme_fabrics_opcode_str(qnum, sqe),
+		sqe->common.cdw10, sqe->common.cdw11);
+	if (__nvme_fc_abort_op(ctrl, op))	/* [한국어] 개별 취소가 불가능했다면 */
+		nvme_fc_error_recovery(ctrl, "io timeout abort failed");	/* [한국어] 세션 수준 복구로 올린다 */
 
 	/*
 	 * the io abort has been initiated. Have the reset timer
 	 * restarted and the abort completion will complete the io
 	 * shortly. Avoids a synchronous wait while the abort finishes.
 	 */
-	return BLK_EH_RESET_TIMER;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
-}	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	/* [한국어] 위 영어 주석대로 여기서 기다리면 blk-mq 타임아웃 문맥이 묶인다.
+	 * 시계만 다시 걸고 물러나면 abort 완료가 곧 요청을 끝낸다. */
+	return BLK_EH_RESET_TIMER;
+}
 
 static int	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 nvme_fc_map_data(struct nvme_fc_ctrl *ctrl, struct request *rq,	/* [한국어] NVMe/FC LS·FCP·rport 경로 헬퍼 */
