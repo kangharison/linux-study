@@ -211,7 +211,7 @@ MODULE_PARM_DESC(sgl_threshold,	/* [한국어] PRP/SGL 디스크립터 경로 */
 #define NVME_PCI_MAX_QUEUE_SIZE 4095	/* [한국어] 드라이버 I/O 깊이 상한 (스펙 MQES 보다 작음) */
 static int io_queue_depth_set(const char *val, const struct kernel_param *kp);	/* [한국어] 깊이 setter 전방 선언 */
 /* [한국어] io_queue_depth 모듈 파라미터 연산 벡터 — minmax 검증 set + uint get */
-static const struct kernel_param_ops io_queue_depth_ops = {	/* [한국어] PCIe NVMe 아키텍처 단계 (BAR/SQ·CQ/도어벨/맵/리셋) */
+static const struct kernel_param_ops io_queue_depth_ops = {
 	.set = io_queue_depth_set,	/* [한국어] [2,4095] 클램프 후 저장 */
 	.get = param_get_uint,		/* [한국어] 현재 깊이 읽기 */
 };
@@ -377,13 +377,13 @@ out_free_val:
 
 static char quirks_param[128];	/* [한국어] 파라미터 원문 보관 버퍼 (modinfo/sysfs get) */
 /* [한국어] quirks 파라미터 ops — 커스텀 set + 문자열 get */
-static const struct kernel_param_ops quirks_param_ops = {	/* [한국어] PCIe NVMe 아키텍처 단계 (BAR/SQ·CQ/도어벨/맵/리셋) */
+static const struct kernel_param_ops quirks_param_ops = {
 	.set = quirks_param_set,	/* [한국어] 파싱·테이블 설치 */
 	.get = param_get_string,	/* [한국어] 보관 문자열 반환 */
 };
 
 /* [한국어] kparam_string 기술자 — maxlen/string 포인터를 프레임워크에 전달 */
-static struct kparam_string quirks_param_string = {	/* [한국어] PCIe NVMe 아키텍처 단계 (BAR/SQ·CQ/도어벨/맵/리셋) */
+static struct kparam_string quirks_param_string = {
 	.maxlen = sizeof(quirks_param),	/* [한국어] 복사 상한 */
 	.string = quirks_param,		/* [한국어] 실제 버퍼 */
 };
@@ -410,7 +410,7 @@ static int io_queue_count_set(const char *val, const struct kernel_param *kp)
 }
 
 /* [한국어] write/poll 큐 수 파라미터 공통 ops */
-static const struct kernel_param_ops io_queue_count_ops = {	/* [한국어] PCIe NVMe 아키텍처 단계 (BAR/SQ·CQ/도어벨/맵/리셋) */
+static const struct kernel_param_ops io_queue_count_ops = {
 	.set = io_queue_count_set,	/* [한국어] 상한 검증 setter */
 	.get = param_get_uint,		/* [한국어] 현재 값 읽기 */
 };
@@ -2962,7 +2962,7 @@ release_cq:
 }
 
 /* [한국어] Admin tagset blk-mq ops — 단일 큐, 배치/poll/map 없음 */
-static const struct blk_mq_ops nvme_mq_admin_ops = {	/* [한국어] blk-mq 태그/요청 API */
+static const struct blk_mq_ops nvme_mq_admin_ops = {
 	.queue_rq	= nvme_queue_rq,	/* [한국어] 제출 핫패스 (admin 도 동일) */
 	.complete	= nvme_pci_complete_rq,	/* [한국어] unmap + core complete */
 	.init_hctx	= nvme_admin_init_hctx,	/* [한국어] qid=0 바인딩 */
@@ -2971,7 +2971,7 @@ static const struct blk_mq_ops nvme_mq_admin_ops = {	/* [한국어] blk-mq 태�
 };
 
 /* [한국어] I/O tagset blk-mq ops — 배치 제출·affinity map·poll 포함 */
-static const struct blk_mq_ops nvme_mq_ops = {	/* [한국어] blk-mq 태그/요청 API */
+static const struct blk_mq_ops nvme_mq_ops = {
 	.queue_rq	= nvme_queue_rq,	/* [한국어] 단일 요청 제출 */
 	.queue_rqs	= nvme_queue_rqs,	/* [한국어] 다중 요청 배치 제출 */
 	.complete	= nvme_pci_complete_rq,	/* [한국어] 완료 unmap */
@@ -3652,7 +3652,7 @@ static umode_t nvme_pci_attrs_are_visible(struct kobject *kobj,
 }
 
 /* [한국어] PCIe 전용 sysfs 속성 목록 — CMB/HMB */
-static struct attribute *nvme_pci_attrs[] = {	/* [한국어] NVMe host 헬퍼/코어 API */
+static struct attribute *nvme_pci_attrs[] = {
 	&dev_attr_cmb.attr,	/* [한국어] 복합 CMB 덤프 */
 	&dev_attr_cmbloc.attr,	/* [한국어] CMB 위치 */
 	&dev_attr_cmbsz.attr,	/* [한국어] CMB 크기/능력 */
@@ -3661,13 +3661,13 @@ static struct attribute *nvme_pci_attrs[] = {	/* [한국어] NVMe host 헬퍼/�
 };
 
 /* [한국어] is_visible 훅이 붙은 PCIe attr group */
-static const struct attribute_group nvme_pci_dev_attrs_group = {	/* [한국어] NVMe host 헬퍼/코어 API */
+static const struct attribute_group nvme_pci_dev_attrs_group = {
 	.attrs		= nvme_pci_attrs,	/* [한국어] 속성 배열 */
 	.is_visible	= nvme_pci_attrs_are_visible,	/* [한국어] 능력 기반 노출 */
 };
 
 /* [한국어] ctrl_ops.dev_attr_groups — 공통+PCIe 그룹 연결 */
-static const struct attribute_group *nvme_pci_dev_attr_groups[] = {	/* [한국어] NVMe host 헬퍼/코어 API */
+static const struct attribute_group *nvme_pci_dev_attr_groups[] = {
 	&nvme_dev_attrs_group,	/* [한국어] host 공통 속성 */
 	&nvme_pci_dev_attrs_group,	/* [한국어] CMB/HMB */
 	NULL,	/* [한국어] 센티널 */
@@ -4539,7 +4539,7 @@ static unsigned long nvme_pci_get_virt_boundary(struct nvme_ctrl *ctrl,
  * [한국어] core 가 호출하는 PCIe 트랜스포트 ops 테이블.
  * reg_* 는 BAR MMIO, free_ctrl 은 ref=0 해제, AEN/NSSR/P2PDMA/boundary 훅.
  */
-static const struct nvme_ctrl_ops nvme_pci_ctrl_ops = {	/* [한국어] NVMe host 헬퍼/코어 API */
+static const struct nvme_ctrl_ops nvme_pci_ctrl_ops = {
 	.name			= "pcie",	/* [한국어] 트랜스포트 이름 (sysfs 등) */
 	.module			= THIS_MODULE,	/* [한국어] 모듈 참조 핀 */
 	.flags			= NVME_F_METADATA_SUPPORTED,	/* [한국어] PI/메타 지원 광고 */
@@ -5114,7 +5114,7 @@ static int nvme_simple_resume(struct device *dev)
 }
 
 /* [한국어] 시스템 슬립 PM ops — suspend 는 프로토콜 PS 시도, freeze/poweroff 는 simple */
-static const struct dev_pm_ops nvme_dev_pm_ops = {	/* [한국어] NVMe host 헬퍼/코어 API */
+static const struct dev_pm_ops nvme_dev_pm_ops = {
 	.suspend	= nvme_suspend,	/* [한국어] 호스트 관리 PS 또는 full shutdown */
 	.resume		= nvme_resume,	/* [한국어] PS 복귀 또는 reset */
 	.freeze		= nvme_simple_suspend,	/* [한국어] 하이버네이션 이미지 전 shutdown */
@@ -5188,7 +5188,7 @@ static void nvme_error_resume(struct pci_dev *pdev)
 }
 
 /* [한국어] PCI AER/FLR 콜백 테이블 — frozen→reset→resume 흐름 연결 */
-static const struct pci_error_handlers nvme_err_handler = {	/* [한국어] PCI 서브시스템 API */
+static const struct pci_error_handlers nvme_err_handler = {
 	.error_detected	= nvme_error_detected,	/* [한국어] 채널 상태 1차 통지 */
 	.slot_reset	= nvme_slot_reset,	/* [한국어] 슬롯 리셋 직후 */
 	.resume		= nvme_error_resume,	/* [한국어] 링크 정상화 후 */
@@ -5201,7 +5201,7 @@ static const struct pci_error_handlers nvme_err_handler = {	/* [한국어] PCI �
  * PCI_DEVICE_CLASS(STORAGE_EXPRESS) 로 나머지 NVMe 클래스 장치를 포괄 매칭.
  * driver_data 비트는 nvme_pci_alloc_dev 에서 ctrl.quirks 시드가 된다.
  */
-static const struct pci_device_id nvme_id_table[] = {	/* [한국어] PCI 서브시스템 API */
+static const struct pci_device_id nvme_id_table[] = {
 	/* [한국어] 아래 각 엔트리: probe 매치 + driver_data 정적 quirk 시드 */
 	{ PCI_VDEVICE(INTEL, 0x0953),	/* Intel 750/P3500/P3600/P3700 */ /* [한국어] 초기 Intel + stripe/dealloc */
 		.driver_data = NVME_QUIRK_STRIPE_SIZE |	/* [한국어] PCI ID 테이블 quirk 시드 */
@@ -5401,7 +5401,7 @@ MODULE_DEVICE_TABLE(pci, nvme_id_table);	/* [한국어] depmod/자동 로드용 
  * [한국어] PCI 서브시스템에 등록되는 nvme 호스트 드라이버 디스크립터.
  * 클래스 매치(STORAGE_EXPRESS)로 대부분 SSD 를 잡고, id_table quirk 가 우선.
  */
-static struct pci_driver nvme_driver = {	/* [한국어] PCI 서브시스템 API */
+static struct pci_driver nvme_driver = {
 	.name		= "nvme",	/* [한국어] sysfs/드라이버 이름 */
 	.id_table	= nvme_id_table,	/* [한국어] VID:DID + 클래스 매치 + quirk */
 	.probe		= nvme_probe,	/* [한국어] 바인드 시 전체 초기화 */

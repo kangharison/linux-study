@@ -2010,7 +2010,7 @@ struct nvme_get_log_page_command {
 	__le16			numdl;	/* [한국어] Number of Dwords Lower */
 	__le16			numdu;	/* [한국어] Number of Dwords Upper */
 	__le16			lsi;	/* [한국어] Log Specific Identifier */
-	union {	/* [한국어] 지역/멤버 상태 — 상위 함수·구조 아키텍처 참고 */
+	union {
 		struct {	/* [한국어] 지역/멤버 상태 — 상위 함수·구조 아키텍처 참고 */
 			__le32 lpol;	/* [한국어] Log Page Offset lower */
 			__le32 lpou;	/* [한국어] Log Page Offset upper */
@@ -2129,9 +2129,9 @@ struct nvmf_disc_rsp_page_entry {
 	__u8		resv64[192];	/* [한국어] 예약 */
 	char		subnqn[NVMF_NQN_FIELD_LEN];	/* [한국어] 대상 서브시스템 NQN 256B 필드 */
 	char		traddr[NVMF_TRADDR_SIZE];	/* [한국어] 전송 주소 문자열(IP/WWPN 등) */
-	union tsas {	/* [한국어] 지역/멤버 상태 — 상위 함수·구조 아키텍처 참고 */
+	union tsas {
 		char		common[NVMF_TSAS_SIZE];	/* [한국어] 전송 특화 공통 256B 슬롯 */
-		struct rdma {	/* [한국어] 지역/멤버 상태 — 상위 함수·구조 아키텍처 참고 */
+		struct rdma {
 			__u8	qptype;	/* [한국어] RDMA QP 타입 — Connected/Datagram */
 			__u8	prtype;	/* [한국어] RDMA 프로바이더 — IB/RoCE/iWARP */
 			__u8	cms;	/* [한국어] 연결 관리 서비스 — RDMA_CM */
@@ -2139,7 +2139,7 @@ struct nvmf_disc_rsp_page_entry {
 			__u16	pkey;	/* [한국어] Partition Key */
 			__u8	resv10[246];	/* [한국어] 예약 패딩 */
 		} rdma;	/* [한국어] RDMA TSAS 오버레이 */
-		struct tcp {	/* [한국어] 지역/멤버 상태 — 상위 함수·구조 아키텍처 참고 */
+		struct tcp {
 			__u8	sectype;	/* [한국어] TCP SECTYPE — NONE/TLS12/TLS13 */
 		} tcp;	/* [한국어] TCP TSAS 오버레이 */
 	} tsas;	/* [한국어] Transport Specific Address Subtype 유니온 */
@@ -2832,7 +2832,7 @@ struct nvme_completion {
 	/*
 	 * Used by Admin and Fabrics commands to return data:
 	 */
-	union nvme_result {	/* [한국어] 지역/멤버 상태 — 상위 함수·구조 아키텍처 참고 */
+	union nvme_result {
 		__le16	u16;	/* [한국어] 결과 16비트 뷰 — Get Features 등 */
 		__le32	u32;	/* [한국어] 결과 32비트 뷰 */
 		__le64	u64;	/* [한국어] 결과 64비트 뷰 — Connect cntlid 등 */

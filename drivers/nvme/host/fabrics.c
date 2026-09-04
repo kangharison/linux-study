@@ -1701,7 +1701,7 @@ static int __init nvmf_init(void)
 		goto out_free_host;	/* [한국어] out_free_host — 함수/구조 문맥의 상태 */
 	}
 
-	nvmf_device =	/* [한국어] nvmf_device 상수 — 상위 enum 역할 참고 */
+	nvmf_device =
 		device_create(&nvmf_class, NULL, MKDEV(0, 0), NULL, "ctl");	/* [한국어] create_ctrl 부모 장치 */
 	if (IS_ERR(nvmf_device)) {	/* [한국어] class 아래 "ctl" 장치 — sysfs 쪽 진입점 */
 		pr_err("couldn't create nvme-fabrics device!\n");	/* [한국어] 진단 로그 */

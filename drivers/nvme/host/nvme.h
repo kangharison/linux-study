@@ -190,94 +190,94 @@ enum nvme_quirks {
 	 * Prefers I/O aligned to a stripe size specified in a vendor
 	 * specific Identify field.
 	 */
-	NVME_QUIRK_STRIPE_SIZE			= (1 << 0),	/* [한국어] NVME_QUIRK_STRIPE_SIZE 상수 — 상위 enum 역할 참고 */
+	NVME_QUIRK_STRIPE_SIZE			= (1 << 0),
 	/* [한국어] 벤더 Identify 의 스트라이프 크기에 I/O 정렬 권장 — 큐 limits 조정. */
 
 	/*
 	 * The controller doesn't handle Identify value others than 0 or 1
 	 * correctly.
 	 */
-	NVME_QUIRK_IDENTIFY_CNS			= (1 << 1),	/* [한국어] NVME_QUIRK_IDENTIFY_CNS 상수 — 상위 enum 역할 참고 */
+	NVME_QUIRK_IDENTIFY_CNS			= (1 << 1),
 	/* [한국어] CNS 값이 0/1 이외면 오동작 — 확장 Identify 시퀀스를 축소·회피. */
 
 	/*
 	 * The controller deterministically returns 0's on reads to
 	 * logical blocks that deallocate was called on.
 	 */
-	NVME_QUIRK_DEALLOCATE_ZEROES		= (1 << 2),	/* [한국어] NVME_QUIRK_DEALLOCATE_ZEROES 상수 — 상위 enum 역할 참고 */
+	NVME_QUIRK_DEALLOCATE_ZEROES		= (1 << 2),
 	/* [한국어] deallocate 후 읽기가 확정적으로 0 — discard_zeroes_data 정책에 반영. */
 
 	/*
 	 * The controller needs a delay before starts checking the device
 	 * readiness, which is done by reading the NVME_CSTS_RDY bit.
 	 */
-	NVME_QUIRK_DELAY_BEFORE_CHK_RDY		= (1 << 3),	/* [한국어] NVME_QUIRK_DELAY_BEFORE_CHK_RDY 상수 — 상위 enum 역할 참고 */
+	NVME_QUIRK_DELAY_BEFORE_CHK_RDY		= (1 << 3),
 	/* [한국어] CSTS.RDY 폴링 전 NVME_QUIRK_DELAY_AMOUNT ms 대기 — 조기 폴링 오판 방지. */
 
 	/*
 	 * APST should not be used.
 	 */
-	NVME_QUIRK_NO_APST			= (1 << 4),	/* [한국어] NVME_QUIRK_NO_APST 상수 — 상위 enum 역할 참고 */
+	NVME_QUIRK_NO_APST			= (1 << 4),
 	/* [한국어] Autonomous Power State Transition 비활성 — 불안정 장치에서 절전 전환 금지. */
 
 	/*
 	 * The deepest sleep state should not be used.
 	 */
-	NVME_QUIRK_NO_DEEPEST_PS		= (1 << 5),	/* [한국어] NVME_QUIRK_NO_DEEPEST_PS 상수 — 상위 enum 역할 참고 */
+	NVME_QUIRK_NO_DEEPEST_PS		= (1 << 5),
 	/* [한국어] 최심부 전원 상태 제외 — 웨이크 실패·타임아웃 이슈 회피. */
 
 	/*
 	 *  Problems seen with concurrent commands
 	 */
-	NVME_QUIRK_QDEPTH_ONE			= (1 << 6),	/* [한국어] NVME_QUIRK_QDEPTH_ONE 상수 — 상위 enum 역할 참고 */
+	NVME_QUIRK_QDEPTH_ONE			= (1 << 6),
 	/* [한국어] 동시 명령 1개로 제한 — 큐 깊이 1로 직렬화해 레이스성 펌웨어 버그 회피. */
 
 	/*
 	 * Set MEDIUM priority on SQ creation
 	 */
-	NVME_QUIRK_MEDIUM_PRIO_SQ		= (1 << 7),	/* [한국어] NVME_QUIRK_MEDIUM_PRIO_SQ 상수 — 상위 enum 역할 참고 */
+	NVME_QUIRK_MEDIUM_PRIO_SQ		= (1 << 7),
 	/* [한국어] Create SQ 시 medium 우선순위 비트 설정 — 특정 컨트롤러 스케줄 요구. */
 
 	/*
 	 * Ignore device provided subnqn.
 	 */
-	NVME_QUIRK_IGNORE_DEV_SUBNQN		= (1 << 8),	/* [한국어] NVME_QUIRK_IGNORE_DEV_SUBNQN 상수 — 상위 enum 역할 참고 */
+	NVME_QUIRK_IGNORE_DEV_SUBNQN		= (1 << 8),
 	/* [한국어] 장치가 보고한 subnqn 무시 — 중복/깨진 NQN 으로 서브시스템 병합 오류 방지. */
 
 	/*
 	 * Broken Write Zeroes.
 	 */
-	NVME_QUIRK_DISABLE_WRITE_ZEROES		= (1 << 9),	/* [한국어] NVME_QUIRK_DISABLE_WRITE_ZEROES 상수 — 상위 enum 역할 참고 */
+	NVME_QUIRK_DISABLE_WRITE_ZEROES		= (1 << 9),
 	/* [한국어] Write Zeroes 명령 비활성 — 블록 계층이 소프트웨어 제로필/다른 경로 사용. */
 
 	/*
 	 * Force simple suspend/resume path.
 	 */
-	NVME_QUIRK_SIMPLE_SUSPEND		= (1 << 10),	/* [한국어] NVME_QUIRK_SIMPLE_SUSPEND 상수 — 상위 enum 역할 참고 */
+	NVME_QUIRK_SIMPLE_SUSPEND		= (1 << 10),
 	/* [한국어] 단순 suspend: 복잡한 상태 보존 대신 재초기화에 가까운 경로 강제. */
 
 	/*
 	 * Use only one interrupt vector for all queues
 	 */
-	NVME_QUIRK_SINGLE_VECTOR		= (1 << 11),	/* [한국어] NVME_QUIRK_SINGLE_VECTOR 상수 — 상위 enum 역할 참고 */
+	NVME_QUIRK_SINGLE_VECTOR		= (1 << 11),
 	/* [한국어] 전 큐 단일 IRQ 벡터 — MSI-X 다벡터 깨진 장치용. */
 
 	/*
 	 * Use non-standard 128 bytes SQEs.
 	 */
-	NVME_QUIRK_128_BYTES_SQES		= (1 << 12),	/* [한국어] NVME_QUIRK_128_BYTES_SQES 상수 — 상위 enum 역할 참고 */
+	NVME_QUIRK_128_BYTES_SQES		= (1 << 12),
 	/* [한국어] SQE 128바이트 비표준 포맷 — 큐 메모리 배치·명령 복사 크기 변경. */
 
 	/*
 	 * Prevent tag overlap between queues
 	 */
-	NVME_QUIRK_SHARED_TAGS                  = (1 << 13),	/* [한국어] NVME_QUIRK_SHARED_TAGS 상수 — 상위 enum 역할 참고 */
+	NVME_QUIRK_SHARED_TAGS                  = (1 << 13),
 	/* [한국어] 큐 간 tag 공간 공유/겹침 방지 — 장치 CID 네임스페이스가 전역일 때. */
 
 	/*
 	 * Don't change the value of the temperature threshold feature
 	 */
-	NVME_QUIRK_NO_TEMP_THRESH_CHANGE	= (1 << 14),	/* [한국어] NVME_QUIRK_NO_TEMP_THRESH_CHANGE 상수 — 상위 enum 역할 참고 */
+	NVME_QUIRK_NO_TEMP_THRESH_CHANGE	= (1 << 14),
 	/* [한국어] 온도 임계 feature 쓰기 금지 — 변경 시 오동작하는 펌웨어 보호. */
 
 	/*
@@ -285,14 +285,14 @@ enum nvme_quirks {
 	 * Identification Descriptor list subcommand despite claiming
 	 * NVMe 1.3 compliance.
 	 */
-	NVME_QUIRK_NO_NS_DESC_LIST		= (1 << 15),	/* [한국어] NVME_QUIRK_NO_NS_DESC_LIST 상수 — 상위 enum 역할 참고 */
+	NVME_QUIRK_NO_NS_DESC_LIST		= (1 << 15),
 	/* [한국어] NS Identification Descriptor 리스트 CNS 미지원 — UUID 등 조회 우회. */
 
 	/*
 	 * The controller does not properly handle DMA addresses over
 	 * 48 bits.
 	 */
-	NVME_QUIRK_DMA_ADDRESS_BITS_48		= (1 << 16),	/* [한국어] NVME_QUIRK_DMA_ADDRESS_BITS_48 상수 — 상위 enum 역할 참고 */
+	NVME_QUIRK_DMA_ADDRESS_BITS_48		= (1 << 16),
 	/* [한국어] DMA 주소 48비트 제한 — dma_set_mask 상한을 낮춰 고주소 실패 방지. */
 
 	/*
@@ -306,31 +306,31 @@ enum nvme_quirks {
 	/*
 	 * Reports garbage in the namespace identifiers (eui64, nguid, uuid).
 	 */
-	NVME_QUIRK_BOGUS_NID			= (1 << 18),	/* [한국어] NVME_QUIRK_BOGUS_NID 상수 — 상위 enum 역할 참고 */
+	NVME_QUIRK_BOGUS_NID			= (1 << 18),
 	/* [한국어] NS 식별자 필드 신뢰 불가 — multipath 매칭·공유 NS 판정에서 무시/대체. */
 
 	/*
 	 * No temperature thresholds for channels other than 0 (Composite).
 	 */
-	NVME_QUIRK_NO_SECONDARY_TEMP_THRESH	= (1 << 19),	/* [한국어] NVME_QUIRK_NO_SECONDARY_TEMP_THRESH 상수 — 상위 enum 역할 참고 */
+	NVME_QUIRK_NO_SECONDARY_TEMP_THRESH	= (1 << 19),
 	/* [한국어] 복합 온도(채널0) 외 센서 임계 미지원 — hwmon/feature 경로 제한. */
 
 	/*
 	 * Disables simple suspend/resume path.
 	 */
-	NVME_QUIRK_FORCE_NO_SIMPLE_SUSPEND	= (1 << 20),	/* [한국어] NVME_QUIRK_FORCE_NO_SIMPLE_SUSPEND 상수 — 상위 enum 역할 참고 */
+	NVME_QUIRK_FORCE_NO_SIMPLE_SUSPEND	= (1 << 20),
 	/* [한국어] SIMPLE_SUSPEND 를 강제로 끔 — 단순 경로가 오히려 깨지는 장치 예외. */
 
 	/*
 	 * MSI (but not MSI-X) interrupts are broken and never fire.
 	 */
-	NVME_QUIRK_BROKEN_MSI			= (1 << 21),	/* [한국어] NVME_QUIRK_BROKEN_MSI 상수 — 상위 enum 역할 참고 */
+	NVME_QUIRK_BROKEN_MSI			= (1 << 21),
 	/* [한국어] 레거시 MSI 미동작 — MSI-X 만 사용하도록 인터럽트 설정 분기. */
 
 	/*
 	 * Align dma pool segment size to 512 bytes
 	 */
-	NVME_QUIRK_DMAPOOL_ALIGN_512		= (1 << 22),	/* [한국어] NVME_QUIRK_DMAPOOL_ALIGN_512 상수 — 상위 enum 역할 참고 */
+	NVME_QUIRK_DMAPOOL_ALIGN_512		= (1 << 22),
 	/* [한국어] DMA pool 세그먼트 512B 정렬 — 특정 컨트롤러 DMA 엔진 제약. */
 };
 
@@ -465,16 +465,16 @@ struct nvme_request {
  * [한국어] nvme_request.flags 비트 정의 — 요청 수명 동안의 호스트 측 속성.
  */
 enum {
-	NVME_REQ_CANCELLED		= (1 << 0),	/* [한국어] NVME_REQ_CANCELLED 상수 — 상위 enum 역할 참고 */
+	NVME_REQ_CANCELLED		= (1 << 0),
 	/* [한국어] 호스트가 완료 전 취소함 — 타임아웃/리셋/경로 다운 시 cancel 콜백이 설정. */
 
-	NVME_REQ_USERCMD		= (1 << 1),	/* [한국어] NVME_REQ_USERCMD 상수 — 상위 enum 역할 참고 */
+	NVME_REQ_USERCMD		= (1 << 1),
 	/* [한국어] 사용자 passthrough ioctl/uring 명령 — 재시도·effects 정책이 커널 I/O 와 다름. */
 
-	NVME_MPATH_IO_STATS		= (1 << 2),	/* [한국어] NVME_MPATH_IO_STATS 상수 — 상위 enum 역할 참고 */
+	NVME_MPATH_IO_STATS		= (1 << 2),
 	/* [한국어] multipath I/O 통계 수집 대상 — start/end_request 가 카운터 갱신. */
 
-	NVME_MPATH_CNT_ACTIVE		= (1 << 3),	/* [한국어] NVME_MPATH_CNT_ACTIVE 상수 — 상위 enum 역할 참고 */
+	NVME_MPATH_CNT_ACTIVE		= (1 << 3),
 	/* [한국어] ctrl->nr_active 에 반영된 인플라이트 — 완료 시 반드시 감소시켜 균형 유지. */
 };
 
@@ -570,25 +570,25 @@ struct nvme_fault_inject {
  * 상태 enum 과 별도로 "일회성/동작 플래그" 를 담는다.
  */
 enum nvme_ctrl_flags {
-	NVME_CTRL_FAILFAST_EXPIRED	= 0,	/* [한국어] NVME_CTRL_FAILFAST_EXPIRED 상수 — 상위 enum 역할 참고 */
+	NVME_CTRL_FAILFAST_EXPIRED	= 0,
 	/* [한국어] failfast 타이머 만료 — 경로 오류 시 빠른 실패 모드 진입 표식 */
 
-	NVME_CTRL_ADMIN_Q_STOPPED	= 1,	/* [한국어] NVME_CTRL_ADMIN_Q_STOPPED 상수 — 상위 enum 역할 참고 */
+	NVME_CTRL_ADMIN_Q_STOPPED	= 1,
 	/* [한국어] admin 큐 정지됨 — 재개 전 admin 제출 금지 */
 
-	NVME_CTRL_STARTED_ONCE		= 2,	/* [한국어] NVME_CTRL_STARTED_ONCE 상수 — 상위 enum 역할 참고 */
+	NVME_CTRL_STARTED_ONCE		= 2,
 	/* [한국어] 한 번이라도 start 됨 — 재개/리셋 경로 분기(최초 vs 재시작) */
 
-	NVME_CTRL_STOPPED		= 3,	/* [한국어] NVME_CTRL_STOPPED 상수 — 상위 enum 역할 참고 */
+	NVME_CTRL_STOPPED		= 3,
 	/* [한국어] 컨트롤러 논리 정지 — keep-alive/스캔 등 백그라운드 억제 */
 
-	NVME_CTRL_SKIP_ID_CNS_CS	= 4,	/* [한국어] NVME_CTRL_SKIP_ID_CNS_CS 상수 — 상위 enum 역할 참고 */
+	NVME_CTRL_SKIP_ID_CNS_CS	= 4,
 	/* [한국어] 특정 Identify CNS/CSI 조합 스킵 — 호환성 단축 경로 */
 
-	NVME_CTRL_DIRTY_CAPABILITY	= 5,	/* [한국어] NVME_CTRL_DIRTY_CAPABILITY 상수 — 상위 enum 역할 참고 */
+	NVME_CTRL_DIRTY_CAPABILITY	= 5,
 	/* [한국어] 큐 한계 등 capability 가 더러워짐 — 재협상/limits 갱신 필요 */
 
-	NVME_CTRL_FROZEN		= 6,	/* [한국어] NVME_CTRL_FROZEN 상수 — 상위 enum 역할 참고 */
+	NVME_CTRL_FROZEN		= 6,
 	/* [한국어] freeze 진행 중 표식 — wait_freeze/unfreeze 와 연동 */
 };
 
@@ -1882,19 +1882,19 @@ typedef __u32 __bitwise nvme_submit_flags_t;	/* [한국어] nvme_submit_flags_t 
 
 enum {
 	/* Insert request at the head of the queue */
-	NVME_SUBMIT_AT_HEAD  = (__force nvme_submit_flags_t)(1 << 0),	/* [한국어] NVME_SUBMIT_AT_HEAD 상수 — 상위 enum 역할 참고 */
+	NVME_SUBMIT_AT_HEAD  = (__force nvme_submit_flags_t)(1 << 0),
 	/* [한국어] 큐 헤드 삽입 — 긴급 admin/복구 명령 */
 
 	/* Set BLK_MQ_REQ_NOWAIT when allocating request */
-	NVME_SUBMIT_NOWAIT = (__force nvme_submit_flags_t)(1 << 1),	/* [한국어] NVME_SUBMIT_NOWAIT 상수 — 상위 enum 역할 참고 */
+	NVME_SUBMIT_NOWAIT = (__force nvme_submit_flags_t)(1 << 1),
 	/* [한국어] 태그 없으면 잠들지 않고 -EAGAIN 계열 */
 
 	/* Set BLK_MQ_REQ_RESERVED when allocating request */
-	NVME_SUBMIT_RESERVED = (__force nvme_submit_flags_t)(1 << 2),	/* [한국어] NVME_SUBMIT_RESERVED 상수 — 상위 enum 역할 참고 */
+	NVME_SUBMIT_RESERVED = (__force nvme_submit_flags_t)(1 << 2),
 	/* [한국어] 예약 태그 풀 사용 — 교착 방지용 admin */
 
 	/* Retry command when NVME_STATUS_DNR is not set in the result */
-	NVME_SUBMIT_RETRY = (__force nvme_submit_flags_t)(1 << 3),	/* [한국어] NVME_SUBMIT_RETRY 상수 — 상위 enum 역할 참고 */
+	NVME_SUBMIT_RETRY = (__force nvme_submit_flags_t)(1 << 3),
 	/* [한국어] DNR 아닌 실패 시 호스트 재시도 */
 };
 

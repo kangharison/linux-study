@@ -1123,7 +1123,7 @@ static void nvme_mpath_set_live(struct nvme_ns *ns)
 	 */
 	/* [한국어] 최초 live 전환 한 경로만 device_add_disk 수행 */
 	if (!test_and_set_bit(NVME_NSHEAD_DISK_LIVE, &head->flags)) {	/* [한국어] 상태 플래그 비트 */
-		rc = device_add_disk(&head->subsys->dev, head->disk,	/* [한국어] rc 상수 — 상위 enum 역할 참고 */
+		rc = device_add_disk(&head->subsys->dev, head->disk,
 				     nvme_ns_attr_groups);	/* [한국어] sysfs/블록 계층에 multipath 디스크 노출 */
 		if (rc) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
 			clear_bit(NVME_NSHEAD_DISK_LIVE, &head->flags);	/* [한국어] device_add_disk 실패 시 live 비트 롤백 */
@@ -1317,14 +1317,14 @@ static int nvme_read_ana_log(struct nvme_ctrl *ctrl)
 	int error;	/* [한국어] Get Log / parse 결과 */
 
 	mutex_lock(&ctrl->ana_lock);	/* [한국어] ANA 로그 읽기·파싱 임계구역 진입 */
-	error = nvme_get_log(ctrl, NVME_NSID_ALL, NVME_LOG_ANA, 0, NVME_CSI_NVM,	/* [한국어] error 상수 — 상위 enum 역할 참고 */
+	error = nvme_get_log(ctrl, NVME_NSID_ALL, NVME_LOG_ANA, 0, NVME_CSI_NVM,
 			ctrl->ana_log_buf, ctrl->ana_log_size, 0);	/* [한국어] Admin Get Log Page 로 ANA 로그 전체 수신 */
 	if (error) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
 		dev_warn(ctrl->device, "Failed to get ANA log: %d\n", error);	/* [한국어] 로그 읽기 실패 — 상태 미갱신 */
 		goto out_unlock;	/* [한국어] out_unlock — 함수/구조 문맥의 상태 */
 	}
 
-	error = nvme_parse_ana_log(ctrl, &nr_change_groups,	/* [한국어] error 상수 — 상위 enum 역할 참고 */
+	error = nvme_parse_ana_log(ctrl, &nr_change_groups,
 			nvme_update_ana_state);	/* [한국어] 수신 버퍼를 그룹 단위 콜백으로 해석 */
 	if (error)	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
 		goto out_unlock;	/* [한국어] out_unlock — 함수/구조 문맥의 상태 */
@@ -1541,7 +1541,7 @@ static ssize_t numa_nodes_show(struct device *dev, struct device_attribute *attr
 
 	srcu_idx = srcu_read_lock(&head->srcu);	/* [한국어] srcu_idx 상수 — 상위 enum 역할 참고 */
 	for_each_node(node) {	/* [한국어] 집합/비트 순회 */
-		current_ns = srcu_dereference(head->current_path[node],	/* [한국어] current_ns 상수 — 상위 enum 역할 참고 */
+		current_ns = srcu_dereference(head->current_path[node],
 				&head->srcu);	/* [한국어] 해당 노드 캐시 경로 */
 		if (ns == current_ns)
 			node_set(node, numa_nodes);	/* [한국어] 이 path 가 해당 노드 선택이면 마스크 포함 */
@@ -1684,7 +1684,7 @@ void nvme_mpath_add_sysfs_link(struct nvme_ns_head *head)
 		 * Create sysfs link from head gendisk kobject @kobj to the
 		 * ns path gendisk kobject @target->kobj.
 		 */
-		rc = sysfs_add_link_to_group(kobj, nvme_ns_mpath_attr_group.name,	/* [한국어] rc 상수 — 상위 enum 역할 참고 */
+		rc = sysfs_add_link_to_group(kobj, nvme_ns_mpath_attr_group.name,
 				&target->kobj, dev_name(target));	/* [한국어] head multipath attr 그룹 아래 path 링크 */
 		if (unlikely(rc)) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
 			dev_err(disk_to_dev(ns->head->disk),	/* [한국어] 진단 로그 */
@@ -1727,7 +1727,7 @@ void nvme_mpath_remove_sysfs_link(struct nvme_ns *ns)
 void nvme_mpath_add_disk(struct nvme_ns *ns, __le32 anagrpid)
 {
 	if (nvme_ctrl_use_ana(ns->ctrl)) {	/* [한국어] 컨트롤러·서브시스템이 ANA 사용 구성인지 */
-		struct nvme_ana_group_desc desc = {	/* [한국어] 지역/멤버 상태 — 상위 함수·구조 아키텍처 참고 */
+		struct nvme_ana_group_desc desc = {
 			.grpid = anagrpid,	/* [한국어] 찾을 그룹 ID (Identify NS 의 anagrpid) */
 			.state = 0,	/* [한국어] 0=미발견 센티널; 찾으면 로그 state 로 덮임 */
 		};
@@ -1859,7 +1859,7 @@ int nvme_mpath_init_identify(struct nvme_ctrl *ctrl, struct nvme_id_ctrl *id)
 	ctrl->nanagrpid = le32_to_cpu(id->nanagrpid);	/* [한국어] ANA 그룹 수 — 로그 버퍼 크기 계산 */
 	ctrl->anagrpmax = le32_to_cpu(id->anagrpmax);	/* [한국어] 유효 grpid 상한 — 로그 검증 */
 
-	ana_log_size = sizeof(struct nvme_ana_rsp_hdr) +	/* [한국어] ana_log_size 상수 — 상위 enum 역할 참고 */
+	ana_log_size = sizeof(struct nvme_ana_rsp_hdr) +
 		ctrl->nanagrpid * sizeof(struct nvme_ana_group_desc) +
 		ctrl->max_namespaces * sizeof(__le32);	/* [한국어] 최악 크기: 모든 그룹+모든 NSID */
 	if (ana_log_size > max_transfer_size) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */

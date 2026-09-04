@@ -619,7 +619,7 @@ static int nvme_auth_dhchap_setup_ctrl_response(struct nvme_ctrl *ctrl,
 	u8 buf[4], *challenge = chap->c2;	/* [한국어] 지역/멤버 상태 — 상위 함수·구조 아키텍처 참고 */
 	int ret;	/* [한국어] ret — 함수/구조 문맥의 상태 */
 
-	transformed_key = nvme_auth_transform_key(ctrl->ctrl_key,	/* [한국어] transformed_key 상수 — 상위 enum 역할 참고 */
+	transformed_key = nvme_auth_transform_key(ctrl->ctrl_key,
 				ctrl->opts->subsysnqn);	/* [한국어] 컨트롤러 시크릿+서브시스템 NQN */
 	if (IS_ERR(transformed_key)) {	/* [한국어] 에러 포인터 규약 */
 		ret = PTR_ERR(transformed_key);	/* [한국어] ret 상수 — 상위 enum 역할 참고 */
@@ -867,7 +867,7 @@ static int nvme_auth_secure_concat(struct nvme_ctrl *ctrl,
 		goto out_free_digest;	/* [한국어] out_free_digest — 함수/구조 문맥의 상태 */
 	}
 
-	tls_key = nvme_tls_psk_refresh(ctrl->opts->keyring,	/* [한국어] tls_key 상수 — 상위 enum 역할 참고 */
+	tls_key = nvme_tls_psk_refresh(ctrl->opts->keyring,
 				       ctrl->opts->host->nqn,
 				       ctrl->opts->subsysnqn, chap->hash_id,
 				       tls_psk, psk_len, digest);	/* [한국어] 키링에 PSK 등록/갱신 */
@@ -1300,17 +1300,17 @@ EXPORT_SYMBOL_GPL(nvme_auth_free);	/* [한국어] core 컨트롤러 파괴 경�
  */
 int __init nvme_init_auth(void)
 {
-	nvme_auth_wq = alloc_workqueue("nvme-auth-wq",	/* [한국어] nvme_auth_wq 상수 — 상위 enum 역할 참고 */
+	nvme_auth_wq = alloc_workqueue("nvme-auth-wq",
 			       WQ_UNBOUND | WQ_MEM_RECLAIM | WQ_SYSFS, 0);	/* [한국어] 인증 전용 unbound reclaim wq */
 	if (!nvme_auth_wq)	/* [한국어] 워크큐가 없으면 인증 자체가 불가능하다 — 모듈 적재를 실패시킨다 */
 		return -ENOMEM;	/* [한국어] 할당 실패 전파 */
 
-	nvme_chap_buf_cache = kmem_cache_create("nvme-chap-buf-cache",	/* [한국어] nvme_chap_buf_cache 상수 — 상위 enum 역할 참고 */
+	nvme_chap_buf_cache = kmem_cache_create("nvme-chap-buf-cache",
 				CHAP_BUF_SIZE, 0, SLAB_HWCACHE_ALIGN, NULL);	/* [한국어] 4K 정렬 CHAP 버퍼 슬랩 */
 	if (!nvme_chap_buf_cache)
 		goto err_destroy_workqueue;	/* [한국어] err_destroy_workqueue — 함수/구조 문맥의 상태 */
 
-	nvme_chap_buf_pool = mempool_create(16, mempool_alloc_slab,	/* [한국어] nvme_chap_buf_pool 상수 — 상위 enum 역할 참고 */
+	nvme_chap_buf_pool = mempool_create(16, mempool_alloc_slab,
 			mempool_free_slab, nvme_chap_buf_cache);	/* [한국어] 최소 16개 예약 — 다중 큐 동시 인증 */
 	if (!nvme_chap_buf_pool)
 		goto err_destroy_chap_buf_cache;	/* [한국어] err_destroy_chap_buf_cache — 함수/구조 문맥의 상태 */

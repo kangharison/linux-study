@@ -3079,7 +3079,7 @@ static int nvme_report_zones(struct gendisk *disk, sector_t sector,
 #endif /* CONFIG_BLK_DEV_ZONED */ /* [한국어] 조건부 컴파일 게이트 */
 
 /* [한국어] gendisk bdev 연산 테이블 — 블록 계층이 open/ioctl/PR/zones 로 진입 */
-const struct block_device_operations nvme_bdev_ops = {	/* [한국어] NVMe host 코어 헬퍼 API */
+const struct block_device_operations nvme_bdev_ops = {
 	.owner		= THIS_MODULE,	/* [한국어] 모듈 참조 */
 	.ioctl		= nvme_ioctl,	/* [한국어] ioctl.c 패스스루 등 */
 	.compat_ioctl	= blkdev_compat_ptr_ioctl,
@@ -4280,7 +4280,7 @@ static int nvme_dev_release(struct inode *inode, struct file *file)	/* [한국�
  */
 
 /* [한국어] /dev/nvmeN 캐릭터 장치 fops — admin 패스스루·ioctl·io_uring */
-static const struct file_operations nvme_dev_fops = {	/* [한국어] NVMe host 코어 헬퍼 API */
+static const struct file_operations nvme_dev_fops = {
 	.owner		= THIS_MODULE,
 	.open		= nvme_dev_open,	/* [한국어] LIVE + get_ctrl */
 	.release	= nvme_dev_release,
@@ -4379,7 +4379,7 @@ static int nvme_ns_chr_release(struct inode *inode, struct file *file)	/* [한�
 }
 
 /* [한국어] /dev/ngNnM 네임스페이스 패스스루 fops (블록 우회 관리 경로) */
-static const struct file_operations nvme_ns_chr_fops = {	/* [한국어] NVMe host 코어 헬퍼 API */
+static const struct file_operations nvme_ns_chr_fops = {
 	.owner		= THIS_MODULE,
 	.open		= nvme_ns_chr_open,
 	.release	= nvme_ns_chr_release,
