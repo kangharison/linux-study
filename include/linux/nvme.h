@@ -786,7 +786,7 @@ enum {
 /*
  * [한국어] nvme_elbaf_sts() — ELBAF 에서 Storage Tag Size 비트 추출 (PI 확장 포맷)
  */
-static inline __u8 nvme_elbaf_sts(__u32 elbaf)	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
+static inline __u8 nvme_elbaf_sts(__u32 elbaf)
 {
 	return elbaf & NVME_ID_NS_NVM_STS_MASK;	/* [한국어] STS 하위 7비트 */
 }
@@ -794,7 +794,7 @@ static inline __u8 nvme_elbaf_sts(__u32 elbaf)	/* [한국어] 함수 시그니�
 /*
  * [한국어] nvme_elbaf_guard_type() — ELBAF guard 타입 필드 — 16/32/64b 가드
  */
-static inline __u8 nvme_elbaf_guard_type(__u32 elbaf)	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
+static inline __u8 nvme_elbaf_guard_type(__u32 elbaf)
 {
 	return (elbaf >> NVME_ID_NS_NVM_GUARD_SHIFT) & NVME_ID_NS_NVM_GUARD_MASK;	/* [한국어] guard 타입 추출 */
 }
@@ -802,7 +802,7 @@ static inline __u8 nvme_elbaf_guard_type(__u32 elbaf)	/* [한국어] 함수 시�
 /*
  * [한국어] nvme_elbaf_qualified_guard_type() — Qualified PI format 인덱스 추출
  */
-static inline __u8 nvme_elbaf_qualified_guard_type(__u32 elbaf)	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
+static inline __u8 nvme_elbaf_qualified_guard_type(__u32 elbaf)
 {
 	return (elbaf >> NVME_ID_NS_NVM_QPIF_SHIFT) & NVME_ID_NS_NVM_QPIF_MASK;	/* [한국어] QPIF 인덱스 */
 }
@@ -917,7 +917,7 @@ enum {
  * [한국어] nvme_lbaf_index() — flbas 에서 활성 LBAF 인덱스 재조립
  * 하위 4비트 + 상위 확장 비트를 합쳐 lbaf[] 인덱스를 만든다.
  */
-static inline __u8 nvme_lbaf_index(__u8 flbas)	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
+static inline __u8 nvme_lbaf_index(__u8 flbas)
 {
 	return (flbas & NVME_NS_FLBAS_LBA_MASK) |	/* [한국어] 하위 LBAF 인덱스 */
 		((flbas & NVME_NS_FLBAS_LBA_UMASK) >> NVME_NS_FLBAS_LBA_SHIFT);	/* [한국어] 확장 비트 정렬 후 합 */
@@ -2558,7 +2558,7 @@ struct nvme_command {
  * [한국어] nvme_is_fabrics() — opcode==0x7f 이면 Fabrics capsule
  * 쓰기 판정·트레이스·opcode 문자열 분기에서 사용.
  */
-static inline bool nvme_is_fabrics(const struct nvme_command *cmd)	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
+static inline bool nvme_is_fabrics(const struct nvme_command *cmd)
 {
 	return cmd->common.opcode == nvme_fabrics_command;	/* [한국어] Fabrics 단일 opcode 판정 */
 }
@@ -2570,7 +2570,7 @@ const char *nvme_get_admin_opcode_str(u8 opcode);	/* [한국어] Admin opcode �
 const char *nvme_get_fabrics_opcode_str(u8 opcode);	/* [한국어] Fabrics fctype 이름 */
 #else /* CONFIG_NVME_VERBOSE_ERRORS */
 /* [한국어] verbose 비활성 빌드: 고정 짧은 문자열 — 바이너리 크기 절약 */
-static inline const char *nvme_get_error_status_str(u16 status)	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
+static inline const char *nvme_get_error_status_str(u16 status)
 {
 	return "I/O Error";	/* [한국어] 상태 코드 비해석 폴백 */
 }
@@ -2592,7 +2592,7 @@ static inline const char *nvme_get_fabrics_opcode_str(u8 opcode)	/* [한국어] 
 /*
  * [한국어] nvme_opcode_str() — qid? I/O : Admin 문자열 선택 — 로그 공통 헬퍼
  */
-static inline const char *nvme_opcode_str(int qid, u8 opcode)	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
+static inline const char *nvme_opcode_str(int qid, u8 opcode)
 {
 	return qid ? nvme_get_opcode_str(opcode) :	/* [한국어] qid>0 → I/O opcode 이름 */
 		nvme_get_admin_opcode_str(opcode);	/* [한국어] qid==0 → Admin opcode 이름 */
@@ -2601,8 +2601,8 @@ static inline const char *nvme_opcode_str(int qid, u8 opcode)	/* [한국어] 함
 /*
  * [한국어] nvme_fabrics_opcode_str() — Fabrics 이면 fctype 이름, 아니면 opcode_str
  */
-static inline const char *nvme_fabrics_opcode_str(	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
-		int qid, const struct nvme_command *cmd)	/* [한국어] 지역/멤버 상태 — 상위 함수·구조 아키텍처 참고 */
+static inline const char *nvme_fabrics_opcode_str(
+		int qid, const struct nvme_command *cmd)
 {
 	if (nvme_is_fabrics(cmd))	/* [한국어] 0x7f 이면 fctype 문자열 */
 		return nvme_get_fabrics_opcode_str(cmd->fabrics.fctype);	/* [한국어] Connect/Property/Auth 이름 */
@@ -2633,7 +2633,7 @@ struct nvme_error_slot {
  * Fabrics 는 fctype LSB, 그 외 opcode LSB. DMA 매핑 방향·권한 판단에 사용.
  * 원본 영문 주석대로 Fabrics 가 방향 비트를 opcode 와 공유하지 않아 특수 분기.
  */
-static inline bool nvme_is_write(const struct nvme_command *cmd)	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
+static inline bool nvme_is_write(const struct nvme_command *cmd)
 {
 	/*
 	 * What a mess...

@@ -497,7 +497,7 @@ static inline bool nvme_tcp_recv_pdu_supported(enum nvme_tcp_pdu_type type)	/* [
 /*
  * Check if the queue is TLS encrypted
  */
-static inline bool nvme_tcp_queue_tls(struct nvme_tcp_queue *queue)	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+static inline bool nvme_tcp_queue_tls(struct nvme_tcp_queue *queue)
 {
 	if (!IS_ENABLED(CONFIG_NVME_TCP_TLS))	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 		return 0;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
@@ -508,7 +508,7 @@ static inline bool nvme_tcp_queue_tls(struct nvme_tcp_queue *queue)	/* [한국�
 /*
  * Check if TLS is configured for the controller.
  */
-static inline bool nvme_tcp_tls_configured(struct nvme_ctrl *ctrl)	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+static inline bool nvme_tcp_tls_configured(struct nvme_ctrl *ctrl)
 {
 	if (!IS_ENABLED(CONFIG_NVME_TCP_TLS))	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
 		return 0;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
@@ -724,8 +724,8 @@ nvme_tcp_fetch_request(struct nvme_tcp_queue *queue)
 
 #define NVME_TCP_CRC_SEED (~0)	/* [한국어] 상수/매크로 — PDU·큐·타임아웃·플래그 */
 
-static inline void nvme_tcp_ddgst_update(u32 *crcp,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		struct page *page, size_t off, size_t len)	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
+static inline void nvme_tcp_ddgst_update(u32 *crcp,
+		struct page *page, size_t off, size_t len)
 {
 	page += off / PAGE_SIZE;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	off %= PAGE_SIZE;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
@@ -803,7 +803,7 @@ static int nvme_tcp_check_ddgst(struct nvme_tcp_queue *queue, void *pdu)	/* [한
 }
 
 static void nvme_tcp_exit_request(struct blk_mq_tag_set *set,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		struct request *rq, unsigned int hctx_idx)	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
+		struct request *rq, unsigned int hctx_idx)
 {
 	struct nvme_tcp_request *req = blk_mq_rq_to_pdu(rq);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 
@@ -811,7 +811,7 @@ static void nvme_tcp_exit_request(struct blk_mq_tag_set *set,	/* [한국어] NVM
 }
 
 static int nvme_tcp_init_request(struct blk_mq_tag_set *set,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		struct request *rq, unsigned int hctx_idx,	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
+		struct request *rq, unsigned int hctx_idx,
 		unsigned int numa_node)
 {
 	struct nvme_tcp_ctrl *ctrl = to_tcp_ctrl(set->driver_data);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
@@ -906,7 +906,7 @@ static void nvme_tcp_error_recovery(struct nvme_ctrl *ctrl)
 }
 
 static int nvme_tcp_process_nvme_cqe(struct nvme_tcp_queue *queue,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		struct nvme_completion *cqe)	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
+		struct nvme_completion *cqe)
 {
 	struct nvme_tcp_request *req;	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 	struct request *rq;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
@@ -3298,7 +3298,7 @@ static void nvme_tcp_reconnect_or_remove(struct nvme_ctrl *ctrl,	/* [한국어] 
  * DH-HMAC-CHAP negotiation (which generates the key, so it _must not_ be set),
  * and once after the negotiation (which uses the key, so it _must_ be set).
  */
-static bool nvme_tcp_key_revoke_needed(struct nvme_ctrl *ctrl)	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
+static bool nvme_tcp_key_revoke_needed(struct nvme_ctrl *ctrl)
 {
 	return ctrl->opts->concat && ctrl->opts->tls_key && ctrl->tls_pskid;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 }
@@ -3637,7 +3637,7 @@ static void nvme_tcp_set_sg_null(struct nvme_command *c)	/* [한국어] NVMe/TCP
 }
 
 static void nvme_tcp_set_sg_inline(struct nvme_tcp_queue *queue,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		struct nvme_command *c, u32 data_len)	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
+		struct nvme_command *c, u32 data_len)
 {
 	struct nvme_sgl_desc *sg = &c->common.dptr.sgl;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
 
@@ -3800,7 +3800,7 @@ static enum blk_eh_timer_return nvme_tcp_timeout(struct request *rq)
 }
 
 static blk_status_t nvme_tcp_map_data(struct nvme_tcp_queue *queue,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-			struct request *rq)	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
+			struct request *rq)
 {
 	struct nvme_tcp_request *req = blk_mq_rq_to_pdu(rq);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 	struct nvme_tcp_cmd_pdu *pdu = nvme_tcp_req_cmd_pdu(req);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
@@ -3820,7 +3820,7 @@ static blk_status_t nvme_tcp_map_data(struct nvme_tcp_queue *queue,	/* [한국�
 }
 
 static blk_status_t nvme_tcp_setup_cmd_pdu(struct nvme_ns *ns,	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
-		struct request *rq)	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
+		struct request *rq)
 {
 	struct nvme_tcp_request *req = blk_mq_rq_to_pdu(rq);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */
 	struct nvme_tcp_cmd_pdu *pdu = nvme_tcp_req_cmd_pdu(req);	/* [한국어] NVMe/TCP 큐·PDU·소켓 경로 헬퍼 */

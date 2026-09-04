@@ -160,21 +160,21 @@
 /* [한국어] 메타 SGL 은 small pool 만 사용. 첫 엔트리는 last-segment 디스크립터
  * (데이터 경로의 SQE dptr 역할)이므로 사용 가능 데이터 칸은 -1. */
 #define NVME_MAX_META_SEGS \
-	((NVME_SMALL_POOL_SIZE / sizeof(struct nvme_sgl_desc)) - 1)	/* [한국어] NVMe host 헬퍼/코어 API */
+	((NVME_SMALL_POOL_SIZE / sizeof(struct nvme_sgl_desc)) - 1)
 
 /*
  * The last entry is used to link to the next descriptor.
  */
 /* [한국어] PRP 리스트 페이지 마지막 슬롯은 다음 리스트 DMA 주소(링크) 전용 */
 #define PRPS_PER_PAGE \
-	(((NVME_CTRL_PAGE_SIZE / sizeof(__le64))) - 1)	/* [한국어] PCIe NVMe 아키텍처 단계 (BAR/SQ·CQ/도어벨/맵/리셋) */
+	(((NVME_CTRL_PAGE_SIZE / sizeof(__le64))) - 1)
 
 /*
  * I/O could be non-aligned both at the beginning and end.
  */
 /* [한국어] 선두·말미 비정렬 여유(각 최대 페이지-1)를 포함한 최악 PRP 바이트 span */
 #define MAX_PRP_RANGE \
-	(NVME_MAX_BYTES + 2 * (NVME_CTRL_PAGE_SIZE - 1))	/* [한국어] PCIe NVMe 아키텍처 단계 (BAR/SQ·CQ/도어벨/맵/리셋) */
+	(NVME_MAX_BYTES + 2 * (NVME_CTRL_PAGE_SIZE - 1))
 
 /* [한국어] PRP1 + 디스크립터 페이지들로 MAX_PRP_RANGE 를 항상 커버 가능한지 컴파일 타임 검증 */
 static_assert(MAX_PRP_RANGE / NVME_CTRL_PAGE_SIZE <=
@@ -238,7 +238,7 @@ static unsigned int nvme_pci_quirk_count;	/* [한국어] 동적 테이블 엔트
  * 동작: strsep 로 필드를 나누고 nvme_quirk_name(bit) 과 문자열 매칭.
  * 호출 체인: quirks_param_set → nvme_parse_quirk_entry → [여기]
  */
-static int nvme_parse_quirk_names(char *quirk_str, struct quirk_entry *entry)	/* [한국어] NVMe host 헬퍼/코어 API */
+static int nvme_parse_quirk_names(char *quirk_str, struct quirk_entry *entry)
 {
 	int i;				/* [한국어] quirk 비트 인덱스 0..31 순회 */
 	size_t field_len;		/* [한국어] 사용자 필드 길이 — 부분 문자열 오매칭 방지 */
@@ -264,9 +264,9 @@ static int nvme_parse_quirk_names(char *quirk_str, struct quirk_entry *entry)	/*
 			if (!strcmp(q_name, "unknown"))	/* [한국어] 더 이상 정의된 이름 없음 — 테이블 끝 */
 				break;	/* [한국어] 미매칭으로 빠져 사용자 입력 거부 경로 */
 
-			if (!strcmp(q_name, field) &&	/* [한국어] 아키텍처 조건 분기 */
+			if (!strcmp(q_name, field) &&
 				    q_len == field_len) {	/* [한국어] 이름·길이 모두 일치해야 수락 */
-				if (disabled)	/* [한국어] 아키텍처 조건 분기 */
+				if (disabled)
 					entry->disabled_quirks |= bit;	/* [한국어] 이후 probe 에서 마스크로 제거 */
 				else
 					entry->enabled_quirks |= bit;	/* [한국어] 정적 ID quirk 위에 추가 OR */
@@ -293,7 +293,7 @@ static int nvme_parse_quirk_names(char *quirk_str, struct quirk_entry *entry)	/*
  * @return: 0 또는 -EINVAL.
  * 호출 체인: quirks_param_set → [여기] → nvme_parse_quirk_names
  */
-static int nvme_parse_quirk_entry(char *s, struct quirk_entry *entry)	/* [한국어] NVMe host 헬퍼/코어 API */
+static int nvme_parse_quirk_entry(char *s, struct quirk_entry *entry)
 {
 	char *field;	/* [한국어] 콜론으로 분리된 현재 필드 */
 
@@ -306,7 +306,7 @@ static int nvme_parse_quirk_entry(char *s, struct quirk_entry *entry)	/* [한국
 		return -EINVAL;	/* [한국어] DID 파싱 실패 */
 
 	field = strsep(&s, ":");	/* [한국어] 셋째 필드 = quirk 이름 목록 */
-	if (!field)	/* [한국어] 아키텍처 조건 분기 */
+	if (!field)
 		return -EINVAL;	/* [한국어] 이름 목록 누락 거부 */
 
 	return nvme_parse_quirk_names(field, entry);	/* [한국어] 쉼표 목록을 비트마스크로 */
@@ -322,26 +322,26 @@ static int nvme_parse_quirk_entry(char *s, struct quirk_entry *entry)	/* [한국
  * 기존 nvme_pci_quirk_list 를 kfree 후 새 배열로 교체. 파싱 실패 시 이전
  * 리스트를 유지하지 않고 에러 반환. probe 시 detect_dynamic_quirks() 가 참조.
  */
-static int quirks_param_set(const char *value, const struct kernel_param *kp)	/* [한국어] PCIe NVMe 아키텍처 단계 (BAR/SQ·CQ/도어벨/맵/리셋) */
+static int quirks_param_set(const char *value, const struct kernel_param *kp)
 {
 	int count, err, i;		/* [한국어] 엔트리 수 / 에러 / 루프 인덱스 */
 	struct quirk_entry *qlist;	/* [한국어] 새로 조립할 동적 테이블 */
 	char *field, *val, *sep_ptr;	/* [한국어] 토큰·복사본·strsep 커서 */
 
 	err = param_set_copystring(value, kp);	/* [한국어] 원본 문자열을 quirks_param 버퍼에 보관 */
-	if (err)	/* [한국어] 아키텍처 조건 분기 */
+	if (err)
 		return err;	/* [한국어] 버퍼 초과 등 — 테이블 불변 */
 
 	val = kstrdup(value, GFP_KERNEL);	/* [한국어] strsep 파괴 파싱용 가변 복사본 */
-	if (!val)	/* [한국어] 아키텍처 조건 분기 */
+	if (!val)
 		return -ENOMEM;	/* [한국어] 메모리 부족 — 파라미터 거부 */
 
-	if (!*val)	/* [한국어] 아키텍처 조건 분기 */
+	if (!*val)
 		goto out_free_val;	/* [한국어] 빈 문자열은 테이블 비우지 않고 복사만 성공 처리 */
 
 	count = 1;	/* [한국어] 구분자 없으면 엔트리 1개 */
 	for (i = 0; val[i]; i++) {	/* [한국어] 순회 루프 */
-		if (val[i] == '-')	/* [한국어] 아키텍처 조건 분기 */
+		if (val[i] == '-')
 			count++;	/* [한국어] '-' 개수+1 = 엔트리 수 */
 	}
 
@@ -355,7 +355,7 @@ static int quirks_param_set(const char *value, const struct kernel_param *kp)	/*
 	sep_ptr = val;		/* [한국어] 전체 문자열 커서 */
 	while ((field = strsep(&sep_ptr, "-"))) {	/* [한국어] 엔트리 단위 분리 */
 		if (nvme_parse_quirk_entry(field, &qlist[i])) {	/* [한국어] VID:DID:names 해석 */
-			pr_err("nvme: failed to parse quirk string %s\n",	/* [한국어] PCIe NVMe 아키텍처 단계 (BAR/SQ·CQ/도어벨/맵/리셋) */
+			pr_err("nvme: failed to parse quirk string %s\n",
 				value);	/* [한국어] 원문 전체를 로그에 남겨 수정 유도 */
 			goto out_free_qlist;	/* [한국어] 부분 적용 없이 롤백 */
 		}
@@ -398,7 +398,7 @@ MODULE_PARM_DESC(quirks, "Enable/disable NVMe quirks by specifying "	/* [한국�
  *
  * blk_mq_num_possible_queues(0) 초과를 거부해 affinity 단계 전 불가능한 큐 수를 차단.
  */
-static int io_queue_count_set(const char *val, const struct kernel_param *kp)	/* [한국어] PCIe NVMe 아키텍처 단계 (BAR/SQ·CQ/도어벨/맵/리셋) */
+static int io_queue_count_set(const char *val, const struct kernel_param *kp)
 {
 	unsigned int n;	/* [한국어] 파싱된 큐 개수 후보 */
 	int ret;	/* [한국어] kstrtouint 결과 */
@@ -508,9 +508,9 @@ struct nvme_dev {
  *
  * 실제 동작 깊이는 nvme_pci_enable 에서 CAP.MQES+1 과 min 한다.
  */
-static int io_queue_depth_set(const char *val, const struct kernel_param *kp)	/* [한국어] PCIe NVMe 아키텍처 단계 (BAR/SQ·CQ/도어벨/맵/리셋) */
+static int io_queue_depth_set(const char *val, const struct kernel_param *kp)
 {
-	return param_set_uint_minmax(val, kp, NVME_PCI_MIN_QUEUE_SIZE,	/* [한국어] PCIe NVMe 경로 반환 */
+	return param_set_uint_minmax(val, kp, NVME_PCI_MIN_QUEUE_SIZE,
 			NVME_PCI_MAX_QUEUE_SIZE);	/* [한국어] 드라이버 허용 범위 밖 값 거부 */
 }
 
@@ -520,7 +520,7 @@ static int io_queue_depth_set(const char *val, const struct kernel_param *kp)	/*
  *
  * 큐 qid 당 SQ/CQ 두 도어벨 × stride(DWORD). SQ 는 짝수 슬롯. CAP.DSTRD 반영.
  */
-static inline unsigned int sq_idx(unsigned int qid, u32 stride)	/* [한국어] CMB/HMB/도어벨/SQ·CQ 경로 */
+static inline unsigned int sq_idx(unsigned int qid, u32 stride)
 {
 	return qid * 2 * stride;	/* [한국어] (SQ,CQ) 쌍에서 SQ 가 선행 */
 }
@@ -529,7 +529,7 @@ static inline unsigned int sq_idx(unsigned int qid, u32 stride)	/* [한국어] C
  * [한국어]
  * cq_idx - shadow doorbell 배열에서 Completion Queue doorbell 슬롯 오프셋
  */
-static inline unsigned int cq_idx(unsigned int qid, u32 stride)	/* [한국어] CMB/HMB/도어벨/SQ·CQ 경로 */
+static inline unsigned int cq_idx(unsigned int qid, u32 stride)
 {
 	return (qid * 2 + 1) * stride;	/* [한국어] SQ 다음 슬롯이 CQ */
 }
@@ -540,7 +540,7 @@ static inline unsigned int cq_idx(unsigned int qid, u32 stride)	/* [한국어] C
  *
  * core 콜백이 ctrl 만 넘길 때 BAR/queues 접근하는 단일 관문.
  */
-static inline struct nvme_dev *to_nvme_dev(struct nvme_ctrl *ctrl)	/* [한국어] NVMe host 헬퍼/코어 API */
+static inline struct nvme_dev *to_nvme_dev(struct nvme_ctrl *ctrl)
 {
 	return container_of(ctrl, struct nvme_dev, ctrl);	/* [한국어] 임베드 ctrl 멤버 기준 부모 복원 */
 }
@@ -662,7 +662,7 @@ struct nvme_iod {
  *
  * 큐마다 SQ+CQ 도어벨 2×4B×stride. OACS.DBBUF 지원 시에만 할당.
  */
-static inline unsigned int nvme_dbbuf_size(struct nvme_dev *dev)	/* [한국어] NVMe host 헬퍼/코어 API */
+static inline unsigned int nvme_dbbuf_size(struct nvme_dev *dev)
 {
 	return dev->nr_allocated_queues * 8 * dev->db_stride;	/* [한국어] 큐당 8바이트×stride */
 }
@@ -674,7 +674,7 @@ static inline unsigned int nvme_dbbuf_size(struct nvme_dev *dev)	/* [한국어] 
  * 이미 있으면 memset 으로 stale 제거(리셋 재사용). 실패 시 MMIO 도어벨 폴백.
  * 호출: probe/reset_work 컨트롤 플레인.
  */
-static void nvme_dbbuf_dma_alloc(struct nvme_dev *dev)	/* [한국어] NVMe host 헬퍼/코어 API */
+static void nvme_dbbuf_dma_alloc(struct nvme_dev *dev)
 {
 	unsigned int mem_size = nvme_dbbuf_size(dev);	/* [한국어] dbs·eis 각각 동일 크기 */
 
@@ -692,20 +692,20 @@ static void nvme_dbbuf_dma_alloc(struct nvme_dev *dev)	/* [한국어] NVMe host 
 		return;	/* [한국어] 재할당 없이 기존 DMA 버퍼 유지 */
 	}
 
-	dev->dbbuf_dbs = dma_alloc_coherent(dev->dev, mem_size,	/* [한국어] 일관 DMA 링/버퍼 할당 */
+	dev->dbbuf_dbs = dma_alloc_coherent(dev->dev, mem_size,
 					    &dev->dbbuf_dbs_dma_addr,
 					    GFP_KERNEL);	/* [한국어] 컨트롤러가 snooping 할 doorbell 메모리 */
-	if (!dev->dbbuf_dbs)	/* [한국어] 아키텍처 조건 분기 */
+	if (!dev->dbbuf_dbs)
 		goto fail;	/* [한국어] dbs 실패 시 eis 시도 불필요 */
-	dev->dbbuf_eis = dma_alloc_coherent(dev->dev, mem_size,	/* [한국어] 일관 DMA 링/버퍼 할당 */
+	dev->dbbuf_eis = dma_alloc_coherent(dev->dev, mem_size,
 					    &dev->dbbuf_eis_dma_addr,
 					    GFP_KERNEL);	/* [한국어] 컨트롤러가 갱신하는 event index */
-	if (!dev->dbbuf_eis)	/* [한국어] 아키텍처 조건 분기 */
+	if (!dev->dbbuf_eis)
 		goto fail_free_dbbuf_dbs;	/* [한국어] 쌍이 불완전하면 dbs 롤백 */
 	return;	/* [한국어] 성공 — 이후 dbbuf_set 이 admin 으로 등록 */
 
 fail_free_dbbuf_dbs:
-	dma_free_coherent(dev->dev, mem_size, dev->dbbuf_dbs,	/* [한국어] 일관 DMA 버퍼 해제 */
+	dma_free_coherent(dev->dev, mem_size, dev->dbbuf_dbs,
 			  dev->dbbuf_dbs_dma_addr);	/* [한국어] 짝 실패 시 부분 할당 해제 */
 	dev->dbbuf_dbs = NULL;	/* [한국어] free 후 dangling 포인터 제거 */
 fail:
@@ -716,17 +716,17 @@ fail:
  * [한국어]
  * nvme_dbbuf_dma_free - shadow doorbell DMA 쌍 해제 (remove·set 실패 롤백)
  */
-static void nvme_dbbuf_dma_free(struct nvme_dev *dev)	/* [한국어] NVMe host 헬퍼/코어 API */
+static void nvme_dbbuf_dma_free(struct nvme_dev *dev)
 {
 	unsigned int mem_size = nvme_dbbuf_size(dev);	/* [한국어] alloc 과 동일 크기 계산 */
 
 	if (dev->dbbuf_dbs) {	/* [한국어] 아키텍처 조건 분기 */
-		dma_free_coherent(dev->dev, mem_size,	/* [한국어] 일관 DMA 버퍼 해제 */
+		dma_free_coherent(dev->dev, mem_size,
 				  dev->dbbuf_dbs, dev->dbbuf_dbs_dma_addr);	/* [한국어] doorbell 배열 반환 */
 		dev->dbbuf_dbs = NULL;	/* [한국어] 이중 free 방지 */
 	}
 	if (dev->dbbuf_eis) {	/* [한국어] 아키텍처 조건 분기 */
-		dma_free_coherent(dev->dev, mem_size,	/* [한국어] 일관 DMA 버퍼 해제 */
+		dma_free_coherent(dev->dev, mem_size,
 				  dev->dbbuf_eis, dev->dbbuf_eis_dma_addr);	/* [한국어] event index 배열 반환 */
 		dev->dbbuf_eis = NULL;	/* [한국어] CMB/HMB/도어벨/SQ·CQ 경로 */
 	}
@@ -738,7 +738,7 @@ static void nvme_dbbuf_dma_free(struct nvme_dev *dev)	/* [한국어] NVMe host �
  *
  * Admin qid=0 은 shadow 미사용. I/O 큐만 인덱싱.
  */
-static void nvme_dbbuf_init(struct nvme_dev *dev,	/* [한국어] NVMe host 헬퍼/코어 API */
+static void nvme_dbbuf_init(struct nvme_dev *dev,
 			    struct nvme_queue *nvmeq, int qid)
 {
 	if (!dev->dbbuf_dbs || !qid)	/* [한국어] 미할당 또는 admin 큐 — 연결 생략 */
@@ -754,7 +754,7 @@ static void nvme_dbbuf_init(struct nvme_dev *dev,	/* [한국어] NVMe host 헬�
  * [한국어]
  * nvme_dbbuf_free - 큐 구조체 dbbuf 포인터만 NULL (DMA 본체는 유지/별도 free)
  */
-static void nvme_dbbuf_free(struct nvme_queue *nvmeq)	/* [한국어] NVMe host 헬퍼/코어 API */
+static void nvme_dbbuf_free(struct nvme_queue *nvmeq)
 {
 	if (!nvmeq->qid)	/* [한국어] admin 은 원래 연결 없음 */
 		return;	/* [한국어] PCIe NVMe 경로 반환 */
@@ -772,7 +772,7 @@ static void nvme_dbbuf_free(struct nvme_queue *nvmeq)	/* [한국어] NVMe host �
  * prp1=dbs, prp2=eis. 실패 시 메모리 해제 후 전 큐 free — optional 기능.
  * 호출 체인: probe/reset LIVE 직전 → [여기] → nvme_submit_sync_cmd
  */
-static void nvme_dbbuf_set(struct nvme_dev *dev)	/* [한국어] NVMe host 헬퍼/코어 API */
+static void nvme_dbbuf_set(struct nvme_dev *dev)
 {
 	struct nvme_command c = { };	/* [한국어] dbbuf admin SQE 제로 초기화 */
 	unsigned int i;			/* [한국어] online 큐 순회 인덱스 */
@@ -800,7 +800,7 @@ static void nvme_dbbuf_set(struct nvme_dev *dev)	/* [한국어] NVMe host 헬퍼
  *
  * (new-event-1) < (new-old) 이면 컨트롤러 미인지 → MMIO doorbell 필수.
  */
-static inline int nvme_dbbuf_need_event(u16 event_idx, u16 new_idx, u16 old)	/* [한국어] NVMe host 헬퍼/코어 API */
+static inline int nvme_dbbuf_need_event(u16 event_idx, u16 new_idx, u16 old)
 {
 	return (u16)(new_idx - event_idx - 1) < (u16)(new_idx - old);	/* [한국어] wrap-safe u16 모듈러 비교 */
 }
@@ -813,7 +813,7 @@ static inline int nvme_dbbuf_need_event(u16 event_idx, u16 new_idx, u16 old)	/* 
  * wmb(SQ/CQ 가시화) → doorbell 메모리 기록 → mb → event index 읽기.
  * @return true 면 호출자가 writel 로 BAR doorbell 을 울려야 함.
  */
-static bool nvme_dbbuf_update_and_check_event(u16 value, __le32 *dbbuf_db,	/* [한국어] NVMe host 헬퍼/코어 API */
+static bool nvme_dbbuf_update_and_check_event(u16 value, __le32 *dbbuf_db,
 					      volatile __le32 *dbbuf_ei)
 {
 	if (dbbuf_db) {	/* [한국어] shadow 미연결이면 무조건 MMIO */
@@ -851,24 +851,24 @@ static bool nvme_dbbuf_update_and_check_event(u16 value, __le32 *dbbuf_db,	/* [�
  * large=페이지 정렬, small=256B(또는 512 quirk). hctx init 시 큐에 캐시.
  * 호출 체인: nvme_init_hctx_common → [여기]
  */
-static struct nvme_descriptor_pools *	/* [한국어] NVMe host 헬퍼/코어 API */
+static struct nvme_descriptor_pools *
 nvme_setup_descriptor_pools(struct nvme_dev *dev, unsigned numa_node)
 {
 	struct nvme_descriptor_pools *pools = &dev->descriptor_pools[numa_node];	/* [한국어] 노드 전용 풀 슬롯 */
 	size_t small_align = NVME_SMALL_POOL_SIZE;	/* [한국어] small 풀 정렬 — quirk 시 512 로 완화 */
 
-	if (pools->small)	/* [한국어] 아키텍처 조건 분기 */
+	if (pools->small)
 		return pools; /* already initialized */	/* [한국어] 노드당 1회 생성 — 재호출 시 캐시 반환 */
 
-	pools->large = dma_pool_create_node("nvme descriptor page", dev->dev,	/* [한국어] descriptor dma_pool 연산 */
+	pools->large = dma_pool_create_node("nvme descriptor page", dev->dev,
 			NVME_CTRL_PAGE_SIZE, NVME_CTRL_PAGE_SIZE, 0, numa_node);	/* [한국어] 4K PRP/SGL 페이지 풀 */
-	if (!pools->large)	/* [한국어] 아키텍처 조건 분기 */
+	if (!pools->large)
 		return ERR_PTR(-ENOMEM);	/* [한국어] large 풀 실패 — hctx init 중단 */
 
 	if (dev->ctrl.quirks & NVME_QUIRK_DMAPOOL_ALIGN_512)	/* [한국어] 일부 컨트롤러 512 정렬 요구 */
 		small_align = 512;	/* [한국어] small pool 정렬 완화/강제 */
 
-	pools->small = dma_pool_create_node("nvme descriptor small", dev->dev,	/* [한국어] descriptor dma_pool 연산 */
+	pools->small = dma_pool_create_node("nvme descriptor small", dev->dev,
 			NVME_SMALL_POOL_SIZE, small_align, 0, numa_node);	/* [한국어] 256B 짧은 PRP/SGL 풀 */
 	if (!pools->small) {	/* [한국어] 아키텍처 조건 분기 */
 		dma_pool_destroy(pools->large);	/* [한국어] 짝 실패 시 large 롤백 */
@@ -883,7 +883,7 @@ nvme_setup_descriptor_pools(struct nvme_dev *dev, unsigned numa_node)
  * [한국어]
  * nvme_release_descriptor_pools - 전 NUMA 노드 PRP/SGL pool 파괴 (remove)
  */
-static void nvme_release_descriptor_pools(struct nvme_dev *dev)	/* [한국어] NVMe host 헬퍼/코어 API */
+static void nvme_release_descriptor_pools(struct nvme_dev *dev)
 {
 	unsigned i;	/* [한국어] 노드 인덱스 0..nr_node_ids-1 */
 
@@ -901,7 +901,7 @@ static void nvme_release_descriptor_pools(struct nvme_dev *dev)	/* [한국어] N
  *
  * tags 일치 WARN. pool setup 실패 시 PTR_ERR. driver_data=nvmeq 로 핫패스 연결.
  */
-static int nvme_init_hctx_common(struct blk_mq_hw_ctx *hctx, void *data,	/* [한국어] blk-mq 태그/요청 API */
+static int nvme_init_hctx_common(struct blk_mq_hw_ctx *hctx, void *data,
 		unsigned qid)	/* [한국어] 지역 변수 */
 {
 	struct nvme_dev *dev = to_nvme_dev(data);	/* [한국어] tagset driver_data=ctrl */
@@ -912,7 +912,7 @@ static int nvme_init_hctx_common(struct blk_mq_hw_ctx *hctx, void *data,	/* [한
 	tags = qid ? dev->tagset.tags[qid - 1] : dev->admin_tagset.tags[0];	/* [한국어] I/O 는 qid-1 슬롯 */
 	WARN_ON(tags != hctx->tags);	/* [한국어] blk-mq 태그/큐 불변식 */
 	pools = nvme_setup_descriptor_pools(dev, hctx->numa_node);	/* [한국어] hctx NUMA 지역 풀 */
-	if (IS_ERR(pools))	/* [한국어] 아키텍처 조건 분기 */
+	if (IS_ERR(pools))
 		return PTR_ERR(pools);	/* [한국어] 풀 생성 실패 errno */
 
 	nvmeq->descriptor_pools = *pools;	/* [한국어] 큐에 풀 사본 캐시 — 핫패스 간접 제거 */
@@ -924,7 +924,7 @@ static int nvme_init_hctx_common(struct blk_mq_hw_ctx *hctx, void *data,	/* [한
  * [한국어]
  * nvme_admin_init_hctx - Admin tagset 유일 hctx → qid=0
  */
-static int nvme_admin_init_hctx(struct blk_mq_hw_ctx *hctx, void *data,	/* [한국어] blk-mq 태그/요청 API */
+static int nvme_admin_init_hctx(struct blk_mq_hw_ctx *hctx, void *data,
 				unsigned int hctx_idx)	/* [한국어] 지역 변수 */
 {
 	WARN_ON(hctx_idx != 0);	/* [한국어] admin 은 단일 hctx */
@@ -935,7 +935,7 @@ static int nvme_admin_init_hctx(struct blk_mq_hw_ctx *hctx, void *data,	/* [한�
  * [한국어]
  * nvme_init_hctx - I/O hctx_idx → qid = hctx_idx+1 (admin 제외 번호)
  */
-static int nvme_init_hctx(struct blk_mq_hw_ctx *hctx, void *data,	/* [한국어] blk-mq 태그/요청 API */
+static int nvme_init_hctx(struct blk_mq_hw_ctx *hctx, void *data,
 			     unsigned int hctx_idx)	/* [한국어] 지역 변수 */
 {
 	return nvme_init_hctx_common(hctx, data, hctx_idx + 1);	/* [한국어] I/O qid 오프셋 */
@@ -947,7 +947,7 @@ static int nvme_init_hctx(struct blk_mq_hw_ctx *hctx, void *data,	/* [한국어]
  *
  * 매 요청 재설정 아님 — setup_cmd 이 동일 SQE 버퍼에 기록.
  */
-static int nvme_pci_init_request(struct blk_mq_tag_set *set,	/* [한국어] blk-mq 태그/요청 API */
+static int nvme_pci_init_request(struct blk_mq_tag_set *set,
 		struct request *req, unsigned int hctx_idx,	/* [한국어] 지역 변수 */
 		unsigned int numa_node)	/* [한국어] 지역 변수 */
 {
@@ -962,11 +962,11 @@ static int nvme_pci_init_request(struct blk_mq_tag_set *set,	/* [한국어] blk-
  * [한국어]
  * queue_irq_offset - blk-mq CPU 맵에서 admin 벡터(0) 를 건너뛸 오프셋
  */
-static int queue_irq_offset(struct nvme_dev *dev)	/* [한국어] NVMe host 헬퍼/코어 API */
+static int queue_irq_offset(struct nvme_dev *dev)
 {
 	/* if we have more than 1 vec, admin queue offsets us by 1 */
 	/* [한국어] 다중 벡터면 I/O 는 vector 1 부터 affinity */
-	if (dev->num_vecs > 1)	/* [한국어] 아키텍처 조건 분기 */
+	if (dev->num_vecs > 1)
 		return 1;	/* [한국어] admin=0 스킵 */
 
 	return 0;	/* [한국어] 단일 벡터 장치는 전부 0 공유 */
@@ -978,7 +978,7 @@ static int queue_irq_offset(struct nvme_dev *dev)	/* [한국어] NVMe host 헬�
  *
  * POLL 은 인터럽트 없음 → blk_mq_map_queues. 나머지는 offset 반영 hw map.
  */
-static void nvme_pci_map_queues(struct blk_mq_tag_set *set)	/* [한국어] blk-mq 태그/요청 API */
+static void nvme_pci_map_queues(struct blk_mq_tag_set *set)
 {
 	struct nvme_dev *dev = to_nvme_dev(set->driver_data);	/* [한국어] io_queues[] 보유 */
 	int i, qoff, offset;	/* [한국어] 맵 인덱스 / 큐 누적 오프셋 / IRQ 오프셋 */
@@ -1019,7 +1019,7 @@ static void nvme_pci_map_queues(struct blk_mq_tag_set *set)	/* [한국어] blk-m
  * 여러 SQE 를 쌓은 뒤 한 번만 울려 PCIe 트래픽 절감. dbbuf 면 이벤트 필요 시에만 writel.
  * 전제: sq_lock 보유 또는 단일 제출자.
  */
-static inline void nvme_write_sq_db(struct nvme_queue *nvmeq, bool write_sq)	/* [한국어] NVMe host 헬퍼/코어 API */
+static inline void nvme_write_sq_db(struct nvme_queue *nvmeq, bool write_sq)
 {
 	if (!write_sq) {	/* [한국어] 배치 중 — wrap 직전이 아니면 doorbell 연기 */
 		u16 next_tail = nvmeq->sq_tail + 1;	/* [한국어] 한 슬롯 더 쓸 때의 예상 tail */
@@ -1030,7 +1030,7 @@ static inline void nvme_write_sq_db(struct nvme_queue *nvmeq, bool write_sq)	/* 
 			return;	/* [한국어] MMIO 생략 — commit_rqs/last 가 나중에 플러시 */
 	}
 
-	if (nvme_dbbuf_update_and_check_event(nvmeq->sq_tail,	/* [한국어] NVMe host 헬퍼/코어 API */
+	if (nvme_dbbuf_update_and_check_event(nvmeq->sq_tail,
 			nvmeq->dbbuf_sq_db, nvmeq->dbbuf_sq_ei))	/* [한국어] shadow 갱신; true 면 BAR 필요 */
 		writel(nvmeq->sq_tail, nvmeq->q_db);	/* [한국어] SQ doorbell MMIO — 컨트롤러에 새 작업 통지 */
 	nvmeq->last_sq_tail = nvmeq->sq_tail;	/* [한국어] 마지막으로 울린 값 기록 (배치 비교용) */
@@ -1042,10 +1042,10 @@ static inline void nvme_write_sq_db(struct nvme_queue *nvmeq, bool write_sq)	/* 
  *
  * CMB SQ 면 장치 로컬 기록으로 host→device DMA 감소. wrap 시 tail=0.
  */
-static inline void nvme_sq_copy_cmd(struct nvme_queue *nvmeq,	/* [한국어] NVMe host 헬퍼/코어 API */
+static inline void nvme_sq_copy_cmd(struct nvme_queue *nvmeq,
 				    struct nvme_command *cmd)
 {
-	memcpy(nvmeq->sq_cmds + (nvmeq->sq_tail << nvmeq->sqes),	/* [한국어] CMB/HMB/도어벨/SQ·CQ 경로 */
+	memcpy(nvmeq->sq_cmds + (nvmeq->sq_tail << nvmeq->sqes),
 		absolute_pointer(cmd), sizeof(*cmd));	/* [한국어] 현재 tail 슬롯에 SQE 64B 기록 */
 	if (++nvmeq->sq_tail == nvmeq->q_depth)	/* [한국어] 생산자 인덱스 증가 후 wrap 검사 */
 		nvmeq->sq_tail = 0;	/* [한국어] 링 처음으로 */
@@ -1057,7 +1057,7 @@ static inline void nvme_sq_copy_cmd(struct nvme_queue *nvmeq,	/* [한국어] NVM
  *
  * queue_rq 가 last=false 로 도어벨을 미룬 경우 스케줄러 종료 시 강제 울림.
  */
-static void nvme_commit_rqs(struct blk_mq_hw_ctx *hctx)	/* [한국어] blk-mq 태그/요청 API */
+static void nvme_commit_rqs(struct blk_mq_hw_ctx *hctx)
 {
 	struct nvme_queue *nvmeq = hctx->driver_data;	/* [한국어] hctx 에 바인딩된 하드웨어 큐 */
 
@@ -1081,14 +1081,14 @@ enum nvme_use_sgl {
  * 컨트롤러 meta SGL 지원 + (다중 integrity segment 또는 usercmd).
  * 단일 커널 MPTR 이 싸지만 usercmd 길이 검증은 SGL 이 안전.
  */
-static inline bool nvme_pci_metadata_use_sgls(struct request *req)	/* [한국어] NVMe host 헬퍼/코어 API */
+static inline bool nvme_pci_metadata_use_sgls(struct request *req)
 {
 	struct nvme_queue *nvmeq = req->mq_hctx->driver_data;	/* [한국어] 소속 컨트롤러 조회 */
 	struct nvme_dev *dev = nvmeq->dev;	/* [한국어] Identify 능력 캐시 */
 
 	if (!nvme_ctrl_meta_sgl_supported(&dev->ctrl))	/* [한국어] meta SGL 미지원 */
 		return false;	/* [한국어] MPTR 경로 강제 */
-	return req->nr_integrity_segments > 1 ||	/* [한국어] PCIe NVMe 경로 반환 */
+	return req->nr_integrity_segments > 1 ||
 		nvme_req(req)->flags & NVME_REQ_USERCMD;	/* [한국어] 다중/유저 → SGL */
 }
 
@@ -1099,7 +1099,7 @@ static inline bool nvme_pci_metadata_use_sgls(struct request *req)	/* [한국어
  * SGL_FORCED: 페이지 gap·usercmd·multi integrity. SGL_SUPPORTED: threshold 선택.
  * Admin(qid=0) 또는 컨트롤러 미지원 → SGL_UNSUPPORTED (항상 PRP).
  */
-static inline enum nvme_use_sgl nvme_pci_use_sgls(struct nvme_dev *dev,	/* [한국어] NVMe host 헬퍼/코어 API */
+static inline enum nvme_use_sgl nvme_pci_use_sgls(struct nvme_dev *dev,
 		struct request *req)	/* [한국어] 지역 변수 */
 {
 	struct nvme_queue *nvmeq = req->mq_hctx->driver_data;	/* [한국어] NVMe host 헬퍼/코어 API */
@@ -1119,7 +1119,7 @@ static inline enum nvme_use_sgl nvme_pci_use_sgls(struct nvme_dev *dev,	/* [한�
 		 *    only way to describe such a command in NVMe.
 		 */
 		/* [한국어] PRP 불가 조건이면 강제 SGL — 정렬 갭/유저커맨드/다중 메타 */
-		if (req_phys_gap_mask(req) & (NVME_CTRL_PAGE_SIZE - 1) ||	/* [한국어] 아키텍처 조건 분기 */
+		if (req_phys_gap_mask(req) & (NVME_CTRL_PAGE_SIZE - 1) ||
 		    nvme_req(req)->flags & NVME_REQ_USERCMD ||
 		    req->nr_integrity_segments > 1)
 			return SGL_FORCED;	/* [한국어] PRP 포맷 불가 */
@@ -1135,7 +1135,7 @@ static inline enum nvme_use_sgl nvme_pci_use_sgls(struct nvme_dev *dev,	/* [한�
  *
  * coalesce 시 nseg=1 — 큰 연속 세그먼트일수록 SGL 오버헤드 대비 이득.
  */
-static unsigned int nvme_pci_avg_seg_size(struct request *req)	/* [한국어] NVMe host 헬퍼/코어 API */
+static unsigned int nvme_pci_avg_seg_size(struct request *req)
 {
 	struct nvme_iod *iod = blk_mq_rq_to_pdu(req);	/* [한국어] dma_state coalesce 판정 */
 	unsigned int nseg;	/* [한국어] 유효 물리 세그먼트 수 */
@@ -1151,7 +1151,7 @@ static unsigned int nvme_pci_avg_seg_size(struct request *req)	/* [한국어] NV
  * [한국어]
  * nvme_dma_pool - iod 플래그로 small(256B) 또는 large(4K) descriptor pool 선택
  */
-static inline struct dma_pool *nvme_dma_pool(struct nvme_queue *nvmeq,	/* [한국어] NVMe host 헬퍼/코어 API */
+static inline struct dma_pool *nvme_dma_pool(struct nvme_queue *nvmeq,
 		struct nvme_iod *iod)
 {
 	if (iod->flags & IOD_SMALL_DESCRIPTOR)	/* [한국어] 짧은 PRP/SGL 리스트 */
@@ -1163,7 +1163,7 @@ static inline struct dma_pool *nvme_dma_pool(struct nvme_queue *nvmeq,	/* [한�
  * [한국어]
  * nvme_pci_cmd_use_meta_sgl - SQE flags 가 메타 SGL 세그먼트(METASEG) 형식인지
  */
-static inline bool nvme_pci_cmd_use_meta_sgl(struct nvme_command *cmd)	/* [한국어] NVMe host 헬퍼/코어 API */
+static inline bool nvme_pci_cmd_use_meta_sgl(struct nvme_command *cmd)
 {
 	return (cmd->common.flags & NVME_CMD_SGL_ALL) == NVME_CMD_SGL_METASEG;	/* [한국어] unmap_metadata 분기 */
 }
@@ -1172,9 +1172,9 @@ static inline bool nvme_pci_cmd_use_meta_sgl(struct nvme_command *cmd)	/* [한�
  * [한국어]
  * nvme_pci_cmd_use_sgl - SQE 가 데이터 SGL(METABUF 또는 METASEG) 인지
  */
-static inline bool nvme_pci_cmd_use_sgl(struct nvme_command *cmd)	/* [한국어] NVMe host 헬퍼/코어 API */
+static inline bool nvme_pci_cmd_use_sgl(struct nvme_command *cmd)
 {
-	return cmd->common.flags &	/* [한국어] PCIe NVMe 경로 반환 */
+	return cmd->common.flags &
 		(NVME_CMD_SGL_METABUF | NVME_CMD_SGL_METASEG);	/* [한국어] PRP 대비 SGL dptr 해석 */
 }
 
@@ -1184,7 +1184,7 @@ static inline bool nvme_pci_cmd_use_sgl(struct nvme_command *cmd)	/* [한국어]
  *
  * SGL 이면 dptr.sgl.addr, PRP 면 prp2(리스트). 단일 세그먼트 단순 경로는 0 가능.
  */
-static inline dma_addr_t nvme_pci_first_desc_dma_addr(struct nvme_command *cmd)	/* [한국어] NVMe host 헬퍼/코어 API */
+static inline dma_addr_t nvme_pci_first_desc_dma_addr(struct nvme_command *cmd)
 {
 	if (nvme_pci_cmd_use_sgl(cmd))	/* [한국어] SGL dptr */
 		return le64_to_cpu(cmd->common.dptr.sgl.addr);	/* [한국어] 인라인 또는 last-seg DMA */
@@ -1197,7 +1197,7 @@ static inline dma_addr_t nvme_pci_first_desc_dma_addr(struct nvme_command *cmd)	
  *
  * 다중 페이지 PRP 는 마지막 엔트리가 다음 리스트 DMA. free 전 next 로드 필수.
  */
-static void nvme_free_descriptors(struct request *req)	/* [한국어] NVMe host 헬퍼/코어 API */
+static void nvme_free_descriptors(struct request *req)
 {
 	struct nvme_queue *nvmeq = req->mq_hctx->driver_data;	/* [한국어] pool 소유 큐 */
 	const int last_prp = NVME_CTRL_PAGE_SIZE / sizeof(__le64) - 1;	/* [한국어] 링크 슬롯 인덱스 */
@@ -1206,7 +1206,7 @@ static void nvme_free_descriptors(struct request *req)	/* [한국어] NVMe host 
 	int i;	/* [한국어] 디스크립터 페이지 인덱스 */
 
 	if (iod->nr_descriptors == 1) {	/* [한국어] small/large 단일 페이지 */
-		dma_pool_free(nvme_dma_pool(nvmeq, iod), iod->descriptors[0],	/* [한국어] descriptor dma_pool 연산 */
+		dma_pool_free(nvme_dma_pool(nvmeq, iod), iod->descriptors[0],
 				dma_addr);	/* [한국어] 플래그에 맞는 풀로 반환 */
 		return;	/* [한국어] 체인 없음 */
 	}
@@ -1215,7 +1215,7 @@ static void nvme_free_descriptors(struct request *req)	/* [한국어] NVMe host 
 		__le64 *prp_list = iod->descriptors[i];	/* [한국어] 현재 리스트 페이지 VA */
 		dma_addr_t next_dma_addr = le64_to_cpu(prp_list[last_prp]);	/* [한국어] free 전 다음 주소 확보 */
 
-		dma_pool_free(nvmeq->descriptor_pools.large, prp_list,	/* [한국어] descriptor dma_pool 연산 */
+		dma_pool_free(nvmeq->descriptor_pools.large, prp_list,
 				dma_addr);	/* [한국어] 다중 페이지는 large 풀 */
 		dma_addr = next_dma_addr;	/* [한국어] 다음 이터레이션 대상 */
 	}
@@ -1225,14 +1225,14 @@ static void nvme_free_descriptors(struct request *req)	/* [한국어] NVMe host 
  * [한국어]
  * nvme_free_prps - non-IOVA PRP 경로: 저장된 phys 벡터 일괄 unmap + mempool 반환
  */
-static void nvme_free_prps(struct request *req, unsigned int attrs)	/* [한국어] NVMe host 헬퍼/코어 API */
+static void nvme_free_prps(struct request *req, unsigned int attrs)
 {
 	struct nvme_iod *iod = blk_mq_rq_to_pdu(req);	/* [한국어] dma_vecs 소유 */
 	struct nvme_queue *nvmeq = req->mq_hctx->driver_data;	/* [한국어] DMA device·mempool */
 	unsigned int i;	/* [한국어] 벡터 인덱스 */
 
 	for (i = 0; i < iod->nr_dma_vecs; i++)	/* [한국어] prep 시 저장한 모든 물리 세그먼트 */
-		dma_unmap_phys(nvmeq->dev->dev, iod->dma_vecs[i].addr,	/* [한국어] DMA 맵/언맵 */
+		dma_unmap_phys(nvmeq->dev->dev, iod->dma_vecs[i].addr,
 			       iod->dma_vecs[i].len, rq_dma_dir(req), attrs);	/* [한국어] attrs 에 MMIO 등 반영 */
 	mempool_free(iod->dma_vecs, nvmeq->dev->dmavec_mempool);	/* [한국어] GFP_ATOMIC 벡터 풀 반환 */
 }
@@ -1243,7 +1243,7 @@ static void nvme_free_prps(struct request *req, unsigned int attrs)	/* [한국�
  *
  * sge 가 Last Segment 면 length=리스트 바이트, sg_list 가 실제 데이터 디스크립터.
  */
-static void nvme_free_sgls(struct request *req, struct nvme_sgl_desc *sge,	/* [한국어] NVMe host 헬퍼/코어 API */
+static void nvme_free_sgls(struct request *req, struct nvme_sgl_desc *sge,
 		struct nvme_sgl_desc *sg_list, unsigned int attrs)
 {
 	struct nvme_queue *nvmeq = req->mq_hctx->driver_data;	/* [한국어] DMA device */
@@ -1253,13 +1253,13 @@ static void nvme_free_sgls(struct request *req, struct nvme_sgl_desc *sge,	/* [�
 	unsigned int i;	/* [한국어] 세그먼트 인덱스 */
 
 	if (sge->type == (NVME_SGL_FMT_DATA_DESC << 4)) {	/* [한국어] 인라인/단일 데이터 디스크립터 */
-		dma_unmap_phys(dma_dev, le64_to_cpu(sge->addr), len, dir,	/* [한국어] DMA 맵/언맵 */
+		dma_unmap_phys(dma_dev, le64_to_cpu(sge->addr), len, dir,
 			       attrs);	/* [한국어] 한 버퍼 unmap */
 		return;	/* [한국어] 리스트 순회 불필요 */
 	}
 
 	for (i = 0; i < len / sizeof(*sg_list); i++)	/* [한국어] last-seg 가 가리킨 엔트리 수 */
-		dma_unmap_phys(dma_dev, le64_to_cpu(sg_list[i].addr),	/* [한국어] DMA 맵/언맵 */
+		dma_unmap_phys(dma_dev, le64_to_cpu(sg_list[i].addr),
 			le32_to_cpu(sg_list[i].length), dir, attrs);	/* [한국어] 각 데이터 블록 unmap */
 }
 
@@ -1270,7 +1270,7 @@ static void nvme_free_sgls(struct request *req, struct nvme_sgl_desc *sge,	/* [�
  * SINGLE_META_SEGMENT→unmap_page. P2P/MMIO attrs 반영 후 iterator unmap 또는
  * free_sgls/phys. small pool meta descriptor 반환.
  */
-static void nvme_unmap_metadata(struct request *req)	/* [한국어] NVMe host 헬퍼/코어 API */
+static void nvme_unmap_metadata(struct request *req)
 {
 	struct nvme_queue *nvmeq = req->mq_hctx->driver_data;	/* [한국어] NVMe host 헬퍼/코어 API */
 	enum pci_p2pdma_map_type map = PCI_P2PDMA_MAP_NONE;	/* [한국어] 기본 호스트 DMA unmap */
@@ -1281,7 +1281,7 @@ static void nvme_unmap_metadata(struct request *req)	/* [한국어] NVMe host �
 	unsigned int attrs = 0;	/* [한국어] 지역 변수 */
 
 	if (iod->flags & IOD_SINGLE_META_SEGMENT) {	/* [한국어] 단일 bvec MPTR 경로 */
-		dma_unmap_page(dma_dev, iod->meta_dma,	/* [한국어] DMA 맵/언맵 */
+		dma_unmap_page(dma_dev, iod->meta_dma,
 			       rq_integrity_vec(req).bv_len,
 			       rq_dma_dir(req));	/* [한국어] 페이지 단위 unmap */
 		return;	/* [한국어] PCIe NVMe 경로 반환 */
@@ -1294,17 +1294,17 @@ static void nvme_unmap_metadata(struct request *req)	/* [한국어] NVMe host �
 		attrs |= DMA_ATTR_MMIO;	/* [한국어] unmap 속성 정합 */
 	}
 
-	if (!blk_rq_dma_unmap(req, dma_dev, &iod->meta_dma_state,	/* [한국어] 아키텍처 조건 분기 */
+	if (!blk_rq_dma_unmap(req, dma_dev, &iod->meta_dma_state,
 			      iod->meta_total_len, map)) {	/* [한국어] IOVA 아니면 수동 unmap */
 		if (nvme_pci_cmd_use_meta_sgl(&iod->cmd))	/* [한국어] meta SGL 형식 */
 			nvme_free_sgls(req, sge, &sge[1], attrs);	/* [한국어] 세그먼트 리스트 unmap */
 		else
-			dma_unmap_phys(dma_dev, iod->meta_dma,	/* [한국어] DMA 맵/언맵 */
+			dma_unmap_phys(dma_dev, iod->meta_dma,
 				       iod->meta_total_len, dir, attrs);	/* [한국어] MPTR phys unmap */
 	}
 
 	if (iod->meta_descriptor)	/* [한국어] small pool 에 빌린 meta desc 있음 */
-		dma_pool_free(nvmeq->descriptor_pools.small,	/* [한국어] descriptor dma_pool 연산 */
+		dma_pool_free(nvmeq->descriptor_pools.small,
 			      iod->meta_descriptor, iod->meta_dma);	/* [한국어] small pool 디스크립터 반환 */
 }
 
@@ -1315,7 +1315,7 @@ static void nvme_unmap_metadata(struct request *req)	/* [한국어] NVMe host �
  * 단일 세그먼트 고속 경로 vs iterator 경로. P2P/MMIO 플래그로 unmap 속성 정합.
  * descriptor 페이지는 마지막에 free. 호출: complete / prep 실패 롤백.
  */
-static void nvme_unmap_data(struct request *req)	/* [한국어] NVMe host 헬퍼/코어 API */
+static void nvme_unmap_data(struct request *req)
 {
 	enum pci_p2pdma_map_type map = PCI_P2PDMA_MAP_NONE;	/* [한국어] 기본=일반 호스트 DMA */
 	struct nvme_iod *iod = blk_mq_rq_to_pdu(req);	/* [한국어] flags/dptr/descriptors */
@@ -1324,9 +1324,9 @@ static void nvme_unmap_data(struct request *req)	/* [한국어] NVMe host 헬퍼
 	unsigned int attrs = 0;	/* [한국어] DMA_ATTR_MMIO 등 */
 
 	if (iod->flags & IOD_SINGLE_SEGMENT) {	/* [한국어] simple 경로 — descriptor 없음 */
-		static_assert(offsetof(union nvme_data_ptr, prp1) ==	/* [한국어] NVMe host 헬퍼/코어 API */
+		static_assert(offsetof(union nvme_data_ptr, prp1) ==
 				offsetof(union nvme_data_ptr, sgl.addr));	/* [한국어] prp1/sgl.addr 동위치 */
-		dma_unmap_page(dma_dev, le64_to_cpu(iod->cmd.common.dptr.prp1),	/* [한국어] DMA 맵/언맵 */
+		dma_unmap_page(dma_dev, le64_to_cpu(iod->cmd.common.dptr.prp1),
 				iod->total_len, rq_dma_dir(req));	/* [한국어] 단일 페이지 unmap */
 		return;	/* [한국어] descriptor/풀 없음 — 조기 종료 */
 	}
@@ -1338,7 +1338,7 @@ static void nvme_unmap_data(struct request *req)	/* [한국어] NVMe host 헬퍼
 		attrs |= DMA_ATTR_MMIO;	/* [한국어] unmap 시 MMIO 속성 전달 */
 	}
 
-	if (!blk_rq_dma_unmap(req, dma_dev, &iod->dma_state, iod->total_len,	/* [한국어] 아키텍처 조건 분기 */
+	if (!blk_rq_dma_unmap(req, dma_dev, &iod->dma_state, iod->total_len,
 			      map)) {	/* [한국어] IOVA 경로가 아니면 false → 수동 unmap */
 		if (nvme_pci_cmd_use_sgl(&iod->cmd))	/* [한국어] SGL dptr 형식 */
 			nvme_free_sgls(req, &iod->cmd.common.dptr.sgl,
@@ -1357,7 +1357,7 @@ static void nvme_unmap_data(struct request *req)	/* [한국어] NVMe host 헬퍼
  *
  * IOVA 또는 need_unmap=false 면 저장 불필요. GFP_ATOMIC mempool — 제출 경로.
  */
-static bool nvme_pci_prp_save_mapping(struct request *req,	/* [한국어] NVMe host 헬퍼/코어 API */
+static bool nvme_pci_prp_save_mapping(struct request *req,
 				      struct device *dma_dev,	/* [한국어] 지역 변수 */
 				      struct blk_dma_iter *iter)	/* [한국어] 지역 변수 */
 {
@@ -1369,7 +1369,7 @@ static bool nvme_pci_prp_save_mapping(struct request *req,	/* [한국어] NVMe h
 	if (!iod->nr_dma_vecs) {	/* [한국어] 첫 세그먼트 — 벡터 배열 대여 */
 		struct nvme_queue *nvmeq = req->mq_hctx->driver_data;	/* [한국어] mempool 소유 dev */
 
-		iod->dma_vecs = mempool_alloc(nvmeq->dev->dmavec_mempool,	/* [한국어] DMA 매핑·풀·일관 버퍼 (PRP/SGL/HMB/링) */
+		iod->dma_vecs = mempool_alloc(nvmeq->dev->dmavec_mempool,
 				GFP_ATOMIC);	/* [한국어] 제출 핫패스 — atomic */
 		if (!iod->dma_vecs) {	/* [한국어] 아키텍처 조건 분기 */
 			iter->status = BLK_STS_RESOURCE;	/* [한국어] 풀 고갈 — 재시도 가능 */
@@ -1387,7 +1387,7 @@ static bool nvme_pci_prp_save_mapping(struct request *req,	/* [한국어] NVMe h
  * [한국어]
  * nvme_pci_prp_iter_next - DMA iterator 다음 청크 + unmap 용 매핑 저장
  */
-static bool nvme_pci_prp_iter_next(struct request *req, struct device *dma_dev,	/* [한국어] NVMe host 헬퍼/코어 API */
+static bool nvme_pci_prp_iter_next(struct request *req, struct device *dma_dev,
 		struct blk_dma_iter *iter)	/* [한국어] 지역 변수 */
 {
 	if (iter->len)	/* [한국어] 현재 청크 잔여 바이트 있음 */
@@ -1406,7 +1406,7 @@ static bool nvme_pci_prp_iter_next(struct request *req, struct device *dma_dev,	
  * 실패 시에도 dptr 를 채워 unmap_data 가 tear-down 가능하게 함.
  * 호출 체인: nvme_map_data → [여기]
  */
-static blk_status_t nvme_pci_setup_data_prp(struct request *req,	/* [한국어] NVMe host 헬퍼/코어 API */
+static blk_status_t nvme_pci_setup_data_prp(struct request *req,
 		struct blk_dma_iter *iter)	/* [한국어] 지역 변수 */
 {
 	struct nvme_iod *iod = blk_mq_rq_to_pdu(req);	/* [한국어] dptr/descriptor 상태 */
@@ -1427,13 +1427,13 @@ static blk_status_t nvme_pci_setup_data_prp(struct request *req,	/* [한국어] 
 	 */
 	/* [한국어] PRP1 만 페이지 중간 offset 허용 — 이후 엔트리는 페이지 정렬 */
 	prp1_dma = iter->addr;	/* [한국어] 전송 시작 DMA */
-	prp_len = min(length, NVME_CTRL_PAGE_SIZE -	/* [한국어] PRP/SGL 디스크립터 경로 */
+	prp_len = min(length, NVME_CTRL_PAGE_SIZE -
 			(iter->addr & (NVME_CTRL_PAGE_SIZE - 1)));	/* [한국어] 첫 페이지 잔여 */
 	iod->total_len += prp_len;	/* [한국어] 매핑 누적 */
 	iter->addr += prp_len;	/* [한국어] iterator 전진 */
 	iter->len -= prp_len;	/* [한국어] 현재 phys 세그먼트 잔여 감소 */
 	length -= prp_len;	/* [한국어] 남은 페이로드 */
-	if (!length)	/* [한국어] 아키텍처 조건 분기 */
+	if (!length)
 		goto done;	/* [한국어] 단일 PRP1 로 끝 — prp2=0 */
 
 	if (!nvme_pci_prp_iter_next(req, nvmeq->dev->dev, iter)) {	/* [한국어] 다음 데이터 DMA 청크 */
@@ -1453,11 +1453,11 @@ static blk_status_t nvme_pci_setup_data_prp(struct request *req,	/* [한국어] 
 		goto done;	/* [한국어] PRP1+PRP2 로 완료 */
 	}
 
-	if (DIV_ROUND_UP(length, NVME_CTRL_PAGE_SIZE) <=	/* [한국어] 아키텍처 조건 분기 */
+	if (DIV_ROUND_UP(length, NVME_CTRL_PAGE_SIZE) <=
 	    NVME_SMALL_POOL_SIZE / sizeof(__le64))	/* [한국어] small 풀로 리스트 수용 가능 */
 		iod->flags |= IOD_SMALL_DESCRIPTOR;	/* [한국어] free 시 small pool 경로 */
 
-	prp_list = dma_pool_alloc(nvme_dma_pool(nvmeq, iod), GFP_ATOMIC,	/* [한국어] descriptor dma_pool 연산 */
+	prp_list = dma_pool_alloc(nvme_dma_pool(nvmeq, iod), GFP_ATOMIC,
 			&prp2_dma);	/* [한국어] PRP2=리스트 DMA 주소 */
 	if (!prp_list) {	/* [한국어] 아키텍처 조건 분기 */
 		iter->status = BLK_STS_RESOURCE;	/* [한국어] 디스크립터 풀 고갈 */
@@ -1476,11 +1476,11 @@ static blk_status_t nvme_pci_setup_data_prp(struct request *req,	/* [한국어] 
 		iter->addr += prp_len;	/* [한국어] 청크 전진 */
 		iter->len -= prp_len;	/* [한국어] phys 세그먼트 잔여 */
 		length -= prp_len;	/* [한국어] 전체 잔여 */
-		if (!length)	/* [한국어] 아키텍처 조건 분기 */
+		if (!length)
 			break;	/* [한국어] 페이로드 소진 — 리스트 완성 */
 
 		if (!nvme_pci_prp_iter_next(req, nvmeq->dev->dev, iter)) {	/* [한국어] 다음 청크 */
-			if (WARN_ON_ONCE(!iter->status))	/* [한국어] 아키텍처 조건 분기 */
+			if (WARN_ON_ONCE(!iter->status))
 				goto bad_sgl;	/* [한국어] 조기 종료 이상 */
 			goto done;	/* [한국어] 에러 status 유지 후 unmap */
 		}
@@ -1496,7 +1496,7 @@ static blk_status_t nvme_pci_setup_data_prp(struct request *req,	/* [한국어] 
 			__le64 *old_prp_list = prp_list;	/* [한국어] 이전 리스트 페이지 */
 			dma_addr_t prp_list_dma;	/* [한국어] 새 리스트 DMA */
 
-			prp_list = dma_pool_alloc(nvmeq->descriptor_pools.large,	/* [한국어] descriptor dma_pool 연산 */
+			prp_list = dma_pool_alloc(nvmeq->descriptor_pools.large,
 					GFP_ATOMIC, &prp_list_dma);	/* [한국어] 다음 4K 리스트 */
 			if (!prp_list) {	/* [한국어] 아키텍처 조건 분기 */
 				iter->status = BLK_STS_RESOURCE;	/* [한국어] 추가 페이지 실패 */
@@ -1523,7 +1523,7 @@ done:
 	return iter->status;	/* [한국어] BLK_STS_OK 또는 에러 */
 
 bad_sgl:
-	dev_err_once(nvmeq->dev->dev,	/* [한국어] PCIe NVMe 아키텍처 단계 (BAR/SQ·CQ/도어벨/맵/리셋) */
+	dev_err_once(nvmeq->dev->dev,
 		"Incorrectly formed request for payload:%d nents:%d\n",
 		blk_rq_payload_bytes(req), blk_rq_nr_phys_segments(req));	/* [한국어] 드라이버/블록 계층 버그 단서 */
 	return BLK_STS_IOERR;	/* [한국어] 재시도 무의미한 형식 오류 */
@@ -1533,7 +1533,7 @@ bad_sgl:
  * [한국어]
  * nvme_pci_sgl_set_data - SGL Data Block descriptor 한 칸 채움 (addr/len/type)
  */
-static void nvme_pci_sgl_set_data(struct nvme_sgl_desc *sge,	/* [한국어] NVMe host 헬퍼/코어 API */
+static void nvme_pci_sgl_set_data(struct nvme_sgl_desc *sge,
 		struct blk_dma_iter *iter)	/* [한국어] 지역 변수 */
 {
 	sge->addr = cpu_to_le64(iter->addr);	/* [한국어] 데이터 버퍼 DMA */
@@ -1545,7 +1545,7 @@ static void nvme_pci_sgl_set_data(struct nvme_sgl_desc *sge,	/* [한국어] NVMe
  * [한국어]
  * nvme_pci_sgl_set_seg - Last Segment descriptor (SQE dptr 또는 meta 가 가리킴)
  */
-static void nvme_pci_sgl_set_seg(struct nvme_sgl_desc *sge,	/* [한국어] NVMe host 헬퍼/코어 API */
+static void nvme_pci_sgl_set_seg(struct nvme_sgl_desc *sge,
 		dma_addr_t dma_addr, int entries)	/* [한국어] 지역 변수 */
 {
 	sge->addr = cpu_to_le64(dma_addr);	/* [한국어] 데이터 디스크립터 리스트 DMA */
@@ -1559,7 +1559,7 @@ static void nvme_pci_sgl_set_seg(struct nvme_sgl_desc *sge,	/* [한국어] NVMe 
  *
  * 1 entry 또는 coalesce 면 SQE 인라인 DATA_DESC. 아니면 pool 리스트 + SEG.
  */
-static blk_status_t nvme_pci_setup_data_sgl(struct request *req,	/* [한국어] NVMe host 헬퍼/코어 API */
+static blk_status_t nvme_pci_setup_data_sgl(struct request *req,
 		struct blk_dma_iter *iter)	/* [한국어] 지역 변수 */
 {
 	struct nvme_iod *iod = blk_mq_rq_to_pdu(req);	/* [한국어] dptr/flags 기록 대상 */
@@ -1582,9 +1582,9 @@ static blk_status_t nvme_pci_setup_data_sgl(struct request *req,	/* [한국어] 
 	if (entries <= NVME_SMALL_POOL_SIZE / sizeof(*sg_list))	/* [한국어] 256B 풀 수용 범위 */
 		iod->flags |= IOD_SMALL_DESCRIPTOR;	/* [한국어] 짧은 리스트 → small pool */
 
-	sg_list = dma_pool_alloc(nvme_dma_pool(nvmeq, iod), GFP_ATOMIC,	/* [한국어] descriptor dma_pool 연산 */
+	sg_list = dma_pool_alloc(nvme_dma_pool(nvmeq, iod), GFP_ATOMIC,
 			&sgl_dma);	/* [한국어] 제출 경로 — atomic 할당 */
-	if (!sg_list)	/* [한국어] 아키텍처 조건 분기 */
+	if (!sg_list)
 		return BLK_STS_RESOURCE;	/* [한국어] 풀 고갈 — 재시도 가능 */
 	iod->descriptors[iod->nr_descriptors++] = sg_list;	/* [한국어] free 시 추적 */
 
@@ -1598,7 +1598,7 @@ static blk_status_t nvme_pci_setup_data_sgl(struct request *req,	/* [한국어] 
 	} while (blk_rq_dma_map_iter_next(req, nvmeq->dev->dev, iter));	/* [한국어] 다음 물리 세그먼트 */
 
 	nvme_pci_sgl_set_seg(&iod->cmd.common.dptr.sgl, sgl_dma, mapped);	/* [한국어] SQE 가 last-seg 가리킴 */
-	if (unlikely(iter->status))	/* [한국어] 아키텍처 조건 분기 */
+	if (unlikely(iter->status))
 		nvme_unmap_data(req);	/* [한국어] 부분 실패 tear-down */
 	return iter->status;	/* [한국어] PCIe NVMe 경로 반환 */
 }
@@ -1616,7 +1616,7 @@ static blk_status_t nvme_pci_setup_data_sgl(struct request *req,	/* [한국어] 
  * PRP 로 최대 2 페이지 span 가능해야 함. P2P 는 iterator 경로(BLK_STS_AGAIN).
  * dma_map_bvec 1회 + IOD_SINGLE_SEGMENT.
  */
-static blk_status_t nvme_pci_setup_data_simple(struct request *req,	/* [한국어] NVMe host 헬퍼/코어 API */
+static blk_status_t nvme_pci_setup_data_simple(struct request *req,
 		enum nvme_use_sgl use_sgl)
 {
 	struct nvme_iod *iod = blk_mq_rq_to_pdu(req);	/* [한국어] dptr/flags */
@@ -1632,7 +1632,7 @@ static blk_status_t nvme_pci_setup_data_simple(struct request *req,	/* [한국�
 		return BLK_STS_AGAIN;	/* [한국어] P2P 는 iterator 경로 필요 */
 
 	dma_addr = dma_map_bvec(nvmeq->dev->dev, &bv, rq_dma_dir(req), 0);	/* [한국어] 단일 bvec 맵 */
-	if (dma_mapping_error(nvmeq->dev->dev, dma_addr))	/* [한국어] 아키텍처 조건 분기 */
+	if (dma_mapping_error(nvmeq->dev->dev, dma_addr))
 		return BLK_STS_RESOURCE;	/* [한국어] 맵 실패 — 재시도 가능 */
 	iod->total_len = bv.bv_len;	/* [한국어] unmap 길이 */
 	iod->flags |= IOD_SINGLE_SEGMENT;	/* [한국어] unmap_page 경로 */
@@ -1648,7 +1648,7 @@ static blk_status_t nvme_pci_setup_data_simple(struct request *req,	/* [한국�
 		iod->cmd.common.dptr.prp1 = cpu_to_le64(dma_addr);	/* [한국어] 첫 페이지 (비정렬 가능) */
 		iod->cmd.common.dptr.prp2 = 0;	/* [한국어] 한 페이지 이내면 prp2 불필요 */
 		if (bv.bv_len > first_prp_len)	/* [한국어] 두 번째 페이지 필요 */
-			iod->cmd.common.dptr.prp2 =	/* [한국어] PRP/SGL 디스크립터 경로 */
+			iod->cmd.common.dptr.prp2 =
 				cpu_to_le64(dma_addr + first_prp_len);	/* [한국어] 다음 페이지 직주소 */
 	}
 
@@ -1662,7 +1662,7 @@ static blk_status_t nvme_pci_setup_data_simple(struct request *req,	/* [한국�
  * 1) single segment simple 시도 2) dma_map_iter_start + P2P 플래그
  * 3) SGL 또는 PRP setup. prep_rq 의 핵심 비용 구간.
  */
-static blk_status_t nvme_map_data(struct request *req)	/* [한국어] NVMe host 헬퍼/코어 API */
+static blk_status_t nvme_map_data(struct request *req)
 {
 	struct nvme_iod *iod = blk_mq_rq_to_pdu(req);	/* [한국어] dptr/플래그 기록 대상 */
 	struct nvme_queue *nvmeq = req->mq_hctx->driver_data;	/* [한국어] 큐·device */
@@ -1698,8 +1698,8 @@ static blk_status_t nvme_map_data(struct request *req)	/* [한국어] NVMe host 
 		return BLK_STS_RESOURCE;	/* [한국어] 미지원 맵 유형 */
 	}
 
-	if (use_sgl == SGL_FORCED ||	/* [한국어] 아키텍처 조건 분기 */
-	    (use_sgl == SGL_SUPPORTED &&	/* [한국어] PRP/SGL 디스크립터 경로 */
+	if (use_sgl == SGL_FORCED ||
+	    (use_sgl == SGL_SUPPORTED &&
 	     (sgl_threshold && nvme_pci_avg_seg_size(req) >= sgl_threshold)))	/* [한국어] 강제 또는 임계값 충족 */
 		return nvme_pci_setup_data_sgl(req, &iter);	/* [한국어] SGL dptr */
 	return nvme_pci_setup_data_prp(req, &iter);	/* [한국어] 전통 PRP1/2/list */
@@ -1712,7 +1712,7 @@ static blk_status_t nvme_map_data(struct request *req)	/* [한국어] NVMe host 
  * 커널 단일 segment+비 usercmd 는 효율적 MPTR. usercmd/다중/P2P 는 명시 길이
  * SGL_METASEG. small pool 에 세그먼트 리스트.
  */
-static blk_status_t nvme_pci_setup_meta_iter(struct request *req)	/* [한국어] NVMe host 헬퍼/코어 API */
+static blk_status_t nvme_pci_setup_meta_iter(struct request *req)
 {
 	struct nvme_queue *nvmeq = req->mq_hctx->driver_data;	/* [한국어] 풀·device 소스 */
 	unsigned int entries = req->nr_integrity_segments;	/* [한국어] 메타 물리 세그먼트 수 */
@@ -1723,7 +1723,7 @@ static blk_status_t nvme_pci_setup_meta_iter(struct request *req)	/* [한국어]
 	dma_addr_t sgl_dma;	/* [한국어] 리스트 DMA — SQE metadata 에 기록 */
 	int i = 0;	/* [한국어] 데이터 디스크립터 채움 인덱스 */
 
-	if (!blk_rq_integrity_dma_map_iter_start(req, dev->dev,	/* [한국어] 아키텍처 조건 분기 */
+	if (!blk_rq_integrity_dma_map_iter_start(req, dev->dev,
 						&iod->meta_dma_state, &iter))	/* [한국어] 메타 버퍼 맵 시작 */
 		return iter.status;	/* [한국어] 맵 실패 상태 */
 
@@ -1760,7 +1760,7 @@ static blk_status_t nvme_pci_setup_meta_iter(struct request *req)	/* [한국어]
 	 * leverages this routine when that happens.
 	 */
 	/* [한국어] MPTR=암시 길이(커널 PI) vs SGL=명시 길이(usercmd 검증) */
-	if (!nvme_ctrl_meta_sgl_supported(&dev->ctrl) ||	/* [한국어] NVMe host 헬퍼/코어 API */
+	if (!nvme_ctrl_meta_sgl_supported(&dev->ctrl) ||
 	    (entries == 1 && !(nvme_req(req)->flags & NVME_REQ_USERCMD))) {	/* [한국어] 효율 MPTR 경로 */
 		iod->cmd.common.metadata = cpu_to_le64(iter.addr);	/* [한국어] SQE MPTR 필드 */
 		iod->meta_total_len = iter.len;	/* [한국어] unmap 길이 */
@@ -1769,9 +1769,9 @@ static blk_status_t nvme_pci_setup_meta_iter(struct request *req)	/* [한국어]
 		return BLK_STS_OK;	/* [한국어] 메타 매핑 완료 */
 	}
 
-	sg_list = dma_pool_alloc(nvmeq->descriptor_pools.small, GFP_ATOMIC,	/* [한국어] descriptor dma_pool 연산 */
+	sg_list = dma_pool_alloc(nvmeq->descriptor_pools.small, GFP_ATOMIC,
 			&sgl_dma);	/* [한국어] meta last-seg+data 디스크립터 페이지 */
-	if (!sg_list)	/* [한국어] 아키텍처 조건 분기 */
+	if (!sg_list)
 		return BLK_STS_RESOURCE;	/* [한국어] 풀 고갈 — 재시도 가능 */
 
 	iod->meta_descriptor = sg_list;	/* [한국어] free 시 추적 */
@@ -1802,7 +1802,7 @@ static blk_status_t nvme_pci_setup_meta_iter(struct request *req)	/* [한국어]
  *
  * P2P 페이지는 iter 경로 위임. 성공 시 IOD_SINGLE_META_SEGMENT.
  */
-static blk_status_t nvme_pci_setup_meta_mptr(struct request *req)	/* [한국어] NVMe host 헬퍼/코어 API */
+static blk_status_t nvme_pci_setup_meta_mptr(struct request *req)
 {
 	struct nvme_iod *iod = blk_mq_rq_to_pdu(req);	/* [한국어] metadata/flags */
 	struct nvme_queue *nvmeq = req->mq_hctx->driver_data;	/* [한국어] DMA device */
@@ -1812,7 +1812,7 @@ static blk_status_t nvme_pci_setup_meta_mptr(struct request *req)	/* [한국어]
 		return nvme_pci_setup_meta_iter(req);	/* [한국어] P2P 플래그 경로 위임 */
 
 	iod->meta_dma = dma_map_bvec(nvmeq->dev->dev, &bv, rq_dma_dir(req), 0);	/* [한국어] 단일 페이지 맵 */
-	if (dma_mapping_error(nvmeq->dev->dev, iod->meta_dma))	/* [한국어] 아키텍처 조건 분기 */
+	if (dma_mapping_error(nvmeq->dev->dev, iod->meta_dma))
 		return BLK_STS_IOERR;	/* [한국어] 맵 실패 — 영구/즉시 오류 */
 	iod->cmd.common.metadata = cpu_to_le64(iod->meta_dma);	/* [한국어] SQE MPTR */
 	iod->flags |= IOD_SINGLE_META_SEGMENT;	/* [한국어] unmap_page 경로 */
@@ -1823,11 +1823,11 @@ static blk_status_t nvme_pci_setup_meta_mptr(struct request *req)	/* [한국어]
  * [한국어]
  * nvme_map_metadata - PI/메타 매핑 엔트리. 데이터 SGL 이면 meta SGL 정책 연동
  */
-static blk_status_t nvme_map_metadata(struct request *req)	/* [한국어] NVMe host 헬퍼/코어 API */
+static blk_status_t nvme_map_metadata(struct request *req)
 {
 	struct nvme_iod *iod = blk_mq_rq_to_pdu(req);	/* [한국어] cmd flags 검사 */
 
-	if ((iod->cmd.common.flags & NVME_CMD_SGL_METABUF) &&	/* [한국어] 아키텍처 조건 분기 */
+	if ((iod->cmd.common.flags & NVME_CMD_SGL_METABUF) &&
 	    nvme_pci_metadata_use_sgls(req))	/* [한국어] 데이터 SGL+메타 SGL 강제 조건 */
 		return nvme_pci_setup_meta_iter(req);	/* [한국어] meta SGL/iter */
 	return nvme_pci_setup_meta_mptr(req);	/* [한국어] 기본 MPTR 고속 경로 */
@@ -1841,7 +1841,7 @@ static blk_status_t nvme_map_metadata(struct request *req)	/* [한국어] NVMe h
  * 실패 시 역순 unmap/cleanup. start_request 로 타임아웃 시계 시작.
  * 호출: queue_rq / prep_rq_batch
  */
-static blk_status_t nvme_prep_rq(struct request *req)	/* [한국어] NVMe host 헬퍼/코어 API */
+static blk_status_t nvme_prep_rq(struct request *req)
 {
 	struct nvme_iod *iod = blk_mq_rq_to_pdu(req);	/* [한국어] 요청 PDU — cmd/매핑 상태 */
 	blk_status_t ret;	/* [한국어] 단계별 블록 상태 누적 */
@@ -1853,18 +1853,18 @@ static blk_status_t nvme_prep_rq(struct request *req)	/* [한국어] NVMe host �
 	iod->nr_dma_vecs = 0;		/* [한국어] phys 벡터 개수 리셋 */
 
 	ret = nvme_setup_cmd(req->q->queuedata, req);	/* [한국어] core 가 opcode/ns/SLBA 등 SQE 채움 */
-	if (ret)	/* [한국어] 아키텍처 조건 분기 */
+	if (ret)
 		return ret;	/* [한국어] 명령 구성 실패 — DMA 전 단계라 unmap 불필요 */
 
 	if (blk_rq_nr_phys_segments(req)) {	/* [한국어] 페이로드 있는 요청만 데이터 매핑 */
 		ret = nvme_map_data(req);	/* [한국어] PRP/SGL 로 dptr 구성 — 핫패스 비용 핵심 */
-		if (ret)	/* [한국어] 아키텍처 조건 분기 */
+		if (ret)
 			goto out_free_cmd;	/* [한국어] 맵 실패 → cleanup_cmd */
 	}
 
 	if (blk_integrity_rq(req)) {	/* [한국어] PI/메타 보호 정보 경로 */
 		ret = nvme_map_metadata(req);	/* [한국어] MPTR 또는 meta SGL */
-		if (ret)	/* [한국어] 아키텍처 조건 분기 */
+		if (ret)
 			goto out_unmap_data;	/* [한국어] 메타 실패 시 이미 맵된 데이터 해제 */
 	}
 
@@ -1886,7 +1886,7 @@ out_free_cmd:
  * bd->last 가 false 면 도어벨 배치 지연 가능. dying 큐는 IOERR.
  * 호출 체인: blk_mq → [여기] → nvme_prep_rq → hardware
  */
-static blk_status_t nvme_queue_rq(struct blk_mq_hw_ctx *hctx,	/* [한국어] blk-mq 태그/요청 API */
+static blk_status_t nvme_queue_rq(struct blk_mq_hw_ctx *hctx,
 			 const struct blk_mq_queue_data *bd)
 {
 	struct nvme_queue *nvmeq = hctx->driver_data;	/* [한국어] 이 hctx 의 하드웨어 큐 */
@@ -1907,7 +1907,7 @@ static blk_status_t nvme_queue_rq(struct blk_mq_hw_ctx *hctx,	/* [한국어] blk
 		return nvme_fail_nonready_command(&dev->ctrl, req);	/* [한국어] 상태별 실패/재시도 정책 */
 
 	ret = nvme_prep_rq(req);	/* [한국어] cmd+DMA+timeout 시작 */
-	if (unlikely(ret))	/* [한국어] 아키텍처 조건 분기 */
+	if (unlikely(ret))
 		return ret;	/* [한국어] 맵 자원 부족 등은 blk-mq 가 재큐잉 */
 	spin_lock(&nvmeq->sq_lock);	/* [한국어] SQ tail/copy/doorbell 임계구역 */
 	nvme_sq_copy_cmd(nvmeq, &iod->cmd);	/* [한국어] 링에 SQE 기록 */
@@ -1922,7 +1922,7 @@ static blk_status_t nvme_queue_rq(struct blk_mq_hw_ctx *hctx,	/* [한국어] blk
  *
  * queue_rqs 배치 효율 핵심. empty 면 no-op.
  */
-static void nvme_submit_cmds(struct nvme_queue *nvmeq, struct rq_list *rqlist)	/* [한국어] NVMe host 헬퍼/코어 API */
+static void nvme_submit_cmds(struct nvme_queue *nvmeq, struct rq_list *rqlist)
 {
 	struct request *req;	/* [한국어] 리스트에서 꺼낸 blk-mq 요청 */
 
@@ -1943,7 +1943,7 @@ static void nvme_submit_cmds(struct nvme_queue *nvmeq, struct rq_list *rqlist)	/
  * [한국어]
  * nvme_prep_rq_batch - queue_rqs 용 prep. ENABLED/ready 실패 시 false→requeue
  */
-static bool nvme_prep_rq_batch(struct nvme_queue *nvmeq, struct request *req)	/* [한국어] NVMe host 헬퍼/코어 API */
+static bool nvme_prep_rq_batch(struct nvme_queue *nvmeq, struct request *req)
 {
 	/*
 	 * We should not need to do this, but we're still using this to
@@ -1964,7 +1964,7 @@ static bool nvme_prep_rq_batch(struct nvme_queue *nvmeq, struct request *req)	/*
  *
  * prep 실패 요청은 입력 리스트에 남겨 blk-mq 가 재시도. doorbell 은 큐당 1회.
  */
-static void nvme_queue_rqs(struct rq_list *rqlist)	/* [한국어] NVMe host 헬퍼/코어 API */
+static void nvme_queue_rqs(struct rq_list *rqlist)
 {
 	struct rq_list submit_list = { };	/* [한국어] prep 성공 → SQ 투입 대기 */
 	struct rq_list requeue_list = { };	/* [한국어] prep 실패 → 호출자 재시도 */
@@ -1972,7 +1972,7 @@ static void nvme_queue_rqs(struct rq_list *rqlist)	/* [한국어] NVMe host 헬�
 	struct request *req;	/* [한국어] 지역 변수 */
 
 	while ((req = rq_list_pop(rqlist))) {	/* [한국어] 입력 리스트 소비 */
-		if (nvmeq && nvmeq != req->mq_hctx->driver_data)	/* [한국어] 아키텍처 조건 분기 */
+		if (nvmeq && nvmeq != req->mq_hctx->driver_data)
 			nvme_submit_cmds(nvmeq, &submit_list);	/* [한국어] 큐 전환 시 이전 배치 플러시 */
 		nvmeq = req->mq_hctx->driver_data;	/* [한국어] 이 요청의 하드웨어 큐 */
 
@@ -1982,7 +1982,7 @@ static void nvme_queue_rqs(struct rq_list *rqlist)	/* [한국어] NVMe host 헬�
 			rq_list_add_tail(&requeue_list, req);	/* [한국어] 자원 부족 등 재큐잉 */
 	}
 
-	if (nvmeq)	/* [한국어] 아키텍처 조건 분기 */
+	if (nvmeq)
 		nvme_submit_cmds(nvmeq, &submit_list);	/* [한국어] 마지막 큐 배치 투입 */
 	*rqlist = requeue_list;	/* [한국어] 실패분만 호출자에 반환 */
 }
@@ -1993,7 +1993,7 @@ static void nvme_queue_rqs(struct rq_list *rqlist)	/* [한국어] NVMe host 헬�
  *
  * integrity 가 있으면 메타 먼저, 페이로드 세그먼트가 있으면 데이터 unmap.
  */
-static __always_inline void nvme_pci_unmap_rq(struct request *req)	/* [한국어] NVMe host 헬퍼/코어 API */
+static __always_inline void nvme_pci_unmap_rq(struct request *req)
 {
 	if (blk_integrity_rq(req))	/* [한국어] PI/메타 매핑 존재 */
 		nvme_unmap_metadata(req);	/* [한국어] MPTR 또는 meta SGL 해제 */
@@ -2005,7 +2005,7 @@ static __always_inline void nvme_pci_unmap_rq(struct request *req)	/* [한국어
  * [한국어]
  * nvme_pci_complete_rq - 단일 완료: unmap 후 core nvme_complete_rq
  */
-static void nvme_pci_complete_rq(struct request *req)	/* [한국어] NVMe host 헬퍼/코어 API */
+static void nvme_pci_complete_rq(struct request *req)
 {
 	nvme_pci_unmap_rq(req);	/* [한국어] 하드웨어 소유 끝 — DMA 역매핑 */
 	nvme_complete_rq(req);	/* [한국어] status→blk 에러·end_io·재시도 정책 */
@@ -2015,7 +2015,7 @@ static void nvme_pci_complete_rq(struct request *req)	/* [한국어] NVMe host �
  * [한국어]
  * nvme_pci_complete_batch - IRQ 배치 완료: unmap 훅을 complete_batch 에 전달
  */
-static void nvme_pci_complete_batch(struct io_comp_batch *iob)	/* [한국어] NVMe host 헬퍼/코어 API */
+static void nvme_pci_complete_batch(struct io_comp_batch *iob)
 {
 	nvme_complete_batch(iob, nvme_pci_unmap_rq);	/* [한국어] 배치 각 요청 unmap+core complete */
 }
@@ -2028,7 +2028,7 @@ static void nvme_pci_complete_batch(struct io_comp_batch *iob)	/* [한국어] NV
  * status LSB 가 phase. 호스트 소유 슬롯과 컨트롤러 기록이 교차할 때 토글.
  * true 면 나머지 CQE 필드 읽기 전 dma_rmb 필요.
  */
-static inline bool nvme_cqe_pending(struct nvme_queue *nvmeq)	/* [한국어] NVMe host 헬퍼/코어 API */
+static inline bool nvme_cqe_pending(struct nvme_queue *nvmeq)
 {
 	struct nvme_completion *hcqe = &nvmeq->cqes[nvmeq->cq_head];	/* [한국어] 소비자 head 슬롯 */
 
@@ -2041,11 +2041,11 @@ static inline bool nvme_cqe_pending(struct nvme_queue *nvmeq)	/* [한국어] NVM
  *
  * q_db+db_stride 가 CQ doorbell. dbbuf 동일 적용.
  */
-static inline void nvme_ring_cq_doorbell(struct nvme_queue *nvmeq)	/* [한국어] NVMe host 헬퍼/코어 API */
+static inline void nvme_ring_cq_doorbell(struct nvme_queue *nvmeq)
 {
 	u16 head = nvmeq->cq_head;	/* [한국어] 호스트가 소비를 끝낸 다음 슬롯 인덱스 */
 
-	if (nvme_dbbuf_update_and_check_event(head, nvmeq->dbbuf_cq_db,	/* [한국어] NVMe host 헬퍼/코어 API */
+	if (nvme_dbbuf_update_and_check_event(head, nvmeq->dbbuf_cq_db,
 					      nvmeq->dbbuf_cq_ei))	/* [한국어] shadow CQ head 갱신 */
 		writel(head, nvmeq->q_db + nvmeq->dev->db_stride);	/* [한국어] CQ doorbell MMIO */
 }
@@ -2054,7 +2054,7 @@ static inline void nvme_ring_cq_doorbell(struct nvme_queue *nvmeq)	/* [한국어
  * [한국어]
  * nvme_queue_tagset - qid 대응 blk_mq_tags (admin vs io)
  */
-static inline struct blk_mq_tags *nvme_queue_tagset(struct nvme_queue *nvmeq)	/* [한국어] blk-mq 태그/요청 API */
+static inline struct blk_mq_tags *nvme_queue_tagset(struct nvme_queue *nvmeq)
 {
 	if (!nvmeq->qid)	/* [한국어] admin 큐는 admin_tagset */
 		return nvmeq->dev->admin_tagset.tags[0];	/* [한국어] 단일 admin hctx 태그 */
@@ -2067,7 +2067,7 @@ static inline struct blk_mq_tags *nvme_queue_tagset(struct nvme_queue *nvmeq)	/*
  *
  * AEN 은 request 없이 예약 command_id. 일반은 find_rq → try_complete/batch.
  */
-static inline void nvme_handle_cqe(struct nvme_queue *nvmeq,	/* [한국어] NVMe host 헬퍼/코어 API */
+static inline void nvme_handle_cqe(struct nvme_queue *nvmeq,
 				   struct io_comp_batch *iob, u16 idx)	/* [한국어] 지역 변수 */
 {
 	struct nvme_completion *cqe = &nvmeq->cqes[idx];	/* [한국어] 완료 엔트리 */
@@ -2082,14 +2082,14 @@ static inline void nvme_handle_cqe(struct nvme_queue *nvmeq,	/* [한국어] NVMe
 	 */
 	/* [한국어] Async Event 는 상주 슬롯 — request 수명/타임아웃 모델 밖 */
 	if (unlikely(nvme_is_aen_req(nvmeq->qid, command_id))) {	/* [한국어] admin 고정 AEN CID */
-		nvme_complete_async_event(&nvmeq->dev->ctrl,	/* [한국어] NVMe host 헬퍼/코어 API */
+		nvme_complete_async_event(&nvmeq->dev->ctrl,
 				cqe->status, &cqe->result);	/* [한국어] core 가 이벤트 디스패치·재무장 */
 		return;	/* [한국어] tagset 조회 없음 */
 	}
 
 	req = nvme_find_rq(nvme_queue_tagset(nvmeq), command_id);	/* [한국어] CID→inflight request */
 	if (unlikely(!req)) {	/* [한국어] stale/이중완료/펌웨어 버그 */
-		dev_warn(nvmeq->dev->ctrl.device,	/* [한국어] PCIe NVMe 아키텍처 단계 (BAR/SQ·CQ/도어벨/맵/리셋) */
+		dev_warn(nvmeq->dev->ctrl.device,
 			"invalid id %d completed on queue %d\n",
 			command_id, le16_to_cpu(cqe->sq_id));	/* [한국어] 진단 로그 후 드롭 */
 		return;	/* [한국어] PCIe NVMe 경로 반환 */
@@ -2109,7 +2109,7 @@ static inline void nvme_handle_cqe(struct nvme_queue *nvmeq,	/* [한국어] NVMe
  *
  * 스펙: 링 한 바퀴마다 phase 반전으로 full/empty 모호성 해소.
  */
-static inline void nvme_update_cq_head(struct nvme_queue *nvmeq)	/* [한국어] NVMe host 헬퍼/코어 API */
+static inline void nvme_update_cq_head(struct nvme_queue *nvmeq)
 {
 	u32 tmp = nvmeq->cq_head + 1;	/* [한국어] 다음 소비자 슬롯 후보 */
 
@@ -2127,7 +2127,7 @@ static inline void nvme_update_cq_head(struct nvme_queue *nvmeq)	/* [한국어] 
  *
  * phase 확인 후 dma_rmb 로 CQE 필드 순서 보장. IRQ·poll·reap 공용.
  */
-static inline bool nvme_poll_cq(struct nvme_queue *nvmeq,	/* [한국어] NVMe host 헬퍼/코어 API */
+static inline bool nvme_poll_cq(struct nvme_queue *nvmeq,
 			        struct io_comp_batch *iob)	/* [한국어] 지역 변수 */
 {
 	bool found = false;	/* [한국어] 하나라도 완료를 봤는지 — doorbell/IRQ 반환용 */
@@ -2143,7 +2143,7 @@ static inline bool nvme_poll_cq(struct nvme_queue *nvmeq,	/* [한국어] NVMe ho
 		nvme_update_cq_head(nvmeq);	/* [한국어] 소비자 전진 */
 	}
 
-	if (found)	/* [한국어] 아키텍처 조건 분기 */
+	if (found)
 		nvme_ring_cq_doorbell(nvmeq);	/* [한국어] 일괄 head 통지 — 슬롯 재사용 허가 */
 	return found;	/* [한국어] IRQ_HANDLED / poll 진척 여부 */
 }
@@ -2154,7 +2154,7 @@ static inline bool nvme_poll_cq(struct nvme_queue *nvmeq,	/* [한국어] NVMe ho
  *
  * poll_cq + 배치 complete. 일감 없으면 IRQ_NONE (공유 벡터 대비).
  */
-static irqreturn_t nvme_irq(int irq, void *data)	/* [한국어] NVMe host 헬퍼/코어 API */
+static irqreturn_t nvme_irq(int irq, void *data)
 {
 	struct nvme_queue *nvmeq = data;	/* [한국어] request_irq 때 넘긴 큐 쿠키 */
 	DEFINE_IO_COMP_BATCH(iob);	/* [한국어] 스택 배치 complete 리스트 */
@@ -2173,7 +2173,7 @@ static irqreturn_t nvme_irq(int irq, void *data)	/* [한국어] NVMe host 헬퍼
  *
  * phase 만 보고 WAKE_THREAD 여부 결정 — hardirq 에서 무거운 완료 회피.
  */
-static irqreturn_t nvme_irq_check(int irq, void *data)	/* [한국어] NVMe host 헬퍼/코어 API */
+static irqreturn_t nvme_irq_check(int irq, void *data)
 {
 	struct nvme_queue *nvmeq = data;	/* [한국어] 동일 큐 쿠키 */
 
@@ -2193,7 +2193,7 @@ static irqreturn_t nvme_irq_check(int irq, void *data)	/* [한국어] NVMe host 
  * disable_irq 로 MSI-X 핸들러 진입 차단 후 cq_poll_lock 하 drain.
  * 폴링 큐에서는 호출 금지(WARN). 미스드 인터럽트 수확 핵심.
  */
-static void nvme_poll_irqdisable(struct nvme_queue *nvmeq)	/* [한국어] NVMe host 헬퍼/코어 API */
+static void nvme_poll_irqdisable(struct nvme_queue *nvmeq)
 {
 	struct pci_dev *pdev = to_pci_dev(nvmeq->dev->dev);	/* [한국어] 벡터 번호 조회 */
 	int irq;	/* [한국어] Linux IRQ 번호 */
@@ -2214,7 +2214,7 @@ static void nvme_poll_irqdisable(struct nvme_queue *nvmeq)	/* [한국어] NVMe h
  *
  * spin cq_poll_lock. 반환: 완료 발견 시 비0.
  */
-static int nvme_poll(struct blk_mq_hw_ctx *hctx, struct io_comp_batch *iob)	/* [한국어] blk-mq 태그/요청 API */
+static int nvme_poll(struct blk_mq_hw_ctx *hctx, struct io_comp_batch *iob)
 {
 	struct nvme_queue *nvmeq = hctx->driver_data;	/* [한국어] 폴링 대상 하드웨어 큐 */
 	bool found;	/* [한국어] poll_cq 진척 여부 */
@@ -2237,7 +2237,7 @@ static int nvme_poll(struct blk_mq_hw_ctx *hctx, struct io_comp_batch *iob)	/* [
  * request 없이 고정 command_id(NVME_AQ_BLK_MQ_DEPTH). core 가 AEN 재무장 시 호출.
  * 핫패스와 동일하게 sq_lock + copy + doorbell.
  */
-static void nvme_pci_submit_async_event(struct nvme_ctrl *ctrl)	/* [한국어] NVMe host 헬퍼/코어 API */
+static void nvme_pci_submit_async_event(struct nvme_ctrl *ctrl)
 {
 	struct nvme_dev *dev = to_nvme_dev(ctrl);	/* [한국어] admin 큐 접근 */
 	struct nvme_queue *nvmeq = &dev->queues[0];	/* [한국어] Admin SQ/CQ */
@@ -2259,7 +2259,7 @@ static void nvme_pci_submit_async_event(struct nvme_ctrl *ctrl)	/* [한국어] N
  * shutdown_lock 으로 BAR 맵과 remove 레이스 방지. 상태 RESETTING→CONNECTING→LIVE
  * 를 빠르게 통과해 sysfs NSSR 경로가 막히지 않게 한다. CSTS 읽기로 write flush.
  */
-static int nvme_pci_subsystem_reset(struct nvme_ctrl *ctrl)	/* [한국어] NVMe host 헬퍼/코어 API */
+static int nvme_pci_subsystem_reset(struct nvme_ctrl *ctrl)
 {
 	struct nvme_dev *dev = to_nvme_dev(ctrl);	/* [한국어] BAR/NSSR 접근 */
 	int ret = 0;	/* [한국어] 기본 성공 — 단계 실패 시 갱신 */
@@ -2284,7 +2284,7 @@ static int nvme_pci_subsystem_reset(struct nvme_ctrl *ctrl)	/* [한국어] NVMe 
 
 	writel(NVME_SUBSYS_RESET, dev->bar + NVME_REG_NSSR);	/* [한국어] 스펙 매직 → 서브시스템 리셋 트리거 */
 
-	if (!nvme_change_ctrl_state(ctrl, NVME_CTRL_CONNECTING) ||	/* [한국어] 컨트롤러 상태기계 전이 */
+	if (!nvme_change_ctrl_state(ctrl, NVME_CTRL_CONNECTING) ||
 	    !nvme_change_ctrl_state(ctrl, NVME_CTRL_LIVE))	/* [한국어] sysfs 경로 상태 복귀 시도 */
 		goto unlock;	/* [한국어] 전이 실패해도 NSSR 은 이미 기록됨 */
 
@@ -2303,7 +2303,7 @@ unlock:
  * [한국어]
  * adapter_delete_queue - Delete SQ/CQ admin 동기 제출 공통 헬퍼
  */
-static int adapter_delete_queue(struct nvme_dev *dev, u8 opcode, u16 id)	/* [한국어] NVMe host 헬퍼/코어 API */
+static int adapter_delete_queue(struct nvme_dev *dev, u8 opcode, u16 id)
 {
 	struct nvme_command c = { };	/* [한국어] Delete Queue SQE */
 
@@ -2319,7 +2319,7 @@ static int adapter_delete_queue(struct nvme_dev *dev, u8 opcode, u16 id)	/* [한
  *
  * PRP1=CQ DMA, 물리 연속. 폴링이면 IRQ_ENABLED 클리어. vector=MSI-X 인덱스.
  */
-static int adapter_alloc_cq(struct nvme_dev *dev, u16 qid,	/* [한국어] NVMe host 헬퍼/코어 API */
+static int adapter_alloc_cq(struct nvme_dev *dev, u16 qid,
 		struct nvme_queue *nvmeq, s16 vector)
 {
 	struct nvme_command c = { };	/* [한국어] Create CQ SQE */
@@ -2349,7 +2349,7 @@ static int adapter_alloc_cq(struct nvme_dev *dev, u16 qid,	/* [한국어] NVMe h
  *
  * 동일 qid CQ 에 연결. MEDIUM_PRIO quirk 로 WRRU 오동작 회피.
  */
-static int adapter_alloc_sq(struct nvme_dev *dev, u16 qid,	/* [한국어] NVMe host 헬퍼/코어 API */
+static int adapter_alloc_sq(struct nvme_dev *dev, u16 qid,
 						struct nvme_queue *nvmeq)
 {
 	struct nvme_ctrl *ctrl = &dev->ctrl;	/* [한국어] quirks 조회용 */
@@ -2362,7 +2362,7 @@ static int adapter_alloc_sq(struct nvme_dev *dev, u16 qid,	/* [한국어] NVMe h
 	 * URGENT.
 	 */
 	/* [한국어] 우선순위 0=URGENT 버그 — MEDIUM 비트로 균등 스케줄 강제 */
-	if (ctrl->quirks & NVME_QUIRK_MEDIUM_PRIO_SQ)	/* [한국어] 아키텍처 조건 분기 */
+	if (ctrl->quirks & NVME_QUIRK_MEDIUM_PRIO_SQ)
 		flags |= NVME_SQ_PRIO_MEDIUM;	/* [한국어] WRRU 오동작 회피 */
 
 	/*
@@ -2384,7 +2384,7 @@ static int adapter_alloc_sq(struct nvme_dev *dev, u16 qid,	/* [한국어] NVMe h
  * [한국어]
  * adapter_delete_cq - Delete Completion Queue admin 래퍼
  */
-static int adapter_delete_cq(struct nvme_dev *dev, u16 cqid)	/* [한국어] NVMe host 헬퍼/코어 API */
+static int adapter_delete_cq(struct nvme_dev *dev, u16 cqid)
 {
 	return adapter_delete_queue(dev, nvme_admin_delete_cq, cqid);	/* [한국어] CQ 삭제 동기 제출 */
 }
@@ -2393,7 +2393,7 @@ static int adapter_delete_cq(struct nvme_dev *dev, u16 cqid)	/* [한국어] NVMe
  * [한국어]
  * adapter_delete_sq - Delete Submission Queue admin 래퍼
  */
-static int adapter_delete_sq(struct nvme_dev *dev, u16 sqid)	/* [한국어] NVMe host 헬퍼/코어 API */
+static int adapter_delete_sq(struct nvme_dev *dev, u16 sqid)
 {
 	return adapter_delete_queue(dev, nvme_admin_delete_sq, sqid);	/* [한국어] SQ 삭제 동기 제출 */
 }
@@ -2407,7 +2407,7 @@ static enum rq_end_io_ret abort_endio(struct request *req, blk_status_t error,	/
 {
 	struct nvme_queue *nvmeq = req->mq_hctx->driver_data;	/* [한국어] abort 가 실린 admin 큐 */
 
-	dev_warn(nvmeq->dev->ctrl.device,	/* [한국어] PCIe NVMe 아키텍처 단계 (BAR/SQ·CQ/도어벨/맵/리셋) */
+	dev_warn(nvmeq->dev->ctrl.device,
 		 "Abort status: 0x%x", nvme_req(req)->status);	/* [한국어] Abort 자체 성공/실패 가시성 */
 	atomic_inc(&nvmeq->dev->ctrl.abort_limit);	/* [한국어] 동시 Abort 토큰 복구 */
 	blk_mq_free_request(req);	/* [한국어] admin 태그 반환 */
@@ -2420,7 +2420,7 @@ static enum rq_end_io_ret abort_endio(struct request *req, blk_status_t error,	/
  *
  * 이미 RESETTING/CONNECTING 이면 중복 리셋 억제.
  */
-static bool nvme_should_reset(struct nvme_dev *dev, u32 csts)	/* [한국어] NVMe host 헬퍼/코어 API */
+static bool nvme_should_reset(struct nvme_dev *dev, u32 csts)
 {
 	/* If true, indicates loss of adapter communication, possibly by a
 	 * NVMe Subsystem reset.
@@ -2453,30 +2453,30 @@ static bool nvme_should_reset(struct nvme_dev *dev, u32 csts)	/* [한국어] NVM
  *
  * CSTS=~0xFFFFFFFF 는 링크 다운/전원 이슈 징후 — ASPM/PS 디버그 메시지.
  */
-static void nvme_warn_reset(struct nvme_dev *dev, u32 csts)	/* [한국어] NVMe host 헬퍼/코어 API */
+static void nvme_warn_reset(struct nvme_dev *dev, u32 csts)
 {
 	/* Read a config register to help see what died. */
 	/* [한국어] MMIO 와 별개로 cfg space 생존 여부 확인 */
 	u16 pci_status;	/* [한국어] PCI_STATUS 스냅샷 */
 	int result;	/* [한국어] config 접근 결과 */
 
-	result = pci_read_config_word(to_pci_dev(dev->dev), PCI_STATUS,	/* [한국어] PCI 서브시스템 API */
+	result = pci_read_config_word(to_pci_dev(dev->dev), PCI_STATUS,
 				      &pci_status);	/* [한국어] 구성 공간 상태 비트 */
 	if (result == PCIBIOS_SUCCESSFUL)	/* [한국어] cfg 접근 성공 */
 		dev_warn(dev->ctrl.device,
-			 "controller is down; will reset: CSTS=0x%x, PCI_STATUS=0x%hx\n",	/* [한국어] 리셋/disable 복구 경로 */
+			 "controller is down; will reset: CSTS=0x%x, PCI_STATUS=0x%hx\n",
 			 csts, pci_status);	/* [한국어] 프로토콜+링크 단서 동시 로그 */
 	else
 		dev_warn(dev->ctrl.device,
-			 "controller is down; will reset: CSTS=0x%x, PCI_STATUS read failed (%d)\n",	/* [한국어] 리셋/disable 복구 경로 */
+			 "controller is down; will reset: CSTS=0x%x, PCI_STATUS read failed (%d)\n",
 			 csts, result);	/* [한국어] cfg 도 죽음 — 핫제거/전원 의심 */
 
 	if (csts != ~0)	/* [한국어] 전비트1 아니면 일반 fatal */
 		return;	/* [한국어] 절전 힌트 불필요 */
 
-	dev_warn(dev->ctrl.device,	/* [한국어] PCIe NVMe 아키텍처 단계 (BAR/SQ·CQ/도어벨/맵/리셋) */
+	dev_warn(dev->ctrl.device,
 		 "Does your device have a faulty power saving mode enabled?\n");	/* [한국어] 절전 버그 의심 안내 */
-	dev_warn(dev->ctrl.device,	/* [한국어] PCIe NVMe 아키텍처 단계 (BAR/SQ·CQ/도어벨/맵/리셋) */
+	dev_warn(dev->ctrl.device,
 		 "Try \"nvme_core.default_ps_max_latency_us=0 pcie_aspm=off pcie_port_pm=off\" and report a bug\n");	/* [한국어] 현장 완화 파라미터 */
 }
 
@@ -2492,7 +2492,7 @@ static void nvme_warn_reset(struct nvme_dev *dev, u32 csts)	/* [한국어] NVMe 
  * (7) 그 외 I/O → Abort 1회 + 타이머 재무장
  * 리셋: RESETTING → dev_disable → try_sched_reset
  */
-static enum blk_eh_timer_return nvme_timeout(struct request *req)	/* [한국어] NVMe host 헬퍼/코어 API */
+static enum blk_eh_timer_return nvme_timeout(struct request *req)
 {
 	struct nvme_iod *iod = blk_mq_rq_to_pdu(req);	/* [한국어] ABORTED 플래그 등 */
 	struct nvme_queue *nvmeq = req->mq_hctx->driver_data;	/* [한국어] 타임아웃 난 큐 */
@@ -2542,7 +2542,7 @@ static enum blk_eh_timer_return nvme_timeout(struct request *req)	/* [한국어]
 		nvme_poll_irqdisable(nvmeq);	/* [한국어] IRQ 끄고 CQ drain */
 
 	if (blk_mq_rq_state(req) != MQ_RQ_IN_FLIGHT) {	/* [한국어] 폴링이 이미 완료 처리함 */
-		dev_warn(dev->ctrl.device,	/* [한국어] PCIe NVMe 아키텍처 단계 (BAR/SQ·CQ/도어벨/맵/리셋) */
+		dev_warn(dev->ctrl.device,
 			 "I/O tag %d (%04x) QID %d timeout, completion polled\n",
 			 req->tag, nvme_cid(req), nvmeq->qid);	/* [한국어] 미스드 인터럽트 단서 */
 		return BLK_EH_DONE;	/* [한국어] 추가 조치 없음 */
@@ -2596,13 +2596,13 @@ static enum blk_eh_timer_return nvme_timeout(struct request *req)	/* [한국어]
 	cmd.abort.cid = nvme_cid(req);	/* [한국어] 대상 명령 ID */
 	cmd.abort.sqid = cpu_to_le16(nvmeq->qid);	/* [한국어] 대상 SQ */
 
-	dev_warn(nvmeq->dev->ctrl.device,	/* [한국어] PCIe NVMe 아키텍처 단계 (BAR/SQ·CQ/도어벨/맵/리셋) */
+	dev_warn(nvmeq->dev->ctrl.device,
 		 "I/O tag %d (%04x) opcode %#x (%s) QID %d timeout, aborting req_op:%s(%u) size:%u\n",
 		 req->tag, nvme_cid(req), opcode, nvme_get_opcode_str(opcode),
 		 nvmeq->qid, blk_op_str(req_op(req)), req_op(req),	/* [한국어] blk-mq 요청/태그/큐 계층 연동 */
 		 blk_rq_bytes(req));	/* [한국어] 운영 가시성 로그 */
 
-	abort_req = blk_mq_alloc_request(dev->ctrl.admin_q, nvme_req_op(&cmd),	/* [한국어] blk-mq 태그/요청 API */
+	abort_req = blk_mq_alloc_request(dev->ctrl.admin_q, nvme_req_op(&cmd),
 					 BLK_MQ_REQ_NOWAIT);	/* [한국어] 타임아웃 경로 — sleep 금지 */
 	if (IS_ERR(abort_req)) {	/* [한국어] admin 태그 고갈 */
 		atomic_inc(&dev->ctrl.abort_limit);	/* [한국어] 토큰 반환 */
@@ -2638,18 +2638,18 @@ disable:
  * [한국어]
  * nvme_free_queue - 단일 큐 CQ/SQ DMA 또는 CMB p2pmem 해제
  */
-static void nvme_free_queue(struct nvme_queue *nvmeq)	/* [한국어] NVMe host 헬퍼/코어 API */
+static void nvme_free_queue(struct nvme_queue *nvmeq)
 {
-	dma_free_coherent(nvmeq->dev->dev, CQ_SIZE(nvmeq),	/* [한국어] 일관 DMA 버퍼 해제 */
+	dma_free_coherent(nvmeq->dev->dev, CQ_SIZE(nvmeq),
 				(void *)nvmeq->cqes, nvmeq->cq_dma_addr);	/* [한국어] CQ 항상 host coherent */
-	if (!nvmeq->sq_cmds)	/* [한국어] 아키텍처 조건 분기 */
+	if (!nvmeq->sq_cmds)
 		return;	/* [한국어] 할당 실패 중간 상태 방어 */
 
 	if (test_and_clear_bit(NVMEQ_SQ_CMB, &nvmeq->flags)) {	/* [한국어] CMB SQ 면 p2pmem 경로 */
-		pci_free_p2pmem(to_pci_dev(nvmeq->dev->dev),	/* [한국어] PCI 서브시스템 API */
+		pci_free_p2pmem(to_pci_dev(nvmeq->dev->dev),
 				nvmeq->sq_cmds, SQ_SIZE(nvmeq));	/* [한국어] CMB 영역 반환 */
 	} else {
-		dma_free_coherent(nvmeq->dev->dev, SQ_SIZE(nvmeq),	/* [한국어] 일관 DMA 버퍼 해제 */
+		dma_free_coherent(nvmeq->dev->dev, SQ_SIZE(nvmeq),
 				nvmeq->sq_cmds, nvmeq->sq_dma_addr);	/* [한국어] 호스트 SQ 반환 */
 	}
 }
@@ -2658,7 +2658,7 @@ static void nvme_free_queue(struct nvme_queue *nvmeq)	/* [한국어] NVMe host �
  * [한국어]
  * nvme_free_queues - queue_count-1 부터 lowest 까지 역순 free
  */
-static void nvme_free_queues(struct nvme_dev *dev, int lowest)	/* [한국어] NVMe host 헬퍼/코어 API */
+static void nvme_free_queues(struct nvme_dev *dev, int lowest)
 {
 	int i;	/* [한국어] 역순 qid */
 
@@ -2674,7 +2674,7 @@ static void nvme_free_queues(struct nvme_dev *dev, int lowest)	/* [한국어] NV
  *
  * mb 로 queue_rq 가 ENABLED 를 보도록 순서. 폴링 큐는 IRQ free 생략.
  */
-static void nvme_suspend_queue(struct nvme_dev *dev, unsigned int qid)	/* [한국어] NVMe host 헬퍼/코어 API */
+static void nvme_suspend_queue(struct nvme_dev *dev, unsigned int qid)
 {
 	struct nvme_queue *nvmeq = &dev->queues[qid];	/* [한국어] NVMe host 헬퍼/코어 API */
 
@@ -2685,7 +2685,7 @@ static void nvme_suspend_queue(struct nvme_dev *dev, unsigned int qid)	/* [한�
 	mb();	/* [한국어] 플래그 클리어가 제출 경로에 보이도록 */
 
 	nvmeq->dev->online_queues--;	/* [한국어] online 카운트 감소 */
-	if (!nvmeq->qid && nvmeq->dev->ctrl.admin_q)	/* [한국어] 아키텍처 조건 분기 */
+	if (!nvmeq->qid && nvmeq->dev->ctrl.admin_q)
 		nvme_quiesce_admin_queue(&nvmeq->dev->ctrl);	/* [한국어] admin 제출 정지 */
 	if (!test_and_clear_bit(NVMEQ_POLLED, &nvmeq->flags))	/* [한국어] 폴링이면 IRQ 없음 */
 		pci_free_irq(to_pci_dev(dev->dev), nvmeq->cq_vector, nvmeq);	/* [한국어] 벡터 핸들러 해제 */
@@ -2695,7 +2695,7 @@ static void nvme_suspend_queue(struct nvme_dev *dev, unsigned int qid)	/* [한�
  * [한국어]
  * nvme_suspend_io_queues - admin 제외 전 I/O 큐 suspend
  */
-static void nvme_suspend_io_queues(struct nvme_dev *dev)	/* [한국어] NVMe host 헬퍼/코어 API */
+static void nvme_suspend_io_queues(struct nvme_dev *dev)
 {
 	int i;	/* [한국어] 지역 변수 */
 
@@ -2716,7 +2716,7 @@ static void nvme_suspend_io_queues(struct nvme_dev *dev)	/* [한국어] NVMe hos
  * IRQ 는 이미 free 된 상태. cq_poll_lock 으로 poll() 과 배타적으로
  * nvme_poll_cq 를 돌려 자연 완료를 놓치지 않는다. admin(qid0) 은 별도 경로.
  */
-static void nvme_reap_pending_cqes(struct nvme_dev *dev)	/* [한국어] NVMe host 헬퍼/코어 API */
+static void nvme_reap_pending_cqes(struct nvme_dev *dev)
 {
 	int i;	/* [한국어] I/O 큐 역순 인덱스 — admin 제외 */
 
@@ -2734,7 +2734,7 @@ static void nvme_reap_pending_cqes(struct nvme_dev *dev)	/* [한국어] NVMe hos
  * 전 I/O 큐 SQ 를 CMB 에 두면 cmb_size 가 부족할 수 있다. 페이지 정렬 후
  * 큐당 몫으로 depth 를 낮춘다. 64 미만이면 호스트 메모리 SQ 폴백(-ENOMEM).
  */
-static int nvme_cmb_qdepth(struct nvme_dev *dev, int nr_io_queues,	/* [한국어] NVMe host 헬퍼/코어 API */
+static int nvme_cmb_qdepth(struct nvme_dev *dev, int nr_io_queues,
 				int entry_size)	/* [한국어] 지역 변수 */
 {
 	int q_depth = dev->q_depth;	/* [한국어] CAP.MQES 기반 현재 깊이 후보 */
@@ -2767,7 +2767,7 @@ static int nvme_cmb_qdepth(struct nvme_dev *dev, int nr_io_queues,	/* [한국어
  * CMB SQS + use_cmb_sqes 시 장치 로컬 메모리에 SQ 를 두어 PCIe 트래픽 절감.
  * bus addr 변환 실패 시 p2pmem 반환 후 호스트 DMA 폴백.
  */
-static int nvme_alloc_sq_cmds(struct nvme_dev *dev, struct nvme_queue *nvmeq,	/* [한국어] NVMe host 헬퍼/코어 API */
+static int nvme_alloc_sq_cmds(struct nvme_dev *dev, struct nvme_queue *nvmeq,
 				int qid)	/* [한국어] 지역 변수 */
 {
 	struct pci_dev *pdev = to_pci_dev(dev->dev);	/* [한국어] CMB p2pmem API 인자 */
@@ -2775,7 +2775,7 @@ static int nvme_alloc_sq_cmds(struct nvme_dev *dev, struct nvme_queue *nvmeq,	/*
 	if (qid && dev->cmb_use_sqes && (dev->cmbsz & NVME_CMBSZ_SQS)) {	/* [한국어] I/O 큐 + CMB SQ 지원 */
 		nvmeq->sq_cmds = pci_alloc_p2pmem(pdev, SQ_SIZE(nvmeq));	/* [한국어] CMB 영역에서 SQ 링 확보 */
 		if (nvmeq->sq_cmds) {	/* [한국어] CMB 용량 충분 */
-			nvmeq->sq_dma_addr = pci_p2pmem_virt_to_bus(pdev,	/* [한국어] PCI 서브시스템 API */
+			nvmeq->sq_dma_addr = pci_p2pmem_virt_to_bus(pdev,
 							nvmeq->sq_cmds);	/* [한국어] Create SQ 에 넣을 버스 주소 */
 			if (nvmeq->sq_dma_addr) {	/* [한국어] 버스 주소 변환 성공 */
 				set_bit(NVMEQ_SQ_CMB, &nvmeq->flags);	/* [한국어] free 시 p2pmem 경로 */
@@ -2786,9 +2786,9 @@ static int nvme_alloc_sq_cmds(struct nvme_dev *dev, struct nvme_queue *nvmeq,	/*
 		}
 	}
 
-	nvmeq->sq_cmds = dma_alloc_coherent(dev->dev, SQ_SIZE(nvmeq),	/* [한국어] 일관 DMA 링/버퍼 할당 */
+	nvmeq->sq_cmds = dma_alloc_coherent(dev->dev, SQ_SIZE(nvmeq),
 				&nvmeq->sq_dma_addr, GFP_KERNEL);	/* [한국어] 호스트 메모리 SQ 폴백 */
-	if (!nvmeq->sq_cmds)	/* [한국어] 아키텍처 조건 분기 */
+	if (!nvmeq->sq_cmds)
 		return -ENOMEM;	/* [한국어] CQ 는 이미 할당됐을 수 있음 — 호출자 롤백 */
 	return 0;	/* [한국어] 호스트 coherent SQ 준비 완료 */
 }
@@ -2800,16 +2800,16 @@ static int nvme_alloc_sq_cmds(struct nvme_dev *dev, struct nvme_queue *nvmeq,	/*
  * 이미 queue_count > qid 면 재진입 no-op. 실패 시 CQ 롤백.
  * Create admin 이전에 호스트 측 링 메모리를 준비한다.
  */
-static int nvme_alloc_queue(struct nvme_dev *dev, int qid, int depth)	/* [한국어] NVMe host 헬퍼/코어 API */
+static int nvme_alloc_queue(struct nvme_dev *dev, int qid, int depth)
 {
 	struct nvme_queue *nvmeq = &dev->queues[qid];	/* [한국어] NVMe host 헬퍼/코어 API */
 
-	if (dev->ctrl.queue_count > qid)	/* [한국어] 아키텍처 조건 분기 */
+	if (dev->ctrl.queue_count > qid)
 		return 0;	/* [한국어] 이미 할당된 슬롯 — 리셋 재진입 안전 */
 
 	nvmeq->sqes = qid ? dev->io_sqes : NVME_ADM_SQES;	/* [한국어] admin=6(64B), I/O 는 quirk 반영 */
 	nvmeq->q_depth = depth;	/* [한국어] 링 엔트리 수 */
-	nvmeq->cqes = dma_alloc_coherent(dev->dev, CQ_SIZE(nvmeq),	/* [한국어] 일관 DMA 링/버퍼 할당 */
+	nvmeq->cqes = dma_alloc_coherent(dev->dev, CQ_SIZE(nvmeq),
 					 &nvmeq->cq_dma_addr, GFP_KERNEL);	/* [한국어] CQ 는 항상 호스트 coherent */
 	if (!nvmeq->cqes)	/* [한국어] 아키텍처 조건 분기 */
 		goto free_nvmeq;	/* [한국어] 에러 언와인드/공통 경로 점프 */
@@ -2829,7 +2829,7 @@ static int nvme_alloc_queue(struct nvme_dev *dev, int qid, int depth)	/* [한국
 	return 0;	/* [한국어] 성공 반환 */
 
  free_cqdma:
-	dma_free_coherent(dev->dev, CQ_SIZE(nvmeq), (void *)nvmeq->cqes,	/* [한국어] 일관 DMA 버퍼 해제 */
+	dma_free_coherent(dev->dev, CQ_SIZE(nvmeq), (void *)nvmeq->cqes,
 			  nvmeq->cq_dma_addr);	/* [한국어] SQ 실패 시 CQ 롤백 */
  free_nvmeq:
 	return -ENOMEM;	/* [한국어] 에러 코드 반환 */
@@ -2839,16 +2839,16 @@ static int nvme_alloc_queue(struct nvme_dev *dev, int qid, int depth)	/* [한국
  * [한국어]
  * queue_request_irq - 큐 벡터에 nvme_irq (또는 threaded check+irq) 등록
  */
-static int queue_request_irq(struct nvme_queue *nvmeq)	/* [한국어] NVMe host 헬퍼/코어 API */
+static int queue_request_irq(struct nvme_queue *nvmeq)
 {
 	struct pci_dev *pdev = to_pci_dev(nvmeq->dev->dev);	/* [한국어] PCI 서브시스템 API */
 	int nr = nvmeq->dev->ctrl.instance;	/* [한국어] irq 이름 nvme{N}q{M} 의 N */
 
 	if (use_threaded_interrupts) {	/* [한국어] 아키텍처 조건 분기 */
-		return pci_request_irq(pdev, nvmeq->cq_vector, nvme_irq_check,	/* [한국어] PCI 서브시스템 API */
+		return pci_request_irq(pdev, nvmeq->cq_vector, nvme_irq_check,
 				nvme_irq, nvmeq, "nvme%dq%d", nr, nvmeq->qid);	/* [한국어] hardirq=phase 검사, thread=완료 */
 	} else {
-		return pci_request_irq(pdev, nvmeq->cq_vector, nvme_irq,	/* [한국어] PCI 서브시스템 API */
+		return pci_request_irq(pdev, nvmeq->cq_vector, nvme_irq,
 				NULL, nvmeq, "nvme%dq%d", nr, nvmeq->qid);	/* [한국어] 단일 핸들러에서 poll_cq */
 	}
 }
@@ -2859,7 +2859,7 @@ static int queue_request_irq(struct nvme_queue *nvmeq)	/* [한국어] NVMe host 
  *
  * wmb 로 첫 인터럽트 전 초기화 가시성 확보.
  */
-static void nvme_init_queue(struct nvme_queue *nvmeq, u16 qid)	/* [한국어] NVMe host 헬퍼/코어 API */
+static void nvme_init_queue(struct nvme_queue *nvmeq, u16 qid)
 {
 	struct nvme_dev *dev = nvmeq->dev;	/* [한국어] NVMe host 헬퍼/코어 API */
 
@@ -2883,7 +2883,7 @@ static void nvme_init_queue(struct nvme_queue *nvmeq, u16 qid)	/* [한국어] NV
  *
  * disable 와 교착 피하려 blocking lock 대신 trylock. 실패=-ENODEV.
  */
-static int nvme_setup_io_queues_trylock(struct nvme_dev *dev)	/* [한국어] NVMe host 헬퍼/코어 API */
+static int nvme_setup_io_queues_trylock(struct nvme_dev *dev)
 {
 	/*
 	 * Give up if the lock is being held by nvme_dev_disable.
@@ -2909,7 +2909,7 @@ static int nvme_setup_io_queues_trylock(struct nvme_dev *dev)	/* [한국어] NVM
  * polled 면 벡터 없이 POLLED 비트. 실패 시 delete 로 부분 생성 정리.
  * create 중 shutdown_lock 구간으로 disable 과 인터리브 제한.
  */
-static int nvme_create_queue(struct nvme_queue *nvmeq, int qid, bool polled)	/* [한국어] NVMe host 헬퍼/코어 API */
+static int nvme_create_queue(struct nvme_queue *nvmeq, int qid, bool polled)
 {
 	struct nvme_dev *dev = nvmeq->dev;	/* [한국어] NVMe host 헬퍼/코어 API */
 	int result;	/* [한국어] Create/IRQ 단계 결과 */
@@ -2921,19 +2921,19 @@ static int nvme_create_queue(struct nvme_queue *nvmeq, int qid, bool polled)	/* 
 	 * A queue's vector matches the queue identifier unless the controller
 	 * has only one vector available.
 	 */
-	if (!polled)	/* [한국어] 아키텍처 조건 분기 */
+	if (!polled)
 		vector = dev->num_vecs == 1 ? 0 : qid;	/* [한국어] 단일 벡터면 전부 0 공유 */
 	else
 		set_bit(NVMEQ_POLLED, &nvmeq->flags);	/* [한국어] 인터럽트 없는 완료 경로 */
 
 	result = adapter_alloc_cq(dev, qid, nvmeq, vector);	/* [한국어] Create I/O CQ admin */
-	if (result)	/* [한국어] 아키텍처 조건 분기 */
+	if (result)
 		return result;	/* [한국어] CQ 실패 시 SQ 시도 불필요 */
 
 	result = adapter_alloc_sq(dev, qid, nvmeq);	/* [한국어] Create I/O SQ — 동일 qid CQ 연결 */
-	if (result < 0)	/* [한국어] 아키텍처 조건 분기 */
+	if (result < 0)
 		return result;	/* [한국어] 음수=전송/자원 실패 */
-	if (result)	/* [한국어] 아키텍처 조건 분기 */
+	if (result)
 		goto release_cq;	/* [한국어] 양수 NVMe status — CQ 롤백 */
 
 	nvmeq->cq_vector = vector;	/* [한국어] request_irq 에 쓸 벡터 저장 */
@@ -2944,7 +2944,7 @@ static int nvme_create_queue(struct nvme_queue *nvmeq, int qid, bool polled)	/* 
 	nvme_init_queue(nvmeq, qid);	/* [한국어] head/tail/phase/online++ */
 	if (!polled) {	/* [한국어] 아키텍처 조건 분기 */
 		result = queue_request_irq(nvmeq);	/* [한국어] MSI-X 핸들러 등록 */
-		if (result < 0)	/* [한국어] 아키텍처 조건 분기 */
+		if (result < 0)
 			goto release_sq;	/* [한국어] IRQ 실패 → SQ/CQ 삭제 */
 	}
 
@@ -2990,7 +2990,7 @@ static const struct blk_mq_ops nvme_mq_ops = {	/* [한국어] blk-mq 태그/요�
  * reset 중 quiesce 된 admin 에 대기 요청이 있을 수 있어 unquiesce 후
  * 실패 완료를 흘려보낸 뒤 tagset 을 해제한다. remove/probe 실패 공용.
  */
-static void nvme_dev_remove_admin(struct nvme_dev *dev)	/* [한국어] NVMe host 헬퍼/코어 API */
+static void nvme_dev_remove_admin(struct nvme_dev *dev)
 {
 	if (dev->ctrl.admin_q && !blk_queue_dying(dev->ctrl.admin_q)) {	/* [한국어] 아직 유효한 admin_q */
 		/*
@@ -3010,7 +3010,7 @@ static void nvme_dev_remove_admin(struct nvme_dev *dev)	/* [한국어] NVMe host
  *
  * NVME_REG_DBS 오프셋 + (큐수)×2 도어벨×4B×db_stride. remap_bar 입력.
  */
-static unsigned long db_bar_size(struct nvme_dev *dev, unsigned nr_io_queues)	/* [한국어] NVMe host 헬퍼/코어 API */
+static unsigned long db_bar_size(struct nvme_dev *dev, unsigned nr_io_queues)
 {
 	return NVME_REG_DBS + ((nr_io_queues + 1) * 8 * dev->db_stride);	/* [한국어] +1=admin, ×8=SQ+CQ DWORD 쌍 */
 }
@@ -3022,7 +3022,7 @@ static unsigned long db_bar_size(struct nvme_dev *dev, unsigned nr_io_queues)	/*
  * 축소는 안 함. 실패 시 bar=NULL. dbs=bar+NVME_REG_DBS.
  * shutdown_lock 또는 초기화 단일 스레드에서 호출.
  */
-static int nvme_remap_bar(struct nvme_dev *dev, unsigned long size)	/* [한국어] NVMe host 헬퍼/코어 API */
+static int nvme_remap_bar(struct nvme_dev *dev, unsigned long size)
 {
 	struct pci_dev *pdev = to_pci_dev(dev->dev);	/* [한국어] BAR 리소스 소유 PCI 함수 */
 
@@ -3030,7 +3030,7 @@ static int nvme_remap_bar(struct nvme_dev *dev, unsigned long size)	/* [한국�
 		return 0;	/* [한국어] 성공 반환 */
 	if (size > pci_resource_len(pdev, 0))	/* [한국어] 물리 BAR 길이 초과 불가 */
 		return -ENOMEM;	/* [한국어] 큐 수를 줄여 재시도하는 상위 루프 유도 */
-	if (dev->bar)	/* [한국어] 아키텍처 조건 분기 */
+	if (dev->bar)
 		iounmap(dev->bar);	/* [한국어] 이전 매핑 해제 후 확장 재맵 */
 	dev->bar = ioremap(pci_resource_start(pdev, 0), size);	/* [한국어] 레지스터+도어벨 창 MMIO */
 	if (!dev->bar) {	/* [한국어] 아키텍처 조건 분기 */
@@ -3053,7 +3053,7 @@ static int nvme_remap_bar(struct nvme_dev *dev, unsigned long size)	/* [한국�
  * 6) alloc admin queue, AQA/ASQ/ACQ, enable_ctrl, IRQ, ENABLED
  * CAP/CC/CSTS 상태기계 핵심 진입점.
  */
-static int nvme_pci_configure_admin_queue(struct nvme_dev *dev)	/* [한국어] NVMe host 헬퍼/코어 API */
+static int nvme_pci_configure_admin_queue(struct nvme_dev *dev)
 {
 	int result;	/* [한국어] 단계별 에러 코드 */
 	u32 aqa;	/* [한국어] Admin Queue Attributes 레지스터 값 */
@@ -3066,7 +3066,7 @@ static int nvme_pci_configure_admin_queue(struct nvme_dev *dev)	/* [한국어] N
 	dev->subsystem = readl(dev->bar + NVME_REG_VS) >= NVME_VS(1, 1, 0) ?	/* [한국어] MMIO 레지스터 접근 */
 				NVME_CAP_NSSRC(dev->ctrl.cap) : 0;	/* [한국어] 1.1+ 이고 NSSRC 면 서브시스템 */
 
-	if (dev->subsystem &&	/* [한국어] 아키텍처 조건 분기 */
+	if (dev->subsystem &&
 	    (readl(dev->bar + NVME_REG_CSTS) & NVME_CSTS_NSSRO))	/* [한국어] 서브시스템 리셋 잔존 플래그 */
 		writel(NVME_CSTS_NSSRO, dev->bar + NVME_REG_CSTS);	/* [한국어] W1C 로 클리어 */
 
@@ -3091,7 +3091,7 @@ static int nvme_pci_configure_admin_queue(struct nvme_dev *dev)	/* [한국어] N
 		 */
 		/* [한국어] 컨트롤러 리셋 실패 → PCIe FLR 로 기능 수준 초기화 */
 		result = pcie_reset_flr(pdev, false);	/* [한국어] Function Level Reset */
-		if (result < 0)	/* [한국어] 아키텍처 조건 분기 */
+		if (result < 0)
 			return result;	/* [한국어] FLR 불가 — probe/reset 실패 */
 
 		pci_restore_state(pdev);	/* [한국어] FLR 전 save 한 cfg 복구 (enable 시 save) */
@@ -3099,7 +3099,7 @@ static int nvme_pci_configure_admin_queue(struct nvme_dev *dev)	/* [한국어] N
 		if (result < 0)	/* [한국어] 아키텍처 조건 분기 */
 			return result;	/* [한국어] PCIe NVMe 경로 반환 */
 
-		dev_info(dev->ctrl.device,	/* [한국어] PCIe NVMe 아키텍처 단계 (BAR/SQ·CQ/도어벨/맵/리셋) */
+		dev_info(dev->ctrl.device,
 			"controller reset completed after pcie flr\n");	/* [한국어] 복구 성공 가시성 */
 	}
 
@@ -3118,7 +3118,7 @@ static int nvme_pci_configure_admin_queue(struct nvme_dev *dev)	/* [한국어] N
 	lo_hi_writeq(nvmeq->cq_dma_addr, dev->bar + NVME_REG_ACQ);	/* [한국어] Admin CQ 베이스 */
 
 	result = nvme_enable_ctrl(&dev->ctrl);	/* [한국어] CC 필드 설정 후 EN=1, RDY=1 대기 */
-	if (result)	/* [한국어] 아키텍처 조건 분기 */
+	if (result)
 		return result;	/* [한국어] 핸드셰이크 실패 */
 
 	nvmeq->cq_vector = 0;	/* [한국어] admin 은 벡터 0 */
@@ -3142,7 +3142,7 @@ static int nvme_pci_configure_admin_queue(struct nvme_dev *dev)	/* [한국어] N
  * 3) Create 실패는 음수만 치명 — 양수 status 는 부분 성공으로 0 처리
  * admin-only 컨트롤러도 펌웨어 복구에 유용하므로 I/O 전멸을 허용한다.
  */
-static int nvme_create_io_queues(struct nvme_dev *dev)	/* [한국어] NVMe host 헬퍼/코어 API */
+static int nvme_create_io_queues(struct nvme_dev *dev)
 {
 	unsigned i, max, rw_queues;	/* [한국어] 큐 id / 생성 상한 / 비폴 큐 수 */
 	int ret = 0;	/* [한국어] 마지막 Create 결과 — 음수만 전파 */
@@ -3156,7 +3156,7 @@ static int nvme_create_io_queues(struct nvme_dev *dev)	/* [한국어] NVMe host 
 
 	max = min(dev->max_qid, dev->ctrl.queue_count - 1);	/* [한국어] 실제 생성 가능 최대 qid */
 	if (max != 1 && dev->io_queues[HCTX_TYPE_POLL]) {	/* [한국어] 폴링 맵이 있으면 뒤쪽을 polled */
-		rw_queues = dev->io_queues[HCTX_TYPE_DEFAULT] +	/* [한국어] PCIe NVMe 아키텍처 단계 (BAR/SQ·CQ/도어벨/맵/리셋) */
+		rw_queues = dev->io_queues[HCTX_TYPE_DEFAULT] +
 				dev->io_queues[HCTX_TYPE_READ];	/* [한국어] MSI-X 완료 큐 개수 */
 	} else {
 		rw_queues = max;	/* [한국어] 전부 인터럽트 큐 */
@@ -3166,7 +3166,7 @@ static int nvme_create_io_queues(struct nvme_dev *dev)	/* [한국어] NVMe host 
 		bool polled = i > rw_queues;	/* [한국어] qid 가 비폴 영역을 넘으면 폴링 */
 
 		ret = nvme_create_queue(&dev->queues[i], i, polled);	/* [한국어] Create CQ/SQ+IRQ+ENABLED */
-		if (ret)	/* [한국어] 아키텍처 조건 분기 */
+		if (ret)
 			break;	/* [한국어] 실패 지점 이후는 미생성 — 부분 토폴로지 허용 */
 	}
 
@@ -3184,7 +3184,7 @@ static int nvme_create_io_queues(struct nvme_dev *dev)	/* [한국어] NVMe host 
  * [한국어]
  * nvme_cmb_size_unit - CMBSZ.SZU 를 바이트 단위로 (4KB << 4*szu)
  */
-static u64 nvme_cmb_size_unit(struct nvme_dev *dev)	/* [한국어] NVMe host 헬퍼/코어 API */
+static u64 nvme_cmb_size_unit(struct nvme_dev *dev)
 {
 	u8 szu = (dev->cmbsz >> NVME_CMBSZ_SZU_SHIFT) & NVME_CMBSZ_SZU_MASK;	/* [한국어] 크기 단위 지수 */
 
@@ -3195,7 +3195,7 @@ static u64 nvme_cmb_size_unit(struct nvme_dev *dev)	/* [한국어] NVMe host 헬
  * [한국어]
  * nvme_cmb_size - CMBSZ.SZ 필드 (unit 개수)
  */
-static u32 nvme_cmb_size(struct nvme_dev *dev)	/* [한국어] NVMe host 헬퍼/코어 API */
+static u32 nvme_cmb_size(struct nvme_dev *dev)
 {
 	return (dev->cmbsz >> NVME_CMBSZ_SZ_SHIFT) & NVME_CMBSZ_SZ_MASK;	/* [한국어] 단위 개수 */
 }
@@ -3208,7 +3208,7 @@ static u32 nvme_cmb_size(struct nvme_dev *dev)	/* [한국어] NVMe host 헬퍼/�
  * BAR 보다 큰 CMB 는 BAR 잔여로 clamp. WDS+RDS 면 p2pmem publish.
  * SQ 용 여부는 cmbsz.SQS && use_cmb_sqes.
  */
-static void nvme_map_cmb(struct nvme_dev *dev)	/* [한국어] NVMe host 헬퍼/코어 API */
+static void nvme_map_cmb(struct nvme_dev *dev)
 {
 	u64 size, offset;	/* [한국어] CMB 바이트 크기 / BAR 내 오프셋 */
 	resource_size_t bar_size;	/* [한국어] CMB 가 앉은 PCI BAR 길이 */
@@ -3218,11 +3218,11 @@ static void nvme_map_cmb(struct nvme_dev *dev)	/* [한국어] NVMe host 헬퍼/�
 	if (dev->cmb_size)	/* [한국어] 이미 맵됨 — 리셋 재진입 시 스킵 */
 		return;	/* [한국어] PCIe NVMe 경로 반환 */
 
-	if (NVME_CAP_CMBS(dev->ctrl.cap))	/* [한국어] 아키텍처 조건 분기 */
+	if (NVME_CAP_CMBS(dev->ctrl.cap))
 		writel(NVME_CMBMSC_CRE, dev->bar + NVME_REG_CMBMSC);	/* [한국어] CMB 메모리 공간 enable */
 
 	dev->cmbsz = readl(dev->bar + NVME_REG_CMBSZ);	/* [한국어] 크기/단위/지원 비트 */
-	if (!dev->cmbsz)	/* [한국어] 아키텍처 조건 분기 */
+	if (!dev->cmbsz)
 		return;	/* [한국어] CMB 없음 */
 	dev->cmbloc = readl(dev->bar + NVME_REG_CMBLOC);	/* [한국어] BIR + offset */
 
@@ -3231,7 +3231,7 @@ static void nvme_map_cmb(struct nvme_dev *dev)	/* [한국어] NVMe host 헬퍼/�
 	bar = NVME_CMB_BIR(dev->cmbloc);	/* [한국어] 어느 BAR 에 앉는지 */
 	bar_size = pci_resource_len(pdev, bar);	/* [한국어] PCI 서브시스템 API */
 
-	if (offset > bar_size)	/* [한국어] 아키텍처 조건 분기 */
+	if (offset > bar_size)
 		return;	/* [한국어] 위치 비정상 */
 
 	/*
@@ -3242,7 +3242,7 @@ static void nvme_map_cmb(struct nvme_dev *dev)	/* [한국어] NVMe host 헬퍼/�
 	/* [한국어] 브리지 뒤 등 BAR 가 잘린 경우 CMB 를 BAR 잔여로 clamp */
 	size = min(size, bar_size - offset);	/* [한국어] PCIe NVMe 런타임 상태 갱신 */
 
-	if (!IS_ALIGNED(size, memremap_compat_align()) ||	/* [한국어] 아키텍처 조건 분기 */
+	if (!IS_ALIGNED(size, memremap_compat_align()) ||
 	    !IS_ALIGNED(pci_resource_start(pdev, bar),
 			memremap_compat_align()))	/* [한국어] p2pdma/memremap 정렬 요구 */
 		return;	/* [한국어] PCIe NVMe 경로 반환 */
@@ -3267,7 +3267,7 @@ static void nvme_map_cmb(struct nvme_dev *dev)	/* [한국어] NVMe host 헬퍼/�
 	dev->cmb_size = size;	/* [한국어] 사용 가능 용량 확정 */
 	dev->cmb_use_sqes = use_cmb_sqes && (dev->cmbsz & NVME_CMBSZ_SQS);	/* [한국어] SQ 본문 CMB 배치 가능 */
 
-	if ((dev->cmbsz & (NVME_CMBSZ_WDS | NVME_CMBSZ_RDS)) ==	/* [한국어] 아키텍처 조건 분기 */
+	if ((dev->cmbsz & (NVME_CMBSZ_WDS | NVME_CMBSZ_RDS)) ==
 			(NVME_CMBSZ_WDS | NVME_CMBSZ_RDS))	/* [한국어] 데이터 R/W 모두 지원 */
 		pci_p2pmem_publish(pdev, true);	/* [한국어] 피어 장치가 CMB 를 쓰도록 공개 */
 }
@@ -3279,7 +3279,7 @@ static void nvme_map_cmb(struct nvme_dev *dev)	/* [한국어] NVMe host 헬퍼/�
  * dword11=ENABLE/RETURN 비트, dword12=페이지 수, 13-14=디스크립터 DMA,
  * dword15=디스크립터 개수. bits=0 이면 HMB disable (suspend/remove).
  */
-static int nvme_set_host_mem(struct nvme_dev *dev, u32 bits)	/* [한국어] NVMe host 헬퍼/코어 API */
+static int nvme_set_host_mem(struct nvme_dev *dev, u32 bits)
 {
 	u32 host_mem_size = dev->host_mem_size >> NVME_CTRL_PAGE_SHIFT;	/* [한국어] 스펙 단위=컨트롤러 페이지 수 */
 	u64 dma_addr = dev->host_mem_descs_dma;	/* [한국어] 디스크립터 배열 DMA — 컨트롤러가 읽음 */
@@ -3296,7 +3296,7 @@ static int nvme_set_host_mem(struct nvme_dev *dev, u32 bits)	/* [한국어] NVMe
 
 	ret = nvme_submit_sync_cmd(dev->ctrl.admin_q, &c, NULL, 0);	/* [한국어] admin_q 동기 제출 */
 	if (ret) {	/* [한국어] 아키텍처 조건 분기 */
-		dev_warn(dev->ctrl.device,	/* [한국어] PCIe NVMe 아키텍처 단계 (BAR/SQ·CQ/도어벨/맵/리셋) */
+		dev_warn(dev->ctrl.device,
 			 "failed to set host mem (err %d, flags %#x).\n",
 			 ret, bits);	/* [한국어] HMB 실패 진단 — I/O 는 계속 가능 */
 	} else
@@ -3312,7 +3312,7 @@ static int nvme_set_host_mem(struct nvme_dev *dev, u32 bits)	/* [한국어] NVMe
  * 각 디스크립터의 DMA attrs 청크와 VA 추적 배열을 반환. 디스크립터 배열
  * 자체는 nvme_free_host_mem 이 해제한다.
  */
-static void nvme_free_host_mem_multi(struct nvme_dev *dev)	/* [한국어] NVMe host 헬퍼/코어 API */
+static void nvme_free_host_mem_multi(struct nvme_dev *dev)
 {
 	int i;	/* [한국어] 디스크립터 인덱스 */
 
@@ -3336,7 +3336,7 @@ static void nvme_free_host_mem_multi(struct nvme_dev *dev)	/* [한국어] NVMe h
  * single(noncontiguous sgt) 또는 multi 경로 분기 후 coherent desc 배열 free.
  * remove/setup 실패/리셋 재할당 전 호출.
  */
-static void nvme_free_host_mem(struct nvme_dev *dev)	/* [한국어] NVMe host 헬퍼/코어 API */
+static void nvme_free_host_mem(struct nvme_dev *dev)
 {
 	if (dev->hmb_sgt)	/* [한국어] single noncontiguous 할당 경로 */
 		dma_free_noncontiguous(dev->dev, dev->host_mem_size,	/* [한국어] 지역 변수 */
@@ -3344,7 +3344,7 @@ static void nvme_free_host_mem(struct nvme_dev *dev)	/* [한국어] NVMe host �
 	else
 		nvme_free_host_mem_multi(dev);	/* [한국어] multi 청크 경로 */
 
-	dma_free_coherent(dev->dev, dev->host_mem_descs_size,	/* [한국어] 일관 DMA 버퍼 해제 */
+	dma_free_coherent(dev->dev, dev->host_mem_descs_size,
 			dev->host_mem_descs, dev->host_mem_descs_dma);	/* [한국어] 디스크립터 배열 DMA 해제 */
 	dev->host_mem_descs = NULL;	/* [한국어] 재사용 판정 필드 클리어 */
 	dev->host_mem_descs_size = 0;	/* [한국어] 크기 무효 */
@@ -3358,14 +3358,14 @@ static void nvme_free_host_mem(struct nvme_dev *dev)	/* [한국어] NVMe host �
  * dma_alloc_noncontiguous 로 preferred 크기 확보 후 desc[0] 한 칸에 기록.
  * 컨트롤러 디스크립터 수 상한(hmmaxd) 압박을 줄이는 최적 경로.
  */
-static int nvme_alloc_host_mem_single(struct nvme_dev *dev, u64 size)	/* [한국어] NVMe host 헬퍼/코어 API */
+static int nvme_alloc_host_mem_single(struct nvme_dev *dev, u64 size)
 {
-	dev->hmb_sgt = dma_alloc_noncontiguous(dev->dev, size,	/* [한국어] DMA 매핑·풀·일관 버퍼 (PRP/SGL/HMB/링) */
+	dev->hmb_sgt = dma_alloc_noncontiguous(dev->dev, size,
 				DMA_BIDIRECTIONAL, GFP_KERNEL, 0);	/* [한국어] 가상 비연속·물리 merge HMB */
-	if (!dev->hmb_sgt)	/* [한국어] 아키텍처 조건 분기 */
+	if (!dev->hmb_sgt)
 		return -ENOMEM;	/* [한국어] multi 폴백 유도 */
 
-	dev->host_mem_descs = dma_alloc_coherent(dev->dev,	/* [한국어] 일관 DMA 링/버퍼 할당 */
+	dev->host_mem_descs = dma_alloc_coherent(dev->dev,
 			sizeof(*dev->host_mem_descs), &dev->host_mem_descs_dma,
 			GFP_KERNEL);	/* [한국어] 단일 디스크립터 슬롯 */
 	if (!dev->host_mem_descs) {	/* [한국어] 아키텍처 조건 분기 */
@@ -3378,7 +3378,7 @@ static int nvme_alloc_host_mem_single(struct nvme_dev *dev, u64 size)	/* [한국
 	dev->host_mem_descs_size = sizeof(*dev->host_mem_descs);	/* [한국어] desc 배열 바이트 */
 	dev->nr_host_mem_descs = 1;	/* [한국어] 단일 세그먼트 */
 
-	dev->host_mem_descs[0].addr =	/* [한국어] CMB/HMB/도어벨/SQ·CQ 경로 */
+	dev->host_mem_descs[0].addr =
 		cpu_to_le64(dev->hmb_sgt->sgl->dma_address);	/* [한국어] 컨트롤러가 쓸 시작 DMA */
 	dev->host_mem_descs[0].size = cpu_to_le32(size / NVME_CTRL_PAGE_SIZE);	/* [한국어] 페이지 수 */
 	return 0;	/* [한국어] Set Features 준비 완료 */
@@ -3391,7 +3391,7 @@ static int nvme_alloc_host_mem_single(struct nvme_dev *dev, u64 size)	/* [한국
  * preferred/chunk 와 hmmaxd 로 엔트리 상한. NO_KERNEL_MAPPING 청크는
  * 컨트롤러 전용 캐시 — 호스트 CPU 는 내용에 접근하지 않는다.
  */
-static int nvme_alloc_host_mem_multi(struct nvme_dev *dev, u64 preferred,	/* [한국어] NVMe host 헬퍼/코어 API */
+static int nvme_alloc_host_mem_multi(struct nvme_dev *dev, u64 preferred,
 		u32 chunk_size)	/* [한국어] 지역 변수 */
 {
 	struct nvme_host_mem_buf_desc *descs;	/* [한국어] coherent 디스크립터 배열 */
@@ -3409,22 +3409,22 @@ static int nvme_alloc_host_mem_multi(struct nvme_dev *dev, u64 preferred,	/* [�
 		max_entries = dev->ctrl.hmmaxd;	/* [한국어] 컨트롤러 허용 디스크립터 수 */
 
 	descs_size = max_entries * sizeof(*descs);	/* [한국어] 디스크립터 배열 바이트 */
-	descs = dma_alloc_coherent(dev->dev, descs_size, &descs_dma,	/* [한국어] 일관 DMA 링/버퍼 할당 */
+	descs = dma_alloc_coherent(dev->dev, descs_size, &descs_dma,
 			GFP_KERNEL);	/* [한국어] 컨트롤러가 읽는 desc 테이블 */
-	if (!descs)	/* [한국어] 아키텍처 조건 분기 */
+	if (!descs)
 		goto out;	/* [한국어] 테이블 자체 할당 실패 */
 
 	bufs = kzalloc_objs(*bufs, max_entries);	/* [한국어] 청크 VA 배열 */
-	if (!bufs)	/* [한국어] 아키텍처 조건 분기 */
+	if (!bufs)
 		goto out_free_descs;	/* [한국어] desc 롤백 */
 
 	for (size = 0; size < preferred && i < max_entries; size += len) {	/* [한국어] preferred 채울 때까지 */
 		dma_addr_t dma_addr;	/* [한국어] 이번 청크 DMA */
 
 		len = min_t(u64, chunk_size, preferred - size);	/* [한국어] 마지막 청크 잔여 반영 */
-		bufs[i] = dma_alloc_attrs(dev->dev, len, &dma_addr, GFP_KERNEL,	/* [한국어] DMA 매핑·풀·일관 버퍼 (PRP/SGL/HMB/링) */
+		bufs[i] = dma_alloc_attrs(dev->dev, len, &dma_addr, GFP_KERNEL,
 				DMA_ATTR_NO_KERNEL_MAPPING | DMA_ATTR_NO_WARN);	/* [한국어] 컨트롤러 전용 DRAM 청크 */
-		if (!bufs[i])	/* [한국어] 아키텍처 조건 분기 */
+		if (!bufs[i])
 			break;	/* [한국어] 부분 성공 가능 — size 로 판정 */
 
 		descs[i].addr = cpu_to_le64(dma_addr);	/* [한국어] 온와이어 시작 주소 */
@@ -3458,7 +3458,7 @@ out:
  *
  * min 미달 할당은 free 후 다음 chunk_size. hmminds 아래로는 내려가지 않음.
  */
-static int nvme_alloc_host_mem(struct nvme_dev *dev, u64 min, u64 preferred)	/* [한국어] NVMe host 헬퍼/코어 API */
+static int nvme_alloc_host_mem(struct nvme_dev *dev, u64 min, u64 preferred)
 {
 	unsigned long dma_merge_boundary = dma_get_merge_boundary(dev->dev);	/* [한국어] IOMMU merge 경계 */
 	u64 min_chunk = min_t(u64, preferred, PAGE_SIZE * MAX_ORDER_NR_PAGES);	/* [한국어] multi 시작 청크 상한 */
@@ -3495,7 +3495,7 @@ static int nvme_alloc_host_mem(struct nvme_dev *dev, u64 min, u64 preferred)	/* 
  * 기존 버퍼 재사용 시 RETURN 비트. 할당 실패는 warn 후 0 (optional 기능).
  * 컨트롤러 DRAM 캐시를 호스트 메모리로 확장해 성능 향상.
  */
-static int nvme_setup_host_mem(struct nvme_dev *dev)	/* [한국어] NVMe host 헬퍼/코어 API */
+static int nvme_setup_host_mem(struct nvme_dev *dev)
 {
 	u64 max = (u64)max_host_mem_size_mb * SZ_1M;	/* [한국어] 모듈 파라미터 상한 */
 	u64 preferred = (u64)dev->ctrl.hmpre * 4096;	/* [한국어] Identify 선호 크기 */
@@ -3503,7 +3503,7 @@ static int nvme_setup_host_mem(struct nvme_dev *dev)	/* [한국어] NVMe host �
 	u32 enable_bits = NVME_HOST_MEM_ENABLE;	/* [한국어] Set Features enable 플래그 */
 	int ret;	/* [한국어] 지역 변수 */
 
-	if (!dev->ctrl.hmpre)	/* [한국어] 아키텍처 조건 분기 */
+	if (!dev->ctrl.hmpre)
 		return 0;	/* [한국어] HMB 미지원/미선호 — 스킵 */
 
 	preferred = min(preferred, max);	/* [한국어] 호스트 정책으로 선호 크기 클램프 */
@@ -3520,7 +3520,7 @@ static int nvme_setup_host_mem(struct nvme_dev *dev)	/* [한국어] NVMe host �
 	 */
 	/* [한국어] 리셋 경로: min 만족 시 RETURN 으로 재등록, 아니면 재할당 */
 	if (dev->host_mem_descs) {	/* [한국어] 아키텍처 조건 분기 */
-		if (dev->host_mem_size >= min)	/* [한국어] 아키텍처 조건 분기 */
+		if (dev->host_mem_size >= min)
 			enable_bits |= NVME_HOST_MEM_RETURN;	/* [한국어] 기존 버퍼 재사용 알림 */
 		else
 			nvme_free_host_mem(dev);	/* [한국어] 너무 작음 — 새로 할당 */
@@ -3549,12 +3549,12 @@ static int nvme_setup_host_mem(struct nvme_dev *dev)	/* [한국어] NVMe host �
 /*
  * [한국어] sysfs cmb — CMBLOC/CMBSZ 레지스터 스냅샷 (디버그·용량 확인)
  */
-static ssize_t cmb_show(struct device *dev, struct device_attribute *attr,	/* [한국어] CMB/HMB/도어벨/SQ·CQ 경로 */
+static ssize_t cmb_show(struct device *dev, struct device_attribute *attr,
 		char *buf)	/* [한국어] 지역 변수 */
 {
 	struct nvme_dev *ndev = to_nvme_dev(dev_get_drvdata(dev));	/* [한국어] char-dev → nvme_dev */
 
-	return sysfs_emit(buf, "cmbloc : 0x%08x\ncmbsz  : 0x%08x\n",	/* [한국어] PCIe NVMe 경로 반환 */
+	return sysfs_emit(buf, "cmbloc : 0x%08x\ncmbsz  : 0x%08x\n",
 		       ndev->cmbloc, ndev->cmbsz);	/* [한국어] BAR 위치·크기/능력 비트 */
 }
 static DEVICE_ATTR_RO(cmb);	/* [한국어] /sys/.../cmb 읽기 전용 */
@@ -3562,7 +3562,7 @@ static DEVICE_ATTR_RO(cmb);	/* [한국어] /sys/.../cmb 읽기 전용 */
 /*
  * [한국어] sysfs cmbloc — CMB 위치 레지스터 단독 노출
  */
-static ssize_t cmbloc_show(struct device *dev, struct device_attribute *attr,	/* [한국어] PCIe NVMe 아키텍처 단계 (BAR/SQ·CQ/도어벨/맵/리셋) */
+static ssize_t cmbloc_show(struct device *dev, struct device_attribute *attr,
 		char *buf)	/* [한국어] 지역 변수 */
 {
 	struct nvme_dev *ndev = to_nvme_dev(dev_get_drvdata(dev));	/* [한국어] PCIe 트랜스포트 인스턴스 */
@@ -3574,7 +3574,7 @@ static DEVICE_ATTR_RO(cmbloc);	/* [한국어] /sys/.../cmbloc */
 /*
  * [한국어] sysfs cmbsz — CMB 크기/SQS·WDS·RDS 능력 비트
  */
-static ssize_t cmbsz_show(struct device *dev, struct device_attribute *attr,	/* [한국어] PCIe NVMe 아키텍처 단계 (BAR/SQ·CQ/도어벨/맵/리셋) */
+static ssize_t cmbsz_show(struct device *dev, struct device_attribute *attr,
 		char *buf)	/* [한국어] 지역 변수 */
 {
 	struct nvme_dev *ndev = to_nvme_dev(dev_get_drvdata(dev));	/* [한국어] 컨트롤러 */
@@ -3586,7 +3586,7 @@ static DEVICE_ATTR_RO(cmbsz);	/* [한국어] /sys/.../cmbsz */
 /*
  * [한국어] sysfs hmb — Host Memory Buffer feature enable 여부 (0/1)
  */
-static ssize_t hmb_show(struct device *dev, struct device_attribute *attr,	/* [한국어] CMB/HMB/도어벨/SQ·CQ 경로 */
+static ssize_t hmb_show(struct device *dev, struct device_attribute *attr,
 			char *buf)	/* [한국어] 지역 변수 */
 {
 	struct nvme_dev *ndev = to_nvme_dev(dev_get_drvdata(dev));	/* [한국어] hmb 캐시 보유자 */
@@ -3598,7 +3598,7 @@ static ssize_t hmb_show(struct device *dev, struct device_attribute *attr,	/* [�
  * [한국어]
  * hmb_store - 런타임 HMB on/off. on→setup_host_mem, off→Set Features 0 + free
  */
-static ssize_t hmb_store(struct device *dev, struct device_attribute *attr,	/* [한국어] CMB/HMB/도어벨/SQ·CQ 경로 */
+static ssize_t hmb_store(struct device *dev, struct device_attribute *attr,
 			 const char *buf, size_t count)
 {
 	struct nvme_dev *ndev = to_nvme_dev(dev_get_drvdata(dev));	/* [한국어] 대상 컨트롤러 */
@@ -3615,11 +3615,11 @@ static ssize_t hmb_store(struct device *dev, struct device_attribute *attr,	/* [
 		ret = nvme_setup_host_mem(ndev);	/* [한국어] 할당+Set Features ENABLE */
 	} else {
 		ret = nvme_set_host_mem(ndev, 0);	/* [한국어] 컨트롤러 HMB disable */
-		if (!ret)	/* [한국어] 아키텍처 조건 분기 */
+		if (!ret)
 			nvme_free_host_mem(ndev);	/* [한국어] 호스트 측 버퍼 반환 */
 	}
 
-	if (ret < 0)	/* [한국어] 아키텍처 조건 분기 */
+	if (ret < 0)
 		return ret;	/* [한국어] 에러를 sysfs write 에 전파 */
 
 	return count;	/* [한국어] 전체 입력 소비 */
@@ -3632,14 +3632,14 @@ static DEVICE_ATTR_RW(hmb);	/* [한국어] /sys/.../hmb 읽기/쓰기 */
  *
  * cmbsz=0 이면 CMB 속성 숨김. hmpre=0 이면 hmb 숨김. 리셋 후 update 로 재평가.
  */
-static umode_t nvme_pci_attrs_are_visible(struct kobject *kobj,	/* [한국어] NVMe host 헬퍼/코어 API */
+static umode_t nvme_pci_attrs_are_visible(struct kobject *kobj,
 		struct attribute *a, int n)	/* [한국어] 지역 변수 */
 {
-	struct nvme_ctrl *ctrl =	/* [한국어] NVMe host 헬퍼/코어 API */
+	struct nvme_ctrl *ctrl =
 		dev_get_drvdata(container_of(kobj, struct device, kobj));	/* [한국어] char device → ctrl */
 	struct nvme_dev *dev = to_nvme_dev(ctrl);	/* [한국어] PCIe 전용 필드 */
 
-	if (a == &dev_attr_cmb.attr ||	/* [한국어] 아키텍처 조건 분기 */
+	if (a == &dev_attr_cmb.attr ||
 	    a == &dev_attr_cmbloc.attr ||
 	    a == &dev_attr_cmbsz.attr) {	/* [한국어] CMB 계열 속성 */
 	    	if (!dev->cmbsz)	/* [한국어] CMB 미지원/미맵 */
@@ -3677,7 +3677,7 @@ static const struct attribute_group *nvme_pci_dev_attr_groups[] = {	/* [한국�
  * [한국어]
  * nvme_update_attrs - 리셋/HMB 변경 후 CMB·HMB sysfs 가시성 재계산
  */
-static void nvme_update_attrs(struct nvme_dev *dev)	/* [한국어] NVMe host 헬퍼/코어 API */
+static void nvme_update_attrs(struct nvme_dev *dev)
 {
 	sysfs_update_group(&dev->ctrl.device->kobj, &nvme_pci_dev_attrs_group);	/* [한국어] is_visible 재평가 */
 }
@@ -3693,7 +3693,7 @@ static void nvme_update_attrs(struct nvme_dev *dev)	/* [한국어] NVMe host 헬
  * write_queues 모듈 파라미터와 벡터 수로 읽기 전용 맵 크기를 결정.
  * admin 벡터는 pre_vectors 로 이미 제외된 nrirqs 가 들어온다.
  */
-static void nvme_calc_irq_sets(struct irq_affinity *affd, unsigned int nrirqs)	/* [한국어] NVMe host 헬퍼/코어 API */
+static void nvme_calc_irq_sets(struct irq_affinity *affd, unsigned int nrirqs)
 {
 	struct nvme_dev *dev = affd->priv;	/* [한국어] setup_irqs 가 넣은 nvme_dev */
 	unsigned int nr_read_queues, nr_write_queues = dev->nr_write_queues;	/* [한국어] 분할 입력 */
@@ -3735,7 +3735,7 @@ static void nvme_calc_irq_sets(struct irq_affinity *affd, unsigned int nrirqs)	/
  * poll 큐는 벡터 불필요. SINGLE_VECTOR quirk 는 1벡터. BROKEN_MSI 시 MSI 제외.
  * pre_vectors=1 (admin). calc_sets 가 DEFAULT/READ 분할.
  */
-static int nvme_setup_irqs(struct nvme_dev *dev, unsigned int nr_io_queues)	/* [한국어] NVMe host 헬퍼/코어 API */
+static int nvme_setup_irqs(struct nvme_dev *dev, unsigned int nr_io_queues)
 {
 	struct pci_dev *pdev = to_pci_dev(dev->dev);	/* [한국어] PCI 서브시스템 API */
 	struct irq_affinity affd = {	/* [한국어] 지역 변수 */
@@ -3766,11 +3766,11 @@ static int nvme_setup_irqs(struct nvme_dev *dev, unsigned int nr_io_queues)	/* [
 	 * vector.
 	 */
 	irq_queues = 1;	/* [한국어] admin 최소 1 */
-	if (!(dev->ctrl.quirks & NVME_QUIRK_SINGLE_VECTOR))	/* [한국어] 아키텍처 조건 분기 */
+	if (!(dev->ctrl.quirks & NVME_QUIRK_SINGLE_VECTOR))
 		irq_queues += (nr_io_queues - poll_queues);	/* [한국어] 비폴 I/O 큐당 벡터 */
-	if (dev->ctrl.quirks & NVME_QUIRK_BROKEN_MSI)	/* [한국어] 아키텍처 조건 분기 */
+	if (dev->ctrl.quirks & NVME_QUIRK_BROKEN_MSI)
 		flags &= ~PCI_IRQ_MSI;	/* [한국어] 깨진 MSI 제외 — MSI-X/INTx */
-	return pci_alloc_irq_vectors_affinity(pdev, 1, irq_queues, flags,	/* [한국어] PCI 서브시스템 API */
+	return pci_alloc_irq_vectors_affinity(pdev, 1, irq_queues, flags,
 					      &affd);	/* [한국어] 실제 할당 수 반환(>=1) */
 }
 
@@ -3781,16 +3781,16 @@ static int nvme_setup_irqs(struct nvme_dev *dev, unsigned int nr_io_queues)	/* [
  * SHARED_TAGS quirk(Apple) 는 admin 과 태그 풀 공유 → I/O 큐 1개 강제.
  * 그 외 CPU 가능 큐 + write/poll 특수 큐 가산 (이후 컨트롤러와 협상).
  */
-static unsigned int nvme_max_io_queues(struct nvme_dev *dev)	/* [한국어] NVMe host 헬퍼/코어 API */
+static unsigned int nvme_max_io_queues(struct nvme_dev *dev)
 {
 	/*
 	 * If tags are shared with admin queue (Apple bug), then
 	 * make sure we only use one IO queue.
 	 */
 	/* [한국어] admin 태그 고갈 방지 — 단일 I/O 큐로 풀 공유 폭 제한 */
-	if (dev->ctrl.quirks & NVME_QUIRK_SHARED_TAGS)	/* [한국어] 아키텍처 조건 분기 */
+	if (dev->ctrl.quirks & NVME_QUIRK_SHARED_TAGS)
 		return 1;	/* [한국어] Apple 등 공유 태그 컨트롤러 */
-	return blk_mq_num_possible_queues(0) + dev->nr_write_queues +	/* [한국어] blk-mq 태그/요청 API */
+	return blk_mq_num_possible_queues(0) + dev->nr_write_queues +
 		dev->nr_poll_queues;	/* [한국어] 기본 맵 + write/poll 가산 상한 */
 }
 
@@ -3802,7 +3802,7 @@ static unsigned int nvme_max_io_queues(struct nvme_dev *dev)	/* [한국어] NVMe
  * → free_irq_vectors → setup_irqs → admin IRQ 재등록 → create_io_queues.
  * 실제 online < max 면 축소 재시도. shutdown_lock 구간이 disable 과 레이스.
  */
-static int nvme_setup_io_queues(struct nvme_dev *dev)	/* [한국어] NVMe host 헬퍼/코어 API */
+static int nvme_setup_io_queues(struct nvme_dev *dev)
 {
 	struct nvme_queue *adminq = &dev->queues[0];	/* [한국어] 벡터 재할당 중 건드리는 admin */
 	struct pci_dev *pdev = to_pci_dev(dev->dev);	/* [한국어] PCI 서브시스템 API */
@@ -3837,10 +3837,10 @@ static int nvme_setup_io_queues(struct nvme_dev *dev)	/* [한국어] NVMe host �
 	 * number we need for this round.
 	 */
 	/* [한국어] queues[] 슬롯과 목표 큐 수 상한 교집합 */
-	nr_io_queues = min(nvme_max_io_queues(dev),	/* [한국어] NVMe host 헬퍼/코어 API */
+	nr_io_queues = min(nvme_max_io_queues(dev),
 			   dev->nr_allocated_queues - 1);	/* [한국어] -1=admin 슬롯 제외 */
 	result = nvme_set_queue_count(&dev->ctrl, &nr_io_queues);	/* [한국어] Set Features Number of Queues 협상 */
-	if (result < 0)	/* [한국어] 아키텍처 조건 분기 */
+	if (result < 0)
 		return result;	/* [한국어] admin 협상 실패 */
 
 	if (nr_io_queues == 0)	/* [한국어] 컨트롤러가 I/O 큐 0 개만 허용 */
@@ -3861,7 +3861,7 @@ static int nvme_setup_io_queues(struct nvme_dev *dev)	/* [한국어] NVMe host �
 		pci_free_irq(pdev, 0, adminq);	/* [한국어] 벡터0 핸들러 선해제 — 재할당 준비 */
 
 	if (dev->cmb_use_sqes) {	/* [한국어] CMB 에 I/O SQ 배치 시도 */
-		result = nvme_cmb_qdepth(dev, nr_io_queues,	/* [한국어] NVMe host 헬퍼/코어 API */
+		result = nvme_cmb_qdepth(dev, nr_io_queues,
 				sizeof(struct nvme_command));	/* [한국어] CMB 용량→깊이 */
 		if (result > 0) {	/* [한국어] 아키텍처 조건 분기 */
 			dev->q_depth = result;	/* [한국어] 축소된 깊이 적용 */
@@ -3874,7 +3874,7 @@ static int nvme_setup_io_queues(struct nvme_dev *dev)	/* [한국어] NVMe host �
 	do {	/* [한국어] PCIe NVMe 아키텍처 단계 (BAR/SQ·CQ/도어벨/맵/리셋) */
 		size = db_bar_size(dev, nr_io_queues);	/* [한국어] 전 도어벨 커버 맵 크기 */
 		result = nvme_remap_bar(dev, size);	/* [한국어] BAR0 ioremap 확장 */
-		if (!result)	/* [한국어] 아키텍처 조건 분기 */
+		if (!result)
 			break;	/* [한국어] 맵 성공 */
 		if (!--nr_io_queues) {	/* [한국어] 큐 수 줄여 재시도 — 0 되면 실패 */
 			result = -ENOMEM;	/* [한국어] BAR 물리 길이 부족 */
@@ -3886,7 +3886,7 @@ static int nvme_setup_io_queues(struct nvme_dev *dev)	/* [한국어] NVMe host �
  retry:
 	/* Deregister the admin queue's interrupt */
 	/* [한국어] 벡터 풀 재할당 전 admin 핸들러 제거 (ENABLED 원자 클리어) */
-	if (test_and_clear_bit(NVMEQ_ENABLED, &adminq->flags))	/* [한국어] 아키텍처 조건 분기 */
+	if (test_and_clear_bit(NVMEQ_ENABLED, &adminq->flags))
 		pci_free_irq(pdev, 0, adminq);	/* [한국어] 벡터0 해제 */
 
 	/*
@@ -3932,7 +3932,7 @@ static int nvme_setup_io_queues(struct nvme_dev *dev)	/* [한국어] NVMe host �
 		nvme_suspend_io_queues(dev);	/* [한국어] ENABLED/IRQ 정리 후 retry */
 		goto retry;	/* [한국어] 벡터 수·max_qid 재계산 */
 	}
-	dev_info(dev->ctrl.device, "%d/%d/%d default/read/poll queues\n",	/* [한국어] PCIe NVMe 아키텍처 단계 (BAR/SQ·CQ/도어벨/맵/리셋) */
+	dev_info(dev->ctrl.device, "%d/%d/%d default/read/poll queues\n",
 					dev->io_queues[HCTX_TYPE_DEFAULT],
 					dev->io_queues[HCTX_TYPE_READ],
 					dev->io_queues[HCTX_TYPE_POLL]);	/* [한국어] 최종 토폴로지 로그 */
@@ -3948,7 +3948,7 @@ out_unlock:
  *
  * request free 후 delete_done 시그널 — __nvme_delete_io_queues 가 대기.
  */
-static enum rq_end_io_ret nvme_del_queue_end(struct request *req,	/* [한국어] NVMe host 헬퍼/코어 API */
+static enum rq_end_io_ret nvme_del_queue_end(struct request *req,
 					     blk_status_t error,	/* [한국어] 지역 변수 */
 					     const struct io_comp_batch *iob)
 {
@@ -3965,7 +3965,7 @@ static enum rq_end_io_ret nvme_del_queue_end(struct request *req,	/* [한국어]
  *
  * CQ delete 실패는 컨트롤러 상태 불일치 단서 — 이후 정책에 사용.
  */
-static enum rq_end_io_ret nvme_del_cq_end(struct request *req,	/* [한국어] NVMe host 헬퍼/코어 API */
+static enum rq_end_io_ret nvme_del_cq_end(struct request *req,
 					  blk_status_t error,	/* [한국어] 지역 변수 */
 					  const struct io_comp_batch *iob)
 {
@@ -3983,7 +3983,7 @@ static enum rq_end_io_ret nvme_del_cq_end(struct request *req,	/* [한국어] NV
  *
  * NOWAIT 할당 실패 시 호출자가 배치를 중단. end_io_data=nvmeq 로 완료 연결.
  */
-static int nvme_delete_queue(struct nvme_queue *nvmeq, u8 opcode)	/* [한국어] NVMe host 헬퍼/코어 API */
+static int nvme_delete_queue(struct nvme_queue *nvmeq, u8 opcode)
 {
 	struct request_queue *q = nvmeq->dev->ctrl.admin_q;	/* [한국어] Delete 는 admin 경로 */
 	struct request *req;	/* [한국어] admin 태그 요청 */
@@ -3993,7 +3993,7 @@ static int nvme_delete_queue(struct nvme_queue *nvmeq, u8 opcode)	/* [한국어]
 	cmd.delete_queue.qid = cpu_to_le16(nvmeq->qid);	/* [한국어] 대상 큐 ID */
 
 	req = blk_mq_alloc_request(q, nvme_req_op(&cmd), BLK_MQ_REQ_NOWAIT);	/* [한국어] 블로킹 없이 태그 */
-	if (IS_ERR(req))	/* [한국어] 아키텍처 조건 분기 */
+	if (IS_ERR(req))
 		return PTR_ERR(req);	/* [한국어] 태그 고갈 — 배치 중단 */
 	nvme_init_request(req, &cmd);	/* [한국어] core 요청 메타+cmd 연결 */
 
@@ -4015,7 +4015,7 @@ static int nvme_delete_queue(struct nvme_queue *nvmeq, u8 opcode)	/* [한국어]
  * admin 타임아웃 예산 안에서 배치 제출 후 completion 대기. 타임아웃 시
  * false — 호출자가 CQ delete 를 건너뛸 수 있다.
  */
-static bool __nvme_delete_io_queues(struct nvme_dev *dev, u8 opcode)	/* [한국어] NVMe host 헬퍼/코어 API */
+static bool __nvme_delete_io_queues(struct nvme_dev *dev, u8 opcode)
 {
 	int nr_queues = dev->online_queues - 1, sent = 0;	/* [한국어] 남은 큐 / 비행 중 Delete 수 */
 	unsigned long timeout;	/* [한국어] 공유 admin 타임아웃 잔여 jiffies */
@@ -4031,7 +4031,7 @@ static bool __nvme_delete_io_queues(struct nvme_dev *dev, u8 opcode)	/* [한국�
 	while (sent) {	/* [한국어] 제출분 완료 대기 */
 		struct nvme_queue *nvmeq = &dev->queues[nr_queues + sent];	/* [한국어] 가장 최근 제출 큐 */
 
-		timeout = wait_for_completion_io_timeout(&nvmeq->delete_done,	/* [한국어] PCIe NVMe 아키텍처 단계 (BAR/SQ·CQ/도어벨/맵/리셋) */
+		timeout = wait_for_completion_io_timeout(&nvmeq->delete_done,
 				timeout);	/* [한국어] I/O 대기 — 잔여 시간 갱신 */
 		if (timeout == 0)	/* [한국어] admin 타임아웃 소진 */
 			return false;	/* [한국어] 하드웨어 무응답 — 상위에서 중단 */
@@ -4049,7 +4049,7 @@ static bool __nvme_delete_io_queues(struct nvme_dev *dev, u8 opcode)	/* [한국�
  *
  * SQ 가 남아 있는 채 CQ 를 지우면 컨트롤러 미정의 동작 — SQ 선행 필수.
  */
-static void nvme_delete_io_queues(struct nvme_dev *dev)	/* [한국어] NVMe host 헬퍼/코어 API */
+static void nvme_delete_io_queues(struct nvme_dev *dev)
 {
 	if (__nvme_delete_io_queues(dev, nvme_admin_delete_sq))	/* [한국어] Submission Queue 먼저 */
 		__nvme_delete_io_queues(dev, nvme_admin_delete_cq);	/* [한국어] SQ 성공 후에만 CQ */
@@ -4059,7 +4059,7 @@ static void nvme_delete_io_queues(struct nvme_dev *dev)	/* [한국어] NVMe host
  * [한국어]
  * nvme_pci_nr_maps - blk-mq nr_maps (1=DEFAULT, 2=+READ, 3=+POLL)
  */
-static unsigned int nvme_pci_nr_maps(struct nvme_dev *dev)	/* [한국어] NVMe host 헬퍼/코어 API */
+static unsigned int nvme_pci_nr_maps(struct nvme_dev *dev)
 {
 	if (dev->io_queues[HCTX_TYPE_POLL])	/* [한국어] 폴링 큐 존재 */
 		return 3;	/* [한국어] DEFAULT+READ+POLL */
@@ -4075,17 +4075,17 @@ static unsigned int nvme_pci_nr_maps(struct nvme_dev *dev)	/* [한국어] NVMe h
  * tagset 없으면 최초 alloc. 있으면 trylock 하 update_nr_hw_queues 후
  * 잉여 queues[] 슬롯 free. disable 레이스 시 false.
  */
-static bool nvme_pci_update_nr_queues(struct nvme_dev *dev)	/* [한국어] NVMe host 헬퍼/코어 API */
+static bool nvme_pci_update_nr_queues(struct nvme_dev *dev)
 {
 	if (!dev->ctrl.tagset) {	/* [한국어] 첫 LIVE — tagset 미생성 */
-		nvme_alloc_io_tag_set(&dev->ctrl, &dev->tagset, &nvme_mq_ops,	/* [한국어] NVMe host 헬퍼/코어 API */
+		nvme_alloc_io_tag_set(&dev->ctrl, &dev->tagset, &nvme_mq_ops,
 				nvme_pci_nr_maps(dev), sizeof(struct nvme_iod));	/* [한국어] I/O blk-mq+iod PDU */
 		return true;	/* [한국어] 신규 할당 성공 취급 */
 	}
 
 	/* Give up if we are racing with nvme_dev_disable() */
 	/* [한국어] disable 가 shutdown_lock 보유 중이면 포기 */
-	if (!mutex_trylock(&dev->shutdown_lock))	/* [한국어] 뮤텍스로 컨트롤 플레인 직렬화 */
+	if (!mutex_trylock(&dev->shutdown_lock))
 		return false;	/* [한국어] reset_work 가 실패 경로로 */
 
 	/* Check if nvme_dev_disable() has been executed already */
@@ -4110,7 +4110,7 @@ static bool nvme_pci_update_nr_queues(struct nvme_dev *dev)	/* [한국어] NVMe 
  * CSTS 전1 이면 장치 미응답. q_depth=min(MQES+1,module). db_stride,
  * Apple 128B SQE, Samsung PM1725 등 quirk. CMB map, save_state, admin queue.
  */
-static int nvme_pci_enable(struct nvme_dev *dev)	/* [한국어] NVMe host 헬퍼/코어 API */
+static int nvme_pci_enable(struct nvme_dev *dev)
 {
 	int result = -ENOMEM;	/* [한국어] 기본 실패 코드 — 단계별 갱신 */
 	struct pci_dev *pdev = to_pci_dev(dev->dev);	/* [한국어] PCI 서브시스템 API */
@@ -4133,7 +4133,7 @@ static int nvme_pci_enable(struct nvme_dev *dev)	/* [한국어] NVMe host 헬퍼
 	 * adjust this later.
 	 */
 	/* [한국어] setup 단계 단일 벡터 — 이후 setup_io_queues 가 본 할당 */
-	if (dev->ctrl.quirks & NVME_QUIRK_BROKEN_MSI)	/* [한국어] 아키텍처 조건 분기 */
+	if (dev->ctrl.quirks & NVME_QUIRK_BROKEN_MSI)
 		flags &= ~PCI_IRQ_MSI;	/* [한국어] 깨진 MSI 제외 */
 	result = pci_alloc_irq_vectors(pdev, 1, 1, flags);	/* [한국어] admin 용 임시 1벡터 */
 	if (result < 0)	/* [한국어] 아키텍처 조건 분기 */
@@ -4141,7 +4141,7 @@ static int nvme_pci_enable(struct nvme_dev *dev)	/* [한국어] NVMe host 헬퍼
 
 	dev->ctrl.cap = lo_hi_readq(dev->bar + NVME_REG_CAP);	/* [한국어] CAP — MQES/DSTRD/CSS/CMBS 등 */
 
-	dev->q_depth = min_t(u32, NVME_CAP_MQES(dev->ctrl.cap) + 1,	/* [한국어] PCIe NVMe 아키텍처 단계 (BAR/SQ·CQ/도어벨/맵/리셋) */
+	dev->q_depth = min_t(u32, NVME_CAP_MQES(dev->ctrl.cap) + 1,
 				io_queue_depth);	/* [한국어] 스펙 상한과 모듈 파라미터 교집합 */
 	dev->db_stride = 1 << NVME_CAP_STRIDE(dev->ctrl.cap);	/* [한국어] 도어벨 간격 DWORD */
 	dev->dbs = dev->bar + 4096;	/* [한국어] 초기 도어벨 창 — remap 이 재설정 */
@@ -4151,14 +4151,14 @@ static int nvme_pci_enable(struct nvme_dev *dev)	/* [한국어] NVMe host 헬퍼
 	 * Interestingly they also seem to ignore the CC:IOSQES register
 	 * so we don't bother updating it here.
 	 */
-	if (dev->ctrl.quirks & NVME_QUIRK_128_BYTES_SQES)	/* [한국어] 아키텍처 조건 분기 */
+	if (dev->ctrl.quirks & NVME_QUIRK_128_BYTES_SQES)
 		dev->io_sqes = 7;	/* [한국어] 128B SQE → log2=7 */
 	else
 		dev->io_sqes = NVME_NVM_IOSQES;	/* [한국어] 표준 64B → 6 */
 
 	if (dev->ctrl.quirks & NVME_QUIRK_QDEPTH_ONE) {	/* [한국어] 아키텍처 조건 분기 */
 		dev->q_depth = 2;	/* [한국어] 사실상 깊이1 장치 — 최소 2 슬롯 */
-	} else if (pdev->vendor == PCI_VENDOR_ID_SAMSUNG &&	/* [한국어] 아키텍처 조건 분기 */
+	} else if (pdev->vendor == PCI_VENDOR_ID_SAMSUNG &&
 		   (pdev->device == 0xa821 || pdev->device == 0xa822) &&
 		   NVME_CAP_MQES(dev->ctrl.cap) == 0) {	/* [한국어] PM1725 MQES=0 버그 */
 		dev->q_depth = 64;	/* [한국어] 경험적 안전 깊이 */
@@ -4170,7 +4170,7 @@ static int nvme_pci_enable(struct nvme_dev *dev)	/* [한국어] NVMe host 헬퍼
 	 * Controllers with the shared tags quirk need the IO queue to be
 	 * big enough so that we get 32 tags for the admin queue
 	 */
-	if ((dev->ctrl.quirks & NVME_QUIRK_SHARED_TAGS) &&	/* [한국어] 아키텍처 조건 분기 */
+	if ((dev->ctrl.quirks & NVME_QUIRK_SHARED_TAGS) &&
 	    (dev->q_depth < (NVME_AQ_DEPTH + 2))) {	/* [한국어] admin 태그와 풀 공유 */
 		dev->q_depth = NVME_AQ_DEPTH + 2;	/* [한국어] admin 여유 확보 */
 		dev_warn(dev->ctrl.device, "IO queue depth clamped to %d\n",	/* [한국어] PCIe NVMe 아키텍처 단계 (BAR/SQ·CQ/도어벨/맵/리셋) */
@@ -4200,7 +4200,7 @@ static int nvme_pci_enable(struct nvme_dev *dev)	/* [한국어] NVMe host 헬퍼
  *
  * remove/probe 실패. bar=NULL 이면 unmap 생략 (remap 실패 상태).
  */
-static void nvme_dev_unmap(struct nvme_dev *dev)	/* [한국어] NVMe host 헬퍼/코어 API */
+static void nvme_dev_unmap(struct nvme_dev *dev)
 {
 	if (dev->bar)	/* [한국어] 유효 MMIO 매핑이 있을 때만 */
 		iounmap(dev->bar);	/* [한국어] BAR0 VA 반환 — dbs 도 무효화됨 */
@@ -4213,7 +4213,7 @@ static void nvme_dev_unmap(struct nvme_dev *dev)	/* [한국어] NVMe host 헬퍼
  *
  * true 면 Delete Queue admin 을 시도하지 않고 로컬 tear-down 만 수행.
  */
-static bool nvme_pci_ctrl_is_dead(struct nvme_dev *dev)	/* [한국어] NVMe host 헬퍼/코어 API */
+static bool nvme_pci_ctrl_is_dead(struct nvme_dev *dev)
 {
 	struct pci_dev *pdev = to_pci_dev(dev->dev);	/* [한국어] PCI 서브시스템 API */
 	u32 csts;	/* [한국어] Controller Status 스냅샷 */
@@ -4236,7 +4236,7 @@ static bool nvme_pci_ctrl_is_dead(struct nvme_dev *dev)	/* [한국어] NVMe host
  * cancel tagsets → shutdown 이면 unquiesce 로 실패 완료 플러시.
  * shutdown_lock 전체 구간. 핫언플러그/timeout/suspend/remove 공용 중추.
  */
-static void nvme_dev_disable(struct nvme_dev *dev, bool shutdown)	/* [한국어] NVMe host 헬퍼/코어 API */
+static void nvme_dev_disable(struct nvme_dev *dev, bool shutdown)
 {
 	enum nvme_ctrl_state state = nvme_ctrl_state(&dev->ctrl);	/* [한국어] LIVE/RESETTING 등 */
 	struct pci_dev *pdev = to_pci_dev(dev->dev);	/* [한국어] PCI 서브시스템 API */
@@ -4245,7 +4245,7 @@ static void nvme_dev_disable(struct nvme_dev *dev, bool shutdown)	/* [한국어]
 	mutex_lock(&dev->shutdown_lock);	/* [한국어] setup_io/BAR remap 과 상호배제 */
 	dead = nvme_pci_ctrl_is_dead(dev);	/* [한국어] admin delete 시도 가치 판정 */
 	if (state == NVME_CTRL_LIVE || state == NVME_CTRL_RESETTING) {	/* [한국어] 아키텍처 조건 분기 */
-		if (pci_is_enabled(pdev))	/* [한국어] PCI 서브시스템 API */
+		if (pci_is_enabled(pdev))
 			nvme_start_freeze(&dev->ctrl);	/* [한국어] 새 I/O 진입 동결 */
 		/*
 		 * Give the controller a chance to complete all entered requests
@@ -4265,7 +4265,7 @@ static void nvme_dev_disable(struct nvme_dev *dev, bool shutdown)	/* [한국어]
 	nvme_suspend_io_queues(dev);	/* [한국어] I/O ENABLED 클리어·IRQ free */
 	nvme_suspend_queue(dev, 0);	/* [한국어] admin 큐 suspend */
 	pci_free_irq_vectors(pdev);	/* [한국어] MSI-X 풀 전체 해제 */
-	if (pci_is_enabled(pdev))	/* [한국어] PCI 서브시스템 API */
+	if (pci_is_enabled(pdev))
 		pci_disable_device(pdev);	/* [한국어] PCI 기능 disable */
 	nvme_reap_pending_cqes(dev);	/* [한국어] cancel 전 마지막 자연 완료 */
 
@@ -4280,7 +4280,7 @@ static void nvme_dev_disable(struct nvme_dev *dev, bool shutdown)	/* [한국어]
 	/* [한국어] shutdown 시 quiesce 상태면 실패 완료가 흐르지 않아 교착 — unquiesce */
 	if (shutdown) {	/* [한국어] 아키텍처 조건 분기 */
 		nvme_unquiesce_io_queues(&dev->ctrl);	/* [한국어] 실패 완료 플러시 */
-		if (dev->ctrl.admin_q && !blk_queue_dying(dev->ctrl.admin_q))	/* [한국어] 아키텍처 조건 분기 */
+		if (dev->ctrl.admin_q && !blk_queue_dying(dev->ctrl.admin_q))
 			nvme_unquiesce_admin_queue(&dev->ctrl);	/* [한국어] admin 도 동일 */
 	}
 	mutex_unlock(&dev->shutdown_lock);	/* [한국어] 정지 절차 종료 */
@@ -4293,7 +4293,7 @@ static void nvme_dev_disable(struct nvme_dev *dev, bool shutdown)	/* [한국어]
  * wait_reset 실패(-EBUSY)면 다른 리셋/제거가 진행 중. shutdown=true 면
  * CC.SHN 정상 종료 경로 (suspend/remove/shutdown).
  */
-static int nvme_disable_prepare_reset(struct nvme_dev *dev, bool shutdown)	/* [한국어] NVMe host 헬퍼/코어 API */
+static int nvme_disable_prepare_reset(struct nvme_dev *dev, bool shutdown)
 {
 	if (!nvme_wait_reset(&dev->ctrl))	/* [한국어] RESETTING 상태 선점 대기 */
 		return -EBUSY;	/* [한국어] 동시 리셋/삭제와 충돌 */
@@ -4307,15 +4307,15 @@ static int nvme_disable_prepare_reset(struct nvme_dev *dev, bool shutdown)	/* [�
  *
  * 핫패스 GFP_ATOMIC 친화. 노드 지역 할당. NVME_MAX_SEGS 쌍 크기.
  */
-static int nvme_pci_alloc_iod_mempool(struct nvme_dev *dev)	/* [한국어] NVMe host 헬퍼/코어 API */
+static int nvme_pci_alloc_iod_mempool(struct nvme_dev *dev)
 {
 	size_t alloc_size = sizeof(struct nvme_dma_vec) * NVME_MAX_SEGS;	/* [한국어] 최악 세그먼트 벡터 바이트 */
 
-	dev->dmavec_mempool = mempool_create_node(1,	/* [한국어] PCIe NVMe 아키텍처 단계 (BAR/SQ·CQ/도어벨/맵/리셋) */
-			mempool_kmalloc, mempool_kfree,	/* [한국어] probe/remove 수명·자원 관리 */
-			(void *)alloc_size, GFP_KERNEL,	/* [한국어] probe/remove 수명·자원 관리 */
+	dev->dmavec_mempool = mempool_create_node(1,
+			mempool_kmalloc, mempool_kfree,
+			(void *)alloc_size, GFP_KERNEL,
 			dev_to_node(dev->dev));	/* [한국어] 최소 1 예비 객체 — 제출 경로 고갈 완화 */
-	if (!dev->dmavec_mempool)	/* [한국어] 아키텍처 조건 분기 */
+	if (!dev->dmavec_mempool)
 		return -ENOMEM;	/* [한국어] probe 실패 */
 	return 0;	/* [한국어] PRP phys 경로 준비 완료 */
 }
@@ -4326,7 +4326,7 @@ static int nvme_pci_alloc_iod_mempool(struct nvme_dev *dev)	/* [한국어] NVMe 
  *
  * 리셋 중 I/O 큐 전멸 또는 remove 경로. tags 유효할 때만 remove.
  */
-static void nvme_free_tagset(struct nvme_dev *dev)	/* [한국어] NVMe host 헬퍼/코어 API */
+static void nvme_free_tagset(struct nvme_dev *dev)
 {
 	if (dev->tagset.tags)	/* [한국어] 아직 할당된 tagset */
 		nvme_remove_io_tag_set(&dev->ctrl);	/* [한국어] blk-mq 인프라 해제 */
@@ -4340,7 +4340,7 @@ static void nvme_free_tagset(struct nvme_dev *dev)	/* [한국어] NVMe host 헬�
  *
  * tagset·pdev get_device·queues[]·본체 kfree. BAR/HMB 는 이미 remove 가 처리.
  */
-static void nvme_pci_free_ctrl(struct nvme_ctrl *ctrl)	/* [한국어] NVMe host 헬퍼/코어 API */
+static void nvme_pci_free_ctrl(struct nvme_ctrl *ctrl)
 {
 	struct nvme_dev *dev = to_nvme_dev(ctrl);	/* [한국어] 임베드 부모 복원 */
 
@@ -4359,9 +4359,9 @@ static void nvme_pci_free_ctrl(struct nvme_ctrl *ctrl)	/* [한국어] NVMe host 
  * start_ctrl. 실패 시 DELETING→disable→DEAD.
  * 호출: timeout, AER slot_reset, resume, FLR done 등 try_sched_reset.
  */
-static void nvme_reset_work(struct work_struct *work)	/* [한국어] NVMe host 헬퍼/코어 API */
+static void nvme_reset_work(struct work_struct *work)
 {
-	struct nvme_dev *dev =	/* [한국어] NVMe host 헬퍼/코어 API */
+	struct nvme_dev *dev =
 		container_of(work, struct nvme_dev, ctrl.reset_work);	/* [한국어] 임베드 work → 컨트롤러 */
 	bool was_suspend = !!(dev->ctrl.ctrl_config & NVME_CC_SHN_NORMAL);	/* [한국어] 직전 정상 shutdown 여부 */
 	int result;	/* [한국어] 단계 실패 코드 */
@@ -4400,7 +4400,7 @@ static void nvme_reset_work(struct work_struct *work)	/* [한국어] NVMe host �
 	}
 
 	result = nvme_init_ctrl_finish(&dev->ctrl, was_suspend);	/* [한국어] Identify/재설정 (suspend 복귀 힌트) */
-	if (result)	/* [한국어] 아키텍처 조건 분기 */
+	if (result)
 		goto out;	/* [한국어] Identify 등 admin 실패 */
 
 	if (nvme_ctrl_meta_sgl_supported(&dev->ctrl))	/* [한국어] 메타 SGL 능력 */
@@ -4411,7 +4411,7 @@ static void nvme_reset_work(struct work_struct *work)	/* [한국어] NVMe host �
 	nvme_dbbuf_dma_alloc(dev);	/* [한국어] shadow doorbell 재할당/재클리어 */
 
 	result = nvme_setup_host_mem(dev);	/* [한국어] HMB 재설정 */
-	if (result < 0)	/* [한국어] 아키텍처 조건 분기 */
+	if (result < 0)
 		goto out;	/* [한국어] 치명 HMB 실패(드묾) */
 
 	nvme_update_attrs(dev);	/* [한국어] CMB/HMB sysfs 가시성 갱신 */
@@ -4475,7 +4475,7 @@ static void nvme_reset_work(struct work_struct *work)	/* [한국어] NVMe host �
 /*
  * [한국어] core 가 CAP/CC/CSTS 등 레지스터를 읽을 때 쓰는 BAR MMIO 훅 묶음.
  */
-static int nvme_pci_reg_read32(struct nvme_ctrl *ctrl, u32 off, u32 *val)	/* [한국어] NVMe host 헬퍼/코어 API */
+static int nvme_pci_reg_read32(struct nvme_ctrl *ctrl, u32 off, u32 *val)
 {
 	*val = readl(to_nvme_dev(ctrl)->bar + off);	/* [한국어] 32bit MMIO 로드 — CSTS/CC 등 */
 	return 0;	/* [한국어] PCIe 맵 성공 전제 — 항상 0 */
@@ -4505,7 +4505,7 @@ static void nvme_pci_print_device_info(struct nvme_ctrl *ctrl)	/* [한국어] NV
 	struct pci_dev *pdev = to_pci_dev(to_nvme_dev(ctrl)->dev);	/* [한국어] VID/DID */
 	struct nvme_subsystem *subsys = ctrl->subsys;	/* [한국어] Identify model/fw */
 
-	dev_err(ctrl->device,	/* [한국어] PCIe NVMe 아키텍처 단계 (BAR/SQ·CQ/도어벨/맵/리셋) */
+	dev_err(ctrl->device,
 		"VID:DID %04x:%04x model:%.*s firmware:%.*s\n",
 		pdev->vendor, pdev->device,
 		nvme_strlen(subsys->model, sizeof(subsys->model)),
@@ -4527,10 +4527,10 @@ static bool nvme_pci_supports_pci_p2pdma(struct nvme_ctrl *ctrl)	/* [한국어] 
  *
  * blk-mq 가상 경계 병합 정책에 영향 — PRP 는 페이지 경계를 넘기 어렵다.
  */
-static unsigned long nvme_pci_get_virt_boundary(struct nvme_ctrl *ctrl,	/* [한국어] NVMe host 헬퍼/코어 API */
+static unsigned long nvme_pci_get_virt_boundary(struct nvme_ctrl *ctrl,
 						bool is_admin)	/* [한국어] 지역 변수 */
 {
-	if (!nvme_ctrl_sgl_supported(ctrl) || is_admin)	/* [한국어] NVMe host 헬퍼/코어 API */
+	if (!nvme_ctrl_sgl_supported(ctrl) || is_admin)
 		return NVME_CTRL_PAGE_SIZE - 1;	/* [한국어] PRP 정렬 경계 마스크 */
 	return 0;	/* [한국어] SGL I/O 는 가상 경계 제한 없음 */
 }
@@ -4560,7 +4560,7 @@ static const struct nvme_ctrl_ops nvme_pci_ctrl_ops = {	/* [한국어] NVMe host
  * [한국어]
  * nvme_dev_map - MEM BAR claim + 최소 창 ioremap (레지스터+초기 도어벨)
  */
-static int nvme_dev_map(struct nvme_dev *dev)	/* [한국어] NVMe host 헬퍼/코어 API */
+static int nvme_dev_map(struct nvme_dev *dev)
 {
 	struct pci_dev *pdev = to_pci_dev(dev->dev);	/* [한국어] PCI 서브시스템 API */
 
@@ -4583,7 +4583,7 @@ static int nvme_dev_map(struct nvme_dev *dev)	/* [한국어] NVMe host 헬퍼/�
  * 정적 ID 테이블만으로는 잡지 못하는 플랫폼 한정 버스 드롭/절전 버그.
  * 반환 비트는 alloc_dev 에서 ctrl.quirks 에 OR 된다.
  */
-static unsigned long check_vendor_combination_bug(struct pci_dev *pdev)	/* [한국어] PCI 서브시스템 API */
+static unsigned long check_vendor_combination_bug(struct pci_dev *pdev)
 {
 	if (pdev->vendor == 0x144d && pdev->device == 0xa802) {	/* [한국어] Samsung SM951/PM951/950 PRO 계열 */
 		/*
@@ -4607,11 +4607,11 @@ static unsigned long check_vendor_combination_bug(struct pci_dev *pdev)	/* [한�
 		 * ASUS PRIME Z370-A
 		 */
 		/* [한국어] 특정 ASUS 보드에서 suspend/부팅 직후 버스 드롭 — APST 전면 금지 */
-		if (dmi_match(DMI_BOARD_VENDOR, "ASUSTeK COMPUTER INC.") &&	/* [한국어] 아키텍처 조건 분기 */
+		if (dmi_match(DMI_BOARD_VENDOR, "ASUSTeK COMPUTER INC.") &&
 		    (dmi_match(DMI_BOARD_NAME, "PRIME B350M-A") ||
 		     dmi_match(DMI_BOARD_NAME, "PRIME Z370-A")))
 			return NVME_QUIRK_NO_APST;	/* [한국어] Autonomous Power State Transition 비활성 */
-	} else if ((pdev->vendor == 0x144d && (pdev->device == 0xa801 ||	/* [한국어] 아키텍처 조건 분기 */
+	} else if ((pdev->vendor == 0x144d && (pdev->device == 0xa801 ||
 		    pdev->device == 0xa808 || pdev->device == 0xa809)) ||
 		   (pdev->vendor == 0x1e0f && pdev->device == 0x0001)) {	/* [한국어] Samsung/Toshiba 일부 */
 		/*
@@ -4621,10 +4621,10 @@ static unsigned long check_vendor_combination_bug(struct pci_dev *pdev)	/* [한�
 		 * on Coffee Lake board for LENOVO C640
 		 */
 		/* [한국어] Lenovo C640 계 — 커널 simple suspend(풀 shutdown) 강제 */
-		if ((dmi_match(DMI_BOARD_VENDOR, "LENOVO")) &&	/* [한국어] 아키텍처 조건 분기 */
+		if ((dmi_match(DMI_BOARD_VENDOR, "LENOVO")) &&
 		     dmi_match(DMI_BOARD_NAME, "LNVNB161216"))
 			return NVME_QUIRK_SIMPLE_SUSPEND;	/* [한국어] 프로토콜 PS 대신 full disable */
-	} else if (pdev->vendor == 0x2646 && (pdev->device == 0x2263 ||	/* [한국어] 아키텍처 조건 분기 */
+	} else if (pdev->vendor == 0x2646 && (pdev->device == 0x2263 ||
 		   pdev->device == 0x500f)) {	/* [한국어] Kingston NV1/A2000 */
 		/*
 		 * Exclude some Kingston NV1 and A2000 devices from
@@ -4632,7 +4632,7 @@ static unsigned long check_vendor_combination_bug(struct pci_dev *pdev)	/* [한�
 		 * lot of energy with s2idle sleep on some TUXEDO platforms.
 		 */
 		/* [한국어] TUXEDO s2idle 절전 — simple suspend 강제 제외(풀 경로 유도) */
-		if (dmi_match(DMI_BOARD_NAME, "NS5X_NS7XAU") ||	/* [한국어] 아키텍처 조건 분기 */
+		if (dmi_match(DMI_BOARD_NAME, "NS5X_NS7XAU") ||
 		    dmi_match(DMI_BOARD_NAME, "NS5x_7xAU") ||
 		    dmi_match(DMI_BOARD_NAME, "NS5x_7xPU") ||
 		    dmi_match(DMI_BOARD_NAME, "PH4PRX1_PH6PRX1"))
@@ -4645,7 +4645,7 @@ static unsigned long check_vendor_combination_bug(struct pci_dev *pdev)	/* [한�
 		 * (Note for testing: Samsung 990 Evo Plus has same PCI ID)
 		 */
 		/* [한국어] 특정 보드 s2idle 고소비 — simple suspend 제외 */
-		if (dmi_match(DMI_BOARD_NAME, "DN50Z-140HC-YD") ||	/* [한국어] 아키텍처 조건 분기 */
+		if (dmi_match(DMI_BOARD_NAME, "DN50Z-140HC-YD") ||
 		    dmi_match(DMI_BOARD_NAME, "GMxPXxx") ||
 		    dmi_match(DMI_BOARD_NAME, "GXxMRXx") ||
 		    dmi_match(DMI_BOARD_NAME, "NS5X_NS7XAU") ||
@@ -4660,7 +4660,7 @@ static unsigned long check_vendor_combination_bug(struct pci_dev *pdev)	/* [한�
 	 * for 10 hours on a Lenovo N60z board.
 	 */
 	/* [한국어] Lenovo N60z 장기 유휴 후 버스 드롭 — APST 금지 */
-	if (dmi_match(DMI_BOARD_NAME, "LXKT-ZXEG-N6"))	/* [한국어] 아키텍처 조건 분기 */
+	if (dmi_match(DMI_BOARD_NAME, "LXKT-ZXEG-N6"))
 		return NVME_QUIRK_NO_APST;	/* [한국어] 자율 전원 전이 비활성 */
 
 	return 0;	/* [한국어] 해당 조합 없음 — 추가 quirk 없음 */
@@ -4672,7 +4672,7 @@ static unsigned long check_vendor_combination_bug(struct pci_dev *pdev)	/* [한�
  *
  * probe 시 정적 ID+DMI 위에 enabled OR / disabled AND-NOT 오버레이.
  */
-static struct quirk_entry *detect_dynamic_quirks(struct pci_dev *pdev)	/* [한국어] PCI 서브시스템 API */
+static struct quirk_entry *detect_dynamic_quirks(struct pci_dev *pdev)
 {
 	int i;	/* [한국어] 동적 테이블 선형 스캔 인덱스 */
 
@@ -4691,7 +4691,7 @@ static struct quirk_entry *detect_dynamic_quirks(struct pci_dev *pdev)	/* [한�
  * descriptor_pools 를 nr_node_ids 유연 배열로 함께 할당. DMA mask 48/64,
  * min_align 4K-1, max_hw_sectors/segments 상한. probe 최전방.
  */
-static struct nvme_dev *nvme_pci_alloc_dev(struct pci_dev *pdev,	/* [한국어] PCI 서브시스템 API */
+static struct nvme_dev *nvme_pci_alloc_dev(struct pci_dev *pdev,
 		const struct pci_device_id *id)
 {
 	unsigned long quirks = id->driver_data;	/* [한국어] PCI ID 테이블 정적 quirk 시드 */
@@ -4700,7 +4700,7 @@ static struct nvme_dev *nvme_pci_alloc_dev(struct pci_dev *pdev,	/* [한국어] 
 	struct quirk_entry *qentry;	/* [한국어] 모듈 파라미터 동적 quirk */
 	int ret = -ENOMEM;	/* [한국어] 지역 변수 */
 
-	dev = kzalloc_node(struct_size(dev, descriptor_pools, nr_node_ids),	/* [한국어] PRP/SGL 디스크립터 경로 */
+	dev = kzalloc_node(struct_size(dev, descriptor_pools, nr_node_ids),
 			GFP_KERNEL, node);	/* [한국어] 본체+노드별 pool 배열 일괄 할당 */
 	if (!dev)	/* [한국어] 아키텍처 조건 분기 */
 		return ERR_PTR(-ENOMEM);	/* [한국어] PCIe NVMe 경로 반환 */
@@ -4710,7 +4710,7 @@ static struct nvme_dev *nvme_pci_alloc_dev(struct pci_dev *pdev,	/* [한국어] 
 	dev->nr_write_queues = write_queues;	/* [한국어] 초기 스냅샷 — setup_io 가 재샘플 */
 	dev->nr_poll_queues = poll_queues;	/* [한국어] PCIe NVMe 런타임 상태 갱신 */
 	dev->nr_allocated_queues = nvme_max_io_queues(dev) + 1;	/* [한국어] admin 포함 슬롯 */
-	dev->queues = kcalloc_node(dev->nr_allocated_queues,	/* [한국어] probe/remove 수명·자원 관리 */
+	dev->queues = kcalloc_node(dev->nr_allocated_queues,
 			sizeof(struct nvme_queue), GFP_KERNEL, node);	/* [한국어] 큐 배열 */
 	if (!dev->queues)	/* [한국어] 아키텍처 조건 분기 */
 		goto out_free_dev;	/* [한국어] 에러 언와인드/공통 경로 점프 */
@@ -4735,12 +4735,12 @@ static struct nvme_dev *nvme_pci_alloc_dev(struct pci_dev *pdev,	/* [한국어] 
 		quirks |= qentry->enabled_quirks;	/* [한국어] 강제 on */
 		quirks &= ~qentry->disabled_quirks;	/* [한국어] 강제 off */
 	}
-	ret = nvme_init_ctrl(&dev->ctrl, &pdev->dev, &nvme_pci_ctrl_ops,	/* [한국어] NVMe host 헬퍼/코어 API */
+	ret = nvme_init_ctrl(&dev->ctrl, &pdev->dev, &nvme_pci_ctrl_ops,
 			     quirks);	/* [한국어] core 컨트롤러 객체 초기화 + ops 연결 */
 	if (ret)	/* [한국어] 아키텍처 조건 분기 */
 		goto out_put_device;	/* [한국어] 에러 언와인드/공통 경로 점프 */
 
-	if (dev->ctrl.quirks & NVME_QUIRK_DMA_ADDRESS_BITS_48)	/* [한국어] 아키텍처 조건 분기 */
+	if (dev->ctrl.quirks & NVME_QUIRK_DMA_ADDRESS_BITS_48)
 		dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(48));	/* [한국어] 일부 플랫폼 48bit */
 	else
 		dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64));	/* [한국어] 표준 64bit DMA */
@@ -4752,7 +4752,7 @@ static struct nvme_dev *nvme_pci_alloc_dev(struct pci_dev *pdev,	/* [한국어] 
 	 * over a single page.
 	 */
 	/* [한국어] 단일 요청 크기/세그먼트 상한 — iod 메모리 폭주 방지 */
-	dev->ctrl.max_hw_sectors = min_t(u32,	/* [한국어] PCIe NVMe 아키텍처 단계 (BAR/SQ·CQ/도어벨/맵/리셋) */
+	dev->ctrl.max_hw_sectors = min_t(u32,
 			NVME_MAX_BYTES >> SECTOR_SHIFT,
 			dma_opt_mapping_size(&pdev->dev) >> 9);	/* [한국어] 8MiB 와 DMA opt 중 작은 쪽 */
 	dev->ctrl.max_segments = NVME_MAX_SEGS;	/* [한국어] SGL 페이지 한도 */
@@ -4775,13 +4775,13 @@ out_free_dev:
  * I/O tagset+dbbuf_set. 실패 시 역순 정리. 비동기 probe.
  * 호출 체인: pci_driver.probe → [여기] → nvme_start_ctrl → scan_work
  */
-static int nvme_probe(struct pci_dev *pdev, const struct pci_device_id *id)	/* [한국어] PCI 서브시스템 API */
+static int nvme_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 {
 	struct nvme_dev *dev;	/* [한국어] 이 PCI 함수의 트랜스포트 인스턴스 */
 	int result = -ENOMEM;	/* [한국어] 기본 에러 — 단계별 갱신 */
 
 	dev = nvme_pci_alloc_dev(pdev, id);	/* [한국어] nvme_dev+queues+quirks+init_ctrl */
-	if (IS_ERR(dev))	/* [한국어] 아키텍처 조건 분기 */
+	if (IS_ERR(dev))
 		return PTR_ERR(dev);	/* [한국어] 할당/init 실패 errno */
 
 	result = nvme_add_ctrl(&dev->ctrl);	/* [한국어] 전역 컨트롤러 목록·문자 장치 등록 */
@@ -4802,7 +4802,7 @@ static int nvme_probe(struct pci_dev *pdev, const struct pci_device_id *id)	/* [
 	if (result)	/* [한국어] 아키텍처 조건 분기 */
 		goto out_release_iod_mempool;	/* [한국어] 에러 언와인드/공통 경로 점프 */
 
-	result = nvme_alloc_admin_tag_set(&dev->ctrl, &dev->admin_tagset,	/* [한국어] NVMe host 헬퍼/코어 API */
+	result = nvme_alloc_admin_tag_set(&dev->ctrl, &dev->admin_tagset,
 				&nvme_mq_admin_ops, sizeof(struct nvme_iod));	/* [한국어] admin blk-mq + iod PDU */
 	if (result)	/* [한국어] 아키텍처 조건 분기 */
 		goto out_disable;	/* [한국어] 에러 언와인드/공통 경로 점프 */
@@ -4823,7 +4823,7 @@ static int nvme_probe(struct pci_dev *pdev, const struct pci_device_id *id)	/* [
 	if (result)	/* [한국어] 아키텍처 조건 분기 */
 		goto out_disable;	/* [한국어] 에러 언와인드/공통 경로 점프 */
 
-	if (nvme_ctrl_meta_sgl_supported(&dev->ctrl))	/* [한국어] NVMe host 헬퍼/코어 API */
+	if (nvme_ctrl_meta_sgl_supported(&dev->ctrl))
 		dev->ctrl.max_integrity_segments = NVME_MAX_META_SEGS;	/* [한국어] meta SGL 상한 */
 	else
 		dev->ctrl.max_integrity_segments = 1;	/* [한국어] MPTR 단일 세그먼트만 */
@@ -4841,12 +4841,12 @@ static int nvme_probe(struct pci_dev *pdev, const struct pci_device_id *id)	/* [
 		goto out_disable;	/* [한국어] 에러 언와인드/공통 경로 점프 */
 
 	if (dev->online_queues > 1) {	/* [한국어] admin 외에 I/O 큐가 있음 */
-		nvme_alloc_io_tag_set(&dev->ctrl, &dev->tagset, &nvme_mq_ops,	/* [한국어] NVMe host 헬퍼/코어 API */
+		nvme_alloc_io_tag_set(&dev->ctrl, &dev->tagset, &nvme_mq_ops,
 				nvme_pci_nr_maps(dev), sizeof(struct nvme_iod));	/* [한국어] I/O blk-mq */
 		nvme_dbbuf_set(dev);	/* [한국어] 컨트롤러에 dbbuf 주소 등록 */
 	}
 
-	if (!dev->ctrl.tagset)	/* [한국어] 아키텍처 조건 분기 */
+	if (!dev->ctrl.tagset)
 		dev_warn(dev->ctrl.device, "IO queues not created\n");	/* [한국어] admin-only 로 생존 가능 */
 
 	if (!nvme_change_ctrl_state(&dev->ctrl, NVME_CTRL_LIVE)) {	/* [한국어] 서비스 가능 상태 */
@@ -4888,7 +4888,7 @@ out_put_ctrl:
  *
  * device lock 보유 → remove 레이스 없음. disable_prepare_reset + sync.
  */
-static void nvme_reset_prepare(struct pci_dev *pdev)	/* [한국어] PCI 서브시스템 API */
+static void nvme_reset_prepare(struct pci_dev *pdev)
 {
 	struct nvme_dev *dev = pci_get_drvdata(pdev);	/* [한국어] PCI 서브시스템 API */
 
@@ -4905,7 +4905,7 @@ static void nvme_reset_prepare(struct pci_dev *pdev)	/* [한국어] PCI 서브�
  * [한국어]
  * nvme_reset_done - FLR 완료 후 reset_work 스케줄 및 flush
  */
-static void nvme_reset_done(struct pci_dev *pdev)	/* [한국어] PCI 서브시스템 API */
+static void nvme_reset_done(struct pci_dev *pdev)
 {
 	struct nvme_dev *dev = pci_get_drvdata(pdev);	/* [한국어] PCI 서브시스템 API */
 
@@ -4917,7 +4917,7 @@ static void nvme_reset_done(struct pci_dev *pdev)	/* [한국어] PCI 서브시�
  * [한국어]
  * nvme_shutdown - 시스템 종료 시 정상 shutdown_notification 경로 disable
  */
-static void nvme_shutdown(struct pci_dev *pdev)	/* [한국어] PCI 서브시스템 API */
+static void nvme_shutdown(struct pci_dev *pdev)
 {
 	struct nvme_dev *dev = pci_get_drvdata(pdev);	/* [한국어] PCI 서브시스템 API */
 
@@ -4935,7 +4935,7 @@ static void nvme_shutdown(struct pci_dev *pdev)	/* [한국어] PCI 서브시스�
  *
  * DELETING, 부재 시 DEAD 즉시 disable. reset_work flush 후 ns 제거·자원 해제.
  */
-static void nvme_remove(struct pci_dev *pdev)	/* [한국어] PCI 서브시스템 API */
+static void nvme_remove(struct pci_dev *pdev)
 {
 	struct nvme_dev *dev = pci_get_drvdata(pdev);	/* [한국어] probe 가 저장한 인스턴스 */
 
@@ -4968,7 +4968,7 @@ static void nvme_remove(struct pci_dev *pdev)	/* [한국어] PCI 서브시스템
  *
  * suspend 직전 last_ps 저장용. resume 이 동일 PS 로 복귀 시도.
  */
-static int nvme_get_power_state(struct nvme_ctrl *ctrl, u32 *ps)	/* [한국어] NVMe host 헬퍼/코어 API */
+static int nvme_get_power_state(struct nvme_ctrl *ctrl, u32 *ps)
 {
 	return nvme_get_features(ctrl, NVME_FEAT_POWER_MGMT, 0, NULL, 0, ps);	/* [한국어] admin Get Features PS */
 }
@@ -4979,7 +4979,7 @@ static int nvme_get_power_state(struct nvme_ctrl *ctrl, u32 *ps)	/* [한국어] 
  *
  * npss(최심 비동작) 또는 last_ps 복귀에 사용. PCI D-state 와 별개 프로토콜 PS.
  */
-static int nvme_set_power_state(struct nvme_ctrl *ctrl, u32 ps)	/* [한국어] NVMe host 헬퍼/코어 API */
+static int nvme_set_power_state(struct nvme_ctrl *ctrl, u32 ps)
 {
 	return nvme_set_features(ctrl, NVME_FEAT_POWER_MGMT, ps, NULL, 0, NULL);	/* [한국어] admin Set Features PS */
 }
@@ -4988,12 +4988,12 @@ static int nvme_set_power_state(struct nvme_ctrl *ctrl, u32 ps)	/* [한국어] N
  * [한국어]
  * nvme_resume - 가능하면 이전 PS 복귀+HMB, 실패 시 full reset
  */
-static int nvme_resume(struct device *dev)	/* [한국어] NVMe host 헬퍼/코어 API */
+static int nvme_resume(struct device *dev)
 {
 	struct nvme_dev *ndev = pci_get_drvdata(to_pci_dev(dev));	/* [한국어] PCI 서브시스템 API */
 	struct nvme_ctrl *ctrl = &ndev->ctrl;	/* [한국어] NVMe host 헬퍼/코어 API */
 
-	if (ndev->last_ps == U32_MAX ||	/* [한국어] 아키텍처 조건 분기 */
+	if (ndev->last_ps == U32_MAX ||
 	    nvme_set_power_state(ctrl, ndev->last_ps) != 0)	/* [한국어] PS 미저장 또는 복귀 실패 */
 		goto reset;	/* [한국어] full 컨트롤러 리셋 폴백 */
 	if (ctrl->hmpre && nvme_setup_host_mem(ndev))	/* [한국어] HMB 재설정 실패도 리셋 */
@@ -5012,7 +5012,7 @@ reset:
  * disable_prepare_reset. 아니면 freeze 후 HMB off, last_ps 저장, npss 진입.
  * 실패 시 unfreeze 후 에러 또는 full reset 폴백.
  */
-static int nvme_suspend(struct device *dev)	/* [한국어] NVMe host 헬퍼/코어 API */
+static int nvme_suspend(struct device *dev)
 {
 	struct pci_dev *pdev = to_pci_dev(dev);	/* [한국어] PCI 서브시스템 API */
 	struct nvme_dev *ndev = pci_get_drvdata(pdev);	/* [한국어] 이 함수의 컨트롤러 */
@@ -5035,7 +5035,7 @@ static int nvme_suspend(struct device *dev)	/* [한국어] NVMe host 헬퍼/코�
 	 * state (which may not be possible if the link is up).
 	 */
 	/* [한국어] 프로토콜 PS 가 부적합하면 PCI D3/full shutdown 경로 */
-	if (pm_suspend_via_firmware() || !ctrl->npss ||	/* [한국어] 아키텍처 조건 분기 */
+	if (pm_suspend_via_firmware() || !ctrl->npss ||
 	    !pcie_aspm_enabled(pdev) ||
 	    (ndev->ctrl.quirks & NVME_QUIRK_SIMPLE_SUSPEND))
 		return nvme_disable_prepare_reset(ndev, true);	/* [한국어] CC shutdown + 리셋 대기 */
@@ -5094,7 +5094,7 @@ unfreeze:
  * [한국어]
  * nvme_simple_suspend - freeze/poweroff 용 무조건 컨트롤러 shutdown
  */
-static int nvme_simple_suspend(struct device *dev)	/* [한국어] NVMe host 헬퍼/코어 API */
+static int nvme_simple_suspend(struct device *dev)
 {
 	struct nvme_dev *ndev = pci_get_drvdata(to_pci_dev(dev));	/* [한국어] PCI 서브시스템 API */
 
@@ -5105,7 +5105,7 @@ static int nvme_simple_suspend(struct device *dev)	/* [한국어] NVMe host 헬�
  * [한국어]
  * nvme_simple_resume - thaw/restore 용 reset 스케줄
  */
-static int nvme_simple_resume(struct device *dev)	/* [한국어] NVMe host 헬퍼/코어 API */
+static int nvme_simple_resume(struct device *dev)
 {
 	struct pci_dev *pdev = to_pci_dev(dev);	/* [한국어] PCI 서브시스템 API */
 	struct nvme_dev *ndev = pci_get_drvdata(pdev);	/* [한국어] PCI 서브시스템 API */
@@ -5131,7 +5131,7 @@ static const struct dev_pm_ops nvme_dev_pm_ops = {	/* [한국어] NVMe host 헬�
  * normal→CAN_RECOVER, frozen→RESETTING+disable→NEED_RESET,
  * perm_failure→DISCONNECT.
  */
-static pci_ers_result_t nvme_error_detected(struct pci_dev *pdev,	/* [한국어] PCI 서브시스템 API */
+static pci_ers_result_t nvme_error_detected(struct pci_dev *pdev,
 						pci_channel_state_t state)
 {
 	struct nvme_dev *dev = pci_get_drvdata(pdev);	/* [한국어] 오류 난 컨트롤러 */
@@ -5165,7 +5165,7 @@ static pci_ers_result_t nvme_error_detected(struct pci_dev *pdev,	/* [한국어]
  * [한국어]
  * nvme_slot_reset - 슬롯 리셋 후 config restore + try_sched_reset
  */
-static pci_ers_result_t nvme_slot_reset(struct pci_dev *pdev)	/* [한국어] PCI 서브시스템 API */
+static pci_ers_result_t nvme_slot_reset(struct pci_dev *pdev)
 {
 	struct nvme_dev *dev = pci_get_drvdata(pdev);	/* [한국어] PCI 서브시스템 API */
 
@@ -5180,7 +5180,7 @@ static pci_ers_result_t nvme_slot_reset(struct pci_dev *pdev)	/* [한국어] PCI
  * [한국어]
  * nvme_error_resume - 링크 복구 후 reset_work 완료 대기
  */
-static void nvme_error_resume(struct pci_dev *pdev)	/* [한국어] PCI 서브시스템 API */
+static void nvme_error_resume(struct pci_dev *pdev)
 {
 	struct nvme_dev *dev = pci_get_drvdata(pdev);	/* [한국어] PCI 서브시스템 API */
 
@@ -5421,7 +5421,7 @@ static struct pci_driver nvme_driver = {	/* [한국어] PCI 서브시스템 API 
  * [한국어]
  * nvme_init - 모듈 로드: SQE 크기 불변식 검증 후 pci_register_driver
  */
-static int __init nvme_init(void)	/* [한국어] NVMe host 헬퍼/코어 API */
+static int __init nvme_init(void)
 {
 	BUILD_BUG_ON(sizeof(struct nvme_create_cq) != 64);	/* [한국어] Create CQ SQE 는 정확히 64B */
 	BUILD_BUG_ON(sizeof(struct nvme_create_sq) != 64);	/* [한국어] Create SQ SQE 64B */
@@ -5435,7 +5435,7 @@ static int __init nvme_init(void)	/* [한국어] NVMe host 헬퍼/코어 API */
  * [한국어]
  * nvme_exit - quirk 리스트 free, pci_unregister, nvme_wq flush
  */
-static void __exit nvme_exit(void)	/* [한국어] NVMe host 헬퍼/코어 API */
+static void __exit nvme_exit(void)
 {
 	kfree(nvme_pci_quirk_list);	/* [한국어] 동적 quirks= 테이블 */
 	pci_unregister_driver(&nvme_driver);	/* [한국어] 전 장치 remove 경로 유도 */

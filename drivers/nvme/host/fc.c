@@ -483,7 +483,7 @@ struct nvme_fc_ctrl {
 };
 
 static inline struct nvme_fc_ctrl *	/* [한국어] NVMe/FC LS·FCP·rport 경로 헬퍼 */
-to_fc_ctrl(struct nvme_ctrl *ctrl)	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
+to_fc_ctrl(struct nvme_ctrl *ctrl)
 {
 	return container_of(ctrl, struct nvme_fc_ctrl, ctrl);	/* [한국어] NVMe/FC LS·FCP·rport 경로 헬퍼 */
 }
@@ -501,13 +501,13 @@ remoteport_to_rport(struct nvme_fc_remote_port *portptr)
 }
 
 static inline struct nvmefc_ls_req_op *	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-ls_req_to_lsop(struct nvmefc_ls_req *lsreq)	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
+ls_req_to_lsop(struct nvmefc_ls_req *lsreq)
 {
 	return container_of(lsreq, struct nvmefc_ls_req_op, ls_req);	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 }
 
 static inline struct nvme_fc_fcp_op *	/* [한국어] NVMe/FC LS·FCP·rport 경로 헬퍼 */
-fcp_req_to_fcp_op(struct nvmefc_fcp_req *fcpreq)	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
+fcp_req_to_fcp_op(struct nvmefc_fcp_req *fcpreq)
 {
 	return container_of(fcpreq, struct nvme_fc_fcp_op, fcp_req);	/* [한국어] NVMe/FC LS·FCP·rport 경로 헬퍼 */
 }
@@ -1378,8 +1378,8 @@ EXPORT_SYMBOL_GPL(nvme_fc_set_remoteport_devloss);	/* [한국어] NVMe/FC LS·FC
  * in the scatter list, setting all dma addresses to 0.
  */
 
-static inline dma_addr_t	/* [한국어] DMA 매핑 — 장치가 접근할 주소 확보 */
-fc_dma_map_single(struct device *dev, void *ptr, size_t size,	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
+static inline dma_addr_t
+fc_dma_map_single(struct device *dev, void *ptr, size_t size,
 		enum dma_data_direction dir)
 {
 	return dev ? dma_map_single(dev, ptr, size, dir) : (dma_addr_t)0L;	/* [한국어] DMA 매핑 — 장치가 접근할 주소 확보 */
@@ -1645,7 +1645,7 @@ nvme_fc_send_ls_req(struct nvme_fc_rport *rport, struct nvmefc_ls_req_op *lsop)
 static int
 nvme_fc_send_ls_req_async(struct nvme_fc_rport *rport,
 		struct nvmefc_ls_req_op *lsop,	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-		void (*done)(struct nvmefc_ls_req *req, int status))	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
+		void (*done)(struct nvmefc_ls_req *req, int status))
 {
 	/* don't wait for completion */
 
@@ -2639,7 +2639,7 @@ nvme_fc_ctrl_ioerr_work(struct work_struct *work)
  * Returns: UUID if there is an appid associated with VM or
  * NULL if the user/libvirt has not set the appid to VM
  */
-char *nvme_fc_io_getuuid(struct nvmefc_fcp_req *req)	/* [한국어] NVMe/FC LS·FCP·rport 경로 헬퍼 */
+char *nvme_fc_io_getuuid(struct nvmefc_fcp_req *req)
 {
 	struct nvme_fc_fcp_op *op = fcp_req_to_fcp_op(req);	/* [한국어] NVMe/FC LS·FCP·rport 경로 헬퍼 */
 	struct request *rq = op->rq;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
@@ -5337,8 +5337,8 @@ static struct nvmf_transport_ops nvme_fc_transport = {	/* [한국어] NVMe/FC LS
 /* Arbitrary successive failures max. With lots of subsystems could be high */
 #define DISCOVERY_MAX_FAIL	20	/* [한국어] 상수/매크로 — PDU·큐·타임아웃·플래그 */
 
-static ssize_t nvme_fc_nvme_discovery_store(struct device *dev,	/* [한국어] NVMe/FC LS·FCP·rport 경로 헬퍼 */
-		struct device_attribute *attr, const char *buf, size_t count)	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
+static ssize_t nvme_fc_nvme_discovery_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t count)
 {
 	unsigned long flags;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	LIST_HEAD(local_disc_list);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
@@ -5425,8 +5425,8 @@ static int fc_parse_cgrpid(const char *buf, u64 *id)	/* [한국어] 트랜스포
 /*
  * Parse and update the appid in the blkcg associated with the cgroupid.
  */
-static ssize_t fc_appid_store(struct device *dev,	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-		struct device_attribute *attr, const char *buf, size_t count)	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
+static ssize_t fc_appid_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t count)
 {
 	size_t orig_count = count;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
 	u64 cgrp_id;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */

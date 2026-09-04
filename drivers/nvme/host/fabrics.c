@@ -86,12 +86,12 @@ static struct nvmf_host *nvmf_default_host;	/* [한국어] 부팅 시 생성되�
  *
  * 리스트 삽입은 호출자(add/default)가 hosts_mutex 하에서 수행. kref=1 시작.
  */
-static struct nvmf_host *nvmf_host_alloc(const char *hostnqn, uuid_t *id)	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
+static struct nvmf_host *nvmf_host_alloc(const char *hostnqn, uuid_t *id)
 {
 	struct nvmf_host *host;	/* [한국어] 신규 host 인스턴스 */
 
 	host = kmalloc_obj(*host);	/* [한국어] host 구조체 슬랩 할당 */
-	if (!host)	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (!host)
 		return NULL;	/* [한국어] 메모리 부족 */
 
 	kref_init(&host->ref);	/* [한국어] 참조 카운트 1 — put 시 destroy */
@@ -110,7 +110,7 @@ static struct nvmf_host *nvmf_host_alloc(const char *hostnqn, uuid_t *id)	/* [�
  * 락: nvmf_hosts_mutex.
  * 호출: nvmf_parse_options 끝에서 opts->host 설정.
  */
-static struct nvmf_host *nvmf_host_add(const char *hostnqn, uuid_t *id)	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
+static struct nvmf_host *nvmf_host_add(const char *hostnqn, uuid_t *id)
 {
 	struct nvmf_host *host;	/* [한국어] 순회/결과 host */
 
@@ -164,7 +164,7 @@ out_unlock:
  * 스펙 관례: nqn.2014-08.org.nvmexpress:uuid:<HostID>
  * 사용자 공간 hostnqn 미지정 connect 가 이 기본 host 를 사용.
  */
-static struct nvmf_host *nvmf_host_default(void)	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
+static struct nvmf_host *nvmf_host_default(void)
 {
 	struct nvmf_host *host;	/* [한국어] host — 함수/구조 문맥의 상태 */
 	char nqn[NVMF_NQN_SIZE];	/* [한국어] 생성할 기본 Host NQN 버퍼 */
@@ -175,7 +175,7 @@ static struct nvmf_host *nvmf_host_default(void)	/* [한국어] 함수 시그니
 		"nqn.2014-08.org.nvmexpress:uuid:%pUb", &id);	/* [한국어] 스펙 권장 UUID 형식 NQN */
 
 	host = nvmf_host_alloc(nqn, &id);	/* [한국어] host 상수 — 상위 enum 역할 참고 */
-	if (!host)	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (!host)
 		return NULL;	/* [한국어] 모듈 init 실패 유발 */
 
 	mutex_lock(&nvmf_hosts_mutex);	/* [한국어] 기본 host 도 같은 목록에 올라야 이후 조회에서 발견된다 */
@@ -191,7 +191,7 @@ static struct nvmf_host *nvmf_host_default(void)	/* [한국어] 함수 시그니
  *
  * 호출: kref_put → 여기. hosts_mutex 로 list_del 직렬화.
  */
-static void nvmf_host_destroy(struct kref *ref)	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
+static void nvmf_host_destroy(struct kref *ref)
 {
 	struct nvmf_host *host = container_of(ref, struct nvmf_host, ref);	/* [한국어] kref → host */
 
@@ -208,9 +208,9 @@ static void nvmf_host_destroy(struct kref *ref)	/* [한국어] 함수 시그니�
  *
  * opts 해제·모듈 exit 에서 호출.
  */
-static void nvmf_host_put(struct nvmf_host *host)	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
+static void nvmf_host_put(struct nvmf_host *host)
 {
-	if (host)	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (host)
 		kref_put(&host->ref, nvmf_host_destroy);	/* [한국어] 마지막 put 이면 destroy */
 }
 
@@ -227,19 +227,19 @@ static void nvmf_host_put(struct nvmf_host *host)	/* [한국어] 함수 시그�
  * traddr/trsvcid/host_traddr/host_iface 중 mask 에 있는 항목만 콤마 구분 출력.
  * 호출: core/sysfs address 속성 show.
  */
-int nvmf_get_address(struct nvme_ctrl *ctrl, char *buf, int size)	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
+int nvmf_get_address(struct nvme_ctrl *ctrl, char *buf, int size)
 {
 	int len = 0;	/* [한국어] 누적 출력 바이트 */
 
-	if (ctrl->opts->mask & NVMF_OPT_TRADDR)	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (ctrl->opts->mask & NVMF_OPT_TRADDR)
 		len += scnprintf(buf, size, "traddr=%s", ctrl->opts->traddr);	/* [한국어] 원격 전송 주소 */
-	if (ctrl->opts->mask & NVMF_OPT_TRSVCID)	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (ctrl->opts->mask & NVMF_OPT_TRSVCID)
 		len += scnprintf(buf + len, size - len, "%strsvcid=%s",	/* [한국어] 포맷 작성 */
 				(len) ? "," : "", ctrl->opts->trsvcid);	/* [한국어] 원격 서비스/포트 ID */
-	if (ctrl->opts->mask & NVMF_OPT_HOST_TRADDR)	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (ctrl->opts->mask & NVMF_OPT_HOST_TRADDR)
 		len += scnprintf(buf + len, size - len, "%shost_traddr=%s",	/* [한국어] 포맷 작성 */
 				(len) ? "," : "", ctrl->opts->host_traddr);	/* [한국어] 로컬 바인드 주소 */
-	if (ctrl->opts->mask & NVMF_OPT_HOST_IFACE)	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (ctrl->opts->mask & NVMF_OPT_HOST_IFACE)
 		len += scnprintf(buf + len, size - len, "%shost_iface=%s",	/* [한국어] 포맷 작성 */
 				(len) ? "," : "", ctrl->opts->host_iface);	/* [한국어] 로컬 인터페이스 이름 */
 	len += scnprintf(buf + len, size - len, "\n");	/* [한국어] sysfs 관례 개행 */
@@ -260,7 +260,7 @@ EXPORT_SYMBOL_GPL(nvmf_get_address);	/* [한국어] 트랜스포트/sysfs 모듈
  * fabrics_q 동기 제출, 결과는 CQE result 64bit 하위. attrib=0 (32-bit).
  * 호출 체인: enable/disable_ctrl 등 → ctrl->ops->reg_read32 → [여기]
  */
-int nvmf_reg_read32(struct nvme_ctrl *ctrl, u32 off, u32 *val)	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
+int nvmf_reg_read32(struct nvme_ctrl *ctrl, u32 off, u32 *val)
 {
 	struct nvme_command cmd = { };	/* [한국어] Property Get 캡슐 SQE */
 	union nvme_result res;	/* [한국어] CQE result 필드 */
@@ -270,12 +270,12 @@ int nvmf_reg_read32(struct nvme_ctrl *ctrl, u32 off, u32 *val)	/* [한국어] �
 	cmd.prop_get.fctype = nvme_fabrics_type_property_get;	/* [한국어] fctype = Property Get */
 	cmd.prop_get.offset = cpu_to_le32(off);	/* [한국어] 대상 property 오프셋 (예: CSTS) */
 
-	ret = __nvme_submit_sync_cmd(ctrl->fabrics_q, &cmd, &res, NULL, 0,	/* [한국어] ret 상수 — 상위 enum 역할 참고 */
+	ret = __nvme_submit_sync_cmd(ctrl->fabrics_q, &cmd, &res, NULL, 0,
 			NVME_QID_ANY, NVME_SUBMIT_RESERVED);	/* [한국어] fabrics_q 동기 제출; RESERVED 태그 사용 */
 
-	if (ret >= 0)	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (ret >= 0)
 		*val = le64_to_cpu(res.u64);	/* [한국어] 성공/NVMe status 시에도 result 에 값이 올 수 있음 */
-	if (unlikely(ret != 0))	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (unlikely(ret != 0))
 		dev_err(ctrl->device,	/* [한국어] 진단 로그 */
 			"Property Get error: %d, offset %#x\n",
 			ret > 0 ? ret & ~NVME_STATUS_DNR : ret, off);	/* [한국어] DNR 비트 제거한 가독 로그 */
@@ -293,7 +293,7 @@ EXPORT_SYMBOL_GPL(nvmf_reg_read32);	/* [한국어] tcp/rdma/fc 가 CSTS 등 32�
  *
  * 32-bit 버전과 동일 경로이나 attrib 로 폭을 지정. 스펙 fabrics property 모델.
  */
-int nvmf_reg_read64(struct nvme_ctrl *ctrl, u32 off, u64 *val)	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
+int nvmf_reg_read64(struct nvme_ctrl *ctrl, u32 off, u64 *val)
 {
 	struct nvme_command cmd = { };	/* [한국어] 지역/멤버 상태 — 상위 함수·구조 아키텍처 참고 */
 	union nvme_result res;	/* [한국어] res — 함수/구조 문맥의 상태 */
@@ -307,9 +307,9 @@ int nvmf_reg_read64(struct nvme_ctrl *ctrl, u32 off, u64 *val)	/* [한국어] �
 	ret = __nvme_submit_sync_cmd(ctrl->fabrics_q, &cmd, &res, NULL, 0,	/* [한국어] ret 상수 — 상위 enum 역할 참고 */
 			NVME_QID_ANY, NVME_SUBMIT_RESERVED);
 
-	if (ret >= 0)	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (ret >= 0)
 		*val = le64_to_cpu(res.u64);	/* [한국어] 64-bit property 값 */
-	if (unlikely(ret != 0))	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (unlikely(ret != 0))
 		dev_err(ctrl->device,	/* [한국어] 진단 로그 */
 			"Property Get error: %d, offset %#x\n",
 			ret > 0 ? ret & ~NVME_STATUS_DNR : ret, off);
@@ -326,7 +326,7 @@ EXPORT_SYMBOL_GPL(nvmf_reg_read64);	/* [한국어] CAP 처럼 64비트인 레지
  *
  * enable 시 CC.EN=1, shutdown 시 SHN 등. fabrics_q 동기. attrib=0 (32-bit).
  */
-int nvmf_reg_write32(struct nvme_ctrl *ctrl, u32 off, u32 val)	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
+int nvmf_reg_write32(struct nvme_ctrl *ctrl, u32 off, u32 val)
 {
 	struct nvme_command cmd = { };	/* [한국어] 지역/멤버 상태 — 상위 함수·구조 아키텍처 참고 */
 	int ret;	/* [한국어] ret — 함수/구조 문맥의 상태 */
@@ -339,7 +339,7 @@ int nvmf_reg_write32(struct nvme_ctrl *ctrl, u32 off, u32 val)	/* [한국어] �
 
 	ret = __nvme_submit_sync_cmd(ctrl->fabrics_q, &cmd, NULL, NULL, 0,	/* [한국어] ret 상수 — 상위 enum 역할 참고 */
 			NVME_QID_ANY, NVME_SUBMIT_RESERVED);
-	if (unlikely(ret))	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (unlikely(ret))
 		dev_err(ctrl->device,	/* [한국어] 진단 로그 */
 			"Property Set error: %d, offset %#x\n",
 			ret > 0 ? ret & ~NVME_STATUS_DNR : ret, off);
@@ -353,11 +353,11 @@ EXPORT_SYMBOL_GPL(nvmf_reg_write32);	/* [한국어] CC 를 써서 컨트롤러�
  *
  * nvme_wait_reset 으로 리셋 권한 획득. reg_write32(NSSR) 후 try_sched_reset.
  */
-int nvmf_subsystem_reset(struct nvme_ctrl *ctrl)	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
+int nvmf_subsystem_reset(struct nvme_ctrl *ctrl)
 {
 	int ret;	/* [한국어] ret — 함수/구조 문맥의 상태 */
 
-	if (!nvme_wait_reset(ctrl))	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (!nvme_wait_reset(ctrl))
 		return -EBUSY;	/* [한국어] 이미 다른 리셋/상태 전이 진행 중 */
 
 	ret = ctrl->ops->reg_write32(ctrl, NVME_REG_NSSR, NVME_SUBSYS_RESET);	/* [한국어] 원격 NSSR 에 리셋 시그니처 기록 */
@@ -386,8 +386,8 @@ EXPORT_SYMBOL_GPL(nvmf_subsystem_reset);	/* [한국어] NSSR 레지스터 — PC
  * INVALID_PARAM 시 CQE result 의 offset 이 SQE 필드인지 data 필드인지
  * (상위 16비트)로 갈라 잘못된 파라미터를 명시. 인증·권한·busy 등 공통 코드 처리.
  */
-static void nvmf_log_connect_error(struct nvme_ctrl *ctrl,	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
-		int errval, int offset, struct nvme_command *cmd,	/* [한국어] 지역/멤버 상태 — 상위 함수·구조 아키텍처 참고 */
+static void nvmf_log_connect_error(struct nvme_ctrl *ctrl,
+		int errval, int offset, struct nvme_command *cmd,
 		struct nvmf_connect_data *data)
 {
 	int err_sctype = errval & ~NVME_STATUS_DNR;	/* [한국어] DNR 제거한 SC — 분기 비교용 */
@@ -477,13 +477,13 @@ static void nvmf_log_connect_error(struct nvme_ctrl *ctrl,	/* [한국어] 함수
  *
  * Admin Connect 는 cntlid=0xffff(동적 할당 요청), I/O Connect 는 할당된 cntlid.
  */
-static struct nvmf_connect_data *nvmf_connect_data_prep(struct nvme_ctrl *ctrl,	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
-		u16 cntlid)	/* [한국어] 지역/멤버 상태 — 상위 함수·구조 아키텍처 참고 */
+static struct nvmf_connect_data *nvmf_connect_data_prep(struct nvme_ctrl *ctrl,
+		u16 cntlid)
 {
 	struct nvmf_connect_data *data;	/* [한국어] data — 함수/구조 문맥의 상태 */
 
 	data = kzalloc_obj(*data);	/* [한국어] 1024B Connect data 제로 할당 */
-	if (!data)	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (!data)
 		return NULL;	/* [한국어] 대상 없음 */
 
 	uuid_copy(&data->hostid, &ctrl->opts->host->id);	/* [한국어] Host Identifier */
@@ -500,8 +500,8 @@ static struct nvmf_connect_data *nvmf_connect_data_prep(struct nvme_ctrl *ctrl,	
  *
  * Admin(qid=0): AQ depth-1, KATO(ms). I/O: ctrl->sqsize. disable_sqflow 옵션 반영.
  */
-static void nvmf_connect_cmd_prep(struct nvme_ctrl *ctrl, u16 qid,	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
-		struct nvme_command *cmd)	/* [한국어] 지역/멤버 상태 — 상위 함수·구조 아키텍처 참고 */
+static void nvmf_connect_cmd_prep(struct nvme_ctrl *ctrl, u16 qid,
+		struct nvme_command *cmd)
 {
 	cmd->connect.opcode = nvme_fabrics_command;	/* [한국어] nvme_fabrics_command — 함수/구조 문맥의 상태 */
 	cmd->connect.fctype = nvme_fabrics_type_connect;	/* [한국어] fctype = Connect */
@@ -519,7 +519,7 @@ static void nvmf_connect_cmd_prep(struct nvme_ctrl *ctrl, u16 qid,	/* [한국어
 		cmd->connect.kato = cpu_to_le32(ctrl->kato * 1000);	/* [한국어] LE 온와이어 엔디안 변환 */
 	}
 
-	if (ctrl->opts->disable_sqflow)	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (ctrl->opts->disable_sqflow)
 		cmd->connect.cattr |= NVME_CONNECT_DISABLE_SQFLOW;	/* [한국어] SQ 흐름제어 비활성 요청 비트 */
 }
 
@@ -535,7 +535,7 @@ static void nvmf_connect_cmd_prep(struct nvme_ctrl *ctrl, u16 qid,	/* [한국어
  * 제출: fabrics_q, AT_HEAD|NOWAIT|RESERVED — 연결 초기 전용 경로.
  * 호출: tcp/rdma/fc 의 setup_ctrl / reconnect 초기 단계.
  */
-int nvmf_connect_admin_queue(struct nvme_ctrl *ctrl)	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
+int nvmf_connect_admin_queue(struct nvme_ctrl *ctrl)
 {
 	struct nvme_command cmd = { };	/* [한국어] 지역/멤버 상태 — 상위 함수·구조 아키텍처 참고 */
 	union nvme_result res;	/* [한국어] res — 함수/구조 문맥의 상태 */
@@ -549,7 +549,7 @@ int nvmf_connect_admin_queue(struct nvme_ctrl *ctrl)	/* [한국어] 함수 시�
 	if (!data)	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
 		return -ENOMEM;	/* [한국어] 할당 실패 전파 */
 
-	ret = __nvme_submit_sync_cmd(ctrl->fabrics_q, &cmd, &res,	/* [한국어] ret 상수 — 상위 enum 역할 참고 */
+	ret = __nvme_submit_sync_cmd(ctrl->fabrics_q, &cmd, &res,
 			data, sizeof(*data), NVME_QID_ANY,
 			NVME_SUBMIT_AT_HEAD |
 			NVME_SUBMIT_NOWAIT |
@@ -603,7 +603,7 @@ EXPORT_SYMBOL_GPL(nvmf_connect_admin_queue);	/* [한국어] 각 트랜스포트�
  * connect_q 에 qid 지정 제출. I/O 큐 ASCR(secure concat) 는 미구현(-EOPNOTSUPP).
  * ATR 만 지원 시 큐별 auth negotiate/wait.
  */
-int nvmf_connect_io_queue(struct nvme_ctrl *ctrl, u16 qid)	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
+int nvmf_connect_io_queue(struct nvme_ctrl *ctrl, u16 qid)
 {
 	struct nvme_command cmd = { };	/* [한국어] 지역/멤버 상태 — 상위 함수·구조 아키텍처 참고 */
 	struct nvmf_connect_data *data;	/* [한국어] data — 함수/구조 문맥의 상태 */
@@ -617,7 +617,7 @@ int nvmf_connect_io_queue(struct nvme_ctrl *ctrl, u16 qid)	/* [한국어] 함수
 	if (!data)	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
 		return -ENOMEM;	/* [한국어] 할당 실패 전파 */
 
-	ret = __nvme_submit_sync_cmd(ctrl->connect_q, &cmd, &res,	/* [한국어] ret 상수 — 상위 enum 역할 참고 */
+	ret = __nvme_submit_sync_cmd(ctrl->connect_q, &cmd, &res,
 			data, sizeof(*data), qid,
 			NVME_SUBMIT_AT_HEAD |
 			NVME_SUBMIT_RESERVED |
@@ -676,16 +676,16 @@ EXPORT_SYMBOL_GPL(nvmf_connect_io_queue);	/* [한국어] I/O 큐마다 한 번�
  * 재시도 무의미. max_reconnects==-1 이면 무한, 아니면 nr_reconnects 비교.
  * 호출: 트랜스포트 error_recovery / reconnect 워크.
  */
-bool nvmf_should_reconnect(struct nvme_ctrl *ctrl, int status)	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
+bool nvmf_should_reconnect(struct nvme_ctrl *ctrl, int status)
 {
-	if (status > 0 && (status & NVME_STATUS_DNR))	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (status > 0 && (status & NVME_STATUS_DNR))
 		return false;	/* [한국어] 스펙 Do Not Retry — 동일 파라미터로 재 Connect 금지 */
 
-	if (status == -EKEYREJECTED || status == -ENOKEY)	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (status == -EKEYREJECTED || status == -ENOKEY)
 		return false;	/* [한국어] 호스트측 키 거부/부재 — 재시도해도 동일 실패 */
 
-	if (ctrl->opts->max_reconnects == -1 ||	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
-	    ctrl->nr_reconnects < ctrl->opts->max_reconnects)	/* [한국어] 인자/선언 연속행 */
+	if (ctrl->opts->max_reconnects == -1 ||
+	    ctrl->nr_reconnects < ctrl->opts->max_reconnects)
 		return true;	/* [한국어] 무한 또는 남은 재시도 횟수 있음 */
 
 	return false;	/* [한국어] ctrl_loss_tmo 환산 재시도 한도 소진 */
@@ -701,9 +701,9 @@ EXPORT_SYMBOL_GPL(nvmf_should_reconnect);	/* [한국어] 트랜스포트의 오�
  *
  * create_ctrl 필수. 모듈 init 에서 호출. nvmf_create_ctrl 이 이름으로 조회.
  */
-int nvmf_register_transport(struct nvmf_transport_ops *ops)	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
+int nvmf_register_transport(struct nvmf_transport_ops *ops)
 {
-	if (!ops->create_ctrl)	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (!ops->create_ctrl)
 		return -EINVAL;	/* [한국어] create_ctrl 없는 ops 는 무의미 */
 
 	down_write(&nvmf_transports_rwsem);	/* [한국어] 등록은 배타 write 락 */
@@ -721,7 +721,7 @@ EXPORT_SYMBOL_GPL(nvmf_register_transport);	/* [한국어] 각 트랜스포트 �
  * [한국어]
  * nvmf_unregister_transport - 모듈 exit 시 ops 목록에서 제거
  */
-void nvmf_unregister_transport(struct nvmf_transport_ops *ops)	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
+void nvmf_unregister_transport(struct nvmf_transport_ops *ops)
 {
 	down_write(&nvmf_transports_rwsem);	/* [한국어] 조회 중에 목록이 바뀌면 안 되므로 쓰기 잠금 */
 	list_del(&ops->entry);	/* [한국어] 등록 해제 — 이후 create_ctrl 조회 실패 */
@@ -735,7 +735,7 @@ EXPORT_SYMBOL_GPL(nvmf_unregister_transport);	/* [한국어] 각 트랜스포트
  *
  * 전제: nvmf_transports_rwsem read 보유.
  */
-static struct nvmf_transport_ops *nvmf_lookup_transport(	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
+static struct nvmf_transport_ops *nvmf_lookup_transport(
 		struct nvmf_ctrl_options *opts)
 {
 	struct nvmf_transport_ops *ops;	/* [한국어] ops — 함수/구조 문맥의 상태 */
@@ -743,7 +743,7 @@ static struct nvmf_transport_ops *nvmf_lookup_transport(	/* [한국어] 함수 �
 	lockdep_assert_held(&nvmf_transports_rwsem);	/* [한국어] 조회 중 등록/해제 경합 방지 전제 */
 
 	list_for_each_entry(ops, &nvmf_transports, entry) {	/* [한국어] 트랜스포트 수가 몇 개뿐이라 선형 탐색으로 충분하다 */
-		if (strcmp(ops->name, opts->transport) == 0)	/* [한국어] 메모리/문자열 연산 */
+		if (strcmp(ops->name, opts->transport) == 0)
 			return ops;	/* [한국어] 이름 일치 트랜스포트 발견 */
 	}
 
@@ -756,7 +756,7 @@ static struct nvmf_transport_ops *nvmf_lookup_transport(	/* [한국어] 함수 �
  *
  * CONFIG_NVME_TCP_TLS 필수. keyring=/tls_key= 옵션 파싱에서 사용.
  */
-static struct key *nvmf_parse_key(int key_id)	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
+static struct key *nvmf_parse_key(int key_id)
 {
 	struct key *key;	/* [한국어] key — 함수/구조 문맥의 상태 */
 
@@ -766,7 +766,7 @@ static struct key *nvmf_parse_key(int key_id)	/* [한국어] 함수 시그니처
 	}
 
 	key = nvme_tls_key_lookup(key_id);	/* [한국어] key_id 로 커널 키링 조회 */
-	if (IS_ERR(key))	/* [한국어] 에러 포인터 규약 */
+	if (IS_ERR(key))
 		pr_err("key id %08x not found\n", key_id);	/* [한국어] 사용자 공간 미등록 키 */
 	else
 		pr_debug("Using key id %08x\n", key_id);	/* [한국어] 진단 로그 */
@@ -824,8 +824,8 @@ static const match_table_t opt_tokens = {
  * → nvmf_host_add. 파괴적 파싱을 위해 kstrdup 사본 사용.
  * 호출: nvmf_create_ctrl.
  */
-static int nvmf_parse_options(struct nvmf_ctrl_options *opts,	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
-		const char *buf)	/* [한국어] 지역/멤버 상태 — 상위 함수·구조 아키텍처 참고 */
+static int nvmf_parse_options(struct nvmf_ctrl_options *opts,
+		const char *buf)
 {
 	substring_t args[MAX_OPT_ARGS];	/* [한국어] match_token 인자 슬롯 */
 	char *options, *o, *p;	/* [한국어] 복제 버퍼 / 순회 커서 / 현재 토큰 */
@@ -862,7 +862,7 @@ static int nvmf_parse_options(struct nvmf_ctrl_options *opts,	/* [한국어] 함
 	strscpy(hostnqn, nvmf_default_host->nqn, NVMF_NQN_SIZE);	/* [한국어] NQN 도 기본값에서 시작해 파싱 중 덮어쓰일 수 있다 */
 
 	while ((p = strsep(&o, ",\n")) != NULL) {	/* [한국어] 콤마/개행으로 옵션 토큰 분리 */
-		if (!*p)	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+		if (!*p)
 			continue;	/* [한국어] 빈 토큰 스킵 */
 
 		token = match_token(p, opt_tokens, args);	/* [한국어] 패턴 매칭 → NVMF_OPT_* 비트 */
@@ -893,7 +893,7 @@ static int nvmf_parse_options(struct nvmf_ctrl_options *opts,	/* [한국어] 함
 				goto out;	/* [한국어] out — 함수/구조 문맥의 상태 */
 			}
 			opts->discovery_nqn =
-				!(strcmp(opts->subsysnqn,	/* [한국어] 메모리/문자열 연산 */
+				!(strcmp(opts->subsysnqn,
 					 NVME_DISC_SUBSYS_NAME));	/* [한국어] well-known discovery NQN 이면 디스커버리 모드 */
 			break;	/* [한국어] 루프/스위치 종료 */
 		case NVMF_OPT_TRADDR:	/* [한국어] 다중 분기 케이스 */
@@ -967,7 +967,7 @@ static int nvmf_parse_options(struct nvmf_ctrl_options *opts,	/* [한국어] 함
 				goto out;	/* [한국어] out — 함수/구조 문맥의 상태 */
 			}
 
-			if (token < 0)	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+			if (token < 0)
 				pr_warn("ctrl_loss_tmo < 0 will reconnect forever\n");	/* [한국어] 진단 로그 */
 			ctrl_loss_tmo = token;	/* [한국어] ctrl_loss_tmo 상수 — 상위 enum 역할 참고 */
 			break;	/* [한국어] 루프/스위치 종료 */
@@ -977,7 +977,7 @@ static int nvmf_parse_options(struct nvmf_ctrl_options *opts,	/* [한국어] 함
 				goto out;	/* [한국어] out — 함수/구조 문맥의 상태 */
 			}
 
-			if (token >= 0)	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+			if (token >= 0)
 				pr_warn("I/O fail on reconnect controller after %d sec\n",	/* [한국어] 진단 로그 */
 					token);
 			else
@@ -1192,7 +1192,7 @@ static int nvmf_parse_options(struct nvmf_ctrl_options *opts,	/* [한국어] 함
 		opts->nr_poll_queues = 0;
 		opts->duplicate_connect = true;	/* [한국어] 다중 디스커버리 세션 허용 */
 	} else {	/* [한국어] 대안 경로 */
-		if (!opts->kato)	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+		if (!opts->kato)
 			opts->kato = NVME_DEFAULT_KATO;	/* [한국어] 일반 컨트롤러 기본 keep-alive */
 	}
 	if (ctrl_loss_tmo < 0) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
@@ -1200,7 +1200,7 @@ static int nvmf_parse_options(struct nvmf_ctrl_options *opts,	/* [한국어] 함
 	} else {	/* [한국어] 대안 경로 */
 		opts->max_reconnects = DIV_ROUND_UP(ctrl_loss_tmo,	/* [한국어] 올림 환산 */
 						opts->reconnect_delay);	/* [한국어] 총 허용 시간을 재시도 횟수로 환산 */
-		if (ctrl_loss_tmo < opts->fast_io_fail_tmo)	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+		if (ctrl_loss_tmo < opts->fast_io_fail_tmo)
 			pr_warn("failfast tmo (%d) larger than controller loss tmo (%d)\n",	/* [한국어] 진단 로그 */
 				opts->fast_io_fail_tmo, ctrl_loss_tmo);	/* [한국어] fail-fast 가 loss 보다 크면 설정 모순 경고 */
 	}
@@ -1242,8 +1242,8 @@ out:
  * 아니면 DEFAULT 공유. 남는 큐를 POLL 에 할당.
  * 호출: 트랜스포트가 실제 생성 가능 큐 수를 안 뒤 map 직전.
  */
-void nvmf_set_io_queues(struct nvmf_ctrl_options *opts, u32 nr_io_queues,	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
-			u32 io_queues[HCTX_MAX_TYPES])	/* [한국어] 지역/멤버 상태 — 상위 함수·구조 아키텍처 참고 */
+void nvmf_set_io_queues(struct nvmf_ctrl_options *opts, u32 nr_io_queues,
+			u32 io_queues[HCTX_MAX_TYPES])
 {
 	if (opts->nr_write_queues && opts->nr_io_queues < nr_io_queues) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
 		/*
@@ -1284,8 +1284,8 @@ EXPORT_SYMBOL_GPL(nvmf_set_io_queues);	/* [한국어] tcp/rdma 가 큐 종류별
  * 분리 모드: DEFAULT(write) 먼저, READ 가 그 다음 오프셋.
  * 공유 모드: DEFAULT 와 READ 가 동일 큐 집합. POLL 은 맨 뒤 오프셋.
  */
-void nvmf_map_queues(struct blk_mq_tag_set *set, struct nvme_ctrl *ctrl,	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
-		     u32 io_queues[HCTX_MAX_TYPES])	/* [한국어] 지역/멤버 상태 — 상위 함수·구조 아키텍처 참고 */
+void nvmf_map_queues(struct blk_mq_tag_set *set, struct nvme_ctrl *ctrl,
+		     u32 io_queues[HCTX_MAX_TYPES])
 {
 	struct nvmf_ctrl_options *opts = ctrl->opts;	/* [한국어] 사용자가 준 큐 종류별 개수가 여기 들어 있다 */
 
@@ -1333,8 +1333,8 @@ EXPORT_SYMBOL_GPL(nvmf_map_queues);	/* [한국어] 트랜스포트의 map_queues
  *
  * 누락 시 패턴 문자열을 경고로 출력해 nvme-cli 사용자가 고치기 쉽게 함.
  */
-static int nvmf_check_required_opts(struct nvmf_ctrl_options *opts,	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
-		unsigned int required_opts)	/* [한국어] 지역/멤버 상태 — 상위 함수·구조 아키텍처 참고 */
+static int nvmf_check_required_opts(struct nvmf_ctrl_options *opts,
+		unsigned int required_opts)
 {
 	if ((opts->mask & required_opts) != required_opts) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
 		unsigned int i;	/* [한국어] i — 함수/구조 문맥의 상태 */
@@ -1360,12 +1360,12 @@ static int nvmf_check_required_opts(struct nvmf_ctrl_options *opts,	/* [한국�
  * 중복 connect 거부/재사용 판단. 베이스(NQN/host) + traddr/trsvcid +
  * host_traddr/iface 대칭성(한쪽만 지정되면 불일치).
  */
-bool nvmf_ip_options_match(struct nvme_ctrl *ctrl,	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
+bool nvmf_ip_options_match(struct nvme_ctrl *ctrl,
 		struct nvmf_ctrl_options *opts)
 {
 	if (!nvmf_ctlr_matches_baseopts(ctrl, opts) ||	/* [한국어] NQN·host 가 같아야 같은 대상이고, 그 위에 주소까지 봐야 같은 경로다 */
-	    strcmp(opts->traddr, ctrl->opts->traddr) ||	/* [한국어] 메모리/문자열 연산 */
-	    strcmp(opts->trsvcid, ctrl->opts->trsvcid))	/* [한국어] 메모리/문자열 연산 */
+	    strcmp(opts->traddr, ctrl->opts->traddr) ||
+	    strcmp(opts->trsvcid, ctrl->opts->trsvcid))
 		return false;	/* [한국어] 서브시스템/host/원격 주소 불일치 */
 
 	/*
@@ -1384,7 +1384,7 @@ bool nvmf_ip_options_match(struct nvme_ctrl *ctrl,	/* [한국어] 함수 시그�
 	/* [한국어] 로컬 바인드 옵션은 "둘 다 없음" 또는 "둘 다 같고 동일 값" 만 매치 */
 	if ((opts->mask & NVMF_OPT_HOST_TRADDR) &&	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
 	    (ctrl->opts->mask & NVMF_OPT_HOST_TRADDR)) {
-		if (strcmp(opts->host_traddr, ctrl->opts->host_traddr))	/* [한국어] 메모리/문자열 연산 */
+		if (strcmp(opts->host_traddr, ctrl->opts->host_traddr))
 			return false;	/* [한국어] 로컬 주소 문자열 불일치 */
 	} else if ((opts->mask & NVMF_OPT_HOST_TRADDR) ||	/* [한국어] 대안 조건 경로 */
 		   (ctrl->opts->mask & NVMF_OPT_HOST_TRADDR)) {
@@ -1393,7 +1393,7 @@ bool nvmf_ip_options_match(struct nvme_ctrl *ctrl,	/* [한국어] 함수 시그�
 
 	if ((opts->mask & NVMF_OPT_HOST_IFACE) &&	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
 	    (ctrl->opts->mask & NVMF_OPT_HOST_IFACE)) {
-		if (strcmp(opts->host_iface, ctrl->opts->host_iface))	/* [한국어] 메모리/문자열 연산 */
+		if (strcmp(opts->host_iface, ctrl->opts->host_iface))
 			return false;	/* [한국어] 음성 판정 */
 	} else if ((opts->mask & NVMF_OPT_HOST_IFACE) ||	/* [한국어] 대안 조건 경로 */
 		   (ctrl->opts->mask & NVMF_OPT_HOST_IFACE)) {
@@ -1408,8 +1408,8 @@ EXPORT_SYMBOL_GPL(nvmf_ip_options_match);	/* [한국어] IP 기반 트랜스포�
  * [한국어]
  * nvmf_check_allowed_opts - 공통+트랜스포트 허용 목록 밖 옵션 거부
  */
-static int nvmf_check_allowed_opts(struct nvmf_ctrl_options *opts,	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
-		unsigned int allowed_opts)	/* [한국어] 지역/멤버 상태 — 상위 함수·구조 아키텍처 참고 */
+static int nvmf_check_allowed_opts(struct nvmf_ctrl_options *opts,
+		unsigned int allowed_opts)
 {
 	if (opts->mask & ~allowed_opts) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
 		unsigned int i;	/* [한국어] i — 함수/구조 문맥의 상태 */
@@ -1434,7 +1434,7 @@ static int nvmf_check_allowed_opts(struct nvmf_ctrl_options *opts,	/* [한국어
  *
  * host kref, 키링 참조, 문자열, 민감 시크릿(kfree_sensitive).
  */
-void nvmf_free_options(struct nvmf_ctrl_options *opts)	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
+void nvmf_free_options(struct nvmf_ctrl_options *opts)
 {
 	nvmf_host_put(opts->host);	/* [한국어] host 참조 반환 */
 	key_put(opts->keyring);	/* [한국어] 키링 참조 (NULL-safe key_put) */
@@ -1478,11 +1478,11 @@ nvmf_create_ctrl(struct device *dev, const char *buf)	/* [한국어] class ctl �
 	int ret;	/* [한국어] 파싱·검사·생성 errno */
 
 	opts = kzalloc_obj(*opts);	/* [한국어] 옵션 구조체 제로 할당 */
-	if (!opts)	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (!opts)
 		return ERR_PTR(-ENOMEM);	/* [한국어] 옵션 메모리 부족 */
 
 	ret = nvmf_parse_options(opts, buf);	/* [한국어] write 버퍼 → opts 필드 */
-	if (ret)	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (ret)
 		goto out_free_opts;	/* [한국어] 토큰 파싱 실패 — 부분 할당 정리 */
 
 
@@ -1495,7 +1495,7 @@ nvmf_create_ctrl(struct device *dev, const char *buf)	/* [한국어] class ctl �
 	 */
 	/* [한국어] 공통 필수 먼저 확인 후 mask 에서 제거 — 트랜스포트는 자기 옵션만 봄 */
 	ret = nvmf_check_required_opts(opts, NVMF_REQUIRED_OPTS);	/* [한국어] ret 상수 — 상위 enum 역할 참고 */
-	if (ret)	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (ret)
 		goto out_free_opts;	/* [한국어] out_free_opts — 함수/구조 문맥의 상태 */
 	opts->mask &= ~NVMF_REQUIRED_OPTS;	/* [한국어] transport/nqn 비트 소비 처리 */
 
@@ -1517,7 +1517,7 @@ nvmf_create_ctrl(struct device *dev, const char *buf)	/* [한국어] class ctl �
 	ret = nvmf_check_required_opts(opts, ops->required_opts);	/* [한국어] 트랜스포트 고유 필수 (예: traddr) */
 	if (ret)	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
 		goto out_module_put;	/* [한국어] out_module_put — 함수/구조 문맥의 상태 */
-	ret = nvmf_check_allowed_opts(opts, NVMF_ALLOWED_OPTS |	/* [한국어] ret 상수 — 상위 enum 역할 참고 */
+	ret = nvmf_check_allowed_opts(opts, NVMF_ALLOWED_OPTS |
 				ops->allowed_opts | ops->required_opts);	/* [한국어] 공통∪트랜스포트 허용 집합 밖 거부 */
 	if (ret)	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
 		goto out_module_put;	/* [한국어] out_module_put — 함수/구조 문맥의 상태 */
@@ -1555,15 +1555,15 @@ static DEFINE_MUTEX(nvmf_dev_mutex);	/* [한국어] misc fd 당 한 컨트롤러
  * 한 fd 에 한 번만 성공 write (seq_file->private 에 ctrl 보관).
  * 성공 시 count 반환, 실패 시 errno. nvme-cli connect 의 커널 진입점.
  */
-static ssize_t nvmf_dev_write(struct file *file, const char __user *ubuf,	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
-		size_t count, loff_t *pos)	/* [한국어] 지역/멤버 상태 — 상위 함수·구조 아키텍처 참고 */
+static ssize_t nvmf_dev_write(struct file *file, const char __user *ubuf,
+		size_t count, loff_t *pos)
 {
 	struct seq_file *seq_file = file->private_data;	/* [한국어] single_open 이 만든 seq_file */
 	struct nvme_ctrl *ctrl;	/* [한국어] ctrl — 함수/구조 문맥의 상태 */
 	const char *buf;	/* [한국어] buf — 함수/구조 문맥의 상태 */
 	int ret = 0;	/* [한국어] 지역/멤버 상태 — 상위 함수·구조 아키텍처 참고 */
 
-	if (count > PAGE_SIZE)	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (count > PAGE_SIZE)
 		return -ENOMEM;	/* [한국어] 옵션 문자열 상한 — 페이지 단위 */
 
 	buf = memdup_user_nul(ubuf, count);	/* [한국어] 유저 버퍼 커널 복사 + NUL 종단 */
@@ -1596,7 +1596,7 @@ out_unlock:
  *
  * instance=-1,cntlid=-1 로 "아직 컨트롤러 없음" 신호 후 토큰 패턴 덤프.
  */
-static void __nvmf_concat_opt_tokens(struct seq_file *seq_file)	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
+static void __nvmf_concat_opt_tokens(struct seq_file *seq_file)
 {
 	const struct match_token *tok;	/* [한국어] tok — 함수/구조 문맥의 상태 */
 	int idx;	/* [한국어] idx — 함수/구조 문맥의 상태 */
@@ -1608,7 +1608,7 @@ static void __nvmf_concat_opt_tokens(struct seq_file *seq_file)	/* [한국어] �
 	seq_puts(seq_file, "instance=-1,cntlid=-1");	/* [한국어] 미연결 센티널 */
 	for (idx = 0; idx < ARRAY_SIZE(opt_tokens); idx++) {	/* [한국어] 정적 배열 크기 */
 		tok = &opt_tokens[idx];	/* [한국어] tok 상수 — 상위 enum 역할 참고 */
-		if (tok->token == NVMF_OPT_ERR)	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+		if (tok->token == NVMF_OPT_ERR)
 			continue;	/* [한국어] ERR 센티널 패턴 제외 */
 		seq_putc(seq_file, ',');	/* [한국어] 옵션 이름들을 쉼표로 이어 붙인다 — 사용자 공간이 지원 옵션을 알아내는 방법 */
 		seq_puts(seq_file, tok->pattern);	/* [한국어] 사용자 공간 도움용 옵션 문법 */
@@ -1620,7 +1620,7 @@ static void __nvmf_concat_opt_tokens(struct seq_file *seq_file)	/* [한국어] �
  * [한국어]
  * nvmf_dev_show - misc read: 연결 후면 instance/cntlid, 전이면 옵션 목록
  */
-static int nvmf_dev_show(struct seq_file *seq_file, void *private)	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
+static int nvmf_dev_show(struct seq_file *seq_file, void *private)
 {
 	struct nvme_ctrl *ctrl;	/* [한국어] ctrl — 함수/구조 문맥의 상태 */
 
@@ -1643,7 +1643,7 @@ out_unlock:
  * [한국어]
  * nvmf_dev_open - misc open: single_open 으로 show 콜백 연결
  */
-static int nvmf_dev_open(struct inode *inode, struct file *file)	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
+static int nvmf_dev_open(struct inode *inode, struct file *file)
 {
 	/*
 	 * The miscdevice code initializes file->private_data, but doesn't
@@ -1657,12 +1657,12 @@ static int nvmf_dev_open(struct inode *inode, struct file *file)	/* [한국어] 
  * [한국어]
  * nvmf_dev_release - fd close 시 생성했던 컨트롤러 참조 반환
  */
-static int nvmf_dev_release(struct inode *inode, struct file *file)	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
+static int nvmf_dev_release(struct inode *inode, struct file *file)
 {
 	struct seq_file *seq_file = file->private_data;	/* [한국어] open 시 설치한 seq_file */
 	struct nvme_ctrl *ctrl = seq_file->private;	/* [한국어] write 가 저장한 컨트롤러 또는 NULL */
 
-	if (ctrl)	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (ctrl)
 		nvme_put_ctrl(ctrl);	/* [한국어] write 가 잡은 ctrl 참조 균형 */
 	return single_release(inode, file);	/* [한국어] seq_file 정리 */
 }
@@ -1687,7 +1687,7 @@ static struct miscdevice nvmf_misc = {	/* [한국어] /dev/nvme-fabrics — nvme
  *
  * 모듈 로드 시 사용자 공간 connect 경로를 연다.
  */
-static int __init nvmf_init(void)	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
+static int __init nvmf_init(void)
 {
 	int ret;	/* [한국어] ret — 함수/구조 문맥의 상태 */
 
@@ -1732,7 +1732,7 @@ out_free_host:
  *
  * BUILD_BUG_ON 은 스펙 고정 레이아웃이 깨지면 빌드 실패로 조기 발견.
  */
-static void __exit nvmf_exit(void)	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
+static void __exit nvmf_exit(void)
 {
 	misc_deregister(&nvmf_misc);	/* [한국어] /dev/nvme-fabrics 제거 */
 	device_destroy(&nvmf_class, MKDEV(0, 0));	/* [한국어] class ctl 장치 제거 */

@@ -668,7 +668,7 @@ static int nvme_rdma_create_qp(struct nvme_rdma_queue *queue, const int factor)
 }
 
 static void nvme_rdma_exit_request(struct blk_mq_tag_set *set,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-		struct request *rq, unsigned int hctx_idx)	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
+		struct request *rq, unsigned int hctx_idx)
 {
 	struct nvme_rdma_request *req = blk_mq_rq_to_pdu(rq);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 
@@ -676,7 +676,7 @@ static void nvme_rdma_exit_request(struct blk_mq_tag_set *set,	/* [한국어] NV
 }
 
 static int nvme_rdma_init_request(struct blk_mq_tag_set *set,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-		struct request *rq, unsigned int hctx_idx,	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
+		struct request *rq, unsigned int hctx_idx,
 		unsigned int numa_node)
 {
 	struct nvme_rdma_ctrl *ctrl = to_rdma_ctrl(set->driver_data);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
@@ -1908,7 +1908,7 @@ static void nvme_rdma_dma_unmap_req(struct ib_device *ibdev, struct request *rq)
 }
 
 static void nvme_rdma_unmap_data(struct nvme_rdma_queue *queue,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-		struct request *rq)	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
+		struct request *rq)
 {
 	struct nvme_rdma_request *req = blk_mq_rq_to_pdu(rq);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 	struct nvme_rdma_device *dev = queue->device;	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
@@ -2993,7 +2993,7 @@ static enum blk_eh_timer_return nvme_rdma_timeout(struct request *rq)	/* [한국
 }
 
 static blk_status_t nvme_rdma_queue_rq(struct blk_mq_hw_ctx *hctx,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-		const struct blk_mq_queue_data *bd)	/* [한국어] blk-mq — 태그·hctx·타임아웃·맵·완료 연동 */
+		const struct blk_mq_queue_data *bd)
 {
 	struct nvme_ns *ns = hctx->queue->queuedata;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
 	struct nvme_rdma_queue *queue = hctx->driver_data;	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
