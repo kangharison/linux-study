@@ -332,7 +332,7 @@ static unsigned int apple_nvme_queue_depth(struct apple_nvme_queue *q)	/* [한�
  * 복구 불가 경고 후 nvme_reset_ctrl. 실제 soft-reset 도 실패할 수 있음.
  * 호출 체인: RTKit → [여기] → reset_work
  */
-static void apple_nvme_rtkit_crashed(void *cookie, const void *crashlog, size_t crashlog_size)	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+static void apple_nvme_rtkit_crashed(void *cookie, const void *crashlog, size_t crashlog_size)
 {
 	struct apple_nvme *anv = cookie;	/* [한국어] rtkit 등록 시 넘긴 장치 포인터 */
 
@@ -347,7 +347,7 @@ static void apple_nvme_rtkit_crashed(void *cookie, const void *crashlog, size_t 
  * RTKit 공유 메모리용 coherent 할당 후 SART allow. 벤더 명령 버퍼 경로.
  * 실패 시 -ENOMEM/-EINVAL. 호출 체인: RTKit shmem_setup → [여기]
  */
-static int apple_nvme_sart_dma_setup(void *cookie,	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+static int apple_nvme_sart_dma_setup(void *cookie,
 				     struct apple_rtkit_shmem *bfr)	/* [한국어] Apple-ANS: 자료구조/열거 — 트랜스포트 상태 모델 */
 {
 	struct apple_nvme *anv = cookie;	/* [한국어] 장치 컨텍스트 */
@@ -358,7 +358,7 @@ static int apple_nvme_sart_dma_setup(void *cookie,	/* [한국어] Apple-ANS: 트
 	if (!bfr->size)	/* [한국어] 크기 0 거부 */
 		return -EINVAL;	/* [한국어] 빈 창 불가 */
 
-	bfr->buffer =	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	bfr->buffer =	/* [한국어] 코프로세서와 공유할 버퍼 — 물리 연속이어야 SART 한 구간으로 덮인다 */
 		dma_alloc_coherent(anv->dev, bfr->size, &bfr->iova, GFP_KERNEL);	/* [한국어] 일관 DMA 버퍼+IOVA 확보 */
 	if (!bfr->buffer)	/* [한국어] 메모리 부족 */
 		return -ENOMEM;	/* [한국어] 할당 실패 전파 */
@@ -379,7 +379,7 @@ static int apple_nvme_sart_dma_setup(void *cookie,	/* [한국어] Apple-ANS: 트
  *
  * setup 의 대칭. 호출 체인: RTKit shmem_destroy → [여기]
  */
-static void apple_nvme_sart_dma_destroy(void *cookie,	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+static void apple_nvme_sart_dma_destroy(void *cookie,
 					struct apple_rtkit_shmem *bfr)	/* [한국어] Apple-ANS: 자료구조/열거 — 트랜스포트 상태 모델 */
 {
 	struct apple_nvme *anv = cookie;	/* [한국어] 장치 컨텍스트 */
@@ -428,7 +428,7 @@ static void apple_nvme_submit_cmd_t8015(struct apple_nvme_queue *q,	/* [한국�
 
 	if (q->is_adminq)	/* [한국어] admin: 64B 슬롯 배열 */
 		memcpy(&q->sqes[q->sq_tail], cmd, sizeof(*cmd));	/* [한국어] tail 슬롯에 SQE 기록 */
-	else	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	else	/* [한국어] 구세대는 SQ 항목 크기가 커서(IOSQES) 바이트 오프셋을 직접 계산한다 */
 		memcpy((void *)q->sqes + (q->sq_tail << APPLE_NVME_IOSQES),
 			cmd, sizeof(*cmd));	/* [한국어] I/O: 128B 스트라이드 슬롯에 SQE */
 
@@ -463,7 +463,7 @@ static void apple_nvme_submit_cmd_t8103(struct apple_nvme_queue *q,	/* [한국�
 
 	if (nvme_is_write(cmd))	/* [한국어] 쓰기면 호스트→디바이스 DMA */
 		tcb->dma_flags = APPLE_ANS_TCB_DMA_TO_DEVICE;	/* [한국어] TO_DEVICE 방향 비트 */
-	else	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	else	/* [한국어] 읽기는 반대 방향 — TCB 가 DMA 방향을 하드웨어에 명시한다 */
 		tcb->dma_flags = APPLE_ANS_TCB_DMA_FROM_DEVICE;	/* [한국어] FROM_DEVICE(읽기) */
 
 	memcpy(&q->sqes[tag], cmd, sizeof(*cmd));	/* [한국어] 태그 인덱스 슬롯에 SQE 배치 */
@@ -496,12 +496,12 @@ static void apple_nvme_submit_cmd_t8103(struct apple_nvme_queue *q,	/* [한국�
  *
  * 단일 페이지 이하로 제한해 GFP_ATOMIC mempool 안전성 확보.
  */
-static inline size_t apple_nvme_iod_alloc_size(void)	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+static inline size_t apple_nvme_iod_alloc_size(void)
 {
-	const unsigned int nprps = DIV_ROUND_UP(	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	const unsigned int nprps = DIV_ROUND_UP(	/* [한국어] 최대 전송 크기를 덮는 PRP 개수. 시작이 페이지 중간일 수 있어 한 페이지를 더 잡는다 */
 		NVME_MAX_KB_SZ + NVME_CTRL_PAGE_SIZE, NVME_CTRL_PAGE_SIZE);	/* [한국어] 최대 페이로드 기준 PRP 개수 상한 */
 	const int npages = DIV_ROUND_UP(8 * nprps, PAGE_SIZE - 8);	/* [한국어] PRP list 페이지 체인 길이 */
-	const size_t alloc_size = sizeof(__le64 *) * npages +	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	const size_t alloc_size = sizeof(__le64 *) * npages +	/* [한국어] PRP 리스트 페이지 포인터 배열 + 세그먼트 배열 — 요청 하나가 쓰는 총량 */
 				  sizeof(struct scatterlist) * NVME_MAX_SEGS;	/* [한국어] 포인터 배열 + sg[] 합산 */
 
 	return alloc_size;	/* [한국어] mempool 오브젝트 크기 */
@@ -565,17 +565,17 @@ static void apple_nvme_unmap_data(struct apple_nvme *anv, struct request *req)	/
 	if (iod->npages == 0)	/* [한국어] small pool 단일 PRP list */
 		dma_pool_free(anv->prp_small_pool, apple_nvme_iod_list(req)[0],	/* [한국어] Apple-ANS: DMA 매핑 — 장치 접근 가능 주소 */
 			      iod->first_dma);	/* [한국어] 256B 풀 반환 */
-	else	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	else	/* [한국어] 두 개 이상이면 풀 하나로 안 되고 PRP 리스트 페이지들을 되짚어 풀어야 한다 */
 		apple_nvme_free_prps(anv, req);	/* [한국어] 다중 페이지 PRP 체인 해제 */
 	mempool_free(iod->sg, anv->iod_mempool);	/* [한국어] sg+포인터 배열 mempool 반환 */
 }
 
 static void apple_nvme_print_sgl(struct scatterlist *sgl, int nents)	/* [한국어] Apple-ANS: 자료구조/열거 — 트랜스포트 상태 모델 */
 {
-	int i;	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	int i;	/* [한국어] for_each_sg 가 요구하는 인덱스 변수 */
 	struct scatterlist *sg;	/* [한국어] Apple-ANS: 자료구조/열거 — 트랜스포트 상태 모델 */
 
-	for_each_sg(sgl, sg, nents, i) {	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	for_each_sg(sgl, sg, nents, i) {	/* [한국어] 체인된 산재 리스트라 배열처럼 순회할 수 없다 — 매크로가 체인을 따라간다 */
 		dma_addr_t phys = sg_phys(sg);	/* [한국어] Apple-ANS: DMA 매핑 — 장치 접근 가능 주소 */
 
 		pr_warn("sg[%d] phys_addr:%pad offset:%d length:%d dma_address:%pad dma_length:%d\n",	/* [한국어] Apple-ANS: DMA 매핑 — 장치 접근 가능 주소 */
@@ -679,7 +679,7 @@ free_prps:	/* [한국어] list 할당 실패 언와인드 */
 	apple_nvme_free_prps(anv, req);	/* [한국어] 이미 할당된 list 페이지 반환 */
 	return BLK_STS_RESOURCE;	/* [한국어] 자원 부족 */
 bad_sgl:	/* [한국어] SGL 무결성 오류 */
-	WARN(DO_ONCE(apple_nvme_print_sgl, iod->sg, iod->nents),	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	WARN(DO_ONCE(apple_nvme_print_sgl, iod->sg, iod->nents),	/* [한국어] DO_ONCE 라 부팅 중 같은 버그가 반복돼도 로그를 한 번만 남긴다 */
 	     "Invalid SGL for payload:%d nents:%d\n", blk_rq_payload_bytes(req),
 	     iod->nents);	/* [한국어] 1회 덤프 후 IOERR */
 	return BLK_STS_IOERR;	/* [한국어] 재시도 무의미한 맵 오류 */
@@ -812,7 +812,7 @@ apple_nvme_queue_tagset(struct apple_nvme *anv, struct apple_nvme_queue *q)	/* [
 {
 	if (q->is_adminq)	/* [한국어] admin 태그 공간 */
 		return anv->admin_tagset.tags[0];	/* [한국어] admin tags */
-	else	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	else	/* [한국어] I/O 큐는 별도 태그셋 — 태그 공간이 겹치지 않아야 TCB 인덱스가 유일해진다 */
 		return anv->tagset.tags[0];	/* [한국어] I/O tags (공유 공간 예약 포함) */
 }
 
@@ -847,129 +847,301 @@ static inline void apple_nvme_handle_cqe(struct apple_nvme_queue *q,	/* [한국�
 		apple_nvme_complete_rq(req);	/* [한국어] 배치 실패/비배치 → 즉시 unmap+complete */
 }
 
-static inline void apple_nvme_update_cq_head(struct apple_nvme_queue *q)	/* [한국어] Apple-ANS: 자료구조/열거 — 트랜스포트 상태 모델 */
+/*
+ * [한국어]
+ * apple_nvme_update_cq_head - 완료 큐 소비 위치를 한 칸 전진시킨다
+ *
+ * @q: 방금 한 항목을 소비한 완료 큐
+ * @return: 없음
+ *
+ * NVMe 완료 큐는 원형 버퍼이고, 호스트는 별도의 "얼마나 찼는가" 레지스터
+ * 없이 위상(phase) 비트 하나로 새 항목을 알아본다. 컨트롤러는 큐를 한
+ * 바퀴 돌 때마다 쓰는 위상 값을 뒤집으므로, 호스트도 되감을 때 같이
+ * 뒤집어야 다음 바퀴의 항목을 새것으로 인식한다.
+ *
+ * 뒤집기를 빠뜨리면 이미 처리한 옛 항목을 새 완료로 오인해 무한히 같은
+ * 요청을 완료 처리한다. 반대로 되감지 않고 뒤집기만 하면 새 항목을
+ * 영원히 못 본다. 두 갱신은 반드시 짝을 이룬다.
+ *
+ * 실행 컨텍스트: 인터럽트 핸들러 또는 폴링. anv->lock 아래에서 불린다.
+ *
+ * 호출 체인: apple_nvme_poll_cq → [이 함수]
+ */
+static inline void apple_nvme_update_cq_head(struct apple_nvme_queue *q)
 {
-	u32 tmp = q->cq_head + 1;	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	u32 tmp = q->cq_head + 1;	/* [한국어] 되감김 여부를 먼저 판단하려고 임시 변수에 담는다 */
 
-	if (tmp == apple_nvme_queue_depth(q)) {	/* [한국어] Apple-ANS: 제어 분기 — 오류·상태·자원 조건에 따른 경로 선택 */
-		q->cq_head = 0;	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-		q->cq_phase ^= 1;	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	if (tmp == apple_nvme_queue_depth(q)) {	/* [한국어] 큐 끝을 지났다 — 원형 버퍼를 한 바퀴 돌았다 */
+		q->cq_head = 0;	/* [한국어] 처음으로 되감는다 */
+		q->cq_phase ^= 1;	/* [한국어] 위상도 함께 뒤집어야 다음 바퀴 항목을 새것으로 인식한다 */
 	} else {
-		q->cq_head = tmp;	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+		q->cq_head = tmp;	/* [한국어] 평범한 전진 — 위상은 그대로 */
 	}
 }
 
-static bool apple_nvme_poll_cq(struct apple_nvme_queue *q,	/* [한국어] Apple-ANS: 자료구조/열거 — 트랜스포트 상태 모델 */
-			       struct io_comp_batch *iob)	/* [한국어] Apple-ANS: 자료구조/열거 — 트랜스포트 상태 모델 */
+/*
+ * [한국어]
+ * apple_nvme_poll_cq - 완료 큐에 쌓인 항목을 모두 거둬들인다
+ *
+ * @q:   훑어볼 완료 큐(admin 또는 I/O)
+ * @iob: 완료를 모아 담을 배치. 블록 계층이 한 번에 끝내도록 해 준다.
+ * @return: 하나라도 처리했으면 true. 인터럽트 핸들러가 IRQ_HANDLED 판단에 쓴다.
+ *
+ * 위상 비트가 바뀐 항목이 없을 때까지 돈다. 컨트롤러는 인터럽트 하나로
+ * 여러 완료를 알릴 수 있으므로 반드시 반복해야 하며, 하나만 처리하고
+ * 나가면 남은 완료가 다음 인터럽트가 올 때까지 묶인다.
+ *
+ * dma_rmb() 가 필요한 이유는 위 영어 주석에 있다. 위상 비트를 읽어
+ * "이 항목은 유효하다"고 판단한 것과 나머지 필드를 읽는 것 사이에는
+ * 제어 의존성밖에 없는데, 제어 의존성은 읽기 재정렬을 막지 못한다.
+ * 장벽이 없으면 위상보다 먼저 실려 온 낡은 CQE 내용을 읽을 수 있다.
+ *
+ * 도어벨 쓰기는 루프 밖에서 한 번만 한다. 항목마다 쓰면 MMIO 왕복이
+ * 늘고, 컨트롤러가 알아야 하는 것은 최종 위치뿐이다.
+ *
+ * 실행 컨텍스트: 인터럽트 또는 폴링. 호출자가 anv->lock 을 든다.
+ *
+ * 호출 체인:
+ *   apple_nvme_handle_cq → [이 함수] → apple_nvme_handle_cqe / writel
+ */
+static bool apple_nvme_poll_cq(struct apple_nvme_queue *q,
+			       struct io_comp_batch *iob)
 {
-	bool found = false;	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	bool found = false;	/* [한국어] 하나라도 처리했는지 — IRQ_HANDLED 판단의 근거가 된다 */
 
-	while (apple_nvme_cqe_pending(q)) {	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-		found = true;	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	while (apple_nvme_cqe_pending(q)) {	/* [한국어] 위상이 뒤집힌 항목이 남아 있는 동안 계속 — 인터럽트 하나에 완료 여럿이 실린다 */
+		found = true;
 
 		/*
 		 * load-load control dependency between phase and the rest of
 		 * the cqe requires a full read memory barrier
 		 */
-		dma_rmb();	/* [한국어] Apple-ANS: DMA 매핑 — 장치 접근 가능 주소 */
-		apple_nvme_handle_cqe(q, iob, q->cq_head);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-		apple_nvme_update_cq_head(q);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+		/* [한국어] 위 영어 주석대로, 제어 의존성만으로는 읽기 재정렬이
+		 * 막히지 않는다. 장벽이 없으면 유효하다고 판단한 항목의 낡은
+		 * 내용을 읽는다. */
+		dma_rmb();
+		apple_nvme_handle_cqe(q, iob, q->cq_head);	/* [한국어] 현재 위치의 CQE 를 요청과 짝지어 완료 처리한다 */
+		apple_nvme_update_cq_head(q);	/* [한국어] 소비 위치를 전진(필요하면 되감고 위상 뒤집기) */
 	}
 
-	if (found)	/* [한국어] Apple-ANS: 제어 분기 — 오류·상태·자원 조건에 따른 경로 선택 */
-		writel(q->cq_head, q->cq_db);
+	if (found)	/* [한국어] 아무것도 없었다면 도어벨을 건드릴 이유가 없다 */
+		writel(q->cq_head, q->cq_db);	/* [한국어] 최종 위치만 한 번 알린다 — 항목마다 쓰면 MMIO 왕복만 는다 */
 
-	return found;	/* [한국어] Apple-ANS: 반환 — 상위 계층에 성공/에러/상태 전달 */
+	return found;
 }
 
-static bool apple_nvme_handle_cq(struct apple_nvme_queue *q, bool force)	/* [한국어] Apple-ANS: 자료구조/열거 — 트랜스포트 상태 모델 */
+/*
+ * [한국어]
+ * apple_nvme_handle_cq - 큐 하나의 완료를 처리하고 배치를 비운다
+ *
+ * @q:     대상 큐
+ * @force: 큐가 비활성이어도 처리할지. 해체·복구 경로에서 true 가 온다.
+ * @return: 하나라도 처리했으면 true
+ *
+ * poll_cq 를 감싸면서 두 가지를 더한다. 첫째, 비활성 큐를 걸러 낸다 --
+ * 큐를 내리는 중에 늦게 도착한 인터럽트가 이미 정리된 자료구조를 건드리는
+ * 것을 막는다. force 는 그 정리 자체가 남은 완료를 훑어야 할 때 쓰인다.
+ *
+ * 둘째, 배치를 실제로 완료시킨다. poll_cq 는 iob 에 모으기만 하므로,
+ * 여기서 비워 주지 않으면 요청이 블록 계층으로 돌아가지 못한다.
+ *
+ * 실행 컨텍스트: 인터럽트 또는 해체 경로. 호출자가 anv->lock 을 든다.
+ *
+ * 호출 체인:
+ *   apple_nvme_irq / 해체 경로 → [이 함수] → apple_nvme_poll_cq
+ *                                          → apple_nvme_complete_batch
+ */
+static bool apple_nvme_handle_cq(struct apple_nvme_queue *q, bool force)
 {
-	bool found;	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	DEFINE_IO_COMP_BATCH(iob);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	bool found;
+	DEFINE_IO_COMP_BATCH(iob);	/* [한국어] 스택에 배치 헤드를 잡는다 — 여러 완료를 한 번에 블록 계층으로 넘기기 위해 */
 
-	if (!READ_ONCE(q->enabled) && !force)	/* [한국어] Apple-ANS: 제어 분기 — 오류·상태·자원 조건에 따른 경로 선택 */
-		return false;	/* [한국어] Apple-ANS: 반환 — 상위 계층에 성공/에러/상태 전달 */
+	if (!READ_ONCE(q->enabled) && !force)	/* [한국어] 내려간 큐에 늦게 온 인터럽트가 정리된 자료구조를 건드리는 것을 막는다 */
+		return false;
 
-	found = apple_nvme_poll_cq(q, &iob);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	found = apple_nvme_poll_cq(q, &iob);	/* [한국어] 쌓인 항목을 모두 거둬 iob 에 모은다 */
 
-	if (!rq_list_empty(&iob.req_list))	/* [한국어] Apple-ANS: 제어 분기 — 오류·상태·자원 조건에 따른 경로 선택 */
-		apple_nvme_complete_batch(&iob);
+	if (!rq_list_empty(&iob.req_list))	/* [한국어] 모인 것이 있을 때만 */
+		apple_nvme_complete_batch(&iob);	/* [한국어] 여기서 비워야 요청이 블록 계층으로 돌아간다 */
 
-	return found;	/* [한국어] Apple-ANS: 반환 — 상위 계층에 성공/에러/상태 전달 */
+	return found;
 }
 
-static irqreturn_t apple_nvme_irq(int irq, void *data)	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+/*
+ * [한국어]
+ * apple_nvme_irq - ANS 코프로세서의 완료 인터럽트 핸들러
+ *
+ * @irq:  인터럽트 번호(쓰지 않는다)
+ * @data: request_irq 에 넘긴 드라이버 인스턴스
+ * @return: 처리한 완료가 있으면 IRQ_HANDLED, 없으면 IRQ_NONE
+ *
+ * 일반 NVMe 는 큐마다 벡터를 갖지만 ANS 는 인터럽트 하나를 admin 큐와
+ * I/O 큐가 공유한다. 따라서 어느 쪽이 울렸는지 알 수 없고, 매번 둘 다
+ * 훑어야 한다. 둘 다 검사해야 하므로 첫 번째에서 처리했다고 빠져나가면
+ * 안 된다 -- && 가 아니라 두 개의 독립된 if 인 이유다.
+ *
+ * spin_lock_irqsave 를 쓰는 이유: 같은 락을 폴링·해체 경로도 잡는데
+ * 그쪽은 프로세스 문맥이다. 인터럽트가 그 구간을 선점하면 자기 자신을
+ * 기다리는 교착이 되므로, 락을 잡는 동안 로컬 인터럽트를 막는다.
+ *
+ * IRQ_NONE 을 정직하게 돌려주는 것도 의미가 있다. 공유 인터럽트 선에서
+ * 커널이 "아무도 처리하지 않는 인터럽트"를 감지해 폭주를 차단한다.
+ *
+ * 실행 컨텍스트: 하드 인터럽트. 잠들 수 없다.
+ *
+ * 호출 체인: 커널 IRQ 코어 → [이 함수] → apple_nvme_handle_cq
+ */
+static irqreturn_t apple_nvme_irq(int irq, void *data)
 {
-	struct apple_nvme *anv = data;	/* [한국어] Apple-ANS: 자료구조/열거 — 트랜스포트 상태 모델 */
-	bool handled = false;	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	unsigned long flags;	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	struct apple_nvme *anv = data;	/* [한국어] request_irq 등록 시 넘긴 인스턴스 */
+	bool handled = false;
+	unsigned long flags;
 
-	spin_lock_irqsave(&anv->lock, flags);	/* [한국어] Apple-ANS: 동기화 — 큐/연결/상태 보호 */
-	if (apple_nvme_handle_cq(&anv->ioq, false))	/* [한국어] Apple-ANS: 제어 분기 — 오류·상태·자원 조건에 따른 경로 선택 */
+	spin_lock_irqsave(&anv->lock, flags);	/* [한국어] 같은 락을 프로세스 문맥도 잡는다 — 선점되면 자기 자신을 기다리는 교착이 된다 */
+	if (apple_nvme_handle_cq(&anv->ioq, false))	/* [한국어] 인터럽트를 공유하므로 어느 큐가 울렸는지 알 수 없다 */
 		handled = true;
-	if (apple_nvme_handle_cq(&anv->adminq, false))	/* [한국어] Apple-ANS: 제어 분기 — 오류·상태·자원 조건에 따른 경로 선택 */
+	if (apple_nvme_handle_cq(&anv->adminq, false))	/* [한국어] 그래서 첫 번째에서 나가지 않고 admin 큐도 반드시 본다 */
 		handled = true;
-	spin_unlock_irqrestore(&anv->lock, flags);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	spin_unlock_irqrestore(&anv->lock, flags);
 
-	if (handled)	/* [한국어] Apple-ANS: 제어 분기 — 오류·상태·자원 조건에 따른 경로 선택 */
-		return IRQ_HANDLED;	/* [한국어] Apple-ANS: 반환 — 상위 계층에 성공/에러/상태 전달 */
-	return IRQ_NONE;	/* [한국어] Apple-ANS: 반환 — 상위 계층에 성공/에러/상태 전달 */
+	if (handled)
+		return IRQ_HANDLED;
+	return IRQ_NONE;	/* [한국어] 정직하게 알려야 커널이 폭주하는 공유 인터럽트를 차단할 수 있다 */
 }
 
-static int apple_nvme_create_cq(struct apple_nvme *anv)	/* [한국어] Apple-ANS: 자료구조/열거 — 트랜스포트 상태 모델 */
+/*
+ * [한국어]
+ * apple_nvme_create_cq - 유일한 I/O 완료 큐를 컨트롤러에 등록한다
+ *
+ * @anv: 드라이버 인스턴스
+ * @return: 0 이면 성공. 음수 오류 또는 NVMe 상태 코드.
+ *
+ * 표준 admin 명령 Create I/O Completion Queue(opcode 0x05)를 보낸다.
+ * ANS 는 I/O 큐를 하나만 지원하므로 큐 ID 는 항상 1 로 고정이며,
+ * 벡터도 0 하나뿐이다.
+ *
+ * qsize 에 1 을 빼는 것은 스펙 규정이다. 0-based 값이라 깊이 N 인 큐는
+ * N-1 로 적는다.
+ *
+ * PHYS_CONTIG 는 큐 메모리가 물리적으로 연속임을 뜻하고, 그래서 prp1
+ * 하나로 시작 주소를 알리는 것으로 끝난다. 위 영어 주석이 말하듯 이
+ * 명령에는 데이터 전송이 없으므로 prp 필드를 큐 주소 전달에 그대로
+ * 쓴다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥. 동기 명령이라 완료까지 잠든다.
+ *
+ * 호출 체인:
+ *   apple_nvme_reset_work → [이 함수] → nvme_submit_sync_cmd → admin 큐
+ */
+static int apple_nvme_create_cq(struct apple_nvme *anv)
 {
-	struct nvme_command c = {};	/* [한국어] Apple-ANS: NVMe 코어/호스트 API 호출 — 컨트롤러·요청 생명주기와 연결 */
+	struct nvme_command c = {};	/* [한국어] 0 초기화가 중요하다 — 안 쓰는 필드는 반드시 0 이어야 한다 */
 
 	/*
 	 * Note: we (ab)use the fact that the prp fields survive if no data
 	 * is attached to the request.
 	 */
-	c.create_cq.opcode = nvme_admin_create_cq;	/* [한국어] Apple-ANS: NVMe 코어/호스트 API 호출 — 컨트롤러·요청 생명주기와 연결 */
-	c.create_cq.prp1 = cpu_to_le64(anv->ioq.cq_dma_addr);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	c.create_cq.cqid = cpu_to_le16(1);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	c.create_cq.qsize = cpu_to_le16(anv->hw->max_queue_depth - 1);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	c.create_cq.cq_flags = cpu_to_le16(NVME_QUEUE_PHYS_CONTIG | NVME_CQ_IRQ_ENABLED);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	c.create_cq.irq_vector = cpu_to_le16(0);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	/* [한국어] 위 영어 주석대로, 데이터 전송이 없는 명령이라 prp 필드를
+	 * 큐 메모리 주소 전달에 전용한다. */
+	c.create_cq.opcode = nvme_admin_create_cq;	/* [한국어] 스펙 admin opcode 0x05 */
+	c.create_cq.prp1 = cpu_to_le64(anv->ioq.cq_dma_addr);	/* [한국어] 큐 메모리의 장치 주소 — CPU 가상 주소가 아니다 */
+	c.create_cq.cqid = cpu_to_le16(1);	/* [한국어] ANS 는 I/O 큐가 하나뿐이라 ID 는 1 고정 */
+	c.create_cq.qsize = cpu_to_le16(anv->hw->max_queue_depth - 1);	/* [한국어] 스펙상 0-based — 깊이 N 은 N-1 로 적는다 */
+	c.create_cq.cq_flags = cpu_to_le16(NVME_QUEUE_PHYS_CONTIG | NVME_CQ_IRQ_ENABLED);	/* [한국어] 물리 연속이라 prp1 하나로 충분하고, 완료 시 인터럽트를 켠다 */
+	c.create_cq.irq_vector = cpu_to_le16(0);	/* [한국어] 벡터도 하나뿐이라 0 */
 
-	return nvme_submit_sync_cmd(anv->ctrl.admin_q, &c, NULL, 0);	/* [한국어] Apple-ANS: NVMe 코어/호스트 API 호출 — 컨트롤러·요청 생명주기와 연결 */
+	return nvme_submit_sync_cmd(anv->ctrl.admin_q, &c, NULL, 0);	/* [한국어] 데이터 버퍼 없이 완료까지 기다린다 */
 }
 
-static int apple_nvme_remove_cq(struct apple_nvme *anv)	/* [한국어] Apple-ANS: 자료구조/열거 — 트랜스포트 상태 모델 */
+/*
+ * [한국어]
+ * apple_nvme_remove_cq - I/O 완료 큐를 컨트롤러에서 내린다
+ *
+ * @anv: 드라이버 인스턴스
+ * @return: 0 이면 성공
+ *
+ * create_cq 의 짝이다. 스펙은 SQ 를 먼저 지우고 CQ 를 나중에 지우도록
+ * 요구한다 -- 아직 SQ 가 붙어 있는 CQ 를 지우면 갈 곳 없는 완료가 생긴다.
+ * 호출자가 그 순서를 지킨다.
+ *
+ * 삭제 명령은 큐 ID 만 있으면 되므로 나머지 필드는 0 인 채로 둔다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥. 완료까지 잠든다.
+ *
+ * 호출 체인: 큐 해체 경로 → [이 함수] → nvme_submit_sync_cmd
+ */
+static int apple_nvme_remove_cq(struct apple_nvme *anv)
 {
-	struct nvme_command c = {};	/* [한국어] Apple-ANS: NVMe 코어/호스트 API 호출 — 컨트롤러·요청 생명주기와 연결 */
+	struct nvme_command c = {};	/* [한국어] 삭제는 큐 ID 만 필요해 나머지는 0 인 채로 둔다 */
 
-	c.delete_queue.opcode = nvme_admin_delete_cq;	/* [한국어] Apple-ANS: NVMe 코어/호스트 API 호출 — 컨트롤러·요청 생명주기와 연결 */
-	c.delete_queue.qid = cpu_to_le16(1);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	c.delete_queue.opcode = nvme_admin_delete_cq;	/* [한국어] 스펙 admin opcode 0x04 */
+	c.delete_queue.qid = cpu_to_le16(1);	/* [한국어] create 때와 같은 유일한 I/O 큐 ID */
 
-	return nvme_submit_sync_cmd(anv->ctrl.admin_q, &c, NULL, 0);	/* [한국어] Apple-ANS: NVMe 코어/호스트 API 호출 — 컨트롤러·요청 생명주기와 연결 */
+	return nvme_submit_sync_cmd(anv->ctrl.admin_q, &c, NULL, 0);
 }
 
-static int apple_nvme_create_sq(struct apple_nvme *anv)	/* [한국어] Apple-ANS: 자료구조/열거 — 트랜스포트 상태 모델 */
+/*
+ * [한국어]
+ * apple_nvme_create_sq - 유일한 I/O 제출 큐를 등록하고 완료 큐에 묶는다
+ *
+ * @anv: 드라이버 인스턴스
+ * @return: 0 이면 성공
+ *
+ * Create I/O Submission Queue(opcode 0x01)를 보낸다. create_cq 와 거의
+ * 같지만 결정적으로 cqid 필드가 하나 더 있다 -- 이 SQ 에 낸 명령의 완료가
+ * 어느 CQ 로 갈지를 여기서 못 박는다. 그래서 CQ 가 반드시 먼저 존재해야
+ * 하고, 호출 순서가 create_cq → create_sq 로 고정된다.
+ *
+ * SQ 에는 인터럽트 개념이 없으므로 IRQ_ENABLED 도 벡터도 없다. 물리
+ * 연속 플래그만 세운다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥. 완료까지 잠든다.
+ *
+ * 호출 체인:
+ *   apple_nvme_reset_work → apple_nvme_create_cq → [이 함수]
+ */
+static int apple_nvme_create_sq(struct apple_nvme *anv)
 {
-	struct nvme_command c = {};	/* [한국어] Apple-ANS: NVMe 코어/호스트 API 호출 — 컨트롤러·요청 생명주기와 연결 */
+	struct nvme_command c = {};	/* [한국어] 안 쓰는 필드가 0 이어야 하므로 0 초기화 */
 
 	/*
 	 * Note: we (ab)use the fact that the prp fields survive if no data
 	 * is attached to the request.
 	 */
-	c.create_sq.opcode = nvme_admin_create_sq;	/* [한국어] Apple-ANS: NVMe 코어/호스트 API 호출 — 컨트롤러·요청 생명주기와 연결 */
-	c.create_sq.prp1 = cpu_to_le64(anv->ioq.sq_dma_addr);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	c.create_sq.sqid = cpu_to_le16(1);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	c.create_sq.qsize = cpu_to_le16(anv->hw->max_queue_depth - 1);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	c.create_sq.sq_flags = cpu_to_le16(NVME_QUEUE_PHYS_CONTIG);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	c.create_sq.cqid = cpu_to_le16(1);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	/* [한국어] 위 영어 주석대로 prp 필드를 큐 주소 전달에 전용한다. */
+	c.create_sq.opcode = nvme_admin_create_sq;	/* [한국어] 스펙 admin opcode 0x01 */
+	c.create_sq.prp1 = cpu_to_le64(anv->ioq.sq_dma_addr);	/* [한국어] SQ 메모리의 장치 주소 */
+	c.create_sq.sqid = cpu_to_le16(1);	/* [한국어] 유일한 I/O SQ */
+	c.create_sq.qsize = cpu_to_le16(anv->hw->max_queue_depth - 1);	/* [한국어] 0-based 규정 */
+	c.create_sq.sq_flags = cpu_to_le16(NVME_QUEUE_PHYS_CONTIG);	/* [한국어] SQ 에는 인터럽트 개념이 없어 물리 연속 플래그만 */
+	c.create_sq.cqid = cpu_to_le16(1);	/* [한국어] 이 SQ 의 완료가 갈 CQ — 그래서 CQ 가 먼저 있어야 한다 */
 
-	return nvme_submit_sync_cmd(anv->ctrl.admin_q, &c, NULL, 0);	/* [한국어] Apple-ANS: NVMe 코어/호스트 API 호출 — 컨트롤러·요청 생명주기와 연결 */
+	return nvme_submit_sync_cmd(anv->ctrl.admin_q, &c, NULL, 0);
 }
 
-static int apple_nvme_remove_sq(struct apple_nvme *anv)	/* [한국어] Apple-ANS: 자료구조/열거 — 트랜스포트 상태 모델 */
+/*
+ * [한국어]
+ * apple_nvme_remove_sq - I/O 제출 큐를 컨트롤러에서 내린다
+ *
+ * @anv: 드라이버 인스턴스
+ * @return: 0 이면 성공
+ *
+ * 해체는 생성의 역순이라 이것이 먼저다. SQ 를 먼저 지워야 새 명령이
+ * 들어오지 않고, 스펙상 컨트롤러는 이 명령의 완료 전에 해당 SQ 의
+ * 미결 명령을 모두 종료시킨다. 그 뒤에야 CQ 를 지울 수 있다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥. 완료까지 잠든다.
+ *
+ * 호출 체인: 큐 해체 경로 → [이 함수] → apple_nvme_remove_cq
+ */
+static int apple_nvme_remove_sq(struct apple_nvme *anv)
 {
-	struct nvme_command c = {};	/* [한국어] Apple-ANS: NVMe 코어/호스트 API 호출 — 컨트롤러·요청 생명주기와 연결 */
+	struct nvme_command c = {};	/* [한국어] 삭제는 큐 ID 만 필요하다 */
 
-	c.delete_queue.opcode = nvme_admin_delete_sq;	/* [한국어] Apple-ANS: NVMe 코어/호스트 API 호출 — 컨트롤러·요청 생명주기와 연결 */
-	c.delete_queue.qid = cpu_to_le16(1);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	c.delete_queue.opcode = nvme_admin_delete_sq;	/* [한국어] 스펙 admin opcode 0x00 */
+	c.delete_queue.qid = cpu_to_le16(1);	/* [한국어] create 때와 같은 유일한 I/O SQ */
 
-	return nvme_submit_sync_cmd(anv->ctrl.admin_q, &c, NULL, 0);	/* [한국어] Apple-ANS: NVMe 코어/호스트 API 호출 — 컨트롤러·요청 생명주기와 연결 */
+	return nvme_submit_sync_cmd(anv->ctrl.admin_q, &c, NULL, 0);
 }
 
 /*
@@ -1018,7 +1190,7 @@ static blk_status_t apple_nvme_queue_rq(struct blk_mq_hw_ctx *hctx,	/* [한국�
 
 	if (anv->hw->has_lsq_nvmmu)	/* [한국어] 신형: TCB+태그 도어벨 */
 		apple_nvme_submit_cmd_t8103(q, cmnd);	/* [한국어] NVMMU 경로 제출 */
-	else	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	else	/* [한국어] 구세대는 링 tail 도어벨 — 하드웨어 세대가 제출 방식을 가른다 */
 		apple_nvme_submit_cmd_t8015(q, cmnd);	/* [한국어] 구형 링 tail 제출 */
 
 	return BLK_STS_OK;	/* [한국어] 비동기 완료 대기 — 성공 큐잉 */
@@ -1031,7 +1203,7 @@ out_free_cmd:	/* [한국어] 맵 실패 언와인드 */
 static int apple_nvme_init_hctx(struct blk_mq_hw_ctx *hctx, void *data,	/* [한국어] Apple-ANS: blk-mq 연동 — 태그·제출·완료 경로 */
 				unsigned int hctx_idx)
 {
-	hctx->driver_data = data;	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	hctx->driver_data = data;	/* [한국어] 큐가 하나뿐이라 인덱스를 볼 것 없이 태그셋의 driver_data 를 그대로 쓴다 */
 	return 0;	/* [한국어] Apple-ANS: 반환 — 상위 계층에 성공/에러/상태 전달 */
 }
 
@@ -1044,9 +1216,9 @@ static int apple_nvme_init_request(struct blk_mq_tag_set *set,	/* [한국어] Ap
 	struct apple_nvme_iod *iod = blk_mq_rq_to_pdu(req);	/* [한국어] Apple-ANS: blk-mq 연동 — 태그·제출·완료 경로 */
 	struct nvme_request *nreq = nvme_req(req);	/* [한국어] Apple-ANS: NVMe 코어/호스트 API 호출 — 컨트롤러·요청 생명주기와 연결 */
 
-	iod->q = q;	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	nreq->ctrl = &anv->ctrl;	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	nreq->cmd = &iod->cmd;	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	iod->q = q;	/* [한국어] 완료 시 어느 큐의 CQ 였는지 되찾는 경로 */
+	nreq->ctrl = &anv->ctrl;	/* [한국어] 코어가 요청에서 컨트롤러를 찾을 때 쓴다 — 오류 처리와 재시도 판단에 필요 */
+	nreq->cmd = &iod->cmd;	/* [한국어] 코어가 조립한 SQE 가 놓일 자리를 요청 안쪽으로 고정한다 */
 
 	return 0;	/* [한국어] Apple-ANS: 반환 — 상위 계층에 성공/에러/상태 전달 */
 }
@@ -1127,7 +1299,7 @@ static void apple_nvme_disable(struct apple_nvme *anv, bool shutdown)	/* [한국
 	spin_lock_irqsave(&anv->lock, flags);	/* [한국어] 제출/IRQ 와 직렬화 */
 	apple_nvme_handle_cq(&anv->ioq, true);	/* [한국어] I/O CQ 강제 드레인 */
 	apple_nvme_handle_cq(&anv->adminq, true);	/* [한국어] admin CQ 강제 드레인 */
-	spin_unlock_irqrestore(&anv->lock, flags);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	spin_unlock_irqrestore(&anv->lock, flags);	/* [한국어] 여기까지가 완료를 거둘 마지막 기회다 */
 
 	nvme_cancel_tagset(&anv->ctrl);	/* [한국어] 잔여 I/O 요청 취소 완료 */
 	nvme_cancel_admin_tagset(&anv->ctrl);	/* [한국어] 잔여 admin 요청 취소 */
@@ -1249,12 +1421,12 @@ static int apple_nvme_poll(struct blk_mq_hw_ctx *hctx,	/* [한국어] Apple-ANS:
 {
 	struct apple_nvme_queue *q = hctx->driver_data;	/* [한국어] Apple-ANS: 자료구조/열거 — 트랜스포트 상태 모델 */
 	struct apple_nvme *anv = queue_to_apple_nvme(q);	/* [한국어] Apple-ANS: 자료구조/열거 — 트랜스포트 상태 모델 */
-	bool found;	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	unsigned long flags;	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	bool found;	/* [한국어] 폴링은 처리한 개수가 아니라 있었는지 여부만 상위에 알린다 */
+	unsigned long flags;	/* [한국어] 같은 락을 인터럽트가 잡으므로 저장/복원이 필요하다 */
 
 	spin_lock_irqsave(&anv->lock, flags);	/* [한국어] Apple-ANS: 동기화 — 큐/연결/상태 보호 */
-	found = apple_nvme_poll_cq(q, iob);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	spin_unlock_irqrestore(&anv->lock, flags);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	found = apple_nvme_poll_cq(q, iob);	/* [한국어] 인터럽트 경로와 같은 함수 — 락만 다르게 잡는다 */
+	spin_unlock_irqrestore(&anv->lock, flags);
 
 	return found;	/* [한국어] Apple-ANS: 반환 — 상위 계층에 성공/에러/상태 전달 */
 }
@@ -1578,7 +1750,7 @@ static void apple_nvme_remove_dead_ctrl_work(struct work_struct *work)	/* [한�
 		container_of(work, struct apple_nvme, remove_work);	/* [한국어] Apple-ANS: 자료구조/열거 — 트랜스포트 상태 모델 */
 
 	nvme_put_ctrl(&anv->ctrl);	/* [한국어] Apple-ANS: NVMe 코어/호스트 API 호출 — 컨트롤러·요청 생명주기와 연결 */
-	device_release_driver(anv->dev);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	device_release_driver(anv->dev);	/* [한국어] probe 를 되감아 이 장치를 드라이버에서 떼어낸다 — 복구 불가 판정의 마지막 단계 */
 }
 
 /*
@@ -1650,16 +1822,16 @@ static const struct nvme_ctrl_ops nvme_ctrl_ops = {	/* [한국어] Apple-ANS: NV
 	.get_virt_boundary = nvme_get_virt_boundary,	/* [한국어] 공통 virt boundary */
 };
 
-static void apple_nvme_async_probe(void *data, async_cookie_t cookie)	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+static void apple_nvme_async_probe(void *data, async_cookie_t cookie)
 {
 	struct apple_nvme *anv = data;	/* [한국어] Apple-ANS: 자료구조/열거 — 트랜스포트 상태 모델 */
 
-	flush_work(&anv->ctrl.reset_work);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	flush_work(&anv->ctrl.scan_work);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	flush_work(&anv->ctrl.reset_work);	/* [한국어] 리셋이 끝나야 네임스페이스가 생긴다 */
+	flush_work(&anv->ctrl.scan_work);	/* [한국어] 스캔까지 기다려야 부팅이 루트 장치를 찾을 수 있다 */
 	nvme_put_ctrl(&anv->ctrl);	/* [한국어] Apple-ANS: NVMe 코어/호스트 API 호출 — 컨트롤러·요청 생명주기와 연결 */
 }
 
-static void devm_apple_nvme_put_tag_set(void *data)	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+static void devm_apple_nvme_put_tag_set(void *data)
 {
 	blk_mq_free_tag_set(data);	/* [한국어] Apple-ANS: blk-mq 연동 — 태그·제출·완료 경로 */
 }
@@ -1750,10 +1922,10 @@ static int apple_nvme_alloc_tagsets(struct apple_nvme *anv)
 static int apple_nvme_queue_alloc(struct apple_nvme *anv,	/* [한국어] Apple-ANS: 자료구조/열거 — 트랜스포트 상태 모델 */
 				  struct apple_nvme_queue *q)	/* [한국어] Apple-ANS: 자료구조/열거 — 트랜스포트 상태 모델 */
 {
-	unsigned int depth = apple_nvme_queue_depth(q);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	size_t iosq_size;	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	unsigned int depth = apple_nvme_queue_depth(q);	/* [한국어] admin 과 I/O 의 깊이가 다르므로 큐마다 다시 묻는다 */
+	size_t iosq_size;	/* [한국어] 세대별로 SQ 항목 크기가 달라 따로 계산한다 */
 
-	q->cqes = dmam_alloc_coherent(anv->dev,	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	q->cqes = dmam_alloc_coherent(anv->dev,	/* [한국어] coherent — 컨트롤러가 쓰고 CPU 가 읽으므로 캐시 관리를 하드웨어에 맡긴다 */
 				      depth * sizeof(struct nvme_completion),
 				      &q->cq_dma_addr, GFP_KERNEL);
 	if (!q->cqes)	/* [한국어] Apple-ANS: 제어 분기 — 오류·상태·자원 조건에 따른 경로 선택 */
@@ -1761,10 +1933,10 @@ static int apple_nvme_queue_alloc(struct apple_nvme *anv,	/* [한국어] Apple-A
 
 	if (anv->hw->has_lsq_nvmmu)	/* [한국어] Apple-ANS: 제어 분기 — 오류·상태·자원 조건에 따른 경로 선택 */
 		iosq_size = depth * sizeof(struct nvme_command);
-	else	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	else	/* [한국어] 구세대는 항목이 커서 시프트로 크기를 키운다 */
 		iosq_size = depth << APPLE_NVME_IOSQES;
 
-	q->sqes = dmam_alloc_coherent(anv->dev, iosq_size,	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	q->sqes = dmam_alloc_coherent(anv->dev, iosq_size,	/* [한국어] SQ 는 반대로 CPU 가 쓰고 컨트롤러가 읽는다 */
 				      &q->sq_dma_addr, GFP_KERNEL);
 	if (!q->sqes)	/* [한국어] Apple-ANS: 제어 분기 — 오류·상태·자원 조건에 따른 경로 선택 */
 		return -ENOMEM;	/* [한국어] Apple-ANS: 반환 — 상위 계층에 성공/에러/상태 전달 */
@@ -1774,7 +1946,7 @@ static int apple_nvme_queue_alloc(struct apple_nvme *anv,	/* [한국어] Apple-A
 		 * We need the maximum queue depth here because the NVMMU only
 		 * has a single depth configuration shared between both queues.
 		 */
-		q->tcbs = dmam_alloc_coherent(anv->dev,	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+		q->tcbs = dmam_alloc_coherent(anv->dev,	/* [한국어] NVMMU 세대에만 있는 명령 기술자 배열 — 태그로 색인된다 */
 			anv->hw->max_queue_depth *
 				sizeof(struct apple_nvmmu_tcb),	/* [한국어] Apple-ANS: 자료구조/열거 — 트랜스포트 상태 모델 */
 			&q->tcb_dma_addr, GFP_KERNEL);
@@ -1786,18 +1958,18 @@ static int apple_nvme_queue_alloc(struct apple_nvme *anv,	/* [한국어] Apple-A
 	 * initialize phase to make sure the allocated and empty memory
 	 * doesn't look like a full cq already.
 	 */
-	q->cq_phase = 1;	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	q->cq_phase = 1;	/* [한국어] 위 영어 주석대로, 0 으로 두면 빈 메모리가 유효한 완료처럼 보인다 */
 	return 0;	/* [한국어] Apple-ANS: 반환 — 상위 계층에 성공/에러/상태 전달 */
 }
 
 static void apple_nvme_detach_genpd(struct apple_nvme *anv)	/* [한국어] Apple-ANS: 자료구조/열거 — 트랜스포트 상태 모델 */
 {
-	int i;	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	int i;	/* [한국어] 역순 순회에 음수 비교가 필요해 부호 있는 타입을 쓴다 */
 
 	if (anv->pd_count <= 1)	/* [한국어] Apple-ANS: 제어 분기 — 오류·상태·자원 조건에 따른 경로 선택 */
 		return;	/* [한국어] Apple-ANS: 반환 — 상위 계층에 성공/에러/상태 전달 */
 
-	for (i = anv->pd_count - 1; i >= 0; i--) {	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	for (i = anv->pd_count - 1; i >= 0; i--) {	/* [한국어] 붙인 역순으로 뗀다 — 도메인 사이 의존 순서를 거스르지 않기 위해 */
 		if (anv->pd_link[i])	/* [한국어] Apple-ANS: 제어 분기 — 오류·상태·자원 조건에 따른 경로 선택 */
 			device_link_del(anv->pd_link[i]);
 		if (!IS_ERR_OR_NULL(anv->pd_dev[i]))	/* [한국어] Apple-ANS: 제어 분기 — 오류·상태·자원 조건에 따른 경로 선택 */
@@ -1875,9 +2047,9 @@ static int apple_nvme_attach_genpd(struct apple_nvme *anv)
 	return 0;
 }
 
-static void devm_apple_nvme_mempool_destroy(void *data)	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+static void devm_apple_nvme_mempool_destroy(void *data)
 {
-	mempool_destroy(data);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	mempool_destroy(data);	/* [한국어] devm 콜백 시그니처에 맞추기 위한 한 줄 어댑터 */
 }
 
 /*
@@ -2069,95 +2241,213 @@ put_dev:	/* [한국어] 대부분이 devm 이라 되감을 것이 둘뿐이다 *
 	return ERR_PTR(ret);
 }
 
-static int apple_nvme_probe(struct platform_device *pdev)	/* [한국어] Apple-ANS: 자료구조/열거 — 트랜스포트 상태 모델 */
+/*
+ * [한국어]
+ * apple_nvme_probe - 플랫폼 장치를 NVMe 컨트롤러로 세운다
+ *
+ * @pdev: 디바이스 트리에서 매칭된 ANS 플랫폼 장치
+ * @return: 0 이면 성공. 음수 errno.
+ *
+ * 자원 확보는 전부 apple_nvme_alloc 이 하고, 이 함수는 그 위에 NVMe
+ * 계층을 얹는 일만 한다. 그래서 세 단계로 짧다: 코어에 등록하고,
+ * admin 큐를 만들고, 리셋을 걸어 하드웨어를 살린다.
+ *
+ * admin 큐를 여기서 손으로 만드는 것이 PCI 드라이버와 다른 점이다.
+ * alloc 에서 태그셋만 준비해 두었으므로 요청 큐는 아직 없고, 리셋
+ * 워크가 admin 명령을 보내려면 그 전에 큐가 있어야 한다.
+ *
+ * nvme_reset_ctrl 은 워크를 예약만 하고 곧바로 돌아온다. 실제 하드웨어
+ * 초기화(RTKit 부팅, 큐 생성, Identify)는 그 워크에서 일어난다. 이어지는
+ * async_schedule 은 그 리셋이 끝나기를 기다렸다가 네임스페이스 스캔을
+ * 마무리하는 일을 병렬 부팅 큐에 올린다 -- probe 를 블로킹하지 않아
+ * 부팅 시간이 다른 장치와 겹쳐 진행된다.
+ *
+ * 실패 경로는 두 라벨로 나뉜다. 코어 등록 후에 실패하면 uninit 이
+ * 필요하고, 등록 전이라면 참조만 놓으면 된다. genpd 는 devm 이 다루지
+ * 못하므로 양쪽 모두 손으로 분리한다.
+ *
+ * 실행 컨텍스트: 드라이버 probe. 잠들 수 있다.
+ *
+ * 호출 체인:
+ *   플랫폼 버스 → [이 함수] → apple_nvme_alloc / nvme_add_ctrl
+ *                            → nvme_reset_ctrl → apple_nvme_reset_work
+ */
+static int apple_nvme_probe(struct platform_device *pdev)
 {
-	struct apple_nvme *anv;	/* [한국어] Apple-ANS: 자료구조/열거 — 트랜스포트 상태 모델 */
-	int ret;	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	struct apple_nvme *anv;
+	int ret;
 
-	anv = apple_nvme_alloc(pdev);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	if (IS_ERR(anv))	/* [한국어] Apple-ANS: 제어 분기 — 오류·상태·자원 조건에 따른 경로 선택 */
-		return PTR_ERR(anv);	/* [한국어] Apple-ANS: 반환 — 상위 계층에 성공/에러/상태 전달 */
+	anv = apple_nvme_alloc(pdev);	/* [한국어] MMIO·SART·IRQ·RTKit 등 하드웨어 자원 확보를 모두 위임한다 */
+	if (IS_ERR(anv))
+		return PTR_ERR(anv);
 
-	ret = nvme_add_ctrl(&anv->ctrl);	/* [한국어] Apple-ANS: NVMe 코어/호스트 API 호출 — 컨트롤러·요청 생명주기와 연결 */
-	if (ret)	/* [한국어] Apple-ANS: 제어 분기 — 오류·상태·자원 조건에 따른 경로 선택 */
-		goto out_put_ctrl;	/* [한국어] Apple-ANS: 공통 정리 라벨로 점프 — 부분 성공 롤백 */
+	ret = nvme_add_ctrl(&anv->ctrl);	/* [한국어] 코어에 등록 — 여기부터 /dev/nvmeX 수명이 시작된다 */
+	if (ret)
+		goto out_put_ctrl;	/* [한국어] 아직 등록 전이므로 참조만 놓으면 된다 */
 
-	anv->ctrl.admin_q = blk_mq_alloc_queue(&anv->admin_tagset, NULL, NULL);	/* [한국어] Apple-ANS: blk-mq 연동 — 태그·제출·완료 경로 */
-	if (IS_ERR(anv->ctrl.admin_q)) {	/* [한국어] Apple-ANS: 제어 분기 — 오류·상태·자원 조건에 따른 경로 선택 */
-		ret = -ENOMEM;	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-		anv->ctrl.admin_q = NULL;	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-		goto out_uninit_ctrl;	/* [한국어] Apple-ANS: 공통 정리 라벨로 점프 — 부분 성공 롤백 */
+	anv->ctrl.admin_q = blk_mq_alloc_queue(&anv->admin_tagset, NULL, NULL);	/* [한국어] 리셋 워크가 admin 명령을 보내려면 그 전에 큐가 있어야 한다 */
+	if (IS_ERR(anv->ctrl.admin_q)) {
+		ret = -ENOMEM;
+		anv->ctrl.admin_q = NULL;	/* [한국어] 오류 포인터를 남기면 정리 경로가 그것을 큐로 오인한다 */
+		goto out_uninit_ctrl;
 	}
 
-	nvme_reset_ctrl(&anv->ctrl);	/* [한국어] Apple-ANS: NVMe 코어/호스트 API 호출 — 컨트롤러·요청 생명주기와 연결 */
-	async_schedule(apple_nvme_async_probe, anv);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	nvme_reset_ctrl(&anv->ctrl);	/* [한국어] 예약만 하고 돌아온다 — RTKit 부팅과 큐 생성은 그 워크에서 */
+	async_schedule(apple_nvme_async_probe, anv);	/* [한국어] 스캔 완료를 병렬 부팅 큐로 넘겨 probe 를 막지 않는다 */
 
-	return 0;	/* [한국어] Apple-ANS: 반환 — 상위 계층에 성공/에러/상태 전달 */
+	return 0;
 
 out_uninit_ctrl:
-	nvme_uninit_ctrl(&anv->ctrl);	/* [한국어] Apple-ANS: NVMe 코어/호스트 API 호출 — 컨트롤러·요청 생명주기와 연결 */
+	nvme_uninit_ctrl(&anv->ctrl);	/* [한국어] 등록 후 실패 — sysfs/cdev 를 되돌린다 */
 out_put_ctrl:
-	nvme_put_ctrl(&anv->ctrl);	/* [한국어] Apple-ANS: NVMe 코어/호스트 API 호출 — 컨트롤러·요청 생명주기와 연결 */
-	apple_nvme_detach_genpd(anv);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	return ret;	/* [한국어] Apple-ANS: 반환 — 상위 계층에 성공/에러/상태 전달 */
+	nvme_put_ctrl(&anv->ctrl);	/* [한국어] 마지막 참조라면 free_ctrl 이 이어진다 */
+	apple_nvme_detach_genpd(anv);	/* [한국어] devm 이 다루지 못하는 전원 도메인은 손으로 분리한다 */
+	return ret;
 }
 
-static void apple_nvme_remove(struct platform_device *pdev)	/* [한국어] Apple-ANS: 자료구조/열거 — 트랜스포트 상태 모델 */
+/*
+ * [한국어]
+ * apple_nvme_remove - 컨트롤러를 내리고 코프로세서를 정지시킨다
+ *
+ * @pdev: 제거되는 플랫폼 장치
+ * @return: 없음
+ *
+ * 순서가 이 함수의 전부다. 위에서 아래로 계층을 하나씩 걷어 낸다.
+ *
+ * DELETING 으로 먼저 바꾸는 것이 출발점이다. 이 상태에서는 리셋 워크가
+ * 새 세션을 세우려 하지 않으므로, 이어지는 flush_work 가 "지금 도는
+ * 것"만 기다리면 되고 무한히 반복되지 않는다. 순서를 바꾸면 flush 가
+ * 끝나자마자 새 리셋이 예약되어 경쟁이 된다.
+ *
+ * 그다음 코어 쪽 정리(스캔·AEN 정지 → 네임스페이스 제거)를 하고, 그
+ * 뒤에야 하드웨어를 끈다. 네임스페이스가 아직 살아 있는데 큐를 내리면
+ * 진행 중 I/O 가 갈 곳을 잃는다.
+ *
+ * 마지막이 코프로세서다. RTKit 에 정상 종료를 요청한 뒤 CPU 제어
+ * 레지스터에 0 을 써서 실제로 멈춘다. 종료 요청만 하고 멈추지 않으면
+ * 펌웨어가 계속 돌며 이미 반납한 메모리를 건드릴 수 있다.
+ *
+ * 실행 컨텍스트: 드라이버 remove. 잠들 수 있다.
+ *
+ * 호출 체인:
+ *   플랫폼 버스 → [이 함수] → nvme_remove_namespaces / apple_nvme_disable
+ *                            → apple_rtkit_shutdown
+ */
+static void apple_nvme_remove(struct platform_device *pdev)
 {
-	struct apple_nvme *anv = platform_get_drvdata(pdev);	/* [한국어] Apple-ANS: 자료구조/열거 — 트랜스포트 상태 모델 */
+	struct apple_nvme *anv = platform_get_drvdata(pdev);
 
-	nvme_change_ctrl_state(&anv->ctrl, NVME_CTRL_DELETING);	/* [한국어] Apple-ANS: NVMe 코어/호스트 API 호출 — 컨트롤러·요청 생명주기와 연결 */
-	flush_work(&anv->ctrl.reset_work);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	nvme_stop_ctrl(&anv->ctrl);	/* [한국어] Apple-ANS: NVMe 코어/호스트 API 호출 — 컨트롤러·요청 생명주기와 연결 */
-	nvme_remove_namespaces(&anv->ctrl);	/* [한국어] Apple-ANS: NVMe 코어/호스트 API 호출 — 컨트롤러·요청 생명주기와 연결 */
-	apple_nvme_disable(anv, true);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	nvme_uninit_ctrl(&anv->ctrl);	/* [한국어] Apple-ANS: NVMe 코어/호스트 API 호출 — 컨트롤러·요청 생명주기와 연결 */
+	nvme_change_ctrl_state(&anv->ctrl, NVME_CTRL_DELETING);	/* [한국어] 먼저 상태를 바꿔야 리셋 워크가 새 세션을 세우지 않는다 */
+	flush_work(&anv->ctrl.reset_work);	/* [한국어] 그래야 이 대기가 "지금 도는 것"만 기다리고 끝난다 */
+	nvme_stop_ctrl(&anv->ctrl);	/* [한국어] 스캔·AEN 등 코어의 백그라운드 작업을 멈춘다 */
+	nvme_remove_namespaces(&anv->ctrl);	/* [한국어] 블록 장치를 먼저 없애야 큐를 내릴 때 갈 곳 잃은 I/O 가 없다 */
+	apple_nvme_disable(anv, true);	/* [한국어] 정식 shutdown 으로 하드웨어 큐를 내린다 */
+	nvme_uninit_ctrl(&anv->ctrl);	/* [한국어] sysfs/cdev 등 코어 등록을 되돌린다 */
 
-	if (apple_rtkit_is_running(anv->rtk)) {	/* [한국어] Apple-ANS: 제어 분기 — 오류·상태·자원 조건에 따른 경로 선택 */
-		apple_rtkit_shutdown(anv->rtk);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	if (apple_rtkit_is_running(anv->rtk)) {	/* [한국어] 펌웨어가 살아 있을 때만 종료 절차가 의미가 있다 */
+		apple_rtkit_shutdown(anv->rtk);	/* [한국어] 코프로세서에 정상 종료를 요청한다 */
 
-		writel(0, anv->mmio_coproc + APPLE_ANS_COPROC_CPU_CONTROL);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+		writel(0, anv->mmio_coproc + APPLE_ANS_COPROC_CPU_CONTROL);	/* [한국어] 실제로 CPU 를 멈춘다 — 안 멈추면 반납한 메모리를 계속 건드릴 수 있다 */
 	}
 
-	apple_nvme_detach_genpd(anv);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	apple_nvme_detach_genpd(anv);	/* [한국어] 전원 도메인 분리가 마지막 — devm 밖의 자원이다 */
 }
 
-static void apple_nvme_shutdown(struct platform_device *pdev)	/* [한국어] Apple-ANS: 자료구조/열거 — 트랜스포트 상태 모델 */
+/*
+ * [한국어]
+ * apple_nvme_shutdown - 시스템 종료/재부팅 시 장치를 안전하게 멈춘다
+ *
+ * @pdev: 대상 플랫폼 장치
+ * @return: 없음
+ *
+ * remove 와 달리 자료구조를 해제하지 않는다. 곧 전원이 내려가거나
+ * 커널이 바뀌므로 메모리 반납은 무의미하고, 필요한 것은 캐시된 쓰기가
+ * 미디어에 내려가고 코프로세서가 DMA 를 멈추는 것뿐이다.
+ *
+ * 두 번째 인자 true 가 정식 shutdown 을 뜻한다. 컨트롤러에 CC.SHN 을
+ * 걸어 휘발성 쓰기 캐시를 비우게 한다. 이 단계를 건너뛰면 재부팅 후
+ * 파일시스템이 더러운 상태로 보인다.
+ *
+ * kexec 를 생각하면 코프로세서 정지가 특히 중요하다. 새 커널이 뜬 뒤에도
+ * 옛 펌웨어가 DMA 를 계속하면 새 커널의 메모리를 덮어쓴다.
+ *
+ * 실행 컨텍스트: 시스템 종료 경로. 잠들 수 있다.
+ *
+ * 호출 체인: 커널 종료 경로 → [이 함수] → apple_nvme_disable
+ */
+static void apple_nvme_shutdown(struct platform_device *pdev)
 {
-	struct apple_nvme *anv = platform_get_drvdata(pdev);	/* [한국어] Apple-ANS: 자료구조/열거 — 트랜스포트 상태 모델 */
+	struct apple_nvme *anv = platform_get_drvdata(pdev);
 
-	apple_nvme_disable(anv, true);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
-	if (apple_rtkit_is_running(anv->rtk)) {	/* [한국어] Apple-ANS: 제어 분기 — 오류·상태·자원 조건에 따른 경로 선택 */
-		apple_rtkit_shutdown(anv->rtk);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	apple_nvme_disable(anv, true);	/* [한국어] true = 정식 shutdown — 휘발성 쓰기 캐시를 미디어에 내린다 */
+	if (apple_rtkit_is_running(anv->rtk)) {	/* [한국어] 펌웨어가 살아 있을 때만 */
+		apple_rtkit_shutdown(anv->rtk);	/* [한국어] 정상 종료 요청 */
 
-		writel(0, anv->mmio_coproc + APPLE_ANS_COPROC_CPU_CONTROL);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+		writel(0, anv->mmio_coproc + APPLE_ANS_COPROC_CPU_CONTROL);	/* [한국어] kexec 후 옛 펌웨어가 새 커널 메모리를 덮어쓰지 않도록 확실히 멈춘다 */
 	}
 }
 
-static int apple_nvme_resume(struct device *dev)	/* [한국어] Apple-ANS: 자료구조/열거 — 트랜스포트 상태 모델 */
+/*
+ * [한국어]
+ * apple_nvme_resume - 절전에서 깨어난 뒤 컨트롤러를 되살린다
+ *
+ * @dev: 대상 장치
+ * @return: 리셋 예약 결과. 0 이면 성공.
+ *
+ * 절전 중에 코프로세서 전원이 완전히 내려가 펌웨어 상태와 큐가 모두
+ * 사라졌으므로, 부분 복구가 아니라 리셋 경로를 그대로 다시 탄다.
+ * RTKit 부팅부터 큐 생성, Identify 까지 처음과 같은 순서다.
+ *
+ * 절전 복귀를 리셋으로 처리하는 것은 이 하드웨어에서 자연스럽다.
+ * 유지할 상태가 없으므로 되살리기와 새로 세우기가 같은 일이다.
+ *
+ * 실행 컨텍스트: PM resume. 잠들 수 있다.
+ *
+ * 호출 체인: PM 코어 → [이 함수] → nvme_reset_ctrl
+ */
+static int apple_nvme_resume(struct device *dev)
 {
-	struct apple_nvme *anv = dev_get_drvdata(dev);	/* [한국어] Apple-ANS: 자료구조/열거 — 트랜스포트 상태 모델 */
+	struct apple_nvme *anv = dev_get_drvdata(dev);
 
-	return nvme_reset_ctrl(&anv->ctrl);	/* [한국어] Apple-ANS: NVMe 코어/호스트 API 호출 — 컨트롤러·요청 생명주기와 연결 */
+	return nvme_reset_ctrl(&anv->ctrl);	/* [한국어] 유지할 상태가 없으므로 처음 세울 때와 같은 경로를 탄다 */
 }
 
-static int apple_nvme_suspend(struct device *dev)	/* [한국어] Apple-ANS: 자료구조/열거 — 트랜스포트 상태 모델 */
+/*
+ * [한국어]
+ * apple_nvme_suspend - 절전 진입 전에 컨트롤러와 코프로세서를 멈춘다
+ *
+ * @dev: 대상 장치
+ * @return: 0 이면 성공. RTKit 종료 실패 시 그 오류.
+ *
+ * shutdown 과 같은 절차를 밟되 반환값을 전달한다는 점만 다르다. PM
+ * 코어는 오류를 받으면 절전을 중단하고 시스템을 되돌리므로, RTKit
+ * 종료가 실패했다는 사실을 삼키면 안 된다 -- 펌웨어가 살아 있는 채로
+ * 전원 도메인이 내려가면 복귀가 불가능해진다.
+ *
+ * 여기서 하드웨어 상태를 저장하지 않는 이유는 resume 이 리셋으로
+ * 처리되기 때문이다. 저장할 것이 없다.
+ *
+ * 실행 컨텍스트: PM suspend. 잠들 수 있다.
+ *
+ * 호출 체인: PM 코어 → [이 함수] → apple_nvme_disable / apple_rtkit_shutdown
+ */
+static int apple_nvme_suspend(struct device *dev)
 {
-	struct apple_nvme *anv = dev_get_drvdata(dev);	/* [한국어] Apple-ANS: 자료구조/열거 — 트랜스포트 상태 모델 */
-	int ret = 0;	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	struct apple_nvme *anv = dev_get_drvdata(dev);
+	int ret = 0;	/* [한국어] RTKit 이 이미 멈춘 경우에는 성공으로 남는다 */
 
-	apple_nvme_disable(anv, true);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	apple_nvme_disable(anv, true);	/* [한국어] 정식 shutdown — 쓰기 캐시를 내린 뒤 큐를 접는다 */
 
-	if (apple_rtkit_is_running(anv->rtk)) {	/* [한국어] Apple-ANS: 제어 분기 — 오류·상태·자원 조건에 따른 경로 선택 */
-		ret = apple_rtkit_shutdown(anv->rtk);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	if (apple_rtkit_is_running(anv->rtk)) {
+		ret = apple_rtkit_shutdown(anv->rtk);	/* [한국어] 실패를 삼키면 펌웨어가 산 채로 전원이 내려가 복귀가 불가능해진다 */
 
-		writel(0, anv->mmio_coproc + APPLE_ANS_COPROC_CPU_CONTROL);	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+		writel(0, anv->mmio_coproc + APPLE_ANS_COPROC_CPU_CONTROL);
 	}
 
-	return ret;	/* [한국어] Apple-ANS: 반환 — 상위 계층에 성공/에러/상태 전달 */
+	return ret;	/* [한국어] PM 코어는 오류를 받으면 절전을 중단한다 */
 }
 
-static DEFINE_SIMPLE_DEV_PM_OPS(apple_nvme_pm_ops, apple_nvme_suspend,	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+static DEFINE_SIMPLE_DEV_PM_OPS(apple_nvme_pm_ops, apple_nvme_suspend,	/* [한국어] suspend/resume 한 쌍만 채우고 나머지는 매크로가 기본값으로 메운다 */
 				apple_nvme_resume);
 
 /* [한국어] T8015: 구형 링 tail 제출, 깊이 16 */
@@ -2183,7 +2473,7 @@ MODULE_DEVICE_TABLE(of, apple_nvme_of_match);	/* [한국어] 모듈 OF 별칭 �
 
 /* [한국어] platform_driver — probe/remove/shutdown + PM */
 static struct platform_driver apple_nvme_driver = {	/* [한국어] Apple-ANS: 자료구조/열거 — 트랜스포트 상태 모델 */
-	.driver = {	/* [한국어] Apple-ANS: 트랜스포트 경로 실행 — 제출/완료/복구 파이프라인의 한 단계 */
+	.driver = {
 		.name = "nvme-apple",	/* [한국어] 드라이버 이름 */
 		.of_match_table = apple_nvme_of_match,	/* [한국어] DT 매치 */
 		.pm = pm_sleep_ptr(&apple_nvme_pm_ops),	/* [한국어] suspend/resume */
