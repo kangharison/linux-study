@@ -128,12 +128,12 @@ static inline int ctrl_max_dhchaps(struct nvme_ctrl *ctrl)
 static int nvme_auth_submit(struct nvme_ctrl *ctrl, int qid,
 			    void *data, size_t data_len, bool auth_send)
 {
-	struct nvme_command cmd = {};	/* [한국어] 지역/멤버 상태 — 상위 함수·구조 아키텍처 참고 */
+	struct nvme_command cmd = {};	/* [한국어] 0 초기화 — Fabrics 명령은 안 쓰는 필드가 0 이어야 한다 */
 	nvme_submit_flags_t flags = NVME_SUBMIT_RETRY;	/* [한국어] Admin 기본: 일시 실패 재시도 */
 	struct request_queue *q = ctrl->fabrics_q;	/* [한국어] Admin 인증은 fabrics_q */
-	int ret;	/* [한국어] ret — 함수/구조 문맥의 상태 */
+	int ret;	/* [한국어] 제출 결과. 음수는 전송 실패, 양수는 NVMe 상태 코드 */
 
-	if (qid != 0) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (qid != 0) {	/* [한국어] I/O 큐 인증은 그 큐로 보내야 한다 — admin 큐로 보내면 대상이 어느 연결인지 모른다 */
 		flags |= NVME_SUBMIT_NOWAIT | NVME_SUBMIT_RESERVED;	/* [한국어] I/O 큐 연결 경로 플래그 */
 		q = ctrl->connect_q;	/* [한국어] I/O Connect/Auth 는 connect_q */
 	}
@@ -142,7 +142,7 @@ static int nvme_auth_submit(struct nvme_ctrl *ctrl, int qid,
 	cmd.auth_common.secp = NVME_AUTH_DHCHAP_PROTOCOL_IDENTIFIER;	/* [한국어] 보안 프로토콜 = DH-HMAC-CHAP */
 	cmd.auth_common.spsp0 = 0x01;	/* [한국어] SP 특정 필드 — CHAP 관례 값 */
 	cmd.auth_common.spsp1 = 0x01;	/* [한국어] SPSP1 관례 값 — 스펙 고정 */
-	if (auth_send) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (auth_send) {	/* [한국어] Send 와 Receive 가 같은 함수를 쓰되 방향과 길이 필드만 다르다 */
 		cmd.auth_send.fctype = nvme_fabrics_type_auth_send;	/* [한국어] Host→Ctrl 메시지 송신 */
 		cmd.auth_send.tl = cpu_to_le32(data_len);	/* [한국어] 송신 페이로드 길이 */
 	} else {	/* [한국어] 대안 경로 */
@@ -170,27 +170,27 @@ static int nvme_auth_submit(struct nvme_ctrl *ctrl, int qid,
  */
 static int nvme_auth_receive_validate(struct nvme_ctrl *ctrl, int qid,
 		struct nvmf_auth_dhchap_failure_data *data,
-		u16 transaction, u8 expected_msg)	/* [한국어] 지역/멤버 상태 — 상위 함수·구조 아키텍처 참고 */
+		u16 transaction, u8 expected_msg)	/* [한국어] 보낸 쪽이 기대하는 값 — 이 둘이 응답 위조와 순서 뒤바뀜을 걸러 낸다 */
 {
 	dev_dbg(ctrl->device, "%s: qid %d auth_type %d auth_id %x\n",	/* [한국어] 진단 로그 */
 		__func__, qid, data->auth_type, data->auth_id);
 
-	if (data->auth_type == NVME_AUTH_COMMON_MESSAGES &&	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (data->auth_type == NVME_AUTH_COMMON_MESSAGES &&	/* [한국어] 상대가 공통 실패 메시지를 보냈다 — 그 안의 이유 코드를 그대로 올린다 */
 	    data->auth_id == NVME_AUTH_DHCHAP_MESSAGE_FAILURE1) {
 		return data->rescode_exp;	/* [한국어] 컨트롤러가 보낸 실패 사유 코드 그대로 전파 */
 	}
-	if (data->auth_type != NVME_AUTH_DHCHAP_MESSAGES ||	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (data->auth_type != NVME_AUTH_DHCHAP_MESSAGES ||	/* [한국어] 기대한 종류가 아니다 — 프로토콜 순서가 어긋났거나 응답이 뒤섞였다 */
 	    data->auth_id != expected_msg) {
 		dev_warn(ctrl->device,	/* [한국어] 진단 로그 */
 			 "qid %d invalid message %02x/%02x\n",
 			 qid, data->auth_type, data->auth_id);	/* [한국어] 단계 머신 기대와 다른 메시지 */
-		return NVME_AUTH_DHCHAP_FAILURE_INCORRECT_MESSAGE;	/* [한국어] 호출 결과 반환 */
+		return NVME_AUTH_DHCHAP_FAILURE_INCORRECT_MESSAGE;	/* [한국어] 스펙이 정한 거절 코드로 상대에게도 알린다 */
 	}
 	if (le16_to_cpu(data->t_id) != transaction) {	/* [한국어] LE 온와이어 엔디안 변환 */
 		dev_warn(ctrl->device,	/* [한국어] 진단 로그 */
 			 "qid %d invalid transaction ID %d\n",
 			 qid, le16_to_cpu(data->t_id));	/* [한국어] 다른 핸드셰이크 응답 혼입 감지 */
-		return NVME_AUTH_DHCHAP_FAILURE_INCORRECT_MESSAGE;	/* [한국어] 호출 결과 반환 */
+		return NVME_AUTH_DHCHAP_FAILURE_INCORRECT_MESSAGE;	/* [한국어] 트랜잭션이 다르다 — 다른 교환의 응답을 가로챈 것일 수 있다 */
 	}
 	return 0;	/* [한국어] 메시지 헤더 유효 */
 }
@@ -211,15 +211,15 @@ static int nvme_auth_set_dhchap_negotiate_data(struct nvme_ctrl *ctrl,
 	u8 dh_list_offset = NVME_AUTH_DHCHAP_MAX_DH_IDS;	/* [한국어] idlist 내 DH 그룹 시작 오프셋 */
 	u8 *idlist = data->auth_protocol[0].dhchap.idlist;	/* [한국어] hash 다음 DH id 목록 버퍼 */
 
-	if (size > CHAP_BUF_SIZE) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
-		chap->status = NVME_AUTH_DHCHAP_FAILURE_INCORRECT_PAYLOAD;	/* [한국어] NVME_AUTH_DHCHAP_FAILURE_INCORRECT_PAYLOAD — 함수/구조 문맥의 상태 */
+	if (size > CHAP_BUF_SIZE) {	/* [한국어] 버퍼를 넘으면 조립 자체가 불가능하다 — 쓰기 전에 막는다 */
+		chap->status = NVME_AUTH_DHCHAP_FAILURE_INCORRECT_PAYLOAD;	/* [한국어] 실패 이유를 남겨 두면 상위가 상대에게 전달한다 */
 		return -EINVAL;	/* [한국어] 이론상 도달 어려움 — 버퍼 불변식 */
 	}
 	memset((u8 *)chap->buf, 0, size);	/* [한국어] 미사용 바이트 제로화 */
-	data->auth_type = NVME_AUTH_COMMON_MESSAGES;	/* [한국어] NVME_AUTH_COMMON_MESSAGES — 함수/구조 문맥의 상태 */
+	data->auth_type = NVME_AUTH_COMMON_MESSAGES;	/* [한국어] Negotiate 만 공통 클래스다 — 아직 어떤 프로토콜을 쓸지 정하지 않았기 때문 */
 	data->auth_id = NVME_AUTH_DHCHAP_MESSAGE_NEGOTIATE;	/* [한국어] 단계 1: Negotiate */
 	data->t_id = cpu_to_le16(chap->transaction);	/* [한국어] 호스트가 고른 트랜잭션 ID */
-	if (ctrl->opts->concat && chap->qid == 0) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (ctrl->opts->concat && chap->qid == 0) {	/* [한국어] secure concatenation 은 admin 큐에서만 협상한다 — 그 결과로 TLS 키를 유도한다 */
 		if (ctrl->opts->tls_key)
 			data->sc_c = NVME_AUTH_SECP_REPLACETLSPSK;	/* [한국어] 기존 TLS PSK 교체 concat */
 		else
@@ -228,18 +228,18 @@ static int nvme_auth_set_dhchap_negotiate_data(struct nvme_ctrl *ctrl,
 		data->sc_c = NVME_AUTH_SECP_NOSC;	/* [한국어] 보안 채널 결합 없음 — 순수 in-band 인증 */
 	chap->sc_c = data->sc_c;	/* [한국어] HMAC 입력에 동일 sc_c 사용 위해 보관 */
 	data->napd = 1;	/* [한국어] 인증 프로토콜 디스크립터 1개 (DH-CHAP only) */
-	data->auth_protocol[0].dhchap.authid = NVME_AUTH_DHCHAP_AUTH_ID;	/* [한국어] NVME_AUTH_DHCHAP_AUTH_ID — 함수/구조 문맥의 상태 */
+	data->auth_protocol[0].dhchap.authid = NVME_AUTH_DHCHAP_AUTH_ID;	/* [한국어] 제안하는 프로토콜은 DH-HMAC-CHAP 하나뿐이다 */
 	data->auth_protocol[0].dhchap.halen = 3;	/* [한국어] 해시 3종 제안 */
-	idlist[0] = NVME_AUTH_HASH_SHA256;	/* [한국어] NVME_AUTH_HASH_SHA256 — 함수/구조 문맥의 상태 */
-	idlist[1] = NVME_AUTH_HASH_SHA384;	/* [한국어] NVME_AUTH_HASH_SHA384 — 함수/구조 문맥의 상태 */
-	idlist[2] = NVME_AUTH_HASH_SHA512;	/* [한국어] NVME_AUTH_HASH_SHA512 — 함수/구조 문맥의 상태 */
+	idlist[0] = NVME_AUTH_HASH_SHA256;	/* [한국어] 지원 해시를 강한 순이 아니라 나열 순으로 제안하고, 선택은 컨트롤러가 한다 */
+	idlist[1] = NVME_AUTH_HASH_SHA384;
+	idlist[2] = NVME_AUTH_HASH_SHA512;
 	if (chap->sc_c == NVME_AUTH_SECP_NOSC)
 		idlist[dh_list_offset++] = NVME_AUTH_DHGROUP_NULL;	/* [한국어] 순수 CHAP 시 DH 없이 가능 */
 	idlist[dh_list_offset++] = NVME_AUTH_DHGROUP_2048;	/* [한국어] 이하 ffdhe 계열 제안 */
-	idlist[dh_list_offset++] = NVME_AUTH_DHGROUP_3072;	/* [한국어] NVME_AUTH_DHGROUP_3072 — 함수/구조 문맥의 상태 */
-	idlist[dh_list_offset++] = NVME_AUTH_DHGROUP_4096;	/* [한국어] NVME_AUTH_DHGROUP_4096 — 함수/구조 문맥의 상태 */
-	idlist[dh_list_offset++] = NVME_AUTH_DHGROUP_6144;	/* [한국어] NVME_AUTH_DHGROUP_6144 — 함수/구조 문맥의 상태 */
-	idlist[dh_list_offset++] = NVME_AUTH_DHGROUP_8192;	/* [한국어] NVME_AUTH_DHGROUP_8192 — 함수/구조 문맥의 상태 */
+	idlist[dh_list_offset++] = NVME_AUTH_DHGROUP_3072;	/* [한국어] DH 군은 큰 것일수록 안전하지만 계산이 무겁다 — 전부 제안하고 상대가 고른다 */
+	idlist[dh_list_offset++] = NVME_AUTH_DHGROUP_4096;
+	idlist[dh_list_offset++] = NVME_AUTH_DHGROUP_6144;
+	idlist[dh_list_offset++] = NVME_AUTH_DHGROUP_8192;
 	data->auth_protocol[0].dhchap.dhlen =
 		dh_list_offset - NVME_AUTH_DHCHAP_MAX_DH_IDS;	/* [한국어] 제안한 DH 그룹 개수 */
 
@@ -260,35 +260,35 @@ static int nvme_auth_process_dhchap_challenge(struct nvme_ctrl *ctrl,
 	u16 dhvlen = le16_to_cpu(data->dhvlen);	/* [한국어] 컨트롤러 DH 공개키 길이 */
 	size_t size = sizeof(*data) + data->hl + dhvlen;	/* [한국어] 고정+챌린지+DH 값 총 크기 */
 	const char *gid_name = nvme_auth_dhgroup_name(data->dhgid);	/* [한국어] 로그용 이름. 협상 실패를 사람이 읽을 수 있게 남긴다 */
-	const char *hmac_name, *kpp_name;	/* [한국어] kpp_name — 함수/구조 문맥의 상태 */
+	const char *hmac_name, *kpp_name;	/* [한국어] 커널 crypto 가 쓰는 알고리즘 이름 — 스펙의 숫자 ID 를 이것으로 바꿔야 tfm 을 잡을 수 있다 */
 
-	if (size > CHAP_BUF_SIZE) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
-		chap->status = NVME_AUTH_DHCHAP_FAILURE_INCORRECT_PAYLOAD;	/* [한국어] NVME_AUTH_DHCHAP_FAILURE_INCORRECT_PAYLOAD — 함수/구조 문맥의 상태 */
+	if (size > CHAP_BUF_SIZE) {	/* [한국어] 컨트롤러가 알린 길이가 버퍼를 넘는다 — 읽기 전에 막아야 넘겨 읽지 않는다 */
+		chap->status = NVME_AUTH_DHCHAP_FAILURE_INCORRECT_PAYLOAD;
 		return -EINVAL;	/* [한국어] 버퍼 초과 — 프로토콜/손상 */
 	}
 
-	hmac_name = nvme_auth_hmac_name(data->hashid);	/* [한국어] hmac_name 상수 — 상위 enum 역할 참고 */
-	if (!hmac_name) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	hmac_name = nvme_auth_hmac_name(data->hashid);	/* [한국어] 스펙 ID → 커널 crypto 이름 */
+	if (!hmac_name) {	/* [한국어] 이 커널이 모르는 해시를 골랐다 */
 		dev_warn(ctrl->device,	/* [한국어] 진단 로그 */
 			 "qid %d: invalid HASH ID %d\n",
 			 chap->qid, data->hashid);	/* [한국어] 호스트가 모르는 hashid */
-		chap->status = NVME_AUTH_DHCHAP_FAILURE_HASH_UNUSABLE;	/* [한국어] NVME_AUTH_DHCHAP_FAILURE_HASH_UNUSABLE — 함수/구조 문맥의 상태 */
-		return -EPROTO;	/* [한국어] 호출 결과 반환 */
+		chap->status = NVME_AUTH_DHCHAP_FAILURE_HASH_UNUSABLE;	/* [한국어] 스펙이 정한 "해시를 쓸 수 없음" 코드 */
+		return -EPROTO;	/* [한국어] 프로토콜 오류로 올린다 — 재시도해도 같은 결과다 */
 	}
 
-	if (chap->hash_id == data->hashid && chap->hash_len == data->hl) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (chap->hash_id == data->hashid && chap->hash_len == data->hl) {	/* [한국어] 재인증에서 같은 해시를 다시 골랐다면 tfm 을 새로 잡을 필요가 없다 */
 		dev_dbg(ctrl->device,	/* [한국어] 진단 로그 */
 			"qid %d: reuse existing hash %s\n",
 			chap->qid, hmac_name);	/* [한국어] 재인증: 해시 컨텍스트 재사용 */
-		goto select_kpp;	/* [한국어] select_kpp — 함수/구조 문맥의 상태 */
+		goto select_kpp;	/* [한국어] 해시 설정을 건너뛰고 DH 군 선택으로 */
 	}
 
 	if (nvme_auth_hmac_hash_len(data->hashid) != data->hl) {	/* [한국어] 해시 ID 가 뜻하는 길이와 컨트롤러가 적은 길이가 어긋난다 — 위조되었거나 구현이 틀렸다 */
 		dev_warn(ctrl->device,	/* [한국어] 진단 로그 */
 			 "qid %d: invalid hash length %d\n",
 			 chap->qid, data->hl);	/* [한국어] hashid 와 hl 불일치 */
-		chap->status = NVME_AUTH_DHCHAP_FAILURE_HASH_UNUSABLE;	/* [한국어] NVME_AUTH_DHCHAP_FAILURE_HASH_UNUSABLE — 함수/구조 문맥의 상태 */
-		return -EPROTO;	/* [한국어] 호출 결과 반환 */
+		chap->status = NVME_AUTH_DHCHAP_FAILURE_HASH_UNUSABLE;	/* [한국어] ID 와 길이가 모순이다 */
+		return -EPROTO;
 	}
 
 	chap->hash_id = data->hashid;	/* [한국어] 협상 확정 해시 */
@@ -298,77 +298,77 @@ static int nvme_auth_process_dhchap_challenge(struct nvme_ctrl *ctrl,
 
 select_kpp:
 	kpp_name = nvme_auth_dhgroup_kpp(data->dhgid);	/* [한국어] 커널 KPP 알고리즘 이름 */
-	if (!kpp_name) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (!kpp_name) {	/* [한국어] 이 커널이 모르는 DH 군을 골랐다 */
 		dev_warn(ctrl->device,	/* [한국어] 진단 로그 */
 			 "qid %d: invalid DH group id %d\n",
 			 chap->qid, data->dhgid);
-		chap->status = NVME_AUTH_DHCHAP_FAILURE_DHGROUP_UNUSABLE;	/* [한국어] NVME_AUTH_DHCHAP_FAILURE_DHGROUP_UNUSABLE — 함수/구조 문맥의 상태 */
+		chap->status = NVME_AUTH_DHCHAP_FAILURE_DHGROUP_UNUSABLE;	/* [한국어] 스펙이 정한 "DH 군을 쓸 수 없음" 코드 */
 		/* Leave previous dh_tfm intact */
 		return -EPROTO;	/* [한국어] 이전 tfm 유지 — 부분 실패 시 정리 경로 단순화 */
 	}
 
-	if (chap->dhgroup_id == data->dhgid &&	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (chap->dhgroup_id == data->dhgid &&	/* [한국어] 같은 군이면 이미 만든 KPP tfm 과 공개키를 재사용한다 — DH 계산이 비싸다 */
 	    (data->dhgid == NVME_AUTH_DHGROUP_NULL || chap->dh_tfm)) {
 		dev_dbg(ctrl->device,	/* [한국어] 진단 로그 */
 			"qid %d: reuse existing DH group %s\n",
 			chap->qid, gid_name);	/* [한국어] 동일 그룹 재사용 */
-		goto skip_kpp;	/* [한국어] skip_kpp — 함수/구조 문맥의 상태 */
+		goto skip_kpp;	/* [한국어] 키 생성을 통째로 건너뛴다 */
 	}
 
 	/* Reset dh_tfm if it can't be reused */
-	if (chap->dh_tfm) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (chap->dh_tfm) {	/* [한국어] 군이 바뀌었으니 이전 tfm 은 쓸 수 없다 */
 		crypto_free_kpp(chap->dh_tfm);	/* [한국어] 그룹 변경 시 이전 KPP 해제 */
-		chap->dh_tfm = NULL;	/* [한국어] NULL — 함수/구조 문맥의 상태 */
+		chap->dh_tfm = NULL;	/* [한국어] 포인터를 지워야 아래 할당이 실패해도 해제된 tfm 을 다시 쓰지 않는다 */
 	}
 
-	if (data->dhgid != NVME_AUTH_DHGROUP_NULL) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
-		if (dhvlen == 0) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (data->dhgid != NVME_AUTH_DHGROUP_NULL) {	/* [한국어] NULL 군이 아니면 실제 Diffie-Hellman 교환을 한다 */
+		if (dhvlen == 0) {	/* [한국어] DH 를 쓰겠다면서 공개키를 안 보냈다 — 모순이다 */
 			dev_warn(ctrl->device,	/* [한국어] 진단 로그 */
 				 "qid %d: empty DH value\n",
 				 chap->qid);	/* [한국어] 비-NULL 그룹인데 공개키 없음 */
-			chap->status = NVME_AUTH_DHCHAP_FAILURE_DHGROUP_UNUSABLE;	/* [한국어] NVME_AUTH_DHCHAP_FAILURE_DHGROUP_UNUSABLE — 함수/구조 문맥의 상태 */
-			return -EPROTO;	/* [한국어] 호출 결과 반환 */
+			chap->status = NVME_AUTH_DHCHAP_FAILURE_DHGROUP_UNUSABLE;
+			return -EPROTO;
 		}
 
 		chap->dh_tfm = crypto_alloc_kpp(kpp_name, 0, 0);	/* [한국어] DH KPP 인스턴스 할당 */
-		if (IS_ERR(chap->dh_tfm)) {	/* [한국어] 에러 포인터 규약 */
-			int ret = PTR_ERR(chap->dh_tfm);	/* [한국어] 에러 포인터 규약 */
+		if (IS_ERR(chap->dh_tfm)) {	/* [한국어] 커널이 이 군을 지원하지 않거나 메모리가 부족하다 */
+			int ret = PTR_ERR(chap->dh_tfm);	/* [한국어] 오류 포인터에서 errno 를 꺼낸다 */
 
 			dev_warn(ctrl->device,	/* [한국어] 진단 로그 */
 				 "qid %d: error %d initializing DH group %s\n",
 				 chap->qid, ret, gid_name);	/* [한국어] 커널 crypto 미지원 그룹 등 */
-			chap->status = NVME_AUTH_DHCHAP_FAILURE_DHGROUP_UNUSABLE;	/* [한국어] NVME_AUTH_DHCHAP_FAILURE_DHGROUP_UNUSABLE — 함수/구조 문맥의 상태 */
-			chap->dh_tfm = NULL;	/* [한국어] NULL — 함수/구조 문맥의 상태 */
-			return ret;	/* [한국어] 결과 코드 전파 */
+			chap->status = NVME_AUTH_DHCHAP_FAILURE_DHGROUP_UNUSABLE;	/* [한국어] 상대에게는 "이 군은 쓸 수 없다"로 알린다 */
+			chap->dh_tfm = NULL;	/* [한국어] 오류 포인터를 남기면 정리 경로가 그것을 tfm 으로 오인한다 */
+			return ret;
 		}
 		dev_dbg(ctrl->device, "qid %d: selected DH group %s\n",	/* [한국어] 진단 로그 */
 			chap->qid, gid_name);
-	} else if (dhvlen != 0) {	/* [한국어] 대안 조건 경로 */
+	} else if (dhvlen != 0) {	/* [한국어] NULL 군인데 공개키가 왔다 — 역시 모순이다 */
 		dev_warn(ctrl->device,	/* [한국어] 진단 로그 */
 			 "qid %d: invalid DH value for NULL DH\n",
 			 chap->qid);	/* [한국어] NULL 그룹에 공개키가 오면 페이로드 오류 */
-		chap->status = NVME_AUTH_DHCHAP_FAILURE_INCORRECT_PAYLOAD;	/* [한국어] NVME_AUTH_DHCHAP_FAILURE_INCORRECT_PAYLOAD — 함수/구조 문맥의 상태 */
-		return -EPROTO;	/* [한국어] 호출 결과 반환 */
+		chap->status = NVME_AUTH_DHCHAP_FAILURE_INCORRECT_PAYLOAD;
+		return -EPROTO;
 	}
 	chap->dhgroup_id = data->dhgid;	/* [한국어] 협상 확정 DH 그룹 */
 
 skip_kpp:
 	chap->s1 = le32_to_cpu(data->seqnum);	/* [한국어] 컨트롤러 시퀀스 — host response HMAC 입력 */
 	memcpy(chap->c1, data->cval, chap->hash_len);	/* [한국어] 컨트롤러 챌린지 c1 */
-	if (dhvlen) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (dhvlen) {	/* [한국어] 컨트롤러 공개키가 왔다면 보관해 두었다가 공유 비밀 계산에 쓴다 */
 		chap->ctrl_key = kmalloc(dhvlen, GFP_KERNEL);	/* [한국어] 컨트롤러 DH 공개키 보관 */
-		if (!chap->ctrl_key) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
-			chap->status = NVME_AUTH_DHCHAP_FAILURE_FAILED;	/* [한국어] NVME_AUTH_DHCHAP_FAILURE_FAILED — 함수/구조 문맥의 상태 */
-			return -ENOMEM;	/* [한국어] 할당 실패 전파 */
+		if (!chap->ctrl_key) {	/* [한국어] 공개키를 담을 곳이 없으면 교환을 이어 갈 수 없다 */
+			chap->status = NVME_AUTH_DHCHAP_FAILURE_FAILED;	/* [한국어] 상대에게는 일반 실패로 알린다 — 이유를 흘리지 않는다 */
+			return -ENOMEM;
 		}
-		chap->ctrl_key_len = dhvlen;	/* [한국어] dhvlen — 함수/구조 문맥의 상태 */
+		chap->ctrl_key_len = dhvlen;	/* [한국어] 포인터와 길이를 함께 세워야 이후 경로가 안전하다 */
 		memcpy(chap->ctrl_key, data->cval + chap->hash_len,
 		       dhvlen);	/* [한국어] cval 레이아웃: [c1 | ctrl_pubkey] */
 		dev_dbg(ctrl->device, "ctrl public key %*ph\n",	/* [한국어] 진단 로그 */
 			 (int)chap->ctrl_key_len, chap->ctrl_key);
 	}
 
-	return 0;	/* [한국어] 성공/no-op 완료 */
+	return 0;	/* [한국어] 해시와 DH 군이 정해졌다 — 다음은 Reply 조립이다 */
 }
 
 /*
@@ -382,20 +382,20 @@ static int nvme_auth_set_dhchap_reply_data(struct nvme_ctrl *ctrl,
 		struct nvme_dhchap_queue_context *chap)
 {
 	struct nvmf_auth_dhchap_reply_data *data = chap->buf;	/* [한국어] 같은 버퍼에 이번에는 Reply 를 조립한다 */
-	size_t size = sizeof(*data);	/* [한국어] 지역/멤버 상태 — 상위 함수·구조 아키텍처 참고 */
+	size_t size = sizeof(*data);	/* [한국어] 고정부에 챌린지 응답과 공개키가 붙어 최종 크기가 정해진다 */
 
 	size += 2 * chap->hash_len;	/* [한국어] response + c2 슬롯 예약 */
 
 	if (chap->host_key_len)
 		size += chap->host_key_len;	/* [한국어] 호스트 DH 공개키 추가 */
 
-	if (size > CHAP_BUF_SIZE) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
-		chap->status = NVME_AUTH_DHCHAP_FAILURE_INCORRECT_PAYLOAD;	/* [한국어] NVME_AUTH_DHCHAP_FAILURE_INCORRECT_PAYLOAD — 함수/구조 문맥의 상태 */
-		return -EINVAL;	/* [한국어] 인자·프로토콜 불변식 위반 */
+	if (size > CHAP_BUF_SIZE) {	/* [한국어] 조립 전에 크기를 확인한다 */
+		chap->status = NVME_AUTH_DHCHAP_FAILURE_INCORRECT_PAYLOAD;
+		return -EINVAL;
 	}
 
-	memset(chap->buf, 0, size);	/* [한국어] 메모리/문자열 연산 */
-	data->auth_type = NVME_AUTH_DHCHAP_MESSAGES;	/* [한국어] NVME_AUTH_DHCHAP_MESSAGES — 함수/구조 문맥의 상태 */
+	memset(chap->buf, 0, size);	/* [한국어] 이전 메시지의 잔재가 남으면 상대가 그것을 읽는다 */
+	data->auth_type = NVME_AUTH_DHCHAP_MESSAGES;	/* [한국어] Negotiate 이후는 모두 DH-HMAC-CHAP 클래스다 */
 	data->auth_id = NVME_AUTH_DHCHAP_MESSAGE_REPLY;	/* [한국어] 단계 3: Reply */
 	data->t_id = cpu_to_le16(chap->transaction);	/* [한국어] LE 온와이어 엔디안 변환 */
 	data->hl = chap->hash_len;	/* [한국어] 컨트롤러가 rval 을 잘라 읽을 수 있도록 길이를 명시한다 */
@@ -403,7 +403,7 @@ static int nvme_auth_set_dhchap_reply_data(struct nvme_ctrl *ctrl,
 	memcpy(data->rval, chap->response, chap->hash_len);	/* [한국어] 호스트 HMAC 응답 */
 	if (ctrl->ctrl_key)
 		chap->bi_directional = true;	/* [한국어] 컨트롤러 시크릿 있으면 양방향 인증 */
-	if (ctrl->ctrl_key || ctrl->opts->concat) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (ctrl->ctrl_key || ctrl->opts->concat) {	/* [한국어] 상호 인증이거나 concat 이면 우리도 챌린지를 보낸다 */
 		get_random_bytes(chap->c2, chap->hash_len);	/* [한국어] 호스트 챌린지 c2 난수 */
 		data->cvalid = 1;	/* [한국어] 역방향 챌린지를 실었다는 표시 — 컨트롤러도 자신을 증명해야 한다 */
 		memcpy(data->rval + chap->hash_len, chap->c2,
@@ -413,13 +413,13 @@ static int nvme_auth_set_dhchap_reply_data(struct nvme_ctrl *ctrl,
 	} else {	/* [한국어] 대안 경로 */
 		memset(chap->c2, 0, chap->hash_len);	/* [한국어] 단방향: c2 미사용 */
 	}
-	if (ctrl->opts->concat) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (ctrl->opts->concat) {	/* [한국어] concat 은 이 교환의 재료로 TLS PSK 를 유도하므로 시퀀스 처리가 다르다 */
 		chap->s2 = 0;	/* [한국어] concat 스펙: s2 0 */
 		chap->bi_directional = false;	/* [한국어] concat 은 Success2 양방향 확인 대신 PSK 유도 */
 	} else	/* [한국어] 대안 경로 */
 		chap->s2 = nvme_auth_get_seqnum();	/* [한국어] 호스트 시퀀스 번호 발급 */
 	data->seqnum = cpu_to_le32(chap->s2);	/* [한국어] LE 온와이어 엔디안 변환 */
-	if (chap->host_key_len) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (chap->host_key_len) {	/* [한국어] DH 를 쓰는 경우에만 공개키를 뒤에 덧붙인다 */
 		dev_dbg(ctrl->device, "%s: qid %d host public key %*ph\n",	/* [한국어] 진단 로그 */
 			__func__, chap->qid,
 			chap->host_key_len, chap->host_key);
@@ -440,19 +440,19 @@ static int nvme_auth_process_dhchap_success1(struct nvme_ctrl *ctrl,
 		struct nvme_dhchap_queue_context *chap)
 {
 	struct nvmf_auth_dhchap_success1_data *data = chap->buf;	/* [한국어] 컨트롤러의 Success1 응답을 해석한다 */
-	size_t size = sizeof(*data) + chap->hash_len;	/* [한국어] 지역/멤버 상태 — 상위 함수·구조 아키텍처 참고 */
+	size_t size = sizeof(*data) + chap->hash_len;	/* [한국어] 고정부 + 컨트롤러의 응답 해시 */
 
-	if (size > CHAP_BUF_SIZE) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
-		chap->status = NVME_AUTH_DHCHAP_FAILURE_INCORRECT_PAYLOAD;	/* [한국어] NVME_AUTH_DHCHAP_FAILURE_INCORRECT_PAYLOAD — 함수/구조 문맥의 상태 */
-		return -EINVAL;	/* [한국어] 인자·프로토콜 불변식 위반 */
+	if (size > CHAP_BUF_SIZE) {	/* [한국어] 받은 것을 해석하기 전에 크기부터 확인한다 */
+		chap->status = NVME_AUTH_DHCHAP_FAILURE_INCORRECT_PAYLOAD;
+		return -EINVAL;
 	}
 
-	if (data->hl != chap->hash_len) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (data->hl != chap->hash_len) {	/* [한국어] 협상한 해시 길이와 다르다 — 응답을 비교할 수 없다 */
 		dev_warn(ctrl->device,	/* [한국어] 진단 로그 */
 			 "qid %d: invalid hash length %u\n",
 			 chap->qid, data->hl);
-		chap->status = NVME_AUTH_DHCHAP_FAILURE_HASH_UNUSABLE;	/* [한국어] NVME_AUTH_DHCHAP_FAILURE_HASH_UNUSABLE — 함수/구조 문맥의 상태 */
-		return -EPROTO;	/* [한국어] 호출 결과 반환 */
+		chap->status = NVME_AUTH_DHCHAP_FAILURE_HASH_UNUSABLE;
+		return -EPROTO;
 	}
 
 	/* Just print out information for the admin queue */
@@ -475,7 +475,7 @@ static int nvme_auth_process_dhchap_success1(struct nvme_ctrl *ctrl,
 		dev_warn(ctrl->device,	/* [한국어] 진단 로그 */
 			 "qid %d: controller authentication failed\n",
 			 chap->qid);	/* [한국어] 컨트롤러 가장 또는 키 불일치 */
-		chap->status = NVME_AUTH_DHCHAP_FAILURE_FAILED;	/* [한국어] NVME_AUTH_DHCHAP_FAILURE_FAILED — 함수/구조 문맥의 상태 */
+		chap->status = NVME_AUTH_DHCHAP_FAILURE_FAILED;	/* [한국어] 컨트롤러의 응답이 우리가 계산한 값과 다르다 — 상대가 비밀을 모른다 */
 		return -ECONNREFUSED;	/* [한국어] 인증/연결 거부 */
 	}
 
@@ -483,7 +483,7 @@ static int nvme_auth_process_dhchap_success1(struct nvme_ctrl *ctrl,
 	if (chap->qid == 0)
 		dev_info(ctrl->device,	/* [한국어] 진단 로그 */
 			 "qid 0: controller authenticated\n");	/* [한국어] 양방향 인증 완료 */
-	return 0;	/* [한국어] 성공/no-op 완료 */
+	return 0;	/* [한국어] 상호 인증까지 통과했다 */
 }
 
 /*
@@ -539,18 +539,18 @@ static int nvme_auth_dhchap_setup_host_response(struct nvme_ctrl *ctrl,
 {
 	struct nvme_auth_hmac_ctx hmac;	/* [한국어] 스택 HMAC 컨텍스트 — 종료 시 제로화 */
 	u8 buf[4], *challenge = chap->c1;	/* [한국어] LE 인코딩 스크래치 / 챌린지 포인터 */
-	int ret;	/* [한국어] ret — 함수/구조 문맥의 상태 */
+	int ret;	/* [한국어] 키 변환과 HMAC 단계의 결과를 모은다 */
 
 	dev_dbg(ctrl->device, "%s: qid %d host response seq %u transaction %d\n",	/* [한국어] 진단 로그 */
 		__func__, chap->qid, chap->s1, chap->transaction);
 
-	if (!chap->transformed_key) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (!chap->transformed_key) {	/* [한국어] 재인증이면 이전 변환 결과를 그대로 쓴다 — 변환은 비싸다 */
 		chap->transformed_key = nvme_auth_transform_key(ctrl->host_key,	/* [한국어] 비밀키를 host NQN 으로 한 번 더 변환한다 — 같은 비밀을 다른 호스트가 재사용하지 못하게 */
 						ctrl->opts->host->nqn);	/* [한국어] 원시 시크릿+NQN → HMAC 키 */
-		if (IS_ERR(chap->transformed_key)) {	/* [한국어] 에러 포인터 규약 */
-			ret = PTR_ERR(chap->transformed_key);	/* [한국어] ret 상수 — 상위 enum 역할 참고 */
-			chap->transformed_key = NULL;	/* [한국어] NULL — 함수/구조 문맥의 상태 */
-			return ret;	/* [한국어] 결과 코드 전파 */
+		if (IS_ERR(chap->transformed_key)) {	/* [한국어] 비밀키 형식이 잘못됐거나 메모리가 부족하다 */
+			ret = PTR_ERR(chap->transformed_key);
+			chap->transformed_key = NULL;	/* [한국어] 오류 포인터를 남기면 정리 경로가 해제를 시도한다 */
+			return ret;
 		}
 	} else {	/* [한국어] 대안 경로 */
 		dev_dbg(ctrl->device, "%s: qid %d re-using host response\n",	/* [한국어] 진단 로그 */
@@ -560,22 +560,22 @@ static int nvme_auth_dhchap_setup_host_response(struct nvme_ctrl *ctrl,
 	ret = nvme_auth_hmac_init(&hmac, chap->hash_id,
 				  chap->transformed_key->key,
 				  chap->transformed_key->len);	/* [한국어] 선택 해시로 HMAC 시작 */
-	if (ret)	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
-		goto out;	/* [한국어] out — 함수/구조 문맥의 상태 */
+	if (ret)	/* [한국어] HMAC 초기화 실패 — 아직 challenge 를 안 잡았으니 out 이 안전하다 */
+		goto out;
 
-	if (chap->dh_tfm) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (chap->dh_tfm) {	/* [한국어] DH 를 썼다면 챌린지를 공유 비밀로 한 번 더 섞는다 — 도청자가 응답을 계산하지 못하게 */
 		challenge = kmalloc(chap->hash_len, GFP_KERNEL);	/* [한국어] augmented challenge 출력 버퍼 */
-		if (!challenge) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
-			ret = -ENOMEM;	/* [한국어] ret 상수 — 상위 enum 역할 참고 */
-			goto out;	/* [한국어] out — 함수/구조 문맥의 상태 */
+		if (!challenge) {	/* [한국어] 섞은 결과를 담을 곳이 없다 */
+			ret = -ENOMEM;
+			goto out;
 		}
 		ret = nvme_auth_augmented_challenge(chap->hash_id,
 						    chap->sess_key,
 						    chap->sess_key_len,
 						    chap->c1, challenge,
 						    chap->hash_len);	/* [한국어] DH 세션키로 c1 증강 */
-		if (ret)	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
-			goto out;	/* [한국어] out — 함수/구조 문맥의 상태 */
+		if (ret)	/* [한국어] 섞기 실패 — challenge 는 out 에서 해제된다 */
+			goto out;
 	}
 
 	nvme_auth_hmac_update(&hmac, challenge, chap->hash_len);	/* [한국어] 챌린지 바이트 */
@@ -591,17 +591,17 @@ static int nvme_auth_dhchap_setup_host_response(struct nvme_ctrl *ctrl,
 	nvme_auth_hmac_update(&hmac, "HostHost", 8);	/* [한국어] 역할 라벨 — 호스트 응답 도메인 */
 	nvme_auth_hmac_update(&hmac, ctrl->opts->host->nqn,	/* [한국어] 호스트 NQN 을 해시에 넣는다 — 신원이 응답에 묶인다 */
 			      strlen(ctrl->opts->host->nqn));	/* [한국어] Host NQN */
-	memset(buf, 0, sizeof(buf));	/* [한국어] 메모리/문자열 연산 */
+	memset(buf, 0, sizeof(buf));	/* [한국어] 스펙이 요구하는 구분자 0 바이트 — NQN 두 개가 이어 붙어 같은 해시가 되는 것을 막는다 */
 	nvme_auth_hmac_update(&hmac, buf, 1);	/* [한국어] NQN 구분자 NUL */
 	nvme_auth_hmac_update(&hmac, ctrl->opts->subsysnqn,	/* [한국어] 서브시스템 NQN 도 넣어 다른 대상으로의 재생 공격을 막는다 */
 			      strlen(ctrl->opts->subsysnqn));	/* [한국어] 서브시스템 NQN */
 	nvme_auth_hmac_final(&hmac, chap->response);	/* [한국어] 최종 호스트 응답 다이제스트 */
-	ret = 0;	/* [한국어] ret 상수 — 상위 enum 역할 참고 */
+	ret = 0;	/* [한국어] 응답이 chap->response 에 담겼다 */
 out:
 	if (challenge != chap->c1)
 		kfree(challenge);	/* [한국어] augmented 임시 버퍼만 해제 */
 	memzero_explicit(&hmac, sizeof(hmac));	/* [한국어] 스택 키 재료 잔존 방지 */
-	return ret;	/* [한국어] 결과 코드 전파 */
+	return ret;	/* [한국어] 성공이든 실패든 비밀 재료는 out 에서 이미 지워졌다 */
 }
 
 /*
@@ -614,39 +614,39 @@ out:
 static int nvme_auth_dhchap_setup_ctrl_response(struct nvme_ctrl *ctrl,
 		struct nvme_dhchap_queue_context *chap)
 {
-	struct nvme_auth_hmac_ctx hmac;	/* [한국어] hmac — 함수/구조 문맥의 상태 */
+	struct nvme_auth_hmac_ctx hmac;	/* [한국어] 컨트롤러 응답 계산용 — 스택에 두고 끝나면 지운다 */
 	struct nvme_dhchap_key *transformed_key;	/* [한국어] 컨트롤러 시크릿 변환 키 (일회) */
-	u8 buf[4], *challenge = chap->c2;	/* [한국어] 지역/멤버 상태 — 상위 함수·구조 아키텍처 참고 */
-	int ret;	/* [한국어] ret — 함수/구조 문맥의 상태 */
+	u8 buf[4], *challenge = chap->c2;	/* [한국어] 우리가 보낸 역방향 챌린지가 기본값이다 */
+	int ret;	/* [한국어] 단계별 결과 */
 
 	transformed_key = nvme_auth_transform_key(ctrl->ctrl_key,
 				ctrl->opts->subsysnqn);	/* [한국어] 컨트롤러 시크릿+서브시스템 NQN */
-	if (IS_ERR(transformed_key)) {	/* [한국어] 에러 포인터 규약 */
-		ret = PTR_ERR(transformed_key);	/* [한국어] ret 상수 — 상위 enum 역할 참고 */
-		return ret;	/* [한국어] 결과 코드 전파 */
+	if (IS_ERR(transformed_key)) {	/* [한국어] 컨트롤러 비밀키를 서브시스템 NQN 으로 변환하지 못했다 */
+		ret = PTR_ERR(transformed_key);
+		return ret;	/* [한국어] 아직 잡은 자원이 없어 곧바로 나간다 */
 	}
 
-	ret = nvme_auth_hmac_init(&hmac, chap->hash_id, transformed_key->key,	/* [한국어] ret 상수 — 상위 enum 역할 참고 */
+	ret = nvme_auth_hmac_init(&hmac, chap->hash_id, transformed_key->key,	/* [한국어] 협상한 해시로 HMAC 을 연다 — 키는 방금 변환한 컨트롤러 비밀 */
 				  transformed_key->len);
-	if (ret) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (ret) {	/* [한국어] 이 해시를 커널이 지원하지 않는다 */
 		dev_warn(ctrl->device, "qid %d: failed to init hmac, error %d\n",	/* [한국어] 진단 로그 */
 			 chap->qid, ret);
-		goto out;	/* [한국어] out — 함수/구조 문맥의 상태 */
+		goto out;	/* [한국어] 변환 키를 해제해야 하므로 곧바로 반환하지 않는다 */
 	}
 
-	if (chap->dh_tfm) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
-		challenge = kmalloc(chap->hash_len, GFP_KERNEL);	/* [한국어] challenge 상수 — 상위 enum 역할 참고 */
-		if (!challenge) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
-			ret = -ENOMEM;	/* [한국어] ret 상수 — 상위 enum 역할 참고 */
-			goto out;	/* [한국어] out — 함수/구조 문맥의 상태 */
+	if (chap->dh_tfm) {	/* [한국어] 정방향과 같은 이유로 역방향 챌린지도 공유 비밀로 섞는다 */
+		challenge = kmalloc(chap->hash_len, GFP_KERNEL);	/* [한국어] 섞은 결과를 담을 임시 버퍼 */
+		if (!challenge) {
+			ret = -ENOMEM;
+			goto out;
 		}
 		ret = nvme_auth_augmented_challenge(chap->hash_id,
 						    chap->sess_key,
 						    chap->sess_key_len,
 						    chap->c2, challenge,
 						    chap->hash_len);	/* [한국어] c2 를 세션키로 증강 */
-		if (ret)	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
-			goto out;	/* [한국어] out — 함수/구조 문맥의 상태 */
+		if (ret)
+			goto out;
 	}
 	dev_dbg(ctrl->device, "%s: qid %d ctrl response seq %u transaction %d\n",	/* [한국어] 진단 로그 */
 		__func__, chap->qid, chap->s2, chap->transaction);
@@ -665,22 +665,22 @@ static int nvme_auth_dhchap_setup_ctrl_response(struct nvme_ctrl *ctrl,
 	put_unaligned_le16(chap->transaction, buf);	/* [한국어] 비정렬 LE 직렬화 */
 	nvme_auth_hmac_update(&hmac, buf, 2);	/* [한국어] 트랜잭션 ID 2바이트 — 같은 연결의 다른 교환과 섞이지 않게 */
 
-	memset(buf, 0, 4);	/* [한국어] 메모리/문자열 연산 */
+	memset(buf, 0, 4);	/* [한국어] 구분자 0 바이트 — 아래 두 NQN 사이에 들어간다 */
 	nvme_auth_hmac_update(&hmac, buf, 1);	/* [한국어] sc 자리 0 */
 	nvme_auth_hmac_update(&hmac, "Controller", 10);	/* [한국어] 컨트롤러 역할 라벨 */
 	nvme_auth_hmac_update(&hmac, ctrl->opts->subsysnqn,	/* [한국어] 역방향이라 순서가 반대다: 서브시스템이 먼저 */
-			      strlen(ctrl->opts->subsysnqn));	/* [한국어] 메모리/문자열 연산 */
+			      strlen(ctrl->opts->subsysnqn));	/* [한국어] 길이를 명시해야 널 종단이 해시에 섞이지 않는다 */
 	nvme_auth_hmac_update(&hmac, buf, 1);	/* [한국어] NUL 구분자 */
 	nvme_auth_hmac_update(&hmac, ctrl->opts->host->nqn,	/* [한국어] 그다음 호스트. 이 순서가 정방향과 달라야 두 응답이 구별된다 */
-			      strlen(ctrl->opts->host->nqn));	/* [한국어] 메모리/문자열 연산 */
+			      strlen(ctrl->opts->host->nqn));
 	nvme_auth_hmac_final(&hmac, chap->response);	/* [한국어] 기대 컨트롤러 응답 → chap->response 에 덮어씀 */
-	ret = 0;	/* [한국어] ret 상수 — 상위 enum 역할 참고 */
+	ret = 0;	/* [한국어] 기대 응답이 chap->response 에 담겼다 — 이것을 받은 값과 비교한다 */
 out:
-	if (challenge != chap->c2)	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
-		kfree(challenge);	/* [한국어] 동적 메모리 해제 */
+	if (challenge != chap->c2)	/* [한국어] 섞은 임시 버퍼일 때만 해제한다. c2 는 context 소유다 */
+		kfree(challenge);
 	memzero_explicit(&hmac, sizeof(hmac));	/* [한국어] 컴파일러가 지우지 못하도록 — 스택에 남은 해시 상태도 비밀이다 */
 	nvme_auth_free_key(transformed_key);	/* [한국어] 일회 변환 키 즉시 폐기 */
-	return ret;	/* [한국어] 결과 코드 전파 */
+	return ret;
 }
 
 /*
@@ -693,57 +693,57 @@ out:
 static int nvme_auth_dhchap_exponential(struct nvme_ctrl *ctrl,
 		struct nvme_dhchap_queue_context *chap)
 {
-	int ret;	/* [한국어] ret — 함수/구조 문맥의 상태 */
+	int ret;	/* [한국어] 키 생성 단계들의 결과 */
 
-	if (chap->host_key && chap->host_key_len) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (chap->host_key && chap->host_key_len) {	/* [한국어] 재인증에서 같은 DH 군이면 개인키·공개키를 다시 만들지 않는다 */
 		dev_dbg(ctrl->device,	/* [한국어] 진단 로그 */
 			"qid %d: reusing host key\n", chap->qid);	/* [한국어] 재인증: 호스트 키쌍 재사용 */
-		goto gen_sesskey;	/* [한국어] gen_sesskey — 함수/구조 문맥의 상태 */
+		goto gen_sesskey;	/* [한국어] 공유 비밀만 다시 계산한다 — 상대 공개키가 바뀌었을 수 있다 */
 	}
 	ret = nvme_auth_gen_privkey(chap->dh_tfm, chap->dhgroup_id);	/* [한국어] 에페메럴 개인키 생성 */
-	if (ret < 0) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
-		chap->status = NVME_AUTH_DHCHAP_FAILURE_INCORRECT_PAYLOAD;	/* [한국어] NVME_AUTH_DHCHAP_FAILURE_INCORRECT_PAYLOAD — 함수/구조 문맥의 상태 */
-		return ret;	/* [한국어] 결과 코드 전파 */
+	if (ret < 0) {	/* [한국어] 개인키 생성 실패 */
+		chap->status = NVME_AUTH_DHCHAP_FAILURE_INCORRECT_PAYLOAD;
+		return ret;
 	}
 
 	chap->host_key_len = crypto_kpp_maxsize(chap->dh_tfm);	/* [한국어] 공개키 최대 바이트 */
 
 	chap->host_key = kzalloc(chap->host_key_len, GFP_KERNEL);	/* [한국어] 커널 할당 */
-	if (!chap->host_key) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (!chap->host_key) {	/* [한국어] 공개키를 담을 버퍼가 없다 */
 		chap->host_key_len = 0;	/* [한국어] 길이를 되돌려야 실패 후 정리 경로가 없는 키를 해제하지 않는다 */
-		chap->status = NVME_AUTH_DHCHAP_FAILURE_FAILED;	/* [한국어] NVME_AUTH_DHCHAP_FAILURE_FAILED — 함수/구조 문맥의 상태 */
-		return -ENOMEM;	/* [한국어] 할당 실패 전파 */
+		chap->status = NVME_AUTH_DHCHAP_FAILURE_FAILED;
+		return -ENOMEM;
 	}
 	ret = nvme_auth_gen_pubkey(chap->dh_tfm,
 				   chap->host_key, chap->host_key_len);	/* [한국어] 공개키 도출 → Reply 에 실음 */
-	if (ret) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (ret) {	/* [한국어] 개인키에서 공개키를 유도하지 못했다 */
 		dev_dbg(ctrl->device,	/* [한국어] 진단 로그 */
 			"failed to generate public key, error %d\n", ret);
-		chap->status = NVME_AUTH_DHCHAP_FAILURE_INCORRECT_PAYLOAD;	/* [한국어] NVME_AUTH_DHCHAP_FAILURE_INCORRECT_PAYLOAD — 함수/구조 문맥의 상태 */
-		return ret;	/* [한국어] 결과 코드 전파 */
+		chap->status = NVME_AUTH_DHCHAP_FAILURE_INCORRECT_PAYLOAD;
+		return ret;
 	}
 
 gen_sesskey:
 	chap->sess_key_len = chap->host_key_len;	/* [한국어] 공유 비밀은 공개키와 같은 크기다 — DH 군의 소수 크기가 둘을 함께 정한다 */
 	chap->sess_key = kmalloc(chap->sess_key_len, GFP_KERNEL);	/* [한국어] 공유 비밀 버퍼 */
-	if (!chap->sess_key) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (!chap->sess_key) {	/* [한국어] 공유 비밀을 담을 버퍼가 없다 */
 		chap->sess_key_len = 0;	/* [한국어] 같은 이유로 실패 시 길이를 지운다 */
-		chap->status = NVME_AUTH_DHCHAP_FAILURE_FAILED;	/* [한국어] NVME_AUTH_DHCHAP_FAILURE_FAILED — 함수/구조 문맥의 상태 */
-		return -ENOMEM;	/* [한국어] 할당 실패 전파 */
+		chap->status = NVME_AUTH_DHCHAP_FAILURE_FAILED;
+		return -ENOMEM;
 	}
 
 	ret = nvme_auth_gen_shared_secret(chap->dh_tfm,
 					  chap->ctrl_key, chap->ctrl_key_len,
 					  chap->sess_key, chap->sess_key_len);	/* [한국어] DH(priv, ctrl_pub) → sess_key */
-	if (ret) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (ret) {	/* [한국어] 우리 개인키와 상대 공개키로 공유 비밀을 만들지 못했다 */
 		dev_dbg(ctrl->device,	/* [한국어] 진단 로그 */
 			"failed to generate shared secret, error %d\n", ret);
-		chap->status = NVME_AUTH_DHCHAP_FAILURE_INCORRECT_PAYLOAD;	/* [한국어] NVME_AUTH_DHCHAP_FAILURE_INCORRECT_PAYLOAD — 함수/구조 문맥의 상태 */
-		return ret;	/* [한국어] 결과 코드 전파 */
+		chap->status = NVME_AUTH_DHCHAP_FAILURE_INCORRECT_PAYLOAD;
+		return ret;
 	}
 	dev_dbg(ctrl->device, "shared secret %*ph\n",	/* [한국어] 진단 로그 */
 		(int)chap->sess_key_len, chap->sess_key);
-	return 0;	/* [한국어] 성공/no-op 완료 */
+	return 0;	/* [한국어] 이제 챌린지 응답을 이 공유 비밀로 섞을 수 있다 */
 }
 
 /*
@@ -755,26 +755,26 @@ gen_sesskey:
 static void nvme_auth_reset_dhchap(struct nvme_dhchap_queue_context *chap)
 {
 	nvme_auth_free_key(chap->transformed_key);	/* [한국어] 변환 키부터 — 아래 kfree_sensitive 들과 달리 키링 참조라 전용 해제가 필요하다 */
-	chap->transformed_key = NULL;	/* [한국어] NULL — 함수/구조 문맥의 상태 */
+	chap->transformed_key = NULL;	/* [한국어] 포인터를 지워야 재인증이 해제된 키를 다시 쓰지 않는다 */
 	kfree_sensitive(chap->host_key);	/* [한국어] DH 키 재료 민감 해제 */
-	chap->host_key = NULL;	/* [한국어] NULL — 함수/구조 문맥의 상태 */
+	chap->host_key = NULL;
 	chap->host_key_len = 0;	/* [한국어] 포인터와 길이를 함께 지워야 재인증에서 없는 버퍼를 읽지 않는다 */
-	kfree_sensitive(chap->ctrl_key);	/* [한국어] 시크릿 안전 해제 */
-	chap->ctrl_key = NULL;	/* [한국어] NULL — 함수/구조 문맥의 상태 */
+	kfree_sensitive(chap->ctrl_key);	/* [한국어] _sensitive 라 해제 전에 내용을 0 으로 덮는다 */
+	chap->ctrl_key = NULL;
 	chap->ctrl_key_len = 0;	/* [한국어] 컨트롤러 공개키도 같은 방식으로 */
-	kfree_sensitive(chap->sess_key);	/* [한국어] 시크릿 안전 해제 */
-	chap->sess_key = NULL;	/* [한국어] NULL — 함수/구조 문맥의 상태 */
+	kfree_sensitive(chap->sess_key);	/* [한국어] 공유 비밀이라 특히 남기면 안 된다 */
+	chap->sess_key = NULL;
 	chap->sess_key_len = 0;	/* [한국어] 공유 비밀도 같은 방식으로 */
 	chap->status = 0;	/* [한국어] 다음 교환이 이전 실패 코드를 물려받지 않도록 */
 	chap->error = 0;	/* [한국어] 같은 이유 */
 	chap->s1 = 0;	/* [한국어] 시퀀스 번호를 비운다 — 재사용하면 재생 공격 방어가 무너진다 */
 	chap->s2 = 0;	/* [한국어] 역방향 시퀀스도 */
-	chap->bi_directional = false;	/* [한국어] false — 함수/구조 문맥의 상태 */
+	chap->bi_directional = false;	/* [한국어] 다음 교환에서 상호 인증 여부를 새로 판단한다 */
 	chap->transaction = 0;	/* [한국어] 트랜잭션 ID 도 새로 받는다 */
 	memset(chap->c1, 0, sizeof(chap->c1));	/* [한국어] 챌린지 잔존 제거 */
-	memset(chap->c2, 0, sizeof(chap->c2));	/* [한국어] 메모리/문자열 연산 */
+	memset(chap->c2, 0, sizeof(chap->c2));	/* [한국어] 챌린지도 지운다 — 재사용하면 재생 공격 방어가 무너진다 */
 	mempool_free(chap->buf, nvme_chap_buf_pool);	/* [한국어] CHAP 버퍼 풀 반환 */
-	chap->buf = NULL;	/* [한국어] NULL — 함수/구조 문맥의 상태 */
+	chap->buf = NULL;	/* [한국어] mempool 로 돌려줬으므로 포인터를 남기면 남의 버퍼를 건드린다 */
 }
 
 /*
@@ -798,10 +798,10 @@ static void nvme_auth_free_dhchap(struct nvme_dhchap_queue_context *chap)
 void nvme_auth_revoke_tls_key(struct nvme_ctrl *ctrl)
 {
 	dev_dbg(ctrl->device, "Wipe generated TLS PSK %08x\n",	/* [한국어] 진단 로그 */
-		key_serial(ctrl->opts->tls_key));	/* [한국어] 키링 수명/조회 */
+		key_serial(ctrl->opts->tls_key));	/* [한국어] 키 내용이 아니라 일련번호만 남긴다 — 로그에 비밀이 새면 안 된다 */
 	key_revoke(ctrl->opts->tls_key);	/* [한국어] 키링에서 즉시 사용 불가 표시 */
-	key_put(ctrl->opts->tls_key);	/* [한국어] 키링 수명/조회 */
-	ctrl->opts->tls_key = NULL;	/* [한국어] NULL — 함수/구조 문맥의 상태 */
+	key_put(ctrl->opts->tls_key);	/* [한국어] revoke 가 사용을 막고, put 이 참조를 놓는다. 둘 다 필요하다 */
+	ctrl->opts->tls_key = NULL;	/* [한국어] 재연결이 이 포인터를 살아 있는 키로 오인하지 않도록 */
 }
 EXPORT_SYMBOL_GPL(nvme_auth_revoke_tls_key);	/* [한국어] fabrics 트랜스포트가 TLS 재협상 시 부른다 */
 
@@ -818,31 +818,31 @@ static int nvme_auth_secure_concat(struct nvme_ctrl *ctrl,
 	u8 *psk, *tls_psk;	/* [한국어] 중간 PSK / 최종 TLS PSK 바이트 */
 	char *digest;	/* [한국어] 키 식별용 digest 문자열 */
 	struct key *tls_key;	/* [한국어] 키링에 삽입된 key 객체 */
-	size_t psk_len;	/* [한국어] psk_len — 함수/구조 문맥의 상태 */
-	int ret = 0;	/* [한국어] 지역/멤버 상태 — 상위 함수·구조 아키텍처 참고 */
+	size_t psk_len;	/* [한국어] PSK 길이는 협상한 해시 길이를 따라간다 */
+	int ret = 0;	/* [한국어] 단계별 결과 — 정리 라벨들이 이 값을 그대로 올린다 */
 
-	if (!chap->sess_key) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (!chap->sess_key) {	/* [한국어] concat 은 DH 공유 비밀에서 PSK 를 뽑는다. 그것이 없으면 유도할 재료가 없다 */
 		dev_warn(ctrl->device,	/* [한국어] 진단 로그 */
 			 "%s: qid %d no session key negotiated\n",
 			 __func__, chap->qid);	/* [한국어] DH 없이 concat 불가 */
-		return -ENOKEY;	/* [한국어] 호출 결과 반환 */
+		return -ENOKEY;	/* [한국어] 키 없음 — 사용자에게 DH 군을 쓰라고 알리는 신호다 */
 	}
 
-	if (chap->qid) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (chap->qid) {	/* [한국어] concat 은 admin 큐에서만 협상한다 — I/O 큐는 그 결과로 만든 TLS 위에서 연결된다 */
 		dev_warn(ctrl->device,	/* [한국어] 진단 로그 */
 			 "qid %d: secure concatenation not supported on I/O queues\n",
 			 chap->qid);	/* [한국어] I/O 큐 ASCR 미구현과 정합 */
-		return -EINVAL;	/* [한국어] 인자·프로토콜 불변식 위반 */
+		return -EINVAL;
 	}
 	ret = nvme_auth_generate_psk(chap->hash_id, chap->sess_key,
 				     chap->sess_key_len,
 				     chap->c1, chap->c2,
 				     chap->hash_len, &psk, &psk_len);	/* [한국어] 세션키+챌린지 → PSK */
-	if (ret) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (ret) {	/* [한국어] 두 챌린지와 공유 비밀에서 PSK 를 만들지 못했다 */
 		dev_warn(ctrl->device,	/* [한국어] 진단 로그 */
 			 "%s: qid %d failed to generate PSK, error %d\n",
 			 __func__, chap->qid, ret);
-		return ret;	/* [한국어] 결과 코드 전파 */
+		return ret;	/* [한국어] 아직 잡은 것이 없어 곧바로 나간다 */
 	}
 	dev_dbg(ctrl->device,	/* [한국어] 진단 로그 */
 		  "%s: generated psk %*ph\n", __func__, (int)psk_len, psk);
@@ -850,43 +850,43 @@ static int nvme_auth_secure_concat(struct nvme_ctrl *ctrl,
 	ret = nvme_auth_generate_digest(chap->hash_id, psk, psk_len,
 					ctrl->opts->subsysnqn,
 					ctrl->opts->host->nqn, &digest);	/* [한국어] 키 이름/지문용 digest */
-	if (ret) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (ret) {	/* [한국어] 호스트·서브시스템 NQN 을 묶은 다이제스트 생성 실패 */
 		dev_warn(ctrl->device,	/* [한국어] 진단 로그 */
 			 "%s: qid %d failed to generate digest, error %d\n",
 			 __func__, chap->qid, ret);
-		goto out_free_psk;	/* [한국어] out_free_psk — 함수/구조 문맥의 상태 */
+		goto out_free_psk;	/* [한국어] PSK 는 이미 잡혔으므로 지우고 나가야 한다 */
 	}
 	dev_dbg(ctrl->device, "%s: generated digest %s\n",	/* [한국어] 진단 로그 */
 		 __func__, digest);
 	ret = nvme_auth_derive_tls_psk(chap->hash_id, psk, psk_len,
 				       digest, &tls_psk);	/* [한국어] TLS 용 최종 키 바이트 유도 */
-	if (ret) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (ret) {	/* [한국어] PSK 와 다이제스트에서 최종 TLS PSK 를 유도하지 못했다 */
 		dev_warn(ctrl->device,	/* [한국어] 진단 로그 */
 			 "%s: qid %d failed to derive TLS psk, error %d\n",
 			 __func__, chap->qid, ret);
-		goto out_free_digest;	/* [한국어] out_free_digest — 함수/구조 문맥의 상태 */
+		goto out_free_digest;	/* [한국어] 다이제스트와 PSK 를 순서대로 지운다 */
 	}
 
 	tls_key = nvme_tls_psk_refresh(ctrl->opts->keyring,
 				       ctrl->opts->host->nqn,
 				       ctrl->opts->subsysnqn, chap->hash_id,
 				       tls_psk, psk_len, digest);	/* [한국어] 키링에 PSK 등록/갱신 */
-	if (IS_ERR(tls_key)) {	/* [한국어] 에러 포인터 규약 */
-		ret = PTR_ERR(tls_key);	/* [한국어] ret 상수 — 상위 enum 역할 참고 */
+	if (IS_ERR(tls_key)) {	/* [한국어] 키링 삽입 실패 — 키 자체는 만들어졌지만 쓸 수 없다 */
+		ret = PTR_ERR(tls_key);
 		dev_warn(ctrl->device,	/* [한국어] 진단 로그 */
 			 "%s: qid %d failed to insert generated key, error %d\n",
 			 __func__, chap->qid, ret);
-		tls_key = NULL;	/* [한국어] tls_key 상수 — 상위 enum 역할 참고 */
+		tls_key = NULL;	/* [한국어] 오류 포인터를 opts 에 넣으면 이후 경로가 그것을 키로 다룬다 */
 	}
-	kfree_sensitive(tls_psk);	/* [한국어] 시크릿 안전 해제 */
+	kfree_sensitive(tls_psk);	/* [한국어] 키링이 복사본을 들었으므로 원본은 지워 없앤다 */
 	if (ctrl->opts->tls_key)
 		nvme_auth_revoke_tls_key(ctrl);	/* [한국어] 이전 PSK 폐기 후 교체 */
 	ctrl->opts->tls_key = tls_key;	/* [한국어] 이후 TCP TLS 핸드셰이크가 이 키 사용 */
 out_free_digest:
-	kfree_sensitive(digest);	/* [한국어] 시크릿 안전 해제 */
+	kfree_sensitive(digest);	/* [한국어] 다이제스트도 유도 재료라 흔적을 남기지 않는다 */
 out_free_psk:
-	kfree_sensitive(psk);	/* [한국어] 시크릿 안전 해제 */
-	return ret;	/* [한국어] 결과 코드 전파 */
+	kfree_sensitive(psk);	/* [한국어] 중간 PSK 도 마찬가지 */
+	return ret;	/* [한국어] 성공이면 opts->tls_key 에 키가 걸려 있다 */
 }
 
 /*
@@ -901,11 +901,11 @@ out_free_psk:
  */
 static void nvme_queue_auth_work(struct work_struct *work)
 {
-	struct nvme_dhchap_queue_context *chap =	/* [한국어] 지역/멤버 상태 — 상위 함수·구조 아키텍처 참고 */
-		container_of(work, struct nvme_dhchap_queue_context, auth_work);	/* [한국어] 임베디드 멤버→부모 구조체 */
-	struct nvme_ctrl *ctrl = chap->ctrl;	/* [한국어] 지역/멤버 상태 — 상위 함수·구조 아키텍처 참고 */
+	struct nvme_dhchap_queue_context *chap =	/* [한국어] 워크가 큐 문맥 안에 박혀 있어 역산으로 찾는다 */
+		container_of(work, struct nvme_dhchap_queue_context, auth_work);
+	struct nvme_ctrl *ctrl = chap->ctrl;	/* [한국어] 문맥 생성 시 새겨 둔 컨트롤러 */
 	size_t tl;	/* [한국어] Auth Send 페이로드 길이 */
-	int ret = 0;	/* [한국어] 지역/멤버 상태 — 상위 함수·구조 아키텍처 참고 */
+	int ret = 0;	/* [한국어] 워크는 값을 반환할 수 없어 chap->error 로 결과를 남긴다 */
 
 	/*
 	 * Allocate a large enough buffer for the entire negotiation:
@@ -913,7 +913,7 @@ static void nvme_queue_auth_work(struct work_struct *work)
 	 */
 	/* [한국어] 핸드셰이크 전 구간 재사용하는 4K 버퍼 — ffdhe8192 공개키 수용 */
 	chap->buf = mempool_alloc(nvme_chap_buf_pool, GFP_KERNEL);	/* [한국어] 풀/캐시/wq 수명 */
-	if (!chap->buf) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (!chap->buf) {	/* [한국어] 협상 버퍼를 못 잡으면 첫 메시지도 만들 수 없다 */
 		chap->error = -ENOMEM;	/* [한국어] 워크 안이라 반환할 곳이 없다 — 오류는 context 에 적고 auth_wait 이 읽는다 */
 		return;	/* [한국어] 버퍼 없으면 메시지 송수신 불가 — Failure2 도 못 보냄 */
 	}
@@ -924,14 +924,14 @@ static void nvme_queue_auth_work(struct work_struct *work)
 	dev_dbg(ctrl->device, "%s: qid %d send negotiate\n",	/* [한국어] 진단 로그 */
 		__func__, chap->qid);
 	ret = nvme_auth_set_dhchap_negotiate_data(ctrl, chap);	/* [한국어] 지원 hash/DH/sc_c 목록 구성 */
-	if (ret < 0) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
-		chap->error = ret;	/* [한국어] ret — 함수/구조 문맥의 상태 */
+	if (ret < 0) {	/* [한국어] Negotiate 조립 실패 — 음수만 오류이고 양수는 길이다 */
+		chap->error = ret;
 		return;	/* [한국어] 협상 데이터를 못 만들었으므로 보낼 것이 없다 */
 	}
-	tl = ret;	/* [한국어] tl 상수 — 상위 enum 역할 참고 */
+	tl = ret;	/* [한국어] 조립 함수는 성공 시 메시지 길이를 돌려준다 */
 	ret = nvme_auth_submit(ctrl, chap->qid, chap->buf, tl, true);	/* [한국어] Negotiate Auth Send */
-	if (ret) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
-		chap->error = ret;	/* [한국어] ret — 함수/구조 문맥의 상태 */
+	if (ret) {	/* [한국어] Negotiate 전송 실패 */
+		chap->error = ret;
 		return;	/* [한국어] Negotiate 전송 실패 — 여기서 끝내면 컨트롤러도 교환을 버린다 */
 	}
 
@@ -942,36 +942,36 @@ static void nvme_queue_auth_work(struct work_struct *work)
 	memset(chap->buf, 0, CHAP_BUF_SIZE);	/* [한국어] 수신 전 버퍼 클리어 */
 	ret = nvme_auth_submit(ctrl, chap->qid, chap->buf, CHAP_BUF_SIZE,
 			       false);	/* [한국어] Challenge Auth Receive */
-	if (ret) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (ret) {	/* [한국어] Challenge 수신 실패 — 음수면 전송 오류, 양수면 컨트롤러가 거절했다 */
 		dev_warn(ctrl->device,	/* [한국어] 진단 로그 */
 			 "qid %d failed to receive challenge, %s %d\n",
 			 chap->qid, ret < 0 ? "error" : "nvme status", ret);
-		chap->error = ret;	/* [한국어] ret — 함수/구조 문맥의 상태 */
+		chap->error = ret;
 		return;	/* [한국어] Challenge 수신 실패 */
 	}
 	ret = nvme_auth_receive_validate(ctrl, chap->qid, chap->buf, chap->transaction,
 					 NVME_AUTH_DHCHAP_MESSAGE_CHALLENGE);	/* [한국어] Challenge 헤더 검증 */
-	if (ret) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
-		chap->status = ret;	/* [한국어] ret — 함수/구조 문맥의 상태 */
+	if (ret) {	/* [한국어] 받은 것이 기대한 메시지가 아니다 */
+		chap->status = ret;	/* [한국어] 검증 함수가 돌려준 스펙 거절 코드를 그대로 쓴다 */
 		chap->error = -EKEYREJECTED;	/* [한국어] 재연결 억제용 키 거부 errno */
 		return;	/* [한국어] 트랜잭션 ID 나 메시지 종류가 어긋났다 — 응답을 가로챈 것일 수 있다 */
 	}
 
 	ret = nvme_auth_process_dhchap_challenge(ctrl, chap);	/* [한국어] hash/DH/c1/s1/ctrl_key 확정 */
-	if (ret) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (ret) {	/* [한국어] 챌린지 안의 해시·DH 군이 우리가 다룰 수 없는 값이다 */
 		/* Invalid challenge parameters */
-		chap->error = ret;	/* [한국어] ret — 함수/구조 문맥의 상태 */
-		goto fail2;	/* [한국어] fail2 — 함수/구조 문맥의 상태 */
+		chap->error = ret;
+		goto fail2;	/* [한국어] 이 지점부터는 상대에게 실패 메시지를 보내 줘야 한다 */
 	}
 
-	if (chap->ctrl_key_len) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (chap->ctrl_key_len) {	/* [한국어] 컨트롤러가 공개키를 보냈다면 DH 교환을 마쳐야 한다 */
 		dev_dbg(ctrl->device,	/* [한국어] 진단 로그 */
 			"%s: qid %d DH exponential\n",
 			__func__, chap->qid);
 		ret = nvme_auth_dhchap_exponential(ctrl, chap);	/* [한국어] 호스트 키쌍+공유비밀 */
-		if (ret) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
-			chap->error = ret;	/* [한국어] ret — 함수/구조 문맥의 상태 */
-			goto fail2;	/* [한국어] fail2 — 함수/구조 문맥의 상태 */
+		if (ret) {	/* [한국어] 공유 비밀 계산 실패 */
+			chap->error = ret;
+			goto fail2;
 		}
 	}
 
@@ -979,82 +979,82 @@ static void nvme_queue_auth_work(struct work_struct *work)
 		__func__, chap->qid);
 	mutex_lock(&ctrl->dhchap_auth_mutex);	/* [한국어] transformed_key/호스트 키 직렬화 */
 	ret = nvme_auth_dhchap_setup_host_response(ctrl, chap);	/* [한국어] Reply HMAC 계산 */
-	mutex_unlock(&ctrl->dhchap_auth_mutex);	/* [한국어] 컨트롤 플레인 뮤텍스 해제 */
-	if (ret) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
-		chap->error = ret;	/* [한국어] ret — 함수/구조 문맥의 상태 */
-		goto fail2;	/* [한국어] fail2 — 함수/구조 문맥의 상태 */
+	mutex_unlock(&ctrl->dhchap_auth_mutex);	/* [한국어] 호스트 키를 읽는 동안만 잡는다 — sysfs 가 그 사이에 키를 바꿀 수 있다 */
+	if (ret) {	/* [한국어] 응답 계산 실패 */
+		chap->error = ret;
+		goto fail2;
 	}
 
 	/* DH-HMAC-CHAP Step 3: send reply */
 	dev_dbg(ctrl->device, "%s: qid %d send reply\n",	/* [한국어] 진단 로그 */
 		__func__, chap->qid);
 	ret = nvme_auth_set_dhchap_reply_data(ctrl, chap);	/* [한국어] response/c2/pubkey 패킹 */
-	if (ret < 0) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
-		chap->error = ret;	/* [한국어] ret — 함수/구조 문맥의 상태 */
-		goto fail2;	/* [한국어] fail2 — 함수/구조 문맥의 상태 */
+	if (ret < 0) {	/* [한국어] Reply 조립 실패 */
+		chap->error = ret;
+		goto fail2;
 	}
 
-	tl = ret;	/* [한국어] tl 상수 — 상위 enum 역할 참고 */
+	tl = ret;	/* [한국어] 조립된 Reply 의 길이 */
 	ret = nvme_auth_submit(ctrl, chap->qid, chap->buf, tl, true);	/* [한국어] Reply Auth Send */
-	if (ret) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
-		chap->error = ret;	/* [한국어] ret — 함수/구조 문맥의 상태 */
-		goto fail2;	/* [한국어] fail2 — 함수/구조 문맥의 상태 */
+	if (ret) {	/* [한국어] Reply 전송 실패 */
+		chap->error = ret;
+		goto fail2;	/* [한국어] Reply 를 보낸 뒤이므로 상대에게 실패 메시지를 보내 교환을 닫아야 한다 */
 	}
 
 	/* DH-HMAC-CHAP Step 4: receive success1 */
 	dev_dbg(ctrl->device, "%s: qid %d receive success1\n",	/* [한국어] 진단 로그 */
 		__func__, chap->qid);
 
-	memset(chap->buf, 0, CHAP_BUF_SIZE);	/* [한국어] 메모리/문자열 연산 */
+	memset(chap->buf, 0, CHAP_BUF_SIZE);	/* [한국어] 받기 전에 통째로 지운다 — 앞 메시지의 잔재를 응답으로 오독하지 않도록 */
 	ret = nvme_auth_submit(ctrl, chap->qid, chap->buf, CHAP_BUF_SIZE,
 			       false);	/* [한국어] Success1 Auth Receive */
-	if (ret) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (ret) {	/* [한국어] Success1 수신 실패 */
 		dev_warn(ctrl->device,	/* [한국어] 진단 로그 */
 			 "qid %d failed to receive success1, %s %d\n",
 			 chap->qid, ret < 0 ? "error" : "nvme status", ret);
-		chap->error = ret;	/* [한국어] ret — 함수/구조 문맥의 상태 */
+		chap->error = ret;
 		return;	/* [한국어] 수신 자체 실패 — Failure2 의미 약함 */
 	}
-	ret = nvme_auth_receive_validate(ctrl, chap->qid,	/* [한국어] ret 상수 — 상위 enum 역할 참고 */
+	ret = nvme_auth_receive_validate(ctrl, chap->qid,	/* [한국어] 받은 것이 정말 Success1 이고 같은 트랜잭션인지 확인한다 */
 					 chap->buf, chap->transaction,
 					 NVME_AUTH_DHCHAP_MESSAGE_SUCCESS1);
-	if (ret) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
-		chap->status = ret;	/* [한국어] ret — 함수/구조 문맥의 상태 */
+	if (ret) {	/* [한국어] 아니면 재생이나 순서 뒤바뀜이다 */
+		chap->status = ret;
 		chap->error = -EKEYREJECTED;	/* [한국어] Success1 이 아니거나 트랜잭션이 다르다 — 키 거부로 올린다 */
 		return;
 	}
 
-	mutex_lock(&ctrl->dhchap_auth_mutex);	/* [한국어] 컨트롤 플레인 뮤텍스 획득 */
-	if (ctrl->ctrl_key) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	mutex_lock(&ctrl->dhchap_auth_mutex);	/* [한국어] 컨트롤러 키를 읽는 동안 sysfs 가 바꾸지 못하게 */
+	if (ctrl->ctrl_key) {	/* [한국어] 상호 인증을 요구한 경우에만 기대 응답을 계산한다 */
 		dev_dbg(ctrl->device,	/* [한국어] 진단 로그 */
 			"%s: qid %d controller response\n",
 			__func__, chap->qid);
 		ret = nvme_auth_dhchap_setup_ctrl_response(ctrl, chap);	/* [한국어] 기대 컨트롤러 HMAC 선계산 */
-		if (ret) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
-			mutex_unlock(&ctrl->dhchap_auth_mutex);	/* [한국어] 컨트롤 플레인 뮤텍스 해제 */
-			chap->error = ret;	/* [한국어] ret — 함수/구조 문맥의 상태 */
-			goto fail2;	/* [한국어] fail2 — 함수/구조 문맥의 상태 */
+		if (ret) {	/* [한국어] 기대 응답 계산 실패 */
+			mutex_unlock(&ctrl->dhchap_auth_mutex);	/* [한국어] goto 전에 락을 놓아야 한다 — fail2 는 락을 모른다 */
+			chap->error = ret;
+			goto fail2;
 		}
 	}
-	mutex_unlock(&ctrl->dhchap_auth_mutex);	/* [한국어] 컨트롤 플레인 뮤텍스 해제 */
+	mutex_unlock(&ctrl->dhchap_auth_mutex);	/* [한국어] 키를 다 읽었다 */
 
 	ret = nvme_auth_process_dhchap_success1(ctrl, chap);	/* [한국어] rvalid 시 memcmp 검증 */
-	if (ret) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (ret) {	/* [한국어] 받은 응답이 기대값과 다르다 */
 		/* Controller authentication failed */
 		chap->error = -EKEYREJECTED;	/* [한국어] 컨트롤러가 자신을 증명하지 못했다 — 상호 인증이 여기서 깨진다 */
-		goto fail2;	/* [한국어] fail2 — 함수/구조 문맥의 상태 */
+		goto fail2;	/* [한국어] 상대에게 실패를 알린다 */
 	}
 
-	if (chap->bi_directional) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (chap->bi_directional) {	/* [한국어] 우리가 챌린지를 보낸 경우에만 Success2 로 교환을 닫는다 */
 		/* DH-HMAC-CHAP Step 5: send success2 */
 		dev_dbg(ctrl->device, "%s: qid %d send success2\n",	/* [한국어] 진단 로그 */
 			__func__, chap->qid);
-		tl = nvme_auth_set_dhchap_success2_data(ctrl, chap);	/* [한국어] tl 상수 — 상위 enum 역할 참고 */
+		tl = nvme_auth_set_dhchap_success2_data(ctrl, chap);	/* [한국어] Success2 는 실패할 수 없어 길이만 돌려준다 */
 		ret = nvme_auth_submit(ctrl, chap->qid, chap->buf, tl, true);	/* [한국어] 양방향 확인 Success2 */
-		if (ret)	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
-			chap->error = ret;	/* [한국어] ret — 함수/구조 문맥의 상태 */
+		if (ret)	/* [한국어] 전송은 실패할 수 있다 */
+			chap->error = ret;
 	}
-	if (!ret) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (!ret) {	/* [한국어] 여기까지 오류가 없어야 인증 성공으로 표시한다 */
 		chap->error = 0;	/* [한국어] 여기까지 왔으면 양방향 모두 통과다 */
 		chap->authenticated = true;	/* [한국어] 이 큐 인증 성공 — 재인증 대상 표시 */
 		if (ctrl->opts->concat &&
@@ -1062,7 +1062,7 @@ static void nvme_queue_auth_work(struct work_struct *work)
 			dev_warn(ctrl->device,	/* [한국어] 진단 로그 */
 				 "%s: qid %d failed to enable secure concatenation\n",
 				 __func__, chap->qid);
-			chap->error = ret;	/* [한국어] ret — 함수/구조 문맥의 상태 */
+			chap->error = ret;	/* [한국어] 인증은 됐지만 TLS 키 유도가 실패했다 — 연결을 세울 수 없다 */
 			chap->authenticated = false;	/* [한국어] concat 실패 시 인증 무효로 취급 */
 		}
 		return;	/* [한국어] 성공 경로 — Failure2 불필요 */
@@ -1073,15 +1073,15 @@ fail2:
 		chap->status = NVME_AUTH_DHCHAP_FAILURE_FAILED;	/* [한국어] 세부 코드 없으면 일반 실패 */
 	dev_dbg(ctrl->device, "%s: qid %d send failure2, status %x\n",	/* [한국어] 진단 로그 */
 		__func__, chap->qid, chap->status);
-	tl = nvme_auth_set_dhchap_failure2_data(ctrl, chap);	/* [한국어] tl 상수 — 상위 enum 역할 참고 */
+	tl = nvme_auth_set_dhchap_failure2_data(ctrl, chap);	/* [한국어] 상대도 교환을 닫을 수 있도록 실패 이유를 보낸다 */
 	ret = nvme_auth_submit(ctrl, chap->qid, chap->buf, tl, true);	/* [한국어] 호스트→컨트롤러 실패 통지 */
 	/*
 	 * only update error if send failure2 failed and no other
 	 * error had been set during authentication.
 	 */
 	/* [한국어] 이미 error 가 있으면 원인 보존 — Failure2 전송 실패만 보충 */
-	if (ret && !chap->error)	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
-		chap->error = ret;	/* [한국어] ret — 함수/구조 문맥의 상태 */
+	if (ret && !chap->error)	/* [한국어] 위 영어 주석대로, 먼저 난 오류를 실패 메시지 전송 오류로 덮지 않는다 */
+		chap->error = ret;
 }
 
 /*
@@ -1093,22 +1093,22 @@ fail2:
  */
 int nvme_auth_negotiate(struct nvme_ctrl *ctrl, int qid)
 {
-	struct nvme_dhchap_queue_context *chap;	/* [한국어] chap — 함수/구조 문맥의 상태 */
+	struct nvme_dhchap_queue_context *chap;	/* [한국어] 큐마다 하나씩 미리 잡아 둔 문맥 */
 
-	if (!ctrl->host_key) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (!ctrl->host_key) {	/* [한국어] 호스트 비밀이 없으면 증명할 것이 없다 */
 		dev_warn(ctrl->device, "qid %d: no key\n", qid);	/* [한국어] 시크릿 미설정 — 인증 불가 */
-		return -ENOKEY;	/* [한국어] 호출 결과 반환 */
+		return -ENOKEY;
 	}
 
-	if (ctrl->opts->dhchap_ctrl_secret && !ctrl->ctrl_key) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (ctrl->opts->dhchap_ctrl_secret && !ctrl->ctrl_key) {	/* [한국어] 상호 인증을 요구했는데 컨트롤러 키 파싱이 실패한 상태다 */
 		dev_warn(ctrl->device, "qid %d: invalid ctrl key\n", qid);	/* [한국어] 양방향 옵션인데 키 파싱 실패 상태 */
-		return -ENOKEY;	/* [한국어] 호출 결과 반환 */
+		return -ENOKEY;
 	}
 
 	chap = &ctrl->dhchap_ctxs[qid];	/* [한국어] 큐 슬롯 context */
 	cancel_work_sync(&chap->auth_work);	/* [한국어] 이전 라운드 잔여 워크 정리 */
 	queue_work(nvme_auth_wq, &chap->auth_work);	/* [한국어] 상태기계 비동기 시작 */
-	return 0;	/* [한국어] 성공/no-op 완료 */
+	return 0;	/* [한국어] 예약만 하고 돌아간다 — 결과는 nvme_auth_wait 이 거둔다 */
 }
 EXPORT_SYMBOL_GPL(nvme_auth_negotiate);	/* [한국어] fabrics 트랜스포트가 Connect 직후 큐마다 부른다 */
 
@@ -1121,15 +1121,15 @@ EXPORT_SYMBOL_GPL(nvme_auth_negotiate);	/* [한국어] fabrics 트랜스포트�
  */
 int nvme_auth_wait(struct nvme_ctrl *ctrl, int qid)
 {
-	struct nvme_dhchap_queue_context *chap;	/* [한국어] chap — 함수/구조 문맥의 상태 */
-	int ret;	/* [한국어] ret — 함수/구조 문맥의 상태 */
+	struct nvme_dhchap_queue_context *chap;	/* [한국어] negotiate 가 워크를 건 그 문맥 */
+	int ret;	/* [한국어] 워크가 남긴 오류 */
 
-	chap = &ctrl->dhchap_ctxs[qid];	/* [한국어] chap 상수 — 상위 enum 역할 참고 */
+	chap = &ctrl->dhchap_ctxs[qid];	/* [한국어] 큐 번호가 곧 배열 인덱스다 */
 	flush_work(&chap->auth_work);	/* [한국어] nvme_queue_auth_work 완료까지 슬립 */
 	ret = chap->error;	/* [한국어] 0=성공, 음수=호스트 errno, 키 거부는 -EKEYREJECTED */
 	/* clear sensitive info */
 	nvme_auth_reset_dhchap(chap);	/* [한국어] 세션 키·챌린지·버퍼 잔존 방지 */
-	return ret;	/* [한국어] 결과 코드 전파 */
+	return ret;	/* [한국어] 키 재료는 이미 지워졌고 결과 코드만 나간다 */
 }
 EXPORT_SYMBOL_GPL(nvme_auth_wait);	/* [한국어] 같은 트랜스포트가 결과를 동기적으로 받기 위해 부른다 */
 
@@ -1142,9 +1142,9 @@ EXPORT_SYMBOL_GPL(nvme_auth_wait);	/* [한국어] 같은 트랜스포트가 결�
  */
 static void nvme_ctrl_auth_work(struct work_struct *work)
 {
-	struct nvme_ctrl *ctrl =	/* [한국어] 지역/멤버 상태 — 상위 함수·구조 아키텍처 참고 */
-		container_of(work, struct nvme_ctrl, dhchap_auth_work);	/* [한국어] 임베디드 멤버→부모 구조체 */
-	int ret, q;	/* [한국어] q — 함수/구조 문맥의 상태 */
+	struct nvme_ctrl *ctrl =	/* [한국어] 워크가 컨트롤러 안에 박혀 있다 */
+		container_of(work, struct nvme_ctrl, dhchap_auth_work);
+	int ret, q;	/* [한국어] 결과와 큐 인덱스 */
 
 	/*
 	 * If the ctrl is no connected, bail as reconnect will handle
@@ -1155,13 +1155,13 @@ static void nvme_ctrl_auth_work(struct work_struct *work)
 
 	/* Authenticate admin queue first */
 	ret = nvme_auth_negotiate(ctrl, 0);	/* [한국어] Admin 재인증 시작 */
-	if (ret) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (ret) {	/* [한국어] admin 큐 인증을 걸지 못했다 */
 		dev_warn(ctrl->device,	/* [한국어] 진단 로그 */
 			 "qid 0: error %d setting up authentication\n", ret);
 		return;	/* [한국어] admin 큐 인증을 걸지 못하면 I/O 큐를 시도할 이유가 없다 */
 	}
-	ret = nvme_auth_wait(ctrl, 0);	/* [한국어] ret 상수 — 상위 enum 역할 참고 */
-	if (ret) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	ret = nvme_auth_wait(ctrl, 0);	/* [한국어] admin 결과를 먼저 확인해야 I/O 큐를 시도할지 정할 수 있다 */
+	if (ret) {	/* [한국어] admin 인증 실패 — I/O 큐도 통과할 리 없다 */
 		dev_warn(ctrl->device,	/* [한국어] 진단 로그 */
 			 "qid 0: authentication failed\n");
 		return;	/* [한국어] Admin 실패 시 I/O 재인증 생략 */
@@ -1173,7 +1173,7 @@ static void nvme_ctrl_auth_work(struct work_struct *work)
 		return;	/* [한국어] concat 은 Admin 세션키만으로 TLS PSK 유도 */
 
 	for (q = 1; q < ctrl->queue_count; q++) {	/* [한국어] 순회 루프 */
-		struct nvme_dhchap_queue_context *chap =	/* [한국어] 지역/멤버 상태 — 상위 함수·구조 아키텍처 참고 */
+		struct nvme_dhchap_queue_context *chap =	/* [한국어] I/O 큐들의 인증을 먼저 모두 걸어 두고 */
 			&ctrl->dhchap_ctxs[q];
 		/*
 		 * Skip re-authentication if the queue had
@@ -1191,12 +1191,12 @@ static void nvme_ctrl_auth_work(struct work_struct *work)
 	 */
 	/* [한국어] I/O 재인증 실패해도 즉시 연결 끊지 않음 — soft 경고 */
 	for (q = 1; q < ctrl->queue_count; q++) {	/* [한국어] 순회 루프 */
-		struct nvme_dhchap_queue_context *chap =	/* [한국어] 지역/멤버 상태 — 상위 함수·구조 아키텍처 참고 */
+		struct nvme_dhchap_queue_context *chap =	/* [한국어] 그다음 한꺼번에 기다린다 — 순차로 하면 큐 수만큼 왕복이 늘어난다 */
 			&ctrl->dhchap_ctxs[q];
 		if (!chap->authenticated)
 			continue;	/* [한국어] 다음 후보로 진행 */
 		flush_work(&chap->auth_work);	/* [한국어] 워크 동기 완료/취소 */
-		ret = chap->error;	/* [한국어] ret 상수 — 상위 enum 역할 참고 */
+		ret = chap->error;	/* [한국어] 하나라도 실패하면 재인증 전체를 실패로 본다 */
 		nvme_auth_reset_dhchap(chap);	/* [한국어] wait 와 동일하게 민감 상태 소거 */
 		if (ret)
 			dev_warn(ctrl->device,	/* [한국어] 진단 로그 */
@@ -1213,46 +1213,46 @@ static void nvme_ctrl_auth_work(struct work_struct *work)
  */
 int nvme_auth_init_ctrl(struct nvme_ctrl *ctrl)
 {
-	struct nvme_dhchap_queue_context *chap;	/* [한국어] chap — 함수/구조 문맥의 상태 */
-	int i, ret;	/* [한국어] ret — 함수/구조 문맥의 상태 */
+	struct nvme_dhchap_queue_context *chap;	/* [한국어] 배열 원소 크기를 구하는 데만 쓰는 선언 */
+	int i, ret;	/* [한국어] 큐 인덱스와 단계별 결과 */
 
 	mutex_init(&ctrl->dhchap_auth_mutex);	/* [한국어] HMAC 키 변환 직렬화 */
 	INIT_WORK(&ctrl->dhchap_auth_work, nvme_ctrl_auth_work);	/* [한국어] 전역 재인증 워크 */
 	if (!ctrl->opts)
 		return 0;	/* [한국어] fabrics 옵션 없음 — 인증 불필요 */
 	ret = nvme_auth_parse_key(ctrl->opts->dhchap_secret, &ctrl->host_key);	/* [한국어] DHHC-1: 호스트 시크릿 파싱 */
-	if (ret)	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
-		return ret;	/* [한국어] 결과 코드 전파 */
+	if (ret)	/* [한국어] 호스트 비밀 문자열이 형식에 맞지 않는다 */
+		return ret;	/* [한국어] 아직 잡은 것이 없다 */
 	ret = nvme_auth_parse_key(ctrl->opts->dhchap_ctrl_secret,
 				  &ctrl->ctrl_key);	/* [한국어] 양방향용 컨트롤러 시크릿 */
 	if (ret)
-		goto err_free_dhchap_secret;	/* [한국어] err_free_dhchap_secret — 함수/구조 문맥의 상태 */
+		goto err_free_dhchap_secret;	/* [한국어] 호스트 키는 이미 잡혔으므로 되돌려야 한다 */
 
 	if (!ctrl->opts->dhchap_secret && !ctrl->opts->dhchap_ctrl_secret)
 		return 0;	/* [한국어] 시크릿 전무 — context 배열 불필요 */
 
 	ctrl->dhchap_ctxs = kvzalloc_objs(*chap, ctrl_max_dhchaps(ctrl));	/* [한국어] Admin+I/O 큐 슬롯 일괄 할당 */
-	if (!ctrl->dhchap_ctxs) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
-		ret = -ENOMEM;	/* [한국어] ret 상수 — 상위 enum 역할 참고 */
-		goto err_free_dhchap_ctrl_secret;	/* [한국어] err_free_dhchap_ctrl_secret — 함수/구조 문맥의 상태 */
+	if (!ctrl->dhchap_ctxs) {	/* [한국어] 큐마다 하나씩 필요한 문맥 배열 */
+		ret = -ENOMEM;
+		goto err_free_dhchap_ctrl_secret;
 	}
 
 	for (i = 0; i < ctrl_max_dhchaps(ctrl); i++) {	/* [한국어] 순회 루프 */
-		chap = &ctrl->dhchap_ctxs[i];	/* [한국어] chap 상수 — 상위 enum 역할 참고 */
+		chap = &ctrl->dhchap_ctxs[i];	/* [한국어] 큐 번호와 인덱스를 일치시켜 조회를 O(1) 로 만든다 */
 		chap->qid = i;	/* [한국어] 배열 인덱스 = qid */
-		chap->ctrl = ctrl;	/* [한국어] ctrl — 함수/구조 문맥의 상태 */
-		chap->authenticated = false;	/* [한국어] false — 함수/구조 문맥의 상태 */
+		chap->ctrl = ctrl;	/* [한국어] 워크에서 컨트롤러로 돌아가는 통로 */
+		chap->authenticated = false;	/* [한국어] 아직 아무 큐도 인증되지 않았다 */
 		INIT_WORK(&chap->auth_work, nvme_queue_auth_work);	/* [한국어] 큐별 상태기계 워크 */
 	}
 
-	return 0;	/* [한국어] 성공/no-op 완료 */
+	return 0;	/* [한국어] 문맥이 준비됐다 — 실제 인증은 연결 시점에 시작된다 */
 err_free_dhchap_ctrl_secret:
 	nvme_auth_free_key(ctrl->ctrl_key);	/* [한국어] 컨트롤러 키를 먼저 되돌린다 — 이 라벨에 온 것은 그 뒤 단계가 실패했다는 뜻 */
-	ctrl->ctrl_key = NULL;	/* [한국어] NULL — 함수/구조 문맥의 상태 */
+	ctrl->ctrl_key = NULL;	/* [한국어] 포인터를 지워야 uninit 이 이중 해제하지 않는다 */
 err_free_dhchap_secret:
 	nvme_auth_free_key(ctrl->host_key);	/* [한국어] 호스트 키까지 되돌려 완전히 인증 이전 상태로 */
-	ctrl->host_key = NULL;	/* [한국어] NULL — 함수/구조 문맥의 상태 */
-	return ret;	/* [한국어] 결과 코드 전파 */
+	ctrl->host_key = NULL;
+	return ret;
 }
 EXPORT_SYMBOL_GPL(nvme_auth_init_ctrl);	/* [한국어] 코어가 컨트롤러를 세울 때 부른다 */
 
@@ -1276,16 +1276,16 @@ void nvme_auth_free(struct nvme_ctrl *ctrl)
 {
 	int i;	/* [한국어] 큐 컨텍스트 인덱스 */
 
-	if (ctrl->dhchap_ctxs) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (ctrl->dhchap_ctxs) {	/* [한국어] 인증을 쓰지 않은 컨트롤러는 배열 자체가 없다 */
 		for (i = 0; i < ctrl_max_dhchaps(ctrl); i++)	/* [한국어] 순회 루프 */
 			nvme_auth_free_dhchap(&ctrl->dhchap_ctxs[i]);	/* [한국어] 큐별 KPP·민감 버퍼 해제 */
 		kvfree(ctrl->dhchap_ctxs);	/* [한국어] 컨텍스트 배열 자체 해제 */
 	}
-	if (ctrl->host_key) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (ctrl->host_key) {	/* [한국어] 키도 없을 수 있다 */
 		nvme_auth_free_key(ctrl->host_key);	/* [한국어] 호스트 시크릿 키 객체 폐기 */
 		ctrl->host_key = NULL;	/* [한국어] 이중 free 방지 */
 	}
-	if (ctrl->ctrl_key) {	/* [한국어] 아키텍처 가드 — 함수 헤드 문맥 참고 */
+	if (ctrl->ctrl_key) {	/* [한국어] 상호 인증을 쓰지 않았다면 이쪽은 처음부터 NULL 이다 */
 		nvme_auth_free_key(ctrl->ctrl_key);	/* [한국어] 양방향 컨트롤러 키 폐기 */
 		ctrl->ctrl_key = NULL;	/* [한국어] 포인터 무효화 */
 	}
@@ -1303,17 +1303,17 @@ int __init nvme_init_auth(void)
 	nvme_auth_wq = alloc_workqueue("nvme-auth-wq",
 			       WQ_UNBOUND | WQ_MEM_RECLAIM | WQ_SYSFS, 0);	/* [한국어] 인증 전용 unbound reclaim wq */
 	if (!nvme_auth_wq)	/* [한국어] 워크큐가 없으면 인증 자체가 불가능하다 — 모듈 적재를 실패시킨다 */
-		return -ENOMEM;	/* [한국어] 할당 실패 전파 */
+		return -ENOMEM;	/* [한국어] 워크큐가 없으면 인증 자체가 불가능하다 — 모듈 적재를 실패시킨다 */
 
 	nvme_chap_buf_cache = kmem_cache_create("nvme-chap-buf-cache",
 				CHAP_BUF_SIZE, 0, SLAB_HWCACHE_ALIGN, NULL);	/* [한국어] 4K 정렬 CHAP 버퍼 슬랩 */
 	if (!nvme_chap_buf_cache)
-		goto err_destroy_workqueue;	/* [한국어] err_destroy_workqueue — 함수/구조 문맥의 상태 */
+		goto err_destroy_workqueue;	/* [한국어] 만든 역순으로 되감는다 */
 
 	nvme_chap_buf_pool = mempool_create(16, mempool_alloc_slab,
 			mempool_free_slab, nvme_chap_buf_cache);	/* [한국어] 최소 16개 예약 — 다중 큐 동시 인증 */
 	if (!nvme_chap_buf_pool)
-		goto err_destroy_chap_buf_cache;	/* [한국어] err_destroy_chap_buf_cache — 함수/구조 문맥의 상태 */
+		goto err_destroy_chap_buf_cache;
 
 	return 0;	/* [한국어] 전역 인증 인프라 준비 완료 */
 err_destroy_chap_buf_cache:
