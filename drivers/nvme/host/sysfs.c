@@ -219,7 +219,7 @@ static ssize_t nvme_io_passthru_err_log_enabled_store(struct device *dev,
 		return -EINVAL;	/* [한국어] 잘못된 토글 문자열 */
 	head->passthru_err_log_enabled = passthru_err_log_enabled;	/* [한국어] 동일 head 를 공유하는 multipath 경로 전체에 적용 */
 
-	return count;	/* [한국어] store 성공 */
+	return count;	/* [한국어] sysfs store 규약: 소비한 바이트 수를 돌려줘야 쓰기가 완료된 것으로 처리된다 */
 }
 
 static struct device_attribute dev_attr_adm_passthru_err_log_enabled = \
@@ -408,7 +408,7 @@ static int ns_update_nuse(struct nvme_ns *ns)	/* [한국어] 경로 디스크 pr
 		return ret;	/* [한국어] Admin 실패 전파 */
 
 	ns->head->nuse = le64_to_cpu(id->nuse);	/* [한국어] 공유 head 캐시 갱신 — 다른 경로 sysfs 에도 반영 */
-	kfree(id);	/* [한국어] Identify 버퍼 해제 */
+	kfree(id);	/* [한국어] 필요한 값 하나만 뽑았으므로 4KB Identify 버퍼는 곧바로 반납한다 */
 	return 0;	/* [한국어] 캐시 갱신 완료 */
 }
 
@@ -804,7 +804,7 @@ static ssize_t nvme_ctrl_reconnect_delay_store(struct device *dev,
 		return err;	/* [한국어] kstrtou32 의 errno 그대로 */
 
 	ctrl->opts->reconnect_delay = v;	/* [한국어] 다음 재연결 스케줄부터 반영 */
-	return count;	/* [한국어] store 성공 */
+	return count;	/* [한국어] 전부 소비했음을 알린다 — 적게 돌려주면 사용자 공간이 나머지를 다시 쓴다 */
 }
 static DEVICE_ATTR(reconnect_delay, S_IRUGO | S_IWUSR,
 	nvme_ctrl_reconnect_delay_show, nvme_ctrl_reconnect_delay_store);	/* [한국어] RW 재연결 간격 */
@@ -839,7 +839,7 @@ static ssize_t nvme_ctrl_fast_io_fail_tmo_store(struct device *dev,
 		opts->fast_io_fail_tmo = -1;	/* [한국어] 빠른 I/O 실패 비활성 */
 	else
 		opts->fast_io_fail_tmo = fast_io_fail_tmo;	/* [한국어] 경로 오류 시 조기 fail 대기 */
-	return count;	/* [한국어] store 성공 */
+	return count;
 }
 static DEVICE_ATTR(fast_io_fail_tmo, S_IRUGO | S_IWUSR,
 	nvme_ctrl_fast_io_fail_tmo_show, nvme_ctrl_fast_io_fail_tmo_store);	/* [한국어] RW fast_io_fail_tmo */
@@ -1045,7 +1045,7 @@ static ssize_t nvme_ctrl_dhchap_ctrl_secret_store(struct device *dev,
 	dev_info(ctrl->device, "re-authenticating controller\n");	/* [한국어] 재인증 로그 */
 	queue_work(nvme_wq, &ctrl->dhchap_auth_work);	/* [한국어] CHAP 워크 스케줄 */
 
-	return count;	/* [한국어] store 성공 */
+	return count;
 }
 
 static DEVICE_ATTR(dhchap_ctrl_secret, S_IRUGO | S_IWUSR,
