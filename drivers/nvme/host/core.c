@@ -3665,42 +3665,42 @@ static inline bool nvme_is_io_ctrl(struct nvme_ctrl *ctrl)	/* [한국어] 실제
 	return !nvme_discovery_ctrl(ctrl) && !nvme_admin_ctrl(ctrl); /* [한국어] 일반 I/O 컨트롤러 */
 }
 
-static bool nvme_validate_cntlid(struct nvme_subsystem *subsys,	/* [한국어] NVMe host 코어 헬퍼 API */
+static bool nvme_validate_cntlid(struct nvme_subsystem *subsys,	/* [한국어] 같은 서브시스템에 이 컨트롤러를 넣어도 되는지 본다 */
 		struct nvme_ctrl *ctrl, struct nvme_id_ctrl *id)
 {
 	struct nvme_ctrl *tmp; /* [한국어] subsystem 내 컨트롤러 순회 */
 
 	lockdep_assert_held(&nvme_subsystems_lock); /* [한국어] 호출자 전역 락 보유 전제 */
 
-	list_for_each_entry(tmp, &subsys->ctrls, subsys_entry) {	/* [한국어] 연결 리스트 순회(락 보유 전제) */
-		if (nvme_state_terminal(tmp))	/* [한국어] NVMe host 코어 헬퍼 API */
-			continue;	/* [한국어] 다음 순회 스킵 */
+	list_for_each_entry(tmp, &subsys->ctrls, subsys_entry) {	/* [한국어] 이미 이 서브시스템에 속한 컨트롤러들 */
+		if (nvme_state_terminal(tmp))	/* [한국어] 곧 사라질 컨트롤러와는 충돌을 따질 필요가 없다 */
+			continue;
 
-		if (tmp->cntlid == ctrl->cntlid) {	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
-			dev_err(ctrl->device,	/* [한국어] 장치/전역 로그 */
-				"Duplicate cntlid %u with %s, subsys %s, rejecting\n",	/* [한국어] nvme_validate_cntlid 실행 단계 — 상태기계·blk-mq·에러복구 맥락 */
-				ctrl->cntlid, dev_name(tmp->device),	/* [한국어] nvme_validate_cntlid 연속 인자/초기화 항목 */
-				subsys->subnqn);	/* [한국어] nvme_validate_cntlid 하위 헬퍼 호출 — 계층 경계 위임 */
-			return false; /* [한국어] 부정 — 거절/미매칭/불법 */
+		if (tmp->cntlid == ctrl->cntlid) {	/* [한국어] 같은 서브시스템 안에서 컨트롤러 ID 는 유일해야 한다 */
+			dev_err(ctrl->device,	/* [한국어] 어느 장치와 충돌하는지 함께 남긴다 */
+				"Duplicate cntlid %u with %s, subsys %s, rejecting\n",
+				ctrl->cntlid, dev_name(tmp->device),
+				subsys->subnqn);
+			return false;	/* [한국어] 받아들이면 다중경로 묶음이 잘못된다 */
 		}
 
-		if ((id->cmic & NVME_CTRL_CMIC_MULTI_CTRL) ||	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
+		if ((id->cmic & NVME_CTRL_CMIC_MULTI_CTRL) ||	/* [한국어] 서브시스템이 여러 컨트롤러를 지원한다고 알렸거나 */
 		    nvme_discovery_ctrl(ctrl))
 			continue;	/* [한국어] 다음 순회 스킵 */
 
 		dev_err(ctrl->device,	/* [한국어] 장치/전역 로그 */
-			"Subsystem does not support multiple controllers\n");	/* [한국어] nvme_validate_cntlid 하위 헬퍼 호출 — 계층 경계 위임 */
-		return false; /* [한국어] 부정 — 거절/미매칭/불법 */
+			"Subsystem does not support multiple controllers\n");
+		return false;
 	}
 
-	return true; /* [한국어] 긍정 — 허용/매칭/검증 통과 */
+	return true;	/* [한국어] 이 서브시스템에 넣어도 된다 */
 }
 
 /* [한국어] nvme_init_subsystem - subsystem 생성 또는 기존 결합, sysfs 링크, ctrls 리스트 */
 static int nvme_init_subsystem(struct nvme_ctrl *ctrl, struct nvme_id_ctrl *id)	/* [한국어] subsystem 결합/수명 */
 {
 	struct nvme_subsystem *subsys, *found; /* [한국어] 신규 후보 / 기존 검색 결과 */
-	int ret; /* [한국어] 함수 누적 결과 — 에러 언와인드 축 */
+	int ret;
 
 	subsys = kzalloc_obj(*subsys); /* [한국어] subsystem 구조 0-초기화 할당 */
 	if (!subsys)
@@ -3718,18 +3718,18 @@ static int nvme_init_subsystem(struct nvme_ctrl *ctrl, struct nvme_id_ctrl *id)	
 	subsys->cmic = id->cmic; /* [한국어] multipath/SR-IOV 능력 */
 
 	/* Versions prior to 1.4 don't necessarily report a valid type */
-	if (id->cntrltype == NVME_CTRL_DISC ||	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
-	    !strcmp(subsys->subnqn, NVME_DISC_SUBSYS_NAME))	/* [한국어] nvme_init_subsystem 하위 헬퍼 호출 — 계층 경계 위임 */
-		subsys->subtype = NVME_NQN_DISC;	/* [한국어] nvme_init_subsystem 상태/필드 갱신 — 후속 정책 입력 */
-	else	/* [한국어] 나머지 경로 — 기본/폴백 */
-		subsys->subtype = NVME_NQN_NVME;	/* [한국어] nvme_init_subsystem 상태/필드 갱신 — 후속 정책 입력 */
+	if (id->cntrltype == NVME_CTRL_DISC ||	/* [한국어] 위 영어 주석대로 1.4 이전은 종류를 제대로 알리지 않는다 */
+	    !strcmp(subsys->subnqn, NVME_DISC_SUBSYS_NAME))	/* [한국어] 그래서 잘 알려진 이름으로도 판별한다 */
+		subsys->subtype = NVME_NQN_DISC;
+	else
+		subsys->subtype = NVME_NQN_NVME;
 
-	if (nvme_discovery_ctrl(ctrl) && subsys->subtype != NVME_NQN_DISC) {	/* [한국어] NVMe host 코어 헬퍼 API */
-		dev_err(ctrl->device,	/* [한국어] 장치/전역 로그 */
-			"Subsystem %s is not a discovery controller",	/* [한국어] nvme_init_subsystem 실행 단계 — 상태기계·blk-mq·에러복구 맥락 */
-			subsys->subnqn);	/* [한국어] nvme_init_subsystem 하위 헬퍼 호출 — 계층 경계 위임 */
+	if (nvme_discovery_ctrl(ctrl) && subsys->subtype != NVME_NQN_DISC) {	/* [한국어] 디스커버리로 연결했는데 대상이 아니다 */
+		dev_err(ctrl->device,
+			"Subsystem %s is not a discovery controller",
+			subsys->subnqn);
 		kfree(subsys); /* [한국어] subsystem 힙 해제 */
-		return -EINVAL; /* [한국어] 잘못된 인자·상태 */
+		return -EINVAL;
 	}
 	nvme_mpath_default_iopolicy(subsys); /* [한국어] multipath iopolicy 기본값 */
 
@@ -3741,11 +3741,11 @@ static int nvme_init_subsystem(struct nvme_ctrl *ctrl, struct nvme_id_ctrl *id)	
 
 	mutex_lock(&nvme_subsystems_lock); /* [한국어] 전역 find-or-add 직렬화 */
 	found = __nvme_find_get_subsystem(subsys->subnqn); /* [한국어] 기존 NQN 검색 */
-	if (found) {	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
+	if (found) {	/* [한국어] 같은 NQN 의 서브시스템이 이미 있다 — 다중경로로 묶인다 */
 		put_device(&subsys->dev); /* [한국어] 신규 후보 폐기 */
 		subsys = found; /* [한국어] 기존 subsystem 재사용 */
 
-		if (!nvme_validate_cntlid(subsys, ctrl, id)) {	/* [한국어] NVMe host 코어 헬퍼 API */
+		if (!nvme_validate_cntlid(subsys, ctrl, id)) {	/* [한국어] 묶어도 되는지 확인한다 */
 			ret = -EINVAL; /* [한국어] cntlid 중복/단일 정책 위반 */
 			goto out_put_subsystem; /* [한국어] put+unlock */
 		}
@@ -3753,9 +3753,9 @@ static int nvme_init_subsystem(struct nvme_ctrl *ctrl, struct nvme_id_ctrl *id)	
 		ret = device_add(&subsys->dev); /* [한국어] sysfs 등록 */
 		if (ret) {	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
 			dev_err(ctrl->device,	/* [한국어] 장치/전역 로그 */
-				"failed to register subsystem device.\n");	/* [한국어] nvme_init_subsystem 하위 헬퍼 호출 — 계층 경계 위임 */
+				"failed to register subsystem device.\n");
 			put_device(&subsys->dev); /* [한국어] 초기화 참조 반납 */
-			goto out_unlock;	/* [한국어] 에러 언와인드/공통 정리 라벨 */
+			goto out_unlock;
 		}
 		ida_init(&subsys->ns_ida); /* [한국어] NS 인스턴스 번호 공간 */
 		list_add_tail(&subsys->entry, &nvme_subsystems); /* [한국어] 전역 목록 삽입 */
@@ -3763,10 +3763,10 @@ static int nvme_init_subsystem(struct nvme_ctrl *ctrl, struct nvme_id_ctrl *id)	
 
 	ret = sysfs_create_link(&subsys->dev.kobj, &ctrl->device->kobj,
 				dev_name(ctrl->device)); /* [한국어] subsystem→ctrl 링크 */
-	if (ret) {	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
-		dev_err(ctrl->device,	/* [한국어] 장치/전역 로그 */
-			"failed to create sysfs link from subsystem.\n");	/* [한국어] nvme_init_subsystem 하위 헬퍼 호출 — 계층 경계 위임 */
-		goto out_put_subsystem;	/* [한국어] 에러 언와인드/공통 정리 라벨 */
+	if (ret) {	/* [한국어] sysfs 링크 생성 실패 */
+		dev_err(ctrl->device,
+			"failed to create sysfs link from subsystem.\n");
+		goto out_put_subsystem;
 	}
 
 	if (!found)
@@ -3776,11 +3776,11 @@ static int nvme_init_subsystem(struct nvme_ctrl *ctrl, struct nvme_id_ctrl *id)	
 	mutex_unlock(&nvme_subsystems_lock); /* [한국어] 전역 락 해제 */
 	return 0; /* [한국어] 성공 */
 
-out_put_subsystem:	/* [한국어] nvme_init_subsystem 에러 언와인드 라벨 */
+out_put_subsystem:	/* [한국어] 참조를 놓아야 하는 경로 */
 	nvme_put_subsystem(subsys); /* [한국어] 참조 반납 */
-out_unlock:	/* [한국어] nvme_init_subsystem 에러 언와인드 라벨 */
+out_unlock:	/* [한국어] 락만 놓으면 되는 경로 */
 	mutex_unlock(&nvme_subsystems_lock); /* [한국어] 에러 경로 락 해제 */
-	return ret; /* [한국어] 누적 결과 전파 — 에러 언와인드 포함 */
+	return ret;
 }
 
 /* [한국어] nvme_get_log_lsi - Get Log Page (LSI·오프셋·NUMD 분할 포함) 동기 제출 */
@@ -3812,14 +3812,14 @@ int nvme_get_log(struct nvme_ctrl *ctrl, u32 nsid, u8 log_page, u8 lsp, u8 csi,	
 			offset, 0);
 }
 
-static int nvme_get_effects_log(struct nvme_ctrl *ctrl, u8 csi,	/* [한국어] NVMe host 코어 헬퍼 API */
+static int nvme_get_effects_log(struct nvme_ctrl *ctrl, u8 csi,	/* [한국어] 커맨드셋별 명령 영향 표를 받아 캐시한다 */
 				struct nvme_effects_log **log)
 {
 	struct nvme_effects_log *old, *cel = xa_load(&ctrl->cels, csi); /* [한국어] CSI 캐시 조회 */
-	int ret; /* [한국어] 함수 누적 결과 — 에러 언와인드 축 */
+	int ret;
 
-	if (cel)	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
-		goto out;	/* [한국어] 에러 언와인드/공통 정리 라벨 */
+	if (cel)	/* [한국어] 이미 받아 둔 커맨드셋이면 다시 묻지 않는다 */
+		goto out;
 
 	cel = kzalloc_obj(*cel); /* [한국어] effects 로그 슬롯 할당 */
 	if (!cel)
@@ -3827,35 +3827,35 @@ static int nvme_get_effects_log(struct nvme_ctrl *ctrl, u8 csi,	/* [한국어] N
 
 	ret = nvme_get_log(ctrl, 0x00, NVME_LOG_CMD_EFFECTS, 0, csi,	/* [한국어] Get Log Page — AER/FW/ANA */
 			cel, sizeof(*cel), 0);
-	if (ret) {	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
-		kfree(cel);	/* [한국어] 커널 힙 할당/해제 */
-		return ret; /* [한국어] 조기 실패 전파 — 호출자 복구/롤백 */
+	if (ret) {	/* [한국어] 로그를 못 읽었다 */
+		kfree(cel);
+		return ret;
 	}
 
 	old = xa_store(&ctrl->cels, csi, cel, GFP_KERNEL); /* [한국어] CSI→effects xarray 저장 */
-	if (xa_is_err(old)) {	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
-		kfree(cel);	/* [한국어] 커널 힙 할당/해제 */
-		return xa_err(old);	/* [한국어] 호출자 반환 — 상위 정책 해석 */
+	if (xa_is_err(old)) {	/* [한국어] xarray 확장에 실패했다 */
+		kfree(cel);
+		return xa_err(old);
 	}
-out:	/* [한국어] nvme_get_effects_log 에러 언와인드 라벨 */
+out:
 	*log = cel;
 	return 0; /* [한국어] 성공 */
 }
 
-static inline u32 nvme_mps_to_sectors(struct nvme_ctrl *ctrl, u32 units)	/* [한국어] NVMe host 코어 헬퍼 API */
+static inline u32 nvme_mps_to_sectors(struct nvme_ctrl *ctrl, u32 units)	/* [한국어] 컨트롤러의 페이지 단위 값을 512바이트 섹터 수로 바꾼다 */
 {
 	u32 page_shift = NVME_CAP_MPSMIN(ctrl->cap) + 12, val; /* [한국어] 장치 페이지 시프트·결과 */
 
-	if (check_shl_overflow(1U, units + page_shift - 9, &val))	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
-		return UINT_MAX;	/* [한국어] 호출자 반환 — 상위 정책 해석 */
+	if (check_shl_overflow(1U, units + page_shift - 9, &val))	/* [한국어] 컨트롤러가 큰 값을 알릴 수 있어 넘칠 수 있다 */
+		return UINT_MAX;	/* [한국어] 상한 없음으로 처리한다 */
 	return val; /* [한국어] MPS 단위→512B 섹터 수 */
 }
 
-static int nvme_init_non_mdts_limits(struct nvme_ctrl *ctrl)	/* [한국어] NVMe host 코어 헬퍼 API */
+static int nvme_init_non_mdts_limits(struct nvme_ctrl *ctrl)	/* [한국어] MDTS 로 표현되지 않는 명령별 상한들을 읽는다 */
 {
 	struct nvme_command c = { }; /* [한국어] 64B SQE 템플릿 — opcode/CNS 이하 채움 */
 	struct nvme_id_ctrl_nvm *id; /* [한국어] CSI=NVM 컨트롤러 Identify */
-	int ret; /* [한국어] 함수 누적 결과 — 에러 언와인드 축 */
+	int ret;
 
 	/*
 	 * Even though NVMe spec explicitly states that MDTS is not applicable
@@ -3863,11 +3863,11 @@ static int nvme_init_non_mdts_limits(struct nvme_ctrl *ctrl)	/* [한국어] NVMe
 	 * controllers max_hw_sectors value, which is based on the MDTS field
 	 * and possibly other limiting factors.
 	 */
-	if ((ctrl->oncs & NVME_CTRL_ONCS_WRITE_ZEROES) &&	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
+	if ((ctrl->oncs & NVME_CTRL_ONCS_WRITE_ZEROES) &&	/* [한국어] Write Zeroes 를 지원하고 quirk 로 막히지 않았다 */
 	    !(ctrl->quirks & NVME_QUIRK_DISABLE_WRITE_ZEROES))
-		ctrl->max_zeroes_sectors = ctrl->max_hw_sectors;	/* [한국어] nvme_init_non_mdts_limits 상태/필드 갱신 — 후속 정책 입력 */
-	else	/* [한국어] 나머지 경로 — 기본/폴백 */
-		ctrl->max_zeroes_sectors = 0;	/* [한국어] nvme_init_non_mdts_limits 상태/필드 갱신 — 후속 정책 입력 */
+		ctrl->max_zeroes_sectors = ctrl->max_hw_sectors;	/* [한국어] 위 영어 주석대로 일단 일반 전송 상한과 같다고 본다 */
+	else	/* [한국어] 지원하지 않으면 0 — 블록 계층이 이 연산을 쓰지 않는다 */
+		ctrl->max_zeroes_sectors = 0;
 
 	if (!nvme_is_io_ctrl(ctrl) ||
 	    !nvme_id_cns_ok(ctrl, NVME_ID_CNS_CS_CTRL) ||
@@ -3882,23 +3882,23 @@ static int nvme_init_non_mdts_limits(struct nvme_ctrl *ctrl)	/* [한국어] NVMe
 	c.identify.cns = NVME_ID_CNS_CS_CTRL; /* [한국어] Command Set Controller */
 	c.identify.csi = NVME_CSI_NVM; /* [한국어] NVM CSI */
 
-	ret = nvme_submit_sync_cmd(ctrl->admin_q, &c, id, sizeof(*id)); /* [한국어] admin 동기 Identify */
-	if (ret)	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
-		goto free_data;	/* [한국어] 에러 언와인드/공통 정리 라벨 */
+	ret = nvme_submit_sync_cmd(ctrl->admin_q, &c, id, sizeof(*id));	/* [한국어] NVM 커맨드셋 전용 Identify */
+	if (ret)
+		goto free_data;
 
 	ctrl->dmrl = id->dmrl; /* [한국어] Dataset Management max ranges */
 	ctrl->dmrsl = le32_to_cpu(id->dmrsl); /* [한국어] DSM range size limit */
-	if (id->wzsl && !(ctrl->quirks & NVME_QUIRK_DISABLE_WRITE_ZEROES))	/* [한국어] NVMe/blk 상수 — 정책 분기 입력 */
+	if (id->wzsl && !(ctrl->quirks & NVME_QUIRK_DISABLE_WRITE_ZEROES))	/* [한국어] 컨트롤러가 전용 상한을 알렸으면 그것으로 좁힌다 */
 		ctrl->max_zeroes_sectors = nvme_mps_to_sectors(ctrl, id->wzsl);
 
-free_data:	/* [한국어] nvme_init_non_mdts_limits 에러 언와인드 라벨 */
-	if (ret > 0)	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
-		set_bit(NVME_CTRL_SKIP_ID_CNS_CS, &ctrl->flags);	/* [한국어] 컨트롤러/NS 플래그 원자 조작 */
-	kfree(id); /* [한국어] Identify 버퍼 해제 */
-	return ret; /* [한국어] 누적 결과 전파 — 에러 언와인드 포함 */
+free_data:
+	if (ret > 0)	/* [한국어] 양수는 컨트롤러가 이 CNS 를 모른다는 뜻이다 */
+		set_bit(NVME_CTRL_SKIP_ID_CNS_CS, &ctrl->flags);	/* [한국어] 다음부터 묻지 않도록 표시해 둔다 */
+	kfree(id);
+	return ret;
 }
 
-static int nvme_init_effects_log(struct nvme_ctrl *ctrl,	/* [한국어] NVMe host 코어 헬퍼 API */
+static int nvme_init_effects_log(struct nvme_ctrl *ctrl,	/* [한국어] 영향 표를 xarray 에 등록한다 */
 		u8 csi, struct nvme_effects_log **log)
 {
 	struct nvme_effects_log *effects, *old; /* [한국어] 신규/기존 effects 슬롯 */
@@ -3908,24 +3908,24 @@ static int nvme_init_effects_log(struct nvme_ctrl *ctrl,	/* [한국어] NVMe hos
 		return -ENOMEM; /* [한국어] 메모리 부족 */
 
 	old = xa_store(&ctrl->cels, csi, effects, GFP_KERNEL); /* [한국어] CSI→effects xarray 저장 */
-	if (xa_is_err(old)) {	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
-		kfree(effects);	/* [한국어] 커널 힙 할당/해제 */
-		return xa_err(old);	/* [한국어] 호출자 반환 — 상위 정책 해석 */
+	if (xa_is_err(old)) {
+		kfree(effects);
+		return xa_err(old);
 	}
 
 	*log = effects;
 	return 0; /* [한국어] 성공 */
 }
 
-static void nvme_init_known_nvm_effects(struct nvme_ctrl *ctrl)	/* [한국어] NVMe host 코어 헬퍼 API */
+static void nvme_init_known_nvm_effects(struct nvme_ctrl *ctrl)	/* [한국어] 스펙이 정한 영향을 컨트롤러가 알리지 않았어도 강제로 세운다 */
 {
 	struct nvme_effects_log	*log = ctrl->effects; /* [한국어] 로컬 known effects 보정 대상 */
 
-	log->acs[nvme_admin_format_nvm] |= cpu_to_le32(NVME_CMD_EFFECTS_LBCC |	/* [한국어] NVMe host 코어 헬퍼 API */
-						NVME_CMD_EFFECTS_NCC |	/* [한국어] nvme_init_known_nvm_effects 실행 단계 — 상태기계·blk-mq·에러복구 맥락 */
-						NVME_CMD_EFFECTS_CSE_MASK);	/* [한국어] nvme_init_known_nvm_effects 하위 헬퍼 호출 — 계층 경계 위임 */
-	log->acs[nvme_admin_sanitize_nvm] |= cpu_to_le32(NVME_CMD_EFFECTS_LBCC |	/* [한국어] NVMe host 코어 헬퍼 API */
-						NVME_CMD_EFFECTS_CSE_MASK);	/* [한국어] nvme_init_known_nvm_effects 하위 헬퍼 호출 — 계층 경계 위임 */
+	log->acs[nvme_admin_format_nvm] |= cpu_to_le32(NVME_CMD_EFFECTS_LBCC |	/* [한국어] Format 은 데이터를 바꾸고 */
+						NVME_CMD_EFFECTS_NCC |	/* [한국어] 다른 명령과 함께 실행할 수 없으며 */
+						NVME_CMD_EFFECTS_CSE_MASK);	/* [한국어] 네임스페이스 상태를 바꾼다 — 큐를 얼려야 한다 */
+	log->acs[nvme_admin_sanitize_nvm] |= cpu_to_le32(NVME_CMD_EFFECTS_LBCC |	/* [한국어] Sanitize 도 마찬가지다 */
+						NVME_CMD_EFFECTS_CSE_MASK);
 
 	/*
 	 * The spec says the result of a security receive command depends on
@@ -4132,7 +4132,7 @@ static int nvme_init_identify(struct nvme_ctrl *ctrl)
 		} else {	/* [한국어] 정상 장치면 식별자를 읽어 둔다 */
 			ctrl->apst_enabled = false;	/* [한국어] nvme_init_identify 상태/필드 갱신 — 후속 정책 입력 */
 		}
-	} else {	/* [한국어] nvme_init_identify 실행 단계 — 상태기계·blk-mq·에러복구 맥락 */
+	} else {	/* [한국어] 처음 보는 서브시스템이다 */
 		ctrl->apst_enabled = id->apsta;	/* [한국어] nvme_init_identify 상태/필드 갱신 — 후속 정책 입력 */
 	}
 	memcpy(ctrl->psd, id->psd, sizeof(ctrl->psd)); /* [한국어] Power State Descriptor 캐시 */
@@ -4183,8 +4183,8 @@ int nvme_init_ctrl_finish(struct nvme_ctrl *ctrl, bool was_suspended)
 	int ret;
 
 	ret = ctrl->ops->reg_read32(ctrl, NVME_REG_VS, &ctrl->vs);	/* [한국어] 스펙 버전 */
-	if (ret) {	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
-		dev_err(ctrl->device, "Reading VS failed (%d)\n", ret);	/* [한국어] 장치/전역 로그 */
+	if (ret) {
+		dev_err(ctrl->device, "Reading VS failed (%d)\n", ret);
 		return ret; /* [한국어] 조기 실패 전파 — 호출자 복구/롤백 */
 	}
 
@@ -4222,7 +4222,7 @@ int nvme_init_ctrl_finish(struct nvme_ctrl *ctrl, bool was_suspended)
 
 	nvme_configure_opal(ctrl, was_suspended); /* [한국어] Opal SED 연동/resume unlock */
 
-	if (!ctrl->identified && !nvme_discovery_ctrl(ctrl)) {	/* [한국어] NVMe host 코어 헬퍼 API */
+	if (!ctrl->identified && !nvme_discovery_ctrl(ctrl)) {	/* [한국어] 디스커버리 컨트롤러라면 예외다 */
 		/*
 		 * Do not return errors unless we are in a controller reset,
 		 * the controller works perfectly fine without hwmon.
@@ -4303,7 +4303,7 @@ static struct nvme_ns_head *nvme_find_ns_head(struct nvme_ctrl *ctrl,	/* [한국
 		 * with the same NSID.
 		 */
 		if (h->ns_id != nsid || !nvme_is_unique_nsid(ctrl, h))	/* [한국어] NVMe host 코어 헬퍼 API */
-			continue;	/* [한국어] 다음 순회 스킵 */
+			continue;
 		if (nvme_tryget_ns_head(h))	/* [한국어] NVMe host 코어 헬퍼 API */
 			return h;	/* [한국어] 호출자 반환 — 상위 정책 해석 */
 	}
@@ -4517,7 +4517,7 @@ static int nvme_init_ns_head(struct nvme_ns *ns, struct nvme_ns_info *info)
 		if ((ns->ctrl->ops->flags & NVME_F_FABRICS) || /* !PCIe */ /* [한국어] 트랜스포트 ops 콜백 위임 */
 		    ((ns->ctrl->subsys->cmic & NVME_CTRL_CMIC_MULTI_CTRL) &&	/* [한국어] nvme_init_ns_head 실행 단계 — 상태기계·blk-mq·에러복구 맥락 */
 		     info->is_shared)) {	/* [한국어] nvme_init_ns_head 실행 단계 — 상태기계·blk-mq·에러복구 맥락 */
-			dev_err(ctrl->device,	/* [한국어] 장치/전역 로그 */
+			dev_err(ctrl->device,	/* [한국어] 같은 NQN 을 알렸으면서 다중 컨트롤러를 지원하지 않는다 */
 				"ignoring nsid %d because of duplicate IDs\n",	/* [한국어] nvme_init_ns_head 실행 단계 — 상태기계·blk-mq·에러복구 맥락 */
 				info->nsid);	/* [한국어] nvme_init_ns_head 하위 헬퍼 호출 — 계층 경계 위임 */
 			return ret; /* [한국어] 중첩 가드 실패 — 상위 정책에 errno/status 전달 */
@@ -4541,18 +4541,18 @@ static int nvme_init_ns_head(struct nvme_ns *ns, struct nvme_ns_info *info)
 			dev_err(ctrl->device,	/* [한국어] 장치/전역 로그 */
 				"duplicate IDs in subsystem for nsid %d\n",	/* [한국어] nvme_init_ns_head 실행 단계 — 상태기계·blk-mq·에러복구 맥락 */
 				info->nsid);	/* [한국어] nvme_init_ns_head 하위 헬퍼 호출 — 계층 경계 위임 */
-			goto out_unlock;	/* [한국어] 에러 언와인드/공통 정리 라벨 */
+			goto out_unlock;
 		}
 		head = nvme_alloc_ns_head(ctrl, info);	/* [한국어] NS 스캔·등록·제거 */
 		if (IS_ERR(head)) {	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
 			ret = PTR_ERR(head);	/* [한국어] nvme_init_ns_head 상태/필드 갱신 — 후속 정책 입력 */
-			goto out_unlock;	/* [한국어] 에러 언와인드/공통 정리 라벨 */
+			goto out_unlock;
 		}
 	} else {	/* [한국어] nvme_init_ns_head 실행 단계 — 상태기계·blk-mq·에러복구 맥락 */
 		ret = -EINVAL;	/* [한국어] nvme_init_ns_head 상태/필드 갱신 — 후속 정책 입력 */
 		if ((!info->is_shared || !head->shared) &&	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
 		    !list_empty(&head->list)) {	/* [한국어] nvme_init_ns_head 실행 단계 — 상태기계·blk-mq·에러복구 맥락 */
-			dev_err(ctrl->device,	/* [한국어] 장치/전역 로그 */
+			dev_err(ctrl->device,
 				"Duplicate unshared namespace %d\n",	/* [한국어] nvme_init_ns_head 실행 단계 — 상태기계·blk-mq·에러복구 맥락 */
 				info->nsid);	/* [한국어] nvme_init_ns_head 하위 헬퍼 호출 — 계층 경계 위임 */
 			goto out_put_ns_head;	/* [한국어] 에러 언와인드/공통 정리 라벨 */
@@ -4584,9 +4584,9 @@ static int nvme_init_ns_head(struct nvme_ns *ns, struct nvme_ns_info *info)
 
 out_put_ns_head:	/* [한국어] nvme_init_ns_head 에러 언와인드 라벨 */
 	nvme_put_ns_head(head);	/* [한국어] kref 수명 가감 */
-out_unlock:	/* [한국어] nvme_init_ns_head 에러 언와인드 라벨 */
+out_unlock:	/* [한국어] 락만 놓으면 되는 경로 */
 	mutex_unlock(&ctrl->subsys->lock);	/* [한국어] subsystem 락 해제 */
-	return ret; /* [한국어] 누적 결과 전파 — 에러 언와인드 포함 */
+	return ret;
 }
 
 /* [한국어] nvme_find_get_ns - ctrl namespaces 정렬 리스트에서 nsid 검색 + get (srcu) */
@@ -4965,7 +4965,7 @@ static int nvme_scan_ns_list(struct nvme_ctrl *ctrl)
 
 		ret = nvme_submit_sync_cmd(ctrl->admin_q, &cmd, ns_list,	/* [한국어] admin/IO 동기 제출 */
 					    NVME_IDENTIFY_DATA_SIZE);	/* [한국어] nvme_scan_ns_list 하위 헬퍼 호출 — 계층 경계 위임 */
-		if (ret) {	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
+		if (ret) {	/* [한국어] sysfs 링크 생성 실패 */
 			dev_warn(ctrl->device,	/* [한국어] 장치/전역 로그 */
 				"Identify NS List failed (status=0x%x)\n", ret);	/* [한국어] nvme_scan_ns_list 상태/필드 갱신 — 후속 정책 입력 */
 			goto free;	/* [한국어] 에러 언와인드/공통 정리 라벨 */
@@ -4989,7 +4989,7 @@ static int nvme_scan_ns_list(struct nvme_ctrl *ctrl)
  free:	/* [한국어] nvme_scan_ns_list 에러 언와인드 라벨 */
 	async_synchronize_full_domain(&domain);	/* [한국어] async 도메인 병렬 스캔 */
 	kfree(ns_list);	/* [한국어] 커널 힙 할당/해제 */
-	return ret; /* [한국어] 누적 결과 전파 — 에러 언와인드 포함 */
+	return ret;
 }
 
 static void nvme_scan_ns_sequential(struct nvme_ctrl *ctrl)	/* [한국어] NS 스캔·등록·제거 */
@@ -5045,7 +5045,7 @@ static void nvme_scan_work(struct work_struct *work)
 {
 	struct nvme_ctrl *ctrl =	/* [한국어] NVMe host 코어 헬퍼 API */
 		container_of(work, struct nvme_ctrl, scan_work);
-	int ret; /* [한국어] 함수 누적 결과 — 에러 언와인드 축 */
+	int ret;
 
 	/* No tagset on a live ctrl means IO queues could not created */
 	if (nvme_ctrl_state(ctrl) != NVME_CTRL_LIVE || !ctrl->tagset)
@@ -5073,7 +5073,7 @@ static void nvme_scan_work(struct work_struct *work)
 	mutex_lock(&ctrl->scan_lock);	/* [한국어] 패스스루 CSE freeze 와 상호배제 */
 	if (!nvme_id_cns_ok(ctrl, NVME_ID_CNS_NS_ACTIVE_LIST)) {	/* [한국어] NVMe host 코어 헬퍼 API */
 		nvme_scan_ns_sequential(ctrl);	/* [한국어] 구형: nn 까지 1..N */
-	} else {	/* [한국어] nvme_scan_work 실행 단계 — 상태기계·blk-mq·에러복구 맥락 */
+	} else {
 		/*
 		 * Fall back to sequential scan if DNR is set to handle broken
 		 * devices which should support Identify NS List (as per the VS
@@ -5154,7 +5154,7 @@ static int nvme_class_uevent(const struct device *dev, struct kobj_uevent_env *e
 	const struct nvme_ctrl *ctrl =	/* [한국어] NVMe host 코어 헬퍼 API */
 		container_of(dev, struct nvme_ctrl, ctrl_device);
 	struct nvmf_ctrl_options *opts = ctrl->opts;	/* [한국어] nvme_class_uevent 상태/필드 갱신 — 후속 정책 입력 */
-	int ret; /* [한국어] 함수 누적 결과 — 에러 언와인드 축 */
+	int ret;
 
 	ret = add_uevent_var(env, "NVME_TRTYPE=%s", ctrl->ops->name);	/* [한국어] 트랜스포트 ops 콜백 위임 */
 	if (ret)	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
@@ -5163,7 +5163,7 @@ static int nvme_class_uevent(const struct device *dev, struct kobj_uevent_env *e
 	if (opts) {	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
 		ret = add_uevent_var(env, "NVME_TRADDR=%s", opts->traddr);	/* [한국어] uevent — udev/multipathd 통지 */
 		if (ret)	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
-			return ret; /* [한국어] 중첩 가드 실패 — 상위 정책에 errno/status 전달 */
+			return ret;
 
 		ret = add_uevent_var(env, "NVME_TRSVCID=%s",	/* [한국어] uevent — udev/multipathd 통지 */
 				opts->trsvcid ?: "none");	/* [한국어] nvme_class_uevent 하위 헬퍼 호출 — 계층 경계 위임 */
@@ -5516,7 +5516,7 @@ int nvme_alloc_io_tag_set(struct nvme_ctrl *ctrl, struct blk_mq_tag_set *set,
 		const struct blk_mq_ops *ops, unsigned int nr_maps,
 		unsigned int cmd_size)
 {
-	int ret; /* [한국어] 함수 누적 결과 — 에러 언와인드 축 */
+	int ret;
 
 	memset(set, 0, sizeof(*set)); /* [한국어] 태그셋 구조 0 초기화 */
 	set->ops = ops; /* [한국어] 트랜스포트 queue_rq/timeout/map_queues */
@@ -5706,7 +5706,7 @@ static void nvme_free_ctrl(struct device *dev)
 int nvme_init_ctrl(struct nvme_ctrl *ctrl, struct device *dev,
 		const struct nvme_ctrl_ops *ops, unsigned long quirks)
 {
-	int ret; /* [한국어] 함수 누적 결과 — 에러 언와인드 축 */
+	int ret;
 
 	WRITE_ONCE(ctrl->state, NVME_CTRL_NEW);	/* [한국어] 상태 기계 시작점 */
 	ctrl->passthru_err_log_enabled = false;	/* [한국어] nvme_init_ctrl 상태/필드 갱신 — 후속 정책 입력 */
@@ -5742,12 +5742,12 @@ int nvme_init_ctrl(struct nvme_ctrl *ctrl, struct device *dev,
 	ctrl->discard_page = alloc_page(GFP_KERNEL);	/* [한국어] DSM 비상 버퍼 */
 	if (!ctrl->discard_page) {	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
 		ret = -ENOMEM;	/* [한국어] nvme_init_ctrl 상태/필드 갱신 — 후속 정책 입력 */
-		goto out;	/* [한국어] 에러 언와인드/공통 정리 라벨 */
+		goto out;
 	}
 
 	ret = ida_alloc(&nvme_instance_ida, GFP_KERNEL);	/* [한국어] nvmeN 번호 */
 	if (ret < 0)	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
-		goto out;	/* [한국어] 에러 언와인드/공통 정리 라벨 */
+		goto out;
 	ctrl->instance = ret;	/* [한국어] nvme_init_ctrl 상태/필드 갱신 — 후속 정책 입력 */
 
 	ret = nvme_auth_init_ctrl(ctrl);	/* [한국어] DH-HMAC-CHAP 상태 */
@@ -5769,15 +5769,15 @@ int nvme_init_ctrl(struct nvme_ctrl *ctrl, struct device *dev,
 	ctrl->device->release = nvme_free_ctrl;	/* [한국어] 최종 소멸자 */
 	dev_set_drvdata(ctrl->device, ctrl);	/* [한국어] nvme_init_ctrl 하위 헬퍼 호출 — 계층 경계 위임 */
 
-	return ret; /* [한국어] 누적 결과 전파 — 에러 언와인드 포함 */
+	return ret;
 
 out_release_instance:	/* [한국어] nvme_init_ctrl 에러 언와인드 라벨 */
 	ida_free(&nvme_instance_ida, ctrl->instance);	/* [한국어] NVMe host 코어 헬퍼 API */
-out:	/* [한국어] nvme_init_ctrl 에러 언와인드 라벨 */
+out:
 	if (ctrl->discard_page)	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
 		__free_page(ctrl->discard_page);	/* [한국어] nvme_init_ctrl 하위 헬퍼 호출 — 계층 경계 위임 */
 	cleanup_srcu_struct(&ctrl->srcu);	/* [한국어] nvme_init_ctrl 하위 헬퍼 호출 — 계층 경계 위임 */
-	return ret; /* [한국어] 누적 결과 전파 — 에러 언와인드 포함 */
+	return ret;
 }
 EXPORT_SYMBOL_GPL(nvme_init_ctrl); /* [한국어] 컨트롤러 최조기 뼈대 — NEW·락·work·instance */
 
@@ -5788,11 +5788,11 @@ EXPORT_SYMBOL_GPL(nvme_init_ctrl); /* [한국어] 컨트롤러 최조기 뼈대 
 /* [한국어] nvme_add_ctrl - nvmeN 이름, cdev 등록, PM QoS, fault inject, get_ctrl */
 int nvme_add_ctrl(struct nvme_ctrl *ctrl)
 {
-	int ret; /* [한국어] 함수 누적 결과 — 에러 언와인드 축 */
+	int ret;
 
 	ret = dev_set_name(ctrl->device, "nvme%d", ctrl->instance);	/* [한국어] sysfs/클래스 등록 */
-	if (ret)	/* [한국어] 제어 가드 — 상태·권한·자원 정책 분기 */
-		return ret; /* [한국어] 조기 실패 전파 — 호출자 복구/롤백 */
+	if (ret)
+		return ret;
 
 	cdev_init(&ctrl->cdev, &nvme_dev_fops);	/* [한국어] NVMe host 코어 헬퍼 API */
 	ctrl->cdev.owner = ctrl->ops->module;	/* [한국어] 트랜스포트 ops 콜백 위임 */
@@ -6041,7 +6041,7 @@ static int __init nvme_core_init(void)
 
 	nvme_wq = alloc_workqueue("nvme-wq", wq_flags, 0);	/* [한국어] 스캔·AER·KA·재연결 */
 	if (!nvme_wq)	/* [한국어] NVMe host 코어 헬퍼 API */
-		goto out;	/* [한국어] 에러 언와인드/공통 정리 라벨 */
+		goto out;
 
 	nvme_reset_wq = alloc_workqueue("nvme-reset-wq", wq_flags, 0);	/* [한국어] 리셋 직렬화 */
 	if (!nvme_reset_wq)	/* [한국어] NVMe host 코어 헬퍼 API */
@@ -6094,7 +6094,7 @@ destroy_reset_wq:	/* [한국어] BUILD_BUG_ON 에러 언와인드 라벨 */
 	destroy_workqueue(nvme_reset_wq);	/* [한국어] 3단 workqueue 수명 */
 destroy_wq:	/* [한국어] BUILD_BUG_ON 에러 언와인드 라벨 */
 	destroy_workqueue(nvme_wq);	/* [한국어] 3단 workqueue 수명 */
-out:	/* [한국어] BUILD_BUG_ON 에러 언와인드 라벨 */
+out:
 	return result;	/* [한국어] 호출자 반환 — 상위 정책 해석 */
 }
 
