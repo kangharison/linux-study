@@ -2303,53 +2303,152 @@ static void nvme_rdma_error_recovery_work(struct work_struct *work)
 	nvme_rdma_reconnect_or_remove(ctrl, 0);	/* [한국어] 재연결 루프에 넘긴다 */
 }
 
-static void nvme_rdma_error_recovery(struct nvme_rdma_ctrl *ctrl)	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+/*
+ * [한국어]
+ * nvme_rdma_error_recovery - 이 컨트롤러의 복구를 한 번만 예약한다
+ *
+ * @ctrl: 복구할 컨트롤러
+ * @return: 없음
+ *
+ * 하나의 오류가 여러 완료를 통해 여러 번 보고되는 것이 RDMA 에서는
+ * 정상이다. QP 가 오류 상태가 되면 걸려 있던 work request 가 모두
+ * 오류로 완료되기 때문이다. 상태 전이를 중복 방지 수단으로 쓰는 것이
+ * 이 함수의 요점이다 -- RESETTING 으로 바꾸는 데 성공한 첫 호출만
+ * 워크를 걸고, 나머지는 조용히 물러난다.
+ *
+ * nvme_reset_wq 를 쓰는 이유는 일반 워크큐가 밀려 있어도 복구는 즉시
+ * 시작돼야 하기 때문이다.
+ *
+ * 실행 컨텍스트: 완료 콜백(소프트 IRQ) 또는 CM 콜백. 잠들지 않는다.
+ *
+ * 호출 체인:
+ *   nvme_rdma_wr_error / nvme_rdma_cm_handler → [이 함수]
+ *     → nvme_rdma_error_recovery_work
+ */
+static void nvme_rdma_error_recovery(struct nvme_rdma_ctrl *ctrl)
 {
-	if (!nvme_change_ctrl_state(&ctrl->ctrl, NVME_CTRL_RESETTING))	/* [한국어] NVMe core API — SQE 조립·완료·상태기계·수명 */
-		return;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	if (!nvme_change_ctrl_state(&ctrl->ctrl, NVME_CTRL_RESETTING))	/* [한국어] 상태 전이가 중복 방지 수단이다 — 한 오류가 여러 완료로 보고되므로 첫 호출만 통과한다 */
+		return;
 
-	dev_warn(ctrl->ctrl.device, "starting error recovery\n");	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	queue_work(nvme_reset_wq, &ctrl->err_work);	/* [한국어] 워크큐 — 송수신/재연결/복구 비동기 실행 */
+	dev_warn(ctrl->ctrl.device, "starting error recovery\n");	/* [한국어] 사용자에게 왜 I/O 가 멈추는지 알린다 */
+	queue_work(nvme_reset_wq, &ctrl->err_work);	/* [한국어] 전용 큐 — 일반 워크가 밀려 있어도 복구는 즉시 시작돼야 한다 */
 }
 
-static void nvme_rdma_end_request(struct nvme_rdma_request *req)	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+/*
+ * [한국어]
+ * nvme_rdma_end_request - 요청의 마지막 참조가 놓일 때만 완료시킨다
+ *
+ * @req: 대상 요청
+ * @return: 없음
+ *
+ * 하나의 I/O 가 여러 개의 완료를 낳을 수 있는 것이 이 참조 계수의
+ * 이유다. 메모리 등록, 데이터 전송, rkey 무효화, 응답 수신이 각각
+ * 완료 통지를 내고 어느 순서로 도착할지 알 수 없다. 마지막 하나가
+ * 도착했을 때만 요청을 블록 계층에 돌려줘야 한다.
+ *
+ * nvme_try_complete_req 가 거짓을 주면 코어가 재시도나 페일오버를
+ * 맡았다는 뜻이라 여기서 끝내지 않는다.
+ *
+ * 실행 컨텍스트: 완료 콜백(소프트 IRQ). 잠들지 않는다.
+ *
+ * 호출 체인:
+ *   nvme_rdma_recv_done / _inv_rkey_done / _send_done → [이 함수]
+ */
+static void nvme_rdma_end_request(struct nvme_rdma_request *req)
 {
-	struct request *rq = blk_mq_rq_from_pdu(req);	/* [한국어] blk-mq — 태그·hctx·타임아웃·맵·완료 연동 */
+	struct request *rq = blk_mq_rq_from_pdu(req);	/* [한국어] 드라이버 영역에서 요청으로 되짚는다 */
 
-	if (!refcount_dec_and_test(&req->ref))	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		return;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
-	if (!nvme_try_complete_req(rq, req->status, req->result))	/* [한국어] NVMe core API — SQE 조립·완료·상태기계·수명 */
+	if (!refcount_dec_and_test(&req->ref))	/* [한국어] 등록·전송·무효화·수신이 각각 완료를 낸다 — 마지막 하나만 통과한다 */
+		return;
+	if (!nvme_try_complete_req(rq, req->status, req->result))	/* [한국어] 거짓이면 코어가 재시도나 페일오버를 맡았다는 뜻이다 */
 		nvme_rdma_complete_rq(rq);
 }
 
-static void nvme_rdma_wr_error(struct ib_cq *cq, struct ib_wc *wc,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+/*
+ * [한국어]
+ * nvme_rdma_wr_error - 실패한 work completion 을 기록하고 복구를 건다
+ *
+ * @cq: 완료가 온 큐
+ * @wc: 실패한 완료 항목
+ * @op: 어떤 종류의 작업이었는지 나타내는 문자열. 로그에만 쓰인다.
+ * @return: 없음
+ *
+ * LIVE 일 때만 로그를 남기는 것이 요점이다. 이미 해체 중이라면 걸려
+ * 있던 work request 가 모두 오류로 완료되는 것이 정상이므로, 그때마다
+ * 경고를 내면 로그가 수백 줄로 넘친다.
+ *
+ * QP 문맥에서 큐를 되찾는다. 완료 항목 자체에는 큐 포인터가 없지만
+ * QP 를 만들 때 문맥으로 걸어 두었다.
+ *
+ * 실행 컨텍스트: 완료 콜백(소프트 IRQ). 잠들지 않는다.
+ *
+ * 호출 체인: 각 *_done 콜백 → [이 함수] → nvme_rdma_error_recovery
+ */
+static void nvme_rdma_wr_error(struct ib_cq *cq, struct ib_wc *wc,
 		const char *op)
 {
-	struct nvme_rdma_queue *queue = wc->qp->qp_context;	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	struct nvme_rdma_ctrl *ctrl = queue->ctrl;	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+	struct nvme_rdma_queue *queue = wc->qp->qp_context;	/* [한국어] 완료 항목에는 큐 포인터가 없다 — QP 를 만들 때 문맥으로 걸어 두었다 */
+	struct nvme_rdma_ctrl *ctrl = queue->ctrl;
 
-	if (nvme_ctrl_state(&ctrl->ctrl) == NVME_CTRL_LIVE)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
+	if (nvme_ctrl_state(&ctrl->ctrl) == NVME_CTRL_LIVE)	/* [한국어] 해체 중에는 걸린 작업이 모두 오류로 완료되는 것이 정상이라 로그를 내지 않는다 */
 		dev_info(ctrl->ctrl.device,
 			     "%s for CQE 0x%p failed with status %s (%d)\n",
 			     op, wc->wr_cqe,
 			     ib_wc_status_msg(wc->status), wc->status);
-	nvme_rdma_error_recovery(ctrl);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+	nvme_rdma_error_recovery(ctrl);	/* [한국어] 중복 호출은 위 함수가 걸러 낸다 */
 }
 
-static void nvme_rdma_memreg_done(struct ib_cq *cq, struct ib_wc *wc)	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+/*
+ * [한국어]
+ * nvme_rdma_memreg_done - 메모리 등록 work request 의 완료 콜백
+ *
+ * @cq: 완료가 온 큐
+ * @wc: 완료 항목
+ * @return: 없음
+ *
+ * 성공 시 할 일이 없는 것이 정상이다. 등록은 요청 제출과 함께 체인으로
+ * 걸리고, 실제 데이터 전송의 완료가 요청을 끝내기 때문이다. 이 콜백이
+ * 존재하는 이유는 오직 실패를 감지하기 위해서다 -- 등록되지 않은 rkey 로
+ * 원격이 접근하면 그 뒤의 모든 전송이 실패한다.
+ *
+ * 실행 컨텍스트: 완료 콜백(소프트 IRQ). 잠들지 않는다.
+ *
+ * 호출 체인: IB 완료 처리 → [이 함수] → nvme_rdma_wr_error
+ */
+static void nvme_rdma_memreg_done(struct ib_cq *cq, struct ib_wc *wc)
 {
-	if (unlikely(wc->status != IB_WC_SUCCESS))	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
+	if (unlikely(wc->status != IB_WC_SUCCESS))	/* [한국어] 성공 시 할 일이 없다 — 이 콜백은 실패 감지만을 위해 있다 */
 		nvme_rdma_wr_error(cq, wc, "MEMREG");
 }
 
-static void nvme_rdma_inv_rkey_done(struct ib_cq *cq, struct ib_wc *wc)	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+/*
+ * [한국어]
+ * nvme_rdma_inv_rkey_done - rkey 무효화 완료 콜백
+ *
+ * @cq: 완료가 온 큐
+ * @wc: 완료 항목
+ * @return: 없음
+ *
+ * memreg 와 달리 성공 경로에서 할 일이 있다. 무효화가 끝나야 원격이
+ * 이 메모리에 더는 접근할 수 없고, 그래야 요청을 완료시켜 버퍼를
+ * 상위로 돌려줄 수 있다. 그래서 여기서 end_request 로 참조를 하나
+ * 놓는다.
+ *
+ * 무효화를 기다리지 않고 완료시키면 이미 반환된 페이지를 원격이 계속
+ * 쓸 수 있다 -- register_always 기본값이 참인 것과 같은 이유다.
+ *
+ * 실행 컨텍스트: 완료 콜백(소프트 IRQ). 잠들지 않는다.
+ *
+ * 호출 체인: IB 완료 처리 → [이 함수] → nvme_rdma_end_request
+ */
+static void nvme_rdma_inv_rkey_done(struct ib_cq *cq, struct ib_wc *wc)
 {
-	struct nvme_rdma_request *req =	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+	struct nvme_rdma_request *req =	/* [한국어] reg_cqe 가 요청 안에 박혀 있어 역산으로 찾는다 */
 		container_of(wc->wr_cqe, struct nvme_rdma_request, reg_cqe);
 
-	if (unlikely(wc->status != IB_WC_SUCCESS))	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
+	if (unlikely(wc->status != IB_WC_SUCCESS))	/* [한국어] 무효화 실패 — 원격이 아직 이 메모리를 볼 수 있다 */
 		nvme_rdma_wr_error(cq, wc, "LOCAL_INV");
-	else	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	else	/* [한국어] 무효화가 끝나야 버퍼를 상위로 돌려줄 수 있다 */
 		nvme_rdma_end_request(req);
 }
 
@@ -2364,58 +2463,118 @@ static int nvme_rdma_inv_rkey(struct nvme_rdma_queue *queue,	/* [한국어] NVMe
 		.ex.invalidate_rkey = req->mr->rkey,	/* [한국어] 무효화할 키. 이것이 살아 있는 동안은 원격이 이 메모리에 접근할 수 있다 */
 	};
 
-	req->reg_cqe.done = nvme_rdma_inv_rkey_done;	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	wr.wr_cqe = &req->reg_cqe;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	req->reg_cqe.done = nvme_rdma_inv_rkey_done;	/* [한국어] 완료가 어느 콜백으로 갈지 여기서 정한다 */
+	wr.wr_cqe = &req->reg_cqe;	/* [한국어] 그 콜백 정보를 work request 에 싣는다 */
 
-	return ib_post_send(queue->qp, &wr, NULL);	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
+	return ib_post_send(queue->qp, &wr, NULL);	/* [한국어] 비동기 — 무효화 완료는 콜백으로 온다 */
 }
 
-static void nvme_rdma_dma_unmap_req(struct ib_device *ibdev, struct request *rq)	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+/*
+ * [한국어]
+ * nvme_rdma_dma_unmap_req - 요청이 잡은 DMA 매핑과 산재 테이블을 되돌린다
+ *
+ * @ibdev: 매핑을 만든 IB 장치
+ * @rq:    대상 요청
+ * @return: 없음
+ *
+ * 메타데이터가 있으면 그쪽을 먼저 푼다. 두 매핑은 독립이지만 순서를
+ * 고정해 두는 편이 추적하기 쉽다.
+ *
+ * 체인된 테이블을 쓰는 것에 주의할 것. 세그먼트가 적으면 요청 안의
+ * 내장 배열을 쓰고 많으면 별도 할당으로 넘어가므로, 해제도 그 규약을
+ * 아는 sg_free_table_chained 로 해야 한다.
+ *
+ * 실행 컨텍스트: 완료 경로. 잠들지 않는다.
+ *
+ * 호출 체인: nvme_rdma_unmap_data → [이 함수] → ib_dma_unmap_sg
+ */
+static void nvme_rdma_dma_unmap_req(struct ib_device *ibdev, struct request *rq)
 {
-	struct nvme_rdma_request *req = blk_mq_rq_to_pdu(rq);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+	struct nvme_rdma_request *req = blk_mq_rq_to_pdu(rq);	/* [한국어] 매핑 상태가 요청 뒤에 있다 */
 
-	if (blk_integrity_rq(rq)) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		ib_dma_unmap_sg(ibdev, req->metadata_sgl->sg_table.sgl,	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
+	if (blk_integrity_rq(rq)) {	/* [한국어] 메타데이터가 있으면 별도 매핑이 하나 더 있다 */
+		ib_dma_unmap_sg(ibdev, req->metadata_sgl->sg_table.sgl,
 				req->metadata_sgl->nents, rq_dma_dir(rq));
-		sg_free_table_chained(&req->metadata_sgl->sg_table,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		sg_free_table_chained(&req->metadata_sgl->sg_table,	/* [한국어] 체인 규약을 아는 해제 함수여야 한다 — 내장 배열인지 별도 할당인지 그것이 안다 */
 				      NVME_INLINE_METADATA_SG_CNT);
 	}
 
-	ib_dma_unmap_sg(ibdev, req->data_sgl.sg_table.sgl, req->data_sgl.nents,	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
+	ib_dma_unmap_sg(ibdev, req->data_sgl.sg_table.sgl, req->data_sgl.nents,	/* [한국어] 데이터 쪽 매핑 */
 			rq_dma_dir(rq));
-	sg_free_table_chained(&req->data_sgl.sg_table, NVME_INLINE_SG_CNT);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	sg_free_table_chained(&req->data_sgl.sg_table, NVME_INLINE_SG_CNT);	/* [한국어] 세그먼트가 적었다면 요청 안의 배열이라 실제 해제가 없다 */
 }
 
-static void nvme_rdma_unmap_data(struct nvme_rdma_queue *queue,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+/*
+ * [한국어]
+ * nvme_rdma_unmap_data - 요청이 쓴 MR 을 풀에 돌려주고 매핑을 푼다
+ *
+ * @queue: 이 요청이 간 큐
+ * @rq:    대상 요청
+ * @return: 없음
+ *
+ * MR 풀이 두 개인 것이 이 함수의 분기다. 보통 요청은 일반 MR 풀을
+ * 쓰지만 T10-PI 를 하드웨어로 검사하는 요청은 시그니처 MR 을 쓰고,
+ * 그 둘은 다른 풀에서 나온다. 잘못된 풀에 돌려주면 이후 할당이
+ * 엉뚱한 종류의 MR 을 받는다.
+ *
+ * 세그먼트가 없는 요청(Flush 등)은 매핑 자체가 없어 곧바로 돌아간다.
+ *
+ * req->mr 을 NULL 로 지우는 것도 필수다. 재시도 경로가 이 요청을
+ * 다시 매핑할 때 이미 반납한 MR 을 쓰지 않게 한다.
+ *
+ * 실행 컨텍스트: 완료 경로. 잠들지 않는다.
+ *
+ * 호출 체인: nvme_rdma_complete_rq → [이 함수] → ib_mr_pool_put
+ */
+static void nvme_rdma_unmap_data(struct nvme_rdma_queue *queue,
 		struct request *rq)
 {
-	struct nvme_rdma_request *req = blk_mq_rq_to_pdu(rq);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	struct nvme_rdma_device *dev = queue->device;	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	struct ib_device *ibdev = dev->dev;	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
-	struct list_head *pool = &queue->qp->rdma_mrs;	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
+	struct nvme_rdma_request *req = blk_mq_rq_to_pdu(rq);
+	struct nvme_rdma_device *dev = queue->device;	/* [한국어] MR 풀이 QP 에 달려 있다 */
+	struct ib_device *ibdev = dev->dev;
+	struct list_head *pool = &queue->qp->rdma_mrs;	/* [한국어] 기본은 일반 MR 풀 */
 
-	if (!blk_rq_nr_phys_segments(rq))	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		return;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	if (!blk_rq_nr_phys_segments(rq))	/* [한국어] Flush 처럼 데이터가 없는 요청은 매핑 자체가 없다 */
+		return;
 
-	if (req->use_sig_mr)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
+	if (req->use_sig_mr)	/* [한국어] T10-PI 요청은 시그니처 MR 풀에서 나왔다 */
 		pool = &queue->qp->sig_mrs;
 
-	if (req->mr) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		ib_mr_pool_put(queue->qp, pool, req->mr);	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
-		req->mr = NULL;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	if (req->mr) {	/* [한국어] 인라인이나 단일 SGE 로 보낸 요청은 MR 을 쓰지 않는다 */
+		ib_mr_pool_put(queue->qp, pool, req->mr);	/* [한국어] 잘못된 풀에 돌려주면 이후 할당이 엉뚱한 종류를 받는다 */
+		req->mr = NULL;	/* [한국어] 재시도가 이미 반납한 MR 을 쓰지 않도록 */
 	}
 
-	nvme_rdma_dma_unmap_req(ibdev, rq);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+	nvme_rdma_dma_unmap_req(ibdev, rq);	/* [한국어] MR 을 돌려준 뒤 매핑을 푼다 */
 }
 
-static int nvme_rdma_set_sg_null(struct nvme_command *c)	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+/*
+ * [한국어]
+ * nvme_rdma_set_sg_null - 데이터가 없는 명령의 SGL 서술자를 0으로 채운다
+ *
+ * @c: 조립 중인 명령
+ * @return: 항상 0
+ *
+ * Flush 나 일부 admin 명령처럼 전송할 데이터가 없는 경우다. 필드를
+ * 그냥 두지 않고 명시적으로 0 을 채우는 이유는, 이 SQE 버퍼가 요청마다
+ * 재사용되어 이전 명령의 주소와 키가 남아 있기 때문이다. 남은 값을
+ * 컨트롤러가 유효한 서술자로 읽으면 엉뚱한 메모리에 접근한다.
+ *
+ * type 만은 0 이 아니라 KEY_SGL_FMT_DATA_DESC 로 채운다. 길이가 0
+ * 이더라도 서술자의 종류는 유효해야 스펙에 맞다.
+ *
+ * 실행 컨텍스트: 제출 경로. 잠들지 않는다.
+ *
+ * 호출 체인: nvme_rdma_map_data → [이 함수]
+ */
+static int nvme_rdma_set_sg_null(struct nvme_command *c)
 {
-	struct nvme_keyed_sgl_desc *sg = &c->common.dptr.ksgl;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
+	struct nvme_keyed_sgl_desc *sg = &c->common.dptr.ksgl;	/* [한국어] RDMA 는 keyed SGL 을 쓴다 — 주소에 더해 rkey 가 필요하다 */
 
-	sg->addr = 0;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	put_unaligned_le24(0, sg->length);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	put_unaligned_le32(0, sg->key);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	sg->type = NVME_KEY_SGL_FMT_DATA_DESC << 4;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	sg->addr = 0;	/* [한국어] SQE 버퍼가 재사용되므로 이전 명령의 주소가 남아 있다 */
+	put_unaligned_le24(0, sg->length);	/* [한국어] 길이 필드는 24비트라 전용 접근자를 쓴다 */
+	put_unaligned_le32(0, sg->key);	/* [한국어] 키도 지운다 — 남으면 컨트롤러가 유효한 서술자로 읽는다 */
+	sg->type = NVME_KEY_SGL_FMT_DATA_DESC << 4;	/* [한국어] 길이가 0 이어도 종류는 유효해야 스펙에 맞다. 상위 니블이 종류 자리다 */
 	return 0;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
 }
 
@@ -2580,180 +2739,318 @@ static int nvme_rdma_map_sg_fr(struct nvme_rdma_queue *queue,
 	return 0;
 }
 
-static void nvme_rdma_set_sig_domain(struct blk_integrity *bi,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+/*
+ * [한국어]
+ * nvme_rdma_set_sig_domain - 한쪽 도메인의 T10-PI 검사 규칙을 HCA 에 알린다
+ *
+ * @bi:      이 네임스페이스의 무결성 프로파일(간격, 태그 크기)
+ * @cmd:     조립 중인 NVMe 명령. 참조 태그와 앱 태그가 여기서 온다
+ * @domain:  채울 도메인. wire(선로) 또는 mem(호스트 메모리)
+ * @control: 명령의 PRINFO 비트들 — 무엇을 검사할지 지시한다
+ * @pi_type: 네임스페이스의 보호 정보 종류(1/2/3)
+ * @return: 없음
+ *
+ * T10-PI 는 논리 블록마다 8바이트 보호 정보를 붙여 데이터가 조용히
+ * 망가지는 것을 막는다. HCA 가 그것을 대신 생성·검증하게 하려면
+ * "블록 하나가 몇 바이트인지, 참조 태그가 어디서 시작하는지"를
+ * 알려 줘야 하고, 그 설정이 이 함수다.
+ *
+ * ref_remap 이 참이면 HCA 가 블록마다 참조 태그를 하나씩 증가시킨다.
+ * NVMe 는 명령의 첫 LBA 만 주고 나머지는 증가한다고 규정하므로,
+ * 참조 태그를 검사하는 구성에서는 반드시 켜야 한다.
+ *
+ * TYPE3 만 다른 이유는 스펙에 있다. 그 타입은 참조 태그를 쓰지 않아
+ * 검사 대상에서 빠진다.
+ *
+ * 실행 컨텍스트: 제출 경로. 잠들지 않는다.
+ *
+ * 호출 체인: nvme_rdma_set_sig_attrs → [이 함수]
+ */
+static void nvme_rdma_set_sig_domain(struct blk_integrity *bi,
 		struct nvme_command *cmd, struct ib_sig_domain *domain,
 		u16 control, u8 pi_type)
 {
-	domain->sig_type = IB_SIG_TYPE_T10_DIF;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	domain->sig.dif.bg_type = IB_T10DIF_CRC;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	domain->sig.dif.pi_interval = 1 << bi->interval_exp;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	domain->sig.dif.ref_tag = le32_to_cpu(cmd->rw.reftag);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	if (control & NVME_RW_PRINFO_PRCHK_REF)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
+	domain->sig_type = IB_SIG_TYPE_T10_DIF;	/* [한국어] T10 DIF — 8바이트 보호 정보를 블록마다 붙이는 표준 형식 */
+	domain->sig.dif.bg_type = IB_T10DIF_CRC;	/* [한국어] 가드는 CRC16. NVMe 가 규정한 값이다 */
+	domain->sig.dif.pi_interval = 1 << bi->interval_exp;	/* [한국어] 보호 정보 하나가 덮는 바이트 수 — 논리 블록 크기다 */
+	domain->sig.dif.ref_tag = le32_to_cpu(cmd->rw.reftag);	/* [한국어] 첫 블록의 참조 태그. 보통 시작 LBA 의 하위 32비트다 */
+	if (control & NVME_RW_PRINFO_PRCHK_REF)	/* [한국어] 참조 태그를 검사하는 구성에서만 */
 		domain->sig.dif.ref_remap = true;
 
-	domain->sig.dif.app_tag = le16_to_cpu(cmd->rw.lbat);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	domain->sig.dif.apptag_check_mask = le16_to_cpu(cmd->rw.lbatm);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	domain->sig.dif.app_escape = true;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	if (pi_type == NVME_NS_DPS_PI_TYPE3)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
+	domain->sig.dif.app_tag = le16_to_cpu(cmd->rw.lbat);	/* [한국어] 응용이 정한 태그 — 스토리지가 해석하지 않는다 */
+	domain->sig.dif.apptag_check_mask = le16_to_cpu(cmd->rw.lbatm);	/* [한국어] 비트마스크 — 일부 비트만 검사할 수 있다 */
+	domain->sig.dif.app_escape = true;	/* [한국어] 앱 태그가 0xffff 면 그 블록의 검사를 건너뛴다 — 스펙이 정한 탈출 값 */
+	if (pi_type == NVME_NS_DPS_PI_TYPE3)	/* [한국어] TYPE3 은 참조 태그를 쓰지 않아 검사 대상에서 빠진다 */
 		domain->sig.dif.ref_escape = true;
 }
 
-static void nvme_rdma_set_sig_attrs(struct blk_integrity *bi,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+/*
+ * [한국어]
+ * nvme_rdma_set_sig_attrs - 보호 정보를 어느 도메인에서 다룰지 정한다
+ *
+ * @bi:        네임스페이스의 무결성 프로파일
+ * @cmd:       조립 중인 명령. PRACT 비트를 여기서 지운다
+ * @sig_attrs: 채울 시그니처 속성
+ * @pi_type:   보호 정보 종류
+ * @return: 없음
+ *
+ * 두 갈래가 이 함수의 전부이며, 갈림은 PRACT 비트다.
+ *
+ * PRACT 가 서 있으면 호스트 메모리에는 보호 정보가 없고 선로에만
+ * 있다는 뜻이다(쓰기는 삽입, 읽기는 제거). 그래서 메모리 도메인을
+ * NONE 으로 두고 선로 도메인만 채운다. 그리고 명령에서 PRACT 를
+ * 지운다 -- 위 영어 주석대로, 이제 그 일을 HCA 가 하므로 컨트롤러가
+ * 또 하면 안 된다. 이 한 줄을 빠뜨리면 보호 정보가 두 번 삽입된다.
+ *
+ * PRACT 가 없으면 호스트 메모리에도 보호 정보가 있어 그대로 통과하며,
+ * 양쪽 도메인을 같은 규칙으로 채운다.
+ *
+ * 실행 컨텍스트: 제출 경로. 잠들지 않는다.
+ *
+ * 호출 체인: nvme_rdma_map_sg_pi → [이 함수] → nvme_rdma_set_sig_domain
+ */
+static void nvme_rdma_set_sig_attrs(struct blk_integrity *bi,
 		struct nvme_command *cmd, struct ib_sig_attrs *sig_attrs,
 		u8 pi_type)
 {
-	u16 control = le16_to_cpu(cmd->rw.control);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	u16 control = le16_to_cpu(cmd->rw.control);	/* [한국어] PRINFO 비트가 여기 들어 있다 */
 
-	memset(sig_attrs, 0, sizeof(*sig_attrs));	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	if (control & NVME_RW_PRINFO_PRACT) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
+	memset(sig_attrs, 0, sizeof(*sig_attrs));	/* [한국어] 남은 값이 있으면 엉뚱한 도메인 설정이 켜진다 */
+	if (control & NVME_RW_PRINFO_PRACT) {	/* [한국어] 호스트 메모리에는 보호 정보가 없고 선로에만 있다는 뜻 */
 		/* for WRITE_INSERT/READ_STRIP no memory domain */
-		sig_attrs->mem.sig_type = IB_SIG_TYPE_NONE;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		nvme_rdma_set_sig_domain(bi, cmd, &sig_attrs->wire, control,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+		sig_attrs->mem.sig_type = IB_SIG_TYPE_NONE;	/* [한국어] 메모리 쪽에는 검사할 것이 없다 */
+		nvme_rdma_set_sig_domain(bi, cmd, &sig_attrs->wire, control,	/* [한국어] 선로 쪽만 채운다 */
 					 pi_type);
 		/* Clear the PRACT bit since HCA will generate/verify the PI */
-		control &= ~NVME_RW_PRINFO_PRACT;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		cmd->rw.control = cpu_to_le16(control);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		control &= ~NVME_RW_PRINFO_PRACT;	/* [한국어] 위 영어 주석대로 — 이제 HCA 가 하므로 컨트롤러가 또 하면 안 된다 */
+		cmd->rw.control = cpu_to_le16(control);	/* [한국어] 지운 비트를 실제 명령에 반영한다. 빠뜨리면 보호 정보가 두 번 삽입된다 */
 	} else {
 		/* for WRITE_PASS/READ_PASS both wire/memory domains exist */
-		nvme_rdma_set_sig_domain(bi, cmd, &sig_attrs->wire, control,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+		nvme_rdma_set_sig_domain(bi, cmd, &sig_attrs->wire, control,	/* [한국어] 양쪽이 다 있는 경우 — 선로 쪽 */
 					 pi_type);
-		nvme_rdma_set_sig_domain(bi, cmd, &sig_attrs->mem, control,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+		nvme_rdma_set_sig_domain(bi, cmd, &sig_attrs->mem, control,	/* [한국어] 메모리 쪽도 같은 규칙으로 */
 					 pi_type);
 	}
 }
 
-static void nvme_rdma_set_prot_checks(struct nvme_command *cmd, u8 *mask)	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+/*
+ * [한국어]
+ * nvme_rdma_set_prot_checks - 어느 태그를 실제로 검사할지 마스크로 옮긴다
+ *
+ * @cmd:  검사 지시가 담긴 명령
+ * @mask: 채울 HCA 검사 마스크
+ * @return: 없음
+ *
+ * NVMe 의 PRINFO 비트를 IB 의 검사 마스크로 번역한다. 가드(CRC)와
+ * 참조 태그는 따로 켤 수 있어서, 예컨대 CRC 만 보고 참조 태그는
+ * 보지 않는 구성이 가능하다.
+ *
+ * 0 으로 시작하는 것이 중요하다. 지시가 없으면 아무것도 검사하지
+ * 않는 것이 맞고, 남은 값이 있으면 엉뚱한 검사가 켜진다.
+ *
+ * 실행 컨텍스트: 제출 경로. 잠들지 않는다.
+ *
+ * 호출 체인: nvme_rdma_map_sg_pi → [이 함수]
+ */
+static void nvme_rdma_set_prot_checks(struct nvme_command *cmd, u8 *mask)
 {
-	*mask = 0;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	if (le16_to_cpu(cmd->rw.control) & NVME_RW_PRINFO_PRCHK_REF)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
+	*mask = 0;	/* [한국어] 지시가 없으면 아무것도 검사하지 않는 것이 맞다 */
+	if (le16_to_cpu(cmd->rw.control) & NVME_RW_PRINFO_PRCHK_REF)	/* [한국어] 참조 태그 검사를 켠다 */
 		*mask |= IB_SIG_CHECK_REFTAG;
-	if (le16_to_cpu(cmd->rw.control) & NVME_RW_PRINFO_PRCHK_GUARD)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
+	if (le16_to_cpu(cmd->rw.control) & NVME_RW_PRINFO_PRCHK_GUARD)	/* [한국어] 가드(CRC) 검사는 따로 켤 수 있다 */
 		*mask |= IB_SIG_CHECK_GUARD;
 }
 
-static void nvme_rdma_sig_done(struct ib_cq *cq, struct ib_wc *wc)	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+/*
+ * [한국어]
+ * nvme_rdma_sig_done - 시그니처 MR 등록의 완료 콜백
+ *
+ * @cq: 완료가 온 큐
+ * @wc: 완료 항목
+ * @return: 없음
+ *
+ * memreg_done 과 같은 구조다. 성공 경로에 할 일이 없고 실패만 잡는다.
+ * 실제 무결성 검사 결과는 이 완료가 아니라 데이터 전송이 끝난 뒤
+ * MR 상태를 조회해 얻는다.
+ *
+ * 실행 컨텍스트: 완료 콜백(소프트 IRQ). 잠들지 않는다.
+ *
+ * 호출 체인: IB 완료 처리 → [이 함수] → nvme_rdma_wr_error
+ */
+static void nvme_rdma_sig_done(struct ib_cq *cq, struct ib_wc *wc)
 {
-	if (unlikely(wc->status != IB_WC_SUCCESS))	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
+	if (unlikely(wc->status != IB_WC_SUCCESS))	/* [한국어] 실제 무결성 결과는 이 완료가 아니라 전송 후 MR 상태 조회로 얻는다 */
 		nvme_rdma_wr_error(cq, wc, "SIG");
 }
 
-static int nvme_rdma_map_sg_pi(struct nvme_rdma_queue *queue,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+/*
+ * [한국어]
+ * nvme_rdma_map_sg_pi - 데이터와 보호 정보를 하나의 시그니처 MR 로 묶는다
+ *
+ * @queue:    이 요청이 갈 큐
+ * @req:      대상 요청
+ * @c:        조립 중인 명령. SGL 서술자를 여기 채운다
+ * @count:    데이터 세그먼트 수
+ * @pi_count: 메타데이터 세그먼트 수. 0이면 HCA 가 보호 정보를 만든다
+ * @return: 0 이면 성공, -EAGAIN 이면 MR 부족, 음수면 매핑 오류
+ *
+ * T10-PI 를 하드웨어로 처리하는 경로다. 일반 MR 과 달리 시그니처 MR 은
+ * 데이터와 보호 정보를 하나의 원격 키 뒤에 묶어, 컨트롤러가 보기에는
+ * 연속된 하나의 영역으로 보이게 한다.
+ *
+ * rkey 를 매번 증가시키는 것이 안전 장치다. 같은 MR 을 재사용하므로
+ * 키를 바꾸지 않으면 이전 요청의 rkey 로도 이 메모리에 접근할 수 있다.
+ *
+ * xfer_len 보정이 이 함수의 미묘한 지점이다. pi_count 가 0이면 호스트
+ * 메모리에는 보호 정보가 없고 HCA 가 선로에 삽입하므로, 컨트롤러에게
+ * 알리는 길이는 삽입 후 크기여야 한다. 블록 개수만큼 pi_size 를 더한다.
+ *
+ * 실행 컨텍스트: 제출 경로. 잠들지 않는다(GFP 없음).
+ *
+ * 호출 체인: nvme_rdma_map_data → [이 함수] → ib_map_mr_sg_pi
+ */
+static int nvme_rdma_map_sg_pi(struct nvme_rdma_queue *queue,
 		struct nvme_rdma_request *req, struct nvme_command *c,
 		int count, int pi_count)
 {
-	struct nvme_rdma_sgl *sgl = &req->data_sgl;	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	struct ib_reg_wr *wr = &req->reg_wr;	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
-	struct request *rq = blk_mq_rq_from_pdu(req);	/* [한국어] blk-mq — 태그·hctx·타임아웃·맵·완료 연동 */
-	struct nvme_ns *ns = rq->q->queuedata;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	struct bio *bio = rq->bio;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	struct nvme_keyed_sgl_desc *sg = &c->common.dptr.ksgl;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	struct blk_integrity *bi = blk_get_integrity(bio->bi_bdev->bd_disk);	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	u32 xfer_len;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	int nr;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	struct nvme_rdma_sgl *sgl = &req->data_sgl;	/* [한국어] 데이터 산재 목록 */
+	struct ib_reg_wr *wr = &req->reg_wr;	/* [한국어] 등록 work request 는 요청 안에 미리 자리를 잡아 두었다 */
+	struct request *rq = blk_mq_rq_from_pdu(req);	/* [한국어] 무결성 프로파일을 찾으려면 요청이 필요하다 */
+	struct nvme_ns *ns = rq->q->queuedata;	/* [한국어] pi_type 과 pi_size 가 네임스페이스에 있다 */
+	struct bio *bio = rq->bio;	/* [한국어] 무결성 프로파일은 디스크에 달려 있다 */
+	struct nvme_keyed_sgl_desc *sg = &c->common.dptr.ksgl;	/* [한국어] 채울 SGL 서술자 */
+	struct blk_integrity *bi = blk_get_integrity(bio->bi_bdev->bd_disk);	/* [한국어] 간격과 태그 크기 */
+	u32 xfer_len;	/* [한국어] 컨트롤러에 알릴 전송 길이 — 아래에서 보정된다 */
+	int nr;	/* [한국어] 매핑된 세그먼트 수 또는 오류 */
 
-	req->mr = ib_mr_pool_get(queue->qp, &queue->qp->sig_mrs);	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
-	if (WARN_ON_ONCE(!req->mr))	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		return -EAGAIN;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	req->mr = ib_mr_pool_get(queue->qp, &queue->qp->sig_mrs);	/* [한국어] 시그니처 MR 은 전용 풀에서 나온다 */
+	if (WARN_ON_ONCE(!req->mr))	/* [한국어] 풀 크기를 큐 깊이에 맞춰 잡았으므로 고갈은 논리 오류다 */
+		return -EAGAIN;	/* [한국어] 그래도 실패하면 재시도로 넘긴다 */
 
-	nr = ib_map_mr_sg_pi(req->mr, sgl->sg_table.sgl, count, NULL,	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
+	nr = ib_map_mr_sg_pi(req->mr, sgl->sg_table.sgl, count, NULL,	/* [한국어] 데이터와 보호 정보를 하나의 MR 뒤에 묶는다 */
 			     req->metadata_sgl->sg_table.sgl, pi_count, NULL,
 			     SZ_4K);
-	if (unlikely(nr))	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		goto mr_put;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
+	if (unlikely(nr))	/* [한국어] 정렬이나 크기 제약을 어겼다 */
+		goto mr_put;
 
-	nvme_rdma_set_sig_attrs(bi, c, req->mr->sig_attrs, ns->head->pi_type);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	nvme_rdma_set_prot_checks(c, &req->mr->sig_attrs->check_mask);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+	nvme_rdma_set_sig_attrs(bi, c, req->mr->sig_attrs, ns->head->pi_type);	/* [한국어] 어느 도메인에서 검사할지 정한다 */
+	nvme_rdma_set_prot_checks(c, &req->mr->sig_attrs->check_mask);	/* [한국어] 무엇을 검사할지 정한다 */
 
-	ib_update_fast_reg_key(req->mr, ib_inc_rkey(req->mr->rkey));	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
+	ib_update_fast_reg_key(req->mr, ib_inc_rkey(req->mr->rkey));	/* [한국어] 키를 바꾸지 않으면 이전 요청의 rkey 로도 이 메모리에 접근할 수 있다 */
 
-	req->reg_cqe.done = nvme_rdma_sig_done;	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	memset(wr, 0, sizeof(*wr));	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	wr->wr.opcode = IB_WR_REG_MR_INTEGRITY;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	wr->wr.wr_cqe = &req->reg_cqe;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	wr->wr.num_sge = 0;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	wr->wr.send_flags = 0;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	wr->mr = req->mr;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	wr->key = req->mr->rkey;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	wr->access = IB_ACCESS_LOCAL_WRITE |	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	req->reg_cqe.done = nvme_rdma_sig_done;	/* [한국어] 등록 완료가 갈 콜백 */
+	memset(wr, 0, sizeof(*wr));	/* [한국어] 요청이 재사용되므로 이전 값을 지운다 */
+	wr->wr.opcode = IB_WR_REG_MR_INTEGRITY;	/* [한국어] 일반 등록이 아니라 무결성 등록이다 */
+	wr->wr.wr_cqe = &req->reg_cqe;
+	wr->wr.num_sge = 0;	/* [한국어] 등록 자체는 데이터를 옮기지 않는다 */
+	wr->wr.send_flags = 0;	/* [한국어] 완료 통지를 강제하지 않는다 — 뒤따르는 전송의 완료로 충분하다 */
+	wr->mr = req->mr;
+	wr->key = req->mr->rkey;	/* [한국어] 방금 증가시킨 키 */
+	wr->access = IB_ACCESS_LOCAL_WRITE |	/* [한국어] 원격이 읽고 쓸 수 있어야 한다 — 읽기 명령은 원격이 쓰고, 쓰기 명령은 원격이 읽는다 */
 		     IB_ACCESS_REMOTE_READ |
 		     IB_ACCESS_REMOTE_WRITE;
 
-	sg->addr = cpu_to_le64(req->mr->iova);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	xfer_len = req->mr->length;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	sg->addr = cpu_to_le64(req->mr->iova);	/* [한국어] MR 이 노출하는 가상 주소 — 물리 주소가 아니다 */
+	xfer_len = req->mr->length;	/* [한국어] MR 이 덮는 길이 */
 	/* Check if PI is added by the HW */
-	if (!pi_count)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
+	if (!pi_count)	/* [한국어] 호스트 메모리에 보호 정보가 없다 — HCA 가 선로에 삽입한다 */
 		xfer_len += (xfer_len >> bi->interval_exp) * ns->head->pi_size;
-	put_unaligned_le24(xfer_len, sg->length);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	put_unaligned_le32(req->mr->rkey, sg->key);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	sg->type = NVME_KEY_SGL_FMT_DATA_DESC << 4;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	put_unaligned_le24(xfer_len, sg->length);	/* [한국어] 컨트롤러에는 삽입 후 크기를 알려야 한다 */
+	put_unaligned_le32(req->mr->rkey, sg->key);	/* [한국어] 원격이 이 키로 접근한다 */
+	sg->type = NVME_KEY_SGL_FMT_DATA_DESC << 4;
 
-	return 0;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	return 0;	/* [한국어] 등록 work request 는 호출자가 제출과 함께 체인으로 건다 */
 
 mr_put:
-	ib_mr_pool_put(queue->qp, &queue->qp->sig_mrs, req->mr);	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
-	req->mr = NULL;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	if (nr < 0)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		return nr;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
-	return -EINVAL;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	ib_mr_pool_put(queue->qp, &queue->qp->sig_mrs, req->mr);	/* [한국어] 실패했으니 MR 을 돌려준다 */
+	req->mr = NULL;	/* [한국어] 정리 경로가 이미 반납한 MR 을 다시 놓지 않도록 */
+	if (nr < 0)	/* [한국어] 음수는 진짜 오류 */
+		return nr;
+	return -EINVAL;	/* [한국어] 양수는 "일부만 매핑됨" — 이 경로가 다룰 수 없다 */
 }
 
-static int nvme_rdma_dma_map_req(struct ib_device *ibdev, struct request *rq,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
+/*
+ * [한국어]
+ * nvme_rdma_dma_map_req - 요청의 데이터(와 메타데이터)를 DMA 로 매핑한다
+ *
+ * @ibdev:    매핑할 IB 장치
+ * @rq:       대상 요청
+ * @count:    매핑된 데이터 세그먼트 수를 받는다
+ * @pi_count: 매핑된 메타데이터 세그먼트 수를 받는다
+ * @return: 0 이면 성공, 음수 errno
+ *
+ * 산재 테이블을 요청 뒤 공간에 얹는 것이 요점이다. (req + 1) 이
+ * 가리키는 곳은 태그셋을 만들 때 cmd_size 로 확보해 둔 영역이고,
+ * 세그먼트가 적으면 그 안에서 끝나 별도 할당이 없다. 많으면
+ * sg_alloc_table_chained 가 알아서 체인을 잇는다.
+ *
+ * 메타데이터 테이블도 같은 방식으로 그 뒤에 얹힌다. init_request 가
+ * 계산해 둔 오프셋이 여기서 쓰인다.
+ *
+ * 실패 라벨이 세 단계인 이유는 매핑이 층층이 쌓이기 때문이다. 각
+ * 라벨이 그 지점까지 성공한 것만 정확히 되감는다.
+ *
+ * 실행 컨텍스트: 제출 경로. 잠들지 않는다.
+ *
+ * 호출 체인: nvme_rdma_map_data → [이 함수] → ib_dma_map_sg
+ */
+static int nvme_rdma_dma_map_req(struct ib_device *ibdev, struct request *rq,
 		int *count, int *pi_count)
 {
-	struct nvme_rdma_request *req = blk_mq_rq_to_pdu(rq);	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
-	int ret;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	struct nvme_rdma_request *req = blk_mq_rq_to_pdu(rq);
+	int ret;
 
-	req->data_sgl.sg_table.sgl = (struct scatterlist *)(req + 1);	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	ret = sg_alloc_table_chained(&req->data_sgl.sg_table,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	req->data_sgl.sg_table.sgl = (struct scatterlist *)(req + 1);	/* [한국어] 요청 뒤 공간 — 태그셋의 cmd_size 로 확보해 둔 자리다 */
+	ret = sg_alloc_table_chained(&req->data_sgl.sg_table,	/* [한국어] 세그먼트가 적으면 그 자리에서 끝나고 많으면 체인을 잇는다 */
 			blk_rq_nr_phys_segments(rq), req->data_sgl.sg_table.sgl,
 			NVME_INLINE_SG_CNT);
-	if (ret)	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		return -ENOMEM;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	if (ret)
+		return -ENOMEM;
 
-	req->data_sgl.nents = blk_rq_map_sg(rq, req->data_sgl.sg_table.sgl);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	req->data_sgl.nents = blk_rq_map_sg(rq, req->data_sgl.sg_table.sgl);	/* [한국어] bio 를 산재 목록으로 편다 */
 
-	*count = ib_dma_map_sg(ibdev, req->data_sgl.sg_table.sgl,	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
+	*count = ib_dma_map_sg(ibdev, req->data_sgl.sg_table.sgl,	/* [한국어] HCA 가 볼 수 있는 주소로 바꾼다. IOMMU 가 세그먼트를 병합할 수 있어 반환 개수가 다르다 */
 			       req->data_sgl.nents, rq_dma_dir(rq));
-	if (unlikely(*count <= 0)) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		ret = -EIO;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		goto out_free_table;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
+	if (unlikely(*count <= 0)) {	/* [한국어] IOMMU 자원 부족이거나 매핑 불가한 주소다 */
+		ret = -EIO;
+		goto out_free_table;
 	}
 
-	if (blk_integrity_rq(rq)) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-		req->metadata_sgl->sg_table.sgl =	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			(struct scatterlist *)(req->metadata_sgl + 1);	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-		ret = sg_alloc_table_chained(&req->metadata_sgl->sg_table,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	if (blk_integrity_rq(rq)) {	/* [한국어] 메타데이터가 있는 요청만 */
+		req->metadata_sgl->sg_table.sgl =	/* [한국어] 메타데이터 테이블도 그 뒤 공간에 얹는다 */
+			(struct scatterlist *)(req->metadata_sgl + 1);	/* [한국어] init_request 가 계산해 둔 오프셋이 여기서 쓰인다 */
+		ret = sg_alloc_table_chained(&req->metadata_sgl->sg_table,
 				rq->nr_integrity_segments,
 				req->metadata_sgl->sg_table.sgl,
 				NVME_INLINE_METADATA_SG_CNT);
-		if (unlikely(ret)) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-			ret = -ENOMEM;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			goto out_unmap_sg;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
+		if (unlikely(ret)) {
+			ret = -ENOMEM;
+			goto out_unmap_sg;	/* [한국어] 데이터 매핑을 되돌린다 */
 		}
 
-		req->metadata_sgl->nents = blk_rq_map_integrity_sg(rq,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+		req->metadata_sgl->nents = blk_rq_map_integrity_sg(rq,	/* [한국어] 무결성 bio 를 산재 목록으로 */
 				req->metadata_sgl->sg_table.sgl);
-		*pi_count = ib_dma_map_sg(ibdev,	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
+		*pi_count = ib_dma_map_sg(ibdev,
 					  req->metadata_sgl->sg_table.sgl,
 					  req->metadata_sgl->nents,
 					  rq_dma_dir(rq));
-		if (unlikely(*pi_count <= 0)) {	/* [한국어] 제어 분기 — 상태·에러·자원 조건 경로 */
-			ret = -EIO;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-			goto out_free_pi_table;	/* [한국어] 공통 정리 라벨 — 부분 할당 롤백 */
+		if (unlikely(*pi_count <= 0)) {
+			ret = -EIO;
+			goto out_free_pi_table;
 		}
 	}
 
-	return 0;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	return 0;	/* [한국어] 두 매핑이 모두 섰다 */
 
 out_free_pi_table:
-	sg_free_table_chained(&req->metadata_sgl->sg_table,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	sg_free_table_chained(&req->metadata_sgl->sg_table,
 			      NVME_INLINE_METADATA_SG_CNT);
 out_unmap_sg:
-	ib_dma_unmap_sg(ibdev, req->data_sgl.sg_table.sgl, req->data_sgl.nents,	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
+	ib_dma_unmap_sg(ibdev, req->data_sgl.sg_table.sgl, req->data_sgl.nents,
 			rq_dma_dir(rq));
 out_free_table:
-	sg_free_table_chained(&req->data_sgl.sg_table, NVME_INLINE_SG_CNT);	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	return ret;	/* [한국어] 상위 계층으로 성공/에러/상태 반환 */
+	sg_free_table_chained(&req->data_sgl.sg_table, NVME_INLINE_SG_CNT);
+	return ret;
 }
 
 /*
