@@ -539,7 +539,7 @@ static inline u16 nvme_req_qid(struct request *req)	/* [한국어] 함수 시그
  * 로만 합법 전이. I/O 제출 가드(nvme_check_ready), 리셋 직렬화, 삭제 순서
  * (AER 정리 → DELETING_NOIO → NS 제거 → DEAD) 의 중심 축.
  */
-enum nvme_ctrl_state {	/* [한국어] 컨트롤러 상태 원자 스냅샷 */
+enum nvme_ctrl_state {
 	NVME_CTRL_NEW,		/* [한국어] 할당 직후 — 아직 트랜스포트 connect/enable 전 */
 	NVME_CTRL_LIVE,		/* [한국어] I/O·admin 정상 서비스 — 제출 핫패스의 기대 상태 */
 	NVME_CTRL_RESETTING,	/* [한국어] 리셋 예약/진행 — 신규 I/O 제한, reset_work 가 주도 */

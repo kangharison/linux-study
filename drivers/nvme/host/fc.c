@@ -191,15 +191,66 @@ struct nvmefc_ls_req_op {
 };
 
 struct nvmefc_ls_rcv_op {	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	struct nvme_fc_rport		*rport;	/* [한국어] NVMe/FC LS·FCP·rport 경로 헬퍼 */
-	struct nvmefc_ls_rsp		*lsrsp;	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	union nvmefc_ls_requests	*rqstbuf;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	union nvmefc_ls_responses	*rspbuf;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	u16				rqstdatalen;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	bool				handled;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	dma_addr_t			rspdma;	/* [한국어] DMA 매핑 — 장치가 접근할 주소 확보 */
-	struct list_head		lsrcv_list;	/* rport->ls_rcv_list */	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-} __aligned(sizeof(u64));	/* alignment for other things alloc'd with */	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	/* [한국어] 이 LS 를 보내 온 원격 포트.
+	 * 설정자: nvme_fc_rcv_ls_req 가 수신 시점에 채운다.
+	 * 읽는 자: 응답 전송과 취소 경로가 LLDD 핸들을 찾는 데 쓴다.
+	 * 값 범위: 유효한 rport 포인터. 이 구조체는 rport 의 목록에 매달리므로
+	 *   rport 보다 오래 살 수 없다.
+	 * 동기화: rport->lock 아래에서 설정·해제된다. */
+	struct nvme_fc_rport		*rport;
+
+	/* [한국어] LLDD 가 넘겨준 응답 전송 핸들.
+	 * 설정자: LLDD 가 nvme_fc_rcv_ls_req 인자로 준다.
+	 * 읽는 자: nvme_fc_xmt_ls_rsp 가 이것을 LLDD 에 되돌려 응답을 보낸다.
+	 * 값 범위: 이 LS 교환에만 유효한 불투명 핸들 — 응답 완료 후 무효.
+	 * 동기화: 한 LS 는 수신부터 응답까지 한 흐름으로 처리되어 락이 없다. */
+	struct nvmefc_ls_rsp		*lsrsp;
+
+	/* [한국어] 받은 LS 요청이 담긴 버퍼. 모든 LS 종류를 덮는 공용체다.
+	 * 설정자: op 를 할당할 때 뒤따르는 DMA 가능 메모리를 가리키게 한다.
+	 * 읽는 자: nvme_fc_handle_ls_rqst 가 w0.ls_cmd 로 종류를 가른 뒤
+	 *   해당 멤버로 해석한다.
+	 * 값 범위: Create Association / Create Connection / Disconnect 중 하나.
+	 * 동기화: LLDD 가 채운 뒤 넘기므로 이후에는 읽기만 한다. */
+	union nvmefc_ls_requests	*rqstbuf;
+
+	/* [한국어] 보낼 LS 응답을 조립하는 버퍼. 역시 모든 응답을 덮는 공용체.
+	 * 설정자: 각 LS 처리 함수가 승인 또는 거절(RJT)을 채운다.
+	 * 읽는 자: LLDD 가 DMA 로 읽어 선로에 내보낸다.
+	 * 값 범위: 요청과 짝이 되는 응답 종류.
+	 * 동기화: 전송이 끝날 때까지 살아 있어야 하므로 완료 콜백 전에는
+	 *   해제하지 않는다. */
+	union nvmefc_ls_responses	*rspbuf;
+
+	/* [한국어] 실제로 받은 요청 바이트 수.
+	 * 설정자: 수신 시 LLDD 가 알려 준 길이를 그대로 저장한다.
+	 * 읽는 자: 각 LS 처리 함수가 "이 종류가 요구하는 최소 길이"와 비교해
+	 *   짧으면 RJT 로 거절한다. 이 검사가 없으면 잘린 PDU 를 읽는다.
+	 * 값 범위: 0 이상. 종류별 고정 크기와 비교된다. */
+	u16				rqstdatalen;
+
+	/* [한국어] 이 LS 를 이미 처리했는가.
+	 * 왜 필요한가: 같은 association 에 대해 중복 LS 가 오거나 취소 경로와
+	 *   처리 경로가 겹칠 때, 응답을 두 번 보내지 않도록 한 번만 통과시킨다.
+	 * 설정자: 처리 경로가 rport->lock 아래에서 세운다.
+	 * 읽는 자: 취소 경로가 이미 처리된 것을 건너뛰는 데 쓴다. */
+	bool				handled;
+
+	/* [한국어] rspbuf 의 장치 주소.
+	 * 왜 별도로 두는가: LLDD 는 CPU 가상 주소가 아니라 DMA 주소로 읽는다.
+	 * 설정자: op 준비 시 fc_dma_map_single 결과.
+	 * 읽는 자: 응답 전송 시 LLDD 에 넘어가고, 해제 시 unmap 에 쓰인다.
+	 * 값 범위: 매핑 성공 시 유효. 실패는 fc_dma_mapping_error 로 판정한다. */
+	dma_addr_t			rspdma;
+
+	/* [한국어] rport 의 수신 LS 목록에 매달리는 고리.
+	 * 왜 목록인가: 원격 포트가 사라질 때 아직 응답하지 못한 LS 를 모두
+	 *   찾아 정리해야 하기 때문이다.
+	 * 동기화: rport->lock 이 목록 전체를 보호한다. */
+	struct list_head		lsrcv_list;	/* rport->ls_rcv_list */
+} __aligned(sizeof(u64));	/* alignment for other things alloc'd with */
+/* [한국어] 위 영어 주석대로, 이 구조체 뒤에 요청·응답 버퍼를 이어 붙여
+ * 한 번에 할당한다. u64 정렬이라야 뒤따르는 IU 들이 비정렬 접근을 겪지 않는다. */
 
 /* [한국어] FCP 오퍼레이션 하나의 생애 상태.
  * atomic_t 로 다뤄지며, 상태 전이를 atomic_cmpxchg 로 시도해 "내가 먼저
@@ -264,9 +315,27 @@ struct nvme_fc_fcp_op {
 };
 
 struct nvme_fcp_op_w_sgl {	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	struct nvme_fc_fcp_op	op;	/* [한국어] NVMe/FC LS·FCP·rport 경로 헬퍼 */
-	struct scatterlist	sgl[NVME_INLINE_SG_CNT];	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	uint8_t			priv[];	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	/* [한국어] 본체. 이 구조체는 op 를 감싸 뒤에 두 영역을 덧붙인 것이다.
+	 * 왜 이렇게 묶는가: 요청 하나가 필요한 세 덩어리를 blk-mq 가 요청마다
+	 *   잡아 주는 PDU 한 조각 안에 모두 담기 위해서다. 그러면 I/O 경로에서
+	 *   추가 할당이 전혀 없다.
+	 * 설정자: nvme_fc_init_request 가 요청 생성 시 초기화.
+	 * 읽는 자: blk_mq_rq_to_pdu 로 되찾아 제출·완료·abort 가 모두 쓴다. */
+	struct nvme_fc_fcp_op	op;
+
+	/* [한국어] 세그먼트가 적은 흔한 I/O 를 위한 내장 산재 목록.
+	 * 왜 필요한가: 대부분의 요청은 몇 조각뿐이라 별도 할당이 낭비다.
+	 *   이 배열을 넘는 요청만 mempool 에서 큰 목록을 빌린다.
+	 * 값 범위: NVME_INLINE_SG_CNT 개. 초과 시 op.data_sg 가 다른 곳을 가리킨다.
+	 * 동기화: 요청 하나에 전속이라 락이 없다. */
+	struct scatterlist	sgl[NVME_INLINE_SG_CNT];
+
+	/* [한국어] LLDD 전용 영역. 가변 길이 배열이라 크기는 등록 시 LLDD 가 알린
+	 *   fcprqst_priv_sz 로 정해진다.
+	 * 왜 여기 있는가: LLDD 가 요청마다 자기 상태(FC 익스체인지 문맥 등)를
+	 *   둘 곳이 필요한데, 따로 할당하면 I/O 경로에 할당이 하나 더 생긴다.
+	 * 설정자/읽는 자: 오직 LLDD. 이 드라이버는 포인터만 넘기고 내용을 보지 않는다. */
+	uint8_t			priv[];
 };
 
 /* [한국어] 로컬 FC 포트 하나 -- 이 호스트에 꽂힌 HBA 포트를 나타낸다.
@@ -5071,8 +5140,19 @@ out_put_ctrl:
 }
 
 struct nvmet_fc_traddr {	/* [한국어] 트랜스포트 상태/요청 모델 타입 */
-	u64	nn;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-	u64	pn;	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	/* [한국어] World Wide Node Name. FC 노드(장치 전체)를 세계적으로 유일하게
+	 *   식별하는 64비트 값이다. 한 장치의 여러 포트가 같은 nn 을 공유한다.
+	 * 설정자: nvme_fc_parse_traddr 가 "nn-0x..." 문자열을 파싱해 채운다.
+	 * 읽는 자: 로컬/원격 포트를 찾을 때 pn 과 함께 대조된다.
+	 * 값 범위: 호스트 바이트 순서의 64비트. 선로에 나갈 때 변환된다. */
+	u64	nn;
+
+	/* [한국어] World Wide Port Name. 같은 노드 안에서 포트 하나를 구별한다.
+	 * 왜 둘 다 필요한가: 노드만으로는 다중 포트 HBA 의 어느 포트인지 알 수
+	 *   없고, 연결은 포트 단위로 맺어진다.
+	 * 설정자: 같은 파서가 "pn-0x..." 부분에서 채운다.
+	 * 읽는 자: nvme connect 인자에서 온 값과 등록된 포트를 대조하는 데 쓴다. */
+	u64	pn;
 };
 
 static int

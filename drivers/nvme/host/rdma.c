@@ -1877,12 +1877,12 @@ static void nvme_rdma_inv_rkey_done(struct ib_cq *cq, struct ib_wc *wc)	/* [한�
 static int nvme_rdma_inv_rkey(struct nvme_rdma_queue *queue,	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */
 		struct nvme_rdma_request *req)
 {
-	struct ib_send_wr wr = {	/* [한국어] RDMA CM/IB verbs — 연결·QP·CQ·MR·WR */
-		.opcode		    = IB_WR_LOCAL_INV,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		.next		    = NULL,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		.num_sge	    = 0,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		.send_flags	    = IB_SEND_SIGNALED,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
-		.ex.invalidate_rkey = req->mr->rkey,	/* [한국어] 트랜스포트 파이프라인 단계 — 제출/완료/연결/복구 중 한 축 */
+	struct ib_send_wr wr = {
+		.opcode		    = IB_WR_LOCAL_INV,	/* [한국어] LOCAL_INV — 원격이 아니라 로컬 HCA 에게 이 rkey 를 무효화하라고 시킨다 */
+		.next		    = NULL,	/* [한국어] 작업 하나만 올린다. 체인 없음 */
+		.num_sge	    = 0,	/* [한국어] 데이터 전송이 없는 제어 작업이라 산재 목록이 필요 없다 */
+		.send_flags	    = IB_SEND_SIGNALED,	/* [한국어] 완료 통지를 반드시 받아야 한다 — 무효화가 끝나야 MR 을 재사용할 수 있다 */
+		.ex.invalidate_rkey = req->mr->rkey,	/* [한국어] 무효화할 키. 이것이 살아 있는 동안은 원격이 이 메모리에 접근할 수 있다 */
 	};
 
 	req->reg_cqe.done = nvme_rdma_inv_rkey_done;	/* [한국어] NVMe/RDMA QP·CM·MR 경로 헬퍼 */

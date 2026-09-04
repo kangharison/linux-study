@@ -2051,11 +2051,11 @@ struct nvme_directive_cmd {
  * SQE.opcode=0x7f 이면 Admin/I/O 가 아니라 Fabrics capsule.
  * fctype: Connect / Property Get·Set / Auth. 트랜스포트가 연결·레지스터 에뮬·인증에 사용.
  */
-enum nvmf_fabrics_opcode {	/* [한국어] Fabrics 공통 라이브러리 */
+enum nvmf_fabrics_opcode {
 	nvme_fabrics_command		= 0x7f,	/* [한국어] 모든 Fabrics 명령의 opcode — nvme_is_fabrics() 판정 기준 */
 };
 
-enum nvmf_capsule_command {	/* [한국어] Fabrics 공통 라이브러리 */
+enum nvmf_capsule_command {
 	nvme_fabrics_type_property_set	= 0x00,	/* [한국어] fctype 00h Property Set — CC 등 기록 */
 	nvme_fabrics_type_connect	= 0x01,	/* [한국어] fctype 01h Connect — 큐 연결 수립 */
 	nvme_fabrics_type_property_get	= 0x04,	/* [한국어] fctype 04h Property Get — CAP/CSTS 읽기 */
@@ -2082,7 +2082,7 @@ enum nvmf_capsule_command {	/* [한국어] Fabrics 공통 라이브러리 */
 	 show_nvm_opcode_name(opcode) :				\
 	 show_admin_opcode_name(opcode)))	/* [한국어] 인자/선언 연속행 */
 
-struct nvmf_common_command {	/* [한국어] Fabrics 공통 라이브러리 */
+struct nvmf_common_command {
 	__u8	opcode;	/* [한국어] opcode 필드 — 상위 구조 작성자·동기화 참고 */
 	__u8	resv1;	/* [한국어] 스펙 예약 — 호스트 0 */
 	__u16	command_id;	/* [한국어] command_id 필드 — 상위 구조 작성자·동기화 참고 */
@@ -2115,7 +2115,7 @@ enum {
  * 호스트 fabrics 가 이를 파싱해 nvme connect 인자 생성. 디스커버리 컨트롤러 작성.
  */
 /* Discovery log page entry */
-struct nvmf_disc_rsp_page_entry {	/* [한국어] Fabrics 공통 라이브러리 */
+struct nvmf_disc_rsp_page_entry {
 	__u8		trtype;	/* [한국어] 전송 타입 — PCI/RDMA/FC/TCP (NVMF_TRTYPE_*) */
 	__u8		adrfam;	/* [한국어] 주소 패밀리 — traddr 해석 방식 */
 	__u8		subtype;	/* [한국어] 서브시스템 타입 — DISC/NVME/CURR */
@@ -2150,7 +2150,7 @@ struct nvmf_disc_rsp_page_entry {	/* [한국어] Fabrics 공통 라이브러리 
  * genctr 변경 시 재읽기, numrec 만큼 entries[] 반복. LID=70h.
  */
 /* Discovery log page header */
-struct nvmf_disc_rsp_page_hdr {	/* [한국어] Fabrics 공통 라이브러리 */
+struct nvmf_disc_rsp_page_hdr {
 	__le64		genctr;	/* [한국어] generation counter — 변경 감지 LE64 */
 	__le64		numrec;	/* [한국어] 레코드 수 LE64 */
 	__le16		recfmt;	/* [한국어] 레코드 포맷 버전 */
@@ -2168,7 +2168,7 @@ enum {
  * sqsize/kato/cattr, dptr → nvmf_connect_data (hostid, NQN 쌍).
  * 연결 성공 CQE 가 cntlid 등 result 반환. 호스트 작성.
  */
-struct nvmf_connect_command {	/* [한국어] Fabrics 공통 라이브러리 */
+struct nvmf_connect_command {
 	__u8		opcode;	/* [한국어] 0x7f fabrics */
 	__u8		resv1;	/* [한국어] 예약 */
 	__u16		command_id;	/* [한국어] CID */
@@ -2193,7 +2193,7 @@ enum {
  * [한국어] Connect 데이터 페이로드 (호스트→컨트롤러)
  * hostid UUID, cntlid(동적 0xffff 가능), subsysnqn, hostnqn. 인증·권한의 정체성.
  */
-struct nvmf_connect_data {	/* [한국어] Fabrics 공통 라이브러리 */
+struct nvmf_connect_data {
 	uuid_t		hostid;	/* [한국어] Host Identifier UUID */
 	__le16		cntlid;	/* [한국어] 요청 cntlid — DYNAMIC=0xffff 면 할당 요청 */
 	char		resv4[238];	/* [한국어] 예약 */
@@ -2206,7 +2206,7 @@ struct nvmf_connect_data {	/* [한국어] Fabrics 공통 라이브러리 */
  * [한국어] Property Set — Fabrics 에서 CC 등 레지스터 에뮬 기록
  * offset+value. PCIe MMIO 대신 캡슐로 CAP/CC/CSTS 공간 접근.
  */
-struct nvmf_property_set_command {	/* [한국어] Fabrics 공통 라이브러리 */
+struct nvmf_property_set_command {
 	__u8		opcode;	/* [한국어] 0x7f */
 	__u8		resv1;	/* [한국어] 예약 */
 	__u16		command_id;	/* [한국어] CID */
@@ -2223,7 +2223,7 @@ struct nvmf_property_set_command {	/* [한국어] Fabrics 공통 라이브러리
  * [한국어] Property Get — 레지스터 읽기 에뮬
  * offset 지정, 결과는 CQE.result. enable 시퀀스를 fabrics 에서도 동일 개념으로 수행.
  */
-struct nvmf_property_get_command {	/* [한국어] Fabrics 공통 라이브러리 */
+struct nvmf_property_get_command {
 	__u8		opcode;	/* [한국어] 0x7f */
 	__u8		resv1;	/* [한국어] 예약 */
 	__u16		command_id;	/* [한국어] CID */
@@ -2241,7 +2241,7 @@ struct nvmf_property_get_command {	/* [한국어] Fabrics 공통 라이브러리
  * 프로토콜 선택(DH-HMAC-CHAP=0xE9). dptr 가 인증 메시지 버퍼를 가리키고
  * al_tl 은 Send 의 tl / Receive 의 al 오버레이(호스트가 길이 계약).
  */
-struct nvmf_auth_common_command {	/* [한국어] Fabrics 공통 라이브러리 */
+struct nvmf_auth_common_command {
 	__u8		opcode;	/* [한국어] 항상 nvme_fabrics_command (0x7f) */
 	__u8		resv1;	/* [한국어] 스펙 예약 — 호스트 0 */
 	__u16		command_id;	/* [한국어] 호스트 CID — CQE 매칭 */
@@ -2260,7 +2260,7 @@ struct nvmf_auth_common_command {	/* [한국어] Fabrics 공통 라이브러리 
  * [한국어] Authentication Send — 호스트→컨트롤러 메시지 제출(Negotiate/Reply/Success2).
  * tl 은 전송 바이트 수. auth.c 가 chap->buf 를 dptr 에 실어 동기 제출.
  */
-struct nvmf_auth_send_command {	/* [한국어] Fabrics 공통 라이브러리 */
+struct nvmf_auth_send_command {
 	__u8		opcode;	/* [한국어] Fabrics opcode */
 	__u8		resv1;	/* [한국어] 예약 */
 	__u16		command_id;	/* [한국어] CID */
@@ -2279,7 +2279,7 @@ struct nvmf_auth_send_command {	/* [한국어] Fabrics 공통 라이브러리 */
  * [한국어] Authentication Receive — 컨트롤러→호스트 메시지 수신(Challenge/Success1/Failure).
  * al 은 할당 버퍼 크기. 호스트가 수신 후 auth_type/auth_id 로 단계 전이.
  */
-struct nvmf_auth_receive_command {	/* [한국어] Fabrics 공통 라이브러리 */
+struct nvmf_auth_receive_command {
 	__u8		opcode;	/* [한국어] Fabrics opcode */
 	__u8		resv1;	/* [한국어] 예약 */
 	__u16		command_id;	/* [한국어] CID */
@@ -2324,7 +2324,7 @@ enum {
  * [한국어] Negotiate 에 실리는 프로토콜 디스크립터 — 지원 hash/DH 목록.
  * idlist 앞 halen 바이트가 해시 ID, 이어 dhlen 바이트가 DH 그룹 ID.
  */
-struct nvmf_auth_dhchap_protocol_descriptor {	/* [한국어] Fabrics 공통 라이브러리 */
+struct nvmf_auth_dhchap_protocol_descriptor {
 	__u8		authid;	/* [한국어] NVME_AUTH_DHCHAP_AUTH_ID */
 	__u8		rsvd;	/* [한국어] 예약 */
 	__u8		halen;	/* [한국어] 해시 ID 목록 길이 */
@@ -2368,7 +2368,7 @@ enum {
 };
 
 /* [한국어] Negotiate 가변 프로토콜 목록 엔트리 유니온 — 현재 DH-CHAP 만 */
-union nvmf_auth_protocol {	/* [한국어] Fabrics 공통 라이브러리 */
+union nvmf_auth_protocol {
 	struct nvmf_auth_dhchap_protocol_descriptor dhchap;	/* [한국어] DH-HMAC-CHAP 디스크립터 */
 };
 
@@ -2376,7 +2376,7 @@ union nvmf_auth_protocol {	/* [한국어] Fabrics 공통 라이브러리 */
  * [한국어] Host→Ctrl Negotiate — 지원 해시/DH·secure channel 선택(sc_c)·트랜잭션.
  * napd 개수만큼 auth_protocol[] 가 이어짐. auth.c setup_negotiate 작성.
  */
-struct nvmf_auth_dhchap_negotiate_data {	/* [한국어] Fabrics 공통 라이브러리 */
+struct nvmf_auth_dhchap_negotiate_data {
 	__u8		auth_type;	/* [한국어] NVME_AUTH_DHCHAP_MESSAGES */
 	__u8		auth_id;	/* [한국어] MESSAGE_NEGOTIATE */
 	__le16		rsvd;	/* [한국어] 예약 */
@@ -2390,7 +2390,7 @@ struct nvmf_auth_dhchap_negotiate_data {	/* [한국어] Fabrics 공통 라이브
  * [한국어] Ctrl→Host Challenge — 선택 해시/DH, c1 챌린지, 시퀀스, 선택적 DH 공개키.
  * hl=해시 길이. cval[hl] 뒤 dhvlen 바이트 DH 값. 호스트가 Reply HMAC 입력으로 사용.
  */
-struct nvmf_auth_dhchap_challenge_data {	/* [한국어] Fabrics 공통 라이브러리 */
+struct nvmf_auth_dhchap_challenge_data {
 	__u8		auth_type;	/* [한국어] DHCHAP 메시지 클래스 */
 	__u8		auth_id;	/* [한국어] MESSAGE_CHALLENGE */
 	__u16		rsvd1;	/* [한국어] 예약 */
@@ -2410,7 +2410,7 @@ struct nvmf_auth_dhchap_challenge_data {	/* [한국어] Fabrics 공통 라이브
  * [한국어] Host→Ctrl Reply — 호스트 HMAC 응답, 선택적 상호 c2/s2, 호스트 DH 공개키.
  * cvalid 비트로 컨트롤러 챌린지 포함 여부. rval 뒤에 c2·DH 가변 영역.
  */
-struct nvmf_auth_dhchap_reply_data {	/* [한국어] Fabrics 공통 라이브러리 */
+struct nvmf_auth_dhchap_reply_data {
 	__u8		auth_type;	/* [한국어] DHCHAP 메시지 클래스 */
 	__u8		auth_id;	/* [한국어] MESSAGE_REPLY */
 	__le16		rsvd1;	/* [한국어] 예약 */
@@ -2435,7 +2435,7 @@ enum {
  * [한국어] Ctrl→Host Success1 — 단방향 완료 또는 상호 인증 시 컨트롤러 응답.
  * rvalid 가 설정되면 rval[hl] 에 컨트롤러 HMAC. 이후 호스트 Success2 가능.
  */
-struct nvmf_auth_dhchap_success1_data {	/* [한국어] Fabrics 공통 라이브러리 */
+struct nvmf_auth_dhchap_success1_data {
 	__u8		auth_type;	/* [한국어] DHCHAP 메시지 클래스 */
 	__u8		auth_id;	/* [한국어] MESSAGE_SUCCESS1 */
 	__le16		rsvd1;	/* [한국어] 예약 */
@@ -2452,7 +2452,7 @@ struct nvmf_auth_dhchap_success1_data {	/* [한국어] Fabrics 공통 라이브�
  * [한국어] Host→Ctrl Success2 — 양방향 인증 최종 ACK. 페이로드 최소 헤더만.
  * Success1 검증 후 호스트가 보내 핸드셰이크를 닫는다.
  */
-struct nvmf_auth_dhchap_success2_data {	/* [한국어] Fabrics 공통 라이브러리 */
+struct nvmf_auth_dhchap_success2_data {
 	__u8		auth_type;	/* [한국어] DHCHAP 메시지 클래스 */
 	__u8		auth_id;	/* [한국어] MESSAGE_SUCCESS2 */
 	__le16		rsvd1;	/* [한국어] 예약 */
@@ -2464,7 +2464,7 @@ struct nvmf_auth_dhchap_success2_data {	/* [한국어] Fabrics 공통 라이브�
  * [한국어] Failure1/2 — 인증 실패 사유. rescode/rescode_exp 로 해시·DH·concat
  * 불일치 등을 전달. auth.c 가 Failure2 를 구성해 보낸 뒤 연결을 중단.
  */
-struct nvmf_auth_dhchap_failure_data {	/* [한국어] Fabrics 공통 라이브러리 */
+struct nvmf_auth_dhchap_failure_data {
 	__u8		auth_type;	/* [한국어] COMMON 또는 DHCHAP 실패 클래스 */
 	__u8		auth_id;	/* [한국어] FAILURE1/FAILURE2 */
 	__le16		rsvd1;	/* [한국어] 예약 */

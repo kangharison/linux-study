@@ -182,7 +182,7 @@ static_assert(MAX_PRP_RANGE / NVME_CTRL_PAGE_SIZE <=
 
 /* [한국어] 모듈 파라미터 동적 quirk 한 줄: PCI VID/DID 와 on/off 비트마스크.
  * probe 시 id->driver_data 및 DMI quirk 와 OR/AND 되어 ctrl.quirks 가 된다. */
-struct quirk_entry {	/* [한국어] PCIe NVMe 아키텍처 단계 (BAR/SQ·CQ/도어벨/맵/리셋) */
+struct quirk_entry {
 	u16 vendor_id;		/* [한국어] PCI Vendor ID (16진 파싱) */
 	u16 dev_id;		/* [한국어] PCI Device ID */
 	u32 enabled_quirks;	/* [한국어] 강제로 켤 NVME_QUIRK_* 비트 */
@@ -438,7 +438,7 @@ static void nvme_update_attrs(struct nvme_dev *dev);	/* [한국어] CMB/HMB sysf
 
 /* [한국어] NUMA 노드 하나 분의 PRP/SGL descriptor dma_pool 쌍.
  * large=페이지, small=256B. nvme_dev.descriptor_pools[] 유연 배열 원소. */
-struct nvme_descriptor_pools {	/* [한국어] NVMe host 헬퍼/코어 API */
+struct nvme_descriptor_pools {
 	struct dma_pool *large;	/* [한국어] NVME_CTRL_PAGE_SIZE 정렬 PRP/SGL 페이지 풀 */
 	struct dma_pool *small;	/* [한국어] 짧은 리스트용 256B(또는 512 정렬 quirk) 풀 */
 };
@@ -454,7 +454,7 @@ struct nvme_descriptor_pools {	/* [한국어] NVMe host 헬퍼/코어 API */
  * ctrl: core 공통 상태(임베드). shutdown_lock: disable vs setup 직렬화.
  * descriptor_pools[]: 노드 수만큼 말단 유연 배열.
  */
-struct nvme_dev {	/* [한국어] NVMe host 헬퍼/코어 API */
+struct nvme_dev {
 	struct nvme_queue *queues;		/* [한국어] 큐 배열 — [0] admin, 이후 I/O */
 	struct blk_mq_tag_set tagset;		/* [한국어] I/O blk-mq tag set */
 	struct blk_mq_tag_set admin_tagset;	/* [한국어] Admin blk-mq tag set */
@@ -555,14 +555,23 @@ static inline struct nvme_dev *to_nvme_dev(struct nvme_ctrl *ctrl)	/* [한국어
  * sq_tail/last_sq_tail: 배치 도어벨 최적화. cq_head/cq_phase: 완료 소비자.
  * flags: ENABLED, SQ_CMB, DELETE_ERROR, POLLED. dbbuf_*: shadow 포인터.
  */
-struct nvme_queue {	/* [한국어] NVMe host 헬퍼/코어 API */
+struct nvme_queue {
 	struct nvme_dev *dev;			/* [한국어] 소속 컨트롤러 */
 	struct nvme_descriptor_pools descriptor_pools; /* [한국어] hctx NUMA 풀 캐시 사본 */
 	spinlock_t sq_lock;			/* [한국어] SQ 복사·tail·doorbell 직렬화 */
 	void *sq_cmds;				/* [한국어] SQ 링 VA (호스트 DMA 또는 CMB) */
 	 /* only used for poll queues: */
 	/* [한국어] 폴링/reap 과 IRQ 폴 직렬화 — 캐시라인 정렬로 false sharing 완화 */
-	spinlock_t cq_poll_lock ____cacheline_aligned_in_smp;	/* [한국어] CMB/HMB/도어벨/SQ·CQ 경로 */
+	/* [한국어] 폴링 큐의 완료 큐를 보호하는 락.
+	 * 왜 sq_lock 과 따로 두는가: 제출과 완료가 서로 다른 CPU 에서 동시에
+	 *   진행되는 것이 정상 경로이므로, 하나의 락으로 묶으면 두 방향이
+	 *   불필요하게 직렬화된다.
+	 * 왜 캐시라인 정렬인가: sq_lock 과 같은 라인에 놓이면 서로 다른 CPU 가
+	 *   각자의 락만 만져도 라인이 오가는 거짓 공유가 생긴다. 정렬이
+	 *   그 라인을 갈라 준다.
+	 * 설정자/읽는 자: nvme_poll 이 잡고, 인터럽트 큐에서는 쓰이지 않는다.
+	 * 동기화: 폴링은 프로세스 문맥에서만 불리므로 irqsave 가 필요 없다. */
+	spinlock_t cq_poll_lock ____cacheline_aligned_in_smp;
 	struct nvme_completion *cqes;		/* [한국어] CQ 링 VA (coherent) */
 	dma_addr_t sq_dma_addr;			/* [한국어] SQ 베이스 DMA/버스 주소 (Create SQ PRP1) */
 	dma_addr_t cq_dma_addr;			/* [한국어] CQ 베이스 DMA 주소 (Create CQ PRP1) */
@@ -589,7 +598,7 @@ struct nvme_queue {	/* [한국어] NVMe host 헬퍼/코어 API */
 
 /* bits for iod->flags */
 /* [한국어] 요청 PDU(iod) 수명 동안의 매핑/중단 상태 비트 — unmap 경로 분기 핵심 */
-enum nvme_iod_flags {	/* [한국어] NVMe host 헬퍼/코어 API */
+enum nvme_iod_flags {
 	/* this command has been aborted by the timeout handler */
 	IOD_ABORTED		= 1U << 0,	/* [한국어] timeout 이 Abort 시도함 — 재차 시 리셋 */
 
@@ -616,7 +625,7 @@ enum nvme_iod_flags {	/* [한국어] NVMe host 헬퍼/코어 API */
 };
 
 /* [한국어] non-IOVA PRP 경로에서 unmap 용 (dma_addr, len) 한 쌍 */
-struct nvme_dma_vec {	/* [한국어] NVMe host 헬퍼/코어 API */
+struct nvme_dma_vec {
 	dma_addr_t addr;	/* [한국어] 매핑된 DMA 주소 */
 	unsigned int len;	/* [한국어] 바이트 길이 */
 };
@@ -629,7 +638,7 @@ struct nvme_dma_vec {	/* [한국어] NVMe host 헬퍼/코어 API */
  * req=core 메타, cmd=64B SQE. descriptors[]=PRP/SGL 페이지.
  * 제출 전 prep, 완료 시 unmap 이 쌍으로 동작. sizeof 가 tagset cmd_size.
  */
-struct nvme_iod {	/* [한국어] NVMe host 헬퍼/코어 API */
+struct nvme_iod {
 	struct nvme_request req;	/* [한국어] core 요청 메타 (status/ctrl/flags) */
 	struct nvme_command cmd;	/* [한국어] 제출용 64바이트 SQE 템플릿 */
 	u8 flags;			/* [한국어] enum nvme_iod_flags 비트 OR */
@@ -1059,7 +1068,7 @@ static void nvme_commit_rqs(struct blk_mq_hw_ctx *hctx)	/* [한국어] blk-mq �
 }
 
 /* [한국어] 데이터 경로 SGL 정책 3단: 불가 / 선택 가능 / 강제 */
-enum nvme_use_sgl {	/* [한국어] NVMe host 헬퍼/코어 API */
+enum nvme_use_sgl {
 	SGL_UNSUPPORTED,	/* [한국어] admin 또는 컨트롤러 미지원 → 항상 PRP */
 	SGL_SUPPORTED,		/* [한국어] 평균 세그먼트·threshold 로 선택 */
 	SGL_FORCED,		/* [한국어] gap/usercmd/multi-integrity — PRP 불가 */

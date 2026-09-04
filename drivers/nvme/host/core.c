@@ -156,7 +156,7 @@
  * [한국어] nvme_ns_info - 스캔 중 아직 gendisk 에 붙이기 전 임시 NS 메타
  * Identify 결과만 담아 alloc_ns/validate_ns 로 넘긴다. 등록 구조체 아님.
  */
-struct nvme_ns_info {	/* [한국어] NVMe host 코어 헬퍼 API */
+struct nvme_ns_info {
 	struct nvme_ns_ids ids;		/* [한국어] UUID/NGUID/EUI64/CSI 식별 묶음 */
 	u32 nsid;			/* [한국어] 네임스페이스 식별자 */
 	__le32 anagrpid;		/* [한국어] ANA 그룹 — multipath 경로 상태 */
@@ -593,7 +593,7 @@ static void nvme_log_err_passthru(struct request *req)	/* [한국어] NVMe host 
 /*
  * [한국어] nvme_disposition - 완료 후 요청 운명 (complete 핫패스 분기축)
  */
-enum nvme_disposition {	/* [한국어] NVMe host 코어 헬퍼 API */
+enum nvme_disposition {
 	COMPLETE,	/* [한국어] 사용자/블록 계층에 최종 완료 */
 	RETRY,		/* [한국어] 동일 경로 CRD 지연 재시도 */
 	FAILOVER,	/* [한국어] multipath 다른 경로로 */
@@ -2062,10 +2062,10 @@ static int nvme_ns_info_from_id_cs_indep(struct nvme_ctrl *ctrl,	/* [한국어] 
 		struct nvme_ns_info *info)
 {
 	struct nvme_id_ns_cs_indep *id; /* [한국어] CSI 독립 Identify 버퍼 */
-	struct nvme_command c = {	/* [한국어] NVMe host 코어 헬퍼 API */
-		.identify.opcode	= nvme_admin_identify,	/* [한국어] NVMe host 코어 헬퍼 API */
-		.identify.nsid		= cpu_to_le32(info->nsid),	/* [한국어] 엔디안 변환 — 스펙 온와이어 */
-		.identify.cns		= NVME_ID_CNS_NS_CS_INDEP,	/* [한국어] NVMe/blk 상수 — 정책 분기 입력 */
+	struct nvme_command c = {
+		.identify.opcode	= nvme_admin_identify,	/* [한국어] Identify(06h) — 네임스페이스/컨트롤러 메타데이터를 읽는 admin 명령 */
+		.identify.nsid		= cpu_to_le32(info->nsid),	/* [한국어] 어느 네임스페이스를 물을지. 호출자가 스캔에서 얻은 번호 */
+		.identify.cns		= NVME_ID_CNS_NS_CS_INDEP,	/* [한국어] CNS 08h — I/O 커맨드셋과 무관한 공통 필드만 받는다. ZNS·KV 등 무엇이든 같은 구조로 읽힌다 */
 	};
 	int ret; /* [한국어] 함수 누적 결과 — 에러 언와인드 축 */
 
@@ -2326,7 +2326,7 @@ static bool nvme_ns_ids_equal(struct nvme_ns_ids *a, struct nvme_ns_ids *b)	/* [
 static int nvme_identify_ns_nvm(struct nvme_ctrl *ctrl, unsigned int nsid,	/* [한국어] Identify/Features 제어 평면 */
 		struct nvme_id_ns_nvm **nvmp)
 {
-	struct nvme_command c = {	/* [한국어] NVMe host 코어 헬퍼 API */
+	struct nvme_command c = {
 		.identify.opcode	= nvme_admin_identify, /* [한국어] Identify */
 		.identify.nsid		= cpu_to_le32(nsid), /* [한국어] 대상 NS */
 		.identify.cns		= NVME_ID_CNS_CS_NS, /* [한국어] Command Set NS */
@@ -3466,7 +3466,7 @@ static void nvme_set_latency_tolerance(struct device *dev, s32 val)	/* [한국�
 	}
 }
 
-struct nvme_core_quirk_entry {	/* [한국어] NVMe host 코어 헬퍼 API */
+struct nvme_core_quirk_entry {
 	/*
 	 * NVMe model and firmware strings are padded with spaces.  For
 	 * simplicity, strings in the quirk table are padded with NULLs
@@ -4903,9 +4903,9 @@ static void nvme_scan_ns(struct nvme_ctrl *ctrl, unsigned nsid)	/* [한국어] N
  * NSID.
  */
 struct async_scan_info {	/* [한국어] nvme_scan_ns 자료구조/열거 정의 — 상태·명령·메타 축 */
-	struct nvme_ctrl *ctrl;	/* [한국어] NVMe host 코어 헬퍼 API */
-	atomic_t next_nsid;	/* [한국어] 원자 카운터 — 병렬 스캔/참조 */
-	__le32 *ns_list;	/* [한국어] nvme_scan_ns 실행 단계 — 상태기계·blk-mq·에러복구 맥락 */
+	struct nvme_ctrl *ctrl;	/* [한국어] 스캔 대상 컨트롤러. 병렬 인스턴스가 모두 같은 것을 가리킨다 */
+	atomic_t next_nsid;	/* [한국어] 위 영어 주석이 말하는 핵심. 여러 스캔이 이 값을 원자적으로 나눠 가져 같은 NSID 를 두 번 보지 않는다 */
+	__le32 *ns_list;	/* [한국어] Identify 가 채운 활성 NSID 배열. 읽기 전용으로 공유된다 */
 };
 
 static void nvme_scan_ns_async(void *data, async_cookie_t cookie)	/* [한국어] NS 스캔·등록·제거 */
@@ -4957,10 +4957,10 @@ static int nvme_scan_ns_list(struct nvme_ctrl *ctrl)	/* [한국어] NS 스캔·�
 	scan_info.ctrl = ctrl;	/* [한국어] nvme_scan_ns_list 상태/필드 갱신 — 후속 정책 입력 */
 	scan_info.ns_list = ns_list;	/* [한국어] nvme_scan_ns_list 상태/필드 갱신 — 후속 정책 입력 */
 	for (;;) {	/* [한국어] 순회 — NS·세그먼트·파워스테이트 */
-		struct nvme_command cmd = {	/* [한국어] NVMe host 코어 헬퍼 API */
-			.identify.opcode	= nvme_admin_identify,	/* [한국어] NVMe host 코어 헬퍼 API */
-			.identify.cns		= NVME_ID_CNS_NS_ACTIVE_LIST,	/* [한국어] NVMe/blk 상수 — 정책 분기 입력 */
-			.identify.nsid		= cpu_to_le32(prev),	/* [한국어] 엔디안 변환 — 스펙 온와이어 */
+		struct nvme_command cmd = {
+			.identify.opcode	= nvme_admin_identify,	/* [한국어] Identify(06h) */
+			.identify.cns		= NVME_ID_CNS_NS_ACTIVE_LIST,	/* [한국어] CNS 02h Active Namespace ID List — 존재하는 NSID 를 오름차순으로 받는다 */
+			.identify.nsid		= cpu_to_le32(prev),	/* [한국어] "이 번호보다 큰 것부터" — 목록이 한 페이지를 넘으면 마지막 값을 넣어 이어 받는다 */
 		};
 
 		ret = nvme_submit_sync_cmd(ctrl->admin_q, &cmd, ns_list,	/* [한국어] admin/IO 동기 제출 */
