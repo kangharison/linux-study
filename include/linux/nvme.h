@@ -993,36 +993,36 @@ struct nvme_rotational_media_log {
 };
 
 struct nvme_fdp_config {
-	__u8			flags;	/* [한국어] flags 필드 — 상위 구조 작성자·동기화 참고 */
-#define FDPCFG_FDPE	(1U << 0)	/* [한국어] FDPCFG_FDPE 매크로 — 상위 섹션 계약 참고 */
-	__u8			fdpcidx;	/* [한국어] fdpcidx 필드 — 상위 구조 작성자·동기화 참고 */
+	__u8			flags;	/* [한국어] FDP 설정 플래그 — 아래 FDPCFG_FDPE 비트로 활성 여부를 나타낸다 */
+#define FDPCFG_FDPE	(1U << 0)	/* [한국어] FDP Enable — 이 비트가 서야 배치 식별자가 실제로 쓰인다 */
+	__u8			fdpcidx;	/* [한국어] 적용할 FDP 설정의 인덱스 — 컨트롤러가 여러 설정을 광고한다 */
 	__le16			reserved;	/* [한국어] 스펙 예약 — 호스트 0 */
 };
 
 struct nvme_fdp_ruh_desc {
-	__u8			ruht;	/* [한국어] ruht 필드 — 상위 구조 작성자·동기화 참고 */
+	__u8			ruht;	/* [한국어] Reclaim Unit Handle Type — 초기 격리(0x1)인지 영구 격리(0x2)인지 */
 	__u8			reserved[3];	/* [한국어] 스펙 예약 — 호스트 0 */
 };
 
 struct nvme_fdp_config_desc {
-	__le16			dsze;	/* [한국어] dsze 필드 — 상위 구조 작성자·동기화 참고 */
-	__u8			fdpa;	/* [한국어] fdpa 필드 — 상위 구조 작성자·동기화 참고 */
-	__u8			vss;	/* [한국어] vss 필드 — 상위 구조 작성자·동기화 참고 */
-	__le32			nrg;	/* [한국어] nrg 필드 — 상위 구조 작성자·동기화 참고 */
-	__le16			nruh;	/* [한국어] nruh 필드 — 상위 구조 작성자·동기화 참고 */
-	__le16			maxpids;	/* [한국어] maxpids 필드 — 상위 구조 작성자·동기화 참고 */
-	__le32			nns;	/* [한국어] nns 필드 — 상위 구조 작성자·동기화 참고 */
-	__le64			runs;	/* [한국어] runs 필드 — 상위 구조 작성자·동기화 참고 */
-	__le32			erutl;	/* [한국어] erutl 필드 — 상위 구조 작성자·동기화 참고 */
+	__le16			dsze;	/* [한국어] 이 설정 서술자의 전체 바이트 수. 가변 길이 ruhs[] 가 뒤에 온다 */
+	__u8			fdpa;	/* [한국어] FDP Attributes — RUH 수정 가능 여부 등 설정의 성질 */
+	__u8			vss;	/* [한국어] Vendor Specific Size — 서술자 끝의 벤더 영역 길이 */
+	__le32			nrg;	/* [한국어] Reclaim Group 개수 — 물리적으로 독립된 회수 단위 묶음 */
+	__le16			nruh;	/* [한국어] Reclaim Unit Handle 개수 — 호스트가 쓸 수 있는 배치 대상 수 */
+	__le16			maxpids;	/* [한국어] Placement Identifier 최대값 — 호스트가 쓸 수 있는 배치 식별자 범위 */
+	__le32			nns;	/* [한국어] 이 설정이 적용되는 네임스페이스 개수 */
+	__le64			runs;	/* [한국어] Reclaim Unit Nominal Size — 회수 단위 하나의 크기. 쓰기를 이 경계에 맞추면 GC 가 줄어든다 */
+	__le32			erutl;	/* [한국어] Estimated Reclaim Unit Time Limit — 회수 단위가 열려 있을 수 있는 시간 */
 	__u8			rsvd28[36];	/* [한국어] 스펙 예약 — 호스트 0 */
-	struct nvme_fdp_ruh_desc ruhs[];	/* [한국어] ruhs 필드 — 상위 구조 작성자·동기화 참고 */
+	struct nvme_fdp_ruh_desc ruhs[];	/* [한국어] 가변 길이 RUH 서술자 배열 — 개수는 nruh 다 */
 };
 
 struct nvme_fdp_config_log {
-	__le16			numfdpc;	/* [한국어] numfdpc 필드 — 상위 구조 작성자·동기화 참고 */
-	__u8			ver;	/* [한국어] ver 필드 — 상위 구조 작성자·동기화 참고 */
+	__le16			numfdpc;	/* [한국어] 이 로그에 담긴 FDP 설정 개수 */
+	__u8			ver;	/* [한국어] 로그 페이지 형식 버전 */
 	__u8			rsvd3;	/* [한국어] 스펙 예약 — 호스트 0 */
-	__le32			sze;	/* [한국어] sze 필드 — 상위 구조 작성자·동기화 참고 */
+	__le32			sze;	/* [한국어] 로그 전체 크기 — 호스트가 두 번째 Get Log Page 로 나머지를 받는 데 쓴다 */
 	__u8			rsvd8[8];	/* [한국어] 스펙 예약 — 호스트 0 */
 	/*
 	 * This is followed by variable number of nvme_fdp_config_desc
@@ -1204,12 +1204,12 @@ enum {
 };
 
 struct nvme_lba_range_type {
-	__u8			type;	/* [한국어] type 필드 — 상위 구조 작성자·동기화 참고 */
-	__u8			attributes;	/* [한국어] attributes 필드 — 상위 구조 작성자·동기화 참고 */
+	__u8			type;	/* [한국어] LBA Range Type — 파일시스템·RAID·캐시 등 이 구간의 용도 */
+	__u8			attributes;	/* [한국어] 읽기 전용/숨김 여부 비트 */
 	__u8			rsvd2[14];	/* [한국어] 스펙 예약 — 호스트 0 */
-	__le64			slba;	/* [한국어] slba 필드 — 상위 구조 작성자·동기화 참고 */
-	__le64			nlb;	/* [한국어] nlb 필드 — 상위 구조 작성자·동기화 참고 */
-	__u8			guid[16];	/* [한국어] guid 필드 — 상위 구조 작성자·동기화 참고 */
+	__le64			slba;	/* [한국어] 구간 시작 LBA */
+	__le64			nlb;	/* [한국어] 구간 길이(논리 블록 수) */
+	__u8			guid[16];	/* [한국어] 구간을 만든 주체를 식별하는 GUID */
 	__u8			rsvd48[16];	/* [한국어] 스펙 예약 — 호스트 0 */
 };
 
@@ -1241,41 +1241,41 @@ enum nvme_eds {
 };
 
 struct nvme_registered_ctrl {
-	__le16	cntlid;	/* [한국어] cntlid 필드 — 상위 구조 작성자·동기화 참고 */
-	__u8	rcsts;	/* [한국어] rcsts 필드 — 상위 구조 작성자·동기화 참고 */
+	__le16	cntlid;	/* [한국어] 예약을 등록한 컨트롤러 ID */
+	__u8	rcsts;	/* [한국어] Reservation Status — 이 컨트롤러가 예약 보유자인지 */
 	__u8	rsvd3[5];	/* [한국어] 스펙 예약 — 호스트 0 */
-	__le64	hostid;	/* [한국어] hostid 필드 — 상위 구조 작성자·동기화 참고 */
-	__le64	rkey;	/* [한국어] rkey 필드 — 상위 구조 작성자·동기화 참고 */
+	__le64	hostid;	/* [한국어] 등록한 호스트의 64비트 식별자. 확장 형식에서는 128비트가 된다 */
+	__le64	rkey;	/* [한국어] 등록 키 — preempt/release 시 이 값으로 자격을 증명한다 */
 };
 
 struct nvme_reservation_status {
-	__le32	gen;	/* [한국어] gen 필드 — 상위 구조 작성자·동기화 참고 */
-	__u8	rtype;	/* [한국어] rtype 필드 — 상위 구조 작성자·동기화 참고 */
-	__u8	regctl[2];	/* [한국어] regctl 필드 — 상위 구조 작성자·동기화 참고 */
+	__le32	gen;	/* [한국어] Generation — 등록이 바뀔 때마다 증가한다. 호스트가 경쟁을 감지하는 수단 */
+	__u8	rtype;	/* [한국어] 현재 예약 타입 — Write Exclusive, Exclusive Access 등 */
+	__u8	regctl[2];	/* [한국어] 등록된 컨트롤러 수. 뒤따르는 배열의 길이다 */
 	__u8	resv5[2];	/* [한국어] 스펙 예약 — 호스트 0 */
-	__u8	ptpls;	/* [한국어] ptpls 필드 — 상위 구조 작성자·동기화 참고 */
+	__u8	ptpls;	/* [한국어] Persist Through Power Loss State — 전원이 끊겨도 예약이 남는지 */
 	__u8	resv10[14];	/* [한국어] 스펙 예약 — 호스트 0 */
-	struct nvme_registered_ctrl regctl_ds[];	/* [한국어] regctl_ds 필드 — 상위 구조 작성자·동기화 참고 */
+	struct nvme_registered_ctrl regctl_ds[];	/* [한국어] 가변 길이 등록 목록 — 개수는 regctl 이다 */
 };
 
 struct nvme_registered_ctrl_ext {
-	__le16	cntlid;	/* [한국어] cntlid 필드 — 상위 구조 작성자·동기화 참고 */
-	__u8	rcsts;	/* [한국어] rcsts 필드 — 상위 구조 작성자·동기화 참고 */
+	__le16	cntlid;	/* [한국어] 확장 형식도 컨트롤러 ID 로 시작한다 */
+	__u8	rcsts;	/* [한국어] 예약 보유 여부 */
 	__u8	rsvd3[5];	/* [한국어] 스펙 예약 — 호스트 0 */
-	__le64	rkey;	/* [한국어] rkey 필드 — 상위 구조 작성자·동기화 참고 */
-	__u8	hostid[16];	/* [한국어] hostid 필드 — 상위 구조 작성자·동기화 참고 */
+	__le64	rkey;	/* [한국어] 등록 키. 기본 형식과 달리 hostid 앞에 온다 */
+	__u8	hostid[16];	/* [한국어] 확장 형식의 128비트 호스트 ID — 기본 형식의 64비트로는 부족한 환경용 */
 	__u8	rsvd32[32];	/* [한국어] 스펙 예약 — 호스트 0 */
 };
 
 struct nvme_reservation_status_ext {
-	__le32	gen;	/* [한국어] gen 필드 — 상위 구조 작성자·동기화 참고 */
-	__u8	rtype;	/* [한국어] rtype 필드 — 상위 구조 작성자·동기화 참고 */
-	__u8	regctl[2];	/* [한국어] regctl 필드 — 상위 구조 작성자·동기화 참고 */
+	__le32	gen;	/* [한국어] 기본 형식과 같은 세대 카운터 */
+	__u8	rtype;	/* [한국어] 예약 타입 */
+	__u8	regctl[2];	/* [한국어] 등록 컨트롤러 수 */
 	__u8	resv5[2];	/* [한국어] 스펙 예약 — 호스트 0 */
-	__u8	ptpls;	/* [한국어] ptpls 필드 — 상위 구조 작성자·동기화 참고 */
+	__u8	ptpls;	/* [한국어] 전원 손실 후 예약 유지 여부 */
 	__u8	resv10[14];	/* [한국어] 스펙 예약 — 호스트 0 */
 	__u8	rsvd24[40];	/* [한국어] 스펙 예약 — 호스트 0 */
-	struct nvme_registered_ctrl_ext regctl_eds[];	/* [한국어] regctl_eds 필드 — 상위 구조 작성자·동기화 참고 */
+	struct nvme_registered_ctrl_ext regctl_eds[];	/* [한국어] 확장 등록 목록 */
 };
 
 /*
@@ -1305,7 +1305,7 @@ enum nvme_opcode {
 	nvme_cmd_vendor_start	= 0x80,	/* [한국어] 0x80+ 벤더 고유 I/O opcode 시작 */
 };
 
-#define nvme_opcode_name(opcode)	{ opcode, #opcode }	/* [한국어] nvme_opcode_name 매크로 — 상위 섹션 계약 참고 */
+#define nvme_opcode_name(opcode)	{ opcode, #opcode }	/* [한국어] ftrace 심볼 표에 쓰는 {값, "이름"} 쌍 — 매크로 하나로 정의와 문자열을 함께 얻는다 */
 #define show_nvm_opcode_name(val)				\
 	__print_symbolic(val,					\
 		nvme_opcode_name(nvme_cmd_flush),		\
@@ -1323,7 +1323,7 @@ enum nvme_opcode {
 		nvme_opcode_name(nvme_cmd_resv_release),	\
 		nvme_opcode_name(nvme_cmd_zone_mgmt_send),	\
 		nvme_opcode_name(nvme_cmd_zone_mgmt_recv),	\
-		nvme_opcode_name(nvme_cmd_zone_append))	/* [한국어] 인자/선언 연속행 */
+		nvme_opcode_name(nvme_cmd_zone_append))	/* [한국어] 목록의 끝. 여기 없는 opcode 는 추적 로그에 숫자로 찍힌다 */
 
 
 
@@ -1401,7 +1401,7 @@ struct nvme_keyed_sgl_desc {
  * 호스트 매핑 계층이 채움. 컨트롤러가 읽어 데이터 이동. LE 주소.
  */
 union nvme_data_ptr {
-	struct {	/* [한국어] 지역/멤버 상태 — 상위 함수·구조 아키텍처 참고 */
+	struct {	/* [한국어] 이름 없는 구조체라 dptr.prp1 처럼 한 단계 덜 거쳐 접근한다 */
 		__le64	prp1;	/* [한국어] PRP1 — 첫 데이터 페이지 또는 버퍼 물리 주소 */
 		__le64	prp2;	/* [한국어] PRP2 — 다음 페이지 또는 PRP 리스트 포인터 */
 	};
@@ -1618,35 +1618,35 @@ struct nvme_zone_mgmt_recv_cmd {
 };
 
 struct nvme_io_mgmt_recv_cmd {
-	__u8			opcode;	/* [한국어] opcode 필드 — 상위 구조 작성자·동기화 참고 */
-	__u8			flags;	/* [한국어] flags 필드 — 상위 구조 작성자·동기화 참고 */
-	__u16			command_id;	/* [한국어] command_id 필드 — 상위 구조 작성자·동기화 참고 */
-	__le32			nsid;	/* [한국어] nsid 필드 — 상위 구조 작성자·동기화 참고 */
+	__u8			opcode;	/* [한국어] I/O Management Receive(12h) — FDP 상태를 읽는 I/O 명령 */
+	__u8			flags;	/* [한국어] FUSE/PSDT — PRP 를 쓸지 SGL 을 쓸지가 여기서 정해진다 */
+	__u16			command_id;	/* [한국어] 완료를 요청과 짝짓는 태그 */
+	__le32			nsid;	/* [한국어] 어느 네임스페이스의 배치 상태를 물을지 */
 	__le64			rsvd2[2];	/* [한국어] 스펙 예약 — 호스트 0 */
-	union nvme_data_ptr	dptr;	/* [한국어] dptr 필드 — 상위 구조 작성자·동기화 참고 */
-	__u8			mo;	/* [한국어] mo 필드 — 상위 구조 작성자·동기화 참고 */
+	union nvme_data_ptr	dptr;	/* [한국어] 결과를 받을 버퍼 — PRP 또는 SGL */
+	__u8			mo;	/* [한국어] Management Operation — 무엇을 받을지 고른다. RUHS 가 유일한 값이다 */
 	__u8			rsvd11;	/* [한국어] 스펙 예약 — 호스트 0 */
-	__u16			mos;	/* [한국어] mos 필드 — 상위 구조 작성자·동기화 참고 */
-	__le32			numd;	/* [한국어] numd 필드 — 상위 구조 작성자·동기화 참고 */
-	__le32			cdw12[4];	/* [한국어] cdw12 필드 — 상위 구조 작성자·동기화 참고 */
+	__u16			mos;	/* [한국어] Management Operation Specific — 연산별 추가 인자 */
+	__le32			numd;	/* [한국어] 받을 dword 수 - 1. 0-based 라 실제 크기보다 하나 작다 */
+	__le32			cdw12[4];	/* [한국어] 연산별 예약 dword — RUHS 에서는 쓰지 않는다 */
 };
 
 enum {
-	NVME_IO_MGMT_RECV_MO_RUHS	= 1,	/* [한국어] NVME_IO_MGMT_RECV_MO_RUHS 상수 — 상위 enum 역할 참고 */
+	NVME_IO_MGMT_RECV_MO_RUHS	= 1,	/* [한국어] Reclaim Unit Handle Status — 각 RUH 가 얼마나 찼는지 받는다 */
 };
 
 struct nvme_fdp_ruh_status_desc {
-	__le16			pid;	/* [한국어] pid 필드 — 상위 구조 작성자·동기화 참고 */
-	__le16			ruhid;	/* [한국어] ruhid 필드 — 상위 구조 작성자·동기화 참고 */
-	__le32			earutr;	/* [한국어] earutr 필드 — 상위 구조 작성자·동기화 참고 */
-	__le64			ruamw;	/* [한국어] ruamw 필드 — 상위 구조 작성자·동기화 참고 */
+	__le16			pid;	/* [한국어] 이 RUH 에 매핑된 Placement Identifier */
+	__le16			ruhid;	/* [한국어] Reclaim Unit Handle ID */
+	__le32			earutr;	/* [한국어] Estimated Active Reclaim Unit Time Remaining — 이 회수 단위가 닫히기까지 남은 시간 */
+	__le64			ruamw;	/* [한국어] Reclaim Unit Available Media Writes — 지금 열린 회수 단위에 더 쓸 수 있는 양. 호스트가 쓰기를 경계에 맞추는 근거다 */
 	__u8			reserved[16];	/* [한국어] 스펙 예약 — 호스트 0 */
 };
 
 struct nvme_fdp_ruh_status {
 	__u8			rsvd0[14];	/* [한국어] 스펙 예약 — 호스트 0 */
-	__le16			nruhsd;	/* [한국어] nruhsd 필드 — 상위 구조 작성자·동기화 참고 */
-	struct nvme_fdp_ruh_status_desc ruhsd[];	/* [한국어] ruhsd 필드 — 상위 구조 작성자·동기화 참고 */
+	__le16			nruhsd;	/* [한국어] 뒤따르는 서술자 개수 */
+	struct nvme_fdp_ruh_status_desc ruhsd[];	/* [한국어] RUH 마다 하나씩 */
 };
 
 /*
@@ -1668,30 +1668,30 @@ enum {
 /* Features */
 
 enum {
-	NVME_TEMP_THRESH_MASK		= 0xffff,	/* [한국어] NVME_TEMP_THRESH_MASK 상수 — 상위 enum 역할 참고 */
-	NVME_TEMP_THRESH_SELECT_SHIFT	= 16,	/* [한국어] NVME_TEMP_THRESH_SELECT_SHIFT 상수 — 상위 enum 역할 참고 */
-	NVME_TEMP_THRESH_TYPE_UNDER	= 0x100000,	/* [한국어] NVME_TEMP_THRESH_TYPE_UNDER 상수 — 상위 enum 역할 참고 */
+	NVME_TEMP_THRESH_MASK		= 0xffff,	/* [한국어] 온도 임계값은 켈빈 16비트다 */
+	NVME_TEMP_THRESH_SELECT_SHIFT	= 16,	/* [한국어] 어느 온도 센서를 가리키는지 — 컨트롤러는 여러 센서를 광고할 수 있다 */
+	NVME_TEMP_THRESH_TYPE_UNDER	= 0x100000,	/* [한국어] 하한 임계 — 기본은 상한이라 이 비트로 방향을 뒤집는다 */
 };
 
 struct nvme_feat_auto_pst {
-	__le64 entries[32];	/* [한국어] entries 필드 — 상위 구조 작성자·동기화 참고 */
+	__le64 entries[32];	/* [한국어] APST 표 — 전력 상태마다 "얼마나 놀면 어디로 내려갈지" 한 항목씩 */
 };
 
 enum {
-	NVME_HOST_MEM_ENABLE	= (1 << 0),	/* [한국어] NVME_HOST_MEM_ENABLE 상수 — 상위 enum 역할 참고 */
-	NVME_HOST_MEM_RETURN	= (1 << 1),	/* [한국어] NVME_HOST_MEM_RETURN 상수 — 상위 enum 역할 참고 */
+	NVME_HOST_MEM_ENABLE	= (1 << 0),	/* [한국어] HMB 사용 시작 — 서술자 목록을 함께 넘긴다 */
+	NVME_HOST_MEM_RETURN	= (1 << 1),	/* [한국어] 이전에 넘긴 버퍼를 그대로 다시 쓰라는 뜻. 재시작 후 재할당을 피한다 */
 };
 
 struct nvme_feat_host_behavior {
-	__u8 acre;	/* [한국어] acre 필드 — 상위 구조 작성자·동기화 참고 */
-	__u8 etdas;	/* [한국어] etdas 필드 — 상위 구조 작성자·동기화 참고 */
-	__u8 lbafee;	/* [한국어] lbafee 필드 — 상위 구조 작성자·동기화 참고 */
+	__u8 acre;	/* [한국어] Autonomous Power State Transition 관련이 아니라 Command Retry Delay 활성 — 컨트롤러가 재시도 지연을 알려 줄 수 있게 한다 */
+	__u8 etdas;	/* [한국어] Extended Telemetry Data Area 4 지원 활성 */
+	__u8 lbafee;	/* [한국어] LBA Format Extension — 64개를 넘는 LBA 포맷을 쓸 수 있게 한다 */
 	__u8 resv1[509];	/* [한국어] 스펙 예약 — 호스트 0 */
 };
 
 enum {
-	NVME_ENABLE_ACRE	= 1,	/* [한국어] NVME_ENABLE_ACRE 상수 — 상위 enum 역할 참고 */
-	NVME_ENABLE_LBAFEE	= 1,	/* [한국어] NVME_ENABLE_LBAFEE 상수 — 상위 enum 역할 참고 */
+	NVME_ENABLE_ACRE	= 1,	/* [한국어] acre 필드에 쓰는 값 */
+	NVME_ENABLE_LBAFEE	= 1,	/* [한국어] lbafee 필드에 쓰는 값. 둘 다 1 이라 상수 이름으로 의도를 남긴다 */
 };
 
 /*
@@ -1733,7 +1733,7 @@ enum nvme_admin_opcode {
 	nvme_admin_vendor_start		= 0xC0,	/* [한국어] 0xC0+ 벤더 Admin 시작 */
 };
 
-#define nvme_admin_opcode_name(opcode)	{ opcode, #opcode }	/* [한국어] nvme_admin_opcode_name 매크로 — 상위 섹션 계약 참고 */
+#define nvme_admin_opcode_name(opcode)	{ opcode, #opcode }	/* [한국어] admin 쪽 추적 심볼 표를 만드는 같은 모양의 매크로 */
 #define show_admin_opcode_name(val)					\
 	__print_symbolic(val,						\
 		nvme_admin_opcode_name(nvme_admin_delete_sq),		\
@@ -1762,7 +1762,7 @@ enum nvme_admin_opcode {
 		nvme_admin_opcode_name(nvme_admin_security_send),	\
 		nvme_admin_opcode_name(nvme_admin_security_recv),	\
 		nvme_admin_opcode_name(nvme_admin_sanitize_nvm),	\
-		nvme_admin_opcode_name(nvme_admin_get_lba_status))	/* [한국어] 인자/선언 연속행 */
+		nvme_admin_opcode_name(nvme_admin_get_lba_status))	/* [한국어] admin 목록의 끝 */
 
 /*
  * [한국어] Create Queue 플래그 + Feature ID + Log Page ID + FW 활성 동작
@@ -2011,7 +2011,7 @@ struct nvme_get_log_page_command {
 	__le16			numdu;	/* [한국어] Number of Dwords Upper */
 	__le16			lsi;	/* [한국어] Log Specific Identifier */
 	union {
-		struct {	/* [한국어] 지역/멤버 상태 — 상위 함수·구조 아키텍처 참고 */
+		struct {	/* [한국어] 32비트 둘로도, 64비트 하나로도 읽을 수 있게 겹쳐 둔다 */
 			__le32 lpol;	/* [한국어] Log Page Offset lower */
 			__le32 lpou;	/* [한국어] Log Page Offset upper */
 		};
@@ -2063,14 +2063,14 @@ enum nvmf_capsule_command {
 	nvme_fabrics_type_auth_receive	= 0x06,	/* [한국어] fctype 06h Authentication Receive */
 };
 
-#define nvme_fabrics_type_name(type)   { type, #type }	/* [한국어] nvme_fabrics_type_name 매크로 — 상위 섹션 계약 참고 */
+#define nvme_fabrics_type_name(type)   { type, #type }	/* [한국어] Fabrics fctype 추적 심볼 표 — opcode 표와 같은 모양이다 */
 #define show_fabrics_type_name(type)					\
 	__print_symbolic(type,						\
 		nvme_fabrics_type_name(nvme_fabrics_type_property_set),	\
 		nvme_fabrics_type_name(nvme_fabrics_type_connect),	\
 		nvme_fabrics_type_name(nvme_fabrics_type_property_get), \
 		nvme_fabrics_type_name(nvme_fabrics_type_auth_send),	\
-		nvme_fabrics_type_name(nvme_fabrics_type_auth_receive))	/* [한국어] 인자/선언 연속행 */
+		nvme_fabrics_type_name(nvme_fabrics_type_auth_receive))	/* [한국어] fctype 목록의 끝 */
 
 /*
  * If not fabrics command, fctype will be ignored.
@@ -2080,15 +2080,15 @@ enum nvmf_capsule_command {
 	 show_fabrics_type_name(fctype) :			\
 	((qid) ?						\
 	 show_nvm_opcode_name(opcode) :				\
-	 show_admin_opcode_name(opcode)))	/* [한국어] 인자/선언 연속행 */
+	 show_admin_opcode_name(opcode)))	/* [한국어] 큐 번호가 0 이면 admin — 같은 opcode 숫자가 큐에 따라 다른 명령을 뜻하기 때문이다 */
 
 struct nvmf_common_command {
-	__u8	opcode;	/* [한국어] opcode 필드 — 상위 구조 작성자·동기화 참고 */
+	__u8	opcode;	/* [한국어] 항상 0x7f. 이 값이 "이것은 Fabrics 명령"이라는 표시다 */
 	__u8	resv1;	/* [한국어] 스펙 예약 — 호스트 0 */
-	__u16	command_id;	/* [한국어] command_id 필드 — 상위 구조 작성자·동기화 참고 */
-	__u8	fctype;	/* [한국어] fctype 필드 — 상위 구조 작성자·동기화 참고 */
+	__u16	command_id;	/* [한국어] 일반 명령과 같은 자리의 태그 */
+	__u8	fctype;	/* [한국어] 실제 서브명령 — Connect, Property Get/Set, Auth Send/Receive */
 	__u8	resv2[35];	/* [한국어] 스펙 예약 — 호스트 0 */
-	__u8	ts[24];	/* [한국어] ts 필드 — 상위 구조 작성자·동기화 참고 */
+	__u8	ts[24];	/* [한국어] Type Specific — 서브명령마다 다르게 해석되는 영역. 아래 각 구조체가 이 자리를 덮어쓴다 */
 };
 
 /*
@@ -2525,7 +2525,7 @@ struct streams_directive_params {
  * 반드시 64B 정렬·크기 — CC.IOSQES 와 일치.
  */
 struct nvme_command {
-	union {	/* [한국어] 지역/멤버 상태 — 상위 함수·구조 아키텍처 참고 */
+	union {	/* [한국어] 같은 64바이트를 명령 종류마다 다른 모양으로 본다 — SQE 는 크기가 고정이다 */
 		struct nvme_common_command common;	/* [한국어] 공통 레이아웃 뷰 */
 		struct nvme_rw_command rw;	/* [한국어] Read/Write/Compare 등 LBA 명령 뷰 */
 		struct nvme_identify identify;	/* [한국어] Identify Admin 뷰 */
@@ -2574,16 +2574,16 @@ static inline const char *nvme_get_error_status_str(u16 status)
 {
 	return "I/O Error";	/* [한국어] 상태 코드 비해석 폴백 */
 }
-static inline const char *nvme_get_opcode_str(u8 opcode)	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
+static inline const char *nvme_get_opcode_str(u8 opcode)	/* [한국어] VERBOSE_ERRORS 를 끈 빌드용 대체 — 문자열 표를 통째로 빼 커널 크기를 줄인다 */
 {
 	return "I/O Cmd";	/* [한국어] I/O 명령 총칭 */
 }
-static inline const char *nvme_get_admin_opcode_str(u8 opcode)	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
+static inline const char *nvme_get_admin_opcode_str(u8 opcode)	/* [한국어] 같은 이유의 admin 쪽 대체 */
 {
 	return "Admin Cmd";	/* [한국어] Admin 명령 총칭 */
 }
 
-static inline const char *nvme_get_fabrics_opcode_str(u8 opcode)	/* [한국어] 함수 시그니처 — 직전 한국어 함수 블록 계약 */
+static inline const char *nvme_get_fabrics_opcode_str(u8 opcode)	/* [한국어] Fabrics 쪽 대체 */
 {
 	return "Fabrics Cmd";	/* [한국어] Fabrics 명령 총칭 */
 }
@@ -2855,43 +2855,43 @@ struct nvme_completion {
 #define NVME_TERTIARY(ver)	((ver) & 0xff)	/* [한국어] 버전 tertiary 추출 */
 
 enum {
-	NVME_AEN_RESV_LOG_PAGE_AVALIABLE	= 0x00,	/* [한국어] NVME_AEN_RESV_LOG_PAGE_AVALIABLE 상수 — 상위 enum 역할 참고 */
+	NVME_AEN_RESV_LOG_PAGE_AVALIABLE	= 0x00,	/* [한국어] 예약 로그에 읽을 것이 생겼다는 비동기 통지. 호스트가 Get Log Page 로 받아 간다 */
 };
 
 enum {
-	NVME_PR_LOG_EMPTY_LOG_PAGE			= 0x00,	/* [한국어] NVME_PR_LOG_EMPTY_LOG_PAGE 상수 — 상위 enum 역할 참고 */
-	NVME_PR_LOG_REGISTRATION_PREEMPTED		= 0x01,	/* [한국어] NVME_PR_LOG_REGISTRATION_PREEMPTED 상수 — 상위 enum 역할 참고 */
-	NVME_PR_LOG_RESERVATION_RELEASED		= 0x02,	/* [한국어] NVME_PR_LOG_RESERVATION_RELEASED 상수 — 상위 enum 역할 참고 */
-	NVME_PR_LOG_RESERVATOIN_PREEMPTED		= 0x03,	/* [한국어] NVME_PR_LOG_RESERVATOIN_PREEMPTED 상수 — 상위 enum 역할 참고 */
+	NVME_PR_LOG_EMPTY_LOG_PAGE			= 0x00,	/* [한국어] 읽을 항목이 없다 */
+	NVME_PR_LOG_REGISTRATION_PREEMPTED		= 0x01,	/* [한국어] 다른 호스트가 이 등록을 밀어냈다 */
+	NVME_PR_LOG_RESERVATION_RELEASED		= 0x02,	/* [한국어] 예약 보유자가 예약을 놓았다 */
+	NVME_PR_LOG_RESERVATOIN_PREEMPTED		= 0x03,	/* [한국어] 예약 자체를 다른 호스트가 빼앗았다 — 진행 중 I/O 가 거부되기 시작한다 */
 };
 
 enum {
-	NVME_PR_NOTIFY_BIT_REG_PREEMPTED		= 1,	/* [한국어] NVME_PR_NOTIFY_BIT_REG_PREEMPTED 상수 — 상위 enum 역할 참고 */
-	NVME_PR_NOTIFY_BIT_RESV_RELEASED		= 2,	/* [한국어] NVME_PR_NOTIFY_BIT_RESV_RELEASED 상수 — 상위 enum 역할 참고 */
-	NVME_PR_NOTIFY_BIT_RESV_PREEMPTED		= 3,	/* [한국어] NVME_PR_NOTIFY_BIT_RESV_PREEMPTED 상수 — 상위 enum 역할 참고 */
+	NVME_PR_NOTIFY_BIT_REG_PREEMPTED		= 1,	/* [한국어] 통지 마스크의 비트 위치 — 위 로그 타입과 짝을 이룬다 */
+	NVME_PR_NOTIFY_BIT_RESV_RELEASED		= 2,
+	NVME_PR_NOTIFY_BIT_RESV_PREEMPTED		= 3,
 };
 
 struct nvme_pr_log {
-	__le64			count;	/* [한국어] count 필드 — 상위 구조 작성자·동기화 참고 */
-	__u8			type;	/* [한국어] type 필드 — 상위 구조 작성자·동기화 참고 */
-	__u8			nr_pages;	/* [한국어] nr_pages 필드 — 상위 구조 작성자·동기화 참고 */
+	__le64			count;	/* [한국어] 로그 생성 카운터 — 호스트가 놓친 항목이 있는지 판단한다 */
+	__u8			type;	/* [한국어] 위 NVME_PR_LOG_* 중 하나 */
+	__u8			nr_pages;	/* [한국어] 아직 읽지 않고 남은 로그 페이지 수 */
 	__u8			rsvd1[2];	/* [한국어] 스펙 예약 — 호스트 0 */
-	__le32			nsid;	/* [한국어] nsid 필드 — 상위 구조 작성자·동기화 참고 */
+	__le32			nsid;	/* [한국어] 어느 네임스페이스의 예약이 바뀌었는지 */
 	__u8			rsvd2[48];	/* [한국어] 스펙 예약 — 호스트 0 */
 };
 
 struct nvmet_pr_register_data {
-	__le64	crkey;	/* [한국어] crkey 필드 — 상위 구조 작성자·동기화 참고 */
-	__le64	nrkey;	/* [한국어] nrkey 필드 — 상위 구조 작성자·동기화 참고 */
+	__le64	crkey;	/* [한국어] Current Reservation Key — 지금 등록된 키. 자격 증명이다 */
+	__le64	nrkey;	/* [한국어] New Reservation Key — 등록을 이 값으로 바꾼다 */
 };
 
 struct nvmet_pr_acquire_data {
-	__le64	crkey;	/* [한국어] crkey 필드 — 상위 구조 작성자·동기화 참고 */
-	__le64	prkey;	/* [한국어] prkey 필드 — 상위 구조 작성자·동기화 참고 */
+	__le64	crkey;	/* [한국어] 예약을 얻으려는 호스트의 등록 키 */
+	__le64	prkey;	/* [한국어] Preempt Reservation Key — 밀어낼 대상의 키. 0 이면 모두를 밀어낸다 */
 };
 
 struct nvmet_pr_release_data {
-	__le64	crkey;	/* [한국어] crkey 필드 — 상위 구조 작성자·동기화 참고 */
+	__le64	crkey;	/* [한국어] 놓으려는 예약의 키 — 보유자만 놓을 수 있다 */
 };
 
 /*
