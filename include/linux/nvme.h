@@ -1456,7 +1456,7 @@ struct nvme_common_command {
 	__le32			cdw13;	/* [한국어] 명령 dword13 */
 	__le32			cdw14;	/* [한국어] 명령 dword14 */
 	__le32			cdw15;	/* [한국어] 명령 dword15 */
-	);	/* [한국어] 실행 단계 — 주변 함수 한국어 블록과 함께 해석 */
+	);
 };
 
 /*
