@@ -14,35 +14,132 @@
  * These routines are used by both DMA-remapping and Interrupt-remapping
  */
 
-#define pr_fmt(fmt)     "DMAR: " fmt
+/*
+ * [한국어 설명] DMAR ACPI 표 파싱과 무효화 큐의 하부 구현 (intel/dmar.c)
+ *
+ * === 파일의 역할 ===
+ * VT-d 드라이버가 하드웨어를 처음 발견하는 곳이자, 하드웨어와 실제로
+ * 명령을 주고받는 곳이다. 위 영어 주석이 말하듯 "펌웨어가 ACPI DMAR 표로
+ * 보고한 재매핑 장치를 부팅 초기에 찾아내고 해석하는" 것이 출발점이고,
+ * 거기서 만들어진 struct intel_iommu 를 DMA 재매핑과 인터럽트 재매핑이
+ * 함께 쓴다 — 두 기능이 같은 하드웨어 유닛을 공유하기 때문이다.
+ * 크게 네 덩어리다.
+ *   [1] ACPI DMAR 표 파싱: DRHD(유닛), RMRR(예약 메모리), ATSR, SATC, ANDD
+ *       항목을 훑어 커널 자료구조로 만든다. 이 과정이 부팅 아주 초기에,
+ *       메모리 할당기조차 제한적인 시점에 일어난다.
+ *   [2] device scope 해석: 표가 "버스 x 의 슬롯 y" 처럼 경로로 지목한 장치를
+ *       실제 struct device 로 연결한다. 그 장치가 아직 없으면 나중에
+ *       핫플러그 알림으로 이어 붙인다.
+ *   [3] 유닛 초기화: 레지스터를 매핑하고 능력을 읽어 struct intel_iommu 를
+ *       채운다. 폴트 인터럽트도 여기서 건다.
+ *   [4] 무효화 큐(QI): 서술자를 큐에 넣고 완료를 기다리는 구현. 이 파일에서
+ *       가장 정교한 부분이며, 상위 계층(cache.c, pasid.c)의 모든 무효화가
+ *       결국 여기로 모인다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * VT-d 스택의 가장 아래층이다.
+ *   펌웨어 ACPI DMAR 표 → [이 파일] → struct intel_iommu 목록
+ *     → iommu.c(DMA 재매핑) 와 irq_remapping.c(인터럽트 재매핑) 가 함께 쓴다
+ *   상위 계층의 무효화 → qi_flush_* → [이 파일의 qi_submit_sync] → 하드웨어
+ * 부팅 순서상 이 파일이 가장 먼저 실행된다. dmar_table_init() 이 성공해야
+ * intel_iommu_init() 이 유닛들을 세울 수 있다.
+ * 실행 컨텍스트: 파싱은 __init(부팅 초기, 단일 스레드). 무효화 제출은
+ * 인터럽트를 끈 문맥에서도 불리므로 raw 스핀락을 쓴다. 폴트 처리는
+ * 인터럽트 핸들러다.
+ *
+ * === 타 모듈과의 연결 ===
+ * - <linux/dmar.h>: 이 파일이 만들고 다른 파일이 쓰는 DRHD 목록과 순회 매크로.
+ * - iommu.c: 파싱 결과를 받아 유닛을 세우고, RMRR/ATSR/SATC 항목을 정책
+ *   판단에 쓴다. dmar_parse_one_* 콜백들이 그쪽에 구현되어 있다.
+ * - irq_remapping.c: 같은 유닛 목록을 써서 인터럽트 재매핑을 설정한다.
+ * - cache.c/pasid.c: 무효화를 qi_submit_sync 로 보낸다.
+ * - perf.c: 무효화 지연을 잰다.
+ * - ACPI 서브시스템: 표를 읽고 핫플러그 알림을 전달한다.
+ * 데이터 흐름: 부팅 → DMAR 표 파싱 → 유닛 자료구조 생성 → 레지스터 매핑 →
+ * 능력 읽기 → (iommu.c 가) 루트 테이블·무효화 큐 설정 → 이후 모든 무효화가
+ * 이 파일의 큐를 통과한다.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * - dmar_table_init(): 표 전체를 훑어 모든 항목을 파싱한다. 부팅의 시작점.
+ * - dmar_parse_one_drhd(): 유닛 하나를 발견해 자료구조를 만든다.
+ * - dmar_alloc_dev_scope()/dmar_insert_dev_scope(): 표의 장치 경로를 실제
+ *   struct device 로 잇는다. 핫플러그로 나중에 이어지는 경로도 여기 있다.
+ * - alloc_iommu()/free_iommu(): 유닛의 레지스터를 매핑하고 능력을 읽는다.
+ * - dmar_enable_qi(): 무효화 큐를 만들고 하드웨어에 알린다.
+ * - qi_submit_sync(): 이 파일의 핵심. 서술자를 큐에 넣고 완료를 기다리며,
+ *   오류가 나면 어디까지 처리되었는지 판별해 다시 제출한다.
+ * - qi_check_fault(): 큐 오류를 해석한다. 서술자 하나가 거부되면 그 뒤의
+ *   것들도 무효가 되므로, 어디서부터 다시 보낼지 정하는 것이 관건이다.
+ * - dmar_fault(): 폴트 인터럽트 핸들러. 폴트 기록을 훑어 로그를 남긴다.
+ * - dmar_set_interrupt()/dmar_alloc_hwirq(): 유닛의 인터럽트를 건다.
+ */
+#define pr_fmt(fmt)     "DMAR: " fmt	/* [한국어] 이 파일의 모든 로그에 붙는 접두사 */
 
-#include <linux/pci.h>
-#include <linux/dmar.h>
-#include <linux/iova.h>
-#include <linux/timer.h>
-#include <linux/irq.h>
-#include <linux/interrupt.h>
-#include <linux/tboot.h>
-#include <linux/dmi.h>
-#include <linux/slab.h>
-#include <linux/iommu.h>
-#include <linux/numa.h>
-#include <linux/limits.h>
-#include <asm/irq_remapping.h>
+#include <linux/pci.h>	/* [한국어] 장치 경로를 실제 PCI 장치로 해석한다 */
+#include <linux/dmar.h>	/* [한국어] DRHD 목록과 순회 매크로 — 이 파일이 채우고 다른 파일이 쓴다 */
+#include <linux/iova.h>	/* [한국어] IOVA 할당기 타입 */
+#include <linux/timer.h>	/* [한국어] 무효화 완료를 기다릴 때의 시간 측정 */
+#include <linux/irq.h>	/* [한국어] 인터럽트 서술자 */
+#include <linux/interrupt.h>	/* [한국어] 폴트 인터럽트 등록 */
+#include <linux/tboot.h>	/* [한국어] TXT 측정 부팅 여부 확인 */
+#include <linux/dmi.h>	/* [한국어] BIOS 벤더·버전 — 펌웨어 버그를 보고할 때 함께 남긴다 */
+#include <linux/slab.h>	/* [한국어] 자료구조 할당 */
+#include <linux/iommu.h>	/* [한국어] 코어 타입 */
+#include <linux/numa.h>	/* [한국어] 유닛과 가까운 노드에서 테이블을 잡는다 */
+#include <linux/limits.h>	/* [한국어] 정수 상한값 */
+#include <asm/irq_remapping.h>	/* [한국어] 아키텍처별 인터럽트 재매핑 인터페이스 */
 
-#include "iommu.h"
-#include "../irq_remapping.h"
-#include "../iommu-pages.h"
-#include "perf.h"
-#include "trace.h"
-#include "perfmon.h"
+#include "iommu.h"	/* [한국어] struct intel_iommu, 레지스터 정의, 서술자 형식 */
+#include "../irq_remapping.h"	/* [한국어] 인터럽트 재매핑 코어와의 접점 */
+#include "../iommu-pages.h"	/* [한국어] 큐 버퍼를 잡는 공용 할당기 */
+#include "perf.h"	/* [한국어] 무효화 지연 계측 */
+#include "trace.h"	/* [한국어] 서술자 제출을 추적 이벤트로 남긴다 */
+#include "perfmon.h"	/* [한국어] 유닛의 하드웨어 성능 카운터 */
 
-typedef int (*dmar_res_handler_t)(struct acpi_dmar_header *, void *);
+typedef int (*dmar_res_handler_t)(struct acpi_dmar_header *, void *);	/* [한국어] DMAR 표의 항목 하나를 처리하는 콜백의 형태. 항목 종류마다 다른 함수를 꽂아 같은 순회 코드를 재사용한다 */
+/*
+ * [한국어] struct dmar_res_callback — DMAR 표 순회의 콜백 묶음
+ *
+ * DMAR 표에는 종류가 다른 항목(DRHD, RMRR, ATSR, SATC, ANDD)이 섞여 있고,
+ * 그것을 훑는 코드는 하나(dmar_walk_remapping_entries)뿐이다. 항목 종류를
+ * 인덱스로 삼는 콜백 배열을 넘겨, 같은 순회 코드가 상황마다 다르게 동작하게
+ * 한다.
+ *
+ * 같은 표를 여러 목적으로 훑기 때문에 이 구조가 필요하다.
+ *   - 부팅 시 파싱: 모든 종류에 파싱 함수를 꽂는다.
+ *   - 핫플러그 삽입/제거: 그때 필요한 종류에만 함수를 꽂고 나머지는 NULL.
+ *   - 검증만: 제거해도 되는지 묻는 check 함수들.
+ * NULL 인 종류를 만났을 때 어떻게 할지는 ignore_unhandled 가 정한다.
+ */
 struct dmar_res_callback {
 	dmar_res_handler_t	cb[ACPI_DMAR_TYPE_RESERVED];
+	/* [한국어] 항목 종류를 인덱스로 하는 콜백 배열.
+	 * 설정자: 순회를 시작하는 쪽이 필요한 종류에만 함수를 꽂는다.
+	 * 읽는 자: dmar_walk_remapping_entries() 가 항목의 type 으로 색인해 부른다.
+	 * 값 범위: NULL 인 자리는 "이 종류는 다루지 않는다"는 뜻이며, 그때의 동작은
+	 *   아래 ignore_unhandled 가 정한다.
+	 * 배열 크기가 ACPI_DMAR_TYPE_RESERVED 인 것은 그 값이 정의된 종류의 개수
+	 *   다음 값이기 때문이다 — 종류 번호를 그대로 인덱스로 쓸 수 있다. */
 	void			*arg[ACPI_DMAR_TYPE_RESERVED];
+	/* [한국어] 각 콜백에 함께 넘길 인자.
+	 * 설정자/읽는 자: cb 와 짝을 이룬다.
+	 * 왜 종류마다 따로인가: 같은 순회에서 종류마다 다른 문맥이 필요할 수 있다.
+	 *   예를 들어 핫플러그 삽입은 DRHD 콜백에는 유닛 정보를, ATSR 콜백에는
+	 *   아무것도 넘기지 않는다. */
 	bool			ignore_unhandled;
+	/* [한국어] 콜백이 없는 종류를 만났을 때 그냥 넘어갈지, 오류로 볼지.
+	 * 설정자: 순회를 시작하는 쪽.
+	 * 읽는 자: dmar_walk_remapping_entries().
+	 * 왜 두 방식이 다 필요한가: 부팅 파싱은 모르는 항목을 만나면 알려야 하지만
+	 *   (펌웨어가 우리가 모르는 것을 보고했다는 뜻이다), 핫플러그처럼 특정
+	 *   종류만 처리하는 순회에서는 나머지를 조용히 건너뛰어야 한다. */
 	bool			print_entry;
+	/* [한국어] 항목을 훑으며 그 내용을 로그에 찍을지.
+	 * 설정자: 부팅 파싱에서만 참으로 둔다.
+	 * 읽는 자: dmar_walk_remapping_entries().
+	 * 왜 부팅에서만 찍는가: dmesg 에 남은 그 목록이 "이 시스템의 IOMMU 구성이
+	 *   어떠했는가"를 알려 주는 유일한 기록인 경우가 많다. 핫플러그마다 다시
+	 *   찍으면 로그만 지저분해진다. */
 };
 
 /*
@@ -57,64 +154,130 @@ struct dmar_res_callback {
  * 1) Use dmar_global_lock in process context
  * 2) Use RCU in interrupt context
  */
-DECLARE_RWSEM(dmar_global_lock);
-LIST_HEAD(dmar_drhd_units);
+DECLARE_RWSEM(dmar_global_lock);	/* [한국어] DMAR 전역 자료구조를 지키는 읽기/쓰기 세마포어. 위 영어 주석의 잠금 규칙 — 프로세스 컨텍스트에서는 이 락을, 인터럽트 컨텍스트에서는 RCU 를 쓴다 */
+LIST_HEAD(dmar_drhd_units);	/* [한국어] 발견된 모든 DRHD 유닛의 목록. 이 파일이 채우고 iommu.c 와 irq_remapping.c 가 순회한다 */
 
-struct acpi_table_header * __initdata dmar_tbl;
-static int dmar_dev_scope_status = 1;
-static DEFINE_IDA(dmar_seq_ids);
+struct acpi_table_header * __initdata dmar_tbl;	/* [한국어] 매핑된 DMAR 표. __initdata 라 부팅이 끝나면 해제된다 — 그래서 표 내용을 계속 참조할 항목(ATSR/SATC)은 사본을 뜬다 */
+static int dmar_dev_scope_status = 1;	/* [한국어] device scope 연결의 결과. 1 은 "아직 시도하지 않음"이며, 성공하면 0 이 된다. 나중에 나타나는 장치를 표에 이어 붙일지 판단하는 근거다 */
+static DEFINE_IDA(dmar_seq_ids);	/* [한국어] 유닛 순번 할당기. 이 번호가 "dmar0" 같은 이름과 도메인의 iommu_array 색인이 된다 */
 
-static int alloc_iommu(struct dmar_drhd_unit *drhd);
-static void free_iommu(struct intel_iommu *iommu);
+static int alloc_iommu(struct dmar_drhd_unit *drhd);	/* [한국어] 전방 선언 — 유닛의 레지스터를 매핑하고 능력을 읽는다 */
+static void free_iommu(struct intel_iommu *iommu);	/* [한국어] 그 반대 */
 
+/*
+ * [한국어]
+ * dmar_register_drhd_unit - 발견한 DRHD 유닛을 전역 목록에 등록한다
+ *
+ * @drhd: 방금 파싱한 유닛.
+ * @return: 없음.
+ *
+ * 넣는 위치가 이 함수의 전부다. include_all 유닛 — "이 세그먼트의 나머지
+ * 장치를 모두 담당한다"고 신고한 유닛 — 은 목록의 꼬리에, 나머지는 앞에
+ * 넣는다.
+ *
+ * 왜 그런가(코드 안 영어 주석): 장치를 담당할 유닛을 찾을 때 목록을 앞에서부터
+ * 훑는데, 특정 장치를 지목한 유닛이 먼저 나와야 한다. include_all 이 앞에
+ * 있으면 그것이 먼저 매치되어, 실제로 그 장치를 담당하는 유닛이 있는데도
+ * 엉뚱한 유닛이 선택된다. 즉 "구체적인 것이 일반적인 것보다 먼저"라는
+ * 규칙을 목록 순서로 구현한 것이다.
+ *
+ * list_add_rcu 를 쓰는 것은 이 목록이 인터럽트 문맥에서도 순회되기 때문이다.
+ *
+ * 실행 컨텍스트: 표 파싱(부팅) 또는 핫플러그. 프로세스 컨텍스트.
+ */
 static void dmar_register_drhd_unit(struct dmar_drhd_unit *drhd)
 {
 	/*
 	 * add INCLUDE_ALL at the tail, so scan the list will find it at
 	 * the very end.
 	 */
-	if (drhd->include_all)
-		list_add_tail_rcu(&drhd->list, &dmar_drhd_units);
+	if (drhd->include_all)	/* [한국어] "나머지를 모두 담당한다"고 신고한 유닛이면 (위 영어 주석) */
+		list_add_tail_rcu(&drhd->list, &dmar_drhd_units);	/* [한국어] 목록의 꼬리에 넣는다. 앞에 있으면 특정 장치를 지목한 유닛보다 먼저 매치되어 엉뚱한 유닛이 선택된다 */
 	else
-		list_add_rcu(&drhd->list, &dmar_drhd_units);
+		list_add_rcu(&drhd->list, &dmar_drhd_units);	/* [한국어] 특정 장치를 지목한 유닛은 앞에. "구체적인 것이 일반적인 것보다 먼저"를 목록 순서로 구현한 것이다 */
 }
 
+/*
+ * [한국어]
+ * dmar_alloc_dev_scope - ACPI 항목 뒤에 이어진 device scope 배열을 파싱한다
+ *
+ * @start: device scope 가 시작되는 주소(항목 구조체 바로 뒤).
+ * @end: 항목의 끝.
+ * @cnt: 출력 — 지원하는 장치의 개수.
+ * @return: 그만큼 잡은 dmar_dev_scope 배열, 장치가 없으면 NULL.
+ *
+ * DMAR 표의 여러 항목(DRHD, RMRR, ATSR, SATC)은 뒤에 "이 항목이 적용되는
+ * 장치들"의 목록을 가변 길이로 붙인다. 이 함수가 그 목록을 훑는다.
+ *
+ * 두 번 훑는 구조다. 먼저 개수를 세고, 그만큼 한 번에 할당한다. 항목마다
+ * 길이가 달라(scope->length) 미리 개수를 알 수 없기 때문이다.
+ *
+ * 세는 대상: 네임스페이스 장치, 엔드포인트, 브리지 셋만 센다. IOAPIC 과
+ * HPET 은 인터럽트 재매핑 쪽에서 따로 다루므로 여기서는 건너뛰되 경고도
+ * 내지 않는다. 그 밖의 종류는 우리가 모르는 것이라 경고를 남긴다 —
+ * 펌웨어가 새 종류를 보고했거나 표가 손상되었다는 뜻이다.
+ *
+ * 이 배열은 처음에는 비어 있고(경로만 표에 있다), 그 경로의 장치가 실제로
+ * 나타나면 dmar_insert_dev_scope 가 포인터를 채워 넣는다.
+ *
+ * 실행 컨텍스트: 표 파싱 또는 핫플러그. 프로세스 컨텍스트.
+ */
 void *dmar_alloc_dev_scope(void *start, void *end, int *cnt)
 {
-	struct acpi_dmar_device_scope *scope;
+	struct acpi_dmar_device_scope *scope;	/* [한국어] 순회 커서 */
 
-	*cnt = 0;
-	while (start < end) {
-		scope = start;
-		if (scope->entry_type == ACPI_DMAR_SCOPE_TYPE_NAMESPACE ||
-		    scope->entry_type == ACPI_DMAR_SCOPE_TYPE_ENDPOINT ||
-		    scope->entry_type == ACPI_DMAR_SCOPE_TYPE_BRIDGE)
-			(*cnt)++;
-		else if (scope->entry_type != ACPI_DMAR_SCOPE_TYPE_IOAPIC &&
-			scope->entry_type != ACPI_DMAR_SCOPE_TYPE_HPET) {
-			pr_warn("Unsupported device scope\n");
+	*cnt = 0;	/* [한국어] 개수부터 센다 */
+	while (start < end) {	/* [한국어] 항목의 끝까지 */
+		scope = start;	/* [한국어] 현재 device scope 항목 */
+		if (scope->entry_type == ACPI_DMAR_SCOPE_TYPE_NAMESPACE ||	/* [한국어] ACPI 네임스페이스 장치이거나 */
+		    scope->entry_type == ACPI_DMAR_SCOPE_TYPE_ENDPOINT ||	/* [한국어] PCI 엔드포인트이거나 */
+		    scope->entry_type == ACPI_DMAR_SCOPE_TYPE_BRIDGE)	/* [한국어] 브리지면 */
+			(*cnt)++;	/* [한국어] 우리가 다루는 종류다 */
+		else if (scope->entry_type != ACPI_DMAR_SCOPE_TYPE_IOAPIC &&	/* [한국어] IOAPIC 과 */
+			scope->entry_type != ACPI_DMAR_SCOPE_TYPE_HPET) {	/* [한국어] HPET 은 인터럽트 재매핑 쪽에서 다루므로 조용히 건너뛰고, */
+			pr_warn("Unsupported device scope\n");	/* [한국어] 그 밖의 종류는 경고한다 — 펌웨어가 우리가 모르는 것을 보고했다는 뜻이다 */
 		}
-		start += scope->length;
+		start += scope->length;	/* [한국어] 항목마다 길이가 달라 그만큼 전진한다 */
 	}
-	if (*cnt == 0)
-		return NULL;
+	if (*cnt == 0)	/* [한국어] 지원하는 장치가 하나도 없으면 */
+		return NULL;	/* [한국어] 배열을 만들지 않는다 */
 
-	return kzalloc_objs(struct dmar_dev_scope, *cnt);
+	return kzalloc_objs(struct dmar_dev_scope, *cnt);	/* [한국어] 센 만큼 한 번에 잡는다. 처음에는 비어 있고, 그 경로의 장치가 나타나면 채워진다 */
 }
 
+/*
+ * [한국어]
+ * dmar_free_dev_scope - device scope 배열과 그것이 잡은 장치 참조를 반납한다
+ *
+ * @devices: 배열 포인터의 주소(NULL 로 되돌리기 위해 이중 포인터).
+ * @cnt: 개수의 주소(0 으로 되돌린다).
+ * @return: 없음.
+ *
+ * 배열만 해제하면 안 된다. 연결된 각 장치에 대해 get_device 로 참조를
+ * 잡아 두었으므로, 그것을 먼저 놓아야 한다 — 그러지 않으면 그 장치들이
+ * 영원히 해제되지 않는다.
+ *
+ * for_each_active_dev_scope 는 실제로 연결된(포인터가 채워진) 항목만
+ * 훑는다. 경로만 있고 장치가 아직 나타나지 않은 자리는 참조도 없다.
+ *
+ * 이중 포인터로 받는 이유: 호출자의 변수를 NULL 과 0 으로 되돌려, 두 번
+ * 해제되거나 해제된 배열을 순회하는 일이 없게 한다.
+ *
+ * 실행 컨텍스트: 항목 해제. 프로세스 컨텍스트.
+ */
 void dmar_free_dev_scope(struct dmar_dev_scope **devices, int *cnt)
 {
-	int i;
-	struct device *tmp_dev;
+	int i;	/* [한국어] 순회 인덱스 */
+	struct device *tmp_dev;	/* [한국어] 순회 커서 */
 
-	if (*devices && *cnt) {
-		for_each_active_dev_scope(*devices, *cnt, i, tmp_dev)
-			put_device(tmp_dev);
-		kfree(*devices);
+	if (*devices && *cnt) {	/* [한국어] 배열이 있고 항목이 있으면 */
+		for_each_active_dev_scope(*devices, *cnt, i, tmp_dev)	/* [한국어] 실제로 연결된 장치들에 대해 */
+			put_device(tmp_dev);	/* [한국어] 잡아 두었던 참조를 놓는다. 그러지 않으면 그 장치들이 영원히 해제되지 않는다 */
+		kfree(*devices);	/* [한국어] 그 다음 배열을 반납한다 */
 	}
 
-	*devices = NULL;
-	*cnt = 0;
+	*devices = NULL;	/* [한국어] 호출자의 변수를 되돌려 */
+	*cnt = 0;	/* [한국어] 두 번 해제되거나 해제된 배열을 순회하는 일이 없게 한다 */
 }
 
 /* Optimize out kzalloc()/kfree() for normal cases */
