@@ -1090,83 +1090,444 @@ PT_IOMMU_CHECK_DOMAIN(struct dmar_domain, fspt.iommu, domain);	/* [한국어] 1�
 
 struct iommu_pmu {
 	struct intel_iommu	*iommu;
+	/* [한국어] 이 성능 카운터 묶음이 속한 VT-d 유닛. 카운터는 유닛마다 따로 있다.
+	 * 설정자: alloc_iommu_pmu() 가 유닛 초기화 때 채운다.
+	 * 읽는 자: perf 콜백들이 레지스터를 만질 때 유닛의 reg 를 얻는 경로.
+	 * 동기화: 생성 시 한 번 쓰고 이후 읽기만 한다. */
 	u32			num_cntr;	/* Number of counters */
+	/* [한국어] 이 유닛이 가진 카운터 개수 (원 주석: Number of counters).
+	 * 설정자: pcap_num_cntr() 로 능력 레지스터에서 읽는다.
+	 * 읽는 자: 카운터 할당 시 범위 검사, 그리고 used_mask 순회의 상한.
+	 * 값 범위: 1 ~ IOMMU_PMU_IDX_MAX. 하드웨어가 더 많다고 신고해도 64 로 자른다.
+	 * 동기화: 초기화 시 한 번 쓴다. */
 	u32			num_eg;		/* Number of event group */
+	/* [한국어] 이벤트 그룹 수 (원 주석: Number of event group).
+	 * 한 카운터가 셀 수 있는 이벤트는 그룹으로 묶여 있고, 카운터마다 지원하는
+	 * 그룹이 다를 수 있다. 그래서 아래 cntr_evcap 이 카운터별 목록을 따로 둔다.
+	 * 설정자: pcap_num_event_group() 로 읽는다.
+	 * 읽는 자: cntr_evcap 배열의 두 번째 차원 크기.
+	 * 동기화: 초기화 시 한 번 쓴다. */
 	u32			cntr_width;	/* Counter width */
+	/* [한국어] 카운터 하나의 비트 폭 (원 주석: Counter width).
+	 * 설정자: pcap_cntr_width() 로 읽는다.
+	 * 읽는 자: 카운터 값을 읽어 perf 이벤트에 더할 때. 폭을 알아야 랩어라운드를
+	 *   올바로 처리한다 — 이 값보다 상위 비트는 의미가 없다.
+	 * 동기화: 초기화 시 한 번 쓴다. */
 	u32			cntr_stride;	/* Counter Stride */
+	/* [한국어] 카운터 레지스터 사이의 바이트 간격 (원 주석: Counter Stride).
+	 * 설정자: pcap_cntr_stride() 가 2^(x+10) 으로 계산해 준다.
+	 * 읽는 자: n번 카운터의 주소를 cntr_reg + n * cntr_stride 로 구하는 계산.
+	 * 동기화: 초기화 시 한 번 쓴다. */
 	u32			filter;		/* Bitmask of filter support */
+	/* [한국어] 지원하는 필터 종류의 비트마스크 (원 주석: Bitmask of filter support).
+	 * 필터는 "이 요청만 세라"는 조건이다 — 특정 도메인 id, 소스 id, PASID 등.
+	 * 설정자: pcap_filters_mask() 로 읽는다.
+	 * 읽는 자: 사용자가 요청한 필터를 이 유닛이 지원하는지 확인하는 경로.
+	 * 동기화: 초기화 시 한 번 쓴다. */
 	void __iomem		*base;		/* the PerfMon base address */
+	/* [한국어] 성능 카운터 레지스터 영역의 시작 (원 주석: the PerfMon base address).
+	 * 설정자: 유닛의 reg 에 DMAR_PERFCAP_REG 계열이 알려 준 오프셋을 더해 구한다.
+	 * 읽는 자: 아래 세 포인터가 모두 이 값에서 파생된다.
+	 * 동기화: 초기화 시 한 번 쓴다. */
 	void __iomem		*cfg_reg;	/* counter configuration base address */
+	/* [한국어] 카운터 설정 레지스터들의 시작 (원 주석: counter configuration base address).
+	 * 어떤 이벤트를 셀지, 어떤 필터를 걸지를 여기에 쓴다.
+	 * 설정자: base + DMAR_PERFCFGOFF_REG 가 알려 준 오프셋.
+	 * 읽는 자: perf 의 add/del/start/stop 콜백.
+	 * 동기화: 초기화 시 한 번 쓴다. */
 	void __iomem		*cntr_reg;	/* counter 0 address*/
+	/* [한국어] 0번 카운터의 주소 (원 주석: counter 0 address). n번은 여기에
+	 * n * cntr_stride 를 더해 얻는다.
+	 * 설정자: base + DMAR_PERFCNTROFF_REG 가 알려 준 오프셋.
+	 * 읽는 자: 카운터 값을 읽는 모든 경로.
+	 * 동기화: 초기화 시 한 번 쓴다. */
 	void __iomem		*overflow;	/* overflow status register */
+	/* [한국어] 오버플로 상태 레지스터 (원 주석: overflow status register).
+	 * 카운터가 넘치면 여기 비트가 서고, 인터럽트가 걸린다.
+	 * 설정자: base + DMAR_PERFOVFOFF_REG 가 알려 준 오프셋.
+	 * 읽는 자: 오버플로 인터럽트 핸들러가 어느 카운터가 넘쳤는지 확인한다.
+	 * 동기화: 초기화 시 한 번 쓴다. */
 
 	u64			*evcap;		/* Indicates all supported events */
+	/* [한국어] 이 유닛이 셀 수 있는 모든 이벤트의 비트마스크 배열
+	 * (원 주석: Indicates all supported events). 그룹마다 한 워드다.
+	 * 설정자: 초기화 때 DMAR_PERFEVNTCAP_REG 를 그룹 수만큼 읽어 채운다.
+	 * 읽는 자: 사용자가 요청한 이벤트를 이 유닛이 셀 수 있는지 확인.
+	 * 동기화: 초기화 시 한 번 쓴다. */
 	u32			**cntr_evcap;	/* Supported events of each counter. */
+	/* [한국어] 카운터별로 셀 수 있는 이벤트 목록 (원 주석: Supported events of each counter).
+	 * 왜 evcap 과 따로인가: 유닛 전체가 셀 수 있는 이벤트와, 특정 카운터가 셀 수
+	 *   있는 이벤트가 다를 수 있다. 이벤트를 요청받으면 그것을 셀 수 있는 카운터를
+	 *   골라야 하므로 카운터별 목록이 필요하다.
+	 * 설정자: 초기화 때 카운터마다 능력 레지스터를 읽어 2차원 배열로 만든다.
+	 * 읽는 자: 카운터 할당 로직.
+	 * 동기화: 초기화 시 한 번 쓴다. */
 
 	struct pmu		pmu;
+	/* [한국어] perf 서브시스템에 등록하는 PMU 객체. 이벤트 추가·삭제·시작·정지 콜백이 여기 달린다.
+	 * 설정자: iommu_pmu_register() 가 채워 perf_pmu_register() 에 넘긴다.
+	 * 읽는 자: perf 코어. 유저스페이스가 perf stat 으로 이 PMU 의 이벤트를 요청하면
+	 *   여기 달린 콜백이 불린다.
+	 * 동기화: perf 코어의 규약을 따른다. */
 	DECLARE_BITMAP(used_mask, IOMMU_PMU_IDX_MAX);
+	/* [한국어] 어느 카운터가 사용 중인지 나타내는 비트맵.
+	 * 설정자: 이벤트를 카운터에 배정할 때 세우고, 놓을 때 지운다.
+	 * 읽는 자: 빈 카운터를 찾는 할당 로직.
+	 * 동기화: perf 코어가 이 PMU 의 콜백을 직렬화해 준다. */
 	struct perf_event	*event_list[IOMMU_PMU_IDX_MAX];
+	/* [한국어] 카운터 번호 → 그 카운터에 배정된 perf 이벤트.
+	 * 설정자: 이벤트 배정/해제 시.
+	 * 읽는 자: 오버플로 인터럽트 핸들러가 넘친 카운터 번호로 이벤트를 되찾아
+	 *   perf 에 샘플을 보고한다.
+	 * 값 범위: 배정되지 않은 자리는 NULL.
+	 * 동기화: used_mask 와 함께 갱신된다. */
 	unsigned char		irq_name[16];
+	/* [한국어] 이 PMU 의 인터럽트 이름. /proc/interrupts 에 나타난다.
+	 * 설정자: 초기화 때 유닛 이름을 넣어 만든다("dmar%d-perf" 형식).
+	 * 읽는 자: request_irq() 와 유저스페이스의 진단.
+	 * 왜 구조체 안에 두는가: request_irq 는 이름 문자열의 수명을 인터럽트가
+	 *   살아 있는 동안 요구한다. 스택이나 임시 버퍼를 넘길 수 없어 여기 담아 둔다.
+	 * 동기화: 초기화 시 한 번 쓴다. */
 };
 
-#define IOMMU_IRQ_ID_OFFSET_PRQ		(DMAR_UNITS_SUPPORTED)
-#define IOMMU_IRQ_ID_OFFSET_PERF	(2 * DMAR_UNITS_SUPPORTED)
+#define IOMMU_IRQ_ID_OFFSET_PRQ		(DMAR_UNITS_SUPPORTED)	/* [한국어] 페이지 요청 인터럽트의 id 공간을 폴트 인터럽트와 겹치지 않게 미는 오프셋. 유닛 하나가 폴트·PRQ·성능 세 가지 인터럽트를 가질 수 있어 구간을 나눠 쓴다 */
+#define IOMMU_IRQ_ID_OFFSET_PERF	(2 * DMAR_UNITS_SUPPORTED)	/* [한국어] 성능 인터럽트의 구간. 세 번째 블록이다 */
 
+/*
+ * [한국어] struct intel_iommu — DRHD 유닛 하나, 즉 물리적인 VT-d 하드웨어 하나
+ *
+ * ACPI DMAR 표의 DRHD(DMA Remapping Hardware unit Definition) 항목 하나에
+ * 대응한다. 대형 시스템은 이런 유닛이 여러 개이고, 각 유닛이 자기 아래의 PCI
+ * 세그먼트/버스에서 나오는 DMA 를 담당한다. 그래서 "IOMMU 가 켜져 있다"는
+ * 말은 실제로는 "이 유닛들이 각자 자기 표를 세우고 번역을 켰다"는 뜻이다.
+ *
+ * 담고 있는 것을 성격별로 나누면 다섯 덩어리다.
+ *   [하드웨어 창]  reg/reg_phys/reg_size 로 MMIO 를 매핑하고, cap/ecap/vccap/
+ *                  ecmdcap 으로 이 유닛이 무엇을 할 수 있는지 안다. gcmd 는
+ *                  전역 명령 레지스터의 "우리가 켠 비트"를 기억해 둔 사본이다.
+ *   [번역 표]      root_entry 가 루트 테이블을, copied_tables 가 이전 커널에서
+ *                  물려받은 버스들을 표시한다.
+ *   [무효화]       qi 가 큐를, flush 가 레지스터 방식 폴백을 담는다.
+ *   [폴트/페이지요청] prq 와 iopf_queue, 그리고 소스 id 로 장치를 되찾는
+ *                  device_rbtree.
+ *   [코어 연결]    iommu(iommu_device)로 코어에 등록하고, domain_ida 로
+ *                  도메인 id 를 나눠 준다.
+ *
+ * gcmd 를 따로 두는 이유가 이 하드웨어의 특징을 잘 보여 준다. GCMD 레지스터는
+ * 읽어도 현재 설정이 나오지 않는 write-only 성격이라, 비트 하나를 바꾸려면
+ * 나머지 비트를 우리가 기억하고 있어야 한다. 그래서 켠 상태를 소프트웨어
+ * 사본으로 들고 다닌다 (원 주석: Holds TE, EAFL — SRTP/SFL/WBF 는 한 번짜리
+ * 명령이라 기억할 필요가 없다).
+ *
+ * 락이 넷인 것도 각각 지키는 대상이 다르기 때문이다.
+ *   register_lock  — MMIO 접근 직렬화. raw 스핀락(인터럽트 문맥에서도 쓴다).
+ *   did_lock       — 도메인 id 할당기. 잠들 수 있어 뮤텍스.
+ *   lock           — 컨텍스트 테이블과 도메인 id 사용 상태.
+ *   device_rbtree_lock — 소스 id 색인. 폴트 인터럽트에서 잡히므로 irqsave.
+ *   iopf_lock      — 폴트 보고와 장치 해제 사이의 경쟁을 막는다.
+ *
+ * 실행 컨텍스트: 이 구조체는 부팅 중 dmar.c 가 만들고 시스템 수명 내내
+ * 유지된다(유닛 핫플러그 시에만 생성·해제). 필드에 따라 부팅 초기화,
+ * 프로세스 컨텍스트의 매핑, 폴트 인터럽트에서 모두 접근된다.
+ */
 struct intel_iommu {
 	void __iomem	*reg; /* Pointer to hardware regs, virtual addr */
+	/* [한국어] 이 유닛의 MMIO 레지스터가 매핑된 가상 주소 (원 주석: Pointer to hardware regs).
+	 * 이 파일의 모든 DMAR_*_REG 오프셋이 이 포인터에 더해져 실제 접근이 된다.
+	 * 설정자: map_iommu() 가 부팅 중 ioremap 한다.
+	 * 읽는 자: readl/readq/writel/writeq 를 쓰는 모든 경로 — 초기화, 무효화,
+	 *   폴트 처리, 성능 카운터.
+	 * 값 범위: NULL 이 아니어야 하고, __iomem 이므로 일반 포인터처럼 역참조하면 안 된다.
+	 * 동기화: 접근 자체는 register_lock 이 직렬화한다. */
 	u64 		reg_phys; /* physical address of hw register set */
+	/* [한국어] 레지스터 영역의 물리 주소 (원 주석: physical address of hw register set).
+	 * 설정자: DMAR 표의 DRHD 항목에서 읽는다.
+	 * 읽는 자: ioremap 할 때, 그리고 sysfs 의 address 속성. DMAR 표의 몇 번째
+	 *   항목인지 사람이 대조하는 근거가 된다.
+	 * 동기화: 초기화 시 한 번 쓴다. */
 	u64		reg_size; /* size of hw register set */
+	/* [한국어] 레지스터 영역의 크기 (원 주석: size of hw register set).
+	 * 설정자: 능력 레지스터를 읽어 필요한 범위를 계산한다 — 폴트 기록과 IOTLB
+	 *   레지스터가 어디까지 뻗는지가 cap/ecap 에 들어 있어서, 처음에 작게 매핑해
+	 *   그 값을 읽은 뒤 필요하면 다시 매핑한다.
+	 * 읽는 자: ioremap/iounmap.
+	 * 동기화: 초기화 시 한 번 쓴다. */
 	u64		cap;
+	/* [한국어] 능력 레지스터(DMAR_CAP_REG)의 사본.
+	 * 설정자: 초기화 때 한 번 읽어 둔다.
+	 * 읽는 자: 이 파일의 cap_ 계열 매크로 전부. 도메인 개수, 주소 폭, 큰 페이지
+	 *   지원, caching mode 판정이 모두 이 값에서 나온다.
+	 * 왜 캐시하는가: 능력은 바뀌지 않는 값인데 MMIO 읽기는 비싸다. 매핑 경로에서
+	 *   cap_ndoms 같은 것을 물을 때마다 하드웨어를 읽을 수는 없다.
+	 * 동기화: 초기화 시 한 번 쓰고 이후 읽기만 한다. */
 	u64		ecap;
+	/* [한국어] 확장 능력 레지스터(DMAR_ECAP_REG)의 사본.
+	 * PASID, PRI, scalable mode, 코히런시 지원이 여기서 나온다.
+	 * 설정자/읽는 자/동기화: cap 과 같다. ecap_ 계열 매크로가 이 값을 읽는다. */
 	u64		vccap;
+	/* [한국어] 가상 명령 인터페이스 능력 레지스터의 사본.
+	 * 게스트 커널이 호스트에 PASID 할당을 요청하는 경로를 지원하는지 알려 준다.
+	 * 설정자: scalable 모드 유닛에서 초기화 때 읽는다.
+	 * 읽는 자: vccap_pasid() 매크로.
+	 * 동기화: 초기화 시 한 번 쓴다. */
 	u64		ecmdcap[DMA_MAX_NUM_ECMDCAP];
+	/* [한국어] 확장 명령 능력 비트맵. 256개 명령의 지원 여부를 64비트 워드 4개에 담는다.
+	 * 설정자: cap_ecmds 인 유닛에서 초기화 때 DMAR_ECCAP_REG 를 순회하며 읽는다.
+	 * 읽는 자: 성능 카운터 초기화가 DMA_ECMD_ECCAP3_ESSENTIAL 조합을 확인한다.
+	 * 동기화: 초기화 시 한 번 쓴다. */
 	u32		gcmd; /* Holds TE, EAFL. Don't need SRTP, SFL, WBF */
+	/* [한국어] 전역 명령 레지스터에서 우리가 켠 비트들의 소프트웨어 사본
+	 * (원 주석: Holds TE, EAFL. Don't need SRTP, SFL, WBF).
+	 * 왜 사본이 필요한가: GCMD 레지스터는 읽어도 현재 설정을 돌려주지 않는다.
+	 *   그래서 비트 하나를 바꾸려면 나머지를 우리가 기억하고 있다가 통째로
+	 *   다시 써야 한다. TE(번역 켜기)와 EAFL 처럼 켠 채로 유지되는 비트만
+	 *   기억하면 되고, SRTP/SFL/WBF 는 한 번 수행되고 스스로 내려가는 명령이라
+	 *   기억할 필요가 없다.
+	 * 설정자: iommu_enable_translation()/disable_translation() 등이 갱신한다.
+	 * 읽는 자: 같은 함수들, 그리고 intel_iommu_add() 가 "펌웨어가 켜 둔 채
+	 *   넘겨줬는가"를 판단할 때.
+	 * 동기화: register_lock. */
 	raw_spinlock_t	register_lock; /* protect register handling */
+	/* [한국어] MMIO 레지스터 접근을 직렬화하는 락 (원 주석: protect register handling).
+	 * 설정자/읽는 자: 레지스터를 읽고 쓰는 거의 모든 경로.
+	 * raw 인 이유: PREEMPT_RT 에서도 진짜 스핀락으로 남아야 한다. 레지스터 접근은
+	 *   대개 "쓰고 상태 비트가 바뀔 때까지 폴링"이라 선점되면 안 되고,
+	 *   폴트 인터럽트 핸들러에서도 잡힌다.
+	 * 동기화 범위: 이 유닛 하나. 유닛이 여럿이면 서로 독립적으로 진행한다. */
 	int		seq_id;	/* sequence id of the iommu */
+	/* [한국어] 이 유닛의 순번 (원 주석: sequence id of the iommu).
+	 * 설정자: 유닛을 등록할 때 전역 비트맵에서 하나 받는다.
+	 * 읽는 자: 도메인의 iommu_array 를 색인하는 키, 인터럽트 id 계산,
+	 *   "dmar0" 같은 이름 생성.
+	 * 값 범위: 0 ~ DMAR_UNITS_SUPPORTED-1.
+	 * 동기화: 등록 시 한 번 쓴다. */
 	int		agaw; /* agaw of this iommu */
+	/* [한국어] 이 유닛이 실제로 쓰기로 한 주소 폭 (원 주석: agaw of this iommu).
+	 * Adjusted Guest Address Width — cap 의 sagaw 와 mgaw 를 함께 보고 고른 값이다.
+	 * 설정자: __iommu_calculate_agaw() 가 초기화 때 정한다.
+	 * 읽는 자: 도메인의 페이지 테이블 단계 수를 정할 때.
+	 * 동기화: 초기화 시 한 번 쓴다. */
 	int		msagaw; /* max sagaw of this iommu */
+	/* [한국어] 이 유닛이 지원하는 최대 주소 폭 (원 주석: max sagaw of this iommu).
+	 * agaw 와 달리 "쓸 수 있는 최대"다.
+	 * 설정자: __iommu_calculate_sagaw() 계열.
+	 * 읽는 자: 통과 모드의 컨텍스트 항목에 AW 를 채울 때. 통과 모드에서는
+	 *   지원하는 최대값을 프로그램해야 한다는 스펙 요구가 있다.
+	 * 동기화: 초기화 시 한 번 쓴다. */
 	unsigned int	irq, pr_irq, perf_irq;
+	/* [한국어] 이 유닛이 쓰는 세 인터럽트 번호 — 폴트, 페이지 요청, 성능 카운터.
+	 * 설정자: dmar_set_interrupt(), intel_iommu_enable_prq(), iommu_pmu_register().
+	 * 읽는 자: 해제 경로가 free_irq 할 때.
+	 * 값 범위: 0 이면 아직 할당되지 않았다는 뜻이다. 세 인터럽트는 서로 다른
+	 *   id 구간을 쓰며(IOMMU_IRQ_ID_OFFSET_PRQ/PERF), 그래서 유닛이 여럿이어도
+	 *   겹치지 않는다.
+	 * 동기화: 설정·해제 시에만 쓴다. */
 	u16		segment;     /* PCI segment# */
+	/* [한국어] 이 유닛이 담당하는 PCI 세그먼트(도메인) 번호 (원 주석: PCI segment#).
+	 * 대형 시스템은 PCI 버스 번호 공간이 여럿이라, 소스 id 만으로는 장치를
+	 *   특정할 수 없고 세그먼트까지 맞아야 한다.
+	 * 설정자: DMAR 표의 DRHD 항목에서 읽는다.
+	 * 읽는 자: device_lookup_iommu() 가 장치의 세그먼트와 비교할 때,
+	 *   그리고 ATSR/SATC 항목을 이 유닛의 것으로 걸러 낼 때.
+	 * 동기화: 초기화 시 한 번 쓴다. */
 	unsigned char	name[16];    /* Device Name */
+	/* [한국어] 이 유닛의 이름 (원 주석: Device Name). "dmar0" 형식이다.
+	 * 설정자: 등록 시 seq_id 로 만든다.
+	 * 읽는 자: 로그 메시지, sysfs 노드 이름(/sys/class/iommu/dmar0), 인터럽트 이름.
+	 * 왜 구조체 안에 두는가: sysfs 와 request_irq 가 문자열의 수명을 요구한다.
+	 * 동기화: 등록 시 한 번 쓴다. */
 
-#ifdef CONFIG_INTEL_IOMMU
+#ifdef CONFIG_INTEL_IOMMU	/* [한국어] DMA 재매핑을 뺀 빌드(인터럽트 재매핑만 쓰는 경우)에서는 아래 필드들이 필요 없다 */
 	/* mutex to protect domain_ida */
 	struct mutex	did_lock;
+	/* [한국어] 도메인 id 할당기(domain_ida)를 지키는 락 (원 주석: mutex to protect domain_ida).
+	 * 뮤텍스인 이유: ida 할당은 내부에서 메모리를 잡을 수 있어 잠들 수 있다.
+	 *   도메인 부착은 프로세스 컨텍스트에서만 일어나므로 뮤텍스로 충분하다.
+	 * 설정자/읽는 자: domain_attach_iommu()/domain_detach_iommu().
+	 * 아래 lock(스핀락)과 다른 것을 지킨다 — 이쪽은 id 를 나눠 주는 할당기,
+	 *   저쪽은 컨텍스트 테이블과 id 사용 상태다. */
 	struct ida	domain_ida; /* domain id allocator */
+	/* [한국어] 이 유닛의 도메인 id 할당기 (원 주석: domain id allocator).
+	 * 설정자: domain_attach_iommu() 가 새 id 를 받고, 마지막 장치가 떠나면 반납한다.
+	 * 읽는 자: sysfs 의 domains_used 가 몇 개가 쓰이는지 세고,
+	 *   copy_translation_tables() 가 물려받은 표의 id 를 예약할 때도 쓴다.
+	 * 값 범위: 0 ~ cap_ndoms(cap)-1. 이 수를 다 쓰면 그 유닛에는 새 도메인을
+	 *   붙일 수 없다 — 컨테이너나 VFIO 를 많이 쓰는 시스템에서 실제로 겪는 한계다.
+	 * 동기화: 위 did_lock. */
 	unsigned long	*copied_tables; /* bitmap of copied tables */
+	/* [한국어] 이전 커널에서 그대로 물려받은 컨텍스트 테이블이 있는 버스들의 비트맵
+	 * (원 주석: bitmap of copied tables).
+	 * 왜 필요한가: kdump 커널은 이전 커널의 번역 표를 이어받아, 진행 중이던 DMA 가
+	 *   끊기지 않게 한다. 그런데 그 표는 우리가 만든 것이 아니므로, 나중에 그
+	 *   장치를 실제로 쓰게 될 때 우리 형식으로 다시 세워야 한다. 어느 버스가
+	 *   그런 상태인지를 이 비트맵이 기억한다.
+	 * 설정자: copy_translation_tables() 가 버스마다 비트를 세운다.
+	 * 읽는 자: context_copied() 매크로. 프로브·부착·해제 경로가 "이 항목은
+	 *   우리 것인가 물려받은 것인가"를 이 값으로 구분한다.
+	 * 값 범위: NULL 이면 인계받은 것이 없다는 뜻이다(보통의 부팅).
+	 * 동기화: 아래 lock. */
 	spinlock_t	lock; /* protect context, domain ids */
+	/* [한국어] 컨텍스트 테이블과 도메인 id 사용 상태를 지키는 락
+	 * (원 주석: protect context, domain ids).
+	 * 설정자/읽는 자: 컨텍스트 항목을 세우고 지우는 모든 경로
+	 *   (domain_context_mapping_one, context_setup_pass_through, free_context_table).
+	 * did_lock 과 나눈 이유: 이쪽은 인터럽트를 끈 짧은 구간이고 잠들 수 없다.
+	 *   ida 할당처럼 잠들 수 있는 작업과 같은 락으로 묶을 수 없다. */
 	struct root_entry *root_entry; /* virtual address */
+	/* [한국어] 이 유닛의 루트 테이블 (원 주석: virtual address).
+	 * 번역 사슬의 시작점 — 하드웨어는 RTADDR 레지스터에 적힌 물리 주소로 이 표를
+	 * 읽고, 소스 id 의 버스 번호로 색인해 컨텍스트 테이블을 찾는다.
+	 * 설정자: iommu_alloc_root_entry() 가 한 페이지를 잡아 채운다.
+	 * 읽는 자: 컨텍스트 항목을 찾는 iommu_context_addr(), 폴트 덤프, 해제 경로.
+	 * 값 범위: 256개 항목 × 16바이트 = 정확히 4KB 한 페이지.
+	 * 동기화: 위 lock. 하드웨어에 알리는 것은 iommu_set_root_entry() 의 몫이다. */
 
 	struct iommu_flush flush;
+	/* [한국어] 레지스터 방식 무효화 함수 포인터 두 개(컨텍스트, IOTLB).
+	 * 왜 함수 포인터인가: 무효화 큐(QI)를 지원하는 유닛과 그렇지 않은 유닛이
+	 *   섞여 있고, 초기화 도중에는 큐가 아직 없어 레지스터 방식을 써야 한다.
+	 *   호출부가 매번 분기하지 않도록 초기화 때 적절한 구현을 꽂아 둔다.
+	 * 설정자: init_dmars()/intel_iommu_add() 가 __iommu_flush_context 와
+	 *   __iommu_flush_iotlb 를 꽂는다.
+	 * 읽는 자: 초기화 경로와, 큐를 쓸 수 없는 상황의 폴백.
+	 * 동기화: 초기화 시 한 번 쓴다. */
 #endif
 	struct page_req_dsc *prq;
+	/* [한국어] 페이지 요청 큐 버퍼. 하드웨어가 채우고 커널이 소비한다 — 무효화 큐와
+	 * 방향이 반대다.
+	 * 설정자: intel_iommu_enable_prq() 가 PRQ_SIZE 만큼 잡고 PQA 레지스터에 알린다.
+	 * 읽는 자: prq_event_thread() 가 head~tail 구간을 읽어 처리한다.
+	 * 값 범위: NULL 이면 PRI 를 쓰지 않는 유닛이다.
+	 * 동기화: head/tail 레지스터로 하드웨어와 협조한다. */
 	unsigned char prq_name[16];    /* Name for PRQ interrupt */
+	/* [한국어] 페이지 요청 인터럽트의 이름 (원 주석: Name for PRQ interrupt).
+	 * name 과 마찬가지로, request_irq 가 문자열의 수명을 요구해 구조체에 담는다.
+	 * 설정자: PRQ 활성화 시 만든다.
+	 * 읽는 자: request_irq 와 /proc/interrupts. */
 	unsigned long prq_seq_number;
+	/* [한국어] 지금까지 처리한 페이지 요청의 누적 번호.
+	 * 무엇에 쓰는가: PASID 를 내릴 때 "그 시점 이후의 요청은 없다"를 확인해야
+	 *   하는데, 이 번호를 기준점으로 삼아 드레인이 끝났는지 판단한다.
+	 * 설정자: prq_event_thread() 가 요청을 처리할 때마다 늘린다.
+	 * 읽는 자: 드레인 완료를 기다리는 경로.
+	 * 동기화: 폴트 스레드 하나만 갱신하므로 별도 락이 없다. */
 	struct completion prq_complete;
+	/* [한국어] 페이지 요청 드레인이 끝났음을 기다리는 쪽에 알리는 completion.
+	 * 왜 필요한가: PASID 를 내리려면 그 PASID 로 온 요청이 모두 처리되었음을
+	 *   보장해야 한다. 남은 요청에 응답하지 않으면 장치가 영원히 멈추기 때문이다.
+	 * 설정자: 드레인이 끝나면 폴트 스레드가 complete() 한다.
+	 * 읽는 자: intel_pasid_tear_down_entry() 계열이 wait_for_completion() 한다. */
 	struct iopf_queue *iopf_queue;
+	/* [한국어] 코어의 I/O 페이지 폴트 처리 큐. 하드웨어에서 받은 요청을 여기 넣으면
+	 * 코어가 워커 스레드에서 처리하고 응답을 돌려준다.
+	 * 설정자: PRQ 활성화 시 iopf_queue_alloc() 으로 만든다.
+	 * 읽는 자: intel_iommu_enable_iopf() 가 장치를 등록하고, 폴트 스레드가
+	 *   요청을 넣는다.
+	 * 동기화: 코어가 큐 내부를 지킨다. 장치 등록·해제는 그룹 뮤텍스가 지킨다. */
 	unsigned char iopfq_name[16];
+	/* [한국어] 그 폴트 큐의 이름. 워커 스레드 이름과 진단에 쓰인다.
+	 * 설정자/읽는 자: prq_name 과 같은 이유로 구조체에 담아 둔다. */
 	/* Synchronization between fault report and iommu device release. */
 	struct mutex iopf_lock;
+	/* [한국어] 폴트 보고와 장치 해제 사이의 경쟁을 막는 락
+	 * (원 주석: Synchronization between fault report and iommu device release).
+	 * 왜 필요한가: 폴트 처리는 소스 id 로 struct device 를 되찾아 진행하는데,
+	 *   그 사이에 장치가 해제되면 이미 사라진 device_domain_info 를 읽게 된다.
+	 *   intel_iommu_release_device() 가 device_rbtree_remove() 를 이 락 안에서
+	 *   하는 이유가 그것이다 — 이 뒤로는 폴트 처리기가 그 장치를 찾지 못한다는
+	 *   순간을 확정한다.
+	 * 뮤텍스인 이유: 폴트 처리 경로가 잠들 수 있는 문맥(워커 스레드)이다. */
 	struct q_inval  *qi;            /* Queued invalidation info */
+	/* [한국어] 무효화 큐 (원 주석: Queued invalidation info).
+	 * 설정자: dmar_enable_qi() 가 만들고 IQA 레지스터에 알린다.
+	 * 읽는 자: qi_submit_sync() 와 그것을 부르는 모든 무효화 경로.
+	 * 값 범위: NULL 이면 큐를 쓰지 않는 유닛이고, 그 경우 위 flush 의
+	 *   레지스터 방식으로 무효화한다.
+	 * 동기화: 구조체 안의 q_lock. */
 	u32 iommu_state[MAX_SR_DMAR_REGS]; /* Store iommu states between suspend and resume.*/
+	/* [한국어] 서스펜드 때 저장해 두는 레지스터 값들
+	 * (원 주석: Store iommu states between suspend and resume).
+	 * 무엇을 저장하는가: 폴트 인터럽트 관련 네 레지스터(FECTL/FEDATA/FEADDR/
+	 *   FEUADDR). 나머지 상태(루트 테이블 주소, 큐 주소 등)는 리줌 때 우리가
+	 *   들고 있는 자료구조에서 다시 세울 수 있지만, MSI 설정은 커널이 그 시점에
+	 *   할당한 값이라 저장해 두어야 한다.
+	 * 설정자: iommu_suspend(). 읽는 자: iommu_resume().
+	 * 동기화: syscore 콜백이라 CPU 하나만 살아 있는 시점에 실행된다. */
 
 	/* rb tree for all probed devices */
 	struct rb_root device_rbtree;
+	/* [한국어] 이 유닛 아래의 장치들을 소스 id 로 색인한 트리 (원 주석: rb tree for all probed devices).
+	 * 왜 필요한가: 하드웨어가 폴트나 페이지 요청을 보고할 때 알려 주는 것은
+	 *   16비트 소스 id 뿐이다. 그것을 struct device 로 되돌리는 역방향 조회가
+	 *   이 트리다.
+	 * 설정자: device_rbtree_insert()/remove().
+	 * 읽는 자: device_rbtree_find() — 폴트 인터럽트 문맥에서 불린다.
+	 * 동기화: 아래 device_rbtree_lock. */
 	/* protect the device_rbtree */
 	spinlock_t device_rbtree_lock;
+	/* [한국어] 위 트리를 지키는 락 (원 주석: protect the device_rbtree).
+	 * irqsave 로 잡아야 하는 이유: 조회가 폴트 인터럽트 핸들러에서 일어난다.
+	 *   인터럽트 밖(프로브/해제)에서 인터럽트를 막지 않고 이 락을 잡으면,
+	 *   그 사이 들어온 폴트가 같은 락을 기다리며 자기 자신과 데드락이 난다. */
 
 #ifdef CONFIG_IRQ_REMAP
 	struct ir_table *ir_table;	/* Interrupt remapping info */
+	/* [한국어] 인터럽트 재매핑 테이블 (원 주석: Interrupt remapping info).
+	 * DMA 번역과 별개의 기능이다 — 장치가 보내는 인터럽트 메시지를 가로채
+	 * 실제 벡터와 목적지 CPU 로 바꾼다. 이것이 없으면 장치가 임의의 인터럽트를
+	 * 임의의 CPU 에 쏠 수 있다.
+	 * 설정자: intel_setup_irq_remapping().
+	 * 읽는 자: irq_remapping.c 의 항목 할당·수정 경로.
+	 * 동기화: irq_2_ir_lock. */
 	struct irq_domain *ir_domain;
+	/* [한국어] 이 유닛이 관리하는 인터럽트들의 커널 인터럽트 도메인.
+	 * 커널의 인터럽트 할당 요청이 이 도메인을 거쳐 재매핑 항목 할당으로 이어진다.
+	 * 설정자: intel_setup_irq_remapping().
+	 * 읽는 자: 커널 인터럽트 코어. */
 #endif
 	struct iommu_device iommu;  /* IOMMU core code handle */
+	/* [한국어] IOMMU 코어에 등록하는 핸들 (원 주석: IOMMU core code handle).
+	 * 이 필드가 코어와 이 드라이버를 잇는 지점이다 — 코어는 이 포인터만 알고,
+	 * dev_to_intel_iommu() 처럼 container_of 로 유닛 전체를 되찾는다.
+	 * 설정자: iommu_device_sysfs_add() 와 iommu_device_register() 가 채운다.
+	 * 읽는 자: 코어의 모든 경로, 그리고 sysfs 속성 함수들.
+	 * 값 범위: ops 가 채워지기 전에는 이 유닛이 아직 장치를 받을 수 없다 —
+	 *   device_lookup_iommu() 가 !iommu->iommu.ops 를 확인하는 이유다. */
 	int		node;
+	/* [한국어] 이 유닛이 속한 NUMA 노드.
+	 * 설정자: DMAR 표와 ACPI 근접성 정보에서 구한다.
+	 * 읽는 자: 루트 테이블·컨텍스트 테이블·페이지 테이블을 할당할 때. 하드웨어가
+	 *   매 번역마다 읽는 메모리이므로 같은 노드에 두면 지연이 줄어든다.
+	 * 값 범위: NUMA_NO_NODE 일 수 있다(정보가 없는 시스템). */
 	u32		flags;      /* Software defined flags */
+	/* [한국어] 소프트웨어가 정의한 상태 플래그 (원 주석: Software defined flags).
+	 * VTD_FLAG_TRANS_PRE_ENABLED(번역을 인계받았다),
+	 * VTD_FLAG_IRQ_REMAP_PRE_ENABLED(재매핑을 인계받았다),
+	 * VTD_FLAG_SVM_CAPABLE(SVA 를 쓸 수 있다)의 조합이다.
+	 * 설정자: init_translation_status(), intel_svm_check() 등.
+	 * 읽는 자: translation_pre_enabled() 같은 판별자.
+	 * 동기화: 초기화 경로에서만 바뀌며 그때는 단일 스레드다. */
 
 	struct dmar_drhd_unit *drhd;
+	/* [한국어] 이 유닛을 만든 DMAR 표의 DRHD 항목.
+	 * 설정자: 유닛 생성 시 서로를 가리키게 연결한다.
+	 * 읽는 자: 이 유닛이 담당하는 장치 목록(device scope)을 훑거나,
+	 *   ignored 표시를 확인할 때.
+	 * 동기화: DMAR 표는 부팅 내내 유지되고, 목록 순회는 RCU 로 보호한다. */
 	void *perf_statistic;
+	/* [한국어] 진단용 지연 통계 버퍼(perf.c 가 관리한다).
+	 * 무엇을 재는가: 무효화 같은 동작이 얼마나 걸렸는지를 구간별 히스토그램으로
+	 *   쌓는다. 위의 iommu_pmu 가 하드웨어 카운터라면 이쪽은 소프트웨어 계측이다.
+	 * 설정자: dmar_latency_enable() 이 잡고 disable 이 놓는다.
+	 * 읽는 자: debugfs 의 지연 통계 노드.
+	 * 값 범위: NULL 이면 계측이 꺼져 있다. */
 
 	struct iommu_pmu *pmu;
+	/* [한국어] 이 유닛의 하드웨어 성능 카운터(위 struct iommu_pmu).
+	 * 설정자: alloc_iommu_pmu()/iommu_pmu_register().
+	 * 읽는 자: perf 서브시스템의 콜백들.
+	 * 값 범위: NULL 이면 이 유닛에 성능 카운터가 없거나 필요한 확장 명령을
+	 *   지원하지 않는다는 뜻이다. */
 };
 
 /* PCI domain-device relationship */
