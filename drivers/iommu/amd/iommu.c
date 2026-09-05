@@ -2053,185 +2053,375 @@ static void dump_command_buffer(struct amd_iommu *iommu)
 	}
 }
 
+/*
+ * [한국어]
+ * wait_on_sem - 하드웨어가 완료 값을 쓸 때까지 기다린다
+ *
+ * @iommu: 대상 유닛.
+ * @data: 기다릴 완료 순번.
+ * @return: 0 성공, -EIO 면 타임아웃.
+ *
+ * AMD 에서 "명령이 끝났다"를 아는 유일한 방법이다. 완료 대기 명령이
+ * cmd_sem 에 지정한 값을 쓰고, 여기서 그것을 폴링한다.
+ *
+ * 비교가 뺄셈의 부호로 되어 있는 것이 요령이다. 원 주석대로 cmd_sem 은
+ * 단조 증가하는 순번이라, 값이 한 바퀴 돌아도 (현재 - 기다리는 값)의
+ * 부호가 "아직인가"를 정확히 답한다. 단순 비교로는 랩어라운드에서 틀린다.
+ *
+ * READ_ONCE 가 필수인 이유: 값을 바꾸는 것이 CPU 가 아니라 하드웨어라,
+ * 컴파일러가 루프 밖으로 읽기를 끌어내면 영원히 끝나지 않는다.
+ *
+ * 타임아웃하면 하드웨어가 멈춘 것이다. 그 상태로 진행하면 무효화되지 않은
+ * 매핑을 재사용하게 되므로, 오류를 돌려주고 명령 버퍼를 덤프한다.
+ *
+ * 실행 컨텍스트: 잠들 수 없는 문맥에서도 불려 udelay 로 바쁜 대기를 한다.
+ *
+ * 호출 체인:
+ *   iommu_completion_wait() → [이 함수]
+ */
 static int wait_on_sem(struct amd_iommu *iommu, u64 data)
 {
-	int i = 0;
+	int i = 0;	/* [한국어] 기다린 횟수 */
 
 	/*
 	 * cmd_sem holds a monotonically non-decreasing completion sequence
 	 * number.
 	 */
-	while ((__s64)(READ_ONCE(*iommu->cmd_sem) - data) < 0 &&
-	       i < LOOP_TIMEOUT) {
-		udelay(1);
-		i += 1;
+	while ((__s64)(READ_ONCE(*iommu->cmd_sem) - data) < 0 &&	/* [한국어] (원 주석: cmd_sem 은 단조 비감소 완료 순번이다) 뺄셈의 부호로 비교해야 랩어라운드에서도 맞다 */
+	       i < LOOP_TIMEOUT) {	/* [한국어] 영원히 돌지 않도록 */
+		udelay(1);	/* [한국어] 잠들 수 없는 문맥에서도 불려 바쁜 대기를 한다 */
+		i += 1;	/* [한국어] 횟수를 센다 */
 	}
 
-	if (i == LOOP_TIMEOUT) {
+	if (i == LOOP_TIMEOUT) {	/* [한국어] 하드웨어가 응답하지 않는다 */
 
-		pr_alert("IOMMU %04x:%02x:%02x.%01x: Completion-Wait loop timed out\n",
+		pr_alert("IOMMU %04x:%02x:%02x.%01x: Completion-Wait loop timed out\n",	/* [한국어] 어느 유닛인지 알린다 */
 			 iommu->pci_seg->id, PCI_BUS_NUM(iommu->devid),
 			 PCI_SLOT(iommu->devid), PCI_FUNC(iommu->devid));
 
-		if (amd_iommu_dump)
-			DO_ONCE_LITE(dump_command_buffer, iommu);
+		if (amd_iommu_dump)	/* [한국어] 상세 로그를 켰으면 */
+			DO_ONCE_LITE(dump_command_buffer, iommu);	/* [한국어] 버퍼를 한 번만 덤프한다 — 반복되면 로그를 채운다 */
 
-		return -EIO;
+		return -EIO;	/* [한국어] 무효화되지 않은 매핑을 재사용하지 않도록 오류를 알린다 */
 	}
 
-	return 0;
+	return 0;	/* [한국어] 완료를 확인했다 */
 }
 
+/*
+ * [한국어]
+ * copy_cmd_to_buffer - 명령을 링에 넣고 하드웨어에 알린다
+ *
+ * @iommu: 대상 유닛.
+ * @cmd: 넣을 명령.
+ *
+ * 꼬리를 먼저 진행시키고 그다음 레지스터에 쓰는 순서가 중요하다.
+ * 레지스터에 쓰는 순간 하드웨어가 그 자리까지 읽어 가므로, 명령이 이미
+ * 메모리에 있어야 한다.
+ *
+ * 드라이버가 꼬리의 사본을 들고 있는 이유: 명령을 넣을 때마다 MMIO 를
+ * 읽으면 느리다. 대신 사본과 하드웨어 값이 어긋나지 않도록 초기화와
+ * 리셋에서 함께 맞춰야 한다.
+ *
+ * 호출자가 이미 빈자리를 확인하고 락을 들고 있다는 전제다.
+ *
+ * 호출 체인:
+ *   __iommu_queue_command_sync() → [이 함수]
+ */
 static void copy_cmd_to_buffer(struct amd_iommu *iommu,
 			       struct iommu_cmd *cmd)
 {
-	u8 *target;
-	u32 tail;
+	u8 *target;	/* [한국어] 넣을 자리 */
+	u32 tail;	/* [한국어] 링의 다음 빈자리 */
 
 	/* Copy command to buffer */
-	tail = iommu->cmd_buf_tail;
-	target = iommu->cmd_buf + tail;
-	memcpy(target, cmd, sizeof(*cmd));
+	tail = iommu->cmd_buf_tail;	/* [한국어] (원 주석: 명령을 버퍼에 복사한다) 사본을 쓰면 MMIO 읽기를 줄인다 */
+	target = iommu->cmd_buf + tail;	/* [한국어] 그 자리의 주소 */
+	memcpy(target, cmd, sizeof(*cmd));	/* [한국어] 명령을 메모리에 먼저 놓는다 */
 
-	tail = (tail + sizeof(*cmd)) % CMD_BUFFER_SIZE;
-	iommu->cmd_buf_tail = tail;
+	tail = (tail + sizeof(*cmd)) % CMD_BUFFER_SIZE;	/* [한국어] 링이라 끝에서 되돌아온다 */
+	iommu->cmd_buf_tail = tail;	/* [한국어] 사본을 갱신 */
 
 	/* Tell the IOMMU about it */
-	writel(tail, iommu->mmio_base + MMIO_CMD_TAIL_OFFSET);
+	writel(tail, iommu->mmio_base + MMIO_CMD_TAIL_OFFSET);	/* [한국어] (원 주석: IOMMU 에 알린다) 이 순간 하드웨어가 그 자리까지 읽어 간다 */
 }
 
+/*
+ * [한국어]
+ * build_completion_wait - 완료 대기 명령을 만든다
+ *
+ * @cmd: 채울 명령.
+ * @iommu: 대상 유닛.
+ * @data: 하드웨어가 쓸 완료 순번.
+ *
+ * "이 명령까지 다 끝나면 이 주소에 이 값을 써라"라는 명령이다. 그 주소가
+ * cmd_sem 이고, 드라이버가 그것을 폴링해 완료를 안다.
+ *
+ * 물리 주소를 미리 구해 둔 값(cmd_sem_paddr)으로 쓰는 이유: 매번 변환하지
+ * 않기 위해서이고, kdump 커널에서 virt_to_phys 가 기대대로 동작하지 않는
+ * 문제도 함께 피한다.
+ *
+ * STORE_MASK 를 세우는 것이 "값을 써라"의 뜻이다. 이것 없이는 명령이
+ * 아무것도 하지 않는다.
+ */
 static void build_completion_wait(struct iommu_cmd *cmd,
 				  struct amd_iommu *iommu,
 				  u64 data)
 {
-	u64 paddr = iommu->cmd_sem_paddr;
+	u64 paddr = iommu->cmd_sem_paddr;	/* [한국어] 미리 구해 둔 물리 주소 — 매번 변환하지 않고 kdump 의 변환 문제도 피한다 */
 
-	memset(cmd, 0, sizeof(*cmd));
-	cmd->data[0] = lower_32_bits(paddr) | CMD_COMPL_WAIT_STORE_MASK;
-	cmd->data[1] = upper_32_bits(paddr);
-	cmd->data[2] = lower_32_bits(data);
-	cmd->data[3] = upper_32_bits(data);
-	CMD_SET_TYPE(cmd, CMD_COMPL_WAIT);
+	memset(cmd, 0, sizeof(*cmd));	/* [한국어] 명시하지 않는 필드를 0 으로 */
+	cmd->data[0] = lower_32_bits(paddr) | CMD_COMPL_WAIT_STORE_MASK;	/* [한국어] 주소 하위와 "값을 써라" 플래그. 이것 없이는 아무 일도 일어나지 않는다 */
+	cmd->data[1] = upper_32_bits(paddr);	/* [한국어] 주소 상위 */
+	cmd->data[2] = lower_32_bits(data);	/* [한국어] 쓸 값의 하위 */
+	cmd->data[3] = upper_32_bits(data);	/* [한국어] 상위. 드라이버가 이 값을 폴링해 완료를 안다 */
+	CMD_SET_TYPE(cmd, CMD_COMPL_WAIT);	/* [한국어] 명령 종류 */
 }
 
+/*
+ * [한국어]
+ * build_inv_dte - 장치 테이블 항목 캐시 무효화 명령을 만든다
+ *
+ * @cmd: 채울 명령.
+ * @devid: 대상 장치.
+ *
+ * DTE 를 고친 뒤 반드시 뒤따라야 하는 명령이다. 하드웨어가 DTE 를 캐시에
+ * 담아 두므로, 메모리만 고치면 한동안 옛 설정으로 동작한다.
+ */
 static void build_inv_dte(struct iommu_cmd *cmd, u16 devid)
 {
-	memset(cmd, 0, sizeof(*cmd));
-	cmd->data[0] = devid;
-	CMD_SET_TYPE(cmd, CMD_INV_DEV_ENTRY);
+	memset(cmd, 0, sizeof(*cmd));	/* [한국어] 전 필드 초기화 */
+	cmd->data[0] = devid;	/* [한국어] 대상 장치 */
+	CMD_SET_TYPE(cmd, CMD_INV_DEV_ENTRY);	/* [한국어] DTE 를 고친 뒤 반드시 뒤따라야 한다 */
 }
 
 /*
  * Builds an invalidation address which is suitable for one page or multiple
  * pages. Sets the size bit (S) as needed is more than one page is flushed.
  */
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * build_inv_address - 무효화 범위를 하드웨어가 이해하는 한 주소로 인코딩한다
+ *
+ * @address: 범위의 시작.
+ * @size: 범위의 크기.
+ * @return: 크기 비트가 얹힌 주소.
+ *
+ * AMD 의 무효화 명령은 "시작과 끝"을 받지 않는다. 대신 주소 하나와 크기
+ * 비트를 받고, 그 주소의 하위 1비트들이 범위의 폭을 나타낸다 —
+ * 2의 거듭제곱 크기의 정렬된 범위만 표현할 수 있다.
+ *
+ * 그래서 임의의 범위를 그 형식에 맞추는 것이 이 함수의 일이다. 시작과
+ * 끝을 XOR 해 "어느 비트에서 갈리는가"를 찾고, 그 아래를 모두 1 로
+ * 채운다. 결과는 요청한 범위를 포함하는 가장 작은 표현 가능한 범위다.
+ *
+ * 넓히는 것은 성능 손실일 뿐이지만 좁히면 정확성 문제가 된다 — 지워지지
+ * 않은 캐시가 남는다. 그래서 항상 넉넉한 쪽으로 반올림한다.
+ *
+ * 51번 비트에서 갈리면 전체를 무효화하는 이유를 원 주석이 밝힌다: 그
+ * 위는 부호 확장 구간이라 이 인코딩으로 표현할 수 없다.
+ *
+ * 한 페이지면 크기 비트 없이 주소만 돌려준다 — 그것이 가장 정확한 표현이다.
+ *
+ * 호출 체인:
+ *   build_inv_iommu_pages()/build_inv_iotlb_pages() → [이 함수]
+ */
 static inline u64 build_inv_address(u64 address, size_t size)
 {
-	u64 pages, end, msb_diff;
+	u64 pages, end, msb_diff;	/* [한국어] 페이지 수, 범위의 끝, 갈리는 비트 위치 */
 
-	pages = iommu_num_pages(address, size, PAGE_SIZE);
+	pages = iommu_num_pages(address, size, PAGE_SIZE);	/* [한국어] 범위가 몇 페이지인가 */
 
-	if (pages == 1)
-		return address & PAGE_MASK;
+	if (pages == 1)	/* [한국어] 한 페이지면 */
+		return address & PAGE_MASK;	/* [한국어] 크기 비트 없이 주소만 — 가장 정확한 표현이다 */
 
-	end = address + size - 1;
+	end = address + size - 1;	/* [한국어] 범위의 마지막 바이트 */
 
 	/*
 	 * msb_diff would hold the index of the most significant bit that
 	 * flipped between the start and end.
 	 */
-	msb_diff = fls64(end ^ address) - 1;
+	msb_diff = fls64(end ^ address) - 1;	/* [한국어] (원 주석: 시작과 끝이 갈리는 최상위 비트의 위치) */
 
 	/*
 	 * Bits 63:52 are sign extended. If for some reason bit 51 is different
 	 * between the start and the end, invalidate everything.
 	 */
-	if (unlikely(msb_diff > 51)) {
-		address = CMD_INV_IOMMU_ALL_PAGES_ADDRESS;
+	if (unlikely(msb_diff > 51)) {	/* [한국어] (원 주석: 63:52 는 부호 확장 구간이라 51번에서 갈리면 표현할 수 없다) */
+		address = CMD_INV_IOMMU_ALL_PAGES_ADDRESS;	/* [한국어] 전체를 무효화한다 — 넓히는 것은 성능 손실일 뿐이다 */
 	} else {
 		/*
 		 * The msb-bit must be clear on the address. Just set all the
 		 * lower bits.
 		 */
-		address |= (1ull << msb_diff) - 1;
+		address |= (1ull << msb_diff) - 1;	/* [한국어] (원 주석: 하위 비트를 모두 세운다) 요청 범위를 포함하는 가장 작은 표현 가능한 범위 */
 	}
 
 	/* Clear bits 11:0 */
-	address &= PAGE_MASK;
+	address &= PAGE_MASK;	/* [한국어] (원 주석: 11:0 을 지운다) 페이지 오프셋은 의미가 없다 */
 
 	/* Set the size bit - we flush more than one 4kb page */
-	return address | CMD_INV_IOMMU_PAGES_SIZE_MASK;
+	return address | CMD_INV_IOMMU_PAGES_SIZE_MASK;	/* [한국어] (원 주석: 4KB 한 페이지보다 넓으므로 크기 비트를 세운다) */
 }
 
+/*
+ * [한국어]
+ * build_inv_iommu_pages - IOMMU 의 IOTLB 무효화 명령을 만든다
+ *
+ * @cmd: 채울 명령.
+ * @address: 무효화할 범위의 시작.
+ * @size: 그 크기.
+ * @domid: 대상 도메인.
+ * @pasid: 대상 PASID(gn 이 참일 때만).
+ * @gn: PASID 별 무효화인가.
+ *
+ * 도메인 id 로 대상을 좁히는 것이 이 명령의 핵심이다. 같은 하드웨어를
+ * 여러 도메인이 쓰므로, 도메인을 지정하지 않으면 관계없는 매핑까지 지운다.
+ *
+ * PDE 비트를 항상 세우는 이유를 원 주석이 밝힌다: 페이지 테이블 항목뿐
+ * 아니라 상위 디렉터리 항목까지 지운다. 매핑을 새로 만들 때 중간 단계가
+ * 캐시에 남아 있으면 하드웨어가 옛 구조를 따라간다.
+ *
+ * gn 이 참이면 PASID 를 실어 그 주소 공간만 지운다. SVA 에서 프로세스의
+ * 매핑이 바뀌었을 때 다른 PASID 의 캐시까지 날리지 않기 위해서다.
+ */
 static void build_inv_iommu_pages(struct iommu_cmd *cmd, u64 address,
 				  size_t size, u16 domid,
 				  ioasid_t pasid, bool gn)
 {
-	u64 inv_address = build_inv_address(address, size);
+	u64 inv_address = build_inv_address(address, size);	/* [한국어] 범위를 하드웨어 형식으로 인코딩 */
 
-	memset(cmd, 0, sizeof(*cmd));
+	memset(cmd, 0, sizeof(*cmd));	/* [한국어] 전 필드 초기화 */
 
-	cmd->data[1] |= domid;
-	cmd->data[2]  = lower_32_bits(inv_address);
-	cmd->data[3]  = upper_32_bits(inv_address);
+	cmd->data[1] |= domid;	/* [한국어] 도메인으로 대상을 좁힌다 — 없으면 관계없는 매핑까지 지운다 */
+	cmd->data[2]  = lower_32_bits(inv_address);	/* [한국어] 인코딩된 주소의 하위 */
+	cmd->data[3]  = upper_32_bits(inv_address);	/* [한국어] 상위 */
 	/* PDE bit - we want to flush everything, not only the PTEs */
-	cmd->data[2] |= CMD_INV_IOMMU_PAGES_PDE_MASK;
-	if (gn) {
-		cmd->data[0] |= pasid;
-		cmd->data[2] |= CMD_INV_IOMMU_PAGES_GN_MASK;
+	cmd->data[2] |= CMD_INV_IOMMU_PAGES_PDE_MASK;	/* [한국어] (원 주석: PTE 뿐 아니라 전부를 지운다) 상위 디렉터리가 남으면 옛 구조를 따라간다 */
+	if (gn) {	/* [한국어] PASID 별 무효화면 */
+		cmd->data[0] |= pasid;	/* [한국어] 그 주소 공간만 지운다 */
+		cmd->data[2] |= CMD_INV_IOMMU_PAGES_GN_MASK;	/* [한국어] 다른 PASID 의 캐시는 건드리지 않는다 */
 	}
-	CMD_SET_TYPE(cmd, CMD_INV_IOMMU_PAGES);
+	CMD_SET_TYPE(cmd, CMD_INV_IOMMU_PAGES);	/* [한국어] 명령 종류 */
 }
 
+/*
+ * [한국어]
+ * build_inv_iotlb_pages - 장치 쪽 IOTLB(ATS) 무효화 명령을 만든다
+ *
+ * @cmd: 채울 명령.
+ * @devid: 대상 장치.
+ * @qdep: 그 장치의 무효화 큐 깊이.
+ * @address: 범위의 시작.
+ * @size: 크기.
+ * @pasid: 대상 PASID.
+ * @gn: PASID 별 무효화인가.
+ *
+ * 앞의 명령이 IOMMU 안의 캐시를 지운다면, 이것은 장치 안의 캐시를 지운다.
+ * ATS 를 켠 장치는 변환 결과를 자기 안에 담아 두므로, 그쪽도 지워야
+ * unmap 이 완결된다.
+ *
+ * qdep 를 싣는 이유: 하드웨어가 그 장치에 몇 개의 무효화를 동시에 보낼 수
+ * 있는지 알아야 한다. 장치가 감당하지 못하면 응답이 늦어지고, 그것이
+ * IOTLB_INV_TIMEOUT 이벤트로 나타난다.
+ *
+ * PASID 가 두 조각으로 나뉘어 실리는 것이 눈에 띈다 — 이 명령 형식에
+ * 연속된 자리가 없어 상위와 하위를 서로 다른 워드에 넣는다.
+ */
 static void build_inv_iotlb_pages(struct iommu_cmd *cmd, u16 devid, int qdep,
 				  u64 address, size_t size,
 				  ioasid_t pasid, bool gn)
 {
-	u64 inv_address = build_inv_address(address, size);
+	u64 inv_address = build_inv_address(address, size);	/* [한국어] 같은 방식으로 범위를 인코딩 */
 
-	memset(cmd, 0, sizeof(*cmd));
+	memset(cmd, 0, sizeof(*cmd));	/* [한국어] 초기화 */
 
-	cmd->data[0]  = devid;
-	cmd->data[0] |= (qdep & 0xff) << 24;
-	cmd->data[1]  = devid;
-	cmd->data[2]  = lower_32_bits(inv_address);
-	cmd->data[3]  = upper_32_bits(inv_address);
+	cmd->data[0]  = devid;	/* [한국어] 대상 장치 */
+	cmd->data[0] |= (qdep & 0xff) << 24;	/* [한국어] 장치가 동시에 받을 수 있는 무효화 수. 넘기면 응답이 늦어 타임아웃 이벤트가 난다 */
+	cmd->data[1]  = devid;	/* [한국어] 형식상 두 번 실린다 */
+	cmd->data[2]  = lower_32_bits(inv_address);	/* [한국어] 주소 하위 */
+	cmd->data[3]  = upper_32_bits(inv_address);	/* [한국어] 상위 */
 	if (gn) {
-		cmd->data[0] |= ((pasid >> 8) & 0xff) << 16;
-		cmd->data[1] |= (pasid & 0xff) << 16;
-		cmd->data[2] |= CMD_INV_IOMMU_PAGES_GN_MASK;
+		cmd->data[0] |= ((pasid >> 8) & 0xff) << 16;	/* [한국어] PASID 의 상위 바이트 */
+		cmd->data[1] |= (pasid & 0xff) << 16;	/* [한국어] 하위 바이트 — 연속된 자리가 없어 두 워드에 나뉜다 */
+		cmd->data[2] |= CMD_INV_IOMMU_PAGES_GN_MASK;	/* [한국어] PASID 별 무효화임을 표시 */
 	}
 
-	CMD_SET_TYPE(cmd, CMD_INV_IOTLB_PAGES);
+	CMD_SET_TYPE(cmd, CMD_INV_IOTLB_PAGES);	/* [한국어] 명령 종류 */
 }
 
+/*
+ * [한국어]
+ * build_complete_ppr - 페이지 요청에 대한 응답 명령을 만든다
+ *
+ * @cmd: 채울 명령.
+ * @devid: 응답할 장치.
+ * @pasid: 그 요청의 PASID.
+ * @status: 성공인지 실패인지.
+ * @tag: 요청 태그.
+ * @gn: PASID 를 실어야 하는 장치인가.
+ *
+ * 장치가 낸 페이지 폴트를 처리한 뒤 그 결과를 알린다. 이 응답이 도달해야
+ * 장치가 멈춰 있던 요청을 재개한다.
+ *
+ * tag 를 9비트로 자르는 이유: 태그의 최상위 비트는 "그룹의 마지막"을
+ * 뜻하는 플래그이고, 응답에는 그룹 번호만 실린다.
+ *
+ * gn 이 장치마다 다른 이유: 일부 장치는 응답에 PASID 를 요구하고 일부는
+ * 그렇지 않다(pri_tlp 가 그것을 기억한다). 틀리면 장치가 응답을 자기
+ * 요청과 짝지어 주지 못한다.
+ */
 static void build_complete_ppr(struct iommu_cmd *cmd, u16 devid, u32 pasid,
 			       int status, int tag, u8 gn)
 {
-	memset(cmd, 0, sizeof(*cmd));
+	memset(cmd, 0, sizeof(*cmd));	/* [한국어] 초기화 */
 
-	cmd->data[0]  = devid;
-	if (gn) {
-		cmd->data[1]  = pasid;
-		cmd->data[2]  = CMD_INV_IOMMU_PAGES_GN_MASK;
+	cmd->data[0]  = devid;	/* [한국어] 응답할 장치 */
+	if (gn) {	/* [한국어] PASID 를 요구하는 장치면 */
+		cmd->data[1]  = pasid;	/* [한국어] 그 값을 싣는다 */
+		cmd->data[2]  = CMD_INV_IOMMU_PAGES_GN_MASK;	/* [한국어] PASID 가 유효함을 표시 */
 	}
-	cmd->data[3]  = tag & 0x1ff;
-	cmd->data[3] |= (status & PPR_STATUS_MASK) << PPR_STATUS_SHIFT;
+	cmd->data[3]  = tag & 0x1ff;	/* [한국어] 최상위 비트는 "그룹의 마지막" 플래그라 9비트만 쓴다 */
+	cmd->data[3] |= (status & PPR_STATUS_MASK) << PPR_STATUS_SHIFT;	/* [한국어] 성공인지 실패인지. 이 응답이 도달해야 장치가 재개한다 */
 
-	CMD_SET_TYPE(cmd, CMD_COMPLETE_PPR);
+	CMD_SET_TYPE(cmd, CMD_COMPLETE_PPR);	/* [한국어] 명령 종류 */
 }
 
+/*
+ * [한국어]
+ * build_inv_all - 모든 캐시를 한 번에 무효화하는 명령을 만든다
+ *
+ * @cmd: 채울 명령.
+ *
+ * 인자가 없다는 것이 이 명령의 성격이다. DTE 캐시, IOTLB, 인터럽트 항목
+ * 캐시를 도메인 구분 없이 전부 지운다.
+ *
+ * 초기화 직후처럼 하드웨어의 캐시 상태를 알 수 없을 때 쓴다. 정상 동작
+ * 중에는 범위를 좁힌 명령이 훨씬 낫다 — 이것은 모든 장치의 성능에 영향을
+ * 준다.
+ */
 static void build_inv_all(struct iommu_cmd *cmd)
 {
-	memset(cmd, 0, sizeof(*cmd));
-	CMD_SET_TYPE(cmd, CMD_INV_ALL);
+	memset(cmd, 0, sizeof(*cmd));	/* [한국어] 인자가 없다 — 모든 캐시를 도메인 구분 없이 지운다 */
+	CMD_SET_TYPE(cmd, CMD_INV_ALL);	/* [한국어] 캐시 상태를 알 수 없을 때만 쓴다. 모든 장치의 성능에 영향을 준다 */
 }
 
+/*
+ * [한국어]
+ * build_inv_irt - 인터럽트 재매핑 표 캐시 무효화 명령을 만든다
+ *
+ * @cmd: 채울 명령.
+ * @devid: 대상 장치.
+ *
+ * AMD 는 재매핑 표가 장치마다 있어 무효화도 장치 단위다. 항목을 고친 뒤
+ * 이것을 보내지 않으면 하드웨어가 한동안 옛 목적지로 인터럽트를 보낸다.
+ */
 static void build_inv_irt(struct iommu_cmd *cmd, u16 devid)
 {
-	memset(cmd, 0, sizeof(*cmd));
-	cmd->data[0] = devid;
-	CMD_SET_TYPE(cmd, CMD_INV_IRT);
+	memset(cmd, 0, sizeof(*cmd));	/* [한국어] 초기화 */
+	cmd->data[0] = devid;	/* [한국어] AMD 는 재매핑 표가 장치마다 있어 무효화도 장치 단위다 */
+	CMD_SET_TYPE(cmd, CMD_INV_IRT);	/* [한국어] 보내지 않으면 한동안 옛 목적지로 인터럽트가 간다 */
 }
 
 /*
