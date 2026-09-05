@@ -392,9 +392,9 @@
 #define DMA_ECMD_ECCAP3_FCNTS		BIT_ULL(52)	/* [한국어] Freeze Counters 지원 */
 #define DMA_ECMD_ECCAP3_UFCNTS		BIT_ULL(53)	/* [한국어] Unfreeze Counters 지원 */
 #define DMA_ECMD_ECCAP3_ESSENTIAL	(DMA_ECMD_ECCAP3_ECNTS |	\	/* [한국어] 성능 카운터를 쓰려면 넷 다 있어야 한다. perfmon 초기화가 이 조합으로 한 번에 확인한다 */
-					 DMA_ECMD_ECCAP3_DCNTS |	\
-					 DMA_ECMD_ECCAP3_FCNTS |	\
-					 DMA_ECMD_ECCAP3_UFCNTS)
+					 DMA_ECMD_ECCAP3_DCNTS |	\	/* [한국어] 끄기도 */
+					 DMA_ECMD_ECCAP3_FCNTS |	\	/* [한국어] 멈추기도 */
+					 DMA_ECMD_ECCAP3_UFCNTS)	/* [한국어] 다시 진행시키기도 모두 지원해야 성능 카운터를 쓸 수 있다 */
 
 /* FECTL_REG */
 #define DMA_FECTL_IM (((u32)1) << 31)	/* [한국어] 폴트 인터럽트 마스크. 인터럽트를 세우는 동안 잠시 막는 데 쓴다 */
@@ -428,9 +428,9 @@
 #define DMA_PERFINTRSTS_PIS	((u32)1)	/* [한국어] 성능 카운터 인터럽트가 걸렸음을 알리는 비트 */
 
 #define IOMMU_WAIT_OP(iommu, offset, op, cond, sts)			\	/* [한국어] 레지스터가 원하는 상태가 될 때까지 도는 관용구. VT-d 의 명령은 대부분 "비트를 쓰고 상태 비트가 바뀔 때까지 기다린다" 형태라 매크로로 뺐다 */
-do {									\
+do {									\	/* [한국어] 매크로를 한 문장처럼 쓰게 하는 관용구 */
 	cycles_t start_time = get_cycles();				\	/* [한국어] 시작 시각. 타임아웃을 재려면 필요하다 */
-	while (1) {							\
+	while (1) {							\	/* [한국어] 조건이 맞을 때까지 반복 */
 		sts = op(iommu->reg + offset);				\	/* [한국어] 레지스터를 읽는다. op 는 readl/readq 중 하나로 호출자가 넘긴다 */
 		if (cond)						\	/* [한국어] 원하는 조건이 되었으면 */
 			break;						\	/* [한국어] 기다림 종료 */
@@ -438,7 +438,7 @@ do {									\
 			panic("DMAR hardware is malfunctioning\n");	\	/* [한국어] 부팅을 멈춘다. IOMMU 가 응답하지 않는데 계속 진행하면 격리 상태를 알 수 없어 더 위험하다 */
 		cpu_relax();						\	/* [한국어] 바쁜 대기 중임을 CPU 에 알린다(하이퍼스레드 양보, 전력 절약) */
 	}								\
-} while (0)
+} while (0)	/* [한국어] 관용구의 끝. 세미콜론을 붙여 쓸 수 있게 한다 */
 
 #define QI_LENGTH	256	/* queue length */	/* [한국어] 무효화 큐에 담을 수 있는 서술자 수 (위 영어 주석) */
 
@@ -672,29 +672,29 @@ struct iommu_flush {
 };
 
 enum {
-	SR_DMAR_FECTL_REG,
-	SR_DMAR_FEDATA_REG,
-	SR_DMAR_FEADDR_REG,
-	SR_DMAR_FEUADDR_REG,
-	MAX_SR_DMAR_REGS
+	SR_DMAR_FECTL_REG,	/* [한국어] 서스펜드 때 저장할 레지스터 — 폴트 인터럽트 제어 */
+	SR_DMAR_FEDATA_REG,	/* [한국어] 폴트 인터럽트 MSI 데이터 */
+	SR_DMAR_FEADDR_REG,	/* [한국어] 폴트 인터럽트 MSI 주소 */
+	SR_DMAR_FEUADDR_REG,	/* [한국어] 그 상위 32비트. 리줌 때 이 넷을 되살려야 폴트 보고가 계속 동작한다 */
+	MAX_SR_DMAR_REGS	/* [한국어] 저장할 레지스터 개수. 배열 크기로 쓰인다 */
 };
 
-#define VTD_FLAG_TRANS_PRE_ENABLED	(1 << 0)
-#define VTD_FLAG_IRQ_REMAP_PRE_ENABLED	(1 << 1)
-#define VTD_FLAG_SVM_CAPABLE		(1 << 2)
+#define VTD_FLAG_TRANS_PRE_ENABLED	(1 << 0)	/* [한국어] 커널이 시작하기 전에 이미 번역이 켜져 있었다(kdump/펌웨어 인계) */
+#define VTD_FLAG_IRQ_REMAP_PRE_ENABLED	(1 << 1)	/* [한국어] 인터럽트 재매핑도 마찬가지로 이미 켜져 있었다 */
+#define VTD_FLAG_SVM_CAPABLE		(1 << 2)	/* [한국어] 이 유닛으로 SVA 를 쓸 수 있다. intel_svm_check 가 세운다 */
 
-#define sm_supported(iommu)	(intel_iommu_sm && ecap_smts((iommu)->ecap))
-#define pasid_supported(iommu)	(sm_supported(iommu) &&			\
+#define sm_supported(iommu)	(intel_iommu_sm && ecap_smts((iommu)->ecap))	/* [한국어] scalable 모드를 실제로 쓰는가. 하드웨어 지원(ecap_smts)과 부트 옵션(intel_iommu_sm) 둘 다 필요하다 — 아래 판별자들이 모두 이것을 전제로 한다 */
+#define pasid_supported(iommu)	(sm_supported(iommu) &&			\	/* [한국어] PASID 를 쓸 수 있는가. scalable 모드 위에서만 성립한다 */
 				 ecap_pasid((iommu)->ecap))
-#define ssads_supported(iommu) (sm_supported(iommu) &&                 \
+#define ssads_supported(iommu) (sm_supported(iommu) &&                 \	/* [한국어] 2단계 더티 추적을 쓸 수 있는가. 추적 비트(slads)뿐 아니라 워크 코히런시(smpwc)까지 요구하는 것은, 하드웨어가 남긴 비트를 CPU 가 캐시를 거치지 않고 읽어야 하기 때문이다 */
 				ecap_slads((iommu)->ecap) &&           \
 				ecap_smpwc(iommu->ecap))
-#define nested_supported(iommu)	(sm_supported(iommu) &&			\
+#define nested_supported(iommu)	(sm_supported(iommu) &&			\	/* [한국어] 중첩 변환을 쓸 수 있는가 */
 				 ecap_nest((iommu)->ecap))
 
-struct pasid_entry;
-struct pasid_state_entry;
-struct page_req_dsc;
+struct pasid_entry;	/* [한국어] 전방 선언 — PASID 테이블의 항목. 정의는 pasid.h 에 있다 */
+struct pasid_state_entry;	/* [한국어] PASID 상태 항목 */
+struct page_req_dsc;	/* [한국어] 페이지 요청 큐에 들어오는 요청 하나. 정의는 prq.c 쪽에 있다 */
 
 /*
  * 0: Present
@@ -704,7 +704,23 @@ struct page_req_dsc;
  */
 struct root_entry {
 	u64     lo;
+	/* [한국어] 루트 항목의 하위 64비트 — devfn 0~127 을 담당하는 "하위" 컨텍스트 테이블을 가리킨다.
+	 * 비트 배치는 바로 위 영어 주석 그대로다: 0=present, 1-11 예약, 12-63=컨텍스트
+	 * 테이블의 물리 주소(12 ~ haw-1).
+	 * 설정자: iommu_context_addr() 이 그 버스의 컨텍스트 테이블을 처음 만들 때.
+	 * 읽는 자: root_entry_lctp() 과 하드웨어. 하드웨어는 소스 id 의 버스 번호로
+	 *   루트 테이블을 색인해 이 항목에 닿는다.
+	 * 값 범위: present 가 0 이면 그 버스에는 아무 설정이 없다는 뜻이고, 그 버스의
+	 *   모든 DMA 가 폴트로 끝난다.
+	 * 동기화: iommu->lock. 항목을 고친 뒤 비코히런트 유닛에서는 clflush 가 필요하다. */
 	u64     hi;
+	/* [한국어] 루트 항목의 상위 64비트 — devfn 128~255 를 담당하는 "상위" 컨텍스트 테이블.
+	 * 왜 둘로 나뉘는가: 컨텍스트 항목 하나가 16바이트라 4KB 한 페이지에 256개가
+	 *   아니라 128개만 들어간다. 그래서 한 버스의 컨텍스트 테이블을 두 페이지로
+	 *   쪼개고, 루트 항목의 lo/hi 가 각각을 가리킨다.
+	 * 설정자/읽는 자/동기화: lo 와 같다. 읽는 쪽은 root_entry_uctp() 다.
+	 * 값 범위: 위 영어 주석이 64-127 을 예약이라고 적은 것은 스펙 초판 기준이며,
+	 *   실제로는 lo 와 같은 형식으로 상위 테이블을 가리킨다. */
 };
 
 /*
@@ -720,15 +736,63 @@ struct root_entry {
  */
 struct context_entry {
 	u64 lo;
+	/* [한국어] 컨텍스트 항목의 하위 64비트. 비트 배치는 위 영어 주석 그대로다:
+	 *   0=present, 1=fault processing disable, 2-3=translation type,
+	 *   12-63=address space root.
+	 * translation type 이 이 항목의 성격을 정한다 — CONTEXT_TT_MULTI_LEVEL 이면
+	 *   address space root 가 페이지 테이블의 최상위를 가리키고,
+	 *   CONTEXT_TT_PASS_THROUGH 면 그 필드를 하드웨어가 무시하고 번역 없이 통과시킨다.
+	 * 결정적으로, 루트 테이블 주소에 DMA_RTADDR_SMT 가 켜져 있으면(scalable 모드)
+	 *   같은 비트들이 전혀 다르게 읽힌다 — address space root 가 페이지 테이블이
+	 *   아니라 PASID 디렉터리를 가리키는 것으로 해석된다. 한 비트가 이 구조체의
+	 *   의미를 통째로 바꾸는 셈이다.
+	 * 설정자: domain_context_mapping_one()(레거시), context_setup_pass_through(),
+	 *   copy_context_table()(kdump 인계).
+	 * 읽는 자: 하드웨어가 소스 id 의 devfn 으로 색인해 읽는다.
+	 * 동기화: iommu->lock. present 는 반드시 마지막에 세운다 — 그 순간부터
+	 *   하드웨어가 항목을 쓰기 때문이다. */
 	u64 hi;
+	/* [한국어] 컨텍스트 항목의 상위 64비트: 0-2=address width, 3-6=aval, 8-23=domain id
+	 * (위 영어 주석).
+	 * address width 는 이 장치가 쓸 페이지 테이블의 단계 수를 정하고, 통과 모드에서는
+	 *   하드웨어가 지원하는 최대 AGAW 로 프로그램해야 한다.
+	 * domain id 는 IOTLB 항목을 구분하는 태그다. 같은 도메인 id 를 쓰는 장치들의
+	 *   번역은 하드웨어 캐시에서 공유되므로, 도메인 단위 무효화 한 번이 그 모두에
+	 *   적용된다 — cache.c 의 cache tag 모델이 이 성질 위에 세워져 있다.
+	 * 설정자/읽는 자/동기화: lo 와 같다.
+	 * 값 범위: domain id 는 16비트이지만 실제 상한은 cap_ndoms(cap) 이다(스펙 9.3). */
 };
 
 struct iommu_domain_info {
 	struct intel_iommu *iommu;
+	/* [한국어] 이 정보가 어느 유닛에 대한 것인지.
+	 * 설정자: domain_attach_iommu() 가 도메인에 그 유닛의 장치가 처음 붙을 때 만든다.
+	 * 읽는 자: 무효화 경로가 어느 유닛의 큐로 명령을 보낼지 정할 때.
+	 * 값 범위: NULL 이 아닌 유효한 유닛. 이 구조체는 도메인의 iommu_array 에
+	 *   유닛 순번(seq_id)으로 색인되어 들어간다.
+	 * 동기화: 도메인의 lock. 생성과 해제가 그 락 아래에서 일어난다. */
 	unsigned int refcnt;		/* Refcount of devices per iommu */
+	/* [한국어] 이 도메인에 붙어 있는, 이 유닛 아래의 장치 수 (원 주석: Refcount of devices per iommu).
+	 * 설정자: domain_attach_iommu() 가 늘리고 domain_detach_iommu() 가 줄인다.
+	 * 읽는 자: 같은 두 함수. 0 이 되는 순간 아래의 did 를 유닛에 반납하고
+	 *   이 구조체 자체를 없앤다.
+	 * 왜 필요한가: 도메인 id 는 유닛마다 개수가 정해진 희소 자원(cap_ndoms)이다.
+	 *   같은 도메인에 같은 유닛의 장치가 여럿 붙어도 id 는 하나면 되고, 마지막
+	 *   장치가 떠날 때 반납해야 한다. 그 시점을 이 계수가 알려 준다.
+	 * 동기화: 도메인의 lock. */
 	u16 did;			/* Domain ids per IOMMU. Use u16 since
 					 * domain ids are 16 bit wide according
 					 * to VT-d spec, section 9.3 */
+	/* [한국어] 이 유닛에서 이 도메인에 할당된 도메인 id (원 주석: 스펙 9.3 에 따라 16비트).
+	 * 설정자: domain_attach_iommu() 가 유닛의 domain_ida 에서 할당한다.
+	 * 읽는 자: 컨텍스트/PASID 항목을 채울 때, 그리고 모든 도메인 단위 무효화에서.
+	 * 값 범위: 0 ~ cap_ndoms(iommu->cap)-1. 16비트 타입이지만 실제 상한은 유닛마다
+	 *   다르며, 그 수를 다 쓰면 그 유닛에는 새 도메인을 붙일 수 없다
+	 *   (sysfs 의 domains_used/domains_supported 가 이 상태를 보여 준다).
+	 * 왜 유닛마다 따로인가: 도메인 id 는 유닛의 IOTLB 를 구분하는 태그일 뿐,
+	 *   시스템 전역의 이름이 아니다. 같은 도메인이라도 유닛이 다르면 다른 id 를
+	 *   받을 수 있어서, 도메인은 이 정보를 유닛별로 xarray 에 담아 둔다.
+	 * 동기화: 도메인의 lock 아래에서 할당·반납한다. */
 };
 
 /*
@@ -738,67 +802,281 @@ struct iommu_domain_info {
  * allowing us to adjust the batch size for optimal performance in different
  * scenarios.
  */
-#define QI_MAX_BATCHED_DESC_COUNT 16
+#define QI_MAX_BATCHED_DESC_COUNT 16	/* [한국어] 한 번에 모아 보낼 무효화 서술자의 개수. 지금은 고정값이면 충분하고, 나중에 수요에 따라 동적으로 잡는 개선을 생각해 볼 수 있다 (위 영어 주석) */
 struct qi_batch {
 	struct qi_desc descs[QI_MAX_BATCHED_DESC_COUNT];
+	/* [한국어] 모아 둔 무효화 서술자들.
+	 * 왜 모으는가: 무효화 하나를 보낼 때마다 큐 락을 잡고 tail 을 쓰고 완료를
+	 *   기다리면, 큰 범위를 언매핑할 때 그 왕복 비용이 전부가 된다. 여러 개를
+	 *   채워 한 번에 제출하면 락 획득과 완료 대기가 한 번으로 줄어든다.
+	 * 설정자: cache.c 의 qi_batch_add_* 계열이 채운다.
+	 * 읽는 자: qi_batch_flush_descs() 가 통째로 큐에 제출한다.
+	 * 값 범위: 앞의 index 개만 유효하다. 나머지는 이전 배치의 잔재가 남아 있을 수
+	 *   있으므로 index 를 넘어 읽으면 안 된다.
+	 * 동기화: 도메인의 cache_lock. 이 버퍼는 도메인 하나에 하나씩 있다. */
 	unsigned int index;
+	/* [한국어] 지금까지 채운 서술자 수이자, 다음에 채울 자리.
+	 * 설정자: 서술자를 하나 넣을 때마다 늘리고, 제출한 뒤 0 으로 되돌린다.
+	 * 읽는 자: 배열이 가득 찼는지(QI_MAX_BATCHED_DESC_COUNT 에 닿았는지) 확인해
+	 *   중간 제출을 트리거하는 판단.
+	 * 값 범위: 0 ~ QI_MAX_BATCHED_DESC_COUNT.
+	 * 동기화: 도메인의 cache_lock. */
 };
 
+/*
+ * [한국어] struct dmar_domain — VT-d 가 다루는 "주소 공간 하나"
+ *
+ * 코어의 struct iommu_domain 을 감싸는 이 드라이버의 도메인 표현이다. 하나의
+ * 도메인에 여러 장치가 붙을 수 있고, 그 장치들은 같은 IOVA→PA 매핑을 공유한다.
+ *
+ * 첫 union 이 이 구조체의 성격을 정한다. 도메인은 네 가지 얼굴 중 하나로
+ * 쓰이며, 어느 얼굴인지는 domain.type 과 domain.ops 로 구분한다.
+ *   - domain: 코어가 보는 얼굴. 모든 경우에 유효하다.
+ *   - iommu:  공용 페이지 테이블 라이브러리가 보는 얼굴.
+ *   - fspt:   1단계(x86-64 형식) 페이지 테이블을 쓸 때.
+ *   - sspt:   2단계(VT-d 고유 형식) 페이지 테이블을 쓸 때.
+ * 이들이 union 인 것은 세 표현이 같은 메모리를 겹쳐 쓰되 항상 첫 필드가
+ * iommu_domain 이도록 배치되어 있기 때문이다 — 아래 PT_IOMMU_CHECK_DOMAIN 이
+ * 그 배치를 컴파일 타임에 확인한다.
+ *
+ * 마지막 union 은 용도별 추가 상태다. DMA 재매핑 도메인은 자기 위에 얹힌
+ * 1단계 도메인 목록(s1_domains)을, 중첩 사용자 도메인은 자기가 얹힌 부모
+ * (s2_domain)와 게스트가 준 설정(s1_cfg)을, SVA 도메인은 mmu_notifier 를
+ * 갖는다. 한 도메인이 이 셋 중 둘일 수 없으므로 union 으로 겹쳤다.
+ *
+ * 목록이 네 개인 이유를 함께 보면 구조가 보인다.
+ *   devices     — PASID 없이 붙은 장치들. 도메인 단위 설정을 적용할 대상.
+ *   dev_pasids  — PASID 단위로 붙은 (장치, PASID) 쌍들.
+ *   cache_tags  — 위 둘에서 유도되지만 중복이 제거된 "무효화를 보낼 곳" 목록.
+ *   s1_domains  — 중첩 자식들.
+ * 앞의 둘은 "무엇이 붙어 있는가"를, cache_tags 는 "무효화를 어디로 보낼
+ * 것인가"를 답한다. 여러 장치가 같은 유닛의 같은 도메인 id 를 쓰면 무효화는
+ * 한 번이면 되므로, 그 정규화를 위해 목록을 따로 둔다.
+ *
+ * 락이 셋인 이유: lock 은 장치 목록을, cache_lock 은 무효화 대상 목록을,
+ * s1_lock 은 중첩 자식 목록을 지킨다. 무효화는 장치 부착보다 훨씬 자주
+ * 일어나므로 두 락을 나눠야 매핑 경로가 부착 경로에 막히지 않는다.
+ */
 struct dmar_domain {
 	union {
 		struct iommu_domain domain;
+		/* [한국어] 코어가 보는 얼굴. iommu_domain_ops, pgsize_bitmap, dirty_ops 가 여기 있다.
+		 * 설정자: 도메인 생성 함수들이 ops 와 pgsize_bitmap 을 채운다.
+		 * 읽는 자: IOMMU 코어 전체. to_dmar_domain() 이 이 포인터에서 감싸는
+		 *   dmar_domain 을 되찾는다.
+		 * 값 범위: type 이 이 도메인의 종류(PAGING/IDENTITY/BLOCKED/SVA/NESTED)를 정하며,
+		 *   아래 union 중 어느 얼굴이 유효한지도 그 값으로 갈린다.
+		 * 동기화: 생성 시점에 채우고 이후 대부분 읽기만 한다. */
 		struct pt_iommu iommu;
+		/* [한국어] 공용 페이지 테이블 라이브러리(generic_pt)가 보는 얼굴.
+		 * 설정자: 도메인 생성 시 iommu_device 와 nid 를 채운 뒤 pt_iommu_*_init() 에 넘긴다.
+		 * 읽는 자: 라이브러리의 map/unmap/iova_to_phys 구현.
+		 * 값 범위: fspt/sspt 중 무엇을 쓰든 이 얼굴로 접근할 수 있도록 두 구조체 모두
+		 *   첫 필드가 pt_iommu 다.
+		 * 동기화: 라이브러리 내부 규약을 따른다. */
 		/* First stage page table */
 		struct pt_iommu_x86_64 fspt;
+		/* [한국어] 1단계 페이지 테이블 (원 주석: First stage page table).
+		 * 형식이 x86-64 CPU 페이지 테이블과 같아서, 프로세스의 페이지 테이블을 그대로
+		 * 가리키는 SVA 로 자연스럽게 이어진다.
+		 * 설정자: intel_iommu_domain_alloc_first_stage() 가 pt_iommu_x86_64_init() 으로 만든다.
+		 * 읽는 자: 매핑/언매핑 경로와, 붙이기 전 호환성 검사
+		 *   (paging_domain_compatible_first_stage 가 max_vasz_lg2 와 features 를 확인한다).
+		 * 값 범위: intel_domain_is_fs_paging() 이 참일 때만 유효하다.
+		 * 동기화: 라이브러리가 페이지 테이블 갱신의 원자성을 책임진다. */
 		/* Second stage page table */
 		struct pt_iommu_vtdss sspt;
+		/* [한국어] 2단계 페이지 테이블 (원 주석: Second stage page table).
+		 * VT-d 고유 형식이며, 레거시 모드에서 쓸 수 있는 유일한 형식이자 가상화에서
+		 * 호스트가 소유하는 하위 단계다. PTE 마다 SNP 비트가 있어 강제 코히런시를
+		 * 항목 단위로 표현할 수 있다는 점이 1단계와 다르다.
+		 * 설정자: intel_iommu_domain_alloc_second_stage() 가 pt_iommu_vtdss_init() 으로 만든다.
+		 * 읽는 자: 매핑/언매핑, 호환성 검사, 더티 비트 조회.
+		 * 값 범위: intel_domain_is_ss_paging() 이 참일 때만 유효하다.
+		 * 동기화: 라이브러리가 책임진다. */
 	};
 
 	struct xarray iommu_array;	/* Attached IOMMU array */
+	/* [한국어] 이 도메인이 쓰는 유닛별 정보(struct iommu_domain_info)를 유닛 순번(seq_id)으로
+	 * 색인한다 (원 주석: Attached IOMMU array).
+	 * 왜 배열이 필요한가: 도메인 id 는 시스템 전역의 이름이 아니라 유닛마다 따로
+	 *   할당되는 태그다. 한 도메인에 여러 유닛의 장치가 붙으면 유닛마다 다른
+	 *   id 를 받게 되므로, "이 도메인이 저 유닛에서는 몇 번인가"를 따로 들고 있어야 한다.
+	 * 설정자: domain_attach_iommu() 가 새 항목을 넣고 domain_detach_iommu() 가 뺀다.
+	 * 읽는 자: domain_id_iommu() 와 모든 무효화 경로.
+	 * 값 범위: 항목이 없는 유닛 순번은 NULL — 그 유닛에는 이 도메인의 장치가 없다.
+	 * 동기화: 도메인의 lock. xarray 자체도 내부 락을 갖지만, 참조 계수와 함께
+	 *   갱신해야 해서 바깥 락으로 묶는다. */
 
 	u8 force_snooping:1;		/* Create PASID entry with snoop control */
+	/* [한국어] 이 도메인의 모든 매핑이 CPU 캐시를 스누프하도록 강제되었는가
+	 * (원 주석: Create PASID entry with snoop control).
+	 * 설정자: intel_iommu_enforce_cache_coherency_fs()/_ss(). VFIO/KVM 이 장치를
+	 *   게스트에 넘기기 전에 요청한다.
+	 * 읽는 자: 이후 이 도메인에 장치를 붙이는 경로. 새로 붙는 장치에도 같은 설정을
+	 *   해 줘야 하므로 dmar_domain_attach_device 가 이 값을 본다.
+	 * 값 범위: 한 번 켜면 끄지 않는다 — 이미 그 보장을 믿고 있는 사용자가 있기 때문이다.
+	 * 왜 필요한가: 이 보장이 있으면 게스트가 캐시를 직접 관리하지 않아도 되고,
+	 *   호스트가 게스트에 WBINVD 같은 위험한 명령을 허용하지 않아도 된다.
+	 * 동기화: 도메인의 lock 아래에서 검사와 설정을 함께 한다. */
 	u8 dirty_tracking:1;		/* Dirty tracking is enabled */
+	/* [한국어] 더티 추적이 켜져 있는가 (원 주석: Dirty tracking is enabled).
+	 * 설정자: intel_iommu_set_dirty_tracking(). 모든 장치·PASID·중첩 자식에 적용이
+	 *   성공한 뒤에야 갱신한다 — 실패 시 되돌릴 원래 값이 필요하기 때문이다.
+	 * 읽는 자: 같은 함수(중복 설정 회피)와, 새로 붙는 장치에 같은 설정을 적용하는 경로.
+	 * 값 범위: 0/1. ssads_supported 인 유닛에서만 1 이 될 수 있다.
+	 * 동기화: 도메인의 lock. */
 	u8 nested_parent:1;		/* Has other domains nested on it */
+	/* [한국어] 이 도메인 위에 다른(1단계) 도메인이 얹혀 있을 수 있는가
+	 * (원 주석: Has other domains nested on it).
+	 * 설정자: intel_iommu_domain_alloc_second_stage() 가 IOMMU_HWPT_ALLOC_NEST_PARENT
+	 *   플래그를 그대로 옮긴다. 생성 시점에 정해지고 이후 바뀌지 않는다.
+	 * 읽는 자: intel_iommu_domain_free() 가 자식이 남아 있는지 확인할 때,
+	 *   더티 추적을 자식까지 전파할지 정할 때, 그리고 호환성 검사.
+	 * 값 범위: 0/1. 1 이면 이 도메인의 페이지 테이블에 읽기 전용 매핑을 만들 수
+	 *   없다(ERRATA_772415_SPR17) — 생성 시 FORCE_WRITEABLE 로 강제된다.
+	 * 동기화: 생성 시 한 번 쓰고 이후 읽기만 한다. */
 	u8 iotlb_sync_map:1;		/* Need to flush IOTLB cache or write
 					 * buffer when creating mappings.
 					 */
+	/* [한국어] 매핑을 "만들 때"도 무효화가 필요한 도메인인가
+	 * (원 주석: Need to flush IOTLB cache or write buffer when creating mappings).
+	 * 보통의 IOMMU 는 없던 항목이 생기는 것뿐이라 매핑 시 무효화가 필요 없다.
+	 * 두 경우가 예외다.
+	 *   - rwbf 가 필요한 옛 유닛: 내부 쓰기 버퍼를 비우지 않으면 우리가 쓴 항목이
+	 *     하드웨어에 보이지 않는다.
+	 *   - caching mode(에뮬레이션된 IOMMU): "여기엔 매핑이 없다"까지 캐시하므로,
+	 *     그 캐시를 지워야 새 매핑이 보인다.
+	 * 설정자: 도메인 생성 시 유닛의 능력을 보고 정한다.
+	 * 읽는 자: intel_iommu_iotlb_sync_map() 이 이 값을 보고 무효화를 보낼지 정한다.
+	 *   호환성 검사도 이 값이 유닛의 요구와 맞는지 확인한다.
+	 * 값 범위: 0/1. 생성 시 정해지고 바뀌지 않는다.
+	 * 동기화: 생성 시 한 번 쓴다. */
 
 	spinlock_t lock;		/* Protect device tracking lists */
+	/* [한국어] 아래 devices/dev_pasids 목록과 위 비트필드 상태를 지키는 락
+	 * (원 주석: Protect device tracking lists).
+	 * 설정자/읽는 자: 장치 부착·분리, force_snooping/dirty_tracking 설정, 그리고
+	 *   그 목록을 훑는 모든 경로.
+	 * irqsave 로 잡는 이유: 이 목록을 훑는 코드가 인터럽트를 끈 문맥에서도 불릴 수
+	 *   있어서다. cache_lock 과 나눈 이유는, 무효화가 장치 부착보다 훨씬 자주
+	 *   일어나므로 두 경로가 서로를 막지 않게 하기 위해서다.
+	 * 동기화 범위: 이 도메인 하나. */
 	struct list_head devices;	/* all devices' list */
+	/* [한국어] PASID 없이 이 도메인에 붙은 장치들의 목록 (원 주석: all devices list).
+	 * 각 항목은 struct device_domain_info 의 link 필드다.
+	 * 설정자: dmar_domain_attach_device() 가 넣고 device_block_translation() 이 뺀다.
+	 * 읽는 자: 도메인 단위 설정을 적용할 때(더티 추적, force snooping),
+	 *   그리고 강제 코히런시 지원 여부를 판단할 때.
+	 * 값 범위: 비어 있을 수 있다. 도메인 해제 시 비어 있지 않으면 코어가 순서를
+	 *   어긴 것이라 WARN 을 남기고 해제를 거부한다.
+	 * 동기화: 위 lock. */
 	struct list_head dev_pasids;	/* all attached pasids */
+	/* [한국어] PASID 단위로 이 도메인에 붙은 (장치, PASID) 쌍들의 목록
+	 * (원 주석: all attached pasids). 각 항목은 struct dev_pasid_info 다.
+	 * 왜 devices 와 나뉘는가: 한 장치가 여러 PASID 로 서로 다른 도메인에 붙을 수
+	 *   있고, 반대로 한 도메인에 같은 장치의 여러 PASID 가 붙을 수도 있다.
+	 *   장치 목록만으로는 그 다대다 관계를 표현할 수 없다.
+	 * 설정자: domain_add_dev_pasid() 가 넣고 domain_remove_dev_pasid() 가 뺀다.
+	 * 읽는 자: 도메인 단위 설정을 PASID 항목에도 적용할 때.
+	 * 동기화: 위 lock. */
 
 	spinlock_t cache_lock;		/* Protect the cache tag list */
+	/* [한국어] cache_tags 목록과 qi_batch 를 지키는 락 (원 주석: Protect the cache tag list).
+	 * 설정자/읽는 자: cache.c 의 태그 등록·해제와 모든 무효화 경로.
+	 * lock 과 분리한 이유: 무효화는 매 언매핑마다 일어나고 장치 부착은 드물다.
+	 *   하나의 락으로 묶으면 잦은 무효화가 부착을 막거나 그 반대가 된다.
+	 * 동기화 범위: 이 도메인 하나. 인터럽트 문맥에서도 잡히므로 irqsave 를 쓴다. */
 	struct list_head cache_tags;	/* Cache tag list */
+	/* [한국어] 무효화를 실제로 보낼 곳들의 목록 (원 주석: Cache tag list).
+	 * 각 항목은 (유닛, 도메인 id, 장치, PASID, 태그 종류)를 담으며, 태그 종류는
+	 * IOTLB / DEVTLB / NESTING_IOTLB / NESTING_DEVTLB 중 하나다.
+	 * 왜 devices 에서 매번 계산하지 않는가: 같은 유닛의 같은 도메인 id 를 쓰는
+	 *   장치가 여럿이면 IOTLB 무효화는 한 번이면 된다. 그 중복 제거를 미리 해 두면
+	 *   무효화 경로가 이 목록만 훑으면 되고, 매번 장치 목록을 훑으며 중복을
+	 *   걸러 낼 필요가 없다. 무효화가 뜨거운 경로라 그 차이가 크다.
+	 * 설정자: cache_tag_assign_domain()/cache_tag_unassign_domain().
+	 * 읽는 자: cache_tag_flush_range()/flush_all()/flush_range_np().
+	 * 동기화: 위 cache_lock. */
 	struct qi_batch *qi_batch;	/* Batched QI descriptors */
+	/* [한국어] 이 도메인의 무효화 명령을 모아 두는 버퍼 (원 주석: Batched QI descriptors).
+	 * 설정자: 처음 필요할 때 할당하고, 도메인 해제 시 kfree 한다.
+	 * 읽는 자: cache.c 의 배치 경로. 서술자를 채우다 가득 차거나 한 무효화 묶음이
+	 *   끝나면 통째로 큐에 제출한다.
+	 * 값 범위: NULL 일 수 있다(아직 무효화를 보낸 적이 없는 도메인).
+	 * 동기화: 위 cache_lock. */
 
 	union {
 		/* DMA remapping domain */
 		struct {
 			/* Protect the s1_domains list */
 			spinlock_t	s1_lock;
+			/* [한국어] 아래 s1_domains 목록을 지키는 락 (원 주석: Protect the s1_domains list).
+			 * 설정자/읽는 자: 중첩 도메인의 생성·해제와, 더티 추적을 자식들에 전파하는 경로.
+			 * lock/cache_lock 과 별개인 이유: 중첩 관계 변경은 장치 부착이나 무효화와
+			 *   전혀 다른 빈도로 일어나고, 자식마다 그 자식의 lock 을 다시 잡아야 해서
+			 *   락 순서를 명확히 나눠 두는 편이 안전하다.
+			 * 인터럽트를 끄지 않는 평범한 spin_lock 을 쓴다 — 이 목록은 인터럽트 문맥에서
+			 *   건드려지지 않는다. */
 			/* Track s1_domains nested on this domain */
 			struct list_head s1_domains;
+			/* [한국어] 이 2단계 도메인을 부모로 삼아 얹힌 1단계(게스트) 도메인들의 목록
+			 * (원 주석: Track s1_domains nested on this domain).
+			 * 설정자: 중첩 도메인이 만들어질 때 자식이 자기 s2_link 로 여기 매달린다.
+			 * 읽는 자: parent_domain_set_dirty_tracking() 이 설정을 자식까지 전파할 때,
+			 *   그리고 intel_iommu_domain_free() 가 자식이 남아 있는지 확인할 때.
+			 * 값 범위: nested_parent 가 0 인 도메인에서는 항상 비어 있다.
+			 * 동기화: 위 s1_lock. */
 		};
 
 		/* Nested user domain */
 		struct {
 			/* parent page table which the user domain is nested on */
 			struct dmar_domain *s2_domain;
+			/* [한국어] 이 중첩 사용자 도메인이 얹혀 있는 부모(2단계) 도메인
+			 * (원 주석: parent page table which the user domain is nested on).
+			 * 중첩 변환에서 게스트의 DMA 는 이 도메인의 1단계 테이블로 게스트 물리 주소를
+			 * 얻고, 그 주소를 다시 부모의 2단계 테이블로 호스트 물리 주소로 바꾼다.
+			 * 설정자: intel_iommu_domain_alloc_nested() 가 사용자가 지정한 부모를 기록한다.
+			 * 읽는 자: 무효화 경로 — 자식의 매핑을 무효화할 때 부모의 도메인 id 가 필요하다.
+			 * 값 범위: NULL 이 아니어야 하며, 그 부모는 nested_parent 로 표시되어 있어야 한다.
+			 * 동기화: 생성 시 한 번 쓰고 이후 읽기만 한다. */
 			/* page table attributes */
 			struct iommu_hwpt_vtd_s1 s1_cfg;
+			/* [한국어] 게스트가 준 1단계 페이지 테이블의 설정 (원 주석: page table attributes).
+			 * 게스트 테이블의 물리 주소와 플래그(주소 폭, 쓰기 보호 등)가 들어 있다.
+			 * 설정자: iommufd 가 유저스페이스에서 받은 값을 그대로 옮긴다.
+			 * 읽는 자: PASID 항목을 세울 때. 호스트는 이 테이블을 파싱하지 않고 주소만
+			 *   하드웨어에 넘긴다 — 워크는 하드웨어가 한다.
+			 * 값 범위: 유저스페이스가 준 값이므로 신뢰할 수 없다. 그래서 호스트는 이
+			 *   테이블이 가리키는 주소를 2단계 매핑으로 한 번 더 걸러 낸다.
+			 * 동기화: 생성 시 한 번 쓴다. */
 			/* link to parent domain siblings */
 			struct list_head s2_link;
+			/* [한국어] 부모의 s1_domains 목록에 매달리는 고리 (원 주석: link to parent domain siblings).
+			 * 설정자: 중첩 도메인 생성 시 부모의 목록에 넣고, 해제 시 뺀다.
+			 * 읽는 자: 부모가 자식들을 훑는 모든 경로.
+			 * 동기화: 부모의 s1_lock. */
 		};
 
 		/* SVA domain */
 		struct {
 			struct mmu_notifier notifier;
+			/* [한국어] SVA 도메인이 프로세스의 주소 공간 변경을 통보받는 훅.
+			 * SVA 도메인은 자기 페이지 테이블을 갖지 않고 프로세스의 것을 그대로 가리킨다.
+			 * 그래서 프로세스 쪽에서 매핑이 바뀌면(munmap, 페이지 회수 등) 그 사실을
+			 * 알아 IOMMU 캐시를 비워야 하는데, 그 통지를 이 notifier 가 받는다.
+			 * 설정자: intel_svm_domain_alloc() 이 등록한다.
+			 * 읽는 자: mm 서브시스템이 콜백을 부른다 — invalidate_range 가 오면 해당
+			 *   범위의 IOTLB 와 디바이스 TLB 를 비운다.
+			 * 실행 컨텍스트: mm 의 잠금 아래에서 불리므로 콜백 안에서 잠들면 안 된다.
+			 * 동기화: mmu_notifier 서브시스템의 규약을 따른다. */
 		};
 	};
 };
-PT_IOMMU_CHECK_DOMAIN(struct dmar_domain, iommu, domain);
-PT_IOMMU_CHECK_DOMAIN(struct dmar_domain, sspt.iommu, domain);
-PT_IOMMU_CHECK_DOMAIN(struct dmar_domain, fspt.iommu, domain);
+PT_IOMMU_CHECK_DOMAIN(struct dmar_domain, iommu, domain);	/* [한국어] union 의 세 얼굴이 같은 자리에서 iommu_domain 을 시작하는지 컴파일 타임에 확인한다. 이 배치가 깨지면 to_dmar_domain() 이 엉뚱한 포인터를 돌려주므로 런타임까지 갈 수 없는 오류다 */
+PT_IOMMU_CHECK_DOMAIN(struct dmar_domain, sspt.iommu, domain);	/* [한국어] 2단계 얼굴에 대한 같은 확인 */
+PT_IOMMU_CHECK_DOMAIN(struct dmar_domain, fspt.iommu, domain);	/* [한국어] 1단계 얼굴에 대한 같은 확인 */
 
 /*
  * In theory, the VT-d 4.0 spec can support up to 2 ^ 16 counters.
@@ -808,7 +1086,7 @@ PT_IOMMU_CHECK_DOMAIN(struct dmar_domain, fspt.iommu, domain);
  * requires more extras, e.g., extra freeze and overflow registers,
  * which is not necessary for now.
  */
-#define IOMMU_PMU_IDX_MAX		64
+#define IOMMU_PMU_IDX_MAX		64	/* [한국어] 성능 카운터의 최대 개수. 스펙상 2^16 까지 가능하지만 실제 플랫폼에는 14개뿐이라 64 면 한동안 충분하고, 그 이상은 추가 freeze/overflow 레지스터가 필요해 지금은 다루지 않는다 (위 영어 주석) */
 
 struct iommu_pmu {
 	struct intel_iommu	*iommu;
