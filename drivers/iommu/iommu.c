@@ -2067,14 +2067,23 @@ EXPORT_SYMBOL_GPL(iommu_group_for_each_dev);
  * for the specified device.  If found, the group is returned and the group
  * reference in incremented, else NULL.
  */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어) 장치에서 그룹을 찾고 참조를 든다.
+ *
+ * devices_kobj 를 잡는 것에 주의할 것. 그룹 kobject 가 아니라 자식을
+ * 잡는데, 이것이 iommu_group_alloc() 의 참조 뒤집기와 짝을 이룬다 --
+ * 자식이 부모를 들고 있으므로 자식만 관리하면 그룹 전체가 유지된다.
+ *
+ * 호출 체인: VFIO·벤더 드라이버 → [이 함수]
+ */
 struct iommu_group *iommu_group_get(struct device *dev)
 {
 	struct iommu_group *group = dev->iommu_group;
 
 	if (group)
-		kobject_get(group->devices_kobj);
+		kobject_get(group->devices_kobj);	/* [한국어] 그룹 수명은 이 자식 kobject 가 대표한다 */
 
-	return group;
+	return group;	/* [한국어] IOMMU 아래에 없는 장치면 NULL — 오류가 아니다 */
 }
 EXPORT_SYMBOL_GPL(iommu_group_get);
 
@@ -2085,10 +2094,21 @@ EXPORT_SYMBOL_GPL(iommu_group_get);
  * This function is called by iommu drivers to take additional references on an
  * existing group.  Returns the given group for convenience.
  */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어) 이미 손에 든 그룹의 참조를 하나 더 든다.
+ *
+ * get() 과 달리 NULL 검사가 없다. 위 주석대로 호출자가 이미 유효한
+ * 그룹을 가지고 있다는 전제이며, 그 전제가 깨지면 곧바로 터진다.
+ *
+ * 그룹을 그대로 돌려주는 것은 호출자의 편의를 위한 것이다 --
+ * group = iommu_group_ref_get(group) 처럼 이어 쓸 수 있다.
+ *
+ * 호출 체인: iommu_group_add_device 등 → [이 함수]
+ */
 struct iommu_group *iommu_group_ref_get(struct iommu_group *group)
 {
 	kobject_get(group->devices_kobj);
-	return group;
+	return group;	/* [한국어] 이어 쓰기 편하도록 인자를 그대로 돌려준다 */
 }
 EXPORT_SYMBOL_GPL(iommu_group_ref_get);
 
@@ -2099,10 +2119,19 @@ EXPORT_SYMBOL_GPL(iommu_group_ref_get);
  * This function is called by iommu drivers and users to release the
  * iommu group.  Once the reference count is zero, the group is released.
  */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어) 참조를 놓는다. 마지막이면 그룹이 해제된다.
+ *
+ * NULL 을 허용하는 것에 주의할 것. 실패 경로에서 그룹을 얻었는지 아닌지
+ * 따지지 않고 부를 수 있게 하려는 것이며, get() 이 NULL 을 돌려줄 수
+ * 있다는 점과 짝을 이룬다.
+ *
+ * 호출 체인: 그룹을 다 쓴 모든 곳 → [이 함수] → (마지막이면) iommu_group_release
+ */
 void iommu_group_put(struct iommu_group *group)
 {
 	if (group)
-		kobject_put(group->devices_kobj);
+		kobject_put(group->devices_kobj);	/* [한국어] 0 이 되면 부모 참조도 함께 놓여 그룹이 해제된다 */
 }
 EXPORT_SYMBOL_GPL(iommu_group_put);
 
@@ -2112,9 +2141,18 @@ EXPORT_SYMBOL_GPL(iommu_group_put);
  *
  * Return the unique ID for the group matching the sysfs group number.
  */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어) 그룹 번호를 돌려준다.
+ *
+ * 이 번호가 곧 /sys/kernel/iommu_groups/<id> 의 이름이라, 사용자 공간과
+ * 커널이 같은 그룹을 가리키는 공통 언어가 된다. VFIO 가 사용자에게
+ * 보여 주는 그룹 번호도 이것이다.
+ *
+ * 호출 체인: VFIO·로그 → [이 함수]
+ */
 int iommu_group_id(struct iommu_group *group)
 {
-	return group->id;
+	return group->id;	/* [한국어] 사용자 공간과 커널이 그룹을 가리키는 공통 번호 */
 }
 EXPORT_SYMBOL_GPL(iommu_group_id);
 
@@ -2129,6 +2167,20 @@ static struct iommu_group *get_pci_alias_group(struct pci_dev *pdev,
  * transactions are forwarded upstream, even as it passes through a
  * bridge where the target device is downstream.
  */
+/*
+ * [한국어] 위 영어 주석이 이 파일 전체에서 가장 중요한 정의를 설명한다 --
+ * PCI 장치를 "격리됐다"고 인정하려면 ACS 가 네 가지를 모두 지원해야 한다.
+ *
+ * 각각이 막는 것이 다르다. SV(Source Validation)는 장치가 남의 요청자 ID 를
+ * 사칭하는 것을, RR/CR(Request/Completer Redirection)은 요청과 완료가
+ * 다른 곳으로 돌려지는 것을, UF(Upstream Forwarding)는 브리지가 트래픽을
+ * 상류로 보내지 않고 옆 장치로 바로 넘기는 것을 막는다.
+ *
+ * 마지막 하나가 특히 중요하다. UF 가 없으면 같은 스위치 아래의 두 장치가
+ * IOMMU 를 거치지 않고 직접 주고받을 수 있어, 아무리 페이지 테이블을
+ * 나눠도 격리가 성립하지 않는다. 그래서 이 네 가지가 모두 없으면 그
+ * 장치들은 한 그룹으로 묶인다 -- 그룹 판정의 실질적 근거가 이 한 줄이다.
+ */
 #define REQ_ACS_FLAGS   (PCI_ACS_SV | PCI_ACS_RR | PCI_ACS_CR | PCI_ACS_UF)
 
 /*
@@ -2137,6 +2189,23 @@ static struct iommu_group *get_pci_alias_group(struct pci_dev *pdev,
  * each function, we also need to look for aliases to or from other devices
  * that may already have a group.
  */
+/*
+ * [한국어] (위 영어 주석에 이어) 같은 슬롯의 다른 기능들 중 이미 그룹을
+ * 가진 것을 찾는다.
+ *
+ * 왜 필요한가: 다기능 장치의 기능들은 물리적으로 한 칩이라, ACS 가
+ * 없으면 서로의 DMA 를 가로챌 수 있다. 그런 기능들은 한 그룹이어야 하고,
+ * 그중 하나가 이미 그룹을 가지고 있다면 나머지도 그리로 들어가야 한다.
+ *
+ * 세 가지 조건으로 후보를 좁히는 것에 주의할 것 -- 같은 버스, 같은 슬롯,
+ * 그리고 ACS 가 없을 것. 앞의 둘은 "같은 물리 장치인가"이고, 마지막은
+ * "정말 격리가 안 되는가"이다. ACS 가 있는 기능은 자기 그룹을 가질 수
+ * 있으므로 후보에서 뺀다.
+ *
+ * 실행 컨텍스트: 장치 probe 경로. 잠들 수 있다.
+ *
+ * 호출 체인: get_pci_alias_group → [이 함수] → get_pci_alias_group (상호 재귀)
+ */
 static struct iommu_group *get_pci_function_alias_group(struct pci_dev *pdev,
 							unsigned long *devfns)
 {
@@ -2144,22 +2213,22 @@ static struct iommu_group *get_pci_function_alias_group(struct pci_dev *pdev,
 	struct iommu_group *group;
 
 	if (!pdev->multifunction || pci_acs_enabled(pdev, REQ_ACS_FLAGS))
-		return NULL;
+		return NULL;	/* [한국어] 단일 기능이거나 ACS 로 격리된다 — 남과 묶일 이유가 없다 */
 
 	for_each_pci_dev(tmp) {
-		if (tmp == pdev || tmp->bus != pdev->bus ||
-		    PCI_SLOT(tmp->devfn) != PCI_SLOT(pdev->devfn) ||
-		    pci_acs_enabled(tmp, REQ_ACS_FLAGS))
+		if (tmp == pdev || tmp->bus != pdev->bus ||	/* [한국어] 자기 자신과 다른 버스는 제외 */
+		    PCI_SLOT(tmp->devfn) != PCI_SLOT(pdev->devfn) ||	/* [한국어] 같은 슬롯이어야 같은 물리 장치의 기능이다 */
+		    pci_acs_enabled(tmp, REQ_ACS_FLAGS))	/* [한국어] ACS 가 있는 기능은 자기 그룹을 가질 수 있다 */
 			continue;
 
-		group = get_pci_alias_group(tmp, devfns);
+		group = get_pci_alias_group(tmp, devfns);	/* [한국어] 그 기능이 별칭을 통해 이미 그룹에 속했는지 본다 */
 		if (group) {
-			pci_dev_put(tmp);
+			pci_dev_put(tmp);	/* [한국어] for_each_pci_dev 가 든 참조 — 루프를 벗어나므로 손으로 놓는다 */
 			return group;
 		}
 	}
 
-	return NULL;
+	return NULL;	/* [한국어] 아무도 그룹을 갖고 있지 않다 — 호출자가 새로 만든다 */
 }
 
 /*
@@ -2171,6 +2240,27 @@ static struct iommu_group *get_pci_function_alias_group(struct pci_dev *pdev,
  * multifunction devices could have aliases between them that would cause a
  * loop.  To prevent this, we use a bitmap to track where we've been.
  */
+/*
+ * [한국어] (위 영어 주석에 이어) DMA 별칭을 따라가며 이미 있는 그룹을 찾는다.
+ *
+ * DMA 별칭이란: 어떤 장치는 자기 것이 아닌 요청자 ID 로 DMA 를 낸다.
+ * 옛 PCI-to-PCI 브리지 뒤의 장치나, 하드웨어 버그로 잘못된 ID 를 쓰는
+ * 장치가 그렇다. IOMMU 는 요청자 ID 로만 장치를 구별하므로, 같은 ID 를
+ * 쓰는 장치들은 구별할 수 없고 따라서 한 그룹이어야 한다.
+ *
+ * 비트맵이 이 함수의 안전장치다. 위 영어 주석대로 두 다기능 장치가 서로를
+ * 별칭으로 가리키면 재귀가 무한히 돈다. 그래서 방문한 devfn 을 표시해 두고
+ * 두 번째 방문에서 곧바로 돌아온다 -- test_and_set 한 번으로 검사와 표시를
+ * 함께 한다.
+ *
+ * 상호 재귀 구조에 주의할 것. 이 함수는 별칭을 따라가고,
+ * get_pci_function_alias_group 은 같은 슬롯의 다른 기능을 따라간다. 둘이
+ * 서로를 불러 "별칭이거나 같은 칩인" 장치들을 모두 훑는다.
+ *
+ * 실행 컨텍스트: 장치 probe 경로. 잠들 수 있다.
+ *
+ * 호출 체인: pci_device_group → [이 함수] ↔ get_pci_function_alias_group
+ */
 static struct iommu_group *get_pci_alias_group(struct pci_dev *pdev,
 					       unsigned long *devfns)
 {
@@ -2178,25 +2268,25 @@ static struct iommu_group *get_pci_alias_group(struct pci_dev *pdev,
 	struct iommu_group *group;
 
 	if (test_and_set_bit(pdev->devfn & 0xff, devfns))
-		return NULL;
+		return NULL;	/* [한국어] 이미 왔던 곳이다 — 위 영어 주석이 말하는 순환을 여기서 끊는다 */
 
 	group = iommu_group_get(&pdev->dev);
 	if (group)
-		return group;
+		return group;	/* [한국어] 이 장치가 이미 그룹에 속했다 — 참조를 든 채로 돌려준다 */
 
 	for_each_pci_dev(tmp) {
 		if (tmp == pdev || tmp->bus != pdev->bus)
-			continue;
+			continue;	/* [한국어] 위 영어 주석대로 별칭은 같은 버스 안에서만 성립한다 */
 
 		/* We alias them or they alias us */
-		if (pci_devs_are_dma_aliases(pdev, tmp)) {
-			group = get_pci_alias_group(tmp, devfns);
+		if (pci_devs_are_dma_aliases(pdev, tmp)) {	/* [한국어] 위 영어 주석대로 방향은 상관없다 — 한쪽이라도 같은 ID 를 쓰면 구별이 안 된다 */
+			group = get_pci_alias_group(tmp, devfns);	/* [한국어] 그 장치의 별칭도 따라간다 */
 			if (group) {
 				pci_dev_put(tmp);
 				return group;
 			}
 
-			group = get_pci_function_alias_group(tmp, devfns);
+			group = get_pci_function_alias_group(tmp, devfns);	/* [한국어] 그 장치와 같은 칩인 기능들도 본다 */
 			if (group) {
 				pci_dev_put(tmp);
 				return group;
@@ -2204,11 +2294,21 @@ static struct iommu_group *get_pci_alias_group(struct pci_dev *pdev,
 		}
 	}
 
-	return NULL;
+	return NULL;	/* [한국어] 연결된 어느 장치도 그룹을 갖고 있지 않다 */
 }
 
+/*
+ * [한국어] pci_for_each_dma_alias 콜백이 결과를 담아 돌려주는 자리.
+ * 콜백 시그니처가 void* 하나뿐이라, 두 값을 함께 넘기려면 이렇게 묶어야 한다.
+ */
 struct group_for_pci_data {
+	/* [한국어] 마지막으로 본 장치. 별칭 사슬의 끝, 즉 IOMMU 에 실제로
+	 * 보이는 요청자를 가리키게 된다. 그룹을 못 찾았을 때 이것을 기준으로
+	 * 상류를 더 훑는다. */
 	struct pci_dev *pdev;
+
+	/* [한국어] 찾은 그룹. NULL 이면 사슬 어디에도 그룹이 없었다는 뜻이고,
+	 * NULL 이 아니면 참조를 든 채로 담겨 있다. */
 	struct iommu_group *group;
 };
 
@@ -2216,23 +2316,54 @@ struct group_for_pci_data {
  * DMA alias iterator callback, return the last seen device.  Stop and return
  * the IOMMU group if we find one along the way.
  */
+/*
+ * [한국어] (위 영어 주석에 이어) 별칭 사슬을 훑는 콜백.
+ *
+ * @pdev:   지금 보고 있는 장치
+ * @alias:  그 장치가 쓰는 요청자 ID(여기서는 쓰지 않는다)
+ * @opaque: 결과를 담을 group_for_pci_data
+ * @return: 0 이 아니면 순회를 멈춘다 -- 그룹을 찾았다는 뜻이다.
+ *
+ * 매번 pdev 를 덮어쓰는 것이 의도다. 위 영어 주석대로 "마지막으로 본
+ * 장치"를 남기는 것이 목적이며, 그룹을 못 찾고 끝나면 그 마지막 장치가
+ * 별칭 사슬의 끝 -- IOMMU 에 실제로 보이는 요청자다.
+ *
+ * 반환값이 곧 "멈춤" 신호인 것도 pci_for_each_dma_alias 의 규약이다.
+ * 그룹을 찾자마자 더 볼 이유가 없다.
+ *
+ * 실행 컨텍스트: 장치 probe 경로. 잠들 수 있다.
+ *
+ * 호출 체인: pci_device_group → pci_for_each_dma_alias → [이 함수]
+ */
 static int get_pci_alias_or_group(struct pci_dev *pdev, u16 alias, void *opaque)
 {
 	struct group_for_pci_data *data = opaque;
 
-	data->pdev = pdev;
-	data->group = iommu_group_get(&pdev->dev);
+	data->pdev = pdev;	/* [한국어] 매번 덮어써 마지막으로 본 장치를 남긴다 */
+	data->group = iommu_group_get(&pdev->dev);	/* [한국어] 있으면 참조를 든 채 담긴다 */
 
-	return data->group != NULL;
+	return data->group != NULL;	/* [한국어] 찾았으면 0 이 아닌 값 — 순회가 여기서 멈춘다 */
 }
 
 /*
  * Generic device_group call-back function. It just allocates one
  * iommu-group per device.
  */
+/*
+ * [한국어] (위 영어 주석에 이어) 장치마다 그룹 하나를 주는 가장 단순한 정책.
+ *
+ * 언제 쓰나: 버스 구조상 장치들이 서로를 방해할 수 없는 경우다. 온칩
+ * 장치들이 각자 고유한 스트림 ID 로 IOMMU 에 보이는 ARM SoC 가 그렇고,
+ * 그런 곳에서는 별칭도 ACS 도 따질 것이 없다.
+ *
+ * PCI 의 pci_device_group() 과 대비된다 -- 그쪽은 토폴로지를 훑어야
+ * 하지만 여기서는 무조건 새 그룹이면 된다.
+ *
+ * 호출 체인: iommu_group_get_for_dev → ops->device_group → [이 함수]
+ */
 struct iommu_group *generic_device_group(struct device *dev)
 {
-	return iommu_group_alloc();
+	return iommu_group_alloc();	/* [한국어] 서로 방해할 수 없는 버스라 판정이 필요 없다 */
 }
 EXPORT_SYMBOL_GPL(generic_device_group);
 
