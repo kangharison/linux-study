@@ -2428,170 +2428,336 @@ static void build_inv_irt(struct iommu_cmd *cmd, u16 devid)
  * Writes the command to the IOMMUs command buffer and informs the
  * hardware about the new command.
  */
+/*
+ * [한국어]
+ * __iommu_queue_command_sync - 명령 버퍼에 자리가 나면 명령을 넣는다
+ *
+ * @iommu: 대상 유닛.
+ * @cmd: 넣을 명령.
+ * @sync: 나중에 완료 대기가 필요한 명령인가.
+ * @return: 0 성공, -EIO 면 버퍼가 비지 않는다.
+ *
+ * 링에 빈자리가 없으면 하드웨어가 처리하기를 기다린다. 0x20 을 여유로
+ * 두는 이유: 완료 대기 명령이 들어갈 자리를 남겨 둬야 한다. 그것마저
+ * 넣지 못하면 완료를 확인할 방법이 없어 교착에 빠진다.
+ *
+ * 첫 회에 udelay 를 건너뛰는 것이 작은 최적화다. 대부분의 경우 머리를
+ * 다시 읽는 것만으로 자리가 생긴다 — 하드웨어는 계속 처리하고 있고,
+ * 드라이버의 사본이 낡았을 뿐이다.
+ *
+ * need_sync 를 여기서 세우는 이유: 완료 대기를 매번 보내면 느리다. 넣은
+ * 명령이 있을 때만 나중에 한 번 보내면 되고, 이 플래그가 그것을 기억한다.
+ *
+ * 호출자가 락을 들고 있어야 한다 — 꼬리 사본과 버퍼를 함께 건드린다.
+ *
+ * 호출 체인:
+ *   iommu_queue_command_sync()/iommu_completion_wait() → [이 함수]
+ *     → copy_cmd_to_buffer()
+ */
 static int __iommu_queue_command_sync(struct amd_iommu *iommu,
 				      struct iommu_cmd *cmd,
 				      bool sync)
 {
-	unsigned int count = 0;
-	u32 left, next_tail;
+	unsigned int count = 0;	/* [한국어] 기다린 횟수 */
+	u32 left, next_tail;	/* [한국어] 남은 자리와 다음 꼬리 위치 */
 
-	next_tail = (iommu->cmd_buf_tail + sizeof(*cmd)) % CMD_BUFFER_SIZE;
+	next_tail = (iommu->cmd_buf_tail + sizeof(*cmd)) % CMD_BUFFER_SIZE;	/* [한국어] 이 명령을 넣으면 꼬리가 어디로 가는가 */
 again:
-	left      = (iommu->cmd_buf_head - next_tail) % CMD_BUFFER_SIZE;
+	left      = (iommu->cmd_buf_head - next_tail) % CMD_BUFFER_SIZE;	/* [한국어] 하드웨어가 처리한 지점까지의 여유 */
 
-	if (left <= 0x20) {
+	if (left <= 0x20) {	/* [한국어] 완료 대기가 들어갈 자리를 남겨 둬야 한다 — 그것마저 못 넣으면 교착이다 */
 		/* Skip udelay() the first time around */
-		if (count++) {
-			if (count == LOOP_TIMEOUT) {
-				pr_err("Command buffer timeout\n");
-				return -EIO;
+		if (count++) {	/* [한국어] (원 주석: 첫 회에는 udelay 를 건너뛴다) */
+			if (count == LOOP_TIMEOUT) {	/* [한국어] 하드웨어가 처리하지 않는다 */
+				pr_err("Command buffer timeout\n");	/* [한국어] 멈춘 상태다 */
+				return -EIO;	/* [한국어] 호출자가 무효화 실패를 알아야 한다 */
 			}
 
-			udelay(1);
+			udelay(1);	/* [한국어] 짧게 기다린다 */
 		}
 
 		/* Update head and recheck remaining space */
-		iommu->cmd_buf_head = readl(iommu->mmio_base +
-					    MMIO_CMD_HEAD_OFFSET);
+		iommu->cmd_buf_head = readl(iommu->mmio_base +	/* [한국어] (원 주석: 머리를 갱신하고 남은 자리를 다시 본다) */
+					    MMIO_CMD_HEAD_OFFSET);	/* [한국어] 대개 사본이 낡았을 뿐이고 하드웨어는 계속 처리하고 있다 */
 
-		goto again;
+		goto again;	/* [한국어] 다시 확인 */
 	}
 
-	copy_cmd_to_buffer(iommu, cmd);
+	copy_cmd_to_buffer(iommu, cmd);	/* [한국어] 자리가 생겼으므로 넣는다 */
 
 	/* Do we need to make sure all commands are processed? */
-	iommu->need_sync = sync;
+	iommu->need_sync = sync;	/* [한국어] (원 주석: 모든 명령이 처리됐는지 확인해야 하는가) 완료 대기를 매번 보내지 않기 위한 표시 */
 
-	return 0;
+	return 0;	/* [한국어] 큐에 들어갔다 */
 }
 
+/*
+ * [한국어]
+ * iommu_queue_command_sync - 락을 잡고 명령을 넣는다
+ *
+ * @iommu: 대상 유닛.
+ * @cmd: 넣을 명령.
+ * @sync: 완료 대기가 필요한가.
+ * @return: 0 성공, 음수면 실패.
+ *
+ * 락만 담당하는 껍데기다. 완료 대기 경로는 락을 더 넓게 잡아야 해서
+ * 안쪽 함수를 직접 부르므로, 둘이 나뉘어 있다.
+ *
+ * irqsave 인 이유: 무효화가 인터럽트를 끈 문맥에서도 불린다.
+ */
 static int iommu_queue_command_sync(struct amd_iommu *iommu,
 				    struct iommu_cmd *cmd,
 				    bool sync)
 {
-	unsigned long flags;
-	int ret;
+	unsigned long flags;	/* [한국어] 인터럽트 상태 저장용 */
+	int ret;	/* [한국어] 결과 */
 
-	raw_spin_lock_irqsave(&iommu->lock, flags);
-	ret = __iommu_queue_command_sync(iommu, cmd, sync);
-	raw_spin_unlock_irqrestore(&iommu->lock, flags);
+	raw_spin_lock_irqsave(&iommu->lock, flags);	/* [한국어] 꼬리 사본과 버퍼를 함께 건드린다. 무효화가 인터럽트를 끈 문맥에서도 불려 irqsave */
+	ret = __iommu_queue_command_sync(iommu, cmd, sync);	/* [한국어] 실제 삽입 */
+	raw_spin_unlock_irqrestore(&iommu->lock, flags);	/* [한국어] 완료 */
 
-	return ret;
+	return ret;	/* [한국어] 성패 */
 }
 
+/*
+ * [한국어]
+ * iommu_queue_command - 명령을 넣는다 (완료 대기 필요 표시와 함께)
+ *
+ * @iommu: 대상 유닛.
+ * @cmd: 넣을 명령.
+ * @return: 0 성공, 음수면 실패.
+ *
+ * 대부분의 호출자가 쓰는 입구다. sync 를 참으로 넘겨, 이후
+ * iommu_completion_wait 가 실제로 대기하게 만든다.
+ */
 static int iommu_queue_command(struct amd_iommu *iommu, struct iommu_cmd *cmd)
 {
-	return iommu_queue_command_sync(iommu, cmd, true);
+	return iommu_queue_command_sync(iommu, cmd, true);	/* [한국어] sync 를 참으로 — 이후 완료 대기가 실제로 기다리게 한다 */
 }
 
+/*
+ * [한국어]
+ * get_cmdsem_val - 다음 완료 순번을 발급한다
+ *
+ * @iommu: 대상 유닛.
+ * @return: 새 순번.
+ *
+ * 매번 증가시키는 것이 핵심이다. 고정값을 쓰면 옛 완료의 흔적과 새 완료를
+ * 구별할 수 없어, 아직 끝나지 않은 명령을 끝난 것으로 착각한다.
+ *
+ * 락을 요구하는 이유: 두 스레드가 같은 순번을 받으면 한쪽이 남의 완료를
+ * 자기 것으로 오인한다. lockdep_assert 가 그 계약을 코드로 못박는다.
+ */
 static u64 get_cmdsem_val(struct amd_iommu *iommu)
 {
-	lockdep_assert_held(&iommu->lock);
-	return ++iommu->cmd_sem_val;
+	lockdep_assert_held(&iommu->lock);	/* [한국어] 두 스레드가 같은 순번을 받으면 남의 완료를 자기 것으로 오인한다 */
+	return ++iommu->cmd_sem_val;	/* [한국어] 매번 증가시켜야 옛 완료의 흔적과 구별된다 */
 }
 
 /*
  * This function queues a completion wait command into the command
  * buffer of an IOMMU
  */
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * iommu_completion_wait - 지금까지 넣은 명령이 모두 끝날 때까지 기다린다
+ *
+ * @iommu: 대상 유닛.
+ * @return: 0 성공, 음수면 타임아웃이나 큐 오류.
+ *
+ * 무효화가 실제로 적용됐음을 보장하는 유일한 수단이다. 이 함수가 반환한
+ * 뒤에야 호출자는 매핑을 놓거나 페이지를 재사용해도 된다.
+ *
+ * need_sync 검사가 이 함수의 비용을 줄인다. 넣은 명령이 없으면 기다릴
+ * 것도 없으므로 곧바로 돌아간다 — 완료 대기는 하드웨어를 멈춰 세우는
+ * 일이라 공짜가 아니다.
+ *
+ * 락을 순번 발급부터 명령 삽입까지 유지하는 이유: 그 사이에 다른 스레드가
+ * 끼어들어 자기 완료 대기를 넣으면, 순번의 순서와 명령의 순서가 어긋난다.
+ * 그러면 남의 완료를 자기 것으로 보게 된다.
+ *
+ * 대기 자체는 락 밖에서 한다 — 길 수 있고, 그동안 다른 CPU 가 명령을
+ * 넣지 못할 이유가 없다.
+ *
+ * 호출 체인:
+ *   무효화 경로 전반 → [이 함수] → build_completion_wait() → wait_on_sem()
+ */
 static int iommu_completion_wait(struct amd_iommu *iommu)
 {
-	struct iommu_cmd cmd;
-	unsigned long flags;
-	int ret;
-	u64 data;
+	struct iommu_cmd cmd;	/* [한국어] 완료 대기 명령 */
+	unsigned long flags;	/* [한국어] 인터럽트 상태 저장용 */
+	int ret;	/* [한국어] 결과 */
+	u64 data;	/* [한국어] 이번 대기의 순번 */
 
-	if (!iommu->need_sync)
-		return 0;
+	if (!iommu->need_sync)	/* [한국어] 넣은 명령이 없으면 */
+		return 0;	/* [한국어] 기다릴 것이 없다 — 완료 대기는 하드웨어를 멈춰 세우는 비싼 일이다 */
 
-	raw_spin_lock_irqsave(&iommu->lock, flags);
+	raw_spin_lock_irqsave(&iommu->lock, flags);	/* [한국어] 순번 발급부터 삽입까지 하나의 단위여야 한다 */
 
-	data = get_cmdsem_val(iommu);
-	build_completion_wait(&cmd, iommu, data);
+	data = get_cmdsem_val(iommu);	/* [한국어] 새 순번 */
+	build_completion_wait(&cmd, iommu, data);	/* [한국어] 그 값을 쓰라는 명령 */
 
-	ret = __iommu_queue_command_sync(iommu, &cmd, false);
-	raw_spin_unlock_irqrestore(&iommu->lock, flags);
+	ret = __iommu_queue_command_sync(iommu, &cmd, false);	/* [한국어] 이 명령 자체는 완료 대기가 필요 없다 */
+	raw_spin_unlock_irqrestore(&iommu->lock, flags);	/* [한국어] 순서가 어긋나면 남의 완료를 자기 것으로 본다 */
 
-	if (ret)
-		return ret;
+	if (ret)	/* [한국어] 큐에 넣지 못했으면 */
+		return ret;	/* [한국어] 기다릴 것이 없다 */
 
-	ret = wait_on_sem(iommu, data);
+	ret = wait_on_sem(iommu, data);	/* [한국어] 대기는 락 밖에서 — 길 수 있고 다른 CPU 를 막을 이유가 없다 */
 
-	return ret;
+	return ret;	/* [한국어] 반환 후에는 매핑을 놓아도 안전하다 */
 }
 
+/*
+ * [한국어]
+ * domain_flush_complete - 이 도메인과 관련된 모든 유닛의 완료를 기다린다
+ *
+ * @domain: 대상 도메인.
+ *
+ * 도메인에 붙은 장치가 여러 유닛에 흩어져 있을 수 있고, 무효화 명령은
+ * 유닛마다 따로 갔다. 그 모두가 끝나야 매핑을 놓아도 안전하다.
+ *
+ * iommu_array 를 훑는 것이 그 목록이다. 참조 수로 관리되어, 장치가 없는
+ * 유닛은 애초에 목록에 없다.
+ *
+ * 락을 요구하는 이유: 순회 중에 장치가 붙거나 떨어지면 목록이 바뀐다.
+ *
+ * 호출 체인:
+ *   amd_iommu_domain_flush_pages() 등 → [이 함수] → iommu_completion_wait()
+ */
 static void domain_flush_complete(struct protection_domain *domain)
 {
-	struct pdom_iommu_info *pdom_iommu_info;
-	unsigned long i;
+	struct pdom_iommu_info *pdom_iommu_info;	/* [한국어] 유닛별 참조 정보 */
+	unsigned long i;	/* [한국어] xarray 인덱스 */
 
-	lockdep_assert_held(&domain->lock);
+	lockdep_assert_held(&domain->lock);	/* [한국어] 순회 중 장치가 붙거나 떨어지면 목록이 바뀐다 */
 
 	/*
 	 * Devices of this domain are behind this IOMMU
 	 * We need to wait for completion of all commands.
 	 */
-	 xa_for_each(&domain->iommu_array, i, pdom_iommu_info)
-		iommu_completion_wait(pdom_iommu_info->iommu);
+	 xa_for_each(&domain->iommu_array, i, pdom_iommu_info)	/* [한국어] (원 주석: 이 도메인의 장치들이 이 IOMMU 뒤에 있어 모든 명령의 완료를 기다려야 한다) */
+		iommu_completion_wait(pdom_iommu_info->iommu);	/* [한국어] 장치가 없는 유닛은 애초에 목록에 없다 */
 }
 
+/*
+ * [한국어]
+ * iommu_flush_dte - 장치 테이블 항목 캐시를 무효화한다
+ *
+ * @iommu: 대상 유닛.
+ * @devid: 대상 장치.
+ * @return: 0 성공, 음수면 큐에 넣지 못했다.
+ *
+ * 명령을 넣기만 하고 기다리지 않는다. 여러 장치의 DTE 를 한꺼번에 고칠
+ * 때 매번 기다리면 느리므로, 대기는 호출자가 마지막에 한 번 한다.
+ */
 static int iommu_flush_dte(struct amd_iommu *iommu, u16 devid)
 {
-	struct iommu_cmd cmd;
+	struct iommu_cmd cmd;	/* [한국어] 무효화 명령 */
 
-	build_inv_dte(&cmd, devid);
+	build_inv_dte(&cmd, devid);	/* [한국어] 그 장치의 DTE 캐시를 지우라는 명령 */
 
-	return iommu_queue_command(iommu, &cmd);
+	return iommu_queue_command(iommu, &cmd);	/* [한국어] 넣기만 한다 — 대기는 호출자가 마지막에 한 번 */
 }
 
+/*
+ * [한국어]
+ * iommu_flush_dte_sync - DTE 캐시를 무효화하고 완료까지 기다린다
+ *
+ * @iommu: 대상 유닛.
+ * @devid: 대상 장치.
+ *
+ * update_dte256 이 쓰는 형태다. 그 함수는 DTE 를 여러 단계로 나눠 쓰는데,
+ * 각 단계 사이에 하드웨어가 옛 캐시를 보면 안 되므로 매번 완료를 기다려야
+ * 한다.
+ *
+ * 큐에 넣지 못했으면 기다리지 않는 이유: 기다릴 명령이 없다.
+ */
 static void iommu_flush_dte_sync(struct amd_iommu *iommu, u16 devid)
 {
-	int ret;
+	int ret;	/* [한국어] 큐 삽입 결과 */
 
-	ret = iommu_flush_dte(iommu, devid);
-	if (!ret)
-		iommu_completion_wait(iommu);
+	ret = iommu_flush_dte(iommu, devid);	/* [한국어] 명령을 넣고 */
+	if (!ret)	/* [한국어] 넣었으면 */
+		iommu_completion_wait(iommu);	/* [한국어] 기다린다. update_dte256 의 단계 사이에서는 이 대기가 필수다 */
 }
 
+/*
+ * [한국어]
+ * amd_iommu_flush_dte_all - 이 유닛의 모든 DTE 캐시를 무효화한다
+ *
+ * @iommu: 대상 유닛.
+ *
+ * 장치마다 명령을 하나씩 넣고 마지막에 한 번 기다린다. 매번 기다리면
+ * 65536번의 왕복이 되어 부팅이 눈에 띄게 느려진다.
+ *
+ * 초기화 직후처럼 캐시 상태를 알 수 없을 때 쓴다.
+ */
 static void amd_iommu_flush_dte_all(struct amd_iommu *iommu)
 {
-	u32 devid;
-	u16 last_bdf = iommu->pci_seg->last_bdf;
+	u32 devid;	/* [한국어] 장치 순회 인덱스 */
+	u16 last_bdf = iommu->pci_seg->last_bdf;	/* [한국어] 이 세그먼트의 최대 장치 id */
 
-	for (devid = 0; devid <= last_bdf; ++devid)
-		iommu_flush_dte(iommu, devid);
+	for (devid = 0; devid <= last_bdf; ++devid)	/* [한국어] 모든 장치에 대해 */
+		iommu_flush_dte(iommu, devid);	/* [한국어] 명령만 넣는다 */
 
-	iommu_completion_wait(iommu);
+	iommu_completion_wait(iommu);	/* [한국어] 마지막에 한 번 — 매번 기다리면 65536번의 왕복이 된다 */
 }
 
 /*
  * This function uses heavy locking and may disable irqs for some time. But
  * this is no issue because it is only called during resume.
  */
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * amd_iommu_flush_tlb_all - 모든 도메인의 IOTLB 를 무효화한다
+ *
+ * @iommu: 대상 유닛.
+ *
+ * 도메인 id 를 하나씩 지정해 명령을 넣는다. 원 주석이 밝히듯 락을 오래
+ * 잡고 인터럽트를 오래 끄지만, 레주메 경로에서만 불려 문제되지 않는다.
+ *
+ * 도메인 id 의 상한으로 last_bdf 를 쓰는 것이 눈에 띈다. 도메인 id 공간은
+ * 실제로는 더 넓지만, 장치 수보다 많은 도메인이 있을 수 없으므로 그것으로
+ * 충분하다.
+ */
 static void amd_iommu_flush_tlb_all(struct amd_iommu *iommu)
 {
-	u32 dom_id;
-	u16 last_bdf = iommu->pci_seg->last_bdf;
+	u32 dom_id;	/* [한국어] 도메인 순회 인덱스 */
+	u16 last_bdf = iommu->pci_seg->last_bdf;	/* [한국어] 장치 수보다 많은 도메인은 있을 수 없어 이것으로 충분하다 */
 
-	for (dom_id = 0; dom_id <= last_bdf; ++dom_id) {
-		struct iommu_cmd cmd;
-		build_inv_iommu_pages(&cmd, 0, CMD_INV_IOMMU_ALL_PAGES_ADDRESS,
-				      dom_id, IOMMU_NO_PASID, false);
-		iommu_queue_command(iommu, &cmd);
+	for (dom_id = 0; dom_id <= last_bdf; ++dom_id) {	/* [한국어] 도메인마다 */
+		struct iommu_cmd cmd;	/* [한국어] 무효화 명령 */
+		build_inv_iommu_pages(&cmd, 0, CMD_INV_IOMMU_ALL_PAGES_ADDRESS,	/* [한국어] 주소 전체를 뜻하는 특수 주소 */
+				      dom_id, IOMMU_NO_PASID, false);	/* [한국어] 그 도메인의 모든 매핑 */
+		iommu_queue_command(iommu, &cmd);	/* [한국어] 명령만 넣는다 */
 	}
 
-	iommu_completion_wait(iommu);
+	iommu_completion_wait(iommu);	/* [한국어] 마지막에 한 번 기다린다 */
 }
 
+/*
+ * [한국어]
+ * amd_iommu_flush_tlb_domid - 한 도메인의 IOTLB 를 통째로 무효화한다
+ *
+ * @iommu: 대상 유닛.
+ * @dom_id: 대상 도메인.
+ *
+ * 범위를 지정하지 않고 그 도메인의 모든 매핑을 지운다. 도메인의 페이지
+ * 테이블을 통째로 바꾸거나, 지울 범위가 너무 넓어 범위 지정이 무의미할
+ * 때 쓴다.
+ */
 static void amd_iommu_flush_tlb_domid(struct amd_iommu *iommu, u32 dom_id)
 {
-	struct iommu_cmd cmd;
+	struct iommu_cmd cmd;	/* [한국어] 무효화 명령 */
 
-	build_inv_iommu_pages(&cmd, 0, CMD_INV_IOMMU_ALL_PAGES_ADDRESS,
-			      dom_id, IOMMU_NO_PASID, false);
-	iommu_queue_command(iommu, &cmd);
+	build_inv_iommu_pages(&cmd, 0, CMD_INV_IOMMU_ALL_PAGES_ADDRESS,	/* [한국어] 범위를 지정하지 않고 */
+			      dom_id, IOMMU_NO_PASID, false);	/* [한국어] 그 도메인의 모든 매핑을 지운다 */
+	iommu_queue_command(iommu, &cmd);	/* [한국어] 넣고 */
 
-	iommu_completion_wait(iommu);
+	iommu_completion_wait(iommu);	/* [한국어] 완료까지 기다린다 */
 }
 
 static int iommu_flush_pages_v1_hdom_ids(struct protection_domain *pdom, u64 address, size_t size)
