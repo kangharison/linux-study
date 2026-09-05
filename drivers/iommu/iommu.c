@@ -3564,6 +3564,30 @@ static bool domain_iommu_ops_compatible(const struct iommu_ops *ops,
 	return false;
 }
 
+/*
+ * [한국어]
+ * __iommu_attach_group - 그룹을 새 도메인에 붙인다 (락은 호출자가 든다)
+ *
+ * @domain: 붙일 도메인
+ * @group:  대상 그룹
+ * @return: 0 이면 성공. -EBUSY 면 이미 남이 쓰고 있고, -EINVAL 이면 맞지 않는다.
+ *
+ * 두 가지를 확인한 뒤 실제 전환에 넘긴다.
+ *
+ * -EBUSY 검사가 소유권의 실질이다. 그룹이 코어의 도메인(기본/차단)에
+ * 있을 때만 남이 가져갈 수 있다. 이미 다른 도메인에 붙어 있다면 누군가
+ * 이 그룹을 쓰고 있다는 뜻이고, 그 위에 덮어쓰면 그쪽이 모르는 사이에
+ * 주소 공간이 바뀐다.
+ *
+ * -EINVAL 은 도메인과 IOMMU 가 맞지 않는다는 뜻이다. 도메인은 그것을
+ * 만든 IOMMU 의 페이지 테이블 형식을 가지므로, 다른 벤더의 IOMMU 에
+ * 붙일 수 없다. 위 iommu_attach_group 의 영어 주석대로 이 실패는 다른
+ * 도메인으로는 성공할 수 있는 종류다.
+ *
+ * 실행 컨텍스트: group->mutex 를 든 채. 잠들 수 있다.
+ *
+ * 호출 체인: iommu_attach_group / iommu_attach_device → [이 함수]
+ */
 static int __iommu_attach_group(struct iommu_domain *domain,
 				struct iommu_group *group)
 {
@@ -3571,12 +3595,12 @@ static int __iommu_attach_group(struct iommu_domain *domain,
 
 	if (group->domain && group->domain != group->default_domain &&
 	    group->domain != group->blocking_domain)
-		return -EBUSY;
+		return -EBUSY;	/* [한국어] 코어 소유의 도메인에 있을 때만 가져갈 수 있다 — 아니면 이미 남이 쓰는 중이다 */
 
 	dev = iommu_group_first_dev(group);
 	if (!dev_has_iommu(dev) ||
 	    !domain_iommu_ops_compatible(dev_iommu_ops(dev), domain))
-		return -EINVAL;
+		return -EINVAL;	/* [한국어] 도메인은 만든 IOMMU 의 페이지 테이블 형식을 가진다 — 다른 벤더에는 못 붙인다 */
 
 	return __iommu_group_set_domain(group, domain);
 }
@@ -3593,18 +3617,61 @@ static int __iommu_attach_group(struct iommu_domain *domain,
  * the group. In this case attaching a different domain to the
  * group may succeed.
  */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어) 그룹을 도메인에 붙이는 공개 API.
+ *
+ * iommu_attach_device 와 달리 장치 수를 따지지 않는다. 호출자가 그룹을
+ * 옮긴다는 것을 이미 알고 부르는 것이므로, 여러 장치가 함께 움직이는
+ * 것이 놀랄 일이 아니다.
+ *
+ * 락만 잡고 안쪽으로 넘긴다 -- 안쪽 판은 락을 이미 든 경로에서도
+ * 불리기 때문에 나뉘어 있다.
+ *
+ * 호출 체인: VFIO/iommufd → [이 함수] → __iommu_attach_group
+ */
 int iommu_attach_group(struct iommu_domain *domain, struct iommu_group *group)
 {
 	int ret;
 
 	mutex_lock(&group->mutex);
-	ret = __iommu_attach_group(domain, group);
+	ret = __iommu_attach_group(domain, group);	/* [한국어] 락을 이미 든 경로도 있어 안쪽 판이 따로 있다 */
 	mutex_unlock(&group->mutex);
 
 	return ret;
 }
 EXPORT_SYMBOL_GPL(iommu_attach_group);
 
+/*
+ * [한국어]
+ * __iommu_device_set_domain - 장치 하나를 새 도메인으로 옮긴다
+ *
+ * @group:      소속 그룹
+ * @dev:        옮길 장치
+ * @new_domain: 옮겨 갈 도메인
+ * @old_domain: 지금 붙어 있는 도메인. 드라이버의 원자적 교체에 쓰인다.
+ * @flags:      IOMMU_SET_DOMAIN_MUST_SUCCEED 이면 실패해도 물러설 수 없다
+ * @return: 0 이면 성공, 음수 errno
+ *
+ * 세 가지 특수 처리가 들어 있다.
+ *
+ * 첫째는 항등 매핑이 필수인 장치다. 위 영어 주석대로 펌웨어가 그렇게
+ * 요구한 장치를 차단 도메인에 넣으면 펌웨어가 쓰던 접근이 끊긴다.
+ * 그래서 거절하며, 그 결과로 이런 장치는 VFIO 나 iommufd 로 넘길 수도
+ * 없다 -- 소유권을 가져가는 과정이 차단 도메인을 거치기 때문이다.
+ *
+ * 둘째는 미뤄 둔 붙이기다. 아직 실제로 붙지 않은 장치를 기본 도메인으로
+ * 옮기라는 요청은 할 일이 없다 -- 어차피 첫 DMA 때 그리로 붙을 것이다.
+ * 반면 다른 도메인으로 가야 한다면 지금 붙여야 하므로 표시를 지운다.
+ *
+ * 셋째가 실패 처리이며 위 영어 주석이 그 의도를 밝힌다. 반드시 성공해야
+ * 하는 경로에서 실패했다면, 차라리 차단 도메인에라도 붙여 장치가 사라진
+ * 페이지 테이블을 계속 보는 것(use-after-free)을 막는다. 최신 드라이버는
+ * 차단 도메인을 실패할 수 없는 정적 객체로 두라고 권한다.
+ *
+ * 실행 컨텍스트: group->mutex 를 든 채. 잠들 수 있다.
+ *
+ * 호출 체인: __iommu_group_set_domain_internal → [이 함수] → __iommu_attach_device
+ */
 static int __iommu_device_set_domain(struct iommu_group *group,
 				     struct device *dev,
 				     struct iommu_domain *new_domain,
@@ -3620,18 +3687,21 @@ static int __iommu_device_set_domain(struct iommu_group *group,
 	 * being used with iommu_group_claim_dma_owner() which will block
 	 * vfio and iommufd as well.
 	 */
+	/* [한국어] 위 영어 주석대로 항등 매핑이 필수인 장치는 차단할 수 없다.
+	 * 그 부작용으로 이런 장치는 사용자 공간에 넘길 수도 없는데, 소유권을
+	 * 가져가는 과정 자체가 차단 도메인을 거치기 때문이다. */
 	if (dev->iommu->require_direct &&
 	    (new_domain->type == IOMMU_DOMAIN_BLOCKED ||
 	     new_domain == group->blocking_domain)) {
-		dev_warn(dev,
+		dev_warn(dev,	/* [한국어] 펌웨어 요구와 사용자 의도가 충돌한 것이라 벤더 문의를 안내한다 */
 			 "Firmware has requested this device have a 1:1 IOMMU mapping, rejecting configuring the device without a 1:1 mapping. Contact your platform vendor.\n");
 		return -EINVAL;
 	}
 
-	if (dev->iommu->attach_deferred) {
+	if (dev->iommu->attach_deferred) {	/* [한국어] 아직 실제로는 아무 도메인에도 붙지 않은 장치 */
 		if (new_domain == group->default_domain)
-			return 0;
-		dev->iommu->attach_deferred = 0;
+			return 0;	/* [한국어] 어차피 첫 DMA 때 그리로 붙는다 — 지금 할 일이 없다 */
+		dev->iommu->attach_deferred = 0;	/* [한국어] 다른 도메인으로 가야 하니 지금 붙인다 */
 	}
 
 	ret = __iommu_attach_device(new_domain, dev, old_domain);
@@ -3641,11 +3711,14 @@ static int __iommu_device_set_domain(struct iommu_group *group,
 		 * of avoiding a UAF. Modern drivers should implement blocking
 		 * domains as global statics that cannot fail.
 		 */
+		/* [한국어] 위 영어 주석대로 물러설 곳이 없는 경로에서 실패했다면,
+		 * 차단 도메인에라도 붙여 장치가 곧 사라질 페이지 테이블을 계속
+		 * 보는 것을 막는다. */
 		if ((flags & IOMMU_SET_DOMAIN_MUST_SUCCEED) &&
 		    group->blocking_domain &&
 		    group->blocking_domain != new_domain)
 			__iommu_attach_device(group->blocking_domain, dev,
-					      old_domain);
+					      old_domain);	/* [한국어] 이것마저 실패하면 할 수 있는 것이 없다 — 결과를 보지 않는다 */
 		return ret;
 	}
 	return 0;
@@ -3666,27 +3739,67 @@ static int __iommu_device_set_domain(struct iommu_group *group,
  * members, but we wish to group them at a higher level (ex. untrusted
  * multi-function PCI devices).  Thus we attach each device.
  */
+/*
+ * [한국어] (위 영어 주석에 이어) 그룹의 도메인을 실제로 갈아 끼운다.
+ * 이 파일에서 도메인 전환의 유일한 구현이며, 모든 전환이 여기를 지난다.
+ *
+ * 위 영어 주석의 두 번째 문단이 왜 장치마다 도는지 밝힌다. IOMMU 의
+ * 자연스러운 단위는 그룹이지만 API 는 장치와 도메인으로 되어 있고,
+ * 게다가 하드웨어가 구별할 수 있는데도 정책적으로 묶은 그룹이 있어
+ * (신뢰할 수 없는 다기능 PCI 장치 같은) 그룹 대표 하나로는 부족하다.
+ * 그래서 소속 장치를 하나씩 붙인다.
+ *
+ * 전환이 원자적이지 않아도 되는 이유도 그 주석에 있다. 전환 중 DMA 는
+ * 버려져도 좋지만, 옛 도메인 아니면 새 도메인 둘 중 하나만 보여야 한다 --
+ * 그 사이의 정의되지 않은 상태는 안 된다.
+ *
+ * 실패 처리가 두 갈래인 것이 이 함수의 핵심이다.
+ *
+ * 평범한 경로(플래그 0)는 err_revert 로 가서 이미 옮긴 장치들을 되돌린다.
+ * 실패한 장치 자신은 되돌릴 것이 없으므로 건너뛰고, 그 앞의 것들만
+ * 옛 도메인으로 되돌린다.
+ *
+ * MUST_SUCCEED 경로는 되돌리지 않고 나머지 장치도 계속 시도한다. 위
+ * 영어 주석대로 이 경로는 이미 무언가를 해체하는 중이라 옛 도메인이 곧
+ * 사라지기 때문이다. 되돌리면 사라질 페이지 테이블로 되돌리는 셈이 된다.
+ * 그래서 최대한 밀고 나가며, 드라이버에게 최소한 옛 도메인 참조라도
+ * 놓아 달라고 요구한다.
+ *
+ * group->domain 을 마지막에 쓰는 것에 주의할 것. 도중에 실패하면 그룹은
+ * 여전히 옛 도메인을 가리키고, 그것이 err_revert 가 되돌릴 목표가 된다.
+ *
+ * @group:      대상 그룹
+ * @new_domain: 옮겨 갈 도메인
+ * @flags:      MUST_SUCCEED 이면 되돌리지 않는다
+ * @return: 0 이면 성공. 음수면 실패이며, 되돌림 여부는 flags 에 달렸다.
+ *
+ * 실행 컨텍스트: group->mutex 를 든 채. 잠들 수 있다.
+ *
+ * 호출 체인: __iommu_group_set_domain(_nofail) → [이 함수] → __iommu_device_set_domain
+ */
 static int __iommu_group_set_domain_internal(struct iommu_group *group,
 					     struct iommu_domain *new_domain,
 					     unsigned int flags)
 {
-	struct group_device *last_gdev;
+	struct group_device *last_gdev;	/* [한국어] 실패한 장치. 되돌림에서 여기까지만 간다 */
 	struct group_device *gdev;
-	int result;
+	int result;	/* [한국어] MUST_SUCCEED 경로에서 마지막 오류를 담아 올린다 */
 	int ret;
 
 	lockdep_assert_held(&group->mutex);
 
 	if (group->domain == new_domain)
-		return 0;
+		return 0;	/* [한국어] 이미 거기 있다 — 하드웨어를 건드릴 이유가 없다 */
 
 	if (WARN_ON(!new_domain))
-		return -EINVAL;
+		return -EINVAL;	/* [한국어] 아무 도메인에도 안 붙은 상태는 허용되지 않는다 */
 
 	/*
 	 * This is a concurrent attach during a device reset. Reject it until
 	 * pci_dev_reset_iommu_done() attaches the device to group->domain.
 	 */
+	/* [한국어] 위 영어 주석대로 리셋 중에는 그룹이 물리 도메인에 가 있고,
+	 * 여기서 바꾸면 리셋이 끝난 뒤 되돌릴 대상이 어긋난다. */
 	if (group->resetting_domain)
 		return -EBUSY;
 
@@ -3696,10 +3809,13 @@ static int __iommu_group_set_domain_internal(struct iommu_group *group,
 	 * discarded during the transition. DMA must only be able to access
 	 * either new_domain or group->domain, never something else.
 	 */
+	/* [한국어] 위 영어 주석이 이 루프의 안전 규약이다 -- 전환 중 DMA 는
+	 * 버려져도 좋지만, 옛 도메인과 새 도메인 둘 중 하나만 보여야 한다.
+	 * 정의되지 않은 중간 상태가 없어야 한다는 뜻이다. */
 	result = 0;
 	for_each_group_device(group, gdev) {
 		ret = __iommu_device_set_domain(group, gdev->dev, new_domain,
-						group->domain, flags);
+						group->domain, flags);	/* [한국어] 옛 도메인을 함께 넘겨 원자적 교체를 가능하게 한다 */
 		if (ret) {
 			result = ret;
 			/*
@@ -3709,54 +3825,97 @@ static int __iommu_group_set_domain_internal(struct iommu_group *group,
 			 * drop its reference on the current domain so we don't
 			 * UAF.
 			 */
+			/* [한국어] 위 영어 주석대로, 물러설 수 없는 경로에서는
+			 * 되돌리지 않고 나머지도 계속 시도한다. 옛 도메인이 곧
+			 * 사라질 것이라 되돌려 봐야 사라질 곳으로 되돌리는 셈이다. */
 			if (flags & IOMMU_SET_DOMAIN_MUST_SUCCEED)
 				continue;
 			goto err_revert;
 		}
 	}
-	group->domain = new_domain;
-	return result;
+	group->domain = new_domain;	/* [한국어] 마지막에 쓴다 — 도중에 실패하면 이 값이 되돌림의 목표가 된다 */
+	return result;	/* [한국어] MUST_SUCCEED 에서 일부가 실패했으면 그 오류가 담겨 있다 */
 
 err_revert:
 	/*
 	 * This is called in error unwind paths. A well behaved driver should
 	 * always allow us to attach to a domain that was already attached.
 	 */
-	last_gdev = gdev;
+	/* [한국어] 위 영어 주석이 되돌림이 성립하는 근거다 -- 방금까지 붙어
+	 * 있던 도메인에 다시 붙는 것은 드라이버가 반드시 허용해야 한다. */
+	last_gdev = gdev;	/* [한국어] 실패한 그 장치 */
 	for_each_group_device(group, gdev) {
 		/* No need to revert the last gdev that failed to set domain */
 		if (gdev == last_gdev)
-			break;
+			break;	/* [한국어] 실패한 장치는 옮겨지지 않았으므로 되돌릴 것이 없다 */
 		/*
 		 * A NULL domain can happen only for first probe, in which case
 		 * we leave group->domain as NULL and let release clean
 		 * everything up.
 		 */
+		/* [한국어] 위 영어 주석대로 첫 probe 에서는 되돌릴 옛 도메인이
+		 * 아예 없다. 그대로 두면 해체 경로가 정리한다. */
 		if (group->domain)
-			WARN_ON(__iommu_device_set_domain(
+			WARN_ON(__iommu_device_set_domain(	/* [한국어] 되돌림도 실패하면 그룹 상태가 어긋난 채 남는다 — 기록만 남긴다 */
 				group, gdev->dev, group->domain, new_domain,
 				IOMMU_SET_DOMAIN_MUST_SUCCEED));
 	}
 	return ret;
 }
 
+/*
+ * [한국어]
+ * iommu_detach_group - 그룹을 코어 도메인으로 되돌린다
+ *
+ * @domain: 지금 붙어 있는 도메인(쓰지 않는다 — API 대칭을 위한 인자다)
+ * @group:  대상 그룹
+ * @return: 없음
+ *
+ * iommu_attach_group 의 짝이다. domain 인자를 실제로 쓰지 않는 것에
+ * 주의할 것 -- 어디로 되돌릴지는 소유권 상태가 정하지 호출자가 정하지
+ * 않기 때문이다. 인자가 남아 있는 것은 attach 와 모양을 맞추기 위해서다.
+ *
+ * 실행 컨텍스트: 드라이버·VFIO 문맥. 잠들 수 있다.
+ *
+ * 호출 체인: VFIO/iommufd → [이 함수] → __iommu_group_set_core_domain
+ */
 void iommu_detach_group(struct iommu_domain *domain, struct iommu_group *group)
 {
 	mutex_lock(&group->mutex);
-	__iommu_group_set_core_domain(group);
+	__iommu_group_set_core_domain(group);	/* [한국어] 어디로 갈지는 소유권이 정한다 — 인자의 domain 은 쓰지 않는다 */
 	mutex_unlock(&group->mutex);
 }
 EXPORT_SYMBOL_GPL(iommu_detach_group);
 
+/*
+ * [한국어]
+ * iommu_iova_to_phys - IOVA 를 물리 주소로 되돌린다
+ *
+ * @domain: 조회할 도메인
+ * @iova:   장치가 보는 주소
+ * @return: 물리 주소. 매핑이 없으면 0.
+ *
+ * 두 특수 도메인은 페이지 테이블을 볼 것도 없이 답이 정해져 있다.
+ * 통과 도메인은 주소가 곧 물리 주소이고, 차단 도메인은 어떤 주소도
+ * 유효하지 않다.
+ *
+ * 반환 0 의 모호함에 주의할 것 -- "매핑 없음"과 "물리 주소 0 에 매핑됨"을
+ * 구별하지 못한다. iommu_create_device_direct_mappings 가 주소 0 을 1 로
+ * 바꿔 묻는 것이 이 때문이다.
+ *
+ * 실행 컨텍스트: 어디서든. 잠들지 않는다.
+ *
+ * 호출 체인: DMA 계층·디버깅 → [이 함수] → ops->iova_to_phys
+ */
 phys_addr_t iommu_iova_to_phys(struct iommu_domain *domain, dma_addr_t iova)
 {
 	if (domain->type == IOMMU_DOMAIN_IDENTITY)
-		return iova;
+		return iova;	/* [한국어] 번역이 없는 도메인 — 주소가 곧 답이다 */
 
 	if (domain->type == IOMMU_DOMAIN_BLOCKED)
-		return 0;
+		return 0;	/* [한국어] 어떤 주소도 유효하지 않다 */
 
-	return domain->ops->iova_to_phys(domain, iova);
+	return domain->ops->iova_to_phys(domain, iova);	/* [한국어] 실제 페이지 테이블을 걸어 내려간다 */
 }
 EXPORT_SYMBOL_GPL(iommu_iova_to_phys);
 
