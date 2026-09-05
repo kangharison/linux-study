@@ -4,10 +4,40 @@
  * Pasha Tatashin <pasha.tatashin@soleen.com>
  */
 
-#ifndef __IOMMU_PAGES_H
+/*
+ * [한국어 설명] 페이지 테이블 페이지 할당자의 인터페이스 (drivers/iommu/iommu-pages.h)
+ *
+ * === 파일의 역할 ===
+ * iommu-pages.c 가 구현하는 API 와, 그것을 감싸는 인라인 헬퍼들이다. 여기서
+ * 중요한 것은 두 가지다.
+ *
+ * 첫째, struct ioptdesc 의 정의. 페이지 테이블 페이지 하나를 기술하는 구조체인데
+ * struct page 를 덮어쓰는 오버레이라, 필드 위치가 정확히 맞아야 한다. 그 검증은
+ * iommu-pages.c 의 static_assert 들이 한다.
+ *
+ * 둘째, 비일관 IOMMU 의 캐시 관리가 아키텍처마다 갈린다는 사실. x86 은 clflush 를
+ * 직접 부르고, 그 외에는 DMA API 를 캐시 관리 수단으로 빌려 쓴다. 그 차이가
+ * IOMMU_PAGES_USE_DMA_API 로 표현되며, 그 값에 따라 stop/free 경로의 구현 자체가
+ * 달라진다 — x86 은 되돌릴 DMA 매핑이 없어 아무 일도 하지 않는다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * 벤더 드라이버 / io-pgtable → [이 헤더] → iommu-pages.c → folio 할당자
+ *
+ * === 타 모듈과의 연결 ===
+ * - iommu-pages.c: 여기 선언된 것의 구현.
+ * - io-pgtable-arm.c 등: 페이지 테이블 페이지를 이 API 로 얻는다.
+ * - dma-iommu.c: iommu_pages_list 를 flush queue 항목에 담아 지연 해제한다.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * - struct ioptdesc            : 페이지 테이블 페이지의 서술자 (page 오버레이).
+ * - iommu_alloc_pages_node_sz(): 크기·노드 지정 할당.
+ * - iommu_pages_list_add/splice(): 지연 해제 목록 조작.
+ * - IOMMU_PAGES_USE_DMA_API    : 캐시 관리를 DMA API 로 하는가 (x86 은 0).
+ */
+#ifndef __IOMMU_PAGES_H	/* [한국어] 중복 포함 방지 */
 #define __IOMMU_PAGES_H
 
-#include <linux/iommu.h>
+#include <linux/iommu.h>	/* [한국어] struct iommu_pages_list 정의 */
 
 /**
  * struct ioptdesc - Memory descriptor for IOMMU page tables
@@ -17,51 +47,60 @@
  * understanding of the issues.
  */
 struct ioptdesc {
-	unsigned long __page_flags;
+	unsigned long __page_flags;	/* [한국어] struct page 의 flags 자리. 이 파일이 쓰지 않지만 자리를 맞춰야 오버레이가 성립한다 (위 영어 주석) */
 
-	struct list_head iopt_freelist_elm;
-	unsigned long __page_mapping;
-	union {
-		u8 incoherent;
-		pgoff_t __index;
+	struct list_head iopt_freelist_elm;	/* [한국어] 지연 해제 목록의 고리. struct page 의 lru 자리를 빌려 쓴다 */
+	unsigned long __page_mapping;	/* [한국어] page 의 mapping 자리. 쓰지 않는다 */
+	union {	/* [한국어] incoherent 플래그가 page 의 index 자리를 빌려 쓴다 */
+		u8 incoherent;	/* [한국어] 이 페이지의 캐시 관리가 시작되었는가. DMA 매핑이 걸려 있다는 뜻이며, 해제 전에 반드시 되돌려야 한다 */
+		pgoff_t __index;	/* [한국어] 원래 자리의 크기를 맞추기 위한 짝 */
 	};
-	void *_private;
+	void *_private;	/* [한국어] page 의 private 자리. 쓰지 않는다 */
 
-	unsigned int __page_type;
-	atomic_t __page_refcount;
-#ifdef CONFIG_MEMCG
-	unsigned long memcg_data;
+	unsigned int __page_type;	/* [한국어] page 의 종류 필드 */
+	atomic_t __page_refcount;	/* [한국어] 참조 계수 — folio_put 이 이 자리를 본다 */
+#ifdef CONFIG_MEMCG	/* [한국어] 메모리 cgroup 이 켜진 빌드에만 있는 필드 */
+	unsigned long memcg_data;	/* [한국어] cgroup 회계 자리 */
 #endif
 };
 
+/* [한국어] folio 를 페이지 테이블 서술자로 본다.
+ * 두 구조체가 같은 메모리를 다르게 해석하는 것이라 변환 비용이 없고,
+ * 필드 위치가 맞는지는 iommu-pages.c 의 static_assert 들이 보장한다. */
 static inline struct ioptdesc *folio_ioptdesc(struct folio *folio)
 {
-	return (struct ioptdesc *)folio;
+	return (struct ioptdesc *)folio;	/* [한국어] folio 를 이 서술자로 본다. 두 구조체가 같은 메모리를 다르게 해석하는 것이라 변환 비용이 없다 */
 }
 
+/* [한국어] 그 역. folio 계층의 API(참조 계수, 회계)를 부를 때 쓴다. */
 static inline struct folio *ioptdesc_folio(struct ioptdesc *iopt)
 {
-	return (struct folio *)iopt;
+	return (struct folio *)iopt;	/* [한국어] 그 역 */
 }
 
+/* [한국어] 가상 주소에서 서술자로.
+ * 해제 API 들이 주소만 받으므로 이 변환이 매번 필요하다. */
 static inline struct ioptdesc *virt_to_ioptdesc(void *virt)
 {
-	return folio_ioptdesc(virt_to_folio(virt));
+	return folio_ioptdesc(virt_to_folio(virt));	/* [한국어] 가상 주소에서 서술자로. 해제 경로가 주소만 받으므로 이 변환이 필요하다 */
 }
 
-void *iommu_alloc_pages_node_sz(int nid, gfp_t gfp, size_t size);
-void iommu_free_pages(void *virt);
-void iommu_put_pages_list(struct iommu_pages_list *list);
+void *iommu_alloc_pages_node_sz(int nid, gfp_t gfp, size_t size);	/* [한국어] NUMA 노드와 크기를 지정한 할당 */
+void iommu_free_pages(void *virt);	/* [한국어] 즉시 해제 */
+void iommu_put_pages_list(struct iommu_pages_list *list);	/* [한국어] 목록 단위 지연 해제 */
 
 /**
  * iommu_pages_list_add - add the page to a iommu_pages_list
  * @list: List to add the page to
  * @virt: Address returned from iommu_alloc_pages_node_sz()
  */
+/* [한국어] (위 영어 kernel-doc 에 이어)
+ * 페이지를 지연 해제 목록에 넣는다. 목록의 고리가 서술자 안에 있으므로 별도
+ * 할당이 없다 — 페이지 자신이 자기 목록 항목 역할을 한다. */
 static inline void iommu_pages_list_add(struct iommu_pages_list *list,
 					void *virt)
 {
-	list_add_tail(&virt_to_ioptdesc(virt)->iopt_freelist_elm, &list->pages);
+	list_add_tail(&virt_to_ioptdesc(virt)->iopt_freelist_elm, &list->pages);	/* [한국어] 페이지를 해제 대기 목록에 넣는다. 실제 반납은 IOTLB 무효화가 끝난 뒤에 일어난다 */
 }
 
 /**
@@ -72,19 +111,25 @@ static inline void iommu_pages_list_add(struct iommu_pages_list *list,
  * from must be re-initialized after calling this function if it is to be
  * used again.
  */
+/* [한국어] (위 영어 kernel-doc 에 이어)
+ * 한 목록을 다른 목록 끝에 통째로 옮긴다. dma-iommu 가 해제 경로에서 모은
+ * 페이지들을 flush queue 항목으로 넘길 때 쓰며, O(1) 이라 큰 목록도 비용이 없다.
+ * 원본은 무효가 되므로 재사용하려면 다시 초기화해야 한다. */
 static inline void iommu_pages_list_splice(struct iommu_pages_list *from,
 					   struct iommu_pages_list *to)
 {
-	list_splice(&from->pages, &to->pages);
+	list_splice(&from->pages, &to->pages);	/* [한국어] 한 목록을 다른 목록에 통째로 옮겨 붙인다. dma-iommu 가 해제 경로의 freelist 를 flush queue 항목으로 옮길 때 쓰며, 원본은 무효가 되므로 재사용하려면 다시 초기화해야 한다 (위 영어 주석) */
 }
 
 /**
  * iommu_pages_list_empty - True if the list is empty
  * @list: List to check
  */
+/* [한국어] (위 영어 kernel-doc 에 이어)
+ * 목록이 비었는가. 지연 해제 경로가 반납할 것이 있는지 볼 때 쓴다. */
 static inline bool iommu_pages_list_empty(struct iommu_pages_list *list)
 {
-	return list_empty(&list->pages);
+	return list_empty(&list->pages);	/* [한국어] 목록이 비었는가 */
 }
 
 /**
@@ -96,53 +141,56 @@ static inline bool iommu_pages_list_empty(struct iommu_pages_list *list)
  *
  * Returns the virtual address of the allocated page.
  */
+/* [한국어] (위 영어 kernel-doc 에 이어)
+ * NUMA 노드를 가리지 않는 할당. 현재 CPU 의 노드가 선택되므로, IOMMU 와 가까운
+ * 메모리를 원하면 대신 iommu_alloc_pages_node_sz 를 쓴다. */
 static inline void *iommu_alloc_pages_sz(gfp_t gfp, size_t size)
 {
-	return iommu_alloc_pages_node_sz(NUMA_NO_NODE, gfp, size);
+	return iommu_alloc_pages_node_sz(NUMA_NO_NODE, gfp, size);	/* [한국어] 노드를 가리지 않는 할당. 현재 CPU 의 노드가 선택된다 */
 }
 
-int iommu_pages_start_incoherent(void *virt, struct device *dma_dev);
-int iommu_pages_start_incoherent_list(struct iommu_pages_list *list,
-				      struct device *dma_dev);
+int iommu_pages_start_incoherent(void *virt, struct device *dma_dev);	/* [한국어] 비일관 IOMMU 를 위한 캐시 관리를 시작한다 */
+int iommu_pages_start_incoherent_list(struct iommu_pages_list *list,	/* [한국어] 목록 단위 판 */
+				      struct device *dma_dev);	/* [한국어] 캐시 관리를 대행할 IOMMU 장치 */
 
-#ifdef CONFIG_X86
-#define IOMMU_PAGES_USE_DMA_API 0
-#include <linux/cacheflush.h>
+#ifdef CONFIG_X86	/* [한국어] x86 은 캐시 관리 방식이 다르다 */
+#define IOMMU_PAGES_USE_DMA_API 0	/* [한국어] DMA API 를 쓰지 않는다. clflush 를 직접 부를 수 있어 매핑을 만들 이유가 없다 */
+#include <linux/cacheflush.h>	/* [한국어] clflush_cache_range */
 
 static inline void iommu_pages_flush_incoherent(struct device *dma_dev,
 						void *virt, size_t offset,
 						size_t len)
 {
-	clflush_cache_range(virt + offset, len);
+	clflush_cache_range(virt + offset, len);	/* [한국어] 해당 캐시라인들을 메모리로 밀어낸다. AMD IOMMU 처럼 일부 구성에서 페이지 테이블이 비일관인 경우에 쓴다 */
 }
-static inline void
-iommu_pages_stop_incoherent_list(struct iommu_pages_list *list,
-				 struct device *dma_dev)
+static inline void	/* [한국어] x86 에서는 되돌릴 것이 없다 */
+iommu_pages_stop_incoherent_list(struct iommu_pages_list *list,	/* [한국어] 목록 단위 캐시 관리 종료 */
+				 struct device *dma_dev)	/* [한국어] 쓰지 않는 인자 */
 {
 	/*
 	 * For performance leave the incoherent flag alone which turns this into
 	 * a NOP. For X86 the rest of the stop/free flow ignores the flag.
 	 */
 }
-static inline void iommu_pages_free_incoherent(void *virt,
-					       struct device *dma_dev)
+static inline void iommu_pages_free_incoherent(void *virt,	/* [한국어] x86 의 비일관 페이지 해제 */
+					       struct device *dma_dev)	/* [한국어] 쓰지 않는 인자 */
 {
-	iommu_free_pages(virt);
+	iommu_free_pages(virt);	/* [한국어] 되돌릴 DMA 매핑이 없으므로 보통의 해제와 같다 */
 }
-#else
-#define IOMMU_PAGES_USE_DMA_API 1
-#include <linux/dma-mapping.h>
+#else	/* [한국어] x86 이 아닌 아키텍처 (주로 ARM) */
+#define IOMMU_PAGES_USE_DMA_API 1	/* [한국어] DMA API 를 캐시 관리 수단으로 빌려 쓴다. 기존 ARM 드라이버들의 관행을 유지한 것이며, 그 대가로 매핑의 수명을 추적해야 한다 */
+#include <linux/dma-mapping.h>	/* [한국어] dma_sync/map/unmap */
 
 static inline void iommu_pages_flush_incoherent(struct device *dma_dev,
 						void *virt, size_t offset,
 						size_t len)
 {
-	dma_sync_single_for_device(dma_dev, (uintptr_t)virt + offset, len,
-				   DMA_TO_DEVICE);
+	dma_sync_single_for_device(dma_dev, (uintptr_t)virt + offset, len,	/* [한국어] DMA API 로 캐시를 밀어낸다. 이 호출이 성립하려면 그 페이지가 이미 dma_map_single 로 매핑되어 있어야 하고, 그것이 incoherent 플래그가 추적하는 상태다 */
+				   DMA_TO_DEVICE);	/* [한국어] IOMMU 가 페이지 테이블을 읽기만 하므로 이 방향 */
 }
-void iommu_pages_stop_incoherent_list(struct iommu_pages_list *list,
-				      struct device *dma_dev);
-void iommu_pages_free_incoherent(void *virt, struct device *dma_dev);
+void iommu_pages_stop_incoherent_list(struct iommu_pages_list *list,	/* [한국어] 실제 구현이 필요하다 — DMA 매핑을 되돌려야 한다 */
+				      struct device *dma_dev);	/* [한국어] 캐시 관리를 맡은 장치 */
+void iommu_pages_free_incoherent(void *virt, struct device *dma_dev);	/* [한국어] 매핑을 되돌린 뒤 해제한다 */
 #endif
 
 #endif /* __IOMMU_PAGES_H */
