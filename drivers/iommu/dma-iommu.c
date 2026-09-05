@@ -976,7 +976,7 @@ static int dma_info_to_prot(enum dma_data_direction dir, bool coherent,
 		return prot | IOMMU_READ;	/* [한국어] 읽기만 — 쓰기를 막는 것이 격리의 실질이다. 장치가 이 버퍼를 덮어쓰려 하면 폴트가 난다 */
 	case DMA_FROM_DEVICE:	/* [한국어] 장치가 메모리에 써 넣는다 */
 		return prot | IOMMU_WRITE;	/* [한국어] 쓰기만 */
-	default:
+	default:	/* [한국어] DMA_NONE 등 권한 없는 방향 */
 		return 0;	/* [한국어] DMA_NONE 등 — 권한 없는 매핑은 만들 수 없으므로 호출자가 실패로 다룬다 */
 	}
 }
@@ -1316,7 +1316,7 @@ int iommu_dma_mmap_noncontiguous(struct device *dev, struct vm_area_struct *vma,
 {
 	unsigned long count = PAGE_ALIGN(size) >> PAGE_SHIFT;	/* [한국어] 페이지 수 */
 
-	if (vma->vm_pgoff >= count || vma_pages(vma) > count - vma->vm_pgoff)
+	if (vma->vm_pgoff >= count || vma_pages(vma) > count - vma->vm_pgoff)	/* [한국어] 요청 범위가 할당 범위를 벗어난다 — 이 검사가 없으면 사용자가 이웃 커널 메모리를 매핑할 수 있다 */
 		return -ENXIO;	/* [한국어] 요청 범위가 할당 크기를 넘는다 */
 	return vm_map_pages(vma, sgt_handle(sgt)->pages, count);	/* [한국어] 사용자 공간에 이 페이지들을 매핑한다 */
 }
@@ -1692,7 +1692,7 @@ int iommu_dma_map_sg(struct device *dev, struct scatterlist *sg, int nents,
 			sg_dma_len(s) = sg->length;	/* [한국어] 길이 기록 */
 			sg_dma_mark_bus_address(s);	/* [한국어] 표식을 단다. iommu_map_sg 가 이 세그먼트를 건너뛰고, __finalise_sg 가 주소를 그대로 출력에 옮긴다 (위 영어 주석) */
 			continue;	/* [한국어] IOVA 길이 계산에서 제외 — 주소 공간을 쓰지 않는다 */
-		default:
+		default:	/* [한국어] 알 수 없는 P2PDMA 상태 */
 			ret = -EREMOTEIO;	/* [한국어] 이 장치에서 도달할 수 없는 P2P 메모리 */
 			goto out_restore_sg;	/* [한국어] 리스트를 원상 복구하고 실패 */
 		}
@@ -1757,238 +1757,238 @@ out:	/* [한국어] 지연 부착 실패도 합류 */
 void iommu_dma_unmap_sg(struct device *dev, struct scatterlist *sg, int nents,
 		enum dma_data_direction dir, unsigned long attrs)
 {
-	dma_addr_t end = 0, start;
-	struct scatterlist *tmp;
-	int i;
+	dma_addr_t end = 0, start;	/* [한국어] 해제할 IOVA 창의 양 끝. 매핑이 하나의 연속 창이므로 시작과 끝만 알면 된다 */
+	struct scatterlist *tmp;	/* [한국어] 순회 커서 */
+	int i;	/* [한국어] 인덱스 */
 
-	if (sg_dma_is_swiotlb(sg)) {
-		iommu_dma_unmap_sg_swiotlb(dev, sg, nents, dir, attrs);
-		return;
+	if (sg_dma_is_swiotlb(sg)) {	/* [한국어] 바운스 경로로 매핑되었다면 */
+		iommu_dma_unmap_sg_swiotlb(dev, sg, nents, dir, attrs);	/* [한국어] 세그먼트마다 개별 해제한다 — 그쪽은 병합하지 않았다 */
+		return;	/* [한국어] 해제 완료 */
 	}
 
-	if (!(attrs & DMA_ATTR_SKIP_CPU_SYNC))
-		iommu_dma_sync_sg_for_cpu(dev, sg, nents, dir);
+	if (!(attrs & DMA_ATTR_SKIP_CPU_SYNC))	/* [한국어] 호출자가 생략하라고 하지 않았으면 */
+		iommu_dma_sync_sg_for_cpu(dev, sg, nents, dir);	/* [한국어] 매핑을 지우기 전에 장치가 쓴 내용을 CPU 가 볼 수 있게 한다 */
 
 	/*
 	 * The scatterlist segments are mapped into a single
 	 * contiguous IOVA allocation, the start and end points
 	 * just have to be determined.
 	 */
-	for_each_sg(sg, tmp, nents, i) {
-		if (sg_dma_is_bus_address(tmp)) {
-			sg_dma_unmark_bus_address(tmp);
-			continue;
+	for_each_sg(sg, tmp, nents, i) {	/* [한국어] 1단계 — 창의 시작을 찾는다 (위 영어 주석) */
+		if (sg_dma_is_bus_address(tmp)) {	/* [한국어] P2PDMA 세그먼트는 IOVA 를 쓰지 않는다 */
+			sg_dma_unmark_bus_address(tmp);	/* [한국어] 표식만 지우고 */
+			continue;	/* [한국어] 건너뛴다 */
 		}
 
-		if (sg_dma_len(tmp) == 0)
-			break;
+		if (sg_dma_len(tmp) == 0)	/* [한국어] 길이 0 = 출력 리스트의 끝 (__finalise_sg 가 병합하며 남긴 빈 세그먼트) */
+			break;	/* [한국어] 여기까지 */
 
-		start = sg_dma_address(tmp);
-		break;
+		start = sg_dma_address(tmp);	/* [한국어] 첫 유효 세그먼트의 주소가 창의 시작이다 */
+		break;	/* [한국어] 찾았으므로 종료 */
 	}
 
-	nents -= i;
-	for_each_sg(tmp, tmp, nents, i) {
-		if (sg_dma_is_bus_address(tmp)) {
-			sg_dma_unmark_bus_address(tmp);
-			continue;
+	nents -= i;	/* [한국어] 이미 지나온 만큼 남은 개수를 줄인다 */
+	for_each_sg(tmp, tmp, nents, i) {	/* [한국어] 2단계 — 창의 끝을 찾는다. 시작 세그먼트부터 이어서 훑는다 */
+		if (sg_dma_is_bus_address(tmp)) {	/* [한국어] P2PDMA 세그먼트 */
+			sg_dma_unmark_bus_address(tmp);	/* [한국어] 표식 제거 */
+			continue;	/* [한국어] 건너뛴다 */
 		}
 
-		if (sg_dma_len(tmp) == 0)
-			break;
+		if (sg_dma_len(tmp) == 0)	/* [한국어] 리스트의 끝 */
+			break;	/* [한국어] 순회 종료 */
 
-		end = sg_dma_address(tmp) + sg_dma_len(tmp);
+		end = sg_dma_address(tmp) + sg_dma_len(tmp);	/* [한국어] 마지막 유효 세그먼트의 끝이 창의 끝이다 — 매번 갱신하므로 루프가 끝나면 최댓값이 남는다 */
 	}
 
-	if (end)
-		__iommu_dma_unmap(dev, start, end - start);
+	if (end)	/* [한국어] 해제할 IOVA 가 실제로 있었다면 */
+		__iommu_dma_unmap(dev, start, end - start);	/* [한국어] 창 전체를 한 번에 해제한다. 세그먼트 수와 무관하게 unmap 호출이 한 번이라는 점이 병합의 또 다른 이득이다 */
 }
 
 static void __iommu_dma_free(struct device *dev, size_t size, void *cpu_addr)
 {
-	size_t alloc_size = PAGE_ALIGN(size);
-	int count = alloc_size >> PAGE_SHIFT;
-	struct page *page = NULL, **pages = NULL;
+	size_t alloc_size = PAGE_ALIGN(size);	/* [한국어] 실제로 잡았던 크기 */
+	int count = alloc_size >> PAGE_SHIFT;	/* [한국어] 페이지 수 */
+	struct page *page = NULL, **pages = NULL;	/* [한국어] 단일 블록으로 잡았는지, 흩어진 페이지 배열인지 — 할당 경로가 여럿이라 여기서 판별한다 */
 
 	/* Non-coherent atomic allocation? Easy */
-	if (IS_ENABLED(CONFIG_DMA_DIRECT_REMAP) &&
-	    dma_free_from_pool(dev, cpu_addr, alloc_size))
-		return;
+	if (IS_ENABLED(CONFIG_DMA_DIRECT_REMAP) &&	/* [한국어] 아토믹 풀에서 잡은 것인지 먼저 확인한다 */
+	    dma_free_from_pool(dev, cpu_addr, alloc_size))	/* [한국어] 풀의 것이었으면 여기서 반납이 끝난다 */
+		return;	/* [한국어] 가장 단순한 경로 (위 영어 주석) */
 
-	if (is_vmalloc_addr(cpu_addr)) {
+	if (is_vmalloc_addr(cpu_addr)) {	/* [한국어] 가상 주소로 재매핑된 할당이면 */
 		/*
 		 * If it the address is remapped, then it's either non-coherent
 		 * or highmem CMA, or an iommu_dma_alloc_remap() construction.
 		 */
-		pages = dma_common_find_pages(cpu_addr);
-		if (!pages)
-			page = vmalloc_to_page(cpu_addr);
-		dma_common_free_remap(cpu_addr, alloc_size);
+		pages = dma_common_find_pages(cpu_addr);	/* [한국어] iommu_dma_alloc_remap 이 남긴 페이지 배열을 찾는다 */
+		if (!pages)	/* [한국어] 배열이 없다면 흩어진 것이 아니라 */
+			page = vmalloc_to_page(cpu_addr);	/* [한국어] 연속 블록을 재매핑한 경우다 (비일관 장치나 highmem CMA) */
+		dma_common_free_remap(cpu_addr, alloc_size);	/* [한국어] 가상 매핑 해제 */
 	} else {
 		/* Lowmem means a coherent atomic or CMA allocation */
-		page = virt_to_page(cpu_addr);
+		page = virt_to_page(cpu_addr);	/* [한국어] lowmem 주소 = 재매핑 없이 그대로 쓴 연속 블록 (위 영어 주석) */
 	}
 
-	if (pages)
-		__iommu_dma_free_pages(pages, count);
-	if (page)
-		dma_free_contiguous(dev, page, alloc_size);
+	if (pages)	/* [한국어] 흩어진 페이지들이었으면 */
+		__iommu_dma_free_pages(pages, count);	/* [한국어] 낱장으로 반납 */
+	if (page)	/* [한국어] 연속 블록이었으면 */
+		dma_free_contiguous(dev, page, alloc_size);	/* [한국어] CMA 또는 버디 할당자로 반납 */
 }
 
 void iommu_dma_free(struct device *dev, size_t size, void *cpu_addr,
 		dma_addr_t handle, unsigned long attrs)
 {
-	__iommu_dma_unmap(dev, handle, size);
-	__iommu_dma_free(dev, size, cpu_addr);
+	__iommu_dma_unmap(dev, handle, size);	/* [한국어] 장치 쪽 매핑을 먼저 지운다 — 페이지를 반납하기 전에 장치가 닿지 못하게 해야 한다 */
+	__iommu_dma_free(dev, size, cpu_addr);	/* [한국어] 그 다음 CPU 쪽 매핑과 페이지를 정리 */
 }
 
 static void *iommu_dma_alloc_pages(struct device *dev, size_t size,
 		struct page **pagep, gfp_t gfp, unsigned long attrs)
 {
-	bool coherent = dev_is_dma_coherent(dev);
-	size_t alloc_size = PAGE_ALIGN(size);
-	int node = dev_to_node(dev);
-	struct page *page = NULL;
-	void *cpu_addr;
+	bool coherent = dev_is_dma_coherent(dev);	/* [한국어] 캐시 일관성 여부 */
+	size_t alloc_size = PAGE_ALIGN(size);	/* [한국어] 페이지 단위로 올림 */
+	int node = dev_to_node(dev);	/* [한국어] 장치와 가까운 NUMA 노드 */
+	struct page *page = NULL;	/* [한국어] 확보한 연속 블록 */
+	void *cpu_addr;	/* [한국어] CPU 가 쓸 주소 */
 
-	page = dma_alloc_contiguous(dev, alloc_size, gfp);
-	if (!page)
-		page = alloc_pages_node(node, gfp, get_order(alloc_size));
-	if (!page)
-		return NULL;
+	page = dma_alloc_contiguous(dev, alloc_size, gfp);	/* [한국어] 먼저 CMA 에서 시도 — 큰 연속 블록은 CMA 가 유리하다 */
+	if (!page)	/* [한국어] CMA 에 없으면 */
+		page = alloc_pages_node(node, gfp, get_order(alloc_size));	/* [한국어] 버디 할당자에서 연속 블록으로. 이 경로는 물리 연속을 요구하므로 큰 크기에서 실패하기 쉽다 */
+	if (!page)	/* [한국어] 둘 다 실패 */
+		return NULL;	/* [한국어] 할당 실패 */
 
-	if (!coherent || PageHighMem(page)) {
-		pgprot_t prot = dma_pgprot(dev, PAGE_KERNEL, attrs);
+	if (!coherent || PageHighMem(page)) {	/* [한국어] 비일관 장치이거나 highmem 페이지면 커널 가상 매핑을 새로 만들어야 한다 */
+		pgprot_t prot = dma_pgprot(dev, PAGE_KERNEL, attrs);	/* [한국어] 비일관이면 여기서 비캐시 속성이 된다 */
 
-		cpu_addr = dma_common_contiguous_remap(page, alloc_size,
-				prot, __builtin_return_address(0));
-		if (!cpu_addr)
-			goto out_free_pages;
+		cpu_addr = dma_common_contiguous_remap(page, alloc_size,	/* [한국어] 연속 블록을 그 속성으로 다시 매핑한다 */
+				prot, __builtin_return_address(0));	/* [한국어] 진단용 호출자 주소 */
+		if (!cpu_addr)	/* [한국어] 가상 매핑 실패 */
+			goto out_free_pages;	/* [한국어] 페이지 반납 */
 
-		if (!coherent)
-			arch_dma_prep_coherent(page, size);
+		if (!coherent)	/* [한국어] 비일관 장치면 */
+			arch_dma_prep_coherent(page, size);	/* [한국어] 캐시를 비운다 — 이 페이지는 이제 비캐시로 접근되므로, 캐시에 남은 옛 내용이 나중에 write-back 되면 안 된다 */
 	} else {
-		cpu_addr = page_address(page);
+		cpu_addr = page_address(page);	/* [한국어] 일관성 있는 lowmem 페이지는 선형 매핑 주소를 그대로 쓴다 */
 	}
 
-	*pagep = page;
-	memset(cpu_addr, 0, alloc_size);
-	return cpu_addr;
-out_free_pages:
-	dma_free_contiguous(dev, page, alloc_size);
-	return NULL;
+	*pagep = page;	/* [한국어] 호출자가 물리 주소를 얻을 수 있도록 */
+	memset(cpu_addr, 0, alloc_size);	/* [한국어] 반드시 0 으로 채운다 — 이전 사용자의 커널 데이터가 장치에 노출되면 안 된다 */
+	return cpu_addr;	/* [한국어] CPU 가 쓸 주소 */
+out_free_pages:	/* [한국어] 가상 매핑 실패 경로 */
+	dma_free_contiguous(dev, page, alloc_size);	/* [한국어] 블록 반납 */
+	return NULL;	/* [한국어] 할당 실패 */
 }
 
 void *iommu_dma_alloc(struct device *dev, size_t size, dma_addr_t *handle,
 		gfp_t gfp, unsigned long attrs)
 {
-	bool coherent = dev_is_dma_coherent(dev);
-	int ioprot = dma_info_to_prot(DMA_BIDIRECTIONAL, coherent, attrs);
-	struct page *page = NULL;
-	void *cpu_addr;
+	bool coherent = dev_is_dma_coherent(dev);	/* [한국어] 캐시 일관성 여부 */
+	int ioprot = dma_info_to_prot(DMA_BIDIRECTIONAL, coherent, attrs);	/* [한국어] coherent 버퍼는 양방향으로 쓰인다 */
+	struct page *page = NULL;	/* [한국어] 확보한 페이지(들의 첫 장) */
+	void *cpu_addr;	/* [한국어] CPU 가 쓸 주소 */
 
-	gfp |= __GFP_ZERO;
+	gfp |= __GFP_ZERO;	/* [한국어] DMA 버퍼는 반드시 0 으로 시작해야 한다 — 커널 데이터 유출 방지 */
 
-	if (gfpflags_allow_blocking(gfp) &&
-	    !(attrs & DMA_ATTR_FORCE_CONTIGUOUS)) {
-		return iommu_dma_alloc_remap(dev, size, handle, gfp, attrs);
+	if (gfpflags_allow_blocking(gfp) &&	/* [한국어] 잠들 수 있는 문맥이고 */
+	    !(attrs & DMA_ATTR_FORCE_CONTIGUOUS)) {	/* [한국어] 물리 연속을 강제하지 않는다면 */
+		return iommu_dma_alloc_remap(dev, size, handle, gfp, attrs);	/* [한국어] 흩어진 페이지를 IOVA 창 하나로 접는 경로 — IOMMU 를 쓰는 가장 큰 이유다. 물리 연속이 필요 없으니 큰 버퍼도 실패하지 않는다 */
 	}
 
-	if (IS_ENABLED(CONFIG_DMA_DIRECT_REMAP) &&
-	    !gfpflags_allow_blocking(gfp) && !coherent)
-		page = dma_alloc_from_pool(dev, PAGE_ALIGN(size), &cpu_addr,
-					       gfp, NULL);
+	if (IS_ENABLED(CONFIG_DMA_DIRECT_REMAP) &&	/* [한국어] 아토믹 풀이 있는 빌드이고 */
+	    !gfpflags_allow_blocking(gfp) && !coherent)	/* [한국어] 잠들 수 없는 문맥의 비일관 장치라면 */
+		page = dma_alloc_from_pool(dev, PAGE_ALIGN(size), &cpu_addr,	/* [한국어] 미리 만들어 둔 비캐시 풀에서 꺼낸다 — 아토믹 문맥에서는 재매핑을 할 수 없기 때문이다 */
+					       gfp, NULL);	/* [한국어] 할당 플래그 */
 	else
-		cpu_addr = iommu_dma_alloc_pages(dev, size, &page, gfp, attrs);
-	if (!cpu_addr)
-		return NULL;
+		cpu_addr = iommu_dma_alloc_pages(dev, size, &page, gfp, attrs);	/* [한국어] 그 외에는 물리 연속 블록으로 (FORCE_CONTIGUOUS 요청이 여기 온다) */
+	if (!cpu_addr)	/* [한국어] 확보 실패 */
+		return NULL;	/* [한국어] 할당 실패 */
 
-	*handle = __iommu_dma_map(dev, page_to_phys(page), size, ioprot,
-			dev->coherent_dma_mask);
-	if (*handle == DMA_MAPPING_ERROR) {
-		__iommu_dma_free(dev, size, cpu_addr);
-		return NULL;
+	*handle = __iommu_dma_map(dev, page_to_phys(page), size, ioprot,	/* [한국어] 연속 블록을 IOVA 에 매핑한다 */
+			dev->coherent_dma_mask);	/* [한국어] coherent 전용 마스크 — 스트리밍 마스크와 다를 수 있다 */
+	if (*handle == DMA_MAPPING_ERROR) {	/* [한국어] 매핑 실패 */
+		__iommu_dma_free(dev, size, cpu_addr);	/* [한국어] 확보한 메모리를 되돌린다 */
+		return NULL;	/* [한국어] 할당 실패 */
 	}
 
-	return cpu_addr;
+	return cpu_addr;	/* [한국어] CPU 는 이 주소, 장치는 *handle 로 같은 메모리를 본다 */
 }
 
 int iommu_dma_mmap(struct device *dev, struct vm_area_struct *vma,
 		void *cpu_addr, dma_addr_t dma_addr, size_t size,
 		unsigned long attrs)
 {
-	unsigned long nr_pages = PAGE_ALIGN(size) >> PAGE_SHIFT;
-	unsigned long pfn, off = vma->vm_pgoff;
-	int ret;
+	unsigned long nr_pages = PAGE_ALIGN(size) >> PAGE_SHIFT;	/* [한국어] 전체 페이지 수 */
+	unsigned long pfn, off = vma->vm_pgoff;	/* [한국어] 매핑할 첫 페이지 번호와 사용자 요청 오프셋 */
+	int ret;	/* [한국어] 결과 */
 
-	vma->vm_page_prot = dma_pgprot(dev, vma->vm_page_prot, attrs);
+	vma->vm_page_prot = dma_pgprot(dev, vma->vm_page_prot, attrs);	/* [한국어] 사용자 공간 매핑에도 같은 캐시 속성을 적용한다 — 비일관 장치면 비캐시여야 한다 */
 
-	if (dma_mmap_from_dev_coherent(dev, vma, cpu_addr, size, &ret))
-		return ret;
+	if (dma_mmap_from_dev_coherent(dev, vma, cpu_addr, size, &ret))	/* [한국어] 장치 전용 coherent 영역에서 온 버퍼면 그쪽이 처리한다 */
+		return ret;	/* [한국어] 그 결과를 그대로 */
 
-	if (off >= nr_pages || vma_pages(vma) > nr_pages - off)
-		return -ENXIO;
+	if (off >= nr_pages || vma_pages(vma) > nr_pages - off)	/* [한국어] 요청 범위가 할당 범위를 벗어난다 */
+		return -ENXIO;	/* [한국어] 거절 — 이 검사가 없으면 사용자가 인접한 커널 메모리를 매핑할 수 있다 */
 
-	if (is_vmalloc_addr(cpu_addr)) {
-		struct page **pages = dma_common_find_pages(cpu_addr);
+	if (is_vmalloc_addr(cpu_addr)) {	/* [한국어] 재매핑된 할당이면 */
+		struct page **pages = dma_common_find_pages(cpu_addr);	/* [한국어] 흩어진 페이지 배열을 찾는다 */
 
-		if (pages)
-			return vm_map_pages(vma, pages, nr_pages);
-		pfn = vmalloc_to_pfn(cpu_addr);
+		if (pages)	/* [한국어] 배열이 있으면 */
+			return vm_map_pages(vma, pages, nr_pages);	/* [한국어] 낱장씩 사용자 공간에 매핑 */
+		pfn = vmalloc_to_pfn(cpu_addr);	/* [한국어] 연속 블록을 재매핑한 경우 */
 	} else {
-		pfn = page_to_pfn(virt_to_page(cpu_addr));
+		pfn = page_to_pfn(virt_to_page(cpu_addr));	/* [한국어] lowmem 연속 블록 */
 	}
 
-	return remap_pfn_range(vma, vma->vm_start, pfn + off,
-			       vma->vm_end - vma->vm_start,
-			       vma->vm_page_prot);
+	return remap_pfn_range(vma, vma->vm_start, pfn + off,	/* [한국어] 연속 물리 범위를 한 번에 매핑 */
+			       vma->vm_end - vma->vm_start,	/* [한국어] 사용자가 요청한 길이 */
+			       vma->vm_page_prot);	/* [한국어] 위에서 정한 캐시 속성 */
 }
 
 int iommu_dma_get_sgtable(struct device *dev, struct sg_table *sgt,
 		void *cpu_addr, dma_addr_t dma_addr, size_t size,
 		unsigned long attrs)
 {
-	struct page *page;
-	int ret;
+	struct page *page;	/* [한국어] 단일 블록인 경우의 첫 페이지 */
+	int ret;	/* [한국어] 결과 */
 
-	if (is_vmalloc_addr(cpu_addr)) {
-		struct page **pages = dma_common_find_pages(cpu_addr);
+	if (is_vmalloc_addr(cpu_addr)) {	/* [한국어] 재매핑된 할당이면 */
+		struct page **pages = dma_common_find_pages(cpu_addr);	/* [한국어] 페이지 배열을 찾는다 */
 
-		if (pages) {
-			return sg_alloc_table_from_pages(sgt, pages,
-					PAGE_ALIGN(size) >> PAGE_SHIFT,
-					0, size, GFP_KERNEL);
+		if (pages) {	/* [한국어] 흩어진 페이지들이면 */
+			return sg_alloc_table_from_pages(sgt, pages,	/* [한국어] 각 페이지를 세그먼트로 엮는다 — 인접한 것은 자동 병합된다 */
+					PAGE_ALIGN(size) >> PAGE_SHIFT,	/* [한국어] 페이지 수 */
+					0, size, GFP_KERNEL);	/* [한국어] 오프셋 0, 전체 길이 */
 		}
 
-		page = vmalloc_to_page(cpu_addr);
+		page = vmalloc_to_page(cpu_addr);	/* [한국어] 연속 블록을 재매핑한 경우 */
 	} else {
-		page = virt_to_page(cpu_addr);
+		page = virt_to_page(cpu_addr);	/* [한국어] lowmem 연속 블록 */
 	}
 
-	ret = sg_alloc_table(sgt, 1, GFP_KERNEL);
-	if (!ret)
-		sg_set_page(sgt->sgl, page, PAGE_ALIGN(size), 0);
-	return ret;
+	ret = sg_alloc_table(sgt, 1, GFP_KERNEL);	/* [한국어] 연속이므로 세그먼트 하나면 충분하다 */
+	if (!ret)	/* [한국어] 테이블 생성 성공 */
+		sg_set_page(sgt->sgl, page, PAGE_ALIGN(size), 0);	/* [한국어] 전체 범위를 한 세그먼트로 */
+	return ret;	/* [한국어] 0 이면 sgt 가 이 버퍼를 기술한다 */
 }
 
 unsigned long iommu_dma_get_merge_boundary(struct device *dev)
 {
-	struct iommu_domain *domain = iommu_get_dma_domain(dev);
+	struct iommu_domain *domain = iommu_get_dma_domain(dev);	/* [한국어] 이 장치의 도메인 */
 
-	return (1UL << __ffs(domain->pgsize_bitmap)) - 1;
+	return (1UL << __ffs(domain->pgsize_bitmap)) - 1;	/* [한국어] IOMMU 최소 페이지 크기 - 1. 블록 계층이 '이 경계를 넘지 않는 한 세그먼트를 합쳐도 IOMMU 가 하나로 매핑해 준다'고 판단하는 근거다 — NVMe 가 큰 I/O 를 적은 SGL 항목으로 보낼 수 있는 이유 */
 }
 
 size_t iommu_dma_opt_mapping_size(void)
 {
-	return iova_rcache_range();
+	return iova_rcache_range();	/* [한국어] IOVA 캐시가 담을 수 있는 최대 크기. 이 크기를 넘는 매핑은 매번 IOVA 트리 락을 잡으므로, 블록 계층이 요청을 이 단위로 쪼개면 처리량이 크게 달라진다 */
 }
 
 size_t iommu_dma_max_mapping_size(struct device *dev)
 {
-	if (dev_is_untrusted(dev))
-		return swiotlb_max_mapping_size(dev);
+	if (dev_is_untrusted(dev))	/* [한국어] 신뢰할 수 없는 장치는 항상 바운스 버퍼를 거친다 */
+		return swiotlb_max_mapping_size(dev);	/* [한국어] 그 버퍼 하나의 크기가 곧 상한이 된다 */
 
-	return SIZE_MAX;
+	return SIZE_MAX;	/* [한국어] 그 외에는 IOMMU 가 크기를 제한하지 않는다 */
 }
 
 /**
@@ -2010,47 +2010,47 @@ size_t iommu_dma_max_mapping_size(struct device *dev)
 bool dma_iova_try_alloc(struct device *dev, struct dma_iova_state *state,
 		phys_addr_t phys, size_t size)
 {
-	struct iommu_dma_cookie *cookie;
-	struct iommu_domain *domain;
-	struct iova_domain *iovad;
-	size_t iova_off;
-	dma_addr_t addr;
+	struct iommu_dma_cookie *cookie;	/* [한국어] DMA 상태 */
+	struct iommu_domain *domain;	/* [한국어] 이 장치의 도메인 */
+	struct iova_domain *iovad;	/* [한국어] IOVA 공간 */
+	size_t iova_off;	/* [한국어] 물리 주소의 페이지 내 오프셋 */
+	dma_addr_t addr;	/* [한국어] 확보한 IOVA */
 
-	memset(state, 0, sizeof(*state));
-	if (!use_dma_iommu(dev))
-		return false;
+	memset(state, 0, sizeof(*state));	/* [한국어] 실패하더라도 호출자가 깨끗한 상태를 보게 한다 */
+	if (!use_dma_iommu(dev))	/* [한국어] 이 장치가 IOMMU 경로를 쓰지 않는다 */
+		return false;	/* [한국어] 호출자는 일반 DMA API 로 돌아간다 (위 영어 주석) */
 
-	domain = iommu_get_dma_domain(dev);
-	cookie = domain->iova_cookie;
-	iovad = &cookie->iovad;
-	iova_off = iova_offset(iovad, phys);
+	domain = iommu_get_dma_domain(dev);	/* [한국어] 기본 도메인 */
+	cookie = domain->iova_cookie;	/* [한국어] DMA 상태 */
+	iovad = &cookie->iovad;	/* [한국어] IOVA 공간 */
+	iova_off = iova_offset(iovad, phys);	/* [한국어] 정렬 계산에만 쓰인다 — 호출자가 항상 페이지 정렬 전송을 한다면 phys 에 0 을 넘겨도 된다 (위 영어 주석) */
 
-	if (static_branch_unlikely(&iommu_deferred_attach_enabled) &&
-	    iommu_deferred_attach(dev, iommu_get_domain_for_dev(dev)))
-		return false;
+	if (static_branch_unlikely(&iommu_deferred_attach_enabled) &&	/* [한국어] 지연 부착이 필요한 시스템에서만 */
+	    iommu_deferred_attach(dev, iommu_get_domain_for_dev(dev)))	/* [한국어] 여기서 도메인을 건다 */
+		return false;	/* [한국어] 부착 실패 — IOVA 경로를 쓸 수 없다 */
 
-	if (WARN_ON_ONCE(!size))
-		return false;
+	if (WARN_ON_ONCE(!size))	/* [한국어] 길이 0 요청은 호출자 버그 */
+		return false;	/* [한국어] 거절 */
 
 	/*
 	 * DMA_IOVA_USE_SWIOTLB is flag which is set by dma-iommu
 	 * internals, make sure that caller didn't set it and/or
 	 * didn't use this interface to map SIZE_MAX.
 	 */
-	if (WARN_ON_ONCE((u64)size & DMA_IOVA_USE_SWIOTLB))
-		return false;
+	if (WARN_ON_ONCE((u64)size & DMA_IOVA_USE_SWIOTLB))	/* [한국어] 이 비트는 내부 표식 자리다. 호출자가 세웠거나 SIZE_MAX 를 넘긴 경우이며, 그대로 두면 나중에 '바운스를 썼다'고 오인한다 (위 영어 주석) */
+		return false;	/* [한국어] 거절 */
 
-	addr = iommu_dma_alloc_iova(domain,
-			iova_align(iovad, size + iova_off),
-			dma_get_mask(dev), dev);
-	if (!addr)
-		return false;
+	addr = iommu_dma_alloc_iova(domain,	/* [한국어] 앞으로 여러 번에 걸쳐 채울 IOVA 창을 미리 한 번에 확보한다 */
+			iova_align(iovad, size + iova_off),	/* [한국어] 앞 오프셋을 포함해 페이지 단위로 */
+			dma_get_mask(dev), dev);	/* [한국어] 장치의 주소 상한 */
+	if (!addr)	/* [한국어] IOVA 고갈 */
+		return false;	/* [한국어] 호출자는 일반 경로로 돌아간다 */
 
-	state->addr = addr + iova_off;
-	state->__size = size;
-	return true;
+	state->addr = addr + iova_off;	/* [한국어] 오프셋을 더한 실제 시작 주소 */
+	state->__size = size;	/* [한국어] 이후 link/unlink 가 이 크기를 기준으로 동작한다 */
+	return true;	/* [한국어] IOVA 경로를 쓸 수 있다 */
 }
-EXPORT_SYMBOL_GPL(dma_iova_try_alloc);
+EXPORT_SYMBOL_GPL(dma_iova_try_alloc);	/* [한국어] 블록 계층·RDMA 처럼 큰 전송을 여러 조각으로 나눠 채우는 사용자가 부른다 */
 
 /**
  * dma_iova_free - Free an IOVA space
@@ -2066,29 +2066,29 @@ EXPORT_SYMBOL_GPL(dma_iova_try_alloc);
  */
 void dma_iova_free(struct device *dev, struct dma_iova_state *state)
 {
-	struct iommu_domain *domain = iommu_get_dma_domain(dev);
-	struct iommu_dma_cookie *cookie = domain->iova_cookie;
-	struct iova_domain *iovad = &cookie->iovad;
-	size_t iova_start_pad = iova_offset(iovad, state->addr);
-	size_t size = dma_iova_size(state);
+	struct iommu_domain *domain = iommu_get_dma_domain(dev);	/* [한국어] 도메인 */
+	struct iommu_dma_cookie *cookie = domain->iova_cookie;	/* [한국어] DMA 상태 */
+	struct iova_domain *iovad = &cookie->iovad;	/* [한국어] IOVA 공간 */
+	size_t iova_start_pad = iova_offset(iovad, state->addr);	/* [한국어] 할당 때 더했던 오프셋 */
+	size_t size = dma_iova_size(state);	/* [한국어] 요청했던 크기 */
 
-	iommu_dma_free_iova(domain, state->addr - iova_start_pad,
-			iova_align(iovad, size + iova_start_pad), NULL);
+	iommu_dma_free_iova(domain, state->addr - iova_start_pad,	/* [한국어] 할당 때와 정확히 같은 범위로 되돌린다 */
+			iova_align(iovad, size + iova_start_pad), NULL);	/* [한국어] gather 가 NULL — 매핑은 이미 dma_iova_unlink 가 지웠으므로 무효화할 것이 없다 (위 영어 주석) */
 }
-EXPORT_SYMBOL_GPL(dma_iova_free);
+EXPORT_SYMBOL_GPL(dma_iova_free);	/* [한국어] try_alloc 의 짝 */
 
 static int __dma_iova_link(struct device *dev, dma_addr_t addr,
 		phys_addr_t phys, size_t size, enum dma_data_direction dir,
 		unsigned long attrs)
 {
-	bool coherent = dev_is_dma_coherent(dev);
-	int prot = dma_info_to_prot(dir, coherent, attrs);
+	bool coherent = dev_is_dma_coherent(dev);	/* [한국어] 캐시 일관성 여부 */
+	int prot = dma_info_to_prot(dir, coherent, attrs);	/* [한국어] 이 조각의 권한 */
 
-	if (!coherent && !(attrs & (DMA_ATTR_SKIP_CPU_SYNC | DMA_ATTR_MMIO)))
-		arch_sync_dma_for_device(phys, size, dir);
+	if (!coherent && !(attrs & (DMA_ATTR_SKIP_CPU_SYNC | DMA_ATTR_MMIO)))	/* [한국어] 비일관 장치이고 동기화를 생략하지 않았으면 */
+		arch_sync_dma_for_device(phys, size, dir);	/* [한국어] 캐시를 밀어낸다 */
 
-	return iommu_map_nosync(iommu_get_dma_domain(dev), addr, phys, size,
-			prot, GFP_ATOMIC);
+	return iommu_map_nosync(iommu_get_dma_domain(dev), addr, phys, size,	/* [한국어] nosync 인 것이 이 API 의 요점이다 — 여러 조각을 이어 붙인 뒤 마지막에 dma_iova_sync 를 한 번만 부른다 */
+			prot, GFP_ATOMIC);	/* [한국어] 아토믹 문맥에서도 불릴 수 있다 */
 }
 
 static int iommu_dma_iova_bounce_and_link(struct device *dev, dma_addr_t addr,
@@ -2096,72 +2096,72 @@ static int iommu_dma_iova_bounce_and_link(struct device *dev, dma_addr_t addr,
 		enum dma_data_direction dir, unsigned long attrs,
 		size_t iova_start_pad)
 {
-	struct iommu_domain *domain = iommu_get_dma_domain(dev);
-	struct iova_domain *iovad = &domain->iova_cookie->iovad;
-	phys_addr_t bounce_phys;
-	int error;
+	struct iommu_domain *domain = iommu_get_dma_domain(dev);	/* [한국어] 도메인 */
+	struct iova_domain *iovad = &domain->iova_cookie->iovad;	/* [한국어] IOVA 입도 */
+	phys_addr_t bounce_phys;	/* [한국어] 바운스 버퍼의 물리 주소 */
+	int error;	/* [한국어] 결과 */
 
-	bounce_phys = iommu_dma_map_swiotlb(dev, phys, bounce_len, dir, attrs);
-	if (bounce_phys == DMA_MAPPING_ERROR)
-		return -ENOMEM;
+	bounce_phys = iommu_dma_map_swiotlb(dev, phys, bounce_len, dir, attrs);	/* [한국어] 페이지 경계에 걸친 조각을 전용 버퍼로 복사한다 */
+	if (bounce_phys == DMA_MAPPING_ERROR)	/* [한국어] 바운스 실패 */
+		return -ENOMEM;	/* [한국어] 이 조각을 매핑할 수 없다 */
 
-	error = __dma_iova_link(dev, addr - iova_start_pad,
-			bounce_phys - iova_start_pad,
-			iova_align(iovad, bounce_len), dir, attrs);
-	if (error)
-		swiotlb_tbl_unmap_single(dev, bounce_phys, bounce_len, dir,
-				attrs);
-	return error;
+	error = __dma_iova_link(dev, addr - iova_start_pad,	/* [한국어] IOVA 도 페이지 경계로 내려 맞춘다 */
+			bounce_phys - iova_start_pad,	/* [한국어] 바운스 버퍼도 같은 오프셋만큼 내린다 — 버퍼가 그 정렬로 잡혀 있다 */
+			iova_align(iovad, bounce_len), dir, attrs);	/* [한국어] 페이지 단위 길이 */
+	if (error)	/* [한국어] 매핑 실패 */
+		swiotlb_tbl_unmap_single(dev, bounce_phys, bounce_len, dir,	/* [한국어] 잡아 둔 바운스 버퍼를 되돌린다 */
+				attrs);	/* [한국어] 속성 그대로 */
+	return error;	/* [한국어] 0 이면 이 조각이 연결되었다 */
 }
 
 static int iommu_dma_iova_link_swiotlb(struct device *dev,
 		struct dma_iova_state *state, phys_addr_t phys, size_t offset,
 		size_t size, enum dma_data_direction dir, unsigned long attrs)
 {
-	struct iommu_domain *domain = iommu_get_dma_domain(dev);
-	struct iommu_dma_cookie *cookie = domain->iova_cookie;
-	struct iova_domain *iovad = &cookie->iovad;
-	size_t iova_start_pad = iova_offset(iovad, phys);
-	size_t iova_end_pad = iova_offset(iovad, phys + size);
-	dma_addr_t addr = state->addr + offset;
-	size_t mapped = 0;
-	int error;
+	struct iommu_domain *domain = iommu_get_dma_domain(dev);	/* [한국어] 도메인 */
+	struct iommu_dma_cookie *cookie = domain->iova_cookie;	/* [한국어] DMA 상태 */
+	struct iova_domain *iovad = &cookie->iovad;	/* [한국어] IOVA 공간 */
+	size_t iova_start_pad = iova_offset(iovad, phys);	/* [한국어] 조각의 앞쪽이 페이지 중간에서 시작하는가 */
+	size_t iova_end_pad = iova_offset(iovad, phys + size);	/* [한국어] 조각의 뒤쪽이 페이지 중간에서 끝나는가 */
+	dma_addr_t addr = state->addr + offset;	/* [한국어] 이 조각이 들어갈 IOVA 위치 */
+	size_t mapped = 0;	/* [한국어] 지금까지 연결한 길이 */
+	int error;	/* [한국어] 결과 */
 
-	if (iova_start_pad) {
-		size_t bounce_len = min(size, iovad->granule - iova_start_pad);
+	if (iova_start_pad) {	/* [한국어] 앞쪽이 페이지 경계에 맞지 않는다 — 그 페이지에는 이 조각 말고 다른 데이터도 들어 있다 */
+		size_t bounce_len = min(size, iovad->granule - iova_start_pad);	/* [한국어] 페이지 끝까지, 또는 조각 전체 중 짧은 쪽 */
 
-		error = iommu_dma_iova_bounce_and_link(dev, addr, phys,
-				bounce_len, dir, attrs, iova_start_pad);
-		if (error)
-			return error;
-		state->__size |= DMA_IOVA_USE_SWIOTLB;
+		error = iommu_dma_iova_bounce_and_link(dev, addr, phys,	/* [한국어] 그만큼만 바운스 버퍼로 복사해 연결한다 */
+				bounce_len, dir, attrs, iova_start_pad);	/* [한국어] 앞 패딩 길이 */
+		if (error)	/* [한국어] 실패 */
+			return error;	/* [한국어] 아직 연결한 것이 없으므로 되감을 것도 없다 */
+		state->__size |= DMA_IOVA_USE_SWIOTLB;	/* [한국어] 해제 경로가 바운스 버퍼도 돌려줘야 함을 알리는 표식 */
 
-		mapped += bounce_len;
-		size -= bounce_len;
-		if (!size)
-			return 0;
+		mapped += bounce_len;	/* [한국어] 진행 길이 갱신 */
+		size -= bounce_len;	/* [한국어] 남은 길이 */
+		if (!size)	/* [한국어] 조각 전체가 앞 패딩 안에 들어갔다 */
+			return 0;	/* [한국어] 연결 완료 */
 	}
 
-	size -= iova_end_pad;
-	error = __dma_iova_link(dev, addr + mapped, phys + mapped, size, dir,
-			attrs);
-	if (error)
-		goto out_unmap;
-	mapped += size;
+	size -= iova_end_pad;	/* [한국어] 뒤쪽 패딩을 뺀 '완전한 페이지들'만 먼저 처리한다 */
+	error = __dma_iova_link(dev, addr + mapped, phys + mapped, size, dir,	/* [한국어] 가운데의 정렬된 본문은 바운스 없이 직접 매핑한다 — 복사 비용을 최소한으로 줄이는 것이 이 함수의 목적이다 */
+			attrs);	/* [한국어] 속성 그대로 */
+	if (error)	/* [한국어] 실패 */
+		goto out_unmap;	/* [한국어] 앞에서 연결한 것까지 되돌린다 */
+	mapped += size;	/* [한국어] 진행 길이 갱신 */
 
-	if (iova_end_pad) {
-		error = iommu_dma_iova_bounce_and_link(dev, addr + mapped,
-				phys + mapped, iova_end_pad, dir, attrs, 0);
-		if (error)
-			goto out_unmap;
-		state->__size |= DMA_IOVA_USE_SWIOTLB;
+	if (iova_end_pad) {	/* [한국어] 뒤쪽이 페이지 중간에서 끝난다 */
+		error = iommu_dma_iova_bounce_and_link(dev, addr + mapped,	/* [한국어] 그 꼬리도 바운스로 */
+				phys + mapped, iova_end_pad, dir, attrs, 0);	/* [한국어] 앞 패딩은 없으므로 0 */
+		if (error)	/* [한국어] 실패 */
+			goto out_unmap;	/* [한국어] 되감기 */
+		state->__size |= DMA_IOVA_USE_SWIOTLB;	/* [한국어] 바운스 사용 표식 */
 	}
 
-	return 0;
+	return 0;	/* [한국어] 조각 전체가 연결되었다 */
 
-out_unmap:
-	dma_iova_unlink(dev, state, 0, mapped, dir, attrs);
-	return error;
+out_unmap:	/* [한국어] 부분 성공 되감기 */
+	dma_iova_unlink(dev, state, 0, mapped, dir, attrs);	/* [한국어] 연결한 만큼만 정확히 해제한다 */
+	return error;	/* [한국어] 실패 이유 */
 }
 
 /**
@@ -2185,40 +2185,40 @@ int dma_iova_link(struct device *dev, struct dma_iova_state *state,
 		phys_addr_t phys, size_t offset, size_t size,
 		enum dma_data_direction dir, unsigned long attrs)
 {
-	struct iommu_domain *domain = iommu_get_dma_domain(dev);
-	struct iommu_dma_cookie *cookie = domain->iova_cookie;
-	struct iova_domain *iovad = &cookie->iovad;
-	size_t iova_start_pad = iova_offset(iovad, phys);
+	struct iommu_domain *domain = iommu_get_dma_domain(dev);	/* [한국어] 도메인 */
+	struct iommu_dma_cookie *cookie = domain->iova_cookie;	/* [한국어] DMA 상태 */
+	struct iova_domain *iovad = &cookie->iovad;	/* [한국어] IOVA 공간 */
+	size_t iova_start_pad = iova_offset(iovad, phys);	/* [한국어] 이 조각의 앞쪽 정렬 어긋남 */
 
-	if (WARN_ON_ONCE(iova_start_pad && offset > 0))
-		return -EIO;
+	if (WARN_ON_ONCE(iova_start_pad && offset > 0))	/* [한국어] 창 중간에 정렬이 어긋난 조각을 넣으려 한다. 그러면 앞 조각의 페이지와 겹쳐 서로의 매핑을 덮어쓴다 */
+		return -EIO;	/* [한국어] 호출자 사용법 오류 */
 
 	/*
 	 * DMA_IOVA_USE_SWIOTLB is set on state after some entry
 	 * took SWIOTLB path, which we were supposed to prevent
 	 * for DMA_ATTR_REQUIRE_COHERENT attribute.
 	 */
-	if (WARN_ON_ONCE((state->__size & DMA_IOVA_USE_SWIOTLB) &&
-			 (attrs & DMA_ATTR_REQUIRE_COHERENT)))
-		return -EOPNOTSUPP;
+	if (WARN_ON_ONCE((state->__size & DMA_IOVA_USE_SWIOTLB) &&	/* [한국어] 이미 어떤 조각이 바운스 경로를 탔는데 */
+			 (attrs & DMA_ATTR_REQUIRE_COHERENT)))	/* [한국어] 호출자가 coherent 를 요구한다 — 바운스 버퍼는 그 요구를 만족시킬 수 없다 (위 영어 주석) */
+		return -EOPNOTSUPP;	/* [한국어] 모순된 요청 */
 
-	if (!dev_is_dma_coherent(dev) && (attrs & DMA_ATTR_REQUIRE_COHERENT))
-		return -EOPNOTSUPP;
+	if (!dev_is_dma_coherent(dev) && (attrs & DMA_ATTR_REQUIRE_COHERENT))	/* [한국어] 비일관 장치에 coherent 를 요구했다 */
+		return -EOPNOTSUPP;	/* [한국어] 하드웨어가 제공할 수 없다 */
 
-	if (dev_use_swiotlb(dev, size, dir) &&
-	    iova_unaligned(iovad, phys, size)) {
-		if (attrs & (DMA_ATTR_MMIO | DMA_ATTR_REQUIRE_COHERENT))
-			return -EPERM;
+	if (dev_use_swiotlb(dev, size, dir) &&	/* [한국어] 바운스가 필요한 장치이고 */
+	    iova_unaligned(iovad, phys, size)) {	/* [한국어] 실제로 정렬이 어긋났다면 */
+		if (attrs & (DMA_ATTR_MMIO | DMA_ATTR_REQUIRE_COHERENT))	/* [한국어] MMIO 나 coherent 요구는 바운스로 처리할 수 없다 */
+			return -EPERM;	/* [한국어] 거절 */
 
-		return iommu_dma_iova_link_swiotlb(dev, state, phys, offset,
-				size, dir, attrs);
+		return iommu_dma_iova_link_swiotlb(dev, state, phys, offset,	/* [한국어] 앞뒤 꼬리만 바운스하고 가운데는 직접 매핑하는 경로로 */
+				size, dir, attrs);	/* [한국어] 조각의 크기와 방향 */
 	}
 
-	return __dma_iova_link(dev, state->addr + offset - iova_start_pad,
-			phys - iova_start_pad,
-			iova_align(iovad, size + iova_start_pad), dir, attrs);
+	return __dma_iova_link(dev, state->addr + offset - iova_start_pad,	/* [한국어] 정렬이 맞으면 곧바로 매핑한다 */
+			phys - iova_start_pad,	/* [한국어] 물리 주소도 페이지 경계로 */
+			iova_align(iovad, size + iova_start_pad), dir, attrs);	/* [한국어] 페이지 단위 길이 */
 }
-EXPORT_SYMBOL_GPL(dma_iova_link);
+EXPORT_SYMBOL_GPL(dma_iova_link);	/* [한국어] 여러 조각을 하나의 IOVA 창에 이어 붙이는 사용자가 부른다 */
 
 /**
  * dma_iova_sync - Sync IOTLB
@@ -2234,55 +2234,55 @@ EXPORT_SYMBOL_GPL(dma_iova_link);
 int dma_iova_sync(struct device *dev, struct dma_iova_state *state,
 		size_t offset, size_t size)
 {
-	struct iommu_domain *domain = iommu_get_dma_domain(dev);
-	struct iommu_dma_cookie *cookie = domain->iova_cookie;
-	struct iova_domain *iovad = &cookie->iovad;
-	dma_addr_t addr = state->addr + offset;
-	size_t iova_start_pad = iova_offset(iovad, addr);
+	struct iommu_domain *domain = iommu_get_dma_domain(dev);	/* [한국어] 도메인 */
+	struct iommu_dma_cookie *cookie = domain->iova_cookie;	/* [한국어] DMA 상태 */
+	struct iova_domain *iovad = &cookie->iovad;	/* [한국어] IOVA 공간 */
+	dma_addr_t addr = state->addr + offset;	/* [한국어] 동기화할 구간의 시작 */
+	size_t iova_start_pad = iova_offset(iovad, addr);	/* [한국어] 페이지 경계로 내릴 오프셋 */
 
-	if (!dev_is_dma_coherent(dev))
-		arch_sync_dma_flush();
-	return iommu_sync_map(domain, addr - iova_start_pad,
-		      iova_align(iovad, size + iova_start_pad));
+	if (!dev_is_dma_coherent(dev))	/* [한국어] 비일관 장치면 */
+		arch_sync_dma_flush();	/* [한국어] 앞서 link 마다 낸 캐시 쓰기를 여기서 한 번에 완료시킨다 — 조각마다 기다리지 않는 것이 이 API 의 이득이다 */
+	return iommu_sync_map(domain, addr - iova_start_pad,	/* [한국어] 여러 번의 nosync 매핑을 여기서 한 번에 하드웨어에 반영한다 */
+		      iova_align(iovad, size + iova_start_pad));	/* [한국어] 페이지 단위 범위 */
 }
-EXPORT_SYMBOL_GPL(dma_iova_sync);
+EXPORT_SYMBOL_GPL(dma_iova_sync);	/* [한국어] link 를 여러 번 부른 뒤 마지막에 한 번 */
 
 static void iommu_dma_iova_unlink_range_slow(struct device *dev,
 		dma_addr_t addr, size_t size, enum dma_data_direction dir,
 		unsigned long attrs)
 {
-	struct iommu_domain *domain = iommu_get_dma_domain(dev);
-	struct iommu_dma_cookie *cookie = domain->iova_cookie;
-	struct iova_domain *iovad = &cookie->iovad;
-	size_t iova_start_pad = iova_offset(iovad, addr);
-	bool need_sync_dma = !dev_is_dma_coherent(dev) &&
-			!(attrs & (DMA_ATTR_SKIP_CPU_SYNC | DMA_ATTR_MMIO));
-	dma_addr_t end = addr + size;
+	struct iommu_domain *domain = iommu_get_dma_domain(dev);	/* [한국어] 도메인 */
+	struct iommu_dma_cookie *cookie = domain->iova_cookie;	/* [한국어] DMA 상태 */
+	struct iova_domain *iovad = &cookie->iovad;	/* [한국어] IOVA 공간 */
+	size_t iova_start_pad = iova_offset(iovad, addr);	/* [한국어] 첫 페이지의 오프셋 */
+	bool need_sync_dma = !dev_is_dma_coherent(dev) &&	/* [한국어] 비일관 장치이고 */
+			!(attrs & (DMA_ATTR_SKIP_CPU_SYNC | DMA_ATTR_MMIO));	/* [한국어] 동기화를 생략하지 않았으면 마지막에 완료 대기가 필요하다 */
+	dma_addr_t end = addr + size;	/* [한국어] 구간의 끝 */
 
-	do {
-		phys_addr_t phys;
-		size_t len;
+	do {	/* [한국어] 페이지 단위로 훑는다 — 어느 페이지가 바운스 버퍼인지 미리 알 수 없어 하나씩 확인해야 한다 */
+		phys_addr_t phys;	/* [한국어] 이 페이지의 물리 주소 */
+		size_t len;	/* [한국어] 이번 회차에 처리할 길이 */
 
-		phys = iommu_iova_to_phys(domain, addr);
-		if (WARN_ON(!phys))
+		phys = iommu_iova_to_phys(domain, addr);	/* [한국어] 매핑을 지우기 전에 역변환한다 */
+		if (WARN_ON(!phys))	/* [한국어] 매핑이 없다 — link 와 unlink 의 범위가 어긋났다는 뜻 */
 			/* Something very horrible happen here */
-			return;
+			return;	/* [한국어] 더 진행하면 엉뚱한 메모리를 만진다 (위 영어 주석: 매우 나쁜 일이 일어난 것이다) */
 
-		len = min_t(size_t,
-			end - addr, iovad->granule - iova_start_pad);
+		len = min_t(size_t,	/* [한국어] 이 페이지 안에서 처리할 길이 */
+			end - addr, iovad->granule - iova_start_pad);	/* [한국어] 구간의 남은 길이와 페이지 끝까지 중 짧은 쪽 */
 
-		if (!dev_is_dma_coherent(dev) &&
-		    !(attrs & (DMA_ATTR_SKIP_CPU_SYNC | DMA_ATTR_MMIO)))
-			arch_sync_dma_for_cpu(phys, len, dir);
+		if (!dev_is_dma_coherent(dev) &&	/* [한국어] 비일관 장치이고 */
+		    !(attrs & (DMA_ATTR_SKIP_CPU_SYNC | DMA_ATTR_MMIO)))	/* [한국어] 동기화를 생략하지 않았으면 */
+			arch_sync_dma_for_cpu(phys, len, dir);	/* [한국어] 장치가 쓴 내용을 CPU 가 보도록 캐시 무효화 */
 
-		swiotlb_tbl_unmap_single(dev, phys, len, dir, attrs);
+		swiotlb_tbl_unmap_single(dev, phys, len, dir, attrs);	/* [한국어] 바운스 버퍼였다면 내용을 되복사하고 반납한다. 아니면 무해하게 지나간다 — 그래서 페이지마다 확인 없이 부를 수 있다 */
 
-		addr += len;
-		iova_start_pad = 0;
-	} while (addr < end);
+		addr += len;	/* [한국어] 다음 페이지로 */
+		iova_start_pad = 0;	/* [한국어] 첫 페이지 이후로는 오프셋이 없다 */
+	} while (addr < end);	/* [한국어] 구간 끝까지 */
 
-	if (need_sync_dma)
-		arch_sync_dma_flush();
+	if (need_sync_dma)	/* [한국어] 캐시를 만졌으면 */
+		arch_sync_dma_flush();	/* [한국어] 한 번만 완료 대기 */
 }
 
 static void __iommu_dma_iova_unlink(struct device *dev,
@@ -2290,31 +2290,31 @@ static void __iommu_dma_iova_unlink(struct device *dev,
 		enum dma_data_direction dir, unsigned long attrs,
 		bool free_iova)
 {
-	struct iommu_domain *domain = iommu_get_dma_domain(dev);
-	struct iommu_dma_cookie *cookie = domain->iova_cookie;
-	struct iova_domain *iovad = &cookie->iovad;
-	dma_addr_t addr = state->addr + offset;
-	size_t iova_start_pad = iova_offset(iovad, addr);
-	struct iommu_iotlb_gather iotlb_gather;
-	size_t unmapped;
+	struct iommu_domain *domain = iommu_get_dma_domain(dev);	/* [한국어] 도메인 */
+	struct iommu_dma_cookie *cookie = domain->iova_cookie;	/* [한국어] DMA 상태 */
+	struct iova_domain *iovad = &cookie->iovad;	/* [한국어] IOVA 공간 */
+	dma_addr_t addr = state->addr + offset;	/* [한국어] 해제할 구간의 시작 */
+	size_t iova_start_pad = iova_offset(iovad, addr);	/* [한국어] 페이지 경계로 내릴 오프셋 */
+	struct iommu_iotlb_gather iotlb_gather;	/* [한국어] 무효화 범위 수집기 */
+	size_t unmapped;	/* [한국어] 실제 해제 바이트 */
 
-	if ((state->__size & DMA_IOVA_USE_SWIOTLB) ||
-	    (!dev_is_dma_coherent(dev) &&
-	     !(attrs & (DMA_ATTR_SKIP_CPU_SYNC | DMA_ATTR_MMIO))))
-		iommu_dma_iova_unlink_range_slow(dev, addr, size, dir, attrs);
+	if ((state->__size & DMA_IOVA_USE_SWIOTLB) ||	/* [한국어] 바운스 버퍼가 섞여 있거나 */
+	    (!dev_is_dma_coherent(dev) &&	/* [한국어] 비일관 장치이고 */
+	     !(attrs & (DMA_ATTR_SKIP_CPU_SYNC | DMA_ATTR_MMIO))))	/* [한국어] 동기화가 필요하면 */
+		iommu_dma_iova_unlink_range_slow(dev, addr, size, dir, attrs);	/* [한국어] 페이지 단위로 훑는 느린 경로를 먼저 거친다. 둘 다 아니면 이 비용을 완전히 건너뛴다 */
 
-	iommu_iotlb_gather_init(&iotlb_gather);
-	iotlb_gather.queued = free_iova && READ_ONCE(cookie->fq_domain);
+	iommu_iotlb_gather_init(&iotlb_gather);	/* [한국어] 빈 수집기 */
+	iotlb_gather.queued = free_iova && READ_ONCE(cookie->fq_domain);	/* [한국어] IOVA 를 반납하지 않는 unlink 는 지연 무효화를 쓸 수 없다 — 큐는 IOVA 반납과 무효화를 함께 미루는 장치이기 때문이다 */
 
-	size = iova_align(iovad, size + iova_start_pad);
-	addr -= iova_start_pad;
-	unmapped = iommu_unmap_fast(domain, addr, size, &iotlb_gather);
-	WARN_ON(unmapped != size);
+	size = iova_align(iovad, size + iova_start_pad);	/* [한국어] 페이지 단위 범위로 */
+	addr -= iova_start_pad;	/* [한국어] 시작도 페이지 경계로 */
+	unmapped = iommu_unmap_fast(domain, addr, size, &iotlb_gather);	/* [한국어] PTE 제거 */
+	WARN_ON(unmapped != size);	/* [한국어] link 와 unlink 의 범위가 어긋났다 */
 
-	if (!iotlb_gather.queued)
-		iommu_iotlb_sync(domain, &iotlb_gather);
-	if (free_iova)
-		iommu_dma_free_iova(domain, addr, size, &iotlb_gather);
+	if (!iotlb_gather.queued)	/* [한국어] 지연 무효화가 아니면 */
+		iommu_iotlb_sync(domain, &iotlb_gather);	/* [한국어] 여기서 IOTLB 를 비운다 */
+	if (free_iova)	/* [한국어] destroy 경로면 */
+		iommu_dma_free_iova(domain, addr, size, &iotlb_gather);	/* [한국어] IOVA 창까지 반납한다. unlink 경로는 창을 남겨 두어 다시 채울 수 있게 한다 */
 }
 
 /**
@@ -2332,9 +2332,9 @@ void dma_iova_unlink(struct device *dev, struct dma_iova_state *state,
 		size_t offset, size_t size, enum dma_data_direction dir,
 		unsigned long attrs)
 {
-	 __iommu_dma_iova_unlink(dev, state, offset, size, dir, attrs, false);
+	 __iommu_dma_iova_unlink(dev, state, offset, size, dir, attrs, false);	/* [한국어] IOVA 창은 그대로 두고 매핑만 지운다 — 같은 창에 다른 내용을 다시 이어 붙일 수 있다 */
 }
-EXPORT_SYMBOL_GPL(dma_iova_unlink);
+EXPORT_SYMBOL_GPL(dma_iova_unlink);	/* [한국어] 조각 단위 해제 */
 
 /**
  * dma_iova_destroy - Finish a DMA mapping transaction
@@ -2352,128 +2352,128 @@ void dma_iova_destroy(struct device *dev, struct dma_iova_state *state,
 		size_t mapped_len, enum dma_data_direction dir,
 		unsigned long attrs)
 {
-	if (mapped_len)
-		__iommu_dma_iova_unlink(dev, state, 0, mapped_len, dir, attrs,
-				true);
+	if (mapped_len)	/* [한국어] 연결된 것이 있으면 */
+		__iommu_dma_iova_unlink(dev, state, 0, mapped_len, dir, attrs,	/* [한국어] 매핑 해제와 */
+				true);	/* [한국어] IOVA 반납을 한 번에 — 그래서 unlink + free 두 번보다 효율적이다 (위 영어 주석) */
 	else
 		/*
 		 * We can be here if first call to dma_iova_link() failed and
 		 * there is nothing to unlink, so let's be more clear.
 		 */
-		dma_iova_free(dev, state);
+		dma_iova_free(dev, state);	/* [한국어] 첫 link 부터 실패해 지울 매핑이 없는 경우. 창만 반납한다 (위 영어 주석) */
 }
-EXPORT_SYMBOL_GPL(dma_iova_destroy);
+EXPORT_SYMBOL_GPL(dma_iova_destroy);	/* [한국어] link 을 여러 번 한 뒤 한 번에 정리하는 종료 경로 */
 
 void iommu_setup_dma_ops(struct device *dev, struct iommu_domain *domain)
 {
-	if (dev_is_pci(dev))
-		dev->iommu->pci_32bit_workaround = !iommu_dma_forcedac;
+	if (dev_is_pci(dev))	/* [한국어] PCI 장치면 */
+		dev->iommu->pci_32bit_workaround = !iommu_dma_forcedac;	/* [한국어] forcedac 를 켜지 않았으면 32비트 우선 할당을 시도한다. 이 플래그가 IOVA 배정 정책의 시작점이다 */
 
-	dev->dma_iommu = iommu_is_dma_domain(domain);
-	if (dev->dma_iommu && iommu_dma_init_domain(domain, dev))
-		goto out_err;
+	dev->dma_iommu = iommu_is_dma_domain(domain);	/* [한국어] 번역 도메인이면 이 장치의 DMA 를 IOMMU 경로로 돌린다. 이 한 줄이 dma_map_* 의 목적지를 바꾼다 */
+	if (dev->dma_iommu && iommu_dma_init_domain(domain, dev))	/* [한국어] IOVA 공간과 예약 구간을 세운다 */
+		goto out_err;	/* [한국어] 세우지 못했다 */
 
-	return;
-out_err:
-	pr_warn("Failed to set up IOMMU for device %s; retaining platform DMA ops\n",
-		dev_name(dev));
-	dev->dma_iommu = false;
+	return;	/* [한국어] 설정 완료 — 이제 이 장치의 DMA 는 IOMMU 를 지난다 */
+out_err:	/* [한국어] 초기화 실패 경로 */
+	pr_warn("Failed to set up IOMMU for device %s; retaining platform DMA ops\n",	/* [한국어] 조용히 넘어가면 장치가 왜 느린지 알 수 없다 */
+		dev_name(dev));	/* [한국어] 문제의 장치 */
+	dev->dma_iommu = false;	/* [한국어] 플랫폼 기본 DMA 경로(직접 매핑 또는 swiotlb)로 되돌린다. 격리는 잃지만 장치는 동작한다 */
 }
 
 static bool has_msi_cookie(const struct iommu_domain *domain)
 {
-	return domain && (domain->cookie_type == IOMMU_COOKIE_DMA_IOVA ||
-			  domain->cookie_type == IOMMU_COOKIE_DMA_MSI);
+	return domain && (domain->cookie_type == IOMMU_COOKIE_DMA_IOVA ||	/* [한국어] 완전한 DMA 쿠키이거나 */
+			  domain->cookie_type == IOMMU_COOKIE_DMA_MSI);	/* [한국어] MSI 전용 축소판 쿠키. 둘 중 하나여야 MSI 매핑 목록이 존재한다 */
 }
 
 static size_t cookie_msi_granule(const struct iommu_domain *domain)
 {
-	switch (domain->cookie_type) {
-	case IOMMU_COOKIE_DMA_IOVA:
-		return domain->iova_cookie->iovad.granule;
-	case IOMMU_COOKIE_DMA_MSI:
-		return PAGE_SIZE;
+	switch (domain->cookie_type) {	/* [한국어] 쿠키 종류에 따라 MSI 매핑의 단위가 다르다 */
+	case IOMMU_COOKIE_DMA_IOVA:	/* [한국어] 완전한 DMA 쿠키 */
+		return domain->iova_cookie->iovad.granule;	/* [한국어] IOVA 공간의 입도를 그대로 쓴다 */
+	case IOMMU_COOKIE_DMA_MSI:	/* [한국어] 축소판 쿠키에는 IOVA 공간이 없다 */
+		return PAGE_SIZE;	/* [한국어] CPU 페이지 크기로 대신한다 */
 	default:
-		BUG();
+		BUG();	/* [한국어] MSI 쿠키가 없는 도메인에서 불렸다 = 호출자가 has_msi_cookie 검사를 건너뛴 것 */
 	}
 }
 
 static struct list_head *cookie_msi_pages(const struct iommu_domain *domain)
 {
-	switch (domain->cookie_type) {
-	case IOMMU_COOKIE_DMA_IOVA:
-		return &domain->iova_cookie->msi_page_list;
-	case IOMMU_COOKIE_DMA_MSI:
-		return &domain->msi_cookie->msi_page_list;
+	switch (domain->cookie_type) {	/* [한국어] 쿠키 종류에 따라 목록의 위치가 다르다 */
+	case IOMMU_COOKIE_DMA_IOVA:	/* [한국어] 완전한 DMA 쿠키 */
+		return &domain->iova_cookie->msi_page_list;	/* [한국어] 큰 쿠키 안의 목록 */
+	case IOMMU_COOKIE_DMA_MSI:	/* [한국어] 축소판 쿠키 */
+		return &domain->msi_cookie->msi_page_list;	/* [한국어] 작은 쿠키 안의 목록 */
 	default:
-		BUG();
+		BUG();	/* [한국어] MSI 쿠키가 없는 도메인 */
 	}
 }
 
 static struct iommu_dma_msi_page *iommu_dma_get_msi_page(struct device *dev,
 		phys_addr_t msi_addr, struct iommu_domain *domain)
 {
-	struct list_head *msi_page_list = cookie_msi_pages(domain);
-	struct iommu_dma_msi_page *msi_page;
-	dma_addr_t iova;
-	int prot = IOMMU_WRITE | IOMMU_NOEXEC | IOMMU_MMIO;
-	size_t size = cookie_msi_granule(domain);
+	struct list_head *msi_page_list = cookie_msi_pages(domain);	/* [한국어] 이 도메인의 MSI 매핑 목록 */
+	struct iommu_dma_msi_page *msi_page;	/* [한국어] 찾거나 만들 매핑 기록 */
+	dma_addr_t iova;	/* [한국어] 도어벨을 매핑할 IOVA */
+	int prot = IOMMU_WRITE | IOMMU_NOEXEC | IOMMU_MMIO;	/* [한국어] 쓰기만 허용한다 — MSI 는 도어벨에 값을 쓰는 동작이고 읽을 이유가 없다. NOEXEC 와 MMIO 는 이 매핑이 코드도 메모리도 아님을 하드웨어에 알린다 */
+	size_t size = cookie_msi_granule(domain);	/* [한국어] 매핑 단위 (한 페이지) */
 
-	msi_addr &= ~(phys_addr_t)(size - 1);
-	list_for_each_entry(msi_page, msi_page_list, list)
-		if (msi_page->phys == msi_addr)
-			return msi_page;
+	msi_addr &= ~(phys_addr_t)(size - 1);	/* [한국어] 도어벨 주소를 페이지 경계로 내린다 — 같은 페이지의 여러 도어벨이 하나의 매핑을 공유한다 */
+	list_for_each_entry(msi_page, msi_page_list, list)	/* [한국어] 이미 매핑해 둔 것이 있는지 */
+		if (msi_page->phys == msi_addr)	/* [한국어] 같은 페이지면 */
+			return msi_page;	/* [한국어] 재사용한다. 벡터마다 IOVA 를 새로 떼면 주소 공간이 빠르게 소모된다 */
 
-	msi_page = kzalloc_obj(*msi_page);
-	if (!msi_page)
-		return NULL;
+	msi_page = kzalloc_obj(*msi_page);	/* [한국어] 새 매핑 기록 */
+	if (!msi_page)	/* [한국어] 할당 실패 */
+		return NULL;	/* [한국어] MSI 를 설정할 수 없다 */
 
-	iova = iommu_dma_alloc_iova(domain, size, dma_get_mask(dev), dev);
-	if (!iova)
-		goto out_free_page;
+	iova = iommu_dma_alloc_iova(domain, size, dma_get_mask(dev), dev);	/* [한국어] 도어벨용 IOVA 한 페이지 */
+	if (!iova)	/* [한국어] IOVA 고갈 */
+		goto out_free_page;	/* [한국어] 기록 반납 */
 
-	if (iommu_map(domain, iova, msi_addr, size, prot, GFP_KERNEL))
-		goto out_free_iova;
+	if (iommu_map(domain, iova, msi_addr, size, prot, GFP_KERNEL))	/* [한국어] 그 IOVA 에 도어벨의 물리 주소를 매핑한다. 이 매핑이 있어야 장치가 낸 쓰기가 인터럽트 컨트롤러에 도달한다 */
+		goto out_free_iova;	/* [한국어] 매핑 실패 */
 
-	INIT_LIST_HEAD(&msi_page->list);
-	msi_page->phys = msi_addr;
-	msi_page->iova = iova;
-	list_add(&msi_page->list, msi_page_list);
-	return msi_page;
+	INIT_LIST_HEAD(&msi_page->list);	/* [한국어] 목록 고리 초기화 */
+	msi_page->phys = msi_addr;	/* [한국어] 재사용 판정 키 */
+	msi_page->iova = iova;	/* [한국어] 장치에 프로그래밍할 주소 */
+	list_add(&msi_page->list, msi_page_list);	/* [한국어] 도메인 목록에 등록 — 다음 벡터가 이것을 찾아 쓴다 */
+	return msi_page;	/* [한국어] 매핑 완료 */
 
-out_free_iova:
-	iommu_dma_free_iova(domain, iova, size, NULL);
-out_free_page:
-	kfree(msi_page);
-	return NULL;
+out_free_iova:	/* [한국어] 매핑 실패 경로 */
+	iommu_dma_free_iova(domain, iova, size, NULL);	/* [한국어] IOVA 반납 */
+out_free_page:	/* [한국어] IOVA 확보 실패가 합류 */
+	kfree(msi_page);	/* [한국어] 기록 반납 */
+	return NULL;	/* [한국어] MSI 설정 실패 */
 }
 
 int iommu_dma_sw_msi(struct iommu_domain *domain, struct msi_desc *desc,
 		     phys_addr_t msi_addr)
 {
-	struct device *dev = msi_desc_to_dev(desc);
-	const struct iommu_dma_msi_page *msi_page;
+	struct device *dev = msi_desc_to_dev(desc);	/* [한국어] 이 MSI 를 쓰는 장치 */
+	const struct iommu_dma_msi_page *msi_page;	/* [한국어] 매핑 기록 */
 
-	if (!has_msi_cookie(domain)) {
-		msi_desc_set_iommu_msi_iova(desc, 0, 0);
-		return 0;
+	if (!has_msi_cookie(domain)) {	/* [한국어] MSI 매핑을 관리하지 않는 도메인 (항등 도메인 등) */
+		msi_desc_set_iommu_msi_iova(desc, 0, 0);	/* [한국어] 번역이 없으니 원래 물리 주소를 그대로 쓰라고 알린다 */
+		return 0;	/* [한국어] 할 일 없음 */
 	}
 
-	iommu_group_mutex_assert(dev);
-	msi_page = iommu_dma_get_msi_page(dev, msi_addr, domain);
-	if (!msi_page)
-		return -ENOMEM;
+	iommu_group_mutex_assert(dev);	/* [한국어] 목록 조작은 그룹 락 아래에서만 — iommu_dma_prepare_msi 가 그 락을 들고 부른다 */
+	msi_page = iommu_dma_get_msi_page(dev, msi_addr, domain);	/* [한국어] 도어벨 매핑을 찾거나 만든다 */
+	if (!msi_page)	/* [한국어] 실패 */
+		return -ENOMEM;	/* [한국어] MSI 를 설정할 수 없다 */
 
-	msi_desc_set_iommu_msi_iova(desc, msi_page->iova,
-				    ilog2(cookie_msi_granule(domain)));
-	return 0;
+	msi_desc_set_iommu_msi_iova(desc, msi_page->iova,	/* [한국어] 인터럽트 코어에 IOVA 를 돌려준다. 이 값이 장치의 MSI 주소 레지스터에 쓰인다 */
+				    ilog2(cookie_msi_granule(domain)));	/* [한국어] 페이지 크기의 로그값 — 코어가 페이지 내 오프셋을 더해 최종 주소를 만든다 */
+	return 0;	/* [한국어] MSI 준비 완료 */
 }
 
 static int iommu_dma_init(void)
 {
-	if (is_kdump_kernel())
-		static_branch_enable(&iommu_deferred_attach_enabled);
+	if (is_kdump_kernel())	/* [한국어] 크래시 덤프 커널이다 */
+		static_branch_enable(&iommu_deferred_attach_enabled);	/* [한국어] 앞선 커널이 남긴 매핑 위에서 부팅하므로, 도메인을 곧바로 걸면 아직 살아 있는 DMA 가 끊긴다. 첫 DMA 시점까지 부착을 미루는 정적 키를 켠다 */
 
-	return iova_cache_get();
+	return iova_cache_get();	/* [한국어] IOVA 슬랩을 준비한다 — 이후 만들어지는 모든 도메인이 이것을 공유한다 */
 }
-arch_initcall(iommu_dma_init);
+arch_initcall(iommu_dma_init);	/* [한국어] IOMMU 드라이버 초기화보다 먼저 돌아야 한다 */
