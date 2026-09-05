@@ -2279,6 +2279,29 @@ static int device_def_domain_type(struct device *dev)
 	return 0;	/* [한국어] 선호 없음 — 코어의 시스템 기본값을 따른다 */
 }
 
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * intel_iommu_init_qi - 무효화 큐를 세우고 무효화 방식을 정한다
+ *
+ * @iommu: 대상 유닛
+ *
+ * VT-d 에는 무효화를 내는 두 가지 방법이 있다. 레지스터에 직접 쓰고 완료를
+ * 폴링하는 방식과, 링 버퍼(큐)에 명령을 넣고 나중에 완료를 확인하는 방식이다.
+ *
+ * 차이가 크다. 레지스터 방식은 명령 하나마다 하드웨어 완료를 기다리므로 해제가
+ * 잦은 워크로드에서 병목이 되고, 큐 방식은 여러 명령을 한 번에 제출한 뒤 마지막에
+ * 한 번만 기다린다. dma-iommu 의 flush queue 가 성능을 내려면 아래 계층도 배치를
+ * 받아 줘야 하고, 그것이 이 큐다.
+ *
+ * 앞부분이 인수인계 처리다. 펌웨어나 인터럽트 재매핑 초기화가 이미 큐를 켜 두었을
+ * 수 있는데, 그 큐의 메모리는 우리 것이 아니므로 끄고 다시 세운다. 남은 폴트를
+ * 먼저 걷어 내는 것도 중요한데, 폴트 레지스터가 가득 차 있으면 새 폴트가 기록되지
+ * 않기 때문이다.
+ *
+ * 실행 컨텍스트: 유닛 초기화. 프로세스 문맥.
+ *
+ * 호출 체인: init_dmars → [이 함수]
+ */
 static void intel_iommu_init_qi(struct intel_iommu *iommu)
 {
 	/*
@@ -2287,116 +2310,145 @@ static void intel_iommu_init_qi(struct intel_iommu *iommu)
 	 * (for example, while enabling interrupt-remapping) then
 	 * we got the things already rolling from a sane state.
 	 */
-	if (!iommu->qi) {
+	if (!iommu->qi) {	/* [한국어] 우리가 아직 무효화 큐를 세우지 않았다면 (인터럽트 재매핑을 켜며 이미 세웠을 수 있다 — 위 영어 주석) */
 		/*
 		 * Clear any previous faults.
 		 */
-		dmar_fault(-1, iommu);
+		dmar_fault(-1, iommu);	/* [한국어] 앞선 상태에서 남은 폴트를 먼저 걷어 낸다. 폴트 레지스터가 가득 차 있으면 새 폴트가 기록되지 않는다 */
 		/*
 		 * Disable queued invalidation if supported and already enabled
 		 * before OS handover.
 		 */
-		dmar_disable_qi(iommu);
+		dmar_disable_qi(iommu);	/* [한국어] 펌웨어가 켜 둔 큐를 끈다. 그 큐의 메모리는 우리 것이 아니므로 그대로 쓸 수 없다 (위 영어 주석) */
 	}
 
-	if (dmar_enable_qi(iommu)) {
+	if (dmar_enable_qi(iommu)) {	/* [한국어] 무효화 큐를 세우려 시도한다 */
 		/*
 		 * Queued Invalidate not enabled, use Register Based Invalidate
 		 */
-		iommu->flush.flush_context = __iommu_flush_context;
-		iommu->flush.flush_iotlb = __iommu_flush_iotlb;
-		pr_info("%s: Using Register based invalidation\n",
-			iommu->name);
+		iommu->flush.flush_context = __iommu_flush_context;	/* [한국어] 실패 — 레지스터 방식으로 물러선다 */
+		iommu->flush.flush_iotlb = __iommu_flush_iotlb;	/* [한국어] 레지스터 방식은 명령마다 완료를 폴링해야 해 느리다 */
+		pr_info("%s: Using Register based invalidation\n",	/* [한국어] 어느 방식인지 남긴다 — 성능 차이가 커서 진단에 중요하다 */
+			iommu->name);	/* [한국어] 어느 유닛인지 */
 	} else {
-		iommu->flush.flush_context = qi_flush_context;
-		iommu->flush.flush_iotlb = qi_flush_iotlb;
-		pr_info("%s: Using Queued invalidation\n", iommu->name);
+		iommu->flush.flush_context = qi_flush_context;	/* [한국어] 큐 방식. 명령을 링 버퍼에 넣고 완료는 나중에 확인한다 */
+		iommu->flush.flush_iotlb = qi_flush_iotlb;	/* [한국어] 여러 무효화를 한 번에 제출할 수 있어, dma-iommu 의 flush queue 와 맞물려 처리량을 만든다 */
+		pr_info("%s: Using Queued invalidation\n", iommu->name);	/* [한국어] 큐 방식임을 남긴다 */
 	}
 }
 
+/*
+ * [한국어]
+ * copy_context_table - 앞선 커널의 컨텍스트 테이블을 우리 것으로 옮긴다
+ *
+ * @iommu:  대상 유닛
+ * @old_re: 앞선 커널의 루트 항목
+ * @tbl:    새로 만든 테이블들을 담을 배열
+ * @bus:    이 버스 번호
+ * @ext:    확장(scalable) 모드인가
+ * @return: 0 성공, -ENOMEM 이면 할당 실패
+ *
+ * kdump 전용이다. 크래시 덤프 커널은 앞선 커널이 설정해 둔 IOMMU 상태 위에서
+ * 시작하는데, 그것을 통째로 지우면 진행 중이던 DMA(덤프를 쓸 디스크 컨트롤러의
+ * 동작 등)가 끊긴다. 그래서 항목을 그대로 옮겨 매핑을 유지한 채 인수인계한다.
+ *
+ * 옛 테이블을 그대로 쓰지 않고 복사하는 이유는 소유권이다. 그 메모리는 크래시
+ * 커널이 관리하지 않는 영역이라 언제 재사용될지 알 수 없다.
+ *
+ * 도메인 id 예약이 조용하지만 중요하다. 옮겨 온 항목이 쓰는 id 를 우리 풀에서도
+ * 예약해 두지 않으면, 새로 만든 도메인이 그 id 를 받아 아직 살아 있는 앞선 커널의
+ * 매핑과 같은 무효화 범위를 공유하게 된다.
+ *
+ * 각 항목에 copied 표시를 남기는 것은 나중을 위한 것이다. 그 장치를 실제로
+ * 설정할 때 copied_context_tear_down 이 이 표시를 보고 캐시를 비운다.
+ *
+ * 실행 컨텍스트: 유닛 초기화 (kdump). 프로세스 문맥.
+ *
+ * 호출 체인: copy_translation_tables → [이 함수]
+ */
 static int copy_context_table(struct intel_iommu *iommu,
 			      struct root_entry *old_re,
 			      struct context_entry **tbl,
 			      int bus, bool ext)
 {
-	int tbl_idx, pos = 0, idx, devfn, ret = 0, did;
-	struct context_entry *new_ce = NULL, ce;
-	struct context_entry *old_ce = NULL;
-	struct root_entry re;
-	phys_addr_t old_ce_phys;
+	int tbl_idx, pos = 0, idx, devfn, ret = 0, did;	/* [한국어] 테이블 인덱스, 상위/하위 위치, 항목 인덱스, 장치 번호, 결과, 도메인 id */
+	struct context_entry *new_ce = NULL, ce;	/* [한국어] 새로 만들 테이블과 복사할 항목 */
+	struct context_entry *old_ce = NULL;	/* [한국어] 앞선 커널의 테이블 (임시 매핑) */
+	struct root_entry re;	/* [한국어] 루트 항목 사본 */
+	phys_addr_t old_ce_phys;	/* [한국어] 옛 테이블의 물리 주소 */
 
-	tbl_idx = ext ? bus * 2 : bus;
-	memcpy(&re, old_re, sizeof(re));
+	tbl_idx = ext ? bus * 2 : bus;	/* [한국어] 확장(scalable) 모드면 버스마다 테이블이 둘이라 인덱스가 두 배 */
+	memcpy(&re, old_re, sizeof(re));	/* [한국어] 루트 항목을 복사해 둔다 — 원본은 앞선 커널의 메모리라 언제든 바뀔 수 있다 */
 
-	for (devfn = 0; devfn < 256; devfn++) {
+	for (devfn = 0; devfn < 256; devfn++) {	/* [한국어] 이 버스의 모든 장치·함수에 대해 */
 		/* First calculate the correct index */
-		idx = (ext ? devfn * 2 : devfn) % 256;
+		idx = (ext ? devfn * 2 : devfn) % 256;	/* [한국어] 확장 모드는 항목이 두 배 크기라 인덱스가 두 배가 되고, 256 을 넘으면 다음 테이블로 넘어간다 */
 
-		if (idx == 0) {
+		if (idx == 0) {	/* [한국어] 테이블 경계 — 새 테이블을 잡을 시점 */
 			/* First save what we may have and clean up */
-			if (new_ce) {
-				tbl[tbl_idx] = new_ce;
-				__iommu_flush_cache(iommu, new_ce,
-						    VTD_PAGE_SIZE);
-				pos = 1;
+			if (new_ce) {	/* [한국어] 앞 테이블을 다 채웠으면 */
+				tbl[tbl_idx] = new_ce;	/* [한국어] 결과 배열에 등록 */
+				__iommu_flush_cache(iommu, new_ce,	/* [한국어] 기입한 내용을 메모리로 */
+						    VTD_PAGE_SIZE);	/* [한국어] 테이블 한 페이지 */
+				pos = 1;	/* [한국어] 다음은 상위 테이블 자리 */
 			}
 
-			if (old_ce)
-				memunmap(old_ce);
+			if (old_ce)	/* [한국어] 앞 테이블의 임시 매핑을 */
+				memunmap(old_ce);	/* [한국어] 해제 */
 
-			ret = 0;
-			if (devfn < 0x80)
-				old_ce_phys = root_entry_lctp(&re);
+			ret = 0;	/* [한국어] 아래 실패 전까지는 성공 */
+			if (devfn < 0x80)	/* [한국어] 장치 번호 128 미만이면 */
+				old_ce_phys = root_entry_lctp(&re);	/* [한국어] 하위 컨텍스트 테이블 */
 			else
-				old_ce_phys = root_entry_uctp(&re);
+				old_ce_phys = root_entry_uctp(&re);	/* [한국어] 아니면 상위 */
 
-			if (!old_ce_phys) {
-				if (ext && devfn == 0) {
+			if (!old_ce_phys) {	/* [한국어] 그 테이블이 없다 */
+				if (ext && devfn == 0) {	/* [한국어] 확장 모드에서 하위가 없으면 상위만 있을 수 있다 */
 					/* No LCTP, try UCTP */
-					devfn = 0x7f;
-					continue;
+					devfn = 0x7f;	/* [한국어] 루프를 128 로 건너뛴다 (다음 회차에 ++ 되어 0x80) */
+					continue;	/* [한국어] 상위 테이블을 시도한다 */
 				} else {
-					goto out;
+					goto out;	/* [한국어] 더 볼 것이 없다 */
 				}
 			}
 
-			ret = -ENOMEM;
-			old_ce = memremap(old_ce_phys, PAGE_SIZE,
-					MEMREMAP_WB);
-			if (!old_ce)
-				goto out;
+			ret = -ENOMEM;	/* [한국어] 아래 할당이 실패하면 이 값 */
+			old_ce = memremap(old_ce_phys, PAGE_SIZE,	/* [한국어] 앞선 커널의 테이블을 임시로 매핑한다. 그 메모리는 커널 선형 매핑 안에 있다는 보장이 없어 memremap 이 필요하다 */
+					MEMREMAP_WB);	/* [한국어] 쓰기 저장 캐시로 */
+			if (!old_ce)	/* [한국어] 매핑 실패 */
+				goto out;	/* [한국어] 복사 불가 */
 
-			new_ce = iommu_alloc_pages_node_sz(iommu->node,
-							   GFP_KERNEL, SZ_4K);
-			if (!new_ce)
-				goto out_unmap;
+			new_ce = iommu_alloc_pages_node_sz(iommu->node,	/* [한국어] 우리 테이블을 새로 잡는다 — 앞선 커널의 것을 그대로 쓰지 않는다 */
+							   GFP_KERNEL, SZ_4K);	/* [한국어] 한 페이지 */
+			if (!new_ce)	/* [한국어] 할당 실패 */
+				goto out_unmap;	/* [한국어] 임시 매핑을 풀고 나간다 */
 
-			ret = 0;
+			ret = 0;	/* [한국어] 여기까지 성공 */
 		}
 
 		/* Now copy the context entry */
-		memcpy(&ce, old_ce + idx, sizeof(ce));
+		memcpy(&ce, old_ce + idx, sizeof(ce));	/* [한국어] 옛 항목을 사본으로 */
 
-		if (!context_present(&ce))
-			continue;
+		if (!context_present(&ce))	/* [한국어] 설정되지 않은 장치면 */
+			continue;	/* [한국어] 복사할 것이 없다 */
 
-		did = context_domain_id(&ce);
-		if (did >= 0 && did < cap_ndoms(iommu->cap))
-			ida_alloc_range(&iommu->domain_ida, did, did, GFP_KERNEL);
+		did = context_domain_id(&ce);	/* [한국어] 앞선 커널이 쓰던 도메인 id */
+		if (did >= 0 && did < cap_ndoms(iommu->cap))	/* [한국어] 그 값이 유효 범위 안이면 */
+			ida_alloc_range(&iommu->domain_ida, did, did, GFP_KERNEL);	/* [한국어] 같은 id 를 우리 풀에서도 예약한다. 그러지 않으면 새 도메인이 그 id 를 받아, 아직 살아 있는 앞선 커널의 매핑과 충돌한다 */
 
-		set_context_copied(iommu, bus, devfn);
-		new_ce[idx] = ce;
+		set_context_copied(iommu, bus, devfn);	/* [한국어] 이 항목이 물려받은 것임을 표시. 나중에 이 장치를 설정할 때 copied_context_tear_down 이 이 표시를 보고 캐시를 비운다 */
+		new_ce[idx] = ce;	/* [한국어] 항목을 그대로 옮긴다 — 진행 중인 DMA 를 끊지 않기 위해서다 */
 	}
 
-	tbl[tbl_idx + pos] = new_ce;
+	tbl[tbl_idx + pos] = new_ce;	/* [한국어] 마지막 테이블을 등록 */
 
-	__iommu_flush_cache(iommu, new_ce, VTD_PAGE_SIZE);
+	__iommu_flush_cache(iommu, new_ce, VTD_PAGE_SIZE);	/* [한국어] 기입 내용을 메모리로 */
 
-out_unmap:
-	memunmap(old_ce);
+out_unmap:	/* [한국어] 임시 매핑을 풀어야 하는 경로 */
+	memunmap(old_ce);	/* [한국어] 해제 */
 
-out:
-	return ret;
+out:	/* [한국어] 공통 출구 */
+	return ret;	/* [한국어] 0 이면 이 버스의 컨텍스트가 모두 옮겨졌다 */
 }
 
 static int copy_translation_tables(struct intel_iommu *iommu)
