@@ -365,6 +365,28 @@ struct iova_fq {
 #define fq_ring_for_each(i, fq) \
 	for ((i) = (fq)->head; (i) != (fq)->tail; (i) = ((i) + 1) & (fq)->mod_mask)	/* [한국어] head == tail 이면 비었다는 규약이라 종료 조건이 곧 '빔' 판정이기도 하다 */
 
+/*
+ * [한국어]
+ * fq_full - 플러시 큐가 가득 찼는지 판별한다
+ *
+ * @fq: 검사할 큐. 호출자가 fq->lock 을 든 상태여야 한다.
+ * @return: 한 칸도 더 넣을 수 없으면 true.
+ *
+ * 링 버퍼에서 head == tail 은 "비었다"는 뜻으로 이미 쓰이고 있다. 그래서
+ * 가득 참을 그것과 구별하려면 한 칸을 영원히 비워 두는 수밖에 없다 —
+ * "tail 의 다음 칸이 head"이면 가득 찬 것으로 본다. 항목 하나를 낭비하는
+ * 대신 두 상태를 락 없이도 한 번의 비교로 구별할 수 있다.
+ *
+ * 이 함수가 참을 돌려주면 호출자는 큐를 비우고(iova_domain_flush) 나서야
+ * 새 항목을 넣을 수 있다. 그래서 이 판정이 곧 "지금 IOTLB 무효화를
+ * 강제할 것인가"의 갈림길이다.
+ *
+ * 실행 컨텍스트: unmap 핫패스. assert_spin_locked 는 디버그 빌드에서만
+ * 실제 검사가 되며, 락 없이 부르는 실수를 개발 중에 잡는다.
+ *
+ * 호출 체인:
+ *   iommu_dma_free_iova()/fq_flush_timeout() → [이 함수]
+ */
 static inline bool fq_full(struct iova_fq *fq)
 {
 	assert_spin_locked(&fq->lock);	/* [한국어] 호출자가 큐 락을 든 상태여야 한다 */
