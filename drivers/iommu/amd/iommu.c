@@ -953,173 +953,325 @@ static struct iommu_group *acpihid_device_group(struct device *dev)
 	return entry->group;	/* [한국어] 이 장치가 속할 그룹 */
 }
 
+/*
+ * [한국어]
+ * pdev_pasid_supported - 이 장치가 PASID 를 요청에 실을 수 있는가
+ *
+ * @dev_data: 장치의 IOMMU 상태.
+ * @return: 지원하면 참.
+ *
+ * "지원"과 "활성화"를 구별하는 것이 이 드라이버의 관례다. 이 함수는
+ * 능력만 보고, 실제로 켰는지는 dev_data->pasid_enabled 가 안다.
+ */
 static inline bool pdev_pasid_supported(struct iommu_dev_data *dev_data)
 {
-	return (dev_data->flags & AMD_IOMMU_DEVICE_FLAG_PASID_SUP);
+	return (dev_data->flags & AMD_IOMMU_DEVICE_FLAG_PASID_SUP);	/* [한국어] 능력만 본다 — 실제로 켰는지는 pasid_enabled 가 안다 */
 }
 
+/*
+ * [한국어]
+ * pdev_get_caps - 장치의 PCI 능력을 드라이버의 플래그로 옮긴다
+ *
+ * @pdev: 대상 장치.
+ * @return: AMD_IOMMU_DEVICE_FLAG_* 조합.
+ *
+ * 세 능력(ATS/PRI/PASID)을 한 번에 읽어 둔다. 매번 PCI 설정 공간을 뒤지지
+ * 않기 위해서다.
+ *
+ * PASID 안에 EXEC 와 PRIV 가 중첩되어 있는 것이 눈에 띈다. 그 둘은 PASID
+ * 능력의 하위 기능이라, PASID 가 없으면 존재할 수 없다.
+ *
+ * 여기서는 켜지 않는다 — 능력을 아는 것과 쓰는 것은 별개이고, 켜는 것은
+ * 도메인 종류가 정해진 뒤의 일이다.
+ *
+ * 호출 체인:
+ *   iommu_init_device() → [이 함수]
+ */
 static u32 pdev_get_caps(struct pci_dev *pdev)
 {
-	int features;
-	u32 flags = 0;
+	int features;	/* [한국어] PASID 능력의 세부 플래그 */
+	u32 flags = 0;	/* [한국어] 모아 둘 결과 */
 
-	if (pci_ats_supported(pdev))
-		flags |= AMD_IOMMU_DEVICE_FLAG_ATS_SUP;
+	if (pci_ats_supported(pdev))	/* [한국어] 장치가 변환을 캐시할 수 있는가 */
+		flags |= AMD_IOMMU_DEVICE_FLAG_ATS_SUP;	/* [한국어] 기록 */
 
-	if (pci_pri_supported(pdev))
-		flags |= AMD_IOMMU_DEVICE_FLAG_PRI_SUP;
+	if (pci_pri_supported(pdev))	/* [한국어] 페이지 폴트를 보고할 수 있는가 */
+		flags |= AMD_IOMMU_DEVICE_FLAG_PRI_SUP;	/* [한국어] 기록 */
 
-	features = pci_pasid_features(pdev);
-	if (features >= 0) {
-		flags |= AMD_IOMMU_DEVICE_FLAG_PASID_SUP;
+	features = pci_pasid_features(pdev);	/* [한국어] PASID 능력과 그 하위 기능들 */
+	if (features >= 0) {	/* [한국어] PASID 능력이 있으면 */
+		flags |= AMD_IOMMU_DEVICE_FLAG_PASID_SUP;	/* [한국어] 기록 */
 
-		if (features & PCI_PASID_CAP_EXEC)
-			flags |= AMD_IOMMU_DEVICE_FLAG_EXEC_SUP;
+		if (features & PCI_PASID_CAP_EXEC)	/* [한국어] 실행 권한 요청 가능 */
+			flags |= AMD_IOMMU_DEVICE_FLAG_EXEC_SUP;	/* [한국어] PASID 의 하위 기능이라 그 안에서만 의미가 있다 */
 
-		if (features & PCI_PASID_CAP_PRIV)
-			flags |= AMD_IOMMU_DEVICE_FLAG_PRIV_SUP;
+		if (features & PCI_PASID_CAP_PRIV)	/* [한국어] 커널 권한 요청 가능 */
+			flags |= AMD_IOMMU_DEVICE_FLAG_PRIV_SUP;	/* [한국어] 같은 이유 */
 	}
 
-	return flags;
+	return flags;	/* [한국어] 능력을 아는 것과 쓰는 것은 별개다 — 켜기는 나중이다 */
 }
 
+/*
+ * [한국어]
+ * pdev_enable_cap_ats - 장치 IOTLB(ATS)를 켠다
+ *
+ * @pdev: 대상 장치.
+ * @return: 0 성공(이미 켜져 있어도 0), -EINVAL 이면 켤 수 없다.
+ *
+ * ATS 는 장치가 변환 결과를 자기 안에 캐시하게 한다. 그러면 매 접근마다
+ * IOMMU 를 거치지 않아 빨라지지만, 대가로 unmap 마다 장치 쪽 캐시도
+ * 지워야 한다 — 그것이 무효화 경로가 복잡해지는 이유다.
+ *
+ * 전역 amd_iommu_iotlb_sup 를 함께 보는 이유: 모든 유닛이 지원해야 쓴다.
+ * 유닛에 따라 되고 안 되면 장치를 옮길 때 문제가 된다.
+ *
+ * PAGE_SHIFT 를 넘기는 것은 장치가 캐시할 최소 단위를 페이지로 정하는
+ * 것이다.
+ *
+ * qdep 를 함께 읽어 두는 이유: 무효화 명령에 그 값을 실어야 하드웨어가
+ * 장치의 응답을 기다릴지 알 수 있다.
+ */
 static inline int pdev_enable_cap_ats(struct pci_dev *pdev)
 {
-	struct iommu_dev_data *dev_data = dev_iommu_priv_get(&pdev->dev);
-	int ret = -EINVAL;
+	struct iommu_dev_data *dev_data = dev_iommu_priv_get(&pdev->dev);	/* [한국어] 장치 상태 */
+	int ret = -EINVAL;	/* [한국어] 켤 수 없을 때의 기본값 */
 
-	if (dev_data->ats_enabled)
-		return 0;
+	if (dev_data->ats_enabled)	/* [한국어] 이미 켜져 있으면 */
+		return 0;	/* [한국어] 성공으로 돌아간다 */
 
-	if (amd_iommu_iotlb_sup &&
-	    (dev_data->flags & AMD_IOMMU_DEVICE_FLAG_ATS_SUP)) {
-		ret = pci_enable_ats(pdev, PAGE_SHIFT);
-		if (!ret) {
-			dev_data->ats_enabled = 1;
-			dev_data->ats_qdep    = pci_ats_queue_depth(pdev);
+	if (amd_iommu_iotlb_sup &&	/* [한국어] 모든 유닛이 지원해야 쓴다 — 유닛마다 다르면 장치를 옮길 때 문제가 된다 */
+	    (dev_data->flags & AMD_IOMMU_DEVICE_FLAG_ATS_SUP)) {	/* [한국어] 장치도 지원하면 */
+		ret = pci_enable_ats(pdev, PAGE_SHIFT);	/* [한국어] 캐시할 최소 단위를 페이지로 정한다 */
+		if (!ret) {	/* [한국어] 성공하면 */
+			dev_data->ats_enabled = 1;	/* [한국어] 이제 unmap 마다 장치 쪽 캐시도 지워야 한다 */
+			dev_data->ats_qdep    = pci_ats_queue_depth(pdev);	/* [한국어] 무효화 명령에 실어야 하드웨어가 장치의 응답을 기다릴지 안다 */
 		}
 	}
 
-	return ret;
+	return ret;	/* [한국어] 성패 */
 }
 
+/*
+ * [한국어]
+ * pdev_disable_cap_ats - 장치 IOTLB 를 끈다
+ *
+ * @pdev: 대상 장치.
+ *
+ * 끄면 장치가 캐시를 버리므로, 이후 unmap 에서 장치 쪽 무효화를 보내지
+ * 않아도 된다. 상태를 함께 내려야 무효화 경로가 그것을 안다.
+ */
 static inline void pdev_disable_cap_ats(struct pci_dev *pdev)
 {
-	struct iommu_dev_data *dev_data = dev_iommu_priv_get(&pdev->dev);
+	struct iommu_dev_data *dev_data = dev_iommu_priv_get(&pdev->dev);	/* [한국어] 장치 상태 */
 
-	if (dev_data->ats_enabled) {
-		pci_disable_ats(pdev);
-		dev_data->ats_enabled = 0;
+	if (dev_data->ats_enabled) {	/* [한국어] 켜져 있을 때만 */
+		pci_disable_ats(pdev);	/* [한국어] 장치가 캐시를 버린다 */
+		dev_data->ats_enabled = 0;	/* [한국어] 무효화 경로가 이제 장치 쪽을 건너뛴다 */
 	}
 }
 
+/*
+ * [한국어]
+ * pdev_enable_cap_pri - 페이지 요청(PRI)을 켠다
+ *
+ * @pdev: 대상 장치.
+ * @return: 0 성공, -EINVAL 이면 켤 수 없다.
+ *
+ * ATS 가 먼저 켜져 있어야 한다는 것이 이 함수의 전제다. PRI 는 ATS 의
+ * 확장이라, 장치가 변환을 요청할 수 있어야 그 실패를 보고할 수도 있다.
+ * 그래서 ATS 가 없으면 오류가 아니라 0 을 돌려준다 — 순서상 아직 이르다는
+ * 뜻이지 실패가 아니다.
+ *
+ * 먼저 reset 하는 이유: 앞선 부팅이나 옛 커널이 남긴 PRI 상태가 있을 수
+ * 있고, 그 위에 켜면 미처리 요청이 섞인다.
+ *
+ * 미처리 요청 수 32 는 원 주석대로 임시로 못박은 값이다. 장치마다 적절한
+ * 값이 다르지만 그것을 알아낼 방법이 마땅치 않다.
+ *
+ * pri_tlp 를 함께 읽는 이유: 응답에 PASID 를 실어야 하는 장치인지가
+ * 여기서 정해진다.
+ */
 static inline int pdev_enable_cap_pri(struct pci_dev *pdev)
 {
-	struct iommu_dev_data *dev_data = dev_iommu_priv_get(&pdev->dev);
-	int ret = -EINVAL;
+	struct iommu_dev_data *dev_data = dev_iommu_priv_get(&pdev->dev);	/* [한국어] 장치 상태 */
+	int ret = -EINVAL;	/* [한국어] 켤 수 없을 때의 기본값 */
 
-	if (dev_data->pri_enabled)
-		return 0;
+	if (dev_data->pri_enabled)	/* [한국어] 이미 켜져 있으면 */
+		return 0;	/* [한국어] 성공 */
 
-	if (!dev_data->ats_enabled)
-		return 0;
+	if (!dev_data->ats_enabled)	/* [한국어] PRI 는 ATS 의 확장이라 그것이 먼저다 */
+		return 0;	/* [한국어] 오류가 아니라 순서상 아직 이르다는 뜻이다 */
 
-	if (dev_data->flags & AMD_IOMMU_DEVICE_FLAG_PRI_SUP) {
+	if (dev_data->flags & AMD_IOMMU_DEVICE_FLAG_PRI_SUP) {	/* [한국어] 장치가 지원하면 */
 		/*
 		 * First reset the PRI state of the device.
 		 * FIXME: Hardcode number of outstanding requests for now
 		 */
-		if (!pci_reset_pri(pdev) && !pci_enable_pri(pdev, 32)) {
-			dev_data->pri_enabled = 1;
-			dev_data->pri_tlp     = pci_prg_resp_pasid_required(pdev);
+		if (!pci_reset_pri(pdev) && !pci_enable_pri(pdev, 32)) {	/* [한국어] (원 주석: 먼저 PRI 상태를 초기화한다. 미처리 요청 수는 임시로 못박았다) */
+			dev_data->pri_enabled = 1;	/* [한국어] 이제 장치가 페이지 폴트를 보고할 수 있다 */
+			dev_data->pri_tlp     = pci_prg_resp_pasid_required(pdev);	/* [한국어] 응답에 PASID 를 실어야 하는 장치인지 */
 
-			ret = 0;
+			ret = 0;	/* [한국어] 성공 */
 		}
 	}
 
-	return ret;
+	return ret;	/* [한국어] 성패 */
 }
 
+/*
+ * [한국어]
+ * pdev_disable_cap_pri - 페이지 요청을 끈다
+ *
+ * @pdev: 대상 장치.
+ *
+ * 끈 뒤에는 장치가 폴트를 보고하지 않는다. 그래서 이것을 끄기 전에
+ * 대기 중인 요청이 모두 응답받아야 한다 — 그 정리는 IOPF 계층이 한다.
+ */
 static inline void pdev_disable_cap_pri(struct pci_dev *pdev)
 {
-	struct iommu_dev_data *dev_data = dev_iommu_priv_get(&pdev->dev);
+	struct iommu_dev_data *dev_data = dev_iommu_priv_get(&pdev->dev);	/* [한국어] 장치 상태 */
 
-	if (dev_data->pri_enabled) {
-		pci_disable_pri(pdev);
-		dev_data->pri_enabled = 0;
+	if (dev_data->pri_enabled) {	/* [한국어] 켜져 있을 때만 */
+		pci_disable_pri(pdev);	/* [한국어] 이제 폴트를 보고하지 않는다 — 대기 중인 요청은 미리 정리되어 있어야 한다 */
+		dev_data->pri_enabled = 0;	/* [한국어] 상태를 내린다 */
 	}
 }
 
+/*
+ * [한국어]
+ * pdev_enable_cap_pasid - 장치가 PASID 를 요청에 싣게 한다
+ *
+ * @pdev: 대상 장치.
+ * @return: 0 성공, -EINVAL 이면 켤 수 없다.
+ *
+ * 0 을 넘기는 것이 이 함수의 보안적 선택이다. 원 주석이 밝히듯 사용자
+ * 권한으로 접근할 수 있는 페이지만 허용한다 — 커널 권한(PRIV)이나
+ * 실행 권한(EXEC)은 주지 않는다.
+ *
+ * 장치가 그 권한을 광고하더라도 주지 않는 이유: 손상된 장치가 커널
+ * 메모리에 닿을 통로를 열지 않기 위해서다.
+ */
 static inline int pdev_enable_cap_pasid(struct pci_dev *pdev)
 {
-	struct iommu_dev_data *dev_data = dev_iommu_priv_get(&pdev->dev);
-	int ret = -EINVAL;
+	struct iommu_dev_data *dev_data = dev_iommu_priv_get(&pdev->dev);	/* [한국어] 장치 상태 */
+	int ret = -EINVAL;	/* [한국어] 켤 수 없을 때의 기본값 */
 
-	if (dev_data->pasid_enabled)
-		return 0;
+	if (dev_data->pasid_enabled)	/* [한국어] 이미 켜져 있으면 */
+		return 0;	/* [한국어] 성공 */
 
-	if (dev_data->flags & AMD_IOMMU_DEVICE_FLAG_PASID_SUP) {
+	if (dev_data->flags & AMD_IOMMU_DEVICE_FLAG_PASID_SUP) {	/* [한국어] 장치가 지원하면 */
 		/* Only allow access to user-accessible pages */
-		ret = pci_enable_pasid(pdev, 0);
-		if (!ret)
-			dev_data->pasid_enabled = 1;
+		ret = pci_enable_pasid(pdev, 0);	/* [한국어] (원 주석: 사용자 권한 페이지만 허용한다) 장치가 광고해도 커널 권한은 주지 않는다 */
+		if (!ret)	/* [한국어] 성공하면 */
+			dev_data->pasid_enabled = 1;	/* [한국어] 이제 요청에 PASID 가 실린다 */
 	}
 
-	return ret;
+	return ret;	/* [한국어] 성패 */
 }
 
+/*
+ * [한국어]
+ * pdev_disable_cap_pasid - PASID 를 끈다
+ *
+ * @pdev: 대상 장치.
+ *
+ * 끄면 장치의 요청에 PASID 가 실리지 않아 모두 PASID 0 으로 취급된다.
+ * 그래서 이것을 끄기 전에 모든 PASID 연결이 정리되어 있어야 한다.
+ */
 static inline void pdev_disable_cap_pasid(struct pci_dev *pdev)
 {
-	struct iommu_dev_data *dev_data = dev_iommu_priv_get(&pdev->dev);
+	struct iommu_dev_data *dev_data = dev_iommu_priv_get(&pdev->dev);	/* [한국어] 장치 상태 */
 
-	if (dev_data->pasid_enabled) {
-		pci_disable_pasid(pdev);
-		dev_data->pasid_enabled = 0;
+	if (dev_data->pasid_enabled) {	/* [한국어] 켜져 있을 때만 */
+		pci_disable_pasid(pdev);	/* [한국어] 이후 요청은 모두 PASID 0 으로 취급된다 */
+		dev_data->pasid_enabled = 0;	/* [한국어] 상태를 내린다 */
 	}
 }
 
+/*
+ * [한국어]
+ * pdev_enable_caps - 세 능력을 순서대로 켠다
+ *
+ * @pdev: 대상 장치.
+ *
+ * 순서가 중요하다. PASID 를 먼저, 그다음 ATS, 마지막에 PRI 다. PRI 가
+ * ATS 를 요구하므로 그 둘의 순서는 필수이고, PASID 를 먼저 켜는 것은
+ * PRI 가 응답 형식을 정할 때 PASID 상태를 보기 때문이다.
+ *
+ * 각 단계의 실패를 무시하는 것에 유의: 능력이 없거나 켜지지 않는 것은
+ * 오류가 아니라 그 기능을 쓰지 않는다는 뜻이다.
+ */
 static void pdev_enable_caps(struct pci_dev *pdev)
 {
-	pdev_enable_cap_pasid(pdev);
-	pdev_enable_cap_ats(pdev);
-	pdev_enable_cap_pri(pdev);
+	pdev_enable_cap_pasid(pdev);	/* [한국어] PRI 가 응답 형식을 정할 때 PASID 상태를 보므로 먼저 */
+	pdev_enable_cap_ats(pdev);	/* [한국어] PRI 의 전제 */
+	pdev_enable_cap_pri(pdev);	/* [한국어] 마지막. 각 단계의 실패는 그 기능을 쓰지 않는다는 뜻이라 무시한다 */
 }
 
+/*
+ * [한국어]
+ * pdev_disable_caps - 세 능력을 끈다
+ *
+ * @pdev: 대상 장치.
+ *
+ * 켜기의 정확한 역순이 아니라는 점이 눈에 띈다. ATS 를 가장 먼저 끄는데,
+ * 그러면 장치가 새 변환을 캐시하지 않게 되어 이후 정리가 단순해진다.
+ */
 static void pdev_disable_caps(struct pci_dev *pdev)
 {
-	pdev_disable_cap_ats(pdev);
-	pdev_disable_cap_pasid(pdev);
-	pdev_disable_cap_pri(pdev);
+	pdev_disable_cap_ats(pdev);	/* [한국어] 먼저 끄면 장치가 새 변환을 캐시하지 않아 이후 정리가 단순해진다 */
+	pdev_disable_cap_pasid(pdev);	/* [한국어] 그다음 PASID */
+	pdev_disable_cap_pri(pdev);	/* [한국어] 마지막에 PRI */
 }
 
 /*
  * This function checks if the driver got a valid device from the caller to
  * avoid dereferencing invalid pointers.
  */
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * check_device - 이 장치를 이 드라이버가 다룰 수 있는지 확인한다
+ *
+ * @dev: 대상 장치.
+ * @return: 다룰 수 있으면 참.
+ *
+ * 원 주석대로 잘못된 포인터를 역참조하지 않기 위한 관문이다. 네 가지를
+ * 차례로 확인한다: 장치가 있는가, 식별할 수 있는가, 담당 유닛이 있는가,
+ * 그 세그먼트의 표 범위 안인가.
+ *
+ * 마지막 검사가 중요하다. 표는 last_bdf 까지만 잡혀 있으므로, 그보다 큰
+ * id 로 인덱싱하면 배열 밖을 건드린다. IVRS 에 나타나지 않은 장치가
+ * 나중에 열거될 수 있어 실제로 일어날 수 있는 일이다.
+ *
+ * 호출 체인:
+ *   amd_iommu_probe_device() → [이 함수]
+ */
 static bool check_device(struct device *dev)
 {
-	struct amd_iommu_pci_seg *pci_seg;
-	struct amd_iommu *iommu;
-	int devid, sbdf;
+	struct amd_iommu_pci_seg *pci_seg;	/* [한국어] 표 범위를 확인할 세그먼트 */
+	struct amd_iommu *iommu;	/* [한국어] 담당 유닛 */
+	int devid, sbdf;	/* [한국어] 장치 id 와 합친 키 */
 
-	if (!dev)
-		return false;
+	if (!dev)	/* [한국어] 장치 포인터 자체가 없다 */
+		return false;	/* [한국어] 다룰 수 없다 */
 
-	sbdf = get_device_sbdf_id(dev);
-	if (sbdf < 0)
-		return false;
-	devid = PCI_SBDF_TO_DEVID(sbdf);
+	sbdf = get_device_sbdf_id(dev);	/* [한국어] 식별할 수 있는가 */
+	if (sbdf < 0)	/* [한국어] 없으면 */
+		return false;	/* [한국어] 이 드라이버의 대상이 아니다 */
+	devid = PCI_SBDF_TO_DEVID(sbdf);	/* [한국어] 합친 키에서 BDF 만 */
 
-	iommu = rlookup_amd_iommu(dev);
-	if (!iommu)
-		return false;
+	iommu = rlookup_amd_iommu(dev);	/* [한국어] 담당 유닛이 있는가 */
+	if (!iommu)	/* [한국어] 없으면 */
+		return false;	/* [한국어] 어느 IOMMU 도 이 장치를 담당하지 않는다 */
 
 	/* Out of our scope? */
-	pci_seg = iommu->pci_seg;
-	if (devid > pci_seg->last_bdf)
-		return false;
+	pci_seg = iommu->pci_seg;	/* [한국어] (원 주석: 우리 범위 밖인가) */
+	if (devid > pci_seg->last_bdf)	/* [한국어] 표는 last_bdf 까지만 잡혀 있다 */
+		return false;	/* [한국어] 그보다 큰 id 로 인덱싱하면 배열 밖을 건드린다 */
 
-	return true;
+	return true;	/* [한국어] 이 드라이버가 다룰 수 있는 장치 */
 }
 
 static int iommu_init_device(struct amd_iommu *iommu, struct device *dev)
