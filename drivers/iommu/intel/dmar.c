@@ -1373,144 +1373,264 @@ out:	/* [한국어] 두 결론이 합류 */
 	return dmaru;	/* [한국어] 담당 유닛 또는 NULL */
 }
 
+/*
+ * [한국어]
+ * dmar_acpi_insert_dev_scope - ANDD 로 선언된 ACPI 장치를 유닛의 device scope 에 연결한다
+ *
+ * @device_number: ANDD 항목이 적은 열거 번호. @adev: 그 이름으로 찾은 ACPI 장치.
+ * @return: 없음.
+ *
+ * PCI 장치는 버스 알림으로 연결되지만(dmar_insert_dev_scope), ACPI
+ * 네임스페이스 장치는 그런 알림이 없다. 그래서 부팅 후반에 ANDD 항목을
+ * 하나씩 훑으며 이 함수로 직접 연결한다.
+ *
+ * 연결의 열쇠가 enumeration_id 다. ANDD 항목이 "이 장치는 번호 N 이다"를
+ * 선언하고, DRHD 의 device scope 가 같은 번호로 그 장치를 지목한다. 즉
+ * 이름이 아니라 번호로 두 항목이 짝지어진다.
+ *
+ * 찾은 뒤에는 PCI 경로처럼 bus/devfn 을 채운다. ACPI 장치라도 DMA 는 PCI
+ * 소스 id 로 나가기 때문에, DMAR 이 그 장치에 부여한 가상의 위치를
+ * device scope 가 함께 적어 둔 것이다.
+ *
+ * BUG_ON 을 쓰는 것이 이 파일에서 드문 경우다. 표가 신고한 개수보다 많은
+ * 장치가 매치되었다는 뜻인데, 그 상태로 진행하면 배열 밖에 쓰게 된다.
+ *
+ * 매치되는 scope 가 없으면 경고만 남긴다 — 그 장치는 IOMMU 아래에 들어가지
+ * 못하지만 시스템은 동작한다.
+ *
+ * 실행 컨텍스트: 부팅 후반(__init). 단일 스레드.
+ */
 static void __init dmar_acpi_insert_dev_scope(u8 device_number,
 					      struct acpi_device *adev)
 {
-	struct dmar_drhd_unit *dmaru;
-	struct acpi_dmar_hardware_unit *drhd;
-	struct acpi_dmar_device_scope *scope;
-	struct device *tmp;
-	int i;
-	struct acpi_dmar_pci_path *path;
+	struct dmar_drhd_unit *dmaru;	/* [한국어] 유닛 순회 커서 */
+	struct acpi_dmar_hardware_unit *drhd;	/* [한국어] 그 유닛의 원본 ACPI 항목 */
+	struct acpi_dmar_device_scope *scope;	/* [한국어] device scope 순회 커서 */
+	struct device *tmp;	/* [한국어] 빈 자리 순회 커서 */
+	int i;	/* [한국어] 인덱스 */
+	struct acpi_dmar_pci_path *path;	/* [한국어] 그 scope 가 적은 위치 */
 
-	for_each_drhd_unit(dmaru) {
-		drhd = container_of(dmaru->hdr,
-				    struct acpi_dmar_hardware_unit,
-				    header);
+	for_each_drhd_unit(dmaru) {	/* [한국어] 모든 유닛의 device scope 를 훑는다 */
+		drhd = container_of(dmaru->hdr,	/* [한국어] 보관된 ACPI 항목으로 */
+				    struct acpi_dmar_hardware_unit,	/* [한국어] DRHD 형식으로 */
+				    header);	/* [한국어] 해석 */
 
-		for (scope = (void *)(drhd + 1);
-		     (unsigned long)scope < ((unsigned long)drhd) + drhd->header.length;
-		     scope = ((void *)scope) + scope->length) {
-			if (scope->entry_type != ACPI_DMAR_SCOPE_TYPE_NAMESPACE)
-				continue;
-			if (scope->enumeration_id != device_number)
-				continue;
+		for (scope = (void *)(drhd + 1);	/* [한국어] 항목 뒤의 device scope 부터 */
+		     (unsigned long)scope < ((unsigned long)drhd) + drhd->header.length;	/* [한국어] 항목의 끝까지 */
+		     scope = ((void *)scope) + scope->length) {	/* [한국어] 항목마다 길이가 다르다 */
+			if (scope->entry_type != ACPI_DMAR_SCOPE_TYPE_NAMESPACE)	/* [한국어] ACPI 네임스페이스 장치가 아니면 */
+				continue;	/* [한국어] 건너뛴다 */
+			if (scope->enumeration_id != device_number)	/* [한국어] 열거 번호가 다르면 */
+				continue;	/* [한국어] 다른 장치다. ANDD 와 device scope 는 이름이 아니라 이 번호로 짝지어진다 */
 
-			path = (void *)(scope + 1);
-			pr_info("ACPI device \"%s\" under DMAR at %llx as %02x:%02x.%d\n",
-				dev_name(&adev->dev), dmaru->reg_base_addr,
-				scope->bus, path->device, path->function);
-			for_each_dev_scope(dmaru->devices, dmaru->devices_cnt, i, tmp)
-				if (tmp == NULL) {
-					dmaru->devices[i].bus = scope->bus;
-					dmaru->devices[i].devfn = PCI_DEVFN(path->device,
-									    path->function);
-					rcu_assign_pointer(dmaru->devices[i].dev,
-							   get_device(&adev->dev));
-					return;
+			path = (void *)(scope + 1);	/* [한국어] 그 scope 가 적은 위치 */
+			pr_info("ACPI device \"%s\" under DMAR at %llx as %02x:%02x.%d\n",	/* [한국어] 어느 장치가 어느 유닛 아래에 어떤 위치로 들어가는지 남긴다 */
+				dev_name(&adev->dev), dmaru->reg_base_addr,	/* [한국어] 장치 이름과 유닛 주소 */
+				scope->bus, path->device, path->function);	/* [한국어] 그 장치에 부여된 버스·슬롯·함수 */
+			for_each_dev_scope(dmaru->devices, dmaru->devices_cnt, i, tmp)	/* [한국어] 빈 자리를 찾는다 */
+				if (tmp == NULL) {	/* [한국어] 아직 연결되지 않은 자리면 */
+					dmaru->devices[i].bus = scope->bus;	/* [한국어] DMAR 이 이 장치에 부여한 버스 번호 */
+					dmaru->devices[i].devfn = PCI_DEVFN(path->device,	/* [한국어] 슬롯과 */
+									    path->function);	/* [한국어] 함수를 devfn 으로 조립한다. ACPI 장치라도 DMA 는 PCI 소스 id 로 나가기 때문이다 */
+					rcu_assign_pointer(dmaru->devices[i].dev,	/* [한국어] 포인터를 연결한다 */
+							   get_device(&adev->dev));	/* [한국어] 참조를 잡는다 */
+					return;	/* [한국어] 연결 완료 */
 				}
-			BUG_ON(i >= dmaru->devices_cnt);
+			BUG_ON(i >= dmaru->devices_cnt);	/* [한국어] 빈 자리가 없으면 표가 신고한 개수보다 많은 장치가 매치된 것이다. 그대로 진행하면 배열 밖에 쓴다 */
 		}
 	}
-	pr_warn("No IOMMU scope found for ANDD enumeration ID %d (%s)\n",
-		device_number, dev_name(&adev->dev));
+	pr_warn("No IOMMU scope found for ANDD enumeration ID %d (%s)\n",	/* [한국어] 어느 유닛도 이 번호를 지목하지 않았다 */
+		device_number, dev_name(&adev->dev));	/* [한국어] 그 장치는 IOMMU 아래에 들어가지 못하지만 시스템은 동작한다 */
 }
 
+/*
+ * [한국어]
+ * dmar_acpi_dev_scope_init - ANDD 항목들을 훑어 ACPI 장치를 찾아 연결한다
+ *
+ * @return: 0 성공, -ENODEV 면 DMAR 표가 없다.
+ *
+ * ANDD 항목이 적은 것은 ACPI 이름 문자열이다. 그 이름으로 실제 ACPI 장치를
+ * 찾아(acpi_get_handle → acpi_fetch_acpi_dev), 그것을 유닛의 device scope 에
+ * 연결한다.
+ *
+ * 표를 직접 훑는 것을 눈여겨볼 것 — dmar_walk_dmar_table 을 쓰지 않는다.
+ * 이 함수는 부팅 후반, 파싱이 끝난 뒤에 불리는데 그때는 콜백 묶음을 다시
+ * 구성하는 것보다 필요한 종류만 직접 훑는 편이 단순하다.
+ *
+ * 이름을 찾지 못하거나 장치를 얻지 못해도 continue 한다: 그 장치 하나가
+ * IOMMU 아래에 들어가지 못할 뿐, 나머지 ANDD 항목은 계속 처리해야 한다.
+ * 펌웨어가 존재하지 않는 이름을 적는 경우가 실제로 있다.
+ *
+ * 실행 컨텍스트: 부팅 후반(__init).
+ */
 static int __init dmar_acpi_dev_scope_init(void)
 {
-	struct acpi_dmar_andd *andd;
+	struct acpi_dmar_andd *andd;	/* [한국어] ANDD 항목 순회 커서 */
 
-	if (dmar_tbl == NULL)
-		return -ENODEV;
+	if (dmar_tbl == NULL)	/* [한국어] 표가 없으면 */
+		return -ENODEV;	/* [한국어] 할 일이 없다 */
 
-	for (andd = (void *)dmar_tbl + sizeof(struct acpi_table_dmar);
-	     ((unsigned long)andd) < ((unsigned long)dmar_tbl) + dmar_tbl->length;
-	     andd = ((void *)andd) + andd->header.length) {
-		if (andd->header.type == ACPI_DMAR_TYPE_NAMESPACE) {
-			acpi_handle h;
-			struct acpi_device *adev;
+	for (andd = (void *)dmar_tbl + sizeof(struct acpi_table_dmar);	/* [한국어] 표 헤더 뒤의 첫 항목부터 */
+	     ((unsigned long)andd) < ((unsigned long)dmar_tbl) + dmar_tbl->length;	/* [한국어] 표의 끝까지 */
+	     andd = ((void *)andd) + andd->header.length) {	/* [한국어] 항목마다 길이가 다르다 */
+		if (andd->header.type == ACPI_DMAR_TYPE_NAMESPACE) {	/* [한국어] ANDD 항목만 처리한다 */
+			acpi_handle h;	/* [한국어] ACPI 객체 핸들 */
+			struct acpi_device *adev;	/* [한국어] 그 핸들이 가리키는 장치 */
 
-			if (!ACPI_SUCCESS(acpi_get_handle(ACPI_ROOT_OBJECT,
-							  andd->device_name,
-							  &h))) {
-				pr_err("Failed to find handle for ACPI object %s\n",
-				       andd->device_name);
-				continue;
+			if (!ACPI_SUCCESS(acpi_get_handle(ACPI_ROOT_OBJECT,	/* [한국어] 항목이 적은 이름으로 */
+							  andd->device_name,	/* [한국어] ACPI 네임스페이스를 찾는다 */
+							  &h))) {	/* [한국어] 핸들을 받는다 */
+				pr_err("Failed to find handle for ACPI object %s\n",	/* [한국어] 펌웨어가 존재하지 않는 이름을 적는 경우가 실제로 있다 */
+				       andd->device_name);	/* [한국어] 그 이름 */
+				continue;	/* [한국어] 이 항목만 건너뛰고 나머지는 계속 처리한다 */
 			}
-			adev = acpi_fetch_acpi_dev(h);
-			if (!adev) {
-				pr_err("Failed to get device for ACPI object %s\n",
-				       andd->device_name);
-				continue;
+			adev = acpi_fetch_acpi_dev(h);	/* [한국어] 핸들에서 장치 구조체로 */
+			if (!adev) {	/* [한국어] 얻지 못하면 */
+				pr_err("Failed to get device for ACPI object %s\n",	/* [한국어] 기록하고 */
+				       andd->device_name);	/* [한국어] 그 이름 */
+				continue;	/* [한국어] 건너뛴다 */
 			}
-			dmar_acpi_insert_dev_scope(andd->device_number, adev);
+			dmar_acpi_insert_dev_scope(andd->device_number, adev);	/* [한국어] 열거 번호로 유닛의 device scope 를 찾아 연결한다 */
 		}
 	}
-	return 0;
+	return 0;	/* [한국어] ANDD 항목을 모두 처리했다 */
 }
 
+/*
+ * [한국어]
+ * dmar_dev_scope_init - 이미 존재하는 모든 장치를 DMAR 표에 연결한다
+ *
+ * @return: 0 성공, 음수면 실패(그 값이 이후 조회의 답으로 기억된다).
+ *
+ * 부팅 순서의 문제를 해결하는 함수다. DMAR 표는 아주 이른 시점에 파싱되지만
+ * 그때는 PCI 장치가 아직 열거되지 않았다. 버스 알림은 그 이후에 나타나는
+ * 장치만 알려 주므로, 이미 있는 장치들은 여기서 한 번에 훑어 연결해야 한다.
+ *
+ * dmar_dev_scope_status 가 상태 기계 역할을 한다.
+ *   1  — 아직 하지 않음(초기값). 이 함수가 실제로 동작하는 유일한 조건이다.
+ *   0  — 성공.
+ *   음수 — 실패. 그 값이 그대로 반환되어, 다시 시도하지 않는다.
+ * 두 번 불려도 안전하고, 한 번 실패하면 그 사실이 기억된다.
+ *
+ * VF 를 건너뛰는 이유는 버스 알림과 같다 — VF 는 PF 를 통해 조회된다.
+ *
+ * 알림 정보를 만들지 못하면 그 자리에서 반환하는데, for_each_pci_dev 가
+ * 잡아 둔 참조를 먼저 놓는다(pci_dev_put). 루프를 중간에 빠져나갈 때의
+ * 규칙이다.
+ *
+ * 유닛이 하나도 없으면 -ENODEV 로 기록한다 — 연결할 대상이 없다.
+ *
+ * 실행 컨텍스트: 부팅(__init), PCI 열거 후.
+ *
+ * 호출 체인:
+ *   intel_iommu_init()/irq_remapping 초기화 → [dmar_dev_scope_init]
+ *     → dmar_acpi_dev_scope_init() → dmar_pci_bus_add_dev()
+ */
 int __init dmar_dev_scope_init(void)
 {
-	struct pci_dev *dev = NULL;
-	struct dmar_pci_notify_info *info;
+	struct pci_dev *dev = NULL;	/* [한국어] for_each_pci_dev 가 갱신할 커서 */
+	struct dmar_pci_notify_info *info;	/* [한국어] 표와 대조할 경로 정보 */
 
-	if (dmar_dev_scope_status != 1)
-		return dmar_dev_scope_status;
+	if (dmar_dev_scope_status != 1)	/* [한국어] 이미 했거나 실패했으면 */
+		return dmar_dev_scope_status;	/* [한국어] 기억된 결과를 그대로 돌려준다. 1 은 "아직 안 함"의 초기값이다 */
 
-	if (list_empty(&dmar_drhd_units)) {
-		dmar_dev_scope_status = -ENODEV;
+	if (list_empty(&dmar_drhd_units)) {	/* [한국어] 유닛이 하나도 없으면 */
+		dmar_dev_scope_status = -ENODEV;	/* [한국어] 연결할 대상이 없다 */
 	} else {
-		dmar_dev_scope_status = 0;
+		dmar_dev_scope_status = 0;	/* [한국어] 성공으로 시작한다. 도중에 실패하면 add_dev 가 이 값을 덮어쓴다 */
 
-		dmar_acpi_dev_scope_init();
+		dmar_acpi_dev_scope_init();	/* [한국어] 먼저 ACPI 네임스페이스 장치들을 연결한다 */
 
-		for_each_pci_dev(dev) {
-			if (dev->is_virtfn)
-				continue;
+		for_each_pci_dev(dev) {	/* [한국어] 이미 열거된 모든 PCI 장치에 대해 */
+			if (dev->is_virtfn)	/* [한국어] VF 는 */
+				continue;	/* [한국어] PF 를 통해 조회되므로 건너뛴다 */
 
-			info = dmar_alloc_pci_notify_info(dev,
-					BUS_NOTIFY_ADD_DEVICE);
-			if (!info) {
-				pci_dev_put(dev);
-				return dmar_dev_scope_status;
+			info = dmar_alloc_pci_notify_info(dev,	/* [한국어] 버스 알림과 같은 형태의 정보를 만들어 */
+					BUS_NOTIFY_ADD_DEVICE);	/* [한국어] 추가 이벤트로 처리한다 — 이미 있는 장치를 "지금 나타난 것처럼" 다룬다 */
+			if (!info) {	/* [한국어] 만들 수 없으면 */
+				pci_dev_put(dev);	/* [한국어] 루프를 중간에 빠져나가므로 잡힌 참조를 놓고 */
+				return dmar_dev_scope_status;	/* [한국어] 기록된 오류를 돌려준다 */
 			} else {
-				dmar_pci_bus_add_dev(info);
-				dmar_free_pci_notify_info(info);
+				dmar_pci_bus_add_dev(info);	/* [한국어] 표의 모든 항목에 연결한다 */
+				dmar_free_pci_notify_info(info);	/* [한국어] 정보를 반납한다 */
 			}
 		}
 	}
 
-	return dmar_dev_scope_status;
+	return dmar_dev_scope_status;	/* [한국어] 성공이면 0 */
 }
 
+/*
+ * [한국어]
+ * dmar_register_bus_notifier - PCI 버스 알림 체인에 등록한다
+ *
+ * @return: 없음.
+ *
+ * 이 등록 이후에 나타나거나 사라지는 PCI 장치가 dmar_pci_bus_notifier 로
+ * 통보된다. dmar_dev_scope_init 이 "이미 있는 장치"를 처리하고, 이 등록이
+ * "앞으로의 장치"를 처리하는 셈이다.
+ *
+ * 호출 시점이 미묘하다: intel_iommu_init 이 dmar_global_lock 을 놓은 뒤에
+ * 부른다. 등록 자체가 그 락을 잡을 수 있어, 쥔 채로 부르면 lockdep 이
+ * 경고하기 때문이다.
+ *
+ * 실행 컨텍스트: 부팅(__init).
+ */
 void __init dmar_register_bus_notifier(void)
 {
-	bus_register_notifier(&pci_bus_type, &dmar_pci_bus_nb);
+	bus_register_notifier(&pci_bus_type, &dmar_pci_bus_nb);	/* [한국어] 이 등록 이후 나타나거나 사라지는 PCI 장치가 통보된다. 이미 있는 장치는 dmar_dev_scope_init 이 처리한다 */
 }
 
 
+/*
+ * [한국어]
+ * dmar_table_init - DMAR 표를 한 번만 파싱하고 그 결과를 기억한다
+ *
+ * @return: 0 성공, 음수면 표가 없거나 파싱에 실패했다.
+ *
+ * DMA 재매핑과 인터럽트 재매핑이 각각 초기화를 시작하면서 이 함수를 부른다.
+ * 두 기능이 같은 표를 쓰므로, 정적 변수로 "이미 했는지"를 기억해 두 번
+ * 파싱하지 않는다.
+ *
+ * dmar_table_initialized 가 세 상태를 담는다.
+ *   0  — 아직 안 함.
+ *   1  — 성공.
+ *   음수 — 실패했고 그 이유.
+ * 그래서 두 번째 호출부터는 파싱 없이 기억된 결과를 돌려준다.
+ *
+ * -ENODEV(표가 없음)만 로그를 남기지 않는다. VT-d 하드웨어가 없는 시스템은
+ * 흔하고, 그때마다 "파싱 실패"라고 찍으면 사용자를 혼란스럽게 한다.
+ *
+ * 표는 파싱했는데 유닛이 하나도 없는 경우도 -ENODEV 로 만든다 — 결과적으로
+ * 쓸 수 있는 하드웨어가 없다는 점에서 같기 때문이다.
+ *
+ * 반환값이 "음수면 그대로, 아니면 0" 인 것은 호출자가 성공을 0 으로만
+ * 판단하기 때문이다(내부 상태값 1 을 노출하지 않는다).
+ *
+ * 실행 컨텍스트: 부팅(__init).
+ */
 int __init dmar_table_init(void)
 {
-	static int dmar_table_initialized;
-	int ret;
+	static int dmar_table_initialized;	/* [한국어] 정적 변수로 결과를 기억한다. DMA 재매핑과 인터럽트 재매핑이 각각 부르므로 두 번 파싱하지 않는다 */
+	int ret;	/* [한국어] 파싱 결과 */
 
-	if (dmar_table_initialized == 0) {
-		ret = parse_dmar_table();
-		if (ret < 0) {
-			if (ret != -ENODEV)
-				pr_info("Parse DMAR table failure.\n");
-		} else  if (list_empty(&dmar_drhd_units)) {
-			pr_info("No DMAR devices found\n");
-			ret = -ENODEV;
+	if (dmar_table_initialized == 0) {	/* [한국어] 아직 하지 않았으면 */
+		ret = parse_dmar_table();	/* [한국어] 표 전체를 파싱한다 */
+		if (ret < 0) {	/* [한국어] 실패했으면 */
+			if (ret != -ENODEV)	/* [한국어] 표가 아예 없는 경우가 아니면 */
+				pr_info("Parse DMAR table failure.\n");	/* [한국어] 기록한다. VT-d 하드웨어가 없는 시스템은 흔해서 그때는 찍지 않는다 */
+		} else  if (list_empty(&dmar_drhd_units)) {	/* [한국어] 파싱은 됐는데 유닛이 없으면 */
+			pr_info("No DMAR devices found\n");	/* [한국어] 기록하고 */
+			ret = -ENODEV;	/* [한국어] 결과적으로 쓸 수 있는 하드웨어가 없다는 점에서 같으므로 같은 오류로 만든다 */
 		}
 
-		if (ret < 0)
-			dmar_table_initialized = ret;
+		if (ret < 0)	/* [한국어] 실패였으면 */
+			dmar_table_initialized = ret;	/* [한국어] 그 이유를 기억한다 */
 		else
-			dmar_table_initialized = 1;
+			dmar_table_initialized = 1;	/* [한국어] 성공을 기억한다 */
 	}
 
-	return dmar_table_initialized < 0 ? dmar_table_initialized : 0;
+	return dmar_table_initialized < 0 ? dmar_table_initialized : 0;	/* [한국어] 내부 상태값 1 을 노출하지 않고, 호출자에게는 0 또는 오류만 돌려준다 */
 }
 
 static void warn_invalid_dmar(u64 addr, const char *message)
