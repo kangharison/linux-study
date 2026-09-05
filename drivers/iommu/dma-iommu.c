@@ -8,190 +8,414 @@
  * Copyright (C) 2000-2004 Russell King
  */
 
-#include <linux/acpi_iort.h>
-#include <linux/atomic.h>
-#include <linux/crash_dump.h>
-#include <linux/device.h>
-#include <linux/dma-direct.h>
-#include <linux/dma-map-ops.h>
-#include <linux/generic_pt/iommu.h>
-#include <linux/gfp.h>
-#include <linux/huge_mm.h>
-#include <linux/iommu.h>
-#include <linux/iommu-dma.h>
-#include <linux/iova.h>
-#include <linux/irq.h>
-#include <linux/list_sort.h>
-#include <linux/memremap.h>
-#include <linux/mm.h>
-#include <linux/mutex.h>
-#include <linux/msi.h>
-#include <linux/of_iommu.h>
-#include <linux/pci.h>
-#include <linux/pci-p2pdma.h>
-#include <linux/scatterlist.h>
-#include <linux/spinlock.h>
-#include <linux/swiotlb.h>
-#include <linux/vmalloc.h>
-#include <trace/events/swiotlb.h>
+/*
+ * [한국어 설명] DMA API 와 IOMMU API 를 잇는 접착 계층 (drivers/iommu/dma-iommu.c)
+ *
+ * === 파일의 역할 ===
+ * 장치 드라이버가 부르는 dma_map_page / dma_map_sg / dma_alloc_coherent 를 IOMMU
+ * 동작으로 옮기는 계층이다. NVMe 드라이버가 "이 페이지를 장치가 읽게 해 달라"고
+ * 말하면, 이 파일이 iova.c 에서 IOVA 를 하나 떼고 iommu.c 로 그 IOVA 에 물리
+ * 페이지를 매핑한 뒤 장치에 줄 주소를 돌려준다. IOMMU 를 켠 시스템에서 DMA 주소는
+ * 물리 주소가 아니라 여기서 만들어진 IOVA 다.
+ *
+ * 이 파일이 실제로 결정하는 것은 세 가지다.
+ *  1) 주소 배정: IOVA 를 어디서 떼고 어떻게 정렬할지, 32비트 마스크 장치를 어떻게
+ *     다룰지, PCIe DAC(64비트 주소)를 쓸지.
+ *  2) 무효화 정책: 해제 즉시 IOTLB 를 비울지(strict), 아니면 flush queue 에 모았다가
+ *     한꺼번에 비울지(lazy/DMA_FQ). 후자가 이 파일 코드의 상당 부분이며, 고성능
+ *     장치에서 IOMMU 를 켜도 처리량이 버티는 이유다.
+ *  3) 우회 판단: 신뢰할 수 없는 장치나 정렬이 맞지 않는 버퍼는 swiotlb 바운스
+ *     버퍼를 거치게 하고, P2PDMA 세그먼트는 IOMMU 를 아예 건너뛰게 한다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * 흐름(매핑):
+ *   NVMe 드라이버 dma_map_sg
+ *     → DMA API(kernel/dma/mapping.c) → dev->dma_ops == iommu_dma_ops
+ *       → [이 파일] iommu_dma_map_sg
+ *         → iova.c   alloc_iova_fast    : 연속 IOVA 창 확보
+ *         → iommu.c  iommu_map_sg       : 그 창에 흩어진 물리 페이지를 접어 넣음
+ *       ← 장치가 볼 연속 DMA 주소 하나를 돌려준다
+ * 흐름(해제):
+ *   dma_unmap_sg → iommu_dma_unmap_sg → iommu.c iommu_unmap_fast
+ *     → 무효화를 gather 에 모아 두고, IOVA 는 flush queue 에 넣는다
+ *     → 타이머나 큐 포화 시 flush_iotlb_all 한 번으로 정리하고 IOVA 를 반납
+ *
+ * 실행 컨텍스트는 커널 모듈이며, 매핑/해제 경로는 인터럽트 문맥에서도 불린다.
+ * 그래서 이 파일의 할당은 대부분 GFP_ATOMIC 이고 락은 irqsave 다.
+ *
+ * === 타 모듈과의 연결 ===
+ * - iommu.c: 도메인·그룹을 관리하고 실제 PTE 를 기입한다. 이 파일은 도메인에
+ *   iommu_dma_cookie 를 매달아(cookie_type == IOMMU_COOKIE_DMA_IOVA) 자기 상태를 둔다.
+ *   iommu_setup_dma_ops 가 장치의 dma_ops 를 이쪽으로 갈아 끼우는 순간부터 그
+ *   장치의 DMA 가 IOMMU 를 지난다.
+ * - iova.c: IOVA 주소 배정. 이 파일은 IOVA 를 "언제 반납할지"만 정하고, "어디를
+ *   줄지"는 전적으로 그쪽이 정한다.
+ * - swiotlb: 바운스 버퍼. 신뢰할 수 없는 장치(untrusted)나 IOMMU 페이지 경계에
+ *   걸친 부분 페이지 매핑은 다른 데이터가 같은 페이지에 노출되므로, 전용 버퍼로
+ *   복사해 넘긴다.
+ * - MSI: 인터럽트 도어벨 주소도 이 주소 공간 안에 매핑되어야 한다. msi_page_list 가
+ *   그 매핑을 도메인 단위로 캐시한다.
+ * - PCI p2pdma: 장치끼리 직접 오가는 세그먼트는 IOMMU 를 거치지 않으므로 매핑
+ *   대상에서 제외한다.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * - struct iommu_dma_cookie : 도메인 하나의 DMA 상태. IOVA 도메인, flush queue,
+ *                             MSI 페이지 목록, 정책 옵션이 모두 여기 모인다.
+ * - struct iova_fq          : 해제된 IOVA 를 무효화 전까지 담아 두는 링 버퍼.
+ * - iommu_dma_init_domain() : 도메인에 IOVA 공간과 예약 구간을 세운다.
+ * - iommu_dma_map_page/sg() : 매핑 진입점. IOVA 확보 → iommu_map → 주소 반환.
+ * - iommu_dma_unmap_page/sg(): 해제 진입점. iommu_unmap_fast → queue_iova.
+ * - queue_iova() / fq_ring_free() : 지연 무효화의 넣기/거두기.
+ * - iommu_dma_alloc()       : coherent 할당. 페이지를 모아 하나의 IOVA 창에 접는다.
+ * - iommu_dma_prepare_msi() : MSI 도어벨을 이 주소 공간에 매핑한다.
+ */
+#include <linux/acpi_iort.h>	/* [한국어] ACPI IORT 표 파싱 — MSI 창 같은 예약 구간 정보를 얻는다 */
+#include <linux/atomic.h>	/* [한국어] flush queue 의 시작/완료 카운터가 원자 변수다 */
+#include <linux/crash_dump.h>	/* [한국어] kdump 커널 판별. 앞선 커널이 남긴 매핑 때문에 정책을 달리해야 한다 */
+#include <linux/device.h>	/* [한국어] struct device — DMA 요청의 주체 */
+#include <linux/dma-direct.h>	/* [한국어] IOMMU 를 거치지 않는 직접 매핑 경로. 항등 도메인이나 우회 판단에서 쓴다 */
+#include <linux/dma-map-ops.h>	/* [한국어] struct dma_map_ops — 이 파일이 채워 장치에 꽂는 vtable */
+#include <linux/generic_pt/iommu.h>	/* [한국어] 공용 페이지 테이블 계층 연동 */
+#include <linux/gfp.h>	/* [한국어] 할당 플래그. 이 파일은 문맥에 따라 ATOMIC 과 KERNEL 을 오간다 */
+#include <linux/huge_mm.h>	/* [한국어] 대형 페이지 처리 — 하나의 큰 페이지를 한 번에 매핑할 수 있는지 판단 */
+#include <linux/iommu.h>	/* [한국어] iommu_map/unmap 등 이 파일이 호출하는 코어 API */
+#include <linux/iommu-dma.h>	/* [한국어] 이 파일이 외부에 노출하는 선언들 */
+#include <linux/iova.h>	/* [한국어] IOVA 할당자 — 주소를 실제로 떼어 주는 계층 */
+#include <linux/irq.h>	/* [한국어] MSI 처리에 필요한 인터럽트 자료구조 */
+#include <linux/list_sort.h>	/* [한국어] scatterlist 정렬 — 매핑 전 세그먼트를 정돈할 때 */
+#include <linux/memremap.h>	/* [한국어] ZONE_DEVICE 페이지 판별. P2PDMA 메모리가 여기 속한다 */
+#include <linux/mm.h>	/* [한국어] 페이지 할당과 vmalloc 영역 조작 */
+#include <linux/mutex.h>	/* [한국어] flush queue 초기화 등 잠들 수 있는 구간 보호 */
+#include <linux/msi.h>	/* [한국어] MSI 서술자 — 도어벨 IOVA 를 여기에 적어 준다 */
+#include <linux/of_iommu.h>	/* [한국어] 장치 트리 기반 IOMMU 설정 */
+#include <linux/pci.h>	/* [한국어] PCI 장치 판별과 DMA 마스크 처리 */
+#include <linux/pci-p2pdma.h>	/* [한국어] P2PDMA 세그먼트 판별 — IOMMU 를 건너뛰어야 하는 구간 */
+#include <linux/scatterlist.h>	/* [한국어] sg 리스트 순회와 병합 */
+#include <linux/spinlock.h>	/* [한국어] flush queue 와 MSI 목록 보호 */
+#include <linux/swiotlb.h>	/* [한국어] 바운스 버퍼. 신뢰할 수 없는 장치나 부분 페이지 매핑의 우회로 */
+#include <linux/vmalloc.h>	/* [한국어] coherent 할당이 만든 페이지들을 커널 가상 주소로 잇는다 */
+#include <trace/events/swiotlb.h>	/* [한국어] 바운스 발생을 ftrace 로 남긴다 — 성능 저하의 흔한 원인이라 추적이 중요하다 */
 
-#include "dma-iommu.h"
-#include "iommu-pages.h"
+#include "dma-iommu.h"	/* [한국어] 이 파일과 iommu.c 사이의 내부 인터페이스 (쿠키 생성/해제 등) */
+#include "iommu-pages.h"	/* [한국어] 페이지 테이블용 페이지 할당자. 해제 목록(freelist)을 이 형식으로 주고받는다 */
 
+/*
+ * [한국어] MSI 도어벨 한 페이지의 매핑 기록.
+ *
+ * MSI 는 인터럽트선이 아니라 약속된 주소로의 메모리 쓰기다. IOMMU 아래의 장치가
+ * 내는 주소는 전부 IOVA 이므로, 도어벨의 물리 주소를 이 주소 공간에 매핑하고
+ * 장치에는 그 IOVA 를 프로그래밍해야 인터럽트가 전달된다.
+ *
+ * 도메인당 목록으로 캐시한다. 같은 도메인의 여러 장치·여러 벡터가 같은 도어벨을
+ * 쓰는 경우가 대부분이라, 매번 새 IOVA 를 떼면 주소 공간이 낭비된다.
+ */
 struct iommu_dma_msi_page {
+	/* [한국어] 쿠키의 msi_page_list 에 매다는 고리.
+	 * 설정자: iommu_dma_get_msi_page 가 새 매핑을 만들 때 추가.
+	 * 읽는 자: 같은 함수가 기존 매핑을 재사용할 수 있는지 훑을 때.
+	 * 동기화: 도메인 단위 락(iommu_dma_prepare_msi 가 그룹 락 아래에서 부른다). */
 	struct list_head	list;
+	/* [한국어] 이 도어벨이 매핑된 IOVA. 장치에 실제로 프로그래밍되는 주소다.
+	 * 설정자: 매핑 생성 시 alloc_iova 결과 또는 예약된 MSI 창의 주소.
+	 * 읽는 자: msi_desc_set_iommu_msi_iova 를 통해 인터럽트 코어로 전달된다.
+	 * 값 범위: 이 도메인의 IOVA 공간 안. 도메인마다 다를 수 있다. */
 	dma_addr_t		iova;
+	/* [한국어] 도어벨의 실제 물리 주소. 목록에서 재사용 여부를 판정하는 키다.
+	 * 설정자: 매핑 생성 시 요청받은 msi_addr.
+	 * 읽는 자: 기존 항목을 훑으며 같은 도어벨인지 비교할 때.
+	 * 페이지 단위로 정렬된 값이며, 한 페이지 안의 여러 도어벨은 한 항목을 공유한다. */
 	phys_addr_t		phys;
 };
 
+/*
+ * [한국어] flush queue 를 어떤 모양으로 둘지.
+ *
+ * 무효화를 모아서 하려면 해제된 IOVA 를 어딘가 담아 둬야 하는데, 그 큐를 CPU 별로
+ * 둘지 하나만 둘지의 선택이다. 시스템 규모와 IOMMU 무효화 비용에 따라 유리한
+ * 쪽이 달라진다.
+ */
 enum iommu_dma_queue_type {
+	/* [한국어] CPU 마다 작은 큐 하나 (기본값).
+	 * 장점: 큐 락 경쟁이 없다. 각 CPU 가 자기 큐에만 넣는다.
+	 * 단점: 큐가 작아(256) 자주 차고, 그때마다 무효화가 일어난다. CPU 수가 아주
+	 *   많으면 무효화 빈도가 오히려 올라간다. */
 	IOMMU_DMA_OPTS_PER_CPU_QUEUE,
+	/* [한국어] 시스템 전체에 큐 하나 (32768 항목).
+	 * 장점: 큐가 커서 무효화 한 번에 정리되는 양이 많다. 무효화 자체가 매우 비싼
+	 *   하드웨어(일부 ARM SMMU 구성)에서 유리하다.
+	 * 단점: 모든 CPU 가 한 락을 다툰다.
+	 * 선택 근거: 드라이버가 IOMMU_CAP_DEFERRED_FLUSH 관련 특성을 알릴 때 이쪽을 쓴다. */
 	IOMMU_DMA_OPTS_SINGLE_QUEUE,
 };
 
+/*
+ * [한국어] 이 도메인의 지연 무효화 정책 묶음.
+ * 도메인을 세울 때 한 번 정해지고 이후 바뀌지 않는다.
+ */
 struct iommu_dma_options {
+	/* [한국어] CPU 별 큐인지 전역 큐 하나인지.
+	 * 설정자: iommu_dma_init_options 가 하드웨어 특성을 보고 결정.
+	 * 읽는 자: queue_iova, fq_flush_timeout 등이 어느 큐를 만질지 고를 때. */
 	enum iommu_dma_queue_type qt;
+	/* [한국어] 큐 하나의 항목 수. 반드시 2의 거듭제곱이어야 한다 —
+	 * 링 버퍼 인덱스를 mod_mask 로 감싸기 때문이다.
+	 * 값: 기본 256, 전역 큐면 32768. */
 	size_t		fq_size;
+	/* [한국어] 큐를 강제로 비우는 주기(ms).
+	 * 왜 필요한가: 큐가 차기만 기다리면, DMA 가 뜸해진 뒤 해제된 IOVA 가 무한정
+	 *   묶인 채 남는다. 타이머가 그 하한을 보장한다.
+	 * 값: CPU 별 큐 10ms, 전역 큐 1000ms — 큐 크기에 반비례한다. */
 	unsigned int	fq_timeout;
 };
 
+/*
+ * [한국어] 도메인 하나의 DMA 상태 전부.
+ *
+ * iommu_domain 의 cookie 자리에 매달리며, cookie_type == IOMMU_COOKIE_DMA_IOVA 가
+ * "이 도메인은 커널 DMA API 용이고 그 상태가 여기 있다"는 표시다. iommu.c 는 이
+ * 구조체의 내용을 전혀 모르고, 도메인이 해제될 때 iommu_put_dma_cookie 를 부를 뿐이다.
+ */
 struct iommu_dma_cookie {
+	/* [한국어] 이 도메인의 IOVA 주소 공간 (iova.c 가 관리).
+	 * 포인터가 아니라 구조체로 박아 두어, 쿠키가 있으면 IOVA 공간도 반드시 있다.
+	 * 설정자: iommu_dma_init_domain 이 init_iova_domain 으로 세운다.
+	 * 읽는 자: 모든 매핑/해제 경로가 alloc_iova_fast/free_iova_fast 로 접근.
+	 * 동기화: iova.c 내부의 rbtree 락과 CPU 별 캐시 락이 담당한다. */
 	struct iova_domain iovad;
+	/* [한국어] 이 도메인에 매핑해 둔 MSI 도어벨 페이지 목록.
+	 * 설정자/읽는 자: iommu_dma_get_msi_page.
+	 * 왜 목록인가: 같은 도메인의 여러 장치가 서로 다른 도어벨을 쓸 수 있고(멀티
+	 *   ITS 구성), 개수가 작아 선형 탐색으로 충분하다.
+	 * 동기화: 호출자가 그룹 락을 든 상태에서만 접근한다. */
 	struct list_head msi_page_list;
 	/* Flush queue */
+	/* [한국어] 큐 모양에 따라 둘 중 하나만 쓴다 (options.qt 가 어느 쪽인지 말해 준다).
+	 * 공용체로 둔 이유: 두 구성이 동시에 존재할 일이 없고, 쿠키는 도메인마다
+	 *   하나씩이라 크기를 아끼는 의미가 있다. */
 	union {
+		/* [한국어] 전역 큐 하나 (SINGLE_QUEUE 구성).
+		 * 모든 CPU 가 이 큐의 lock 을 다툰다.
+		 * 설정자: iommu_dma_init_fq_single. */
 		struct iova_fq *single_fq;
+		/* [한국어] CPU 별 큐 배열 (PER_CPU_QUEUE 구성, 기본).
+		 * 각 CPU 가 자기 것만 만지므로 락 경쟁이 사실상 없다.
+		 * 설정자: iommu_dma_init_fq_percpu. */
 		struct iova_fq __percpu *percpu_fq;
 	};
 	/* Number of TLB flushes that have been started */
+	/* [한국어] 지금까지 시작된 IOTLB 전체 무효화 횟수 (위 영어 주석).
+	 * 큐에 항목을 넣을 때 이 값을 함께 적어 둔다. "이 IOVA 는 N번째 무효화 이후에
+	 * 해제되었다"는 표식이다.
+	 * 설정자: fq_flush_iotlb 가 무효화 직전에 증가.
+	 * 동기화: 원자 변수. 여러 CPU 가 동시에 무효화를 시작할 수 있다. */
 	atomic64_t fq_flush_start_cnt;
 	/* Number of TLB flushes that have been finished */
+	/* [한국어] 완료된 무효화 횟수 (위 영어 주석).
+	 * 두 카운터를 나눠 둔 것이 이 설계의 핵심 안전장치다. 항목의 counter 가
+	 * finish_cnt 보다 작아야만 그 IOVA 를 재사용해도 안전하다 — 그 항목이 큐에
+	 * 들어간 뒤 시작된 무효화가 '끝났음'이 보장되기 때문이다. 하나로 합치면
+	 * 무효화가 진행 중인 사이에 IOVA 가 풀려 나갈 수 있다.
+	 * 설정자: fq_flush_iotlb 가 무효화 완료 직후에 증가. */
 	atomic64_t fq_flush_finish_cnt;
 	/* Timer to regularily empty the flush queues */
+	/* [한국어] 큐를 주기적으로 비우는 타이머 (위 영어 주석).
+	 * 큐가 차기만 기다리면 DMA 가 잦아든 뒤 IOVA 가 무한정 묶이므로, 이 타이머가
+	 * 회수의 하한을 보장한다.
+	 * 설정자: queue_iova 가 항목을 넣으며 필요하면 예약.
+	 * 콜백: fq_flush_timeout — 무효화 한 번 내리고 모든 큐를 훑는다. */
 	struct timer_list fq_timer;
 	/* 1 when timer is active, 0 when not */
+	/* [한국어] 타이머가 이미 걸려 있는지 (위 영어 주석).
+	 * 왜 원자 변수인가: 여러 CPU 가 동시에 queue_iova 에 들어와 각자 타이머를
+	 *   걸려 하면 mod_timer 가 중복 호출된다. cmpxchg 로 한 CPU 만 걸게 만든다.
+	 * 값: 0 = 꺼짐, 1 = 걸림. */
 	atomic_t fq_timer_on;
 	/* Domain for flush queue callback; NULL if flush queue not in use */
+	/* [한국어] 무효화를 내릴 도메인. NULL 이면 지연 무효화를 쓰지 않는다 (위 영어 주석).
+	 * 이 필드의 NULL 여부가 곧 strict / lazy 정책의 판정 기준이다.
+	 * 설정자: iommu_dma_init_fq 가 큐 준비를 마친 마지막에 채운다 — 큐가 완성되기
+	 *   전에 채우면 다른 CPU 가 반쯤 만들어진 큐를 쓴다.
+	 * 읽는 자: 해제 경로가 queue_iova 로 갈지 즉시 무효화할지 가른다. */
 	struct iommu_domain *fq_domain;
 	/* Options for dma-iommu use */
+	/* [한국어] 이 도메인의 큐 정책 (위 영어 주석).
+	 * 설정자: iommu_dma_init_options, 도메인 초기화 시 한 번.
+	 * 이후 불변이므로 락 없이 읽는다. */
 	struct iommu_dma_options options;
 };
 
+/*
+ * [한국어] MSI 매핑만 필요한 도메인의 축소판 쿠키.
+ *
+ * IOVA 할당자도 flush queue 도 없다. VFIO/iommufd 가 소유한 도메인처럼 커널이
+ * DMA 를 관리하지 않는 경우에도 MSI 도어벨만은 매핑해야 하기 때문에 존재한다.
+ * cookie_type == IOMMU_COOKIE_DMA_MSI 가 이 형태임을 알린다.
+ */
 struct iommu_dma_msi_cookie {
+	/* [한국어] MSI 매핑에 쓸 IOVA 창의 기준 주소.
+	 * 할당자가 없으므로 소유자가 미리 정해 준 고정 창을 순서대로 쓴다.
+	 * 설정자: iommu_get_msi_cookie 를 부르는 소유자(VFIO 등). */
 	dma_addr_t msi_iova;
+	/* [한국어] 매핑해 둔 도어벨 페이지 목록. 큰 쿠키의 같은 이름 필드와 같은 역할이며,
+	 * 두 쿠키 형태 모두에서 이 목록의 위치를 알아야 하므로 코드가 cookie_type 을
+	 * 보고 갈라 접근한다. */
 	struct list_head msi_page_list;
 };
 
-static DEFINE_STATIC_KEY_FALSE(iommu_deferred_attach_enabled);
-bool iommu_dma_forcedac __read_mostly;
+static DEFINE_STATIC_KEY_FALSE(iommu_deferred_attach_enabled);	/* [한국어] 지연 부착이 필요한 하드웨어가 있을 때만 켜지는 정적 키. 매 매핑마다 검사가 들어가는 자리라, 대부분의 시스템에서 그 분기 자체를 지워 버리기 위해 static key 를 쓴다 */
+bool iommu_dma_forcedac __read_mostly;	/* [한국어] PCIe 장치에 64비트 주소(DAC)를 강제할지. 켜면 32비트 영역을 아끼지만 오래된 장치에서 문제가 생길 수 있다 */
 
 static int __init iommu_dma_forcedac_setup(char *str)
 {
-	int ret = kstrtobool(str, &iommu_dma_forcedac);
+	int ret = kstrtobool(str, &iommu_dma_forcedac);	/* [한국어] 부트 인자 값 해석 */
 
-	if (!ret && iommu_dma_forcedac)
-		pr_info("Forcing DAC for PCI devices\n");
-	return ret;
+	if (!ret && iommu_dma_forcedac)	/* [한국어] 해석에 성공했고 켜졌다면 */
+		pr_info("Forcing DAC for PCI devices\n");	/* [한국어] 주소 배정 정책이 평소와 달라졌음을 남긴다 */
+	return ret;	/* [한국어] 해석 결과 */
 }
-early_param("iommu.forcedac", iommu_dma_forcedac_setup);
+early_param("iommu.forcedac", iommu_dma_forcedac_setup);	/* [한국어] 부트 인자 등록 */
 
 /* Number of entries per flush queue */
-#define IOVA_DEFAULT_FQ_SIZE	256
-#define IOVA_SINGLE_FQ_SIZE	32768
+#define IOVA_DEFAULT_FQ_SIZE	256	/* [한국어] CPU 별 큐의 항목 수. 작게 잡는 이유는 CPU 마다 하나씩 있어 합계가 커지기 때문이다 */
+#define IOVA_SINGLE_FQ_SIZE	32768	/* [한국어] 전역 큐 하나만 쓰는 구성에서의 항목 수. 모든 CPU 가 공유하므로 훨씬 크게 잡는다 */
 
 /* Timeout (in ms) after which entries are flushed from the queue */
-#define IOVA_DEFAULT_FQ_TIMEOUT	10
-#define IOVA_SINGLE_FQ_TIMEOUT	1000
+#define IOVA_DEFAULT_FQ_TIMEOUT	10	/* [한국어] CPU 별 큐를 비우는 주기(ms). 짧을수록 IOVA 회수가 빠르고 무효화 횟수가 는다 */
+#define IOVA_SINGLE_FQ_TIMEOUT	1000	/* [한국어] 전역 큐는 훨씬 크므로 주기도 길게 — 무효화 한 번에 정리되는 양이 많다 */
 
 /* Flush queue entry for deferred flushing */
+/*
+ * [한국어] (위 영어 주석에 이어) 해제 대기 중인 IOVA 구간 하나.
+ *
+ * dma_unmap 이 불리면 PTE 는 곧바로 지우지만, IOTLB 에는 옛 번역이 남아 있어
+ * 그 IOVA 를 바로 재사용하면 장치가 이미 반납된 페이지에 닿을 수 있다. 그래서
+ * IOVA 를 여기 담아 두고, 전체 무효화가 한 번 끝난 뒤에야 iova.c 로 돌려준다.
+ */
 struct iova_fq_entry {
+	/* [한국어] 반납 대기 중인 구간의 시작 pfn.
+	 * 설정자: queue_iova.
+	 * 읽는 자: fq_ring_free_locked 가 free_iova_fast 로 돌려줄 때. */
 	unsigned long iova_pfn;
+	/* [한국어] 그 구간의 페이지 수. free_iova_fast 가 캐시 등급을 정할 때 쓴다.
+	 * 넣을 때와 꺼낼 때의 크기가 같아야 IOVA 캐시의 부기가 맞는다. */
 	unsigned long pages;
+	/* [한국어] 이 해제로 비게 된 페이지 테이블 페이지들.
+	 * 왜 함께 미루는가: 페이지 테이블 페이지를 곧바로 반납하면, 아직 무효화되지
+	 *   않은 IOTLB 항목이 참조하던 표를 다른 용도로 재사용하게 된다. IOVA 와
+	 *   똑같이 무효화가 끝난 뒤에 놓아야 안전하다.
+	 * 설정자: queue_iova 가 호출자의 목록을 여기로 옮겨 붙인다(splice).
+	 * 읽는 자: fq_ring_free_locked 가 iommu_put_pages_list 로 반납. */
 	struct iommu_pages_list freelist;
+	/* [한국어] 이 항목이 큐에 들어갈 때의 fq_flush_start_cnt (위 영어 주석).
+	 * 판정 규칙: counter < fq_flush_finish_cnt 이면 이 항목이 들어간 뒤 시작된
+	 *   무효화가 이미 끝났다는 뜻이므로 반납해도 안전하다. 이 한 비교가 지연
+	 *   무효화 전체의 정확성을 떠받친다. */
 	u64 counter; /* Flush counter when this entry was added */
 };
 
 /* Per-CPU flush queue structure */
+/*
+ * [한국어] (위 영어 주석에 이어) 해제 대기 IOVA 를 담는 링 버퍼.
+ *
+ * head 는 반납할 차례, tail 은 넣을 자리다. 항목 수가 2의 거듭제곱이라 인덱스를
+ * mod_mask 로 감싸며, 한 칸을 비워 둬 가득 참과 빔을 구별한다.
+ */
 struct iova_fq {
+	/* [한국어] 이 큐를 지키는 락.
+	 * CPU 별 큐라도 필요하다 — dma_unmap 이 인터럽트 문맥에서 오므로 같은 CPU
+	 *   안에서 경쟁하고, 타이머 콜백과 다른 CPU 의 회수도 이 큐를 만진다.
+	 * 항상 spin_lock_irqsave 로 쓴다. */
 	spinlock_t lock;
+	/* [한국어] 링 버퍼의 읽기/쓰기 커서.
+	 * head: 다음에 반납을 시도할 항목. fq_ring_free_locked 가 전진시킨다.
+	 * tail: 다음에 넣을 자리. fq_ring_add 가 전진시킨다.
+	 * head == tail 이면 비었고, (tail+1) == head 면 가득 찬 것으로 본다 —
+	 *   한 칸을 희생해 두 상태를 구별한다.
+	 * 동기화: 위의 lock. */
 	unsigned int head, tail;
+	/* [한국어] 인덱스를 링 크기로 감싸는 마스크 (= fq_size - 1).
+	 * fq_size 가 2의 거듭제곱이어야 하는 이유가 이 마스크다. 나눗셈 대신
+	 * AND 한 번으로 감싸므로 핫패스에서 비용이 없다. */
 	unsigned int mod_mask;
+	/* [한국어] 가변 길이 항목 배열. 크기는 options.fq_size.
+	 * 구조체 뒤에 붙여 한 번의 할당으로 큐 전체를 잡는다 — CPU 별 큐라면
+	 * percpu 영역에, 전역 큐라면 일반 커널 메모리에. */
 	struct iova_fq_entry entries[];
 };
 
-#define fq_ring_for_each(i, fq) \
-	for ((i) = (fq)->head; (i) != (fq)->tail; (i) = ((i) + 1) & (fq)->mod_mask)
+#define fq_ring_for_each(i, fq) \	/* [한국어] head 부터 tail 직전까지 링을 도는 매크로. mod_mask 로 감싸므로 배열 끝에서 앞으로 되돌아온다 */
+	for ((i) = (fq)->head; (i) != (fq)->tail; (i) = ((i) + 1) & (fq)->mod_mask)	/* [한국어] head == tail 이면 비었다는 규약이라 종료 조건이 곧 '빔' 판정이기도 하다 */
 
 static inline bool fq_full(struct iova_fq *fq)
 {
-	assert_spin_locked(&fq->lock);
-	return (((fq->tail + 1) & fq->mod_mask) == fq->head);
+	assert_spin_locked(&fq->lock);	/* [한국어] 호출자가 큐 락을 든 상태여야 한다 */
+	return (((fq->tail + 1) & fq->mod_mask) == fq->head);	/* [한국어] 한 칸을 비워 둬 '가득 참'과 '빔'을 구별한다. 그 한 칸이 없으면 head==tail 이 두 뜻을 갖는다 */
 }
 
 static inline unsigned int fq_ring_add(struct iova_fq *fq)
 {
-	unsigned int idx = fq->tail;
+	unsigned int idx = fq->tail;	/* [한국어] 넣을 자리 */
 
-	assert_spin_locked(&fq->lock);
+	assert_spin_locked(&fq->lock);	/* [한국어] 호출자가 락을 든 상태여야 한다 */
 
-	fq->tail = (idx + 1) & fq->mod_mask;
+	fq->tail = (idx + 1) & fq->mod_mask;	/* [한국어] 커서를 한 칸 전진시키고 감싼다 */
 
-	return idx;
+	return idx;	/* [한국어] 방금 확보한 자리의 인덱스 */
 }
 
 static void fq_ring_free_locked(struct iommu_dma_cookie *cookie, struct iova_fq *fq)
 {
-	u64 counter = atomic64_read(&cookie->fq_flush_finish_cnt);
-	unsigned int idx;
+	u64 counter = atomic64_read(&cookie->fq_flush_finish_cnt);	/* [한국어] '완료된' 무효화 횟수. 이 값보다 작은 counter 를 가진 항목만 반납해도 안전하다 */
+	unsigned int idx;	/* [한국어] 링 순회 커서 */
 
-	assert_spin_locked(&fq->lock);
+	assert_spin_locked(&fq->lock);	/* [한국어] 호출자가 락을 든 상태여야 한다 */
 
-	fq_ring_for_each(idx, fq) {
+	fq_ring_for_each(idx, fq) {	/* [한국어] 가장 오래된 항목부터 */
 
-		if (fq->entries[idx].counter >= counter)
-			break;
+		if (fq->entries[idx].counter >= counter)	/* [한국어] 이 항목이 들어간 뒤 시작된 무효화가 아직 끝나지 않았다 */
+			break;	/* [한국어] 링은 시간순이므로 여기서 멈추면 뒤는 볼 필요가 없다 */
 
-		iommu_put_pages_list(&fq->entries[idx].freelist);
-		free_iova_fast(&cookie->iovad,
-			       fq->entries[idx].iova_pfn,
-			       fq->entries[idx].pages);
+		iommu_put_pages_list(&fq->entries[idx].freelist);	/* [한국어] 비었던 페이지 테이블 페이지를 이제야 반납한다 — 무효화가 끝났으므로 아무도 그 표를 참조하지 않는다 */
+		free_iova_fast(&cookie->iovad,	/* [한국어] IOVA 도 이제 재사용 가능하다 */
+			       fq->entries[idx].iova_pfn,	/* [한국어] 구간의 시작 */
+			       fq->entries[idx].pages);	/* [한국어] 페이지 수 (캐시 등급 판정에 쓰인다) */
 
-		fq->entries[idx].freelist =
-			IOMMU_PAGES_LIST_INIT(fq->entries[idx].freelist);
-		fq->head = (fq->head + 1) & fq->mod_mask;
+		fq->entries[idx].freelist =	/* [한국어] 항목을 재사용할 수 있도록 */
+			IOMMU_PAGES_LIST_INIT(fq->entries[idx].freelist);	/* [한국어] 목록을 빈 상태로 되돌린다 */
+		fq->head = (fq->head + 1) & fq->mod_mask;	/* [한국어] 반납한 만큼 head 를 전진 */
 	}
 }
 
 static void fq_ring_free(struct iommu_dma_cookie *cookie, struct iova_fq *fq)
 {
-	unsigned long flags;
+	unsigned long flags;	/* [한국어] 인터럽트 상태 */
 
-	spin_lock_irqsave(&fq->lock, flags);
-	fq_ring_free_locked(cookie, fq);
-	spin_unlock_irqrestore(&fq->lock, flags);
+	spin_lock_irqsave(&fq->lock, flags);	/* [한국어] 큐 보호 */
+	fq_ring_free_locked(cookie, fq);	/* [한국어] 락을 잡고 반납 수행 */
+	spin_unlock_irqrestore(&fq->lock, flags);	/* [한국어] 락 해제 */
 }
 
 static void fq_flush_iotlb(struct iommu_dma_cookie *cookie)
 {
-	atomic64_inc(&cookie->fq_flush_start_cnt);
-	cookie->fq_domain->ops->flush_iotlb_all(cookie->fq_domain);
-	atomic64_inc(&cookie->fq_flush_finish_cnt);
+	atomic64_inc(&cookie->fq_flush_start_cnt);	/* [한국어] 무효화를 '시작한다'고 먼저 알린다. 이 시점 이후 큐에 들어가는 항목은 더 큰 counter 를 갖게 되어, 이번 무효화의 보호를 받지 못한다 — 그것이 정확하다 */
+	cookie->fq_domain->ops->flush_iotlb_all(cookie->fq_domain);	/* [한국어] 도메인 전체 IOTLB 를 한 번에 비운다. 구간별 무효화를 수천 번 하는 대신 전체를 한 번 — 그것이 지연 무효화의 이득이다 */
+	atomic64_inc(&cookie->fq_flush_finish_cnt);	/* [한국어] 완료를 알린다. 이 증가를 본 CPU 는 그 이전 counter 의 항목을 안전하게 반납할 수 있다 */
 }
 
 static void fq_flush_timeout(struct timer_list *t)
 {
-	struct iommu_dma_cookie *cookie = timer_container_of(cookie, t,
-							     fq_timer);
-	int cpu;
+	struct iommu_dma_cookie *cookie = timer_container_of(cookie, t,	/* [한국어] 타이머 구조체에서 소유 쿠키로 되짚는다 */
+							     fq_timer);	/* [한국어] 이 쿠키의 타이머 필드 */
+	int cpu;	/* [한국어] CPU 순회 커서 */
 
-	atomic_set(&cookie->fq_timer_on, 0);
-	fq_flush_iotlb(cookie);
+	atomic_set(&cookie->fq_timer_on, 0);	/* [한국어] 먼저 내린다 — 아래 작업 중에 새 항목이 들어오면 타이머를 다시 걸 수 있어야 한다 */
+	fq_flush_iotlb(cookie);	/* [한국어] 전체 무효화 한 번 */
 
-	if (cookie->options.qt == IOMMU_DMA_OPTS_SINGLE_QUEUE) {
-		fq_ring_free(cookie, cookie->single_fq);
+	if (cookie->options.qt == IOMMU_DMA_OPTS_SINGLE_QUEUE) {	/* [한국어] 전역 큐 구성이면 */
+		fq_ring_free(cookie, cookie->single_fq);	/* [한국어] 그 큐 하나만 훑는다 */
 	} else {
-		for_each_possible_cpu(cpu)
-			fq_ring_free(cookie, per_cpu_ptr(cookie->percpu_fq, cpu));
+		for_each_possible_cpu(cpu)	/* [한국어] CPU 별 구성이면 모든 CPU 의 큐를 */
+			fq_ring_free(cookie, per_cpu_ptr(cookie->percpu_fq, cpu));	/* [한국어] 각각 훑어 반납한다. 무효화는 한 번뿐이므로 전 CPU 의 대기분이 이 한 번으로 풀린다 */
 	}
 }
 
@@ -199,9 +423,9 @@ static void queue_iova(struct iommu_dma_cookie *cookie,
 		unsigned long pfn, unsigned long pages,
 		struct iommu_pages_list *freelist)
 {
-	struct iova_fq *fq;
-	unsigned long flags;
-	unsigned int idx;
+	struct iova_fq *fq;	/* [한국어] 넣을 큐 */
+	unsigned long flags;	/* [한국어] 인터럽트 상태 */
+	unsigned int idx;	/* [한국어] 확보한 자리 */
 
 	/*
 	 * Order against the IOMMU driver's pagetable update from unmapping
@@ -210,156 +434,156 @@ static void queue_iova(struct iommu_dma_cookie *cookie,
 	 * so it also pairs with iommu_dma_init_fq() to avoid seeing partially
 	 * written fq state here.
 	 */
-	smp_mb();
+	smp_mb();	/* [한국어] 드라이버가 PTE 를 지운 것과 이 항목이 큐에 들어가는 것 사이의 순서를 못박는다. 다른 CPU 가 곧바로 무효화를 내리더라도 지워진 PTE 를 반드시 보게 된다. 전체 배리어인 것은 iommu_dma_init_fq 가 쓴 큐 상태를 반쯤 본 채로 만지지 않기 위해서이기도 하다 (위 영어 주석) */
 
-	if (cookie->options.qt == IOMMU_DMA_OPTS_SINGLE_QUEUE)
-		fq = cookie->single_fq;
+	if (cookie->options.qt == IOMMU_DMA_OPTS_SINGLE_QUEUE)	/* [한국어] 전역 큐 구성 */
+		fq = cookie->single_fq;	/* [한국어] 모두가 공유하는 큐 */
 	else
-		fq = raw_cpu_ptr(cookie->percpu_fq);
+		fq = raw_cpu_ptr(cookie->percpu_fq);	/* [한국어] 현재 CPU 의 큐 — 아래 락이 정확성을 책임지므로 선점 비활성이 필요 없다 */
 
-	spin_lock_irqsave(&fq->lock, flags);
+	spin_lock_irqsave(&fq->lock, flags);	/* [한국어] 큐 보호 */
 
 	/*
 	 * First remove all entries from the flush queue that have already been
 	 * flushed out on another CPU. This makes the fq_full() check below less
 	 * likely to be true.
 	 */
-	fq_ring_free_locked(cookie, fq);
+	fq_ring_free_locked(cookie, fq);	/* [한국어] 먼저 다른 CPU 가 이미 무효화를 끝내 준 항목들을 거둔다. 그러면 아래 가득 참 검사에 걸릴 확률이 낮아진다 (위 영어 주석) */
 
-	if (fq_full(fq)) {
-		fq_flush_iotlb(cookie);
-		fq_ring_free_locked(cookie, fq);
+	if (fq_full(fq)) {	/* [한국어] 그래도 자리가 없다 */
+		fq_flush_iotlb(cookie);	/* [한국어] 여기서 직접 무효화를 내린다 — 큐가 넘치면 지연의 이득을 포기하고 즉시 처리한다 */
+		fq_ring_free_locked(cookie, fq);	/* [한국어] 이제 모든 항목을 반납할 수 있다 */
 	}
 
-	idx = fq_ring_add(fq);
+	idx = fq_ring_add(fq);	/* [한국어] 자리 확보 */
 
-	fq->entries[idx].iova_pfn = pfn;
-	fq->entries[idx].pages    = pages;
-	fq->entries[idx].counter  = atomic64_read(&cookie->fq_flush_start_cnt);
-	iommu_pages_list_splice(freelist, &fq->entries[idx].freelist);
+	fq->entries[idx].iova_pfn = pfn;	/* [한국어] 반납 대기 구간의 시작 */
+	fq->entries[idx].pages    = pages;	/* [한국어] 페이지 수 */
+	fq->entries[idx].counter  = atomic64_read(&cookie->fq_flush_start_cnt);	/* [한국어] 현재 '시작' 카운터를 찍어 둔다. 나중에 finish 카운터가 이 값을 넘어서면 반납해도 안전해진다 */
+	iommu_pages_list_splice(freelist, &fq->entries[idx].freelist);	/* [한국어] 비워진 페이지 테이블 페이지도 함께 미룬다 — IOVA 와 같은 조건에서 풀려야 한다 */
 
-	spin_unlock_irqrestore(&fq->lock, flags);
+	spin_unlock_irqrestore(&fq->lock, flags);	/* [한국어] 큐 조작 끝 */
 
 	/* Avoid false sharing as much as possible. */
-	if (!atomic_read(&cookie->fq_timer_on) &&
-	    !atomic_xchg(&cookie->fq_timer_on, 1))
-		mod_timer(&cookie->fq_timer,
-			  jiffies + msecs_to_jiffies(cookie->options.fq_timeout));
+	if (!atomic_read(&cookie->fq_timer_on) &&	/* [한국어] 먼저 읽어 본다. 대부분 이미 켜져 있어 아래 원자 교환까지 갈 필요가 없고, 그 읽기는 캐시라인을 공유 상태로 두므로 false sharing 이 적다 (위 영어 주석) */
+	    !atomic_xchg(&cookie->fq_timer_on, 1))	/* [한국어] 실제로 켜는 것은 한 CPU 뿐이다 — 교환 결과가 0 이었던 쪽만 통과한다 */
+		mod_timer(&cookie->fq_timer,	/* [한국어] 타이머를 건다 */
+			  jiffies + msecs_to_jiffies(cookie->options.fq_timeout));	/* [한국어] 큐가 차지 않아도 이 시간 안에는 반드시 회수된다 */
 }
 
 static void iommu_dma_free_fq_single(struct iova_fq *fq)
 {
-	int idx;
+	int idx;	/* [한국어] 링 순회 커서 */
 
-	fq_ring_for_each(idx, fq)
-		iommu_put_pages_list(&fq->entries[idx].freelist);
-	vfree(fq);
+	fq_ring_for_each(idx, fq)	/* [한국어] 아직 반납되지 않은 항목들에 대해 */
+		iommu_put_pages_list(&fq->entries[idx].freelist);	/* [한국어] 페이지 테이블 페이지만 돌려준다. IOVA 는 도메인이 통째로 사라지는 중이라 따로 반납할 필요가 없다 */
+	vfree(fq);	/* [한국어] 큐 자체 해제 (vmalloc 으로 잡았다) */
 }
 
 static void iommu_dma_free_fq_percpu(struct iova_fq __percpu *percpu_fq)
 {
-	int cpu, idx;
+	int cpu, idx;	/* [한국어] CPU 와 링 순회 커서 */
 
 	/* The IOVAs will be torn down separately, so just free our queued pages */
-	for_each_possible_cpu(cpu) {
-		struct iova_fq *fq = per_cpu_ptr(percpu_fq, cpu);
+	for_each_possible_cpu(cpu) {	/* [한국어] 모든 CPU 의 큐에 대해 */
+		struct iova_fq *fq = per_cpu_ptr(percpu_fq, cpu);	/* [한국어] 그 CPU 의 큐 */
 
-		fq_ring_for_each(idx, fq)
-			iommu_put_pages_list(&fq->entries[idx].freelist);
+		fq_ring_for_each(idx, fq)	/* [한국어] 남은 항목들에 대해 */
+			iommu_put_pages_list(&fq->entries[idx].freelist);	/* [한국어] 페이지 테이블 페이지만 반납 (위 영어 주석 — IOVA 는 별도로 정리된다) */
 	}
 
-	free_percpu(percpu_fq);
+	free_percpu(percpu_fq);	/* [한국어] percpu 배열 해제 */
 }
 
 static void iommu_dma_free_fq(struct iommu_dma_cookie *cookie)
 {
-	if (!cookie->fq_domain)
-		return;
+	if (!cookie->fq_domain)	/* [한국어] 지연 무효화를 쓰지 않는 도메인 */
+		return;	/* [한국어] 큐 자체가 없다 */
 
-	timer_delete_sync(&cookie->fq_timer);
-	if (cookie->options.qt == IOMMU_DMA_OPTS_SINGLE_QUEUE)
-		iommu_dma_free_fq_single(cookie->single_fq);
+	timer_delete_sync(&cookie->fq_timer);	/* [한국어] 타이머가 돌고 있으면 끝날 때까지 기다린다 — 큐를 해제한 뒤 콜백이 돌면 해제된 메모리를 만진다 */
+	if (cookie->options.qt == IOMMU_DMA_OPTS_SINGLE_QUEUE)	/* [한국어] 구성에 맞는 해제 함수로 */
+		iommu_dma_free_fq_single(cookie->single_fq);	/* [한국어] 전역 큐 */
 	else
-		iommu_dma_free_fq_percpu(cookie->percpu_fq);
+		iommu_dma_free_fq_percpu(cookie->percpu_fq);	/* [한국어] CPU 별 큐 */
 }
 
 static void iommu_dma_init_one_fq(struct iova_fq *fq, size_t fq_size)
 {
-	int i;
+	int i;	/* [한국어] 항목 초기화 커서 */
 
-	fq->head = 0;
-	fq->tail = 0;
-	fq->mod_mask = fq_size - 1;
+	fq->head = 0;	/* [한국어] 빈 링 */
+	fq->tail = 0;	/* [한국어] head == tail 이 곧 '비었음'이다 */
+	fq->mod_mask = fq_size - 1;	/* [한국어] 2의 거듭제곱 크기이므로 이 마스크로 인덱스를 감싼다 */
 
-	spin_lock_init(&fq->lock);
+	spin_lock_init(&fq->lock);	/* [한국어] 이 큐 전용 락 */
 
-	for (i = 0; i < fq_size; i++)
-		fq->entries[i].freelist =
-			IOMMU_PAGES_LIST_INIT(fq->entries[i].freelist);
+	for (i = 0; i < fq_size; i++)	/* [한국어] 모든 항목에 대해 */
+		fq->entries[i].freelist =	/* [한국어] 페이지 목록을 */
+			IOMMU_PAGES_LIST_INIT(fq->entries[i].freelist);	/* [한국어] 빈 상태로 초기화. 항목은 재사용되므로 처음 한 번만 하면 된다 */
 }
 
 static int iommu_dma_init_fq_single(struct iommu_dma_cookie *cookie)
 {
-	size_t fq_size = cookie->options.fq_size;
-	struct iova_fq *queue;
+	size_t fq_size = cookie->options.fq_size;	/* [한국어] 전역 큐는 32768 항목으로 크다 */
+	struct iova_fq *queue;	/* [한국어] 만들 큐 */
 
-	queue = vmalloc(struct_size(queue, entries, fq_size));
-	if (!queue)
-		return -ENOMEM;
-	iommu_dma_init_one_fq(queue, fq_size);
-	cookie->single_fq = queue;
+	queue = vmalloc(struct_size(queue, entries, fq_size));	/* [한국어] 크기가 수 MB 에 이르러 물리 연속을 요구할 수 없다 — vmalloc 으로 가상 연속만 확보한다 */
+	if (!queue)	/* [한국어] 할당 실패 */
+		return -ENOMEM;	/* [한국어] 지연 무효화를 켤 수 없다 */
+	iommu_dma_init_one_fq(queue, fq_size);	/* [한국어] 링 상태 초기화 */
+	cookie->single_fq = queue;	/* [한국어] 쿠키에 매단다 */
 
-	return 0;
+	return 0;	/* [한국어] 전역 큐 준비 완료 */
 }
 
 static int iommu_dma_init_fq_percpu(struct iommu_dma_cookie *cookie)
 {
-	size_t fq_size = cookie->options.fq_size;
-	struct iova_fq __percpu *queue;
-	int cpu;
+	size_t fq_size = cookie->options.fq_size;	/* [한국어] CPU 별 큐는 256 항목으로 작다 */
+	struct iova_fq __percpu *queue;	/* [한국어] 만들 percpu 큐 배열 */
+	int cpu;	/* [한국어] CPU 순회 커서 */
 
-	queue = __alloc_percpu(struct_size(queue, entries, fq_size),
-			       __alignof__(*queue));
-	if (!queue)
-		return -ENOMEM;
+	queue = __alloc_percpu(struct_size(queue, entries, fq_size),	/* [한국어] CPU 마다 큐 하나. 가변 배열까지 포함한 크기를 오버플로 안전하게 계산한다 */
+			       __alignof__(*queue));	/* [한국어] 구조체의 자연 정렬 */
+	if (!queue)	/* [한국어] 할당 실패 */
+		return -ENOMEM;	/* [한국어] 지연 무효화를 켤 수 없다 */
 
-	for_each_possible_cpu(cpu)
-		iommu_dma_init_one_fq(per_cpu_ptr(queue, cpu), fq_size);
-	cookie->percpu_fq = queue;
-	return 0;
+	for_each_possible_cpu(cpu)	/* [한국어] online 이 아니라 possible — 나중에 올라올 CPU 도 자기 큐를 이미 갖고 있어야 한다 */
+		iommu_dma_init_one_fq(per_cpu_ptr(queue, cpu), fq_size);	/* [한국어] 각각 초기화 */
+	cookie->percpu_fq = queue;	/* [한국어] 쿠키에 매단다 */
+	return 0;	/* [한국어] CPU 별 큐 준비 완료 */
 }
 
 /* sysfs updates are serialised by the mutex of the group owning @domain */
 int iommu_dma_init_fq(struct iommu_domain *domain)
 {
-	struct iommu_dma_cookie *cookie = domain->iova_cookie;
-	int rc;
+	struct iommu_dma_cookie *cookie = domain->iova_cookie;	/* [한국어] 이 도메인의 DMA 상태 */
+	int rc;	/* [한국어] 큐 생성 결과 */
 
-	if (cookie->fq_domain)
-		return 0;
+	if (cookie->fq_domain)	/* [한국어] 이미 켜져 있으면 (sysfs 로 DMA-FQ 를 두 번 요청한 경우) */
+		return 0;	/* [한국어] 할 일이 없다 — 멱등이다 */
 
-	atomic64_set(&cookie->fq_flush_start_cnt,  0);
-	atomic64_set(&cookie->fq_flush_finish_cnt, 0);
+	atomic64_set(&cookie->fq_flush_start_cnt,  0);	/* [한국어] 두 카운터를 0 에서 시작 */
+	atomic64_set(&cookie->fq_flush_finish_cnt, 0);	/* [한국어] 항목의 counter 는 0 이상이므로, finish 가 0 인 동안에는 아무 것도 반납되지 않는다 */
 
-	if (cookie->options.qt == IOMMU_DMA_OPTS_SINGLE_QUEUE)
-		rc = iommu_dma_init_fq_single(cookie);
+	if (cookie->options.qt == IOMMU_DMA_OPTS_SINGLE_QUEUE)	/* [한국어] 정책에 맞는 큐를 만든다 */
+		rc = iommu_dma_init_fq_single(cookie);	/* [한국어] 전역 큐 */
 	else
-		rc = iommu_dma_init_fq_percpu(cookie);
+		rc = iommu_dma_init_fq_percpu(cookie);	/* [한국어] CPU 별 큐 */
 
-	if (rc) {
-		pr_warn("iova flush queue initialization failed\n");
-		return -ENOMEM;
+	if (rc) {	/* [한국어] 큐 생성 실패 */
+		pr_warn("iova flush queue initialization failed\n");	/* [한국어] 치명적이지는 않다 — 도메인은 즉시 무효화(strict)로 계속 동작한다 */
+		return -ENOMEM;	/* [한국어] 호출자가 DMA-FQ 전환을 포기한다 */
 	}
 
-	timer_setup(&cookie->fq_timer, fq_flush_timeout, 0);
-	atomic_set(&cookie->fq_timer_on, 0);
+	timer_setup(&cookie->fq_timer, fq_flush_timeout, 0);	/* [한국어] 주기적 회수 타이머 준비 */
+	atomic_set(&cookie->fq_timer_on, 0);	/* [한국어] 아직 걸리지 않은 상태 */
 	/*
 	 * Prevent incomplete fq state being observable. Pairs with path from
 	 * __iommu_dma_unmap() through iommu_dma_free_iova() to queue_iova()
 	 */
-	smp_wmb();
-	WRITE_ONCE(cookie->fq_domain, domain);
-	return 0;
+	smp_wmb();	/* [한국어] 위의 모든 초기화가 아래 대입보다 먼저 보이게 한다 */
+	WRITE_ONCE(cookie->fq_domain, domain);	/* [한국어] 이 대입이 곧 '지연 무효화 켜짐' 스위치다. 반드시 마지막에 해야 한다 — 해제 경로가 이 필드를 보고 queue_iova 로 들어가므로, 큐가 완성되기 전에 켜면 반쯤 만들어진 링을 만진다 (위 영어 주석) */
+	return 0;	/* [한국어] 이제 이 도메인의 해제는 큐를 거친다 */
 }
 
 /**
@@ -368,19 +592,19 @@ int iommu_dma_init_fq(struct iommu_domain *domain)
  */
 int iommu_get_dma_cookie(struct iommu_domain *domain)
 {
-	struct iommu_dma_cookie *cookie;
+	struct iommu_dma_cookie *cookie;	/* [한국어] 만들 쿠키 */
 
-	if (domain->cookie_type != IOMMU_COOKIE_NONE)
-		return -EEXIST;
+	if (domain->cookie_type != IOMMU_COOKIE_NONE)	/* [한국어] cookie 자리를 이미 다른 용도가 쓰고 있다 */
+		return -EEXIST;	/* [한국어] 한 도메인에 쿠키는 하나뿐이다 */
 
-	cookie = kzalloc_obj(*cookie);
-	if (!cookie)
-		return -ENOMEM;
+	cookie = kzalloc_obj(*cookie);	/* [한국어] 0 으로 채운 쿠키 — iovad.granule 이 0 이라 '아직 IOVA 공간 없음'을 뜻한다 */
+	if (!cookie)	/* [한국어] 할당 실패 */
+		return -ENOMEM;	/* [한국어] 도메인을 DMA API 용으로 쓸 수 없다 */
 
-	INIT_LIST_HEAD(&cookie->msi_page_list);
-	domain->cookie_type = IOMMU_COOKIE_DMA_IOVA;
-	domain->iova_cookie = cookie;
-	return 0;
+	INIT_LIST_HEAD(&cookie->msi_page_list);	/* [한국어] MSI 매핑 목록은 빈 상태로 */
+	domain->cookie_type = IOMMU_COOKIE_DMA_IOVA;	/* [한국어] cookie 자리의 용도를 선언 — iommu.c 의 여러 분기가 이 값을 본다 */
+	domain->iova_cookie = cookie;	/* [한국어] 도메인에 매단다 */
+	return 0;	/* [한국어] IOVA 공간 자체는 iommu_dma_init_domain 이 나중에 세운다 */
 }
 
 /**
@@ -397,25 +621,25 @@ int iommu_get_dma_cookie(struct iommu_domain *domain)
  */
 int iommu_get_msi_cookie(struct iommu_domain *domain, dma_addr_t base)
 {
-	struct iommu_dma_msi_cookie *cookie;
+	struct iommu_dma_msi_cookie *cookie;	/* [한국어] 만들 축소판 쿠키 */
 
-	if (domain->type != IOMMU_DOMAIN_UNMANAGED)
-		return -EINVAL;
+	if (domain->type != IOMMU_DOMAIN_UNMANAGED)	/* [한국어] 커널이 관리하는 도메인은 큰 쿠키를 쓴다 */
+		return -EINVAL;	/* [한국어] 소유자가 직접 IOVA 를 관리하는 도메인 전용이다 (위 영어 주석) */
 
-	if (domain->cookie_type != IOMMU_COOKIE_NONE)
-		return -EEXIST;
+	if (domain->cookie_type != IOMMU_COOKIE_NONE)	/* [한국어] 이미 쿠키가 있다 */
+		return -EEXIST;	/* [한국어] 중복 설정 */
 
-	cookie = kzalloc_obj(*cookie);
-	if (!cookie)
-		return -ENOMEM;
+	cookie = kzalloc_obj(*cookie);	/* [한국어] 0 으로 채운 축소판 쿠키 */
+	if (!cookie)	/* [한국어] 할당 실패 */
+		return -ENOMEM;	/* [한국어] MSI 재매핑을 쓸 수 없다 */
 
-	cookie->msi_iova = base;
-	INIT_LIST_HEAD(&cookie->msi_page_list);
-	domain->cookie_type = IOMMU_COOKIE_DMA_MSI;
-	domain->msi_cookie = cookie;
-	return 0;
+	cookie->msi_iova = base;	/* [한국어] 소유자가 예약해 둔 창의 시작 주소. 할당자가 없으므로 여기서부터 순서대로 쓴다 (위 영어 주석) */
+	INIT_LIST_HEAD(&cookie->msi_page_list);	/* [한국어] 매핑 목록 초기화 */
+	domain->cookie_type = IOMMU_COOKIE_DMA_MSI;	/* [한국어] MSI 전용 쿠키임을 선언 */
+	domain->msi_cookie = cookie;	/* [한국어] 도메인에 매단다 */
+	return 0;	/* [한국어] 이제 이 도메인에서도 MSI 도어벨이 매핑된다 */
 }
-EXPORT_SYMBOL(iommu_get_msi_cookie);
+EXPORT_SYMBOL(iommu_get_msi_cookie);	/* [한국어] VFIO 등 도메인을 직접 소유하는 사용자가 부른다 */
 
 /**
  * iommu_put_dma_cookie - Release a domain's DMA mapping resources
@@ -423,16 +647,16 @@ EXPORT_SYMBOL(iommu_get_msi_cookie);
  */
 void iommu_put_dma_cookie(struct iommu_domain *domain)
 {
-	struct iommu_dma_cookie *cookie = domain->iova_cookie;
-	struct iommu_dma_msi_page *msi, *tmp;
+	struct iommu_dma_cookie *cookie = domain->iova_cookie;	/* [한국어] 해제할 쿠키 */
+	struct iommu_dma_msi_page *msi, *tmp;	/* [한국어] MSI 목록 순회 (해제하며 돌므로 _safe) */
 
-	if (cookie->iovad.granule) {
-		iommu_dma_free_fq(cookie);
-		put_iova_domain(&cookie->iovad);
+	if (cookie->iovad.granule) {	/* [한국어] granule 이 0 이 아니면 IOVA 공간이 실제로 세워졌다는 뜻 — 쿠키만 만들고 도메인 초기화 전에 해제되는 경로가 있다 */
+		iommu_dma_free_fq(cookie);	/* [한국어] 큐부터 (타이머 정지 포함) */
+		put_iova_domain(&cookie->iovad);	/* [한국어] IOVA 트리와 캐시 해제 */
 	}
-	list_for_each_entry_safe(msi, tmp, &cookie->msi_page_list, list)
-		kfree(msi);
-	kfree(cookie);
+	list_for_each_entry_safe(msi, tmp, &cookie->msi_page_list, list)	/* [한국어] MSI 매핑 기록들을 */
+		kfree(msi);	/* [한국어] 해제한다. 실제 IOVA 매핑은 도메인이 사라지며 함께 없어진다 */
+	kfree(cookie);	/* [한국어] 쿠키 본체 */
 }
 
 /**
@@ -441,12 +665,12 @@ void iommu_put_dma_cookie(struct iommu_domain *domain)
  */
 void iommu_put_msi_cookie(struct iommu_domain *domain)
 {
-	struct iommu_dma_msi_cookie *cookie = domain->msi_cookie;
-	struct iommu_dma_msi_page *msi, *tmp;
+	struct iommu_dma_msi_cookie *cookie = domain->msi_cookie;	/* [한국어] 축소판 쿠키 */
+	struct iommu_dma_msi_page *msi, *tmp;	/* [한국어] MSI 목록 순회 */
 
-	list_for_each_entry_safe(msi, tmp, &cookie->msi_page_list, list)
-		kfree(msi);
-	kfree(cookie);
+	list_for_each_entry_safe(msi, tmp, &cookie->msi_page_list, list)	/* [한국어] 매핑 기록들을 */
+		kfree(msi);	/* [한국어] 해제 */
+	kfree(cookie);	/* [한국어] 쿠키 본체 */
 }
 
 /**
@@ -462,13 +686,13 @@ void iommu_put_msi_cookie(struct iommu_domain *domain)
 void iommu_dma_get_resv_regions(struct device *dev, struct list_head *list)
 {
 
-	if (!is_of_node(dev_iommu_fwspec_get(dev)->iommu_fwnode))
-		iort_iommu_get_resv_regions(dev, list);
+	if (!is_of_node(dev_iommu_fwspec_get(dev)->iommu_fwnode))	/* [한국어] 장치 트리 노드가 아니면 = ACPI 시스템 */
+		iort_iommu_get_resv_regions(dev, list);	/* [한국어] IORT 표에서 GICv3 ITS 창 같은 하드웨어 MSI 구간을 읽어 예약 목록에 넣는다 (위 영어 주석) */
 
-	if (dev->of_node)
-		of_iommu_get_resv_regions(dev, list);
+	if (dev->of_node)	/* [한국어] 장치 트리 노드가 있으면 */
+		of_iommu_get_resv_regions(dev, list);	/* [한국어] DT 에서 같은 정보를 읽는다 */
 }
-EXPORT_SYMBOL(iommu_dma_get_resv_regions);
+EXPORT_SYMBOL(iommu_dma_get_resv_regions);	/* [한국어] 벤더 드라이버가 자기 get_resv_regions 콜백에서 이 공통 부분을 그대로 부른다 */
 
 static int cookie_init_hw_msi_region(struct iommu_dma_cookie *cookie,
 		phys_addr_t start, phys_addr_t end)
