@@ -437,7 +437,7 @@ do {									\	/* [한국어] 매크로를 한 문장처럼 쓰게 하는 관용
 		if (DMAR_OPERATION_TIMEOUT < (get_cycles() - start_time))\	/* [한국어] 정해진 시간을 넘겼으면 */
 			panic("DMAR hardware is malfunctioning\n");	\	/* [한국어] 부팅을 멈춘다. IOMMU 가 응답하지 않는데 계속 진행하면 격리 상태를 알 수 없어 더 위험하다 */
 		cpu_relax();						\	/* [한국어] 바쁜 대기 중임을 CPU 에 알린다(하이퍼스레드 양보, 전력 절약) */
-	}								\
+	}								\	/* [한국어] 루프의 끝 */
 } while (0)	/* [한국어] 관용구의 끝. 세미콜론을 붙여 쓸 수 있게 한다 */
 
 #define QI_LENGTH	256	/* queue length */	/* [한국어] 무효화 큐에 담을 수 있는 서술자 수 (위 영어 주석) */
@@ -486,7 +486,7 @@ enum {
 #define QI_DEV_IOTLB_QDEP(qdep)	(((qdep) & 0x1f) << 16)	/* [한국어] 그 장치의 ATS 큐 깊이. 이보다 많이 보내면 응답이 유실된다 */
 #define QI_DEV_IOTLB_ADDR(addr)	((u64)(addr) & VTD_PAGE_MASK)	/* [한국어] 무효화할 주소 */
 #define QI_DEV_IOTLB_PFSID(pfsid) (((u64)(pfsid & 0xf) << 12) | \	/* [한국어] VF 의 무효화에 PF 의 소스 id 를 싣는다. 필드가 두 조각으로 나뉘어 있어 하위 4비트와 상위 12비트를 따로 넣는다 */
-				   ((u64)((pfsid >> 4) & 0xfff) << 52))
+				   ((u64)((pfsid >> 4) & 0xfff) << 52))	/* [한국어] PF 소스 id 의 상위 12비트는 떨어진 자리에 들어간다 — 필드가 두 조각으로 나뉜 서술자 형식이다 */
 #define QI_DEV_IOTLB_SIZE	1	/* [한국어] 범위 지정 방식의 플래그 */
 #define QI_DEV_IOTLB_MAX_INVS	32	/* [한국어] 한 번에 보낼 수 있는 디바이스 TLB 무효화의 최대 개수 */
 
@@ -516,7 +516,7 @@ enum {
 #define QI_DEV_EIOTLB_SID(sid)	((u64)((sid) & 0xffff) << 16)	/* [한국어] 대상 소스 id */
 #define QI_DEV_EIOTLB_QDEP(qd)	((u64)((qd) & 0x1f) << 4)	/* [한국어] 장치의 ATS 큐 깊이 */
 #define QI_DEV_EIOTLB_PFSID(pfsid) (((u64)(pfsid & 0xf) << 12) | \	/* [한국어] PF 소스 id. 기본 형식과 마찬가지로 두 조각으로 나뉜다 */
-				    ((u64)((pfsid >> 4) & 0xfff) << 52))
+				    ((u64)((pfsid >> 4) & 0xfff) << 52))	/* [한국어] 확장 형식에서도 같은 방식으로 두 조각에 나눠 넣는다 */
 #define QI_DEV_EIOTLB_MAX_INVS	32	/* [한국어] 한 번에 보낼 수 있는 최대 개수 */
 
 /* Page group response descriptor QW0 */
@@ -570,6 +570,21 @@ struct qi_desc {
 	 *   가리키면 이 워드와 qw2 는 큐에 아예 복사되지 않는다. */
 };
 
+/*
+ * [한국어] struct q_inval — 유닛 하나의 무효화 큐(Queued Invalidation)
+ *
+ * VT-d 는 무효화를 두 방식으로 받는다. 레지스터에 직접 쓰는 옛 방식과,
+ * 서술자를 메모리 링에 넣고 tail 레지스터만 갱신하는 이 큐 방식이다.
+ * 큐 쪽이 훨씬 빠르고 여러 명령을 한꺼번에 보낼 수 있어, 지원하는 유닛
+ * (ecap_qis)에서는 초기화 직후부터 이쪽만 쓴다.
+ *
+ * 동작 구조: desc 는 하드웨어가 직접 읽는 링 버퍼이고, desc_status 는 커널만
+ * 보는 그림자 배열이다. 커널이 서술자를 채우고 tail 을 밀면 하드웨어가
+ * head 를 따라오며 소비한다. 완료를 알려면 Invalidation Wait 서술자
+ * (QI_IWD_TYPE)를 끼워 넣어 지정한 주소에 값이 쓰이는지 폴링한다.
+ *
+ * 이 구조체가 유닛마다 하나씩 있고, q_lock 이 그 전부를 지킨다.
+ */
 struct q_inval {
 	raw_spinlock_t  q_lock;
 	/* [한국어] 이 무효화 큐 전체(서술자 링, 상태 배열, head/tail/cnt)를 지키는 락.
@@ -629,7 +644,7 @@ struct q_inval {
 
 struct dmar_pci_notify_info;	/* [한국어] 전방 선언 — PCI 핫플러그 알림 정보. 실제 정의는 <linux/dmar.h> 에 있다 */
 
-#ifdef CONFIG_IRQ_REMAP
+#ifdef CONFIG_IRQ_REMAP	/* [한국어] 인터럽트 재매핑을 켠 빌드에서만 */
 #define INTR_REMAP_TABLE_REG_SIZE	0xf	/* [한국어] IRTA 레지스터의 크기 필드 최대값 */
 #define INTR_REMAP_TABLE_REG_SIZE_MASK  0xf	/* [한국어] 그 필드를 뽑는 마스크 */
 
@@ -637,6 +652,22 @@ struct dmar_pci_notify_info;	/* [한국어] 전방 선언 — PCI 핫플러그 �
 
 struct irq_domain;	/* [한국어] 전방 선언 — 커널 인터럽트 도메인 */
 
+/*
+ * [한국어] struct ir_table — 인터럽트 재매핑 테이블
+ *
+ * DMA 번역과 완전히 별개의 기능이다. 재매핑을 켜면 장치가 보내는 인터럽트
+ * 메시지(MSI/MSI-X)가 곧바로 CPU 로 가지 않고, 이 표를 거쳐 실제 벡터와
+ * 목적지 CPU 로 번역된다.
+ *
+ * 왜 필요한가: MSI 는 결국 특정 주소에 특정 값을 쓰는 것이라, 장치가 마음대로
+ * 주소와 값을 정하면 임의의 인터럽트를 임의의 CPU 에 쏠 수 있다. 재매핑은
+ * 그 사이에 커널이 관리하는 표를 끼워 넣어, 각 장치가 자기에게 할당된
+ * 인터럽트만 낼 수 있게 한다. x2APIC(32비트 APIC id)를 쓰려면 재매핑이
+ * 필수라는 실용적인 이유도 있다.
+ *
+ * base 가 표 자체이고 bitmap 이 빈 자리를 찾는 색인이다. 항목을 고친 뒤에는
+ * 반드시 인터럽트 항목 캐시를 무효화(QI_IEC_TYPE)해야 하드웨어가 새 값을 본다.
+ */
 struct ir_table {
 	struct irte *base;
 	/* [한국어] 인터럽트 재매핑 테이블의 시작 주소. 항목 하나(struct irte)가 벡터 번호,
@@ -665,12 +696,21 @@ intel_irq_remap_add_device(struct dmar_pci_notify_info *info) { }	/* [한국어]
 #endif
 
 struct iommu_flush {
-	void (*flush_context)(struct intel_iommu *iommu, u16 did, u16 sid,
+	void (*flush_context)(struct intel_iommu *iommu, u16 did, u16 sid,	/* [한국어] 컨텍스트 캐시 무효화 구현. 초기화 단계처럼 큐를 쓸 수 없을 때의 폴백이다 */
 			      u8 fm, u64 type);
-	void (*flush_iotlb)(struct intel_iommu *iommu, u16 did, u64 addr,
+	void (*flush_iotlb)(struct intel_iommu *iommu, u16 did, u64 addr,	/* [한국어] IOTLB 무효화 구현. 같은 이유로 함수 포인터다 */
 			    unsigned int size_order, u64 type);
 };
 
+/*
+ * [한국어] 무효화 큐 슬롯의 상태. 하드웨어는 이 값을 모르며, 커널이
+ * desc_status 배열로 각 슬롯의 진행 상황을 추적하기 위한 것이다.
+ *
+ * QI_FREE → QI_IN_USE → QI_DONE 이 정상 흐름이고, 하드웨어가 서술자를
+ * 거부하거나 시간 초과가 나면 QI_ABORT 가 된다. QI_ABORT 는 그 슬롯뿐 아니라
+ * 뒤따르던 서술자들도 무효가 되었음을 뜻해서, 복구 경로가 그것들을 다시
+ * 제출해야 한다 — 하드웨어가 큐를 그 지점에서 멈추기 때문이다.
+ */
 enum {
 	SR_DMAR_FECTL_REG,	/* [한국어] 서스펜드 때 저장할 레지스터 — 폴트 인터럽트 제어 */
 	SR_DMAR_FEDATA_REG,	/* [한국어] 폴트 인터럽트 MSI 데이터 */
@@ -685,12 +725,12 @@ enum {
 
 #define sm_supported(iommu)	(intel_iommu_sm && ecap_smts((iommu)->ecap))	/* [한국어] scalable 모드를 실제로 쓰는가. 하드웨어 지원(ecap_smts)과 부트 옵션(intel_iommu_sm) 둘 다 필요하다 — 아래 판별자들이 모두 이것을 전제로 한다 */
 #define pasid_supported(iommu)	(sm_supported(iommu) &&			\	/* [한국어] PASID 를 쓸 수 있는가. scalable 모드 위에서만 성립한다 */
-				 ecap_pasid((iommu)->ecap))
+				 ecap_pasid((iommu)->ecap))	/* [한국어] 하드웨어의 PASID 지원까지 함께 요구한다 */
 #define ssads_supported(iommu) (sm_supported(iommu) &&                 \	/* [한국어] 2단계 더티 추적을 쓸 수 있는가. 추적 비트(slads)뿐 아니라 워크 코히런시(smpwc)까지 요구하는 것은, 하드웨어가 남긴 비트를 CPU 가 캐시를 거치지 않고 읽어야 하기 때문이다 */
-				ecap_slads((iommu)->ecap) &&           \
-				ecap_smpwc(iommu->ecap))
+				ecap_slads((iommu)->ecap) &&           \	/* [한국어] 2단계 접근/더티 비트와 */
+				ecap_smpwc(iommu->ecap))	/* [한국어] 워크 코히런시가 함께 있어야 한다 — 하드웨어가 남긴 비트를 CPU 가 캐시를 거치지 않고 읽어야 하기 때문이다 */
 #define nested_supported(iommu)	(sm_supported(iommu) &&			\	/* [한국어] 중첩 변환을 쓸 수 있는가 */
-				 ecap_nest((iommu)->ecap))
+				 ecap_nest((iommu)->ecap))	/* [한국어] 하드웨어의 중첩 변환 지원까지 함께 요구한다 */
 
 struct pasid_entry;	/* [한국어] 전방 선언 — PASID 테이블의 항목. 정의는 pasid.h 에 있다 */
 struct pasid_state_entry;	/* [한국어] PASID 상태 항목 */
@@ -701,6 +741,19 @@ struct page_req_dsc;	/* [한국어] 페이지 요청 큐에 들어오는 요청 
  * 1-11: Reserved
  * 12-63: Context Ptr (12 - (haw-1))
  * 64-127: Reserved
+ */
+/*
+ * [한국어] struct root_entry — 번역 사슬의 첫 단계, 루트 테이블의 항목 하나
+ *
+ * 하드웨어는 소스 id 의 버스 번호(상위 8비트)로 이 표를 색인한다. 표는
+ * 256개 항목 × 16바이트 = 정확히 4KB 한 페이지다.
+ *
+ * 항목 하나가 lo/hi 로 나뉘어 컨텍스트 테이블 두 개를 가리키는 이유는,
+ * 컨텍스트 항목이 16바이트라 4KB 한 페이지에 256개가 아니라 128개만 들어가기
+ * 때문이다. 그래서 devfn 0~127 은 lo 가, 128~255 는 hi 가 가리키는 표에서
+ * 찾는다.
+ *
+ * 비트 배치는 바로 위 영어 주석에 있다.
  */
 struct root_entry {
 	u64     lo;
@@ -734,6 +787,22 @@ struct root_entry {
  * 3-6: aval
  * 8-23: domain id
  */
+/*
+ * [한국어] struct context_entry — 번역 사슬의 둘째 단계, 장치 하나의 설정
+ *
+ * 루트 테이블에서 버스로 찾아 온 컨텍스트 테이블을, 소스 id 의 devfn 으로
+ * 다시 색인해 얻는 항목이다. 즉 이 항목 하나가 PCI 함수 하나에 대응하며,
+ * "이 장치의 DMA 를 어떻게 다룰 것인가"를 통째로 담고 있다.
+ *
+ * 이 구조체의 가장 중요한 성질은 해석이 모드에 따라 달라진다는 것이다.
+ * 루트 테이블 주소에 DMA_RTADDR_SMT 가 켜져 있으면(scalable 모드),
+ * 같은 비트들이 전혀 다르게 읽힌다 — address space root 가 페이지 테이블이
+ * 아니라 PASID 디렉터리를 가리키는 것으로 해석되고, DTE/PRE 같은 새 필드가
+ * 생긴다. 그래서 이 파일에는 context_set_* 계열(레거시)과 context_set_sm_*
+ * 계열(scalable)이 따로 있다.
+ *
+ * 비트 배치는 바로 위 영어 주석에 있다(레거시 기준).
+ */
 struct context_entry {
 	u64 lo;
 	/* [한국어] 컨텍스트 항목의 하위 64비트. 비트 배치는 위 영어 주석 그대로다:
@@ -763,6 +832,18 @@ struct context_entry {
 	 * 값 범위: domain id 는 16비트이지만 실제 상한은 cap_ndoms(cap) 이다(스펙 9.3). */
 };
 
+/*
+ * [한국어] struct iommu_domain_info — "이 도메인이 저 유닛에서는 몇 번인가"
+ *
+ * 도메인 id 는 시스템 전역의 이름이 아니라 유닛의 IOTLB 를 구분하는 태그다.
+ * 유닛마다 할당기가 따로 있고 개수 상한(cap_ndoms)도 달라서, 하나의 도메인이
+ * 여러 유닛에 걸치면 유닛마다 다른 번호를 받는다.
+ *
+ * 그 대응 관계를 담는 것이 이 구조체이고, 도메인의 iommu_array(xarray)에
+ * 유닛 순번으로 색인되어 들어간다. 참조 계수를 함께 두는 것은 같은 유닛의
+ * 장치가 여럿 붙어도 id 는 하나면 되고, 마지막 장치가 떠날 때 반납해야
+ * 하기 때문이다.
+ */
 struct iommu_domain_info {
 	struct intel_iommu *iommu;
 	/* [한국어] 이 정보가 어느 유닛에 대한 것인지.
@@ -858,7 +939,7 @@ struct qi_batch {
  * 일어나므로 두 락을 나눠야 매핑 경로가 부착 경로에 막히지 않는다.
  */
 struct dmar_domain {
-	union {
+	union {	/* [한국어] 도메인의 "얼굴" — 종류에 따라 아래 넷 중 하나로 읽는다. 모두 같은 자리에서 iommu_domain 으로 시작하도록 배치되어 있다 */
 		struct iommu_domain domain;
 		/* [한국어] 코어가 보는 얼굴. iommu_domain_ops, pgsize_bitmap, dirty_ops 가 여기 있다.
 		 * 설정자: 도메인 생성 함수들이 ops 와 pgsize_bitmap 을 채운다.
@@ -1008,7 +1089,7 @@ struct dmar_domain {
 
 	union {
 		/* DMA remapping domain */
-		struct {
+		struct {	/* [한국어] DMA 재매핑 도메인일 때의 추가 상태 (아래 영어 주석) */
 			/* Protect the s1_domains list */
 			spinlock_t	s1_lock;
 			/* [한국어] 아래 s1_domains 목록을 지키는 락 (원 주석: Protect the s1_domains list).
@@ -1030,7 +1111,7 @@ struct dmar_domain {
 		};
 
 		/* Nested user domain */
-		struct {
+		struct {	/* [한국어] 중첩 사용자 도메인일 때의 추가 상태. 위와 겹쳐 쓰므로 한 도메인이 둘 다일 수 없다 (아래 영어 주석) */
 			/* parent page table which the user domain is nested on */
 			struct dmar_domain *s2_domain;
 			/* [한국어] 이 중첩 사용자 도메인이 얹혀 있는 부모(2단계) 도메인
@@ -1060,7 +1141,7 @@ struct dmar_domain {
 		};
 
 		/* SVA domain */
-		struct {
+		struct {	/* [한국어] SVA 도메인일 때의 추가 상태 (아래 영어 주석) */
 			struct mmu_notifier notifier;
 			/* [한국어] SVA 도메인이 프로세스의 주소 공간 변경을 통보받는 훅.
 			 * SVA 도메인은 자기 페이지 테이블을 갖지 않고 프로세스의 것을 그대로 가리킨다.
@@ -1693,11 +1774,21 @@ struct device_domain_info {
 	 * 읽는 자: device_rbtree_find() — 폴트 인터럽트가 소스 id 로 장치를 되찾는다.
 	 * 동기화: 유닛의 device_rbtree_lock(irqsave). link 와 마찬가지로 목록의
 	 *   주인(여기서는 유닛)의 락이 지킨다. */
-#ifdef CONFIG_INTEL_IOMMU_DEBUGFS
+#ifdef CONFIG_INTEL_IOMMU_DEBUGFS	/* [한국어] DMA 재매핑을 켠 빌드에서만 */
 	struct dentry *debugfs_dentry; /* pointer to device directory dentry */
 #endif
 };
 
+/*
+ * [한국어] struct dev_pasid_info — 도메인에 PASID 단위로 붙은 (장치, PASID) 쌍
+ *
+ * 장치 목록(devices)만으로는 표현할 수 없는 관계가 있다. 한 장치가 여러
+ * PASID 로 서로 다른 도메인에 붙을 수 있고, 반대로 한 도메인에 같은 장치의
+ * 여러 PASID 가 붙을 수도 있다. 그 다대다 관계의 한 쌍이 이 구조체다.
+ *
+ * 도메인의 dev_pasids 목록에 매달리며, 도메인 단위 설정(더티 추적 등)을
+ * PASID 항목에도 전파할 때 이 목록을 훑는다.
+ */
 struct dev_pasid_info {
 	struct list_head link_domain;	/* link to domain siblings */
 	/* [한국어] 도메인의 dev_pasids 목록에 매달리는 고리 (원 주석: link to domain siblings).
@@ -1896,6 +1987,19 @@ static inline bool dev_is_real_dma_subdevice(struct device *dev)
  * 8-10: available
  * 11: snoop behavior
  * 12-63: Host physical address
+ */
+/*
+ * [한국어] struct dma_pte — 2단계 페이지 테이블의 항목 하나
+ *
+ * 64비트 값 하나를 감싼 것뿐이지만, 타입을 씌워 두면 일반 u64 와 섞이지
+ * 않아 실수를 줄인다.
+ *
+ * 1단계 PTE(x86-64 형식)와의 결정적인 차이는 present 비트가 없다는 것이다.
+ * 읽기(비트 0)와 쓰기(비트 1) 권한 중 하나라도 서 있으면 유효한 매핑이고,
+ * 둘 다 0 이면 하드웨어가 그 항목을 없는 것으로 취급한다. 그래서 매핑을
+ * 지울 때 권한 비트만 지워도 되고, dma_pte_present 가 & 3 을 본다.
+ *
+ * 비트 배치는 바로 위 영어 주석에 있다.
  */
 struct dma_pte {
 	u64 val;
@@ -2330,7 +2434,7 @@ static inline void context_clear_entry(struct context_entry *context)
 	context->hi = 0;	/* [한국어] 상위 워드도 비운다 */
 }
 
-#ifdef CONFIG_INTEL_IOMMU
+#ifdef CONFIG_INTEL_IOMMU	/* [한국어] DMA 재매핑을 켠 빌드에서만 — 인계 표시는 그 빌드에만 있는 개념이다 */
 /*
  * [한국어]
  * context_copied - 이 소스 id 의 컨텍스트 항목이 이전 커널에서 물려받은 것인지
@@ -2792,75 +2896,116 @@ static inline void qi_desc_dev_iotlb_pasid(u16 sid, u16 pfsid, u32 pasid,
 
 struct dmar_drhd_unit *dmar_find_matched_drhd_unit(struct pci_dev *dev);
 
-int dmar_enable_qi(struct intel_iommu *iommu);
-void dmar_disable_qi(struct intel_iommu *iommu);
-int dmar_reenable_qi(struct intel_iommu *iommu);
-void qi_global_iec(struct intel_iommu *iommu);
+int dmar_enable_qi(struct intel_iommu *iommu);	/* [한국어] 무효화 큐를 만들어 켠다. 이후 모든 무효화가 레지스터 대신 이 큐로 나간다 */
+void dmar_disable_qi(struct intel_iommu *iommu);	/* [한국어] 큐를 끈다 */
+int dmar_reenable_qi(struct intel_iommu *iommu);	/* [한국어] 리줌 때 큐를 다시 세운다. 서스펜드 중에 하드웨어 상태가 날아가기 때문이다 */
+void qi_global_iec(struct intel_iommu *iommu);	/* [한국어] 인터럽트 항목 캐시를 통째로 비운다. 재매핑 표를 바꾼 뒤 필요하다 */
 
-void qi_flush_context(struct intel_iommu *iommu, u16 did,
+void qi_flush_context(struct intel_iommu *iommu, u16 did,	/* [한국어] 컨텍스트 캐시 무효화 */
 		      u16 sid, u8 fm, u64 type);
-void qi_flush_iotlb(struct intel_iommu *iommu, u16 did, u64 addr,
+void qi_flush_iotlb(struct intel_iommu *iommu, u16 did, u64 addr,	/* [한국어] IOTLB 무효화 */
 		    unsigned int size_order, u64 type);
-void qi_flush_dev_iotlb(struct intel_iommu *iommu, u16 sid, u16 pfsid,
+void qi_flush_dev_iotlb(struct intel_iommu *iommu, u16 sid, u16 pfsid,	/* [한국어] 디바이스 TLB 무효화 — 장치 안의 캐시를 지운다 */
 			u16 qdep, u64 addr, unsigned mask);
 
-void qi_flush_piotlb_all(struct intel_iommu *iommu, u16 did, u32 pasid);
+void qi_flush_piotlb_all(struct intel_iommu *iommu, u16 did, u32 pasid);	/* [한국어] 한 PASID 의 IOTLB 항목 전체 */
 
-void qi_flush_dev_iotlb_pasid(struct intel_iommu *iommu, u16 sid, u16 pfsid,
+void qi_flush_dev_iotlb_pasid(struct intel_iommu *iommu, u16 sid, u16 pfsid,	/* [한국어] PASID 를 지정한 디바이스 TLB 무효화 */
 			      u32 pasid, u16 qdep, u64 addr,
 			      unsigned int size_order);
-void quirk_extra_dev_tlb_flush(struct device_domain_info *info,
+void quirk_extra_dev_tlb_flush(struct device_domain_info *info,	/* [한국어] ATS 완료 순서 결함이 있는 장치에 무효화를 한 번 더 보낸다 */
 			       unsigned long address, unsigned long pages,
 			       u32 pasid, u16 qdep);
-void qi_flush_pasid_cache(struct intel_iommu *iommu, u16 did, u64 granu,
+void qi_flush_pasid_cache(struct intel_iommu *iommu, u16 did, u64 granu,	/* [한국어] PASID 캐시 무효화. PASID 항목을 고친 뒤 필요하다 */
 			  u32 pasid);
 
-int qi_submit_sync(struct intel_iommu *iommu, struct qi_desc *desc,
+int qi_submit_sync(struct intel_iommu *iommu, struct qi_desc *desc,	/* [한국어] 서술자들을 큐에 넣고 완료까지 기다린다. 위 qi_desc_* 가 조립한 것을 여기서 제출한다 */
 		   unsigned int count, unsigned long options);
 
-void __iommu_flush_iotlb(struct intel_iommu *iommu, u16 did, u64 addr,
+void __iommu_flush_iotlb(struct intel_iommu *iommu, u16 did, u64 addr,	/* [한국어] 레지스터 방식 IOTLB 무효화. 큐를 쓸 수 없는 초기화 단계의 폴백이다 */
 			 unsigned int size_order, u64 type);
 /*
  * Options used in qi_submit_sync:
  * QI_OPT_WAIT_DRAIN - Wait for PRQ drain completion, spec 6.5.2.8.
  */
-#define QI_OPT_WAIT_DRAIN		BIT(0)
+#define QI_OPT_WAIT_DRAIN		BIT(0)	/* [한국어] qi_submit_sync 의 옵션 — 완료를 기다리면서 대기 중인 페이지 요청까지 배수한다. PASID 를 내릴 때 남은 요청이 없도록 보장한다 */
 
 int domain_attach_iommu(struct dmar_domain *domain, struct intel_iommu *iommu);
-void domain_detach_iommu(struct dmar_domain *domain, struct intel_iommu *iommu);
-void device_block_translation(struct device *dev);
-int paging_domain_compatible(struct iommu_domain *domain, struct device *dev);
+void domain_detach_iommu(struct dmar_domain *domain, struct intel_iommu *iommu);	/* [한국어] 도메인에서 이 유닛의 참조를 놓는다. 마지막이면 도메인 id 를 반납한다 */
+void device_block_translation(struct device *dev);	/* [한국어] 장치의 번역을 끊어 모든 DMA 를 막는다 */
+int paging_domain_compatible(struct iommu_domain *domain, struct device *dev);	/* [한국어] 이 도메인을 이 장치에 붙일 수 있는지 검사한다 */
 
-struct dev_pasid_info *
+struct dev_pasid_info *	/* [한국어] (장치, PASID) 기록을 만들고 필요한 참조를 잡는다 */
 domain_add_dev_pasid(struct iommu_domain *domain,
 		     struct device *dev, ioasid_t pasid);
-void domain_remove_dev_pasid(struct iommu_domain *domain,
+void domain_remove_dev_pasid(struct iommu_domain *domain,	/* [한국어] 그 기록을 지우고 참조를 놓는다 */
 			     struct device *dev, ioasid_t pasid);
 
-int __domain_setup_first_level(struct intel_iommu *iommu, struct device *dev,
+int __domain_setup_first_level(struct intel_iommu *iommu, struct device *dev,	/* [한국어] PASID 항목에 1단계 페이지 테이블을 세운다. SVA 와 일반 1단계 도메인이 공유하는 하부 구현이다 */
 			       ioasid_t pasid, u16 did, phys_addr_t fsptptr,
 			       int flags, struct iommu_domain *old);
 
-int dmar_ir_support(void);
+int dmar_ir_support(void);	/* [한국어] 인터럽트 재매핑을 지원하는 하드웨어가 있는지 */
 
-void iommu_flush_write_buffer(struct intel_iommu *iommu);
-struct iommu_domain *
+void iommu_flush_write_buffer(struct intel_iommu *iommu);	/* [한국어] rwbf 가 필요한 유닛에서 내부 쓰기 버퍼를 비운다 */
+struct iommu_domain *	/* [한국어] 중첩(게스트 1단계) 도메인을 만든다 */
 intel_iommu_domain_alloc_nested(struct device *dev, struct iommu_domain *parent,
 				u32 flags,
 				const struct iommu_user_data *user_data);
-struct device *device_rbtree_find(struct intel_iommu *iommu, u16 rid);
+struct device *device_rbtree_find(struct intel_iommu *iommu, u16 rid);	/* [한국어] 소스 id 로 장치를 되찾는다. 폴트 처리의 출발점이다 */
 
+/*
+ * [한국어] enum cache_tag_type — 무효화를 보낼 "캐시의 종류"
+ *
+ * VT-d 에서 번역 결과가 캐시되는 곳은 한 군데가 아니다. 매핑을 풀 때 어느
+ * 캐시를 비워야 하는지가 이 네 종류로 갈린다.
+ *   CACHE_TAG_IOTLB          — 유닛 안의 번역 캐시.
+ *   CACHE_TAG_DEVTLB         — ATS 를 켠 장치 안의 캐시(디바이스 TLB).
+ *   CACHE_TAG_NESTING_IOTLB  — 중첩 변환에서 부모(2단계) 쪽 유닛 캐시.
+ *   CACHE_TAG_NESTING_DEVTLB — 중첩 변환에서의 디바이스 TLB.
+ *
+ * 중첩용이 따로 있는 이유: 중첩에서는 게스트가 1단계 테이블을 고치고,
+ * 호스트가 2단계를 고친다. 어느 쪽이 바뀌었느냐에 따라 보내야 할 무효화
+ * 명령의 형식과 범위가 달라서, 같은 유닛·같은 장치라도 태그를 나눠 둔다.
+ */
 enum cache_tag_type {
-	CACHE_TAG_IOTLB,
+	CACHE_TAG_IOTLB,	/* [한국어] 유닛 안의 번역 캐시 */
 	CACHE_TAG_DEVTLB,
 	CACHE_TAG_NESTING_IOTLB,
 	CACHE_TAG_NESTING_DEVTLB,
 };
 
+/*
+ * [한국어] struct cache_tag — 무효화를 보낼 곳 하나
+ *
+ * 왜 이 자료구조가 따로 있는가: 매핑을 풀 때 비워야 할 캐시는 도메인에 붙은
+ * 장치 수만큼 있는 것이 아니다. 같은 유닛의 같은 도메인 id 를 쓰는 장치가
+ * 열 개여도 IOTLB 무효화는 한 번이면 된다. 반면 ATS 를 켠 장치는 각자의
+ * 디바이스 TLB 를 따로 비워야 한다.
+ *
+ * 그래서 도메인은 장치 목록과 별도로, 중복이 제거된 "무효화 대상" 목록을
+ * 유지한다. 그 목록의 항목이 이 구조체이고, (유닛, 도메인 id, 장치, PASID,
+ * 종류)로 유일성이 정해진다. users 가 그 태그를 필요로 하는 조합의 수다.
+ *
+ * 이 정규화 덕분에 무효화 경로는 cache_tags 만 훑으면 되고, 매번 장치
+ * 목록에서 중복을 걸러 낼 필요가 없다. 무효화는 언매핑마다 일어나는 뜨거운
+ * 경로라 그 차이가 크다.
+ */
 struct cache_tag {
 	struct list_head node;
+	/* [한국어] 도메인의 cache_tags 목록에 매달리는 고리.
+	 * 설정자: cache_tag_assign()/cache_tag_unassign().
+	 * 읽는 자: 무효화 경로가 이 목록을 훑으며 명령을 만든다.
+	 * 동기화: 도메인의 cache_lock. */
 	enum cache_tag_type type;
+	/* [한국어] 이 태그가 어느 캐시를 가리키는지(IOTLB / DEVTLB / 중첩판).
+	 * 설정자: 태그를 만들 때. 읽는 자: 무효화 명령의 종류를 고르는 분기.
+	 * 값 범위: 위 enum 의 넷 중 하나. 같은 (유닛, 도메인 id, 장치, PASID)라도
+	 *   종류가 다르면 별개의 태그다 — 비워야 할 캐시가 다르기 때문이다. */
 	struct intel_iommu *iommu;
+	/* [한국어] 이 무효화를 보낼 유닛. 명령은 결국 이 유닛의 큐에 들어간다.
+	 * 설정자: 태그 생성 시. 읽는 자: qi_submit_sync 에 넘길 유닛.
+	 * 동기화: 태그의 수명 동안 바뀌지 않는다. */
 	/*
 	 * The @dev field represents the location of the cache. For IOTLB, it
 	 * resides on the IOMMU hardware. @dev stores the device pointer to
@@ -2868,167 +3013,310 @@ struct cache_tag {
 	 * @dev stores the device pointer to that endpoint.
 	 */
 	struct device *dev;
+	/* [한국어] 캐시가 있는 위치 (원 주석의 설명이 정확하다).
+	 * IOTLB 태그면 캐시가 IOMMU 하드웨어에 있으므로 그 유닛의 장치 포인터가,
+	 * DevTLB 태그면 캐시가 PCIe 엔드포인트에 있으므로 그 엔드포인트의 포인터가
+	 * 들어간다. 즉 이 필드는 "누구의 캐시인가"를 말한다.
+	 * 설정자: 태그 생성 시. 읽는 자: 디바이스 TLB 무효화의 대상 소스 id 와
+	 *   큐 깊이를 얻을 때, 그리고 진단 출력. */
 	u16 domain_id;
+	/* [한국어] 이 유닛에서의 도메인 id. 무효화 명령의 DID 필드에 실린다.
+	 * 설정자: 태그 생성 시 domain_id_iommu() 의 결과.
+	 * 읽는 자: 모든 도메인 단위 무효화.
+	 * 왜 태그에 복사해 두는가: 무효화 경로가 도메인의 xarray 를 다시 뒤지지
+	 *   않아도 되게 하려는 것이다. 무효화는 뜨거운 경로다. */
 	ioasid_t pasid;
+	/* [한국어] 무효화 대상 PASID. PASID 를 쓰지 않는 트래픽이면 IOMMU_NO_PASID.
+	 * 설정자: 태그 생성 시. 읽는 자: 확장(EIOTLB) 형식 무효화의 PASID 필드.
+	 * 값 범위: 같은 장치의 서로 다른 PASID 는 각각 별개의 태그를 갖는다 —
+	 *   한 PASID 의 매핑을 풀어도 다른 PASID 의 캐시는 남아야 하기 때문이다. */
 	unsigned int users;
+	/* [한국어] 이 태그를 필요로 하는 (장치, PASID) 조합의 수.
+	 * 왜 필요한가: 같은 유닛의 같은 도메인 id 를 쓰는 장치가 여럿이면 IOTLB
+	 *   무효화는 한 번이면 된다. 그래서 태그는 하나만 두고 참조를 센다.
+	 *   마지막 사용자가 떨어질 때 태그를 없앤다.
+	 *   이 중복 제거가 cache_tags 목록을 devices 목록과 따로 두는 이유다.
+	 * 설정자/읽는 자: cache_tag_assign()/cache_tag_unassign().
+	 * 동기화: 도메인의 cache_lock. */
 };
 
-int cache_tag_assign(struct dmar_domain *domain, u16 did, struct device *dev,
+int cache_tag_assign(struct dmar_domain *domain, u16 did, struct device *dev,	/* [한국어] 태그 하나를 등록한다(이미 있으면 참조만 늘린다) */
 		     ioasid_t pasid, enum cache_tag_type type);
-int cache_tag_assign_domain(struct dmar_domain *domain,
+int cache_tag_assign_domain(struct dmar_domain *domain,	/* [한국어] 한 장치·PASID 에 필요한 태그들을 한꺼번에 등록한다. 도메인 종류와 ATS 여부에 따라 IOTLB 만일 수도, DEVTLB 까지일 수도 있다 */
 			    struct device *dev, ioasid_t pasid);
-void cache_tag_unassign_domain(struct dmar_domain *domain,
+void cache_tag_unassign_domain(struct dmar_domain *domain,	/* [한국어] 그 반대. 마지막 참조가 떨어진 태그는 사라진다 */
 			       struct device *dev, ioasid_t pasid);
-void cache_tag_flush_range(struct dmar_domain *domain, unsigned long start,
+void cache_tag_flush_range(struct dmar_domain *domain, unsigned long start,	/* [한국어] 이 도메인의 모든 태그에 대해 주어진 범위를 무효화한다 */
 			   unsigned long end, int ih);
-void cache_tag_flush_all(struct dmar_domain *domain);
-void cache_tag_flush_range_np(struct dmar_domain *domain, unsigned long start,
+void cache_tag_flush_all(struct dmar_domain *domain);	/* [한국어] 범위 없이 도메인 전체를 무효화한다. 범위가 너무 넓어 범위 무효화가 오히려 비쌀 때 쓴다 */
+void cache_tag_flush_range_np(struct dmar_domain *domain, unsigned long start,	/* [한국어] "없음" 항목의 캐시를 지운다. 캐싱 모드 하드웨어에서 새 매핑을 보이게 하는 용도다 */
 			      unsigned long end);
 
-void intel_context_flush_no_pasid(struct device_domain_info *info,
+void intel_context_flush_no_pasid(struct device_domain_info *info,	/* [한국어] PASID 를 쓰지 않는 기본 트래픽의 컨텍스트 캐시를 비운다 */
 				  struct context_entry *context, u16 did);
 
-int intel_iommu_enable_prq(struct intel_iommu *iommu);
-int intel_iommu_finish_prq(struct intel_iommu *iommu);
-void intel_iommu_page_response(struct device *dev, struct iopf_fault *evt,
+int intel_iommu_enable_prq(struct intel_iommu *iommu);	/* [한국어] 페이지 요청 큐를 만들고 인터럽트를 건다 */
+int intel_iommu_finish_prq(struct intel_iommu *iommu);	/* [한국어] 그 반대. 큐를 정리한다 */
+void intel_iommu_page_response(struct device *dev, struct iopf_fault *evt,	/* [한국어] 페이지 요청에 대한 응답을 하드웨어로 보낸다. 이 응답이 없으면 장치가 영원히 멈춘다 */
 			       struct iommu_page_response *msg);
-void intel_iommu_drain_pasid_prq(struct device *dev, u32 pasid);
+void intel_iommu_drain_pasid_prq(struct device *dev, u32 pasid);	/* [한국어] 이 PASID 로 온 남은 페이지 요청을 모두 배수한다. PASID 를 내리기 전에 반드시 해야 한다 */
 
-int intel_iommu_enable_iopf(struct device *dev);
-void intel_iommu_disable_iopf(struct device *dev);
+int intel_iommu_enable_iopf(struct device *dev);	/* [한국어] 폴트 처리를 켠다(참조 계수) */
+void intel_iommu_disable_iopf(struct device *dev);	/* [한국어] 참조를 놓는다 */
 
+/*
+ * [한국어]
+ * iopf_for_domain_set - 이 도메인이 폴트 처리를 필요로 하면 켠다
+ *
+ * @domain: 붙이려는 도메인. NULL 일 수 있다.
+ * @dev: 대상 장치.
+ * @return: 0 성공(필요 없어서 아무것도 안 한 경우 포함), 음수면 실패.
+ *
+ * 모든 도메인이 페이지 폴트를 쓰지는 않는다. SVA 나 iommufd 의 폴트 전달
+ * 도메인만 iopf_handler 를 갖고, 보통의 DMA 매핑 도메인은 매핑을 미리 다
+ * 만들어 두므로 폴트가 날 일이 없다.
+ *
+ * 그래서 도메인에 handler 가 없으면 곧바로 0 을 돌려준다. 이 얇은 껍데기
+ * 덕분에 호출부(attach/set_dev_pasid)가 도메인 종류를 따지지 않고 늘
+ * 같은 코드를 쓸 수 있다.
+ *
+ * 실행 컨텍스트: 도메인 부착. 프로세스 컨텍스트.
+ */
 static inline int iopf_for_domain_set(struct iommu_domain *domain,
 				      struct device *dev)
 {
-	if (!domain || !domain->iopf_handler)
-		return 0;
+	if (!domain || !domain->iopf_handler)	/* [한국어] 폴트를 처리할 도메인이 아니면 */
+		return 0;	/* [한국어] 켤 것이 없다 */
 
-	return intel_iommu_enable_iopf(dev);
+	return intel_iommu_enable_iopf(dev);	/* [한국어] 필요하면 참조를 하나 잡는다 */
 }
 
+/*
+ * [한국어]
+ * iopf_for_domain_remove - 이 도메인이 폴트 처리를 쓰고 있었으면 놓는다
+ *
+ * @domain: 떼어 낼 도메인. NULL 일 수 있다.
+ * @dev: 대상 장치.
+ * @return: 없음.
+ *
+ * set 의 짝. 같은 조건(iopf_handler 유무)으로 갈리므로, 켤 때 켰던 것만
+ * 정확히 놓는다 — 참조 계수의 짝이 맞으려면 두 함수가 같은 판단을 해야 한다.
+ *
+ * 실행 컨텍스트: 도메인 분리. 프로세스 컨텍스트.
+ */
 static inline void iopf_for_domain_remove(struct iommu_domain *domain,
 					  struct device *dev)
 {
-	if (!domain || !domain->iopf_handler)
-		return;
+	if (!domain || !domain->iopf_handler)	/* [한국어] 켠 적이 없는 도메인이면 */
+		return;	/* [한국어] 놓을 것도 없다 */
 
-	intel_iommu_disable_iopf(dev);
+	intel_iommu_disable_iopf(dev);	/* [한국어] 참조를 하나 놓는다 */
 }
 
+/*
+ * [한국어]
+ * iopf_for_domain_replace - 폴트 처리를 옛 도메인에서 새 도메인으로 옮긴다
+ *
+ * @new: 새로 붙일 도메인. @old: 떼어 낼 도메인. @dev: 대상 장치.
+ * @return: 0 성공, 음수면 실패(그 경우 옛 상태가 그대로 유지된다).
+ *
+ * 순서가 이 함수의 전부다: 먼저 새 것을 켜고, 성공한 뒤에 옛 것을 놓는다.
+ * 반대로 하면 두 도메인 사이의 짧은 순간 동안 이 장치의 폴트 처리가 꺼지고,
+ * 그 틈에 도착한 페이지 요청은 응답을 받지 못한다. 응답 없는 PRI 요청은
+ * 장치를 영원히 멈춰 세우므로 이 순서를 어길 수 없다.
+ *
+ * 참조 계수가 있기 때문에 이 겹침이 가능하다 — 잠시 둘 다 켜져 있어도
+ * 계수가 2 가 될 뿐 문제가 없다.
+ *
+ * 실행 컨텍스트: 도메인 교체(attach/set_dev_pasid). 프로세스 컨텍스트.
+ */
 static inline int iopf_for_domain_replace(struct iommu_domain *new,
 					  struct iommu_domain *old,
 					  struct device *dev)
 {
-	int ret;
+	int ret;	/* [한국어] 결과 */
 
-	ret = iopf_for_domain_set(new, dev);
-	if (ret)
-		return ret;
+	ret = iopf_for_domain_set(new, dev);	/* [한국어] 새 도메인 쪽을 먼저 켠다 */
+	if (ret)	/* [한국어] 실패하면 */
+		return ret;	/* [한국어] 옛 도메인은 그대로 남는다 */
 
-	iopf_for_domain_remove(old, dev);
+	iopf_for_domain_remove(old, dev);	/* [한국어] 성공한 뒤에야 옛 도메인 쪽을 놓는다. 겹치는 순간이 있어야 폴트 처리가 끊기지 않는다 */
 
-	return 0;
+	return 0;	/* [한국어] 교체 완료 */
 }
 
 #ifdef CONFIG_INTEL_IOMMU_SVM	/* [한국어] DMA 재매핑을 뺀 빌드에는 인계 표시 자체가 없다 */
 void intel_svm_check(struct intel_iommu *iommu);
-struct iommu_domain *intel_svm_domain_alloc(struct device *dev,
+struct iommu_domain *intel_svm_domain_alloc(struct device *dev,	/* [한국어] SVA 도메인을 만든다. 프로세스의 페이지 테이블을 그대로 쓰는 도메인이다 */
 					    struct mm_struct *mm);
 #else
 static inline void intel_svm_check(struct intel_iommu *iommu) {}
-static inline struct iommu_domain *intel_svm_domain_alloc(struct device *dev,
+static inline struct iommu_domain *intel_svm_domain_alloc(struct device *dev,	/* [한국어] SVA 를 뺀 빌드의 빈 구현 */
 							  struct mm_struct *mm)
 {
-	return ERR_PTR(-ENODEV);
+	return ERR_PTR(-ENODEV);	/* [한국어] SVA 를 뺀 빌드에서는 만들 수 없다 */
 }
 #endif
 
-#ifdef CONFIG_INTEL_IOMMU_DEBUGFS
+#ifdef CONFIG_INTEL_IOMMU_DEBUGFS	/* [한국어] DMA 재매핑을 켠 빌드의 실제 선언들 */
 void intel_iommu_debugfs_init(void);
-void intel_iommu_debugfs_create_dev(struct device_domain_info *info);
-void intel_iommu_debugfs_remove_dev(struct device_domain_info *info);
-void intel_iommu_debugfs_create_dev_pasid(struct dev_pasid_info *dev_pasid);
-void intel_iommu_debugfs_remove_dev_pasid(struct dev_pasid_info *dev_pasid);
+void intel_iommu_debugfs_create_dev(struct device_domain_info *info);	/* [한국어] 장치의 진단 노드를 만든다 */
+void intel_iommu_debugfs_remove_dev(struct device_domain_info *info);	/* [한국어] 그 노드를 지운다 */
+void intel_iommu_debugfs_create_dev_pasid(struct dev_pasid_info *dev_pasid);	/* [한국어] PASID 단위 진단 노드 */
+void intel_iommu_debugfs_remove_dev_pasid(struct dev_pasid_info *dev_pasid);	/* [한국어] 그 제거 */
 #else
 static inline void intel_iommu_debugfs_init(void) {}
-static inline void intel_iommu_debugfs_create_dev(struct device_domain_info *info) {}
-static inline void intel_iommu_debugfs_remove_dev(struct device_domain_info *info) {}
-static inline void intel_iommu_debugfs_create_dev_pasid(struct dev_pasid_info *dev_pasid) {}
-static inline void intel_iommu_debugfs_remove_dev_pasid(struct dev_pasid_info *dev_pasid) {}
+static inline void intel_iommu_debugfs_create_dev(struct device_domain_info *info) {}	/* [한국어] debugfs 를 끈 빌드의 빈 구현. 호출부에 #ifdef 를 흩지 않는다 */
+static inline void intel_iommu_debugfs_remove_dev(struct device_domain_info *info) {}	/* [한국어] 같음 */
+static inline void intel_iommu_debugfs_create_dev_pasid(struct dev_pasid_info *dev_pasid) {}	/* [한국어] 같음 */
+static inline void intel_iommu_debugfs_remove_dev_pasid(struct dev_pasid_info *dev_pasid) {}	/* [한국어] 같음 */
 #endif /* CONFIG_INTEL_IOMMU_DEBUGFS */
 
 extern const struct attribute_group *intel_iommu_groups[];
-struct context_entry *iommu_context_addr(struct intel_iommu *iommu, u8 bus,
+struct context_entry *iommu_context_addr(struct intel_iommu *iommu, u8 bus,	/* [한국어] 소스 id 에 해당하는 컨텍스트 항목의 주소를 구한다. 필요하면 컨텍스트 테이블을 새로 만든다 */
 					 u8 devfn, int alloc);
 
-extern const struct iommu_ops intel_iommu_ops;
-extern const struct iommu_domain_ops intel_fs_paging_domain_ops;
-extern const struct iommu_domain_ops intel_ss_paging_domain_ops;
+extern const struct iommu_ops intel_iommu_ops;	/* [한국어] 코어에 등록하는 콜백 표. 정의는 iommu.c 끝에 있다 */
+extern const struct iommu_domain_ops intel_fs_paging_domain_ops;	/* [한국어] 1단계 도메인의 콜백 표 */
+extern const struct iommu_domain_ops intel_ss_paging_domain_ops;	/* [한국어] 2단계 도메인의 콜백 표 */
 
+/*
+ * [한국어]
+ * intel_domain_is_fs_paging - 이 도메인이 1단계 페이징 도메인인지 판별한다
+ *
+ * @domain: 검사할 도메인.
+ * @return: true 면 1단계(x86-64 형식) 페이지 테이블을 쓰는 도메인이다.
+ *
+ * 별도의 종류 필드를 두지 않고 콜백 표(ops)의 주소를 비교한다. 도메인을 만들
+ * 때 종류에 따라 다른 표를 꽂아 두므로, 그 포인터가 곧 종류의 증거다.
+ * 필드 하나를 아끼는 것보다, 종류와 동작이 어긋날 수 없다는 점이 중요하다 —
+ * 표가 1단계용인데 종류 필드만 2단계인 상태가 만들어질 수 없다.
+ *
+ * 판별이 필요한 곳: 호환성 검사(어느 조건으로 볼지), PASID 항목 설정
+ * (어느 테이블을 세울지), dmar_domain 의 union 중 fspt 를 읽어도 되는지.
+ *
+ * 실행 컨텍스트: 어디서든. 포인터 비교 하나다.
+ */
 static inline bool intel_domain_is_fs_paging(struct dmar_domain *domain)
 {
-	return domain->domain.ops == &intel_fs_paging_domain_ops;
+	return domain->domain.ops == &intel_fs_paging_domain_ops;	/* [한국어] 콜백 표의 주소로 도메인 종류를 판별한다. 별도 플래그를 두지 않고 ops 포인터를 비교하는 것이 관용구다 */
 }
 
+/*
+ * [한국어]
+ * intel_domain_is_ss_paging - 이 도메인이 2단계 페이징 도메인인지 판별한다
+ *
+ * @domain: 검사할 도메인.
+ * @return: true 면 2단계(VT-d 고유 형식) 페이지 테이블을 쓰는 도메인이다.
+ *
+ * fs 판과 같은 방식이다. 두 판별이 모두 거짓이면 페이징 도메인이 아니라는
+ * 뜻이고(SVA, 항등, 차단, 중첩), 그런 도메인이 페이징 경로로 들어오면
+ * 호출부가 WARN 을 남기고 거절한다.
+ *
+ * 실행 컨텍스트: 어디서든.
+ */
 static inline bool intel_domain_is_ss_paging(struct dmar_domain *domain)
 {
-	return domain->domain.ops == &intel_ss_paging_domain_ops;
+	return domain->domain.ops == &intel_ss_paging_domain_ops;	/* [한국어] 2단계 판별 */
 }
 
-#ifdef CONFIG_INTEL_IOMMU
+#ifdef CONFIG_INTEL_IOMMU	/* [한국어] DMA 재매핑을 켠 빌드에서만 — 뺀 빌드에는 아래 #else 의 빈 구현이 쓰인다 */
 extern int intel_iommu_sm;
-int iommu_calculate_agaw(struct intel_iommu *iommu);
-int iommu_calculate_max_sagaw(struct intel_iommu *iommu);
-int ecmd_submit_sync(struct intel_iommu *iommu, u8 ecmd, u64 oa, u64 ob);
+int iommu_calculate_agaw(struct intel_iommu *iommu);	/* [한국어] 이 유닛이 쓸 주소 폭을 정한다 */
+int iommu_calculate_max_sagaw(struct intel_iommu *iommu);	/* [한국어] 지원하는 최대 주소 폭을 구한다 */
+int ecmd_submit_sync(struct intel_iommu *iommu, u8 ecmd, u64 oa, u64 ob);	/* [한국어] 확장 명령을 보내고 완료까지 기다린다 */
 
+/*
+ * [한국어]
+ * ecmd_has_pmu_essential - 성능 카운터를 쓰는 데 필요한 확장 명령이 모두 있는지
+ *
+ * @iommu: 검사할 유닛.
+ * @return: true 면 네 명령(enable/disable/freeze/unfreeze)을 모두 지원한다.
+ *
+ * 성능 카운터를 다루려면 켜고, 끄고, 값을 안정적으로 읽으려 멈추고, 다시
+ * 진행시키는 네 가지가 모두 필요하다. 하나라도 없으면 카운터를 제대로 쓸 수
+ * 없으므로 아예 등록하지 않는다.
+ *
+ * 비트를 하나씩 확인하지 않고 DMA_ECMD_ECCAP3_ESSENTIAL 조합과 통째로
+ * 비교하는 것이 관용구다 — & 결과가 조합 자체와 같아야 "전부 있다"가 된다.
+ *
+ * 실행 컨텍스트: perfmon 초기화.
+ */
 static inline bool ecmd_has_pmu_essential(struct intel_iommu *iommu)
 {
-	return (iommu->ecmdcap[DMA_ECMD_ECCAP3] & DMA_ECMD_ECCAP3_ESSENTIAL) ==
-		DMA_ECMD_ECCAP3_ESSENTIAL;
+	return (iommu->ecmdcap[DMA_ECMD_ECCAP3] & DMA_ECMD_ECCAP3_ESSENTIAL) ==	/* [한국어] 필요한 네 비트를 한꺼번에 걸러 */
+		DMA_ECMD_ECCAP3_ESSENTIAL;	/* [한국어] 조합 자체와 같은지 본다 — 하나라도 빠지면 거짓이다 */
 }
 
-extern int dmar_disabled;
-extern int intel_iommu_enabled;
+extern int dmar_disabled;	/* [한국어] 부트 옵션으로 VT-d 를 껐는지 */
+extern int intel_iommu_enabled;	/* [한국어] VT-d 가 실제로 동작 중인지. 다른 서브시스템이 참고한다 */
 #else
 static inline int iommu_calculate_agaw(struct intel_iommu *iommu)
 {
-	return 0;
+	return 0;	/* [한국어] DMA 재매핑을 뺀 빌드의 빈 구현 — 주소 폭 계산이 필요 없다 */
 }
-static inline int iommu_calculate_max_sagaw(struct intel_iommu *iommu)
+static inline int iommu_calculate_max_sagaw(struct intel_iommu *iommu)	/* [한국어] 뺀 빌드의 빈 구현 */
 {
-	return 0;
+	return 0;	/* [한국어] 같음 */
 }
-#define dmar_disabled	(1)
-#define intel_iommu_enabled (0)
-#define intel_iommu_sm (0)
+#define dmar_disabled	(1)	/* [한국어] 그 빌드에서는 항상 꺼진 것으로 본다 */
+#define intel_iommu_enabled (0)	/* [한국어] 동작 중이 아니다 */
+#define intel_iommu_sm (0)	/* [한국어] scalable 모드도 없다 */
 #endif
 
+/*
+ * [한국어]
+ * decode_prq_descriptor - 페이지 요청 서술자를 사람이 읽을 문자열로 푼다
+ *
+ * @str: 출력 버퍼. @size: 그 크기. @dw0~@dw3: 서술자의 네 워드.
+ * @return: str(호출자가 그대로 출력할 수 있게 시작 포인터를 돌려준다).
+ *
+ * 페이지 요청 하나에 담긴 정보를 한 줄로 편다.
+ *   rid    — 요청을 낸 장치의 소스 id(dw0 의 비트 31:16).
+ *   addr   — 접근하려던 주소(dw1 의 비트 63:12).
+ *   rwxpl  — 요청한 권한과 성격을 다섯 글자로: 읽기(dw1 비트 0), 쓰기(비트 1),
+ *            실행(dw0 비트 52), 특권(dw0 비트 53), 마지막 요청(dw1 비트 2).
+ *            'l' 이 중요하다 — 그룹의 마지막 요청이라는 표시이며, 이것이
+ *            온 뒤에야 그 그룹에 응답할 수 있다.
+ *   pasid  — 어느 주소 공간인지(dw0 의 비트 51:32).
+ *   index  — 요청 그룹 인덱스(dw1 의 비트 11:3). 응답에 그대로 실어야
+ *            장치가 어느 요청에 대한 답인지 안다.
+ *
+ * 비트 위치를 FIELD_GET 으로 뽑는 것은 시프트·마스크를 손으로 쓰다 틀리는
+ * 것을 막기 위해서다. 삼항 연산자로 문자 하나씩 만드는 부분은 플래그를
+ * "rw-x-" 처럼 한눈에 보이게 하는 흔한 관용구다.
+ *
+ * 사설 데이터(dw0 의 비트 9)가 있으면 dw2/dw3 를 덧붙인다. 그 필드는 장치가
+ * 자기 용도로 쓰는 값이라 커널은 해석하지 않고 그대로 응답에 되돌려 준다.
+ *
+ * 실행 컨텍스트: 폴트 진단 출력(trace/debugfs). 잠들지 않는다.
+ */
 static inline const char *decode_prq_descriptor(char *str, size_t size,
 		u64 dw0, u64 dw1, u64 dw2, u64 dw3)
 {
-	char *buf = str;
-	int bytes;
+	char *buf = str;	/* [한국어] 채워 나갈 커서 */
+	int bytes;	/* [한국어] 첫 부분이 쓴 바이트 수 */
 
-	bytes = snprintf(buf, size,
-			 "rid=0x%llx addr=0x%llx %c%c%c%c%c pasid=0x%llx index=0x%llx",
-			 FIELD_GET(GENMASK_ULL(31, 16), dw0),
-			 FIELD_GET(GENMASK_ULL(63, 12), dw1),
-			 dw1 & BIT_ULL(0) ? 'r' : '-',
-			 dw1 & BIT_ULL(1) ? 'w' : '-',
-			 dw0 & BIT_ULL(52) ? 'x' : '-',
-			 dw0 & BIT_ULL(53) ? 'p' : '-',
-			 dw1 & BIT_ULL(2) ? 'l' : '-',
-			 FIELD_GET(GENMASK_ULL(51, 32), dw0),
-			 FIELD_GET(GENMASK_ULL(11, 3), dw1));
+	bytes = snprintf(buf, size,	/* [한국어] 서술자의 주요 필드를 한 줄로 편다 */
+			 "rid=0x%llx addr=0x%llx %c%c%c%c%c pasid=0x%llx index=0x%llx",	/* [한국어] 소스 id, 주소, 다섯 플래그, PASID, 그룹 인덱스 순 */
+			 FIELD_GET(GENMASK_ULL(31, 16), dw0),	/* [한국어] 요청을 낸 장치의 소스 id */
+			 FIELD_GET(GENMASK_ULL(63, 12), dw1),	/* [한국어] 접근하려던 주소(페이지 단위) */
+			 dw1 & BIT_ULL(0) ? 'r' : '-',	/* [한국어] 읽기 요청인가 */
+			 dw1 & BIT_ULL(1) ? 'w' : '-',	/* [한국어] 쓰기 요청인가 */
+			 dw0 & BIT_ULL(52) ? 'x' : '-',	/* [한국어] 실행 요청인가 */
+			 dw0 & BIT_ULL(53) ? 'p' : '-',	/* [한국어] 특권(supervisor) 요청인가 */
+			 dw1 & BIT_ULL(2) ? 'l' : '-',	/* [한국어] 그룹의 마지막 요청인가. 이것이 와야 그 그룹에 응답할 수 있다 */
+			 FIELD_GET(GENMASK_ULL(51, 32), dw0),	/* [한국어] 어느 주소 공간(PASID)인지 */
+			 FIELD_GET(GENMASK_ULL(11, 3), dw1));	/* [한국어] 요청 그룹 인덱스. 응답에 그대로 실어야 장치가 짝을 찾는다 */
 
 	/* Private Data */
-	if (dw0 & BIT_ULL(9)) {
-		size -= bytes;
-		buf += bytes;
-		snprintf(buf, size, " private=0x%llx/0x%llx\n", dw2, dw3);
+	if (dw0 & BIT_ULL(9)) {	/* [한국어] 사설 데이터가 실려 있으면 (위 영어 주석) */
+		size -= bytes;	/* [한국어] 남은 버퍼 크기를 줄이고 */
+		buf += bytes;	/* [한국어] 커서를 뒤로 민다 */
+		snprintf(buf, size, " private=0x%llx/0x%llx\n", dw2, dw3);	/* [한국어] 두 워드를 덧붙인다. 커널은 이 값을 해석하지 않고 응답에 그대로 되돌려 준다 */
 	}
 
-	return str;
+	return str;	/* [한국어] 버퍼의 시작을 돌려준다 */
 }
 
 #endif
