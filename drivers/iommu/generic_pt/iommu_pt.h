@@ -611,61 +611,128 @@ static int __maybe_unused NS(set_dirty)(struct pt_iommu *iommu_table,
 
 struct pt_iommu_collect_args {
 	struct iommu_pages_list free_list;
+	/* [한국어] 모은 표들을 담는 목록.
+	 * 설정자: 호출자가 초기화하고, __collect_tables 가 채운다.
+	 * 읽는 자: 무효화가 끝난 뒤 해제하는 쪽.
+	 * 값 범위: 비어 있거나 표 페이지들의 목록.
+	 * 동기화: 호출 스택에 있어 공유되지 않는다. */
 	/* Fail if any OAs are within the range */
 	u8 check_mapped : 1;
+	/* [한국어] (원 주석: 범위 안에 출력 주소가 있으면 실패시킨다)
+	 * 설정자: 큰 페이지를 놓기 전 확인하는 호출이 참으로 둔다.
+	 * 읽는 자: __collect_tables 의 두 갈래.
+	 * 값 범위: 0(해제용 수집) 또는 1(자리 비었는지 확인).
+	 * 동기화: 호출 스택 값. */
 };
 
+/*
+ * [한국어]
+ * __collect_tables - 하위 표를 모두 모으고, 필요하면 매핑이 없는지 확인한다
+ *
+ * @range: 걷는 범위.
+ * @arg: 모을 목록과 검사 여부.
+ * @level: 현재 단계.
+ * @table: 그 단계의 표.
+ * @return: 0 성공, -EADDRINUSE 면 그 범위에 매핑이 남아 있다.
+ *
+ * 두 가지 목적으로 쓰인다. 도메인을 해제할 때 표 메모리를 전부 모으는
+ * 경우와, 큰 페이지를 놓기 전에 그 자리가 정말 비어 있는지 확인하는
+ * 경우다 — 후자가 check_mapped 다.
+ *
+ * 첫 조건이 그 두 용도를 가른다. 검사하지 않는 호출에서는 잎만 있는
+ * 단계를 볼 이유가 없어 곧바로 돌아간다.
+ *
+ * 목록에 넣는 순서가 위에서 아래로인 점에 유의 — 해제는 목록 전체를
+ * 한꺼번에 하므로 순서가 문제되지 않는다.
+ */
 static int __collect_tables(struct pt_range *range, void *arg,
 			    unsigned int level, struct pt_table_p *table)
 {
-	struct pt_state pts = pt_init(range, level, table);
-	struct pt_iommu_collect_args *collect = arg;
-	int ret;
+	struct pt_state pts = pt_init(range, level, table);	/* [한국어] 이 단계의 순회 상태 */
+	struct pt_iommu_collect_args *collect = arg;	/* [한국어] 모을 목록과 검사 여부 */
+	int ret;	/* [한국어] 아래 단계의 결과 */
 
-	if (!collect->check_mapped && !pt_can_have_table(&pts))
-		return 0;
+	if (!collect->check_mapped && !pt_can_have_table(&pts))	/* [한국어] 검사하지 않는 호출이면 잎만 있는 단계는 */
+		return 0;	/* [한국어] 볼 이유가 없다 */
 
-	for_each_pt_level_entry(&pts) {
-		if (pts.type == PT_ENTRY_TABLE) {
-			iommu_pages_list_add(&collect->free_list, pts.table_lower);
-			ret = pt_descend(&pts, arg, __collect_tables);
-			if (ret)
-				return ret;
-			continue;
+	for_each_pt_level_entry(&pts) {	/* [한국어] 이 단계의 항목들을 훑는다 */
+		if (pts.type == PT_ENTRY_TABLE) {	/* [한국어] 아래 표면 */
+			iommu_pages_list_add(&collect->free_list, pts.table_lower);	/* [한국어] 해제 목록에 넣고 */
+			ret = pt_descend(&pts, arg, __collect_tables);	/* [한국어] 그 아래도 훑는다 */
+			if (ret)	/* [한국어] 실패면 */
+				return ret;	/* [한국어] 바로 전한다 */
+			continue;	/* [한국어] 다음 항목으로 */
 		}
-		if (pts.type == PT_ENTRY_OA && collect->check_mapped)
-			return -EADDRINUSE;
+		if (pts.type == PT_ENTRY_OA && collect->check_mapped)	/* [한국어] 비어 있어야 할 자리에 매핑이 있으면 */
+			return -EADDRINUSE;	/* [한국어] 큰 페이지를 놓을 수 없다 */
 	}
-	return 0;
+	return 0;	/* [한국어] 이 단계를 다 돌았다 */
 }
 
-enum alloc_mode {ALLOC_NORMAL, ALLOC_DEFER_COHERENT_FLUSH};
+enum alloc_mode {ALLOC_NORMAL, ALLOC_DEFER_COHERENT_FLUSH};	/* [한국어] 비일관 플랫폼에서 DMA 매핑을 지금 할지 미룰지 */
 
 /* Allocate a table, the empty table will be ready to be installed. */
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * _table_alloc - 표 메모리를 잡는다
+ *
+ * @common: 페이지 테이블 인스턴스.
+ * @lg2sz: 잡을 크기의 지수.
+ * @gfp: 할당 플래그.
+ * @mode: 비일관 플랫폼에서 DMA 매핑까지 지금 할 것인가.
+ * @return: 표 메모리, 실패하면 ERR_PTR.
+ *
+ * 0 으로 채워진 페이지를 받아 곧바로 설치할 수 있는 상태로 돌려준다.
+ *
+ * 비일관 플랫폼에서는 그 페이지를 장치가 DMA 로 읽을 수 있게 매핑까지
+ * 해야 한다. ALLOC_DEFER_COHERENT_FLUSH 는 그 일을 뒤로 미루는데,
+ * 최상위 표처럼 아직 하드웨어에 연결되지 않은 경우에 쓴다.
+ *
+ * nid 를 쓰는 이유: 하드웨어가 이 표를 DMA 로 읽으므로 가까운 노드에 두는
+ * 편이 빠르다.
+ */
 static inline struct pt_table_p *_table_alloc(struct pt_common *common,
 					      size_t lg2sz, gfp_t gfp,
 					      enum alloc_mode mode)
 {
-	struct pt_iommu *iommu_table = iommu_from_common(common);
-	struct pt_table_p *table_mem;
+	struct pt_iommu *iommu_table = iommu_from_common(common);	/* [한국어] NUMA 노드와 장치를 얻기 위해 */
+	struct pt_table_p *table_mem;	/* [한국어] 잡을 표 */
 
-	table_mem = iommu_alloc_pages_node_sz(iommu_table->nid, gfp,
-					      log2_to_int(lg2sz));
-	if (!table_mem)
-		return ERR_PTR(-ENOMEM);
+	table_mem = iommu_alloc_pages_node_sz(iommu_table->nid, gfp,	/* [한국어] 하드웨어가 DMA 로 읽으므로 가까운 노드에 */
+					      log2_to_int(lg2sz));	/* [한국어] 지수를 실제 크기로 */
+	if (!table_mem)	/* [한국어] 메모리 부족 */
+		return ERR_PTR(-ENOMEM);	/* [한국어] 호출자에게 */
 
-	if (pt_feature(common, PT_FEAT_DMA_INCOHERENT) &&
-	    mode == ALLOC_NORMAL) {
-		int ret = iommu_pages_start_incoherent(
-			table_mem, iommu_table->iommu_device);
-		if (ret) {
-			iommu_free_pages(table_mem);
-			return ERR_PTR(ret);
+	if (pt_feature(common, PT_FEAT_DMA_INCOHERENT) &&	/* [한국어] 비일관 플랫폼이고 */
+	    mode == ALLOC_NORMAL) {	/* [한국어] 지금 매핑하라는 요청이면 */
+		int ret = iommu_pages_start_incoherent(	/* [한국어] 장치가 DMA 로 읽을 수 있게 매핑한다 */
+			table_mem, iommu_table->iommu_device);	/* [한국어] 그 매핑을 만들 장치 */
+		if (ret) {	/* [한국어] 매핑 실패면 */
+			iommu_free_pages(table_mem);	/* [한국어] 페이지도 돌려주고 */
+			return ERR_PTR(ret);	/* [한국어] 오류를 전한다 */
 		}
 	}
-	return table_mem;
+	return table_mem;	/* [한국어] 0 으로 채워져 곧바로 설치할 수 있다 */
 }
 
+/*
+ * [한국어]
+ * table_alloc_top - 최상위 표를 잡는다
+ *
+ * @common: 페이지 테이블 인스턴스.
+ * @top_of_table: 최상위 워드(단계 정보를 담고 있다).
+ * @gfp: 할당 플래그.
+ * @mode: 비일관 매핑을 지금 할 것인가.
+ * @return: 표 메모리, 실패하면 ERR_PTR.
+ *
+ * 최상위만 크기가 다르다. 주소 공간 폭이 좁으면 항목이 몇 개만 필요하므로
+ * pt_top_memsize_lg2 가 그 크기를 계산해 준다.
+ *
+ * 원 주석이 설계 선택을 밝힌다 — 최상위는 free_list 를 쓰지 않아 굳이
+ * iommu-pages API 를 쓸 이유가 없지만, 대개 페이지 크기 이상이라 코드를
+ * 단순하게 두려고 같은 API 를 쓴다.
+ */
 static inline struct pt_table_p *table_alloc_top(struct pt_common *common,
 						 uintptr_t top_of_table,
 						 gfp_t gfp,
@@ -676,219 +743,335 @@ static inline struct pt_table_p *table_alloc_top(struct pt_common *common,
 	 * doesn't need to use iommu pages. Use the API anyhow as the top is
 	 * usually not smaller than PAGE_SIZE to keep things simple.
 	 */
-	return _table_alloc(common, pt_top_memsize_lg2(common, top_of_table),
-			    gfp, mode);
+	return _table_alloc(common, pt_top_memsize_lg2(common, top_of_table),	/* [한국어] (원 주석: 최상위는 free_list 가 필요 없지만 대개 페이지 크기 이상이라 같은 API 를 쓴다) */
+			    gfp, mode);	/* [한국어] 주소 공간 폭이 좁으면 항목 몇 개면 족하다 */
 }
 
 /* Allocate an interior table */
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * table_alloc - 중간 단계 표를 잡는다
+ *
+ * @parent_pts: 이 표를 꽂을 상위 항목의 순회 상태.
+ * @gfp: 할당 플래그.
+ * @mode: 비일관 매핑을 지금 할 것인가.
+ * @return: 표 메모리, 실패하면 ERR_PTR.
+ *
+ * 크기를 아래 단계 기준으로 계산해야 하므로, 한 단계 낮춘 임시 상태를
+ * 만들어 항목 수를 묻는다.
+ */
 static inline struct pt_table_p *table_alloc(const struct pt_state *parent_pts,
 					     gfp_t gfp, enum alloc_mode mode)
 {
-	struct pt_state child_pts =
-		pt_init(parent_pts->range, parent_pts->level - 1, NULL);
+	struct pt_state child_pts =	/* [한국어] 크기는 아래 단계 기준이라 */
+		pt_init(parent_pts->range, parent_pts->level - 1, NULL);	/* [한국어] 한 단계 낮춘 임시 상태를 만든다 */
 
-	return _table_alloc(parent_pts->range->common,
-			    pt_num_items_lg2(&child_pts) +
-				    ilog2(PT_ITEM_WORD_SIZE),
-			    gfp, mode);
+	return _table_alloc(parent_pts->range->common,	/* [한국어] 그 단계의 */
+			    pt_num_items_lg2(&child_pts) +	/* [한국어] 항목 수에 */
+				    ilog2(PT_ITEM_WORD_SIZE),	/* [한국어] 항목 폭을 곱한 크기 */
+			    gfp, mode);	/* [한국어] 할당 방식은 호출자가 정한다 */
 }
 
+/*
+ * [한국어]
+ * pt_iommu_new_table - 새 표를 만들어 현재 항목에 꽂는다
+ *
+ * @pts: 꽂을 자리(현재 값이 담겨 있어야 한다).
+ * @attrs: 할당 플래그와 속성.
+ * @return: 0 성공, -EAGAIN 경합에서 짐, -ENOMEM, -ENXIO.
+ *
+ * 락 없는 표 만들기의 본체다. 표를 만들고 cmpxchg 로 꽂되, 다른 스레드가
+ * 먼저 꽂았으면 내 표를 버리고 -EAGAIN 을 돌려준다 — 호출자가 그 단계를
+ * 다시 읽고 이어 간다.
+ *
+ * 비일관 플랫폼의 순서가 중요하다. 표를 꽂은 뒤에 캐시를 밀어내고, 그
+ * 다음에 소프트웨어 비트를 해제 순서로 세운다. 그 비트를 본 다른 CPU 는
+ * 표 내용도 반드시 본다 — 즉 "이 표는 하드웨어가 읽어도 되는 상태"라는
+ * 깃발이다.
+ *
+ * 디버그 빌드의 되읽기 검사는 kunit 을 위한 것이다. 원 주석이 상황을
+ * 설명한다 — 시험 환경에서는 표 형식이 담을 수 있는 것보다 넓은 물리
+ * 주소가 나올 수 있고, 그러면 조용히 잘린 주소를 쓰게 된다.
+ */
 static inline int pt_iommu_new_table(struct pt_state *pts,
 				     struct pt_write_attrs *attrs)
 {
-	struct pt_table_p *table_mem;
-	phys_addr_t phys;
+	struct pt_table_p *table_mem;	/* [한국어] 만들 표 */
+	phys_addr_t phys;	/* [한국어] 그 표의 물리 주소 */
 
 	/* Given PA/VA/length can't be represented */
-	if (PT_WARN_ON(!pt_can_have_table(pts)))
-		return -ENXIO;
+	if (PT_WARN_ON(!pt_can_have_table(pts)))	/* [한국어] (원 주석: 주어진 PA/VA/길이를 표현할 수 없다) */
+		return -ENXIO;	/* [한국어] 0단계 아래로는 내려갈 수 없다 */
 
-	table_mem = table_alloc(pts, attrs->gfp, ALLOC_NORMAL);
-	if (IS_ERR(table_mem))
-		return PTR_ERR(table_mem);
+	table_mem = table_alloc(pts, attrs->gfp, ALLOC_NORMAL);	/* [한국어] 표를 잡고 */
+	if (IS_ERR(table_mem))	/* [한국어] 실패면 */
+		return PTR_ERR(table_mem);	/* [한국어] 오류를 전한다 */
 
-	phys = virt_to_phys(table_mem);
-	if (!pt_install_table(pts, phys, attrs)) {
-		iommu_pages_free_incoherent(
-			table_mem,
-			iommu_from_common(pts->range->common)->iommu_device);
-		return -EAGAIN;
+	phys = virt_to_phys(table_mem);	/* [한국어] 항목에 적을 물리 주소 */
+	if (!pt_install_table(pts, phys, attrs)) {	/* [한국어] cmpxchg 로 꽂는다 — 경합에서 지면 */
+		iommu_pages_free_incoherent(	/* [한국어] 내가 만든 표를 버리고 */
+			table_mem,	/* [한국어] 매핑까지 함께 푼다 */
+			iommu_from_common(pts->range->common)->iommu_device);	/* [한국어] 그 매핑을 만든 장치 */
+		return -EAGAIN;	/* [한국어] 호출자가 그 단계를 다시 읽는다 */
 	}
 
-	if (pts_feature(pts, PT_FEAT_DMA_INCOHERENT)) {
-		flush_writes_item(pts);
-		pt_set_sw_bit_release(pts, SW_BIT_CACHE_FLUSH_DONE);
+	if (pts_feature(pts, PT_FEAT_DMA_INCOHERENT)) {	/* [한국어] 비일관 플랫폼이면 */
+		flush_writes_item(pts);	/* [한국어] 꽂은 항목을 메모리로 밀어내고 */
+		pt_set_sw_bit_release(pts, SW_BIT_CACHE_FLUSH_DONE);	/* [한국어] 그 뒤에 깃발을 세운다 — 깃발을 본 CPU 는 표 내용도 본다 */
 	}
 
-	if (IS_ENABLED(CONFIG_DEBUG_GENERIC_PT)) {
+	if (IS_ENABLED(CONFIG_DEBUG_GENERIC_PT)) {	/* [한국어] 디버그 빌드에서만 */
 		/*
 		 * The underlying table can't store the physical table address.
 		 * This happens when kunit testing tables outside their normal
 		 * environment where a CPU might be limited.
 		 */
-		pt_load_single_entry(pts);
-		if (PT_WARN_ON(pt_table_pa(pts) != phys)) {
-			pt_clear_entries(pts, ilog2(1));
-			iommu_pages_free_incoherent(
-				table_mem, iommu_from_common(pts->range->common)
-						   ->iommu_device);
-			return -EINVAL;
+		pt_load_single_entry(pts);	/* [한국어] (원 주석: 시험 환경에서 표 형식이 담을 수 없는 물리 주소가 나올 수 있다) */
+		if (PT_WARN_ON(pt_table_pa(pts) != phys)) {	/* [한국어] 되읽은 주소가 다르면 조용히 잘린 것이다 */
+			pt_clear_entries(pts, ilog2(1));	/* [한국어] 꽂은 항목을 지우고 */
+			iommu_pages_free_incoherent(	/* [한국어] 표도 버린다 */
+				table_mem, iommu_from_common(pts->range->common)	/* [한국어] 그 매핑을 만든 */
+						   ->iommu_device);	/* [한국어] 장치 */
+			return -EINVAL;	/* [한국어] 이 환경에서는 쓸 수 없다 */
 		}
 	}
 
-	pts->table_lower = table_mem;
-	return 0;
+	pts->table_lower = table_mem;	/* [한국어] 호출자가 곧바로 내려갈 수 있게 */
+	return 0;	/* [한국어] 성공 */
 }
 
 struct pt_iommu_map_args {
 	struct iommu_iotlb_gather *iotlb_gather;
+	/* [한국어] 무효화 범위와 해제 목록을 모으는 자리.
+	 * 설정자: map 진입점이 코어에서 받은 것을 그대로 넣는다.
+	 * 읽는 자: clear_contig 가 걷어낸 표를 여기 얹는다.
+	 * 값 범위: 유효한 포인터.
+	 * 동기화: 드라이버가 잡은 범위 락이 지킨다. */
 	struct pt_write_attrs attrs;
+	/* [한국어] 잎에 얹을 권한 비트와 할당 플래그.
+	 * 설정자: map 진입점이 pt_iommu_set_prot 으로 채운다.
+	 * 읽는 자: pt_install_leaf_entry 와 표 할당.
+	 * 값 범위: 형식이 정하는 비트 조합.
+	 * 동기화: 호출 스택 값. */
 	pt_oaddr_t oa;
+	/* [한국어] 다음에 놓을 출력 주소.
+	 * 설정자: 잎을 하나 놓을 때마다 그 크기만큼 앞으로 간다.
+	 * 읽는 자: 다음 잎의 설치와 페이지 크기 계산.
+	 * 값 범위: 형식의 출력 주소 범위 안.
+	 * 동기화: 호출 스택 값. */
 	unsigned int leaf_pgsize_lg2;
+	/* [한국어] 지금 놓고 있는 페이지 크기의 지수.
+	 * 설정자: 진입점이 처음 계산하고, 크기가 바뀌는 지점에서 다시 정해진다.
+	 * 읽는 자: __map_range 가 어느 단계까지 내려갈지 정할 때.
+	 * 값 범위: 도메인 비트맵에 있는 크기 중 하나.
+	 * 동기화: 호출 스택 값. */
 	unsigned int leaf_level;
+	/* [한국어] 그 크기를 담당하는 단계.
+	 * 설정자: leaf_pgsize_lg2 와 함께 정해진다.
+	 * 읽는 자: __map_range 의 재귀 종료 조건.
+	 * 값 범위: 0 부터 최상위까지.
+	 * 동기화: 호출 스택 값. */
 	pt_vaddr_t num_leaves;
+	/* [한국어] 이 크기로 연달아 놓을 잎의 남은 개수.
+	 * 설정자: pt_pgsz_count 가 계산하고, 놓을 때마다 줄어든다.
+	 * 읽는 자: __map_range_leaf 가 표 중간에서 멈출지 정할 때.
+	 * 값 범위: 0 이면 이 크기로는 더 놓을 것이 없다.
+	 * 동기화: 호출 스택 값. */
 };
 
 /*
  * This will recursively check any tables in the block to validate they are
  * empty and then free them through the gather.
  */
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * clear_contig - 큰 페이지를 놓을 자리를 비운다
+ *
+ * @start_pts: 비울 구간의 첫 항목.
+ * @iotlb_gather: 무효화와 해제를 모으는 자리.
+ * @step: 비울 항목 수.
+ * @pgsize_lg2: 놓으려는 페이지 크기(쓰지 않는다).
+ * @return: 0 성공, -EADDRINUSE 면 그 자리에 매핑이 남아 있다.
+ *
+ * 이미 표가 꽂혀 있는 자리에 큰 페이지를 놓으려면 그 표를 걷어내야 한다.
+ * 다만 그 아래에 실제 매핑이 있으면 안 되므로, 내려가며 확인한 뒤에야
+ * 지운다.
+ *
+ * 원 주석이 순서를 못박는다 — 표 항목을 먼저 지우고 나서야 gather 에
+ * 넣을 수 있다. 그러지 않으면 아직 하드웨어가 참조하는 표를 해제 목록에
+ * 올리게 된다.
+ *
+ * 반복문이 for_each_pt_level_entry 대신 손으로 쓰여 있는 이유: 색인 구간을
+ * 호출자가 정한 step 으로 좁혀야 하기 때문이다.
+ */
 static int clear_contig(const struct pt_state *start_pts,
 			struct iommu_iotlb_gather *iotlb_gather,
 			unsigned int step, unsigned int pgsize_lg2)
 {
-	struct pt_iommu *iommu_table =
-		iommu_from_common(start_pts->range->common);
-	struct pt_range range = *start_pts->range;
-	struct pt_state pts =
-		pt_init(&range, start_pts->level, start_pts->table);
-	struct pt_iommu_collect_args collect = { .check_mapped = true };
-	int ret;
+	struct pt_iommu *iommu_table =	/* [한국어] gather 에 넘길 때 필요하다 */
+		iommu_from_common(start_pts->range->common);	/* [한국어] 공통 상태에서 되짚는다 */
+	struct pt_range range = *start_pts->range;	/* [한국어] 원본 순회를 건드리지 않으려고 복사한다 */
+	struct pt_state pts =	/* [한국어] 같은 표를 가리키되 */
+		pt_init(&range, start_pts->level, start_pts->table);	/* [한국어] 색인 구간만 따로 정할 상태 */
+	struct pt_iommu_collect_args collect = { .check_mapped = true };	/* [한국어] 아래에 매핑이 있으면 실패시킨다 */
+	int ret;	/* [한국어] 결과 */
 
-	pts.index = start_pts->index;
-	pts.end_index = start_pts->index + step;
-	for (; _pt_iter_load(&pts); pt_next_entry(&pts)) {
-		if (pts.type == PT_ENTRY_TABLE) {
-			collect.free_list =
-				IOMMU_PAGES_LIST_INIT(collect.free_list);
-			ret = pt_walk_descend_all(&pts, __collect_tables,
-						  &collect);
-			if (ret)
-				return ret;
+	pts.index = start_pts->index;	/* [한국어] 비울 구간의 시작 */
+	pts.end_index = start_pts->index + step;	/* [한국어] 그 끝 — 호출자가 정한 만큼만 */
+	for (; _pt_iter_load(&pts); pt_next_entry(&pts)) {	/* [한국어] 구간의 항목들을 훑는다 */
+		if (pts.type == PT_ENTRY_TABLE) {	/* [한국어] 표가 꽂혀 있으면 */
+			collect.free_list =	/* [한국어] 모을 목록을 */
+				IOMMU_PAGES_LIST_INIT(collect.free_list);	/* [한국어] 항목마다 새로 시작한다 */
+			ret = pt_walk_descend_all(&pts, __collect_tables,	/* [한국어] 아래에 매핑이 없는지 확인하며 */
+						  &collect);	/* [한국어] 하위 표를 모은다 */
+			if (ret)	/* [한국어] 매핑이 남아 있으면 */
+				return ret;	/* [한국어] 큰 페이지를 놓을 수 없다 */
 
 			/*
 			 * The table item must be cleared before we can update
 			 * the gather
 			 */
-			pt_clear_entries(&pts, ilog2(1));
-			flush_writes_item(&pts);
+			pt_clear_entries(&pts, ilog2(1));	/* [한국어] (원 주석: gather 를 갱신하기 전에 표 항목을 먼저 지워야 한다) */
+			flush_writes_item(&pts);	/* [한국어] 비일관 플랫폼이면 그 지움을 메모리로 */
 
-			iommu_pages_list_add(&collect.free_list,
-					     pt_table_ptr(&pts));
-			gather_range_pages(
-				iotlb_gather, iommu_table, range.va,
-				log2_to_int(pt_table_item_lg2sz(&pts)),
-				&collect.free_list);
-		} else if (pts.type != PT_ENTRY_EMPTY) {
-			return -EADDRINUSE;
+			iommu_pages_list_add(&collect.free_list,	/* [한국어] 이 표 자신도 */
+					     pt_table_ptr(&pts));	/* [한국어] 해제 목록에 */
+			gather_range_pages(	/* [한국어] 무효화 범위와 해제 목록을 */
+				iotlb_gather, iommu_table, range.va,	/* [한국어] 코어에 넘긴다 */
+				log2_to_int(pt_table_item_lg2sz(&pts)),	/* [한국어] 이 항목이 덮던 크기 */
+				&collect.free_list);	/* [한국어] 무효화가 끝난 뒤 해제된다 */
+		} else if (pts.type != PT_ENTRY_EMPTY) {	/* [한국어] 표도 빈자리도 아니면 잎이 있다 */
+			return -EADDRINUSE;	/* [한국어] 그 자리를 덮어쓸 수 없다 */
 		}
 	}
-	return 0;
+	return 0;	/* [한국어] 구간이 비었다 */
 }
 
+/*
+ * [한국어]
+ * __map_range_leaf - 잎을 놓을 단계에 닿았을 때 실제로 채우는 워커
+ *
+ * @range: 걷는 범위.
+ * @arg: 매핑 인자(출력 주소, 페이지 크기, 남은 개수 등).
+ * @level: 현재 단계(반드시 map->leaf_level).
+ * @table: 그 단계의 표.
+ * @return: 0 이 표를 다 채웠다, -EAGAIN 페이지 크기가 바뀌어 다시 와야 한다,
+ *          음수는 실패.
+ *
+ * 매핑의 가장 안쪽 반복문이다. 같은 크기의 잎을 연달아 놓으며 출력 주소를
+ * 그만큼씩 밀어 간다.
+ *
+ * 세 가지가 이 함수를 복잡하게 만든다.
+ *
+ * 1) 자리가 비어 있지 않을 수 있다. 연속 항목을 놓으려면 그 구간을 통째로
+ *    확인하고 비워야 하므로, 비어 있지 않거나 연속을 놓는 경우에는
+ *    clear_contig 를 먼저 부른다.
+ *
+ * 2) 표 중간에서 페이지 크기가 바뀔 수 있다. 남은 길이나 정렬이 달라지는
+ *    지점이 있고, 거기서 멈춰 새 크기·새 단계를 계산해 map 에 적어 둔다.
+ *    표를 다 채우지 못했으면 -EAGAIN 으로 호출자가 이 단계를 다시 돌게 한다.
+ *
+ * 3) VA 를 게으르게 유지한다. 반복문은 색인으로만 진행하고, VA 가 실제로
+ *    필요한 지점에서만 pt_index_to_va 로 되짚는다.
+ *
+ * 캐시 플러시를 반복문 밖에서 한 번에 하는 것도 의도적이다 — 항목마다
+ * 밀어내면 비일관 플랫폼에서 비용이 크게 는다.
+ */
 static int __map_range_leaf(struct pt_range *range, void *arg,
 			    unsigned int level, struct pt_table_p *table)
 {
-	struct pt_iommu *iommu_table = iommu_from_common(range->common);
-	struct pt_state pts = pt_init(range, level, table);
-	struct pt_iommu_map_args *map = arg;
-	unsigned int leaf_pgsize_lg2 = map->leaf_pgsize_lg2;
-	unsigned int start_index;
-	pt_oaddr_t oa = map->oa;
-	unsigned int num_leaves;
-	unsigned int orig_end;
-	pt_vaddr_t last_va;
-	unsigned int step;
-	bool need_contig;
-	int ret = 0;
+	struct pt_iommu *iommu_table = iommu_from_common(range->common);	/* [한국어] 도메인의 크기 비트맵을 얻기 위해 */
+	struct pt_state pts = pt_init(range, level, table);	/* [한국어] 이 단계의 순회 상태 */
+	struct pt_iommu_map_args *map = arg;	/* [한국어] 매핑 인자 */
+	unsigned int leaf_pgsize_lg2 = map->leaf_pgsize_lg2;	/* [한국어] 이번에 놓을 페이지 크기 */
+	unsigned int start_index;	/* [한국어] 캐시 플러시 범위의 시작 */
+	pt_oaddr_t oa = map->oa;	/* [한국어] 다음에 놓을 출력 주소 */
+	unsigned int num_leaves;	/* [한국어] 이 표를 마친 뒤 남을 개수 */
+	unsigned int orig_end;	/* [한국어] 원래의 끝 색인 — 표를 다 채웠는지 판정한다 */
+	pt_vaddr_t last_va;	/* [한국어] 마지막으로 놓은 잎의 다음 주소 */
+	unsigned int step;	/* [한국어] 잎 하나가 차지하는 항목 수 */
+	bool need_contig;	/* [한국어] 연속 항목을 놓는가 */
+	int ret = 0;	/* [한국어] 결과 */
 
-	PT_WARN_ON(map->leaf_level != level);
-	PT_WARN_ON(!pt_can_have_leaf(&pts));
+	PT_WARN_ON(map->leaf_level != level);	/* [한국어] 잎을 놓을 단계에서만 불려야 한다 */
+	PT_WARN_ON(!pt_can_have_leaf(&pts));	/* [한국어] 그 단계가 잎을 허용해야 한다 */
 
-	step = log2_to_int_t(unsigned int,
-			     leaf_pgsize_lg2 - pt_table_item_lg2sz(&pts));
-	need_contig = leaf_pgsize_lg2 != pt_table_item_lg2sz(&pts);
+	step = log2_to_int_t(unsigned int,	/* [한국어] 잎 하나가 */
+			     leaf_pgsize_lg2 - pt_table_item_lg2sz(&pts));	/* [한국어] 몇 개의 항목을 차지하는가 */
+	need_contig = leaf_pgsize_lg2 != pt_table_item_lg2sz(&pts);	/* [한국어] 항목 크기보다 크면 연속 묶음이다 */
 
-	_pt_iter_first(&pts);
-	start_index = pts.index;
-	orig_end = pts.end_index;
-	if (pts.index + map->num_leaves < pts.end_index) {
+	_pt_iter_first(&pts);	/* [한국어] 색인 구간을 잡고 */
+	start_index = pts.index;	/* [한국어] 플러시 범위의 시작을 기억한다 */
+	orig_end = pts.end_index;	/* [한국어] 표를 다 채웠는지 나중에 비교한다 */
+	if (pts.index + map->num_leaves < pts.end_index) {	/* [한국어] 남은 개수가 이 표를 다 채우지 못하면 */
 		/* Need to stop in the middle of the table to change sizes */
-		pts.end_index = pts.index + map->num_leaves;
-		num_leaves = 0;
+		pts.end_index = pts.index + map->num_leaves;	/* [한국어] (원 주석: 크기를 바꾸려면 표 중간에서 멈춰야 한다) */
+		num_leaves = 0;	/* [한국어] 이 크기로는 더 놓을 것이 없다 */
 	} else {
-		num_leaves = map->num_leaves - (pts.end_index - pts.index);
+		num_leaves = map->num_leaves - (pts.end_index - pts.index);	/* [한국어] 표를 다 채우고도 남는 개수 */
 	}
 
 	do {
-		pts.type = pt_load_entry_raw(&pts);
-		if (pts.type != PT_ENTRY_EMPTY || need_contig) {
-			if (pts.index != start_index)
-				pt_index_to_va(&pts);
-			ret = clear_contig(&pts, map->iotlb_gather, step,
-					   leaf_pgsize_lg2);
-			if (ret)
-				break;
+		pts.type = pt_load_entry_raw(&pts);	/* [한국어] 이 자리가 비어 있는지 본다 */
+		if (pts.type != PT_ENTRY_EMPTY || need_contig) {	/* [한국어] 차 있거나 연속 묶음을 놓으려면 */
+			if (pts.index != start_index)	/* [한국어] VA 를 게으르게 유지하므로 */
+				pt_index_to_va(&pts);	/* [한국어] 필요한 지점에서만 되짚는다 */
+			ret = clear_contig(&pts, map->iotlb_gather, step,	/* [한국어] 그 구간을 확인하고 비운다 */
+					   leaf_pgsize_lg2);	/* [한국어] 놓으려는 크기만큼 */
+			if (ret)	/* [한국어] 매핑이 남아 있으면 */
+				break;	/* [한국어] 여기서 멈춘다 */
 		}
 
-		if (IS_ENABLED(CONFIG_DEBUG_GENERIC_PT)) {
-			pt_index_to_va(&pts);
-			PT_WARN_ON(compute_best_pgsize(&pts, oa) !=
-				   leaf_pgsize_lg2);
+		if (IS_ENABLED(CONFIG_DEBUG_GENERIC_PT)) {	/* [한국어] 디버그 빌드에서만 */
+			pt_index_to_va(&pts);	/* [한국어] VA 를 맞추고 */
+			PT_WARN_ON(compute_best_pgsize(&pts, oa) !=	/* [한국어] 호출자가 고른 크기가 */
+				   leaf_pgsize_lg2);	/* [한국어] 여기서도 최선인지 확인한다 */
 		}
-		pt_install_leaf_entry(&pts, oa, leaf_pgsize_lg2, &map->attrs);
+		pt_install_leaf_entry(&pts, oa, leaf_pgsize_lg2, &map->attrs);	/* [한국어] 실제로 매핑이 생기는 지점 */
 
-		oa += log2_to_int(leaf_pgsize_lg2);
-		pts.index += step;
-	} while (pts.index < pts.end_index);
+		oa += log2_to_int(leaf_pgsize_lg2);	/* [한국어] 다음 출력 주소 */
+		pts.index += step;	/* [한국어] 다음 자리 */
+	} while (pts.index < pts.end_index);	/* [한국어] 구간을 다 채울 때까지 */
 
-	flush_writes_range(&pts, start_index, pts.index);
+	flush_writes_range(&pts, start_index, pts.index);	/* [한국어] 항목마다가 아니라 한 번에 — 비일관 플랫폼의 비용을 줄인다 */
 
-	map->oa = oa;
-	map->num_leaves = num_leaves;
-	if (ret || num_leaves)
-		return ret;
+	map->oa = oa;	/* [한국어] 호출자가 이어 갈 수 있게 */
+	map->num_leaves = num_leaves;	/* [한국어] 남은 개수 */
+	if (ret || num_leaves)	/* [한국어] 실패했거나 이 크기로 더 놓을 것이 남았으면 */
+		return ret;	/* [한국어] 호출자가 판단한다 */
 
 	/* range->va is not valid if we reached the end of the table */
-	pts.index -= step;
-	pt_index_to_va(&pts);
-	pts.index += step;
-	last_va = range->va + log2_to_int(leaf_pgsize_lg2);
+	pts.index -= step;	/* [한국어] (원 주석: 표 끝에 닿았으면 range->va 가 유효하지 않다) */
+	pt_index_to_va(&pts);	/* [한국어] 마지막으로 놓은 잎의 VA 를 되짚고 */
+	pts.index += step;	/* [한국어] 색인은 원래대로 */
+	last_va = range->va + log2_to_int(leaf_pgsize_lg2);	/* [한국어] 그 잎의 다음 주소 */
 
-	if (last_va - 1 == range->last_va) {
-		PT_WARN_ON(pts.index != orig_end);
-		return 0;
+	if (last_va - 1 == range->last_va) {	/* [한국어] 요청 범위를 다 덮었으면 */
+		PT_WARN_ON(pts.index != orig_end);	/* [한국어] 표도 끝까지 왔어야 한다 */
+		return 0;	/* [한국어] 매핑 완료 */
 	}
 
 	/*
 	 * Reached a point where the page size changed, compute the new
 	 * parameters.
 	 */
-	map->leaf_pgsize_lg2 = pt_compute_best_pgsize(
-		iommu_table->domain.pgsize_bitmap, last_va, range->last_va, oa);
-	map->leaf_level =
-		pt_pgsz_lg2_to_level(range->common, map->leaf_pgsize_lg2);
-	map->num_leaves = pt_pgsz_count(iommu_table->domain.pgsize_bitmap,
-					last_va, range->last_va, oa,
-					map->leaf_pgsize_lg2);
+	map->leaf_pgsize_lg2 = pt_compute_best_pgsize(	/* [한국어] (원 주석: 페이지 크기가 바뀌는 지점에 닿았으니 새 값을 계산한다) */
+		iommu_table->domain.pgsize_bitmap, last_va, range->last_va, oa);	/* [한국어] 남은 범위와 새 정렬로 */
+	map->leaf_level =	/* [한국어] 그 크기를 담당하는 */
+		pt_pgsz_lg2_to_level(range->common, map->leaf_pgsize_lg2);	/* [한국어] 단계를 구하고 */
+	map->num_leaves = pt_pgsz_count(iommu_table->domain.pgsize_bitmap,	/* [한국어] 그 크기로 몇 개를 */
+					last_va, range->last_va, oa,	/* [한국어] 연달아 놓을 수 있는지 */
+					map->leaf_pgsize_lg2);	/* [한국어] 미리 센다 */
 
 	/* Didn't finish this table level, caller will repeat it */
-	if (pts.index != orig_end) {
-		if (pts.index != start_index)
-			pt_index_to_va(&pts);
-		return -EAGAIN;
+	if (pts.index != orig_end) {	/* [한국어] (원 주석: 이 단계를 다 돌지 못했으니 호출자가 다시 부른다) */
+		if (pts.index != start_index)	/* [한국어] VA 를 맞춰 두어야 */
+			pt_index_to_va(&pts);	/* [한국어] 호출자가 이어 갈 수 있다 */
+		return -EAGAIN;	/* [한국어] 같은 표를 새 크기로 다시 돈다 */
 	}
-	return 0;
+	return 0;	/* [한국어] 표를 다 채웠다 — 나머지는 상위가 다음 표로 넘긴다 */
 }
 
 static int __map_range(struct pt_range *range, void *arg, unsigned int level,
