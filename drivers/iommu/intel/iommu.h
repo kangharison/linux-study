@@ -1531,28 +1531,168 @@ struct intel_iommu {
 };
 
 /* PCI domain-device relationship */
+/*
+ * [한국어] struct device_domain_info — VT-d 가 보는 "장치 하나"
+ *
+ * IOMMU 코어의 struct device 에 매달리는(dev_iommu_priv_set) 이 드라이버의
+ * 장치 표현이다. 코어는 장치를 이름과 그룹으로 알지만, VT-d 는 소스 id 와
+ * 능력 비트로 안다 — 그 번역을 이 구조체가 담당한다.
+ *
+ * 세 가지를 동시에 기억한다.
+ *   [정체]  segment/bus/devfn — 하드웨어가 이 장치를 부르는 이름. 별칭 때문에
+ *           장치 자신의 PCI 위치와 다를 수 있다.
+ *   [능력]  ats/pasid/pri 의 supported 와 enabled 가 쌍으로 있다. supported 는
+ *           프로브 때 조사한 "쓸 수 있는가"이고, enabled 는 finalize 때 실제로
+ *           켰는가다. 둘을 나누는 이유는 켜는 순서에 스펙 요구가 있어서
+ *           (PASID 를 ATS 보다 먼저) 조사와 활성화를 분리해야 하기 때문이다.
+ *   [소속]  iommu(담당 유닛)와 domain(현재 붙은 도메인), 그리고 두 자료구조에
+ *           동시에 매달리기 위한 고리 두 개 — link(도메인의 devices 목록)와
+ *           node(유닛의 device_rbtree).
+ *
+ * 왜 목록과 트리에 동시에 매다는가: 도메인은 "이 주소 공간을 쓰는 장치들"을
+ * 순회해야 하고(설정 전파, 무효화 대상 수집), 유닛은 "이 소스 id 가 누구인가"를
+ * 빠르게 답해야 한다(폴트 처리). 두 질문의 접근 방향이 정반대라 자료구조도
+ * 두 개다.
+ *
+ * 수명: intel_iommu_probe_device() 가 만들고 intel_iommu_release_device() 가
+ * kfree 한다. 그 사이 이 포인터는 dev_iommu_priv_get(dev) 으로 언제든 얻을 수
+ * 있으며, 해제 순서를 어기면 폴트 처리기가 사라진 구조체를 읽게 된다 —
+ * release 경로가 iopf_lock 아래에서 트리 제거를 하는 이유다.
+ */
 struct device_domain_info {
 	struct list_head link;	/* link to domain siblings */
+	/* [한국어] 도메인의 devices 목록에 매달리는 고리 (원 주석: link to domain siblings).
+	 * 설정자: dmar_domain_attach_device() 가 넣고 device_block_translation() 이 뺀다.
+	 * 읽는 자: 도메인이 자기 장치들을 훑는 모든 경로.
+	 * 동기화: 도메인의 lock(irqsave). 이 구조체의 것이 아니라 도메인의 락이라는
+	 *   점이 중요하다 — 목록의 주인이 도메인이기 때문이다. */
 	u32 segment;		/* PCI segment number */
+	/* [한국어] PCI 세그먼트(도메인) 번호 (원 주석: PCI segment number).
+	 * 대형 시스템은 버스 번호 공간이 여럿이라 세그먼트까지 맞아야 장치가 특정된다.
+	 * 설정자: intel_iommu_probe_device(). 보통 유닛의 segment 를 쓰지만,
+	 *   실제 DMA 서브디바이스는 자기 PCI 세그먼트를 쓴다.
+	 * 읽는 자: 진단 출력과 장치 조회. */
 	u8 bus;			/* PCI bus number */
+	/* [한국어] 이 장치의 DMA 가 하드웨어에 보일 때의 버스 번호 (원 주석: PCI bus number).
+	 * 설정자: device_lookup_iommu() 가 별칭까지 따져 정한 값을 프로브가 저장한다.
+	 * 읽는 자: 컨텍스트 항목을 찾는 iommu_context_addr(), 소스 id 조립
+	 *   (PCI_DEVID(bus, devfn)), 물려받은 컨텍스트인지 확인하는 context_copied().
+	 * 값 범위: 장치 자신의 pdev->bus->number 와 다를 수 있다 — 브리지 뒤의 장치는
+	 *   브리지의 소스 id 로 DMA 를 내기 때문이다. */
 	u8 devfn;		/* PCI devfn number */
+	/* [한국어] 같은 이유로 정해진 devfn (원 주석: PCI devfn number).
+	 * 설정자/읽는 자/값 범위: bus 와 같다. 비트 7 이 컨텍스트 테이블의 하위/상위
+	 *   중 어느 쪽을 쓸지도 정한다. */
 	u16 pfsid;		/* SRIOV physical function source ID */
+	/* [한국어] SR-IOV 가상 함수의 경우, 그 물리 함수(PF)의 소스 id
+	 * (원 주석: SRIOV physical function source ID).
+	 * 왜 필요한가: 유닛이 DIT(Device-TLB Invalidation Throttling)를 지원하면,
+	 *   VF 로 보내는 무효화 서술자에 PF 의 소스 id 를 실어 준다. 그래야 하드웨어가
+	 *   PF 단위로 큐 깊이를 가늠해 무효화를 조절할 수 있다.
+	 * 설정자: intel_iommu_probe_device() 가 ecap_dit 인 경우에만 채운다.
+	 * 읽는 자: qi_flush_dev_iotlb() 계열.
+	 * 값 범위: DIT 를 지원하지 않으면 예약 필드라 0 이어야 한다. */
 	u8 pasid_supported:3;
+	/* [한국어] 이 장치의 PASID 능력. 비트 0 은 "능력이 있다"는 우리 표시이고, 상위 비트는
+	 * PCIe 가 알려 준 features(실행 권한, 특권 모드 지원)다.
+	 * 왜 비트 0 을 겸용하는가: pci_pasid_features() 가 0 을 돌려줄 수 있어서,
+	 *   그 값만으로는 "능력 없음"과 구분되지 않는다. 그래서 |1 로 존재를 표시한다.
+	 * 설정자: intel_iommu_probe_device(). 읽는 자: probe_finalize 가
+	 *   pci_enable_pasid() 에 넘길 때 이 비트를 다시 뺀다(& ~1).
+	 * 값 범위: 0 이면 PASID 를 쓸 수 없는 장치다. */
 	u8 pasid_enabled:1;
+	/* [한국어] 실제로 PASID 를 켰는가.
+	 * 설정자: intel_iommu_probe_finalize() 가 켜는 데 성공하면 1.
+	 * 읽는 자: release 경로가 끌지 말지 판단할 때.
+	 * supported 와 나뉘는 이유: PCIe 스펙이 "ATS 를 켠 뒤 PASID 를 켜면 동작이
+	 *   정의되지 않는다"고 못 박아, 쓸지 모르더라도 능력이 있으면 먼저 켜 둔다.
+	 *   즉 조사와 활성화가 다른 시점에 일어난다. */
 	u8 pri_supported:1;
+	/* [한국어] 페이지 요청 인터페이스를 쓸 수 있는가.
+	 * 설정자: 프로브 때 유닛(ecap_prs/ecap_pds)과 장치(pci_pri_supported) 양쪽,
+	 *   그리고 ATS 가 가능한지까지 확인해 정한다. ATS 가 전제인 이유는 PRI 응답이
+	 *   ATS 번역 경로로 돌아오기 때문이다.
+	 * 읽는 자: intel_iommu_enable_iopf() 가 이 값이 아니라 pri_enabled 를 본다. */
 	u8 pri_enabled:1;
+	/* [한국어] 실제로 PRI 를 켰는가.
+	 * 설정자: probe_finalize 의 iommu_enable_pci_pri(). 켜는 순서상 마지막이다.
+	 * 읽는 자: intel_iommu_enable_iopf()/disable_iopf(). 이것이 0 이면 폴트를
+	 *   받을 통로가 없으므로 -ENODEV 다.
+	 * 동기화: 그룹 뮤텍스가 이 값과 iopf_refcount 를 함께 지킨다. */
 	u8 ats_supported:1;
+	/* [한국어] ATS(장치 내부 번역 캐시)를 쓸 수 있는가.
+	 * 설정자: 프로브 때 유닛의 ecap_dev_iotlb_support, 장치의 ATS 능력 구조,
+	 *   그리고 dmar_ats_supported()(경로와 펌웨어 신고) 셋을 모두 확인한다.
+	 * 읽는 자: intel_iommu_capable(IOMMU_CAP_PCI_ATS_SUPPORTED), probe_finalize. */
 	u8 ats_enabled:1;
+	/* [한국어] 실제로 ATS 를 켰는가.
+	 * 설정자: iommu_enable_pci_ats()/disable_pci_ats().
+	 * 읽는 자: 무효화 경로 — 켜져 있으면 IOTLB 뿐 아니라 이 장치의 디바이스 TLB 도
+	 *   비워야 한다. probe_finalize 는 이 값이 1 일 때만 DEVTLB 캐시 태그를 단다.
+	 * 주의: 태그 등록에 실패하면 ATS 를 도로 끈다 — 무효화할 수 없는 캐시를
+	 *   켜 두는 것이 훨씬 위험하기 때문이다. */
 	u8 dtlb_extra_inval:1;	/* Quirk for devices need extra flush */
+	/* [한국어] 디바이스 TLB 무효화를 한 번 더 보내야 하는 결함 장치인가
+	 * (원 주석: Quirk for devices need extra flush).
+	 * 어떤 결함인가: ATS 무효화 완료 응답을, 그 범위의 번역을 이미 써서 발행한
+	 *   posted write 보다 먼저 보내는 장치가 있다. 완료를 믿고 페이지를 해제하면
+	 *   뒤늦게 도착한 쓰기가 남의 메모리를 덮어쓴다.
+	 * 설정자: 프로브 때 dev_needs_extra_dtlb_flush() 가 판단한다.
+	 * 읽는 자: quirk_extra_dev_tlb_flush() — 이 값이 0 이면 곧바로 돌아간다. */
 	u8 domain_attached:1;	/* Device has domain attached */
+	/* [한국어] 이 장치에 도메인이 붙어 하드웨어 번역이 세워져 있는가
+	 * (원 주석: Device has domain attached).
+	 * 설정자: 부착 성공 시 1, device_block_translation() 이 0.
+	 * 읽는 자: device_block_translation() 자신 — 이 값이 0 이면 이미 차단
+	 *   상태이므로 아무것도 하지 않는다. 그래서 두 번 불려도 안전하다.
+	 * 왜 domain 포인터로 대신할 수 없는가: 항등 도메인처럼 domain 이 NULL 이면서도
+	 *   하드웨어 설정은 세워져 있는 경우가 있다. */
 	u8 ats_qdep;
+	/* [한국어] 이 장치의 ATS 큐 깊이 — 한 번에 받아 처리할 수 있는 무효화 요청 수.
+	 * 설정자: 프로브 때 pci_ats_queue_depth() 로 읽는다.
+	 * 읽는 자: 디바이스 TLB 무효화 서술자에 실린다.
+	 * 값 범위: 이보다 많이 보내면 장치가 요청을 흘려버려 무효화가 유실된다.
+	 *   그래서 이 값이 서술자마다 함께 전달된다. */
 	unsigned int iopf_refcount;
+	/* [한국어] I/O 페이지 폴트 처리를 요구하는 사용자 수.
+	 * 왜 참조 계수인가: 한 장치를 SVA 와 iommufd 가 동시에 쓸 수 있고 둘 다 폴트
+	 *   처리를 요구한다. 먼저 끝난 쪽이 큐에서 장치를 빼면 남은 쪽의 페이지 요청이
+	 *   응답을 받지 못하고, 응답 없는 PRI 요청은 장치를 영원히 멈춰 세운다.
+	 * 설정자/읽는 자: intel_iommu_enable_iopf()/disable_iopf().
+	 * 동기화: 그룹 뮤텍스(iommu_group_mutex_assert 로 확인만 한다). */
 	struct device *dev; /* it's NULL for PCIe-to-PCI bridge */
+	/* [한국어] 원본 struct device. 코어와 이 드라이버를 잇는 반대 방향의 포인터다
+	 * (원 주석: it's NULL for PCIe-to-PCI bridge).
+	 * 설정자: 프로브. 읽는 자: 로그, 폴트 보고, PCI 조회.
+	 * 값 범위: 브리지처럼 실체 없는 항목에서는 NULL 일 수 있으므로, 이 포인터를
+	 *   쓰기 전에 확인하는 코드가 곳곳에 있다. */
 	struct intel_iommu *iommu; /* IOMMU used by this device */
+	/* [한국어] 이 장치를 담당하는 유닛 (원 주석: IOMMU used by this device).
+	 * 설정자: 프로브 때 device_lookup_iommu() 의 결과.
+	 * 읽는 자: 이 장치에 대한 모든 하드웨어 조작 — 컨텍스트/PASID 항목 설정,
+	 *   무효화, 능력 판정.
+	 * 값 범위: 장치의 수명 동안 바뀌지 않는다. 유닛이 핫플러그로 사라지면
+	 *   장치도 함께 해제된다. */
 	struct dmar_domain *domain; /* pointer to domain */
+	/* [한국어] 현재 붙어 있는 도메인 (원 주석: pointer to domain).
+	 * 설정자: 부착 시 채우고 device_block_translation() 이 NULL 로 되돌린다.
+	 * 읽는 자: 무효화 대상 결정, 도메인 전환, 폴트 처리.
+	 * 값 범위: NULL 이면 어느 도메인에도 속하지 않는다 — 차단 상태이거나,
+	 *   항등 도메인처럼 도메인 자료구조를 쓰지 않는 경우다. */
 	struct pasid_table *pasid_table; /* pasid table */
+	/* [한국어] 이 장치 전용 PASID 테이블 (원 주석: pasid table).
+	 * scalable 모드에서 컨텍스트 항목은 페이지 테이블이 아니라 이 테이블(정확히는
+	 * PASID 디렉터리)을 가리킨다. 즉 번역이 실제로 시작되는 곳이다.
+	 * 설정자: intel_pasid_alloc_table() 이 프로브 때 만든다.
+	 * 읽는 자: PASID 항목을 세우고 내리는 pasid.c 의 모든 경로.
+	 * 값 범위: 레거시 모드이거나 부모의 항목을 공유하는 서브디바이스면 NULL. */
 	/* device tracking node(lookup by PCI RID) */
 	struct rb_node node;
+	/* [한국어] 유닛의 device_rbtree 에 매달리는 노드. 키는 PCI_DEVID(bus, devfn) 이다.
+	 * 설정자: device_rbtree_insert()/remove().
+	 * 읽는 자: device_rbtree_find() — 폴트 인터럽트가 소스 id 로 장치를 되찾는다.
+	 * 동기화: 유닛의 device_rbtree_lock(irqsave). link 와 마찬가지로 목록의
+	 *   주인(여기서는 유닛)의 락이 지킨다. */
 #ifdef CONFIG_INTEL_IOMMU_DEBUGFS
 	struct dentry *debugfs_dentry; /* pointer to device directory dentry */
 #endif
@@ -1560,24 +1700,82 @@ struct device_domain_info {
 
 struct dev_pasid_info {
 	struct list_head link_domain;	/* link to domain siblings */
+	/* [한국어] 도메인의 dev_pasids 목록에 매달리는 고리 (원 주석: link to domain siblings).
+	 * 설정자: domain_add_dev_pasid() 가 넣고 domain_remove_dev_pasid() 가 뺀다.
+	 * 읽는 자: 도메인 단위 설정을 PASID 항목에도 전파하는 경로.
+	 * 동기화: 도메인의 lock(irqsave). */
 	struct device *dev;
+	/* [한국어] 이 (장치, PASID) 쌍의 장치.
+	 * 설정자: domain_add_dev_pasid(). 읽는 자: 목록에서 특정 쌍을 찾을 때의 비교,
+	 *   그리고 그 장치의 유닛을 얻어 PASID 항목을 만질 때.
+	 * 값 범위: NULL 이 아니다. 이 구조체의 수명은 장치보다 짧다 — 장치가 해제되기
+	 *   전에 모든 PASID 가 먼저 떨어진다. */
 	ioasid_t pasid;
+	/* [한국어] 이 쌍의 PASID 번호.
+	 * 설정자: domain_add_dev_pasid() 가 호출자가 준 값을 그대로 저장한다.
+	 * 읽는 자: 목록 검색의 비교 키, 무효화 서술자의 PASID 필드, PASID 항목 색인.
+	 * 값 범위: 0 ~ 2^(ecap_pss+1)-1. IOMMU_NO_PASID(0)는 PASID 를 쓰지 않는 기본
+	 *   트래픽을 뜻하는 특별한 값이라 이 목록에는 들어오지 않는다. */
 #ifdef CONFIG_INTEL_IOMMU_DEBUGFS
 	struct dentry *debugfs_dentry; /* pointer to pasid directory dentry */
+	/* [한국어] 이 PASID 의 debugfs 디렉터리 (원 주석: pointer to pasid directory dentry).
+	 * 설정자: intel_iommu_debugfs_create_dev_pasid().
+	 * 읽는 자: 해제 시 그 디렉터리를 지우는 경로.
+	 * 값 범위: CONFIG_INTEL_IOMMU_DEBUGFS 를 끈 빌드에는 이 필드가 없다. */
 #endif
 };
 
+/*
+ * [한국어]
+ * __iommu_flush_cache - 방금 고친 자료구조를 하드웨어가 볼 수 있게 메모리로 밀어낸다
+ *
+ * @iommu: 이 표를 읽을 유닛.
+ * @addr: 밀어낼 메모리의 시작. @size: 그 크기.
+ * @return: 없음.
+ *
+ * 왜 필요한가: 커널이 페이지 테이블이나 컨텍스트 항목을 고치면 그 값은 CPU
+ * 캐시에만 있고 메모리에는 아직 반영되지 않았을 수 있다. IOMMU 는 메모리를
+ * 직접 읽으므로, 캐시를 스누프하지 않는 유닛(!ecap_coherent)에서는 우리가
+ * 쓴 값을 보지 못하고 옛 내용이나 쓰레기 값을 읽는다.
+ *
+ * ecap_coherent 인 유닛에서는 아무것도 하지 않는다 — 하드웨어가 CPU 캐시를
+ * 스누프하므로 그냥 두어도 최신 값을 본다. 그래서 이 함수는 조건 검사만 하고
+ * 끝나는 경우가 대부분이며, 그 조건 분기를 호출부마다 쓰지 않으려고 인라인
+ * 함수로 뺐다.
+ *
+ * 실행 컨텍스트: 어디서든. clflush 는 잠들지 않는다.
+ *
+ * 호출 체인:
+ *   iommu_alloc_root_entry()/domain_context_mapping_one()/copy_context_table()
+ *     → [__iommu_flush_cache] → clflush_cache_range()
+ */
 static inline void __iommu_flush_cache(
 	struct intel_iommu *iommu, void *addr, int size)
 {
-	if (!ecap_coherent(iommu->ecap))
-		clflush_cache_range(addr, size);
+	if (!ecap_coherent(iommu->ecap))	/* [한국어] 이 유닛의 워크가 CPU 캐시를 스누프하지 않으면 */
+		clflush_cache_range(addr, size);	/* [한국어] 캐시 라인을 메모리로 밀어낸다. 코히런트한 유닛에서는 이 줄을 건너뛴다 */
 }
 
 /* Convert generic struct iommu_domain to private struct dmar_domain */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * to_dmar_domain - 코어의 iommu_domain 에서 이 드라이버의 dmar_domain 을 되찾는다
+ *
+ * @dom: 코어가 다루는 도메인 포인터.
+ * @return: 그것을 품고 있는 dmar_domain.
+ *
+ * 코어는 벤더 중립적인 iommu_domain 만 알고, 드라이버는 그것을 자기 구조체
+ * 안에 박아 둔 뒤 container_of 로 되찾는다 — 커널 전반의 관용구다.
+ *
+ * dmar_domain 의 domain 필드가 union 안에 있는데도 이 계산이 성립하는 이유는,
+ * 그 union 의 모든 얼굴이 같은 자리에서 iommu_domain 으로 시작하도록 배치되어
+ * 있기 때문이다. 그 배치를 PT_IOMMU_CHECK_DOMAIN 이 컴파일 타임에 확인한다.
+ *
+ * 실행 컨텍스트: 어디서든. 순수한 포인터 산술이다.
+ */
 static inline struct dmar_domain *to_dmar_domain(struct iommu_domain *dom)
 {
-	return container_of(dom, struct dmar_domain, domain);
+	return container_of(dom, struct dmar_domain, domain);	/* [한국어] 감싸는 구조체로 되돌린다 */
 }
 
 /*
@@ -1595,32 +1793,99 @@ static inline struct dmar_domain *to_dmar_domain(struct iommu_domain *dom)
  * this purpose. This domain id is also used for identity domain
  * in legacy mode.
  */
-#define FLPT_DEFAULT_DID		1
-#define IDA_START_DID			2
+#define FLPT_DEFAULT_DID		1	/* [한국어] 1단계·통과 변환 전용으로 예약한 도메인 id. 스펙 6.2.3.1 이 "1단계나 통과 모드의 PASID 항목은 2단계·중첩과 다른 도메인 id 를 써야 한다"고 요구해서 하나를 떼어 둔 것이며, 레거시 모드의 항등 도메인도 이 값을 쓴다 (위 영어 주석) */
+#define IDA_START_DID			2	/* [한국어] 그래서 실제 도메인 할당은 2번부터 시작한다. 0번은 캐싱 모드 하드웨어가 "유효하지 않은 번역"에 붙이는 값이자 커널이 "할당되지 않음"의 표식으로도 쓰므로 진짜 도메인에 줄 수 없다 (위 영어 주석) */
 
 /* Retrieve the domain ID which has allocated to the domain */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * domain_id_iommu - 이 도메인이 저 유닛에서 받은 도메인 id 를 꺼낸다
+ *
+ * @domain: 대상 도메인. @iommu: 어느 유닛에서의 id 인지.
+ * @return: 그 유닛에서 이 도메인에 할당된 16비트 도메인 id.
+ *
+ * 도메인 id 가 왜 유닛마다 다른가: id 는 시스템 전역의 이름이 아니라 유닛의
+ * IOTLB 항목을 구분하는 태그일 뿐이다. 유닛마다 할당기(domain_ida)가 따로 있고
+ * 개수 상한(cap_ndoms)도 다르므로, 같은 도메인이라도 유닛이 다르면 다른 번호를
+ * 받을 수 있다. 그래서 도메인은 유닛 순번으로 색인된 xarray 에 그 매핑을
+ * 담아 두고, 이 함수가 그것을 꺼낸다.
+ *
+ * xa_load 가 NULL 을 돌려주면 그 유닛에 이 도메인의 장치가 없다는 뜻인데,
+ * 이 함수는 확인 없이 역참조한다 — 호출자가 "이 유닛에 붙어 있는 도메인"에
+ * 대해서만 부르는 것을 전제로 한다.
+ *
+ * 실행 컨텍스트: 무효화 경로와 항목 설정. 인터럽트 문맥에서도 불릴 수 있다.
+ *
+ * 호출 체인:
+ *   컨텍스트/PASID 항목 설정, 모든 도메인 단위 무효화 → [domain_id_iommu]
+ */
 static inline u16
 domain_id_iommu(struct dmar_domain *domain, struct intel_iommu *iommu)
 {
-	struct iommu_domain_info *info =
-			xa_load(&domain->iommu_array, iommu->seq_id);
+	struct iommu_domain_info *info =	/* [한국어] 이 유닛에서의 정보를 찾는다 */
+			xa_load(&domain->iommu_array, iommu->seq_id);	/* [한국어] 유닛 순번으로 색인한다 */
 
-	return info->did;
+	return info->did;	/* [한국어] 그 유닛에서 이 도메인에 할당된 id */
 }
 
+/*
+ * [한국어]
+ * iommu_domain_did - 코어 도메인에서 이 유닛의 도메인 id 를 구한다(특수 도메인 포함)
+ *
+ * @domain: 코어가 다루는 도메인. @iommu: 대상 유닛.
+ * @return: 무효화에 쓸 도메인 id.
+ *
+ * domain_id_iommu 의 앞단으로, 도메인 id 를 따로 갖지 않는 두 종류를 먼저
+ * 걸러 낸다.
+ *   - SVA 도메인: 자기 페이지 테이블이 없고 프로세스의 것을 가리킨다.
+ *   - 항등 도메인: 번역 자체를 하지 않는다.
+ * 둘 다 도메인 id 를 할당받지 않으므로 FLPT_DEFAULT_DID 를 쓴다. 그 값이
+ * 1단계·통과 전용으로 예약되어 있고, 이 두 도메인이 정확히 그 범주이기 때문이다.
+ *
+ * 나머지 페이징 도메인은 domain_id_iommu 로 넘겨 실제 할당된 id 를 얻는다.
+ *
+ * 실행 컨텍스트: 무효화 경로.
+ *
+ * 호출 체인:
+ *   cache.c 의 무효화 경로 → [iommu_domain_did] → domain_id_iommu()
+ */
 static inline u16
 iommu_domain_did(struct iommu_domain *domain, struct intel_iommu *iommu)
 {
-	if (domain->type == IOMMU_DOMAIN_SVA ||
-	    domain->type == IOMMU_DOMAIN_IDENTITY)
-		return FLPT_DEFAULT_DID;
-	return domain_id_iommu(to_dmar_domain(domain), iommu);
+	if (domain->type == IOMMU_DOMAIN_SVA ||	/* [한국어] SVA 도메인이거나 */
+	    domain->type == IOMMU_DOMAIN_IDENTITY)	/* [한국어] 항등 도메인이면 */
+		return FLPT_DEFAULT_DID;	/* [한국어] 도메인 id 를 따로 갖지 않으므로 예약된 값을 쓴다 */
+	return domain_id_iommu(to_dmar_domain(domain), iommu);	/* [한국어] 그 밖의 페이징 도메인은 실제 할당된 id 를 꺼낸다 */
 }
 
+/*
+ * [한국어]
+ * dev_is_real_dma_subdevice - 이 장치가 다른 장치의 이름으로 DMA 를 내는지 판별한다
+ *
+ * @dev: 검사할 장치.
+ * @return: true 면 이 장치의 DMA 는 다른(부모) PCI 함수의 소스 id 로 나간다.
+ *
+ * 어떤 경우인가: SR-IOV 서브펑션이나 일부 통합 장치는 자기 PCI 함수를 갖고
+ * 있으면서도 DMA 는 부모 함수의 소스 id 로 낸다. pci_real_dma_dev() 가 그
+ * "실제로 DMA 를 내는 장치"를 알려 주므로, 그것이 자기 자신이 아니면 참이다.
+ *
+ * 왜 중요한가: 그런 장치는 자기 컨텍스트 항목도, 자기 PASID 테이블도 갖지
+ * 않는다. 부모의 것을 공유하기 때문이다. 그래서 이 드라이버 곳곳에서
+ *   - 컨텍스트/PASID 항목을 세우거나 내리지 않고(부모의 것을 건드리게 된다),
+ *   - PASID 단위 부착을 거절하고(-EOPNOTSUPP),
+ *   - 항등 도메인 부착에서 아무것도 하지 않는다
+ * 는 예외 처리를 이 판별로 건다.
+ *
+ * 실행 컨텍스트: 어디서든. 순수 조회다.
+ *
+ * 호출 체인:
+ *   intel_iommu_probe_device()/device_block_translation()/
+ *   intel_iommu_set_dev_pasid()/identity_domain_attach_dev() → [이 함수]
+ */
 static inline bool dev_is_real_dma_subdevice(struct device *dev)
 {
-	return dev && dev_is_pci(dev) &&
-	       pci_real_dma_dev(to_pci_dev(dev)) != to_pci_dev(dev);
+	return dev && dev_is_pci(dev) &&	/* [한국어] PCI 장치이면서 */
+	       pci_real_dma_dev(to_pci_dev(dev)) != to_pci_dev(dev);	/* [한국어] 실제로 DMA 를 내는 장치가 자기 자신이 아니면 — 부모의 컨텍스트 항목을 공유한다는 뜻이다 */
 }
 
 /*
