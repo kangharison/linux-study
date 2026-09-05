@@ -5398,7 +5398,7 @@ intel_iommu_domain_alloc_second_stage(struct device *dev,
 		dmar_domain->domain.dirty_ops = &intel_second_stage_dirty_ops;	/* [한국어] 그 콜백 표를 단다. 라이브 마이그레이션에서 어느 페이지가 바뀌었는지 추적할 때 쓴다 */
 
 	ret = pt_iommu_vtdss_init(&dmar_domain->sspt, &cfg, GFP_KERNEL);	/* [한국어] 실제 페이지 테이블을 만든다 */
-	if (ret) {
+	if (ret) {	/* [한국어] 페이지 테이블 초기화 실패 */
 		kfree(dmar_domain);	/* [한국어] 실패하면 껍데기 반납 */
 		return ERR_PTR(ret);	/* [한국어] 실패 전달 */
 	}
@@ -5709,146 +5709,357 @@ int paging_domain_compatible(struct iommu_domain *domain, struct device *dev)
 	return 0;	/* [한국어] 이 장치에 이 도메인을 붙일 수 있다 */
 }
 
+/*
+ * [한국어]
+ * intel_iommu_attach_device - 장치를 페이징 도메인에 붙인다
+ *
+ * @domain: 붙일 도메인(1단계 또는 2단계 페이징).
+ * @dev: 붙일 장치.
+ * @old: 직전 도메인. 코어가 알려 주지만 여기서는 쓰지 않는다.
+ * @return: 0 성공, 음수면 실패. 실패해도 장치는 안전한 차단 상태로 남는다.
+ *
+ * 순서 자체가 이 함수의 내용이다.
+ *   1) device_block_translation — 지금 붙어 있는 것을 먼저 전부 내린다.
+ *      "옛 매핑과 새 매핑이 동시에 유효한 순간"을 만들지 않기 위해서다.
+ *      또한 이 단계 덕분에 이후 어느 지점에서 실패해도 장치는 DMA 가 막힌
+ *      상태로 남아, 되돌릴 것이 없다.
+ *   2) paging_domain_compatible — 이 유닛의 능력과 도메인 설정이 맞는지.
+ *      이 검사는 kdump 로 물려받은 컨텍스트를 우리 형식으로 전환하는 일까지
+ *      겸한다.
+ *   3) iopf_for_domain_set — 페이지 폴트 처리를 먼저 연결한다. 번역을 켠 뒤에
+ *      연결하면 그 사이의 폴트를 처리할 곳이 없다.
+ *   4) dmar_domain_attach_device — 실제로 하드웨어 항목을 세운다.
+ *      실패하면 3)을 되돌린다.
+ *
+ * iommu_domain_ops.attach_dev 콜백이며, 코어가 도메인을 바꿀 때마다 부른다.
+ * 실행 컨텍스트: 프로세스 컨텍스트. 그룹 뮤텍스를 쥔 상태로 들어온다.
+ *
+ * 호출 체인:
+ *   iommu_attach_device()/iommu_attach_group() → [이 함수]
+ *     → device_block_translation() → paging_domain_compatible()
+ *     → iopf_for_domain_set() → dmar_domain_attach_device()
+ */
 static int intel_iommu_attach_device(struct iommu_domain *domain,
 				     struct device *dev,
 				     struct iommu_domain *old)
 {
-	int ret;
+	int ret;	/* [한국어] 각 단계의 결과 */
 
-	device_block_translation(dev);
+	device_block_translation(dev);	/* [한국어] 먼저 지금 붙어 있는 것을 모두 내린다. 옛 매핑과 새 매핑이 겹치는 순간을 만들지 않기 위한 것이며, 실패해도 되돌릴 필요가 없는 상태로 만든다 */
 
-	ret = paging_domain_compatible(domain, dev);
-	if (ret)
-		return ret;
+	ret = paging_domain_compatible(domain, dev);	/* [한국어] 이 도메인을 이 장치에 붙일 수 있는지 */
+	if (ret)	/* [한국어] 불가능하면 */
+		return ret;	/* [한국어] 장치는 차단 상태로 남는다 — 안전한 실패다 */
 
-	ret = iopf_for_domain_set(domain, dev);
-	if (ret)
-		return ret;
+	ret = iopf_for_domain_set(domain, dev);	/* [한국어] I/O 페이지 폴트 처리를 이 도메인에 연결한다. 번역을 세우기 전에 해야 첫 폴트부터 처리된다 */
+	if (ret)	/* [한국어] 실패 */
+		return ret;	/* [한국어] 역시 차단 상태로 남는다 */
 
-	ret = dmar_domain_attach_device(to_dmar_domain(domain), dev);
-	if (ret)
-		iopf_for_domain_remove(domain, dev);
+	ret = dmar_domain_attach_device(to_dmar_domain(domain), dev);	/* [한국어] 실제로 컨텍스트/PASID 항목을 세워 번역을 켠다 */
+	if (ret)	/* [한국어] 실패하면 */
+		iopf_for_domain_remove(domain, dev);	/* [한국어] 방금 연결한 폴트 처리를 되돌린다 */
 
-	return ret;
+	return ret;	/* [한국어] 성공이면 0 */
 }
 
+/*
+ * [한국어]
+ * intel_iommu_tlb_sync - 모아 둔 언매핑 범위를 한 번에 무효화하고 페이지를 반납한다
+ *
+ * @domain: 대상 도메인.
+ * @gather: 코어가 언매핑하며 누적한 정보 — 범위(start~end)와, 해제 대기 중인
+ *          페이지 테이블 페이지 목록(freelist).
+ * @return: 없음.
+ *
+ * 왜 모았다가 한 번에 하는가: 무효화 명령은 큐에 넣고 완료를 기다려야 하는
+ * 값비싼 동작이다. 4KB 씩 백만 번 언매핑하면서 매번 무효화를 보내면 그 비용이
+ * 전부다. 그래서 코어는 언매핑 범위를 gather 에 누적했다가, 한 묶음이 끝나면
+ * 이 콜백에서 한 번에 처리한다.
+ *
+ * freelist 가 함께 오는 이유와 순서: 큰 매핑을 풀면 페이지 테이블 페이지 자체가
+ * 통째로 비게 되어 반납 대상이 된다. 그런데 하드웨어가 그 테이블을 아직
+ * 캐시하고 있을 수 있으므로, 반드시 무효화가 끝난 뒤에 반납해야 한다.
+ * 이 함수가 cache_tag_flush_range 다음에 iommu_put_pages_list 를 부르는 순서가
+ * 정확히 그 규칙이다. 반대로 하면 하드웨어가 이미 재사용된 메모리를 페이지
+ * 테이블로 워크한다.
+ *
+ * freelist 가 비어 있는지를 flush 에 넘기는 이유: 비어 있지 않다는 것은 페이지
+ * 테이블 구조 자체가 바뀌었다는 뜻이라, 잎(leaf) 항목만 비우는 좁은 무효화로는
+ * 부족하고 중간 단계까지 비워야 한다.
+ *
+ * 실행 컨텍스트: 언매핑 후처리. 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   iommu_iotlb_sync() → [intel_iommu_tlb_sync]
+ *     → cache_tag_flush_range() → iommu_put_pages_list()
+ */
 static void intel_iommu_tlb_sync(struct iommu_domain *domain,
 				 struct iommu_iotlb_gather *gather)
 {
-	cache_tag_flush_range(to_dmar_domain(domain), gather->start,
-			      gather->end,
-			      iommu_pages_list_empty(&gather->freelist));
-	iommu_put_pages_list(&gather->freelist);
+	cache_tag_flush_range(to_dmar_domain(domain), gather->start,	/* [한국어] 모아 둔 언매핑 범위를 한 번에 무효화한다. 언매핑마다 무효화를 보내는 대신 gather 에 범위를 누적했다가 여기서 한 번에 처리하는 것이 배치의 핵심이다 */
+			      gather->end,	/* [한국어] 범위의 끝 */
+			      iommu_pages_list_empty(&gather->freelist));	/* [한국어] 해제 대기 페이지 목록이 비어 있는지. 비어 있지 않다면 페이지 테이블 자체가 정리된 것이라 더 넓은 무효화가 필요하다 */
+	iommu_put_pages_list(&gather->freelist);	/* [한국어] 무효화가 끝난 뒤에야 페이지 테이블 페이지를 반납한다. 순서를 바꾸면 하드웨어가 아직 캐시하고 있는 테이블 페이지가 재사용된다 */
 }
 
+/*
+ * [한국어]
+ * domain_support_force_snooping - 이 도메인에 붙은 모든 유닛이 강제 코히런시를 지원하는지 본다
+ *
+ * @domain: 검사할 도메인. 호출자가 domain->lock 을 쥐고 있어야 한다.
+ * @return: 모든 유닛이 snoop control 을 지원하면 true.
+ *
+ * force snooping 이 무엇인가: 보통 DMA 가 CPU 캐시를 스누프할지는 장치가
+ * 요청 안에서 정한다. 그런데 KVM 이 게스트에 장치를 넘길 때는 "이 도메인의
+ * 모든 DMA 는 무조건 코히런트하다"는 보장이 필요하다. 그래야 게스트가
+ * 캐시를 직접 관리하지 않아도 되고, 호스트가 WBINVD 같은 위험한 명령을
+ * 게스트에 허용하지 않아도 된다. VT-d 의 snoop control(SC)이 그 강제다.
+ *
+ * 왜 모든 유닛을 확인하는가: 하나의 도메인에 여러 장치가, 서로 다른 유닛
+ * 아래에서 붙을 수 있다. 그중 하나라도 SC 를 지원하지 않으면 그 장치의 DMA 는
+ * 코히런시가 보장되지 않으므로, 도메인 전체가 그 약속을 할 수 없다.
+ *
+ * assert_spin_locked 인 이유: 순회 도중 장치가 붙거나 떨어지면 결론이
+ * 틀어진다. 락을 이 함수가 잡지 않고 호출자에게 요구하는 것은, 호출자가
+ * 검사와 force_snooping 설정을 같은 임계 구역 안에서 해야 하기 때문이다.
+ *
+ * 실행 컨텍스트: domain->lock(irqsave)을 쥔 상태. 잠들면 안 된다.
+ *
+ * 호출 체인:
+ *   intel_iommu_enforce_cache_coherency_fs()/_ss()
+ *     → [domain_support_force_snooping]
+ */
 static bool domain_support_force_snooping(struct dmar_domain *domain)
 {
-	struct device_domain_info *info;
-	bool support = true;
+	struct device_domain_info *info;	/* [한국어] 장치 순회 커서 */
+	bool support = true;	/* [한국어] 기본값은 지원. 하나라도 못 하면 뒤집는다 */
 
-	assert_spin_locked(&domain->lock);
-	list_for_each_entry(info, &domain->devices, link) {
-		if (!ecap_sc_support(info->iommu->ecap)) {
-			support = false;
-			break;
+	assert_spin_locked(&domain->lock);	/* [한국어] 호출자가 도메인 락을 쥐고 있어야 한다. 순회 중에 장치가 붙거나 떨어지면 판단이 틀어지기 때문이다 */
+	list_for_each_entry(info, &domain->devices, link) {	/* [한국어] 이 도메인에 붙은 모든 장치를 훑으며 */
+		if (!ecap_sc_support(info->iommu->ecap)) {	/* [한국어] 그 장치를 맡은 유닛이 snoop control 을 지원하지 않으면 */
+			support = false;	/* [한국어] 도메인 전체가 강제 코히런시를 약속할 수 없다 */
+			break;	/* [한국어] 하나만 못 해도 결론이 난다 */
 		}
 	}
 
-	return support;
+	return support;	/* [한국어] 모든 유닛이 지원할 때만 true */
 }
 
+/*
+ * [한국어]
+ * intel_iommu_enforce_cache_coherency_fs - 1단계 도메인에 강제 코히런시를 켠다
+ *
+ * @domain: 대상 도메인(1단계 페이징).
+ * @return: true 면 켜졌거나 이미 켜져 있다, false 면 하드웨어가 지원하지 않는다.
+ *
+ * VFIO/KVM 이 장치를 게스트에 넘기기 전에 부른다. false 를 받으면 게스트에
+ * WBINVD 를 허용하는 등 다른(더 비싼, 더 위험한) 방법을 써야 한다.
+ *
+ * 1단계에서의 구현이 2단계와 다르다: 1단계 페이지 테이블은 x86-64 CPU 형식
+ * 그대로라 PTE 안에 스누프 제어 비트를 둘 자리가 없다. 그래서 PTE 가 아니라
+ * PASID 항목에 도메인 단위로 설정한다. 이미 붙어 있는 장치들에 대해
+ * intel_pasid_setup_page_snoop_control 을 하나씩 부르는 것이 그 때문이다.
+ * (2단계는 PTE 마다 SNP 비트가 있어 설정만 바꿔 두면 된다 — _ss 쪽 참고.)
+ *
+ * 이후에 붙는 장치는 dmar_domain_attach_device 가 force_snooping 을 보고
+ * 같은 설정을 해 준다. 그래서 여기서는 "지금 붙어 있는 것"만 처리하면 된다.
+ *
+ * 동기화: guard(spinlock_irqsave) 로 도메인 락을 잡아, 검사와 설정과 순회가
+ * 한 임계 구역 안에서 일어나게 한다. 그 사이에 장치가 붙으면 새 장치는 위
+ * 규칙에 따라 attach 경로에서 처리된다.
+ *
+ * 호출 체인:
+ *   iommu_enforce_cache_coherency() (VFIO/KVM) → [이 함수]
+ *     → domain_support_force_snooping()
+ *     → intel_pasid_setup_page_snoop_control()
+ */
 static bool intel_iommu_enforce_cache_coherency_fs(struct iommu_domain *domain)
 {
-	struct dmar_domain *dmar_domain = to_dmar_domain(domain);
-	struct device_domain_info *info;
+	struct dmar_domain *dmar_domain = to_dmar_domain(domain);	/* [한국어] VT-d 도메인으로 */
+	struct device_domain_info *info;	/* [한국어] 장치 순회 커서 */
 
-	guard(spinlock_irqsave)(&dmar_domain->lock);
+	guard(spinlock_irqsave)(&dmar_domain->lock);	/* [한국어] 도메인 장치 목록을 보호한다. guard 는 함수를 벗어날 때 자동으로 놓아 준다 */
 
-	if (dmar_domain->force_snooping)
-		return true;
+	if (dmar_domain->force_snooping)	/* [한국어] 이미 켜져 있으면 */
+		return true;	/* [한국어] 다시 할 일이 없다 */
 
-	if (!domain_support_force_snooping(dmar_domain))
-		return false;
+	if (!domain_support_force_snooping(dmar_domain))	/* [한국어] 붙어 있는 유닛 중 하나라도 snoop control 을 못 하면 */
+		return false;	/* [한국어] 약속할 수 없다 */
 
-	dmar_domain->force_snooping = true;
-	list_for_each_entry(info, &dmar_domain->devices, link)
-		intel_pasid_setup_page_snoop_control(info->iommu, info->dev,
-						     IOMMU_NO_PASID);
-	return true;
+	dmar_domain->force_snooping = true;	/* [한국어] 이제부터 이 도메인의 매핑은 캐시 코히런트하게 다뤄진다 */
+	list_for_each_entry(info, &dmar_domain->devices, link)	/* [한국어] 이미 붙어 있는 장치들에 대해 */
+		intel_pasid_setup_page_snoop_control(info->iommu, info->dev,	/* [한국어] 1단계는 PTE 마다 스누프 비트를 두지 않으므로, PASID 항목에 도메인 단위로 설정한다 */
+						     IOMMU_NO_PASID);	/* [한국어] PASID 를 쓰지 않는 기본 트래픽의 항목 */
+	return true;	/* [한국어] 강제 코히런시가 켜졌다 */
 }
 
+/*
+ * [한국어]
+ * intel_iommu_enforce_cache_coherency_ss - 2단계 도메인에 강제 코히런시를 켠다
+ *
+ * @domain: 대상 도메인(2단계 페이징).
+ * @return: true 면 켜졌다, false 면 지원하지 않는다.
+ *
+ * _fs 판과 목적은 같지만 구현이 훨씬 간단하다. 2단계 페이지 테이블은 항목마다
+ * SNP(snoop) 비트를 갖고 있으므로, 테이블 설정에 PT_FEAT_VTDSS_FORCE_COHERENCE
+ * 를 켜 두기만 하면 이후 iommu_map() 이 만드는 모든 항목에 그 비트가 실린다
+ * (위 영어 주석). 이미 붙어 있는 장치를 하나씩 손볼 필요가 없다.
+ *
+ * 이미 만들어진 매핑은 어떻게 되는가: 이 콜백은 도메인에 매핑이 들어가기
+ * 전(VFIO 가 컨테이너를 세우는 시점)에 불리는 것을 전제로 한다. 그래서 _fs 와
+ * 달리 force_snooping 이 이미 켜져 있는지 먼저 확인하지도 않는다.
+ *
+ * 이 설정은 나중에 paging_domain_compatible_second_stage 의 검사 대상이
+ * 되기도 한다 — SC 를 지원하지 않는 유닛에 이 도메인을 붙이려 하면 거절된다.
+ *
+ * 동기화: 도메인 락을 guard 로 잡는다.
+ *
+ * 호출 체인:
+ *   iommu_enforce_cache_coherency() (VFIO/KVM) → [이 함수]
+ *     → domain_support_force_snooping()
+ */
 static bool intel_iommu_enforce_cache_coherency_ss(struct iommu_domain *domain)
 {
-	struct dmar_domain *dmar_domain = to_dmar_domain(domain);
+	struct dmar_domain *dmar_domain = to_dmar_domain(domain);	/* [한국어] VT-d 도메인으로 */
 
-	guard(spinlock_irqsave)(&dmar_domain->lock);
-	if (!domain_support_force_snooping(dmar_domain))
-		return false;
+	guard(spinlock_irqsave)(&dmar_domain->lock);	/* [한국어] 도메인 락 */
+	if (!domain_support_force_snooping(dmar_domain))	/* [한국어] 유닛들이 지원하지 않으면 */
+		return false;	/* [한국어] 약속할 수 없다 */
 
 	/*
 	 * Second level page table supports per-PTE snoop control. The
 	 * iommu_map() interface will handle this by setting SNP bit.
 	 */
-	dmar_domain->sspt.vtdss_pt.common.features |=
-		BIT(PT_FEAT_VTDSS_FORCE_COHERENCE);
-	dmar_domain->force_snooping = true;
-	return true;
+	dmar_domain->sspt.vtdss_pt.common.features |=	/* [한국어] 2단계는 PTE 마다 SNP 비트를 둘 수 있으므로, 테이블 설정에 표시만 해 두면 iommu_map() 이 매 항목에 비트를 세운다 (위 영어 주석) */
+		BIT(PT_FEAT_VTDSS_FORCE_COHERENCE);	/* [한국어] 그 기능 비트 */
+	dmar_domain->force_snooping = true;	/* [한국어] 도메인 상태에도 기록 */
+	return true;	/* [한국어] 켜졌다. 1단계와 달리 이미 붙은 장치를 다시 손볼 필요가 없다 — 설정이 PTE 에 들어가기 때문이다 */
 }
 
+/*
+ * [한국어]
+ * intel_iommu_capable - 코어가 묻는 능력에 이 장치/유닛이 답한다
+ *
+ * @dev: 대상 장치.
+ * @cap: 코어가 묻는 능력 종류.
+ * @return: 지원하면 true.
+ *
+ * 각 능력이 무엇을 결정하는가:
+ *   CACHE_COHERENCY — DMA 가 CPU 캐시와 코히런트한가. x86 은 장치 DMA 가
+ *     캐시를 스누프하므로 항상 참이다.
+ *   PRE_BOOT_PROTECTION — 커널이 뜨기 전부터 DMA 가 막혀 있었는가. 펌웨어가
+ *     platform opt-in 으로 신고했을 때만 참이며, Thunderbolt 보안 정책에서
+ *     "부팅 중 DMA 공격이 가능했는가"를 판단하는 근거가 된다.
+ *   ENFORCE_CACHE_COHERENCY — 도메인 단위로 코히런시를 강제할 수 있는가.
+ *     VFIO/KVM 이 이 값으로 게스트에 WBINVD 를 허용할지 정한다.
+ *   DIRTY_TRACKING — 수정된 페이지를 추적할 수 있는가. 라이브 마이그레이션의
+ *     전제 조건이다.
+ *   PCI_ATS_SUPPORTED — 프로브 때 dmar_ats_supported 로 판단해 저장해 둔 값.
+ *
+ * 모르는 능력에 false 를 돌려주는 것이 중요하다: 코어에 새 능력이 추가되어도
+ * 이 드라이버가 그것을 지원한다고 잘못 답하지 않는다.
+ *
+ * 실행 컨텍스트: 아무 데서나 불릴 수 있는 순수 조회. 락을 잡지 않는다.
+ *
+ * 호출 체인:
+ *   iommu_capable()/device_iommu_capable() → [intel_iommu_capable]
+ */
 static bool intel_iommu_capable(struct device *dev, enum iommu_cap cap)
 {
-	struct device_domain_info *info = dev_iommu_priv_get(dev);
+	struct device_domain_info *info = dev_iommu_priv_get(dev);	/* [한국어] 이 장치의 VT-d 정보 */
 
-	switch (cap) {
-	case IOMMU_CAP_CACHE_COHERENCY:
-		return true;
-	case IOMMU_CAP_PRE_BOOT_PROTECTION:
-		return dmar_platform_optin();
-	case IOMMU_CAP_ENFORCE_CACHE_COHERENCY:
-		return ecap_sc_support(info->iommu->ecap);
-	case IOMMU_CAP_DIRTY_TRACKING:
-		return ssads_supported(info->iommu);
-	case IOMMU_CAP_PCI_ATS_SUPPORTED:
-		return info->ats_supported;
-	default:	/* [한국어] 펌웨어/호출자가 알 수 없는 무효화 종류를 넘겼다 */
-		return false;
+	switch (cap) {	/* [한국어] 코어가 묻는 능력 종류에 따라 */
+	case IOMMU_CAP_CACHE_COHERENCY:	/* [한국어] DMA 가 CPU 캐시와 코히런트한가 */
+		return true;	/* [한국어] x86 은 항상 그렇다 — 장치 DMA 가 캐시를 스누프한다 */
+	case IOMMU_CAP_PRE_BOOT_PROTECTION:	/* [한국어] 커널이 뜨기 전부터 DMA 가 막혀 있었는가 */
+		return dmar_platform_optin();	/* [한국어] 펌웨어가 그렇게 신고했을 때만 참이다. Thunderbolt 보안에서 이 값이 중요하다 */
+	case IOMMU_CAP_ENFORCE_CACHE_COHERENCY:	/* [한국어] 도메인 단위로 코히런시를 강제할 수 있는가 */
+		return ecap_sc_support(info->iommu->ecap);	/* [한국어] 유닛의 snoop control 지원 여부. VFIO/KVM 이 이 값으로 게스트의 캐시 관리 정책을 정한다 */
+	case IOMMU_CAP_DIRTY_TRACKING:	/* [한국어] 수정된 페이지를 추적할 수 있는가 */
+		return ssads_supported(info->iommu);	/* [한국어] 2단계 접근/더티 비트 지원 여부. 라이브 마이그레이션의 전제다 */
+	case IOMMU_CAP_PCI_ATS_SUPPORTED:	/* [한국어] 이 장치에 ATS 를 쓸 수 있는가 */
+		return info->ats_supported;	/* [한국어] 프로브 때 dmar_ats_supported 로 판단해 저장해 둔 값 */
+	default:	/* [한국어] 코어가 아직 모르는 능력을 물었다 — 지원하지 않는다고 답한다 */
+		return false;	/* [한국어] 모르는 능력은 지원하지 않는다고 답한다 */
 	}
 }
 
+/*
+ * [한국어]
+ * intel_iommu_probe_device - 장치를 VT-d 아래로 들이고 능력을 조사한다
+ *
+ * @dev: 프로브할 장치.
+ * @return: 이 장치를 맡을 유닛의 iommu_device, 실패 시 ERR_PTR.
+ *          -ENODEV 는 "이 장치는 IOMMU 아래가 아니다"라는 정상적인 답이다.
+ *
+ * 장치가 처음 IOMMU 코어에 등장할 때 불리며, 이후 이 장치에 대한 모든 판단의
+ * 근거가 되는 device_domain_info 를 만든다. 크게 세 단계다.
+ *
+ *   [1] 담당 유닛 찾기 — device_lookup_iommu 가 DMAR 표를 따라간다. 유닛이
+ *       없으면 이 장치는 번역 대상이 아니다.
+ *   [2] 소스 id 정하기 — 보통은 유닛 조회가 알려 준 (bus, devfn)을 쓴다.
+ *       별칭 때문에 장치 자신의 위치와 다를 수 있기 때문이다. 다만 실제 DMA
+ *       서브디바이스는 자기 PCI 위치를 그대로 쓴다.
+ *   [3] 능력 조사 — ATS, PASID, PRI 를 각각 "유닛도 지원하고 장치도 지원하고
+ *       경로도 허용하는가"로 확인해 기록한다. 여기서 정해진 값이
+ *       intel_iommu_probe_finalize 에서 실제로 무엇을 켤지를 결정한다.
+ *
+ * 눈여겨볼 세부:
+ *   - pasid_supported 에 |1 을 하는 이유: PCIe 가 알려 준 features 가 0 일 수
+ *     있어서, 그것만으로는 "능력 없음"과 구분되지 않는다. 비트 0 을 존재
+ *     표시로 겸용한다.
+ *   - PRI 가 ATS 를 전제로 하는 이유: 페이지 요청의 응답이 ATS 번역 경로로
+ *     돌아오기 때문이다.
+ *   - pfsid: 유닛이 DIT 를 지원할 때만 의미가 있다. VF 의 무효화 요청에 PF 의
+ *     소스 id 를 실어 주면 하드웨어가 PF 단위로 큐 깊이를 가늠할 수 있다.
+ *     DIT 가 없으면 예약 필드라 0 이어야 한다.
+ *   - context_copied 검사: kdump 로 물려받은 컨텍스트는 여기서 손대지 않는다.
+ *     도메인을 붙일 때 paging_domain_compatible 이 전환한다.
+ *
+ * 실행 컨텍스트: 장치 프로브. 프로세스 컨텍스트(GFP_KERNEL 할당).
+ * 에러 처리: 세 단계의 정리 라벨(free_table → clear_rbtree → free)이
+ * 되돌리기 순서를 그대로 따른다.
+ *
+ * 호출 체인:
+ *   iommu_probe_device() → [intel_iommu_probe_device]
+ *     → device_lookup_iommu() → dmar_ats_supported()
+ *     → device_rbtree_insert() → intel_pasid_alloc_table()
+ *     → intel_pasid_setup_sm_context()
+ */
 static struct iommu_device *intel_iommu_probe_device(struct device *dev)
 {
-	struct pci_dev *pdev = dev_is_pci(dev) ? to_pci_dev(dev) : NULL;
-	struct device_domain_info *info;
-	struct intel_iommu *iommu;
-	u8 bus, devfn;
-	int ret;
+	struct pci_dev *pdev = dev_is_pci(dev) ? to_pci_dev(dev) : NULL;	/* [한국어] PCI 장치면 그 포인터, 아니면 NULL */
+	struct device_domain_info *info;	/* [한국어] 만들 장치 정보 */
+	struct intel_iommu *iommu;	/* [한국어] 이 장치를 맡을 유닛 */
+	u8 bus, devfn;	/* [한국어] 유닛이 보는 소스 id 의 두 부분 */
+	int ret;	/* [한국어] 각 단계의 결과 */
 
-	iommu = device_lookup_iommu(dev, &bus, &devfn);
-	if (!iommu || !iommu->iommu.ops)
-		return ERR_PTR(-ENODEV);
+	iommu = device_lookup_iommu(dev, &bus, &devfn);	/* [한국어] DMAR 표를 따라 이 장치를 담당하는 유닛을 찾는다 */
+	if (!iommu || !iommu->iommu.ops)	/* [한국어] 유닛이 없거나 아직 코어에 등록되지 않았으면 */
+		return ERR_PTR(-ENODEV);	/* [한국어] 이 장치는 IOMMU 아래가 아니다 */
 
-	info = kzalloc_obj(*info);
-	if (!info)
-		return ERR_PTR(-ENOMEM);
+	info = kzalloc_obj(*info);	/* [한국어] 장치 정보 구조체 */
+	if (!info)	/* [한국어] 할당 실패 */
+		return ERR_PTR(-ENOMEM);	/* [한국어] 프로브 실패 */
 
-	if (dev_is_real_dma_subdevice(dev)) {
-		info->bus = pdev->bus->number;
-		info->devfn = pdev->devfn;
-		info->segment = pci_domain_nr(pdev->bus);
+	if (dev_is_real_dma_subdevice(dev)) {	/* [한국어] 부모의 컨텍스트 항목을 공유하는 서브디바이스면 */
+		info->bus = pdev->bus->number;	/* [한국어] 자기 PCI 위치를 그대로 쓴다 */
+		info->devfn = pdev->devfn;	/* [한국어] 자기 devfn */
+		info->segment = pci_domain_nr(pdev->bus);	/* [한국어] 자기 세그먼트 */
 	} else {
-		info->bus = bus;
-		info->devfn = devfn;
-		info->segment = iommu->segment;
+		info->bus = bus;	/* [한국어] 보통은 유닛 조회가 알려 준 값 — 별칭 때문에 자기 위치와 다를 수 있다 */
+		info->devfn = devfn;	/* [한국어] 그 devfn */
+		info->segment = iommu->segment;	/* [한국어] 유닛의 세그먼트 */
 	}
 
-	info->dev = dev;
-	info->iommu = iommu;
-	if (dev_is_pci(dev)) {	/* [한국어] PCI 장치는 별도 처리가 필요하다 — 아래에서 실제 DMA 를 내는 장치로 바꿔 잡는다 */
-		if (ecap_dev_iotlb_support(iommu->ecap) &&
-		    pci_ats_supported(pdev) &&
-		    dmar_ats_supported(pdev, iommu)) {
-			info->ats_supported = 1;
-			info->dtlb_extra_inval = dev_needs_extra_dtlb_flush(pdev);
+	info->dev = dev;	/* [한국어] 원본 장치 */
+	info->iommu = iommu;	/* [한국어] 담당 유닛 */
+	if (dev_is_pci(dev)) {	/* [한국어] PCI 장치라면 ATS/PRI/PASID 능력을 추가로 살핀다 */
+		if (ecap_dev_iotlb_support(iommu->ecap) &&	/* [한국어] 유닛이 디바이스 IOTLB 를 지원하고 */
+		    pci_ats_supported(pdev) &&	/* [한국어] 장치에 ATS 능력 구조가 있고 */
+		    dmar_ats_supported(pdev, iommu)) {	/* [한국어] 경로와 펌웨어 신고까지 허용하면 */
+			info->ats_supported = 1;	/* [한국어] ATS 를 쓸 수 있는 장치로 표시 */
+			info->dtlb_extra_inval = dev_needs_extra_dtlb_flush(pdev);	/* [한국어] 일부 장치는 결함 때문에 디바이스 TLB 무효화를 한 번 더 보내야 한다 */
 
 			/*
 			 * For IOMMU that supports device IOTLB throttling
@@ -5857,63 +6068,92 @@ static struct iommu_device *intel_iommu_probe_device(struct device *dev)
 			 * at PF level. If DIT is not set, PFSID will be
 			 * treated as reserved, which should be set to 0.
 			 */
-			if (ecap_dit(iommu->ecap))
-				info->pfsid = pci_dev_id(pci_physfn(pdev));
-			info->ats_qdep = pci_ats_queue_depth(pdev);
+			if (ecap_dit(iommu->ecap))	/* [한국어] 유닛이 디바이스 IOTLB 스로틀링(DIT)을 지원하면 (위 영어 주석) */
+				info->pfsid = pci_dev_id(pci_physfn(pdev));	/* [한국어] VF 의 무효화 요청에 PF 의 소스 id 를 실어 준다. 그래야 하드웨어가 PF 단위로 큐 깊이를 가늠할 수 있다. DIT 가 없으면 이 필드는 예약이라 0 이어야 한다 */
+			info->ats_qdep = pci_ats_queue_depth(pdev);	/* [한국어] 장치가 한 번에 받을 수 있는 무효화 요청 수. 이보다 많이 보내면 응답이 유실된다 */
 		}
-		if (sm_supported(iommu)) {
-			if (pasid_supported(iommu)) {
-				int features = pci_pasid_features(pdev);
+		if (sm_supported(iommu)) {	/* [한국어] scalable 모드에서만 PASID/PRI 를 쓸 수 있다 */
+			if (pasid_supported(iommu)) {	/* [한국어] 유닛이 PASID 를 지원하면 */
+				int features = pci_pasid_features(pdev);	/* [한국어] 장치의 PASID 능력(실행 권한, 특권 모드 지원 여부) */
 
-				if (features >= 0)
-					info->pasid_supported = features | 1;
+				if (features >= 0)	/* [한국어] 능력 구조가 있으면 */
+					info->pasid_supported = features | 1;	/* [한국어] 비트 0 을 "지원함" 표시로 겸용한다. features 가 0 일 수 있어 그것만으로는 지원 여부를 구분하지 못하기 때문이다 */
 			}
 
-			if (info->ats_supported && ecap_prs(iommu->ecap) &&
-			    ecap_pds(iommu->ecap) && pci_pri_supported(pdev))
-				info->pri_supported = 1;
+			if (info->ats_supported && ecap_prs(iommu->ecap) &&	/* [한국어] ATS 가 되고, 유닛이 페이지 요청을 지원하고 */
+			    ecap_pds(iommu->ecap) && pci_pri_supported(pdev))	/* [한국어] 페이지 요청 드레인도 되고, 장치에도 PRI 능력이 있으면 */
+				info->pri_supported = 1;	/* [한국어] PRI 를 쓸 수 있다. ATS 가 전제인 이유는 PRI 응답이 ATS 번역 경로로 돌아오기 때문이다 */
 		}
 	}
 
-	dev_iommu_priv_set(dev, info);
-	if (pdev && pci_ats_supported(pdev)) {
-		pci_prepare_ats(pdev, VTD_PAGE_SHIFT);
-		ret = device_rbtree_insert(iommu, info);
-		if (ret)
-			goto free;
+	dev_iommu_priv_set(dev, info);	/* [한국어] 장치에 이 정보를 매단다. 이후 모든 콜백이 dev_iommu_priv_get 으로 되찾는다 */
+	if (pdev && pci_ats_supported(pdev)) {	/* [한국어] ATS 를 쓸 수 있는 PCI 장치면 */
+		pci_prepare_ats(pdev, VTD_PAGE_SHIFT);	/* [한국어] 장치의 ATS 페이지 크기를 4KB 로 맞춘다 */
+		ret = device_rbtree_insert(iommu, info);	/* [한국어] 소스 id 색인 트리에 넣는다. ATS/PRI 를 쓰는 장치는 폴트가 소스 id 로 돌아오므로 이 등록이 필요하다 */
+		if (ret)	/* [한국어] 중복 등록 등 실패 */
+			goto free;	/* [한국어] 장치 정보를 반납하고 나간다 */
 	}
 
-	if (sm_supported(iommu) && !dev_is_real_dma_subdevice(dev)) {
-		ret = intel_pasid_alloc_table(dev);
+	if (sm_supported(iommu) && !dev_is_real_dma_subdevice(dev)) {	/* [한국어] scalable 모드이고 자기 항목을 갖는 장치면 */
+		ret = intel_pasid_alloc_table(dev);	/* [한국어] 이 장치 전용 PASID 테이블을 만든다 */
 		if (ret) {
-			dev_err(dev, "PASID table allocation failed\n");
-			goto clear_rbtree;
+			dev_err(dev, "PASID table allocation failed\n");	/* [한국어] 실패는 치명적이다 — 이 모드에서는 PASID 테이블 없이 번역을 세울 수 없다 */
+			goto clear_rbtree;	/* [한국어] 트리 등록을 되돌린다 */
 		}
 
-		if (!context_copied(iommu, info->bus, info->devfn)) {
-			ret = intel_pasid_setup_sm_context(dev);
-			if (ret)
-				goto free_table;
+		if (!context_copied(iommu, info->bus, info->devfn)) {	/* [한국어] 이전 커널에서 컨텍스트를 물려받은 것이 아니라면 */
+			ret = intel_pasid_setup_sm_context(dev);	/* [한국어] 지금 컨텍스트 항목을 세운다. 물려받은 경우는 아직 손대지 않고, 도메인을 붙일 때 paging_domain_compatible 이 전환한다 */
+			if (ret)	/* [한국어] 실패 */
+				goto free_table;	/* [한국어] PASID 테이블을 반납한다 */
 		}
 	}
 
-	intel_iommu_debugfs_create_dev(info);
+	intel_iommu_debugfs_create_dev(info);	/* [한국어] 이 장치의 진단 노드를 만든다 */
 
-	return &iommu->iommu;
-free_table:
-	intel_pasid_free_table(dev);
-clear_rbtree:
-	device_rbtree_remove(info);
-free:
-	kfree(info);
+	return &iommu->iommu;	/* [한국어] 코어에 "이 장치는 이 유닛이 맡는다"고 알린다 */
+free_table:	/* [한국어] 컨텍스트 설정 실패 경로 */
+	intel_pasid_free_table(dev);	/* [한국어] PASID 테이블 반납 */
+clear_rbtree:	/* [한국어] PASID 테이블 실패가 합류 */
+	device_rbtree_remove(info);	/* [한국어] 소스 id 트리에서 제거 */
+free:	/* [한국어] 트리 등록 실패가 합류 */
+	kfree(info);	/* [한국어] 장치 정보 반납 */
 
-	return ERR_PTR(ret);
+	return ERR_PTR(ret);	/* [한국어] 프로브 실패를 코어에 알린다 */
 }
 
+/*
+ * [한국어]
+ * intel_iommu_probe_finalize - 기본 도메인이 붙은 뒤 PASID/ATS/PRI 를 실제로 켠다
+ *
+ * @dev: 대상 장치.
+ * @return: 없음. 실패해도 조용히 그 기능만 꺼진 채로 진행한다.
+ *
+ * probe_device 가 "무엇을 켤 수 있는지" 조사했다면, 이 함수는 기본 도메인이
+ * 붙은 뒤 실제로 켜는 일을 한다. 코어가 두 단계로 나눈 이유는, 도메인이 붙기
+ * 전에 ATS 를 켜면 아직 번역 테이블이 없는 상태에서 장치가 번역을 요청하게
+ * 되기 때문이다.
+ *
+ * 순서가 스펙 요구사항이다: PCIe 스펙은 "ATS 를 켠 뒤에 PASID 를 켜면 장치의
+ * 동작이 정의되지 않는다"고 못 박고 있다(위 영어 주석). 그래서 아직 PASID 를
+ * 쓸지 모르더라도, 능력이 있으면 무조건 먼저 켜 둔다. 그 다음 ATS, 마지막이
+ * PRI 다. release_device 는 정확히 이 역순으로 내린다.
+ *
+ * cache_tag_assign 이 여기 있는 이유: ATS 를 켰다는 것은 장치가 자기 안에
+ * 번역을 캐시하기 시작했다는 뜻이다. 언매핑 때 그 캐시까지 비우려면 무효화
+ * 대상 목록에 디바이스 TLB 태그를 등록해야 한다. 등록에 실패하면 ATS 를
+ * 도로 끈다 — 무효화할 수 없는 캐시를 켜 두는 것이 훨씬 위험하기 때문이다.
+ *
+ * 실행 컨텍스트: 장치 프로브 마무리. 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   iommu_probe_device() (기본 도메인 부착 후) → [intel_iommu_probe_finalize]
+ *     → pci_enable_pasid() → iommu_enable_pci_ats() → cache_tag_assign()
+ *     → iommu_enable_pci_pri()
+ */
 static void intel_iommu_probe_finalize(struct device *dev)
 {
-	struct device_domain_info *info = dev_iommu_priv_get(dev);
-	struct intel_iommu *iommu = info->iommu;
+	struct device_domain_info *info = dev_iommu_priv_get(dev);	/* [한국어] 장치 정보 */
+	struct intel_iommu *iommu = info->iommu;	/* [한국어] 담당 유닛 */
 
 	/*
 	 * The PCIe spec, in its wisdom, declares that the behaviour of the
@@ -5921,140 +6161,251 @@ static void intel_iommu_probe_finalize(struct device *dev)
 	 * So always enable PASID support on devices which have it, even if
 	 * we can't yet know if we're ever going to use it.
 	 */
-	if (info->pasid_supported &&
-	    !pci_enable_pasid(to_pci_dev(dev), info->pasid_supported & ~1))
-		info->pasid_enabled = 1;
+	if (info->pasid_supported &&	/* [한국어] 장치가 PASID 능력을 갖고 있고 (위 영어 주석) */
+	    !pci_enable_pasid(to_pci_dev(dev), info->pasid_supported & ~1))	/* [한국어] 켜는 데 성공하면 (비트 0 은 우리가 붙인 표시라 뺀다) */
+		info->pasid_enabled = 1;	/* [한국어] 기록한다. PCIe 스펙상 ATS 를 켠 뒤 PASID 를 켜면 동작이 정의되지 않으므로, 아직 쓸지 모르더라도 항상 PASID 를 먼저 켠다 (위 영어 주석) */
 
-	if (sm_supported(iommu) && !dev_is_real_dma_subdevice(dev)) {
-		iommu_enable_pci_ats(info);
+	if (sm_supported(iommu) && !dev_is_real_dma_subdevice(dev)) {	/* [한국어] scalable 모드이고 자기 항목을 갖는 장치면 */
+		iommu_enable_pci_ats(info);	/* [한국어] 이제 ATS 를 켠다 — PASID 다음이라는 순서가 중요하다 */
 		/* Assign a DEVTLB cache tag to the default domain. */
-		if (info->ats_enabled && info->domain) {
-			u16 did = domain_id_iommu(info->domain, iommu);
+		if (info->ats_enabled && info->domain) {	/* [한국어] ATS 가 켜졌고 이미 기본 도메인에 붙어 있으면 (위 영어 주석) */
+			u16 did = domain_id_iommu(info->domain, iommu);	/* [한국어] 이 유닛에서 그 도메인의 id */
 
-			if (cache_tag_assign(info->domain, did, dev,
-					     IOMMU_NO_PASID, CACHE_TAG_DEVTLB))
-				iommu_disable_pci_ats(info);
+			if (cache_tag_assign(info->domain, did, dev,	/* [한국어] 디바이스 TLB 무효화 대상으로 등록한다. 이 등록이 없으면 언매핑 때 장치 캐시가 남는다 */
+					     IOMMU_NO_PASID, CACHE_TAG_DEVTLB))	/* [한국어] PASID 없는 기본 트래픽의 디바이스 TLB 태그 */
+				iommu_disable_pci_ats(info);	/* [한국어] 등록에 실패하면 ATS 를 다시 끈다. 무효화할 수 없는 캐시를 켜 두는 것이 더 위험하다 */
 		}
 	}
-	iommu_enable_pci_pri(info);
+	iommu_enable_pci_pri(info);	/* [한국어] 마지막으로 페이지 요청 인터페이스를 켠다. ATS 가 켜진 뒤여야 한다 */
 }
 
+/*
+ * [한국어]
+ * intel_iommu_release_device - 장치를 VT-d 에서 떼어 내고 자원을 반납한다
+ *
+ * @dev: 떨어져 나가는 장치.
+ * @return: 없음.
+ *
+ * probe_device + probe_finalize 의 역순으로 되돌린다. 순서가 중요한 곳이 셋이다.
+ *   1) PRI → ATS → PASID 순으로 끈다. probe_finalize 가 PASID → ATS → PRI
+ *      순으로 켰으므로 정확히 역순이다. PRI 를 먼저 끄지 않으면 ATS 를 끈 뒤
+ *      도착한 페이지 요청의 응답이 갈 길을 잃는다.
+ *   2) 소스 id 트리 제거는 iopf_lock 안에서 한다. 그래야 "이 뒤로는 폴트
+ *      처리기가 이 장치를 찾지 못한다"는 순간이 확정된다. 락 없이 지우면
+ *      진행 중인 폴트 처리가 해제된 info 를 볼 수 있다.
+ *   3) 물려받은 컨텍스트(context_copied)는 내리지 않는다. 그것은 우리가 세운
+ *      것이 아니고, 다음 커널이 그 상태를 이어받을 수 있어야 하기 때문이다.
+ *
+ * 마지막에 info 자체를 kfree 한다. 이 시점 이후 dev_iommu_priv_get 은
+ * 유효하지 않으므로, 이 함수 뒤에 이 장치를 참조하는 코드가 남아 있으면
+ * 안 된다 — 위 세 순서 규칙이 그것을 보장한다.
+ *
+ * 실행 컨텍스트: 장치 제거. 프로세스 컨텍스트(mutex 를 잡는다).
+ *
+ * 호출 체인:
+ *   iommu_release_device() → [intel_iommu_release_device]
+ *     → iommu_disable_pci_pri()/ats() → device_rbtree_remove()
+ *     → intel_pasid_teardown_sm_context() → intel_pasid_free_table()
+ */
 static void intel_iommu_release_device(struct device *dev)
 {
-	struct device_domain_info *info = dev_iommu_priv_get(dev);
-	struct intel_iommu *iommu = info->iommu;
+	struct device_domain_info *info = dev_iommu_priv_get(dev);	/* [한국어] 장치 정보 */
+	struct intel_iommu *iommu = info->iommu;	/* [한국어] 담당 유닛 */
 
-	iommu_disable_pci_pri(info);
-	iommu_disable_pci_ats(info);
+	iommu_disable_pci_pri(info);	/* [한국어] 프로브의 역순으로 내린다 — PRI 먼저 */
+	iommu_disable_pci_ats(info);	/* [한국어] 그 다음 ATS. 순서를 바꾸면 PRI 응답이 갈 길을 잃는다 */
 
-	if (info->pasid_enabled) {
-		pci_disable_pasid(to_pci_dev(dev));
-		info->pasid_enabled = 0;
+	if (info->pasid_enabled) {	/* [한국어] PASID 를 켰었으면 */
+		pci_disable_pasid(to_pci_dev(dev));	/* [한국어] 마지막으로 끈다 */
+		info->pasid_enabled = 0;	/* [한국어] 기록 */
 	}
 
-	mutex_lock(&iommu->iopf_lock);
-	if (dev_is_pci(dev) && pci_ats_supported(to_pci_dev(dev)))
-		device_rbtree_remove(info);
-	mutex_unlock(&iommu->iopf_lock);
+	mutex_lock(&iommu->iopf_lock);	/* [한국어] 폴트 처리 경로와 겹치지 않게 잡는다 */
+	if (dev_is_pci(dev) && pci_ats_supported(to_pci_dev(dev)))	/* [한국어] 프로브 때 트리에 넣었던 장치라면 */
+		device_rbtree_remove(info);	/* [한국어] 소스 id 색인에서 뺀다. 락 안에서 하는 이유는 이 뒤로 폴트 처리기가 이 장치를 찾지 못하게 하는 순간을 확정하기 위해서다 */
+	mutex_unlock(&iommu->iopf_lock);	/* [한국어] 락 해제 */
 
-	if (sm_supported(iommu) && !dev_is_real_dma_subdevice(dev) &&
-	    !context_copied(iommu, info->bus, info->devfn))
-		intel_pasid_teardown_sm_context(dev);
+	if (sm_supported(iommu) && !dev_is_real_dma_subdevice(dev) &&	/* [한국어] scalable 모드이고 자기 항목을 갖는 장치이며 */
+	    !context_copied(iommu, info->bus, info->devfn))	/* [한국어] 물려받은 컨텍스트가 아니면 */
+		intel_pasid_teardown_sm_context(dev);	/* [한국어] 우리가 세운 컨텍스트를 내린다. 물려받은 것은 손대지 않는다 — 다음 커널이 그 상태를 이어받을 수 있다 */
 
-	intel_pasid_free_table(dev);
-	intel_iommu_debugfs_remove_dev(info);
-	kfree(info);
+	intel_pasid_free_table(dev);	/* [한국어] PASID 테이블 반납 */
+	intel_iommu_debugfs_remove_dev(info);	/* [한국어] 진단 노드 제거 */
+	kfree(info);	/* [한국어] 장치 정보 반납 */
 }
 
+/*
+ * [한국어]
+ * intel_iommu_get_resv_regions - 이 장치에 대해 IOVA 로 써서는 안 되는 주소 범위를 보고한다
+ *
+ * @device: 대상 장치.
+ * @head: 만든 iommu_resv_region 들을 매달 목록(호출자가 준비한다).
+ * @return: 없음. 만들 수 있는 만큼만 만들고 돌아간다.
+ *
+ * 예약 영역이 왜 필요한가: IOVA 할당기는 도메인의 주소 공간을 자유롭게 쓴다고
+ * 가정한다. 그런데 실제로는 손대면 안 되는 구간이 있다. 그 구간에 매핑을
+ * 만들면 (a) 펌웨어의 DMA 가 엉뚱한 데로 가거나 (b) 인터럽트 메시지가 메모리
+ * 쓰기로 오인된다. 이 콜백이 그런 구간을 코어에 알려 준다.
+ *
+ * 세 종류를 보고한다.
+ *   [1] RMRR — 펌웨어가 신고한 예약 구간. 이 장치 자신이나 이 장치가 매달린
+ *       브리지에 걸린 항목을 찾는다(브리지의 RMRR 은 그 아래 모든 장치에
+ *       적용되므로 is_downstream_to_pci_bridge 로 확인한다).
+ *       device_rmrr_is_relaxable 이면 DIRECT_RELAXABLE 로 표시해, 항등 매핑을
+ *       강제하지 않고 그 주소만 피하게 한다 — USB/그래픽처럼 부팅 뒤 펌웨어가
+ *       손을 떼는 장치가 여기 해당한다.
+ *   [2] 플로피 우회(CONFIG_INTEL_IOMMU_FLOPPY_WA) — ISA 브리지 아래의 레거시
+ *       DMA 는 하위 16MB 만 다룰 수 있어 그 범위를 통째로 예약한다.
+ *   [3] IOAPIC 범위 — 이 주소로 가는 것은 DMA 가 아니라 인터럽트 메시지다.
+ *       IOMMU 가 그것을 메모리 쓰기로 번역하면 인터럽트가 사라진다.
+ *       IOMMU_RESV_MSI 로 표시해 코어가 다르게 다루게 한다.
+ *
+ * 할당 플래그가 두 가지인 이유: RMRR 순회는 rcu_read_lock 안이라 잠들 수 없어
+ * GFP_ATOMIC 을, 그 밖은 GFP_KERNEL 을 쓴다.
+ * 실행 컨텍스트: 장치가 그룹에 들어갈 때. 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   iommu_get_resv_regions() → [intel_iommu_get_resv_regions]
+ *     → device_rmrr_is_relaxable() → iommu_alloc_resv_region()
+ */
 static void intel_iommu_get_resv_regions(struct device *device,
 					 struct list_head *head)
 {
-	int prot = DMA_PTE_READ | DMA_PTE_WRITE;
-	struct iommu_resv_region *reg;
-	struct dmar_rmrr_unit *rmrr;
-	struct device *i_dev;
-	int i;
+	int prot = DMA_PTE_READ | DMA_PTE_WRITE;	/* [한국어] RMRR 구간은 읽기/쓰기 모두 허용해야 한다. 펌웨어가 어느 쪽으로 쓰는지 알 수 없기 때문이다 */
+	struct iommu_resv_region *reg;	/* [한국어] 만들 예약 영역 */
+	struct dmar_rmrr_unit *rmrr;	/* [한국어] RMRR 항목 순회 커서 */
+	struct device *i_dev;	/* [한국어] device scope 순회 커서 */
+	int i;	/* [한국어] 인덱스 */
 
-	rcu_read_lock();
-	for_each_rmrr_units(rmrr) {
-		for_each_active_dev_scope(rmrr->devices, rmrr->devices_cnt,
-					  i, i_dev) {
-			struct iommu_resv_region *resv;
-			enum iommu_resv_type type;
-			size_t length;
+	rcu_read_lock();	/* [한국어] RMRR 목록 순회 보호 */
+	for_each_rmrr_units(rmrr) {	/* [한국어] 신고된 예약 구간마다 */
+		for_each_active_dev_scope(rmrr->devices, rmrr->devices_cnt,	/* [한국어] 그 구간이 적용되는 장치들을 훑으며 */
+					  i, i_dev) {	/* [한국어] 순회 */
+			struct iommu_resv_region *resv;	/* [한국어] 만들 항목 */
+			enum iommu_resv_type type;	/* [한국어] 예약의 성격 */
+			size_t length;	/* [한국어] 구간 길이 */
 
-			if (i_dev != device &&
-			    !is_downstream_to_pci_bridge(device, i_dev))
-				continue;
+			if (i_dev != device &&	/* [한국어] 우리가 묻는 장치가 아니고 */
+			    !is_downstream_to_pci_bridge(device, i_dev))	/* [한국어] 그 장치 아래에 매달린 것도 아니면 */
+				continue;	/* [한국어] 무관한 항목이다. 브리지 아래까지 보는 이유는 브리지에 걸린 RMRR 이 그 아래 모든 장치에 적용되기 때문이다 */
 
-			length = rmrr->end_address - rmrr->base_address + 1;
+			length = rmrr->end_address - rmrr->base_address + 1;	/* [한국어] 닫힌 구간이라 +1 */
 
-			type = device_rmrr_is_relaxable(device) ?
-				IOMMU_RESV_DIRECT_RELAXABLE : IOMMU_RESV_DIRECT;
+			type = device_rmrr_is_relaxable(device) ?	/* [한국어] 이 장치의 RMRR 을 나중에 풀어도 되는가 */
+				IOMMU_RESV_DIRECT_RELAXABLE : IOMMU_RESV_DIRECT;	/* [한국어] USB/그래픽처럼 부팅 뒤 펌웨어가 손을 떼는 장치는 RELAXABLE 로 표시해, 항등 매핑을 강제하지 않고 주소만 피하게 한다 */
 
-			resv = iommu_alloc_resv_region(rmrr->base_address,
-						       length, prot, type,
-						       GFP_ATOMIC);
-			if (!resv)
-				break;
+			resv = iommu_alloc_resv_region(rmrr->base_address,	/* [한국어] 예약 영역 객체를 만든다 */
+						       length, prot, type,	/* [한국어] 길이, 권한, 성격 */
+						       GFP_ATOMIC);	/* [한국어] RCU 순회 안이라 잠들 수 없다 */
+			if (!resv)	/* [한국어] 할당 실패 */
+				break;	/* [한국어] 더 만들지 못한다. 여기까지 만든 것은 그대로 두고 나간다 */
 
-			list_add_tail(&resv->list, head);
+			list_add_tail(&resv->list, head);	/* [한국어] 호출자의 목록에 붙인다 */
 		}
 	}
-	rcu_read_unlock();
+	rcu_read_unlock();	/* [한국어] 순회 끝 */
 
 #ifdef CONFIG_INTEL_IOMMU_FLOPPY_WA
-	if (dev_is_pci(device)) {
-		struct pci_dev *pdev = to_pci_dev(device);
+	if (dev_is_pci(device)) {	/* [한국어] 플로피 우회가 켜진 빌드에서 PCI 장치라면 */
+		struct pci_dev *pdev = to_pci_dev(device);	/* [한국어] PCI 장치로 */
 
-		if ((pdev->class >> 8) == PCI_CLASS_BRIDGE_ISA) {
-			reg = iommu_alloc_resv_region(0, 1UL << 24, prot,
-					IOMMU_RESV_DIRECT_RELAXABLE,
-					GFP_KERNEL);
-			if (reg)
-				list_add_tail(&reg->list, head);
+		if ((pdev->class >> 8) == PCI_CLASS_BRIDGE_ISA) {	/* [한국어] ISA 브리지면 */
+			reg = iommu_alloc_resv_region(0, 1UL << 24, prot,	/* [한국어] 하위 16MB 를 통째로 예약한다. 플로피 컨트롤러의 레거시 DMA 가 그 범위만 쓸 수 있어서다 */
+					IOMMU_RESV_DIRECT_RELAXABLE,	/* [한국어] 필요하면 풀 수 있는 예약으로 표시 */
+					GFP_KERNEL);	/* [한국어] 여기는 RCU 밖이라 잠들 수 있다 */
+			if (reg)	/* [한국어] 만들어졌으면 */
+				list_add_tail(&reg->list, head);	/* [한국어] 목록에 붙인다 */
 		}
 	}
 #endif /* CONFIG_INTEL_IOMMU_FLOPPY_WA */
 
-	reg = iommu_alloc_resv_region(IOAPIC_RANGE_START,
-				      IOAPIC_RANGE_END - IOAPIC_RANGE_START + 1,
-				      0, IOMMU_RESV_MSI, GFP_KERNEL);
-	if (!reg)
-		return;
-	list_add_tail(&reg->list, head);
+	reg = iommu_alloc_resv_region(IOAPIC_RANGE_START,	/* [한국어] IOAPIC 인터럽트 주소 범위를 예약한다 */
+				      IOAPIC_RANGE_END - IOAPIC_RANGE_START + 1,	/* [한국어] 그 길이 */
+				      0, IOMMU_RESV_MSI, GFP_KERNEL);	/* [한국어] MSI 형 예약이라 권한은 0. 이 범위는 DMA 가 아니라 인터럽트 메시지가 가는 곳이라, IOVA 할당기가 여기를 쓰면 인터럽트가 메모리 쓰기로 오인된다 */
+	if (!reg)	/* [한국어] 할당 실패 */
+		return;	/* [한국어] 지금까지 만든 것만 남긴다 */
+	list_add_tail(&reg->list, head);	/* [한국어] 목록에 붙인다 */
 }
 
+/*
+ * [한국어]
+ * intel_iommu_device_group - 이 장치가 속할 IOMMU 그룹을 정한다
+ *
+ * @dev: 대상 장치.
+ * @return: 이 장치가 들어갈 iommu_group(참조를 잡은 상태로 반환된다).
+ *
+ * 그룹이란: 하드웨어적으로 서로 분리할 수 없는 장치들의 묶음이다. 예를 들어
+ * ACS(Access Control Services)가 없는 스위치 아래의 장치들은 서로의 트래픽을
+ * IOMMU 를 거치지 않고 주고받을 수 있으므로, 하나를 격리해도 의미가 없다.
+ * 그래서 코어는 그룹 단위로만 도메인을 붙인다.
+ *
+ * PCI 장치는 pci_device_group 이 PCIe 토폴로지와 ACS 설정, requester id
+ * 별칭까지 보고 판단한다. 이 드라이버가 그 판단에 더할 것이 없어 코어 헬퍼를
+ * 그대로 쓴다. PCI 가 아닌 장치(ACPI 네임스페이스 장치 등)는 그런 우회 경로가
+ * 없으므로 generic_device_group 으로 하나씩 자기 그룹을 갖는다.
+ *
+ * 실행 컨텍스트: 장치 프로브. 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   iommu_group_get_for_dev() → [intel_iommu_device_group]
+ */
 static struct iommu_group *intel_iommu_device_group(struct device *dev)
 {
-	if (dev_is_pci(dev))
-		return pci_device_group(dev);
-	return generic_device_group(dev);
+	if (dev_is_pci(dev))	/* [한국어] PCI 장치는 */
+		return pci_device_group(dev);	/* [한국어] PCIe 토폴로지와 ACS 설정을 보고 그룹을 정한다. 하드웨어적으로 분리할 수 없는 장치들이 한 그룹이 된다 */
+	return generic_device_group(dev);	/* [한국어] 그 밖의 장치는 하나씩 자기 그룹을 갖는다 */
 }
 
+/*
+ * [한국어]
+ * intel_iommu_enable_iopf - 이 장치의 I/O 페이지 폴트 처리를 켠다(참조 계수 방식)
+ *
+ * @dev: 대상 장치.
+ * @return: 0 성공, -ENODEV 면 PRI 가 켜져 있지 않아 폴트를 받을 방법이 없다.
+ *
+ * I/O 페이지 폴트란: SVA 처럼 매핑을 미리 다 만들어 두지 않는 방식에서는,
+ * 장치가 아직 매핑되지 않은 주소에 접근하면 IOMMU 가 그것을 폴트로 보고하고
+ * 커널이 페이지를 채운 뒤 장치에 "다시 시도하라"고 답한다. PRI(Page Request
+ * Interface)가 그 하드웨어 통로이고, iopf 큐가 그 소프트웨어 처리다.
+ *
+ * 참조 계수가 필요한 이유: 한 장치를 SVA 와 iommufd 가 동시에 쓸 수 있고,
+ * 둘 다 폴트 처리를 요구한다. 먼저 끈 쪽 때문에 다른 쪽의 폴트 처리가
+ * 사라지면 그쪽 장치는 영원히 멈춘다(응답 없는 페이지 요청은 장치를 정지시킨다).
+ * 그래서 마지막 사용자가 놓을 때까지 유지한다.
+ *
+ * 동기화: pri_enabled 와 iopf_refcount 는 그룹 뮤텍스가 지킨다. 이 함수는 그
+ * 락을 잡지 않고 iommu_group_mutex_assert 로 호출자가 쥐고 있음을 확인만
+ * 한다 — 켜고 끄는 결정이 그룹 단위로 일어나기 때문이다.
+ *
+ * 실행 컨텍스트: SVA/iommufd 설정 경로. 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   iommu_dev_enable_feature(IOMMU_DEV_FEAT_IOPF)/SVA 설정 → [이 함수]
+ *     → iopf_queue_add_device()
+ */
 int intel_iommu_enable_iopf(struct device *dev)
 {
-	struct device_domain_info *info = dev_iommu_priv_get(dev);
-	struct intel_iommu *iommu = info->iommu;
-	int ret;
+	struct device_domain_info *info = dev_iommu_priv_get(dev);	/* [한국어] 장치 정보 */
+	struct intel_iommu *iommu = info->iommu;	/* [한국어] 담당 유닛 */
+	int ret;	/* [한국어] 결과 */
 
-	if (!info->pri_enabled)
-		return -ENODEV;
+	if (!info->pri_enabled)	/* [한국어] PRI 가 켜져 있지 않으면 */
+		return -ENODEV;	/* [한국어] 페이지 폴트를 받을 방법이 없다 */
 
 	/* pri_enabled is protected by the group mutex. */
-	iommu_group_mutex_assert(dev);
-	if (info->iopf_refcount) {
-		info->iopf_refcount++;
-		return 0;
+	iommu_group_mutex_assert(dev);	/* [한국어] pri_enabled 와 참조 계수를 그룹 뮤텍스가 지킨다 (위 영어 주석) */
+	if (info->iopf_refcount) {	/* [한국어] 이미 켜져 있으면 */
+		info->iopf_refcount++;	/* [한국어] 참조만 하나 늘린다. 같은 장치를 SVA 와 iommufd 가 동시에 쓸 수 있어 참조 계수가 필요하다 */
+		return 0;	/* [한국어] 성공 */
 	}
 
-	ret = iopf_queue_add_device(iommu->iopf_queue, dev);
-	if (ret)
-		return ret;
+	ret = iopf_queue_add_device(iommu->iopf_queue, dev);	/* [한국어] 이 유닛의 폴트 큐에 장치를 등록한다 */
+	if (ret)	/* [한국어] 실패 */
+		return ret;	/* [한국어] 전달 */
 
-	info->iopf_refcount = 1;
+	info->iopf_refcount = 1;	/* [한국어] 첫 사용자 */
 
-	return 0;
+	return 0;	/* [한국어] 이제 이 장치의 페이지 폴트가 처리된다 */
 }
 
 void intel_iommu_disable_iopf(struct device *dev)
