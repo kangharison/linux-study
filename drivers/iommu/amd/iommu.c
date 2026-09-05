@@ -4967,24 +4967,50 @@ static int blocked_domain_attach_device(struct iommu_domain *domain,
 	return 0;	/* [한국어] 실패할 수 없는 경로 */
 }
 
+/*
+ * [한국어]
+ * blocked_domain_set_dev_pasid - PASID 하나를 막힌 상태로 되돌린다
+ *
+ * @domain: blocked 도메인.
+ * @dev: 대상 장치.
+ * @pasid: 막을 PASID.
+ * @old: 직전에 그 PASID 에 붙어 있던 도메인.
+ * @return: 항상 0.
+ *
+ * PASID 단위 detach 다. GCR3 항목을 비우면 그 PASID 로 오는 접근은
+ * 하드웨어에서 거부된다. 장치의 다른 PASID 는 그대로 산다.
+ */
 static int blocked_domain_set_dev_pasid(struct iommu_domain *domain,
 					struct device *dev, ioasid_t pasid,
 					struct iommu_domain *old)
 {
-	amd_iommu_remove_dev_pasid(dev, pasid, old);
-	return 0;
+	amd_iommu_remove_dev_pasid(dev, pasid, old);	/* [한국어] GCR3 항목을 비워 그 PASID 만 막는다 */
+	return 0;	/* [한국어] 실패할 수 없는 경로 */
 }
 
 static struct iommu_domain blocked_domain = {
-	.type = IOMMU_DOMAIN_BLOCKED,
+	.type = IOMMU_DOMAIN_BLOCKED,	/* [한국어] 상태가 없는 이름뿐인 도메인 — 실제 동작은 DTE 를 변환 불가로 만드는 것이다 */
 	.ops = &(const struct iommu_domain_ops) {
-		.attach_dev     = blocked_domain_attach_device,
-		.set_dev_pasid  = blocked_domain_set_dev_pasid,
+		.attach_dev     = blocked_domain_attach_device,	/* [한국어] 장치 전체를 막는다 */
+		.set_dev_pasid  = blocked_domain_set_dev_pasid,	/* [한국어] PASID 하나만 막는다 */
 	}
 };
 
 static struct protection_domain identity_domain;
 
+/*
+ * [한국어]
+ * amd_iommu_identity_attach - 장치를 통과 도메인에 붙인다
+ *
+ * @dom: identity 도메인.
+ * @dev: 대상 장치.
+ * @old: 직전 도메인.
+ * @return: 0 성공, SNP 가 켜져 있으면 -EINVAL.
+ *
+ * SNP 를 막는 이유가 이 함수의 전부다. SNP 는 DTE 의 페이지 테이블 모드가
+ * 0 인 것을 금지하는데, 통과가 바로 그 상태다. 게스트 메모리 보호가
+ * IOMMU 변환을 전제로 하므로 변환을 건너뛰게 둘 수 없다.
+ */
 static int amd_iommu_identity_attach(struct iommu_domain *dom, struct device *dev,
 				     struct iommu_domain *old)
 {
@@ -4992,220 +5018,326 @@ static int amd_iommu_identity_attach(struct iommu_domain *dom, struct device *de
 	 * Don't allow attaching a device to the identity domain if SNP is
 	 * enabled.
 	 */
-	if (amd_iommu_snp_en)
-		return -EINVAL;
+	if (amd_iommu_snp_en)	/* [한국어] (원 주석: SNP 가 켜져 있으면 통과 도메인 붙이기를 막는다) */
+		return -EINVAL;	/* [한국어] SNP 는 DTE 의 모드 0 을 금지한다 */
 
-	return amd_iommu_attach_device(dom, dev, old);
+	return amd_iommu_attach_device(dom, dev, old);	/* [한국어] 나머지는 일반 attach 와 같다 */
 }
 
 static const struct iommu_domain_ops identity_domain_ops = {
-	.attach_dev = amd_iommu_identity_attach,
+	.attach_dev = amd_iommu_identity_attach,	/* [한국어] SNP 확인만 더한 일반 attach */
 };
 
+/*
+ * [한국어]
+ * amd_iommu_init_identity_domain - 전역 통과 도메인을 준비한다
+ *
+ * 통과 도메인은 하나면 충분하므로 정적 변수로 두고 부팅 중 한 번 채운다.
+ * 페이지 테이블이 없으니 할당할 것도 없다.
+ *
+ * 도메인 id 는 여전히 필요하다 — 무효화 명령이 그 id 로 대상을 고른다.
+ *
+ * 호출 체인:
+ *   amd_iommu_init() → [이 함수]
+ */
 void amd_iommu_init_identity_domain(void)
 {
-	struct iommu_domain *domain = &identity_domain.domain;
+	struct iommu_domain *domain = &identity_domain.domain;	/* [한국어] 전역 정적 도메인 */
 
-	domain->type = IOMMU_DOMAIN_IDENTITY;
-	domain->ops = &identity_domain_ops;
-	domain->owner = &amd_iommu_ops;
+	domain->type = IOMMU_DOMAIN_IDENTITY;	/* [한국어] set_dte_entry 가 이 값으로 통과 갈래를 고른다 */
+	domain->ops = &identity_domain_ops;	/* [한국어] attach 만 따로 가로챈다 */
+	domain->owner = &amd_iommu_ops;	/* [한국어] 코어가 소유 드라이버를 확인한다 */
 
-	identity_domain.id = amd_iommu_pdom_id_alloc();
+	identity_domain.id = amd_iommu_pdom_id_alloc();	/* [한국어] 페이지 테이블은 없어도 무효화 태그는 필요하다 */
 
-	protection_domain_init(&identity_domain);
+	protection_domain_init(&identity_domain);	/* [한국어] 목록과 락 초기화 */
 }
 
+/*
+ * [한국어]
+ * amd_iommu_attach_device - 코어가 부르는 도메인 전환 진입점
+ *
+ * @dom: 새로 붙을 도메인.
+ * @dev: 대상 장치.
+ * @old: 직전 도메인.
+ * @return: 0 성공, 음수면 실패.
+ *
+ * 같은 도메인이면 아무 일도 하지 않고 끝낸다 — 코어가 중복으로 부를 수 있다.
+ *
+ * 전환은 반드시 detach 후 attach 다. 하나의 DTE 를 두 도메인이 나눠 가질 수
+ * 없기 때문이다.
+ *
+ * vAPIC 처리가 뒤에 붙는 이유: 사용자 공간에 넘긴 장치(UNMANAGED)만
+ * 게스트에 인터럽트를 직접 전달할 수 있다. 커널이 쓰는 도메인이면 그
+ * 경로를 꺼야 한다.
+ */
 static int amd_iommu_attach_device(struct iommu_domain *dom, struct device *dev,
 				   struct iommu_domain *old)
 {
-	struct iommu_dev_data *dev_data = dev_iommu_priv_get(dev);
-	struct protection_domain *domain = to_pdomain(dom);
-	struct amd_iommu *iommu = get_amd_iommu_from_dev(dev);
-	int ret;
+	struct iommu_dev_data *dev_data = dev_iommu_priv_get(dev);	/* [한국어] 장치의 벤더 상태 */
+	struct protection_domain *domain = to_pdomain(dom);	/* [한국어] 벤더 도메인 */
+	struct amd_iommu *iommu = get_amd_iommu_from_dev(dev);	/* [한국어] 담당 유닛 */
+	int ret;	/* [한국어] 결과 */
 
 	/*
 	 * Skip attach device to domain if new domain is same as
 	 * devices current domain
 	 */
-	if (dev_data->domain == domain)
-		return 0;
+	if (dev_data->domain == domain)	/* [한국어] (원 주석: 이미 같은 도메인이면 건너뛴다) */
+		return 0;	/* [한국어] 코어가 중복으로 부를 수 있다 */
 
-	dev_data->defer_attach = false;
+	dev_data->defer_attach = false;	/* [한국어] 실제로 붙이는 시점이 왔다 */
 
 	/*
 	 * Restrict to devices with compatible IOMMU hardware support
 	 * when enforcement of dirty tracking is enabled.
 	 */
-	if (dom->dirty_ops && !amd_iommu_hd_support(iommu))
-		return -EINVAL;
+	if (dom->dirty_ops && !amd_iommu_hd_support(iommu))	/* [한국어] (원 주석: 더티 추적을 강제하면 지원 하드웨어로 제한한다) */
+		return -EINVAL;	/* [한국어] 추적할 수 없는 유닛에 붙이면 기록이 새어 나간다 */
 
-	if (dev_data->domain)
-		detach_device(dev);
+	if (dev_data->domain)	/* [한국어] 다른 도메인에 붙어 있으면 */
+		detach_device(dev);	/* [한국어] 하나의 DTE 를 둘이 나눠 가질 수 없다 */
 
-	ret = attach_device(dev, domain);
+	ret = attach_device(dev, domain);	/* [한국어] 새 도메인에 */
 
 #ifdef CONFIG_IRQ_REMAP
-	if (AMD_IOMMU_GUEST_IR_VAPIC(amd_iommu_guest_ir)) {
-		if (dom->type == IOMMU_DOMAIN_UNMANAGED)
-			dev_data->use_vapic = 1;
+	if (AMD_IOMMU_GUEST_IR_VAPIC(amd_iommu_guest_ir)) {	/* [한국어] 게스트 인터럽트 직접 전달을 쓰는 구성인가 */
+		if (dom->type == IOMMU_DOMAIN_UNMANAGED)	/* [한국어] 사용자 공간에 넘긴 장치만 */
+			dev_data->use_vapic = 1;	/* [한국어] 게스트 vCPU 로 인터럽트를 직접 보낸다 */
 		else
-			dev_data->use_vapic = 0;
+			dev_data->use_vapic = 0;	/* [한국어] 커널이 쓰는 도메인이면 그 경로를 끈다 */
 	}
 #endif
 
-	return ret;
+	return ret;	/* [한국어] 성패 */
 }
 
+/*
+ * [한국어]
+ * amd_iommu_capable - 이 하드웨어가 무엇을 할 수 있는지 알려 준다
+ *
+ * @dev: 묻는 장치(항목에 따라 쓰이거나 무시된다).
+ * @cap: 묻는 능력.
+ * @return: 지원하면 참.
+ *
+ * 코어와 VFIO/iommufd 가 정책을 정할 때 참고한다. 몇 가지는 설명이 필요하다.
+ *  - CACHE_COHERENCY: AMD 는 페이지 테이블 항목에 강제 일관 비트가 늘 서
+ *    있어 언제나 참이다.
+ *  - NOEXEC: 실행 금지 비트가 없다.
+ *  - PRE_BOOT_PROTECTION: 펌웨어가 부팅 전부터 재매핑을 켜 두었는가.
+ */
 static bool amd_iommu_capable(struct device *dev, enum iommu_cap cap)
 {
-	switch (cap) {
-	case IOMMU_CAP_CACHE_COHERENCY:
+	switch (cap) {	/* [한국어] 묻는 능력에 따라 */
+	case IOMMU_CAP_CACHE_COHERENCY:	/* [한국어] 캐시 일관성 */
+		return true;	/* [한국어] 강제 일관 비트가 늘 서 있다 */
+	case IOMMU_CAP_NOEXEC:	/* [한국어] 실행 금지 */
+		return false;	/* [한국어] AMD IOMMU 에는 그 비트가 없다 */
+	case IOMMU_CAP_PRE_BOOT_PROTECTION:	/* [한국어] 부팅 전부터 보호되고 있었나 */
+		return amdr_ivrs_remap_support;	/* [한국어] 펌웨어가 재매핑을 켜 두었는지 IVRS 가 알려 준다 */
+	case IOMMU_CAP_ENFORCE_CACHE_COHERENCY:	/* [한국어] 일관성 강제를 요청할 수 있나 */
 		return true;
-	case IOMMU_CAP_NOEXEC:
-		return false;
-	case IOMMU_CAP_PRE_BOOT_PROTECTION:
-		return amdr_ivrs_remap_support;
-	case IOMMU_CAP_ENFORCE_CACHE_COHERENCY:
-		return true;
-	case IOMMU_CAP_DIRTY_TRACKING: {
-		struct amd_iommu *iommu = get_amd_iommu_from_dev(dev);
+	case IOMMU_CAP_DIRTY_TRACKING: {	/* [한국어] 더티 추적 */
+		struct amd_iommu *iommu = get_amd_iommu_from_dev(dev);	/* [한국어] 유닛마다 다를 수 있다 */
 
-		return amd_iommu_hd_support(iommu);
+		return amd_iommu_hd_support(iommu);	/* [한국어] 기능 비트와 커맨드라인 양쪽을 본다 */
 	}
-	case IOMMU_CAP_PCI_ATS_SUPPORTED: {
-		struct iommu_dev_data *dev_data = dev_iommu_priv_get(dev);
+	case IOMMU_CAP_PCI_ATS_SUPPORTED: {	/* [한국어] 장치 변환 캐시 */
+		struct iommu_dev_data *dev_data = dev_iommu_priv_get(dev);	/* [한국어] 장치 쪽 능력 */
 
-		return amd_iommu_iotlb_sup &&
-			 (dev_data->flags & AMD_IOMMU_DEVICE_FLAG_ATS_SUP);
+		return amd_iommu_iotlb_sup &&	/* [한국어] 유닛이 장치 IOTLB 무효화를 보낼 수 있고 */
+			 (dev_data->flags & AMD_IOMMU_DEVICE_FLAG_ATS_SUP);	/* [한국어] 장치도 ATS 를 광고해야 한다 */
 	}
 	default:
 		break;
 	}
 
-	return false;
+	return false;	/* [한국어] 모르는 능력은 없다고 답한다 */
 }
 
+/*
+ * [한국어]
+ * amd_iommu_set_dirty_tracking - 도메인의 더티 추적을 켜거나 끈다
+ *
+ * @domain: 대상 도메인.
+ * @enable: 켤 것인가.
+ * @return: 항상 0.
+ *
+ * 추적 여부는 DTE 의 HAD 비트로 정해지므로, 도메인에 붙은 모든 장치의
+ * 항목을 하나씩 고쳐야 한다.
+ *
+ * 여기서는 update_dte256 을 쓰지 않고 data[0] 만 직접 고친다. 바꾸는 것이
+ * V·GV 와 무관한 비트 하나뿐이라 하위 128비트 한 번의 쓰기로 끝나기
+ * 때문이다.
+ *
+ * 마지막의 IOTLB 플러시가 중요하다. 캐시에 남은 변환은 HAD 가 꺼져 있을 때
+ * 만들어진 것이라, 그것을 지우지 않으면 다음 접근이 더티 표시를 남기지
+ * 않는다.
+ */
 static int amd_iommu_set_dirty_tracking(struct iommu_domain *domain,
 					bool enable)
 {
-	struct protection_domain *pdomain = to_pdomain(domain);
-	struct dev_table_entry *dte;
-	struct iommu_dev_data *dev_data;
-	bool domain_flush = false;
-	struct amd_iommu *iommu;
-	unsigned long flags;
-	u64 new;
+	struct protection_domain *pdomain = to_pdomain(domain);	/* [한국어] 벤더 도메인 */
+	struct dev_table_entry *dte;	/* [한국어] 고칠 하드웨어 항목 */
+	struct iommu_dev_data *dev_data;	/* [한국어] 장치 순회용 */
+	bool domain_flush = false;	/* [한국어] 실제로 하나라도 고쳤나 */
+	struct amd_iommu *iommu;	/* [한국어] 그 장치를 맡은 유닛 */
+	unsigned long flags;	/* [한국어] 인터럽트 상태 */
+	u64 new;	/* [한국어] 새 data[0] */
 
-	spin_lock_irqsave(&pdomain->lock, flags);
-	if (!(pdomain->dirty_tracking ^ enable)) {
-		spin_unlock_irqrestore(&pdomain->lock, flags);
-		return 0;
+	spin_lock_irqsave(&pdomain->lock, flags);	/* [한국어] 장치 목록과 dirty_tracking 보호 */
+	if (!(pdomain->dirty_tracking ^ enable)) {	/* [한국어] 이미 원하는 상태면 */
+		spin_unlock_irqrestore(&pdomain->lock, flags);	/* [한국어] 풀고 */
+		return 0;	/* [한국어] 할 일이 없다 */
 	}
 
-	list_for_each_entry(dev_data, &pdomain->dev_list, list) {
-		spin_lock(&dev_data->dte_lock);
-		iommu = get_amd_iommu_from_dev_data(dev_data);
-		dte = &get_dev_table(iommu)[dev_data->devid];
-		new = dte->data[0];
-		new = (enable ? new | DTE_FLAG_HAD : new & ~DTE_FLAG_HAD);
-		dte->data[0] = new;
-		spin_unlock(&dev_data->dte_lock);
+	list_for_each_entry(dev_data, &pdomain->dev_list, list) {	/* [한국어] 붙어 있는 모든 장치의 DTE 를 */
+		spin_lock(&dev_data->dte_lock);	/* [한국어] 항목 갱신은 이 락이 지킨다 */
+		iommu = get_amd_iommu_from_dev_data(dev_data);	/* [한국어] 그 장치를 맡은 유닛 */
+		dte = &get_dev_table(iommu)[dev_data->devid];	/* [한국어] 하드웨어가 읽는 항목 */
+		new = dte->data[0];	/* [한국어] 현재 값에서 */
+		new = (enable ? new | DTE_FLAG_HAD : new & ~DTE_FLAG_HAD);	/* [한국어] 하드웨어 더티 갱신 비트만 바꾼다 */
+		dte->data[0] = new;	/* [한국어] V·GV 와 무관한 비트라 하위 절반 한 번의 쓰기로 족하다 */
+		spin_unlock(&dev_data->dte_lock);	/* [한국어] 항목 갱신 끝 */
 
 		/* Flush device DTE */
-		device_flush_dte(dev_data);
-		domain_flush = true;
+		device_flush_dte(dev_data);	/* [한국어] (원 주석: 장치 DTE 를 플러시) */
+		domain_flush = true;	/* [한국어] 하나라도 고쳤으면 IOTLB 도 지워야 한다 */
 	}
 
 	/* Flush IOTLB to mark IOPTE dirty on the next translation(s) */
-	if (domain_flush)
-		amd_iommu_domain_flush_all(pdomain);
+	if (domain_flush)	/* [한국어] (원 주석: 다음 변환부터 IOPTE 에 더티가 찍히도록 IOTLB 를 비운다) */
+		amd_iommu_domain_flush_all(pdomain);	/* [한국어] 옛 변환이 남아 있으면 표시를 남기지 않는다 */
 
-	pdomain->dirty_tracking = enable;
-	spin_unlock_irqrestore(&pdomain->lock, flags);
+	pdomain->dirty_tracking = enable;	/* [한국어] 이후 만들어지는 DTE 가 이 값을 반영한다 */
+	spin_unlock_irqrestore(&pdomain->lock, flags);	/* [한국어] 끝 */
 
-	return 0;
+	return 0;	/* [한국어] 실패할 수 없는 경로 */
 }
 
+/*
+ * [한국어]
+ * amd_iommu_get_resv_regions - 이 장치에 예약된 IOVA 구간을 알려 준다
+ *
+ * @dev: 대상 장치.
+ * @head: 채울 목록.
+ *
+ * 코어가 IOVA 할당기를 만들 때 피해야 할 구간을 여기서 받는다. 세 종류가
+ * 나온다.
+ *  - IVRS 의 단위 매핑: 펌웨어가 "이 장치는 이 물리 주소를 그대로 봐야
+ *    한다"고 못박은 구간이다(레거시 장치, HPET 등). DIRECT 로 표시하면
+ *    코어가 항등 매핑을 만들어 준다. 배제 구간은 매핑조차 만들지 않는다.
+ *  - MSI 구간: 인터럽트 메시지가 쓰이는 주소라 DMA 로 겹치면 안 된다.
+ *  - HyperTransport 구간: 칩셋 내부 통신에 쓰이는 물리 주소 창이다.
+ *
+ * 할당 실패를 조용히 넘기는 이유: 예약을 덜 알려 주면 성능이나 호환성이
+ * 나빠질 뿐, 부팅을 막는 것보다는 낫다.
+ */
 static void amd_iommu_get_resv_regions(struct device *dev,
 				       struct list_head *head)
 {
-	struct iommu_resv_region *region;
-	struct unity_map_entry *entry;
-	struct amd_iommu *iommu;
-	struct amd_iommu_pci_seg *pci_seg;
-	int devid, sbdf;
+	struct iommu_resv_region *region;	/* [한국어] 만들 예약 구간 */
+	struct unity_map_entry *entry;	/* [한국어] IVRS 가 알려 준 단위 매핑 */
+	struct amd_iommu *iommu;	/* [한국어] 담당 유닛 */
+	struct amd_iommu_pci_seg *pci_seg;	/* [한국어] 단위 매핑 목록이 있는 세그먼트 */
+	int devid, sbdf;	/* [한국어] 장치 id */
 
-	sbdf = get_device_sbdf_id(dev);
-	if (sbdf < 0)
-		return;
+	sbdf = get_device_sbdf_id(dev);	/* [한국어] 세그먼트+BDF */
+	if (sbdf < 0)	/* [한국어] id 를 못 구하면 */
+		return;	/* [한국어] 알려 줄 것이 없다 */
 
-	devid = PCI_SBDF_TO_DEVID(sbdf);
-	iommu = get_amd_iommu_from_dev(dev);
-	pci_seg = iommu->pci_seg;
+	devid = PCI_SBDF_TO_DEVID(sbdf);	/* [한국어] 표에서 쓰는 16비트 id */
+	iommu = get_amd_iommu_from_dev(dev);	/* [한국어] 담당 유닛 */
+	pci_seg = iommu->pci_seg;	/* [한국어] 단위 매핑 목록 */
 
-	list_for_each_entry(entry, &pci_seg->unity_map, list) {
-		int type, prot = 0;
-		size_t length;
+	list_for_each_entry(entry, &pci_seg->unity_map, list) {	/* [한국어] 펌웨어가 못박은 구간들 */
+		int type, prot = 0;	/* [한국어] 예약 종류와 권한 */
+		size_t length;	/* [한국어] 구간 길이 */
 
-		if (devid < entry->devid_start || devid > entry->devid_end)
-			continue;
+		if (devid < entry->devid_start || devid > entry->devid_end)	/* [한국어] 이 장치를 포함하지 않는 항목은 */
+			continue;	/* [한국어] 건너뛴다 */
 
-		type   = IOMMU_RESV_DIRECT;
-		length = entry->address_end - entry->address_start;
-		if (entry->prot & IOMMU_PROT_IR)
-			prot |= IOMMU_READ;
-		if (entry->prot & IOMMU_PROT_IW)
-			prot |= IOMMU_WRITE;
-		if (entry->prot & IOMMU_UNITY_MAP_FLAG_EXCL_RANGE)
+		type   = IOMMU_RESV_DIRECT;	/* [한국어] 기본은 항등 매핑을 만들어 달라는 뜻 */
+		length = entry->address_end - entry->address_start;	/* [한국어] 구간 길이 */
+		if (entry->prot & IOMMU_PROT_IR)	/* [한국어] 읽기 허용이면 */
+			prot |= IOMMU_READ;	/* [한국어] 코어 표현으로 */
+		if (entry->prot & IOMMU_PROT_IW)	/* [한국어] 쓰기 허용이면 */
+			prot |= IOMMU_WRITE;	/* [한국어] 코어 표현으로 */
+		if (entry->prot & IOMMU_UNITY_MAP_FLAG_EXCL_RANGE)	/* [한국어] 배제 구간이면 */
 			/* Exclusion range */
-			type = IOMMU_RESV_RESERVED;
+			type = IOMMU_RESV_RESERVED;	/* [한국어] (원 주석: 배제 범위) 매핑조차 만들지 않는다 */
 
-		region = iommu_alloc_resv_region(entry->address_start,
-						 length, prot, type,
-						 GFP_KERNEL);
-		if (!region) {
-			dev_err(dev, "Out of memory allocating dm-regions\n");
-			return;
+		region = iommu_alloc_resv_region(entry->address_start,	/* [한국어] 구간 기술자를 만든다 */
+						 length, prot, type,	/* [한국어] 길이·권한·종류 */
+						 GFP_KERNEL);	/* [한국어] 프로세스 문맥 */
+		if (!region) {	/* [한국어] 메모리 부족 */
+			dev_err(dev, "Out of memory allocating dm-regions\n");	/* [한국어] 알리고 */
+			return;	/* [한국어] 덜 알려 주면 성능이 나빠질 뿐 부팅은 막지 않는다 */
 		}
-		list_add_tail(&region->list, head);
+		list_add_tail(&region->list, head);	/* [한국어] 코어에 넘길 목록에 */
 	}
 
-	region = iommu_alloc_resv_region(MSI_RANGE_START,
-					 MSI_RANGE_END - MSI_RANGE_START + 1,
-					 0, IOMMU_RESV_MSI, GFP_KERNEL);
-	if (!region)
-		return;
-	list_add_tail(&region->list, head);
+	region = iommu_alloc_resv_region(MSI_RANGE_START,	/* [한국어] 인터럽트 메시지가 쓰는 주소 창 */
+					 MSI_RANGE_END - MSI_RANGE_START + 1,	/* [한국어] 끝 주소가 포함이라 +1 */
+					 0, IOMMU_RESV_MSI, GFP_KERNEL);	/* [한국어] 권한 없이 예약만 */
+	if (!region)	/* [한국어] 실패면 */
+		return;	/* [한국어] 있는 것까지만 알린다 */
+	list_add_tail(&region->list, head);	/* [한국어] 목록에 */
 
-	if (amd_iommu_ht_range_ignore())
-		return;
+	if (amd_iommu_ht_range_ignore())	/* [한국어] 플랫폼이 이 창을 안 쓴다고 하면 */
+		return;	/* [한국어] 예약할 필요가 없다 */
 
-	region = iommu_alloc_resv_region(HT_RANGE_START,
-					 HT_RANGE_END - HT_RANGE_START + 1,
-					 0, IOMMU_RESV_RESERVED, GFP_KERNEL);
-	if (!region)
-		return;
-	list_add_tail(&region->list, head);
+	region = iommu_alloc_resv_region(HT_RANGE_START,	/* [한국어] 칩셋 내부 통신용 물리 주소 창 */
+					 HT_RANGE_END - HT_RANGE_START + 1,	/* [한국어] 끝 주소가 포함이라 +1 */
+					 0, IOMMU_RESV_RESERVED, GFP_KERNEL);	/* [한국어] 매핑을 만들지 말고 비워 두라는 뜻 */
+	if (!region)	/* [한국어] 실패면 */
+		return;	/* [한국어] 있는 것까지만 */
+	list_add_tail(&region->list, head);	/* [한국어] 목록에 */
 }
 
+/*
+ * [한국어]
+ * amd_iommu_is_attach_deferred - attach 를 미뤄야 하는 장치인지 알려 준다
+ *
+ * @dev: 대상 장치.
+ * @return: 미뤄야 하면 참.
+ *
+ * kdump 처럼 앞 커널의 매핑을 유지해야 하는 상황에서, 장치가 실제로 쓰이기
+ * 전까지 DTE 를 건드리지 않으려고 표시해 둔다. 진행 중이던 DMA 를 갑자기
+ * 끊으면 그 장치가 오류를 낸다.
+ */
 static bool amd_iommu_is_attach_deferred(struct device *dev)
 {
-	struct iommu_dev_data *dev_data = dev_iommu_priv_get(dev);
+	struct iommu_dev_data *dev_data = dev_iommu_priv_get(dev);	/* [한국어] 장치의 벤더 상태 */
 
-	return dev_data->defer_attach;
+	return dev_data->defer_attach;	/* [한국어] kdump 등에서 진행 중인 DMA 를 끊지 않으려는 표시 */
 }
 
+/*
+ * [한국어]
+ * amd_iommu_def_domain_type - 이 장치의 기본 도메인 종류를 고른다
+ *
+ * @dev: 대상 장치.
+ * @return: IOMMU_DOMAIN_DMA / IOMMU_DOMAIN_IDENTITY / 0(코어 기본값).
+ *
+ * 신뢰할 수 없는 장치(썬더볼트 등)는 무조건 변환을 건다 — 통과시키면
+ * 물리 메모리 전체를 읽을 수 있다.
+ *
+ * PASID 를 쓰는 장치는 기본을 통과로 두는 편이 빠르다. 다만 원 주석이 든
+ * 두 예외가 있다: 메모리 암호화 환경에서는 일부 GPU 가 DMA 마스크에 암호화
+ * 비트를 못 실어 재매핑이 필요하고, SNP 는 통과 자체를 금지한다.
+ */
 static int amd_iommu_def_domain_type(struct device *dev)
 {
-	struct iommu_dev_data *dev_data;
+	struct iommu_dev_data *dev_data;	/* [한국어] 장치의 벤더 상태 */
 
-	dev_data = dev_iommu_priv_get(dev);
-	if (!dev_data)
-		return 0;
+	dev_data = dev_iommu_priv_get(dev);	/* [한국어] probe 때 붙여 둔 것 */
+	if (!dev_data)	/* [한국어] 아직 준비 전이면 */
+		return 0;	/* [한국어] 코어 기본값에 맡긴다 */
 
 	/* Always use DMA domain for untrusted device */
-	if (dev_is_pci(dev) && to_pci_dev(dev)->untrusted)
-		return IOMMU_DOMAIN_DMA;
+	if (dev_is_pci(dev) && to_pci_dev(dev)->untrusted)	/* [한국어] (원 주석: 신뢰할 수 없는 장치는 늘 DMA 도메인) */
+		return IOMMU_DOMAIN_DMA;	/* [한국어] 통과시키면 물리 메모리 전체를 읽는다 */
 
 	/*
 	 * Do not identity map IOMMUv2 capable devices when:
@@ -5214,38 +5346,52 @@ static int amd_iommu_def_domain_type(struct device *dev)
 	 *    and require remapping.
 	 *  - SNP is enabled, because it prohibits DTE[Mode]=0.
 	 */
-	if (pdev_pasid_supported(dev_data) &&
-	    !cc_platform_has(CC_ATTR_MEM_ENCRYPT) &&
-	    !amd_iommu_snp_en) {
-		return IOMMU_DOMAIN_IDENTITY;
+	if (pdev_pasid_supported(dev_data) &&	/* [한국어] (원 주석: 두 경우에는 IOMMUv2 장치를 항등 매핑하지 않는다) */
+	    !cc_platform_has(CC_ATTR_MEM_ENCRYPT) &&	/* [한국어] 암호화 환경의 일부 GPU 는 DMA 마스크에 암호화 비트를 못 싣는다 */
+	    !amd_iommu_snp_en) {	/* [한국어] SNP 는 DTE 모드 0 을 금지한다 */
+		return IOMMU_DOMAIN_IDENTITY;	/* [한국어] 그 밖에는 통과가 빠르다 */
 	}
 
-	return 0;
+	return 0;	/* [한국어] 코어 기본값 */
 }
 
+/*
+ * [한국어]
+ * amd_iommu_enforce_cache_coherency - 일관성 강제를 요청받는다
+ *
+ * @domain: 대상 도메인.
+ * @return: 항상 참.
+ *
+ * VT-d 와 달리 켜고 끌 것이 없다. AMD 는 페이지 테이블 항목의 강제 일관
+ * 비트가 늘 서 있어, 장치가 비일관 접근을 요청해도 하드웨어가 무시한다.
+ *
+ * v2 표에는 그 비트가 없다는 점을 amdv2_ops 의 원 주석이 인정하고 있다 —
+ * VFIO 쪽이 도메인마다 다른 답을 받아들이지 못해 사실과 다르게 참을
+ * 돌려주고 있다.
+ */
 static bool amd_iommu_enforce_cache_coherency(struct iommu_domain *domain)
 {
 	/* IOMMU_PTE_FC is always set */
-	return true;
+	return true;	/* [한국어] (원 주석: IOMMU_PTE_FC 는 늘 설정된다) 켜고 끌 것이 없다 */
 }
 
 const struct iommu_ops amd_iommu_ops = {
-	.capable = amd_iommu_capable,
-	.hw_info = amd_iommufd_hw_info,
-	.blocked_domain = &blocked_domain,
-	.release_domain = &blocked_domain,
-	.identity_domain = &identity_domain.domain,
-	.domain_alloc_paging_flags = amd_iommu_domain_alloc_paging_flags,
-	.domain_alloc_sva = amd_iommu_domain_alloc_sva,
-	.probe_device = amd_iommu_probe_device,
-	.release_device = amd_iommu_release_device,
-	.device_group = amd_iommu_device_group,
-	.get_resv_regions = amd_iommu_get_resv_regions,
-	.is_attach_deferred = amd_iommu_is_attach_deferred,
-	.def_domain_type = amd_iommu_def_domain_type,
-	.page_response = amd_iommu_page_response,
-	.get_viommu_size = amd_iommufd_get_viommu_size,
-	.viommu_init = amd_iommufd_viommu_init,
+	.capable = amd_iommu_capable,	/* [한국어] 하드웨어 능력 질의 */
+	.hw_info = amd_iommufd_hw_info,	/* [한국어] iommufd 에 하드웨어 정보를 넘긴다 */
+	.blocked_domain = &blocked_domain,	/* [한국어] 모든 DMA 를 막는 전역 도메인 */
+	.release_domain = &blocked_domain,	/* [한국어] 장치를 놓을 때도 같은 상태로 */
+	.identity_domain = &identity_domain.domain,	/* [한국어] 변환 없이 통과시키는 전역 도메인 */
+	.domain_alloc_paging_flags = amd_iommu_domain_alloc_paging_flags,	/* [한국어] 요청 속성에 맞는 v1/v2 도메인을 고른다 */
+	.domain_alloc_sva = amd_iommu_domain_alloc_sva,	/* [한국어] 프로세스 주소 공간을 그대로 붙이는 도메인 */
+	.probe_device = amd_iommu_probe_device,	/* [한국어] 장치를 맡을지 판단하고 준비한다 */
+	.release_device = amd_iommu_release_device,	/* [한국어] 상태는 남겨 두고 경고만 한다 */
+	.device_group = amd_iommu_device_group,	/* [한국어] 격리 단위를 고른다 */
+	.get_resv_regions = amd_iommu_get_resv_regions,	/* [한국어] IOVA 할당기가 피해야 할 구간 */
+	.is_attach_deferred = amd_iommu_is_attach_deferred,	/* [한국어] kdump 등에서 attach 를 미룬다 */
+	.def_domain_type = amd_iommu_def_domain_type,	/* [한국어] 장치별 기본 도메인 종류 */
+	.page_response = amd_iommu_page_response,	/* [한국어] PPR 폴트 처리 결과를 장치에 돌려준다 */
+	.get_viommu_size = amd_iommufd_get_viommu_size,	/* [한국어] 중첩용 vIOMMU 객체 크기 */
+	.viommu_init = amd_iommufd_viommu_init,	/* [한국어] 그 객체를 초기화한다 */
 };
 
 #ifdef CONFIG_IRQ_REMAP
