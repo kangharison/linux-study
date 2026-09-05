@@ -252,7 +252,7 @@ static __maybe_unused int make_range_u64(struct pt_common *common,
 		else                                                    \
 			ret = make_range_ul(common, range, iova, len);  \
 		ret;                                                    \
-	})
+	})	/* [한국어] 타입 폭을 보고 한쪽만 남는다 — 결과를 식의 값으로 돌려준다 */
 
 #define make_range(common, range, iova, len)                             \
 	({                                                               \
@@ -260,7 +260,7 @@ static __maybe_unused int make_range_u64(struct pt_common *common,
 		if (!ret)                                                \
 			ret = pt_check_range(range);                     \
 		ret;                                                     \
-	})
+	})	/* [한국어] 범위를 만든 뒤 표 안에 드는지까지 확인한다 */
 
 /*
  * [한국어]
@@ -333,7 +333,7 @@ static __always_inline int __do_iova_to_phys(struct pt_range *range, void *arg,
 	}
 	return -ENOENT;	/* [한국어] enum 밖의 값에 대비한 컴파일러용 경로 */
 }
-PT_MAKE_LEVELS(__iova_to_phys, __do_iova_to_phys);
+PT_MAKE_LEVELS(__iova_to_phys, __do_iova_to_phys);	/* [한국어] 단계별로 펼쳐진 워커와 그 진입점을 만든다 */
 
 /**
  * iova_to_phys() - Return the output address for the given IOVA
@@ -386,9 +386,20 @@ phys_addr_t DOMAIN_NS(iova_to_phys)(struct iommu_domain *domain,
 }
 EXPORT_SYMBOL_NS_GPL(DOMAIN_NS(iova_to_phys), "GENERIC_PT_IOMMU");	/* [한국어] 드라이버 모듈이 이 이름으로 가져다 쓴다 */
 
-struct pt_iommu_dirty_args {
+struct pt_iommu_dirty_args {	/* [한국어] 더티 추적 워커들 사이로 나르는 묶음 */
 	struct iommu_dirty_bitmap *dirty;
+	/* [한국어] 결과를 기록할 비트맵과 무효화 자리.
+	 * 설정자: read_and_clear_dirty 진입점이 코어에서 받은 것을 그대로 넣는다.
+	 * 읽는 자: record_dirty 가 비트를 세우고 무효화 범위를 쌓는다.
+	 * 값 범위: 유효한 포인터. bitmap 필드는 NULL 일 수 있다 — 지우기만
+	 *   하고 기록은 하지 않는 호출이 그렇다.
+	 * 동기화: 호출 스택에 있어 공유되지 않는다. */
 	unsigned int flags;
+	/* [한국어] IOMMU_DIRTY_NO_CLEAR 조합.
+	 * 설정자: 코어가 넘긴 값을 그대로.
+	 * 읽는 자: record_dirty 가 표시를 지울지 정할 때.
+	 * 값 범위: 0 이면 읽고 지운다, NO_CLEAR 면 읽기만 한다.
+	 * 동기화: 호출 스택 값. */
 };
 
 /*
@@ -533,7 +544,7 @@ int DOMAIN_NS(read_and_clear_dirty)(struct iommu_domain *domain,
 	struct pt_range range;	/* [한국어] 걸을 범위 */
 	int ret;	/* [한국어] 결과 */
 
-#if !IS_ENABLED(CONFIG_IOMMUFD_DRIVER) || !defined(pt_entry_is_write_dirty)
+#if !IS_ENABLED(CONFIG_IOMMUFD_DRIVER) || !defined(pt_entry_is_write_dirty)	/* [한국어] iommufd 를 껐거나 형식에 더티 비트가 없으면 아래가 죽은 코드가 된다 */
 	return -EOPNOTSUPP;	/* [한국어] iommufd 를 껐거나 형식에 더티 비트가 없으면 함수 전체가 이 한 줄로 접힌다 */
 #endif
 
@@ -609,7 +620,7 @@ static int __maybe_unused NS(set_dirty)(struct pt_iommu *iommu_table,
 	return pt_walk_range(&range, __set_dirty, NULL);	/* [한국어] (원 주석: 아직 잠금이 없어 시험이 경쟁하면 깨질 수 있다) */
 }
 
-struct pt_iommu_collect_args {
+struct pt_iommu_collect_args {	/* [한국어] 표를 모으거나 자리가 비었는지 확인할 때 넘기는 묶음 */
 	struct iommu_pages_list free_list;
 	/* [한국어] 모은 표들을 담는 목록.
 	 * 설정자: 호출자가 초기화하고, __collect_tables 가 채운다.
@@ -841,7 +852,7 @@ static inline int pt_iommu_new_table(struct pt_state *pts,
 	return 0;	/* [한국어] 성공 */
 }
 
-struct pt_iommu_map_args {
+struct pt_iommu_map_args {	/* [한국어] 매핑 진행 상태를 워커들 사이로 나르는 묶음 */
 	struct iommu_iotlb_gather *iotlb_gather;
 	/* [한국어] 무효화 범위와 해제 목록을 모으는 자리.
 	 * 설정자: map 진입점이 코어에서 받은 것을 그대로 넣는다.
@@ -1224,7 +1235,7 @@ static __always_inline int __do_map_single_page(struct pt_range *range,
 	/* Something else, use the slow path */
 	return -EAGAIN;	/* [한국어] (원 주석: 그 밖에는 느린 경로를 쓴다) */
 }
-PT_MAKE_LEVELS(__map_single_page, __do_map_single_page);
+PT_MAKE_LEVELS(__map_single_page, __do_map_single_page);	/* [한국어] 빠른 경로도 단계별로 펼쳐 만든다 */
 
 /*
  * Add a table to the top, increasing the top level as much as necessary to
@@ -1358,7 +1369,7 @@ static int increase_top(struct pt_iommu *iommu_table, struct pt_range *range,
 	spin_unlock_irqrestore(domain_lock, flags);	/* [한국어] 성장 완료 */
 	return 0;	/* [한국어] 성공 */
 
-err_free:
+err_free:	/* [한국어] 실패 경로 — 만든 표를 모두 되돌린다 */
 	if (pt_feature(common, PT_FEAT_DMA_INCOHERENT))	/* [한국어] 비일관 플랫폼이면 */
 		iommu_pages_stop_incoherent_list(&free_list,	/* [한국어] 매핑을 먼저 풀고 */
 						 iommu_table->iommu_device);	/* [한국어] 그 장치에서 */
@@ -1447,104 +1458,169 @@ static int do_map(struct pt_range *range, struct pt_common *common,
 	return ret;	/* [한국어] 성패 */
 }
 
+/*
+ * [한국어]
+ * map_range - 범위 하나를 페이지 테이블에 매핑한다
+ *
+ * @iommu_table: 대상 페이지 테이블.
+ * @iova: 매핑할 IO 가상 주소.
+ * @paddr: 대응하는 물리 주소.
+ * @len: 길이.
+ * @prot: IOMMU_READ/WRITE 등 권한.
+ * @gfp: 표를 만들 때 쓸 할당 플래그.
+ * @mapped: 실제로 매핑한 바이트 수를 더해 돌려준다.
+ * @return: 0 성공, 음수면 실패.
+ *
+ * 드라이버가 부르는 매핑 진입점이다. 순서는 이렇다.
+ *  1) 인자 검사 — 권한이 있는가, 물리 주소가 이 형식에 담기는가.
+ *  2) 권한을 형식 비트로 옮기고, 범위를 만든다.
+ *  3) 첫 페이지 크기와 그 크기로 놓을 개수를 계산한다. 4KB 한 장인 흔한
+ *     경우는 계산을 건너뛰고 빠른 경로 표시를 세운다.
+ *  4) 필요하면 최상위 단계를 얹는다.
+ *  5) 실제로 채운다.
+ *
+ * 마지막의 sync 가 미묘하다. 매핑 도중 큰 페이지를 놓느라 기존 표를
+ * 걷어냈을 수 있는데, 그 표를 가리키던 걷기 캐시가 남아 있으면 해제된
+ * 메모리를 하드웨어가 읽는다. 원 주석이 그 위험을 짚는다.
+ *
+ * 실행 컨텍스트: 드라이버가 잡은 쓰기 범위 락 아래.
+ */
 static int NS(map_range)(struct pt_iommu *iommu_table, dma_addr_t iova,
 			 phys_addr_t paddr, dma_addr_t len, unsigned int prot,
 			 gfp_t gfp, size_t *mapped)
 {
-	pt_vaddr_t pgsize_bitmap = iommu_table->domain.pgsize_bitmap;
-	struct pt_common *common = common_from_iommu(iommu_table);
-	struct iommu_iotlb_gather iotlb_gather;
-	struct pt_iommu_map_args map = {
-		.iotlb_gather = &iotlb_gather,
-		.oa = paddr,
+	pt_vaddr_t pgsize_bitmap = iommu_table->domain.pgsize_bitmap;	/* [한국어] 코어가 허용한 페이지 크기들 */
+	struct pt_common *common = common_from_iommu(iommu_table);	/* [한국어] 페이지 테이블 인스턴스 */
+	struct iommu_iotlb_gather iotlb_gather;	/* [한국어] 큰 페이지를 놓느라 걷어낸 표를 모은다 */
+	struct pt_iommu_map_args map = {	/* [한국어] 워커에 넘길 인자 */
+		.iotlb_gather = &iotlb_gather,	/* [한국어] 걷어낸 표를 여기 쌓는다 */
+		.oa = paddr,	/* [한국어] 첫 잎이 낼 출력 주소 */
 	};
-	bool single_page = false;
-	struct pt_range range;
-	int ret;
+	bool single_page = false;	/* [한국어] 4KB 한 장인 흔한 경우인가 */
+	struct pt_range range;	/* [한국어] 매핑할 범위 */
+	int ret;	/* [한국어] 결과 */
 
-	iommu_iotlb_gather_init(&iotlb_gather);
+	iommu_iotlb_gather_init(&iotlb_gather);	/* [한국어] 이 호출 안에서만 쓰는 임시 gather */
 
-	if (WARN_ON(!(prot & (IOMMU_READ | IOMMU_WRITE))))
-		return -EINVAL;
+	if (WARN_ON(!(prot & (IOMMU_READ | IOMMU_WRITE))))	/* [한국어] 권한이 하나도 없으면 */
+		return -EINVAL;	/* [한국어] 만들 수 없는 매핑이다 */
 
 	/* Check the paddr doesn't exceed what the table can store */
-	if ((sizeof(pt_oaddr_t) < sizeof(paddr) &&
-	     (pt_vaddr_t)paddr > PT_VADDR_MAX) ||
-	    (common->max_oasz_lg2 != PT_VADDR_MAX_LG2 &&
-	     oalog2_div(paddr, common->max_oasz_lg2)))
-		return -ERANGE;
+	if ((sizeof(pt_oaddr_t) < sizeof(paddr) &&	/* [한국어] (원 주석: 물리 주소가 표에 담기는지 확인한다) */
+	     (pt_vaddr_t)paddr > PT_VADDR_MAX) ||	/* [한국어] 형식의 주소 타입이 더 좁거나 */
+	    (common->max_oasz_lg2 != PT_VADDR_MAX_LG2 &&	/* [한국어] 하드웨어 한계가 있고 */
+	     oalog2_div(paddr, common->max_oasz_lg2)))	/* [한국어] 그 폭을 넘으면 */
+		return -ERANGE;	/* [한국어] 표현할 수 없다 */
 
-	ret = pt_iommu_set_prot(common, &map.attrs, prot);
-	if (ret)
-		return ret;
-	map.attrs.gfp = gfp;
+	ret = pt_iommu_set_prot(common, &map.attrs, prot);	/* [한국어] 권한을 형식 비트로 옮긴다 */
+	if (ret)	/* [한국어] 형식이 거절하면 */
+		return ret;	/* [한국어] 만들 수 없는 조합이다 */
+	map.attrs.gfp = gfp;	/* [한국어] 표를 만들 때 쓸 플래그 */
 
-	ret = make_range_no_check(common, &range, iova, len);
-	if (ret)
-		return ret;
+	ret = make_range_no_check(common, &range, iova, len);	/* [한국어] 범위를 만든다 — 검사는 check_map_range 가 한다 */
+	if (ret)	/* [한국어] 넘침 등이면 */
+		return ret;	/* [한국어] 거절 */
 
 	/* Calculate target page size and level for the leaves */
-	if (pt_has_system_page_size(common) && len == PAGE_SIZE) {
-		PT_WARN_ON(!(pgsize_bitmap & PAGE_SIZE));
-		if (log2_mod(iova | paddr, PAGE_SHIFT))
-			return -ENXIO;
-		map.leaf_pgsize_lg2 = PAGE_SHIFT;
-		map.leaf_level = 0;
-		map.num_leaves = 1;
-		single_page = true;
+	if (pt_has_system_page_size(common) && len == PAGE_SIZE) {	/* [한국어] (원 주석: 잎의 목표 페이지 크기와 단계를 계산한다) 흔한 경우 */
+		PT_WARN_ON(!(pgsize_bitmap & PAGE_SIZE));	/* [한국어] 그 크기가 허용 목록에 있어야 한다 */
+		if (log2_mod(iova | paddr, PAGE_SHIFT))	/* [한국어] 양쪽이 페이지 정렬이 아니면 */
+			return -ENXIO;	/* [한국어] 한 장으로 놓을 수 없다 */
+		map.leaf_pgsize_lg2 = PAGE_SHIFT;	/* [한국어] 크기 계산을 건너뛴다 */
+		map.leaf_level = 0;	/* [한국어] 가장 아래 단계 */
+		map.num_leaves = 1;	/* [한국어] 한 장 */
+		single_page = true;	/* [한국어] 빠른 경로를 쓸 수 있다 */
 	} else {
-		map.leaf_pgsize_lg2 = pt_compute_best_pgsize(
-			pgsize_bitmap, range.va, range.last_va, paddr);
-		if (!map.leaf_pgsize_lg2)
-			return -ENXIO;
-		map.leaf_level =
-			pt_pgsz_lg2_to_level(common, map.leaf_pgsize_lg2);
-		map.num_leaves = pt_pgsz_count(pgsize_bitmap, range.va,
-					       range.last_va, paddr,
-					       map.leaf_pgsize_lg2);
+		map.leaf_pgsize_lg2 = pt_compute_best_pgsize(	/* [한국어] 정렬과 길이로 가장 큰 크기를 고른다 */
+			pgsize_bitmap, range.va, range.last_va, paddr);	/* [한국어] 코어가 허용한 것 중에서 */
+		if (!map.leaf_pgsize_lg2)	/* [한국어] 쓸 수 있는 크기가 없으면 */
+			return -ENXIO;	/* [한국어] 매핑할 수 없다 */
+		map.leaf_level =	/* [한국어] 그 크기를 담당하는 */
+			pt_pgsz_lg2_to_level(common, map.leaf_pgsize_lg2);	/* [한국어] 단계 */
+		map.num_leaves = pt_pgsz_count(pgsize_bitmap, range.va,	/* [한국어] 그 크기로 몇 개를 */
+					       range.last_va, paddr,	/* [한국어] 연달아 놓을 수 있는지 */
+					       map.leaf_pgsize_lg2);	/* [한국어] 미리 센다 */
 	}
 
-	ret = check_map_range(iommu_table, &range, &map);
-	if (ret)
-		return ret;
+	ret = check_map_range(iommu_table, &range, &map);	/* [한국어] 필요하면 최상위를 얹는다 */
+	if (ret)	/* [한국어] 넓힐 수 없으면 */
+		return ret;	/* [한국어] 거절 */
 
-	PT_WARN_ON(map.leaf_level > range.top_level);
+	PT_WARN_ON(map.leaf_level > range.top_level);	/* [한국어] 이제 잎 단계가 표 안에 있어야 한다 */
 
-	ret = do_map(&range, common, single_page, &map);
+	ret = do_map(&range, common, single_page, &map);	/* [한국어] 실제로 채운다 */
 
 	/*
 	 * Table levels were freed and replaced with large items, flush any walk
 	 * cache that may refer to the freed levels.
 	 */
-	if (!iommu_pages_list_empty(&iotlb_gather.freelist))
-		iommu_iotlb_sync(&iommu_table->domain, &iotlb_gather);
+	if (!iommu_pages_list_empty(&iotlb_gather.freelist))	/* [한국어] (원 주석: 표가 큰 항목으로 대체됐으니 그 표를 가리키던 걷기 캐시를 비운다) */
+		iommu_iotlb_sync(&iommu_table->domain, &iotlb_gather);	/* [한국어] 해제된 메모리를 하드웨어가 읽지 않도록 */
 
 	/* Bytes successfully mapped */
-	PT_WARN_ON(!ret && map.oa - paddr != len);
-	*mapped += map.oa - paddr;
-	return ret;
+	PT_WARN_ON(!ret && map.oa - paddr != len);	/* [한국어] (원 주석: 성공적으로 매핑한 바이트 수) 성공했으면 전부 덮었어야 한다 */
+	*mapped += map.oa - paddr;	/* [한국어] 코어가 이어 갈 위치를 안다 */
+	return ret;	/* [한국어] 성패 */
 }
 
-struct pt_unmap_args {
+struct pt_unmap_args {	/* [한국어] 해제 진행 상태를 워커들 사이로 나르는 묶음 */
 	struct iommu_pages_list free_list;
+	/* [한국어] 비워진 표들을 모으는 목록.
+	 * 설정자: unmap_range 가 비워 두고, __unmap_range 가 채운다.
+	 * 읽는 자: gather_range_pages 가 코어의 gather 로 옮긴다.
+	 * 값 범위: 비어 있거나 표 페이지들의 목록.
+	 * 동기화: 호출 스택 값. 실제 해제는 무효화가 끝난 뒤 코어가 한다. */
 	pt_vaddr_t unmapped;
+	/* [한국어] 실제로 걷어낸 바이트 수.
+	 * 설정자: __unmap_range 가 각 단계에서 지운 만큼 더한다.
+	 * 읽는 자: unmap_range 의 반환값.
+	 * 값 범위: 요청 길이보다 클 수 있다 — 큰 페이지가 통째로 걷히기 때문.
+	 * 동기화: 호출 스택 값. */
 };
 
+/*
+ * [한국어]
+ * __unmap_range - 범위의 잎을 지우고 빈 표를 모으는 워커
+ *
+ * @range: 걷는 범위.
+ * @arg: 해제 목록과 지운 길이.
+ * @level: 현재 단계.
+ * @table: 그 단계의 표.
+ * @return: 0 성공, -EINVAL 이면 다룰 수 없는 상태다.
+ *
+ * 매핑보다 단순해 보이지만 두 가지 규칙이 얽혀 있다.
+ *
+ * 첫째, 큰 페이지를 부분 해제하지 않는다. 원 주석이 근거를 든다 —
+ * IOMMU API 는 그것을 요구하지 않고, 예전에 VFIO 가 쪼개려 했지만 지금은
+ * 하지 않는다. 그래서 요청 범위가 큰 페이지의 시작과 맞으면 그 페이지
+ * 전체를 지우고 지운 길이를 요청보다 크게 돌려준다. 시작이 한가운데면
+ * 아예 거절한다.
+ *
+ * 둘째, 표를 지우는 순서. 아래 단계를 모두 지운 뒤에야 그 표를 가리키던
+ * 항목을 지운다 — 원 주석이 그 지연을 명시한다. 반대로 하면 아직 매핑이
+ * 남은 표를 잃어버린다.
+ *
+ * 표 자체는 여기서 해제하지 않고 목록에 모은다. 실제 해제는 무효화가
+ * 끝난 뒤 코어가 한다.
+ *
+ * goto start_oa 는 원 주석이 밝히듯 순수한 최적화다 — 첫 항목이 이미 잎인
+ * 흔한 경우에 반복문 앞머리를 건너뛴다.
+ */
 static __maybe_unused int __unmap_range(struct pt_range *range, void *arg,
 					unsigned int level,
 					struct pt_table_p *table)
 {
-	struct pt_state pts = pt_init(range, level, table);
-	unsigned int flush_start_index = UINT_MAX;
-	unsigned int flush_end_index = UINT_MAX;
-	struct pt_unmap_args *unmap = arg;
-	unsigned int num_oas = 0;
-	unsigned int start_index;
-	int ret = 0;
+	struct pt_state pts = pt_init(range, level, table);	/* [한국어] 이 단계의 순회 상태 */
+	unsigned int flush_start_index = UINT_MAX;	/* [한국어] 캐시를 밀어낼 구간의 시작 */
+	unsigned int flush_end_index = UINT_MAX;	/* [한국어] 그 끝 — 같으면 밀어낼 것이 없다 */
+	struct pt_unmap_args *unmap = arg;	/* [한국어] 해제 목록과 지운 길이 */
+	unsigned int num_oas = 0;	/* [한국어] 이 단계에서 지운 항목 수 */
+	unsigned int start_index;	/* [한국어] 시작 색인 — VA 되짚기 판단에 쓴다 */
+	int ret = 0;	/* [한국어] 결과 */
 
-	_pt_iter_first(&pts);
-	start_index = pts.index;
-	pts.type = pt_load_entry_raw(&pts);
+	_pt_iter_first(&pts);	/* [한국어] 색인 구간을 잡고 */
+	start_index = pts.index;	/* [한국어] 시작을 기억한다 */
+	pts.type = pt_load_entry_raw(&pts);	/* [한국어] 첫 항목을 읽는다 */
 	/*
 	 * A starting index is in the middle of a contiguous entry
 	 *
@@ -1556,218 +1632,310 @@ static __maybe_unused int __unmap_range(struct pt_range *range, void *arg,
 	 * IOPTE it should remove the entire IOPTE and return that size to the
 	 * caller.
 	 */
-	if (pts.type == PT_ENTRY_OA) {
-		if (log2_mod(range->va, pt_entry_oa_lg2sz(&pts)))
-			return -EINVAL;
+	if (pts.type == PT_ENTRY_OA) {	/* [한국어] (원 주석: IOMMU API 는 큰 페이지의 부분 해제를 요구하지 않는다) */
+		if (log2_mod(range->va, pt_entry_oa_lg2sz(&pts)))	/* [한국어] 시작이 큰 페이지 한가운데면 */
+			return -EINVAL;	/* [한국어] 쪼갤 방법이 없어 거절한다 */
 		/* Micro optimization */
-		goto start_oa;
+		goto start_oa;	/* [한국어] (원 주석: 미세 최적화) 첫 항목이 이미 잎인 흔한 경우 */
 	}
 
 	do {
-		if (pts.type != PT_ENTRY_OA) {
-			bool fully_covered;
+		if (pts.type != PT_ENTRY_OA) {	/* [한국어] 잎이 아니면 */
+			bool fully_covered;	/* [한국어] 이 표 전체가 요청 범위에 덮이는가 */
 
-			if (pts.type != PT_ENTRY_TABLE) {
-				ret = -EINVAL;
-				break;
+			if (pts.type != PT_ENTRY_TABLE) {	/* [한국어] 표도 잎도 아니면 */
+				ret = -EINVAL;	/* [한국어] 매핑되지 않은 자리를 지우라는 요청이다 */
+				break;	/* [한국어] 멈춘다 */
 			}
 
-			if (pts.index != start_index)
-				pt_index_to_va(&pts);
-			pts.table_lower = pt_table_ptr(&pts);
+			if (pts.index != start_index)	/* [한국어] VA 를 게으르게 유지하므로 */
+				pt_index_to_va(&pts);	/* [한국어] 필요한 지점에서만 되짚는다 */
+			pts.table_lower = pt_table_ptr(&pts);	/* [한국어] 내려갈 표 */
 
-			fully_covered = pt_entry_fully_covered(
-				&pts, pt_table_item_lg2sz(&pts));
+			fully_covered = pt_entry_fully_covered(	/* [한국어] 내려가기 전에 판정해 둔다 — */
+				&pts, pt_table_item_lg2sz(&pts));	/* [한국어] 내려갔다 오면 VA 가 바뀌어 있다 */
 
-			ret = pt_descend(&pts, arg, __unmap_range);
-			if (ret)
-				break;
+			ret = pt_descend(&pts, arg, __unmap_range);	/* [한국어] 아래 단계를 먼저 지운다 */
+			if (ret)	/* [한국어] 실패면 */
+				break;	/* [한국어] 이 항목을 건드리지 않는다 */
 
 			/*
 			 * If the unmapping range fully covers the table then we
 			 * can free it as well. The clear is delayed until we
 			 * succeed in clearing the lower table levels.
 			 */
-			if (fully_covered) {
-				iommu_pages_list_add(&unmap->free_list,
-						     pts.table_lower);
-				pt_clear_entries(&pts, ilog2(1));
-				if (pts.index < flush_start_index)
-					flush_start_index = pts.index;
-				flush_end_index = pts.index + 1;
+			if (fully_covered) {	/* [한국어] (원 주석: 범위가 표 전체를 덮으면 그 표도 해제할 수 있다) */
+				iommu_pages_list_add(&unmap->free_list,	/* [한국어] 해제 목록에 넣고 */
+						     pts.table_lower);	/* [한국어] 실제 해제는 무효화 뒤에 */
+				pt_clear_entries(&pts, ilog2(1));	/* [한국어] (원 주석: 아래 단계를 다 지운 뒤에야 이 항목을 지운다) */
+				if (pts.index < flush_start_index)	/* [한국어] 밀어낼 구간을 */
+					flush_start_index = pts.index;	/* [한국어] 넓힌다 */
+				flush_end_index = pts.index + 1;	/* [한국어] 끝도 갱신 */
 			}
-			pts.index++;
+			pts.index++;	/* [한국어] 다음 항목으로 */
 		} else {
-			unsigned int num_contig_lg2;
-start_oa:
+			unsigned int num_contig_lg2;	/* [한국어] 이 잎이 이루는 묶음의 크기 */
+start_oa:	/* [한국어] 첫 항목이 이미 잎인 흔한 경우가 뛰어드는 자리 */
 			/*
 			 * If the caller requested an last that falls within a
 			 * single entry then the entire entry is unmapped and
 			 * the length returned will be larger than requested.
 			 */
-			num_contig_lg2 = pt_entry_num_contig_lg2(&pts);
-			pt_clear_entries(&pts, num_contig_lg2);
-			num_oas += log2_to_int(num_contig_lg2);
-			if (pts.index < flush_start_index)
-				flush_start_index = pts.index;
-			pts.index += log2_to_int(num_contig_lg2);
-			flush_end_index = pts.index;
+			num_contig_lg2 = pt_entry_num_contig_lg2(&pts);	/* [한국어] (원 주석: 요청 끝이 한 항목 안에 들면 그 항목 전체가 지워지고 반환 길이가 요청보다 커진다) */
+			pt_clear_entries(&pts, num_contig_lg2);	/* [한국어] 묶음 전체를 지운다 */
+			num_oas += log2_to_int(num_contig_lg2);	/* [한국어] 지운 항목 수를 센다 */
+			if (pts.index < flush_start_index)	/* [한국어] 밀어낼 구간의 */
+				flush_start_index = pts.index;	/* [한국어] 시작을 넓히고 */
+			pts.index += log2_to_int(num_contig_lg2);	/* [한국어] 묶음만큼 건너뛴다 */
+			flush_end_index = pts.index;	/* [한국어] 끝도 갱신 */
 		}
-		if (pts.index >= pts.end_index)
-			break;
-		pts.type = pt_load_entry_raw(&pts);
-	} while (true);
+		if (pts.index >= pts.end_index)	/* [한국어] 구간을 다 돌았으면 */
+			break;	/* [한국어] 끝 */
+		pts.type = pt_load_entry_raw(&pts);	/* [한국어] 다음 항목을 읽는다 */
+	} while (true);	/* [한국어] 구간을 다 돌 때까지 */
 
-	unmap->unmapped += log2_mul(num_oas, pt_table_item_lg2sz(&pts));
-	if (flush_start_index != flush_end_index)
-		flush_writes_range(&pts, flush_start_index, flush_end_index);
+	unmap->unmapped += log2_mul(num_oas, pt_table_item_lg2sz(&pts));	/* [한국어] 지운 항목 수에 항목 크기를 곱한 바이트 */
+	if (flush_start_index != flush_end_index)	/* [한국어] 지운 항목이 있으면 */
+		flush_writes_range(&pts, flush_start_index, flush_end_index);	/* [한국어] 한 번에 밀어낸다 */
 
-	return ret;
+	return ret;	/* [한국어] 성패 */
 }
 
+/*
+ * [한국어]
+ * unmap_range - 범위의 매핑을 걷어낸다
+ *
+ * @iommu_table: 대상 페이지 테이블.
+ * @iova: 시작 주소.
+ * @len: 길이.
+ * @iotlb_gather: 무효화 범위와 해제 목록을 모으는 자리.
+ * @return: 실제로 걷어낸 바이트 수.
+ *
+ * 반환값이 요청보다 클 수 있다 — 큰 페이지의 일부를 요청하면 그 페이지
+ * 전체가 걷힌다. 코어가 그 값을 보고 다음 위치를 정한다.
+ *
+ * 범위가 잘못되면 0 을 돌려준다. 오류 코드를 줄 자리가 없는 API 다.
+ *
+ * 실행 컨텍스트: 드라이버가 잡은 쓰기 범위 락 아래.
+ */
 static size_t NS(unmap_range)(struct pt_iommu *iommu_table, dma_addr_t iova,
 			      dma_addr_t len,
 			      struct iommu_iotlb_gather *iotlb_gather)
 {
-	struct pt_unmap_args unmap = { .free_list = IOMMU_PAGES_LIST_INIT(
-					       unmap.free_list) };
-	struct pt_range range;
-	int ret;
+	struct pt_unmap_args unmap = { .free_list = IOMMU_PAGES_LIST_INIT(	/* [한국어] 비워진 표를 모을 목록 */
+					       unmap.free_list) };	/* [한국어] 비어 있는 상태로 시작 */
+	struct pt_range range;	/* [한국어] 걸어낼 범위 */
+	int ret;	/* [한국어] 결과 */
 
-	ret = make_range(common_from_iommu(iommu_table), &range, iova, len);
-	if (ret)
-		return 0;
+	ret = make_range(common_from_iommu(iommu_table), &range, iova, len);	/* [한국어] 범위를 만들고 검사한다 */
+	if (ret)	/* [한국어] 표 밖이면 */
+		return 0;	/* [한국어] 오류 코드를 줄 자리가 없어 0 을 돌려준다 */
 
-	pt_walk_range(&range, __unmap_range, &unmap);
+	pt_walk_range(&range, __unmap_range, &unmap);	/* [한국어] 잎을 지우고 빈 표를 모은다 */
 
-	gather_range_pages(iotlb_gather, iommu_table, iova, unmap.unmapped,
-			   &unmap.free_list);
+	gather_range_pages(iotlb_gather, iommu_table, iova, unmap.unmapped,	/* [한국어] 무효화 범위와 해제 목록을 */
+			   &unmap.free_list);	/* [한국어] 코어에 넘긴다 */
 
-	return unmap.unmapped;
+	return unmap.unmapped;	/* [한국어] 큰 페이지 때문에 요청보다 클 수 있다 */
 }
 
+/*
+ * [한국어]
+ * get_info - 이 페이지 테이블이 지원하는 페이지 크기를 알려 준다
+ *
+ * @iommu_table: 대상 페이지 테이블.
+ * @info: 채울 결과.
+ *
+ * 모든 단계의 가능한 크기를 OR 해서 비트맵을 만든다. 드라이버가 그것을
+ * 도메인의 pgsize_bitmap 으로 코어에 보고한다.
+ *
+ * 자랄 수 있는 형식이면 지금 최상위가 아니라 최대 단계까지 훑어야 한다 —
+ * 나중에 자라면 더 큰 페이지를 쓸 수 있게 되기 때문이다. 다만 인스턴스의
+ * 주소 폭을 넘는 단계는 의미가 없어 거기서 멈춘다.
+ *
+ * 마지막에 출력 주소 폭으로 한 번 더 자른다. 물리 주소가 52비트인데
+ * 페이지가 그보다 크면 표현할 수 없다.
+ */
 static void NS(get_info)(struct pt_iommu *iommu_table,
 			 struct pt_iommu_info *info)
 {
-	struct pt_common *common = common_from_iommu(iommu_table);
-	struct pt_range range = pt_top_range(common);
-	struct pt_state pts = pt_init_top(&range);
-	pt_vaddr_t pgsize_bitmap = 0;
+	struct pt_common *common = common_from_iommu(iommu_table);	/* [한국어] 페이지 테이블 인스턴스 */
+	struct pt_range range = pt_top_range(common);	/* [한국어] 현재 최상위 정보 */
+	struct pt_state pts = pt_init_top(&range);	/* [한국어] 단계별 크기를 묻기 위한 상태 */
+	pt_vaddr_t pgsize_bitmap = 0;	/* [한국어] 모을 비트맵 */
 
-	if (pt_feature(common, PT_FEAT_DYNAMIC_TOP)) {
-		for (pts.level = 0; pts.level <= PT_MAX_TOP_LEVEL;
-		     pts.level++) {
-			if (pt_table_item_lg2sz(&pts) >= common->max_vasz_lg2)
-				break;
-			pgsize_bitmap |= pt_possible_sizes(&pts);
+	if (pt_feature(common, PT_FEAT_DYNAMIC_TOP)) {	/* [한국어] 자랄 수 있는 형식이면 */
+		for (pts.level = 0; pts.level <= PT_MAX_TOP_LEVEL;	/* [한국어] 지금이 아니라 최대 단계까지 */
+		     pts.level++) {	/* [한국어] 훑어야 한다 — 나중에 자라면 더 큰 페이지를 쓴다 */
+			if (pt_table_item_lg2sz(&pts) >= common->max_vasz_lg2)	/* [한국어] 인스턴스의 주소 폭을 넘는 단계는 */
+				break;	/* [한국어] 의미가 없다 */
+			pgsize_bitmap |= pt_possible_sizes(&pts);	/* [한국어] 그 단계가 만들 수 있는 크기들 */
 		}
 	} else {
-		for (pts.level = 0; pts.level <= range.top_level; pts.level++)
-			pgsize_bitmap |= pt_possible_sizes(&pts);
+		for (pts.level = 0; pts.level <= range.top_level; pts.level++)	/* [한국어] 고정 형식이면 현재 최상위까지 */
+			pgsize_bitmap |= pt_possible_sizes(&pts);	/* [한국어] 각 단계의 크기를 모은다 */
 	}
 
 	/* Hide page sizes larger than the maximum OA */
-	info->pgsize_bitmap = oalog2_mod(pgsize_bitmap, common->max_oasz_lg2);
+	info->pgsize_bitmap = oalog2_mod(pgsize_bitmap, common->max_oasz_lg2);	/* [한국어] (원 주석: 최대 출력 주소보다 큰 페이지 크기는 감춘다) */
 }
 
+/*
+ * [한국어]
+ * deinit - 페이지 테이블의 모든 표를 해제한다
+ *
+ * @iommu_table: 해제할 페이지 테이블.
+ *
+ * 표 전체를 훑어 모은 뒤 한꺼번에 돌려준다. 최상위는 순회에 포함되지
+ * 않으므로 따로 목록에 넣는다.
+ *
+ * pt_all_range 를 쓰는 이유: 부호 확장 형식에서도 색인이 표 전체를 덮게
+ * 하려는 것이다. 그 범위의 VA 는 틀리지만, 여기서는 VA 를 쓰지 않는다.
+ *
+ * 원 주석이 호출자의 의무를 못박는다 — 이 함수를 부르기 전에 하드웨어의
+ * 접근을 끊고 그 메모리를 가리키는 캐시를 모두 비워 두어야 한다. 이
+ * 함수는 그 확인을 하지 않는다.
+ */
 static void NS(deinit)(struct pt_iommu *iommu_table)
 {
-	struct pt_common *common = common_from_iommu(iommu_table);
-	struct pt_range range = pt_all_range(common);
-	struct pt_iommu_collect_args collect = {
-		.free_list = IOMMU_PAGES_LIST_INIT(collect.free_list),
+	struct pt_common *common = common_from_iommu(iommu_table);	/* [한국어] 페이지 테이블 인스턴스 */
+	struct pt_range range = pt_all_range(common);	/* [한국어] 부호 확장 형식에서도 색인이 표 전체를 덮게 한다 */
+	struct pt_iommu_collect_args collect = {	/* [한국어] 모을 목록 */
+		.free_list = IOMMU_PAGES_LIST_INIT(collect.free_list),	/* [한국어] 비어 있는 상태로 시작 */
 	};
 
-	iommu_pages_list_add(&collect.free_list, range.top_table);
-	pt_walk_range(&range, __collect_tables, &collect);
+	iommu_pages_list_add(&collect.free_list, range.top_table);	/* [한국어] 최상위는 순회에 포함되지 않아 따로 */
+	pt_walk_range(&range, __collect_tables, &collect);	/* [한국어] 아래 모든 표를 모은다 */
 
 	/*
 	 * The driver has to already have fenced the HW access to the page table
 	 * and invalidated any caching referring to this memory.
 	 */
-	if (pt_feature(common, PT_FEAT_DMA_INCOHERENT))
-		iommu_pages_stop_incoherent_list(&collect.free_list,
-						 iommu_table->iommu_device);
-	iommu_put_pages_list(&collect.free_list);
+	if (pt_feature(common, PT_FEAT_DMA_INCOHERENT))	/* [한국어] (원 주석: 드라이버가 이미 하드웨어 접근을 끊고 캐시를 비워 두어야 한다) */
+		iommu_pages_stop_incoherent_list(&collect.free_list,	/* [한국어] DMA 매핑을 먼저 풀고 */
+						 iommu_table->iommu_device);	/* [한국어] 그 장치에서 */
+	iommu_put_pages_list(&collect.free_list);	/* [한국어] 한꺼번에 돌려준다 */
 }
 
-static const struct pt_iommu_ops NS(ops) = {
-	.map_range = NS(map_range),
-	.unmap_range = NS(unmap_range),
+static const struct pt_iommu_ops NS(ops) = {	/* [한국어] 드라이버가 부르는 연산 집합 — 형식별 이름으로 만들어진다 */
+	.map_range = NS(map_range),	/* [한국어] 드라이버가 부르는 매핑 진입점 */
+	.unmap_range = NS(unmap_range),	/* [한국어] 해제 진입점 */
 #if IS_ENABLED(CONFIG_IOMMUFD_DRIVER) && defined(pt_entry_is_write_dirty) && \
-	IS_ENABLED(CONFIG_IOMMUFD_TEST) && defined(pt_entry_make_write_dirty)
-	.set_dirty = NS(set_dirty),
+	IS_ENABLED(CONFIG_IOMMUFD_TEST) && defined(pt_entry_make_write_dirty)	/* [한국어] 시험 빌드이고 형식이 소프트웨어 더티 찍기를 지원할 때만 */
+	.set_dirty = NS(set_dirty),	/* [한국어] 시험용 — iommufd 시험 빌드에서만 */
 #endif
-	.get_info = NS(get_info),
-	.deinit = NS(deinit),
+	.get_info = NS(get_info),	/* [한국어] 지원 페이지 크기 보고 */
+	.deinit = NS(deinit),	/* [한국어] 표를 모두 해제한다 */
 };
 
+/*
+ * [한국어]
+ * pt_init_common - 형식과 무관한 초기화와 정합성 검사
+ *
+ * @common: 초기화할 인스턴스.
+ * @return: 0 성공, -EINVAL/-EOPNOTSUPP 면 성립할 수 없는 구성이다.
+ *
+ * 형식별 초기화가 끝난 뒤 불려 기능 조합을 다듬고 검사한다.
+ *
+ * 두 곳에서 기능을 자동으로 조정한다.
+ *  - 이미 최대 단계이거나 주소 폭을 다 쓰고 있으면 더 자랄 수 없으므로
+ *    DYNAMIC_TOP 을 끈다.
+ *  - 주소 공간이 전 범위면 FULL_VA 를 켠다 — 그래야 fvalog2_* 계열이
+ *    그 극단을 안전하게 다룬다.
+ *
+ * 그다음 요청 기능이 이 빌드에 컴파일된 집합 안인지, 강제 기능이 모두
+ * 켜져 있는지 본다. 디버그 빌드에서는 강제 검사를 건너뛰는데, kunit 이
+ * 기능 조합을 자유롭게 바꿔 시험하기 때문이다.
+ *
+ * 마지막 검사는 고정 크기 형식의 함정을 막는다 — 최상위가 낮은데 주소
+ * 폭을 넓게 잡으면 표 밖의 주소를 유효하다고 받아들이게 된다.
+ */
 static int pt_init_common(struct pt_common *common)
 {
-	struct pt_range top_range = pt_top_range(common);
+	struct pt_range top_range = pt_top_range(common);	/* [한국어] 현재 최상위 정보 */
 
-	if (PT_WARN_ON(top_range.top_level > PT_MAX_TOP_LEVEL))
-		return -EINVAL;
+	if (PT_WARN_ON(top_range.top_level > PT_MAX_TOP_LEVEL))	/* [한국어] 형식이 허용하는 단계를 넘으면 */
+		return -EINVAL;	/* [한국어] 형식별 초기화가 잘못됐다 */
 
-	if (top_range.top_level == PT_MAX_TOP_LEVEL ||
-	    common->max_vasz_lg2 == top_range.max_vasz_lg2)
-		common->features &= ~BIT(PT_FEAT_DYNAMIC_TOP);
+	if (top_range.top_level == PT_MAX_TOP_LEVEL ||	/* [한국어] 이미 최대 단계이거나 */
+	    common->max_vasz_lg2 == top_range.max_vasz_lg2)	/* [한국어] 주소 폭을 다 쓰고 있으면 */
+		common->features &= ~BIT(PT_FEAT_DYNAMIC_TOP);	/* [한국어] 더 자랄 수 없으니 그 기능을 끈다 */
 
-	if (top_range.max_vasz_lg2 == PT_VADDR_MAX_LG2)
-		common->features |= BIT(PT_FEAT_FULL_VA);
+	if (top_range.max_vasz_lg2 == PT_VADDR_MAX_LG2)	/* [한국어] 주소 공간이 전 범위면 */
+		common->features |= BIT(PT_FEAT_FULL_VA);	/* [한국어] fvalog2_* 가 그 극단을 안전하게 다루게 한다 */
 
 	/* Requested features must match features compiled into this format */
-	if ((common->features & ~(unsigned int)PT_SUPPORTED_FEATURES) ||
-	    (!IS_ENABLED(CONFIG_DEBUG_GENERIC_PT) &&
-	     (common->features & PT_FORCE_ENABLED_FEATURES) !=
-		     PT_FORCE_ENABLED_FEATURES))
-		return -EOPNOTSUPP;
+	if ((common->features & ~(unsigned int)PT_SUPPORTED_FEATURES) ||	/* [한국어] (원 주석: 요청 기능이 이 형식에 컴파일된 집합 안이어야 한다) */
+	    (!IS_ENABLED(CONFIG_DEBUG_GENERIC_PT) &&	/* [한국어] 디버그가 아니면 */
+	     (common->features & PT_FORCE_ENABLED_FEATURES) !=	/* [한국어] 강제 기능이 */
+		     PT_FORCE_ENABLED_FEATURES))	/* [한국어] 모두 켜져 있어야 한다 */
+		return -EOPNOTSUPP;	/* [한국어] 조합이 성립하지 않는다 */
 
 	/*
 	 * Check if the top level of the page table is too small to hold the
 	 * specified maxvasz.
 	 */
-	if (!pt_feature(common, PT_FEAT_DYNAMIC_TOP) &&
-	    top_range.top_level != PT_MAX_TOP_LEVEL) {
-		struct pt_state pts = { .range = &top_range,
-					.level = top_range.top_level };
+	if (!pt_feature(common, PT_FEAT_DYNAMIC_TOP) &&	/* [한국어] (원 주석: 최상위가 요청 주소 폭을 담기에 너무 작은지 본다) */
+	    top_range.top_level != PT_MAX_TOP_LEVEL) {	/* [한국어] 자라지 않는데 단계가 낮으면 */
+		struct pt_state pts = { .range = &top_range,	/* [한국어] 그 단계의 크기를 묻기 위한 */
+					.level = top_range.top_level };	/* [한국어] 임시 상태 */
 
-		if (common->max_vasz_lg2 >
-		    pt_num_items_lg2(&pts) + pt_table_item_lg2sz(&pts))
-			return -EOPNOTSUPP;
+		if (common->max_vasz_lg2 >	/* [한국어] 표가 덮는 범위보다 */
+		    pt_num_items_lg2(&pts) + pt_table_item_lg2sz(&pts))	/* [한국어] 주소 폭이 넓으면 */
+			return -EOPNOTSUPP;	/* [한국어] 표 밖의 주소를 유효하다고 받아들이게 된다 */
 	}
 
-	if (common->max_oasz_lg2 == 0)
-		common->max_oasz_lg2 = pt_max_oa_lg2(common);
+	if (common->max_oasz_lg2 == 0)	/* [한국어] 하드웨어 한계를 주지 않았으면 */
+		common->max_oasz_lg2 = pt_max_oa_lg2(common);	/* [한국어] 형식의 한계를 그대로 */
 	else
-		common->max_oasz_lg2 = min(common->max_oasz_lg2,
-					   pt_max_oa_lg2(common));
-	return 0;
+		common->max_oasz_lg2 = min(common->max_oasz_lg2,	/* [한국어] 주었으면 둘 중 */
+					   pt_max_oa_lg2(common));	/* [한국어] 작은 쪽 */
+	return 0;	/* [한국어] 성공 */
 }
 
+/*
+ * [한국어]
+ * pt_iommu_init_domain - 코어에 보고할 도메인 속성을 채운다
+ *
+ * @iommu_table: 페이지 테이블.
+ * @domain: 채울 도메인.
+ * @return: 0 성공, -EOVERFLOW 면 이 시스템에서 쓸 수 없다.
+ *
+ * 코어가 IOVA 할당기를 만들 때 보는 값들이다 — 지원 페이지 크기와,
+ * 쓸 수 있는 주소 구간(aperture).
+ *
+ * 자랄 수 있는 형식이면 지금이 아니라 다 자란 뒤의 범위를 보고한다.
+ * 그러지 않으면 코어가 좁은 구간만 쓰고, 표는 영영 자라지 않는다.
+ *
+ * 타입 폭 처리가 이 함수의 까다로운 부분이다. 원 주석이 사정을 설명한다 —
+ * VA 가 dma_addr_t, unsigned long, pt_vaddr_t 세 타입을 오가므로, 그중
+ * 가장 좁은 것으로 표현할 수 있는 범위만 보고해야 한다. 시작 주소는
+ * 잘리면 아예 실패로 처리하고, 끝 주소는 잘리는 대신 포화시킨다 —
+ * 좁게 보고하는 것은 안전하지만 시작이 틀리면 매핑이 어긋난다.
+ */
 static int pt_iommu_init_domain(struct pt_iommu *iommu_table,
 				struct iommu_domain *domain)
 {
-	struct pt_common *common = common_from_iommu(iommu_table);
-	struct pt_iommu_info info;
-	struct pt_range range;
+	struct pt_common *common = common_from_iommu(iommu_table);	/* [한국어] 페이지 테이블 인스턴스 */
+	struct pt_iommu_info info;	/* [한국어] 지원 페이지 크기 */
+	struct pt_range range;	/* [한국어] 보고할 주소 구간 */
 
-	NS(get_info)(iommu_table, &info);
+	NS(get_info)(iommu_table, &info);	/* [한국어] 크기 비트맵을 구하고 */
 
-	domain->type = __IOMMU_DOMAIN_PAGING;
-	domain->pgsize_bitmap = info.pgsize_bitmap;
-	domain->is_iommupt = true;
+	domain->type = __IOMMU_DOMAIN_PAGING;	/* [한국어] 변환을 하는 도메인이다 */
+	domain->pgsize_bitmap = info.pgsize_bitmap;	/* [한국어] 코어의 IOVA 할당기가 이 값을 본다 */
+	domain->is_iommupt = true;	/* [한국어] 이 도메인이 generic_pt 로 만들어졌다는 표시 */
 
-	if (pt_feature(common, PT_FEAT_DYNAMIC_TOP))
-		range = _pt_top_range(common,
-				      _pt_top_set(NULL, PT_MAX_TOP_LEVEL));
+	if (pt_feature(common, PT_FEAT_DYNAMIC_TOP))	/* [한국어] 자랄 수 있는 형식이면 */
+		range = _pt_top_range(common,	/* [한국어] 다 자란 뒤의 범위를 보고한다 */
+				      _pt_top_set(NULL, PT_MAX_TOP_LEVEL));	/* [한국어] 그러지 않으면 표가 영영 자라지 않는다 */
 	else
-		range = pt_top_range(common);
+		range = pt_top_range(common);	/* [한국어] 고정 형식이면 현재 범위 */
 
 	/* A 64-bit high address space table on a 32-bit system cannot work. */
-	domain->geometry.aperture_start = (unsigned long)range.va;
-	if ((pt_vaddr_t)domain->geometry.aperture_start != range.va)
-		return -EOVERFLOW;
+	domain->geometry.aperture_start = (unsigned long)range.va;	/* [한국어] (원 주석: 32비트 시스템에서 64비트 상위 주소 공간 표는 동작할 수 없다) */
+	if ((pt_vaddr_t)domain->geometry.aperture_start != range.va)	/* [한국어] 되읽어 잘렸으면 */
+		return -EOVERFLOW;	/* [한국어] 시작이 틀리면 매핑이 어긋난다 */
 
 	/*
 	 * The aperture is limited to what the API can do after considering all
@@ -1776,110 +1944,157 @@ static int pt_iommu_init_domain(struct pt_iommu *iommu_table,
 	 * cases. Saturate instead of truncate the end if the types are smaller
 	 * than the top range. aperture_end should be called aperture_last.
 	 */
-	domain->geometry.aperture_end = (unsigned long)range.last_va;
-	if ((pt_vaddr_t)domain->geometry.aperture_end != range.last_va) {
-		domain->geometry.aperture_end = ULONG_MAX;
-		domain->pgsize_bitmap &= ULONG_MAX;
+	domain->geometry.aperture_end = (unsigned long)range.last_va;	/* [한국어] (원 주석: VA 를 담는 여러 타입 중 가장 좁은 것에 맞춰야 한다) */
+	if ((pt_vaddr_t)domain->geometry.aperture_end != range.last_va) {	/* [한국어] 끝이 잘렸으면 */
+		domain->geometry.aperture_end = ULONG_MAX;	/* [한국어] 자르는 대신 포화시킨다 — 좁게 보고하는 편이 안전하다 */
+		domain->pgsize_bitmap &= ULONG_MAX;	/* [한국어] 크기 비트맵도 같은 폭으로 */
 	}
-	domain->geometry.force_aperture = true;
+	domain->geometry.force_aperture = true;	/* [한국어] 코어가 이 구간 밖을 요청하지 않게 한다 */
 
-	return 0;
+	return 0;	/* [한국어] 성공 */
 }
 
+/*
+ * [한국어]
+ * pt_iommu_zero - 구조체를 지우되 호출자가 미리 채운 값은 남긴다
+ *
+ * @fmt_table: 지울 객체.
+ *
+ * domain 필드까지는 코어가 관리하므로 건드리지 않고, 그 뒤만 0 으로
+ * 만든다. static_assert 가 그 배치를 강제한다 — domain 이 맨 앞에
+ * 있어야 memset_after 가 맞는다.
+ *
+ * 그러고 나서 호출자가 미리 넣어 둔 세 값을 복원한다. 드라이버가
+ * pt_iommu_init 전에 채우는 것들이라 지우면 안 된다.
+ */
 static void pt_iommu_zero(struct pt_iommu_table *fmt_table)
 {
-	struct pt_iommu *iommu_table = &fmt_table->iommu;
-	struct pt_iommu cfg = *iommu_table;
+	struct pt_iommu *iommu_table = &fmt_table->iommu;	/* [한국어] 공통 부분 */
+	struct pt_iommu cfg = *iommu_table;	/* [한국어] 호출자가 미리 채운 값을 잠시 보관 */
 
-	static_assert(offsetof(struct pt_iommu_table, iommu.domain) == 0);
-	memset_after(fmt_table, 0, iommu.domain);
+	static_assert(offsetof(struct pt_iommu_table, iommu.domain) == 0);	/* [한국어] domain 이 맨 앞이어야 아래 memset 이 맞는다 */
+	memset_after(fmt_table, 0, iommu.domain);	/* [한국어] domain 은 코어가 관리하므로 그 뒤만 지운다 */
 
 	/* The caller can initialize some of these values */
-	iommu_table->iommu_device = cfg.iommu_device;
-	iommu_table->driver_ops = cfg.driver_ops;
-	iommu_table->nid = cfg.nid;
+	iommu_table->iommu_device = cfg.iommu_device;	/* [한국어] (원 주석: 호출자가 미리 채우는 값들) */
+	iommu_table->driver_ops = cfg.driver_ops;	/* [한국어] 최상위 교체 콜백 */
+	iommu_table->nid = cfg.nid;	/* [한국어] 표를 둘 NUMA 노드 */
 }
 
-#define pt_iommu_table_cfg CONCATENATE(pt_iommu_table, _cfg)
+#define pt_iommu_table_cfg CONCATENATE(pt_iommu_table, _cfg)	/* [한국어] 형식별 설정 구조체의 이름 */
 #define pt_iommu_init CONCATENATE(CONCATENATE(pt_iommu_, PTPFX), init)
 
+/*
+ * [한국어]
+ * pt_iommu_init - 페이지 테이블 인스턴스를 만든다
+ *
+ * @fmt_table: 초기화할 객체(드라이버가 잡은 메모리).
+ * @cfg: 하드웨어 한계와 요청 기능.
+ * @return: 0 성공, 음수면 실패.
+ *
+ * 드라이버가 도메인을 만들 때 부르는 진입점이다. 여기서 최상위 표까지
+ * 만들어지고, 그 순간부터 map 을 받을 수 있다.
+ *
+ * 검사가 여러 겹인 이유는 잘못된 조합이 조용히 오동작하기 때문이다.
+ *  - DYNAMIC_TOP 을 쓰려면 드라이버가 최상위 교체 콜백을 주어야 한다.
+ *    없으면 자랄 때 하드웨어를 갱신할 방법이 없다.
+ *  - 부호 확장과 FULL_VA/DYNAMIC_TOP 은 공존할 수 없다. 주소 공간이
+ *    위아래로 갈리는데 "전 범위"나 "자라는 최상위"를 함께 말할 수 없다.
+ *  - 비일관 플랫폼이면 DMA 매핑을 만들 장치가 있어야 한다.
+ *
+ * 마지막 줄의 순서를 원 주석이 못박는다 — ops 를 마지막에 넣어야, 실패해
+ * 되돌릴 때 pt_iommu_deinit() 이 아직 초기화되지 않은 객체를 건드리지
+ * 않는다.
+ */
 int pt_iommu_init(struct pt_iommu_table *fmt_table,
 		  const struct pt_iommu_table_cfg *cfg, gfp_t gfp)
 {
-	struct pt_iommu *iommu_table = &fmt_table->iommu;
-	struct pt_common *common = common_from_iommu(iommu_table);
-	struct pt_table_p *table_mem;
-	int ret;
+	struct pt_iommu *iommu_table = &fmt_table->iommu;	/* [한국어] 공통 부분 */
+	struct pt_common *common = common_from_iommu(iommu_table);	/* [한국어] 페이지 테이블 상태 */
+	struct pt_table_p *table_mem;	/* [한국어] 최상위 표 */
+	int ret;	/* [한국어] 결과 */
 
-	if (cfg->common.hw_max_vasz_lg2 > PT_MAX_VA_ADDRESS_LG2 ||
-	    !cfg->common.hw_max_vasz_lg2 || !cfg->common.hw_max_oasz_lg2)
-		return -EINVAL;
+	if (cfg->common.hw_max_vasz_lg2 > PT_MAX_VA_ADDRESS_LG2 ||	/* [한국어] 형식이 담을 수 없는 주소 폭이거나 */
+	    !cfg->common.hw_max_vasz_lg2 || !cfg->common.hw_max_oasz_lg2)	/* [한국어] 폭이 0 이면 */
+		return -EINVAL;	/* [한국어] 표를 만들 수 없다 */
 
-	pt_iommu_zero(fmt_table);
-	common->features = cfg->common.features;
-	common->max_vasz_lg2 = cfg->common.hw_max_vasz_lg2;
-	common->max_oasz_lg2 = cfg->common.hw_max_oasz_lg2;
-	ret = pt_iommu_fmt_init(fmt_table, cfg);
-	if (ret)
-		return ret;
+	pt_iommu_zero(fmt_table);	/* [한국어] 호출자가 채운 값만 남기고 지운다 */
+	common->features = cfg->common.features;	/* [한국어] 요청 기능 */
+	common->max_vasz_lg2 = cfg->common.hw_max_vasz_lg2;	/* [한국어] 입력 주소 폭 */
+	common->max_oasz_lg2 = cfg->common.hw_max_oasz_lg2;	/* [한국어] 출력 주소 폭 */
+	ret = pt_iommu_fmt_init(fmt_table, cfg);	/* [한국어] 형식별 초기화 — 시작 단계를 정한다 */
+	if (ret)	/* [한국어] 실패면 */
+		return ret;	/* [한국어] 거절 */
 
-	if (cfg->common.hw_max_oasz_lg2 > pt_max_oa_lg2(common))
-		return -EINVAL;
+	if (cfg->common.hw_max_oasz_lg2 > pt_max_oa_lg2(common))	/* [한국어] 형식이 낼 수 있는 것보다 넓게 요청하면 */
+		return -EINVAL;	/* [한국어] 표현할 수 없다 */
 
-	ret = pt_init_common(common);
-	if (ret)
-		return ret;
+	ret = pt_init_common(common);	/* [한국어] 기능 조합을 다듬고 검사한다 */
+	if (ret)	/* [한국어] 성립하지 않으면 */
+		return ret;	/* [한국어] 거절 */
 
-	if (pt_feature(common, PT_FEAT_DYNAMIC_TOP) &&
-	    WARN_ON(!iommu_table->driver_ops ||
-		    !iommu_table->driver_ops->change_top ||
-		    !iommu_table->driver_ops->get_top_lock))
-		return -EINVAL;
+	if (pt_feature(common, PT_FEAT_DYNAMIC_TOP) &&	/* [한국어] 자라는 형식인데 */
+	    WARN_ON(!iommu_table->driver_ops ||	/* [한국어] 드라이버가 */
+		    !iommu_table->driver_ops->change_top ||	/* [한국어] 최상위 교체 콜백이나 */
+		    !iommu_table->driver_ops->get_top_lock))	/* [한국어] 락을 주지 않았으면 */
+		return -EINVAL;	/* [한국어] 자랄 때 하드웨어를 갱신할 방법이 없다 */
 
-	if (pt_feature(common, PT_FEAT_SIGN_EXTEND) &&
-	    (pt_feature(common, PT_FEAT_FULL_VA) ||
-	     pt_feature(common, PT_FEAT_DYNAMIC_TOP)))
-		return -EINVAL;
+	if (pt_feature(common, PT_FEAT_SIGN_EXTEND) &&	/* [한국어] 부호 확장과 */
+	    (pt_feature(common, PT_FEAT_FULL_VA) ||	/* [한국어] 전 범위나 */
+	     pt_feature(common, PT_FEAT_DYNAMIC_TOP)))	/* [한국어] 자라는 최상위는 */
+		return -EINVAL;	/* [한국어] 주소 공간이 갈리는데 함께 말할 수 없다 */
 
-	if (pt_feature(common, PT_FEAT_DMA_INCOHERENT) &&
-	    WARN_ON(!iommu_table->iommu_device))
-		return -EINVAL;
+	if (pt_feature(common, PT_FEAT_DMA_INCOHERENT) &&	/* [한국어] 비일관 플랫폼인데 */
+	    WARN_ON(!iommu_table->iommu_device))	/* [한국어] 매핑을 만들 장치가 없으면 */
+		return -EINVAL;	/* [한국어] 표를 하드웨어에 보이게 할 수 없다 */
 
-	ret = pt_iommu_init_domain(iommu_table, &iommu_table->domain);
-	if (ret)
-		return ret;
+	ret = pt_iommu_init_domain(iommu_table, &iommu_table->domain);	/* [한국어] 코어에 보고할 속성을 채운다 */
+	if (ret)	/* [한국어] 이 시스템에서 쓸 수 없으면 */
+		return ret;	/* [한국어] 거절 */
 
-	table_mem = table_alloc_top(common, common->top_of_table, gfp,
-				    ALLOC_NORMAL);
-	if (IS_ERR(table_mem))
-		return PTR_ERR(table_mem);
-	pt_top_set(common, table_mem, pt_top_get_level(common));
+	table_mem = table_alloc_top(common, common->top_of_table, gfp,	/* [한국어] 최상위 표를 만든다 */
+				    ALLOC_NORMAL);	/* [한국어] 비일관 매핑도 지금 한다 */
+	if (IS_ERR(table_mem))	/* [한국어] 실패면 */
+		return PTR_ERR(table_mem);	/* [한국어] 거절 */
+	pt_top_set(common, table_mem, pt_top_get_level(common));	/* [한국어] 주소와 단계를 한 워드에 함께 */
 
 	/* Must be last, see pt_iommu_deinit() */
-	iommu_table->ops = &NS(ops);
-	return 0;
+	iommu_table->ops = &NS(ops);	/* [한국어] (원 주석: 반드시 마지막 — pt_iommu_deinit() 참고) */
+	return 0;	/* [한국어] 이제 map 을 받을 수 있다 */
 }
-EXPORT_SYMBOL_NS_GPL(pt_iommu_init, "GENERIC_PT_IOMMU");
+EXPORT_SYMBOL_NS_GPL(pt_iommu_init, "GENERIC_PT_IOMMU");	/* [한국어] 드라이버 모듈이 형식별 이름으로 가져다 쓴다 */
 
-#ifdef pt_iommu_fmt_hw_info
+#ifdef pt_iommu_fmt_hw_info	/* [한국어] 형식이 하드웨어 정보 추출을 제공할 때만 */
 #define pt_iommu_table_hw_info CONCATENATE(pt_iommu_table, _hw_info)
 #define pt_iommu_hw_info CONCATENATE(CONCATENATE(pt_iommu_, PTPFX), hw_info)
+/*
+ * [한국어]
+ * pt_iommu_hw_info - 하드웨어에 적을 값을 드라이버에 넘긴다
+ *
+ * @fmt_table: 페이지 테이블 객체.
+ * @info: 채울 결과(형식마다 모양이 다르다).
+ *
+ * generic_pt 와 벤더 드라이버가 만나는 마지막 지점이다. AMD 는 이 값으로
+ * DTE 를, VT-d 는 컨텍스트 항목을, RISC-V 는 장치 컨텍스트의 fsc 를 채운다.
+ *
+ * 형식이 그 함수를 정의하지 않았으면 이 함수 자체가 컴파일되지 않는다.
+ */
 void pt_iommu_hw_info(struct pt_iommu_table *fmt_table,
 		      struct pt_iommu_table_hw_info *info)
 {
-	struct pt_iommu *iommu_table = &fmt_table->iommu;
-	struct pt_common *common = common_from_iommu(iommu_table);
-	struct pt_range top_range = pt_top_range(common);
+	struct pt_iommu *iommu_table = &fmt_table->iommu;	/* [한국어] 공통 부분 */
+	struct pt_common *common = common_from_iommu(iommu_table);	/* [한국어] 페이지 테이블 상태 */
+	struct pt_range top_range = pt_top_range(common);	/* [한국어] 최상위 주소와 단계를 찢어지지 않게 읽는다 */
 
-	pt_iommu_fmt_hw_info(fmt_table, &top_range, info);
+	pt_iommu_fmt_hw_info(fmt_table, &top_range, info);	/* [한국어] 형식이 자기 모양으로 채운다 */
 }
-EXPORT_SYMBOL_NS_GPL(pt_iommu_hw_info, "GENERIC_PT_IOMMU");
+EXPORT_SYMBOL_NS_GPL(pt_iommu_hw_info, "GENERIC_PT_IOMMU");	/* [한국어] 벤더 드라이버가 이 이름으로 부른다 */
 #endif
 
-MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("IOMMU Page table implementation for " __stringify(PTPFX_RAW));
-MODULE_IMPORT_NS("GENERIC_PT");
+MODULE_LICENSE("GPL");	/* [한국어] 라이선스 선언 */
+MODULE_DESCRIPTION("IOMMU Page table implementation for " __stringify(PTPFX_RAW));	/* [한국어] 형식 이름이 설명에 박힌다 */
+MODULE_IMPORT_NS("GENERIC_PT");	/* [한국어] 공통 페이지 테이블 심볼을 가져온다 */
 /* For iommu_dirty_bitmap_record() */
-MODULE_IMPORT_NS("IOMMUFD");
+MODULE_IMPORT_NS("IOMMUFD");	/* [한국어] (원 주석: iommu_dirty_bitmap_record() 때문) */
 
 #endif  /* __GENERIC_PT_IOMMU_PT_H */
