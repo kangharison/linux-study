@@ -2921,36 +2921,65 @@ static void iommu_group_do_probe_finalize(struct device *dev)
 		ops->probe_finalize(dev);	/* [한국어] 도메인이 붙은 뒤에야 할 수 있는 일을 드라이버가 여기서 한다 */
 }
 
+/*
+ * [한국어]
+ * bus_iommu_probe - 버스에 이미 붙어 있던 장치들을 뒤늦게 IOMMU 아래로 들인다
+ *
+ * @bus: 훑을 버스
+ * @return: 0 이면 성공, 음수 errno
+ *
+ * 왜 필요한가: 통지는 앞으로 나타날 장치만 알려 준다. IOMMU 드라이버가
+ * 늦게 적재되면 그전에 이미 등록된 장치들은 통지를 놓치므로, 등록 시점에
+ * 한 번 훑어 따라잡아야 한다.
+ *
+ * 두 단계로 나뉜 것이 이 함수의 구조다. 먼저 모든 장치를 그룹에 넣기만
+ * 하고(1단계), 그다음 그룹마다 기본 도메인을 세운다(2단계). 위 영어
+ * 주석이 그 이유를 밝힌다 -- 도메인 종류는 그룹 안 모든 장치의 의견을
+ * 합쳐 정해야 하고, 예약 구간도 모든 장치의 것을 모아야 한다. 장치를
+ * 하나 넣을 때마다 도메인을 세우면 그 둘 다 불가능하다.
+ *
+ * 마지막 probe_finalize 를 락 밖에서 부르는 것에 주의할 것. 위 FIXME 가
+ * 밝히듯 일부 ARM 드라이버의 콜백이 코어로 되돌아와 같은 락을 잡으려
+ * 하므로, 들고 있으면 교착이 된다. 상류도 이것을 잘못된 상태로 인정하고
+ * 있다.
+ *
+ * 실행 컨텍스트: IOMMU 등록 경로. 잠들 수 있다.
+ *
+ * 호출 체인: iommu_device_register → [이 함수] → iommu_setup_default_domain
+ */
 static int bus_iommu_probe(const struct bus_type *bus)
 {
-	struct iommu_group *group, *next;
-	LIST_HEAD(group_list);
+	struct iommu_group *group, *next;	/* [한국어] 목록에서 빼며 도므로 _safe 가 필요하다 */
+	LIST_HEAD(group_list);	/* [한국어] 1단계에서 새로 만들어진 그룹들이 여기 모인다 */
 	int ret;
 
-	ret = bus_for_each_dev(bus, NULL, &group_list, probe_iommu_group);
+	ret = bus_for_each_dev(bus, NULL, &group_list, probe_iommu_group);	/* [한국어] 1단계 — 장치를 그룹에 넣기만 한다 */
 	if (ret)
 		return ret;
 
-	list_for_each_entry_safe(group, next, &group_list, entry) {
+	list_for_each_entry_safe(group, next, &group_list, entry) {	/* [한국어] 2단계 — 그룹이 완성된 뒤에야 도메인을 세운다 */
 		struct group_device *gdev;
 
 		mutex_lock(&group->mutex);
 
 		/* Remove item from the list */
-		list_del_init(&group->entry);
+		list_del_init(&group->entry);	/* [한국어] _init 까지 하는 이유: 이 고리는 나중에 다시 쓰인다 */
 
 		/*
 		 * We go to the trouble of deferred default domain creation so
 		 * that the cross-group default domain type and the setup of the
 		 * IOMMU_RESV_DIRECT will work correctly in non-hotpug scenarios.
 		 */
-		ret = iommu_setup_default_domain(group, 0);
+		/* [한국어] 위 영어 주석이 두 단계로 나눈 이유다 — 도메인 종류는
+		 * 그룹 전체의 의견을 합쳐야 하고, 항등 매핑도 모든 장치의 예약
+		 * 구간을 모아야 정확하다. */
+		ret = iommu_setup_default_domain(group, 0);	/* [한국어] 0 = 자동 선택 */
 		if (ret) {
 			mutex_unlock(&group->mutex);
-			return ret;
+			return ret;	/* [한국어] 이미 처리한 그룹들은 그대로 둔다 — 되돌릴 수 없다 */
 		}
 		for_each_group_device(group, gdev)
-			iommu_setup_dma_ops(gdev->dev, group->default_domain);
+			iommu_setup_dma_ops(gdev->dev, group->default_domain);	/* [한국어] 이제 이 장치의 dma_map_* 이 IOMMU 를 거친다 */
 		mutex_unlock(&group->mutex);
 
 		/*
@@ -2959,6 +2988,9 @@ static int bus_iommu_probe(const struct bus_type *bus)
 		 * in-turn might call back into IOMMU core code, where it tries
 		 * to take group->mutex, resulting in a deadlock.
 		 */
+		/* [한국어] 위 FIXME 대로 락을 놓고 부른다. 일부 ARM 드라이버의
+		 * 콜백이 코어로 되돌아와 같은 락을 잡으려 하기 때문이며,
+		 * 상류도 이것을 잘못된 상태로 인정하고 있다. */
 		for_each_group_device(group, gdev)
 			iommu_group_do_probe_finalize(gdev->dev);
 	}
@@ -2974,16 +3006,25 @@ static int bus_iommu_probe(const struct bus_type *bus)
  * Return: true if an IOMMU is present and supports the given capability
  * for the given device, otherwise false.
  */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어) IOMMU 능력을 묻는다.
+ *
+ * 두 번의 "없으면 false" 가 이 함수의 전부다. IOMMU 아래에 없는 장치와,
+ * 능력 질의를 구현하지 않은 드라이버 모두 "그 능력이 없다"로 답한다 --
+ * 능력이 있다고 잘못 답하는 것보다 없다고 답하는 쪽이 안전하기 때문이다.
+ *
+ * 호출 체인: VFIO·DMA 계층 → [이 함수] → ops->capable
+ */
 bool device_iommu_capable(struct device *dev, enum iommu_cap cap)
 {
 	const struct iommu_ops *ops;
 
 	if (!dev_has_iommu(dev))
-		return false;
+		return false;	/* [한국어] IOMMU 아래에 없으면 어떤 능력도 없다 */
 
 	ops = dev_iommu_ops(dev);
 	if (!ops->capable)
-		return false;
+		return false;	/* [한국어] 묻지 않은 것은 없는 것으로 — 안전한 쪽으로 답한다 */
 
 	return ops->capable(dev, cap);
 }
@@ -2999,14 +3040,30 @@ EXPORT_SYMBOL_GPL(device_iommu_capable);
  * directly prevents this, so ensure mistakes don't result in isolation failures
  * by checking that all the devices are the same.
  */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어) 그룹의 MSI 가 격리돼 있는지 묻는다.
+ *
+ * 왜 중요한가: MSI 는 장치가 특정 주소에 쓰기를 해서 인터럽트를 내는
+ * 방식이다. 그 주소가 격리되지 않으면, 사용자 공간에 넘긴 장치가 임의의
+ * 인터럽트를 호스트에 주입할 수 있다. 그래서 VFIO 가 장치를 넘기기 전에
+ * 이것을 확인한다.
+ *
+ * &= 로 모아 하나라도 거짓이면 전체가 거짓이 되는 것이 요점이다. 위
+ * 영어 주석대로 그룹 안에서 값이 갈리는 일은 없어야 하지만 막을 방법이
+ * 없어, 갈렸을 때 안전한 쪽(격리 안 됨)으로 답하도록 해 둔 것이다.
+ *
+ * 실행 컨텍스트: VFIO 의 장치 인계 경로. 잠들 수 있다.
+ *
+ * 호출 체인: VFIO/iommufd → [이 함수]
+ */
 bool iommu_group_has_isolated_msi(struct iommu_group *group)
 {
 	struct group_device *group_dev;
-	bool ret = true;
+	bool ret = true;	/* [한국어] 하나씩 &= 로 깎아 나간다 */
 
 	mutex_lock(&group->mutex);
 	for_each_group_device(group, group_dev)
-		ret &= msi_device_has_isolated_msi(group_dev->dev);
+		ret &= msi_device_has_isolated_msi(group_dev->dev);	/* [한국어] 하나라도 격리되지 않으면 그룹 전체가 격리되지 않은 것이다 */
 	mutex_unlock(&group->mutex);
 	return ret;
 }
@@ -3024,16 +3081,26 @@ EXPORT_SYMBOL_GPL(iommu_group_has_isolated_msi);
  * The fault handler itself should return 0 on success, and an appropriate
  * error code otherwise.
  */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어) 도메인에 폴트 처리기를 건다.
+ *
+ * cookie_type 검사가 이 함수의 핵심이다. 도메인은 사용자별 상태를 담는
+ * 자리를 하나만 가지고 있고, 그것을 DMA API 가 쓰거나(IOMMU_COOKIE_DMA)
+ * 폴트 처리기가 쓰거나 하나만 가능하다. 이미 다른 용도로 쓰이는 도메인에
+ * 처리기를 걸면 그쪽 상태를 덮어써 버리므로, 아직 비어 있을 때만 허용한다.
+ *
+ * 호출 체인: IOMMU 사용자(드라이버·VFIO) → [이 함수]
+ */
 void iommu_set_fault_handler(struct iommu_domain *domain,
 					iommu_fault_handler_t handler,
 					void *token)
 {
 	if (WARN_ON(!domain || domain->cookie_type != IOMMU_COOKIE_NONE))
-		return;
+		return;	/* [한국어] 자리가 이미 다른 용도로 쓰이고 있다 — 덮어쓰면 그쪽이 깨진다 */
 
-	domain->cookie_type = IOMMU_COOKIE_FAULT_HANDLER;
+	domain->cookie_type = IOMMU_COOKIE_FAULT_HANDLER;	/* [한국어] 이제 이 도메인의 쿠키는 폴트 처리기 것이다 */
 	domain->handler = handler;
-	domain->handler_token = token;
+	domain->handler_token = token;	/* [한국어] 처리기가 자기 문맥을 되찾는 통로 */
 }
 EXPORT_SYMBOL_GPL(iommu_set_fault_handler);
 
