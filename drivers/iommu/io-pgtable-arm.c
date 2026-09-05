@@ -7,99 +7,145 @@
  * Author: Will Deacon <will.deacon@arm.com>
  */
 
-#define pr_fmt(fmt)	"arm-lpae io-pgtable: " fmt
+/*
+ * [한국어 설명] ARM LPAE 페이지 테이블 구현 (drivers/iommu/io-pgtable-arm.c)
+ *
+ * === 파일의 역할 ===
+ * ARM 의 긴 서술자(Long-descriptor, LPAE) 형식 페이지 테이블을 만들고 다루는
+ * 코드다. IOMMU 하드웨어를 전혀 만지지 않고 메모리 상의 자료구조만 조작하며,
+ * 그래서 SMMUv2·SMMUv3·Mediatek·Rockchip·Mali 등 서로 다른 하드웨어가 이 파일
+ * 하나를 공유한다. 파일 첫 줄의 "CPU-agnostic" 이 그 뜻이다.
+ *
+ * 형식 자체는 ARM CPU 의 페이지 테이블과 같다. 64비트 서술자, 레벨당 고정 비트
+ * 수, 블록/테이블/페이지 세 가지 항목 종류. 그래서 CPU 쪽 mm 코드를 아는 사람이면
+ * 구조가 바로 읽힌다 — 다만 접근 권한과 캐시 속성의 해석이 stage 에 따라 다르다.
+ *
+ * stage-1 과 stage-2 를 함께 구현한다는 점이 중요하다. stage-1 은 OS 가 관리하는
+ * 보통의 번역(IOVA → 물리)이고, stage-2 는 하이퍼바이저가 게스트의 출력을 다시
+ * 번역하는 층이다. 두 stage 는 서술자 비트 배치가 달라(AP vs HAP, MAIR 인덱스 vs
+ * 직접 인코딩) 권한 변환 함수가 갈린다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * 흐름: iommu.c iommu_map
+ *         → 벤더 드라이버 map_pages
+ *           → [이 파일] arm_lpae_map_pages
+ *             → 레벨을 내려가며 필요하면 테이블을 만들고, 마지막에 PTE 기입
+ *             → 비일관 IOMMU 면 그 캐시라인을 메모리로 밀어낸다
+ *           → 드라이버가 cfg->tlb 콜백으로 무효화
+ *
+ * 이 파일이 직접 부르는 것은 두 가지뿐이다 — 페이지 할당(iommu-pages.c)과
+ * TLB 무효화 콜백(cfg->tlb). 하드웨어 접근은 전부 후자를 통해 드라이버에 되돌린다.
+ *
+ * === 타 모듈과의 연결 ===
+ * - io-pgtable.c: 이 구현을 포맷 표에 등록하고, alloc_io_pgtable_ops 로 진입시킨다.
+ * - io_pgtable_cfg: 양방향 통신. 드라이버가 주소 폭·페이지 크기·일관성 여부를
+ *   넣으면, 이 파일이 TCR/TTBR/MAIR 레지스터 값을 채워 돌려준다.
+ * - iommu-pages.c: 테이블 페이지를 그쪽에서 얻는다. 비일관 하드웨어면 기입 후
+ *   캐시 플러시까지 그쪽 헬퍼로 처리한다.
+ * - 벤더 드라이버: 채워진 레지스터 값을 하드웨어에 쓰고, TLB 콜백을 구현한다.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * - struct arm_lpae_io_pgtable : 이 테이블의 형상 (레벨 수, 레벨당 비트, PGD 크기).
+ * - arm_lpae_map_pages()   : 레벨을 내려가며 매핑을 기입한다. 필요하면 테이블 생성.
+ * - arm_lpae_unmap_pages() : 그 역. 블록을 쪼개야 하면 분할까지 한다.
+ * - arm_lpae_iova_to_phys(): 테이블을 걸어 내려가 물리 주소를 얻는다.
+ * - __arm_lpae_set_pte()   : PTE 하나를 쓰고, 비일관 하드웨어면 캐시를 민다.
+ * - arm_lpae_install_table(): 블록을 테이블로 바꾸는 원자적 교체 (분할의 핵심).
+ * - alloc_io_pgtable_ops 진입점들: 64/32비트 × stage-1/2, Mali 변형.
+ */
+#define pr_fmt(fmt)	"arm-lpae io-pgtable: " fmt	/* [한국어] 이 파일의 로그에 붙일 접두사 — 여러 드라이버가 공유하므로 어느 계층에서 난 메시지인지 구별이 필요하다 */
 
-#include <linux/atomic.h>
-#include <linux/bitops.h>
-#include <linux/io-pgtable.h>
-#include <linux/sizes.h>
-#include <linux/slab.h>
-#include <linux/types.h>
-#include <linux/dma-mapping.h>
+#include <linux/atomic.h>	/* [한국어] PTE 교체에 cmpxchg 를 쓴다 — 블록 분할이 다른 CPU 의 매핑과 경쟁할 수 있다 */
+#include <linux/bitops.h>	/* [한국어] 비트 조작 */
+#include <linux/io-pgtable.h>	/* [한국어] io_pgtable_cfg/ops 정의 */
+#include <linux/sizes.h>	/* [한국어] SZ_4K 등 크기 상수 */
+#include <linux/slab.h>	/* [한국어] 테이블 객체 할당 */
+#include <linux/types.h>	/* [한국어] 기본 타입 */
+#include <linux/dma-mapping.h>	/* [한국어] 비일관 하드웨어의 캐시 관리 */
 
-#include <asm/barrier.h>
+#include <asm/barrier.h>	/* [한국어] PTE 기입 순서를 강제하는 배리어 */
 
-#include "io-pgtable-arm.h"
-#include "iommu-pages.h"
+#include "io-pgtable-arm.h"	/* [한국어] 이 파일과 SMMU 드라이버가 공유하는 서술자 정의 */
+#include "iommu-pages.h"	/* [한국어] 테이블 페이지 할당자 */
 
-#define ARM_LPAE_MAX_ADDR_BITS		52
-#define ARM_LPAE_S2_MAX_CONCAT_PAGES	16
-#define ARM_LPAE_MAX_LEVELS		4
+#define ARM_LPAE_MAX_ADDR_BITS		52	/* [한국어] LPAE 가 표현할 수 있는 최대 주소 폭. ARMv8.2 의 52비트 확장까지 포함한다 */
+#define ARM_LPAE_S2_MAX_CONCAT_PAGES	16	/* [한국어] stage-2 는 최상위 테이블을 여러 장 이어 붙여(concatenate) 레벨 하나를 줄일 수 있다. 게스트 주소 공간이 커도 워크 깊이를 얕게 유지하는 기법이며, 최대 16장까지 허용된다 */
+#define ARM_LPAE_MAX_LEVELS		4	/* [한국어] 최대 4단계 워크 (레벨 0~3) */
 
 /* Struct accessors */
-#define io_pgtable_to_data(x)						\
-	container_of((x), struct arm_lpae_io_pgtable, iop)
+#define io_pgtable_to_data(x)						\	/* [한국어] 공통 io_pgtable 객체에서 이 구현의 확장형으로 되짚는다 */
+	container_of((x), struct arm_lpae_io_pgtable, iop)	/* [한국어] iop 이 확장형 안에 박혀 있으므로 성립한다 */
 
-#define io_pgtable_ops_to_data(x)					\
-	io_pgtable_to_data(io_pgtable_ops_to_pgtable(x))
+#define io_pgtable_ops_to_data(x)					\	/* [한국어] ops 포인터에서 곧바로 확장형으로 (두 단계 역산을 합친 것) */
+	io_pgtable_to_data(io_pgtable_ops_to_pgtable(x))	/* [한국어] ops → io_pgtable → arm_lpae_io_pgtable */
 
 /*
  * Calculate the right shift amount to get to the portion describing level l
  * in a virtual address mapped by the pagetable in d.
  */
-#define ARM_LPAE_LVL_SHIFT(l,d)						\
-	(((ARM_LPAE_MAX_LEVELS - (l)) * (d)->bits_per_level) +		\
-	ilog2(sizeof(arm_lpae_iopte)))
+#define ARM_LPAE_LVL_SHIFT(l,d)						\	/* [한국어] 레벨 l 의 인덱스를 꺼내려면 주소를 몇 비트 오른쪽으로 밀어야 하는지 */
+	(((ARM_LPAE_MAX_LEVELS - (l)) * (d)->bits_per_level) +		\	/* [한국어] 레벨이 낮을수록(상위 테이블일수록) 더 많이 민다. 레벨당 bits_per_level 씩 차이가 난다 */
+	ilog2(sizeof(arm_lpae_iopte)))	/* [한국어] 서술자 하나가 8바이트이므로 최하위 3비트는 항목 내 오프셋이다 (위 영어 주석) */
 
-#define ARM_LPAE_GRANULE(d)						\
-	(sizeof(arm_lpae_iopte) << (d)->bits_per_level)
-#define ARM_LPAE_PGD_SIZE(d)						\
-	(sizeof(arm_lpae_iopte) << (d)->pgd_bits)
+#define ARM_LPAE_GRANULE(d)						\	/* [한국어] 테이블 한 장의 크기 = 항목 크기 × 항목 수. 이것이 곧 이 설정의 페이지 크기(4K/16K/64K)이기도 하다 */
+	(sizeof(arm_lpae_iopte) << (d)->bits_per_level)	/* [한국어] 8 << bits_per_level */
+#define ARM_LPAE_PGD_SIZE(d)						\	/* [한국어] 최상위 테이블의 크기. 보통 테이블 한 장과 같지만, stage-2 의 이어붙이기나 좁은 주소 공간에서는 다를 수 있다 */
+	(sizeof(arm_lpae_iopte) << (d)->pgd_bits)	/* [한국어] 8 << pgd_bits */
 
-#define ARM_LPAE_PTES_PER_TABLE(d)					\
-	(ARM_LPAE_GRANULE(d) >> ilog2(sizeof(arm_lpae_iopte)))
+#define ARM_LPAE_PTES_PER_TABLE(d)					\	/* [한국어] 테이블 한 장에 들어가는 항목 수 */
+	(ARM_LPAE_GRANULE(d) >> ilog2(sizeof(arm_lpae_iopte)))	/* [한국어] 테이블 크기 / 항목 크기 */
 
 /*
  * Calculate the index at level l used to map virtual address a using the
  * pagetable in d.
  */
-#define ARM_LPAE_PGD_IDX(l,d)						\
-	((l) == (d)->start_level ? (d)->pgd_bits - (d)->bits_per_level : 0)
+#define ARM_LPAE_PGD_IDX(l,d)						\	/* [한국어] 최상위 레벨에서만 인덱스 폭이 다를 수 있다 — 이어붙이기나 축소된 주소 공간 때문 */
+	((l) == (d)->start_level ? (d)->pgd_bits - (d)->bits_per_level : 0)	/* [한국어] 최상위면 그 차이를, 아니면 0 */
 
-#define ARM_LPAE_LVL_IDX(a,l,d)						\
-	(((u64)(a) >> ARM_LPAE_LVL_SHIFT(l,d)) &			\
-	 ((1 << ((d)->bits_per_level + ARM_LPAE_PGD_IDX(l,d))) - 1))
+#define ARM_LPAE_LVL_IDX(a,l,d)						\	/* [한국어] 주소 a 에서 레벨 l 의 테이블 인덱스를 뽑는다 (위 영어 주석) */
+	(((u64)(a) >> ARM_LPAE_LVL_SHIFT(l,d)) &			\	/* [한국어] 해당 비트 구간까지 밀고 */
+	 ((1 << ((d)->bits_per_level + ARM_LPAE_PGD_IDX(l,d))) - 1))	/* [한국어] 그 레벨의 인덱스 폭만큼 잘라 낸다 */
 
 /* Calculate the block/page mapping size at level l for pagetable in d. */
-#define ARM_LPAE_BLOCK_SIZE(l,d)	(1ULL << ARM_LPAE_LVL_SHIFT(l,d))
+#define ARM_LPAE_BLOCK_SIZE(l,d)	(1ULL << ARM_LPAE_LVL_SHIFT(l,d))	/* [한국어] 레벨 l 에서 항목 하나가 덮는 크기. 4K 입도의 레벨 2 면 2MB, 레벨 1 이면 1GB 다 (위 영어 주석) */
 
 /* Page table bits */
-#define ARM_LPAE_PTE_TYPE_SHIFT		0
-#define ARM_LPAE_PTE_TYPE_MASK		0x3
+#define ARM_LPAE_PTE_TYPE_SHIFT		0	/* [한국어] 항목 종류는 최하위 2비트에 있다 */
+#define ARM_LPAE_PTE_TYPE_MASK		0x3	/* [한국어] 그 2비트 */
 
-#define ARM_LPAE_PTE_TYPE_BLOCK		1
-#define ARM_LPAE_PTE_TYPE_TABLE		3
-#define ARM_LPAE_PTE_TYPE_PAGE		3
+#define ARM_LPAE_PTE_TYPE_BLOCK		1	/* [한국어] 블록 — 이 레벨의 큰 크기를 통째로 매핑한다 (2MB, 1GB 등) */
+#define ARM_LPAE_PTE_TYPE_TABLE		3	/* [한국어] 테이블 — 다음 레벨 테이블의 주소를 담는다 */
+#define ARM_LPAE_PTE_TYPE_PAGE		3	/* [한국어] 페이지 — 마지막 레벨에서는 같은 값이 '페이지'를 뜻한다. 레벨에 따라 해석이 갈리는 것이 LPAE 의 특징이다 */
 
-#define ARM_LPAE_PTE_ADDR_MASK		GENMASK_ULL(47,12)
+#define ARM_LPAE_PTE_ADDR_MASK		GENMASK_ULL(47,12)	/* [한국어] 항목이 담는 물리 주소 비트. 하위 12비트는 페이지 내 오프셋이라 항상 0 이고, 그 자리가 종류·유효 비트로 재활용된다 */
 
-#define ARM_LPAE_PTE_NSTABLE		(((arm_lpae_iopte)1) << 63)
-#define ARM_LPAE_PTE_XN			(((arm_lpae_iopte)3) << 53)
-#define ARM_LPAE_PTE_DBM		(((arm_lpae_iopte)1) << 51)
-#define ARM_LPAE_PTE_AF			(((arm_lpae_iopte)1) << 10)
-#define ARM_LPAE_PTE_SH_NS		(((arm_lpae_iopte)0) << 8)
-#define ARM_LPAE_PTE_SH_OS		(((arm_lpae_iopte)2) << 8)
-#define ARM_LPAE_PTE_SH_IS		(((arm_lpae_iopte)3) << 8)
-#define ARM_LPAE_PTE_NS			(((arm_lpae_iopte)1) << 5)
-#define ARM_LPAE_PTE_VALID		(((arm_lpae_iopte)1) << 0)
+#define ARM_LPAE_PTE_NSTABLE		(((arm_lpae_iopte)1) << 63)	/* [한국어] 이 테이블 아래는 비보안 세계 — TrustZone 구분 */
+#define ARM_LPAE_PTE_XN			(((arm_lpae_iopte)3) << 53)	/* [한국어] 실행 금지. 장치가 이 매핑에서 명령어를 가져오지 못하게 한다 */
+#define ARM_LPAE_PTE_DBM		(((arm_lpae_iopte)1) << 51)	/* [한국어] Dirty Bit Modifier — 하드웨어가 쓰기를 감지해 RDONLY 비트를 지우게 하는 기능. 더티 페이지 추적(마이그레이션)에 쓴다 */
+#define ARM_LPAE_PTE_AF			(((arm_lpae_iopte)1) << 10)	/* [한국어] Access Flag. 0 이면 접근 시 폴트가 나는데, IOMMU 매핑은 항상 1 로 둔다 — 접근 추적을 하지 않기 때문 */
+#define ARM_LPAE_PTE_SH_NS		(((arm_lpae_iopte)0) << 8)	/* [한국어] 공유 없음 — 캐시 일관성 프로토콜에 참여하지 않는다 */
+#define ARM_LPAE_PTE_SH_OS		(((arm_lpae_iopte)2) << 8)	/* [한국어] 외부 공유 — 시스템 전체와 일관성 */
+#define ARM_LPAE_PTE_SH_IS		(((arm_lpae_iopte)3) << 8)	/* [한국어] 내부 공유 — CPU 클러스터 안에서 일관성. 일관성 있는 IOMMU 매핑의 기본값이다 */
+#define ARM_LPAE_PTE_NS			(((arm_lpae_iopte)1) << 5)	/* [한국어] 이 매핑은 비보안 물리 주소를 가리킨다 */
+#define ARM_LPAE_PTE_VALID		(((arm_lpae_iopte)1) << 0)	/* [한국어] 유효 비트. 0 이면 어떤 종류든 무효이며, PTE 를 지우는 것은 이 비트를 지우는 것이다 */
 
 /* Software bit for solving coherency races */
-#define ARM_LPAE_PTE_SW_SYNC		(((arm_lpae_iopte)1) << 55)
+#define ARM_LPAE_PTE_SW_SYNC		(((arm_lpae_iopte)1) << 55)	/* [한국어] 하드웨어가 무시하는 소프트웨어 전용 비트 (위 영어 주석). 비일관 하드웨어에서 '이 항목의 캐시 플러시가 끝났다'는 표식으로 쓴다 — 두 CPU 가 같은 테이블을 만들 때의 경쟁을 푸는 장치다 */
 
 /* Stage-1 PTE */
-#define ARM_LPAE_PTE_AP_UNPRIV		(((arm_lpae_iopte)1) << 6)
-#define ARM_LPAE_PTE_AP_RDONLY_BIT	7
-#define ARM_LPAE_PTE_AP_RDONLY		(((arm_lpae_iopte)1) << \
-					   ARM_LPAE_PTE_AP_RDONLY_BIT)
-#define ARM_LPAE_PTE_AP_WR_CLEAN_MASK	(ARM_LPAE_PTE_AP_RDONLY | \
-					 ARM_LPAE_PTE_DBM)
-#define ARM_LPAE_PTE_ATTRINDX_SHIFT	2
-#define ARM_LPAE_PTE_nG			(((arm_lpae_iopte)1) << 11)
+#define ARM_LPAE_PTE_AP_UNPRIV		(((arm_lpae_iopte)1) << 6)	/* [한국어] stage-1: 비특권 접근 허용 */
+#define ARM_LPAE_PTE_AP_RDONLY_BIT	7	/* [한국어] stage-1: 읽기 전용 비트의 위치 */
+#define ARM_LPAE_PTE_AP_RDONLY		(((arm_lpae_iopte)1) << \	/* [한국어] 읽기 전용. DMA_TO_DEVICE 매핑이 이 비트를 얻어, 장치가 그 버퍼를 덮어쓰면 폴트가 난다 */
+					   ARM_LPAE_PTE_AP_RDONLY_BIT)	/* [한국어] 위 비트 위치 */
+#define ARM_LPAE_PTE_AP_WR_CLEAN_MASK	(ARM_LPAE_PTE_AP_RDONLY | \	/* [한국어] 더티 추적에서 '쓰기 없음' 상태를 나타내는 조합 */
+					 ARM_LPAE_PTE_DBM)	/* [한국어] RDONLY + DBM 이 함께 서 있으면, 하드웨어가 쓰기를 만났을 때 RDONLY 를 지워 더티를 기록한다 */
+#define ARM_LPAE_PTE_ATTRINDX_SHIFT	2	/* [한국어] stage-1: 캐시 속성을 MAIR 레지스터의 인덱스로 간접 지정한다 */
+#define ARM_LPAE_PTE_nG			(((arm_lpae_iopte)1) << 11)	/* [한국어] non-Global — ASID 에 묶인 매핑. IOMMU 에서는 PASID 별 주소 공간에 쓰인다 */
 
 /* Stage-2 PTE */
-#define ARM_LPAE_PTE_HAP_FAULT		(((arm_lpae_iopte)0) << 6)
-#define ARM_LPAE_PTE_HAP_READ		(((arm_lpae_iopte)1) << 6)
-#define ARM_LPAE_PTE_HAP_WRITE		(((arm_lpae_iopte)2) << 6)
+#define ARM_LPAE_PTE_HAP_FAULT		(((arm_lpae_iopte)0) << 6)	/* [한국어] stage-2: 접근 금지 (권한 비트 배치가 stage-1 과 다르다) */
+#define ARM_LPAE_PTE_HAP_READ		(((arm_lpae_iopte)1) << 6)	/* [한국어] stage-2: 읽기 허용 */
+#define ARM_LPAE_PTE_HAP_WRITE		(((arm_lpae_iopte)2) << 6)	/* [한국어] stage-2: 쓰기 허용. 둘을 OR 하면 읽기·쓰기가 된다 */
 /*
  * For !FWB these code to:
  *  1111 = Normal outer write back cachable / Inner Write Back Cachable
@@ -111,96 +157,124 @@
  *  0101 Normal* is forced Normal-NC, Device unchanged
  *  0001 Force Device-nGnRE
  */
-#define ARM_LPAE_PTE_MEMATTR_FWB_WB	(((arm_lpae_iopte)0x6) << 2)
-#define ARM_LPAE_PTE_MEMATTR_OIWB	(((arm_lpae_iopte)0xf) << 2)
-#define ARM_LPAE_PTE_MEMATTR_NC		(((arm_lpae_iopte)0x5) << 2)
-#define ARM_LPAE_PTE_MEMATTR_DEV	(((arm_lpae_iopte)0x1) << 2)
+#define ARM_LPAE_PTE_MEMATTR_FWB_WB	(((arm_lpae_iopte)0x6) << 2)	/* [한국어] S2FWB: 강제 Write-Back. FWB 는 stage-2 가 stage-1 의 캐시 속성을 덮어쓰게 하는 기능으로, 게스트가 무엇을 지정하든 호스트가 정한 대로 만든다 */
+#define ARM_LPAE_PTE_MEMATTR_OIWB	(((arm_lpae_iopte)0xf) << 2)	/* [한국어] stage-2: 내외부 Write-Back, stage-1 의 지정을 허용 (위 영어 주석의 1111) */
+#define ARM_LPAE_PTE_MEMATTR_NC		(((arm_lpae_iopte)0x5) << 2)	/* [한국어] 비캐시 */
+#define ARM_LPAE_PTE_MEMATTR_DEV	(((arm_lpae_iopte)0x1) << 2)	/* [한국어] Device-nGnRE — 병합·재정렬·투기적 접근이 모두 금지된 MMIO 속성 */
 
 /* Register bits */
-#define ARM_LPAE_VTCR_SL0_MASK		0x3
+#define ARM_LPAE_VTCR_SL0_MASK		0x3	/* [한국어] stage-2 시작 레벨 필드 */
 
-#define ARM_LPAE_TCR_T0SZ_SHIFT		0
+#define ARM_LPAE_TCR_T0SZ_SHIFT		0	/* [한국어] 입력 주소 폭 = 64 - T0SZ */
 
-#define ARM_LPAE_VTCR_PS_SHIFT		16
-#define ARM_LPAE_VTCR_PS_MASK		0x7
+#define ARM_LPAE_VTCR_PS_SHIFT		16	/* [한국어] stage-2 물리 주소 폭 필드 위치 */
+#define ARM_LPAE_VTCR_PS_MASK		0x7	/* [한국어] 3비트로 32/36/40/42/44/48/52비트를 인코딩한다 */
 
-#define ARM_LPAE_MAIR_ATTR_SHIFT(n)	((n) << 3)
-#define ARM_LPAE_MAIR_ATTR_MASK		0xff
-#define ARM_LPAE_MAIR_ATTR_DEVICE	0x04
-#define ARM_LPAE_MAIR_ATTR_NC		0x44
-#define ARM_LPAE_MAIR_ATTR_INC_OWBRWA	0xf4
-#define ARM_LPAE_MAIR_ATTR_WBRWA	0xff
-#define ARM_LPAE_MAIR_ATTR_IDX_NC	0
-#define ARM_LPAE_MAIR_ATTR_IDX_CACHE	1
-#define ARM_LPAE_MAIR_ATTR_IDX_DEV	2
-#define ARM_LPAE_MAIR_ATTR_IDX_INC_OCACHE	3
+#define ARM_LPAE_MAIR_ATTR_SHIFT(n)	((n) << 3)	/* [한국어] MAIR 은 8비트 속성 8개를 한 레지스터에 담는다. 인덱스 n 의 위치 */
+#define ARM_LPAE_MAIR_ATTR_MASK		0xff	/* [한국어] 속성 하나는 8비트 */
+#define ARM_LPAE_MAIR_ATTR_DEVICE	0x04	/* [한국어] Device-nGnRE */
+#define ARM_LPAE_MAIR_ATTR_NC		0x44	/* [한국어] Normal, 내외부 비캐시 */
+#define ARM_LPAE_MAIR_ATTR_INC_OWBRWA	0xf4	/* [한국어] 내부 비캐시 + 외부 Write-Back. 일부 하드웨어가 요구하는 비대칭 조합이다 */
+#define ARM_LPAE_MAIR_ATTR_WBRWA	0xff	/* [한국어] 내외부 Write-Back, 읽기·쓰기 할당 */
+#define ARM_LPAE_MAIR_ATTR_IDX_NC	0	/* [한국어] PTE 의 ATTRINDX 가 0 이면 비캐시 */
+#define ARM_LPAE_MAIR_ATTR_IDX_CACHE	1	/* [한국어] 1 이면 캐시 가능 — IOMMU_CACHE 매핑이 이 인덱스를 쓴다 */
+#define ARM_LPAE_MAIR_ATTR_IDX_DEV	2	/* [한국어] 2 면 장치 메모리 — IOMMU_MMIO 매핑 */
+#define ARM_LPAE_MAIR_ATTR_IDX_INC_OCACHE	3	/* [한국어] 3 이면 비대칭 조합 */
 
-#define ARM_MALI_LPAE_TTBR_ADRMODE_TABLE (3u << 0)
-#define ARM_MALI_LPAE_TTBR_READ_INNER	BIT(2)
-#define ARM_MALI_LPAE_TTBR_SHARE_OUTER	BIT(4)
+#define ARM_MALI_LPAE_TTBR_ADRMODE_TABLE (3u << 0)	/* [한국어] Mali GPU 의 TTBR 은 ARM 표준과 형식이 다르다 — 주소 모드를 레지스터 안에서 지정한다 */
+#define ARM_MALI_LPAE_TTBR_READ_INNER	BIT(2)	/* [한국어] 내부 공유 도메인에서 테이블을 읽는다 */
+#define ARM_MALI_LPAE_TTBR_SHARE_OUTER	BIT(4)	/* [한국어] 외부 공유 */
 
-#define ARM_MALI_LPAE_MEMATTR_IMP_DEF	0x88ULL
-#define ARM_MALI_LPAE_MEMATTR_WRITE_ALLOC 0x8DULL
+#define ARM_MALI_LPAE_MEMATTR_IMP_DEF	0x88ULL	/* [한국어] Mali 의 구현 정의 메모리 속성 */
+#define ARM_MALI_LPAE_MEMATTR_WRITE_ALLOC 0x8DULL	/* [한국어] 쓰기 할당 캐시 속성 */
 
 /* IOPTE accessors */
-#define iopte_deref(pte,d) __va(iopte_to_paddr(pte, d))
+#define iopte_deref(pte,d) __va(iopte_to_paddr(pte, d))	/* [한국어] 테이블 항목이 담은 물리 주소를 커널 가상 주소로. 다음 레벨 테이블을 따라 내려갈 때 쓴다 */
 
 #define iopte_type(pte)					\
-	(((pte) >> ARM_LPAE_PTE_TYPE_SHIFT) & ARM_LPAE_PTE_TYPE_MASK)
+	(((pte) >> ARM_LPAE_PTE_TYPE_SHIFT) & ARM_LPAE_PTE_TYPE_MASK)	/* [한국어] 항목 종류 2비트를 뽑는다 */
 
 #define iopte_writeable_dirty(pte)				\
-	(((pte) & ARM_LPAE_PTE_AP_WR_CLEAN_MASK) == ARM_LPAE_PTE_DBM)
+	(((pte) & ARM_LPAE_PTE_AP_WR_CLEAN_MASK) == ARM_LPAE_PTE_DBM)	/* [한국어] DBM 은 서 있고 RDONLY 는 지워졌다 = 하드웨어가 쓰기를 감지해 더티로 표시했다는 뜻 */
 
 #define iopte_set_writeable_clean(ptep)				\
-	set_bit(ARM_LPAE_PTE_AP_RDONLY_BIT, (unsigned long *)(ptep))
+	set_bit(ARM_LPAE_PTE_AP_RDONLY_BIT, (unsigned long *)(ptep))	/* [한국어] RDONLY 를 다시 세워 '깨끗함'으로 되돌린다. 더티 추적의 리셋 동작이며, 원자적 비트 연산이라 하드웨어의 동시 갱신과 경쟁하지 않는다 */
 
+/*
+ * [한국어] 이 페이지 테이블의 형상.
+ *
+ * LPAE 는 하나의 고정된 구조가 아니라 매개변수화된 형식이다. 페이지 입도(4K/16K/64K)와
+ * 주소 폭에 따라 레벨 수와 레벨당 인덱스 비트가 달라지고, 그 조합을 이 구조체가
+ * 담는다. 파일 전체의 인덱싱 매크로가 여기서 값을 읽는다.
+ */
 struct arm_lpae_io_pgtable {
+	/* [한국어] 공통 계층이 보는 부분. 이 구조체의 첫 필드라 container_of 로
+	 * 양방향 변환이 성립한다.
+	 * 담고 있는 것: 포맷 번호, 드라이버 쿠키, cfg(하드웨어 설정과 TLB 콜백), ops. */
 	struct io_pgtable	iop;
 
+	/* [한국어] 최상위 테이블의 인덱스 비트 수.
+	 * 보통은 bits_per_level 과 같지만 두 경우에 달라진다 — 주소 공간이 좁아
+	 *   최상위 테이블이 한 장을 다 쓰지 않을 때(작게), stage-2 가 테이블을 여러
+	 *   장 이어 붙여 레벨을 줄일 때(크게).
+	 * 읽는 자: ARM_LPAE_PGD_SIZE, ARM_LPAE_PGD_IDX. */
 	int			pgd_bits;
+	/* [한국어] 워크를 시작하는 레벨 (0~3).
+	 * 주소 공간이 좁으면 상위 레벨이 통째로 불필요해진다 — 40비트 주소에 4K
+	 *   입도면 레벨 0 은 인덱스가 늘 0 이라 건너뛴다.
+	 * stage-2 의 테이블 이어붙이기도 시작 레벨을 한 단계 낮추는 효과를 낸다.
+	 * 읽는 자: 모든 워크 루프의 시작점. */
 	int			start_level;
+	/* [한국어] 중간 레벨 하나가 소비하는 주소 비트 수.
+	 * 페이지 입도가 정한다 — 4K 면 9비트(512항목), 16K 면 11비트, 64K 면 13비트.
+	 * 이 값 하나가 테이블 크기, 항목 수, 레벨별 시프트를 모두 결정한다. */
 	int			bits_per_level;
 
+	/* [한국어] 최상위 테이블의 커널 가상 주소.
+	 * 설정자: 이 형식의 alloc 이 iommu-pages 에서 잡는다.
+	 * 읽는 자: 모든 워크의 출발점. 드라이버는 이것의 물리 주소를 TTBR 레지스터에
+	 *   써서 하드웨어에 알린다.
+	 * 정렬: PGD_SIZE 에 정렬되어 있어야 한다 — 하드웨어가 하위 비트를 무시한다. */
 	void			*pgd;
 };
 
-typedef u64 arm_lpae_iopte;
+typedef u64 arm_lpae_iopte;	/* [한국어] 서술자 하나는 64비트. 32비트 LPAE 도 서술자는 64비트다 — 이름의 'Large Physical Address' 가 그 뜻이다 */
 
 static inline bool iopte_leaf(arm_lpae_iopte pte, int lvl,
 			      enum io_pgtable_fmt fmt)
 {
-	if (lvl == (ARM_LPAE_MAX_LEVELS - 1) && fmt != ARM_MALI_LPAE)
-		return iopte_type(pte) == ARM_LPAE_PTE_TYPE_PAGE;
+	if (lvl == (ARM_LPAE_MAX_LEVELS - 1) && fmt != ARM_MALI_LPAE)	/* [한국어] 마지막 레벨에서는 같은 값 3 이 '페이지'를 뜻한다 */
+		return iopte_type(pte) == ARM_LPAE_PTE_TYPE_PAGE;	/* [한국어] 마지막 레벨의 잎 */
 
-	return iopte_type(pte) == ARM_LPAE_PTE_TYPE_BLOCK;
+	return iopte_type(pte) == ARM_LPAE_PTE_TYPE_BLOCK;	/* [한국어] 중간 레벨의 잎은 블록(2MB/1GB). Mali 는 마지막 레벨에서도 블록 인코딩을 쓴다 */
 }
 
 static inline bool iopte_table(arm_lpae_iopte pte, int lvl)
 {
-	if (lvl == (ARM_LPAE_MAX_LEVELS - 1))
-		return false;
-	return iopte_type(pte) == ARM_LPAE_PTE_TYPE_TABLE;
+	if (lvl == (ARM_LPAE_MAX_LEVELS - 1))	/* [한국어] 마지막 레벨에는 다음 테이블이 없다 */
+		return false;	/* [한국어] 테이블일 수 없다 — 같은 비트 값이 '페이지'를 뜻하므로 이 검사가 없으면 오판한다 */
+	return iopte_type(pte) == ARM_LPAE_PTE_TYPE_TABLE;	/* [한국어] 다음 레벨 테이블을 가리키는 항목 */
 }
 
 static arm_lpae_iopte paddr_to_iopte(phys_addr_t paddr,
 				     struct arm_lpae_io_pgtable *data)
 {
-	arm_lpae_iopte pte = paddr;
+	arm_lpae_iopte pte = paddr;	/* [한국어] 물리 주소를 서술자 형으로 */
 
 	/* Of the bits which overlap, either 51:48 or 15:12 are always RES0 */
-	return (pte | (pte >> (48 - 12))) & ARM_LPAE_PTE_ADDR_MASK;
+	return (pte | (pte >> (48 - 12))) & ARM_LPAE_PTE_ADDR_MASK;	/* [한국어] 52비트 주소 지원의 핵심 트릭이다. 48비트를 넘는 상위 4비트(51:48)를 하위 자리(15:12)로 접어 넣는다 — 64K 입도에서는 페이지 내 오프셋이 16비트라 그 자리가 비어 있기 때문이다. 겹치는 두 구간 중 하나는 항상 0 이라 OR 로 합쳐도 정보가 섞이지 않는다 (위 영어 주석) */
 }
 
 static phys_addr_t iopte_to_paddr(arm_lpae_iopte pte,
 				  struct arm_lpae_io_pgtable *data)
 {
-	u64 paddr = pte & ARM_LPAE_PTE_ADDR_MASK;
+	u64 paddr = pte & ARM_LPAE_PTE_ADDR_MASK;	/* [한국어] 주소 비트만 꺼낸다 */
 
-	if (ARM_LPAE_GRANULE(data) < SZ_64K)
-		return paddr;
+	if (ARM_LPAE_GRANULE(data) < SZ_64K)	/* [한국어] 64K 입도가 아니면 접어 넣은 비트가 없다 */
+		return paddr;	/* [한국어] 그대로가 답이다 */
 
 	/* Rotate the packed high-order bits back to the top */
-	return (paddr | (paddr << (48 - 12))) & (ARM_LPAE_PTE_ADDR_MASK << 4);
+	return (paddr | (paddr << (48 - 12))) & (ARM_LPAE_PTE_ADDR_MASK << 4);	/* [한국어] 접어 두었던 상위 4비트를 제자리로 되돌린다 (위 영어 주석) */
 }
 
 /*
@@ -210,9 +284,9 @@ static phys_addr_t iopte_to_paddr(arm_lpae_iopte pte,
  */
 static inline int arm_lpae_max_entries(int i, struct arm_lpae_io_pgtable *data)
 {
-	int ptes_per_table = ARM_LPAE_PTES_PER_TABLE(data);
+	int ptes_per_table = ARM_LPAE_PTES_PER_TABLE(data);	/* [한국어] 테이블 한 장의 항목 수 */
 
-	return ptes_per_table - (i & (ptes_per_table - 1));
+	return ptes_per_table - (i & (ptes_per_table - 1));	/* [한국어] 인덱스 i 에서 이 테이블 페이지의 끝까지 몇 항목이 남았는지. 이어붙인 PGD 에서는 인덱스가 테이블 경계를 넘을 수 있어, 한 번의 연속 기입이 페이지를 넘지 않도록 잘라 주는 값이다 (위 영어 주석) */
 }
 
 /*
@@ -227,109 +301,109 @@ static inline int arm_lpae_max_entries(int i, struct arm_lpae_io_pgtable *data)
 static inline bool arm_lpae_concat_mandatory(struct io_pgtable_cfg *cfg,
 					     struct arm_lpae_io_pgtable *data)
 {
-	unsigned int ias = cfg->ias;
-	unsigned int oas = cfg->oas;
+	unsigned int ias = cfg->ias;	/* [한국어] 입력 주소 폭 (IOVA 쪽) */
+	unsigned int oas = cfg->oas;	/* [한국어] 출력 주소 폭 (물리 쪽) */
 
 	/* Covers 1 and 2.d */
-	if ((ARM_LPAE_GRANULE(data) == SZ_16K) && (data->start_level == 0))
-		return (oas == 48) || (ias == 48);
+	if ((ARM_LPAE_GRANULE(data) == SZ_16K) && (data->start_level == 0))	/* [한국어] 16K 입도로 레벨 0 부터 시작하는 경우 */
+		return (oas == 48) || (ias == 48);	/* [한국어] 48비트면 아키텍처가 테이블 이어붙이기를 요구한다 (위 영어 주석의 1, 2.d) */
 
 	/* Covers 2.a and 2.c */
-	if ((ARM_LPAE_GRANULE(data) == SZ_4K) && (data->start_level == 0))
-		return (oas == 40) || (oas == 42);
+	if ((ARM_LPAE_GRANULE(data) == SZ_4K) && (data->start_level == 0))	/* [한국어] 4K 입도로 레벨 0 부터 */
+		return (oas == 40) || (oas == 42);	/* [한국어] 40/42비트 물리 주소에서 요구된다 (2.a, 2.c) */
 
 	/* Case 2.b */
-	return (ARM_LPAE_GRANULE(data) == SZ_16K) &&
-	       (data->start_level == 1) && (oas == 40);
+	return (ARM_LPAE_GRANULE(data) == SZ_16K) &&	/* [한국어] 16K 입도이고 */
+	       (data->start_level == 1) && (oas == 40);	/* [한국어] 레벨 1 시작, 40비트 물리 주소 (2.b). 이어붙이기는 최상위 테이블을 여러 장 나란히 두어 워크 레벨을 하나 줄이는 기법으로, 아키텍처가 특정 조합에서 이것을 의무로 정해 두었다 */
 }
 
 static dma_addr_t __arm_lpae_dma_addr(void *pages)
 {
-	return (dma_addr_t)virt_to_phys(pages);
+	return (dma_addr_t)virt_to_phys(pages);	/* [한국어] 이 파일에서 DMA 주소는 언제나 물리 주소와 같다 — 아래 alloc 이 그 조건을 검사해 보장한다 */
 }
 
 static void *__arm_lpae_alloc_pages(size_t size, gfp_t gfp,
 				    struct io_pgtable_cfg *cfg,
 				    void *cookie)
 {
-	struct device *dev = cfg->iommu_dev;
-	size_t alloc_size;
-	dma_addr_t dma;
-	void *pages;
+	struct device *dev = cfg->iommu_dev;	/* [한국어] 캐시 관리를 대행할 IOMMU 장치 */
+	size_t alloc_size;	/* [한국어] 실제 할당 크기 */
+	dma_addr_t dma;	/* [한국어] DMA 매핑 결과 */
+	void *pages;	/* [한국어] 확보한 테이블 페이지 */
 
 	/*
 	 * For very small starting-level translation tables the HW requires a
 	 * minimum alignment of at least 64 to cover all cases.
 	 */
-	alloc_size = max(size, 64);
-	if (cfg->alloc)
-		pages = cfg->alloc(cookie, alloc_size, gfp);
+	alloc_size = max(size, 64);	/* [한국어] 아주 작은 최상위 테이블이라도 하드웨어가 64바이트 정렬을 요구한다 (위 영어 주석). 좁은 주소 공간에서 PGD 가 몇 항목뿐일 수 있기 때문이다 */
+	if (cfg->alloc)	/* [한국어] 드라이버가 자기 할당자를 제공했으면 */
+		pages = cfg->alloc(cookie, alloc_size, gfp);	/* [한국어] 그것을 쓴다 — 전용 SRAM 이나 주소 제한이 있는 영역에 테이블을 두어야 하는 하드웨어용 */
 	else
-		pages = iommu_alloc_pages_node_sz(dev_to_node(dev), gfp,
-						  alloc_size);
+		pages = iommu_alloc_pages_node_sz(dev_to_node(dev), gfp,	/* [한국어] 보통은 공용 할당자. IOMMU 와 같은 NUMA 노드에서 잡아 워크 지연을 줄인다 */
+						  alloc_size);	/* [한국어] 64바이트로 올림된 크기 */
 
-	if (!pages)
-		return NULL;
+	if (!pages)	/* [한국어] 할당 실패 */
+		return NULL;	/* [한국어] 매핑을 만들 수 없다 */
 
-	if (!cfg->coherent_walk) {
-		dma = dma_map_single(dev, pages, size, DMA_TO_DEVICE);
-		if (dma_mapping_error(dev, dma))
-			goto out_free;
+	if (!cfg->coherent_walk) {	/* [한국어] IOMMU 가 테이블을 읽을 때 CPU 캐시를 보지 않는 하드웨어면 */
+		dma = dma_map_single(dev, pages, size, DMA_TO_DEVICE);	/* [한국어] DMA API 를 캐시 관리 수단으로 쓴다 */
+		if (dma_mapping_error(dev, dma))	/* [한국어] 매핑 실패 */
+			goto out_free;	/* [한국어] 페이지 반납 */
 		/*
 		 * We depend on the IOMMU being able to work with any physical
 		 * address directly, so if the DMA layer suggests otherwise by
 		 * translating or truncating them, that bodes very badly...
 		 */
-		if (dma != virt_to_phys(pages))
-			goto out_unmap;
+		if (dma != virt_to_phys(pages))	/* [한국어] DMA 계층이 주소를 번역하거나 잘라 냈다 */
+			goto out_unmap;	/* [한국어] 페이지 테이블은 물리 주소로 참조되므로 성립할 수 없다. 위 영어 주석이 '아주 나쁜 조짐'이라 표현한 상황이다 */
 	}
 
-	return pages;
+	return pages;	/* [한국어] 0 으로 채워진 테이블 페이지 */
 
-out_unmap:
-	dev_err(dev, "Cannot accommodate DMA translation for IOMMU page tables\n");
-	dma_unmap_single(dev, dma, size, DMA_TO_DEVICE);
+out_unmap:	/* [한국어] 주소 불일치 경로 */
+	dev_err(dev, "Cannot accommodate DMA translation for IOMMU page tables\n");	/* [한국어] 구성 자체가 성립하지 않음을 알린다 */
+	dma_unmap_single(dev, dma, size, DMA_TO_DEVICE);	/* [한국어] 매핑 되돌리기 */
 
-out_free:
-	if (cfg->free)
-		cfg->free(cookie, pages, size);
+out_free:	/* [한국어] DMA 매핑 실패가 합류 */
+	if (cfg->free)	/* [한국어] 드라이버 할당자를 썼으면 */
+		cfg->free(cookie, pages, size);	/* [한국어] 같은 쪽으로 반납 */
 	else
-		iommu_free_pages(pages);
+		iommu_free_pages(pages);	/* [한국어] 아니면 공용 할당자로 */
 
-	return NULL;
+	return NULL;	/* [한국어] 할당 실패 */
 }
 
 static void __arm_lpae_free_pages(void *pages, size_t size,
 				  struct io_pgtable_cfg *cfg,
 				  void *cookie)
 {
-	if (!cfg->coherent_walk)
-		dma_unmap_single(cfg->iommu_dev, __arm_lpae_dma_addr(pages),
-				 size, DMA_TO_DEVICE);
+	if (!cfg->coherent_walk)	/* [한국어] 비일관 하드웨어면 */
+		dma_unmap_single(cfg->iommu_dev, __arm_lpae_dma_addr(pages),	/* [한국어] DMA 매핑을 먼저 되돌린다 */
+				 size, DMA_TO_DEVICE);	/* [한국어] 같은 크기·방향 */
 
-	if (cfg->free)
-		cfg->free(cookie, pages, size);
+	if (cfg->free)	/* [한국어] 드라이버 할당자를 썼으면 */
+		cfg->free(cookie, pages, size);	/* [한국어] 같은 쪽으로 */
 	else
-		iommu_free_pages(pages);
+		iommu_free_pages(pages);	/* [한국어] 아니면 공용 할당자로 */
 }
 
 static void __arm_lpae_sync_pte(arm_lpae_iopte *ptep, int num_entries,
 				struct io_pgtable_cfg *cfg)
 {
-	dma_sync_single_for_device(cfg->iommu_dev, __arm_lpae_dma_addr(ptep),
-				   sizeof(*ptep) * num_entries, DMA_TO_DEVICE);
+	dma_sync_single_for_device(cfg->iommu_dev, __arm_lpae_dma_addr(ptep),	/* [한국어] 방금 쓴 PTE 들의 캐시라인을 메모리로 밀어낸다. 이것이 없으면 비일관 IOMMU 가 옛 내용을 읽는다 */
+				   sizeof(*ptep) * num_entries, DMA_TO_DEVICE);	/* [한국어] 기입한 항목들의 범위만 */
 }
 
 static void __arm_lpae_clear_pte(arm_lpae_iopte *ptep, struct io_pgtable_cfg *cfg, int num_entries)
 {
-	for (int i = 0; i < num_entries; i++)
-		ptep[i] = 0;
+	for (int i = 0; i < num_entries; i++)	/* [한국어] 연속된 항목들을 */
+		ptep[i] = 0;	/* [한국어] 0 으로 지운다 — 유효 비트가 0 이 되어 무효 항목이 된다 */
 
-	if (!cfg->coherent_walk && num_entries)
-		__arm_lpae_sync_pte(ptep, num_entries, cfg);
+	if (!cfg->coherent_walk && num_entries)	/* [한국어] 비일관 하드웨어이고 실제로 지운 것이 있으면 */
+		__arm_lpae_sync_pte(ptep, num_entries, cfg);	/* [한국어] 그 변경을 메모리로 밀어낸다 */
 }
 
-static size_t __arm_lpae_unmap(struct arm_lpae_io_pgtable *data,
+static size_t __arm_lpae_unmap(struct arm_lpae_io_pgtable *data,	/* [한국어] 상호 재귀를 위한 전방 선언 — 매핑 경로가 블록을 덮어쓸 때 옛 테이블을 해제하려고 해제 경로를 부른다 */
 			       struct iommu_iotlb_gather *gather,
 			       unsigned long iova, size_t size, size_t pgcount,
 			       int lvl, arm_lpae_iopte *ptep);
@@ -338,21 +412,21 @@ static void __arm_lpae_init_pte(struct arm_lpae_io_pgtable *data,
 				phys_addr_t paddr, arm_lpae_iopte prot,
 				int lvl, int num_entries, arm_lpae_iopte *ptep)
 {
-	arm_lpae_iopte pte = prot;
-	struct io_pgtable_cfg *cfg = &data->iop.cfg;
-	size_t sz = ARM_LPAE_BLOCK_SIZE(lvl, data);
-	int i;
+	arm_lpae_iopte pte = prot;	/* [한국어] 권한 비트에서 시작해 종류와 주소를 얹는다 */
+	struct io_pgtable_cfg *cfg = &data->iop.cfg;	/* [한국어] 캐시 정책 확인용 */
+	size_t sz = ARM_LPAE_BLOCK_SIZE(lvl, data);	/* [한국어] 이 레벨의 항목 하나가 덮는 크기 */
+	int i;	/* [한국어] 항목 순회 커서 */
 
-	if (data->iop.fmt != ARM_MALI_LPAE && lvl == ARM_LPAE_MAX_LEVELS - 1)
-		pte |= ARM_LPAE_PTE_TYPE_PAGE;
+	if (data->iop.fmt != ARM_MALI_LPAE && lvl == ARM_LPAE_MAX_LEVELS - 1)	/* [한국어] 마지막 레벨의 표준 LPAE */
+		pte |= ARM_LPAE_PTE_TYPE_PAGE;	/* [한국어] '페이지' 인코딩 */
 	else
-		pte |= ARM_LPAE_PTE_TYPE_BLOCK;
+		pte |= ARM_LPAE_PTE_TYPE_BLOCK;	/* [한국어] 중간 레벨이거나 Mali — '블록' 인코딩 */
 
-	for (i = 0; i < num_entries; i++)
-		ptep[i] = pte | paddr_to_iopte(paddr + i * sz, data);
+	for (i = 0; i < num_entries; i++)	/* [한국어] 연속된 항목들을 */
+		ptep[i] = pte | paddr_to_iopte(paddr + i * sz, data);	/* [한국어] 같은 권한에 주소만 한 블록씩 전진시켜 채운다. 한 번의 호출로 여러 항목을 쓰는 것이 map_pages API 의 이득이다 */
 
-	if (!cfg->coherent_walk)
-		__arm_lpae_sync_pte(ptep, num_entries, cfg);
+	if (!cfg->coherent_walk)	/* [한국어] 비일관 하드웨어면 */
+		__arm_lpae_sync_pte(ptep, num_entries, cfg);	/* [한국어] 기입을 메모리로 밀어낸다 */
 }
 
 static int arm_lpae_init_pte(struct arm_lpae_io_pgtable *data,
@@ -360,31 +434,31 @@ static int arm_lpae_init_pte(struct arm_lpae_io_pgtable *data,
 			     arm_lpae_iopte prot, int lvl, int num_entries,
 			     arm_lpae_iopte *ptep)
 {
-	int i;
+	int i;	/* [한국어] 항목 순회 커서 */
 
-	for (i = 0; i < num_entries; i++)
-		if (iopte_leaf(ptep[i], lvl, data->iop.fmt)) {
+	for (i = 0; i < num_entries; i++)	/* [한국어] 덮어쓸 자리들을 먼저 확인한다 */
+		if (iopte_leaf(ptep[i], lvl, data->iop.fmt)) {	/* [한국어] 이미 매핑이 있다 */
 			/* We require an unmap first */
-			WARN_ON(!(data->iop.cfg.quirks & IO_PGTABLE_QUIRK_NO_WARN));
-			return -EEXIST;
-		} else if (iopte_type(ptep[i]) == ARM_LPAE_PTE_TYPE_TABLE) {
+			WARN_ON(!(data->iop.cfg.quirks & IO_PGTABLE_QUIRK_NO_WARN));	/* [한국어] 덮어쓰기는 허용하지 않는다 — 해제를 먼저 해야 한다. 일부 드라이버가 이 경고를 끄는 quirk 를 쓴다 */
+			return -EEXIST;	/* [한국어] 호출자가 실패로 처리한다 */
+		} else if (iopte_type(ptep[i]) == ARM_LPAE_PTE_TYPE_TABLE) {	/* [한국어] 이 자리에 하위 테이블이 있는데 이제 블록으로 덮으려 한다 */
 			/*
 			 * We need to unmap and free the old table before
 			 * overwriting it with a block entry.
 			 */
-			arm_lpae_iopte *tblp;
-			size_t sz = ARM_LPAE_BLOCK_SIZE(lvl, data);
+			arm_lpae_iopte *tblp;	/* [한국어] 현재 테이블의 시작 */
+			size_t sz = ARM_LPAE_BLOCK_SIZE(lvl, data);	/* [한국어] 이 레벨의 블록 크기 */
 
-			tblp = ptep - ARM_LPAE_LVL_IDX(iova, lvl, data);
-			if (__arm_lpae_unmap(data, NULL, iova + i * sz, sz, 1,
-					     lvl, tblp) != sz) {
-				WARN_ON(1);
-				return -EINVAL;
+			tblp = ptep - ARM_LPAE_LVL_IDX(iova, lvl, data);	/* [한국어] 인덱스를 빼서 테이블의 첫 항목으로 되돌린다 — 해제 경로가 테이블 시작을 받기 때문 */
+			if (__arm_lpae_unmap(data, NULL, iova + i * sz, sz, 1,	/* [한국어] 하위 테이블을 통째로 해제한다. 그러지 않으면 블록으로 덮는 순간 그 테이블 페이지들이 참조를 잃는다 (위 영어 주석) */
+					     lvl, tblp) != sz) {	/* [한국어] 기대한 만큼 지우지 못했다 */
+				WARN_ON(1);	/* [한국어] 페이지 테이블 상태가 이미 어긋나 있다 */
+				return -EINVAL;	/* [한국어] 더 진행하지 않는다 */
 			}
 		}
 
-	__arm_lpae_init_pte(data, paddr, prot, lvl, num_entries, ptep);
-	return 0;
+	__arm_lpae_init_pte(data, paddr, prot, lvl, num_entries, ptep);	/* [한국어] 자리가 비었으니 실제 기입 */
+	return 0;	/* [한국어] 매핑 완료 */
 }
 
 static arm_lpae_iopte arm_lpae_install_table(arm_lpae_iopte *table,
@@ -392,31 +466,31 @@ static arm_lpae_iopte arm_lpae_install_table(arm_lpae_iopte *table,
 					     arm_lpae_iopte curr,
 					     struct arm_lpae_io_pgtable *data)
 {
-	arm_lpae_iopte old, new;
-	struct io_pgtable_cfg *cfg = &data->iop.cfg;
+	arm_lpae_iopte old, new;	/* [한국어] cmpxchg 의 기대값과 새 값 */
+	struct io_pgtable_cfg *cfg = &data->iop.cfg;	/* [한국어] 캐시 정책과 quirk 확인용 */
 
-	new = paddr_to_iopte(__pa(table), data) | ARM_LPAE_PTE_TYPE_TABLE;
-	if (cfg->quirks & IO_PGTABLE_QUIRK_ARM_NS)
-		new |= ARM_LPAE_PTE_NSTABLE;
+	new = paddr_to_iopte(__pa(table), data) | ARM_LPAE_PTE_TYPE_TABLE;	/* [한국어] 새 테이블의 물리 주소에 '테이블' 종류를 얹는다 */
+	if (cfg->quirks & IO_PGTABLE_QUIRK_ARM_NS)	/* [한국어] 비보안 세계용 테이블이면 */
+		new |= ARM_LPAE_PTE_NSTABLE;	/* [한국어] 그 표시를 단다 */
 
 	/*
 	 * Ensure the table itself is visible before its PTE can be.
 	 * Whilst we could get away with cmpxchg64_release below, this
 	 * doesn't have any ordering semantics when !CONFIG_SMP.
 	 */
-	dma_wmb();
+	dma_wmb();	/* [한국어] 테이블 내용이 먼저 보이고 그것을 가리키는 항목이 나중에 보이게 한다. 순서가 뒤집히면 하드웨어가 아직 채워지지 않은 테이블을 워크한다. cmpxchg64_release 로도 되지만 !CONFIG_SMP 에서 순서 의미가 사라져 명시적 배리어를 쓴다 (위 영어 주석) */
 
-	old = cmpxchg64_relaxed(ptep, curr, new);
+	old = cmpxchg64_relaxed(ptep, curr, new);	/* [한국어] 원자적 교체. 두 CPU 가 같은 자리에 동시에 테이블을 만들 수 있어, 진 쪽은 자기 테이블을 버리고 이긴 쪽의 것을 쓴다 */
 
-	if (cfg->coherent_walk || (old & ARM_LPAE_PTE_SW_SYNC))
-		return old;
+	if (cfg->coherent_walk || (old & ARM_LPAE_PTE_SW_SYNC))	/* [한국어] 일관성 있는 하드웨어이거나, 다른 CPU 가 이미 이 항목의 캐시를 밀어냈다면 */
+		return old;	/* [한국어] 추가로 할 일이 없다 */
 
 	/* Even if it's not ours, there's no point waiting; just kick it */
-	__arm_lpae_sync_pte(ptep, 1, cfg);
-	if (old == curr)
-		WRITE_ONCE(*ptep, new | ARM_LPAE_PTE_SW_SYNC);
+	__arm_lpae_sync_pte(ptep, 1, cfg);	/* [한국어] 비일관 하드웨어 — 이 항목을 메모리로 밀어낸다. 내가 쓴 것이 아니더라도 기다릴 이유가 없으니 그냥 밀어 준다 (위 영어 주석) */
+	if (old == curr)	/* [한국어] 교체에 성공한 쪽이면 */
+		WRITE_ONCE(*ptep, new | ARM_LPAE_PTE_SW_SYNC);	/* [한국어] 소프트웨어 비트를 세워 '이 항목은 이미 플러시됐다'고 남긴다. 뒤따라오는 CPU 가 같은 플러시를 반복하지 않게 하는 표식이며, 하드웨어는 이 비트를 무시한다 */
 
-	return old;
+	return old;	/* [한국어] 교체 전의 값. 0 이 아니면 다른 CPU 가 먼저 만든 것이다 */
 }
 
 static int __arm_lpae_map(struct arm_lpae_io_pgtable *data, unsigned long iova,
@@ -424,56 +498,56 @@ static int __arm_lpae_map(struct arm_lpae_io_pgtable *data, unsigned long iova,
 			  arm_lpae_iopte prot, int lvl, arm_lpae_iopte *ptep,
 			  gfp_t gfp, size_t *mapped)
 {
-	arm_lpae_iopte *cptep, pte;
-	size_t block_size = ARM_LPAE_BLOCK_SIZE(lvl, data);
-	size_t tblsz = ARM_LPAE_GRANULE(data);
-	struct io_pgtable_cfg *cfg = &data->iop.cfg;
-	int ret = 0, num_entries, max_entries, map_idx_start;
+	arm_lpae_iopte *cptep, pte;	/* [한국어] 다음 레벨 테이블 포인터와 현재 항목 */
+	size_t block_size = ARM_LPAE_BLOCK_SIZE(lvl, data);	/* [한국어] 이 레벨의 항목 하나가 덮는 크기 */
+	size_t tblsz = ARM_LPAE_GRANULE(data);	/* [한국어] 테이블 한 장의 크기 */
+	struct io_pgtable_cfg *cfg = &data->iop.cfg;	/* [한국어] 설정 */
+	int ret = 0, num_entries, max_entries, map_idx_start;	/* [한국어] 결과와 이번에 채울 항목 수 */
 
 	/* Find our entry at the current level */
-	map_idx_start = ARM_LPAE_LVL_IDX(iova, lvl, data);
-	ptep += map_idx_start;
+	map_idx_start = ARM_LPAE_LVL_IDX(iova, lvl, data);	/* [한국어] 이 레벨에서 이 주소가 쓰는 인덱스 */
+	ptep += map_idx_start;	/* [한국어] 해당 항목으로 이동 */
 
 	/* If we can install a leaf entry at this level, then do so */
-	if (size == block_size) {
-		max_entries = arm_lpae_max_entries(map_idx_start, data);
-		num_entries = min_t(int, pgcount, max_entries);
-		ret = arm_lpae_init_pte(data, iova, paddr, prot, lvl, num_entries, ptep);
-		if (!ret)
-			*mapped += num_entries * size;
+	if (size == block_size) {	/* [한국어] 요청 크기가 이 레벨의 블록 크기와 정확히 같다 — 여기서 잎을 만들면 된다 */
+		max_entries = arm_lpae_max_entries(map_idx_start, data);	/* [한국어] 이 테이블 페이지 안에서 연속으로 쓸 수 있는 항목 수 */
+		num_entries = min_t(int, pgcount, max_entries);	/* [한국어] 요청한 개수와 그 한계 중 작은 쪽 */
+		ret = arm_lpae_init_pte(data, iova, paddr, prot, lvl, num_entries, ptep);	/* [한국어] 연속 항목들을 한 번에 기입 */
+		if (!ret)	/* [한국어] 성공했으면 */
+			*mapped += num_entries * size;	/* [한국어] 호출자에게 진행량을 알린다. 나머지는 상위 루프가 다시 부른다 */
 
-		return ret;
+		return ret;	/* [한국어] 이 레벨에서 끝 */
 	}
 
 	/* We can't allocate tables at the final level */
-	if (WARN_ON(lvl >= ARM_LPAE_MAX_LEVELS - 1))
-		return -EINVAL;
+	if (WARN_ON(lvl >= ARM_LPAE_MAX_LEVELS - 1))	/* [한국어] 마지막 레벨인데 더 내려가려 한다 = 크기가 최소 페이지보다 작다 */
+		return -EINVAL;	/* [한국어] 호출자의 정렬 검사가 놓친 경우 */
 
 	/* Grab a pointer to the next level */
-	pte = READ_ONCE(*ptep);
-	if (!pte) {
-		cptep = __arm_lpae_alloc_pages(tblsz, gfp, cfg, data->iop.cookie);
-		if (!cptep)
-			return -ENOMEM;
+	pte = READ_ONCE(*ptep);	/* [한국어] 현재 항목을 한 번만 읽는다 — 다른 CPU 가 동시에 쓸 수 있다 */
+	if (!pte) {	/* [한국어] 비어 있다 — 하위 테이블을 만들어야 한다 */
+		cptep = __arm_lpae_alloc_pages(tblsz, gfp, cfg, data->iop.cookie);	/* [한국어] 새 테이블 페이지 */
+		if (!cptep)	/* [한국어] 할당 실패 */
+			return -ENOMEM;	/* [한국어] 매핑 실패 */
 
-		pte = arm_lpae_install_table(cptep, ptep, 0, data);
-		if (pte)
-			__arm_lpae_free_pages(cptep, tblsz, cfg, data->iop.cookie);
-	} else if (!cfg->coherent_walk && !(pte & ARM_LPAE_PTE_SW_SYNC)) {
-		__arm_lpae_sync_pte(ptep, 1, cfg);
+		pte = arm_lpae_install_table(cptep, ptep, 0, data);	/* [한국어] 0 을 기대값으로 원자적 설치 */
+		if (pte)	/* [한국어] 0 이 아니면 다른 CPU 가 먼저 만들었다 */
+			__arm_lpae_free_pages(cptep, tblsz, cfg, data->iop.cookie);	/* [한국어] 내 테이블은 버리고 그쪽 것을 쓴다 */
+	} else if (!cfg->coherent_walk && !(pte & ARM_LPAE_PTE_SW_SYNC)) {	/* [한국어] 이미 항목이 있지만 아직 플러시되지 않았다 */
+		__arm_lpae_sync_pte(ptep, 1, cfg);	/* [한국어] 여기서 밀어 준다 — 설치한 CPU 가 아직 플러시 전일 수 있다 */
 	}
 
-	if (pte && !iopte_leaf(pte, lvl, data->iop.fmt)) {
-		cptep = iopte_deref(pte, data);
-	} else if (pte) {
+	if (pte && !iopte_leaf(pte, lvl, data->iop.fmt)) {	/* [한국어] 항목이 있고 테이블이면 */
+		cptep = iopte_deref(pte, data);	/* [한국어] 다음 레벨로 내려갈 포인터 */
+	} else if (pte) {	/* [한국어] 항목이 있는데 잎이다 = 이미 매핑되어 있다 */
 		/* We require an unmap first */
-		WARN_ON(!(cfg->quirks & IO_PGTABLE_QUIRK_NO_WARN));
-		return -EEXIST;
+		WARN_ON(!(cfg->quirks & IO_PGTABLE_QUIRK_NO_WARN));	/* [한국어] 덮어쓰기는 허용하지 않는다 */
+		return -EEXIST;	/* [한국어] 해제를 먼저 해야 한다 */
 	}
 
 	/* Rinse, repeat */
-	return __arm_lpae_map(data, iova, paddr, size, pgcount, prot, lvl + 1,
-			      cptep, gfp, mapped);
+	return __arm_lpae_map(data, iova, paddr, size, pgcount, prot, lvl + 1,	/* [한국어] 한 레벨 내려가 같은 일을 반복한다. 꼬리 재귀라 컴파일러가 루프로 펼친다 */
+			      cptep, gfp, mapped);	/* [한국어] 다음 레벨 테이블 */
 }
 
 static arm_lpae_iopte arm_lpae_prot_to_pte(struct arm_lpae_io_pgtable *data,
