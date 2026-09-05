@@ -3288,18 +3288,43 @@ static void __iommu_group_set_core_domain(struct iommu_group *group)
 	__iommu_group_set_domain_nofail(group, new_domain);	/* [한국어] 물러설 곳이 없는 경로라 실패를 허용하지 않는다 */
 }
 
+/*
+ * [한국어]
+ * __iommu_attach_device - 장치 하나를 도메인에 붙인다
+ *
+ * @domain: 붙일 도메인
+ * @dev:    붙일 장치
+ * @old:    직전 도메인. 드라이버가 원자적 교체를 할 수 있게 함께 준다.
+ * @return: 0 이면 성공, 음수 errno
+ *
+ * 하드웨어를 실제로 만지는 지점이다. 드라이버가 페이지 테이블 베이스를
+ * 장치의 문맥 항목에 써 넣고, 그 순간부터 이 장치의 DMA 가 새 주소
+ * 공간을 본다.
+ *
+ * old 를 함께 넘기는 이유: 드라이버가 지원한다면 두 도메인 사이를 한
+ * 번의 하드웨어 갱신으로 건너뛸 수 있다. 떼었다 붙이면 그 사이에 DMA 가
+ * 갈 곳을 잃는 창이 생긴다.
+ *
+ * attach_deferred 를 지우는 것에 주의할 것. 부팅 초기에는 도메인을 바로
+ * 붙이지 못해 미뤄 두는 경우가 있고, 실제로 붙은 이 시점에 그 표시를
+ * 지워야 DMA 경로가 매번 다시 붙이려 하지 않는다.
+ *
+ * 실행 컨텍스트: 그룹 락을 든 채. 잠들 수 있다.
+ *
+ * 호출 체인: __iommu_group_set_domain_internal → [이 함수] → ops->attach_dev
+ */
 static int __iommu_attach_device(struct iommu_domain *domain,
 				 struct device *dev, struct iommu_domain *old)
 {
 	int ret;
 
 	if (unlikely(domain->ops->attach_dev == NULL))
-		return -ENODEV;
+		return -ENODEV;	/* [한국어] 붙이기를 지원하지 않는 도메인 — 있을 수 있지만 흔치 않다 */
 
-	ret = domain->ops->attach_dev(domain, dev, old);
+	ret = domain->ops->attach_dev(domain, dev, old);	/* [한국어] 여기서 하드웨어가 바뀐다. old 를 주어 원자적 교체를 가능하게 한다 */
 	if (ret)
 		return ret;
-	dev->iommu->attach_deferred = 0;
+	dev->iommu->attach_deferred = 0;	/* [한국어] 미뤄 둔 붙이기가 실제로 끝났다 — DMA 경로가 다시 시도하지 않게 한다 */
 	trace_attach_device_to_domain(dev);
 	return 0;
 }
@@ -3316,6 +3341,25 @@ static int __iommu_attach_device(struct iommu_domain *domain,
  * the device. In this case attaching a different domain to the
  * device may succeed.
  */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어) 장치 하나를 도메인에 붙이는 공개 API.
+ *
+ * 그룹에 장치가 하나뿐일 때만 허용하는 것이 이 함수의 전부다. 왜냐하면
+ * 도메인은 그룹 단위로 붙기 때문이다 -- 장치 하나만 옮기는 것은 불가능하고,
+ * 옮기면 같은 그룹의 나머지 장치도 함께 옮겨진다. 호출자는 장치 하나를
+ * 다룬다고 생각하는데 실제로는 여러 장치가 움직이는 상황을 막으려고,
+ * 애초에 둘 이상이면 -EINVAL 로 거절한다.
+ *
+ * 여러 장치를 옮기려는 호출자는 iommu_attach_group 을 써야 하며, 그것은
+ * 그룹을 옮긴다는 사실이 이름에 드러난다.
+ *
+ * 위 영어 주석이 밝히는 -EINVAL 의 성격도 중요하다. 도메인과 장치의
+ * 구성이 안 맞는다는 뜻일 수 있어, 다른 도메인으로는 성공할 수 있다.
+ *
+ * 실행 컨텍스트: 드라이버 문맥. 잠들 수 있다.
+ *
+ * 호출 체인: 장치 드라이버 → [이 함수] → __iommu_attach_group
+ */
 int iommu_attach_device(struct iommu_domain *domain, struct device *dev)
 {
 	/* Caller must be a probed driver on dev */
@@ -3323,7 +3367,7 @@ int iommu_attach_device(struct iommu_domain *domain, struct device *dev)
 	int ret;
 
 	if (!group)
-		return -ENODEV;
+		return -ENODEV;	/* [한국어] IOMMU 아래에 없는 장치 */
 
 	/*
 	 * Lock the group to make sure the device-count doesn't
@@ -3332,9 +3376,9 @@ int iommu_attach_device(struct iommu_domain *domain, struct device *dev)
 	mutex_lock(&group->mutex);
 	ret = -EINVAL;
 	if (list_count_nodes(&group->devices) != 1)
-		goto out_unlock;
+		goto out_unlock;	/* [한국어] 도메인은 그룹 단위로 붙는다 — 둘 이상이면 남의 장치까지 함께 옮겨진다 */
 
-	ret = __iommu_attach_group(domain, group);
+	ret = __iommu_attach_group(domain, group);	/* [한국어] 장치가 하나뿐이라 그룹을 옮기는 것과 같다 */
 
 out_unlock:
 	mutex_unlock(&group->mutex);
@@ -3342,6 +3386,30 @@ out_unlock:
 }
 EXPORT_SYMBOL_GPL(iommu_attach_device);
 
+/*
+ * [한국어]
+ * iommu_deferred_attach - 미뤄 두었던 도메인 붙이기를 DMA 경로에서 처리한다
+ *
+ * @dev:    대상 장치
+ * @domain: 붙일 도메인
+ * @return: 0 이면 (이미 붙었거나 방금 붙어) 진행해도 좋다. -EBUSY 면 리셋 중이다.
+ *
+ * 왜 미루는가: 부팅 초기에는 도메인을 붙일 수 없는 시점이 있다. 그때는
+ * 표시만 해 두었다가 첫 DMA 매핑 때 실제로 붙인다.
+ *
+ * 락 없이 플래그부터 보는 것이 위 영어 주석의 요점이다. 이 함수는 DMA
+ * 매핑 핫패스에서 매번 불리므로 락을 잡으면 그 비용이 모든 매핑에 얹힌다.
+ * 경쟁이 있을 수 있지만, 드라이버가 probe 안에서 단일 스레드로 DMA 를
+ * 세운다는 전제로 감수한다.
+ *
+ * 리셋 중 거절은 두 번째 영어 주석이 밝힌다. 리셋 도중에는 그룹이 물리
+ * 도메인에 가 있고, 여기서 다른 도메인을 붙이면 리셋이 끝난 뒤 되돌릴
+ * 대상이 어긋난다. 그 대가로 이 DMA 매핑이 실패하지만 다른 방법이 없다.
+ *
+ * 실행 컨텍스트: DMA 매핑 경로. 잠들 수 있다(뮤텍스를 잡는다).
+ *
+ * 호출 체인: dma-iommu.c 의 매핑 경로 → [이 함수] → __iommu_attach_device
+ */
 int iommu_deferred_attach(struct device *dev, struct iommu_domain *domain)
 {
 	/*
@@ -3349,10 +3417,12 @@ int iommu_deferred_attach(struct device *dev, struct iommu_domain *domain)
 	 * racy, but we have an expectation that the driver will setup its DMAs
 	 * inside probe while being single threaded to avoid racing.
 	 */
+	/* [한국어] 위 영어 주석대로 핫패스라 락 없이 먼저 거른다. 미룬 붙이기가
+	 * 없는 것이 압도적으로 흔하므로, 그 경우 락 비용을 아예 치르지 않는다. */
 	if (!dev->iommu || !dev->iommu->attach_deferred)
 		return 0;
 
-	guard(mutex)(&dev->iommu_group->mutex);
+	guard(mutex)(&dev->iommu_group->mutex);	/* [한국어] 실제로 붙일 때만 락을 잡는다. guard 라 반환 시 자동으로 놓인다 */
 
 	/*
 	 * This is a concurrent attach during a device reset. Reject it until
@@ -3361,11 +3431,36 @@ int iommu_deferred_attach(struct device *dev, struct iommu_domain *domain)
 	 * Note that this might fail the iommu_dma_map(). But there's nothing
 	 * more we can do here.
 	 */
+	/* [한국어] 위 영어 주석대로 리셋 중에 붙이면 되돌릴 대상이 어긋난다.
+	 * 이 DMA 매핑이 실패하는 대가를 치르더라도 거절하는 편이 낫다. */
 	if (dev->iommu_group->resetting_domain)
 		return -EBUSY;
-	return __iommu_attach_device(domain, dev, NULL);
+	return __iommu_attach_device(domain, dev, NULL);	/* [한국어] old 가 NULL — 지금 붙어 있는 도메인이 없다 */
 }
 
+/*
+ * [한국어]
+ * iommu_detach_device - 장치를 도메인에서 떼어 코어 도메인으로 되돌린다
+ *
+ * @domain: 지금 붙어 있는 도메인. 확인용이다.
+ * @dev:    대상 장치
+ * @return: 없음
+ *
+ * attach 의 짝이며 같은 제약을 받는다 -- 그룹에 장치가 하나뿐일 때만
+ * 의미가 있다.
+ *
+ * domain 인자를 받아 확인만 하는 것에 주의할 것. 호출자가 생각하는
+ * 도메인과 실제로 붙어 있는 것이 다르면 상태가 이미 어긋난 것이므로,
+ * 조용히 떼는 대신 WARN 을 내고 아무것도 하지 않는다.
+ *
+ * "뗀다"가 아무 도메인에도 안 붙은 상태를 뜻하지 않는 것도 중요하다.
+ * 장치는 항상 어딘가에 붙어 있어야 하므로, 실제로는 기본 도메인이나
+ * 차단 도메인으로 옮겨진다.
+ *
+ * 실행 컨텍스트: 드라이버 문맥. 잠들 수 있다.
+ *
+ * 호출 체인: 장치 드라이버 → [이 함수] → __iommu_group_set_core_domain
+ */
 void iommu_detach_device(struct iommu_domain *domain, struct device *dev)
 {
 	/* Caller must be a probed driver on dev */
@@ -3375,10 +3470,10 @@ void iommu_detach_device(struct iommu_domain *domain, struct device *dev)
 		return;
 
 	mutex_lock(&group->mutex);
-	if (WARN_ON(domain != group->domain) ||
-	    WARN_ON(list_count_nodes(&group->devices) != 1))
+	if (WARN_ON(domain != group->domain) ||	/* [한국어] 호출자가 아는 도메인과 실제가 다르다 — 상태가 이미 어긋났다 */
+	    WARN_ON(list_count_nodes(&group->devices) != 1))	/* [한국어] attach 와 같은 제약 — 그룹 단위로만 옮길 수 있다 */
 		goto out_unlock;
-	__iommu_group_set_core_domain(group);
+	__iommu_group_set_core_domain(group);	/* [한국어] 떼는 것이 아니라 기본/차단 도메인으로 옮기는 것이다 */
 
 out_unlock:
 	mutex_unlock(&group->mutex);
