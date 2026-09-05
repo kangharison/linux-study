@@ -5074,46 +5074,91 @@ static void init_device_table(void)
 	}
 }
 
+/*
+ * [한국어]
+ * iommu_init_flags - 펌웨어가 권장한 설정과 드라이버가 요구하는 설정을 적용한다
+ *
+ * @iommu: 대상 유닛.
+ *
+ * 앞의 네 항목은 IVHD 가 권장한 것을 그대로 따른다. 삼항 연산자를 문장처럼
+ * 쓴 형태가 낯설지만, "표가 켜라면 켜고 아니면 끈다"를 한 줄로 나타낸다.
+ * 명시적으로 끄는 것이 중요하다 — 앞선 부팅이나 펌웨어가 켜 둔 상태가
+ * 남아 있을 수 있기 때문이다.
+ *
+ * 뒤의 셋은 표와 무관하게 드라이버가 정한다.
+ *  - COHERENT_EN: IOMMU 의 표 접근을 캐시 코히런트하게 만든다. 그래야
+ *    드라이버가 표를 고칠 때마다 캐시를 직접 밀어내지 않아도 된다.
+ *  - 무효화 타임아웃 1초: 응답하지 않는 장치가 시스템을 영원히 붙잡지
+ *    못하게 한다. 없음(무한 대기)과 100초 사이에서 고른 값이다.
+ *  - EPH: 향상된 PPR 처리. SVA 의 응답 프로토콜이 이것을 요구한다.
+ *
+ * 호출 체인:
+ *   early_enable_iommu() → [이 함수]
+ */
 static void iommu_init_flags(struct amd_iommu *iommu)
 {
-	iommu->acpi_flags & IVHD_FLAG_HT_TUN_EN_MASK ?
-		iommu_feature_enable(iommu, CONTROL_HT_TUN_EN) :
-		iommu_feature_disable(iommu, CONTROL_HT_TUN_EN);
+	iommu->acpi_flags & IVHD_FLAG_HT_TUN_EN_MASK ?	/* [한국어] 표가 HT 터널 변환을 켜라고 했는가 */
+		iommu_feature_enable(iommu, CONTROL_HT_TUN_EN) :	/* [한국어] 켜거나 */
+		iommu_feature_disable(iommu, CONTROL_HT_TUN_EN);	/* [한국어] 명시적으로 끈다 — 앞선 부팅이 켜 둔 상태가 남을 수 있다 */
 
-	iommu->acpi_flags & IVHD_FLAG_PASSPW_EN_MASK ?
-		iommu_feature_enable(iommu, CONTROL_PASSPW_EN) :
-		iommu_feature_disable(iommu, CONTROL_PASSPW_EN);
+	iommu->acpi_flags & IVHD_FLAG_PASSPW_EN_MASK ?	/* [한국어] posted write 통과를 켜라고 했는가 */
+		iommu_feature_enable(iommu, CONTROL_PASSPW_EN) :	/* [한국어] 켜거나 */
+		iommu_feature_disable(iommu, CONTROL_PASSPW_EN);	/* [한국어] 끈다 */
 
-	iommu->acpi_flags & IVHD_FLAG_RESPASSPW_EN_MASK ?
-		iommu_feature_enable(iommu, CONTROL_RESPASSPW_EN) :
-		iommu_feature_disable(iommu, CONTROL_RESPASSPW_EN);
+	iommu->acpi_flags & IVHD_FLAG_RESPASSPW_EN_MASK ?	/* [한국어] 응답 통과는 */
+		iommu_feature_enable(iommu, CONTROL_RESPASSPW_EN) :	/* [한국어] 켜거나 */
+		iommu_feature_disable(iommu, CONTROL_RESPASSPW_EN);	/* [한국어] 끈다 */
 
-	iommu->acpi_flags & IVHD_FLAG_ISOC_EN_MASK ?
-		iommu_feature_enable(iommu, CONTROL_ISOC_EN) :
-		iommu_feature_disable(iommu, CONTROL_ISOC_EN);
+	iommu->acpi_flags & IVHD_FLAG_ISOC_EN_MASK ?	/* [한국어] 등시성 트래픽 처리는 */
+		iommu_feature_enable(iommu, CONTROL_ISOC_EN) :	/* [한국어] 켜거나 */
+		iommu_feature_disable(iommu, CONTROL_ISOC_EN);	/* [한국어] 끈다 */
 
 	/*
 	 * make IOMMU memory accesses cache coherent
 	 */
-	iommu_feature_enable(iommu, CONTROL_COHERENT_EN);
+	iommu_feature_enable(iommu, CONTROL_COHERENT_EN);	/* [한국어] (원 주석: IOMMU 의 메모리 접근을 캐시 코히런트하게) 표를 고칠 때마다 캐시를 밀어내지 않아도 된다 */
 
 	/* Set IOTLB invalidation timeout to 1s */
-	iommu_feature_set(iommu, CTRL_INV_TO_1S, CTRL_INV_TO_MASK, CONTROL_INV_TIMEOUT);
+	iommu_feature_set(iommu, CTRL_INV_TO_1S, CTRL_INV_TO_MASK, CONTROL_INV_TIMEOUT);	/* [한국어] (원 주석: 무효화 타임아웃 1초) 응답 없는 장치가 시스템을 영원히 붙잡지 못하게 */
 
 	/* Enable Enhanced Peripheral Page Request Handling */
-	if (check_feature(FEATURE_EPHSUP))
-		iommu_feature_enable(iommu, CONTROL_EPH_EN);
+	if (check_feature(FEATURE_EPHSUP))	/* [한국어] (원 주석: 향상된 PPR 처리) */
+		iommu_feature_enable(iommu, CONTROL_EPH_EN);	/* [한국어] SVA 의 응답 프로토콜이 이것을 요구한다 */
 }
 
+/*
+ * [한국어]
+ * iommu_apply_resume_quirks - RD890 에서 레주메 뒤 레지스터를 손수 복원한다
+ *
+ * @iommu: 대상 유닛.
+ *
+ * 원 주석이 사정을 밝힌다: RD890 의 BIOS 는 레주메 때 IOMMU 를 완전히
+ * 재구성해 주지 않는다. 그래서 서스펜드 전에 iommu_init_pci 가 읽어 둔
+ * 값들(stored_addr, stored_l1, stored_l2)을 여기서 되쓴다.
+ *
+ * 순서가 정해져 있다.
+ *  1) 노스브리지의 레지스터로 IOMMU 자체를 켠다. 이것이 꺼져 있으면 아래
+ *     설정을 아무리 써도 동작하지 않는다.
+ *  2) BAR 을 복원한다 — MMIO 주소를 되찾는 것이 먼저다.
+ *  3) L1/L2 간접 레지스터를 전부 되쓴다.
+ *  4) 마지막에 BAR 의 최하위 비트를 세워 설정 공간 쓰기를 잠근다. 복원이
+ *     끝난 뒤 다른 코드가 실수로 바꾸는 것을 막는다.
+ *
+ * 잠금 비트를 저장할 때 지워 두었던 것(iommu_init_pci 참고)이 여기서
+ * 짝을 이룬다 — 잠긴 값을 그대로 되쓰면 복원 도중에 잠겨 버린다.
+ *
+ * 호출 체인:
+ *   amd_iommu_resume() → [이 함수] → iommu_write_l1()/iommu_write_l2()
+ */
 static void iommu_apply_resume_quirks(struct amd_iommu *iommu)
 {
-	int i, j;
-	u32 ioc_feature_control;
-	struct pci_dev *pdev = iommu->root_pdev;
+	int i, j;	/* [한국어] 간접 레지스터 순회 인덱스 */
+	u32 ioc_feature_control;	/* [한국어] 노스브리지의 IOMMU 활성화 레지스터 */
+	struct pci_dev *pdev = iommu->root_pdev;	/* [한국어] 미리 잡아 둔 루트 장치 */
 
 	/* RD890 BIOSes may not have completely reconfigured the iommu */
-	if (!is_rd890_iommu(iommu->dev) || !pdev)
-		return;
+	if (!is_rd890_iommu(iommu->dev) || !pdev)	/* [한국어] (원 주석: RD890 BIOS 가 IOMMU 를 완전히 재구성하지 않을 수 있다) */
+		return;	/* [한국어] 다른 칩셋은 BIOS 가 알아서 한다 */
 
 	/*
 	 * First, we need to ensure that the iommu is enabled. This is
@@ -5121,102 +5166,192 @@ static void iommu_apply_resume_quirks(struct amd_iommu *iommu)
 	 */
 
 	/* Select Northbridge indirect register 0x75 and enable writing */
-	pci_write_config_dword(pdev, 0x60, 0x75 | (1 << 7));
-	pci_read_config_dword(pdev, 0x64, &ioc_feature_control);
+	pci_write_config_dword(pdev, 0x60, 0x75 | (1 << 7));	/* [한국어] (원 주석: 노스브리지 간접 레지스터 0x75 를 선택하고 쓰기를 허용한다) */
+	pci_read_config_dword(pdev, 0x64, &ioc_feature_control);	/* [한국어] 현재 값 */
 
 	/* Enable the iommu */
-	if (!(ioc_feature_control & 0x1))
-		pci_write_config_dword(pdev, 0x64, ioc_feature_control | 1);
+	if (!(ioc_feature_control & 0x1))	/* [한국어] (원 주석: IOMMU 를 켠다) 이것이 꺼져 있으면 아래 설정이 무의미하다 */
+		pci_write_config_dword(pdev, 0x64, ioc_feature_control | 1);	/* [한국어] 활성화 비트를 세운다 */
 
 	/* Restore the iommu BAR */
-	pci_write_config_dword(iommu->dev, iommu->cap_ptr + 4,
-			       iommu->stored_addr_lo);
-	pci_write_config_dword(iommu->dev, iommu->cap_ptr + 8,
-			       iommu->stored_addr_hi);
+	pci_write_config_dword(iommu->dev, iommu->cap_ptr + 4,	/* [한국어] (원 주석: IOMMU BAR 복원) MMIO 주소를 먼저 되찾아야 한다 */
+			       iommu->stored_addr_lo);	/* [한국어] 저장해 둔 하위 */
+	pci_write_config_dword(iommu->dev, iommu->cap_ptr + 8,	/* [한국어] 상위도 */
+			       iommu->stored_addr_hi);	/* [한국어] 복원 */
 
 	/* Restore the l1 indirect regs for each of the 6 l1s */
-	for (i = 0; i < 6; i++)
-		for (j = 0; j < 0x12; j++)
-			iommu_write_l1(iommu, i, j, iommu->stored_l1[i][j]);
+	for (i = 0; i < 6; i++)	/* [한국어] (원 주석: 여섯 개 L1 각각의 간접 레지스터 복원) */
+		for (j = 0; j < 0x12; j++)	/* [한국어] 블록마다 0x12 개 */
+			iommu_write_l1(iommu, i, j, iommu->stored_l1[i][j]);	/* [한국어] 서스펜드 전에 읽어 둔 값을 되쓴다 */
 
 	/* Restore the l2 indirect regs */
-	for (i = 0; i < 0x83; i++)
-		iommu_write_l2(iommu, i, iommu->stored_l2[i]);
+	for (i = 0; i < 0x83; i++)	/* [한국어] (원 주석: L2 간접 레지스터 복원) */
+		iommu_write_l2(iommu, i, iommu->stored_l2[i]);	/* [한국어] 같은 방식 */
 
 	/* Lock PCI setup registers */
-	pci_write_config_dword(iommu->dev, iommu->cap_ptr + 4,
-			       iommu->stored_addr_lo | 1);
+	pci_write_config_dword(iommu->dev, iommu->cap_ptr + 4,	/* [한국어] (원 주석: PCI 설정 레지스터를 잠근다) */
+			       iommu->stored_addr_lo | 1);	/* [한국어] 저장할 때 지워 두었던 잠금 비트를 이제 세운다 — 먼저 세우면 복원 도중에 잠긴다 */
 }
 
+/*
+ * [한국어]
+ * iommu_enable_ga - 게스트 APIC 을 켜고 IRTE 형식을 고른다
+ *
+ * @iommu: 대상 유닛.
+ *
+ * 두 가지를 함께 정하는 것이 이 함수의 요점이다. GA 를 켜는 것과 128비트
+ * IRTE 형식을 쓰는 것은 짝을 이룬다 — 게스트에 직접 전달하려면 항목에
+ * 게스트 정보를 담을 자리가 필요하고, 32비트로는 부족하다.
+ *
+ * irte_ops 를 여기서 정하므로, 이후 모든 인터럽트 조작이 형식에 맞는
+ * 함수를 쓰게 된다. LEGACY_GA 가 VAPIC 과 같은 처리를 받는 것이 눈에
+ * 띄는데, 그 모드는 형식은 유지하고 게스트 전달만 끈 상태이기 때문이다.
+ *
+ * 호출 체인:
+ *   early_enable_iommu()/early_enable_iommus() → [이 함수]
+ */
 static void iommu_enable_ga(struct amd_iommu *iommu)
 {
 #ifdef CONFIG_IRQ_REMAP
-	switch (amd_iommu_guest_ir) {
-	case AMD_IOMMU_GUEST_IR_VAPIC:
-	case AMD_IOMMU_GUEST_IR_LEGACY_GA:
-		iommu_feature_enable(iommu, CONTROL_GA_EN);
-		iommu->irte_ops = &irte_128_ops;
-		break;
-	default:
-		iommu->irte_ops = &irte_32_ops;
+	switch (amd_iommu_guest_ir) {	/* [한국어] 인터럽트 전달 모드에 따라 */
+	case AMD_IOMMU_GUEST_IR_VAPIC:	/* [한국어] 게스트 직접 전달 */
+	case AMD_IOMMU_GUEST_IR_LEGACY_GA:	/* [한국어] 형식만 유지하고 전달은 끈 상태 — 둘 다 128비트를 쓴다 */
+		iommu_feature_enable(iommu, CONTROL_GA_EN);	/* [한국어] 게스트 APIC 을 켠다 */
+		iommu->irte_ops = &irte_128_ops;	/* [한국어] 이후 모든 인터럽트 조작이 128비트 형식 함수를 쓴다 */
+		break;	/* [한국어] 결정 */
+	default:	/* [한국어] 그 밖(레거시) */
+		iommu->irte_ops = &irte_32_ops;	/* [한국어] 32비트 형식 함수 */
 		break;
 	}
 #endif
 }
 
+/*
+ * [한국어]
+ * iommu_disable_irtcachedis - 인터럽트 재매핑 캐시를 다시 켠다
+ *
+ * @iommu: 대상 유닛.
+ *
+ * 이름이 이중 부정이라 헷갈린다. IRTCACHEDIS 는 "캐시 비활성화" 비트이므로,
+ * 그것을 disable 한다는 것은 캐시를 켠다는 뜻이다.
+ *
+ * kdump 물려받기 경로에서 쓴다 — 옛 커널이 켜 둔 설정을 지우고 알려진
+ * 상태에서 다시 시작하기 위해서다.
+ */
 static void iommu_disable_irtcachedis(struct amd_iommu *iommu)
 {
-	iommu_feature_disable(iommu, CONTROL_IRTCACHEDIS);
+	iommu_feature_disable(iommu, CONTROL_IRTCACHEDIS);	/* [한국어] 이중 부정 — "캐시 비활성화"를 끄므로 캐시가 켜진다 */
 }
 
+/*
+ * [한국어]
+ * iommu_enable_irtcachedis - 요청이 있으면 재매핑 캐시를 끈다
+ *
+ * @iommu: 대상 유닛.
+ *
+ * 원 주석이 이 함수의 요령을 밝힌다: 이 기능을 지원하는지 알아내는 방법이
+ * "비트를 써 보고 남아 있는지 확인하는 것"뿐이다. 능력 레지스터에 그것을
+ * 알리는 비트가 없기 때문이다.
+ *
+ * 그래서 켜 보고 다시 읽어, 값이 유지되면 지원하는 것으로 판단한다.
+ * 지원하지 않는 하드웨어에서는 쓰기가 무시되어 0 으로 읽힌다.
+ *
+ * 왜 캐시를 끄고 싶은가: 특정 하드웨어의 errata 를 피하기 위해서다. 캐시가
+ * 없으면 인터럽트마다 표를 다시 읽어 느려지지만, 잘못된 항목을 재사용하는
+ * 것보다 낫다.
+ *
+ * 결과를 항상 로그에 남기는 이유: 요청했는데 안 된 경우를 사용자가 알아야
+ * 한다.
+ *
+ * 호출 체인:
+ *   early_enable_iommu()/early_enable_iommus() → [이 함수]
+ */
 static void iommu_enable_irtcachedis(struct amd_iommu *iommu)
 {
-	u64 ctrl;
+	u64 ctrl;	/* [한국어] 다시 읽은 제어 레지스터 */
 
-	if (!amd_iommu_irtcachedis)
-		return;
+	if (!amd_iommu_irtcachedis)	/* [한국어] 사용자가 요청하지 않았으면 */
+		return;	/* [한국어] 캐시를 그대로 둔다 */
 
 	/*
 	 * Note:
 	 * The support for IRTCacheDis feature is dertermined by
 	 * checking if the bit is writable.
 	 */
-	iommu_feature_enable(iommu, CONTROL_IRTCACHEDIS);
-	ctrl = readq(iommu->mmio_base +  MMIO_CONTROL_OFFSET);
-	ctrl &= (1ULL << CONTROL_IRTCACHEDIS);
-	if (ctrl)
-		iommu->irtcachedis_enabled = true;
-	pr_info("iommu%d (%#06x) : IRT cache is %s\n",
+	iommu_feature_enable(iommu, CONTROL_IRTCACHEDIS);	/* [한국어] (원 주석: 이 기능의 지원 여부는 비트가 쓰이는지로 판별한다) */
+	ctrl = readq(iommu->mmio_base +  MMIO_CONTROL_OFFSET);	/* [한국어] 써 보고 다시 읽어 */
+	ctrl &= (1ULL << CONTROL_IRTCACHEDIS);	/* [한국어] 그 비트만 남긴다 */
+	if (ctrl)	/* [한국어] 값이 유지됐으면 지원하는 하드웨어다 */
+		iommu->irtcachedis_enabled = true;	/* [한국어] 실제로 꺼졌음을 기록 */
+	pr_info("iommu%d (%#06x) : IRT cache is %s\n",	/* [한국어] 요청했는데 안 된 경우를 사용자가 알 수 있게 항상 남긴다 */
 		iommu->index, iommu->devid,
 		iommu->irtcachedis_enabled ? "disabled" : "enabled");
 }
 
+/*
+ * [한국어]
+ * iommu_enable_2k_int - 장치당 인터럽트 재매핑 항목을 2048개로 늘린다
+ *
+ * @iommu: 대상 유닛.
+ *
+ * 기본은 512개다. MSI-X 벡터를 많이 쓰는 장치(고성능 NIC 등)가 그 한계에
+ * 닿을 수 있어, 하드웨어가 지원하면 네 배로 늘린다.
+ *
+ * 표가 네 배로 커지는 대가가 있지만, 표는 장치가 인터럽트를 실제로 쓸 때만
+ * 만들어지므로 대부분의 장치에는 영향이 없다.
+ *
+ * 호출 체인:
+ *   early_enable_iommu()/early_enable_iommus() → [이 함수]
+ */
 static void iommu_enable_2k_int(struct amd_iommu *iommu)
 {
-	if (!FEATURE_NUM_INT_REMAP_SUP_2K(amd_iommu_efr2))
-		return;
+	if (!FEATURE_NUM_INT_REMAP_SUP_2K(amd_iommu_efr2))	/* [한국어] 하드웨어가 2048개를 지원하지 않으면 */
+		return;	/* [한국어] 기본 512개를 쓴다 */
 
-	iommu_feature_set(iommu,
-			  CONTROL_NUM_INT_REMAP_MODE_2K,
-			  CONTROL_NUM_INT_REMAP_MODE_MASK,
-			  CONTROL_NUM_INT_REMAP_MODE);
+	iommu_feature_set(iommu,	/* [한국어] MSI-X 벡터를 많이 쓰는 장치를 위해 */
+			  CONTROL_NUM_INT_REMAP_MODE_2K,	/* [한국어] 네 배로 늘린다 */
+			  CONTROL_NUM_INT_REMAP_MODE_MASK,	/* [한국어] 그 필드의 폭 */
+			  CONTROL_NUM_INT_REMAP_MODE);	/* [한국어] 필드의 위치 */
 }
 
+/*
+ * [한국어]
+ * early_enable_iommu - 유닛 하나를 알려진 상태에서 출발시켜 켠다
+ *
+ * @iommu: 대상 유닛.
+ *
+ * 순서가 이 함수의 전부이고, 그 순서에는 이유가 있다.
+ *
+ * 맨 앞의 iommu_disable 이 눈에 띈다. 켜려는 함수가 끄기로 시작하는 이유는
+ * 앞선 부팅이나 펌웨어가 남긴 설정을 지우기 위해서다 — 알려지지 않은
+ * 상태 위에 설정을 얹으면 무엇이 켜져 있는지 알 수 없다.
+ *
+ * 그다음 자료구조를 하드웨어에 알린다: 장치 테이블, 명령 버퍼, 이벤트
+ * 버퍼, 제외 범위. 이것들이 모두 준비되어야 켤 수 있다.
+ *
+ * 기능들(GT/GA/XT/IRT 캐시/2K 인터럽트)을 켜는 것이 그다음이고, 마지막이
+ * IOMMU 본체다. 이 한 줄부터 모든 DMA 가 변환을 거친다.
+ *
+ * 캐시 비우기로 끝나는 이유: 앞선 설정 전부가 실제로 반영되도록 보장한다.
+ *
+ * 호출 체인:
+ *   early_enable_iommus() → [이 함수]
+ */
 static void early_enable_iommu(struct amd_iommu *iommu)
 {
-	iommu_disable(iommu);
-	iommu_init_flags(iommu);
-	iommu_set_device_table(iommu);
-	iommu_enable_command_buffer(iommu);
-	iommu_enable_event_buffer(iommu);
-	iommu_set_exclusion_range(iommu);
-	iommu_enable_gt(iommu);
-	iommu_enable_ga(iommu);
-	iommu_enable_xt(iommu);
-	iommu_enable_irtcachedis(iommu);
-	iommu_enable_2k_int(iommu);
-	iommu_enable(iommu);
-	amd_iommu_flush_all_caches(iommu);
+	iommu_disable(iommu);	/* [한국어] 켜기 전에 먼저 끈다 — 앞선 부팅이나 펌웨어가 남긴 설정을 지우기 위해서다 */
+	iommu_init_flags(iommu);	/* [한국어] 표가 권장한 설정과 드라이버가 요구하는 설정 */
+	iommu_set_device_table(iommu);	/* [한국어] 변환 사슬의 출발점을 알린다 */
+	iommu_enable_command_buffer(iommu);	/* [한국어] 무효화를 보낼 수단 */
+	iommu_enable_event_buffer(iommu);	/* [한국어] 오류를 보고받을 수단 */
+	iommu_set_exclusion_range(iommu);	/* [한국어] 펌웨어가 요구한 통과 구간 */
+	iommu_enable_gt(iommu);	/* [한국어] 게스트 변환(PASID 별 변환) */
+	iommu_enable_ga(iommu);	/* [한국어] 게스트 APIC 과 IRTE 형식 */
+	iommu_enable_xt(iommu);	/* [한국어] x2APIC 목적지 */
+	iommu_enable_irtcachedis(iommu);	/* [한국어] 요청이 있으면 재매핑 캐시를 끈다 */
+	iommu_enable_2k_int(iommu);	/* [한국어] 인터럽트 항목 수를 늘린다 */
+	iommu_enable(iommu);	/* [한국어] 마지막에 본체를 켠다. 이 줄부터 모든 DMA 가 변환을 거친다 */
+	amd_iommu_flush_all_caches(iommu);	/* [한국어] 앞선 설정이 모두 반영되도록 캐시를 비운다 */
 }
 
 /*
@@ -5227,71 +5362,107 @@ static void early_enable_iommu(struct amd_iommu *iommu)
  * the old content of device table entries. Not this case or reuse failed,
  * just continue as normal kernel does.
  */
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * early_enable_iommus - 모든 유닛을 켠다. kdump 면 옛 표를 물려받아 켠다
+ *
+ * 두 갈래가 완전히 다른 절차라는 것이 이 함수의 핵심이다.
+ *
+ * 물려받기에 실패한 경우(또는 kdump 가 아닌 경우): 각 유닛을 끄고 새 표로
+ * 처음부터 켠다. 그 과정에서 진행 중이던 DMA 는 끊긴다.
+ *
+ * 물려받기에 성공한 경우: 하드웨어를 끄지 않는다. 새로 잡은 표를 버리고
+ * 옛 표를 그대로 쓰며, 명령/이벤트 버퍼만 껐다 켠다. 장치 테이블 주소는
+ * 바뀌지 않으므로(kdump 에서 iommu_set_device_table 이 아무것도 하지 않는다)
+ * 살아 있는 장치의 DMA 가 끊기지 않는다.
+ *
+ * SNP 에서 BUG_ON 을 거는 이유가 강하다. 원 주석대로, SNP 환경에서 장치
+ * 테이블 없이 진행하면 IOMMU 명령이 전부 타임아웃되어 kdump 부팅 자체가
+ * 패닉으로 끝난다. 그럴 바에는 여기서 분명히 멈추는 편이 낫다.
+ *
+ * 실패 경로에서 old_dev_tbl_cpy 를 놓는 것도 중요하다 — 물려받기를 포기한
+ * 이상 그 매핑을 들고 있을 이유가 없다.
+ *
+ * 호출 체인:
+ *   enable_iommus() → [이 함수] → reuse_device_table() → early_enable_iommu()
+ */
 static void early_enable_iommus(void)
 {
-	struct amd_iommu *iommu;
-	struct amd_iommu_pci_seg *pci_seg;
+	struct amd_iommu *iommu;	/* [한국어] 유닛 순회용 */
+	struct amd_iommu_pci_seg *pci_seg;	/* [한국어] 세그먼트 순회용 */
 
-	if (!reuse_device_table()) {
+	if (!reuse_device_table()) {	/* [한국어] 옛 표를 물려받지 못했거나 kdump 가 아니다 */
 		/*
 		 * If come here because of failure in reusing device table from old
 		 * kernel with all IOMMUs enabled, print error message and try to
 		 * free allocated old_dev_tbl_cpy.
 		 */
-		if (amd_iommu_pre_enabled) {
-			pr_err("Failed to reuse DEV table from previous kernel.\n");
+		if (amd_iommu_pre_enabled) {	/* [한국어] (원 주석: 모든 IOMMU 가 켜진 옛 커널에서 표 재사용에 실패한 경우) */
+			pr_err("Failed to reuse DEV table from previous kernel.\n");	/* [한국어] 물려받으려 했는데 실패했다 */
 			/*
 			 * Bail out early if unable to remap/reuse DEV table from
 			 * previous kernel if SNP enabled as IOMMU commands will
 			 * time out without DEV table and cause kdump boot panic.
 			 */
-			BUG_ON(check_feature(FEATURE_SNP));
+			BUG_ON(check_feature(FEATURE_SNP));	/* [한국어] (원 주석: SNP 에서는 장치 테이블 없이 진행하면 명령이 전부 타임아웃되어 kdump 부팅이 패닉으로 끝난다) */
 		}
 
-		for_each_pci_segment(pci_seg) {
-			if (pci_seg->old_dev_tbl_cpy != NULL) {
-				memunmap((void *)pci_seg->old_dev_tbl_cpy);
-				pci_seg->old_dev_tbl_cpy = NULL;
+		for_each_pci_segment(pci_seg) {	/* [한국어] 물려받기를 포기했으므로 */
+			if (pci_seg->old_dev_tbl_cpy != NULL) {	/* [한국어] 매핑해 둔 옛 표가 있으면 */
+				memunmap((void *)pci_seg->old_dev_tbl_cpy);	/* [한국어] 들고 있을 이유가 없다 */
+				pci_seg->old_dev_tbl_cpy = NULL;	/* [한국어] 포인터도 지운다 */
 			}
 		}
 
-		for_each_iommu(iommu) {
-			clear_translation_pre_enabled(iommu);
-			early_enable_iommu(iommu);
+		for_each_iommu(iommu) {	/* [한국어] 모든 유닛을 */
+			clear_translation_pre_enabled(iommu);	/* [한국어] 물려받음 표시를 지우고 */
+			early_enable_iommu(iommu);	/* [한국어] 끄고 새 표로 처음부터 켠다. 진행 중이던 DMA 는 끊긴다 */
 		}
 	} else {
-		pr_info("Reused DEV table from previous kernel.\n");
+		pr_info("Reused DEV table from previous kernel.\n");	/* [한국어] 물려받기 성공 */
 
-		for_each_pci_segment(pci_seg) {
-			iommu_free_pages(pci_seg->dev_table);
-			pci_seg->dev_table = pci_seg->old_dev_tbl_cpy;
+		for_each_pci_segment(pci_seg) {	/* [한국어] 새로 잡았던 표는 */
+			iommu_free_pages(pci_seg->dev_table);	/* [한국어] 놓고 */
+			pci_seg->dev_table = pci_seg->old_dev_tbl_cpy;	/* [한국어] 옛 표를 그대로 쓴다 */
 		}
 
-		for_each_iommu(iommu) {
-			iommu_disable_command_buffer(iommu);
-			iommu_disable_event_buffer(iommu);
-			iommu_disable_irtcachedis(iommu);
-			iommu_enable_command_buffer(iommu);
-			iommu_enable_event_buffer(iommu);
-			iommu_enable_ga(iommu);
-			iommu_enable_xt(iommu);
-			iommu_enable_irtcachedis(iommu);
-			iommu_enable_2k_int(iommu);
-			iommu_set_device_table(iommu);
-			amd_iommu_flush_all_caches(iommu);
+		for_each_iommu(iommu) {	/* [한국어] 하드웨어는 끄지 않는다 — 그것이 물려받기의 핵심이다 */
+			iommu_disable_command_buffer(iommu);	/* [한국어] 버퍼만 껐다가 */
+			iommu_disable_event_buffer(iommu);	/* [한국어] 이벤트 버퍼도 */
+			iommu_disable_irtcachedis(iommu);	/* [한국어] 캐시 설정도 알려진 상태로 되돌리고 */
+			iommu_enable_command_buffer(iommu);	/* [한국어] 다시 켠다. 주소는 옛 것 그대로다 */
+			iommu_enable_event_buffer(iommu);	/* [한국어] 이벤트 버퍼도 */
+			iommu_enable_ga(iommu);	/* [한국어] 게스트 APIC 과 IRTE 형식 */
+			iommu_enable_xt(iommu);	/* [한국어] x2APIC 목적지 */
+			iommu_enable_irtcachedis(iommu);	/* [한국어] 재매핑 캐시 설정 */
+			iommu_enable_2k_int(iommu);	/* [한국어] 인터럽트 항목 수 */
+			iommu_set_device_table(iommu);	/* [한국어] kdump 에서는 아무것도 하지 않는다 — 주소를 바꾸면 전환이 원자적이지 않다 */
+			amd_iommu_flush_all_caches(iommu);	/* [한국어] 설정을 반영시킨다 */
 		}
 	}
 }
 
+/*
+ * [한국어]
+ * enable_iommus_ppr - 모든 유닛의 PPR 로그를 켠다
+ *
+ * SVA 에 필요한 세 조건이 모두 갖춰졌을 때만 켠다. 하나라도 없으면 페이지
+ * 폴트를 받아도 처리할 수 없으므로, 아예 받지 않는 편이 낫다 — 받고
+ * 응답하지 않으면 장치가 멈춘다.
+ *
+ * 호출 체인:
+ *   amd_iommu_enable_interrupts() → [이 함수] → amd_iommu_enable_ppr_log()
+ */
 static void enable_iommus_ppr(void)
 {
-	struct amd_iommu *iommu;
+	struct amd_iommu *iommu;	/* [한국어] 유닛 순회용 */
 
-	if (!amd_iommu_gt_ppr_supported())
-		return;
+	if (!amd_iommu_gt_ppr_supported())	/* [한국어] SVA 의 세 조건이 갖춰지지 않았으면 */
+		return;	/* [한국어] 폴트를 받아도 처리할 수 없다. 받고 응답하지 않으면 장치가 멈춘다 */
 
-	for_each_iommu(iommu)
-		amd_iommu_enable_ppr_log(iommu);
+	for_each_iommu(iommu)	/* [한국어] 모든 유닛의 */
+		amd_iommu_enable_ppr_log(iommu);	/* [한국어] PPR 로그를 켠다 */
 }
 
 static void enable_iommus_vapic(void)
