@@ -3972,191 +3972,285 @@ static void dev_update_dte(struct iommu_dev_data *dev_data, bool set)
  * If domain is SVA capable then initialize GCR3 table. Also if domain is
  * in v2 page table mode then update GCR3[0].
  */
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * init_gcr3_table - 장치에 GCR3 표를 붙이고 필요하면 0번 항목을 채운다
+ *
+ * @dev_data: 대상 장치.
+ * @pdom: 붙을 도메인.
+ * @return: 0 성공(만들지 않은 경우 포함), 음수면 실패.
+ *
+ * 두 가지 일을 한다. 표를 만드는 것과, v2 도메인이면 PASID 0 에 도메인의
+ * 페이지 테이블을 걸어 두는 것이다.
+ *
+ * 통과 도메인에서는 PASID 를 지원하는 장치에만 표를 만든다 — 통과 자체에는
+ * 표가 필요 없고, PASID 를 붙일 여지를 남기기 위해서만 만든다.
+ *
+ * PASID 0 이 특별한 이유: PASID 를 붙이지 않은 요청은 하드웨어에서 PASID 0
+ * 으로 취급된다. 그래서 도메인의 기본 주소 공간이 그 자리에 들어간다.
+ */
 static int init_gcr3_table(struct iommu_dev_data *dev_data,
 			   struct protection_domain *pdom)
 {
-	struct amd_iommu *iommu = get_amd_iommu_from_dev_data(dev_data);
-	int max_pasids = dev_data->max_pasids;
-	struct pt_iommu_x86_64_hw_info pt_info;
-	int ret = 0;
+	struct amd_iommu *iommu = get_amd_iommu_from_dev_data(dev_data);	/* [한국어] NUMA 노드를 고르는 데 쓴다 */
+	int max_pasids = dev_data->max_pasids;	/* [한국어] probe 때 정해 둔 장치/유닛 공통 한계 */
+	struct pt_iommu_x86_64_hw_info pt_info;	/* [한국어] 도메인의 v2 페이지 테이블 루트 */
+	int ret = 0;	/* [한국어] 결과 */
 
 	 /*
 	  * If domain is in pt mode then setup GCR3 table only if device
 	  * is PASID capable
 	  */
-	if (pdom_is_in_pt_mode(pdom) && !pdev_pasid_supported(dev_data))
-		return ret;
+	if (pdom_is_in_pt_mode(pdom) && !pdev_pasid_supported(dev_data))	/* [한국어] (원 주석: 통과 모드에서는 PASID 지원 장치만 표를 만든다) */
+		return ret;	/* [한국어] 통과 자체에는 표가 필요 없다 */
 
 	/*
 	 * By default, setup GCR3 table to support MAX PASIDs
 	 * supported by the device/IOMMU.
 	 */
-	ret = setup_gcr3_table(&dev_data->gcr3_info, iommu,
-			       max_pasids > 0 ?  max_pasids : 1);
-	if (ret)
-		return ret;
+	ret = setup_gcr3_table(&dev_data->gcr3_info, iommu,	/* [한국어] (원 주석: 기본적으로 최대 PASID 수를 담도록 만든다) */
+			       max_pasids > 0 ?  max_pasids : 1);	/* [한국어] PASID 를 못 쓰는 장치도 0번은 있어야 한다 */
+	if (ret)	/* [한국어] 표를 못 만들었으면 */
+		return ret;	/* [한국어] 붙일 수 없다 */
 
 	/* Setup GCR3[0] only if domain is setup with v2 page table mode */
-	if (!pdom_is_v2_pgtbl_mode(pdom))
-		return ret;
+	if (!pdom_is_v2_pgtbl_mode(pdom))	/* [한국어] (원 주석: GCR3[0] 은 v2 모드일 때만 채운다) */
+		return ret;	/* [한국어] 통과 도메인은 여기서 끝 */
 
-	pt_iommu_x86_64_hw_info(&pdom->amdv2, &pt_info);
-	ret = update_gcr3(dev_data, 0, __sme_set(pt_info.gcr3_pt), true);
-	if (ret)
-		free_gcr3_table(&dev_data->gcr3_info);
+	pt_iommu_x86_64_hw_info(&pdom->amdv2, &pt_info);	/* [한국어] 도메인의 페이지 테이블 루트 */
+	ret = update_gcr3(dev_data, 0, __sme_set(pt_info.gcr3_pt), true);	/* [한국어] PASID 없는 요청이 하드웨어에서 PASID 0 으로 처리된다 */
+	if (ret)	/* [한국어] 0번을 못 채웠으면 */
+		free_gcr3_table(&dev_data->gcr3_info);	/* [한국어] 반쯤 만든 표를 남기지 않는다 */
 
-	return ret;
+	return ret;	/* [한국어] 성패 */
 }
 
+/*
+ * [한국어]
+ * destroy_gcr3_table - 장치의 GCR3 표를 걷어낸다
+ *
+ * @dev_data: 대상 장치.
+ * @pdom: 떼어 낼 도메인.
+ *
+ * 0번 항목을 먼저 지운다 — update_gcr3 안에서 캐시까지 비우므로, 표를 버린
+ * 뒤에는 할 수 없는 일이다. 순서가 뒤바뀌면 해제된 표를 하드웨어가 계속
+ * 참조할 수 있다.
+ */
 static void destroy_gcr3_table(struct iommu_dev_data *dev_data,
 			       struct protection_domain *pdom)
 {
-	struct gcr3_tbl_info *gcr3_info = &dev_data->gcr3_info;
+	struct gcr3_tbl_info *gcr3_info = &dev_data->gcr3_info;	/* [한국어] 걷어낼 표 */
 
-	if (pdom_is_v2_pgtbl_mode(pdom))
-		update_gcr3(dev_data, 0, 0, false);
+	if (pdom_is_v2_pgtbl_mode(pdom))	/* [한국어] 0번을 채웠던 경우만 */
+		update_gcr3(dev_data, 0, 0, false);	/* [한국어] 표를 버리기 전에 지워야 캐시까지 비울 수 있다 */
 
-	if (gcr3_info->gcr3_tbl == NULL)
-		return;
+	if (gcr3_info->gcr3_tbl == NULL)	/* [한국어] 애초에 만들지 않았으면 */
+		return;	/* [한국어] 할 일이 없다 */
 
-	free_gcr3_table(gcr3_info);
+	free_gcr3_table(gcr3_info);	/* [한국어] 표와 도메인 id 를 함께 반납한다 */
 }
 
+/*
+ * [한국어]
+ * pdom_attach_iommu - 도메인에 "이 유닛 뒤에 장치가 있다"를 기록한다
+ *
+ * @iommu: 그 장치를 맡은 유닛.
+ * @pdom: 대상 도메인.
+ * @return: 0 성공, -ENOMEM, -ENOSPC(경합).
+ *
+ * 한 도메인에 여러 유닛 뒤의 장치가 붙을 수 있다. 무효화 명령을 어느 유닛에
+ * 보내야 하는지 알려면 이 목록이 필요하다 — domain_flush_pages_v1 이 이
+ * 배열을 훑는다.
+ *
+ * 참조 수를 두는 이유: 같은 유닛 뒤의 장치가 여럿일 수 있고, 마지막
+ * 하나가 떨어질 때까지 항목이 남아 있어야 한다.
+ *
+ * 실행 컨텍스트: 도메인 락 아래. GFP_ATOMIC 인 이유가 그것이다.
+ */
 static int pdom_attach_iommu(struct amd_iommu *iommu,
 			     struct protection_domain *pdom)
 {
-	struct pdom_iommu_info *pdom_iommu_info, *curr;
-	unsigned long flags;
-	int ret = 0;
+	struct pdom_iommu_info *pdom_iommu_info, *curr;	/* [한국어] 새 항목과 경합으로 먼저 들어간 항목 */
+	unsigned long flags;	/* [한국어] 인터럽트 상태 */
+	int ret = 0;	/* [한국어] 결과 */
 
-	spin_lock_irqsave(&pdom->lock, flags);
+	spin_lock_irqsave(&pdom->lock, flags);	/* [한국어] 무효화 경로가 이 배열을 훑으므로 배타적으로 */
 
-	pdom_iommu_info = xa_load(&pdom->iommu_array, iommu->index);
-	if (pdom_iommu_info) {
-		pdom_iommu_info->refcnt++;
-		goto out_unlock;
+	pdom_iommu_info = xa_load(&pdom->iommu_array, iommu->index);	/* [한국어] 이 유닛이 이미 등록되어 있나 */
+	if (pdom_iommu_info) {	/* [한국어] 있으면 */
+		pdom_iommu_info->refcnt++;	/* [한국어] 같은 유닛 뒤의 장치가 하나 늘었다 */
+		goto out_unlock;	/* [한국어] 새로 만들 것이 없다 */
 	}
 
-	pdom_iommu_info = kzalloc_obj(*pdom_iommu_info, GFP_ATOMIC);
-	if (!pdom_iommu_info) {
-		ret = -ENOMEM;
-		goto out_unlock;
+	pdom_iommu_info = kzalloc_obj(*pdom_iommu_info, GFP_ATOMIC);	/* [한국어] 스핀락 아래라 ATOMIC */
+	if (!pdom_iommu_info) {	/* [한국어] 메모리 부족 */
+		ret = -ENOMEM;	/* [한국어] attach 를 되돌리게 한다 */
+		goto out_unlock;	/* [한국어] 풀고 나간다 */
 	}
 
-	pdom_iommu_info->iommu = iommu;
-	pdom_iommu_info->refcnt = 1;
+	pdom_iommu_info->iommu = iommu;	/* [한국어] 무효화 명령을 보낼 유닛 */
+	pdom_iommu_info->refcnt = 1;	/* [한국어] 첫 장치 */
 
-	curr = xa_cmpxchg(&pdom->iommu_array, iommu->index,
-			  NULL, pdom_iommu_info, GFP_ATOMIC);
-	if (curr) {
-		kfree(pdom_iommu_info);
-		ret = -ENOSPC;
-		goto out_unlock;
+	curr = xa_cmpxchg(&pdom->iommu_array, iommu->index,	/* [한국어] 비어 있을 때만 넣는다 */
+			  NULL, pdom_iommu_info, GFP_ATOMIC);	/* [한국어] 락 안이지만 xarray 는 자체 규칙을 따른다 */
+	if (curr) {	/* [한국어] 그사이 다른 쪽이 넣었으면 */
+		kfree(pdom_iommu_info);	/* [한국어] 내 것을 버리고 */
+		ret = -ENOSPC;	/* [한국어] 호출자가 되돌린다 */
+		goto out_unlock;	/* [한국어] 풀고 나간다 */
 	}
 
 out_unlock:
-	spin_unlock_irqrestore(&pdom->lock, flags);
-	return ret;
+	spin_unlock_irqrestore(&pdom->lock, flags);	/* [한국어] 배열 갱신 끝 */
+	return ret;	/* [한국어] 성패 */
 }
 
+/*
+ * [한국어]
+ * pdom_detach_iommu - 유닛 참조를 하나 내린다
+ *
+ * @iommu: 떼어 낼 유닛.
+ * @pdom: 대상 도메인.
+ *
+ * 마지막 참조가 사라질 때만 항목을 지운다. 그 전에 무효화가 끝나 있어야
+ * 하므로, detach_device 는 플러시를 마친 뒤에 이 함수를 부른다.
+ */
 static void pdom_detach_iommu(struct amd_iommu *iommu,
 			      struct protection_domain *pdom)
 {
-	struct pdom_iommu_info *pdom_iommu_info;
-	unsigned long flags;
+	struct pdom_iommu_info *pdom_iommu_info;	/* [한국어] 내릴 항목 */
+	unsigned long flags;	/* [한국어] 인터럽트 상태 */
 
-	spin_lock_irqsave(&pdom->lock, flags);
+	spin_lock_irqsave(&pdom->lock, flags);	/* [한국어] 배열 보호 */
 
-	pdom_iommu_info = xa_load(&pdom->iommu_array, iommu->index);
-	if (!pdom_iommu_info) {
-		spin_unlock_irqrestore(&pdom->lock, flags);
-		return;
+	pdom_iommu_info = xa_load(&pdom->iommu_array, iommu->index);	/* [한국어] 등록된 항목 */
+	if (!pdom_iommu_info) {	/* [한국어] 없으면 */
+		spin_unlock_irqrestore(&pdom->lock, flags);	/* [한국어] 풀고 */
+		return;	/* [한국어] 할 일이 없다 */
 	}
 
-	pdom_iommu_info->refcnt--;
-	if (pdom_iommu_info->refcnt == 0) {
-		xa_erase(&pdom->iommu_array, iommu->index);
-		kfree(pdom_iommu_info);
+	pdom_iommu_info->refcnt--;	/* [한국어] 이 유닛 뒤의 장치가 하나 줄었다 */
+	if (pdom_iommu_info->refcnt == 0) {	/* [한국어] 마지막 하나였으면 */
+		xa_erase(&pdom->iommu_array, iommu->index);	/* [한국어] 더 이상 무효화를 보낼 필요가 없다 */
+		kfree(pdom_iommu_info);	/* [한국어] 항목을 버린다 */
 	}
 
-	spin_unlock_irqrestore(&pdom->lock, flags);
+	spin_unlock_irqrestore(&pdom->lock, flags);	/* [한국어] 끝 */
 }
 
 /*
  * If a device is not yet associated with a domain, this function makes the
  * device visible in the domain
  */
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * attach_device - 장치를 보호 도메인에 붙인다
+ *
+ * @dev: 붙일 장치.
+ * @domain: 붙을 도메인.
+ * @return: 0 성공, -EBUSY 이미 붙어 있음, 그 밖의 음수는 자원 실패.
+ *
+ * 순서가 이 함수의 전부다. 하드웨어가 새 매핑을 보기 시작하는 시점은 맨
+ * 마지막의 DTE 갱신이므로, 그 전에 모든 준비 — 유닛 참조, GCR3 표, 장치
+ * 능력, 도메인 목록 등록 — 가 끝나 있어야 한다. 거꾸로 하면 하드웨어가
+ * 아직 없는 자료구조를 참조하는 순간이 생긴다.
+ *
+ * IOPF 등록 실패를 치명적으로 다루지 않는 이유: 페이지 폴트를 못 받을 뿐
+ * 장치는 계속 동작한다. 그래서 PRI 만 끄고 진행한다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥, 장치별 뮤텍스 아래.
+ *
+ * 호출 체인:
+ *   amd_iommu_attach_device()/identity_attach() → [이 함수] → dev_update_dte()
+ */
 static int attach_device(struct device *dev,
 			 struct protection_domain *domain)
 {
-	struct iommu_dev_data *dev_data = dev_iommu_priv_get(dev);
-	struct amd_iommu *iommu = get_amd_iommu_from_dev_data(dev_data);
-	struct pci_dev *pdev;
-	unsigned long flags;
-	int ret = 0;
+	struct iommu_dev_data *dev_data = dev_iommu_priv_get(dev);	/* [한국어] probe 때 붙여 둔 상태 */
+	struct amd_iommu *iommu = get_amd_iommu_from_dev_data(dev_data);	/* [한국어] 담당 유닛 */
+	struct pci_dev *pdev;	/* [한국어] PCI 능력을 켤 때만 쓴다 */
+	unsigned long flags;	/* [한국어] 인터럽트 상태 */
+	int ret = 0;	/* [한국어] 결과 */
 
-	mutex_lock(&dev_data->mutex);
+	mutex_lock(&dev_data->mutex);	/* [한국어] attach 와 detach 가 겹치지 않도록 */
 
-	if (dev_data->domain != NULL) {
-		ret = -EBUSY;
-		goto out;
+	if (dev_data->domain != NULL) {	/* [한국어] 이미 어딘가에 붙어 있으면 */
+		ret = -EBUSY;	/* [한국어] 코어가 먼저 떼어야 한다 */
+		goto out;	/* [한국어] 풀고 나간다 */
 	}
 
 	/* Do reference counting */
-	ret = pdom_attach_iommu(iommu, domain);
-	if (ret)
-		goto out;
+	ret = pdom_attach_iommu(iommu, domain);	/* [한국어] (원 주석: 참조 계수) 무효화를 보낼 유닛 목록에 등록 */
+	if (ret)	/* [한국어] 실패면 */
+		goto out;	/* [한국어] 아무것도 바꾸지 않고 나간다 */
 
 	/* Setup GCR3 table */
-	if (pdom_is_sva_capable(domain)) {
-		ret = init_gcr3_table(dev_data, domain);
-		if (ret) {
-			pdom_detach_iommu(iommu, domain);
-			goto out;
+	if (pdom_is_sva_capable(domain)) {	/* [한국어] (원 주석: GCR3 표 준비) */
+		ret = init_gcr3_table(dev_data, domain);	/* [한국어] PASID 를 쓸 수 있게 */
+		if (ret) {	/* [한국어] 실패면 */
+			pdom_detach_iommu(iommu, domain);	/* [한국어] 방금 올린 참조를 되돌린다 */
+			goto out;	/* [한국어] 나간다 */
 		}
 	}
 
-	pdev = dev_is_pci(dev_data->dev) ? to_pci_dev(dev_data->dev) : NULL;
-	if (pdev && pdom_is_sva_capable(domain)) {
-		pdev_enable_caps(pdev);
+	pdev = dev_is_pci(dev_data->dev) ? to_pci_dev(dev_data->dev) : NULL;	/* [한국어] PCI 장치인가 */
+	if (pdev && pdom_is_sva_capable(domain)) {	/* [한국어] PASID 를 쓸 도메인이면 */
+		pdev_enable_caps(pdev);	/* [한국어] ATS·PRI·PASID 를 켠다 */
 
 		/*
 		 * Device can continue to function even if IOPF
 		 * enablement failed. Hence in error path just
 		 * disable device PRI support.
 		 */
-		if (amd_iommu_iopf_add_device(iommu, dev_data))
-			pdev_disable_cap_pri(pdev);
-	} else if (pdev) {
-		pdev_enable_cap_ats(pdev);
+		if (amd_iommu_iopf_add_device(iommu, dev_data))	/* [한국어] (원 주석: IOPF 등록에 실패해도 장치는 동작하므로 PRI 만 끈다) */
+			pdev_disable_cap_pri(pdev);	/* [한국어] 폴트를 받을 수 없으니 요청도 못 하게 한다 */
+	} else if (pdev) {	/* [한국어] 그 밖의 PCI 장치는 */
+		pdev_enable_cap_ats(pdev);	/* [한국어] 변환 캐시만 켠다 */
 	}
 
 	/* Update data structures */
-	dev_data->domain = domain;
-	spin_lock_irqsave(&domain->lock, flags);
-	list_add(&dev_data->list, &domain->dev_list);
-	spin_unlock_irqrestore(&domain->lock, flags);
+	dev_data->domain = domain;	/* [한국어] (원 주석: 자료구조 갱신) */
+	spin_lock_irqsave(&domain->lock, flags);	/* [한국어] 무효화 경로가 훑는 목록이다 */
+	list_add(&dev_data->list, &domain->dev_list);	/* [한국어] 이제 이 도메인 플러시가 이 장치도 포함한다 */
+	spin_unlock_irqrestore(&domain->lock, flags);	/* [한국어] 목록 갱신 끝 */
 
 	/* Update device table */
-	dev_update_dte(dev_data, true);
+	dev_update_dte(dev_data, true);	/* [한국어] (원 주석: 장치 테이블 갱신) 하드웨어가 새 매핑을 보기 시작하는 순간 */
 
 out:
-	mutex_unlock(&dev_data->mutex);
+	mutex_unlock(&dev_data->mutex);	/* [한국어] 장치 상태 보호 해제 */
 
-	return ret;
+	return ret;	/* [한국어] 성패 */
 }
 
 /*
  * Removes a device from a protection domain (with devtable_lock held)
  */
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * detach_device - 장치를 도메인에서 뗀다
+ *
+ * @dev: 뗄 장치.
+ *
+ * attach 의 역순이되, 무효화 위치가 중요하다. DTE 를 먼저 막아 새 요청을
+ * 끊고, 그다음 도메인 캐시를 비운다. 그러고 나서야 GCR3 표를 버리고 유닛
+ * 참조를 내린다 — 플러시 전에 참조를 내리면 명령을 보낼 유닛을 잃는다.
+ *
+ * 이미 떨어진 장치에 다시 들어올 수 있다는 점도 원 주석이 짚고 있다.
+ * 코어의 detach 와 별칭 처리가 겹칠 때 그렇다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥, 장치별 뮤텍스 아래.
+ */
 static void detach_device(struct device *dev)
 {
-	struct iommu_dev_data *dev_data = dev_iommu_priv_get(dev);
-	struct amd_iommu *iommu = get_amd_iommu_from_dev_data(dev_data);
-	struct protection_domain *domain = dev_data->domain;
-	unsigned long flags;
+	struct iommu_dev_data *dev_data = dev_iommu_priv_get(dev);	/* [한국어] 장치의 벤더 상태 */
+	struct amd_iommu *iommu = get_amd_iommu_from_dev_data(dev_data);	/* [한국어] 담당 유닛 */
+	struct protection_domain *domain = dev_data->domain;	/* [한국어] 떼어 낼 도메인 */
+	unsigned long flags;	/* [한국어] 인터럽트 상태 */
 
-	mutex_lock(&dev_data->mutex);
+	mutex_lock(&dev_data->mutex);	/* [한국어] attach 와 겹치지 않도록 */
 
 	/*
 	 * First check if the device is still attached. It might already
@@ -4164,110 +4258,145 @@ static void detach_device(struct device *dev)
 	 * iommu_detach_group code detached it and we try again here in
 	 * our alias handling.
 	 */
-	if (WARN_ON(!dev_data->domain))
-		goto out;
+	if (WARN_ON(!dev_data->domain))	/* [한국어] (원 주석: 코어의 detach 와 별칭 처리가 겹쳐 이미 떨어졌을 수 있다) */
+		goto out;	/* [한국어] 두 번 떼지 않는다 */
 
 	/* Remove IOPF handler */
-	if (dev_data->ppr) {
-		iopf_queue_flush_dev(dev);
-		amd_iommu_iopf_remove_device(iommu, dev_data);
+	if (dev_data->ppr) {	/* [한국어] (원 주석: IOPF 처리기 제거) */
+		iopf_queue_flush_dev(dev);	/* [한국어] 처리 중인 폴트를 먼저 비운다 */
+		amd_iommu_iopf_remove_device(iommu, dev_data);	/* [한국어] 그다음 등록을 푼다 */
 	}
 
-	if (dev_is_pci(dev))
-		pdev_disable_caps(to_pci_dev(dev));
+	if (dev_is_pci(dev))	/* [한국어] PCI 장치면 */
+		pdev_disable_caps(to_pci_dev(dev));	/* [한국어] ATS·PRI·PASID 를 끈다 */
 
 	/* Clear DTE and flush the entry */
-	dev_update_dte(dev_data, false);
+	dev_update_dte(dev_data, false);	/* [한국어] (원 주석: DTE 를 지우고 항목을 플러시) 새 요청을 먼저 끊는다 */
 
 	/* Flush IOTLB and wait for the flushes to finish */
-	spin_lock_irqsave(&domain->lock, flags);
-	amd_iommu_domain_flush_all(domain);
-	list_del(&dev_data->list);
-	spin_unlock_irqrestore(&domain->lock, flags);
+	spin_lock_irqsave(&domain->lock, flags);	/* [한국어] (원 주석: IOTLB 를 비우고 완료를 기다린다) */
+	amd_iommu_domain_flush_all(domain);	/* [한국어] 이 장치가 남긴 캐시까지 지운다 */
+	list_del(&dev_data->list);	/* [한국어] 플러시가 끝난 뒤에 목록에서 뺀다 */
+	spin_unlock_irqrestore(&domain->lock, flags);	/* [한국어] 목록 갱신 끝 */
 
 	/* Clear GCR3 table */
-	if (pdom_is_sva_capable(domain))
-		destroy_gcr3_table(dev_data, domain);
+	if (pdom_is_sva_capable(domain))	/* [한국어] (원 주석: GCR3 표 정리) */
+		destroy_gcr3_table(dev_data, domain);	/* [한국어] 하드웨어가 더 이상 보지 않게 된 뒤에 */
 
 	/* Update data structures */
-	dev_data->domain = NULL;
+	dev_data->domain = NULL;	/* [한국어] (원 주석: 자료구조 갱신) 이제 어디에도 붙어 있지 않다 */
 
 	/* decrease reference counters - needs to happen after the flushes */
-	pdom_detach_iommu(iommu, domain);
+	pdom_detach_iommu(iommu, domain);	/* [한국어] (원 주석: 참조 감소 — 플러시 뒤여야 한다) 먼저 내리면 명령 보낼 유닛을 잃는다 */
 
 out:
-	mutex_unlock(&dev_data->mutex);
+	mutex_unlock(&dev_data->mutex);	/* [한국어] 장치 상태 보호 해제 */
 }
 
+/*
+ * [한국어]
+ * amd_iommu_probe_device - 장치를 이 드라이버가 맡을지 판단하고 준비한다
+ *
+ * @dev: 새로 나타난 장치.
+ * @return: 담당 iommu_device, 맡지 않으면 ERR_PTR.
+ *
+ * iommu 코어가 장치마다 한 번 부르는 진입점이다. 여기서 -ENODEV 를 내면
+ * 그 장치는 IOMMU 없이 동작한다.
+ *
+ * 이미 상태가 붙어 있으면 그대로 돌려준다 — 해제 경로가 dev_data 를 남겨
+ * 두기 때문에 재삽입된 장치가 이리로 온다.
+ *
+ * 초기화 실패를 치명적으로 다루지 않는 것이 눈에 띈다. iommu_ignore_device
+ * 로 그 장치를 통과 상태로 만들어 두고 오류만 알린다 — 부팅을 막는 것보다
+ * 낫다는 판단이다.
+ *
+ * max_irqs 를 여기서 정하는 이유: 인터럽트 재매핑 표 크기가 장치마다
+ * 달라질 수 있고, 그 값이 표를 만들 때 필요하다.
+ *
+ * 호출 체인:
+ *   iommu_probe_device() → [이 함수] → iommu_init_device()
+ */
 static struct iommu_device *amd_iommu_probe_device(struct device *dev)
 {
-	struct iommu_device *iommu_dev;
-	struct amd_iommu *iommu;
-	struct iommu_dev_data *dev_data;
-	int ret;
+	struct iommu_device *iommu_dev;	/* [한국어] 코어에 돌려줄 담당 유닛 */
+	struct amd_iommu *iommu;	/* [한국어] 벤더 구조체 */
+	struct iommu_dev_data *dev_data;	/* [한국어] 장치별 상태 */
+	int ret;	/* [한국어] 결과 */
 
-	if (!check_device(dev))
-		return ERR_PTR(-ENODEV);
+	if (!check_device(dev))	/* [한국어] IVRS 가 이 장치를 다루라고 했나 */
+		return ERR_PTR(-ENODEV);	/* [한국어] 아니면 IOMMU 없이 동작한다 */
 
-	iommu = rlookup_amd_iommu(dev);
-	if (!iommu)
-		return ERR_PTR(-ENODEV);
+	iommu = rlookup_amd_iommu(dev);	/* [한국어] 장치 id 로 담당 유닛을 찾는다 */
+	if (!iommu)	/* [한국어] 표에 없으면 */
+		return ERR_PTR(-ENODEV);	/* [한국어] 맡을 수 없다 */
 
 	/* Not registered yet? */
-	if (!iommu->iommu.ops)
-		return ERR_PTR(-ENODEV);
+	if (!iommu->iommu.ops)	/* [한국어] (원 주석: 아직 등록 전인가) */
+		return ERR_PTR(-ENODEV);	/* [한국어] 등록이 끝난 뒤 다시 불린다 */
 
-	if (dev_iommu_priv_get(dev))
-		return &iommu->iommu;
+	if (dev_iommu_priv_get(dev))	/* [한국어] 해제 경로가 상태를 남겨 두므로 재삽입은 여기로 온다 */
+		return &iommu->iommu;	/* [한국어] 이미 준비되어 있다 */
 
-	ret = iommu_init_device(iommu, dev);
-	if (ret) {
-		dev_err(dev, "Failed to initialize - trying to proceed anyway\n");
-		iommu_dev = ERR_PTR(ret);
-		iommu_ignore_device(iommu, dev);
-		goto out_err;
+	ret = iommu_init_device(iommu, dev);	/* [한국어] 장치별 상태를 만들고 별칭을 정리한다 */
+	if (ret) {	/* [한국어] 실패해도 부팅을 막지는 않는다 */
+		dev_err(dev, "Failed to initialize - trying to proceed anyway\n");	/* [한국어] 오류만 알리고 */
+		iommu_dev = ERR_PTR(ret);	/* [한국어] 코어에는 실패로 */
+		iommu_ignore_device(iommu, dev);	/* [한국어] 그 장치는 통과 상태로 둔다 */
+		goto out_err;	/* [한국어] 나간다 */
 	}
 
-	amd_iommu_set_pci_msi_domain(dev, iommu);
-	iommu_dev = &iommu->iommu;
+	amd_iommu_set_pci_msi_domain(dev, iommu);	/* [한국어] 인터럽트가 재매핑 도메인을 거치게 한다 */
+	iommu_dev = &iommu->iommu;	/* [한국어] 성공 반환값 */
 
 	/*
 	 * If IOMMU and device supports PASID then it will contain max
 	 * supported PASIDs, else it will be zero.
 	 */
-	dev_data = dev_iommu_priv_get(dev);
-	if (amd_iommu_pasid_supported() && dev_is_pci(dev) &&
-	    pdev_pasid_supported(dev_data)) {
-		dev_data->max_pasids = min_t(u32, iommu->iommu.max_pasids,
-					     pci_max_pasids(to_pci_dev(dev)));
+	dev_data = dev_iommu_priv_get(dev);	/* [한국어] 방금 만든 상태 */
+	if (amd_iommu_pasid_supported() && dev_is_pci(dev) &&	/* [한국어] (원 주석: 양쪽이 PASID 를 지원하면 최대치가 들어가고 아니면 0 이다) */
+	    pdev_pasid_supported(dev_data)) {	/* [한국어] 장치 쪽도 지원해야 한다 */
+		dev_data->max_pasids = min_t(u32, iommu->iommu.max_pasids,	/* [한국어] 둘 중 작은 쪽이 실제 한계다 */
+					     pci_max_pasids(to_pci_dev(dev)));	/* [한국어] 장치가 광고한 값 */
 	}
 
-	if (amd_iommu_pgtable == PD_MODE_NONE) {
-		pr_warn_once("%s: DMA translation not supported by iommu.\n",
-			     __func__);
-		iommu_dev = ERR_PTR(-ENODEV);
-		goto out_err;
+	if (amd_iommu_pgtable == PD_MODE_NONE) {	/* [한국어] 변환 자체를 못 하는 구성이면 */
+		pr_warn_once("%s: DMA translation not supported by iommu.\n",	/* [한국어] 한 번만 알리고 */
+			     __func__);	/* [한국어] 어디서 났는지 */
+		iommu_dev = ERR_PTR(-ENODEV);	/* [한국어] 맡지 않는다 */
+		goto out_err;	/* [한국어] 나간다 */
 	}
 
-	iommu_completion_wait(iommu);
+	iommu_completion_wait(iommu);	/* [한국어] 초기화 중 넣은 명령이 끝났음을 보장한다 */
 
-	if (FEATURE_NUM_INT_REMAP_SUP_2K(amd_iommu_efr2))
-		dev_data->max_irqs = MAX_IRQS_PER_TABLE_2K;
+	if (FEATURE_NUM_INT_REMAP_SUP_2K(amd_iommu_efr2))	/* [한국어] 인터럽트 재매핑 표를 2K 까지 쓸 수 있나 */
+		dev_data->max_irqs = MAX_IRQS_PER_TABLE_2K;	/* [한국어] 표를 만들 때 이 값이 크기를 정한다 */
 	else
-		dev_data->max_irqs = MAX_IRQS_PER_TABLE_512;
+		dev_data->max_irqs = MAX_IRQS_PER_TABLE_512;	/* [한국어] 아니면 기존 512 */
 
-	if (dev_is_pci(dev))
-		pci_prepare_ats(to_pci_dev(dev), PAGE_SHIFT);
+	if (dev_is_pci(dev))	/* [한국어] PCI 장치면 */
+		pci_prepare_ats(to_pci_dev(dev), PAGE_SHIFT);	/* [한국어] ATS 무효화 단위를 페이지 크기로 맞춘다 */
 
 out_err:
-	return iommu_dev;
+	return iommu_dev;	/* [한국어] 담당 유닛 또는 오류 */
 }
 
+/*
+ * [한국어]
+ * amd_iommu_release_device - 장치가 사라질 때 코어가 부른다
+ *
+ * @dev: 사라지는 장치.
+ *
+ * 거의 아무것도 하지 않는다. 원 주석이 이유를 밝힌다 — 뽑힌 장치의 상태를
+ * 남겨 두었다가 다시 꽂힐 때 재사용한다. 해제해 버리면 재삽입과 진행 중인
+ * 참조 사이에 경합이 잔뜩 생긴다.
+ *
+ * 도메인이 남아 있으면 코어가 detach 를 빠뜨린 것이므로 경고한다.
+ */
 static void amd_iommu_release_device(struct device *dev)
 {
-	struct iommu_dev_data *dev_data = dev_iommu_priv_get(dev);
+	struct iommu_dev_data *dev_data = dev_iommu_priv_get(dev);	/* [한국어] 장치의 벤더 상태 */
 
-	WARN_ON(dev_data->domain);
+	WARN_ON(dev_data->domain);	/* [한국어] 코어가 detach 를 빠뜨렸다는 뜻이다 */
 
 	/*
 	 * We keep dev_data around for unplugged devices and reuse it when the
@@ -4275,12 +4404,22 @@ static void amd_iommu_release_device(struct device *dev)
 	 */
 }
 
+/*
+ * [한국어]
+ * amd_iommu_device_group - 장치가 속할 격리 그룹을 고른다
+ *
+ * @dev: 대상 장치.
+ * @return: 그 장치의 iommu_group.
+ *
+ * 그룹은 서로 분리할 수 없는 장치들의 묶음이다. PCI 는 ACS 와 별칭을 따져
+ * 코어의 공용 규칙이 정하고, ACPI HID 장치는 별도 규칙을 쓴다.
+ */
 static struct iommu_group *amd_iommu_device_group(struct device *dev)
 {
-	if (dev_is_pci(dev))
-		return pci_device_group(dev);
+	if (dev_is_pci(dev))	/* [한국어] PCI 는 ACS 와 별칭이 그룹을 정한다 */
+		return pci_device_group(dev);	/* [한국어] 코어의 공용 규칙 */
 
-	return acpihid_device_group(dev);
+	return acpihid_device_group(dev);	/* [한국어] ACPI HID 장치는 별도 규칙 */
 }
 
 /*****************************************************************************
