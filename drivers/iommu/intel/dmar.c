@@ -2264,42 +2264,83 @@ static void qi_dump_fault(struct intel_iommu *iommu, u32 fault)
 	       (unsigned long long)desc->qw1);	/* [한국어] 둘째 워드 */
 }
 
+/*
+ * [한국어]
+ * qi_check_fault - 무효화 큐 오류를 해석하고 어떻게 복구할지 정한다
+ *
+ * @iommu: 대상 유닛. @index: 우리가 넣은 첫 서술자의 인덱스.
+ * @wait_index: 그 뒤에 붙인 Invalidation Wait 서술자의 인덱스.
+ * @return: 0 이면 우리 서술자와 무관한 오류(또는 오류 없음),
+ *          -EAGAIN 이면 다시 제출해야 한다, -EINVAL/-ETIMEDOUT 이면 포기한다.
+ *
+ * 이 파일에서 가장 까다로운 함수다. 큐에서 오류가 나면 그 서술자뿐 아니라
+ * 뒤따르던 것들도 무효가 되므로, "어디서부터 다시 보낼 것인가"를 정해야
+ * 한다. 오류 종류마다 그 답이 다르다.
+ *
+ * [IQE — 서술자가 거부됨]
+ * 하드웨어가 head 를 그 서술자에 멈춰 두고 더 이상 가져가지 않는다(코드 안
+ * 영어 주석). head 가 우리 서술자를 가리키면 우리 것이 문제다.
+ * 그 자리를 Wait 서술자로 덮어쓰는 것이 이 코드의 요령이다 — 문제의 서술자를
+ * 무해한 것으로 바꿔 큐가 다시 흐르게 한다. 덮어쓸 때 wait 서술자를 통째로
+ * 복사하는 이유는 qw2/qw3 에 소프트웨어 사설 데이터가 있을 수 있어, 그것을
+ * 로그에 노출하지 않기 위해서다(코드 안 영어 주석).
+ * -EINVAL 을 돌려주어 재시도하지 않는다 — 같은 서술자를 다시 보내면 같은
+ * 오류가 난다.
+ *
+ * [ITE — 무효화 시간 초과]
+ * 대기 중이던 모든 wait 서술자가 중단된다. 그래서 head 부터 tail 까지를
+ * 거꾸로 훑으며 QI_IN_USE 인 슬롯을 QI_ABORT 로 바꾼다 — 그것들이 다시
+ * 제출되어야 할 서술자다.
+ * 그 다음이 흥미롭다: 응답하지 않은 장치(ite_sid)를 찾아, 이미 사라졌거나
+ * PCI 장치가 아니면 -ETIMEDOUT 으로 포기한다(코드 안 영어 주석). 없는
+ * 장치에 ATS 무효화를 다시 보내 봐야 또 시간 초과가 날 뿐이다.
+ * ite_sid 가 0 이면 그 필드를 지원하지 않는 옛 하드웨어이므로 판단을
+ * 건너뛰고 재시도한다.
+ *
+ * [ICE — 완료 오류]
+ * 비트만 지우고 넘어간다. 우리 서술자가 무효가 된 것은 아니다.
+ *
+ * 맨 앞에서 wait_index 가 이미 QI_ABORT 인지 보는 것은, 다른 CPU 의 오류
+ * 처리가 우리 서술자를 이미 중단시켰을 수 있기 때문이다.
+ *
+ * 실행 컨텍스트: qi_submit_sync 안에서, q_lock 을 쥔 채.
+ */
 static int qi_check_fault(struct intel_iommu *iommu, int index, int wait_index)
 {
-	u32 fault;
-	int head, tail;
-	struct device *dev;
-	u64 iqe_err, ite_sid;
-	struct q_inval *qi = iommu->qi;
-	int shift = qi_shift(iommu);
+	u32 fault;	/* [한국어] 폴트 상태 레지스터 */
+	int head, tail;	/* [한국어] 큐의 처리 지점과 제출 지점 */
+	struct device *dev;	/* [한국어] 응답하지 않은 장치 */
+	u64 iqe_err, ite_sid;	/* [한국어] 오류 상세와 그 장치의 소스 id */
+	struct q_inval *qi = iommu->qi;	/* [한국어] 이 유닛의 큐 */
+	int shift = qi_shift(iommu);	/* [한국어] 서술자 크기의 로그값. 바이트 오프셋과 인덱스를 오갈 때 쓴다 */
 
-	if (qi->desc_status[wait_index] == QI_ABORT)
-		return -EAGAIN;
+	if (qi->desc_status[wait_index] == QI_ABORT)	/* [한국어] 다른 CPU 의 오류 처리가 우리 서술자를 이미 중단시켰으면 */
+		return -EAGAIN;	/* [한국어] 다시 제출해야 한다 */
 
-	fault = readl(iommu->reg + DMAR_FSTS_REG);
-	if (fault & (DMA_FSTS_IQE | DMA_FSTS_ITE | DMA_FSTS_ICE))
-		qi_dump_fault(iommu, fault);
+	fault = readl(iommu->reg + DMAR_FSTS_REG);	/* [한국어] 폴트 상태를 읽는다 */
+	if (fault & (DMA_FSTS_IQE | DMA_FSTS_ITE | DMA_FSTS_ICE))	/* [한국어] 큐 관련 오류가 있으면 */
+		qi_dump_fault(iommu, fault);	/* [한국어] 상세를 로그에 남긴다 */
 
 	/*
 	 * If IQE happens, the head points to the descriptor associated
 	 * with the error. No new descriptors are fetched until the IQE
 	 * is cleared.
 	 */
-	if (fault & DMA_FSTS_IQE) {
-		head = readl(iommu->reg + DMAR_IQH_REG);
-		if ((head >> shift) == index) {
-			struct qi_desc *desc = qi->desc + head;
+	if (fault & DMA_FSTS_IQE) {	/* [한국어] 서술자가 거부되었으면 (위 영어 주석) */
+		head = readl(iommu->reg + DMAR_IQH_REG);	/* [한국어] 하드웨어가 멈춘 지점 */
+		if ((head >> shift) == index) {	/* [한국어] 그것이 우리 서술자면 */
+			struct qi_desc *desc = qi->desc + head;	/* [한국어] 그 자리 */
 
 			/*
 			 * desc->qw2 and desc->qw3 are either reserved or
 			 * used by software as private data. We won't print
 			 * out these two qw's for security consideration.
 			 */
-			memcpy(desc, qi->desc + (wait_index << shift),
-			       1 << shift);
-			writel(DMA_FSTS_IQE, iommu->reg + DMAR_FSTS_REG);
-			pr_info("Invalidation Queue Error (IQE) cleared\n");
-			return -EINVAL;
+			memcpy(desc, qi->desc + (wait_index << shift),	/* [한국어] 문제의 서술자를 무해한 Wait 서술자로 덮어써 큐가 다시 흐르게 한다. 통째로 복사하는 것은 qw2/qw3 의 사설 데이터를 로그에 노출하지 않기 위해서다 (위 영어 주석) */
+			       1 << shift);	/* [한국어] 서술자 하나 크기만큼 */
+			writel(DMA_FSTS_IQE, iommu->reg + DMAR_FSTS_REG);	/* [한국어] 오류 비트를 지워 하드웨어가 다시 가져가게 한다 */
+			pr_info("Invalidation Queue Error (IQE) cleared\n");	/* [한국어] 회복되었음을 남긴다 */
+			return -EINVAL;	/* [한국어] 재시도하지 않는다 — 같은 서술자를 다시 보내면 같은 오류가 난다 */
 		}
 	}
 
@@ -2307,27 +2348,27 @@ static int qi_check_fault(struct intel_iommu *iommu, int index, int wait_index)
 	 * If ITE happens, all pending wait_desc commands are aborted.
 	 * No new descriptors are fetched until the ITE is cleared.
 	 */
-	if (fault & DMA_FSTS_ITE) {
-		head = readl(iommu->reg + DMAR_IQH_REG);
-		head = ((head >> shift) - 1 + QI_LENGTH) % QI_LENGTH;
-		tail = readl(iommu->reg + DMAR_IQT_REG);
-		tail = ((tail >> shift) - 1 + QI_LENGTH) % QI_LENGTH;
+	if (fault & DMA_FSTS_ITE) {	/* [한국어] 무효화 시간 초과면 (위 영어 주석) */
+		head = readl(iommu->reg + DMAR_IQH_REG);	/* [한국어] 처리 지점을 */
+		head = ((head >> shift) - 1 + QI_LENGTH) % QI_LENGTH;	/* [한국어] 인덱스로 바꾸고 한 칸 뒤로 (링을 감싼다) */
+		tail = readl(iommu->reg + DMAR_IQT_REG);	/* [한국어] 제출 지점도 */
+		tail = ((tail >> shift) - 1 + QI_LENGTH) % QI_LENGTH;	/* [한국어] 같은 방식으로 */
 
 		/*
 		 * SID field is valid only when the ITE field is Set in FSTS_REG
 		 * see Intel VT-d spec r4.1, section 11.4.9.9
 		 */
-		iqe_err = readq(iommu->reg + DMAR_IQER_REG);
-		ite_sid = DMAR_IQER_REG_ITESID(iqe_err);
+		iqe_err = readq(iommu->reg + DMAR_IQER_REG);	/* [한국어] 오류 상세를 읽는다. SID 필드는 ITE 일 때만 유효하다 (위 영어 주석, 스펙 11.4.9.9) */
+		ite_sid = DMAR_IQER_REG_ITESID(iqe_err);	/* [한국어] 응답하지 않은 장치의 소스 id */
 
-		writel(DMA_FSTS_ITE, iommu->reg + DMAR_FSTS_REG);
-		pr_info("Invalidation Time-out Error (ITE) cleared\n");
+		writel(DMA_FSTS_ITE, iommu->reg + DMAR_FSTS_REG);	/* [한국어] 오류 비트를 지운다 */
+		pr_info("Invalidation Time-out Error (ITE) cleared\n");	/* [한국어] 회복되었음을 남긴다 */
 
-		do {
-			if (qi->desc_status[head] == QI_IN_USE)
-				qi->desc_status[head] = QI_ABORT;
-			head = (head - 1 + QI_LENGTH) % QI_LENGTH;
-		} while (head != tail);
+		do {	/* [한국어] head 부터 tail 까지 거꾸로 훑으며 */
+			if (qi->desc_status[head] == QI_IN_USE)	/* [한국어] 아직 처리 중이던 서술자를 */
+				qi->desc_status[head] = QI_ABORT;	/* [한국어] 중단으로 표시한다. 이것들이 다시 제출되어야 할 서술자다 */
+			head = (head - 1 + QI_LENGTH) % QI_LENGTH;	/* [한국어] 한 칸 뒤로 */
+		} while (head != tail);	/* [한국어] 제출 지점까지 */
 
 		/*
 		 * If device was released or isn't present, no need to retry
@@ -2336,22 +2377,22 @@ static int qi_check_fault(struct intel_iommu *iommu, int index, int wait_index)
 		 * 0 value of ite_sid means old VT-d device, no ite_sid value.
 		 * see Intel VT-d spec r4.1, section 11.4.9.9
 		 */
-		if (ite_sid) {
-			dev = device_rbtree_find(iommu, ite_sid);
-			if (!dev || !dev_is_pci(dev) ||
-			    !pci_device_is_present(to_pci_dev(dev)))
-				return -ETIMEDOUT;
+		if (ite_sid) {	/* [한국어] 응답하지 않은 장치를 알 수 있으면 (위 영어 주석) */
+			dev = device_rbtree_find(iommu, ite_sid);	/* [한국어] 소스 id 로 장치를 찾는다 */
+			if (!dev || !dev_is_pci(dev) ||	/* [한국어] 이미 해제되었거나 PCI 가 아니거나 */
+			    !pci_device_is_present(to_pci_dev(dev)))	/* [한국어] 뽑혔으면 */
+				return -ETIMEDOUT;	/* [한국어] 재시도를 포기한다. 없는 장치에 다시 보내 봐야 또 시간 초과가 날 뿐이다 */
 		}
-		if (qi->desc_status[wait_index] == QI_ABORT)
-			return -EAGAIN;
+		if (qi->desc_status[wait_index] == QI_ABORT)	/* [한국어] 우리 서술자도 중단되었으면 */
+			return -EAGAIN;	/* [한국어] 다시 제출해야 한다 */
 	}
 
-	if (fault & DMA_FSTS_ICE) {
-		writel(DMA_FSTS_ICE, iommu->reg + DMAR_FSTS_REG);
-		pr_info("Invalidation Completion Error (ICE) cleared\n");
+	if (fault & DMA_FSTS_ICE) {	/* [한국어] 완료 오류면 */
+		writel(DMA_FSTS_ICE, iommu->reg + DMAR_FSTS_REG);	/* [한국어] 비트만 지우고 */
+		pr_info("Invalidation Completion Error (ICE) cleared\n");	/* [한국어] 기록한다. 우리 서술자가 무효가 된 것은 아니다 */
 	}
 
-	return 0;
+	return 0;	/* [한국어] 우리 서술자와 무관한 오류였거나 오류가 없었다 */
 }
 
 /*
@@ -2361,86 +2402,132 @@ static int qi_check_fault(struct intel_iommu *iommu, int index, int wait_index)
  * hardware has completed the invalidation before return. Wait descriptors
  * can be part of the submission but it will not be polled for completion.
  */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * qi_submit_sync - 무효화 서술자들을 큐에 넣고 하드웨어가 끝낼 때까지 기다린다
+ *
+ * @iommu: 대상 유닛. @desc: 보낼 서술자 배열. @count: 그 개수.
+ * @options: QI_OPT_WAIT_DRAIN 등.
+ * @return: 0 성공, 음수면 오류(재시도로도 해결되지 않은 경우).
+ *
+ * 이 드라이버의 모든 무효화가 여기로 모인다. cache.c 가 모은 배치도,
+ * pasid.c 의 낱개 무효화도, 인터럽트 재매핑의 무효화도 결국 이 함수를
+ * 통과한다.
+ *
+ * 완료를 어떻게 아는가: 서술자들 뒤에 Invalidation Wait 를 하나 붙이고,
+ * 그 서술자에 "끝나면 이 주소에 QI_DONE 을 써라"고 지시한다. 그 주소가
+ * 바로 그 슬롯의 desc_status 다. 즉 하드웨어가 소프트웨어 상태 배열에 직접
+ * 값을 써서 완료를 알리고, 커널은 그 값이 나타나는지 폴링한다.
+ *
+ * 빈 슬롯이 count + 2 개 필요한 이유(코드 안 영어 주석): 서술자 count 개,
+ * Wait 서술자 하나, 그리고 head 와 tail 이 같아지면 "비었다"와 "가득 찼다"를
+ * 구분할 수 없으므로 한 칸을 비워 둔다.
+ *
+ * 인터럽트를 끈 채 기다리는 것이 중요하다(코드 안 영어 주석). 완료를
+ * 기다리는 동안 인터럽트가 들어와 같은 큐에 또 무효화를 넣으려 하면,
+ * 그쪽은 빈 슬롯을 기다리고 우리는 완료를 기다리는 데드락이 된다.
+ * 그래서 락을 잠깐 놓았다 잡을 때도 raw_spin_unlock 만 쓰고 인터럽트
+ * 상태는 건드리지 않는다.
+ *
+ * 오류 처리가 이 함수의 나머지 절반이다. qi_check_fault 가 -EAGAIN 을
+ * 돌려주면 restart 로 돌아가 처음부터 다시 제출한다 — 오류로 중단된
+ * 서술자는 하드웨어가 처리하지 않았기 때문이다.
+ *
+ * 마지막에 count + 1 개의 슬롯을 QI_FREE 로 되돌리는 이유(코드 안 영어
+ * 주석): 회수는 tail 부터 순서대로만 가능하므로, 우리가 쓴 슬롯을 모두
+ * 비워 둬야 이전 제출의 슬롯까지 함께 회수될 수 있다. count 가 0 인
+ * 경우(Wait 서술자만 보내는 드레인)에도 그 하나는 비워야 한다.
+ *
+ * 지연 계측은 종류별로 시작 시각을 따로 재고 끝에서 갱신한다. 계측이 꺼져
+ * 있으면 시각을 읽지도 않는다(start_ktime 이 0 으로 남는다).
+ *
+ * 실행 컨텍스트: 어디서든. 인터럽트를 끈 문맥에서도 불리므로 raw 스핀락을
+ * 쓰고, 완료를 기다리는 동안 잠들지 않는다.
+ *
+ * 호출 체인:
+ *   cache.c 의 qi_batch_flush_descs()/pasid.c 의 무효화/irq_remapping.c
+ *     → [qi_submit_sync] → qi_check_fault() → reclaim_free_desc()
+ */
 int qi_submit_sync(struct intel_iommu *iommu, struct qi_desc *desc,
 		   unsigned int count, unsigned long options)
 {
-	struct q_inval *qi = iommu->qi;
-	s64 devtlb_start_ktime = 0;
-	s64 iotlb_start_ktime = 0;
-	s64 iec_start_ktime = 0;
-	struct qi_desc wait_desc;
-	int wait_index, index;
-	unsigned long flags;
-	int offset, shift;
-	int rc, i;
-	u64 type;
+	struct q_inval *qi = iommu->qi;	/* [한국어] 이 유닛의 큐 */
+	s64 devtlb_start_ktime = 0;	/* [한국어] 디바이스 TLB 무효화의 시작 시각(계측이 꺼져 있으면 0 으로 남는다) */
+	s64 iotlb_start_ktime = 0;	/* [한국어] IOTLB 무효화의 시작 시각 */
+	s64 iec_start_ktime = 0;	/* [한국어] 인터럽트 항목 캐시 무효화의 시작 시각 */
+	struct qi_desc wait_desc;	/* [한국어] 완료를 알릴 Wait 서술자 */
+	int wait_index, index;	/* [한국어] 그 슬롯과 첫 서술자의 슬롯 */
+	unsigned long flags;	/* [한국어] 인터럽트 상태 */
+	int offset, shift;	/* [한국어] 링 안의 바이트 오프셋과 서술자 크기의 로그값 */
+	int rc, i;	/* [한국어] 결과와 순회 인덱스 */
+	u64 type;	/* [한국어] 서술자 종류(계측 대상을 고르는 데 쓴다) */
 
-	if (!qi)
-		return 0;
+	if (!qi)	/* [한국어] 큐를 쓰지 않는 유닛이면 */
+		return 0;	/* [한국어] 레지스터 방식으로 이미 처리되었다 */
 
-	type = desc->qw0 & GENMASK_ULL(3, 0);
+	type = desc->qw0 & GENMASK_ULL(3, 0);	/* [한국어] 첫 서술자의 종류 */
 
-	if ((type == QI_IOTLB_TYPE || type == QI_EIOTLB_TYPE) &&
-	    dmar_latency_enabled(iommu, DMAR_LATENCY_INV_IOTLB))
-		iotlb_start_ktime = ktime_to_ns(ktime_get());
+	if ((type == QI_IOTLB_TYPE || type == QI_EIOTLB_TYPE) &&	/* [한국어] IOTLB 무효화이고 */
+	    dmar_latency_enabled(iommu, DMAR_LATENCY_INV_IOTLB))	/* [한국어] 계측이 켜져 있으면 */
+		iotlb_start_ktime = ktime_to_ns(ktime_get());	/* [한국어] 시각을 잰다. 꺼져 있으면 읽지도 않는다 */
 
-	if ((type == QI_DIOTLB_TYPE || type == QI_DEIOTLB_TYPE) &&
-	    dmar_latency_enabled(iommu, DMAR_LATENCY_INV_DEVTLB))
-		devtlb_start_ktime = ktime_to_ns(ktime_get());
+	if ((type == QI_DIOTLB_TYPE || type == QI_DEIOTLB_TYPE) &&	/* [한국어] 디바이스 TLB 무효화이고 */
+	    dmar_latency_enabled(iommu, DMAR_LATENCY_INV_DEVTLB))	/* [한국어] 계측이 켜져 있으면 */
+		devtlb_start_ktime = ktime_to_ns(ktime_get());	/* [한국어] 시각을 잰다 */
 
-	if (type == QI_IEC_TYPE &&
-	    dmar_latency_enabled(iommu, DMAR_LATENCY_INV_IEC))
-		iec_start_ktime = ktime_to_ns(ktime_get());
+	if (type == QI_IEC_TYPE &&	/* [한국어] 인터럽트 항목 캐시 무효화이고 */
+	    dmar_latency_enabled(iommu, DMAR_LATENCY_INV_IEC))	/* [한국어] 계측이 켜져 있으면 */
+		iec_start_ktime = ktime_to_ns(ktime_get());	/* [한국어] 시각을 잰다 */
 
-restart:
-	rc = 0;
+restart:	/* [한국어] 오류로 중단되었을 때 처음부터 다시 제출한다 */
+	rc = 0;	/* [한국어] 결과 초기화 */
 
-	raw_spin_lock_irqsave(&qi->q_lock, flags);
+	raw_spin_lock_irqsave(&qi->q_lock, flags);	/* [한국어] 큐 조작 구간. 완료를 기다리는 동안 인터럽트를 막는다 */
 	/*
 	 * Check if we have enough empty slots in the queue to submit,
 	 * the calculation is based on:
 	 * # of desc + 1 wait desc + 1 space between head and tail
 	 */
-	while (qi->free_cnt < count + 2) {
-		raw_spin_unlock_irqrestore(&qi->q_lock, flags);
-		cpu_relax();
-		raw_spin_lock_irqsave(&qi->q_lock, flags);
+	while (qi->free_cnt < count + 2) {	/* [한국어] 서술자 count 개 + Wait 하나 + head/tail 구분용 한 칸이 필요하다 (위 영어 주석) */
+		raw_spin_unlock_irqrestore(&qi->q_lock, flags);	/* [한국어] 자리가 날 때까지 락을 놓고 */
+		cpu_relax();	/* [한국어] 바쁜 대기임을 CPU 에 알린 뒤 */
+		raw_spin_lock_irqsave(&qi->q_lock, flags);	/* [한국어] 다시 잡아 확인한다 */
 	}
 
-	index = qi->free_head;
-	wait_index = (index + count) % QI_LENGTH;
-	shift = qi_shift(iommu);
+	index = qi->free_head;	/* [한국어] 첫 서술자가 들어갈 슬롯 */
+	wait_index = (index + count) % QI_LENGTH;	/* [한국어] Wait 서술자는 그 뒤에 */
+	shift = qi_shift(iommu);	/* [한국어] 서술자 크기의 로그값 */
 
-	for (i = 0; i < count; i++) {
-		offset = ((index + i) % QI_LENGTH) << shift;
-		memcpy(qi->desc + offset, &desc[i], 1 << shift);
-		qi->desc_status[(index + i) % QI_LENGTH] = QI_IN_USE;
-		trace_qi_submit(iommu, desc[i].qw0, desc[i].qw1,
-				desc[i].qw2, desc[i].qw3);
+	for (i = 0; i < count; i++) {	/* [한국어] 서술자를 하나씩 */
+		offset = ((index + i) % QI_LENGTH) << shift;	/* [한국어] 링 안의 바이트 오프셋 */
+		memcpy(qi->desc + offset, &desc[i], 1 << shift);	/* [한국어] 그 자리에 복사한다 */
+		qi->desc_status[(index + i) % QI_LENGTH] = QI_IN_USE;	/* [한국어] 사용 중으로 표시 */
+		trace_qi_submit(iommu, desc[i].qw0, desc[i].qw1,	/* [한국어] 추적 이벤트에 원본 워드를 남긴다 */
+				desc[i].qw2, desc[i].qw3);	/* [한국어] 네 워드 모두 */
 	}
-	qi->desc_status[wait_index] = QI_IN_USE;
+	qi->desc_status[wait_index] = QI_IN_USE;	/* [한국어] Wait 슬롯도 사용 중으로 */
 
-	wait_desc.qw0 = QI_IWD_STATUS_DATA(QI_DONE) |
-			QI_IWD_STATUS_WRITE | QI_IWD_TYPE;
-	if (options & QI_OPT_WAIT_DRAIN)
-		wait_desc.qw0 |= QI_IWD_PRQ_DRAIN;
-	wait_desc.qw1 = virt_to_phys(&qi->desc_status[wait_index]);
-	wait_desc.qw2 = 0;
-	wait_desc.qw3 = 0;
+	wait_desc.qw0 = QI_IWD_STATUS_DATA(QI_DONE) |	/* [한국어] 완료 시 쓸 값(QI_DONE)과 */
+			QI_IWD_STATUS_WRITE | QI_IWD_TYPE;	/* [한국어] 실제로 쓰라는 지시, 그리고 Wait 종류 */
+	if (options & QI_OPT_WAIT_DRAIN)	/* [한국어] 드레인을 요청했으면 */
+		wait_desc.qw0 |= QI_IWD_PRQ_DRAIN;	/* [한국어] 대기 중인 페이지 요청까지 배수하게 한다 */
+	wait_desc.qw1 = virt_to_phys(&qi->desc_status[wait_index]);	/* [한국어] 완료 값을 쓸 주소 — 바로 그 슬롯의 상태 배열이다. 하드웨어가 소프트웨어 배열에 직접 써서 완료를 알린다 */
+	wait_desc.qw2 = 0;	/* [한국어] 예약 워드를 비운다 */
+	wait_desc.qw3 = 0;	/* [한국어] 같음 */
 
-	offset = wait_index << shift;
-	memcpy(qi->desc + offset, &wait_desc, 1 << shift);
+	offset = wait_index << shift;	/* [한국어] Wait 서술자의 자리 */
+	memcpy(qi->desc + offset, &wait_desc, 1 << shift);	/* [한국어] 거기에 복사 */
 
-	qi->free_head = (qi->free_head + count + 1) % QI_LENGTH;
-	qi->free_cnt -= count + 1;
+	qi->free_head = (qi->free_head + count + 1) % QI_LENGTH;	/* [한국어] 쓴 만큼 head 를 민다 */
+	qi->free_cnt -= count + 1;	/* [한국어] 빈 슬롯 수를 줄인다 */
 
 	/*
 	 * update the HW tail register indicating the presence of
 	 * new descriptors.
 	 */
-	writel(qi->free_head << shift, iommu->reg + DMAR_IQT_REG);
+	writel(qi->free_head << shift, iommu->reg + DMAR_IQT_REG);	/* [한국어] tail 레지스터를 갱신한다 — 이 쓰기가 곧 제출이며, 이 순간부터 하드웨어가 서술자를 가져간다 (위 영어 주석) */
 
-	while (READ_ONCE(qi->desc_status[wait_index]) != QI_DONE) {
+	while (READ_ONCE(qi->desc_status[wait_index]) != QI_DONE) {	/* [한국어] 하드웨어가 완료 값을 쓸 때까지 폴링한다 */
 		/*
 		 * We will leave the interrupts disabled, to prevent interrupt
 		 * context to queue another cmd while a cmd is already submitted
@@ -2448,13 +2535,13 @@ restart:
 		 * a deadlock where the interrupt context can wait indefinitely
 		 * for free slots in the queue.
 		 */
-		rc = qi_check_fault(iommu, index, wait_index);
-		if (rc)
-			break;
+		rc = qi_check_fault(iommu, index, wait_index);	/* [한국어] 오류가 났는지 확인하고 복구 방법을 정한다 */
+		if (rc)	/* [한국어] 오류가 우리 서술자와 관련되면 */
+			break;	/* [한국어] 기다림을 멈춘다 */
 
-		raw_spin_unlock(&qi->q_lock);
-		cpu_relax();
-		raw_spin_lock(&qi->q_lock);
+		raw_spin_unlock(&qi->q_lock);	/* [한국어] 락만 놓는다 — 인터럽트 상태는 그대로 둔다. 완료를 기다리는 동안 인터럽트가 같은 큐에 무효화를 넣으려 하면 데드락이 되기 때문이다 (위 영어 주석) */
+		cpu_relax();	/* [한국어] 바쁜 대기 */
+		raw_spin_lock(&qi->q_lock);	/* [한국어] 다시 잡는다 */
 	}
 
 	/*
@@ -2465,28 +2552,28 @@ restart:
 	 * It is also possible that descriptors from one of the previous
 	 * submissions has to be reclaimed by a subsequent submission.
 	 */
-	for (i = 0; i <= count; i++)
-		qi->desc_status[(index + i) % QI_LENGTH] = QI_FREE;
+	for (i = 0; i <= count; i++)	/* [한국어] 우리가 쓴 슬롯 전부(서술자 + Wait)를 */
+		qi->desc_status[(index + i) % QI_LENGTH] = QI_FREE;	/* [한국어] 비운다. 회수는 tail 부터 순서대로만 가능하므로, 모두 비워 둬야 이전 제출의 슬롯까지 함께 회수된다 (위 영어 주석) */
 
-	reclaim_free_desc(qi);
-	raw_spin_unlock_irqrestore(&qi->q_lock, flags);
+	reclaim_free_desc(qi);	/* [한국어] tail 부터 이어지는 빈 슬롯을 회수한다 */
+	raw_spin_unlock_irqrestore(&qi->q_lock, flags);	/* [한국어] 락 해제와 인터럽트 복원 */
 
-	if (rc == -EAGAIN)
-		goto restart;
+	if (rc == -EAGAIN)	/* [한국어] 오류로 중단되어 다시 보내야 하면 */
+		goto restart;	/* [한국어] 처음부터 다시 제출한다 */
 
-	if (iotlb_start_ktime)
-		dmar_latency_update(iommu, DMAR_LATENCY_INV_IOTLB,
-				ktime_to_ns(ktime_get()) - iotlb_start_ktime);
+	if (iotlb_start_ktime)	/* [한국어] IOTLB 계측이 켜져 있었으면 */
+		dmar_latency_update(iommu, DMAR_LATENCY_INV_IOTLB,	/* [한국어] 걸린 시간을 히스토그램에 더한다 */
+				ktime_to_ns(ktime_get()) - iotlb_start_ktime);	/* [한국어] 지금 시각에서 시작 시각을 뺀 값 */
 
-	if (devtlb_start_ktime)
-		dmar_latency_update(iommu, DMAR_LATENCY_INV_DEVTLB,
-				ktime_to_ns(ktime_get()) - devtlb_start_ktime);
+	if (devtlb_start_ktime)	/* [한국어] 디바이스 TLB 계측이 켜져 있었으면 */
+		dmar_latency_update(iommu, DMAR_LATENCY_INV_DEVTLB,	/* [한국어] 마찬가지 */
+				ktime_to_ns(ktime_get()) - devtlb_start_ktime);	/* [한국어] 걸린 시간 */
 
-	if (iec_start_ktime)
-		dmar_latency_update(iommu, DMAR_LATENCY_INV_IEC,
-				ktime_to_ns(ktime_get()) - iec_start_ktime);
+	if (iec_start_ktime)	/* [한국어] 인터럽트 캐시 계측이 켜져 있었으면 */
+		dmar_latency_update(iommu, DMAR_LATENCY_INV_IEC,	/* [한국어] 마찬가지 */
+				ktime_to_ns(ktime_get()) - iec_start_ktime);	/* [한국어] 걸린 시간 */
 
-	return rc;
+	return rc;	/* [한국어] 0 이면 무효화가 하드웨어에서 완료되었다 */
 }
 
 /*
