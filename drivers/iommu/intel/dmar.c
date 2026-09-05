@@ -3333,209 +3333,340 @@ static int dmar_fault_do_one(struct intel_iommu *iommu, int type,
 	return 0;	/* [한국어] 기록 완료 */
 }
 
-#define PRIMARY_FAULT_REG_LEN (16)
+#define PRIMARY_FAULT_REG_LEN (16)	/* [한국어] 폴트 기록 하나의 크기. 하드웨어가 이 간격으로 기록을 늘어놓으므로 인덱스에 이 값을 곱해 주소를 구한다 */
+/*
+ * [한국어]
+ * dmar_fault - DMA 폴트 인터럽트 핸들러
+ *
+ * @irq: 인터럽트 번호(쓰지 않는다). @dev_id: 폴트를 보고한 유닛.
+ * @return: 항상 IRQ_HANDLED.
+ *
+ * 하드웨어가 폴트 기록을 링 버퍼처럼 채우고 인터럽트를 낸다. 이 함수가 그
+ * 기록들을 훑으며 로그로 옮기고 자리를 비운다.
+ *
+ * 순회의 종료 조건이 특이하다: 기록의 F(유효) 비트가 꺼져 있으면 멈춘다.
+ * 하드웨어가 채운 기록에는 그 비트가 서 있고, 커널이 처리하며 지운다.
+ * 그래서 "다음 기록이 비어 있으면 끝" 이 자연스러운 종료가 된다.
+ *
+ * 속도 제한(ratelimit)이 이 함수의 특징이다. 폴트는 초당 수만 번 날 수
+ * 있다 — 드라이버 버그 하나가 그런 상황을 만든다. 그때 로그를 다 찍으면
+ * 시스템이 로그에 잠식된다. 그래서 제한에 걸리면 기록을 읽지도 않고
+ * F 비트만 지워 자리를 비운다. 폴트를 놓치더라도 시스템은 살아남아야 한다.
+ *
+ * 락을 잠깐 놓는 지점을 눈여겨볼 것: 기록을 읽고 F 비트를 지운 뒤
+ * dmar_fault_do_one 을 부르기 전에 놓는다. 로그를 찍는 동안 락을 쥐고
+ * 있으면 다른 CPU 의 무효화가 그동안 막히기 때문이다. 그 사이 하드웨어가
+ * 새 기록을 채워도, F 비트로 판별하므로 문제가 없다.
+ *
+ * 마지막에 오버플로 비트들(PFO/PPF/PRO)을 함께 지운다. 처리 도중 넘쳤을
+ * 수 있고, 그 비트가 남아 있으면 다음 인터럽트가 오지 않는다.
+ *
+ * 실행 컨텍스트: 인터럽트 핸들러. 잠들 수 없고 raw 스핀락만 쓴다.
+ *
+ * 호출 체인:
+ *   폴트 인터럽트 → [dmar_fault] → dmar_fault_do_one()
+ *     → dmar_get_fault_reason() → dmar_fault_dump_ptes()
+ */
 irqreturn_t dmar_fault(int irq, void *dev_id)
 {
-	struct intel_iommu *iommu = dev_id;
-	int reg, fault_index;
-	u32 fault_status;
-	unsigned long flag;
-	static DEFINE_RATELIMIT_STATE(rs,
-				      DEFAULT_RATELIMIT_INTERVAL,
-				      DEFAULT_RATELIMIT_BURST);
+	struct intel_iommu *iommu = dev_id;	/* [한국어] 인터럽트 등록 때 넘긴 유닛 */
+	int reg, fault_index;	/* [한국어] 폴트 기록 영역의 오프셋과 현재 인덱스 */
+	u32 fault_status;	/* [한국어] 폴트 상태 레지스터 */
+	unsigned long flag;	/* [한국어] 인터럽트 상태 */
+	static DEFINE_RATELIMIT_STATE(rs,	/* [한국어] 로그 속도 제한. 정적 변수이므로 유닛이 여럿이어도 전체에 하나가 적용된다 */
+				      DEFAULT_RATELIMIT_INTERVAL,	/* [한국어] 기본 간격 */
+				      DEFAULT_RATELIMIT_BURST);	/* [한국어] 그 안에서 허용할 개수 */
 
-	raw_spin_lock_irqsave(&iommu->register_lock, flag);
-	fault_status = readl(iommu->reg + DMAR_FSTS_REG);
-	if (fault_status && __ratelimit(&rs))
-		pr_err("DRHD: handling fault status reg %x\n", fault_status);
+	raw_spin_lock_irqsave(&iommu->register_lock, flag);	/* [한국어] 레지스터 조작 구간 */
+	fault_status = readl(iommu->reg + DMAR_FSTS_REG);	/* [한국어] 폴트 상태를 읽는다 */
+	if (fault_status && __ratelimit(&rs))	/* [한국어] 폴트가 있고 제한에 걸리지 않았으면 */
+		pr_err("DRHD: handling fault status reg %x\n", fault_status);	/* [한국어] 상태를 남긴다 */
 
 	/* TBD: ignore advanced fault log currently */
-	if (!(fault_status & DMA_FSTS_PPF))
-		goto unlock_exit;
+	if (!(fault_status & DMA_FSTS_PPF))	/* [한국어] 처리할 폴트 기록이 없으면 (고급 폴트 로그는 아직 다루지 않는다 — 위 영어 주석) */
+		goto unlock_exit;	/* [한국어] 할 일이 없다 */
 
-	fault_index = dma_fsts_fault_record_index(fault_status);
-	reg = cap_fault_reg_offset(iommu->cap);
-	while (1) {
+	fault_index = dma_fsts_fault_record_index(fault_status);	/* [한국어] 하드웨어가 알려 준 시작 인덱스 */
+	reg = cap_fault_reg_offset(iommu->cap);	/* [한국어] 폴트 기록 영역의 시작 오프셋 */
+	while (1) {	/* [한국어] 기록을 하나씩 — 종료는 아래 F 비트로 판별한다 */
 		/* Disable printing, simply clear the fault when ratelimited */
-		bool ratelimited = !__ratelimit(&rs);
-		u8 fault_reason;
-		u16 source_id;
-		u64 guest_addr;
-		u32 pasid;
-		int type;
-		u32 data;
-		bool pasid_present;
+		bool ratelimited = !__ratelimit(&rs);	/* [한국어] 제한에 걸렸으면 읽지도 않고 지우기만 한다 (위 영어 주석). 폴트가 초당 수만 번 나도 시스템이 살아남아야 한다 */
+		u8 fault_reason;	/* [한국어] 사유 코드 */
+		u16 source_id;	/* [한국어] 폴트를 낸 장치 */
+		u64 guest_addr;	/* [한국어] 폴트가 난 주소 */
+		u32 pasid;	/* [한국어] 어느 주소 공간이었는지 */
+		int type;	/* [한국어] 읽기인지 쓰기인지 */
+		u32 data;	/* [한국어] 레지스터에서 읽은 원본 */
+		bool pasid_present;	/* [한국어] PASID 필드가 유효한지 */
 
 		/* highest 32 bits */
-		data = readl(iommu->reg + reg +
-				fault_index * PRIMARY_FAULT_REG_LEN + 12);
-		if (!(data & DMA_FRCD_F))
-			break;
+		data = readl(iommu->reg + reg +	/* [한국어] 기록의 상위 32비트를 먼저 읽는다 (위 영어 주석) */
+				fault_index * PRIMARY_FAULT_REG_LEN + 12);	/* [한국어] 기록 하나가 16바이트라 인덱스에 곱하고, 상위 워드는 +12 */
+		if (!(data & DMA_FRCD_F))	/* [한국어] F(유효) 비트가 꺼져 있으면 */
+			break;	/* [한국어] 더 처리할 기록이 없다. 하드웨어가 채운 기록에만 이 비트가 서 있다 */
 
-		if (!ratelimited) {
-			fault_reason = dma_frcd_fault_reason(data);
-			type = dma_frcd_type(data);
+		if (!ratelimited) {	/* [한국어] 제한에 걸리지 않았을 때만 내용을 읽는다 */
+			fault_reason = dma_frcd_fault_reason(data);	/* [한국어] 사유 코드 */
+			type = dma_frcd_type(data);	/* [한국어] 읽기/쓰기 */
 
-			pasid = dma_frcd_pasid_value(data);
-			data = readl(iommu->reg + reg +
-				     fault_index * PRIMARY_FAULT_REG_LEN + 8);
-			source_id = dma_frcd_source_id(data);
+			pasid = dma_frcd_pasid_value(data);	/* [한국어] PASID */
+			data = readl(iommu->reg + reg +	/* [한국어] 중간 워드를 읽는다 */
+				     fault_index * PRIMARY_FAULT_REG_LEN + 8);	/* [한국어] +8 위치 */
+			source_id = dma_frcd_source_id(data);	/* [한국어] 폴트를 낸 장치의 소스 id */
 
-			pasid_present = dma_frcd_pasid_present(data);
-			guest_addr = readq(iommu->reg + reg +
-					   fault_index * PRIMARY_FAULT_REG_LEN);
-			guest_addr = dma_frcd_page_addr(guest_addr);
+			pasid_present = dma_frcd_pasid_present(data);	/* [한국어] PASID 필드가 유효한지 */
+			guest_addr = readq(iommu->reg + reg +	/* [한국어] 하위 64비트를 읽는다 */
+					   fault_index * PRIMARY_FAULT_REG_LEN);	/* [한국어] 기록의 시작 */
+			guest_addr = dma_frcd_page_addr(guest_addr);	/* [한국어] 페이지 오프셋을 잘라 낸 주소 */
 		}
 
 		/* clear the fault */
-		writel(DMA_FRCD_F, iommu->reg + reg +
-			fault_index * PRIMARY_FAULT_REG_LEN + 12);
+		writel(DMA_FRCD_F, iommu->reg + reg +	/* [한국어] F 비트를 써서 기록을 지운다 — 이 자리를 하드웨어가 다시 쓸 수 있게 된다 (위 영어 주석) */
+			fault_index * PRIMARY_FAULT_REG_LEN + 12);	/* [한국어] 상위 워드에 */
 
-		raw_spin_unlock_irqrestore(&iommu->register_lock, flag);
+		raw_spin_unlock_irqrestore(&iommu->register_lock, flag);	/* [한국어] 로그를 찍기 전에 락을 놓는다. 쥔 채로 찍으면 다른 CPU 의 무효화가 그동안 막힌다 */
 
-		if (!ratelimited)
+		if (!ratelimited)	/* [한국어] 제한에 걸리지 않았으면 */
 			/* Using pasid -1 if pasid is not present */
-			dmar_fault_do_one(iommu, type, fault_reason,
-					  pasid_present ? pasid : IOMMU_PASID_INVALID,
-					  source_id, guest_addr);
+			dmar_fault_do_one(iommu, type, fault_reason,	/* [한국어] 사람이 읽을 형태로 남긴다 */
+					  pasid_present ? pasid : IOMMU_PASID_INVALID,	/* [한국어] PASID 가 없으면 무효값을 넘긴다 (위 영어 주석) */
+					  source_id, guest_addr);	/* [한국어] 장치와 폴트 주소 */
 
-		fault_index++;
-		if (fault_index >= cap_num_fault_regs(iommu->cap))
-			fault_index = 0;
-		raw_spin_lock_irqsave(&iommu->register_lock, flag);
+		fault_index++;	/* [한국어] 다음 기록으로 */
+		if (fault_index >= cap_num_fault_regs(iommu->cap))	/* [한국어] 끝에 닿으면 */
+			fault_index = 0;	/* [한국어] 처음으로 돌아간다 — 링 버퍼다 */
+		raw_spin_lock_irqsave(&iommu->register_lock, flag);	/* [한국어] 다시 잡아 다음 기록을 읽는다. 그 사이 하드웨어가 새 기록을 채워도 F 비트로 판별하므로 문제가 없다 */
 	}
 
-	writel(DMA_FSTS_PFO | DMA_FSTS_PPF | DMA_FSTS_PRO,
-	       iommu->reg + DMAR_FSTS_REG);
+	writel(DMA_FSTS_PFO | DMA_FSTS_PPF | DMA_FSTS_PRO,	/* [한국어] 오버플로 비트들을 함께 지운다. 처리 도중 넘쳤을 수 있고, 남아 있으면 다음 인터럽트가 오지 않는다 */
+	       iommu->reg + DMAR_FSTS_REG);	/* [한국어] 폴트 상태 레지스터에 */
 
-unlock_exit:
-	raw_spin_unlock_irqrestore(&iommu->register_lock, flag);
-	return IRQ_HANDLED;
+unlock_exit:	/* [한국어] 처리할 기록이 없었던 경우가 합류 */
+	raw_spin_unlock_irqrestore(&iommu->register_lock, flag);	/* [한국어] 락 해제 */
+	return IRQ_HANDLED;	/* [한국어] 항상 처리했다고 답한다 — 이 인터럽트는 이 유닛 전용이라 공유되지 않는다 */
 }
 
+/*
+ * [한국어]
+ * dmar_set_interrupt - 유닛의 폴트 인터럽트를 건다
+ *
+ * @iommu: 대상 유닛.
+ * @return: 0 성공(이미 걸려 있으면 0), -EINVAL 이면 벡터가 없다.
+ *
+ * IRQF_NO_THREAD 를 쓰는 것이 눈여겨볼 점이다. 대부분의 인터럽트는
+ * PREEMPT_RT 에서 스레드로 옮겨지지만, 폴트 핸들러는 그러면 안 된다 —
+ * register_lock 이 raw 스핀락이고, 핸들러가 그 락을 잡는다. 스레드
+ * 문맥에서 raw 스핀락을 오래 쥐면 시스템 지연이 커진다. 또한 폴트는
+ * "이미 무언가 잘못된" 상황이라 최대한 빨리 기록하는 편이 낫다.
+ *
+ * 이미 걸려 있으면 그냥 돌아간다(코드 안 영어 주석) — 이 함수는 초기화와
+ * CPU 온라인 경로에서 여러 번 불릴 수 있다.
+ *
+ * 실행 컨텍스트: 유닛 초기화 또는 CPU 온라인. 프로세스 컨텍스트.
+ */
 int dmar_set_interrupt(struct intel_iommu *iommu)
 {
-	int irq, ret;
+	int irq, ret;	/* [한국어] 인터럽트 번호와 결과 */
 
 	/*
 	 * Check if the fault interrupt is already initialized.
 	 */
-	if (iommu->irq)
-		return 0;
+	if (iommu->irq)	/* [한국어] 이미 걸려 있으면 (위 영어 주석) */
+		return 0;	/* [한국어] 다시 걸지 않는다 */
 
-	irq = dmar_alloc_hwirq(iommu->seq_id, iommu->node, iommu);
-	if (irq > 0) {
-		iommu->irq = irq;
+	irq = dmar_alloc_hwirq(iommu->seq_id, iommu->node, iommu);	/* [한국어] 유닛 순번을 id 로 벡터를 잡는다. 노드를 넘겨 그 유닛과 가까운 CPU 로 가게 한다 */
+	if (irq > 0) {	/* [한국어] 잡았으면 */
+		iommu->irq = irq;	/* [한국어] 기억해 둔다 */
 	} else {
-		pr_err("No free IRQ vectors\n");
-		return -EINVAL;
+		pr_err("No free IRQ vectors\n");	/* [한국어] 벡터가 없으면 */
+		return -EINVAL;	/* [한국어] 폴트를 보고받을 수 없다 */
 	}
 
-	ret = request_irq(irq, dmar_fault, IRQF_NO_THREAD, iommu->name, iommu);
-	if (ret)
-		pr_err("Can't request irq\n");
-	return ret;
+	ret = request_irq(irq, dmar_fault, IRQF_NO_THREAD, iommu->name, iommu);	/* [한국어] NO_THREAD 로 등록한다 — 핸들러가 raw 스핀락을 잡고, 폴트는 최대한 빨리 기록해야 한다 */
+	if (ret)	/* [한국어] 등록 실패 */
+		pr_err("Can't request irq\n");	/* [한국어] 기록만 남긴다 */
+	return ret;	/* [한국어] 결과 */
 }
 
+/*
+ * [한국어]
+ * enable_drhd_fault_handling - 이 CPU 가 속한 노드의 유닛들에 폴트 인터럽트를 건다
+ *
+ * @cpu: 방금 온라인이 된 CPU.
+ * @return: 0 성공, -1 이면 어떤 유닛에서 실패했다.
+ *
+ * CPU 핫플러그 콜백이다. 왜 CPU 와 엮이는가: 인터럽트는 특정 CPU 로
+ * 전달되므로, 그 CPU 가 온라인이 되어야 벡터를 할당할 수 있다. 유닛의
+ * NUMA 노드와 CPU 의 노드가 맞는 것만 처리해, 인터럽트가 그 유닛과 가까운
+ * CPU 로 가게 한다.
+ *
+ * 인터럽트를 건 직후 dmar_fault 를 직접 부르는 것이 요령이다(코드 안
+ * 영어 주석). 인터럽트를 걸기 전에 쌓인 폴트가 있을 수 있고, 그것을
+ * 비우지 않으면 상태 비트가 남아 새 인터럽트가 오지 않는다. 상태
+ * 레지스터를 읽어 그대로 다시 쓰는 것도 같은 이유다 — 남은 비트를 지운다.
+ *
+ * 실행 컨텍스트: CPU 핫플러그 콜백. 프로세스 컨텍스트.
+ */
 int enable_drhd_fault_handling(unsigned int cpu)
 {
-	struct dmar_drhd_unit *drhd;
-	struct intel_iommu *iommu;
+	struct dmar_drhd_unit *drhd;	/* [한국어] DRHD 순회 커서 */
+	struct intel_iommu *iommu;	/* [한국어] 유닛 커서 */
 
 	/*
 	 * Enable fault control interrupt.
 	 */
-	guard(rwsem_read)(&dmar_global_lock);
-	for_each_iommu(iommu, drhd) {
-		u32 fault_status;
-		int ret;
+	guard(rwsem_read)(&dmar_global_lock);	/* [한국어] 목록 순회 보호. guard 는 함수를 벗어날 때 자동으로 놓아 준다 (위 영어 주석) */
+	for_each_iommu(iommu, drhd) {	/* [한국어] 등록된 유닛들에 대해 */
+		u32 fault_status;	/* [한국어] 폴트 상태 레지스터 */
+		int ret;	/* [한국어] 결과 */
 
-		if (iommu->irq || iommu->node != cpu_to_node(cpu))
-			continue;
+		if (iommu->irq || iommu->node != cpu_to_node(cpu))	/* [한국어] 이미 걸려 있거나 이 CPU 의 노드가 아니면 */
+			continue;	/* [한국어] 건너뛴다. 인터럽트가 그 유닛과 가까운 CPU 로 가게 하려는 것이다 */
 
-		ret = dmar_set_interrupt(iommu);
+		ret = dmar_set_interrupt(iommu);	/* [한국어] 폴트 인터럽트를 건다 */
 
-		if (ret) {
-			pr_err("DRHD %Lx: failed to enable fault, interrupt, ret %d\n",
-			       (unsigned long long)drhd->reg_base_addr, ret);
-			return -1;
+		if (ret) {	/* [한국어] 실패하면 */
+			pr_err("DRHD %Lx: failed to enable fault, interrupt, ret %d\n",	/* [한국어] 어느 유닛인지와 함께 남기고 */
+			       (unsigned long long)drhd->reg_base_addr, ret);	/* [한국어] 그 주소와 오류 */
+			return -1;	/* [한국어] CPU 온라인을 실패시킨다 */
 		}
 
 		/*
 		 * Clear any previous faults.
 		 */
-		dmar_fault(iommu->irq, iommu);
-		fault_status = readl(iommu->reg + DMAR_FSTS_REG);
-		writel(fault_status, iommu->reg + DMAR_FSTS_REG);
+		dmar_fault(iommu->irq, iommu);	/* [한국어] 핸들러를 직접 불러 쌓인 폴트를 비운다 (위 영어 주석). 인터럽트를 걸기 전의 폴트가 남아 있으면 상태 비트 때문에 새 인터럽트가 오지 않는다 */
+		fault_status = readl(iommu->reg + DMAR_FSTS_REG);	/* [한국어] 상태를 읽어 */
+		writel(fault_status, iommu->reg + DMAR_FSTS_REG);	/* [한국어] 그대로 다시 쓴다 — 세워진 비트를 지우는 관용구다 */
 	}
 
-	return 0;
+	return 0;	/* [한국어] 이 노드의 유닛들이 폴트를 보고할 준비가 되었다 */
 }
 
 /*
  * Re-enable Queued Invalidation interface.
  */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * dmar_reenable_qi - 무효화 큐를 껐다가 다시 켠다
+ *
+ * @iommu: 대상 유닛.
+ * @return: 0 성공, -ENOENT 면 큐를 쓰지 않는 유닛이다.
+ *
+ * 서스펜드에서 돌아온 뒤에 쓴다. 하드웨어는 초기화되었지만 큐 버퍼와
+ * 소프트웨어 상태는 그대로 남아 있으므로, 하드웨어 쪽만 다시 세우면 된다.
+ *
+ * 끄기를 먼저 하는 이유(코드 안 영어 주석): 그 과정에서 대기 중인 요청이
+ * 처리되기를 기다린다. 그 다음 다시 켤 때는 대기 중인 것이 없으므로
+ * 안전하게 상태를 초기화할 수 있다.
+ *
+ * __dmar_enable_qi 가 head/tail/cnt 를 처음으로 되돌린다는 점이 중요하다 —
+ * 서스펜드 전의 소프트웨어 상태와 초기화된 하드웨어를 맞추는 것이 이
+ * 함수의 실질적인 목적이다.
+ *
+ * 실행 컨텍스트: 리줌. 프로세스 컨텍스트.
+ */
 int dmar_reenable_qi(struct intel_iommu *iommu)
 {
-	if (!ecap_qis(iommu->ecap))
-		return -ENOENT;
+	if (!ecap_qis(iommu->ecap))	/* [한국어] 큐를 지원하지 않는 유닛이면 */
+		return -ENOENT;	/* [한국어] 다시 켤 것이 없다 */
 
-	if (!iommu->qi)
-		return -ENOENT;
+	if (!iommu->qi)	/* [한국어] 큐를 만든 적이 없으면 */
+		return -ENOENT;	/* [한국어] 역시 */
 
 	/*
 	 * First disable queued invalidation.
 	 */
-	dmar_disable_qi(iommu);
+	dmar_disable_qi(iommu);	/* [한국어] 먼저 끈다 — 그 과정에서 대기 중인 요청이 처리되기를 기다린다 (위 영어 주석) */
 	/*
 	 * Then enable queued invalidation again. Since there is no pending
 	 * invalidation requests now, it's safe to re-enable queued
 	 * invalidation.
 	 */
-	__dmar_enable_qi(iommu);
+	__dmar_enable_qi(iommu);	/* [한국어] 다시 켠다. 대기 중인 것이 없으므로 안전하게 상태를 초기화할 수 있다 (위 영어 주석) */
 
-	return 0;
+	return 0;	/* [한국어] 무효화 큐가 다시 동작한다 */
 }
 
 /*
  * Check interrupt remapping support in DMAR table description.
  */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * dmar_ir_support - 이 플랫폼이 인터럽트 재매핑을 지원하는지 표에서 확인한다
+ *
+ * @return: 0 이면 지원하지 않는다, 0 이 아니면 지원한다.
+ *
+ * DMAR 표 헤더의 flags 비트 0 이 그것을 알려 준다. 유닛마다의 능력이
+ * 아니라 플랫폼 전체의 선언이라는 점이 특징이다 — 인터럽트 재매핑은
+ * 시스템 전역으로 켜거나 끄는 기능이기 때문이다.
+ *
+ * 표가 없으면 0 을 돌려준다 — 하드웨어가 없으니 지원할 것도 없다.
+ *
+ * 실행 컨텍스트: 부팅 초기(__init).
+ */
 int __init dmar_ir_support(void)
 {
-	struct acpi_table_dmar *dmar;
-	dmar = (struct acpi_table_dmar *)dmar_tbl;
-	if (!dmar)
-		return 0;
-	return dmar->flags & 0x1;
+	struct acpi_table_dmar *dmar;	/* [한국어] 매핑된 표 */
+	dmar = (struct acpi_table_dmar *)dmar_tbl;	/* [한국어] 표를 DMAR 형식으로 */
+	if (!dmar)	/* [한국어] 표가 없으면 */
+		return 0;	/* [한국어] 하드웨어가 없으니 지원할 것도 없다 */
+	return dmar->flags & 0x1;	/* [한국어] 헤더의 비트 0. 유닛마다가 아니라 플랫폼 전체의 선언이다 */
 }
 
 /* Check whether DMAR units are in use */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * dmar_in_use - DMAR 유닛이 실제로 쓰이고 있는지 본다
+ *
+ * @return: true 면 인터럽트 재매핑이나 DMA 재매핑 중 하나가 동작 중이다.
+ *
+ * 두 기능이 같은 유닛을 공유하므로, 자원을 반납해도 되는지 판단하려면
+ * 둘 다 확인해야 한다. 하나만 보고 반납하면 다른 쪽이 쓰던 것을 빼앗는다.
+ *
+ * 실행 컨텍스트: 부팅 후반의 정리. 순수 조회.
+ */
 static inline bool dmar_in_use(void)
 {
-	return irq_remapping_enabled || intel_iommu_enabled;
+	return irq_remapping_enabled || intel_iommu_enabled;	/* [한국어] 둘 중 하나라도 동작 중이면 유닛이 쓰이는 중이다. 하나만 보고 반납하면 다른 쪽이 쓰던 것을 빼앗는다 */
 }
 
+/*
+ * [한국어]
+ * dmar_free_unused_resources - 아무도 쓰지 않는 DMAR 자료구조를 반납한다
+ *
+ * @return: 항상 0.
+ *
+ * late_initcall 로 등록되어 부팅이 거의 끝난 시점에 불린다. 그때까지도
+ * 인터럽트 재매핑도 DMA 재매핑도 켜지지 않았다면, 파싱해 둔 유닛 목록과
+ * 그 자원은 영영 쓰이지 않는다.
+ *
+ * 버스 알림을 먼저 해제하는 조건이 미묘하다: device scope 연결을 시도한
+ * 적이 있고(status != 1) 유닛이 있었으면 알림을 등록했다는 뜻이므로,
+ * 그것을 먼저 풀어야 한다. 등록하지 않은 알림을 해제하면 커널이 경고한다.
+ *
+ * 실행 컨텍스트: late_initcall. 프로세스 컨텍스트.
+ */
 static int __init dmar_free_unused_resources(void)
 {
-	struct dmar_drhd_unit *dmaru, *dmaru_n;
+	struct dmar_drhd_unit *dmaru, *dmaru_n;	/* [한국어] 해제하며 순회하므로 다음 포인터를 미리 들고 있어야 한다 */
 
-	if (dmar_in_use())
-		return 0;
+	if (dmar_in_use())	/* [한국어] 어느 한쪽이라도 쓰고 있으면 */
+		return 0;	/* [한국어] 반납하지 않는다 */
 
-	if (dmar_dev_scope_status != 1 && !list_empty(&dmar_drhd_units))
-		bus_unregister_notifier(&pci_bus_type, &dmar_pci_bus_nb);
+	if (dmar_dev_scope_status != 1 && !list_empty(&dmar_drhd_units))	/* [한국어] 연결을 시도한 적이 있고 유닛이 있었으면 — 그때 버스 알림을 등록했다는 뜻이다 */
+		bus_unregister_notifier(&pci_bus_type, &dmar_pci_bus_nb);	/* [한국어] 먼저 알림을 푼다. 등록하지 않은 알림을 해제하면 커널이 경고한다 */
 
-	down_write(&dmar_global_lock);
-	list_for_each_entry_safe(dmaru, dmaru_n, &dmar_drhd_units, list) {
-		list_del(&dmaru->list);
-		dmar_free_drhd(dmaru);
+	down_write(&dmar_global_lock);	/* [한국어] 목록을 비우는 구간 */
+	list_for_each_entry_safe(dmaru, dmaru_n, &dmar_drhd_units, list) {	/* [한국어] 유닛마다 */
+		list_del(&dmaru->list);	/* [한국어] 목록에서 빼고 */
+		dmar_free_drhd(dmaru);	/* [한국어] 자원을 반납한다 */
 	}
-	up_write(&dmar_global_lock);
+	up_write(&dmar_global_lock);	/* [한국어] 락 해제 */
 
-	return 0;
+	return 0;	/* [한국어] 정리 완료 */
 }
 
-late_initcall(dmar_free_unused_resources);
+late_initcall(dmar_free_unused_resources);	/* [한국어] 부팅이 거의 끝난 시점에 부른다. 그때까지 아무도 쓰지 않았으면 영영 쓰이지 않을 자원이다 */
 
 /*
  * DMAR Hotplug Support
@@ -3543,56 +3674,81 @@ late_initcall(dmar_free_unused_resources);
  * for Directed-IO Architecture Specifiction, Rev 2.2, Section 8.8
  * "Remapping Hardware Unit Hot Plug".
  */
-static guid_t dmar_hp_guid =
-	GUID_INIT(0xD8C1A3A6, 0xBE9B, 0x4C9B,
-		  0x91, 0xBF, 0xC3, 0xCB, 0x81, 0xFC, 0x5D, 0xAF);
+static guid_t dmar_hp_guid =	/* [한국어] DMAR 핫플러그 _DSM 메서드를 식별하는 GUID (위 영어 주석: 스펙 2.2 의 8.8 절) */
+	GUID_INIT(0xD8C1A3A6, 0xBE9B, 0x4C9B,	/* [한국어] 스펙이 정한 값 — 펌웨어와 커널이 같은 값을 알고 있어야 통한다 */
+		  0x91, 0xBF, 0xC3, 0xCB, 0x81, 0xFC, 0x5D, 0xAF);	/* [한국어] 나머지 바이트 */
 
 /*
  * Currently there's only one revision and BIOS will not check the revision id,
  * so use 0 for safety.
  */
-#define	DMAR_DSM_REV_ID			0
-#define	DMAR_DSM_FUNC_DRHD		1
-#define	DMAR_DSM_FUNC_ATSR		2
-#define	DMAR_DSM_FUNC_RHSA		3
-#define	DMAR_DSM_FUNC_SATC		4
+#define	DMAR_DSM_REV_ID			0	/* [한국어] _DSM 리비전. 지금은 하나뿐이고 BIOS 가 검사하지도 않아 안전하게 0 을 쓴다 (위 영어 주석) */
+#define	DMAR_DSM_FUNC_DRHD		1	/* [한국어] 유닛 항목을 달라는 함수 번호 */
+#define	DMAR_DSM_FUNC_ATSR		2	/* [한국어] ATS 능력 보고 */
+#define	DMAR_DSM_FUNC_RHSA		3	/* [한국어] NUMA 근접성 */
+#define	DMAR_DSM_FUNC_SATC		4	/* [한국어] SoC 통합 ATS 신고 */
 
 static inline bool dmar_detect_dsm(acpi_handle handle, int func)
 {
-	return acpi_check_dsm(handle, &dmar_hp_guid, DMAR_DSM_REV_ID, 1 << func);
+	return acpi_check_dsm(handle, &dmar_hp_guid, DMAR_DSM_REV_ID, 1 << func);	/* [한국어] 이 ACPI 장치가 그 함수 번호의 _DSM 을 지원하는지. 지원하지 않으면 그 종류의 항목이 없다는 뜻이다 */
 }
 
+/*
+ * [한국어]
+ * dmar_walk_dsm_resource - ACPI _DSM 이 돌려준 표 조각을 훑어 콜백을 부른다
+ *
+ * @handle: 핫플러그된 ACPI 장치의 핸들. @func: _DSM 함수 번호(어떤 종류를
+ *          달라고 할지). @handler: 각 항목에 부를 콜백. @arg: 그 인자.
+ * @return: 0 성공(지원하지 않으면 0), 음수면 실패.
+ *
+ * 핫플러그의 핵심 구조다. 부팅 시에는 DMAR 표 전체가 메모리에 있지만,
+ * 유닛이 나중에 꽂히면 그 유닛의 항목만 새로 알려 줘야 한다. ACPI _DSM
+ * 메서드가 그 통로이며, 요청한 종류의 항목들을 담은 버퍼를 돌려준다.
+ *
+ * func 번호가 종류를 정한다(DRHD/ATSR/RHSA/SATC). res_type 배열이 그
+ * 번호를 DMAR 항목 종류로 바꿔, 콜백 묶음의 알맞은 자리에 handler 를 꽂는다.
+ * 그 덕분에 부팅 파싱과 같은 dmar_walk_remapping_entries 를 재사용할 수 있다.
+ *
+ * 지원 여부를 먼저 확인하고(dmar_detect_dsm) 없으면 0 을 돌려준다 —
+ * 그 종류를 알려 주지 않는 것은 오류가 아니라 그냥 해당 항목이 없다는 뜻이다.
+ *
+ * ACPI_FREE 로 버퍼를 반납하는 것이 중요하다. 이 버퍼는 _DSM 이 슬랩에서
+ * 잡아 준 것이라, 항목 내용을 계속 참조할 파서(ATSR/SATC)는 사본을 떠야 한다 —
+ * 그 파서들이 memcpy 를 하는 이유가 여기 있다.
+ *
+ * 실행 컨텍스트: ACPI 핫플러그. 프로세스 컨텍스트.
+ */
 static int dmar_walk_dsm_resource(acpi_handle handle, int func,
 				  dmar_res_handler_t handler, void *arg)
 {
-	int ret = -ENODEV;
-	union acpi_object *obj;
-	struct acpi_dmar_header *start;
-	struct dmar_res_callback callback;
-	static int res_type[] = {
-		[DMAR_DSM_FUNC_DRHD] = ACPI_DMAR_TYPE_HARDWARE_UNIT,
-		[DMAR_DSM_FUNC_ATSR] = ACPI_DMAR_TYPE_ROOT_ATS,
-		[DMAR_DSM_FUNC_RHSA] = ACPI_DMAR_TYPE_HARDWARE_AFFINITY,
-		[DMAR_DSM_FUNC_SATC] = ACPI_DMAR_TYPE_SATC,
+	int ret = -ENODEV;	/* [한국어] 결과 */
+	union acpi_object *obj;	/* [한국어] _DSM 이 돌려줄 버퍼 */
+	struct acpi_dmar_header *start;	/* [한국어] 그 안의 첫 항목 */
+	struct dmar_res_callback callback;	/* [한국어] 부팅 파싱과 같은 형태의 콜백 묶음 */
+	static int res_type[] = {	/* [한국어] _DSM 함수 번호를 DMAR 항목 종류로 바꾸는 표 */
+		[DMAR_DSM_FUNC_DRHD] = ACPI_DMAR_TYPE_HARDWARE_UNIT,	/* [한국어] 유닛 */
+		[DMAR_DSM_FUNC_ATSR] = ACPI_DMAR_TYPE_ROOT_ATS,	/* [한국어] ATS 능력 보고 */
+		[DMAR_DSM_FUNC_RHSA] = ACPI_DMAR_TYPE_HARDWARE_AFFINITY,	/* [한국어] NUMA 근접성 */
+		[DMAR_DSM_FUNC_SATC] = ACPI_DMAR_TYPE_SATC,	/* [한국어] SoC 통합 ATS */
 	};
 
-	if (!dmar_detect_dsm(handle, func))
-		return 0;
+	if (!dmar_detect_dsm(handle, func))	/* [한국어] 그 종류를 알려 주지 않으면 */
+		return 0;	/* [한국어] 오류가 아니라 해당 항목이 없다는 뜻이다 */
 
-	obj = acpi_evaluate_dsm_typed(handle, &dmar_hp_guid, DMAR_DSM_REV_ID,
-				      func, NULL, ACPI_TYPE_BUFFER);
-	if (!obj)
-		return -ENODEV;
+	obj = acpi_evaluate_dsm_typed(handle, &dmar_hp_guid, DMAR_DSM_REV_ID,	/* [한국어] _DSM 을 호출해 */
+				      func, NULL, ACPI_TYPE_BUFFER);	/* [한국어] 그 종류의 항목들을 버퍼로 받는다 */
+	if (!obj)	/* [한국어] 받지 못하면 */
+		return -ENODEV;	/* [한국어] 처리할 수 없다 */
 
-	memset(&callback, 0, sizeof(callback));
-	callback.cb[res_type[func]] = handler;
-	callback.arg[res_type[func]] = arg;
-	start = (struct acpi_dmar_header *)obj->buffer.pointer;
-	ret = dmar_walk_remapping_entries(start, obj->buffer.length, &callback);
+	memset(&callback, 0, sizeof(callback));	/* [한국어] 다른 종류는 다루지 않도록 비워 두고 */
+	callback.cb[res_type[func]] = handler;	/* [한국어] 요청한 종류의 자리에만 콜백을 꽂는다 */
+	callback.arg[res_type[func]] = arg;	/* [한국어] 그 인자도 */
+	start = (struct acpi_dmar_header *)obj->buffer.pointer;	/* [한국어] 버퍼의 첫 항목 */
+	ret = dmar_walk_remapping_entries(start, obj->buffer.length, &callback);	/* [한국어] 부팅 파싱과 같은 순회 코드를 재사용한다 */
 
-	ACPI_FREE(obj);
+	ACPI_FREE(obj);	/* [한국어] 버퍼를 반납한다. 이것이 슬랩에서 잡힌 임시 버퍼라, 내용을 계속 참조할 파서는 사본을 떠야 한다 */
 
-	return ret;
+	return ret;	/* [한국어] 결과 */
 }
 
 static int dmar_hp_add_drhd(struct acpi_dmar_header *header, void *arg)
