@@ -5757,69 +5757,112 @@ out_unlock:
 	return table;	/* [한국어] 실제로 쓰일 표 */
 }
 
+/*
+ * [한국어]
+ * alloc_irq_index - 재매핑 표에서 연속된 항목 자리를 잡는다
+ *
+ * @iommu: 담당 유닛.
+ * @devid: 대상 장치.
+ * @count: 필요한 연속 항목 수.
+ * @align: 시작 위치를 count 의 2의 거듭제곱으로 맞출 것인가.
+ * @pdev: PCI 장치면 표 할당에 쓴다.
+ * @max_irqs: 표의 항목 수.
+ * @return: 첫 항목의 색인, 자리가 없으면 -ENOSPC, 표가 없으면 -ENODEV.
+ *
+ * MSI-X 는 벡터 여러 개를 연속으로 쓰므로 빈칸이 이어진 자리를 찾아야 한다.
+ * 스캔은 단순하다 — 비어 있으면 세고, 차 있으면 세기를 접고 정렬 경계로
+ * 건너뛴다.
+ *
+ * 정렬이 필요한 이유: 다중 MSI 는 시작 벡터 하나만 알려 주고 나머지는
+ * 하위 비트를 증가시켜 만들어지므로, 시작이 2의 거듭제곱 경계에 있어야
+ * 그 계산이 맞는다.
+ *
+ * min_index 부터 시작하는 이유: 앞쪽 몇 항목은 레거시 인터럽트가 예약해 둔다.
+ */
 static int alloc_irq_index(struct amd_iommu *iommu, u16 devid, int count,
 			   bool align, struct pci_dev *pdev,
 			   unsigned long max_irqs)
 {
-	struct irq_remap_table *table;
-	int index, c, alignment = 1;
-	unsigned long flags;
+	struct irq_remap_table *table;	/* [한국어] 자리를 찾을 표 */
+	int index, c, alignment = 1;	/* [한국어] 스캔 위치, 연속 개수, 정렬 단위 */
+	unsigned long flags;	/* [한국어] 인터럽트 상태 */
 
-	table = alloc_irq_table(iommu, devid, pdev, max_irqs);
-	if (!table)
-		return -ENODEV;
+	table = alloc_irq_table(iommu, devid, pdev, max_irqs);	/* [한국어] 없으면 만들어서 */
+	if (!table)	/* [한국어] 실패면 */
+		return -ENODEV;	/* [한국어] 인터럽트를 줄 수 없다 */
 
-	if (align)
-		alignment = roundup_pow_of_two(count);
+	if (align)	/* [한국어] 다중 MSI 처럼 정렬이 필요하면 */
+		alignment = roundup_pow_of_two(count);	/* [한국어] 시작이 2의 거듭제곱 경계여야 하위 비트 증가가 맞는다 */
 
-	raw_spin_lock_irqsave(&table->lock, flags);
+	raw_spin_lock_irqsave(&table->lock, flags);	/* [한국어] 항목 할당 보호 */
 
 	/* Scan table for free entries */
-	for (index = ALIGN(table->min_index, alignment), c = 0;
-	     index < max_irqs;) {
-		if (!iommu->irte_ops->is_allocated(table, index)) {
-			c += 1;
+	for (index = ALIGN(table->min_index, alignment), c = 0;	/* [한국어] (원 주석: 빈 항목을 찾아 표를 훑는다) 앞쪽은 레거시가 예약해 둔다 */
+	     index < max_irqs;) {	/* [한국어] 표 끝까지 */
+		if (!iommu->irte_ops->is_allocated(table, index)) {	/* [한국어] 비어 있으면 */
+			c += 1;	/* [한국어] 연속 길이를 늘린다 */
 		} else {
-			c     = 0;
-			index = ALIGN(index + 1, alignment);
-			continue;
+			c     = 0;	/* [한국어] 차 있으면 세기를 접고 */
+			index = ALIGN(index + 1, alignment);	/* [한국어] 다음 정렬 경계로 건너뛴다 */
+			continue;	/* [한국어] 거기서 다시 센다 */
 		}
 
-		if (c == count)	{
-			for (; c != 0; --c)
-				iommu->irte_ops->set_allocated(table, index - c + 1);
+		if (c == count)	{	/* [한국어] 필요한 만큼 이어졌으면 */
+			for (; c != 0; --c)	/* [한국어] 그 자리들을 */
+				iommu->irte_ops->set_allocated(table, index - c + 1);	/* [한국어] 모두 사용 중으로 표시한다 */
 
-			index -= count - 1;
-			goto out;
+			index -= count - 1;	/* [한국어] 첫 항목의 색인으로 되돌린다 */
+			goto out;	/* [한국어] 찾았다 */
 		}
 
-		index++;
+		index++;	/* [한국어] 다음 자리로 */
 	}
 
-	index = -ENOSPC;
+	index = -ENOSPC;	/* [한국어] 표가 가득 찼다 */
 
 out:
-	raw_spin_unlock_irqrestore(&table->lock, flags);
+	raw_spin_unlock_irqrestore(&table->lock, flags);	/* [한국어] 할당 보호 해제 */
 
-	return index;
+	return index;	/* [한국어] 첫 항목의 색인 또는 오류 */
 }
 
+/*
+ * [한국어]
+ * __modify_irte_ga - 128비트 재매핑 항목을 한 번에 갱신한다
+ *
+ * @iommu: 담당 유닛.
+ * @devid: 대상 장치.
+ * @index: 항목 색인.
+ * @irte: 써 넣을 새 내용.
+ * @return: 0 성공, -ENOMEM 이면 표를 못 찾았다.
+ *
+ * DTE 와 같은 문제가 여기에도 있다. 하드웨어는 항목을 128비트 한 덩어리로
+ * 읽는데 CPU 는 64비트씩 쓴다. 반쪽만 바뀐 상태를 하드웨어가 보면 엉뚱한
+ * CPU 로 인터럽트가 간다.
+ *
+ * 그래서 cmpxchg16b 로 한 번에 쓴다. 원 주석이 짚듯 하드웨어나 다른 CPU 가
+ * 이 항목을 고치지 않으므로(락이 있다) 비교는 반드시 성공한다 — 실패하면
+ * 그 전제가 깨진 것이라 경고한다.
+ *
+ * 캐시 무효화는 하지 않는다. 여러 항목을 고친 뒤 한 번만 지우려는 호출자가
+ * 있어서다.
+ */
 static int __modify_irte_ga(struct amd_iommu *iommu, u16 devid, int index,
 			    struct irte_ga *irte)
 {
-	struct irq_remap_table *table;
-	struct irte_ga *entry;
-	unsigned long flags;
-	u128 old;
+	struct irq_remap_table *table;	/* [한국어] 대상 표 */
+	struct irte_ga *entry;	/* [한국어] 고칠 항목 */
+	unsigned long flags;	/* [한국어] 인터럽트 상태 */
+	u128 old;	/* [한국어] cmpxchg 의 비교값 */
 
-	table = get_irq_table(iommu, devid);
-	if (!table)
-		return -ENOMEM;
+	table = get_irq_table(iommu, devid);	/* [한국어] 조회 배열에서 */
+	if (!table)	/* [한국어] 없으면 */
+		return -ENOMEM;	/* [한국어] 고칠 곳이 없다 */
 
-	raw_spin_lock_irqsave(&table->lock, flags);
+	raw_spin_lock_irqsave(&table->lock, flags);	/* [한국어] 같은 항목을 두 CPU 가 고치지 않도록 */
 
-	entry = (struct irte_ga *)table->table;
-	entry = &entry[index];
+	entry = (struct irte_ga *)table->table;	/* [한국어] 128비트 항목 배열로 */
+	entry = &entry[index];	/* [한국어] 대상 항목 */
 
 	/*
 	 * We use cmpxchg16 to atomically update the 128-bit IRTE,
@@ -5827,164 +5870,327 @@ static int __modify_irte_ga(struct amd_iommu *iommu, u16 devid, int index,
 	 * behind us, so the return value of cmpxchg16 should be the
 	 * same as the old value.
 	 */
-	old = entry->irte;
-	WARN_ON(!try_cmpxchg128(&entry->irte, &old, irte->irte));
+	old = entry->irte;	/* [한국어] 현재 값을 비교값으로 */
+	WARN_ON(!try_cmpxchg128(&entry->irte, &old, irte->irte));	/* [한국어] (원 주석: 하드웨어도 다른 CPU 도 고치지 않으므로 반드시 성공한다) */
 
-	raw_spin_unlock_irqrestore(&table->lock, flags);
+	raw_spin_unlock_irqrestore(&table->lock, flags);	/* [한국어] 갱신 끝 */
 
-	return 0;
+	return 0;	/* [한국어] 캐시 무효화는 호출자가 모아서 */
 }
 
+/*
+ * [한국어]
+ * modify_irte_ga - 128비트 항목을 갱신하고 캐시까지 지운다
+ *
+ * @iommu: 담당 유닛.
+ * @devid: 대상 장치.
+ * @index: 항목 색인.
+ * @irte: 새 내용.
+ * @return: 0 성공, 음수면 실패.
+ *
+ * 표만 고치고 캐시를 두면 하드웨어가 옛 항목으로 인터럽트를 계속 보낸다.
+ */
 static int modify_irte_ga(struct amd_iommu *iommu, u16 devid, int index,
 			  struct irte_ga *irte)
 {
-	int ret;
+	int ret;	/* [한국어] 결과 */
 
-	ret = __modify_irte_ga(iommu, devid, index, irte);
-	if (ret)
-		return ret;
+	ret = __modify_irte_ga(iommu, devid, index, irte);	/* [한국어] 표를 먼저 고치고 */
+	if (ret)	/* [한국어] 실패면 */
+		return ret;	/* [한국어] 지울 것도 없다 */
 
-	iommu_flush_irt_and_complete(iommu, devid);
+	iommu_flush_irt_and_complete(iommu, devid);	/* [한국어] 캐시를 두면 하드웨어가 옛 목적지로 보낸다 */
 
-	return 0;
+	return 0;	/* [한국어] 성공 */
 }
 
+/*
+ * [한국어]
+ * modify_irte - 32비트 재매핑 항목을 갱신한다
+ *
+ * @iommu: 담당 유닛.
+ * @devid: 대상 장치.
+ * @index: 항목 색인.
+ * @irte: 새 내용.
+ * @return: 0 성공, -ENOMEM 이면 표를 못 찾았다.
+ *
+ * 기본 형식은 항목이 32비트라 한 번의 쓰기로 끝난다 — GA 형식이 겪는
+ * 반쪽 갱신 문제가 없다.
+ */
 static int modify_irte(struct amd_iommu *iommu,
 		       u16 devid, int index, union irte *irte)
 {
-	struct irq_remap_table *table;
-	unsigned long flags;
+	struct irq_remap_table *table;	/* [한국어] 대상 표 */
+	unsigned long flags;	/* [한국어] 인터럽트 상태 */
 
-	table = get_irq_table(iommu, devid);
-	if (!table)
-		return -ENOMEM;
+	table = get_irq_table(iommu, devid);	/* [한국어] 조회 배열에서 */
+	if (!table)	/* [한국어] 없으면 */
+		return -ENOMEM;	/* [한국어] 고칠 곳이 없다 */
 
-	raw_spin_lock_irqsave(&table->lock, flags);
-	table->table[index] = irte->val;
-	raw_spin_unlock_irqrestore(&table->lock, flags);
+	raw_spin_lock_irqsave(&table->lock, flags);	/* [한국어] 항목 보호 */
+	table->table[index] = irte->val;	/* [한국어] 32비트라 한 번의 쓰기로 끝난다 */
+	raw_spin_unlock_irqrestore(&table->lock, flags);	/* [한국어] 갱신 끝 */
 
-	iommu_flush_irt_and_complete(iommu, devid);
+	iommu_flush_irt_and_complete(iommu, devid);	/* [한국어] 새 항목이 실제로 쓰이도록 */
 
-	return 0;
+	return 0;	/* [한국어] 성공 */
 }
 
+/*
+ * [한국어]
+ * free_irte - 재매핑 항목 자리를 반납한다
+ *
+ * @iommu: 담당 유닛.
+ * @devid: 대상 장치.
+ * @index: 반납할 색인.
+ *
+ * 자리 표시만 지운다. 그 자리가 다시 쓰이기 전에 캐시를 비워야, 새 주인의
+ * 인터럽트가 옛 목적지로 가지 않는다.
+ */
 static void free_irte(struct amd_iommu *iommu, u16 devid, int index)
 {
-	struct irq_remap_table *table;
-	unsigned long flags;
+	struct irq_remap_table *table;	/* [한국어] 대상 표 */
+	unsigned long flags;	/* [한국어] 인터럽트 상태 */
 
-	table = get_irq_table(iommu, devid);
-	if (!table)
-		return;
+	table = get_irq_table(iommu, devid);	/* [한국어] 조회 배열에서 */
+	if (!table)	/* [한국어] 없으면 */
+		return;	/* [한국어] 반납할 것도 없다 */
 
-	raw_spin_lock_irqsave(&table->lock, flags);
-	iommu->irte_ops->clear_allocated(table, index);
-	raw_spin_unlock_irqrestore(&table->lock, flags);
+	raw_spin_lock_irqsave(&table->lock, flags);	/* [한국어] 할당 표시 보호 */
+	iommu->irte_ops->clear_allocated(table, index);	/* [한국어] 자리를 비운다 */
+	raw_spin_unlock_irqrestore(&table->lock, flags);	/* [한국어] 끝 */
 
-	iommu_flush_irt_and_complete(iommu, devid);
+	iommu_flush_irt_and_complete(iommu, devid);	/* [한국어] 새 주인의 인터럽트가 옛 목적지로 가지 않도록 */
 }
 
+/*
+ * [한국어]
+ * irte_prepare - 32비트 재매핑 항목을 채운다
+ *
+ * @entry: 채울 항목.
+ * @delivery_mode: 전달 방식(고정/최저 우선순위 등).
+ * @dest_mode: 물리 목적지인가 논리 목적지인가.
+ * @vector: CPU 쪽 벡터 번호.
+ * @dest_apicid: 받을 CPU 의 APIC id.
+ * @devid: 대상 장치(이 형식에서는 쓰지 않는다).
+ *
+ * 재매핑의 핵심이 이 한 항목이다. 장치는 자기가 정한 메시지를 보내지만,
+ * 실제로 어느 CPU 의 어느 벡터로 갈지는 여기 적힌 값이 정한다 — 장치가
+ * 임의의 CPU 에 임의의 인터럽트를 쏘지 못하게 하는 장치다.
+ *
+ * 0 으로 지우고 시작하는 이유: 재사용된 자리에 남은 값이 섞이면 안 된다.
+ */
 static void irte_prepare(void *entry,
 			 u32 delivery_mode, bool dest_mode,
 			 u8 vector, u32 dest_apicid, int devid)
 {
-	union irte *irte = (union irte *) entry;
+	union irte *irte = (union irte *) entry;	/* [한국어] 32비트 항목으로 */
 
-	irte->val                = 0;
-	irte->fields.vector      = vector;
-	irte->fields.int_type    = delivery_mode;
-	irte->fields.destination = dest_apicid;
-	irte->fields.dm          = dest_mode;
-	irte->fields.valid       = 1;
+	irte->val                = 0;	/* [한국어] 재사용된 자리에 남은 값이 섞이면 안 된다 */
+	irte->fields.vector      = vector;	/* [한국어] CPU 쪽 벡터 번호 */
+	irte->fields.int_type    = delivery_mode;	/* [한국어] 고정/최저 우선순위 등 */
+	irte->fields.destination = dest_apicid;	/* [한국어] 받을 CPU */
+	irte->fields.dm          = dest_mode;	/* [한국어] 물리 id 인가 논리 id 인가 */
+	irte->fields.valid       = 1;	/* [한국어] 이 값이 서야 인터럽트가 통과한다 */
 }
 
+/*
+ * [한국어]
+ * irte_ga_prepare - 128비트 재매핑 항목을 채운다
+ *
+ * @entry: 채울 항목.
+ * @delivery_mode: 전달 방식.
+ * @dest_mode: 목적지 해석 방식.
+ * @vector: 벡터 번호.
+ * @dest_apicid: 받을 CPU 의 APIC id.
+ * @devid: 대상 장치(쓰지 않는다).
+ *
+ * 하는 일은 32비트 형식과 같지만 APIC id 가 둘로 쪼개져 들어간다. x2APIC
+ * 의 32비트 id 를 담으려면 자리가 모자라 상·하위로 나눠 실었다.
+ *
+ * 이 형식이 있는 이유는 게스트 전달이다. 남는 절반에 게스트 vCPU 정보를
+ * 담아 두면, 하드웨어가 하이퍼바이저를 거치지 않고 게스트에 인터럽트를
+ * 직접 넣을 수 있다.
+ */
 static void irte_ga_prepare(void *entry,
 			    u32 delivery_mode, bool dest_mode,
 			    u8 vector, u32 dest_apicid, int devid)
 {
-	struct irte_ga *irte = (struct irte_ga *) entry;
+	struct irte_ga *irte = (struct irte_ga *) entry;	/* [한국어] 128비트 항목으로 */
 
-	irte->lo.val                      = 0;
-	irte->hi.val                      = 0;
-	irte->lo.fields_remap.int_type    = delivery_mode;
-	irte->lo.fields_remap.dm          = dest_mode;
-	irte->hi.fields.vector            = vector;
-	irte->lo.fields_remap.destination = APICID_TO_IRTE_DEST_LO(dest_apicid);
-	irte->hi.fields.destination       = APICID_TO_IRTE_DEST_HI(dest_apicid);
-	irte->lo.fields_remap.valid       = 1;
+	irte->lo.val                      = 0;	/* [한국어] 하위 절반을 지우고 */
+	irte->hi.val                      = 0;	/* [한국어] 상위 절반도 */
+	irte->lo.fields_remap.int_type    = delivery_mode;	/* [한국어] 전달 방식 */
+	irte->lo.fields_remap.dm          = dest_mode;	/* [한국어] 목적지 해석 방식 */
+	irte->hi.fields.vector            = vector;	/* [한국어] 벡터 번호 */
+	irte->lo.fields_remap.destination = APICID_TO_IRTE_DEST_LO(dest_apicid);	/* [한국어] x2APIC 의 32비트 id 를 담으려 쪼갠다 */
+	irte->hi.fields.destination       = APICID_TO_IRTE_DEST_HI(dest_apicid);	/* [한국어] 나머지 상위 비트 */
+	irte->lo.fields_remap.valid       = 1;	/* [한국어] 유효 표시 */
 }
 
+/*
+ * [한국어]
+ * irte_activate - 32비트 항목을 유효로 바꾼다
+ *
+ * @iommu: 담당 유닛.
+ * @entry: 대상 항목의 사본.
+ * @devid: 대상 장치.
+ * @index: 항목 색인.
+ *
+ * 인터럽트를 실제로 쓰기 시작할 때 불린다. 유효 비트가 서기 전까지 그
+ * 인터럽트는 하드웨어에서 차단된다.
+ */
 static void irte_activate(struct amd_iommu *iommu, void *entry, u16 devid, u16 index)
 {
-	union irte *irte = (union irte *) entry;
+	union irte *irte = (union irte *) entry;	/* [한국어] 32비트 항목으로 */
 
-	irte->fields.valid = 1;
-	modify_irte(iommu, devid, index, irte);
+	irte->fields.valid = 1;	/* [한국어] 이 비트가 서기 전까지 인터럽트는 차단된다 */
+	modify_irte(iommu, devid, index, irte);	/* [한국어] 표에 반영하고 캐시를 지운다 */
 }
 
+/*
+ * [한국어]
+ * irte_ga_activate - 128비트 항목을 유효로 바꾼다
+ *
+ * @iommu: 담당 유닛.
+ * @entry: 대상 항목의 사본.
+ * @devid: 대상 장치.
+ * @index: 항목 색인.
+ */
 static void irte_ga_activate(struct amd_iommu *iommu, void *entry, u16 devid, u16 index)
 {
-	struct irte_ga *irte = (struct irte_ga *) entry;
+	struct irte_ga *irte = (struct irte_ga *) entry;	/* [한국어] 128비트 항목으로 */
 
-	irte->lo.fields_remap.valid = 1;
-	modify_irte_ga(iommu, devid, index, irte);
+	irte->lo.fields_remap.valid = 1;	/* [한국어] 유효 표시 */
+	modify_irte_ga(iommu, devid, index, irte);	/* [한국어] 한 번에 써 넣고 캐시를 지운다 */
 }
 
+/*
+ * [한국어]
+ * irte_deactivate - 32비트 항목을 무효로 만든다
+ *
+ * @iommu: 담당 유닛.
+ * @entry: 대상 항목의 사본.
+ * @devid: 대상 장치.
+ * @index: 항목 색인.
+ *
+ * 자리를 반납하기 전이나 인터럽트를 잠시 막을 때 쓴다. 무효 항목으로 오는
+ * 인터럽트는 하드웨어가 버리고 오류로 기록한다.
+ */
 static void irte_deactivate(struct amd_iommu *iommu, void *entry, u16 devid, u16 index)
 {
-	union irte *irte = (union irte *) entry;
+	union irte *irte = (union irte *) entry;	/* [한국어] 32비트 항목으로 */
 
-	irte->fields.valid = 0;
-	modify_irte(iommu, devid, index, irte);
+	irte->fields.valid = 0;	/* [한국어] 이후 오는 인터럽트는 버려지고 오류로 기록된다 */
+	modify_irte(iommu, devid, index, irte);	/* [한국어] 표에 반영 */
 }
 
+/*
+ * [한국어]
+ * irte_ga_deactivate - 128비트 항목을 무효로 만든다
+ *
+ * @iommu: 담당 유닛.
+ * @entry: 대상 항목의 사본.
+ * @devid: 대상 장치.
+ * @index: 항목 색인.
+ */
 static void irte_ga_deactivate(struct amd_iommu *iommu, void *entry, u16 devid, u16 index)
 {
-	struct irte_ga *irte = (struct irte_ga *) entry;
+	struct irte_ga *irte = (struct irte_ga *) entry;	/* [한국어] 128비트 항목으로 */
 
-	irte->lo.fields_remap.valid = 0;
-	modify_irte_ga(iommu, devid, index, irte);
+	irte->lo.fields_remap.valid = 0;	/* [한국어] 차단 */
+	modify_irte_ga(iommu, devid, index, irte);	/* [한국어] 표에 반영 */
 }
 
+/*
+ * [한국어]
+ * irte_set_affinity - 인터럽트를 받을 CPU 를 바꾼다
+ *
+ * @iommu: 담당 유닛.
+ * @entry: 대상 항목의 사본.
+ * @devid: 대상 장치.
+ * @index: 항목 색인.
+ * @vector: 새 벡터 번호.
+ * @dest_apicid: 새 목적지 CPU.
+ *
+ * 재매핑이 있으면 친화도 변경이 훨씬 안전해진다. 장치의 MSI 레지스터를
+ * 건드릴 필요 없이 이 항목만 바꾸면 되기 때문이다 — 장치 쪽 갱신은
+ * 진행 중인 인터럽트와 경쟁해 놓칠 수 있다.
+ */
 static void irte_set_affinity(struct amd_iommu *iommu, void *entry, u16 devid, u16 index,
 			      u8 vector, u32 dest_apicid)
 {
-	union irte *irte = (union irte *) entry;
+	union irte *irte = (union irte *) entry;	/* [한국어] 32비트 항목으로 */
 
-	irte->fields.vector = vector;
-	irte->fields.destination = dest_apicid;
-	modify_irte(iommu, devid, index, irte);
+	irte->fields.vector = vector;	/* [한국어] 새 벡터 */
+	irte->fields.destination = dest_apicid;	/* [한국어] 새 목적지 CPU */
+	modify_irte(iommu, devid, index, irte);	/* [한국어] 장치 레지스터를 건드리지 않아 경쟁이 없다 */
 }
 
+/*
+ * [한국어]
+ * irte_ga_set_affinity - 128비트 항목의 목적지를 바꾼다
+ *
+ * @iommu: 담당 유닛.
+ * @entry: 대상 항목의 사본.
+ * @devid: 대상 장치.
+ * @index: 항목 색인.
+ * @vector: 새 벡터.
+ * @dest_apicid: 새 목적지 CPU.
+ *
+ * 게스트 모드일 때는 아무것도 하지 않는 것이 핵심이다. 그 항목의 목적지는
+ * 호스트 CPU 가 아니라 게스트 vCPU 이고, 그 값은 KVM 이 관리한다. 호스트의
+ * 친화도 요청으로 덮어쓰면 게스트 인터럽트가 사라진다.
+ */
 static void irte_ga_set_affinity(struct amd_iommu *iommu, void *entry, u16 devid, u16 index,
 				 u8 vector, u32 dest_apicid)
 {
-	struct irte_ga *irte = (struct irte_ga *) entry;
+	struct irte_ga *irte = (struct irte_ga *) entry;	/* [한국어] 128비트 항목으로 */
 
-	if (!irte->lo.fields_remap.guest_mode) {
-		irte->hi.fields.vector = vector;
-		irte->lo.fields_remap.destination =
-					APICID_TO_IRTE_DEST_LO(dest_apicid);
-		irte->hi.fields.destination =
-					APICID_TO_IRTE_DEST_HI(dest_apicid);
-		modify_irte_ga(iommu, devid, index, irte);
+	if (!irte->lo.fields_remap.guest_mode) {	/* [한국어] 게스트 전달 중이면 목적지는 KVM 이 관리한다 */
+		irte->hi.fields.vector = vector;	/* [한국어] 새 벡터 */
+		irte->lo.fields_remap.destination =	/* [한국어] 목적지 하위 */
+					APICID_TO_IRTE_DEST_LO(dest_apicid);	/* [한국어] x2APIC id 를 쪼개 */
+		irte->hi.fields.destination =	/* [한국어] 목적지 상위 */
+					APICID_TO_IRTE_DEST_HI(dest_apicid);	/* [한국어] 두 자리에 나눠 넣는다 */
+		modify_irte_ga(iommu, devid, index, irte);	/* [한국어] 표에 반영 — 게스트 모드면 덮어쓰지 않는다 */
 	}
 }
 
 #define IRTE_ALLOCATED (~1U)
+/*
+ * [한국어]
+ * irte_set_allocated - 32비트 항목 자리를 "사용 중"으로 표시한다
+ *
+ * @table: 대상 표.
+ * @index: 표시할 자리.
+ *
+ * 별도의 비트맵을 두지 않고 항목 자체에 표시를 남긴다. 유효 비트는 꺼진
+ * 채로 0 이 아닌 값을 넣어 두는 방식이라, 스캔은 값이 0 인지만 보면 된다.
+ */
 static void irte_set_allocated(struct irq_remap_table *table, int index)
 {
-	table->table[index] = IRTE_ALLOCATED;
+	table->table[index] = IRTE_ALLOCATED;	/* [한국어] 유효 비트는 꺼진 채로 0 이 아닌 값 — 스캔은 0 인지만 본다 */
 }
 
+/*
+ * [한국어]
+ * irte_ga_set_allocated - 128비트 항목 자리를 "사용 중"으로 표시한다
+ *
+ * @table: 대상 표.
+ * @index: 표시할 자리.
+ *
+ * 항목을 지운 뒤 벡터에 0xff 를 남긴다. 이 형식에서는 벡터가 0 인지로
+ * 빈자리를 판별하기 때문이다 — 유효한 벡터로는 쓰이지 않는 값을 골랐다.
+ */
 static void irte_ga_set_allocated(struct irq_remap_table *table, int index)
 {
-	struct irte_ga *ptr = (struct irte_ga *)table->table;
-	struct irte_ga *irte = &ptr[index];
+	struct irte_ga *ptr = (struct irte_ga *)table->table;	/* [한국어] 128비트 항목 배열로 */
+	struct irte_ga *irte = &ptr[index];	/* [한국어] 표시할 자리 */
 
-	memset(&irte->lo.val, 0, sizeof(u64));
-	memset(&irte->hi.val, 0, sizeof(u64));
-	irte->hi.fields.vector = 0xff;
+	memset(&irte->lo.val, 0, sizeof(u64));	/* [한국어] 하위 절반을 지우고 */
+	memset(&irte->hi.val, 0, sizeof(u64));	/* [한국어] 상위 절반도 */
+	irte->hi.fields.vector = 0xff;	/* [한국어] 이 형식은 벡터가 0 인지로 빈자리를 판별한다 */
 }
 
 static bool irte_is_allocated(struct irq_remap_table *table, int index)
