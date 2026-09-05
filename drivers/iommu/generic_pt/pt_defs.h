@@ -8,32 +8,81 @@
  *  fmt_XX.h
  *  pt_common.h
  */
-#ifndef __GENERIC_PT_DEFS_H
-#define __GENERIC_PT_DEFS_H
+/*
+ * [한국어 설명] 형식 헤더보다 먼저 필요한 공통 정의 (pt_defs.h)
+ *
+ * === 파일의 역할 ===
+ * generic_pt 의 어휘를 정하는 파일이다. 순회 상태(struct pt_state), 범위
+ * (struct pt_range), 항목의 종류(enum pt_entry_type), 기능 비트 질의,
+ * 그리고 형식이 쓸 산술 매크로가 여기 있다.
+ *
+ * 원 주석이 밝히듯 포함 순서가 정해져 있다: pt_defs.h → 형식 헤더 →
+ * pt_common.h. 형식 헤더가 컴파일되려면 여기 있는 것들이 먼저 있어야 하고,
+ * pt_common.h 는 형식 헤더가 정의한 접근자를 전제로 한다.
+ *
+ * 파일 중간의 "Generic Page Table Language" 문서 블록이 이 계층 전체의
+ * 용어집이다. VA/OA, leaf, level, item 과 entry 의 구분, contig_count,
+ * lg2 표기 — 이 낱말들이 generic_pt 전역에서 같은 뜻으로 쓰인다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * fmt/iommu_<형식>.c → iommu_template.h → defs_<형식>.h → [이 파일]
+ *   → <형식>.h → pt_common.h → iommu_pt.h → IOMMU 드라이버
+ *
+ * 실행 컨텍스트: 전부 인라인이다. 여기 있는 함수는 형식이 컴파일 시점에
+ * 고정되므로 조건문 대부분이 상수로 접혀 사라진다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 위: 모든 형식 헤더와 pt_common.h, pt_iter.h, iommu_pt.h.
+ * 아래: <linux/generic_pt/common.h>(struct pt_common, 기능 비트 번호),
+ *       pt_log2.h(산술), <linux/atomic.h>(항목 설치의 cmpxchg).
+ *
+ * 데이터 흐름: 드라이버가 준 VA 범위가 struct pt_range 로 들어오고,
+ * 순회 중 각 단계의 위치가 struct pt_state 에 담긴다. 그 둘이 이 계층의
+ * 모든 함수 사이를 오간다.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * struct pt_range: 한 번의 연산이 다룰 VA 범위와 최상위 표의 위치.
+ * struct pt_state: 한 단계에서의 현재 위치 — xa_state 와 같은 발상이다.
+ * enum pt_entry_type: 항목이 비었는가, 아래 표를 가리키는가, 주소를 내는가.
+ * pt_table_install32/64: 새 표 포인터를 원자적으로 꽂는다. 경합에서 지면
+ *   거짓을 돌려주고, 진 쪽이 자기 표를 버리고 다시 읽는다.
+ * pt_feature / pts_feature: 이 형식·이 인스턴스에서 기능이 켜져 있는가.
+ * fvalog2_*: 지수가 주소 폭과 같아지는 극단(전 주소 공간)에서도 답이
+ *   정의되게 만든 산술. 보통 버전은 그 지점에서 시프트가 미정의가 된다.
+ * pt_top_set / pt_top_get_level: 최상위 표 주소와 단계 수를 한 워드에
+ *   함께 담아 원자적으로 바꾼다.
+ */
+#ifndef __GENERIC_PT_DEFS_H	/* [한국어] 중복 포함 방지 */
+#define __GENERIC_PT_DEFS_H	/* [한국어] 같은 이름으로 표시 */
 
-#include <linux/generic_pt/common.h>
+#include <linux/generic_pt/common.h>	/* [한국어] struct pt_common 과 기능 비트 번호 */
 
-#include <linux/types.h>
-#include <linux/atomic.h>
-#include <linux/bits.h>
-#include <linux/limits.h>
-#include <linux/bug.h>
-#include <linux/kconfig.h>
-#include "pt_log2.h"
+#include <linux/types.h>	/* [한국어] 고정 폭 정수 */
+#include <linux/atomic.h>	/* [한국어] 표 포인터를 원자적으로 꽂는 cmpxchg */
+#include <linux/bits.h>	/* [한국어] BIT() 매크로 */
+#include <linux/limits.h>	/* [한국어] U32_MAX/U64_MAX — 주소 한계 계산 */
+#include <linux/bug.h>	/* [한국어] WARN_ON */
+#include <linux/kconfig.h>	/* [한국어] IS_ENABLED — 설정을 상수 조건으로 */
+#include "pt_log2.h"	/* [한국어] 지수 기반 산술 */
 
 /* Header self-compile default defines */
-#ifndef pt_write_attrs
-typedef u64 pt_vaddr_t;
-typedef u64 pt_oaddr_t;
+#ifndef pt_write_attrs	/* [한국어] (원 주석: 헤더 단독 컴파일용 기본값) 형식 없이 이 헤더만 컴파일할 때 */
+typedef u64 pt_vaddr_t;	/* [한국어] 형식이 정하지 않았으면 64비트로 가정한다 */
+typedef u64 pt_oaddr_t;	/* [한국어] 출력 주소도 마찬가지 */
 #endif
 
-struct pt_table_p;
+struct pt_table_p;	/* [한국어] 표 메모리를 가리키는 불투명 타입 — 형식만 내용을 안다 */
 
+/*
+ * [한국어] 이 형식이 다루는 주소의 한계값들.
+ * 주소 타입이 32비트인지 64비트인지에 따라 갈리며, sizeof 는 컴파일 시
+ * 상수라 실제 코드에는 한쪽만 남는다.
+ */
 enum {
-	PT_VADDR_MAX = sizeof(pt_vaddr_t) == 8 ? U64_MAX : U32_MAX,
-	PT_VADDR_MAX_LG2 = sizeof(pt_vaddr_t) == 8 ? 64 : 32,
-	PT_OADDR_MAX = sizeof(pt_oaddr_t) == 8 ? U64_MAX : U32_MAX,
-	PT_OADDR_MAX_LG2 = sizeof(pt_oaddr_t) == 8 ? 64 : 32,
+	PT_VADDR_MAX = sizeof(pt_vaddr_t) == 8 ? U64_MAX : U32_MAX,	/* [한국어] 입력 주소의 최대값 */
+	PT_VADDR_MAX_LG2 = sizeof(pt_vaddr_t) == 8 ? 64 : 32,	/* [한국어] 그 폭 — 크기 자체는 담을 수 없어 지수로 든다 */
+	PT_OADDR_MAX = sizeof(pt_oaddr_t) == 8 ? U64_MAX : U32_MAX,	/* [한국어] 출력 주소의 최대값 */
+	PT_OADDR_MAX_LG2 = sizeof(pt_oaddr_t) == 8 ? 64 : 32,	/* [한국어] 그 폭 */
 };
 
 /*
@@ -41,8 +90,8 @@ enum {
  * code gen. Supported features are just a reflection of what the current set of
  * kernel users want to use.
  */
-#ifndef PT_SUPPORTED_FEATURES
-#define PT_SUPPORTED_FEATURES 0
+#ifndef PT_SUPPORTED_FEATURES	/* [한국어] (원 주석: 형식마다 기능을 켜고 꺼 코드 생성을 최적화한다) */
+#define PT_SUPPORTED_FEATURES 0	/* [한국어] 정하지 않았으면 선택 기능이 하나도 없다 */
 #endif
 
 /*
@@ -50,24 +99,24 @@ enum {
  * kunit to test the full matrix. SIGN_EXTEND can't co-exist with DYNAMIC_TOP or
  * FULL_VA. DMA_INCOHERENT requires a SW bit that not all formats have
  */
-#if IS_ENABLED(CONFIG_DEBUG_GENERIC_PT)
+#if IS_ENABLED(CONFIG_DEBUG_GENERIC_PT)	/* [한국어] (원 주석: 디버그에서는 모든 형식을 모든 기능으로 컴파일해 kunit 이 전 조합을 시험한다) */
 enum {
-	PT_ORIG_SUPPORTED_FEATURES = PT_SUPPORTED_FEATURES,
-	PT_DEBUG_SUPPORTED_FEATURES =
-		UINT_MAX &
-		~((PT_ORIG_SUPPORTED_FEATURES & BIT(PT_FEAT_DMA_INCOHERENT) ?
+	PT_ORIG_SUPPORTED_FEATURES = PT_SUPPORTED_FEATURES,	/* [한국어] 원래 형식이 허용한 집합을 남겨 둔다 */
+	PT_DEBUG_SUPPORTED_FEATURES =	/* [한국어] 시험용으로 넓힌 집합 */
+		UINT_MAX &	/* [한국어] 일단 전부 켜고 */
+		~((PT_ORIG_SUPPORTED_FEATURES & BIT(PT_FEAT_DMA_INCOHERENT) ?	/* [한국어] 원래 없던 DMA_INCOHERENT 는 뺀다 */
 			   0 :
-			   BIT(PT_FEAT_DMA_INCOHERENT))) &
-		~((PT_ORIG_SUPPORTED_FEATURES & BIT(PT_FEAT_SIGN_EXTEND)) ?
-			  BIT(PT_FEAT_DYNAMIC_TOP) | BIT(PT_FEAT_FULL_VA) :
-			  BIT(PT_FEAT_SIGN_EXTEND)),
+			   BIT(PT_FEAT_DMA_INCOHERENT))) &	/* [한국어] 그 기능은 형식마다 소프트웨어 비트가 필요해 아무 데나 켤 수 없다 */
+		~((PT_ORIG_SUPPORTED_FEATURES & BIT(PT_FEAT_SIGN_EXTEND)) ?	/* [한국어] 부호 확장을 쓰는 형식이면 */
+			  BIT(PT_FEAT_DYNAMIC_TOP) | BIT(PT_FEAT_FULL_VA) :	/* [한국어] 그와 공존할 수 없는 둘을 빼고 */
+			  BIT(PT_FEAT_SIGN_EXTEND)),	/* [한국어] 부호 확장과 공존할 수 없는 조합을 걸러낸 결과 */
 };
-#undef PT_SUPPORTED_FEATURES
-#define PT_SUPPORTED_FEATURES PT_DEBUG_SUPPORTED_FEATURES
+#undef PT_SUPPORTED_FEATURES	/* [한국어] 원래 정의를 지우고 */
+#define PT_SUPPORTED_FEATURES PT_DEBUG_SUPPORTED_FEATURES	/* [한국어] 넓힌 집합으로 갈아 끼운다 */
 #endif
 
-#ifndef PT_FORCE_ENABLED_FEATURES
-#define PT_FORCE_ENABLED_FEATURES 0
+#ifndef PT_FORCE_ENABLED_FEATURES	/* [한국어] 강제 기능을 정하지 않은 형식이면 */
+#define PT_FORCE_ENABLED_FEATURES 0	/* [한국어] 늘 켜지는 것이 없다 */
 #endif
 
 /**
@@ -122,39 +171,130 @@ enum {
  */
 
 /* Returned by pt_load_entry() and for_each_pt_level_entry() */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * 항목 하나를 읽었을 때 나올 수 있는 세 가지.
+ * 순회 코드는 이 값으로 다음 행동을 정한다 — 비었으면 만들거나 건너뛰고,
+ * 표면 한 단계 내려가고, 주소면 거기서 멈춘다.
+ */
 enum pt_entry_type {
-	PT_ENTRY_EMPTY,
+	PT_ENTRY_EMPTY,	/* [한국어] 비어 있다 — 매핑이 없다 */
 	/* Entry is valid and points to a lower table level */
-	PT_ENTRY_TABLE,
+	PT_ENTRY_TABLE,	/* [한국어] (원 주석: 유효하며 아래 단계 표를 가리킨다) */
 	/* Entry is valid and returns an output address */
-	PT_ENTRY_OA,
+	PT_ENTRY_OA,	/* [한국어] (원 주석: 유효하며 출력 주소를 낸다) 여기서 순회가 끝난다 */
 };
 
+/*
+ * [한국어] 한 번의 연산이 다룰 VA 범위와 그 출발점.
+ * map/unmap/iova_to_phys 같은 모든 진입점이 먼저 이 구조체를 만들고,
+ * 순회 함수들이 그것을 들고 다닌다.
+ */
 struct pt_range {
 	struct pt_common *common;
+	/* [한국어] 이 범위가 속한 페이지 테이블 인스턴스.
+	 * 설정자: pt_make_range() 계열이 도메인에서 꺼내 채운다.
+	 * 읽는 자: 기능 질의(pts_feature)와 최상위 표 조회가 여기서 출발한다.
+	 * 값 범위: 유효한 포인터. 범위가 사는 동안 바뀌지 않는다.
+	 * 동기화: 구조체 자체는 호출 스택에 있어 공유되지 않는다. 가리키는
+	 *   pt_common 은 드라이버의 락이 지킨다. */
 	struct pt_table_p *top_table;
+	/* [한국어] 순회를 시작할 최상위 표의 주소.
+	 * 설정자: 범위를 만들 때 common->top_of_table 에서 꺼내 온다.
+	 * 읽는 자: 순회의 첫 단계.
+	 * 값 범위: 표 메모리의 커널 가상 주소.
+	 * 동기화: 한 번 읽어 고정해 두므로, 순회 도중 최상위가 바뀌어도 이
+	 *   범위는 일관된 표를 본다 — DYNAMIC_TOP 형식에서 중요하다. */
 	pt_vaddr_t va;
+	/* [한국어] 다룰 범위의 시작 주소.
+	 * 설정자: 진입점이 사용자 인자에서 채운다. 순회가 진행되며 앞으로 간다.
+	 * 읽는 자: 각 단계의 색인 계산.
+	 * 값 범위: 0 이상 last_va 이하.
+	 * 동기화: 호출 스택 값. */
 	pt_vaddr_t last_va;
+	/* [한국어] 범위의 마지막 주소(포함).
+	 * 설정자: 진입점이 시작+길이-1 로 채운다.
+	 * 읽는 자: 순회 종료 판정.
+	 * 값 범위: va 이상. 끝을 배타적으로 두지 않는 이유는 전 주소 공간을
+	 *   표현할 때 끝값이 넘치기 때문이다.
+	 * 동기화: 호출 스택 값. */
 	u8 top_level;
+	/* [한국어] 최상위 표의 단계 번호(0 이 가장 아래).
+	 * 설정자: top_table 과 함께 한 워드에서 꺼내 온다.
+	 * 읽는 자: 순회 시작 단계.
+	 * 값 범위: 0 부터 형식이 허용하는 최대 단계까지.
+	 * 동기화: top_table 과 같은 읽기에서 나오므로 서로 어긋나지 않는다. */
 	u8 max_vasz_lg2;
+	/* [한국어] 이 범위가 다룰 수 있는 주소 폭의 지수.
+	 * 설정자: 최상위 단계와 형식의 단계별 비트 수에서 계산한다.
+	 * 읽는 자: 인자 검증 — 범위가 표의 사정거리를 넘는지 본다.
+	 * 값 범위: 형식에 따라 32 또는 최대 64.
+	 * 동기화: 호출 스택 값. */
 };
 
 /*
  * Similar to xa_state, this records information about an in-progress parse at a
  * single level.
  */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * 순회 중 "지금 어느 단계의 어느 항목을 보고 있는가"를 담는다.
+ * 원 주석이 xa_state 에 빗대는 이유가 이것이다 — 함수마다 위치를 다시
+ * 계산하는 대신 상태를 넘겨 가며 진행한다.
+ */
 struct pt_state {
 	struct pt_range *range;
+	/* [한국어] 이 순회가 다루는 범위.
+	 * 설정자: 상태를 만들 때 연결한다.
+	 * 읽는 자: 현재 VA 와 종료 조건을 여기서 읽는다.
+	 * 값 범위: 유효한 포인터.
+	 * 동기화: 둘 다 호출 스택에 있다. */
 	struct pt_table_p *table;
+	/* [한국어] 지금 보고 있는 단계의 표.
+	 * 설정자: 한 단계 내려갈 때 아래 표 주소로 바뀐다.
+	 * 읽는 자: 항목을 읽고 쓰는 형식 접근자.
+	 * 값 범위: 표 메모리의 커널 가상 주소.
+	 * 동기화: 항목 갱신은 cmpxchg 로, 표 자체의 해제는 드라이버 락으로. */
 	struct pt_table_p *table_lower;
+	/* [한국어] 방금 내려온 아래 단계의 표.
+	 * 설정자: 내려갈 때 기록해 두었다가 올라올 때 쓴다.
+	 * 읽는 자: 빈 표를 되돌려 줄 때(unmap 후 정리) 그 주소가 필요하다.
+	 * 값 범위: 표 주소 또는 NULL.
+	 * 동기화: 호출 스택 값. */
 	u64 entry;
+	/* [한국어] 현재 항목의 원본 값.
+	 * 설정자: pt_load_entry() 가 한 번 읽어 담는다.
+	 * 읽는 자: 형식 접근자들이 이 값에서 주소와 속성을 뽑는다.
+	 * 값 범위: 형식이 정하는 비트 배치. 폭이 32비트인 형식도 여기에 담긴다.
+	 * 동기화: 한 번 읽어 두는 이유가 동기화다 — 여러 번 읽으면 그사이
+	 *   다른 CPU 가 바꾼 값을 섞어 쓰게 된다. */
 	enum pt_entry_type type;
+	/* [한국어] 그 항목이 비었는지, 표인지, 주소인지.
+	 * 설정자: pt_load_entry() 가 entry 와 함께 정한다.
+	 * 읽는 자: 순회 코드의 분기.
+	 * 값 범위: PT_ENTRY_EMPTY/TABLE/OA.
+	 * 동기화: entry 와 같은 읽기에서 나온다. */
 	unsigned short index;
+	/* [한국어] 현재 표에서의 위치.
+	 * 설정자: VA 의 해당 비트 조각에서 계산한다.
+	 * 읽는 자: 항목 접근과 다음 항목으로의 이동.
+	 * 값 범위: 0 부터 표의 항목 수-1.
+	 * 동기화: 호출 스택 값. */
 	unsigned short end_index;
+	/* [한국어] 이 표에서 처리할 마지막 다음 위치.
+	 * 설정자: 범위의 끝 주소가 이 표의 어디까지 걸치는지로 정해진다.
+	 * 읽는 자: 한 표 안의 순회 종료 판정.
+	 * 값 범위: index 이상, 표의 항목 수 이하.
+	 * 동기화: 호출 스택 값. */
 	u8 level;
+	/* [한국어] 지금 있는 단계 번호.
+	 * 설정자: 내려가면 줄고 올라오면 는다.
+	 * 읽는 자: 단계별 항목 크기와 접근자 선택.
+	 * 값 범위: 0 부터 range->top_level 까지.
+	 * 동기화: 호출 스택 값. */
 };
 
-#define pt_cur_table(pts, type) ((type *)((pts)->table))
+#define pt_cur_table(pts, type) ((type *)((pts)->table))	/* [한국어] 불투명 표 포인터를 형식이 아는 항목 타입으로 본다 */
 
 /*
  * Try to install a new table pointer. The locking methodology requires this to
@@ -162,171 +302,361 @@ struct pt_state {
  * threads will fail the atomic and return false. They should free any memory
  * and reparse the table level again.
  */
-#if !IS_ENABLED(CONFIG_GENERIC_ATOMIC64)
+#if !IS_ENABLED(CONFIG_GENERIC_ATOMIC64)	/* [한국어] 64비트 원자 연산을 하드웨어가 지원할 때만 */
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * pt_table_install64 - 새 표 포인터를 64비트 항목에 원자적으로 꽂는다
+ *
+ * @pts: 지금 보고 있는 항목의 위치와 그때 읽은 값.
+ * @table_entry: 꽂을 항목 값(아래 표의 주소와 유효 비트).
+ * @return: 성공하면 참, 다른 스레드가 먼저 꽂았으면 거짓.
+ *
+ * 이 계층의 잠금 전략이 이 함수에 압축되어 있다. 표를 만드는 데 락을 쓰지
+ * 않고, 여러 스레드가 각자 표를 만들어 경쟁적으로 꽂는다. 진 쪽은 거짓을
+ * 받고 자기 표를 버린 뒤 그 단계를 다시 읽는다 — 원 주석이 그 계약을
+ * 명시한다.
+ *
+ * 비교값이 pts->entry 인 것이 요점이다. "내가 읽었을 때 비어 있던 그
+ * 상태"에서만 꽂으므로, 그사이 누가 무엇을 넣었으면 실패한다.
+ *
+ * release 순서가 필요한 이유: 새 표는 0 으로 채워져 있어야 하는데, 그
+ * 0 채움이 하드웨어에게 보이기 전에 포인터가 먼저 보이면 하드웨어가
+ * 쓰레기 항목을 읽는다.
+ *
+ * !SMP 에서 dma_wmb 를 따로 넣는 이유: 그 구성에서 release 는 컴파일러
+ * 장벽으로 접히지만, 하드웨어는 여전히 자기 순서로 읽는다.
+ */
 static inline bool pt_table_install64(struct pt_state *pts, u64 table_entry)
 {
-	u64 *entryp = pt_cur_table(pts, u64) + pts->index;
-	u64 old_entry = pts->entry;
-	bool ret;
+	u64 *entryp = pt_cur_table(pts, u64) + pts->index;	/* [한국어] 고칠 항목의 실제 주소 */
+	u64 old_entry = pts->entry;	/* [한국어] 내가 읽었을 때의 값 — 그 상태에서만 꽂는다 */
+	bool ret;	/* [한국어] 성공 여부 */
 
 	/*
 	 * Ensure the zero'd table content itself is visible before its PTE can
 	 * be. release is a NOP on !SMP, but the HW is still doing an acquire.
 	 */
-	if (!IS_ENABLED(CONFIG_SMP))
-		dma_wmb();
-	ret = try_cmpxchg64_release(entryp, &old_entry, table_entry);
-	if (ret)
-		pts->entry = table_entry;
-	return ret;
+	if (!IS_ENABLED(CONFIG_SMP))	/* [한국어] (원 주석: release 는 !SMP 에서 NOP 이지만 하드웨어는 여전히 acquire 한다) */
+		dma_wmb();	/* [한국어] 0 채움이 하드웨어에 보인 뒤에야 포인터가 보이도록 */
+	ret = try_cmpxchg64_release(entryp, &old_entry, table_entry);	/* [한국어] 경합에서 지면 거짓 — 진 쪽이 자기 표를 버린다 */
+	if (ret)	/* [한국어] 내가 꽂았으면 */
+		pts->entry = table_entry;	/* [한국어] 순회 상태도 새 값으로 맞춘다 */
+	return ret;	/* [한국어] 성패 */
 }
 #endif
 
+/*
+ * [한국어]
+ * pt_table_install32 - 새 표 포인터를 32비트 항목에 원자적으로 꽂는다
+ *
+ * @pts: 지금 보고 있는 항목의 위치와 그때 읽은 값.
+ * @table_entry: 꽂을 항목 값.
+ * @return: 성공하면 참, 경합에서 지면 거짓.
+ *
+ * 64비트판과 논리가 같다. 항목이 32비트인 형식(RISC-V Sv32 등)이 쓴다.
+ * 이쪽은 어느 아키텍처에서나 원자 연산이 있어 CONFIG_GENERIC_ATOMIC64
+ * 조건이 붙지 않는다.
+ */
 static inline bool pt_table_install32(struct pt_state *pts, u32 table_entry)
 {
-	u32 *entryp = pt_cur_table(pts, u32) + pts->index;
-	u32 old_entry = pts->entry;
-	bool ret;
+	u32 *entryp = pt_cur_table(pts, u32) + pts->index;	/* [한국어] 고칠 항목의 실제 주소 */
+	u32 old_entry = pts->entry;	/* [한국어] 읽었을 때의 값 */
+	bool ret;	/* [한국어] 성공 여부 */
 
 	/*
 	 * Ensure the zero'd table content itself is visible before its PTE can
 	 * be. release is a NOP on !SMP, but the HW is still doing an acquire.
 	 */
-	if (!IS_ENABLED(CONFIG_SMP))
-		dma_wmb();
-	ret = try_cmpxchg_release(entryp, &old_entry, table_entry);
-	if (ret)
-		pts->entry = table_entry;
-	return ret;
+	if (!IS_ENABLED(CONFIG_SMP))	/* [한국어] (원 주석: 같은 이유의 장벽) */
+		dma_wmb();	/* [한국어] 표 내용이 먼저 보이도록 */
+	ret = try_cmpxchg_release(entryp, &old_entry, table_entry);	/* [한국어] 32비트 원자 연산은 어디에나 있다 */
+	if (ret)	/* [한국어] 내가 꽂았으면 */
+		pts->entry = table_entry;	/* [한국어] 순회 상태를 맞춘다 */
+	return ret;	/* [한국어] 성패 */
 }
 
-#define PT_SUPPORTED_FEATURE(feature_nr) (PT_SUPPORTED_FEATURES & BIT(feature_nr))
+#define PT_SUPPORTED_FEATURE(feature_nr) (PT_SUPPORTED_FEATURES & BIT(feature_nr))	/* [한국어] 컴파일 시 상수 — 안 쓰는 기능의 코드가 통째로 사라진다 */
 
+/*
+ * [한국어]
+ * pt_feature - 이 인스턴스에서 그 기능이 켜져 있는지 답한다
+ *
+ * @common: 페이지 테이블 인스턴스.
+ * @feature_nr: 물어볼 기능 번호.
+ * @return: 켜져 있으면 참.
+ *
+ * 세 단계로 판정한다. 형식이 강제로 켜는 기능이면 무조건 참, 형식이 아예
+ * 지원하지 않으면 무조건 거짓, 그 밖에는 인스턴스가 요청했는지를 본다.
+ *
+ * 앞 두 판정이 컴파일 시 상수라는 점이 중요하다. __always_inline 과 맞물려
+ * 쓰지 않는 기능의 코드가 통째로 사라진다 — 형식마다 전용 코드를 찍어 내는
+ * 이 계층의 설계가 여기서 이득을 낸다.
+ */
 static __always_inline bool pt_feature(const struct pt_common *common,
 			      unsigned int feature_nr)
 {
-	if (PT_FORCE_ENABLED_FEATURES & BIT(feature_nr))
-		return true;
-	if (!PT_SUPPORTED_FEATURE(feature_nr))
-		return false;
-	return common->features & BIT(feature_nr);
+	if (PT_FORCE_ENABLED_FEATURES & BIT(feature_nr))	/* [한국어] 형식이 강제로 켜는 기능이면 */
+		return true;	/* [한국어] 인스턴스의 요청과 무관하게 참 */
+	if (!PT_SUPPORTED_FEATURE(feature_nr))	/* [한국어] 형식이 아예 지원하지 않으면 */
+		return false;	/* [한국어] 상수 거짓 — 그 기능의 코드가 통째로 사라진다 */
+	return common->features & BIT(feature_nr);	/* [한국어] 그 밖에는 인스턴스가 요청했는지 */
 }
 
+/*
+ * [한국어]
+ * pts_feature - 순회 상태에서 기능 여부를 묻는다
+ *
+ * @pts: 순회 상태.
+ * @feature_nr: 물어볼 기능 번호.
+ * @return: 켜져 있으면 참.
+ *
+ * 순회 중에는 pt_common 을 두 번 거쳐 가야 하므로 그 경로를 감싼 껍질이다.
+ */
 static __always_inline bool pts_feature(const struct pt_state *pts,
 			       unsigned int feature_nr)
 {
-	return pt_feature(pts->range->common, feature_nr);
+	return pt_feature(pts->range->common, feature_nr);	/* [한국어] 순회 상태에서 인스턴스까지 두 번 거친다 */
 }
 
 /*
  * PT_WARN_ON is used for invariants that the kunit should be checking can't
  * happen.
  */
-#if IS_ENABLED(CONFIG_DEBUG_GENERIC_PT)
-#define PT_WARN_ON WARN_ON
+#if IS_ENABLED(CONFIG_DEBUG_GENERIC_PT)	/* [한국어] (원 주석: kunit 이 일어날 수 없다고 확인해야 하는 불변식에 쓴다) */
+#define PT_WARN_ON WARN_ON	/* [한국어] 디버그 빌드에서는 실제로 경고한다 */
 #else
+/*
+ * [한국어]
+ * PT_WARN_ON - 디버그가 아닐 때의 빈 구현
+ *
+ * @condition: 무시된다.
+ * @return: 항상 거짓.
+ *
+ * 이 매크로가 확인하는 것은 "kunit 이 일어날 수 없다고 검증한 불변식"이라,
+ * 운영 커널에서는 검사 자체를 없앤다. 함수로 두는 이유: 인자 식이 여전히
+ * 문법 검사를 받고, 조건에 부작용이 있으면 컴파일러가 경고한다.
+ */
 static inline bool PT_WARN_ON(bool condition)
 {
-	return false;
+	return false;	/* [한국어] 운영 커널에서는 검사 자체를 없앤다 */
 }
 #endif
 
 /* These all work on the VA type */
-#define log2_to_int(a_lg2) log2_to_int_t(pt_vaddr_t, a_lg2)
-#define log2_to_max_int(a_lg2) log2_to_max_int_t(pt_vaddr_t, a_lg2)
-#define log2_div(a, b_lg2) log2_div_t(pt_vaddr_t, a, b_lg2)
-#define log2_div_eq(a, b, c_lg2) log2_div_eq_t(pt_vaddr_t, a, b, c_lg2)
-#define log2_mod(a, b_lg2) log2_mod_t(pt_vaddr_t, a, b_lg2)
-#define log2_mod_eq_max(a, b_lg2) log2_mod_eq_max_t(pt_vaddr_t, a, b_lg2)
-#define log2_set_mod(a, val, b_lg2) log2_set_mod_t(pt_vaddr_t, a, val, b_lg2)
-#define log2_set_mod_max(a, b_lg2) log2_set_mod_max_t(pt_vaddr_t, a, b_lg2)
-#define log2_mul(a, b_lg2) log2_mul_t(pt_vaddr_t, a, b_lg2)
-#define vaffs(a) ffs_t(pt_vaddr_t, a)
-#define vafls(a) fls_t(pt_vaddr_t, a)
-#define vaffz(a) ffz_t(pt_vaddr_t, a)
+#define log2_to_int(a_lg2) log2_to_int_t(pt_vaddr_t, a_lg2)	/* [한국어] (원 주석: 이 아래는 모두 VA 타입에 대해 동작한다) 타입을 고정한 별칭 */
+#define log2_to_max_int(a_lg2) log2_to_max_int_t(pt_vaddr_t, a_lg2)	/* [한국어] VA 용 하위 비트 마스크 */
+#define log2_div(a, b_lg2) log2_div_t(pt_vaddr_t, a, b_lg2)	/* [한국어] VA 용 나눗셈 */
+#define log2_div_eq(a, b, c_lg2) log2_div_eq_t(pt_vaddr_t, a, b, c_lg2)	/* [한국어] 두 VA 가 같은 블록에 있는가 */
+#define log2_mod(a, b_lg2) log2_mod_t(pt_vaddr_t, a, b_lg2)	/* [한국어] VA 용 나머지 */
+#define log2_mod_eq_max(a, b_lg2) log2_mod_eq_max_t(pt_vaddr_t, a, b_lg2)	/* [한국어] VA 가 블록의 마지막 바이트인가 */
+#define log2_set_mod(a, val, b_lg2) log2_set_mod_t(pt_vaddr_t, a, val, b_lg2)	/* [한국어] VA 의 하위 비트를 val 로 */
+#define log2_set_mod_max(a, b_lg2) log2_set_mod_max_t(pt_vaddr_t, a, b_lg2)	/* [한국어] VA 를 그 블록의 끝 주소로 */
+#define log2_mul(a, b_lg2) log2_mul_t(pt_vaddr_t, a, b_lg2)	/* [한국어] VA 용 곱셈 */
+#define vaffs(a) ffs_t(pt_vaddr_t, a)	/* [한국어] VA 의 정렬을 잰다 */
+#define vafls(a) fls_t(pt_vaddr_t, a)	/* [한국어] VA 에 필요한 비트 수 */
+#define vaffz(a) ffz_t(pt_vaddr_t, a)	/* [한국어] VA 하위의 연속된 1 의 길이 */
 
 /*
  * The full VA (fva) versions permit the lg2 value to be == PT_VADDR_MAX_LG2 and
  * generate a useful defined result. The non-fva versions will malfunction at
  * this extreme.
  */
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * fvalog2_div - 전 주소 공간에서도 안전한 나눗셈
+ *
+ * @a: 나눌 값.
+ * @b_lg2: 나눌 크기의 지수.
+ * @return: a / 2^b_lg2.
+ *
+ * 지수가 주소 폭과 같아지는 경우가 문제다. 64비트 값을 64비트 시프트하는
+ * 것은 C 에서 미정의 동작이고, 실제 x86 은 시프트 양을 63 으로 마스크해
+ * 엉뚱한 답을 낸다.
+ *
+ * 그런 경우가 생기는 이유는 FULL_VA 형식이 "주소 공간 전체"를 한 블록으로
+ * 다루기 때문이다. 그 블록의 크기가 곧 2^64 다.
+ *
+ * 그래서 그 극단만 따로 답한다: 전 공간으로 나눈 몫은 0 이다.
+ */
 static inline pt_vaddr_t fvalog2_div(pt_vaddr_t a, unsigned int b_lg2)
 {
-	if (PT_SUPPORTED_FEATURE(PT_FEAT_FULL_VA) && b_lg2 == PT_VADDR_MAX_LG2)
-		return 0;
-	return log2_div_t(pt_vaddr_t, a, b_lg2);
+	if (PT_SUPPORTED_FEATURE(PT_FEAT_FULL_VA) && b_lg2 == PT_VADDR_MAX_LG2)	/* [한국어] 전 주소 공간으로 나누는 극단 */
+		return 0;	/* [한국어] 64비트 시프트는 미정의라 답을 직접 준다 */
+	return log2_div_t(pt_vaddr_t, a, b_lg2);	/* [한국어] 그 밖에는 보통 시프트 */
 }
 
+/*
+ * [한국어]
+ * fvalog2_mod - 전 주소 공간에서도 안전한 나머지
+ *
+ * @a: 값.
+ * @b_lg2: 나눌 크기의 지수.
+ * @return: a % 2^b_lg2.
+ *
+ * 전 공간으로 나눈 나머지는 값 자체다.
+ */
 static inline pt_vaddr_t fvalog2_mod(pt_vaddr_t a, unsigned int b_lg2)
 {
-	if (PT_SUPPORTED_FEATURE(PT_FEAT_FULL_VA) && b_lg2 == PT_VADDR_MAX_LG2)
-		return a;
-	return log2_mod_t(pt_vaddr_t, a, b_lg2);
+	if (PT_SUPPORTED_FEATURE(PT_FEAT_FULL_VA) && b_lg2 == PT_VADDR_MAX_LG2)	/* [한국어] 전 공간으로 나누는 극단 */
+		return a;	/* [한국어] 나머지는 값 자체다 */
+	return log2_mod_t(pt_vaddr_t, a, b_lg2);	/* [한국어] 그 밖에는 마스크 */
 }
 
+/*
+ * [한국어]
+ * fvalog2_div_eq - 두 주소가 같은 블록에 있는지, 전 공간에서도 안전하게
+ *
+ * @a: 첫 주소.
+ * @b: 둘째 주소.
+ * @c_lg2: 블록 크기의 지수.
+ * @return: 같은 블록이면 참.
+ *
+ * 블록이 주소 공간 전체면 어떤 두 주소든 같은 블록에 있다.
+ */
 static inline bool fvalog2_div_eq(pt_vaddr_t a, pt_vaddr_t b,
 				  unsigned int c_lg2)
 {
-	if (PT_SUPPORTED_FEATURE(PT_FEAT_FULL_VA) && c_lg2 == PT_VADDR_MAX_LG2)
-		return true;
-	return log2_div_eq_t(pt_vaddr_t, a, b, c_lg2);
+	if (PT_SUPPORTED_FEATURE(PT_FEAT_FULL_VA) && c_lg2 == PT_VADDR_MAX_LG2)	/* [한국어] 블록이 주소 공간 전체면 */
+		return true;	/* [한국어] 어떤 두 주소든 같은 블록에 있다 */
+	return log2_div_eq_t(pt_vaddr_t, a, b, c_lg2);	/* [한국어] 그 밖에는 XOR 로 */
 }
 
+/*
+ * [한국어]
+ * fvalog2_set_mod - 하위 비트를 val 로, 전 공간에서도 안전하게
+ *
+ * @a: 원래 값.
+ * @val: 넣을 하위 값.
+ * @b_lg2: 하위 비트 수의 지수.
+ * @return: 상위는 a, 하위는 val.
+ *
+ * 전 공간이면 상위 비트가 하나도 없으므로 결과는 val 자체다.
+ */
 static inline pt_vaddr_t fvalog2_set_mod(pt_vaddr_t a, pt_vaddr_t val,
 					 unsigned int b_lg2)
 {
-	if (PT_SUPPORTED_FEATURE(PT_FEAT_FULL_VA) && b_lg2 == PT_VADDR_MAX_LG2)
-		return val;
-	return log2_set_mod_t(pt_vaddr_t, a, val, b_lg2);
+	if (PT_SUPPORTED_FEATURE(PT_FEAT_FULL_VA) && b_lg2 == PT_VADDR_MAX_LG2)	/* [한국어] 하위가 전부인 극단 */
+		return val;	/* [한국어] 남길 상위 비트가 없다 */
+	return log2_set_mod_t(pt_vaddr_t, a, val, b_lg2);	/* [한국어] 그 밖에는 마스크와 OR */
 }
 
+/*
+ * [한국어]
+ * fvalog2_set_mod_max - 그 블록의 끝 주소를 구한다, 전 공간에서도 안전하게
+ *
+ * @a: 블록 안의 아무 주소.
+ * @b_lg2: 블록 크기의 지수.
+ * @return: 그 블록의 마지막 주소.
+ *
+ * 전 공간의 끝은 주소 최대값이다. 순회의 종료 주소를 구할 때 쓰이며,
+ * 이 처리가 없으면 전 공간을 도는 순회가 끝나지 않는다.
+ */
 static inline pt_vaddr_t fvalog2_set_mod_max(pt_vaddr_t a, unsigned int b_lg2)
 {
-	if (PT_SUPPORTED_FEATURE(PT_FEAT_FULL_VA) && b_lg2 == PT_VADDR_MAX_LG2)
-		return PT_VADDR_MAX;
-	return log2_set_mod_max_t(pt_vaddr_t, a, b_lg2);
+	if (PT_SUPPORTED_FEATURE(PT_FEAT_FULL_VA) && b_lg2 == PT_VADDR_MAX_LG2)	/* [한국어] 블록이 주소 공간 전체면 */
+		return PT_VADDR_MAX;	/* [한국어] 그 끝은 주소 최대값이다 — 없으면 순회가 끝나지 않는다 */
+	return log2_set_mod_max_t(pt_vaddr_t, a, b_lg2);	/* [한국어] 그 밖에는 하위 비트를 모두 세운다 */
 }
 
 /* These all work on the OA type */
-#define oalog2_to_int(a_lg2) log2_to_int_t(pt_oaddr_t, a_lg2)
-#define oalog2_to_max_int(a_lg2) log2_to_max_int_t(pt_oaddr_t, a_lg2)
-#define oalog2_div(a, b_lg2) log2_div_t(pt_oaddr_t, a, b_lg2)
-#define oalog2_div_eq(a, b, c_lg2) log2_div_eq_t(pt_oaddr_t, a, b, c_lg2)
-#define oalog2_mod(a, b_lg2) log2_mod_t(pt_oaddr_t, a, b_lg2)
-#define oalog2_mod_eq_max(a, b_lg2) log2_mod_eq_max_t(pt_oaddr_t, a, b_lg2)
-#define oalog2_set_mod(a, val, b_lg2) log2_set_mod_t(pt_oaddr_t, a, val, b_lg2)
-#define oalog2_set_mod_max(a, b_lg2) log2_set_mod_max_t(pt_oaddr_t, a, b_lg2)
-#define oalog2_mul(a, b_lg2) log2_mul_t(pt_oaddr_t, a, b_lg2)
-#define oaffs(a) ffs_t(pt_oaddr_t, a)
-#define oafls(a) fls_t(pt_oaddr_t, a)
-#define oaffz(a) ffz_t(pt_oaddr_t, a)
+#define oalog2_to_int(a_lg2) log2_to_int_t(pt_oaddr_t, a_lg2)	/* [한국어] (원 주석: 이 아래는 OA 타입에 대해 동작한다) */
+#define oalog2_to_max_int(a_lg2) log2_to_max_int_t(pt_oaddr_t, a_lg2)	/* [한국어] OA 용 하위 비트 마스크 */
+#define oalog2_div(a, b_lg2) log2_div_t(pt_oaddr_t, a, b_lg2)	/* [한국어] OA 용 나눗셈 */
+#define oalog2_div_eq(a, b, c_lg2) log2_div_eq_t(pt_oaddr_t, a, b, c_lg2)	/* [한국어] 두 OA 가 같은 블록에 있는가 */
+#define oalog2_mod(a, b_lg2) log2_mod_t(pt_oaddr_t, a, b_lg2)	/* [한국어] OA 용 나머지 */
+#define oalog2_mod_eq_max(a, b_lg2) log2_mod_eq_max_t(pt_oaddr_t, a, b_lg2)	/* [한국어] OA 가 블록의 마지막인가 */
+#define oalog2_set_mod(a, val, b_lg2) log2_set_mod_t(pt_oaddr_t, a, val, b_lg2)	/* [한국어] OA 의 하위 비트를 val 로 */
+#define oalog2_set_mod_max(a, b_lg2) log2_set_mod_max_t(pt_oaddr_t, a, b_lg2)	/* [한국어] OA 를 그 블록의 끝으로 */
+#define oalog2_mul(a, b_lg2) log2_mul_t(pt_oaddr_t, a, b_lg2)	/* [한국어] OA 용 곱셈 */
+#define oaffs(a) ffs_t(pt_oaddr_t, a)	/* [한국어] OA 의 정렬을 잰다 */
+#define oafls(a) fls_t(pt_oaddr_t, a)	/* [한국어] OA 에 필요한 비트 수 */
+#define oaffz(a) ffz_t(pt_oaddr_t, a)	/* [한국어] OA 하위의 연속된 1 의 길이 */
 
+/*
+ * [한국어]
+ * _pt_top_set - 최상위 표 주소와 단계 번호를 한 워드에 합친다
+ *
+ * @table_mem: 최상위 표의 주소.
+ * @top_level: 그 단계 번호.
+ * @return: 둘을 합친 값.
+ *
+ * 표는 페이지 정렬이라 하위 비트가 늘 0 이다. 그 빈자리에 단계 번호를
+ * 넣으면 둘을 한 번의 원자적 읽기·쓰기로 다룰 수 있다.
+ *
+ * 그것이 필요한 이유가 DYNAMIC_TOP 이다. 주소 공간이 커져 단계를 하나
+ * 얹을 때 주소와 단계가 함께 바뀌어야 하는데, 따로 쓰면 그 사이를 본
+ * 다른 CPU 가 옛 주소를 새 단계로 해석한다.
+ */
 static inline uintptr_t _pt_top_set(struct pt_table_p *table_mem,
 				    unsigned int top_level)
 {
-	return top_level | (uintptr_t)table_mem;
+	return top_level | (uintptr_t)table_mem;	/* [한국어] 표는 페이지 정렬이라 하위 비트가 비어 있다 */
 }
 
+/*
+ * [한국어]
+ * pt_top_set - 최상위 표를 바꾼다
+ *
+ * @common: 페이지 테이블 인스턴스.
+ * @table_mem: 새 최상위 표.
+ * @top_level: 그 단계 번호.
+ *
+ * WRITE_ONCE 로 한 번에 쓴다 — 읽는 쪽이 찢어진 값을 보지 않게 한다.
+ */
 static inline void pt_top_set(struct pt_common *common,
 			      struct pt_table_p *table_mem,
 			      unsigned int top_level)
 {
-	WRITE_ONCE(common->top_of_table, _pt_top_set(table_mem, top_level));
+	WRITE_ONCE(common->top_of_table, _pt_top_set(table_mem, top_level));	/* [한국어] 주소와 단계를 한 번에 — 읽는 쪽이 찢어진 값을 보지 않는다 */
 }
 
+/*
+ * [한국어]
+ * pt_top_set_level - 표 없이 단계 번호만 기록한다
+ *
+ * @common: 페이지 테이블 인스턴스.
+ * @top_level: 단계 번호.
+ *
+ * 초기화 중 표를 아직 만들지 않았을 때 쓴다. 시작 단계를 먼저 정해 두면
+ * 첫 매핑이 그 단계에 맞는 표를 만든다.
+ */
 static inline void pt_top_set_level(struct pt_common *common,
 				    unsigned int top_level)
 {
-	pt_top_set(common, NULL, top_level);
+	pt_top_set(common, NULL, top_level);	/* [한국어] 표는 첫 매핑이 만든다 */
 }
 
+/*
+ * [한국어]
+ * pt_top_get_level - 현재 최상위 단계를 읽는다
+ *
+ * @common: 페이지 테이블 인스턴스.
+ * @return: 단계 번호.
+ *
+ * 합쳐 둔 워드의 하위 비트만 꺼낸다. READ_ONCE 인 이유: 다른 CPU 가 단계를
+ * 올리는 중일 수 있어 컴파일러가 값을 다시 읽거나 쪼개면 안 된다.
+ */
 static inline unsigned int pt_top_get_level(const struct pt_common *common)
 {
-	return READ_ONCE(common->top_of_table) % (1 << PT_TOP_LEVEL_BITS);
+	return READ_ONCE(common->top_of_table) % (1 << PT_TOP_LEVEL_BITS);	/* [한국어] 합쳐 둔 워드의 하위 비트만 */
 }
 
+/*
+ * [한국어]
+ * pt_check_install_leaf_args - 잎 항목 인자의 전방 선언
+ *
+ * @pts: 항목 위치.
+ * @oa: 넣을 출력 주소.
+ * @oasz_lg2: 그 항목이 덮는 크기의 지수.
+ * @return: 인자가 형식의 규칙에 맞으면 참.
+ *
+ * 정의는 형식 헤더에 있다. 여기 선언만 두는 이유는 포함 순서다 —
+ * pt_common.h 의 인라인 코드가 형식 헤더보다 먼저 이 이름을 봐야 한다.
+ */
 static inline bool pt_check_install_leaf_args(struct pt_state *pts,
 					      pt_oaddr_t oa,
 					      unsigned int oasz_lg2);
 
-#endif
+#endif	/* [한국어] 포함 방지 끝 */
