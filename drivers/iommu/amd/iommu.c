@@ -5405,223 +5405,356 @@ const struct iommu_ops amd_iommu_ops = {
 static struct irq_chip amd_ir_chip;
 static DEFINE_SPINLOCK(iommu_table_lock);
 
+/*
+ * [한국어]
+ * iommu_flush_dev_irt - 별칭마다 인터럽트 재매핑 캐시를 지우는 콜백
+ *
+ * @unused: 순회의 장치(쓰지 않는다).
+ * @devid: 그 별칭 id.
+ * @data: 담당 유닛.
+ * @return: 큐 삽입 결과.
+ *
+ * 유닛 락을 이미 들고 있는 상태에서 불리므로 락을 다시 잡지 않는
+ * __iommu_queue_command_sync 를 쓴다. 완료 대기는 호출자가 한 번만 한다.
+ */
 static int iommu_flush_dev_irt(struct pci_dev *unused, u16 devid, void *data)
 {
-	int ret;
-	struct iommu_cmd cmd;
-	struct amd_iommu *iommu = data;
+	int ret;	/* [한국어] 큐 삽입 결과 */
+	struct iommu_cmd cmd;	/* [한국어] 무효화 명령 */
+	struct amd_iommu *iommu = data;	/* [한국어] 호출자가 넘긴 유닛 */
 
-	build_inv_irt(&cmd, devid);
-	ret = __iommu_queue_command_sync(iommu, &cmd, true);
-	return ret;
+	build_inv_irt(&cmd, devid);	/* [한국어] 이 별칭의 재매핑 표 캐시를 */
+	ret = __iommu_queue_command_sync(iommu, &cmd, true);	/* [한국어] 호출자가 이미 유닛 락을 들고 있다 */
+	return ret;	/* [한국어] 성패 */
 }
 
+/*
+ * [한국어]
+ * iommu_flush_irt_and_complete - 인터럽트 표 변경을 하드웨어에 반영한다
+ *
+ * @iommu: 담당 유닛.
+ * @devid: 대상 장치.
+ *
+ * 무효화 명령들과 완료 대기 명령을 한 락 구간 안에서 큐에 넣는 것이 요점이다.
+ * 그래야 이 완료 신호가 "내가 넣은 무효화가 모두 끝났다"를 뜻한다 — 중간에
+ * 다른 CPU 의 명령이 끼어들면 기다리는 대상이 흐려진다.
+ *
+ * 실제 대기는 락을 푼 뒤에 한다. 세마포어 폴링이 길어질 수 있어 락을 쥔 채로
+ * 돌면 다른 CPU 가 명령을 넣지 못한다.
+ *
+ * 별칭 순회를 하는 이유: 하드웨어는 요청에 실린 requester id 로 DTE 를
+ * 찾으므로, 브리지 뒤의 장치는 브리지 이름으로 조회된다.
+ */
 static void iommu_flush_irt_and_complete(struct amd_iommu *iommu, u16 devid)
 {
-	int ret;
-	u64 data;
-	unsigned long flags;
-	struct iommu_cmd cmd;
-	struct pci_dev *pdev = NULL;
-	struct iommu_dev_data *dev_data = search_dev_data(iommu, devid);
+	int ret;	/* [한국어] 큐 삽입 결과 */
+	u64 data;	/* [한국어] 이번 완료 대기가 기다릴 값 */
+	unsigned long flags;	/* [한국어] 인터럽트 상태 */
+	struct iommu_cmd cmd;	/* [한국어] 완료 대기 명령 */
+	struct pci_dev *pdev = NULL;	/* [한국어] PCI 면 별칭 순회를 쓴다 */
+	struct iommu_dev_data *dev_data = search_dev_data(iommu, devid);	/* [한국어] 장치의 벤더 상태 */
 
-	if (iommu->irtcachedis_enabled)
-		return;
+	if (iommu->irtcachedis_enabled)	/* [한국어] 캐시를 꺼 둔 유닛이면 */
+		return;	/* [한국어] 지울 것이 없다 */
 
-	if (dev_data && dev_data->dev && dev_is_pci(dev_data->dev))
-		pdev = to_pci_dev(dev_data->dev);
+	if (dev_data && dev_data->dev && dev_is_pci(dev_data->dev))	/* [한국어] PCI 장치인가 */
+		pdev = to_pci_dev(dev_data->dev);	/* [한국어] 별칭 순회를 위해 */
 
-	raw_spin_lock_irqsave(&iommu->lock, flags);
-	data = get_cmdsem_val(iommu);
-	build_completion_wait(&cmd, iommu, data);
+	raw_spin_lock_irqsave(&iommu->lock, flags);	/* [한국어] 무효화와 완료 대기를 한 구간에 넣기 위해 */
+	data = get_cmdsem_val(iommu);	/* [한국어] 이번에 기다릴 세마포어 값 */
+	build_completion_wait(&cmd, iommu, data);	/* [한국어] 그 값을 쓰라는 명령 */
 
-	if (pdev)
-		ret = pci_for_each_dma_alias(pdev, iommu_flush_dev_irt, iommu);
+	if (pdev)	/* [한국어] PCI 면 */
+		ret = pci_for_each_dma_alias(pdev, iommu_flush_dev_irt, iommu);	/* [한국어] 모든 별칭의 캐시를 */
 	else
-		ret = iommu_flush_dev_irt(NULL, devid, iommu);
-	if (ret)
-		goto out_err;
+		ret = iommu_flush_dev_irt(NULL, devid, iommu);	/* [한국어] 아니면 자기 것만 */
+	if (ret)	/* [한국어] 큐가 가득 찼으면 */
+		goto out_err;	/* [한국어] 완료 대기를 넣을 의미가 없다 */
 
-	ret = __iommu_queue_command_sync(iommu, &cmd, false);
-	if (ret)
-		goto out_err;
-	raw_spin_unlock_irqrestore(&iommu->lock, flags);
+	ret = __iommu_queue_command_sync(iommu, &cmd, false);	/* [한국어] 무효화 뒤에 완료 대기를 */
+	if (ret)	/* [한국어] 넣지 못했으면 */
+		goto out_err;	/* [한국어] 기다릴 대상이 없다 */
+	raw_spin_unlock_irqrestore(&iommu->lock, flags);	/* [한국어] 폴링 전에 락을 놓는다 */
 
-	wait_on_sem(iommu, data);
-	return;
+	wait_on_sem(iommu, data);	/* [한국어] 하드웨어가 그 값을 쓸 때까지 */
+	return;	/* [한국어] 무효화가 끝났다 */
 
 out_err:
-	raw_spin_unlock_irqrestore(&iommu->lock, flags);
+	raw_spin_unlock_irqrestore(&iommu->lock, flags);	/* [한국어] 실패 경로도 락은 풀어야 한다 */
 }
 
+/*
+ * [한국어]
+ * iommu_get_int_tablen - DTE 에 적을 인터럽트 표 크기 코드를 고른다
+ *
+ * @dev_data: 대상 장치(없으면 기본값).
+ * @return: DTE 의 IntTabLen 필드 값.
+ *
+ * 표 크기를 하드웨어에 알려 주는 코드다. 2K 항목을 쓸 수 있는 하드웨어에서만
+ * 그 값을 쓰고, 그 밖에는 512 다 — 크기를 잘못 알리면 하드웨어가 표 밖을
+ * 읽는다.
+ */
 static inline u8 iommu_get_int_tablen(struct iommu_dev_data *dev_data)
 {
-	if (dev_data && dev_data->max_irqs == MAX_IRQS_PER_TABLE_2K)
-		return DTE_INTTABLEN_2K;
-	return DTE_INTTABLEN_512;
+	if (dev_data && dev_data->max_irqs == MAX_IRQS_PER_TABLE_2K)	/* [한국어] 2K 표를 쓰는 장치인가 */
+		return DTE_INTTABLEN_2K;	/* [한국어] 크기를 잘못 알리면 하드웨어가 표 밖을 읽는다 */
+	return DTE_INTTABLEN_512;	/* [한국어] 기본 512 항목 */
 }
 
+/*
+ * [한국어]
+ * set_dte_irq_entry - DTE 에 인터럽트 재매핑 표를 실는다
+ *
+ * @iommu: 담당 유닛.
+ * @devid: 대상 장치.
+ * @table: 그 장치가 쓸 재매핑 표.
+ *
+ * DTE 의 data[2] 가 인터럽트 전용 절반이다. DMA 쪽 경로가 이 절반을
+ * 건드리지 않도록 write_dte_upper128 이 보존해 주고, 반대로 여기서는
+ * DMA 비트를 건드리지 않는다 — 읽고 고쳐 쓰는 이유가 그것이다.
+ *
+ * 그 읽기-수정-쓰기가 하나의 단위여야 하므로 dte_lock 을 잡는다. dev_data 가
+ * 없는 경우(아직 probe 전)에는 경쟁 상대도 없다.
+ */
 static void set_dte_irq_entry(struct amd_iommu *iommu, u16 devid,
 			      struct irq_remap_table *table)
 {
-	u64 new;
-	struct dev_table_entry *dte = &get_dev_table(iommu)[devid];
-	struct iommu_dev_data *dev_data = search_dev_data(iommu, devid);
+	u64 new;	/* [한국어] 고칠 data[2] */
+	struct dev_table_entry *dte = &get_dev_table(iommu)[devid];	/* [한국어] 하드웨어가 읽는 항목 */
+	struct iommu_dev_data *dev_data = search_dev_data(iommu, devid);	/* [한국어] 락과 표 크기를 위해 */
+
+	if (dev_data)	/* [한국어] 아직 probe 전이면 경쟁 상대가 없다 */
+		spin_lock(&dev_data->dte_lock);	/* [한국어] 읽고 고쳐 쓰는 사이를 지킨다 */
+
+	new = READ_ONCE(dte->data[2]);	/* [한국어] DMA 쪽 비트를 보존하려고 현재 값에서 시작 */
+	new &= ~DTE_IRQ_PHYS_ADDR_MASK;	/* [한국어] 옛 표 주소를 지우고 */
+	new |= iommu_virt_to_phys(table->table);	/* [한국어] 새 표의 물리 주소 */
+	new |= DTE_IRQ_REMAP_INTCTL;	/* [한국어] 고정 인터럽트를 표로 재매핑하라는 지시 */
+	new |= iommu_get_int_tablen(dev_data);	/* [한국어] 표 크기 코드 */
+	new |= DTE_IRQ_REMAP_ENABLE;	/* [한국어] 재매핑 활성 */
+	WRITE_ONCE(dte->data[2], new);	/* [한국어] 인터럽트 전용 절반만 갱신한다 */
 
 	if (dev_data)
-		spin_lock(&dev_data->dte_lock);
-
-	new = READ_ONCE(dte->data[2]);
-	new &= ~DTE_IRQ_PHYS_ADDR_MASK;
-	new |= iommu_virt_to_phys(table->table);
-	new |= DTE_IRQ_REMAP_INTCTL;
-	new |= iommu_get_int_tablen(dev_data);
-	new |= DTE_IRQ_REMAP_ENABLE;
-	WRITE_ONCE(dte->data[2], new);
-
-	if (dev_data)
-		spin_unlock(&dev_data->dte_lock);
+		spin_unlock(&dev_data->dte_lock);	/* [한국어] 읽기-수정-쓰기 끝 */
 }
 
+/*
+ * [한국어]
+ * get_irq_table - 장치의 인터럽트 재매핑 표를 찾는다
+ *
+ * @iommu: 담당 유닛.
+ * @devid: 대상 장치.
+ * @return: 그 표, 없으면 NULL.
+ *
+ * 두 단계를 모두 확인한다. 담당 유닛이 없다는 것은 IVRS 표가 이 장치를
+ * 모른다는 뜻이고, 재매핑 표가 없다는 것은 인터럽트를 아직 할당하지 않았다는
+ * 뜻이다. 둘 다 여기까지 와서는 안 되는 상태라 경고를 남긴다.
+ */
 static struct irq_remap_table *get_irq_table(struct amd_iommu *iommu, u16 devid)
 {
-	struct irq_remap_table *table;
-	struct amd_iommu_pci_seg *pci_seg = iommu->pci_seg;
+	struct irq_remap_table *table;	/* [한국어] 찾을 표 */
+	struct amd_iommu_pci_seg *pci_seg = iommu->pci_seg;	/* [한국어] 조회 배열이 있는 세그먼트 */
 
-	if (WARN_ONCE(!pci_seg->rlookup_table[devid],
-		      "%s: no iommu for devid %x:%x\n",
-		      __func__, pci_seg->id, devid))
-		return NULL;
+	if (WARN_ONCE(!pci_seg->rlookup_table[devid],	/* [한국어] IVRS 가 이 장치를 모른다는 뜻 */
+		      "%s: no iommu for devid %x:%x\n",	/* [한국어] 어느 세그먼트의 어느 장치인지 */
+		      __func__, pci_seg->id, devid))	/* [한국어] 호출 위치와 함께 */
+		return NULL;	/* [한국어] 여기까지 와서는 안 되는 상태다 */
 
-	table = pci_seg->irq_lookup_table[devid];
-	if (WARN_ONCE(!table, "%s: no table for devid %x:%x\n",
-		      __func__, pci_seg->id, devid))
-		return NULL;
+	table = pci_seg->irq_lookup_table[devid];	/* [한국어] 이 장치의 재매핑 표 */
+	if (WARN_ONCE(!table, "%s: no table for devid %x:%x\n",	/* [한국어] 아직 할당하지 않았다는 뜻 */
+		      __func__, pci_seg->id, devid))	/* [한국어] 어디서 났는지 */
+		return NULL;	/* [한국어] 호출자가 실패로 처리한다 */
 
-	return table;
+	return table;	/* [한국어] 찾은 표 */
 }
 
+/*
+ * [한국어]
+ * __alloc_irq_table - 인터럽트 재매핑 표를 하나 만든다
+ *
+ * @nid: 표를 둘 NUMA 노드.
+ * @size: 표의 바이트 크기.
+ * @return: 새 표, 실패하면 NULL.
+ *
+ * 하드웨어가 요구하는 정렬이 크기보다 클 수 있어 둘 중 큰 값으로 잡는다.
+ * 정렬이 어긋나면 DTE 에 적을 주소의 하위 비트가 다른 필드와 겹친다.
+ */
 static struct irq_remap_table *__alloc_irq_table(int nid, size_t size)
 {
-	struct irq_remap_table *table;
+	struct irq_remap_table *table;	/* [한국어] 만들 표 */
 
-	table = kzalloc_obj(*table);
-	if (!table)
-		return NULL;
+	table = kzalloc_obj(*table);	/* [한국어] 관리 구조체 */
+	if (!table)	/* [한국어] 메모리 부족 */
+		return NULL;	/* [한국어] 호출자에게 */
 
-	table->table = iommu_alloc_pages_node_sz(
-		nid, GFP_KERNEL, max(DTE_INTTAB_ALIGNMENT, size));
-	if (!table->table) {
-		kfree(table);
-		return NULL;
+	table->table = iommu_alloc_pages_node_sz(	/* [한국어] 하드웨어가 읽을 실제 표 */
+		nid, GFP_KERNEL, max(DTE_INTTAB_ALIGNMENT, size));	/* [한국어] 정렬이 어긋나면 DTE 의 다른 필드와 겹친다 */
+	if (!table->table) {	/* [한국어] 표를 못 잡았으면 */
+		kfree(table);	/* [한국어] 관리 구조체도 버린다 */
+		return NULL;	/* [한국어] 호출자에게 */
 	}
-	raw_spin_lock_init(&table->lock);
+	raw_spin_lock_init(&table->lock);	/* [한국어] 항목 할당을 지키는 락 */
 
-	return table;
+	return table;	/* [한국어] 새 표 */
 }
 
+/*
+ * [한국어]
+ * set_remap_table_entry - 장치를 재매핑 표에 연결한다
+ *
+ * @iommu: 담당 유닛.
+ * @devid: 대상 장치.
+ * @table: 연결할 표.
+ *
+ * 소프트웨어 조회 배열과 하드웨어 DTE 를 함께 갱신한다. 둘이 어긋나면
+ * 드라이버가 보는 표와 하드웨어가 읽는 표가 달라진다.
+ *
+ * 여기서는 명령만 넣는다 — 여러 별칭을 처리한 뒤 호출자가 한 번만 기다린다.
+ */
 static void set_remap_table_entry(struct amd_iommu *iommu, u16 devid,
 				  struct irq_remap_table *table)
 {
-	struct amd_iommu_pci_seg *pci_seg = iommu->pci_seg;
+	struct amd_iommu_pci_seg *pci_seg = iommu->pci_seg;	/* [한국어] 조회 배열이 있는 세그먼트 */
 
-	pci_seg->irq_lookup_table[devid] = table;
-	set_dte_irq_entry(iommu, devid, table);
-	iommu_flush_dte(iommu, devid);
+	pci_seg->irq_lookup_table[devid] = table;	/* [한국어] 드라이버가 보는 쪽 */
+	set_dte_irq_entry(iommu, devid, table);	/* [한국어] 하드웨어가 읽는 쪽 — 둘이 어긋나면 안 된다 */
+	iommu_flush_dte(iommu, devid);	/* [한국어] 명령만 넣고 대기는 호출자가 */
 }
 
+/*
+ * [한국어]
+ * set_remap_table_entry_alias - 별칭마다 같은 표를 연결하는 콜백
+ *
+ * @pdev: 순회 중인 장치.
+ * @alias: 그 별칭 id.
+ * @data: 연결할 표.
+ * @return: 0 성공, -EINVAL 이면 담당 유닛을 못 찾았다.
+ *
+ * 별칭이 다른 유닛에 속할 수 있어 유닛을 다시 찾는다. 무효화 명령도 그
+ * 별칭을 맡은 유닛에 보내야 한다 — 그래서 rlookup_table 로 한 번 더 되짚는다.
+ */
 static int set_remap_table_entry_alias(struct pci_dev *pdev, u16 alias,
 				       void *data)
 {
-	struct irq_remap_table *table = data;
-	struct amd_iommu_pci_seg *pci_seg;
-	struct amd_iommu *iommu = rlookup_amd_iommu(&pdev->dev);
+	struct irq_remap_table *table = data;	/* [한국어] 연결할 표 */
+	struct amd_iommu_pci_seg *pci_seg;	/* [한국어] 별칭이 속한 세그먼트 */
+	struct amd_iommu *iommu = rlookup_amd_iommu(&pdev->dev);	/* [한국어] 별칭이 다른 유닛에 속할 수 있다 */
 
-	if (!iommu)
-		return -EINVAL;
+	if (!iommu)	/* [한국어] 담당 유닛을 못 찾으면 */
+		return -EINVAL;	/* [한국어] 순회를 중단시킨다 */
 
-	pci_seg = iommu->pci_seg;
-	pci_seg->irq_lookup_table[alias] = table;
-	set_dte_irq_entry(iommu, alias, table);
-	iommu_flush_dte(pci_seg->rlookup_table[alias], alias);
+	pci_seg = iommu->pci_seg;	/* [한국어] 그 유닛의 세그먼트 */
+	pci_seg->irq_lookup_table[alias] = table;	/* [한국어] 같은 표를 공유한다 */
+	set_dte_irq_entry(iommu, alias, table);	/* [한국어] 별칭의 DTE 도 같은 표를 가리키게 */
+	iommu_flush_dte(pci_seg->rlookup_table[alias], alias);	/* [한국어] 그 별칭을 맡은 유닛에 보내야 한다 */
 
-	return 0;
+	return 0;	/* [한국어] 계속 순회 */
 }
 
+/*
+ * [한국어]
+ * get_irq_table_size - 재매핑 표에 필요한 바이트 수를 구한다
+ *
+ * @max_irqs: 담을 항목 수.
+ * @return: 표의 크기.
+ *
+ * 항목 형식이 두 가지다. 기본 항목은 32비트지만, 게스트 가상 APIC(GA)를
+ * 쓰면 게스트 vCPU 정보까지 담아야 해서 128비트가 된다.
+ */
 static inline size_t get_irq_table_size(unsigned int max_irqs)
 {
-	if (!AMD_IOMMU_GUEST_IR_GA(amd_iommu_guest_ir))
-		return max_irqs * sizeof(u32);
+	if (!AMD_IOMMU_GUEST_IR_GA(amd_iommu_guest_ir))	/* [한국어] 게스트 가상 APIC 를 쓰지 않으면 */
+		return max_irqs * sizeof(u32);	/* [한국어] 항목이 32비트 */
 
-	return max_irqs * (sizeof(u64) * 2);
+	return max_irqs * (sizeof(u64) * 2);	/* [한국어] 게스트 vCPU 정보까지 담아 128비트 */
 }
 
+/*
+ * [한국어]
+ * alloc_irq_table - 장치의 재매핑 표를 찾거나 만든다
+ *
+ * @iommu: 담당 유닛.
+ * @devid: 대상 장치.
+ * @pdev: PCI 장치면 별칭 순회에 쓴다.
+ * @max_irqs: 담아야 할 항목 수.
+ * @return: 그 장치가 쓸 표, 실패하면 NULL.
+ *
+ * 락을 놓고 할당한 뒤 다시 잡는 구조가 이 함수의 골격이다. 표 할당은
+ * GFP_KERNEL 로 해야 하는데 스핀락 아래에서는 잠들 수 없기 때문이다.
+ *
+ * 그래서 락을 다시 잡은 뒤 조회를 처음부터 되풀이한다 — 그사이 다른 CPU 가
+ * 같은 장치의 표를 만들었을 수 있고, 그렇다면 내가 만든 것을 버려야 한다.
+ * 마지막의 new_table 정리가 그 몫이다.
+ *
+ * 별칭들이 같은 표를 공유해야 하는 이유: 하드웨어가 requester id 로 DTE 를
+ * 고르므로, 어느 이름으로 오든 같은 항목을 찾아야 인터럽트가 제대로 간다.
+ */
 static struct irq_remap_table *alloc_irq_table(struct amd_iommu *iommu,
 					       u16 devid, struct pci_dev *pdev,
 					       unsigned int max_irqs)
 {
-	struct irq_remap_table *table = NULL;
-	struct irq_remap_table *new_table = NULL;
-	struct amd_iommu_pci_seg *pci_seg;
-	unsigned long flags;
-	int nid = iommu->dev ? dev_to_node(&iommu->dev->dev) : NUMA_NO_NODE;
-	u16 alias;
+	struct irq_remap_table *table = NULL;	/* [한국어] 찾았거나 만든 표 */
+	struct irq_remap_table *new_table = NULL;	/* [한국어] 락 밖에서 미리 만든 것 */
+	struct amd_iommu_pci_seg *pci_seg;	/* [한국어] 조회 배열이 있는 세그먼트 */
+	unsigned long flags;	/* [한국어] 인터럽트 상태 */
+	int nid = iommu->dev ? dev_to_node(&iommu->dev->dev) : NUMA_NO_NODE;	/* [한국어] 하드웨어가 읽으므로 가까운 노드에 */
+	u16 alias;	/* [한국어] IVRS 가 알려 준 별칭 */
 
-	spin_lock_irqsave(&iommu_table_lock, flags);
+	spin_lock_irqsave(&iommu_table_lock, flags);	/* [한국어] 조회 배열 보호 */
 
-	pci_seg = iommu->pci_seg;
-	table = pci_seg->irq_lookup_table[devid];
-	if (table)
-		goto out_unlock;
+	pci_seg = iommu->pci_seg;	/* [한국어] 세그먼트 */
+	table = pci_seg->irq_lookup_table[devid];	/* [한국어] 이미 있나 */
+	if (table)	/* [한국어] 있으면 */
+		goto out_unlock;	/* [한국어] 그대로 쓴다 */
 
-	alias = pci_seg->alias_table[devid];
-	table = pci_seg->irq_lookup_table[alias];
-	if (table) {
-		set_remap_table_entry(iommu, devid, table);
-		goto out_wait;
+	alias = pci_seg->alias_table[devid];	/* [한국어] 별칭 쪽에 있을 수도 있다 */
+	table = pci_seg->irq_lookup_table[alias];	/* [한국어] 별칭의 표 */
+	if (table) {	/* [한국어] 있으면 */
+		set_remap_table_entry(iommu, devid, table);	/* [한국어] 내 이름으로도 연결하고 */
+		goto out_wait;	/* [한국어] 명령이 끝나기를 기다린다 */
 	}
-	spin_unlock_irqrestore(&iommu_table_lock, flags);
+	spin_unlock_irqrestore(&iommu_table_lock, flags);	/* [한국어] GFP_KERNEL 할당은 잠들 수 있어 락을 놓는다 */
 
 	/* Nothing there yet, allocate new irq remapping table */
-	new_table = __alloc_irq_table(nid, get_irq_table_size(max_irqs));
-	if (!new_table)
-		return NULL;
+	new_table = __alloc_irq_table(nid, get_irq_table_size(max_irqs));	/* [한국어] (원 주석: 아직 없으니 새 표를 만든다) */
+	if (!new_table)	/* [한국어] 실패면 */
+		return NULL;	/* [한국어] 호출자가 인터럽트 할당을 접는다 */
 
-	spin_lock_irqsave(&iommu_table_lock, flags);
+	spin_lock_irqsave(&iommu_table_lock, flags);	/* [한국어] 다시 잡고 */
 
-	table = pci_seg->irq_lookup_table[devid];
-	if (table)
-		goto out_unlock;
+	table = pci_seg->irq_lookup_table[devid];	/* [한국어] 그사이 누가 만들었을 수 있어 처음부터 다시 본다 */
+	if (table)	/* [한국어] 있으면 */
+		goto out_unlock;	/* [한국어] 내가 만든 것은 뒤에서 버린다 */
 
-	table = pci_seg->irq_lookup_table[alias];
-	if (table) {
-		set_remap_table_entry(iommu, devid, table);
-		goto out_wait;
+	table = pci_seg->irq_lookup_table[alias];	/* [한국어] 별칭 쪽도 다시 */
+	if (table) {	/* [한국어] 있으면 */
+		set_remap_table_entry(iommu, devid, table);	/* [한국어] 그것을 공유한다 */
+		goto out_wait;	/* [한국어] 명령 완료를 기다린다 */
 	}
 
-	table = new_table;
-	new_table = NULL;
+	table = new_table;	/* [한국어] 내가 만든 것이 채택됐다 */
+	new_table = NULL;	/* [한국어] 뒤의 정리가 이것을 버리지 않도록 */
 
-	if (pdev)
-		pci_for_each_dma_alias(pdev, set_remap_table_entry_alias,
-				       table);
+	if (pdev)	/* [한국어] PCI 면 */
+		pci_for_each_dma_alias(pdev, set_remap_table_entry_alias,	/* [한국어] 모든 별칭이 같은 표를 보게 한다 */
+				       table);	/* [한국어] requester id 가 무엇이든 같은 항목을 찾아야 한다 */
 	else
-		set_remap_table_entry(iommu, devid, table);
+		set_remap_table_entry(iommu, devid, table);	/* [한국어] 플랫폼 장치는 자기 것만 */
 
-	if (devid != alias)
-		set_remap_table_entry(iommu, alias, table);
+	if (devid != alias)	/* [한국어] IVRS 별칭이 따로 있으면 */
+		set_remap_table_entry(iommu, alias, table);	/* [한국어] 위 순회에 없을 수 있어 따로 연결한다 */
 
 out_wait:
-	iommu_completion_wait(iommu);
+	iommu_completion_wait(iommu);	/* [한국어] 넣어 둔 DTE 무효화가 모두 끝나기를 */
 
 out_unlock:
-	spin_unlock_irqrestore(&iommu_table_lock, flags);
+	spin_unlock_irqrestore(&iommu_table_lock, flags);	/* [한국어] 조회 배열 보호 해제 */
 
-	if (new_table) {
-		iommu_free_pages(new_table->table);
-		kfree(new_table);
+	if (new_table) {	/* [한국어] 경합에 져서 쓰이지 않았으면 */
+		iommu_free_pages(new_table->table);	/* [한국어] 표를 버리고 */
+		kfree(new_table);	/* [한국어] 관리 구조체도 */
 	}
-	return table;
+	return table;	/* [한국어] 실제로 쓰일 표 */
 }
 
 static int alloc_irq_index(struct amd_iommu *iommu, u16 devid, int count,
