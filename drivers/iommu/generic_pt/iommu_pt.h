@@ -1074,31 +1074,60 @@ static int __map_range_leaf(struct pt_range *range, void *arg,
 	return 0;	/* [한국어] 표를 다 채웠다 — 나머지는 상위가 다음 표로 넘긴다 */
 }
 
+/*
+ * [한국어]
+ * __map_range - 잎 단계에 닿을 때까지 내려가며 필요한 표를 만드는 워커
+ *
+ * @range: 걷는 범위.
+ * @arg: 매핑 인자.
+ * @level: 현재 단계.
+ * @table: 그 단계의 표.
+ * @return: 0 성공, -EAGAIN 이 단계를 다시 돌아야 함, -EADDRINUSE 자리 충돌.
+ *
+ * 매핑의 바깥 재귀다. 항목이 비어 있으면 표를 만들고, 표가 있으면 그대로
+ * 내려간다.
+ *
+ * 두 곳의 -EAGAIN 처리가 락 없는 설계의 핵심이다.
+ *  - pt_iommu_new_table 이 경합에서 지면 -EAGAIN 을 주는데, 바깥 do-while
+ *    이 같은 항목을 다시 읽어 이번에는 표를 찾는다.
+ *  - 아래 단계가 -EAGAIN 을 주면 페이지 크기가 바뀐 것이므로 그 단계를
+ *    다시 부른다.
+ *
+ * 비일관 플랫폼의 캐시 처리가 미묘하다. 이미 있는 표를 만난 경우, 그것을
+ * 만든 스레드가 아직 캐시를 밀어내는 중일 수 있다. 원 주석이 그 대응을
+ * 설명한다 — 깃발(SW_BIT_CACHE_FLUSH_DONE)이 아직 서 있지 않으면 나도
+ * 밀어낸다. 그래야 내 매핑이 끝났을 때 거기까지 이르는 모든 표 항목이
+ * 하드웨어에 보인다.
+ *
+ * 마지막의 -EAGAIN 은 다른 사정이다. 아래 단계에서 페이지 크기가 커져
+ * 잎 단계가 이 단계로 올라왔으면, 지금 실행 중인 함수는 더 이상 맞지
+ * 않으므로 호출자가 __map_range_leaf 를 부르게 한다.
+ */
 static int __map_range(struct pt_range *range, void *arg, unsigned int level,
 		       struct pt_table_p *table)
 {
-	struct pt_state pts = pt_init(range, level, table);
-	struct pt_iommu_map_args *map = arg;
-	int ret;
+	struct pt_state pts = pt_init(range, level, table);	/* [한국어] 이 단계의 순회 상태 */
+	struct pt_iommu_map_args *map = arg;	/* [한국어] 매핑 인자 */
+	int ret;	/* [한국어] 결과 */
 
-	PT_WARN_ON(map->leaf_level == level);
-	PT_WARN_ON(!pt_can_have_table(&pts));
+	PT_WARN_ON(map->leaf_level == level);	/* [한국어] 잎 단계면 다른 워커가 맡는다 */
+	PT_WARN_ON(!pt_can_have_table(&pts));	/* [한국어] 내려갈 수 있는 단계여야 한다 */
 
-	_pt_iter_first(&pts);
+	_pt_iter_first(&pts);	/* [한국어] 색인 구간을 잡는다 */
 
 	/* Descend to a child table */
 	do {
-		pts.type = pt_load_entry_raw(&pts);
+		pts.type = pt_load_entry_raw(&pts);	/* [한국어] (원 주석: 하위 표로 내려간다) 이 자리에 무엇이 있나 */
 
-		if (pts.type != PT_ENTRY_TABLE) {
-			if (pts.type != PT_ENTRY_EMPTY)
-				return -EADDRINUSE;
-			ret = pt_iommu_new_table(&pts, &map->attrs);
+		if (pts.type != PT_ENTRY_TABLE) {	/* [한국어] 표가 아니면 */
+			if (pts.type != PT_ENTRY_EMPTY)	/* [한국어] 잎이 이미 있으면 */
+				return -EADDRINUSE;	/* [한국어] 그 자리를 덮어쓸 수 없다 */
+			ret = pt_iommu_new_table(&pts, &map->attrs);	/* [한국어] 비어 있으면 표를 만들어 꽂는다 */
 			/* EAGAIN on a race will loop again */
-			if (ret)
-				return ret;
+			if (ret)	/* [한국어] (원 주석: 경합에 진 EAGAIN 이면 바깥 반복문이 다시 돈다) */
+				return ret;	/* [한국어] 호출자가 되돌리거나 다시 시도한다 */
 		} else {
-			pts.table_lower = pt_table_ptr(&pts);
+			pts.table_lower = pt_table_ptr(&pts);	/* [한국어] 이미 있는 표로 내려갈 준비 */
 			/*
 			 * Racing with a shared pt_iommu_new_table()? The other
 			 * thread is still flushing the cache, so we have to
@@ -1110,10 +1139,10 @@ static int __map_range(struct pt_range *range, void *arg, unsigned int level,
 			 * release of the cache flush so that this can acquire
 			 * visibility at the iommu.
 			 */
-			if (pts_feature(&pts, PT_FEAT_DMA_INCOHERENT) &&
-			    !pt_test_sw_bit_acquire(&pts,
-						    SW_BIT_CACHE_FLUSH_DONE))
-				flush_writes_item(&pts);
+			if (pts_feature(&pts, PT_FEAT_DMA_INCOHERENT) &&	/* [한국어] (원 주석: 이 표를 만든 스레드가 아직 캐시를 밀어내는 중일 수 있다) */
+			    !pt_test_sw_bit_acquire(&pts,	/* [한국어] 깃발이 아직 서 있지 않으면 */
+						    SW_BIT_CACHE_FLUSH_DONE))	/* [한국어] 내 매핑이 끝났을 때 표가 보이도록 */
+				flush_writes_item(&pts);	/* [한국어] 나도 밀어낸다 */
 		}
 
 		/*
@@ -1121,28 +1150,28 @@ static int __map_range(struct pt_range *range, void *arg, unsigned int level,
 		 * concurrent map.
 		 */
 		do {
-			if (map->leaf_level == level - 1)
-				ret = pt_descend(&pts, arg, __map_range_leaf);
+			if (map->leaf_level == level - 1)	/* [한국어] (원 주석: 이미 있는 표는 다른 매핑과 공유될 수 있다) */
+				ret = pt_descend(&pts, arg, __map_range_leaf);	/* [한국어] 아래가 잎 단계면 잎 워커로 */
 			else
-				ret = pt_descend(&pts, arg, __map_range);
-		} while (ret == -EAGAIN);
-		if (ret)
-			return ret;
+				ret = pt_descend(&pts, arg, __map_range);	/* [한국어] 아니면 한 단계 더 내려간다 */
+		} while (ret == -EAGAIN);	/* [한국어] 페이지 크기가 바뀌었으면 그 단계를 다시 */
+		if (ret)	/* [한국어] 실패면 */
+			return ret;	/* [한국어] 바로 전한다 */
 
-		pts.index++;
-		pt_index_to_va(&pts);
-		if (pts.index >= pts.end_index)
-			break;
+		pts.index++;	/* [한국어] 다음 항목으로 */
+		pt_index_to_va(&pts);	/* [한국어] VA 를 색인에 맞춘다 */
+		if (pts.index >= pts.end_index)	/* [한국어] 이 표를 다 돌았으면 */
+			break;	/* [한국어] 끝 */
 
 		/*
 		 * This level is currently running __map_range_leaf() which is
 		 * not correct if the target level has been updated to this
 		 * level. Have the caller invoke __map_range_leaf.
 		 */
-		if (map->leaf_level == level)
-			return -EAGAIN;
-	} while (true);
-	return 0;
+		if (map->leaf_level == level)	/* [한국어] (원 주석: 잎 단계가 이 단계로 올라왔으면 지금 함수는 맞지 않다) */
+			return -EAGAIN;	/* [한국어] 호출자가 __map_range_leaf 를 부르게 한다 */
+	} while (true);	/* [한국어] 표를 다 돌 때까지 */
+	return 0;	/* [한국어] 이 단계를 마쳤다 */
 }
 
 /*
@@ -1150,28 +1179,50 @@ static int __map_range(struct pt_range *range, void *arg, unsigned int level,
  * table. This is a common workload. If it returns EAGAIN run the full algorithm
  * instead.
  */
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * __do_map_single_page - 4KB 한 장을 이미 있는 표에 놓는 빠른 경로
+ *
+ * @range: 걷는 범위.
+ * @arg: 매핑 인자.
+ * @level: 현재 단계.
+ * @table: 그 단계의 표.
+ * @descend_fn: 아래 단계 워커.
+ * @return: 0 성공, -EAGAIN 이면 일반 경로로 넘어가야 한다.
+ *
+ * 원 주석이 존재 이유를 밝힌다 — 4KB 한 장을 이미 있는 표에 놓는 것이
+ * 가장 흔한 작업이라, 그 경우만 따로 최적화한다.
+ *
+ * 표를 만들지 않는 것이 요점이다. 중간에 빈 항목을 만나면 곧바로
+ * -EAGAIN 을 주고 일반 경로에 넘긴다. 그래서 이 함수에는 할당도, 경합
+ * 처리도, 크기 계산도 없다.
+ *
+ * 비일관 플랫폼에서 쓰지 않는 이유도 같다 — 캐시 플러시를 넣으면 이
+ * 함수의 코드가 커져 최적화의 뜻이 사라진다.
+ */
 static __always_inline int __do_map_single_page(struct pt_range *range,
 						void *arg, unsigned int level,
 						struct pt_table_p *table,
 						pt_level_fn_t descend_fn)
 {
-	struct pt_state pts = pt_init(range, level, table);
-	struct pt_iommu_map_args *map = arg;
+	struct pt_state pts = pt_init(range, level, table);	/* [한국어] 이 단계의 순회 상태 */
+	struct pt_iommu_map_args *map = arg;	/* [한국어] 매핑 인자 */
 
-	pts.type = pt_load_single_entry(&pts);
-	if (pts.level == 0) {
-		if (pts.type != PT_ENTRY_EMPTY)
-			return -EADDRINUSE;
-		pt_install_leaf_entry(&pts, map->oa, PAGE_SHIFT,
-				      &map->attrs);
+	pts.type = pt_load_single_entry(&pts);	/* [한국어] 한 항목만 읽는다 */
+	if (pts.level == 0) {	/* [한국어] 잎을 놓을 마지막 단계면 */
+		if (pts.type != PT_ENTRY_EMPTY)	/* [한국어] 자리가 비어 있지 않으면 */
+			return -EADDRINUSE;	/* [한국어] 덮어쓸 수 없다 */
+		pt_install_leaf_entry(&pts, map->oa, PAGE_SHIFT,	/* [한국어] 4KB 한 장을 놓는다 */
+				      &map->attrs);	/* [한국어] 권한은 호출자가 준 대로 */
 		/* No flush, not used when incoherent */
-		map->oa += PAGE_SIZE;
-		return 0;
+		map->oa += PAGE_SIZE;	/* [한국어] (원 주석: 비일관에서는 쓰지 않으므로 플러시가 없다) */
+		return 0;	/* [한국어] 한 장 매핑 완료 */
 	}
-	if (pts.type == PT_ENTRY_TABLE)
-		return pt_descend(&pts, arg, descend_fn);
+	if (pts.type == PT_ENTRY_TABLE)	/* [한국어] 표가 이미 있으면 */
+		return pt_descend(&pts, arg, descend_fn);	/* [한국어] 그대로 내려간다 — 만들지는 않는다 */
 	/* Something else, use the slow path */
-	return -EAGAIN;
+	return -EAGAIN;	/* [한국어] (원 주석: 그 밖에는 느린 경로를 쓴다) */
 }
 PT_MAKE_LEVELS(__map_single_page, __do_map_single_page);
 
@@ -1179,69 +1230,100 @@ PT_MAKE_LEVELS(__map_single_page, __do_map_single_page);
  * Add a table to the top, increasing the top level as much as necessary to
  * encompass range.
  */
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * increase_top - 최상위 단계를 얹어 주소 공간을 넓힌다
+ *
+ * @iommu_table: 대상 페이지 테이블.
+ * @range: 담아야 할 범위.
+ * @map: 매핑 인자(필요한 잎 단계와 할당 플래그).
+ * @return: 0 성공, -EAGAIN 다른 스레드가 먼저 했음, -ERANGE 한계 초과.
+ *
+ * DYNAMIC_TOP 형식은 작게 시작해 필요할 때만 자란다. 이 함수가 그 성장을
+ * 맡는다.
+ *
+ * 반복문이 한 단계씩 얹는다. 새 표를 만들고, 그 0번 항목이 기존 최상위를
+ * 가리키게 한 다음, 그것을 새 최상위로 삼는다. 요청 범위가 들어갈 때까지
+ * 되풀이한다.
+ *
+ * 그 사이의 표들은 아직 하드웨어에 연결되지 않았으므로 비일관 매핑을
+ * 미뤄 두었다가(ALLOC_DEFER_COHERENT_FLUSH) 마지막에 한 번에 한다 —
+ * 원 주석이 이중 플러시를 피한다고 밝힌 대목이다.
+ *
+ * 락 구간의 순서가 결정적이다. 원 주석이 계약을 명시한다: 읽는 쪽은
+ * READ_ONCE 로 락 없이 최상위를 보고, 주소와 단계가 한 워드에 있어 늘
+ * 일관된 값을 본다. 그래서 하드웨어를 먼저 새 단계로 바꾸고 나서야
+ * top_of_table 을 갱신해야, 다른 스레드가 아직 하드웨어가 모르는 단계에
+ * 매핑을 만드는 일이 없다.
+ *
+ * 무효화를 하지 않는 근거도 원 주석에 있다 — 걷기 캐시에 남은 항목은
+ * 여전히 옳고, 새로 생긴 IOVA 는 전부 비어 있어 부정 캐시도 문제가 되지
+ * 않는다.
+ */
 static int increase_top(struct pt_iommu *iommu_table, struct pt_range *range,
 			struct pt_iommu_map_args *map)
 {
-	struct iommu_pages_list free_list = IOMMU_PAGES_LIST_INIT(free_list);
-	struct pt_common *common = common_from_iommu(iommu_table);
-	uintptr_t top_of_table = READ_ONCE(common->top_of_table);
-	uintptr_t new_top_of_table = top_of_table;
-	struct pt_table_p *table_mem;
-	unsigned int new_level;
-	spinlock_t *domain_lock;
-	unsigned long flags;
-	int ret;
+	struct iommu_pages_list free_list = IOMMU_PAGES_LIST_INIT(free_list);	/* [한국어] 실패하면 되돌릴 표들 */
+	struct pt_common *common = common_from_iommu(iommu_table);	/* [한국어] 페이지 테이블 인스턴스 */
+	uintptr_t top_of_table = READ_ONCE(common->top_of_table);	/* [한국어] 시작 시점의 최상위 — 나중에 바뀌었는지 비교한다 */
+	uintptr_t new_top_of_table = top_of_table;	/* [한국어] 한 단계씩 얹으며 갱신할 값 */
+	struct pt_table_p *table_mem;	/* [한국어] 새로 만든 표 */
+	unsigned int new_level;	/* [한국어] 최종 단계 */
+	spinlock_t *domain_lock;	/* [한국어] 드라이버가 빌려 주는 락 */
+	unsigned long flags;	/* [한국어] 인터럽트 상태 */
+	int ret;	/* [한국어] 결과 */
 
-	while (true) {
-		struct pt_range top_range =
-			_pt_top_range(common, new_top_of_table);
-		struct pt_state pts = pt_init_top(&top_range);
+	while (true) {	/* [한국어] 범위가 들어갈 때까지 한 단계씩 */
+		struct pt_range top_range =	/* [한국어] 지금까지 얹은 최상위로 */
+			_pt_top_range(common, new_top_of_table);	/* [한국어] 범위를 만들어 */
+		struct pt_state pts = pt_init_top(&top_range);	/* [한국어] 그 단계의 상태 */
 
-		top_range.va = range->va;
-		top_range.last_va = range->last_va;
+		top_range.va = range->va;	/* [한국어] 요청 범위를 넣어 */
+		top_range.last_va = range->last_va;	/* [한국어] 들어가는지 본다 */
 
-		if (!pt_check_range(&top_range) &&
-		    map->leaf_level <= pts.level) {
-			new_level = pts.level;
-			break;
+		if (!pt_check_range(&top_range) &&	/* [한국어] 범위가 들어가고 */
+		    map->leaf_level <= pts.level) {	/* [한국어] 필요한 잎 단계도 덮으면 */
+			new_level = pts.level;	/* [한국어] 여기까지가 새 최상위 */
+			break;	/* [한국어] 더 얹을 필요가 없다 */
 		}
 
-		pts.level++;
-		if (pts.level > PT_MAX_TOP_LEVEL ||
-		    pt_table_item_lg2sz(&pts) >= common->max_vasz_lg2) {
-			ret = -ERANGE;
-			goto err_free;
+		pts.level++;	/* [한국어] 한 단계 위로 */
+		if (pts.level > PT_MAX_TOP_LEVEL ||	/* [한국어] 형식의 최대 단계를 넘거나 */
+		    pt_table_item_lg2sz(&pts) >= common->max_vasz_lg2) {	/* [한국어] 인스턴스의 주소 폭을 넘으면 */
+			ret = -ERANGE;	/* [한국어] 더 넓힐 수 없다 */
+			goto err_free;	/* [한국어] 만든 것을 되돌린다 */
 		}
 
-		table_mem =
-			table_alloc_top(common, _pt_top_set(NULL, pts.level),
-					map->attrs.gfp, ALLOC_DEFER_COHERENT_FLUSH);
-		if (IS_ERR(table_mem)) {
-			ret = PTR_ERR(table_mem);
-			goto err_free;
+		table_mem =	/* [한국어] 새 최상위 표를 */
+			table_alloc_top(common, _pt_top_set(NULL, pts.level),	/* [한국어] 그 단계 크기로 잡는다 */
+					map->attrs.gfp, ALLOC_DEFER_COHERENT_FLUSH);	/* [한국어] 아직 하드웨어에 연결되지 않아 매핑을 미룬다 */
+		if (IS_ERR(table_mem)) {	/* [한국어] 실패면 */
+			ret = PTR_ERR(table_mem);	/* [한국어] 오류를 전하고 */
+			goto err_free;	/* [한국어] 되돌린다 */
 		}
-		iommu_pages_list_add(&free_list, table_mem);
+		iommu_pages_list_add(&free_list, table_mem);	/* [한국어] 실패 시 되돌릴 목록에 */
 
 		/* The new table links to the lower table always at index 0 */
-		top_range.va = 0;
-		top_range.top_level = pts.level;
-		pts.table_lower = pts.table;
-		pts.table = table_mem;
-		pt_load_single_entry(&pts);
-		PT_WARN_ON(pts.index != 0);
-		pt_install_table(&pts, virt_to_phys(pts.table_lower),
-				 &map->attrs);
-		new_top_of_table = _pt_top_set(pts.table, pts.level);
+		top_range.va = 0;	/* [한국어] (원 주석: 새 표는 늘 0번 항목에서 아래 표로 이어진다) */
+		top_range.top_level = pts.level;	/* [한국어] 새 단계로 */
+		pts.table_lower = pts.table;	/* [한국어] 기존 최상위가 아래 표가 되고 */
+		pts.table = table_mem;	/* [한국어] 새 표가 최상위가 된다 */
+		pt_load_single_entry(&pts);	/* [한국어] 0번 항목을 읽어 */
+		PT_WARN_ON(pts.index != 0);	/* [한국어] 반드시 0번이어야 한다 */
+		pt_install_table(&pts, virt_to_phys(pts.table_lower),	/* [한국어] 기존 최상위를 가리키게 꽂는다 */
+				 &map->attrs);	/* [한국어] 속성은 호출자가 준 대로 */
+		new_top_of_table = _pt_top_set(pts.table, pts.level);	/* [한국어] 새 최상위 워드 */
 	}
 
 	/*
 	 * Avoid double flushing, flush it once after all pt_install_table()
 	 */
-	if (pt_feature(common, PT_FEAT_DMA_INCOHERENT)) {
-		ret = iommu_pages_start_incoherent_list(
-			&free_list, iommu_table->iommu_device);
-		if (ret)
-			goto err_free;
+	if (pt_feature(common, PT_FEAT_DMA_INCOHERENT)) {	/* [한국어] (원 주석: 이중 플러시를 피해 모든 설치 뒤에 한 번만 한다) */
+		ret = iommu_pages_start_incoherent_list(	/* [한국어] 미뤄 둔 매핑을 이제 한꺼번에 */
+			&free_list, iommu_table->iommu_device);	/* [한국어] 그 장치로 */
+		if (ret)	/* [한국어] 실패면 */
+			goto err_free;	/* [한국어] 되돌린다 */
 	}
 
 	/*
@@ -1254,13 +1336,13 @@ static int increase_top(struct pt_iommu *iommu_table, struct pt_range *range,
 	 * already updated it while we were working then throw everything away
 	 * and try again.
 	 */
-	domain_lock = iommu_table->driver_ops->get_top_lock(iommu_table);
-	spin_lock_irqsave(domain_lock, flags);
-	if (common->top_of_table != top_of_table ||
-	    top_of_table == new_top_of_table) {
-		spin_unlock_irqrestore(domain_lock, flags);
-		ret = -EAGAIN;
-		goto err_free;
+	domain_lock = iommu_table->driver_ops->get_top_lock(iommu_table);	/* [한국어] (원 주석: top_of_table 은 이 스핀락이 쓰기를 지키고 읽기는 READ_ONCE 로 한다) */
+	spin_lock_irqsave(domain_lock, flags);	/* [한국어] 장치 목록 순회와도 직렬화된다 */
+	if (common->top_of_table != top_of_table ||	/* [한국어] 그사이 다른 스레드가 바꿨거나 */
+	    top_of_table == new_top_of_table) {	/* [한국어] 얹은 것이 없으면 */
+		spin_unlock_irqrestore(domain_lock, flags);	/* [한국어] 풀고 */
+		ret = -EAGAIN;	/* [한국어] (원 주석: 전부 버리고 다시 시도한다) */
+		goto err_free;	/* [한국어] 만든 표를 되돌린다 */
 	}
 
 	/*
@@ -1270,69 +1352,99 @@ static int increase_top(struct pt_iommu *iommu_table, struct pt_range *range,
 	 * continue to be correct. Negative caching is fine too since all the
 	 * new IOVA added by the new top is non-present.
 	 */
-	iommu_table->driver_ops->change_top(
-		iommu_table, virt_to_phys(table_mem), new_level);
-	WRITE_ONCE(common->top_of_table, new_top_of_table);
-	spin_unlock_irqrestore(domain_lock, flags);
-	return 0;
+	iommu_table->driver_ops->change_top(	/* [한국어] (원 주석: 걷기 캐시는 문제되지 않으므로 무효화하지 않는다) */
+		iommu_table, virt_to_phys(table_mem), new_level);	/* [한국어] 하드웨어를 먼저 새 단계로 */
+	WRITE_ONCE(common->top_of_table, new_top_of_table);	/* [한국어] 그 다음에야 소프트웨어 최상위를 바꾼다 */
+	spin_unlock_irqrestore(domain_lock, flags);	/* [한국어] 성장 완료 */
+	return 0;	/* [한국어] 성공 */
 
 err_free:
-	if (pt_feature(common, PT_FEAT_DMA_INCOHERENT))
-		iommu_pages_stop_incoherent_list(&free_list,
-						 iommu_table->iommu_device);
-	iommu_put_pages_list(&free_list);
-	return ret;
+	if (pt_feature(common, PT_FEAT_DMA_INCOHERENT))	/* [한국어] 비일관 플랫폼이면 */
+		iommu_pages_stop_incoherent_list(&free_list,	/* [한국어] 매핑을 먼저 풀고 */
+						 iommu_table->iommu_device);	/* [한국어] 그 장치에서 */
+	iommu_put_pages_list(&free_list);	/* [한국어] 만든 표들을 돌려준다 */
+	return ret;	/* [한국어] 실패 이유 */
 }
 
+/*
+ * [한국어]
+ * check_map_range - 범위를 담을 수 있게 만들고 확인한다
+ *
+ * @iommu_table: 대상 페이지 테이블.
+ * @range: 담아야 할 범위.
+ * @map: 매핑 인자.
+ * @return: 0 성공, 음수면 담을 수 없다.
+ *
+ * 고정 크기 형식이면 검사만 하고 끝난다. 자랄 수 있는 형식이면, 범위가
+ * 들어가지 않거나 필요한 잎 단계가 지금 최상위보다 높을 때 단계를 얹는다.
+ *
+ * increase_top 이 -EAGAIN 을 주면 다른 스레드가 먼저 얹은 것이므로, 새
+ * 최상위를 다시 읽고 처음부터 판단한다.
+ */
 static int check_map_range(struct pt_iommu *iommu_table, struct pt_range *range,
 			   struct pt_iommu_map_args *map)
 {
-	struct pt_common *common = common_from_iommu(iommu_table);
-	int ret;
+	struct pt_common *common = common_from_iommu(iommu_table);	/* [한국어] 기능 질의를 위해 */
+	int ret;	/* [한국어] 결과 */
 
 	do {
-		ret = pt_check_range(range);
-		if (!pt_feature(common, PT_FEAT_DYNAMIC_TOP))
-			return ret;
+		ret = pt_check_range(range);	/* [한국어] 범위가 지금 표에 들어가는가 */
+		if (!pt_feature(common, PT_FEAT_DYNAMIC_TOP))	/* [한국어] 자랄 수 없는 형식이면 */
+			return ret;	/* [한국어] 그 답이 최종이다 */
 
-		if (!ret && map->leaf_level <= range->top_level)
-			break;
+		if (!ret && map->leaf_level <= range->top_level)	/* [한국어] 들어가고 잎 단계도 덮으면 */
+			break;	/* [한국어] 더 할 일이 없다 */
 
-		ret = increase_top(iommu_table, range, map);
-		if (ret && ret != -EAGAIN)
-			return ret;
+		ret = increase_top(iommu_table, range, map);	/* [한국어] 단계를 얹는다 */
+		if (ret && ret != -EAGAIN)	/* [한국어] 경합이 아닌 실패면 */
+			return ret;	/* [한국어] 넓힐 수 없다 */
 
 		/* Reload the new top */
-		*range = pt_make_range(common, range->va, range->last_va);
-	} while (ret);
-	PT_WARN_ON(pt_check_range(range));
-	return 0;
+		*range = pt_make_range(common, range->va, range->last_va);	/* [한국어] (원 주석: 새 최상위를 다시 읽는다) */
+	} while (ret);	/* [한국어] 경합이면 처음부터 다시 판단한다 */
+	PT_WARN_ON(pt_check_range(range));	/* [한국어] 이제는 반드시 들어가야 한다 */
+	return 0;	/* [한국어] 성공 */
 }
 
+/*
+ * [한국어]
+ * do_map - 빠른 경로를 먼저 시도하고 안 되면 일반 경로로 매핑한다
+ *
+ * @range: 매핑할 범위.
+ * @common: 페이지 테이블 인스턴스.
+ * @single_page: 4KB 한 장인가.
+ * @map: 매핑 인자.
+ * @return: 0 성공, 음수면 실패.
+ *
+ * 일반 경로의 do-while 이 __map_range_leaf 의 -EAGAIN 을 받아 낸다 —
+ * 페이지 크기가 바뀔 때마다 새 크기로 다시 도는 구조다.
+ *
+ * 시작 단계가 잎 단계와 같으면 내려갈 필요가 없어 곧바로 잎 워커를 쓴다.
+ */
 static int do_map(struct pt_range *range, struct pt_common *common,
 		  bool single_page, struct pt_iommu_map_args *map)
 {
-	int ret;
+	int ret;	/* [한국어] 결과 */
 
 	/*
 	 * The __map_single_page() fast path does not support DMA_INCOHERENT
 	 * flushing to keep its .text small.
 	 */
-	if (single_page && !pt_feature(common, PT_FEAT_DMA_INCOHERENT)) {
+	if (single_page && !pt_feature(common, PT_FEAT_DMA_INCOHERENT)) {	/* [한국어] (원 주석: 빠른 경로는 .text 를 작게 두려고 비일관 플러시를 지원하지 않는다) */
 
-		ret = pt_walk_range(range, __map_single_page, map);
-		if (ret != -EAGAIN)
-			return ret;
+		ret = pt_walk_range(range, __map_single_page, map);	/* [한국어] 표를 만들지 않는 얕은 경로 */
+		if (ret != -EAGAIN)	/* [한국어] 빈 표를 만나지 않았으면 */
+			return ret;	/* [한국어] 그것으로 끝 */
 		/* EAGAIN falls through to the full path */
 	}
 
 	do {
-		if (map->leaf_level == range->top_level)
-			ret = pt_walk_range(range, __map_range_leaf, map);
+		if (map->leaf_level == range->top_level)	/* [한국어] (원 주석: EAGAIN 이면 아래의 전체 경로로 넘어간다) */
+			ret = pt_walk_range(range, __map_range_leaf, map);	/* [한국어] 최상위가 곧 잎 단계면 바로 채운다 */
 		else
-			ret = pt_walk_range(range, __map_range, map);
-	} while (ret == -EAGAIN);
-	return ret;
+			ret = pt_walk_range(range, __map_range, map);	/* [한국어] 아니면 내려가며 표를 만든다 */
+	} while (ret == -EAGAIN);	/* [한국어] 페이지 크기가 바뀔 때마다 새 크기로 다시 돈다 */
+	return ret;	/* [한국어] 성패 */
 }
 
 static int NS(map_range)(struct pt_iommu *iommu_table, dma_addr_t iova,
