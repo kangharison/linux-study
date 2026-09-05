@@ -1692,7 +1692,16 @@ static int riscv_iommu_iodir_set_mode(struct riscv_iommu_device *iommu,
 /* This struct contains protection domain specific IOMMU driver data. */
 /* [한국어] IOMMU 도메인 하나. */
 struct riscv_iommu_domain {
-	union {	/* [한국어] 두 관점을 같은 메모리에 겹친다. */
+	union {
+	/* [한국어] 코어가 보는 도메인과 generic_pt 의 표 객체를 같은 메모리에 겹친 것.
+	 * 왜 겹치는가: generic_pt 의 pt_iommu 구조체가 자기 안에 struct iommu_domain
+	 *   을 품고 있다. 이 드라이버도 같은 iommu_domain 이 필요한데, 따로 두면
+	 *   두 벌이 생겨 어느 것이 진짜인지 혼란스럽다. 같은 자리에 겹쳐 두면
+	 *   변환 없이 두 관점을 오갈 수 있다.
+	 * 읽는 자: 코어 진입점은 domain 으로 보고, 표를 다루는 코드는 generic_pt
+	 *   객체로 본다.
+	 * 제약: 두 관점의 iommu_domain 이 정확히 같은 오프셋에 있어야 한다. 그
+	 *   전제가 깨지면 container_of 가 엉뚱한 곳을 가리킨다. */
 		struct iommu_domain domain;
 		/* [한국어] 코어가 보는 도메인.
 		 * 공용체인 이유: generic_pt가 자기 구조체 안에 같은

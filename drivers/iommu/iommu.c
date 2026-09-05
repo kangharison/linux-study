@@ -290,14 +290,38 @@ struct group_device {
  * 자체 형을 정의하고, 아래에서 kobject 계층과 이어 붙인다.
  */
 struct iommu_group_attribute {
-	/* [한국어] sysfs 가 요구하는 공통 헤더. 이름과 권한이 들어 있다. */
 	struct attribute attr;
+	/* [한국어] sysfs 가 요구하는 공통 헤더 — 파일 이름과 권한이 들어 있다.
+	 * 설정자: IOMMU_GROUP_ATTR 매크로가 정적으로 채운다.
+	 * 읽는 자: sysfs 코어. 이 구조체를 kobject 에 등록할 때 이름과 모드를 여기서 읽는다.
+	 * 왜 첫 필드여야 하는가: sysfs 는 struct attribute 포인터만 받고, 콜백을
+	 *   부를 때 그것을 container_of 로 되짚어 이 구조체를 복원한다. 첫 필드일
+	 *   필요는 없지만 관례이며, 이 자리가 곧 sysfs 가 쥔 손잡이다.
+	 * 아래 두 콜백과 함께, 이 구조체는 "그룹을 인자로 받는 sysfs 속성" 이라는
+	 *   자체 형을 이룬다. */
 
-	/* [한국어] 읽기 콜백. 그룹을 받아 버퍼에 쓴 바이트 수를 돌려준다. */
 	ssize_t (*show)(struct iommu_group *group, char *buf);
+	/* [한국어] 읽기 콜백 — 그룹을 받아 버퍼에 쓴 바이트 수를 돌려준다.
+	 * 설정자: IOMMU_GROUP_ATTR 매크로가 각 속성의 구현을 꽂는다.
+	 * 읽는 자: iommu_group_attr_show() 가 sysfs 의 일반 콜백을 받아 이쪽으로 넘긴다.
+	 * @group: 대상 그룹. sysfs 가 준 kobject 에서 되짚은 것이다.
+	 * @buf:   PAGE_SIZE 크기의 출력 버퍼.
+	 * @return: 쓴 바이트 수, 또는 음수 오류.
+	 * 왜 표준 device_attribute 를 쓰지 않는가: 그쪽의 콜백은 struct device 를
+	 *   받는데, 이 속성들의 대상은 장치가 아니라 그룹이다. 콜백마다 그룹을
+	 *   되짚는 코드를 넣는 대신, 되짚기를 한 곳(iommu_group_attr_show)에 모으고
+	 *   콜백은 그룹을 바로 받게 했다. */
 
-	/* [한국어] 쓰기 콜백. NULL 이면 읽기 전용 속성이다. */
 	ssize_t (*store)(struct iommu_group *group,
+	/* [한국어] 쓰기 콜백 — NULL 이면 읽기 전용 속성이다.
+	 * 설정자: IOMMU_GROUP_ATTR 매크로. 읽기 전용 속성은 이 자리를 비운다.
+	 * 읽는 자: iommu_group_attr_store() 가 sysfs 콜백을 받아 넘긴다. 이 포인터가
+	 *   NULL 이면 -EIO 를 돌려준다.
+	 * @group: 대상 그룹.
+	 * @buf/@count: 사용자가 쓴 내용과 그 길이. 널 종료가 보장되지 않는다.
+	 * @return: 소비한 바이트 수(보통 count), 또는 음수 오류.
+	 * 대표적인 쓰기 속성이 type 이다 — 그룹의 기본 도메인 종류를 DMA, DMA-FQ,
+	 *   identity 사이에서 바꾼다. 그것이 이 콜백이 존재하는 주된 이유다. */
 			 const char *buf, size_t count);
 };
 

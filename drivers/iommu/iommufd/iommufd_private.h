@@ -344,7 +344,16 @@ void iopt_free_pages_list(struct list_head *pages_list);	/* [한국어] 그 목�
  * IOVA 를 커널이 골라 달라는 요청이면 ALLOC_IOVA 를 준다.
  */
 enum {
-	IOPT_ALLOC_IOVA = 1 << 0,	/* [한국어] IOVA 를 커널이 골라 달라는 요청 */
+	IOPT_ALLOC_IOVA = 1 << 0,
+	/* [한국어] IOVA 를 사용자가 지정하지 않고 커널이 골라 달라는 요청.
+	 * 설정자: 매핑 ioctl 이 사용자 플래그를 보고 정한다.
+	 * 읽는 자: iopt_map_* 계열이 이 비트를 보면 빈 구간을 스스로 찾고, 고른
+	 *   주소를 iova 인자에 돌려준다.
+	 * 왜 두 방식이 다 필요한가: 게스트 메모리처럼 IOVA 가 미리 정해진 경우에는
+	 *   사용자가 지정해야 하고, 단순히 DMA 버퍼가 필요한 경우에는 커널이 고르는
+	 *   편이 편하고 충돌도 없다.
+	 * 값 범위: 이 enum 에는 현재 이 하나뿐이며, 비트 플래그 형태로 둔 것은
+	 *   나중에 다른 요청을 더할 여지를 남기기 위해서다. */
 };
 int iopt_map_user_pages(struct iommufd_ctx *ictx, struct io_pagetable *iopt,	/* [한국어] 사용자 VA 를 IOVA 에 매핑한다 */
 			unsigned long *iova, void __user *uptr,
@@ -523,8 +532,24 @@ void iommufd_object_finalize(struct iommufd_ctx *ictx,	/* [한국어] 객체를 
  * id 를 비워 두지 않고 비석으로 남겨 재사용을 막는다.
  */
 enum {
-	REMOVE_WAIT		= BIT(0),	/* [한국어] 다른 사용자가 놓을 때까지 기다린다 */
-	REMOVE_OBJ_TOMBSTONE	= BIT(1),	/* [한국어] id 를 비석으로 남겨 재사용을 막는다 */
+	REMOVE_WAIT		= BIT(0),
+	/* [한국어] 다른 사용자가 이 객체를 놓을 때까지 기다린다.
+	 * 설정자: 객체를 파괴하는 경로가 상황에 따라 준다.
+	 * 읽는 자: iommufd_object_remove() 가 참조가 남아 있을 때 어떻게 할지 정할 때.
+	 * 이 비트가 없으면: 참조가 남아 있으면 곧바로 -EBUSY 로 실패한다. 사용자가
+	 *   명시적으로 IOMMU_DESTROY 를 부른 경우가 그렇다 — 아직 쓰이는 객체를
+	 *   지우려는 것은 사용자의 실수이므로 알려 주는 편이 낫다.
+	 * 이 비트가 있으면: fd 를 닫아 모든 것을 정리하는 경로처럼, 실패할 수 없고
+	 *   기다리는 것 말고 선택지가 없는 경우다. */
+	REMOVE_OBJ_TOMBSTONE	= BIT(1),
+	/* [한국어] id 를 비워 두지 않고 비석(tombstone)으로 남겨 재사용을 막는다.
+	 * 설정자: 객체를 파괴하는 경로 중, 그 id 가 다시 쓰이면 위험한 경우.
+	 * 읽는 자: iommufd_object_remove() 가 id 를 xarray 에서 지울지 표시만 할지 정할 때.
+	 * 왜 필요한가: id 를 곧바로 비우면 다음 객체가 그 번호를 물려받는다. 이전
+	 *   객체의 id 를 아직 들고 있는 사용자 코드가 그것을 쓰면, 전혀 다른 객체를
+	 *   조작하게 된다 — 조용히 잘못된 대상에 작용하는, 진단이 매우 어려운 오류다.
+	 * 비석을 남기면 그 요청이 "없는 객체" 로 깨끗하게 실패한다.
+	 * 대가: 그 id 는 fd 가 닫힐 때까지 다시 쓰이지 않는다. */
 };
 int iommufd_object_remove(struct iommufd_ctx *ictx,	/* [한국어] 객체를 목록에서 빼고 파괴한다 */
 			  struct iommufd_object *to_destroy, u32 id,

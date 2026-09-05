@@ -958,7 +958,7 @@ struct arm_smmu_cmdq_ent {
  * 캐시 줄 정렬을 강제하는 것도 요점 — 여러 CPU 가 이 값을 다투므로,
  * 다른 자료와 같은 줄에 있으면 거짓 공유가 생긴다. */
 struct arm_smmu_ll_queue {
-	union {
+	union {	/* [한국어] 같은 8바이트를 네 가지로 본다: 한 워드(val), 두 정수(prod/cons), 두 atomic_t, 그리고 캐시 줄 채움 */
 		u64			val;
 		/* [한국어] prod 와 cons 를 한 64비트로 겹쳐 본 모습 — 락 없는 큐 삽입의 토대다.
 		 * 설정자/읽는 자: arm_smmu_cmdq_issue_cmdlist() 가 이 값으로 cmpxchg 를 건다.
@@ -987,7 +987,7 @@ struct arm_smmu_ll_queue {
 			 *   레지스터를 읽어 새로 고쳐야 최신이 된다. 큐가 찼을 때만 그렇게 한다.
 			 * 동기화: 위 val 과 함께 원자적으로 다룬다. */
 		};
-		struct {
+		struct {	/* [한국어] 같은 두 워드를 atomic_t 로 본 두 번째 관점. 원자 연산이 필요한 경로가 이 이름들을 쓴다 */
 			atomic_t	prod;
 			/* [한국어] 위 prod 와 같은 자리를 atomic_t 로 본 것.
 			 * 설정자/읽는 자: atomic_fetch_inc 처럼 원자 연산이 필요한 경로가 이 이름을 쓴다.

@@ -192,8 +192,25 @@ static int of_iommu_configure_dev(struct device_node *master_np,
  * 두 값을 함께 넘기려면 이렇게 묶어야 한다.
  */
 struct of_pci_iommu_alias_info {
-	struct device *dev;	/* [한국어] 별칭마다 ID 를 등록할 대상 장치 */
-	struct device_node *np;	/* [한국어] 매핑 표를 담고 있는 버스 노드 */
+	struct device *dev;
+	/* [한국어] 별칭마다 IOMMU ID 를 등록할 대상 장치.
+	 * 설정자: of_iommu_configure() 가 순회를 시작하기 전에 채운다.
+	 * 읽는 자: of_pci_iommu_init() 콜백이 찾아낸 ID 를 이 장치에 붙일 때.
+	 * 왜 구조체로 묶어 넘기는가: pci_for_each_dma_alias() 의 콜백은 void 포인터
+	 *   하나만 받는다. 장치와 아래 버스 노드 두 값을 함께 넘기려면 묶는 수밖에 없다.
+	 * 값 범위: NULL 이 아니다. 순회하는 동안 바뀌지 않는다.
+	 * 왜 별칭을 순회하는가: PCI-to-PCI 브리지 뒤의 장치나 위상 정보가 없는
+	 *   장치는 IOMMU 에 자기 BDF 가 아닌 다른 요청자 id 로 나타난다. 그 모든
+	 *   가능한 id 를 등록해야 어느 것으로 오든 이 장치로 인식된다. */
+	struct device_node *np;
+	/* [한국어] iommu-map 표를 담고 있는 버스(호스트 브리지) 노드.
+	 * 설정자: of_iommu_configure() 가 장치의 상위 버스 노드를 찾아 담는다.
+	 * 읽는 자: 콜백이 of_map_id() 로 이 노드의 iommu-map 표를 뒤져, 별칭 id 를
+	 *   IOMMU 의 id 로 옮길 때.
+	 * 왜 장치 노드가 아니라 버스 노드인가: PCI 장치는 대개 장치 트리에 노드가
+	 *   없다 — 열거로 발견되기 때문이다. 그래서 대응 표는 호스트 브리지 노드에
+	 *   놓이고, 그 표가 요청자 id 범위를 IOMMU id 범위로 옮긴다.
+	 * 값 범위: NULL 이 아니다. */
 };
 
 /*
