@@ -361,8 +361,7 @@ struct iova_fq {
 	struct iova_fq_entry entries[];
 };
 
-/* [한국어] head 부터 tail 직전까지 링을 도는 매크로. mod_mask 로 감싸므로 배열 끝에서 앞으로 되돌아온다
- * (매크로 이어짐 표시 \ 뒤에는 주석을 붙일 수 없어 위로 옮겼다.) */
+/* [한국어] head 부터 tail 직전까지 링을 도는 매크로. mod_mask 로 감싸므로 배열 끝에서 앞으로 되돌아온다 */
 #define fq_ring_for_each(i, fq) \
 	for ((i) = (fq)->head; (i) != (fq)->tail; (i) = ((i) + 1) & (fq)->mod_mask)	/* [한국어] head == tail 이면 비었다는 규약이라 종료 조건이 곧 '빔' 판정이기도 하다 */
 
@@ -2009,8 +2008,7 @@ struct dma_sgt_handle {
 	struct sg_table sgt;	/* [한국어] 호출자에게 돌려줄 scatterlist */
 	struct page **pages;	/* [한국어] DMA API 내부에서 vmap/해제에 쓸 페이지 배열. 사용자는 이것을 몰라도 된다 (위 영어 주석) */
 };
-/* [한국어] 돌려준 sgt 포인터에서 감싸는 핸들로 되짚는다
- * (매크로 이어짐 표시 \ 뒤에는 주석을 붙일 수 없어 위로 옮겼다.) */
+/* [한국어] 돌려준 sgt 포인터에서 감싸는 핸들로 되짚는다 */
 #define sgt_handle(sgt) \
 	container_of((sgt), struct dma_sgt_handle, sgt)	/* [한국어] sgt 가 핸들의 첫 필드이므로 성립한다 */
 

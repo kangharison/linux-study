@@ -138,8 +138,7 @@ struct iommu_regset {
 #define DEBUG_BUFFER_SIZE	1024	/* [한국어] 아래 debug_buf 의 크기. 한 번에 만들어 낼 수 있는 문자열의 상한이다 */
 static char debug_buf[DEBUG_BUFFER_SIZE];	/* [한국어] 임시 문자열 조립용 전역 버퍼. debugfs 쓰기 경로가 사용자 입력을 받는 데 쓴다 */
 
-/* [한국어] 레지스터 이름 하나로 {오프셋, "이름"} 쌍을 만든다. 이름과 오프셋이 어긋날 수 없게 하는 장치
- * (매크로 이어짐 표시 \ 뒤에는 주석을 붙일 수 없어 위로 옮겼다.) */
+/* [한국어] 레지스터 이름 하나로 {오프셋, "이름"} 쌍을 만든다. 이름과 오프셋이 어긋날 수 없게 하는 장치 */
 #define IOMMU_REGSET_ENTRY(_reg_)					\
 	{ DMAR_##_reg_##_REG, __stringify(_reg_) }	/* [한국어] 매크로 인자 하나에서 오프셋 상수와 이름 문자열을 함께 만든다 — 둘이 어긋날 수 없다 */
 

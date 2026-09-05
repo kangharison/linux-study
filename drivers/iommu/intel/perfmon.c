@@ -94,7 +94,7 @@ static struct attribute_group iommu_pmu_format_attr_group = {	/* [한국어] 그
 
 /* The available events are added in attr_update later */
 static struct attribute *attrs_empty[] = {	/* [한국어] 비어 있는 속성 목록. 이벤트 속성은 하드웨어 능력을 본 뒤 attr_update 로 채워진다 */
-	NULL
+	NULL	/* [한국어] 목록의 끝 표시 */
 };
 
 static struct attribute_group iommu_pmu_events_attr_group = {	/* [한국어] "events" 디렉터리. 처음에는 비어 있다 */
@@ -138,8 +138,27 @@ static inline struct iommu_pmu *dev_to_iommu_pmu(struct device *dev)
 	return container_of(dev_get_drvdata(dev), struct iommu_pmu, pmu);	/* [한국어] perf 코어가 걸어 둔 struct pmu 로부터 바깥 구조체를 얻는다 */
 }
 
-/* [한국어] 필터 속성 하나를 통째로 만들어 내는 매크로. 속성, 배열, 가시성 함수, 그룹을 한 번에 정의한다
- * (매크로 이어짐 표시 \ 뒤에는 주석을 붙일 수 없어 위로 옮겼다.) */
+/*
+ * [한국어] 필터 속성 하나에 필요한 네 가지를 통째로 만들어 내는 매크로
+ *
+ * 필터가 열 개나 되고 각각 속성·배열·가시성 함수·그룹을 필요로 해서, 손으로
+ * 쓰면 마흔 덩어리가 된다. 이름 하나에서 전부 찍어 내면 그 사이의 불일치가
+ * 원천적으로 불가능해진다.
+ *
+ * 본체의 각 줄:
+ *  - PMU_FORMAT_ATTR(_name, _format)
+ *      "이 필터는 config1 의 몇 번 비트인가"를 sysfs 에 알리는 속성.
+ *  - static struct attribute *_name##_attr[]
+ *      그 속성 하나만 담은 배열. 그룹이 배열을 요구하기 때문에 필요하다.
+ *  - _name##_is_visible(...)
+ *      sysfs 가 파일을 만들지 말지 물을 때 답하는 콜백. dev_to_iommu_pmu 로
+ *      PMU 를 되찾아 filter 비트맵에 이 필터가 있는지 본다. 없으면 0 을
+ *      돌려 파일 자체가 생기지 않는다 — 사용자는 sysfs 만 보고 이 기계에서
+ *      실제로 걸 수 있는 필터를 알 수 있다.
+ *  - static struct attribute_group _name
+ *      위 셋을 "format" 디렉터리용 그룹으로 묶는다. 이 그룹이
+ *      iommu_pmu_attr_update 목록에 실려 등록된다.
+ */
 #define IOMMU_PMU_ATTR(_name, _format, _filter)				\
 	PMU_FORMAT_ATTR(_name, _format);				\
 									\
@@ -187,8 +206,25 @@ IOMMU_PMU_ATTR(filter_page_table,	"config2:32-36",	IOMMU_PMU_FILTER_PAGE_TABLE);
 #define iommu_pmu_get_ats(filter)		(((filter) >> 24) & 0x1f)	/* [한국어] config2 에서 ATS 필터 값 */
 #define iommu_pmu_get_page_table(filter)	(((filter) >> 32) & 0x1f)	/* [한국어] config2 상위에서 페이지 테이블 종류 */
 
-/* [한국어] 하드웨어가 그 필터를 지원하고 사용자가 켰을 때만 필터 레지스터에 값을 쓴다. 오프셋은 카운터 인덱스와 필터 종류로 계산한다
- * (매크로 이어짐 표시 \ 뒤에는 주석을 붙일 수 없어 위로 옮겼다.) */
+/*
+ * [한국어] 필터 값을 카운터의 필터 레지스터에 쓴다
+ *
+ * 두 조건을 모두 만족할 때만 쓴다: 하드웨어가 그 필터를 지원하고
+ * (iommu_pmu->filter), 사용자가 그 필터를 켰을 때(iommu_pmu_en_##_name).
+ * 둘 중 하나라도 아니면 아무것도 하지 않아, 필터가 걸리지 않은 상태로
+ * 남는다 — 지원하지 않는 레지스터를 건드리는 것보다 안전하다.
+ *
+ * 쓰는 주소는 세 조각을 더해 구한다:
+ *  - _idx * IOMMU_PMU_CFG_OFFSET  : 카운터마다 설정 블록이 하나씩 있다.
+ *  - IOMMU_PMU_CFG_SIZE           : 그 블록에서 필터 영역이 시작하는 자리.
+ *  - (ffs(_filter) - 1) * IOMMU_PMU_CFG_FILTERS_OFFSET
+ *                                 : 필터 종류마다 한 칸씩. _filter 는 비트
+ *                                   하나짜리 상수라 ffs 로 그 비트 위치를
+ *                                   구하면 그대로 몇 번째 필터인지가 된다.
+ *
+ * 값에 IOMMU_PMU_FILTER_EN 을 함께 OR 하는 이유: 같은 레지스터의 활성화
+ * 비트라, 값만 쓰고 이 비트를 빼면 필터가 동작하지 않는다.
+ */
 #define iommu_pmu_set_filter(_name, _config, _filter, _idx, _econfig)		\
 {										\
 	if ((iommu_pmu->filter & _filter) && iommu_pmu_en_##_name(_econfig)) {	\
@@ -199,8 +235,19 @@ IOMMU_PMU_ATTR(filter_page_table,	"config2:32-36",	IOMMU_PMU_FILTER_PAGE_TABLE);
 	}									\
 }
 
-/* [한국어] 같은 자리에 0 을 써 필터를 해제한다. 카운터를 재사용할 때 앞 이벤트의 필터가 남지 않게 하는 것이 목적
- * (매크로 이어짐 표시 \ 뒤에는 주석을 붙일 수 없어 위로 옮겼다.) */
+/*
+ * [한국어] 필터를 해제한다 — 같은 자리에 0 을 쓴다
+ *
+ * 0 을 쓰면 값과 함께 활성화 비트도 내려가 필터가 풀린다. 주소 계산은
+ * iommu_pmu_set_filter 와 완전히 같다.
+ *
+ * 이것이 왜 중요한가: 카운터는 이벤트가 끝나면 다른 이벤트에 재배정된다.
+ * 앞 이벤트가 걸어 둔 "PASID 3만 센다" 같은 필터가 남아 있으면, 다음
+ * 이벤트는 이유를 알 수 없는 0 을 세게 된다. 그래서 iommu_pmu_del 이
+ * 다섯 필터를 모두 지운 뒤에야 자리를 반납한다.
+ *
+ * 지원하지 않는 필터는 건너뛰는 것도 set 과 같다.
+ */
 #define iommu_pmu_clear_filter(_filter, _idx)					\
 {										\
 	if (iommu_pmu->filter & _filter) {					\
@@ -218,8 +265,27 @@ IOMMU_PMU_ATTR(filter_page_table,	"config2:32-36",	IOMMU_PMU_FILTER_PAGE_TABLE);
  *        _g_idx: event group encoding
  *        _event: event encoding
  */
-/* [한국어] 이벤트 하나의 sysfs 속성을 통째로 만든다. is_visible 이 evcap 을 확인하므로, 하드웨어가 세지 못하는 이벤트는 사용자에게 아예 보이지 않는다
- * (매크로 이어짐 표시 \ 뒤에는 주석을 붙일 수 없어 위로 옮겼다.) */
+/*
+ * [한국어] (위 영어 주석에 이어) 이벤트 하나의 sysfs 속성을 통째로 만든다
+ *
+ * IOMMU_PMU_ATTR 와 같은 구조이고, 판단 근거만 다르다. 필터 쪽은
+ * iommu_pmu->filter 를 보지만 이쪽은 evcap[그룹]에 이 이벤트의 비트가
+ * 있는지를 본다.
+ *
+ * 본체의 각 줄:
+ *  - PMU_EVENT_ATTR_STRING(_name, event_attr_##_name, _string)
+ *      "event_group=0x3,event=0x002" 같은 문자열을 그대로 내보내는 속성.
+ *      perf 도구가 이 문자열을 읽어 사용자의 이벤트 이름을 config 값으로
+ *      번역하므로, 사용자는 비트 인코딩을 몰라도 된다.
+ *  - static struct attribute *_name##_attr[]
+ *      그 속성 하나만 담은 배열.
+ *  - _name##_is_visible(...)
+ *      evcap[_g_idx] 에 _event 비트가 없으면 0 을 돌려 파일을 만들지
+ *      않는다. 그래서 sysfs 의 events 디렉터리는 곧 "이 기계가 실제로
+ *      셀 수 있는 이벤트 목록"이 된다.
+ *  - static struct attribute_group _name
+ *      위 셋을 "events" 디렉터리용 그룹으로 묶는다.
+ */
 #define IOMMU_PMU_EVENT_ATTR(_name, _string, _g_idx, _event)			\
 	PMU_EVENT_ATTR_STRING(_name, event_attr_##_name, _string)		\
 										\
@@ -578,7 +644,7 @@ static void iommu_pmu_event_update(struct perf_event *event)
 	u64 prev_count, new_count, delta;	/* [한국어] 직전 값, 현재 값, 그 차이 */
 	int shift = 64 - iommu_pmu->cntr_width;	/* [한국어] 카운터의 최상위 비트를 64비트의 최상위로 올릴 시프트 양 */
 
-again:
+again:	/* [한국어] 다른 CPU 가 끼어들어 prev_count 를 바꿨을 때 되돌아오는 지점 */
 	prev_count = local64_read(&hwc->prev_count);	/* [한국어] 마지막으로 읽었던 값 */
 	new_count = readq(iommu_event_base(iommu_pmu, hwc->idx));	/* [한국어] 지금의 하드웨어 값 */
 	if (local64_xchg(&hwc->prev_count, new_count) != prev_count)	/* [한국어] 바꿔치기의 반환값이 예상과 다르면 누군가 먼저 갱신했다 */
@@ -1203,7 +1269,7 @@ int alloc_iommu_pmu(struct intel_iommu *iommu)
 	 * same capabilities on Interrupt on Overflow Support and Counter
 	 * Width.
 	 */
-	for (i = 0; i < iommu_pmu->num_cntr; i++) {
+	for (i = 0; i < iommu_pmu->num_cntr; i++) {	/* [한국어] 카운터마다 개별 능력을 확인한다 */
 		cap = readl(iommu_pmu->cfg_reg +	/* [한국어] 카운터별 능력 레지스터를 읽는다 */
 			    i * IOMMU_PMU_CFG_OFFSET +	/* [한국어] 카운터 인덱스 × 설정 블록 크기 */
 			    IOMMU_PMU_CFG_CNTRCAP_OFFSET);	/* [한국어] 그 블록 안의 능력 필드 */
@@ -1245,13 +1311,13 @@ int alloc_iommu_pmu(struct intel_iommu *iommu)
 
 	return 0;	/* [한국어] 구성 완료 */
 
-free_pmu_cntr_evcap:
-	for (i = 0; i < iommu_pmu->num_cntr; i++)
+free_pmu_cntr_evcap:	/* [한국어] 카운터별 능력 배열까지 잡은 뒤 실패한 경우 */
+	for (i = 0; i < iommu_pmu->num_cntr; i++)	/* [한국어] 잡은 안쪽 배열을 하나씩 */
 		kfree(iommu_pmu->cntr_evcap[i]);	/* [한국어] 2차원 배열은 안쪽부터 놓아야 한다 */
 	kfree(iommu_pmu->cntr_evcap);	/* [한국어] 바깥 배열 */
-free_pmu_evcap:
+free_pmu_evcap:	/* [한국어] 전역 능력 배열까지 잡은 뒤 실패한 경우 */
 	kfree(iommu_pmu->evcap);	/* [한국어] 전역 능력 배열 */
-free_pmu:
+free_pmu:	/* [한국어] 구조체만 잡은 뒤 실패한 경우 */
 	kfree(iommu_pmu);	/* [한국어] 구조체 자신 */
 
 	return ret;	/* [한국어] 실패 원인 그대로 */
@@ -1400,9 +1466,9 @@ void iommu_pmu_register(struct intel_iommu *iommu)
 
 	return;	/* [한국어] 성공 — 이제 perf 로 측정할 수 있다 */
 
-unregister:
+unregister:	/* [한국어] PMU 등록까지 성공한 뒤 인터럽트에서 실패한 경우 */
 	perf_pmu_unregister(&iommu_pmu->pmu);	/* [한국어] 코어가 해제된 구조체를 참조하지 않도록 먼저 뗀다 */
-err:
+err:	/* [한국어] 등록 자체가 실패한 경우도 여기로 모인다 */
 	pr_err("Failed to register PMU for iommu (seq_id = %d)\n", iommu->seq_id);	/* [한국어] 실패해도 IOMMU 동작에는 영향이 없어 경고만 남긴다 */
 	free_iommu_pmu(iommu);	/* [한국어] 구조체를 놓고 iommu->pmu 를 NULL 로 되돌린다 */
 }

@@ -73,13 +73,11 @@
 #define ARM_LPAE_MAX_LEVELS		4	/* [한국어] 최대 4단계 워크 (레벨 0~3) */
 
 /* Struct accessors */
-/* [한국어] 공통 io_pgtable 객체에서 이 구현의 확장형으로 되짚는다
- * (매크로 이어짐 표시 \ 뒤에는 주석을 붙일 수 없어 위로 옮겼다.) */
+/* [한국어] 공통 io_pgtable 객체에서 이 구현의 확장형으로 되짚는다 */
 #define io_pgtable_to_data(x)						\
 	container_of((x), struct arm_lpae_io_pgtable, iop)	/* [한국어] iop 이 확장형 안에 박혀 있으므로 성립한다 */
 
-/* [한국어] ops 포인터에서 곧바로 확장형으로 (두 단계 역산을 합친 것)
- * (매크로 이어짐 표시 \ 뒤에는 주석을 붙일 수 없어 위로 옮겼다.) */
+/* [한국어] ops 포인터에서 곧바로 확장형으로 (두 단계 역산을 합친 것) */
 #define io_pgtable_ops_to_data(x)					\
 	io_pgtable_to_data(io_pgtable_ops_to_pgtable(x))	/* [한국어] ops → io_pgtable → arm_lpae_io_pgtable */
 
@@ -99,17 +97,14 @@
 	(((ARM_LPAE_MAX_LEVELS - (l)) * (d)->bits_per_level) +		\
 	ilog2(sizeof(arm_lpae_iopte)))	/* [한국어] 서술자 하나가 8바이트이므로 최하위 3비트는 항목 내 오프셋이다 (위 영어 주석) */
 
-/* [한국어] 테이블 한 장의 크기 = 항목 크기 × 항목 수. 이것이 곧 이 설정의 페이지 크기(4K/16K/64K)이기도 하다
- * (매크로 이어짐 표시 \ 뒤에는 주석을 붙일 수 없어 위로 옮겼다.) */
+/* [한국어] 테이블 한 장의 크기 = 항목 크기 × 항목 수. 이것이 곧 이 설정의 페이지 크기(4K/16K/64K)이기도 하다 */
 #define ARM_LPAE_GRANULE(d)						\
 	(sizeof(arm_lpae_iopte) << (d)->bits_per_level)	/* [한국어] 8 << bits_per_level */
-/* [한국어] 최상위 테이블의 크기. 보통 테이블 한 장과 같지만, stage-2 의 이어붙이기나 좁은 주소 공간에서는 다를 수 있다
- * (매크로 이어짐 표시 \ 뒤에는 주석을 붙일 수 없어 위로 옮겼다.) */
+/* [한국어] 최상위 테이블의 크기. 보통 테이블 한 장과 같지만, stage-2 의 이어붙이기나 좁은 주소 공간에서는 다를 수 있다 */
 #define ARM_LPAE_PGD_SIZE(d)						\
 	(sizeof(arm_lpae_iopte) << (d)->pgd_bits)	/* [한국어] 8 << pgd_bits */
 
-/* [한국어] 테이블 한 장에 들어가는 항목 수
- * (매크로 이어짐 표시 \ 뒤에는 주석을 붙일 수 없어 위로 옮겼다.) */
+/* [한국어] 테이블 한 장에 들어가는 항목 수 */
 #define ARM_LPAE_PTES_PER_TABLE(d)					\
 	(ARM_LPAE_GRANULE(d) >> ilog2(sizeof(arm_lpae_iopte)))	/* [한국어] 테이블 크기 / 항목 크기 */
 
@@ -117,8 +112,7 @@
  * Calculate the index at level l used to map virtual address a using the
  * pagetable in d.
  */
-/* [한국어] 최상위 레벨에서만 인덱스 폭이 다를 수 있다 — 이어붙이기나 축소된 주소 공간 때문
- * (매크로 이어짐 표시 \ 뒤에는 주석을 붙일 수 없어 위로 옮겼다.) */
+/* [한국어] 최상위 레벨에서만 인덱스 폭이 다를 수 있다 — 이어붙이기나 축소된 주소 공간 때문 */
 #define ARM_LPAE_PGD_IDX(l,d)						\
 	((l) == (d)->start_level ? (d)->pgd_bits - (d)->bits_per_level : 0)	/* [한국어] 최상위면 그 차이를, 아니면 0 */
 
@@ -163,12 +157,10 @@
 /* Stage-1 PTE */
 #define ARM_LPAE_PTE_AP_UNPRIV		(((arm_lpae_iopte)1) << 6)	/* [한국어] stage-1: 비특권 접근 허용 */
 #define ARM_LPAE_PTE_AP_RDONLY_BIT	7	/* [한국어] stage-1: 읽기 전용 비트의 위치 */
-/* [한국어] 읽기 전용. DMA_TO_DEVICE 매핑이 이 비트를 얻어, 장치가 그 버퍼를 덮어쓰면 폴트가 난다
- * (매크로 이어짐 표시 \ 뒤에는 주석을 붙일 수 없어 위로 옮겼다.) */
+/* [한국어] 읽기 전용. DMA_TO_DEVICE 매핑이 이 비트를 얻어, 장치가 그 버퍼를 덮어쓰면 폴트가 난다 */
 #define ARM_LPAE_PTE_AP_RDONLY		(((arm_lpae_iopte)1) << \
 					   ARM_LPAE_PTE_AP_RDONLY_BIT)	/* [한국어] 위 비트 위치 */
-/* [한국어] 더티 추적에서 '쓰기 없음' 상태를 나타내는 조합
- * (매크로 이어짐 표시 \ 뒤에는 주석을 붙일 수 없어 위로 옮겼다.) */
+/* [한국어] 더티 추적에서 '쓰기 없음' 상태를 나타내는 조합 */
 #define ARM_LPAE_PTE_AP_WR_CLEAN_MASK	(ARM_LPAE_PTE_AP_RDONLY | \
 					 ARM_LPAE_PTE_DBM)	/* [한국어] RDONLY + DBM 이 함께 서 있으면, 하드웨어가 쓰기를 만났을 때 RDONLY 를 지워 더티를 기록한다 */
 #define ARM_LPAE_PTE_ATTRINDX_SHIFT	2	/* [한국어] stage-1: 캐시 속성을 MAIR 레지스터의 인덱스로 간접 지정한다 */
