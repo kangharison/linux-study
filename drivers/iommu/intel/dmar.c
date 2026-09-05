@@ -2579,46 +2579,104 @@ restart:	/* [한국어] 오류로 중단되었을 때 처음부터 다시 제출
 /*
  * Flush the global interrupt entry cache.
  */
+/*
+ * [한국어]
+ * qi_global_iec - 인터럽트 항목 캐시를 통째로 비운다
+ *
+ * @iommu: 대상 유닛.
+ * @return: 없음.
+ *
+ * 인터럽트 재매핑 테이블을 고친 뒤 부른다. 하드웨어가 캐시한 옛 항목이
+ * 남아 있으면 인터럽트가 여전히 옛 벡터나 옛 CPU 로 간다.
+ * 범위를 지정하지 않고 전역으로 비우는 이유: 이 무효화는 인터럽트를
+ * 재설정할 때만 일어나 드물고, 어느 항목이 영향을 받는지 좁히는 비용이
+ * 이득보다 크다.
+ * "should never fail"(영어 주석)은 반환값을 무시한다는 뜻이다 — 실패하면
+ * 하드웨어나 큐가 이미 망가진 상태라 여기서 할 수 있는 일이 없다. *
+ * 실행 컨텍스트: 무효화 경로. qi_submit_sync 안에서 완료를 기다린다.
+ */
 void qi_global_iec(struct intel_iommu *iommu)
 {
-	struct qi_desc desc;
+	struct qi_desc desc;	/* [한국어] 보낼 서술자 */
 
-	desc.qw0 = QI_IEC_TYPE;
-	desc.qw1 = 0;
-	desc.qw2 = 0;
-	desc.qw3 = 0;
+	desc.qw0 = QI_IEC_TYPE;	/* [한국어] 인터럽트 항목 캐시 무효화. 범위를 지정하지 않으면 전역이다 */
+	desc.qw1 = 0;	/* [한국어] 주소를 쓰지 않는다 */
+	desc.qw2 = 0;	/* [한국어] 예약 워드를 비운다 */
+	desc.qw3 = 0;	/* [한국어] 같음 */
 
 	/* should never fail */
-	qi_submit_sync(iommu, &desc, 1, 0);
+	qi_submit_sync(iommu, &desc, 1, 0);	/* [한국어] 반환값을 무시한다 — 실패하면 하드웨어나 큐가 이미 망가진 상태라 할 수 있는 일이 없다 (위 영어 주석) */
 }
 
+/*
+ * [한국어]
+ * qi_flush_context - 컨텍스트 캐시를 비운다
+ *
+ * @iommu: 대상 유닛. @did: 도메인 id. @sid: 소스 id.
+ * @fm: 함수 마스크. @type: 무효화 범위(전역/도메인/장치).
+ * @return: 없음.
+ *
+ * 컨텍스트 항목을 고친 뒤 부른다. 하드웨어가 그 항목을 캐시하고 있으면
+ * 새 설정이 반영되지 않는다.
+ * 함수 마스크로 여러 함수를 한 번에 비울 수 있다 — 한 장치의 모든 함수가
+ * 같은 도메인에 속하는 흔한 경우에 명령 수를 줄인다. *
+ * 실행 컨텍스트: 무효화 경로. qi_submit_sync 안에서 완료를 기다린다.
+ */
 void qi_flush_context(struct intel_iommu *iommu, u16 did, u16 sid, u8 fm,
 		      u64 type)
 {
-	struct qi_desc desc;
+	struct qi_desc desc;	/* [한국어] 보낼 서술자 */
 
-	desc.qw0 = QI_CC_FM(fm) | QI_CC_SID(sid) | QI_CC_DID(did)
-			| QI_CC_GRAN(type) | QI_CC_TYPE;
-	desc.qw1 = 0;
-	desc.qw2 = 0;
-	desc.qw3 = 0;
+	desc.qw0 = QI_CC_FM(fm) | QI_CC_SID(sid) | QI_CC_DID(did)	/* [한국어] 함수 마스크·소스 id·도메인 id 와 */
+			| QI_CC_GRAN(type) | QI_CC_TYPE;	/* [한국어] 범위 종류·명령 종류를 담는다 */
+	desc.qw1 = 0;	/* [한국어] 컨텍스트 캐시 무효화는 주소를 쓰지 않는다 */
+	desc.qw2 = 0;	/* [한국어] 예약 워드를 비운다 */
+	desc.qw3 = 0;	/* [한국어] 같음 */
 
-	qi_submit_sync(iommu, &desc, 1, 0);
+	qi_submit_sync(iommu, &desc, 1, 0);	/* [한국어] 하나만 보내고 완료를 기다린다 */
 }
 
+/*
+ * [한국어]
+ * qi_flush_iotlb - IOTLB 를 비운다
+ *
+ * @iommu: 대상 유닛. @did: 도메인 id. @addr: 주소.
+ * @size_order: 범위 크기. @type: 무효화 범위 종류.
+ * @return: 없음.
+ *
+ * 서술자 조립은 iommu.h 의 qi_desc_iotlb 가 하고, 이 함수는 그것을 하나만
+ * 보낸다. cache.c 는 같은 조립 함수를 쓰되 배치에 모으므로, 이쪽은 낱개로
+ * 보내야 하는 경로(초기화, PASID 해제 등)가 쓴다. *
+ * 실행 컨텍스트: 무효화 경로. qi_submit_sync 안에서 완료를 기다린다.
+ */
 void qi_flush_iotlb(struct intel_iommu *iommu, u16 did, u64 addr,
 		    unsigned int size_order, u64 type)
 {
-	struct qi_desc desc;
+	struct qi_desc desc;	/* [한국어] 보낼 서술자 */
 
-	qi_desc_iotlb(iommu, did, addr, size_order, type, &desc);
-	qi_submit_sync(iommu, &desc, 1, 0);
+	qi_desc_iotlb(iommu, did, addr, size_order, type, &desc);	/* [한국어] 조립은 헤더의 매크로가 한다 */
+	qi_submit_sync(iommu, &desc, 1, 0);	/* [한국어] 낱개로 보낸다. cache.c 는 같은 조립 함수를 쓰되 배치에 모은다 */
 }
 
+/*
+ * [한국어]
+ * qi_flush_dev_iotlb - 장치 안의 번역 캐시를 비운다
+ *
+ * @iommu: 대상 유닛. @sid: 장치 소스 id. @pfsid: PF 소스 id.
+ * @qdep: ATS 큐 깊이. @addr: 주소. @mask: 범위 크기.
+ * @return: 없음.
+ *
+ * 번역이 꺼져 있으면 보내지 않는다(코드 안 영어 주석, 스펙 4.3).
+ * 꺼진 동안의 디바이스 TLB 무효화는 스펙이 권하지 않으며, 그 상태에서
+ * 장치 캐시에 있을 번역 자체가 의미가 없다.
+ * gcmd 의 사본으로 확인하는 것은 GCMD 레지스터를 읽어도 현재 설정이
+ * 나오지 않기 때문이다. *
+ * 실행 컨텍스트: 무효화 경로. qi_submit_sync 안에서 완료를 기다린다.
+ */
 void qi_flush_dev_iotlb(struct intel_iommu *iommu, u16 sid, u16 pfsid,
 			u16 qdep, u64 addr, unsigned mask)
 {
-	struct qi_desc desc;
+	struct qi_desc desc;	/* [한국어] 보낼 서술자 */
 
 	/*
 	 * VT-d spec, section 4.3:
@@ -2626,27 +2684,52 @@ void qi_flush_dev_iotlb(struct intel_iommu *iommu, u16 sid, u16 pfsid,
 	 * Software is recommended to not submit any Device-TLB invalidation
 	 * requests while address remapping hardware is disabled.
 	 */
-	if (!(iommu->gcmd & DMA_GCMD_TE))
-		return;
+	if (!(iommu->gcmd & DMA_GCMD_TE))	/* [한국어] 번역이 꺼져 있으면 (위 영어 주석, 스펙 4.3) */
+		return;	/* [한국어] 보내지 않는다. 꺼진 동안 장치 캐시에 있을 번역 자체가 의미가 없다 */
 
-	qi_desc_dev_iotlb(sid, pfsid, qdep, addr, mask, &desc);
-	qi_submit_sync(iommu, &desc, 1, 0);
+	qi_desc_dev_iotlb(sid, pfsid, qdep, addr, mask, &desc);	/* [한국어] 조립 */
+	qi_submit_sync(iommu, &desc, 1, 0);	/* [한국어] 제출하고 완료를 기다린다 */
 }
 
 /* PASID-selective IOTLB invalidation */
+/*
+ * [한국어]
+ * qi_flush_piotlb_all - 한 PASID 의 IOTLB 를 통째로 비운다 (위 영어 주석)
+ *
+ * @iommu: 대상 유닛. @did: 도메인 id. @pasid: 대상 PASID.
+ * @return: 없음.
+ *
+ * 그 주소 공간이 통째로 사라질 때 쓴다 — SVA 에서 프로세스가 죽거나
+ * PASID 를 회수할 때다. 범위를 하나씩 지우는 것보다 훨씬 싸다. *
+ * 실행 컨텍스트: 무효화 경로. qi_submit_sync 안에서 완료를 기다린다.
+ */
 void qi_flush_piotlb_all(struct intel_iommu *iommu, u16 did, u32 pasid)
 {
-	struct qi_desc desc = {};
+	struct qi_desc desc = {};	/* [한국어] 0 으로 초기화된 서술자 */
 
-	qi_desc_piotlb_all(did, pasid, &desc);
-	qi_submit_sync(iommu, &desc, 1, 0);
+	qi_desc_piotlb_all(did, pasid, &desc);	/* [한국어] 그 PASID 전체를 비우는 서술자를 조립 */
+	qi_submit_sync(iommu, &desc, 1, 0);	/* [한국어] 제출 */
 }
 
 /* PASID-based device IOTLB Invalidate */
+/*
+ * [한국어]
+ * qi_flush_dev_iotlb_pasid - PASID 를 지정해 장치 캐시를 비운다 (위 영어 주석)
+ *
+ * @iommu: 유닛. @sid: 장치 소스 id. @pfsid: PF 소스 id. @pasid: 대상 PASID.
+ * @qdep: ATS 큐 깊이. @addr: 주소. @size_order: 범위 크기.
+ * @return: 없음.
+ *
+ * qi_flush_dev_iotlb 의 PASID 인식 판이며, 번역이 꺼져 있으면 보내지
+ * 않는 규칙도 같다(코드 안 영어 주석).
+ * SVA 에서 장치가 여러 PASID 로 동시에 DMA 를 내므로, 한 PASID 의 캐시만
+ * 지워야 나머지가 살아남는다. *
+ * 실행 컨텍스트: 무효화 경로. qi_submit_sync 안에서 완료를 기다린다.
+ */
 void qi_flush_dev_iotlb_pasid(struct intel_iommu *iommu, u16 sid, u16 pfsid,
 			      u32 pasid,  u16 qdep, u64 addr, unsigned int size_order)
 {
-	struct qi_desc desc = {.qw1 = 0, .qw2 = 0, .qw3 = 0};
+	struct qi_desc desc = {.qw1 = 0, .qw2 = 0, .qw3 = 0};	/* [한국어] 조립 함수가 qw0/qw1 만 채우므로 나머지를 미리 비운다 */
 
 	/*
 	 * VT-d spec, section 4.3:
@@ -2654,94 +2737,153 @@ void qi_flush_dev_iotlb_pasid(struct intel_iommu *iommu, u16 sid, u16 pfsid,
 	 * Software is recommended to not submit any Device-TLB invalidation
 	 * requests while address remapping hardware is disabled.
 	 */
-	if (!(iommu->gcmd & DMA_GCMD_TE))
-		return;
+	if (!(iommu->gcmd & DMA_GCMD_TE))	/* [한국어] 번역이 꺼져 있으면 (위 영어 주석) */
+		return;	/* [한국어] 보내지 않는다 */
 
-	qi_desc_dev_iotlb_pasid(sid, pfsid, pasid,
-				qdep, addr, size_order,
-				&desc);
-	qi_submit_sync(iommu, &desc, 1, 0);
+	qi_desc_dev_iotlb_pasid(sid, pfsid, pasid,	/* [한국어] PASID 를 지정한 서술자를 조립 */
+				qdep, addr, size_order,	/* [한국어] 큐 깊이와 범위 */
+				&desc);	/* [한국어] 이 서술자에 */
+	qi_submit_sync(iommu, &desc, 1, 0);	/* [한국어] 제출 */
 }
 
+/*
+ * [한국어]
+ * qi_flush_pasid_cache - PASID 캐시를 비운다
+ *
+ * @iommu: 대상 유닛. @did: 도메인 id. @granu: 무효화 범위
+ *   (QI_PC_ALL_PASIDS / PASID_SEL / GLOBAL). @pasid: 대상 PASID.
+ * @return: 없음.
+ *
+ * PASID 항목을 고치거나 지운 뒤 부른다. 하드웨어가 "이 PASID 의 항목은
+ * 이런 내용이다"를 캐시하고 있으면 옛 내용으로 계속 번역한다.
+ * 무효화 순서에서 이것이 IOTLB 보다 먼저 와야 한다 — 상위 캐시를 먼저
+ * 비워야 하위를 비우는 동안 다시 채워지지 않는다. *
+ * 실행 컨텍스트: 무효화 경로. qi_submit_sync 안에서 완료를 기다린다.
+ */
 void qi_flush_pasid_cache(struct intel_iommu *iommu, u16 did,
 			  u64 granu, u32 pasid)
 {
-	struct qi_desc desc = {.qw1 = 0, .qw2 = 0, .qw3 = 0};
+	struct qi_desc desc = {.qw1 = 0, .qw2 = 0, .qw3 = 0};	/* [한국어] qw0 만 아래에서 채우므로 나머지를 미리 비운다 */
 
-	desc.qw0 = QI_PC_PASID(pasid) | QI_PC_DID(did) |
-			QI_PC_GRAN(granu) | QI_PC_TYPE;
-	qi_submit_sync(iommu, &desc, 1, 0);
+	desc.qw0 = QI_PC_PASID(pasid) | QI_PC_DID(did) |	/* [한국어] 대상 PASID 와 도메인 id, */
+			QI_PC_GRAN(granu) | QI_PC_TYPE;	/* [한국어] 무효화 범위와 명령 종류 */
+	qi_submit_sync(iommu, &desc, 1, 0);	/* [한국어] 제출. 이 무효화가 IOTLB 보다 먼저 나가야 상위 캐시가 하위를 다시 채우지 않는다 */
 }
 
 /*
  * Disable Queued Invalidation interface.
  */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * dmar_disable_qi - 무효화 큐를 끈다
+ *
+ * @iommu: 대상 유닛.
+ * @return: 없음.
+ *
+ * 큐를 끄기 전에 이미 제출된 서술자가 처리되기를 기다린다(코드 안 영어
+ * 주석). tail 과 head 가 같아지면 하드웨어가 다 가져갔다는 뜻이다.
+ * 시간 제한을 두는 것은 하드웨어가 응답하지 않을 수 있기 때문이다 —
+ * 그 경우에도 끄기는 해야 한다.
+ *
+ * gcmd 사본에서 비트를 지운 뒤 통째로 쓰는 것이 GCMD 를 다루는 표준
+ * 방식이다. 그 레지스터는 읽어도 현재 설정이 나오지 않으므로, 우리가 기억한
+ * 사본에서 한 비트만 바꿔 전체를 다시 쓴다.
+ *
+ * 쓰고 나서 상태 레지스터로 확인하는 것도 규칙이다. 명령은 비동기로
+ * 처리되므로, 상태 비트가 내려가야 실제로 꺼진 것이다.
+ *
+ * 실행 컨텍스트: 서스펜드, 유닛 정지. register_lock 을 잡는다.
+ */
 void dmar_disable_qi(struct intel_iommu *iommu)
 {
-	unsigned long flags;
-	u32 sts;
-	cycles_t start_time = get_cycles();
+	unsigned long flags;	/* [한국어] 인터럽트 상태 */
+	u32 sts;	/* [한국어] 전역 상태 레지스터 */
+	cycles_t start_time = get_cycles();	/* [한국어] 대기 시간을 재기 위한 기준 */
 
-	if (!ecap_qis(iommu->ecap))
-		return;
+	if (!ecap_qis(iommu->ecap))	/* [한국어] 큐를 지원하지 않는 유닛이면 */
+		return;	/* [한국어] 끌 것도 없다 */
 
-	raw_spin_lock_irqsave(&iommu->register_lock, flags);
+	raw_spin_lock_irqsave(&iommu->register_lock, flags);	/* [한국어] 레지스터 조작 구간 */
 
-	sts =  readl(iommu->reg + DMAR_GSTS_REG);
-	if (!(sts & DMA_GSTS_QIES))
-		goto end;
+	sts =  readl(iommu->reg + DMAR_GSTS_REG);	/* [한국어] 현재 상태 */
+	if (!(sts & DMA_GSTS_QIES))	/* [한국어] 이미 꺼져 있으면 */
+		goto end;	/* [한국어] 할 일이 없다 */
 
 	/*
 	 * Give a chance to HW to complete the pending invalidation requests.
 	 */
-	while ((readl(iommu->reg + DMAR_IQT_REG) !=
-		readl(iommu->reg + DMAR_IQH_REG)) &&
-		(DMAR_OPERATION_TIMEOUT > (get_cycles() - start_time)))
-		cpu_relax();
+	while ((readl(iommu->reg + DMAR_IQT_REG) !=	/* [한국어] 제출 지점과 */
+		readl(iommu->reg + DMAR_IQH_REG)) &&	/* [한국어] 처리 지점이 같아질 때까지 — 즉 하드웨어가 다 가져갈 때까지 (위 영어 주석) */
+		(DMAR_OPERATION_TIMEOUT > (get_cycles() - start_time)))	/* [한국어] 시간 제한 안에서만. 응답하지 않는 하드웨어에서도 끄기는 해야 한다 */
+		cpu_relax();	/* [한국어] 바쁜 대기 */
 
-	iommu->gcmd &= ~DMA_GCMD_QIE;
-	writel(iommu->gcmd, iommu->reg + DMAR_GCMD_REG);
+	iommu->gcmd &= ~DMA_GCMD_QIE;	/* [한국어] 사본에서 비트를 지우고 */
+	writel(iommu->gcmd, iommu->reg + DMAR_GCMD_REG);	/* [한국어] 전체를 다시 쓴다. GCMD 는 읽어도 현재 설정이 나오지 않아 이 방식을 쓴다 */
 
-	IOMMU_WAIT_OP(iommu, DMAR_GSTS_REG, readl,
-		      !(sts & DMA_GSTS_QIES), sts);
-end:
-	raw_spin_unlock_irqrestore(&iommu->register_lock, flags);
+	IOMMU_WAIT_OP(iommu, DMAR_GSTS_REG, readl,	/* [한국어] 상태 비트가 내려갈 때까지 기다린다 */
+		      !(sts & DMA_GSTS_QIES), sts);	/* [한국어] 명령은 비동기로 처리되므로 상태로 확인해야 실제로 꺼진 것이다 */
+end:	/* [한국어] 이미 꺼져 있던 경우가 합류 */
+	raw_spin_unlock_irqrestore(&iommu->register_lock, flags);	/* [한국어] 락 해제 */
 }
 
 /*
  * Enable queued invalidation.
  */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * __dmar_enable_qi - 큐 버퍼가 준비된 상태에서 하드웨어에 알리고 켠다
+ *
+ * @iommu: 대상 유닛.
+ * @return: 없음(실패할 수 없다 — 이미 자원이 다 있다).
+ *
+ * 할당과 활성화를 분리한 이유: 리줌 경로(dmar_reenable_qi)는 버퍼가 이미
+ * 있으므로 이 부분만 다시 하면 된다.
+ *
+ * 순서가 중요하다.
+ *   1) 소프트웨어 상태를 처음으로 되돌린다(head/tail/cnt). 리줌이라면
+ *      서스펜드 전의 상태가 남아 있는데, 하드웨어는 초기화되므로 맞춰야 한다.
+ *   2) tail 레지스터를 0 으로 쓴다.
+ *   3) 큐 주소를 알린다.
+ *   4) 마지막에 QIE 비트를 켠다 — 그 순간부터 하드웨어가 큐를 읽기 시작하므로,
+ *      주소가 먼저 설정되어 있어야 한다.
+ *
+ * IQA 레지스터의 두 비트(코드 안 영어 주석): scalable 모드를 지원하면
+ * DW(Descriptor Width)와 QS 비트를 세워, 서술자가 32바이트임을 알린다.
+ * 그 비트가 없으면 하드웨어가 16바이트로 읽어 서술자 경계가 어긋난다.
+ *
+ * 실행 컨텍스트: 큐 활성화. register_lock 을 잡는다.
+ */
 static void __dmar_enable_qi(struct intel_iommu *iommu)
 {
-	u32 sts;
-	unsigned long flags;
-	struct q_inval *qi = iommu->qi;
-	u64 val = virt_to_phys(qi->desc);
+	u32 sts;	/* [한국어] 전역 상태 레지스터 */
+	unsigned long flags;	/* [한국어] 인터럽트 상태 */
+	struct q_inval *qi = iommu->qi;	/* [한국어] 준비된 큐 */
+	u64 val = virt_to_phys(qi->desc);	/* [한국어] 하드웨어에 알릴 버퍼의 물리 주소 */
 
-	qi->free_head = qi->free_tail = 0;
-	qi->free_cnt = QI_LENGTH;
+	qi->free_head = qi->free_tail = 0;	/* [한국어] 소프트웨어 상태를 처음으로 되돌린다. 리줌이라면 서스펜드 전 상태가 남아 있는데 하드웨어는 초기화되므로 맞춰야 한다 */
+	qi->free_cnt = QI_LENGTH;	/* [한국어] 전부 비어 있는 상태로 */
 
 	/*
 	 * Set DW=1 and QS=1 in IQA_REG when Scalable Mode capability
 	 * is present.
 	 */
-	if (ecap_smts(iommu->ecap))
-		val |= BIT_ULL(11) | BIT_ULL(0);
+	if (ecap_smts(iommu->ecap))	/* [한국어] scalable 모드를 지원하면 (위 영어 주석) */
+		val |= BIT_ULL(11) | BIT_ULL(0);	/* [한국어] DW 와 QS 비트를 세워 서술자가 32바이트임을 알린다. 이 비트가 없으면 하드웨어가 16바이트로 읽어 서술자 경계가 어긋난다 */
 
-	raw_spin_lock_irqsave(&iommu->register_lock, flags);
+	raw_spin_lock_irqsave(&iommu->register_lock, flags);	/* [한국어] 레지스터 조작 구간 */
 
 	/* write zero to the tail reg */
-	writel(0, iommu->reg + DMAR_IQT_REG);
+	writel(0, iommu->reg + DMAR_IQT_REG);	/* [한국어] 제출 지점을 0 으로 (위 영어 주석) */
 
-	writeq(val, iommu->reg + DMAR_IQA_REG);
+	writeq(val, iommu->reg + DMAR_IQA_REG);	/* [한국어] 버퍼 주소와 형식 비트를 알린다 */
 
-	iommu->gcmd |= DMA_GCMD_QIE;
-	writel(iommu->gcmd, iommu->reg + DMAR_GCMD_REG);
+	iommu->gcmd |= DMA_GCMD_QIE;	/* [한국어] 사본에 비트를 세우고 */
+	writel(iommu->gcmd, iommu->reg + DMAR_GCMD_REG);	/* [한국어] 전체를 쓴다. 이 순간부터 하드웨어가 큐를 읽으므로 주소가 먼저 설정되어 있어야 한다 */
 
 	/* Make sure hardware complete it */
-	IOMMU_WAIT_OP(iommu, DMAR_GSTS_REG, readl, (sts & DMA_GSTS_QIES), sts);
+	IOMMU_WAIT_OP(iommu, DMAR_GSTS_REG, readl, (sts & DMA_GSTS_QIES), sts);	/* [한국어] 상태 비트가 올라올 때까지 기다린다 (위 영어 주석) */
 
-	raw_spin_unlock_irqrestore(&iommu->register_lock, flags);
+	raw_spin_unlock_irqrestore(&iommu->register_lock, flags);	/* [한국어] 락 해제 */
 }
 
 /*
@@ -2749,54 +2891,79 @@ static void __dmar_enable_qi(struct intel_iommu *iommu)
  * interrupt-remapping. Also used by DMA-remapping, which replaces
  * register based IOTLB invalidation.
  */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * dmar_enable_qi - 무효화 큐를 만들고 켠다
+ *
+ * @iommu: 대상 유닛.
+ * @return: 0 성공(이미 켜져 있으면 0), -ENOENT(하드웨어 미지원), -ENOMEM.
+ *
+ * 위 영어 주석이 이 기능의 위치를 말한다: 인터럽트 재매핑에는 필수이고,
+ * DMA 재매핑에서는 레지스터 방식 IOTLB 무효화를 대체한다. 즉 두 기능이
+ * 모두 이 큐 위에서 돌아간다.
+ *
+ * 버퍼 크기가 모드에 따라 갈린다(코드 안 영어 주석). scalable 모드에서는
+ * 서술자가 32바이트(256비트)라 256개를 담으려면 8KB 가 필요하고, 아니면
+ * 4KB 면 된다. 이 크기가 __dmar_enable_qi 가 IQA 에 세우는 DW 비트와
+ * 짝을 이룬다 — 둘이 어긋나면 하드웨어가 서술자 경계를 잘못 읽는다.
+ *
+ * GFP_ATOMIC 을 쓰는 이유: 이 함수가 인터럽트를 끈 초기화 구간에서도
+ * 불릴 수 있다.
+ *
+ * 실패할 때마다 iommu->qi 를 NULL 로 되돌리는 것이 중요하다. 그 포인터가
+ * 남아 있으면 이후 무효화 경로가 절반만 만들어진 큐를 쓰려 한다.
+ *
+ * 실행 컨텍스트: 유닛 초기화. 프로세스 컨텍스트지만 인터럽트를 끈 상태일
+ * 수 있다.
+ */
 int dmar_enable_qi(struct intel_iommu *iommu)
 {
-	struct q_inval *qi;
-	void *desc;
+	struct q_inval *qi;	/* [한국어] 만들 큐 구조체 */
+	void *desc;	/* [한국어] 서술자 버퍼 */
 
-	if (!ecap_qis(iommu->ecap))
-		return -ENOENT;
+	if (!ecap_qis(iommu->ecap))	/* [한국어] 큐를 지원하지 않는 유닛이면 */
+		return -ENOENT;	/* [한국어] 레지스터 방식만 쓸 수 있다 */
 
 	/*
 	 * queued invalidation is already setup and enabled.
 	 */
-	if (iommu->qi)
-		return 0;
+	if (iommu->qi)	/* [한국어] 이미 세웠으면 (위 영어 주석) */
+		return 0;	/* [한국어] 다시 만들지 않는다 */
 
-	iommu->qi = kmalloc_obj(*qi, GFP_ATOMIC);
-	if (!iommu->qi)
-		return -ENOMEM;
+	iommu->qi = kmalloc_obj(*qi, GFP_ATOMIC);	/* [한국어] 큐 구조체. 인터럽트를 끈 구간에서도 불릴 수 있어 ATOMIC */
+	if (!iommu->qi)	/* [한국어] 할당 실패 */
+		return -ENOMEM;	/* [한국어] 큐를 쓸 수 없다 */
 
-	qi = iommu->qi;
+	qi = iommu->qi;	/* [한국어] 지역 변수로 */
 
 	/*
 	 * Need two pages to accommodate 256 descriptors of 256 bits each
 	 * if the remapping hardware supports scalable mode translation.
 	 */
-	desc = iommu_alloc_pages_node_sz(iommu->node, GFP_ATOMIC,
-					 ecap_smts(iommu->ecap) ? SZ_8K :
-								  SZ_4K);
-	if (!desc) {
-		kfree(qi);
-		iommu->qi = NULL;
-		return -ENOMEM;
+	desc = iommu_alloc_pages_node_sz(iommu->node, GFP_ATOMIC,	/* [한국어] 유닛과 가까운 노드에서 서술자 버퍼를 잡는다 */
+					 ecap_smts(iommu->ecap) ? SZ_8K :	/* [한국어] scalable 모드면 서술자가 32바이트라 256개에 8KB 가 필요하고 (위 영어 주석) */
+								  SZ_4K);	/* [한국어] 아니면 4KB. 이 크기가 IQA 의 DW 비트와 짝을 이룬다 */
+	if (!desc) {	/* [한국어] 할당 실패 */
+		kfree(qi);	/* [한국어] 구조체를 반납하고 */
+		iommu->qi = NULL;	/* [한국어] 포인터를 지운다 — 남아 있으면 이후 무효화가 절반만 만들어진 큐를 쓴다 */
+		return -ENOMEM;	/* [한국어] 실패 */
 	}
 
-	qi->desc = desc;
+	qi->desc = desc;	/* [한국어] 버퍼를 연결 */
 
-	qi->desc_status = kzalloc_objs(int, QI_LENGTH, GFP_ATOMIC);
-	if (!qi->desc_status) {
-		iommu_free_pages(qi->desc);
-		kfree(qi);
-		iommu->qi = NULL;
-		return -ENOMEM;
+	qi->desc_status = kzalloc_objs(int, QI_LENGTH, GFP_ATOMIC);	/* [한국어] 슬롯별 상태 배열. 하드웨어는 이것을 모르지만, Wait 서술자가 완료 값을 쓰는 곳이 바로 이 배열이다 */
+	if (!qi->desc_status) {	/* [한국어] 할당 실패 */
+		iommu_free_pages(qi->desc);	/* [한국어] 버퍼를 반납하고 */
+		kfree(qi);	/* [한국어] 구조체도 */
+		iommu->qi = NULL;	/* [한국어] 포인터를 지운다 */
+		return -ENOMEM;	/* [한국어] 실패 */
 	}
 
-	raw_spin_lock_init(&qi->q_lock);
+	raw_spin_lock_init(&qi->q_lock);	/* [한국어] 큐를 지키는 락. raw 인 것은 인터럽트 문맥에서도 쓰기 때문이다 */
 
-	__dmar_enable_qi(iommu);
+	__dmar_enable_qi(iommu);	/* [한국어] 하드웨어에 알리고 켠다 */
 
-	return 0;
+	return 0;	/* [한국어] 이제 모든 무효화가 이 큐를 통과한다 */
 }
 
 /* iommu interrupt handling. Most stuff are MSI-like. */
