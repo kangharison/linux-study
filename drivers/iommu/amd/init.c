@@ -4181,24 +4181,50 @@ static void print_iommu_info(void)
 	}
 }
 
+/*
+ * [한국어]
+ * amd_iommu_init_pci - PCI 단계의 유닛 초기화를 모두 마치고 캐시를 비운다
+ *
+ * @return: 0 성공, 음수면 어느 유닛에서 실패.
+ *
+ * 함수 안의 긴 영어 주석이 이 함수의 전부다: 순서가 중요하다.
+ *
+ * 1) iommu_init_pci 가 각 유닛을 마무리하면서, 그 과정에서 펌웨어가 요구한
+ *    항등 매핑이 만들어져 장치 테이블에 써진다.
+ * 2) 그다음 init_device_table_dma 가 "아직 설정되지 않은 DTE 는 DMA 를
+ *    차단하도록" 만든다. 이것이 나중이어야 하는 이유는, 먼저 하면 항등
+ *    매핑을 쓰는 장치까지 차단되기 때문이다.
+ * 3) 마지막으로 모든 유닛의 캐시를 비운다. 그래야 장치 테이블의 변경이
+ *    실제로 반영된다.
+ *
+ * 항등 도메인을 맨 먼저 만드는 것도 순서 문제다. 유닛을 코어에 등록하면
+ * 곧바로 장치가 붙을 수 있고, 그때 기본 도메인이 있어야 한다.
+ *
+ * iommu_set_cwwb_range 를 PCI 초기화 뒤에 부르는 이유는 원 주석이 밝힌다 —
+ * 그 설정에 필요한 정보가 PCI 단계에서야 갖춰진다.
+ *
+ * 호출 체인:
+ *   state_next() → [이 함수] → iommu_init_pci() → init_device_table_dma()
+ *     → amd_iommu_flush_all_caches()
+ */
 static int __init amd_iommu_init_pci(void)
 {
-	struct amd_iommu *iommu;
-	struct amd_iommu_pci_seg *pci_seg;
-	int ret;
+	struct amd_iommu *iommu;	/* [한국어] 유닛 순회용 */
+	struct amd_iommu_pci_seg *pci_seg;	/* [한국어] 세그먼트 순회용 */
+	int ret;	/* [한국어] 결과 */
 
 	/* Init global identity domain before registering IOMMU */
-	amd_iommu_init_identity_domain();
+	amd_iommu_init_identity_domain();	/* [한국어] (원 주석: 유닛을 등록하기 전에 전역 항등 도메인을 만든다) 등록 직후 장치가 붙을 수 있어서다 */
 
-	for_each_iommu(iommu) {
-		ret = iommu_init_pci(iommu);
+	for_each_iommu(iommu) {	/* [한국어] 유닛마다 */
+		ret = iommu_init_pci(iommu);	/* [한국어] PCI 단계의 초기화 */
 		if (ret) {
-			pr_err("IOMMU%d: Failed to initialize IOMMU Hardware (error=%d)!\n",
+			pr_err("IOMMU%d: Failed to initialize IOMMU Hardware (error=%d)!\n",	/* [한국어] 어느 유닛에서 실패했는지 */
 			       iommu->index, ret);
-			goto out;
+			goto out;	/* [한국어] 더 진행하지 않는다 */
 		}
 		/* Need to setup range after PCI init */
-		iommu_set_cwwb_range(iommu);
+		iommu_set_cwwb_range(iommu);	/* [한국어] (원 주석: PCI 초기화 뒤에 범위를 설정해야 한다) */
 	}
 
 	/*
@@ -4211,16 +4237,16 @@ static int __init amd_iommu_init_pci(void)
 	 * of all IOMMUs to make sure the changes to the device table are
 	 * active.
 	 */
-	for_each_pci_segment(pci_seg)
-		init_device_table_dma(pci_seg);
+	for_each_pci_segment(pci_seg)	/* [한국어] (위 영어 주석: 항등 매핑이 먼저 만들어진 뒤여야 한다) */
+		init_device_table_dma(pci_seg);	/* [한국어] 설정되지 않은 DTE 가 DMA 를 차단하도록 만든다 */
 
-	for_each_iommu(iommu)
-		amd_iommu_flush_all_caches(iommu);
+	for_each_iommu(iommu)	/* [한국어] 모든 유닛에 대해 */
+		amd_iommu_flush_all_caches(iommu);	/* [한국어] 장치 테이블의 변경을 실제로 반영시킨다 */
 
-	print_iommu_info();
+	print_iommu_info();	/* [한국어] 결과를 한 줄로 요약해 로그에 남긴다 */
 
 out:
-	return ret;
+	return ret;	/* [한국어] 성공이면 0 */
 }
 
 /****************************************************************************
@@ -4232,140 +4258,345 @@ out:
  *
  ****************************************************************************/
 
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * iommu_setup_msi - 유닛의 인터럽트를 평범한 MSI 로 잡는다
+ *
+ * @iommu: 대상 유닛.
+ * @return: 0 성공, 음수면 실패.
+ *
+ * x2APIC 모드가 아닐 때 쓰는 경로다. IOMMU 자신도 PCI 장치이므로 평범한
+ * MSI 를 쓸 수 있다.
+ *
+ * 원 주석이 밝히는 어려움: 한 PCI 함수에 IOMMU 가 여럿 있을 수 있는데
+ * pci_enable_msi 는 장치당 한 번만 부를 수 있다. 그래서 두 번째 유닛의
+ * 호출은 실패하고, 상위 경로가 그것을 감안한다.
+ *
+ * threaded IRQ 를 쓰는 이유: 핸들러가 이벤트 로그를 훑고 페이지 요청을
+ * 큐에 넣는 등 짧지 않은 일을 한다. IRQF_ONESHOT 은 그 스레드가 끝날
+ * 때까지 같은 인터럽트를 막아 로그 처리가 겹치지 않게 한다.
+ *
+ * 호출 체인:
+ *   iommu_init_irq() → [이 함수]
+ */
 static int iommu_setup_msi(struct amd_iommu *iommu)
 {
-	int r;
+	int r;	/* [한국어] 결과 */
 
-	r = pci_enable_msi(iommu->dev);
-	if (r)
-		return r;
+	r = pci_enable_msi(iommu->dev);	/* [한국어] (원 주석) 한 PCI 함수에 여러 유닛이 있으면 두 번째 호출은 실패한다 */
+	if (r)	/* [한국어] 실패 */
+		return r;	/* [한국어] 호출자가 다른 방법을 찾는다 */
 
-	r = request_threaded_irq(iommu->dev->irq, NULL, amd_iommu_int_thread,
-				 IRQF_ONESHOT, "AMD-Vi", iommu);
-	if (r) {
-		pci_disable_msi(iommu->dev);
-		return r;
+	r = request_threaded_irq(iommu->dev->irq, NULL, amd_iommu_int_thread,	/* [한국어] 상단 핸들러 없이 스레드만 — 로그 처리가 짧지 않다 */
+				 IRQF_ONESHOT, "AMD-Vi", iommu);	/* [한국어] 스레드가 끝날 때까지 같은 인터럽트를 막아 로그 처리가 겹치지 않게 */
+	if (r) {	/* [한국어] 등록 실패 */
+		pci_disable_msi(iommu->dev);	/* [한국어] 잡은 MSI 를 되돌리고 */
+		return r;	/* [한국어] 실패 보고 */
 	}
 
-	return 0;
+	return 0;	/* [한국어] 인터럽트 준비 완료 */
 }
 
+/*
+ * [한국어] union intcapxt — x2APIC 방식 IOMMU 인터럽트의 설정 레지스터 형식
+ *
+ * MSI 를 PCI 설정 공간이 아니라 IOMMU 의 MMIO 레지스터로 설정하는 방식이다.
+ * 그래야 32비트 APIC id 를 담을 수 있고, 한 PCI 함수의 여러 유닛이 각자
+ * 인터럽트를 가질 수 있다 — pci_enable_msi 의 "장치당 한 번" 제약을
+ * 우회하는 것이 이 방식을 쓰는 실질적인 이유이기도 하다.
+ *
+ * 목적지 id 가 destid_0_23 과 destid_24_31 로 나뉜 것이 눈에 띈다. 32비트를
+ * 담을 연속된 자리가 없어 두 조각으로 흩어졌다.
+ *
+ * union 인 이유: 레지스터에는 64비트를 통째로 써야 하므로, 필드로 조립한 뒤
+ * capxt 로 한 번에 쓴다.
+ */
 union intcapxt {
 	u64	capxt;
+	/* [한국어] 레지스터에 통째로 쓸 64비트 값.
+	 * 아래 비트필드로 조립한 뒤 이 창으로 한 번에 쓴다 — MMIO 는 부분 쓰기를
+	 *   허용하지 않는다. */
 	struct {
 		u64	reserved_0		:  2,
+		/* [한국어] 예약. 0 이어야 한다. */
 			dest_mode_logical	:  1,
+			/* [한국어] 목적지 모드 — 논리인지 물리인지.
+			 * 현재 APIC 드라이버가 쓰는 방식을 그대로 따른다. */
 			reserved_1		:  5,
+			/* [한국어] 예약. */
 			destid_0_23		: 24,
+			/* [한국어] 목적지 APIC id 의 하위 24비트. */
 			vector			:  8,
+			/* [한국어] CPU 를 깨울 벡터 번호. */
 			reserved_2		: 16,
+			/* [한국어] 예약. */
 			destid_24_31		:  8;
+			/* [한국어] 목적지 id 의 상위 8비트.
+			 * 32비트를 담을 연속된 자리가 없어 하위와 떨어져 놓였다.
+			 * 이 필드가 있기 때문에 x2APIC 의 넓은 목적지를 쓸 수 있다. */
 	};
 } __attribute__ ((packed));
 
 
 static struct irq_chip intcapxt_controller;
 
+/*
+ * [한국어]
+ * intcapxt_irqdomain_activate - 활성화 콜백 (하는 일 없음)
+ *
+ * @domain: 인터럽트 도메인.
+ * @irqd: 인터럽트 데이터.
+ * @reserve: 예약만 하는 호출인지.
+ * @return: 항상 0.
+ *
+ * 이 도메인에서 활성화 시점에 할 일이 없다. 실제 하드웨어 설정은
+ * unmask 에서 일어나며, 그것이 인터럽트를 켜는 시점과 자연스럽게 맞는다.
+ *
+ * 그래도 콜백을 두는 이유: 코어가 NULL 을 허용하지 않는 자리가 있고,
+ * 명시적인 빈 구현이 "일부러 아무것도 하지 않는다"를 분명히 한다.
+ */
 static int intcapxt_irqdomain_activate(struct irq_domain *domain,
 				       struct irq_data *irqd, bool reserve)
 {
-	return 0;
+	return 0;	/* [한국어] 실제 하드웨어 설정은 unmask 가 한다 */
 }
 
+/*
+ * [한국어]
+ * intcapxt_irqdomain_deactivate - 비활성화 콜백 (하는 일 없음)
+ *
+ * @domain: 인터럽트 도메인.
+ * @irqd: 인터럽트 데이터.
+ *
+ * activate 와 같은 이유로 비어 있다. 인터럽트를 끊는 일은 mask 가 한다.
+ */
 static void intcapxt_irqdomain_deactivate(struct irq_domain *domain,
 					  struct irq_data *irqd)
 {
 }
 
 
+/*
+ * [한국어]
+ * intcapxt_irqdomain_alloc - IOMMU 인터럽트를 이 도메인에서 잡는다
+ *
+ * @domain: 인터럽트 도메인.
+ * @virq: 첫 가상 인터럽트 번호.
+ * @nr_irqs: 개수.
+ * @arg: irq_alloc_info. AMDVI 타입이어야 한다.
+ * @return: 0 성공, 음수면 실패.
+ *
+ * 계층 구조의 한 단계다. 부모(vector 도메인)가 실제 CPU 벡터를 잡고, 이
+ * 계층은 그 위에 "어느 MMIO 레지스터에 설정을 쓸 것인가"를 얹는다.
+ *
+ * hwirq 에 담기는 것이 그 레지스터의 오프셋이라는 점이 이 도메인의 특징이다.
+ * 보통 hwirq 는 하드웨어 인터럽트 번호지만, 여기서는 설정을 쓸 위치다 —
+ * unmask/mask 가 그것을 그대로 주소로 쓴다.
+ *
+ * chip_data 에 유닛 포인터를 넣어, 나중에 어느 유닛의 MMIO 인지 알 수 있게
+ * 한다.
+ *
+ * edge 핸들러를 붙이는 이유: IOMMU 의 로그 인터럽트는 에지 트리거다.
+ *
+ * 호출 체인:
+ *   iommu_setup_intcapxt() → 코어 → [이 함수]
+ */
 static int intcapxt_irqdomain_alloc(struct irq_domain *domain, unsigned int virq,
 				    unsigned int nr_irqs, void *arg)
 {
-	struct irq_alloc_info *info = arg;
-	int i, ret;
+	struct irq_alloc_info *info = arg;	/* [한국어] 인터럽트의 종류와 레지스터 오프셋 */
+	int i, ret;	/* [한국어] 순회 인덱스와 결과 */
 
-	if (!info || info->type != X86_IRQ_ALLOC_TYPE_AMDVI)
-		return -EINVAL;
+	if (!info || info->type != X86_IRQ_ALLOC_TYPE_AMDVI)	/* [한국어] 이 도메인이 다룰 수 있는 종류인가 */
+		return -EINVAL;	/* [한국어] 아니면 거절 */
 
-	ret = irq_domain_alloc_irqs_parent(domain, virq, nr_irqs, arg);
-	if (ret < 0)
-		return ret;
+	ret = irq_domain_alloc_irqs_parent(domain, virq, nr_irqs, arg);	/* [한국어] 부모가 실제 CPU 벡터를 잡는다 */
+	if (ret < 0)	/* [한국어] 벡터 부족 */
+		return ret;	/* [한국어] 실패 보고 */
 
-	for (i = virq; i < virq + nr_irqs; i++) {
-		struct irq_data *irqd = irq_domain_get_irq_data(domain, i);
+	for (i = virq; i < virq + nr_irqs; i++) {	/* [한국어] 잡은 인터럽트마다 */
+		struct irq_data *irqd = irq_domain_get_irq_data(domain, i);	/* [한국어] 이 계층의 데이터 */
 
-		irqd->chip = &intcapxt_controller;
-		irqd->hwirq = info->hwirq;
-		irqd->chip_data = info->data;
-		__irq_set_handler(i, handle_edge_irq, 0, "edge");
+		irqd->chip = &intcapxt_controller;	/* [한국어] MMIO 로 설정하는 칩 */
+		irqd->hwirq = info->hwirq;	/* [한국어] 보통과 달리 이 값은 설정을 쓸 MMIO 오프셋이다 */
+		irqd->chip_data = info->data;	/* [한국어] 어느 유닛의 MMIO 인지 */
+		__irq_set_handler(i, handle_edge_irq, 0, "edge");	/* [한국어] IOMMU 의 로그 인터럽트는 에지 트리거다 */
 	}
 
-	return ret;
+	return ret;	/* [한국어] 배선 완료 */
 }
 
+/*
+ * [한국어]
+ * intcapxt_irqdomain_free - 그 인터럽트를 해제한다
+ *
+ * @domain: 인터럽트 도메인.
+ * @virq: 첫 가상 인터럽트 번호.
+ * @nr_irqs: 개수.
+ *
+ * 이 계층이 따로 잡은 자원이 없어(hwirq 와 chip_data 는 참조일 뿐) 부모의
+ * 해제만 부르면 된다.
+ */
 static void intcapxt_irqdomain_free(struct irq_domain *domain, unsigned int virq,
 				    unsigned int nr_irqs)
 {
-	irq_domain_free_irqs_top(domain, virq, nr_irqs);
+	irq_domain_free_irqs_top(domain, virq, nr_irqs);	/* [한국어] 이 계층이 따로 잡은 자원이 없어 부모의 해제만 부른다 */
 }
 
 
+/*
+ * [한국어]
+ * intcapxt_unmask_irq - 목적지와 벡터를 써 넣어 인터럽트를 켠다
+ *
+ * @irqd: 대상 인터럽트.
+ *
+ * 이 도메인에서 하드웨어를 실제로 건드리는 유일한 곳이다. 상위 계층이 정한
+ * 벡터와 목적지 CPU 를 레지스터 형식으로 조립해 한 번에 쓴다.
+ *
+ * 목적지 id 를 두 조각으로 쪼개는 것이 x2APIC 지원의 핵심이다 — 32비트를
+ * 담을 연속된 자리가 레지스터에 없어 상위 8비트가 따로 놓인다.
+ *
+ * 64비트를 통째로 쓰는 것이 곧 "켜기"다. 별도의 활성화 비트가 없고, 유효한
+ * 목적지가 적혀 있으면 인터럽트가 나간다 — 그래서 mask 는 0 을 쓰는 것으로
+ * 충분하다.
+ *
+ * 호출 체인:
+ *   인터럽트 활성화/affinity 변경 → [이 함수]
+ */
 static void intcapxt_unmask_irq(struct irq_data *irqd)
 {
-	struct amd_iommu *iommu = irqd->chip_data;
-	struct irq_cfg *cfg = irqd_cfg(irqd);
-	union intcapxt xt;
+	struct amd_iommu *iommu = irqd->chip_data;	/* [한국어] 설정을 쓸 유닛 */
+	struct irq_cfg *cfg = irqd_cfg(irqd);	/* [한국어] 상위 계층이 정한 벡터와 목적지 */
+	union intcapxt xt;	/* [한국어] 조립할 레지스터 값 */
 
-	xt.capxt = 0ULL;
-	xt.dest_mode_logical = apic->dest_mode_logical;
-	xt.vector = cfg->vector;
-	xt.destid_0_23 = cfg->dest_apicid & GENMASK(23, 0);
-	xt.destid_24_31 = cfg->dest_apicid >> 24;
+	xt.capxt = 0ULL;	/* [한국어] 명시하지 않는 비트를 0 으로 */
+	xt.dest_mode_logical = apic->dest_mode_logical;	/* [한국어] 현재 APIC 드라이버가 쓰는 목적지 모드 */
+	xt.vector = cfg->vector;	/* [한국어] CPU 를 깨울 벡터 */
+	xt.destid_0_23 = cfg->dest_apicid & GENMASK(23, 0);	/* [한국어] 목적지 id 의 하위 24비트 */
+	xt.destid_24_31 = cfg->dest_apicid >> 24;	/* [한국어] 상위 8비트 — 자리가 떨어져 있어 따로 넣는다. 이것이 x2APIC 지원의 핵심이다 */
 
-	writeq(xt.capxt, iommu->mmio_base + irqd->hwirq);
+	writeq(xt.capxt, iommu->mmio_base + irqd->hwirq);	/* [한국어] 64비트를 통째로. 유효한 목적지가 적히는 것이 곧 "켜기"다 */
 }
 
+/*
+ * [한국어]
+ * intcapxt_mask_irq - 레지스터를 0 으로 만들어 인터럽트를 끊는다
+ *
+ * @irqd: 대상 인터럽트.
+ *
+ * 목적지가 없으면 하드웨어가 인터럽트를 내지 않는다. 별도의 마스크 비트를
+ * 쓰지 않고 설정 전체를 지우는 방식이라, unmask 가 매번 전부 다시 쓴다.
+ */
 static void intcapxt_mask_irq(struct irq_data *irqd)
 {
-	struct amd_iommu *iommu = irqd->chip_data;
+	struct amd_iommu *iommu = irqd->chip_data;	/* [한국어] 대상 유닛 */
 
-	writeq(0, iommu->mmio_base + irqd->hwirq);
+	writeq(0, iommu->mmio_base + irqd->hwirq);	/* [한국어] 목적지를 지우면 인터럽트가 나가지 않는다. 별도의 마스크 비트가 없다 */
 }
 
 
+/*
+ * [한국어]
+ * intcapxt_set_affinity - 인터럽트를 다른 CPU 로 옮긴다
+ *
+ * @irqd: 대상 인터럽트.
+ * @mask: 허용 CPU 집합.
+ * @force: 강제 여부.
+ * @return: 0 이면 이 계층이 추가 작업을 했다는 뜻(코어가 unmask 를 다시 부른다).
+ *
+ * 부모가 새 벡터를 잡게 하고, 그 결과를 레지스터에 반영하는 것은 이 함수가
+ * 직접 하지 않는다. 0 을 돌려주면 코어가 unmask 를 다시 불러 주고, 거기서
+ * 새 벡터와 목적지가 써진다.
+ *
+ * IRQCHIP_MOVE_DEFERRED 플래그와 짝을 이루는 설계다 — 인터럽트가 도착하지
+ * 않는 안전한 시점에 옮기기 위해서다.
+ *
+ * 호출 체인:
+ *   irq_set_affinity() → [이 함수] → parent->chip->irq_set_affinity()
+ */
 static int intcapxt_set_affinity(struct irq_data *irqd,
 				 const struct cpumask *mask, bool force)
 {
-	struct irq_data *parent = irqd->parent_data;
-	int ret;
+	struct irq_data *parent = irqd->parent_data;	/* [한국어] 상위 vector 도메인 */
+	int ret;	/* [한국어] 부모의 판단 */
 
-	ret = parent->chip->irq_set_affinity(parent, mask, force);
-	if (ret < 0 || ret == IRQ_SET_MASK_OK_DONE)
-		return ret;
-	return 0;
+	ret = parent->chip->irq_set_affinity(parent, mask, force);	/* [한국어] 새 CPU 의 벡터를 잡게 한다 */
+	if (ret < 0 || ret == IRQ_SET_MASK_OK_DONE)	/* [한국어] 실패했거나 부모가 이미 다 처리했으면 */
+		return ret;	/* [한국어] 그대로 전달 */
+	return 0;	/* [한국어] 0 을 돌려주면 코어가 unmask 를 다시 불러 새 설정을 써 준다 */
 }
 
+/*
+ * [한국어]
+ * intcapxt_set_wake - 이 인터럽트로 시스템을 깨울 수 있는가
+ *
+ * @irqd: 대상 인터럽트.
+ * @on: 깨우기를 켜려는 요청인지.
+ * @return: 끄는 요청이면 0, 켜려는 요청이면 -EOPNOTSUPP.
+ *
+ * IOMMU 의 로그 인터럽트로 시스템을 깨울 이유가 없고, 서스펜드 중에는
+ * IOMMU 도 꺼져 있다. 그래서 켜려는 요청만 거절한다.
+ *
+ * 끄는 요청에 0 을 돌려주는 이유: 그것은 이미 만족된 상태이므로 오류가
+ * 아니다. 무조건 거절하면 정리 경로가 실패한다.
+ */
 static int intcapxt_set_wake(struct irq_data *irqd, unsigned int on)
 {
-	return on ? -EOPNOTSUPP : 0;
+	return on ? -EOPNOTSUPP : 0;	/* [한국어] 켜려는 요청만 거절한다. 끄는 요청은 이미 만족된 상태라 성공이다 */
 }
 
+/*
+ * [한국어] struct irq_chip intcapxt_controller — MMIO 로 설정하는 IOMMU 인터럽트
+ *
+ * 평범한 MSI 칩과 달리 설정을 PCI 설정 공간이 아니라 IOMMU 의 MMIO
+ * 레지스터에 쓴다. 그래야 32비트 APIC id 를 담을 수 있고, 한 PCI 함수의
+ * 여러 유닛이 각자 인터럽트를 가질 수 있다.
+ *
+ * 두 플래그가 이 칩의 성격을 정한다:
+ *  - MASK_ON_SUSPEND: 서스펜드 때 마스크한다. IOMMU 도 함께 꺼지므로
+ *    깨우기 용도로 쓸 수 없고, 그렇다면 막아 두는 편이 안전하다.
+ *  - MOVE_DEFERRED: 인터럽트를 옮기는 것을 안전한 시점까지 미룬다.
+ *    설정을 통째로 갈아 쓰는 방식이라, 도착 중인 인터럽트가 있으면
+ *    중간 상태를 볼 수 있다.
+ */
 static struct irq_chip intcapxt_controller = {
 	.name			= "IOMMU-MSI",
+	/* [한국어] /proc/interrupts 에 보이는 이름. */
 	.irq_unmask		= intcapxt_unmask_irq,
+	/* [한국어] 목적지와 벡터를 써 넣어 켠다. 실제 하드웨어 설정은 여기서만 일어난다. */
 	.irq_mask		= intcapxt_mask_irq,
+	/* [한국어] 레지스터를 0 으로 만들어 끊는다. */
 	.irq_ack		= irq_chip_ack_parent,
+	/* [한국어] 수신 확인은 부모(APIC)가 한다 — 이 계층은 목적지만 관리한다. */
 	.irq_retrigger		= irq_chip_retrigger_hierarchy,
+	/* [한국어] 재발생 요청도 계층을 따라 위로 넘긴다. */
 	.irq_set_affinity       = intcapxt_set_affinity,
+	/* [한국어] 부모가 벡터를 잡게 하고, 반영은 코어가 부를 unmask 에 맡긴다. */
 	.irq_set_wake		= intcapxt_set_wake,
+	/* [한국어] 깨우기는 지원하지 않는다 — 서스펜드 중에는 IOMMU 도 꺼져 있다. */
 	.flags			= IRQCHIP_MASK_ON_SUSPEND | IRQCHIP_MOVE_DEFERRED,
+	/* [한국어] 서스펜드 때 마스크하고, 이동은 안전한 시점까지 미룬다. */
 };
 
+/*
+ * [한국어] struct irq_domain_ops intcapxt_domain_ops — 이 도메인의 콜백 표
+ *
+ * activate/deactivate 가 비어 있는 것이 이 도메인의 특징이다. 하드웨어
+ * 설정이 mask/unmask 에서만 일어나므로, 활성화 시점에 따로 할 일이 없다.
+ *
+ * select 가 없는 것도 눈에 띈다 — 이 도메인의 인터럽트는 드라이버가 직접
+ * 잡으므로, "이게 네 것이냐"를 물어올 일이 없다.
+ */
 static const struct irq_domain_ops intcapxt_domain_ops = {
 	.alloc			= intcapxt_irqdomain_alloc,
+	/* [한국어] 부모의 벡터 위에 MMIO 오프셋과 유닛 정보를 얹는다. */
 	.free			= intcapxt_irqdomain_free,
+	/* [한국어] 이 계층이 잡은 자원이 없어 부모의 해제만 부른다. */
 	.activate		= intcapxt_irqdomain_activate,
+	/* [한국어] 하는 일 없음. 설정은 unmask 가 한다. */
 	.deactivate		= intcapxt_irqdomain_deactivate,
+	/* [한국어] 하는 일 없음. 끊는 것은 mask 가 한다. */
 };
 
 
