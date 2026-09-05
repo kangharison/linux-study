@@ -1736,6 +1736,22 @@ retry:
 		memset(__evt, 0, 4 * sizeof(u32));	/* [한국어] 다음에 이 자리가 "아직 안 쓰임"으로 보이게 한다 */
 }
 
+/*
+ * [한국어]
+ * iommu_poll_events - 이벤트 로그를 비우며 항목마다 보고한다
+ *
+ * @iommu: 대상 유닛.
+ *
+ * 링 버퍼의 소비자다. 머리와 꼬리가 같아질 때까지 항목을 하나씩 꺼낸다.
+ *
+ * 각 항목을 처리한 뒤 머리를 진행시키는 순서가 눈에 띈다 — PPR 쪽은
+ * 머리를 먼저 진행시키는데, 여기는 처리가 짧아 그럴 필요가 없다.
+ *
+ * 실행 컨텍스트: 인터럽트 스레드.
+ *
+ * 호출 체인:
+ *   amd_iommu_int_thread_evtlog() → amd_iommu_handle_irq() → [이 함수]
+ */
 static void iommu_poll_events(struct amd_iommu *iommu)
 {
 	u32 head, tail;	/* [한국어] 우리가 읽은 지점과 하드웨어가 쓴 지점 */
@@ -1789,6 +1805,23 @@ int amd_iommu_register_ga_log_notifier(int (*notifier)(u32))
 }
 EXPORT_SYMBOL(amd_iommu_register_ga_log_notifier);	/* [한국어] KVM 모듈이 부른다 */
 
+/*
+ * [한국어]
+ * iommu_poll_ga_log - 게스트에 전달하지 못한 인터럽트를 KVM 에 넘긴다
+ *
+ * @iommu: 대상 유닛.
+ *
+ * 게스트 vCPU 가 실행 중이 아닐 때 인터럽트가 오면 하드웨어가 직접 전달할
+ * 수 없어 여기 기록한다. KVM 이 그 태그로 어느 vCPU 의 어느 벡터인지
+ * 알아내 vCPU 가 다시 스케줄될 때 주입한다.
+ *
+ * 이 경로가 없으면 게스트는 그 인터럽트를 영영 받지 못한다.
+ *
+ * 실행 컨텍스트: 인터럽트 스레드.
+ *
+ * 호출 체인:
+ *   amd_iommu_int_thread_galog() → amd_iommu_handle_irq() → [이 함수]
+ */
 static void iommu_poll_ga_log(struct amd_iommu *iommu)
 {
 	u32 head, tail;	/* [한국어] 읽은 지점과 쌓인 지점 */
@@ -2760,136 +2793,249 @@ static void amd_iommu_flush_tlb_domid(struct amd_iommu *iommu, u32 dom_id)
 	iommu_completion_wait(iommu);	/* [한국어] 완료까지 기다린다 */
 }
 
+/*
+ * [한국어]
+ * iommu_flush_pages_v1_hdom_ids - 중첩 변환의 게스트 도메인들까지 무효화한다
+ *
+ * @pdom: 2단계(호스트) 도메인.
+ * @address: 무효화할 범위의 시작.
+ * @size: 그 크기.
+ * @return: 0 성공, 음수면 어느 명령이 큐에 들어가지 못했다.
+ *
+ * 중첩 변환에서 하드웨어의 TLB 태그는 게스트 도메인 id 로 매겨진다. 그래서
+ * 2단계 매핑이 바뀌면 그 위에 얹힌 모든 게스트 도메인의 캐시도 지워야
+ * 한다 — 호스트 도메인 id 만으로 무효화하면 게스트 태그가 그대로 남는다.
+ *
+ * 그 역방향 탐색이 두 겹의 순회다: 이 도메인을 부모로 쓰는 vIOMMU 들을
+ * 훑고, 각 vIOMMU 의 게스트 id 대응표를 훑는다. nested.c 가 만들어 둔
+ * 연결이 여기서 쓰인다.
+ *
+ * 호출 체인:
+ *   amd_iommu_domain_flush_pages() → [이 함수]
+ */
 static int iommu_flush_pages_v1_hdom_ids(struct protection_domain *pdom, u64 address, size_t size)
 {
-	int ret = 0;
-	struct amd_iommu_viommu *aviommu;
+	int ret = 0;	/* [한국어] 명령 삽입 결과를 모은다 */
+	struct amd_iommu_viommu *aviommu;	/* [한국어] 이 도메인을 부모로 쓰는 vIOMMU */
 
-	list_for_each_entry(aviommu, &pdom->viommu_list, pdom_list) {
-		unsigned long i;
-		struct guest_domain_mapping_info *gdom_info;
-		struct amd_iommu *iommu = container_of(aviommu->core.iommu_dev,
-						       struct amd_iommu, iommu);
+	list_for_each_entry(aviommu, &pdom->viommu_list, pdom_list) {	/* [한국어] nested.c 가 만들어 둔 역방향 연결 */
+		unsigned long i;	/* [한국어] xarray 인덱스 */
+		struct guest_domain_mapping_info *gdom_info;	/* [한국어] 게스트 id → 호스트 id 대응 */
+		struct amd_iommu *iommu = container_of(aviommu->core.iommu_dev,	/* [한국어] 그 vIOMMU 를 제공하는 유닛 */
+						       struct amd_iommu, iommu);	/* [한국어] 벤더 구조체로 되짚는다 */
 
-		xa_lock(&aviommu->gdomid_array);
-		xa_for_each(&aviommu->gdomid_array, i, gdom_info) {
-			struct iommu_cmd cmd;
+		xa_lock(&aviommu->gdomid_array);	/* [한국어] 순회 중 대응이 추가되거나 사라질 수 있다 */
+		xa_for_each(&aviommu->gdomid_array, i, gdom_info) {	/* [한국어] 그 vIOMMU 의 모든 게스트 도메인 */
+			struct iommu_cmd cmd;	/* [한국어] 무효화 명령 */
 
-			pr_debug("%s: iommu=%#x, hdom_id=%#x\n", __func__,
+			pr_debug("%s: iommu=%#x, hdom_id=%#x\n", __func__,	/* [한국어] 어느 유닛의 어느 도메인 id 인지 */
 				 iommu->devid, gdom_info->hdom_id);
-			build_inv_iommu_pages(&cmd, address, size, gdom_info->hdom_id,
-					      IOMMU_NO_PASID, false);
-			ret |= iommu_queue_command(iommu, &cmd);
+			build_inv_iommu_pages(&cmd, address, size, gdom_info->hdom_id,	/* [한국어] TLB 태그가 게스트 도메인 id 로 매겨지므로 그 id 로 지워야 한다 */
+					      IOMMU_NO_PASID, false);	/* [한국어] 2단계 매핑 변경이라 PASID 는 따지지 않는다 */
+			ret |= iommu_queue_command(iommu, &cmd);	/* [한국어] 하나라도 실패하면 결과에 남는다 */
 		}
-		xa_unlock(&aviommu->gdomid_array);
+		xa_unlock(&aviommu->gdomid_array);	/* [한국어] 이 vIOMMU 의 게스트 도메인을 모두 처리했다 */
 	}
-	return ret;
+	return ret;	/* [한국어] 성패 */
 }
 
+/*
+ * [한국어]
+ * amd_iommu_flush_all - 이 유닛의 모든 캐시를 한 명령으로 비운다
+ *
+ * @iommu: 대상 유닛.
+ *
+ * INV_ALL 명령 하나로 DTE 캐시·IOTLB·인터럽트 항목 캐시를 전부 지운다.
+ * 하드웨어가 그 명령을 지원할 때(FEATURE_IA)만 쓸 수 있다.
+ */
 static void amd_iommu_flush_all(struct amd_iommu *iommu)
 {
-	struct iommu_cmd cmd;
+	struct iommu_cmd cmd;	/* [한국어] 무효화 명령 */
 
-	build_inv_all(&cmd);
+	build_inv_all(&cmd);	/* [한국어] DTE·IOTLB·인터럽트 캐시를 한 번에 */
 
-	iommu_queue_command(iommu, &cmd);
-	iommu_completion_wait(iommu);
+	iommu_queue_command(iommu, &cmd);	/* [한국어] 넣고 */
+	iommu_completion_wait(iommu);	/* [한국어] 실제로 비워질 때까지 기다린다 */
 }
 
+/*
+ * [한국어]
+ * iommu_flush_irt - 한 장치의 인터럽트 재매핑 캐시를 무효화한다
+ *
+ * @iommu: 대상 유닛.
+ * @devid: 대상 장치.
+ *
+ * 명령만 넣고 기다리지 않는다 — 여러 장치를 처리할 때 마지막에 한 번
+ * 기다리기 위해서다.
+ */
 static void iommu_flush_irt(struct amd_iommu *iommu, u16 devid)
 {
-	struct iommu_cmd cmd;
+	struct iommu_cmd cmd;	/* [한국어] 무효화 명령 */
 
-	build_inv_irt(&cmd, devid);
+	build_inv_irt(&cmd, devid);	/* [한국어] 그 장치의 재매핑 표 캐시 */
 
-	iommu_queue_command(iommu, &cmd);
+	iommu_queue_command(iommu, &cmd);	/* [한국어] 넣기만 한다 — 대기는 호출자가 */
 }
 
+/*
+ * [한국어]
+ * amd_iommu_flush_irt_all - 모든 장치의 인터럽트 재매핑 캐시를 비운다
+ *
+ * @iommu: 대상 유닛.
+ *
+ * 캐시를 끈 유닛에서는 아무것도 하지 않는다. 지울 캐시가 없을 뿐 아니라,
+ * 그 명령이 무의미하게 하드웨어를 붙잡는다.
+ */
 static void amd_iommu_flush_irt_all(struct amd_iommu *iommu)
 {
-	u32 devid;
-	u16 last_bdf = iommu->pci_seg->last_bdf;
+	u32 devid;	/* [한국어] 장치 순회 인덱스 */
+	u16 last_bdf = iommu->pci_seg->last_bdf;	/* [한국어] 이 세그먼트의 최대 장치 id */
 
-	if (iommu->irtcachedis_enabled)
-		return;
+	if (iommu->irtcachedis_enabled)	/* [한국어] 캐시를 꺼 둔 유닛이면 */
+		return;	/* [한국어] 지울 것이 없고 명령만 낭비된다 */
 
-	for (devid = 0; devid <= last_bdf; devid++)
-		iommu_flush_irt(iommu, devid);
+	for (devid = 0; devid <= last_bdf; devid++)	/* [한국어] 모든 장치에 */
+		iommu_flush_irt(iommu, devid);	/* [한국어] 명령만 넣고 */
 
-	iommu_completion_wait(iommu);
+	iommu_completion_wait(iommu);	/* [한국어] 마지막에 한 번 기다린다 */
 }
 
+/*
+ * [한국어]
+ * amd_iommu_flush_all_caches - 이 유닛의 캐시를 모두 비운다
+ *
+ * @iommu: 대상 유닛.
+ *
+ * 하드웨어가 INV_ALL 을 지원하면 명령 하나로 끝내고, 아니면 세 종류를
+ * 따로 지운다. 결과는 같지만 전자가 훨씬 빠르다 — 후자는 장치 수만큼
+ * 명령을 넣어야 한다.
+ *
+ * 초기화 직후나 물려받기 직후처럼 캐시 상태를 알 수 없을 때 쓴다.
+ *
+ * 호출 체인:
+ *   early_enable_iommu()/amd_iommu_init_pci() → [이 함수]
+ */
 void amd_iommu_flush_all_caches(struct amd_iommu *iommu)
 {
-	if (check_feature(FEATURE_IA)) {
-		amd_iommu_flush_all(iommu);
+	if (check_feature(FEATURE_IA)) {	/* [한국어] 한 명령으로 전부 비우는 기능이 있으면 */
+		amd_iommu_flush_all(iommu);	/* [한국어] 그것을 쓴다 — 훨씬 빠르다 */
 	} else {
-		amd_iommu_flush_dte_all(iommu);
-		amd_iommu_flush_irt_all(iommu);
-		amd_iommu_flush_tlb_all(iommu);
+		amd_iommu_flush_dte_all(iommu);	/* [한국어] 없으면 장치 테이블 캐시를 */
+		amd_iommu_flush_irt_all(iommu);	/* [한국어] 인터럽트 재매핑 캐시를 */
+		amd_iommu_flush_tlb_all(iommu);	/* [한국어] IOTLB 를 따로 비운다. 결과는 같지만 명령 수가 장치 수만큼 든다 */
 	}
 }
 
 /*
  * Command send function for flushing on-device TLB
  */
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * device_flush_iotlb - 장치 안의 변환 캐시를 무효화한다
+ *
+ * @dev_data: 대상 장치.
+ * @address: 범위의 시작.
+ * @size: 크기.
+ * @pasid: 대상 PASID.
+ * @gn: PASID 별 무효화인가.
+ * @return: 0 성공, 음수면 큐에 넣지 못했다.
+ *
+ * ATS 를 켠 장치는 변환 결과를 자기 안에 담아 두므로, IOMMU 쪽만 지우면
+ * 장치는 계속 옛 매핑을 쓴다. unmap 이 완결되려면 양쪽을 모두 지워야 한다.
+ *
+ * qdep 를 실어 보내는 이유: 하드웨어가 이 장치에 동시에 보낼 수 있는
+ * 무효화 수를 알아야 한다.
+ */
 static int device_flush_iotlb(struct iommu_dev_data *dev_data, u64 address,
 			      size_t size, ioasid_t pasid, bool gn)
 {
-	struct amd_iommu *iommu = get_amd_iommu_from_dev_data(dev_data);
-	struct iommu_cmd cmd;
-	int qdep = dev_data->ats_qdep;
+	struct amd_iommu *iommu = get_amd_iommu_from_dev_data(dev_data);	/* [한국어] 명령을 보낼 유닛 */
+	struct iommu_cmd cmd;	/* [한국어] 무효화 명령 */
+	int qdep = dev_data->ats_qdep;	/* [한국어] 장치가 동시에 받을 수 있는 무효화 수 */
 
-	build_inv_iotlb_pages(&cmd, dev_data->devid, qdep, address,
-			      size, pasid, gn);
+	build_inv_iotlb_pages(&cmd, dev_data->devid, qdep, address,	/* [한국어] 장치 안의 캐시를 지우라는 명령 */
+			      size, pasid, gn);	/* [한국어] 범위와 PASID */
 
-	return iommu_queue_command(iommu, &cmd);
+	return iommu_queue_command(iommu, &cmd);	/* [한국어] IOMMU 쪽만 지우면 장치는 계속 옛 매핑을 쓴다 */
 }
 
+/*
+ * [한국어]
+ * device_flush_dte_alias - 별칭마다 DTE 캐시를 무효화하는 콜백
+ *
+ * @pdev: 순회의 장치(쓰지 않는다).
+ * @alias: 그 별칭 id.
+ * @data: 담당 유닛.
+ * @return: 큐 삽입 결과.
+ *
+ * pci_for_each_dma_alias 가 별칭을 하나씩 넘겨 준다. 별칭 항목도 DTE 를
+ * 갖고 있으므로 그쪽 캐시도 지워야 한다.
+ */
 static int device_flush_dte_alias(struct pci_dev *pdev, u16 alias, void *data)
 {
-	struct amd_iommu *iommu = data;
+	struct amd_iommu *iommu = data;	/* [한국어] 담당 유닛 */
 
-	return iommu_flush_dte(iommu, alias);
+	return iommu_flush_dte(iommu, alias);	/* [한국어] 별칭 항목도 DTE 를 갖고 있어 그쪽 캐시도 지워야 한다 */
 }
 
 /*
  * Command send function for invalidating a device table entry
  */
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * device_flush_dte - 이 장치와 관련된 모든 DTE 캐시를 무효화한다
+ *
+ * @dev_data: 대상 장치.
+ * @return: 0 성공, 음수면 어느 단계에서 실패.
+ *
+ * 세 곳을 지워야 한다는 것이 이 함수의 요점이다.
+ *  - PCI 위상에서 유도되는 별칭들: pci_for_each_dma_alias 로 훑는다.
+ *  - IVRS 표가 알려 준 별칭: 위 순회에 포함되지 않을 수 있어 따로 지운다.
+ *    같은 이유로 clone_aliases 도 두 곳을 본다.
+ *  - 장치 안의 IOTLB: ATS 를 켰다면 그쪽도 옛 매핑을 들고 있다.
+ *
+ * 장치 IOTLB 를 통째로 지우는 이유: DTE 가 바뀌면 그 장치의 변환 규칙
+ * 자체가 달라지므로, 캐시에 든 모든 항목이 무효가 된다.
+ *
+ * 호출 체인:
+ *   amd_iommu_update_dte()/장치 attach 경로 → [이 함수]
+ */
 static int device_flush_dte(struct iommu_dev_data *dev_data)
 {
-	struct amd_iommu *iommu = get_amd_iommu_from_dev_data(dev_data);
-	struct pci_dev *pdev = NULL;
-	struct amd_iommu_pci_seg *pci_seg;
-	u16 alias;
-	int ret;
+	struct amd_iommu *iommu = get_amd_iommu_from_dev_data(dev_data);	/* [한국어] 명령을 보낼 유닛 */
+	struct pci_dev *pdev = NULL;	/* [한국어] PCI 장치면 별칭 순회를 쓴다 */
+	struct amd_iommu_pci_seg *pci_seg;	/* [한국어] IVRS 별칭 표가 있는 세그먼트 */
+	u16 alias;	/* [한국어] 표가 알려 준 별칭 */
+	int ret;	/* [한국어] 결과 */
 
-	if (dev_is_pci(dev_data->dev))
-		pdev = to_pci_dev(dev_data->dev);
+	if (dev_is_pci(dev_data->dev))	/* [한국어] PCI 장치인가 */
+		pdev = to_pci_dev(dev_data->dev);	/* [한국어] PCI 표현으로 */
 
-	if (pdev)
-		ret = pci_for_each_dma_alias(pdev,
-					     device_flush_dte_alias, iommu);
+	if (pdev)	/* [한국어] PCI 면 */
+		ret = pci_for_each_dma_alias(pdev,	/* [한국어] 위상에서 유도되는 별칭들을 모두 지운다 */
+					     device_flush_dte_alias, iommu);	/* [한국어] 각 별칭마다 콜백이 불린다 */
 	else
-		ret = iommu_flush_dte(iommu, dev_data->devid);
-	if (ret)
-		return ret;
+		ret = iommu_flush_dte(iommu, dev_data->devid);	/* [한국어] 플랫폼 장치는 별칭이 없어 자기 것만 */
+	if (ret)	/* [한국어] 큐 삽입 실패 */
+		return ret;	/* [한국어] 더 진행하지 않는다 */
 
-	pci_seg = iommu->pci_seg;
-	alias = pci_seg->alias_table[dev_data->devid];
-	if (alias != dev_data->devid) {
-		ret = iommu_flush_dte(iommu, alias);
+	pci_seg = iommu->pci_seg;	/* [한국어] IVRS 별칭 표 */
+	alias = pci_seg->alias_table[dev_data->devid];	/* [한국어] 표가 알려 준 별칭 */
+	if (alias != dev_data->devid) {	/* [한국어] 자기 자신이 아니면 */
+		ret = iommu_flush_dte(iommu, alias);	/* [한국어] 위 순회에 포함되지 않았을 수 있어 따로 지운다 */
 		if (ret)
-			return ret;
+			return ret;	/* [한국어] 실패하면 보고 */
 	}
 
-	if (dev_data->ats_enabled) {
+	if (dev_data->ats_enabled) {	/* [한국어] 장치가 변환을 캐시하고 있으면 */
 		/* Invalidate the entire contents of an IOTLB */
-		ret = device_flush_iotlb(dev_data, 0, ~0UL,
-					 IOMMU_NO_PASID, false);
+		ret = device_flush_iotlb(dev_data, 0, ~0UL,	/* [한국어] (원 주석: 장치 IOTLB 를 통째로 무효화한다) */
+					 IOMMU_NO_PASID, false);	/* [한국어] DTE 가 바뀌면 변환 규칙 자체가 달라져 캐시 전체가 무효다 */
 	}
 
-	return ret;
+	return ret;	/* [한국어] 성패 */
 }
 
 static int domain_flush_pages_v2(struct protection_domain *pdom,
