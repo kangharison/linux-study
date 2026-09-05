@@ -1605,65 +1605,102 @@ static bool first_level_by_default(struct intel_iommu *iommu)
 	return true;	/* [한국어] 둘 다 가능하면 1단계를 기본으로 삼는다. 1단계는 CPU 페이지 테이블과 형식이 같아 SVA 로 확장하기 쉽고, 큰 페이지 지원도 낫다 */
 }
 
+/*
+ * [한국어]
+ * domain_attach_iommu - 이 도메인이 특정 DMAR 유닛에서 쓸 도메인 id 를 확보한다
+ *
+ * @domain: 대상 도메인
+ * @iommu:  설치할 유닛
+ * @return: 0 성공, -ENOSPC 면 id 고갈, -ENOMEM 이면 할당 실패
+ *
+ * VT-d 의 도메인 id 는 유닛마다 독립적인 자원이다. 하나의 커널 도메인이 여러
+ * 유닛에 걸쳐 설치될 수 있고(그 도메인의 장치들이 서로 다른 소켓에 있는 경우),
+ * 그때 유닛마다 다른 id 를 받는다. iommu_array 가 그 대응을 담는다.
+ *
+ * 참조 계수를 두는 이유는 같은 유닛의 여러 장치가 한 도메인을 공유하기 때문이다.
+ * 첫 장치가 id 를 떼고 마지막 장치가 돌려준다.
+ *
+ * cap_ndoms 가 상한인 것이 실무적으로 중요하다. 그 값이 이 유닛에서 동시에
+ * 존재할 수 있는 주소 공간의 개수이며, 구형 하드웨어는 그것이 작아 VM 을 많이
+ * 띄우면 실제로 고갈된다.
+ *
+ * 실행 컨텍스트: 장치 부착. did_lock 을 잡는다. 잠들 수 있다.
+ *
+ * 호출 체인: intel_iommu_attach_device 계열 → [이 함수]
+ */
 int domain_attach_iommu(struct dmar_domain *domain, struct intel_iommu *iommu)
 {
-	struct iommu_domain_info *info, *curr;
-	int num, ret = -ENOSPC;
+	struct iommu_domain_info *info, *curr;	/* [한국어] 이 유닛에서의 도메인 정보와, 이미 있던 것 */
+	int num, ret = -ENOSPC;	/* [한국어] 할당받을 도메인 id 와 결과 */
 
-	if (domain->domain.type == IOMMU_DOMAIN_SVA)
-		return 0;
+	if (domain->domain.type == IOMMU_DOMAIN_SVA)	/* [한국어] SVA 도메인은 PASID 표를 통해 설치되며 도메인 id 를 쓰지 않는다 */
+		return 0;	/* [한국어] 할 일 없음 */
 
-	info = kzalloc_obj(*info);
-	if (!info)
-		return -ENOMEM;
+	info = kzalloc_obj(*info);	/* [한국어] 락 밖에서 미리 잡는다 */
+	if (!info)	/* [한국어] 할당 실패 */
+		return -ENOMEM;	/* [한국어] 부착 불가 */
 
-	guard(mutex)(&iommu->did_lock);
-	curr = xa_load(&domain->iommu_array, iommu->seq_id);
-	if (curr) {
-		curr->refcnt++;
-		kfree(info);
-		return 0;
+	guard(mutex)(&iommu->did_lock);	/* [한국어] 도메인 id 할당을 직렬화. guard 라 반환 경로마다 해제를 쓰지 않아도 된다 */
+	curr = xa_load(&domain->iommu_array, iommu->seq_id);	/* [한국어] 이 도메인이 이 유닛에 이미 설치되어 있는지 */
+	if (curr) {	/* [한국어] 같은 유닛의 다른 장치가 먼저 붙였다 */
+		curr->refcnt++;	/* [한국어] 참조만 늘린다 — 도메인 id 는 유닛당 하나면 된다 */
+		kfree(info);	/* [한국어] 미리 잡은 것은 버린다 */
+		return 0;	/* [한국어] 이미 설치되어 있다 */
 	}
 
-	num = ida_alloc_range(&iommu->domain_ida, IDA_START_DID,
-			      cap_ndoms(iommu->cap) - 1, GFP_KERNEL);
-	if (num < 0) {
-		pr_err("%s: No free domain ids\n", iommu->name);
-		goto err_unlock;
+	num = ida_alloc_range(&iommu->domain_ida, IDA_START_DID,	/* [한국어] 이 유닛에서 쓸 도메인 id 를 뗀다 */
+			      cap_ndoms(iommu->cap) - 1, GFP_KERNEL);	/* [한국어] 상한은 하드웨어가 지원하는 도메인 수. 이 값이 곧 한 유닛이 동시에 관리할 수 있는 주소 공간의 개수이며, 흔히 65536 이지만 구형은 훨씬 적다 */
+	if (num < 0) {	/* [한국어] id 고갈 */
+		pr_err("%s: No free domain ids\n", iommu->name);	/* [한국어] 이 유닛에 더는 도메인을 만들 수 없다 */
+		goto err_unlock;	/* [한국어] 되감기 */
 	}
 
-	info->refcnt	= 1;
-	info->did	= num;
-	info->iommu	= iommu;
-	curr = xa_cmpxchg(&domain->iommu_array, iommu->seq_id,
-			  NULL, info, GFP_KERNEL);
-	if (curr) {
-		ret = xa_err(curr) ? : -EBUSY;
-		goto err_clear;
+	info->refcnt	= 1;	/* [한국어] 첫 사용자 */
+	info->did	= num;	/* [한국어] 하드웨어에 쓸 도메인 id. 컨텍스트 항목과 무효화 명령이 이 값을 싣는다 */
+	info->iommu	= iommu;	/* [한국어] 어느 유닛의 정보인지 */
+	curr = xa_cmpxchg(&domain->iommu_array, iommu->seq_id,	/* [한국어] 원자적으로 등록한다 — 위의 조회와 이 등록 사이에 다른 CPU 가 끼어들 수 있다 */
+			  NULL, info, GFP_KERNEL);	/* [한국어] 비어 있을 때만 넣는다 */
+	if (curr) {	/* [한국어] 다른 CPU 가 먼저 넣었거나 메모리 부족 */
+		ret = xa_err(curr) ? : -EBUSY;	/* [한국어] 에러 포인터면 그 값, 아니면 경쟁 패배 */
+		goto err_clear;	/* [한국어] 뗀 id 를 돌려준다 */
 	}
 
-	return 0;
+	return 0;	/* [한국어] 이 유닛에서 이 도메인이 쓸 id 가 정해졌다 */
 
-err_clear:
-	ida_free(&iommu->domain_ida, info->did);
-err_unlock:
-	kfree(info);
-	return ret;
+err_clear:	/* [한국어] 등록 실패 경로 */
+	ida_free(&iommu->domain_ida, info->did);	/* [한국어] 도메인 id 반납 */
+err_unlock:	/* [한국어] id 할당 실패가 합류 */
+	kfree(info);	/* [한국어] 정보 구조체 반납 */
+	return ret;	/* [한국어] 실패 이유 */
 }
 
+/*
+ * [한국어]
+ * domain_detach_iommu - 유닛에서의 도메인 id 참조를 놓는다
+ *
+ * @domain: 대상 도메인
+ * @iommu:  떠나는 유닛
+ *
+ * 마지막 참조에서만 id 를 반납한다. 그 전까지는 같은 유닛의 다른 장치가 아직
+ * 이 도메인을 쓰고 있다는 뜻이다.
+ *
+ * 실행 컨텍스트: 장치 해제. did_lock 을 잡는다.
+ *
+ * 호출 체인: 도메인 해제 경로 → [이 함수]
+ */
 void domain_detach_iommu(struct dmar_domain *domain, struct intel_iommu *iommu)
 {
-	struct iommu_domain_info *info;
+	struct iommu_domain_info *info;	/* [한국어] 이 유닛에서의 도메인 정보 */
 
-	if (domain->domain.type == IOMMU_DOMAIN_SVA)
-		return;
+	if (domain->domain.type == IOMMU_DOMAIN_SVA)	/* [한국어] SVA 는 도메인 id 를 쓰지 않는다 */
+		return;	/* [한국어] 할 일 없음 */
 
-	guard(mutex)(&iommu->did_lock);
-	info = xa_load(&domain->iommu_array, iommu->seq_id);
-	if (--info->refcnt == 0) {
-		ida_free(&iommu->domain_ida, info->did);
-		xa_erase(&domain->iommu_array, iommu->seq_id);
-		kfree(info);
+	guard(mutex)(&iommu->did_lock);	/* [한국어] id 조작 직렬화 */
+	info = xa_load(&domain->iommu_array, iommu->seq_id);	/* [한국어] 이 유닛의 정보 */
+	if (--info->refcnt == 0) {	/* [한국어] 이 유닛에서 마지막 장치가 떠났다 */
+		ida_free(&iommu->domain_ida, info->did);	/* [한국어] 도메인 id 를 풀에 돌려준다 */
+		xa_erase(&domain->iommu_array, iommu->seq_id);	/* [한국어] 이 도메인이 그 유닛에 더는 설치되지 않았음을 기록 */
+		kfree(info);	/* [한국어] 정보 구조체 반납 */
 	}
 }
 
@@ -1676,30 +1713,53 @@ void domain_detach_iommu(struct dmar_domain *domain, struct intel_iommu *iommu)
  * in-flight DMA will exist, and we don't need to worry anymore
  * hereafter.
  */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * copied_context_tear_down - kdump 로 물려받은 컨텍스트 항목을 정리한다
+ *
+ * @iommu:      대상 유닛
+ * @context:    그 장치의 컨텍스트 항목
+ * @bus/@devfn: 장치의 BDF
+ *
+ * 크래시 덤프 커널은 앞선 커널이 만들어 둔 페이지 테이블과 컨텍스트 항목 위에서
+ * 시작한다. 그것을 그대로 쓰는 이유는 진행 중이던 DMA 를 끊지 않기 위해서인데,
+ * 그 대가로 하드웨어 캐시에 앞선 커널의 번역이 남아 있게 된다.
+ *
+ * 문제는 그 매핑들에 대응하는 해제 동작이 없다는 점이다 (위 영어 주석). 정상
+ * 경로였다면 unmap 이 무효화를 냈겠지만 여기서는 그런 일이 없었으므로, 이 장치를
+ * 새로 설정하기 전에 명시적으로 비워야 한다.
+ *
+ * 이 시점에는 장치가 드라이버 프로브에서 리셋을 마쳤을 것이므로 진행 중인 DMA 는
+ * 없다고 전제한다.
+ *
+ * 실행 컨텍스트: 장치 부착 경로. 유닛 락을 든 채.
+ *
+ * 호출 체인: domain_context_mapping_one → [이 함수]
+ */
 static void copied_context_tear_down(struct intel_iommu *iommu,
 				     struct context_entry *context,
 				     u8 bus, u8 devfn)
 {
-	u16 did_old;
+	u16 did_old;	/* [한국어] 앞선 커널이 이 장치에 쓰던 도메인 id */
 
-	if (!context_copied(iommu, bus, devfn))
-		return;
+	if (!context_copied(iommu, bus, devfn))	/* [한국어] 물려받은 항목이 아니면 */
+		return;	/* [한국어] 할 일 없음 */
 
-	assert_spin_locked(&iommu->lock);
+	assert_spin_locked(&iommu->lock);	/* [한국어] 호출자가 유닛 락을 든 상태여야 한다 */
 
-	did_old = context_domain_id(context);
-	context_clear_entry(context);
+	did_old = context_domain_id(context);	/* [한국어] 앞선 커널의 도메인 id 를 꺼낸다 */
+	context_clear_entry(context);	/* [한국어] 항목을 지운다 */
 
-	if (did_old < cap_ndoms(iommu->cap)) {
-		iommu->flush.flush_context(iommu, did_old,
-					   PCI_DEVID(bus, devfn),
-					   DMA_CCMD_MASK_NOBIT,
-					   DMA_CCMD_DEVICE_INVL);
-		iommu->flush.flush_iotlb(iommu, did_old, 0, 0,
-					 DMA_TLB_DSI_FLUSH);
+	if (did_old < cap_ndoms(iommu->cap)) {	/* [한국어] 그 id 가 이 하드웨어의 범위 안이면 (물려받은 값이 신뢰할 수 있는지 확인) */
+		iommu->flush.flush_context(iommu, did_old,	/* [한국어] 그 id 로 캐시된 컨텍스트를 비운다 */
+					   PCI_DEVID(bus, devfn),	/* [한국어] 이 장치만 */
+					   DMA_CCMD_MASK_NOBIT,	/* [한국어] 함수 마스크 없이 정확히 하나 */
+					   DMA_CCMD_DEVICE_INVL);	/* [한국어] 장치 단위 무효화 */
+		iommu->flush.flush_iotlb(iommu, did_old, 0, 0,	/* [한국어] 그 도메인의 IOTLB 도 */
+					 DMA_TLB_DSI_FLUSH);	/* [한국어] 도메인 전체. 앞선 커널이 만든 매핑에는 대응하는 해제 동작이 없으므로 명시적으로 비워야 한다 (위 영어 주석) */
 	}
 
-	clear_context_copied(iommu, bus, devfn);
+	clear_context_copied(iommu, bus, devfn);	/* [한국어] 이제 이 항목은 우리 것이다 */
 }
 
 /*
@@ -1708,12 +1768,31 @@ static void copied_context_tear_down(struct intel_iommu *iommu,
  * _does_ cache non-present entries, then it does so in the special
  * domain #0, which we have to flush:
  */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * context_present_cache_flush - 없음→있음 전환 뒤 부정 캐시를 비운다
+ *
+ * @iommu:      대상 유닛
+ * @did:        새로 설정한 도메인 id
+ * @bus/@devfn: 장치의 BDF
+ *
+ * 보통의 하드웨어는 "이 장치는 설정되지 않았다"는 사실을 캐시하지 않으므로, 새
+ * 컨텍스트 항목을 쓰면 곧바로 보인다. 그때는 쓰기 버퍼만 비우면 된다.
+ *
+ * 그러나 caching mode 하드웨어 — 주로 가상화된 IOMMU — 는 없음 항목까지 캐시하고,
+ * 그것을 특수 도메인 0 에 넣는다. 그래서 도메인 0 을 명시적으로 비워야 새 설정이
+ * 보인다 (위 영어 주석).
+ *
+ * 실행 컨텍스트: 장치 부착 경로.
+ *
+ * 호출 체인: domain_context_mapping_one → [이 함수]
+ */
 static void context_present_cache_flush(struct intel_iommu *iommu, u16 did,
 					u8 bus, u8 devfn)
 {
-	if (cap_caching_mode(iommu->cap)) {
-		iommu->flush.flush_context(iommu, 0,
-					   PCI_DEVID(bus, devfn),
+	if (cap_caching_mode(iommu->cap)) {	/* [한국어] 하드웨어가 '없음' 항목까지 캐시하는 모드면 (주로 가상화된 IOMMU) */
+		iommu->flush.flush_context(iommu, 0,	/* [한국어] 도메인 0 에 캐시된 부정 항목을 비운다. 없음→있음 전환이라 그 캐시가 남아 있으면 새 매핑이 보이지 않는다 (위 영어 주석) */
+					   PCI_DEVID(bus, devfn),	/* [한국어] 이 장치의 소스 id */
 					   DMA_CCMD_MASK_NOBIT,
 					   DMA_CCMD_DEVICE_INVL);
 		iommu->flush.flush_iotlb(iommu, did, 0, 0, DMA_TLB_DSI_FLUSH);
