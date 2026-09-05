@@ -5721,34 +5721,64 @@ EXPORT_SYMBOL_GPL(iommu_fwspec_add_ids);
  * When target_type is 0 the default domain is selected based on driver and
  * system preferences.
  */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어)
+ * iommu_setup_default_domain - 그룹의 기본 도메인을 정하고, 만들고, 그룹 전체를 옮긴다
+ *
+ * @group:       대상 그룹
+ * @target_type: 원하는 도메인 종류. 0 이면 시스템·드라이버 선호에 맡긴다.
+ * @return:      0 성공, 음수 실패 (실패 시 그룹은 이전 상태 그대로)
+ *
+ * 기본 도메인(default domain)은 "커널이 이 그룹의 DMA 를 다루는 평상시 주소 공간"
+ * 이다. VFIO 가 소유권을 가져가면 잠시 다른 도메인으로 갔다가, 놓으면 여기로 돌아
+ * 온다. 그래서 이 함수는 프로브 때 한 번, 그리고 sysfs 로 type 을 바꿀 때마다 불린다.
+ *
+ * 순서에 담긴 제약이 이 함수의 내용 대부분이다.
+ *   1) 종류 확정 → 2) 도메인 할당 → 3) DMA 쿠키(IOVA 할당자) 부착
+ *   4) 부착 '전에' 직통 매핑을 심는다. 펌웨어가 쓰던 버퍼가 한순간도 끊기지 않아야
+ *      하기 때문이다. 이를 지원하지 않는 드라이버가 있어 부착 후 재시도 경로가 있다.
+ *   5) group->default_domain 을 먼저 세운 뒤 부착한다 —
+ *      __iommu_device_set_domain 이 '기본 도메인인가'로 실패 정책을 가르기 때문.
+ *   6) 부착. 첫 부착이면 MUST_SUCCEED, 교체면 되감을 수 있는 일반 정책.
+ *
+ * 되감기 라벨 세 개가 각각 다른 지점의 상태를 정확히 되돌린다. 특히 err_restore_domain
+ * 의 되감기는 MUST_SUCCEED 로 부르는데, 여기서 실패하면 장치가 어느 도메인에도
+ * 속하지 않는 상태가 되어 복구가 불가능하기 때문이다.
+ *
+ * 실행 컨텍스트: 그룹 락을 든 채. 프로세스 문맥, 잠들 수 있다.
+ *
+ * 호출 체인: __iommu_probe_device, bus_iommu_probe, iommu_group_store_type → [이 함수]
+ *            → iommu_get_default_domain_type → iommu_group_alloc_default_domain
+ *            → __iommu_group_set_domain(_internal)
+ */
 static int iommu_setup_default_domain(struct iommu_group *group,
 				      int target_type)
 {
-	struct iommu_domain *old_dom = group->default_domain;
-	struct group_device *gdev;
-	struct iommu_domain *dom;
-	bool direct_failed;
-	int req_type;
-	int ret;
+	struct iommu_domain *old_dom = group->default_domain;	/* [한국어] 교체 전 도메인. 성공하면 해제하고, 실패하면 여기로 되돌린다 */
+	struct group_device *gdev;	/* [한국어] 그룹 장치 순회용 */
+	struct iommu_domain *dom;	/* [한국어] 새로 세울 도메인 */
+	bool direct_failed;	/* [한국어] 직통 매핑을 부착 전에 심지 못한 드라이버가 있었는지 */
+	int req_type;	/* [한국어] 최종적으로 만들 도메인 종류 */
+	int ret;	/* [한국어] 각 단계의 결과 */
 
-	lockdep_assert_held(&group->mutex);
+	lockdep_assert_held(&group->mutex);	/* [한국어] 그룹 전체의 도메인을 바꾸므로 반드시 그룹 락 아래에서 */
 
-	req_type = iommu_get_default_domain_type(group, target_type);
-	if (req_type < 0)
-		return -EINVAL;
+	req_type = iommu_get_default_domain_type(group, target_type);	/* [한국어] 3층 정책(빌드 설정 → 부트 인자 → 드라이버 선호)을 해석해 하나의 종류로 확정한다. target_type 이 0 이면 '자동' */
+	if (req_type < 0)	/* [한국어] 그룹 안의 장치들이 서로 다른 종류를 요구해 합의가 불가능하다 */
+		return -EINVAL;	/* [한국어] 도메인을 세울 수 없다 */
 
-	dom = iommu_group_alloc_default_domain(group, req_type);
-	if (IS_ERR(dom))
-		return PTR_ERR(dom);
+	dom = iommu_group_alloc_default_domain(group, req_type);	/* [한국어] 확정된 종류로 실제 도메인을 만든다 (실패하면 DMA 로 물러서는 정책이 그 안에 있다) */
+	if (IS_ERR(dom))	/* [한국어] 할당 실패 */
+		return PTR_ERR(dom);	/* [한국어] 이유를 그대로 올린다 */
 
-	if (group->default_domain == dom)
-		return 0;
+	if (group->default_domain == dom)	/* [한국어] 이미 쓰던 것을 그대로 돌려받았다 (같은 종류 재요청) */
+		return 0;	/* [한국어] 바꿀 것이 없다 */
 
-	if (iommu_is_dma_domain(dom)) {
-		ret = iommu_get_dma_cookie(dom);
-		if (ret) {
-			iommu_domain_free(dom);
-			return ret;
+	if (iommu_is_dma_domain(dom)) {	/* [한국어] 커널 DMA API 가 쓸 도메인이라면 */
+		ret = iommu_get_dma_cookie(dom);	/* [한국어] IOVA 할당자와 flush queue 를 담을 dma-iommu 쿠키를 붙인다 — 이것이 있어야 dma_map_* 이 IOVA 를 떼어 줄 수 있다 */
+		if (ret) {	/* [한국어] 쿠키 준비 실패 */
+			iommu_domain_free(dom);	/* [한국어] 방금 만든 도메인을 거둔다 */
+			return ret;	/* [한국어] 기존 도메인은 손대지 않았으므로 그대로 반환 */
 		}
 	}
 
@@ -5757,33 +5787,33 @@ static int iommu_setup_default_domain(struct iommu_group *group,
 	 * mapped before their device is attached, in order to guarantee
 	 * continuity with any FW activity
 	 */
-	direct_failed = false;
-	for_each_group_device(group, gdev) {
-		if (iommu_create_device_direct_mappings(dom, gdev->dev)) {
-			direct_failed = true;
-			dev_warn_once(
-				gdev->dev->iommu->iommu_dev->dev,
-				"IOMMU driver was not able to establish FW requested direct mapping.");
+	direct_failed = false;	/* [한국어] 낙관적으로 시작 */
+	for_each_group_device(group, gdev) {	/* [한국어] 그룹의 모든 장치에 대해 */
+		if (iommu_create_device_direct_mappings(dom, gdev->dev)) {	/* [한국어] 펌웨어가 계속 쓰는 구간(RESV_DIRECT)을 새 도메인에 미리 심는다. 부착 '전에' 심어야 펌웨어 활동이 한순간도 끊기지 않는다 (위 영어 주석) */
+			direct_failed = true;	/* [한국어] 드라이버가 부착 전 매핑을 받아 주지 않았다 — 아래에서 다시 시도한다 */
+			dev_warn_once(	/* [한국어] 같은 드라이버가 반복해서 경고를 쏟지 않도록 한 번만 */
+				gdev->dev->iommu->iommu_dev->dev,	/* [한국어] 경고를 IOMMU 장치 이름으로 낸다 — 문제의 주체가 그 드라이버이기 때문 */
+				"IOMMU driver was not able to establish FW requested direct mapping.");	/* [한국어] 펌웨어 요구 직통 매핑을 못 세웠다는 사실을 남긴다 */
 		}
 	}
 
 	/* We must set default_domain early for __iommu_device_set_domain */
-	group->default_domain = dom;
-	if (!group->domain) {
+	group->default_domain = dom;	/* [한국어] __iommu_device_set_domain 이 '기본 도메인인가'로 실패 정책을 가르므로, 붙이기 전에 먼저 세워 둬야 한다 (위 영어 주석) */
+	if (!group->domain) {	/* [한국어] 아직 어떤 도메인도 걸린 적이 없는 새 그룹 */
 		/*
 		 * Drivers are not allowed to fail the first domain attach.
 		 * The only way to recover from this is to fail attaching the
 		 * iommu driver and call ops->release_device. Put the domain
 		 * in group->default_domain so it is freed after.
 		 */
-		ret = __iommu_group_set_domain_internal(
-			group, dom, IOMMU_SET_DOMAIN_MUST_SUCCEED);
-		if (WARN_ON(ret))
-			goto out_free_old;
+		ret = __iommu_group_set_domain_internal(	/* [한국어] 첫 부착 */
+			group, dom, IOMMU_SET_DOMAIN_MUST_SUCCEED);	/* [한국어] 실패하면 되감을 곳이 없다 — 되돌릴 옛 도메인 자체가 없기 때문이다. 드라이버는 첫 부착을 실패시켜서는 안 되며, 복구 수단은 프로브를 통째로 실패시켜 release_device 로 가는 것뿐이다 (위 영어 주석) */
+		if (WARN_ON(ret))	/* [한국어] 일어나서는 안 될 실패 */
+			goto out_free_old;	/* [한국어] 새 도메인을 default_domain 에 남겨 두어 나중에 해제되게 한다 */
 	} else {
-		ret = __iommu_group_set_domain(group, dom);
+		ret = __iommu_group_set_domain(group, dom);	/* [한국어] 이미 도메인이 있는 그룹의 교체 — 실패하면 옛 도메인으로 되감을 수 있다 */
 		if (ret)
-			goto err_restore_def_domain;
+			goto err_restore_def_domain;	/* [한국어] 교체 실패 — 기본 도메인 포인터부터 원복 */
 	}
 
 	/*
@@ -5792,29 +5822,29 @@ static int iommu_setup_default_domain(struct iommu_group *group,
 	 * trying again after attaching. If this happens it means the device
 	 * will not continuously have the IOMMU_RESV_DIRECT map.
 	 */
-	if (direct_failed) {
-		for_each_group_device(group, gdev) {
-			ret = iommu_create_device_direct_mappings(dom, gdev->dev);
+	if (direct_failed) {	/* [한국어] 부착 전에 직통 매핑을 못 심은 드라이버가 있었다면 */
+		for_each_group_device(group, gdev) {	/* [한국어] 부착이 끝난 지금 다시 시도한다 */
+			ret = iommu_create_device_direct_mappings(dom, gdev->dev);	/* [한국어] 여기서 성공하더라도 그 사이 짧은 공백이 있었다는 뜻이다 — 규격 위반 드라이버를 위한 우회다 (위 영어 주석) */
 			if (ret)
-				goto err_restore_domain;
+				goto err_restore_domain;	/* [한국어] 두 번째 시도마저 실패 — 도메인 자체를 되돌린다 */
 		}
 	}
 
-out_free_old:
-	if (old_dom)
-		iommu_domain_free(old_dom);
-	return ret;
+out_free_old:	/* [한국어] 교체가 성립한 경로 */
+	if (old_dom)	/* [한국어] 이전 도메인이 있었다면 */
+		iommu_domain_free(old_dom);	/* [한국어] 이제 아무도 보지 않으므로 해제한다 */
+	return ret;	/* [한국어] 0 이면 새 도메인이 그룹 전체에 적용되었다 */
 
-err_restore_domain:
-	if (old_dom)
-		__iommu_group_set_domain_internal(
-			group, old_dom, IOMMU_SET_DOMAIN_MUST_SUCCEED);
-err_restore_def_domain:
-	if (old_dom) {
-		iommu_domain_free(dom);
-		group->default_domain = old_dom;
+err_restore_domain:	/* [한국어] 직통 매핑 재시도에서 실패한 경로 */
+	if (old_dom)	/* [한국어] 되돌릴 옛 도메인이 있으면 */
+		__iommu_group_set_domain_internal(	/* [한국어] 장치들을 원래 도메인으로 되돌린다 */
+			group, old_dom, IOMMU_SET_DOMAIN_MUST_SUCCEED);	/* [한국어] 이 되감기는 실패할 수 없다 — 실패하면 장치가 어느 도메인에도 속하지 않는 상태가 되기 때문 */
+err_restore_def_domain:	/* [한국어] 도메인 교체 자체가 실패한 경로가 합류 */
+	if (old_dom) {	/* [한국어] 옛 도메인이 있었다면 */
+		iommu_domain_free(dom);	/* [한국어] 쓰지 못한 새 도메인을 거두고 */
+		group->default_domain = old_dom;	/* [한국어] 기본 도메인 포인터를 원상 복구 */
 	}
-	return ret;
+	return ret;	/* [한국어] 실패 이유 전달 */
 }
 
 /*
@@ -5826,59 +5856,87 @@ err_restore_def_domain:
  * group->mutex is used here to guarantee that the device release path
  * will not be entered at the same time.
  */
+/*
+ * [한국어]
+ * iommu_group_store_type - sysfs 로 그룹의 격리 정책을 런타임에 바꾼다
+ *
+ * @group:  대상 그룹
+ * @buf:    "identity" / "DMA" / "DMA-FQ" / "auto" 중 하나
+ * @count:  입력 길이
+ * @return: 성공이면 count, 실패면 음수
+ *
+ * /sys/kernel/iommu_groups/<n>/type 에 쓰면 여기로 온다. 부팅 인자를 바꾸고 재부팅
+ * 하지 않고도 특정 장치의 DMA 정책을 바꿀 수 있는 유일한 통로이며, 관리자가 IOMMU
+ * 오버헤드를 실측할 때 흔히 쓴다.
+ *
+ * 권한을 CAP_SYS_ADMIN 과 CAP_SYS_RAWIO 둘 다 요구하는 것이 이 인터페이스의 위험도를
+ * 말해 준다. identity 로 바꾸면 그 장치는 시스템 물리 메모리 전체에 DMA 할 수 있게
+ * 되므로, 사실상 raw I/O 권한을 주는 것과 같다.
+ *
+ * DMA → DMA-FQ 만 특별 경로를 탄다. 둘은 같은 페이지 테이블에 무효화 정책만 다르므로,
+ * 기존 도메인에 flush queue 를 얹고 종류 표시만 바꾸면 끝이다. 매핑을 헐지 않으니
+ * 장치가 DMA 중이어도 안전하다. 나머지 전환은 도메인을 갈아야 하고, 그래서 그룹에
+ * 장치가 있고 아무도 소유권을 들고 있지 않을 때만 허용된다 — 드라이버가 바인딩된
+ * 장치의 주소 공간을 밑에서 바꿔치울 수는 없기 때문이다.
+ *
+ * 실행 컨텍스트: 사용자 공간 write(). 프로세스 문맥, 잠들 수 있다.
+ *
+ * 호출 체인: sysfs → iommu_group_attr_store → [이 함수]
+ *            → iommu_dma_init_fq 또는 iommu_setup_default_domain
+ */
 static ssize_t iommu_group_store_type(struct iommu_group *group,
 				      const char *buf, size_t count)
 {
-	struct group_device *gdev;
-	int ret, req_type;
+	struct group_device *gdev;	/* [한국어] 그룹 장치 순회용 */
+	int ret, req_type;	/* [한국어] 결과와 요청된 도메인 종류 */
 
-	if (!capable(CAP_SYS_ADMIN) || !capable(CAP_SYS_RAWIO))
-		return -EACCES;
+	if (!capable(CAP_SYS_ADMIN) || !capable(CAP_SYS_RAWIO))	/* [한국어] 격리 정책을 바꾸는 일이라 두 가지 능력을 모두 요구한다. RAWIO 까지 요구하는 것은 identity 로 바꾸면 장치가 물리 메모리 전체에 닿게 되어 사실상 raw I/O 와 같은 위력을 갖기 때문이다 */
+		return -EACCES;	/* [한국어] 권한 부족 */
 
-	if (WARN_ON(!group) || !group->default_domain)
-		return -EINVAL;
+	if (WARN_ON(!group) || !group->default_domain)	/* [한국어] 기본 도메인이 아직 서지 않은 그룹은 바꿀 대상이 없다 */
+		return -EINVAL;	/* [한국어] 잘못된 요청 */
 
-	if (sysfs_streq(buf, "identity"))
-		req_type = IOMMU_DOMAIN_IDENTITY;
-	else if (sysfs_streq(buf, "DMA"))
-		req_type = IOMMU_DOMAIN_DMA;
-	else if (sysfs_streq(buf, "DMA-FQ"))
-		req_type = IOMMU_DOMAIN_DMA_FQ;
-	else if (sysfs_streq(buf, "auto"))
-		req_type = 0;
+	if (sysfs_streq(buf, "identity"))	/* [한국어] 번역 없이 통과 — 성능 최대, 격리 없음 */
+		req_type = IOMMU_DOMAIN_IDENTITY;	/* [한국어] 항등 도메인으로 */
+	else if (sysfs_streq(buf, "DMA"))	/* [한국어] 번역 + 매 해제마다 즉시 IOTLB 무효화 */
+		req_type = IOMMU_DOMAIN_DMA;	/* [한국어] 가장 안전한 선택 */
+	else if (sysfs_streq(buf, "DMA-FQ"))	/* [한국어] 번역 + flush queue 로 지연 무효화 */
+		req_type = IOMMU_DOMAIN_DMA_FQ;	/* [한국어] 처리량 우선 */
+	else if (sysfs_streq(buf, "auto"))	/* [한국어] 시스템 정책에 맡긴다 */
+		req_type = 0;	/* [한국어] 0 이 곧 '자동' 이며 iommu_get_default_domain_type 이 해석한다 */
 	else
-		return -EINVAL;
+		return -EINVAL;	/* [한국어] 알 수 없는 문자열 */
 
-	mutex_lock(&group->mutex);
+	mutex_lock(&group->mutex);	/* [한국어] 그룹 도메인 변경 구간 */
 	/* We can bring up a flush queue without tearing down the domain. */
-	if (req_type == IOMMU_DOMAIN_DMA_FQ &&
-	    group->default_domain->type == IOMMU_DOMAIN_DMA) {
-		ret = iommu_dma_init_fq(group->default_domain);
+	if (req_type == IOMMU_DOMAIN_DMA_FQ &&	/* [한국어] DMA → DMA-FQ 는 특별 취급한다 */
+	    group->default_domain->type == IOMMU_DOMAIN_DMA) {	/* [한국어] 둘은 같은 페이지 테이블을 쓰고 무효화 정책만 다르기 때문 */
+		ret = iommu_dma_init_fq(group->default_domain);	/* [한국어] 기존 도메인에 flush queue 만 얹는다 — 매핑을 하나도 헐지 않는다 */
 		if (ret)
-			goto out_unlock;
+			goto out_unlock;	/* [한국어] 큐 준비 실패 */
 
-		group->default_domain->type = IOMMU_DOMAIN_DMA_FQ;
-		ret = count;
-		goto out_unlock;
+		group->default_domain->type = IOMMU_DOMAIN_DMA_FQ;	/* [한국어] 종류 표시만 바꾸면 전환 완료. 장치를 떼었다 붙일 필요가 없어 동작 중에도 안전하다 (위 영어 주석) */
+		ret = count;	/* [한국어] 성공 시 sysfs 는 소비한 바이트 수를 돌려준다 */
+		goto out_unlock;	/* [한국어] 여기서 끝 */
 	}
 
 	/* Otherwise, ensure that device exists and no driver is bound. */
-	if (list_empty(&group->devices) || group->owner_cnt) {
-		ret = -EPERM;
-		goto out_unlock;
+	if (list_empty(&group->devices) || group->owner_cnt) {	/* [한국어] 그 외의 전환은 도메인을 갈아야 한다. 장치가 하나도 없거나, 누군가 DMA 소유권을 들고 있으면(VFIO 가 쓰는 중이거나 드라이버가 바인딩됨) 바꿀 수 없다 */
+		ret = -EPERM;	/* [한국어] 사용 중인 그룹의 격리 정책을 바꾸는 것은 허용하지 않는다 */
+		goto out_unlock;	/* [한국어] 거절 */
 	}
 
-	ret = iommu_setup_default_domain(group, req_type);
+	ret = iommu_setup_default_domain(group, req_type);	/* [한국어] 새 종류로 도메인을 만들고 그룹 전체를 옮긴다 */
 	if (ret)
-		goto out_unlock;
+		goto out_unlock;	/* [한국어] 실패 시 이미 원상 복구된 상태다 */
 
 	/* Make sure dma_ops is appropriatley set */
-	for_each_group_device(group, gdev)
-		iommu_setup_dma_ops(gdev->dev, group->default_domain);
+	for_each_group_device(group, gdev)	/* [한국어] 도메인 종류가 바뀌었으므로 */
+		iommu_setup_dma_ops(gdev->dev, group->default_domain);	/* [한국어] 각 장치의 dma_map_* 구현을 새 도메인에 맞게 다시 건다 — identity 로 갔다면 IOMMU 를 거치지 않는 경로로 돌아간다 */
 
-out_unlock:
-	mutex_unlock(&group->mutex);
-	return ret ?: count;
+out_unlock:	/* [한국어] 성공·실패 공통 출구 */
+	mutex_unlock(&group->mutex);	/* [한국어] 락 해제 */
+	return ret ?: count;	/* [한국어] 0 이면 소비 바이트 수를, 아니면 에러를 돌려준다 (sysfs 규약) */
 }
 
 /**
