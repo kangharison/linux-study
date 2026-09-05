@@ -3688,6 +3688,22 @@ static guid_t dmar_hp_guid =	/* [한국어] DMAR 핫플러그 _DSM 메서드를 
 #define	DMAR_DSM_FUNC_RHSA		3	/* [한국어] NUMA 근접성 */
 #define	DMAR_DSM_FUNC_SATC		4	/* [한국어] SoC 통합 ATS 신고 */
 
+/*
+ * [한국어]
+ * dmar_detect_dsm - 이 ACPI 객체가 그 종류의 DMAR _DSM 을 지원하는지 본다
+ *
+ * @handle: 검사할 ACPI 객체. @func: _DSM 함수 번호(DMAR_DSM_FUNC_*).
+ * @return: true 면 지원한다.
+ *
+ * _DSM(Device Specific Method)은 ACPI 객체가 노출하는 벤더 정의 인터페이스다.
+ * 어떤 함수 번호를 지원하는지는 0번 함수가 비트마스크로 알려 주며,
+ * acpi_check_dsm 이 그것을 확인해 준다. 그래서 1 << func 를 넘긴다.
+ *
+ * 지원하지 않는다는 것은 오류가 아니라 "이 객체는 그 종류의 DMAR 항목을
+ * 갖고 있지 않다"는 뜻이다. 그래서 호출자들이 그 경우 조용히 0 을 돌려준다.
+ *
+ * 실행 컨텍스트: ACPI 핫플러그. 프로세스 컨텍스트.
+ */
 static inline bool dmar_detect_dsm(acpi_handle handle, int func)
 {
 	return acpi_check_dsm(handle, &dmar_hp_guid, DMAR_DSM_REV_ID, 1 << func);	/* [한국어] 이 ACPI 장치가 그 함수 번호의 _DSM 을 지원하는지. 지원하지 않으면 그 종류의 항목이 없다는 뜻이다 */
@@ -3751,187 +3767,346 @@ static int dmar_walk_dsm_resource(acpi_handle handle, int func,
 	return ret;	/* [한국어] 결과 */
 }
 
+/*
+ * [한국어]
+ * dmar_hp_add_drhd - 핫플러그로 파싱된 유닛을 실제로 동작시킨다
+ *
+ * @header: 그 유닛의 DRHD 항목. @arg: 쓰지 않는다.
+ * @return: 0 성공, 음수면 실패.
+ *
+ * 파싱(dmar_parse_one_drhd)이 자료구조를 만들었다면, 이 함수는 그것을
+ * 켠다. 인터럽트 재매핑을 먼저 켜고 그 다음 DMA 재매핑을 켜는 순서다 —
+ * 인터럽트 재매핑이 실패하면 DMA 쪽은 시도하지 않는다.
+ *
+ * 순서의 이유: 인터럽트 재매핑은 시스템 전역 기능이라 부분적으로 켜진
+ * 상태를 만들면 안 된다. DMA 재매핑은 유닛 단위라 하나가 빠져도 나머지는
+ * 동작한다.
+ *
+ * 실행 컨텍스트: ACPI 핫플러그. dmar_global_lock 쓰기 락 아래.
+ */
 static int dmar_hp_add_drhd(struct acpi_dmar_header *header, void *arg)
 {
-	int ret;
-	struct dmar_drhd_unit *dmaru;
+	int ret;	/* [한국어] 결과 */
+	struct dmar_drhd_unit *dmaru;	/* [한국어] 대상 유닛 */
 
-	dmaru = dmar_find_dmaru((struct acpi_dmar_hardware_unit *)header);
-	if (!dmaru)
-		return -ENODEV;
+	dmaru = dmar_find_dmaru((struct acpi_dmar_hardware_unit *)header);	/* [한국어] 파싱 단계가 만들어 둔 자료구조를 찾는다 */
+	if (!dmaru)	/* [한국어] 없으면 */
+		return -ENODEV;	/* [한국어] 파싱이 실패했다는 뜻이다 */
 
-	ret = dmar_ir_hotplug(dmaru, true);
-	if (ret == 0)
-		ret = dmar_iommu_hotplug(dmaru, true);
+	ret = dmar_ir_hotplug(dmaru, true);	/* [한국어] 인터럽트 재매핑을 먼저 켠다 — 시스템 전역 기능이라 부분적으로 켜진 상태를 만들면 안 된다 */
+	if (ret == 0)	/* [한국어] 성공했으면 */
+		ret = dmar_iommu_hotplug(dmaru, true);	/* [한국어] DMA 재매핑도 켠다. 이쪽은 유닛 단위라 하나가 빠져도 나머지는 동작한다 */
 
-	return ret;
+	return ret;	/* [한국어] 결과 */
 }
 
+/*
+ * [한국어]
+ * dmar_hp_remove_drhd - 유닛을 정지시킨다(쓰이는 중이면 거절)
+ *
+ * @header: 그 유닛의 DRHD 항목. @arg: 쓰지 않는다.
+ * @return: 0 성공, -EBUSY 면 아직 쓰이는 중이다.
+ *
+ * 제거의 첫 관문이 그 유닛이 담당하는 장치가 남아 있는지 확인하는 것이다
+ * (코드 안 영어 주석). 살아 있는 장치가 하나라도 있으면 거절한다 —
+ * 그 장치의 DMA 를 번역할 유닛이 사라지면 그 장치는 동작하지 못한다.
+ * include_all 유닛은 특정 장치를 지목하지 않아 이 검사를 건너뛴다.
+ *
+ * 정지 순서는 add 의 역순이 아니라 같다: 인터럽트 재매핑 먼저, DMA 나중.
+ * 인터럽트 재매핑이 실패하면 DMA 도 건드리지 않아 원래 상태가 유지된다.
+ *
+ * 실행 컨텍스트: ACPI 핫플러그. dmar_global_lock 쓰기 락 아래.
+ */
 static int dmar_hp_remove_drhd(struct acpi_dmar_header *header, void *arg)
 {
-	int i, ret;
-	struct device *dev;
-	struct dmar_drhd_unit *dmaru;
+	int i, ret;	/* [한국어] 순회 인덱스와 결과 */
+	struct device *dev;	/* [한국어] 순회 커서 */
+	struct dmar_drhd_unit *dmaru;	/* [한국어] 대상 유닛 */
 
-	dmaru = dmar_find_dmaru((struct acpi_dmar_hardware_unit *)header);
-	if (!dmaru)
-		return 0;
+	dmaru = dmar_find_dmaru((struct acpi_dmar_hardware_unit *)header);	/* [한국어] 자료구조를 찾는다 */
+	if (!dmaru)	/* [한국어] 없으면 */
+		return 0;	/* [한국어] 제거할 것도 없다 */
 
 	/*
 	 * All PCI devices managed by this unit should have been destroyed.
 	 */
-	if (!dmaru->include_all && dmaru->devices && dmaru->devices_cnt) {
-		for_each_active_dev_scope(dmaru->devices,
-					  dmaru->devices_cnt, i, dev)
-			return -EBUSY;
+	if (!dmaru->include_all && dmaru->devices && dmaru->devices_cnt) {	/* [한국어] 특정 장치를 지목한 유닛이고 목록이 있으면 (위 영어 주석) */
+		for_each_active_dev_scope(dmaru->devices,	/* [한국어] 아직 살아 있는 장치가 하나라도 있는지 */
+					  dmaru->devices_cnt, i, dev)	/* [한국어] 순회 */
+			return -EBUSY;	/* [한국어] 있으면 거절한다 — 그 장치의 DMA 를 번역할 유닛이 사라지면 장치가 동작하지 못한다 */
 	}
 
-	ret = dmar_ir_hotplug(dmaru, false);
-	if (ret == 0)
-		ret = dmar_iommu_hotplug(dmaru, false);
+	ret = dmar_ir_hotplug(dmaru, false);	/* [한국어] 인터럽트 재매핑을 먼저 끈다 */
+	if (ret == 0)	/* [한국어] 성공했으면 */
+		ret = dmar_iommu_hotplug(dmaru, false);	/* [한국어] DMA 재매핑도 끈다. 실패하면 DMA 는 건드리지 않아 원래 상태가 유지된다 */
 
-	return ret;
+	return ret;	/* [한국어] 결과 */
 }
 
+/*
+ * [한국어]
+ * dmar_hp_release_drhd - 정지된 유닛의 자료구조를 반납한다
+ *
+ * @header: 그 유닛의 DRHD 항목. @arg: 쓰지 않는다.
+ * @return: 항상 0.
+ *
+ * remove 가 하드웨어를 멈췄다면 이 함수는 메모리를 놓는다. 둘을 나눈 이유는
+ * 삽입 실패 경로에서도 이 반납이 필요하기 때문이다 — 파싱까지만 하고
+ * 켜지 못한 유닛도 자료구조는 반납해야 한다.
+ *
+ * RCU 제거 3단계를 지킨다: 목록에서 끊고 → 유예 기간을 기다리고 → 해제.
+ * dmar_drhd_units 를 인터럽트 문맥에서 RCU 로 순회하므로, 순서를 어기면
+ * 해제된 유닛을 읽는 순회가 남는다.
+ *
+ * 실행 컨텍스트: ACPI 핫플러그. synchronize_rcu 를 부르므로 잠들 수 있어야 한다.
+ */
 static int dmar_hp_release_drhd(struct acpi_dmar_header *header, void *arg)
 {
-	struct dmar_drhd_unit *dmaru;
+	struct dmar_drhd_unit *dmaru;	/* [한국어] 대상 유닛 */
 
-	dmaru = dmar_find_dmaru((struct acpi_dmar_hardware_unit *)header);
-	if (dmaru) {
-		list_del_rcu(&dmaru->list);
-		synchronize_rcu();
-		dmar_free_drhd(dmaru);
+	dmaru = dmar_find_dmaru((struct acpi_dmar_hardware_unit *)header);	/* [한국어] 자료구조를 찾는다 */
+	if (dmaru) {	/* [한국어] 있으면 */
+		list_del_rcu(&dmaru->list);	/* [한국어] 목록에서 끊고 */
+		synchronize_rcu();	/* [한국어] 진행 중인 순회가 끝나기를 기다린 뒤 */
+		dmar_free_drhd(dmaru);	/* [한국어] 해제한다. 이 목록은 인터럽트 문맥에서 RCU 로 순회되므로 순서를 어기면 해제된 유닛을 읽는다 */
 	}
 
-	return 0;
+	return 0;	/* [한국어] 반납은 실패할 수 없다 */
 }
 
+/*
+ * [한국어]
+ * dmar_hotplug_insert - 새로 나타난 DMAR 유닛들을 파싱하고 동작시킨다
+ *
+ * @handle: 핫플러그된 ACPI 장치의 핸들.
+ * @return: 0 성공, 음수면 실패(그 경우 아무것도 남지 않는다).
+ *
+ * _DSM 을 여러 번 호출하며 단계적으로 진행하는데, 그 순서와 되돌리기가
+ * 이 함수의 전부다.
+ *   1) 검증 — 주소에 정말 하드웨어가 있는지. 여기서 실패하면 아무것도
+ *      만들지 않았으므로 그냥 나간다.
+ *   2) 파싱 — 유닛 자료구조를 만든다. 하나도 없으면 펌웨어가 빈 버퍼를
+ *      돌려준 것이라 FW_BUG 로 남긴다.
+ *   3) RHSA — NUMA 노드 정보.
+ *   4) ATSR — ATS 능력 보고.
+ *   5) 동작 — 인터럽트·DMA 재매핑을 켠다.
+ * 각 단계가 실패하면 그때까지 한 것을 정확히 역순으로 되돌린다. 라벨이
+ * release_atsr → release_drhd → out 순으로 이어지는 것이 그 구조다.
+ *
+ * 5단계 실패의 되돌리기가 특히 눈여겨볼 만하다: dmar_hp_remove_drhd 를
+ * 불러 켜진 유닛을 다시 끄고, 그 다음 ATSR 과 유닛 자료구조를 반납한다.
+ * 즉 "일부만 켜진" 상태를 남기지 않는다.
+ *
+ * 실행 컨텍스트: ACPI 핫플러그. dmar_global_lock 쓰기 락 아래.
+ */
 static int dmar_hotplug_insert(acpi_handle handle)
 {
-	int ret;
-	int drhd_count = 0;
+	int ret;	/* [한국어] 각 단계의 결과 */
+	int drhd_count = 0;	/* [한국어] 파싱된 유닛 수 */
 
-	ret = dmar_walk_dsm_resource(handle, DMAR_DSM_FUNC_DRHD,
-				     &dmar_validate_one_drhd, (void *)1);
-	if (ret)
-		goto out;
+	ret = dmar_walk_dsm_resource(handle, DMAR_DSM_FUNC_DRHD,	/* [한국어] 먼저 검증한다 — 주소에 정말 하드웨어가 있는지 */
+				     &dmar_validate_one_drhd, (void *)1);	/* [한국어] arg 가 NULL 이 아니면 정상 ioremap 을 쓴다는 표시다 */
+	if (ret)	/* [한국어] 검증 실패 */
+		goto out;	/* [한국어] 아무것도 만들지 않았으므로 그냥 나간다 */
 
-	ret = dmar_walk_dsm_resource(handle, DMAR_DSM_FUNC_DRHD,
-				     &dmar_parse_one_drhd, (void *)&drhd_count);
-	if (ret == 0 && drhd_count == 0) {
-		pr_warn(FW_BUG "No DRHD structures in buffer returned by _DSM method\n");
-		goto out;
-	} else if (ret) {
-		goto release_drhd;
+	ret = dmar_walk_dsm_resource(handle, DMAR_DSM_FUNC_DRHD,	/* [한국어] 유닛 자료구조를 만들고 개수를 센다 */
+				     &dmar_parse_one_drhd, (void *)&drhd_count);	/* [한국어] 유닛 자료구조를 만들고 개수를 센다 */
+	if (ret == 0 && drhd_count == 0) {	/* [한국어] 성공했는데 유닛이 하나도 없으면 */
+		pr_warn(FW_BUG "No DRHD structures in buffer returned by _DSM method\n");	/* [한국어] 펌웨어가 빈 버퍼를 돌려준 것이다 */
+		goto out;	/* [한국어] 만든 것이 없으므로 정리도 없다 */
+	} else if (ret) {	/* [한국어] 파싱 실패면 */
+		goto release_drhd;	/* [한국어] 일부 만들어진 자료구조를 반납한다 */
 	}
 
-	ret = dmar_walk_dsm_resource(handle, DMAR_DSM_FUNC_RHSA,
-				     &dmar_parse_one_rhsa, NULL);
-	if (ret)
-		goto release_drhd;
+	ret = dmar_walk_dsm_resource(handle, DMAR_DSM_FUNC_RHSA,	/* [한국어] NUMA 노드 정보를 얻는다 */
+				     &dmar_parse_one_rhsa, NULL);	/* [한국어] NUMA 노드 정보를 얻는다 */
+	if (ret)	/* [한국어] 실패 */
+		goto release_drhd;	/* [한국어] 유닛 자료구조를 반납 */
 
-	ret = dmar_walk_dsm_resource(handle, DMAR_DSM_FUNC_ATSR,
-				     &dmar_parse_one_atsr, NULL);
-	if (ret)
-		goto release_atsr;
+	ret = dmar_walk_dsm_resource(handle, DMAR_DSM_FUNC_ATSR,	/* [한국어] ATS 능력 보고를 등록한다 */
+				     &dmar_parse_one_atsr, NULL);	/* [한국어] ATS 능력 보고를 등록한다 */
+	if (ret)	/* [한국어] 실패 */
+		goto release_atsr;	/* [한국어] ATSR 과 유닛을 반납 */
 
-	ret = dmar_walk_dsm_resource(handle, DMAR_DSM_FUNC_DRHD,
-				     &dmar_hp_add_drhd, NULL);
-	if (!ret)
-		return 0;
+	ret = dmar_walk_dsm_resource(handle, DMAR_DSM_FUNC_DRHD,	/* [한국어] 마지막으로 유닛을 실제로 켠다 */
+				     &dmar_hp_add_drhd, NULL);	/* [한국어] 마지막으로 유닛을 실제로 켠다 */
+	if (!ret)	/* [한국어] 성공했으면 */
+		return 0;	/* [한국어] 핫플러그 완료 */
 
-	dmar_walk_dsm_resource(handle, DMAR_DSM_FUNC_DRHD,
-			       &dmar_hp_remove_drhd, NULL);
-release_atsr:
-	dmar_walk_dsm_resource(handle, DMAR_DSM_FUNC_ATSR,
-			       &dmar_release_one_atsr, NULL);
-release_drhd:
-	dmar_walk_dsm_resource(handle, DMAR_DSM_FUNC_DRHD,
-			       &dmar_hp_release_drhd, NULL);
-out:
-	return ret;
+	dmar_walk_dsm_resource(handle, DMAR_DSM_FUNC_DRHD,	/* [한국어] 켜기에 실패했으면 이미 켜진 유닛을 다시 끈다 */
+			       &dmar_hp_remove_drhd, NULL);	/* [한국어] "일부만 켜진" 상태를 남기지 않는다 */
+release_atsr:	/* [한국어] ATSR 등록 실패가 합류 */
+	dmar_walk_dsm_resource(handle, DMAR_DSM_FUNC_ATSR,	/* [한국어] ATSR 항목을 반납 */
+			       &dmar_release_one_atsr, NULL);	/* [한국어] ATSR 항목을 반납 */
+release_drhd:	/* [한국어] RHSA/파싱 실패가 합류 */
+	dmar_walk_dsm_resource(handle, DMAR_DSM_FUNC_DRHD,	/* [한국어] 유닛 자료구조를 반납 */
+			       &dmar_hp_release_drhd, NULL);	/* [한국어] 유닛 자료구조를 반납 */
+out:	/* [한국어] 검증 실패와 빈 버퍼가 합류 */
+	return ret;	/* [한국어] 결과 */
 }
 
+/*
+ * [한국어]
+ * dmar_hotplug_remove - 사라지는 DMAR 유닛들을 정지시키고 반납한다
+ *
+ * @handle: 핫플러그된 ACPI 장치의 핸들.
+ * @return: 0 성공, 음수면 아직 제거할 수 없다.
+ *
+ * 검사 → 정지 → 반납의 3단계다.
+ *   1) dmar_check_one_atsr — ATSR 항목을 지워도 되는지 먼저 묻는다.
+ *      아직 그 포트 아래에 장치가 살아 있으면 여기서 거절된다.
+ *   2) dmar_hp_remove_drhd — 유닛을 정지시킨다. 담당 장치가 남아 있으면
+ *      역시 거절된다.
+ *   3) 성공했으면 ATSR 과 유닛 자료구조를 반납한다.
+ *
+ * 3단계의 WARN_ON 이 의미 있다: 이미 정지시킨 뒤라 반납이 실패할 이유가
+ * 없다. 실패한다면 코드에 문제가 있다는 뜻이므로 스택을 남긴다.
+ *
+ * 2단계가 실패하면 되돌린다 — dmar_hp_add_drhd 로 다시 켠다. 1단계에서
+ * 이미 통과했더라도 유닛을 끄지 못했으면 원래 상태로 되돌려야 한다.
+ *
+ * 실행 컨텍스트: ACPI 핫플러그. dmar_global_lock 쓰기 락 아래.
+ */
 static int dmar_hotplug_remove(acpi_handle handle)
 {
-	int ret;
+	int ret;	/* [한국어] 각 단계의 결과 */
 
-	ret = dmar_walk_dsm_resource(handle, DMAR_DSM_FUNC_ATSR,
-				     &dmar_check_one_atsr, NULL);
-	if (ret)
-		return ret;
+	ret = dmar_walk_dsm_resource(handle, DMAR_DSM_FUNC_ATSR,	/* [한국어] 먼저 ATSR 항목을 지워도 되는지 묻는다 */
+				     &dmar_check_one_atsr, NULL);	/* [한국어] 먼저 ATSR 항목을 지워도 되는지 묻는다 — 그 포트 아래에 장치가 살아 있으면 거절된다 */
+	if (ret)	/* [한국어] 거절되면 */
+		return ret;	/* [한국어] 아무것도 건드리지 않는다 */
 
-	ret = dmar_walk_dsm_resource(handle, DMAR_DSM_FUNC_DRHD,
-				     &dmar_hp_remove_drhd, NULL);
-	if (ret == 0) {
-		WARN_ON(dmar_walk_dsm_resource(handle, DMAR_DSM_FUNC_ATSR,
-					       &dmar_release_one_atsr, NULL));
-		WARN_ON(dmar_walk_dsm_resource(handle, DMAR_DSM_FUNC_DRHD,
-					       &dmar_hp_release_drhd, NULL));
+	ret = dmar_walk_dsm_resource(handle, DMAR_DSM_FUNC_DRHD,	/* [한국어] 유닛을 정지시킨다 */
+				     &dmar_hp_remove_drhd, NULL);	/* [한국어] 유닛을 정지시킨다. 담당 장치가 남아 있으면 역시 거절된다 */
+	if (ret == 0) {	/* [한국어] 정지에 성공했으면 */
+		WARN_ON(dmar_walk_dsm_resource(handle, DMAR_DSM_FUNC_ATSR,	/* [한국어] ATSR 을 반납한다. 이미 정지시킨 뒤라 실패할 이유가 없어, 실패하면 코드 문제이므로 스택을 남긴다 */
+					       &dmar_release_one_atsr, NULL));	/* [한국어] 그 반납 */
+		WARN_ON(dmar_walk_dsm_resource(handle, DMAR_DSM_FUNC_DRHD,	/* [한국어] 유닛 자료구조도 */
+					       &dmar_hp_release_drhd, NULL));	/* [한국어] 같은 이유로 WARN */
 	} else {
-		dmar_walk_dsm_resource(handle, DMAR_DSM_FUNC_DRHD,
-				       &dmar_hp_add_drhd, NULL);
+		dmar_walk_dsm_resource(handle, DMAR_DSM_FUNC_DRHD,	/* [한국어] 정지에 실패했으면 되돌린다 */
+				       &dmar_hp_add_drhd, NULL);	/* [한국어] 다시 켜서 원래 상태로 */
 	}
 
-	return ret;
+	return ret;	/* [한국어] 결과 */
 }
 
+/*
+ * [한국어]
+ * dmar_get_dsm_handle - ACPI 네임스페이스를 훑어 DMAR _DSM 을 가진 객체를 찾는다
+ *
+ * @handle: 현재 훑고 있는 객체. @lvl: 깊이(쓰지 않는다).
+ * @context: 쓰지 않는다. @retval: 출력 — 찾은 핸들.
+ * @return: 찾았으면 AE_CTRL_TERMINATE(순회 중단), 아니면 AE_OK(계속).
+ *
+ * 핫플러그 알림이 온 객체 자신이 _DSM 을 갖고 있지 않을 수 있다. 그 아래
+ * 어딘가에 있을 수 있어서, acpi_walk_namespace 로 하위 트리를 훑는다.
+ * 이 함수가 그 순회의 콜백이다.
+ *
+ * 찾으면 AE_CTRL_TERMINATE 로 순회를 멈춘다 — 하나면 충분하고, 계속
+ * 훑으면 나중에 찾은 것이 앞의 것을 덮어쓴다.
+ *
+ * 실행 컨텍스트: ACPI 네임스페이스 순회. 프로세스 컨텍스트.
+ */
 static acpi_status dmar_get_dsm_handle(acpi_handle handle, u32 lvl,
 				       void *context, void **retval)
 {
-	acpi_handle *phdl = retval;
+	acpi_handle *phdl = retval;	/* [한국어] 찾은 핸들을 담을 자리 */
 
-	if (dmar_detect_dsm(handle, DMAR_DSM_FUNC_DRHD)) {
-		*phdl = handle;
-		return AE_CTRL_TERMINATE;
+	if (dmar_detect_dsm(handle, DMAR_DSM_FUNC_DRHD)) {	/* [한국어] 이 객체가 DMAR _DSM 을 갖고 있으면 */
+		*phdl = handle;	/* [한국어] 기록하고 */
+		return AE_CTRL_TERMINATE;	/* [한국어] 순회를 멈춘다. 계속 훑으면 나중에 찾은 것이 앞의 것을 덮어쓴다 */
 	}
 
-	return AE_OK;
+	return AE_OK;	/* [한국어] 아니면 계속 훑는다 */
 }
 
+/*
+ * [한국어]
+ * dmar_device_hotplug - DMAR 유닛의 핫플러그 삽입/제거를 처리한다
+ *
+ * @handle: 핫플러그된 ACPI 장치의 핸들. @insert: 삽입인지 제거인지.
+ * @return: 0 성공, 음수면 실패.
+ *
+ * dmar_in_use() 를 먼저 확인하는 것이 중요하다. VT-d 를 쓰지 않는
+ * 시스템에서는 유닛이 나타나거나 사라져도 할 일이 없다 — 표만 파싱해
+ * 두고 아무것도 켜지 않았기 때문이다.
+ *
+ * _DSM 을 가진 객체를 찾는 두 단계: 알림이 온 객체 자신이 갖고 있으면
+ * 그것을 쓰고, 아니면 하위 네임스페이스를 훑는다. 찾지 못하면 0 을
+ * 돌려주는데, 이것은 오류가 아니라 "이 장치는 DMAR 과 무관하다"는 뜻이다.
+ *
+ * dmar_global_lock 을 쓰기 모드로 잡는 이유: 유닛 목록과 표 항목들을
+ * 통째로 바꾸기 때문이다.
+ *
+ * 실행 컨텍스트: ACPI 핫플러그 알림. 프로세스 컨텍스트.
+ */
 static int dmar_device_hotplug(acpi_handle handle, bool insert)
 {
-	int ret;
-	acpi_handle tmp = NULL;
-	acpi_status status;
+	int ret;	/* [한국어] 결과 */
+	acpi_handle tmp = NULL;	/* [한국어] _DSM 을 가진 객체의 핸들 */
+	acpi_status status;	/* [한국어] ACPI 호출의 결과 */
 
-	if (!dmar_in_use())
-		return 0;
+	if (!dmar_in_use())	/* [한국어] VT-d 를 쓰지 않는 시스템이면 */
+		return 0;	/* [한국어] 유닛이 나타나거나 사라져도 할 일이 없다 */
 
-	if (dmar_detect_dsm(handle, DMAR_DSM_FUNC_DRHD)) {
-		tmp = handle;
+	if (dmar_detect_dsm(handle, DMAR_DSM_FUNC_DRHD)) {	/* [한국어] 알림이 온 객체 자신이 _DSM 을 갖고 있으면 */
+		tmp = handle;	/* [한국어] 그것을 쓴다 */
 	} else {
-		status = acpi_walk_namespace(ACPI_TYPE_DEVICE, handle,
-					     ACPI_UINT32_MAX,
-					     dmar_get_dsm_handle,
-					     NULL, NULL, &tmp);
-		if (ACPI_FAILURE(status)) {
-			pr_warn("Failed to locate _DSM method.\n");
-			return -ENXIO;
+		status = acpi_walk_namespace(ACPI_TYPE_DEVICE, handle,	/* [한국어] 아니면 하위 네임스페이스를 훑어 */
+					     ACPI_UINT32_MAX,	/* [한국어] 깊이 제한 없이 */
+					     dmar_get_dsm_handle,	/* [한국어] _DSM 을 가진 객체를 찾는다 */
+					     NULL, NULL, &tmp);	/* [한국어] 결과를 tmp 에 받는다 */
+		if (ACPI_FAILURE(status)) {	/* [한국어] 순회 자체가 실패하면 */
+			pr_warn("Failed to locate _DSM method.\n");	/* [한국어] 기록하고 */
+			return -ENXIO;	/* [한국어] 처리할 수 없다 */
 		}
 	}
-	if (tmp == NULL)
-		return 0;
+	if (tmp == NULL)	/* [한국어] _DSM 을 가진 객체가 없으면 */
+		return 0;	/* [한국어] 오류가 아니라 이 장치가 DMAR 과 무관하다는 뜻이다 */
 
-	down_write(&dmar_global_lock);
-	if (insert)
-		ret = dmar_hotplug_insert(tmp);
+	down_write(&dmar_global_lock);	/* [한국어] 유닛 목록과 표 항목을 통째로 바꾼다 */
+	if (insert)	/* [한국어] 삽입이면 */
+		ret = dmar_hotplug_insert(tmp);	/* [한국어] 파싱하고 켠다 */
 	else
-		ret = dmar_hotplug_remove(tmp);
-	up_write(&dmar_global_lock);
+		ret = dmar_hotplug_remove(tmp);	/* [한국어] 제거면 정지시키고 반납한다 */
+	up_write(&dmar_global_lock);	/* [한국어] 락 해제 */
 
-	return ret;
+	return ret;	/* [한국어] 결과 */
 }
 
+/*
+ * [한국어]
+ * dmar_device_add - ACPI 계층이 부르는 삽입 진입점
+ *
+ * @handle: 나타난 ACPI 장치의 핸들.
+ * @return: 0 성공, 음수면 실패.
+ *
+ * dmar_device_hotplug 에 insert=true 를 넘기는 얇은 껍데기다. ACPI
+ * 서브시스템이 이 이름으로 부르므로 별도 함수로 두었다.
+ *
+ * 실행 컨텍스트: ACPI 핫플러그 알림.
+ */
 int dmar_device_add(acpi_handle handle)
 {
-	return dmar_device_hotplug(handle, true);
+	return dmar_device_hotplug(handle, true);	/* [한국어] 삽입으로 넘긴다 */
 }
 
+/*
+ * [한국어]
+ * dmar_device_remove - ACPI 계층이 부르는 제거 진입점
+ *
+ * @handle: 사라지는 ACPI 장치의 핸들.
+ * @return: 0 성공, 음수면 아직 제거할 수 없다.
+ *
+ * insert=false 판. 반환값이 중요하다 — 음수면 ACPI 계층이 제거를 중단하고
+ * 그 장치를 그대로 둔다.
+ *
+ * 실행 컨텍스트: ACPI 핫플러그 알림.
+ */
 int dmar_device_remove(acpi_handle handle)
 {
-	return dmar_device_hotplug(handle, false);
+	return dmar_device_hotplug(handle, false);	/* [한국어] 제거로 넘긴다. 음수를 돌려주면 ACPI 계층이 제거를 중단한다 */
 }
 
 /*
@@ -3941,20 +4116,42 @@ int dmar_device_remove(acpi_handle handle)
  * the ACPI DMAR table. This means that the platform boot firmware has made
  * sure no device can issue DMA outside of RMRR regions.
  */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어)
+ * dmar_platform_optin - 펌웨어가 "부팅 중 DMA 를 이미 막았다"고 신고했는지 본다
+ *
+ * @return: true 면 플랫폼이 opt-in 을 선언했다.
+ *
+ * 이 플래그의 의미가 중요하다(위 영어 kernel-doc): 부팅 펌웨어가 어떤
+ * 장치도 RMRR 밖으로 DMA 를 내지 못하게 이미 조치했다는 선언이다. 즉
+ * 커널이 뜨기 전 구간에도 DMA 공격의 창이 없었다는 뜻이다.
+ *
+ * 그래서 이 값이 두 곳에서 정책을 바꾼다.
+ *   - platform_optin_force_iommu(): 관리자가 IOMMU 를 껐더라도, 외부
+ *     포트 장치가 있으면 이 선언을 근거로 강제로 켠다.
+ *   - IOMMU_CAP_PRE_BOOT_PROTECTION: Thunderbolt 보안 정책이 "부팅 중
+ *     보호되었는가"를 이 값으로 판단한다.
+ *
+ * 표를 매번 다시 얻는 이유: 이 함수는 부팅 초기(dmar_tbl 이 아직 있을 때)와
+ * 그 이후(해제된 뒤) 양쪽에서 불린다. 전역 포인터에 기대지 않고 스스로
+ * 얻었다가 놓는 편이 안전하다.
+ *
+ * 실행 컨텍스트: 어디서든. 프로세스 컨텍스트.
+ */
 bool dmar_platform_optin(void)
 {
-	struct acpi_table_dmar *dmar;
-	acpi_status status;
-	bool ret;
+	struct acpi_table_dmar *dmar;	/* [한국어] 표 */
+	acpi_status status;	/* [한국어] ACPI 호출 결과 */
+	bool ret;	/* [한국어] 판정 결과 */
 
-	status = acpi_get_table(ACPI_SIG_DMAR, 0,
-				(struct acpi_table_header **)&dmar);
-	if (ACPI_FAILURE(status))
-		return false;
+	status = acpi_get_table(ACPI_SIG_DMAR, 0,	/* [한국어] 표를 직접 얻는다 — 전역 포인터는 부팅 후 해제되므로 기대지 않는다 */
+				(struct acpi_table_header **)&dmar);	/* [한국어] DMAR 표로 */
+	if (ACPI_FAILURE(status))	/* [한국어] 표가 없으면 */
+		return false;	/* [한국어] 신고한 적이 없다 */
 
-	ret = !!(dmar->flags & DMAR_PLATFORM_OPT_IN);
-	acpi_put_table((struct acpi_table_header *)dmar);
+	ret = !!(dmar->flags & DMAR_PLATFORM_OPT_IN);	/* [한국어] 헤더의 opt-in 플래그. 부팅 펌웨어가 RMRR 밖으로의 DMA 를 이미 막았다는 선언이다 (위 영어 kernel-doc) */
+	acpi_put_table((struct acpi_table_header *)dmar);	/* [한국어] 표를 놓는다 */
 
-	return ret;
+	return ret;	/* [한국어] 판정 결과 */
 }
-EXPORT_SYMBOL_GPL(dmar_platform_optin);
+EXPORT_SYMBOL_GPL(dmar_platform_optin);	/* [한국어] 인터럽트 재매핑과 Thunderbolt 보안 정책이 모듈에서도 이 값을 본다 */
