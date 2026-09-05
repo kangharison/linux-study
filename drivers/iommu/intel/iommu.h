@@ -2331,24 +2331,76 @@ static inline void context_clear_entry(struct context_entry *context)
 }
 
 #ifdef CONFIG_INTEL_IOMMU
+/*
+ * [한국어]
+ * context_copied - 이 소스 id 의 컨텍스트 항목이 이전 커널에서 물려받은 것인지
+ *
+ * @iommu: 대상 유닛. @bus, @devfn: 확인할 소스 id.
+ * @return: true 면 그 항목은 우리가 만든 것이 아니라 인계받은 것이다.
+ *
+ * kdump 커널은 이전 커널의 번역 표를 그대로 이어받아, 크래시 시점에 진행 중이던
+ * DMA(특히 덤프를 쓸 디스크 컨트롤러)가 끊기지 않게 한다. 그런데 그 항목은
+ * 이전 커널의 페이지 테이블을 가리키고 있으므로, 그 장치를 실제로 쓰게 될 때
+ * 우리 형식으로 다시 세워야 한다. 이 함수가 "아직 인계 상태인가"를 답한다.
+ *
+ * 비트맵 인덱스가 (bus << 8) | devfn 인 것은 소스 id 그 자체다 — 65536개
+ * 비트로 한 유닛의 모든 소스 id 를 표시할 수 있다.
+ * copied_tables 가 NULL 이면 보통의 부팅이라 인계받은 것이 없다.
+ *
+ * 이 값을 보고 갈라지는 곳들:
+ *   - 프로브: 인계 상태면 컨텍스트를 세우지 않고 그대로 둔다.
+ *   - 부착: paging_domain_compatible() 이 그때 우리 형식으로 전환한다.
+ *   - 해제: 인계받은 것은 내리지 않는다(다음 커널이 이어받을 수 있게).
+ *
+ * 실행 컨텍스트: 어디서든. 순수 조회다.
+ */
 static inline bool context_copied(struct intel_iommu *iommu, u8 bus, u8 devfn)
 {
-	if (!iommu->copied_tables)
+	if (!iommu->copied_tables)	/* [한국어] 인계받은 것이 없는 보통의 부팅이면 */
 		return false;
 
-	return test_bit(((long)bus << 8) | devfn, iommu->copied_tables);
+	return test_bit(((long)bus << 8) | devfn, iommu->copied_tables);	/* [한국어] 소스 id 를 인덱스로 비트를 확인한다 */
 }
 
+/*
+ * [한국어]
+ * set_context_copied - 이 소스 id 를 "인계받은 항목"으로 표시한다
+ *
+ * @iommu: 대상 유닛. @bus, @devfn: 표시할 소스 id.
+ * @return: 없음.
+ *
+ * copy_translation_tables() 가 이전 커널의 컨텍스트 테이블을 복사하면서,
+ * present 인 항목마다 이 표시를 남긴다. 그래야 나중에 그 항목이 우리 것인지
+ * 물려받은 것인지 구분할 수 있다.
+ *
+ * 실행 컨텍스트: 부팅 초기화(kdump 경로). 단일 스레드.
+ */
 static inline void
 set_context_copied(struct intel_iommu *iommu, u8 bus, u8 devfn)
 {
-	set_bit(((long)bus << 8) | devfn, iommu->copied_tables);
+	set_bit(((long)bus << 8) | devfn, iommu->copied_tables);	/* [한국어] 그 소스 id 를 인계 상태로 표시한다 */
 }
 
+/*
+ * [한국어]
+ * clear_context_copied - 인계 표시를 지운다(= 이제 우리 항목이다)
+ *
+ * @iommu: 대상 유닛. @bus, @devfn: 대상 소스 id.
+ * @return: 없음.
+ *
+ * 인계받은 항목을 우리 형식으로 다시 세운 뒤 부른다. 이 뒤로는 보통의 항목과
+ * 똑같이 다뤄지며, 해제 시에도 정상적으로 내려간다.
+ *
+ * 인계에서 우리 것으로 넘어오는 지점이 두 군데다: 레거시 모드에서는
+ * copied_context_tear_down() 이, scalable 모드에서는
+ * intel_pasid_setup_sm_context() 경로가 이 표시를 지운다.
+ *
+ * 실행 컨텍스트: 장치 부착. 프로세스 컨텍스트.
+ */
 static inline void
 clear_context_copied(struct intel_iommu *iommu, u8 bus, u8 devfn)
 {
-	clear_bit(((long)bus << 8) | devfn, iommu->copied_tables);
+	clear_bit(((long)bus << 8) | devfn, iommu->copied_tables);	/* [한국어] 표시를 지운다 — 이제 우리가 세운 항목이다 */
 }
 #endif /* CONFIG_INTEL_IOMMU */
 
@@ -2357,101 +2409,297 @@ clear_context_copied(struct intel_iommu *iommu, u8 bus, u8 devfn)
  * IOMMU hardware will use the PASID value set in this field for
  * DMA translations of DMA requests without PASID.
  */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * context_set_sm_rid2pasid - scalable 모드 항목에 "PASID 없는 요청이 쓸 PASID"를 넣는다
+ *
+ * @context: 대상 컨텍스트 항목. @pasid: 기본으로 쓸 PASID 값.
+ * @return: 없음.
+ *
+ * scalable 모드에서는 번역이 항상 PASID 항목에서 시작한다. 그런데 대부분의
+ * 장치는 PASID 를 실어 보내지 않는 평범한 DMA 를 낸다. 그런 요청에 어떤
+ * PASID 를 붙일지를 이 필드(RID_PASID)가 정한다 (위 영어 주석).
+ *
+ * 그래서 이 값이 곧 "이 장치의 기본 주소 공간"을 가리키게 되고, 보통
+ * IOMMU_NO_PASID(0)가 들어간다. 즉 레거시 모드에서 컨텍스트 항목이 바로
+ * 페이지 테이블을 가리키던 자리를, scalable 모드에서는 "0번 PASID 항목"이
+ * 대신하는 셈이다.
+ *
+ * 마스크가 20비트인 것은 PASID 필드의 폭이 20비트이기 때문이다.
+ *
+ * 실행 컨텍스트: iommu->lock 아래, 항목을 세우는 중.
+ */
 static inline void
 context_set_sm_rid2pasid(struct context_entry *context, unsigned long pasid)
 {
-	context->hi |= pasid & ((1 << 20) - 1);
+	context->hi |= pasid & ((1 << 20) - 1);	/* [한국어] PASID 필드는 20비트다 */
 }
 
 /*
  * Set the DTE(Device-TLB Enable) field of a scalable mode context
  * entry.
  */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * context_set_sm_dte - scalable 모드 항목에서 디바이스 TLB(ATS)를 켠다
+ *
+ * @context: 대상 항목.
+ * @return: 없음.
+ *
+ * lo 의 비트 2 가 DTE(Device-TLB Enable)다. 이 비트가 서야 하드웨어가 이
+ * 장치의 ATS 요청을 받아들이고 번역 결과를 돌려준다.
+ *
+ * 레거시 모드에서 같은 일을 하던 것이 translation type 의
+ * CONTEXT_TT_DEV_IOTLB 였다. scalable 모드는 그것을 별도 비트로 분리해,
+ * 번역 방식과 ATS 사용 여부를 독립적으로 정할 수 있게 했다.
+ *
+ * 실행 컨텍스트: iommu->lock 아래.
+ */
 static inline void context_set_sm_dte(struct context_entry *context)
 {
-	context->lo |= BIT_ULL(2);
+	context->lo |= BIT_ULL(2);	/* [한국어] DTE — 디바이스 TLB 사용 허용 */
 }
 
 /*
  * Set the PRE(Page Request Enable) field of a scalable mode context
  * entry.
  */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * context_set_sm_pre - scalable 모드 항목에서 페이지 요청(PRI)을 켠다
+ *
+ * @context: 대상 항목.
+ * @return: 없음.
+ *
+ * lo 의 비트 4 가 PRE(Page Request Enable)다. 이 비트가 서야 장치가 보낸
+ * 페이지 요청을 하드웨어가 받아 PRQ 에 넣는다.
+ *
+ * DTE 와 짝을 이루는 이유: 페이지 요청의 응답은 ATS 번역 경로로 돌아온다.
+ * 그래서 PRI 를 켜려면 ATS 가 먼저 켜져 있어야 하고, 이 파일의 능력 판정도
+ * pri_supported 에 ats_supported 를 전제로 두고 있다.
+ *
+ * 실행 컨텍스트: iommu->lock 아래.
+ */
 static inline void context_set_sm_pre(struct context_entry *context)
 {
-	context->lo |= BIT_ULL(4);
+	context->lo |= BIT_ULL(4);	/* [한국어] PRE — 페이지 요청 허용 */
 }
 
 /*
  * Clear the PRE(Page Request Enable) field of a scalable mode context
  * entry.
  */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * context_clear_sm_pre - 페이지 요청을 끈다
+ *
+ * @context: 대상 항목.
+ * @return: 없음.
+ *
+ * 켜기의 반대. 주의할 점은 이 비트를 끈 뒤에도 이미 큐에 들어와 있거나
+ * 하드웨어 안에서 진행 중인 요청이 남아 있을 수 있다는 것이다. 응답하지
+ * 않은 페이지 요청은 장치를 영원히 멈춰 세우므로, 끄기만 해서는 안 되고
+ * 남은 요청을 배수(drain)해야 한다 — ecap_pds 와 QI_IWD_PRQ_DRAIN 이
+ * 그 일을 한다.
+ *
+ * 실행 컨텍스트: iommu->lock 아래.
+ */
 static inline void context_clear_sm_pre(struct context_entry *context)
 {
-	context->lo &= ~BIT_ULL(4);
+	context->lo &= ~BIT_ULL(4);	/* [한국어] PRE 를 내린다. 남은 요청의 배수는 별도로 해야 한다 */
 }
 
 /* Returns a number of VTD pages, but aligned to MM page size */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * aligned_nrpages - 이 주소·크기가 걸치는 VT-d 페이지 수를 센다
+ *
+ * @host_addr: 시작 주소(정렬되지 않아도 된다). @size: 바이트 크기.
+ * @return: 덮어야 할 4KB 페이지 개수.
+ *
+ * 왜 단순히 size >> 12 가 아닌가: 시작 주소가 페이지 중간이면 같은 크기라도
+ * 한 페이지를 더 걸친다. 예를 들어 오프셋 4095 에서 2바이트는 두 페이지에
+ * 걸친다. 그래서 먼저 페이지 안 오프셋만 남기고(&= ~PAGE_MASK), 그것을
+ * 크기에 더한 뒤 올림 정렬한다.
+ *
+ * PAGE_MASK(호스트 페이지)와 VTD_PAGE_SHIFT(항상 4KB)가 섞여 있는 점을
+ * 눈여겨볼 것: 정렬은 호스트 페이지 기준으로 하고 개수는 VT-d 페이지로 센다.
+ * 호스트가 64KB 페이지를 쓰더라도 IOMMU 항목은 4KB 단위이기 때문이다.
+ *
+ * 실행 컨텍스트: 어디서든. 순수 계산.
+ */
 static inline unsigned long aligned_nrpages(unsigned long host_addr, size_t size)
 {
-	host_addr &= ~PAGE_MASK;
-	return PAGE_ALIGN(host_addr + size) >> VTD_PAGE_SHIFT;
+	host_addr &= ~PAGE_MASK;	/* [한국어] 페이지 안 오프셋만 남긴다 */
+	return PAGE_ALIGN(host_addr + size) >> VTD_PAGE_SHIFT;	/* [한국어] 오프셋을 더해 올림 정렬한 뒤 4KB 페이지 수로 바꾼다. 시작이 페이지 중간이면 한 페이지를 더 걸치는 것이 이 계산으로 반영된다 */
 }
 
 /* Return a size from number of VTD pages. */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * nrpages_to_size - VT-d 페이지 수를 바이트 크기로 되돌린다
+ *
+ * @npages: 페이지 개수.
+ * @return: 그만큼의 바이트 수.
+ *
+ * aligned_nrpages 의 역방향. 무효화 범위를 계산할 때 두 표현을 오간다 —
+ * 페이지 수로 세다가 주소 범위로 바꿔야 하는 지점이 있기 때문이다.
+ *
+ * 실행 컨텍스트: 어디서든. 순수 계산.
+ */
 static inline unsigned long nrpages_to_size(unsigned long npages)
 {
-	return npages << VTD_PAGE_SHIFT;
+	return npages << VTD_PAGE_SHIFT;	/* [한국어] 페이지 수 × 4KB */
 }
 
+/*
+ * [한국어]
+ * qi_desc_iotlb - IOTLB 무효화 서술자를 조립한다
+ *
+ * @iommu: 이 서술자를 받을 유닛(능력을 보고 배수 플래그를 정한다).
+ * @did: 대상 도메인 id. @addr: 무효화할 주소(하위 비트에 IH 힌트가 실려 온다).
+ * @size_order: 범위 크기의 로그값. @type: DMA_TLB_*_FLUSH 중 하나.
+ * @desc: 채울 서술자.
+ * @return: 없음.
+ *
+ * 이 파일의 qi_desc_* 계열은 "무효화 명령을 만드는 곳"이고, 실제 제출은
+ * dmar.c 의 qi_submit_sync() 가 한다. 조립과 제출을 나눈 이유는 cache.c 가
+ * 여러 서술자를 모아 한 번에 보내기 때문이다(qi_batch).
+ *
+ * 배수(drain) 플래그가 능력에 따라 갈리는 것이 중요하다. cap_read_drain /
+ * cap_write_drain 을 지원하는 유닛에서만 DR/DW 를 세우는데, 이 비트가 있어야
+ * "무효화 완료"가 "옛 번역으로 가는 진행 중인 전송이 더 이상 없다"를 뜻한다.
+ * 지원하지 않는 유닛에서는 완료를 받아도 그 보장이 없어, 상위 코드가
+ * 언매핑 후 페이지 재사용을 더 조심해야 한다.
+ *
+ * ih = addr & 1 은 주소의 최하위 비트를 힌트로 쓰는 관용구다. 주소는 페이지
+ * 정렬이라 하위 12비트가 비어 있으므로, 호출자가 거기에 IH(중간 단계 항목은
+ * 그대로 두라)를 실어 보낸다.
+ *
+ * qw2/qw3 를 0 으로 미는 이유: scalable 모드에서 서술자가 32바이트로 커지면
+ * 이 두 워드도 하드웨어가 읽는다. 예약 필드에 값이 남아 있으면 서술자가
+ * 거부되므로 반드시 비워야 한다.
+ *
+ * 실행 컨텍스트: 무효화 경로. 락을 쥔 채 불릴 수 있어 잠들면 안 된다.
+ *
+ * 호출 체인:
+ *   cache_tag_flush_range() 등 → [qi_desc_iotlb] → (나중에) qi_submit_sync()
+ */
 static inline void qi_desc_iotlb(struct intel_iommu *iommu, u16 did, u64 addr,
 				 unsigned int size_order, u64 type,
 				 struct qi_desc *desc)
 {
-	u8 dw = 0, dr = 0;
-	int ih = addr & 1;
+	u8 dw = 0, dr = 0;	/* [한국어] 쓰기/읽기 배수 플래그. 기본은 끔 */
+	int ih = addr & 1;	/* [한국어] 주소의 최하위 비트에 실려 온 IH 힌트를 꺼낸다. 주소는 페이지 정렬이라 그 자리가 비어 있어 이렇게 겸용한다 */
 
-	if (cap_write_drain(iommu->cap))
-		dw = 1;
+	if (cap_write_drain(iommu->cap))	/* [한국어] 이 유닛이 쓰기 배수를 지원하면 */
+		dw = 1;	/* [한국어] 켠다 — 이 플래그가 있어야 무효화 완료가 "옛 번역으로 가는 쓰기가 더 이상 없다"를 뜻한다 */
 
-	if (cap_read_drain(iommu->cap))
-		dr = 1;
+	if (cap_read_drain(iommu->cap))	/* [한국어] 읽기 배수도 지원하면 */
+		dr = 1;	/* [한국어] 켠다 */
 
-	desc->qw0 = QI_IOTLB_DID(did) | QI_IOTLB_DR(dr) | QI_IOTLB_DW(dw)
-		| QI_IOTLB_GRAN(type) | QI_IOTLB_TYPE;
-	desc->qw1 = QI_IOTLB_ADDR(addr) | QI_IOTLB_IH(ih)
-		| QI_IOTLB_AM(size_order);
-	desc->qw2 = 0;
-	desc->qw3 = 0;
+	desc->qw0 = QI_IOTLB_DID(did) | QI_IOTLB_DR(dr) | QI_IOTLB_DW(dw)	/* [한국어] 도메인 id 와 배수 플래그를 */
+		| QI_IOTLB_GRAN(type) | QI_IOTLB_TYPE;	/* [한국어] 범위 종류·명령 종류와 함께 첫 워드에 담는다 */
+	desc->qw1 = QI_IOTLB_ADDR(addr) | QI_IOTLB_IH(ih)	/* [한국어] 둘째 워드에는 주소와 힌트를 */
+		| QI_IOTLB_AM(size_order);	/* [한국어] 범위 크기와 함께 담는다 */
+	desc->qw2 = 0;	/* [한국어] scalable 모드의 32바이트 서술자에서 하드웨어가 읽으므로 반드시 비운다 */
+	desc->qw3 = 0;	/* [한국어] 같은 이유 */
 }
 
+/*
+ * [한국어]
+ * qi_desc_dev_iotlb - 디바이스 TLB(ATS) 무효화 서술자를 조립한다
+ *
+ * @sid: 대상 장치의 소스 id. @pfsid: SR-IOV 라면 PF 의 소스 id.
+ * @qdep: 그 장치의 ATS 큐 깊이. @addr: 무효화할 주소. @mask: 범위 크기(로그값).
+ * @desc: 채울 서술자.
+ * @return: 없음.
+ *
+ * IOTLB 무효화가 유닛 안의 캐시를 지우는 것이라면, 이쪽은 장치 안의 캐시를
+ * 지운다. ATS 를 켠 장치는 번역 결과를 자기 안에 캐시하므로, 매핑을 풀 때
+ * 두 곳을 모두 비워야 한다.
+ *
+ * 범위 표현 방식이 IOTLB 와 다르다. 여기서는 별도의 크기 필드가 아니라
+ * "주소의 하위 비트를 1 로 채우고 S 비트를 세우는" 방식으로 범위를 나타낸다:
+ *   addr |= (1 << (12 + mask - 1)) - 1
+ * 그래서 mask 가 0 이면 한 페이지, 그보다 크면 그만큼 넓은 범위가 된다.
+ *
+ * qdep 을 상한에서 잘라 0 으로 만드는 것: 큐 깊이가 QI_DEV_IOTLB_MAX_INVS
+ * 이상이면 필드에 담을 수 없다. 0 은 "제한 없음"으로 해석되므로, 잘라 내는
+ * 대신 0 을 보내 하드웨어가 알아서 조절하게 한다.
+ *
+ * 실행 컨텍스트: 무효화 경로. 잠들면 안 된다.
+ *
+ * 호출 체인:
+ *   cache_tag_flush_range() (DEVTLB 태그) → [qi_desc_dev_iotlb]
+ */
 static inline void qi_desc_dev_iotlb(u16 sid, u16 pfsid, u16 qdep, u64 addr,
 				     unsigned int mask, struct qi_desc *desc)
 {
-	if (mask) {
-		addr |= (1ULL << (VTD_PAGE_SHIFT + mask - 1)) - 1;
-		desc->qw1 = QI_DEV_IOTLB_ADDR(addr) | QI_DEV_IOTLB_SIZE;
+	if (mask) {	/* [한국어] 한 페이지보다 넓은 범위면 */
+		addr |= (1ULL << (VTD_PAGE_SHIFT + mask - 1)) - 1;	/* [한국어] 주소의 하위 비트를 1 로 채워 범위를 표현한다. 디바이스 TLB 는 별도 크기 필드가 없어 주소 자체로 범위를 나타낸다 */
+		desc->qw1 = QI_DEV_IOTLB_ADDR(addr) | QI_DEV_IOTLB_SIZE;	/* [한국어] S 비트를 세워 "한 페이지가 아니다"를 알린다 */
 	} else {
-		desc->qw1 = QI_DEV_IOTLB_ADDR(addr);
+		desc->qw1 = QI_DEV_IOTLB_ADDR(addr);	/* [한국어] 한 페이지면 주소만 넣는다 */
 	}
 
-	if (qdep >= QI_DEV_IOTLB_MAX_INVS)
-		qdep = 0;
+	if (qdep >= QI_DEV_IOTLB_MAX_INVS)	/* [한국어] 큐 깊이가 필드에 담을 수 없을 만큼 크면 */
+		qdep = 0;	/* [한국어] 0 을 보낸다. 0 은 "제한 없음"으로 해석되어 하드웨어가 알아서 조절한다 */
 
-	desc->qw0 = QI_DEV_IOTLB_SID(sid) | QI_DEV_IOTLB_QDEP(qdep) |
-		   QI_DIOTLB_TYPE | QI_DEV_IOTLB_PFSID(pfsid);
-	desc->qw2 = 0;
-	desc->qw3 = 0;
+	desc->qw0 = QI_DEV_IOTLB_SID(sid) | QI_DEV_IOTLB_QDEP(qdep) |	/* [한국어] 대상 장치와 큐 깊이를 */
+		   QI_DIOTLB_TYPE | QI_DEV_IOTLB_PFSID(pfsid);	/* [한국어] 명령 종류·PF 소스 id 와 함께 담는다 */
+	desc->qw2 = 0;	/* [한국어] scalable 모드의 32바이트 서술자에서 하드웨어가 읽으므로 반드시 비운다 */
+	desc->qw3 = 0;	/* [한국어] 같은 이유 */
 }
 
 /* PASID-selective IOTLB invalidation */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * qi_desc_piotlb_all - 한 PASID 의 IOTLB 항목을 통째로 무효화하는 서술자
+ *
+ * @did: 대상 도메인 id. @pasid: 대상 PASID. @desc: 채울 서술자.
+ * @return: 없음.
+ *
+ * 확장(EIOTLB) 형식이라 PASID 필드가 있다. 범위를 지정하지 않고 그 PASID 에
+ * 속한 항목 전부를 지운다(QI_GRAN_NONG_PASID).
+ *
+ * 언제 쓰는가: 그 주소 공간이 통째로 사라질 때 — SVA 에서 프로세스가 죽거나,
+ * PASID 를 회수할 때다. 범위를 하나하나 지우는 것보다 한 번에 비우는 편이
+ * 훨씬 싸다.
+ *
+ * qw1 을 0 으로 두는 것은 주소와 범위를 쓰지 않기 때문이다. 이 형식은
+ * 16바이트 서술자라 qw2/qw3 는 아예 건드리지 않는다.
+ *
+ * 실행 컨텍스트: 무효화 경로.
+ */
 static inline void qi_desc_piotlb_all(u16 did, u32 pasid, struct qi_desc *desc)
 {
-	desc->qw0 = QI_EIOTLB_PASID(pasid) | QI_EIOTLB_DID(did) |
-		    QI_EIOTLB_GRAN(QI_GRAN_NONG_PASID) | QI_EIOTLB_TYPE;
-	desc->qw1 = 0;
+	desc->qw0 = QI_EIOTLB_PASID(pasid) | QI_EIOTLB_DID(did) |	/* [한국어] PASID 와 도메인 id 를 */
+		    QI_EIOTLB_GRAN(QI_GRAN_NONG_PASID) | QI_EIOTLB_TYPE;	/* [한국어] "이 PASID 전체" 범위와 함께 담는다 */
+	desc->qw1 = 0;	/* [한국어] 주소를 쓰지 않으므로 비운다 */
 }
 
 /* Page-selective-within-PASID IOTLB invalidation */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * qi_desc_piotlb - 한 PASID 안에서 특정 주소 범위만 무효화하는 서술자
+ *
+ * @did: 도메인 id. @pasid: 대상 PASID. @addr: 시작 주소.
+ * @size_order: 범위 크기의 로그값. @ih: 중간 단계 항목 유지 힌트.
+ * @desc: 채울 서술자.
+ * @return: 없음.
+ *
+ * piotlb_all 의 범위 지정 판(QI_GRAN_PSI_PASID). SVA 에서 프로세스의 일부
+ * 매핑만 바뀌었을 때(munmap, 페이지 회수) 그 범위만 지운다.
+ *
+ * 함수 안 영어 주석이 중요한 전제를 말한다: addr 과 size_order 는 반드시
+ * calculate_psi_aligned_address() 로 계산한 값이어야 한다. VT-d 의 범위
+ * 무효화는 "주소가 그 크기에 정렬되어 있다"를 전제로 하며, 어긋나면
+ * 하드웨어가 의도보다 넓거나 좁은 범위를 지운다. 좁게 지우면 옛 번역이
+ * 남아 use-after-free 로 이어지므로 조용한 버그가 된다.
+ *
+ * 실행 컨텍스트: 무효화 경로.
+ */
 static inline void qi_desc_piotlb(u16 did, u32 pasid, u64 addr,
 				  unsigned int size_order, bool ih,
 				  struct qi_desc *desc)
@@ -2459,22 +2707,54 @@ static inline void qi_desc_piotlb(u16 did, u32 pasid, u64 addr,
 	/*
 	 * calculate_psi_aligned_address() must be used for addr and size_order
 	 */
-	desc->qw0 = QI_EIOTLB_PASID(pasid) | QI_EIOTLB_DID(did) |
-		    QI_EIOTLB_GRAN(QI_GRAN_PSI_PASID) | QI_EIOTLB_TYPE;
-	desc->qw1 = QI_EIOTLB_ADDR(addr) | QI_EIOTLB_IH(ih) |
-		    QI_EIOTLB_AM(size_order);
+	desc->qw0 = QI_EIOTLB_PASID(pasid) | QI_EIOTLB_DID(did) |	/* [한국어] PASID 와 도메인 id 를 */
+		    QI_EIOTLB_GRAN(QI_GRAN_PSI_PASID) | QI_EIOTLB_TYPE;	/* [한국어] "이 PASID 안의 페이지 선택" 범위와 함께 담는다 */
+	desc->qw1 = QI_EIOTLB_ADDR(addr) | QI_EIOTLB_IH(ih) |	/* [한국어] 주소와 힌트를 */
+		    QI_EIOTLB_AM(size_order);	/* [한국어] 범위 크기와 함께 담는다. 이 둘은 calculate_psi_aligned_address() 가 계산한 값이어야 한다 (위 영어 주석) */
 }
 
+/*
+ * [한국어]
+ * qi_desc_dev_iotlb_pasid - PASID 를 지정한 디바이스 TLB 무효화 서술자를 조립한다
+ *
+ * @sid: 장치 소스 id. @pfsid: PF 소스 id. @pasid: 대상 PASID.
+ * @qdep: ATS 큐 깊이. @addr: 시작 주소. @size_order: 범위 크기의 로그값.
+ * @desc: 채울 서술자.
+ * @return: 없음.
+ *
+ * qi_desc_dev_iotlb 의 PASID 인식 판. SVA 처럼 장치가 여러 주소 공간을 동시에
+ * 쓰는 경우, 한 PASID 의 캐시만 지워야 나머지가 살아남는다.
+ *
+ * 범위 표현이 이 파일에서 가장 까다로운 자리다. S 비트가 0 이면 한 페이지,
+ * 1 이면 "주소에서 0 인 최하위 비트가 범위 크기를 나타낸다"는 규칙이다
+ * (스펙 6.5.2.6, 위 영어 주석). 예를 들어 비트 12 가 0 이면 8KB, 비트 13 이
+ * 0 이면 16KB 다.
+ * 그래서 원하는 크기를 표현하려면 세 단계가 필요하다.
+ *   1) size_order 아래의 비트를 모두 1 로 채운다. 원래 0 이었던 비트가
+ *      "최하위 0" 으로 오인되면 의도보다 좁은 범위가 되기 때문이다.
+ *   2) size_order 자리의 비트를 0 으로 만들어 그것이 크기를 나타내게 한다.
+ *   3) S 비트를 세워 "한 페이지가 아니다" 를 알린다.
+ * 이 순서를 지키지 않으면 무효화 범위가 조용히 어긋난다.
+ *
+ * 정렬 검사: addr 이 요청한 크기에 정렬되어 있지 않으면 위 규칙으로 그 크기를
+ * 표현할 수 없다. 그래서 경고를 남긴다 — 무효화가 조용히 좁아지는 것보다
+ * 로그에 남는 편이 낫기 때문이다.
+ *
+ * MIP(Max Invs Pending)를 0 으로 두는 것은 ECAP 에 DIT 가 들어오기 전까지의
+ * 임시 조치다 (위 영어 주석).
+ *
+ * 실행 컨텍스트: 무효화 경로. 잠들면 안 된다.
+ */
 static inline void qi_desc_dev_iotlb_pasid(u16 sid, u16 pfsid, u32 pasid,
 					   u16 qdep, u64 addr,
 					   unsigned int size_order,
 					   struct qi_desc *desc)
 {
-	unsigned long mask = 1UL << (VTD_PAGE_SHIFT + size_order - 1);
+	unsigned long mask = 1UL << (VTD_PAGE_SHIFT + size_order - 1);	/* [한국어] 크기를 나타낼 자리의 비트. 아래에서 이 비트를 0 으로 만들어 범위를 표현한다 */
 
-	desc->qw0 = QI_DEV_EIOTLB_PASID(pasid) | QI_DEV_EIOTLB_SID(sid) |
-		QI_DEV_EIOTLB_QDEP(qdep) | QI_DEIOTLB_TYPE |
-		QI_DEV_IOTLB_PFSID(pfsid);
+	desc->qw0 = QI_DEV_EIOTLB_PASID(pasid) | QI_DEV_EIOTLB_SID(sid) |	/* [한국어] PASID 와 장치 소스 id 를 */
+		QI_DEV_EIOTLB_QDEP(qdep) | QI_DEIOTLB_TYPE |	/* [한국어] 큐 깊이·명령 종류와 */
+		QI_DEV_IOTLB_PFSID(pfsid);	/* [한국어] PF 소스 id 까지 담는다 */
 
 	/*
 	 * If S bit is 0, we only flush a single page. If S bit is set,
@@ -2485,30 +2765,30 @@ static inline void qi_desc_dev_iotlb_pasid(u16 sid, u16 pfsid, u32 pasid,
 	 * Max Invs Pending (MIP) is set to 0 for now until we have DIT in
 	 * ECAP.
 	 */
-	if (!IS_ALIGNED(addr, VTD_PAGE_SIZE << size_order))
-		pr_warn_ratelimited("Invalidate non-aligned address %llx, order %d\n",
-				    addr, size_order);
+	if (!IS_ALIGNED(addr, VTD_PAGE_SIZE << size_order))	/* [한국어] 주소가 요청한 크기에 정렬되어 있지 않으면 */
+		pr_warn_ratelimited("Invalidate non-aligned address %llx, order %d\n",	/* [한국어] 아래 규칙으로 그 크기를 표현할 수 없다. 무효화가 조용히 좁아지는 것보다 로그를 남기는 편이 낫다 */
+				    addr, size_order);	/* [한국어] 문제의 주소와 크기 */
 
 	/* Take page address */
-	desc->qw1 = QI_DEV_EIOTLB_ADDR(addr);
+	desc->qw1 = QI_DEV_EIOTLB_ADDR(addr);	/* [한국어] 먼저 주소를 넣는다 (위 영어 주석) */
 
-	if (size_order) {
+	if (size_order) {	/* [한국어] 한 페이지보다 넓으면 */
 		/*
 		 * Existing 0s in address below size_order may be the least
 		 * significant bit, we must set them to 1s to avoid having
 		 * smaller size than desired.
 		 */
-		desc->qw1 |= GENMASK_ULL(size_order + VTD_PAGE_SHIFT - 1,
-					VTD_PAGE_SHIFT);
+		desc->qw1 |= GENMASK_ULL(size_order + VTD_PAGE_SHIFT - 1,	/* [한국어] size_order 아래의 비트를 모두 1 로 채운다. 원래 0 이던 비트가 "최하위 0"으로 오인되면 의도보다 좁은 범위가 되기 때문이다 (위 영어 주석) */
+					VTD_PAGE_SHIFT);	/* [한국어] 페이지 오프셋 자리부터 */
 		/* Clear size_order bit to indicate size */
-		desc->qw1 &= ~mask;
+		desc->qw1 &= ~mask;	/* [한국어] size_order 자리를 0 으로 만들어 그것이 크기를 나타내게 한다 (위 영어 주석) */
 		/* Set the S bit to indicate flushing more than 1 page */
-		desc->qw1 |= QI_DEV_EIOTLB_SIZE;
+		desc->qw1 |= QI_DEV_EIOTLB_SIZE;	/* [한국어] S 비트를 세워 한 페이지가 아님을 알린다 (위 영어 주석) */
 	}
 }
 
 /* Convert value to context PASID directory size field coding. */
-#define context_pdts(pds)	(((pds) & 0x7) << 9)
+#define context_pdts(pds)	(((pds) & 0x7) << 9)	/* [한국어] PASID 디렉터리 크기를 컨텍스트 항목의 필드 자리로 옮긴다 (위 영어 주석). 디렉터리가 몇 개의 PASID 테이블을 담는지를 하드웨어에 알린다 */
 
 struct dmar_drhd_unit *dmar_find_matched_drhd_unit(struct pci_dev *dev);
 
@@ -2650,7 +2930,7 @@ static inline int iopf_for_domain_replace(struct iommu_domain *new,
 	return 0;
 }
 
-#ifdef CONFIG_INTEL_IOMMU_SVM
+#ifdef CONFIG_INTEL_IOMMU_SVM	/* [한국어] DMA 재매핑을 뺀 빌드에는 인계 표시 자체가 없다 */
 void intel_svm_check(struct intel_iommu *iommu);
 struct iommu_domain *intel_svm_domain_alloc(struct device *dev,
 					    struct mm_struct *mm);
