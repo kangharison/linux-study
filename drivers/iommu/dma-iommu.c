@@ -2028,7 +2028,27 @@ out_unmap:	/* [한국어] vmap 실패 경로 */
  */
 struct dma_sgt_handle {
 	struct sg_table sgt;	/* [한국어] 호출자에게 돌려줄 scatterlist */
+	/* [한국어] 호출자에게 돌려주는 scatterlist. 구조체의 첫 필드인 것이 설계의 핵심이다.
+	 * 설정자: __iommu_dma_alloc_noncontiguous() 가 페이지를 모아 sg_table 을 세우고,
+	 *   그 안의 각 세그먼트에 연속된 IOVA 를 채워 넣는다.
+	 * 읽는 자: DMA API 사용자. 장치는 이 sgl 의 dma_address 만 보므로, 물리적으로
+	 *   흩어진 페이지들이 하나의 연속 구간으로 보인다.
+	 * 값 범위: 세그먼트 수는 물리 조각 수에 따라 달라지지만, dma_address 는 항상
+	 *   연속이다 — 그것이 이 API 를 쓰는 이유다.
+	 * 동기화: 한 할당은 소유한 드라이버만 다루므로 별도 락이 없다. 해제 전까지 유효.
+	 * 첫 필드여야 하는 이유: 호출자에게는 &sh->sgt 만 넘기고, 되돌아올 때는
+	 *   sgt_handle() 매크로가 container_of 로 핸들을 복원한다. */
 	struct page **pages;	/* [한국어] DMA API 내부에서 vmap/해제에 쓸 페이지 배열. 사용자는 이것을 몰라도 된다 (위 영어 주석) */
+	/* [한국어] 할당된 페이지들의 배열. DMA API 사용자에게는 보이지 않는 내부 상태다.
+	 * 설정자: __iommu_dma_alloc_noncontiguous() 가 __iommu_dma_alloc_pages() 의
+	 *   결과를 그대로 보관한다.
+	 * 읽는 자: iommu_dma_vmap_noncontiguous() 가 vmap() 에 넘기고,
+	 *   iommu_dma_free_noncontiguous() 가 __iommu_dma_free_pages() 에 넘긴다.
+	 * 값 범위: PAGE_ALIGN(size) >> PAGE_SHIFT 개의 유효한 page 포인터. NULL 이면
+	 *   할당 실패이며, 그 경우 핸들 자체가 만들어지지 않는다.
+	 * 왜 따로 들고 있는가: sg_table 만으로는 이 배열을 되돌릴 수 없다. vmap 도
+	 *   해제도 page 배열을 요구하므로, 위 영어 주석대로 임시방편으로 숨겨 둔다.
+	 * 동기화: 한 할당의 소유 드라이버만 접근하므로 락이 없다. */
 };
 /* [한국어] 돌려준 sgt 포인터에서 감싸는 핸들로 되짚는다 */
 #define sgt_handle(sgt) \
