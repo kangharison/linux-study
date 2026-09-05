@@ -3104,15 +3104,59 @@ void iommu_set_fault_handler(struct iommu_domain *domain,
 }
 EXPORT_SYMBOL_GPL(iommu_set_fault_handler);
 
+/*
+ * [한국어]
+ * iommu_domain_init - 갓 만들어진 도메인의 공통 필드를 채운다
+ *
+ * @domain: 드라이버가 막 할당한 도메인
+ * @type:   무슨 종류인가(번역·통과·차단 등)
+ * @ops:    이 도메인을 만든 IOMMU 의 vtable
+ * @return: 없음
+ *
+ * 드라이버는 도메인을 할당하고 자기 필드만 채운다. 코어가 알아야 하는
+ * 것들은 여기서 채워지며, 그래서 모든 도메인 생성 경로가 마지막에 이
+ * 함수를 지난다.
+ *
+ * ops 를 이미 채웠으면 건드리지 않는 것에 주의할 것. 드라이버가 도메인
+ * 종류마다 다른 연산 집합을 주고 싶을 때 미리 채워 두며, 그 경우 기본값을
+ * 덮어쓰면 안 된다.
+ *
+ * 호출 체인: 각 도메인 생성 경로 → [이 함수]
+ */
 static void iommu_domain_init(struct iommu_domain *domain, unsigned int type,
 			      const struct iommu_ops *ops)
 {
 	domain->type = type;
-	domain->owner = ops;
+	domain->owner = ops;	/* [한국어] 어느 IOMMU 가 만든 도메인인지 — 다른 IOMMU 에 붙이려 할 때 걸러 내는 근거다 */
 	if (!domain->ops)
-		domain->ops = ops->default_domain_ops;
+		domain->ops = ops->default_domain_ops;	/* [한국어] 드라이버가 종류별 연산을 미리 채웠으면 그것을 존중한다 */
 }
 
+/*
+ * [한국어]
+ * __iommu_paging_domain_alloc_flags - 번역용 도메인을 만든다
+ *
+ * @dev:   이 장치의 IOMMU 에게 만들게 한다
+ * @type:  만들어진 도메인에 새길 종류
+ * @flags: iommufd 가 요구하는 속성(중첩 변환, PASID 지원 등)
+ * @return: 도메인. 실패하면 오류 포인터.
+ *
+ * 드라이버가 도메인을 만드는 콜백이 세대별로 셋이라 갈래가 셋이다.
+ * 새 콜백(domain_alloc_paging_flags)은 플래그를 받고, 그 앞 세대
+ * (domain_alloc_paging)는 못 받으며, 가장 오래된 것(domain_alloc)은
+ * FSL PAMU 에만 남아 #ifdef 로 묶여 있다.
+ *
+ * 플래그가 있으면 새 콜백만 쓸 수 있는 것에 주의할 것. 옛 콜백은
+ * 플래그를 표현할 방법이 없으므로, 요구를 조용히 무시하는 대신
+ * -EOPNOTSUPP 로 거절한다.
+ *
+ * 반환값을 두 번 검사하는 이유: 콜백 세대에 따라 실패를 오류 포인터로
+ * 알리기도 하고 NULL 로 알리기도 한다. 둘 다 받아 준다.
+ *
+ * 실행 컨텍스트: 도메인 생성 경로. 잠들 수 있다.
+ *
+ * 호출 체인: iommu_paging_domain_alloc_flags / 기본 도메인 설정 → [이 함수]
+ */
 static struct iommu_domain *
 __iommu_paging_domain_alloc_flags(struct device *dev, unsigned int type,
 				  unsigned int flags)
@@ -3121,27 +3165,27 @@ __iommu_paging_domain_alloc_flags(struct device *dev, unsigned int type,
 	struct iommu_domain *domain;
 
 	if (!dev_has_iommu(dev))
-		return ERR_PTR(-ENODEV);
+		return ERR_PTR(-ENODEV);	/* [한국어] IOMMU 아래에 없는 장치에는 만들어 줄 도메인이 없다 */
 
 	ops = dev_iommu_ops(dev);
 
 	if (ops->domain_alloc_paging && !flags)
-		domain = ops->domain_alloc_paging(dev);
+		domain = ops->domain_alloc_paging(dev);	/* [한국어] 플래그를 표현할 수 없는 세대 — 요구가 없을 때만 쓴다 */
 	else if (ops->domain_alloc_paging_flags)
-		domain = ops->domain_alloc_paging_flags(dev, flags, NULL);
+		domain = ops->domain_alloc_paging_flags(dev, flags, NULL);	/* [한국어] 플래그를 받는 새 콜백 */
 #if IS_ENABLED(CONFIG_FSL_PAMU)
 	else if (ops->domain_alloc && !flags)
-		domain = ops->domain_alloc(IOMMU_DOMAIN_UNMANAGED);
+		domain = ops->domain_alloc(IOMMU_DOMAIN_UNMANAGED);	/* [한국어] 가장 오래된 콜백. 이제 FSL PAMU 에만 남았다 */
 #endif
 	else
-		return ERR_PTR(-EOPNOTSUPP);
+		return ERR_PTR(-EOPNOTSUPP);	/* [한국어] 플래그를 요구했는데 표현할 콜백이 없다 — 조용히 무시하지 않고 거절한다 */
 
 	if (IS_ERR(domain))
-		return domain;
+		return domain;	/* [한국어] 콜백 세대에 따라 실패를 알리는 방식이 다르다 */
 	if (!domain)
-		return ERR_PTR(-ENOMEM);
+		return ERR_PTR(-ENOMEM);	/* [한국어] 옛 콜백은 NULL 로 실패를 알린다 */
 
-	iommu_domain_init(domain, type, ops);
+	iommu_domain_init(domain, type, ops);	/* [한국어] 코어가 알아야 하는 공통 필드를 채운다 */
 	return domain;
 }
 
@@ -3153,31 +3197,61 @@ __iommu_paging_domain_alloc_flags(struct device *dev, unsigned int type,
  * Allocate a paging domain which will be managed by a kernel driver. Return
  * allocated domain if successful, or an ERR pointer for failure.
  */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어) 외부에 열린 도메인 생성 API.
+ *
+ * 종류를 UNMANAGED 로 못박는 것이 요점이다. 매핑을 커널의 DMA API 가
+ * 아니라 호출자가 직접 관리한다는 뜻이며, VFIO 와 iommufd 가 쓰는 도메인이
+ * 모두 이 종류다.
+ *
+ * 호출 체인: VFIO/iommufd → [이 함수] → __iommu_paging_domain_alloc_flags
+ */
 struct iommu_domain *iommu_paging_domain_alloc_flags(struct device *dev,
 						     unsigned int flags)
 {
 	return __iommu_paging_domain_alloc_flags(dev,
-					 IOMMU_DOMAIN_UNMANAGED, flags);
+					 IOMMU_DOMAIN_UNMANAGED, flags);	/* [한국어] 매핑을 호출자가 직접 관리한다는 표시 */
 }
 EXPORT_SYMBOL_GPL(iommu_paging_domain_alloc_flags);
 
+/*
+ * [한국어]
+ * iommu_domain_free - 도메인을 해제한다
+ *
+ * @domain: 해제할 도메인
+ * @return: 없음
+ *
+ * 쿠키를 먼저 풀고 드라이버에 넘기는 순서다. 쿠키는 도메인에 딸린
+ * 사용자별 상태이고 종류마다 푸는 방법이 다르므로, 어느 용도로 쓰였는지
+ * 기록해 둔 cookie_type 을 보고 갈라 처리한다.
+ *
+ * SVA 만 mmdrop 인 것에 주의할 것. 공유 주소 공간 도메인은 프로세스의
+ * mm 을 참조로 들고 있어, 그것을 놓는 것이 곧 쿠키 정리다.
+ *
+ * 드라이버의 free 를 마지막에 부르는 이유: 그 호출 뒤에는 도메인 구조체
+ * 자체가 사라지므로, cookie_type 을 포함한 어떤 필드도 읽을 수 없다.
+ *
+ * 실행 컨텍스트: 도메인 해체 경로. 잠들 수 있다.
+ *
+ * 호출 체인: 도메인 사용자 → [이 함수] → ops->free
+ */
 void iommu_domain_free(struct iommu_domain *domain)
 {
-	switch (domain->cookie_type) {
+	switch (domain->cookie_type) {	/* [한국어] 쿠키 자리를 누가 썼는지에 따라 푸는 방법이 다르다 */
 	case IOMMU_COOKIE_DMA_IOVA:
-		iommu_put_dma_cookie(domain);
+		iommu_put_dma_cookie(domain);	/* [한국어] DMA API 가 쓰던 IOVA 할당기 */
 		break;
 	case IOMMU_COOKIE_DMA_MSI:
-		iommu_put_msi_cookie(domain);
+		iommu_put_msi_cookie(domain);	/* [한국어] MSI 창 매핑 정보 */
 		break;
 	case IOMMU_COOKIE_SVA:
-		mmdrop(domain->mm);
+		mmdrop(domain->mm);	/* [한국어] 공유 주소 공간 — 프로세스 mm 참조를 놓는 것이 곧 정리다 */
 		break;
 	default:
-		break;
+		break;	/* [한국어] 쿠키를 쓰지 않았거나 폴트 처리기라 풀 것이 없다 */
 	}
 	if (domain->ops->free)
-		domain->ops->free(domain);
+		domain->ops->free(domain);	/* [한국어] 마지막 — 이 뒤로는 구조체 자체가 없어 어떤 필드도 못 읽는다 */
 }
 EXPORT_SYMBOL_GPL(iommu_domain_free);
 
@@ -3185,16 +3259,33 @@ EXPORT_SYMBOL_GPL(iommu_domain_free);
  * Put the group's domain back to the appropriate core-owned domain - either the
  * standard kernel-mode DMA configuration or an all-DMA-blocked domain.
  */
+/*
+ * [한국어] (위 영어 주석에 이어) 그룹을 코어가 소유한 도메인으로 되돌린다.
+ *
+ * 갈래가 소유권으로 갈리는 것이 요점이다. 아직 소유자가 있다면 -- VFIO 가
+ * 장치를 들고 있는 중이라면 -- 기본 도메인으로 되돌리면 안 된다. 그것은
+ * 커널의 DMA 번역이 살아난다는 뜻이고, 사용자 공간에 넘긴 장치가 커널
+ * 메모리를 볼 수 있게 되기 때문이다. 그래서 차단 도메인으로 보낸다.
+ *
+ * 소유자가 없을 때만 기본 도메인으로 돌아간다. 그것이 정상 상태다.
+ *
+ * nofail 판을 쓰는 이유: 이 경로는 이미 무언가를 놓는 중이라 물러설
+ * 곳이 없다. 실패해도 옛 도메인에 남겨 둘 수 없다.
+ *
+ * 실행 컨텍스트: 장치 분리·해체 경로. 잠들 수 있다.
+ *
+ * 호출 체인: iommu_detach_device / 소유권 해제 → [이 함수]
+ */
 static void __iommu_group_set_core_domain(struct iommu_group *group)
 {
 	struct iommu_domain *new_domain;
 
 	if (group->owner)
-		new_domain = group->blocking_domain;
+		new_domain = group->blocking_domain;	/* [한국어] 아직 사용자 공간 것이다 — 커널 번역을 살리면 커널 메모리가 노출된다 */
 	else
-		new_domain = group->default_domain;
+		new_domain = group->default_domain;	/* [한국어] 아무도 안 쓴다 — 정상 상태로 되돌린다 */
 
-	__iommu_group_set_domain_nofail(group, new_domain);
+	__iommu_group_set_domain_nofail(group, new_domain);	/* [한국어] 물러설 곳이 없는 경로라 실패를 허용하지 않는다 */
 }
 
 static int __iommu_attach_device(struct iommu_domain *domain,
