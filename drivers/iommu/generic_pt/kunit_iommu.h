@@ -118,7 +118,14 @@ static const void *kunit_pt_gen_params_cfg(struct kunit *test, const void *prev,
 #define IS_32BIT (sizeof(unsigned long) == 4)	/* [한국어] (원 주석: 32비트에서는 IOMMU 연산의 주소가 그 폭으로 제한된다) */
 
 struct kunit_iommu_priv {
-	union {	/* [한국어] 도메인과 형식별 표를 겹쳐 둔다 — 실제 드라이버가 쓰는 배치를 흉내 낸다 */
+	union {
+	/* [한국어] 도메인과 형식별 표를 같은 자리에 겹쳐 둔 union.
+	 * 왜 이렇게 하는가: 실제 IOMMU 드라이버는 struct iommu_domain 을 자기
+	 *   구조체 안에 품고 container_of 로 오간다. 시험이 그 배치를 흉내 내야,
+	 *   겹침 때문에 생기는 버그(오프셋 계산 실수, 초기화 순서 문제)를 잡아낼 수 있다.
+	 * 읽는 자: 시험 코드가 상황에 따라 두 시각 중 하나로 접근한다. 코어 진입점을
+	 *   부를 때는 domain 으로, 표를 직접 다룰 때는 fmt_table 로 본다.
+	 * 동기화: 시험 하나가 이 구조체를 독점하므로 경쟁이 없다. */
 		struct iommu_domain domain;
 		/* [한국어] 코어가 보는 도메인.
 		 * 설정자: pt_kunit_priv_init 이 ops 를 넣고, pt_iommu_init 이 나머지를 채운다.
