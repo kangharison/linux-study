@@ -2968,15 +2968,34 @@ int dmar_enable_qi(struct intel_iommu *iommu)
 
 /* iommu interrupt handling. Most stuff are MSI-like. */
 
+/*
+ * [한국어] enum faulttype — 폴트가 어느 기능에서 났는지
+ *
+ * VT-d 유닛 하나가 DMA 재매핑과 인터럽트 재매핑을 함께 담당하므로, 폴트
+ * 사유 코드도 두 공간으로 나뉜다. 그 구분을 폴트 처리기에 알려 주는 값이다.
+ * 사유 코드의 범위가 곧 종류를 정한다 — 0x20 대는 인터럽트 재매핑,
+ * 0x30 이상은 scalable 모드 DMA, 그 아래는 레거시 DMA 다.
+ */
 enum faulttype {
-	DMA_REMAP,
-	INTR_REMAP,
-	UNKNOWN,
+	DMA_REMAP,	/* [한국어] DMA 번역 중에 난 폴트 */
+	INTR_REMAP,	/* [한국어] 인터럽트 재매핑 중에 난 폴트 */
+	UNKNOWN,	/* [한국어] 우리가 모르는 사유 코드 */
 };
 
+/*
+ * [한국어] 레거시 모드 DMA 폴트의 사유 이름표 (사유 코드 0x00~0x0D)
+ *
+ * 이 배열의 순서가 곧 하드웨어가 보고하는 사유 코드다. 인덱스를 그대로
+ * 코드로 쓰므로 순서를 바꾸면 안 된다.
+ *
+ * 사유를 읽는 것이 진단의 출발점이다. 예를 들어 "Present bit in context
+ * entry is clear" 는 장치가 도메인에 붙지 않았는데 DMA 를 냈다는 뜻이고,
+ * "PTE Write access is not set" 은 읽기 전용 매핑에 쓰기를 시도했다는
+ * 뜻이라, 원인을 찾을 곳이 전혀 다르다.
+ */
 static const char *dma_remap_fault_reasons[] =
 {
-	"Software",
+	"Software",	/* [한국어] 사유 코드 0x00 — 소프트웨어가 의도적으로 막았다 */
 	"Present bit in root entry is clear",
 	"Present bit in context entry is clear",
 	"Invalid context entry",
@@ -2992,8 +3011,24 @@ static const char *dma_remap_fault_reasons[] =
 	"PCE for translation request specifies blocking",
 };
 
+/*
+ * [한국어] scalable 모드 DMA 폴트의 사유 이름표 (사유 코드 0x30~0x90)
+ *
+ * 레거시보다 훨씬 길다. scalable 모드에서는 번역이 루트 → 컨텍스트 →
+ * PASID 디렉터리 → PASID 테이블 → 페이지 테이블의 다섯 단계를 거치고,
+ * 각 단계마다 "접근 실패 / present 아님 / 예약 필드가 0 이 아님" 같은
+ * 사유가 따로 있기 때문이다.
+ *
+ * 그래서 사유 이름이 곧 "어느 단계에서 끊겼는가"를 알려 준다. 예를 들어
+ * "Present bit in Directory Entry is clear" 면 PASID 디렉터리까지는 갔는데
+ * 그 PASID 구간의 테이블이 없다는 뜻이다.
+ *
+ * 중간중간의 "Unknown" 은 스펙이 비워 둔 코드 자리다. 배열 인덱스가 곧
+ * 사유 코드이므로 빈 자리도 채워 둬야 뒤의 항목이 제자리에 온다 — 옆의
+ * 주석이 그 자리의 코드 범위를 적어 둔 이유다.
+ */
 static const char * const dma_remap_sm_fault_reasons[] = {
-	"SM: Invalid Root Table Address",
+	"SM: Invalid Root Table Address",	/* [한국어] 사유 코드 0x30 부터 시작한다. 아래 항목들의 인덱스가 그대로 코드가 된다 */
 	"SM: TTM 0 for request with PASID",
 	"SM: TTM 0 for page group request",
 	"Unknown", "Unknown", "Unknown", "Unknown", "Unknown", /* 0x33-0x37 */
@@ -3050,9 +3085,20 @@ static const char * const dma_remap_sm_fault_reasons[] = {
 	"SM: A/D bit update needed in first-level entry when set up in no snoop",
 };
 
+/*
+ * [한국어] 인터럽트 재매핑 폴트의 사유 이름표 (사유 코드 0x20~)
+ *
+ * DMA 와 별개의 사유 공간이다. 인터럽트가 재매핑 표를 통과하지 못한
+ * 이유를 담는다 — 인덱스가 표 크기를 넘었거나, 항목이 present 가 아니거나,
+ * 호환 형식 인터럽트가 차단되었거나.
+ *
+ * 마지막 것("Blocked a compatibility format interrupt request")이 특히
+ * 의미 있다: 재매핑을 켜면 옛 형식 인터럽트가 막히는데, 그것을 여전히
+ * 내는 장치가 있으면 이 폴트로 드러난다.
+ */
 static const char *irq_remap_fault_reasons[] =
 {
-	"Detected reserved fields in the decoded interrupt-remapped request",
+	"Detected reserved fields in the decoded interrupt-remapped request",	/* [한국어] 사유 코드 0x20 부터 시작한다 */
 	"Interrupt index exceeded the interrupt-remapping table size",
 	"Present field in the IRTE entry is clear",
 	"Error accessing interrupt-remapping table pointed by IRTA_REG",
@@ -3061,113 +3107,230 @@ static const char *irq_remap_fault_reasons[] =
 	"Blocked an interrupt request due to source-id verification failure",
 };
 
+/*
+ * [한국어]
+ * dmar_get_fault_reason - 사유 코드를 이름과 종류로 바꾼다
+ *
+ * @fault_reason: 하드웨어가 보고한 사유 코드.
+ * @fault_type: 출력 — DMA_REMAP / INTR_REMAP / UNKNOWN.
+ * @return: 그 사유의 이름 문자열.
+ *
+ * 코드의 범위가 곧 어느 표를 볼지를 정한다.
+ *   0x20 대  — 인터럽트 재매핑.
+ *   0x30 이상 — scalable 모드 DMA.
+ *   그 아래  — 레거시 DMA.
+ * 각 표의 시작 코드를 빼서 인덱스로 쓴다.
+ *
+ * 범위 검사가 두 겹인 것을 눈여겨볼 것: 시작 코드 이상인지와, 그 표의
+ * 크기 안인지를 함께 본다. 하드웨어가 우리가 모르는 사유를 보고할 수 있고,
+ * 그때 배열 밖을 읽으면 안 되기 때문이다.
+ *
+ * 실행 컨텍스트: 폴트 인터럽트 처리. 순수 조회.
+ */
 static const char *dmar_get_fault_reason(u8 fault_reason, int *fault_type)
 {
-	if (fault_reason >= 0x20 && (fault_reason - 0x20 <
-					ARRAY_SIZE(irq_remap_fault_reasons))) {
-		*fault_type = INTR_REMAP;
-		return irq_remap_fault_reasons[fault_reason - 0x20];
-	} else if (fault_reason >= 0x30 && (fault_reason - 0x30 <
-			ARRAY_SIZE(dma_remap_sm_fault_reasons))) {
-		*fault_type = DMA_REMAP;
-		return dma_remap_sm_fault_reasons[fault_reason - 0x30];
-	} else if (fault_reason < ARRAY_SIZE(dma_remap_fault_reasons)) {
-		*fault_type = DMA_REMAP;
-		return dma_remap_fault_reasons[fault_reason];
+	if (fault_reason >= 0x20 && (fault_reason - 0x20 <	/* [한국어] 0x20 대이고 */
+					ARRAY_SIZE(irq_remap_fault_reasons))) {	/* [한국어] 그 표의 크기 안이면 */
+		*fault_type = INTR_REMAP;	/* [한국어] 인터럽트 재매핑 폴트로 분류하고 */
+		return irq_remap_fault_reasons[fault_reason - 0x20];	/* [한국어] 그 표의 크기 안이면 인터럽트 재매핑 사유다 */
+	} else if (fault_reason >= 0x30 && (fault_reason - 0x30 <	/* [한국어] 0x30 이상이고 */
+			ARRAY_SIZE(dma_remap_sm_fault_reasons))) {	/* [한국어] 그 표의 크기 안이면 */
+		*fault_type = DMA_REMAP;	/* [한국어] DMA 번역 폴트로 분류하고 */
+		return dma_remap_sm_fault_reasons[fault_reason - 0x30];	/* [한국어] 그 표의 크기 안이면 scalable 모드 DMA 사유다 */
+	} else if (fault_reason < ARRAY_SIZE(dma_remap_fault_reasons)) {	/* [한국어] 그 아래이고 레거시 표의 크기 안이면 */
+		*fault_type = DMA_REMAP;	/* [한국어] DMA 번역 폴트로 분류하고 */
+		return dma_remap_fault_reasons[fault_reason];	/* [한국어] 레거시 DMA 사유다 */
 	} else {
-		*fault_type = UNKNOWN;
-		return "Unknown";
+		*fault_type = UNKNOWN;	/* [한국어] 알 수 없는 사유로 분류하고 */
+		return "Unknown";	/* [한국어] 하드웨어가 우리가 모르는 사유를 보고했다. 범위 검사가 두 겹인 것이 배열 밖을 읽지 않게 한다 */
 	}
 }
 
 
+/*
+ * [한국어]
+ * dmar_msi_reg - 인터럽트 번호로 어느 MSI 레지스터 묶음인지 고른다
+ *
+ * @iommu: 대상 유닛. @irq: 인터럽트 번호.
+ * @return: 그 인터럽트의 MSI 레지스터 시작 오프셋.
+ *
+ * 유닛 하나가 세 종류의 인터럽트를 낼 수 있다 — 폴트(FE*), 페이지
+ * 요청(PE*), 성능 카운터(PERFINTR*). 각각 MSI 주소·데이터 레지스터가
+ * 따로 있어서, 커널의 MSI 콜백이 어느 것을 만질지 이 함수가 정한다.
+ *
+ * 인터럽트 번호로 판별하는 이유: MSI 콜백은 irq 번호만 받는다. 유닛은
+ * 세 번호를 모두 기억하고 있으므로(irq/pr_irq/perf_irq), 그것과 비교해
+ * 되짚는다.
+ *
+ * 실행 컨텍스트: MSI 설정. 순수 조회.
+ */
 static inline int dmar_msi_reg(struct intel_iommu *iommu, int irq)
 {
-	if (iommu->irq == irq)
-		return DMAR_FECTL_REG;
-	else if (iommu->pr_irq == irq)
-		return DMAR_PECTL_REG;
-	else if (iommu->perf_irq == irq)
-		return DMAR_PERFINTRCTL_REG;
+	if (iommu->irq == irq)	/* [한국어] 폴트 인터럽트면 */
+		return DMAR_FECTL_REG;	/* [한국어] 폴트 인터럽트의 MSI 레지스터 묶음 */
+	else if (iommu->pr_irq == irq)	/* [한국어] 페이지 요청 인터럽트면 */
+		return DMAR_PECTL_REG;	/* [한국어] 페이지 요청 인터럽트의 것 */
+	else if (iommu->perf_irq == irq)	/* [한국어] 성능 카운터 인터럽트면 */
+		return DMAR_PERFINTRCTL_REG;	/* [한국어] 성능 카운터 인터럽트의 것 */
 	else
-		BUG();
+		BUG();	/* [한국어] 세 번호 중 어느 것도 아니면 커널이 관리하지 않는 인터럽트다 — 여기까지 올 수 없다 */
 }
 
+/*
+ * [한국어]
+ * dmar_msi_unmask - 이 유닛 인터럽트의 마스크를 푼다
+ *
+ * @data: 커널 인터럽트 서술자. 어느 인터럽트인지와 유닛을 담고 있다.
+ * @return: 없음.
+ *
+ * 제어 레지스터에 0 을 써서 IM(Interrupt Mask) 비트를 내린다.
+ *
+ * 쓰고 나서 같은 레지스터를 읽는 것이 요령이다(코드 안 영어 주석).
+ * MMIO 쓰기는 posted write 라 함수가 돌아온 뒤에도 하드웨어에 도달하지
+ * 않았을 수 있다. 같은 영역을 읽으면 그 쓰기가 먼저 완료되어야 하므로,
+ * 읽기가 돌아온 시점에는 마스크가 확실히 풀린 상태다.
+ *
+ * 어느 인터럽트인지는 dmar_msi_reg 가 irq 번호로 판별한다 — 유닛 하나가
+ * 폴트·페이지 요청·성능 세 인터럽트를 가질 수 있다.
+ *
+ * 실행 컨텍스트: 커널 인터럽트 코어의 콜백. register_lock 을 잡는다.
+ */
 void dmar_msi_unmask(struct irq_data *data)
 {
-	struct intel_iommu *iommu = irq_data_get_irq_handler_data(data);
-	int reg = dmar_msi_reg(iommu, data->irq);
-	unsigned long flag;
+	struct intel_iommu *iommu = irq_data_get_irq_handler_data(data);	/* [한국어] 인터럽트 등록 때 함께 넘긴 유닛 */
+	int reg = dmar_msi_reg(iommu, data->irq);	/* [한국어] 세 인터럽트 중 어느 것인지 */
+	unsigned long flag;	/* [한국어] 인터럽트 상태 */
 
 	/* unmask it */
-	raw_spin_lock_irqsave(&iommu->register_lock, flag);
-	writel(0, iommu->reg + reg);
+	raw_spin_lock_irqsave(&iommu->register_lock, flag);	/* [한국어] 레지스터 조작 구간 */
+	writel(0, iommu->reg + reg);	/* [한국어] 제어 레지스터를 0 으로 — IM 비트가 내려가 인터럽트가 허용된다 */
 	/* Read a reg to force flush the post write */
-	readl(iommu->reg + reg);
-	raw_spin_unlock_irqrestore(&iommu->register_lock, flag);
+	readl(iommu->reg + reg);	/* [한국어] 같은 영역을 읽어 posted write 를 밀어낸다 (위 영어 주석). 그러지 않으면 함수가 돌아온 뒤에도 하드웨어에 도달하지 않았을 수 있다 */
+	raw_spin_unlock_irqrestore(&iommu->register_lock, flag);	/* [한국어] 락 해제 */
 }
 
+/*
+ * [한국어]
+ * dmar_msi_mask - 이 유닛 인터럽트를 마스크한다
+ *
+ * @data: 커널 인터럽트 서술자.
+ * @return: 없음.
+ *
+ * unmask 의 반대로, IM 비트를 세워 인터럽트가 오지 않게 한다. 쓰기 뒤에
+ * 읽어 posted write 를 밀어내는 것도 같다 — 마스크의 경우 특히 중요하다.
+ * 함수가 돌아왔는데 마스크가 아직 적용되지 않았으면 그 사이에 인터럽트가
+ * 들어와, 마스크했다고 믿는 코드의 전제가 깨진다.
+ *
+ * 실행 컨텍스트: 커널 인터럽트 코어의 콜백. register_lock 을 잡는다.
+ */
 void dmar_msi_mask(struct irq_data *data)
 {
-	struct intel_iommu *iommu = irq_data_get_irq_handler_data(data);
-	int reg = dmar_msi_reg(iommu, data->irq);
-	unsigned long flag;
+	struct intel_iommu *iommu = irq_data_get_irq_handler_data(data);	/* [한국어] 유닛 */
+	int reg = dmar_msi_reg(iommu, data->irq);	/* [한국어] 어느 인터럽트인지 */
+	unsigned long flag;	/* [한국어] 인터럽트 상태 */
 
 	/* mask it */
-	raw_spin_lock_irqsave(&iommu->register_lock, flag);
-	writel(DMA_FECTL_IM, iommu->reg + reg);
+	raw_spin_lock_irqsave(&iommu->register_lock, flag);	/* [한국어] 레지스터 조작 구간 (위 영어 주석) */
+	writel(DMA_FECTL_IM, iommu->reg + reg);	/* [한국어] IM 비트를 세워 인터럽트를 막는다 */
 	/* Read a reg to force flush the post write */
-	readl(iommu->reg + reg);
-	raw_spin_unlock_irqrestore(&iommu->register_lock, flag);
+	readl(iommu->reg + reg);	/* [한국어] posted write 를 밀어낸다. 마스크에서 특히 중요하다 — 아직 적용되지 않았는데 마스크했다고 믿으면 그 사이 인터럽트가 들어온다 */
+	raw_spin_unlock_irqrestore(&iommu->register_lock, flag);	/* [한국어] 락 해제 */
 }
 
+/*
+ * [한국어]
+ * dmar_msi_write - MSI 메시지(주소와 데이터)를 유닛 레지스터에 쓴다
+ *
+ * @irq: 인터럽트 번호. @msg: 커널이 정한 MSI 메시지.
+ * @return: 없음.
+ *
+ * 커널이 이 인터럽트를 어느 CPU 의 어느 벡터로 보낼지 정하면, 그것이
+ * MSI 주소와 데이터의 형태로 온다. 유닛이 인터럽트를 낼 때 그 주소에
+ * 그 값을 쓰게 되어 결과적으로 원하는 CPU 에 인터럽트가 전달된다.
+ *
+ * 오프셋 +4, +8, +12 는 제어 레지스터 뒤에 DATA, ADDR, UADDR 이 이어져
+ * 있기 때문이다. dmar_msi_reg 가 돌려준 제어 레지스터 위치가 기준이 된다.
+ *
+ * 데이터를 먼저 쓰고 주소를 나중에 쓰는 순서를 눈여겨볼 것: 주소가 유효해지는
+ * 순간 인터럽트가 나갈 수 있으므로, 데이터가 먼저 자리 잡아야 한다.
+ *
+ * 실행 컨텍스트: MSI 설정(인터럽트 할당·이동). register_lock 을 잡는다.
+ */
 void dmar_msi_write(int irq, struct msi_msg *msg)
 {
-	struct intel_iommu *iommu = irq_get_handler_data(irq);
-	int reg = dmar_msi_reg(iommu, irq);
-	unsigned long flag;
+	struct intel_iommu *iommu = irq_get_handler_data(irq);	/* [한국어] 유닛 */
+	int reg = dmar_msi_reg(iommu, irq);	/* [한국어] 어느 인터럽트인지 */
+	unsigned long flag;	/* [한국어] 인터럽트 상태 */
 
-	raw_spin_lock_irqsave(&iommu->register_lock, flag);
-	writel(msg->data, iommu->reg + reg + 4);
-	writel(msg->address_lo, iommu->reg + reg + 8);
-	writel(msg->address_hi, iommu->reg + reg + 12);
-	raw_spin_unlock_irqrestore(&iommu->register_lock, flag);
+	raw_spin_lock_irqsave(&iommu->register_lock, flag);	/* [한국어] 레지스터 조작 구간 */
+	writel(msg->data, iommu->reg + reg + 4);	/* [한국어] DATA 를 먼저 쓴다 — 주소가 유효해지는 순간 인터럽트가 나갈 수 있어 데이터가 먼저 자리 잡아야 한다 */
+	writel(msg->address_lo, iommu->reg + reg + 8);	/* [한국어] 주소의 하위 32비트 */
+	writel(msg->address_hi, iommu->reg + reg + 12);	/* [한국어] 상위 32비트. 이 주소가 곧 목적지 CPU 를 정한다 */
+	raw_spin_unlock_irqrestore(&iommu->register_lock, flag);	/* [한국어] 락 해제 */
 }
 
+/*
+ * [한국어]
+ * dmar_fault_do_one - 폴트 기록 하나를 사람이 읽을 수 있게 로그로 남긴다
+ *
+ * @iommu: 폴트를 보고한 유닛. @type: 읽기(1)인지 쓰기(0)인지.
+ * @fault_reason: 사유 코드. @pasid: 폴트를 낸 PASID(없으면 INVALID).
+ * @source_id: 폴트를 낸 장치. @addr: 폴트가 난 주소.
+ * @return: 항상 0.
+ *
+ * DMA 폴트는 대부분 커널이 고칠 수 있는 것이 아니다 — 드라이버가 매핑하지
+ * 않은 주소를 썼거나, 장치가 오동작하거나, 설정이 잘못된 것이다. 그래서
+ * 이 함수가 하는 일은 "무엇이 왜 실패했는가"를 최대한 자세히 남기는 것이다.
+ *
+ * 인터럽트 재매핑 폴트는 형식이 다르다. 주소 필드가 주소가 아니라 인터럽트
+ * 인덱스를 담고 있어(addr >> 48), 그것을 그렇게 해석해 찍고 끝낸다.
+ *
+ * DMA 폴트는 PASID 유무로 다시 갈린다. PASID 가 있으면 어느 주소 공간에서
+ * 난 폴트인지가 중요한 정보이기 때문이다.
+ *
+ * 마지막에 페이지 테이블을 덤프하는 것이 이 함수의 핵심이다. 사유 코드만으로는
+ * "컨텍스트 항목이 없다"까지만 알 수 있고, 실제로 어느 단계에서 끊겼는지는
+ * 표를 따라가 봐야 안다. CONFIG_DMAR_DEBUG 를 켠 빌드에서만 동작한다.
+ *
+ * source_id 를 버스·슬롯·함수로 쪼개 찍는 것은 lspci 출력과 대조할 수 있게
+ * 하기 위해서다.
+ *
+ * 실행 컨텍스트: 폴트 인터럽트 처리. 잠들면 안 된다.
+ */
 static int dmar_fault_do_one(struct intel_iommu *iommu, int type,
 		u8 fault_reason, u32 pasid, u16 source_id,
 		unsigned long long addr)
 {
-	const char *reason;
-	int fault_type;
+	const char *reason;	/* [한국어] 사유의 이름 */
+	int fault_type;	/* [한국어] DMA 인지 인터럽트 재매핑인지 */
 
-	reason = dmar_get_fault_reason(fault_reason, &fault_type);
+	reason = dmar_get_fault_reason(fault_reason, &fault_type);	/* [한국어] 사유 코드를 이름과 종류로 바꾼다 */
 
-	if (fault_type == INTR_REMAP) {
-		pr_err("[INTR-REMAP] Request device [%02x:%02x.%d] fault index 0x%llx [fault reason 0x%02x] %s\n",
-		       source_id >> 8, PCI_SLOT(source_id & 0xFF),
-		       PCI_FUNC(source_id & 0xFF), addr >> 48,
-		       fault_reason, reason);
+	if (fault_type == INTR_REMAP) {	/* [한국어] 인터럽트 재매핑 폴트면 */
+		pr_err("[INTR-REMAP] Request device [%02x:%02x.%d] fault index 0x%llx [fault reason 0x%02x] %s\n",	/* [한국어] 형식이 다르다 */
+		       source_id >> 8, PCI_SLOT(source_id & 0xFF),	/* [한국어] 버스와 슬롯 */
+		       PCI_FUNC(source_id & 0xFF), addr >> 48,	/* [한국어] 함수, 그리고 주소 필드에 담긴 인터럽트 인덱스 — DMA 폴트와 달리 주소가 아니다 */
+		       fault_reason, reason);	/* [한국어] 사유 코드와 이름 */
 
-		return 0;
+		return 0;	/* [한국어] 인터럽트 폴트는 페이지 테이블 덤프가 의미 없어 여기서 끝낸다 */
 	}
 
-	if (pasid == IOMMU_PASID_INVALID)
-		pr_err("[%s NO_PASID] Request device [%02x:%02x.%d] fault addr 0x%llx [fault reason 0x%02x] %s\n",
-		       type ? "DMA Read" : "DMA Write",
-		       source_id >> 8, PCI_SLOT(source_id & 0xFF),
-		       PCI_FUNC(source_id & 0xFF), addr,
-		       fault_reason, reason);
+	if (pasid == IOMMU_PASID_INVALID)	/* [한국어] PASID 없는 트래픽이면 */
+		pr_err("[%s NO_PASID] Request device [%02x:%02x.%d] fault addr 0x%llx [fault reason 0x%02x] %s\n",	/* [한국어] PASID 없이 찍는다 */
+		       type ? "DMA Read" : "DMA Write",	/* [한국어] 읽기인지 쓰기인지 */
+		       source_id >> 8, PCI_SLOT(source_id & 0xFF),	/* [한국어] 버스와 슬롯 */
+		       PCI_FUNC(source_id & 0xFF), addr,	/* [한국어] 함수와 폴트 주소 */
+		       fault_reason, reason);	/* [한국어] 사유 코드와 이름 */
 	else
-		pr_err("[%s PASID 0x%x] Request device [%02x:%02x.%d] fault addr 0x%llx [fault reason 0x%02x] %s\n",
-		       type ? "DMA Read" : "DMA Write", pasid,
-		       source_id >> 8, PCI_SLOT(source_id & 0xFF),
-		       PCI_FUNC(source_id & 0xFF), addr,
-		       fault_reason, reason);
+		pr_err("[%s PASID 0x%x] Request device [%02x:%02x.%d] fault addr 0x%llx [fault reason 0x%02x] %s\n",	/* [한국어] PASID 가 있으면 어느 주소 공간이었는지도 함께 찍는다 */
+		       type ? "DMA Read" : "DMA Write", pasid,	/* [한국어] 읽기/쓰기와 PASID */
+		       source_id >> 8, PCI_SLOT(source_id & 0xFF),	/* [한국어] 버스와 슬롯 */
+		       PCI_FUNC(source_id & 0xFF), addr,	/* [한국어] 함수와 폴트 주소 */
+		       fault_reason, reason);	/* [한국어] 사유 코드와 이름 */
 
-	dmar_fault_dump_ptes(iommu, source_id, addr, pasid);
+	dmar_fault_dump_ptes(iommu, source_id, addr, pasid);	/* [한국어] 번역 사슬을 따라가며 각 단계의 항목을 찍는다. 사유 코드만으로는 알 수 없는 "실제로 어디서 끊겼는가"를 보여 준다 (CONFIG_DMAR_DEBUG 빌드에서만) */
 
-	return 0;
+	return 0;	/* [한국어] 기록 완료 */
 }
 
 #define PRIMARY_FAULT_REG_LEN (16)
