@@ -2392,16 +2392,40 @@ EXPORT_SYMBOL_GPL(generic_single_device_group);
  * Use standard PCI bus topology, isolation features, and DMA alias quirks
  * to find or create an IOMMU group for a device.
  */
+/*
+ * [한국어] (위 영어 주석에 이어) PCI 장치가 어느 그룹에 들어갈지 정한다.
+ * 이 파일에서 그룹 판정의 실제 알고리즘이며, 네 단계를 순서대로 밟는다.
+ *
+ * 1. 별칭 사슬을 따라 올라가며 이미 그룹을 가진 장치를 찾는다. 요청자
+ *    ID 를 공유하는 장치는 IOMMU 가 구별할 수 없으므로 같은 그룹이어야
+ *    한다.
+ * 2. 사슬의 끝에서 버스를 거슬러 올라가며, ACS 로 격리가 보장되는
+ *    지점까지 간다. 그 아래의 브리지들은 트래픽을 옆으로 넘길 수 있어
+ *    함께 묶여야 한다.
+ * 3. 거기서 다시 별칭을, 4. 같은 슬롯의 다른 기능을 본다.
+ *
+ * 각 단계에서 기존 그룹을 찾으면 즉시 그것을 쓴다. 넷 다 실패해야
+ * 비로소 새 그룹을 만든다 -- 이 순서가 "격리가 성립하는 가장 작은
+ * 묶음"을 실제로 찾아내는 방법이다.
+ *
+ * devfns 비트맵을 단계 3, 4 가 공유하는 것에 주의할 것. 위 4번 단계의
+ * 영어 주석대로 초기화하지 않는데, 이미 훑은 devfn 을 다시 볼 이유가
+ * 없기 때문이다.
+ *
+ * 실행 컨텍스트: 장치 probe 경로. 잠들 수 있다.
+ *
+ * 호출 체인: iommu_group_get_for_dev → ops->device_group → [이 함수]
+ */
 struct iommu_group *pci_device_group(struct device *dev)
 {
 	struct pci_dev *pdev = to_pci_dev(dev);
-	struct group_for_pci_data data;
-	struct pci_bus *bus;
+	struct group_for_pci_data data;	/* [한국어] 별칭 순회의 결과를 받을 자리 */
+	struct pci_bus *bus;	/* [한국어] 상류로 거슬러 올라갈 커서 */
 	struct iommu_group *group = NULL;
-	u64 devfns[4] = { 0 };
+	u64 devfns[4] = { 0 };	/* [한국어] 256개 devfn 을 담는 비트맵 — 별칭 순회의 순환 방지용이다 */
 
 	if (WARN_ON(!dev_is_pci(dev)))
-		return ERR_PTR(-EINVAL);
+		return ERR_PTR(-EINVAL);	/* [한국어] PCI 전용 콜백에 다른 버스 장치가 왔다 */
 
 	/*
 	 * Find the upstream DMA alias for the device.  A device must not
@@ -2409,10 +2433,10 @@ struct iommu_group *pci_device_group(struct device *dev)
 	 * If we find an alias along the way that already belongs to a
 	 * group, use it.
 	 */
-	if (pci_for_each_dma_alias(pdev, get_pci_alias_or_group, &data))
+	if (pci_for_each_dma_alias(pdev, get_pci_alias_or_group, &data))	/* [한국어] 1단계 — 위 영어 주석대로 별칭 사슬에 이미 그룹이 있으면 그것을 쓴다 */
 		return data.group;
 
-	pdev = data.pdev;
+	pdev = data.pdev;	/* [한국어] 사슬의 끝 — IOMMU 에 실제로 보이는 요청자다. 여기서부터 상류를 본다 */
 
 	/*
 	 * Continue upstream from the point of minimum IOMMU granularity
@@ -2420,24 +2444,28 @@ struct iommu_group *pci_device_group(struct device *dev)
 	 * peer-to-peer DMA by PCI ACS.  Again, if we find an existing
 	 * group, use it.
 	 */
+	/* [한국어] 2단계 — 위 영어 주석대로 ACS 가 P2P DMA 를 막아 주는
+	 * 지점까지 거슬러 올라간다. 그 아래는 모두 한 그룹이다. */
 	for (bus = pdev->bus; !pci_is_root_bus(bus); bus = bus->parent) {
 		if (!bus->self)
-			continue;
+			continue;	/* [한국어] 브리지 없는 버스 — 올라갈 다리가 없으니 건너뛴다 */
 
 		if (pci_acs_path_enabled(bus->self, NULL, REQ_ACS_FLAGS))
-			break;
+			break;	/* [한국어] 여기부터 상류는 격리된다 — 더 묶을 필요가 없다 */
 
-		pdev = bus->self;
+		pdev = bus->self;	/* [한국어] 격리가 없으니 이 브리지까지 같은 그룹이다 */
 
 		group = iommu_group_get(&pdev->dev);
 		if (group)
-			return group;
+			return group;	/* [한국어] 브리지가 이미 그룹을 가졌다면 그리로 들어간다 */
 	}
 
 	/*
 	 * Look for existing groups on device aliases.  If we alias another
 	 * device or another device aliases us, use the same group.
 	 */
+	/* [한국어] 3단계 — 올라간 지점에서 다시 별칭을 본다. 상류로 올라오며
+	 * 기준 장치가 바뀌었으므로 별칭 관계도 달라진다. */
 	group = get_pci_alias_group(pdev, (unsigned long *)devfns);
 	if (group)
 		return group;
@@ -2447,45 +2475,75 @@ struct iommu_group *pci_device_group(struct device *dev)
 	 * slot and aliases of those funcions, if any.  No need to clear
 	 * the search bitmap, the tested devfns are still valid.
 	 */
+	/* [한국어] 4단계 — 같은 슬롯의 격리되지 않은 기능들. 위 영어 주석대로
+	 * 비트맵을 지우지 않는데, 이미 훑은 devfn 은 다시 볼 이유가 없다. */
 	group = get_pci_function_alias_group(pdev, (unsigned long *)devfns);
 	if (group)
 		return group;
 
 	/* No shared group found, allocate new */
-	return iommu_group_alloc();
+	return iommu_group_alloc();	/* [한국어] 네 단계 모두 빈손 — 이 장치는 혼자 격리된다 */
 }
 EXPORT_SYMBOL_GPL(pci_device_group);
 
 /* Get the IOMMU group for device on fsl-mc bus */
+/*
+ * [한국어] (위 영어 주석에 이어) fsl-mc 버스의 그룹 판정.
+ *
+ * PCI 처럼 토폴로지를 훑을 필요가 없다. 이 버스에서는 컨테이너 장치가
+ * 격리 경계이며, 같은 컨테이너 안의 장치들은 모두 한 그룹이다. 그래서
+ * 컨테이너를 찾아 그 그룹을 쓰고, 없으면 새로 만드는 두 줄로 끝난다.
+ *
+ * 호출 체인: iommu_group_get_for_dev → ops->device_group → [이 함수]
+ */
 struct iommu_group *fsl_mc_device_group(struct device *dev)
 {
-	struct device *cont_dev = fsl_mc_cont_dev(dev);
+	struct device *cont_dev = fsl_mc_cont_dev(dev);	/* [한국어] 이 버스의 격리 경계는 컨테이너다 */
 	struct iommu_group *group;
 
-	group = iommu_group_get(cont_dev);
+	group = iommu_group_get(cont_dev);	/* [한국어] 같은 컨테이너의 다른 장치가 이미 만들었을 수 있다 */
 	if (!group)
-		group = iommu_group_alloc();
+		group = iommu_group_alloc();	/* [한국어] 이 컨테이너의 첫 장치다 */
 	return group;
 }
 EXPORT_SYMBOL_GPL(fsl_mc_device_group);
 
+/*
+ * [한국어]
+ * __iommu_alloc_identity_domain - 주소를 그대로 통과시키는 도메인을 얻는다
+ *
+ * @dev: 이 장치의 IOMMU 에게 묻는다
+ * @return: 항등 도메인. 지원하지 않으면 -EOPNOTSUPP.
+ *
+ * 드라이버가 항등 도메인을 제공하는 방식이 두 가지라 갈래가 둘이다.
+ * 하나는 정적 도메인 하나를 미리 만들어 두고 모두가 공유하는 방식이고
+ * (ops->identity_domain), 다른 하나는 장치마다 만들어 주는 방식이다.
+ *
+ * 앞쪽 경로가 iommu_domain_init 을 거치지 않는 것에 주의할 것. 공유
+ * 도메인은 드라이버가 이미 초기화해 둔 것이라 다시 손대면 안 된다.
+ * 뒤쪽만 갓 만들어진 것이라 공통 필드를 채운다.
+ *
+ * 실행 컨텍스트: 도메인 생성 경로. 잠들 수 있다.
+ *
+ * 호출 체인: __iommu_group_alloc_default_domain → [이 함수] → ops
+ */
 static struct iommu_domain *__iommu_alloc_identity_domain(struct device *dev)
 {
 	const struct iommu_ops *ops = dev_iommu_ops(dev);
 	struct iommu_domain *domain;
 
 	if (ops->identity_domain)
-		return ops->identity_domain;
+		return ops->identity_domain;	/* [한국어] 드라이버가 미리 만들어 공유하는 도메인 — 이미 초기화돼 있다 */
 
 	if (ops->domain_alloc_identity) {
-		domain = ops->domain_alloc_identity(dev);
+		domain = ops->domain_alloc_identity(dev);	/* [한국어] 장치마다 만들어 주는 방식 */
 		if (IS_ERR(domain))
 			return domain;
 	} else {
-		return ERR_PTR(-EOPNOTSUPP);
+		return ERR_PTR(-EOPNOTSUPP);	/* [한국어] 둘 다 없다 — 이 IOMMU 는 통과 모드를 지원하지 않는다 */
 	}
 
-	iommu_domain_init(domain, IOMMU_DOMAIN_IDENTITY, ops);
+	iommu_domain_init(domain, IOMMU_DOMAIN_IDENTITY, ops);	/* [한국어] 갓 만든 것만 공통 필드를 채운다 */
 	return domain;
 }
 
@@ -2526,10 +2584,32 @@ __iommu_group_alloc_default_domain(struct iommu_group *group, int req_type)
  * req_type of 0 means "auto" which means to select a domain based on
  * iommu_def_domain_type or what the driver actually supports.
  */
+/*
+ * [한국어] (위 영어 주석에 이어) 그룹의 기본 도메인을 정해 만든다.
+ *
+ * 세 층으로 결정된다. 먼저 드라이버가 아예 도메인을 못박아 둔 경우
+ * (ops->default_domain), 위 영어 주석대로 옛 드라이버를 위한 것이며
+ * 요청과 다르면 거절한다 -- 협상의 여지가 없는 구성이다.
+ *
+ * 그다음 호출자가 종류를 지정했으면 그대로 시도한다.
+ *
+ * 지정하지 않았으면(req_type 0) 시스템 기본값으로 시도하고, 실패하면
+ * DMA 로 물러선다. 이 물러섬이 이 함수의 핵심이다 -- 예컨대 기본이
+ * DMA_FQ 인데 드라이버가 플러시 큐를 지원하지 않으면, 통째로 실패하는
+ * 대신 평범한 DMA 도메인으로 내려앉는다. 격리는 유지하면서 성능만
+ * 포기하는 쪽을 고르는 것이다.
+ *
+ * 기본값이 이미 DMA 일 때 곧바로 거절하는 이유: 물러설 곳이 같은
+ * 종류라 다시 시도해 봐야 같은 실패다.
+ *
+ * 실행 컨텍스트: 그룹 설정 경로. group->mutex 를 든 채 불린다.
+ *
+ * 호출 체인: iommu_setup_default_domain → [이 함수]
+ */
 static struct iommu_domain *
 iommu_group_alloc_default_domain(struct iommu_group *group, int req_type)
 {
-	const struct iommu_ops *ops = dev_iommu_ops(iommu_group_first_dev(group));
+	const struct iommu_ops *ops = dev_iommu_ops(iommu_group_first_dev(group));	/* [한국어] 그룹의 장치는 모두 같은 IOMMU 아래라 아무거나 하나면 된다 */
 	struct iommu_domain *dom;
 
 	lockdep_assert_held(&group->mutex);
@@ -2539,67 +2619,117 @@ iommu_group_alloc_default_domain(struct iommu_group *group, int req_type)
 	 * domain. This should always be either an IDENTITY/BLOCKED/PLATFORM
 	 * domain. Do not use in new drivers.
 	 */
-	if (ops->default_domain) {
+	if (ops->default_domain) {	/* [한국어] 위 영어 주석대로 옛 드라이버용 경로 — 새 드라이버는 쓰지 말라고 못박아 두었다 */
 		if (req_type != ops->default_domain->type)
-			return ERR_PTR(-EINVAL);
+			return ERR_PTR(-EINVAL);	/* [한국어] 드라이버가 못박은 종류라 협상의 여지가 없다 */
 		return ops->default_domain;
 	}
 
 	if (req_type)
-		return __iommu_group_alloc_default_domain(group, req_type);
+		return __iommu_group_alloc_default_domain(group, req_type);	/* [한국어] 호출자가 지정했으면 그대로 — 물러서지 않는다 */
 
 	/* The driver gave no guidance on what type to use, try the default */
-	dom = __iommu_group_alloc_default_domain(group, iommu_def_domain_type);
+	dom = __iommu_group_alloc_default_domain(group, iommu_def_domain_type);	/* [한국어] 시스템 기본값으로 먼저 */
 	if (!IS_ERR(dom))
 		return dom;
 
 	/* Otherwise IDENTITY and DMA_FQ defaults will try DMA */
 	if (iommu_def_domain_type == IOMMU_DOMAIN_DMA)
-		return ERR_PTR(-EINVAL);
-	dom = __iommu_group_alloc_default_domain(group, IOMMU_DOMAIN_DMA);
+		return ERR_PTR(-EINVAL);	/* [한국어] 물러설 곳이 같은 종류라 다시 시도해도 같은 실패다 */
+	dom = __iommu_group_alloc_default_domain(group, IOMMU_DOMAIN_DMA);	/* [한국어] 격리는 지키고 성능만 포기하는 쪽으로 내려앉는다 */
 	if (IS_ERR(dom))
 		return dom;
 
-	pr_warn("Failed to allocate default IOMMU domain of type %u for group %s - Falling back to IOMMU_DOMAIN_DMA",
+	pr_warn("Failed to allocate default IOMMU domain of type %u for group %s - Falling back to IOMMU_DOMAIN_DMA",	/* [한국어] 요청과 다른 구성이 됐음을 반드시 알린다 */
 		iommu_def_domain_type, group->name);
 	return dom;
 }
 
+/*
+ * [한국어]
+ * iommu_group_default_domain - 그룹의 기본 도메인을 꺼낸다
+ *
+ * @group: 대상 그룹
+ * @return: 기본 도메인. 아직 세우지 않았으면 NULL.
+ *
+ * VFIO 가 장치를 돌려줄 때 어디로 되돌려야 하는지 묻는 통로다.
+ *
+ * 호출 체인: VFIO/iommufd → [이 함수]
+ */
 struct iommu_domain *iommu_group_default_domain(struct iommu_group *group)
 {
-	return group->default_domain;
+	return group->default_domain;	/* [한국어] 소유자가 장치를 놓을 때 돌아갈 자리 */
 }
 
+/*
+ * [한국어]
+ * probe_iommu_group - 버스 순회 콜백. 장치 하나를 IOMMU 아래로 들인다
+ *
+ * @dev:  검사할 장치
+ * @data: 새로 만들어진 그룹들을 모을 목록
+ * @return: 0 이면 순회를 계속한다
+ *
+ * -ENODEV 를 성공으로 바꾸는 것이 이 함수의 전부다. 버스의 장치 대부분은
+ * IOMMU 아래에 들어갈 대상이 아니고, 그것은 오류가 아니라 정상이다.
+ * 그대로 올리면 bus_for_each_dev 가 첫 비대상 장치에서 순회를 멈춘다.
+ *
+ * 실행 컨텍스트: 버스 훑기. 잠들 수 있다.
+ *
+ * 호출 체인: bus_iommu_probe → bus_for_each_dev → [이 함수]
+ */
 static int probe_iommu_group(struct device *dev, void *data)
 {
 	struct list_head *group_list = data;
 	int ret;
 
-	mutex_lock(&iommu_probe_device_lock);
+	mutex_lock(&iommu_probe_device_lock);	/* [한국어] 같은 그룹을 두 경로가 동시에 만들지 못하게 한다 */
 	ret = __iommu_probe_device(dev, group_list);
 	mutex_unlock(&iommu_probe_device_lock);
 	if (ret == -ENODEV)
-		ret = 0;
+		ret = 0;	/* [한국어] IOMMU 대상이 아닌 장치가 대부분이다 — 여기서 멈추면 안 된다 */
 
 	return ret;
 }
 
+/*
+ * [한국어]
+ * iommu_bus_notifier - 장치가 나타나고 사라지는 것을 버스에서 통지받는다
+ *
+ * @nb:     등록해 둔 통지 블록
+ * @action: 무슨 일이 일어났는가
+ * @data:   해당 장치
+ * @return: NOTIFY_OK / NOTIFY_DONE
+ *
+ * 이 파일이 세상과 이어지는 지점이다. iommu_subsys_init 이 버스마다
+ * 하나씩 걸어 두었고, 이후로는 장치가 생길 때마다 여기로 들어온다.
+ *
+ * 두 시점만 다루는 것에 주의할 것. ADD 는 장치가 등록된 직후이고
+ * REMOVED 는 완전히 사라진 뒤다 -- 그 사이의 BIND/UNBIND 는 드라이버가
+ * 붙고 떨어지는 것일 뿐 IOMMU 소속과는 무관하다.
+ *
+ * 실패해도 NOTIFY_DONE 일 뿐 장치 등록 자체를 막지 않는다. IOMMU 아래로
+ * 들이지 못한 장치도 (보호받지 못한 채) 동작은 해야 하기 때문이다.
+ *
+ * 실행 컨텍스트: 버스 통지 사슬. 잠들 수 있다.
+ *
+ * 호출 체인: 버스 계층 → [이 함수] → iommu_probe_device / iommu_release_device
+ */
 static int iommu_bus_notifier(struct notifier_block *nb,
 			      unsigned long action, void *data)
 {
 	struct device *dev = data;
 
-	if (action == BUS_NOTIFY_ADD_DEVICE) {
+	if (action == BUS_NOTIFY_ADD_DEVICE) {	/* [한국어] 장치가 막 등록됐다 — 그룹을 정하고 도메인을 붙일 때다 */
 		int ret;
 
 		ret = iommu_probe_device(dev);
-		return (ret) ? NOTIFY_DONE : NOTIFY_OK;
-	} else if (action == BUS_NOTIFY_REMOVED_DEVICE) {
+		return (ret) ? NOTIFY_DONE : NOTIFY_OK;	/* [한국어] 실패해도 장치 등록을 막지는 않는다 */
+	} else if (action == BUS_NOTIFY_REMOVED_DEVICE) {	/* [한국어] 완전히 사라진 뒤 — 그룹에서 뺀다 */
 		iommu_release_device(dev);
 		return NOTIFY_OK;
 	}
 
-	return 0;
+	return 0;	/* [한국어] BIND/UNBIND 등 나머지는 IOMMU 소속과 무관하다 */
 }
 
 /*
