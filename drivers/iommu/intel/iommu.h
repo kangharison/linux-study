@@ -1899,66 +1899,214 @@ static inline bool dev_is_real_dma_subdevice(struct device *dev)
  */
 struct dma_pte {
 	u64 val;
+	/* [한국어] 2단계 페이지 테이블 항목 하나의 원본 64비트. 비트 배치는 바로 위 영어
+	 * 주석 그대로다: 0=readable, 1=writable, 7=super page, 11=snoop behavior,
+	 * 12-63=호스트 물리 주소.
+	 * 1단계 PTE 와 다른 점: 1단계는 present 비트가 따로 있지만 2단계는 읽기/쓰기
+	 *   권한 두 비트가 곧 존재 여부다 — 둘 다 0 이면 "매핑 없음"이다
+	 *   (dma_pte_present 가 & 3 을 보는 이유).
+	 * 설정자: 공용 페이지 테이블 라이브러리의 매핑 경로.
+	 * 읽는 자: 하드웨어의 페이지 워크, 그리고 커널의 진단/조회 헬퍼들.
+	 * 동기화: 항목 갱신은 원자적 64비트 쓰기여야 한다 — 절반만 바뀐 항목을
+	 *   하드웨어가 읽으면 엉뚱한 물리 주소로 번역한다. 32비트 커널에서
+	 *   dma_pte_addr 이 cmpxchg64 를 쓰는 이유가 그것이다. */
 };
 
+/*
+ * [한국어]
+ * dma_pte_addr - 2단계 PTE 에서 물리 주소만 뽑는다
+ *
+ * @pte: 읽을 항목.
+ * @return: 플래그 비트를 털어 낸 페이지 정렬 물리 주소.
+ *
+ * 64비트 커널에서는 그냥 읽고 마스크하면 된다 — 64비트 읽기가 원자적이다.
+ * 32비트 커널에서는 그렇지 않아서, 절반을 읽는 사이에 다른 CPU 가 항목을
+ * 바꾸면 상위 32비트와 하위 32비트가 서로 다른 값에서 온 쓰레기가 된다.
+ * 그래서 __cmpxchg64(&val, 0, 0) 으로 "바꾸지 않는 교환"을 걸어 원자적 읽기를
+ * 흉내 낸다 (위 영어 주석: Must have a full atomic 64-bit read).
+ *
+ * 실행 컨텍스트: 어디서든. 매핑 조회와 진단 경로에서 쓴다.
+ */
 static inline u64 dma_pte_addr(struct dma_pte *pte)
 {
-#ifdef CONFIG_64BIT
-	return pte->val & VTD_PAGE_MASK;
+#ifdef CONFIG_64BIT	/* [한국어] 64비트 커널에서는 */
+	return pte->val & VTD_PAGE_MASK;	/* [한국어] 평범한 읽기로 충분하다 — 64비트 접근이 원자적이다 */
 #else
 	/* Must have a full atomic 64-bit read */
-	return  __cmpxchg64(&pte->val, 0ULL, 0ULL) & VTD_PAGE_MASK;
+	return  __cmpxchg64(&pte->val, 0ULL, 0ULL) & VTD_PAGE_MASK;	/* [한국어] 32비트에서는 "바꾸지 않는 교환"으로 원자적 64비트 읽기를 흉내 낸다. 절반씩 읽으면 그 사이 항목이 바뀌어 상하위가 서로 다른 값에서 온 쓰레기가 될 수 있다 (위 영어 주석) */
 #endif
 }
 
+/*
+ * [한국어]
+ * dma_pte_present - 이 2단계 PTE 가 유효한 매핑인지 본다
+ *
+ * @pte: 검사할 항목.
+ * @return: true 면 매핑이 있다.
+ *
+ * & 3 인 것이 핵심이다. 2단계 PTE 에는 1단계와 달리 present 비트가 따로 없고,
+ * 읽기(비트 0)와 쓰기(비트 1) 권한 중 하나라도 서 있으면 유효한 매핑으로
+ * 본다. 둘 다 0 이면 하드웨어가 그 항목을 없는 것으로 취급한다.
+ *
+ * 그래서 매핑을 지울 때 권한 비트만 지워도 되고, 실제로 언매핑 경로가
+ * 그렇게 한다.
+ *
+ * 실행 컨텍스트: 어디서든.
+ */
 static inline bool dma_pte_present(struct dma_pte *pte)
 {
-	return (pte->val & 3) != 0;
+	return (pte->val & 3) != 0;	/* [한국어] 읽기 또는 쓰기 권한 중 하나라도 있으면 유효한 매핑이다 */
 }
 
+/*
+ * [한국어]
+ * dma_pte_superpage - 이 항목이 큰 페이지를 직접 가리키는지 본다
+ *
+ * @pte: 검사할 항목.
+ * @return: true 면 하위 테이블이 아니라 2MB/1GB 페이지를 직접 가리킨다.
+ *
+ * 페이지 테이블을 워크할 때 이 비트를 만나면 거기서 멈춰야 한다 — 그 아래
+ * 레벨이 없기 때문이다. 폴트 덤프(pgtable_walk)와 언매핑 경로가 그 판단에
+ * 쓴다.
+ *
+ * 큰 페이지를 쓸 수 있는지는 하드웨어 능력(cap_super_page_val)이 정하고,
+ * 도메인의 pgsize_bitmap 에 반영된다.
+ *
+ * 실행 컨텍스트: 어디서든.
+ */
 static inline bool dma_pte_superpage(struct dma_pte *pte)
 {
-	return (pte->val & DMA_PTE_LARGE_PAGE);
+	return (pte->val & DMA_PTE_LARGE_PAGE);	/* [한국어] 큰 페이지 표시 비트 */
 }
 
+/*
+ * [한국어]
+ * context_present - 컨텍스트 항목이 유효한지 본다
+ *
+ * @context: 검사할 항목.
+ * @return: true 면 이 소스 id 에 대한 설정이 세워져 있다.
+ *
+ * 2단계 PTE 와 달리 컨텍스트 항목에는 present 비트(lo 의 비트 0)가 따로 있다.
+ * 이 비트가 0 이면 그 장치의 DMA 는 전부 폴트로 끝난다 — 즉 이 한 비트가
+ * "이 장치가 IOMMU 아래에서 동작할 수 있는가"를 정한다.
+ *
+ * 그래서 항목을 세울 때는 나머지 필드를 모두 채운 뒤 마지막에 이 비트를
+ * 세우고(context_set_present), 내릴 때는 이 비트를 먼저 지운다.
+ *
+ * 실행 컨텍스트: iommu->lock 아래에서 주로 쓰인다.
+ */
 static inline bool context_present(struct context_entry *context)
 {
-	return (context->lo & 1);
+	return (context->lo & 1);	/* [한국어] 컨텍스트 항목의 present 비트 */
 }
 
-#define LEVEL_STRIDE		(9)
-#define LEVEL_MASK		(((u64)1 << LEVEL_STRIDE) - 1)
-#define MAX_AGAW_WIDTH		(64)
-#define MAX_AGAW_PFN_WIDTH	(MAX_AGAW_WIDTH - VTD_PAGE_SHIFT)
+#define LEVEL_STRIDE		(9)	/* [한국어] 페이지 테이블 한 단계가 다루는 인덱스 비트 수. 512개 항목이라 9다 */
+#define LEVEL_MASK		(((u64)1 << LEVEL_STRIDE) - 1)	/* [한국어] 그 인덱스를 뽑는 마스크(0x1ff) */
+#define MAX_AGAW_WIDTH		(64)	/* [한국어] 주소 폭의 이론적 상한 */
+#define MAX_AGAW_PFN_WIDTH	(MAX_AGAW_WIDTH - VTD_PAGE_SHIFT)	/* [한국어] 그것을 페이지 프레임 번호 폭으로 바꾼 값(52). IOVA 범위 검사에 쓴다 */
 
+/*
+ * [한국어]
+ * agaw_to_level - 주소 폭(AGAW) 값에서 페이지 테이블 단계 수를 구한다
+ *
+ * @agaw: Adjusted Guest Address Width 인덱스(0, 1, 2, ...).
+ * @return: 그에 해당하는 최상위 테이블 레벨.
+ *
+ * +2 인 이유: AGAW 0 은 30비트(3단계 워크)에 대응한다. 한 단계가 9비트를
+ * 다루고 페이지 오프셋이 12비트이므로 3단계는 12 + 9*3 = 39비트, 2단계는
+ * 30비트다. 즉 AGAW 인덱스에 2 를 더하면 곧 레벨이 된다.
+ *
+ * 실행 컨텍스트: 어디서든. 순수 계산.
+ */
 static inline int agaw_to_level(int agaw)
 {
-	return agaw + 2;
+	return agaw + 2;	/* [한국어] AGAW 0 이 30비트(2단계)에 대응하므로 2 를 더하면 레벨이 된다 */
 }
 
+/*
+ * [한국어]
+ * width_to_agaw - 주소 폭(비트 수)에서 AGAW 인덱스를 구한다
+ *
+ * @width: 다루려는 주소 폭(비트).
+ * @return: 그것을 담을 수 있는 가장 작은 AGAW 인덱스.
+ *
+ * agaw_to_level 의 역방향이다. -30 은 AGAW 0 이 30비트에 대응하기 때문이고,
+ * LEVEL_STRIDE(9)로 나누는 것은 한 단계가 9비트를 더하기 때문이다.
+ * DIV_ROUND_UP 이라 요청한 폭보다 작아지는 일이 없다 — 모자라면 매핑할 수
+ * 없는 주소가 생기므로 반드시 올림이어야 한다.
+ *
+ * 실행 컨텍스트: 어디서든. 순수 계산.
+ */
 static inline int width_to_agaw(int width)
 {
-	return DIV_ROUND_UP(width - 30, LEVEL_STRIDE);
+	return DIV_ROUND_UP(width - 30, LEVEL_STRIDE);	/* [한국어] 30비트를 기준으로 몇 단계가 더 필요한지. 올림이라 요청한 폭보다 좁아지지 않는다 */
 }
 
+/*
+ * [한국어]
+ * level_to_offset_bits - 이 레벨의 인덱스가 주소의 몇 번째 비트부터 시작하는지
+ *
+ * @level: 페이지 테이블 레벨(1 이 가장 아래).
+ * @return: 페이지 프레임 번호에서 이 레벨의 인덱스를 뽑을 시프트 값.
+ *
+ * 레벨 1(가장 아래)은 pfn 의 하위 9비트를 그대로 쓰므로 0, 레벨 2 는 9,
+ * 레벨 3 은 18 … 이런 식이다. pfn_level_offset 이 이 값으로 시프트한다.
+ *
+ * 실행 컨텍스트: 어디서든. 순수 계산.
+ */
 static inline unsigned int level_to_offset_bits(int level)
 {
-	return (level - 1) * LEVEL_STRIDE;
+	return (level - 1) * LEVEL_STRIDE;	/* [한국어] 레벨 1 은 0, 레벨 2 는 9, 레벨 3 은 18 … */
 }
 
+/*
+ * [한국어]
+ * pfn_level_offset - 페이지 프레임 번호에서 이 레벨의 테이블 인덱스를 뽑는다
+ *
+ * @pfn: IOVA >> 12. @level: 어느 레벨의 인덱스인지.
+ * @return: 그 레벨 테이블에서의 항목 번호(0~511).
+ *
+ * 다단계 페이지 테이블 워크의 핵심 계산이다. 주소를 9비트씩 잘라 각 레벨의
+ * 인덱스로 쓰는데, 이 함수가 그 "자르기"를 한다: 해당 레벨의 시작 비트까지
+ * 시프트한 뒤 LEVEL_MASK(0x1ff)로 9비트만 남긴다.
+ *
+ * pgtable_walk() 가 레벨을 내려가며 이 함수로 각 단계의 항목을 찾는다.
+ *
+ * 실행 컨텍스트: 어디서든. 순수 계산.
+ */
 static inline int pfn_level_offset(u64 pfn, int level)
 {
-	return (pfn >> level_to_offset_bits(level)) & LEVEL_MASK;
+	return (pfn >> level_to_offset_bits(level)) & LEVEL_MASK;	/* [한국어] 해당 레벨의 자리까지 시프트한 뒤 9비트만 남긴다 — 다단계 워크의 인덱스 계산이다 */
 }
 
 
+/*
+ * [한국어]
+ * context_set_present - 컨텍스트 항목의 present 비트를 세운다(= 하드웨어에 넘긴다)
+ *
+ * @context: 이미 나머지 필드가 모두 채워진 항목.
+ * @return: 없음.
+ *
+ * 이 함수가 컨텍스트 항목의 소유권을 소프트웨어에서 하드웨어로 넘기는 지점이다.
+ * 이 비트가 서는 순간부터 유닛이 그 항목을 실제로 워크하기 시작한다.
+ *
+ * dma_wmb() 가 먼저 오는 것이 핵심이다. 컴파일러나 CPU 가 present 쓰기를
+ * 나머지 필드 쓰기보다 앞으로 옮기면, 하드웨어가 절반만 채워진 항목을 보고
+ * 엉뚱한 페이지 테이블이나 도메인 id 로 번역한다. 그 재배치를 막는 장벽이다.
+ *
+ * READ_ONCE/WRITE_ONCE 를 쓰는 이유: 컴파일러가 이 읽기·쓰기를 쪼개거나
+ * 합치지 못하게 한다. 하드웨어가 동시에 같은 항목을 읽고 있으므로 반드시
+ * 한 번의 온전한 64비트 쓰기여야 한다.
+ *
+ * 실행 컨텍스트: iommu->lock 아래.
+ */
 static inline void context_set_present(struct context_entry *context)
 {
-	u64 val;
+	u64 val;	/* [한국어] 읽어서 고칠 값 */
 
-	dma_wmb();
-	val = READ_ONCE(context->lo) | 1;
-	WRITE_ONCE(context->lo, val);
+	dma_wmb();	/* [한국어] 나머지 필드 쓰기가 present 쓰기보다 먼저 보이도록 강제한다. 순서가 뒤집히면 하드웨어가 절반만 채워진 항목을 워크한다 */
+	val = READ_ONCE(context->lo) | 1;	/* [한국어] present 비트를 더한다 */
+	WRITE_ONCE(context->lo, val);	/* [한국어] 한 번의 온전한 64비트 쓰기로 반영한다 */
 }
 
 /*
@@ -1967,60 +2115,219 @@ static inline void context_set_present(struct context_entry *context)
  * caller is responsible for fulfilling the invalidation handshake recommended
  * by the VT-d spec, Section 6.5.3.3 (Guidance to Software for Invalidations).
  */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * context_clear_present - present 비트를 지운다(= 하드웨어에서 되찾아 온다)
+ *
+ * @context: 내릴 항목.
+ * @return: 없음.
+ *
+ * set 의 반대 방향으로, 항목의 소유권을 하드웨어에서 소프트웨어로 되돌린다.
+ * 이 뒤로 그 소스 id 의 DMA 는 전부 폴트로 끝난다.
+ *
+ * 장벽의 위치가 set 과 반대인 점을 눈여겨볼 것: set 은 dma_wmb 가 앞에,
+ * clear 는 뒤에 온다. set 은 "나머지 필드가 먼저 보여야" 하고, clear 는
+ * "present 를 지운 것이 이후의 정리 작업보다 먼저 보여야" 하기 때문이다.
+ *
+ * 중요한 것은 이 함수만으로는 끝이 아니라는 점이다(위 영어 주석). 하드웨어는
+ * 이미 이 항목을 캐시하고 있을 수 있으므로, 호출자가 스펙 6.5.3.3 이 권하는
+ * 무효화 핸드셰이크(컨텍스트 캐시 → PASID 캐시 → IOTLB 순)를 수행해야
+ * 비로소 하드웨어가 이 변경을 본다.
+ *
+ * 실행 컨텍스트: iommu->lock 아래.
+ */
 static inline void context_clear_present(struct context_entry *context)
 {
-	u64 val;
+	u64 val;	/* [한국어] 읽어서 고칠 값 */
 
-	val = READ_ONCE(context->lo) & GENMASK_ULL(63, 1);
-	WRITE_ONCE(context->lo, val);
-	dma_wmb();
+	val = READ_ONCE(context->lo) & GENMASK_ULL(63, 1);	/* [한국어] 비트 0(present)만 지우고 나머지는 남긴다 */
+	WRITE_ONCE(context->lo, val);	/* [한국어] 한 번의 쓰기로 반영 */
+	dma_wmb();	/* [한국어] present 를 지운 것이 이후의 정리 작업보다 먼저 보이도록 한다. set 과 장벽의 위치가 반대인 이유다 */
 }
 
+/*
+ * [한국어]
+ * context_set_fault_enable - 이 항목에 대한 폴트 보고를 켠다
+ *
+ * @context: 대상 항목.
+ * @return: 없음.
+ *
+ * lo 의 비트 1 이 FPD(Fault Processing Disable)이며, 이름대로 1 이면 폴트를
+ * 보고하지 않는다. 이 함수는 그 비트를 0 으로 만들어 보고를 켜는 것이다 —
+ * 함수 이름과 비트의 의미가 반대라 헷갈리기 쉬운 자리다.
+ *
+ * 마스크 (((u64)-1) << 2) | 1 은 "비트 1 만 지우고 나머지는 보존"이다:
+ * 상위 비트 전부와 비트 0(present)은 남기고 비트 1 만 떨어뜨린다.
+ *
+ * 폴트 보고를 켜 두는 이유는 통과 모드에서도 마찬가지다 — 하드웨어가 다룰 수
+ * 있는 범위를 벗어난 접근은 여전히 알아야 하기 때문이다.
+ *
+ * 실행 컨텍스트: iommu->lock 아래, present 를 세우기 전에.
+ */
 static inline void context_set_fault_enable(struct context_entry *context)
 {
-	context->lo &= (((u64)-1) << 2) | 1;
+	context->lo &= (((u64)-1) << 2) | 1;	/* [한국어] 비트 1(Fault Processing Disable)만 떨어뜨려 폴트 보고를 켠다. 비트 0 과 상위 비트는 보존한다 */
 }
 
+/*
+ * [한국어]
+ * context_set_translation_type - 이 항목의 번역 방식을 정한다
+ *
+ * @context: 대상 항목. @value: CONTEXT_TT_* 중 하나.
+ * @return: 없음.
+ *
+ * lo 의 비트 2-3 이 translation type 이고, 이 두 비트가 항목의 성격을 정한다.
+ *   CONTEXT_TT_MULTI_LEVEL(0)  — 페이지 테이블을 워크한다(보통의 번역).
+ *   CONTEXT_TT_DEV_IOTLB(1)    — 워크하되 디바이스 TLB 도 함께 쓴다.
+ *   CONTEXT_TT_PASS_THROUGH(2) — 번역하지 않고 통과시킨다.
+ *
+ * 두 줄로 나뉜 이유: 먼저 마스크로 그 자리를 비우고(&=), 그 다음 새 값을
+ * 넣는다(|=). 한 번에 대입하지 않는 것은 같은 워드의 다른 필드
+ * (present, fault enable, address root)를 보존해야 하기 때문이다.
+ * 이 파일의 context_set_* 계열이 모두 같은 형태다.
+ *
+ * 실행 컨텍스트: iommu->lock 아래.
+ */
 static inline void context_set_translation_type(struct context_entry *context,
 						unsigned long value)
 {
-	context->lo &= (((u64)-1) << 4) | 3;
-	context->lo |= (value & 3) << 2;
+	context->lo &= (((u64)-1) << 4) | 3;	/* [한국어] 비트 2-3(translation type) 자리를 비운다 */
+	context->lo |= (value & 3) << 2;	/* [한국어] 거기에 새 값을 넣는다 */
 }
 
+/*
+ * [한국어]
+ * context_set_address_root - 이 항목이 가리킬 최상위 테이블의 물리 주소를 넣는다
+ *
+ * @context: 대상 항목. @value: 페이지 정렬된 물리 주소.
+ * @return: 없음.
+ *
+ * 무엇을 가리키는지는 모드에 따라 다르다. 레거시 모드에서는 페이지 테이블의
+ * 최상위를, scalable 모드에서는 PASID 디렉터리를 가리킨다 — 같은 필드가
+ * 루트 테이블 주소의 SMT 비트 하나로 다르게 해석되는 것이다.
+ * 통과 모드에서는 하드웨어가 이 필드를 아예 무시한다(ASR is ignored).
+ *
+ * VTD_PAGE_MASK 로 하위 12비트를 비운 뒤 넣으므로, 주소가 페이지 정렬되어
+ * 있지 않으면 조용히 잘린다.
+ *
+ * 실행 컨텍스트: iommu->lock 아래.
+ */
 static inline void context_set_address_root(struct context_entry *context,
 					    unsigned long value)
 {
-	context->lo &= ~VTD_PAGE_MASK;
-	context->lo |= value & VTD_PAGE_MASK;
+	context->lo &= ~VTD_PAGE_MASK;	/* [한국어] 주소 자리를 비운다 */
+	context->lo |= value & VTD_PAGE_MASK;	/* [한국어] 페이지 정렬된 주소만 넣는다. 정렬되지 않은 값은 조용히 잘린다 */
 }
 
+/*
+ * [한국어]
+ * context_set_address_width - 이 항목이 쓸 주소 폭(= 테이블 단계 수)을 넣는다
+ *
+ * @context: 대상 항목. @value: AGAW 인덱스.
+ * @return: 없음.
+ *
+ * hi 의 비트 0-2 다. 하드웨어는 이 값으로 페이지 테이블을 몇 단계 워크할지
+ * 안다 — 실제 테이블의 깊이와 어긋나면 엉뚱한 메모리를 테이블로 읽는다.
+ *
+ * |= 만 하고 마스크를 먼저 걸지 않는 이유: 이 함수는 항상 갓 비운 항목
+ * (context_clear_entry 직후)에 대해서만 불린다. 값이 남아 있는 항목에 쓰면
+ * 비트가 섞이므로, 호출 순서가 이 함수의 전제다.
+ *
+ * 통과 모드에서는 하드웨어가 지원하는 최대 AGAW(iommu->msagaw)를 넣어야
+ * 한다는 스펙 요구가 있다.
+ *
+ * 실행 컨텍스트: iommu->lock 아래.
+ */
 static inline void context_set_address_width(struct context_entry *context,
 					     unsigned long value)
 {
-	context->hi |= value & 7;
+	context->hi |= value & 7;	/* [한국어] 비트 0-2 에 AGAW 를 넣는다. 갓 비운 항목을 전제로 마스크 없이 |= 만 한다 */
 }
 
+/*
+ * [한국어]
+ * context_set_domain_id - 이 항목에 도메인 id 를 붙인다
+ *
+ * @context: 대상 항목. @value: 이 유닛에서의 도메인 id.
+ * @return: 없음.
+ *
+ * hi 의 비트 8-23 이다. 이 id 가 하드웨어 IOTLB 항목에 태그로 붙어, 도메인
+ * 단위 무효화가 어느 항목을 지울지를 정한다. 같은 id 를 쓰는 장치들의 번역은
+ * 캐시에서 공유되므로, 무효화 한 번이 그 모두에 적용된다 — cache.c 의
+ * cache tag 모델이 이 성질 위에 세워져 있다.
+ *
+ * 마스크가 (1 << 16) - 1 인 것은 필드가 16비트이기 때문이지만, 실제 상한은
+ * cap_ndoms(cap) 이며 그보다 큰 값을 넣으면 하드웨어가 무시하거나 오동작한다.
+ *
+ * 실행 컨텍스트: iommu->lock 아래.
+ */
 static inline void context_set_domain_id(struct context_entry *context,
 					 unsigned long value)
 {
-	context->hi |= (value & ((1 << 16) - 1)) << 8;
+	context->hi |= (value & ((1 << 16) - 1)) << 8;	/* [한국어] 비트 8-23 에 도메인 id 를 넣는다 */
 }
 
+/*
+ * [한국어]
+ * context_set_pasid - 이 항목에서 PASID 를 쓴다고 표시한다
+ *
+ * @context: 대상 항목.
+ * @return: 없음.
+ *
+ * lo 의 비트 3(CONTEXT_PASIDE)을 세운다. scalable 모드에서 이 비트가 켜져야
+ * 하드웨어가 address root 를 PASID 디렉터리로 해석하고, 요청에 실린 PASID 로
+ * 그 디렉터리를 색인한다.
+ *
+ * 실행 컨텍스트: iommu->lock 아래.
+ */
 static inline void context_set_pasid(struct context_entry *context)
 {
-	context->lo |= CONTEXT_PASIDE;
+	context->lo |= CONTEXT_PASIDE;	/* [한국어] PASID 사용 표시. 이 비트가 켜져야 address root 가 PASID 디렉터리로 해석된다 */
 }
 
+/*
+ * [한국어]
+ * context_domain_id - 컨텍스트 항목에 적힌 도메인 id 를 읽는다
+ *
+ * @c: 읽을 항목.
+ * @return: 그 항목의 도메인 id.
+ *
+ * context_set_domain_id 의 역방향. 주로 kdump 인계 경로에서 쓰인다 —
+ * 이전 커널의 컨텍스트 항목이 쓰던 도메인 id 를 읽어, 우리 할당기에서 그
+ * 번호를 미리 예약해 두어야 나중에 다른 도메인에 같은 번호를 주지 않는다.
+ * 진단 덤프에서도 쓴다.
+ *
+ * 실행 컨텍스트: 어디서든. 순수 계산.
+ */
 static inline int context_domain_id(struct context_entry *c)
 {
-	return((c->hi >> 8) & 0xffff);
+	return((c->hi >> 8) & 0xffff);	/* [한국어] 비트 8-23 을 도로 꺼낸다 */
 }
 
+/*
+ * [한국어]
+ * context_clear_entry - 컨텍스트 항목을 완전히 비운다
+ *
+ * @context: 비울 항목.
+ * @return: 없음.
+ *
+ * lo/hi 를 모두 0 으로 만든다. present 가 0 이 되므로 그 소스 id 의 DMA 는
+ * 전부 폴트로 끝난다.
+ *
+ * context_clear_present 와 다른 점: 저쪽은 present 만 지워 나머지 설정을
+ * 남기고(진단이나 재사용을 위해), 이쪽은 통째로 지운다. 새 항목을 세우기
+ * 직전에 불려 이전 값이 섞이지 않게 하는 것이 주 용도다 — 위의
+ * context_set_address_width 처럼 마스크 없이 |= 만 하는 함수들이 이 선행
+ * 조건에 기대고 있다.
+ *
+ * 이 함수만으로는 하드웨어에 반영되지 않는다. 캐시 무효화가 뒤따라야 한다.
+ *
+ * 실행 컨텍스트: iommu->lock 아래.
+ */
 static inline void context_clear_entry(struct context_entry *context)
 {
-	context->lo = 0;
-	context->hi = 0;
+	context->lo = 0;	/* [한국어] 하위 워드를 비운다 — present 가 0 이 되므로 이 시점부터 무효한 항목이다 */
+	context->hi = 0;	/* [한국어] 상위 워드도 비운다 */
 }
 
 #ifdef CONFIG_INTEL_IOMMU
