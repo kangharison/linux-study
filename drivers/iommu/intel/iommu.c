@@ -1189,24 +1189,40 @@ void __iommu_flush_iotlb(struct intel_iommu *iommu, u16 did, u64 addr,
 			(unsigned long long)DMA_TLB_IAIG(val));	/* [한국어] 실제 범위 */
 }
 
+/*
+ * [한국어]
+ * domain_lookup_dev_info - 이 도메인에 붙어 있는 특정 장치의 정보를 찾는다
+ *
+ * @domain: 대상 도메인
+ * @iommu:  그 장치를 맡은 유닛
+ * @bus/@devfn: 장치의 BDF
+ * @return: 장치 정보, 없으면 NULL
+ *
+ * 유닛까지 비교하는 것이 중요하다. 서로 다른 PCI 세그먼트나 서로 다른 유닛 아래에
+ * 같은 BDF 가 존재할 수 있어, 버스·함수만으로는 장치를 특정하지 못한다.
+ *
+ * 실행 컨텍스트: 부착/해제 경로. 도메인 락을 잡는다.
+ *
+ * 호출 체인: domain_context_mapping 등 → [이 함수]
+ */
 static struct device_domain_info *
 domain_lookup_dev_info(struct dmar_domain *domain,
 		       struct intel_iommu *iommu, u8 bus, u8 devfn)
 {
-	struct device_domain_info *info;
-	unsigned long flags;
+	struct device_domain_info *info;	/* [한국어] 순회 커서 */
+	unsigned long flags;	/* [한국어] 인터럽트 상태 */
 
-	spin_lock_irqsave(&domain->lock, flags);
-	list_for_each_entry(info, &domain->devices, link) {
-		if (info->iommu == iommu && info->bus == bus &&
-		    info->devfn == devfn) {
-			spin_unlock_irqrestore(&domain->lock, flags);
-			return info;
+	spin_lock_irqsave(&domain->lock, flags);	/* [한국어] 도메인의 장치 목록 보호 */
+	list_for_each_entry(info, &domain->devices, link) {	/* [한국어] 이 도메인에 붙은 장치들 */
+		if (info->iommu == iommu && info->bus == bus &&	/* [한국어] 같은 유닛의 */
+		    info->devfn == devfn) {	/* [한국어] 같은 BDF 를 찾는다. 서로 다른 유닛 아래에 같은 BDF 가 있을 수 있어 유닛까지 비교해야 한다 */
+			spin_unlock_irqrestore(&domain->lock, flags);	/* [한국어] 락 해제 */
+			return info;	/* [한국어] 찾은 장치 정보 */
 		}
 	}
-	spin_unlock_irqrestore(&domain->lock, flags);
+	spin_unlock_irqrestore(&domain->lock, flags);	/* [한국어] 순회 끝 */
 
-	return NULL;
+	return NULL;	/* [한국어] 이 도메인에 없는 장치 */
 }
 
 /*
@@ -1215,176 +1231,378 @@ domain_lookup_dev_info(struct dmar_domain *domain,
  * check because it applies only to the built-in QAT devices and it doesn't
  * grant additional privileges.
  */
-#define BUGGY_QAT_DEVID_MASK 0x4940
+#define BUGGY_QAT_DEVID_MASK 0x4940	/* [한국어] 특정 QAT 가속기의 장치 ID 대역 */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * dev_needs_extra_dtlb_flush - 이 장치가 devTLB 무효화를 한 번 더 필요로 하는가
+ *
+ * @pdev:   확인할 장치
+ * @return: 필요하면 true
+ *
+ * 특정 세대의 내장 QAT 가속기가 첫 devTLB 무효화를 놓치는 결함이 있다. ATS 를
+ * 쓰는 장치는 자기 캐시(ATC)에 번역을 들고 있으므로, 그 무효화가 유실되면
+ * 해제된 페이지에 계속 접근하게 된다 — 그래서 한 번 더 보낸다.
+ *
+ * risky_device 검사를 면제한 이유가 위 영어 주석에 있다. 내장 장치에만 적용되고
+ * 추가 권한을 주는 것이 아니므로, 외부에서 꽂은 장치가 이 ID 를 위장해도 얻는
+ * 것이 없다.
+ *
+ * 실행 컨텍스트: 프로브 경로.
+ *
+ * 호출 체인: intel_iommu_probe_device → [이 함수]
+ */
 static bool dev_needs_extra_dtlb_flush(struct pci_dev *pdev)
 {
-	if (pdev->vendor != PCI_VENDOR_ID_INTEL)
-		return false;
+	if (pdev->vendor != PCI_VENDOR_ID_INTEL)	/* [한국어] 인텔 장치가 아니면 */
+		return false;	/* [한국어] 해당 없음 */
 
-	if ((pdev->device & 0xfffc) != BUGGY_QAT_DEVID_MASK)
-		return false;
+	if ((pdev->device & 0xfffc) != BUGGY_QAT_DEVID_MASK)	/* [한국어] 0x4940~0x4943 범위가 아니면 */
+		return false;	/* [한국어] 해당 없음 */
 
-	return true;
+	return true;	/* [한국어] 이 장치는 devTLB 무효화를 한 번 더 보내야 한다. risky_device 검사를 면제한 것은 내장 장치이고 추가 권한을 주는 것이 아니기 때문이다 (위 영어 주석) */
 }
 
+/*
+ * [한국어]
+ * iommu_enable_pci_ats - 장치가 번역을 자기 캐시에 들고 있게 한다
+ *
+ * @info: 장치 정보
+ *
+ * ATS(Address Translation Services)는 장치가 IOMMU 에 한 번 물어본 번역 결과를
+ * 자기 ATC 에 보관하고 이후 그것을 재사용하게 하는 기능이다. IOMMU 왕복이
+ * 사라져 지연이 크게 줄지만, 대가로 무효화를 IOMMU 뿐 아니라 장치에도 보내야
+ * 한다 — 그 devTLB 무효화가 해제 경로의 추가 비용이다.
+ *
+ * 페이지 정렬 검사가 안전장치다. 장치의 무효화 입도가 페이지에 맞지 않으면
+ * 요청한 범위가 정확히 지워지지 않아 옛 번역이 남을 수 있다.
+ *
+ * 실행 컨텍스트: 장치 부착 경로. 프로세스 문맥.
+ *
+ * 호출 체인: intel_iommu_attach_device 계열 → [이 함수]
+ */
 static void iommu_enable_pci_ats(struct device_domain_info *info)
 {
-	struct pci_dev *pdev;
+	struct pci_dev *pdev;	/* [한국어] PCI 형으로 변환할 장치 */
 
-	if (!info->ats_supported)
-		return;
+	if (!info->ats_supported)	/* [한국어] ATS 를 지원하지 않는 장치 */
+		return;	/* [한국어] 켤 수 없다 */
 
-	pdev = to_pci_dev(info->dev);
-	if (!pci_ats_page_aligned(pdev))
-		return;
+	pdev = to_pci_dev(info->dev);	/* [한국어] PCI 장치 */
+	if (!pci_ats_page_aligned(pdev))	/* [한국어] 장치의 ATC 무효화 입도가 페이지에 맞지 않으면 */
+		return;	/* [한국어] 켜지 않는다 — 무효화가 정확히 되지 않으면 옛 번역이 남는다 */
 
-	if (!pci_enable_ats(pdev, VTD_PAGE_SHIFT))
-		info->ats_enabled = 1;
+	if (!pci_enable_ats(pdev, VTD_PAGE_SHIFT))	/* [한국어] 장치가 번역을 자기 캐시(ATC)에 들고 있게 한다. IOMMU 왕복이 사라져 지연이 크게 줄지만, 이제 무효화를 장치에도 보내야 한다 */
+		info->ats_enabled = 1;	/* [한국어] 켜졌음을 기록 — 이후 무효화 경로가 이 값을 보고 devTLB 명령을 함께 낸다 */
 }
 
+/*
+ * [한국어]
+ * iommu_disable_pci_ats - 장치의 번역 캐시를 끈다
+ *
+ * @info: 장치 정보
+ *
+ * 이 호출 이후 장치는 매 접근마다 IOMMU 에 번역을 묻는다. 느려지지만, 무효화가
+ * IOMMU 한 곳에만 도달하면 되므로 해제 경로는 단순해진다.
+ *
+ * 실행 컨텍스트: 장치 해제 경로.
+ *
+ * 호출 체인: 도메인 해제, 장치 제거 → [이 함수]
+ */
 static void iommu_disable_pci_ats(struct device_domain_info *info)
 {
-	if (!info->ats_enabled)
-		return;
+	if (!info->ats_enabled)	/* [한국어] 켜져 있지 않으면 */
+		return;	/* [한국어] 할 일 없음 */
 
-	pci_disable_ats(to_pci_dev(info->dev));
-	info->ats_enabled = 0;
+	pci_disable_ats(to_pci_dev(info->dev));	/* [한국어] 장치의 ATC 를 끈다 */
+	info->ats_enabled = 0;	/* [한국어] 기록 해제 */
 }
 
+/*
+ * [한국어]
+ * iommu_enable_pci_pri - 장치가 페이지 요청을 보낼 수 있게 한다
+ *
+ * @info: 장치 정보
+ *
+ * PRI(Page Request Interface)는 장치가 매핑되지 않은 주소에 접근했을 때 폴트로
+ * 죽는 대신 "이 페이지를 채워 달라"고 요청하게 한다. SVA 의 요구 페이징이
+ * 성립하는 하드웨어 근거이며, 그 요청이 io-pgfault.c 를 거쳐 handle_mm_fault 로
+ * 이어진다.
+ *
+ * ATS 가 먼저 켜져 있어야 하는 것은 PRI 가 그 위에 얹힌 프로토콜이기 때문이다.
+ *
+ * PASID 검사가 미묘하다. PASID 를 쓰는 구성에서 장치가 응답 메시지에 PASID 를
+ * 싣지 않으면, 커널이 그 응답을 어느 주소 공간의 것으로 되짚을 수 없다.
+ *
+ * 실행 컨텍스트: 장치 부착 경로.
+ *
+ * 호출 체인: SVA/PASID 활성화 경로 → [이 함수]
+ */
 static void iommu_enable_pci_pri(struct device_domain_info *info)
 {
-	struct pci_dev *pdev;
+	struct pci_dev *pdev;	/* [한국어] PCI 장치 */
 
-	if (!info->ats_enabled || !info->pri_supported)
-		return;
+	if (!info->ats_enabled || !info->pri_supported)	/* [한국어] PRI 는 ATS 위에 얹히는 기능이라 ATS 가 먼저 켜져 있어야 한다 */
+		return;	/* [한국어] 켤 수 없다 */
 
-	pdev = to_pci_dev(info->dev);
+	pdev = to_pci_dev(info->dev);	/* [한국어] PCI 장치 */
 	/* PASID is required in PRG Response Message. */
-	if (info->pasid_enabled && !pci_prg_resp_pasid_required(pdev))
-		return;
+	if (info->pasid_enabled && !pci_prg_resp_pasid_required(pdev))	/* [한국어] PASID 를 쓰는데 장치가 응답에 PASID 를 싣지 않는다면, 어느 주소 공간의 요청인지 되짚을 수 없다 (위 영어 주석) */
+		return;	/* [한국어] 켜지 않는다 */
 
-	if (pci_reset_pri(pdev))
-		return;
+	if (pci_reset_pri(pdev))	/* [한국어] 장치의 PRI 상태를 초기화한다 */
+		return;	/* [한국어] 실패하면 켜지 않는다 */
 
-	if (!pci_enable_pri(pdev, PRQ_DEPTH))
-		info->pri_enabled = 1;
+	if (!pci_enable_pri(pdev, PRQ_DEPTH))	/* [한국어] 페이지 요청을 보낼 수 있게 한다. 이것이 켜져야 SVA 의 요구 페이징이 성립한다 */
+		info->pri_enabled = 1;	/* [한국어] 켜졌음을 기록 */
 }
 
+/*
+ * [한국어]
+ * iommu_disable_pci_pri - 페이지 요청 기능을 끈다
+ *
+ * @info: 장치 정보
+ *
+ * 끄기 전에 폴트 큐에서 장치를 떼는 것이 순서상 중요하다. 그래야 아직 응답하지
+ * 않은 요청들에 실패 응답이 나가고, 장치가 멈춘 채로 남지 않는다.
+ *
+ * iopf_refcount 가 0 이 아닌데도 여기 왔다면 사용자가 정리하지 않은 것이지만,
+ * 그래도 큐에서 떼어 내는 편이 장치를 영영 멈춰 두는 것보다 낫다.
+ *
+ * 실행 컨텍스트: 장치 해제 경로.
+ *
+ * 호출 체인: SVA/PASID 해제 경로 → [이 함수]
+ */
 static void iommu_disable_pci_pri(struct device_domain_info *info)
 {
-	if (!info->pri_enabled)
-		return;
+	if (!info->pri_enabled)	/* [한국어] 켜져 있지 않으면 */
+		return;	/* [한국어] 할 일 없음 */
 
-	if (WARN_ON(info->iopf_refcount))
-		iopf_queue_remove_device(info->iommu->iopf_queue, info->dev);
+	if (WARN_ON(info->iopf_refcount))	/* [한국어] 아직 폴트 처리를 요구하는 사용자가 남아 있다 */
+		iopf_queue_remove_device(info->iommu->iopf_queue, info->dev);	/* [한국어] 그래도 큐에서 뗀다 — 밀린 요청에 실패 응답이 나가 장치가 멈추지 않게 */
 
-	pci_disable_pri(to_pci_dev(info->dev));
-	info->pri_enabled = 0;
+	pci_disable_pri(to_pci_dev(info->dev));	/* [한국어] PRI 를 끈다 */
+	info->pri_enabled = 0;	/* [한국어] 기록 해제 */
 }
 
+/*
+ * [한국어]
+ * intel_flush_iotlb_all - 이 도메인의 IOTLB 를 통째로 비운다 (ops 진입점)
+ *
+ * @domain: 대상 도메인
+ *
+ * dma-iommu 의 flush queue 가 쌓아 둔 해제를 한 번에 정리할 때 코어가 부른다.
+ * 이 한 번의 호출이 수천 건의 개별 무효화를 대신하며, 지연 무효화의 이득이
+ * 실현되는 지점이다.
+ *
+ * cache_tag 계층에 위임하는 이유는 도메인 하나가 여러 DMAR 유닛에 걸쳐 설치될
+ * 수 있기 때문이다. 어느 유닛에 어떤 무효화를 보내야 하는지를 그쪽이 추적한다.
+ *
+ * 실행 컨텍스트: 어디서든. 인터럽트 문맥 가능.
+ *
+ * 호출 체인: iommu.c 의 flush_iotlb_all → [이 함수] → cache_tag_flush_all
+ */
 static void intel_flush_iotlb_all(struct iommu_domain *domain)
 {
-	cache_tag_flush_all(to_dmar_domain(domain));
+	cache_tag_flush_all(to_dmar_domain(domain));	/* [한국어] 이 도메인이 걸쳐 있는 모든 유닛에 전체 무효화를 낸다. 도메인 하나가 여러 DMAR 유닛에 설치될 수 있어, 어디에 보낼지를 cache.c 의 태그 목록이 추적한다 */
 }
 
+/*
+ * [한국어]
+ * iommu_disable_protect_mem_regions - BIOS 가 설정한 하드웨어 보호 영역을 끈다
+ *
+ * @iommu: 대상 유닛
+ *
+ * VT-d 에는 페이지 테이블과 무관하게 특정 물리 범위로의 DMA 를 차단하는 별도
+ * 기능이 있고, BIOS 가 부팅 중 그것을 켜 둔다. 커널이 IOMMU 를 넘겨받아 페이지
+ * 테이블로 접근을 관리하기 시작하면 그 중복 보호가 오히려 정상 매핑을 막으므로
+ * 꺼야 한다.
+ *
+ * 실행 컨텍스트: 유닛 초기화. 레지스터 락을 잡는다.
+ *
+ * 호출 체인: init_dmars → [이 함수]
+ */
 static void iommu_disable_protect_mem_regions(struct intel_iommu *iommu)
 {
-	u32 pmen;
-	unsigned long flags;
+	u32 pmen;	/* [한국어] 보호 메모리 활성화 레지스터 */
+	unsigned long flags;	/* [한국어] 인터럽트 상태 */
 
-	if (!cap_plmr(iommu->cap) && !cap_phmr(iommu->cap))
-		return;
+	if (!cap_plmr(iommu->cap) && !cap_phmr(iommu->cap))	/* [한국어] 보호 영역 기능이 없는 하드웨어 */
+		return;	/* [한국어] 할 일 없음 */
 
-	raw_spin_lock_irqsave(&iommu->register_lock, flags);
-	pmen = readl(iommu->reg + DMAR_PMEN_REG);
-	pmen &= ~DMA_PMEN_EPM;
-	writel(pmen, iommu->reg + DMAR_PMEN_REG);
+	raw_spin_lock_irqsave(&iommu->register_lock, flags);	/* [한국어] 레지스터 접근 직렬화 */
+	pmen = readl(iommu->reg + DMAR_PMEN_REG);	/* [한국어] 현재 값 */
+	pmen &= ~DMA_PMEN_EPM;	/* [한국어] Enable Protected Memory 를 끈다. BIOS 가 설정한 하드웨어 보호 영역인데, 커널이 IOMMU 를 관리하기 시작하면 그 영역을 페이지 테이블로 다루므로 중복 보호가 오히려 방해가 된다 */
+	writel(pmen, iommu->reg + DMAR_PMEN_REG);	/* [한국어] 기록 */
 
 	/* wait for the protected region status bit to clear */
-	IOMMU_WAIT_OP(iommu, DMAR_PMEN_REG,
-		readl, !(pmen & DMA_PMEN_PRS), pmen);
+	IOMMU_WAIT_OP(iommu, DMAR_PMEN_REG,	/* [한국어] 완료 대기 */
+		readl, !(pmen & DMA_PMEN_PRS), pmen);	/* [한국어] Protected Region Status 가 내려갈 때까지 */
 
-	raw_spin_unlock_irqrestore(&iommu->register_lock, flags);
+	raw_spin_unlock_irqrestore(&iommu->register_lock, flags);	/* [한국어] 레지스터 접근 끝 */
 }
 
+/*
+ * [한국어]
+ * iommu_enable_translation - 이 유닛의 DMA 번역을 켠다
+ *
+ * @iommu: 대상 유닛
+ *
+ * 이 함수가 돌아온 순간부터 이 유닛 아래의 모든 DMA 가 페이지 테이블을 거친다.
+ * 그 전까지는 장치가 물리 주소를 그대로 쓰고 있었으므로, 켜기 전에 필요한 항등
+ * 매핑(RMRR 등)이 모두 자리 잡고 있어야 한다.
+ *
+ * gcmd 사본을 갱신하는 것이 필수다. 전역 명령 레지스터는 읽을 수 없어 소프트웨어가
+ * 현재 설정을 기억해야 하고, 다음 명령을 낼 때 그 사본을 함께 써야 이전 설정이
+ * 꺼지지 않는다.
+ *
+ * 실행 컨텍스트: 유닛 초기화, 리쥼. 레지스터 락을 잡는다.
+ *
+ * 호출 체인: init_dmars, 리쥼 경로 → [이 함수]
+ */
 static void iommu_enable_translation(struct intel_iommu *iommu)
 {
-	u32 sts;
-	unsigned long flags;
+	u32 sts;	/* [한국어] 상태 레지스터 */
+	unsigned long flags;	/* [한국어] 인터럽트 상태 */
 
-	raw_spin_lock_irqsave(&iommu->register_lock, flags);
-	iommu->gcmd |= DMA_GCMD_TE;
-	writel(iommu->gcmd, iommu->reg + DMAR_GCMD_REG);
+	raw_spin_lock_irqsave(&iommu->register_lock, flags);	/* [한국어] 레지스터 접근 직렬화 */
+	iommu->gcmd |= DMA_GCMD_TE;	/* [한국어] Translation Enable. gcmd 사본을 갱신해 두는 것이 중요하다 — 전역 명령 레지스터는 읽을 수 없어 소프트웨어가 현재 상태를 기억해야 한다 */
+	writel(iommu->gcmd, iommu->reg + DMAR_GCMD_REG);	/* [한국어] 이 순간부터 이 유닛 아래의 모든 DMA 가 번역을 거친다 */
 
 	/* Make sure hardware complete it */
-	IOMMU_WAIT_OP(iommu, DMAR_GSTS_REG,
-		      readl, (sts & DMA_GSTS_TES), sts);
+	IOMMU_WAIT_OP(iommu, DMAR_GSTS_REG,	/* [한국어] 완료 대기 */
+		      readl, (sts & DMA_GSTS_TES), sts);	/* [한국어] Translation Enable Status 가 설 때까지 */
 
-	raw_spin_unlock_irqrestore(&iommu->register_lock, flags);
+	raw_spin_unlock_irqrestore(&iommu->register_lock, flags);	/* [한국어] 레지스터 접근 끝 */
 }
 
+/*
+ * [한국어]
+ * iommu_disable_translation - 이 유닛의 번역을 끈다
+ *
+ * @iommu: 대상 유닛
+ *
+ * 끄는 순간 격리가 사라지고 모든 DMA 가 물리 주소로 통과한다. 그래서 정상 종료
+ * 경로에서는 장치가 모두 떼어진 뒤에만 부른다.
+ *
+ * 앞의 조건이 kexec 를 위한 예외다. 그래픽 전용 유닛은 디스플레이가 계속 DMA 를
+ * 내고 있어, 번역을 끄면 넘어가는 커널에서 화면이 깨진다. iommu_skip_te_disable
+ * 이 그 상황을 위해 존재한다.
+ *
+ * 실행 컨텍스트: 종료/서스펜드. 레지스터 락을 잡는다.
+ *
+ * 호출 체인: disable_dmar_iommu, 서스펜드 경로 → [이 함수]
+ */
 static void iommu_disable_translation(struct intel_iommu *iommu)
 {
-	u32 sts;
-	unsigned long flag;
+	u32 sts;	/* [한국어] 상태 레지스터 */
+	unsigned long flag;	/* [한국어] 인터럽트 상태 */
 
-	if (iommu_skip_te_disable && iommu->drhd->gfx_dedicated &&
-	    (cap_read_drain(iommu->cap) || cap_write_drain(iommu->cap)))
-		return;
+	if (iommu_skip_te_disable && iommu->drhd->gfx_dedicated &&	/* [한국어] 종료 시 번역을 끄지 않도록 요청되었고, 그래픽 전용 유닛이며 */
+	    (cap_read_drain(iommu->cap) || cap_write_drain(iommu->cap)))	/* [한국어] 배수 기능이 있다면 */
+		return;	/* [한국어] 끄지 않는다. kexec 로 넘어갈 때 디스플레이가 계속 DMA 를 내고 있어, 번역을 끄면 화면이 깨진다 */
 
-	raw_spin_lock_irqsave(&iommu->register_lock, flag);
-	iommu->gcmd &= ~DMA_GCMD_TE;
-	writel(iommu->gcmd, iommu->reg + DMAR_GCMD_REG);
+	raw_spin_lock_irqsave(&iommu->register_lock, flag);	/* [한국어] 레지스터 접근 직렬화 */
+	iommu->gcmd &= ~DMA_GCMD_TE;	/* [한국어] 번역 비트를 내린다 */
+	writel(iommu->gcmd, iommu->reg + DMAR_GCMD_REG);	/* [한국어] 이 순간부터 모든 DMA 가 물리 주소로 통과한다 — 격리가 사라진다 */
 
 	/* Make sure hardware complete it */
-	IOMMU_WAIT_OP(iommu, DMAR_GSTS_REG,
-		      readl, (!(sts & DMA_GSTS_TES)), sts);
+	IOMMU_WAIT_OP(iommu, DMAR_GSTS_REG,	/* [한국어] 완료 대기 */
+		      readl, (!(sts & DMA_GSTS_TES)), sts);	/* [한국어] 상태 비트가 내려갈 때까지 */
 
-	raw_spin_unlock_irqrestore(&iommu->register_lock, flag);
+	raw_spin_unlock_irqrestore(&iommu->register_lock, flag);	/* [한국어] 레지스터 접근 끝 */
 }
 
+/*
+ * [한국어]
+ * disable_dmar_iommu - 유닛을 정지 상태로 만든다
+ *
+ * @iommu: 대상 유닛
+ *
+ * 도메인 id 가 남아 있으면 아직 장치가 붙어 있다는 뜻이고, 그 상태에서 번역을
+ * 끄면 그 장치들이 곧바로 물리 주소로 DMA 하게 된다 (위 영어 주석). 그래서
+ * 경고만 남기고 끄지 않는다 — 격리를 잃느니 유닛을 켜 둔 채로 두는 편이 낫다.
+ *
+ * 실행 컨텍스트: 드라이버 제거, 유닛 핫플러그. 프로세스 문맥.
+ *
+ * 호출 체인: 유닛 제거 경로 → [이 함수]
+ */
 static void disable_dmar_iommu(struct intel_iommu *iommu)
 {
 	/*
 	 * All iommu domains must have been detached from the devices,
 	 * hence there should be no domain IDs in use.
 	 */
-	if (WARN_ON(!ida_is_empty(&iommu->domain_ida)))
-		return;
+	if (WARN_ON(!ida_is_empty(&iommu->domain_ida)))	/* [한국어] 아직 쓰이는 도메인 id 가 남아 있다 = 장치가 떼어지지 않았다 (위 영어 주석) */
+		return;	/* [한국어] 번역을 끄면 그 장치들이 곧바로 물리 주소로 DMA 하게 되므로 그대로 둔다 */
 
-	if (iommu->gcmd & DMA_GCMD_TE)
-		iommu_disable_translation(iommu);
+	if (iommu->gcmd & DMA_GCMD_TE)	/* [한국어] 번역이 켜져 있으면 */
+		iommu_disable_translation(iommu);	/* [한국어] 끈다 */
 }
 
+/*
+ * [한국어]
+ * free_dmar_iommu - 유닛의 자료구조를 반납한다
+ *
+ * @iommu: 사라지는 유닛
+ *
+ * copied_tables 는 kexec 로 물려받은 컨텍스트 항목을 추적하던 비트맵이다.
+ * 앞선 커널이 만든 설정을 우리 것과 구별하기 위한 것이며, 유닛이 사라지면 함께
+ * 없어진다.
+ *
+ * 실행 컨텍스트: 유닛 제거. 프로세스 문맥.
+ *
+ * 호출 체인: 유닛 제거 경로 → [이 함수]
+ */
 static void free_dmar_iommu(struct intel_iommu *iommu)
 {
-	if (iommu->copied_tables) {
-		bitmap_free(iommu->copied_tables);
-		iommu->copied_tables = NULL;
+	if (iommu->copied_tables) {	/* [한국어] kexec 로 물려받은 테이블 추적 비트맵이 있으면 */
+		bitmap_free(iommu->copied_tables);	/* [한국어] 해제 */
+		iommu->copied_tables = NULL;	/* [한국어] 두 번 해제되지 않도록 */
 	}
 
 	/* free context mapping */
-	free_context_table(iommu);
+	free_context_table(iommu);	/* [한국어] 루트·컨텍스트 테이블 반납 */
 
-	if (ecap_prs(iommu->ecap))
-		intel_iommu_finish_prq(iommu);
+	if (ecap_prs(iommu->ecap))	/* [한국어] 페이지 요청 큐를 지원하는 하드웨어면 */
+		intel_iommu_finish_prq(iommu);	/* [한국어] 그 큐도 정리한다 */
 }
 
 /*
  * Check and return whether first level is used by default for
  * DMA translation.
  */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * first_level_by_default - DMA 번역에 1단계 페이지 테이블을 기본으로 쓸 것인가
+ *
+ * @iommu:  대상 유닛
+ * @return: 1단계를 쓰면 true
+ *
+ * VT-d 는 두 종류의 페이지 테이블을 지원한다. 2단계(second-level)는 VT-d 고유
+ * 형식이고, 1단계(first-level)는 x86 CPU 의 페이지 테이블과 형식이 같다.
+ *
+ * 둘 다 가능하면 1단계를 고르는 이유가 두 가지다. CPU 와 형식이 같아 SVA 에서
+ * 프로세스의 페이지 테이블을 그대로 가리킬 수 있고, 큰 페이지 지원도 낫다.
+ * 2단계는 주로 가상화의 두 번째 번역 층으로 쓰인다.
+ *
+ * 레거시 모드에는 2단계만 있다 (위 영어 주석) — 1단계는 scalable mode 에서
+ * 도입된 것이기 때문이다.
+ *
+ * 실행 컨텍스트: 도메인 생성.
+ *
+ * 호출 체인: 도메인 할당 경로 → [이 함수]
+ */
 static bool first_level_by_default(struct intel_iommu *iommu)
 {
 	/* Only SL is available in legacy mode */
-	if (!sm_supported(iommu))
-		return false;
+	if (!sm_supported(iommu))	/* [한국어] scalable mode 가 없으면 */
+		return false;	/* [한국어] 레거시는 2단계 번역만 가능하다 (위 영어 주석) */
 
 	/* Only level (either FL or SL) is available, just use it */
-	if (ecap_flts(iommu->ecap) ^ ecap_slts(iommu->ecap))
-		return ecap_flts(iommu->ecap);
+	if (ecap_flts(iommu->ecap) ^ ecap_slts(iommu->ecap))	/* [한국어] 둘 중 하나만 지원하면 */
+		return ecap_flts(iommu->ecap);	/* [한국어] 그것을 쓴다 */
 
-	return true;
+	return true;	/* [한국어] 둘 다 가능하면 1단계를 기본으로 삼는다. 1단계는 CPU 페이지 테이블과 형식이 같아 SVA 로 확장하기 쉽고, 큰 페이지 지원도 낫다 */
 }
 
 int domain_attach_iommu(struct dmar_domain *domain, struct intel_iommu *iommu)
