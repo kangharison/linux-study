@@ -5465,78 +5465,115 @@ static void enable_iommus_ppr(void)
 		amd_iommu_enable_ppr_log(iommu);	/* [한국어] PPR 로그를 켠다 */
 }
 
+/*
+ * [한국어]
+ * enable_iommus_vapic - 게스트 vAPIC(인터럽트 직접 전달)을 켤 수 있으면 켠다
+ *
+ * 세 단계로 나뉜다.
+ *
+ * 1) 이미 돌고 있는 GA 로그를 멈춘다. 원 주석이 이유를 밝힌다 — kdump 라면
+ *    옛 커널이 켜 둔 채일 수 있고, GA 로그 레지스터는 로그가 멈춘 상태에서만
+ *    안전하게 고칠 수 있다. 그래서 GALOGRun 비트가 0 이 될 때까지 기다린다.
+ *
+ * 2) 켤 수 있는지 확인한다. 두 가지 이유로 물러날 수 있다: 하드웨어가
+ *    GAM_VAPIC 을 지원하지 않거나, SNP 환경인데 그 조합을 지원하지 않거나.
+ *    두 경우 모두 LEGACY_GA 로 내려간다 — 128비트 형식은 유지하고 게스트
+ *    전달만 포기하는 것이다.
+ *
+ * 3) 각 유닛의 GA 로그를 만들고 켠 뒤 GAM 을 활성화한다. 그리고 코어에
+ *    "포스티드 인터럽트를 쓸 수 있다"고 알린다 — KVM 이 그 능력을 보고
+ *    장치 인터럽트를 게스트에 직접 넘길지 정한다.
+ *
+ * 중간에 실패하면 그냥 돌아간다. 이미 켠 유닛이 있어도 되돌리지 않는데,
+ * capability 를 세우지 않으므로 상위 계층이 그 기능을 쓰지 않기 때문이다.
+ *
+ * 호출 체인:
+ *   amd_iommu_enable_interrupts() → [이 함수] → iommu_init_ga_log()
+ *     → iommu_ga_log_enable()
+ */
 static void enable_iommus_vapic(void)
 {
 #ifdef CONFIG_IRQ_REMAP
-	u32 status, i;
-	struct amd_iommu *iommu;
+	u32 status, i;	/* [한국어] 상태 값과 폴링 카운터 */
+	struct amd_iommu *iommu;	/* [한국어] 유닛 순회용 */
 
 	for_each_iommu(iommu) {
 		/*
 		 * Disable GALog if already running. It could have been enabled
 		 * in the previous boot before kdump.
 		 */
-		status = readl(iommu->mmio_base + MMIO_STATUS_OFFSET);
-		if (!(status & MMIO_STATUS_GALOG_RUN_MASK))
-			continue;
+		status = readl(iommu->mmio_base + MMIO_STATUS_OFFSET);	/* [한국어] (원 주석: 이미 돌고 있으면 GA 로그를 끈다. kdump 전 부팅에서 켜졌을 수 있다) */
+		if (!(status & MMIO_STATUS_GALOG_RUN_MASK))	/* [한국어] 돌고 있지 않으면 */
+			continue;	/* [한국어] 건드릴 것이 없다 */
 
-		iommu_feature_disable(iommu, CONTROL_GALOG_EN);
-		iommu_feature_disable(iommu, CONTROL_GAINT_EN);
+		iommu_feature_disable(iommu, CONTROL_GALOG_EN);	/* [한국어] 기록을 끄고 */
+		iommu_feature_disable(iommu, CONTROL_GAINT_EN);	/* [한국어] 인터럽트도 끈다 */
 
 		/*
 		 * Need to set and poll check the GALOGRun bit to zero before
 		 * we can set/ modify GA Log registers safely.
 		 */
-		for (i = 0; i < MMIO_STATUS_TIMEOUT; ++i) {
-			status = readl(iommu->mmio_base + MMIO_STATUS_OFFSET);
-			if (!(status & MMIO_STATUS_GALOG_RUN_MASK))
-				break;
-			udelay(10);
+		for (i = 0; i < MMIO_STATUS_TIMEOUT; ++i) {	/* [한국어] (원 주석: GA 로그 레지스터를 안전하게 고치려면 GALOGRun 이 0 이 될 때까지 기다려야 한다) */
+			status = readl(iommu->mmio_base + MMIO_STATUS_OFFSET);	/* [한국어] 상태를 다시 읽어 */
+			if (!(status & MMIO_STATUS_GALOG_RUN_MASK))	/* [한국어] 멈췄으면 */
+				break;	/* [한국어] 다음 유닛으로 */
+			udelay(10);	/* [한국어] 짧게 기다린다 */
 		}
 
-		if (WARN_ON(i >= MMIO_STATUS_TIMEOUT))
-			return;
+		if (WARN_ON(i >= MMIO_STATUS_TIMEOUT))	/* [한국어] 끝내 멈추지 않았다 */
+			return;	/* [한국어] 레지스터를 고치면 안 되므로 vAPIC 을 포기한다 */
 	}
 
-	if (AMD_IOMMU_GUEST_IR_VAPIC(amd_iommu_guest_ir) &&
-	    !check_feature(FEATURE_GAM_VAPIC)) {
-		amd_iommu_guest_ir = AMD_IOMMU_GUEST_IR_LEGACY_GA;
-		return;
+	if (AMD_IOMMU_GUEST_IR_VAPIC(amd_iommu_guest_ir) &&	/* [한국어] vAPIC 을 쓰려는데 */
+	    !check_feature(FEATURE_GAM_VAPIC)) {	/* [한국어] 하드웨어가 게스트 APIC 모드를 지원하지 않으면 */
+		amd_iommu_guest_ir = AMD_IOMMU_GUEST_IR_LEGACY_GA;	/* [한국어] 128비트 형식은 유지하고 게스트 전달만 포기한다 */
+		return;	/* [한국어] 더 진행하지 않는다 */
 	}
 
-	if (amd_iommu_snp_en &&
-	    !FEATURE_SNPAVICSUP_GAM(amd_iommu_efr2)) {
-		pr_warn("Force to disable Virtual APIC due to SNP\n");
-		amd_iommu_guest_ir = AMD_IOMMU_GUEST_IR_LEGACY_GA;
+	if (amd_iommu_snp_en &&	/* [한국어] SNP 환경인데 */
+	    !FEATURE_SNPAVICSUP_GAM(amd_iommu_efr2)) {	/* [한국어] 그 조합에서 AVIC 을 지원하지 않으면 */
+		pr_warn("Force to disable Virtual APIC due to SNP\n");	/* [한국어] 사용자가 이유를 알 수 있게 알린다 */
+		amd_iommu_guest_ir = AMD_IOMMU_GUEST_IR_LEGACY_GA;	/* [한국어] 같은 후퇴 */
 		return;
 	}
 
 	/* Enabling GAM and SNPAVIC support */
-	for_each_iommu(iommu) {
-		if (iommu_init_ga_log(iommu) ||
-		    iommu_ga_log_enable(iommu))
-			return;
+	for_each_iommu(iommu) {	/* [한국어] (원 주석: GAM 과 SNPAVIC 지원을 켠다) */
+		if (iommu_init_ga_log(iommu) ||	/* [한국어] GA 로그 버퍼를 잡고 */
+		    iommu_ga_log_enable(iommu))	/* [한국어] 하드웨어에 걸어 동작을 확인한다 */
+			return;	/* [한국어] 실패하면 능력을 광고하지 않으므로 되돌릴 필요가 없다 */
 
-		iommu_feature_enable(iommu, CONTROL_GAM_EN);
-		if (amd_iommu_snp_en)
-			iommu_feature_enable(iommu, CONTROL_SNPAVIC_EN);
+		iommu_feature_enable(iommu, CONTROL_GAM_EN);	/* [한국어] 게스트 APIC 모드 */
+		if (amd_iommu_snp_en)	/* [한국어] SNP 환경이면 */
+			iommu_feature_enable(iommu, CONTROL_SNPAVIC_EN);	/* [한국어] 그쪽 전용 비트도 함께 */
 	}
 
-	amd_iommu_irq_ops.capability |= (1 << IRQ_POSTING_CAP);
-	pr_info("Virtual APIC enabled\n");
+	amd_iommu_irq_ops.capability |= (1 << IRQ_POSTING_CAP);	/* [한국어] KVM 이 이 능력을 보고 인터럽트를 게스트에 직접 넘길지 정한다 */
+	pr_info("Virtual APIC enabled\n");	/* [한국어] 성공을 알린다 */
 #endif
 }
 
+/*
+ * [한국어]
+ * disable_iommus - 모든 유닛을 끄고 포스티드 인터럽트 능력을 거둔다
+ *
+ * 서스펜드와 초기화 실패 정리에서 쓴다. 능력 비트를 함께 내리는 것이
+ * 중요하다 — 하드웨어가 꺼진 동안 KVM 이 게스트 직접 전달을 시도하면
+ * 없는 기능을 쓰는 셈이 된다.
+ *
+ * 호출 체인:
+ *   amd_iommu_suspend()/실패 정리 → [이 함수] → iommu_disable()
+ */
 static void disable_iommus(void)
 {
-	struct amd_iommu *iommu;
+	struct amd_iommu *iommu;	/* [한국어] 유닛 순회용 */
 
-	for_each_iommu(iommu)
-		iommu_disable(iommu);
+	for_each_iommu(iommu)	/* [한국어] 모든 유닛을 */
+		iommu_disable(iommu);	/* [한국어] 끈다 */
 
 #ifdef CONFIG_IRQ_REMAP
-	if (AMD_IOMMU_GUEST_IR_VAPIC(amd_iommu_guest_ir))
-		amd_iommu_irq_ops.capability &= ~(1 << IRQ_POSTING_CAP);
+	if (AMD_IOMMU_GUEST_IR_VAPIC(amd_iommu_guest_ir))	/* [한국어] vAPIC 을 쓰고 있었다면 */
+		amd_iommu_irq_ops.capability &= ~(1 << IRQ_POSTING_CAP);	/* [한국어] 능력도 거둔다 — 꺼진 동안 KVM 이 그 기능을 쓰면 안 된다 */
 #endif
 }
 
@@ -5545,78 +5582,164 @@ static void disable_iommus(void)
  * disable suspend until real resume implemented
  */
 
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * amd_iommu_resume - 서스펜드에서 깨어난 뒤 모든 유닛을 되살린다
+ *
+ * @data: 쓰지 않는다.
+ *
+ * 순서가 정해져 있다. 먼저 기종별 우회(RD890 의 레지스터 복원)를 적용하고,
+ * 그다음 유닛을 처음부터 다시 켠다. 반대로 하면 복원되지 않은 레지스터
+ * 위에 설정을 얹게 된다.
+ *
+ * early_enable_iommu 를 그대로 재사용하는 것이 눈에 띈다. 서스펜드 동안
+ * 하드웨어의 레지스터는 초기화되지만 자료구조는 메모리에 그대로 남아 있어,
+ * 부팅 때와 같은 절차로 다시 걸면 된다.
+ *
+ * 인터럽트는 따로 되살린다 — 인터럽트 자체는 잡혀 있고 하드웨어의 활성화
+ * 비트만 다시 세우면 되기 때문이다.
+ *
+ * 호출 체인:
+ *   syscore resume → [이 함수] → iommu_apply_resume_quirks()
+ *     → early_enable_iommu() → amd_iommu_enable_interrupts()
+ */
 static void amd_iommu_resume(void *data)
 {
-	struct amd_iommu *iommu;
+	struct amd_iommu *iommu;	/* [한국어] 유닛 순회용 */
 
-	for_each_iommu(iommu)
-		iommu_apply_resume_quirks(iommu);
+	for_each_iommu(iommu)	/* [한국어] 기종별 우회를 먼저 */
+		iommu_apply_resume_quirks(iommu);	/* [한국어] 복원되지 않은 레지스터 위에 설정을 얹지 않기 위해서다 */
 
 	/* re-load the hardware */
-	for_each_iommu(iommu)
-		early_enable_iommu(iommu);
+	for_each_iommu(iommu)	/* [한국어] (원 주석: 하드웨어를 다시 적재한다) */
+		early_enable_iommu(iommu);	/* [한국어] 자료구조는 메모리에 남아 있어 부팅 때와 같은 절차로 다시 건다 */
 
-	amd_iommu_enable_interrupts();
+	amd_iommu_enable_interrupts();	/* [한국어] 인터럽트는 잡혀 있고 활성화 비트만 다시 세우면 된다 */
 }
 
+/*
+ * [한국어]
+ * amd_iommu_suspend - 서스펜드 전에 모든 유닛을 끈다
+ *
+ * @data: 쓰지 않는다.
+ * @return: 항상 0.
+ *
+ * 원 주석이 "BIOS 가 방해받지 않도록"이라고 밝힌다. 서스펜드 경로에서
+ * 펌웨어가 DMA 를 쓸 수 있고, 그때 IOMMU 가 켜져 있으면 그 요청이 차단되어
+ * 시스템이 멈춘다.
+ *
+ * 호출 체인:
+ *   syscore suspend → [이 함수] → disable_iommus()
+ */
 static int amd_iommu_suspend(void *data)
 {
 	/* disable IOMMUs to go out of the way for BIOS */
-	disable_iommus();
+	disable_iommus();	/* [한국어] (원 주석: BIOS 가 방해받지 않도록 IOMMU 를 끈다) 서스펜드 경로의 펌웨어 DMA 가 차단되면 시스템이 멈춘다 */
 
-	return 0;
+	return 0;	/* [한국어] 실패할 일이 없다 */
 }
 
+/*
+ * [한국어] struct syscore_ops amd_iommu_syscore_ops — 서스펜드/레주메 콜백
+ *
+ * syscore 는 다른 모든 장치가 멈춘 뒤에 불리는 마지막 단계다. IOMMU 는
+ * 그 시점에 꺼져야 하는데, 더 일찍 끄면 아직 동작 중인 장치의 DMA 가
+ * 차단되기 때문이다.
+ */
 static const struct syscore_ops amd_iommu_syscore_ops = {
 	.suspend = amd_iommu_suspend,
+	/* [한국어] 서스펜드 직전에 모든 유닛을 끈다. */
 	.resume = amd_iommu_resume,
+	/* [한국어] 깨어난 뒤 기종별 우회를 적용하고 처음부터 다시 켠다. */
 };
 
+/*
+ * [한국어] syscore 에 등록할 객체
+ *
+ * 위 콜백 표를 담는 껍데기다. 등록은 초기화 마지막 단계에서 이루어진다 —
+ * 그 전에 서스펜드가 일어나면 되살릴 상태가 아직 없기 때문이다.
+ */
 static struct syscore amd_iommu_syscore = {
 	.ops = &amd_iommu_syscore_ops,
+	/* [한국어] 위에서 정의한 서스펜드/레주메 콜백. */
 };
 
+/*
+ * [한국어]
+ * free_iommu_resources - 유닛과 세그먼트의 모든 자원을 놓는다
+ *
+ * 순서가 중요하다. 유닛을 먼저 놓아야 하는데, 유닛이 세그먼트의 표를
+ * 참조하고 있기 때문이다.
+ *
+ * 호출 체인:
+ *   early_amd_iommu_init() 실패 경로 → [이 함수]
+ */
 static void __init free_iommu_resources(void)
 {
-	free_iommu_all();
-	free_pci_segments();
+	free_iommu_all();	/* [한국어] 유닛을 먼저 — 세그먼트의 표를 참조하고 있다 */
+	free_pci_segments();	/* [한국어] 그다음 세그먼트 */
 }
 
 /* SB IOAPIC is always on this device in AMD systems */
+/* [한국어] (위 영어 주석에 이어) AMD 시스템에서 사우스브리지 IOAPIC 의
+ * 요청자 id 는 항상 버스 0, 장치 0x14, 기능 0 이다.
+ * 시스템 타이머가 이 IOAPIC 에 붙어 있어, 이것을 재매핑하지 못하면
+ * 부팅 자체가 실패한다 — 그래서 이 하나만 상수로 못박아 둔다. */
 #define IOAPIC_SB_DEVID		((0x00 << 8) | PCI_DEVFN(0x14, 0))
 
+/*
+ * [한국어]
+ * check_ioapic_information - 모든 IOAPIC 이 IVRS 표에 있는지 확인한다
+ *
+ * @return: 재매핑을 켜도 되면 참.
+ *
+ * 인터럽트 재매핑을 켜기 전의 마지막 관문이다. 표에 없는 IOAPIC 이 있으면
+ * 그 인터럽트의 요청자 id 를 모르고, 그러면 재매핑 항목을 만들 수 없다.
+ *
+ * 사우스브리지 IOAPIC 이 특별히 중요한 이유를 원 주석이 밝힌다: 시스템
+ * 타이머가 거기 붙어 있어서, 그것을 재매핑하지 못한 채 켜면 부팅 중에
+ * 패닉한다. 그래서 그 하나가 목록에 있는지를 반환값의 근거로 삼는다.
+ *
+ * cmdline_maps 검사가 세심하다. 사용자가 명령줄로 대응을 지정했다면 표의
+ * 문제가 아닐 수 있으므로, 원 주석대로 FW_BUG 접두사를 떼어 잘못된 비난을
+ * 피한다.
+ *
+ * 호출 체인:
+ *   early_amd_iommu_init() → [이 함수] → get_ioapic_devid()
+ */
 static bool __init check_ioapic_information(void)
 {
-	const char *fw_bug = FW_BUG;
-	bool ret, has_sb_ioapic;
-	int idx;
+	const char *fw_bug = FW_BUG;	/* [한국어] 기본은 펌웨어 문제로 보고 */
+	bool ret, has_sb_ioapic;	/* [한국어] 반환값과 사우스브리지 IOAPIC 발견 여부 */
+	int idx;	/* [한국어] IOAPIC 순회 인덱스 */
 
-	has_sb_ioapic = false;
-	ret           = false;
+	has_sb_ioapic = false;	/* [한국어] 아직 못 찾았다 */
+	ret           = false;	/* [한국어] 기본은 거절 */
 
 	/*
 	 * If we have map overrides on the kernel command line the
 	 * messages in this function might not describe firmware bugs
 	 * anymore - so be careful
 	 */
-	if (cmdline_maps)
-		fw_bug = "";
+	if (cmdline_maps)	/* [한국어] (원 주석: 명령줄 지정이 있으면 이 메시지가 펌웨어 버그를 뜻하지 않을 수 있다) */
+		fw_bug = "";	/* [한국어] 접두사를 떼어 잘못된 비난을 피한다 */
 
-	for (idx = 0; idx < nr_ioapics; idx++) {
-		int devid, id = mpc_ioapic_id(idx);
+	for (idx = 0; idx < nr_ioapics; idx++) {	/* [한국어] 커널이 아는 모든 IOAPIC */
+		int devid, id = mpc_ioapic_id(idx);	/* [한국어] MADT 가 부여한 번호 */
 
-		devid = get_ioapic_devid(id);
-		if (devid < 0) {
-			pr_err("%s: IOAPIC[%d] not in IVRS table\n",
+		devid = get_ioapic_devid(id);	/* [한국어] 그 IOAPIC 의 요청자 id 를 아는가 */
+		if (devid < 0) {	/* [한국어] 표에 없다 */
+			pr_err("%s: IOAPIC[%d] not in IVRS table\n",	/* [한국어] 그 인터럽트는 재매핑할 수 없다 */
 				fw_bug, id);
-			ret = false;
-		} else if (devid == IOAPIC_SB_DEVID) {
-			has_sb_ioapic = true;
-			ret           = true;
+			ret = false;	/* [한국어] 거절 */
+		} else if (devid == IOAPIC_SB_DEVID) {	/* [한국어] 사우스브리지 IOAPIC 인가 */
+			has_sb_ioapic = true;	/* [한국어] 찾았다 */
+			ret           = true;	/* [한국어] 그것 하나가 있으면 켤 수 있다 */
 		}
 	}
 
-	if (!has_sb_ioapic) {
+	if (!has_sb_ioapic) {	/* [한국어] (원 주석: 시스템 타이머가 SB IOAPIC 에 붙어 있어, 목록에 없으면 부팅 중 패닉한다) */
 		/*
 		 * We expect the SB IOAPIC to be listed in the IVRS
 		 * table. The system timer is connected to the SB IOAPIC
@@ -5625,24 +5748,49 @@ static bool __init check_ioapic_information(void)
 		 * when the BIOS is buggy and provides us the wrong
 		 * device id for the IOAPIC in the system.
 		 */
-		pr_err("%s: No southbridge IOAPIC found\n", fw_bug);
+		pr_err("%s: No southbridge IOAPIC found\n", fw_bug);	/* [한국어] 대개 BIOS 가 잘못된 장치 id 를 준 경우다 */
 	}
 
-	if (!ret)
-		pr_err("Disabling interrupt remapping\n");
+	if (!ret)	/* [한국어] 켤 수 없다고 판단했으면 */
+		pr_err("Disabling interrupt remapping\n");	/* [한국어] 그 사실을 분명히 알린다 */
 
-	return ret;
+	return ret;	/* [한국어] 재매핑 초기화가 이 값으로 갈린다 */
 }
 
+/*
+ * [한국어]
+ * free_dma_resources - DMA 쪽 자원(도메인 id 할당기와 항등 매핑)을 놓는다
+ *
+ * 인터럽트 재매핑 쪽 자원과 나뉘어 있는 이유: DMA 변환을 포기하고도
+ * 재매핑만 켜는 경우가 있어, 그때 이쪽만 정리할 수 있어야 한다.
+ *
+ * 호출 체인:
+ *   early_amd_iommu_init() 실패 경로 → [이 함수]
+ */
 static void __init free_dma_resources(void)
 {
-	amd_iommu_pdom_id_destroy();
-	free_unity_maps();
+	amd_iommu_pdom_id_destroy();	/* [한국어] 도메인 id 할당기 */
+	free_unity_maps();	/* [한국어] 항등 매핑 목록. 재매핑 쪽 자원과 나뉘어 있어 DMA 만 포기할 수 있다 */
 }
 
+/*
+ * [한국어]
+ * ivinfo_init - IVRS 표의 IVinfo 필드를 사본으로 보관한다
+ *
+ * @ivrs: IVRS 표.
+ *
+ * 펌웨어가 알리는 전역 설정이 그 한 워드에 들어 있다 — 표의 EFR 사본이
+ * 유효한지(EFRSUP), DMA 재매핑이 부팅 전부터 켜져 있었는지(DMA_REMAP).
+ *
+ * 표는 나중에 매핑이 풀릴 수 있으므로 값을 복사해 둔다. 그 뒤의 판단들이
+ * 이 사본을 본다.
+ *
+ * 호출 체인:
+ *   early_amd_iommu_init() → [이 함수]
+ */
 static void __init ivinfo_init(void *ivrs)
 {
-	amd_iommu_ivinfo = *((u32 *)(ivrs + IOMMU_IVINFO_OFFSET));
+	amd_iommu_ivinfo = *((u32 *)(ivrs + IOMMU_IVINFO_OFFSET));	/* [한국어] 표는 나중에 매핑이 풀릴 수 있어 값을 복사해 둔다 */
 }
 
 /*
