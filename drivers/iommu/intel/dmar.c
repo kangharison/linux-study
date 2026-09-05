@@ -1910,239 +1910,358 @@ out:	/* [한국어] 모든 경로가 합류 */
 	return err;	/* [한국어] 결과 */
 }
 
+/*
+ * [한국어]
+ * alloc_iommu - DRHD 항목 하나로부터 동작 가능한 struct intel_iommu 를 만든다
+ *
+ * @drhd: 그 유닛의 DRHD 항목.
+ * @return: 0 성공, 음수면 실패(그 경우 아무것도 남지 않는다).
+ *
+ * 커널이 VT-d 하드웨어를 처음 "만지는" 지점이다. 여기서 레지스터가 매핑되고
+ * 능력이 읽히며, 그 결과가 이후 모든 판단의 근거가 된다.
+ *
+ * 순서와 각 단계의 의미:
+ *   1) 순번(seq_id) 할당 — "dmar0" 같은 이름과 도메인의 iommu_array 색인이
+ *      된다. DMAR_UNITS_SUPPORTED 가 상한이다.
+ *   2) map_iommu — 레지스터를 매핑하고 cap/ecap 을 읽는다.
+ *   3) 주소 폭 판정 — 지원하는 폭이 없으면 이 유닛으로는 DMA 번역을 할 수
+ *      없으므로 ignored 로 표시한다. 다만 인터럽트 재매핑은 여전히 쓸 수
+ *      있어서 유닛 자체는 만든다.
+ *   4) 자료구조 초기화 — 락, 트리, ida.
+ *   5) gcmd 사본 만들기 — 하드웨어가 이미 켜 둔 비트를 상태 레지스터에서
+ *      읽어 기억한다. GCMD 는 읽어도 현재 설정이 나오지 않는 write-only
+ *      성격이라, 나중에 비트 하나를 바꾸려면 나머지를 우리가 알고 있어야 한다.
+ *   6) 핫플러그라면 코어 등록까지 — 부팅 시에는 intel_iommu_init 이 나중에
+ *      한꺼번에 등록하므로 건너뛴다(코드 안 영어 주석).
+ *
+ * ignored 표시의 의미가 미묘하다. "이 유닛으로 DMA 번역을 하지 않는다"일 뿐
+ * 유닛을 버리는 것이 아니다. 인터럽트 재매핑은 계속 쓸 수 있고, PMR 을
+ * 내리는 것 같은 최소한의 조작도 필요하다.
+ *
+ * max_pasids 계산(코드 안 영어 주석): ecap 의 PSS 필드가 N 이면 하드웨어가
+ * N+1 비트의 PASID 를 지원한다. 그래서 2 << N 이 개수가 된다.
+ *
+ * 실패 경로가 네 라벨(err_sysfs → err_unmap → error_free_seq_id → error)로
+ * 정확히 역순으로 되돌린다.
+ *
+ * 실행 컨텍스트: 표 파싱(부팅) 또는 유닛 핫플러그. 프로세스 컨텍스트.
+ */
 static int alloc_iommu(struct dmar_drhd_unit *drhd)
 {
-	struct intel_iommu *iommu;
-	u32 ver, sts;
-	int agaw = -1;
-	int msagaw = -1;
-	int err;
+	struct intel_iommu *iommu;	/* [한국어] 만들 유닛 구조체 */
+	u32 ver, sts;	/* [한국어] 버전과 전역 상태 레지스터 */
+	int agaw = -1;	/* [한국어] 이 유닛이 쓸 주소 폭. -1 은 아직 정해지지 않았다는 표시 */
+	int msagaw = -1;	/* [한국어] 지원하는 최대 주소 폭 */
+	int err;	/* [한국어] 각 단계의 결과 */
 
-	if (!drhd->reg_base_addr) {
-		warn_invalid_dmar(0, "");
-		return -EINVAL;
+	if (!drhd->reg_base_addr) {	/* [한국어] 주소가 0 이면 */
+		warn_invalid_dmar(0, "");	/* [한국어] 펌웨어가 항목을 채우지 않았다 */
+		return -EINVAL;	/* [한국어] 만들 수 없다 */
 	}
 
-	iommu = kzalloc_obj(*iommu);
-	if (!iommu)
-		return -ENOMEM;
+	iommu = kzalloc_obj(*iommu);	/* [한국어] 유닛 구조체 */
+	if (!iommu)	/* [한국어] 할당 실패 */
+		return -ENOMEM;	/* [한국어] 만들 수 없다 */
 
-	iommu->seq_id = ida_alloc_range(&dmar_seq_ids, 0,
-					DMAR_UNITS_SUPPORTED - 1, GFP_KERNEL);
-	if (iommu->seq_id < 0) {
-		pr_err("Failed to allocate seq_id\n");
-		err = iommu->seq_id;
-		goto error;
+	iommu->seq_id = ida_alloc_range(&dmar_seq_ids, 0,	/* [한국어] 순번을 받는다. 이 번호가 이름과 도메인의 iommu_array 색인이 된다 */
+					DMAR_UNITS_SUPPORTED - 1, GFP_KERNEL);	/* [한국어] 지원하는 유닛 수가 상한 */
+	if (iommu->seq_id < 0) {	/* [한국어] 순번이 동났으면 */
+		pr_err("Failed to allocate seq_id\n");	/* [한국어] 더 이상 유닛을 만들 수 없다 */
+		err = iommu->seq_id;	/* [한국어] 그 오류를 */
+		goto error;	/* [한국어] 구조체만 반납하고 나간다 */
 	}
-	snprintf(iommu->name, sizeof(iommu->name), "dmar%d", iommu->seq_id);
+	snprintf(iommu->name, sizeof(iommu->name), "dmar%d", iommu->seq_id);	/* [한국어] "dmar0" 형식의 이름. sysfs 노드와 인터럽트 이름에 쓰인다 */
 
-	err = map_iommu(iommu, drhd);
-	if (err) {
-		pr_err("Failed to map %s\n", iommu->name);
-		goto error_free_seq_id;
-	}
-
-	if (!cap_sagaw(iommu->cap) &&
-	    (!ecap_smts(iommu->ecap) || ecap_slts(iommu->ecap))) {
-		pr_info("%s: No supported address widths. Not attempting DMA translation.\n",
-			iommu->name);
-		drhd->ignored = 1;
+	err = map_iommu(iommu, drhd);	/* [한국어] 레지스터를 매핑하고 능력을 읽는다 */
+	if (err) {	/* [한국어] 실패하면 */
+		pr_err("Failed to map %s\n", iommu->name);	/* [한국어] 이 유닛을 쓸 수 없다 */
+		goto error_free_seq_id;	/* [한국어] 순번을 반납한다 */
 	}
 
-	if (!drhd->ignored) {
-		agaw = iommu_calculate_agaw(iommu);
-		if (agaw < 0) {
-			pr_err("Cannot get a valid agaw for iommu (seq_id = %d)\n",
-			       iommu->seq_id);
-			drhd->ignored = 1;
+	if (!cap_sagaw(iommu->cap) &&	/* [한국어] 지원하는 2단계 주소 폭이 없고 */
+	    (!ecap_smts(iommu->ecap) || ecap_slts(iommu->ecap))) {	/* [한국어] scalable 모드가 없거나 2단계를 쓴다면 — 즉 1단계 전용 scalable 유닛이 아니라면 */
+		pr_info("%s: No supported address widths. Not attempting DMA translation.\n",	/* [한국어] 이 유닛으로는 DMA 번역을 할 수 없다 */
+			iommu->name);	/* [한국어] 어느 유닛인지 */
+		drhd->ignored = 1;	/* [한국어] 번역 대상에서 제외한다. 유닛을 버리는 것은 아니다 — 인터럽트 재매핑은 여전히 쓸 수 있다 */
+	}
+
+	if (!drhd->ignored) {	/* [한국어] 번역을 할 유닛이면 */
+		agaw = iommu_calculate_agaw(iommu);	/* [한국어] 쓸 주소 폭을 정한다 */
+		if (agaw < 0) {	/* [한국어] 정할 수 없으면 */
+			pr_err("Cannot get a valid agaw for iommu (seq_id = %d)\n",	/* [한국어] 능력 조합이 이상하다 */
+			       iommu->seq_id);	/* [한국어] 어느 유닛인지 */
+			drhd->ignored = 1;	/* [한국어] 번역 대상에서 제외 */
 		}
 	}
-	if (!drhd->ignored) {
-		msagaw = iommu_calculate_max_sagaw(iommu);
-		if (msagaw < 0) {
-			pr_err("Cannot get a valid max agaw for iommu (seq_id = %d)\n",
-			       iommu->seq_id);
-			drhd->ignored = 1;
-			agaw = -1;
+	if (!drhd->ignored) {	/* [한국어] 앞 단계에서 제외되지 않았으면 최대 폭도 확인한다 */
+		msagaw = iommu_calculate_max_sagaw(iommu);	/* [한국어] 지원하는 최대 폭도 구한다 */
+		if (msagaw < 0) {	/* [한국어] 구할 수 없으면 */
+			pr_err("Cannot get a valid max agaw for iommu (seq_id = %d)\n",	/* [한국어] 역시 능력 조합이 이상하다 */
+			       iommu->seq_id);	/* [한국어] 어느 유닛인지 */
+			drhd->ignored = 1;	/* [한국어] 제외하고 */
+			agaw = -1;	/* [한국어] 앞서 구한 값도 무효로 만든다 */
 		}
 	}
-	iommu->agaw = agaw;
-	iommu->msagaw = msagaw;
-	iommu->segment = drhd->segment;
-	iommu->device_rbtree = RB_ROOT;
-	spin_lock_init(&iommu->device_rbtree_lock);
-	mutex_init(&iommu->iopf_lock);
-	iommu->node = NUMA_NO_NODE;
-	spin_lock_init(&iommu->lock);
-	ida_init(&iommu->domain_ida);
-	mutex_init(&iommu->did_lock);
+	iommu->agaw = agaw;	/* [한국어] 쓸 주소 폭 */
+	iommu->msagaw = msagaw;	/* [한국어] 지원하는 최대 폭. 통과 모드에서 이 값을 컨텍스트 항목에 넣는다 */
+	iommu->segment = drhd->segment;	/* [한국어] PCI 세그먼트 */
+	iommu->device_rbtree = RB_ROOT;	/* [한국어] 소스 id 로 장치를 되찾는 트리 */
+	spin_lock_init(&iommu->device_rbtree_lock);	/* [한국어] 그 트리를 지키는 락(폴트 인터럽트에서도 잡힌다) */
+	mutex_init(&iommu->iopf_lock);	/* [한국어] 폴트 보고와 장치 해제 사이의 경쟁을 막는 락 */
+	iommu->node = NUMA_NO_NODE;	/* [한국어] RHSA 항목이 있으면 나중에 채워진다 */
+	spin_lock_init(&iommu->lock);	/* [한국어] 컨텍스트 테이블과 도메인 id 를 지키는 락 */
+	ida_init(&iommu->domain_ida);	/* [한국어] 도메인 id 할당기 */
+	mutex_init(&iommu->did_lock);	/* [한국어] 그 할당기를 지키는 락 */
 
-	ver = readl(iommu->reg + DMAR_VER_REG);
-	pr_info("%s: reg_base_addr %llx ver %d:%d cap %llx ecap %llx\n",
-		iommu->name,
-		(unsigned long long)drhd->reg_base_addr,
-		DMAR_VER_MAJOR(ver), DMAR_VER_MINOR(ver),
-		(unsigned long long)iommu->cap,
-		(unsigned long long)iommu->ecap);
+	ver = readl(iommu->reg + DMAR_VER_REG);	/* [한국어] 버전 레지스터 */
+	pr_info("%s: reg_base_addr %llx ver %d:%d cap %llx ecap %llx\n",	/* [한국어] 유닛의 정체와 능력을 한 줄로 남긴다. 이 로그가 나중에 하드웨어 구성을 확인할 단서가 된다 */
+		iommu->name,	/* [한국어] 이름 */
+		(unsigned long long)drhd->reg_base_addr,	/* [한국어] 레지스터 주소 */
+		DMAR_VER_MAJOR(ver), DMAR_VER_MINOR(ver),	/* [한국어] 버전 */
+		(unsigned long long)iommu->cap,	/* [한국어] 능력 레지스터 */
+		(unsigned long long)iommu->ecap);	/* [한국어] 확장 능력 */
 
 	/* Reflect status in gcmd */
-	sts = readl(iommu->reg + DMAR_GSTS_REG);
-	if (sts & DMA_GSTS_IRES)
-		iommu->gcmd |= DMA_GCMD_IRE;
-	if (sts & DMA_GSTS_TES)
-		iommu->gcmd |= DMA_GCMD_TE;
-	if (sts & DMA_GSTS_QIES)
-		iommu->gcmd |= DMA_GCMD_QIE;
+	sts = readl(iommu->reg + DMAR_GSTS_REG);	/* [한국어] 전역 상태를 읽어 (위 영어 주석) */
+	if (sts & DMA_GSTS_IRES)	/* [한국어] 인터럽트 재매핑이 켜져 있으면 */
+		iommu->gcmd |= DMA_GCMD_IRE;	/* [한국어] 사본에 기록한다 */
+	if (sts & DMA_GSTS_TES)	/* [한국어] 번역이 켜져 있으면 */
+		iommu->gcmd |= DMA_GCMD_TE;	/* [한국어] 기록 */
+	if (sts & DMA_GSTS_QIES)	/* [한국어] 무효화 큐가 켜져 있으면 */
+		iommu->gcmd |= DMA_GCMD_QIE;	/* [한국어] 기록. GCMD 는 읽어도 현재 설정이 나오지 않아, 나중에 비트 하나를 바꾸려면 나머지를 우리가 알고 있어야 한다 */
 
-	if (alloc_iommu_pmu(iommu))
-		pr_debug("Cannot alloc PMU for iommu (seq_id = %d)\n", iommu->seq_id);
+	if (alloc_iommu_pmu(iommu))	/* [한국어] 성능 카운터를 만들지 못해도 */
+		pr_debug("Cannot alloc PMU for iommu (seq_id = %d)\n", iommu->seq_id);	/* [한국어] 진단 기능일 뿐이라 계속 진행한다 */
 
-	raw_spin_lock_init(&iommu->register_lock);
+	raw_spin_lock_init(&iommu->register_lock);	/* [한국어] MMIO 접근을 직렬화하는 락. raw 인 것은 인터럽트를 끈 문맥에서도 쓰기 때문이다 */
 
 	/*
 	 * A value of N in PSS field of eCap register indicates hardware
 	 * supports PASID field of N+1 bits.
 	 */
-	if (pasid_supported(iommu))
-		iommu->iommu.max_pasids = 2UL << ecap_pss(iommu->ecap);
+	if (pasid_supported(iommu))	/* [한국어] PASID 를 지원하면 */
+		iommu->iommu.max_pasids = 2UL << ecap_pss(iommu->ecap);	/* [한국어] PSS 가 N 이면 N+1 비트를 지원한다는 뜻이라 2 << N 이 개수가 된다 (위 영어 주석) */
 
 	/*
 	 * This is only for hotplug; at boot time intel_iommu_enabled won't
 	 * be set yet. When intel_iommu_init() runs, it registers the units
 	 * present at boot time, then sets intel_iommu_enabled.
 	 */
-	if (intel_iommu_enabled && !drhd->ignored) {
-		err = iommu_device_sysfs_add(&iommu->iommu, NULL,
-					     intel_iommu_groups,
-					     "%s", iommu->name);
-		if (err)
-			goto err_unmap;
+	if (intel_iommu_enabled && !drhd->ignored) {	/* [한국어] 핫플러그로 추가된 유닛이면 (부팅 시에는 intel_iommu_init 이 나중에 한꺼번에 등록한다 — 위 영어 주석) */
+		err = iommu_device_sysfs_add(&iommu->iommu, NULL,	/* [한국어] sysfs 에 노출하고 */
+					     intel_iommu_groups,	/* [한국어] 속성 그룹과 */
+					     "%s", iommu->name);	/* [한국어] 이름을 붙인다 */
+		if (err)	/* [한국어] 실패하면 */
+			goto err_unmap;	/* [한국어] 매핑을 되돌린다 */
 
-		err = iommu_device_register(&iommu->iommu, &intel_iommu_ops, NULL);
-		if (err)
-			goto err_sysfs;
+		err = iommu_device_register(&iommu->iommu, &intel_iommu_ops, NULL);	/* [한국어] IOMMU 코어에 등록한다. 이 시점부터 코어가 장치를 이 유닛으로 프로브한다 */
+		if (err)	/* [한국어] 실패하면 */
+			goto err_sysfs;	/* [한국어] sysfs 등록을 되돌린다 */
 
-		iommu_pmu_register(iommu);
+		iommu_pmu_register(iommu);	/* [한국어] 성능 카운터를 perf 에 등록한다 */
 	}
 
-	drhd->iommu = iommu;
-	iommu->drhd = drhd;
+	drhd->iommu = iommu;	/* [한국어] DRHD 항목과 유닛이 서로를 가리키게 한다 */
+	iommu->drhd = drhd;	/* [한국어] 반대 방향 */
 
-	return 0;
+	return 0;	/* [한국어] 유닛이 준비되었다 */
 
-err_sysfs:
-	iommu_device_sysfs_remove(&iommu->iommu);
-err_unmap:
-	free_iommu_pmu(iommu);
-	unmap_iommu(iommu);
-error_free_seq_id:
-	ida_free(&dmar_seq_ids, iommu->seq_id);
-error:
-	kfree(iommu);
-	return err;
+err_sysfs:	/* [한국어] 코어 등록 실패 경로 */
+	iommu_device_sysfs_remove(&iommu->iommu);	/* [한국어] sysfs 노드를 지운다 */
+err_unmap:	/* [한국어] sysfs 등록 실패가 합류 */
+	free_iommu_pmu(iommu);	/* [한국어] 성능 카운터를 반납하고 */
+	unmap_iommu(iommu);	/* [한국어] 레지스터 매핑과 예약을 놓는다 */
+error_free_seq_id:	/* [한국어] 매핑 실패가 합류 */
+	ida_free(&dmar_seq_ids, iommu->seq_id);	/* [한국어] 순번을 반납한다 */
+error:	/* [한국어] 순번 실패가 합류 */
+	kfree(iommu);	/* [한국어] 구조체 반납 */
+	return err;	/* [한국어] 실패 이유 */
 }
 
+/*
+ * [한국어]
+ * free_iommu - 유닛과 그것이 잡은 모든 자원을 반납한다
+ *
+ * @iommu: 반납할 유닛.
+ * @return: 없음.
+ *
+ * alloc_iommu 의 역순이며, 각 자원을 확인하고 놓는다. 확인이 필요한 이유는
+ * alloc 이 중간에 실패했을 수도 있고, 유닛이 ignored 라 일부만 세워졌을
+ * 수도 있기 때문이다.
+ *
+ * 인터럽트를 놓는 순서가 중첩되어 있다: 페이지 요청 인터럽트를 먼저 놓고
+ * 그 다음 폴트 인터럽트를 놓는다. PRQ 는 폴트 인터럽트 위에 얹힌 기능이라
+ * 그 반대는 성립하지 않는다.
+ *
+ * 무효화 큐를 반납할 때 세 조각을 순서대로 놓는다: 서술자 버퍼(하드웨어가
+ * 읽던 것), 상태 배열(커널만 보던 것), 그리고 구조체. 하드웨어는 이미
+ * 멈춘 뒤라 순서 자체가 중요하지는 않지만, 잡은 역순을 지킨다.
+ *
+ * 실행 컨텍스트: 유닛 제거 또는 초기화 실패 정리. 프로세스 컨텍스트.
+ */
 static void free_iommu(struct intel_iommu *iommu)
 {
-	if (intel_iommu_enabled && !iommu->drhd->ignored) {
-		iommu_pmu_unregister(iommu);
-		iommu_device_unregister(&iommu->iommu);
-		iommu_device_sysfs_remove(&iommu->iommu);
+	if (intel_iommu_enabled && !iommu->drhd->ignored) {	/* [한국어] 코어에 등록했던 유닛이면 */
+		iommu_pmu_unregister(iommu);	/* [한국어] perf 등록을 푼다 */
+		iommu_device_unregister(&iommu->iommu);	/* [한국어] 코어 등록을 푼다 — 이 뒤로 새 장치가 이 유닛으로 프로브되지 않는다 */
+		iommu_device_sysfs_remove(&iommu->iommu);	/* [한국어] sysfs 노드를 지운다 */
 	}
 
-	free_iommu_pmu(iommu);
+	free_iommu_pmu(iommu);	/* [한국어] 성능 카운터 자료구조 반납 */
 
-	if (iommu->irq) {
-		if (iommu->pr_irq) {
-			free_irq(iommu->pr_irq, iommu);
-			dmar_free_hwirq(iommu->pr_irq);
-			iommu->pr_irq = 0;
+	if (iommu->irq) {	/* [한국어] 인터럽트를 걸었으면 */
+		if (iommu->pr_irq) {	/* [한국어] 페이지 요청 인터럽트를 먼저 놓는다 — PRQ 는 폴트 인터럽트 위에 얹힌 기능이라 그 반대는 성립하지 않는다 */
+			free_irq(iommu->pr_irq, iommu);	/* [한국어] 핸들러를 떼고 */
+			dmar_free_hwirq(iommu->pr_irq);	/* [한국어] 벡터를 반납 */
+			iommu->pr_irq = 0;	/* [한국어] 기록도 지운다 */
 		}
-		free_irq(iommu->irq, iommu);
-		dmar_free_hwirq(iommu->irq);
-		iommu->irq = 0;
+		free_irq(iommu->irq, iommu);	/* [한국어] 폴트 인터럽트의 핸들러를 떼고 */
+		dmar_free_hwirq(iommu->irq);	/* [한국어] 벡터를 반납 */
+		iommu->irq = 0;	/* [한국어] 기록도 지운다 */
 	}
 
-	if (iommu->qi) {
-		iommu_free_pages(iommu->qi->desc);
-		kfree(iommu->qi->desc_status);
-		kfree(iommu->qi);
+	if (iommu->qi) {	/* [한국어] 무효화 큐를 세웠으면 */
+		iommu_free_pages(iommu->qi->desc);	/* [한국어] 하드웨어가 읽던 서술자 버퍼 */
+		kfree(iommu->qi->desc_status);	/* [한국어] 커널만 보던 상태 배열 */
+		kfree(iommu->qi);	/* [한국어] 큐 구조체 */
 	}
 
-	if (iommu->reg)
-		unmap_iommu(iommu);
+	if (iommu->reg)	/* [한국어] 레지스터를 매핑했으면 */
+		unmap_iommu(iommu);	/* [한국어] 매핑과 예약을 놓는다 */
 
-	ida_destroy(&iommu->domain_ida);
-	ida_free(&dmar_seq_ids, iommu->seq_id);
-	kfree(iommu);
+	ida_destroy(&iommu->domain_ida);	/* [한국어] 도메인 id 할당기 해제 */
+	ida_free(&dmar_seq_ids, iommu->seq_id);	/* [한국어] 유닛 순번 반납 */
+	kfree(iommu);	/* [한국어] 구조체 자신 */
 }
 
 /*
  * Reclaim all the submitted descriptors which have completed its work.
  */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * reclaim_free_desc - 완료된 무효화 서술자 슬롯을 회수한다
+ *
+ * @qi: 대상 큐.
+ * @return: 없음.
+ *
+ * 큐는 링이고, free_tail 부터 free_head 직전까지가 "제출했지만 아직
+ * 회수하지 않은" 구간이다. 제출한 쪽이 완료를 확인하면 그 슬롯의 상태를
+ * QI_FREE 로 되돌리는데, 이 함수는 free_tail 부터 그런 슬롯이 이어지는
+ * 만큼 tail 을 밀고 free_cnt 를 늘린다.
+ *
+ * 앞에서부터만 회수하는 이유: 링이라 순서대로만 자리를 되돌릴 수 있다.
+ * 가운데 슬롯이 먼저 완료되어 QI_FREE 가 되어도, 그 앞이 아직이면 그 자리를
+ * 쓸 수 없다. 그래서 앞의 것이 완료될 때 한꺼번에 회수된다.
+ *
+ * free_tail != free_head 조건이 필요한 이유: 큐가 완전히 빈 상태에서는
+ * 모든 슬롯이 QI_FREE 이므로, 그 검사가 없으면 링을 무한히 돈다.
+ *
+ * 실행 컨텍스트: q_lock 을 쥔 채.
+ */
 static inline void reclaim_free_desc(struct q_inval *qi)
 {
-	while (qi->desc_status[qi->free_tail] == QI_FREE && qi->free_tail != qi->free_head) {
-		qi->free_tail = (qi->free_tail + 1) % QI_LENGTH;
-		qi->free_cnt++;
+	while (qi->desc_status[qi->free_tail] == QI_FREE && qi->free_tail != qi->free_head) {	/* [한국어] tail 부터 완료 표시된 슬롯이 이어지는 만큼 회수한다. 두 번째 조건이 없으면 큐가 완전히 빈 상태에서 링을 무한히 돈다 */
+		qi->free_tail = (qi->free_tail + 1) % QI_LENGTH;	/* [한국어] 한 칸 밀고 (링이라 모듈로) */
+		qi->free_cnt++;	/* [한국어] 빈 슬롯 수를 늘린다 */
 	}
 }
 
+/*
+ * [한국어]
+ * qi_type_string - 무효화 서술자 종류를 사람이 읽을 이름으로 바꾼다
+ *
+ * @type: 서술자 첫 워드의 하위 4비트.
+ * @return: 그 종류의 이름 문자열.
+ *
+ * 오류 로그 전용이다. 큐에서 문제가 생겼을 때 "어떤 명령이었는가"가
+ * 원인 추적의 출발점이 되는데, 숫자로 찍으면 사람이 스펙을 찾아봐야 한다.
+ *
+ * 모르는 값에 "UNKNOWN" 을 돌려주는 것이 중요하다 — 큐가 손상되어 엉뚱한
+ * 값이 들어 있는 경우가 바로 이 함수가 불리는 상황이기 때문이다.
+ *
+ * 실행 컨텍스트: 오류 로그. 순수 변환.
+ */
 static const char *qi_type_string(u8 type)
 {
-	switch (type) {
-	case QI_CC_TYPE:
-		return "Context-cache Invalidation";
-	case QI_IOTLB_TYPE:
-		return "IOTLB Invalidation";
-	case QI_DIOTLB_TYPE:
-		return "Device-TLB Invalidation";
-	case QI_IEC_TYPE:
-		return "Interrupt Entry Cache Invalidation";
-	case QI_IWD_TYPE:
-		return "Invalidation Wait";
-	case QI_EIOTLB_TYPE:
-		return "PASID-based IOTLB Invalidation";
-	case QI_PC_TYPE:
-		return "PASID-cache Invalidation";
-	case QI_DEIOTLB_TYPE:
-		return "PASID-based Device-TLB Invalidation";
-	case QI_PGRP_RESP_TYPE:
-		return "Page Group Response";
-	default:
-		return "UNKNOWN";
+	switch (type) {	/* [한국어] 서술자 첫 워드의 하위 4비트에 따라 */
+	case QI_CC_TYPE:	/* [한국어] 컨텍스트 캐시 */
+		return "Context-cache Invalidation";	/* [한국어] 그 이름 */
+	case QI_IOTLB_TYPE:	/* [한국어] IOTLB */
+		return "IOTLB Invalidation";	/* [한국어] 그 이름 */
+	case QI_DIOTLB_TYPE:	/* [한국어] 디바이스 TLB */
+		return "Device-TLB Invalidation";	/* [한국어] 그 이름 */
+	case QI_IEC_TYPE:	/* [한국어] 인터럽트 항목 캐시 */
+		return "Interrupt Entry Cache Invalidation";	/* [한국어] 그 이름 */
+	case QI_IWD_TYPE:	/* [한국어] 완료 대기 표식 */
+		return "Invalidation Wait";	/* [한국어] 그 이름 */
+	case QI_EIOTLB_TYPE:	/* [한국어] PASID 인식 IOTLB */
+		return "PASID-based IOTLB Invalidation";	/* [한국어] 그 이름 */
+	case QI_PC_TYPE:	/* [한국어] PASID 캐시 */
+		return "PASID-cache Invalidation";	/* [한국어] 그 이름 */
+	case QI_DEIOTLB_TYPE:	/* [한국어] PASID 인식 디바이스 TLB */
+		return "PASID-based Device-TLB Invalidation";	/* [한국어] 그 이름 */
+	case QI_PGRP_RESP_TYPE:	/* [한국어] 페이지 요청 응답 */
+		return "Page Group Response";	/* [한국어] 그 이름 */
+	default:	/* [한국어] 모르는 값이면 */
+		return "UNKNOWN";	/* [한국어] 큐가 손상되어 엉뚱한 값이 들어 있는 경우다 — 바로 이 함수가 불리는 상황이다 */
 	}
 }
 
+/*
+ * [한국어]
+ * qi_dump_fault - 무효화 큐 오류의 상세를 로그에 남긴다
+ *
+ * @iommu: 오류가 난 유닛. @fault: 폴트 상태 레지스터 값.
+ * @return: 없음.
+ *
+ * 세 종류의 큐 오류를 구분해 찍는다.
+ *   IQE — 서술자 자체가 잘못되었다. IQER 레지스터에 이유가 들어 있다.
+ *   ITE — 무효화 시간 초과. 어느 장치가 응답하지 않았는지(SID)가 나온다.
+ *         대개 그 장치를 더 이상 신뢰할 수 없다는 뜻이다.
+ *   ICE — 완료 오류. 역시 관련 장치의 SID 가 나온다.
+ *
+ * 그 다음 서술자 둘을 찍는 것이 이 함수의 요령이다. head 가 가리키는
+ * 현재 서술자와, 그 앞의 서술자다. 왜 앞의 것도 찍는가: 무효화는 서술자
+ * 여러 개가 한 묶음으로 나가고, 오류의 원인이 앞의 서술자에 있는 경우가
+ * 많다. 예를 들어 잘못된 IOTLB 무효화 뒤에 온 Invalidation Wait 에서
+ * 오류가 드러나는 식이다.
+ *
+ * 앞 서술자를 구하는 계산이 링을 감싼다: head 를 서술자 인덱스로 바꾸고
+ * (>> qi_shift), QI_LENGTH-1 을 더해 모듈로를 취해 한 칸 뒤로 간 뒤,
+ * 다시 바이트 오프셋으로 되돌린다(<< qi_shift). 0 번에서 뒤로 가면
+ * 마지막 슬롯이 된다.
+ *
+ * 실행 컨텍스트: 오류 처리. q_lock 을 쥔 채일 수 있다.
+ */
 static void qi_dump_fault(struct intel_iommu *iommu, u32 fault)
 {
-	unsigned int head = readl(iommu->reg + DMAR_IQH_REG);
-	u64 iqe_err = readq(iommu->reg + DMAR_IQER_REG);
-	struct qi_desc *desc = iommu->qi->desc + head;
+	unsigned int head = readl(iommu->reg + DMAR_IQH_REG);	/* [한국어] 하드웨어가 처리 중인 지점 */
+	u64 iqe_err = readq(iommu->reg + DMAR_IQER_REG);	/* [한국어] 오류의 상세가 담긴 레지스터 */
+	struct qi_desc *desc = iommu->qi->desc + head;	/* [한국어] 그 자리의 서술자 */
 
-	if (fault & DMA_FSTS_IQE)
-		pr_err("VT-d detected Invalidation Queue Error: Reason %llx",
-		       DMAR_IQER_REG_IQEI(iqe_err));
-	if (fault & DMA_FSTS_ITE)
-		pr_err("VT-d detected Invalidation Time-out Error: SID %llx",
-		       DMAR_IQER_REG_ITESID(iqe_err));
-	if (fault & DMA_FSTS_ICE)
-		pr_err("VT-d detected Invalidation Completion Error: SID %llx",
-		       DMAR_IQER_REG_ICESID(iqe_err));
+	if (fault & DMA_FSTS_IQE)	/* [한국어] 서술자 자체가 거부되었으면 */
+		pr_err("VT-d detected Invalidation Queue Error: Reason %llx",	/* [한국어] IQER 에 그 이유가 있다 */
+		       DMAR_IQER_REG_IQEI(iqe_err));	/* [한국어] 오류 코드 */
+	if (fault & DMA_FSTS_ITE)	/* [한국어] 무효화 시간 초과면 */
+		pr_err("VT-d detected Invalidation Time-out Error: SID %llx",	/* [한국어] 어느 장치가 응답하지 않았는지 — 대개 그 장치를 더 이상 신뢰할 수 없다 */
+		       DMAR_IQER_REG_ITESID(iqe_err));	/* [한국어] 그 소스 id */
+	if (fault & DMA_FSTS_ICE)	/* [한국어] 완료 오류면 */
+		pr_err("VT-d detected Invalidation Completion Error: SID %llx",	/* [한국어] 관련 장치를 알려 준다 */
+		       DMAR_IQER_REG_ICESID(iqe_err));	/* [한국어] 그 소스 id */
 
-	pr_err("QI HEAD: %s qw0 = 0x%llx, qw1 = 0x%llx\n",
-	       qi_type_string(desc->qw0 & 0xf),
-	       (unsigned long long)desc->qw0,
-	       (unsigned long long)desc->qw1);
+	pr_err("QI HEAD: %s qw0 = 0x%llx, qw1 = 0x%llx\n",	/* [한국어] 현재 서술자를 종류 이름과 함께 찍는다 */
+	       qi_type_string(desc->qw0 & 0xf),	/* [한국어] 종류 이름 */
+	       (unsigned long long)desc->qw0,	/* [한국어] 첫 워드 */
+	       (unsigned long long)desc->qw1);	/* [한국어] 둘째 워드 */
 
-	head = ((head >> qi_shift(iommu)) + QI_LENGTH - 1) % QI_LENGTH;
-	head <<= qi_shift(iommu);
-	desc = iommu->qi->desc + head;
+	head = ((head >> qi_shift(iommu)) + QI_LENGTH - 1) % QI_LENGTH;	/* [한국어] 앞 서술자로 한 칸 뒤로 간다. 바이트 오프셋을 인덱스로 바꾸고, +LENGTH-1 후 모듈로로 0 에서 뒤로 갈 때 마지막 슬롯이 되게 한다 */
+	head <<= qi_shift(iommu);	/* [한국어] 다시 바이트 오프셋으로 */
+	desc = iommu->qi->desc + head;	/* [한국어] 그 자리의 서술자 */
 
-	pr_err("QI PRIOR: %s qw0 = 0x%llx, qw1 = 0x%llx\n",
-	       qi_type_string(desc->qw0 & 0xf),
-	       (unsigned long long)desc->qw0,
-	       (unsigned long long)desc->qw1);
+	pr_err("QI PRIOR: %s qw0 = 0x%llx, qw1 = 0x%llx\n",	/* [한국어] 앞의 것도 찍는다 — 오류의 원인이 앞 서술자에 있는 경우가 많다. 잘못된 무효화 뒤에 온 Invalidation Wait 에서 오류가 드러나는 식이다 */
+	       qi_type_string(desc->qw0 & 0xf),	/* [한국어] 종류 이름 */
+	       (unsigned long long)desc->qw0,	/* [한국어] 첫 워드 */
+	       (unsigned long long)desc->qw1);	/* [한국어] 둘째 워드 */
 }
 
 static int qi_check_fault(struct intel_iommu *iommu, int index, int wait_index)
