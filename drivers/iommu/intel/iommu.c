@@ -7334,146 +7334,246 @@ const struct iommu_domain_ops intel_ss_paging_domain_ops = {	/* [한국어] 2단
 	.enforce_cache_coherency = intel_iommu_enforce_cache_coherency_ss,	/* [한국어] 2단계만 다르다 — PTE 의 SNP 비트를 쓴다 */
 };
 
-const struct iommu_ops intel_iommu_ops = {
-	.blocked_domain		= &blocking_domain,
-	.release_domain		= &blocking_domain,
-	.identity_domain	= &identity_domain,
-	.capable		= intel_iommu_capable,
-	.hw_info		= intel_iommu_hw_info,
-	.domain_alloc_paging_flags = intel_iommu_domain_alloc_paging_flags,
-	.domain_alloc_sva	= intel_svm_domain_alloc,
-	.domain_alloc_nested	= intel_iommu_domain_alloc_nested,
-	.probe_device		= intel_iommu_probe_device,
-	.probe_finalize		= intel_iommu_probe_finalize,
-	.release_device		= intel_iommu_release_device,
-	.get_resv_regions	= intel_iommu_get_resv_regions,
-	.device_group		= intel_iommu_device_group,
-	.is_attach_deferred	= intel_iommu_is_attach_deferred,
-	.def_domain_type	= device_def_domain_type,
-	.page_response		= intel_iommu_page_response,
+const struct iommu_ops intel_iommu_ops = {	/* [한국어] IOMMU 코어가 이 드라이버를 부르는 유일한 통로. 파일 앞쪽에서 전방 선언해 두었던 그 표다 */
+	.blocked_domain		= &blocking_domain,	/* [한국어] 모든 DMA 를 막는 도메인. 코어가 장치를 안전한 상태로 두어야 할 때 쓴다 */
+	.release_domain		= &blocking_domain,	/* [한국어] 장치가 떠날 때 남겨 둘 도메인. 차단과 같은 것을 쓴다 — 드라이버 없는 장치가 DMA 를 내지 못하게 */
+	.identity_domain	= &identity_domain,	/* [한국어] 번역 없이 통과시키는 도메인 */
+	.capable		= intel_iommu_capable,	/* [한국어] 능력 질의 */
+	.hw_info		= intel_iommu_hw_info,	/* [한국어] iommufd 에 하드웨어 정보 제공 */
+	.domain_alloc_paging_flags = intel_iommu_domain_alloc_paging_flags,	/* [한국어] 페이징 도메인 생성(1단계 우선) */
+	.domain_alloc_sva	= intel_svm_domain_alloc,	/* [한국어] SVA 도메인 생성 — 프로세스의 페이지 테이블을 그대로 쓴다 */
+	.domain_alloc_nested	= intel_iommu_domain_alloc_nested,	/* [한국어] 중첩 도메인 생성 — 게스트의 1단계 테이블을 얹는다 */
+	.probe_device		= intel_iommu_probe_device,	/* [한국어] 장치 등장 */
+	.probe_finalize		= intel_iommu_probe_finalize,	/* [한국어] 기본 도메인 부착 후 마무리(PASID/ATS/PRI 켜기) */
+	.release_device		= intel_iommu_release_device,	/* [한국어] 장치 제거 */
+	.get_resv_regions	= intel_iommu_get_resv_regions,	/* [한국어] 쓰면 안 되는 주소 범위 보고 */
+	.device_group		= intel_iommu_device_group,	/* [한국어] IOMMU 그룹 결정 */
+	.is_attach_deferred	= intel_iommu_is_attach_deferred,	/* [한국어] kdump 인계 상태에서 부착을 미룰지 */
+	.def_domain_type	= device_def_domain_type,	/* [한국어] 이 장치의 기본 도메인을 번역으로 할지 항등으로 할지 (RMRR 등이 근거) */
+	.page_response		= intel_iommu_page_response,	/* [한국어] 페이지 요청에 대한 응답을 하드웨어로 보낸다 */
 };
 
+/*
+ * [한국어]
+ * quirk_iommu_igfx - 통합 그래픽을 IOMMU 대상에서 제외한다
+ *
+ * @dev: PCI fixup 이 넘겨준 장치. 아래 DECLARE_PCI_FIXUP_HEADER 목록의
+ *       디바이스 ID 와 일치하는 장치에 대해서만 불린다.
+ * @return: 없음. 전역 disable_igfx_iommu 를 세우는 것이 전부다.
+ *
+ * 왜 필요한가: G4x/GM45, QM57/QS57, Broadwell 세대의 통합 GPU 는 IOMMU 아래에서
+ * 정상 동작하지 않는다(아래 각 그룹의 영어 주석 참고). GPU 는 자체 GTT 를 통해
+ * DMA 를 내는데, 그 경로가 VT-d 번역과 맞물리는 방식이 이 세대들에서 어긋난다.
+ * 커널이 고칠 수 있는 문제가 아니라서 그냥 그 장치를 번역 대상에서 뺀다.
+ *
+ * risky_device 검사가 먼저인 이유: 이 우회는 PCI 디바이스 ID 만 보고 격리를
+ * 완화한다. ID 는 장치가 스스로 보고하는 값이라 위조할 수 있으므로, 외부
+ * 포트에 꽂힌 신뢰할 수 없는 장치에는 적용하지 않는다.
+ *
+ * 실행 컨텍스트: PCI 열거 중 헤더 fixup. VT-d 초기화보다 앞선다 — 그래서
+ * 전역 변수를 세우기만 하고, init_dmars 가 나중에 그 값을 읽는다.
+ *
+ * 호출 체인:
+ *   PCI 열거 → pci_fixup_device(header) → [quirk_iommu_igfx] → risky_device()
+ */
 static void quirk_iommu_igfx(struct pci_dev *dev)
 {
-	if (risky_device(dev))
-		return;
+	if (risky_device(dev))	/* [한국어] 외부 포트의 신뢰할 수 없는 장치면 */
+		return;	/* [한국어] 우회를 적용하지 않는다 — ID 위조로 격리를 벗어나는 것을 막는다 */
 
-	pci_info(dev, "Disabling IOMMU for graphics on this chipset\n");
-	disable_igfx_iommu = 1;
+	pci_info(dev, "Disabling IOMMU for graphics on this chipset\n");	/* [한국어] 왜 그래픽만 IOMMU 밖에 두는지 로그로 남긴다 */
+	disable_igfx_iommu = 1;	/* [한국어] 통합 그래픽을 번역 대상에서 제외한다. 이 칩셋들의 GPU 는 IOMMU 아래에서 오동작한다 */
 }
 
 /* G4x/GM45 integrated gfx dmar support is totally busted. */
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x2a40, quirk_iommu_igfx);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x2e00, quirk_iommu_igfx);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x2e10, quirk_iommu_igfx);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x2e20, quirk_iommu_igfx);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x2e30, quirk_iommu_igfx);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x2e40, quirk_iommu_igfx);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x2e90, quirk_iommu_igfx);
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x2a40, quirk_iommu_igfx);	/* [한국어] G4x/GM45 통합 그래픽 — 이 세대의 DMAR 지원은 완전히 망가져 있다 (위 영어 주석) */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x2e00, quirk_iommu_igfx);	/* [한국어] 같은 계열의 다른 디바이스 ID */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x2e10, quirk_iommu_igfx);	/* [한국어] 같은 계열 */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x2e20, quirk_iommu_igfx);	/* [한국어] 같은 계열 */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x2e30, quirk_iommu_igfx);	/* [한국어] 같은 계열 */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x2e40, quirk_iommu_igfx);	/* [한국어] 같은 계열 */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x2e90, quirk_iommu_igfx);	/* [한국어] 같은 계열 */
 
 /* QM57/QS57 integrated gfx malfunctions with dmar */
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x0044, quirk_iommu_igfx);
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x0044, quirk_iommu_igfx);	/* [한국어] QM57/QS57 통합 그래픽 — dmar 아래에서 오동작한다 (위 영어 주석) */
 
 /* Broadwell igfx malfunctions with dmar */
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x1606, quirk_iommu_igfx);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x160B, quirk_iommu_igfx);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x160E, quirk_iommu_igfx);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x1602, quirk_iommu_igfx);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x160A, quirk_iommu_igfx);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x160D, quirk_iommu_igfx);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x1616, quirk_iommu_igfx);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x161B, quirk_iommu_igfx);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x161E, quirk_iommu_igfx);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x1612, quirk_iommu_igfx);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x161A, quirk_iommu_igfx);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x161D, quirk_iommu_igfx);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x1626, quirk_iommu_igfx);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x162B, quirk_iommu_igfx);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x162E, quirk_iommu_igfx);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x1622, quirk_iommu_igfx);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x162A, quirk_iommu_igfx);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x162D, quirk_iommu_igfx);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x1636, quirk_iommu_igfx);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x163B, quirk_iommu_igfx);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x163E, quirk_iommu_igfx);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x1632, quirk_iommu_igfx);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x163A, quirk_iommu_igfx);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x163D, quirk_iommu_igfx);
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x1606, quirk_iommu_igfx);	/* [한국어] Broadwell 통합 그래픽 — 역시 dmar 아래에서 오동작한다 (위 영어 주석). 아래는 그 세대의 모든 GT 변종 ID 다 */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x160B, quirk_iommu_igfx);	/* [한국어] Broadwell 계열의 또 다른 변종 */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x160E, quirk_iommu_igfx);	/* [한국어] Broadwell 계열의 또 다른 변종 */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x1602, quirk_iommu_igfx);	/* [한국어] Broadwell 계열의 또 다른 변종 */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x160A, quirk_iommu_igfx);	/* [한국어] Broadwell 계열의 또 다른 변종 */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x160D, quirk_iommu_igfx);	/* [한국어] Broadwell 계열의 또 다른 변종 */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x1616, quirk_iommu_igfx);	/* [한국어] Broadwell 계열의 또 다른 변종 */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x161B, quirk_iommu_igfx);	/* [한국어] Broadwell 계열의 또 다른 변종 */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x161E, quirk_iommu_igfx);	/* [한국어] Broadwell 계열의 또 다른 변종 */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x1612, quirk_iommu_igfx);	/* [한국어] Broadwell 계열의 또 다른 변종 */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x161A, quirk_iommu_igfx);	/* [한국어] Broadwell 계열의 또 다른 변종 */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x161D, quirk_iommu_igfx);	/* [한국어] Broadwell 계열의 또 다른 변종 */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x1626, quirk_iommu_igfx);	/* [한국어] Broadwell 계열의 또 다른 변종 */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x162B, quirk_iommu_igfx);	/* [한국어] Broadwell 계열의 또 다른 변종 */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x162E, quirk_iommu_igfx);	/* [한국어] Broadwell 계열의 또 다른 변종 */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x1622, quirk_iommu_igfx);	/* [한국어] Broadwell 계열의 또 다른 변종 */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x162A, quirk_iommu_igfx);	/* [한국어] Broadwell 계열의 또 다른 변종 */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x162D, quirk_iommu_igfx);	/* [한국어] Broadwell 계열의 또 다른 변종 */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x1636, quirk_iommu_igfx);	/* [한국어] Broadwell 계열의 또 다른 변종 */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x163B, quirk_iommu_igfx);	/* [한국어] Broadwell 계열의 또 다른 변종 */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x163E, quirk_iommu_igfx);	/* [한국어] Broadwell 계열의 또 다른 변종 */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x1632, quirk_iommu_igfx);	/* [한국어] Broadwell 계열의 또 다른 변종 */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x163A, quirk_iommu_igfx);	/* [한국어] Broadwell 계열의 또 다른 변종 */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x163D, quirk_iommu_igfx);	/* [한국어] Broadwell 계열의 또 다른 변종 */
 
+/*
+ * [한국어]
+ * quirk_iommu_rwbf - 능력 레지스터를 무시하고 쓰기 버퍼 비우기를 강제한다
+ *
+ * @dev: 대상 칩셋의 PCI 장치.
+ * @return: 없음. 전역 rwbf_quirk 를 세운다.
+ *
+ * RWBF(Required Write-Buffer Flushing)란: 일부 옛 유닛은 우리가 메모리에 쓴
+ * 페이지 테이블/컨텍스트 항목이 하드웨어에 보이려면, 명시적으로 쓰기 버퍼를
+ * 비우라고 요구한다. 그 요구는 원래 CAP 레지스터의 RWBF 비트로 알려져야 한다.
+ *
+ * 문제는 Mobile 4 Series 칩셋(과 데스크톱 판)이 그 비트를 세우지 않으면서
+ * 실제로는 그 동작이 필요하다는 것이다(위 영어 주석). 비우지 않으면 우리가
+ * 세운 매핑이 하드웨어에 보이지 않아, 정상적으로 매핑한 주소가 폴트를 낸다.
+ * 그래서 이 칩셋들에서는 하드웨어 신고를 무시하고 강제로 켠다.
+ *
+ * rwbf_required(iommu) 가 이 전역 값과 CAP 비트를 함께 본다. 도메인 생성
+ * (iotlb_sync_map 설정)과 부착 호환성 검사가 그 결과를 쓴다.
+ *
+ * 실행 컨텍스트: PCI 헤더 fixup. VT-d 초기화 이전.
+ *
+ * 호출 체인:
+ *   PCI 열거 → pci_fixup_device(header) → [quirk_iommu_rwbf]
+ */
 static void quirk_iommu_rwbf(struct pci_dev *dev)
 {
-	if (risky_device(dev))
-		return;
+	if (risky_device(dev))	/* [한국어] 신뢰할 수 없는 장치면 */
+		return;	/* [한국어] 우회 없음 */
 
 	/*
 	 * Mobile 4 Series Chipset neglects to set RWBF capability,
 	 * but needs it. Same seems to hold for the desktop versions.
 	 */
-	pci_info(dev, "Forcing write-buffer flush capability\n");
-	rwbf_quirk = 1;
+	pci_info(dev, "Forcing write-buffer flush capability\n");	/* [한국어] 능력 레지스터를 무시하고 강제한다는 사실을 남긴다 */
+	rwbf_quirk = 1;	/* [한국어] Mobile 4 계열 칩셋은 RWBF 능력 비트를 세우지 않으면서 실제로는 그 동작이 필요하다. 비우지 않으면 우리가 쓴 페이지 테이블이 하드웨어에 보이지 않는다 (위 영어 주석) */
 }
 
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x2a40, quirk_iommu_rwbf);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x2e00, quirk_iommu_rwbf);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x2e10, quirk_iommu_rwbf);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x2e20, quirk_iommu_rwbf);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x2e30, quirk_iommu_rwbf);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x2e40, quirk_iommu_rwbf);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x2e90, quirk_iommu_rwbf);
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x2a40, quirk_iommu_rwbf);	/* [한국어] Mobile 4 Series — RWBF 능력을 신고하지 않으면서 실제로는 필요한 칩셋 (위 영어 주석) */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x2e00, quirk_iommu_rwbf);	/* [한국어] 같은 계열의 다른 디바이스 ID */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x2e10, quirk_iommu_rwbf);	/* [한국어] 같은 계열의 다른 디바이스 ID */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x2e20, quirk_iommu_rwbf);	/* [한국어] 같은 계열의 다른 디바이스 ID */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x2e30, quirk_iommu_rwbf);	/* [한국어] 같은 계열의 다른 디바이스 ID */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x2e40, quirk_iommu_rwbf);	/* [한국어] 같은 계열의 다른 디바이스 ID */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x2e90, quirk_iommu_rwbf);	/* [한국어] 같은 계열의 다른 디바이스 ID */
 
-#define GGC 0x52
-#define GGC_MEMORY_SIZE_MASK	(0xf << 8)
-#define GGC_MEMORY_SIZE_NONE	(0x0 << 8)
-#define GGC_MEMORY_SIZE_1M	(0x1 << 8)
-#define GGC_MEMORY_SIZE_2M	(0x3 << 8)
-#define GGC_MEMORY_VT_ENABLED	(0x8 << 8)
-#define GGC_MEMORY_SIZE_2M_VT	(0x9 << 8)
-#define GGC_MEMORY_SIZE_3M_VT	(0xa << 8)
-#define GGC_MEMORY_SIZE_4M_VT	(0xb << 8)
+#define GGC 0x52	/* [한국어] GMCH Graphics Control 레지스터의 PCI 설정 공간 오프셋. 통합 그래픽이 쓰는 스텔른(stolen) 메모리의 크기와 VT 지원 여부가 여기 있다 */
+#define GGC_MEMORY_SIZE_MASK	(0xf << 8)	/* [한국어] 스텔른 메모리 크기 필드를 뽑는 마스크 */
+#define GGC_MEMORY_SIZE_NONE	(0x0 << 8)	/* [한국어] 할당되지 않음 */
+#define GGC_MEMORY_SIZE_1M	(0x1 << 8)	/* [한국어] 1MB */
+#define GGC_MEMORY_SIZE_2M	(0x3 << 8)	/* [한국어] 2MB */
+#define GGC_MEMORY_VT_ENABLED	(0x8 << 8)	/* [한국어] VT 용 그림자 GTT 가 할당되었음을 뜻하는 비트. 이것이 꺼져 있으면 GPU 를 IOMMU 아래에 둘 수 없다 */
+#define GGC_MEMORY_SIZE_2M_VT	(0x9 << 8)	/* [한국어] VT 활성 + 2MB */
+#define GGC_MEMORY_SIZE_3M_VT	(0xa << 8)	/* [한국어] VT 활성 + 3MB */
+#define GGC_MEMORY_SIZE_4M_VT	(0xb << 8)	/* [한국어] VT 활성 + 4MB */
 
+/*
+ * [한국어]
+ * quirk_calpella_no_shadow_gtt - Calpella/Ironlake 의 그래픽 설정을 보고 정책을 정한다
+ *
+ * @dev: 대상 칩셋의 PCI 장치.
+ * @return: 없음. 두 전역 정책 중 하나를 바꾼다.
+ *
+ * GGC(GMCH Graphics Control) 레지스터를 읽어 두 갈래로 나뉜다.
+ *
+ *   [1] VT 용 그림자 GTT 가 할당되지 않았으면(GGC_MEMORY_VT_ENABLED 가 꺼짐):
+ *       GPU 를 IOMMU 밖에 둔다. 통합 GPU 는 자기 GTT 를 통해 DMA 를 내는데,
+ *       VT-d 아래에서 동작하려면 BIOS 가 그 GTT 를 위한 별도 메모리(그림자
+ *       GTT)를 잡아 줘야 한다. 없으면 번역할 방법이 아예 없다.
+ *
+ *   [2] GTT 는 있고 GPU 를 IOMMU 아래에 두기로 했으면: 지연 무효화(flush
+ *       queue)를 끈다. Ironlake 는 IOTLB 를 비우기 전에 GPU 가 유휴 상태여야
+ *       하는데(위 영어 주석), 지연 무효화는 언제 비울지를 커널이 통제하지
+ *       못한다. 그래서 언매핑 즉시 비우는 strict 모드로 돌린다.
+ *
+ * 다른 우회들과 달리 결과가 두 가지인 것은, 이 칩셋의 문제가 "동작하지
+ * 않는다"가 아니라 "BIOS 설정에 따라 달라진다"이기 때문이다.
+ *
+ * 실행 컨텍스트: PCI 헤더 fixup. VT-d 초기화 이전이라 전역 정책만 바꾼다.
+ *
+ * 호출 체인:
+ *   PCI 열거 → pci_fixup_device(header) → [quirk_calpella_no_shadow_gtt]
+ *     → pci_read_config_word() → iommu_set_dma_strict()
+ */
 static void quirk_calpella_no_shadow_gtt(struct pci_dev *dev)
 {
-	unsigned short ggc;
+	unsigned short ggc;	/* [한국어] 읽어 올 GGC 레지스터 값 */
 
-	if (risky_device(dev))
-		return;
+	if (risky_device(dev))	/* [한국어] 신뢰할 수 없는 장치면 */
+		return;	/* [한국어] 우회 없음 */
 
-	if (pci_read_config_word(dev, GGC, &ggc))
-		return;
+	if (pci_read_config_word(dev, GGC, &ggc))	/* [한국어] 설정 공간에서 GGC 를 읽는다 */
+		return;	/* [한국어] 읽지 못하면 판단할 근거가 없다 */
 
-	if (!(ggc & GGC_MEMORY_VT_ENABLED)) {
-		pci_info(dev, "BIOS has allocated no shadow GTT; disabling IOMMU for graphics\n");
-		disable_igfx_iommu = 1;
-	} else if (!disable_igfx_iommu) {
+	if (!(ggc & GGC_MEMORY_VT_ENABLED)) {	/* [한국어] BIOS 가 VT 용 그림자 GTT 를 할당하지 않았으면 */
+		pci_info(dev, "BIOS has allocated no shadow GTT; disabling IOMMU for graphics\n");	/* [한국어] 이유를 남기고 */
+		disable_igfx_iommu = 1;	/* [한국어] GPU 를 IOMMU 밖에 둔다. 그림자 GTT 없이는 GPU 의 DMA 를 번역할 수 없다 */
+	} else if (!disable_igfx_iommu) {	/* [한국어] GTT 는 있고 GPU 를 IOMMU 아래에 두기로 했다면 */
 		/* we have to ensure the gfx device is idle before we flush */
-		pci_info(dev, "Disabling batched IOTLB flush on Ironlake\n");
-		iommu_set_dma_strict();
+		pci_info(dev, "Disabling batched IOTLB flush on Ironlake\n");	/* [한국어] 배치 무효화를 끈다고 알린다 */
+		iommu_set_dma_strict();	/* [한국어] Ironlake 는 무효화 전에 GPU 가 유휴 상태여야 한다 (위 영어 주석). 지연 무효화는 그 시점을 통제할 수 없으므로 즉시 무효화로 돌린다 */
 	}
 }
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x0040, quirk_calpella_no_shadow_gtt);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x0062, quirk_calpella_no_shadow_gtt);
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x006a, quirk_calpella_no_shadow_gtt);
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x0040, quirk_calpella_no_shadow_gtt);	/* [한국어] Calpella/Ironlake — BIOS 가 그림자 GTT 를 할당하지 않는 경우가 있다 */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x0062, quirk_calpella_no_shadow_gtt);	/* [한국어] 같은 계열 */
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, 0x006a, quirk_calpella_no_shadow_gtt);	/* [한국어] 같은 계열 */
 
+/*
+ * [한국어]
+ * quirk_igfx_skip_te_disable - 종료/kexec 때 번역을 끄지 않도록 표시한다
+ *
+ * @dev: 검사할 장치. PCI_ANY_ID 로 등록되어 모든 장치에 불리므로, 함수 안에서
+ *       그래픽 장치인지와 세대를 직접 판별한다.
+ * @return: 없음. 전역 iommu_skip_te_disable 을 세운다.
+ *
+ * 왜 필요한가: 보통은 종료 직전에 번역을 꺼서 다음 커널/펌웨어가 깨끗한
+ * 상태를 넘겨받게 한다(intel_iommu_shutdown). 그런데 Skylake~Alder Lake 계열의
+ * 일부 통합 GPU 는 번역이 꺼지는 순간 진행 중이던 DMA 가 엉켜 시스템이 그대로
+ * 멈춘다. 그래서 그런 GPU 가 있는 시스템에서는 번역을 켠 채로 넘긴다.
+ *
+ * 판별 방식이 다른 우회들과 다르다: 대상 디바이스 ID 가 너무 많아 목록으로
+ * 나열하는 대신 PCI_ANY_ID 로 등록하고, IS_GFX_DEVICE 로 그래픽 장치를 거른
+ * 뒤 디바이스 ID 의 상위 바이트(세대 번호)를 알려진 목록과 대조한다.
+ *
+ * risky_device 검사는 세대 판별 뒤에 온다. 순서를 그렇게 둔 것은, 대상이
+ * 아닌 장치에까지 경고 로그를 남기지 않기 위해서다.
+ *
+ * 실행 컨텍스트: PCI 헤더 fixup.
+ *
+ * 호출 체인:
+ *   PCI 열거 → pci_fixup_device(header) → [quirk_igfx_skip_te_disable]
+ */
 static void quirk_igfx_skip_te_disable(struct pci_dev *dev)
 {
-	unsigned short ver;
+	unsigned short ver;	/* [한국어] 디바이스 ID 에서 뽑은 세대 번호 */
 
-	if (!IS_GFX_DEVICE(dev))
-		return;
+	if (!IS_GFX_DEVICE(dev))	/* [한국어] 그래픽 장치가 아니면 */
+		return;	/* [한국어] 대상이 아니다. 이 우회는 PCI_ANY_ID 로 등록되어 모든 장치에 불리므로 여기서 걸러야 한다 */
 
-	ver = (dev->device >> 8) & 0xff;
-	if (ver != 0x45 && ver != 0x46 && ver != 0x4c &&
-	    ver != 0x4e && ver != 0x8a && ver != 0x98 &&
-	    ver != 0x9a && ver != 0xa7 && ver != 0x7d)
-		return;
+	ver = (dev->device >> 8) & 0xff;	/* [한국어] 디바이스 ID 의 상위 바이트가 세대를 나타낸다 */
+	if (ver != 0x45 && ver != 0x46 && ver != 0x4c &&	/* [한국어] Skylake~Alder Lake 계열 중 */
+	    ver != 0x4e && ver != 0x8a && ver != 0x98 &&	/* [한국어] 이 우회가 필요한 세대들과 */
+	    ver != 0x9a && ver != 0xa7 && ver != 0x7d)	/* [한국어] 비교한다 */
+		return;	/* [한국어] 해당하지 않으면 그냥 돌아간다 */
 
-	if (risky_device(dev))
-		return;
+	if (risky_device(dev))	/* [한국어] 신뢰할 수 없는 장치면 */
+		return;	/* [한국어] 우회 없음 */
 
-	pci_info(dev, "Skip IOMMU disabling for graphics\n");
-	iommu_skip_te_disable = 1;
+	pci_info(dev, "Skip IOMMU disabling for graphics\n");	/* [한국어] 이유를 남긴다 */
+	iommu_skip_te_disable = 1;	/* [한국어] 종료/kexec 때 번역을 끄지 않는다. 이 세대의 GPU 는 번역이 꺼지는 순간 진행 중이던 DMA 가 엉켜 시스템이 멈춘다 */
 }
-DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, PCI_ANY_ID, quirk_igfx_skip_te_disable);
+DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, PCI_ANY_ID, quirk_igfx_skip_te_disable);	/* [한국어] PCI_ANY_ID — 이 우회는 디바이스 ID 가 아니라 함수 안에서 세대를 판별한다 */
 
 /* On Tylersburg chipsets, some BIOSes have been known to enable the
    ISOCH DMAR unit for the Azalia sound device, but not give it any
@@ -7482,66 +7582,96 @@ DECLARE_PCI_FIXUP_HEADER(PCI_VENDOR_ID_INTEL, PCI_ANY_ID, quirk_igfx_skip_te_dis
    quirk, because we don't want to print the obnoxious "BIOS broken"
    message if VT-d is actually disabled.
 */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * check_tylersburg_isoch - Tylersburg 칩셋의 ISOCH DMAR 유닛 설정이 온전한지 확인한다
+ *
+ * @return: 없음. 문제가 있으면 경고를 남기고 필요하면 항등 매핑을 강제한다.
+ *
+ * 어떤 결함인가: Tylersburg 칩셋의 일부 BIOS 는 Azalia(HD 오디오) 컨트롤러의
+ * DMA 를 ISOCH(등시성) 전용 DMAR 유닛으로 보내면서, 그 유닛에 TLB 항목을 하나도
+ * 주지 않는다. 번역할 자리가 없는 유닛으로 DMA 가 몰리면 그 유닛이 데드락에
+ * 빠지고, 오디오는 물론 그 유닛을 쓰는 모든 것이 멈춘다.
+ *
+ * 왜 PCI quirk 가 아니라 init_dmars 에서 부르는 함수인가(위 영어 주석):
+ * PCI quirk 는 VT-d 를 쓰든 안 쓰든 무조건 실행된다. 그런데 VT-d 가 꺼져 있으면
+ * 이 설정은 아무 문제가 되지 않으므로, "BIOS 가 망가졌다"는 요란한 메시지를
+ * 띄울 이유가 없다. 그래서 VT-d 를 실제로 켜는 경로에서만 검사한다.
+ *
+ * 검사 순서: Azalia 가 있는지 → 시스템 관리 레지스터를 읽을 수 있는지 →
+ * ISOCH 로 라우팅되는지(비트 0) → TLB 항목 수가 몇 개인지. 항목 수가 0 이면
+ * IDENTMAP_AZALIA 를 세워 그 컨트롤러만 항등 매핑으로 돌려 데드락을 피하고,
+ * 권장값(16)이 아닌 다른 값이면 경고만 남기고 진행한다.
+ *
+ * 참조 관리: pci_get_device 는 참조를 잡아 돌려주므로, 어느 경로로 나가든
+ * pci_dev_put 으로 놓는다. 존재 확인만 하는 첫 조회도 마찬가지다.
+ *
+ * 실행 컨텍스트: init_dmars 안(__init). 부팅 중 단일 스레드.
+ *
+ * 호출 체인:
+ *   init_dmars() → [check_tylersburg_isoch] → pci_get_device()
+ *     → pci_read_config_dword()
+ */
 static void __init check_tylersburg_isoch(void)
 {
-	struct pci_dev *pdev;
-	uint32_t vtisochctrl;
+	struct pci_dev *pdev;	/* [한국어] 조회할 장치 */
+	uint32_t vtisochctrl;	/* [한국어] ISOCH 제어 레지스터 값 */
 
 	/* If there's no Azalia in the system anyway, forget it. */
-	pdev = pci_get_device(PCI_VENDOR_ID_INTEL, 0x3a3e, NULL);
-	if (!pdev)
-		return;
+	pdev = pci_get_device(PCI_VENDOR_ID_INTEL, 0x3a3e, NULL);	/* [한국어] Azalia(HD 오디오) 컨트롤러를 찾는다 (위 영어 주석) */
+	if (!pdev)	/* [한국어] 없으면 */
+		return;	/* [한국어] 이 결함과 무관한 시스템이다 */
 
-	if (risky_device(pdev)) {
-		pci_dev_put(pdev);
-		return;
+	if (risky_device(pdev)) {	/* [한국어] 신뢰할 수 없는 장치면 */
+		pci_dev_put(pdev);	/* [한국어] 참조를 놓고 */
+		return;	/* [한국어] 판단하지 않는다 */
 	}
 
-	pci_dev_put(pdev);
+	pci_dev_put(pdev);	/* [한국어] 존재 확인만 했으므로 참조를 놓는다 */
 
 	/* System Management Registers. Might be hidden, in which case
 	   we can't do the sanity check. But that's OK, because the
 	   known-broken BIOSes _don't_ actually hide it, so far. */
-	pdev = pci_get_device(PCI_VENDOR_ID_INTEL, 0x342e, NULL);
-	if (!pdev)
-		return;
+	pdev = pci_get_device(PCI_VENDOR_ID_INTEL, 0x342e, NULL);	/* [한국어] 시스템 관리 레지스터 장치를 찾는다. 숨겨져 있을 수 있지만, 알려진 결함 BIOS 들은 숨기지 않는다 (위 영어 주석) */
+	if (!pdev)	/* [한국어] 없으면 */
+		return;	/* [한국어] 검사할 수 없다 */
 
-	if (risky_device(pdev)) {
-		pci_dev_put(pdev);
-		return;
+	if (risky_device(pdev)) {	/* [한국어] 신뢰할 수 없으면 */
+		pci_dev_put(pdev);	/* [한국어] 참조를 놓고 */
+		return;	/* [한국어] 판단하지 않는다 */
 	}
 
-	if (pci_read_config_dword(pdev, 0x188, &vtisochctrl)) {
-		pci_dev_put(pdev);
-		return;
+	if (pci_read_config_dword(pdev, 0x188, &vtisochctrl)) {	/* [한국어] ISOCH 제어 레지스터를 읽는다 */
+		pci_dev_put(pdev);	/* [한국어] 실패하면 참조를 놓고 */
+		return;	/* [한국어] 포기 */
 	}
 
-	pci_dev_put(pdev);
+	pci_dev_put(pdev);	/* [한국어] 값을 읽었으므로 참조를 놓는다 */
 
 	/* If Azalia DMA is routed to the non-isoch DMAR unit, fine. */
-	if (vtisochctrl & 1)
-		return;
+	if (vtisochctrl & 1)	/* [한국어] Azalia DMA 가 ISOCH 가 아닌 DMAR 유닛으로 간다면 (위 영어 주석) */
+		return;	/* [한국어] 문제 없다 */
 
 	/* Drop all bits other than the number of TLB entries */
-	vtisochctrl &= 0x1c;
+	vtisochctrl &= 0x1c;	/* [한국어] TLB 항목 수 필드만 남긴다 (위 영어 주석) */
 
 	/* If we have the recommended number of TLB entries (16), fine. */
-	if (vtisochctrl == 0x10)
-		return;
+	if (vtisochctrl == 0x10)	/* [한국어] 권장값인 16개면 (위 영어 주석) */
+		return;	/* [한국어] 정상이다 */
 
 	/* Zero TLB entries? You get to ride the short bus to school. */
-	if (!vtisochctrl) {
-		WARN(1, "Your BIOS is broken; DMA routed to ISOCH DMAR unit but no TLB space.\n"
-		     "BIOS vendor: %s; Ver: %s; Product Version: %s\n",
-		     dmi_get_system_info(DMI_BIOS_VENDOR),
-		     dmi_get_system_info(DMI_BIOS_VERSION),
-		     dmi_get_system_info(DMI_PRODUCT_VERSION));
-		iommu_identity_mapping |= IDENTMAP_AZALIA;
-		return;
+	if (!vtisochctrl) {	/* [한국어] 0개라면 — Azalia 의 DMA 가 ISOCH 유닛으로 가는데 TLB 자리가 전혀 없다 */
+		WARN(1, "Your BIOS is broken; DMA routed to ISOCH DMAR unit but no TLB space.\n"	/* [한국어] 이 조합은 그 유닛이 데드락에 빠진다 (파일 위 영어 주석) */
+		     "BIOS vendor: %s; Ver: %s; Product Version: %s\n",	/* [한국어] 어느 BIOS 의 문제인지 */
+		     dmi_get_system_info(DMI_BIOS_VENDOR),	/* [한국어] 벤더 */
+		     dmi_get_system_info(DMI_BIOS_VERSION),	/* [한국어] 버전 */
+		     dmi_get_system_info(DMI_PRODUCT_VERSION));	/* [한국어] 제품 버전 */
+		iommu_identity_mapping |= IDENTMAP_AZALIA;	/* [한국어] 이 오디오 컨트롤러만 항등 매핑으로 돌려 데드락을 피한다 */
+		return;	/* [한국어] 처리 완료 */
 	}
 
-	pr_warn("Recommended TLB entries for ISOCH unit is 16; your BIOS set %d\n",
-	       vtisochctrl);
+	pr_warn("Recommended TLB entries for ISOCH unit is 16; your BIOS set %d\n",	/* [한국어] 0 은 아니지만 권장값도 아닌 경우 — 경고만 남기고 그대로 진행한다 */
+	       vtisochctrl);	/* [한국어] 실제 값 */
 }
 
 /*
@@ -7570,26 +7700,64 @@ static void __init check_tylersburg_isoch(void)
  *
  * As a reminder, #6 will *NEED* this quirk as we enable nested translation.
  */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * quirk_extra_dev_tlb_flush - 결함 있는 장치에 디바이스 TLB 무효화를 한 번 더 보낸다
+ *
+ * @info: 대상 장치 정보. dtlb_extra_inval 이 이 우회의 대상 표시다.
+ * @address: 무효화할 주소. @mask: 그 범위 크기.
+ * @pasid: 무효화할 PASID, 또는 IOMMU_NO_PASID.
+ * @qdep: 장치의 ATS 큐 깊이.
+ * @return: 없음.
+ *
+ * 어떤 결함인가(위 영어 주석 요약): 일부 장치는 ATS 무효화 완료 응답을,
+ * 무효화 대상 범위의 번역을 이미 써서 발행한 posted write 보다 먼저 보낸다.
+ * 즉 "무효화가 끝났다"는 응답이 왔는데도 옛 번역으로 향하는 쓰기가 아직 길
+ * 위에 남아 있다. 완료 순서 보장이 깨진 것이다.
+ *
+ * 왜 위험한가: 커널은 무효화 완료를 보고 그 페이지를 해제하거나 다른 용도로
+ * 준다. 그런데 뒤늦게 도착한 쓰기가 그 페이지로 향하면 이미 남의 것이 된
+ * 메모리를 덮어쓴다. 특히 언매핑 전에 DMA 가 멈췄다고 보장할 수 없는
+ * 경우(사용자가 제어하는 SVA, PASID 해제, 프로세스 crash 후 exit_mmap 등)에
+ * 이 창이 실제로 열린다. 그래서 신뢰/특권 호스트 드라이버가 통제하지 않는
+ * 모든 dTLB 무효화는 이 우회를 써야 한다.
+ *
+ * 해법: 같은 무효화를 한 번 더 보낸다. 두 번째 무효화의 완료를 기다리는
+ * 동안 첫 번째 이후에 발행된 쓰기가 모두 도착하므로, 순서 보장이 회복된다.
+ *
+ * 위 영어 주석의 마지막 문장 — 중첩 변환을 켜면 6번 조건(게스트가 제어하는
+ * 무효화)이 반드시 이 우회를 필요로 한다.
+ *
+ * likely(!dtlb_extra_inval) 로 시작하는 이유: 대부분의 장치는 이 결함이 없어
+ * 곧바로 돌아간다. 이 함수가 무효화 경로 한가운데서 불리므로 그 분기를
+ * 컴파일러에 알려 준다.
+ *
+ * 실행 컨텍스트: 무효화 경로. 스핀락을 쥔 상태일 수 있어 잠들면 안 된다.
+ *
+ * 호출 체인:
+ *   cache_tag_flush_range()/cache_tag_flush_all() → [quirk_extra_dev_tlb_flush]
+ *     → qi_flush_dev_iotlb() / qi_flush_dev_iotlb_pasid()
+ */
 void quirk_extra_dev_tlb_flush(struct device_domain_info *info,
 			       unsigned long address, unsigned long mask,
 			       u32 pasid, u16 qdep)
 {
-	u16 sid;
+	u16 sid;	/* [한국어] 이 장치의 소스 id */
 
-	if (likely(!info->dtlb_extra_inval))
-		return;
+	if (likely(!info->dtlb_extra_inval))	/* [한국어] 이 결함이 없는 장치면 */
+		return;	/* [한국어] 추가 무효화가 필요 없다. 대부분의 장치가 여기서 돌아간다 */
 
-	sid = PCI_DEVID(info->bus, info->devfn);
-	if (pasid == IOMMU_NO_PASID) {
-		qi_flush_dev_iotlb(info->iommu, sid, info->pfsid,
-				   qdep, address, mask);
+	sid = PCI_DEVID(info->bus, info->devfn);	/* [한국어] 버스와 devfn 을 16비트 소스 id 로 */
+	if (pasid == IOMMU_NO_PASID) {	/* [한국어] PASID 를 쓰지 않는 기본 트래픽이면 */
+		qi_flush_dev_iotlb(info->iommu, sid, info->pfsid,	/* [한국어] 같은 범위에 디바이스 TLB 무효화를 한 번 더 보낸다 */
+				   qdep, address, mask);	/* [한국어] 같은 인자로 */
 	} else {
-		qi_flush_dev_iotlb_pasid(info->iommu, sid, info->pfsid,
-					 pasid, qdep, address, mask);
+		qi_flush_dev_iotlb_pasid(info->iommu, sid, info->pfsid,	/* [한국어] PASID 트래픽이면 PASID 를 지정한 무효화를 */
+					 pasid, qdep, address, mask);	/* [한국어] 역시 한 번 더 보낸다 */
 	}
 }
 
-#define ecmd_get_status_code(res)	(((res) & 0xff) >> 1)
+#define ecmd_get_status_code(res)	(((res) & 0xff) >> 1)	/* [한국어] 응답 레지스터의 하위 8비트에서 상태 코드를 뽑는다. 비트 0 은 진행 중(IP) 플래그라 한 칸 밀어낸다 */
 
 /*
  * Function to submit a command to the enhanced command interface. The
@@ -7603,21 +7771,59 @@ void quirk_extra_dev_tlb_flush(struct device_domain_info *info,
  *  - Negative: software error value;
  *  - Nonzero positive: failure status code defined in Table 48.
  */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * ecmd_submit_sync - 확장 명령(Enhanced Command)을 보내고 완료까지 기다린다
+ *
+ * @iommu: 대상 유닛.
+ * @ecmd: 보낼 명령 코드.
+ * @oa: 피연산자 A. 명령 레지스터에 명령 코드와 함께 실린다.
+ * @ob: 피연산자 B. 별도 레지스터로 보낸다.
+ * @return: 0 성공, 음수면 소프트웨어 오류(-ENODEV/-EBUSY/-ETIMEDOUT),
+ *          양수면 하드웨어가 돌려준 실패 코드(스펙 Table 48) — 위 영어 주석.
+ *
+ * 확장 명령 인터페이스란: 큐 기반 무효화(QI)와 별개로, 유닛에 직접 명령을
+ * 하나씩 보내고 응답을 기다리는 동기식 경로다. 성능 카운터 설정이나 특정
+ * 진단 동작처럼 드물게 일어나고 순서가 중요한 명령에 쓴다.
+ *
+ * 프로토콜: 응답 레지스터(ECRSP)의 IP(In Progress) 비트가 상태를 알려 준다.
+ *   1) IP 가 이미 켜져 있으면 이전 명령이 진행 중이라 -EBUSY.
+ *   2) 피연산자 B 를 쓰고, 그 다음 명령 레지스터를 쓴다. 명령 레지스터 쓰기가
+ *      실행을 시작시키므로 반드시 이 순서여야 한다.
+ *   3) IP 가 내려갈 때까지 폴링한다. 끝내 내려가지 않으면 -ETIMEDOUT.
+ *   4) 응답의 하위 비트에서 상태 코드를 뽑는다.
+ *
+ * 피연산자 B 를 무조건 쓰는 이유(위 영어 주석): 필요 없는 명령이라도 그
+ * 레지스터에 값이 들어 있는 것 자체는 부작용이 없고, 이 경로가 성능이
+ * 중요한 곳이 아니라 MMIO 쓰기 한 번을 더 하는 비용이 문제되지 않는다.
+ * 조건 분기를 없애 코드가 단순해지는 쪽을 택했다.
+ *
+ * 동기화: register_lock 을 raw 스핀락으로 인터럽트를 끈 채 잡는다. raw 인
+ * 것은 PREEMPT_RT 커널에서도 이 구간이 잠들면 안 되기 때문이다 — MMIO 로
+ * 하드웨어와 핸드셰이크하는 중에 선점되면 IP 비트를 보는 다른 CPU 와
+ * 경쟁하게 된다.
+ *
+ * 실행 컨텍스트: 성능 카운터 설정 등. 프로세스 컨텍스트이지만 락 안에서는
+ * 잠들 수 없다.
+ *
+ * 호출 체인:
+ *   iommu_pmu_*() 등 → [ecmd_submit_sync] → readq()/writeq()
+ */
 int ecmd_submit_sync(struct intel_iommu *iommu, u8 ecmd, u64 oa, u64 ob)
 {
-	unsigned long flags;
-	u64 res;
-	int ret;	/* [한국어] 결과 */
+	unsigned long flags;	/* [한국어] 인터럽트 상태 */
+	u64 res;	/* [한국어] 응답 레지스터 값 */
+	int ret;	/* [한국어] 반환할 결과 */
 
-	if (!cap_ecmds(iommu->cap))
-		return -ENODEV;
+	if (!cap_ecmds(iommu->cap))	/* [한국어] 유닛이 확장 명령 인터페이스를 지원하지 않으면 */
+		return -ENODEV;	/* [한국어] 쓸 수 없다 */
 
-	raw_spin_lock_irqsave(&iommu->register_lock, flags);
+	raw_spin_lock_irqsave(&iommu->register_lock, flags);	/* [한국어] 레지스터 접근을 직렬화한다. raw 스핀락인 것은 PREEMPT_RT 에서도 이 구간이 잠들면 안 되기 때문이다 */
 
-	res = readq(iommu->reg + DMAR_ECRSP_REG);
-	if (res & DMA_ECMD_ECRSP_IP) {
-		ret = -EBUSY;
-		goto err;
+	res = readq(iommu->reg + DMAR_ECRSP_REG);	/* [한국어] 응답 레지스터를 먼저 읽는다 */
+	if (res & DMA_ECMD_ECRSP_IP) {	/* [한국어] 이전 명령이 아직 진행 중이면 */
+		ret = -EBUSY;	/* [한국어] 새 명령을 넣을 수 없다 */
+		goto err;	/* [한국어] 락을 놓고 나간다 */
 	}
 
 	/*
@@ -7627,22 +7833,22 @@ int ecmd_submit_sync(struct intel_iommu *iommu, u8 ecmd, u64 oa, u64 ob)
 	 * - It's not invoked in any critical path. The extra MMIO
 	 *   write doesn't bring any performance concerns.
 	 */
-	writeq(ob, iommu->reg + DMAR_ECEO_REG);
-	writeq(ecmd | (oa << DMA_ECMD_OA_SHIFT), iommu->reg + DMAR_ECMD_REG);
+	writeq(ob, iommu->reg + DMAR_ECEO_REG);	/* [한국어] 피연산자 B 를 항상 쓴다. 필요 없는 명령이라도 부작용이 없고, 성능이 중요한 경로가 아니어서 조건 분기를 두지 않았다 (위 영어 주석) */
+	writeq(ecmd | (oa << DMA_ECMD_OA_SHIFT), iommu->reg + DMAR_ECMD_REG);	/* [한국어] 명령 코드와 피연산자 A 를 한 워드에 담아 쓴다. 이 쓰기가 명령 실행을 시작시킨다 */
 
-	IOMMU_WAIT_OP(iommu, DMAR_ECRSP_REG, readq,
-		      !(res & DMA_ECMD_ECRSP_IP), res);
+	IOMMU_WAIT_OP(iommu, DMAR_ECRSP_REG, readq,	/* [한국어] 응답 레지스터를 폴링하며 */
+		      !(res & DMA_ECMD_ECRSP_IP), res);	/* [한국어] 진행 중 비트가 내려갈 때까지 기다린다 */
 
-	if (res & DMA_ECMD_ECRSP_IP) {
-		ret = -ETIMEDOUT;
-		goto err;
+	if (res & DMA_ECMD_ECRSP_IP) {	/* [한국어] 시간이 다 되도록 내려가지 않았으면 */
+		ret = -ETIMEDOUT;	/* [한국어] 하드웨어가 응답하지 않는다 */
+		goto err;	/* [한국어] 정리 */
 	}
 
-	ret = ecmd_get_status_code(res);
-err:
-	raw_spin_unlock_irqrestore(&iommu->register_lock, flags);
+	ret = ecmd_get_status_code(res);	/* [한국어] 하드웨어가 돌려준 상태 코드. 0 이면 성공이고, 양수면 스펙 Table 48 의 실패 코드다 (위 영어 주석) */
+err:	/* [한국어] 두 실패 경로가 합류 */
+	raw_spin_unlock_irqrestore(&iommu->register_lock, flags);	/* [한국어] 락 해제 */
 
-	return ret;	/* [한국어] 결과 */
+	return ret;	/* [한국어] 음수면 소프트웨어 오류, 양수면 하드웨어 상태 코드, 0 이면 성공 */
 }
 
-MODULE_IMPORT_NS("GENERIC_PT_IOMMU");
+MODULE_IMPORT_NS("GENERIC_PT_IOMMU");	/* [한국어] 공용 페이지 테이블 라이브러리의 심볼 네임스페이스를 가져온다. pt_iommu_x86_64_init 등이 그 안에 있다 */
