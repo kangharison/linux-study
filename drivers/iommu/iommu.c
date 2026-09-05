@@ -5234,45 +5234,110 @@ EXPORT_SYMBOL_GPL(iommu_map_sg);
  * (though fault handlers can also return -ENOSYS, in case they want to
  * elicit the default behavior of the IOMMU drivers).
  */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어)
+ * report_iommu_fault - 하드웨어가 낸 IOMMU 폴트를 상위 계층에 알린다
+ *
+ * @domain: 폴트가 난 도메인
+ * @dev:    폴트를 낸 장치
+ * @flags:  IOMMU_FAULT_READ / IOMMU_FAULT_WRITE 등 접근 종류
+ * @iova:   번역에 실패한 IO 가상 주소
+ * @return: 0 이면 핸들러가 처리했다. -ENOSYS 면 등록된 핸들러가 없다.
+ *
+ * IOMMU 폴트는 장치가 매핑되지 않은 IOVA 에 DMA 를 시도했다는 뜻이고, 대개는
+ * 드라이버 버그(이미 unmap 한 버퍼로 DMA, 길이 계산 오류)의 첫 증상이다. 벤더
+ * 드라이버가 인터럽트 핸들러에서 이 함수를 불러 코어에 올린다.
+ *
+ * 다만 폴트가 항상 오류인 것은 아니다. remoteproc 처럼 페이지를 요구 시점에 채우는
+ * 사용자는 핸들러를 등록해 두고 폴트를 받아 PTE 를 만든 뒤 장치를 재개시킨다.
+ * 그래서 처리 여부를 반환값으로 구분한다.
+ *
+ * cookie_type 검사가 붙어 있는 이유는 도메인의 cookie 자리를 여럿이 나눠 쓰기
+ * 때문이다 — dma-iommu 쿠키, iommufd 문맥, 그리고 이 폴트 핸들러 토큰이다.
+ * 종류를 확인하지 않고 handler 를 부르면 엉뚱한 포인터를 함수로 호출하게 된다.
+ *
+ * 실행 컨텍스트: IOMMU 하드웨어 인터럽트 문맥이 대부분. 핸들러도 그 제약을 따른다.
+ *
+ * 호출 체인: 벤더 드라이버의 폴트 인터럽트 핸들러 → [이 함수] → domain->handler
+ */
 int report_iommu_fault(struct iommu_domain *domain, struct device *dev,
 		       unsigned long iova, int flags)
 {
-	int ret = -ENOSYS;
+	int ret = -ENOSYS;	/* [한국어] 기본값이 곧 '핸들러가 없다'는 신호. 드라이버는 이 값을 보고 자기 기본 동작(대개 로그 후 장치 정지)을 한다 */
 
 	/*
 	 * if upper layers showed interest and installed a fault handler,
 	 * invoke it.
 	 */
-	if (domain->cookie_type == IOMMU_COOKIE_FAULT_HANDLER &&
-	    domain->handler)
-		ret = domain->handler(domain, dev, iova, flags,
-						domain->handler_token);
+	if (domain->cookie_type == IOMMU_COOKIE_FAULT_HANDLER &&	/* [한국어] cookie 자리에 무엇이 들어 있는지를 종류로 구분한다 — 같은 필드를 dma-iommu 쿠키, iommufd 문맥, 폴트 핸들러 토큰이 나눠 쓰기 때문 */
+	    domain->handler)	/* [한국어] 실제로 핸들러가 등록되어 있어야 한다 */
+		ret = domain->handler(domain, dev, iova, flags,	/* [한국어] 상위 계층(주로 원격 프로세서 remoteproc, 일부 GPU 드라이버)이 등록한 처리기를 부른다. 여기서 PTE 를 동적으로 채워 넣고 장치를 재개시키는 구현도 가능하다 (위 영어 주석) */
+						domain->handler_token);	/* [한국어] 등록 때 함께 준 문맥 포인터 */
 
-	trace_io_page_fault(dev, iova, flags);
-	return ret;
+	trace_io_page_fault(dev, iova, flags);	/* [한국어] 핸들러 유무와 무관하게 폴트 사실은 항상 남긴다 — DMA 오류 추적의 1차 자료 */
+	return ret;	/* [한국어] 0 이면 처리됨, -ENOSYS 면 핸들러 없음, 그 외는 핸들러가 준 이유 */
 }
 EXPORT_SYMBOL_GPL(report_iommu_fault);
 
+/*
+ * [한국어]
+ * iommu_init - IOMMU 서브시스템의 sysfs/debugfs 뼈대를 세운다
+ *
+ * @return: 항상 0 (실패는 BUG_ON 으로 즉시 멈춘다)
+ *
+ * core_initcall 로 등록되어 어떤 IOMMU 드라이버보다 먼저 돈다. 순서가 중요한
+ * 이유는 드라이버 등록이 곧 장치 프로브와 그룹 생성으로 이어지고, 그룹은 만들어
+ * 지자마자 /sys/kernel/iommu_groups/<번호>/ 에 나타나야 하기 때문이다. 그 부모
+ * kset 이 여기서 만들어진다.
+ *
+ * 그 디렉터리가 이 서브시스템의 사용자 대면 얼굴이다 — 각 그룹 아래의 devices/,
+ * type, reserved_regions 가 모두 이 파일이 노출하는 것이며, VFIO 로 장치를 넘길 때
+ * 관리자가 가장 먼저 확인하는 곳이다.
+ *
+ * 실행 컨텍스트: 부팅 초기 initcall. 프로세스 문맥.
+ *
+ * 호출 체인: core_initcall → [이 함수]
+ */
 static int __init iommu_init(void)
 {
-	iommu_group_kset = kset_create_and_add("iommu_groups",
-					       NULL, kernel_kobj);
-	BUG_ON(!iommu_group_kset);
+	iommu_group_kset = kset_create_and_add("iommu_groups",	/* [한국어] /sys/kernel/iommu_groups/ 디렉터리를 만든다. 모든 그룹이 이 아래에 번호로 나타나고, VFIO 를 쓰는 사람이 가장 먼저 들여다보는 곳이다 */
+					       NULL, kernel_kobj);	/* [한국어] 부모는 /sys/kernel */
+	BUG_ON(!iommu_group_kset);	/* [한국어] 이것이 없으면 그룹을 sysfs 에 노출할 방법이 없다. 부팅 초기라 복구할 수단도 없으므로 즉시 멈춘다 */
 
-	iommu_debugfs_setup();
+	iommu_debugfs_setup();	/* [한국어] debugfs 아래 IOMMU 진단 인터페이스 준비 (설정에 따라 빈 함수) */
 
-	return 0;
+	return 0;	/* [한국어] 초기화 완료 */
 }
-core_initcall(iommu_init);
+core_initcall(iommu_init);	/* [한국어] IOMMU 드라이버들보다 먼저 돌아야 한다 — 드라이버 등록이 곧 그룹 생성으로 이어지고, 그때 이미 kset 이 있어야 한다 */
 
+/*
+ * [한국어]
+ * iommu_set_pgtable_quirks - 도메인의 페이지 테이블 동작을 비표준으로 조정한다
+ *
+ * @domain: 조정할 도메인. UNMANAGED 여야 한다.
+ * @quirk:  IO_PGTABLE_QUIRK_* 비트
+ * @return: 0 성공, -EINVAL 이면 도메인 종류가 맞지 않거나 드라이버 미지원
+ *
+ * 같은 하드웨어라도 사용자에 따라 페이지 테이블 항목의 의미를 달리 쓰고 싶을 때가
+ * 있다. ARM 계열의 캐시 속성 비트 배치나 GPU 가 요구하는 특수한 메모리 타입이
+ * 그런 경우다.
+ *
+ * UNMANAGED 로 제한한 것이 이 API 의 안전장치다. 커널 DMA API 가 쓰는 도메인의
+ * 페이지 테이블 의미를 밖에서 바꾸면 dma-iommu 의 가정이 통째로 깨진다. 도메인을
+ * 스스로 만들어 통째로 소유한 사용자만 자기 도메인을 조정할 수 있다.
+ *
+ * 실행 컨텍스트: 도메인 생성 직후, 매핑을 넣기 전. 프로세스 문맥.
+ *
+ * 호출 체인: GPU/미디어 드라이버 등 도메인 소유자 → [이 함수] → ops->set_pgtable_quirks
+ */
 int iommu_set_pgtable_quirks(struct iommu_domain *domain,
 		unsigned long quirk)
 {
-	if (domain->type != IOMMU_DOMAIN_UNMANAGED)
-		return -EINVAL;
-	if (!domain->ops->set_pgtable_quirks)
-		return -EINVAL;
-	return domain->ops->set_pgtable_quirks(domain, quirk);
+	if (domain->type != IOMMU_DOMAIN_UNMANAGED)	/* [한국어] 커널이 관리하는 DMA 도메인의 페이지 테이블 동작을 밖에서 바꾸게 두면 DMA API 의 가정이 깨진다. 사용자가 통째로 소유한 UNMANAGED 도메인에서만 허용한다 */
+		return -EINVAL;	/* [한국어] 관리 도메인에는 적용 불가 */
+	if (!domain->ops->set_pgtable_quirks)	/* [한국어] 드라이버가 이 조정을 지원하지 않는다 */
+		return -EINVAL;	/* [한국어] 조용히 무시하지 않고 거절한다 — 호출자가 켰다고 착각하면 안 되기 때문 */
+	return domain->ops->set_pgtable_quirks(domain, quirk);	/* [한국어] IO_PGTABLE_QUIRK_* 를 드라이버에 전달한다. GPU 드라이버가 캐시 속성이나 ARM 의 비표준 TEX 비트 배치를 바꿀 때 쓴다 */
 }
 EXPORT_SYMBOL_GPL(iommu_set_pgtable_quirks);
 
@@ -5284,12 +5349,33 @@ EXPORT_SYMBOL_GPL(iommu_set_pgtable_quirks);
  * This returns a list of reserved IOVA regions specific to this device.
  * A domain user should not map IOVA in these ranges.
  */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어)
+ * iommu_get_resv_regions - 장치가 요구하는 예약 IOVA 구간을 드라이버에게 받는다
+ *
+ * @dev:  대상 장치
+ * @list: 결과를 매달 목록 (호출자가 초기화해 넘긴다)
+ *
+ * 여기서 나오는 구간들이 "이 장치의 주소 공간에서 자유롭게 쓸 수 없는 범위"다.
+ * 인텔이면 ACPI DMAR 테이블의 RMRR, AMD 면 IVMD 의 unity map, 그리고 모든
+ * 아키텍처의 MSI 창이 대표적이다. 펌웨어가 부팅 전부터 쓰던 버퍼(USB 레거시 에뮬
+ * 레이션, 관리 엔진)나 인터럽트 메시지가 향하는 주소가 여기 해당한다.
+ *
+ * 소유권이 드라이버에 있다는 점이 중요하다 — 항목마다 자기 해제 함수를 달 수 있어
+ * 반드시 iommu_put_resv_regions 로 돌려줘야 하고, 오래 보관하려면 복제해야 한다.
+ * iommu_insert_resv_region 이 복제하는 이유가 그것이다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥. 드라이버 구현에 따라 잠들 수 있다.
+ *
+ * 호출 체인: iommu_get_group_resv_regions, iommu_create_device_direct_mappings,
+ *            dma-iommu → [이 함수] → ops->get_resv_regions
+ */
 void iommu_get_resv_regions(struct device *dev, struct list_head *list)
 {
-	const struct iommu_ops *ops = dev_iommu_ops(dev);
+	const struct iommu_ops *ops = dev_iommu_ops(dev);	/* [한국어] 이 장치를 맡은 드라이버 */
 
-	if (ops->get_resv_regions)
-		ops->get_resv_regions(dev, list);
+	if (ops->get_resv_regions)	/* [한국어] 예약 구간을 알릴 것이 있는 드라이버만 (인텔 RMRR, AMD unity map, MSI 창) */
+		ops->get_resv_regions(dev, list);	/* [한국어] 드라이버가 list 에 iommu_resv_region 들을 매단다. 소유권은 드라이버에 있으므로 반드시 iommu_put_resv_regions 로 돌려줘야 한다 */
 }
 EXPORT_SYMBOL_GPL(iommu_get_resv_regions);
 
@@ -5300,142 +5386,328 @@ EXPORT_SYMBOL_GPL(iommu_get_resv_regions);
  *
  * This releases a reserved region list acquired by iommu_get_resv_regions().
  */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어)
+ * iommu_put_resv_regions - 드라이버에게 받은 예약 구간 목록을 돌려준다
+ *
+ * @dev:  구간을 받았던 장치
+ * @list: iommu_get_resv_regions 가 채운 목록
+ *
+ * 항목별 free 콜백을 먼저 보는 것이 요점이다. 대부분의 드라이버는
+ * iommu_alloc_resv_region 이 준 평범한 슬랩 메모리를 쓰지만, 정적 배열을 가리키게
+ * 하거나 추가 정리가 필요한 드라이버는 free 를 채워 자기 방식으로 거둔다.
+ *
+ * 실행 컨텍스트: get 과 같은 문맥. 프로세스 문맥.
+ *
+ * 호출 체인: iommu_get_group_resv_regions 등 → [이 함수]
+ */
 void iommu_put_resv_regions(struct device *dev, struct list_head *list)
 {
-	struct iommu_resv_region *entry, *next;
+	struct iommu_resv_region *entry, *next;	/* [한국어] 해제하며 순회하므로 _safe 판 */
 
-	list_for_each_entry_safe(entry, next, list, list) {
-		if (entry->free)
-			entry->free(dev, entry);
+	list_for_each_entry_safe(entry, next, list, list) {	/* [한국어] 드라이버가 채워 준 항목을 하나씩 */
+		if (entry->free)	/* [한국어] 항목마다 자기 해제 함수를 가질 수 있다 — 드라이버가 슬랩이 아닌 곳에서 할당했거나 추가 정리가 필요한 경우 */
+			entry->free(dev, entry);	/* [한국어] 드라이버 방식으로 해제 */
 		else
-			kfree(entry);
+			kfree(entry);	/* [한국어] 기본은 iommu_alloc_resv_region 이 준 kzalloc 메모리 */
 	}
 }
 EXPORT_SYMBOL(iommu_put_resv_regions);
 
+/*
+ * [한국어]
+ * iommu_alloc_resv_region - 예약 구간 항목 하나를 만든다
+ *
+ * @start:  구간 시작 주소
+ * @length: 길이
+ * @prot:   직통 매핑으로 심을 때 쓸 접근 권한 (DIRECT 종류에서만 의미)
+ * @type:   구간의 종류
+ * @gfp:    할당 플래그. 호출 문맥에 따라 GFP_KERNEL 또는 GFP_ATOMIC.
+ * @return: 새 항목, 실패면 NULL
+ *
+ * 벤더 드라이버가 get_resv_regions 콜백에서 자기 예약 구간을 알릴 때 쓰는 생성자
+ * 이자, iommu_insert_resv_region 이 그룹 목록으로 복제할 때 쓰는 생성자다. free
+ * 필드가 0 으로 남으므로 기본 kfree 경로를 타게 된다.
+ *
+ * type 이 이후 처리를 모두 가른다 — DIRECT 는 실제로 항등 매핑을 심고
+ * (iommu_create_device_direct_mappings), MSI 는 IOVA 할당자가 피하기만 하며,
+ * 병합 역시 같은 종류끼리만 일어난다.
+ *
+ * 실행 컨텍스트: 어디서든. gfp 가 정한다.
+ *
+ * 호출 체인: 벤더 드라이버 get_resv_regions, iommu_insert_resv_region → [이 함수]
+ */
 struct iommu_resv_region *iommu_alloc_resv_region(phys_addr_t start,
 						  size_t length, int prot,
 						  enum iommu_resv_type type,
 						  gfp_t gfp)
 {
-	struct iommu_resv_region *region;
+	struct iommu_resv_region *region;	/* [한국어] 만들 항목 */
 
-	region = kzalloc_obj(*region, gfp);
-	if (!region)
-		return NULL;
+	region = kzalloc_obj(*region, gfp);	/* [한국어] 0 으로 채운 새 항목 — free 콜백 필드도 NULL 로 시작해 기본 kfree 경로를 타게 된다 */
+	if (!region)	/* [한국어] 할당 실패 */
+		return NULL;	/* [한국어] 호출자가 -ENOMEM 으로 바꾼다 */
 
-	INIT_LIST_HEAD(&region->list);
-	region->start = start;
-	region->length = length;
-	region->prot = prot;
-	region->type = type;
-	return region;
+	INIT_LIST_HEAD(&region->list);	/* [한국어] 아직 어느 목록에도 속하지 않은 상태로 초기화 */
+	region->start = start;	/* [한국어] 구간 시작 물리/IOVA 주소 */
+	region->length = length;	/* [한국어] 길이 (끝 주소는 start + length - 1) */
+	region->prot = prot;	/* [한국어] 직통 매핑으로 심을 때 쓸 접근 권한. DIRECT 종류에서만 의미가 있다 */
+	region->type = type;	/* [한국어] DIRECT / DIRECT_RELAXABLE / RESERVED / MSI / SW_MSI — 병합과 해석이 종류별로 다르다 */
+	return region;	/* [한국어] 완성된 항목 */
 }
 EXPORT_SYMBOL_GPL(iommu_alloc_resv_region);
 
+/*
+ * [한국어]
+ * iommu_set_default_passthrough - 시스템 기본 도메인을 항등(번역 없음)으로 정한다
+ *
+ * @cmd_line: true 면 부트 인자가 시킨 것 — 이후 드라이버 선호가 뒤집지 못하게 표식을 남긴다
+ *
+ * 기본 도메인 종류를 정하는 3층 중 위쪽 두 층을 잇는 자리다. 빌드 설정
+ * (CONFIG_IOMMU_DEFAULT_PASSTHROUGH)이 부팅 때 이 함수를 cmd_line=false 로 부르고,
+ * "iommu.passthrough=1" 부트 인자는 true 로 부른다. 그 차이가
+ * IOMMU_CMD_LINE_DMA_API 표식의 유무이고, 표식이 있으면 벤더 드라이버가
+ * def_domain_type 으로 다른 종류를 선호해도 무시된다 — 관리자가 명시한 것을 커널이
+ * 조용히 뒤집지 않는다는 원칙이다.
+ *
+ * 패스스루는 장치가 낸 주소를 그대로 물리 주소로 쓰는 것이라 IOMMU 오버헤드가
+ * 사라지지만, 그 장치는 시스템 메모리 전체에 닿을 수 있게 된다.
+ *
+ * 실행 컨텍스트: 부팅 초기. 프로세스 문맥.
+ *
+ * 호출 체인: early_param 파서, 아키텍처 초기화 코드 → [이 함수]
+ */
 void iommu_set_default_passthrough(bool cmd_line)
 {
-	if (cmd_line)
-		iommu_cmd_line |= IOMMU_CMD_LINE_DMA_API;
-	iommu_def_domain_type = IOMMU_DOMAIN_IDENTITY;
+	if (cmd_line)	/* [한국어] 부트 인자가 부른 경우 */
+		iommu_cmd_line |= IOMMU_CMD_LINE_DMA_API;	/* [한국어] '관리자가 명시했다'는 표식. 이후 드라이버의 def_domain_type 선호가 이 결정을 뒤집지 못한다 */
+	iommu_def_domain_type = IOMMU_DOMAIN_IDENTITY;	/* [한국어] 시스템 기본을 항등(번역 없음)으로 — 격리를 버리고 성능을 택한다 */
 }
 
+/*
+ * [한국어]
+ * iommu_set_default_translated - 시스템 기본 도메인을 번역형(DMA)으로 정한다
+ *
+ * @cmd_line: true 면 부트 인자가 시킨 것
+ *
+ * 위 함수의 대칭이다. 기밀 컴퓨팅(SEV-SNP/TDX)처럼 장치를 신뢰할 수 없는 환경에서는
+ * 커널이 이 함수를 불러 패스스루를 강제로 끈다 — 그 경우가 3층 구조의 맨 위층,
+ * 부트 인자마저 덮어쓰는 "커널 오버라이드"에 해당한다.
+ *
+ * 실행 컨텍스트: 부팅 초기. 프로세스 문맥.
+ *
+ * 호출 체인: early_param 파서, 기밀 컴퓨팅 초기화 → [이 함수]
+ */
 void iommu_set_default_translated(bool cmd_line)
 {
-	if (cmd_line)
-		iommu_cmd_line |= IOMMU_CMD_LINE_DMA_API;
-	iommu_def_domain_type = IOMMU_DOMAIN_DMA;
+	if (cmd_line)	/* [한국어] 부트 인자가 부른 경우 */
+		iommu_cmd_line |= IOMMU_CMD_LINE_DMA_API;	/* [한국어] 같은 표식. 드라이버가 패스스루를 선호해도 번역이 강제된다 */
+	iommu_def_domain_type = IOMMU_DOMAIN_DMA;	/* [한국어] 시스템 기본을 번역형으로 — 기밀 컴퓨팅이나 신뢰할 수 없는 장치가 있는 시스템의 선택 */
 }
 
+/*
+ * [한국어]
+ * iommu_default_passthrough - 지금 시스템 기본이 패스스루인가
+ *
+ * @return: true 면 기본 도메인이 항등 도메인이다
+ *
+ * 벤더 드라이버가 초기화 중 자기 하드웨어 설정을 정할 때 참고한다. 예를 들어
+ * 패스스루가 기본이면 페이지 테이블을 미리 만들 이유가 없다.
+ *
+ * 실행 컨텍스트: 어디서든. 전역 하나를 읽는다.
+ *
+ * 호출 체인: 벤더 드라이버 초기화 → [이 함수]
+ */
 bool iommu_default_passthrough(void)
 {
-	return iommu_def_domain_type == IOMMU_DOMAIN_IDENTITY;
+	return iommu_def_domain_type == IOMMU_DOMAIN_IDENTITY;	/* [한국어] 벤더 드라이버가 초기화 중 '지금 정책이 패스스루인가'를 물을 때 쓴다 */
 }
 EXPORT_SYMBOL_GPL(iommu_default_passthrough);
 
+/*
+ * [한국어]
+ * iommu_from_fwnode - 펌웨어 노드로 등록된 IOMMU 인스턴스를 찾는다
+ *
+ * @fwnode: DT 노드 또는 ACPI 핸들
+ * @return: 해당 인스턴스, 없으면 NULL
+ *
+ * 장치와 IOMMU 를 짝짓는 근본 수단이다. DT 라면 장치 노드의
+ * iommus = <&smmu 0x1234> 가, ACPI 라면 IORT/VIOT 표의 매핑이 특정 IOMMU 노드를
+ * 가리키고, 그 노드를 등록된 인스턴스 목록에서 찾는 것이 이 함수다.
+ *
+ * 인스턴스 수가 많아야 수십이라 선형 탐색으로 충분하다. 스핀락을 쓰므로 이 구간에서
+ * 잠들 수 없고, 그래서 찾은 포인터만 돌려주고 아무 것도 하지 않는다.
+ *
+ * 실행 컨텍스트: 어디서든. 스핀락 구간이 짧다.
+ *
+ * 호출 체인: iommu_ops_from_fwnode, iommu_fwspec_init → [이 함수]
+ */
 static const struct iommu_device *iommu_from_fwnode(const struct fwnode_handle *fwnode)
 {
-	const struct iommu_device *iommu, *ret = NULL;
+	const struct iommu_device *iommu, *ret = NULL;	/* [한국어] 순회 커서와 결과 */
 
-	spin_lock(&iommu_device_lock);
-	list_for_each_entry(iommu, &iommu_device_list, list)
-		if (iommu->fwnode == fwnode) {
-			ret = iommu;
-			break;
+	spin_lock(&iommu_device_lock);	/* [한국어] 전역 인스턴스 목록 보호 */
+	list_for_each_entry(iommu, &iommu_device_list, list)	/* [한국어] 등록된 모든 IOMMU 인스턴스를 훑는다. 개수가 많아야 수십이라 선형 탐색으로 충분하다 */
+		if (iommu->fwnode == fwnode) {	/* [한국어] 펌웨어 노드가 일치하는 인스턴스 — DT 의 iommus = <&smmu ...> 나 ACPI IORT 가 가리키는 대상 */
+			ret = iommu;	/* [한국어] 찾았다 */
+			break;	/* [한국어] 더 볼 필요 없다 */
 		}
-	spin_unlock(&iommu_device_lock);
-	return ret;
+	spin_unlock(&iommu_device_lock);	/* [한국어] 목록 보호 해제 */
+	return ret;	/* [한국어] 없으면 NULL */
 }
 
+/*
+ * [한국어]
+ * iommu_ops_from_fwnode - 펌웨어 노드에 해당하는 IOMMU 드라이버의 콜백 표를 얻는다
+ *
+ * @fwnode: DT 노드 또는 ACPI 핸들
+ * @return: 그 드라이버의 ops, 등록 전이면 NULL
+ *
+ * OF/ACPI 파싱 코드가 "이 노드를 맡을 IOMMU 드라이버가 이미 올라왔는가"를 확인할 때
+ * 쓴다. NULL 이면 아직 등록되지 않은 것이고, 호출자는 대개 -EPROBE_DEFER 로 물러나
+ * 나중에 다시 시도한다.
+ *
+ * 실행 컨텍스트: 어디서든.
+ *
+ * 호출 체인: OF/ACPI IOMMU 설정 코드 → [이 함수] → iommu_from_fwnode
+ */
 const struct iommu_ops *iommu_ops_from_fwnode(const struct fwnode_handle *fwnode)
 {
-	const struct iommu_device *iommu = iommu_from_fwnode(fwnode);
+	const struct iommu_device *iommu = iommu_from_fwnode(fwnode);	/* [한국어] 노드로 인스턴스를 찾고 */
 
-	return iommu ? iommu->ops : NULL;
+	return iommu ? iommu->ops : NULL;	/* [한국어] 그 드라이버의 콜백 표만 꺼내 준다. OF/ACPI 파싱 코드가 '이 노드에 해당하는 IOMMU 드라이버가 이미 등록됐는가'를 볼 때 쓴다 */
 }
 
+/*
+ * [한국어]
+ * iommu_fwspec_init - 장치를 특정 IOMMU 펌웨어 노드에 묶는다
+ *
+ * @dev:          아직 IOMMU 가 정해지지 않은 장치
+ * @iommu_fwnode: 이 장치를 맡을 IOMMU 의 펌웨어 노드
+ * @return: 0 성공. -EPROBE_DEFER 면 IOMMU 가 아직 준비되지 않아 나중에 다시 시도해야
+ *          한다. -EINVAL 이면 이미 다른 IOMMU 에 묶여 있다.
+ *
+ * fwspec(firmware specification)은 "이 장치는 저 IOMMU 의, 이런 ID 로 식별되는
+ * 장치다"라는 정보다. 프로브의 출발점이며, iommu_init_device 가 이것을 보고
+ * 드라이버를 찾는다.
+ *
+ * 반환값 세 갈래가 부팅 순서 문제를 다룬다.
+ *   - 인스턴스가 아예 없다: driver_deferred_probe_check_state 에 맡긴다. 아직
+ *     initcall 이 남았으면 미루고, 다 끝났으면 영영 오지 않을 것으로 보고 포기한다.
+ *   - 인스턴스는 있으나 ready 가 아직 false: 등록 중인 IOMMU 를 반쯤 만들어진 채로
+ *     쓰지 않도록 -EPROBE_DEFER.
+ *   - 이미 fwspec 이 있다: 같은 IOMMU 면 성공(뒤이어 add_ids 로 ID 를 덧붙일 것이다),
+ *     다른 IOMMU 면 한 장치가 둘에 걸린 것이라 거절.
+ *
+ * ID 하나짜리로 선할당하는 것은 압도적 다수가 스트림 ID 를 하나만 쓰기 때문이다.
+ *
+ * 실행 컨텍스트: 프로브 경로. iommu_probe_device_lock 아래. 잠들 수 있다.
+ *
+ * 호출 체인: OF/ACPI 의 dma_configure 경로 → [이 함수] → dev_iommu_get
+ */
 int iommu_fwspec_init(struct device *dev, struct fwnode_handle *iommu_fwnode)
 {
-	const struct iommu_device *iommu = iommu_from_fwnode(iommu_fwnode);
-	struct iommu_fwspec *fwspec = dev_iommu_fwspec_get(dev);
+	const struct iommu_device *iommu = iommu_from_fwnode(iommu_fwnode);	/* [한국어] 이 노드를 맡는 IOMMU 가 이미 등록됐는지 확인 */
+	struct iommu_fwspec *fwspec = dev_iommu_fwspec_get(dev);	/* [한국어] 기존 fwspec — 여러 IOMMU 항목을 가진 장치는 이 함수가 여러 번 불린다 */
 
-	if (!iommu)
-		return driver_deferred_probe_check_state(dev);
-	if (!dev->iommu && !READ_ONCE(iommu->ready))
-		return -EPROBE_DEFER;
+	if (!iommu)	/* [한국어] 해당 IOMMU 드라이버가 아직 등록되지 않았다 */
+		return driver_deferred_probe_check_state(dev);	/* [한국어] 프로브를 미룰지, 아니면 영영 오지 않을 것으로 보고 포기할지를 드라이버 코어가 판정한다 (initcall 이 다 끝났는지 등으로) */
+	if (!dev->iommu && !READ_ONCE(iommu->ready))	/* [한국어] 인스턴스는 있으나 아직 준비 완료를 공개하지 않았다 */
+		return -EPROBE_DEFER;	/* [한국어] 나중에 다시 시도 — 등록 중인 IOMMU 를 반쯤 만들어진 채로 쓰지 않는다 */
 
-	if (fwspec)
-		return iommu->ops == iommu_fwspec_ops(fwspec) ? 0 : -EINVAL;
+	if (fwspec)	/* [한국어] 이미 fwspec 이 있는 장치라면 */
+		return iommu->ops == iommu_fwspec_ops(fwspec) ? 0 : -EINVAL;	/* [한국어] 같은 IOMMU 를 가리키면 성공(추가 ID 를 붙일 것이다). 다른 IOMMU 를 가리키면 한 장치가 두 IOMMU 에 걸린 것이라 거절한다 */
 
-	if (!dev_iommu_get(dev))
-		return -ENOMEM;
+	if (!dev_iommu_get(dev))	/* [한국어] fwspec 을 담을 장치 상태부터 */
+		return -ENOMEM;	/* [한국어] 상태를 못 만들면 진행 불가 */
 
 	/* Preallocate for the overwhelmingly common case of 1 ID */
-	fwspec = kzalloc_flex(*fwspec, ids, 1);
-	if (!fwspec)
-		return -ENOMEM;
+	fwspec = kzalloc_flex(*fwspec, ids, 1);	/* [한국어] ID 하나짜리로 미리 잡는다. 대다수 장치가 스트림 ID 를 하나만 쓰므로 이 크기면 재할당이 없다 (위 영어 주석) */
+	if (!fwspec)	/* [한국어] 할당 실패 */
+		return -ENOMEM;	/* [한국어] dev->iommu 는 남지만 이후 해제 경로가 거둔다 */
 
-	fwnode_handle_get(iommu_fwnode);
-	fwspec->iommu_fwnode = iommu_fwnode;
-	dev_iommu_fwspec_set(dev, fwspec);
-	return 0;
+	fwnode_handle_get(iommu_fwnode);	/* [한국어] fwspec 이 노드를 붙잡는 동안 사라지지 않도록 참조를 잡는다 (dev_iommu_free 가 put 한다) */
+	fwspec->iommu_fwnode = iommu_fwnode;	/* [한국어] 이 장치를 맡을 IOMMU 를 가리킨다. iommu_fwspec_ops 가 이 필드로 드라이버를 찾는다 */
+	dev_iommu_fwspec_set(dev, fwspec);	/* [한국어] 장치에 매단다 */
+	return 0;	/* [한국어] 이제 이 장치는 프로브 대상이 되었다 */
 }
 EXPORT_SYMBOL_GPL(iommu_fwspec_init);
 
+/*
+ * [한국어]
+ * iommu_fwspec_free - 장치의 fwspec 을 해제한다
+ *
+ * @dev: 대상 장치
+ *
+ * iommu_fwspec_init 이 잡은 노드 참조까지 함께 돌려준다. 프로브가 실패해 되돌릴 때,
+ * 또는 IOMMU 를 못 찾아 장치를 IOMMU 밖에 두기로 했을 때 쓴다.
+ *
+ * 정상 해제 경로에서는 dev_iommu_free 가 같은 일을 하므로 이 함수를 따로 부르지
+ * 않는다는 점에 주의할 것.
+ *
+ * 실행 컨텍스트: 프로브 되감기. 프로세스 문맥.
+ *
+ * 호출 체인: OF/ACPI 설정 에러 경로, iommu_mock_device_add → [이 함수]
+ */
 void iommu_fwspec_free(struct device *dev)
 {
-	struct iommu_fwspec *fwspec = dev_iommu_fwspec_get(dev);
+	struct iommu_fwspec *fwspec = dev_iommu_fwspec_get(dev);	/* [한국어] 있는지 확인 */
 
-	if (fwspec) {
-		fwnode_handle_put(fwspec->iommu_fwnode);
-		kfree(fwspec);
-		dev_iommu_fwspec_set(dev, NULL);
+	if (fwspec) {	/* [한국어] 만들어진 적이 있으면 */
+		fwnode_handle_put(fwspec->iommu_fwnode);	/* [한국어] 잡아 뒀던 노드 참조 반납 */
+		kfree(fwspec);	/* [한국어] 본체 해제 */
+		dev_iommu_fwspec_set(dev, NULL);	/* [한국어] 장치에서 끊는다 */
 	}
 }
 
+/*
+ * [한국어]
+ * iommu_fwspec_add_ids - 이 장치가 IOMMU 에게 보이는 하드웨어 ID 들을 등록한다
+ *
+ * @dev:     이미 iommu_fwspec_init 을 거친 장치
+ * @ids:     추가할 ID 배열
+ * @num_ids: 그 개수
+ * @return:  0 성공, -EINVAL 이면 fwspec 이 없다, -ENOMEM 이면 확장 실패
+ *
+ * 여기 담기는 ID 가 곧 하드웨어가 DMA 요청의 출처를 식별하는 값이다. ARM 이면
+ * StreamID — SMMU 가 그 값으로 스트림 테이블 항목을 찾아 어떤 페이지 테이블을 쓸지
+ * 정한다. PCIe 라면 requester id 에 대응한다.
+ *
+ * 여러 개인 경우가 왜 생기는가. 하나의 논리 장치가 여러 마스터 포트를 갖거나
+ * (DMA 엔진과 디스플레이 컨트롤러가 한 노드에 있는 SoC 블록), DT 가 여러 ID 를
+ * 나열하는 경우다. 그 모두가 같은 도메인을 보게 된다.
+ *
+ * 첫 ID 는 init 이 미리 잡아 둔 자리에 들어가므로 재할당이 없고, 두 번째부터
+ * krealloc 으로 늘린다. num_ids 갱신을 복사 뒤에 하는 것은 중간 상태를 노출하지
+ * 않기 위한 순서다.
+ *
+ * 실행 컨텍스트: 프로브 경로. 프로세스 문맥, 잠들 수 있다.
+ *
+ * 호출 체인: OF/ACPI IOMMU 설정 코드 → [이 함수]
+ */
 int iommu_fwspec_add_ids(struct device *dev, const u32 *ids, int num_ids)
 {
-	struct iommu_fwspec *fwspec = dev_iommu_fwspec_get(dev);
-	int i, new_num;
+	struct iommu_fwspec *fwspec = dev_iommu_fwspec_get(dev);	/* [한국어] 이미 init 된 fwspec 이어야 한다 */
+	int i, new_num;	/* [한국어] 복사 커서와 새 총 개수 */
 
-	if (!fwspec)
-		return -EINVAL;
+	if (!fwspec)	/* [한국어] init 없이 부른 경우 */
+		return -EINVAL;	/* [한국어] 호출 순서 오류 */
 
-	new_num = fwspec->num_ids + num_ids;
-	if (new_num > 1) {
-		fwspec = krealloc(fwspec, struct_size(fwspec, ids, new_num),
-				  GFP_KERNEL);
-		if (!fwspec)
-			return -ENOMEM;
+	new_num = fwspec->num_ids + num_ids;	/* [한국어] 기존 ID 뒤에 이어 붙인다 */
+	if (new_num > 1) {	/* [한국어] 미리 잡아 둔 자리는 하나뿐이므로 그보다 많아질 때만 재할당 */
+		fwspec = krealloc(fwspec, struct_size(fwspec, ids, new_num),	/* [한국어] 가변 배열을 포함한 크기를 오버플로 안전하게 계산해 늘린다 */
+				  GFP_KERNEL);	/* [한국어] 프로브 문맥이라 잠들 수 있다 */
+		if (!fwspec)	/* [한국어] 재할당 실패 — krealloc 실패 시 원본은 그대로 살아 있다 */
+			return -ENOMEM;	/* [한국어] 호출자가 프로브를 접는다 */
 
-		dev_iommu_fwspec_set(dev, fwspec);
+		dev_iommu_fwspec_set(dev, fwspec);	/* [한국어] 주소가 바뀌었을 수 있으므로 장치의 포인터를 갱신 */
 	}
 
-	for (i = 0; i < num_ids; i++)
-		fwspec->ids[fwspec->num_ids + i] = ids[i];
+	for (i = 0; i < num_ids; i++)	/* [한국어] 새 ID 들을 */
+		fwspec->ids[fwspec->num_ids + i] = ids[i];	/* [한국어] 기존 것 뒤에 이어 복사한다. 이 ID 가 곧 하드웨어가 보는 식별자 — ARM 이면 StreamID, 그 값으로 SMMU 가 스트림 테이블 항목을 찾는다 */
 
-	fwspec->num_ids = new_num;
-	return 0;
+	fwspec->num_ids = new_num;	/* [한국어] 개수 갱신은 복사가 끝난 뒤에 */
+	return 0;	/* [한국어] ID 추가 완료 */
 }
 EXPORT_SYMBOL_GPL(iommu_fwspec_add_ids);
 
