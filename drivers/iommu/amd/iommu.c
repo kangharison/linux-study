@@ -531,232 +531,426 @@ static inline int get_acpihid_device_id(struct device *dev,
 	return p1->devid;	/* [한국어] 찾은 요청자 id */
 }
 
+/*
+ * [한국어]
+ * get_device_sbdf_id - 장치의 종류에 맞는 방법으로 조회 키를 얻는다
+ *
+ * @dev: 대상 장치.
+ * @return: 세그먼트+BDF 를 합친 키, 못 찾으면 음수.
+ *
+ * PCI 장치는 자기 BDF 가 있고, 플랫폼 장치는 펌웨어가 알려 준 대응을
+ * 뒤져야 한다. 그 갈림길을 여기 모아 두어 호출부가 종류를 신경 쓰지
+ * 않게 한다.
+ */
 static inline int get_device_sbdf_id(struct device *dev)
 {
-	int sbdf;
+	int sbdf;	/* [한국어] 조회 키 */
 
-	if (dev_is_pci(dev))
-		sbdf = get_pci_sbdf_id(to_pci_dev(dev));
+	if (dev_is_pci(dev))	/* [한국어] PCI 장치면 */
+		sbdf = get_pci_sbdf_id(to_pci_dev(dev));	/* [한국어] 자기 BDF 에서 만든다 */
 	else
-		sbdf = get_acpihid_device_id(dev, NULL);
+		sbdf = get_acpihid_device_id(dev, NULL);	/* [한국어] 플랫폼 장치면 펌웨어가 알려 준 대응을 뒤진다 */
 
-	return sbdf;
+	return sbdf;	/* [한국어] 음수면 식별할 수 없다는 뜻 */
 }
 
+/*
+ * [한국어]
+ * get_dev_table - 이 유닛이 실제로 쓰는 장치 테이블을 얻는다
+ *
+ * @iommu: 대상 유닛.
+ * @return: 장치 테이블의 시작 주소.
+ *
+ * 표는 유닛이 아니라 세그먼트에 딸려 있으므로 한 단계를 거쳐야 한다.
+ * kdump 에서 물려받은 표를 쓰는 경우에도 이 함수가 옳은 것을 돌려주므로,
+ * 호출부는 그 구별을 하지 않아도 된다.
+ *
+ * 두 BUG_ON 은 배선이 잘못된 경우다. 표 없이 진행하면 0 번지를 표로
+ * 해석하게 되므로 조용히 넘어가지 않는다.
+ */
 struct dev_table_entry *get_dev_table(struct amd_iommu *iommu)
 {
-	struct dev_table_entry *dev_table;
-	struct amd_iommu_pci_seg *pci_seg = iommu->pci_seg;
+	struct dev_table_entry *dev_table;	/* [한국어] 돌려줄 표 */
+	struct amd_iommu_pci_seg *pci_seg = iommu->pci_seg;	/* [한국어] 표는 유닛이 아니라 세그먼트에 딸려 있다 */
 
-	BUG_ON(pci_seg == NULL);
-	dev_table = pci_seg->dev_table;
-	BUG_ON(dev_table == NULL);
+	BUG_ON(pci_seg == NULL);	/* [한국어] 세그먼트가 없으면 배선이 잘못된 것이다 */
+	dev_table = pci_seg->dev_table;	/* [한국어] 그 세그먼트의 표. kdump 에서는 물려받은 것이 여기 들어 있다 */
+	BUG_ON(dev_table == NULL);	/* [한국어] 표 없이 진행하면 0 번지를 표로 해석한다 */
 
-	return dev_table;
+	return dev_table;	/* [한국어] 호출부는 kdump 여부를 신경 쓰지 않아도 된다 */
 }
 
+/*
+ * [한국어]
+ * get_device_segment - 장치가 속한 PCI 세그먼트를 얻는다
+ *
+ * @dev: 대상 장치.
+ * @return: 세그먼트 번호.
+ *
+ * get_device_sbdf_id 와 같은 갈림길이지만 세그먼트만 필요할 때 쓴다.
+ * 플랫폼 장치는 합친 키에서 상위 절반을 꺼낸다.
+ */
 static inline u16 get_device_segment(struct device *dev)
 {
-	u16 seg;
+	u16 seg;	/* [한국어] 세그먼트 번호 */
 
-	if (dev_is_pci(dev)) {
-		struct pci_dev *pdev = to_pci_dev(dev);
+	if (dev_is_pci(dev)) {	/* [한국어] PCI 장치면 */
+		struct pci_dev *pdev = to_pci_dev(dev);	/* [한국어] PCI 표현으로 */
 
-		seg = pci_domain_nr(pdev->bus);
+		seg = pci_domain_nr(pdev->bus);	/* [한국어] 버스가 속한 도메인이 곧 세그먼트다 */
 	} else {
-		u32 devid = get_acpihid_device_id(dev, NULL);
+		u32 devid = get_acpihid_device_id(dev, NULL);	/* [한국어] 플랫폼 장치면 합친 키를 얻어 */
 
-		seg = PCI_SBDF_TO_SEGID(devid);
+		seg = PCI_SBDF_TO_SEGID(devid);	/* [한국어] 상위 절반을 꺼낸다 */
 	}
 
-	return seg;
+	return seg;	/* [한국어] 세그먼트 번호 */
 }
 
 /* Writes the specific IOMMU for a device into the PCI segment rlookup table */
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * amd_iommu_set_rlookup_table - 장치 id 를 담당 유닛에 연결한다
+ *
+ * @iommu: 담당 유닛.
+ * @devid: 장치 id.
+ *
+ * IVRS 파싱과 별칭 복제가 이 표를 채운다. 이후 모든 조회가 O(1) 로
+ * 끝나는 것이 이 평평한 배열의 목적이다.
+ */
 void amd_iommu_set_rlookup_table(struct amd_iommu *iommu, u16 devid)
 {
-	struct amd_iommu_pci_seg *pci_seg = iommu->pci_seg;
+	struct amd_iommu_pci_seg *pci_seg = iommu->pci_seg;	/* [한국어] 표가 있는 세그먼트 */
 
-	pci_seg->rlookup_table[devid] = iommu;
+	pci_seg->rlookup_table[devid] = iommu;	/* [한국어] 평평한 배열이라 이후 조회가 O(1) 이다 */
 }
 
+/*
+ * [한국어]
+ * __rlookup_amd_iommu - 세그먼트와 장치 id 로 담당 유닛을 찾는다
+ *
+ * @seg: 세그먼트 번호.
+ * @devid: 장치 id.
+ * @return: 담당 유닛, 없으면 NULL.
+ *
+ * 세그먼트를 목록에서 선형 탐색하는 것이 눈에 띈다. 세그먼트는 많아야
+ * 몇 개뿐이고, 그 안의 조회는 배열이라 O(1) 이다.
+ */
 static struct amd_iommu *__rlookup_amd_iommu(u16 seg, u16 devid)
 {
-	struct amd_iommu_pci_seg *pci_seg;
+	struct amd_iommu_pci_seg *pci_seg;	/* [한국어] 세그먼트 커서 */
 
-	for_each_pci_segment(pci_seg) {
-		if (pci_seg->id == seg)
-			return pci_seg->rlookup_table[devid];
+	for_each_pci_segment(pci_seg) {	/* [한국어] 세그먼트는 많아야 몇 개뿐이라 선형 탐색으로 충분하다 */
+		if (pci_seg->id == seg)	/* [한국어] 번호가 맞으면 */
+			return pci_seg->rlookup_table[devid];	/* [한국어] 그 안의 조회는 배열이라 O(1) 이다 */
 	}
-	return NULL;
+	return NULL;	/* [한국어] 그런 세그먼트가 없다 */
 }
 
+/*
+ * [한국어]
+ * rlookup_amd_iommu - 장치로부터 담당 유닛을 찾는다
+ *
+ * @dev: 대상 장치.
+ * @return: 담당 유닛, 없으면 NULL.
+ *
+ * probe 중에 쓰는 경로다. probe 가 끝난 뒤에는 코어가 장치에 유닛을
+ * 붙여 두므로 get_amd_iommu_from_dev 가 더 빠르다 — 두 함수가 나뉜
+ * 이유가 그것이다.
+ */
 static struct amd_iommu *rlookup_amd_iommu(struct device *dev)
 {
-	u16 seg = get_device_segment(dev);
-	int devid = get_device_sbdf_id(dev);
+	u16 seg = get_device_segment(dev);	/* [한국어] 세그먼트와 */
+	int devid = get_device_sbdf_id(dev);	/* [한국어] 장치 id 를 각각 얻는다 */
 
-	if (devid < 0)
-		return NULL;
-	return __rlookup_amd_iommu(seg, PCI_SBDF_TO_DEVID(devid));
+	if (devid < 0)	/* [한국어] 식별할 수 없는 장치 */
+		return NULL;	/* [한국어] 담당 유닛도 알 수 없다 */
+	return __rlookup_amd_iommu(seg, PCI_SBDF_TO_DEVID(devid));	/* [한국어] 합친 키에서 BDF 만 꺼내 조회한다 */
 }
 
+/*
+ * [한국어]
+ * alloc_dev_data - 장치의 IOMMU 상태를 새로 만든다
+ *
+ * @iommu: 담당 유닛.
+ * @devid: 장치 id.
+ * @return: 새 상태, 실패하면 NULL.
+ *
+ * 락 두 개를 함께 초기화하는 것이 이 구조체의 특징이다. mutex 는 붙이고
+ * 떼는 긴 경로를, dte_lock 은 256비트 DTE 를 나눠 쓰는 짧은 구간을 지킨다.
+ *
+ * ratelimit 을 초기화하는 이유: 고장난 장치가 초당 수만 건의 페이지 폴트를
+ * 낼 수 있고, 그것을 모두 찍으면 로그가 시스템을 멈춘다.
+ *
+ * llist 에 넣는 것이 락 없이 되는 이유: 밀어 넣기만 무잠금이면 충분하고,
+ * 순회는 드물다.
+ */
 static struct iommu_dev_data *alloc_dev_data(struct amd_iommu *iommu, u16 devid)
 {
-	struct iommu_dev_data *dev_data;
-	struct amd_iommu_pci_seg *pci_seg = iommu->pci_seg;
+	struct iommu_dev_data *dev_data;	/* [한국어] 만들 상태 */
+	struct amd_iommu_pci_seg *pci_seg = iommu->pci_seg;	/* [한국어] 목록이 있는 세그먼트 */
 
-	dev_data = kzalloc_obj(*dev_data);
-	if (!dev_data)
-		return NULL;
+	dev_data = kzalloc_obj(*dev_data);	/* [한국어] 0 초기화된 구조체 */
+	if (!dev_data)	/* [한국어] 메모리 부족 */
+		return NULL;	/* [한국어] 상태 없이는 이 장치를 다룰 수 없다 */
 
-	mutex_init(&dev_data->mutex);
-	spin_lock_init(&dev_data->dte_lock);
-	dev_data->devid = devid;
-	ratelimit_default_init(&dev_data->rs);
+	mutex_init(&dev_data->mutex);	/* [한국어] 붙이고 떼는 긴 경로를 지킨다 */
+	spin_lock_init(&dev_data->dte_lock);	/* [한국어] 256비트 DTE 를 나눠 쓰는 짧은 구간을 지킨다 — 인터럽트 문맥에서도 잡힌다 */
+	dev_data->devid = devid;	/* [한국어] 하드웨어가 보는 이름. 별칭이면 별칭 id 가 들어간다 */
+	ratelimit_default_init(&dev_data->rs);	/* [한국어] 고장난 장치가 로그로 시스템을 멈추지 못하게 */
 
-	llist_add(&dev_data->dev_data_list, &pci_seg->dev_data_list);
-	return dev_data;
+	llist_add(&dev_data->dev_data_list, &pci_seg->dev_data_list);	/* [한국어] 밀어 넣기만 무잠금이면 충분하다 — 순회는 드물다 */
+	return dev_data;	/* [한국어] 새 상태 */
 }
 
+/*
+ * [한국어]
+ * search_dev_data - 그 장치 id 의 상태를 목록에서 찾는다
+ *
+ * @iommu: 담당 유닛.
+ * @devid: 장치 id.
+ * @return: 찾은 상태, 없으면 NULL.
+ *
+ * 세그먼트의 llist 를 선형 탐색한다. 장치 수가 많으면 느려 보이지만,
+ * 이 조회는 장치를 붙이고 떼는 경로에서만 일어나고 핫패스에는 없다.
+ */
 struct iommu_dev_data *search_dev_data(struct amd_iommu *iommu, u16 devid)
 {
-	struct iommu_dev_data *dev_data;
-	struct llist_node *node;
-	struct amd_iommu_pci_seg *pci_seg = iommu->pci_seg;
+	struct iommu_dev_data *dev_data;	/* [한국어] 목록 커서 */
+	struct llist_node *node;	/* [한국어] llist 순회용 노드 */
+	struct amd_iommu_pci_seg *pci_seg = iommu->pci_seg;	/* [한국어] 목록이 있는 세그먼트 */
 
-	if (llist_empty(&pci_seg->dev_data_list))
-		return NULL;
+	if (llist_empty(&pci_seg->dev_data_list))	/* [한국어] 아직 아무 장치도 없다 */
+		return NULL;	/* [한국어] 찾을 것이 없다 */
 
-	node = pci_seg->dev_data_list.first;
-	llist_for_each_entry(dev_data, node, dev_data_list) {
-		if (dev_data->devid == devid)
-			return dev_data;
+	node = pci_seg->dev_data_list.first;	/* [한국어] 목록의 첫 원소 */
+	llist_for_each_entry(dev_data, node, dev_data_list) {	/* [한국어] 선형 탐색 — 핫패스에는 없는 조회다 */
+		if (dev_data->devid == devid)	/* [한국어] id 가 맞으면 */
+			return dev_data;	/* [한국어] 그 상태 */
 	}
 
-	return NULL;
+	return NULL;	/* [한국어] 아직 만들어지지 않았다 */
 }
 
+/*
+ * [한국어]
+ * clone_alias - 별칭 장치의 DTE 를 원본과 같게 만든다
+ *
+ * @pdev_origin: 별칭 순회의 출발 장치(쓰지 않는다).
+ * @alias: 별칭 요청자 id.
+ * @data: 원본 장치.
+ * @return: 0 성공(할 일이 없어도 0), 음수면 상태를 찾지 못했다.
+ *
+ * 왜 복제해야 하는가: 하드웨어는 요청에 실린 이름으로 DTE 를 찾는다.
+ * 브리지 뒤의 장치가 브리지 이름으로 요청을 내면, 하드웨어는 브리지의
+ * DTE 를 본다. 원본 장치의 DTE 만 설정하면 그 설정이 적용되지 않는다.
+ *
+ * 그래서 원본의 DTE 를 통째로 읽어 별칭 항목에도 그대로 쓴다.
+ *
+ * rlookup 도 함께 채우는 이유: 그 별칭 id 로 오는 이벤트나 인터럽트를
+ * 처리할 때 담당 유닛을 찾을 수 있어야 한다.
+ *
+ * 호출 체인:
+ *   clone_aliases() → pci_for_each_dma_alias() → [이 함수] → update_dte256()
+ */
 static int clone_alias(struct pci_dev *pdev_origin, u16 alias, void *data)
 {
-	struct dev_table_entry new;
-	struct amd_iommu *iommu;
-	struct iommu_dev_data *dev_data, *alias_data;
-	struct pci_dev *pdev = data;
-	u16 devid = pci_dev_id(pdev);
-	int ret = 0;
+	struct dev_table_entry new;	/* [한국어] 원본에서 읽어 올 DTE */
+	struct amd_iommu *iommu;	/* [한국어] 담당 유닛 */
+	struct iommu_dev_data *dev_data, *alias_data;	/* [한국어] 원본과 별칭의 상태 */
+	struct pci_dev *pdev = data;	/* [한국어] 순회의 원본 장치 */
+	u16 devid = pci_dev_id(pdev);	/* [한국어] 그 장치의 id */
+	int ret = 0;	/* [한국어] 결과 */
 
-	if (devid == alias)
-		return 0;
+	if (devid == alias)	/* [한국어] 자기 자신은 복제할 필요가 없다 */
+		return 0;	/* [한국어] 다음 별칭으로 */
 
-	iommu = rlookup_amd_iommu(&pdev->dev);
-	if (!iommu)
-		return 0;
+	iommu = rlookup_amd_iommu(&pdev->dev);	/* [한국어] 담당 유닛 */
+	if (!iommu)	/* [한국어] 없으면 */
+		return 0;	/* [한국어] 복제할 곳이 없다 */
 
 	/* Copy the data from pdev */
-	dev_data = dev_iommu_priv_get(&pdev->dev);
-	if (!dev_data) {
-		pr_err("%s : Failed to get dev_data for 0x%x\n", __func__, devid);
-		ret = -EINVAL;
-		goto out;
+	dev_data = dev_iommu_priv_get(&pdev->dev);	/* [한국어] (원 주석: pdev 의 데이터를 복사한다) */
+	if (!dev_data) {	/* [한국어] 원본 상태가 없다 */
+		pr_err("%s : Failed to get dev_data for 0x%x\n", __func__, devid);	/* [한국어] 배선이 잘못된 것이라 알린다 */
+		ret = -EINVAL;	/* [한국어] 실패 */
+		goto out;	/* [한국어] 나간다 */
 	}
-	get_dte256(iommu, dev_data, &new);
+	get_dte256(iommu, dev_data, &new);	/* [한국어] 원본의 DTE 를 통째로 읽는다 */
 
 	/* Setup alias */
-	alias_data = find_dev_data(iommu, alias);
-	if (!alias_data) {
-		pr_err("%s : Failed to get alias dev_data for 0x%x\n", __func__, alias);
+	alias_data = find_dev_data(iommu, alias);	/* [한국어] (원 주석: 별칭을 설정한다) 없으면 여기서 만들어진다 */
+	if (!alias_data) {	/* [한국어] 만들지 못했다 */
+		pr_err("%s : Failed to get alias dev_data for 0x%x\n", __func__, alias);	/* [한국어] 메모리 부족일 가능성이 높다 */
 		ret = -EINVAL;
 		goto out;
 	}
-	update_dte256(iommu, alias_data, &new);
+	update_dte256(iommu, alias_data, &new);	/* [한국어] 별칭 항목에도 같은 내용을 쓴다 — 하드웨어는 이 이름으로 요청을 본다 */
 
-	amd_iommu_set_rlookup_table(iommu, alias);
+	amd_iommu_set_rlookup_table(iommu, alias);	/* [한국어] 그 별칭 id 로 오는 이벤트도 이 유닛이 처리한다 */
 out:
-	return ret;
+	return ret;	/* [한국어] 성공이면 0 */
 }
 
+/*
+ * [한국어]
+ * clone_aliases - 이 장치의 모든 별칭에 DTE 를 복제한다
+ *
+ * @iommu: 담당 유닛.
+ * @dev: 원본 장치.
+ *
+ * 두 곳에서 별칭을 얻는다는 것이 이 함수의 요점이다.
+ *
+ * 하나는 IVRS 표가 알려 준 별칭이고, 다른 하나는 PCI 위상에서 유도되는
+ * 별칭이다. 원 주석이 밝히듯 전자가 후자에 포함되지 않을 수 있다 —
+ * 표의 별칭이 다른 버스에 있으면 PCI 계층은 그것을 별칭으로 보지 않는다.
+ *
+ * 그래서 표의 별칭을 먼저 처리하고, 그다음 PCI 별칭을 순회한다.
+ *
+ * 호출 체인:
+ *   amd_iommu_update_dte()/setup_aliases() → [이 함수] → clone_alias()
+ */
 static void clone_aliases(struct amd_iommu *iommu, struct device *dev)
 {
-	struct pci_dev *pdev;
+	struct pci_dev *pdev;	/* [한국어] PCI 표현 */
 
-	if (!dev_is_pci(dev))
-		return;
-	pdev = to_pci_dev(dev);
+	if (!dev_is_pci(dev))	/* [한국어] 플랫폼 장치에는 별칭이 없다 */
+		return;	/* [한국어] 할 일이 없다 */
+	pdev = to_pci_dev(dev);	/* [한국어] PCI 로 변환 */
 
 	/*
 	 * The IVRS alias stored in the alias table may not be
 	 * part of the PCI DMA aliases if it's bus differs
 	 * from the original device.
 	 */
-	clone_alias(pdev, iommu->pci_seg->alias_table[pci_dev_id(pdev)], pdev);
+	clone_alias(pdev, iommu->pci_seg->alias_table[pci_dev_id(pdev)], pdev);	/* [한국어] (원 주석: IVRS 의 별칭이 PCI 별칭 목록에 없을 수 있다 — 버스가 다르면) */
 
-	pci_for_each_dma_alias(pdev, clone_alias, pdev);
+	pci_for_each_dma_alias(pdev, clone_alias, pdev);	/* [한국어] 그다음 위상에서 유도되는 별칭들을 훑는다 */
 }
 
+/*
+ * [한국어]
+ * setup_aliases - IVRS 의 별칭을 PCI 계층에도 알리고 DTE 를 복제한다
+ *
+ * @iommu: 담당 유닛.
+ * @dev: 대상 장치.
+ *
+ * clone_aliases 보다 한 걸음 더 나간다. 원 주석이 이유를 밝힌다: IVRS 표는
+ * PCI 계층이 모르는 quirk 를 알고 있을 수 있으므로, 같은 버스의 별칭이면
+ * PCI 의 별칭 목록에도 추가한다.
+ *
+ * 그러면 이후 DMA API 나 다른 코드가 별칭을 물을 때 그것까지 포함된다 —
+ * IOMMU 만 아는 사실이 아니라 시스템 전체가 아는 사실이 되는 것이다.
+ *
+ * 같은 버스일 때만 추가하는 이유: PCI 의 별칭 추가 인터페이스가 버스 안의
+ * devfn 만 받는다.
+ *
+ * 호출 체인:
+ *   amd_iommu_probe_device() → [이 함수] → pci_add_dma_alias()
+ *     → clone_aliases()
+ */
 static void setup_aliases(struct amd_iommu *iommu, struct device *dev)
 {
-	struct pci_dev *pdev = to_pci_dev(dev);
-	struct amd_iommu_pci_seg *pci_seg = iommu->pci_seg;
-	u16 ivrs_alias;
+	struct pci_dev *pdev = to_pci_dev(dev);	/* [한국어] PCI 표현 */
+	struct amd_iommu_pci_seg *pci_seg = iommu->pci_seg;	/* [한국어] 별칭 표가 있는 세그먼트 */
+	u16 ivrs_alias;	/* [한국어] 표가 알려 준 별칭 */
 
 	/* For ACPI HID devices, there are no aliases */
-	if (!dev_is_pci(dev))
-		return;
+	if (!dev_is_pci(dev))	/* [한국어] (원 주석: ACPI HID 장치에는 별칭이 없다) */
+		return;	/* [한국어] 할 일이 없다 */
 
 	/*
 	 * Add the IVRS alias to the pci aliases if it is on the same
 	 * bus. The IVRS table may know about a quirk that we don't.
 	 */
-	ivrs_alias = pci_seg->alias_table[pci_dev_id(pdev)];
-	if (ivrs_alias != pci_dev_id(pdev) &&
-	    PCI_BUS_NUM(ivrs_alias) == pdev->bus->number)
-		pci_add_dma_alias(pdev, ivrs_alias & 0xff, 1);
+	ivrs_alias = pci_seg->alias_table[pci_dev_id(pdev)];	/* [한국어] (원 주석: 같은 버스라면 IVRS 별칭을 PCI 별칭에 추가한다. 표가 우리가 모르는 quirk 를 알 수 있다) */
+	if (ivrs_alias != pci_dev_id(pdev) &&	/* [한국어] 자기 자신이 아니고 */
+	    PCI_BUS_NUM(ivrs_alias) == pdev->bus->number)	/* [한국어] 같은 버스면 — PCI 의 추가 인터페이스가 버스 안의 devfn 만 받는다 */
+		pci_add_dma_alias(pdev, ivrs_alias & 0xff, 1);	/* [한국어] IOMMU 만 아는 사실이 시스템 전체가 아는 사실이 된다 */
 
-	clone_aliases(iommu, dev);
+	clone_aliases(iommu, dev);	/* [한국어] 그다음 DTE 를 복제한다 */
 }
 
+/*
+ * [한국어]
+ * find_dev_data - 장치 상태를 찾거나 없으면 만든다
+ *
+ * @iommu: 담당 유닛.
+ * @devid: 장치 id.
+ * @return: 그 상태, 실패하면 NULL.
+ *
+ * defer_attach 를 세우는 부분이 kdump 배려다. 물려받은 변환이 있으면 그
+ * 장치는 이미 동작 중이므로, 지금 도메인에 붙이면서 DTE 를 갈아엎으면
+ * 진행 중이던 DMA 가 끊긴다. 그래서 붙이기를 미뤄 두고, 실제로 매핑이
+ * 필요해지는 시점에 처리한다.
+ *
+ * 호출 체인:
+ *   clone_alias()/amd_iommu_probe_device() → [이 함수] → alloc_dev_data()
+ */
 static struct iommu_dev_data *find_dev_data(struct amd_iommu *iommu, u16 devid)
 {
-	struct iommu_dev_data *dev_data;
+	struct iommu_dev_data *dev_data;	/* [한국어] 찾거나 만들 상태 */
 
-	dev_data = search_dev_data(iommu, devid);
+	dev_data = search_dev_data(iommu, devid);	/* [한국어] 이미 있는지 */
 
-	if (dev_data == NULL) {
-		dev_data = alloc_dev_data(iommu, devid);
-		if (!dev_data)
-			return NULL;
+	if (dev_data == NULL) {	/* [한국어] 없으면 */
+		dev_data = alloc_dev_data(iommu, devid);	/* [한국어] 만든다 */
+		if (!dev_data)	/* [한국어] 실패 */
+			return NULL;	/* [한국어] 상태 없이는 다룰 수 없다 */
 
-		if (translation_pre_enabled(iommu))
-			dev_data->defer_attach = true;
+		if (translation_pre_enabled(iommu))	/* [한국어] 물려받은 변환이 있으면 이 장치는 이미 동작 중이다 */
+			dev_data->defer_attach = true;	/* [한국어] 지금 DTE 를 갈아엎으면 진행 중인 DMA 가 끊기므로 미룬다 */
 	}
 
-	return dev_data;
+	return dev_data;	/* [한국어] 그 상태 */
 }
 
 /*
 * Find or create an IOMMU group for a acpihid device.
 */
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * acpihid_device_group - ACPI HID 장치의 IOMMU 그룹을 찾거나 만든다
+ *
+ * @dev: 대상 장치.
+ * @return: 그룹, 실패하면 ERR_PTR.
+ *
+ * 같은 요청자 id 를 쓰는 플랫폼 장치들은 하드웨어가 구별할 수 없으므로
+ * 같은 그룹에 있어야 한다 — 하나를 게스트에 넘기면 다른 것도 함께 가야
+ * 한다는 뜻이다.
+ *
+ * 그래서 목록에서 같은 devid 의 항목을 찾아 그 그룹을 공유한다. 없으면
+ * 새로 만든다.
+ *
+ * 참조 계수를 늘리는 쪽과 늘리지 않는 쪽이 갈리는 이유: generic_device_group
+ * 은 이미 참조를 들고 돌아오지만, 기존 그룹을 재사용할 때는 우리가 직접
+ * 늘려야 한다.
+ *
+ * 호출 체인:
+ *   amd_iommu_device_group() → [이 함수] → get_acpihid_device_id()
+ */
 static struct iommu_group *acpihid_device_group(struct device *dev)
 {
-	struct acpihid_map_entry *p, *entry = NULL;
-	int devid;
+	struct acpihid_map_entry *p, *entry = NULL;	/* [한국어] 목록 커서와 이 장치의 항목 */
+	int devid;	/* [한국어] 요청자 id */
 
-	devid = get_acpihid_device_id(dev, &entry);
-	if (devid < 0)
-		return ERR_PTR(devid);
+	devid = get_acpihid_device_id(dev, &entry);	/* [한국어] id 와 함께 목록 항목도 받는다 */
+	if (devid < 0)	/* [한국어] 식별할 수 없다 */
+		return ERR_PTR(devid);	/* [한국어] 그룹을 만들 수 없다 */
 
-	list_for_each_entry(p, &acpihid_map, list) {
-		if ((devid == p->devid) && p->group)
-			entry->group = p->group;
+	list_for_each_entry(p, &acpihid_map, list) {	/* [한국어] 같은 요청자 id 의 다른 장치를 찾는다 */
+		if ((devid == p->devid) && p->group)	/* [한국어] 이미 그룹이 있으면 */
+			entry->group = p->group;	/* [한국어] 하드웨어가 구별하지 못하므로 같은 그룹이어야 한다 */
 	}
 
-	if (!entry->group)
-		entry->group = generic_device_group(dev);
+	if (!entry->group)	/* [한국어] 공유할 그룹이 없으면 */
+		entry->group = generic_device_group(dev);	/* [한국어] 새로 만든다 — 이 함수는 참조를 들고 돌아온다 */
 	else
-		iommu_group_ref_get(entry->group);
+		iommu_group_ref_get(entry->group);	/* [한국어] 재사용할 때는 우리가 직접 참조를 늘려야 한다 */
 
-	return entry->group;
+	return entry->group;	/* [한국어] 이 장치가 속할 그룹 */
 }
 
 static inline bool pdev_pasid_supported(struct iommu_dev_data *dev_data)
