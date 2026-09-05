@@ -4602,118 +4602,205 @@ static const struct irq_domain_ops intcapxt_domain_ops = {
 
 static struct irq_domain *iommu_irqdomain;
 
+/*
+ * [한국어]
+ * iommu_get_irqdomain - 모든 유닛이 공유하는 인터럽트 도메인을 얻는다
+ *
+ * @return: 그 도메인, 실패하면 NULL.
+ *
+ * 도메인이 유닛마다가 아니라 시스템에 하나뿐이라는 점이 이 함수의 요점이다.
+ * 도메인은 "설정을 MMIO 로 쓴다"는 방식을 나타낼 뿐이고, 어느 유닛의 어느
+ * 레지스터인지는 인터럽트마다 hwirq/chip_data 에 담기기 때문이다.
+ *
+ * 첫 호출에서 만들고 이후에는 그것을 돌려준다. 원 주석이 밝히듯 초기화가
+ * 단일 스레드라 락이 필요 없다 — "아직은(yet)"이라는 단서가 그 전제가
+ * 깨질 수 있음을 시사한다.
+ *
+ * x86_vector_domain 을 부모로 삼는다. 실제 CPU 벡터는 그쪽이 잡고, 이
+ * 계층은 그 위에 MMIO 설정을 얹는다.
+ *
+ * 호출 체인:
+ *   __iommu_setup_intcapxt() → [이 함수]
+ */
 static struct irq_domain *iommu_get_irqdomain(void)
 {
-	struct fwnode_handle *fn;
+	struct fwnode_handle *fn;	/* [한국어] 도메인을 이름으로 식별할 펌웨어 노드 */
 
 	/* No need for locking here (yet) as the init is single-threaded */
-	if (iommu_irqdomain)
-		return iommu_irqdomain;
+	if (iommu_irqdomain)	/* [한국어] (원 주석: 초기화가 단일 스레드라 아직은 락이 필요 없다) */
+		return iommu_irqdomain;	/* [한국어] 이미 만들었으면 그것을 공유한다 — 도메인은 시스템에 하나뿐이다 */
 
-	fn = irq_domain_alloc_named_fwnode("AMD-Vi-MSI");
-	if (!fn)
-		return NULL;
+	fn = irq_domain_alloc_named_fwnode("AMD-Vi-MSI");	/* [한국어] /proc/interrupts 등에 이 이름으로 보인다 */
+	if (!fn)	/* [한국어] 노드 할당 실패 */
+		return NULL;	/* [한국어] 도메인을 만들 수 없다 */
 
-	iommu_irqdomain = irq_domain_create_hierarchy(x86_vector_domain, 0, 0,
-						      fn, &intcapxt_domain_ops,
-						      NULL);
-	if (!iommu_irqdomain)
-		irq_domain_free_fwnode(fn);
+	iommu_irqdomain = irq_domain_create_hierarchy(x86_vector_domain, 0, 0,	/* [한국어] 실제 CPU 벡터는 부모가 잡는다 */
+						      fn, &intcapxt_domain_ops,	/* [한국어] 이 계층은 그 위에 MMIO 설정을 얹는다 */
+						      NULL);	/* [한국어] 호스트 데이터 없음 — 유닛 정보는 인터럽트마다 chip_data 에 담긴다 */
+	if (!iommu_irqdomain)	/* [한국어] 도메인 생성 실패 */
+		irq_domain_free_fwnode(fn);	/* [한국어] 노드를 되돌린다 */
 
-	return iommu_irqdomain;
+	return iommu_irqdomain;	/* [한국어] 성공하면 도메인, 실패하면 NULL */
 }
 
+/*
+ * [한국어]
+ * __iommu_setup_intcapxt - 로그 인터럽트 하나를 잡고 핸들러를 건다
+ *
+ * @iommu: 대상 유닛.
+ * @devname: /proc/interrupts 에 보일 이름.
+ * @hwirq: 설정을 쓸 MMIO 레지스터의 오프셋.
+ * @thread_fn: 그 인터럽트의 스레드 핸들러.
+ * @return: 0 성공, 음수면 실패.
+ *
+ * 세 로그(이벤트/PPR/GA)가 같은 절차를 쓰므로 다른 점만 인자로 받는다.
+ *
+ * hwirq 로 MMIO 오프셋을 넘기는 것이 이 도메인의 규약이다. 그 값이
+ * irq_data 에 실려 unmask 가 설정을 쓸 주소가 된다.
+ *
+ * 유닛과 같은 NUMA 노드에서 인터럽트를 잡는 이유: 핸들러가 그 유닛의
+ * 로그 버퍼를 읽으므로, 같은 노드의 CPU 에서 처리하는 편이 빠르다.
+ *
+ * 실패 시 irq_domain_remove 까지 부르는 것이 눈에 띈다. 도메인은 공유
+ * 자원인데 여기서 없애면 다른 유닛의 인터럽트도 사라진다 — 다만 이 경로가
+ * 실패하면 어차피 초기화 전체가 중단되므로 실질적인 문제는 되지 않는다.
+ *
+ * 호출 체인:
+ *   iommu_setup_intcapxt() → [이 함수] → iommu_get_irqdomain()
+ */
 static int __iommu_setup_intcapxt(struct amd_iommu *iommu, const char *devname,
 				  int hwirq, irq_handler_t thread_fn)
 {
-	struct irq_domain *domain;
-	struct irq_alloc_info info;
-	int irq, ret;
-	int node = dev_to_node(&iommu->dev->dev);
+	struct irq_domain *domain;	/* [한국어] 공유 도메인 */
+	struct irq_alloc_info info;	/* [한국어] 도메인에 넘길 요청 정보 */
+	int irq, ret;	/* [한국어] 잡은 인터럽트 번호와 결과 */
+	int node = dev_to_node(&iommu->dev->dev);	/* [한국어] 핸들러가 이 유닛의 버퍼를 읽으므로 같은 노드가 낫다 */
 
-	domain = iommu_get_irqdomain();
-	if (!domain)
-		return -ENXIO;
+	domain = iommu_get_irqdomain();	/* [한국어] 없으면 여기서 만들어진다 */
+	if (!domain)	/* [한국어] 도메인이 없다 */
+		return -ENXIO;	/* [한국어] 인터럽트를 잡을 수 없다 */
 
-	init_irq_alloc_info(&info, NULL);
-	info.type = X86_IRQ_ALLOC_TYPE_AMDVI;
-	info.data = iommu;
-	info.hwirq = hwirq;
+	init_irq_alloc_info(&info, NULL);	/* [한국어] 요청 정보를 초기화 */
+	info.type = X86_IRQ_ALLOC_TYPE_AMDVI;	/* [한국어] 이 도메인이 받아들이는 종류 */
+	info.data = iommu;	/* [한국어] chip_data 가 되어 어느 유닛인지 알려 준다 */
+	info.hwirq = hwirq;	/* [한국어] 설정을 쓸 MMIO 오프셋. 이 도메인의 규약이다 */
 
-	irq = irq_domain_alloc_irqs(domain, 1, node, &info);
-	if (irq < 0) {
-		irq_domain_remove(domain);
-		return irq;
+	irq = irq_domain_alloc_irqs(domain, 1, node, &info);	/* [한국어] 부모의 벡터 위에 이 계층을 얹어 인터럽트 하나를 잡는다 */
+	if (irq < 0) {	/* [한국어] 벡터 부족이나 배선 실패 */
+		irq_domain_remove(domain);	/* [한국어] 초기화가 어차피 중단되므로 공유 도메인도 정리한다 */
+		return irq;	/* [한국어] 실패 보고 */
 	}
 
-	ret = request_threaded_irq(irq, NULL, thread_fn, IRQF_ONESHOT, devname,
-				   iommu);
-	if (ret) {
-		irq_domain_free_irqs(irq, 1);
-		irq_domain_remove(domain);
-		return ret;
+	ret = request_threaded_irq(irq, NULL, thread_fn, IRQF_ONESHOT, devname,	/* [한국어] 로그 처리가 짧지 않아 스레드 핸들러를 쓴다 */
+				   iommu);	/* [한국어] 핸들러가 받을 유닛 */
+	if (ret) {	/* [한국어] 핸들러 등록 실패 */
+		irq_domain_free_irqs(irq, 1);	/* [한국어] 잡은 인터럽트를 되돌리고 */
+		irq_domain_remove(domain);	/* [한국어] 도메인도 */
+		return ret;	/* [한국어] 실패 보고 */
 	}
 
-	return 0;
+	return 0;	/* [한국어] 이 로그의 인터럽트가 준비됐다 */
 }
 
+/*
+ * [한국어]
+ * iommu_setup_intcapxt - 유닛의 세 로그 인터럽트를 모두 잡는다
+ *
+ * @iommu: 대상 유닛.
+ * @return: 0 성공, 음수면 어느 하나가 실패.
+ *
+ * x2APIC 모드에서 쓰는 경로다. MSI 와 달리 로그마다 별도의 인터럽트를
+ * 가질 수 있어, 이벤트·PPR·GA 를 각각 다른 CPU 에서 처리할 수 있다.
+ *
+ * 이름을 구조체 안의 버퍼에 만드는 이유: request_irq 는 이름 포인터를
+ * 보관만 하고 복사하지 않는다. 지역 변수를 넘기면 함수가 끝난 뒤
+ * /proc/interrupts 가 사라진 메모리를 읽는다.
+ *
+ * GA 인터럽트만 #ifdef 안에 있다. 재매핑을 끈 커널에서는 GA 로그 자체가
+ * 없기 때문이다.
+ *
+ * 호출 체인:
+ *   iommu_init_irq() → [이 함수] → __iommu_setup_intcapxt()
+ */
 static int iommu_setup_intcapxt(struct amd_iommu *iommu)
 {
-	int ret;
+	int ret;	/* [한국어] 각 단계의 결과 */
 
-	snprintf(iommu->evt_irq_name, sizeof(iommu->evt_irq_name),
-		 "AMD-Vi%d-Evt", iommu->index);
-	ret = __iommu_setup_intcapxt(iommu, iommu->evt_irq_name,
-				     MMIO_INTCAPXT_EVT_OFFSET,
-				     amd_iommu_int_thread_evtlog);
+	snprintf(iommu->evt_irq_name, sizeof(iommu->evt_irq_name),	/* [한국어] 구조체 안의 버퍼에 만든다 — request_irq 는 이름을 복사하지 않는다 */
+		 "AMD-Vi%d-Evt", iommu->index);	/* [한국어] 유닛 번호를 넣어 구별할 수 있게 */
+	ret = __iommu_setup_intcapxt(iommu, iommu->evt_irq_name,	/* [한국어] 이벤트 로그 인터럽트 */
+				     MMIO_INTCAPXT_EVT_OFFSET,	/* [한국어] 그 설정 레지스터의 오프셋 */
+				     amd_iommu_int_thread_evtlog);	/* [한국어] 전용 핸들러 */
 	if (ret)
 		return ret;
 
-	snprintf(iommu->ppr_irq_name, sizeof(iommu->ppr_irq_name),
-		 "AMD-Vi%d-PPR", iommu->index);
-	ret = __iommu_setup_intcapxt(iommu, iommu->ppr_irq_name,
-				     MMIO_INTCAPXT_PPR_OFFSET,
-				     amd_iommu_int_thread_pprlog);
+	snprintf(iommu->ppr_irq_name, sizeof(iommu->ppr_irq_name),	/* [한국어] PPR 로그 인터럽트의 이름 */
+		 "AMD-Vi%d-PPR", iommu->index);	/* [한국어] 유닛 번호와 함께 */
+	ret = __iommu_setup_intcapxt(iommu, iommu->ppr_irq_name,	/* [한국어] PPR 인터럽트 */
+				     MMIO_INTCAPXT_PPR_OFFSET,	/* [한국어] 그 설정 레지스터 */
+				     amd_iommu_int_thread_pprlog);	/* [한국어] 전용 핸들러 */
 	if (ret)
 		return ret;
 
 #ifdef CONFIG_IRQ_REMAP
-	snprintf(iommu->ga_irq_name, sizeof(iommu->ga_irq_name),
-		 "AMD-Vi%d-GA", iommu->index);
-	ret = __iommu_setup_intcapxt(iommu, iommu->ga_irq_name,
-				     MMIO_INTCAPXT_GALOG_OFFSET,
-				     amd_iommu_int_thread_galog);
+	snprintf(iommu->ga_irq_name, sizeof(iommu->ga_irq_name),	/* [한국어] GA 로그 인터럽트의 이름 */
+		 "AMD-Vi%d-GA", iommu->index);	/* [한국어] 유닛 번호와 함께 */
+	ret = __iommu_setup_intcapxt(iommu, iommu->ga_irq_name,	/* [한국어] GA 인터럽트 — 재매핑을 켠 커널에서만 */
+				     MMIO_INTCAPXT_GALOG_OFFSET,	/* [한국어] 그 설정 레지스터 */
+				     amd_iommu_int_thread_galog);	/* [한국어] 전용 핸들러 */
 #endif
 
-	return ret;
+	return ret;	/* [한국어] 세 인터럽트가 모두 준비됐다 */
 }
 
+/*
+ * [한국어]
+ * iommu_init_irq - 유닛의 인터럽트를 잡고 폴트 보고를 켠다
+ *
+ * @iommu: 대상 유닛.
+ * @return: 0 성공, -ENODEV 면 인터럽트를 잡을 방법이 없다.
+ *
+ * 두 방식 중 하나를 고른다. x2APIC 모드면 MMIO 방식(intcapxt)을, 아니면
+ * 평범한 MSI 를 쓴다. 후자는 장치에 MSI 능력이 있어야 하므로 그것도 확인한다.
+ *
+ * int_enabled 로 중복 등록을 막는 것이 눈에 띈다. 이 함수는 서스펜드에서
+ * 깨어날 때도 불리는데, 그때는 인터럽트가 이미 잡혀 있고 하드웨어의
+ * 활성화 비트만 다시 세우면 된다 — enable_faults 레이블이 그 진입점이다.
+ *
+ * 마지막에 이벤트 인터럽트를 켜는 것이 순서상 중요하다. 앞 단계에서 로그
+ * 기록만 켜 두고 인터럽트는 미뤄 두었는데, 핸들러가 등록되기 전에 인터럽트가
+ * 오면 처리할 곳이 없기 때문이다.
+ *
+ * 호출 체인:
+ *   amd_iommu_enable_interrupts() → [이 함수]
+ *     → iommu_setup_intcapxt()/iommu_setup_msi()
+ */
 static int iommu_init_irq(struct amd_iommu *iommu)
 {
-	int ret;
+	int ret;	/* [한국어] 결과 */
 
-	if (iommu->int_enabled)
-		goto enable_faults;
+	if (iommu->int_enabled)	/* [한국어] 서스펜드에서 깨어난 경우 — 인터럽트는 이미 잡혀 있다 */
+		goto enable_faults;	/* [한국어] 하드웨어의 활성화 비트만 다시 세우면 된다 */
 
-	if (amd_iommu_xt_mode == IRQ_REMAP_X2APIC_MODE)
-		ret = iommu_setup_intcapxt(iommu);
-	else if (iommu->dev->msi_cap)
-		ret = iommu_setup_msi(iommu);
+	if (amd_iommu_xt_mode == IRQ_REMAP_X2APIC_MODE)	/* [한국어] x2APIC 모드면 */
+		ret = iommu_setup_intcapxt(iommu);	/* [한국어] 로그마다 별도 인터럽트를 잡는 MMIO 방식 */
+	else if (iommu->dev->msi_cap)	/* [한국어] 아니면 장치에 MSI 능력이 있는지 보고 */
+		ret = iommu_setup_msi(iommu);	/* [한국어] 평범한 MSI 하나를 잡는다 */
 	else
-		ret = -ENODEV;
+		ret = -ENODEV;	/* [한국어] 둘 다 안 되면 인터럽트를 받을 방법이 없다 */
 
 	if (ret)
-		return ret;
+		return ret;	/* [한국어] 실패 보고 */
 
-	iommu->int_enabled = true;
+	iommu->int_enabled = true;	/* [한국어] 다음에 불려도 다시 잡지 않게 */
 enable_faults:
 
-	if (amd_iommu_xt_mode == IRQ_REMAP_X2APIC_MODE)
-		iommu_feature_enable(iommu, CONTROL_INTCAPXT_EN);
+	if (amd_iommu_xt_mode == IRQ_REMAP_X2APIC_MODE)	/* [한국어] MMIO 방식을 쓴다면 */
+		iommu_feature_enable(iommu, CONTROL_INTCAPXT_EN);	/* [한국어] 하드웨어에 그 방식을 쓰라고 알린다 */
 
-	iommu_feature_enable(iommu, CONTROL_EVT_INT_EN);
+	iommu_feature_enable(iommu, CONTROL_EVT_INT_EN);	/* [한국어] 이제 핸들러가 있으므로 이벤트 인터럽트를 켠다 — 앞 단계가 미뤄 둔 일이다 */
 
-	return 0;
+	return 0;	/* [한국어] 인터럽트 준비 완료 */
 }
 
 /****************************************************************************
@@ -4724,57 +4811,99 @@ enable_faults:
  *
  ****************************************************************************/
 
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * free_unity_maps - 모든 세그먼트의 항등 매핑 목록을 놓는다
+ *
+ * 초기화 실패 정리 경로다. 목록이 세그먼트마다 있으므로 이중 순회가 된다.
+ *
+ * 항등 매핑 정보는 도메인을 만들 때마다 참조되므로, 정상 동작 중에는
+ * 놓지 않는다.
+ *
+ * 호출 체인:
+ *   free_iommu_resources() → [이 함수]
+ */
 static void __init free_unity_maps(void)
 {
-	struct unity_map_entry *entry, *next;
-	struct amd_iommu_pci_seg *p, *pci_seg;
+	struct unity_map_entry *entry, *next;	/* [한국어] 목록에서 빼며 훑는다 */
+	struct amd_iommu_pci_seg *p, *pci_seg;	/* [한국어] 목록이 세그먼트마다 있어 이중 순회 */
 
-	for_each_pci_segment_safe(pci_seg, p) {
-		list_for_each_entry_safe(entry, next, &pci_seg->unity_map, list) {
-			list_del(&entry->list);
-			kfree(entry);
+	for_each_pci_segment_safe(pci_seg, p) {	/* [한국어] 모든 세그먼트 */
+		list_for_each_entry_safe(entry, next, &pci_seg->unity_map, list) {	/* [한국어] 그 세그먼트의 항등 매핑들 */
+			list_del(&entry->list);	/* [한국어] 목록에서 빼고 */
+			kfree(entry);	/* [한국어] 놓는다 */
 		}
 	}
 }
 
 /* called for unity map ACPI definition */
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * init_unity_map_range - IVMD 항목 하나를 항등 매핑 목록에 등록한다
+ *
+ * @m: IVMD 헤더.
+ * @ivrs_base: IVRS 표(세그먼트를 찾는 데 쓴다).
+ * @return: 0 성공(모르는 타입도 0), -ENOMEM 이면 할당 실패.
+ *
+ * 펌웨어가 "이 장치들은 이 물리 주소 구간을 그대로 써야 한다"고 요구한
+ * 것을 목록에 담는다. 도메인을 만들 때마다 이 목록을 훑어 매핑을 넣어 준다.
+ *
+ * 타입에 따라 적용 대상이 다르다: 장치 하나, 세그먼트 전체, 또는 범위.
+ * 모르는 타입은 조용히 무시한다 — 표에 우리가 이해하지 못하는 항목이 있어도
+ * 부팅을 막을 이유가 없다.
+ *
+ * 주소를 페이지 단위로 올림하는 이유: IOMMU 는 페이지 단위로만 매핑한다.
+ *
+ * prot 를 flags >> 1 로 얻는 것은 IVMD_FLAG_IR/IW 가 IOMMU_PROT_IR/IW 와
+ * 한 비트 어긋나 있기 때문이다.
+ *
+ * 제외 범위를 읽기/쓰기 항등 매핑으로 바꿔 다루는 것이 이 함수에서 가장
+ * 중요한 판단이다. 원 주석이 이유를 밝힌다: IVMD 항목이 여럿이면 일부
+ * BIOS 가 제외 범위 레지스터를 덮어써 앞의 설정을 잃는다. 항등 매핑으로
+ * 다루면 레지스터가 아니라 페이지 테이블에 담기므로 그런 충돌이 없다.
+ *
+ * 호출 체인:
+ *   init_memory_definitions() → [이 함수] → get_pci_segment()
+ */
 static int __init init_unity_map_range(struct ivmd_header *m,
 				       struct acpi_table_header *ivrs_base)
 {
-	struct unity_map_entry *e = NULL;
-	struct amd_iommu_pci_seg *pci_seg;
-	char *s;
+	struct unity_map_entry *e = NULL;	/* [한국어] 목록에 담을 항목 */
+	struct amd_iommu_pci_seg *pci_seg;	/* [한국어] 대상 세그먼트 */
+	char *s;	/* [한국어] 로그에 쓸 타입 이름 */
 
-	pci_seg = get_pci_segment(m->pci_seg, ivrs_base);
-	if (pci_seg == NULL)
-		return -ENOMEM;
+	pci_seg = get_pci_segment(m->pci_seg, ivrs_base);	/* [한국어] 없으면 여기서 만들어진다 */
+	if (pci_seg == NULL)	/* [한국어] 세그먼트를 만들 수 없다 */
+		return -ENOMEM;	/* [한국어] 등록 불가 */
 
-	e = kzalloc_obj(*e);
-	if (e == NULL)
-		return -ENOMEM;
+	e = kzalloc_obj(*e);	/* [한국어] 항목 할당 */
+	if (e == NULL)	/* [한국어] 메모리 부족 */
+		return -ENOMEM;	/* [한국어] 등록 불가 */
 
-	switch (m->type) {
-	default:
-		kfree(e);
-		return 0;
-	case ACPI_IVMD_TYPE:
-		s = "IVMD_TYPEi\t\t\t";
-		e->devid_start = e->devid_end = m->devid;
+	switch (m->type) {	/* [한국어] 적용 대상이 타입마다 다르다 */
+	default:	/* [한국어] 드라이버가 모르는 타입 */
+		kfree(e);	/* [한국어] 할당한 항목을 놓고 */
+		return 0;	/* [한국어] 조용히 무시한다 — 부팅을 막을 이유가 없다 */
+	case ACPI_IVMD_TYPE:	/* [한국어] 장치 하나 */
+		s = "IVMD_TYPEi\t\t\t";	/* [한국어] 로그용 이름 */
+		e->devid_start = e->devid_end = m->devid;	/* [한국어] 시작과 끝이 같다 */
 		break;
-	case ACPI_IVMD_TYPE_ALL:
-		s = "IVMD_TYPE_ALL\t\t";
-		e->devid_start = 0;
-		e->devid_end = pci_seg->last_bdf;
+	case ACPI_IVMD_TYPE_ALL:	/* [한국어] 세그먼트의 모든 장치 */
+		s = "IVMD_TYPE_ALL\t\t";	/* [한국어] 로그용 이름 */
+		e->devid_start = 0;	/* [한국어] 0 부터 */
+		e->devid_end = pci_seg->last_bdf;	/* [한국어] 최대 id 까지 */
 		break;
-	case ACPI_IVMD_TYPE_RANGE:
-		s = "IVMD_TYPE_RANGE\t\t";
-		e->devid_start = m->devid;
-		e->devid_end = m->aux;
+	case ACPI_IVMD_TYPE_RANGE:	/* [한국어] 장치 범위 */
+		s = "IVMD_TYPE_RANGE\t\t";	/* [한국어] 로그용 이름 */
+		e->devid_start = m->devid;	/* [한국어] 범위의 시작 */
+		e->devid_end = m->aux;	/* [한국어] 끝은 aux 필드에 있다 */
 		break;
 	}
-	e->address_start = PAGE_ALIGN(m->range_start);
-	e->address_end = e->address_start + PAGE_ALIGN(m->range_length);
-	e->prot = m->flags >> 1;
+	e->address_start = PAGE_ALIGN(m->range_start);	/* [한국어] IOMMU 는 페이지 단위로만 매핑한다 */
+	e->address_end = e->address_start + PAGE_ALIGN(m->range_length);	/* [한국어] 길이도 올림해 구간을 넉넉히 잡는다 */
+	e->prot = m->flags >> 1;	/* [한국어] IVMD 의 IR/IW 비트가 IOMMU_PROT 와 한 비트 어긋나 있다 */
 
 	/*
 	 * Treat per-device exclusion ranges as r/w unity-mapped regions
@@ -4783,10 +4912,10 @@ static int __init init_unity_map_range(struct ivmd_header *m,
 	 * happens when there are multiple exclusion ranges (IVMD entries)
 	 * defined in ACPI table.
 	 */
-	if (m->flags & IVMD_FLAG_EXCL_RANGE)
-		e->prot = (IVMD_FLAG_IW | IVMD_FLAG_IR) >> 1;
+	if (m->flags & IVMD_FLAG_EXCL_RANGE)	/* [한국어] (원 주석: 장치별 제외 범위를 읽기/쓰기 항등 매핑으로 다룬다) */
+		e->prot = (IVMD_FLAG_IW | IVMD_FLAG_IR) >> 1;	/* [한국어] IVMD 가 여럿이면 일부 BIOS 가 제외 범위 레지스터를 덮어써 앞 설정을 잃는다. 페이지 테이블에 담으면 그런 충돌이 없다 */
 
-	DUMP_printk("%s devid_start: %04x:%02x:%02x.%x devid_end: "
+	DUMP_printk("%s devid_start: %04x:%02x:%02x.%x devid_end: "	/* [한국어] 상세 로그: 적용 범위와 주소 구간 */
 		    "%04x:%02x:%02x.%x range_start: %016llx range_end: %016llx"
 		    " flags: %x\n", s, m->pci_seg,
 		    PCI_BUS_NUM(e->devid_start), PCI_SLOT(e->devid_start),
@@ -4795,74 +4924,153 @@ static int __init init_unity_map_range(struct ivmd_header *m,
 		    PCI_SLOT(e->devid_end), PCI_FUNC(e->devid_end),
 		    e->address_start, e->address_end, m->flags);
 
-	list_add_tail(&e->list, &pci_seg->unity_map);
+	list_add_tail(&e->list, &pci_seg->unity_map);	/* [한국어] 도메인을 만들 때마다 이 목록을 훑는다 */
 
-	return 0;
+	return 0;	/* [한국어] 등록 완료 */
 }
 
 /* iterates over all memory definitions we find in the ACPI table */
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * init_memory_definitions - 표의 모든 IVMD 를 훑는다
+ *
+ * @table: IVRS 표.
+ * @return: 항상 0.
+ *
+ * 표를 세 번 훑는 것 중 마지막이다. 앞의 둘이 유닛과 장치를 다뤘다면
+ * 여기서는 메모리 요구사항만 모은다.
+ *
+ * 항등 매핑이나 제외 범위 플래그가 있는 항목만 처리한다. 그 둘 중 하나도
+ * 없는 IVMD 는 이 드라이버가 할 일이 없는 항목이다.
+ *
+ * 실패해도 0 을 돌려주는 것에 유의: init_unity_map_range 의 반환값을 보지
+ * 않는다. 항등 매핑 하나를 등록하지 못해도 부팅은 계속하는 편이 낫다는
+ * 판단이며, 그 결과는 해당 장치가 오동작하는 것으로 나타난다.
+ *
+ * 호출 체인:
+ *   early_amd_iommu_init() → [이 함수] → init_unity_map_range()
+ */
 static int __init init_memory_definitions(struct acpi_table_header *table)
 {
-	u8 *p = (u8 *)table, *end = (u8 *)table;
-	struct ivmd_header *m;
+	u8 *p = (u8 *)table, *end = (u8 *)table;	/* [한국어] 표를 훑을 커서와 끝 */
+	struct ivmd_header *m;	/* [한국어] 현재 IVMD */
 
-	end += table->length;
-	p += IVRS_HEADER_LENGTH;
+	end += table->length;	/* [한국어] 표의 끝 */
+	p += IVRS_HEADER_LENGTH;	/* [한국어] 첫 항목으로 */
 
-	while (p < end) {
-		m = (struct ivmd_header *)p;
-		if (m->flags & (IVMD_FLAG_UNITY_MAP | IVMD_FLAG_EXCL_RANGE))
-			init_unity_map_range(m, table);
+	while (p < end) {	/* [한국어] 항목을 하나씩 */
+		m = (struct ivmd_header *)p;	/* [한국어] 현재 위치를 IVMD 로 */
+		if (m->flags & (IVMD_FLAG_UNITY_MAP | IVMD_FLAG_EXCL_RANGE))	/* [한국어] 둘 중 하나라도 없으면 이 드라이버가 할 일이 없다 */
+			init_unity_map_range(m, table);	/* [한국어] 반환값을 보지 않는다 — 하나를 놓쳐도 부팅은 계속하는 편이 낫다 */
 
-		p += m->length;
+		p += m->length;	/* [한국어] 다음 항목으로 */
 	}
 
-	return 0;
+	return 0;	/* [한국어] 세 번째 순회 완료 */
 }
 
 /*
  * Init the device table to not allow DMA access for devices
  */
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * init_device_table_dma - 설정되지 않은 장치의 DMA 를 차단한다
+ *
+ * @pci_seg: 대상 세그먼트.
+ *
+ * 이 함수가 IOMMU 격리의 기본값을 정한다. 표의 모든 항목에 V(유효)와
+ * TV(변환 유효)를 세우면, 페이지 테이블이 없는 장치의 요청은 "변환할
+ * 매핑이 없음"으로 차단된다.
+ *
+ * V 만 세우고 TV 를 세우지 않으면 변환 없이 통과시킨다는 뜻이 되므로,
+ * 둘을 함께 세우는 것이 곧 "차단"이다.
+ *
+ * SNP 환경에서 TV 를 세우지 않는 이유: 그 모드에서는 하드웨어가 별도의
+ * 무결성 검사를 하고, TV 의 의미가 달라진다.
+ *
+ * 순서가 중요하다 — 항등 매핑이 먼저 만들어진 뒤에 불려야 한다. 반대로
+ * 하면 그 매핑을 쓰는 장치까지 차단된다(amd_iommu_init_pci 참고).
+ *
+ * 호출 체인:
+ *   amd_iommu_init_pci() → [이 함수]
+ */
 static void init_device_table_dma(struct amd_iommu_pci_seg *pci_seg)
 {
-	u32 devid;
-	struct dev_table_entry *dev_table = pci_seg->dev_table;
+	u32 devid;	/* [한국어] 순회 인덱스 */
+	struct dev_table_entry *dev_table = pci_seg->dev_table;	/* [한국어] 대상 표 */
 
-	if (!dev_table || amd_iommu_pgtable == PD_MODE_NONE)
-		return;
+	if (!dev_table || amd_iommu_pgtable == PD_MODE_NONE)	/* [한국어] 표가 없거나 DMA 변환을 아예 쓰지 않는 구성 */
+		return;	/* [한국어] 차단할 것이 없다 */
 
-	for (devid = 0; devid <= pci_seg->last_bdf; ++devid) {
-		set_dte_bit(&dev_table[devid], DEV_ENTRY_VALID);
-		if (!amd_iommu_snp_en)
-			set_dte_bit(&dev_table[devid], DEV_ENTRY_TRANSLATION);
+	for (devid = 0; devid <= pci_seg->last_bdf; ++devid) {	/* [한국어] 모든 항목에 */
+		set_dte_bit(&dev_table[devid], DEV_ENTRY_VALID);	/* [한국어] V — 하드웨어가 아는 장치로 만든다 */
+		if (!amd_iommu_snp_en)	/* [한국어] SNP 에서는 TV 의 의미가 달라 세우지 않는다 */
+			set_dte_bit(&dev_table[devid], DEV_ENTRY_TRANSLATION);	/* [한국어] TV — V 와 함께 서야 "변환하되 매핑이 없으므로 차단"이 된다 */
 	}
 }
 
+/*
+ * [한국어]
+ * uninit_device_table_dma - 장치 테이블을 통째로 지운다
+ *
+ * @pci_seg: 대상 세그먼트.
+ *
+ * 초기화 실패 정리 경로다. 모든 항목의 앞 두 워드를 0 으로 만들면 V 가
+ * 내려가 그 장치들이 IOMMU 에게 "모르는 장치"가 된다.
+ *
+ * 그 상태의 요청은 이벤트 로그를 채우는 오류가 되지만, 어차피 IOMMU 를
+ * 끄고 물러나는 경로이므로 문제되지 않는다.
+ *
+ * 뒤 두 워드(인터럽트 재매핑 정보)를 남기는 것에 유의: DMA 를 포기해도
+ * 인터럽트 재매핑은 계속 쓸 수 있다.
+ *
+ * 호출 체인:
+ *   amd_iommu_uninit_devices()/실패 정리 → [이 함수]
+ */
 static void __init uninit_device_table_dma(struct amd_iommu_pci_seg *pci_seg)
 {
-	u32 devid;
-	struct dev_table_entry *dev_table = pci_seg->dev_table;
+	u32 devid;	/* [한국어] 순회 인덱스 */
+	struct dev_table_entry *dev_table = pci_seg->dev_table;	/* [한국어] 대상 표 */
 
-	if (dev_table == NULL)
-		return;
+	if (dev_table == NULL)	/* [한국어] 표가 없으면 */
+		return;	/* [한국어] 지울 것이 없다 */
 
-	for (devid = 0; devid <= pci_seg->last_bdf; ++devid) {
-		dev_table[devid].data[0] = 0ULL;
-		dev_table[devid].data[1] = 0ULL;
+	for (devid = 0; devid <= pci_seg->last_bdf; ++devid) {	/* [한국어] 모든 항목의 */
+		dev_table[devid].data[0] = 0ULL;	/* [한국어] 앞 워드를 지운다 — V 가 내려가 "모르는 장치"가 된다 */
+		dev_table[devid].data[1] = 0ULL;	/* [한국어] 두 번째 워드까지. 뒤 두 워드(인터럽트 재매핑)는 남긴다 */
 	}
 }
 
+/*
+ * [한국어]
+ * init_device_table - 모든 장치의 인터럽트 재매핑을 켠다
+ *
+ * 이름과 달리 DMA 가 아니라 인터럽트 쪽만 건드린다. 모든 DTE 에 IRQ_TBL_EN
+ * 을 세워, 그 장치의 인터럽트가 재매핑 표를 거치게 만든다.
+ *
+ * 재매핑을 쓰지 않으면 곧바로 돌아간다.
+ *
+ * 왜 모든 장치에 미리 세우는가: 표 자체는 장치가 인터럽트를 실제로 쓸 때
+ * 만들어지지만, 이 비트가 없으면 그 사이에 온 인터럽트가 재매핑을 우회한다.
+ * 미리 켜 두면 표가 없는 장치의 인터럽트는 폴트가 되어 차단된다 — 우회보다
+ * 안전한 실패다.
+ *
+ * 호출 체인:
+ *   early_enable_iommus() → [이 함수]
+ */
 static void init_device_table(void)
 {
-	struct amd_iommu_pci_seg *pci_seg;
-	u32 devid;
+	struct amd_iommu_pci_seg *pci_seg;	/* [한국어] 세그먼트 순회용 */
+	u32 devid;	/* [한국어] 장치 순회용 */
 
-	if (!amd_iommu_irq_remap)
-		return;
+	if (!amd_iommu_irq_remap)	/* [한국어] 재매핑을 쓰지 않으면 */
+		return;	/* [한국어] 할 일이 없다 */
 
-	for_each_pci_segment(pci_seg) {
-		for (devid = 0; devid <= pci_seg->last_bdf; ++devid)
-			set_dte_bit(&pci_seg->dev_table[devid], DEV_ENTRY_IRQ_TBL_EN);
+	for_each_pci_segment(pci_seg) {	/* [한국어] 모든 세그먼트의 */
+		for (devid = 0; devid <= pci_seg->last_bdf; ++devid)	/* [한국어] 모든 장치에 */
+			set_dte_bit(&pci_seg->dev_table[devid], DEV_ENTRY_IRQ_TBL_EN);	/* [한국어] 미리 켜 둔다. 표가 없는 장치의 인터럽트는 폴트가 되어 차단된다 — 우회보다 안전한 실패다 */
 	}
 }
 
