@@ -4432,77 +4432,145 @@ static struct iommu_group *amd_iommu_device_group(struct device *dev)
  *
  *****************************************************************************/
 
+/*
+ * [한국어]
+ * protection_domain_init - 도메인의 자료구조를 초기 상태로 만든다
+ *
+ * @domain: 초기화할 도메인.
+ *
+ * 세 목록과 배열이 각각 다른 것을 담는다: dev_list 는 무효화 대상 장치,
+ * dev_data_list 는 PASID 별 상태, viommu_list 는 이 도메인을 부모로 삼은
+ * 중첩 도메인, iommu_array 는 명령을 보내야 할 유닛들이다.
+ *
+ * 락 하나가 이 넷을 모두 지킨다.
+ */
 static void protection_domain_init(struct protection_domain *domain)
 {
-	spin_lock_init(&domain->lock);
-	INIT_LIST_HEAD(&domain->dev_list);
-	INIT_LIST_HEAD(&domain->dev_data_list);
-	INIT_LIST_HEAD(&domain->viommu_list);
-	xa_init(&domain->iommu_array);
+	spin_lock_init(&domain->lock);	/* [한국어] 아래 목록과 배열을 모두 이 락이 지킨다 */
+	INIT_LIST_HEAD(&domain->dev_list);	/* [한국어] 무효화 대상 장치들 */
+	INIT_LIST_HEAD(&domain->dev_data_list);	/* [한국어] PASID 별 상태 */
+	INIT_LIST_HEAD(&domain->viommu_list);	/* [한국어] 이 도메인을 부모로 삼은 중첩 도메인들 */
+	xa_init(&domain->iommu_array);	/* [한국어] 명령을 보내야 할 유닛들 */
 }
 
+/*
+ * [한국어]
+ * protection_domain_alloc - 보호 도메인을 만든다
+ *
+ * @return: 새 도메인, 실패하면 NULL.
+ *
+ * 도메인 id 배정이 여기서 일어난다. id 는 하드웨어가 TLB 항목에 붙이는
+ * 태그라, id 없이는 무효화를 지시할 방법이 없다 — 그래서 실패하면 도메인
+ * 자체를 만들지 않는다.
+ *
+ * 페이지 테이블은 여기서 만들지 않는다. v1/v2 중 무엇을 쓸지는 호출자가
+ * 정하기 때문이다.
+ */
 struct protection_domain *protection_domain_alloc(void)
 {
-	struct protection_domain *domain;
-	int domid;
+	struct protection_domain *domain;	/* [한국어] 만들 도메인 */
+	int domid;	/* [한국어] TLB 태그가 될 id */
 
-	domain = kzalloc_obj(*domain);
-	if (!domain)
-		return NULL;
+	domain = kzalloc_obj(*domain);	/* [한국어] 0 으로 채워 시작 */
+	if (!domain)	/* [한국어] 메모리 부족 */
+		return NULL;	/* [한국어] 호출자가 -ENOMEM 으로 바꾼다 */
 
-	domid = amd_iommu_pdom_id_alloc();
-	if (domid <= 0) {
-		kfree(domain);
-		return NULL;
+	domid = amd_iommu_pdom_id_alloc();	/* [한국어] id 없이는 무효화를 지시할 수 없다 */
+	if (domid <= 0) {	/* [한국어] 고갈됐거나 실패 */
+		kfree(domain);	/* [한국어] 도메인 자체를 만들지 않는다 */
+		return NULL;	/* [한국어] 호출자에게 */
 	}
-	domain->id = domid;
+	domain->id = domid;	/* [한국어] 이후 모든 무효화 명령이 이 값을 쓴다 */
 
-	protection_domain_init(domain);
+	protection_domain_init(domain);	/* [한국어] 목록과 락 초기화 */
 
-	return domain;
+	return domain;	/* [한국어] 페이지 테이블은 호출자가 붙인다 */
 }
 
+/*
+ * [한국어]
+ * amd_iommu_hd_support - 하드웨어 더티 추적을 쓸 수 있는지 본다
+ *
+ * @iommu: 확인할 유닛.
+ * @return: 쓸 수 있으면 참.
+ *
+ * 더티 추적은 하드웨어가 쓰기가 일어난 페이지에 표시를 남기는 기능이다.
+ * 라이브 마이그레이션에서 바뀐 페이지만 추리는 데 쓴다.
+ *
+ * hatdis(호스트 주소 변환 비활성) 가 켜져 있으면 애초에 호스트 페이지
+ * 테이블을 걷지 않으므로 표시할 자리도 없다.
+ */
 static bool amd_iommu_hd_support(struct amd_iommu *iommu)
 {
-	if (amd_iommu_hatdis)
-		return false;
+	if (amd_iommu_hatdis)	/* [한국어] 호스트 변환을 끈 구성이면 */
+		return false;	/* [한국어] 표시를 남길 페이지 테이블이 없다 */
 
-	return iommu && (iommu->features & FEATURE_HDSUP);
+	return iommu && (iommu->features & FEATURE_HDSUP);	/* [한국어] 하드웨어가 더티 비트를 갱신할 수 있는가 */
 }
 
+/*
+ * [한국어]
+ * amd_iommu_get_top_lock - 페이지 테이블 계층에 도메인 락을 빌려 준다
+ *
+ * @iommupt: 공용 페이지 테이블 객체.
+ * @return: 그 도메인의 락.
+ *
+ * generic_pt 계층은 최상위 표를 바꿀 때 락이 필요한데, 그 락을 스스로 갖는
+ * 대신 드라이버에게 물어본다. 여기서 도메인 락을 돌려주면 페이지 테이블
+ * 변경과 장치 목록 순회가 같은 락 아래에서 직렬화된다 — change_top 이
+ * 장치 목록을 훑어야 하므로 그래야 맞다.
+ */
 static spinlock_t *amd_iommu_get_top_lock(struct pt_iommu *iommupt)
 {
-	struct protection_domain *pdom =
-		container_of(iommupt, struct protection_domain, iommu);
+	struct protection_domain *pdom =	/* [한국어] 공용 객체에서 벤더 도메인으로 */
+		container_of(iommupt, struct protection_domain, iommu);	/* [한국어] 되짚는다 */
 
-	return &pdom->lock;
+	return &pdom->lock;	/* [한국어] 페이지 테이블 변경과 장치 목록 순회를 같은 락으로 직렬화 */
 }
 
 /*
  * Update all HW references to the domain with a new pgtable configuration.
  */
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * amd_iommu_change_top - 최상위 페이지 테이블 교체를 하드웨어에 반영한다
+ *
+ * @iommu_table: 공용 페이지 테이블 객체.
+ * @top_paddr: 새 최상위 표의 물리 주소.
+ * @top_level: 그 단계.
+ *
+ * 주소 공간이 커져 단계가 하나 늘 때 불린다. 최상위가 바뀌면 그 도메인에
+ * 붙은 모든 장치의 DTE 가 옛 루트를 가리키게 되므로 전부 다시 써야 한다.
+ *
+ * 두 번 순회하는 것이 요점이다. 먼저 모든 DTE 를 새 루트로 바꾸고, 그다음
+ * 모두를 무효화한다. 하나씩 쓰고 지우면 그사이 어떤 장치는 새 표를, 어떤
+ * 장치는 옛 표를 보는 구간이 길어진다.
+ *
+ * 실행 컨텍스트: 도메인 락을 쥔 채(assert 로 강제).
+ */
 static void amd_iommu_change_top(struct pt_iommu *iommu_table,
 				 phys_addr_t top_paddr, unsigned int top_level)
 {
-	struct protection_domain *pdom =
-		container_of(iommu_table, struct protection_domain, iommu);
-	struct iommu_dev_data *dev_data;
+	struct protection_domain *pdom =	/* [한국어] 공용 객체에서 */
+		container_of(iommu_table, struct protection_domain, iommu);	/* [한국어] 벤더 도메인으로 */
+	struct iommu_dev_data *dev_data;	/* [한국어] 장치 순회용 */
 
-	lockdep_assert_held(&pdom->lock);
+	lockdep_assert_held(&pdom->lock);	/* [한국어] 장치 목록이 바뀌면 안 된다 */
 
 	/* Update the DTE for all devices attached to this domain */
-	list_for_each_entry(dev_data, &pdom->dev_list, list) {
-		struct amd_iommu *iommu = rlookup_amd_iommu(dev_data->dev);
+	list_for_each_entry(dev_data, &pdom->dev_list, list) {	/* [한국어] (원 주석: 이 도메인에 붙은 모든 장치의 DTE 를 갱신한다) */
+		struct amd_iommu *iommu = rlookup_amd_iommu(dev_data->dev);	/* [한국어] 그 장치를 맡은 유닛 */
 
 		/* Update the HW references with the new level and top ptr */
-		set_dte_entry(iommu, dev_data, top_paddr, top_level);
-		clone_aliases(iommu, dev_data->dev);
+		set_dte_entry(iommu, dev_data, top_paddr, top_level);	/* [한국어] (원 주석: 새 단계와 최상위 포인터로 하드웨어 참조를 갱신) */
+		clone_aliases(iommu, dev_data->dev);	/* [한국어] 별칭 항목도 같은 값이어야 한다 */
 	}
 
-	list_for_each_entry(dev_data, &pdom->dev_list, list)
-		device_flush_dte(dev_data);
+	list_for_each_entry(dev_data, &pdom->dev_list, list)	/* [한국어] 모두 쓴 뒤에 한 번 더 순회하며 */
+		device_flush_dte(dev_data);	/* [한국어] 무효화한다 — 하나씩 쓰고 지우면 혼재 구간이 길어진다 */
 
-	domain_flush_complete(pdom);
+	domain_flush_complete(pdom);	/* [한국어] 모든 장치가 새 표를 보는 것을 확인하고 돌아간다 */
 }
 
 /*
@@ -4510,51 +4578,89 @@ static void amd_iommu_change_top(struct pt_iommu *iommu_table,
  * present (ie mapping) operations. It is a NOP if the IOMMU doesn't have non
  * present caching (like hypervisor shadowing).
  */
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * amd_iommu_iotlb_sync_map - 새로 만든 매핑을 하드웨어에 알린다
+ *
+ * @dom: 대상 도메인.
+ * @iova: 매핑한 범위의 시작.
+ * @size: 크기.
+ * @return: 항상 0.
+ *
+ * 실물 하드웨어에서는 아무것도 하지 않는다. 없던 매핑이 생기는 방향은
+ * 캐시에 남을 것이 없기 때문이다 — 하드웨어는 실패한 변환을 캐시하지 않는다.
+ *
+ * vIOMMU 는 다르다. 하이퍼바이저가 없는 매핑을 "없음"으로 캐시해 둘 수
+ * 있어(non-present cache), 새 매핑을 알려 주지 않으면 계속 실패한다.
+ */
 static int amd_iommu_iotlb_sync_map(struct iommu_domain *dom,
 				    unsigned long iova, size_t size)
 {
-	struct protection_domain *domain = to_pdomain(dom);
-	unsigned long flags;
+	struct protection_domain *domain = to_pdomain(dom);	/* [한국어] 벤더 도메인 */
+	unsigned long flags;	/* [한국어] 인터럽트 상태 */
 
-	if (likely(!amd_iommu_np_cache))
-		return 0;
+	if (likely(!amd_iommu_np_cache))	/* [한국어] 실물 하드웨어는 실패한 변환을 캐시하지 않는다 */
+		return 0;	/* [한국어] 알릴 것이 없다 */
 
-	spin_lock_irqsave(&domain->lock, flags);
-	amd_iommu_domain_flush_pages(domain, iova, size);
-	spin_unlock_irqrestore(&domain->lock, flags);
-	return 0;
+	spin_lock_irqsave(&domain->lock, flags);	/* [한국어] 장치 목록 보호 */
+	amd_iommu_domain_flush_pages(domain, iova, size);	/* [한국어] 하이퍼바이저의 "없음" 캐시를 지운다 */
+	spin_unlock_irqrestore(&domain->lock, flags);	/* [한국어] 끝 */
+	return 0;	/* [한국어] 실패할 수 없는 경로 */
 }
 
+/*
+ * [한국어]
+ * amd_iommu_flush_iotlb_all - 도메인 캐시 전체를 비운다
+ *
+ * @domain: 대상 도메인.
+ *
+ * 범위를 따지는 것이 이득이 없을 만큼 많이 바뀌었을 때 코어가 부른다.
+ */
 static void amd_iommu_flush_iotlb_all(struct iommu_domain *domain)
 {
-	struct protection_domain *dom = to_pdomain(domain);
-	unsigned long flags;
+	struct protection_domain *dom = to_pdomain(domain);	/* [한국어] 벤더 도메인 */
+	unsigned long flags;	/* [한국어] 인터럽트 상태 */
 
-	spin_lock_irqsave(&dom->lock, flags);
-	amd_iommu_domain_flush_all(dom);
-	spin_unlock_irqrestore(&dom->lock, flags);
+	spin_lock_irqsave(&dom->lock, flags);	/* [한국어] 장치 목록과 유닛 배열 보호 */
+	amd_iommu_domain_flush_all(dom);	/* [한국어] 범위를 따지지 않고 통째로 */
+	spin_unlock_irqrestore(&dom->lock, flags);	/* [한국어] 끝 */
 }
 
+/*
+ * [한국어]
+ * amd_iommu_iotlb_sync - 모아 둔 unmap 범위를 한 번에 무효화한다
+ *
+ * @domain: 대상 도메인.
+ * @gather: 코어가 모아 둔 범위와 해제 대기 페이지 목록.
+ *
+ * unmap 마다 무효화하면 명령이 폭증하므로, 코어가 인접한 범위를 모았다가
+ * 여기서 한 번에 지운다.
+ *
+ * 페이지 해제가 무효화 뒤에 오는 것이 핵심이다. 하드웨어가 그 페이지
+ * 테이블을 아직 캐시하고 있는 동안 페이지를 반납하면, 재할당된 메모리를
+ * 하드웨어가 페이지 테이블로 읽는다.
+ */
 static void amd_iommu_iotlb_sync(struct iommu_domain *domain,
 				 struct iommu_iotlb_gather *gather)
 {
-	struct protection_domain *dom = to_pdomain(domain);
-	unsigned long flags;
+	struct protection_domain *dom = to_pdomain(domain);	/* [한국어] 벤더 도메인 */
+	unsigned long flags;	/* [한국어] 인터럽트 상태 */
 
-	spin_lock_irqsave(&dom->lock, flags);
-	amd_iommu_domain_flush_pages(dom, gather->start,
-				     gather->end - gather->start + 1);
-	spin_unlock_irqrestore(&dom->lock, flags);
-	iommu_put_pages_list(&gather->freelist);
+	spin_lock_irqsave(&dom->lock, flags);	/* [한국어] 장치 목록 보호 */
+	amd_iommu_domain_flush_pages(dom, gather->start,	/* [한국어] 코어가 모아 둔 범위를 */
+				     gather->end - gather->start + 1);	/* [한국어] 한 번에 — end 는 포함이라 +1 */
+	spin_unlock_irqrestore(&dom->lock, flags);	/* [한국어] 무효화 명령이 끝난 뒤 */
+	iommu_put_pages_list(&gather->freelist);	/* [한국어] 비로소 페이지를 반납한다 — 순서가 바뀌면 재할당된 메모리를 하드웨어가 읽는다 */
 }
 
 static const struct pt_iommu_driver_ops amd_hw_driver_ops_v1 = {
-	.get_top_lock = amd_iommu_get_top_lock,
-	.change_top = amd_iommu_change_top,
+	.get_top_lock = amd_iommu_get_top_lock,	/* [한국어] 최상위 교체 시 쓸 락을 드라이버에게 물어본다 */
+	.change_top = amd_iommu_change_top,	/* [한국어] 단계가 늘 때 모든 DTE 를 다시 쓴다 */
 };
 
 static const struct iommu_domain_ops amdv1_ops = {
-	IOMMU_PT_DOMAIN_OPS(amdv1),
+	IOMMU_PT_DOMAIN_OPS(amdv1),	/* [한국어] map/unmap 등은 공용 v1 구현이 채운다 */
 	.iotlb_sync_map = amd_iommu_iotlb_sync_map,
 	.flush_iotlb_all = amd_iommu_flush_iotlb_all,
 	.iotlb_sync = amd_iommu_iotlb_sync,
@@ -4564,37 +4670,55 @@ static const struct iommu_domain_ops amdv1_ops = {
 };
 
 static const struct iommu_dirty_ops amdv1_dirty_ops = {
-	IOMMU_PT_DIRTY_OPS(amdv1),
-	.set_dirty_tracking = amd_iommu_set_dirty_tracking,
+	IOMMU_PT_DIRTY_OPS(amdv1),	/* [한국어] 더티 비트 읽기·정리는 공용 구현이 채운다 */
+	.set_dirty_tracking = amd_iommu_set_dirty_tracking,	/* [한국어] 추적을 켜고 끄는 것만 드라이버가 맡는다 */
 };
 
+/*
+ * [한국어]
+ * amd_iommu_domain_alloc_paging_v1 - v1 페이지 테이블 도메인을 만든다
+ *
+ * @dev: 이 도메인을 쓸 장치(NUMA 노드와 능력 판단에 쓴다).
+ * @flags: iommufd 가 요청한 속성(더티 추적 등).
+ * @return: 새 도메인, 실패하면 ERR_PTR.
+ *
+ * v1 은 AMD 고유 형식으로, 더티 추적과 중첩 부모를 지원하는 유일한 형식이다.
+ *
+ * 플러시 정책 선택이 흥미롭다. 실물 하드웨어는 한 명령으로 얼마든지 넓은
+ * 범위를 지울 수 있어, 범위를 넓혀 명령을 줄이는 편이 낫다. vIOMMU 는 그
+ * 넓힌 만큼을 하이퍼바이저가 실제로 훑으므로 반대다 — 그래서 NpCache 를
+ * 보고 정책을 바꾼다.
+ *
+ * 주소 공간 크기는 하드웨어가 지원하는 단계 수에서 계산한다. 단계마다 9
+ * 비트씩, 마지막 페이지 오프셋이 21 비트다.
+ */
 static struct iommu_domain *amd_iommu_domain_alloc_paging_v1(struct device *dev,
 							     u32 flags)
 {
-	struct pt_iommu_amdv1_cfg cfg = {};
-	struct protection_domain *domain;
-	int ret;
+	struct pt_iommu_amdv1_cfg cfg = {};	/* [한국어] generic_pt 계층에 넘길 설정 */
+	struct protection_domain *domain;	/* [한국어] 만들 도메인 */
+	int ret;	/* [한국어] 결과 */
 
-	if (amd_iommu_hatdis)
-		return ERR_PTR(-EOPNOTSUPP);
+	if (amd_iommu_hatdis)	/* [한국어] 호스트 변환을 끈 구성이면 */
+		return ERR_PTR(-EOPNOTSUPP);	/* [한국어] v1 표를 걸 곳이 없다 */
 
-	domain = protection_domain_alloc();
-	if (!domain)
-		return ERR_PTR(-ENOMEM);
+	domain = protection_domain_alloc();	/* [한국어] 도메인과 id 를 */
+	if (!domain)	/* [한국어] 실패면 */
+		return ERR_PTR(-ENOMEM);	/* [한국어] 호출자에게 */
 
-	domain->pd_mode = PD_MODE_V1;
-	domain->iommu.driver_ops = &amd_hw_driver_ops_v1;
-	domain->iommu.nid = dev_to_node(dev);
-	if (flags & IOMMU_HWPT_ALLOC_DIRTY_TRACKING)
-		domain->domain.dirty_ops = &amdv1_dirty_ops;
+	domain->pd_mode = PD_MODE_V1;	/* [한국어] 무효화 경로가 이 값으로 갈린다 */
+	domain->iommu.driver_ops = &amd_hw_driver_ops_v1;	/* [한국어] 최상위 교체 시 콜백 */
+	domain->iommu.nid = dev_to_node(dev);	/* [한국어] 페이지 테이블을 장치 가까운 노드에 */
+	if (flags & IOMMU_HWPT_ALLOC_DIRTY_TRACKING)	/* [한국어] 더티 추적을 요청했으면 */
+		domain->domain.dirty_ops = &amdv1_dirty_ops;	/* [한국어] 해당 연산 집합을 붙인다 */
 
 	/*
 	 * Someday FORCE_COHERENCE should be set by
 	 * amd_iommu_enforce_cache_coherency() like VT-d does.
 	 */
-	cfg.common.features = BIT(PT_FEAT_DYNAMIC_TOP) |
-			      BIT(PT_FEAT_AMDV1_ENCRYPT_TABLES) |
-			      BIT(PT_FEAT_AMDV1_FORCE_COHERENCE);
+	cfg.common.features = BIT(PT_FEAT_DYNAMIC_TOP) |	/* [한국어] (원 주석: FORCE_COHERENCE 는 언젠가 enforce 쪽으로 옮겨야 한다) 필요할 때 단계를 늘린다 */
+			      BIT(PT_FEAT_AMDV1_ENCRYPT_TABLES) |	/* [한국어] SME 환경에서 표에 암호화 비트를 세운다 */
+			      BIT(PT_FEAT_AMDV1_FORCE_COHERENCE);	/* [한국어] 장치의 비일관 접근을 막는다 */
 
 	/*
 	 * AMD's IOMMU can flush as many pages as necessary in a single flush.
@@ -4606,33 +4730,33 @@ static struct iommu_domain *amd_iommu_domain_alloc_paging_v1(struct device *dev,
 	 * the guest, and the trade-off is different: unnecessary TLB flushes
 	 * should be avoided.
 	 */
-	if (amd_iommu_np_cache)
-		cfg.common.features |= BIT(PT_FEAT_FLUSH_RANGE_NO_GAPS);
+	if (amd_iommu_np_cache)	/* [한국어] vIOMMU 상대면 */
+		cfg.common.features |= BIT(PT_FEAT_FLUSH_RANGE_NO_GAPS);	/* [한국어] 범위를 넓히지 않는다 — 하이퍼바이저가 그만큼 일한다 */
 	else
-		cfg.common.features |= BIT(PT_FEAT_FLUSH_RANGE);
+		cfg.common.features |= BIT(PT_FEAT_FLUSH_RANGE);	/* [한국어] 실물이면 넓혀서 명령 수를 줄인다 */
 
-	cfg.common.hw_max_vasz_lg2 =
-		min(64, (amd_iommu_hpt_level - 1) * 9 + 21);
-	cfg.common.hw_max_oasz_lg2 = 52;
-	cfg.starting_level = 2;
-	domain->domain.ops = &amdv1_ops;
+	cfg.common.hw_max_vasz_lg2 =	/* [한국어] 주소 공간 크기 */
+		min(64, (amd_iommu_hpt_level - 1) * 9 + 21);	/* [한국어] 단계마다 9 비트, 마지막 오프셋이 21 비트 */
+	cfg.common.hw_max_oasz_lg2 = 52;	/* [한국어] 출력 물리 주소는 52 비트 */
+	cfg.starting_level = 2;	/* [한국어] 작게 시작해 필요할 때 키운다 */
+	domain->domain.ops = &amdv1_ops;	/* [한국어] 코어가 부를 연산 집합 */
 
-	ret = pt_iommu_amdv1_init(&domain->amdv1, &cfg, GFP_KERNEL);
-	if (ret) {
-		amd_iommu_domain_free(&domain->domain);
-		return ERR_PTR(ret);
+	ret = pt_iommu_amdv1_init(&domain->amdv1, &cfg, GFP_KERNEL);	/* [한국어] 공용 페이지 테이블 계층 초기화 */
+	if (ret) {	/* [한국어] 실패면 */
+		amd_iommu_domain_free(&domain->domain);	/* [한국어] 도메인과 id 를 되돌린다 */
+		return ERR_PTR(ret);	/* [한국어] 호출자에게 */
 	}
 
 	/*
 	 * Narrow the supported page sizes to those selected by the kernel
 	 * command line.
 	 */
-	domain->domain.pgsize_bitmap &= amd_iommu_pgsize_bitmap;
-	return &domain->domain;
+	domain->domain.pgsize_bitmap &= amd_iommu_pgsize_bitmap;	/* [한국어] (원 주석: 커맨드라인이 고른 페이지 크기로 좁힌다) */
+	return &domain->domain;	/* [한국어] 공용 도메인으로 돌려준다 */
 }
 
 static const struct iommu_domain_ops amdv2_ops = {
-	IOMMU_PT_DOMAIN_OPS(x86_64),
+	IOMMU_PT_DOMAIN_OPS(x86_64),	/* [한국어] map/unmap 등은 공용 x86-64 구현이 채운다 */
 	.iotlb_sync_map = amd_iommu_iotlb_sync_map,
 	.flush_iotlb_all = amd_iommu_flush_iotlb_all,
 	.iotlb_sync = amd_iommu_iotlb_sync,
@@ -4650,28 +4774,43 @@ static const struct iommu_domain_ops amdv2_ops = {
 	.enforce_cache_coherency = amd_iommu_enforce_cache_coherency,
 };
 
+/*
+ * [한국어]
+ * amd_iommu_domain_alloc_paging_v2 - x86-64 형식 페이지 테이블 도메인을 만든다
+ *
+ * @dev: 이 도메인을 쓸 장치.
+ * @flags: 요청 속성.
+ * @return: 새 도메인, 실패하면 ERR_PTR.
+ *
+ * v2 는 CPU 의 페이지 테이블과 같은 형식이라, 프로세스 주소 공간을 그대로
+ * 장치에 붙일 수 있다 — SVA 가 이 형식을 쓴다.
+ *
+ * 최상위 비트를 버리는 이유가 원 주석에 있다. 같은 표가 PASID 0 에서는
+ * 부호 확장 없이, 다른 PASID 에서는 부호 확장으로 해석된다. 양쪽에서
+ * 똑같이 동작하게 하려면 해석이 갈리는 비트를 아예 쓰지 않아야 한다.
+ */
 static struct iommu_domain *amd_iommu_domain_alloc_paging_v2(struct device *dev,
 							     u32 flags)
 {
-	struct pt_iommu_x86_64_cfg cfg = {};
-	struct protection_domain *domain;
-	int ret;
+	struct pt_iommu_x86_64_cfg cfg = {};	/* [한국어] x86-64 형식 설정 */
+	struct protection_domain *domain;	/* [한국어] 만들 도메인 */
+	int ret;	/* [한국어] 결과 */
 
-	if (!amd_iommu_v2_pgtbl_supported())
-		return ERR_PTR(-EOPNOTSUPP);
+	if (!amd_iommu_v2_pgtbl_supported())	/* [한국어] 하드웨어가 이 형식을 못 걸으면 */
+		return ERR_PTR(-EOPNOTSUPP);	/* [한국어] 호출자가 v1 로 되돌아간다 */
 
-	domain = protection_domain_alloc();
-	if (!domain)
-		return ERR_PTR(-ENOMEM);
+	domain = protection_domain_alloc();	/* [한국어] 도메인과 id 를 */
+	if (!domain)	/* [한국어] 실패면 */
+		return ERR_PTR(-ENOMEM);	/* [한국어] 호출자에게 */
 
-	domain->pd_mode = PD_MODE_V2;
-	domain->iommu.nid = dev_to_node(dev);
+	domain->pd_mode = PD_MODE_V2;	/* [한국어] 무효화가 장치별 도메인 id 를 쓰게 된다 */
+	domain->iommu.nid = dev_to_node(dev);	/* [한국어] 표를 장치 가까운 노드에 */
 
-	cfg.common.features = BIT(PT_FEAT_X86_64_AMD_ENCRYPT_TABLES);
-	if (amd_iommu_np_cache)
-		cfg.common.features |= BIT(PT_FEAT_FLUSH_RANGE_NO_GAPS);
+	cfg.common.features = BIT(PT_FEAT_X86_64_AMD_ENCRYPT_TABLES);	/* [한국어] SME 환경에서 표에 암호화 비트를 */
+	if (amd_iommu_np_cache)	/* [한국어] vIOMMU 상대면 */
+		cfg.common.features |= BIT(PT_FEAT_FLUSH_RANGE_NO_GAPS);	/* [한국어] 범위를 넓히지 않는다 */
 	else
-		cfg.common.features |= BIT(PT_FEAT_FLUSH_RANGE);
+		cfg.common.features |= BIT(PT_FEAT_FLUSH_RANGE);	/* [한국어] 실물이면 넓혀서 명령을 줄인다 */
 
 	/*
 	 * The v2 table behaves differently if it is attached to PASID 0 vs a
@@ -4681,30 +4820,41 @@ static struct iommu_domain *amd_iommu_domain_alloc_paging_v2(struct device *dev,
 	 * in both modes the top bit is removed and PT_FEAT_SIGN_EXTEND is not
 	 * set which creates a table that is compatible in both modes.
 	 */
-	if (amd_iommu_gpt_level == PAGE_MODE_5_LEVEL) {
-		cfg.common.hw_max_vasz_lg2 = 56;
-		cfg.top_level = 4;
+	if (amd_iommu_gpt_level == PAGE_MODE_5_LEVEL) {	/* [한국어] (원 주석: PASID 0 과 그 밖에서 해석이 달라 최상위 비트를 버린다) */
+		cfg.common.hw_max_vasz_lg2 = 56;	/* [한국어] 57 비트에서 하나를 뺀 값 */
+		cfg.top_level = 4;	/* [한국어] 5단계 표 */
 	} else {
-		cfg.common.hw_max_vasz_lg2 = 47;
-		cfg.top_level = 3;
+		cfg.common.hw_max_vasz_lg2 = 47;	/* [한국어] 48 비트에서 하나를 뺀 값 */
+		cfg.top_level = 3;	/* [한국어] 4단계 표 */
 	}
-	cfg.common.hw_max_oasz_lg2 = 52;
-	domain->domain.ops = &amdv2_ops;
+	cfg.common.hw_max_oasz_lg2 = 52;	/* [한국어] 출력 물리 주소는 52 비트 */
+	domain->domain.ops = &amdv2_ops;	/* [한국어] 코어가 부를 연산 집합 */
 
-	ret = pt_iommu_x86_64_init(&domain->amdv2, &cfg, GFP_KERNEL);
-	if (ret) {
-		amd_iommu_domain_free(&domain->domain);
-		return ERR_PTR(ret);
+	ret = pt_iommu_x86_64_init(&domain->amdv2, &cfg, GFP_KERNEL);	/* [한국어] 공용 계층 초기화 */
+	if (ret) {	/* [한국어] 실패면 */
+		amd_iommu_domain_free(&domain->domain);	/* [한국어] 되돌린다 */
+		return ERR_PTR(ret);	/* [한국어] 호출자에게 */
 	}
-	return &domain->domain;
+	return &domain->domain;	/* [한국어] 공용 도메인으로 */
 }
 
+/*
+ * [한국어]
+ * is_nest_parent_supported - 중첩 변환의 부모가 될 수 있는지 본다
+ *
+ * @flags: 요청 플래그(현재는 쓰지 않는다).
+ * @return: 세 기능이 모두 있으면 참.
+ *
+ * 중첩에는 게스트 변환(GT), 게스트 I/O 보호(GIOSUP), GCR3 표를 2단계로
+ * 걷는 모드(GCR3TRPMODE)가 모두 필요하다. 하나라도 없으면 게스트 페이지
+ * 테이블을 안전하게 걸 수 없다.
+ */
 static inline bool is_nest_parent_supported(u32 flags)
 {
 	/* Only allow nest parent when these features are supported */
-	return check_feature(FEATURE_GT) &&
-	       check_feature(FEATURE_GIOSUP) &&
-	       check_feature2(FEATURE_GCR3TRPMODE);
+	return check_feature(FEATURE_GT) &&	/* [한국어] (원 주석: 이 기능들이 있을 때만 중첩 부모를 허용한다) 게스트 변환 */
+	       check_feature(FEATURE_GIOSUP) &&	/* [한국어] 게스트 I/O 보호 */
+	       check_feature2(FEATURE_GCR3TRPMODE);	/* [한국어] GCR3 표를 2단계로 걷는 모드 */
 }
 
 static struct iommu_domain *
@@ -4763,31 +4913,58 @@ amd_iommu_domain_alloc_paging_flags(struct device *dev, u32 flags,
 	return ERR_PTR(-EOPNOTSUPP);
 }
 
+/*
+ * [한국어]
+ * amd_iommu_domain_free - 도메인을 해제한다
+ *
+ * @dom: 해제할 도메인.
+ *
+ * 장치가 남아 있으면 경고한다 — 그 장치의 DTE 가 곧 사라질 페이지 테이블을
+ * 가리키고 있다는 뜻이다.
+ *
+ * 도메인 id 반납이 페이지 테이블 해제 뒤에 오는 이유: 그 전에 반납하면
+ * 같은 id 를 받은 다음 도메인이 아직 남은 캐시를 물려받을 수 있다.
+ */
 void amd_iommu_domain_free(struct iommu_domain *dom)
 {
-	struct protection_domain *domain = to_pdomain(dom);
+	struct protection_domain *domain = to_pdomain(dom);	/* [한국어] 벤더 도메인 */
 
-	WARN_ON(!list_empty(&domain->dev_list));
-	pt_iommu_deinit(&domain->iommu);
-	amd_iommu_pdom_id_free(domain->id);
-	kfree(domain);
+	WARN_ON(!list_empty(&domain->dev_list));	/* [한국어] 장치의 DTE 가 곧 사라질 표를 가리키고 있다 */
+	pt_iommu_deinit(&domain->iommu);	/* [한국어] 페이지 테이블을 먼저 버리고 */
+	amd_iommu_pdom_id_free(domain->id);	/* [한국어] 그다음 id 를 — 순서가 바뀌면 다음 도메인이 캐시를 물려받는다 */
+	kfree(domain);	/* [한국어] 도메인 자체 */
 }
 
+/*
+ * [한국어]
+ * blocked_domain_attach_device - 장치의 DMA 를 모두 막는다
+ *
+ * @domain: blocked 도메인(상태가 없다).
+ * @dev: 대상 장치.
+ * @old: 직전 도메인.
+ * @return: 항상 0.
+ *
+ * blocked 도메인은 실체가 없다. "아무것도 허용하지 않는 상태"라는 이름일
+ * 뿐이고, 실제 동작은 DTE 를 변환 불가 상태로 만드는 것이다.
+ *
+ * VFIO 가 장치를 사용자에게 넘기기 전이나, 드라이버 없는 장치를 가둘 때
+ * 이 상태로 둔다.
+ */
 static int blocked_domain_attach_device(struct iommu_domain *domain,
 					struct device *dev,
 					struct iommu_domain *old)
 {
-	struct iommu_dev_data *dev_data = dev_iommu_priv_get(dev);
+	struct iommu_dev_data *dev_data = dev_iommu_priv_get(dev);	/* [한국어] 장치의 벤더 상태 */
 
-	if (dev_data->domain)
-		detach_device(dev);
+	if (dev_data->domain)	/* [한국어] 아직 어딘가에 붙어 있으면 */
+		detach_device(dev);	/* [한국어] 먼저 뗀다 */
 
 	/* Clear DTE and flush the entry */
-	mutex_lock(&dev_data->mutex);
-	dev_update_dte(dev_data, false);
-	mutex_unlock(&dev_data->mutex);
+	mutex_lock(&dev_data->mutex);	/* [한국어] (원 주석: DTE 를 지우고 항목을 플러시) */
+	dev_update_dte(dev_data, false);	/* [한국어] 변환할 방법이 없는 항목으로 만든다 */
+	mutex_unlock(&dev_data->mutex);	/* [한국어] 끝 */
 
-	return 0;
+	return 0;	/* [한국어] 실패할 수 없는 경로 */
 }
 
 static int blocked_domain_set_dev_pasid(struct iommu_domain *domain,
