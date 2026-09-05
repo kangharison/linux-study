@@ -353,6 +353,31 @@ retry:	/* [한국어] 다른 CPU 가 먼저 테이블을 만든 경우 여기로
 /*
  * Interfaces for PASID table entry manipulation:
  */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * intel_pasid_clear_entry - PASID 항목을 비운다(폴트 보고 여부를 골라서)
+ *
+ * @dev: 대상 장치. @pasid: 비울 PASID.
+ * @fault_ignore: true 면 FPD 를 남겨 폴트 보고를 끈 채로 둔다.
+ * @return: 없음.
+ *
+ * pasid.h 의 두 헬퍼 중 무엇을 쓸지 고르는 얇은 층이다.
+ *   fault_ignore 이고 아직 present 면 → pasid_clear_entry_with_fpd
+ *   그 밖에는                        → pasid_clear_entry
+ *
+ * 왜 FPD 를 남기는 선택지가 있는가: PASID 를 내리는 순간에도 장치는 아직 그
+ * PASID 로 DMA 를 내고 있을 수 있다. 접근은 막아야 하지만 그것을 전부 폴트로
+ * 보고하면 로그가 뒤덮이고 폴트 처리 자체가 시스템을 느리게 만든다.
+ * 장치가 사라지는 중이라 응답할 상대가 없는 경우가 대표적이다.
+ *
+ * 이미 present 가 아닌 항목에는 FPD 를 남기지 않는다 — 그런 항목은 이미
+ * 정리된 것이거나 애초에 세운 적이 없어, 통째로 비우는 편이 깨끗하다.
+ *
+ * 실행 컨텍스트: 항목 해제. iommu->lock 아래.
+ *
+ * 호출 체인:
+ *   intel_pasid_tear_down_entry() → [intel_pasid_clear_entry]
+ */
 static void
 intel_pasid_clear_entry(struct device *dev, u32 pasid, bool fault_ignore)
 {
@@ -368,6 +393,30 @@ intel_pasid_clear_entry(struct device *dev, u32 pasid, bool fault_ignore)
 		pasid_clear_entry(pe);	/* [한국어] 아니면 통째로 비운다 */
 }
 
+/*
+ * [한국어]
+ * pasid_cache_invalidation_with_pasid - 한 PASID 의 PASID 캐시를 비운다
+ *
+ * @iommu: 대상 유닛. @did: 도메인 id. @pasid: 대상 PASID.
+ * @return: 없음(완료까지 기다린 뒤 돌아온다).
+ *
+ * PASID 캐시란: 하드웨어가 "이 PASID 의 항목은 이런 내용이다"를 캐시해 둔
+ * 것이다. PASID 항목을 고치거나 지운 뒤 이 캐시를 비우지 않으면, 하드웨어가
+ * 옛 내용으로 계속 번역한다.
+ *
+ * 무효화 순서에서 이것이 가장 먼저 오는 이유: 상위 캐시를 먼저 비워야 하위
+ * (IOTLB, 디바이스 TLB)를 비우는 동안 다시 채워지지 않는다.
+ *
+ * 배치(qi_batch)를 쓰지 않고 하나씩 보내는 것을 눈여겨볼 것. 이 무효화는
+ * 항목을 세우거나 내릴 때 한 번씩만 일어나므로 모을 이유가 없고, 그때마다
+ * 완료를 확인해야 다음 단계로 넘어갈 수 있다. 매 언매핑마다 일어나는
+ * cache.c 의 무효화와 성격이 다르다.
+ *
+ * qw2/qw3 를 0 으로 미는 이유: scalable 모드에서 서술자가 32바이트로 커지면
+ * 하드웨어가 이 두 워드도 읽는다. 예약 필드에 값이 남아 있으면 거부된다.
+ *
+ * 실행 컨텍스트: 항목 설정·해제 후. 완료를 기다리므로 락 밖에서 부른다.
+ */
 static void
 pasid_cache_invalidation_with_pasid(struct intel_iommu *iommu,
 				    u16 did, u32 pasid)
@@ -383,6 +432,32 @@ pasid_cache_invalidation_with_pasid(struct intel_iommu *iommu,
 	qi_submit_sync(iommu, &desc, 1, 0);	/* [한국어] 하나만 보내고 완료를 기다린다. 배치를 쓰지 않는 것은 이 무효화가 항목 해제 경로에서 한 번씩만 일어나기 때문이다 */
 }
 
+/*
+ * [한국어]
+ * devtlb_invalidation_with_pasid - 장치 안의 번역 캐시를 비운다
+ *
+ * @iommu: 대상 유닛. @dev: 대상 장치. @pasid: 대상 PASID.
+ * @return: 없음.
+ *
+ * ATS 를 켠 장치는 번역 결과를 자기 안에 캐시하므로, PASID 항목을 고친 뒤
+ * 그 캐시까지 비워야 한다. 무효화 3단계(PASID 캐시 → IOTLB → 디바이스 TLB)의
+ * 마지막이다.
+ *
+ * 두 가지를 먼저 걸러 낸다.
+ *   - ATS 가 꺼져 있으면 장치 안에 캐시가 없으므로 비울 것도 없다.
+ *   - 장치가 이미 뽑혔으면 보내지 않는다. ATS 무효화는 장치의 응답을
+ *     기다리는데, 사라진 장치는 응답하지 않아 시간 초과만 난다.
+ *
+ * 형식이 PASID 유무로 갈린다(위 영어 주석). PASID 0 은 RID2PASID, 즉 PASID
+ * 를 실어 보내지 않는 DMA 를 뜻하므로 PASID 없는 형식으로 장치 캐시를 통째로
+ * 비운다. 0 이 아니면 그 PASID 만 지정해 비우는데, SVA 에서 장치가 여러
+ * PASID 로 동시에 DMA 를 내므로 그쪽이 훨씬 효율적이다.
+ *
+ * 범위를 항상 주소 공간 전체(64 - VTD_PAGE_SHIFT)로 두는 이유: PASID 항목이
+ * 바뀌면 그 PASID 의 모든 번역이 무효가 되어, 어느 범위만 골라 낼 수 없다.
+ *
+ * 실행 컨텍스트: 항목 설정·해제 후. 락 밖에서.
+ */
 static void
 devtlb_invalidation_with_pasid(struct intel_iommu *iommu,
 			       struct device *dev, u32 pasid)
@@ -898,7 +973,7 @@ int intel_pasid_setup_dirty_tracking(struct intel_iommu *iommu,
 	pte = intel_pasid_get_entry(dev, pasid);	/* [한국어] 그 PASID 의 항목 */
 	if (!pte) {	/* [한국어] 없으면 */
 		spin_unlock(&iommu->lock);	/* [한국어] 락 해제 */
-		dev_err_ratelimited(
+		dev_err_ratelimited(	/* [한국어] 항목을 얻지 못했다 — 그 PASID 를 쓸 수 없다 */
 			dev, "Failed to get pasid entry of PASID %d\n", pasid);	/* [한국어] 어느 PASID 인지 남긴다 */
 		return -ENODEV;	/* [한국어] 설정 불가 */
 	}
@@ -908,7 +983,7 @@ int intel_pasid_setup_dirty_tracking(struct intel_iommu *iommu,
 	if (pgtt != PASID_ENTRY_PGTT_SL_ONLY &&	/* [한국어] 2단계 전용이 아니고 */
 	    pgtt != PASID_ENTRY_PGTT_NESTED) {	/* [한국어] 중첩도 아니면 */
 		spin_unlock(&iommu->lock);	/* [한국어] 락 해제 */
-		dev_err_ratelimited(
+		dev_err_ratelimited(	/* [한국어] 2단계를 쓰지 않는 항목에는 더티 추적을 켤 수 없다 */
 			dev,
 			"Dirty tracking not supported on translation type %d\n",	/* [한국어] 더티 비트는 2단계 페이지 테이블에 기록되므로 그것을 쓰지 않는 항목에서는 켤 수 없다 */
 			pgtt);	/* [한국어] 문제의 변환 종류 */
@@ -1173,6 +1248,39 @@ static void pasid_pte_config_nestd(struct intel_iommu *iommu,
  * nested type and nested on a parent with 'is_nested_parent' flag
  * set.
  */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어)
+ * intel_pasid_setup_nested - PASID 항목을 중첩 변환으로 세운다
+ *
+ * @iommu: 유닛. @dev: 장치. @pasid: 대상 PASID.
+ * @domain: 게스트의 1단계 도메인. 그 안에 s1_cfg(게스트 설정)와
+ *          s2_domain(부모 2단계 도메인)이 들어 있다.
+ * @return: 0 성공, -EINVAL(요청이 하드웨어 능력을 넘음), -ENODEV, -EBUSY.
+ *
+ * 다른 setup_* 과 골격은 같지만 검증이 훨씬 많다. s1_cfg 가 유저스페이스(VMM)
+ * 에서 온 값이기 때문이다. 하드웨어가 못 하는 것을 게스트가 요청했을 때
+ * 조용히 무시하면, 게스트는 그 기능이 켜졌다고 믿고 동작하게 된다.
+ *
+ * 세 가지를 확인한다.
+ *   - 주소 폭: 4레벨은 항상 되고, 5레벨은 cap_fl5lp_support 가 있어야 한다.
+ *     그 밖의 값은 애초에 유효하지 않다.
+ *   - SRE(특권 요청): ecap_srs 필요.
+ *   - EAFE(확장 접근 플래그): ecap_eafs 필요.
+ *
+ * 도메인 id 는 자식(게스트) 도메인의 것을 쓴다. 하드웨어가 그 하나의 id 로
+ * 두 단계를 모두 식별하기 때문이며, cache.c 가 부모 태그에도 같은 did 를
+ * 넘기는 것과 같은 이유다.
+ *
+ * 위 kernel-doc 의 전제: 입력 도메인은 nested 타입이어야 하고, 그 부모는
+ * is_nested_parent 로 표시되어 있어야 한다. 그 검사는 호출자(iommufd 경로)가
+ * 이미 마친 상태로 들어온다.
+ *
+ * 실행 컨텍스트: 중첩 도메인 부착. 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   intel_nested_set_dev_pasid() → [intel_pasid_setup_nested]
+ *     → pasid_pte_config_nestd() → pasid_flush_caches()
+ */
 int intel_pasid_setup_nested(struct intel_iommu *iommu, struct device *dev,
 			     u32 pasid, struct dmar_domain *domain)
 {
@@ -1187,7 +1295,7 @@ int intel_pasid_setup_nested(struct intel_iommu *iommu, struct device *dev,
 		break;	/* [한국어] 항상 지원된다 */
 	case ADDR_WIDTH_5LEVEL:	/* [한국어] 5레벨은 */
 		if (!cap_fl5lp_support(iommu->cap)) {	/* [한국어] 하드웨어가 지원해야 한다 */
-			dev_err_ratelimited(dev,
+			dev_err_ratelimited(dev,	/* [한국어] 게스트가 지원되지 않는 주소 폭을 요청했다 */
 					    "5-level paging not supported\n");	/* [한국어] 지원하지 않으면 이유를 남기고 */
 			return -EINVAL;	/* [한국어] 거절 */
 		}
@@ -1234,47 +1342,102 @@ int intel_pasid_setup_nested(struct intel_iommu *iommu, struct device *dev,
  * context table entry:
  */
 
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * device_pasid_table_teardown - 컨텍스트 항목 하나를 지워 PASID 디렉터리 연결을 끊는다
+ *
+ * @dev: 대상 장치. @bus, @devfn: 지울 컨텍스트 항목의 소스 id(별칭일 수 있다).
+ * @return: 없음.
+ *
+ * scalable 모드에서 컨텍스트 항목은 PASID 디렉터리를 가리킨다. 그 항목을
+ * 지우면 이 소스 id 로 오는 모든 DMA 가 — PASID 를 쓰든 안 쓰든 — 번역할
+ * 곳을 잃는다. 즉 개별 PASID 항목을 하나씩 내리는 것보다 훨씬 넓은 조치다.
+ *
+ * 순서: 도메인 id 를 먼저 읽어 두고(지운 뒤에는 알 수 없다), 항목을 지우고,
+ * 캐시로 밀어낸 뒤, 락을 놓고 무효화한다. 무효화를 락 밖에서 하는 것은
+ * 이 파일 전체의 규칙과 같다.
+ *
+ * 실행 컨텍스트: 장치 해제. 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   intel_pasid_teardown_sm_context() → [device_pasid_table_teardown]
+ *     → context_clear_entry() → intel_context_flush_no_pasid()
+ */
 static void device_pasid_table_teardown(struct device *dev, u8 bus, u8 devfn)
 {
 	struct device_domain_info *info = dev_iommu_priv_get(dev);	/* [한국어] 장치 정보 */
-	struct intel_iommu *iommu = info->iommu;
-	struct context_entry *context;
-	u16 did;
+	struct intel_iommu *iommu = info->iommu;	/* [한국어] 담당 유닛 */
+	struct context_entry *context;	/* [한국어] 지울 컨텍스트 항목 */
+	u16 did;	/* [한국어] 무효화에 쓸 도메인 id */
 
-	spin_lock(&iommu->lock);
-	context = iommu_context_addr(iommu, bus, devfn, false);
-	if (!context) {
-		spin_unlock(&iommu->lock);
-		return;
+	spin_lock(&iommu->lock);	/* [한국어] 컨텍스트 테이블 변경 구간 */
+	context = iommu_context_addr(iommu, bus, devfn, false);	/* [한국어] 그 소스 id 의 항목. false 는 없으면 만들지 말라는 뜻 */
+	if (!context) {	/* [한국어] 항목이 없으면 */
+		spin_unlock(&iommu->lock);	/* [한국어] 락 해제 */
+		return;	/* [한국어] 지울 것도 없다 */
 	}
 
-	did = context_domain_id(context);
-	context_clear_entry(context);
-	__iommu_flush_cache(iommu, context, sizeof(*context));
-	spin_unlock(&iommu->lock);
-	intel_context_flush_no_pasid(info, context, did);
+	did = context_domain_id(context);	/* [한국어] 지우기 전에 도메인 id 를 읽어 둔다 — 지운 뒤에는 알 수 없다 */
+	context_clear_entry(context);	/* [한국어] 항목을 비운다. 이 뒤로 이 소스 id 의 모든 DMA 가 번역할 곳을 잃는다 */
+	__iommu_flush_cache(iommu, context, sizeof(*context));	/* [한국어] 비코히런트 유닛이면 메모리로 밀어낸다 */
+	spin_unlock(&iommu->lock);	/* [한국어] 무효화 전에 락을 놓는다 */
+	intel_context_flush_no_pasid(info, context, did);	/* [한국어] 컨텍스트 캐시와 그 아래 캐시들을 비운다 */
 }
 
+/*
+ * [한국어]
+ * pci_pasid_table_teardown - DMA 별칭마다 컨텍스트 항목을 지우는 콜백
+ *
+ * @pdev: 순회 중인 PCI 장치. @alias: 이 장치가 낼 수 있는 소스 id 하나.
+ * @data: 원본 struct device.
+ * @return: 항상 0 — 모든 별칭을 지우려면 순회가 멈추면 안 된다.
+ *
+ * dev == &pdev->dev 검사가 눈여겨볼 부분이다. pci_for_each_dma_alias 는
+ * 브리지를 거슬러 올라가며 상위 장치의 별칭까지 알려 주는데, 그 상위 장치의
+ * 컨텍스트 항목은 우리 것이 아니다. 자기 자신의 별칭만 지운다.
+ *
+ * 실행 컨텍스트: 장치 해제. 프로세스 컨텍스트.
+ */
 static int pci_pasid_table_teardown(struct pci_dev *pdev, u16 alias, void *data)
 {
-	struct device *dev = data;
+	struct device *dev = data;	/* [한국어] 원본 장치 */
 
-	if (dev == &pdev->dev)
-		device_pasid_table_teardown(dev, PCI_BUS_NUM(alias), alias & 0xff);
+	if (dev == &pdev->dev)	/* [한국어] 자기 자신의 별칭일 때만 — 상위 브리지의 컨텍스트 항목은 우리 것이 아니다 */
+		device_pasid_table_teardown(dev, PCI_BUS_NUM(alias), alias & 0xff);	/* [한국어] 그 소스 id 의 항목을 지운다 */
 
-	return 0;
+	return 0;	/* [한국어] 계속 순회한다. 모든 별칭을 지워야 한다 */
 }
 
+/*
+ * [한국어]
+ * intel_pasid_teardown_sm_context - 이 장치의 scalable 모드 컨텍스트를 모두 내린다
+ *
+ * @dev: 대상 장치.
+ * @return: 없음.
+ *
+ * intel_pasid_setup_sm_context 의 짝. 장치가 낼 수 있는 모든 소스 id 의
+ * 컨텍스트 항목을 지운다 — 하나라도 남으면 그 id 로 오는 DMA 가 여전히
+ * 이 장치의 PASID 디렉터리를 통해 번역된다.
+ *
+ * PCI 가 아닌 장치는 별칭이 없어 자기 항목 하나면 되고, PCI 장치는
+ * pci_for_each_dma_alias 로 전부 훑는다 — domain_context_clear 와 같은 구조다.
+ *
+ * 실행 컨텍스트: 장치 해제. 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   intel_iommu_release_device() → [intel_pasid_teardown_sm_context]
+ *     → pci_for_each_dma_alias() → pci_pasid_table_teardown()
+ */
 void intel_pasid_teardown_sm_context(struct device *dev)
 {
-	struct device_domain_info *info = dev_iommu_priv_get(dev);
+	struct device_domain_info *info = dev_iommu_priv_get(dev);	/* [한국어] 장치 정보 */
 
-	if (!dev_is_pci(dev)) {
-		device_pasid_table_teardown(dev, info->bus, info->devfn);
-		return;
+	if (!dev_is_pci(dev)) {	/* [한국어] PCI 가 아니면 별칭이 없다 */
+		device_pasid_table_teardown(dev, info->bus, info->devfn);	/* [한국어] 자기 항목 하나만 지운다 */
+		return;	/* [한국어] 끝 */
 	}
 
-	pci_for_each_dma_alias(to_pci_dev(dev), pci_pasid_table_teardown, dev);
+	pci_for_each_dma_alias(to_pci_dev(dev), pci_pasid_table_teardown, dev);	/* [한국어] PCI 장치는 낼 수 있는 모든 소스 id 의 항목을 지운다 */
 }
 
 /*
@@ -1282,67 +1445,154 @@ void intel_pasid_teardown_sm_context(struct device *dev)
  * Value of X in the PDTS field of a scalable mode context entry
  * indicates PASID directory with 2^(X + 7) entries.
  */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * context_get_sm_pds - PASID 디렉터리 크기를 컨텍스트 항목의 PDTS 필드 값으로 바꾼다
+ *
+ * @table: 이 장치의 PASID 테이블(디렉터리).
+ * @return: PDTS 필드에 넣을 값.
+ *
+ * PDTS 의 X 는 "디렉터리에 2^(X+7) 개의 항목이 있다"를 뜻한다(위 영어 주석).
+ * 즉 최소 표현 단위가 128개이고, 그보다 작은 디렉터리도 0(=128개)으로 신고한다.
+ *
+ * 계산 과정:
+ *   max_pde = max_pasid / 64   — 디렉터리 항목 수(하위 6비트는 테이블 안 색인).
+ *   pds = 그 값의 로그          — find_first_bit 이 최하위 켜진 비트를 찾는데,
+ *         max_pde 가 2의 거듭제곱이므로 그것이 곧 로그값이다.
+ *   pds < 7 이면 0             — 128개보다 작으면 표현할 수 없으니 최소값.
+ *   아니면 pds - 7             — 2^(X+7) 형식에 맞춘다.
+ *
+ * find_first_bit 을 로그 계산에 쓰는 것이 이 함수의 관용구다.
+ *
+ * 실행 컨텍스트: 컨텍스트 항목 설정. 순수 계산.
+ */
 static unsigned long context_get_sm_pds(struct pasid_table *table)
 {
-	unsigned long pds, max_pde;
+	unsigned long pds, max_pde;	/* [한국어] 계산할 PDTS 값과 디렉터리 항목 수 */
 
-	max_pde = table->max_pasid >> PASID_PDE_SHIFT;
-	pds = find_first_bit(&max_pde, MAX_NR_PASID_BITS);
-	if (pds < 7)
-		return 0;
+	max_pde = table->max_pasid >> PASID_PDE_SHIFT;	/* [한국어] 디렉터리 항목 수 = PASID 상한 / 64 */
+	pds = find_first_bit(&max_pde, MAX_NR_PASID_BITS);	/* [한국어] 그 값의 로그. 2의 거듭제곱이라 최하위 켜진 비트가 곧 로그값이다 */
+	if (pds < 7)	/* [한국어] 128개보다 작으면 */
+		return 0;	/* [한국어] PDTS 형식(2^(X+7))으로 표현할 수 없으니 최소값을 신고한다 */
 
-	return pds - 7;
+	return pds - 7;	/* [한국어] 2^(X+7) 형식에 맞춘다 */
 }
 
+/*
+ * [한국어]
+ * context_entry_set_pasid_table - 컨텍스트 항목이 이 장치의 PASID 디렉터리를 가리키게 한다
+ *
+ * @context: 채울 컨텍스트 항목. @dev: 그 장치.
+ * @return: 항상 0.
+ *
+ * scalable 모드로 들어가는 관문이다. 이 항목이 세워지면 하드웨어는 이 소스
+ * id 의 DMA 를 받았을 때 페이지 테이블이 아니라 PASID 디렉터리를 찾아간다.
+ * 그 해석 전환은 루트 테이블 주소의 SMT 비트가 이미 정해 놓았고, 이 함수는
+ * 그 전제 위에서 디렉터리 주소와 정책을 채운다.
+ *
+ * RID2PASID 를 IOMMU_NO_PASID(0)로 두는 것이 핵심이다. 대부분의 장치는 PASID
+ * 를 실어 보내지 않는 평범한 DMA 를 내는데, 그런 요청에 어떤 PASID 를 붙일지를
+ * 이 필드가 정한다. 0 으로 두면 "0번 PASID 항목"이 그 장치의 기본 주소
+ * 공간이 된다 — 레거시 모드에서 컨텍스트 항목이 바로 페이지 테이블을 가리키던
+ * 자리를 대신하는 셈이다.
+ *
+ * 능력에 따라 켜는 세 비트: DTE(디바이스 TLB), PASIDE(PASID 사용),
+ * PRE(페이지 요청). 장치가 못 하는 기능을 켜면 하드웨어가 오동작하므로
+ * 프로브 때 조사해 둔 값을 그대로 반영한다.
+ *
+ * present 를 마지막에 세우는 규칙은 여기서도 같다.
+ *
+ * 실행 컨텍스트: iommu->lock 을 쥔 채.
+ *
+ * 호출 체인:
+ *   device_pasid_table_setup() → [context_entry_set_pasid_table]
+ *     → context_get_sm_pds() → context_set_sm_rid2pasid()
+ */
 static int context_entry_set_pasid_table(struct context_entry *context,
 					 struct device *dev)
 {
-	struct device_domain_info *info = dev_iommu_priv_get(dev);	/* [한국어] 할당에 쓸 NUMA 노드를 얻으려고 */
-	struct pasid_table *table = info->pasid_table;
-	struct intel_iommu *iommu = info->iommu;
-	unsigned long pds;
+	struct device_domain_info *info = dev_iommu_priv_get(dev);	/* [한국어] 장치 정보 */
+	struct pasid_table *table = info->pasid_table;	/* [한국어] 이 장치의 PASID 디렉터리 */
+	struct intel_iommu *iommu = info->iommu;	/* [한국어] 담당 유닛 */
+	unsigned long pds;	/* [한국어] 디렉터리 크기 필드 값 */
 
-	context_clear_entry(context);
+	context_clear_entry(context);	/* [한국어] 먼저 통째로 비운다 */
 
-	pds = context_get_sm_pds(table);
-	context->lo = (u64)virt_to_phys(table->table) | context_pdts(pds);
-	context_set_sm_rid2pasid(context, IOMMU_NO_PASID);
+	pds = context_get_sm_pds(table);	/* [한국어] 디렉터리 크기를 PDTS 형식으로 */
+	context->lo = (u64)virt_to_phys(table->table) | context_pdts(pds);	/* [한국어] 디렉터리의 물리 주소와 크기를 함께 넣는다. 이 주소가 scalable 모드에서 번역이 시작되는 곳이다 */
+	context_set_sm_rid2pasid(context, IOMMU_NO_PASID);	/* [한국어] PASID 를 실어 보내지 않는 평범한 DMA 가 쓸 PASID. 0 으로 두면 0번 항목이 이 장치의 기본 주소 공간이 된다 */
 
-	if (info->ats_supported)
-		context_set_sm_dte(context);
-	if (info->pasid_supported)
-		context_set_pasid(context);
-	if (info->pri_supported)
-		context_set_sm_pre(context);
+	if (info->ats_supported)	/* [한국어] 장치가 ATS 를 쓸 수 있으면 */
+		context_set_sm_dte(context);	/* [한국어] 디바이스 TLB 를 허용한다 */
+	if (info->pasid_supported)	/* [한국어] PASID 를 쓸 수 있으면 */
+		context_set_pasid(context);	/* [한국어] PASID 사용을 표시한다 */
+	if (info->pri_supported)	/* [한국어] 페이지 요청을 쓸 수 있으면 */
+		context_set_sm_pre(context);	/* [한국어] PRI 를 허용한다. 장치가 못 하는 기능을 켜면 하드웨어가 오동작하므로 프로브 때 조사한 값을 그대로 쓴다 */
 
-	context_set_fault_enable(context);
-	context_set_present(context);
-	__iommu_flush_cache(iommu, context, sizeof(*context));
+	context_set_fault_enable(context);	/* [한국어] 폴트 보고를 켠다 */
+	context_set_present(context);	/* [한국어] 마지막에 present — 이 순간부터 하드웨어가 이 항목을 쓴다 */
+	__iommu_flush_cache(iommu, context, sizeof(*context));	/* [한국어] 비코히런트 유닛이면 메모리로 밀어낸다 */
 
-	return 0;
+	return 0;	/* [한국어] 컨텍스트가 PASID 디렉터리를 가리키게 되었다 */
 }
 
+/*
+ * [한국어]
+ * device_pasid_table_setup - 컨텍스트 항목 하나를 PASID 디렉터리에 연결한다
+ *
+ * @dev: 대상 장치. @bus, @devfn: 세울 컨텍스트 항목의 소스 id(별칭일 수 있다).
+ * @return: 0 성공, -ENOMEM 이면 컨텍스트 테이블을 만들지 못했다.
+ *
+ * 세 갈래로 나뉜다.
+ *
+ *   [1] 이미 우리가 세운 항목이면 그냥 돌아간다. 별칭 순회 때문에 같은 항목이
+ *       두 번 들어올 수 있어서다.
+ *
+ *   [2] 이전 커널에서 물려받은 항목이면(context_copied) 정리부터 해야 한다.
+ *       이것이 이 함수에서 가장 까다로운 부분이다. kdump 로 들어온 커널은
+ *       이전 커널의 컨텍스트·PASID 테이블을 그대로 이어받았는데, 그 테이블을
+ *       통해 캐시된 번역이 하드웨어에 남아 있다. 그런데 우리는 그 테이블이
+ *       어떤 도메인 id 와 PASID 를 썼는지 알 수 없다 — 정상적인 언매핑을
+ *       거치지 않았기 때문이다. 그래서 코드 안 영어 주석이 말하듯,
+ *       "무엇을 지워야 할지 모르니 전부 지운다": PASID 캐시와 IOTLB 를
+ *       전역(global) 무효화로 승격한다. 값비싸지만 kdump 경로에서 한 번뿐이고,
+ *       남은 옛 번역 하나가 크래시 덤프를 망치는 것보다 훨씬 낫다.
+ *       정리가 끝나면 clear_context_copied 로 인계 표시를 지운다 — 그 시점에는
+ *       장치 드라이버의 프로브가 리셋을 마쳐 진행 중인 DMA 가 없다는 것이
+ *       두 번째 영어 주석의 근거다.
+ *
+ *   [3] 그 다음 항목을 세운다. 마지막의 캐싱 모드 무효화는 세 번째 영어
+ *       주석대로 "없음 → 있음" 전환을 알리기 위한 것이다. 그런 하드웨어는
+ *       "이 소스 id 는 설정되지 않았다"를 도메인 0 에 캐시하므로, 그 캐시를
+ *       지워야 새 항목이 보인다.
+ *
+ * 실행 컨텍스트: 장치 프로브 또는 도메인 부착. 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   intel_pasid_setup_sm_context() → [device_pasid_table_setup]
+ *     → context_entry_set_pasid_table()
+ */
 static int device_pasid_table_setup(struct device *dev, u8 bus, u8 devfn)
 {
-	struct device_domain_info *info = dev_iommu_priv_get(dev);
-	struct intel_iommu *iommu = info->iommu;
-	struct context_entry *context;
+	struct device_domain_info *info = dev_iommu_priv_get(dev);	/* [한국어] 장치 정보 */
+	struct intel_iommu *iommu = info->iommu;	/* [한국어] 담당 유닛 */
+	struct context_entry *context;	/* [한국어] 세울 컨텍스트 항목 */
 
-	spin_lock(&iommu->lock);
-	context = iommu_context_addr(iommu, bus, devfn, true);
-	if (!context) {
-		spin_unlock(&iommu->lock);
-		return -ENOMEM;
+	spin_lock(&iommu->lock);	/* [한국어] 컨텍스트 테이블 변경 구간 */
+	context = iommu_context_addr(iommu, bus, devfn, true);	/* [한국어] 그 소스 id 의 항목. true 는 없으면 테이블을 만들라는 뜻 */
+	if (!context) {	/* [한국어] 만들지 못했으면 */
+		spin_unlock(&iommu->lock);	/* [한국어] 락 해제 */
+		return -ENOMEM;	/* [한국어] 설정 실패 */
 	}
 
-	if (context_present(context) && !context_copied(iommu, bus, devfn)) {
-		spin_unlock(&iommu->lock);
-		return 0;
+	if (context_present(context) && !context_copied(iommu, bus, devfn)) {	/* [한국어] 이미 우리가 세운 항목이면 */
+		spin_unlock(&iommu->lock);	/* [한국어] 락 해제 */
+		return 0;	/* [한국어] 다시 세울 필요가 없다. 별칭 순회 때문에 같은 항목이 두 번 들어올 수 있다 */
 	}
 
-	if (context_copied(iommu, bus, devfn)) {
-		context_clear_present(context);
-		__iommu_flush_cache(iommu, context, sizeof(*context));
+	if (context_copied(iommu, bus, devfn)) {	/* [한국어] 이전 커널에서 물려받은 항목이면 */
+		context_clear_present(context);	/* [한국어] 먼저 present 를 지워 하드웨어가 새 번역에 쓰지 않게 한다 */
+		__iommu_flush_cache(iommu, context, sizeof(*context));	/* [한국어] 메모리로 밀어낸다 */
 
 		/*
 		 * For kdump cases, old valid entries may be cached due to
@@ -1353,27 +1603,27 @@ static int device_pasid_table_setup(struct device *dev, u8 bus, u8 devfn)
 		 * which domain IDs and PASIDs were used in the copied tables,
 		 * upgrade them to global PASID and IOTLB cache invalidation.
 		 */
-		iommu->flush.flush_context(iommu, 0,
-					   PCI_DEVID(bus, devfn),
-					   DMA_CCMD_MASK_NOBIT,
-					   DMA_CCMD_DEVICE_INVL);
-		qi_flush_pasid_cache(iommu, 0, QI_PC_GLOBAL, 0);
-		iommu->flush.flush_iotlb(iommu, 0, 0, 0, DMA_TLB_GLOBAL_FLUSH);
-		devtlb_invalidation_with_pasid(iommu, dev, IOMMU_NO_PASID);
+		iommu->flush.flush_context(iommu, 0,	/* [한국어] 이 소스 id 의 컨텍스트 캐시를 비운다 */
+					   PCI_DEVID(bus, devfn),	/* [한국어] 대상 소스 id */
+					   DMA_CCMD_MASK_NOBIT,	/* [한국어] 함수 하나만 */
+					   DMA_CCMD_DEVICE_INVL);	/* [한국어] 장치 단위 무효화 */
+		qi_flush_pasid_cache(iommu, 0, QI_PC_GLOBAL, 0);	/* [한국어] PASID 캐시는 전역으로 비운다. 물려받은 테이블이 어떤 PASID 를 썼는지 알 수 없기 때문이다 (위 영어 주석) */
+		iommu->flush.flush_iotlb(iommu, 0, 0, 0, DMA_TLB_GLOBAL_FLUSH);	/* [한국어] IOTLB 도 전역으로. 어떤 도메인 id 를 썼는지도 알 수 없다 */
+		devtlb_invalidation_with_pasid(iommu, dev, IOMMU_NO_PASID);	/* [한국어] 장치 안의 캐시도 비운다 */
 
-		context_clear_entry(context);
-		__iommu_flush_cache(iommu, context, sizeof(*context));
+		context_clear_entry(context);	/* [한국어] 이제 항목을 완전히 비운다 */
+		__iommu_flush_cache(iommu, context, sizeof(*context));	/* [한국어] 메모리로 밀어낸다 */
 
 		/*
 		 * At this point, the device is supposed to finish reset at
 		 * its driver probe stage, so no in-flight DMA will exist,
 		 * and we don't need to worry anymore hereafter.
 		 */
-		clear_context_copied(iommu, bus, devfn);
+		clear_context_copied(iommu, bus, devfn);	/* [한국어] 인계 표시를 지운다. 이 시점에는 장치 드라이버의 프로브가 리셋을 마쳐 진행 중인 DMA 가 없다 (위 영어 주석) */
 	}
 
-	context_entry_set_pasid_table(context, dev);
-	spin_unlock(&iommu->lock);
+	context_entry_set_pasid_table(context, dev);	/* [한국어] 컨텍스트가 이 장치의 PASID 디렉터리를 가리키게 세운다 */
+	spin_unlock(&iommu->lock);	/* [한국어] 무효화 전에 락을 놓는다 */
 
 	/*
 	 * It's a non-present to present mapping. If hardware doesn't cache
@@ -1381,25 +1631,43 @@ static int device_pasid_table_setup(struct device *dev, u8 bus, u8 devfn)
 	 * cache non-present entries, then it does so in the special
 	 * domain #0, which we have to flush:
 	 */
-	if (cap_caching_mode(iommu->cap)) {
-		iommu->flush.flush_context(iommu, 0,
-					   PCI_DEVID(bus, devfn),
-					   DMA_CCMD_MASK_NOBIT,
-					   DMA_CCMD_DEVICE_INVL);
-		iommu->flush.flush_iotlb(iommu, 0, 0, 0, DMA_TLB_DSI_FLUSH);
+	if (cap_caching_mode(iommu->cap)) {	/* [한국어] 캐싱 모드 하드웨어면 (위 영어 주석) */
+		iommu->flush.flush_context(iommu, 0,	/* [한국어] "이 소스 id 는 설정되지 않았다"는 캐시를 지운다 */
+					   PCI_DEVID(bus, devfn),	/* [한국어] 대상 소스 id */
+					   DMA_CCMD_MASK_NOBIT,	/* [한국어] 함수 하나만 */
+					   DMA_CCMD_DEVICE_INVL);	/* [한국어] 장치 단위 */
+		iommu->flush.flush_iotlb(iommu, 0, 0, 0, DMA_TLB_DSI_FLUSH);	/* [한국어] 그 캐시는 특별한 도메인 0 에 들어 있어 그것을 비운다 (위 영어 주석) */
 	}
 
-	return 0;
+	return 0;	/* [한국어] 이 소스 id 가 scalable 모드로 번역되기 시작한다 */
 }
 
+/*
+ * [한국어]
+ * pci_pasid_table_setup - DMA 별칭마다 컨텍스트 항목을 세우는 콜백
+ *
+ * @pdev: 순회 중인 PCI 장치. @alias: 이 장치가 낼 수 있는 소스 id 하나.
+ * @data: 원본 struct device.
+ * @return: 0 성공(관계없는 장치라 건너뛴 경우 포함), 음수면 설정 실패.
+ *
+ * teardown 판과 대칭이지만 반환값의 의미가 다르다. 여기서는 실패를 그대로
+ * 돌려주어 순회를 멈춘다 — 컨텍스트를 절반만 세우면 그 장치가 어떤 소스
+ * id 로 DMA 를 내느냐에 따라 되기도 하고 안 되기도 하는 상태가 되어,
+ * 진단하기 매우 어려운 버그가 된다.
+ *
+ * dev != &pdev->dev 검사는 상위 브리지의 컨텍스트 항목을 건드리지 않기
+ * 위한 것이다 — 그것은 우리 것이 아니다.
+ *
+ * 실행 컨텍스트: 장치 프로브. 프로세스 컨텍스트.
+ */
 static int pci_pasid_table_setup(struct pci_dev *pdev, u16 alias, void *data)
 {
-	struct device *dev = data;
+	struct device *dev = data;	/* [한국어] 원본 장치 */
 
-	if (dev != &pdev->dev)
-		return 0;
+	if (dev != &pdev->dev)	/* [한국어] 상위 브리지의 항목은 우리 것이 아니다 */
+		return 0;	/* [한국어] 건너뛰되 순회는 계속한다 */
 
-	return device_pasid_table_setup(dev, PCI_BUS_NUM(alias), alias & 0xff);
+	return device_pasid_table_setup(dev, PCI_BUS_NUM(alias), alias & 0xff);	/* [한국어] 실패를 그대로 돌려 순회를 멈춘다. 절반만 세우면 소스 id 에 따라 되기도 안 되기도 하는 상태가 된다 */
 }
 
 /*
@@ -1408,35 +1676,83 @@ static int pci_pasid_table_setup(struct pci_dev *pdev, u16 alias, void *data)
  * The PASID table is set to the context entries of both device itself
  * and its alias requester ID for DMA.
  */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * intel_pasid_setup_sm_context - 이 장치를 scalable 모드로 들인다
+ *
+ * @dev: 대상 장치.
+ * @return: 0 성공, 음수면 실패.
+ *
+ * 장치가 낼 수 있는 모든 소스 id 의 컨텍스트 항목이 이 장치의 PASID
+ * 디렉터리를 가리키게 만든다. 이 함수가 끝나야 그 장치의 DMA 가 scalable
+ * 모드로 번역되기 시작한다.
+ *
+ * 모든 별칭을 세워야 하는 이유(위 영어 주석): PCI 장치는 자기 이름이 아닌
+ * 소스 id 로 DMA 를 낼 수 있다. 하나라도 빠뜨리면 그 id 로 나가는 요청만
+ * 번역되지 않아, 같은 장치가 어떤 경로로 DMA 를 내느냐에 따라 동작이
+ * 달라진다.
+ *
+ * 언제 불리는가: 장치 프로브에서 한 번, 그리고 kdump 로 물려받은 컨텍스트를
+ * 우리 형식으로 전환할 때(paging_domain_compatible) 한 번 더.
+ *
+ * 실행 컨텍스트: 장치 프로브/부착. 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   intel_iommu_probe_device()/paging_domain_compatible()
+ *     → [intel_pasid_setup_sm_context]
+ *     → pci_for_each_dma_alias() → pci_pasid_table_setup()
+ */
 int intel_pasid_setup_sm_context(struct device *dev)
 {
-	struct device_domain_info *info = dev_iommu_priv_get(dev);
+	struct device_domain_info *info = dev_iommu_priv_get(dev);	/* [한국어] 장치 정보 */
 
-	if (!dev_is_pci(dev))
-		return device_pasid_table_setup(dev, info->bus, info->devfn);
+	if (!dev_is_pci(dev))	/* [한국어] PCI 가 아니면 별칭이 없다 */
+		return device_pasid_table_setup(dev, info->bus, info->devfn);	/* [한국어] 자기 항목 하나만 세운다 */
 
-	return pci_for_each_dma_alias(to_pci_dev(dev), pci_pasid_table_setup, dev);
+	return pci_for_each_dma_alias(to_pci_dev(dev), pci_pasid_table_setup, dev);	/* [한국어] PCI 장치는 낼 수 있는 모든 소스 id 에 대해 세운다 (위 영어 주석) */
 }
 
 /*
  * Global Device-TLB invalidation following changes in a context entry which
  * was present.
  */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * __context_flush_dev_iotlb - 컨텍스트 항목이 바뀐 뒤 장치 안의 캐시를 통째로 비운다
+ *
+ * @info: 대상 장치 정보.
+ * @return: 없음.
+ *
+ * 컨텍스트 항목이 바뀌면 그 장치가 캐시한 모든 번역이 무효가 된다. 어느
+ * 범위가 영향을 받는지 특정할 수 없으므로 MAX_AGAW_PFN_WIDTH 로 주소 공간
+ * 전체를 비운다.
+ *
+ * 사라진 장치를 건너뛰는 이유(첫 영어 주석): ATS 무효화는 장치의 응답을
+ * 기다린다. 이미 뽑힌 장치에 보내면 그 응답이 영원히 오지 않아 IOMMU 가
+ * 무한정 기다리게 된다.
+ *
+ * quirk 를 조건 없이 부르는 이유(둘째 영어 주석): 이 지점에서 장치 DMA 가
+ * 멈췄다는 보장이 없다. 완료 순서 결함이 있는 장치라면 두 번째 무효화가
+ * 필요한데, 여기가 성능이 중요한 경로가 아니므로 항상 시도한다.
+ * (quirk_extra_dev_tlb_flush 자신이 대상이 아닌 장치를 걸러 낸다.)
+ *
+ * 실행 컨텍스트: 컨텍스트 항목 변경 후. 프로세스 컨텍스트.
+ */
 static void __context_flush_dev_iotlb(struct device_domain_info *info)
 {
-	if (!info->ats_enabled)
-		return;
+	if (!info->ats_enabled)	/* [한국어] ATS 가 꺼져 있으면 */
+		return;	/* [한국어] 장치 안에 캐시가 없다 */
 
 	/*
 	 * Skip dev-IOTLB flush for inaccessible PCIe devices to prevent the
 	 * Intel IOMMU from waiting indefinitely for an ATS invalidation that
 	 * cannot complete.
 	 */
-	if (!pci_device_is_present(to_pci_dev(info->dev)))
-		return;
+	if (!pci_device_is_present(to_pci_dev(info->dev)))	/* [한국어] 장치가 이미 뽑혔으면 (위 영어 주석) */
+		return;	/* [한국어] 응답하지 않을 무효화를 보내면 IOMMU 가 무한정 기다린다 */
 
-	qi_flush_dev_iotlb(info->iommu, PCI_DEVID(info->bus, info->devfn),
-			   info->pfsid, info->ats_qdep, 0, MAX_AGAW_PFN_WIDTH);
+	qi_flush_dev_iotlb(info->iommu, PCI_DEVID(info->bus, info->devfn),	/* [한국어] 그 장치의 캐시를 */
+			   info->pfsid, info->ats_qdep, 0, MAX_AGAW_PFN_WIDTH);	/* [한국어] 주소 공간 전체 범위로 비운다. 컨텍스트가 바뀌면 어느 범위가 영향받는지 특정할 수 없다 */
 
 	/*
 	 * There is no guarantee that the device DMA is stopped when it reaches
@@ -1444,8 +1760,8 @@ static void __context_flush_dev_iotlb(struct device_domain_info *info)
 	 * quirk. The impact on performance is acceptable since this is not a
 	 * performance-critical path.
 	 */
-	quirk_extra_dev_tlb_flush(info, 0, MAX_AGAW_PFN_WIDTH, IOMMU_NO_PASID,
-				  info->ats_qdep);
+	quirk_extra_dev_tlb_flush(info, 0, MAX_AGAW_PFN_WIDTH, IOMMU_NO_PASID,	/* [한국어] 완료 순서 결함이 있는 장치를 위해 한 번 더 보낸다. 여기서 DMA 가 멈췄다는 보장이 없고 성능이 중요한 경로도 아니라 항상 시도한다 (위 영어 주석) */
+				  info->ats_qdep);	/* [한국어] 같은 큐 깊이로 */
 }
 
 /*
@@ -1455,10 +1771,38 @@ static void __context_flush_dev_iotlb(struct device_domain_info *info)
  * IOMMU is in scalable mode but all PASID table entries of the device are
  * non-present.
  */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * intel_context_flush_no_pasid - 컨텍스트 항목을 고친 뒤 캐시를 비운다
+ *
+ * @info: 대상 장치 정보. @context: 고친 항목. @did: 그 항목의 도메인 id.
+ * @return: 없음.
+ *
+ * 스펙 6.5.3.3 의 무효화 핸드셰이크를 구현한다. 모드에 따라 필요한 것이
+ * 다르다.
+ *
+ *   레거시 모드 — 컨텍스트 캐시 → IOTLB → 디바이스 TLB 셋 다 비운다.
+ *     이 모드에서는 컨텍스트 항목이 곧바로 페이지 테이블을 가리키므로,
+ *     그것이 바뀌면 그 도메인의 IOTLB 항목도 무효가 된다.
+ *
+ *   scalable 모드 — 컨텍스트 캐시와 디바이스 TLB 만 비운다. IOTLB 를
+ *     건너뛰는 것은 이 함수의 사용 조건(위 영어 주석) 때문이다: scalable
+ *     모드에서는 그 장치의 모든 PASID 항목이 이미 non-present 일 때만
+ *     이 함수를 쓸 수 있다. 즉 IOTLB 는 각 PASID 를 내릴 때 이미 비워졌다.
+ *
+ * did 가 scalable 모드에서 무의미하다는 첫 영어 주석도 같은 맥락이다 —
+ * 하드웨어가 컨텍스트 캐시 무효화 서술자의 도메인 id 필드를 무시한다.
+ *
+ * 실행 컨텍스트: 컨텍스트 항목 변경 후, iommu->lock 밖에서.
+ *
+ * 호출 체인:
+ *   device_pasid_table_teardown()/domain_context_clear_one()
+ *     → [intel_context_flush_no_pasid] → __context_flush_dev_iotlb()
+ */
 void intel_context_flush_no_pasid(struct device_domain_info *info,
 				  struct context_entry *context, u16 did)
 {
-	struct intel_iommu *iommu = info->iommu;
+	struct intel_iommu *iommu = info->iommu;	/* [한국어] 담당 유닛 */
 
 	/*
 	 * Device-selective context-cache invalidation. The Domain-ID field
@@ -1466,20 +1810,20 @@ void intel_context_flush_no_pasid(struct device_domain_info *info,
 	 * when operating in scalable mode. Therefore the @did value doesn't
 	 * matter in scalable mode.
 	 */
-	iommu->flush.flush_context(iommu, did, PCI_DEVID(info->bus, info->devfn),
-				   DMA_CCMD_MASK_NOBIT, DMA_CCMD_DEVICE_INVL);
+	iommu->flush.flush_context(iommu, did, PCI_DEVID(info->bus, info->devfn),	/* [한국어] 장치 단위로 컨텍스트 캐시를 비운다. scalable 모드에서는 하드웨어가 도메인 id 필드를 무시하므로 did 값이 무의미하다 (위 영어 주석) */
+				   DMA_CCMD_MASK_NOBIT, DMA_CCMD_DEVICE_INVL);	/* [한국어] 함수 하나만, 장치 단위 */
 
 	/*
 	 * For legacy mode:
 	 * - Domain-selective IOTLB invalidation
 	 * - Global Device-TLB invalidation to all affected functions
 	 */
-	if (!sm_supported(iommu)) {
-		iommu->flush.flush_iotlb(iommu, did, 0, 0, DMA_TLB_DSI_FLUSH);
-		__context_flush_dev_iotlb(info);
+	if (!sm_supported(iommu)) {	/* [한국어] 레거시 모드면 (위 영어 주석) */
+		iommu->flush.flush_iotlb(iommu, did, 0, 0, DMA_TLB_DSI_FLUSH);	/* [한국어] IOTLB 도 비운다 — 컨텍스트 항목이 곧바로 페이지 테이블을 가리키므로 그것이 바뀌면 IOTLB 항목도 무효가 된다 */
+		__context_flush_dev_iotlb(info);	/* [한국어] 장치 안의 캐시도 */
 
-		return;
+		return;	/* [한국어] 레거시 경로는 여기서 끝 */
 	}
 
-	__context_flush_dev_iotlb(info);
+	__context_flush_dev_iotlb(info);	/* [한국어] scalable 모드에서는 IOTLB 를 건너뛴다 — 이 함수의 사용 조건상 모든 PASID 항목이 이미 내려가 있어 그때 이미 비워졌다 */
 }
