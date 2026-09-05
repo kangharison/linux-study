@@ -1946,6 +1946,25 @@ domain_context_mapping(struct dmar_domain *domain, struct device *dev)
 	return 0;	/* [한국어] 이 장치의 모든 requester id 가 이 도메인을 가리킨다 */
 }
 
+/*
+ * [한국어]
+ * domain_context_clear_one - 컨텍스트 항목 하나를 지우고 캐시를 비운다
+ *
+ * @info:       장치 정보 (담당 유닛과 ATS 상태를 안다)
+ * @bus/@devfn: 지울 소스 id
+ *
+ * 순서가 이 함수의 전부다. present 비트만 먼저 내려 하드웨어가 이 장치를 더는
+ * 번역하지 않게 만들고, 락을 놓은 뒤 무효화를 내고, 그 다음에야 항목 전체를
+ * 지운다.
+ *
+ * 왜 나누는가 — 무효화는 하드웨어 완료를 기다리므로 오래 걸린다. 그 동안 유닛
+ * 락을 붙잡고 있으면 다른 장치의 부착이 모두 멈춘다. present 를 먼저 내려 두면
+ * 락을 놓아도 안전하다.
+ *
+ * 실행 컨텍스트: 장치 해제. 유닛 락을 잡았다 놓는다.
+ *
+ * 호출 체인: domain_context_clear → [이 함수]
+ */
 static void domain_context_clear_one(struct device_domain_info *info, u8 bus, u8 devfn)
 {
 	struct intel_iommu *iommu = info->iommu;	/* [한국어] 담당 유닛 */
@@ -1959,117 +1978,217 @@ static void domain_context_clear_one(struct device_domain_info *info, u8 bus, u8
 		return;
 	}
 
-	did = context_domain_id(context);
-	context_clear_present(context);
-	__iommu_flush_cache(iommu, context, sizeof(*context));
-	spin_unlock(&iommu->lock);
-	intel_context_flush_no_pasid(info, context, did);
-	context_clear_entry(context);
-	__iommu_flush_cache(iommu, context, sizeof(*context));
+	did = context_domain_id(context);	/* [한국어] 무효화에 쓸 도메인 id 를 먼저 꺼낸다 — 항목을 지운 뒤에는 알 수 없다 */
+	context_clear_present(context);	/* [한국어] present 비트만 먼저 내린다. 이 순간부터 하드웨어는 이 장치의 DMA 를 폴트로 처리한다 */
+	__iommu_flush_cache(iommu, context, sizeof(*context));	/* [한국어] 그 변경을 하드웨어가 보게 만든다 */
+	spin_unlock(&iommu->lock);	/* [한국어] 무효화는 락 밖에서 — 완료를 기다리는 동안 다른 장치의 설정을 막지 않는다 */
+	intel_context_flush_no_pasid(info, context, did);	/* [한국어] 캐시된 컨텍스트와 IOTLB, 그리고 장치의 ATC 까지 비운다. 이것이 끝나야 이 장치가 옛 주소 공간에 닿지 못한다 */
+	context_clear_entry(context);	/* [한국어] 이제 항목 전체를 0 으로. present 를 먼저 내린 덕분에 이 시점에는 하드웨어가 이 항목을 보지 않는다 */
+	__iommu_flush_cache(iommu, context, sizeof(*context));	/* [한국어] 그 변경도 밀어낸다 */
 }
 
+/*
+ * [한국어]
+ * __domain_setup_first_level - PASID 항목에 1단계 페이지 테이블을 설치한다
+ *
+ * @iommu:   담당 유닛
+ * @dev:     대상 장치
+ * @pasid:   설치할 PASID (0 이면 RID 트래픽)
+ * @did:     도메인 id
+ * @fsptptr: 1단계 페이지 테이블 루트의 물리 주소
+ * @flags:   레벨 수, 스누핑 등의 플래그
+ * @old:     기존에 붙어 있던 도메인 (교체면 먼저 뗀다)
+ * @return:  0 성공, 음수 실패
+ *
+ * 1단계 페이지 테이블은 x86 CPU 의 것과 형식이 같다. 그래서 SVA 에서는 프로세스의
+ * mm->pgd 를 그대로 이 자리에 넣을 수 있고, 그것이 장치가 프로세스 가상 주소를
+ * 쓰는 방식의 실체다.
+ *
+ * 실행 컨텍스트: 부착 경로. 프로세스 문맥.
+ *
+ * 호출 체인: domain_setup_first_level, SVA 경로 → [이 함수]
+ */
 int __domain_setup_first_level(struct intel_iommu *iommu, struct device *dev,
 			       ioasid_t pasid, u16 did, phys_addr_t fsptptr,
 			       int flags, struct iommu_domain *old)
 {
-	if (old)
-		intel_pasid_tear_down_entry(iommu, dev, pasid, false);
+	if (old)	/* [한국어] 이미 다른 도메인이 이 PASID 에 붙어 있으면 */
+		intel_pasid_tear_down_entry(iommu, dev, pasid, false);	/* [한국어] 먼저 떼어 낸다 */
 
-	return intel_pasid_setup_first_level(iommu, dev, fsptptr, pasid, did, flags);
+	return intel_pasid_setup_first_level(iommu, dev, fsptptr, pasid, did, flags);	/* [한국어] PASID 항목에 1단계 페이지 테이블을 설치한다. x86 CPU 와 형식이 같은 테이블이라 SVA 가 프로세스의 것을 그대로 가리킬 수 있다 */
 }
 
+/*
+ * [한국어]
+ * domain_setup_second_level - PASID 항목에 2단계 페이지 테이블을 설치한다
+ *
+ * @iommu:  담당 유닛
+ * @domain: 설치할 도메인
+ * @dev:    대상 장치
+ * @pasid:  설치할 PASID
+ * @old:    기존 도메인
+ * @return: 0 성공, 음수 실패
+ *
+ * scalable mode 에서도 2단계 테이블을 쓸 수 있다. 가상화에서 게스트의 출력을
+ * 다시 번역하거나, 1단계를 지원하지 않는 하드웨어에서 쓰인다.
+ *
+ * 실행 컨텍스트: 부착 경로.
+ *
+ * 호출 체인: dmar_domain_attach_device 등 → [이 함수]
+ */
 static int domain_setup_second_level(struct intel_iommu *iommu,
 				     struct dmar_domain *domain,
 				     struct device *dev, ioasid_t pasid,
 				     struct iommu_domain *old)
 {
-	if (old)
-		intel_pasid_tear_down_entry(iommu, dev, pasid, false);
+	if (old)	/* [한국어] 기존 부착이 있으면 */
+		intel_pasid_tear_down_entry(iommu, dev, pasid, false);	/* [한국어] 먼저 정리 */
 
-	return intel_pasid_setup_second_level(iommu, domain, dev, pasid);
+	return intel_pasid_setup_second_level(iommu, domain, dev, pasid);	/* [한국어] 2단계 페이지 테이블을 PASID 항목에 설치한다 */
 }
 
+/*
+ * [한국어]
+ * domain_setup_passthrough - PASID 항목을 통과 모드로 설정한다
+ *
+ * @iommu:  담당 유닛
+ * @dev:    대상 장치
+ * @pasid:  설치할 PASID
+ * @old:    기존 도메인
+ * @return: 0 성공, 음수 실패
+ *
+ * 항등 도메인의 scalable mode 구현이다. 페이지 테이블 없이 장치가 낸 주소를
+ * 그대로 물리 주소로 쓰며, 번역 비용이 사라지는 대신 격리도 사라진다.
+ *
+ * 실행 컨텍스트: 부착 경로.
+ *
+ * 호출 체인: 항등 도메인 부착 경로 → [이 함수]
+ */
 static int domain_setup_passthrough(struct intel_iommu *iommu,
 				    struct device *dev, ioasid_t pasid,
 				    struct iommu_domain *old)
 {
-	if (old)
-		intel_pasid_tear_down_entry(iommu, dev, pasid, false);
+	if (old)	/* [한국어] 기존 부착이 있으면 */
+		intel_pasid_tear_down_entry(iommu, dev, pasid, false);	/* [한국어] 먼저 정리 */
 
-	return intel_pasid_setup_pass_through(iommu, dev, pasid);
+	return intel_pasid_setup_pass_through(iommu, dev, pasid);	/* [한국어] 번역 없이 통과시키는 PASID 항목. 항등 도메인의 scalable mode 구현이다 */
 }
 
+/*
+ * [한국어]
+ * domain_setup_first_level - 도메인의 1단계 테이블을 PASID 항목에 설치한다
+ *
+ * @iommu:  담당 유닛
+ * @domain: 설치할 도메인
+ * @dev:    대상 장치
+ * @pasid:  설치할 PASID
+ * @old:    기존 도메인
+ * @return: 0 성공, 음수 실패
+ *
+ * 플래그 조립이 이 함수의 내용이다. 세 가지가 PASID 항목의 동작을 바꾼다.
+ *  - FL5LP: 5단계 페이지 테이블(57비트 주소)임을 알린다.
+ *  - PAGE_SNOOP: 장치의 데이터 DMA 가 CPU 캐시를 스누핑하게 한다. 비일관 장치도
+ *    소프트웨어 캐시 관리 없이 쓸 수 있게 되지만 스누핑 대역폭을 소모한다.
+ *  - PWSNP: 페이지 워크도 스누핑하게 한다. 그러면 소프트웨어가 PTE 를 쓴 뒤
+ *    clflush 하지 않아도 하드웨어가 최신 값을 본다.
+ *
+ * 실행 컨텍스트: 부착 경로.
+ *
+ * 호출 체인: dmar_domain_attach_device 등 → [이 함수]
+ */
 static int domain_setup_first_level(struct intel_iommu *iommu,
 				    struct dmar_domain *domain,
 				    struct device *dev,
 				    u32 pasid, struct iommu_domain *old)
 {
-	struct pt_iommu_x86_64_hw_info pt_info;
-	unsigned int flags = 0;
+	struct pt_iommu_x86_64_hw_info pt_info;	/* [한국어] 1단계 페이지 테이블의 하드웨어 정보 */
+	unsigned int flags = 0;	/* [한국어] PASID 항목에 실을 플래그 */
 
-	pt_iommu_x86_64_hw_info(&domain->fspt, &pt_info);
-	if (WARN_ON(pt_info.levels != 4 && pt_info.levels != 5))
-		return -EINVAL;
+	pt_iommu_x86_64_hw_info(&domain->fspt, &pt_info);	/* [한국어] 공용 페이지 테이블 계층에서 루트 주소와 레벨 수를 꺼낸다 */
+	if (WARN_ON(pt_info.levels != 4 && pt_info.levels != 5))	/* [한국어] 1단계는 4단계 또는 5단계만 가능하다 */
+		return -EINVAL;	/* [한국어] 다른 값은 있을 수 없다 */
 
-	if (pt_info.levels == 5)
-		flags |= PASID_FLAG_FL5LP;
+	if (pt_info.levels == 5)	/* [한국어] 5단계 페이지 테이블이면 */
+		flags |= PASID_FLAG_FL5LP;	/* [한국어] 57비트 주소 공간임을 하드웨어에 알린다 */
 
-	if (domain->force_snooping)
-		flags |= PASID_FLAG_PAGE_SNOOP;
+	if (domain->force_snooping)	/* [한국어] 이 도메인이 캐시 일관성을 강제하면 */
+		flags |= PASID_FLAG_PAGE_SNOOP;	/* [한국어] 장치의 DMA 가 CPU 캐시를 스누핑하게 한다. 비일관 장치도 소프트웨어 캐시 관리 없이 쓸 수 있게 되지만, 스누핑 대역폭을 소모한다 */
 
-	if (!(domain->fspt.x86_64_pt.common.features &
-	      BIT(PT_FEAT_DMA_INCOHERENT)))
-		flags |= PASID_FLAG_PWSNP;
+	if (!(domain->fspt.x86_64_pt.common.features &	/* [한국어] 페이지 테이블 자체가 비일관이 아니면 */
+	      BIT(PT_FEAT_DMA_INCOHERENT)))	/* [한국어] 즉 워크가 캐시를 볼 수 있으면 */
+		flags |= PASID_FLAG_PWSNP;	/* [한국어] 페이지 워크도 스누핑하게 한다 — 소프트웨어가 PTE 를 쓴 뒤 플러시하지 않아도 하드웨어가 최신 값을 본다 */
 
-	return __domain_setup_first_level(iommu, dev, pasid,
-					  domain_id_iommu(domain, iommu),
-					  pt_info.gcr3_pt, flags, old);
+	return __domain_setup_first_level(iommu, dev, pasid,	/* [한국어] 실제 설치 */
+					  domain_id_iommu(domain, iommu),	/* [한국어] 이 유닛에서의 도메인 id */
+					  pt_info.gcr3_pt, flags, old);	/* [한국어] 페이지 테이블 루트와 플래그 */
 }
 
+/*
+ * [한국어]
+ * dmar_domain_attach_device - 장치를 이 도메인에 붙인다 (드라이버 내부 진입점)
+ *
+ * @domain: 붙일 도메인
+ * @dev:    대상 장치
+ * @return: 0 성공, 음수 실패
+ *
+ * 네 단계로 이뤄진다. 유닛에서의 도메인 id 확보 → 도메인 장치 목록 등록 →
+ * 하드웨어 설정(모드에 따라 컨텍스트 항목 또는 PASID 항목) → 무효화 태그 등록.
+ *
+ * 마지막 단계가 눈에 잘 띄지 않지만 중요하다. 도메인 하나가 여러 유닛에 걸쳐
+ * 설치될 수 있고 장치마다 ATS 여부가 다르므로, "이 도메인의 무효화를 어디에
+ * 어떤 형태로 보내야 하는가"를 태그 목록이 추적한다.
+ *
+ * 실패하면 차단 상태로 되돌리는 것이 안전 기본값이다. 반쯤 설정된 채로 두면
+ * 장치가 무엇을 보게 될지 알 수 없다.
+ *
+ * 실행 컨텍스트: 부착 경로. 프로세스 문맥.
+ *
+ * 호출 체인: intel_iommu_attach_device → [이 함수]
+ */
 static int dmar_domain_attach_device(struct dmar_domain *domain,
 				     struct device *dev)
 {
-	struct device_domain_info *info = dev_iommu_priv_get(dev);
-	struct intel_iommu *iommu = info->iommu;
-	unsigned long flags;
-	int ret;
+	struct device_domain_info *info = dev_iommu_priv_get(dev);	/* [한국어] 이 장치의 드라이버 문맥 */
+	struct intel_iommu *iommu = info->iommu;	/* [한국어] 담당 유닛 */
+	unsigned long flags;	/* [한국어] 인터럽트 상태 */
+	int ret;	/* [한국어] 결과 */
 
-	ret = domain_attach_iommu(domain, iommu);
-	if (ret)
-		return ret;
+	ret = domain_attach_iommu(domain, iommu);	/* [한국어] 이 유닛에서 쓸 도메인 id 를 먼저 확보한다 */
+	if (ret)	/* [한국어] id 고갈 */
+		return ret;	/* [한국어] 부착 불가 */
 
-	info->domain = domain;
-	info->domain_attached = true;
-	spin_lock_irqsave(&domain->lock, flags);
-	list_add(&info->link, &domain->devices);
-	spin_unlock_irqrestore(&domain->lock, flags);
+	info->domain = domain;	/* [한국어] 장치가 어느 도메인에 속하는지 */
+	info->domain_attached = true;	/* [한국어] 부착 완료 표시. 해제 경로가 이 값을 보고 무엇을 되돌릴지 정한다 */
+	spin_lock_irqsave(&domain->lock, flags);	/* [한국어] 도메인의 장치 목록 보호 */
+	list_add(&info->link, &domain->devices);	/* [한국어] 목록에 등록. 이후 무효화가 이 목록을 훑어 대상 장치를 찾는다 */
+	spin_unlock_irqrestore(&domain->lock, flags);	/* [한국어] 락 해제 */
 
-	if (dev_is_real_dma_subdevice(dev))
-		return 0;
+	if (dev_is_real_dma_subdevice(dev))	/* [한국어] 다른 장치의 이름으로 DMA 를 내는 하위 장치면 */
+		return 0;	/* [한국어] 하드웨어 설정은 그 본체가 이미 했다 */
 
-	if (!sm_supported(iommu))
-		ret = domain_context_mapping(domain, dev);
-	else if (intel_domain_is_fs_paging(domain))
-		ret = domain_setup_first_level(iommu, domain, dev,
-					       IOMMU_NO_PASID, NULL);
-	else if (intel_domain_is_ss_paging(domain))
-		ret = domain_setup_second_level(iommu, domain, dev,
-						IOMMU_NO_PASID, NULL);
-	else if (WARN_ON(true))
-		ret = -EINVAL;
+	if (!sm_supported(iommu))	/* [한국어] 레거시 모드 */
+		ret = domain_context_mapping(domain, dev);	/* [한국어] 컨텍스트 항목에 직접 기입 */
+	else if (intel_domain_is_fs_paging(domain))	/* [한국어] scalable mode, 1단계 페이지 테이블 */
+		ret = domain_setup_first_level(iommu, domain, dev,	/* [한국어] PASID 항목에 설치 */
+					       IOMMU_NO_PASID, NULL);	/* [한국어] PASID 0 = RID 트래픽 */
+	else if (intel_domain_is_ss_paging(domain))	/* [한국어] scalable mode, 2단계 페이지 테이블 */
+		ret = domain_setup_second_level(iommu, domain, dev,	/* [한국어] PASID 항목에 설치 */
+						IOMMU_NO_PASID, NULL);	/* [한국어] PASID 0 */
+	else if (WARN_ON(true))	/* [한국어] 어느 쪽도 아닌 도메인 */
+		ret = -EINVAL;	/* [한국어] 있을 수 없는 상태 */
 
-	if (ret)
-		goto out_block_translation;
+	if (ret)	/* [한국어] 하드웨어 설정 실패 */
+		goto out_block_translation;	/* [한국어] 차단 상태로 되돌린다 */
 
-	ret = cache_tag_assign_domain(domain, dev, IOMMU_NO_PASID);
-	if (ret)
-		goto out_block_translation;
+	ret = cache_tag_assign_domain(domain, dev, IOMMU_NO_PASID);	/* [한국어] 무효화 태그를 등록한다. 이 도메인의 무효화가 어느 유닛에 어떤 형태로 가야 하는지를 cache.c 가 이 태그로 추적한다 */
+	if (ret)	/* [한국어] 태그 등록 실패 */
+		goto out_block_translation;	/* [한국어] 되감기 */
 
-	return 0;
+	return 0;	/* [한국어] 이 장치의 DMA 가 이제 이 도메인을 거친다 */
 
-out_block_translation:
-	device_block_translation(dev);
-	return ret;
+out_block_translation:	/* [한국어] 실패 경로 */
+	device_block_translation(dev);	/* [한국어] 차단 상태로 — 반쯤 설정된 채로 두면 장치가 무엇을 보게 될지 알 수 없다 */
+	return ret;	/* [한국어] 실패 이유 */
 }
 
 /**
@@ -2087,40 +2206,77 @@ out_block_translation:
  *
  * Return: true if the RMRR is relaxable, false otherwise
  */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어)
+ * device_rmrr_is_relaxable - 이 장치의 RMRR 을 강제하지 않아도 되는가
+ *
+ * @dev:    대상 장치
+ * @return: 완화 가능하면 true
+ *
+ * RMRR 은 원칙적으로 항등 매핑을 강제하므로, 그 장치는 사용자 공간에 넘길 수
+ * 없고 임의의 주소 공간에 둘 수도 없다. 그런데 실제로는 USB 와 그래픽이 RMRR 을
+ * 가진 장치의 대부분이고, 그 둘은 부팅 후에 그 영역을 쓰지 않는다는 관찰이
+ * 이 완화의 근거다 (위 영어 주석).
+ *
+ * 위 주석이 "벤더가 남용하기 시작하면 이 예외가 바뀔 수 있다"고 덧붙인 것에서,
+ * 이것이 규격이 아니라 실무적 타협임이 드러난다.
+ *
+ * 실행 컨텍스트: 프로브 경로.
+ *
+ * 호출 체인: RMRR 강제 판정 경로 → [이 함수]
+ */
 static bool device_rmrr_is_relaxable(struct device *dev)
 {
-	struct pci_dev *pdev;
+	struct pci_dev *pdev;	/* [한국어] PCI 형으로 변환 */
 
-	if (!dev_is_pci(dev))
-		return false;
+	if (!dev_is_pci(dev))	/* [한국어] PCI 가 아니면 */
+		return false;	/* [한국어] 완화 대상이 아니다 */
 
-	pdev = to_pci_dev(dev);
-	if (IS_USB_DEVICE(pdev) || IS_GFX_DEVICE(pdev))
-		return true;
+	pdev = to_pci_dev(dev);	/* [한국어] PCI 장치 */
+	if (IS_USB_DEVICE(pdev) || IS_GFX_DEVICE(pdev))	/* [한국어] USB 컨트롤러나 그래픽 장치면 */
+		return true;	/* [한국어] RMRR 을 강제하지 않아도 된다. USB 는 레거시 에뮬레이션이 부팅 후에는 그 영역을 쓰지 않고, 그래픽은 게스트에 넘기기 전에 정리하는 것을 조건으로 한다 (위 영어 주석) */
 	else
-		return false;
+		return false;	/* [한국어] 그 외에는 항등 매핑을 유지해야 한다 */
 }
 
+/*
+ * [한국어]
+ * device_def_domain_type - 이 장치가 선호하는 기본 도메인 종류
+ *
+ * @dev:    대상 장치
+ * @return: IOMMU_DOMAIN_DMA / IOMMU_DOMAIN_IDENTITY, 0 이면 선호 없음
+ *
+ * 코어의 def_domain_type 콜백이다. iommu.c 가 그룹의 모든 장치에서 이 값을 모아
+ * 하나로 합치므로, 여기서 반환한 값이 그룹 전체의 정책을 바꿀 수 있다.
+ *
+ * 두 가지만 강제한다. 하드웨어가 통과 모드를 지원하지 않으면 번역을 요구하고,
+ * 특정 오디오 컨트롤러는 IOMMU 아래에서 오작동해 통과를 요구한다. 그 외에는
+ * 0 을 돌려주어 시스템 정책에 맡긴다.
+ *
+ * 실행 컨텍스트: 도메인 종류 결정. 그룹 락 아래.
+ *
+ * 호출 체인: iommu.c 의 iommu_get_def_domain_type → ops->def_domain_type == [이 함수]
+ */
 static int device_def_domain_type(struct device *dev)
 {
-	struct device_domain_info *info = dev_iommu_priv_get(dev);
-	struct intel_iommu *iommu = info->iommu;
+	struct device_domain_info *info = dev_iommu_priv_get(dev);	/* [한국어] 이 장치의 문맥 */
+	struct intel_iommu *iommu = info->iommu;	/* [한국어] 담당 유닛 */
 
 	/*
 	 * Hardware does not support the passthrough translation mode.
 	 * Always use a dynamaic mapping domain.
 	 */
-	if (!ecap_pass_through(iommu->ecap))
-		return IOMMU_DOMAIN_DMA;
+	if (!ecap_pass_through(iommu->ecap))	/* [한국어] 하드웨어가 통과 모드를 지원하지 않으면 (위 영어 주석) */
+		return IOMMU_DOMAIN_DMA;	/* [한국어] 항상 번역 도메인을 쓴다 */
 
-	if (dev_is_pci(dev)) {
-		struct pci_dev *pdev = to_pci_dev(dev);
+	if (dev_is_pci(dev)) {	/* [한국어] PCI 장치면 */
+		struct pci_dev *pdev = to_pci_dev(dev);	/* [한국어] PCI 형으로 */
 
-		if ((iommu_identity_mapping & IDENTMAP_AZALIA) && IS_AZALIA(pdev))
-			return IOMMU_DOMAIN_IDENTITY;
+		if ((iommu_identity_mapping & IDENTMAP_AZALIA) && IS_AZALIA(pdev))	/* [한국어] 특정 HD 오디오 컨트롤러에 항등 매핑을 강제하도록 설정되어 있으면 */
+			return IOMMU_DOMAIN_IDENTITY;	/* [한국어] 통과 도메인을 쓴다 — 그 장치가 IOMMU 아래에서 오작동하기 때문 */
 	}
 
-	return 0;
+	return 0;	/* [한국어] 선호 없음 — 코어의 시스템 기본값을 따른다 */
 }
 
 static void intel_iommu_init_qi(struct intel_iommu *iommu)
