@@ -79,8 +79,8 @@
  * - struct root_entry / context_entry: 번역 사슬의 첫 두 단계. 컨텍스트 항목의
  *   해석은 scalable 모드 여부에 따라 통째로 달라진다.
  */
-#ifndef _INTEL_IOMMU_H_
-#define _INTEL_IOMMU_H_
+#ifndef _INTEL_IOMMU_H_	/* [한국어] 중복 포함 방지 */
+#define _INTEL_IOMMU_H_	/* [한국어] 같음 */
 
 #include <linux/types.h>	/* [한국어] 기본 정수 타입 */
 #include <linux/iova.h>	/* [한국어] IOVA 할당기. dma-iommu 가 이 도메인 위에 IOVA 공간을 얹는다 */
@@ -242,7 +242,7 @@
 
 #define cap_fault_reg_offset(c)	((((c) >> 24) & 0x3ff) * 16)	/* [한국어] 폴트 기록 레지스터들이 시작되는 오프셋. 필드 값에 16을 곱한다 */
 #define cap_max_fault_reg_offset(c) \	/* [한국어] 그 마지막 레지스터의 끝. 폴트 순회의 종료 조건이다 */
-	(cap_fault_reg_offset(c) + cap_num_fault_regs(c) * 16)
+	(cap_fault_reg_offset(c) + cap_num_fault_regs(c) * 16)	/* [한국어] 시작 오프셋 + 개수 × 16바이트. 폴트 기록 순회의 종료 조건이다 */
 
 #define cap_zlr(c)		(((c) >> 22) & 1)	/* [한국어] Zero Length Read 지원. 길이 0 읽기 요청을 정상 처리하는지 */
 #define cap_isoch(c)		(((c) >> 23) & 1)	/* [한국어] 등시성(ISOCH) 전용 유닛인지. Tylersburg 우회가 이 개념과 얽혀 있다 */
@@ -323,262 +323,345 @@
 #define DMA_TLB_MAX_SIZE (0x3f)	/* [한국어] 주소 마스크 필드의 최대값 */
 
 /* INVALID_DESC */
-#define DMA_CCMD_INVL_GRANU_OFFSET  61
-#define DMA_ID_TLB_GLOBAL_FLUSH	(((u64)1) << 4)
-#define DMA_ID_TLB_DSI_FLUSH	(((u64)2) << 4)
-#define DMA_ID_TLB_PSI_FLUSH	(((u64)3) << 4)
-#define DMA_ID_TLB_READ_DRAIN	(((u64)1) << 7)
-#define DMA_ID_TLB_WRITE_DRAIN	(((u64)1) << 6)
-#define DMA_ID_TLB_DID(id)	(((u64)((id & 0xffff) << 16)))
-#define DMA_ID_TLB_IH_NONLEAF	(((u64)1) << 6)
-#define DMA_ID_TLB_ADDR(addr)	(addr)
-#define DMA_ID_TLB_ADDR_MASK(mask)	(mask)
+#define DMA_CCMD_INVL_GRANU_OFFSET  61	/* [한국어] 무효화 서술자에서 범위 종류를 담는 비트 위치 (위 영어 주석: 큐에 넣는 서술자 형식) */
+#define DMA_ID_TLB_GLOBAL_FLUSH	(((u64)1) << 4)	/* [한국어] 서술자 방식의 전역 IOTLB 무효화 */
+#define DMA_ID_TLB_DSI_FLUSH	(((u64)2) << 4)	/* [한국어] 도메인 단위 */
+#define DMA_ID_TLB_PSI_FLUSH	(((u64)3) << 4)	/* [한국어] 페이지 단위 */
+#define DMA_ID_TLB_READ_DRAIN	(((u64)1) << 7)	/* [한국어] 진행 중인 읽기 배수 */
+#define DMA_ID_TLB_WRITE_DRAIN	(((u64)1) << 6)	/* [한국어] 진행 중인 쓰기 배수 */
+#define DMA_ID_TLB_DID(id)	(((u64)((id & 0xffff) << 16)))	/* [한국어] 대상 도메인 id */
+#define DMA_ID_TLB_IH_NONLEAF	(((u64)1) << 6)	/* [한국어] 중간 단계 항목은 그대로 두라는 힌트 */
+#define DMA_ID_TLB_ADDR(addr)	(addr)	/* [한국어] 무효화할 주소. 별도 변환 없이 그대로 실린다 */
+#define DMA_ID_TLB_ADDR_MASK(mask)	(mask)	/* [한국어] 그 범위 크기(로그값). 주소의 정렬이 곧 가능한 최대 범위를 정한다 */
 
 /* PMEN_REG */
-#define DMA_PMEN_EPM (((u32)1)<<31)
-#define DMA_PMEN_PRS (((u32)1)<<0)
+#define DMA_PMEN_EPM (((u32)1)<<31)	/* [한국어] 보호 메모리 영역을 켜는 비트. 커널은 이것을 내리기만 한다 */
+#define DMA_PMEN_PRS (((u32)1)<<0)	/* [한국어] 현재 보호가 걸려 있는지를 알려 주는 상태 비트. EPM 을 내린 뒤 이 비트가 0 이 될 때까지 기다린다 */
 
 /* GCMD_REG */
-#define DMA_GCMD_TE (((u32)1) << 31)
-#define DMA_GCMD_SRTP (((u32)1) << 30)
-#define DMA_GCMD_SFL (((u32)1) << 29)
-#define DMA_GCMD_EAFL (((u32)1) << 28)
-#define DMA_GCMD_WBF (((u32)1) << 27)
-#define DMA_GCMD_QIE (((u32)1) << 26)
-#define DMA_GCMD_SIRTP (((u32)1) << 24)
-#define DMA_GCMD_IRE (((u32) 1) << 25)
-#define DMA_GCMD_CFI (((u32) 1) << 23)
+#define DMA_GCMD_TE (((u32)1) << 31)	/* [한국어] Translation Enable — 번역을 켜고 끈다. VT-d 의 가장 중요한 스위치다 */
+#define DMA_GCMD_SRTP (((u32)1) << 30)	/* [한국어] Set Root Table Pointer — RTADDR 에 쓴 주소를 실제로 채택시킨다 */
+#define DMA_GCMD_SFL (((u32)1) << 29)	/* [한국어] Set Fault Log */
+#define DMA_GCMD_EAFL (((u32)1) << 28)	/* [한국어] Enable Advanced Fault Logging */
+#define DMA_GCMD_WBF (((u32)1) << 27)	/* [한국어] Write Buffer Flush — rwbf 가 필요한 하드웨어에서 내부 버퍼를 비운다 */
+#define DMA_GCMD_QIE (((u32)1) << 26)	/* [한국어] Queued Invalidation Enable — 무효화 큐를 켠다 */
+#define DMA_GCMD_SIRTP (((u32)1) << 24)	/* [한국어] Set Interrupt Remapping Table Pointer */
+#define DMA_GCMD_IRE (((u32) 1) << 25)	/* [한국어] Interrupt Remapping Enable */
+#define DMA_GCMD_CFI (((u32) 1) << 23)	/* [한국어] Compatibility Format Interrupt 허용 여부. 재매핑을 우회하는 옛 형식 인터럽트를 막을지 정한다 */
 
 /* GSTS_REG */
-#define DMA_GSTS_TES (((u32)1) << 31)
-#define DMA_GSTS_RTPS (((u32)1) << 30)
-#define DMA_GSTS_FLS (((u32)1) << 29)
-#define DMA_GSTS_AFLS (((u32)1) << 28)
-#define DMA_GSTS_WBFS (((u32)1) << 27)
-#define DMA_GSTS_QIES (((u32)1) << 26)
-#define DMA_GSTS_IRTPS (((u32)1) << 24)
-#define DMA_GSTS_IRES (((u32)1) << 25)
-#define DMA_GSTS_CFIS (((u32)1) << 23)
+#define DMA_GSTS_TES (((u32)1) << 31)	/* [한국어] 번역이 켜져 있는가. init_translation_status 가 이 비트를 읽어 인계 여부를 판단한다 */
+#define DMA_GSTS_RTPS (((u32)1) << 30)	/* [한국어] 루트 테이블 주소가 채택되었는가 */
+#define DMA_GSTS_FLS (((u32)1) << 29)	/* [한국어] 폴트 로그 상태 */
+#define DMA_GSTS_AFLS (((u32)1) << 28)	/* [한국어] 고급 폴트 로그 상태 */
+#define DMA_GSTS_WBFS (((u32)1) << 27)	/* [한국어] 쓰기 버퍼 비우기가 진행 중인가 */
+#define DMA_GSTS_QIES (((u32)1) << 26)	/* [한국어] 무효화 큐가 켜져 있는가 */
+#define DMA_GSTS_IRTPS (((u32)1) << 24)	/* [한국어] 인터럽트 재매핑 테이블 주소가 채택되었는가 */
+#define DMA_GSTS_IRES (((u32)1) << 25)	/* [한국어] 인터럽트 재매핑이 켜져 있는가 */
+#define DMA_GSTS_CFIS (((u32)1) << 23)	/* [한국어] 호환 형식 인터럽트가 허용되어 있는가 */
 
 /* DMA_RTADDR_REG */
-#define DMA_RTADDR_SMT (((u64)1) << 10)
+#define DMA_RTADDR_SMT (((u64)1) << 10)	/* [한국어] 루트 테이블 주소의 이 한 비트가 scalable mode 를 켠다. 켜지면 컨텍스트 항목이 페이지 테이블이 아니라 PASID 디렉터리를 가리키는 것으로 해석된다 — 표 전체의 의미를 바꾸는 비트다 */
 
 /* CCMD_REG */
-#define DMA_CCMD_ICC (((u64)1) << 63)
-#define DMA_CCMD_GLOBAL_INVL (((u64)1) << 61)
-#define DMA_CCMD_DOMAIN_INVL (((u64)2) << 61)
-#define DMA_CCMD_DEVICE_INVL (((u64)3) << 61)
-#define DMA_CCMD_FM(m) (((u64)((m) & 0x3)) << 32)
-#define DMA_CCMD_MASK_NOBIT 0
-#define DMA_CCMD_MASK_1BIT 1
-#define DMA_CCMD_MASK_2BIT 2
-#define DMA_CCMD_MASK_3BIT 3
-#define DMA_CCMD_SID(s) (((u64)((s) & 0xffff)) << 16)
-#define DMA_CCMD_DID(d) ((u64)((d) & 0xffff))
+#define DMA_CCMD_ICC (((u64)1) << 63)	/* [한국어] Invalidate Context Cache — 이 비트를 쓰면 하드웨어가 작업을 시작하고 끝나면 스스로 내린다 */
+#define DMA_CCMD_GLOBAL_INVL (((u64)1) << 61)	/* [한국어] 컨텍스트 캐시 전체 */
+#define DMA_CCMD_DOMAIN_INVL (((u64)2) << 61)	/* [한국어] 한 도메인의 컨텍스트만 */
+#define DMA_CCMD_DEVICE_INVL (((u64)3) << 61)	/* [한국어] 한 장치의 컨텍스트만 — 가장 좁다 */
+#define DMA_CCMD_FM(m) (((u64)((m) & 0x3)) << 32)	/* [한국어] 함수 마스크. 여러 함수를 한 번에 무효화할 때 하위 몇 비트를 무시할지 정한다 */
+#define DMA_CCMD_MASK_NOBIT 0	/* [한국어] 함수 하나만 */
+#define DMA_CCMD_MASK_1BIT 1	/* [한국어] 하위 1비트를 무시 — 2개 함수 */
+#define DMA_CCMD_MASK_2BIT 2	/* [한국어] 4개 함수 */
+#define DMA_CCMD_MASK_3BIT 3	/* [한국어] 8개 함수(한 장치의 모든 함수) */
+#define DMA_CCMD_SID(s) (((u64)((s) & 0xffff)) << 16)	/* [한국어] 대상 소스 id */
+#define DMA_CCMD_DID(d) ((u64)((d) & 0xffff))	/* [한국어] 대상 도메인 id */
 
 /* ECMD_REG */
-#define DMA_MAX_NUM_ECMD		256
-#define DMA_MAX_NUM_ECMDCAP		(DMA_MAX_NUM_ECMD / 64)
-#define DMA_ECMD_REG_STEP		8
-#define DMA_ECMD_ENABLE			0xf0
-#define DMA_ECMD_DISABLE		0xf1
-#define DMA_ECMD_FREEZE			0xf4
-#define DMA_ECMD_UNFREEZE		0xf5
-#define DMA_ECMD_OA_SHIFT		16
-#define DMA_ECMD_ECRSP_IP		0x1
-#define DMA_ECMD_ECCAP3			3
-#define DMA_ECMD_ECCAP3_ECNTS		BIT_ULL(48)
-#define DMA_ECMD_ECCAP3_DCNTS		BIT_ULL(49)
-#define DMA_ECMD_ECCAP3_FCNTS		BIT_ULL(52)
-#define DMA_ECMD_ECCAP3_UFCNTS		BIT_ULL(53)
-#define DMA_ECMD_ECCAP3_ESSENTIAL	(DMA_ECMD_ECCAP3_ECNTS |	\
+#define DMA_MAX_NUM_ECMD		256	/* [한국어] 확장 명령의 최대 개수 */
+#define DMA_MAX_NUM_ECMDCAP		(DMA_MAX_NUM_ECMD / 64)	/* [한국어] 그 지원 여부를 담는 64비트 워드의 개수 */
+#define DMA_ECMD_REG_STEP		8	/* [한국어] 능력 레지스터 사이의 간격 */
+#define DMA_ECMD_ENABLE			0xf0	/* [한국어] 성능 카운터를 켜는 확장 명령 */
+#define DMA_ECMD_DISABLE		0xf1	/* [한국어] 끄는 명령 */
+#define DMA_ECMD_FREEZE			0xf4	/* [한국어] 카운터를 멈춰 값을 안정적으로 읽게 하는 명령 */
+#define DMA_ECMD_UNFREEZE		0xf5	/* [한국어] 다시 진행시키는 명령 */
+#define DMA_ECMD_OA_SHIFT		16	/* [한국어] 피연산자 A 가 명령 레지스터에서 차지하는 위치 */
+#define DMA_ECMD_ECRSP_IP		0x1	/* [한국어] 응답 레지스터의 진행 중(In Progress) 비트 */
+#define DMA_ECMD_ECCAP3			3	/* [한국어] 확장 명령 능력 레지스터 중 3번 워드 */
+#define DMA_ECMD_ECCAP3_ECNTS		BIT_ULL(48)	/* [한국어] Enable Counters 명령 지원 */
+#define DMA_ECMD_ECCAP3_DCNTS		BIT_ULL(49)	/* [한국어] Disable Counters 지원 */
+#define DMA_ECMD_ECCAP3_FCNTS		BIT_ULL(52)	/* [한국어] Freeze Counters 지원 */
+#define DMA_ECMD_ECCAP3_UFCNTS		BIT_ULL(53)	/* [한국어] Unfreeze Counters 지원 */
+#define DMA_ECMD_ECCAP3_ESSENTIAL	(DMA_ECMD_ECCAP3_ECNTS |	\	/* [한국어] 성능 카운터를 쓰려면 넷 다 있어야 한다. perfmon 초기화가 이 조합으로 한 번에 확인한다 */
 					 DMA_ECMD_ECCAP3_DCNTS |	\
 					 DMA_ECMD_ECCAP3_FCNTS |	\
 					 DMA_ECMD_ECCAP3_UFCNTS)
 
 /* FECTL_REG */
-#define DMA_FECTL_IM (((u32)1) << 31)
+#define DMA_FECTL_IM (((u32)1) << 31)	/* [한국어] 폴트 인터럽트 마스크. 인터럽트를 세우는 동안 잠시 막는 데 쓴다 */
 
 /* FSTS_REG */
-#define DMA_FSTS_PFO (1 << 0) /* Primary Fault Overflow */
-#define DMA_FSTS_PPF (1 << 1) /* Primary Pending Fault */
-#define DMA_FSTS_IQE (1 << 4) /* Invalidation Queue Error */
-#define DMA_FSTS_ICE (1 << 5) /* Invalidation Completion Error */
-#define DMA_FSTS_ITE (1 << 6) /* Invalidation Time-out Error */
-#define DMA_FSTS_PRO (1 << 7) /* Page Request Overflow */
-#define dma_fsts_fault_record_index(s) (((s) >> 8) & 0xff)
+#define DMA_FSTS_PFO (1 << 0) /* Primary Fault Overflow */	/* [한국어] 폴트 기록이 넘쳐 일부를 잃었다 (위 영어 주석) */
+#define DMA_FSTS_PPF (1 << 1) /* Primary Pending Fault */	/* [한국어] 처리되지 않은 폴트 기록이 있다 — 핸들러가 이 비트를 보고 순회를 시작한다 */
+#define DMA_FSTS_IQE (1 << 4) /* Invalidation Queue Error */	/* [한국어] 무효화 서술자가 거부되었다. IQER 레지스터에 이유가 있다 */
+#define DMA_FSTS_ICE (1 << 5) /* Invalidation Completion Error */	/* [한국어] 무효화 완료 오류 — 장치가 잘못된 응답을 보냈다 */
+#define DMA_FSTS_ITE (1 << 6) /* Invalidation Time-out Error */	/* [한국어] 무효화 시간 초과 — 장치가 응답하지 않았다. 대개 그 장치를 더 이상 신뢰할 수 없다 */
+#define DMA_FSTS_PRO (1 << 7) /* Page Request Overflow */	/* [한국어] 페이지 요청 큐가 넘쳤다 */
+#define dma_fsts_fault_record_index(s) (((s) >> 8) & 0xff)	/* [한국어] 처리를 시작할 폴트 기록의 인덱스. 하드웨어가 링 버퍼처럼 채운다 */
 
 /* FRCD_REG, 32 bits access */
-#define DMA_FRCD_F (((u32)1) << 31)
-#define dma_frcd_type(d) ((d >> 30) & 1)
-#define dma_frcd_fault_reason(c) (c & 0xff)
-#define dma_frcd_source_id(c) (c & 0xffff)
-#define dma_frcd_pasid_value(c) (((c) >> 8) & 0xfffff)
-#define dma_frcd_pasid_present(c) (((c) >> 31) & 1)
+#define DMA_FRCD_F (((u32)1) << 31)	/* [한국어] 이 폴트 기록이 유효한지. 처리 후 커널이 이 비트를 써서 지운다 (위 영어 주석: 32비트 단위 접근) */
+#define dma_frcd_type(d) ((d >> 30) & 1)	/* [한국어] 읽기 폴트인지 쓰기 폴트인지 */
+#define dma_frcd_fault_reason(c) (c & 0xff)	/* [한국어] 폴트 사유 코드. "컨텍스트 항목 없음", "권한 없음" 등을 구분한다 */
+#define dma_frcd_source_id(c) (c & 0xffff)	/* [한국어] 폴트를 낸 장치의 소스 id. device_rbtree_find 가 이 값으로 장치를 되찾는다 */
+#define dma_frcd_pasid_value(c) (((c) >> 8) & 0xfffff)	/* [한국어] 폴트를 낸 PASID */
+#define dma_frcd_pasid_present(c) (((c) >> 31) & 1)	/* [한국어] PASID 필드가 유효한지 */
 /* low 64 bit */
-#define dma_frcd_page_addr(d) (d & (((u64)-1) << PAGE_SHIFT))
+#define dma_frcd_page_addr(d) (d & (((u64)-1) << PAGE_SHIFT))	/* [한국어] 폴트가 난 주소. 하위 페이지 오프셋은 잘라 낸다 (위 영어 주석: 하위 64비트) */
 
 /* PRS_REG */
-#define DMA_PRS_PPR	((u32)1)
-#define DMA_PRS_PRO	((u32)2)
+#define DMA_PRS_PPR	((u32)1)	/* [한국어] 대기 중인 페이지 요청이 있다 */
+#define DMA_PRS_PRO	((u32)2)	/* [한국어] 페이지 요청 큐가 넘쳤다. 이 경우 잃어버린 요청 때문에 장치가 멈출 수 있다 */
 
-#define DMA_VCS_PAS	((u64)1)
+#define DMA_VCS_PAS	((u64)1)	/* [한국어] 가상 명령 인터페이스의 PASID 할당 능력 비트 */
 
 /* PERFINTRSTS_REG */
-#define DMA_PERFINTRSTS_PIS	((u32)1)
+#define DMA_PERFINTRSTS_PIS	((u32)1)	/* [한국어] 성능 카운터 인터럽트가 걸렸음을 알리는 비트 */
 
-#define IOMMU_WAIT_OP(iommu, offset, op, cond, sts)			\
+#define IOMMU_WAIT_OP(iommu, offset, op, cond, sts)			\	/* [한국어] 레지스터가 원하는 상태가 될 때까지 도는 관용구. VT-d 의 명령은 대부분 "비트를 쓰고 상태 비트가 바뀔 때까지 기다린다" 형태라 매크로로 뺐다 */
 do {									\
-	cycles_t start_time = get_cycles();				\
+	cycles_t start_time = get_cycles();				\	/* [한국어] 시작 시각. 타임아웃을 재려면 필요하다 */
 	while (1) {							\
-		sts = op(iommu->reg + offset);				\
-		if (cond)						\
-			break;						\
-		if (DMAR_OPERATION_TIMEOUT < (get_cycles() - start_time))\
-			panic("DMAR hardware is malfunctioning\n");	\
-		cpu_relax();						\
+		sts = op(iommu->reg + offset);				\	/* [한국어] 레지스터를 읽는다. op 는 readl/readq 중 하나로 호출자가 넘긴다 */
+		if (cond)						\	/* [한국어] 원하는 조건이 되었으면 */
+			break;						\	/* [한국어] 기다림 종료 */
+		if (DMAR_OPERATION_TIMEOUT < (get_cycles() - start_time))\	/* [한국어] 정해진 시간을 넘겼으면 */
+			panic("DMAR hardware is malfunctioning\n");	\	/* [한국어] 부팅을 멈춘다. IOMMU 가 응답하지 않는데 계속 진행하면 격리 상태를 알 수 없어 더 위험하다 */
+		cpu_relax();						\	/* [한국어] 바쁜 대기 중임을 CPU 에 알린다(하이퍼스레드 양보, 전력 절약) */
 	}								\
 } while (0)
 
-#define QI_LENGTH	256	/* queue length */
+#define QI_LENGTH	256	/* queue length */	/* [한국어] 무효화 큐에 담을 수 있는 서술자 수 (위 영어 주석) */
 
 enum {
-	QI_FREE,
-	QI_IN_USE,
-	QI_DONE,
-	QI_ABORT
+	QI_FREE,	/* [한국어] 이 슬롯은 비어 있다 */
+	QI_IN_USE,	/* [한국어] 서술자가 들어가 하드웨어 처리를 기다린다 */
+	QI_DONE,	/* [한국어] 처리가 끝났다 */
+	QI_ABORT	/* [한국어] 오류로 중단되었다. 뒤따르던 서술자들도 함께 무효가 된다 */
 };
 
-#define QI_CC_TYPE		0x1
-#define QI_IOTLB_TYPE		0x2
-#define QI_DIOTLB_TYPE		0x3
-#define QI_IEC_TYPE		0x4
-#define QI_IWD_TYPE		0x5
-#define QI_EIOTLB_TYPE		0x6
-#define QI_PC_TYPE		0x7
-#define QI_DEIOTLB_TYPE		0x8
-#define QI_PGRP_RESP_TYPE	0x9
-#define QI_PSTRM_RESP_TYPE	0xa
+#define QI_CC_TYPE		0x1	/* [한국어] 컨텍스트 캐시 무효화 서술자 */
+#define QI_IOTLB_TYPE		0x2	/* [한국어] IOTLB 무효화 */
+#define QI_DIOTLB_TYPE		0x3	/* [한국어] 디바이스 IOTLB(ATS) 무효화 */
+#define QI_IEC_TYPE		0x4	/* [한국어] 인터럽트 항목 캐시 무효화 */
+#define QI_IWD_TYPE		0x5	/* [한국어] Invalidation Wait — 앞의 서술자들이 끝났는지 확인하는 표식. 완료 대기의 핵심이다 */
+#define QI_EIOTLB_TYPE		0x6	/* [한국어] 확장(PASID 인식) IOTLB 무효화 */
+#define QI_PC_TYPE		0x7	/* [한국어] PASID 캐시 무효화 */
+#define QI_DEIOTLB_TYPE		0x8	/* [한국어] 확장 디바이스 IOTLB 무효화 */
+#define QI_PGRP_RESP_TYPE	0x9	/* [한국어] 페이지 요청 그룹에 대한 응답. 이 서술자가 장치의 멈춘 요청을 풀어 준다 */
+#define QI_PSTRM_RESP_TYPE	0xa	/* [한국어] 페이지 스트림 응답 */
 
-#define QI_IEC_SELECTIVE	(((u64)1) << 4)
-#define QI_IEC_IIDEX(idx)	(((u64)(idx & 0xffff) << 32))
-#define QI_IEC_IM(m)		(((u64)(m & 0x1f) << 27))
+#define QI_IEC_SELECTIVE	(((u64)1) << 4)	/* [한국어] 인터럽트 항목 일부만 무효화 */
+#define QI_IEC_IIDEX(idx)	(((u64)(idx & 0xffff) << 32))	/* [한국어] 무효화할 인터럽트 항목의 인덱스 */
+#define QI_IEC_IM(m)		(((u64)(m & 0x1f) << 27))	/* [한국어] 그 범위 크기(로그값) */
 
-#define QI_IWD_STATUS_DATA(d)	(((u64)d) << 32)
-#define QI_IWD_STATUS_WRITE	(((u64)1) << 5)
-#define QI_IWD_FENCE		(((u64)1) << 6)
-#define QI_IWD_PRQ_DRAIN	(((u64)1) << 7)
+#define QI_IWD_STATUS_DATA(d)	(((u64)d) << 32)	/* [한국어] 완료 시 상태 주소에 쓸 값. 커널은 그 값이 나타나는지 폴링해 완료를 안다 */
+#define QI_IWD_STATUS_WRITE	(((u64)1) << 5)	/* [한국어] 완료 시 그 값을 실제로 쓰라는 지시 */
+#define QI_IWD_FENCE		(((u64)1) << 6)	/* [한국어] 펜스 — 이 서술자 앞의 것이 모두 끝나야 뒤의 것이 시작된다. 순서가 중요한 무효화 사이에 끼운다 */
+#define QI_IWD_PRQ_DRAIN	(((u64)1) << 7)	/* [한국어] 대기 중인 페이지 요청까지 배수한다. PASID 를 내릴 때 남은 요청이 없도록 보장한다 */
 
-#define QI_IOTLB_DID(did) 	(((u64)did) << 16)
-#define QI_IOTLB_DR(dr) 	(((u64)dr) << 7)
-#define QI_IOTLB_DW(dw) 	(((u64)dw) << 6)
-#define QI_IOTLB_GRAN(gran) 	(((u64)gran) >> (DMA_TLB_FLUSH_GRANU_OFFSET-4))
-#define QI_IOTLB_ADDR(addr)	(((u64)addr) & VTD_PAGE_MASK)
-#define QI_IOTLB_IH(ih)		(((u64)ih) << 6)
-#define QI_IOTLB_AM(am)		(((u8)am) & 0x3f)
+#define QI_IOTLB_DID(did) 	(((u64)did) << 16)	/* [한국어] 대상 도메인 id */
+#define QI_IOTLB_DR(dr) 	(((u64)dr) << 7)	/* [한국어] 읽기 배수 요청 */
+#define QI_IOTLB_DW(dw) 	(((u64)dw) << 6)	/* [한국어] 쓰기 배수 요청 */
+#define QI_IOTLB_GRAN(gran) 	(((u64)gran) >> (DMA_TLB_FLUSH_GRANU_OFFSET-4))	/* [한국어] 레지스터 방식의 범위 종류 값을 서술자 자리로 옮긴다. 두 형식이 같은 값을 다른 위치에 두어 시프트로 변환한다 */
+#define QI_IOTLB_ADDR(addr)	(((u64)addr) & VTD_PAGE_MASK)	/* [한국어] 무효화할 주소(페이지 정렬) */
+#define QI_IOTLB_IH(ih)		(((u64)ih) << 6)	/* [한국어] 중간 단계는 그대로 두라는 힌트 */
+#define QI_IOTLB_AM(am)		(((u8)am) & 0x3f)	/* [한국어] 범위 크기(로그값) */
 
-#define QI_CC_FM(fm)		(((u64)fm) << 48)
-#define QI_CC_SID(sid)		(((u64)sid) << 32)
-#define QI_CC_DID(did)		(((u64)did) << 16)
-#define QI_CC_GRAN(gran)	(((u64)gran) >> (DMA_CCMD_INVL_GRANU_OFFSET-4))
+#define QI_CC_FM(fm)		(((u64)fm) << 48)	/* [한국어] 함수 마스크 */
+#define QI_CC_SID(sid)		(((u64)sid) << 32)	/* [한국어] 대상 소스 id */
+#define QI_CC_DID(did)		(((u64)did) << 16)	/* [한국어] 대상 도메인 id */
+#define QI_CC_GRAN(gran)	(((u64)gran) >> (DMA_CCMD_INVL_GRANU_OFFSET-4))	/* [한국어] 레지스터 형식의 범위 종류를 서술자 자리로 옮긴다 */
 
-#define QI_DEV_IOTLB_SID(sid)	((u64)((sid) & 0xffff) << 32)
-#define QI_DEV_IOTLB_QDEP(qdep)	(((qdep) & 0x1f) << 16)
-#define QI_DEV_IOTLB_ADDR(addr)	((u64)(addr) & VTD_PAGE_MASK)
-#define QI_DEV_IOTLB_PFSID(pfsid) (((u64)(pfsid & 0xf) << 12) | \
+#define QI_DEV_IOTLB_SID(sid)	((u64)((sid) & 0xffff) << 32)	/* [한국어] 디바이스 TLB 를 비울 장치의 소스 id */
+#define QI_DEV_IOTLB_QDEP(qdep)	(((qdep) & 0x1f) << 16)	/* [한국어] 그 장치의 ATS 큐 깊이. 이보다 많이 보내면 응답이 유실된다 */
+#define QI_DEV_IOTLB_ADDR(addr)	((u64)(addr) & VTD_PAGE_MASK)	/* [한국어] 무효화할 주소 */
+#define QI_DEV_IOTLB_PFSID(pfsid) (((u64)(pfsid & 0xf) << 12) | \	/* [한국어] VF 의 무효화에 PF 의 소스 id 를 싣는다. 필드가 두 조각으로 나뉘어 있어 하위 4비트와 상위 12비트를 따로 넣는다 */
 				   ((u64)((pfsid >> 4) & 0xfff) << 52))
-#define QI_DEV_IOTLB_SIZE	1
-#define QI_DEV_IOTLB_MAX_INVS	32
+#define QI_DEV_IOTLB_SIZE	1	/* [한국어] 범위 지정 방식의 플래그 */
+#define QI_DEV_IOTLB_MAX_INVS	32	/* [한국어] 한 번에 보낼 수 있는 디바이스 TLB 무효화의 최대 개수 */
 
-#define QI_PC_PASID(pasid)	(((u64)pasid) << 32)
-#define QI_PC_DID(did)		(((u64)did) << 16)
-#define QI_PC_GRAN(gran)	(((u64)gran) << 4)
+#define QI_PC_PASID(pasid)	(((u64)pasid) << 32)	/* [한국어] 무효화할 PASID */
+#define QI_PC_DID(did)		(((u64)did) << 16)	/* [한국어] 대상 도메인 id */
+#define QI_PC_GRAN(gran)	(((u64)gran) << 4)	/* [한국어] 범위 종류 */
 
 /* PASID cache invalidation granu */
-#define QI_PC_ALL_PASIDS	0
-#define QI_PC_PASID_SEL		1
-#define QI_PC_GLOBAL		3
+#define QI_PC_ALL_PASIDS	0	/* [한국어] 이 도메인의 모든 PASID (위 영어 주석) */
+#define QI_PC_PASID_SEL		1	/* [한국어] 지정한 PASID 하나만 */
+#define QI_PC_GLOBAL		3	/* [한국어] 유닛 전체의 PASID 캐시 */
 
-#define QI_EIOTLB_ADDR(addr)	((u64)(addr) & VTD_PAGE_MASK)
-#define QI_EIOTLB_IH(ih)	(((u64)ih) << 6)
-#define QI_EIOTLB_AM(am)	(((u64)am) & 0x3f)
-#define QI_EIOTLB_PASID(pasid) 	(((u64)pasid) << 32)
-#define QI_EIOTLB_DID(did)	(((u64)did) << 16)
-#define QI_EIOTLB_GRAN(gran) 	(((u64)gran) << 4)
+#define QI_EIOTLB_ADDR(addr)	((u64)(addr) & VTD_PAGE_MASK)	/* [한국어] 확장 IOTLB 무효화의 주소 */
+#define QI_EIOTLB_IH(ih)	(((u64)ih) << 6)	/* [한국어] 중간 단계 유지 힌트 */
+#define QI_EIOTLB_AM(am)	(((u64)am) & 0x3f)	/* [한국어] 범위 크기 */
+#define QI_EIOTLB_PASID(pasid) 	(((u64)pasid) << 32)	/* [한국어] 대상 PASID. 이 필드가 있는 것이 확장 형식과 기본 형식의 차이다 */
+#define QI_EIOTLB_DID(did)	(((u64)did) << 16)	/* [한국어] 대상 도메인 id */
+#define QI_EIOTLB_GRAN(gran) 	(((u64)gran) << 4)	/* [한국어] 범위 종류 */
 
 /* QI Dev-IOTLB inv granu */
-#define QI_DEV_IOTLB_GRAN_ALL		1
-#define QI_DEV_IOTLB_GRAN_PASID_SEL	0
+#define QI_DEV_IOTLB_GRAN_ALL		1	/* [한국어] 이 장치의 모든 PASID (위 영어 주석) */
+#define QI_DEV_IOTLB_GRAN_PASID_SEL	0	/* [한국어] 지정한 PASID 만 */
 
-#define QI_DEV_EIOTLB_ADDR(a)	((u64)(a) & VTD_PAGE_MASK)
-#define QI_DEV_EIOTLB_SIZE	(((u64)1) << 11)
-#define QI_DEV_EIOTLB_PASID(p)	((u64)((p) & 0xfffff) << 32)
-#define QI_DEV_EIOTLB_SID(sid)	((u64)((sid) & 0xffff) << 16)
-#define QI_DEV_EIOTLB_QDEP(qd)	((u64)((qd) & 0x1f) << 4)
-#define QI_DEV_EIOTLB_PFSID(pfsid) (((u64)(pfsid & 0xf) << 12) | \
+#define QI_DEV_EIOTLB_ADDR(a)	((u64)(a) & VTD_PAGE_MASK)	/* [한국어] 확장 디바이스 TLB 무효화의 주소 */
+#define QI_DEV_EIOTLB_SIZE	(((u64)1) << 11)	/* [한국어] 범위 지정 플래그 */
+#define QI_DEV_EIOTLB_PASID(p)	((u64)((p) & 0xfffff) << 32)	/* [한국어] 대상 PASID */
+#define QI_DEV_EIOTLB_SID(sid)	((u64)((sid) & 0xffff) << 16)	/* [한국어] 대상 소스 id */
+#define QI_DEV_EIOTLB_QDEP(qd)	((u64)((qd) & 0x1f) << 4)	/* [한국어] 장치의 ATS 큐 깊이 */
+#define QI_DEV_EIOTLB_PFSID(pfsid) (((u64)(pfsid & 0xf) << 12) | \	/* [한국어] PF 소스 id. 기본 형식과 마찬가지로 두 조각으로 나뉜다 */
 				    ((u64)((pfsid >> 4) & 0xfff) << 52))
-#define QI_DEV_EIOTLB_MAX_INVS	32
+#define QI_DEV_EIOTLB_MAX_INVS	32	/* [한국어] 한 번에 보낼 수 있는 최대 개수 */
 
 /* Page group response descriptor QW0 */
-#define QI_PGRP_PASID_P(p)	(((u64)(p)) << 4)
-#define QI_PGRP_RESP_CODE(res)	(((u64)(res)) << 12)
-#define QI_PGRP_DID(rid)	(((u64)(rid)) << 16)
-#define QI_PGRP_PASID(pasid)	(((u64)(pasid)) << 32)
+#define QI_PGRP_PASID_P(p)	(((u64)(p)) << 4)	/* [한국어] 응답 서술자에 PASID 필드가 유효한지 표시 (위 영어 주석: QW0) */
+#define QI_PGRP_RESP_CODE(res)	(((u64)(res)) << 12)	/* [한국어] 응답 코드. 이 값이 장치에 "다시 시도하라"인지 "포기하라"인지를 알려 준다 */
+#define QI_PGRP_DID(rid)	(((u64)(rid)) << 16)	/* [한국어] 응답을 받을 장치의 소스 id */
+#define QI_PGRP_PASID(pasid)	(((u64)(pasid)) << 32)	/* [한국어] 응답 대상 PASID */
 
 /* Page group response descriptor QW1 */
-#define QI_PGRP_IDX(idx)	(((u64)(idx)) << 3)
+#define QI_PGRP_IDX(idx)	(((u64)(idx)) << 3)	/* [한국어] 페이지 요청 그룹 인덱스. 장치가 보낸 요청과 응답을 짝지어 주는 번호이며, 이것이 틀리면 장치가 영원히 기다린다 (위 영어 주석: QW1) */
 
 
-#define QI_RESP_SUCCESS		0x0
-#define QI_RESP_INVALID		0x1
-#define QI_RESP_FAILURE		0xf
+#define QI_RESP_SUCCESS		0x0	/* [한국어] 매핑을 채웠으니 다시 시도하라 */
+#define QI_RESP_INVALID		0x1	/* [한국어] 유효하지 않은 요청 — 그 주소에 접근할 권한이 없다 */
+#define QI_RESP_FAILURE		0xf	/* [한국어] 처리할 수 없다. 장치는 대개 이 응답을 받으면 오류로 처리한다 */
 
-#define QI_GRAN_NONG_PASID		2
-#define QI_GRAN_PSI_PASID		3
+#define QI_GRAN_NONG_PASID		2	/* [한국어] PASID 단위의 비-전역 무효화 범위 */
+#define QI_GRAN_PSI_PASID		3	/* [한국어] PASID 단위의 페이지 선택 무효화 */
 
-#define qi_shift(iommu)		(DMAR_IQ_SHIFT + !!ecap_smts((iommu)->ecap))
+#define qi_shift(iommu)		(DMAR_IQ_SHIFT + !!ecap_smts((iommu)->ecap))	/* [한국어] 서술자 하나의 크기(로그값). scalable 모드면 서술자가 32바이트로 커져 한 칸 더 민다 — 큐의 head/tail 계산이 모드에 따라 달라지는 이유다 */
 
 struct qi_desc {
 	u64 qw0;
+	/* [한국어] 무효화 서술자의 첫 워드. 하위 4비트가 명령 종류(QI_CC_TYPE, QI_IOTLB_TYPE 등)이고
+	 * 나머지 비트의 의미는 그 종류마다 다르다.
+	 * 설정자: qi_flush_context()/qi_flush_iotlb()/qi_flush_dev_iotlb() 등 dmar.c 의
+	 *   각 무효화 헬퍼가 QI_* 매크로로 필드를 조립해 채운다.
+	 * 읽는 자: 하드웨어. qi_submit_sync() 가 큐에 복사한 뒤 tail 레지스터를 쓰면
+	 *   유닛이 메모리에서 직접 읽어 간다.
+	 * 값 범위: 종류마다 다르지만 하위 4비트는 반드시 유효한 QI_*_TYPE 이어야 한다.
+	 *   잘못된 종류는 IQER 레지스터에 오류로 기록되고 서술자가 거부된다.
+	 * 동기화: q_inval->q_lock 아래에서만 채운다. 채운 뒤 tail 을 쓰기 전에
+	 *   메모리 배리어가 필요하다 — 하드웨어가 옛 내용을 읽으면 안 되기 때문이다. */
 	u64 qw1;
+	/* [한국어] 둘째 워드. 대부분의 종류에서 무효화할 주소와 범위 크기가 여기 들어간다.
+	 * 설정자/읽는 자: qw0 과 같다.
+	 * 값 범위: 주소는 페이지 정렬(VTD_PAGE_MASK)이어야 하고, 범위 크기(AM)는
+	 *   cap_max_amask_val 이 정한 상한을 넘을 수 없다. 주소의 정렬 자체가
+	 *   한 번에 무효화할 수 있는 최대 범위를 제한한다.
+	 * 동기화: qw0 과 같다. */
 	u64 qw2;
+	/* [한국어] 셋째 워드. scalable 모드에서 서술자가 32바이트로 커질 때만 쓰인다.
+	 * 설정자: PASID 를 다루는 확장 무효화(QI_EIOTLB_TYPE 등)와 페이지 요청 응답.
+	 * 읽는 자: 하드웨어. 16바이트 서술자를 쓰는 유닛은 이 워드를 읽지 않는다.
+	 * 값 범위: 쓰이지 않는 경우 0 이어야 한다 — 예약 필드에 값이 있으면 거부된다.
+	 * 동기화: qw0 과 같다. */
 	u64 qw3;
+	/* [한국어] 넷째 워드. qw2 와 같은 조건에서 쓰인다.
+	 * 설정자/읽는 자/동기화: qw2 와 같다.
+	 * 값 범위: 서술자 크기는 qi_shift(iommu) 가 정하며, 그 값이 16바이트를
+	 *   가리키면 이 워드와 qw2 는 큐에 아예 복사되지 않는다. */
 };
 
 struct q_inval {
 	raw_spinlock_t  q_lock;
+	/* [한국어] 이 무효화 큐 전체(서술자 링, 상태 배열, head/tail/cnt)를 지키는 락.
+	 * 설정자/읽는 자: qi_submit_sync() 와 그 하위 경로. 서술자를 넣고 tail 을 쓰고
+	 *   완료를 기다리는 동안 계속 쥐고 있는다.
+	 * raw 스핀락인 이유: PREEMPT_RT 커널에서 보통의 spinlock 은 잠들 수 있는
+	 *   뮤텍스로 바뀐다. 그런데 이 구간은 하드웨어와 head/tail 로 핸드셰이크하는
+	 *   중이라 선점되면 안 되고, 인터럽트 문맥에서도 무효화가 일어날 수 있다.
+	 *   그래서 RT 에서도 진짜 스핀락으로 남는 raw 판을 쓴다.
+	 * 동기화 범위: 유닛 하나당 하나. 유닛이 여럿이면 서로 독립적으로 진행한다. */
 	void		*desc;          /* invalidation queue */
+	/* [한국어] 서술자 링 버퍼. 하드웨어가 메모리에서 직접 읽어 가므로 물리적으로 연속이고
+	 * 페이지 정렬된 메모리여야 한다 (원 주석: invalidation queue).
+	 * 설정자: dmar_enable_qi() 가 할당하고 IQA 레지스터에 그 물리 주소를 알린다.
+	 * 읽는 자: 커널은 qi_submit_sync() 에서 채우고, 하드웨어는 head~tail 구간을 읽는다.
+	 * 값 범위: 서술자 하나의 크기는 qi_shift(iommu) 가 정한다 — 레거시 16바이트,
+	 *   scalable 모드 32바이트. 그래서 같은 QI_LENGTH 라도 버퍼 크기가 달라진다.
+	 * 동기화: q_lock 아래에서만 쓴다. 쓴 뒤 tail 을 갱신하기 전에 배리어가 필요하다. */
 	int             *desc_status;   /* desc status */
+	/* [한국어] 각 서술자 슬롯의 상태(QI_FREE / QI_IN_USE / QI_DONE / QI_ABORT).
+	 * 하드웨어는 이 배열의 존재를 모른다 — 순수하게 커널이 완료를 추적하려고 둔 것이다
+	 * (원 주석: desc status).
+	 * 설정자: qi_submit_sync() 가 슬롯을 잡을 때 QI_IN_USE 로, 완료를 확인하면
+	 *   QI_DONE 으로, 오류가 나면 QI_ABORT 로 바꾼다.
+	 * 읽는 자: 같은 함수의 완료 대기 루프와, 오류 복구 경로(qi_check_fault).
+	 * 값 범위: 위 네 값 중 하나. QI_ABORT 는 이 슬롯뿐 아니라 뒤따르던 서술자들도
+	 *   무효가 되었음을 뜻해서, 복구 경로가 그것들을 다시 제출한다.
+	 * 동기화: q_lock 아래. */
 	int             free_head;      /* first free entry */
+	/* [한국어] 다음에 채울 빈 슬롯의 인덱스 (원 주석: first free entry).
+	 * 설정자: qi_submit_sync() 가 슬롯을 하나 쓸 때마다 앞으로 민다(QI_LENGTH 로 감싼다).
+	 * 읽는 자: 같은 함수. 이 값이 하드웨어 tail 레지스터에 쓸 값의 근거가 된다.
+	 * 값 범위: 0 ~ QI_LENGTH-1.
+	 * 동기화: q_lock 아래. */
 	int             free_tail;      /* last free entry */
+	/* [한국어] 아직 하드웨어가 소비하지 않은 구간의 끝 (원 주석: last free entry).
+	 * free_tail 부터 free_head 직전까지가 "제출했지만 아직 완료되지 않은" 서술자들이다.
+	 * 설정자: 완료가 확인된 슬롯을 회수할 때 앞으로 민다.
+	 * 읽는 자: 빈 슬롯이 있는지 판단하는 계산.
+	 * 값 범위: 0 ~ QI_LENGTH-1.
+	 * 동기화: q_lock 아래. */
 	int             free_cnt;
+	/* [한국어] 남아 있는 빈 슬롯 수.
+	 * 설정자: 슬롯을 쓰면 줄이고 회수하면 늘린다.
+	 * 읽는 자: qi_submit_sync() 가 제출 전에 확인한다. 0 이면 하드웨어가 소비할
+	 *   때까지 기다려야 하므로, 이 값이 자주 0 이 되는 것은 무효화가 밀리고 있다는 뜻이다.
+	 * 값 범위: 0 ~ QI_LENGTH. head/tail 로도 계산할 수 있지만, 링이 가득 찬 경우와
+	 *   빈 경우를 구분하기 위해 개수를 따로 둔다.
+	 * 동기화: q_lock 아래. */
 };
 
 /* Page Request Queue depth */
-#define PRQ_ORDER	4
-#define PRQ_SIZE	(SZ_4K << PRQ_ORDER)
-#define PRQ_RING_MASK	(PRQ_SIZE - 0x20)
-#define PRQ_DEPTH	(PRQ_SIZE >> 5)
+#define PRQ_ORDER	4	/* [한국어] 페이지 요청 큐의 크기 지수 (위 영어 주석) */
+#define PRQ_SIZE	(SZ_4K << PRQ_ORDER)	/* [한국어] 64KB */
+#define PRQ_RING_MASK	(PRQ_SIZE - 0x20)	/* [한국어] 링 인덱스를 감싸는 마스크. 요청 하나가 32바이트라 그만큼 뺀다 */
+#define PRQ_DEPTH	(PRQ_SIZE >> 5)	/* [한국어] 담을 수 있는 요청 개수 = 크기 / 32 */
 
-struct dmar_pci_notify_info;
+struct dmar_pci_notify_info;	/* [한국어] 전방 선언 — PCI 핫플러그 알림 정보. 실제 정의는 <linux/dmar.h> 에 있다 */
 
 #ifdef CONFIG_IRQ_REMAP
-#define INTR_REMAP_TABLE_REG_SIZE	0xf
-#define INTR_REMAP_TABLE_REG_SIZE_MASK  0xf
+#define INTR_REMAP_TABLE_REG_SIZE	0xf	/* [한국어] IRTA 레지스터의 크기 필드 최대값 */
+#define INTR_REMAP_TABLE_REG_SIZE_MASK  0xf	/* [한국어] 그 필드를 뽑는 마스크 */
 
-#define INTR_REMAP_TABLE_ENTRIES	65536
+#define INTR_REMAP_TABLE_ENTRIES	65536	/* [한국어] 인터럽트 재매핑 테이블의 항목 수. 이 수가 시스템 전체의 재매핑 가능한 인터럽트 상한이다 */
 
-struct irq_domain;
+struct irq_domain;	/* [한국어] 전방 선언 — 커널 인터럽트 도메인 */
 
 struct ir_table {
 	struct irte *base;
+	/* [한국어] 인터럽트 재매핑 테이블의 시작 주소. 항목 하나(struct irte)가 벡터 번호,
+	 * 목적지 CPU(APIC id), 전달 방식(고정/최저우선), 그리고 이 인터럽트를 낼 수 있는
+	 * 소스 id 를 담는다.
+	 * 설정자: intel_setup_irq_remapping() 이 유닛마다 할당하고 IRTA 레지스터에 알린다.
+	 * 읽는 자: 하드웨어가 인터럽트 메시지를 받을 때마다 인덱스로 이 표를 찾는다.
+	 *   커널 쪽은 인터럽트를 할당·변경할 때 항목을 고친다.
+	 * 값 범위: INTR_REMAP_TABLE_ENTRIES(65536) 개. 이 수가 시스템의 재매핑 가능한
+	 *   인터럽트 상한이다.
+	 * 동기화: irq_2_ir_lock. 항목을 고친 뒤에는 반드시 인터럽트 항목 캐시를
+	 *   무효화(QI_IEC_TYPE)해야 하드웨어가 새 값을 본다. */
 	unsigned long *bitmap;
+	/* [한국어] 어느 항목이 사용 중인지 추적하는 비트맵.
+	 * 설정자: 인터럽트를 할당하면 해당 비트를 세우고, 해제하면 지운다.
+	 * 읽는 자: alloc_irte() 가 빈 자리를 찾을 때. 연속된 여러 항목이 필요한 경우
+	 *   (다중 벡터 MSI)도 있어 비트맵 위에서 연속 구간을 찾는다.
+	 * 값 범위: INTR_REMAP_TABLE_ENTRIES 비트.
+	 * 동기화: irq_2_ir_lock. */
 };
 
-void intel_irq_remap_add_device(struct dmar_pci_notify_info *info);
+void intel_irq_remap_add_device(struct dmar_pci_notify_info *info);	/* [한국어] 새 PCI 장치를 인터럽트 재매핑에 등록한다 */
 #else
 static inline void
-intel_irq_remap_add_device(struct dmar_pci_notify_info *info) { }
+intel_irq_remap_add_device(struct dmar_pci_notify_info *info) { }	/* [한국어] 재매핑을 끈 빌드의 빈 구현. 호출부에 #ifdef 를 흩지 않으려는 관용구다 */
 #endif
 
 struct iommu_flush {
