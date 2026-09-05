@@ -6096,7 +6096,7 @@ static struct iommu_device *intel_iommu_probe_device(struct device *dev)
 
 	if (sm_supported(iommu) && !dev_is_real_dma_subdevice(dev)) {	/* [한국어] scalable 모드이고 자기 항목을 갖는 장치면 */
 		ret = intel_pasid_alloc_table(dev);	/* [한국어] 이 장치 전용 PASID 테이블을 만든다 */
-		if (ret) {
+		if (ret) {	/* [한국어] PASID 테이블 할당 실패 */
 			dev_err(dev, "PASID table allocation failed\n");	/* [한국어] 실패는 치명적이다 — 이 모드에서는 PASID 테이블 없이 번역을 세울 수 없다 */
 			goto clear_rbtree;	/* [한국어] 트리 등록을 되돌린다 */
 		}
@@ -6305,7 +6305,7 @@ static void intel_iommu_get_resv_regions(struct device *device,
 	}
 	rcu_read_unlock();	/* [한국어] 순회 끝 */
 
-#ifdef CONFIG_INTEL_IOMMU_FLOPPY_WA
+#ifdef CONFIG_INTEL_IOMMU_FLOPPY_WA	/* [한국어] 플로피 컨트롤러 우회를 켠 빌드에서만 */
 	if (dev_is_pci(device)) {	/* [한국어] 플로피 우회가 켜진 빌드에서 PCI 장치라면 */
 		struct pci_dev *pdev = to_pci_dev(device);	/* [한국어] PCI 장치로 */
 
@@ -6408,26 +6408,74 @@ int intel_iommu_enable_iopf(struct device *dev)
 	return 0;	/* [한국어] 이제 이 장치의 페이지 폴트가 처리된다 */
 }
 
+/*
+ * [한국어]
+ * intel_iommu_disable_iopf - I/O 페이지 폴트 처리의 참조를 하나 놓는다
+ *
+ * @dev: 대상 장치.
+ * @return: 없음.
+ *
+ * intel_iommu_enable_iopf 의 짝. 참조 계수를 하나 줄이고, 0 이 되면 그제서야
+ * 유닛의 폴트 큐에서 장치를 뺀다. 마지막 사용자가 아닐 때 큐에서 빼면 남은
+ * 사용자의 페이지 요청이 응답을 받지 못하고, 응답 없는 PRI 요청은 장치를
+ * 영원히 멈춰 세운다 — 참조 계수가 있는 이유가 그것이다.
+ *
+ * 켠 적 없는데 부르면 WARN_ON 으로 스택을 남긴다. 참조 계수의 짝이 맞지 않는
+ * 것은 호출자(SVA 또는 iommufd)의 버그이며, 조용히 넘기면 나중에 엉뚱한
+ * 장치가 멈춘다.
+ *
+ * 동기화: 참조 계수는 그룹 뮤텍스가 지킨다. 이 함수는 잡지 않고 호출자가
+ * 쥐고 있음을 assert 로 확인만 한다.
+ * 실행 컨텍스트: SVA/iommufd 해제 경로. 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   iommu_dev_disable_feature()/SVA 해제 → [intel_iommu_disable_iopf]
+ *     → iopf_queue_remove_device()
+ */
 void intel_iommu_disable_iopf(struct device *dev)
 {
-	struct device_domain_info *info = dev_iommu_priv_get(dev);
-	struct intel_iommu *iommu = info->iommu;
+	struct device_domain_info *info = dev_iommu_priv_get(dev);	/* [한국어] 장치 정보 */
+	struct intel_iommu *iommu = info->iommu;	/* [한국어] 담당 유닛 */
 
-	if (WARN_ON(!info->pri_enabled || !info->iopf_refcount))
-		return;
+	if (WARN_ON(!info->pri_enabled || !info->iopf_refcount))	/* [한국어] 켠 적 없는데 끄려 하면 호출자 버그다 */
+		return;	/* [한국어] 아무것도 하지 않는다 */
 
-	iommu_group_mutex_assert(dev);
-	if (--info->iopf_refcount)
-		return;
+	iommu_group_mutex_assert(dev);	/* [한국어] 참조 계수는 그룹 뮤텍스가 지킨다 */
+	if (--info->iopf_refcount)	/* [한국어] 아직 다른 사용자가 남아 있으면 */
+		return;	/* [한국어] 폴트 처리를 유지한다. 여기서 끄면 남은 사용자의 장치가 응답 없는 페이지 요청으로 멈춘다 */
 
-	iopf_queue_remove_device(iommu->iopf_queue, dev);
+	iopf_queue_remove_device(iommu->iopf_queue, dev);	/* [한국어] 마지막 사용자가 놓았으므로 큐에서 뺀다 */
 }
 
+/*
+ * [한국어]
+ * intel_iommu_is_attach_deferred - 기본 도메인 부착을 미뤄야 하는 장치인지 답한다
+ *
+ * @dev: 대상 장치.
+ * @return: true 면 코어가 지금 기본 도메인을 붙이지 말고 미뤄야 한다.
+ *
+ * 왜 미루는가: kdump 커널처럼 이전 커널이 켜 둔 번역을 그대로 물려받은
+ * 상태에서는, 장치들이 여전히 옛 페이지 테이블을 통해 DMA 를 하고 있다.
+ * 여기서 코어가 평소처럼 기본 도메인을 붙이면 그 순간 컨텍스트 항목이 새
+ * 테이블을 가리키게 되고, 진행 중이던 DMA 가 매핑되지 않은 주소로 향한다.
+ * 크래시 덤프를 쓰는 디스크 컨트롤러가 그렇게 멈추면 덤프 자체를 못 쓴다.
+ *
+ * 그래서 "물려받은 유닛이고(translation_pre_enabled) 아직 도메인이 붙지
+ * 않았다(!info->domain)"면 미룬다. 실제 드라이버가 로드되어 DMA 매핑을
+ * 요구하는 시점에 비로소 도메인이 붙고, 그때 물려받은 상태에서 우리 상태로
+ * 전환된다. 그 전환을 실제로 수행하는 것은 paging_domain_compatible 이다.
+ *
+ * 실행 컨텍스트: 코어가 기본 도메인을 붙이려 할 때. 순수 조회.
+ *
+ * 호출 체인:
+ *   iommu_ops.is_attach_deferred → [intel_iommu_is_attach_deferred]
+ *     → translation_pre_enabled()
+ */
 static bool intel_iommu_is_attach_deferred(struct device *dev)
 {
-	struct device_domain_info *info = dev_iommu_priv_get(dev);
+	struct device_domain_info *info = dev_iommu_priv_get(dev);	/* [한국어] 장치 정보 */
 
-	return translation_pre_enabled(info->iommu) && !info->domain;
+	return translation_pre_enabled(info->iommu) && !info->domain;	/* [한국어] 이전 커널/펌웨어가 켜 둔 번역을 인계받은 유닛이고 아직 도메인이 붙지 않았으면, 기본 도메인 부착을 미룬다. 지금 붙이면 물려받은 테이블이 끊겨 장치 DMA 가 중단되기 때문이다. 실제 드라이버가 도메인을 요구할 때 비로소 전환한다 */
 }
 
 /*
@@ -6435,168 +6483,349 @@ static bool intel_iommu_is_attach_deferred(struct device *dev)
  * marked as untrusted. Such devices should not be able to apply quirks and
  * thus not be able to bypass the IOMMU restrictions.
  */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * risky_device - 하드웨어 우회(quirk)를 적용해도 되는 장치인지 판단한다
+ *
+ * @pdev: 검사할 PCI 장치.
+ * @return: true 면 위험하므로 우회를 적용하지 않는다.
+ *
+ * 왜 이 검사가 보안 문제인가: 이 파일 뒤쪽의 quirk 들(quirk_iommu_igfx,
+ * quirk_iommu_rwbf 등)은 특정 벤더/디바이스 ID 를 보고 IOMMU 동작을 완화한다.
+ * 그런데 PCI ID 는 장치가 스스로 보고하는 값이라 위조할 수 있다. 외부 포트에
+ * 꽂은 악성 장치가 우회 대상 ID 를 흉내 내면, 그 완화를 얻어 IOMMU 격리를
+ * 벗어날 수 있다.
+ *
+ * 그래서 untrusted 로 표시된 장치(Thunderbolt/USB4 같은 외부 포트 뒤)에는
+ * 어떤 우회도 적용하지 않는다. 정품 장치가 우연히 그런 포트에 꽂혀 동작이
+ * 나빠질 수는 있지만, 그쪽이 격리가 뚫리는 것보다 낫다.
+ *
+ * 로그를 두 줄 남기는 이유: 첫 줄은 어떤 장치에 우회를 건너뛰었는지 알리고,
+ * 둘째 줄은 관리자에게 펌웨어 벤더에 문의하라고 안내한다. 외부 포트 장치가
+ * 우회 대상 ID 를 갖고 있다는 것 자체가 정상적인 구성이 아니기 때문이다.
+ *
+ * 실행 컨텍스트: PCI quirk 적용 시점(부팅/장치 등장). 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   quirk_iommu_igfx()/quirk_iommu_rwbf()/... → [risky_device]
+ */
 static bool risky_device(struct pci_dev *pdev)
 {
-	if (pdev->untrusted) {
-		pci_info(pdev,
+	if (pdev->untrusted) {	/* [한국어] 외부 포트 뒤의 신뢰할 수 없는 장치면 (위 영어 주석) */
+		pci_info(pdev,	/* [한국어] 우회를 적용하지 않았음을 알린다 */
 			 "Skipping IOMMU quirk for dev [%04X:%04X] on untrusted PCI link\n",
-			 pdev->vendor, pdev->device);
-		pci_info(pdev, "Please check with your BIOS/Platform vendor about this\n");
-		return true;
+			 pdev->vendor, pdev->device);	/* [한국어] 어떤 장치였는지 */
+		pci_info(pdev, "Please check with your BIOS/Platform vendor about this\n");	/* [한국어] 펌웨어가 외부 포트 장치에 우회 대상 ID 를 붙인 것 자체가 의심스럽다 — 공격자가 ID 를 위조해 IOMMU 제한을 벗어나려는 시도일 수 있다 */
+		return true;	/* [한국어] 우회를 적용하지 않는다 */
 	}
-	return false;
+	return false;	/* [한국어] 내부 장치라면 우회를 적용해도 된다 */
 }
 
+/*
+ * [한국어]
+ * intel_iommu_iotlb_sync_map - 새로 만든 매핑을 하드웨어에 보이게 한다
+ *
+ * @domain: 매핑이 추가된 도메인.
+ * @iova: 새 매핑의 시작 주소. @size: 그 크기.
+ * @return: 항상 0.
+ *
+ * 보통의 IOMMU 는 매핑을 "만들 때"는 무효화가 필요 없다. 없던 항목이 생긴
+ * 것뿐이고, 하드웨어는 "없음"을 캐시하지 않기 때문이다. 무효화는 매핑을
+ * 지울 때만 필요하다.
+ *
+ * 그런데 두 종류의 VT-d 하드웨어는 다르다.
+ *   - rwbf 가 필요한 옛 유닛: 내부 쓰기 버퍼를 명시적으로 비우지 않으면
+ *     우리가 메모리에 쓴 페이지 테이블 항목이 하드웨어에 보이지 않는다.
+ *   - caching mode(= 에뮬레이션된 IOMMU): "여기엔 매핑이 없다"는 사실까지
+ *     캐시한다. 그래서 새 매핑을 만들어도 캐시된 "없음"이 남아 있으면
+ *     장치가 계속 폴트를 받는다.
+ * 두 경우 모두 도메인 생성 때 iotlb_sync_map 으로 표시해 두었고, 이 콜백이
+ * 그 표시를 보고 필요한 유닛에서만 무효화를 보낸다.
+ *
+ * _np 접미사: non-present, 즉 "없음" 항목의 캐시를 지우는 것이 목적임을
+ * 뜻한다. 이미 있던 매핑을 바꾼 것이 아니므로 더 무거운 무효화는 필요 없다.
+ *
+ * 실행 컨텍스트: iommu_map() 뒤. 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   iommu_map()/iommu_map_sg() → [intel_iommu_iotlb_sync_map]
+ *     → cache_tag_flush_range_np()
+ */
 static int intel_iommu_iotlb_sync_map(struct iommu_domain *domain,
 				      unsigned long iova, size_t size)
 {
-	struct dmar_domain *dmar_domain = to_dmar_domain(domain);
+	struct dmar_domain *dmar_domain = to_dmar_domain(domain);	/* [한국어] VT-d 도메인으로 */
 
-	if (dmar_domain->iotlb_sync_map)
-		cache_tag_flush_range_np(dmar_domain, iova, iova + size - 1);
+	if (dmar_domain->iotlb_sync_map)	/* [한국어] 이 도메인이 "매핑 후에도 동기화가 필요"로 표시되어 있으면 */
+		cache_tag_flush_range_np(dmar_domain, iova, iova + size - 1);	/* [한국어] 새로 만든 범위를 무효화한다. np(non-present)는 "없음" 항목의 캐시를 지운다는 뜻으로, 캐싱 모드 하드웨어가 "여기엔 매핑이 없다"를 캐시해 둔 것을 지워야 새 매핑이 보인다 */
 
-	return 0;
+	return 0;	/* [한국어] 보통의 하드웨어에서는 아무것도 하지 않고 성공 */
 }
 
+/*
+ * [한국어]
+ * domain_remove_dev_pasid - 도메인에서 (장치, PASID) 기록을 지우고 참조를 놓는다
+ *
+ * @domain: 떼어 낼 도메인. NULL 이면 아무것도 하지 않는다.
+ * @dev: 대상 장치. @pasid: 대상 PASID.
+ * @return: 없음.
+ *
+ * PASID 는 한 장치 안에서 여러 주소 공간을 구분하는 번호다. 그래서 도메인은
+ * 붙어 있는 장치 목록(devices)과 별도로, (장치, PASID) 쌍의 목록(dev_pasids)을
+ * 유지한다. 이 함수는 그중 하나를 지운다.
+ *
+ * 항등 도메인을 건너뛰는 이유: 항등 도메인은 IOVA 를 그대로 물리 주소로
+ * 쓰므로 도메인 id 도, 무효화 대상 등록도, PASID 별 메타데이터도 없다
+ * (위 영어 주석). 지울 것이 애초에 없다.
+ *
+ * 순서: 목록에서 먼저 빼고(락 안), 락 밖에서 무효화 등록 해제와 도메인 id
+ * 참조 반납을 한다. 뒤쪽 두 작업은 잠들 수 있어 스핀락 안에서 할 수 없다.
+ *
+ * WARN_ON_ONCE(!dev_pasid): 목록에 없었다는 것은 코어와 이 드라이버의 상태가
+ * 어긋났다는 뜻이다. 해제만 건너뛰고 나머지는 그대로 진행한다.
+ *
+ * 실행 컨텍스트: PASID 분리. 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   blocking_domain_set_dev_pasid()/intel_iommu_set_dev_pasid()
+ *     → [domain_remove_dev_pasid]
+ *     → cache_tag_unassign_domain() → domain_detach_iommu()
+ */
 void domain_remove_dev_pasid(struct iommu_domain *domain,
 			     struct device *dev, ioasid_t pasid)
 {
-	struct device_domain_info *info = dev_iommu_priv_get(dev);
-	struct dev_pasid_info *curr, *dev_pasid = NULL;
-	struct intel_iommu *iommu = info->iommu;
-	struct dmar_domain *dmar_domain;
-	unsigned long flags;
+	struct device_domain_info *info = dev_iommu_priv_get(dev);	/* [한국어] 장치 정보 */
+	struct dev_pasid_info *curr, *dev_pasid = NULL;	/* [한국어] 순회 커서와 찾은 항목 */
+	struct intel_iommu *iommu = info->iommu;	/* [한국어] 담당 유닛 */
+	struct dmar_domain *dmar_domain;	/* [한국어] VT-d 도메인 */
+	unsigned long flags;	/* [한국어] 인터럽트 상태 */
 
-	if (!domain)
-		return;
+	if (!domain)	/* [한국어] 도메인이 없으면 */
+		return;	/* [한국어] 정리할 것이 없다 */
 
 	/* Identity domain has no meta data for pasid. */
-	if (domain->type == IOMMU_DOMAIN_IDENTITY)
-		return;
+	if (domain->type == IOMMU_DOMAIN_IDENTITY)	/* [한국어] 항등 도메인은 PASID 별 메타데이터를 두지 않는다 (위 영어 주석) */
+		return;	/* [한국어] 정리할 것이 없다 */
 
-	dmar_domain = to_dmar_domain(domain);
-	spin_lock_irqsave(&dmar_domain->lock, flags);
-	list_for_each_entry(curr, &dmar_domain->dev_pasids, link_domain) {
-		if (curr->dev == dev && curr->pasid == pasid) {
-			list_del(&curr->link_domain);
-			dev_pasid = curr;
-			break;
+	dmar_domain = to_dmar_domain(domain);	/* [한국어] VT-d 도메인으로 */
+	spin_lock_irqsave(&dmar_domain->lock, flags);	/* [한국어] dev_pasids 목록을 보호한다 */
+	list_for_each_entry(curr, &dmar_domain->dev_pasids, link_domain) {	/* [한국어] 이 도메인에 붙은 (장치, PASID) 쌍들을 훑으며 */
+		if (curr->dev == dev && curr->pasid == pasid) {	/* [한국어] 찾는 쌍이면 */
+			list_del(&curr->link_domain);	/* [한국어] 목록에서 뺀다 */
+			dev_pasid = curr;	/* [한국어] 나중에 해제하려고 기억해 둔다 */
+			break;	/* [한국어] 하나뿐이므로 종료 */
 		}
 	}
-	spin_unlock_irqrestore(&dmar_domain->lock, flags);
+	spin_unlock_irqrestore(&dmar_domain->lock, flags);	/* [한국어] 락 해제. 아래 작업들은 잠들 수 있어 락 밖에서 한다 */
 
-	cache_tag_unassign_domain(dmar_domain, dev, pasid);
-	domain_detach_iommu(dmar_domain, iommu);
-	if (!WARN_ON_ONCE(!dev_pasid)) {
-		intel_iommu_debugfs_remove_dev_pasid(dev_pasid);
-		kfree(dev_pasid);
+	cache_tag_unassign_domain(dmar_domain, dev, pasid);	/* [한국어] 이 PASID 의 무효화 대상 등록을 푼다 */
+	domain_detach_iommu(dmar_domain, iommu);	/* [한국어] 유닛의 도메인 id 참조를 하나 놓는다 */
+	if (!WARN_ON_ONCE(!dev_pasid)) {	/* [한국어] 목록에 없었다면 코어와 상태가 어긋난 것이다 */
+		intel_iommu_debugfs_remove_dev_pasid(dev_pasid);	/* [한국어] 진단 노드 제거 */
+		kfree(dev_pasid);	/* [한국어] 자료구조 반납 */
 	}
 }
 
+/*
+ * [한국어]
+ * blocking_domain_set_dev_pasid - 특정 PASID 의 DMA 만 차단한다
+ *
+ * @domain: 전역 blocking_domain(상태가 없어 쓰이지 않는다).
+ * @dev: 대상 장치. @pasid: 차단할 PASID.
+ * @old: 이 PASID 가 쓰고 있던 도메인.
+ * @return: 항상 0 — 차단은 실패할 수 없다.
+ *
+ * 장치 전체가 아니라 그 안의 한 주소 공간만 막는다. SVA 로 붙였던 프로세스가
+ * 죽거나, iommufd 가 PASID 를 회수할 때 불린다.
+ *
+ * 순서는 blocking_domain_attach_dev 와 같은 원칙이다.
+ *   1) PASID 항목을 내려 하드웨어 번역을 끊는다(false = 폴트를 유발하지 말고
+ *      조용히 차단).
+ *   2) 옛 도메인의 폴트 처리를 뗀다.
+ *   3) 옛 도메인의 (장치, PASID) 기록을 지운다.
+ * 하드웨어를 먼저 끊는 것이 중요하다 — 소프트웨어 기록을 먼저 지우면 그 사이
+ * 도착한 폴트가 참조할 곳을 잃는다.
+ *
+ * 이 함수는 전방 선언(파일 앞쪽 blocking_domain 정의 위)의 실제 구현이다.
+ * blocking_domain 이 이 함수를 참조하고 이 함수가 그 위의 헬퍼들을 쓰기
+ * 때문에 순환을 끊으려고 선언과 정의를 떼어 놓았다.
+ *
+ * 실행 컨텍스트: PASID 해제. 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   iommu_remove_dev_pasid()/SVA 해제 → [blocking_domain_set_dev_pasid]
+ *     → intel_pasid_tear_down_entry() → domain_remove_dev_pasid()
+ */
 static int blocking_domain_set_dev_pasid(struct iommu_domain *domain,
 					 struct device *dev, ioasid_t pasid,
 					 struct iommu_domain *old)
 {
-	struct device_domain_info *info = dev_iommu_priv_get(dev);
+	struct device_domain_info *info = dev_iommu_priv_get(dev);	/* [한국어] 장치 정보 */
 
-	intel_pasid_tear_down_entry(info->iommu, dev, pasid, false);
-	iopf_for_domain_remove(old, dev);
-	domain_remove_dev_pasid(old, dev, pasid);
+	intel_pasid_tear_down_entry(info->iommu, dev, pasid, false);	/* [한국어] 이 PASID 의 항목을 내려 해당 주소 공간의 DMA 를 막는다. false 는 조용히 차단하라는 뜻이다 */
+	iopf_for_domain_remove(old, dev);	/* [한국어] 옛 도메인의 폴트 처리를 뗀다 */
+	domain_remove_dev_pasid(old, dev, pasid);	/* [한국어] 옛 도메인의 (장치, PASID) 기록을 지운다 */
 
-	return 0;
+	return 0;	/* [한국어] 차단은 실패할 수 없다 */
 }
 
+/*
+ * [한국어]
+ * domain_add_dev_pasid - 도메인에 (장치, PASID) 기록을 만들고 필요한 참조를 잡는다
+ *
+ * @domain: 붙일 도메인. @dev: 장치. @pasid: PASID.
+ * @return: 만들어진 dev_pasid_info, 실패 시 ERR_PTR.
+ *
+ * 하드웨어 항목을 세우기 전에 필요한 것들을 미리 확보한다. 순서와 되돌리기가
+ * 이 함수의 전부다.
+ *   1) 기록 구조체 할당.
+ *   2) domain_attach_iommu — 이 유닛에서 도메인 id 를 확보한다. 이미 이
+ *      도메인이 이 유닛을 쓰고 있으면 참조만 늘어난다. 도메인 id 는 유닛마다
+ *      개수가 정해져 있어(cap_ndoms) 여기서 실패할 수 있다.
+ *   3) cache_tag_assign_domain — 이 PASID 를 무효화 대상 목록에 넣는다.
+ *      이것이 없으면 나중에 매핑을 풀어도 이 PASID 의 캐시가 남는다.
+ *   4) 도메인의 dev_pasids 목록에 매단다.
+ * 2~3 이 실패하면 out_detach_iommu → out_free 로 역순으로 되돌린다.
+ *
+ * 왜 하드웨어 설정과 분리했는가: 호출자(intel_iommu_set_dev_pasid)는 하드웨어
+ * 설정이 실패했을 때 이 준비 작업까지 깔끔히 되돌려야 한다. 준비와 설정을
+ * 나눠 두면 되돌리기 경로가 단순해진다.
+ *
+ * 실행 컨텍스트: PASID 부착. 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   intel_iommu_set_dev_pasid()/SVA 설정 → [domain_add_dev_pasid]
+ *     → domain_attach_iommu() → cache_tag_assign_domain()
+ */
 struct dev_pasid_info *
 domain_add_dev_pasid(struct iommu_domain *domain,
 		     struct device *dev, ioasid_t pasid)
 {
-	struct device_domain_info *info = dev_iommu_priv_get(dev);
-	struct dmar_domain *dmar_domain = to_dmar_domain(domain);
-	struct intel_iommu *iommu = info->iommu;
-	struct dev_pasid_info *dev_pasid;
-	unsigned long flags;
-	int ret;
+	struct device_domain_info *info = dev_iommu_priv_get(dev);	/* [한국어] 장치 정보 */
+	struct dmar_domain *dmar_domain = to_dmar_domain(domain);	/* [한국어] VT-d 도메인으로 */
+	struct intel_iommu *iommu = info->iommu;	/* [한국어] 담당 유닛 */
+	struct dev_pasid_info *dev_pasid;	/* [한국어] 만들 (장치, PASID) 기록 */
+	unsigned long flags;	/* [한국어] 인터럽트 상태 */
+	int ret;	/* [한국어] 각 단계 결과 */
 
-	dev_pasid = kzalloc_obj(*dev_pasid);
-	if (!dev_pasid)
-		return ERR_PTR(-ENOMEM);
+	dev_pasid = kzalloc_obj(*dev_pasid);	/* [한국어] 기록 구조체 */
+	if (!dev_pasid)	/* [한국어] 할당 실패 */
+		return ERR_PTR(-ENOMEM);	/* [한국어] 전달 */
 
-	ret = domain_attach_iommu(dmar_domain, iommu);
-	if (ret)
-		goto out_free;
+	ret = domain_attach_iommu(dmar_domain, iommu);	/* [한국어] 이 유닛에서 도메인 id 를 확보한다(이미 있으면 참조만 늘린다) */
+	if (ret)	/* [한국어] 도메인 id 고갈 등 */
+		goto out_free;	/* [한국어] 기록을 반납하고 나간다 */
 
-	ret = cache_tag_assign_domain(dmar_domain, dev, pasid);
-	if (ret)
-		goto out_detach_iommu;
+	ret = cache_tag_assign_domain(dmar_domain, dev, pasid);	/* [한국어] 이 PASID 를 무효화 대상으로 등록한다 */
+	if (ret)	/* [한국어] 실패 */
+		goto out_detach_iommu;	/* [한국어] 도메인 id 참조를 되돌린다 */
 
-	dev_pasid->dev = dev;
-	dev_pasid->pasid = pasid;
-	spin_lock_irqsave(&dmar_domain->lock, flags);
-	list_add(&dev_pasid->link_domain, &dmar_domain->dev_pasids);
-	spin_unlock_irqrestore(&dmar_domain->lock, flags);
+	dev_pasid->dev = dev;	/* [한국어] 어느 장치의 */
+	dev_pasid->pasid = pasid;	/* [한국어] 어느 PASID 인지 */
+	spin_lock_irqsave(&dmar_domain->lock, flags);	/* [한국어] 도메인의 dev_pasids 목록을 바꾼다 */
+	list_add(&dev_pasid->link_domain, &dmar_domain->dev_pasids);	/* [한국어] 도메인에 매단다 */
+	spin_unlock_irqrestore(&dmar_domain->lock, flags);	/* [한국어] 락 해제 */
 
-	return dev_pasid;
-out_detach_iommu:
-	domain_detach_iommu(dmar_domain, iommu);
-out_free:
-	kfree(dev_pasid);
-	return ERR_PTR(ret);
+	return dev_pasid;	/* [한국어] 호출자가 이 포인터로 나중에 정리한다 */
+out_detach_iommu:	/* [한국어] cache tag 실패 경로 */
+	domain_detach_iommu(dmar_domain, iommu);	/* [한국어] 도메인 id 참조를 놓는다 */
+out_free:	/* [한국어] 도메인 id 실패가 합류 */
+	kfree(dev_pasid);	/* [한국어] 기록 반납 */
+	return ERR_PTR(ret);	/* [한국어] 실패 이유 */
 }
 
+/*
+ * [한국어]
+ * intel_iommu_set_dev_pasid - 장치의 특정 PASID 에 페이징 도메인을 붙인다
+ *
+ * @domain: 붙일 페이징 도메인. @dev: 장치. @pasid: 대상 PASID.
+ * @old: 이 PASID 가 쓰고 있던 도메인(교체인 경우). 없으면 NULL.
+ * @return: 0 성공, 음수면 실패(그 경우 옛 상태가 그대로 유지된다).
+ *
+ * PASID 단위 부착이 왜 필요한가: 하나의 장치가 여러 프로세스/컨텍스트를
+ * 동시에 다루는 경우(GPU, 가속기, SR-IOV 서브펑션), 각각에 다른 주소 공간을
+ * 주어야 한다. PASID 가 그 구분자이고, 이 함수가 PASID 하나에 도메인 하나를
+ * 연결한다.
+ *
+ * 거절하는 경우들:
+ *   - 페이징 도메인이 아니면. SVA/항등 도메인은 각자의 경로가 따로 있다.
+ *   - 유닛이 PASID 를 못 하거나, 부모의 컨텍스트 항목을 공유하는
+ *     서브디바이스면. 후자는 자기 PASID 테이블이 없다.
+ *   - 물려받은 컨텍스트가 아직 전환되지 않았으면(-EBUSY). 기본 도메인이 먼저
+ *     붙어 전환이 일어나야 그 위에 PASID 를 얹을 수 있다.
+ *
+ * 교체(replace)의 순서가 이 함수의 핵심이다.
+ *   1) 새 도메인의 준비물을 먼저 확보한다(domain_add_dev_pasid).
+ *   2) 폴트 처리를 옛 도메인에서 새 도메인으로 옮긴다. 하드웨어를 바꾸기
+ *      전에 해야, 전환 직후 도착하는 폴트가 새 도메인으로 간다.
+ *   3) 하드웨어 PASID 항목을 원자적으로 교체한다(old 를 함께 넘겨
+ *      domain_setup_*_level 이 한 번에 바꾼다).
+ *   4) 성공한 뒤에야 옛 도메인의 기록을 지운다.
+ * 실패하면 out_unwind_iopf → out_remove_dev_pasid 로 정확히 역순으로
+ * 되돌리므로, 어느 지점에서 실패해도 옛 도메인이 그대로 살아 있다.
+ *
+ * 실행 컨텍스트: PASID 부착/교체. 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   iommu_attach_device_pasid()/iommufd → [intel_iommu_set_dev_pasid]
+ *     → paging_domain_compatible() → domain_add_dev_pasid()
+ *     → iopf_for_domain_replace()
+ *     → domain_setup_first_level()/domain_setup_second_level()
+ */
 static int intel_iommu_set_dev_pasid(struct iommu_domain *domain,
 				     struct device *dev, ioasid_t pasid,
 				     struct iommu_domain *old)
 {
-	struct device_domain_info *info = dev_iommu_priv_get(dev);
-	struct dmar_domain *dmar_domain = to_dmar_domain(domain);
-	struct intel_iommu *iommu = info->iommu;
-	struct dev_pasid_info *dev_pasid;
-	int ret;
+	struct device_domain_info *info = dev_iommu_priv_get(dev);	/* [한국어] 장치 정보 */
+	struct dmar_domain *dmar_domain = to_dmar_domain(domain);	/* [한국어] VT-d 도메인으로 */
+	struct intel_iommu *iommu = info->iommu;	/* [한국어] 담당 유닛 */
+	struct dev_pasid_info *dev_pasid;	/* [한국어] 만들 (장치, PASID) 기록 */
+	int ret;	/* [한국어] 각 단계 결과 */
 
-	if (WARN_ON_ONCE(!(domain->type & __IOMMU_DOMAIN_PAGING)))
-		return -EINVAL;
+	if (WARN_ON_ONCE(!(domain->type & __IOMMU_DOMAIN_PAGING)))	/* [한국어] 페이징 도메인이 아니면 */
+		return -EINVAL;	/* [한국어] PASID 에 붙일 수 없다. SVA/항등 도메인은 각자의 경로가 따로 있다 */
 
-	if (!pasid_supported(iommu) || dev_is_real_dma_subdevice(dev))
-		return -EOPNOTSUPP;
+	if (!pasid_supported(iommu) || dev_is_real_dma_subdevice(dev))	/* [한국어] 유닛이 PASID 를 못 하거나, 부모의 항목을 공유하는 서브디바이스면 */
+		return -EOPNOTSUPP;	/* [한국어] PASID 단위로 도메인을 붙일 수 없다 */
 
-	if (context_copied(iommu, info->bus, info->devfn))
-		return -EBUSY;
+	if (context_copied(iommu, info->bus, info->devfn))	/* [한국어] 물려받은 컨텍스트가 아직 전환되지 않았으면 */
+		return -EBUSY;	/* [한국어] 그 위에 PASID 를 얹을 수 없다. 기본 도메인이 먼저 붙어 전환이 일어나야 한다 */
 
-	ret = paging_domain_compatible(domain, dev);
-	if (ret)
-		return ret;
+	ret = paging_domain_compatible(domain, dev);	/* [한국어] 이 유닛에 이 도메인을 붙일 수 있는지 */
+	if (ret)	/* [한국어] 불가능하면 */
+		return ret;	/* [한국어] 이유를 전달 */
 
-	dev_pasid = domain_add_dev_pasid(domain, dev, pasid);
-	if (IS_ERR(dev_pasid))
-		return PTR_ERR(dev_pasid);
+	dev_pasid = domain_add_dev_pasid(domain, dev, pasid);	/* [한국어] 도메인 id 확보 + 무효화 등록 + 기록 생성 */
+	if (IS_ERR(dev_pasid))	/* [한국어] 실패 */
+		return PTR_ERR(dev_pasid);	/* [한국어] 전달 */
 
-	ret = iopf_for_domain_replace(domain, old, dev);
-	if (ret)
-		goto out_remove_dev_pasid;
+	ret = iopf_for_domain_replace(domain, old, dev);	/* [한국어] 폴트 처리를 옛 도메인에서 새 도메인으로 옮긴다. 하드웨어를 바꾸기 전에 해야 그 사이의 폴트가 새 도메인으로 간다 */
+	if (ret)	/* [한국어] 실패 */
+		goto out_remove_dev_pasid;	/* [한국어] 방금 만든 기록을 되돌린다 */
 
-	if (intel_domain_is_fs_paging(dmar_domain))
-		ret = domain_setup_first_level(iommu, dmar_domain,
-					       dev, pasid, old);
-	else if (intel_domain_is_ss_paging(dmar_domain))
-		ret = domain_setup_second_level(iommu, dmar_domain,
-						dev, pasid, old);
-	else if (WARN_ON(true))
-		ret = -EINVAL;
+	if (intel_domain_is_fs_paging(dmar_domain))	/* [한국어] 1단계 도메인이면 */
+		ret = domain_setup_first_level(iommu, dmar_domain,	/* [한국어] PASID 항목에 1단계 테이블을 세운다 */
+					       dev, pasid, old);	/* [한국어] 옛 도메인을 함께 넘겨 원자적으로 교체하게 한다 */
+	else if (intel_domain_is_ss_paging(dmar_domain))	/* [한국어] 2단계 도메인이면 */
+		ret = domain_setup_second_level(iommu, dmar_domain,	/* [한국어] PASID 항목에 2단계 테이블을 세운다 */
+						dev, pasid, old);	/* [한국어] 마찬가지로 교체 */
+	else if (WARN_ON(true))	/* [한국어] 둘 다 아니면 위 검사를 통과했을 리 없다 */
+		ret = -EINVAL;	/* [한국어] 거절 */
 
-	if (ret)
-		goto out_unwind_iopf;
+	if (ret)	/* [한국어] 하드웨어 설정 실패 */
+		goto out_unwind_iopf;	/* [한국어] 폴트 처리를 되돌린다 */
 
-	domain_remove_dev_pasid(old, dev, pasid);
+	domain_remove_dev_pasid(old, dev, pasid);	/* [한국어] 새 설정이 자리 잡은 뒤에야 옛 도메인의 기록을 지운다. 순서를 바꾸면 교체 도중 폴트가 갈 곳이 없어진다 */
 
-	intel_iommu_debugfs_create_dev_pasid(dev_pasid);
+	intel_iommu_debugfs_create_dev_pasid(dev_pasid);	/* [한국어] 진단 노드 생성 */
 
-	return 0;
+	return 0;	/* [한국어] PASID 가 새 도메인을 쓴다 */
 
-out_unwind_iopf:
-	iopf_for_domain_replace(old, domain, dev);
-out_remove_dev_pasid:
-	domain_remove_dev_pasid(domain, dev, pasid);
-	return ret;
+out_unwind_iopf:	/* [한국어] 하드웨어 설정 실패 경로 */
+	iopf_for_domain_replace(old, domain, dev);	/* [한국어] 폴트 처리를 옛 도메인으로 되돌린다 */
+out_remove_dev_pasid:	/* [한국어] 폴트 처리 실패가 합류 */
+	domain_remove_dev_pasid(domain, dev, pasid);	/* [한국어] 새 도메인의 기록을 지운다 */
+	return ret;	/* [한국어] 실패 이유 */
 }
 
 static void *intel_iommu_hw_info(struct device *dev, u32 *length,
