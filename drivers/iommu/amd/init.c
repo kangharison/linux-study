@@ -3154,108 +3154,199 @@ static int __init init_iommu_from_acpi(struct amd_iommu *iommu,
 }
 
 /* Allocate PCI segment data structure */
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * alloc_pci_segment - PCI 세그먼트 하나의 조회 표를 모두 만든다
+ *
+ * @id: 세그먼트 번호.
+ * @ivrs_base: IVRS 표(크기를 재기 위해 다시 훑는다).
+ * @return: 새 세그먼트 구조체, 실패하면 NULL.
+ *
+ * 원 주석이 순서를 밝힌다: 먼저 표를 훑어 이 세그먼트의 최대 장치 id 를
+ * 알아내고, 그 값으로 공유 자료구조의 크기를 정한다. 크기를 먼저 알아야
+ * 하는 이유는 표들이 모두 장치 id 를 인덱스로 쓰는 평평한 배열이기
+ * 때문이다.
+ *
+ * 장치 테이블 크기 계산이 눈에 띈다. 항목 수 × 32바이트를 2의 거듭제곱으로
+ * 올리고, 최소 4KB 를 보장한다. 거듭제곱이어야 하는 이유는 하드웨어가
+ * 크기를 "페이지 수 - 1"의 형태로 인코딩하기 때문이고, 최소 4KB 는 장치가
+ * 몇 개뿐인 세그먼트에서도 한 페이지는 있어야 하기 때문이다.
+ *
+ * 목록에 먼저 넣고 표를 잡는 순서에 유의: 실패 경로가 list_del 로 되돌리며,
+ * 그래야 부분적으로 만들어진 세그먼트가 목록에 남지 않는다.
+ *
+ * 호출 체인:
+ *   get_pci_segment() → [이 함수] → find_last_devid_acpi()
+ *     → alloc_dev_table() → alloc_alias_table() → alloc_rlookup_table()
+ */
 static struct amd_iommu_pci_seg *__init alloc_pci_segment(u16 id,
 					  struct acpi_table_header *ivrs_base)
 {
-	struct amd_iommu_pci_seg *pci_seg;
-	int last_bdf;
+	struct amd_iommu_pci_seg *pci_seg;	/* [한국어] 만들 세그먼트 */
+	int last_bdf;	/* [한국어] 이 세그먼트의 최대 장치 id */
 
 	/*
 	 * First parse ACPI tables to find the largest Bus/Dev/Func we need to
 	 * handle in this PCI segment. Upon this information the shared data
 	 * structures for the PCI segments in the system will be allocated.
 	 */
-	last_bdf = find_last_devid_acpi(ivrs_base, id);
-	if (last_bdf < 0)
-		return NULL;
+	last_bdf = find_last_devid_acpi(ivrs_base, id);	/* [한국어] (원 주석: 먼저 표를 훑어 다뤄야 할 최대 BDF 를 찾는다) */
+	if (last_bdf < 0)	/* [한국어] 파싱 실패 */
+		return NULL;	/* [한국어] 표가 이상하면 이 세그먼트를 만들 수 없다 */
 
-	pci_seg = kzalloc_obj(struct amd_iommu_pci_seg);
-	if (pci_seg == NULL)
-		return NULL;
+	pci_seg = kzalloc_obj(struct amd_iommu_pci_seg);	/* [한국어] 세그먼트 구조체 */
+	if (pci_seg == NULL)	/* [한국어] 메모리 부족 */
+		return NULL;	/* [한국어] 실패 */
 
-	pci_seg->last_bdf = last_bdf;
-	DUMP_printk("PCI segment : 0x%0x, last bdf : 0x%04x\n", id, last_bdf);
-	pci_seg->dev_table_size =
-		max(roundup_pow_of_two((last_bdf + 1) * DEV_TABLE_ENTRY_SIZE),
-		    SZ_4K);
+	pci_seg->last_bdf = last_bdf;	/* [한국어] 표들의 크기를 정하는 근거 */
+	DUMP_printk("PCI segment : 0x%0x, last bdf : 0x%04x\n", id, last_bdf);	/* [한국어] 상세 로그 */
+	pci_seg->dev_table_size =	/* [한국어] 장치 테이블의 크기 */
+		max(roundup_pow_of_two((last_bdf + 1) * DEV_TABLE_ENTRY_SIZE),	/* [한국어] 2의 거듭제곱이어야 한다 — 하드웨어가 "페이지 수 - 1"로 인코딩한다 */
+		    SZ_4K);	/* [한국어] 장치가 몇 개뿐이어도 최소 한 페이지 */
 
-	pci_seg->id = id;
-	init_llist_head(&pci_seg->dev_data_list);
-	INIT_LIST_HEAD(&pci_seg->unity_map);
-	list_add_tail(&pci_seg->list, &amd_iommu_pci_seg_list);
+	pci_seg->id = id;	/* [한국어] 세그먼트 번호 */
+	init_llist_head(&pci_seg->dev_data_list);	/* [한국어] 장치 상태 목록. 락 없이 밀어 넣을 수 있는 형태다 */
+	INIT_LIST_HEAD(&pci_seg->unity_map);	/* [한국어] 펌웨어가 요구할 항등 매핑 목록 */
+	list_add_tail(&pci_seg->list, &amd_iommu_pci_seg_list);	/* [한국어] 전역 목록에 먼저 넣는다 — 실패 경로가 list_del 로 되돌린다 */
 
-	if (alloc_dev_table(pci_seg))
-		goto err_free_pci_seg;
-	if (alloc_alias_table(pci_seg))
-		goto err_free_dev_table;
-	if (alloc_rlookup_table(pci_seg))
-		goto err_free_alias_table;
+	if (alloc_dev_table(pci_seg))	/* [한국어] 하드웨어가 읽을 장치 테이블 */
+		goto err_free_pci_seg;	/* [한국어] 실패하면 구조체만 되돌린다 */
+	if (alloc_alias_table(pci_seg))	/* [한국어] 장치 id → 실제 요청자 id */
+		goto err_free_dev_table;	/* [한국어] 장치 테이블까지 되돌린다 */
+	if (alloc_rlookup_table(pci_seg))	/* [한국어] 장치 id → 담당 유닛 */
+		goto err_free_alias_table;	/* [한국어] 별칭 표까지 되돌린다 */
 
-	return pci_seg;
+	return pci_seg;	/* [한국어] 세 표가 모두 준비됐다 */
 
 err_free_alias_table:
-	free_alias_table(pci_seg);
+	free_alias_table(pci_seg);	/* [한국어] 계단식 되감기 */
 err_free_dev_table:
-	free_dev_table(pci_seg);
+	free_dev_table(pci_seg);	/* [한국어] 장치 테이블 */
 err_free_pci_seg:
-	list_del(&pci_seg->list);
-	kfree(pci_seg);
-	return NULL;
+	list_del(&pci_seg->list);	/* [한국어] 목록에서 빼고 */
+	kfree(pci_seg);	/* [한국어] 구조체를 놓는다 */
+	return NULL;	/* [한국어] 이 세그먼트는 쓸 수 없다 */
 }
 
+/*
+ * [한국어]
+ * get_pci_segment - 그 번호의 세그먼트를 찾거나 새로 만든다
+ *
+ * @id: 세그먼트 번호.
+ * @ivrs_base: IVRS 표.
+ * @return: 세그먼트 구조체, 실패하면 NULL.
+ *
+ * 한 세그먼트에 유닛이 여럿일 수 있고 각 유닛의 IVHD 가 따로 나타나므로,
+ * 두 번째 유닛부터는 이미 만들어진 세그먼트를 찾아 써야 한다. 그 판단을
+ * 여기 모아 두어 호출부가 신경 쓰지 않게 한다.
+ *
+ * 호출 체인:
+ *   init_iommu_one() → [이 함수] → alloc_pci_segment()
+ */
 static struct amd_iommu_pci_seg *__init get_pci_segment(u16 id,
 					struct acpi_table_header *ivrs_base)
 {
-	struct amd_iommu_pci_seg *pci_seg;
+	struct amd_iommu_pci_seg *pci_seg;	/* [한국어] 목록 커서 */
 
-	for_each_pci_segment(pci_seg) {
-		if (pci_seg->id == id)
-			return pci_seg;
+	for_each_pci_segment(pci_seg) {	/* [한국어] 이미 만들어진 세그먼트를 찾는다 */
+		if (pci_seg->id == id)	/* [한국어] 번호가 맞으면 */
+			return pci_seg;	/* [한국어] 그것을 쓴다 — 한 세그먼트에 유닛이 여럿일 수 있다 */
 	}
 
-	return alloc_pci_segment(id, ivrs_base);
+	return alloc_pci_segment(id, ivrs_base);	/* [한국어] 없으면 새로 만든다 */
 }
 
+/*
+ * [한국어]
+ * free_pci_segments - 모든 세그먼트와 그 조회 표를 놓는다
+ *
+ * 해제 순서가 alloc 의 역순이 아니라는 점이 눈에 띈다. irq_lookup 이 가장
+ * 먼저인데, 그것만 다른 경로(재매핑 초기화)에서 잡히기 때문이다. 나머지
+ * 셋은 서로 의존하지 않아 순서가 자유롭다.
+ *
+ * _safe 순회를 쓰는 이유: 목록에서 빼면서 훑는다.
+ *
+ * 호출 체인:
+ *   free_iommu_resources() → [이 함수]
+ */
 static void __init free_pci_segments(void)
 {
-	struct amd_iommu_pci_seg *pci_seg, *next;
+	struct amd_iommu_pci_seg *pci_seg, *next;	/* [한국어] 목록에서 빼며 훑으므로 다음을 미리 잡는다 */
 
-	for_each_pci_segment_safe(pci_seg, next) {
-		list_del(&pci_seg->list);
-		free_irq_lookup_table(pci_seg);
-		free_rlookup_table(pci_seg);
-		free_alias_table(pci_seg);
-		free_dev_table(pci_seg);
-		kfree(pci_seg);
+	for_each_pci_segment_safe(pci_seg, next) {	/* [한국어] 모든 세그먼트 */
+		list_del(&pci_seg->list);	/* [한국어] 먼저 목록에서 뺀다 */
+		free_irq_lookup_table(pci_seg);	/* [한국어] 재매핑 초기화가 따로 잡은 것이라 먼저 놓는다 */
+		free_rlookup_table(pci_seg);	/* [한국어] 담당 유닛 표 */
+		free_alias_table(pci_seg);	/* [한국어] 별칭 표 */
+		free_dev_table(pci_seg);	/* [한국어] 장치 테이블 */
+		kfree(pci_seg);	/* [한국어] 구조체 */
 	}
 }
 
+/*
+ * [한국어]
+ * free_sysfs - 코어 IOMMU 계층과 sysfs 에서 이 유닛을 뗀다
+ *
+ * @iommu: 대상 유닛.
+ *
+ * 등록의 역순으로 뗀다: 먼저 코어에서 unregister 하고 그다음 sysfs 를
+ * 지운다. 반대로 하면 코어가 이미 사라진 sysfs 항목을 참조할 수 있다.
+ *
+ * iommu.dev 검사가 등록 여부의 표식이다 — 초기화가 그 단계까지 가지
+ * 못했으면 뗄 것도 없다.
+ */
 static void __init free_sysfs(struct amd_iommu *iommu)
 {
-	if (iommu->iommu.dev) {
-		iommu_device_unregister(&iommu->iommu);
-		iommu_device_sysfs_remove(&iommu->iommu);
+	if (iommu->iommu.dev) {	/* [한국어] 등록까지 갔는지의 표식 */
+		iommu_device_unregister(&iommu->iommu);	/* [한국어] 코어에서 먼저 뗀다 */
+		iommu_device_sysfs_remove(&iommu->iommu);	/* [한국어] 그다음 sysfs — 반대로 하면 코어가 사라진 항목을 참조한다 */
 	}
 }
 
+/*
+ * [한국어]
+ * free_iommu_one - 유닛 하나가 잡은 자원을 모두 놓는다
+ *
+ * @iommu: 대상 유닛.
+ *
+ * MMIO 매핑을 늦게 푸는 것이 중요하다. 그 앞의 해제들이 하드웨어를 건드릴
+ * 수 있는데, 매핑이 없으면 그것을 할 수 없다.
+ *
+ * 각 해제 함수가 "잡히지 않았다"를 스스로 판별하므로, 초기화가 어디까지
+ * 갔든 이 하나로 정리된다.
+ *
+ * 호출 체인:
+ *   free_iommu_all()/init_iommu_one() 실패 경로 → [이 함수]
+ */
 static void __init free_iommu_one(struct amd_iommu *iommu)
 {
-	free_sysfs(iommu);
-	free_iommu_buffers(iommu);
-	amd_iommu_free_ppr_log(iommu);
-	free_ga_log(iommu);
-	iommu_unmap_mmio_space(iommu);
-	amd_iommu_iopf_uninit(iommu);
+	free_sysfs(iommu);	/* [한국어] 코어 등록 해제 */
+	free_iommu_buffers(iommu);	/* [한국어] 명령/이벤트/완료 대기 버퍼 */
+	amd_iommu_free_ppr_log(iommu);	/* [한국어] PPR 로그 */
+	free_ga_log(iommu);	/* [한국어] GA 로그와 꼬리 포인터 */
+	iommu_unmap_mmio_space(iommu);	/* [한국어] MMIO 는 마지막에 — 앞의 해제들이 하드웨어를 건드릴 수 있다 */
+	amd_iommu_iopf_uninit(iommu);	/* [한국어] 페이지 폴트 처리 큐 */
 }
 
+/*
+ * [한국어]
+ * free_iommu_all - 모든 유닛을 목록에서 빼고 자원을 놓는다
+ *
+ * 초기화 실패 정리 경로다. 목록에서 먼저 빼는 이유: 다른 코드가 그 사이에
+ * 목록을 훑으며 해제된 유닛에 닿는 것을 막는다.
+ *
+ * 호출 체인:
+ *   free_iommu_resources() → [이 함수] → free_iommu_one()
+ */
 static void __init free_iommu_all(void)
 {
-	struct amd_iommu *iommu, *next;
+	struct amd_iommu *iommu, *next;	/* [한국어] 목록에서 빼며 훑는다 */
 
-	for_each_iommu_safe(iommu, next) {
-		list_del(&iommu->list);
-		free_iommu_one(iommu);
-		kfree(iommu);
+	for_each_iommu_safe(iommu, next) {	/* [한국어] 모든 유닛 */
+		list_del(&iommu->list);	/* [한국어] 먼저 목록에서 뺀다 — 다른 코드가 해제된 유닛에 닿지 않게 */
+		free_iommu_one(iommu);	/* [한국어] 자원 해제 */
+		kfree(iommu);	/* [한국어] 구조체 */
 	}
 }
 
@@ -3265,29 +3356,52 @@ static void __init free_iommu_all(void)
  *     BIOS should disable L2B micellaneous clock gating by setting
  *     L2_L2B_CK_GATE_CONTROL[CKGateL2BMiscDisable](D0F2xF4_x90[2]) = 1b
  */
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * amd_iommu_erratum_746_workaround - 로그 기록이 변환을 멈추는 결함을 우회한다
+ *
+ * @iommu: 대상 유닛.
+ *
+ * 원 주석이 증상과 처방을 밝힌다: Family15h Model 10h-1fh 에서 IOMMU 가
+ * 로그를 쓰는 동안 변환이 멈출 수 있고, L2B 클록 게이팅을 끄면 해결된다.
+ *
+ * BIOS 가 해야 할 일이지만 하지 않는 기계가 있어 커널이 대신 한다. 모델
+ * 번호로 대상을 좁히는 것이 유일한 판별 방법이다 — 이 결함을 알리는 능력
+ * 비트가 없다.
+ *
+ * 이미 설정되어 있으면 아무것도 하지 않는다(BIOS 가 제대로 한 기계).
+ *
+ * L2 간접 레지스터를 직접 다루는 것에 유의: iommu_write_l2 를 쓰지 않고
+ * 설정 공간을 직접 건드리는데, 이 시점에는 아직 그 도우미가 쓰는 상태가
+ * 준비되지 않았을 수 있다.
+ *
+ * 호출 체인:
+ *   iommu_init_pci() → [이 함수]
+ */
 static void amd_iommu_erratum_746_workaround(struct amd_iommu *iommu)
 {
-	u32 value;
+	u32 value;	/* [한국어] 레지스터 값 */
 
-	if ((boot_cpu_data.x86 != 0x15) ||
-	    (boot_cpu_data.x86_model < 0x10) ||
-	    (boot_cpu_data.x86_model > 0x1f))
-		return;
+	if ((boot_cpu_data.x86 != 0x15) ||	/* [한국어] Family 15h 이고 */
+	    (boot_cpu_data.x86_model < 0x10) ||	/* [한국어] Model 10h 이상 */
+	    (boot_cpu_data.x86_model > 0x1f))	/* [한국어] 1fh 이하인가 — 결함을 알리는 능력 비트가 없어 모델로 판별한다 */
+		return;	/* [한국어] 해당 없음 */
 
-	pci_write_config_dword(iommu->dev, 0xf0, 0x90);
-	pci_read_config_dword(iommu->dev, 0xf4, &value);
+	pci_write_config_dword(iommu->dev, 0xf0, 0x90);	/* [한국어] NB 간접 레지스터 0x90 을 읽기 위해 창을 연다 */
+	pci_read_config_dword(iommu->dev, 0xf4, &value);	/* [한국어] 현재 값 */
 
-	if (value & BIT(2))
-		return;
+	if (value & BIT(2))	/* [한국어] BIOS 가 이미 설정했다면 */
+		return;	/* [한국어] 할 일이 없다 */
 
 	/* Select NB indirect register 0x90 and enable writing */
-	pci_write_config_dword(iommu->dev, 0xf0, 0x90 | (1 << 8));
+	pci_write_config_dword(iommu->dev, 0xf0, 0x90 | (1 << 8));	/* [한국어] (원 주석: 0x90 을 선택하고 쓰기를 허용한다) */
 
-	pci_write_config_dword(iommu->dev, 0xf4, value | 0x4);
-	pci_info(iommu->dev, "Applying erratum 746 workaround\n");
+	pci_write_config_dword(iommu->dev, 0xf4, value | 0x4);	/* [한국어] L2B 클록 게이팅을 끈다 — 그래야 로그 기록이 변환을 멈추지 않는다 */
+	pci_info(iommu->dev, "Applying erratum 746 workaround\n");	/* [한국어] BIOS 가 해야 할 일을 커널이 대신했음을 알린다 */
 
 	/* Clear the enable writing bit */
-	pci_write_config_dword(iommu->dev, 0xf0, 0x90);
+	pci_write_config_dword(iommu->dev, 0xf0, 0x90);	/* [한국어] (원 주석: 쓰기 허용 비트를 지운다) 창을 읽기 모드로 되돌린다 */
 }
 
 /*
@@ -3296,25 +3410,43 @@ static void amd_iommu_erratum_746_workaround(struct amd_iommu *iommu)
  *     BIOS should enable ATS write permission check by setting
  *     L2_DEBUG_3[AtsIgnoreIWDis](D0F2xF4_x47[0]) = 1b
  */
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * amd_iommu_ats_write_check_workaround - ATS 쓰기 권한 검사를 강제로 켠다
+ *
+ * @iommu: 대상 유닛.
+ *
+ * 원 주석대로 Family15h Model 30h-3fh 는 ATS 요청의 쓰기 권한을 제대로
+ * 검사하지 않는다. 그러면 읽기 전용으로 매핑한 페이지에 장치가 쓸 수 있어,
+ * 격리가 부분적으로 깨진다.
+ *
+ * L2_DEBUG_3 의 비트 하나를 세워 검사를 강제한다. 앞의 746 우회와 달리
+ * iommu_read_l2/write_l2 도우미를 쓰는데, 이 함수는 유닛 초기화가 더
+ * 진행된 뒤에 불리기 때문이다.
+ *
+ * 호출 체인:
+ *   iommu_init_pci() → [이 함수] → iommu_read_l2()/iommu_write_l2()
+ */
 static void amd_iommu_ats_write_check_workaround(struct amd_iommu *iommu)
 {
-	u32 value;
+	u32 value;	/* [한국어] 레지스터 값 */
 
-	if ((boot_cpu_data.x86 != 0x15) ||
-	    (boot_cpu_data.x86_model < 0x30) ||
-	    (boot_cpu_data.x86_model > 0x3f))
-		return;
+	if ((boot_cpu_data.x86 != 0x15) ||	/* [한국어] Family 15h 이고 */
+	    (boot_cpu_data.x86_model < 0x30) ||	/* [한국어] Model 30h 이상 */
+	    (boot_cpu_data.x86_model > 0x3f))	/* [한국어] 3fh 이하인가 */
+		return;	/* [한국어] 해당 없음 */
 
 	/* Test L2_DEBUG_3[AtsIgnoreIWDis] == 1 */
-	value = iommu_read_l2(iommu, 0x47);
+	value = iommu_read_l2(iommu, 0x47);	/* [한국어] (원 주석: L2_DEBUG_3[AtsIgnoreIWDis] 를 확인한다) */
 
-	if (value & BIT(0))
-		return;
+	if (value & BIT(0))	/* [한국어] 이미 설정되어 있으면 */
+		return;	/* [한국어] 할 일이 없다 */
 
 	/* Set L2_DEBUG_3[AtsIgnoreIWDis] = 1 */
-	iommu_write_l2(iommu, 0x47, value | BIT(0));
+	iommu_write_l2(iommu, 0x47, value | BIT(0));	/* [한국어] (원 주석: 그 비트를 세운다) 켜지 않으면 읽기 전용 페이지에 장치가 쓸 수 있다 */
 
-	pci_info(iommu->dev, "Applying ATS write check workaround\n");
+	pci_info(iommu->dev, "Applying ATS write check workaround\n");	/* [한국어] 우회가 적용됐음을 알린다 */
 }
 
 /*
@@ -3322,118 +3454,187 @@ static void amd_iommu_ats_write_check_workaround(struct amd_iommu *iommu)
  * together and also allocates the command buffer and programs the
  * hardware. It does NOT enable the IOMMU. This is done afterwards.
  */
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * init_iommu_one - 유닛 하나를 발견해 쓸 수 있는 상태까지 갖춘다
+ *
+ * @iommu: 채울 유닛 구조체.
+ * @h: 그 유닛의 IVHD 헤더.
+ * @ivrs_base: IVRS 표.
+ * @return: 0 성공, 음수면 실패.
+ *
+ * 원 주석이 범위를 분명히 한다: 하드웨어를 프로그램하지만 켜지는 않는다.
+ * 켜는 것은 나중에 별도 단계로 이루어진다 — 실패할 수 있는 일을 모두 여기서
+ * 끝내야 켜는 단계가 되돌릴 필요 없이 진행된다.
+ *
+ * 하는 일의 순서:
+ *  1) 세그먼트를 찾거나 만들고 자신을 등록한다.
+ *  2) IVHD 에서 기본 정보(devid, cap_ptr, MMIO 주소)를 복사한다.
+ *  3) 타입별로 능력을 해석한다. 이 부분이 가장 미묘한데, 타입마다 능력이
+ *     어디에 적혀 있는지가 다르고 그에 따라 인터럽트 모드가 아래로
+ *     내려가기도 한다.
+ *  4) MMIO 를 매핑하고 IVHD 의 장치 항목을 파싱한다.
+ *
+ * 버퍼 할당과 물려받은 상태 확인은 여기가 아니라 init_iommu_one_late 가
+ * 맡는다. 그 둘을 나눈 이유: 이 함수는 IVHD 를 훑는 중에 유닛마다 불리는데,
+ * 늦은 단계의 일은 모든 유닛의 능력을 다 본 뒤에 해야 하기 때문이다.
+ *
+ * MMIO 끝 주소를 능력에 따라 달리 잡는 이유: 성능 카운터 영역까지 있는
+ * 유닛과 없는 유닛이 있어, 없는데 끝까지 매핑하면 존재하지 않는 주소를
+ * 예약하게 된다.
+ *
+ * 인터럽트 모드가 이 함수에서 아래로만 내려가는 것도 눈여겨볼 만하다.
+ * 전역 값이라 한 유닛이라도 GA 를 지원하지 않으면 전체가 내려간다 —
+ * 유닛마다 다른 모드를 쓸 수 없기 때문이다.
+ *
+ * 호출 체인:
+ *   init_iommu_all() → [이 함수] → get_pci_segment()
+ *     → iommu_map_mmio_space() → init_iommu_from_acpi()
+ */
 static int __init init_iommu_one(struct amd_iommu *iommu, struct ivhd_header *h,
 				 struct acpi_table_header *ivrs_base)
 {
-	struct amd_iommu_pci_seg *pci_seg;
+	struct amd_iommu_pci_seg *pci_seg;	/* [한국어] 이 유닛이 속할 세그먼트 */
 
-	pci_seg = get_pci_segment(h->pci_seg, ivrs_base);
-	if (pci_seg == NULL)
-		return -ENOMEM;
-	iommu->pci_seg = pci_seg;
+	pci_seg = get_pci_segment(h->pci_seg, ivrs_base);	/* [한국어] 없으면 만들고, 있으면 그것을 쓴다 */
+	if (pci_seg == NULL)	/* [한국어] 세그먼트를 만들 수 없다 */
+		return -ENOMEM;	/* [한국어] 이 유닛도 쓸 수 없다 */
+	iommu->pci_seg = pci_seg;	/* [한국어] 조회 표들이 거기 있다 */
 
-	raw_spin_lock_init(&iommu->lock);
-	iommu->cmd_sem_val = 0;
+	raw_spin_lock_init(&iommu->lock);	/* [한국어] 명령 버퍼와 레지스터를 지킬 락 */
+	iommu->cmd_sem_val = 0;	/* [한국어] 완료 대기 값의 시작. 매번 증가시켜 옛 완료와 구별한다 */
 
 	/* Add IOMMU to internal data structures */
-	list_add_tail(&iommu->list, &amd_iommu_list);
-	iommu->index = amd_iommus_present++;
+	list_add_tail(&iommu->list, &amd_iommu_list);	/* [한국어] (원 주석: 내부 자료구조에 유닛을 추가한다) */
+	iommu->index = amd_iommus_present++;	/* [한국어] 배열에서의 위치이자 로그의 유닛 번호 */
 
-	if (unlikely(iommu->index >= MAX_IOMMUS)) {
-		WARN(1, "System has more IOMMUs than supported by this driver\n");
-		return -ENOSYS;
+	if (unlikely(iommu->index >= MAX_IOMMUS)) {	/* [한국어] 드라이버가 다룰 수 있는 상한 */
+		WARN(1, "System has more IOMMUs than supported by this driver\n");	/* [한국어] 상한을 넘는 기계는 지원 범위 밖이다 */
+		return -ENOSYS;	/* [한국어] 이 유닛은 쓸 수 없다 */
 	}
 
 	/*
 	 * Copy data from ACPI table entry to the iommu struct
 	 */
-	iommu->devid   = h->devid;
-	iommu->cap_ptr = h->cap_ptr;
-	iommu->mmio_phys = h->mmio_phys;
+	iommu->devid   = h->devid;	/* [한국어] (원 주석: ACPI 표의 값을 구조체로 복사한다) */
+	iommu->cap_ptr = h->cap_ptr;	/* [한국어] 설정 공간에서 능력 구조의 위치 */
+	iommu->mmio_phys = h->mmio_phys;	/* [한국어] MMIO 영역의 시작 */
 
-	switch (h->type) {
-	case 0x10:
+	switch (h->type) {	/* [한국어] 타입마다 능력이 어디에 적혀 있는지가 다르다 */
+	case 0x10:	/* [한국어] 가장 오래된 형식 — efr_attr 만 있다 */
 		/* Check if IVHD EFR contains proper max banks/counters */
-		if ((h->efr_attr != 0) &&
-		    ((h->efr_attr & (0xF << 13)) != 0) &&
-		    ((h->efr_attr & (0x3F << 17)) != 0))
-			iommu->mmio_phys_end = MMIO_REG_END_OFFSET;
+		if ((h->efr_attr != 0) &&	/* [한국어] (원 주석: IVHD EFR 에 뱅크/카운터 정보가 제대로 들어 있는지) */
+		    ((h->efr_attr & (0xF << 13)) != 0) &&	/* [한국어] 성능 카운터 뱅크 수가 있고 */
+		    ((h->efr_attr & (0x3F << 17)) != 0))	/* [한국어] 카운터 수도 있으면 */
+			iommu->mmio_phys_end = MMIO_REG_END_OFFSET;	/* [한국어] 성능 카운터 영역까지 매핑한다 */
 		else
-			iommu->mmio_phys_end = MMIO_CNTR_CONF_OFFSET;
+			iommu->mmio_phys_end = MMIO_CNTR_CONF_OFFSET;	/* [한국어] 없으면 그 앞까지만 — 없는 주소를 예약하면 안 된다 */
 
 		/* GAM requires GA mode. */
-		if ((h->efr_attr & (0x1 << IOMMU_FEAT_GASUP_SHIFT)) == 0)
-			amd_iommu_guest_ir = AMD_IOMMU_GUEST_IR_LEGACY;
+		if ((h->efr_attr & (0x1 << IOMMU_FEAT_GASUP_SHIFT)) == 0)	/* [한국어] (원 주석: GAM 은 GA 모드를 전제로 한다) */
+			amd_iommu_guest_ir = AMD_IOMMU_GUEST_IR_LEGACY;	/* [한국어] GA 가 없으면 게스트 직접 전달을 포기하고 32비트 형식으로 내려간다 */
 		break;
-	case 0x11:
-	case 0x40:
-		if (h->efr_reg & (1 << 9))
+	case 0x11:	/* [한국어] EFR 사본이 추가된 형식 */
+	case 0x40:	/* [한국어] 같은 크기의 최신 형식 */
+		if (h->efr_reg & (1 << 9))	/* [한국어] 성능 카운터 지원 비트 */
 			iommu->mmio_phys_end = MMIO_REG_END_OFFSET;
 		else
 			iommu->mmio_phys_end = MMIO_CNTR_CONF_OFFSET;
 
 		/* XT and GAM require GA mode. */
-		if ((h->efr_reg & (0x1 << IOMMU_EFR_GASUP_SHIFT)) == 0) {
-			amd_iommu_guest_ir = AMD_IOMMU_GUEST_IR_LEGACY;
-			break;
+		if ((h->efr_reg & (0x1 << IOMMU_EFR_GASUP_SHIFT)) == 0) {	/* [한국어] (원 주석: XT 와 GAM 모두 GA 모드를 전제로 한다) */
+			amd_iommu_guest_ir = AMD_IOMMU_GUEST_IR_LEGACY;	/* [한국어] GA 가 없으면 아래 XT 판단도 무의미하다 */
+			break;	/* [한국어] 더 볼 것이 없다 */
 		}
 
-		if (h->efr_reg & BIT(IOMMU_EFR_XTSUP_SHIFT))
-			amd_iommu_xt_mode = IRQ_REMAP_X2APIC_MODE;
+		if (h->efr_reg & BIT(IOMMU_EFR_XTSUP_SHIFT))	/* [한국어] x2APIC 목적지를 지원하는가 */
+			amd_iommu_xt_mode = IRQ_REMAP_X2APIC_MODE;	/* [한국어] 32비트 APIC id 를 쓸 수 있다 */
 
-		if (h->efr_attr & BIT(IOMMU_IVHD_ATTR_HATDIS_SHIFT)) {
-			pr_warn_once("Host Address Translation is not supported.\n");
-			amd_iommu_hatdis = true;
+		if (h->efr_attr & BIT(IOMMU_IVHD_ATTR_HATDIS_SHIFT)) {	/* [한국어] 펌웨어가 호스트 주소 변환을 쓰지 말라고 했는가 */
+			pr_warn_once("Host Address Translation is not supported.\n");	/* [한국어] v1 페이지 테이블을 쓸 수 없다는 뜻이다 */
+			amd_iommu_hatdis = true;	/* [한국어] 도메인 형식 결정이 이 값을 본다 */
 		}
 
-		early_iommu_features_init(iommu, h);
+		early_iommu_features_init(iommu, h);	/* [한국어] 표의 EFR 사본을 구조체로 옮긴다 — MMIO 매핑 전에도 능력을 알 수 있게 */
 
 		break;
 	default:
-		return -EINVAL;
+		return -EINVAL;	/* [한국어] 드라이버가 모르는 IVHD 타입 */
 	}
 
-	iommu->mmio_base = iommu_map_mmio_space(iommu->mmio_phys,
-						iommu->mmio_phys_end);
-	if (!iommu->mmio_base)
-		return -ENOMEM;
+	iommu->mmio_base = iommu_map_mmio_space(iommu->mmio_phys,	/* [한국어] 능력에 따라 정한 끝 주소까지 매핑한다 */
+						iommu->mmio_phys_end);	/* [한국어] 성능 카운터 영역이 없는 유닛은 그 앞까지만 */
+	if (!iommu->mmio_base)	/* [한국어] 매핑 실패 */
+		return -ENOMEM;	/* [한국어] 레지스터를 읽을 수 없으면 아무것도 할 수 없다 */
 
-	return init_iommu_from_acpi(iommu, h);
+	return init_iommu_from_acpi(iommu, h);	/* [한국어] IVHD 의 장치 항목을 훑어 조회 표들을 채운다 */
 }
 
+/*
+ * [한국어]
+ * init_iommu_one_late - 모든 유닛의 능력을 확인한 뒤 마무리한다
+ *
+ * @iommu: 대상 유닛.
+ * @return: 0 성공, 음수면 실패.
+ *
+ * init_iommu_one 과 나뉜 이유가 이 함수의 존재 근거다. 여기서 하는 일들은
+ * 전역 결정(인터럽트 모드, 물려받기 여부)에 의존하는데, 그 결정은 모든
+ * 유닛의 IVHD 를 다 본 뒤에야 확정된다.
+ *
+ * 하는 일:
+ *  - 명령/이벤트/완료 대기 버퍼를 잡는다(또는 kdump 면 물려받는다).
+ *  - 하드웨어에게 지금 변환이 켜져 있는지 물어 물려받음 표시를 세운다.
+ *  - kdump 가 아닌데 켜져 있으면 끄고 시작한다. 정상 부팅에서는 있을 수
+ *    없는 조합이라, 옛 설정을 믿을 수 없다.
+ *  - 재매핑을 쓰기로 했으면 이 유닛의 인터럽트 도메인을 만든다.
+ *
+ * amd_iommu_pre_enabled 를 AND 하듯 좁히는 것에 유의: 전역 물려받기는 모든
+ * 유닛이 켜져 있을 때만 참이어야 한다. 일부만 물려받으면 어떤 장치는 옛
+ * 매핑을, 어떤 장치는 빈 표를 보게 된다.
+ *
+ * 마지막 한 줄이 이 함수에서 가장 눈에 띈다. 원 주석이 "IVRS 표가 그렇게
+ * 말하지만 그것은 거짓"이라고 한다 — 표는 IOMMU 자신도 담당 장치로 적지만,
+ * IOMMU 가 자기 DMA(표 읽기)를 변환하게 두면 표를 읽으려다 다시 표를 읽는
+ * 순환이 생긴다.
+ *
+ * 호출 체인:
+ *   init_iommu_all() (2단계) → [이 함수] → alloc_iommu_buffers()
+ *     → init_translation_status() → amd_iommu_create_irq_domain()
+ */
 static int __init init_iommu_one_late(struct amd_iommu *iommu)
 {
-	int ret;
+	int ret;	/* [한국어] 하위 호출의 결과 */
 
-	ret = alloc_iommu_buffers(iommu);
-	if (ret)
-		return ret;
+	ret = alloc_iommu_buffers(iommu);	/* [한국어] 명령/이벤트/완료 대기 버퍼. kdump 면 물려받는다 */
+	if (ret)	/* [한국어] 할당 실패 */
+		return ret;	/* [한국어] 이 유닛은 쓸 수 없다 */
 
-	iommu->int_enabled = false;
+	iommu->int_enabled = false;	/* [한국어] 인터럽트는 아직 등록하지 않았다 */
 
-	init_translation_status(iommu);
-	if (translation_pre_enabled(iommu) && !is_kdump_kernel()) {
-		iommu_disable(iommu);
-		clear_translation_pre_enabled(iommu);
-		pr_warn("Translation was enabled for IOMMU:%d but we are not in kdump mode\n",
+	init_translation_status(iommu);	/* [한국어] 하드웨어에게 지금 변환이 켜져 있는지 묻는다 */
+	if (translation_pre_enabled(iommu) && !is_kdump_kernel()) {	/* [한국어] 물려받았는데 kdump 가 아니다 — 정상 부팅에서는 있을 수 없는 조합 */
+		iommu_disable(iommu);	/* [한국어] 옛 설정을 믿을 수 없으므로 끄고 시작한다 */
+		clear_translation_pre_enabled(iommu);	/* [한국어] 물려받음 표시도 지운다 */
+		pr_warn("Translation was enabled for IOMMU:%d but we are not in kdump mode\n",	/* [한국어] 비정상 상황이므로 알린다 */
 			iommu->index);
 	}
-	if (amd_iommu_pre_enabled)
-		amd_iommu_pre_enabled = translation_pre_enabled(iommu);
+	if (amd_iommu_pre_enabled)	/* [한국어] 전역 물려받기 판단 */
+		amd_iommu_pre_enabled = translation_pre_enabled(iommu);	/* [한국어] 하나라도 아니면 거짓으로 좁힌다 — 일부만 물려받으면 상태를 알 수 없다 */
 
-	if (amd_iommu_irq_remap) {
-		ret = amd_iommu_create_irq_domain(iommu);
+	if (amd_iommu_irq_remap) {	/* [한국어] 재매핑을 쓰기로 했으면 */
+		ret = amd_iommu_create_irq_domain(iommu);	/* [한국어] 이 유닛의 인터럽트 도메인을 만든다 */
 		if (ret)
-			return ret;
+			return ret;	/* [한국어] 실패하면 재매핑을 쓸 수 없다 */
 	}
 
 	/*
 	 * Make sure IOMMU is not considered to translate itself. The IVRS
 	 * table tells us so, but this is a lie!
 	 */
-	iommu->pci_seg->rlookup_table[iommu->devid] = NULL;
+	iommu->pci_seg->rlookup_table[iommu->devid] = NULL;	/* [한국어] (원 주석: IVRS 는 IOMMU 자신도 담당 장치로 적지만 거짓이다) — 자기 표 읽기를 변환하면 순환이 된다 */
 
-	return 0;
+	return 0;	/* [한국어] 이 유닛이 켜질 준비를 마쳤다 */
 }
 
 /**
