@@ -1793,111 +1793,169 @@ static void context_present_cache_flush(struct intel_iommu *iommu, u16 did,
 	if (cap_caching_mode(iommu->cap)) {	/* [한국어] 하드웨어가 '없음' 항목까지 캐시하는 모드면 (주로 가상화된 IOMMU) */
 		iommu->flush.flush_context(iommu, 0,	/* [한국어] 도메인 0 에 캐시된 부정 항목을 비운다. 없음→있음 전환이라 그 캐시가 남아 있으면 새 매핑이 보이지 않는다 (위 영어 주석) */
 					   PCI_DEVID(bus, devfn),	/* [한국어] 이 장치의 소스 id */
-					   DMA_CCMD_MASK_NOBIT,
-					   DMA_CCMD_DEVICE_INVL);
-		iommu->flush.flush_iotlb(iommu, did, 0, 0, DMA_TLB_DSI_FLUSH);
+					   DMA_CCMD_MASK_NOBIT,	/* [한국어] 이 장치 하나만 */
+					   DMA_CCMD_DEVICE_INVL);	/* [한국어] 장치 단위 무효화 */
+		iommu->flush.flush_iotlb(iommu, did, 0, 0, DMA_TLB_DSI_FLUSH);	/* [한국어] 새 도메인의 IOTLB 도 비운다 — 그 id 가 앞서 다른 도메인에 쓰였을 수 있다 */
 	} else {
-		iommu_flush_write_buffer(iommu);
+		iommu_flush_write_buffer(iommu);	/* [한국어] 보통의 하드웨어는 쓰기 버퍼만 비우면 새 항목이 보인다 */
 	}
 }
 
+/*
+ * [한국어]
+ * domain_context_mapping_one - 하나의 소스 id 에 대해 컨텍스트 항목을 기입한다
+ *
+ * @domain:     설치할 도메인
+ * @iommu:      담당 유닛
+ * @bus/@devfn: 소스 id
+ * @return:     0 성공, 음수 실패
+ *
+ * 이 함수가 VT-d 에서 "장치를 도메인에 붙인다"의 실체다. 컨텍스트 항목에 도메인
+ * id 와 페이지 테이블 루트를 쓰는 순간부터, 그 소스 id 로 오는 DMA 가 이 도메인의
+ * 주소 공간을 보게 된다.
+ *
+ * 기입 순서가 정해져 있다. 모든 필드를 채운 뒤 맨 마지막에 present 를 세우고,
+ * 비일관 하드웨어면 그것을 캐시에서 밀어낸다. present 를 먼저 세우면 하드웨어가
+ * 아직 채워지지 않은 항목을 읽는다.
+ *
+ * 번역 종류를 ATS 여부로 가르는 것도 중요하다. DEV_IOTLB 로 표시해야 하드웨어가
+ * 그 장치에 devTLB 무효화를 보내며, 그러지 않으면 장치의 ATC 에 옛 번역이 남는다.
+ *
+ * 실행 컨텍스트: 장치 부착. 유닛 락을 잡는다.
+ *
+ * 호출 체인: domain_context_mapping(_cb) → [이 함수]
+ */
 static int domain_context_mapping_one(struct dmar_domain *domain,
 				      struct intel_iommu *iommu,
 				      u8 bus, u8 devfn)
 {
-	struct device_domain_info *info =
-			domain_lookup_dev_info(domain, iommu, bus, devfn);
-	u16 did = domain_id_iommu(domain, iommu);
-	int translation = CONTEXT_TT_MULTI_LEVEL;
-	struct pt_iommu_vtdss_hw_info pt_info;
-	struct context_entry *context;
-	int ret;
+	struct device_domain_info *info =	/* [한국어] 이 장치가 이미 이 도메인에 있는지 */
+			domain_lookup_dev_info(domain, iommu, bus, devfn);	/* [한국어] ATS 지원 여부를 알기 위해 필요하다 */
+	u16 did = domain_id_iommu(domain, iommu);	/* [한국어] 이 유닛에서 이 도메인이 쓰는 id */
+	int translation = CONTEXT_TT_MULTI_LEVEL;	/* [한국어] 번역 종류. 기본은 다단계 페이지 테이블 */
+	struct pt_iommu_vtdss_hw_info pt_info;	/* [한국어] 2단계 페이지 테이블의 하드웨어 정보 (루트 주소와 주소 폭) */
+	struct context_entry *context;	/* [한국어] 기입할 컨텍스트 항목 */
+	int ret;	/* [한국어] 결과 */
 
-	if (WARN_ON(!intel_domain_is_ss_paging(domain)))
-		return -EINVAL;
+	if (WARN_ON(!intel_domain_is_ss_paging(domain)))	/* [한국어] 레거시 컨텍스트 매핑은 2단계 페이지 테이블에만 쓰인다 */
+		return -EINVAL;	/* [한국어] 다른 종류의 도메인은 PASID 경로로 설치된다 */
 
-	pt_iommu_vtdss_hw_info(&domain->sspt, &pt_info);
+	pt_iommu_vtdss_hw_info(&domain->sspt, &pt_info);	/* [한국어] 공용 페이지 테이블 계층에서 루트 주소와 주소 폭을 꺼낸다 */
 
-	pr_debug("Set context mapping for %02x:%02x.%d\n",
-		bus, PCI_SLOT(devfn), PCI_FUNC(devfn));
+	pr_debug("Set context mapping for %02x:%02x.%d\n",	/* [한국어] 어느 장치를 설정하는지 */
+		bus, PCI_SLOT(devfn), PCI_FUNC(devfn));	/* [한국어] BDF 를 사람이 읽는 형식으로 */
 
-	spin_lock(&iommu->lock);
-	ret = -ENOMEM;
-	context = iommu_context_addr(iommu, bus, devfn, 1);
-	if (!context)
-		goto out_unlock;
+	spin_lock(&iommu->lock);	/* [한국어] 컨텍스트 테이블 변경 구간 */
+	ret = -ENOMEM;	/* [한국어] 아래 할당이 실패하면 이 값이 나간다 */
+	context = iommu_context_addr(iommu, bus, devfn, 1);	/* [한국어] 항목 주소를 얻는다. 컨텍스트 테이블이 없으면 만든다 */
+	if (!context)	/* [한국어] 테이블 생성 실패 */
+		goto out_unlock;	/* [한국어] 설정 불가 */
 
-	ret = 0;
-	if (context_present(context) && !context_copied(iommu, bus, devfn))
-		goto out_unlock;
+	ret = 0;	/* [한국어] 아래 검사를 통과하면 성공이다 */
+	if (context_present(context) && !context_copied(iommu, bus, devfn))	/* [한국어] 이미 우리가 설정한 항목이면 */
+		goto out_unlock;	/* [한국어] 다시 쓸 필요가 없다 */
 
-	copied_context_tear_down(iommu, context, bus, devfn);
-	context_clear_entry(context);
-	context_set_domain_id(context, did);
+	copied_context_tear_down(iommu, context, bus, devfn);	/* [한국어] kdump 로 물려받은 항목이면 먼저 정리한다 */
+	context_clear_entry(context);	/* [한국어] 0 에서 시작 */
+	context_set_domain_id(context, did);	/* [한국어] 이 유닛에서의 도메인 id. 무효화 명령이 이 값으로 범위를 지정한다 */
 
-	if (info && info->ats_supported)
-		translation = CONTEXT_TT_DEV_IOTLB;
+	if (info && info->ats_supported)	/* [한국어] 이 장치가 ATS 를 쓸 수 있으면 */
+		translation = CONTEXT_TT_DEV_IOTLB;	/* [한국어] 장치가 자기 번역 캐시를 갖는 종류로 표시한다. 이 값이 있어야 하드웨어가 devTLB 무효화를 받아들인다 */
 	else
-		translation = CONTEXT_TT_MULTI_LEVEL;
+		translation = CONTEXT_TT_MULTI_LEVEL;	/* [한국어] 아니면 보통의 다단계 번역 */
 
-	context_set_address_root(context, pt_info.ssptptr);
-	context_set_address_width(context, pt_info.aw);
-	context_set_translation_type(context, translation);
-	context_set_fault_enable(context);
-	context_set_present(context);
-	if (!ecap_coherent(iommu->ecap))
-		clflush_cache_range(context, sizeof(*context));
-	context_present_cache_flush(iommu, did, bus, devfn);
-	ret = 0;
+	context_set_address_root(context, pt_info.ssptptr);	/* [한국어] 2단계 페이지 테이블의 루트 물리 주소. 이 한 줄이 장치를 이 주소 공간에 묶는다 */
+	context_set_address_width(context, pt_info.aw);	/* [한국어] 그 테이블의 주소 폭 (레벨 수) */
+	context_set_translation_type(context, translation);	/* [한국어] 번역 종류 */
+	context_set_fault_enable(context);	/* [한국어] 번역 실패를 폴트로 보고하게 한다. 끄면 실패가 조용히 버려져 디버깅이 불가능해진다 */
+	context_set_present(context);	/* [한국어] present 비트는 반드시 마지막에. 그 전에 세우면 하드웨어가 아직 채워지지 않은 항목을 읽는다 */
+	if (!ecap_coherent(iommu->ecap))	/* [한국어] 워크가 비일관인 하드웨어면 */
+		clflush_cache_range(context, sizeof(*context));	/* [한국어] 기입한 항목을 메모리로 밀어낸다 */
+	context_present_cache_flush(iommu, did, bus, devfn);	/* [한국어] 없음→있음 전환에 필요한 캐시 정리 */
+	ret = 0;	/* [한국어] 설정 완료 */
 
-out_unlock:
-	spin_unlock(&iommu->lock);
+out_unlock:	/* [한국어] 공통 출구 */
+	spin_unlock(&iommu->lock);	/* [한국어] 컨텍스트 테이블 락 해제 */
 
-	return ret;
+	return ret;	/* [한국어] 0 이면 이 장치의 DMA 가 이제 이 도메인의 페이지 테이블을 거친다 */
 }
 
+/*
+ * [한국어]
+ * domain_context_mapping_cb - 별칭 하나에 대해 컨텍스트를 기입한다 (별칭 순회 콜백)
+ *
+ * @pdev:   순회 중인 장치
+ * @alias:  이 장치가 낼 수 있는 requester id 중 하나
+ * @opaque: 설치할 도메인
+ * @return: 0 성공, 음수면 순회 중단
+ *
+ * 하드웨어는 DMA 요청에 실린 requester id 로 컨텍스트를 찾으므로, 장치가 여러
+ * id 로 DMA 를 낼 수 있다면 그 모든 자리에 같은 도메인을 심어야 한다.
+ *
+ * 실행 컨텍스트: 장치 부착 경로.
+ *
+ * 호출 체인: pci_for_each_dma_alias → [이 함수]
+ */
 static int domain_context_mapping_cb(struct pci_dev *pdev,
 				     u16 alias, void *opaque)
 {
-	struct device_domain_info *info = dev_iommu_priv_get(&pdev->dev);
-	struct intel_iommu *iommu = info->iommu;
-	struct dmar_domain *domain = opaque;
+	struct device_domain_info *info = dev_iommu_priv_get(&pdev->dev);	/* [한국어] 이 장치의 드라이버 문맥 */
+	struct intel_iommu *iommu = info->iommu;	/* [한국어] 담당 유닛 */
+	struct dmar_domain *domain = opaque;	/* [한국어] 설정할 도메인 */
 
-	return domain_context_mapping_one(domain, iommu,
-					  PCI_BUS_NUM(alias), alias & 0xff);
+	return domain_context_mapping_one(domain, iommu,	/* [한국어] 이 별칭에 대해서도 같은 컨텍스트를 기입한다 */
+					  PCI_BUS_NUM(alias), alias & 0xff);	/* [한국어] 별칭의 버스와 devfn */
 }
 
+/*
+ * [한국어]
+ * domain_context_mapping - 장치의 모든 소스 id 에 도메인을 설치한다
+ *
+ * @domain: 설치할 도메인
+ * @dev:    대상 장치
+ * @return: 0 성공, 음수 실패
+ *
+ * 레거시 모드에서 장치를 도메인에 붙이는 진입점이다. PCI 장치는 별칭마다,
+ * 그 외에는 한 번만 컨텍스트 항목을 기입한다.
+ *
+ * ATS 를 마지막에 켜는 순서가 중요하다. 컨텍스트가 모두 준비되기 전에 켜면
+ * 장치가 아직 설정되지 않은 상태의 번역(즉 폴트)을 자기 캐시에 담을 수 있다.
+ *
+ * 실행 컨텍스트: 장치 부착. 프로세스 문맥.
+ *
+ * 호출 체인: intel_iommu_attach_device 계열 → [이 함수]
+ */
 static int
 domain_context_mapping(struct dmar_domain *domain, struct device *dev)
 {
-	struct device_domain_info *info = dev_iommu_priv_get(dev);
-	struct intel_iommu *iommu = info->iommu;
-	u8 bus = info->bus, devfn = info->devfn;
-	int ret;
+	struct device_domain_info *info = dev_iommu_priv_get(dev);	/* [한국어] 이 장치의 드라이버 문맥 */
+	struct intel_iommu *iommu = info->iommu;	/* [한국어] 담당 유닛 */
+	u8 bus = info->bus, devfn = info->devfn;	/* [한국어] 장치의 BDF */
+	int ret;	/* [한국어] 결과 */
 
-	if (!dev_is_pci(dev))
-		return domain_context_mapping_one(domain, iommu, bus, devfn);
+	if (!dev_is_pci(dev))	/* [한국어] PCI 가 아니면 별칭이 없다 */
+		return domain_context_mapping_one(domain, iommu, bus, devfn);	/* [한국어] 한 번만 설정 */
 
-	ret = pci_for_each_dma_alias(to_pci_dev(dev),
-				     domain_context_mapping_cb, domain);
-	if (ret)
-		return ret;
+	ret = pci_for_each_dma_alias(to_pci_dev(dev),	/* [한국어] 이 장치가 낼 수 있는 모든 requester id 에 대해 */
+				     domain_context_mapping_cb, domain);	/* [한국어] 각각 컨텍스트 항목을 기입한다. 브리지 뒤의 장치가 브리지 id 로 DMA 를 내면 하드웨어는 그 id 로 컨텍스트를 찾으므로, 그 자리에도 같은 도메인이 있어야 한다 */
+	if (ret)	/* [한국어] 한 별칭이라도 실패하면 */
+		return ret;	/* [한국어] 설정 실패 */
 
-	iommu_enable_pci_ats(info);
+	iommu_enable_pci_ats(info);	/* [한국어] 모든 컨텍스트가 준비된 뒤에 ATS 를 켠다. 순서가 반대면 장치가 아직 설정되지 않은 상태에서 번역을 캐시할 수 있다 */
 
-	return 0;
+	return 0;	/* [한국어] 이 장치의 모든 requester id 가 이 도메인을 가리킨다 */
 }
 
 static void domain_context_clear_one(struct device_domain_info *info, u8 bus, u8 devfn)
 {
-	struct intel_iommu *iommu = info->iommu;
-	struct context_entry *context;
-	u16 did;
+	struct intel_iommu *iommu = info->iommu;	/* [한국어] 담당 유닛 */
+	struct context_entry *context;	/* [한국어] 지울 컨텍스트 항목 */
+	u16 did;	/* [한국어] 무효화에 쓸 도메인 id */
 
-	spin_lock(&iommu->lock);
-	context = iommu_context_addr(iommu, bus, devfn, 0);
-	if (!context) {
-		spin_unlock(&iommu->lock);
+	spin_lock(&iommu->lock);	/* [한국어] 컨텍스트 테이블 변경 구간 */
+	context = iommu_context_addr(iommu, bus, devfn, 0);	/* [한국어] 항목을 찾는다 (만들지는 않는다) */
+	if (!context) {	/* [한국어] 없으면 */
+		spin_unlock(&iommu->lock);	/* [한국어] 할 일이 없다 */
 		return;
 	}
 
