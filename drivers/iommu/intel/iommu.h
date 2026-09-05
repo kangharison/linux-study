@@ -3251,6 +3251,21 @@ static inline bool ecmd_has_pmu_essential(struct intel_iommu *iommu)
 extern int dmar_disabled;	/* [한국어] 부트 옵션으로 VT-d 를 껐는지 */
 extern int intel_iommu_enabled;	/* [한국어] VT-d 가 실제로 동작 중인지. 다른 서브시스템이 참고한다 */
 #else
+/*
+ * [한국어]
+ * iommu_calculate_agaw (빈 구현) - DMA 재매핑을 뺀 빌드용
+ *
+ * @iommu: 대상 유닛(쓰이지 않는다).
+ * @return: 항상 0.
+ *
+ * CONFIG_INTEL_IOMMU 를 끄면 인터럽트 재매핑만 쓰고 DMA 번역은 하지 않는다.
+ * 그러면 페이지 테이블도, 주소 폭 계산도 필요 없다. 그런데 dmar.c 의 공통
+ * 초기화 코드는 이 함수를 부르므로, 호출부에 #ifdef 를 흩는 대신 여기에
+ * 0 을 돌려주는 빈 구현을 두었다 — 커널 헤더의 흔한 관용구다.
+ *
+ * 아래 iommu_calculate_max_sagaw 와 dmar_disabled/intel_iommu_enabled/
+ * intel_iommu_sm 매크로도 같은 이유로 상수로 정의된다.
+ */
 static inline int iommu_calculate_agaw(struct intel_iommu *iommu)
 {
 	return 0;	/* [한국어] DMA 재매핑을 뺀 빌드의 빈 구현 — 주소 폭 계산이 필요 없다 */
