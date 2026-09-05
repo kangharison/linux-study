@@ -113,6 +113,33 @@ int iommu_replace_group_handle(struct iommu_group *group,	/* [한국어] 차단 
 int iommufd_sw_msi(struct iommu_domain *domain, struct msi_desc *desc,	/* [한국어] 사용자 공간이 소유한 도메인에서 MSI 도어벨을 매핑한다 */
 		   phys_addr_t msi_addr);	/* [한국어] 도어벨의 물리 주소 */
 #else /* !CONFIG_IOMMUFD_DRIVER_CORE || !CONFIG_IRQ_MSI_IOMMU */	/* [한국어] 둘 중 하나라도 꺼진 빌드 */
+/*
+ * [한국어]
+ * iommufd_sw_msi - (iommufd 또는 MSI 재매핑 미설정) 도어벨 매핑을 지원하지 않는다고 답한다
+ *
+ * @domain:   MSI 도어벨을 매핑해 달라는 도메인. 여기서는 쓰이지 않는다.
+ * @desc:     대상 MSI 디스크립터. 여기서는 쓰이지 않는다.
+ * @msi_addr: 인터럽트 컨트롤러 도어벨의 물리 주소. 여기서는 쓰이지 않는다.
+ * @return:   항상 -EOPNOTSUPP.
+ *
+ * 유저스페이스가 iommufd 로 IOVA 공간을 직접 소유한 도메인에서는, 커널이
+ * 마음대로 IOVA 를 골라 MSI 도어벨을 매핑할 수 없다. 그래서 켠 빌드에서는
+ * 유저가 미리 지정해 둔 MSI 창(iommufd 의 sw_msi 영역)에 도어벨을 얹는
+ * 별도 경로가 필요하고, 그 일을 실제 구현이 맡는다.
+ *
+ * 두 CONFIG 가 모두 필요한 이유가 조건식에 드러나 있다. IOMMUFD_DRIVER_CORE
+ * 가 없으면 그 창을 관리할 주체가 없고, IRQ_MSI_IOMMU 가 없으면 MSI 경로가
+ * 애초에 IOMMU 를 거치지 않는다.
+ *
+ * 에러 경로: -EOPNOTSUPP 를 본 iommu.c 의 분기는 이 도메인에서의 MSI 설정을
+ * 실패로 처리한다. -ENODEV 가 아니라 -EOPNOTSUPP 인 것은 "장치가 없다"가
+ * 아니라 "이 빌드가 그 방식을 지원하지 않는다"는 뜻을 구분하기 위해서다.
+ *
+ * 실행 컨텍스트: MSI 할당 경로(프로세스 문맥).
+ *
+ * 호출 체인:
+ *   iommu_dma_prepare_msi() → [이 빈 구현]
+ */
 static inline int iommufd_sw_msi(struct iommu_domain *domain,	/* [한국어] 빈 구현 */
 				 struct msi_desc *desc, phys_addr_t msi_addr)	/* [한국어] 같은 시그니처 */
 {
@@ -162,22 +189,98 @@ static inline void iommu_debug_unmap_end(struct iommu_domain *domain,
 void iommu_debug_init(void);	/* [한국어] 진단 자료구조를 세우고 정적 키를 켠다 */
 
 #else	/* [한국어] 진단이 꺼진 빌드 — 아래는 모두 빈 구현이다 */
+/*
+ * [한국어]
+ * iommu_debug_map - (CONFIG_IOMMU_DEBUG_PAGEALLOC 미설정) 매핑을 기록하지 않는다
+ *
+ * @domain: 매핑이 일어난 도메인. 여기서는 쓰이지 않는다.
+ * @phys:   매핑된 물리 주소. 여기서는 쓰이지 않는다.
+ * @size:   매핑 크기. 여기서는 쓰이지 않는다.
+ *
+ * 켠 빌드에서는 이 호출이 매핑된 물리 페이지를 진단 자료구조에 등록해,
+ * 해제된 커널 페이지에 DMA 매핑이 남아 있는지 같은 실수를 잡아낸다. 위쪽
+ * 실제 구현은 static_branch 로 감싸여 있어, 진단을 켠 빌드에서도 실제로
+ * 활성화하기 전에는 비용이 거의 없다.
+ *
+ * 끈 빌드에서는 그 자료구조도 정적 키도 없으므로 인라인 빈 함수로 둔다.
+ * 컴파일 후 호출 자체가 사라져 매핑 핫패스에 아무 비용도 남지 않는다.
+ *
+ * 실행 컨텍스트: iommu_map() 핫패스. 잠들지 않는다.
+ *
+ * 호출 체인:
+ *   iommu_map() (drivers/iommu/iommu.c) → [이 빈 구현]
+ */
 static inline void iommu_debug_map(struct iommu_domain *domain,	/* [한국어] 아무 일도 하지 않는다 */
 				   phys_addr_t phys, size_t size)	/* [한국어] 같은 시그니처 */
 {
 }
 
+/*
+ * [한국어]
+ * iommu_debug_unmap_begin - (CONFIG_IOMMU_DEBUG_PAGEALLOC 미설정) 해제 전 기록을 남기지 않는다
+ *
+ * @domain: 해제가 일어날 도메인. 여기서는 쓰이지 않는다.
+ * @iova:   해제할 IOVA 의 시작. 여기서는 쓰이지 않는다.
+ * @size:   해제를 요청한 크기. 여기서는 쓰이지 않는다.
+ *
+ * 이 함수와 아래 unmap_end 가 짝을 이루는 이유가 진단의 핵심이다. 요청한
+ * 범위(begin 이 기억)와 실제로 풀린 범위(end 가 받는 unmapped)를 견주어,
+ * 페이지 크기 경계가 어긋나 일부만 풀리는 상황을 잡아낸다. 그런 어긋남은
+ * 조용히 지나가면 장치가 이미 반납된 메모리에 계속 DMA 할 수 있게 만든다.
+ *
+ * 끈 빌드에서는 둘 다 비어 있어 그 대조를 하지 않는다.
+ *
+ * 실행 컨텍스트: iommu_unmap() 핫패스. 잠들지 않는다.
+ *
+ * 호출 체인:
+ *   iommu_unmap() (drivers/iommu/iommu.c) → [이 빈 구현]
+ */
 static inline void iommu_debug_unmap_begin(struct iommu_domain *domain,	/* [한국어] 마찬가지 */
 					   unsigned long iova, size_t size)	/* [한국어] 같은 시그니처 */
 {
 }
 
+/*
+ * [한국어]
+ * iommu_debug_unmap_end - (CONFIG_IOMMU_DEBUG_PAGEALLOC 미설정) 해제 후 대조를 하지 않는다
+ *
+ * @domain:   해제가 끝난 도메인. 여기서는 쓰이지 않는다.
+ * @iova:     해제한 IOVA 의 시작. 여기서는 쓰이지 않는다.
+ * @size:     해제를 요청했던 크기. 여기서는 쓰이지 않는다.
+ * @unmapped: 실제로 풀린 크기. 여기서는 버려진다.
+ *
+ * 위 unmap_begin 의 짝. 켠 빌드에서는 size 와 unmapped 를 견주고, begin 에서
+ * 기억해 둔 물리 페이지들을 진단 자료구조에서 지운다. 인자가 넷인 이유가
+ * 여기 있다 — 요청량과 실제 해제량을 둘 다 알아야 어긋남을 판정할 수 있다.
+ *
+ * 실행 컨텍스트: iommu_unmap() 핫패스. 잠들지 않는다.
+ *
+ * 호출 체인:
+ *   iommu_unmap() (drivers/iommu/iommu.c) → [이 빈 구현]
+ */
 static inline void iommu_debug_unmap_end(struct iommu_domain *domain,	/* [한국어] 마찬가지 */
 					 unsigned long iova, size_t size,	/* [한국어] 같은 시그니처 */
 					 size_t unmapped)	/* [한국어] 실제 해제량 */
 {
 }
 
+/*
+ * [한국어]
+ * iommu_debug_init - (CONFIG_IOMMU_DEBUG_PAGEALLOC 미설정) 초기화할 진단 자료가 없다
+ *
+ * 켠 빌드에서는 이 호출이 진단 자료구조를 세우고 iommu_debug_initialized
+ * 정적 키를 켜, 그때부터 위 map/unmap 훅이 실제 일을 하기 시작한다. 정적
+ * 키를 쓰는 이유는 진단을 컴파일해 넣고도 켜기 전까지는 핫패스의 분기
+ * 비용을 0 으로 유지하기 위해서다.
+ *
+ * 끈 빌드에는 켤 키도 세울 자료도 없다. 호출부인 iommu 코어 초기화 경로에
+ * #ifdef 를 심지 않으려고 빈 함수만 남겨 둔다.
+ *
+ * 실행 컨텍스트: 부팅 중 서브시스템 초기화(프로세스 문맥).
+ *
+ * 호출 체인:
+ *   iommu_init() (drivers/iommu/iommu.c) → [이 빈 구현]
+ */
 static inline void iommu_debug_init(void)	/* [한국어] 초기화할 것이 없다 */
 {
 }

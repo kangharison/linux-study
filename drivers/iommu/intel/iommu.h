@@ -3200,6 +3200,31 @@ struct iommu_domain *intel_svm_domain_alloc(struct device *dev,	/* [한국어] S
 					    struct mm_struct *mm);
 #else
 static inline void intel_svm_check(struct intel_iommu *iommu) {}
+/*
+ * [한국어]
+ * intel_svm_domain_alloc - (CONFIG_INTEL_IOMMU_SVM 미설정) SVA 도메인을 만들 수 없다고 답한다
+ *
+ * @dev:    SVA 를 붙이려는 장치. 여기서는 쓰이지 않는다.
+ * @mm:     공유하려는 프로세스의 주소 공간. 여기서는 쓰이지 않는다.
+ * @return: 항상 ERR_PTR(-ENODEV).
+ *
+ * SVA(Shared Virtual Addressing)는 장치가 프로세스의 페이지 테이블을 그대로
+ * 걸어 쓰게 하는 기능이다. 켠 빌드의 실제 구현은 mm 의 PGD 를 PASID 엔트리에
+ * 심고 mmu_notifier 를 걸어 두 TLB(CPU 와 IOMMU)를 함께 무효화한다. 그 코드가
+ * 링크되지 않은 빌드에서는 도메인을 만들 방법이 없다.
+ *
+ * 반환값이 NULL 이 아니라 ERR_PTR 인 이유: 호출자인 iommu 코어의 domain_alloc_sva
+ * 경로는 IS_ERR 로 검사하도록 되어 있어, 오류 코드를 그대로 유저스페이스까지
+ * 올려 보낸다. NULL 을 주면 그 검사를 통과해 버린다.
+ *
+ * 에러 경로: -ENODEV 는 iommu_sva_bind_device() 를 통해 SVA 를 요청한 드라이버
+ * (idxd, ipts 등)까지 올라가, 그 장치가 SVA 없이 동작하도록 유도한다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥.
+ *
+ * 호출 체인:
+ *   iommu_sva_bind_device() → intel_iommu_domain_alloc_sva() → [이 빈 구현]
+ */
 static inline struct iommu_domain *intel_svm_domain_alloc(struct device *dev,	/* [한국어] SVA 를 뺀 빌드의 빈 구현 */
 							  struct mm_struct *mm)
 {
@@ -3319,6 +3344,27 @@ static inline int iommu_calculate_agaw(struct intel_iommu *iommu)
 {
 	return 0;	/* [한국어] DMA 재매핑을 뺀 빌드의 빈 구현 — 주소 폭 계산이 필요 없다 */
 }
+/*
+ * [한국어]
+ * iommu_calculate_max_sagaw - (CONFIG_INTEL_IOMMU 미설정) 최대 SAGAW 를 0 으로 답한다
+ *
+ * @iommu:  대상 IOMMU 유닛. 여기서는 쓰이지 않는다.
+ * @return: 항상 0.
+ *
+ * SAGAW(Supported Adjusted Guest Address Width)는 이 IOMMU 가 지원하는 2단계
+ * 페이지 테이블 단수(level)의 비트맵이다. 켠 빌드에서는 캐퍼빌리티 레지스터를
+ * 읽어 지원 단수 중 가장 큰 것을 골라, 도메인의 주소 폭과 테이블 깊이를 정한다.
+ *
+ * 뺀 빌드에서 0 을 돌려주는 것은 바로 위 iommu_calculate_agaw() 와 같은 이유다.
+ * 이 함수를 부르는 코드(주로 DMAR 표 파싱 경로)가 컴파일은 되지만 실제로는
+ * 실행되지 않으므로, 링크만 통과하면 되는 상수 구현으로 충분하다. 같은 문단의
+ * dmar_disabled/intel_iommu_enabled/intel_iommu_sm 매크로도 같은 취지다.
+ *
+ * 실행 컨텍스트: 부팅 중 DMAR 표 파싱(프로세스 문맥). 뺀 빌드에서는 도달하지 않는다.
+ *
+ * 호출 체인:
+ *   dmar 초기화 경로 → [이 빈 구현]
+ */
 static inline int iommu_calculate_max_sagaw(struct intel_iommu *iommu)	/* [한국어] 뺀 빌드의 빈 구현 */
 {
 	return 0;	/* [한국어] 같음 */

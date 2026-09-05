@@ -2034,6 +2034,44 @@ struct dma_sgt_handle {
 #define sgt_handle(sgt) \
 	container_of((sgt), struct dma_sgt_handle, sgt)	/* [한국어] sgt 가 핸들의 첫 필드이므로 성립한다 */
 
+/*
+ * [한국어]
+ * iommu_dma_alloc_noncontiguous - 물리적으로 흩어진 페이지를 장치에는 연속으로 보이게 할당한다
+ *
+ * @dev:    할당을 요청한 장치. 이 장치의 IOMMU 도메인 안에 IOVA 를 잡는다.
+ * @size:   바이트 단위 요청 크기. 내부에서 페이지 단위로 올림된다.
+ * @dir:    DMA 방향. 캐시 관리와 매핑 권한(읽기/쓰기)을 정한다.
+ * @gfp:    페이지와 핸들 할당에 쓸 GFP 플래그. 호출자가 잠들 수 있는지를 담고 있다.
+ * @attrs:  DMA_ATTR_* 조합. 예컨대 DMA_ATTR_ALLOC_SINGLE_PAGES 는 huge page 시도를 막는다.
+ * @return: 성공하면 sg_table 포인터, 실패하면 NULL. 호출자는 이 포인터를 그대로
+ *          iommu_dma_free_noncontiguous()/vmap_noncontiguous() 에 되돌려 준다.
+ *
+ * 이 API 가 존재하는 이유가 IOMMU 의 존재 이유 그 자체다. 물리 메모리는 조각나
+ * 있어도 IOMMU 가 IOVA 를 연속으로 깔아 주면 장치는 한 덩어리로 본다. 그래서
+ * dma_alloc_coherent 처럼 물리적으로 연속한 큰 블록을 찾아 헤맬 필요가 없다.
+ *
+ * 실제 작업(페이지 확보 + IOVA 할당 + 매핑)은 __iommu_dma_alloc_noncontiguous()
+ * 가 하고, 이 함수는 그 결과를 dma_sgt_handle 에 담는 얇은 껍데기다. 껍데기가
+ * 필요한 이유는 위 struct dma_sgt_handle 주석에 있다 — 해제와 vmap 에 페이지
+ * 배열이 필요한데 sg_table 만으로는 그것을 복원할 수 없어서, sgt 를 첫 필드로
+ * 둔 핸들에 배열을 숨겨 두고 호출자에게는 &sh->sgt 만 보여 준다. 되돌아올 때는
+ * sgt_handle() 매크로가 container_of 로 핸들을 되짚는다.
+ *
+ * 단계:
+ *   1. 핸들을 kmalloc 한다 (sgt + pages 를 함께 담을 그릇).
+ *   2. __iommu_dma_alloc_noncontiguous() 로 페이지를 모으고 IOVA 에 매핑한다.
+ *   3. 실패하면 그릇까지 반납하고 NULL.
+ *   4. 성공하면 핸들이 아니라 그 안의 sgt 주소를 돌려준다.
+ *
+ * 에러 경로: 두 할당 중 어느 쪽이 실패해도 이미 잡은 것을 되돌리고 NULL 을 준다 —
+ * 호출자에게 부분 성공을 넘기지 않는다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥. gfp 에 __GFP_DIRECT_RECLAIM 이 있으면 잠들 수 있다.
+ *
+ * 호출 체인:
+ *   dma_alloc_noncontiguous() (kernel/dma) → [iommu_dma_alloc_noncontiguous]
+ *     → __iommu_dma_alloc_noncontiguous() → __iommu_dma_alloc_pages() + iommu_map_sg()
+ */
 struct sg_table *iommu_dma_alloc_noncontiguous(struct device *dev, size_t size,
 	       enum dma_data_direction dir, gfp_t gfp, unsigned long attrs)
 {

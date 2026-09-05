@@ -80,22 +80,90 @@ void free_iommu_pmu(struct intel_iommu *iommu);	/* [한국어] 그것을 반납�
 void iommu_pmu_register(struct intel_iommu *iommu);	/* [한국어] perf 서브시스템에 등록해 perf stat 으로 쓸 수 있게 한다 */
 void iommu_pmu_unregister(struct intel_iommu *iommu);	/* [한국어] 등록을 해제한다 */
 #else
+/*
+ * [한국어]
+ * alloc_iommu_pmu - (CONFIG_INTEL_IOMMU_PERF_EVENTS 미설정) PMU 를 만들지 않고 성공을 답한다
+ *
+ * @iommu:  PMU 를 붙이려던 IOMMU 유닛. 여기서는 쓰이지 않는다.
+ * @return: 항상 0(성공).
+ *
+ * 켠 빌드에서는 유닛의 성능 카운터 능력(카운터 개수, 지원 이벤트 그룹, MMIO
+ * 오프셋)을 읽어 struct iommu_pmu 를 채운다. 끈 빌드에는 그 구조체가 없다.
+ *
+ * 여기서 0(성공)을 돌려주는 것이 이 파일의 다른 스텁과 다른 점이자 핵심이다.
+ * 호출자인 intel_iommu_init() 의 유닛 초기화 경로는 이 반환값이 음수면 그
+ * IOMMU 유닛 자체의 초기화를 실패로 처리한다. 성능 카운터가 없다는 이유로
+ * IOMMU 를 못 쓰게 만들 수는 없으므로, "만들 것이 없으니 할 일을 다 했다"는
+ * 뜻으로 0 을 준다.
+ *
+ * 실행 컨텍스트: 부팅 중 유닛 초기화(프로세스 문맥).
+ *
+ * 호출 체인:
+ *   init_iommu_hw()/intel_iommu_init() → [이 빈 구현]
+ */
 static inline int
 alloc_iommu_pmu(struct intel_iommu *iommu)	/* [한국어] 성능 카운터를 끈 빌드의 빈 구현들 */
 {
 	return 0;	/* [한국어] 만들 것이 없으니 성공으로 답한다 — 호출자가 실패로 오해하지 않게 */
 }
 
+/*
+ * [한국어]
+ * free_iommu_pmu - (CONFIG_INTEL_IOMMU_PERF_EVENTS 미설정) 반납할 PMU 가 없다
+ *
+ * @iommu: 대상 IOMMU 유닛. 여기서는 쓰이지 않는다.
+ *
+ * alloc 이 아무것도 만들지 않았으므로 짝이 되는 해제도 할 일이 없다. 유닛
+ * 해제 경로가 alloc/free 를 짝지어 부르는 형태를 #ifdef 없이 유지하기 위해
+ * 함수만 남겨 둔다.
+ *
+ * 실행 컨텍스트: 유닛 해제(프로세스 문맥).
+ *
+ * 호출 체인:
+ *   free_iommu() (intel/dmar.c) → [이 빈 구현]
+ */
 static inline void	/* [한국어] 아래도 같은 빈 구현 */
 free_iommu_pmu(struct intel_iommu *iommu)	/* [한국어] 반납할 것도 없다 */
 {
 }
 
+/*
+ * [한국어]
+ * iommu_pmu_register - (CONFIG_INTEL_IOMMU_PERF_EVENTS 미설정) perf 에 등록하지 않는다
+ *
+ * @iommu: 대상 IOMMU 유닛. 여기서는 쓰이지 않는다.
+ *
+ * 켠 빌드에서는 struct pmu 를 perf 서브시스템에 등록해, 유저스페이스가
+ * perf stat -e dmar0/... 형태로 IOMMU 카운터를 읽을 수 있게 만든다. 끈
+ * 빌드에서는 그 이벤트 소스가 아예 나타나지 않는다.
+ *
+ * 반환값이 없는 이유: 등록이 실패해도 IOMMU 동작에는 지장이 없어, 켠 빌드의
+ * 실제 구현도 실패를 로그로만 남기고 삼킨다.
+ *
+ * 실행 컨텍스트: 부팅 중 유닛 초기화(프로세스 문맥).
+ *
+ * 호출 체인:
+ *   intel_iommu_init() → [이 빈 구현]
+ */
 static inline void	/* [한국어] 아래도 같은 빈 구현 */
 iommu_pmu_register(struct intel_iommu *iommu)	/* [한국어] 등록할 것도 없다 */
 {
 }
 
+/*
+ * [한국어]
+ * iommu_pmu_unregister - (CONFIG_INTEL_IOMMU_PERF_EVENTS 미설정) 해제할 등록이 없다
+ *
+ * @iommu: 대상 IOMMU 유닛. 여기서는 쓰이지 않는다.
+ *
+ * register 가 아무것도 하지 않았으므로 해제도 할 일이 없다. 짝을 맞춰
+ * 두는 이유는 위 free_iommu_pmu() 와 같다.
+ *
+ * 실행 컨텍스트: 유닛 해제(프로세스 문맥).
+ *
+ * 호출 체인:
+ *   free_iommu() (intel/dmar.c) → [이 빈 구현]
+ */
 static inline void	/* [한국어] 아래도 같은 빈 구현 */
 iommu_pmu_unregister(struct intel_iommu *iommu)	/* [한국어] 해제할 것도 없다 */
 {

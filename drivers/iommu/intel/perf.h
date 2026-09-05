@@ -134,28 +134,115 @@ void dmar_latency_update(struct intel_iommu *iommu, enum latency_type type,	/* [
 			 u64 latency);
 void dmar_latency_snapshot(struct intel_iommu *iommu, char *str, size_t size);	/* [한국어] 통계를 사람이 읽을 문자열로 만든다 */
 #else
+/*
+ * [한국어]
+ * dmar_latency_enable - (CONFIG_DMAR_PERF 미설정) 지연 계측을 켤 수 없다고 답한다
+ *
+ * @iommu:  계측을 켜려던 IOMMU 유닛. 여기서는 쓰이지 않는다.
+ * @type:   계측 종류(무효화 명령별 지연 등). 여기서는 쓰이지 않는다.
+ * @return: 항상 -EINVAL.
+ *
+ * 켠 빌드에서는 이 호출이 iommu->perf_statistic 배열을 할당해, 이후 무효화
+ * 경로가 ktime 을 재어 히스토그램에 쌓기 시작한다. 끈 빌드에는 그 배열도
+ * 갱신 코드도 없으므로 켤 수 없다.
+ *
+ * 에러 경로: -EINVAL 은 debugfs 의 dmar_perf_latency write 핸들러까지 올라가,
+ * 사용자가 계측을 켜려는 시도를 실패로 끝낸다.
+ *
+ * 실행 컨텍스트: debugfs write(프로세스 문맥).
+ *
+ * 호출 체인:
+ *   dmar_perf_latency_write() (intel/debugfs.c) → [이 빈 구현]
+ */
 static inline int
 dmar_latency_enable(struct intel_iommu *iommu, enum latency_type type)	/* [한국어] 계측을 끈 빌드의 빈 구현들. 호출부에 #ifdef 를 흩지 않는 관용구다 */
 {
 	return -EINVAL;	/* [한국어] 켤 수 없다 */
 }
 
+/*
+ * [한국어]
+ * dmar_latency_disable - (CONFIG_DMAR_PERF 미설정) 끌 계측이 없다
+ *
+ * @iommu: 대상 IOMMU 유닛. 여기서는 쓰이지 않는다.
+ * @type:  계측 종류. 여기서는 쓰이지 않는다.
+ *
+ * enable 이 항상 실패하므로 켜져 있는 계측도 없다. 그래도 함수가 존재해야
+ * debugfs 핸들러가 enable/disable 을 짝지어 부르는 형태를 #ifdef 없이 유지한다.
+ *
+ * 실행 컨텍스트: debugfs write(프로세스 문맥).
+ *
+ * 호출 체인:
+ *   dmar_perf_latency_write() (intel/debugfs.c) → [이 빈 구현]
+ */
 static inline void	/* [한국어] 아래도 같은 빈 구현 */
 dmar_latency_disable(struct intel_iommu *iommu, enum latency_type type)	/* [한국어] 끄기도 할 일이 없다 */
 {
 }
 
+/*
+ * [한국어]
+ * dmar_latency_enabled - (CONFIG_DMAR_PERF 미설정) 항상 꺼져 있다고 답한다
+ *
+ * @iommu:  대상 IOMMU 유닛. 여기서는 쓰이지 않는다.
+ * @type:   계측 종류. 여기서는 쓰이지 않는다.
+ * @return: 항상 false.
+ *
+ * 이 다섯 개 중 성능에 가장 중요한 함수다. 무효화 경로(qi_submit_sync 등)는
+ * 시각을 재기 전에 이 함수로 물어보는데, false 를 상수로 돌려주면 컴파일러가
+ * 그 뒤의 ktime_get() 호출과 계산을 통째로 걷어낸다. 계측을 뺀 빌드에서
+ * 무효화 핫패스에 아무 비용도 남지 않는 이유가 이것이다.
+ *
+ * 실행 컨텍스트: 무효화 핫패스. 인터럽트 비활성 구간에서도 불린다.
+ *
+ * 호출 체인:
+ *   qi_submit_sync() (intel/dmar.c) → [이 빈 구현]
+ */
 static inline bool	/* [한국어] 아래도 같은 빈 구현 */
 dmar_latency_enabled(struct intel_iommu *iommu, enum latency_type type)	/* [한국어] 항상 꺼져 있다고 답해 */
 {
 	return false;	/* [한국어] 무효화 경로가 시각을 재지 않게 한다 */
 }
 
+/*
+ * [한국어]
+ * dmar_latency_update - (CONFIG_DMAR_PERF 미설정) 기록할 통계가 없다
+ *
+ * @iommu:   대상 IOMMU 유닛. 여기서는 쓰이지 않는다.
+ * @type:    계측 종류. 여기서는 쓰이지 않는다.
+ * @latency: 잰 지연 값(ns). 여기서는 버려진다.
+ *
+ * 켠 빌드에서는 이 호출이 latency_statistic 의 min/max/총합/표본 수를 갱신하고
+ * 히스토그램 구간 하나를 늘린다. 끈 빌드에는 그 구조체가 없다. 바로 위
+ * dmar_latency_enabled() 가 false 를 주므로 실제로는 호출 자체가 사라진다.
+ *
+ * 실행 컨텍스트: 무효화 완료 직후. 인터럽트 비활성 구간일 수 있다.
+ *
+ * 호출 체인:
+ *   qi_submit_sync() (intel/dmar.c) → [이 빈 구현]
+ */
 static inline void	/* [한국어] 아래도 같은 빈 구현 */
 dmar_latency_update(struct intel_iommu *iommu, enum latency_type type, u64 latency)	/* [한국어] 기록할 곳이 없다 */
 {
 }
 
+/*
+ * [한국어]
+ * dmar_latency_snapshot - (CONFIG_DMAR_PERF 미설정) 보여 줄 통계가 없다
+ *
+ * @iommu: 대상 IOMMU 유닛. 여기서는 쓰이지 않는다.
+ * @str:   결과를 담을 버퍼. 여기서는 건드리지 않는다 — 호출자가 미리
+ *         비워 둔 내용이 그대로 남아 빈 출력이 된다.
+ * @size:  그 버퍼의 크기. 여기서는 쓰이지 않는다.
+ *
+ * 켠 빌드에서는 평균/최소/최대와 구간별 분포를 사람이 읽을 문자열로 만들어
+ * debugfs 의 dmar_perf_latency 읽기에 실어 준다.
+ *
+ * 실행 컨텍스트: debugfs read(프로세스 문맥).
+ *
+ * 호출 체인:
+ *   latency_show() (intel/debugfs.c) → [이 빈 구현]
+ */
 static inline void	/* [한국어] 아래도 같은 빈 구현 */
 dmar_latency_snapshot(struct intel_iommu *iommu, char *str, size_t size)	/* [한국어] 보여 줄 것도 없다 */
 {

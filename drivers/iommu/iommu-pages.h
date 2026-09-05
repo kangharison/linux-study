@@ -157,12 +157,64 @@ int iommu_pages_start_incoherent_list(struct iommu_pages_list *list,	/* [한국�
 #define IOMMU_PAGES_USE_DMA_API 0	/* [한국어] DMA API 를 쓰지 않는다. clflush 를 직접 부를 수 있어 매핑을 만들 이유가 없다 */
 #include <linux/cacheflush.h>	/* [한국어] clflush_cache_range */
 
+/*
+ * [한국어]
+ * iommu_pages_flush_incoherent - (x86) 페이지 테이블 수정분을 캐시에서 메모리로 밀어낸다
+ *
+ * @dma_dev: 캐시 관리를 대행할 장치. x86 판에서는 쓰이지 않는다 — clflush 는
+ *           CPU 명령이라 장치가 필요 없다. 인자를 남긴 것은 non-x86 판과
+ *           시그니처를 맞춰 호출부에 #ifdef 를 심지 않기 위해서다.
+ * @virt:    수정한 페이지 테이블의 커널 가상 주소.
+ * @offset:  그 페이지 안에서 실제로 고친 부분의 시작 오프셋.
+ * @len:     고친 길이(바이트).
+ *
+ * 어떤 IOMMU 는 페이지 테이블을 읽을 때 CPU 캐시와 일관성을 지키지 않는다
+ * (AMD 의 일부 구성, ARM 의 상당수). 그런 하드웨어에서는 CPU 가 테이블 엔트리를
+ * 고쳐도 그 값이 캐시에만 남아 있고 IOMMU 는 옛 값을 읽는다. 이 함수가 없으면
+ * 매핑을 만들었는데 장치가 여전히 폴트를 내거나, 더 나쁘게는 지운 매핑으로
+ * DMA 가 계속 나가는 상황이 생긴다.
+ *
+ * x86 판은 clflush_cache_range() 로 해당 캐시라인만 골라 밀어낸다. offset/len 을
+ * 받는 이유가 이것이다 — 페이지 전체가 아니라 고친 엔트리 몇 개만 비우면 된다.
+ *
+ * non-x86 판(아래 #else)은 같은 일을 dma_sync_single_for_device() 로 하며,
+ * 그 차이가 IOMMU_PAGES_USE_DMA_API 매크로에 드러나 있다.
+ *
+ * 실행 컨텍스트: 매핑/해제 핫패스. 락을 쥔 채로, 인터럽트 비활성 구간에서도
+ * 불릴 수 있다. 잠들지 않는다.
+ *
+ * 호출 체인:
+ *   io-pgtable 구현의 엔트리 기록 직후 → [이 함수] → clflush_cache_range()
+ */
 static inline void iommu_pages_flush_incoherent(struct device *dma_dev,
 						void *virt, size_t offset,
 						size_t len)
 {
 	clflush_cache_range(virt + offset, len);	/* [한국어] 해당 캐시라인들을 메모리로 밀어낸다. AMD IOMMU 처럼 일부 구성에서 페이지 테이블이 비일관인 경우에 쓴다 */
 }
+/*
+ * [한국어]
+ * iommu_pages_stop_incoherent_list - (x86) 목록의 캐시 관리를 끝낸다 — 할 일이 없다
+ *
+ * @list:    해제 직전의 페이지 목록. 여기서는 손대지 않는다.
+ * @dma_dev: 캐시 관리를 맡았던 장치. 여기서는 쓰이지 않는다.
+ *
+ * non-x86 판에서는 이 함수가 실제 일을 한다. 그쪽은 캐시 관리를 DMA API 로
+ * 하기 때문에 페이지마다 dma_map_single() 매핑이 걸려 있고, 페이지를 반납하기
+ * 전에 그 매핑을 반드시 되돌려야 한다.
+ *
+ * x86 에는 되돌릴 매핑이 없다. clflush 는 매핑 없이도 되는 CPU 명령이라
+ * IOMMU_PAGES_USE_DMA_API 가 0 이다. 그래서 이 판은 비어 있다.
+ *
+ * 본문의 영어 주석이 말하는 것: 성능을 위해 incoherent 플래그를 일부러 끄지
+ * 않고 그대로 둔다. 플래그를 정리하려면 목록을 한 바퀴 돌아야 하는데, x86 의
+ * 이후 stop/free 경로는 그 플래그를 보지 않으므로 도는 것 자체가 낭비다.
+ *
+ * 실행 컨텍스트: 페이지 목록 해제 직전(프로세스 문맥).
+ *
+ * 호출 체인:
+ *   iommu_put_pages_list() 계열 → [이 빈 구현]
+ */
 static inline void	/* [한국어] x86 에서는 되돌릴 것이 없다 */
 iommu_pages_stop_incoherent_list(struct iommu_pages_list *list,	/* [한국어] 목록 단위 캐시 관리 종료 */
 				 struct device *dma_dev)	/* [한국어] 쓰지 않는 인자 */
@@ -172,6 +224,25 @@ iommu_pages_stop_incoherent_list(struct iommu_pages_list *list,	/* [한국어] �
 	 * a NOP. For X86 the rest of the stop/free flow ignores the flag.
 	 */
 }
+/*
+ * [한국어]
+ * iommu_pages_free_incoherent - (x86) 비일관 페이지를 반납한다
+ *
+ * @virt:    반납할 페이지의 커널 가상 주소.
+ * @dma_dev: 캐시 관리를 맡았던 장치. x86 에서는 쓰이지 않는다.
+ *
+ * non-x86 판은 dma_unmap_single() 로 매핑을 먼저 되돌린 뒤 페이지를 반납해야
+ * 한다 — 순서를 지키지 않으면 반납된 페이지에 IOMMU 가 계속 접근할 수 있다.
+ * x86 에는 그 매핑이 없으므로 보통의 iommu_free_pages() 와 완전히 같다.
+ *
+ * 그래도 별도 함수로 두는 이유는 호출부(io-pgtable 의 테이블 해제 경로)가
+ * 아키텍처를 신경 쓰지 않고 같은 이름을 부를 수 있게 하기 위해서다.
+ *
+ * 실행 컨텍스트: 페이지 테이블 해제(프로세스 문맥).
+ *
+ * 호출 체인:
+ *   io-pgtable 의 테이블 해제 → [이 함수] → iommu_free_pages()
+ */
 static inline void iommu_pages_free_incoherent(void *virt,	/* [한국어] x86 의 비일관 페이지 해제 */
 					       struct device *dma_dev)	/* [한국어] 쓰지 않는 인자 */
 {
@@ -181,6 +252,33 @@ static inline void iommu_pages_free_incoherent(void *virt,	/* [한국어] x86 �
 #define IOMMU_PAGES_USE_DMA_API 1	/* [한국어] DMA API 를 캐시 관리 수단으로 빌려 쓴다. 기존 ARM 드라이버들의 관행을 유지한 것이며, 그 대가로 매핑의 수명을 추적해야 한다 */
 #include <linux/dma-mapping.h>	/* [한국어] dma_sync/map/unmap */
 
+/*
+ * [한국어]
+ * iommu_pages_flush_incoherent - (non-x86) 페이지 테이블 수정분을 DMA API 로 밀어낸다
+ *
+ * @dma_dev: 캐시 관리를 대행할 장치 — 보통 IOMMU 자신의 struct device.
+ *           x86 판과 달리 여기서는 반드시 필요하다. DMA API 가 어느 장치의
+ *           관점에서 캐시를 정리할지 알아야 하기 때문이다.
+ * @virt:    수정한 페이지 테이블의 커널 가상 주소.
+ * @offset:  그 페이지 안에서 고친 부분의 시작 오프셋.
+ * @len:     고친 길이(바이트).
+ *
+ * 위 x86 판과 같은 목적이지만 수단이 다르다. ARM 계열에는 유저 코드가 부를 수
+ * 있는 캐시 정리 명령이 없어, 기존 IOMMU 드라이버들은 관행적으로 DMA API 를
+ * 캐시 관리 수단으로 빌려 써 왔다. IOMMU_PAGES_USE_DMA_API 가 1 인 것이 그 뜻이다.
+ *
+ * 그 대가가 이 파일의 incoherent 플래그 추적이다. dma_sync_single_for_device()
+ * 는 대상 페이지가 이미 dma_map_single() 로 매핑되어 있을 때만 성립하므로,
+ * 페이지마다 매핑 여부를 기억해 두었다가 해제 때 되돌려야 한다.
+ *
+ * 방향이 DMA_TO_DEVICE 인 이유: IOMMU 는 페이지 테이블을 읽기만 한다. CPU 가
+ * 쓴 내용을 장치가 볼 수 있게 밀어내는 방향이면 충분하다.
+ *
+ * 실행 컨텍스트: 매핑/해제 핫패스. 잠들지 않는다.
+ *
+ * 호출 체인:
+ *   io-pgtable 구현의 엔트리 기록 직후 → [이 함수] → dma_sync_single_for_device()
+ */
 static inline void iommu_pages_flush_incoherent(struct device *dma_dev,
 						void *virt, size_t offset,
 						size_t len)
