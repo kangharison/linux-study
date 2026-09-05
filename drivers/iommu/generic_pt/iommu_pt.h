@@ -6,50 +6,151 @@
  * This is compiled multiple times, over all the page table formats to pick up
  * the per-format definitions.
  */
-#ifndef __GENERIC_PT_IOMMU_PT_H
-#define __GENERIC_PT_IOMMU_PT_H
+/*
+ * [한국어 설명] 페이지 테이블을 IOMMU 도메인 연산으로 감싸는 템플릿 (iommu_pt.h)
+ *
+ * === 파일의 역할 ===
+ * generic_pt 의 가장 바깥층이다. 순회기(pt_iter.h)와 형식 API(pt_common.h)
+ * 위에 iommu 코어가 부르는 연산 — map, unmap, iova_to_phys, 더티 추적,
+ * 초기화와 해제 — 를 얹는다.
+ *
+ * 원 주석대로 이 파일도 형식마다 다시 컴파일된다. 그래서 여기 있는 코드는
+ * 형식을 컴파일 시에 알고 있고, 단계 수·항목 크기·마스크가 전부 상수로
+ * 접힌다. 외부 심볼은 DOMAIN_NS/NS 매크로가 형식별 접두어를 붙여 만든다.
+ *
+ * 이 계층이 풀어야 하는 어려운 문제가 셋 있다.
+ *
+ * 1) 페이지 크기 선택. 하나의 map 요청을 가장 적은 수의 잎으로 덮으려면
+ *    VA·OA 정렬과 남은 길이를 함께 보아야 한다(compute_best_pgsize).
+ *
+ * 2) 락 없는 표 만들기. 표를 새로 꽂는 일은 cmpxchg 로 하고, 경합에서 진
+ *    쪽이 자기 표를 버리고 다시 읽는다. 그 되돌림을 pt_iommu_new_table 이
+ *    맡는다.
+ *
+ * 3) 무효화 전에 메모리를 돌려주지 않기. unmap 이 떼어 낸 표는 곧바로
+ *    해제하지 않고 목록에 모아 두었다가, iotlb_gather 가 무효화를 마친 뒤
+ *    코어가 해제한다 — 그 사이에 하드웨어가 그 메모리를 표로 읽으면 안 된다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * IOMMU 드라이버(amd/intel/riscv) → 이 파일이 만든 pt_iommu_<형식>_* 진입점
+ *   → pt_iter.h 순회 → 형식 헤더의 항목 접근자 → 하드웨어가 읽는 표
+ *
+ * 실행 컨텍스트: map/unmap 은 드라이버가 잡은 범위 락 아래에서 불린다.
+ * 이 계층은 그 락을 스스로 잡지 않고, 각 함수의 kdoc 이 요구 조건을 밝힌다.
+ *
+ * === 타 모듈과의 연결 ===
+ * 위: <linux/generic_pt/iommu.h> 가 선언한 진입점들, iommu 코어의
+ *     iommu_domain_ops.
+ * 아래: pt_iter.h, ../iommu-pages.h(표 메모리 할당과 비일관 플러시),
+ *       <linux/dma-mapping.h>.
+ *
+ * 데이터 흐름: 코어의 (iova, paddr, size) → struct pt_range → 단계별 순회
+ *   → 잎 설치 → 무효화 정보를 iotlb_gather 에 쌓아 코어로 돌려준다.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * DOMAIN_NS(iova_to_phys): 한 주소를 따라 내려가 출력 주소를 돌려준다.
+ * NS(map_range): 범위를 잎으로 채운다. 최상위가 모자라면 increase_top 이
+ *   단계를 하나 얹고 다시 시도한다.
+ * NS(unmap_range): 잎을 지우고 빈 표를 모아 free_list 로 넘긴다.
+ * DOMAIN_NS(read_and_clear_dirty): 더티 비트를 읽어 비트맵에 옮기고 지운다.
+ * pt_iommu_new_table / clear_contig: 락 없는 표 설치와, 큰 페이지를 쪼갤
+ *   때 기존 연속 항목을 걷어내는 처리.
+ * increase_top: 주소 공간이 커질 때 최상위 단계를 하나 얹는다.
+ * pt_iommu_init / NS(deinit): 인스턴스의 생성과 해제.
+ */
+#ifndef __GENERIC_PT_IOMMU_PT_H	/* [한국어] 중복 포함 방지 */
+#define __GENERIC_PT_IOMMU_PT_H	/* [한국어] 같은 이름으로 표시 */
 
-#include "pt_iter.h"
+#include "pt_iter.h"	/* [한국어] 순회기와 형식 API */
 
-#include <linux/export.h>
-#include <linux/iommu.h>
-#include "../iommu-pages.h"
-#include <linux/cleanup.h>
-#include <linux/dma-mapping.h>
+#include <linux/export.h>	/* [한국어] 형식별 이름으로 심볼을 내보낸다 */
+#include <linux/iommu.h>	/* [한국어] iommu_domain, iotlb_gather 등 */
+#include "../iommu-pages.h"	/* [한국어] 표 메모리 할당과 비일관 캐시 처리 */
+#include <linux/cleanup.h>	/* [한국어] __free 스코프 정리 */
+#include <linux/dma-mapping.h>	/* [한국어] 비일관 플랫폼의 DMA 매핑 */
 
+/*
+ * [한국어] 이 계층이 쓰는 소프트웨어 비트 번호.
+ * 형식이 제공하는 "하드웨어가 무시하는 비트"에 붙이는 뜻이다.
+ */
 enum {
-	SW_BIT_CACHE_FLUSH_DONE = 0,
+	SW_BIT_CACHE_FLUSH_DONE = 0,	/* [한국어] 이 표의 캐시 플러시가 끝났다는 표시. 획득·해제 순서가 붙어 있어 다른 CPU 가 그것을 보면 표 내용도 본다 */
 };
 
+/*
+ * [한국어]
+ * flush_writes_range - 표의 일정 구간을 캐시에서 메모리로 밀어낸다
+ *
+ * @pts: 대상 표를 가리키는 순회 상태.
+ * @start_index: 시작 항목.
+ * @end_index: 마지막 다음 항목.
+ *
+ * 페이지 테이블이 CPU 캐시와 일관되지 않는 플랫폼을 위한 것이다. 그런
+ * 하드웨어는 표를 DMA 로 읽으므로, CPU 가 쓴 내용이 캐시에만 있으면
+ * 옛 값을 본다.
+ *
+ * 그 기능이 꺼진 형식에서는 조건이 컴파일 시 거짓이 되어 통째로 사라진다.
+ */
 static void flush_writes_range(const struct pt_state *pts,
 			       unsigned int start_index, unsigned int end_index)
 {
-	if (pts_feature(pts, PT_FEAT_DMA_INCOHERENT))
-		iommu_pages_flush_incoherent(
-			iommu_from_common(pts->range->common)->iommu_device,
-			pts->table, start_index * PT_ITEM_WORD_SIZE,
-			(end_index - start_index) * PT_ITEM_WORD_SIZE);
+	if (pts_feature(pts, PT_FEAT_DMA_INCOHERENT))	/* [한국어] 표가 CPU 캐시와 일관되지 않는 플랫폼이면 */
+		iommu_pages_flush_incoherent(	/* [한국어] 캐시에만 있는 내용을 메모리로 밀어낸다 */
+			iommu_from_common(pts->range->common)->iommu_device,	/* [한국어] DMA 방향을 아는 장치 */
+			pts->table, start_index * PT_ITEM_WORD_SIZE,	/* [한국어] 표에서의 바이트 오프셋 */
+			(end_index - start_index) * PT_ITEM_WORD_SIZE);	/* [한국어] 밀어낼 바이트 수 */
 }
 
+/*
+ * [한국어]
+ * flush_writes_item - 표의 항목 하나를 캐시에서 밀어낸다
+ *
+ * @pts: 대상 항목을 가리키는 순회 상태.
+ *
+ * 위 함수의 한 항목짜리 판이다. 잎 하나를 고친 뒤 부른다.
+ */
 static void flush_writes_item(const struct pt_state *pts)
 {
-	if (pts_feature(pts, PT_FEAT_DMA_INCOHERENT))
-		iommu_pages_flush_incoherent(
-			iommu_from_common(pts->range->common)->iommu_device,
-			pts->table, pts->index * PT_ITEM_WORD_SIZE,
-			PT_ITEM_WORD_SIZE);
+	if (pts_feature(pts, PT_FEAT_DMA_INCOHERENT))	/* [한국어] 비일관 플랫폼이면 */
+		iommu_pages_flush_incoherent(	/* [한국어] 항목 하나만 */
+			iommu_from_common(pts->range->common)->iommu_device,	/* [한국어] DMA 방향을 아는 장치 */
+			pts->table, pts->index * PT_ITEM_WORD_SIZE,	/* [한국어] 그 항목의 오프셋 */
+			PT_ITEM_WORD_SIZE);	/* [한국어] 항목 하나 크기 */
 }
 
+/*
+ * [한국어]
+ * gather_range_pages - unmap 이 떼어 낸 범위와 페이지를 코어에 넘긴다
+ *
+ * @iotlb_gather: 코어가 무효화 범위를 모으는 자리.
+ * @iommu_table: 대상 페이지 테이블.
+ * @iova: 떼어 낸 범위의 시작.
+ * @len: 그 길이.
+ * @free_list: 이번에 비워진 표들.
+ *
+ * unmap 의 마무리다. 두 가지를 코어에 넘긴다 — 무효화해야 할 주소 범위와,
+ * 무효화가 끝난 뒤에야 해제해도 되는 표 메모리.
+ *
+ * 중간의 분기가 성능 판단이다. 원 주석이 근거를 든다.
+ *  - DMA-FQ 모드면 어차피 뒤에 전체 플러시가 따라오므로 여기서 범위를
+ *    쌓을 이유가 없다.
+ *  - NO_GAPS 형식은 범위를 넓힐 수 없으므로, 새 범위가 기존 것과 떨어져
+ *    있으면 먼저 있던 것을 내보내야 한다. 그 선택의 이해득실은 사용자가
+ *    DMA 와 DMA-FQ 중 무엇을 쓰느냐로 정한다.
+ *
+ * 그 sync 가 gather 의 free_list 를 비운다는 점을 원 주석이 경고한다 —
+ * 그래서 이번 범위에 걸친 페이지를 그 목록에 미리 얹어 두면 안 된다.
+ */
 static void gather_range_pages(struct iommu_iotlb_gather *iotlb_gather,
 			       struct pt_iommu *iommu_table, pt_vaddr_t iova,
 			       pt_vaddr_t len,
 			       struct iommu_pages_list *free_list)
 {
-	struct pt_common *common = common_from_iommu(iommu_table);
+	struct pt_common *common = common_from_iommu(iommu_table);	/* [한국어] 기능 질의를 위해 */
 
-	if (pt_feature(common, PT_FEAT_DMA_INCOHERENT))
-		iommu_pages_stop_incoherent_list(free_list,
-						 iommu_table->iommu_device);
+	if (pt_feature(common, PT_FEAT_DMA_INCOHERENT))	/* [한국어] 비일관 플랫폼이면 */
+		iommu_pages_stop_incoherent_list(free_list,	/* [한국어] 해제 전에 그 페이지들의 DMA 매핑을 푼다 */
+						 iommu_table->iommu_device);	/* [한국어] 그 매핑을 만든 장치 */
 
 	/*
 	 * If running in DMA-FQ mode then the unmap will be followed by an IOTLB
@@ -59,50 +160,83 @@ static void gather_range_pages(struct iommu_iotlb_gather *iotlb_gather,
 	 * flushes is better for their work load by choosing DMA vs DMA-FQ
 	 * operation. Drivers should also see shadow_on_flush.
 	 */
-	if (!iommu_iotlb_gather_queued(iotlb_gather)) {
-		if (pt_feature(common, PT_FEAT_FLUSH_RANGE_NO_GAPS) &&
-		    iommu_iotlb_gather_is_disjoint(iotlb_gather, iova, len)) {
-			iommu_iotlb_sync(&iommu_table->domain, iotlb_gather);
+	if (!iommu_iotlb_gather_queued(iotlb_gather)) {	/* [한국어] (원 주석: DMA-FQ 면 뒤에 전체 플러시가 따라오므로 여기서 쌓지 않는다) */
+		if (pt_feature(common, PT_FEAT_FLUSH_RANGE_NO_GAPS) &&	/* [한국어] 범위를 넓힐 수 없는 형식이고 */
+		    iommu_iotlb_gather_is_disjoint(iotlb_gather, iova, len)) {	/* [한국어] 새 범위가 기존 것과 떨어져 있으면 */
+			iommu_iotlb_sync(&iommu_table->domain, iotlb_gather);	/* [한국어] 먼저 있던 것을 내보낸다 */
 			/*
 			 * Note that the sync frees the gather's free list, so
 			 * we must not have any pages on that list that are
 			 * covered by iova/len
 			 */
 		}
-		iommu_iotlb_gather_add_range(iotlb_gather, iova, len);
+		iommu_iotlb_gather_add_range(iotlb_gather, iova, len);	/* [한국어] (원 주석: sync 가 gather 의 free_list 를 비우므로 이번 범위의 페이지를 미리 얹으면 안 된다) */
 	}
 
-	iommu_pages_list_splice(free_list, &iotlb_gather->freelist);
+	iommu_pages_list_splice(free_list, &iotlb_gather->freelist);	/* [한국어] 무효화가 끝난 뒤 코어가 해제한다 */
 }
 
-#define DOMAIN_NS(op) CONCATENATE(CONCATENATE(pt_iommu_, PTPFX), op)
+#define DOMAIN_NS(op) CONCATENATE(CONCATENATE(pt_iommu_, PTPFX), op)	/* [한국어] 도메인 연산 이름에 형식별 접두어를 붙인다 */
 
+/*
+ * [한국어]
+ * make_range_ul - unsigned long 인자로 순회 범위를 만든다
+ *
+ * @common: 페이지 테이블 인스턴스.
+ * @range: 채울 범위.
+ * @iova: 시작 주소.
+ * @len: 길이.
+ * @return: 0 성공, -EINVAL 길이 0, -EOVERFLOW 넘침.
+ *
+ * 길이 0 을 거절하는 이유: 범위를 시작과 마지막 주소로 표현하므로 빈
+ * 범위를 나타낼 방법이 없다.
+ *
+ * 마지막의 되읽기 검사는 주소 폭이 좁은 형식을 위한 것이다. 32비트
+ * 페이지 테이블에 64비트 주소를 넣으면 잘려 들어가는데, 다시 읽어 비교하면
+ * 그 절단이 드러난다.
+ */
 static int make_range_ul(struct pt_common *common, struct pt_range *range,
 			 unsigned long iova, unsigned long len)
 {
-	unsigned long last;
+	unsigned long last;	/* [한국어] 마지막 주소(포함) */
 
-	if (unlikely(len == 0))
-		return -EINVAL;
+	if (unlikely(len == 0))	/* [한국어] 빈 범위는 */
+		return -EINVAL;	/* [한국어] 시작·마지막 표현으로 나타낼 수 없다 */
 
-	if (check_add_overflow(iova, len - 1, &last))
-		return -EOVERFLOW;
+	if (check_add_overflow(iova, len - 1, &last))	/* [한국어] 주소 공간 끝을 넘으면 */
+		return -EOVERFLOW;	/* [한국어] 호출자에게 */
 
-	*range = pt_make_range(common, iova, last);
-	if (sizeof(iova) > sizeof(range->va)) {
-		if (unlikely(range->va != iova || range->last_va != last))
-			return -EOVERFLOW;
+	*range = pt_make_range(common, iova, last);	/* [한국어] 최상위 정보를 담은 범위로 */
+	if (sizeof(iova) > sizeof(range->va)) {	/* [한국어] 형식의 주소 폭이 더 좁으면 */
+		if (unlikely(range->va != iova || range->last_va != last))	/* [한국어] 되읽어 비교해 */
+			return -EOVERFLOW;	/* [한국어] 절단이 있었는지 드러낸다 */
 	}
-	return 0;
+	return 0;	/* [한국어] 유효한 범위 */
 }
 
+/*
+ * [한국어]
+ * make_range_u64 - 64비트 인자로 순회 범위를 만든다
+ *
+ * @common: 페이지 테이블 인스턴스.
+ * @range: 채울 범위.
+ * @iova: 시작 주소.
+ * @len: 길이.
+ * @return: 0 성공, -EOVERFLOW 넘침.
+ *
+ * 32비트 커널에서 dma_addr_t 가 unsigned long 보다 넓을 수 있다. 그 경우
+ * 먼저 범위를 확인하고 좁은 판으로 넘긴다.
+ *
+ * __maybe_unused 인 이유: 아래 매크로가 타입을 보고 한쪽만 고르므로,
+ * 형식에 따라 이 함수가 전혀 쓰이지 않을 수 있다.
+ */
 static __maybe_unused int make_range_u64(struct pt_common *common,
 					 struct pt_range *range, u64 iova,
 					 u64 len)
 {
-	if (unlikely(iova > ULONG_MAX || len > ULONG_MAX))
-		return -EOVERFLOW;
-	return make_range_ul(common, range, iova, len);
+	if (unlikely(iova > ULONG_MAX || len > ULONG_MAX))	/* [한국어] 32비트 커널에서 넓은 값이 오면 */
+		return -EOVERFLOW;	/* [한국어] 좁은 판으로 넘길 수 없다 */
+	return make_range_ul(common, range, iova, len);	/* [한국어] 확인했으니 좁은 판으로 */
 }
 
 /*
@@ -128,41 +262,76 @@ static __maybe_unused int make_range_u64(struct pt_common *common,
 		ret;                                                     \
 	})
 
+/*
+ * [한국어]
+ * compute_best_pgsize - 이 자리에 쓸 가장 큰 페이지 크기를 고른다
+ *
+ * @pts: 순회 상태(현재 단계와 VA 범위).
+ * @oa: 대응하는 출력 주소.
+ * @return: 크기의 지수, 놓을 수 없으면 0.
+ *
+ * pt_iter.h 의 pt_compute_best_pgsize 를 감싸되, 후보 크기를 도메인의
+ * 비트맵으로 한 번 더 좁힌다.
+ *
+ * 그 교집합이 필요한 이유를 원 주석이 밝힌다 — 코어가 그 비트맵을 줄여
+ * 드라이버가 쓸 수 있는 페이지 크기를 제한할 수 있다. 형식이 1GB 를
+ * 만들 수 있어도 코어가 막으면 쓰지 않는다.
+ */
 static inline unsigned int compute_best_pgsize(struct pt_state *pts,
 					       pt_oaddr_t oa)
 {
-	struct pt_iommu *iommu_table = iommu_from_common(pts->range->common);
+	struct pt_iommu *iommu_table = iommu_from_common(pts->range->common);	/* [한국어] 도메인의 크기 비트맵을 얻기 위해 */
 
-	if (!pt_can_have_leaf(pts))
-		return 0;
+	if (!pt_can_have_leaf(pts))	/* [한국어] 잎을 놓을 수 없는 단계면 */
+		return 0;	/* [한국어] 더 내려가야 한다 */
 
 	/*
 	 * The page size is limited by the domain's bitmap. This allows the core
 	 * code to reduce the supported page sizes by changing the bitmap.
 	 */
-	return pt_compute_best_pgsize(pt_possible_sizes(pts) &
-					      iommu_table->domain.pgsize_bitmap,
-				      pts->range->va, pts->range->last_va, oa);
+	return pt_compute_best_pgsize(pt_possible_sizes(pts) &	/* [한국어] (원 주석: 코어가 비트맵을 줄여 지원 크기를 제한할 수 있다) */
+					      iommu_table->domain.pgsize_bitmap,	/* [한국어] 형식이 만들 수 있어도 코어가 막으면 쓰지 않는다 */
+				      pts->range->va, pts->range->last_va, oa);	/* [한국어] 정렬과 남은 길이를 함께 본다 */
 }
 
+/*
+ * [한국어]
+ * __do_iova_to_phys - 한 단계에서 주소를 따라 내려가는 워커
+ *
+ * @range: 걷는 범위.
+ * @arg: 결과를 담을 pt_oaddr_t 포인터.
+ * @level: 현재 단계.
+ * @table: 그 단계의 표.
+ * @descend_fn: 아래 단계 워커.
+ * @return: 0 성공, -ENOENT 매핑 없음.
+ *
+ * 한 항목만 보고 종류에 따라 갈린다 — 비었으면 매핑이 없고, 표면 내려가고,
+ * 주소면 거기서 끝난다.
+ *
+ * pt_entry_oa_exact 를 쓰는 이유: 큰 페이지의 한가운데 주소를 물었을 수
+ * 있어, entry 시작 주소에 그 오프셋을 더해야 한다.
+ *
+ * 마지막 return 은 컴파일러를 위한 것이다 — switch 가 모든 값을 덮지만
+ * enum 밖의 값이 올 수 있다고 보기 때문이다.
+ */
 static __always_inline int __do_iova_to_phys(struct pt_range *range, void *arg,
 					     unsigned int level,
 					     struct pt_table_p *table,
 					     pt_level_fn_t descend_fn)
 {
-	struct pt_state pts = pt_init(range, level, table);
-	pt_oaddr_t *res = arg;
+	struct pt_state pts = pt_init(range, level, table);	/* [한국어] 이 단계의 순회 상태 */
+	pt_oaddr_t *res = arg;	/* [한국어] 결과를 담을 자리 */
 
-	switch (pt_load_single_entry(&pts)) {
-	case PT_ENTRY_EMPTY:
-		return -ENOENT;
-	case PT_ENTRY_TABLE:
-		return pt_descend(&pts, arg, descend_fn);
-	case PT_ENTRY_OA:
-		*res = pt_entry_oa_exact(&pts);
-		return 0;
+	switch (pt_load_single_entry(&pts)) {	/* [한국어] 한 항목만 읽는다 — 반복문이 필요 없다 */
+	case PT_ENTRY_EMPTY:	/* [한국어] 매핑이 없으면 */
+		return -ENOENT;	/* [한국어] 호출자가 0 으로 바꾼다 */
+	case PT_ENTRY_TABLE:	/* [한국어] 아래 표를 가리키면 */
+		return pt_descend(&pts, arg, descend_fn);	/* [한국어] 한 단계 내려간다 */
+	case PT_ENTRY_OA:	/* [한국어] 잎에 닿았으면 */
+		*res = pt_entry_oa_exact(&pts);	/* [한국어] 큰 페이지 한가운데일 수 있어 오프셋까지 더한다 */
+		return 0;	/* [한국어] 찾았다 */
 	}
-	return -ENOENT;
+	return -ENOENT;	/* [한국어] enum 밖의 값에 대비한 컴파일러용 경로 */
 }
 PT_MAKE_LEVELS(__iova_to_phys, __do_iova_to_phys);
 
@@ -178,86 +347,139 @@ PT_MAKE_LEVELS(__iova_to_phys, __do_iova_to_phys);
  *
  * Return: 0 if there is no translation for the given iova.
  */
+/*
+ * [한국어]
+ * (위 kdoc 과 함께 읽을 것)
+ * iova_to_phys - IOVA 에 대응하는 물리 주소를 돌려준다
+ *
+ * @domain: 조회할 도메인.
+ * @iova: 물어볼 IO 가상 주소.
+ * @return: 물리 주소, 매핑이 없으면 0.
+ *
+ * 코어의 iommu_iova_to_phys() 가 부르는 진입점이다. 정렬을 요구하지 않고,
+ * 페이지 안의 오프셋까지 반영해 돌려준다.
+ *
+ * 오류를 0 으로 뭉개는 것을 원 주석이 아쉬워한다 — PHYS_ADDR_MAX 가 더
+ * 나은 표현이겠지만, 코어 API 가 0 을 "없음"으로 정해 두었다.
+ *
+ * 실행 컨텍스트: 호출자가 그 주소를 포함하는 읽기 범위 락을 쥐고 있어야
+ * 한다(원 주석).
+ */
 phys_addr_t DOMAIN_NS(iova_to_phys)(struct iommu_domain *domain,
 				    dma_addr_t iova)
 {
-	struct pt_iommu *iommu_table =
-		container_of(domain, struct pt_iommu, domain);
-	struct pt_range range;
-	pt_oaddr_t res;
-	int ret;
+	struct pt_iommu *iommu_table =	/* [한국어] 공용 도메인에서 */
+		container_of(domain, struct pt_iommu, domain);	/* [한국어] 이 계층의 객체로 */
+	struct pt_range range;	/* [한국어] 걸을 범위 */
+	pt_oaddr_t res;	/* [한국어] 찾은 출력 주소 */
+	int ret;	/* [한국어] 결과 */
 
-	ret = make_range(common_from_iommu(iommu_table), &range, iova, 1);
-	if (ret)
-		return ret;
+	ret = make_range(common_from_iommu(iommu_table), &range, iova, 1);	/* [한국어] 한 바이트짜리 범위 */
+	if (ret)	/* [한국어] 범위가 표 밖이면 */
+		return ret;	/* [한국어] 오류를 그대로 — 호출자는 0 이 아닌 값을 실패로 본다 */
 
-	ret = pt_walk_range(&range, __iova_to_phys, &res);
+	ret = pt_walk_range(&range, __iova_to_phys, &res);	/* [한국어] 최상위부터 따라 내려간다 */
 	/* PHYS_ADDR_MAX would be a better error code */
-	if (ret)
-		return 0;
-	return res;
+	if (ret)	/* [한국어] (원 주석: PHYS_ADDR_MAX 가 더 나은 오류값이겠지만) */
+		return 0;	/* [한국어] 코어 API 가 0 을 "없음"으로 정해 두었다 */
+	return res;	/* [한국어] 오프셋까지 반영된 물리 주소 */
 }
-EXPORT_SYMBOL_NS_GPL(DOMAIN_NS(iova_to_phys), "GENERIC_PT_IOMMU");
+EXPORT_SYMBOL_NS_GPL(DOMAIN_NS(iova_to_phys), "GENERIC_PT_IOMMU");	/* [한국어] 드라이버 모듈이 이 이름으로 가져다 쓴다 */
 
 struct pt_iommu_dirty_args {
 	struct iommu_dirty_bitmap *dirty;
 	unsigned int flags;
 };
 
+/*
+ * [한국어]
+ * record_dirty - 더티인 항목을 비트맵에 기록하고 필요하면 지운다
+ *
+ * @pts: 더티로 판정된 항목.
+ * @dirty: 비트맵과 플래그.
+ * @num_contig_lg2: 그 항목이 이루는 묶음의 크기.
+ *
+ * 길이 계산이 이 함수의 까다로운 부분이다. 연속 항목이면 묶음 전체가 한
+ * 매핑이지만, 순회가 다루는 범위가 그 묶음의 일부만 덮을 수 있다. 그래서
+ * 묶음의 끝과 순회의 끝 중 앞선 쪽까지만 기록한다.
+ *
+ * IOMMU_DIRTY_NO_CLEAR 가 없으면 표시를 지우고 그 범위를 무효화 목록에
+ * 넣는다 — pt_common.h 의 계약대로, TLB 를 비운 뒤부터 다시 세어야 하기
+ * 때문이다.
+ *
+ * 원 주석이 짚듯 여기에는 캐시 플러시가 필요 없다. 비일관 플랫폼과 원자적
+ * 더티 추적은 함께 쓸 수 없어, 이 경로가 도는 하드웨어는 표를 일관되게
+ * 본다.
+ */
 static void record_dirty(struct pt_state *pts,
 			 struct pt_iommu_dirty_args *dirty,
 			 unsigned int num_contig_lg2)
 {
-	pt_vaddr_t dirty_len;
+	pt_vaddr_t dirty_len;	/* [한국어] 비트맵에 기록할 길이 */
 
-	if (num_contig_lg2 != ilog2(1)) {
-		unsigned int index = pts->index;
-		unsigned int end_index = log2_set_mod_max_t(
-			unsigned int, pts->index, num_contig_lg2);
+	if (num_contig_lg2 != ilog2(1)) {	/* [한국어] 연속 묶음이면 */
+		unsigned int index = pts->index;	/* [한국어] 현재 위치 */
+		unsigned int end_index = log2_set_mod_max_t(	/* [한국어] 묶음의 마지막 자리 */
+			unsigned int, pts->index, num_contig_lg2);	/* [한국어] 하위 비트를 모두 세워 구한다 */
 
 		/* Adjust for being contained inside a contiguous page */
-		end_index = min(end_index, pts->end_index);
-		dirty_len = (end_index - index) *
-				log2_to_int(pt_table_item_lg2sz(pts));
+		end_index = min(end_index, pts->end_index);	/* [한국어] (원 주석: 연속 페이지 안에 들어 있는 경우를 보정한다) */
+		dirty_len = (end_index - index) *	/* [한국어] 순회 범위가 덮는 항목 수에 */
+				log2_to_int(pt_table_item_lg2sz(pts));	/* [한국어] 항목 크기를 곱한다 */
 	} else {
-		dirty_len = log2_to_int(pt_table_item_lg2sz(pts));
+		dirty_len = log2_to_int(pt_table_item_lg2sz(pts));	/* [한국어] 단일 항목이면 그 크기 그대로 */
 	}
 
-	if (dirty->dirty->bitmap)
-		iova_bitmap_set(dirty->dirty->bitmap, pts->range->va,
-				dirty_len);
+	if (dirty->dirty->bitmap)	/* [한국어] 기록할 비트맵이 있으면 */
+		iova_bitmap_set(dirty->dirty->bitmap, pts->range->va,	/* [한국어] 그 주소 범위를 */
+				dirty_len);	/* [한국어] 더티로 표시한다 */
 
-	if (!(dirty->flags & IOMMU_DIRTY_NO_CLEAR)) {
+	if (!(dirty->flags & IOMMU_DIRTY_NO_CLEAR)) {	/* [한국어] 지우라는 요청이면 */
 		/*
 		 * No write log required because DMA incoherence and atomic
 		 * dirty tracking bits can't work together
 		 */
-		pt_entry_make_write_clean(pts);
-		iommu_iotlb_gather_add_range(dirty->dirty->gather,
-					     pts->range->va, dirty_len);
+		pt_entry_make_write_clean(pts);	/* [한국어] (원 주석: 비일관 DMA 와 원자적 더티 추적은 함께 쓸 수 없어 쓰기 로그가 필요 없다) */
+		iommu_iotlb_gather_add_range(dirty->dirty->gather,	/* [한국어] TLB 를 비워야 다음 쓰기가 표시를 남긴다 */
+					     pts->range->va, dirty_len);	/* [한국어] 그 범위를 무효화 목록에 */
 	}
 }
 
+/*
+ * [한국어]
+ * __read_and_clear_dirty - 한 단계의 항목들을 훑는 워커
+ *
+ * @range: 걷는 범위.
+ * @arg: 비트맵과 플래그.
+ * @level: 현재 단계.
+ * @table: 그 단계의 표.
+ * @return: 0 성공, 음수면 아래 단계에서 실패.
+ *
+ * 표를 만나면 재귀하고, 잎을 만나면 더티인지 보고 기록한다.
+ *
+ * PT_MAKE_LEVELS 로 펼치지 않고 자기 이름으로 재귀하는 점이 iova_to_phys
+ * 와 다르다 — 이 경로는 성능이 덜 중요하고, 펼치면 코드가 크게 는다.
+ */
 static inline int __read_and_clear_dirty(struct pt_range *range, void *arg,
 					 unsigned int level,
 					 struct pt_table_p *table)
 {
-	struct pt_state pts = pt_init(range, level, table);
-	struct pt_iommu_dirty_args *dirty = arg;
-	int ret;
+	struct pt_state pts = pt_init(range, level, table);	/* [한국어] 이 단계의 순회 상태 */
+	struct pt_iommu_dirty_args *dirty = arg;	/* [한국어] 비트맵과 플래그 */
+	int ret;	/* [한국어] 아래 단계의 결과 */
 
-	for_each_pt_level_entry(&pts) {
-		if (pts.type == PT_ENTRY_TABLE) {
-			ret = pt_descend(&pts, arg, __read_and_clear_dirty);
-			if (ret)
-				return ret;
-			continue;
+	for_each_pt_level_entry(&pts) {	/* [한국어] 이 단계의 항목들을 훑는다 */
+		if (pts.type == PT_ENTRY_TABLE) {	/* [한국어] 아래 표면 */
+			ret = pt_descend(&pts, arg, __read_and_clear_dirty);	/* [한국어] 재귀한다 — 펼치지 않아 코드가 작다 */
+			if (ret)	/* [한국어] 실패면 */
+				return ret;	/* [한국어] 바로 전한다 */
+			continue;	/* [한국어] 다음 항목으로 */
 		}
-		if (pts.type == PT_ENTRY_OA && pt_entry_is_write_dirty(&pts))
-			record_dirty(&pts, dirty,
-				     pt_entry_num_contig_lg2(&pts));
+		if (pts.type == PT_ENTRY_OA && pt_entry_is_write_dirty(&pts))	/* [한국어] 잎이고 쓰기가 있었으면 */
+			record_dirty(&pts, dirty,	/* [한국어] 비트맵에 기록하고 */
+				     pt_entry_num_contig_lg2(&pts));	/* [한국어] 묶음 크기만큼의 범위로 */
 	}
-	return 0;
+	return 0;	/* [한국어] 이 단계를 다 돌았다 */
 }
 
 /**
@@ -277,67 +499,114 @@ static inline int __read_and_clear_dirty(struct pt_range *range, void *arg,
  *
  * Returns: -ERRNO on failure, 0 on success.
  */
+/*
+ * [한국어]
+ * (위 kdoc 과 함께 읽을 것)
+ * read_and_clear_dirty - 범위의 더티 상태를 읽어 비트맵에 담는다
+ *
+ * @domain: 대상 도메인.
+ * @iova: 시작 주소.
+ * @size: 길이.
+ * @flags: IOMMU_DIRTY_NO_CLEAR 조합.
+ * @dirty: 결과를 담을 비트맵과 무효화 자리.
+ * @return: 0 성공, 음수면 실패.
+ *
+ * 라이브 마이그레이션이 쓰는 경로다. 게스트가 도는 동안 어느 페이지가
+ * 바뀌었는지를 이 비트맵으로 알아내 그것만 다시 보낸다.
+ *
+ * 맨 앞의 #if 가 눈에 띈다 — iommufd 를 끄거나 형식에 더티 비트가 없으면
+ * 이 함수 전체가 -EOPNOTSUPP 하나로 접힌다.
+ *
+ * 실행 컨텍스트: 호출자가 그 범위의 읽기 락을 쥐고 있어야 한다(원 주석).
+ */
 int DOMAIN_NS(read_and_clear_dirty)(struct iommu_domain *domain,
 				    unsigned long iova, size_t size,
 				    unsigned long flags,
 				    struct iommu_dirty_bitmap *dirty)
 {
-	struct pt_iommu *iommu_table =
-		container_of(domain, struct pt_iommu, domain);
-	struct pt_iommu_dirty_args dirty_args = {
-		.dirty = dirty,
-		.flags = flags,
+	struct pt_iommu *iommu_table =	/* [한국어] 공용 도메인에서 */
+		container_of(domain, struct pt_iommu, domain);	/* [한국어] 이 계층의 객체로 */
+	struct pt_iommu_dirty_args dirty_args = {	/* [한국어] 워커에 넘길 묶음 */
+		.dirty = dirty,	/* [한국어] 결과를 담을 비트맵 */
+		.flags = flags,	/* [한국어] 지울 것인지 여부 */
 	};
-	struct pt_range range;
-	int ret;
+	struct pt_range range;	/* [한국어] 걸을 범위 */
+	int ret;	/* [한국어] 결과 */
 
 #if !IS_ENABLED(CONFIG_IOMMUFD_DRIVER) || !defined(pt_entry_is_write_dirty)
-	return -EOPNOTSUPP;
+	return -EOPNOTSUPP;	/* [한국어] iommufd 를 껐거나 형식에 더티 비트가 없으면 함수 전체가 이 한 줄로 접힌다 */
 #endif
 
-	ret = make_range(common_from_iommu(iommu_table), &range, iova, size);
-	if (ret)
-		return ret;
+	ret = make_range(common_from_iommu(iommu_table), &range, iova, size);	/* [한국어] 요청 범위 */
+	if (ret)	/* [한국어] 표 밖이면 */
+		return ret;	/* [한국어] 거절 */
 
-	ret = pt_walk_range(&range, __read_and_clear_dirty, &dirty_args);
-	PT_WARN_ON(ret);
-	return ret;
+	ret = pt_walk_range(&range, __read_and_clear_dirty, &dirty_args);	/* [한국어] 범위를 훑으며 기록한다 */
+	PT_WARN_ON(ret);	/* [한국어] 이 워커는 실패하지 않아야 한다 */
+	return ret;	/* [한국어] 성패 */
 }
-EXPORT_SYMBOL_NS_GPL(DOMAIN_NS(read_and_clear_dirty), "GENERIC_PT_IOMMU");
+EXPORT_SYMBOL_NS_GPL(DOMAIN_NS(read_and_clear_dirty), "GENERIC_PT_IOMMU");	/* [한국어] 더티 추적 진입점을 내보낸다 */
 
+/*
+ * [한국어]
+ * __set_dirty - 한 주소의 항목에 더티 표시를 남기는 워커
+ *
+ * @range: 걷는 범위.
+ * @arg: 쓰지 않는다.
+ * @level: 현재 단계.
+ * @table: 그 단계의 표.
+ * @return: 0 성공, -ENOENT 매핑 없음, -EAGAIN 경합.
+ *
+ * 시험용 경로다. 하드웨어가 더티를 찍는 것을 소프트웨어가 흉내 내어,
+ * 읽기 쪽 코드를 실제 장치 없이 검증할 수 있게 한다.
+ *
+ * -EAGAIN 은 cmpxchg 가 실패했다는 뜻이다 — 그사이 항목이 바뀌었으므로
+ * 호출자가 다시 시도해야 한다.
+ */
 static inline int __set_dirty(struct pt_range *range, void *arg,
 			      unsigned int level, struct pt_table_p *table)
 {
-	struct pt_state pts = pt_init(range, level, table);
+	struct pt_state pts = pt_init(range, level, table);	/* [한국어] 이 단계의 순회 상태 */
 
-	switch (pt_load_single_entry(&pts)) {
-	case PT_ENTRY_EMPTY:
-		return -ENOENT;
-	case PT_ENTRY_TABLE:
-		return pt_descend(&pts, arg, __set_dirty);
-	case PT_ENTRY_OA:
-		if (!pt_entry_make_write_dirty(&pts))
-			return -EAGAIN;
-		return 0;
+	switch (pt_load_single_entry(&pts)) {	/* [한국어] 한 항목만 본다 */
+	case PT_ENTRY_EMPTY:	/* [한국어] 매핑이 없으면 */
+		return -ENOENT;	/* [한국어] 표시할 자리가 없다 */
+	case PT_ENTRY_TABLE:	/* [한국어] 아래 표면 */
+		return pt_descend(&pts, arg, __set_dirty);	/* [한국어] 내려간다 */
+	case PT_ENTRY_OA:	/* [한국어] 잎에 닿았으면 */
+		if (!pt_entry_make_write_dirty(&pts))	/* [한국어] cmpxchg 가 실패하면 */
+			return -EAGAIN;	/* [한국어] 그사이 항목이 바뀌었다 — 다시 시도해야 한다 */
+		return 0;	/* [한국어] 표시했다 */
 	}
-	return -ENOENT;
+	return -ENOENT;	/* [한국어] enum 밖의 값에 대비한 경로 */
 }
 
+/*
+ * [한국어]
+ * set_dirty - 한 주소를 더티로 표시한다(시험용)
+ *
+ * @iommu_table: 대상 페이지 테이블.
+ * @iova: 표시할 주소.
+ * @return: 0 성공, 음수면 실패.
+ *
+ * 원 주석이 한계를 밝힌다 — 아직 잠금이 없어 시험이 경쟁적으로 부르면
+ * 깨질 수 있고, 언젠가 RCU 로 감싸야 한다.
+ */
 static int __maybe_unused NS(set_dirty)(struct pt_iommu *iommu_table,
 					dma_addr_t iova)
 {
-	struct pt_range range;
-	int ret;
+	struct pt_range range;	/* [한국어] 걸을 범위 */
+	int ret;	/* [한국어] 결과 */
 
-	ret = make_range(common_from_iommu(iommu_table), &range, iova, 1);
-	if (ret)
-		return ret;
+	ret = make_range(common_from_iommu(iommu_table), &range, iova, 1);	/* [한국어] 한 바이트짜리 범위 */
+	if (ret)	/* [한국어] 표 밖이면 */
+		return ret;	/* [한국어] 거절 */
 
 	/*
 	 * Note: There is no locking here yet, if the test suite races this it
 	 * can crash. It should use RCU locking eventually.
 	 */
-	return pt_walk_range(&range, __set_dirty, NULL);
+	return pt_walk_range(&range, __set_dirty, NULL);	/* [한국어] (원 주석: 아직 잠금이 없어 시험이 경쟁하면 깨질 수 있다) */
 }
 
 struct pt_iommu_collect_args {
