@@ -3186,10 +3186,11 @@ EXPORT_SYMBOL_GPL(vfio_combine_iova_ranges);
 /* Ranges should fit into a single kernel page */
 /* [한국어] 감시 구간 개수의 상한. 바로 위 상류 주석이 밝히듯 커널 페이지 하나에
  * 들어가는 개수로 정한다. 사용자가 개수를 정하는 값이므로 상한이 없으면
- * 임의 크기의 커널 할당을 요구할 수 있다. */
+ * 임의 크기의 커널 할당을 요구할 수 있다.
+ *
+ * 값은 한 페이지를 구간 구조체 하나의 크기로 나눈 것이라, 구조체가 커지면
+ * 상한이 자동으로 줄어 한 페이지 규칙이 그대로 유지된다. */
 #define LOG_MAX_RANGES \
-	/* [한국어] 한 페이지를 구간 구조체 하나의 크기로 나눈 값. 구조체 크기가 커지면
-	 * 상한이 자동으로 줄어 한 페이지 규칙이 유지된다. */
 	(PAGE_SIZE / sizeof(struct vfio_device_feature_dma_logging_range))
 
 /* [한국어]

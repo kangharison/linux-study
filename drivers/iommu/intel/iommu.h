@@ -241,7 +241,9 @@
 #define cap_super_page_val(c)	(((c) >> 34) & 0xf)	/* [한국어] 2단계가 지원하는 큰 페이지 크기 비트맵(비트0=2MB, 비트1=1GB) */
 
 #define cap_fault_reg_offset(c)	((((c) >> 24) & 0x3ff) * 16)	/* [한국어] 폴트 기록 레지스터들이 시작되는 오프셋. 필드 값에 16을 곱한다 */
-#define cap_max_fault_reg_offset(c) \	/* [한국어] 그 마지막 레지스터의 끝. 폴트 순회의 종료 조건이다 */
+/* [한국어] 그 마지막 레지스터의 끝. 폴트 순회의 종료 조건이다
+ * (매크로 이어짐 표시 \ 뒤에는 주석을 붙일 수 없어 위로 옮겼다.) */
+#define cap_max_fault_reg_offset(c) \
 	(cap_fault_reg_offset(c) + cap_num_fault_regs(c) * 16)	/* [한국어] 시작 오프셋 + 개수 × 16바이트. 폴트 기록 순회의 종료 조건이다 */
 
 #define cap_zlr(c)		(((c) >> 22) & 1)	/* [한국어] Zero Length Read 지원. 길이 0 읽기 요청을 정상 처리하는지 */
@@ -391,9 +393,19 @@
 #define DMA_ECMD_ECCAP3_DCNTS		BIT_ULL(49)	/* [한국어] Disable Counters 지원 */
 #define DMA_ECMD_ECCAP3_FCNTS		BIT_ULL(52)	/* [한국어] Freeze Counters 지원 */
 #define DMA_ECMD_ECCAP3_UFCNTS		BIT_ULL(53)	/* [한국어] Unfreeze Counters 지원 */
-#define DMA_ECMD_ECCAP3_ESSENTIAL	(DMA_ECMD_ECCAP3_ECNTS |	\	/* [한국어] 성능 카운터를 쓰려면 넷 다 있어야 한다. perfmon 초기화가 이 조합으로 한 번에 확인한다 */
-					 DMA_ECMD_ECCAP3_DCNTS |	\	/* [한국어] 끄기도 */
-					 DMA_ECMD_ECCAP3_FCNTS |	\	/* [한국어] 멈추기도 */
+/*
+ * [한국어] 아래 매크로의 각 줄이 하는 일
+ *
+ * 성능 카운터를 쓰려면 넷 다 있어야 한다. perfmon 초기화가 이 조합으로 한 번에 확인한다
+ *
+ * - DMA_ECMD_ECCAP3_DCNTS |
+ *     끄기도
+ * - DMA_ECMD_ECCAP3_FCNTS |
+ *     멈추기도
+ */
+#define DMA_ECMD_ECCAP3_ESSENTIAL	(DMA_ECMD_ECCAP3_ECNTS |	\
+					 DMA_ECMD_ECCAP3_DCNTS |	\
+					 DMA_ECMD_ECCAP3_FCNTS |	\
 					 DMA_ECMD_ECCAP3_UFCNTS)	/* [한국어] 다시 진행시키기도 모두 지원해야 성능 카운터를 쓸 수 있다 */
 
 /* FECTL_REG */
@@ -427,17 +439,43 @@
 /* PERFINTRSTS_REG */
 #define DMA_PERFINTRSTS_PIS	((u32)1)	/* [한국어] 성능 카운터 인터럽트가 걸렸음을 알리는 비트 */
 
-#define IOMMU_WAIT_OP(iommu, offset, op, cond, sts)			\	/* [한국어] 레지스터가 원하는 상태가 될 때까지 도는 관용구. VT-d 의 명령은 대부분 "비트를 쓰고 상태 비트가 바뀔 때까지 기다린다" 형태라 매크로로 뺐다 */
-do {									\	/* [한국어] 매크로를 한 문장처럼 쓰게 하는 관용구 */
-	cycles_t start_time = get_cycles();				\	/* [한국어] 시작 시각. 타임아웃을 재려면 필요하다 */
-	while (1) {							\	/* [한국어] 조건이 맞을 때까지 반복 */
-		sts = op(iommu->reg + offset);				\	/* [한국어] 레지스터를 읽는다. op 는 readl/readq 중 하나로 호출자가 넘긴다 */
-		if (cond)						\	/* [한국어] 원하는 조건이 되었으면 */
-			break;						\	/* [한국어] 기다림 종료 */
-		if (DMAR_OPERATION_TIMEOUT < (get_cycles() - start_time))\	/* [한국어] 정해진 시간을 넘겼으면 */
-			panic("DMAR hardware is malfunctioning\n");	\	/* [한국어] 부팅을 멈춘다. IOMMU 가 응답하지 않는데 계속 진행하면 격리 상태를 알 수 없어 더 위험하다 */
-		cpu_relax();						\	/* [한국어] 바쁜 대기 중임을 CPU 에 알린다(하이퍼스레드 양보, 전력 절약) */
-	}								\	/* [한국어] 루프의 끝 */
+/*
+ * [한국어] 아래 매크로의 각 줄이 하는 일
+ *
+ * 레지스터가 원하는 상태가 될 때까지 도는 관용구. VT-d 의 명령은 대부분 "비트를 쓰고 상태 비트가 바뀔 때까지 기다린다" 형태라 매크로로 뺐다
+ *
+ * - do {
+ *     매크로를 한 문장처럼 쓰게 하는 관용구
+ * - cycles_t start_time = get_cycles();
+ *     시작 시각. 타임아웃을 재려면 필요하다
+ * - while (1) {
+ *     조건이 맞을 때까지 반복
+ * - sts = op(iommu->reg + offset);
+ *     레지스터를 읽는다. op 는 readl/readq 중 하나로 호출자가 넘긴다
+ * - if (cond)
+ *     원하는 조건이 되었으면
+ * - break;
+ *     기다림 종료
+ * - if (DMAR_OPERATION_TIMEOUT < (get_cycles() - start_time))
+ *     정해진 시간을 넘겼으면
+ * - panic("DMAR hardware is malfunctioning\n");
+ *     부팅을 멈춘다. IOMMU 가 응답하지 않는데 계속 진행하면 격리 상태를 알 수 없어 더 위험하다
+ * - cpu_relax();
+ *     바쁜 대기 중임을 CPU 에 알린다(하이퍼스레드 양보, 전력 절약)
+ * - }
+ *     루프의 끝
+ */
+#define IOMMU_WAIT_OP(iommu, offset, op, cond, sts)			\
+do {									\
+	cycles_t start_time = get_cycles();				\
+	while (1) {							\
+		sts = op(iommu->reg + offset);				\
+		if (cond)						\
+			break;						\
+		if (DMAR_OPERATION_TIMEOUT < (get_cycles() - start_time))\
+			panic("DMAR hardware is malfunctioning\n");	\
+		cpu_relax();						\
+	}								\
 } while (0)	/* [한국어] 관용구의 끝. 세미콜론을 붙여 쓸 수 있게 한다 */
 
 #define QI_LENGTH	256	/* queue length */	/* [한국어] 무효화 큐에 담을 수 있는 서술자 수 (위 영어 주석) */
@@ -485,7 +523,9 @@ enum {
 #define QI_DEV_IOTLB_SID(sid)	((u64)((sid) & 0xffff) << 32)	/* [한국어] 디바이스 TLB 를 비울 장치의 소스 id */
 #define QI_DEV_IOTLB_QDEP(qdep)	(((qdep) & 0x1f) << 16)	/* [한국어] 그 장치의 ATS 큐 깊이. 이보다 많이 보내면 응답이 유실된다 */
 #define QI_DEV_IOTLB_ADDR(addr)	((u64)(addr) & VTD_PAGE_MASK)	/* [한국어] 무효화할 주소 */
-#define QI_DEV_IOTLB_PFSID(pfsid) (((u64)(pfsid & 0xf) << 12) | \	/* [한국어] VF 의 무효화에 PF 의 소스 id 를 싣는다. 필드가 두 조각으로 나뉘어 있어 하위 4비트와 상위 12비트를 따로 넣는다 */
+/* [한국어] VF 의 무효화에 PF 의 소스 id 를 싣는다. 필드가 두 조각으로 나뉘어 있어 하위 4비트와 상위 12비트를 따로 넣는다
+ * (매크로 이어짐 표시 \ 뒤에는 주석을 붙일 수 없어 위로 옮겼다.) */
+#define QI_DEV_IOTLB_PFSID(pfsid) (((u64)(pfsid & 0xf) << 12) | \
 				   ((u64)((pfsid >> 4) & 0xfff) << 52))	/* [한국어] PF 소스 id 의 상위 12비트는 떨어진 자리에 들어간다 — 필드가 두 조각으로 나뉜 서술자 형식이다 */
 #define QI_DEV_IOTLB_SIZE	1	/* [한국어] 범위 지정 방식의 플래그 */
 #define QI_DEV_IOTLB_MAX_INVS	32	/* [한국어] 한 번에 보낼 수 있는 디바이스 TLB 무효화의 최대 개수 */
@@ -515,7 +555,9 @@ enum {
 #define QI_DEV_EIOTLB_PASID(p)	((u64)((p) & 0xfffff) << 32)	/* [한국어] 대상 PASID */
 #define QI_DEV_EIOTLB_SID(sid)	((u64)((sid) & 0xffff) << 16)	/* [한국어] 대상 소스 id */
 #define QI_DEV_EIOTLB_QDEP(qd)	((u64)((qd) & 0x1f) << 4)	/* [한국어] 장치의 ATS 큐 깊이 */
-#define QI_DEV_EIOTLB_PFSID(pfsid) (((u64)(pfsid & 0xf) << 12) | \	/* [한국어] PF 소스 id. 기본 형식과 마찬가지로 두 조각으로 나뉜다 */
+/* [한국어] PF 소스 id. 기본 형식과 마찬가지로 두 조각으로 나뉜다
+ * (매크로 이어짐 표시 \ 뒤에는 주석을 붙일 수 없어 위로 옮겼다.) */
+#define QI_DEV_EIOTLB_PFSID(pfsid) (((u64)(pfsid & 0xf) << 12) | \
 				    ((u64)((pfsid >> 4) & 0xfff) << 52))	/* [한국어] 확장 형식에서도 같은 방식으로 두 조각에 나눠 넣는다 */
 #define QI_DEV_EIOTLB_MAX_INVS	32	/* [한국어] 한 번에 보낼 수 있는 최대 개수 */
 
@@ -724,12 +766,24 @@ enum {
 #define VTD_FLAG_SVM_CAPABLE		(1 << 2)	/* [한국어] 이 유닛으로 SVA 를 쓸 수 있다. intel_svm_check 가 세운다 */
 
 #define sm_supported(iommu)	(intel_iommu_sm && ecap_smts((iommu)->ecap))	/* [한국어] scalable 모드를 실제로 쓰는가. 하드웨어 지원(ecap_smts)과 부트 옵션(intel_iommu_sm) 둘 다 필요하다 — 아래 판별자들이 모두 이것을 전제로 한다 */
-#define pasid_supported(iommu)	(sm_supported(iommu) &&			\	/* [한국어] PASID 를 쓸 수 있는가. scalable 모드 위에서만 성립한다 */
+/* [한국어] PASID 를 쓸 수 있는가. scalable 모드 위에서만 성립한다
+ * (매크로 이어짐 표시 \ 뒤에는 주석을 붙일 수 없어 위로 옮겼다.) */
+#define pasid_supported(iommu)	(sm_supported(iommu) &&			\
 				 ecap_pasid((iommu)->ecap))	/* [한국어] 하드웨어의 PASID 지원까지 함께 요구한다 */
-#define ssads_supported(iommu) (sm_supported(iommu) &&                 \	/* [한국어] 2단계 더티 추적을 쓸 수 있는가. 추적 비트(slads)뿐 아니라 워크 코히런시(smpwc)까지 요구하는 것은, 하드웨어가 남긴 비트를 CPU 가 캐시를 거치지 않고 읽어야 하기 때문이다 */
-				ecap_slads((iommu)->ecap) &&           \	/* [한국어] 2단계 접근/더티 비트와 */
+/*
+ * [한국어] 아래 매크로의 각 줄이 하는 일
+ *
+ * 2단계 더티 추적을 쓸 수 있는가. 추적 비트(slads)뿐 아니라 워크 코히런시(smpwc)까지 요구하는 것은, 하드웨어가 남긴 비트를 CPU 가 캐시를 거치지 않고 읽어야 하기 때문이다
+ *
+ * - ecap_slads((iommu)->ecap) &&
+ *     2단계 접근/더티 비트와
+ */
+#define ssads_supported(iommu) (sm_supported(iommu) &&                 \
+				ecap_slads((iommu)->ecap) &&           \
 				ecap_smpwc(iommu->ecap))	/* [한국어] 워크 코히런시가 함께 있어야 한다 — 하드웨어가 남긴 비트를 CPU 가 캐시를 거치지 않고 읽어야 하기 때문이다 */
-#define nested_supported(iommu)	(sm_supported(iommu) &&			\	/* [한국어] 중첩 변환을 쓸 수 있는가 */
+/* [한국어] 중첩 변환을 쓸 수 있는가
+ * (매크로 이어짐 표시 \ 뒤에는 주석을 붙일 수 없어 위로 옮겼다.) */
+#define nested_supported(iommu)	(sm_supported(iommu) &&			\
 				 ecap_nest((iommu)->ecap))	/* [한국어] 하드웨어의 중첩 변환 지원까지 함께 요구한다 */
 
 struct pasid_entry;	/* [한국어] 전방 선언 — PASID 테이블의 항목. 정의는 pasid.h 에 있다 */

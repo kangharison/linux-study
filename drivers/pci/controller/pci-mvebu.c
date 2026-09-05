@@ -198,13 +198,16 @@
 #define  PCIE_CONF_DEV(d)		(((d) & 0x1f) << 11)
 /* [한국어] 기능 번호를 8비트 자리로. 3비트다. */
 #define  PCIE_CONF_FUNC(f)		(((f) & 0x7) << 8)
-/* [한국어] 위 넷을 한데 조립해 주소 레지스터에 쓸 값을 만든다. */
+/*
+ * [한국어] 위 넷을 한데 조립해 주소 레지스터에 쓸 값을 만든다.
+ *
+ * 첫 줄이 버스와 장치 번호, 둘째 줄이 기능 번호와 레지스터 오프셋,
+ * 마지막 줄이 활성 비트다. 이 값을 주소 레지스터에 쓴 뒤
+ * PCIE_CONF_DATA_OFF 를 읽고 써서 config 접근이 완성된다.
+ */
 #define  PCIE_CONF_ADDR(bus, devfn, where) \
-	/* [한국어] 버스와 장치 번호를, */
 	(PCIE_CONF_BUS(bus) | PCIE_CONF_DEV(PCI_SLOT(devfn))    | \
-	 /* [한국어] 기능 번호와 레지스터 오프셋을, */
 	 PCIE_CONF_FUNC(PCI_FUNC(devfn)) | PCIE_CONF_REG(where) | \
-	 /* [한국어] 마지막으로 활성 비트를 함께 OR 한다. */
 	 PCIE_CONF_ADDR_EN)
 /* [한국어] config 접근의 데이터 레지스터. 주소를 세운 뒤 여기를 읽고 쓴다. */
 #define PCIE_CONF_DATA_OFF	0x18fc

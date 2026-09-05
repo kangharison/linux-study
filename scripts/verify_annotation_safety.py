@@ -119,26 +119,54 @@ def check_nested_open(src: str) -> list[str]:
 
 
 def check_macros(src: str) -> list[str]:
-    r"""Mode 2: a stray backslash left inside code by a badly placed comment.
+    r"""Mode 2: a comment that defeats a macro's line continuation.
 
     Line splicing (translation phase 2) runs *before* comments are replaced
-    (phase 3), so writing ``#define Q(v) \ /* note */ \`` still splices, but the
-    first backslash survives into the macro body as a stray token and gcc
-    rejects it. A backslash is only ever legal at end-of-line or inside a
-    literal, so anything else is damage.
+    (phase 3). So a backslash is only a continuation when the newline follows it
+    immediately -- ``#define Q(v) \ /* note */`` does NOT splice, and the macro
+    silently ends at that line. Neither does a comment line placed *between* two
+    continuation lines: the first backslash is then followed by comment text, not
+    a newline.
+
+    Both mistakes are invisible to the token fingerprint, because that strips
+    comments before splicing and so sees a well-formed macro either way. They
+    have to be caught on the raw text, which is what this does:
+
+      1. a line whose code ends in ``\`` followed by ``/*`` or ``//``
+      2. a comment-only line whose previous line ends in ``\``
+
+    A stray backslash anywhere else in code is damage too, and is still flagged.
     """
     problems: list[str] = []
     stripped, _ = strip_comments(src)
-    for lineno, line in enumerate(stripped.split("\n"), 1):
+    raw_lines = src.split("\n")
+    stripped_lines = stripped.split("\n")
+    trailing = re.compile(r"\\[ \t]*(?:/\*|//)")
+    prev_continues = False
+    for lineno, line in enumerate(stripped_lines, 1):
+        raw = raw_lines[lineno - 1] if lineno - 1 < len(raw_lines) else ""
+        continues = line.rstrip().endswith("\\")
+        if continues and trailing.search(raw):
+            problems.append(
+                f"L{lineno}: comment after continuation backslash: {raw.strip()[:60]}"
+            )
+        elif (prev_continues and raw.strip() and not line.strip()
+              and not raw.rstrip().endswith("\\")):
+            # A comment line inside a macro body is fine as long as it carries
+            # its own continuation backslash -- splicing runs before comment
+            # removal, so the comment is joined in and then dropped. Without
+            # the backslash the macro simply ends here.
+            problems.append(
+                f"L{lineno}: comment line ends a macro body: {raw.strip()[:60]}"
+            )
         body = line.rstrip()
         if body.endswith("\\"):
             body = body[:-1]  # the legitimate continuation backslash
-        if "\\" not in body:
-            continue
-        if any(tok == "\\" for tok in TOKEN.findall(body)):
+        if "\\" in body and any(tok == "\\" for tok in TOKEN.findall(body)):
             problems.append(
                 f"L{lineno}: stray backslash in code: {line.strip()[:60]}"
             )
+        prev_continues = continues
     return problems
 
 

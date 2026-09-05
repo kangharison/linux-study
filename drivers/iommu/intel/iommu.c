@@ -435,7 +435,9 @@ static LIST_HEAD(dmar_atsr_units);	/* [한국어] ATS 지원을 보고한 루트
 static LIST_HEAD(dmar_rmrr_units);	/* [한국어] 펌웨어가 예약한 메모리 구간 목록. 장치 프로브 때 항등 매핑 여부를 정하는 근거가 된다 */
 static LIST_HEAD(dmar_satc_units);	/* [한국어] ATS 가 필수인 SoC 통합 장치 목록 */
 
-#define for_each_rmrr_units(rmrr) \	/* [한국어] RMRR 목록 순회 관용구. 여러 곳에서 같은 순회를 하므로 매크로로 뺐다 */
+/* [한국어] RMRR 목록 순회 관용구. 여러 곳에서 같은 순회를 하므로 매크로로 뺐다
+ * (매크로 이어짐 표시 \ 뒤에는 주석을 붙일 수 없어 위로 옮겼다.) */
+#define for_each_rmrr_units(rmrr) \
 	list_for_each_entry(rmrr, &dmar_rmrr_units, list)	/* [한국어] 위 매크로의 본체 */
 
 static void intel_iommu_domain_free(struct iommu_domain *domain);

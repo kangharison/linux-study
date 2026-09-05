@@ -367,30 +367,37 @@ static u32 rcar_read_conf(struct rcar_pcie *pcie, int where)
 
 /* [한국어] 아래 인라인 어셈블리 우회는 ARM 32비트에서만 필요하다. */
 #ifdef CONFIG_ARM
-/* [한국어] 없는 장치에 접근하면 나는 외부 abort 를 커널 oops 로 만들지 않기 위한 틀.
- * str/ldr 중 하나를 instr 로 받아 두 함수가 공유한다. */
+/*
+ * [한국어] 없는 장치에 접근하면 나는 외부 abort 를 커널 oops 로 만들지 않기 위한 틀.
+ * str/ldr 중 하나를 instr 로 받아 두 함수가 공유한다.
+ *
+ * 아래 어셈블리의 각 줄:
+ *  - .arch armv7-a  : 이 블록을 armv7-a 명령 집합으로 어셈블한다.
+ *  - 1: instr %1,[%2] : 실제 접근 명령. %1 이 값, %2 가 주소이며,
+ *                     1번 레이블이 예외 테이블의 키가 된다.
+ *  - 2: isb         : 명령 동기화 장벽. abort 가 비동기라 다음 명령에서
+ *                     잡힐 수 있어, 이 지점도 예외 테이블에 함께 등록한다.
+ *  - 3: pushsection text.fixup : 정상 경로가 도달하는 지점이자,
+ *                     fixup 코드를 .text.fixup 섹션에 넣기 시작하는 곳.
+ *  - 4: mov %0, PCIBIOS_SET_FAILED : 예외가 나면 여기로 점프해
+ *                     %0(error)에 실패 코드를 넣는다.
+ *  - b 3b           : 그리고 3번(정상 흐름 뒤)으로 돌아가 함수가 그 코드를 돌려주게 한다.
+ *  - pushsection __ex_table : 여기부터 예외 테이블 항목을 그 섹션에 넣는다.
+ *  - long 1b, 4b    : 1번(접근 명령)에서 난 예외를 4번(fixup)으로 보낸다.
+ *  - long 2b, 4b    : 2번(isb)에서 난 예외도 같은 곳으로 보낸다.
+ */
 #define __rcar_pci_rw_reg_workaround(instr)				\
-		/* [한국어] 이 블록을 armv7-a 명령 집합으로 어셈블한다. */
 		"	.arch armv7-a\n"				\
-		/* [한국어] 실제 접근 명령. %1 이 값, %2 가 주소다. 1번 레이블이 예외 테이블의 키가 된다. */
 		"1:	" instr " %1, [%2]\n"				\
-		/* [한국어] 명령 동기화 장벽. abort 가 비동기라 다음 명령에서 잡힐 수 있어,
-		 * 이 지점도 아래에서 예외 테이블에 함께 등록한다. */
 		"2:	isb\n"						\
-		/* [한국어] 정상 경로가 도달하는 지점이자, 아래 fixup 코드를 .text.fixup 섹션에 넣기 시작하는 곳. */
 		"3:	.pushsection .text.fixup,\"ax\"\n"		\
 		"	.align	2\n"					\
-		/* [한국어] 예외가 나면 여기로 점프한다. %0(error)에 PCIBIOS_SET_FAILED 를 넣는다. */
 		"4:	mov	%0, #" __stringify(PCIBIOS_SET_FAILED) "\n" \
-		/* [한국어] 그리고 3번(정상 흐름 뒤)으로 돌아가 함수가 실패 코드를 돌려주게 한다. */
 		"	b	3b\n"					\
 		"	.popsection\n"					\
-		/* [한국어] 여기부터 예외 테이블 항목을 __ex_table 섹션에 넣는다. */
 		"	.pushsection __ex_table,\"a\"\n"		\
 		"	.align	3\n"					\
-		/* [한국어] 1번(접근 명령)에서 난 예외를 4번(fixup)으로 보낸다. */
 		"	.long	1b, 4b\n"				\
-		/* [한국어] 2번(isb)에서 난 예외도 같은 곳으로 보낸다. */
 		"	.long	2b, 4b\n"				\
 		"	.popsection\n"
 #endif

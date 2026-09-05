@@ -413,8 +413,14 @@ static void iommu_domain_init(struct iommu_domain *domain, unsigned int type,	/*
 
 /* [한국어] 그룹 sysfs 속성 하나를 정의하는 매크로. __ATTR 이 이름과 권한을
  * 채우고, show/store 는 위에서 정의한 그룹 전용 시그니처를 받는다. */
+/*
+ * [한국어] 아래 매크로의 각 줄이 하는 일
+ *
+ * - struct iommu_group_attribute iommu_group_attr_##_name =
+ *     이름을 붙여 전역 변수를 만든다 — 아래 IOMMU_GROUP_ATTR 호출들이 이 매크로로 속성 객체를 찍어 낸다
+ */
 #define IOMMU_GROUP_ATTR(_name, _mode, _show, _store)		\
-struct iommu_group_attribute iommu_group_attr_##_name =		\	/* [한국어] 이름을 붙여 전역 변수를 만든다 — 아래 IOMMU_GROUP_ATTR 호출들이 이 매크로로 속성 객체를 찍어 낸다 */
+struct iommu_group_attribute iommu_group_attr_##_name =		\
 	__ATTR(_name, _mode, _show, _store)	/* [한국어] kobject 계층의 표준 초기화 매크로가 이름·권한·콜백을 채운다 */
 
 /* [한국어] sysfs 가 넘겨주는 일반 attribute 에서 우리 확장형으로 되짚는다. */

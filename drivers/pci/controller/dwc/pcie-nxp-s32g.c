@@ -208,11 +208,10 @@ struct s32g_pcie {
 	struct list_head ports;
 };
 
+/* [한국어] DWC 코어가 주는 dw_pcie 포인터를 이 드라이버의 구조체로 되돌린다.
+ * pci 가 구조체 맨 앞이라 오프셋이 0 이지만, container_of 를 쓰면 나중에
+ * 필드 순서가 바뀌어도 안전하다. */
 #define to_s32g_from_dw_pcie(x) \
-	/* [한국어] DWC 코어가 주는 dw_pcie 포인터를 이 드라이버의 구조체로 되돌린다.
-	 * pci 가 구조체 맨 앞이라 오프셋이 0 이지만, container_of 를 쓰면 나중에
-	 * 필드 순서가 바뀌어도 안전하다.
-	 * 줄 끝이 역슬래시로 이어지므로 이 설명을 매크로 위에 블록으로 둔다. */
 	container_of(x, struct s32g_pcie, pci)
 
 /* [한국어]

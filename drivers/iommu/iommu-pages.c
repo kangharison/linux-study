@@ -56,8 +56,16 @@
 #include <linux/gfp.h>	/* [한국어] 할당 플래그 */
 #include <linux/mm.h>	/* [한국어] folio 와 vmstat 집계 */
 
-#define IOPTDESC_MATCH(pg_elm, elm)                    \	/* [한국어] struct page 의 필드와 struct ioptdesc 의 대응 필드가 같은 오프셋인지 컴파일 시점에 확인하는 매크로 */
-	static_assert(offsetof(struct page, pg_elm) == \	/* [한국어] 두 오프셋이 다르면 빌드가 멈춘다 */
+/*
+ * [한국어] 아래 매크로의 각 줄이 하는 일
+ *
+ * struct page 의 필드와 struct ioptdesc 의 대응 필드가 같은 오프셋인지 컴파일 시점에 확인하는 매크로
+ *
+ * - static_assert(offsetof(struct page, pg_elm) ==
+ *     두 오프셋이 다르면 빌드가 멈춘다
+ */
+#define IOPTDESC_MATCH(pg_elm, elm)                    \
+	static_assert(offsetof(struct page, pg_elm) == \
 		      offsetof(struct ioptdesc, elm))	/* [한국어] ioptdesc 는 page 를 덮어쓰는 오버레이이므로 정렬이 어긋나면 메모리 관리 코어와 이 파일이 서로 다른 곳을 읽게 된다 */
 IOPTDESC_MATCH(flags, __page_flags);	/* [한국어] 페이지 플래그 자리 */
 IOPTDESC_MATCH(lru, iopt_freelist_elm); /* Ensure bit 0 is clear */	/* [한국어] 해제 목록 고리가 lru 자리에 온다. 위 영어 주석의 '비트 0 이 0 이어야 한다'는 것은 page 코어가 그 비트를 다른 뜻으로 쓰기 때문이다 */

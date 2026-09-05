@@ -201,11 +201,14 @@
 #define	CFG_BME_EVT					BIT(13)
 /* [한국어] Memory Space Enable 변화(14번). */
 #define	CFG_MSE_EVT					BIT(14)
-/* [한국어] 위 열세 비트를 한데 묶은 값. 래퍼 인터럽트를 한 번에 켜고 끌 때 쓴다. */
+/*
+ * [한국어] 위 열세 비트를 한데 묶은 값. 래퍼 인터럽트를 한 번에 켜고 끌 때 쓴다.
+ *
+ * 세 줄에 나뉘어 있을 뿐 하나의 상수다. 첫 줄이 오류 여섯,
+ * 둘째 줄이 전원 관리 셋과 ECRC, 셋째 줄이 링크 둘과 config 변화 둘이다.
+ */
 #define	INTERRUPTS (ERR_SYS | ERR_FATAL | ERR_NONFATAL | ERR_COR | ERR_AXI | \
-			/* [한국어] 오류 여섯과 전원 관리 셋, */
 			ERR_ECRC | PME_TURN_OFF | PME_TO_ACK | PM_PME | \
-			/* [한국어] 링크 둘과 config 변화 둘을 모두 포함한다. */
 			LINK_REQ_RST | LINK_UP_EVT | CFG_BME_EVT | CFG_MSE_EVT)
 
 /* [한국어] MSI/INTx 인터럽트 상태 레지스터. 위 주 인터럽트와 별개 창이다. */
