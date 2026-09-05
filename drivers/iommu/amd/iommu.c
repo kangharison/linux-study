@@ -6193,262 +6193,378 @@ static void irte_ga_set_allocated(struct irq_remap_table *table, int index)
 	irte->hi.fields.vector = 0xff;	/* [한국어] 이 형식은 벡터가 0 인지로 빈자리를 판별한다 */
 }
 
+/*
+ * [한국어]
+ * irte_is_allocated - 32비트 항목 자리가 쓰이고 있는지 본다
+ *
+ * @table: 대상 표.
+ * @index: 볼 자리.
+ * @return: 쓰이고 있으면 참.
+ *
+ * 값이 0 이 아닌지만 본다. 자리를 잡을 때 유효 비트 없이 0 이 아닌 값을
+ * 넣어 두므로, 할당됐지만 아직 켜지지 않은 자리도 여기서 걸린다.
+ */
 static bool irte_is_allocated(struct irq_remap_table *table, int index)
 {
-	union irte *ptr = (union irte *)table->table;
-	union irte *irte = &ptr[index];
+	union irte *ptr = (union irte *)table->table;	/* [한국어] 32비트 항목 배열로 */
+	union irte *irte = &ptr[index];	/* [한국어] 볼 자리 */
 
-	return irte->val != 0;
+	return irte->val != 0;	/* [한국어] 할당 표시가 0 이 아닌 값이라 이것으로 판별된다 */
 }
 
+/*
+ * [한국어]
+ * irte_ga_is_allocated - 128비트 항목 자리가 쓰이고 있는지 본다
+ *
+ * @table: 대상 표.
+ * @index: 볼 자리.
+ * @return: 쓰이고 있으면 참.
+ *
+ * 이 형식은 항목 전체가 아니라 벡터 필드로 판별한다. 게스트 모드 항목은
+ * 나머지 필드가 어떤 값이든 될 수 있어 전체를 0 과 비교할 수 없다.
+ */
 static bool irte_ga_is_allocated(struct irq_remap_table *table, int index)
 {
-	struct irte_ga *ptr = (struct irte_ga *)table->table;
-	struct irte_ga *irte = &ptr[index];
+	struct irte_ga *ptr = (struct irte_ga *)table->table;	/* [한국어] 128비트 항목 배열로 */
+	struct irte_ga *irte = &ptr[index];	/* [한국어] 볼 자리 */
 
-	return irte->hi.fields.vector != 0;
+	return irte->hi.fields.vector != 0;	/* [한국어] 게스트 모드 항목은 나머지 필드가 어떤 값이든 될 수 있다 */
 }
 
+/*
+ * [한국어]
+ * irte_clear_allocated - 32비트 항목 자리를 비운다
+ *
+ * @table: 대상 표.
+ * @index: 비울 자리.
+ */
 static void irte_clear_allocated(struct irq_remap_table *table, int index)
 {
-	table->table[index] = 0;
+	table->table[index] = 0;	/* [한국어] 값이 0 이면 빈자리로 보인다 */
 }
 
+/*
+ * [한국어]
+ * irte_ga_clear_allocated - 128비트 항목 자리를 비운다
+ *
+ * @table: 대상 표.
+ * @index: 비울 자리.
+ *
+ * 벡터를 포함해 두 절반을 모두 지운다 — 벡터가 0 이어야 빈자리로 보인다.
+ */
 static void irte_ga_clear_allocated(struct irq_remap_table *table, int index)
 {
-	struct irte_ga *ptr = (struct irte_ga *)table->table;
-	struct irte_ga *irte = &ptr[index];
+	struct irte_ga *ptr = (struct irte_ga *)table->table;	/* [한국어] 128비트 항목 배열로 */
+	struct irte_ga *irte = &ptr[index];	/* [한국어] 비울 자리 */
 
-	memset(&irte->lo.val, 0, sizeof(u64));
-	memset(&irte->hi.val, 0, sizeof(u64));
+	memset(&irte->lo.val, 0, sizeof(u64));	/* [한국어] 하위 절반 */
+	memset(&irte->hi.val, 0, sizeof(u64));	/* [한국어] 벡터를 포함한 상위 절반 — 0 이어야 빈자리로 보인다 */
 }
 
+/*
+ * [한국어]
+ * get_devid - 인터럽트 할당 요청에서 장치 id 를 뽑는다
+ *
+ * @info: 코어가 넘긴 할당 정보.
+ * @return: 세그먼트+BDF, 알 수 없으면 -1.
+ *
+ * 인터럽트를 낼 수 있는 것이 PCI 장치만은 아니다. IOAPIC 과 HPET 도
+ * 인터럽트를 내고, 그들도 DTE 를 가져야 재매핑을 받는다. 그 둘은 PCI
+ * 주소가 없으므로 IVRS 가 알려 준 가짜 id 를 쓴다.
+ */
 static int get_devid(struct irq_alloc_info *info)
 {
-	switch (info->type) {
-	case X86_IRQ_ALLOC_TYPE_IOAPIC:
-		return get_ioapic_devid(info->devid);
-	case X86_IRQ_ALLOC_TYPE_HPET:
-		return get_hpet_devid(info->devid);
-	case X86_IRQ_ALLOC_TYPE_PCI_MSI:
-	case X86_IRQ_ALLOC_TYPE_PCI_MSIX:
-		return get_device_sbdf_id(msi_desc_to_dev(info->desc));
+	switch (info->type) {	/* [한국어] 인터럽트를 내는 주체에 따라 */
+	case X86_IRQ_ALLOC_TYPE_IOAPIC:	/* [한국어] IOAPIC 은 PCI 주소가 없어 */
+		return get_ioapic_devid(info->devid);	/* [한국어] IVRS 가 알려 준 가짜 id 를 쓴다 */
+	case X86_IRQ_ALLOC_TYPE_HPET:	/* [한국어] HPET 도 마찬가지 */
+		return get_hpet_devid(info->devid);	/* [한국어] IVRS 표에서 찾는다 */
+	case X86_IRQ_ALLOC_TYPE_PCI_MSI:	/* [한국어] 일반 MSI */
+	case X86_IRQ_ALLOC_TYPE_PCI_MSIX:	/* [한국어] 와 MSI-X 는 */
+		return get_device_sbdf_id(msi_desc_to_dev(info->desc));	/* [한국어] 실제 PCI 주소가 있다 */
 	default:
-		WARN_ON_ONCE(1);
-		return -1;
+		WARN_ON_ONCE(1);	/* [한국어] 모르는 종류는 코드 쪽 누락이다 */
+		return -1;	/* [한국어] 호출자가 실패로 처리한다 */
 	}
 }
 
 struct irq_remap_ops amd_iommu_irq_ops = {
-	.prepare		= amd_iommu_prepare,
-	.enable			= amd_iommu_enable,
-	.disable		= amd_iommu_disable,
-	.reenable		= amd_iommu_reenable,
-	.enable_faulting	= amd_iommu_enable_faulting,
+	.prepare		= amd_iommu_prepare,	/* [한국어] 부팅 초기 하드웨어 준비 */
+	.enable			= amd_iommu_enable,	/* [한국어] 재매핑을 켠다 */
+	.disable		= amd_iommu_disable,	/* [한국어] 끈다 */
+	.reenable		= amd_iommu_reenable,	/* [한국어] 서스펜드에서 깨어난 뒤 다시 켠다 */
+	.enable_faulting	= amd_iommu_enable_faulting,	/* [한국어] 오류 인터럽트를 켠다 */
 };
 
+/*
+ * [한국어]
+ * fill_msi_msg - 장치가 쓸 MSI 메시지를 만든다
+ *
+ * @msg: 채울 메시지.
+ * @index: 이 인터럽트의 재매핑 표 색인.
+ *
+ * 재매핑이 켜지면 MSI 메시지의 의미가 통째로 바뀐다. 원래 데이터 필드는
+ * 벡터 번호였지만, 이제는 재매핑 표의 색인이다. 목적지 주소도 고정된
+ * 인터럽트 창을 가리킬 뿐 CPU 를 고르지 않는다.
+ *
+ * 그래서 장치가 어떤 메시지를 보내든 실제 목적지는 표가 정한다 — 이것이
+ * 재매핑이 인터럽트 위조를 막는 원리다.
+ *
+ * DM 비트 처리가 특이하다. 2K 표를 쓰는 하드웨어에서는 색인이 커져 그
+ * 비트까지 색인의 일부로 쓰이므로, 실제 목적지 모드와 무관하게 1 로
+ * 둔다 — 진짜 모드는 표 항목 안에 따로 적힌다.
+ */
 static void fill_msi_msg(struct msi_msg *msg, u32 index)
 {
-	msg->data = index;
-	msg->address_lo = 0;
-	msg->arch_addr_lo.base_address = X86_MSI_BASE_ADDRESS_LOW;
+	msg->data = index;	/* [한국어] 재매핑이 켜지면 데이터는 벡터가 아니라 표 색인이다 */
+	msg->address_lo = 0;	/* [한국어] 아래에서 필드 단위로 다시 채운다 */
+	msg->arch_addr_lo.base_address = X86_MSI_BASE_ADDRESS_LOW;	/* [한국어] CPU 를 고르지 않는 고정 인터럽트 창 */
 	/*
 	 * The struct msi_msg.dest_mode_logical is used to set the DM bit
 	 * in MSI Message Address Register. For device w/ 2K int-remap support,
 	 * this is bit must be set to 1 regardless of the actual destination
 	 * mode, which is signified by the IRTE[DM].
 	 */
-	if (FEATURE_NUM_INT_REMAP_SUP_2K(amd_iommu_efr2))
-		msg->arch_addr_lo.dest_mode_logical = true;
-	msg->address_hi = X86_MSI_BASE_ADDRESS_HIGH;
+	if (FEATURE_NUM_INT_REMAP_SUP_2K(amd_iommu_efr2))	/* [한국어] (원 주석: 2K 표에서는 실제 모드와 무관하게 이 비트를 1 로 둔다) */
+		msg->arch_addr_lo.dest_mode_logical = true;	/* [한국어] 색인이 커져 이 비트까지 색인의 일부로 쓰인다 */
+	msg->address_hi = X86_MSI_BASE_ADDRESS_HIGH;	/* [한국어] 창의 상위 절반 */
 }
 
+/*
+ * [한국어]
+ * irq_remapping_prepare_irte - 인터럽트 하나의 재매핑 항목과 메시지를 준비한다
+ *
+ * @data: 이 인터럽트의 드라이버 상태.
+ * @irq_cfg: 코어가 정한 벡터와 목적지 CPU.
+ * @info: 할당 정보(종류 판별용).
+ * @devid: 대상 장치.
+ * @index: 배정받은 표 색인.
+ * @sub_handle: 다중 MSI 에서 몇 번째인가.
+ *
+ * 두 쪽을 짝지어 두는 것이 이 함수다. 표 항목에는 진짜 목적지를 적고,
+ * 장치가 보낼 메시지에는 그 항목의 색인을 적는다.
+ *
+ * 아직 하드웨어 표에 쓰지는 않는다 — 사본만 채워 두고, 실제 반영은
+ * activate 에서 일어난다.
+ */
 static void irq_remapping_prepare_irte(struct amd_ir_data *data,
 				       struct irq_cfg *irq_cfg,
 				       struct irq_alloc_info *info,
 				       int devid, int index, int sub_handle)
 {
-	struct irq_2_irte *irte_info = &data->irq_2_irte;
-	struct amd_iommu *iommu = data->iommu;
+	struct irq_2_irte *irte_info = &data->irq_2_irte;	/* [한국어] 인터럽트와 표 자리를 잇는 정보 */
+	struct amd_iommu *iommu = data->iommu;	/* [한국어] 담당 유닛 */
 
-	if (!iommu)
-		return;
+	if (!iommu)	/* [한국어] 유닛이 없으면 */
+		return;	/* [한국어] 재매핑 자체가 없다 */
 
-	data->irq_2_irte.devid = devid;
-	data->irq_2_irte.index = index + sub_handle;
-	iommu->irte_ops->prepare(data->entry, APIC_DELIVERY_MODE_FIXED,
-				 apic->dest_mode_logical, irq_cfg->vector,
-				 irq_cfg->dest_apicid, devid);
+	data->irq_2_irte.devid = devid;	/* [한국어] 어느 장치의 표인지 */
+	data->irq_2_irte.index = index + sub_handle;	/* [한국어] 다중 MSI 는 시작에서 순번만큼 떨어진 자리 */
+	iommu->irte_ops->prepare(data->entry, APIC_DELIVERY_MODE_FIXED,	/* [한국어] 표 항목 사본에 진짜 목적지를 적는다 */
+				 apic->dest_mode_logical, irq_cfg->vector,	/* [한국어] 목적지 해석 방식과 벡터 */
+				 irq_cfg->dest_apicid, devid);	/* [한국어] 코어가 고른 CPU */
 
-	switch (info->type) {
-	case X86_IRQ_ALLOC_TYPE_IOAPIC:
-	case X86_IRQ_ALLOC_TYPE_HPET:
-	case X86_IRQ_ALLOC_TYPE_PCI_MSI:
-	case X86_IRQ_ALLOC_TYPE_PCI_MSIX:
-		fill_msi_msg(&data->msi_entry, irte_info->index);
-		break;
+	switch (info->type) {	/* [한국어] 인터럽트 종류에 따라 */
+	case X86_IRQ_ALLOC_TYPE_IOAPIC:	/* [한국어] IOAPIC */
+	case X86_IRQ_ALLOC_TYPE_HPET:	/* [한국어] HPET */
+	case X86_IRQ_ALLOC_TYPE_PCI_MSI:	/* [한국어] MSI */
+	case X86_IRQ_ALLOC_TYPE_PCI_MSIX:	/* [한국어] MSI-X 모두 */
+		fill_msi_msg(&data->msi_entry, irte_info->index);	/* [한국어] 장치가 보낼 메시지에는 표 색인을 적는다 */
+		break;	/* [한국어] 짝짓기 끝 */
 
 	default:
-		BUG_ON(1);
+		BUG_ON(1);	/* [한국어] 그 밖의 종류는 여기 올 수 없다 */
 		break;
 	}
 }
 
 struct amd_irte_ops irte_32_ops = {
-	.prepare = irte_prepare,
-	.activate = irte_activate,
-	.deactivate = irte_deactivate,
-	.set_affinity = irte_set_affinity,
-	.set_allocated = irte_set_allocated,
-	.is_allocated = irte_is_allocated,
-	.clear_allocated = irte_clear_allocated,
+	.prepare = irte_prepare,	/* [한국어] 32비트 항목을 채운다 */
+	.activate = irte_activate,	/* [한국어] 유효 비트를 세운다 */
+	.deactivate = irte_deactivate,	/* [한국어] 유효 비트를 내린다 */
+	.set_affinity = irte_set_affinity,	/* [한국어] 목적지 CPU 를 바꾼다 */
+	.set_allocated = irte_set_allocated,	/* [한국어] 자리를 사용 중으로 표시 */
+	.is_allocated = irte_is_allocated,	/* [한국어] 자리가 쓰이는지 본다 */
+	.clear_allocated = irte_clear_allocated,	/* [한국어] 자리를 비운다 */
 };
 
 struct amd_irte_ops irte_128_ops = {
-	.prepare = irte_ga_prepare,
-	.activate = irte_ga_activate,
-	.deactivate = irte_ga_deactivate,
-	.set_affinity = irte_ga_set_affinity,
-	.set_allocated = irte_ga_set_allocated,
-	.is_allocated = irte_ga_is_allocated,
-	.clear_allocated = irte_ga_clear_allocated,
+	.prepare = irte_ga_prepare,	/* [한국어] 128비트 항목을 채운다 */
+	.activate = irte_ga_activate,	/* [한국어] 유효 비트를 세운다 */
+	.deactivate = irte_ga_deactivate,	/* [한국어] 유효 비트를 내린다 */
+	.set_affinity = irte_ga_set_affinity,	/* [한국어] 게스트 모드가 아닐 때만 목적지를 바꾼다 */
+	.set_allocated = irte_ga_set_allocated,	/* [한국어] 벡터에 0xff 를 남겨 표시한다 */
+	.is_allocated = irte_ga_is_allocated,	/* [한국어] 벡터가 0 이 아닌지로 판별 */
+	.clear_allocated = irte_ga_clear_allocated,	/* [한국어] 두 절반을 모두 지운다 */
 };
 
+/*
+ * [한국어]
+ * irq_remapping_alloc - 인터럽트 도메인에서 벡터와 표 자리를 함께 잡는다
+ *
+ * @domain: 재매핑 도메인.
+ * @virq: 첫 가상 인터럽트 번호.
+ * @nr_irqs: 잡을 개수.
+ * @arg: 할당 정보.
+ * @return: 0 성공, 음수면 실패.
+ *
+ * 계층 구조가 이 함수의 뼈대다. 부모 도메인(벡터 도메인)에서 CPU 벡터를
+ * 먼저 받고, 그다음 이 계층에서 재매핑 표 자리를 잡는다. 실패하면 역순으로
+ * 되돌린다.
+ *
+ * IOAPIC 이 특별 취급을 받는 이유: 그 핀 번호가 곧 표 색인이어야 한다.
+ * 하드웨어가 IOAPIC 재매핑 항목을 핀 번호로 찾기 때문이다. 그래서 앞 32
+ * 자리를 미리 예약해 다른 인터럽트가 쓰지 못하게 막는다.
+ *
+ * 다중 MSI 만 정렬을 요구하는 이유: MSI-X 는 벡터마다 독립된 메시지를
+ * 갖지만, 다중 MSI 는 시작 색인에서 하위 비트를 증가시켜 만든다.
+ */
 static int irq_remapping_alloc(struct irq_domain *domain, unsigned int virq,
 			       unsigned int nr_irqs, void *arg)
 {
-	struct irq_alloc_info *info = arg;
-	struct irq_data *irq_data;
-	struct amd_ir_data *data = NULL;
-	struct amd_iommu *iommu;
-	struct irq_cfg *cfg;
-	struct iommu_dev_data *dev_data;
-	unsigned long max_irqs;
-	int i, ret, devid, seg, sbdf;
-	int index;
+	struct irq_alloc_info *info = arg;	/* [한국어] 코어가 넘긴 할당 정보 */
+	struct irq_data *irq_data;	/* [한국어] 각 인터럽트의 코어 상태 */
+	struct amd_ir_data *data = NULL;	/* [한국어] 드라이버 상태 */
+	struct amd_iommu *iommu;	/* [한국어] 담당 유닛 */
+	struct irq_cfg *cfg;	/* [한국어] 벡터와 목적지 CPU */
+	struct iommu_dev_data *dev_data;	/* [한국어] 표 크기를 알려면 필요하다 */
+	unsigned long max_irqs;	/* [한국어] 표의 항목 수 */
+	int i, ret, devid, seg, sbdf;	/* [한국어] 순회와 장치 id */
+	int index;	/* [한국어] 배정받은 표 색인 */
 
-	if (!info)
-		return -EINVAL;
-	if (nr_irqs > 1 && info->type != X86_IRQ_ALLOC_TYPE_PCI_MSI)
-		return -EINVAL;
+	if (!info)	/* [한국어] 정보가 없으면 */
+		return -EINVAL;	/* [한국어] 무엇을 잡을지 알 수 없다 */
+	if (nr_irqs > 1 && info->type != X86_IRQ_ALLOC_TYPE_PCI_MSI)	/* [한국어] 연속 할당은 다중 MSI 만 */
+		return -EINVAL;	/* [한국어] MSI-X 는 한 번에 하나씩 온다 */
 
-	sbdf = get_devid(info);
-	if (sbdf < 0)
-		return -EINVAL;
+	sbdf = get_devid(info);	/* [한국어] 인터럽트를 내는 주체의 id */
+	if (sbdf < 0)	/* [한국어] 알 수 없으면 */
+		return -EINVAL;	/* [한국어] DTE 를 찾을 수 없다 */
 
-	seg = PCI_SBDF_TO_SEGID(sbdf);
-	devid = PCI_SBDF_TO_DEVID(sbdf);
-	iommu = __rlookup_amd_iommu(seg, devid);
-	if (!iommu)
-		return -EINVAL;
+	seg = PCI_SBDF_TO_SEGID(sbdf);	/* [한국어] 세그먼트 */
+	devid = PCI_SBDF_TO_DEVID(sbdf);	/* [한국어] 16비트 장치 id */
+	iommu = __rlookup_amd_iommu(seg, devid);	/* [한국어] 담당 유닛 */
+	if (!iommu)	/* [한국어] IVRS 가 모르는 장치면 */
+		return -EINVAL;	/* [한국어] 재매핑할 수 없다 */
 
-	dev_data = search_dev_data(iommu, devid);
-	max_irqs = dev_data ? dev_data->max_irqs : MAX_IRQS_PER_TABLE_512;
+	dev_data = search_dev_data(iommu, devid);	/* [한국어] 장치의 벤더 상태 */
+	max_irqs = dev_data ? dev_data->max_irqs : MAX_IRQS_PER_TABLE_512;	/* [한국어] 아직 probe 전이면 보수적으로 512 */
 
-	ret = irq_domain_alloc_irqs_parent(domain, virq, nr_irqs, arg);
-	if (ret < 0)
-		return ret;
+	ret = irq_domain_alloc_irqs_parent(domain, virq, nr_irqs, arg);	/* [한국어] 먼저 부모 도메인에서 CPU 벡터를 */
+	if (ret < 0)	/* [한국어] 벡터가 없으면 */
+		return ret;	/* [한국어] 표 자리를 잡을 이유가 없다 */
 
-	if (info->type == X86_IRQ_ALLOC_TYPE_IOAPIC) {
-		struct irq_remap_table *table;
+	if (info->type == X86_IRQ_ALLOC_TYPE_IOAPIC) {	/* [한국어] IOAPIC 은 핀 번호가 곧 색인이어야 한다 */
+		struct irq_remap_table *table;	/* [한국어] 그 장치의 표 */
 
-		table = alloc_irq_table(iommu, devid, NULL, max_irqs);
-		if (table) {
-			if (!table->min_index) {
+		table = alloc_irq_table(iommu, devid, NULL, max_irqs);	/* [한국어] 없으면 만들어서 */
+		if (table) {	/* [한국어] 얻었으면 */
+			if (!table->min_index) {	/* [한국어] 아직 예약하지 않았으면 */
 				/*
 				 * Keep the first 32 indexes free for IOAPIC
 				 * interrupts.
 				 */
-				table->min_index = 32;
-				for (i = 0; i < 32; ++i)
-					iommu->irte_ops->set_allocated(table, i);
+				table->min_index = 32;	/* [한국어] (원 주석: 앞 32 자리를 IOAPIC 용으로 비워 둔다) */
+				for (i = 0; i < 32; ++i)	/* [한국어] 그 자리들을 */
+					iommu->irte_ops->set_allocated(table, i);	/* [한국어] 미리 잡아 다른 인터럽트가 못 쓰게 한다 */
 			}
-			WARN_ON(table->min_index != 32);
-			index = info->ioapic.pin;
+			WARN_ON(table->min_index != 32);	/* [한국어] 다른 값이면 표가 다른 용도로 쓰인 것이다 */
+			index = info->ioapic.pin;	/* [한국어] 하드웨어가 핀 번호로 항목을 찾는다 */
 		} else {
-			index = -ENOMEM;
+			index = -ENOMEM;	/* [한국어] 표를 못 얻었다 */
 		}
-	} else if (info->type == X86_IRQ_ALLOC_TYPE_PCI_MSI ||
-		   info->type == X86_IRQ_ALLOC_TYPE_PCI_MSIX) {
-		bool align = (info->type == X86_IRQ_ALLOC_TYPE_PCI_MSI);
+	} else if (info->type == X86_IRQ_ALLOC_TYPE_PCI_MSI ||	/* [한국어] MSI 나 */
+		   info->type == X86_IRQ_ALLOC_TYPE_PCI_MSIX) {	/* [한국어] MSI-X 면 */
+		bool align = (info->type == X86_IRQ_ALLOC_TYPE_PCI_MSI);	/* [한국어] 다중 MSI 만 시작 정렬이 필요하다 */
 
-		index = alloc_irq_index(iommu, devid, nr_irqs, align,
-					msi_desc_to_pci_dev(info->desc),
-					max_irqs);
+		index = alloc_irq_index(iommu, devid, nr_irqs, align,	/* [한국어] 연속된 자리를 */
+					msi_desc_to_pci_dev(info->desc),	/* [한국어] 별칭 처리를 위해 PCI 장치를 넘긴다 */
+					max_irqs);	/* [한국어] 표 크기 */
 	} else {
-		index = alloc_irq_index(iommu, devid, nr_irqs, false, NULL,
-					max_irqs);
+		index = alloc_irq_index(iommu, devid, nr_irqs, false, NULL,	/* [한국어] HPET 등은 정렬도 별칭도 없다 */
+					max_irqs);	/* [한국어] 표 크기 */
 	}
 
-	if (index < 0) {
-		pr_warn("Failed to allocate IRTE\n");
-		ret = index;
-		goto out_free_parent;
+	if (index < 0) {	/* [한국어] 자리를 못 잡았으면 */
+		pr_warn("Failed to allocate IRTE\n");	/* [한국어] 알리고 */
+		ret = index;	/* [한국어] 오류를 그대로 전한다 */
+		goto out_free_parent;	/* [한국어] 부모 벡터를 되돌린다 */
 	}
 
-	for (i = 0; i < nr_irqs; i++) {
-		irq_data = irq_domain_get_irq_data(domain, virq + i);
-		cfg = irq_data ? irqd_cfg(irq_data) : NULL;
-		if (!cfg) {
-			ret = -EINVAL;
-			goto out_free_data;
+	for (i = 0; i < nr_irqs; i++) {	/* [한국어] 잡은 인터럽트마다 */
+		irq_data = irq_domain_get_irq_data(domain, virq + i);	/* [한국어] 코어 상태를 찾고 */
+		cfg = irq_data ? irqd_cfg(irq_data) : NULL;	/* [한국어] 부모가 정한 벡터 */
+		if (!cfg) {	/* [한국어] 없으면 */
+			ret = -EINVAL;	/* [한국어] 계층 구조가 깨진 것이다 */
+			goto out_free_data;	/* [한국어] 여기까지 만든 것을 되돌린다 */
 		}
 
-		ret = -ENOMEM;
-		data = kzalloc_obj(*data);
-		if (!data)
-			goto out_free_data;
+		ret = -ENOMEM;	/* [한국어] 아래 할당들의 기본 실패값 */
+		data = kzalloc_obj(*data);	/* [한국어] 드라이버 상태 */
+		if (!data)	/* [한국어] 실패면 */
+			goto out_free_data;	/* [한국어] 되돌린다 */
 
-		if (!AMD_IOMMU_GUEST_IR_GA(amd_iommu_guest_ir))
-			data->entry = kzalloc_obj(union irte);
+		if (!AMD_IOMMU_GUEST_IR_GA(amd_iommu_guest_ir))	/* [한국어] 항목 형식에 따라 */
+			data->entry = kzalloc_obj(union irte);	/* [한국어] 32비트 사본 */
 		else
-			data->entry = kzalloc_obj(struct irte_ga);
-		if (!data->entry) {
-			kfree(data);
-			goto out_free_data;
+			data->entry = kzalloc_obj(struct irte_ga);	/* [한국어] 또는 128비트 사본 */
+		if (!data->entry) {	/* [한국어] 실패면 */
+			kfree(data);	/* [한국어] 상태도 버리고 */
+			goto out_free_data;	/* [한국어] 되돌린다 */
 		}
 
-		data->iommu = iommu;
-		irq_data->hwirq = (devid << 16) + i;
-		irq_data->chip_data = data;
-		irq_data->chip = &amd_ir_chip;
-		irq_remapping_prepare_irte(data, cfg, info, devid, index, i);
+		data->iommu = iommu;	/* [한국어] 나중에 표를 찾을 때 쓴다 */
+		irq_data->hwirq = (devid << 16) + i;	/* [한국어] 이 도메인에서 하드웨어 번호는 장치 id 와 순번의 조합이다 */
+		irq_data->chip_data = data;	/* [한국어] 드라이버 상태를 매단다 */
+		irq_data->chip = &amd_ir_chip;	/* [한국어] 친화도 변경 등이 이 chip 을 거친다 */
+		irq_remapping_prepare_irte(data, cfg, info, devid, index, i);	/* [한국어] 표 항목 사본과 MSI 메시지를 짝짓는다 */
 	}
 
-	return 0;
+	return 0;	/* [한국어] 모두 준비됐다 */
 
 out_free_data:
-	for (i--; i >= 0; i--) {
-		irq_data = irq_domain_get_irq_data(domain, virq + i);
-		if (irq_data)
-			kfree(irq_data->chip_data);
+	for (i--; i >= 0; i--) {	/* [한국어] 실패 지점 직전까지 되짚으며 */
+		irq_data = irq_domain_get_irq_data(domain, virq + i);	/* [한국어] 각 인터럽트의 */
+		if (irq_data)	/* [한국어] 상태가 있으면 */
+			kfree(irq_data->chip_data);	/* [한국어] 드라이버 상태를 버린다 */
 	}
-	for (i = 0; i < nr_irqs; i++)
-		free_irte(iommu, devid, index + i);
+	for (i = 0; i < nr_irqs; i++)	/* [한국어] 잡아 둔 표 자리를 */
+		free_irte(iommu, devid, index + i);	/* [한국어] 모두 반납한다 */
 out_free_parent:
-	irq_domain_free_irqs_common(domain, virq, nr_irqs);
-	return ret;
+	irq_domain_free_irqs_common(domain, virq, nr_irqs);	/* [한국어] 부모 도메인의 벡터까지 */
+	return ret;	/* [한국어] 실패 이유 */
 }
 
+/*
+ * [한국어]
+ * irq_remapping_free - 인터럽트와 표 자리를 반납한다
+ *
+ * @domain: 재매핑 도메인.
+ * @virq: 첫 가상 인터럽트 번호.
+ * @nr_irqs: 반납할 개수.
+ *
+ * 표 자리를 먼저 비우고(그 안에서 캐시도 지운다) 드라이버 상태를 버린 뒤,
+ * 부모 도메인의 벡터를 놓는다.
+ */
 static void irq_remapping_free(struct irq_domain *domain, unsigned int virq,
 			       unsigned int nr_irqs)
 {
-	struct irq_2_irte *irte_info;
-	struct irq_data *irq_data;
-	struct amd_ir_data *data;
-	int i;
+	struct irq_2_irte *irte_info;	/* [한국어] 인터럽트와 표 자리를 잇는 정보 */
+	struct irq_data *irq_data;	/* [한국어] 코어 상태 */
+	struct amd_ir_data *data;	/* [한국어] 드라이버 상태 */
+	int i;	/* [한국어] 순회 */
 
-	for (i = 0; i < nr_irqs; i++) {
-		irq_data = irq_domain_get_irq_data(domain, virq  + i);
-		if (irq_data && irq_data->chip_data) {
-			data = irq_data->chip_data;
-			irte_info = &data->irq_2_irte;
-			free_irte(data->iommu, irte_info->devid, irte_info->index);
-			kfree(data->entry);
-			kfree(data);
+	for (i = 0; i < nr_irqs; i++) {	/* [한국어] 반납할 인터럽트마다 */
+		irq_data = irq_domain_get_irq_data(domain, virq  + i);	/* [한국어] 코어 상태를 찾고 */
+		if (irq_data && irq_data->chip_data) {	/* [한국어] 드라이버 상태가 붙어 있으면 */
+			data = irq_data->chip_data;	/* [한국어] 그 상태에서 */
+			irte_info = &data->irq_2_irte;	/* [한국어] 표 자리를 알아내 */
+			free_irte(data->iommu, irte_info->devid, irte_info->index);	/* [한국어] 자리를 비우고 캐시를 지운다 */
+			kfree(data->entry);	/* [한국어] 항목 사본 */
+			kfree(data);	/* [한국어] 드라이버 상태 */
 		}
 	}
-	irq_domain_free_irqs_common(domain, virq, nr_irqs);
+	irq_domain_free_irqs_common(domain, virq, nr_irqs);	/* [한국어] 마지막으로 부모 도메인의 벡터를 */
 }
 
 static void amd_ir_update_irte(struct irq_data *irqd, struct amd_iommu *iommu,
@@ -6456,62 +6572,103 @@ static void amd_ir_update_irte(struct irq_data *irqd, struct amd_iommu *iommu,
 			       struct irq_2_irte *irte_info,
 			       struct irq_cfg *cfg);
 
+/*
+ * [한국어]
+ * irq_remapping_activate - 준비해 둔 항목을 실제로 켠다
+ *
+ * @domain: 재매핑 도메인.
+ * @irq_data: 이 인터럽트.
+ * @reserve: 예약만 하는 호출인가(여기서는 쓰지 않는다).
+ * @return: 항상 0.
+ *
+ * alloc 이 채워 둔 사본을 하드웨어 표에 반영하고 유효 비트를 세운다. 이
+ * 시점부터 그 인터럽트가 실제로 CPU 에 도달한다.
+ *
+ * 뒤이어 부르는 update 는 게스트 모드일 때 필요하다 — 그쪽 목적지 정보는
+ * activate 가 다루지 않는 절반에 들어 있다.
+ */
 static int irq_remapping_activate(struct irq_domain *domain,
 				  struct irq_data *irq_data, bool reserve)
 {
-	struct amd_ir_data *data = irq_data->chip_data;
-	struct irq_2_irte *irte_info = &data->irq_2_irte;
-	struct amd_iommu *iommu = data->iommu;
-	struct irq_cfg *cfg = irqd_cfg(irq_data);
+	struct amd_ir_data *data = irq_data->chip_data;	/* [한국어] 드라이버 상태 */
+	struct irq_2_irte *irte_info = &data->irq_2_irte;	/* [한국어] 표 자리 */
+	struct amd_iommu *iommu = data->iommu;	/* [한국어] 담당 유닛 */
+	struct irq_cfg *cfg = irqd_cfg(irq_data);	/* [한국어] 현재 벡터와 목적지 */
 
-	if (!iommu)
-		return 0;
+	if (!iommu)	/* [한국어] 유닛이 없으면 */
+		return 0;	/* [한국어] 켤 표가 없다 */
 
-	iommu->irte_ops->activate(iommu, data->entry, irte_info->devid,
-				  irte_info->index);
-	amd_ir_update_irte(irq_data, iommu, data, irte_info, cfg);
-	return 0;
+	iommu->irte_ops->activate(iommu, data->entry, irte_info->devid,	/* [한국어] 사본을 표에 반영하고 유효 비트를 세운다 */
+				  irte_info->index);	/* [한국어] 이 시점부터 인터럽트가 CPU 에 도달한다 */
+	amd_ir_update_irte(irq_data, iommu, data, irte_info, cfg);	/* [한국어] 게스트 모드 목적지는 activate 가 다루지 않는 절반에 있다 */
+	return 0;	/* [한국어] 실패할 수 없는 경로 */
 }
 
+/*
+ * [한국어]
+ * irq_remapping_deactivate - 항목을 무효로 만들어 인터럽트를 막는다
+ *
+ * @domain: 재매핑 도메인.
+ * @irq_data: 이 인터럽트.
+ *
+ * 자리는 그대로 두고 유효 비트만 내린다. 서스펜드나 드라이버 언로드처럼
+ * 잠시 멈춰야 할 때 쓴다.
+ */
 static void irq_remapping_deactivate(struct irq_domain *domain,
 				     struct irq_data *irq_data)
 {
-	struct amd_ir_data *data = irq_data->chip_data;
-	struct irq_2_irte *irte_info = &data->irq_2_irte;
-	struct amd_iommu *iommu = data->iommu;
+	struct amd_ir_data *data = irq_data->chip_data;	/* [한국어] 드라이버 상태 */
+	struct irq_2_irte *irte_info = &data->irq_2_irte;	/* [한국어] 표 자리 */
+	struct amd_iommu *iommu = data->iommu;	/* [한국어] 담당 유닛 */
 
-	if (iommu)
-		iommu->irte_ops->deactivate(iommu, data->entry, irte_info->devid,
-					    irte_info->index);
+	if (iommu)	/* [한국어] 유닛이 있으면 */
+		iommu->irte_ops->deactivate(iommu, data->entry, irte_info->devid,	/* [한국어] 자리는 두고 유효 비트만 내린다 */
+					    irte_info->index);	/* [한국어] 서스펜드나 언로드에서 쓴다 */
 }
 
+/*
+ * [한국어]
+ * irq_remapping_select - 이 도메인이 그 인터럽트를 맡는지 답한다
+ *
+ * @d: 후보 도메인.
+ * @fwspec: 펌웨어가 기술한 인터럽트.
+ * @bus_token: 버스 종류(쓰지 않는다).
+ * @return: 맡으면 참.
+ *
+ * 시스템에 IOMMU 가 여럿이면 도메인도 여럿이라, 어느 도메인이 그 IOAPIC/
+ * HPET 을 담당하는지 골라야 한다. 장치 id 로 담당 유닛을 찾아 그 유닛의
+ * 도메인이 나인지 확인한다.
+ *
+ * 재매핑이 꺼져 있으면 언제나 거짓이다 — 그때는 이 도메인이 존재만 하고
+ * 아무것도 맡지 않는다.
+ */
 static int irq_remapping_select(struct irq_domain *d, struct irq_fwspec *fwspec,
 				enum irq_domain_bus_token bus_token)
 {
-	struct amd_iommu *iommu;
-	int devid = -1;
+	struct amd_iommu *iommu;	/* [한국어] 담당 유닛 */
+	int devid = -1;	/* [한국어] 펌웨어 기술에서 뽑을 장치 id */
 
-	if (!amd_iommu_irq_remap)
-		return 0;
+	if (!amd_iommu_irq_remap)	/* [한국어] 재매핑이 꺼져 있으면 */
+		return 0;	/* [한국어] 이 도메인은 아무것도 맡지 않는다 */
 
-	if (x86_fwspec_is_ioapic(fwspec))
-		devid = get_ioapic_devid(fwspec->param[0]);
-	else if (x86_fwspec_is_hpet(fwspec))
-		devid = get_hpet_devid(fwspec->param[0]);
+	if (x86_fwspec_is_ioapic(fwspec))	/* [한국어] IOAPIC 기술이면 */
+		devid = get_ioapic_devid(fwspec->param[0]);	/* [한국어] IVRS 가 준 id 로 */
+	else if (x86_fwspec_is_hpet(fwspec))	/* [한국어] HPET 이면 */
+		devid = get_hpet_devid(fwspec->param[0]);	/* [한국어] 그쪽 id 로 */
 
-	if (devid < 0)
-		return 0;
-	iommu = __rlookup_amd_iommu((devid >> 16), (devid & 0xffff));
+	if (devid < 0)	/* [한국어] 둘 다 아니거나 못 찾으면 */
+		return 0;	/* [한국어] 내 소관이 아니다 */
+	iommu = __rlookup_amd_iommu((devid >> 16), (devid & 0xffff));	/* [한국어] 세그먼트와 장치 id 로 담당 유닛을 */
 
-	return iommu && iommu->ir_domain == d;
+	return iommu && iommu->ir_domain == d;	/* [한국어] 그 유닛의 도메인이 나인지 */
 }
 
 static const struct irq_domain_ops amd_ir_domain_ops = {
-	.select = irq_remapping_select,
-	.alloc = irq_remapping_alloc,
-	.free = irq_remapping_free,
-	.activate = irq_remapping_activate,
-	.deactivate = irq_remapping_deactivate,
+	.select = irq_remapping_select,	/* [한국어] 이 도메인이 맡는 인터럽트인지 답한다 */
+	.alloc = irq_remapping_alloc,	/* [한국어] 벡터와 표 자리를 함께 잡는다 */
+	.free = irq_remapping_free,	/* [한국어] 둘을 함께 반납한다 */
+	.activate = irq_remapping_activate,	/* [한국어] 준비된 항목을 켠다 */
+	.deactivate = irq_remapping_deactivate,	/* [한국어] 항목을 무효로 만든다 */
 };
 
 static void __amd_iommu_update_ga(struct irte_ga *entry, int cpu,
