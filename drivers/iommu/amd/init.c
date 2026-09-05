@@ -6144,89 +6144,139 @@ disable_snp:
  *
  ****************************************************************************/
 
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * state_next - 초기화를 한 단계 진행한다
+ *
+ * @return: 0 성공, 음수면 그 단계에서 실패.
+ *
+ * 초기화가 상태 기계로 되어 있는 이유는 진입점이 여럿이기 때문이다.
+ * 인터럽트 재매핑 코드는 ACPI 단계까지만 필요하고, DMA 계층은 끝까지
+ * 필요하다. 두 경로가 서로 다른 시점에 서로 다른 깊이까지 요구하므로,
+ * "어디까지 왔는가"를 상태로 들고 필요한 만큼만 전진한다.
+ *
+ * 각 단계가 다음 상태를 정하는 구조라, 순서를 어길 방법이 없다.
+ *
+ * 함수 끝의 정리 블록이 이 함수에서 가장 중요한 부분이다. 실패했을 때
+ * 두 갈래로 나뉜다:
+ *  - 재매핑도 아직 안 켜졌으면: 전부 되돌린다. IOMMU 를 끄고 자원을 놓는다.
+ *  - 재매핑은 이미 켜져 있으면: 하드웨어를 끌 수 없다. 끄면 그 순간
+ *    인터럽트가 재매핑 없이 CPU 로 직행하기 때문이다. 그래서 장치 테이블의
+ *    DMA 부분만 지워 DMA 를 차단하고, 인터럽트 재매핑 정보는 남긴다.
+ *
+ * 그 두 갈래가 uninit_device_table_dma 가 앞 두 워드만 지우는 이유이기도
+ * 하다.
+ *
+ * 호출 체인:
+ *   iommu_go_to_state() → [이 함수]
+ */
 static int __init state_next(void)
 {
-	int ret = 0;
+	int ret = 0;	/* [한국어] 이번 단계의 결과 */
 
-	switch (init_state) {
-	case IOMMU_START_STATE:
-		if (!detect_ivrs()) {
-			init_state	= IOMMU_NOT_FOUND;
-			ret		= -ENODEV;
+	switch (init_state) {	/* [한국어] 현재 상태에 따라 할 일이 정해진다 */
+	case IOMMU_START_STATE:	/* [한국어] 아직 아무것도 하지 않았다 */
+		if (!detect_ivrs()) {	/* [한국어] 표가 있는지, 써도 되는 기종인지 */
+			init_state	= IOMMU_NOT_FOUND;	/* [한국어] 없으면 종착 상태로 */
+			ret		= -ENODEV;	/* [한국어] 오류가 아니라 사실이지만 진행은 멈춘다 */
 		} else {
-			init_state	= IOMMU_IVRS_DETECTED;
+			init_state	= IOMMU_IVRS_DETECTED;	/* [한국어] 있으면 다음 단계로 */
 		}
 		break;
-	case IOMMU_IVRS_DETECTED:
-		if (amd_iommu_disabled) {
-			init_state = IOMMU_CMDLINE_DISABLED;
-			ret = -EINVAL;
+	case IOMMU_IVRS_DETECTED:	/* [한국어] 표를 찾았다 */
+		if (amd_iommu_disabled) {	/* [한국어] 사용자가 명령줄로 껐는가 */
+			init_state = IOMMU_CMDLINE_DISABLED;	/* [한국어] NOT_FOUND 와 구별되는 종착 상태 */
+			ret = -EINVAL;	/* [한국어] 진행 중단 */
 		} else {
-			ret = early_amd_iommu_init();
-			init_state = ret ? IOMMU_INIT_ERROR : IOMMU_ACPI_FINISHED;
+			ret = early_amd_iommu_init();	/* [한국어] 네 번의 표 훑기와 자료구조 구성 */
+			init_state = ret ? IOMMU_INIT_ERROR : IOMMU_ACPI_FINISHED;	/* [한국어] 성패에 따라 다음 상태 */
 		}
 		break;
-	case IOMMU_ACPI_FINISHED:
-		early_enable_iommus();
-		x86_platform.iommu_shutdown = disable_iommus;
-		init_state = IOMMU_ENABLED;
+	case IOMMU_ACPI_FINISHED:	/* [한국어] 자료구조가 준비됐다 */
+		early_enable_iommus();	/* [한국어] 하드웨어를 켠다. 이 단계부터 DMA 가 변환을 거친다 */
+		x86_platform.iommu_shutdown = disable_iommus;	/* [한국어] kexec 등에서 IOMMU 를 끌 수 있게 등록한다 */
+		init_state = IOMMU_ENABLED;	/* [한국어] 다음 단계로 */
 		break;
-	case IOMMU_ENABLED:
-		register_syscore(&amd_iommu_syscore);
-		iommu_snp_enable();
-		ret = amd_iommu_init_pci();
-		init_state = ret ? IOMMU_INIT_ERROR : IOMMU_PCI_INIT;
+	case IOMMU_ENABLED:	/* [한국어] 하드웨어가 켜졌다 */
+		register_syscore(&amd_iommu_syscore);	/* [한국어] 이제 되살릴 상태가 있으므로 서스펜드 콜백을 등록한다 */
+		iommu_snp_enable();	/* [한국어] SNP 전제 조건을 확인한다 — IOMMU 구성이 확정된 뒤여야 한다 */
+		ret = amd_iommu_init_pci();	/* [한국어] PCI 단계의 유닛 초기화 */
+		init_state = ret ? IOMMU_INIT_ERROR : IOMMU_PCI_INIT;	/* [한국어] 성패에 따라 */
 		break;
-	case IOMMU_PCI_INIT:
-		ret = amd_iommu_enable_interrupts();
-		init_state = ret ? IOMMU_INIT_ERROR : IOMMU_INTERRUPTS_EN;
+	case IOMMU_PCI_INIT:	/* [한국어] PCI 단계가 끝났다 */
+		ret = amd_iommu_enable_interrupts();	/* [한국어] 인터럽트를 잡고 로그를 켠다 */
+		init_state = ret ? IOMMU_INIT_ERROR : IOMMU_INTERRUPTS_EN;	/* [한국어] 성패에 따라 */
 		break;
-	case IOMMU_INTERRUPTS_EN:
-		init_state = IOMMU_INITIALIZED;
+	case IOMMU_INTERRUPTS_EN:	/* [한국어] 인터럽트까지 준비됐다 */
+		init_state = IOMMU_INITIALIZED;	/* [한국어] 초기화 완료 */
 		break;
-	case IOMMU_INITIALIZED:
+	case IOMMU_INITIALIZED:	/* [한국어] (원 주석: 할 일 없음) */
 		/* Nothing to do */
 		break;
-	case IOMMU_NOT_FOUND:
-	case IOMMU_INIT_ERROR:
-	case IOMMU_CMDLINE_DISABLED:
+	case IOMMU_NOT_FOUND:	/* [한국어] 종착 상태들 */
+	case IOMMU_INIT_ERROR:	/* [한국어] 더 진행할 수 없다 */
+	case IOMMU_CMDLINE_DISABLED:	/* [한국어] (원 주석: 오류 상태 — 아무것도 하지 않는다) */
 		/* Error states => do nothing */
-		ret = -EINVAL;
+		ret = -EINVAL;	/* [한국어] 호출자의 루프가 이것으로 멈춘다 */
 		break;
-	default:
+	default:	/* [한국어] (원 주석: 알 수 없는 상태) */
 		/* Unknown state */
-		BUG();
+		BUG();	/* [한국어] 상태 기계가 망가진 것이라 계속 진행할 수 없다 */
 	}
 
-	if (ret) {
-		free_dma_resources();
-		if (!irq_remapping_enabled) {
-			disable_iommus();
-			free_iommu_resources();
+	if (ret) {	/* [한국어] 어느 단계에서든 실패했으면 */
+		free_dma_resources();	/* [한국어] DMA 쪽 자원은 어느 경우든 놓는다 */
+		if (!irq_remapping_enabled) {	/* [한국어] 재매핑이 아직 안 켜졌으면 */
+			disable_iommus();	/* [한국어] 하드웨어를 끄고 */
+			free_iommu_resources();	/* [한국어] 전부 되돌린다 */
 		} else {
-			struct amd_iommu *iommu;
-			struct amd_iommu_pci_seg *pci_seg;
+			struct amd_iommu *iommu;	/* [한국어] 재매핑이 이미 켜진 경우 */
+			struct amd_iommu_pci_seg *pci_seg;	/* [한국어] 하드웨어를 끌 수 없다 */
 
-			for_each_pci_segment(pci_seg)
-				uninit_device_table_dma(pci_seg);
+			for_each_pci_segment(pci_seg)	/* [한국어] 끄면 인터럽트가 재매핑 없이 CPU 로 직행한다 */
+				uninit_device_table_dma(pci_seg);	/* [한국어] 그래서 DTE 의 DMA 부분만 지운다 — 인터럽트 정보는 남는다 */
 
-			for_each_iommu(iommu)
-				amd_iommu_flush_all_caches(iommu);
+			for_each_iommu(iommu)	/* [한국어] 모든 유닛에서 */
+				amd_iommu_flush_all_caches(iommu);	/* [한국어] 그 변경을 반영시킨다 */
 		}
 	}
-	return ret;
+	return ret;	/* [한국어] 호출자가 이 값으로 루프를 멈춘다 */
 }
 
+/*
+ * [한국어]
+ * iommu_go_to_state - 원하는 단계까지 초기화를 진행한다
+ *
+ * @state: 도달하려는 상태.
+ * @return: 0 성공, 음수면 도중에 실패했거나 이미 오류 상태다.
+ *
+ * 여러 진입점이 각자 필요한 깊이를 지정해 부른다. 이미 그 단계를 지났다면
+ * 루프가 한 번도 돌지 않고 곧바로 돌아간다 — 두 번 초기화하지 않는다.
+ *
+ * 종착 상태(NOT_FOUND/INIT_ERROR/CMDLINE_DISABLED)에서 멈추는 검사가
+ * 없으면 상태가 진행되지 않아 무한 루프가 된다.
+ *
+ * 뒤의 SNP 처리를 원 주석이 길게 설명한다. 요지는 두 가지 실패를 구별하는
+ * 것이다: IOMMU 의 SNP 지원을 아직 확인조차 못 했다면 SNP 를 지원하지
+ * 않는 것으로 표시하고, 확인은 했는데 RMP 강제가 켜지지 않았다면 어중간한
+ * 상태다 — 그래도 모든 메모리가 하이퍼바이저 소유이므로 절뚝거리며 갈 수
+ * 있어, WARN 만 하고 "지원함"을 유지한다. 여기서 뒤집으면 커널의 다른
+ * 부분이 혼란스러워지기 때문이다.
+ *
+ * 호출 체인:
+ *   amd_iommu_detect()/prepare()/enable()/init() → [이 함수] → state_next()
+ */
 static int __init iommu_go_to_state(enum iommu_init_state state)
 {
-	int ret = -EINVAL;
+	int ret = -EINVAL;	/* [한국어] 한 단계도 진행하지 않으면 이 값이 돌아간다 */
 
-	while (init_state != state) {
-		if (init_state == IOMMU_NOT_FOUND         ||
-		    init_state == IOMMU_INIT_ERROR        ||
-		    init_state == IOMMU_CMDLINE_DISABLED)
-			break;
-		ret = state_next();
+	while (init_state != state) {	/* [한국어] 원하는 단계에 닿을 때까지 */
+		if (init_state == IOMMU_NOT_FOUND         ||	/* [한국어] 종착 상태에 걸렸으면 */
+		    init_state == IOMMU_INIT_ERROR        ||	/* [한국어] 더 진행되지 않으므로 */
+		    init_state == IOMMU_CMDLINE_DISABLED)	/* [한국어] 이 검사가 없으면 무한 루프가 된다 */
+			break;	/* [한국어] 멈춘다 */
+		ret = state_next();	/* [한국어] 한 단계 전진 */
 	}
 
 	/*
@@ -6238,57 +6288,118 @@ static int __init iommu_go_to_state(enum iommu_init_state state)
 	 * along as all memory should be Hypervisor-Owned in the RMP. WARN,
 	 * but leave SNP as "supported" to avoid confusing the kernel.
 	 */
-	if (ret && cc_platform_has(CC_ATTR_HOST_SEV_SNP) &&
-	    !WARN_ON_ONCE(amd_iommu_snp_en))
-		cc_platform_clear(CC_ATTR_HOST_SEV_SNP);
+	if (ret && cc_platform_has(CC_ATTR_HOST_SEV_SNP) &&	/* [한국어] (원 주석: SNP 는 IOMMU 가 완전히 구성되어야 한다) */
+	    !WARN_ON_ONCE(amd_iommu_snp_en))	/* [한국어] 확인조차 못 했다면 지원하지 않는 것으로 표시하고, 확인 후 RMP 만 안 켜졌다면 절뚝거리며 간다 */
+		cc_platform_clear(CC_ATTR_HOST_SEV_SNP);	/* [한국어] 전자의 경우에만 SNP 를 끈다 */
 
-	return ret;
+	return ret;	/* [한국어] 도달했으면 마지막 단계의 결과 */
 }
 
 #ifdef CONFIG_IRQ_REMAP
+/*
+ * [한국어]
+ * amd_iommu_prepare - 인터럽트 재매핑을 위한 준비 단계까지 진행한다
+ *
+ * @return: 0 성공, 음수면 재매핑을 쓸 수 없다.
+ *
+ * x86 의 인터럽트 재매핑 코드가 부르는 진입점이다. APIC 초기화보다 먼저
+ * 불리므로 ACPI 단계까지만 간다 — 하드웨어를 켜는 것은 그다음이다.
+ *
+ * amd_iommu_irq_remap 을 먼저 참으로 두는 것이 중요하다. early_amd_iommu_init
+ * 이 그 값을 보고 재매핑용 자료구조를 잡을지 정하고, 검사 결과에 따라
+ * 스스로 거짓으로 내릴 수도 있다.
+ *
+ * 그래서 마지막 반환이 그 값을 다시 확인한다 — 진행은 성공했는데 재매핑은
+ * 쓸 수 없다고 판정된 경우를 구별하기 위해서다.
+ *
+ * 호출 체인:
+ *   x86 인터럽트 재매핑 초기화 → [이 함수] → iommu_go_to_state()
+ */
 int __init amd_iommu_prepare(void)
 {
-	int ret;
+	int ret;	/* [한국어] 결과 */
 
-	amd_iommu_irq_remap = true;
+	amd_iommu_irq_remap = true;	/* [한국어] early_amd_iommu_init 이 이 값을 보고 재매핑용 자료구조를 잡는다 */
 
-	ret = iommu_go_to_state(IOMMU_ACPI_FINISHED);
-	if (ret) {
-		amd_iommu_irq_remap = false;
-		return ret;
+	ret = iommu_go_to_state(IOMMU_ACPI_FINISHED);	/* [한국어] APIC 초기화보다 먼저라 ACPI 단계까지만 */
+	if (ret) {	/* [한국어] 진행 실패 */
+		amd_iommu_irq_remap = false;	/* [한국어] 재매핑을 쓸 수 없다 */
+		return ret;	/* [한국어] 실패 보고 */
 	}
 
-	return amd_iommu_irq_remap ? 0 : -ENODEV;
+	return amd_iommu_irq_remap ? 0 : -ENODEV;	/* [한국어] 진행은 됐는데 검사에서 거절된 경우를 구별한다 */
 }
 
+/*
+ * [한국어]
+ * amd_iommu_enable - 하드웨어를 켜고 재매핑 모드를 알린다
+ *
+ * @return: 성공하면 동작 모드(xAPIC/x2APIC), 실패하면 음수.
+ *
+ * 반환값이 모드인 이유: 호출자(APIC 초기화)가 이 값을 보고 x2APIC 을
+ * 켤지 정한다. 재매핑 없이는 CPU 255개를 넘는 목적지를 안전하게 다룰 수
+ * 없으므로 두 결정이 여기서 묶인다.
+ *
+ * 호출 체인:
+ *   x86 인터럽트 재매핑 초기화 → [이 함수] → iommu_go_to_state()
+ */
 int __init amd_iommu_enable(void)
 {
-	int ret;
+	int ret;	/* [한국어] 결과 */
 
-	ret = iommu_go_to_state(IOMMU_ENABLED);
-	if (ret)
-		return ret;
+	ret = iommu_go_to_state(IOMMU_ENABLED);	/* [한국어] 하드웨어를 켜는 단계까지 */
+	if (ret)	/* [한국어] 실패 */
+		return ret;	/* [한국어] 재매핑 없이 부팅을 계속한다 */
 
-	irq_remapping_enabled = 1;
-	return amd_iommu_xt_mode;
+	irq_remapping_enabled = 1;	/* [한국어] 코어에 "재매핑이 동작 중"임을 알린다 */
+	return amd_iommu_xt_mode;	/* [한국어] 호출자가 이 값으로 x2APIC 을 켤지 정한다 */
 }
 
+/*
+ * [한국어]
+ * amd_iommu_disable - 재매핑 코어의 요청으로 IOMMU 를 끈다
+ *
+ * 서스펜드 콜백을 그대로 재사용한다. 두 상황에서 해야 할 일이 같기
+ * 때문이다 — 하드웨어를 끄되 자료구조는 남긴다.
+ */
 void amd_iommu_disable(void)
 {
-	amd_iommu_suspend(NULL);
+	amd_iommu_suspend(NULL);	/* [한국어] 두 상황에서 해야 할 일이 같아 서스펜드 콜백을 재사용한다 */
 }
 
+/*
+ * [한국어]
+ * amd_iommu_reenable - 재매핑 코어의 요청으로 IOMMU 를 되살린다
+ *
+ * @mode: 복원할 모드(쓰지 않는다 — 전역 상태에 이미 있다).
+ * @return: 항상 0.
+ *
+ * 레주메 콜백을 그대로 재사용한다.
+ */
 int amd_iommu_reenable(int mode)
 {
-	amd_iommu_resume(NULL);
+	amd_iommu_resume(NULL);	/* [한국어] 레주메 콜백을 재사용한다 */
 
-	return 0;
+	return 0;	/* [한국어] 실패할 지점이 없다 */
 }
 
+/*
+ * [한국어]
+ * amd_iommu_enable_faulting - CPU 마다 폴트 보고를 켜라는 요청 (하는 일 없음)
+ *
+ * @cpu: 대상 CPU.
+ * @return: 항상 0.
+ *
+ * 원 주석이 이유를 밝힌다: MSI 는 PCI 가 초기화된 뒤에 잡으므로, 이
+ * 시점에는 할 수 있는 일이 없다.
+ *
+ * 그래도 콜백을 두는 이유: 재매핑 코어가 CPU 온라인마다 이것을 부르고,
+ * 없으면 그 경로가 실패한다.
+ */
 int amd_iommu_enable_faulting(unsigned int cpu)
 {
 	/* We enable MSI later when PCI is initialized */
-	return 0;
+	return 0;	/* [한국어] (원 주석: MSI 는 PCI 초기화 뒤에 잡는다) 이 시점에는 할 일이 없지만 콜백은 있어야 한다 */
 }
 #endif
 
@@ -6297,44 +6408,83 @@ int amd_iommu_enable_faulting(unsigned int cpu)
  * This function is called from the generic x86 DMA layer initialization
  * code.
  */
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * amd_iommu_init - DMA 계층을 위한 초기화 진입점
+ *
+ * @return: 0 성공, 음수면 실패.
+ *
+ * 상태 기계를 끝까지 진행시킨다. 인터럽트 재매핑 경로가 이미 앞부분을
+ * 진행했다면 남은 단계만 실행된다.
+ *
+ * GART 로의 후퇴가 눈에 띈다. AMD 의 옛 IOMMU 인 GART 는 기능이 훨씬
+ * 제한적이지만, 유닛을 하나도 찾지 못한 경우(목록이 비어 있는 경우)에는
+ * 그것이라도 쓰는 편이 아무것도 없는 것보다 낫다.
+ *
+ * 목록이 비어 있을 때만 후퇴하는 것에 유의: 유닛은 찾았는데 초기화에
+ * 실패한 경우라면 GART 를 켜서는 안 된다 — 두 IOMMU 가 같은 하드웨어를
+ * 다루려 들면 상태를 알 수 없게 된다.
+ *
+ * 호출 체인:
+ *   x86_init.iommu.iommu_init → [이 함수] → iommu_go_to_state()
+ */
 static int __init amd_iommu_init(void)
 {
-	int ret;
+	int ret;	/* [한국어] 결과 */
 
-	ret = iommu_go_to_state(IOMMU_INITIALIZED);
+	ret = iommu_go_to_state(IOMMU_INITIALIZED);	/* [한국어] 끝까지 진행. 재매핑 경로가 앞부분을 이미 했다면 남은 단계만 실행된다 */
 #ifdef CONFIG_GART_IOMMU
-	if (ret && list_empty(&amd_iommu_list)) {
+	if (ret && list_empty(&amd_iommu_list)) {	/* [한국어] (원 주석: AMD IOMMU 초기화에 실패했으니 가능하면 GART 로 후퇴한다) */
 		/*
 		 * We failed to initialize the AMD IOMMU - try fallback
 		 * to GART if possible.
 		 */
-		gart_iommu_init();
+		gart_iommu_init();	/* [한국어] 유닛을 하나도 못 찾은 경우에만 — 찾았는데 실패했다면 두 IOMMU 가 같은 하드웨어를 다투게 된다 */
 	}
 #endif
 
-	if (!ret)
-		amd_iommu_debugfs_setup();
+	if (!ret)	/* [한국어] 초기화에 성공했으면 */
+		amd_iommu_debugfs_setup();	/* [한국어] 진단 파일들을 만든다 */
 
-	return ret;
+	return ret;	/* [한국어] 결과 보고 */
 }
 
+/*
+ * [한국어]
+ * amd_iommu_sme_check - SME 환경에서 이 CPU 의 IOMMU 를 믿을 수 있는가
+ *
+ * @return: 쓸 수 있으면 참.
+ *
+ * Family 17h 의 특정 마이크로코드 이전 버전에서는 SME(메모리 암호화)와
+ * IOMMU 를 함께 쓰면 오동작한다. 그래서 마이크로코드 버전으로 판별한다.
+ *
+ * 두 조건이 OR 로 묶인 것이 눈에 띈다. 0x08001205 이상이거나, 0x08001126
+ * ~0x080011ff 구간이면 괜찮다. 후자는 그 구간에서 수정이 들어갔다가 이후
+ * 잠시 회귀했음을 뜻한다 — 버전 번호가 단조롭게 좋아지지 않은 경우다.
+ *
+ * SME 를 쓰지 않거나 다른 Family 면 곧바로 참을 돌려준다.
+ *
+ * 호출 체인:
+ *   amd_iommu_detect() → [이 함수]
+ */
 static bool amd_iommu_sme_check(void)
 {
-	if (!cc_platform_has(CC_ATTR_HOST_MEM_ENCRYPT) ||
-	    (boot_cpu_data.x86 != 0x17))
-		return true;
+	if (!cc_platform_has(CC_ATTR_HOST_MEM_ENCRYPT) ||	/* [한국어] SME 를 쓰지 않거나 */
+	    (boot_cpu_data.x86 != 0x17))	/* [한국어] Family 17h 가 아니면 */
+		return true;	/* [한국어] 이 문제와 무관하다 */
 
 	/* For Fam17h, a specific level of support is required */
-	if (boot_cpu_data.microcode >= 0x08001205)
-		return true;
+	if (boot_cpu_data.microcode >= 0x08001205)	/* [한국어] (원 주석: Fam17h 는 특정 수준의 지원이 필요하다) */
+		return true;	/* [한국어] 그 이상은 수정이 들어가 있다 */
 
-	if ((boot_cpu_data.microcode >= 0x08001126) &&
-	    (boot_cpu_data.microcode <= 0x080011ff))
-		return true;
+	if ((boot_cpu_data.microcode >= 0x08001126) &&	/* [한국어] 이전에도 수정이 있었던 구간이 있어 */
+	    (boot_cpu_data.microcode <= 0x080011ff))	/* [한국어] 버전이 단조롭게 좋아지지 않는다 */
+		return true;	/* [한국어] 그 구간도 괜찮다 */
 
-	pr_notice("IOMMU not currently supported when SME is active\n");
+	pr_notice("IOMMU not currently supported when SME is active\n");	/* [한국어] 그 밖의 버전은 SME 와 함께 쓰면 오동작한다 */
 
-	return false;
+	return false;	/* [한국어] IOMMU 를 포기한다 */
 }
 
 /****************************************************************************
@@ -6344,28 +6494,47 @@ static bool amd_iommu_sme_check(void)
  * IOMMUs
  *
  ****************************************************************************/
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * amd_iommu_detect - 부팅 아주 이른 시점에 IOMMU 의 존재를 확인한다
+ *
+ * DMA 계층의 IOMMU 탐지 시점에 불린다. 하는 일은 표가 있는지 보고, 있으면
+ * x86_init 에 본 초기화 함수를 등록하는 것뿐이다.
+ *
+ * 세 가지 이유로 물러날 수 있다: 사용자가 껐거나, 다른 IOMMU 가 이미
+ * 발견됐거나, SME 마이크로코드 문제가 있거나.
+ *
+ * 어느 경로로 물러나든 SNP 를 함께 끄는 것이 이 함수의 요점이다. SNP 는
+ * IOMMU 없이 성립하지 않으므로, IOMMU 를 포기한 순간 SNP 도 포기해야 한다.
+ * 그러지 않으면 게스트가 보호받는다고 믿는 상태가 된다.
+ *
+ * 호출 체인:
+ *   x86 부팅의 IOMMU 탐지 → [이 함수] → amd_iommu_sme_check()
+ *     → iommu_go_to_state()
+ */
 void __init amd_iommu_detect(void)
 {
-	int ret;
+	int ret;	/* [한국어] 결과 */
 
-	if (no_iommu || (iommu_detected && !gart_iommu_aperture))
-		goto disable_snp;
+	if (no_iommu || (iommu_detected && !gart_iommu_aperture))	/* [한국어] 사용자가 껐거나 다른 IOMMU 가 이미 발견됐으면 */
+		goto disable_snp;	/* [한국어] SNP 도 함께 포기해야 한다 */
 
-	if (!amd_iommu_sme_check())
-		goto disable_snp;
+	if (!amd_iommu_sme_check())	/* [한국어] SME 마이크로코드 문제가 있으면 */
+		goto disable_snp;	/* [한국어] 같은 처리 */
 
-	ret = iommu_go_to_state(IOMMU_IVRS_DETECTED);
-	if (ret)
-		goto disable_snp;
+	ret = iommu_go_to_state(IOMMU_IVRS_DETECTED);	/* [한국어] 표가 있는지까지만 진행 */
+	if (ret)	/* [한국어] 없거나 쓸 수 없다 */
+		goto disable_snp;	/* [한국어] 같은 처리 */
 
-	amd_iommu_detected = true;
-	iommu_detected = 1;
-	x86_init.iommu.iommu_init = amd_iommu_init;
-	return;
+	amd_iommu_detected = true;	/* [한국어] 발견됐음을 기록 */
+	iommu_detected = 1;	/* [한국어] 다른 IOMMU 드라이버가 나서지 않게 한다 */
+	x86_init.iommu.iommu_init = amd_iommu_init;	/* [한국어] 본 초기화 함수를 등록한다. DMA 계층이 나중에 부른다 */
+	return;	/* [한국어] 탐지 완료 */
 
 disable_snp:
-	if (cc_platform_has(CC_ATTR_HOST_SEV_SNP))
-		cc_platform_clear(CC_ATTR_HOST_SEV_SNP);
+	if (cc_platform_has(CC_ATTR_HOST_SEV_SNP))	/* [한국어] SNP 는 IOMMU 없이 성립하지 않는다 */
+		cc_platform_clear(CC_ATTR_HOST_SEV_SNP);	/* [한국어] IOMMU 를 포기한 순간 SNP 도 포기해야 한다 */
 }
 
 /****************************************************************************
