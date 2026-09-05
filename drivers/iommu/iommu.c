@@ -1614,9 +1614,17 @@ EXPORT_SYMBOL_GPL(iommu_group_alloc);	/* [한국어] 벤더 드라이버가 그�
  * operations.  This function provides a way to retrieve it.  Caller
  * should hold a group reference.
  */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어) 그룹에 매달아 둔 소유자 상태를 꺼낸다.
+ *
+ * 락을 잡지 않는 것에 주의할 것. 위 주석대로 호출자가 이미 그룹 참조를
+ * 들고 있어야 하고, 이 필드는 소유자 자신만 쓰므로 경쟁이 없다는 전제다.
+ *
+ * 호출 체인: VFIO 등 그룹 소유자 → [이 함수]
+ */
 void *iommu_group_get_iommudata(struct iommu_group *group)
 {
-	return group->iommu_data;
+	return group->iommu_data;	/* [한국어] 내용은 이 파일이 해석하지 않는다 — 불투명 포인터다 */
 }
 EXPORT_SYMBOL_GPL(iommu_group_get_iommudata);
 
@@ -1630,11 +1638,20 @@ EXPORT_SYMBOL_GPL(iommu_group_get_iommudata);
  * operations.  This function provides a way to set the data after
  * the group has been allocated.  Caller should hold a group reference.
  */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어) 그 짝. 상태와 함께 해제 방법도 받는다.
+ *
+ * release 를 함께 받는 이유: 그룹이 사라질 때 소유자는 이미 없을 수 있고,
+ * 그러면 이 상태를 무엇으로 풀어야 하는지 그룹 자신은 알 수 없다. 그래서
+ * 해제 함수를 지금 함께 등록해 둔다.
+ *
+ * 호출 체인: VFIO 등 그룹 소유자 → [이 함수]
+ */
 void iommu_group_set_iommudata(struct iommu_group *group, void *iommu_data,
 			       void (*release)(void *iommu_data))
 {
 	group->iommu_data = iommu_data;
-	group->iommu_data_release = release;
+	group->iommu_data_release = release;	/* [한국어] 소유자가 사라진 뒤에도 정리할 수 있도록 방법을 함께 받아 둔다 */
 }
 EXPORT_SYMBOL_GPL(iommu_group_set_iommudata);
 
@@ -1646,26 +1663,44 @@ EXPORT_SYMBOL_GPL(iommu_group_set_iommudata);
  * Allow iommu driver to set a name for a group.  When set it will
  * appear in a name attribute file under the group in sysfs.
  */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어) 그룹에 이름을 붙이거나 지운다.
+ *
+ * 이름은 선택 사항이라 없을 수도 있고, 그때는 sysfs 에 name 파일 자체가
+ * 없다. 그래서 이 함수는 "설정"이 아니라 "있으면 지우고 다시 만들기"로
+ * 동작한다 -- 기존 파일을 먼저 없애야 새 이름으로 다시 만들 수 있다.
+ *
+ * name 이 NULL 이면 지우기만 하고 끝난다. 그 경우 위쪽 블록에서 곧바로
+ * 돌아가는 것이 그 처리다.
+ *
+ * 실패 시 포인터까지 NULL 로 되돌리는 것에 주의할 것. 파일 생성에 실패한
+ * 채 이름만 남으면, 나중에 이 함수가 다시 불릴 때 존재하지 않는 sysfs
+ * 파일을 지우려 한다.
+ *
+ * 실행 컨텍스트: 벤더 드라이버의 그룹 설정 경로. 잠들 수 있다.
+ *
+ * 호출 체인: 벤더 드라이버 → [이 함수] → sysfs_create_file
+ */
 int iommu_group_set_name(struct iommu_group *group, const char *name)
 {
 	int ret;
 
-	if (group->name) {
+	if (group->name) {	/* [한국어] 이미 이름이 있으면 파일부터 없애야 새로 만들 수 있다 */
 		iommu_group_remove_file(group, &iommu_group_attr_name);
 		kfree(group->name);
 		group->name = NULL;
 		if (!name)
-			return 0;
+			return 0;	/* [한국어] 지우기만 요청한 경우 — 여기서 끝난다 */
 	}
 
-	group->name = kstrdup(name, GFP_KERNEL);
+	group->name = kstrdup(name, GFP_KERNEL);	/* [한국어] 호출자의 문자열이 곧 사라질 수 있어 복사한다 */
 	if (!group->name)
 		return -ENOMEM;
 
 	ret = iommu_group_create_file(group, &iommu_group_attr_name);
 	if (ret) {
 		kfree(group->name);
-		group->name = NULL;
+		group->name = NULL;	/* [한국어] 포인터까지 지워야 다음 호출이 없는 파일을 지우려 하지 않는다 */
 		return ret;
 	}
 
@@ -1673,76 +1708,135 @@ int iommu_group_set_name(struct iommu_group *group, const char *name)
 }
 EXPORT_SYMBOL_GPL(iommu_group_set_name);
 
+/*
+ * [한국어]
+ * iommu_create_device_direct_mappings - 예약 구간을 항등 매핑으로 미리 채운다
+ *
+ * @domain: 채울 도메인
+ * @dev:    이 장치가 요구하는 예약 구간을 묻는다
+ * @return: 0 이면 성공, 음수 errno
+ *
+ * 왜 필요한가: 어떤 주소들은 커널이 IOMMU 를 세우기 전부터 이미 쓰이고
+ * 있다. 펌웨어가 화면에 그림을 그리고 있거나, 부팅 로더가 남긴 버퍼를
+ * 장치가 계속 읽고 있는 경우다. 그런 주소를 번역 대상으로 만들면 그
+ * 순간 접근이 끊기므로, IOMMU 를 켜기 전에 "주소가 그대로 통과되는"
+ * 매핑을 미리 넣어 둔다. 그것이 항등(direct) 매핑이다.
+ *
+ * 루프의 모양이 특이한 것에는 이유가 있다. 위 영어 주석대로 여러 장치의
+ * 예약 구간이 겹칠 수 있어, 이미 매핑된 페이지를 다시 매핑하면 실패한다.
+ * 그래서 한 페이지씩 훑으며 아직 비어 있는 구간만 모았다가(map_size)
+ * 이미 매핑된 페이지를 만나면 거기서 끊어 한 번에 매핑한다. 페이지마다
+ * iommu_map 을 부르는 것보다 훨씬 적은 호출로 끝난다.
+ *
+ * 루프 조건이 addr <= end 인 것도 그 구조 때문이다. 마지막 한 바퀴는
+ * 매핑할 페이지를 보는 것이 아니라, 모아 둔 구간을 비우기 위해 도는
+ * 것이며 map_end 로 곧장 뛴다.
+ *
+ * 주소 0 을 1 로 바꿔 묻는 것은 위 영어 주석이 밝히는 API 의 모호함
+ * 때문이다 -- iommu_iova_to_phys 는 "매핑 없음"도 0 으로 답하므로,
+ * 물리 주소 0 에 매핑된 경우와 구별할 수 없다.
+ *
+ * 실행 컨텍스트: 장치를 그룹에 들이는 경로. 잠들 수 있다(GFP_KERNEL).
+ *
+ * 호출 체인: iommu_setup_default_domain / 장치 추가 → [이 함수] → iommu_map
+ */
 static int iommu_create_device_direct_mappings(struct iommu_domain *domain,
 					       struct device *dev)
 {
-	struct iommu_resv_region *entry;
-	LIST_HEAD(mappings);
-	unsigned long pg_size;
+	struct iommu_resv_region *entry;	/* [한국어] 예약 구간 하나 */
+	LIST_HEAD(mappings);	/* [한국어] 이 장치가 요구하는 구간들을 받을 목록 */
+	unsigned long pg_size;	/* [한국어] 이 도메인이 다룰 수 있는 가장 작은 페이지 */
 	int ret = 0;
 
-	pg_size = domain->pgsize_bitmap ? 1UL << __ffs(domain->pgsize_bitmap) : 0;
+	pg_size = domain->pgsize_bitmap ? 1UL << __ffs(domain->pgsize_bitmap) : 0;	/* [한국어] 지원 크기 비트맵의 최하위 비트가 최소 페이지다 */
 
-	if (WARN_ON_ONCE(iommu_is_dma_domain(domain) && !pg_size))
+	if (WARN_ON_ONCE(iommu_is_dma_domain(domain) && !pg_size))	/* [한국어] 번역 도메인인데 페이지 크기를 모른다 — 드라이버가 비트맵을 안 채웠다 */
 		return -EINVAL;
 
-	iommu_get_resv_regions(dev, &mappings);
+	iommu_get_resv_regions(dev, &mappings);	/* [한국어] 벤더 드라이버와 펌웨어가 이 장치의 예약 구간을 알려 준다 */
 
 	/* We need to consider overlapping regions for different devices */
 	list_for_each_entry(entry, &mappings, list) {
 		dma_addr_t start, end, addr;
-		size_t map_size = 0;
+		size_t map_size = 0;	/* [한국어] 아직 매핑되지 않은 채 모아 둔 길이 */
 
 		if (entry->type == IOMMU_RESV_DIRECT)
-			dev->iommu->require_direct = 1;
+			dev->iommu->require_direct = 1;	/* [한국어] 이 장치는 항등 매핑이 필수 — 나중에 통과 모드를 끌 수 있는지 판단하는 근거가 된다 */
 
 		if ((entry->type != IOMMU_RESV_DIRECT &&
 		     entry->type != IOMMU_RESV_DIRECT_RELAXABLE) ||
 		    !iommu_is_dma_domain(domain))
-			continue;
+			continue;	/* [한국어] 항등이 필요한 구간이 아니거나, 번역하지 않는 도메인이라 채울 것이 없다 */
 
-		start = ALIGN(entry->start, pg_size);
+		start = ALIGN(entry->start, pg_size);	/* [한국어] 페이지 경계로 맞춘다 — IOMMU 는 페이지 단위로만 매핑한다 */
 		end   = ALIGN(entry->start + entry->length, pg_size);
 
-		for (addr = start; addr <= end; addr += pg_size) {
+		for (addr = start; addr <= end; addr += pg_size) {	/* [한국어] <= 인 이유: 마지막 한 바퀴는 모아 둔 구간을 비우려고 돈다 */
 			phys_addr_t phys_addr;
 
 			if (addr == end)
-				goto map_end;
+				goto map_end;	/* [한국어] 끝에 닿았다 — 남은 구간만 매핑하고 이 항목을 마친다 */
 
 			/*
 			 * Return address by iommu_iova_to_phys for 0 is
 			 * ambiguous. Offset to address 1 if addr is 0.
 			 */
+			/* [한국어] 위 영어 주석대로, 반환값 0 이 "매핑 없음"과
+			 * "물리 주소 0 에 매핑됨"을 구별하지 못한다. 그래서 주소 0 은
+			 * 1 로 바꿔 묻는다 -- 같은 페이지 안이라 답은 같다. */
 			phys_addr = iommu_iova_to_phys(domain, addr ? addr : 1);
 			if (!phys_addr) {
-				map_size += pg_size;
+				map_size += pg_size;	/* [한국어] 비어 있다 — 모아 두었다가 한 번에 매핑한다 */
 				continue;
 			}
 
 map_end:
-			if (map_size) {
-				ret = iommu_map(domain, addr - map_size,
+			if (map_size) {	/* [한국어] 모아 둔 것이 있으면 여기서 끊어 낸다 */
+				ret = iommu_map(domain, addr - map_size,	/* [한국어] IOVA 와 물리 주소가 같다 — 이것이 항등 매핑이다 */
 						addr - map_size, map_size,
 						entry->prot, GFP_KERNEL);
 				if (ret)
-					goto out;
-				map_size = 0;
+					goto out;	/* [한국어] 이미 넣은 매핑은 도메인이 해제될 때 함께 사라진다 */
+				map_size = 0;	/* [한국어] 다음 구간을 새로 모으기 시작한다 */
 			}
 		}
 
 	}
 out:
-	iommu_put_resv_regions(dev, &mappings);
+	iommu_put_resv_regions(dev, &mappings);	/* [한국어] 목록은 드라이버가 잡아 준 것이라 같은 쪽에 돌려준다 */
 
 	return ret;
 }
 
 /* This is undone by __iommu_group_free_device() */
+/*
+ * [한국어]
+ * iommu_group_alloc_device - 장치 하나를 그룹에 넣을 항목으로 만든다
+ *
+ * @group: 들어갈 그룹
+ * @dev:   들어갈 장치
+ * @return: 만들어진 항목. 실패하면 오류 포인터.
+ *
+ * 실제로 하는 일의 대부분은 sysfs 링크 두 개를 거는 것이다. 장치 쪽에는
+ * "네가 속한 그룹"을 가리키는 iommu_group 링크가, 그룹의 devices/ 아래에는
+ * 장치를 가리키는 링크가 걸린다. 사용자 공간이 양방향으로 탐색할 수 있게
+ * 하려는 것이며, VFIO 를 쓰려면 반드시 필요한 정보다.
+ *
+ * 이름 충돌 처리가 이 함수의 눈에 띄는 부분이다. 서로 다른 버스의 장치가
+ * 같은 kobject 이름을 가질 수 있어, 링크 생성이 -EEXIST 로 실패하면
+ * ".0", ".1" 을 붙여 다시 시도한다. nowarn 판을 쓰는 것도 그래서다 --
+ * 이 실패는 예상된 것이라 커널 로그에 경고를 낼 일이 아니다.
+ *
+ * 목록에 넣는 것은 호출자의 몫이다. 이 함수는 항목만 만들어 돌려준다.
+ *
+ * 실행 컨텍스트: 장치 추가 경로. 잠들 수 있다.
+ *
+ * 호출 체인: iommu_group_add_device / 장치 probe → [이 함수]
+ */
 static struct group_device *iommu_group_alloc_device(struct iommu_group *group,
 						     struct device *dev)
 {
-	int ret, i = 0;
+	int ret, i = 0;	/* [한국어] i 는 이름 충돌 시 붙일 일련번호다 */
 	struct group_device *device;
 
 	device = kzalloc_obj(*device);
@@ -1755,21 +1849,23 @@ static struct group_device *iommu_group_alloc_device(struct iommu_group *group,
 	if (ret)
 		goto err_free_device;
 
-	device->name = kasprintf(GFP_KERNEL, "%s", kobject_name(&dev->kobj));
-rename:
+	device->name = kasprintf(GFP_KERNEL, "%s", kobject_name(&dev->kobj));	/* [한국어] 첫 시도는 장치 이름 그대로 */
+rename:	/* [한국어] 이름이 겹치면 번호를 붙여 여기로 돌아온다 */
 	if (!device->name) {
 		ret = -ENOMEM;
 		goto err_remove_link;
 	}
 
-	ret = sysfs_create_link_nowarn(group->devices_kobj,
+	ret = sysfs_create_link_nowarn(group->devices_kobj,	/* [한국어] nowarn — 충돌은 예상된 것이라 커널 로그를 어지럽히지 않는다 */
 				       &dev->kobj, device->name);
 	if (ret) {
-		if (ret == -EEXIST && i >= 0) {
+		if (ret == -EEXIST && i >= 0) {	/* [한국어] i >= 0 은 오버플로 방어. 음수가 되면 재시도를 멈춘다 */
 			/*
 			 * Account for the slim chance of collision
 			 * and append an instance to the name.
 			 */
+			/* [한국어] 위 영어 주석대로 드물지만 다른 버스의 장치가
+			 * 같은 이름을 가질 수 있다. 번호를 붙여 다시 시도한다. */
 			kfree(device->name);
 			device->name = kasprintf(GFP_KERNEL, "%s.%d",
 						 kobject_name(&dev->kobj), i++);
@@ -1778,19 +1874,19 @@ rename:
 		goto err_free_name;
 	}
 
-	trace_add_device_to_group(group->id, dev);
+	trace_add_device_to_group(group->id, dev);	/* [한국어] 어느 장치가 어느 그룹에 들어갔는지 추적점에 남긴다 */
 
-	dev_info(dev, "Adding to iommu group %d\n", group->id);
+	dev_info(dev, "Adding to iommu group %d\n", group->id);	/* [한국어] 그룹 배정은 사용자가 알아야 하는 사실이라 info 다 */
 
-	return device;
+	return device;	/* [한국어] 목록에 넣는 것은 호출자의 몫이다 */
 
 err_free_name:
 	kfree(device->name);
 err_remove_link:
-	sysfs_remove_link(&dev->kobj, "iommu_group");
+	sysfs_remove_link(&dev->kobj, "iommu_group");	/* [한국어] 장치 쪽 링크를 되돌린다 */
 err_free_device:
 	kfree(device);
-	dev_err(dev, "Failed to add to iommu group %d: %d\n", group->id, ret);
+	dev_err(dev, "Failed to add to iommu group %d: %d\n", group->id, ret);	/* [한국어] 이 장치는 IOMMU 보호를 받지 못한다 — 반드시 남겨야 한다 */
 	return ERR_PTR(ret);
 }
 
@@ -1802,19 +1898,34 @@ err_free_device:
  * This function is called by an iommu driver to add a device into a
  * group.  Adding a device increments the group reference count.
  */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어) 순서가 이 함수의 내용이다.
+ *
+ * 참조를 먼저 들고 목록에 넣는 것이 마지막이다. 목록에 들어가는 순간부터
+ * 다른 경로가 이 장치를 보게 되므로, 그전에 그룹 참조와 역방향 포인터가
+ * 이미 서 있어야 한다. 순서를 바꾸면 순회 중인 쪽이 아직 완성되지 않은
+ * 항목을 만난다.
+ *
+ * 참조는 위 영어 주석대로 장치가 그룹에 있는 동안 유지되고, 뺄 때 놓인다.
+ * 그래서 마지막 장치가 빠지면 그룹이 자연히 사라진다.
+ *
+ * 실행 컨텍스트: 벤더 드라이버의 장치 추가. 잠들 수 있다.
+ *
+ * 호출 체인: 벤더 드라이버 → [이 함수] → iommu_group_alloc_device
+ */
 int iommu_group_add_device(struct iommu_group *group, struct device *dev)
 {
 	struct group_device *gdev;
 
-	gdev = iommu_group_alloc_device(group, dev);
+	gdev = iommu_group_alloc_device(group, dev);	/* [한국어] sysfs 링크까지 걸어 준다 */
 	if (IS_ERR(gdev))
 		return PTR_ERR(gdev);
 
-	iommu_group_ref_get(group);
-	dev->iommu_group = group;
+	iommu_group_ref_get(group);	/* [한국어] 장치가 그룹에 있는 동안 그룹이 사라지지 않게 한다 */
+	dev->iommu_group = group;	/* [한국어] 역방향 포인터 — 장치에서 그룹을 찾는 통로 */
 
 	mutex_lock(&group->mutex);
-	list_add_tail(&gdev->list, &group->devices);
+	list_add_tail(&gdev->list, &group->devices);	/* [한국어] 마지막에 목록에 넣는다 — 이 순간부터 다른 경로가 이 장치를 본다 */
 	mutex_unlock(&group->mutex);
 	return 0;
 }
@@ -1827,16 +1938,26 @@ EXPORT_SYMBOL_GPL(iommu_group_add_device);
  * This function is called by an iommu driver to remove the device from
  * it's current group.  This decrements the iommu group reference count.
  */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어) add 의 짝.
+ *
+ * 그룹이 없는 장치를 조용히 넘기는 것에 주의할 것. IOMMU 아래에 들어오지
+ * 않은 장치가 대부분이고, 그런 장치에 이 함수가 불리는 것은 오류가 아니다.
+ *
+ * 실행 컨텍스트: 벤더 드라이버의 장치 제거. 잠들 수 있다.
+ *
+ * 호출 체인: 벤더 드라이버 → [이 함수] → __iommu_group_remove_device
+ */
 void iommu_group_remove_device(struct device *dev)
 {
 	struct iommu_group *group = dev->iommu_group;
 
 	if (!group)
-		return;
+		return;	/* [한국어] IOMMU 아래에 없던 장치 — 뺄 것이 없다 */
 
-	dev_info(dev, "Removing from iommu group %d\n", group->id);
+	dev_info(dev, "Removing from iommu group %d\n", group->id);	/* [한국어] 추가와 짝을 이루는 기록 */
 
-	__iommu_group_remove_device(dev);
+	__iommu_group_remove_device(dev);	/* [한국어] 링크 제거, 목록에서 빼기, 참조 놓기까지 그쪽이 한다 */
 }
 EXPORT_SYMBOL_GPL(iommu_group_remove_device);
 
@@ -1850,19 +1971,49 @@ EXPORT_SYMBOL_GPL(iommu_group_remove_device);
  *
  * Note that this function must be called after device group param is set.
  */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어) 벤더 드라이버가 자기 콜백 안에서
+ * 그룹 락을 들고 있는지 확인하는 수단이다.
+ *
+ * 왜 필요한가: 벤더 드라이버의 콜백들은 대부분 이 파일이 group->mutex 를
+ * 든 채로 부르지만, 그 규약은 코드에 적혀 있지 않다. 드라이버 쪽에서
+ * 그 전제가 실제로 지켜지는지 검사하고 싶을 때 이것을 쓴다.
+ *
+ * lockdep 을 켰을 때만 존재하는 것에 주의할 것 -- 실행 비용이 있는 검사라
+ * 디버깅 빌드에서만 컴파일된다.
+ *
+ * 호출 체인: 벤더 드라이버 콜백 → [이 함수]
+ */
 void iommu_group_mutex_assert(struct device *dev)
 {
 	struct iommu_group *group = dev->iommu_group;
 
-	lockdep_assert_held(&group->mutex);
+	lockdep_assert_held(&group->mutex);	/* [한국어] 위 주석대로 그룹이 이미 설정된 뒤에만 부를 수 있다 — 아니면 NULL 역참조다 */
 }
 EXPORT_SYMBOL_GPL(iommu_group_mutex_assert);
 #endif
 
+/*
+ * [한국어]
+ * iommu_group_first_dev - 그룹의 대표 장치 하나를 꺼낸다
+ *
+ * @group: 대상 그룹. 호출자가 group->mutex 를 들고 있어야 한다.
+ * @return: 첫 장치. 빈 그룹에 부르면 안 된다.
+ *
+ * 왜 "아무 장치나 하나"로 충분한가: 그룹의 장치들은 같은 IOMMU 아래에
+ * 있고 같은 도메인을 보므로, IOMMU 능력을 묻거나 ops 를 찾는 일에는
+ * 어느 장치를 써도 답이 같다. 도메인을 만들 때나 페이지 크기를 물을 때
+ * 이 함수를 쓴다.
+ *
+ * 빈 목록을 검사하지 않는 것에 주의할 것. 장치가 하나도 없는 그룹은
+ * 곧바로 해제되므로, 이 함수가 불리는 시점에는 반드시 하나 이상 있다.
+ *
+ * 호출 체인: 도메인 생성·능력 조회 경로 → [이 함수]
+ */
 static struct device *iommu_group_first_dev(struct iommu_group *group)
 {
-	lockdep_assert_held(&group->mutex);
-	return list_first_entry(&group->devices, struct group_device, list)->dev;
+	lockdep_assert_held(&group->mutex);	/* [한국어] 락 없이 부르면 목록이 바뀌는 중일 수 있다 */
+	return list_first_entry(&group->devices, struct group_device, list)->dev;	/* [한국어] 어느 것이든 같은 답을 주므로 첫 항목이면 된다 */
 }
 
 /**
@@ -1876,17 +2027,31 @@ static struct device *iommu_group_first_dev(struct iommu_group *group)
  * The group->mutex is held across callbacks, which will block calls to
  * iommu_group_add/remove_device.
  */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어) 그룹의 모든 장치에 콜백을 돌린다.
+ *
+ * 위 주석이 밝히는 규약이 중요하다 -- 콜백이 도는 내내 group->mutex 를
+ * 들고 있으므로, 콜백 안에서 장치를 추가하거나 제거하면 교착이 된다.
+ * 콜백은 짧고 잠들지 않아야 한다.
+ *
+ * 콜백이 0 이 아닌 값을 주면 순회를 멈추고 그 값을 그대로 올린다.
+ * "찾으면 멈추기" 와 "실패하면 중단" 을 같은 규약으로 다룬다.
+ *
+ * 실행 컨텍스트: 그룹 사용자(VFIO 등). 잠들 수 있다.
+ *
+ * 호출 체인: VFIO 등 → [이 함수] → 호출자가 준 fn
+ */
 int iommu_group_for_each_dev(struct iommu_group *group, void *data,
 			     int (*fn)(struct device *, void *))
 {
 	struct group_device *device;
 	int ret = 0;
 
-	mutex_lock(&group->mutex);
+	mutex_lock(&group->mutex);	/* [한국어] 콜백이 도는 내내 잡고 있다 — 그 안에서 장치를 더하거나 빼면 교착이다 */
 	for_each_group_device(group, device) {
 		ret = fn(device->dev, data);
 		if (ret)
-			break;
+			break;	/* [한국어] 0 이 아니면 멈춘다 — 찾았거나 실패했거나 */
 	}
 	mutex_unlock(&group->mutex);
 
