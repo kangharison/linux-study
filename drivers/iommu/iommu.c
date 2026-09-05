@@ -690,14 +690,30 @@ void iommu_device_unregister(struct iommu_device *iommu)
 }
 EXPORT_SYMBOL_GPL(iommu_device_unregister);
 
-#if IS_ENABLED(CONFIG_IOMMUFD_TEST)
+#if IS_ENABLED(CONFIG_IOMMUFD_TEST)	/* [한국어] 여기부터 iommufd 셀프테스트 전용. 실제 하드웨어 없이 가짜 IOMMU 드라이버와 가짜 장치를 지어 코어 로직을 시험하기 위한 진입점들이며, 일반 빌드에는 컴파일되지 않는다 */
+/*
+ * [한국어]
+ * iommu_device_unregister_bus - 버스 하나에 붙여 둔 가짜 IOMMU 드라이버를 거둔다 (셀프테스트 전용)
+ *
+ * @iommu: 등록했던 IOMMU 인스턴스
+ * @bus:   그 인스턴스가 맡고 있던 버스
+ * @nb:    호출자가 제공했던 알림 블록 메모리
+ *
+ * iommu_device_register_bus 의 정확한 역순이다. 알림 → 펌웨어 노드 → 인스턴스
+ * 순으로 되돌리는데, 순서가 중요하다. 알림을 먼저 떼지 않으면 해제 도중에 추가된
+ * 장치가 곧 사라질 드라이버로 프로브될 수 있다.
+ *
+ * 실행 컨텍스트: 셀프테스트 모듈의 정리 경로. 프로세스 문맥.
+ *
+ * 호출 체인: iommufd selftest, iommu_device_register_bus 의 에러 경로 → [이 함수]
+ */
 void iommu_device_unregister_bus(struct iommu_device *iommu,
 				 const struct bus_type *bus,
 				 struct notifier_block *nb)
 {
-	bus_unregister_notifier(bus, nb);
-	fwnode_remove_software_node(iommu->fwnode);
-	iommu_device_unregister(iommu);
+	bus_unregister_notifier(bus, nb);	/* [한국어] 가짜 드라이버가 걸어 둔 버스 알림부터 뗀다 — 이후 추가되는 장치가 이 드라이버로 오지 않게 */
+	fwnode_remove_software_node(iommu->fwnode);	/* [한국어] 가짜 펌웨어 노드 해제. 실제 하드웨어는 DT/ACPI 가 만든 노드를 쓰지만 셀프테스트는 소프트웨어 노드를 지어 쓴다 */
+	iommu_device_unregister(iommu);	/* [한국어] 공통 해제 경로 — 전역 목록에서 빼고 붙어 있던 장치를 모두 떼어 낸다 */
 }
 EXPORT_SYMBOL_GPL(iommu_device_unregister_bus);
 
@@ -706,121 +722,261 @@ EXPORT_SYMBOL_GPL(iommu_device_unregister_bus);
  * selftest to create a mock iommu driver. The caller must provide
  * some memory to hold a notifier_block.
  */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * iommu_device_register_bus - fwnode 매칭 없이 버스 하나에 IOMMU 드라이버를 등록한다 (셀프테스트 전용)
+ *
+ * @iommu:  등록할 IOMMU 인스턴스 (셀프테스트가 정적으로 들고 있다)
+ * @ops:    그 드라이버의 콜백 표
+ * @bus:    이 드라이버가 맡을 버스
+ * @nb:     알림 블록으로 쓸 메모리. 코어가 할당하지 않고 호출자가 준다.
+ * @return: 0 성공, 음수 실패 (실패 시 등록은 전부 되돌아간 상태)
+ *
+ * 정상 등록 경로인 iommu_device_register 와 비교하면 이 함수의 성격이 드러난다.
+ * 정상 경로는 시스템에 있는 모든 버스에 걸쳐 등록되고 fwnode(DT/ACPI 노드)로
+ * 장치와 짝을 맞추지만, 여기서는 버스 하나에만 붙고 fwnode 는 소프트웨어 노드를
+ * 지어서 쓴다. 실제 IOMMU 하드웨어 없이 코어의 그룹·도메인 로직만 시험하기 위한
+ * 발판이다.
+ *
+ * 마지막 WRITE_ONCE(ready) 가 이 함수의 계약을 요약한다 — 목록 등록과 기존 장치
+ * 프로브가 모두 끝난 뒤에야 준비 완료를 공개하므로, 다른 CPU 가 반쯤 만들어진
+ * 인스턴스를 쓰는 일이 없다.
+ *
+ * 실행 컨텍스트: 셀프테스트 모듈 초기화. 프로세스 문맥, 잠들 수 있다.
+ *
+ * 호출 체인: iommufd selftest → [이 함수] → bus_iommu_probe → __iommu_probe_device
+ */
 int iommu_device_register_bus(struct iommu_device *iommu,
 			      const struct iommu_ops *ops,
 			      const struct bus_type *bus,
 			      struct notifier_block *nb)
 {
-	int err;
+	int err;	/* [한국어] 알림 등록/프로브 결과를 받는다 */
 
-	iommu->ops = ops;
-	nb->notifier_call = iommu_bus_notifier;
-	err = bus_register_notifier(bus, nb);
-	if (err)
-		return err;
+	iommu->ops = ops;	/* [한국어] 정상 등록 경로와 달리 fwnode 매칭 없이 ops 를 직접 꽂는다 */
+	nb->notifier_call = iommu_bus_notifier;	/* [한국어] 호출자가 준 메모리에 코어의 표준 버스 알림 핸들러를 심는다 */
+	err = bus_register_notifier(bus, nb);	/* [한국어] 이 버스에 장치가 추가/제거될 때마다 iommu_bus_notifier 가 불리게 한다 */
+	if (err)	/* [한국어] 버스 알림 등록 실패 */
+		return err;	/* [한국어] 알림 등록 실패 — 아직 아무 것도 만들지 않았으므로 그대로 반환 */
 
-	iommu->fwnode = fwnode_create_software_node(NULL, NULL);
-	if (IS_ERR(iommu->fwnode)) {
-		bus_unregister_notifier(bus, nb);
-		return PTR_ERR(iommu->fwnode);
+	iommu->fwnode = fwnode_create_software_node(NULL, NULL);	/* [한국어] 매칭용 가짜 펌웨어 노드를 짓는다. iommu_fwspec_ops 가 fwnode 로 드라이버를 찾기 때문에 실체가 없어도 노드는 필요하다 */
+	if (IS_ERR(iommu->fwnode)) {	/* [한국어] 노드 생성 실패 */
+		bus_unregister_notifier(bus, nb);	/* [한국어] 방금 건 알림부터 되돌린다 */
+		return PTR_ERR(iommu->fwnode);	/* [한국어] 에러 포인터를 코드로 풀어 반환 */
 	}
 
-	spin_lock(&iommu_device_lock);
-	list_add_tail(&iommu->list, &iommu_device_list);
-	spin_unlock(&iommu_device_lock);
+	spin_lock(&iommu_device_lock);	/* [한국어] 전역 IOMMU 인스턴스 목록 보호 — 스핀락이라 이 구간에서 잠들면 안 된다 */
+	list_add_tail(&iommu->list, &iommu_device_list);	/* [한국어] 이 순간부터 fwnode 매칭 대상이 된다 */
+	spin_unlock(&iommu_device_lock);	/* [한국어] 목록 갱신 끝 */
 
-	err = bus_iommu_probe(bus);
-	if (err) {
-		iommu_device_unregister_bus(iommu, bus, nb);
-		return err;
+	err = bus_iommu_probe(bus);	/* [한국어] 이미 버스에 있던 장치들을 소급해서 이 드라이버로 프로브한다 */
+	if (err) {	/* [한국어] 한 장치라도 실패하면 */
+		iommu_device_unregister_bus(iommu, bus, nb);	/* [한국어] 등록 자체를 통째로 되돌린다 */
+		return err;	/* [한국어] 프로브 실패 전달 */
 	}
-	WRITE_ONCE(iommu->ready, true);
-	return 0;
+	WRITE_ONCE(iommu->ready, true);	/* [한국어] 마지막에 한 번에 '준비 완료'를 공개한다 — 다른 CPU 가 부분 초기화 상태를 보지 않도록 */
+	return 0;	/* [한국어] 가짜 IOMMU 등록 완료 */
 }
 EXPORT_SYMBOL_GPL(iommu_device_register_bus);
 
+/*
+ * [한국어]
+ * iommu_mock_device_add - 가짜 장치를 가짜 IOMMU 에 묶어 등록한다 (셀프테스트 전용)
+ *
+ * @dev:    아직 device_add 되지 않은 장치
+ * @iommu:  이 장치를 맡을 가짜 IOMMU 인스턴스
+ * @return: 0 성공, 음수 실패
+ *
+ * 순서가 핵심이다. device_add 는 버스 알림을 돌려 곧바로 __iommu_probe_device 를
+ * 부르는데, 그때 이미 fwspec 이 준비되어 있어야 매칭이 성립한다. 그래서 fwspec 을
+ * 먼저 심고 나서 장치를 등록한다. 실제 하드웨어에서는 이 역할을 DT/ACPI 파싱
+ * (bus->dma_configure)이 대신한다.
+ *
+ * 실행 컨텍스트: 셀프테스트. 프로세스 문맥.
+ *
+ * 호출 체인: iommufd selftest → [이 함수] → iommu_fwspec_init, device_add
+ */
 int iommu_mock_device_add(struct device *dev, struct iommu_device *iommu)
 {
-	int rc;
+	int rc;	/* [한국어] fwspec 생성과 장치 등록의 결과 */
 
-	mutex_lock(&iommu_probe_device_lock);
-	rc = iommu_fwspec_init(dev, iommu->fwnode);
-	mutex_unlock(&iommu_probe_device_lock);
+	mutex_lock(&iommu_probe_device_lock);	/* [한국어] fwspec 조작은 프로브 직렬화 락 아래에서만 허용된다 */
+	rc = iommu_fwspec_init(dev, iommu->fwnode);	/* [한국어] 이 가짜 장치를 가짜 IOMMU 의 fwnode 에 미리 묶어 둔다 — 곧 이어질 프로브가 이 fwspec 을 보고 드라이버를 찾는다 */
+	mutex_unlock(&iommu_probe_device_lock);	/* [한국어] 락 구간 최소화 */
 
-	if (rc)
-		return rc;
+	if (rc)	/* [한국어] fwspec 생성 실패 */
+		return rc;	/* [한국어] fwspec 을 못 만들면 장치를 등록하지 않는다 */
 
-	rc = device_add(dev);
-	if (rc)
-		iommu_fwspec_free(dev);
-	return rc;
+	rc = device_add(dev);	/* [한국어] 여기서 버스 알림이 돌며 __iommu_probe_device 가 실제로 불린다 */
+	if (rc)	/* [한국어] 장치 등록 실패 */
+		iommu_fwspec_free(dev);	/* [한국어] 미리 만든 fwspec 도 함께 거둔다 */
+	return rc;	/* [한국어] 등록 결과 전달 */
 }
 EXPORT_SYMBOL_GPL(iommu_mock_device_add);
 #endif
 
+/*
+ * [한국어]
+ * dev_iommu_get - 장치의 IOMMU 상태 구조체를 얻거나 만든다
+ *
+ * @dev:    대상 장치
+ * @return: struct dev_iommu 포인터. 할당 실패면 NULL.
+ *
+ * struct device 는 IOMMU 에 대해 포인터 한 칸(dev->iommu)만 알고 있고, 그 너머의
+ * 모든 것 — fwspec, 담당 IOMMU 인스턴스, PASID 한계, 지연 부착 여부, 드라이버
+ * 전용 문맥 — 이 이 구조체에 모여 있다. 프로브 경로에서 가장 먼저 만들어지고
+ * dev_iommu_free 로 마지막에 사라진다.
+ *
+ * 이미 있으면 그대로 돌려주는 멱등 함수다. 생성이 전역 프로브 락으로 직렬화되기
+ * 때문에 "확인 후 생성" 사이에 다른 CPU 가 끼어들 수 없고, 그래서 락 없는 이중
+ * 할당 걱정이 없다.
+ *
+ * 실행 컨텍스트: 프로브 경로. iommu_probe_device_lock 을 든 채로. 잠들 수 있다.
+ *
+ * 호출 체인: iommu_init_device, iommu_fwspec_init → [이 함수]
+ */
 static struct dev_iommu *dev_iommu_get(struct device *dev)
 {
-	struct dev_iommu *param = dev->iommu;
+	struct dev_iommu *param = dev->iommu;	/* [한국어] 장치별 IOMMU 상태. struct device 에 포인터 한 칸으로 매달린다 */
 
-	lockdep_assert_held(&iommu_probe_device_lock);
+	lockdep_assert_held(&iommu_probe_device_lock);	/* [한국어] 이 구조체의 생성은 전역 프로브 락으로 직렬화된다 — 두 경로가 동시에 만들면 하나가 그대로 새 나간다 */
 
-	if (param)
-		return param;
+	if (param)	/* [한국어] 이미 있으면 (재시도·재진입 경로) */
+		return param;	/* [한국어] 그대로 재사용 */
 
-	param = kzalloc_obj(*param);
-	if (!param)
-		return NULL;
+	param = kzalloc_obj(*param);	/* [한국어] 0 으로 채운 새 구조체 — 모든 플래그가 거짓에서 출발한다 */
+	if (!param)	/* [한국어] 할당 실패 */
+		return NULL;	/* [한국어] 호출자가 -ENOMEM 으로 바꾼다 */
 
-	mutex_init(&param->lock);
-	dev->iommu = param;
-	return param;
+	mutex_init(&param->lock);	/* [한국어] 이 장치의 fault 핸들러·PASID 상태를 지키는 장치 단위 락 */
+	dev->iommu = param;	/* [한국어] 장치에 붙인다 — 이 줄 이후 dev_iommu_ops/dev_has_iommu 가 동작한다 */
+	return param;	/* [한국어] 새로 만든 상태 반환 */
 }
 
+/*
+ * [한국어]
+ * dev_iommu_free - 장치의 IOMMU 상태를 해제한다
+ *
+ * @dev: 대상 장치
+ *
+ * dev_iommu_get 의 짝. dev->iommu 를 먼저 NULL 로 만든 뒤에 해제하는 순서가
+ * 의도적이다 — 해제 도중 다른 경로가 이 장치를 보더라도 "IOMMU 상태 없음"으로
+ * 일관되게 읽히기 때문이다.
+ *
+ * fwspec 은 이 구조체가 소유하므로 함께 거둔다. 그 안의 iommu_fwnode 는 DT/ACPI
+ * 노드에 대한 참조라 put 이 필요하다.
+ *
+ * 두 곳에서 불린다. 정상 해제 경로(iommu_deinit_device)와, 드라이버가 끝내
+ * 붙지 않아 fwspec 만 남은 장치를 치우는 iommu_release_device 다.
+ *
+ * 실행 컨텍스트: 프로브/해제 경로. 프로세스 문맥.
+ *
+ * 호출 체인: iommu_deinit_device, iommu_release_device, iommu_init_device 에러 경로 → [이 함수]
+ */
 void dev_iommu_free(struct device *dev)
 {
-	struct dev_iommu *param = dev->iommu;
+	struct dev_iommu *param = dev->iommu;	/* [한국어] 해제할 장치별 상태를 집어 둔다 */
 
-	dev->iommu = NULL;
-	if (param->fwspec) {
-		fwnode_handle_put(param->fwspec->iommu_fwnode);
-		kfree(param->fwspec);
+	dev->iommu = NULL;	/* [한국어] 먼저 끊는다 — 이후 누가 보더라도 '이 장치엔 IOMMU 상태가 없다'로 읽힌다 */
+	if (param->fwspec) {	/* [한국어] 펌웨어 매칭 정보를 남겨 두었다면 */
+		fwnode_handle_put(param->fwspec->iommu_fwnode);	/* [한국어] fwspec 이 잡고 있던 fwnode 참조를 반납 */
+		kfree(param->fwspec);	/* [한국어] fwspec 본체 해제 */
 	}
-	kfree(param);
+	kfree(param);	/* [한국어] 장치별 상태 해제 */
 }
 
 /*
  * Internal equivalent of device_iommu_mapped() for when we care that a device
  * actually has API ops, and don't want false positives from VFIO-only groups.
  */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * dev_has_iommu - 이 장치에 실제 IOMMU 드라이버가 붙어 있는가
+ *
+ * @dev:    대상 장치
+ * @return: true 면 ops 를 불러도 되는 장치
+ *
+ * device_iommu_mapped() 와 다른 점이 이 파일에서 자주 문제가 된다. 그룹에 들어
+ * 있다고 해서 IOMMU 드라이버가 붙은 것은 아니다 — VFIO 가 iommu_group_add_device
+ * 로 수동 구성한 그룹의 장치는 dev->iommu 는 있어도 담당 인스턴스가 없다. 그런
+ * 장치에 ops 를 부르면 NULL 역참조가 된다.
+ *
+ * 그래서 해제 경로(__iommu_group_remove_device)가 iommu_deinit_device 를 부를지
+ * 그냥 연결만 끊을지를 이 함수로 가른다.
+ *
+ * 실행 컨텍스트: 어디서든. 순수 판별식이다.
+ *
+ * 호출 체인: __iommu_group_remove_device 등 코어 내부 → [이 함수]
+ */
 static bool dev_has_iommu(struct device *dev)
 {
-	return dev->iommu && dev->iommu->iommu_dev;
+	return dev->iommu && dev->iommu->iommu_dev;	/* [한국어] dev->iommu 만으로는 부족하다. VFIO 가 수동으로 만든 그룹처럼 IOMMU 드라이버 없이 상태만 달린 경우가 있어, 실제 담당 인스턴스까지 붙었는지 봐야 API 를 부를 수 있다 */
 }
 
+/*
+ * [한국어]
+ * dev_iommu_get_max_pasids - 이 장치가 쓸 수 있는 PASID 개수의 상한을 구한다
+ *
+ * @dev:    대상 장치. dev->iommu->iommu_dev 가 이미 채워져 있어야 한다.
+ * @return: 사용 가능한 PASID 개수 (0 이면 PASID 불가)
+ *
+ * PASID(Process Address Space ID)는 하나의 물리 장치가 여러 주소 공간을 동시에
+ * 쓰게 해 주는 식별자다. 이것이 있어야 SVA(Shared Virtual Addressing) — 장치가
+ * 프로세스의 가상 주소를 그대로 쓰는 것 — 가 성립하고, GPU·가속기가 CPU 와 같은
+ * 포인터를 주고받을 수 있다.
+ *
+ * 상한은 양쪽에서 온다. 장치가 몇 비트의 PASID 를 낼 수 있는지(PCIe 는 PASID
+ * Capability, 플랫폼 장치는 pasid-num-bits 속성)와, IOMMU 가 몇 개까지 표를
+ * 들 수 있는지다. 둘 중 작은 쪽이 실제 한계이며, 프로브 때 한 번 계산해
+ * dev->iommu->max_pasids 에 캐시해 둔다.
+ *
+ * 실행 컨텍스트: 프로브 경로. 프로세스 문맥.
+ *
+ * 호출 체인: iommu_init_device → [이 함수] → pci_max_pasids / device_property_read_u32
+ */
 static u32 dev_iommu_get_max_pasids(struct device *dev)
 {
-	u32 max_pasids = 0, bits = 0;
-	int ret;
+	u32 max_pasids = 0, bits = 0;	/* [한국어] 장치가 낼 수 있는 PASID 개수와, 플랫폼 장치가 알리는 비트 폭 */
+	int ret;	/* [한국어] 능력 조회 결과 */
 
-	if (dev_is_pci(dev)) {
-		ret = pci_max_pasids(to_pci_dev(dev));
-		if (ret > 0)
-			max_pasids = ret;
+	if (dev_is_pci(dev)) {	/* [한국어] PCIe 는 PASID 능력이 확장 컨피그 공간에 표준으로 있다 */
+		ret = pci_max_pasids(to_pci_dev(dev));	/* [한국어] PASID Capability 의 Max PASID Width 를 읽어 개수로 환산해 준다 */
+		if (ret > 0)	/* [한국어] 능력이 없으면 0 이나 음수 */
+			max_pasids = ret;	/* [한국어] 지원 개수 확정 */
 	} else {
-		ret = device_property_read_u32(dev, "pasid-num-bits", &bits);
-		if (!ret)
-			max_pasids = 1UL << bits;
+		ret = device_property_read_u32(dev, "pasid-num-bits", &bits);	/* [한국어] 플랫폼 장치는 DT/ACPI 속성으로 PASID 비트 폭을 알린다 */
+		if (!ret)	/* [한국어] 속성이 있었다면 */
+			max_pasids = 1UL << bits;	/* [한국어] 비트 폭을 개수로 편다 */
 	}
 
-	return min_t(u32, max_pasids, dev->iommu->iommu_dev->max_pasids);
+	return min_t(u32, max_pasids, dev->iommu->iommu_dev->max_pasids);	/* [한국어] 장치가 낼 수 있는 수와 IOMMU 가 받아 줄 수 있는 수 중 작은 쪽. 둘 다 만족해야 SVA/PASID 부착이 성립한다 */
 }
 
+/*
+ * [한국어]
+ * dev_iommu_priv_set - 벤더 드라이버의 장치별 문맥 포인터를 심는다
+ *
+ * @dev:  대상 장치
+ * @priv: 드라이버가 소유하는 불투명 포인터
+ *
+ * 코어는 이 값을 절대 해석하지 않는다. 인텔 드라이버는 device_domain_info 를,
+ * ARM SMMU 는 arm_smmu_master 를 여기 매달고, dev_iommu_priv_get 으로 되찾는다.
+ * 드라이버가 struct device 에 자기 필드를 추가하지 않고도 장치별 상태를 붙일 수
+ * 있게 해 주는 자리다.
+ *
+ * lockdep 검사가 조건부인 이유는 FSL PAMU 하나 때문이다. 나머지 드라이버는 모두
+ * probe_device 안, 즉 전역 프로브 락 아래에서만 이 값을 설정한다.
+ *
+ * 실행 컨텍스트: 드라이버의 probe_device 콜백 안. 프로세스 문맥.
+ *
+ * 호출 체인: 벤더 드라이버 probe_device → [이 함수]
+ */
 void dev_iommu_priv_set(struct device *dev, void *priv)
 {
 	/* FSL_PAMU does something weird */
-	if (!IS_ENABLED(CONFIG_FSL_PAMU))
-		lockdep_assert_held(&iommu_probe_device_lock);
-	dev->iommu->priv = priv;
+	if (!IS_ENABLED(CONFIG_FSL_PAMU))	/* [한국어] FSL PAMU 만 프로브 락 밖에서 이 값을 건드린다 (위 영어 주석의 'weird') */
+		lockdep_assert_held(&iommu_probe_device_lock);	/* [한국어] 그 외 모든 드라이버는 프로브 직렬화 락 아래에서만 설정한다 */
+	dev->iommu->priv = priv;	/* [한국어] 벤더 드라이버가 장치별 문맥(예: 인텔의 device_domain_info)을 여기 매단다 — 코어는 내용을 해석하지 않는 불투명 포인터다 */
 }
 EXPORT_SYMBOL_GPL(dev_iommu_priv_set);
 
@@ -828,15 +984,44 @@ EXPORT_SYMBOL_GPL(dev_iommu_priv_set);
  * Init the dev->iommu and dev->iommu_group in the struct device and get the
  * driver probed
  */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * iommu_init_device - 장치를 맡을 IOMMU 드라이버를 찾아 붙이고 그룹까지 정한다
+ *
+ * @dev:    아직 IOMMU 아래로 들어오지 않은 장치
+ * @return: 0 성공. -ENODEV 면 이 장치를 맡을 IOMMU 가 없다(흔한 정상 결과).
+ *          그 외 음수는 실제 실패이며, 이 함수가 자기가 만든 것을 모두 되감은 뒤다.
+ *
+ * 장치가 IOMMU 세계로 들어오는 첫 관문이다. 다섯 단계가 순서대로 일어난다.
+ *   1) dev->iommu 상태 구조체 생성
+ *   2) 필요하면 bus->dma_configure 를 불러 펌웨어(DT/ACPI)에서 fwspec 을 채움
+ *   3) fwspec 의 fwnode 로 담당 IOMMU 드라이버(ops)를 찾고 모듈 참조를 잡음
+ *   4) ops->probe_device 로 드라이버에게 수락 여부를 물음
+ *   5) ops->device_group 으로 이 장치가 속할 격리 그룹을 결정
+ * 마지막에 PASID 한계와 지연 부착 여부까지 캐시하면 장치 초기화가 끝난다.
+ *
+ * 중간에 락을 놓았다 다시 잡는 구간이 있다는 점이 중요하다. dma_configure 가
+ * 재진입할 수 있어 프로브 락을 잠깐 놓는데, 그 사이 다른 CPU 가 같은 장치를
+ * 끝냈을 수 있으므로 돌아온 직후 상태를 다시 확인한다.
+ *
+ * 에러 처리는 계단식 라벨이다. 어느 단계에서 실패했든 그 지점까지 만들어진 것만
+ * 정확히 역순으로 되돌린다.
+ *
+ * 실행 컨텍스트: 프로브 경로. iommu_probe_device_lock 을 든 채 들어오며,
+ * 함수 안에서 잠깐 놓았다 다시 잡는다. 잠들 수 있다.
+ *
+ * 호출 체인: __iommu_probe_device → [이 함수]
+ *            → dev_iommu_get, bus->dma_configure, ops->probe_device, ops->device_group
+ */
 static int iommu_init_device(struct device *dev)
 {
-	const struct iommu_ops *ops;
-	struct iommu_device *iommu_dev;
-	struct iommu_group *group;
-	int ret;
+	const struct iommu_ops *ops;	/* [한국어] 이 장치를 맡을 IOMMU 드라이버의 콜백 표. fwspec 매칭으로 정해진다 */
+	struct iommu_device *iommu_dev;	/* [한국어] 실제로 이 장치를 담당하는 IOMMU 하드웨어 인스턴스 */
+	struct iommu_group *group;	/* [한국어] 이 장치가 속할 격리 그룹 */
+	int ret;	/* [한국어] 각 단계의 실패 코드 */
 
-	if (!dev_iommu_get(dev))
-		return -ENOMEM;
+	if (!dev_iommu_get(dev))	/* [한국어] 장치별 IOMMU 상태부터 만든다 — 이후 모든 단계가 이 구조체를 채워 나간다 */
+		return -ENOMEM;	/* [한국어] 상태 구조체조차 못 만들면 더 갈 수 없다 */
 	/*
 	 * For FDT-based systems and ACPI IORT/VIOT, the common firmware parsing
 	 * is buried in the bus dma_configure path. Properly unpicking that is
@@ -844,13 +1029,13 @@ static int iommu_init_device(struct device *dev)
 	 * already having a driver bound means dma_configure has already run and
 	 * found no IOMMU to wait for, so there's no point calling it again.
 	 */
-	if (!dev->iommu->fwspec && !dev->driver && dev->bus->dma_configure) {
-		mutex_unlock(&iommu_probe_device_lock);
-		dev->bus->dma_configure(dev);
-		mutex_lock(&iommu_probe_device_lock);
+	if (!dev->iommu->fwspec && !dev->driver && dev->bus->dma_configure) {	/* [한국어] fwspec 이 아직 없고 드라이버도 안 붙었다 = 펌웨어 파싱이 아직 돌지 않았다는 뜻. 드라이버가 이미 붙었다면 dma_configure 는 이미 돌았고 IOMMU 를 못 찾은 것이므로 다시 부를 이유가 없다 (위 영어 주석) */
+		mutex_unlock(&iommu_probe_device_lock);	/* [한국어] dma_configure 는 내부에서 다시 이 락을 잡을 수 있어 잠깐 놓는다 */
+		dev->bus->dma_configure(dev);	/* [한국어] DT 의 iommus 속성이나 ACPI IORT/VIOT 를 파싱해 이 장치의 fwspec 을 채운다 */
+		mutex_lock(&iommu_probe_device_lock);	/* [한국어] 다시 잡는다 — 놓은 사이 상태가 바뀌었을 수 있다 */
 		/* If another instance finished the job for us, skip it */
-		if (!dev->iommu || dev->iommu_group)
-			return -ENODEV;
+		if (!dev->iommu || dev->iommu_group)	/* [한국어] 락을 놓은 동안 다른 CPU 가 같은 장치를 끝냈거나(그룹 있음) 정리해 버렸다(상태 없음) */
+			return -ENODEV;	/* [한국어] 중복 작업을 피해 조용히 물러난다 */
 	}
 	/*
 	 * At this point, relevant devices either now have a fwspec which will
@@ -859,63 +1044,87 @@ static int iommu_init_device(struct device *dev)
 	 * be present, and that any of their registered instances has suitable
 	 * ops for probing, and thus cheekily co-opt the same mechanism.
 	 */
-	ops = iommu_fwspec_ops(dev->iommu->fwspec);
-	if (!ops) {
-		ret = -ENODEV;
-		goto err_free;
+	ops = iommu_fwspec_ops(dev->iommu->fwspec);	/* [한국어] fwspec 의 fwnode 로 등록된 IOMMU 드라이버를 찾는다. fwspec 이 없으면 fwnode 가 NULL 인 인스턴스를 집는데, 인텔·AMD·s390·PAMU·구형 SMMUv2 는 시스템에 하나뿐이라 그 편법이 성립한다 (위 영어 주석) */
+	if (!ops) {	/* [한국어] 이 장치를 맡을 IOMMU 가 없다 — 오류라기보다 흔한 정상 결과다 */
+		ret = -ENODEV;	/* [한국어] IOMMU 없이 동작할 장치로 남는다 */
+		goto err_free;	/* [한국어] 만들어 둔 장치 상태만 거두면 된다 */
 	}
 
-	if (!try_module_get(ops->owner)) {
-		ret = -EINVAL;
-		goto err_free;
+	if (!try_module_get(ops->owner)) {	/* [한국어] 드라이버 모듈이 언로드되지 않도록 참조를 잡는다. 장치가 붙어 있는 동안 모듈이 사라지면 ops 포인터가 통째로 무효가 된다 */
+		ret = -EINVAL;	/* [한국어] 모듈이 이미 내려가는 중 */
+		goto err_free;	/* [한국어] 상태만 거두고 물러난다 */
 	}
 
-	iommu_dev = ops->probe_device(dev);
-	if (IS_ERR(iommu_dev)) {
-		ret = PTR_ERR(iommu_dev);
-		goto err_module_put;
+	iommu_dev = ops->probe_device(dev);	/* [한국어] 벤더 드라이버에 '이 장치를 맡을 수 있는가'를 묻는다. 성공하면 담당 IOMMU 인스턴스를 돌려준다 — 인텔이면 DMAR 단위, ARM 이면 SMMU 인스턴스 */
+	if (IS_ERR(iommu_dev)) {	/* [한국어] 드라이버가 거절했다 (스트림 ID 범위 밖, 하드웨어 미지원 등) */
+		ret = PTR_ERR(iommu_dev);	/* [한국어] 드라이버가 준 이유를 그대로 올린다 */
+		goto err_module_put;	/* [한국어] 모듈 참조만 놓으면 된다 */
 	}
-	dev->iommu->iommu_dev = iommu_dev;
+	dev->iommu->iommu_dev = iommu_dev;	/* [한국어] 이 줄이 채워져야 dev_has_iommu 가 참이 된다 — '진짜 IOMMU 가 붙은 장치'의 판별 기준 */
 
-	ret = iommu_device_link(iommu_dev, dev);
-	if (ret)
-		goto err_release;
+	ret = iommu_device_link(iommu_dev, dev);	/* [한국어] sysfs 에 IOMMU↔장치 양방향 심볼릭 링크를 만들어 관리자가 대응 관계를 볼 수 있게 한다 */
+	if (ret)	/* [한국어] 단계 실패 — 아래 라벨로 되감는다 */
+		goto err_release;	/* [한국어] 링크 실패 — 드라이버의 probe_device 부터 되돌린다 */
 
-	group = ops->device_group(dev);
-	if (WARN_ON_ONCE(group == NULL))
-		group = ERR_PTR(-EINVAL);
-	if (IS_ERR(group)) {
-		ret = PTR_ERR(group);
-		goto err_unlink;
+	group = ops->device_group(dev);	/* [한국어] 이 장치가 속할 격리 그룹을 드라이버에게 묻는다. 대개 pci_device_group(ACS/별칭 분석) 이나 generic_device_group(장치당 하나) */
+	if (WARN_ON_ONCE(group == NULL))	/* [한국어] NULL 은 계약 위반 — 드라이버는 그룹이나 에러 포인터 중 하나를 줘야 한다 */
+		group = ERR_PTR(-EINVAL);	/* [한국어] 드라이버 버그를 공통 에러 경로로 흘려보낸다 */
+	if (IS_ERR(group)) {	/* [한국어] 그룹을 만들지 못했다 */
+		ret = PTR_ERR(group);	/* [한국어] 이유 추출 */
+		goto err_unlink;	/* [한국어] sysfs 링크부터 되돌린다 */
 	}
-	dev->iommu_group = group;
+	dev->iommu_group = group;	/* [한국어] 그룹 참조는 여기서 들고, __iommu_group_remove_device 가 놓는다 — 참조의 수명이 두 함수에 걸쳐 있다 */
 
-	dev->iommu->max_pasids = dev_iommu_get_max_pasids(dev);
-	if (ops->is_attach_deferred)
-		dev->iommu->attach_deferred = ops->is_attach_deferred(dev);
-	return 0;
+	dev->iommu->max_pasids = dev_iommu_get_max_pasids(dev);	/* [한국어] 장치와 IOMMU 양쪽 PASID 한계의 교집합을 캐시해 둔다. SVA 부착 때마다 다시 묻지 않기 위해 */
+	if (ops->is_attach_deferred)	/* [한국어] 부팅 초기에는 아직 도메인을 하드웨어에 걸 수 없는 장치가 있다 */
+		dev->iommu->attach_deferred = ops->is_attach_deferred(dev);	/* [한국어] 그런 장치는 첫 DMA 가 올 때 iommu_deferred_attach 로 뒤늦게 붙인다. 이 플래그가 해제 경로의 동작까지 바꾼다 */
+	return 0;	/* [한국어] 장치 초기화 완료 — 이제 그룹에 넣을 수 있다 */
 
-err_unlink:
-	iommu_device_unlink(iommu_dev, dev);
-err_release:
-	if (ops->release_device)
-		ops->release_device(dev);
-err_module_put:
-	module_put(ops->owner);
-err_free:
-	dev->iommu->iommu_dev = NULL;
-	dev_iommu_free(dev);
-	return ret;
+err_unlink:	/* [한국어] 그룹 결정에 실패한 지점의 되감기 */
+	iommu_device_unlink(iommu_dev, dev);	/* [한국어] sysfs 링크 제거 */
+err_release:	/* [한국어] probe_device 까지 성공한 지점의 되감기 */
+	if (ops->release_device)	/* [한국어] 드라이버가 잡은 장치별 자원이 있다면 */
+		ops->release_device(dev);	/* [한국어] 놓게 한다 */
+err_module_put:	/* [한국어] 모듈 참조만 잡은 지점의 되감기 */
+	module_put(ops->owner);	/* [한국어] 드라이버 모듈 참조 반납 */
+err_free:	/* [한국어] 장치 상태만 만든 지점의 되감기 */
+	dev->iommu->iommu_dev = NULL;	/* [한국어] 먼저 지운다 — 해제 도중 다른 경로가 '유효한 장치'로 오인하지 않게 */
+	dev_iommu_free(dev);	/* [한국어] 장치별 상태와 fwspec 해제 */
+	return ret;	/* [한국어] 첫 실패 지점의 이유를 그대로 올린다 */
 }
 
+/*
+ * [한국어]
+ * iommu_deinit_device - 장치를 IOMMU 아래에서 안전하게 빼낸다
+ *
+ * @dev: 그룹 목록에서는 이미 빠졌고, 이제 드라이버와의 연결을 끊을 장치
+ *
+ * iommu_init_device 의 역순이지만, 단순한 해제가 아니라 "떠나는 장치가 남은
+ * 시스템을 해치지 않게 하는" 절차가 들어 있다.
+ *
+ * 핵심은 퇴역 도메인이다. 장치가 그룹을 떠나면 그룹의 도메인은 곧 해제될 수
+ * 있는데, 그 전에 하드웨어가 여전히 그 페이지 테이블을 가리키고 있으면 해제된
+ * 메모리를 워크하게 된다. 그래서 드라이버가 release_domain(보통 전역 차단 도메인)
+ * 을 지정해 두면 코어가 release_device 를 부르기 전에 장치를 그쪽으로 옮겨 준다.
+ * 다만 RMRR/unity map 같은 직통 매핑이 필요한 장치를 차단 도메인에 세우면 펌웨어가
+ * 쓰던 버퍼가 끊기므로, 그 경우에만 항등 도메인으로 바꿔 준다.
+ *
+ * 두 번째 순서 제약은 모듈 참조다. 그룹이 비었다면 도메인들을 먼저 해제해야 하는데
+ * 도메인 해제가 드라이버 코드를 부르므로, module_put 은 반드시 그 뒤여야 한다.
+ *
+ * 실행 컨텍스트: 그룹 락을 든 채. 프로세스 문맥.
+ *
+ * 호출 체인: __iommu_group_remove_device, __iommu_probe_device 에러 경로 → [이 함수]
+ *            → release_domain->ops->attach_dev, ops->release_device, iommu_domain_free
+ */
 static void iommu_deinit_device(struct device *dev)
 {
-	struct iommu_group *group = dev->iommu_group;
-	const struct iommu_ops *ops = dev_iommu_ops(dev);
+	struct iommu_group *group = dev->iommu_group;	/* [한국어] 해제 전 그룹을 집어 둔다 — 아래에서 dev->iommu_group 을 NULL 로 만들기 때문 */
+	const struct iommu_ops *ops = dev_iommu_ops(dev);	/* [한국어] module_put 으로 모듈을 놓기 전에 ops 포인터를 먼저 확보해 둔다 */
 
-	lockdep_assert_held(&group->mutex);
+	lockdep_assert_held(&group->mutex);	/* [한국어] 그룹 구성 변경은 반드시 그룹 락 아래에서 */
 
-	iommu_device_unlink(dev->iommu->iommu_dev, dev);
+	iommu_device_unlink(dev->iommu->iommu_dev, dev);	/* [한국어] sysfs 양방향 링크 제거 */
 
 	/*
 	 * release_device() must stop using any attached domain on the device.
@@ -934,64 +1143,110 @@ static void iommu_deinit_device(struct device *dev)
 	 * Regardless, if a delayed attach never occurred, then the release
 	 * should still avoid touching any hardware configuration either.
 	 */
-	if (!dev->iommu->attach_deferred && ops->release_domain) {
-		struct iommu_domain *release_domain = ops->release_domain;
+	if (!dev->iommu->attach_deferred && ops->release_domain) {	/* [한국어] 실제로 하드웨어에 도메인을 걸어 본 적이 있고(지연 부착이 아니었고), 드라이버가 '퇴역용 도메인'을 지정한 경우에만 */
+		struct iommu_domain *release_domain = ops->release_domain;	/* [한국어] 보통 전역 blocked_domain — 떠나는 장치의 DMA 를 전부 막아 두는 것이 가장 안전하다 */
 
 		/*
 		 * If the device requires direct mappings then it should not
 		 * be parked on a BLOCKED domain during release as that would
 		 * break the direct mappings.
 		 */
-		if (dev->iommu->require_direct && ops->identity_domain &&
-		    release_domain == ops->blocked_domain)
-			release_domain = ops->identity_domain;
+		if (dev->iommu->require_direct && ops->identity_domain &&	/* [한국어] 다만 직통 매핑(인텔 RMRR, AMD unity map)이 필요한 장치는 막아 버리면 펌웨어가 계속 쓰는 버퍼로 가는 길이 끊긴다 */
+		    release_domain == ops->blocked_domain)	/* [한국어] 차단 도메인으로 보내려던 경우에 한해 */
+			release_domain = ops->identity_domain;	/* [한국어] 항등 도메인으로 바꾼다 — 번역 없이 통과시켜 직통 매핑을 유지 */
 
-		release_domain->ops->attach_dev(release_domain, dev,
-						group->domain);
+		release_domain->ops->attach_dev(release_domain, dev,	/* [한국어] 그룹에서 빠지기 직전의 마지막 도메인 전환. 이후 group->domain 은 해제될 수 있으므로 드라이버가 그 포인터를 붙잡고 있으면 안 된다 */
+						group->domain);	/* [한국어] 현재 도메인을 함께 넘겨 드라이버가 어디서 어디로 가는 전이인지 알게 한다 */
 	}
 
-	if (ops->release_device)
-		ops->release_device(dev);
+	if (ops->release_device)	/* [한국어] 드라이버가 장치별 정리를 원하면 */
+		ops->release_device(dev);	/* [한국어] 장치 문맥을 놓게 한다. 위 영어 주석대로, release_domain 을 두지 않은 드라이버는 여기서 스스로 항등/차단 상태로 만들어야 한다 */
 
 	/*
 	 * If this is the last driver to use the group then we must free the
 	 * domains before we do the module_put().
 	 */
-	if (list_empty(&group->devices)) {
-		if (group->default_domain) {
-			iommu_domain_free(group->default_domain);
-			group->default_domain = NULL;
+	if (list_empty(&group->devices)) {	/* [한국어] 이 장치가 그룹의 마지막이었다면 그룹이 들고 있던 도메인들도 함께 정리한다 */
+		if (group->default_domain) {	/* [한국어] 기본 도메인이 남아 있으면 */
+			iommu_domain_free(group->default_domain);	/* [한국어] 해제는 드라이버 코드를 부르므로 아래 module_put 보다 반드시 먼저 (위 영어 주석) */
+			group->default_domain = NULL;	/* [한국어] 빈 그룹 표시 */
 		}
-		if (group->blocking_domain) {
-			iommu_domain_free(group->blocking_domain);
-			group->blocking_domain = NULL;
+		if (group->blocking_domain) {	/* [한국어] 차단 도메인도 지연 생성된 것이 남아 있을 수 있다 */
+			iommu_domain_free(group->blocking_domain);	/* [한국어] 같은 이유로 지금 해제 */
+			group->blocking_domain = NULL;	/* [한국어] 정리 완료 */
 		}
-		group->domain = NULL;
+		group->domain = NULL;	/* [한국어] 빈 그룹은 어떤 도메인도 가리키지 않는다 */
 	}
 
 	/* Caller must put iommu_group */
-	dev->iommu_group = NULL;
-	module_put(ops->owner);
-	dev_iommu_free(dev);
-#ifdef CONFIG_IOMMU_DMA
-	dev->dma_iommu = false;
+	dev->iommu_group = NULL;	/* [한국어] 장치에서 그룹을 끊는다. 참조 반납은 호출자 몫이다 (위 영어 주석) */
+	module_put(ops->owner);	/* [한국어] 이제서야 드라이버 모듈을 놓아 준다 — 위의 도메인 해제까지 끝난 뒤여야 한다 */
+	dev_iommu_free(dev);	/* [한국어] 장치별 상태 해제 */
+#ifdef CONFIG_IOMMU_DMA	/* [한국어] dma_iommu 플래그는 DMA API 통합이 켜진 빌드에만 존재한다 — 꺼져 있으면 이 장치의 DMA 는 애초에 IOMMU 를 지나지 않는다 */
+	dev->dma_iommu = false;	/* [한국어] DMA 계층이 다시 직접 매핑(direct/swiotlb)으로 돌아가도록 되돌린다 */
 #endif
 }
 
+/*
+ * [한국어]
+ * pasid_array_entry_to_domain - PASID xarray 항목에서 도메인을 꺼낸다
+ *
+ * @entry:  group->pasid_array 에 저장된 태그 붙은 포인터
+ * @return: 그 PASID 에 붙어 있는 도메인
+ *
+ * 그룹은 PASID 별 부착 상태를 xarray 하나에 담는데, 저장하는 것이 두 종류다.
+ * 커널 내부에서 붙였으면 도메인 포인터를 바로 넣고, iommufd 처럼 부착 핸들을
+ * 함께 관리해야 하는 사용자면 struct iommu_attach_handle 을 넣는다. 포인터 정렬로
+ * 남는 하위 비트에 태그를 심어 둘을 구분하므로, 배열 하나로 두 경우를 모두 담을
+ * 수 있다.
+ *
+ * 실행 컨텍스트: 어디서든. 순수 변환이다.
+ *
+ * 호출 체인: PASID 부착/해제/조회 경로 → [이 함수]
+ */
 static struct iommu_domain *pasid_array_entry_to_domain(void *entry)
 {
-	if (xa_pointer_tag(entry) == IOMMU_PASID_ARRAY_DOMAIN)
-		return xa_untag_pointer(entry);
-	return ((struct iommu_attach_handle *)xa_untag_pointer(entry))->domain;
+	if (xa_pointer_tag(entry) == IOMMU_PASID_ARRAY_DOMAIN)	/* [한국어] xarray 항목의 하위 태그 비트로 두 가지 저장 형태를 구분한다 — 포인터 정렬 여유 비트를 이렇게 쓴다 */
+		return xa_untag_pointer(entry);	/* [한국어] 도메인을 직접 넣은 경우 (커널 내부 PASID 부착) */
+	return ((struct iommu_attach_handle *)xa_untag_pointer(entry))->domain;	/* [한국어] iommufd 처럼 핸들을 거쳐 붙인 경우 — 핸들 안에서 도메인을 꺼낸다 */
 }
 
-DEFINE_MUTEX(iommu_probe_device_lock);
+DEFINE_MUTEX(iommu_probe_device_lock);	/* [한국어] 장치 프로브 전 구간을 직렬화하는 전역 락. 드라이버 등록과 ACPI/OF 의 재생(replay) 호출이 동시에 들어와도 한 장치가 두 번 초기화되지 않도록 단순한 전역 순서를 강제한다 */
 
+/*
+ * [한국어]
+ * __iommu_probe_device - 장치를 그룹에 넣고 도메인까지 연결한다 (프로브의 본체)
+ *
+ * @dev:        프로브할 장치
+ * @group_list: NULL 이 아니면 기본 도메인 설정을 뒤로 미루고, 설정이 필요한 그룹을
+ *              중복 없이 이 목록에 모아 준다. 부팅 시 bus_iommu_probe 가 수백 개
+ *              장치를 한 번에 훑을 때 그룹마다 한 번씩만 도메인을 세우기 위한 것.
+ *              NULL 이면 이 자리에서 즉시 설정한다.
+ * @return:     0 성공, 음수 실패 (실패 시 모든 부수 효과가 되감긴 상태)
+ *
+ * 장치가 IOMMU 아래로 들어오는 전 과정의 조립부다. iommu_init_device 가 드라이버와
+ * 그룹을 정해 주면, 이 함수가 그 결과를 그룹 자료구조에 반영하고 도메인을 연결한 뒤
+ * 마지막으로 DMA API 를 dma-iommu 로 갈아 끼운다. 마지막 한 줄
+ * (iommu_setup_dma_ops)이 지나야 비로소 이 장치의 dma_map_page 가 IOVA 를 돌려주기
+ * 시작한다 — NVMe 드라이버 입장에서 "IOMMU 가 켜졌다"의 실제 의미가 그것이다.
+ *
+ * 도메인 연결에는 세 갈래가 있다.
+ *   - 그룹에 이미 도메인이 걸려 있다: 새 장치도 같은 도메인에 붙인다. 그룹이 곧
+ *     격리 단위이므로 한 장치만 다른 곳을 볼 수는 없다.
+ *   - 새 그룹이고 즉시 처리: iommu_setup_default_domain 으로 종류를 정하고 세운다.
+ *   - 새 그룹이고 일괄 처리: 그룹을 group_list 에 올려 두고 물러난다.
+ *
+ * 실행 컨텍스트: iommu_probe_device_lock 을 든 채. 안에서 그룹 락을 추가로 잡는다.
+ * 프로세스 문맥, 잠들 수 있다.
+ *
+ * 호출 체인: iommu_probe_device, bus_iommu_probe, iommu_bus_notifier → [이 함수]
+ *            → iommu_init_device → iommu_setup_default_domain → iommu_setup_dma_ops
+ */
 static int __iommu_probe_device(struct device *dev, struct list_head *group_list)
 {
-	struct iommu_group *group;
-	struct group_device *gdev;
-	int ret;
+	struct iommu_group *group;	/* [한국어] 이 장치가 들어갈 그룹 (iommu_init_device 가 정해 준다) */
+	struct group_device *gdev;	/* [한국어] 그룹 목록에 넣을 항목. 장치 포인터와 sysfs 링크 이름을 담는다 */
+	int ret;	/* [한국어] 각 단계의 실패 코드 */
 
 	/*
 	 * Serialise to avoid races between IOMMU drivers registering in
@@ -1000,189 +1255,318 @@ static int __iommu_probe_device(struct device *dev, struct list_head *group_list
 	 * probably be able to use device_lock() here to minimise the scope,
 	 * but for now enforcing a simple global ordering is fine.
 	 */
-	lockdep_assert_held(&iommu_probe_device_lock);
+	lockdep_assert_held(&iommu_probe_device_lock);	/* [한국어] 전역 프로브 락 아래에서만 — 드라이버 등록과 재생 호출의 경쟁을 막는다 (위 영어 주석) */
 
 	/* Device is probed already if in a group */
-	if (dev->iommu_group)
-		return 0;
+	if (dev->iommu_group)	/* [한국어] 그룹이 이미 붙어 있으면 프로브가 끝난 장치다 */
+		return 0;	/* [한국어] 성공으로 간주하고 조용히 돌아간다 */
 
-	ret = iommu_init_device(dev);
-	if (ret)
-		return ret;
+	ret = iommu_init_device(dev);	/* [한국어] 드라이버 찾기 → probe_device → 그룹 결정까지 한 번에 */
+	if (ret)	/* [한국어] 장치 초기화 실패 */
+		return ret;	/* [한국어] IOMMU 를 못 찾았거나 드라이버가 거절했다 */
 	/*
 	 * And if we do now see any replay calls, they would indicate someone
 	 * misusing the dma_configure path outside bus code.
 	 */
-	if (dev->driver)
-		dev_WARN(dev, "late IOMMU probe at driver bind, something fishy here!\n");
+	if (dev->driver)	/* [한국어] 드라이버가 이미 붙은 뒤에 IOMMU 프로브가 왔다 */
+		dev_WARN(dev, "late IOMMU probe at driver bind, something fishy here!\n");	/* [한국어] 버스 코드 밖에서 dma_configure 경로를 잘못 쓴 신호. 치명적이진 않지만 순서가 뒤집혔음을 남긴다 */
 
-	group = dev->iommu_group;
-	gdev = iommu_group_alloc_device(group, dev);
-	mutex_lock(&group->mutex);
-	if (IS_ERR(gdev)) {
-		ret = PTR_ERR(gdev);
-		goto err_put_group;
+	group = dev->iommu_group;	/* [한국어] iommu_init_device 가 정하고 참조까지 잡아 둔 그룹 */
+	gdev = iommu_group_alloc_device(group, dev);	/* [한국어] 그룹 항목과 sysfs 링크를 만든다 — 할당을 그룹 락 밖에서 먼저 끝낸다 */
+	mutex_lock(&group->mutex);	/* [한국어] 여기서부터 그룹 구성 변경 구간 */
+	if (IS_ERR(gdev)) {	/* [한국어] 항목 생성 실패 */
+		ret = PTR_ERR(gdev);	/* [한국어] 이유 추출 */
+		goto err_put_group;	/* [한국어] 장치 초기화까지 되돌린다 */
 	}
 
 	/*
 	 * The gdev must be in the list before calling
 	 * iommu_setup_default_domain()
 	 */
-	list_add_tail(&gdev->list, &group->devices);
-	WARN_ON(group->default_domain && !group->domain);
-	if (group->default_domain)
-		iommu_create_device_direct_mappings(group->default_domain, dev);
-	if (group->domain) {
-		ret = __iommu_device_set_domain(group, dev, group->domain, NULL,
-						0);
-		if (ret)
-			goto err_remove_gdev;
-	} else if (!group->default_domain && !group_list) {
-		ret = iommu_setup_default_domain(group, 0);
-		if (ret)
-			goto err_remove_gdev;
-	} else if (!group->default_domain) {
+	list_add_tail(&gdev->list, &group->devices);	/* [한국어] 기본 도메인 설정이 그룹의 모든 장치를 순회하므로, 그 전에 목록에 들어가 있어야 한다 (위 영어 주석) */
+	WARN_ON(group->default_domain && !group->domain);	/* [한국어] 기본 도메인이 있는데 현재 도메인이 비어 있는 조합은 존재할 수 없다 */
+	if (group->default_domain)	/* [한국어] 그룹이 이미 굴러가는 중이면 */
+		iommu_create_device_direct_mappings(group->default_domain, dev);	/* [한국어] 새로 들어온 이 장치가 요구하는 예약 영역(RMRR/unity map)을 기존 도메인에 미리 심는다 — 심지 않으면 펌웨어가 쓰던 버퍼가 끊긴다 */
+	if (group->domain) {	/* [한국어] 현재 걸린 도메인이 있으면 새 장치도 같은 곳으로 보내야 그룹의 격리 전제가 유지된다 */
+		ret = __iommu_device_set_domain(group, dev, group->domain, NULL,	/* [한국어] 그룹의 현재 도메인에 이 장치만 붙인다 */
+						0);	/* [한국어] 일반 실패 정책 — 실패하면 아래에서 그대로 되감는다 */
+		if (ret)	/* [한국어] 그룹의 현재 도메인에 붙이지 못했다 */
+			goto err_remove_gdev;	/* [한국어] 부착 실패 — 목록에서 다시 뺀다 */
+	} else if (!group->default_domain && !group_list) {	/* [한국어] 새로 만들어진 그룹이고, 호출자가 일괄 처리 목록을 주지 않았다 */
+		ret = iommu_setup_default_domain(group, 0);	/* [한국어] 지금 이 자리에서 기본 도메인을 정하고 세운다 */
+		if (ret)	/* [한국어] 기본 도메인 설정 실패 */
+			goto err_remove_gdev;	/* [한국어] 도메인 설정 실패 */
+	} else if (!group->default_domain) {	/* [한국어] 일괄 처리 경로 — 도메인 결정을 호출자에게 미룬다 */
 		/*
 		 * With a group_list argument we defer the default_domain setup
 		 * to the caller by providing a de-duplicated list of groups
 		 * that need further setup.
 		 */
-		if (list_empty(&group->entry))
-			list_add_tail(&group->entry, group_list);
+		if (list_empty(&group->entry))	/* [한국어] 같은 그룹이 목록에 두 번 들어가지 않도록 (여러 장치가 한 그룹을 공유한다) */
+			list_add_tail(&group->entry, group_list);	/* [한국어] bus_iommu_probe 가 나중에 그룹 단위로 한 번씩 처리한다 */
 	}
 
-	if (group->default_domain)
-		iommu_setup_dma_ops(dev, group->default_domain);
+	if (group->default_domain)	/* [한국어] 도메인이 실제로 정해진 경우에만 */
+		iommu_setup_dma_ops(dev, group->default_domain);	/* [한국어] 이 장치의 dma_map_* 을 dma-iommu 구현으로 갈아 끼운다. 이 줄 이후 드라이버가 내는 DMA 주소는 IOVA 가 되고 IOMMU 를 지나게 된다 */
 
-	mutex_unlock(&group->mutex);
+	mutex_unlock(&group->mutex);	/* [한국어] 그룹 구성 변경 끝 */
 
-	return 0;
+	return 0;	/* [한국어] 장치가 그룹에 들어가고 번역까지 준비됐다 */
 
-err_remove_gdev:
-	list_del(&gdev->list);
-	__iommu_group_free_device(group, gdev);
-err_put_group:
-	iommu_deinit_device(dev);
-	mutex_unlock(&group->mutex);
-	iommu_group_put(group);
+err_remove_gdev:	/* [한국어] 그룹 목록에 넣은 뒤 실패한 경우 */
+	list_del(&gdev->list);	/* [한국어] 목록에서 다시 뺀다 */
+	__iommu_group_free_device(group, gdev);	/* [한국어] sysfs 링크와 항목 해제 */
+err_put_group:	/* [한국어] 항목조차 못 만든 경우가 합류하는 지점 */
+	iommu_deinit_device(dev);	/* [한국어] iommu_init_device 가 한 일을 전부 되돌린다 (드라이버 해제·모듈 참조 반납 포함) */
+	mutex_unlock(&group->mutex);	/* [한국어] 되감기를 마치고 락 해제 */
+	iommu_group_put(group);	/* [한국어] iommu_init_device 가 잡아 둔 그룹 참조를 놓는다 — 마지막 장치였다면 여기서 그룹이 사라진다 */
 
-	return ret;
+	return ret;	/* [한국어] 첫 실패 이유 전달 */
 }
 
+/*
+ * [한국어]
+ * iommu_probe_device - 장치 하나를 IOMMU 아래로 들인다 (외부 진입점)
+ *
+ * @dev:    새로 나타난 장치
+ * @return: 0 성공, 음수 실패
+ *
+ * 부팅이 끝난 뒤 장치가 하나씩 추가될 때 쓰이는 얇은 겉면이다. 버스 알림
+ * (iommu_bus_notifier)과 VFIO/셀프테스트가 여기로 들어온다. group_list 에 NULL 을
+ * 넘기므로 기본 도메인 설정까지 이 자리에서 끝난다 — 부팅 때의 일괄 처리와 대비되는
+ * 점이다.
+ *
+ * 락을 놓은 뒤에 probe_finalize 를 부르는 순서가 의도적이다. 이 콜백은 드라이버가
+ * 도메인이 선 뒤에 마무리 작업을 하는 곳이라 다시 프로브 경로로 재진입할 수 있고,
+ * 전역 락을 든 채로 부르면 교착이 된다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥. 잠들 수 있다.
+ *
+ * 호출 체인: iommu_bus_notifier(BUS_NOTIFY_ADD_DEVICE), VFIO → [이 함수]
+ *            → __iommu_probe_device → ops->probe_finalize
+ */
 int iommu_probe_device(struct device *dev)
 {
-	const struct iommu_ops *ops;
-	int ret;
+	const struct iommu_ops *ops;	/* [한국어] probe_finalize 를 부르기 위해 필요 */
+	int ret;	/* [한국어] 프로브 결과 */
 
-	mutex_lock(&iommu_probe_device_lock);
-	ret = __iommu_probe_device(dev, NULL);
-	mutex_unlock(&iommu_probe_device_lock);
-	if (ret)
-		return ret;
+	mutex_lock(&iommu_probe_device_lock);	/* [한국어] 전역 직렬화 */
+	ret = __iommu_probe_device(dev, NULL);	/* [한국어] group_list 로 NULL 을 넘겨, 기본 도메인 설정까지 이 자리에서 끝내게 한다 (부팅 후 개별 장치 추가 경로) */
+	mutex_unlock(&iommu_probe_device_lock);	/* [한국어] 락은 여기까지 — 아래 콜백이 다시 프로브 경로로 들어갈 수 있다 */
+	if (ret)	/* [한국어] 프로브 실패 — probe_finalize 를 부르지 않는다 */
+		return ret;	/* [한국어] 프로브 실패 전달 */
 
-	ops = dev_iommu_ops(dev);
-	if (ops->probe_finalize)
-		ops->probe_finalize(dev);
+	ops = dev_iommu_ops(dev);	/* [한국어] 이제 드라이버가 확정되었으므로 ops 를 꺼낼 수 있다 */
+	if (ops->probe_finalize)	/* [한국어] 도메인까지 선 뒤에 마무리할 일이 남은 드라이버가 있다 */
+		ops->probe_finalize(dev);	/* [한국어] 전역 락 밖에서 부른다 — 이 콜백이 재진입할 수 있기 때문 */
 
-	return 0;
+	return 0;	/* [한국어] 장치가 IOMMU 아래로 완전히 들어왔다 */
 }
 
+/*
+ * [한국어]
+ * __iommu_group_free_device - 그룹 항목 하나와 그에 딸린 sysfs 링크를 거둔다
+ *
+ * @group:    항목이 속한 그룹
+ * @grp_dev:  이미 group->devices 목록에서 빠진 항목
+ *
+ * 목록에서 빼는 것은 호출자의 일이고, 이 함수는 그 항목이 남긴 흔적 — 양방향
+ * sysfs 링크와 이름 문자열 — 만 정리한다. 둘을 나눠 둔 덕분에 프로브 실패
+ * 되감기와 정상 제거가 같은 정리 코드를 공유한다.
+ *
+ * 그룹이 비는 순간의 WARN 두 개가 중요한 불변식을 지킨다. 마지막 장치가 나갈 때
+ * 소유권 계수가 남아 있거나 도메인이 기본값이 아니라면, VFIO 등이 소유권을 놓지
+ * 않은 채 장치가 사라졌다는 뜻이다.
+ *
+ * 실행 컨텍스트: 그룹 락을 든 채. 프로세스 문맥.
+ *
+ * 호출 체인: __iommu_group_remove_device, __iommu_probe_device 에러 경로 → [이 함수]
+ */
 static void __iommu_group_free_device(struct iommu_group *group,
 				      struct group_device *grp_dev)
 {
-	struct device *dev = grp_dev->dev;
+	struct device *dev = grp_dev->dev;	/* [한국어] 항목이 가리키는 실제 장치 */
 
-	sysfs_remove_link(group->devices_kobj, grp_dev->name);
-	sysfs_remove_link(&dev->kobj, "iommu_group");
+	sysfs_remove_link(group->devices_kobj, grp_dev->name);	/* [한국어] 그룹의 devices/ 아래에 걸었던 링크 제거 */
+	sysfs_remove_link(&dev->kobj, "iommu_group");	/* [한국어] 장치 쪽에서 그룹을 가리키던 역링크 제거 */
 
-	trace_remove_device_from_group(group->id, dev);
+	trace_remove_device_from_group(group->id, dev);	/* [한국어] 그룹 구성 변화를 ftrace 로 남긴다 */
 
 	/*
 	 * If the group has become empty then ownership must have been
 	 * released, and the current domain must be set back to NULL or
 	 * the default domain.
 	 */
-	if (list_empty(&group->devices))
-		WARN_ON(group->owner_cnt ||
-			group->domain != group->default_domain);
+	if (list_empty(&group->devices))	/* [한국어] 마지막 장치를 빼는 중이라면 정리가 순서대로 끝났는지 확인한다 */
+		WARN_ON(group->owner_cnt ||	/* [한국어] 아직 DMA 소유권을 든 사용자(VFIO/iommufd)가 남아 있으면 안 되고 */
+			group->domain != group->default_domain);	/* [한국어] 도메인도 기본값으로 되돌아와 있어야 한다 */
 
-	kfree(grp_dev->name);
-	kfree(grp_dev);
+	kfree(grp_dev->name);	/* [한국어] sysfs 링크 이름 문자열 해제 */
+	kfree(grp_dev);	/* [한국어] 항목 본체 해제 */
 }
 
 /* Remove the iommu_group from the struct device. */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * __iommu_group_remove_device - 장치를 그룹에서 빼고 참조를 반납한다
+ *
+ * @dev: 사라지는 장치
+ *
+ * 그룹 목록을 훑어 이 장치의 항목을 찾고, 목록에서 뺀 뒤 sysfs 를 정리하고,
+ * IOMMU 드라이버가 붙어 있었다면 iommu_deinit_device 로 드라이버 쪽까지 되돌린다.
+ *
+ * dev_has_iommu 로 갈라지는 부분이 이 함수의 요점이다. VFIO 가 iommu_group_add_device
+ * 로 직접 넣은 장치는 IOMMU 드라이버가 없으므로 ops 를 부르면 안 되고, 연결만 끊는다.
+ *
+ * 마지막 iommu_group_put 은 iommu_init_device 나 iommu_group_add_device 가 잡아 둔
+ * 참조와 짝을 이룬다. 그것이 그룹의 마지막 참조였다면 이 호출로 그룹 자체가 해제된다.
+ *
+ * 실행 컨텍스트: 장치 제거 경로. 프로세스 문맥.
+ *
+ * 호출 체인: iommu_release_device → [이 함수] → iommu_deinit_device, iommu_group_put
+ */
 static void __iommu_group_remove_device(struct device *dev)
 {
-	struct iommu_group *group = dev->iommu_group;
-	struct group_device *device;
+	struct iommu_group *group = dev->iommu_group;	/* [한국어] 장치가 속한 그룹 */
+	struct group_device *device;	/* [한국어] 순회용 커서 */
 
-	mutex_lock(&group->mutex);
-	for_each_group_device(group, device) {
-		if (device->dev != dev)
-			continue;
+	mutex_lock(&group->mutex);	/* [한국어] 그룹 구성 변경 구간 */
+	for_each_group_device(group, device) {	/* [한국어] 그룹의 장치 목록에서 이 장치의 항목을 찾는다 */
+		if (device->dev != dev)	/* [한국어] 다른 장치의 항목이면 */
+			continue;	/* [한국어] 건너뛴다 */
 
-		list_del(&device->list);
-		__iommu_group_free_device(group, device);
-		if (dev_has_iommu(dev))
-			iommu_deinit_device(dev);
+		list_del(&device->list);	/* [한국어] 먼저 목록에서 빼 다른 순회가 보지 못하게 한다 */
+		__iommu_group_free_device(group, device);	/* [한국어] sysfs 링크와 항목 해제 */
+		if (dev_has_iommu(dev))	/* [한국어] 실제 IOMMU 드라이버가 붙어 있던 장치라면 */
+			iommu_deinit_device(dev);	/* [한국어] 드라이버 해제·퇴역 도메인 전환·도메인 정리까지 (여기서 dev->iommu_group 도 NULL 이 된다) */
 		else
-			dev->iommu_group = NULL;
-		break;
+			dev->iommu_group = NULL;	/* [한국어] VFIO 가 수동으로 넣었던 장치는 연결만 끊으면 된다 */
+		break;	/* [한국어] 찾았으므로 순회 종료 */
 	}
-	mutex_unlock(&group->mutex);
+	mutex_unlock(&group->mutex);	/* [한국어] 구성 변경 끝 */
 
 	/*
 	 * Pairs with the get in iommu_init_device() or
 	 * iommu_group_add_device()
 	 */
-	iommu_group_put(group);
+	iommu_group_put(group);	/* [한국어] iommu_init_device 또는 iommu_group_add_device 가 잡았던 참조를 여기서 놓는다 (위 영어 주석). 마지막 장치였다면 이 호출로 그룹이 해제된다 */
 }
 
+/*
+ * [한국어]
+ * iommu_release_device - 장치가 시스템에서 사라질 때 IOMMU 흔적을 모두 지운다
+ *
+ * @dev: 제거되는 장치
+ *
+ * 버스 알림의 BUS_NOTIFY_REMOVED_DEVICE 가 도달하는 곳이다. 두 가지 상태를 모두
+ * 처리해야 한다 — 프로브에 성공해 그룹에 들어간 장치와, fwspec 까지만 만들어지고
+ * 드라이버를 못 찾아 그대로 남은 장치다. 후자는 그룹이 없으므로 dev->iommu 만
+ * 거두면 된다.
+ *
+ * 실행 컨텍스트: 장치 제거 알림. 프로세스 문맥.
+ *
+ * 호출 체인: iommu_bus_notifier → [이 함수] → __iommu_group_remove_device / dev_iommu_free
+ */
 static void iommu_release_device(struct device *dev)
 {
-	struct iommu_group *group = dev->iommu_group;
+	struct iommu_group *group = dev->iommu_group;	/* [한국어] 그룹에 들어가 있었는지 확인 */
 
-	if (group)
-		__iommu_group_remove_device(dev);
+	if (group)	/* [한국어] 그룹 소속이면 */
+		__iommu_group_remove_device(dev);	/* [한국어] 그룹 경로로 정리한다 (장치 상태 해제까지 그 안에서) */
 
 	/* Free any fwspec if no iommu_driver was ever attached */
-	if (dev->iommu)
-		dev_iommu_free(dev);
+	if (dev->iommu)	/* [한국어] 드라이버가 끝내 붙지 않아 fwspec 만 남은 장치 */
+		dev_iommu_free(dev);	/* [한국어] 그 잔여 상태를 거둔다 (위 영어 주석) */
 }
 
+/*
+ * [한국어]
+ * iommu_set_def_domain_type - "iommu.passthrough=" 부트 인자를 처리한다
+ *
+ * @str:    인자 값 문자열
+ * @return: 0 성공, 음수면 값 해석 실패
+ *
+ * 기본 도메인 종류를 정하는 세 층 — 빌드 설정, 부트 인자, 커널 오버라이드 — 중
+ * 가운데 층의 입구다. passthrough=1 이면 장치가 물리 주소를 그대로 내는 항등
+ * 도메인이 기본이 되어 DMA 오버헤드가 사라지지만 격리도 함께 사라진다.
+ * passthrough=0 이면 반대로 번역을 강제한다.
+ *
+ * 어느 쪽이든 설정 함수에 true(cmd_line)를 넘기므로 IOMMU_CMD_LINE_DMA_API 가
+ * 서고, 이후 드라이버가 def_domain_type 으로 다른 선호를 내도 이 결정이 이긴다.
+ * 관리자가 명시한 것을 커널이 조용히 뒤집지 않는다는 원칙이다.
+ *
+ * 실행 컨텍스트: early_param — 초기 부팅, 어떤 IOMMU 드라이버보다 먼저.
+ *
+ * 호출 체인: 부트 인자 파서 → [이 함수] → iommu_set_default_passthrough/translated
+ */
 static int __init iommu_set_def_domain_type(char *str)
 {
-	bool pt;
-	int ret;
+	bool pt;	/* [한국어] 패스스루 여부 */
+	int ret;	/* [한국어] 파싱 결과 */
 
-	ret = kstrtobool(str, &pt);
-	if (ret)
-		return ret;
+	ret = kstrtobool(str, &pt);	/* [한국어] '1'/'y'/'on' 등을 불리언으로 해석 */
+	if (ret)	/* [한국어] 부트 인자 값을 해석하지 못했다 */
+		return ret;	/* [한국어] 해석 불가한 값이면 부트 인자 자체를 거절 */
 
-	if (pt)
-		iommu_set_default_passthrough(true);
+	if (pt)	/* [한국어] iommu.passthrough=1 */
+		iommu_set_default_passthrough(true);	/* [한국어] 기본 도메인을 항등(번역 없음)으로. DMA 성능은 최대지만 격리가 사라진다 */
 	else
-		iommu_set_default_translated(true);
+		iommu_set_default_translated(true);	/* [한국어] iommu.passthrough=0 — 기본 도메인을 번역형으로 강제한다 */
 
-	return 0;
+	return 0;	/* [한국어] 부트 인자 처리 완료 */
 }
-early_param("iommu.passthrough", iommu_set_def_domain_type);
+early_param("iommu.passthrough", iommu_set_def_domain_type);	/* [한국어] 부트 인자 등록. 두 설정 함수에 true 를 넘겨 IOMMU_CMD_LINE_DMA_API 를 세우므로, 이후 빌드 설정이나 드라이버 선호를 모두 이긴다 */
 
+/*
+ * [한국어]
+ * iommu_dma_setup - "iommu.strict=" 부트 인자를 처리한다
+ *
+ * @str:    인자 값 문자열
+ * @return: 0 성공, 음수면 값 해석 실패
+ *
+ * 무효화 정책을 고른다. strict=1 이면 매 dma_unmap 마다 IOTLB 무효화를 끝내고
+ * 돌아오므로, 해제된 IOVA 로 오는 DMA 가 옛 페이지에 닿는 창이 아예 없다.
+ * strict=0 이면 flush queue(DMA_FQ)에 모았다가 한꺼번에 무효화해 처리량을 크게
+ * 올리는 대신 그 창을 허용한다.
+ *
+ * IOMMU_CMD_LINE_STRICT 를 세워 두는 것이 요점이다. 나중에 드라이버가
+ * iommu_set_dma_strict 를 부르더라도 관리자가 명시한 값이 우선한다.
+ *
+ * 실행 컨텍스트: early_param — 초기 부팅.
+ *
+ * 호출 체인: 부트 인자 파서 → [이 함수]
+ */
 static int __init iommu_dma_setup(char *str)
 {
-	int ret = kstrtobool(str, &iommu_dma_strict);
+	int ret = kstrtobool(str, &iommu_dma_strict);	/* [한국어] strict=1 이면 해제 때마다 즉시 IOTLB 무효화, 0 이면 flush queue 로 지연 무효화 */
 
-	if (!ret)
-		iommu_cmd_line |= IOMMU_CMD_LINE_STRICT;
-	return ret;
+	if (!ret)	/* [한국어] 값을 제대로 읽었다면 */
+		iommu_cmd_line |= IOMMU_CMD_LINE_STRICT;	/* [한국어] 명령줄이 정했음을 기록해 둔다 — 나중에 드라이버나 빌드 기본값이 이 결정을 덮어쓰지 못하게 하는 표식 */
+	return ret;	/* [한국어] 파싱 결과 반환 */
 }
-early_param("iommu.strict", iommu_dma_setup);
+early_param("iommu.strict", iommu_dma_setup);	/* [한국어] 부트 인자 등록 */
 
+/*
+ * [한국어]
+ * iommu_set_dma_strict - 지연 무효화를 끄고 즉시 무효화로 되돌린다
+ *
+ * 드라이버나 보안 정책이 flush queue 를 허용할 수 없을 때 부른다. 하드웨어 제약
+ * (일부 IOMMU 는 범위 무효화를 제대로 못 한다)이나, 기밀 컴퓨팅처럼 해제 후 잔여
+ * 번역을 절대 남길 수 없는 환경이 그런 경우다.
+ *
+ * 전역 플래그만 바꾸는 것으로는 부족하다. 기본 도메인 종류가 이미 DMA_FQ 로
+ * 정해져 있었다면 그것도 DMA 로 내려야 한다 — 둘은 같은 번역 도메인의 두 가지
+ * 무효화 정책이고, 종류가 FQ 로 남아 있으면 도메인이 여전히 큐를 쓴다.
+ *
+ * 실행 컨텍스트: 부팅 중 드라이버 초기화. 프로세스 문맥.
+ *
+ * 호출 체인: 벤더 드라이버 초기화, 보안 정책 → [이 함수]
+ */
 void iommu_set_dma_strict(void)
 {
-	iommu_dma_strict = true;
-	if (iommu_def_domain_type == IOMMU_DOMAIN_DMA_FQ)
-		iommu_def_domain_type = IOMMU_DOMAIN_DMA;
+	iommu_dma_strict = true;	/* [한국어] 드라이버나 보안 정책이 지연 무효화를 허용하지 않을 때 코어가 부른다 */
+	if (iommu_def_domain_type == IOMMU_DOMAIN_DMA_FQ)	/* [한국어] 이미 flush queue 형 기본 도메인으로 정해져 있었다면 */
+		iommu_def_domain_type = IOMMU_DOMAIN_DMA;	/* [한국어] 즉시 무효화형으로 내린다. DMA 와 DMA_FQ 는 같은 번역 도메인의 두 가지 무효화 정책일 뿐이다 */
 }
 
 /*
@@ -1213,9 +1597,9 @@ static ssize_t iommu_group_attr_show(struct kobject *kobj,
 	struct iommu_group *group = to_iommu_group(kobj);	/* [한국어] kobject 에서 그룹으로 */
 	ssize_t ret = -EIO;	/* [한국어] show 가 없는 속성이면 이 값이 그대로 나간다 */
 
-	if (attr->show)
+	if (attr->show)	/* [한국어] 읽기 콜백이 있는 속성만 */
 		ret = attr->show(group, buf);	/* [한국어] 실제 구현은 각 속성이 가지고 있다 */
-	return ret;
+	return ret;	/* [한국어] 콜백이 쓴 바이트 수 또는 -EIO */
 }
 
 /*
@@ -1239,13 +1623,13 @@ static ssize_t iommu_group_attr_store(struct kobject *kobj,
 				      struct attribute *__attr,
 				      const char *buf, size_t count)
 {
-	struct iommu_group_attribute *attr = to_iommu_group_attr(__attr);
-	struct iommu_group *group = to_iommu_group(kobj);
+	struct iommu_group_attribute *attr = to_iommu_group_attr(__attr);	/* [한국어] 일반 attribute 에서 확장형으로 (container_of) */
+	struct iommu_group *group = to_iommu_group(kobj);	/* [한국어] kobject 에서 그룹으로 */
 	ssize_t ret = -EIO;	/* [한국어] 읽기 전용 속성에 쓰려 했다는 뜻 */
 
-	if (attr->store)
-		ret = attr->store(group, buf, count);
-	return ret;
+	if (attr->store)	/* [한국어] 쓰기 콜백이 있는 속성만 — 현재로선 type 뿐이다 */
+		ret = attr->store(group, buf, count);	/* [한국어] 기본 도메인 종류 변경 같은 실제 동작이 여기서 일어난다 */
+	return ret;	/* [한국어] 소비한 바이트 수 또는 -EIO */
 }
 
 /* [한국어] 위 두 어댑터를 kobject 계층에 연결하는 vtable.
