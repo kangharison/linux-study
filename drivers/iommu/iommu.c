@@ -6364,64 +6364,128 @@ bool iommu_group_dma_owner_claimed(struct iommu_group *group)
 }
 EXPORT_SYMBOL_GPL(iommu_group_dma_owner_claimed);
 
+/*
+ * [한국어]
+ * iommu_remove_dev_pasid - 장치의 PASID 항목을 차단 도메인으로 덮는다
+ *
+ * @dev:    대상 장치
+ * @pasid:  거둘 PASID
+ * @domain: 지금 그 PASID 에 붙어 있는 도메인 (드라이버에 전이 정보로 넘긴다)
+ *
+ * PASID 해제에는 "떼기"가 없다는 것이 이 함수의 요점이다. 하드웨어의 PASID 표에서
+ * 항목을 그냥 비워 두면 그 PASID 로 오는 트랜잭션을 어떻게 다룰지가 정의되지 않으므로,
+ * 대신 모든 접근이 실패하는 차단 도메인을 명시적으로 심는다. 도메인 부착에서
+ * blocked_domain 이 하는 역할과 정확히 같다.
+ *
+ * 그래서 iommu_attach_device_pasid 는 blocked_domain 이 PASID 를 다룰 수 있는지를
+ * 부착 전에 검사한다 — 뗄 수 없는 것은 붙이지도 않는다.
+ *
+ * 실행 컨텍스트: 그룹 락을 든 채. 프로세스 문맥.
+ *
+ * 호출 체인: __iommu_remove_group_pasid, __iommu_set_group_pasid 되감기 → [이 함수]
+ */
 static void iommu_remove_dev_pasid(struct device *dev, ioasid_t pasid,
 				   struct iommu_domain *domain)
 {
-	const struct iommu_ops *ops = dev_iommu_ops(dev);
-	struct iommu_domain *blocked_domain = ops->blocked_domain;
+	const struct iommu_ops *ops = dev_iommu_ops(dev);	/* [한국어] 이 장치의 드라이버 */
+	struct iommu_domain *blocked_domain = ops->blocked_domain;	/* [한국어] PASID 해제는 '떼기'가 아니라 '차단 도메인으로 옮기기'다. PASID 항목을 비워 두면 하드웨어가 무엇을 볼지 정의되지 않으므로, 명시적으로 모든 접근이 실패하는 도메인을 심는다 */
 
-	WARN_ON(blocked_domain->ops->set_dev_pasid(blocked_domain,
-						   dev, pasid, domain));
+	WARN_ON(blocked_domain->ops->set_dev_pasid(blocked_domain,	/* [한국어] 차단 도메인으로의 전환은 실패할 수 없다 — 실패하면 해제된 주소 공간을 가리키는 PASID 항목이 하드웨어에 남는다 */
+						   dev, pasid, domain));	/* [한국어] 현재 도메인을 old 로 넘겨 드라이버가 전이를 인식하게 한다 */
 }
 
+/*
+ * [한국어]
+ * __iommu_set_group_pasid - 그룹의 모든 장치에 같은 PASID→도메인 설정을 심는다
+ *
+ * @domain: 새로 붙일 도메인
+ * @group:  대상 그룹
+ * @pasid:  설정할 PASID
+ * @old:    교체라면 이전 도메인, 신규 부착이면 NULL
+ * @return: 0 성공, 음수면 실패 (성공했던 장치들은 되감긴 뒤다)
+ *
+ * PASID 부착도 그룹 단위다. 그룹은 하드웨어가 구별하지 못하는 장치들의 묶음이므로,
+ * 같은 PASID 가 어떤 장치에서는 A 주소 공간을, 다른 장치에서는 B 를 가리키면 격리가
+ * 무너진다.
+ *
+ * 되감기 정책이 old 의 유무로 갈리는 것이 이 함수의 핵심이다.
+ *   - 신규 부착(old == NULL): 성공했던 장치들을 차단 도메인으로 보낸다. 원래 아무
+ *     것도 없었으니 "없음"에 가장 가까운 상태가 차단이다.
+ *   - 교체(old != NULL): 옛 도메인으로 되돌린다. 조금 전까지 정상 동작하던 도메인을
+ *     다시 붙이는 것이므로 실패하면 드라이버 버그이며, 그때는 차단으로 떨어진다.
+ *
+ * max_pasids 가 0 인 장치를 건너뛰는 것은 최적화가 아니라 정확성이다. 그런 장치는
+ * PASID 붙은 트랜잭션을 만들 수 없으므로 설정 자체가 의미 없고, 드라이버가 그 호출을
+ * 받아 줄 이유도 없다.
+ *
+ * 실행 컨텍스트: 그룹 락을 든 채. 프로세스 문맥.
+ *
+ * 호출 체인: iommu_attach_device_pasid, iommu_replace_device_pasid → [이 함수]
+ *            → domain->ops->set_dev_pasid
+ */
 static int __iommu_set_group_pasid(struct iommu_domain *domain,
 				   struct iommu_group *group, ioasid_t pasid,
 				   struct iommu_domain *old)
 {
-	struct group_device *device, *last_gdev;
-	int ret;
+	struct group_device *device, *last_gdev;	/* [한국어] 순회 커서와, 실패가 난 지점을 기억할 포인터 */
+	int ret;	/* [한국어] 드라이버 콜백 결과 */
 
-	for_each_group_device(group, device) {
-		if (device->dev->iommu->max_pasids > 0) {
-			ret = domain->ops->set_dev_pasid(domain, device->dev,
-							 pasid, old);
+	for_each_group_device(group, device) {	/* [한국어] PASID 부착도 그룹 전체에 적용된다 — 그룹이 하나의 격리 단위이므로 같은 PASID 가 모든 장치에서 같은 주소 공간을 가리켜야 한다 */
+		if (device->dev->iommu->max_pasids > 0) {	/* [한국어] PASID 를 낼 수 없는 장치는 건너뛴다. 그런 장치는 애초에 PASID 붙은 트랜잭션을 만들지 못하므로 설정할 것이 없다 */
+			ret = domain->ops->set_dev_pasid(domain, device->dev,	/* [한국어] 드라이버가 이 장치의 PASID 표에 도메인을 심는다 */
+							 pasid, old);	/* [한국어] old 를 함께 넘겨 교체인지 신규인지 알린다 */
 			if (ret)
-				goto err_revert;
+				goto err_revert;	/* [한국어] 한 장치라도 실패하면 이미 성공한 것들을 되돌린다 */
 		}
 	}
 
-	return 0;
+	return 0;	/* [한국어] 그룹 전체에 적용 완료 */
 
-err_revert:
-	last_gdev = device;
-	for_each_group_device(group, device) {
-		if (device == last_gdev)
-			break;
-		if (device->dev->iommu->max_pasids > 0) {
+err_revert:	/* [한국어] 부분 성공을 되감는 경로 */
+	last_gdev = device;	/* [한국어] 실패가 난 장치. 그 앞까지만 되돌리면 된다 */
+	for_each_group_device(group, device) {	/* [한국어] 처음부터 다시 훑으며 */
+		if (device == last_gdev)	/* [한국어] 실패 지점에 닿으면 */
+			break;	/* [한국어] 그 뒤는 손댄 적이 없으므로 멈춘다 */
+		if (device->dev->iommu->max_pasids > 0) {	/* [한국어] 설정했던 장치만 */
 			/*
 			 * If no old domain, undo the succeeded devices/pasid.
 			 * Otherwise, rollback the succeeded devices/pasid to
 			 * the old domain. And it is a driver bug to fail
 			 * attaching with a previously good domain.
 			 */
-			if (!old ||
-			    WARN_ON(old->ops->set_dev_pasid(old, device->dev,
-							    pasid, domain)))
-				iommu_remove_dev_pasid(device->dev, pasid, domain);
+			if (!old ||	/* [한국어] 신규 부착이었다면 되돌릴 옛 도메인이 없다 */
+			    WARN_ON(old->ops->set_dev_pasid(old, device->dev,	/* [한국어] 교체였다면 옛 도메인으로 되돌린다. 조금 전까지 멀쩡히 붙어 있던 도메인을 다시 붙이는 것이므로 실패는 드라이버 버그다 (위 영어 주석) */
+							    pasid, domain)))	/* [한국어] 현재(실패한) 도메인을 old 로 넘긴다 */
+				iommu_remove_dev_pasid(device->dev, pasid, domain);	/* [한국어] 되돌릴 곳이 없거나 되돌리기마저 실패했다면 차단 도메인으로 보낸다 — 잘못된 주소 공간을 남기느니 막는 편이 안전하다 */
 		}
 	}
-	return ret;
+	return ret;	/* [한국어] 첫 실패 이유를 올린다 */
 }
 
+/*
+ * [한국어]
+ * __iommu_remove_group_pasid - 그룹 전체에서 한 PASID 의 설정을 거둔다
+ *
+ * @group:  대상 그룹
+ * @pasid:  거둘 PASID
+ * @domain: 지금 붙어 있는 도메인
+ *
+ * __iommu_set_group_pasid 의 대칭이며, 실패할 수 없는 경로다. 해제는 되돌릴 곳이
+ * 없으므로 각 장치를 차례로 차단 도메인으로 보내고 끝낸다.
+ *
+ * 실행 컨텍스트: 그룹 락을 든 채. 프로세스 문맥.
+ *
+ * 호출 체인: iommu_detach_device_pasid → [이 함수] → iommu_remove_dev_pasid
+ */
 static void __iommu_remove_group_pasid(struct iommu_group *group,
 				       ioasid_t pasid,
 				       struct iommu_domain *domain)
 {
-	struct group_device *device;
+	struct group_device *device;	/* [한국어] 순회 커서 */
 
-	for_each_group_device(group, device) {
-		if (device->dev->iommu->max_pasids > 0)
-			iommu_remove_dev_pasid(device->dev, pasid, domain);
+	for_each_group_device(group, device) {	/* [한국어] 그룹 전체에서 이 PASID 를 거둔다 */
+		if (device->dev->iommu->max_pasids > 0)	/* [한국어] 설정했던 장치만 */
+			iommu_remove_dev_pasid(device->dev, pasid, domain);	/* [한국어] 차단 도메인으로 옮겨 해제를 표현한다 */
 	}
 }
 
@@ -6437,69 +6501,98 @@ static void __iommu_remove_group_pasid(struct iommu_group *group,
  *
  * Return: 0 on success, or an error.
  */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * iommu_attach_device_pasid - 장치의 특정 PASID 에 도메인을 붙인다
+ *
+ * @domain: 붙일 도메인 (SVA 라면 프로세스 mm 을 따르는 도메인)
+ * @dev:    대상 장치
+ * @pasid:  붙일 PASID. IOMMU_NO_PASID(0)는 RID 트래픽 전용이라 쓸 수 없다.
+ * @handle: iommufd 등이 부착을 식별하는 핸들. NULL 이면 도메인만 저장한다.
+ * @return: 0 성공, 음수 실패
+ *
+ * 한 장치가 여러 주소 공간을 동시에 쓰게 만드는 지점이다. PASID 없이는 장치 하나에
+ * 도메인 하나뿐이지만, PASID 가 있으면 같은 물리 장치가 PASID 값에 따라 서로 다른
+ * 페이지 테이블을 본다. GPU 가 여러 프로세스의 가상 주소를 그대로 쓰는 SVA 가 이
+ * 위에 서 있다.
+ *
+ * 앞부분의 능력 검사에서 blocked_domain 의 set_dev_pasid 까지 요구하는 것에 주목할
+ * 것 — PASID 해제는 차단 도메인을 심는 것으로 구현되므로, 뗄 수 없는 것은 붙이지도
+ * 않는다는 원칙이다.
+ *
+ * 배열 조작의 두 단계가 순서 보장을 만든다. 먼저 xa_insert 로 자리만 예약해 중복
+ * 부착을 막고(xa_reserve 는 이미 있는지 구분하지 못한다), 하드웨어 설정이 끝난 뒤에야
+ * 실제 항목을 공개한다. 먼저 공개하면 PRI(Page Request Interface) 이벤트가 아직 붙지
+ * 않은 도메인을 향해 큐잉될 수 있기 때문이다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥. 그룹 락을 잡고 GFP_KERNEL 을 쓴다.
+ *
+ * 호출 체인: iommu-sva, iommufd, 가속기 드라이버 → [이 함수]
+ *            → __iommu_set_group_pasid → ops->set_dev_pasid
+ */
 int iommu_attach_device_pasid(struct iommu_domain *domain,
 			      struct device *dev, ioasid_t pasid,
 			      struct iommu_attach_handle *handle)
 {
 	/* Caller must be a probed driver on dev */
-	struct iommu_group *group = dev->iommu_group;
-	struct group_device *device;
-	const struct iommu_ops *ops;
-	void *entry;
-	int ret;
+	struct iommu_group *group = dev->iommu_group;	/* [한국어] 호출자는 이 장치에 바인딩된 드라이버여야 한다 */
+	struct group_device *device;	/* [한국어] PASID 범위 검사용 순회 커서 */
+	const struct iommu_ops *ops;	/* [한국어] 드라이버 콜백 표 */
+	void *entry;	/* [한국어] pasid_array 에 넣을 태그 포인터 */
+	int ret;	/* [한국어] 각 단계의 결과 */
 
-	if (!group)
-		return -ENODEV;
+	if (!group)	/* [한국어] IOMMU 아래가 아닌 장치 */
+		return -ENODEV;	/* [한국어] PASID 를 붙일 수 없다 */
 
-	ops = dev_iommu_ops(dev);
+	ops = dev_iommu_ops(dev);	/* [한국어] 드라이버 확보 */
 
-	if (!domain->ops->set_dev_pasid ||
-	    !ops->blocked_domain ||
-	    !ops->blocked_domain->ops->set_dev_pasid)
-		return -EOPNOTSUPP;
+	if (!domain->ops->set_dev_pasid ||	/* [한국어] 도메인이 PASID 부착을 지원하지 않거나 */
+	    !ops->blocked_domain ||	/* [한국어] 해제에 쓸 차단 도메인이 없거나 */
+	    !ops->blocked_domain->ops->set_dev_pasid)	/* [한국어] 그 차단 도메인이 PASID 를 다루지 못한다면 */
+		return -EOPNOTSUPP;	/* [한국어] 붙일 수는 있어도 뗄 수 없는 상태가 되므로 아예 거절한다 */
 
-	if (!domain_iommu_ops_compatible(ops, domain) ||
-	    pasid == IOMMU_NO_PASID)
-		return -EINVAL;
+	if (!domain_iommu_ops_compatible(ops, domain) ||	/* [한국어] 다른 드라이버가 만든 도메인이거나 */
+	    pasid == IOMMU_NO_PASID)	/* [한국어] PASID 0 은 RID(비 PASID) 트래픽 전용이라 여기에 쓸 수 없다 */
+		return -EINVAL;	/* [한국어] 잘못된 요청 */
 
-	mutex_lock(&group->mutex);
+	mutex_lock(&group->mutex);	/* [한국어] PASID 배열과 그룹 상태 변경 구간 */
 
 	/*
 	 * This is a concurrent attach during a device reset. Reject it until
 	 * pci_dev_reset_iommu_done() attaches the device to group->domain.
 	 */
-	if (group->resetting_domain) {
-		ret = -EBUSY;
-		goto out_unlock;
+	if (group->resetting_domain) {	/* [한국어] PCI 함수 리셋이 진행 중이다 — 리셋은 PASID 표를 포함한 장치 상태를 통째로 지운다 */
+		ret = -EBUSY;	/* [한국어] 리셋이 끝나 도메인이 복구될 때까지 새 부착을 받지 않는다 (위 영어 주석) */
+		goto out_unlock;	/* [한국어] 거절 */
 	}
 
-	for_each_group_device(group, device) {
+	for_each_group_device(group, device) {	/* [한국어] 그룹의 모든 장치에 대해 PASID 값이 유효한지 확인 */
 		/*
 		 * Skip PASID validation for devices without PASID support
 		 * (max_pasids = 0). These devices cannot issue transactions
 		 * with PASID, so they don't affect group's PASID usage.
 		 */
-		if ((device->dev->iommu->max_pasids > 0) &&
-		    (pasid >= device->dev->iommu->max_pasids)) {
-			ret = -EINVAL;
-			goto out_unlock;
+		if ((device->dev->iommu->max_pasids > 0) &&	/* [한국어] PASID 를 지원하는 장치만 검사한다. 지원하지 않는 장치는 PASID 붙은 트랜잭션 자체를 못 내므로 그룹의 PASID 사용에 영향을 주지 않는다 (위 영어 주석) */
+		    (pasid >= device->dev->iommu->max_pasids)) {	/* [한국어] 이 장치가 낼 수 있는 범위를 넘는 PASID */
+			ret = -EINVAL;	/* [한국어] 그룹의 어느 장치도 표현할 수 없는 값이면 거절 */
+			goto out_unlock;	/* [한국어] 실패 */
 		}
 	}
 
-	entry = iommu_make_pasid_array_entry(domain, handle);
+	entry = iommu_make_pasid_array_entry(domain, handle);	/* [한국어] 배열에 넣을 태그 포인터를 만든다 (핸들이 있으면 핸들, 없으면 도메인) */
 
 	/*
 	 * Entry present is a failure case. Use xa_insert() instead of
 	 * xa_reserve().
 	 */
-	ret = xa_insert(&group->pasid_array, pasid, XA_ZERO_ENTRY, GFP_KERNEL);
+	ret = xa_insert(&group->pasid_array, pasid, XA_ZERO_ENTRY, GFP_KERNEL);	/* [한국어] 먼저 자리만 예약한다. xa_insert 는 이미 있으면 실패하므로 '중복 부착'을 여기서 걸러 낸다 — xa_reserve 는 그 구분을 못 한다 (위 영어 주석) */
 	if (ret)
-		goto out_unlock;
+		goto out_unlock;	/* [한국어] 이미 그 PASID 가 쓰이는 중이거나 메모리 부족 */
 
-	ret = __iommu_set_group_pasid(domain, group, pasid, NULL);
-	if (ret) {
-		xa_release(&group->pasid_array, pasid);
-		goto out_unlock;
+	ret = __iommu_set_group_pasid(domain, group, pasid, NULL);	/* [한국어] 실제 하드웨어 설정. old 가 NULL 이므로 신규 부착이다 */
+	if (ret) {	/* [한국어] 하드웨어 설정 실패 */
+		xa_release(&group->pasid_array, pasid);	/* [한국어] 예약해 둔 자리를 반납한다 */
+		goto out_unlock;	/* [한국어] 실패 전달 */
 	}
 
 	/*
@@ -6508,12 +6601,12 @@ int iommu_attach_device_pasid(struct iommu_domain *domain,
 	 * operation succeeds as we cannot tolerate PRIs becoming concurrently
 	 * queued and then failing attach.
 	 */
-	WARN_ON(xa_is_err(xa_store(&group->pasid_array,
-				   pasid, entry, GFP_KERNEL)));
+	WARN_ON(xa_is_err(xa_store(&group->pasid_array,	/* [한국어] 예약이 이미 메모리를 잡아 뒀고 그룹 락도 들고 있어 실패할 수 없다 */
+				   pasid, entry, GFP_KERNEL)));	/* [한국어] 하드웨어 설정이 끝난 뒤에야 항목을 공개한다. 순서가 중요하다 — 먼저 공개하면 PRI(페이지 요청 인터페이스) 이벤트가 아직 붙지 않은 도메인을 향해 큐잉될 수 있다 (위 영어 주석) */
 
-out_unlock:
-	mutex_unlock(&group->mutex);
-	return ret;
+out_unlock:	/* [한국어] 공통 출구 */
+	mutex_unlock(&group->mutex);	/* [한국어] 락 해제 */
+	return ret;	/* [한국어] 0 이면 이 PASID 로 오는 DMA 가 새 주소 공간을 본다 */
 }
 EXPORT_SYMBOL_GPL(iommu_attach_device_pasid);
 
@@ -6534,54 +6627,80 @@ EXPORT_SYMBOL_GPL(iommu_attach_device_pasid);
  *
  * Return 0 on success, or an error.
  */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어)
+ * iommu_replace_device_pasid - 이미 붙어 있는 PASID 의 도메인을 갈아 끼운다
+ *
+ * @domain: 새 도메인
+ * @dev:    대상 장치
+ * @pasid:  이미 부착된 PASID
+ * @handle: 새 부착 핸들. 필수이며, 기존 핸들 재사용은 거부된다.
+ * @return: 0 성공, 음수 실패 (실패해도 옛 설정이 그대로 유지된다)
+ *
+ * detach 후 attach 로 흉내 낼 수 없기 때문에 별도 API 로 존재한다. 그 사이에
+ * PASID 가 차단 도메인에 놓이는 창이 생기고, 그동안 장치가 낸 트랜잭션이 폴트로
+ * 죽거나 PRI 요청이 유실되기 때문이다. 이 함수는 옛 도메인을 old 로 넘겨 드라이버가
+ * 하드웨어 수준에서 원자적으로 바꾸게 한다.
+ *
+ * 실패해도 옛 설정이 남는다는 보장이 attach 경로와의 결정적 차이다 —
+ * __iommu_set_group_pasid 의 되감기가 old 로 복원하기 때문에 가능하다.
+ *
+ * 핸들 재사용을 WARN 과 함께 막는 이유는 락 없이 핸들을 읽는 경로
+ * (iommu_attach_handle_get)가 있기 때문이다. 같은 핸들을 다시 넣으면 그 경로가
+ * 교체 도중의 반쯤 갱신된 상태를 볼 수 있다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥. 그룹 락을 잡는다.
+ *
+ * 호출 체인: iommufd → [이 함수] → __iommu_set_group_pasid
+ */
 int iommu_replace_device_pasid(struct iommu_domain *domain,
 			       struct device *dev, ioasid_t pasid,
 			       struct iommu_attach_handle *handle)
 {
 	/* Caller must be a probed driver on dev */
-	struct iommu_group *group = dev->iommu_group;
-	struct iommu_attach_handle *entry;
-	struct iommu_domain *curr_domain;
-	void *curr;
-	int ret;
+	struct iommu_group *group = dev->iommu_group;	/* [한국어] 호출자는 바인딩된 드라이버 */
+	struct iommu_attach_handle *entry;	/* [한국어] 새로 넣을 태그 포인터 */
+	struct iommu_domain *curr_domain;	/* [한국어] 현재 붙어 있는 도메인 */
+	void *curr;	/* [한국어] 배열에서 꺼낸 기존 항목 */
+	int ret;	/* [한국어] 결과 */
 
-	if (!group)
-		return -ENODEV;
+	if (!group)	/* [한국어] IOMMU 아래가 아닌 장치 */
+		return -ENODEV;	/* [한국어] 교체 불가 */
 
-	if (!domain->ops->set_dev_pasid)
-		return -EOPNOTSUPP;
+	if (!domain->ops->set_dev_pasid)	/* [한국어] 새 도메인이 PASID 부착을 지원하지 않는다 */
+		return -EOPNOTSUPP;	/* [한국어] 거절 */
 
-	if (!domain_iommu_ops_compatible(dev_iommu_ops(dev), domain) ||
-	    pasid == IOMMU_NO_PASID || !handle)
-		return -EINVAL;
+	if (!domain_iommu_ops_compatible(dev_iommu_ops(dev), domain) ||	/* [한국어] 다른 드라이버의 도메인이거나 */
+	    pasid == IOMMU_NO_PASID || !handle)	/* [한국어] PASID 0 이거나 핸들이 없다 — 이 API 는 iommufd 전용이라 핸들이 필수다 */
+		return -EINVAL;	/* [한국어] 잘못된 요청 */
 
-	mutex_lock(&group->mutex);
+	mutex_lock(&group->mutex);	/* [한국어] 교체 구간 */
 
 	/*
 	 * This is a concurrent attach during a device reset. Reject it until
 	 * pci_dev_reset_iommu_done() attaches the device to group->domain.
 	 */
-	if (group->resetting_domain) {
-		ret = -EBUSY;
-		goto out_unlock;
+	if (group->resetting_domain) {	/* [한국어] 리셋 중에는 PASID 표가 통째로 초기화된다 */
+		ret = -EBUSY;	/* [한국어] 리셋이 끝날 때까지 거절 */
+		goto out_unlock;	/* [한국어] 실패 */
 	}
 
-	entry = iommu_make_pasid_array_entry(domain, handle);
-	curr = xa_cmpxchg(&group->pasid_array, pasid, NULL,
-			  XA_ZERO_ENTRY, GFP_KERNEL);
-	if (xa_is_err(curr)) {
-		ret = xa_err(curr);
-		goto out_unlock;
+	entry = iommu_make_pasid_array_entry(domain, handle);	/* [한국어] 새 항목을 미리 만들어 둔다 */
+	curr = xa_cmpxchg(&group->pasid_array, pasid, NULL,	/* [한국어] 기존 값을 읽으면서 동시에 자리를 예약 상태로 바꾼다. NULL 을 기대값으로 주므로, 비어 있으면 예약이 성사되고 값이 있으면 그 값을 돌려받는다 */
+			  XA_ZERO_ENTRY, GFP_KERNEL);	/* [한국어] 예약 표식 */
+	if (xa_is_err(curr)) {	/* [한국어] 메모리 부족 등 */
+		ret = xa_err(curr);	/* [한국어] 에러 추출 */
+		goto out_unlock;	/* [한국어] 실패 */
 	}
 
 	/*
 	 * No domain (with or without handle) attached, hence not
 	 * a replace case.
 	 */
-	if (!curr) {
-		xa_release(&group->pasid_array, pasid);
-		ret = -EINVAL;
-		goto out_unlock;
+	if (!curr) {	/* [한국어] 비어 있었다 = 붙어 있던 도메인이 없다 */
+		xa_release(&group->pasid_array, pasid);	/* [한국어] 방금 잡은 예약을 되돌리고 */
+		ret = -EINVAL;	/* [한국어] 교체가 아니라 신규 부착이므로 이 API 의 대상이 아니다 (위 영어 주석) */
+		goto out_unlock;	/* [한국어] 거절 */
 	}
 
 	/*
@@ -6589,32 +6708,32 @@ int iommu_replace_device_pasid(struct iommu_domain *domain,
 	 * the handle without lock. To avoid race, reject the callers that
 	 * attempt it.
 	 */
-	if (curr == entry) {
-		WARN_ON(1);
-		ret = -EINVAL;
-		goto out_unlock;
+	if (curr == entry) {	/* [한국어] 호출자가 이미 쓰이고 있는 바로 그 핸들을 다시 넘겼다 */
+		WARN_ON(1);	/* [한국어] 핸들을 락 없이 참조하는 경로가 있어, 재사용하면 그 경로와 경쟁이 생긴다 (위 영어 주석) */
+		ret = -EINVAL;	/* [한국어] 호출자는 항상 새 핸들을 줘야 한다 */
+		goto out_unlock;	/* [한국어] 거절 */
 	}
 
-	curr_domain = pasid_array_entry_to_domain(curr);
-	ret = 0;
+	curr_domain = pasid_array_entry_to_domain(curr);	/* [한국어] 기존 항목에서 도메인을 꺼낸다 (핸들이든 직접 저장이든) */
+	ret = 0;	/* [한국어] 도메인이 같으면 하드웨어를 건드리지 않고 성공 */
 
-	if (curr_domain != domain) {
-		ret = __iommu_set_group_pasid(domain, group,
-					      pasid, curr_domain);
+	if (curr_domain != domain) {	/* [한국어] 실제로 다른 도메인으로 옮기는 경우에만 */
+		ret = __iommu_set_group_pasid(domain, group,	/* [한국어] 그룹 전체의 PASID 표를 새 도메인으로 갱신한다 */
+					      pasid, curr_domain);	/* [한국어] 옛 도메인을 넘겨 실패 시 되돌릴 수 있게 한다 — 이것이 attach 경로와의 결정적 차이다. 교체 실패 시 PASID 는 옛 설정을 그대로 유지한다 */
 		if (ret)
-			goto out_unlock;
+			goto out_unlock;	/* [한국어] 하드웨어 갱신 실패 — 배열은 예약 상태로 남지만 아래 store 를 건너뛰므로 옛 도메인이 유효하다 */
 	}
 
 	/*
 	 * The above xa_cmpxchg() reserved the memory, and the
 	 * group->mutex is held, this cannot fail.
 	 */
-	WARN_ON(xa_is_err(xa_store(&group->pasid_array,
-				   pasid, entry, GFP_KERNEL)));
+	WARN_ON(xa_is_err(xa_store(&group->pasid_array,	/* [한국어] cmpxchg 가 이미 메모리를 잡았고 락도 들고 있어 실패할 수 없다 */
+				   pasid, entry, GFP_KERNEL)));	/* [한국어] 하드웨어 갱신이 끝난 뒤 새 핸들을 공개한다 */
 
-out_unlock:
-	mutex_unlock(&group->mutex);
-	return ret;
+out_unlock:	/* [한국어] 공통 출구 */
+	mutex_unlock(&group->mutex);	/* [한국어] 락 해제 */
+	return ret;	/* [한국어] 0 이면 이 PASID 가 새 도메인을 본다 */
 }
 EXPORT_SYMBOL_NS_GPL(iommu_replace_device_pasid, "IOMMUFD_INTERNAL");
 
@@ -6627,43 +6746,93 @@ EXPORT_SYMBOL_NS_GPL(iommu_replace_device_pasid, "IOMMUFD_INTERNAL");
  * The @domain must have been attached to @pasid of the @dev with
  * iommu_attach_device_pasid().
  */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * iommu_detach_device_pasid - PASID 부착을 거둔다
+ *
+ * @domain: 붙어 있던 도메인
+ * @dev:    대상 장치
+ * @pasid:  거둘 PASID
+ *
+ * 반환값이 없다 — 해제는 실패할 수 없기 때문이다. 하드웨어를 먼저 차단 도메인으로
+ * 정리하고 그 다음 배열에서 지우는 순서가 중요하다. 반대로 하면 아직 살아 있는
+ * 하드웨어 설정을 아무도 추적하지 못하는 창이 열린다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥. 그룹 락을 잡는다.
+ *
+ * 호출 체인: iommu-sva, iommufd, 가속기 드라이버 → [이 함수]
+ *            → __iommu_remove_group_pasid
+ */
 void iommu_detach_device_pasid(struct iommu_domain *domain, struct device *dev,
 			       ioasid_t pasid)
 {
 	/* Caller must be a probed driver on dev */
-	struct iommu_group *group = dev->iommu_group;
+	struct iommu_group *group = dev->iommu_group;	/* [한국어] 호출자는 바인딩된 드라이버 */
 
-	mutex_lock(&group->mutex);
-	__iommu_remove_group_pasid(group, pasid, domain);
-	xa_erase(&group->pasid_array, pasid);
-	mutex_unlock(&group->mutex);
+	mutex_lock(&group->mutex);	/* [한국어] 해제 구간 */
+	__iommu_remove_group_pasid(group, pasid, domain);	/* [한국어] 그룹의 모든 장치에서 이 PASID 를 차단 도메인으로 보낸다 — 하드웨어를 먼저 정리한다 */
+	xa_erase(&group->pasid_array, pasid);	/* [한국어] 그 다음 배열에서 지운다. 순서가 반대면 아직 살아 있는 하드웨어 설정을 아무도 추적하지 못하는 창이 생긴다 */
+	mutex_unlock(&group->mutex);	/* [한국어] 락 해제 */
 }
 EXPORT_SYMBOL_GPL(iommu_detach_device_pasid);
 
+/*
+ * [한국어]
+ * iommu_alloc_global_pasid - 시스템 전역 풀에서 PASID 하나를 뗀다
+ *
+ * @dev:    PASID 를 쓸 장치 (상한을 정하는 데 쓰인다)
+ * @return: 할당된 PASID, 실패하면 IOMMU_PASID_INVALID
+ *
+ * PASID 공간이 왜 장치별이 아니라 전역인가 — 하나의 프로세스 주소 공간이 여러 장치에
+ * 동시에 붙을 수 있고, 그때 모든 장치에서 같은 PASID 값이어야 커널이 그 바인딩을
+ * 하나로 다룰 수 있기 때문이다. 그래서 IDA 하나를 시스템 전체가 나눠 쓴다.
+ *
+ * 시작값이 IOMMU_FIRST_GLOBAL_PASID 인 것은 낮은 몇 개를 특수 용도로 비워 두기
+ * 때문이고, 상한에서 1 을 빼는 것은 max_pasids 가 '개수'인 반면 IDA 범위는 '마지막
+ * 값'이기 때문이다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥. GFP_KERNEL 로 잠들 수 있다.
+ *
+ * 호출 체인: iommu-sva, 가속기 드라이버 → [이 함수]
+ */
 ioasid_t iommu_alloc_global_pasid(struct device *dev)
 {
-	int ret;
+	int ret;	/* [한국어] IDA 할당 결과 */
 
 	/* max_pasids == 0 means that the device does not support PASID */
-	if (!dev->iommu->max_pasids)
-		return IOMMU_PASID_INVALID;
+	if (!dev->iommu->max_pasids)	/* [한국어] PASID 를 지원하지 않는 장치 (위 영어 주석) */
+		return IOMMU_PASID_INVALID;	/* [한국어] 할당 불가 */
 
 	/*
 	 * max_pasids is set up by vendor driver based on number of PASID bits
 	 * supported but the IDA allocation is inclusive.
 	 */
-	ret = ida_alloc_range(&iommu_global_pasid_ida, IOMMU_FIRST_GLOBAL_PASID,
-			      dev->iommu->max_pasids - 1, GFP_KERNEL);
-	return ret < 0 ? IOMMU_PASID_INVALID : ret;
+	ret = ida_alloc_range(&iommu_global_pasid_ida, IOMMU_FIRST_GLOBAL_PASID,	/* [한국어] 전역 IDA 에서 하나를 뗀다. PASID 공간을 시스템 전체가 공유하는 이유는, 한 프로세스의 주소 공간이 여러 장치에 동시에 붙을 수 있고 그때 같은 PASID 값이어야 하기 때문이다 */
+			      dev->iommu->max_pasids - 1, GFP_KERNEL);	/* [한국어] 상한이 포함(inclusive)이라 1 을 뺀다 — max_pasids 는 개수이고 IDA 범위는 마지막 값이다 (위 영어 주석) */
+	return ret < 0 ? IOMMU_PASID_INVALID : ret;	/* [한국어] 고갈되었으면 무효값. 호출자는 SVA 바인딩을 포기한다 */
 }
 EXPORT_SYMBOL_GPL(iommu_alloc_global_pasid);
 
+/*
+ * [한국어]
+ * iommu_free_global_pasid - 전역 PASID 를 풀에 돌려준다
+ *
+ * @pasid: 반납할 PASID
+ *
+ * 이 시점에는 그 PASID 를 쓰던 모든 하드웨어 설정이 이미 제거되어 있어야 한다.
+ * 남아 있는데 값을 재사용하면, 새 주소 공간에 붙은 PASID 로 옛 장치의 트랜잭션이
+ * 흘러드는 최악의 격리 붕괴가 일어난다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥.
+ *
+ * 호출 체인: iommu-sva, 가속기 드라이버 → [이 함수]
+ */
 void iommu_free_global_pasid(ioasid_t pasid)
 {
-	if (WARN_ON(pasid == IOMMU_PASID_INVALID))
-		return;
+	if (WARN_ON(pasid == IOMMU_PASID_INVALID))	/* [한국어] 할당에 실패했던 값을 해제하려는 것은 호출자 버그 */
+		return;	/* [한국어] IDA 를 건드리지 않는다 */
 
-	ida_free(&iommu_global_pasid_ida, pasid);
+	ida_free(&iommu_global_pasid_ida, pasid);	/* [한국어] 전역 풀에 돌려준다. 이 시점에는 그 PASID 를 쓰던 모든 하드웨어 설정이 이미 제거되어 있어야 한다 */
 }
 EXPORT_SYMBOL_GPL(iommu_free_global_pasid);
 
