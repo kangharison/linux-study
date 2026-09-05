@@ -1633,92 +1633,173 @@ int __init dmar_table_init(void)
 	return dmar_table_initialized < 0 ? dmar_table_initialized : 0;	/* [한국어] 내부 상태값 1 을 노출하지 않고, 호출자에게는 0 또는 오류만 돌려준다 */
 }
 
+/*
+ * [한국어]
+ * warn_invalid_dmar - 펌웨어가 잘못 보고한 DMAR 주소를 알리고 커널을 오염 표시한다
+ *
+ * @addr: 문제의 주소. @message: 무엇이 잘못되었는지 덧붙일 문구.
+ * @return: 없음.
+ *
+ * pr_warn_once 를 쓰는 이유: 같은 문제가 유닛마다 반복될 수 있는데, 같은
+ * 메시지를 여러 번 찍어도 정보가 늘지 않는다.
+ *
+ * add_taint 로 커널을 오염 표시하는 것이 이 함수의 실질적인 목적이다.
+ * 이후 올라오는 버그 리포트에 그 표시가 남아, "이 시스템의 펌웨어가
+ * 이상하다"는 것을 리포트를 받는 쪽이 알 수 있다. BIOS 벤더·버전을 함께
+ * 찍는 것도 같은 이유다.
+ *
+ * 실행 컨텍스트: 부팅 초기의 검증. 프로세스 컨텍스트.
+ */
 static void warn_invalid_dmar(u64 addr, const char *message)
 {
-	pr_warn_once(FW_BUG
-		"Your BIOS is broken; DMAR reported at address %llx%s!\n"
-		"BIOS vendor: %s; Ver: %s; Product Version: %s\n",
-		addr, message,
-		dmi_get_system_info(DMI_BIOS_VENDOR),
-		dmi_get_system_info(DMI_BIOS_VERSION),
-		dmi_get_system_info(DMI_PRODUCT_VERSION));
-	add_taint(TAINT_FIRMWARE_WORKAROUND, LOCKDEP_STILL_OK);
+	pr_warn_once(FW_BUG	/* [한국어] 같은 문제가 유닛마다 반복될 수 있어 한 번만 찍는다 */
+		"Your BIOS is broken; DMAR reported at address %llx%s!\n"	/* [한국어] 펌웨어 버그임을 명시 */
+		"BIOS vendor: %s; Ver: %s; Product Version: %s\n",	/* [한국어] 어느 BIOS 인지 */
+		addr, message,	/* [한국어] 문제의 주소와 상황 설명 */
+		dmi_get_system_info(DMI_BIOS_VENDOR),	/* [한국어] 벤더 */
+		dmi_get_system_info(DMI_BIOS_VERSION),	/* [한국어] 버전 */
+		dmi_get_system_info(DMI_PRODUCT_VERSION));	/* [한국어] 제품 버전 */
+	add_taint(TAINT_FIRMWARE_WORKAROUND, LOCKDEP_STILL_OK);	/* [한국어] 커널에 오염 표시를 남긴다. 이후 버그 리포트에 그 표시가 남아 펌웨어를 의심할 근거가 된다 */
 }
 
+/*
+ * [한국어]
+ * dmar_validate_one_drhd - DRHD 가 가리키는 주소에 정말 하드웨어가 있는지 확인한다
+ *
+ * @entry: 검증할 DRHD 항목. @arg: NULL 이면 부팅 극초기(early ioremap).
+ * @return: 0 이면 유효하다, -EINVAL 이면 펌웨어가 잘못 보고했다.
+ *
+ * 표를 믿고 초기화를 진행하기 전에, 그 주소에 실제로 VT-d 하드웨어가
+ * 응답하는지 본다. 능력 레지스터 둘을 읽어 보는 것이 그 방법이다.
+ *
+ * 전부 1(-1)이 돌아오면 그 주소에 아무것도 없다는 뜻이다. 매핑되지 않은
+ * MMIO 를 읽으면 x86 은 예외 대신 모든 비트가 1 인 값을 돌려주기 때문에,
+ * 이것이 "장치 없음"의 표준적인 판별법이다.
+ *
+ * arg 로 두 매핑 방식을 가르는 이유: 이 함수는 부팅의 아주 이른 시점
+ * (detect_intel_iommu, 정상 ioremap 이 아직 불가능)과 조금 늦은 시점
+ * (핫플러그) 양쪽에서 불린다. __ref 표시는 __init 함수인 early_ioremap 을
+ * 비-__init 문맥에서도 참조한다는 것을 컴파일러에 알리는 것이다.
+ *
+ * 주소가 0 인 경우를 먼저 거른다 — 펌웨어가 항목을 채우지 않았다는 뜻이라
+ * 매핑을 시도할 이유가 없다.
+ *
+ * 실행 컨텍스트: 부팅 극초기 또는 핫플러그.
+ */
 static int __ref
 dmar_validate_one_drhd(struct acpi_dmar_header *entry, void *arg)
 {
-	struct acpi_dmar_hardware_unit *drhd;
-	void __iomem *addr;
-	u64 cap, ecap;
+	struct acpi_dmar_hardware_unit *drhd;	/* [한국어] 검증할 DRHD 항목 */
+	void __iomem *addr;	/* [한국어] 임시로 매핑할 레지스터 */
+	u64 cap, ecap;	/* [한국어] 읽어 볼 능력 레지스터 */
 
-	drhd = (void *)entry;
-	if (!drhd->address) {
-		warn_invalid_dmar(0, "");
-		return -EINVAL;
+	drhd = (void *)entry;	/* [한국어] 헤더를 DRHD 형식으로 */
+	if (!drhd->address) {	/* [한국어] 주소가 0 이면 */
+		warn_invalid_dmar(0, "");	/* [한국어] 펌웨어가 항목을 채우지 않았다 */
+		return -EINVAL;	/* [한국어] 매핑을 시도할 이유가 없다 */
 	}
 
-	if (arg)
-		addr = ioremap(drhd->address, VTD_PAGE_SIZE);
+	if (arg)	/* [한국어] 부팅 극초기가 아니면 */
+		addr = ioremap(drhd->address, VTD_PAGE_SIZE);	/* [한국어] 정상 매핑 */
 	else
-		addr = early_ioremap(drhd->address, VTD_PAGE_SIZE);
-	if (!addr) {
-		pr_warn("Can't validate DRHD address: %llx\n", drhd->address);
-		return -EINVAL;
+		addr = early_ioremap(drhd->address, VTD_PAGE_SIZE);	/* [한국어] 극초기에는 early 매핑만 가능하다 */
+	if (!addr) {	/* [한국어] 매핑 실패 */
+		pr_warn("Can't validate DRHD address: %llx\n", drhd->address);	/* [한국어] 검증할 수 없다 */
+		return -EINVAL;	/* [한국어] 유효하지 않은 것으로 본다 */
 	}
 
-	cap = readq(addr + DMAR_CAP_REG);
-	ecap = readq(addr + DMAR_ECAP_REG);
+	cap = readq(addr + DMAR_CAP_REG);	/* [한국어] 능력 레지스터를 */
+	ecap = readq(addr + DMAR_ECAP_REG);	/* [한국어] 둘 다 읽어 본다 */
 
-	if (arg)
-		iounmap(addr);
+	if (arg)	/* [한국어] 매핑한 방식에 맞춰 */
+		iounmap(addr);	/* [한국어] 풀고 */
 	else
-		early_iounmap(addr, VTD_PAGE_SIZE);
+		early_iounmap(addr, VTD_PAGE_SIZE);	/* [한국어] 또는 early 로 푼다 */
 
-	if (cap == (uint64_t)-1 && ecap == (uint64_t)-1) {
-		warn_invalid_dmar(drhd->address, " returns all ones");
-		return -EINVAL;
+	if (cap == (uint64_t)-1 && ecap == (uint64_t)-1) {	/* [한국어] 둘 다 전부 1 이면 */
+		warn_invalid_dmar(drhd->address, " returns all ones");	/* [한국어] 그 주소에 아무것도 없다. 매핑되지 않은 MMIO 를 읽으면 x86 은 예외 대신 모든 비트가 1 인 값을 돌려준다 */
+		return -EINVAL;	/* [한국어] 유효하지 않다 */
 	}
 
-	return 0;
+	return 0;	/* [한국어] 실제로 하드웨어가 응답한다 */
 }
 
+/*
+ * [한국어]
+ * detect_intel_iommu - VT-d 하드웨어가 있는지 판단하고 초기화 훅을 건다
+ *
+ * @return: 없음.
+ *
+ * x86 부팅에서 IOMMU 를 탐지하는 표준 진입점이며, 여러 IOMMU 구현
+ * (Intel, AMD, ...)이 차례로 불려 자기 하드웨어를 찾는다. 여기서 발견하면
+ * x86_init.iommu.iommu_init 에 자기 초기화 함수를 꽂아, 나중에 커널이
+ * 그것을 부르게 한다.
+ *
+ * 순서가 중요하다.
+ *   1) 표를 찾고 각 DRHD 를 실제로 읽어 검증한다 — 표에 적혀 있다고 해서
+ *      하드웨어가 있는 것은 아니다.
+ *   2) iommu_detected 를 세워 다른 IOMMU 구현이 중복 탐지하지 않게 한다.
+ *   3) pci_request_acs() — ACS(Access Control Services)를 켜 달라고 PCI
+ *      계층에 요청한다(코드 안 영어 주석). ACS 가 없으면 같은 스위치 아래
+ *      장치들이 IOMMU 를 거치지 않고 서로 통신할 수 있어, 그룹이 크게
+ *      묶여 격리가 무의미해진다. 이 요청은 PCI 열거 전에 해야 효과가 있다.
+ *   4) 초기화와 종료 훅을 등록한다.
+ *   5) 표 매핑을 놓는다 — 실제 파싱은 나중에 parse_dmar_table 이 다시 얻어서 한다.
+ *
+ * dmar_disabled 여도 dmar_platform_optin() 이면 탐지를 진행하는 것을
+ * 눈여겨볼 것: 펌웨어가 IOMMU 사용을 전제로 설계되었다고 신고한 경우,
+ * 관리자 설정을 나중에 뒤집을 수 있도록 여지를 남겨 둔다.
+ *
+ * 실행 컨텍스트: 부팅 극초기(__init). 단일 스레드.
+ */
 void __init detect_intel_iommu(void)
 {
-	int ret;
-	struct dmar_res_callback validate_drhd_cb = {
-		.cb[ACPI_DMAR_TYPE_HARDWARE_UNIT] = &dmar_validate_one_drhd,
-		.ignore_unhandled = true,
+	int ret;	/* [한국어] 결과 */
+	struct dmar_res_callback validate_drhd_cb = {	/* [한국어] DRHD 만 검증하는 콜백 묶음 */
+		.cb[ACPI_DMAR_TYPE_HARDWARE_UNIT] = &dmar_validate_one_drhd,	/* [한국어] 유닛 주소에 실제로 하드웨어가 있는지 확인한다 */
+		.ignore_unhandled = true,	/* [한국어] 다른 종류의 항목은 조용히 건너뛴다 — 지금은 하드웨어 존재만 확인하면 된다 */
 	};
 
-	down_write(&dmar_global_lock);
-	ret = dmar_table_detect();
-	if (!ret)
-		ret = dmar_walk_dmar_table((struct acpi_table_dmar *)dmar_tbl,
-					   &validate_drhd_cb);
-	if (!ret && !no_iommu && !iommu_detected &&
-	    (!dmar_disabled || dmar_platform_optin())) {
-		iommu_detected = 1;
+	down_write(&dmar_global_lock);	/* [한국어] 전역 상태를 바꾸는 구간 */
+	ret = dmar_table_detect();	/* [한국어] 표를 찾아 매핑한다 */
+	if (!ret)	/* [한국어] 있으면 */
+		ret = dmar_walk_dmar_table((struct acpi_table_dmar *)dmar_tbl,	/* [한국어] 각 DRHD 를 실제로 읽어 검증한다 — 표에 적혀 있다고 하드웨어가 있는 것은 아니다 */
+					   &validate_drhd_cb);	/* [한국어] 검증 콜백으로 */
+	if (!ret && !no_iommu && !iommu_detected &&	/* [한국어] 유효한 하드웨어가 있고 아직 다른 IOMMU 가 탐지되지 않았으며 */
+	    (!dmar_disabled || dmar_platform_optin())) {	/* [한국어] 관리자가 끄지 않았거나 펌웨어가 사용을 전제로 신고했으면 */
+		iommu_detected = 1;	/* [한국어] 다른 IOMMU 구현이 중복 탐지하지 않게 표시한다 */
 		/* Make sure ACS will be enabled */
-		pci_request_acs();
+		pci_request_acs();	/* [한국어] ACS 를 켜 달라고 PCI 계층에 요청한다 (위 영어 주석). ACS 가 없으면 같은 스위치 아래 장치들이 IOMMU 를 거치지 않고 통신할 수 있어 그룹이 크게 묶인다. 이 요청은 PCI 열거 전에 해야 효과가 있다 */
 	}
 
-	if (!ret) {
-		x86_init.iommu.iommu_init = intel_iommu_init;
-		x86_platform.iommu_shutdown = intel_iommu_shutdown;
+	if (!ret) {	/* [한국어] 하드웨어가 있으면 */
+		x86_init.iommu.iommu_init = intel_iommu_init;	/* [한국어] 나중에 커널이 부를 초기화 함수를 꽂는다 */
+		x86_platform.iommu_shutdown = intel_iommu_shutdown;	/* [한국어] 종료 훅도 */
 	}
 
-	if (dmar_tbl) {
-		acpi_put_table(dmar_tbl);
-		dmar_tbl = NULL;
+	if (dmar_tbl) {	/* [한국어] 표를 매핑했으면 */
+		acpi_put_table(dmar_tbl);	/* [한국어] 놓는다. 실제 파싱은 나중에 parse_dmar_table 이 다시 얻어서 한다 */
+		dmar_tbl = NULL;	/* [한국어] 두 번 놓지 않게 */
 	}
-	up_write(&dmar_global_lock);
+	up_write(&dmar_global_lock);	/* [한국어] 락 해제 */
 }
 
+/*
+ * [한국어]
+ * unmap_iommu - 유닛의 레지스터 매핑과 예약을 놓는다
+ *
+ * @iommu: 대상 유닛.
+ * @return: 없음.
+ *
+ * map_iommu 의 역순: 매핑을 먼저 풀고 예약을 놓는다. 반대로 하면 예약이
+ * 풀린 영역을 아직 매핑한 채로 두는 짧은 구간이 생긴다.
+ *
+ * 실행 컨텍스트: 유닛 해제. 프로세스 컨텍스트.
+ */
 static void unmap_iommu(struct intel_iommu *iommu)
 {
-	iounmap(iommu->reg);
-	release_mem_region(iommu->reg_phys, iommu->reg_size);
+	iounmap(iommu->reg);	/* [한국어] 매핑을 먼저 풀고 */
+	release_mem_region(iommu->reg_phys, iommu->reg_size);	/* [한국어] 예약을 놓는다. 반대로 하면 예약이 풀린 영역을 아직 매핑한 채로 두는 구간이 생긴다 */
 }
 
 /**
@@ -1729,76 +1810,104 @@ static void unmap_iommu(struct intel_iommu *iommu)
  * Memory map the iommu's registers.  Start w/ a single page, and
  * possibly expand if that turns out to be insufficent.
  */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어)
+ * map_iommu - 유닛의 레지스터 영역을 매핑하고 능력을 읽는다
+ *
+ * @iommu: 채울 유닛 구조체. @drhd: 그 주소와 크기를 알려 주는 DRHD 항목.
+ * @return: 0 성공, -EBUSY/-ENOMEM/-EINVAL.
+ *
+ * 두 번 매핑할 수 있다는 것이 이 함수의 특징이다(위 영어 kernel-doc).
+ * 얼마나 매핑해야 하는지가 레지스터 안에 적혀 있다는 순환 때문이다.
+ *   1) 우선 DRHD 가 알려 준 크기로 매핑한다.
+ *   2) 능력 레지스터를 읽는다.
+ *   3) 그 값에서 폴트 기록 레지스터와 IOTLB 레지스터가 어디까지 뻗는지
+ *      계산한다. 그것이 처음 매핑한 크기를 넘으면 다시 매핑한다.
+ * 재매핑할 때 예약(request_mem_region)도 함께 다시 잡는다 — 크기가 달라진
+ * 예약을 그대로 둘 수 없기 때문이다.
+ *
+ * 능력이 전부 1 이면 그 주소에 하드웨어가 없다는 뜻이다
+ * (dmar_validate_one_drhd 와 같은 판별). 검증을 통과했는데 여기서 걸리는
+ * 경우는 그 사이에 하드웨어 상태가 바뀐 것이다.
+ *
+ * 확장 명령 능력(ecmdcap)은 지원하는 유닛에서만 읽는다. 지원하지 않는
+ * 유닛에서 그 레지스터를 읽으면 정의되지 않은 값이 나온다.
+ *
+ * 정리 라벨이 unmap → release → out 순으로 이어져, 어느 단계에서
+ * 실패했든 그때까지 잡은 것만 정확히 되돌린다.
+ *
+ * 실행 컨텍스트: 유닛 생성. 프로세스 컨텍스트.
+ */
 static int map_iommu(struct intel_iommu *iommu, struct dmar_drhd_unit *drhd)
 {
-	u64 phys_addr = drhd->reg_base_addr;
-	int map_size, err=0;
+	u64 phys_addr = drhd->reg_base_addr;	/* [한국어] 레지스터의 물리 주소 */
+	int map_size, err=0;	/* [한국어] 필요한 매핑 크기와 결과 */
 
-	iommu->reg_phys = phys_addr;
-	iommu->reg_size = drhd->reg_size;
+	iommu->reg_phys = phys_addr;	/* [한국어] 유닛에 기록한다 */
+	iommu->reg_size = drhd->reg_size;	/* [한국어] 표가 알려 준 크기로 시작한다 */
 
-	if (!request_mem_region(iommu->reg_phys, iommu->reg_size, iommu->name)) {
-		pr_err("Can't reserve memory\n");
-		err = -EBUSY;
-		goto out;
+	if (!request_mem_region(iommu->reg_phys, iommu->reg_size, iommu->name)) {	/* [한국어] 이 MMIO 영역을 예약한다 — 다른 드라이버가 같은 영역을 쓰지 못하게 */
+		pr_err("Can't reserve memory\n");	/* [한국어] 이미 누가 쓰고 있다 */
+		err = -EBUSY;	/* [한국어] 실패 */
+		goto out;	/* [한국어] 아무것도 잡지 않았으므로 그냥 나간다 */
 	}
 
-	iommu->reg = ioremap(iommu->reg_phys, iommu->reg_size);
-	if (!iommu->reg) {
-		pr_err("Can't map the region\n");
-		err = -ENOMEM;
-		goto release;
+	iommu->reg = ioremap(iommu->reg_phys, iommu->reg_size);	/* [한국어] 커널 가상 주소로 매핑한다 */
+	if (!iommu->reg) {	/* [한국어] 매핑 실패 */
+		pr_err("Can't map the region\n");	/* [한국어] 기록하고 */
+		err = -ENOMEM;	/* [한국어] 실패 */
+		goto release;	/* [한국어] 예약을 되돌린다 */
 	}
 
-	iommu->cap = readq(iommu->reg + DMAR_CAP_REG);
-	iommu->ecap = readq(iommu->reg + DMAR_ECAP_REG);
+	iommu->cap = readq(iommu->reg + DMAR_CAP_REG);	/* [한국어] 능력 레지스터를 읽어 둔다. 이후 모든 판단의 근거가 된다 */
+	iommu->ecap = readq(iommu->reg + DMAR_ECAP_REG);	/* [한국어] 확장 능력도 */
 
-	if (iommu->cap == (uint64_t)-1 && iommu->ecap == (uint64_t)-1) {
-		err = -EINVAL;
-		warn_invalid_dmar(phys_addr, " returns all ones");
-		goto unmap;
+	if (iommu->cap == (uint64_t)-1 && iommu->ecap == (uint64_t)-1) {	/* [한국어] 전부 1 이면 그 주소에 하드웨어가 없다 */
+		err = -EINVAL;	/* [한국어] 쓸 수 없다 */
+		warn_invalid_dmar(phys_addr, " returns all ones");	/* [한국어] 펌웨어 버그로 기록 */
+		goto unmap;	/* [한국어] 매핑과 예약을 되돌린다 */
 	}
 
 	/* the registers might be more than one page */
-	map_size = max_t(int, ecap_max_iotlb_offset(iommu->ecap),
-			 cap_max_fault_reg_offset(iommu->cap));
-	map_size = VTD_PAGE_ALIGN(map_size);
-	if (map_size > iommu->reg_size) {
-		iounmap(iommu->reg);
-		release_mem_region(iommu->reg_phys, iommu->reg_size);
-		iommu->reg_size = map_size;
-		if (!request_mem_region(iommu->reg_phys, iommu->reg_size,
-					iommu->name)) {
-			pr_err("Can't reserve memory\n");
-			err = -EBUSY;
-			goto out;
+	map_size = max_t(int, ecap_max_iotlb_offset(iommu->ecap),	/* [한국어] IOTLB 레지스터가 어디까지 뻗는지와 (위 영어 주석) */
+			 cap_max_fault_reg_offset(iommu->cap));	/* [한국어] 폴트 기록 레지스터가 어디까지 뻗는지 중 큰 쪽 */
+	map_size = VTD_PAGE_ALIGN(map_size);	/* [한국어] 페이지 단위로 올림 */
+	if (map_size > iommu->reg_size) {	/* [한국어] 처음 매핑한 크기로 모자라면 */
+		iounmap(iommu->reg);	/* [한국어] 매핑을 풀고 */
+		release_mem_region(iommu->reg_phys, iommu->reg_size);	/* [한국어] 예약도 놓는다 — 크기가 달라진 예약을 그대로 둘 수 없다 */
+		iommu->reg_size = map_size;	/* [한국어] 새 크기로 */
+		if (!request_mem_region(iommu->reg_phys, iommu->reg_size,	/* [한국어] 다시 예약하고 */
+					iommu->name)) {	/* [한국어] 같은 이름으로 */
+			pr_err("Can't reserve memory\n");	/* [한국어] 실패하면 */
+			err = -EBUSY;	/* [한국어] 오류 */
+			goto out;	/* [한국어] 이미 다 놓았으므로 그냥 나간다 */
 		}
-		iommu->reg = ioremap(iommu->reg_phys, iommu->reg_size);
-		if (!iommu->reg) {
-			pr_err("Can't map the region\n");
-			err = -ENOMEM;
-			goto release;
-		}
-	}
-
-	if (cap_ecmds(iommu->cap)) {
-		int i;
-
-		for (i = 0; i < DMA_MAX_NUM_ECMDCAP; i++) {
-			iommu->ecmdcap[i] = readq(iommu->reg + DMAR_ECCAP_REG +
-						  i * DMA_ECMD_REG_STEP);
+		iommu->reg = ioremap(iommu->reg_phys, iommu->reg_size);	/* [한국어] 다시 매핑한다 */
+		if (!iommu->reg) {	/* [한국어] 실패하면 */
+			pr_err("Can't map the region\n");	/* [한국어] 기록하고 */
+			err = -ENOMEM;	/* [한국어] 오류 */
+			goto release;	/* [한국어] 예약을 되돌린다 */
 		}
 	}
 
-	err = 0;
-	goto out;
+	if (cap_ecmds(iommu->cap)) {	/* [한국어] 확장 명령을 지원하는 유닛에서만 */
+		int i;	/* [한국어] 워드 순회 */
 
-unmap:
-	iounmap(iommu->reg);
-release:
-	release_mem_region(iommu->reg_phys, iommu->reg_size);
-out:
-	return err;
+		for (i = 0; i < DMA_MAX_NUM_ECMDCAP; i++) {	/* [한국어] 능력 비트맵을 워드 단위로 */
+			iommu->ecmdcap[i] = readq(iommu->reg + DMAR_ECCAP_REG +	/* [한국어] 읽어 둔다. 지원하지 않는 유닛에서 이 레지스터를 읽으면 정의되지 않은 값이 나온다 */
+						  i * DMA_ECMD_REG_STEP);	/* [한국어] 일정 간격으로 놓여 있다 */
+		}
+	}
+
+	err = 0;	/* [한국어] 여기까지 오면 성공 */
+	goto out;	/* [한국어] 정리 없이 나간다 */
+
+unmap:	/* [한국어] 능력이 전부 1 이었던 경로 */
+	iounmap(iommu->reg);	/* [한국어] 매핑을 푼다 */
+release:	/* [한국어] 매핑 실패가 합류 */
+	release_mem_region(iommu->reg_phys, iommu->reg_size);	/* [한국어] 예약을 놓는다 */
+out:	/* [한국어] 모든 경로가 합류 */
+	return err;	/* [한국어] 결과 */
 }
 
 static int alloc_iommu(struct dmar_drhd_unit *drhd)
