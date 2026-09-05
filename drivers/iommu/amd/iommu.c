@@ -1274,31 +1274,55 @@ static bool check_device(struct device *dev)
 	return true;	/* [한국어] 이 드라이버가 다룰 수 있는 장치 */
 }
 
+/*
+ * [한국어]
+ * iommu_init_device - 장치의 IOMMU 상태를 만들고 능력을 읽어 둔다
+ *
+ * @iommu: 담당 유닛.
+ * @dev: 대상 장치.
+ * @return: 0 성공, 음수면 실패.
+ *
+ * 두 개의 원 주석이 이 함수의 두 가지 미묘함을 짚는다.
+ *
+ * 하나는 순서다. dev_iommu_priv_set 이 setup_aliases 보다 먼저여야 한다 —
+ * 별칭 복제가 원본의 상태를 dev_iommu_priv_get 으로 얻기 때문이다.
+ *
+ * 다른 하나는 능력을 언제 읽느냐다. force_isolation 옵션이 켜져 있으면
+ * 능력을 아예 읽지 않아서, 이후 코드가 그 장치를 PASID 도 ATS 도 없는
+ * 장치로 다루게 된다. 원 주석대로 "잘못된 주소로의 DMA 를 디버깅"할 때
+ * 장치를 강제로 변환 모드에 묶어 두기 위한 것이다.
+ *
+ * 조건이 OR 인 것에 유의: 기본이 패스스루면 격리 강제와 무관하게 능력을
+ * 읽는다. 패스스루 도메인에서는 어차피 변환하지 않으므로 강제할 것이 없다.
+ *
+ * 호출 체인:
+ *   amd_iommu_probe_device() → [이 함수] → find_dev_data() → setup_aliases()
+ */
 static int iommu_init_device(struct amd_iommu *iommu, struct device *dev)
 {
-	struct iommu_dev_data *dev_data;
-	int devid, sbdf;
+	struct iommu_dev_data *dev_data;	/* [한국어] 장치 상태 */
+	int devid, sbdf;	/* [한국어] 장치 id 와 합친 키 */
 
-	if (dev_iommu_priv_get(dev))
-		return 0;
+	if (dev_iommu_priv_get(dev))	/* [한국어] 이미 초기화됐으면 */
+		return 0;	/* [한국어] 두 번 하지 않는다 */
 
-	sbdf = get_device_sbdf_id(dev);
-	if (sbdf < 0)
-		return sbdf;
+	sbdf = get_device_sbdf_id(dev);	/* [한국어] 식별할 수 있는가 */
+	if (sbdf < 0)	/* [한국어] 없으면 */
+		return sbdf;	/* [한국어] 다룰 수 없는 장치 */
 
-	devid = PCI_SBDF_TO_DEVID(sbdf);
-	dev_data = find_dev_data(iommu, devid);
-	if (!dev_data)
-		return -ENOMEM;
+	devid = PCI_SBDF_TO_DEVID(sbdf);	/* [한국어] BDF 만 꺼낸다 */
+	dev_data = find_dev_data(iommu, devid);	/* [한국어] 상태를 찾거나 만든다 */
+	if (!dev_data)	/* [한국어] 메모리 부족 */
+		return -ENOMEM;	/* [한국어] 실패 */
 
-	dev_data->dev = dev;
+	dev_data->dev = dev;	/* [한국어] 커널 장치 객체를 기억한다 */
 
 	/*
 	 * The dev_iommu_priv_set() needes to be called before setup_aliases.
 	 * Otherwise, subsequent call to dev_iommu_priv_get() will fail.
 	 */
-	dev_iommu_priv_set(dev, dev_data);
-	setup_aliases(iommu, dev);
+	dev_iommu_priv_set(dev, dev_data);	/* [한국어] (원 주석: setup_aliases 보다 먼저여야 한다 — 별칭 복제가 이 값을 읽는다) */
+	setup_aliases(iommu, dev);	/* [한국어] 별칭을 PCI 에 알리고 DTE 를 복제한다 */
 
 	/*
 	 * By default we use passthrough mode for IOMMUv2 capable device.
@@ -1306,29 +1330,49 @@ static int iommu_init_device(struct amd_iommu *iommu, struct device *dev)
 	 * invalid address), we ignore the capability for the device so
 	 * it'll be forced to go into translation mode.
 	 */
-	if ((iommu_default_passthrough() || !amd_iommu_force_isolation) &&
-	    dev_is_pci(dev) && amd_iommu_gt_ppr_supported()) {
-		dev_data->flags = pdev_get_caps(to_pci_dev(dev));
+	if ((iommu_default_passthrough() || !amd_iommu_force_isolation) &&	/* [한국어] (원 주석: 격리 강제 옵션이면 능력을 무시해 변환 모드로 묶는다) */
+	    dev_is_pci(dev) && amd_iommu_gt_ppr_supported()) {	/* [한국어] PCI 장치이고 SVA 전제가 갖춰졌을 때만 */
+		dev_data->flags = pdev_get_caps(to_pci_dev(dev));	/* [한국어] 능력을 읽어 둔다. 읽지 않으면 이후 코드가 능력 없는 장치로 다룬다 */
 	}
 
-	return 0;
+	return 0;	/* [한국어] 초기화 완료 */
 }
 
+/*
+ * [한국어]
+ * iommu_ignore_device - 이 장치를 IOMMU 가 모르는 것으로 만든다
+ *
+ * @iommu: 담당 유닛.
+ * @dev: 대상 장치.
+ *
+ * DTE 를 0 으로 밀고 rlookup 에서도 지운다. 그 결과 이 장치의 요청은
+ * "유효하지 않은 DTE" 오류가 되어 차단된다.
+ *
+ * amd_iommu_make_clear_dte 와 대비된다. 그쪽은 V 를 남겨 "아는 장치이되
+ * 차단"으로 만들지만, 여기는 아예 모르는 장치로 만든다 — 그래서 이벤트
+ * 로그에 오류가 쌓인다는 차이가 있다.
+ *
+ * 별칭까지 복제하는 이유: 별칭 항목이 남아 있으면 그 이름으로 오는 요청이
+ * 여전히 통과한다.
+ *
+ * 호출 체인:
+ *   probe 가 실패했거나 이 장치를 다루지 않기로 한 경로 → [이 함수]
+ */
 static void iommu_ignore_device(struct amd_iommu *iommu, struct device *dev)
 {
-	struct amd_iommu_pci_seg *pci_seg = iommu->pci_seg;
-	struct dev_table_entry *dev_table = get_dev_table(iommu);
-	int devid, sbdf;
+	struct amd_iommu_pci_seg *pci_seg = iommu->pci_seg;	/* [한국어] 조회 표가 있는 세그먼트 */
+	struct dev_table_entry *dev_table = get_dev_table(iommu);	/* [한국어] 장치 테이블 */
+	int devid, sbdf;	/* [한국어] 장치 id 와 합친 키 */
 
-	sbdf = get_device_sbdf_id(dev);
-	if (sbdf < 0)
-		return;
+	sbdf = get_device_sbdf_id(dev);	/* [한국어] 식별할 수 있는가 */
+	if (sbdf < 0)	/* [한국어] 없으면 */
+		return;	/* [한국어] 할 일이 없다 */
 
-	devid = PCI_SBDF_TO_DEVID(sbdf);
-	pci_seg->rlookup_table[devid] = NULL;
-	memset(&dev_table[devid], 0, sizeof(struct dev_table_entry));
+	devid = PCI_SBDF_TO_DEVID(sbdf);	/* [한국어] BDF */
+	pci_seg->rlookup_table[devid] = NULL;	/* [한국어] 담당 유닛 기록을 지운다 */
+	memset(&dev_table[devid], 0, sizeof(struct dev_table_entry));	/* [한국어] V 까지 지워 "모르는 장치"로 만든다 — 요청이 오류가 되어 차단된다 */
 
-	setup_aliases(iommu, dev);
+	setup_aliases(iommu, dev);	/* [한국어] 별칭 항목도 같게 만들지 않으면 그 이름으로 오는 요청이 통과한다 */
 }
 
 
@@ -1338,234 +1382,347 @@ static void iommu_ignore_device(struct amd_iommu *iommu, struct device *dev)
  *
  ****************************************************************************/
 
+/*
+ * [한국어]
+ * dump_dte_entry - 오류가 난 장치의 DTE 를 로그에 찍는다
+ *
+ * @iommu: 담당 유닛.
+ * @devid: 장치 id.
+ *
+ * 이벤트 로그가 "이 장치의 DTE 가 잘못됐다"고 보고했을 때, 실제로 무엇이
+ * 적혀 있는지 보여 준다. 해석하지 않고 네 워드를 원시값으로 내는 이유는
+ * 드라이버의 해석이 틀렸을 가능성을 의심하는 상황이기 때문이다.
+ */
 static void dump_dte_entry(struct amd_iommu *iommu, u16 devid)
 {
-	int i;
-	struct dev_table_entry dte;
-	struct iommu_dev_data *dev_data = find_dev_data(iommu, devid);
+	int i;	/* [한국어] 워드 순회 인덱스 */
+	struct dev_table_entry dte;	/* [한국어] 읽어 올 사본 */
+	struct iommu_dev_data *dev_data = find_dev_data(iommu, devid);	/* [한국어] 그 장치의 상태 */
 
-	get_dte256(iommu, dev_data, &dte);
+	get_dte256(iommu, dev_data, &dte);	/* [한국어] 일관된 사본을 얻는다 */
 
-	for (i = 0; i < 4; ++i)
-		pr_err("DTE[%d]: %016llx\n", i, dte.data[i]);
+	for (i = 0; i < 4; ++i)	/* [한국어] 네 워드를 */
+		pr_err("DTE[%d]: %016llx\n", i, dte.data[i]);	/* [한국어] 해석하지 않고 원시값으로 — 드라이버의 해석을 의심하는 상황이다 */
 }
 
+/*
+ * [한국어]
+ * dump_command - 하드웨어가 거부한 명령을 로그에 찍는다
+ *
+ * @phys_addr: 이벤트가 알려 준 명령의 물리 주소.
+ *
+ * 하드웨어가 잘못된 명령을 만나면 그 주소를 이벤트에 담아 보고한다.
+ * 그 주소를 커널 주소로 되돌려 내용을 찍는다.
+ *
+ * 이 상황은 대부분 드라이버 버그다 — 하드웨어가 이해하지 못하는 명령을
+ * 만들어 넣었다는 뜻이기 때문이다.
+ */
 static void dump_command(unsigned long phys_addr)
 {
-	struct iommu_cmd *cmd = iommu_phys_to_virt(phys_addr);
-	int i;
+	struct iommu_cmd *cmd = iommu_phys_to_virt(phys_addr);	/* [한국어] 이벤트가 알려 준 물리 주소를 커널 주소로 */
+	int i;	/* [한국어] 워드 순회 인덱스 */
 
-	for (i = 0; i < 4; ++i)
-		pr_err("CMD[%d]: %08x\n", i, cmd->data[i]);
+	for (i = 0; i < 4; ++i)	/* [한국어] 명령의 네 워드를 */
+		pr_err("CMD[%d]: %08x\n", i, cmd->data[i]);	/* [한국어] 그대로 찍는다. 대부분 드라이버가 잘못된 명령을 만든 경우다 */
 }
 
+/*
+ * [한국어]
+ * amd_iommu_report_rmp_hw_error - SNP 역매핑 테이블 접근 중의 하드웨어 오류를 보고한다
+ *
+ * @iommu: 오류를 보고한 유닛.
+ * @event: 이벤트 로그 항목.
+ *
+ * SNP 환경에서 하드웨어가 RMP(역매핑 테이블)를 읽다가 실패한 경우다.
+ * 게스트 메모리 보호의 핵심 자료구조라, 이 오류는 보호가 제대로 동작하지
+ * 않을 수 있다는 뜻이다.
+ *
+ * 장치를 찾았는지에 따라 두 갈래로 로그를 내는 구조가 이 파일의 이벤트
+ * 처리 전반에 공통이다. 장치를 찾으면 그 장치의 속도 제한을 쓰고(고장난
+ * 장치 하나가 로그를 채우지 못하게), 못 찾으면 전역 속도 제한을 쓴다.
+ *
+ * 참조 계수를 반드시 놓는 것에 유의: pci_get_domain_bus_and_slot 이
+ * 참조를 들고 돌아온다.
+ */
 static void amd_iommu_report_rmp_hw_error(struct amd_iommu *iommu, volatile u32 *event)
 {
-	struct iommu_dev_data *dev_data = NULL;
-	int devid, vmg_tag, flags;
-	struct pci_dev *pdev;
-	u64 spa;
+	struct iommu_dev_data *dev_data = NULL;	/* [한국어] 장치를 찾으면 그 상태 */
+	int devid, vmg_tag, flags;	/* [한국어] 장치 id, VM 그룹 태그, 플래그 */
+	struct pci_dev *pdev;	/* [한국어] 그 장치 */
+	u64 spa;	/* [한국어] 시스템 물리 주소 */
 
-	devid   = (event[0] >> EVENT_DEVID_SHIFT) & EVENT_DEVID_MASK;
-	vmg_tag = (event[1]) & 0xFFFF;
-	flags   = (event[1] >> EVENT_FLAGS_SHIFT) & EVENT_FLAGS_MASK;
-	spa     = ((u64)event[3] << 32) | (event[2] & 0xFFFFFFF8);
+	devid   = (event[0] >> EVENT_DEVID_SHIFT) & EVENT_DEVID_MASK;	/* [한국어] 요청을 낸 장치 */
+	vmg_tag = (event[1]) & 0xFFFF;	/* [한국어] 어느 게스트의 요청인지 */
+	flags   = (event[1] >> EVENT_FLAGS_SHIFT) & EVENT_FLAGS_MASK;	/* [한국어] 사건 플래그 */
+	spa     = ((u64)event[3] << 32) | (event[2] & 0xFFFFFFF8);	/* [한국어] 접근하려던 물리 주소. 하위 3비트는 다른 용도라 뗀다 */
 
-	pdev = pci_get_domain_bus_and_slot(iommu->pci_seg->id, PCI_BUS_NUM(devid),
-					   devid & 0xff);
-	if (pdev)
-		dev_data = dev_iommu_priv_get(&pdev->dev);
+	pdev = pci_get_domain_bus_and_slot(iommu->pci_seg->id, PCI_BUS_NUM(devid),	/* [한국어] id 로 실제 장치를 찾는다 */
+					   devid & 0xff);	/* [한국어] devfn */
+	if (pdev)	/* [한국어] 찾았으면 */
+		dev_data = dev_iommu_priv_get(&pdev->dev);	/* [한국어] 그 장치의 속도 제한을 쓸 수 있다 */
 
-	if (dev_data) {
-		if (__ratelimit(&dev_data->rs)) {
-			pci_err(pdev, "Event logged [RMP_HW_ERROR vmg_tag=0x%04x, spa=0x%llx, flags=0x%04x]\n",
+	if (dev_data) {	/* [한국어] 장치를 아는 경우 */
+		if (__ratelimit(&dev_data->rs)) {	/* [한국어] 장치별 속도 제한 — 하나가 로그를 채우지 못하게 */
+			pci_err(pdev, "Event logged [RMP_HW_ERROR vmg_tag=0x%04x, spa=0x%llx, flags=0x%04x]\n",	/* [한국어] 장치 이름과 함께 찍는다 */
 				vmg_tag, spa, flags);
 		}
 	} else {
-		pr_err_ratelimited("Event logged [RMP_HW_ERROR device=%04x:%02x:%02x.%x, vmg_tag=0x%04x, spa=0x%llx, flags=0x%04x]\n",
+		pr_err_ratelimited("Event logged [RMP_HW_ERROR device=%04x:%02x:%02x.%x, vmg_tag=0x%04x, spa=0x%llx, flags=0x%04x]\n",	/* [한국어] 모르는 장치면 전역 제한으로 id 만 찍는다 */
 			iommu->pci_seg->id, PCI_BUS_NUM(devid), PCI_SLOT(devid), PCI_FUNC(devid),
 			vmg_tag, spa, flags);
 	}
 
-	if (pdev)
-		pci_dev_put(pdev);
+	if (pdev)	/* [한국어] 참조를 들고 왔으면 */
+		pci_dev_put(pdev);	/* [한국어] 반드시 놓는다 */
 }
 
+/*
+ * [한국어]
+ * amd_iommu_report_rmp_fault - SNP 역매핑 검사에 걸린 접근을 보고한다
+ *
+ * @iommu: 보고한 유닛.
+ * @event: 이벤트 로그 항목.
+ *
+ * 하드웨어 오류가 아니라 정책 위반이다. 장치가 자기에게 배정되지 않은
+ * 게스트 페이지에 접근하려 했고 RMP 가 그것을 막았다는 뜻이다 — SNP 가
+ * 의도대로 동작한 경우다.
+ *
+ * 게스트 물리 주소(gpa)를 함께 찍는 이유: 어느 게스트의 어느 페이지를
+ * 건드렸는지가 원인 추적의 출발점이다.
+ */
 static void amd_iommu_report_rmp_fault(struct amd_iommu *iommu, volatile u32 *event)
 {
-	struct iommu_dev_data *dev_data = NULL;
-	int devid, flags_rmp, vmg_tag, flags;
-	struct pci_dev *pdev;
-	u64 gpa;
+	struct iommu_dev_data *dev_data = NULL;	/* [한국어] 장치 상태 */
+	int devid, flags_rmp, vmg_tag, flags;	/* [한국어] 장치 id, RMP 쪽 플래그, VM 태그, 사건 플래그 */
+	struct pci_dev *pdev;	/* [한국어] 그 장치 */
+	u64 gpa;	/* [한국어] 게스트 물리 주소 */
 
-	devid     = (event[0] >> EVENT_DEVID_SHIFT) & EVENT_DEVID_MASK;
-	flags_rmp = (event[0] >> EVENT_FLAGS_SHIFT) & 0xFF;
-	vmg_tag   = (event[1]) & 0xFFFF;
-	flags     = (event[1] >> EVENT_FLAGS_SHIFT) & EVENT_FLAGS_MASK;
-	gpa       = ((u64)event[3] << 32) | event[2];
+	devid     = (event[0] >> EVENT_DEVID_SHIFT) & EVENT_DEVID_MASK;	/* [한국어] 요청을 낸 장치 */
+	flags_rmp = (event[0] >> EVENT_FLAGS_SHIFT) & 0xFF;	/* [한국어] RMP 검사가 왜 실패했는지 */
+	vmg_tag   = (event[1]) & 0xFFFF;	/* [한국어] 어느 게스트인지 */
+	flags     = (event[1] >> EVENT_FLAGS_SHIFT) & EVENT_FLAGS_MASK;	/* [한국어] 사건 플래그 */
+	gpa       = ((u64)event[3] << 32) | event[2];	/* [한국어] 건드리려던 게스트 물리 주소 — 원인 추적의 출발점 */
 
-	pdev = pci_get_domain_bus_and_slot(iommu->pci_seg->id, PCI_BUS_NUM(devid),
-					   devid & 0xff);
-	if (pdev)
-		dev_data = dev_iommu_priv_get(&pdev->dev);
+	pdev = pci_get_domain_bus_and_slot(iommu->pci_seg->id, PCI_BUS_NUM(devid),	/* [한국어] 장치를 찾는다 */
+					   devid & 0xff);	/* [한국어] devfn */
+	if (pdev)	/* [한국어] 찾았으면 */
+		dev_data = dev_iommu_priv_get(&pdev->dev);	/* [한국어] 그 상태 */
 
-	if (dev_data) {
-		if (__ratelimit(&dev_data->rs)) {
-			pci_err(pdev, "Event logged [RMP_PAGE_FAULT vmg_tag=0x%04x, gpa=0x%llx, flags_rmp=0x%04x, flags=0x%04x]\n",
+	if (dev_data) {	/* [한국어] 장치를 아는 경우 */
+		if (__ratelimit(&dev_data->rs)) {	/* [한국어] 장치별 속도 제한 */
+			pci_err(pdev, "Event logged [RMP_PAGE_FAULT vmg_tag=0x%04x, gpa=0x%llx, flags_rmp=0x%04x, flags=0x%04x]\n",	/* [한국어] SNP 가 의도대로 접근을 막은 경우다 */
 				vmg_tag, gpa, flags_rmp, flags);
 		}
 	} else {
-		pr_err_ratelimited("Event logged [RMP_PAGE_FAULT device=%04x:%02x:%02x.%x, vmg_tag=0x%04x, gpa=0x%llx, flags_rmp=0x%04x, flags=0x%04x]\n",
+		pr_err_ratelimited("Event logged [RMP_PAGE_FAULT device=%04x:%02x:%02x.%x, vmg_tag=0x%04x, gpa=0x%llx, flags_rmp=0x%04x, flags=0x%04x]\n",	/* [한국어] 모르는 장치면 id 만 */
 			iommu->pci_seg->id, PCI_BUS_NUM(devid), PCI_SLOT(devid), PCI_FUNC(devid),
 			vmg_tag, gpa, flags_rmp, flags);
 	}
 
-	if (pdev)
-		pci_dev_put(pdev);
+	if (pdev)	/* [한국어] 참조를 */
+		pci_dev_put(pdev);	/* [한국어] 놓는다 */
 }
 
+/* [한국어] I(nterrupt) 비트가 없으면 메모리 접근이라는 뜻.
+ * 인터럽트 요청의 실패와 DMA 폴트를 구별하는 유일한 단서이며,
+ * 그 구별이 로그 억제 경로를 쓸지 정한다. */
 #define IS_IOMMU_MEM_TRANSACTION(flags)		\
 	(((flags) & EVENT_FLAG_I) == 0)
 
+/* [한국어] RW 비트가 서 있으면 쓰기 요청.
+ * report_iommu_fault 에 넘길 방향을 정하는 데 쓴다. */
 #define IS_WRITE_REQUEST(flags)			\
 	((flags) & EVENT_FLAG_RW)
 
+/*
+ * [한국어]
+ * amd_iommu_report_page_fault - 변환 실패를 코어에 보고하고 필요하면 로그에 남긴다
+ *
+ * @iommu: 보고한 유닛.
+ * @devid: 요청을 낸 장치.
+ * @domain_id: 그 요청이 속한 도메인.
+ * @address: 실패한 주소.
+ * @flags: 사건 플래그(읽기/쓰기, 인터럽트 여부).
+ *
+ * 이 파일에서 가장 자주 실행되는 오류 경로다. 잘못 동작하는 드라이버는
+ * 초당 수천 건의 폴트를 낼 수 있어, 로그를 어떻게 다루느냐가 시스템의
+ * 생사를 가른다.
+ *
+ * 원 주석이 밝히는 우회가 그 대책이다: DMA 폴트라면 report_iommu_fault 에
+ * 먼저 넘겨, 상위 계층(예: 그래픽 드라이버)이 그것을 처리했다고 답하면
+ * 아예 찍지 않는다. 그 계층이 이미 원인을 알고 있는 경우다.
+ *
+ * 인터럽트 폴트는 그 우회를 쓰지 않는다 — I 비트가 서 있으면 인터럽트
+ * 요청의 실패이고, 그것을 처리할 상위 계층이 없다.
+ *
+ * 도메인이 NULL 인 경우를 따로 보고하는 이유: 그것은 장치가 어디에도
+ * 붙지 않은 채 DMA 를 냈다는 뜻으로, 매핑 문제가 아니라 배선 문제다.
+ *
+ * 호출 체인:
+ *   iommu_print_event() → [이 함수] → report_iommu_fault()
+ */
 static void amd_iommu_report_page_fault(struct amd_iommu *iommu,
 					u16 devid, u16 domain_id,
 					u64 address, int flags)
 {
-	struct iommu_dev_data *dev_data = NULL;
-	struct pci_dev *pdev;
+	struct iommu_dev_data *dev_data = NULL;	/* [한국어] 장치 상태 */
+	struct pci_dev *pdev;	/* [한국어] 그 장치 */
 
-	pdev = pci_get_domain_bus_and_slot(iommu->pci_seg->id, PCI_BUS_NUM(devid),
-					   devid & 0xff);
-	if (pdev)
-		dev_data = dev_iommu_priv_get(&pdev->dev);
+	pdev = pci_get_domain_bus_and_slot(iommu->pci_seg->id, PCI_BUS_NUM(devid),	/* [한국어] id 로 장치를 찾는다 */
+					   devid & 0xff);	/* [한국어] devfn */
+	if (pdev)	/* [한국어] 찾았으면 */
+		dev_data = dev_iommu_priv_get(&pdev->dev);	/* [한국어] 상위 계층에 넘길 수 있다 */
 
-	if (dev_data) {
+	if (dev_data) {	/* [한국어] 장치를 아는 경우 */
 		/*
 		 * If this is a DMA fault (for which the I(nterrupt)
 		 * bit will be unset), allow report_iommu_fault() to
 		 * prevent logging it.
 		 */
-		if (IS_IOMMU_MEM_TRANSACTION(flags)) {
+		if (IS_IOMMU_MEM_TRANSACTION(flags)) {	/* [한국어] (원 주석: DMA 폴트면 상위 계층이 로그를 억제할 수 있게 한다) */
 			/* Device not attached to domain properly */
-			if (dev_data->domain == NULL) {
-				pr_err_ratelimited("Event logged [Device not attached to domain properly]\n");
-				pr_err_ratelimited("  device=%04x:%02x:%02x.%x domain=0x%04x\n",
+			if (dev_data->domain == NULL) {	/* [한국어] (원 주석: 장치가 도메인에 제대로 붙지 않았다) */
+				pr_err_ratelimited("Event logged [Device not attached to domain properly]\n");	/* [한국어] 매핑 문제가 아니라 배선 문제다 */
+				pr_err_ratelimited("  device=%04x:%02x:%02x.%x domain=0x%04x\n",	/* [한국어] 어느 장치인지 함께 */
 						   iommu->pci_seg->id, PCI_BUS_NUM(devid), PCI_SLOT(devid),
 						   PCI_FUNC(devid), domain_id);
-				goto out;
+				goto out;	/* [한국어] 더 처리할 것이 없다 */
 			}
 
-			if (!report_iommu_fault(&dev_data->domain->domain,
-						&pdev->dev, address,
-						IS_WRITE_REQUEST(flags) ?
-							IOMMU_FAULT_WRITE :
-							IOMMU_FAULT_READ))
-				goto out;
+			if (!report_iommu_fault(&dev_data->domain->domain,	/* [한국어] 상위 계층에 먼저 넘긴다 */
+						&pdev->dev, address,	/* [한국어] 어느 장치의 어느 주소인지 */
+						IS_WRITE_REQUEST(flags) ?	/* [한국어] 읽기인지 */
+							IOMMU_FAULT_WRITE :	/* [한국어] 쓰기인지 */
+							IOMMU_FAULT_READ))	/* [한국어] 코어 형식으로 알린다 */
+				goto out;	/* [한국어] 상위 계층이 처리했다면 찍지 않는다 — 이미 원인을 아는 경우다 */
 		}
 
-		if (__ratelimit(&dev_data->rs)) {
-			pci_err(pdev, "Event logged [IO_PAGE_FAULT domain=0x%04x address=0x%llx flags=0x%04x]\n",
+		if (__ratelimit(&dev_data->rs)) {	/* [한국어] 아무도 처리하지 않았으면 장치별 제한으로 */
+			pci_err(pdev, "Event logged [IO_PAGE_FAULT domain=0x%04x address=0x%llx flags=0x%04x]\n",	/* [한국어] 도메인, 주소, 플래그를 함께 */
 				domain_id, address, flags);
 		}
 	} else {
-		pr_err_ratelimited("Event logged [IO_PAGE_FAULT device=%04x:%02x:%02x.%x domain=0x%04x address=0x%llx flags=0x%04x]\n",
+		pr_err_ratelimited("Event logged [IO_PAGE_FAULT device=%04x:%02x:%02x.%x domain=0x%04x address=0x%llx flags=0x%04x]\n",	/* [한국어] 모르는 장치면 전역 제한으로 */
 			iommu->pci_seg->id, PCI_BUS_NUM(devid), PCI_SLOT(devid), PCI_FUNC(devid),
 			domain_id, address, flags);
 	}
 
 out:
-	if (pdev)
-		pci_dev_put(pdev);
+	if (pdev)	/* [한국어] 참조를 */
+		pci_dev_put(pdev);	/* [한국어] 놓는다 */
 }
 
+/*
+ * [한국어]
+ * iommu_print_event - 이벤트 로그 항목 하나를 해석해 보고한다
+ *
+ * @iommu: 보고한 유닛.
+ * @__evt: 로그 항목.
+ *
+ * 하드웨어가 남긴 원시 항목을 사람이 읽을 수 있는 형태로 바꾼다. 종류마다
+ * 필드의 의미가 달라 switch 로 갈린다.
+ *
+ * 맨 앞의 retry 루프가 하드웨어 결함 대응이다. 인터럽트가 항목이 메모리에
+ * 쓰이기 전에 도착할 수 있어, 종류가 0(=아직 안 쓰임)인 동안 짧게 기다린다.
+ * 상한에 닿으면 포기하고 알린다.
+ *
+ * IO_FAULT 만 switch 앞에서 따로 처리하는 이유: 가장 흔한 종류이고,
+ * 상위 계층에 넘겨 로그를 억제하는 특별한 경로가 있기 때문이다.
+ *
+ * pasid 필드가 두 조각으로 나뉘어 있는 것도 눈에 띈다. 도메인 id 가 20비트로
+ * 늘면서 자리가 흩어졌고, 같은 자리를 종류에 따라 도메인 id 로도 PASID 로도
+ * 읽는다.
+ *
+ * 실행 컨텍스트: 인터럽트 스레드.
+ *
+ * 호출 체인:
+ *   iommu_poll_events() → [이 함수] → amd_iommu_report_page_fault()
+ */
 static void iommu_print_event(struct amd_iommu *iommu, void *__evt)
 {
-	struct device *dev = iommu->iommu.dev;
-	int type, devid, flags, tag;
-	volatile u32 *event = __evt;
-	int count = 0;
-	u64 address, ctrl;
-	u32 pasid;
+	struct device *dev = iommu->iommu.dev;	/* [한국어] 로그에 쓸 장치 */
+	int type, devid, flags, tag;	/* [한국어] 사건 종류, 장치, 플래그, PPR 태그 */
+	volatile u32 *event = __evt;	/* [한국어] 하드웨어가 쓰는 메모리라 volatile */
+	int count = 0;	/* [한국어] 도착을 기다린 횟수 */
+	u64 address, ctrl;	/* [한국어] 사건 주소와 제어 레지스터 */
+	u32 pasid;	/* [한국어] 도메인 id 또는 PASID — 같은 자리를 종류에 따라 달리 읽는다 */
 
 retry:
-	type    = (event[1] >> EVENT_TYPE_SHIFT)  & EVENT_TYPE_MASK;
-	devid   = (event[0] >> EVENT_DEVID_SHIFT) & EVENT_DEVID_MASK;
-	pasid   = (event[0] & EVENT_DOMID_MASK_HI) |
-		  (event[1] & EVENT_DOMID_MASK_LO);
-	flags   = (event[1] >> EVENT_FLAGS_SHIFT) & EVENT_FLAGS_MASK;
-	address = (u64)(((u64)event[3]) << 32) | event[2];
-	ctrl    = readq(iommu->mmio_base + MMIO_CONTROL_OFFSET);
+	type    = (event[1] >> EVENT_TYPE_SHIFT)  & EVENT_TYPE_MASK;	/* [한국어] 사건 종류 */
+	devid   = (event[0] >> EVENT_DEVID_SHIFT) & EVENT_DEVID_MASK;	/* [한국어] 요청을 낸 장치 */
+	pasid   = (event[0] & EVENT_DOMID_MASK_HI) |	/* [한국어] 상위 4비트와 */
+		  (event[1] & EVENT_DOMID_MASK_LO);	/* [한국어] 하위 16비트 — 도메인 id 가 20비트로 늘면서 자리가 흩어졌다 */
+	flags   = (event[1] >> EVENT_FLAGS_SHIFT) & EVENT_FLAGS_MASK;	/* [한국어] 사건 플래그 */
+	address = (u64)(((u64)event[3]) << 32) | event[2];	/* [한국어] 사건이 난 주소 */
+	ctrl    = readq(iommu->mmio_base + MMIO_CONTROL_OFFSET);	/* [한국어] 당시 설정을 함께 남기기 위해 */
 
-	if (type == 0) {
+	if (type == 0) {	/* [한국어] (원 주석: errata 에 걸렸는가) 종류 0 은 아직 안 쓰인 항목이다 */
 		/* Did we hit the erratum? */
-		if (++count == LOOP_TIMEOUT) {
-			pr_err("No event written to event log\n");
-			return;
+		if (++count == LOOP_TIMEOUT) {	/* [한국어] 너무 오래 기다렸으면 */
+			pr_err("No event written to event log\n");	/* [한국어] 인터럽트만 오고 항목이 오지 않았다 */
+			return;	/* [한국어] 포기 */
 		}
-		udelay(1);
-		goto retry;
+		udelay(1);	/* [한국어] 짧게 기다린다 — 인터럽트가 쓰기보다 먼저 도착할 수 있다 */
+		goto retry;	/* [한국어] 다시 읽는다 */
 	}
 
-	if (type == EVENT_TYPE_IO_FAULT) {
-		amd_iommu_report_page_fault(iommu, devid, pasid, address, flags);
-		return;
+	if (type == EVENT_TYPE_IO_FAULT) {	/* [한국어] 가장 흔한 종류라 switch 앞에서 따로 */
+		amd_iommu_report_page_fault(iommu, devid, pasid, address, flags);	/* [한국어] 상위 계층에 넘겨 로그를 억제할 수 있는 특별한 경로가 있다 */
+		return;	/* [한국어] 처리 완료 */
 	}
 
-	switch (type) {
-	case EVENT_TYPE_ILL_DEV:
-		dev_err(dev, "Event logged [ILLEGAL_DEV_TABLE_ENTRY device=%04x:%02x:%02x.%x pasid=0x%05x address=0x%llx flags=0x%04x]\n",
+	switch (type) {	/* [한국어] 나머지 종류들 */
+	case EVENT_TYPE_ILL_DEV:	/* [한국어] DTE 가 유효하지 않은 장치의 요청 */
+		dev_err(dev, "Event logged [ILLEGAL_DEV_TABLE_ENTRY device=%04x:%02x:%02x.%x pasid=0x%05x address=0x%llx flags=0x%04x]\n",	/* [한국어] 대개 장치가 도메인에 붙지 않은 채 DMA 를 냈다는 뜻 */
 			iommu->pci_seg->id, PCI_BUS_NUM(devid), PCI_SLOT(devid), PCI_FUNC(devid),
 			pasid, address, flags);
-		dev_err(dev, "Control Reg : 0x%llx\n", ctrl);
-		dump_dte_entry(iommu, devid);
-		break;
-	case EVENT_TYPE_DEV_TAB_ERR:
-		dev_err(dev, "Event logged [DEV_TAB_HARDWARE_ERROR device=%04x:%02x:%02x.%x "
+		dev_err(dev, "Control Reg : 0x%llx\n", ctrl);	/* [한국어] 당시 설정도 함께 — 어떤 기능이 켜져 있었는지가 단서가 된다 */
+		dump_dte_entry(iommu, devid);	/* [한국어] 실제로 무엇이 적혀 있었는지 원시값으로 */
+		break;	/* [한국어] 다음 */
+	case EVENT_TYPE_DEV_TAB_ERR:	/* [한국어] 장치 테이블을 읽다가 하드웨어 오류 */
+		dev_err(dev, "Event logged [DEV_TAB_HARDWARE_ERROR device=%04x:%02x:%02x.%x "	/* [한국어] 메모리 오류이거나 표 주소가 잘못됐다 */
 			"address=0x%llx flags=0x%04x]\n",
 			iommu->pci_seg->id, PCI_BUS_NUM(devid), PCI_SLOT(devid), PCI_FUNC(devid),
 			address, flags);
 		break;
-	case EVENT_TYPE_PAGE_TAB_ERR:
-		dev_err(dev, "Event logged [PAGE_TAB_HARDWARE_ERROR device=%04x:%02x:%02x.%x pasid=0x%04x address=0x%llx flags=0x%04x]\n",
+	case EVENT_TYPE_PAGE_TAB_ERR:	/* [한국어] 페이지 테이블을 읽다가 하드웨어 오류 */
+		dev_err(dev, "Event logged [PAGE_TAB_HARDWARE_ERROR device=%04x:%02x:%02x.%x pasid=0x%04x address=0x%llx flags=0x%04x]\n",	/* [한국어] 같은 성격의 오류 */
 			iommu->pci_seg->id, PCI_BUS_NUM(devid), PCI_SLOT(devid), PCI_FUNC(devid),
 			pasid, address, flags);
 		break;
-	case EVENT_TYPE_ILL_CMD:
-		dev_err(dev, "Event logged [ILLEGAL_COMMAND_ERROR address=0x%llx]\n", address);
-		dump_command(address);
+	case EVENT_TYPE_ILL_CMD:	/* [한국어] 명령 버퍼에 잘못된 명령이 들어왔다 */
+		dev_err(dev, "Event logged [ILLEGAL_COMMAND_ERROR address=0x%llx]\n", address);	/* [한국어] 대부분 드라이버 버그다 */
+		dump_command(address);	/* [한국어] 그 명령의 내용을 찍는다 */
 		break;
-	case EVENT_TYPE_CMD_HARD_ERR:
-		dev_err(dev, "Event logged [COMMAND_HARDWARE_ERROR address=0x%llx flags=0x%04x]\n",
+	case EVENT_TYPE_CMD_HARD_ERR:	/* [한국어] 명령을 처리하다 하드웨어 오류 */
+		dev_err(dev, "Event logged [COMMAND_HARDWARE_ERROR address=0x%llx flags=0x%04x]\n",	/* [한국어] 명령 버퍼를 읽지 못한 경우 */
 			address, flags);
 		break;
-	case EVENT_TYPE_IOTLB_INV_TO:
-		dev_err(dev, "Event logged [IOTLB_INV_TIMEOUT device=%04x:%02x:%02x.%x address=0x%llx]\n",
+	case EVENT_TYPE_IOTLB_INV_TO:	/* [한국어] 장치 IOTLB 무효화에 장치가 응답하지 않았다 */
+		dev_err(dev, "Event logged [IOTLB_INV_TIMEOUT device=%04x:%02x:%02x.%x address=0x%llx]\n",	/* [한국어] 그 장치가 멈췄거나 사라졌을 가능성이 높다 */
 			iommu->pci_seg->id, PCI_BUS_NUM(devid), PCI_SLOT(devid), PCI_FUNC(devid),
 			address);
 		break;
-	case EVENT_TYPE_INV_DEV_REQ:
-		dev_err(dev, "Event logged [INVALID_DEVICE_REQUEST device=%04x:%02x:%02x.%x pasid=0x%05x address=0x%llx flags=0x%04x]\n",
+	case EVENT_TYPE_INV_DEV_REQ:	/* [한국어] 장치가 허용되지 않는 종류의 요청을 냈다 */
+		dev_err(dev, "Event logged [INVALID_DEVICE_REQUEST device=%04x:%02x:%02x.%x pasid=0x%05x address=0x%llx flags=0x%04x]\n",	/* [한국어] 예를 들어 PASID 를 켜지 않았는데 PASID 를 실은 경우 */
 			iommu->pci_seg->id, PCI_BUS_NUM(devid), PCI_SLOT(devid), PCI_FUNC(devid),
 			pasid, address, flags);
 		break;
-	case EVENT_TYPE_RMP_FAULT:
-		amd_iommu_report_rmp_fault(iommu, event);
+	case EVENT_TYPE_RMP_FAULT:	/* [한국어] SNP 역매핑 검사 위반 */
+		amd_iommu_report_rmp_fault(iommu, event);	/* [한국어] 전용 처리로 넘긴다 */
 		break;
-	case EVENT_TYPE_RMP_HW_ERR:
-		amd_iommu_report_rmp_hw_error(iommu, event);
+	case EVENT_TYPE_RMP_HW_ERR:	/* [한국어] RMP 접근 중 하드웨어 오류 */
+		amd_iommu_report_rmp_hw_error(iommu, event);	/* [한국어] 전용 처리로 */
 		break;
-	case EVENT_TYPE_INV_PPR_REQ:
-		pasid = PPR_PASID(*((u64 *)__evt));
-		tag = event[1] & 0x03FF;
-		dev_err(dev, "Event logged [INVALID_PPR_REQUEST device=%04x:%02x:%02x.%x pasid=0x%05x address=0x%llx flags=0x%04x tag=0x%03x]\n",
+	case EVENT_TYPE_INV_PPR_REQ:	/* [한국어] 잘못된 페이지 요청 */
+		pasid = PPR_PASID(*((u64 *)__evt));	/* [한국어] PPR 형식은 PASID 자리가 달라 다시 읽는다 */
+		tag = event[1] & 0x03FF;	/* [한국어] 요청 태그 — 장치가 어느 요청인지 아는 값 */
+		dev_err(dev, "Event logged [INVALID_PPR_REQUEST device=%04x:%02x:%02x.%x pasid=0x%05x address=0x%llx flags=0x%04x tag=0x%03x]\n",	/* [한국어] 태그까지 함께 찍어야 장치 쪽과 대조할 수 있다 */
 			iommu->pci_seg->id, PCI_BUS_NUM(devid), PCI_SLOT(devid), PCI_FUNC(devid),
 			pasid, address, flags, tag);
 		break;
-	default:
-		dev_err(dev, "Event logged [UNKNOWN event[0]=0x%08x event[1]=0x%08x event[2]=0x%08x event[3]=0x%08x\n",
+	default:	/* [한국어] 드라이버가 모르는 종류 */
+		dev_err(dev, "Event logged [UNKNOWN event[0]=0x%08x event[1]=0x%08x event[2]=0x%08x event[3]=0x%08x\n",	/* [한국어] 해석하지 않고 네 워드를 그대로 남긴다 */
 			event[0], event[1], event[2], event[3]);
 	}
 
@@ -1575,23 +1732,23 @@ retry:
 	 * enabled system. Also this buffer is not writeable on
 	 * SNP enabled system.
 	 */
-	if (!amd_iommu_snp_en)
-		memset(__evt, 0, 4 * sizeof(u32));
+	if (!amd_iommu_snp_en)	/* [한국어] (원 주석: errata 732 감지를 위해 항목을 0 으로 되돌린다. SNP 에는 이 결함이 없고 버퍼가 쓰기 불가다) */
+		memset(__evt, 0, 4 * sizeof(u32));	/* [한국어] 다음에 이 자리가 "아직 안 쓰임"으로 보이게 한다 */
 }
 
 static void iommu_poll_events(struct amd_iommu *iommu)
 {
-	u32 head, tail;
+	u32 head, tail;	/* [한국어] 우리가 읽은 지점과 하드웨어가 쓴 지점 */
 
-	head = readl(iommu->mmio_base + MMIO_EVT_HEAD_OFFSET);
-	tail = readl(iommu->mmio_base + MMIO_EVT_TAIL_OFFSET);
+	head = readl(iommu->mmio_base + MMIO_EVT_HEAD_OFFSET);	/* [한국어] 어디까지 읽었는가 */
+	tail = readl(iommu->mmio_base + MMIO_EVT_TAIL_OFFSET);	/* [한국어] 어디까지 쌓였는가 */
 
-	while (head != tail) {
-		iommu_print_event(iommu, iommu->evt_buf + head);
+	while (head != tail) {	/* [한국어] 둘이 같아질 때까지 = 로그를 다 비울 때까지 */
+		iommu_print_event(iommu, iommu->evt_buf + head);	/* [한국어] 항목 하나를 해석해 보고한다 */
 
 		/* Update head pointer of hardware ring-buffer */
-		head = (head + EVENT_ENTRY_SIZE) % EVT_BUFFER_SIZE;
-		writel(head, iommu->mmio_base + MMIO_EVT_HEAD_OFFSET);
+		head = (head + EVENT_ENTRY_SIZE) % EVT_BUFFER_SIZE;	/* [한국어] (원 주석: 하드웨어 링 버퍼의 머리를 갱신한다) */
+		writel(head, iommu->mmio_base + MMIO_EVT_HEAD_OFFSET);	/* [한국어] 하드웨어가 그 자리를 재사용할 수 있게 한다 */
 	}
 
 }
