@@ -5,92 +5,152 @@
  *         Leo Duran <leo.duran@amd.com>
  */
 
-#define pr_fmt(fmt)     "AMD-Vi: " fmt
-#define dev_fmt(fmt)    pr_fmt(fmt)
+/*
+ * [한국어 설명] AMD IOMMU 의 본체 — 도메인·장치·무효화·인터럽트 재매핑 (iommu.c)
+ *
+ * === 파일의 역할 ===
+ * init.c 가 하드웨어를 발견해 켜 놓으면, 이 파일이 그 위에서 실제 일을 한다.
+ * 코어 IOMMU 계층에 amd_iommu_ops 를 등록하고, 그 콜백들을 통해 네 종류의
+ * 일을 처리한다.
+ *
+ *  1) 도메인과 장치: 도메인을 만들고, 장치를 붙이고 떼며, 그때마다 장치
+ *     테이블 항목(DTE)을 다시 짓는다. DTE 가 256비트라 원자적으로 쓸 수
+ *     없다는 것이 이 부분의 모든 어려움의 근원이다.
+ *  2) 명령과 무효화: 명령 버퍼에 무효화를 넣고 완료를 기다린다. AMD 에서
+ *     완료를 아는 유일한 방법이 "하드웨어가 메모리에 값을 쓰고 그것을
+ *     폴링하는 것"이다.
+ *  3) 이벤트 로그 처리: 하드웨어가 보고한 변환 실패와 오류를 사람이 읽을
+ *     수 있게 풀어 낸다.
+ *  4) 인터럽트 재매핑: 장치의 MSI 를 표를 거치게 만들고, 게스트에 직접
+ *     전달하는 경로까지 관리한다.
+ *
+ * 페이지 테이블 자체는 이 파일에 없다. 공용 구현(generic_pt)이 v1 과 v2
+ * 형식을 모두 제공하고, 이 파일은 그것을 도메인에 붙여 쓴다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * 코어 IOMMU 계층과 AMD 하드웨어 사이의 본체다. 위로는 amd_iommu_ops 로
+ * 코어가 부르고, DMA API·VFIO·iommufd·KVM 이 그 코어를 통해 도달한다.
+ * 아래로는 init.c 가 만들어 둔 struct amd_iommu 와 세그먼트별 조회 표를
+ * 쓴다.
+ *
+ * 옆으로는 pasid.c(SVA), ppr.c(페이지 폴트), nested.c(중첩 변환)가 이
+ * 파일의 자료구조 위에서 각자의 일을 한다.
+ *
+ * 실행 컨텍스트가 다양하다. 매핑·언매핑은 잠들 수 없는 문맥에서도 불리고,
+ * 이벤트 처리는 인터럽트 스레드이며, 인터럽트 재매핑 콜백은 인터럽트를
+ * 끈 상태에서 불린다. 그래서 도메인 락이 스핀락이고, DTE 를 다루는 락이
+ * 따로 있다.
+ *
+ * 호출 체인:
+ *   DMA API / VFIO / iommufd → 코어 IOMMU → amd_iommu_ops → [이 파일]
+ *     → iommu_queue_command() → 하드웨어 명령 버퍼
+ *   이벤트 인터럽트 → amd_iommu_int_thread_evtlog() → iommu_poll_events()
+ *   MSI 할당 → irq_remapping_alloc() → modify_irte_ga()
+ *
+ * === 타 모듈과의 연결 ===
+ * amd_iommu_types.h 의 하드웨어 정의, generic_pt 의 페이지 테이블 구현,
+ * 코어의 iommu_ops/iommu_domain/iopf 인터페이스, 그리고 x86 의 인터럽트
+ * 도메인 계층.
+ *
+ * 공유 상태: protection_domain 이 도메인의 모든 것을 묶고(페이지 테이블,
+ * 장치 목록, {장치,PASID} 목록, 유닛별 참조 수), 그 lock 이 무효화 대상을
+ * 정하는 순회를 지킨다.
+ *
+ * === 주요 함수/구조체 요약 ===
+ * - amd_iommu_ops: 코어에 등록하는 콜백 표. 이 파일의 목차이기도 하다.
+ * - set_dte_entry()/dev_update_dte(): 장치 테이블 항목을 짓고 반영한다.
+ * - iommu_queue_command()/iommu_completion_wait(): 명령을 넣고 완료를 기다린다.
+ * - amd_iommu_domain_flush_pages(): 무효화의 중심. 범위와 대상을 정한다.
+ * - iommu_poll_events()/iommu_print_event(): 하드웨어 오류 보고를 해석한다.
+ * - irq_remapping_alloc()/modify_irte_ga(): 인터럽트 재매핑 항목 관리.
+ * - amd_ir_set_vcpu_affinity(): 인터럽트를 게스트 vCPU 로 직접 전달한다.
+ */
+#define pr_fmt(fmt)     "AMD-Vi: " fmt	/* [한국어] 이 파일의 로그 접두사 */
+#define dev_fmt(fmt)    pr_fmt(fmt)	/* [한국어] dev_err 계열도 같은 접두사 */
 
-#include <linux/ratelimit.h>
-#include <linux/pci.h>
-#include <linux/acpi.h>
-#include <linux/pci-ats.h>
-#include <linux/bitmap.h>
-#include <linux/slab.h>
-#include <linux/string_choices.h>
-#include <linux/debugfs.h>
-#include <linux/scatterlist.h>
-#include <linux/dma-map-ops.h>
-#include <linux/dma-direct.h>
-#include <linux/idr.h>
-#include <linux/iommu-helper.h>
-#include <linux/delay.h>
-#include <linux/amd-iommu.h>
-#include <linux/notifier.h>
-#include <linux/export.h>
-#include <linux/irq.h>
-#include <linux/irqchip/irq-msi-lib.h>
-#include <linux/msi.h>
-#include <linux/irqdomain.h>
-#include <linux/percpu.h>
-#include <linux/cc_platform.h>
-#include <asm/irq_remapping.h>
-#include <asm/io_apic.h>
-#include <asm/apic.h>
-#include <asm/hw_irq.h>
-#include <asm/proto.h>
-#include <asm/iommu.h>
-#include <asm/gart.h>
-#include <asm/dma.h>
-#include <uapi/linux/iommufd.h>
-#include <linux/generic_pt/iommu.h>
+#include <linux/ratelimit.h>	/* [한국어] 고장난 장치가 로그를 채우지 못하게 하는 속도 제한 */
+#include <linux/pci.h>	/* [한국어] 장치 열거, ATS/PRI/PASID 능력 */
+#include <linux/acpi.h>	/* [한국어] ACPI HID 장치 식별 */
+#include <linux/pci-ats.h>	/* [한국어] 장치 IOTLB 를 켜고 끄는 인터페이스 */
+#include <linux/bitmap.h>	/* [한국어] 인터럽트 재매핑 표의 할당 비트맵 */
+#include <linux/slab.h>	/* [한국어] 자료구조 할당 */
+#include <linux/string_choices.h>	/* [한국어] 로그에 쓰는 str_enabled_disabled 같은 도우미 */
+#include <linux/debugfs.h>	/* [한국어] 장치별 debugfs 디렉터리 */
+#include <linux/scatterlist.h>	/* [한국어] DMA API 의 산재 목록 */
+#include <linux/dma-map-ops.h>	/* [한국어] DMA 매핑 인터페이스 */
+#include <linux/dma-direct.h>	/* [한국어] IOMMU 를 거치지 않는 직접 매핑과의 경계 */
+#include <linux/idr.h>	/* [한국어] 도메인 id 할당기 */
+#include <linux/iommu-helper.h>	/* [한국어] 코어의 공용 도우미 */
+#include <linux/delay.h>	/* [한국어] 완료를 기다리는 짧은 대기 */
+#include <linux/amd-iommu.h>	/* [한국어] 드라이버 외부 인터페이스 */
+#include <linux/notifier.h>	/* [한국어] 통지 체인 */
+#include <linux/export.h>	/* [한국어] 다른 모듈에 심볼을 내보낸다 */
+#include <linux/irq.h>	/* [한국어] 인터럽트 코어 타입 */
+#include <linux/irqchip/irq-msi-lib.h>	/* [한국어] MSI 도메인 공통 코드 */
+#include <linux/msi.h>	/* [한국어] MSI 메시지 형식 */
+#include <linux/irqdomain.h>	/* [한국어] 인터럽트 도메인 계층 */
+#include <linux/percpu.h>	/* [한국어] CPU 별 상태 */
+#include <linux/cc_platform.h>	/* [한국어] 기밀 컴퓨팅(SEV) 환경 판별 */
+#include <asm/irq_remapping.h>	/* [한국어] 아키텍처별 재매핑 인터페이스 */
+#include <asm/io_apic.h>	/* [한국어] IOAPIC 인터럽트 */
+#include <asm/apic.h>	/* [한국어] APIC id 와 목적지 계산 */
+#include <asm/hw_irq.h>	/* [한국어] 인터럽트 할당 정보 */
+#include <asm/proto.h>	/* [한국어] 아키텍처 프로토타입 */
+#include <asm/iommu.h>	/* [한국어] 아키텍처별 IOMMU 정의 */
+#include <asm/gart.h>	/* [한국어] 옛 GART 와의 공존 */
+#include <asm/dma.h>	/* [한국어] DMA 상수 */
+#include <uapi/linux/iommufd.h>	/* [한국어] 사용자와 주고받는 구조체 */
+#include <linux/generic_pt/iommu.h>	/* [한국어] 공용 페이지 테이블 구현 — v1/v2 가 그 위에 얹힌다 */
 
-#include "amd_iommu.h"
-#include "iommufd.h"
-#include "../irq_remapping.h"
-#include "../iommu-pages.h"
+#include "amd_iommu.h"	/* [한국어] 드라이버 내부 함수 선언 */
+#include "iommufd.h"	/* [한국어] iommufd 연동 함수 */
+#include "../irq_remapping.h"	/* [한국어] 코어의 벤더 중립 재매핑 인터페이스 */
+#include "../iommu-pages.h"	/* [한국어] 하드웨어용 페이지 할당기 */
 
-#define CMD_SET_TYPE(cmd, t) ((cmd)->data[1] |= ((t) << 28))
+#define CMD_SET_TYPE(cmd, t) ((cmd)->data[1] |= ((t) << 28))	/* [한국어] 명령 서술자의 종류 필드를 채운다. 모든 build_* 함수가 이것으로 끝난다 */
 
 /* Reserved IOVA ranges */
-#define MSI_RANGE_START		(0xfee00000)
-#define MSI_RANGE_END		(0xfeefffff)
-#define HT_RANGE_START		(0xfd00000000ULL)
-#define HT_RANGE_END		(0xffffffffffULL)
+#define MSI_RANGE_START		(0xfee00000)	/* [한국어] MSI 주소 영역의 시작 (원 주석: 예약 IOVA 범위) */
+#define MSI_RANGE_END		(0xfeefffff)	/* [한국어] 그 끝. 이 구간을 IOVA 로 쓰면 DMA 가 인터럽트로 해석된다 */
+#define HT_RANGE_START		(0xfd00000000ULL)	/* [한국어] HyperTransport 가 쓰는 주소 영역의 시작 */
+#define HT_RANGE_END		(0xffffffffffULL)	/* [한국어] 그 끝. 이 구간으로의 DMA 는 메모리가 아니라 HT 링크로 간다 */
 
-LIST_HEAD(ioapic_map);
-LIST_HEAD(hpet_map);
-LIST_HEAD(acpihid_map);
+LIST_HEAD(ioapic_map);	/* [한국어] IOAPIC id → 요청자 id 대응. init.c 가 채운다 */
+LIST_HEAD(hpet_map);	/* [한국어] HPET 에 대한 같은 목록 */
+LIST_HEAD(acpihid_map);	/* [한국어] ACPI HID 장치에 대한 같은 목록 */
 
-const struct iommu_ops amd_iommu_ops;
+const struct iommu_ops amd_iommu_ops;	/* [한국어] 아래에서 정의되는 콜백 표의 전방 선언 */
 
-int amd_iommu_max_glx_val = -1;
+int amd_iommu_max_glx_val = -1;	/* [한국어] GCR3 표의 최대 레벨 수. -1 은 아직 정해지지 않았다는 뜻 */
 
 /*
  * AMD IOMMU allows up to 2^16 different protection domains. This is a bitmap
  * to know which ones are already in use.
  */
-DEFINE_IDA(pdom_ids);
+DEFINE_IDA(pdom_ids);	/* [한국어] (위 영어 주석에 이어) 도메인 id 할당기. 2^16 개의 id 를 재사용 가능하게 관리한다 */
 
-static int amd_iommu_attach_device(struct iommu_domain *dom, struct device *dev,
+static int amd_iommu_attach_device(struct iommu_domain *dom, struct device *dev,	/* [한국어] ops 표가 정의보다 먼저 참조하므로 전방 선언 */
 				   struct iommu_domain *old);
 
-static void set_dte_entry(struct amd_iommu *iommu,
+static void set_dte_entry(struct amd_iommu *iommu,	/* [한국어] DTE 를 짓는 핵심 함수의 전방 선언 */
 			  struct iommu_dev_data *dev_data,
 			  phys_addr_t top_paddr, unsigned int top_level);
 
-static int device_flush_dte(struct iommu_dev_data *dev_data);
+static int device_flush_dte(struct iommu_dev_data *dev_data);	/* [한국어] DTE 캐시 무효화의 전방 선언 */
 
-static void amd_iommu_change_top(struct pt_iommu *iommu_table,
+static void amd_iommu_change_top(struct pt_iommu *iommu_table,	/* [한국어] 페이지 테이블이 커질 때 공용 계층이 부르는 콜백 */
 				 phys_addr_t top_paddr, unsigned int top_level);
 
-static void iommu_flush_dte_sync(struct amd_iommu *iommu, u16 devid);
+static void iommu_flush_dte_sync(struct amd_iommu *iommu, u16 devid);	/* [한국어] DTE 무효화와 완료 대기를 묶은 함수 */
 
-static struct iommu_dev_data *find_dev_data(struct amd_iommu *iommu, u16 devid);
-static bool amd_iommu_enforce_cache_coherency(struct iommu_domain *domain);
-static int amd_iommu_set_dirty_tracking(struct iommu_domain *domain,
+static struct iommu_dev_data *find_dev_data(struct amd_iommu *iommu, u16 devid);	/* [한국어] 장치 상태 조회의 전방 선언 */
+static bool amd_iommu_enforce_cache_coherency(struct iommu_domain *domain);	/* [한국어] ops 표가 먼저 참조한다 */
+static int amd_iommu_set_dirty_tracking(struct iommu_domain *domain,	/* [한국어] 같은 이유의 전방 선언 */
 					bool enable);
 
-static void clone_aliases(struct amd_iommu *iommu, struct device *dev);
+static void clone_aliases(struct amd_iommu *iommu, struct device *dev);	/* [한국어] 별칭 장치들의 DTE 를 함께 맞추는 함수 */
 
-static int iommu_completion_wait(struct amd_iommu *iommu);
+static int iommu_completion_wait(struct amd_iommu *iommu);	/* [한국어] 완료 대기의 전방 선언 */
 
 /****************************************************************************
  *
@@ -98,6 +158,26 @@ static int iommu_completion_wait(struct amd_iommu *iommu);
  *
  ****************************************************************************/
 
+/*
+ * [한국어]
+ * (아래 영어 주석과 함께 읽을 것)
+ * amd_iommu_atomic128_set - 128비트를 한 번에 써 넣는다
+ *
+ * @ptr: 대상 주소.
+ * @val: 쓸 값.
+ *
+ * 이름이 "atomic set"이지만 실제로는 cmpxchg 를 쓴다. 원 주석이 그 이유를
+ * 밝힌다: x86 에는 128비트 저장 명령이 따로 없고 cmpxchg16b 뿐이라, 그것을
+ * 저장 명령처럼 쓴다.
+ *
+ * 비교값으로 현재 값을 그대로 주므로 항상 성공하며, 재시도 루프가 없다.
+ * LOCK 접두사도 없는데, 호출자가 이미 dte_lock 을 들고 있어 다른 CPU 와
+ * 경쟁하지 않기 때문이다. 필요한 것은 "하드웨어가 반쪽만 갱신된 값을
+ * 보지 않는 것"뿐이다.
+ *
+ * 호출 체인:
+ *   write_dte_upper128()/write_dte_lower128() → [이 함수]
+ */
 static __always_inline void amd_iommu_atomic128_set(__int128 *ptr, __int128 val)
 {
 	/*
@@ -108,28 +188,59 @@ static __always_inline void amd_iommu_atomic128_set(__int128 *ptr, __int128 val)
 	 *   protected by a spin_lock for this DTE).
 	 * - Neither need LOCK_PREFIX nor try loop because of the spin_lock.
 	 */
-	arch_cmpxchg128_local(ptr, *ptr, val);
+	arch_cmpxchg128_local(ptr, *ptr, val);	/* [한국어] 현재 값을 비교값으로 주므로 항상 성공한다. 필요한 것은 하드웨어가 반쪽짜리 값을 보지 않는 것뿐이다 */
 }
 
+/*
+ * [한국어]
+ * write_dte_upper128 - DTE 의 상위 128비트를 쓰되 인터럽트 비트는 보존한다
+ *
+ * @ptr: 하드웨어 표의 항목.
+ * @new: 써 넣을 새 내용.
+ *
+ * 원 주석이 밝히는 보존이 이 함수의 존재 이유다. DTE 의 상위 절반에는
+ * DMA 관련 필드와 인터럽트 재매핑 필드가 섞여 있는데, 이 함수를 부르는
+ * 코드는 DMA 쪽만 다룬다. 인터럽트 쪽은 다른 경로가 관리하므로 덮어쓰면
+ * 안 된다.
+ *
+ * 그래서 현재 값에서 인터럽트 비트만 꺼내 새 값에 얹은 뒤 쓴다. 그 읽기와
+ * 쓰기가 하나의 단위여야 하므로 반드시 dte_lock 안에서 불려야 하고, 원
+ * 주석이 그 계약을 명시한다.
+ *
+ * 호출 체인:
+ *   update_dte256() → [이 함수] → amd_iommu_atomic128_set()
+ */
 static void write_dte_upper128(struct dev_table_entry *ptr, struct dev_table_entry *new)
 {
-	struct dev_table_entry old;
+	struct dev_table_entry old;	/* [한국어] 인터럽트 비트를 꺼낼 현재 값 */
 
-	old.data128[1] = ptr->data128[1];
+	old.data128[1] = ptr->data128[1];	/* [한국어] 상위 절반을 읽어 둔다 */
 	/*
 	 * Preserve DTE_DATA2_INTR_MASK. This needs to be
 	 * done here since it requires to be inside
 	 * spin_lock(&dev_data->dte_lock) context.
 	 */
-	new->data[2] &= ~DTE_DATA2_INTR_MASK;
-	new->data[2] |= old.data[2] & DTE_DATA2_INTR_MASK;
+	new->data[2] &= ~DTE_DATA2_INTR_MASK;	/* [한국어] (원 주석: 인터럽트 비트를 보존한다) 새 값에서 그 자리를 비우고 */
+	new->data[2] |= old.data[2] & DTE_DATA2_INTR_MASK;	/* [한국어] 옛 값의 인터럽트 비트를 얹는다 — 그쪽은 다른 경로가 관리한다 */
 
-	amd_iommu_atomic128_set(&ptr->data128[1], new->data128[1]);
+	amd_iommu_atomic128_set(&ptr->data128[1], new->data128[1]);	/* [한국어] 128비트를 한 번에. 읽기와 쓰기가 하나의 단위여야 하므로 락 안에서만 부를 수 있다 */
 }
 
+/*
+ * [한국어]
+ * write_dte_lower128 - DTE 의 하위 128비트를 쓴다
+ *
+ * @ptr: 하드웨어 표의 항목.
+ * @new: 써 넣을 새 내용.
+ *
+ * 상위와 달리 보존할 것이 없다. 하위 절반은 전부 DMA 관련 필드이기 때문이다.
+ *
+ * V 와 GV 비트가 여기 있다는 점이 중요하다 — update_dte256 의 순서 규칙이
+ * 전부 그 두 비트를 언제 쓰느냐의 문제다.
+ */
 static void write_dte_lower128(struct dev_table_entry *ptr, struct dev_table_entry *new)
 {
-	amd_iommu_atomic128_set(&ptr->data128[0], new->data128[0]);
+	amd_iommu_atomic128_set(&ptr->data128[0], new->data128[0]);	/* [한국어] 하위는 전부 DMA 필드라 보존할 것이 없다. V 와 GV 가 여기 있어 순서 규칙의 대상이 된다 */
 }
 
 /*
@@ -143,59 +254,92 @@ static void write_dte_lower128(struct dev_table_entry *ptr, struct dev_table_ent
  * This function is used only by code, which updates DMA translation part of the DTE.
  * So, only consider control bits related to DMA when updating the entry.
  */
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * update_dte256 - 256비트 DTE 를 하드웨어가 중간 상태를 보지 않게 갱신한다
+ *
+ * @iommu: 대상 유닛.
+ * @dev_data: 그 장치의 상태.
+ * @new: 써 넣을 새 항목.
+ *
+ * 이 파일에서 가장 미묘한 함수다. 문제는 원 주석이 정확히 말한다:
+ * 하드웨어는 256비트를 한 번의 트랜잭션으로 읽는데, 드라이버는 128비트씩
+ * 두 번에 나눠 써야 한다. 그 사이에 하드웨어가 읽으면 절반은 새 값,
+ * 절반은 옛 값인 항목을 본다.
+ *
+ * 해결책은 V 와 GV 비트의 쓰기 순서를 지키는 것이다. 두 비트가 하위
+ * 128비트에 있으므로:
+ *  - 유효하게 만들 때는 상위를 먼저 쓴다. 그러면 V 가 서는 순간에는
+ *    상위가 이미 새 값이다.
+ *  - 무효화할 때는 하위를 먼저 쓴다. V 가 내려간 뒤에 상위를 바꾸면
+ *    하드웨어는 그 항목을 읽지 않는다.
+ *
+ * 여섯 갈래는 그 규칙을 상황별로 적용한 것이다. 마지막 두 갈래가 게스트
+ * 페이지 테이블 때문에 생긴다:
+ *  - 레벨 수가 바뀌면 상위와 하위를 모두 고쳐야 하는데, 그 조합에는
+ *    안전한 순서가 없다. 그래서 일단 V 를 내려 항목을 끄고, 무효화한 뒤,
+ *    새 값을 순서대로 쓴다.
+ *  - 레벨 수가 같으면 하위만 바뀌므로 한 번의 쓰기로 끝나고, 무효화도
+ *    필요 없다 — 유일하게 flush 가 없는 갈래인 이유다.
+ *
+ * 호출 체인:
+ *   amd_iommu_update_dte()/set_dte_entry() → [이 함수]
+ *     → write_dte_upper128()/write_dte_lower128() → iommu_flush_dte_sync()
+ */
 static void update_dte256(struct amd_iommu *iommu, struct iommu_dev_data *dev_data,
 			  struct dev_table_entry *new)
 {
-	unsigned long flags;
-	struct dev_table_entry *dev_table = get_dev_table(iommu);
-	struct dev_table_entry *ptr = &dev_table[dev_data->devid];
+	unsigned long flags;	/* [한국어] 인터럽트 상태 저장용 */
+	struct dev_table_entry *dev_table = get_dev_table(iommu);	/* [한국어] 이 유닛이 쓰는 표 */
+	struct dev_table_entry *ptr = &dev_table[dev_data->devid];	/* [한국어] 그 장치의 항목 */
 
-	spin_lock_irqsave(&dev_data->dte_lock, flags);
+	spin_lock_irqsave(&dev_data->dte_lock, flags);	/* [한국어] 두 번의 쓰기가 하나의 단위여야 한다. 인터럽트 문맥에서도 불려 irqsave */
 
-	if (!(ptr->data[0] & DTE_FLAG_V)) {
+	if (!(ptr->data[0] & DTE_FLAG_V)) {	/* [한국어] (원 주석: 기존 DTE 가 유효하지 않다) */
 		/* Existing DTE is not valid. */
-		write_dte_upper128(ptr, new);
-		write_dte_lower128(ptr, new);
-		iommu_flush_dte_sync(iommu, dev_data->devid);
-	} else if (!(new->data[0] & DTE_FLAG_V)) {
+		write_dte_upper128(ptr, new);	/* [한국어] 유효하게 만드는 경우이므로 상위를 먼저 — V 가 서는 순간 상위는 이미 새 값이다 */
+		write_dte_lower128(ptr, new);	/* [한국어] 그다음 V 가 든 하위 */
+		iommu_flush_dte_sync(iommu, dev_data->devid);	/* [한국어] 캐시를 지우고 완료를 기다린다 */
+	} else if (!(new->data[0] & DTE_FLAG_V)) {	/* [한국어] (원 주석: 기존은 유효, 새 것은 무효) */
 		/* Existing DTE is valid. New DTE is not valid.  */
-		write_dte_lower128(ptr, new);
-		write_dte_upper128(ptr, new);
+		write_dte_lower128(ptr, new);	/* [한국어] 무효화하는 경우이므로 하위를 먼저 — V 를 내린 뒤에는 하드웨어가 읽지 않는다 */
+		write_dte_upper128(ptr, new);	/* [한국어] 그다음 상위 */
 		iommu_flush_dte_sync(iommu, dev_data->devid);
-	} else if (!FIELD_GET(DTE_FLAG_GV, ptr->data[0])) {
+	} else if (!FIELD_GET(DTE_FLAG_GV, ptr->data[0])) {	/* [한국어] (원 주석: 둘 다 유효하고, 기존에는 게스트 페이지 테이블이 없다) */
 		/*
 		 * Both DTEs are valid.
 		 * Existing DTE has no guest page table.
 		 */
-		write_dte_upper128(ptr, new);
+		write_dte_upper128(ptr, new);	/* [한국어] GV 가 서게 되므로 유효화와 같은 순서 */
 		write_dte_lower128(ptr, new);
 		iommu_flush_dte_sync(iommu, dev_data->devid);
-	} else if (!FIELD_GET(DTE_FLAG_GV, new->data[0])) {
+	} else if (!FIELD_GET(DTE_FLAG_GV, new->data[0])) {	/* [한국어] (원 주석: 기존에는 게스트 테이블이 있고 새 것에는 없다) */
 		/*
 		 * Both DTEs are valid.
 		 * Existing DTE has guest page table,
 		 * new DTE has no guest page table,
 		 */
-		write_dte_lower128(ptr, new);
+		write_dte_lower128(ptr, new);	/* [한국어] GV 가 내려가므로 무효화와 같은 순서 */
 		write_dte_upper128(ptr, new);
 		iommu_flush_dte_sync(iommu, dev_data->devid);
-	} else if (FIELD_GET(DTE_GPT_LEVEL_MASK, ptr->data[2]) !=
-		   FIELD_GET(DTE_GPT_LEVEL_MASK, new->data[2])) {
+	} else if (FIELD_GET(DTE_GPT_LEVEL_MASK, ptr->data[2]) !=	/* [한국어] (원 주석: 둘 다 게스트 테이블이 있는데 레벨 수가 다르다) */
+		   FIELD_GET(DTE_GPT_LEVEL_MASK, new->data[2])) {	/* [한국어] 상위와 하위를 모두 고쳐야 해 안전한 순서가 없다 */
 		/*
 		 * Both DTEs are valid and have guest page table,
 		 * but have different number of levels. So, we need
 		 * to upadte both upper and lower 128-bit value, which
 		 * require disabling and flushing.
 		 */
-		struct dev_table_entry clear = {};
+		struct dev_table_entry clear = {};	/* [한국어] 전부 0 인 항목 */
 
 		/* First disable DTE */
-		write_dte_lower128(ptr, &clear);
-		iommu_flush_dte_sync(iommu, dev_data->devid);
+		write_dte_lower128(ptr, &clear);	/* [한국어] (원 주석: 먼저 DTE 를 끈다) V 를 내려 하드웨어가 읽지 않게 한다 */
+		iommu_flush_dte_sync(iommu, dev_data->devid);	/* [한국어] 캐시에서도 지워야 실제로 꺼진다 */
 
 		/* Then update DTE */
-		write_dte_upper128(ptr, new);
-		write_dte_lower128(ptr, new);
+		write_dte_upper128(ptr, new);	/* [한국어] (원 주석: 그다음 DTE 를 갱신한다) 이제 꺼진 항목이라 순서가 자유롭다 */
+		write_dte_lower128(ptr, new);	/* [한국어] 마지막에 V 를 세워 켠다 */
 		iommu_flush_dte_sync(iommu, dev_data->devid);
 	} else {
 		/*
@@ -203,45 +347,99 @@ static void update_dte256(struct amd_iommu *iommu, struct iommu_dev_data *dev_da
 		 * and same number of levels. We just need to only
 		 * update the lower 128-bit. So no need to disable DTE.
 		 */
-		write_dte_lower128(ptr, new);
+		write_dte_lower128(ptr, new);	/* [한국어] (원 주석: 레벨 수가 같으면 하위만 바꾸면 되어 DTE 를 끌 필요가 없다) */
 	}
 
-	spin_unlock_irqrestore(&dev_data->dte_lock, flags);
+	spin_unlock_irqrestore(&dev_data->dte_lock, flags);	/* [한국어] 갱신 완료. 이 갈래만 무효화가 없다 */
 }
 
+/*
+ * [한국어]
+ * amd_iommu_update_dte - DTE 를 갱신하고 별칭까지 맞춘 뒤 완료를 기다린다
+ *
+ * @iommu: 대상 유닛.
+ * @dev_data: 그 장치의 상태.
+ * @new: 새 DTE 내용.
+ *
+ * update_dte256 을 감싸 세 가지를 더한다.
+ *  - clone_aliases: 이 장치의 DMA 별칭들도 같은 DTE 를 갖게 한다. 하드웨어가
+ *    별칭 이름으로 요청을 보므로, 그쪽 항목이 다르면 설정이 반영되지 않는다.
+ *  - device_flush_dte: 하드웨어의 DTE 캐시를 지운다.
+ *  - iommu_completion_wait: 그 무효화가 끝날 때까지 기다린다.
+ *
+ * 마지막 대기가 중요하다. 이 함수가 반환하면 호출자는 새 설정이 실제로
+ * 적용됐다고 가정하고 다음 단계로 넘어간다.
+ *
+ * 호출 체인:
+ *   장치 attach/detach 경로 → [이 함수] → update_dte256() → clone_aliases()
+ */
 void amd_iommu_update_dte(struct amd_iommu *iommu,
 			     struct iommu_dev_data *dev_data,
 			     struct dev_table_entry *new)
 {
-	update_dte256(iommu, dev_data, new);
-	clone_aliases(iommu, dev_data->dev);
-	device_flush_dte(dev_data);
-	iommu_completion_wait(iommu);
+	update_dte256(iommu, dev_data, new);	/* [한국어] 순서 규칙을 지켜 256비트를 갱신한다 */
+	clone_aliases(iommu, dev_data->dev);	/* [한국어] 별칭 항목도 같게 만든다 — 하드웨어는 별칭 이름으로 요청을 본다 */
+	device_flush_dte(dev_data);	/* [한국어] 하드웨어의 DTE 캐시를 지운다 */
+	iommu_completion_wait(iommu);	/* [한국어] 반환 시점에 새 설정이 실제로 적용됐음을 보장한다 */
 }
 
+/*
+ * [한국어]
+ * get_dte256 - 현재 DTE 를 통째로 읽어 사본에 담는다
+ *
+ * @iommu: 대상 유닛.
+ * @dev_data: 그 장치의 상태.
+ * @dte: 결과를 담을 곳.
+ *
+ * 락을 잡고 두 워드를 읽는 이유: 갱신이 128비트씩 두 번에 나눠 일어나므로,
+ * 락 없이 읽으면 반쪽만 새 값인 상태를 볼 수 있다.
+ *
+ * 읽은 사본을 고쳐 다시 쓰는 것이 이 드라이버의 DTE 갱신 방식이다 —
+ * 부분 수정을 할 수 없기 때문이다.
+ */
 static void get_dte256(struct amd_iommu *iommu, struct iommu_dev_data *dev_data,
 		      struct dev_table_entry *dte)
 {
-	unsigned long flags;
-	struct dev_table_entry *ptr;
-	struct dev_table_entry *dev_table = get_dev_table(iommu);
+	unsigned long flags;	/* [한국어] 인터럽트 상태 저장용 */
+	struct dev_table_entry *ptr;	/* [한국어] 하드웨어 표의 항목 */
+	struct dev_table_entry *dev_table = get_dev_table(iommu);	/* [한국어] 이 유닛의 표 */
 
-	ptr = &dev_table[dev_data->devid];
+	ptr = &dev_table[dev_data->devid];	/* [한국어] 그 장치의 항목 */
 
-	spin_lock_irqsave(&dev_data->dte_lock, flags);
-	dte->data128[0] = ptr->data128[0];
-	dte->data128[1] = ptr->data128[1];
-	spin_unlock_irqrestore(&dev_data->dte_lock, flags);
+	spin_lock_irqsave(&dev_data->dte_lock, flags);	/* [한국어] 갱신이 두 번에 나뉘므로 락 없이 읽으면 반쪽짜리를 본다 */
+	dte->data128[0] = ptr->data128[0];	/* [한국어] 하위 절반 */
+	dte->data128[1] = ptr->data128[1];	/* [한국어] 상위 절반 */
+	spin_unlock_irqrestore(&dev_data->dte_lock, flags);	/* [한국어] 일관된 사본을 얻었다 */
 }
 
+/*
+ * [한국어]
+ * pdom_is_v2_pgtbl_mode - 이 도메인이 v2(x86-64 형식) 페이지 테이블을 쓰는가
+ *
+ * @pdom: 검사할 도메인. NULL 이어도 된다.
+ * @return: v2 면 참.
+ *
+ * NULL 을 받아들이는 것이 편의다 — 아직 도메인이 붙지 않은 장치를 다루는
+ * 경로가 매번 검사하지 않아도 된다.
+ */
 static inline bool pdom_is_v2_pgtbl_mode(struct protection_domain *pdom)
 {
-	return (pdom && (pdom->pd_mode == PD_MODE_V2));
+	return (pdom && (pdom->pd_mode == PD_MODE_V2));	/* [한국어] NULL 을 받아들여 호출부가 매번 검사하지 않아도 되게 한다 */
 }
 
+/*
+ * [한국어]
+ * pdom_is_in_pt_mode - 이 도메인이 패스스루(항등)인가
+ *
+ * @pdom: 검사할 도메인.
+ * @return: 패스스루면 참.
+ *
+ * 패스스루 도메인은 페이지 테이블이 없고 장치가 물리 주소를 그대로 쓴다.
+ * 그래서 형식을 묻는 대신 도메인 타입을 본다.
+ */
 static inline bool pdom_is_in_pt_mode(struct protection_domain *pdom)
 {
-	return (pdom->domain.type == IOMMU_DOMAIN_IDENTITY);
+	return (pdom->domain.type == IOMMU_DOMAIN_IDENTITY);	/* [한국어] 패스스루는 페이지 테이블이 없어 형식이 아니라 타입으로 판별한다 */
 }
 
 /*
@@ -249,52 +447,88 @@ static inline bool pdom_is_in_pt_mode(struct protection_domain *pdom)
  * since it will be nested. However, existing domain w/ v2 page table
  * or passthrough mode can be used for PASID.
  */
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * pdom_is_sva_capable - 이 도메인 위에서 PASID(SVA)를 쓸 수 있는가
+ *
+ * @pdom: 검사할 도메인.
+ * @return: 쓸 수 있으면 참.
+ *
+ * 원 주석이 제약의 이유를 밝힌다: v1 페이지 테이블을 쓰는 도메인에 PASID 를
+ * 얹으면 중첩 변환이 되어 버린다. 그 조합은 지원하지 않는다.
+ *
+ * v2 이거나 패스스루면 괜찮다. 전자는 PASID 별 테이블이 자연스럽게 얹히고,
+ * 후자는 애초에 변환이 없어 충돌할 것이 없다.
+ */
 static inline bool pdom_is_sva_capable(struct protection_domain *pdom)
 {
-	return pdom_is_v2_pgtbl_mode(pdom) || pdom_is_in_pt_mode(pdom);
+	return pdom_is_v2_pgtbl_mode(pdom) || pdom_is_in_pt_mode(pdom);	/* [한국어] v2 는 PASID 테이블이 자연히 얹히고, 패스스루는 충돌할 변환이 없다 */
 }
 
+/*
+ * [한국어]
+ * get_acpihid_device_id - ACPI HID 장치의 요청자 id 를 찾는다
+ *
+ * @dev: 대상 장치.
+ * @entry: 찾은 목록 항목을 돌려줄 곳(NULL 이면 생략).
+ * @return: 요청자 id, 못 찾으면 음수.
+ *
+ * PCI 가 아닌 플랫폼 장치의 id 를 알아내는 유일한 경로다. init.c 가 채워
+ * 둔 acpihid_map 을 HID/UID 로 뒤진다.
+ *
+ * 이 함수의 미묘함은 UID 가 없는 경우의 처리에 있다. 정확한 일치(HID + UID)를
+ * 찾으면 곧바로 그것을 쓰지만, HID 만 맞는 항목이 여럿이면 어느 장치인지
+ * 알 수 없다.
+ *
+ * 원 주석대로 그런 경우에도 정확히 하나면 받아들이되 FW_BUG 으로 알린다 —
+ * 펌웨어가 UID 를 제대로 주지 않은 것이고, 그 하나가 맞을 가능성이 높지만
+ * 보장되지는 않기 때문이다. 둘 이상이면 고를 방법이 없어 거절한다.
+ *
+ * 호출 체인:
+ *   get_device_sbdf_id()/get_device_segment()/acpihid_device_group() → [이 함수]
+ */
 static inline int get_acpihid_device_id(struct device *dev,
 					struct acpihid_map_entry **entry)
 {
-	struct acpi_device *adev = ACPI_COMPANION(dev);
-	struct acpihid_map_entry *p, *p1 = NULL;
-	int hid_count = 0;
-	bool fw_bug;
+	struct acpi_device *adev = ACPI_COMPANION(dev);	/* [한국어] 이 장치의 ACPI 쪽 표현 */
+	struct acpihid_map_entry *p, *p1 = NULL;	/* [한국어] 목록 커서와 찾은 항목 */
+	int hid_count = 0;	/* [한국어] HID 만 맞은 항목의 수 */
+	bool fw_bug;	/* [한국어] UID 없이 맞았는가 */
 
-	if (!adev)
-		return -ENODEV;
+	if (!adev)	/* [한국어] ACPI 장치가 아니다 */
+		return -ENODEV;	/* [한국어] 이 경로로는 식별할 수 없다 */
 
-	list_for_each_entry(p, &acpihid_map, list) {
-		if (acpi_dev_hid_uid_match(adev, p->hid,
-					   p->uid[0] ? p->uid : NULL)) {
-			p1 = p;
-			fw_bug = false;
-			hid_count = 1;
-			break;
+	list_for_each_entry(p, &acpihid_map, list) {	/* [한국어] init.c 가 채워 둔 목록을 훑는다 */
+		if (acpi_dev_hid_uid_match(adev, p->hid,	/* [한국어] HID 와 UID 가 모두 맞는가 */
+					   p->uid[0] ? p->uid : NULL)) {	/* [한국어] 목록의 UID 가 비어 있으면 UID 를 따지지 말라는 뜻 */
+			p1 = p;	/* [한국어] 정확한 일치 */
+			fw_bug = false;	/* [한국어] 문제 없음 */
+			hid_count = 1;	/* [한국어] 더 볼 필요가 없다 */
+			break;	/* [한국어] 즉시 종료 */
 		}
 
 		/*
 		 * Count HID matches w/o UID, raise FW_BUG but allow exactly one match
 		 */
-		if (acpi_dev_hid_match(adev, p->hid)) {
-			p1 = p;
-			hid_count++;
-			fw_bug = true;
+		if (acpi_dev_hid_match(adev, p->hid)) {	/* [한국어] (원 주석: UID 없이 HID 만 맞는 경우를 센다) */
+			p1 = p;	/* [한국어] 후보로 기억 */
+			hid_count++;	/* [한국어] 몇 개나 맞는지 */
+			fw_bug = true;	/* [한국어] 펌웨어가 UID 를 제대로 주지 않았다 */
 		}
 	}
 
-	if (!p1)
-		return -EINVAL;
-	if (fw_bug)
-		dev_err_once(dev, FW_BUG "No ACPI device matched UID, but %d device%s matched HID.\n",
+	if (!p1)	/* [한국어] 어느 항목도 맞지 않았다 */
+		return -EINVAL;	/* [한국어] 이 장치의 요청자 id 를 모른다 */
+	if (fw_bug)	/* [한국어] 정확한 일치가 아니었으면 */
+		dev_err_once(dev, FW_BUG "No ACPI device matched UID, but %d device%s matched HID.\n",	/* [한국어] (원 주석대로) 하나뿐이면 받아들이되 알린다 */
 			     hid_count, str_plural(hid_count));
-	if (hid_count > 1)
-		return -EINVAL;
-	if (entry)
-		*entry = p1;
+	if (hid_count > 1)	/* [한국어] 둘 이상이 맞았으면 */
+		return -EINVAL;	/* [한국어] 고를 방법이 없다 */
+	if (entry)	/* [한국어] 호출자가 항목 자체를 원하면 */
+		*entry = p1;	/* [한국어] 돌려준다 */
 
-	return p1->devid;
+	return p1->devid;	/* [한국어] 찾은 요청자 id */
 }
 
 static inline int get_device_sbdf_id(struct device *dev)
