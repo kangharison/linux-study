@@ -363,44 +363,92 @@ __setup("intel_iommu=", intel_iommu_setup);	/* [한국어] 부트 인자 등록 
  * Refer to 11.4.2 of the VT-d spec for the encoding of each bit of
  * the returned SAGAW.
  */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * __iommu_calculate_sagaw - 이 유닛이 지원하는 주소 폭 비트맵을 구한다
+ *
+ * @iommu:  대상 DMAR 유닛
+ * @return: 지원하는 AGAW 들의 비트맵
+ *
+ * SAGAW(Supported Adjusted Guest Address Width)는 이 하드웨어가 몇 단계 페이지
+ * 테이블을 워크할 수 있는지를 비트로 알린 것이다. 비트 위치가 곧 레벨 수를
+ * 나타내며, 레벨이 하나 늘 때마다 주소 폭이 9비트씩 넓어진다.
+ *
+ * 1단계와 2단계 번역이 각각 다른 폭을 지원할 수 있다는 것이 이 함수의 이유다.
+ * scalable mode 에서 둘 다 쓸 수 있으면 교집합을 취하는데, 도메인이 어느 단계로
+ * 만들어질지 이 시점에 알 수 없어 양쪽 모두 표현 가능한 폭만 안전하기 때문이다.
+ *
+ * 실행 컨텍스트: 초기화. 프로세스 문맥.
+ *
+ * 호출 체인: __iommu_calculate_agaw → [이 함수]
+ */
 static unsigned long __iommu_calculate_sagaw(struct intel_iommu *iommu)
 {
-	unsigned long fl_sagaw, sl_sagaw;
+	unsigned long fl_sagaw, sl_sagaw;	/* [한국어] 1단계(first-level)와 2단계(second-level) 페이지 테이블이 각각 지원하는 주소 폭 비트맵 */
 
-	fl_sagaw = BIT(2) | (cap_fl5lp_support(iommu->cap) ? BIT(3) : 0);
-	sl_sagaw = cap_sagaw(iommu->cap);
+	fl_sagaw = BIT(2) | (cap_fl5lp_support(iommu->cap) ? BIT(3) : 0);	/* [한국어] 1단계는 4단계 페이지 테이블(48비트)이 기본이고, 하드웨어가 지원하면 5단계(57비트)도 가능하다. 비트 위치가 곧 레벨 수를 나타낸다 */
+	sl_sagaw = cap_sagaw(iommu->cap);	/* [한국어] 2단계는 능력 레지스터가 지원 폭을 직접 알려 준다 */
 
 	/* Second level only. */
-	if (!sm_supported(iommu) || !ecap_flts(iommu->ecap))
-		return sl_sagaw;
+	if (!sm_supported(iommu) || !ecap_flts(iommu->ecap))	/* [한국어] scalable mode 가 없거나 1단계 번역을 지원하지 않는다 */
+		return sl_sagaw;	/* [한국어] 2단계만 쓸 수 있다 — 레거시 VT-d 의 보통 구성이다 */
 
 	/* First level only. */
-	if (!ecap_slts(iommu->ecap))
-		return fl_sagaw;
+	if (!ecap_slts(iommu->ecap))	/* [한국어] 2단계를 지원하지 않는다 */
+		return fl_sagaw;	/* [한국어] 1단계만 */
 
-	return fl_sagaw & sl_sagaw;
+	return fl_sagaw & sl_sagaw;	/* [한국어] 둘 다 쓸 수 있으면 교집합. 도메인이 어느 단계로 만들어질지 미리 알 수 없어, 양쪽 모두 표현 가능한 폭이어야 한다 */
 }
 
+/*
+ * [한국어]
+ * __iommu_calculate_agaw - 지원하는 폭 중 가장 큰 것을 고른다
+ *
+ * @iommu:   대상 유닛
+ * @max_gaw: 시도를 시작할 최대 폭 (비트 수)
+ * @return:  고른 AGAW, 지원하는 것이 없으면 음수
+ *
+ * 큰 것부터 내려오며 첫 지원 값을 고른다. 폭이 넓을수록 페이지 테이블 레벨이
+ * 늘어 워크가 깊어지지만, 좁으면 그만큼의 IOVA 공간을 잃는다.
+ *
+ * 실행 컨텍스트: 초기화.
+ *
+ * 호출 체인: iommu_calculate_agaw, iommu_calculate_max_sagaw → [이 함수]
+ */
 static int __iommu_calculate_agaw(struct intel_iommu *iommu, int max_gaw)
 {
-	unsigned long sagaw;
-	int agaw;
+	unsigned long sagaw;	/* [한국어] 지원 폭 비트맵 */
+	int agaw;	/* [한국어] 고를 주소 폭 (AGAW: Adjusted Guest Address Width) */
 
-	sagaw = __iommu_calculate_sagaw(iommu);
-	for (agaw = width_to_agaw(max_gaw); agaw >= 0; agaw--) {
-		if (test_bit(agaw, &sagaw))
-			break;
+	sagaw = __iommu_calculate_sagaw(iommu);	/* [한국어] 이 유닛이 지원하는 폭들 */
+	for (agaw = width_to_agaw(max_gaw); agaw >= 0; agaw--) {	/* [한국어] 요청한 최대 폭에서 시작해 내려간다 */
+		if (test_bit(agaw, &sagaw))	/* [한국어] 이 폭을 지원하면 */
+			break;	/* [한국어] 그것을 쓴다 — 지원하는 것 중 가장 큰 폭 */
 	}
 
-	return agaw;
+	return agaw;	/* [한국어] 음수면 지원하는 폭이 하나도 없다는 뜻 */
 }
 
 /*
  * Calculate max SAGAW for each iommu.
  */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * iommu_calculate_max_sagaw - 이 유닛이 낼 수 있는 최대 주소 폭
+ *
+ * @iommu:  대상 유닛
+ * @return: 최대 AGAW
+ *
+ * 하드웨어 능력의 상한을 보고할 때 쓴다. 실제 도메인이 쓰는 폭은
+ * iommu_calculate_agaw 가 정하며, 그쪽은 기본값에서 시작하므로 더 작을 수 있다.
+ *
+ * 실행 컨텍스트: 초기화.
+ *
+ * 호출 체인: dmar.c 의 유닛 초기화 → [이 함수]
+ */
 int iommu_calculate_max_sagaw(struct intel_iommu *iommu)
 {
-	return __iommu_calculate_agaw(iommu, MAX_AGAW_WIDTH);
+	return __iommu_calculate_agaw(iommu, MAX_AGAW_WIDTH);	/* [한국어] 이 유닛이 낼 수 있는 최대 폭 (위 영어 주석) */
 }
 
 /*
@@ -408,57 +456,116 @@ int iommu_calculate_max_sagaw(struct intel_iommu *iommu)
  * "SAGAW" may be different across iommus, use a default agaw, and
  * get a supported less agaw for iommus that don't support the default agaw.
  */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * iommu_calculate_agaw - 이 유닛이 실제로 쓸 주소 폭을 정한다
+ *
+ * @iommu:  대상 유닛
+ * @return: AGAW
+ *
+ * 시스템 기본값(57비트, 5단계)에서 시작해 이 유닛이 지원하는 만큼 낮춘다.
+ * 여러 DMAR 유닛의 능력이 다를 수 있고 도메인 하나가 여러 유닛에 걸쳐 설치될 수
+ * 있으므로, 결국 그중 가장 낮은 폭에 맞춰지게 된다 (위 영어 주석).
+ *
+ * 실행 컨텍스트: 초기화.
+ *
+ * 호출 체인: dmar.c 의 유닛 초기화 → [이 함수]
+ */
 int iommu_calculate_agaw(struct intel_iommu *iommu)
 {
-	return __iommu_calculate_agaw(iommu, DEFAULT_DOMAIN_ADDRESS_WIDTH);
+	return __iommu_calculate_agaw(iommu, DEFAULT_DOMAIN_ADDRESS_WIDTH);	/* [한국어] 기본값(57비트)에서 시작해 이 유닛이 지원하는 만큼 낮춘다. 유닛마다 능력이 다를 수 있어 도메인은 그중 가장 낮은 폭에 맞춰진다 (위 영어 주석) */
 }
 
+/*
+ * [한국어]
+ * iommu_paging_structure_coherency - 페이지 테이블 워크가 CPU 캐시를 보는가
+ *
+ * @iommu:  대상 유닛
+ * @return: true 면 일관성이 있어 캐시 플러시가 필요 없다
+ *
+ * 이 한 줄이 이 드라이버 곳곳의 __iommu_flush_cache 호출을 좌우한다. false 면
+ * PTE 나 컨텍스트 항목을 쓸 때마다 clflush 로 메모리에 밀어내야 하고, 그 비용이
+ * 매핑 경로에 그대로 얹힌다.
+ *
+ * scalable mode 와 레거시가 다른 능력 비트를 쓰는 것에 주의할 것 — 하드웨어가
+ * 두 모드에서 서로 다른 일관성 보장을 할 수 있기 때문이다.
+ *
+ * 실행 컨텍스트: 어디서든.
+ *
+ * 호출 체인: 도메인 생성, __iommu_flush_cache → [이 함수]
+ */
 static bool iommu_paging_structure_coherency(struct intel_iommu *iommu)
 {
-	return sm_supported(iommu) ?
-			ecap_smpwc(iommu->ecap) : ecap_coherent(iommu->ecap);
+	return sm_supported(iommu) ?	/* [한국어] scalable mode 여부에 따라 다른 능력 비트를 본다 */
+			ecap_smpwc(iommu->ecap) : ecap_coherent(iommu->ecap);	/* [한국어] 페이지 테이블 워크가 CPU 캐시를 보는가. 보지 않으면 PTE 를 쓸 때마다 clflush 로 밀어내야 한다 — __iommu_flush_cache 가 그 판단에 이 값을 쓴다 */
 }
 
+/*
+ * [한국어]
+ * iommu_context_addr - 이 장치의 컨텍스트 항목 주소를 얻는다 (필요하면 테이블 생성)
+ *
+ * @iommu:  담당 DMAR 유닛
+ * @bus:    PCI 버스 번호
+ * @devfn:  장치·함수 번호
+ * @alloc:  0 이 아니면 컨텍스트 테이블이 없을 때 만든다
+ * @return: 컨텍스트 항목 포인터, 없거나 실패하면 NULL
+ *
+ * VT-d 의 2단계 인덱싱을 구현한다. 하드웨어가 DMA 요청을 받으면 버스 번호로
+ * 루트 테이블을, 장치·함수로 컨텍스트 테이블을 인덱싱하는데, 이 함수가 그 경로를
+ * 소프트웨어로 따라간다.
+ *
+ * scalable mode 의 처리가 이 함수의 절반이다. 그 모드에서는 컨텍스트 항목이
+ * 32바이트로 커져 한 페이지에 256개가 들어가지 않으므로, 루트 항목이 하위·상위
+ * 두 개의 테이블 주소를 담고 장치 번호 128 을 경계로 나뉜다.
+ *
+ * context_copied 검사는 kexec 상황을 다룬다. 앞선 커널이 만든 항목을 물려받은
+ * 상태에서 그것을 읽기 목적으로 돌려주면, 우리가 설정하지 않은 도메인을 우리
+ * 것으로 오해하게 된다 (위 영어 주석).
+ *
+ * 실행 컨텍스트: 장치 부착 경로. 락 아래일 수 있어 GFP_ATOMIC 를 쓴다.
+ *
+ * 호출 체인: domain_context_mapping, 컨텍스트 조회 경로 → [이 함수]
+ */
 struct context_entry *iommu_context_addr(struct intel_iommu *iommu, u8 bus,
 					 u8 devfn, int alloc)
 {
-	struct root_entry *root = &iommu->root_entry[bus];
-	struct context_entry *context;
-	u64 *entry;
+	struct root_entry *root = &iommu->root_entry[bus];	/* [한국어] 버스 번호로 루트 테이블을 인덱싱한다 */
+	struct context_entry *context;	/* [한국어] 그 버스의 컨텍스트 테이블 */
+	u64 *entry;	/* [한국어] 루트 항목의 하위 또는 상위 절반 */
 
 	/*
 	 * Except that the caller requested to allocate a new entry,
 	 * returning a copied context entry makes no sense.
 	 */
-	if (!alloc && context_copied(iommu, bus, devfn))
-		return NULL;
+	if (!alloc && context_copied(iommu, bus, devfn))	/* [한국어] 앞선 커널(kexec 전)이 만든 항목을 그대로 물려받은 상태다. 읽기 목적으로 그것을 돌려주면 우리가 만들지 않은 설정을 우리 것으로 오해하게 된다 (위 영어 주석) */
+		return NULL;	/* [한국어] 없는 것으로 취급한다 */
 
-	entry = &root->lo;
-	if (sm_supported(iommu)) {
-		if (devfn >= 0x80) {
-			devfn -= 0x80;
-			entry = &root->hi;
+	entry = &root->lo;	/* [한국어] 기본은 하위 절반 (장치 0~127) */
+	if (sm_supported(iommu)) {	/* [한국어] scalable mode 는 컨텍스트 항목이 두 배로 커진다 */
+		if (devfn >= 0x80) {	/* [한국어] 장치 번호가 128 이상이면 */
+			devfn -= 0x80;	/* [한국어] 상위 테이블 안의 인덱스로 바꾸고 */
+			entry = &root->hi;	/* [한국어] 루트 항목의 상위 절반을 쓴다. 항목이 커져 한 페이지에 256개가 들어가지 않으므로 테이블을 둘로 나눈다 */
 		}
-		devfn *= 2;
+		devfn *= 2;	/* [한국어] scalable mode 의 컨텍스트 항목은 32바이트라 인덱스가 두 배가 된다 */
 	}
-	if (*entry & 1)
-		context = phys_to_virt(*entry & VTD_PAGE_MASK);
+	if (*entry & 1)	/* [한국어] present 비트 — 컨텍스트 테이블이 이미 있다 */
+		context = phys_to_virt(*entry & VTD_PAGE_MASK);	/* [한국어] 그 주소를 가상 주소로 */
 	else {
-		unsigned long phy_addr;
-		if (!alloc)
-			return NULL;
+		unsigned long phy_addr;	/* [한국어] 새로 만들 테이블의 물리 주소 */
+		if (!alloc)	/* [한국어] 조회만 하는 호출이면 */
+			return NULL;	/* [한국어] 만들지 않는다 */
 
-		context = iommu_alloc_pages_node_sz(iommu->node, GFP_ATOMIC,
-						    SZ_4K);
-		if (!context)
-			return NULL;
+		context = iommu_alloc_pages_node_sz(iommu->node, GFP_ATOMIC,	/* [한국어] 이 유닛과 가까운 NUMA 노드에서. ATOMIC 인 것은 이 경로가 락 아래에서 불릴 수 있기 때문이다 */
+						    SZ_4K);	/* [한국어] 컨텍스트 테이블은 한 페이지 */
+		if (!context)	/* [한국어] 할당 실패 */
+			return NULL;	/* [한국어] 장치를 설정할 수 없다 */
 
-		__iommu_flush_cache(iommu, (void *)context, CONTEXT_SIZE);
-		phy_addr = virt_to_phys((void *)context);
-		*entry = phy_addr | 1;
-		__iommu_flush_cache(iommu, entry, sizeof(*entry));
+		__iommu_flush_cache(iommu, (void *)context, CONTEXT_SIZE);	/* [한국어] 0 으로 채워진 테이블을 메모리로 밀어낸다. 워크가 비일관인 하드웨어에서 이것을 빠뜨리면 하드웨어가 쓰레기를 유효한 항목으로 읽는다 */
+		phy_addr = virt_to_phys((void *)context);	/* [한국어] 하드웨어가 볼 주소 */
+		*entry = phy_addr | 1;	/* [한국어] 루트 항목에 심고 present 비트를 세운다 */
+		__iommu_flush_cache(iommu, entry, sizeof(*entry));	/* [한국어] 그 항목도 밀어낸다. 순서가 중요하다 — 테이블 내용이 먼저 보이고 그것을 가리키는 항목이 나중에 보여야 한다 */
 	}
-	return &context[devfn];
+	return &context[devfn];	/* [한국어] 이 장치의 컨텍스트 항목. 여기에 도메인과 페이지 테이블 루트를 기입하면 하드웨어가 그 장치의 DMA 를 번역하기 시작한다 */
 }
 
 /**
@@ -469,140 +576,223 @@ struct context_entry *iommu_context_addr(struct intel_iommu *iommu, u8 bus,
  *
  * Return: true if @dev belongs to @bridge PCI sub-hierarchy, else false.
  */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어)
+ * is_downstream_to_pci_bridge - 장치가 이 브리지의 하위 계층에 속하는가
+ *
+ * @dev:    후보 장치
+ * @bridge: 후보 브리지
+ * @return: 하위에 속하면 true
+ *
+ * ACPI DMAR 표는 브리지 하나를 적어 그 아래 전체를 한 유닛에 맡길 수 있다.
+ * 그 기술을 해석하려면 "이 장치가 저 브리지 아래인가"를 판정해야 하는데, PCI 가
+ * 브리지 아래의 버스 번호를 연속 범위로 할당하기 때문에 번호 비교만으로 답이 난다.
+ *
+ * 실행 컨텍스트: 유닛 조회 경로. RCU 읽기 구간.
+ *
+ * 호출 체인: device_lookup_iommu → [이 함수]
+ */
 static bool
 is_downstream_to_pci_bridge(struct device *dev, struct device *bridge)
 {
-	struct pci_dev *pdev, *pbridge;
+	struct pci_dev *pdev, *pbridge;	/* [한국어] PCI 형으로 변환한 두 장치 */
 
-	if (!dev_is_pci(dev) || !dev_is_pci(bridge))
-		return false;
+	if (!dev_is_pci(dev) || !dev_is_pci(bridge))	/* [한국어] 둘 중 하나라도 PCI 가 아니면 */
+		return false;	/* [한국어] 계층 관계를 논할 수 없다 */
 
-	pdev = to_pci_dev(dev);
-	pbridge = to_pci_dev(bridge);
+	pdev = to_pci_dev(dev);	/* [한국어] 후보 장치 */
+	pbridge = to_pci_dev(bridge);	/* [한국어] 후보 브리지 */
 
-	if (pbridge->subordinate &&
-	    pbridge->subordinate->number <= pdev->bus->number &&
-	    pbridge->subordinate->busn_res.end >= pdev->bus->number)
-		return true;
+	if (pbridge->subordinate &&	/* [한국어] 브리지가 실제로 하위 버스를 가지고 있고 */
+	    pbridge->subordinate->number <= pdev->bus->number &&	/* [한국어] 장치의 버스 번호가 그 하위 버스 범위 안에 들면 */
+	    pbridge->subordinate->busn_res.end >= pdev->bus->number)	/* [한국어] PCI 는 브리지 아래의 버스 번호를 연속 범위로 할당하므로, 번호 비교만으로 계층 소속을 알 수 있다 */
+		return true;	/* [한국어] 이 브리지 아래에 있다 */
 
-	return false;
+	return false;	/* [한국어] 아니다 */
 }
 
+/*
+ * [한국어]
+ * quirk_ioat_snb_local_iommu - Sandy Bridge QuickData 장치의 BIOS 오신고를 잡는다
+ *
+ * @pdev:   확인할 QuickData(IOAT) DMA 엔진
+ * @return: BIOS 가 잘못 신고했으면 true
+ *
+ * 이 칩셋에서 QuickData 엔진의 IOMMU 는 반드시 호스트 브리지가 알려 주는
+ * vtbar + 0xa000 에 있다. BIOS 가 다른 유닛을 지정했다면 그것은 거짓이고, 그
+ * 유닛에 이 장치를 붙이면 번역이 엉뚱한 페이지 테이블로 간다.
+ *
+ * 해결책이 "IOMMU 없이 쓴다"인 것이 이 우회의 성격을 말해 준다 — 올바른 유닛을
+ * 찾을 방법이 없으므로, 잘못된 곳에 붙이느니 번역을 포기한다. 위 영어 주석이
+ * "그 IOMMU 가 실제로 꺼져 있기를 바란다"고 적은 그대로다.
+ *
+ * add_taint 로 커널에 오염 표시를 남기는 것도 의도적이다. 이후 문제 보고를 받는
+ * 쪽이 펌웨어 결함이 있었음을 알 수 있게 한다.
+ *
+ * 실행 컨텍스트: 유닛 조회 경로.
+ *
+ * 호출 체인: iommu_is_dummy → [이 함수]
+ */
 static bool quirk_ioat_snb_local_iommu(struct pci_dev *pdev)
 {
-	struct dmar_drhd_unit *drhd;
-	u32 vtbar;
-	int rc;
+	struct dmar_drhd_unit *drhd;	/* [한국어] 이 장치를 맡는다고 신고된 유닛 */
+	u32 vtbar;	/* [한국어] 칩셋이 실제로 알려 주는 VT-d 레지스터 기준 주소 */
+	int rc;	/* [한국어] 설정 공간 읽기 결과 */
 
 	/* We know that this device on this chipset has its own IOMMU.
 	 * If we find it under a different IOMMU, then the BIOS is lying
 	 * to us. Hope that the IOMMU for this device is actually
 	 * disabled, and it needs no translation...
 	 */
-	rc = pci_bus_read_config_dword(pdev->bus, PCI_DEVFN(0, 0), 0xb0, &vtbar);
-	if (rc) {
+	rc = pci_bus_read_config_dword(pdev->bus, PCI_DEVFN(0, 0), 0xb0, &vtbar);	/* [한국어] 호스트 브리지의 비공개 레지스터에서 VT-d 기준 주소를 읽는다. BIOS 가 아니라 하드웨어에게 직접 묻는 것이 이 우회의 요점이다 */
+	if (rc) {	/* [한국어] 읽기 실패 */
 		/* "can't" happen */
-		dev_info(&pdev->dev, "failed to run vt-d quirk\n");
-		return false;
+		dev_info(&pdev->dev, "failed to run vt-d quirk\n");	/* [한국어] 일어날 수 없는 일이지만 방어한다 (위 영어 주석) */
+		return false;	/* [한국어] 우회를 적용하지 않는다 */
 	}
-	vtbar &= 0xffff0000;
+	vtbar &= 0xffff0000;	/* [한국어] 기준 주소 필드만 남긴다 */
 
 	/* we know that the this iommu should be at offset 0xa000 from vtbar */
-	drhd = dmar_find_matched_drhd_unit(pdev);
-	if (!drhd || drhd->reg_base_addr - vtbar != 0xa000) {
-		pr_warn_once(FW_BUG "BIOS assigned incorrect VT-d unit for Intel(R) QuickData Technology device\n");
-		add_taint(TAINT_FIRMWARE_WORKAROUND, LOCKDEP_STILL_OK);
-		return true;
+	drhd = dmar_find_matched_drhd_unit(pdev);	/* [한국어] BIOS 가 신고한 담당 유닛 */
+	if (!drhd || drhd->reg_base_addr - vtbar != 0xa000) {	/* [한국어] 이 칩셋에서 QuickData 장치의 IOMMU 는 반드시 vtbar + 0xa000 에 있다. 다르다면 BIOS 가 거짓말을 한 것이다 (위 영어 주석) */
+		pr_warn_once(FW_BUG "BIOS assigned incorrect VT-d unit for Intel(R) QuickData Technology device\n");	/* [한국어] 펌웨어 버그임을 명시한다 */
+		add_taint(TAINT_FIRMWARE_WORKAROUND, LOCKDEP_STILL_OK);	/* [한국어] 커널에 오염 표시를 남긴다 — 이후 버그 보고를 받는 쪽이 펌웨어 문제였음을 알 수 있게 */
+		return true;	/* [한국어] 이 장치는 IOMMU 없이 다룬다. 잘못된 유닛에 붙이느니 번역을 포기하는 편이 낫다 */
 	}
 
-	return false;
+	return false;	/* [한국어] BIOS 신고가 맞다 */
 }
 
+/*
+ * [한국어]
+ * iommu_is_dummy - 이 유닛을 실제로 쓸 수 없는 경우인가
+ *
+ * @iommu:  찾은 유닛 (NULL 일 수 있다)
+ * @dev:    대상 장치
+ * @return: 쓸 수 없으면 true
+ *
+ * 두 가지를 거른다. DMAR 표가 무시하도록 표시한 유닛(그래픽 전용 유닛을 끈
+ * 경우 등)과, BIOS 오신고로 잘못 연결된 장치다.
+ *
+ * true 를 돌려주면 그 장치는 IOMMU 아래에 들어가지 않고 직접 매핑으로 남는다.
+ * 격리를 잃지만 동작은 한다는 선택이다.
+ *
+ * 실행 컨텍스트: 유닛 조회 경로.
+ *
+ * 호출 체인: device_lookup_iommu → [이 함수]
+ */
 static bool iommu_is_dummy(struct intel_iommu *iommu, struct device *dev)
 {
-	if (!iommu || iommu->drhd->ignored)
-		return true;
+	if (!iommu || iommu->drhd->ignored)	/* [한국어] 유닛이 없거나 무시하도록 표시된 유닛이면 */
+		return true;	/* [한국어] 이 장치는 IOMMU 아래에 두지 않는다 */
 
-	if (dev_is_pci(dev)) {
-		struct pci_dev *pdev = to_pci_dev(dev);
+	if (dev_is_pci(dev)) {	/* [한국어] PCI 장치면 */
+		struct pci_dev *pdev = to_pci_dev(dev);	/* [한국어] PCI 형으로 */
 
-		if (pdev->vendor == PCI_VENDOR_ID_INTEL &&
-		    pdev->device == PCI_DEVICE_ID_INTEL_IOAT_SNB &&
-		    quirk_ioat_snb_local_iommu(pdev))
-			return true;
+		if (pdev->vendor == PCI_VENDOR_ID_INTEL &&	/* [한국어] 인텔 장치이고 */
+		    pdev->device == PCI_DEVICE_ID_INTEL_IOAT_SNB &&	/* [한국어] Sandy Bridge 의 QuickData(IOAT) DMA 엔진이며 */
+		    quirk_ioat_snb_local_iommu(pdev))	/* [한국어] BIOS 가 잘못된 유닛을 지정했다면 */
+			return true;	/* [한국어] 가짜 유닛으로 취급해 IOMMU 밖에 둔다 */
 	}
 
-	return false;
+	return false;	/* [한국어] 정상적인 장치 */
 }
 
+/*
+ * [한국어]
+ * device_lookup_iommu - 이 장치를 담당하는 DMAR 유닛과 소스 id 를 찾는다
+ *
+ * @dev:    대상 장치
+ * @bus:    찾은 버스 번호를 담을 자리 (NULL 가능)
+ * @devfn:  찾은 장치·함수를 담을 자리 (NULL 가능)
+ * @return: 담당 유닛, 없으면 NULL
+ *
+ * 이 드라이버의 프로브가 시작되는 지점이다. 인텔 시스템에는 DMAR 유닛이 여럿
+ * 있을 수 있고(소켓마다, 또는 그래픽 전용으로), ACPI DMAR 표가 어느 유닛이 어느
+ * 장치를 담당하는지 기술한다.
+ *
+ * 표를 해석하는 데 네 가지 경우가 있다.
+ *  - 장치가 범위 표에 직접 적혀 있다 (가장 단순).
+ *  - 브리지가 적혀 있고 장치가 그 아래에 있다 (하위 계층 전체를 위임).
+ *  - 유닛이 include_all 로 "나머지 전부"를 담당한다고 신고했다.
+ *  - 어디에도 없다 → IOMMU 아래가 아니다.
+ *
+ * 장치 정규화가 앞부분의 절반을 차지한다. VF 는 범위 표에 나열되지 않아 PF 로
+ * 찾아야 하고(다만 BDF 는 자기 것을 쓴다), 플랫폼 장치는 ACPI 노드로 기술되며,
+ * 일부 장치는 다른 함수의 이름으로 DMA 를 낸다.
+ *
+ * 실행 컨텍스트: 장치 프로브. RCU 읽기 구간 — 유닛이 핫플러그로 추가될 수 있다.
+ *
+ * 호출 체인: intel_iommu_probe_device → [이 함수]
+ */
 static struct intel_iommu *device_lookup_iommu(struct device *dev, u8 *bus, u8 *devfn)
 {
-	struct dmar_drhd_unit *drhd = NULL;
-	struct pci_dev *pdev = NULL;
-	struct intel_iommu *iommu;
-	struct device *tmp;
-	u16 segment = 0;
-	int i;
+	struct dmar_drhd_unit *drhd = NULL;	/* [한국어] 유닛 순회 커서 */
+	struct pci_dev *pdev = NULL;	/* [한국어] PCI 장치면 여기에 */
+	struct intel_iommu *iommu;	/* [한국어] 찾은 유닛 */
+	struct device *tmp;	/* [한국어] 범위 표의 장치 순회 커서 */
+	u16 segment = 0;	/* [한국어] PCI 세그먼트(도메인) 번호. 대형 시스템은 세그먼트가 여럿이다 */
+	int i;	/* [한국어] 범위 표 인덱스 */
 
-	if (!dev)
-		return NULL;
+	if (!dev)	/* [한국어] 장치가 없다 */
+		return NULL;	/* [한국어] 찾을 수 없다 */
 
 	if (dev_is_pci(dev)) {
-		struct pci_dev *pf_pdev;
+		struct pci_dev *pf_pdev;	/* [한국어] 물리 함수(PF) */
 
-		pdev = pci_real_dma_dev(to_pci_dev(dev));
+		pdev = pci_real_dma_dev(to_pci_dev(dev));	/* [한국어] DMA 를 실제로 내는 장치. 일부 장치는 다른 함수의 이름으로 DMA 를 낸다 */
 
 		/* VFs aren't listed in scope tables; we need to look up
 		 * the PF instead to find the IOMMU. */
-		pf_pdev = pci_physfn(pdev);
-		dev = &pf_pdev->dev;
-		segment = pci_domain_nr(pdev->bus);
-	} else if (has_acpi_companion(dev))
-		dev = &ACPI_COMPANION(dev)->dev;
+		pf_pdev = pci_physfn(pdev);	/* [한국어] VF 라면 그 PF 를 찾는다 */
+		dev = &pf_pdev->dev;	/* [한국어] ACPI 범위 표에는 VF 가 나열되지 않으므로 PF 로 찾아야 한다 (위 영어 주석) */
+		segment = pci_domain_nr(pdev->bus);	/* [한국어] 이 장치가 속한 PCI 세그먼트 */
+	} else if (has_acpi_companion(dev))	/* [한국어] 플랫폼 장치인데 ACPI 노드가 있으면 */
+		dev = &ACPI_COMPANION(dev)->dev;	/* [한국어] 범위 표는 ACPI 장치로 기술되므로 그것으로 바꿔 비교한다 */
 
-	rcu_read_lock();
-	for_each_iommu(iommu, drhd) {
-		if (pdev && segment != drhd->segment)
-			continue;
+	rcu_read_lock();	/* [한국어] 유닛 목록은 RCU 로 보호된다 — 핫플러그로 유닛이 추가될 수 있다 */
+	for_each_iommu(iommu, drhd) {	/* [한국어] 모든 DMAR 유닛에 대해 */
+		if (pdev && segment != drhd->segment)	/* [한국어] 다른 PCI 세그먼트의 유닛 */
+			continue;	/* [한국어] 건너뛴다 */
 
-		for_each_active_dev_scope(drhd->devices,
-					  drhd->devices_cnt, i, tmp) {
-			if (tmp == dev) {
+		for_each_active_dev_scope(drhd->devices,	/* [한국어] 이 유닛이 담당한다고 신고된 장치들을 */
+					  drhd->devices_cnt, i, tmp) {	/* [한국어] 하나씩 */
+			if (tmp == dev) {	/* [한국어] 우리 장치를 찾았다 */
 				/* For a VF use its original BDF# not that of the PF
 				 * which we used for the IOMMU lookup. Strictly speaking
 				 * we could do this for all PCI devices; we only need to
 				 * get the BDF# from the scope table for ACPI matches. */
-				if (pdev && pdev->is_virtfn)
-					goto got_pdev;
+				if (pdev && pdev->is_virtfn)	/* [한국어] VF 는 PF 로 찾았으므로 BDF 는 자기 것을 써야 한다 (위 영어 주석) */
+					goto got_pdev;	/* [한국어] 아래에서 자기 BDF 를 채운다 */
 
-				if (bus && devfn) {
-					*bus = drhd->devices[i].bus;
-					*devfn = drhd->devices[i].devfn;
+				if (bus && devfn) {	/* [한국어] 호출자가 BDF 를 원하면 */
+					*bus = drhd->devices[i].bus;	/* [한국어] 범위 표가 기술한 버스 번호 */
+					*devfn = drhd->devices[i].devfn;	/* [한국어] 그리고 장치·함수. ACPI 장치는 이 값으로만 알 수 있다 */
 				}
-				goto out;
+				goto out;	/* [한국어] 찾았다 */
 			}
 
-			if (is_downstream_to_pci_bridge(dev, tmp))
-				goto got_pdev;
+			if (is_downstream_to_pci_bridge(dev, tmp))	/* [한국어] 범위 표에 브리지가 적혀 있고 우리 장치가 그 아래면 */
+				goto got_pdev;	/* [한국어] 그 유닛이 담당한다 — 브리지 아래 전체를 한 항목으로 기술하는 방식이다 */
 		}
 
-		if (pdev && drhd->include_all) {
-got_pdev:
-			if (bus && devfn) {
-				*bus = pdev->bus->number;
-				*devfn = pdev->devfn;
+		if (pdev && drhd->include_all) {	/* [한국어] 이 유닛이 '나머지 전부'를 담당한다고 신고했다 */
+got_pdev:	/* [한국어] 브리지 하위와 VF 경로가 합류 */
+			if (bus && devfn) {	/* [한국어] 호출자가 BDF 를 원하면 */
+				*bus = pdev->bus->number;	/* [한국어] 장치 자신의 버스 번호 */
+				*devfn = pdev->devfn;	/* [한국어] 그리고 장치·함수 */
 			}
-			goto out;
+			goto out;	/* [한국어] 찾았다 */
 		}
 	}
-	iommu = NULL;
-out:
-	if (iommu_is_dummy(iommu, dev))
-		iommu = NULL;
+	iommu = NULL;	/* [한국어] 어느 유닛도 이 장치를 담당하지 않는다 */
+out:	/* [한국어] 공통 출구 */
+	if (iommu_is_dummy(iommu, dev))	/* [한국어] 무시 표시된 유닛이거나 BIOS 결함 우회 대상이면 */
+		iommu = NULL;	/* [한국어] 없는 것으로 취급한다 */
 
-	rcu_read_unlock();
+	rcu_read_unlock();	/* [한국어] 목록 순회 끝 */
 
-	return iommu;
+	return iommu;	/* [한국어] NULL 이면 이 장치는 IOMMU 아래가 아니다 */
 }
 
 static void free_context_table(struct intel_iommu *iommu)
