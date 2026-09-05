@@ -957,7 +957,7 @@ static int __init dmar_parse_one_andd(struct acpi_dmar_header *header,
 	return 0;	/* [한국어] 항목 처리 완료 */
 }
 
-#ifdef CONFIG_ACPI_NUMA
+#ifdef CONFIG_ACPI_NUMA	/* [한국어] NUMA 를 켠 빌드에서만 RHSA 항목을 해석한다 */
 /*
  * [한국어]
  * dmar_parse_one_rhsa - RHSA 항목으로 유닛의 NUMA 노드를 정한다
@@ -1014,211 +1014,363 @@ static int dmar_parse_one_rhsa(struct acpi_dmar_header *header, void *arg)
 #define	dmar_parse_one_rhsa		dmar_res_noop	/* [한국어] NUMA 를 끈 빌드에서는 RHSA 항목을 조용히 건너뛴다. 노드 정보를 쓸 곳이 없기 때문이다 */
 #endif
 
+/*
+ * [한국어]
+ * dmar_table_print_dmar_entry - DMAR 표 항목 하나를 사람이 읽을 수 있게 로그에 찍는다
+ *
+ * @header: 찍을 항목.
+ * @return: 없음.
+ *
+ * 부팅 파싱에서만 불린다. dmesg 에 남은 이 목록이 "이 시스템의 IOMMU 구성이
+ * 어떠했는가"를 알려 주는 유일한 기록인 경우가 많다 — 나중에 문제를
+ * 조사할 때 표를 다시 읽을 방법이 없기 때문이다(DMAR 표는 __initdata 라
+ * 부팅이 끝나면 해제된다).
+ *
+ * 항목 종류마다 의미 있는 필드만 골라 찍는다. DRHD 는 레지스터 주소와
+ * 플래그, RMRR 은 예약 구간의 범위, RHSA 는 근접 도메인 같은 식이다.
+ *
+ * ANDD 만 여기서 찍지 않는다(코드 안 영어 주석). 이름 문자열이 NUL 로
+ * 끝나는지 먼저 검증해야 안전하게 찍을 수 있어서, 그 검증을 하는
+ * dmar_parse_one_andd 에서 대신 찍는다.
+ *
+ * 실행 컨텍스트: 표 파싱(부팅). 프로세스 컨텍스트.
+ */
 static void
 dmar_table_print_dmar_entry(struct acpi_dmar_header *header)
 {
-	struct acpi_dmar_hardware_unit *drhd;
-	struct acpi_dmar_reserved_memory *rmrr;
-	struct acpi_dmar_atsr *atsr;
-	struct acpi_dmar_rhsa *rhsa;
-	struct acpi_dmar_satc *satc;
+	struct acpi_dmar_hardware_unit *drhd;	/* [한국어] DRHD 항목으로 해석할 때 */
+	struct acpi_dmar_reserved_memory *rmrr;	/* [한국어] RMRR 일 때 */
+	struct acpi_dmar_atsr *atsr;	/* [한국어] ATSR 일 때 */
+	struct acpi_dmar_rhsa *rhsa;	/* [한국어] RHSA 일 때 */
+	struct acpi_dmar_satc *satc;	/* [한국어] SATC 일 때 */
 
-	switch (header->type) {
-	case ACPI_DMAR_TYPE_HARDWARE_UNIT:
-		drhd = container_of(header, struct acpi_dmar_hardware_unit,
-				    header);
-		pr_info("DRHD base: %#016Lx flags: %#x\n",
-			(unsigned long long)drhd->address, drhd->flags);
-		break;
-	case ACPI_DMAR_TYPE_RESERVED_MEMORY:
-		rmrr = container_of(header, struct acpi_dmar_reserved_memory,
-				    header);
-		pr_info("RMRR base: %#016Lx end: %#016Lx\n",
-			(unsigned long long)rmrr->base_address,
-			(unsigned long long)rmrr->end_address);
-		break;
-	case ACPI_DMAR_TYPE_ROOT_ATS:
-		atsr = container_of(header, struct acpi_dmar_atsr, header);
-		pr_info("ATSR flags: %#x\n", atsr->flags);
-		break;
-	case ACPI_DMAR_TYPE_HARDWARE_AFFINITY:
-		rhsa = container_of(header, struct acpi_dmar_rhsa, header);
-		pr_info("RHSA base: %#016Lx proximity domain: %#x\n",
-		       (unsigned long long)rhsa->base_address,
-		       rhsa->proximity_domain);
-		break;
-	case ACPI_DMAR_TYPE_NAMESPACE:
+	switch (header->type) {	/* [한국어] 항목 종류에 따라 */
+	case ACPI_DMAR_TYPE_HARDWARE_UNIT:	/* [한국어] VT-d 유닛 */
+		drhd = container_of(header, struct acpi_dmar_hardware_unit,	/* [한국어] 그 형식으로 */
+				    header);	/* [한국어] 해석하고 */
+		pr_info("DRHD base: %#016Lx flags: %#x\n",	/* [한국어] 레지스터 주소와 플래그를 찍는다 */
+			(unsigned long long)drhd->address, drhd->flags);	/* [한국어] 그 값들 */
+		break;	/* [한국어] 다음 */
+	case ACPI_DMAR_TYPE_RESERVED_MEMORY:	/* [한국어] 예약 메모리 구간 */
+		rmrr = container_of(header, struct acpi_dmar_reserved_memory,	/* [한국어] 그 형식으로 */
+				    header);	/* [한국어] 해석하고 */
+		pr_info("RMRR base: %#016Lx end: %#016Lx\n",	/* [한국어] 구간의 범위를 찍는다 */
+			(unsigned long long)rmrr->base_address,	/* [한국어] 시작 */
+			(unsigned long long)rmrr->end_address);	/* [한국어] 끝 */
+		break;	/* [한국어] 다음 */
+	case ACPI_DMAR_TYPE_ROOT_ATS:	/* [한국어] ATS 능력 보고 */
+		atsr = container_of(header, struct acpi_dmar_atsr, header);	/* [한국어] 그 형식으로 */
+		pr_info("ATSR flags: %#x\n", atsr->flags);	/* [한국어] 플래그만 찍는다(비트 0 이 include_all 이다) */
+		break;	/* [한국어] 다음 */
+	case ACPI_DMAR_TYPE_HARDWARE_AFFINITY:	/* [한국어] NUMA 근접성 */
+		rhsa = container_of(header, struct acpi_dmar_rhsa, header);	/* [한국어] 그 형식으로 */
+		pr_info("RHSA base: %#016Lx proximity domain: %#x\n",	/* [한국어] 어느 유닛이 어느 노드인지 */
+		       (unsigned long long)rhsa->base_address,	/* [한국어] 유닛의 레지스터 주소 */
+		       rhsa->proximity_domain);	/* [한국어] 근접 도메인 번호 */
+		break;	/* [한국어] 다음 */
+	case ACPI_DMAR_TYPE_NAMESPACE:	/* [한국어] ACPI 네임스페이스 장치는 */
 		/* We don't print this here because we need to sanity-check
 		   it first. So print it in dmar_parse_one_andd() instead. */
-		break;
-	case ACPI_DMAR_TYPE_SATC:
-		satc = container_of(header, struct acpi_dmar_satc, header);
-		pr_info("SATC flags: 0x%x\n", satc->flags);
-		break;
+		break;	/* [한국어] 여기서 찍지 않는다. 이름이 NUL 로 끝나는지 먼저 검증해야 안전해서, 그 검증을 하는 dmar_parse_one_andd 가 대신 찍는다 (위 영어 주석) */
+	case ACPI_DMAR_TYPE_SATC:	/* [한국어] SoC 통합 ATS 신고 */
+		satc = container_of(header, struct acpi_dmar_satc, header);	/* [한국어] 그 형식으로 */
+		pr_info("SATC flags: 0x%x\n", satc->flags);	/* [한국어] 플래그를 찍는다(비트 0 이 atc_required 다) */
+		break;	/* [한국어] 끝 */
 	}
 }
 
 /**
  * dmar_table_detect - checks to see if the platform supports DMAR devices
  */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어)
+ * dmar_table_detect - 이 플랫폼에 DMAR 표가 있는지 확인하고 매핑한다
+ *
+ * @return: 0 이면 표가 있다, -ENOENT 면 없거나 매핑에 실패했다.
+ *
+ * VT-d 를 쓸 수 있는지의 첫 판단이다. DMAR 표가 없다는 것은 펌웨어가
+ * IOMMU 하드웨어를 보고하지 않았다는 뜻이고, 그러면 아무것도 할 수 없다.
+ *
+ * acpi_get_table 이 성공했는데 dmar_tbl 이 NULL 인 경우를 따로 확인한다 —
+ * 표는 있는데 매핑에 실패한 상황이라, 있는 것으로 착각하고 진행하면
+ * NULL 을 역참조한다.
+ *
+ * 이 함수는 두 번 불린다: 아주 이른 시점의 탐지와, parse_dmar_table 안에서
+ * 한 번 더. 그 이유는 그쪽 주석에 있다.
+ *
+ * 실행 컨텍스트: 부팅 초기(__init).
+ */
 static int __init dmar_table_detect(void)
 {
-	acpi_status status = AE_OK;
+	acpi_status status = AE_OK;	/* [한국어] ACPI 호출의 결과 */
 
 	/* if we could find DMAR table, then there are DMAR devices */
-	status = acpi_get_table(ACPI_SIG_DMAR, 0, &dmar_tbl);
+	status = acpi_get_table(ACPI_SIG_DMAR, 0, &dmar_tbl);	/* [한국어] DMAR 표를 찾아 매핑한다. 표가 있다는 것이 곧 VT-d 하드웨어가 있다는 뜻이다 (위 영어 주석) */
 
-	if (ACPI_SUCCESS(status) && !dmar_tbl) {
-		pr_warn("Unable to map DMAR\n");
-		status = AE_NOT_FOUND;
+	if (ACPI_SUCCESS(status) && !dmar_tbl) {	/* [한국어] 표는 찾았는데 매핑이 안 된 경우 */
+		pr_warn("Unable to map DMAR\n");	/* [한국어] 있는 것으로 착각하고 진행하면 NULL 을 역참조한다 */
+		status = AE_NOT_FOUND;	/* [한국어] 없는 것으로 처리한다 */
 	}
 
-	return ACPI_SUCCESS(status) ? 0 : -ENOENT;
+	return ACPI_SUCCESS(status) ? 0 : -ENOENT;	/* [한국어] 표가 없으면 VT-d 를 쓸 수 없다 */
 }
 
+/*
+ * [한국어]
+ * dmar_walk_remapping_entries - DMAR 표의 항목들을 훑으며 종류별 콜백을 부른다
+ *
+ * @start: 첫 항목. @len: 훑을 전체 길이. @cb: 종류별 콜백 묶음.
+ * @return: 0 성공, 음수면 콜백이 실패했거나 표가 손상되었다.
+ *
+ * 이 파일의 모든 표 파싱이 이 한 함수를 거친다. 항목 종류를 인덱스로 하는
+ * 콜백 배열 덕분에, 같은 순회 코드가 부팅 파싱·핫플러그 삽입·제거 검증에
+ * 모두 쓰인다.
+ *
+ * 표가 손상된 경우에 대한 방어가 두 겹이다. ACPI 표는 펌웨어가 준 것이라
+ * 신뢰할 수 없다.
+ *   - 길이가 0 인 항목: next 가 iter 와 같아져 무한 루프가 된다. 그래서
+ *     그 자리에서 멈춘다(코드 안 영어 주석).
+ *   - 표 끝을 넘어가는 항목: 그대로 두면 표 밖의 메모리를 항목으로 해석한다.
+ *     오류로 처리한다.
+ *
+ * 모르는 종류를 만났을 때의 처리가 두 갈래인 것도 의도적이다.
+ *   - 정의된 범위를 넘는 종류(>= ACPI_DMAR_TYPE_RESERVED): 앞으로의 호환성을
+ *     위해 조용히 건너뛴다(코드 안 영어 주석). 새 스펙의 항목을 옛 커널이
+ *     만났을 때 부팅이 실패하면 안 된다.
+ *   - 정의된 종류인데 콜백이 없는 경우: ignore_unhandled 가 정한다. 부팅
+ *     파싱에서는 오류로 보고, 특정 종류만 처리하는 순회에서는 건너뛴다.
+ *
+ * 실행 컨텍스트: 표 파싱 또는 핫플러그. 프로세스 컨텍스트.
+ */
 static int dmar_walk_remapping_entries(struct acpi_dmar_header *start,
 				       size_t len, struct dmar_res_callback *cb)
 {
-	struct acpi_dmar_header *iter, *next;
-	struct acpi_dmar_header *end = ((void *)start) + len;
+	struct acpi_dmar_header *iter, *next;	/* [한국어] 현재 항목과 다음 항목 */
+	struct acpi_dmar_header *end = ((void *)start) + len;	/* [한국어] 훑을 영역의 끝 */
 
-	for (iter = start; iter < end; iter = next) {
-		next = (void *)iter + iter->length;
-		if (iter->length == 0) {
+	for (iter = start; iter < end; iter = next) {	/* [한국어] 항목을 하나씩 */
+		next = (void *)iter + iter->length;	/* [한국어] 다음 항목은 이 항목의 길이만큼 뒤에 있다 */
+		if (iter->length == 0) {	/* [한국어] 길이가 0 이면 next 가 iter 와 같아져 무한 루프가 된다 (위 영어 주석) */
 			/* Avoid looping forever on bad ACPI tables */
-			pr_debug(FW_BUG "Invalid 0-length structure\n");
-			break;
-		} else if (next > end) {
+			pr_debug(FW_BUG "Invalid 0-length structure\n");	/* [한국어] 펌웨어가 준 표가 손상되었다 */
+			break;	/* [한국어] 그 자리에서 멈춘다 */
+		} else if (next > end) {	/* [한국어] 항목이 표 끝을 넘어가면 (위 영어 주석) */
 			/* Avoid passing table end */
-			pr_warn(FW_BUG "Record passes table end\n");
-			return -EINVAL;
+			pr_warn(FW_BUG "Record passes table end\n");	/* [한국어] 그대로 두면 표 밖의 메모리를 항목으로 해석하게 된다 */
+			return -EINVAL;	/* [한국어] 오류로 처리한다 */
 		}
 
-		if (cb->print_entry)
-			dmar_table_print_dmar_entry(iter);
+		if (cb->print_entry)	/* [한국어] 로그를 남기라고 했으면 */
+			dmar_table_print_dmar_entry(iter);	/* [한국어] 항목 내용을 찍는다 */
 
-		if (iter->type >= ACPI_DMAR_TYPE_RESERVED) {
+		if (iter->type >= ACPI_DMAR_TYPE_RESERVED) {	/* [한국어] 우리가 아는 범위를 넘는 종류면 */
 			/* continue for forward compatibility */
-			pr_debug("Unknown DMAR structure type %d\n",
-				 iter->type);
-		} else if (cb->cb[iter->type]) {
-			int ret;
+			pr_debug("Unknown DMAR structure type %d\n",	/* [한국어] 조용히 건너뛴다 — 새 스펙의 항목을 옛 커널이 만났을 때 부팅이 실패하면 안 된다 (위 영어 주석) */
+				 iter->type);	/* [한국어] 어떤 종류였는지 */
+		} else if (cb->cb[iter->type]) {	/* [한국어] 아는 종류이고 콜백이 있으면 */
+			int ret;	/* [한국어] 그 결과 */
 
-			ret = cb->cb[iter->type](iter, cb->arg[iter->type]);
-			if (ret)
-				return ret;
-		} else if (!cb->ignore_unhandled) {
-			pr_warn("No handler for DMAR structure type %d\n",
-				iter->type);
-			return -EINVAL;
+			ret = cb->cb[iter->type](iter, cb->arg[iter->type]);	/* [한국어] 종류에 맞는 처리를 한다 */
+			if (ret)	/* [한국어] 실패하면 */
+				return ret;	/* [한국어] 순회를 멈추고 전파한다 */
+		} else if (!cb->ignore_unhandled) {	/* [한국어] 콜백이 없는데 건너뛰지 말라고 했으면 */
+			pr_warn("No handler for DMAR structure type %d\n",	/* [한국어] 다룰 수 없는 항목이다 */
+				iter->type);	/* [한국어] 어떤 종류였는지 */
+			return -EINVAL;	/* [한국어] 오류로 처리한다 */
 		}
 	}
 
-	return 0;
+	return 0;	/* [한국어] 표 전체를 훑었다 */
 }
 
+/*
+ * [한국어]
+ * dmar_walk_dmar_table - DMAR 표 전체를 훑는다
+ *
+ * @dmar: 매핑된 DMAR 표. @cb: 종류별 콜백 묶음.
+ * @return: dmar_walk_remapping_entries 의 결과.
+ *
+ * 표 헤더 바로 뒤가 첫 항목이고, 전체 길이에서 헤더 크기를 뺀 만큼이
+ * 항목 영역이다. 그 계산만 해 주는 얇은 껍데기다.
+ *
+ * 이 계산을 한 곳에 모아 둔 이유: 헤더 크기를 잘못 빼면 첫 항목의 시작이나
+ * 마지막 항목의 끝이 어긋나는데, 그것은 표 밖을 읽거나 항목 하나를 놓치는
+ * 결과로 이어진다. 호출부마다 반복하지 않는 편이 안전하다.
+ *
+ * 실행 컨텍스트: 표 파싱 또는 핫플러그.
+ */
 static inline int dmar_walk_dmar_table(struct acpi_table_dmar *dmar,
 				       struct dmar_res_callback *cb)
 {
-	return dmar_walk_remapping_entries((void *)(dmar + 1),
-			dmar->header.length - sizeof(*dmar), cb);
+	return dmar_walk_remapping_entries((void *)(dmar + 1),	/* [한국어] 첫 항목은 표 헤더 바로 뒤에 있다 */
+			dmar->header.length - sizeof(*dmar), cb);	/* [한국어] 전체 길이에서 헤더 크기를 뺀 만큼이 항목 영역이다. 이 계산이 어긋나면 표 밖을 읽거나 항목 하나를 놓친다 */
 }
 
 /**
  * parse_dmar_table - parses the DMA reporting table
  */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어)
+ * parse_dmar_table - DMAR 표 전체를 파싱해 모든 항목을 커널 자료구조로 만든다
+ *
+ * @return: 0 성공, 음수면 표가 없거나 손상되었거나 항목 처리가 실패했다.
+ *
+ * 부팅 시 VT-d 초기화의 실질적인 시작점이다. 콜백 묶음을 채워
+ * dmar_walk_dmar_table 에 넘기면, 종류마다 알맞은 파서가 불려 DRHD·RMRR·
+ * ATSR·RHSA·ANDD·SATC 가 모두 등록된다.
+ *
+ * ignore_unhandled 를 참으로 두는 것을 눈여겨볼 것: 모든 종류에 콜백을
+ * 꽂았으므로 사실상 걸릴 일이 없지만, 앞으로 새 종류가 생겨도 부팅이
+ * 실패하지 않게 하는 안전판이다.
+ *
+ * dmar_table_detect 를 다시 부르는 이유(코드 안 영어 주석): 앞서의 매핑은
+ * fixmap 으로 되어 있을 수 있다. 부팅이 진행되어 정상적인 매핑이 가능해진
+ * 지금 다시 얻어야 표 전체를 안전하게 훑을 수 있다.
+ *
+ * tboot_get_dmar_table 를 거치는 이유(코드 안 영어 주석): TXT 로 부팅한
+ * 경우 ACPI 표가 DMA 로부터 보호되지 않을 수 있다. 그때는 SINIT 이 TXT
+ * 힙에 저장해 둔 사본 — DMA 보호된 영역에 있는 — 을 대신 쓴다. 측정 부팅의
+ * 신뢰 사슬이 여기서도 이어진다.
+ *
+ * width 검사: 호스트 주소 폭이 페이지 시프트보다 작으면 표가 손상된 것이다.
+ * DRHD 가 하나도 없으면 경고만 남기는데(FW_BUG), 표는 있는데 유닛이 없는
+ * 이상한 상태이기 때문이다.
+ *
+ * 실행 컨텍스트: 부팅 초기(__init). 단일 스레드.
+ *
+ * 호출 체인:
+ *   dmar_table_init() → [parse_dmar_table] → dmar_walk_dmar_table()
+ *     → dmar_parse_one_drhd() 등
+ */
 static int __init
 parse_dmar_table(void)
 {
-	struct acpi_table_dmar *dmar;
-	int drhd_count = 0;
-	int ret;
-	struct dmar_res_callback cb = {
-		.print_entry = true,
-		.ignore_unhandled = true,
-		.arg[ACPI_DMAR_TYPE_HARDWARE_UNIT] = &drhd_count,
-		.cb[ACPI_DMAR_TYPE_HARDWARE_UNIT] = &dmar_parse_one_drhd,
-		.cb[ACPI_DMAR_TYPE_RESERVED_MEMORY] = &dmar_parse_one_rmrr,
-		.cb[ACPI_DMAR_TYPE_ROOT_ATS] = &dmar_parse_one_atsr,
-		.cb[ACPI_DMAR_TYPE_HARDWARE_AFFINITY] = &dmar_parse_one_rhsa,
-		.cb[ACPI_DMAR_TYPE_NAMESPACE] = &dmar_parse_one_andd,
-		.cb[ACPI_DMAR_TYPE_SATC] = &dmar_parse_one_satc,
+	struct acpi_table_dmar *dmar;	/* [한국어] 매핑된 표 */
+	int drhd_count = 0;	/* [한국어] 발견한 유닛 수 */
+	int ret;	/* [한국어] 결과 */
+	struct dmar_res_callback cb = {	/* [한국어] 종류별 파서를 꽂은 콜백 묶음 */
+		.print_entry = true,	/* [한국어] 부팅에서만 항목 내용을 로그에 남긴다. 이 기록이 나중에 구성을 확인할 유일한 단서가 되는 경우가 많다 */
+		.ignore_unhandled = true,	/* [한국어] 모든 종류에 콜백을 꽂았지만, 앞으로 새 종류가 생겨도 부팅이 실패하지 않게 하는 안전판이다 */
+		.arg[ACPI_DMAR_TYPE_HARDWARE_UNIT] = &drhd_count,	/* [한국어] DRHD 파서에 카운터를 넘겨 유닛 수를 세게 한다 */
+		.cb[ACPI_DMAR_TYPE_HARDWARE_UNIT] = &dmar_parse_one_drhd,	/* [한국어] VT-d 유닛 */
+		.cb[ACPI_DMAR_TYPE_RESERVED_MEMORY] = &dmar_parse_one_rmrr,	/* [한국어] 예약 메모리 구간 */
+		.cb[ACPI_DMAR_TYPE_ROOT_ATS] = &dmar_parse_one_atsr,	/* [한국어] ATS 능력 보고 */
+		.cb[ACPI_DMAR_TYPE_HARDWARE_AFFINITY] = &dmar_parse_one_rhsa,	/* [한국어] NUMA 근접성 */
+		.cb[ACPI_DMAR_TYPE_NAMESPACE] = &dmar_parse_one_andd,	/* [한국어] ACPI 네임스페이스 장치 */
+		.cb[ACPI_DMAR_TYPE_SATC] = &dmar_parse_one_satc,	/* [한국어] SoC 통합 ATS 신고 */
 	};
 
 	/*
 	 * Do it again, earlier dmar_tbl mapping could be mapped with
 	 * fixed map.
 	 */
-	dmar_table_detect();
+	dmar_table_detect();	/* [한국어] 다시 얻는다 — 앞서의 매핑은 fixmap 이었을 수 있고, 지금은 정상 매핑이 가능하다 (위 영어 주석) */
 
 	/*
 	 * ACPI tables may not be DMA protected by tboot, so use DMAR copy
 	 * SINIT saved in SinitMleData in TXT heap (which is DMA protected)
 	 */
-	dmar_tbl = tboot_get_dmar_table(dmar_tbl);
+	dmar_tbl = tboot_get_dmar_table(dmar_tbl);	/* [한국어] TXT 로 부팅했으면 SINIT 이 DMA 보호 영역에 저장해 둔 사본을 쓴다. ACPI 표 자체는 DMA 로부터 보호되지 않을 수 있어, 측정 부팅의 신뢰 사슬이 여기서도 이어진다 (위 영어 주석) */
 
-	dmar = (struct acpi_table_dmar *)dmar_tbl;
-	if (!dmar)
-		return -ENODEV;
+	dmar = (struct acpi_table_dmar *)dmar_tbl;	/* [한국어] 표를 DMAR 형식으로 */
+	if (!dmar)	/* [한국어] 표가 없으면 */
+		return -ENODEV;	/* [한국어] VT-d 하드웨어가 없다 */
 
-	if (dmar->width < PAGE_SHIFT - 1) {
-		pr_warn("Invalid DMAR haw\n");
-		return -EINVAL;
+	if (dmar->width < PAGE_SHIFT - 1) {	/* [한국어] 호스트 주소 폭이 페이지 시프트보다 작으면 */
+		pr_warn("Invalid DMAR haw\n");	/* [한국어] 표가 손상된 것이다 */
+		return -EINVAL;	/* [한국어] 파싱하지 않는다 */
 	}
 
-	pr_info("Host address width %d\n", dmar->width + 1);
-	ret = dmar_walk_dmar_table(dmar, &cb);
-	if (ret == 0 && drhd_count == 0)
-		pr_warn(FW_BUG "No DRHD structure found in DMAR table\n");
+	pr_info("Host address width %d\n", dmar->width + 1);	/* [한국어] 이 시스템이 다룰 수 있는 물리 주소 폭 */
+	ret = dmar_walk_dmar_table(dmar, &cb);	/* [한국어] 표 전체를 훑으며 종류별 파서를 부른다 */
+	if (ret == 0 && drhd_count == 0)	/* [한국어] 성공했는데 유닛이 하나도 없으면 */
+		pr_warn(FW_BUG "No DRHD structure found in DMAR table\n");	/* [한국어] 표는 있는데 하드웨어가 없다는 이상한 상태다 */
 
-	return ret;
+	return ret;	/* [한국어] 파싱 결과 */
 }
 
+/*
+ * [한국어]
+ * dmar_pci_device_match - 이 장치나 그 조상이 device scope 목록에 있는지 본다
+ *
+ * @devices: 유닛의 장치 목록. @cnt: 그 개수. @dev: 찾을 장치.
+ * @return: 1 이면 이 유닛이 담당하는 장치다.
+ *
+ * 부모를 거슬러 올라가며 찾는 것이 핵심이다. DMAR 표가 브리지를 지목했다면
+ * 그 아래의 모든 장치가 그 유닛에 속한다 — 표에 장치 하나하나를 적을 필요가
+ * 없도록 설계되어 있다.
+ *
+ * 그래서 자기 자신이 목록에 없어도 부모 브리지가 있으면 매치된다. while
+ * 루프가 dev->bus->self 로 한 단계씩 올라가는 것이 그 구현이다.
+ *
+ * 실행 컨텍스트: 유닛 조회. RCU 순회 안에서 불린다.
+ */
 static int dmar_pci_device_match(struct dmar_dev_scope devices[],
 				 int cnt, struct pci_dev *dev)
 {
-	int index;
-	struct device *tmp;
+	int index;	/* [한국어] 순회 인덱스 */
+	struct device *tmp;	/* [한국어] 순회 커서 */
 
-	while (dev) {
-		for_each_active_dev_scope(devices, cnt, index, tmp)
-			if (dev_is_pci(tmp) && dev == to_pci_dev(tmp))
-				return 1;
+	while (dev) {	/* [한국어] 장치에서 시작해 부모를 거슬러 올라가며 */
+		for_each_active_dev_scope(devices, cnt, index, tmp)	/* [한국어] 목록의 연결된 장치들과 */
+			if (dev_is_pci(tmp) && dev == to_pci_dev(tmp))	/* [한국어] 비교한다 */
+				return 1;	/* [한국어] 이 유닛이 담당한다 */
 
 		/* Check our parent */
-		dev = dev->bus->self;
+		dev = dev->bus->self;	/* [한국어] 부모 브리지로 올라간다 (위 영어 주석). 표가 브리지를 지목했다면 그 아래 모든 장치가 그 유닛에 속하므로, 표에 장치를 하나하나 적을 필요가 없다 */
 	}
 
-	return 0;
+	return 0;	/* [한국어] 이 유닛의 것이 아니다 */
 }
 
+/*
+ * [한국어]
+ * dmar_find_matched_drhd_unit - 이 PCI 장치를 담당하는 유닛을 찾는다
+ *
+ * @dev: 찾을 장치.
+ * @return: 담당 유닛, 없으면 NULL.
+ *
+ * 목록 순서가 결과를 정한다. dmar_register_drhd_unit 이 include_all 유닛을
+ * 꼬리에 넣어 두었으므로, 앞에서부터 훑으면 특정 장치를 지목한 유닛이 먼저
+ * 매치된다. 그 순서가 없으면 include_all 이 모든 장치를 가로챈다.
+ *
+ * 두 조건 중 하나면 매치다.
+ *   - include_all 유닛이고 세그먼트가 같다.
+ *   - device scope 목록에 이 장치나 그 조상이 있다.
+ *
+ * pci_physfn 으로 시작하는 이유: VF 는 자기 DMAR 정보를 갖지 않고 PF 를
+ * 통해 조회된다.
+ *
+ * 동기화: RCU 읽기 락. 목록이 핫플러그로 바뀔 수 있다.
+ * 실행 컨텍스트: 인터럽트 재매핑 설정 등. 프로세스 컨텍스트.
+ */
 struct dmar_drhd_unit *
 dmar_find_matched_drhd_unit(struct pci_dev *dev)
 {
-	struct dmar_drhd_unit *dmaru;
-	struct acpi_dmar_hardware_unit *drhd;
+	struct dmar_drhd_unit *dmaru;	/* [한국어] 순회 커서 */
+	struct acpi_dmar_hardware_unit *drhd;	/* [한국어] 그 유닛의 원본 ACPI 항목 */
 
-	dev = pci_physfn(dev);
+	dev = pci_physfn(dev);	/* [한국어] VF 는 자기 DMAR 정보를 갖지 않고 PF 를 통해 조회된다 */
 
-	rcu_read_lock();
-	for_each_drhd_unit(dmaru) {
-		drhd = container_of(dmaru->hdr,
-				    struct acpi_dmar_hardware_unit,
-				    header);
+	rcu_read_lock();	/* [한국어] 목록이 핫플러그로 바뀔 수 있다 */
+	for_each_drhd_unit(dmaru) {	/* [한국어] 앞에서부터 훑는다. 목록 순서 덕분에 특정 장치를 지목한 유닛이 include_all 보다 먼저 매치된다 */
+		drhd = container_of(dmaru->hdr,	/* [한국어] 보관된 ACPI 항목으로 */
+				    struct acpi_dmar_hardware_unit,	/* [한국어] DRHD 형식으로 */
+				    header);	/* [한국어] 해석 */
 
-		if (dmaru->include_all &&
-		    drhd->segment == pci_domain_nr(dev->bus))
-			goto out;
+		if (dmaru->include_all &&	/* [한국어] "나머지를 모두 담당한다"는 유닛이고 */
+		    drhd->segment == pci_domain_nr(dev->bus))	/* [한국어] 세그먼트가 같으면 */
+			goto out;	/* [한국어] 이 유닛이 담당한다 */
 
-		if (dmar_pci_device_match(dmaru->devices,
-					  dmaru->devices_cnt, dev))
-			goto out;
+		if (dmar_pci_device_match(dmaru->devices,	/* [한국어] 장치 목록에 이 장치나 그 조상이 있으면 */
+					  dmaru->devices_cnt, dev))	/* [한국어] 역시 */
+			goto out;	/* [한국어] 이 유닛이 담당한다 */
 	}
-	dmaru = NULL;
-out:
-	rcu_read_unlock();
+	dmaru = NULL;	/* [한국어] 어느 유닛도 담당하지 않는다 */
+out:	/* [한국어] 두 결론이 합류 */
+	rcu_read_unlock();	/* [한국어] 순회 끝 */
 
-	return dmaru;
+	return dmaru;	/* [한국어] 담당 유닛 또는 NULL */
 }
 
 static void __init dmar_acpi_insert_dev_scope(u8 device_number,
