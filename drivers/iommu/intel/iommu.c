@@ -297,6 +297,34 @@ struct device *device_rbtree_find(struct intel_iommu *iommu, u16 rid)
 	return info ? info->dev : NULL;	/* [한국어] 반환된 장치의 수명은 보장되지 않는다 — 호출자가 따로 동기화해야 한다 (위 영어 주석) */
 }
 
+/*
+ * [한국어]
+ * device_rbtree_insert - 장치를 소스 id 색인 트리에 등록한다
+ *
+ * @iommu: 이 장치를 맡을 DMAR 유닛.
+ * @info: 등록할 장치 정보. info->bus/devfn 이 키가 된다.
+ * @return: 0 성공, -EEXIST 면 같은 소스 id 가 이미 등록되어 있다.
+ *
+ * 장치가 이 유닛에 붙는 순간(intel_iommu_probe_device) 호출된다. 이 등록이
+ * 끝나야 하드웨어 폴트/페이지 요청이 struct device 로 되짚어진다
+ * (device_rbtree_find 주석 참고).
+ *
+ * rb_find_add 를 쓰는 이유: "이미 있는지 찾고, 없으면 넣는다"를 트리 순회 한
+ * 번으로 끝낸다. rb_find + rb_insert 로 나누면 순회를 두 번 하는 데다 그 사이
+ * 락을 놓칠 여지가 생긴다. 반환값이 NULL 이 아니면 충돌한 기존 노드다.
+ *
+ * -EEXIST 가 WARN 인 이유: 두 장치가 같은 requester id 를 갖는 것은 하드웨어
+ * 구성이 잘못되었거나 커널이 같은 장치를 두 번 프로브했다는 뜻이다. 정상
+ * 동작에서는 일어날 수 없으므로 조용히 넘기지 않고 스택을 남긴다.
+ *
+ * 동기화: device_rbtree_lock 을 인터럽트를 끈 채 잡는다. 같은 락을 폴트
+ * 인터럽트 문맥의 device_rbtree_find 가 잡기 때문이다.
+ * 실행 컨텍스트: 장치 프로브. 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   intel_iommu_probe_device() → [device_rbtree_insert]
+ *     → rb_find_add() → device_rid_cmp()
+ */
 static int device_rbtree_insert(struct intel_iommu *iommu,
 				struct device_domain_info *info)
 {
@@ -392,19 +420,28 @@ struct dmar_satc_unit {
 	struct intel_iommu *iommu;	/* the corresponding iommu */	/* [한국어] 이 항목을 담당하는 DMAR 유닛 */
 	int devices_cnt;		/* target device count */	/* [한국어] 장치 개수 */
 	u8 atc_required:1;		/* ATS is required */
+	/* [한국어] 이 SATC 항목의 장치들이 ATS 를 "반드시" 켜야 하는지 여부.
+	 * 설정자: dmar_parse_one_satc() 가 ACPI 항목의 flags 비트 0 을 그대로 옮긴다.
+	 * 읽는 자: dmar_ats_supported() — 이 값이 1 이면 PCIe ATS 능력 구조가 없어도
+	 *   SoC 내부 경로로 ATS 가 동작하는 것으로 보고 활성화를 허용한다.
+	 * 값 범위: 0 이면 "쓸 수 있다"(선택), 1 이면 "없으면 동작하지 않는다"(필수).
+	 *   일반 PCIe 장치의 ATS 는 성능 최적화지만, SoC 통합 장치 중에는 번역
+	 *   캐시를 전제로 설계되어 그것 없이는 DMA 자체가 실패하는 것들이 있다.
+	 * 동기화: 파싱 시점에 한 번 쓰이고 이후 읽기만 한다. RCU 목록에 실려 있어
+	 *   순회 중 갱신되지 않는다. */
 };
 
-static LIST_HEAD(dmar_atsr_units);
-static LIST_HEAD(dmar_rmrr_units);
-static LIST_HEAD(dmar_satc_units);
+static LIST_HEAD(dmar_atsr_units);	/* [한국어] ATS 지원을 보고한 루트 포트 목록. 파싱 순서와 무관하게 조회되므로 전역이다 */
+static LIST_HEAD(dmar_rmrr_units);	/* [한국어] 펌웨어가 예약한 메모리 구간 목록. 장치 프로브 때 항등 매핑 여부를 정하는 근거가 된다 */
+static LIST_HEAD(dmar_satc_units);	/* [한국어] ATS 가 필수인 SoC 통합 장치 목록 */
 
-#define for_each_rmrr_units(rmrr) \
-	list_for_each_entry(rmrr, &dmar_rmrr_units, list)
+#define for_each_rmrr_units(rmrr) \	/* [한국어] RMRR 목록 순회 관용구. 여러 곳에서 같은 순회를 하므로 매크로로 뺐다 */
+	list_for_each_entry(rmrr, &dmar_rmrr_units, list)	/* [한국어] 위 매크로의 본체 */
 
 static void intel_iommu_domain_free(struct iommu_domain *domain);
 
-int dmar_disabled = !IS_ENABLED(CONFIG_INTEL_IOMMU_DEFAULT_ON);
-int intel_iommu_sm = IS_ENABLED(CONFIG_INTEL_IOMMU_SCALABLE_MODE_DEFAULT_ON);
+int dmar_disabled = !IS_ENABLED(CONFIG_INTEL_IOMMU_DEFAULT_ON);	/* [한국어] VT-d 를 끌지 여부. 기본값이 빌드 설정에서 오고, intel_iommu=on/off 가 덮어쓴다 */
+int intel_iommu_sm = IS_ENABLED(CONFIG_INTEL_IOMMU_SCALABLE_MODE_DEFAULT_ON);	/* [한국어] scalable mode(PASID 기반 새 형식) 사용 여부. SVA 와 nested 변환의 전제 조건이다 */
 
 int intel_iommu_enabled = 0;	/* [한국어] VT-d 가 실제로 켜졌는가. 다른 서브시스템(그래픽 드라이버 등)이 참고한다 */
 EXPORT_SYMBOL_GPL(intel_iommu_enabled);	/* [한국어] 모듈에서도 볼 수 있게 */
@@ -953,7 +990,7 @@ static struct intel_iommu *device_lookup_iommu(struct device *dev, u8 *bus, u8 *
 	if (!dev)	/* [한국어] 장치가 없다 */
 		return NULL;	/* [한국어] 찾을 수 없다 */
 
-	if (dev_is_pci(dev)) {
+	if (dev_is_pci(dev)) {	/* [한국어] PCI 장치는 별도 처리가 필요하다 — 아래에서 실제 DMA 를 내는 장치로 바꿔 잡는다 */
 		struct pci_dev *pf_pdev;	/* [한국어] 물리 함수(PF) */
 
 		pdev = pci_real_dma_dev(to_pci_dev(dev));	/* [한국어] DMA 를 실제로 내는 장치. 일부 장치는 다른 함수의 이름으로 DMA 를 낸다 */
@@ -1064,6 +1101,35 @@ static void free_context_table(struct intel_iommu *iommu)
 }
 
 #ifdef CONFIG_DMAR_DEBUG	/* [한국어] 폴트 진단이 켜진 빌드에서만 */
+/*
+ * [한국어]
+ * pgtable_walk - 폴트가 난 주소의 페이지 테이블을 레벨별로 덤프한다
+ *
+ * @iommu: 폴트를 보고한 DMAR 유닛.
+ * @pfn: 폴트 주소의 페이지 프레임 번호(IOVA >> 12).
+ * @bus, @devfn: 폴트를 낸 장치의 소스 id 를 쪼갠 값. 로그에 함께 찍는다.
+ * @parent: 워크를 시작할 페이지 테이블(보통 도메인의 최상위 테이블).
+ * @level: @parent 가 몇 단계인지. 여기서부터 1 이 될 때까지 내려간다.
+ * @return: 없음. 결과는 dmesg 로만 나간다.
+ *
+ * 왜 필요한가: DMA 폴트가 났을 때 "어느 주소가 실패했다"만으로는 원인을 알기
+ * 어렵다. 매핑이 아예 없는 것인지, 있는데 권한이 모자란 것인지, 큰 페이지
+ * 중간을 가리킨 것인지에 따라 의심할 곳이 완전히 다르다. 그래서 각 레벨의
+ * 항목 값을 그대로 찍어 준다.
+ *
+ * 동작: 레벨마다 pfn 의 해당 구간 비트로 오프셋을 뽑아 항목을 읽고, present 가
+ * 아니면 거기서 멈춘다(그 지점이 매핑이 끊긴 곳이다). 큰 페이지 항목을
+ * 만나도 멈춘다 — 그 아래 레벨이 없기 때문이다.
+ *
+ * CONFIG_DMAR_DEBUG 안에서만 빌드된다. 폴트 경로에서 dmesg 로 테이블 내용을
+ * 쏟아내는 것은 진단용이지 상용 동작이 아니기 때문이다.
+ *
+ * 실행 컨텍스트: 폴트 인터럽트 처리 경로. 잠들면 안 되고, 락도 잡지 않는다
+ * (이미 잘못된 상태를 관찰하는 중이라 정합성보다 정보가 우선이다).
+ *
+ * 호출 체인:
+ *   dmar_fault() → dmar_fault_dump_ptes() → [pgtable_walk]
+ */
 static void pgtable_walk(struct intel_iommu *iommu, unsigned long pfn,
 			 u8 bus, u8 devfn, struct dma_pte *parent, int level)
 {
@@ -1089,6 +1155,35 @@ static void pgtable_walk(struct intel_iommu *iommu, unsigned long pfn,
 	}
 }
 
+/*
+ * [한국어]
+ * dmar_fault_dump_ptes - 폴트 하나에 대해 루트/컨텍스트/PASID/페이지 테이블을 훑어 찍는다
+ *
+ * @iommu: 폴트를 보고한 DMAR 유닛.
+ * @source_id: 하드웨어가 알려 준 16비트 소스 id.
+ * @addr: 폴트가 난 주소(IOVA).
+ * @pasid: scalable mode 라면 폴트를 낸 PASID, 아니면 무효값.
+ * @return: 없음. 진단 출력만 한다.
+ *
+ * VT-d 의 변환 경로 전체를 위에서부터 따라 내려가며 각 단계의 항목을 덤프한다.
+ *   1) 루트 테이블에서 버스 번호로 항목을 찾는다. present 가 아니면 이 버스에
+ *      아무 설정이 없다는 뜻이라 거기서 멈춘다.
+ *   2) 컨텍스트 테이블에서 devfn 으로 항목을 찾는다. 여기서 present 가 아니면
+ *      "장치가 도메인에 붙지 않았는데 DMA 를 냈다"는 흔한 실패다.
+ *   3) 레거시 모드면 컨텍스트 항목이 곧바로 페이지 테이블 루트를 가리킨다.
+ *      scalable 모드면 PASID 디렉터리 → PASID 테이블 → 항목을 한 단계 더
+ *      거쳐야 페이지 테이블에 닿는다. 이 분기가 두 모드의 실질적 차이다.
+ *   4) 마지막으로 pgtable_walk 가 페이지 테이블을 레벨별로 찍는다.
+ *
+ * 각 단계에서 멈춘 지점 자체가 진단 정보다 — 어느 표에서 끊겼는지가 곧
+ * 무엇을 설정하지 않았는지를 말해 준다.
+ *
+ * CONFIG_DMAR_DEBUG 전용. 실행 컨텍스트는 폴트 인터럽트 처리 경로다.
+ *
+ * 호출 체인:
+ *   dmar_fault() (인터럽트 핸들러) → [dmar_fault_dump_ptes]
+ *     → root_entry_lctp()/root_entry_uctp() → pgtable_walk()
+ */
 void dmar_fault_dump_ptes(struct intel_iommu *iommu, u16 source_id,
 			  unsigned long long addr, u32 pasid)
 {
@@ -1366,7 +1461,7 @@ static void __iommu_flush_context(struct intel_iommu *iommu,
 		val = DMA_CCMD_DEVICE_INVL|DMA_CCMD_DID(did)	/* [한국어] 도메인 id 와 */
 			| DMA_CCMD_SID(source_id) | DMA_CCMD_FM(function_mask);	/* [한국어] 소스 id, 그리고 함수 마스크. 마스크로 여러 함수를 한 번에 무효화할 수 있다 */
 		break;
-	default:
+	default:	/* [한국어] 펌웨어/호출자가 알 수 없는 무효화 종류를 넘겼다 */
 		pr_warn("%s: Unexpected context-cache invalidation type 0x%llx\n",	/* [한국어] 알 수 없는 종류 — 호출자 버그 */
 			iommu->name, type);	/* [한국어] 어느 유닛의 어떤 요청이었는지 */
 		return;
@@ -1433,7 +1528,7 @@ void __iommu_flush_iotlb(struct intel_iommu *iommu, u16 did, u64 addr,
 		/* IH bit is passed in as part of address */
 		val_iva = size_order | addr;	/* [한국어] 주소와 범위 크기를 한 값에 담는다. 하위 비트가 크기의 로그값이고 상위가 주소라, 주소 정렬이 곧 무효화 가능한 최대 범위를 정한다 (위 영어 주석의 IH 비트도 여기 실린다) */
 		break;
-	default:
+	default:	/* [한국어] 마찬가지로 알 수 없는 IOTLB 무효화 종류 */
 		pr_warn("%s: Unexpected iotlb invalidation type 0x%llx\n",	/* [한국어] 알 수 없는 종류 */
 			iommu->name, type);	/* [한국어] 어느 유닛의 어떤 요청 */
 		return;
