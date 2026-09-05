@@ -1100,61 +1100,61 @@ static dma_addr_t __iommu_dma_map(struct device *dev, phys_addr_t phys,
 
 static void __iommu_dma_free_pages(struct page **pages, int count)
 {
-	while (count--)
-		__free_page(pages[count]);
-	kvfree(pages);
+	while (count--)	/* [한국어] 뒤에서부터 하나씩 */
+		__free_page(pages[count]);	/* [한국어] 페이지 반납. 고차 할당은 split_page 로 이미 낱장으로 쪼개 두었으므로 전부 단일 페이지로 다룰 수 있다 */
+	kvfree(pages);	/* [한국어] 포인터 배열 자체 (kvzalloc 으로 잡았다) */
 }
 
 static struct page **__iommu_dma_alloc_pages(struct device *dev,
 		unsigned int count, unsigned long order_mask, gfp_t gfp)
 {
-	struct page **pages;
-	unsigned int i = 0, nid = dev_to_node(dev);
+	struct page **pages;	/* [한국어] 확보한 페이지들의 포인터 배열 */
+	unsigned int i = 0, nid = dev_to_node(dev);	/* [한국어] 채운 개수와, 장치가 붙은 NUMA 노드 — 장치와 가까운 메모리에서 잡아야 DMA 지연이 낮다 */
 
-	order_mask &= GENMASK(MAX_PAGE_ORDER, 0);
-	if (!order_mask)
-		return NULL;
+	order_mask &= GENMASK(MAX_PAGE_ORDER, 0);	/* [한국어] 페이지 할당자가 다룰 수 있는 차수까지만 남긴다. IOMMU 가 1GB 페이지를 지원해도 버디 할당자가 그 크기를 주지는 않는다 */
+	if (!order_mask)	/* [한국어] 쓸 수 있는 차수가 하나도 없다 */
+		return NULL;	/* [한국어] 할당 불가 */
 
-	pages = kvzalloc_objs(*pages, count);
-	if (!pages)
-		return NULL;
+	pages = kvzalloc_objs(*pages, count);	/* [한국어] 포인터 배열. 개수가 많아질 수 있어 vmalloc 으로 넘어갈 수 있는 kv 판을 쓴다 */
+	if (!pages)	/* [한국어] 배열 할당 실패 */
+		return NULL;	/* [한국어] 포기 */
 
 	/* IOMMU can map any pages, so himem can also be used here */
-	gfp |= __GFP_NOWARN | __GFP_HIGHMEM;
+	gfp |= __GFP_NOWARN | __GFP_HIGHMEM;	/* [한국어] IOMMU 가 어떤 물리 페이지든 매핑할 수 있으므로 HIGHMEM 도 쓸 수 있다 (위 영어 주석). NOWARN 은 고차 할당 실패가 정상적인 후퇴이기 때문이다 */
 
-	while (count) {
-		struct page *page = NULL;
-		unsigned int order_size;
+	while (count) {	/* [한국어] 필요한 페이지 수를 다 채울 때까지 */
+		struct page *page = NULL;	/* [한국어] 이번 회차에 얻은 블록 */
+		unsigned int order_size;	/* [한국어] 그 블록의 페이지 수 */
 
 		/*
 		 * Higher-order allocations are a convenience rather
 		 * than a necessity, hence using __GFP_NORETRY until
 		 * falling back to minimum-order allocations.
 		 */
-		for (order_mask &= GENMASK(__fls(count), 0);
-		     order_mask; order_mask &= ~order_size) {
-			unsigned int order = __fls(order_mask);
-			gfp_t alloc_flags = gfp;
+		for (order_mask &= GENMASK(__fls(count), 0);	/* [한국어] 남은 개수보다 큰 차수는 후보에서 뺀다 */
+		     order_mask; order_mask &= ~order_size) {	/* [한국어] 실패하면 그 차수를 후보에서 지우고 한 단계 낮춰 재시도 */
+			unsigned int order = __fls(order_mask);	/* [한국어] 남은 후보 중 가장 큰 차수부터 */
+			gfp_t alloc_flags = gfp;	/* [한국어] 이 시도의 플래그 */
 
-			order_size = 1U << order;
-			if (order_mask > order_size)
-				alloc_flags |= __GFP_NORETRY;
-			page = alloc_pages_node(nid, alloc_flags, order);
-			if (!page)
-				continue;
-			if (order)
-				split_page(page, order);
-			break;
+			order_size = 1U << order;	/* [한국어] 그 차수의 페이지 수 */
+			if (order_mask > order_size)	/* [한국어] 아직 더 낮은 차수로 물러설 여지가 있다면 */
+				alloc_flags |= __GFP_NORETRY;	/* [한국어] 회수를 강하게 하지 않는다. 고차 할당은 편의일 뿐 필수가 아니므로, 메모리 압박을 만들어 가며 붙잡을 이유가 없다 (위 영어 주석) */
+			page = alloc_pages_node(nid, alloc_flags, order);	/* [한국어] 장치와 같은 NUMA 노드에서 시도 */
+			if (!page)	/* [한국어] 실패 */
+				continue;	/* [한국어] 한 단계 낮은 차수로 */
+			if (order)	/* [한국어] 고차 블록을 얻었다면 */
+				split_page(page, order);	/* [한국어] 낱장으로 쪼개 각 페이지가 독립적으로 참조·해제될 수 있게 한다. 배열에 낱장으로 담기 때문이다 */
+			break;	/* [한국어] 확보 성공 */
 		}
-		if (!page) {
-			__iommu_dma_free_pages(pages, i);
-			return NULL;
+		if (!page) {	/* [한국어] 모든 차수에서 실패 */
+			__iommu_dma_free_pages(pages, i);	/* [한국어] 지금까지 모은 것을 전부 반납 */
+			return NULL;	/* [한국어] 할당 실패 */
 		}
-		count -= order_size;
-		while (order_size--)
-			pages[i++] = page++;
+		count -= order_size;	/* [한국어] 남은 개수 갱신 */
+		while (order_size--)	/* [한국어] 얻은 블록의 각 페이지를 */
+			pages[i++] = page++;	/* [한국어] 배열에 차례로 담는다 */
 	}
-	return pages;
+	return pages;	/* [한국어] 요청한 개수만큼의 페이지 배열 */
 }
 
 /*
@@ -1164,100 +1164,100 @@ static struct page **__iommu_dma_alloc_pages(struct device *dev,
 static struct page **__iommu_dma_alloc_noncontiguous(struct device *dev,
 		size_t size, struct sg_table *sgt, gfp_t gfp, unsigned long attrs)
 {
-	struct iommu_domain *domain = iommu_get_dma_domain(dev);
-	struct iommu_dma_cookie *cookie = domain->iova_cookie;
-	struct iova_domain *iovad = &cookie->iovad;
-	bool coherent = dev_is_dma_coherent(dev);
-	int ioprot = dma_info_to_prot(DMA_BIDIRECTIONAL, coherent, attrs);
-	unsigned int count, min_size, alloc_sizes = domain->pgsize_bitmap;
-	struct page **pages;
-	dma_addr_t iova;
-	ssize_t ret;
+	struct iommu_domain *domain = iommu_get_dma_domain(dev);	/* [한국어] 이 장치의 기본 도메인 */
+	struct iommu_dma_cookie *cookie = domain->iova_cookie;	/* [한국어] DMA 상태 */
+	struct iova_domain *iovad = &cookie->iovad;	/* [한국어] IOVA 공간 */
+	bool coherent = dev_is_dma_coherent(dev);	/* [한국어] 장치가 캐시 일관성을 갖는가 */
+	int ioprot = dma_info_to_prot(DMA_BIDIRECTIONAL, coherent, attrs);	/* [한국어] coherent 할당은 방향을 모르므로 읽기·쓰기 모두 허용한다 */
+	unsigned int count, min_size, alloc_sizes = domain->pgsize_bitmap;	/* [한국어] 페이지 수, 최소 단위, 그리고 시도해 볼 할당 크기 후보들 */
+	struct page **pages;	/* [한국어] 확보한 페이지 배열 */
+	dma_addr_t iova;	/* [한국어] 확보한 IOVA 창 */
+	ssize_t ret;	/* [한국어] iommu_map_sg 결과 (매핑된 바이트 수 또는 음수) */
 
-	if (static_branch_unlikely(&iommu_deferred_attach_enabled) &&
-	    iommu_deferred_attach(dev, domain))
-		return NULL;
+	if (static_branch_unlikely(&iommu_deferred_attach_enabled) &&	/* [한국어] 지연 부착이 필요한 시스템에서만 */
+	    iommu_deferred_attach(dev, domain))	/* [한국어] 여기서 실제로 도메인을 건다 */
+		return NULL;	/* [한국어] 부착 실패 */
 
-	min_size = alloc_sizes & -alloc_sizes;
-	if (min_size < PAGE_SIZE) {
-		min_size = PAGE_SIZE;
-		alloc_sizes |= PAGE_SIZE;
+	min_size = alloc_sizes & -alloc_sizes;	/* [한국어] IOMMU 최소 페이지 크기 (최하위 비트만 남기는 관용구) */
+	if (min_size < PAGE_SIZE) {	/* [한국어] IOMMU 페이지가 CPU 페이지보다 작으면 */
+		min_size = PAGE_SIZE;	/* [한국어] 할당은 어차피 CPU 페이지 단위다 */
+		alloc_sizes |= PAGE_SIZE;	/* [한국어] CPU 페이지 크기를 후보에 넣는다 */
 	} else {
-		size = ALIGN(size, min_size);
+		size = ALIGN(size, min_size);	/* [한국어] IOMMU 페이지가 더 크면 요청을 그 배수로 올린다 — 그보다 잘게 매핑할 수 없다 */
 	}
-	if (attrs & DMA_ATTR_ALLOC_SINGLE_PAGES)
-		alloc_sizes = min_size;
+	if (attrs & DMA_ATTR_ALLOC_SINGLE_PAGES)	/* [한국어] 호출자가 낱장만 원한다고 명시했다 (큰 블록을 붙잡아 단편화를 만들지 말라는 뜻) */
+		alloc_sizes = min_size;	/* [한국어] 최소 크기만 후보로 */
 
-	count = PAGE_ALIGN(size) >> PAGE_SHIFT;
-	pages = __iommu_dma_alloc_pages(dev, count, alloc_sizes >> PAGE_SHIFT,
-					gfp);
-	if (!pages)
-		return NULL;
+	count = PAGE_ALIGN(size) >> PAGE_SHIFT;	/* [한국어] 필요한 CPU 페이지 수 */
+	pages = __iommu_dma_alloc_pages(dev, count, alloc_sizes >> PAGE_SHIFT,	/* [한국어] 물리적으로 흩어져도 좋은 페이지들을 모은다 */
+					gfp);	/* [한국어] 호출자의 할당 플래그 그대로 */
+	if (!pages)	/* [한국어] 페이지 확보 실패 */
+		return NULL;	/* [한국어] 할당 실패 */
 
-	size = iova_align(iovad, size);
-	iova = iommu_dma_alloc_iova(domain, size, dev->coherent_dma_mask, dev);
-	if (!iova)
-		goto out_free_pages;
+	size = iova_align(iovad, size);	/* [한국어] IOVA 창은 IOMMU 페이지 단위로 */
+	iova = iommu_dma_alloc_iova(domain, size, dev->coherent_dma_mask, dev);	/* [한국어] 흩어진 페이지들을 담을 하나의 연속 IOVA 창 */
+	if (!iova)	/* [한국어] IOVA 고갈 */
+		goto out_free_pages;	/* [한국어] 페이지부터 되돌린다 */
 
 	/*
 	 * Remove the zone/policy flags from the GFP - these are applied to the
 	 * __iommu_dma_alloc_pages() but are not used for the supporting
 	 * internal allocations that follow.
 	 */
-	gfp &= ~(__GFP_DMA | __GFP_DMA32 | __GFP_HIGHMEM | __GFP_COMP);
+	gfp &= ~(__GFP_DMA | __GFP_DMA32 | __GFP_HIGHMEM | __GFP_COMP);	/* [한국어] 존 지정과 정책 플래그를 뗀다. 그것들은 위의 데이터 페이지 할당에만 의미가 있고, 아래의 보조 자료구조(sg 테이블, 페이지 테이블)에 적용하면 오히려 해가 된다 (위 영어 주석) */
 
-	if (sg_alloc_table_from_pages(sgt, pages, count, 0, size, gfp))
-		goto out_free_iova;
+	if (sg_alloc_table_from_pages(sgt, pages, count, 0, size, gfp))	/* [한국어] 페이지 배열을 scatterlist 로 엮는다 — 물리적으로 인접한 것들은 자동으로 한 세그먼트로 합쳐진다 */
+		goto out_free_iova;	/* [한국어] 테이블 생성 실패 */
 
-	if (!(ioprot & IOMMU_CACHE)) {
-		struct scatterlist *sg;
-		int i;
+	if (!(ioprot & IOMMU_CACHE)) {	/* [한국어] 비일관 장치용 매핑이면 */
+		struct scatterlist *sg;	/* [한국어] 세그먼트 순회 커서 */
+		int i;	/* [한국어] 인덱스 */
 
-		for_each_sg(sgt->sgl, sg, sgt->orig_nents, i)
-			arch_dma_prep_coherent(sg_page(sg), sg->length);
+		for_each_sg(sgt->sgl, sg, sgt->orig_nents, i)	/* [한국어] 각 세그먼트에 대해 */
+			arch_dma_prep_coherent(sg_page(sg), sg->length);	/* [한국어] 캐시를 비워 둔다. 이 페이지들은 앞으로 비캐시로 매핑되므로, CPU 캐시에 남은 옛 내용이 나중에 write-back 되면 장치가 쓴 데이터를 덮어쓴다 */
 	}
 
-	ret = iommu_map_sg(domain, iova, sgt->sgl, sgt->orig_nents, ioprot,
-			   gfp);
-	if (ret < 0 || ret < size)
-		goto out_free_sg;
+	ret = iommu_map_sg(domain, iova, sgt->sgl, sgt->orig_nents, ioprot,	/* [한국어] 흩어진 페이지들을 하나의 연속 IOVA 창에 접어 넣는다 — 이것이 IOMMU 가 없으면 불가능한 일이고, coherent 할당이 물리 연속을 요구하지 않아도 되는 이유다 */
+			   gfp);	/* [한국어] 페이지 테이블 할당 플래그 */
+	if (ret < 0 || ret < size)	/* [한국어] 실패했거나 일부만 매핑되었다 */
+		goto out_free_sg;	/* [한국어] 전부 되돌린다 */
 
-	sgt->sgl->dma_address = iova;
-	sgt->sgl->dma_length = size;
-	return pages;
+	sgt->sgl->dma_address = iova;	/* [한국어] 호출자는 첫 세그먼트에서 DMA 주소를 읽는다 — 창 전체가 연속이므로 하나면 충분하다 */
+	sgt->sgl->dma_length = size;	/* [한국어] 그 창의 길이 */
+	return pages;	/* [한국어] 페이지 배열은 호출자가 vmap 하거나 나중에 해제할 때 쓴다 */
 
-out_free_sg:
-	sg_free_table(sgt);
-out_free_iova:
-	iommu_dma_free_iova(domain, iova, size, NULL);
-out_free_pages:
-	__iommu_dma_free_pages(pages, count);
-	return NULL;
+out_free_sg:	/* [한국어] 매핑에 실패한 지점 */
+	sg_free_table(sgt);	/* [한국어] 테이블 해제 */
+out_free_iova:	/* [한국어] 테이블 생성에 실패한 지점이 합류 */
+	iommu_dma_free_iova(domain, iova, size, NULL);	/* [한국어] IOVA 반납 (매핑이 없으므로 무효화도 불필요) */
+out_free_pages:	/* [한국어] IOVA 확보에 실패한 지점이 합류 */
+	__iommu_dma_free_pages(pages, count);	/* [한국어] 페이지 반납 */
+	return NULL;	/* [한국어] 할당 실패 */
 }
 
 static void *iommu_dma_alloc_remap(struct device *dev, size_t size,
 		dma_addr_t *dma_handle, gfp_t gfp, unsigned long attrs)
 {
-	struct page **pages;
-	struct sg_table sgt;
-	void *vaddr;
-	pgprot_t prot = dma_pgprot(dev, PAGE_KERNEL, attrs);
+	struct page **pages;	/* [한국어] 확보한 페이지 배열 */
+	struct sg_table sgt;	/* [한국어] 임시 scatterlist — vmap 이 끝나면 필요 없다 */
+	void *vaddr;	/* [한국어] 커널 가상 주소 */
+	pgprot_t prot = dma_pgprot(dev, PAGE_KERNEL, attrs);	/* [한국어] CPU 쪽 매핑 속성. 비일관 장치면 여기서 비캐시(nocache)로 만들어, CPU 와 장치가 같은 데이터를 다르게 보지 않게 한다 */
 
-	pages = __iommu_dma_alloc_noncontiguous(dev, size, &sgt, gfp, attrs);
-	if (!pages)
-		return NULL;
-	*dma_handle = sgt.sgl->dma_address;
-	sg_free_table(&sgt);
-	vaddr = dma_common_pages_remap(pages, size, prot,
-			__builtin_return_address(0));
-	if (!vaddr)
-		goto out_unmap;
-	return vaddr;
+	pages = __iommu_dma_alloc_noncontiguous(dev, size, &sgt, gfp, attrs);	/* [한국어] 페이지를 모아 하나의 IOVA 창에 접는다 */
+	if (!pages)	/* [한국어] 실패 */
+		return NULL;	/* [한국어] 할당 실패 */
+	*dma_handle = sgt.sgl->dma_address;	/* [한국어] 장치가 쓸 주소 */
+	sg_free_table(&sgt);	/* [한국어] scatterlist 는 여기까지만 필요하다 — 페이지 배열이 남아 있으므로 */
+	vaddr = dma_common_pages_remap(pages, size, prot,	/* [한국어] 흩어진 페이지들을 CPU 쪽에서도 연속 가상 주소로 만든다. 장치 쪽은 IOMMU 가, CPU 쪽은 페이지 테이블이 같은 일을 하는 셈이다 */
+			__builtin_return_address(0));	/* [한국어] vmalloc 영역 진단에 남길 호출자 주소 */
+	if (!vaddr)	/* [한국어] 가상 매핑 실패 */
+		goto out_unmap;	/* [한국어] 되감기 */
+	return vaddr;	/* [한국어] CPU 는 이 주소로, 장치는 dma_handle 로 같은 메모리를 본다 */
 
-out_unmap:
-	__iommu_dma_unmap(dev, *dma_handle, size);
-	__iommu_dma_free_pages(pages, PAGE_ALIGN(size) >> PAGE_SHIFT);
-	return NULL;
+out_unmap:	/* [한국어] vmap 실패 경로 */
+	__iommu_dma_unmap(dev, *dma_handle, size);	/* [한국어] IOVA 매핑 해제 */
+	__iommu_dma_free_pages(pages, PAGE_ALIGN(size) >> PAGE_SHIFT);	/* [한국어] 페이지 반납 */
+	return NULL;	/* [한국어] 할당 실패 */
 }
 
 /*
@@ -1269,142 +1269,142 @@ out_unmap:
  * e.g. when a vmap-variant that takes a scatterlist comes along.
  */
 struct dma_sgt_handle {
-	struct sg_table sgt;
-	struct page **pages;
+	struct sg_table sgt;	/* [한국어] 호출자에게 돌려줄 scatterlist */
+	struct page **pages;	/* [한국어] DMA API 내부에서 vmap/해제에 쓸 페이지 배열. 사용자는 이것을 몰라도 된다 (위 영어 주석) */
 };
-#define sgt_handle(sgt) \
-	container_of((sgt), struct dma_sgt_handle, sgt)
+#define sgt_handle(sgt) \	/* [한국어] 돌려준 sgt 포인터에서 감싸는 핸들로 되짚는다 */
+	container_of((sgt), struct dma_sgt_handle, sgt)	/* [한국어] sgt 가 핸들의 첫 필드이므로 성립한다 */
 
 struct sg_table *iommu_dma_alloc_noncontiguous(struct device *dev, size_t size,
 	       enum dma_data_direction dir, gfp_t gfp, unsigned long attrs)
 {
-	struct dma_sgt_handle *sh;
+	struct dma_sgt_handle *sh;	/* [한국어] 만들 핸들 */
 
-	sh = kmalloc_obj(*sh, gfp);
-	if (!sh)
-		return NULL;
+	sh = kmalloc_obj(*sh, gfp);	/* [한국어] sgt 와 페이지 배열을 함께 담을 그릇 */
+	if (!sh)	/* [한국어] 할당 실패 */
+		return NULL;	/* [한국어] 포기 */
 
-	sh->pages = __iommu_dma_alloc_noncontiguous(dev, size, &sh->sgt, gfp, attrs);
-	if (!sh->pages) {
-		kfree(sh);
-		return NULL;
+	sh->pages = __iommu_dma_alloc_noncontiguous(dev, size, &sh->sgt, gfp, attrs);	/* [한국어] 페이지 확보와 IOVA 매핑을 한 번에 */
+	if (!sh->pages) {	/* [한국어] 실패 */
+		kfree(sh);	/* [한국어] 그릇도 반납 */
+		return NULL;	/* [한국어] 할당 실패 */
 	}
-	return &sh->sgt;
+	return &sh->sgt;	/* [한국어] 호출자에게는 sgt 만 보인다 */
 }
 
 void iommu_dma_free_noncontiguous(struct device *dev, size_t size,
 		struct sg_table *sgt, enum dma_data_direction dir)
 {
-	struct dma_sgt_handle *sh = sgt_handle(sgt);
+	struct dma_sgt_handle *sh = sgt_handle(sgt);	/* [한국어] sgt 에서 핸들로 되짚는다 */
 
-	__iommu_dma_unmap(dev, sgt->sgl->dma_address, size);
-	__iommu_dma_free_pages(sh->pages, PAGE_ALIGN(size) >> PAGE_SHIFT);
-	sg_free_table(&sh->sgt);
-	kfree(sh);
+	__iommu_dma_unmap(dev, sgt->sgl->dma_address, size);	/* [한국어] IOVA 매핑 해제 */
+	__iommu_dma_free_pages(sh->pages, PAGE_ALIGN(size) >> PAGE_SHIFT);	/* [한국어] 페이지 반납 */
+	sg_free_table(&sh->sgt);	/* [한국어] scatterlist 해제 */
+	kfree(sh);	/* [한국어] 핸들 해제 */
 }
 
 void *iommu_dma_vmap_noncontiguous(struct device *dev, size_t size,
 		struct sg_table *sgt)
 {
-	unsigned long count = PAGE_ALIGN(size) >> PAGE_SHIFT;
+	unsigned long count = PAGE_ALIGN(size) >> PAGE_SHIFT;	/* [한국어] 페이지 수 */
 
-	return vmap(sgt_handle(sgt)->pages, count, VM_MAP, PAGE_KERNEL);
+	return vmap(sgt_handle(sgt)->pages, count, VM_MAP, PAGE_KERNEL);	/* [한국어] 보관해 둔 페이지 배열 덕분에 vmap 을 그대로 부를 수 있다 — scatterlist 만으로는 이 API 가 없다 (위 영어 주석) */
 }
 
 int iommu_dma_mmap_noncontiguous(struct device *dev, struct vm_area_struct *vma,
 		size_t size, struct sg_table *sgt)
 {
-	unsigned long count = PAGE_ALIGN(size) >> PAGE_SHIFT;
+	unsigned long count = PAGE_ALIGN(size) >> PAGE_SHIFT;	/* [한국어] 페이지 수 */
 
 	if (vma->vm_pgoff >= count || vma_pages(vma) > count - vma->vm_pgoff)
-		return -ENXIO;
-	return vm_map_pages(vma, sgt_handle(sgt)->pages, count);
+		return -ENXIO;	/* [한국어] 요청 범위가 할당 크기를 넘는다 */
+	return vm_map_pages(vma, sgt_handle(sgt)->pages, count);	/* [한국어] 사용자 공간에 이 페이지들을 매핑한다 */
 }
 
 void iommu_dma_sync_single_for_cpu(struct device *dev, dma_addr_t dma_handle,
 		size_t size, enum dma_data_direction dir)
 {
-	phys_addr_t phys;
+	phys_addr_t phys;	/* [한국어] 동기화할 실제 물리 주소 */
 
-	if (dev_is_dma_coherent(dev) && !dev_use_swiotlb(dev, size, dir))
-		return;
+	if (dev_is_dma_coherent(dev) && !dev_use_swiotlb(dev, size, dir))	/* [한국어] 일관성 있는 장치이고 바운스도 쓰지 않으면 */
+		return;	/* [한국어] 캐시를 만질 것도, 복사할 것도 없다 */
 
-	phys = iommu_iova_to_phys(iommu_get_dma_domain(dev), dma_handle);
-	if (!dev_is_dma_coherent(dev)) {
-		arch_sync_dma_for_cpu(phys, size, dir);
-		arch_sync_dma_flush();
+	phys = iommu_iova_to_phys(iommu_get_dma_domain(dev), dma_handle);	/* [한국어] DMA 주소를 물리 주소로 되돌린다 — 캐시 관리와 바운스 복사는 물리 주소를 다룬다 */
+	if (!dev_is_dma_coherent(dev)) {	/* [한국어] 비일관 장치면 */
+		arch_sync_dma_for_cpu(phys, size, dir);	/* [한국어] 장치가 쓴 내용을 CPU 가 보도록 캐시를 무효화한다 */
+		arch_sync_dma_flush();	/* [한국어] 아키텍처가 요구하면 완료까지 기다린다 */
 	}
 
-	swiotlb_sync_single_for_cpu(dev, phys, size, dir);
+	swiotlb_sync_single_for_cpu(dev, phys, size, dir);	/* [한국어] 바운스 버퍼를 썼다면 그 내용을 원본 버퍼로 되복사한다. 순서가 중요하다 — 캐시를 먼저 무효화해야 복사가 최신 데이터를 읽는다 */
 }
 
 void iommu_dma_sync_single_for_device(struct device *dev, dma_addr_t dma_handle,
 		size_t size, enum dma_data_direction dir)
 {
-	phys_addr_t phys;
+	phys_addr_t phys;	/* [한국어] 동기화할 물리 주소 */
 
-	if (dev_is_dma_coherent(dev) && !dev_use_swiotlb(dev, size, dir))
-		return;
+	if (dev_is_dma_coherent(dev) && !dev_use_swiotlb(dev, size, dir))	/* [한국어] 할 일이 없는 경우 */
+		return;	/* [한국어] 바로 반환 */
 
-	phys = iommu_iova_to_phys(iommu_get_dma_domain(dev), dma_handle);
-	swiotlb_sync_single_for_device(dev, phys, size, dir);
+	phys = iommu_iova_to_phys(iommu_get_dma_domain(dev), dma_handle);	/* [한국어] 물리 주소 복원 */
+	swiotlb_sync_single_for_device(dev, phys, size, dir);	/* [한국어] 원본 버퍼의 내용을 바운스 버퍼로 복사한다. CPU 방향과 반대 순서다 — 복사를 먼저 하고 캐시를 비워야 장치가 최신 내용을 본다 */
 
-	if (!dev_is_dma_coherent(dev)) {
-		arch_sync_dma_for_device(phys, size, dir);
-		arch_sync_dma_flush();
+	if (!dev_is_dma_coherent(dev)) {	/* [한국어] 비일관 장치면 */
+		arch_sync_dma_for_device(phys, size, dir);	/* [한국어] CPU 캐시를 메모리로 밀어낸다 */
+		arch_sync_dma_flush();	/* [한국어] 완료 대기 */
 	}
 }
 
 void iommu_dma_sync_sg_for_cpu(struct device *dev, struct scatterlist *sgl,
 		int nelems, enum dma_data_direction dir)
 {
-	struct scatterlist *sg;
-	int i;
+	struct scatterlist *sg;	/* [한국어] 세그먼트 순회 커서 */
+	int i;	/* [한국어] 인덱스 */
 
-	if (sg_dma_is_swiotlb(sgl)) {
-		for_each_sg(sgl, sg, nelems, i)
-			iommu_dma_sync_single_for_cpu(dev, sg_dma_address(sg),
-						      sg->length, dir);
-	} else if (!dev_is_dma_coherent(dev)) {
-		for_each_sg(sgl, sg, nelems, i)
-			arch_sync_dma_for_cpu(sg_phys(sg), sg->length, dir);
-		arch_sync_dma_flush();
+	if (sg_dma_is_swiotlb(sgl)) {	/* [한국어] 이 리스트가 바운스 버퍼로 매핑되었다면 */
+		for_each_sg(sgl, sg, nelems, i)	/* [한국어] 세그먼트마다 */
+			iommu_dma_sync_single_for_cpu(dev, sg_dma_address(sg),	/* [한국어] 단일 매핑과 같은 처리를 반복한다 */
+						      sg->length, dir);	/* [한국어] 그 세그먼트의 길이 */
+	} else if (!dev_is_dma_coherent(dev)) {	/* [한국어] 바운스는 아니지만 비일관 장치면 */
+		for_each_sg(sgl, sg, nelems, i)	/* [한국어] 세그먼트마다 */
+			arch_sync_dma_for_cpu(sg_phys(sg), sg->length, dir);	/* [한국어] 캐시만 무효화한다 — 복사는 필요 없다 */
+		arch_sync_dma_flush();	/* [한국어] 한 번만 완료 대기 — 세그먼트마다 기다릴 이유가 없다 */
 	}
 }
 
 void iommu_dma_sync_sg_for_device(struct device *dev, struct scatterlist *sgl,
 		int nelems, enum dma_data_direction dir)
 {
-	struct scatterlist *sg;
-	int i;
+	struct scatterlist *sg;	/* [한국어] 세그먼트 순회 커서 */
+	int i;	/* [한국어] 인덱스 */
 
-	if (sg_dma_is_swiotlb(sgl)) {
-		for_each_sg(sgl, sg, nelems, i)
-			iommu_dma_sync_single_for_device(dev,
-							 sg_dma_address(sg),
-							 sg->length, dir);
-	} else if (!dev_is_dma_coherent(dev)) {
-		for_each_sg(sgl, sg, nelems, i)
-			arch_sync_dma_for_device(sg_phys(sg), sg->length, dir);
-		arch_sync_dma_flush();
+	if (sg_dma_is_swiotlb(sgl)) {	/* [한국어] 바운스 버퍼 매핑 */
+		for_each_sg(sgl, sg, nelems, i)	/* [한국어] 세그먼트마다 */
+			iommu_dma_sync_single_for_device(dev,	/* [한국어] 단일 매핑과 같은 처리 */
+							 sg_dma_address(sg),	/* [한국어] 그 세그먼트의 DMA 주소 */
+							 sg->length, dir);	/* [한국어] 길이 */
+	} else if (!dev_is_dma_coherent(dev)) {	/* [한국어] 비일관 장치 */
+		for_each_sg(sgl, sg, nelems, i)	/* [한국어] 세그먼트마다 */
+			arch_sync_dma_for_device(sg_phys(sg), sg->length, dir);	/* [한국어] 캐시를 밀어낸다 */
+		arch_sync_dma_flush();	/* [한국어] 한 번만 완료 대기 */
 	}
 }
 
 static phys_addr_t iommu_dma_map_swiotlb(struct device *dev, phys_addr_t phys,
 		size_t size, enum dma_data_direction dir, unsigned long attrs)
 {
-	struct iommu_domain *domain = iommu_get_dma_domain(dev);
-	struct iova_domain *iovad = &domain->iova_cookie->iovad;
+	struct iommu_domain *domain = iommu_get_dma_domain(dev);	/* [한국어] 이 장치의 기본 도메인 */
+	struct iova_domain *iovad = &domain->iova_cookie->iovad;	/* [한국어] IOVA 입도를 알아야 패딩을 지울 범위를 정할 수 있다 */
 
-	if (!is_swiotlb_active(dev)) {
-		dev_warn_once(dev, "DMA bounce buffers are inactive, unable to map unaligned transaction.\n");
-		return (phys_addr_t)DMA_MAPPING_ERROR;
+	if (!is_swiotlb_active(dev)) {	/* [한국어] 바운스 버퍼 풀이 없다 (설정으로 껐거나 고갈) */
+		dev_warn_once(dev, "DMA bounce buffers are inactive, unable to map unaligned transaction.\n");	/* [한국어] 정렬이 맞지 않는 요청을 안전하게 처리할 방법이 없다 */
+		return (phys_addr_t)DMA_MAPPING_ERROR;	/* [한국어] 매핑 거절 — 노출 위험을 감수하느니 실패시킨다 */
 	}
 
-	trace_swiotlb_bounced(dev, phys, size);
+	trace_swiotlb_bounced(dev, phys, size);	/* [한국어] 바운스는 복사 비용을 동반하므로 성능 분석의 주요 단서다 */
 
-	phys = swiotlb_tbl_map_single(dev, phys, size, iova_mask(iovad), dir,
-			attrs);
+	phys = swiotlb_tbl_map_single(dev, phys, size, iova_mask(iovad), dir,	/* [한국어] 전용 버퍼를 잡고 원본 내용을 복사해 넣는다. IOVA 입도를 정렬 요구로 넘겨, 잡힌 버퍼가 IOMMU 페이지 경계에 맞게 한다 */
+			attrs);	/* [한국어] 호출자의 DMA 속성 */
 
 	/*
 	 * Untrusted devices should not see padding areas with random leftover
@@ -1412,19 +1412,19 @@ static phys_addr_t iommu_dma_map_swiotlb(struct device *dev, phys_addr_t phys,
 	 * swiotlb_tbl_map_single() has initialized the bounce buffer proper to
 	 * the contents of the original memory buffer.
 	 */
-	if (phys != (phys_addr_t)DMA_MAPPING_ERROR && dev_is_untrusted(dev)) {
-		size_t start, virt = (size_t)phys_to_virt(phys);
+	if (phys != (phys_addr_t)DMA_MAPPING_ERROR && dev_is_untrusted(dev)) {	/* [한국어] 바운스에 성공했고, 상대가 신뢰할 수 없는 장치라면 */
+		size_t start, virt = (size_t)phys_to_virt(phys);	/* [한국어] 바운스 버퍼의 커널 가상 주소 */
 
 		/* Pre-padding */
-		start = iova_align_down(iovad, virt);
-		memset((void *)start, 0, virt - start);
+		start = iova_align_down(iovad, virt);	/* [한국어] 버퍼 앞쪽, 같은 IOMMU 페이지에 속하는 부분 */
+		memset((void *)start, 0, virt - start);	/* [한국어] 0 으로 지운다. 페이지 단위로 매핑되므로 장치는 이 앞쪽 패딩도 읽을 수 있고, 거기에 이전 사용자의 커널 데이터가 남아 있으면 그대로 새어 나간다 (위 영어 주석) */
 
 		/* Post-padding */
-		start = virt + size;
-		memset((void *)start, 0, iova_align(iovad, start) - start);
+		start = virt + size;	/* [한국어] 버퍼 뒤쪽 패딩의 시작 */
+		memset((void *)start, 0, iova_align(iovad, start) - start);	/* [한국어] 페이지 끝까지 0 으로 — 같은 이유다 */
 	}
 
-	return phys;
+	return phys;	/* [한국어] 바운스 버퍼의 물리 주소. 이제 이것을 매핑한다 */
 }
 
 /*
@@ -1435,43 +1435,43 @@ static phys_addr_t iommu_dma_map_swiotlb(struct device *dev, phys_addr_t phys,
 static inline size_t iova_unaligned(struct iova_domain *iovad, phys_addr_t phys,
 				    size_t size)
 {
-	return iova_offset(iovad, phys | size);
+	return iova_offset(iovad, phys | size);	/* [한국어] 시작 주소와 길이를 OR 해 한 번에 본다 — 둘 중 하나라도 IOMMU 페이지 경계에 맞지 않으면 0 이 아니다 (위 영어 주석) */
 }
 
 dma_addr_t iommu_dma_map_phys(struct device *dev, phys_addr_t phys, size_t size,
 		enum dma_data_direction dir, unsigned long attrs)
 {
-	bool coherent = dev_is_dma_coherent(dev);
-	int prot = dma_info_to_prot(dir, coherent, attrs);
-	struct iommu_domain *domain = iommu_get_dma_domain(dev);
-	struct iommu_dma_cookie *cookie = domain->iova_cookie;
-	struct iova_domain *iovad = &cookie->iovad;
-	dma_addr_t iova, dma_mask = dma_get_mask(dev);
+	bool coherent = dev_is_dma_coherent(dev);	/* [한국어] 캐시 일관성 여부 */
+	int prot = dma_info_to_prot(dir, coherent, attrs);	/* [한국어] 방향과 속성을 PTE 권한으로 */
+	struct iommu_domain *domain = iommu_get_dma_domain(dev);	/* [한국어] 기본 도메인 */
+	struct iommu_dma_cookie *cookie = domain->iova_cookie;	/* [한국어] DMA 상태 */
+	struct iova_domain *iovad = &cookie->iovad;	/* [한국어] IOVA 공간 */
+	dma_addr_t iova, dma_mask = dma_get_mask(dev);	/* [한국어] 확보할 주소와 장치의 주소 상한 */
 
 	/*
 	 * If both the physical buffer start address and size are page aligned,
 	 * we don't need to use a bounce page.
 	 */
-	if (dev_use_swiotlb(dev, size, dir) &&
-	    iova_unaligned(iovad, phys, size)) {
-		if (attrs & (DMA_ATTR_MMIO | DMA_ATTR_REQUIRE_COHERENT))
-			return DMA_MAPPING_ERROR;
+	if (dev_use_swiotlb(dev, size, dir) &&	/* [한국어] 바운스가 필요한 장치이고 */
+	    iova_unaligned(iovad, phys, size)) {	/* [한국어] 실제로 정렬이 어긋났다면. 정렬이 맞으면 페이지 전체가 이 버퍼의 것이라 노출될 여지가 없으므로 바운스가 불필요하다 (위 영어 주석) */
+		if (attrs & (DMA_ATTR_MMIO | DMA_ATTR_REQUIRE_COHERENT))	/* [한국어] MMIO 는 복사할 수 없고(부작용이 있다), coherent 를 요구하는 매핑은 바운스 버퍼로 만족시킬 수 없다 */
+			return DMA_MAPPING_ERROR;	/* [한국어] 이 조합은 지원하지 않는다 */
 
-		phys = iommu_dma_map_swiotlb(dev, phys, size, dir, attrs);
-		if (phys == (phys_addr_t)DMA_MAPPING_ERROR)
-			return DMA_MAPPING_ERROR;
+		phys = iommu_dma_map_swiotlb(dev, phys, size, dir, attrs);	/* [한국어] 전용 버퍼로 바꿔치기한다 — 이후 매핑은 원본이 아니라 이 버퍼를 가리킨다 */
+		if (phys == (phys_addr_t)DMA_MAPPING_ERROR)	/* [한국어] 바운스 실패 */
+			return DMA_MAPPING_ERROR;	/* [한국어] 매핑 실패 */
 	}
 
-	if (!coherent && !(attrs & (DMA_ATTR_SKIP_CPU_SYNC | DMA_ATTR_MMIO))) {
-		arch_sync_dma_for_device(phys, size, dir);
-		arch_sync_dma_flush();
+	if (!coherent && !(attrs & (DMA_ATTR_SKIP_CPU_SYNC | DMA_ATTR_MMIO))) {	/* [한국어] 비일관 장치이고, 호출자가 캐시 동기화를 생략하라고 하지 않았으며, MMIO 도 아니면 */
+		arch_sync_dma_for_device(phys, size, dir);	/* [한국어] CPU 캐시를 메모리로 밀어낸다 — 장치가 곧 이 메모리를 읽는다 */
+		arch_sync_dma_flush();	/* [한국어] 완료 대기 */
 	}
 
-	iova = __iommu_dma_map(dev, phys, size, prot, dma_mask);
-	if (iova == DMA_MAPPING_ERROR &&
-	    !(attrs & (DMA_ATTR_MMIO | DMA_ATTR_REQUIRE_COHERENT)))
-		swiotlb_tbl_unmap_single(dev, phys, size, dir, attrs);
-	return iova;
+	iova = __iommu_dma_map(dev, phys, size, prot, dma_mask);	/* [한국어] IOVA 확보 + 페이지 테이블 기입 */
+	if (iova == DMA_MAPPING_ERROR &&	/* [한국어] 매핑에 실패했고 */
+	    !(attrs & (DMA_ATTR_MMIO | DMA_ATTR_REQUIRE_COHERENT)))	/* [한국어] 바운스를 썼을 수 있는 경우라면 */
+		swiotlb_tbl_unmap_single(dev, phys, size, dir, attrs);	/* [한국어] 잡아 둔 바운스 버퍼를 되돌린다. 바운스를 쓰지 않았다면 이 호출이 무해하게 지나간다 */
+	return iova;	/* [한국어] 성공 시 장치가 쓸 DMA 주소 */
 }
 
 void iommu_dma_unmap_phys(struct device *dev, dma_addr_t dma_handle,
