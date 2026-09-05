@@ -10,57 +10,111 @@
  *          Joerg Roedel <jroedel@suse.de>
  */
 
-#define pr_fmt(fmt)     "DMAR: " fmt
-#define dev_fmt(fmt)    pr_fmt(fmt)
+/*
+ * [한국어 설명] 인텔 VT-d IOMMU 드라이버 본체 (drivers/iommu/intel/iommu.c)
+ *
+ * === 파일의 역할 ===
+ * 인텔 서버·데스크톱 칩셋의 IOMMU(VT-d)를 커널 IOMMU API 로 감싸는 드라이버다.
+ * NVMe 나 NIC 이 x86 서버에서 dma_map_sg 를 부르면, 코어 계층을 지나 결국 이
+ * 파일의 map_pages 가 인텔 페이지 테이블에 PTE 를 기입한다.
+ *
+ * VT-d 의 자료구조는 3층이다. 하드웨어가 DMA 요청의 requester id(버스:장치.함수)를
+ * 받으면 —
+ *   1) 루트 테이블(root table): 버스 번호로 인덱싱. 256개 항목.
+ *   2) 컨텍스트 테이블(context table): 장치.함수로 인덱싱. 이 항목이 그 장치의
+ *      주소 공간(도메인)과 페이지 테이블 루트를 가리킨다.
+ *   3) 페이지 테이블: 4단계 또는 5단계. x86 CPU 의 것과 형식이 거의 같다.
+ * scalable mode 에서는 컨텍스트 항목이 PASID 디렉터리를 가리키고, PASID 항목마다
+ * 별도의 페이지 테이블을 둘 수 있다 — 그것이 SVA 의 하드웨어 근거다.
+ *
+ * 이 드라이버가 코어와 다른 벤더 드라이버에 비해 특별한 점이 몇 가지 있다.
+ *  - RMRR(Reserved Memory Region Reporting): 펌웨어가 "이 장치는 이 물리 주소를
+ *    계속 쓴다"고 ACPI 로 신고한다. USB 레거시 에뮬레이션과 관리 엔진이 대표적이며,
+ *    그 구간은 항등 매핑으로 유지해야 한다.
+ *  - 여러 개의 DMAR 유닛. 소켓마다, 또는 PCIe 루트 포트 묶음마다 별도 하드웨어가
+ *    있어, 도메인 하나가 여러 유닛에 걸쳐 설치될 수 있다.
+ *  - 무효화 큐(queued invalidation): 무효화를 레지스터가 아니라 링 버퍼로 보낸다.
+ *    그 배치 처리가 dma-iommu 의 flush queue 와 맞물려 성능을 만든다.
+ *
+ * === 전체 아키텍처에서의 위치 ===
+ * 흐름(매핑): 드라이버 dma_map_sg
+ *   → dma-iommu.c (IOVA 확보) → iommu.c iommu_map_sg
+ *     → [이 파일] intel_iommu_map_pages : 인텔 페이지 테이블에 PTE 기입
+ * 흐름(부착): 장치 프로브 → iommu.c iommu_init_device
+ *   → [이 파일] intel_iommu_probe_device (DMAR 유닛과 소스 id 결정)
+ *   → 도메인 부착 시 컨텍스트 항목 또는 PASID 항목 기입
+ * 흐름(무효화): iommu_unmap → [이 파일] → cache.c 의 무효화 큐 → 하드웨어
+ *
+ * === 타 모듈과의 연결 ===
+ * - dmar.c: ACPI DMAR 테이블을 파싱해 DMAR 유닛과 그 관할 장치를 알아낸다.
+ *   이 파일이 다루는 iommu 인스턴스는 그쪽이 만든 것이다.
+ * - pasid.c: PASID 표 조작. scalable mode 의 핵심.
+ * - cache.c: 무효화 큐 관리. 어느 범위를 어느 유닛에 무효화할지 추적한다.
+ * - irq_remapping.c: 인터럽트 재매핑. 같은 하드웨어의 다른 기능이다.
+ * - prq.c / svm.c: 페이지 요청 큐와 SVA.
+ * - nested.c: 중첩 번역 (사용자 공간이 stage-1 을 관리).
+ *
+ * === 주요 함수/구조체 요약 ===
+ * - struct dmar_domain     : 이 드라이버의 도메인. 페이지 테이블 루트와 부착된
+ *                            장치·유닛 목록을 담는다.
+ * - domain_context_mapping(): 장치의 컨텍스트 항목에 도메인을 기입한다.
+ * - __domain_mapping()     : 페이지 테이블에 PTE 를 채운다.
+ * - domain_unmap()         : 그 역. 해제된 테이블 페이지를 목록에 모은다.
+ * - intel_iommu_probe_device(): 장치를 맡을 DMAR 유닛과 소스 id 를 정한다.
+ * - intel_iommu_attach_device(): 도메인을 하드웨어에 설치한다.
+ * - iommu_enable_translation(): 유닛의 번역을 켠다.
+ */
+#define pr_fmt(fmt)     "DMAR: " fmt	/* [한국어] 이 파일의 로그 접두사. DMAR 은 ACPI 표 이름(DMA Remapping)이자 인텔 IOMMU 의 통칭이다 */
+#define dev_fmt(fmt)    pr_fmt(fmt)	/* [한국어] dev_err/dev_warn 도 같은 접두사를 쓰게 한다 */
 
-#include <linux/crash_dump.h>
-#include <linux/dma-direct.h>
-#include <linux/dmi.h>
-#include <linux/memory.h>
-#include <linux/pci.h>
-#include <linux/pci-ats.h>
-#include <linux/spinlock.h>
-#include <linux/syscore_ops.h>
-#include <linux/tboot.h>
-#include <uapi/linux/iommufd.h>
+#include <linux/crash_dump.h>	/* [한국어] kdump 커널 판별. 앞선 커널이 남긴 매핑 위에서 부팅하므로 처리가 다르다 */
+#include <linux/dma-direct.h>	/* [한국어] IOMMU 를 거치지 않는 직접 매핑 경로 */
+#include <linux/dmi.h>	/* [한국어] BIOS/보드 식별로 하드웨어 결함 우회(quirk)를 적용한다 */
+#include <linux/memory.h>	/* [한국어] 메모리 핫플러그 통지 — 새 메모리가 붙으면 항등 도메인에 매핑해야 한다 */
+#include <linux/pci.h>	/* [한국어] PCI 장치 순회와 requester id 처리 */
+#include <linux/pci-ats.h>	/* [한국어] ATS/PRI 능력 제어. 장치가 번역을 캐시하게 하는 기능 */
+#include <linux/spinlock.h>	/* [한국어] 도메인·장치 목록 보호 */
+#include <linux/syscore_ops.h>	/* [한국어] 서스펜드/리쥼 시 IOMMU 레지스터 보존 */
+#include <linux/tboot.h>	/* [한국어] Trusted Boot 연동. TXT 로 부팅하면 VT-d 활성화 실패가 보안 문제가 된다 */
+#include <uapi/linux/iommufd.h>	/* [한국어] 사용자 공간과 공유하는 중첩 번역 ABI */
 
-#include "iommu.h"
-#include "../dma-iommu.h"
-#include "../irq_remapping.h"
-#include "../iommu-pages.h"
-#include "pasid.h"
-#include "perfmon.h"
+#include "iommu.h"	/* [한국어] 이 드라이버의 자료구조와 레지스터 정의 */
+#include "../dma-iommu.h"	/* [한국어] 코어의 DMA API 통합 계층 */
+#include "../irq_remapping.h"	/* [한국어] 인터럽트 재매핑 — 같은 하드웨어의 다른 기능 */
+#include "../iommu-pages.h"	/* [한국어] 페이지 테이블 페이지 할당자 */
+#include "pasid.h"	/* [한국어] PASID 표 조작 (scalable mode) */
+#include "perfmon.h"	/* [한국어] IOMMU 성능 카운터 */
 
-#define ROOT_SIZE		VTD_PAGE_SIZE
-#define CONTEXT_SIZE		VTD_PAGE_SIZE
+#define ROOT_SIZE		VTD_PAGE_SIZE	/* [한국어] 루트 테이블은 정확히 한 페이지다 — 256개 항목 × 16바이트 */
+#define CONTEXT_SIZE		VTD_PAGE_SIZE	/* [한국어] 컨텍스트 테이블도 한 페이지. 버스 하나당 256개 함수 항목 */
 
-#define IS_GFX_DEVICE(pdev) pci_is_display(pdev)
-#define IS_USB_DEVICE(pdev) ((pdev->class >> 8) == PCI_CLASS_SERIAL_USB)
-#define IS_ISA_DEVICE(pdev) ((pdev->class >> 8) == PCI_CLASS_BRIDGE_ISA)
-#define IS_AZALIA(pdev) ((pdev)->vendor == 0x8086 && (pdev)->device == 0x3a3e)
+#define IS_GFX_DEVICE(pdev) pci_is_display(pdev)	/* [한국어] 그래픽 장치 판별. 인텔 GPU 는 펌웨어가 남긴 프레임버퍼 매핑 때문에 특별 처리가 필요하다 */
+#define IS_USB_DEVICE(pdev) ((pdev->class >> 8) == PCI_CLASS_SERIAL_USB)	/* [한국어] USB 컨트롤러. 레거시 키보드 에뮬레이션이 RMRR 을 요구하는 대표적인 장치다 */
+#define IS_ISA_DEVICE(pdev) ((pdev->class >> 8) == PCI_CLASS_BRIDGE_ISA)	/* [한국어] ISA 브리지. 옛 DMA 컨트롤러가 저역 메모리를 직접 쓴다 */
+#define IS_AZALIA(pdev) ((pdev)->vendor == 0x8086 && (pdev)->device == 0x3a3e)	/* [한국어] 특정 인텔 HD 오디오 컨트롤러. 아래의 Tylersburg 아이소크로너스 결함 우회 대상이다 */
 
-#define IOAPIC_RANGE_START	(0xfee00000)
-#define IOAPIC_RANGE_END	(0xfeefffff)
-#define IOVA_START_ADDR		(0x1000)
+#define IOAPIC_RANGE_START	(0xfee00000)	/* [한국어] x86 의 인터럽트 메시지 주소 창 시작. 이 범위로 가는 쓰기는 메모리가 아니라 인터럽트다 */
+#define IOAPIC_RANGE_END	(0xfeefffff)	/* [한국어] 그 끝. DMA 가 이 주소를 쓰면 임의의 인터럽트를 만들 수 있어 반드시 예약해 둔다 */
+#define IOVA_START_ADDR		(0x1000)	/* [한국어] IOVA 할당의 하한. 주소 0 페이지를 비워 둬 NULL DMA 주소를 오류로 잡는다 */
 
-#define DEFAULT_DOMAIN_ADDRESS_WIDTH 57
+#define DEFAULT_DOMAIN_ADDRESS_WIDTH 57	/* [한국어] 5단계 페이지 테이블의 주소 폭. 하드웨어가 지원하지 않으면 4단계(48비트)로 낮춘다 */
 
-static void __init check_tylersburg_isoch(void);
-static int intel_iommu_set_dirty_tracking(struct iommu_domain *domain,
-					  bool enable);
-static int rwbf_quirk;
+static void __init check_tylersburg_isoch(void);	/* [한국어] 전방 선언 — 특정 칩셋의 아이소크로너스 DMA 결함을 확인한다 */
+static int intel_iommu_set_dirty_tracking(struct iommu_domain *domain,	/* [한국어] 전방 선언 — 라이브 마이그레이션용 더티 추적 */
+					  bool enable);	/* [한국어] 켜기/끄기 */
+static int rwbf_quirk;	/* [한국어] 쓰기 버퍼 플러시가 필요한 하드웨어 결함. DMI 로 특정 보드를 식별해 켠다 */
 
-#define rwbf_required(iommu)	(rwbf_quirk || cap_rwbf((iommu)->cap))
+#define rwbf_required(iommu)	(rwbf_quirk || cap_rwbf((iommu)->cap))	/* [한국어] 결함 우회이거나 하드웨어가 스스로 요구하면 페이지 테이블 기입 뒤 쓰기 버퍼를 비워야 한다 */
 
 /*
  * set to 1 to panic kernel if can't successfully enable VT-d
  * (used when kernel is launched w/ TXT)
  */
-static int force_on = 0;
-static int intel_iommu_tboot_noforce;
-static int no_platform_optin;
+static int force_on = 0;	/* [한국어] VT-d 활성화 실패를 치명적으로 다룰지 (위 영어 주석). TXT 로 부팅한 경우 격리 없이 진행하는 것이 더 위험하다 */
+static int intel_iommu_tboot_noforce;	/* [한국어] 그 강제를 부트 인자로 끄는 스위치 */
+static int no_platform_optin;	/* [한국어] 펌웨어가 IOMMU 사용을 권장하지 않았음을 기록. 그런 시스템에서는 기본값을 보수적으로 잡는다 */
 
-#define ROOT_ENTRY_NR (VTD_PAGE_SIZE/sizeof(struct root_entry))
+#define ROOT_ENTRY_NR (VTD_PAGE_SIZE/sizeof(struct root_entry))	/* [한국어] 루트 테이블의 항목 수 = 256 (PCI 버스 번호의 범위) */
 
 /*
  * Take a root_entry and return the Lower Context Table Pointer (LCTP)
@@ -68,10 +122,10 @@ static int no_platform_optin;
  */
 static phys_addr_t root_entry_lctp(struct root_entry *re)
 {
-	if (!(re->lo & 1))
-		return 0;
+	if (!(re->lo & 1))	/* [한국어] 비트 0 이 present 플래그다 */
+		return 0;	/* [한국어] 이 버스에는 컨텍스트 테이블이 없다 */
 
-	return re->lo & VTD_PAGE_MASK;
+	return re->lo & VTD_PAGE_MASK;	/* [한국어] 하위 컨텍스트 테이블의 물리 주소. 장치 번호 0~127 을 담당한다 */
 }
 
 /*
@@ -80,34 +134,34 @@ static phys_addr_t root_entry_lctp(struct root_entry *re)
  */
 static phys_addr_t root_entry_uctp(struct root_entry *re)
 {
-	if (!(re->hi & 1))
-		return 0;
+	if (!(re->hi & 1))	/* [한국어] 상위 항목의 present 플래그 */
+		return 0;	/* [한국어] 없다 */
 
-	return re->hi & VTD_PAGE_MASK;
+	return re->hi & VTD_PAGE_MASK;	/* [한국어] 상위 컨텍스트 테이블. 장치 번호 128~255 를 담당하며, 한 페이지에 256개 항목이 들어가지 않아 둘로 나뉜다 */
 }
 
 static int device_rid_cmp_key(const void *key, const struct rb_node *node)
 {
-	struct device_domain_info *info =
-		rb_entry(node, struct device_domain_info, node);
-	const u16 *rid_lhs = key;
+	struct device_domain_info *info =	/* [한국어] 트리 노드에서 장치 정보로 */
+		rb_entry(node, struct device_domain_info, node);	/* [한국어] container_of */
+	const u16 *rid_lhs = key;	/* [한국어] 찾는 소스 id */
 
-	if (*rid_lhs < PCI_DEVID(info->bus, info->devfn))
-		return -1;
+	if (*rid_lhs < PCI_DEVID(info->bus, info->devfn))	/* [한국어] 버스와 devfn 을 합친 16비트 값으로 비교한다 */
+		return -1;	/* [한국어] 왼쪽으로 */
 
-	if (*rid_lhs > PCI_DEVID(info->bus, info->devfn))
-		return 1;
+	if (*rid_lhs > PCI_DEVID(info->bus, info->devfn))	/* [한국어] 더 크면 */
+		return 1;	/* [한국어] 오른쪽으로 */
 
-	return 0;
+	return 0;	/* [한국어] 일치 */
 }
 
 static int device_rid_cmp(struct rb_node *lhs, const struct rb_node *rhs)
 {
-	struct device_domain_info *info =
-		rb_entry(lhs, struct device_domain_info, node);
-	u16 key = PCI_DEVID(info->bus, info->devfn);
+	struct device_domain_info *info =	/* [한국어] 삽입할 노드의 장치 정보 */
+		rb_entry(lhs, struct device_domain_info, node);	/* [한국어] container_of */
+	u16 key = PCI_DEVID(info->bus, info->devfn);	/* [한국어] 그 장치의 소스 id */
 
-	return device_rid_cmp_key(&key, rhs);
+	return device_rid_cmp_key(&key, rhs);	/* [한국어] 키 비교 함수를 재사용한다 */
 }
 
 /*
@@ -123,67 +177,94 @@ static int device_rid_cmp(struct rb_node *lhs, const struct rb_node *rhs)
  */
 struct device *device_rbtree_find(struct intel_iommu *iommu, u16 rid)
 {
-	struct device_domain_info *info = NULL;
-	struct rb_node *node;
-	unsigned long flags;
+	struct device_domain_info *info = NULL;	/* [한국어] 찾은 장치 정보 */
+	struct rb_node *node;	/* [한국어] 트리 노드 */
+	unsigned long flags;	/* [한국어] 인터럽트 상태 */
 
-	spin_lock_irqsave(&iommu->device_rbtree_lock, flags);
-	node = rb_find(&rid, &iommu->device_rbtree, device_rid_cmp_key);
-	if (node)
-		info = rb_entry(node, struct device_domain_info, node);
-	spin_unlock_irqrestore(&iommu->device_rbtree_lock, flags);
+	spin_lock_irqsave(&iommu->device_rbtree_lock, flags);	/* [한국어] 이 조회는 폴트 인터럽트 문맥에서도 불린다 — 하드웨어가 소스 id 만 알려 주므로 그것으로 장치를 되찾아야 한다 */
+	node = rb_find(&rid, &iommu->device_rbtree, device_rid_cmp_key);	/* [한국어] 소스 id 로 이진 탐색 */
+	if (node)	/* [한국어] 찾았으면 */
+		info = rb_entry(node, struct device_domain_info, node);	/* [한국어] 장치 정보로 변환 */
+	spin_unlock_irqrestore(&iommu->device_rbtree_lock, flags);	/* [한국어] 락 해제 */
 
-	return info ? info->dev : NULL;
+	return info ? info->dev : NULL;	/* [한국어] 반환된 장치의 수명은 보장되지 않는다 — 호출자가 따로 동기화해야 한다 (위 영어 주석) */
 }
 
 static int device_rbtree_insert(struct intel_iommu *iommu,
 				struct device_domain_info *info)
 {
-	struct rb_node *curr;
-	unsigned long flags;
+	struct rb_node *curr;	/* [한국어] 이미 있던 노드 */
+	unsigned long flags;	/* [한국어] 인터럽트 상태 */
 
-	spin_lock_irqsave(&iommu->device_rbtree_lock, flags);
-	curr = rb_find_add(&info->node, &iommu->device_rbtree, device_rid_cmp);
-	spin_unlock_irqrestore(&iommu->device_rbtree_lock, flags);
-	if (WARN_ON(curr))
-		return -EEXIST;
+	spin_lock_irqsave(&iommu->device_rbtree_lock, flags);	/* [한국어] 트리 변경 구간 */
+	curr = rb_find_add(&info->node, &iommu->device_rbtree, device_rid_cmp);	/* [한국어] 찾으면서 없으면 넣는다 — 중복 검사와 삽입을 한 번의 순회로 */
+	spin_unlock_irqrestore(&iommu->device_rbtree_lock, flags);	/* [한국어] 락 해제 */
+	if (WARN_ON(curr))	/* [한국어] 같은 소스 id 가 이미 등록되어 있다 */
+		return -EEXIST;	/* [한국어] 두 장치가 같은 requester id 를 쓸 수는 없다 */
 
-	return 0;
+	return 0;	/* [한국어] 등록 완료 — 이제 폴트가 이 장치로 되짚어진다 */
 }
 
 static void device_rbtree_remove(struct device_domain_info *info)
 {
-	struct intel_iommu *iommu = info->iommu;
-	unsigned long flags;
+	struct intel_iommu *iommu = info->iommu;	/* [한국어] 이 장치를 맡은 DMAR 유닛 */
+	unsigned long flags;	/* [한국어] 인터럽트 상태 */
 
-	spin_lock_irqsave(&iommu->device_rbtree_lock, flags);
-	rb_erase(&info->node, &iommu->device_rbtree);
-	spin_unlock_irqrestore(&iommu->device_rbtree_lock, flags);
+	spin_lock_irqsave(&iommu->device_rbtree_lock, flags);	/* [한국어] 트리 변경 구간 */
+	rb_erase(&info->node, &iommu->device_rbtree);	/* [한국어] 트리에서 제거. 이후 이 소스 id 의 폴트는 장치를 찾지 못한다 */
+	spin_unlock_irqrestore(&iommu->device_rbtree_lock, flags);	/* [한국어] 락 해제 */
 }
 
+/*
+ * [한국어] RMRR(Reserved Memory Region Reporting) 항목 하나.
+ *
+ * 펌웨어가 ACPI DMAR 표에 "이 장치는 이 물리 주소 범위를 계속 쓰고 있다"고
+ * 신고한 것이다. 커널이 그 장치를 IOMMU 아래로 들일 때 그 범위를 항등 매핑으로
+ * 유지하지 않으면, 펌웨어가 쓰던 버퍼로 가는 길이 끊긴다.
+ *
+ * 대표적인 것이 USB 레거시 키보드 에뮬레이션(SMM 이 컨트롤러를 계속 만진다)과
+ * 관리 엔진이다. IOMMU 격리의 명백한 구멍이지만, 그것 없이는 그 장치가 동작하지
+ * 않으므로 커널이 받아들일 수밖에 없다.
+ */
 struct dmar_rmrr_unit {
-	struct list_head list;		/* list of rmrr units	*/
-	struct acpi_dmar_header *hdr;	/* ACPI header		*/
-	u64	base_address;		/* reserved base address*/
-	u64	end_address;		/* reserved end address */
-	struct dmar_dev_scope *devices;	/* target devices */
-	int	devices_cnt;		/* target device count */
+	struct list_head list;		/* list of rmrr units	*/	/* [한국어] 전역 RMRR 목록의 고리 */
+	struct acpi_dmar_header *hdr;	/* ACPI header		*/	/* [한국어] 원본 ACPI 항목. 재파싱이나 진단에 쓴다 */
+	u64	base_address;		/* reserved base address*/	/* [한국어] 예약 구간의 시작 물리 주소 */
+	u64	end_address;		/* reserved end address */	/* [한국어] 끝 주소 (포함) */
+	struct dmar_dev_scope *devices;	/* target devices */	/* [한국어] 이 예약이 적용되는 장치 목록. 펌웨어가 버스·장치 경로로 지정한다 */
+	int	devices_cnt;		/* target device count */	/* [한국어] 그 개수 */
 };
 
+/*
+ * [한국어] ATSR(ATS Reporting) 항목 하나.
+ *
+ * 어느 PCIe 루트 포트 아래의 장치가 ATS 를 쓸 수 있는지를 펌웨어가 신고한 것이다.
+ * ATS 는 장치가 번역 결과를 자기 캐시(ATC)에 들고 있게 해 IOMMU 왕복을 줄이지만,
+ * 그러려면 그 경로의 모든 스위치와 루트 포트가 프로토콜을 중계해야 한다.
+ *
+ * include_all 이 서 있으면 그 유닛 아래의 모든 포트가 해당된다.
+ */
 struct dmar_atsr_unit {
-	struct list_head list;		/* list of ATSR units */
-	struct acpi_dmar_header *hdr;	/* ACPI header */
-	struct dmar_dev_scope *devices;	/* target devices */
-	int devices_cnt;		/* target device count */
-	u8 include_all:1;		/* include all ports */
+	struct list_head list;		/* list of ATSR units */	/* [한국어] 전역 ATSR 목록의 고리 */
+	struct acpi_dmar_header *hdr;	/* ACPI header */	/* [한국어] 원본 ACPI 항목 */
+	struct dmar_dev_scope *devices;	/* target devices */	/* [한국어] ATS 를 지원하는 루트 포트들 */
+	int devices_cnt;		/* target device count */	/* [한국어] 그 개수 */
+	u8 include_all:1;		/* include all ports */	/* [한국어] 이 유닛 아래 모든 포트가 해당된다는 표시. 포트를 일일이 나열하지 않아도 되게 한다 */
 };
 
+/*
+ * [한국어] SATC(SoC Integrated Address Translation Cache) 항목 하나.
+ *
+ * SoC 에 통합된 장치 중 ATS 를 쓰되 PCIe 표준 경로를 거치지 않는 것들을 신고한다.
+ * 통합 그래픽이나 가속기처럼 칩 안에서 직접 연결된 장치가 대상이며, 표준 ATS
+ * 능력 비트로는 알 수 없어 펌웨어가 별도로 알려 준다.
+ */
 struct dmar_satc_unit {
-	struct list_head list;		/* list of SATC units */
-	struct acpi_dmar_header *hdr;	/* ACPI header */
-	struct dmar_dev_scope *devices;	/* target devices */
-	struct intel_iommu *iommu;	/* the corresponding iommu */
-	int devices_cnt;		/* target device count */
+	struct list_head list;		/* list of SATC units */	/* [한국어] 전역 SATC 목록의 고리 */
+	struct acpi_dmar_header *hdr;	/* ACPI header */	/* [한국어] 원본 ACPI 항목 */
+	struct dmar_dev_scope *devices;	/* target devices */	/* [한국어] SoC 통합 ATS 장치들 */
+	struct intel_iommu *iommu;	/* the corresponding iommu */	/* [한국어] 이 항목을 담당하는 DMAR 유닛 */
+	int devices_cnt;		/* target device count */	/* [한국어] 장치 개수 */
 	u8 atc_required:1;		/* ATS is required */
 };
 
@@ -199,83 +280,83 @@ static void intel_iommu_domain_free(struct iommu_domain *domain);
 int dmar_disabled = !IS_ENABLED(CONFIG_INTEL_IOMMU_DEFAULT_ON);
 int intel_iommu_sm = IS_ENABLED(CONFIG_INTEL_IOMMU_SCALABLE_MODE_DEFAULT_ON);
 
-int intel_iommu_enabled = 0;
-EXPORT_SYMBOL_GPL(intel_iommu_enabled);
+int intel_iommu_enabled = 0;	/* [한국어] VT-d 가 실제로 켜졌는가. 다른 서브시스템(그래픽 드라이버 등)이 참고한다 */
+EXPORT_SYMBOL_GPL(intel_iommu_enabled);	/* [한국어] 모듈에서도 볼 수 있게 */
 
-static int intel_iommu_superpage = 1;
-static int iommu_identity_mapping;
-static int iommu_skip_te_disable;
-static int disable_igfx_iommu;
+static int intel_iommu_superpage = 1;	/* [한국어] 큰 페이지(2MB/1GB) 매핑을 쓸지. 끄면 PTE 가 늘지만 일부 하드웨어 결함을 피할 수 있다 */
+static int iommu_identity_mapping;	/* [한국어] 항등 매핑이 필요한 장치 종류의 비트마스크 */
+static int iommu_skip_te_disable;	/* [한국어] 종료 시 번역을 끄지 않는다. kexec 로 넘어갈 때 진행 중인 DMA 를 끊지 않기 위한 것 */
+static int disable_igfx_iommu;	/* [한국어] 통합 그래픽을 IOMMU 밖에 둔다. 일부 세대의 GPU 펌웨어가 IOMMU 아래에서 오작동해 생긴 우회다 */
 
-#define IDENTMAP_AZALIA		4
+#define IDENTMAP_AZALIA		4	/* [한국어] 특정 HD 오디오 컨트롤러에 항등 매핑을 강제하는 비트 */
 
-const struct iommu_ops intel_iommu_ops;
+const struct iommu_ops intel_iommu_ops;	/* [한국어] 코어에 등록할 콜백 표. 정의는 파일 끝에 있다 */
 
 static bool translation_pre_enabled(struct intel_iommu *iommu)
 {
-	return (iommu->flags & VTD_FLAG_TRANS_PRE_ENABLED);
+	return (iommu->flags & VTD_FLAG_TRANS_PRE_ENABLED);	/* [한국어] 커널이 시작하기 전에 이미 번역이 켜져 있었는가. kexec 나 펌웨어가 켜 둔 경우이며, 그 상태를 함부로 끄면 진행 중인 DMA 가 끊긴다 */
 }
 
 static void clear_translation_pre_enabled(struct intel_iommu *iommu)
 {
-	iommu->flags &= ~VTD_FLAG_TRANS_PRE_ENABLED;
+	iommu->flags &= ~VTD_FLAG_TRANS_PRE_ENABLED;	/* [한국어] 우리가 상태를 넘겨받았음을 표시한다 */
 }
 
 static void init_translation_status(struct intel_iommu *iommu)
 {
-	u32 gsts;
+	u32 gsts;	/* [한국어] 전역 상태 레지스터 값 */
 
-	gsts = readl(iommu->reg + DMAR_GSTS_REG);
-	if (gsts & DMA_GSTS_TES)
-		iommu->flags |= VTD_FLAG_TRANS_PRE_ENABLED;
+	gsts = readl(iommu->reg + DMAR_GSTS_REG);	/* [한국어] 하드웨어 상태를 읽는다 */
+	if (gsts & DMA_GSTS_TES)	/* [한국어] Translation Enable Status — 번역이 이미 켜져 있다 */
+		iommu->flags |= VTD_FLAG_TRANS_PRE_ENABLED;	/* [한국어] 기억해 둔다. 이후 초기화가 기존 테이블을 이어받을지 새로 만들지를 이 값으로 정한다 */
 }
 
 static int __init intel_iommu_setup(char *str)
 {
-	if (!str)
-		return -EINVAL;
+	if (!str)	/* [한국어] 값 없는 인자 */
+		return -EINVAL;	/* [한국어] 해석 실패 */
 
-	while (*str) {
-		if (!strncmp(str, "on", 2)) {
-			dmar_disabled = 0;
-			pr_info("IOMMU enabled\n");
-		} else if (!strncmp(str, "off", 3)) {
-			dmar_disabled = 1;
-			no_platform_optin = 1;
-			pr_info("IOMMU disabled\n");
-		} else if (!strncmp(str, "igfx_off", 8)) {
-			disable_igfx_iommu = 1;
-			pr_info("Disable GFX device mapping\n");
-		} else if (!strncmp(str, "forcedac", 8)) {
-			pr_warn("intel_iommu=forcedac deprecated; use iommu.forcedac instead\n");
-			iommu_dma_forcedac = true;
-		} else if (!strncmp(str, "strict", 6)) {
-			pr_warn("intel_iommu=strict deprecated; use iommu.strict=1 instead\n");
-			iommu_set_dma_strict();
-		} else if (!strncmp(str, "sp_off", 6)) {
-			pr_info("Disable supported super page\n");
-			intel_iommu_superpage = 0;
-		} else if (!strncmp(str, "sm_on", 5)) {
-			pr_info("Enable scalable mode if hardware supports\n");
-			intel_iommu_sm = 1;
-		} else if (!strncmp(str, "sm_off", 6)) {
-			pr_info("Scalable mode is disallowed\n");
-			intel_iommu_sm = 0;
-		} else if (!strncmp(str, "tboot_noforce", 13)) {
-			pr_info("Intel-IOMMU: not forcing on after tboot. This could expose security risk for tboot\n");
-			intel_iommu_tboot_noforce = 1;
+	while (*str) {	/* [한국어] 쉼표로 구분된 옵션들을 순회 */
+		if (!strncmp(str, "on", 2)) {	/* [한국어] intel_iommu=on */
+			dmar_disabled = 0;	/* [한국어] VT-d 를 켠다 */
+			pr_info("IOMMU enabled\n");	/* [한국어] 관리자 지시를 로그에 남긴다 */
+		} else if (!strncmp(str, "off", 3)) {	/* [한국어] intel_iommu=off */
+			dmar_disabled = 1;	/* [한국어] VT-d 를 끈다 */
+			no_platform_optin = 1;	/* [한국어] 펌웨어 권장도 무시한다 */
+			pr_info("IOMMU disabled\n");	/* [한국어] 기록 */
+		} else if (!strncmp(str, "igfx_off", 8)) {	/* [한국어] 통합 그래픽만 제외 */
+			disable_igfx_iommu = 1;	/* [한국어] GPU 를 IOMMU 밖에 둔다 */
+			pr_info("Disable GFX device mapping\n");	/* [한국어] 기록 */
+		} else if (!strncmp(str, "forcedac", 8)) {	/* [한국어] 옛 이름의 DAC 강제 옵션 */
+			pr_warn("intel_iommu=forcedac deprecated; use iommu.forcedac instead\n");	/* [한국어] 코어 공통 인자로 옮겨졌다 */
+			iommu_dma_forcedac = true;	/* [한국어] 그래도 동작은 시켜 준다 */
+		} else if (!strncmp(str, "strict", 6)) {	/* [한국어] 옛 이름의 즉시 무효화 옵션 */
+			pr_warn("intel_iommu=strict deprecated; use iommu.strict=1 instead\n");	/* [한국어] 마찬가지로 코어로 옮겨졌다 */
+			iommu_set_dma_strict();	/* [한국어] 지연 무효화를 끈다 */
+		} else if (!strncmp(str, "sp_off", 6)) {	/* [한국어] 큰 페이지 비활성화 */
+			pr_info("Disable supported super page\n");	/* [한국어] 기록 */
+			intel_iommu_superpage = 0;	/* [한국어] 2MB/1GB 매핑을 쓰지 않는다 */
+		} else if (!strncmp(str, "sm_on", 5)) {	/* [한국어] scalable mode 활성화 */
+			pr_info("Enable scalable mode if hardware supports\n");	/* [한국어] PASID·중첩 번역이 가능해진다 */
+			intel_iommu_sm = 1;	/* [한국어] 하드웨어가 지원하면 켠다 */
+		} else if (!strncmp(str, "sm_off", 6)) {	/* [한국어] scalable mode 금지 */
+			pr_info("Scalable mode is disallowed\n");	/* [한국어] 레거시 모드만 쓴다 */
+			intel_iommu_sm = 0;	/* [한국어] 끈다 */
+		} else if (!strncmp(str, "tboot_noforce", 13)) {	/* [한국어] TXT 부팅에서의 강제를 해제 */
+			pr_info("Intel-IOMMU: not forcing on after tboot. This could expose security risk for tboot\n");	/* [한국어] 보안 위험을 명시적으로 알린다 — TXT 로 부팅한 이유가 격리인데 그것을 포기하는 것이기 때문 */
+			intel_iommu_tboot_noforce = 1;	/* [한국어] 강제하지 않는다 */
 		} else {
-			pr_notice("Unknown option - '%s'\n", str);
+			pr_notice("Unknown option - '%s'\n", str);	/* [한국어] 알 수 없는 옵션은 무시하고 알린다 */
 		}
 
-		str += strcspn(str, ",");
-		while (*str == ',')
-			str++;
+		str += strcspn(str, ",");	/* [한국어] 다음 쉼표까지 건너뛴다 */
+		while (*str == ',')	/* [한국어] 연속된 쉼표도 */
+			str++;	/* [한국어] 넘어간다 */
 	}
 
-	return 1;
+	return 1;	/* [한국어] __setup 규약: 1 이면 처리됨 */
 }
-__setup("intel_iommu=", intel_iommu_setup);
+__setup("intel_iommu=", intel_iommu_setup);	/* [한국어] 부트 인자 등록 */
 
 /*
  * Calculate the Supported Adjusted Guest Address Widths of an IOMMU.
