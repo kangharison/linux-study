@@ -281,123 +281,228 @@ void dmar_free_dev_scope(struct dmar_dev_scope **devices, int *cnt)
 }
 
 /* Optimize out kzalloc()/kfree() for normal cases */
-static char dmar_pci_notify_info_buf[64];
+static char dmar_pci_notify_info_buf[64];	/* [한국어] 흔한 크기의 알림 정보를 담을 정적 버퍼. 매번 kzalloc/kfree 하지 않으려는 최적화다 (위 영어 주석). PCI 계층 깊이가 얕은 대부분의 장치가 여기 들어간다 */
 
+/*
+ * [한국어]
+ * dmar_alloc_pci_notify_info - PCI 장치 알림을 DMAR 표와 대조할 형태로 만든다
+ *
+ * @dev: 알림의 대상 장치. @event: BUS_NOTIFY_ADD_DEVICE 또는 REMOVED.
+ * @return: 채워진 알림 정보, 이 장치를 다룰 수 없으면 NULL.
+ *
+ * 왜 경로가 필요한가: ACPI DMAR 표는 장치를 "세그먼트 s, 루트 버스 b 에서
+ * 슬롯/함수를 몇 번 거쳐 도달"하는 경로로 지목한다. 그런데 커널이 받은
+ * struct pci_dev 는 그 반대 방향(자신에서 부모로)만 알고 있다. 그래서
+ * 루트까지 거슬러 올라가며 깊이를 세고, 그만큼의 배열에 역순으로 채운다 —
+ * 표의 표현과 같은 방향이 되도록.
+ *
+ * 두 번 훑는 이유가 여기 있다. 먼저 깊이를 세어 배열 크기를 정하고
+ * (struct_size), 그 다음 실제 경로를 채운다.
+ *
+ * 정적 버퍼를 먼저 시도하는 것이 최적화다(위 영어 주석). PCI 계층이 얕은
+ * 대부분의 장치는 64바이트에 들어가므로 할당 없이 끝난다. 그래서 해제할
+ * 때도 그 버퍼인지 확인해야 한다(dmar_free_pci_notify_info).
+ *
+ * 세그먼트 상한 검사: DMAR 표의 세그먼트 필드가 16비트라, 그보다 큰 도메인
+ * 번호를 쓰는 장치(VMD 서브디바이스 등)는 애초에 표에서 찾을 수 없다
+ * (코드 안 영어 주석). 조회를 시도할 이유가 없으므로 NULL 을 돌려준다.
+ *
+ * 제거 알림에는 경로를 만들지 않는다. 제거는 이미 연결된 포인터를 비교해
+ * 찾으므로 경로가 필요 없기 때문이다.
+ *
+ * 할당 실패를 dmar_dev_scope_status 에 기록하는 이유: 이 알림 하나를
+ * 놓치면 그 장치가 표에 영영 연결되지 않는다. 부팅 후반의 검증이 그 상태를
+ * 알아야 한다.
+ *
+ * 실행 컨텍스트: PCI 버스 알림. 프로세스 컨텍스트.
+ */
 static struct dmar_pci_notify_info *
 dmar_alloc_pci_notify_info(struct pci_dev *dev, unsigned long event)
 {
-	int level = 0;
-	size_t size;
-	struct pci_dev *tmp;
-	struct dmar_pci_notify_info *info;
+	int level = 0;	/* [한국어] 루트까지의 계층 깊이 */
+	size_t size;	/* [한국어] 필요한 구조체 크기 */
+	struct pci_dev *tmp;	/* [한국어] 계층을 거슬러 올라가는 커서 */
+	struct dmar_pci_notify_info *info;	/* [한국어] 만들 알림 정보 */
 
 	/*
 	 * Ignore devices that have a domain number higher than what can
 	 * be looked up in DMAR, e.g. VMD subdevices with domain 0x10000
 	 */
-	if (pci_domain_nr(dev->bus) > U16_MAX)
-		return NULL;
+	if (pci_domain_nr(dev->bus) > U16_MAX)	/* [한국어] DMAR 표의 세그먼트 필드는 16비트라 그보다 큰 도메인은 애초에 찾을 수 없다 (위 영어 주석) */
+		return NULL;	/* [한국어] 조회를 시도할 이유가 없다 */
 
 	/* Only generate path[] for device addition event */
-	if (event == BUS_NOTIFY_ADD_DEVICE)
-		for (tmp = dev; tmp; tmp = tmp->bus->self)
-			level++;
+	if (event == BUS_NOTIFY_ADD_DEVICE)	/* [한국어] 장치 추가일 때만 경로가 필요하다 (위 영어 주석) */
+		for (tmp = dev; tmp; tmp = tmp->bus->self)	/* [한국어] 루트까지 거슬러 올라가며 */
+			level++;	/* [한국어] 깊이를 센다 */
 
-	size = struct_size(info, path, level);
-	if (size <= sizeof(dmar_pci_notify_info_buf)) {
-		info = (struct dmar_pci_notify_info *)dmar_pci_notify_info_buf;
+	size = struct_size(info, path, level);	/* [한국어] 그 깊이만큼의 배열을 포함한 크기 */
+	if (size <= sizeof(dmar_pci_notify_info_buf)) {	/* [한국어] 흔한 크기면 */
+		info = (struct dmar_pci_notify_info *)dmar_pci_notify_info_buf;	/* [한국어] 정적 버퍼를 쓴다 — 할당 없이 끝난다 */
 	} else {
-		info = kzalloc(size, GFP_KERNEL);
-		if (!info) {
-			if (dmar_dev_scope_status == 0)
-				dmar_dev_scope_status = -ENOMEM;
-			return NULL;
+		info = kzalloc(size, GFP_KERNEL);	/* [한국어] 계층이 깊으면 따로 잡는다 */
+		if (!info) {	/* [한국어] 할당 실패 */
+			if (dmar_dev_scope_status == 0)	/* [한국어] 아직 오류가 기록되지 않았으면 */
+				dmar_dev_scope_status = -ENOMEM;	/* [한국어] 기록한다. 이 알림을 놓치면 그 장치가 표에 영영 연결되지 않으므로, 부팅 후반의 검증이 알아야 한다 */
+			return NULL;	/* [한국어] 처리할 수 없다 */
 		}
 	}
 
-	info->event = event;
-	info->dev = dev;
-	info->seg = pci_domain_nr(dev->bus);
-	info->level = level;
-	if (event == BUS_NOTIFY_ADD_DEVICE) {
-		for (tmp = dev; tmp; tmp = tmp->bus->self) {
-			level--;
-			info->path[level].bus = tmp->bus->number;
-			info->path[level].device = PCI_SLOT(tmp->devfn);
-			info->path[level].function = PCI_FUNC(tmp->devfn);
-			if (pci_is_root_bus(tmp->bus))
-				info->bus = tmp->bus->number;
+	info->event = event;	/* [한국어] 추가인지 제거인지 */
+	info->dev = dev;	/* [한국어] 대상 장치 */
+	info->seg = pci_domain_nr(dev->bus);	/* [한국어] PCI 세그먼트 */
+	info->level = level;	/* [한국어] 계층 깊이 */
+	if (event == BUS_NOTIFY_ADD_DEVICE) {	/* [한국어] 추가일 때만 경로를 채운다 */
+		for (tmp = dev; tmp; tmp = tmp->bus->self) {	/* [한국어] 다시 루트까지 거슬러 올라가며 */
+			level--;	/* [한국어] 뒤에서부터 채운다 — 표는 루트에서 시작하는 순서로 적으므로 방향을 뒤집어야 한다 */
+			info->path[level].bus = tmp->bus->number;	/* [한국어] 그 단계의 버스 번호 */
+			info->path[level].device = PCI_SLOT(tmp->devfn);	/* [한국어] 슬롯 번호 */
+			info->path[level].function = PCI_FUNC(tmp->devfn);	/* [한국어] 함수 번호 */
+			if (pci_is_root_bus(tmp->bus))	/* [한국어] 루트 버스에 닿으면 */
+				info->bus = tmp->bus->number;	/* [한국어] 그 번호를 따로 기억한다. 표의 항목도 루트 버스로 시작하므로 비교의 첫 조건이 된다 */
 		}
 	}
 
-	return info;
+	return info;	/* [한국어] 표와 대조할 준비가 되었다 */
 }
 
+/*
+ * [한국어]
+ * dmar_free_pci_notify_info - 알림 정보를 반납한다(정적 버퍼면 아무것도 하지 않는다)
+ *
+ * @info: 반납할 정보.
+ * @return: 없음.
+ *
+ * alloc 이 정적 버퍼를 쓸 수도 kzalloc 을 할 수도 있으므로, 포인터를 비교해
+ * 어느 쪽인지 판별한다. 정적 버퍼를 kfree 하면 커널이 죽는다.
+ *
+ * 정적 버퍼가 하나뿐이라는 것은 이 경로가 동시에 두 번 실행되지 않는다는
+ * 전제를 담고 있다 — PCI 버스 알림이 dmar_global_lock 아래에서 직렬화되기
+ * 때문에 성립한다.
+ *
+ * 실행 컨텍스트: PCI 버스 알림. 프로세스 컨텍스트.
+ */
 static inline void dmar_free_pci_notify_info(struct dmar_pci_notify_info *info)
 {
-	if ((void *)info != dmar_pci_notify_info_buf)
-		kfree(info);
+	if ((void *)info != dmar_pci_notify_info_buf)	/* [한국어] 정적 버퍼가 아니면 */
+		kfree(info);	/* [한국어] 반납한다. 정적 버퍼를 kfree 하면 커널이 죽는다 */
 }
 
+/*
+ * [한국어]
+ * dmar_match_pci_path - 장치의 PCI 경로가 표에 적힌 경로와 같은지 본다
+ *
+ * @info: 장치의 경로 정보. @bus: 표가 적은 루트 버스 번호.
+ * @path: 표가 적은 경로 배열. @count: 그 길이.
+ * @return: true 면 같은 장치다.
+ *
+ * 정상 비교는 단순하다: 루트 버스가 같고, 깊이가 같고, 각 단계의
+ * 슬롯·함수가 모두 같으면 같은 장치다.
+ *
+ * fallback 경로가 이 함수의 본론이다. 일부 BIOS 가 RMRR 항목을 잘못 적는다 —
+ * 루트 버스에서 시작하는 전체 경로 대신, 장치가 실제로 붙어 있는 버스 번호와
+ * 그 한 단계만 적는 것이다. 스펙 위반이지만 그런 시스템이 실제로 존재하고,
+ * 그 항목을 무시하면 RMRR 이 적용되지 않아 장치가 동작하지 않는다.
+ * 그래서 "경로 길이가 1 이고, 그 한 단계가 장치의 마지막 단계와 일치하면"
+ * 같은 장치로 인정하고 FW_BUG 경고를 남긴다.
+ *
+ * count != 1 을 먼저 거르는 것이 중요하다. 이 우회는 "한 단계만 적힌" 경우에만
+ * 적용해야 하며, 그러지 않으면 서로 다른 장치를 같다고 판정할 수 있다.
+ *
+ * 실행 컨텍스트: 표와 장치를 대조하는 경로. 순수 비교.
+ */
 static bool dmar_match_pci_path(struct dmar_pci_notify_info *info, int bus,
 				struct acpi_dmar_pci_path *path, int count)
 {
-	int i;
+	int i;	/* [한국어] 경로 순회 */
 
-	if (info->bus != bus)
-		goto fallback;
-	if (info->level != count)
-		goto fallback;
+	if (info->bus != bus)	/* [한국어] 루트 버스가 다르면 */
+		goto fallback;	/* [한국어] 정상 비교로는 다른 장치다 */
+	if (info->level != count)	/* [한국어] 계층 깊이가 다르면 */
+		goto fallback;	/* [한국어] 역시 */
 
-	for (i = 0; i < count; i++) {
-		if (path[i].device != info->path[i].device ||
-		    path[i].function != info->path[i].function)
-			goto fallback;
+	for (i = 0; i < count; i++) {	/* [한국어] 각 단계를 비교한다 */
+		if (path[i].device != info->path[i].device ||	/* [한국어] 슬롯이나 */
+		    path[i].function != info->path[i].function)	/* [한국어] 함수가 다르면 */
+			goto fallback;	/* [한국어] 다른 장치다 */
 	}
 
-	return true;
+	return true;	/* [한국어] 모든 단계가 일치 — 같은 장치다 */
 
-fallback:
+fallback:	/* [한국어] 일부 BIOS 의 잘못된 RMRR 항목을 구제하는 경로 */
 
-	if (count != 1)
-		return false;
+	if (count != 1)	/* [한국어] 표가 한 단계만 적은 경우에만 이 우회를 쓴다 */
+		return false;	/* [한국어] 그 밖에는 정말 다른 장치다 */
 
-	i = info->level - 1;
-	if (bus              == info->path[i].bus &&
-	    path[0].device   == info->path[i].device &&
-	    path[0].function == info->path[i].function) {
-		pr_info(FW_BUG "RMRR entry for device %02x:%02x.%x is broken - applying workaround\n",
-			bus, path[0].device, path[0].function);
-		return true;
+	i = info->level - 1;	/* [한국어] 장치의 마지막 단계(자기 자신) */
+	if (bus              == info->path[i].bus &&	/* [한국어] 표가 적은 버스와 */
+	    path[0].device   == info->path[i].device &&	/* [한국어] 슬롯, */
+	    path[0].function == info->path[i].function) {	/* [한국어] 함수가 그것과 일치하면 */
+		pr_info(FW_BUG "RMRR entry for device %02x:%02x.%x is broken - applying workaround\n",	/* [한국어] 펌웨어가 루트에서 시작하는 전체 경로 대신 장치가 붙은 버스와 한 단계만 적은 것이다. 스펙 위반이지만 무시하면 그 장치가 동작하지 않는다 */
+			bus, path[0].device, path[0].function);	/* [한국어] 문제의 항목 */
+		return true;	/* [한국어] 같은 장치로 인정한다 */
 	}
 
-	return false;
+	return false;	/* [한국어] 정말 다른 장치다 */
 }
 
 /* Return: > 0 if match found, 0 if no match found, < 0 if error happens */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * dmar_insert_dev_scope - 표의 device scope 항목에 실제 struct device 를 연결한다
+ *
+ * @info: 나타난 장치의 경로 정보.
+ * @start, @end: 훑을 device scope 배열의 범위.
+ * @segment: 이 항목의 PCI 세그먼트.
+ * @devices: 연결할 자리들. @devices_cnt: 그 개수.
+ * @return: 1 이면 연결했다, 0 이면 이 항목의 것이 아니다, 음수면 오류.
+ *
+ * ACPI 표는 장치를 경로로만 지목하므로, 그 경로의 장치가 실제로 나타난
+ * 시점에 포인터를 채워야 한다. 이 함수가 그 연결을 한다.
+ *
+ * 반환값 셋을 구분하는 것이 호출자에게 중요하다(위 영어 주석). 1 이면 더
+ * 볼 필요가 없어 순회를 멈추고, 0 이면 다음 항목을 계속 보고, 음수면
+ * 알림 처리 전체를 실패시킨다.
+ *
+ * scope type 검증(코드 안 영어 주석)이 흥미롭다. 엔드포인트로 적힌 항목은
+ * 일반 PCI 헤더를, 브리지로 적힌 항목은 브리지 헤더를 가진 장치와 맞아야
+ * 한다. 그런데 PCI NTB(Non-Transparent Bridge) 장치는 브리지로 신고되면서
+ * 일반 헤더를 갖는다. 그래서 클래스가 BRIDGE_OTHER(0680h)인 경우는 예외로
+ * 두어, 정상적인 구성을 오류로 판정하지 않는다.
+ *
+ * 빈 자리를 찾아 채우는 부분: for_each_dev_scope 로 아직 NULL 인 자리를
+ * 찾는다. rcu_assign_pointer 를 쓰는 것은 이 배열을 인터럽트 문맥에서
+ * RCU 로 순회하기 때문이고, get_device 로 참조를 잡는 것은 그 장치가
+ * 해제되어도 이 포인터가 살아 있어야 하기 때문이다.
+ *
+ * 빈 자리가 없으면 WARN 한다 — 표가 신고한 개수보다 많은 장치가 그 경로에
+ * 매치되었다는 뜻이라, 파싱이나 표에 문제가 있다.
+ *
+ * 실행 컨텍스트: PCI 버스 알림 또는 부팅 후반의 연결. 프로세스 컨텍스트.
+ */
 int dmar_insert_dev_scope(struct dmar_pci_notify_info *info,
 			  void *start, void*end, u16 segment,
 			  struct dmar_dev_scope *devices,
 			  int devices_cnt)
 {
-	int i, level;
-	struct device *tmp, *dev = &info->dev->dev;
-	struct acpi_dmar_device_scope *scope;
-	struct acpi_dmar_pci_path *path;
+	int i, level;	/* [한국어] 순회 인덱스와 표의 경로 깊이 */
+	struct device *tmp, *dev = &info->dev->dev;	/* [한국어] 빈 자리 순회 커서와, 연결할 장치 */
+	struct acpi_dmar_device_scope *scope;	/* [한국어] 표의 device scope 항목 */
+	struct acpi_dmar_pci_path *path;	/* [한국어] 그 뒤에 이어진 경로 배열 */
 
-	if (segment != info->seg)
-		return 0;
+	if (segment != info->seg)	/* [한국어] 세그먼트가 다르면 */
+		return 0;	/* [한국어] 이 항목의 장치가 아니다 */
 
-	for (; start < end; start += scope->length) {
-		scope = start;
-		if (scope->entry_type != ACPI_DMAR_SCOPE_TYPE_ENDPOINT &&
-		    scope->entry_type != ACPI_DMAR_SCOPE_TYPE_BRIDGE)
-			continue;
+	for (; start < end; start += scope->length) {	/* [한국어] device scope 항목들을 훑는다. 항목마다 길이가 달라 그만큼 전진한다 */
+		scope = start;	/* [한국어] 현재 항목 */
+		if (scope->entry_type != ACPI_DMAR_SCOPE_TYPE_ENDPOINT &&	/* [한국어] 엔드포인트도 */
+		    scope->entry_type != ACPI_DMAR_SCOPE_TYPE_BRIDGE)	/* [한국어] 브리지도 아니면 */
+			continue;	/* [한국어] PCI 장치가 아니므로 건너뛴다 */
 
-		path = (struct acpi_dmar_pci_path *)(scope + 1);
-		level = (scope->length - sizeof(*scope)) / sizeof(*path);
-		if (!dmar_match_pci_path(info, scope->bus, path, level))
-			continue;
+		path = (struct acpi_dmar_pci_path *)(scope + 1);	/* [한국어] 경로는 항목 구조체 바로 뒤에 이어진다 */
+		level = (scope->length - sizeof(*scope)) / sizeof(*path);	/* [한국어] 그 길이에서 경로 깊이를 계산한다 */
+		if (!dmar_match_pci_path(info, scope->bus, path, level))	/* [한국어] 경로가 다르면 */
+			continue;	/* [한국어] 다음 항목 */
 
 		/*
 		 * We expect devices with endpoint scope to have normal PCI
@@ -408,49 +513,70 @@ int dmar_insert_dev_scope(struct dmar_pci_notify_info *info,
 		 * "BRIDGE_OTHER" (0680h) - we don't declare a socpe mismatch
 		 * for this special case.
 		 */
-		if ((scope->entry_type == ACPI_DMAR_SCOPE_TYPE_ENDPOINT &&
-		     info->dev->hdr_type != PCI_HEADER_TYPE_NORMAL) ||
-		    (scope->entry_type == ACPI_DMAR_SCOPE_TYPE_BRIDGE &&
-		     (info->dev->hdr_type == PCI_HEADER_TYPE_NORMAL &&
-		      info->dev->class >> 16 != PCI_BASE_CLASS_BRIDGE))) {
-			pr_warn("Device scope type does not match for %s\n",
-				pci_name(info->dev));
-			return -EINVAL;
+		if ((scope->entry_type == ACPI_DMAR_SCOPE_TYPE_ENDPOINT &&	/* [한국어] 엔드포인트로 적혔는데 */
+		     info->dev->hdr_type != PCI_HEADER_TYPE_NORMAL) ||	/* [한국어] 일반 PCI 헤더가 아니거나 (위 영어 주석) */
+		    (scope->entry_type == ACPI_DMAR_SCOPE_TYPE_BRIDGE &&	/* [한국어] 브리지로 적혔는데 */
+		     (info->dev->hdr_type == PCI_HEADER_TYPE_NORMAL &&	/* [한국어] 일반 헤더이면서 */
+		      info->dev->class >> 16 != PCI_BASE_CLASS_BRIDGE))) {	/* [한국어] 브리지 클래스도 아니면 — PCI NTB 장치는 이 예외에 걸리지 않도록 클래스로 구제한다 */
+			pr_warn("Device scope type does not match for %s\n",	/* [한국어] 표와 실제 장치의 종류가 어긋난다 */
+				pci_name(info->dev));	/* [한국어] 어느 장치인지 */
+			return -EINVAL;	/* [한국어] 알림 처리를 실패시킨다 */
 		}
 
-		for_each_dev_scope(devices, devices_cnt, i, tmp)
-			if (tmp == NULL) {
-				devices[i].bus = info->dev->bus->number;
-				devices[i].devfn = info->dev->devfn;
-				rcu_assign_pointer(devices[i].dev,
-						   get_device(dev));
-				return 1;
+		for_each_dev_scope(devices, devices_cnt, i, tmp)	/* [한국어] 빈 자리를 찾는다 */
+			if (tmp == NULL) {	/* [한국어] 아직 연결되지 않은 자리면 */
+				devices[i].bus = info->dev->bus->number;	/* [한국어] 그 장치의 버스와 */
+				devices[i].devfn = info->dev->devfn;	/* [한국어] devfn 을 기록하고 */
+				rcu_assign_pointer(devices[i].dev,	/* [한국어] 포인터를 연결한다. RCU 로 배열을 순회하는 쪽이 있어 assign 매크로를 쓴다 */
+						   get_device(dev));	/* [한국어] 참조를 잡는다 — 그 장치가 해제되어도 이 포인터가 살아 있어야 한다 */
+				return 1;	/* [한국어] 연결 완료. 호출자는 더 볼 필요가 없다 */
 			}
-		if (WARN_ON(i >= devices_cnt))
-			return -EINVAL;
+		if (WARN_ON(i >= devices_cnt))	/* [한국어] 빈 자리가 없으면 표가 신고한 개수보다 많은 장치가 매치된 것이다 */
+			return -EINVAL;	/* [한국어] 파싱이나 표에 문제가 있다 */
 	}
 
-	return 0;
+	return 0;	/* [한국어] 이 항목들 중에 이 장치는 없었다 */
 }
 
+/*
+ * [한국어]
+ * dmar_remove_dev_scope - 사라진 장치를 device scope 에서 끊는다
+ *
+ * @info: 사라진 장치의 알림 정보. @segment: 이 항목의 세그먼트.
+ * @devices: 끊을 자리들. @count: 그 개수.
+ * @return: 1 이면 끊었다, 0 이면 이 항목에 없었다.
+ *
+ * insert 의 반대이며, 순서가 이 함수의 전부다.
+ *   1) RCU_INIT_POINTER 로 포인터를 NULL 로 만든다. 이 시점 이후 새로
+ *      시작하는 순회는 이 자리를 건너뛴다.
+ *   2) synchronize_rcu 로 이미 진행 중인 순회가 끝나기를 기다린다.
+ *   3) 그제서야 참조를 놓는다.
+ * 이 순서를 어기면, RCU 순회 중인 다른 CPU 가 해제된 struct device 를 읽는다.
+ *
+ * 경로가 아니라 포인터를 직접 비교하는 것이 insert 와 다른 점이다 —
+ * 이미 연결된 것을 찾는 것이므로 경로를 다시 대조할 필요가 없다.
+ *
+ * 실행 컨텍스트: PCI 버스 알림. synchronize_rcu 를 부르므로 잠들 수 있는
+ * 문맥이어야 한다.
+ */
 int dmar_remove_dev_scope(struct dmar_pci_notify_info *info, u16 segment,
 			  struct dmar_dev_scope *devices, int count)
 {
-	int index;
-	struct device *tmp;
+	int index;	/* [한국어] 순회 인덱스 */
+	struct device *tmp;	/* [한국어] 순회 커서 */
 
-	if (info->seg != segment)
-		return 0;
+	if (info->seg != segment)	/* [한국어] 세그먼트가 다르면 */
+		return 0;	/* [한국어] 이 항목의 장치가 아니다 */
 
-	for_each_active_dev_scope(devices, count, index, tmp)
-		if (tmp == &info->dev->dev) {
-			RCU_INIT_POINTER(devices[index].dev, NULL);
-			synchronize_rcu();
-			put_device(tmp);
-			return 1;
+	for_each_active_dev_scope(devices, count, index, tmp)	/* [한국어] 연결된 장치들을 훑으며 */
+		if (tmp == &info->dev->dev) {	/* [한국어] 사라진 장치를 찾으면 */
+			RCU_INIT_POINTER(devices[index].dev, NULL);	/* [한국어] 먼저 포인터를 끊는다. 이 시점 이후 새 순회는 이 자리를 건너뛴다 */
+			synchronize_rcu();	/* [한국어] 이미 진행 중인 순회가 끝나기를 기다린다 */
+			put_device(tmp);	/* [한국어] 그제서야 참조를 놓는다. 순서를 어기면 RCU 순회 중인 CPU 가 해제된 장치를 읽는다 */
+			return 1;	/* [한국어] 끊었다 */
 		}
 
-	return 0;
+	return 0;	/* [한국어] 이 항목에는 없었다 */
 }
 
 static int dmar_pci_bus_add_dev(struct dmar_pci_notify_info *info)
