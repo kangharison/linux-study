@@ -689,25 +689,270 @@ static int iommufd_option(struct iommufd_ucmd *ucmd)
  * 걸어 두어, 새 명령을 추가하며 여기 넣는 것을 잊으면 빌드가 깨진다.
  */
 union ucmd_buffer {
-	struct iommu_destroy destroy;	/* [한국어] 객체 파괴 */
-	struct iommu_fault_alloc fault;	/* [한국어] 폴트 큐 생성 */
-	struct iommu_hw_info info;	/* [한국어] 하드웨어 능력 조회 */
-	struct iommu_hw_queue_alloc hw_queue;	/* [한국어] 게스트용 하드웨어 큐 생성 */
-	struct iommu_hwpt_alloc hwpt;	/* [한국어] HWPT 생성 */
-	struct iommu_hwpt_get_dirty_bitmap get_dirty_bitmap;	/* [한국어] 더티 비트맵 조회 */
-	struct iommu_hwpt_invalidate cache;	/* [한국어] 게스트 무효화 명령 전달 */
-	struct iommu_hwpt_set_dirty_tracking set_dirty_tracking;	/* [한국어] 더티 추적 켜고 끄기 */
-	struct iommu_ioas_alloc alloc;	/* [한국어] IOAS 생성 */
-	struct iommu_ioas_allow_iovas allow_iovas;	/* [한국어] 쓸 IOVA 범위 지정 */
-	struct iommu_ioas_copy ioas_copy;	/* [한국어] IOAS 사이 매핑 복사 */
-	struct iommu_ioas_iova_ranges iova_ranges;	/* [한국어] 쓸 수 있는 범위 조회 */
-	struct iommu_ioas_map map;	/* [한국어] 매핑 생성 */
-	struct iommu_ioas_unmap unmap;	/* [한국어] 매핑 해제 */
-	struct iommu_option option;	/* [한국어] 옵션 읽기·쓰기 */
-	struct iommu_vdevice_alloc vdev;	/* [한국어] 가상 장치 생성 */
-	struct iommu_veventq_alloc veventq;	/* [한국어] vIOMMU 이벤트 큐 생성 */
-	struct iommu_vfio_ioas vfio_ioas;	/* [한국어] VFIO 호환 기본 IOAS 지정 */
-	struct iommu_viommu_alloc viommu;	/* [한국어] vIOMMU 생성 */
+	struct iommu_destroy destroy;
+	/* [한국어] IOMMU_DESTROY ioctl 이 넘겨 오는 인자 구조체.
+	 * 설정자: iommufd_fops_ioctl() 이 사용자 공간의 버퍼를 copy_from_user 로 이 자리에 담는다.
+	 * 읽는 자: iommufd_destroy().
+	 * 무엇을 하는가: id 로 지목한 iommufd 객체의 참조를 놓는다. 마지막 참조였다면
+	 *   그 객체가 실제로 사라진다 — 사용자가 명시적으로 자원을 반납하는 통로다.
+	 * 사용자가 이것을 부르지 않고 fd 를 닫아도 모든 객체가 정리되므로, 이 명령은
+	 *   수명을 세밀하게 다루고 싶을 때 쓰는 선택지다.
+	 * 동기화: 이 union 은 ioctl 호출자의 커널 스택에 놓이므로 공유되지 않는다.
+	 *   다른 스레드가 같은 fd 로 동시에 ioctl 을 불러도 각자의 사본을 갖는다.
+	 * 이 자리를 차지하는 이유: union 전체의 크기가 가장 큰 멤버에 맞춰지므로,
+	 *   여기 등록해 두어야 그 명령이 스택 버퍼에 안전하게 들어간다. IOCTL_OP
+	 *   매크로의 컴파일 시 검사가 등록을 빠뜨리면 빌드를 깨뜨린다. */
+	struct iommu_fault_alloc fault;
+	/* [한국어] IOMMU_FAULT_QUEUE_ALLOC ioctl 이 넘겨 오는 인자 구조체.
+	 * 설정자: iommufd_fops_ioctl() 이 사용자 공간의 버퍼를 copy_from_user 로 이 자리에 담는다.
+	 * 읽는 자: iommufd_fault_alloc().
+	 * 무엇을 하는가: IO 페이지 폴트를 사용자 공간으로 전달할 큐를 만들고, 그
+	 *   큐를 읽을 새 fd 를 돌려준다.
+	 * 왜 필요한가: 유저스페이스가 관리하는 주소 공간(SVA, 게스트)에서는 폴트를
+	 *   커널이 해결할 수 없다. 폴트를 그대로 사용자에게 넘겨 처리하게 해야 한다.
+	 * 동기화: 이 union 은 ioctl 호출자의 커널 스택에 놓이므로 공유되지 않는다.
+	 *   다른 스레드가 같은 fd 로 동시에 ioctl 을 불러도 각자의 사본을 갖는다.
+	 * 이 자리를 차지하는 이유: union 전체의 크기가 가장 큰 멤버에 맞춰지므로,
+	 *   여기 등록해 두어야 그 명령이 스택 버퍼에 안전하게 들어간다. IOCTL_OP
+	 *   매크로의 컴파일 시 검사가 등록을 빠뜨리면 빌드를 깨뜨린다. */
+	struct iommu_hw_info info;
+	/* [한국어] IOMMU_GET_HW_INFO ioctl 이 넘겨 오는 인자 구조체.
+	 * 설정자: iommufd_fops_ioctl() 이 사용자 공간의 버퍼를 copy_from_user 로 이 자리에 담는다.
+	 * 읽는 자: iommufd_get_hw_info().
+	 * 무엇을 하는가: 장치를 담당하는 IOMMU 하드웨어의 종류와 능력을 사용자에게 알린다.
+	 * 왜 필요한가: 중첩 변환을 쓰려면 사용자가 게스트 페이지 테이블을 그 하드웨어의
+	 *   형식으로 직접 만들어야 한다. 어떤 형식인지 모르면 시작할 수 없다.
+	 * 반환 구조는 하드웨어 종류마다 달라, 종류 코드와 함께 원시 바이트로 전달된다.
+	 * 동기화: 이 union 은 ioctl 호출자의 커널 스택에 놓이므로 공유되지 않는다.
+	 *   다른 스레드가 같은 fd 로 동시에 ioctl 을 불러도 각자의 사본을 갖는다.
+	 * 이 자리를 차지하는 이유: union 전체의 크기가 가장 큰 멤버에 맞춰지므로,
+	 *   여기 등록해 두어야 그 명령이 스택 버퍼에 안전하게 들어간다. IOCTL_OP
+	 *   매크로의 컴파일 시 검사가 등록을 빠뜨리면 빌드를 깨뜨린다. */
+	struct iommu_hw_queue_alloc hw_queue;
+	/* [한국어] IOMMU_HW_QUEUE_ALLOC ioctl 이 넘겨 오는 인자 구조체.
+	 * 설정자: iommufd_fops_ioctl() 이 사용자 공간의 버퍼를 copy_from_user 로 이 자리에 담는다.
+	 * 읽는 자: iommufd_hw_queue_alloc_ioctl().
+	 * 무엇을 하는가: 게스트가 직접 명령을 넣을 수 있는 하드웨어 큐를 만들어 넘긴다.
+	 * 왜 필요한가: 게스트의 무효화 명령이 매번 하이퍼바이저를 거치면 느리다.
+	 *   하드웨어가 큐를 여러 개 지원하면(Tegra CMDQV 등) 그중 하나를 게스트에게
+	 *   통째로 넘겨, 게스트가 호스트 개입 없이 명령을 보낼 수 있다.
+	 * 동기화: 이 union 은 ioctl 호출자의 커널 스택에 놓이므로 공유되지 않는다.
+	 *   다른 스레드가 같은 fd 로 동시에 ioctl 을 불러도 각자의 사본을 갖는다.
+	 * 이 자리를 차지하는 이유: union 전체의 크기가 가장 큰 멤버에 맞춰지므로,
+	 *   여기 등록해 두어야 그 명령이 스택 버퍼에 안전하게 들어간다. IOCTL_OP
+	 *   매크로의 컴파일 시 검사가 등록을 빠뜨리면 빌드를 깨뜨린다. */
+	struct iommu_hwpt_alloc hwpt;
+	/* [한국어] IOMMU_HWPT_ALLOC ioctl 이 넘겨 오는 인자 구조체.
+	 * 설정자: iommufd_fops_ioctl() 이 사용자 공간의 버퍼를 copy_from_user 로 이 자리에 담는다.
+	 * 읽는 자: iommufd_hwpt_alloc().
+	 * 무엇을 하는가: 하드웨어 페이지 테이블(HWPT) 객체를 만든다. 부모 IOAS 를
+	 *   주면 커널이 관리하는 테이블이, 부모 HWPT 와 게스트 데이터를 주면 중첩
+	 *   변환의 안쪽 테이블이 된다.
+	 * 이 명령이 iommufd 의 중심이다 — 장치를 붙일 대상이 곧 HWPT 이고, 격리와
+	 *   중첩과 더티 추적이 모두 이 객체의 속성으로 표현된다.
+	 * 동기화: 이 union 은 ioctl 호출자의 커널 스택에 놓이므로 공유되지 않는다.
+	 *   다른 스레드가 같은 fd 로 동시에 ioctl 을 불러도 각자의 사본을 갖는다.
+	 * 이 자리를 차지하는 이유: union 전체의 크기가 가장 큰 멤버에 맞춰지므로,
+	 *   여기 등록해 두어야 그 명령이 스택 버퍼에 안전하게 들어간다. IOCTL_OP
+	 *   매크로의 컴파일 시 검사가 등록을 빠뜨리면 빌드를 깨뜨린다. */
+	struct iommu_hwpt_get_dirty_bitmap get_dirty_bitmap;
+	/* [한국어] IOMMU_HWPT_GET_DIRTY_BITMAP ioctl 이 넘겨 오는 인자 구조체.
+	 * 설정자: iommufd_fops_ioctl() 이 사용자 공간의 버퍼를 copy_from_user 로 이 자리에 담는다.
+	 * 읽는 자: iommufd_hwpt_get_dirty_bitmap().
+	 * 무엇을 하는가: 지정한 IOVA 구간에서 장치가 쓴 페이지의 비트맵을 사용자에게
+	 *   옮기고, 필요하면 그 자리에서 더티 비트를 지운다.
+	 * 왜 필요한가: 라이브 마이그레이션에서 장치가 고친 페이지만 다시 보내려면
+	 *   그 목록이 있어야 한다. 페이지 테이블의 D 비트를 훑어 만든다.
+	 * 읽으면서 지우는 것이 원자적이어야 한다 — 그 사이의 쓰기를 놓치면 안 된다.
+	 * 동기화: 이 union 은 ioctl 호출자의 커널 스택에 놓이므로 공유되지 않는다.
+	 *   다른 스레드가 같은 fd 로 동시에 ioctl 을 불러도 각자의 사본을 갖는다.
+	 * 이 자리를 차지하는 이유: union 전체의 크기가 가장 큰 멤버에 맞춰지므로,
+	 *   여기 등록해 두어야 그 명령이 스택 버퍼에 안전하게 들어간다. IOCTL_OP
+	 *   매크로의 컴파일 시 검사가 등록을 빠뜨리면 빌드를 깨뜨린다. */
+	struct iommu_hwpt_invalidate cache;
+	/* [한국어] IOMMU_HWPT_INVALIDATE ioctl 이 넘겨 오는 인자 구조체.
+	 * 설정자: iommufd_fops_ioctl() 이 사용자 공간의 버퍼를 copy_from_user 로 이 자리에 담는다.
+	 * 읽는 자: iommufd_hwpt_invalidate().
+	 * 무엇을 하는가: 게스트가 만든 무효화 명령을 그대로 하드웨어에 전달한다.
+	 * 왜 필요한가: 중첩 변환에서 게스트가 자기 페이지 테이블을 고치면 그 캐시를
+	 *   비워야 하는데, 게스트는 하드웨어 큐에 직접 접근할 수 없다. 명령 배열을
+	 *   이 ioctl 로 넘기면 호스트가 검증한 뒤 큐에 넣어 준다.
+	 * 멤버 이름이 cache 인 것은 이것이 캐시 무효화 명령이기 때문이다.
+	 * 동기화: 이 union 은 ioctl 호출자의 커널 스택에 놓이므로 공유되지 않는다.
+	 *   다른 스레드가 같은 fd 로 동시에 ioctl 을 불러도 각자의 사본을 갖는다.
+	 * 이 자리를 차지하는 이유: union 전체의 크기가 가장 큰 멤버에 맞춰지므로,
+	 *   여기 등록해 두어야 그 명령이 스택 버퍼에 안전하게 들어간다. IOCTL_OP
+	 *   매크로의 컴파일 시 검사가 등록을 빠뜨리면 빌드를 깨뜨린다. */
+	struct iommu_hwpt_set_dirty_tracking set_dirty_tracking;
+	/* [한국어] IOMMU_HWPT_SET_DIRTY_TRACKING ioctl 이 넘겨 오는 인자 구조체.
+	 * 설정자: iommufd_fops_ioctl() 이 사용자 공간의 버퍼를 copy_from_user 로 이 자리에 담는다.
+	 * 읽는 자: iommufd_hwpt_set_dirty_tracking().
+	 * 무엇을 하는가: 그 HWPT 의 더티 추적을 켜거나 끈다. 켤 때는 기존 D 비트를
+	 *   모두 지워 깨끗한 상태에서 시작한다.
+	 * 위 get_dirty_bitmap 과 짝을 이룬다 — 이 명령으로 켜고, 그쪽으로 수확한다.
+	 * 하드웨어가 더티 추적을 지원하지 않으면 실패한다. 그 능력은 GET_HW_INFO 로
+	 *   미리 확인할 수 있다.
+	 * 동기화: 이 union 은 ioctl 호출자의 커널 스택에 놓이므로 공유되지 않는다.
+	 *   다른 스레드가 같은 fd 로 동시에 ioctl 을 불러도 각자의 사본을 갖는다.
+	 * 이 자리를 차지하는 이유: union 전체의 크기가 가장 큰 멤버에 맞춰지므로,
+	 *   여기 등록해 두어야 그 명령이 스택 버퍼에 안전하게 들어간다. IOCTL_OP
+	 *   매크로의 컴파일 시 검사가 등록을 빠뜨리면 빌드를 깨뜨린다. */
+	struct iommu_ioas_alloc alloc;
+	/* [한국어] IOMMU_IOAS_ALLOC ioctl 이 넘겨 오는 인자 구조체.
+	 * 설정자: iommufd_fops_ioctl() 이 사용자 공간의 버퍼를 copy_from_user 로 이 자리에 담는다.
+	 * 읽는 자: iommufd_ioas_alloc_ioctl().
+	 * 무엇을 하는가: IOAS(IO Address Space) 객체를 만든다. IOVA 공간 하나와
+	 *   거기 담긴 매핑들을 나타내는, 사용자가 직접 다루는 주소 공간이다.
+	 * HWPT 와의 차이: IOAS 는 소프트웨어가 관리하는 매핑의 집합이고, HWPT 는
+	 *   그것을 실제 하드웨어 페이지 테이블로 구현한 것이다. 여러 HWPT 가 같은
+	 *   IOAS 를 공유할 수 있어, 서로 다른 하드웨어의 장치들이 같은 주소 공간을 본다.
+	 * 동기화: 이 union 은 ioctl 호출자의 커널 스택에 놓이므로 공유되지 않는다.
+	 *   다른 스레드가 같은 fd 로 동시에 ioctl 을 불러도 각자의 사본을 갖는다.
+	 * 이 자리를 차지하는 이유: union 전체의 크기가 가장 큰 멤버에 맞춰지므로,
+	 *   여기 등록해 두어야 그 명령이 스택 버퍼에 안전하게 들어간다. IOCTL_OP
+	 *   매크로의 컴파일 시 검사가 등록을 빠뜨리면 빌드를 깨뜨린다. */
+	struct iommu_ioas_allow_iovas allow_iovas;
+	/* [한국어] IOMMU_IOAS_ALLOW_IOVAS ioctl 이 넘겨 오는 인자 구조체.
+	 * 설정자: iommufd_fops_ioctl() 이 사용자 공간의 버퍼를 copy_from_user 로 이 자리에 담는다.
+	 * 읽는 자: iommufd_ioas_allow_iovas().
+	 * 무엇을 하는가: 이 IOAS 에서 쓸 수 있는 IOVA 범위를 사용자가 못 박는다.
+	 * 왜 필요한가: 장치를 나중에 붙이면 그 장치의 예약 구간 때문에 이미 만든
+	 *   매핑이 충돌할 수 있다. 미리 범위를 선언해 두면, 그 범위를 침범하는 장치는
+	 *   붙이기 단계에서 거부되어 매핑이 뒤늦게 깨지는 일이 없다.
+	 * 즉 이것은 할당이 아니라 약속이다 — 커널이 그 범위를 지켜 주겠다는.
+	 * 동기화: 이 union 은 ioctl 호출자의 커널 스택에 놓이므로 공유되지 않는다.
+	 *   다른 스레드가 같은 fd 로 동시에 ioctl 을 불러도 각자의 사본을 갖는다.
+	 * 이 자리를 차지하는 이유: union 전체의 크기가 가장 큰 멤버에 맞춰지므로,
+	 *   여기 등록해 두어야 그 명령이 스택 버퍼에 안전하게 들어간다. IOCTL_OP
+	 *   매크로의 컴파일 시 검사가 등록을 빠뜨리면 빌드를 깨뜨린다. */
+	struct iommu_ioas_copy ioas_copy;
+	/* [한국어] IOMMU_IOAS_COPY ioctl 이 넘겨 오는 인자 구조체.
+	 * 설정자: iommufd_fops_ioctl() 이 사용자 공간의 버퍼를 copy_from_user 로 이 자리에 담는다.
+	 * 읽는 자: iommufd_ioas_copy().
+	 * 무엇을 하는가: 한 IOAS 의 매핑 구간을 다른 IOAS 로 복사한다. 페이지를 다시
+	 *   고정(pin)하지 않고 같은 페이지를 공유한다.
+	 * 왜 필요한가: 같은 메모리를 여러 주소 공간에서 보게 할 때, 사용자 페이지를
+	 *   다시 고정하면 메모리 회계가 두 배가 되고 고정 비용도 다시 든다. 내부
+	 *   페이지 목록을 공유하면 둘 다 피할 수 있다.
+	 * 동기화: 이 union 은 ioctl 호출자의 커널 스택에 놓이므로 공유되지 않는다.
+	 *   다른 스레드가 같은 fd 로 동시에 ioctl 을 불러도 각자의 사본을 갖는다.
+	 * 이 자리를 차지하는 이유: union 전체의 크기가 가장 큰 멤버에 맞춰지므로,
+	 *   여기 등록해 두어야 그 명령이 스택 버퍼에 안전하게 들어간다. IOCTL_OP
+	 *   매크로의 컴파일 시 검사가 등록을 빠뜨리면 빌드를 깨뜨린다. */
+	struct iommu_ioas_iova_ranges iova_ranges;
+	/* [한국어] IOMMU_IOAS_IOVA_RANGES ioctl 이 넘겨 오는 인자 구조체.
+	 * 설정자: iommufd_fops_ioctl() 이 사용자 공간의 버퍼를 copy_from_user 로 이 자리에 담는다.
+	 * 읽는 자: iommufd_ioas_iova_ranges().
+	 * 무엇을 하는가: 이 IOAS 에서 실제로 매핑할 수 있는 IOVA 범위들을 사용자에게 알린다.
+	 * 위 allow_iovas 와의 차이: 그쪽은 사용자가 원하는 범위를 선언하는 것이고,
+	 *   이쪽은 붙어 있는 장치들의 제약을 모두 합친 결과를 커널이 알려 주는 것이다.
+	 * 왜 필요한가: 장치마다 예약 구간(MSI 창, 펌웨어 영역)이 달라, 사용할 수 있는
+	 *   구멍이 어디인지 사용자가 미리 알아야 매핑을 배치할 수 있다.
+	 * 동기화: 이 union 은 ioctl 호출자의 커널 스택에 놓이므로 공유되지 않는다.
+	 *   다른 스레드가 같은 fd 로 동시에 ioctl 을 불러도 각자의 사본을 갖는다.
+	 * 이 자리를 차지하는 이유: union 전체의 크기가 가장 큰 멤버에 맞춰지므로,
+	 *   여기 등록해 두어야 그 명령이 스택 버퍼에 안전하게 들어간다. IOCTL_OP
+	 *   매크로의 컴파일 시 검사가 등록을 빠뜨리면 빌드를 깨뜨린다. */
+	struct iommu_ioas_map map;
+	/* [한국어] IOMMU_IOAS_MAP ioctl 이 넘겨 오는 인자 구조체.
+	 * 설정자: iommufd_fops_ioctl() 이 사용자 공간의 버퍼를 copy_from_user 로 이 자리에 담는다.
+	 * 읽는 자: iommufd_ioas_map().
+	 * 무엇을 하는가: 사용자 가상 주소 구간을 이 IOAS 의 IOVA 에 매핑한다. 커널이
+	 *   그 페이지들을 고정하고 페이지 테이블에 채운다.
+	 * IOVA 를 사용자가 고르게 할 수도, 커널이 고르게 할 수도 있다(플래그로 정한다).
+	 * 이것과 아래 unmap 이 iommufd 에서 가장 자주 불리는 두 명령이며, 성능이
+	 *   중요한 경로다 — 큰 구간을 매핑할 때 페이지 고정이 대부분의 시간을 쓴다.
+	 * 동기화: 이 union 은 ioctl 호출자의 커널 스택에 놓이므로 공유되지 않는다.
+	 *   다른 스레드가 같은 fd 로 동시에 ioctl 을 불러도 각자의 사본을 갖는다.
+	 * 이 자리를 차지하는 이유: union 전체의 크기가 가장 큰 멤버에 맞춰지므로,
+	 *   여기 등록해 두어야 그 명령이 스택 버퍼에 안전하게 들어간다. IOCTL_OP
+	 *   매크로의 컴파일 시 검사가 등록을 빠뜨리면 빌드를 깨뜨린다. */
+	struct iommu_ioas_unmap unmap;
+	/* [한국어] IOMMU_IOAS_UNMAP ioctl 이 넘겨 오는 인자 구조체.
+	 * 설정자: iommufd_fops_ioctl() 이 사용자 공간의 버퍼를 copy_from_user 로 이 자리에 담는다.
+	 * 읽는 자: iommufd_ioas_unmap().
+	 * 무엇을 하는가: IOVA 구간의 매핑을 걷고, 고정했던 페이지를 놓는다.
+	 * 순서가 중요하다: 페이지 테이블에서 지우고 TLB 와 장치 캐시를 비운 뒤에야
+	 *   페이지를 놓을 수 있다. 반대로 하면 반납된 페이지에 장치가 계속 DMA 하는
+	 *   창이 열린다.
+	 * 실제로 걷힌 크기를 사용자에게 돌려주어, 요청과 어긋났는지 확인할 수 있다.
+	 * 동기화: 이 union 은 ioctl 호출자의 커널 스택에 놓이므로 공유되지 않는다.
+	 *   다른 스레드가 같은 fd 로 동시에 ioctl 을 불러도 각자의 사본을 갖는다.
+	 * 이 자리를 차지하는 이유: union 전체의 크기가 가장 큰 멤버에 맞춰지므로,
+	 *   여기 등록해 두어야 그 명령이 스택 버퍼에 안전하게 들어간다. IOCTL_OP
+	 *   매크로의 컴파일 시 검사가 등록을 빠뜨리면 빌드를 깨뜨린다. */
+	struct iommu_option option;
+	/* [한국어] IOMMU_OPTION ioctl 이 넘겨 오는 인자 구조체.
+	 * 설정자: iommufd_fops_ioctl() 이 사용자 공간의 버퍼를 copy_from_user 로 이 자리에 담는다.
+	 * 읽는 자: iommufd_option().
+	 * 무엇을 하는가: iommufd 전역 또는 객체 단위의 옵션을 읽거나 쓴다.
+	 * 대표적인 옵션: 매핑에 huge page 를 쓸지, VFIO 호환 모드에서 어떤 동작을
+	 *   고를지 같은 것들이다.
+	 * 읽기와 쓰기를 한 명령으로 다루는 이유: 옵션마다 ioctl 을 만들면 인터페이스가
+	 *   급격히 늘어난다. 옵션 번호와 방향을 인자로 받는 편이 확장에 유리하다.
+	 * 동기화: 이 union 은 ioctl 호출자의 커널 스택에 놓이므로 공유되지 않는다.
+	 *   다른 스레드가 같은 fd 로 동시에 ioctl 을 불러도 각자의 사본을 갖는다.
+	 * 이 자리를 차지하는 이유: union 전체의 크기가 가장 큰 멤버에 맞춰지므로,
+	 *   여기 등록해 두어야 그 명령이 스택 버퍼에 안전하게 들어간다. IOCTL_OP
+	 *   매크로의 컴파일 시 검사가 등록을 빠뜨리면 빌드를 깨뜨린다. */
+	struct iommu_vdevice_alloc vdev;
+	/* [한국어] IOMMU_VDEVICE_ALLOC ioctl 이 넘겨 오는 인자 구조체.
+	 * 설정자: iommufd_fops_ioctl() 이 사용자 공간의 버퍼를 copy_from_user 로 이 자리에 담는다.
+	 * 읽는 자: iommufd_vdevice_alloc_ioctl().
+	 * 무엇을 하는가: vIOMMU 안에서 게스트가 보게 될 가상 장치 객체를 만든다.
+	 * 왜 필요한가: 게스트는 자기만의 장치 id 공간을 갖는다. 게스트가 "장치 3번" 이라고
+	 *   말할 때 그것이 호스트의 어느 물리 장치인지 대응시켜야 하고, 그 대응이
+	 *   이 객체다.
+	 * 폴트나 이벤트를 게스트에게 전달할 때도 이 대응을 거꾸로 따라간다.
+	 * 동기화: 이 union 은 ioctl 호출자의 커널 스택에 놓이므로 공유되지 않는다.
+	 *   다른 스레드가 같은 fd 로 동시에 ioctl 을 불러도 각자의 사본을 갖는다.
+	 * 이 자리를 차지하는 이유: union 전체의 크기가 가장 큰 멤버에 맞춰지므로,
+	 *   여기 등록해 두어야 그 명령이 스택 버퍼에 안전하게 들어간다. IOCTL_OP
+	 *   매크로의 컴파일 시 검사가 등록을 빠뜨리면 빌드를 깨뜨린다. */
+	struct iommu_veventq_alloc veventq;
+	/* [한국어] IOMMU_VEVENTQ_ALLOC ioctl 이 넘겨 오는 인자 구조체.
+	 * 설정자: iommufd_fops_ioctl() 이 사용자 공간의 버퍼를 copy_from_user 로 이 자리에 담는다.
+	 * 읽는 자: iommufd_veventq_alloc().
+	 * 무엇을 하는가: vIOMMU 의 이벤트를 게스트로 전달할 큐를 만들고 읽기용 fd 를 준다.
+	 * 왜 필요한가: 게스트에게 넘긴 장치가 변환 오류를 내면, 게스트의 IOMMU
+	 *   드라이버가 그것을 자기 이벤트 큐에서 읽어야 한다. 호스트가 받은 오류를
+	 *   이 큐로 옮겨 주면 게스트에게는 진짜 하드웨어처럼 보인다.
+	 * 위 fault 큐가 페이지 폴트(응답이 필요한 것)를 다루는 것과 달리, 이쪽은
+	 *   보고만 하는 이벤트를 다룬다.
+	 * 동기화: 이 union 은 ioctl 호출자의 커널 스택에 놓이므로 공유되지 않는다.
+	 *   다른 스레드가 같은 fd 로 동시에 ioctl 을 불러도 각자의 사본을 갖는다.
+	 * 이 자리를 차지하는 이유: union 전체의 크기가 가장 큰 멤버에 맞춰지므로,
+	 *   여기 등록해 두어야 그 명령이 스택 버퍼에 안전하게 들어간다. IOCTL_OP
+	 *   매크로의 컴파일 시 검사가 등록을 빠뜨리면 빌드를 깨뜨린다. */
+	struct iommu_vfio_ioas vfio_ioas;
+	/* [한국어] IOMMU_VFIO_IOAS ioctl 이 넘겨 오는 인자 구조체.
+	 * 설정자: iommufd_fops_ioctl() 이 사용자 공간의 버퍼를 copy_from_user 로 이 자리에 담는다.
+	 * 읽는 자: iommufd_vfio_ioas().
+	 * 무엇을 하는가: VFIO 호환 경로가 쓸 기본 IOAS 를 지정하거나 조회한다.
+	 * 왜 필요한가: 기존 VFIO 컨테이너 ioctl 들은 IOAS 라는 개념을 모른다. 그
+	 *   ioctl 들이 어느 IOAS 에 작용할지 미리 정해 두어야, 옛 사용자 코드가
+	 *   고치지 않고도 iommufd 위에서 동작한다.
+	 * iommufd 가 VFIO 를 대체하면서도 기존 사용자를 깨뜨리지 않기 위한 다리다.
+	 * 동기화: 이 union 은 ioctl 호출자의 커널 스택에 놓이므로 공유되지 않는다.
+	 *   다른 스레드가 같은 fd 로 동시에 ioctl 을 불러도 각자의 사본을 갖는다.
+	 * 이 자리를 차지하는 이유: union 전체의 크기가 가장 큰 멤버에 맞춰지므로,
+	 *   여기 등록해 두어야 그 명령이 스택 버퍼에 안전하게 들어간다. IOCTL_OP
+	 *   매크로의 컴파일 시 검사가 등록을 빠뜨리면 빌드를 깨뜨린다. */
+	struct iommu_viommu_alloc viommu;
+	/* [한국어] IOMMU_VIOMMU_ALLOC ioctl 이 넘겨 오는 인자 구조체.
+	 * 설정자: iommufd_fops_ioctl() 이 사용자 공간의 버퍼를 copy_from_user 로 이 자리에 담는다.
+	 * 읽는 자: iommufd_viommu_alloc_ioctl().
+	 * 무엇을 하는가: 게스트에게 보여 줄 가상 IOMMU 객체를 만든다. 부모가 되는
+	 *   2단계 HWPT 위에 얹힌다.
+	 * 왜 필요한가: 중첩 변환에서 게스트는 자기 IOMMU 가 있다고 믿고 페이지 테이블을
+	 *   만들고 무효화를 보낸다. 그 요청들을 받아 줄 커널 쪽 실체가 이 객체다.
+	 * 위 vdev, veventq, hw_queue 가 모두 이 객체에 매달린다 — vIOMMU 가 그 셋의
+	 *   수명과 문맥을 묶는 뿌리다.
+	 * 동기화: 이 union 은 ioctl 호출자의 커널 스택에 놓이므로 공유되지 않는다.
+	 *   다른 스레드가 같은 fd 로 동시에 ioctl 을 불러도 각자의 사본을 갖는다.
+	 * 이 자리를 차지하는 이유: union 전체의 크기가 가장 큰 멤버에 맞춰지므로,
+	 *   여기 등록해 두어야 그 명령이 스택 버퍼에 안전하게 들어간다. IOCTL_OP
+	 *   매크로의 컴파일 시 검사가 등록을 빠뜨리면 빌드를 깨뜨린다. */
 #ifdef CONFIG_IOMMUFD_TEST	/* [한국어] 시험을 켠 커널에서만 */
 	struct iommu_test_cmd test;	/* [한국어] 시험 전용 명령 */
 #endif
