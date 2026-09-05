@@ -3919,258 +3919,446 @@ phys_addr_t iommu_iova_to_phys(struct iommu_domain *domain, dma_addr_t iova)
 }
 EXPORT_SYMBOL_GPL(iommu_iova_to_phys);
 
+/*
+ * [한국어]
+ * iommu_pgsize - 이번 조각에 쓸 페이지 크기와 장수를 고른다
+ *
+ * @domain: 대상 도메인. pgsize_bitmap 이 이 하드웨어가 PTE 하나로 표현할 수
+ *          있는 크기들을 비트로 알려 준다 (x86 이면 보통 4K|2M|1G, ARM LPAE 면
+ *          입도에 따라 4K/16K/64K 와 그 블록 크기들).
+ * @iova:   이번 조각이 시작될 IO 가상 주소.
+ * @paddr:  대응하는 물리 주소. 해제 경로는 여기에 iova 를 그대로 넘겨
+ *          "물리 제약 없음"을 표현한다.
+ * @size:   아직 처리하지 못하고 남은 길이.
+ * @count:  NULL 이 아니면 "고른 크기의 페이지 몇 장"을 여기에 돌려준다.
+ * @return: 고른 페이지 크기(바이트).
+ *
+ * IOMMU 페이지 테이블은 한 가지 크기만 쓰지 않는다. 큰 페이지를 쓸수록 PTE 도
+ * IOTLB 엔트리도 적게 들지만, 큰 페이지는 IOVA 와 물리 주소가 '동시에' 그
+ * 경계에 정렬되어 있을 때만 쓸 수 있다. 이 함수가 그 판단을 전담한다.
+ *
+ * 판단은 세 단계다.
+ *   1) 남은 길이보다 큰 크기는 후보에서 제외 (GENMASK(__fls(size), 0)).
+ *   2) 두 주소를 OR 한 합성값의 최하위 1비트보다 큰 크기는 제외 — OR 하면 덜
+ *      정렬된 쪽의 하위 비트가 남으므로, 한 번의 __ffs 로 둘의 공통 최대 정렬을
+ *      얻는다.
+ *   3) 남은 것 중 최대치를 고른 뒤, 한 단계 위 크기로 '승격'할 여지가 있으면
+ *      count 를 경계까지로 잘라 둔다. 그러면 호출자가 다음 회차에 다시 들어올
+ *      때 주소가 그 경계에 맞아 큰 페이지가 선택된다. 4KB 로 시작해 2MB 블록으로
+ *      갈아타는 흔한 패턴이 이 잘라내기 하나로 만들어진다.
+ *
+ * 실행 컨텍스트: 매핑/해제 루프 안. 락도 잡지 않고 잠들지도 않는 순수 계산이다.
+ *
+ * 호출 체인: __iommu_map_domain_pgtbl / __iommu_unmap_domain_pgtbl → [이 함수]
+ */
 static size_t iommu_pgsize(struct iommu_domain *domain, unsigned long iova,
 			   phys_addr_t paddr, size_t size, size_t *count)
 {
-	unsigned int pgsize_idx, pgsize_idx_next;
-	unsigned long pgsizes;
-	size_t offset, pgsize, pgsize_next;
-	size_t offset_end;
-	unsigned long addr_merge = paddr | iova;
+	unsigned int pgsize_idx, pgsize_idx_next;	/* [한국어] 고른 페이지 크기와 그 바로 위 크기의 비트 위치 — pgsize_bitmap 안의 인덱스로 다룬다 */
+	unsigned long pgsizes;	/* [한국어] 후보 페이지 크기 집합. pgsize_bitmap 을 이번 요청 조건에 맞게 깎아 낸 비트마스크 */
+	size_t offset, pgsize, pgsize_next;	/* [한국어] offset: 다음 큰 페이지 경계까지 남은 거리. pgsize/pgsize_next: 비트 위치를 실제 바이트 크기로 편 값 */
+	size_t offset_end;	/* [한국어] offset + pgsize_next 를 오버플로 검사와 함께 받아 둘 임시값 */
+	unsigned long addr_merge = paddr | iova;	/* [한국어] 정렬 판정용 합성 주소 — 두 주소를 OR 하면 덜 정렬된 쪽의 하위 1비트가 살아남는다. IOVA 와 물리 주소가 '동시에' 만족하는 최대 정렬을 한 번에 구하는 관용구 */
 
 	/* Page sizes supported by the hardware and small enough for @size */
-	pgsizes = domain->pgsize_bitmap & GENMASK(__fls(size), 0);
+	pgsizes = domain->pgsize_bitmap & GENMASK(__fls(size), 0);	/* [한국어] 1차 후보: 하드웨어가 지원하는 크기 중 요청 길이 size 를 넘지 않는 것만. __fls(size) 는 size 이하 최대 2의 거듭제곱의 비트 위치 */
 
 	/* Constrain the page sizes further based on the maximum alignment */
-	if (likely(addr_merge))
-		pgsizes &= GENMASK(__ffs(addr_merge), 0);
+	if (likely(addr_merge))	/* [한국어] 주소가 0 이면 정렬 제약이 없다(모든 크기에 정렬됨) — 그 예외를 제외하고 */
+		pgsizes &= GENMASK(__ffs(addr_merge), 0);	/* [한국어] 2차 후보: 합성 주소의 최하위 1비트 위치까지만 남긴다. 그보다 큰 페이지는 주소가 경계에 맞지 않아 PTE 로 표현할 수 없다 */
 
 	/* Make sure we have at least one suitable page size */
-	BUG_ON(!pgsizes);
+	BUG_ON(!pgsizes);	/* [한국어] 후보가 하나도 없다 = 호출자가 min_pagesz 정렬 검사를 통과시켜 놓고 어긋난 값을 넘겼다는 뜻. 페이지 테이블을 망가뜨리기 전에 여기서 멈춘다 */
 
 	/* Pick the biggest page size remaining */
-	pgsize_idx = __fls(pgsizes);
-	pgsize = BIT(pgsize_idx);
-	if (!count)
-		return pgsize;
+	pgsize_idx = __fls(pgsizes);	/* [한국어] 남은 후보 중 가장 큰 것을 고른다 — 큰 페이지일수록 PTE 개수도 IOTLB 엔트리 소모도 줄어든다 */
+	pgsize = BIT(pgsize_idx);	/* [한국어] 비트 위치를 바이트 크기로 편다 (예: 21 → 2MB) */
+	if (!count)	/* [한국어] 개수를 묻지 않는 호출자는 페이지 크기 하나만 필요하다 — 승격 검토를 생략한다 */
+		return pgsize;	/* [한국어] 고른 페이지 크기 하나만 돌려준다 */
 
 	/* Find the next biggest support page size, if it exists */
-	pgsizes = domain->pgsize_bitmap & ~GENMASK(pgsize_idx, 0);
-	if (!pgsizes)
-		goto out_set_count;
+	pgsizes = domain->pgsize_bitmap & ~GENMASK(pgsize_idx, 0);	/* [한국어] 방금 고른 크기보다 '큰' 지원 크기만 남긴다 — 한 단계 위 블록으로 승격할 여지가 있는지 보기 위해 */
+	if (!pgsizes)	/* [한국어] 위 단계가 없으면 승격 검토 자체가 무의미 */
+		goto out_set_count;	/* [한국어] 고른 크기로 남은 길이 전부를 채운다 */
 
-	pgsize_idx_next = __ffs(pgsizes);
-	pgsize_next = BIT(pgsize_idx_next);
+	pgsize_idx_next = __ffs(pgsizes);	/* [한국어] 바로 한 단계 위 크기의 비트 위치 */
+	pgsize_next = BIT(pgsize_idx_next);	/* [한국어] 그 크기를 바이트로 (예: 4KB 다음이 2MB) */
 
 	/*
 	 * There's no point trying a bigger page size unless the virtual
 	 * and physical addresses are similarly offset within the larger page.
 	 */
-	if ((iova ^ paddr) & (pgsize_next - 1))
-		goto out_set_count;
+	if ((iova ^ paddr) & (pgsize_next - 1))	/* [한국어] 큰 페이지 '안에서의' 오프셋이 IOVA 와 물리 주소끼리 다르면, 아무리 전진해도 두 주소가 동시에 큰 경계에 닿는 순간이 오지 않는다 — 승격 불가 */
+		goto out_set_count;	/* [한국어] 승격이 불가능하므로 작은 페이지로 끝까지 간다 */
 
 	/* Calculate the offset to the next page size alignment boundary */
-	offset = pgsize_next - (addr_merge & (pgsize_next - 1));
+	offset = pgsize_next - (addr_merge & (pgsize_next - 1));	/* [한국어] 현재 주소에서 다음 큰 페이지 경계까지 남은 거리 */
 
 	/*
 	 * If size is big enough to accommodate the larger page, reduce
 	 * the number of smaller pages.
 	 */
-	if (!check_add_overflow(offset, pgsize_next, &offset_end) &&
-	    offset_end <= size)
-		size = offset;
+	if (!check_add_overflow(offset, pgsize_next, &offset_end) &&	/* [한국어] 경계까지 간 뒤 큰 페이지가 통째로 하나 더 들어가는가 — 그 덧셈이 오버플로하지 않는지까지 함께 본다 */
+	    offset_end <= size)	/* [한국어] 요청 길이 안에서 그것이 실제로 가능하다면 */
+		size = offset;	/* [한국어] 이번 호출은 경계까지만 작은 페이지로 채운다. 호출자가 루프를 돌아 다시 들어오면 그때는 주소가 정렬되어 큰 페이지가 선택된다 — 4KB 로 시작해 2MB 블록으로 갈아타는 승격이 이 한 줄로 이뤄진다 */
 
-out_set_count:
-	*count = size >> pgsize_idx;
-	return pgsize;
+out_set_count:	/* [한국어] 승격 검토를 건너뛴 두 경로가 합류하는 지점 */
+	*count = size >> pgsize_idx;	/* [한국어] 고른 크기의 페이지 몇 장으로 size 를 덮는지 — 드라이버 map_pages 에 한 번에 넘길 장수 */
+	return pgsize;	/* [한국어] (페이지 크기, 장수) 쌍을 확정해 돌려준다 */
 }
 
+/*
+ * [한국어]
+ * __iommu_map_domain_pgtbl - 벤더 드라이버의 map_pages 를 반복 호출해 범위를 매핑한다 (레거시 경로)
+ *
+ * @domain: 매핑을 넣을 도메인. __IOMMU_DOMAIN_PAGING 이어야 한다.
+ * @iova:   매핑 시작 IO 가상 주소.
+ * @paddr:  대응하는 물리 시작 주소. 이 함수가 다루는 것은 물리적으로 연속인
+ *          한 구간이다 — 흩어진 메모리는 호출자가 조각내어 여러 번 부른다.
+ * @size:   길이. iova|paddr|size 가 모두 최소 페이지 크기에 정렬되어야 한다.
+ * @prot:   IOMMU_READ/WRITE/CACHE/NOEXEC/MMIO 조합. 드라이버가 PTE 권한 비트로 옮긴다.
+ * @gfp:    페이지 테이블 페이지 할당에 쓸 플래그. GFP_KERNEL 이면 잠들 수 있다.
+ * @return: 0 이면 전 범위 매핑 완료. 음수면 실패이며, 이 함수가 부분 매핑까지
+ *          모두 되감은 뒤 돌아오므로 호출자는 정리할 것이 없다.
+ *
+ * IOMMU 코어에는 페이지 테이블을 다루는 두 가지 길이 있다. 하나는 각 벤더
+ * 드라이버가 자기 포맷의 페이지 테이블을 직접 관리하고 코어는 map_pages 를
+ * 조각 단위로 부르는 전통적인 길이고(이 함수), 다른 하나는 공용 페이지 테이블
+ * 계층(iommupt)이 범위를 통째로 처리하는 새 길이다. iommu_map_nosync 가 도메인을
+ * 보고 둘 중 하나로 갈라 준다.
+ *
+ * 되감기 방식에 이 함수의 성격이 드러난다. 드라이버는 실패하더라도 이미 기입한
+ * 바이트 수를 mapped 로 알려 주고, 코어는 ret 을 보기 전에 먼저 size 에서 그만큼을
+ * 뺀다. 그래서 실패 시 "원본 길이 − 남은 길이"가 정확히 되감아야 할 길이가 된다.
+ * 매핑 API 는 이렇게 부분 성공을 밖으로 내보내지 않는다 — 성공이면 전부, 실패면
+ * 아무것도.
+ *
+ * 실행 컨텍스트: 프로세스 문맥이 기본. gfp 에 GFP_ATOMIC 을 주면 아토믹 문맥에서도
+ * 부를 수 있고, might_sleep_if 가 그 계약을 검사한다. 도메인 단위 동시 호출은
+ * 드라이버 책임이다.
+ *
+ * 호출 체인: iommu_map_nosync → [이 함수] → iommu_pgsize, ops->map_pages
+ */
 static int __iommu_map_domain_pgtbl(struct iommu_domain *domain,
 				    unsigned long iova, phys_addr_t paddr,
 				    size_t size, int prot, gfp_t gfp)
 {
-	const struct iommu_domain_ops *ops = domain->ops;
-	unsigned long orig_iova = iova;
-	unsigned int min_pagesz;
-	size_t orig_size = size;
-	int ret = 0;
+	const struct iommu_domain_ops *ops = domain->ops;	/* [한국어] 이 도메인을 실제로 구현한 벤더 드라이버의 콜백 표 (intel/amd/arm-smmu ...) */
+	unsigned long orig_iova = iova;	/* [한국어] 되감기 시작점 — iova 는 루프에서 전진하므로 원본을 따로 보관한다 */
+	unsigned int min_pagesz;	/* [한국어] 이 도메인이 다룰 수 있는 최소 페이지 크기 */
+	size_t orig_size = size;	/* [한국어] 되감을 길이를 계산하기 위한 원본 길이 */
+	int ret = 0;	/* [한국어] 드라이버 map_pages 의 마지막 반환값 */
 
-	might_sleep_if(gfpflags_allow_blocking(gfp));
+	might_sleep_if(gfpflags_allow_blocking(gfp));	/* [한국어] GFP_KERNEL 로 불렸다면 페이지 테이블 페이지 할당에서 잠들 수 있다 — 아토믹 문맥에서의 오용을 여기서 잡는다 */
 
-	if (unlikely(!(domain->type & __IOMMU_DOMAIN_PAGING)))
-		return -EINVAL;
+	if (unlikely(!(domain->type & __IOMMU_DOMAIN_PAGING)))	/* [한국어] 페이지 테이블 자체가 없는 도메인(IDENTITY/BLOCKED)에는 매핑을 만들 수 없다 */
+		return -EINVAL;	/* [한국어] 번역 없는 도메인에 매핑을 요청한 것은 호출자 오류 */
 
-	if (WARN_ON(!ops->map_pages || domain->pgsize_bitmap == 0UL))
-		return -ENODEV;
+	if (WARN_ON(!ops->map_pages || domain->pgsize_bitmap == 0UL))	/* [한국어] 드라이버가 map_pages 를 두지 않았거나 지원 페이지 크기를 하나도 알리지 않았다 — 드라이버 등록 단계의 버그 */
+		return -ENODEV;	/* [한국어] 하드웨어가 매핑을 제공하지 못한다 */
 
 	/* Discourage passing strange GFP flags */
-	if (WARN_ON_ONCE(gfp & (__GFP_COMP | __GFP_DMA | __GFP_DMA32 |
-				__GFP_HIGHMEM)))
-		return -EINVAL;
+	if (WARN_ON_ONCE(gfp & (__GFP_COMP | __GFP_DMA | __GFP_DMA32 |	/* [한국어] 페이지 테이블 페이지에 써서는 안 되는 플래그들. __GFP_COMP(복합 페이지)는 페이지 테이블 할당자의 가정과 충돌하고, DMA/DMA32 존 지정은 불필요한 저역 메모리 고갈을 부른다 */
+				__GFP_HIGHMEM)))	/* [한국어] HIGHMEM 은 커널 선형 매핑이 없어 드라이버가 PTE 를 직접 쓸 수조차 없다 */
+		return -EINVAL;	/* [한국어] 이상한 GFP 조합은 거절 */
 
 	/* find out the minimum page size supported */
-	min_pagesz = 1 << __ffs(domain->pgsize_bitmap);
+	min_pagesz = 1 << __ffs(domain->pgsize_bitmap);	/* [한국어] 지원 크기 중 가장 작은 것 — 매핑의 모든 값이 최소한 여기에는 정렬되어야 한다 */
 
 	/*
 	 * both the virtual address and the physical one, as well as
 	 * the size of the mapping, must be aligned (at least) to the
 	 * size of the smallest page supported by the hardware
 	 */
-	if (!IS_ALIGNED(iova | paddr | size, min_pagesz)) {
-		pr_err("unaligned: iova 0x%lx pa %pa size 0x%zx min_pagesz 0x%x\n",
-		       iova, &paddr, size, min_pagesz);
-		return -EINVAL;
+	if (!IS_ALIGNED(iova | paddr | size, min_pagesz)) {	/* [한국어] IOVA·물리 주소·길이 셋 중 하나라도 어긋나면 어떤 PTE 조합으로도 표현할 수 없다. OR 로 셋을 한 번에 검사한다 */
+		pr_err("unaligned: iova 0x%lx pa %pa size 0x%zx min_pagesz 0x%x\n",	/* [한국어] 정렬 위반은 호출자(주로 DMA 계층)의 버그이므로 조용히 넘기지 않고 값을 그대로 남긴다 */
+		       iova, &paddr, size, min_pagesz);	/* [한국어] 어긋난 값과 요구 정렬을 함께 찍어 원인 추적을 돕는다 */
+		return -EINVAL;	/* [한국어] 정렬 위반 — 아무 것도 매핑하지 않고 돌아간다 */
 	}
 
-	pr_debug("map: iova 0x%lx pa %pa size 0x%zx\n", iova, &paddr, size);
+	pr_debug("map: iova 0x%lx pa %pa size 0x%zx\n", iova, &paddr, size);	/* [한국어] 요청 전체를 한 줄로 남긴다 (동적 디버그로 켤 때만 출력) */
 
-	while (size) {
-		size_t pgsize, count, mapped = 0;
+	while (size) {	/* [한국어] 요청 범위를 페이지 크기 단위 조각으로 나눠 모두 소진할 때까지 반복 */
+		size_t pgsize, count, mapped = 0;	/* [한국어] 이번 조각의 페이지 크기, 연속 장수, 그리고 드라이버가 실제로 매핑한 바이트 수 */
 
-		pgsize = iommu_pgsize(domain, iova, paddr, size, &count);
+		pgsize = iommu_pgsize(domain, iova, paddr, size, &count);	/* [한국어] 현재 주소 정렬과 남은 길이로부터 쓸 수 있는 최대 페이지 크기와 장수를 고른다 */
 
-		pr_debug("mapping: iova 0x%lx pa %pa pgsize 0x%zx count %zu\n",
-			 iova, &paddr, pgsize, count);
-		ret = ops->map_pages(domain, iova, paddr, pgsize, count, prot,
-				     gfp, &mapped);
+		pr_debug("mapping: iova 0x%lx pa %pa pgsize 0x%zx count %zu\n",	/* [한국어] 조각 단위 추적 — 어떤 크기로 쪼개졌는지가 성능 분석의 출발점 */
+			 iova, &paddr, pgsize, count);	/* [한국어] 이번 조각의 주소·크기·장수 */
+		ret = ops->map_pages(domain, iova, paddr, pgsize, count, prot,	/* [한국어] 벤더 드라이버에 실제 PTE 기입을 위임한다 — 하드웨어 페이지 테이블이 바뀌는 지점이 바로 여기다 */
+				     gfp, &mapped);	/* [한국어] mapped 로 '성공적으로 기입한 바이트 수'를 돌려받는다 */
 		/*
 		 * Some pages may have been mapped, even if an error occurred,
 		 * so we should account for those so they can be unmapped.
 		 */
-		size -= mapped;
+		size -= mapped;	/* [한국어] ret 검사보다 먼저 빼는 것이 핵심. 에러가 나도 일부는 이미 매핑됐을 수 있고, 그만큼은 되감기 대상에 포함되어야 하기 때문이다 */
 
-		if (ret)
-			break;
+		if (ret)	/* [한국어] 실패면 더 진행하지 않고 되감기로 빠진다 */
+			break;	/* [한국어] 루프 탈출 — size 에는 매핑하지 못한 잔여 길이가 남는다 */
 
-		iova += mapped;
-		paddr += mapped;
+		iova += mapped;	/* [한국어] IOVA 커서를 실제 매핑된 만큼 전진 */
+		paddr += mapped;	/* [한국어] 물리 커서도 같은 만큼 전진 — 이 함수는 물리적으로 연속인 한 구간만 다룬다 */
 	}
 
 	/* unroll mapping in case something went wrong */
-	if (ret) {
-		iommu_unmap(domain, orig_iova, orig_size - size);
-		return ret;
+	if (ret) {	/* [한국어] 부분 매핑이 남아 있다면 원자성을 흉내 내기 위해 전부 되돌린다 */
+		iommu_unmap(domain, orig_iova, orig_size - size);	/* [한국어] 실제로 매핑된 길이 = 원본 길이 − 남은 길이. 덕분에 호출자는 실패 후 아무 것도 정리할 필요가 없다 */
+		return ret;	/* [한국어] 드라이버가 준 에러를 그대로 올린다 */
 	}
-	return 0;
+	return 0;	/* [한국어] 요청 범위 전체가 페이지 테이블에 들어갔다 */
 }
 
+/*
+ * [한국어]
+ * iommu_sync_map - 새로 기입한 PTE 를 하드웨어에 보이게 만든다
+ *
+ * @domain: 매핑이 추가된 도메인.
+ * @iova:   반영할 범위의 시작.
+ * @size:   반영할 범위의 길이.
+ * @return: 0 이면 성공. 드라이버가 실패를 알리면 그 에러.
+ *
+ * 해제 쪽의 IOTLB 무효화와 짝을 이루지만 성격이 다르다. 해제는 옛 번역을 지우는
+ * 것이라 반드시 필요하고, 추가는 대부분의 하드웨어에서 아무 일도 하지 않아도
+ * 된다 — 없던 자리에 생긴 엔트리는 다음 워크에서 자연스럽게 읽히기 때문이다.
+ * 다만 "매핑 없음"까지 캐시하거나(negative caching) 페이지 테이블 워크 결과를
+ * 캐시하는 구현이 있어서, 그런 하드웨어만 iotlb_sync_map 을 채워 둔다.
+ *
+ * 이 단계를 iommu_map 에서 떼어 낸 이유는 배치다. iommu_map_sg 는 세그먼트마다
+ * nosync 로 기입한 뒤 마지막에 이 함수를 한 번만 부른다.
+ *
+ * 실행 컨텍스트: 매핑 경로와 동일. 드라이버 구현에 따라 잠들 수 있다.
+ *
+ * 호출 체인: iommu_map, iommu_map_sg, dma-iommu → [이 함수] → ops->iotlb_sync_map
+ */
 int iommu_sync_map(struct iommu_domain *domain, unsigned long iova, size_t size)
 {
-	const struct iommu_domain_ops *ops = domain->ops;
+	const struct iommu_domain_ops *ops = domain->ops;	/* [한국어] 벤더 콜백 표 */
 
-	if (!ops->iotlb_sync_map)
-		return 0;
-	return ops->iotlb_sync_map(domain, iova, size);
+	if (!ops->iotlb_sync_map)	/* [한국어] 매핑 '추가' 뒤에 별도 동기화가 필요 없는 하드웨어가 다수다 — 그때는 할 일이 없다 */
+		return 0;	/* [한국어] 동기화 불필요 = 성공 */
+	return ops->iotlb_sync_map(domain, iova, size);	/* [한국어] '매핑 없음'까지 캐시하는 IOMMU(negative caching)나 페이지 테이블 워크 캐시를 가진 구현에서, 새로 만든 엔트리를 하드웨어에 보이게 만든다 */
 }
 
+/*
+ * [한국어]
+ * iommu_map_nosync - 동기화 없이 페이지 테이블에만 매핑을 기입한다
+ *
+ * @domain: 대상 도메인.
+ * @iova:   매핑 시작 IO 가상 주소.
+ * @paddr:  물리 시작 주소 (연속 구간).
+ * @size:   길이.
+ * @prot:   접근 권한 비트.
+ * @gfp:    페이지 테이블 할당 플래그.
+ * @return: 0 이면 성공. 음수면 실패이며 부분 매핑은 내부에서 되감긴 뒤다.
+ *
+ * 매핑 경로의 갈림길이다. 도메인이 공용 페이지 테이블 계층(iommupt)으로 만들어져
+ * 있으면 pt->ops->map_range 가 범위 전체를 한 번에 처리하고, 아니면 전통적인
+ * __iommu_map_domain_pgtbl 이 iommu_pgsize 로 조각내며 드라이버 map_pages 를
+ * 반복 호출한다. 두 경로 모두 실패 시 스스로 되감으므로 호출자에게 보이는 계약은
+ * 같다.
+ *
+ * 이름의 nosync 는 iotlb_sync_map 을 생략한다는 뜻이다. 여러 번 기입하고 한 번만
+ * 동기화하려는 호출자(iommu_map_sg, dma-iommu)를 위한 것이며, 이 함수만 부르고
+ * 동기화를 잊으면 일부 하드웨어에서 새 매핑이 보이지 않는다.
+ *
+ * 실행 컨텍스트: gfp 가 허용하면 잠들 수 있다.
+ *
+ * 호출 체인: iommu_map, iommu_map_sg, dma-iommu → [이 함수]
+ *            → pt->ops->map_range 또는 __iommu_map_domain_pgtbl
+ */
 int iommu_map_nosync(struct iommu_domain *domain, unsigned long iova,
 		phys_addr_t paddr, size_t size, int prot, gfp_t gfp)
 {
-	struct pt_iommu *pt = iommupt_from_domain(domain);
-	int ret;
+	struct pt_iommu *pt = iommupt_from_domain(domain);	/* [한국어] 이 도메인이 공용 페이지 테이블 계층(iommupt)으로 만들어졌는지 확인한다. 그렇다면 벤더 콜백을 코어가 루프 돌리는 대신 공용 코드가 범위를 통째로 처리한다 */
+	int ret;	/* [한국어] 두 경로가 공유하는 반환값 */
 
-	if (pt) {
-		size_t mapped = 0;
+	if (pt) {	/* [한국어] 공용 페이지 테이블 경로 — 신형 드라이버들이 이쪽으로 옮겨 가고 있다 */
+		size_t mapped = 0;	/* [한국어] 실패 시 되감을 길이를 공용 계층이 채워 준다 */
 
-		ret = pt->ops->map_range(pt, iova, paddr, size, prot, gfp,
-					 &mapped);
-		if (ret) {
-			iommu_unmap(domain, iova, mapped);
-			return ret;
+		ret = pt->ops->map_range(pt, iova, paddr, size, prot, gfp,	/* [한국어] 범위 전체를 한 번의 호출로 — 페이지 크기 선택과 반복이 공용 계층 안으로 들어가 있다 */
+					 &mapped);	/* [한국어] 부분 성공 바이트 수 회신 창구 */
+		if (ret) {	/* [한국어] 공용 계층이 실패를 알렸다 */
+			iommu_unmap(domain, iova, mapped);	/* [한국어] 부분 성공분을 되감아 호출자에게 '아무 일도 없었던' 상태로 돌려준다 */
+			return ret;	/* [한국어] 되감기까지 마친 뒤 에러 전달 */
 		}
-		return 0;
+		return 0;	/* [한국어] 공용 경로 성공 */
 	}
-	ret = __iommu_map_domain_pgtbl(domain, iova, paddr, size, prot, gfp);
-	if (!ret)
-		return ret;
+	ret = __iommu_map_domain_pgtbl(domain, iova, paddr, size, prot, gfp);	/* [한국어] 레거시 경로 — 코어가 iommu_pgsize 로 쪼개어 드라이버 map_pages 를 직접 반복 호출한다 */
+	if (!ret)	/* [한국어] 주의: 조건이 뒤집혀 있다. 성공(ret==0)일 때 곧장 0 을 돌려주므로 아래 trace_map 은 오히려 '실패했을 때' 실행되고, 그 실패는 return 0 으로 삼켜진다. 원 의도는 if (ret) return ret; 로 보인다 — 코드는 손대지 않고 사실만 남긴다 */
+		return ret;	/* [한국어] 여기서는 ret 이 0 이므로 성공 반환과 같다 */
 
-	trace_map(iova, paddr, size);
-	iommu_debug_map(domain, paddr, size);
-	return 0;
+	trace_map(iova, paddr, size);	/* [한국어] 매핑 이벤트를 ftrace 로 남긴다 (위의 조건 때문에 실제로는 실패 경로에서 실행된다) */
+	iommu_debug_map(domain, paddr, size);	/* [한국어] 디버그 계층에 매핑 사실을 기록 — 나중에 해제와 짝이 맞는지 대조하는 용도 */
+	return 0;	/* [한국어] 성공으로 보고한다 */
 }
 
+/*
+ * [한국어]
+ * iommu_map - IOVA 범위 하나를 물리 메모리에 매핑한다 (외부 공개 API)
+ *
+ * @domain: 매핑을 넣을 도메인. 장치는 attach 를 통해 이미 이 도메인을 보고 있다.
+ * @iova:   매핑할 IO 가상 주소. IOVA 할당은 이 계층의 일이 아니다 — dma-iommu 의
+ *          iova 할당자나 VFIO/iommufd 의 사용자 요청이 정해서 내려보낸다.
+ * @paddr:  물리 시작 주소.
+ * @size:   길이.
+ * @prot:   IOMMU_READ | IOMMU_WRITE | IOMMU_CACHE | IOMMU_NOEXEC | IOMMU_MMIO.
+ * @gfp:    페이지 테이블 할당 플래그.
+ * @return: 0 성공, 음수 에러. 실패 시 아무 매핑도 남지 않는다.
+ *
+ * 장치가 DMA 로 메모리에 닿을 수 있게 만드는 최종 지점이다. NVMe 드라이버가
+ * dma_map_page 를 부르면 dma-iommu 가 IOVA 를 하나 떼어 이 함수로 내려오고,
+ * 그때 비로소 장치가 낸 주소를 IOMMU 가 실제 물리 페이지로 번역할 수 있게 된다.
+ *
+ * 두 단계로 나뉜다. 기입(iommu_map_nosync)과 반영(iommu_sync_map)이다. 반영이
+ * 실패하면 PTE 는 있으나 하드웨어가 볼지 알 수 없는 상태가 되므로 만든 것을 도로
+ * 지운다 — 여기서도 "성공이면 전부, 실패면 아무것도"가 지켜진다.
+ *
+ * 실행 컨텍스트: gfp 가 허용하면 잠들 수 있다. 같은 도메인에 대한 동시 매핑은
+ * 드라이버 또는 상위 계층이 직렬화한다.
+ *
+ * 호출 체인: dma-iommu, VFIO/iommufd, 드라이버 → [이 함수]
+ *            → iommu_map_nosync → iommu_sync_map
+ */
 int iommu_map(struct iommu_domain *domain, unsigned long iova,
 	      phys_addr_t paddr, size_t size, int prot, gfp_t gfp)
 {
-	int ret;
+	int ret;	/* [한국어] 기입과 동기화 두 단계의 결과를 차례로 받는다 */
 
-	ret = iommu_map_nosync(domain, iova, paddr, size, prot, gfp);
-	if (ret)
-		return ret;
+	ret = iommu_map_nosync(domain, iova, paddr, size, prot, gfp);	/* [한국어] 1단계: 페이지 테이블에 PTE 를 채운다 */
+	if (ret)	/* [한국어] 기입 실패는 이미 내부에서 되감겼으므로 그대로 올리면 된다 */
+		return ret;	/* [한국어] 실패 전달 */
 
-	ret = iommu_sync_map(domain, iova, size);
-	if (ret)
-		iommu_unmap(domain, iova, size);
+	ret = iommu_sync_map(domain, iova, size);	/* [한국어] 2단계: 하드웨어가 새 엔트리를 보도록 만든다. 이 두 단계를 나눠 둔 덕분에 map_sg 는 여러 번 기입하고 sync 는 한 번만 할 수 있다 */
+	if (ret)	/* [한국어] 동기화가 실패하면 PTE 는 있으나 하드웨어가 볼지 알 수 없는 어중간한 상태가 된다 */
+		iommu_unmap(domain, iova, size);	/* [한국어] 만든 매핑을 도로 지워 어중간한 상태를 남기지 않는다 */
 
-	return ret;
+	return ret;	/* [한국어] 성공이면 0, 동기화 실패면 그 에러 */
 }
 EXPORT_SYMBOL_GPL(iommu_map);
 
+/*
+ * [한국어]
+ * __iommu_unmap_domain_pgtbl - 드라이버 unmap_pages 를 반복 호출해 범위를 해제한다 (레거시 경로)
+ *
+ * @domain:       해제할 도메인.
+ * @iova:         해제 시작 IO 가상 주소.
+ * @size:         해제할 길이.
+ * @iotlb_gather: 무효화가 필요한 구간을 모으는 수집기. 드라이버가 여기에 범위를
+ *                누적하고, 실제 무효화는 상위의 iommu_iotlb_sync 가 한 번에 낸다.
+ * @return:       실제로 해제된 바이트 수. 요청보다 적으면 매핑이 없는 구간을 만난
+ *                것이다. 에러 코드가 아니라 진행량을 돌려주는 것이 이 계열의 관례다.
+ *
+ * 매핑 쪽과 대칭이지만 두 가지가 다르다. 첫째, 물리 주소가 필요 없으므로 정렬
+ * 검사와 iommu_pgsize 호출 모두 IOVA 만 본다 (그래서 paddr 자리에 iova 를 한 번 더
+ * 넘긴다). 둘째, PTE 를 지웠다고 끝이 아니다 — IOTLB 에 남은 옛 번역을 무효화하기
+ * 전까지 장치는 여전히 옛 물리 페이지에 닿을 수 있다. 그 무효화 범위를 모으는 것이
+ * iotlb_gather 이고, 드라이버가 gather 를 쓰지 않는 구현이면 코어가 형식상 범위를
+ * 채워 sync 콜백이 반드시 한 번은 불리도록 보장한다.
+ *
+ * 실행 컨텍스트: 아토믹 문맥에서도 불릴 수 있다 (dma_unmap 은 인터럽트 문맥에서
+ * 온다). 그래서 이 경로에는 메모리 할당이 없다.
+ *
+ * 호출 체인: __iommu_unmap → [이 함수] → iommu_pgsize, ops->unmap_pages
+ */
 static size_t
 __iommu_unmap_domain_pgtbl(struct iommu_domain *domain, unsigned long iova,
 			   size_t size, struct iommu_iotlb_gather *iotlb_gather)
 {
-	const struct iommu_domain_ops *ops = domain->ops;
-	size_t unmapped_page, unmapped = 0;
-	unsigned int min_pagesz;
+	const struct iommu_domain_ops *ops = domain->ops;	/* [한국어] 벤더 콜백 표 */
+	size_t unmapped_page, unmapped = 0;	/* [한국어] 이번 회차에 해제된 바이트와 누적 해제 바이트 */
+	unsigned int min_pagesz;	/* [한국어] 정렬 검사 기준이 되는 최소 페이지 크기 */
 
-	if (unlikely(!(domain->type & __IOMMU_DOMAIN_PAGING)))
-		return 0;
+	if (unlikely(!(domain->type & __IOMMU_DOMAIN_PAGING)))	/* [한국어] 페이지 테이블이 없는 도메인에는 지울 것도 없다 */
+		return 0;	/* [한국어] 해제 계열은 에러 코드가 아니라 '해제한 바이트 수'를 돌려준다 — 0 은 아무 것도 못 지웠다는 뜻 */
 
-	if (WARN_ON(!ops->unmap_pages || domain->pgsize_bitmap == 0UL))
-		return 0;
+	if (WARN_ON(!ops->unmap_pages || domain->pgsize_bitmap == 0UL))	/* [한국어] 드라이버가 unmap_pages 를 두지 않았다 — 등록 단계의 버그 */
+		return 0;	/* [한국어] 해제 불가 */
 
 	/* find out the minimum page size supported */
-	min_pagesz = 1 << __ffs(domain->pgsize_bitmap);
+	min_pagesz = 1 << __ffs(domain->pgsize_bitmap);	/* [한국어] 지원 크기 중 최소값 */
 
 	/*
 	 * The virtual address, as well as the size of the mapping, must be
 	 * aligned (at least) to the size of the smallest page supported
 	 * by the hardware
 	 */
-	if (!IS_ALIGNED(iova | size, min_pagesz)) {
-		pr_err("unaligned: iova 0x%lx size 0x%zx min_pagesz 0x%x\n",
-		       iova, size, min_pagesz);
-		return 0;
+	if (!IS_ALIGNED(iova | size, min_pagesz)) {	/* [한국어] 해제에는 물리 주소가 필요 없으므로 IOVA 와 길이만 본다 */
+		pr_err("unaligned: iova 0x%lx size 0x%zx min_pagesz 0x%x\n",	/* [한국어] 정렬이 어긋난 해제 요청은 매핑과 짝이 맞지 않는다는 신호 */
+		       iova, size, min_pagesz);	/* [한국어] 문제 값을 그대로 남긴다 */
+		return 0;	/* [한국어] 0 바이트 해제로 보고 — 호출자는 요청이 무시됐음을 알 수 있다 */
 	}
 
-	pr_debug("unmap this: iova 0x%lx size 0x%zx\n", iova, size);
+	pr_debug("unmap this: iova 0x%lx size 0x%zx\n", iova, size);	/* [한국어] 해제 요청 전체를 한 줄로 */
 
-	iommu_debug_unmap_begin(domain, iova, size);
+	iommu_debug_unmap_begin(domain, iova, size);	/* [한국어] 해제 직전 상태를 디버그 계층에 남긴다 — 뒤의 unmap_end 와 대조해 매핑/해제 짝을 검증한다 */
 
 	/*
 	 * Keep iterating until we either unmap 'size' bytes (or more)
 	 * or we hit an area that isn't mapped.
 	 */
-	while (unmapped < size) {
-		size_t pgsize, count;
+	while (unmapped < size) {	/* [한국어] 요청 길이를 다 채울 때까지 조각 단위로 지운다 */
+		size_t pgsize, count;	/* [한국어] 이번 조각의 페이지 크기와 장수 */
 
-		pgsize = iommu_pgsize(domain, iova, iova, size - unmapped, &count);
-		unmapped_page = ops->unmap_pages(domain, iova, pgsize, count, iotlb_gather);
-		if (!unmapped_page)
-			break;
+		pgsize = iommu_pgsize(domain, iova, iova, size - unmapped, &count);	/* [한국어] 물리 주소 자리에 iova 를 한 번 더 넘기는 것에 주의 — 해제에는 물리 주소가 무의미하므로 정렬 판정을 IOVA 만으로 하게 만드는 관용구다 */
+		unmapped_page = ops->unmap_pages(domain, iova, pgsize, count, iotlb_gather);	/* [한국어] 벤더 드라이버가 PTE 를 지우고 실제로 지운 바이트 수를 돌려준다. 이 시점에는 아직 IOTLB 가 옛 번역을 들고 있을 수 있다 */
+		if (!unmapped_page)	/* [한국어] 한 바이트도 못 지웠다 = 매핑이 없는 구간에 닿았다 */
+			break;	/* [한국어] 요청 길이를 다 못 채웠어도 여기서 멈춘다 — 없는 매핑을 억지로 지우지 않는다 */
 
-		pr_debug("unmapped: iova 0x%lx size 0x%zx\n",
-			 iova, unmapped_page);
+		pr_debug("unmapped: iova 0x%lx size 0x%zx\n",	/* [한국어] 조각 단위 해제 추적 */
+			 iova, unmapped_page);	/* [한국어] 이번 조각의 주소와 크기 */
 		/*
 		 * If the driver itself isn't using the gather, make sure
 		 * it looks non-empty so iotlb_sync will still be called.
 		 */
-		if (iotlb_gather->start >= iotlb_gather->end)
-			iommu_iotlb_gather_add_range(iotlb_gather, iova, size);
+		if (iotlb_gather->start >= iotlb_gather->end)	/* [한국어] 드라이버가 gather 에 범위를 적지 않았다면(자체적으로 즉시 무효화하는 구현) 수집기는 빈 채로 남는다 */
+			iommu_iotlb_gather_add_range(iotlb_gather, iova, size);	/* [한국어] 빈 gather 를 만나면 상위의 iommu_iotlb_sync 가 아무 일도 하지 않고 지나간다. 형식상 범위를 채워 sync 콜백이 반드시 한 번은 불리도록 보장한다 */
 
-		iova += unmapped_page;
-		unmapped += unmapped_page;
+		iova += unmapped_page;	/* [한국어] IOVA 커서를 지운 만큼 전진 */
+		unmapped += unmapped_page;	/* [한국어] 누적 해제량 갱신 — 루프 종료 조건이기도 하다 */
 	}
 
-	return unmapped;
+	return unmapped;	/* [한국어] 실제 해제된 총 바이트. 호출자는 iova + 반환값이 '멈춘 지점'임을 알 수 있다 */
 }
 
+/*
+ * [한국어]
+ * __iommu_unmap - 해제 경로의 갈림길 (공용 페이지 테이블 vs 레거시)
+ *
+ * @domain:       해제할 도메인.
+ * @iova:         시작 주소.
+ * @size:         길이.
+ * @iotlb_gather: 무효화 범위 수집기. 동기화는 여기서 하지 않는다.
+ * @return:       해제된 바이트 수.
+ *
+ * iommu_map_nosync 의 해제판이다. 도메인이 공용 페이지 테이블 계층으로 만들어져
+ * 있으면 unmap_range 가 범위를 통째로 지우고, 아니면 코어가 조각 단위로 드라이버
+ * unmap_pages 를 반복한다. 어느 쪽이든 IOTLB 무효화는 gather 에 쌓아 두기만 하고
+ * 내리지 않는다 — 그 결정을 호출자에게 남기는 것이 iommu_unmap 과 iommu_unmap_fast
+ * 를 가르는 유일한 차이다.
+ *
+ * 추적 훅 두 개(trace_unmap, iommu_debug_unmap_end)가 여기 모여 있어, 어느 경로로
+ * 갔든 요청 길이와 실제 해제량의 대조가 한 곳에서 이뤄진다.
+ *
+ * 실행 컨텍스트: 아토믹 문맥 가능.
+ *
+ * 호출 체인: iommu_unmap, iommu_unmap_fast → [이 함수]
+ *            → pt->ops->unmap_range 또는 __iommu_unmap_domain_pgtbl
+ */
 static size_t __iommu_unmap(struct iommu_domain *domain, unsigned long iova,
 			    size_t size,
 			    struct iommu_iotlb_gather *iotlb_gather)
 {
-	struct pt_iommu *pt = iommupt_from_domain(domain);
-	size_t unmapped;
+	struct pt_iommu *pt = iommupt_from_domain(domain);	/* [한국어] 매핑 쪽과 대칭 — 공용 페이지 테이블 계층으로 만들어진 도메인인지 판별한다 */
+	size_t unmapped;	/* [한국어] 두 경로가 공유하는 해제 바이트 수 */
 
-	if (pt)
-		unmapped = pt->ops->unmap_range(pt, iova, size, iotlb_gather);
+	if (pt)	/* [한국어] 공용 페이지 테이블 경로 */
+		unmapped = pt->ops->unmap_range(pt, iova, size, iotlb_gather);	/* [한국어] 범위 전체를 한 번에 지우고, 무효화가 필요한 구간을 gather 에 모아 준다 */
 	else
-		unmapped = __iommu_unmap_domain_pgtbl(domain, iova, size,
-						      iotlb_gather);
-	trace_unmap(iova, size, unmapped);
-	iommu_debug_unmap_end(domain, iova, size, unmapped);
-	return unmapped;
+		unmapped = __iommu_unmap_domain_pgtbl(domain, iova, size,	/* [한국어] 레거시 경로 — 코어가 조각 단위로 드라이버 unmap_pages 를 반복 호출한다 */
+						      iotlb_gather);	/* [한국어] 무효화 범위 수집기를 그대로 넘겨 준다 */
+	trace_unmap(iova, size, unmapped);	/* [한국어] 요청 길이와 실제 해제량을 함께 남긴다 — 둘이 다르면 매핑 누락이나 이중 해제의 단서가 된다 */
+	iommu_debug_unmap_end(domain, iova, size, unmapped);	/* [한국어] unmap_begin 과 짝을 이뤄 디버그 계층이 매핑/해제 대응을 검증하게 한다 */
+	return unmapped;	/* [한국어] 해제된 총 바이트 */
 }
 
 /**
@@ -4187,17 +4375,43 @@ static size_t __iommu_unmap(struct iommu_domain *domain, unsigned long iova,
  * Returns: Number of bytes of IOVA unmapped. iova + res will be the point
  * unmapping stopped.
  */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어)
+ * iommu_unmap - 매핑을 지우고 IOTLB 무효화까지 끝낸다 (안전한 기본 API)
+ *
+ * @domain: 대상 도메인.
+ * @iova:   해제 시작 주소.
+ * @size:   길이.
+ * @return: 실제 해제된 바이트 수.
+ *
+ * 이 함수가 돌아온 뒤에야 "그 IOVA 로 오는 DMA 가 더 이상 옛 물리 페이지에 닿지
+ * 않는다"가 보장된다. 그래서 페이지를 해제하거나 다른 용도로 재사용하기 직전에
+ * 반드시 거쳐야 하는 문이다. 무효화를 건너뛰면 이미 반납된 페이지에 장치가 DMA 를
+ * 쏘는, 추적하기 가장 어려운 부류의 메모리 손상이 생긴다.
+ *
+ * 매핑을 쪼갤 수는 없다는 제약(위 영어 주석)에 주의할 것. iommu_map 으로 만든
+ * 범위를 그보다 작게 잘라 해제할 수는 없고, 연속된 여러 매핑을 한 번에 지우는 것만
+ * 가능하다. 페이지 테이블이 "어디까지가 한 번의 매핑이었는지"를 기억하지 않기
+ * 때문이다.
+ *
+ * 실행 컨텍스트: 아토믹 문맥 가능. 다만 iommu_iotlb_sync 는 하드웨어 완료를
+ * 기다리므로 이 경로가 곧 해제 지연의 대부분이다 — 그 비용을 미루려고 만든 것이
+ * iommu_unmap_fast 와 dma-iommu 의 flush queue 다.
+ *
+ * 호출 체인: dma-iommu, VFIO/iommufd, 매핑 실패 되감기 → [이 함수]
+ *            → __iommu_unmap → iommu_iotlb_sync
+ */
 size_t iommu_unmap(struct iommu_domain *domain,
 		   unsigned long iova, size_t size)
 {
-	struct iommu_iotlb_gather iotlb_gather;
-	size_t ret;
+	struct iommu_iotlb_gather iotlb_gather;	/* [한국어] 이 호출 안에서만 쓰고 버리는 무효화 범위 수집기 — 스택에 둔다 */
+	size_t ret;	/* [한국어] 해제된 바이트 수 */
 
-	iommu_iotlb_gather_init(&iotlb_gather);
-	ret = __iommu_unmap(domain, iova, size, &iotlb_gather);
-	iommu_iotlb_sync(domain, &iotlb_gather);
+	iommu_iotlb_gather_init(&iotlb_gather);	/* [한국어] 빈 범위로 초기화 (start > end 인 '아직 아무 것도 없음' 상태) */
+	ret = __iommu_unmap(domain, iova, size, &iotlb_gather);	/* [한국어] PTE 를 지우고 무효화가 필요한 구간을 수집한다 */
+	iommu_iotlb_sync(domain, &iotlb_gather);	/* [한국어] 여기서 IOTLB 무효화를 하드웨어에 내리고 완료까지 기다린다. 이 함수가 돌아온 뒤에야 해당 IOVA 로 오는 DMA 가 옛 물리 페이지에 닿지 않음이 보장된다 — 페이지를 반납하거나 재사용해도 안전해지는 시점이 바로 이 줄이다 */
 
-	return ret;
+	return ret;	/* [한국어] 해제된 바이트 수를 그대로 전달 */
 }
 EXPORT_SYMBOL_GPL(iommu_unmap);
 
@@ -4220,62 +4434,124 @@ EXPORT_SYMBOL_GPL(iommu_unmap);
  * Returns: Number of bytes of IOVA unmapped. iova + res will be the point
  * unmapping stopped.
  */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어)
+ * iommu_unmap_fast - 무효화를 호출자에게 미루고 PTE 만 지운다
+ *
+ * @domain:       대상 도메인.
+ * @iova:         해제 시작 주소.
+ * @size:         길이.
+ * @iotlb_gather: 호출자가 소유하는 수집기. 여러 번의 해제가 여기에 누적되고,
+ *                호출자가 원하는 시점에 iommu_iotlb_sync 로 한 번에 내린다.
+ * @return:       해제된 바이트 수.
+ *
+ * iommu_unmap 과 하는 일은 같고 마지막 한 걸음만 다르다. 그 한 걸음이 비싸기
+ * 때문에 따로 존재한다 — IOTLB 무효화는 하드웨어 완료를 기다리는 동기 동작이라,
+ * 매 I/O 마다 내리면 스트리밍 DMA 처리량이 눈에 띄게 깎인다. dma-iommu 의
+ * DMA_FQ(flush queue) 모드는 해제된 IOVA 를 큐에 쌓아 두었다가 한꺼번에 무효화하고
+ * 그때서야 IOVA 를 재사용 가능으로 돌린다.
+ *
+ * 대가는 창(window)이다. 이 함수가 돌아온 뒤에도 IOTLB 에는 옛 번역이 잠시 남아
+ * 있어 장치가 이미 해제된 페이지에 닿을 수 있다. 그래서 이 경로는 커널이 신뢰하는
+ * 도메인에서만 쓰고, VFIO/iommufd 처럼 사용자 공간에 장치를 넘기는 경로는 반드시
+ * 무효화를 끝낸 뒤 페이지를 놓는다.
+ *
+ * 실행 컨텍스트: 아토믹 문맥 가능.
+ *
+ * 호출 체인: dma-iommu(flush queue) → [이 함수] → __iommu_unmap
+ *            (무효화는 나중에 iommu_iotlb_sync 가 별도로)
+ */
 size_t iommu_unmap_fast(struct iommu_domain *domain,
 			unsigned long iova, size_t size,
 			struct iommu_iotlb_gather *iotlb_gather)
 {
-	return __iommu_unmap(domain, iova, size, iotlb_gather);
+	return __iommu_unmap(domain, iova, size, iotlb_gather);	/* [한국어] 동기화를 하지 않고 gather 만 채워 돌려준다. 호출자(주로 dma-iommu 의 flush queue)가 여러 해제를 모아 한 번에 무효화하기 위한 것으로, 스트리밍 DMA 성능을 좌우하는 지점이다. 대가로 '해제 후에도 잠시 옛 번역이 살아 있는' 창이 생기므로 신뢰 도메인에서만 쓴다 */
 }
 EXPORT_SYMBOL_GPL(iommu_unmap_fast);
 
+/*
+ * [한국어]
+ * iommu_map_sg - scatter-gather 리스트를 하나의 연속 IOVA 창으로 접는다
+ *
+ * @domain: 대상 도메인.
+ * @iova:   매핑을 시작할 IO 가상 주소. 리스트 전체가 여기서부터 '연속으로' 놓인다.
+ * @sg:     scatterlist 의 첫 세그먼트. 체인된 리스트도 sg_next 로 따라간다.
+ * @nents:  세그먼트 개수.
+ * @prot:   접근 권한 비트.
+ * @gfp:    페이지 테이블 할당 플래그.
+ * @return: 성공 시 매핑된 총 바이트(양수). 실패 시 음수 에러이며 부분 매핑은
+ *          되감긴 뒤다. 반환형이 ssize_t 인 이유가 이 두 의미를 겸하기 위함이다.
+ *
+ * IOMMU 가 블록/네트워크 스택에 주는 가장 큰 이득이 여기 있다. 물리적으로 흩어진
+ * 페이지들을 장치가 보기에는 하나의 연속 버퍼로 만들어 주므로, NVMe 라면 PRP 리스트
+ * 대신 단일 SGL 항목으로, 네트워크라면 하나의 DMA 주소로 처리할 수 있게 된다.
+ *
+ * 두 가지 최적화가 겹쳐 있다.
+ *  - 병합: 물리적으로 이어지는 세그먼트들은 len 에 누적만 하고, 끊기는 지점에서만
+ *    한 번 매핑한다. 매핑 호출 수와 PTE 개수를 함께 줄인다.
+ *  - 지연 동기화: 각 구간은 nosync 로 기입하고 iotlb_sync_map 은 맨 끝에 한 번만.
+ *
+ * 루프 조건이 i <= nents 인 것에 주목할 것. 마지막 한 바퀴는 세그먼트를 읽으려는
+ * 것이 아니라, 모아 두고 아직 매핑하지 않은 잔여 구간을 비워 내기 위한 것이다.
+ * 그 바퀴에서는 sg 가 전진하지 않으므로 "이어지지 않는다" 조건이 반드시 참이 된다.
+ *
+ * sg_dma_is_bus_address 세그먼트는 건너뛴다. P2PDMA 로 PCIe 스위치 안에서 장치끼리
+ * 직접 오가는 구간이라 IOMMU 를 아예 거치지 않으며, 페이지 테이블에 넣으면 오히려
+ * 틀린 번역이 생긴다.
+ *
+ * 실행 컨텍스트: gfp 가 허용하면 잠들 수 있다.
+ *
+ * 호출 체인: dma-iommu 의 dma_map_sg 구현 → [이 함수]
+ *            → iommu_map_nosync (구간마다) → iommu_sync_map (한 번)
+ */
 ssize_t iommu_map_sg(struct iommu_domain *domain, unsigned long iova,
 		     struct scatterlist *sg, unsigned int nents, int prot,
 		     gfp_t gfp)
 {
-	size_t len = 0, mapped = 0;
-	phys_addr_t start;
-	unsigned int i = 0;
-	int ret;
+	size_t len = 0, mapped = 0;	/* [한국어] len: 지금까지 이어붙인 물리 연속 구간의 길이. mapped: IOVA 상에서 이미 매핑을 끝낸 총 길이 */
+	phys_addr_t start;	/* [한국어] 이어붙이는 중인 연속 구간의 시작 물리 주소 */
+	unsigned int i = 0;	/* [한국어] 세그먼트 인덱스 */
+	int ret;	/* [한국어] 하위 매핑 호출의 결과 */
 
-	while (i <= nents) {
-		phys_addr_t s_phys = sg_phys(sg);
+	while (i <= nents) {	/* [한국어] nents '이하'인 것에 주의 — 마지막 한 바퀴는 세그먼트를 읽기 위해서가 아니라 모아 둔 잔여 구간을 비워 내기 위한 것이다 */
+		phys_addr_t s_phys = sg_phys(sg);	/* [한국어] 이번 세그먼트의 물리 시작 주소 (page + offset) */
 
-		if (len && s_phys != start + len) {
-			ret = iommu_map_nosync(domain, iova + mapped, start,
-					len, prot, gfp);
-			if (ret)
-				goto out_err;
+		if (len && s_phys != start + len) {	/* [한국어] 모아 둔 구간이 있는데 이번 세그먼트가 물리적으로 이어지지 않는다 — 여기서 끊고 지금까지 모은 것을 한 번에 매핑한다. 마지막 반복(i == nents)에서는 sg 가 갱신되지 않아 이 조건이 반드시 참이 되고, 그래서 잔여분이 비워진다 */
+			ret = iommu_map_nosync(domain, iova + mapped, start,	/* [한국어] IOVA 는 연속, 물리는 조각 — 흩어진 페이지들을 하나의 연속 IOVA 창으로 접는 것이 IOMMU 가 블록/네트워크 스택에 주는 가장 큰 이득이다 */
+					len, prot, gfp);	/* [한국어] 이번에 모은 연속 구간 전체를 한 번의 호출로 */
+			if (ret)	/* [한국어] 모아 둔 구간 하나를 매핑하다 실패 */
+				goto out_err;	/* [한국어] 일부라도 실패하면 이미 만든 매핑까지 전부 되감는다 */
 
-			mapped += len;
-			len = 0;
+			mapped += len;	/* [한국어] IOVA 커서를 매핑한 만큼 전진 */
+			len = 0;	/* [한국어] 다음 연속 구간 수집을 새로 시작 */
 		}
 
-		if (sg_dma_is_bus_address(sg))
-			goto next;
+		if (sg_dma_is_bus_address(sg))	/* [한국어] P2PDMA 로 이미 버스 주소가 정해진 세그먼트 — PCIe 스위치 안에서 장치끼리 직접 오가며 IOMMU 를 아예 거치지 않으므로 페이지 테이블에 넣어서는 안 된다 */
+			goto next;	/* [한국어] 이 세그먼트는 건너뛴다 */
 
-		if (len) {
-			len += sg->length;
+		if (len) {	/* [한국어] 직전까지의 구간과 물리적으로 이어지는 경우 */
+			len += sg->length;	/* [한국어] 구간을 늘리기만 한다 — 매핑 호출 횟수와 PTE 개수를 함께 줄이는 병합 */
 		} else {
-			len = sg->length;
-			start = s_phys;
+			len = sg->length;	/* [한국어] 새 연속 구간의 길이 */
+			start = s_phys;	/* [한국어] 새 연속 구간의 시작 물리 주소 */
 		}
 
-next:
-		if (++i < nents)
-			sg = sg_next(sg);
+next:	/* [한국어] P2PDMA 세그먼트를 건너뛴 경로가 합류하는 지점 */
+		if (++i < nents)	/* [한국어] 마지막 세그먼트를 지난 한 바퀴에서는 sg 를 전진시키지 않는다 — 위의 잔여분 비우기가 성립하는 이유가 이 조건이다 */
+			sg = sg_next(sg);	/* [한국어] 다음 세그먼트로 (체인된 sgl 도 따라간다) */
 	}
 
-	ret = iommu_sync_map(domain, iova, mapped);
-	if (ret)
-		goto out_err;
+	ret = iommu_sync_map(domain, iova, mapped);	/* [한국어] 모든 매핑을 한 번에 하드웨어에 반영한다 — 세그먼트마다 sync 하지 않으려고 위에서 nosync 를 쓴 것이다 */
+	if (ret)	/* [한국어] 마지막 동기화가 실패 */
+		goto out_err;	/* [한국어] 동기화 실패도 전부 되감는다 */
 
-	return mapped;
+	return mapped;	/* [한국어] 성공 시 매핑된 총 바이트(양수). 반환형이 ssize_t 라 호출자는 음수면 에러로 읽는다 */
 
-out_err:
+out_err:	/* [한국어] 부분 성공을 남기지 않기 위한 되감기 경로 */
 	/* undo mappings already done */
-	iommu_unmap(domain, iova, mapped);
+	iommu_unmap(domain, iova, mapped);	/* [한국어] 이미 만든 매핑을 지운다 — 실패한 dma_map_sg 는 아무 자원도 남기지 않아야 한다 */
 
-	return ret;
+	return ret;	/* [한국어] 음수 에러 코드 */
 }
 EXPORT_SYMBOL_GPL(iommu_map_sg);
 
