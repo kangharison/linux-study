@@ -1477,25 +1477,25 @@ dma_addr_t iommu_dma_map_phys(struct device *dev, phys_addr_t phys, size_t size,
 void iommu_dma_unmap_phys(struct device *dev, dma_addr_t dma_handle,
 		size_t size, enum dma_data_direction dir, unsigned long attrs)
 {
-	phys_addr_t phys;
+	phys_addr_t phys;	/* [한국어] 캐시 동기화와 바운스 해제에 필요한 실제 물리 주소 */
 
-	if (attrs & (DMA_ATTR_MMIO | DMA_ATTR_REQUIRE_COHERENT)) {
-		__iommu_dma_unmap(dev, dma_handle, size);
-		return;
+	if (attrs & (DMA_ATTR_MMIO | DMA_ATTR_REQUIRE_COHERENT)) {	/* [한국어] 이 두 경우는 바운스도 캐시 동기화도 거치지 않았다 */
+		__iommu_dma_unmap(dev, dma_handle, size);	/* [한국어] 매핑만 지우면 끝 */
+		return;	/* [한국어] 해제 완료 */
 	}
 
-	phys = iommu_iova_to_phys(iommu_get_dma_domain(dev), dma_handle);
-	if (WARN_ON(!phys))
-		return;
+	phys = iommu_iova_to_phys(iommu_get_dma_domain(dev), dma_handle);	/* [한국어] 매핑을 지우기 전에 물리 주소를 얻어야 한다 — 지운 뒤에는 역변환이 불가능하다 */
+	if (WARN_ON(!phys))	/* [한국어] 이미 해제되었거나 이 도메인의 주소가 아니다 = 이중 해제 */
+		return;	/* [한국어] 더 진행하면 엉뚱한 메모리를 만진다 */
 
-	if (!(attrs & DMA_ATTR_SKIP_CPU_SYNC) && !dev_is_dma_coherent(dev)) {
-		arch_sync_dma_for_cpu(phys, size, dir);
-		arch_sync_dma_flush();
+	if (!(attrs & DMA_ATTR_SKIP_CPU_SYNC) && !dev_is_dma_coherent(dev)) {	/* [한국어] 비일관 장치이고 호출자가 동기화를 생략하지 않았으면 */
+		arch_sync_dma_for_cpu(phys, size, dir);	/* [한국어] 장치가 쓴 내용을 CPU 가 보도록 캐시를 무효화 */
+		arch_sync_dma_flush();	/* [한국어] 완료 대기 */
 	}
 
-	__iommu_dma_unmap(dev, dma_handle, size);
+	__iommu_dma_unmap(dev, dma_handle, size);	/* [한국어] IOVA 매핑 해제 (무효화는 정책에 따라 즉시 또는 지연) */
 
-	swiotlb_tbl_unmap_single(dev, phys, size, dir, attrs);
+	swiotlb_tbl_unmap_single(dev, phys, size, dir, attrs);	/* [한국어] 바운스를 썼다면 내용을 원본으로 되복사하고 버퍼를 반납한다. 안 썼으면 무해하게 지나간다 */
 }
 
 /*
@@ -1508,36 +1508,36 @@ void iommu_dma_unmap_phys(struct device *dev, dma_addr_t dma_handle,
 static int __finalise_sg(struct device *dev, struct scatterlist *sg, int nents,
 		dma_addr_t dma_addr)
 {
-	struct scatterlist *s, *cur = sg;
-	unsigned long seg_mask = dma_get_seg_boundary(dev);
-	unsigned int cur_len = 0, max_len = dma_get_max_seg_size(dev);
-	int i, count = 0;
+	struct scatterlist *s, *cur = sg;	/* [한국어] 입력 순회 커서와, 결과를 쌓아 갈 출력 커서. 같은 리스트를 제자리에서 압축한다 */
+	unsigned long seg_mask = dma_get_seg_boundary(dev);	/* [한국어] 장치가 넘지 못하는 주소 경계 (예: 64KB 경계를 넘는 전송을 못 하는 하드웨어) */
+	unsigned int cur_len = 0, max_len = dma_get_max_seg_size(dev);	/* [한국어] 쌓고 있는 출력 세그먼트의 길이와, 장치가 받을 수 있는 최대 세그먼트 길이 */
+	int i, count = 0;	/* [한국어] 입력 인덱스와 만들어진 출력 세그먼트 수 */
 
-	for_each_sg(sg, s, nents, i) {
+	for_each_sg(sg, s, nents, i) {	/* [한국어] 입력 세그먼트를 하나씩 */
 		/* Restore this segment's original unaligned fields first */
-		dma_addr_t s_dma_addr = sg_dma_address(s);
-		unsigned int s_iova_off = sg_dma_address(s);
-		unsigned int s_length = sg_dma_len(s);
-		unsigned int s_iova_len = s->length;
+		dma_addr_t s_dma_addr = sg_dma_address(s);	/* [한국어] P2PDMA 세그먼트라면 여기에 버스 주소가 들어 있다 */
+		unsigned int s_iova_off = sg_dma_address(s);	/* [한국어] 일반 세그먼트라면 매핑 준비 단계가 여기에 '페이지 내 오프셋'을 임시로 넣어 두었다. 같은 필드를 두 뜻으로 쓰는 것이라 아래에서 종류를 먼저 가른다 */
+		unsigned int s_length = sg_dma_len(s);	/* [한국어] 원래 길이 (준비 단계가 보관해 둔 값) */
+		unsigned int s_iova_len = s->length;	/* [한국어] IOVA 공간에서 이 세그먼트가 차지한 길이 (페이지 정렬로 부풀려진 값) */
 
-		sg_dma_address(s) = DMA_MAPPING_ERROR;
-		sg_dma_len(s) = 0;
+		sg_dma_address(s) = DMA_MAPPING_ERROR;	/* [한국어] 입력 필드를 무효로 만들어 둔다 — 아래에서 출력 커서에만 유효한 값을 쓴다 */
+		sg_dma_len(s) = 0;	/* [한국어] 마찬가지 */
 
-		if (sg_dma_is_bus_address(s)) {
-			if (i > 0)
-				cur = sg_next(cur);
+		if (sg_dma_is_bus_address(s)) {	/* [한국어] P2PDMA 세그먼트 — IOMMU 를 거치지 않고 이미 버스 주소가 정해져 있다 */
+			if (i > 0)	/* [한국어] 첫 세그먼트가 아니면 */
+				cur = sg_next(cur);	/* [한국어] 출력 커서를 전진 */
 
-			sg_dma_unmark_bus_address(s);
-			sg_dma_address(cur) = s_dma_addr;
-			sg_dma_len(cur) = s_length;
-			sg_dma_mark_bus_address(cur);
-			count++;
-			cur_len = 0;
-			continue;
+			sg_dma_unmark_bus_address(s);	/* [한국어] 입력의 표식을 지우고 */
+			sg_dma_address(cur) = s_dma_addr;	/* [한국어] 출력에 버스 주소를 그대로 옮긴다 */
+			sg_dma_len(cur) = s_length;	/* [한국어] 길이도 */
+			sg_dma_mark_bus_address(cur);	/* [한국어] 출력에 표식을 다시 단다 — 해제 경로가 이것을 보고 IOMMU 해제를 건너뛴다 */
+			count++;	/* [한국어] 출력 세그먼트 하나 */
+			cur_len = 0;	/* [한국어] P2PDMA 세그먼트에는 다음 것을 이어붙일 수 없다 */
+			continue;	/* [한국어] 다음 입력으로 */
 		}
 
-		s->offset += s_iova_off;
-		s->length = s_length;
+		s->offset += s_iova_off;	/* [한국어] 원래의 페이지 내 오프셋을 복원한다 — 호출자는 자기가 넘긴 그대로의 오프셋/길이를 다시 보게 된다 (위 영어 주석) */
+		s->length = s_length;	/* [한국어] 원래 길이 복원 */
 
 		/*
 		 * Now fill in the real DMA data. If...
@@ -1546,27 +1546,27 @@ static int __finalise_sg(struct device *dev, struct scatterlist *sg, int nents,
 		 * - but doesn't fall at a segment boundary
 		 * - and wouldn't make the resulting output segment too long
 		 */
-		if (cur_len && !s_iova_off && (dma_addr & seg_mask) &&
-		    (max_len - cur_len >= s_length)) {
+		if (cur_len && !s_iova_off && (dma_addr & seg_mask) &&	/* [한국어] 이어붙일 수 있는 조건 세 가지: 쌓고 있는 출력이 있고, 이 세그먼트가 IOVA 페이지 경계에서 시작하며(중간에 틈이 없다), 장치의 세그먼트 경계를 넘지 않는다 */
+		    (max_len - cur_len >= s_length)) {	/* [한국어] 그리고 합쳐도 최대 길이를 넘지 않는다 */
 			/* ...then concatenate it with the previous one */
-			cur_len += s_length;
+			cur_len += s_length;	/* [한국어] 앞 세그먼트에 이어붙인다 — IOVA 가 연속이므로 장치가 보기에 하나의 구간이다. 이것이 IOMMU 로 sg 를 접는 실질적 이득이다 */
 		} else {
 			/* Otherwise start the next output segment */
-			if (i > 0)
-				cur = sg_next(cur);
-			cur_len = s_length;
-			count++;
+			if (i > 0)	/* [한국어] 이어붙일 수 없다 — 새 출력 세그먼트를 시작한다 */
+				cur = sg_next(cur);	/* [한국어] 출력 커서 전진 */
+			cur_len = s_length;	/* [한국어] 새 세그먼트의 길이 */
+			count++;	/* [한국어] 출력 세그먼트 하나 추가 */
 
-			sg_dma_address(cur) = dma_addr + s_iova_off;
+			sg_dma_address(cur) = dma_addr + s_iova_off;	/* [한국어] 이 세그먼트의 DMA 주소 = IOVA 창의 현재 위치 + 페이지 내 오프셋 */
 		}
 
-		sg_dma_len(cur) = cur_len;
-		dma_addr += s_iova_len;
+		sg_dma_len(cur) = cur_len;	/* [한국어] 출력 세그먼트의 현재 길이 (이어붙이면 계속 늘어난다) */
+		dma_addr += s_iova_len;	/* [한국어] IOVA 커서를 이 세그먼트가 차지한 만큼 전진 */
 
-		if (s_length + s_iova_off < s_iova_len)
-			cur_len = 0;
+		if (s_length + s_iova_off < s_iova_len)	/* [한국어] 이 세그먼트 뒤에 페이지 정렬 패딩이 남았다면 */
+			cur_len = 0;	/* [한국어] 다음 것을 이어붙일 수 없다 — 사이에 쓰이지 않는 구간이 끼기 때문 */
 	}
-	return count;
+	return count;	/* [한국어] 호출자에게 돌려줄 출력 세그먼트 개수. 입력보다 대개 훨씬 적다 */
 }
 
 /*
@@ -1575,55 +1575,55 @@ static int __finalise_sg(struct device *dev, struct scatterlist *sg, int nents,
  */
 static void __invalidate_sg(struct scatterlist *sg, int nents)
 {
-	struct scatterlist *s;
-	int i;
+	struct scatterlist *s;	/* [한국어] 순회 커서 */
+	int i;	/* [한국어] 인덱스 */
 
-	for_each_sg(sg, s, nents, i) {
-		if (sg_dma_is_bus_address(s)) {
-			sg_dma_unmark_bus_address(s);
+	for_each_sg(sg, s, nents, i) {	/* [한국어] 모든 세그먼트에 대해 */
+		if (sg_dma_is_bus_address(s)) {	/* [한국어] P2PDMA 세그먼트 */
+			sg_dma_unmark_bus_address(s);	/* [한국어] 표식만 지운다 — 원본 offset/length 는 건드리지 않았다 */
 		} else {
-			if (sg_dma_address(s) != DMA_MAPPING_ERROR)
-				s->offset += sg_dma_address(s);
-			if (sg_dma_len(s))
-				s->length = sg_dma_len(s);
+			if (sg_dma_address(s) != DMA_MAPPING_ERROR)	/* [한국어] 준비 단계가 오프셋을 저장해 둔 세그먼트라면 */
+				s->offset += sg_dma_address(s);	/* [한국어] 원래 오프셋을 복원 */
+			if (sg_dma_len(s))	/* [한국어] 길이를 저장해 둔 세그먼트라면 */
+				s->length = sg_dma_len(s);	/* [한국어] 원래 길이를 복원 */
 		}
-		sg_dma_address(s) = DMA_MAPPING_ERROR;
-		sg_dma_len(s) = 0;
+		sg_dma_address(s) = DMA_MAPPING_ERROR;	/* [한국어] DMA 필드는 무효로 — 호출자가 실패한 매핑을 쓰지 못하게 (위 영어 주석) */
+		sg_dma_len(s) = 0;	/* [한국어] 마찬가지 */
 	}
 }
 
 static void iommu_dma_unmap_sg_swiotlb(struct device *dev, struct scatterlist *sg,
 		int nents, enum dma_data_direction dir, unsigned long attrs)
 {
-	struct scatterlist *s;
-	int i;
+	struct scatterlist *s;	/* [한국어] 순회 커서 */
+	int i;	/* [한국어] 인덱스 */
 
-	for_each_sg(sg, s, nents, i)
-		iommu_dma_unmap_phys(dev, sg_dma_address(s),
-				sg_dma_len(s), dir, attrs);
+	for_each_sg(sg, s, nents, i)	/* [한국어] 세그먼트마다 */
+		iommu_dma_unmap_phys(dev, sg_dma_address(s),	/* [한국어] 단일 매핑처럼 하나씩 해제한다 — 바운스 경로는 병합하지 않았으므로 1:1 대응이다 */
+				sg_dma_len(s), dir, attrs);	/* [한국어] 그 세그먼트의 길이 */
 }
 
 static int iommu_dma_map_sg_swiotlb(struct device *dev, struct scatterlist *sg,
 		int nents, enum dma_data_direction dir, unsigned long attrs)
 {
-	struct scatterlist *s;
-	int i;
+	struct scatterlist *s;	/* [한국어] 순회 커서 */
+	int i;	/* [한국어] 인덱스 */
 
-	sg_dma_mark_swiotlb(sg);
+	sg_dma_mark_swiotlb(sg);	/* [한국어] 이 리스트가 바운스 경로로 매핑되었음을 표시한다. 이후 sync 와 해제가 이 표식을 보고 갈라진다 */
 
-	for_each_sg(sg, s, nents, i) {
-		sg_dma_address(s) = iommu_dma_map_phys(dev, sg_phys(s),
-				s->length, dir, attrs);
-		if (sg_dma_address(s) == DMA_MAPPING_ERROR)
-			goto out_unmap;
-		sg_dma_len(s) = s->length;
+	for_each_sg(sg, s, nents, i) {	/* [한국어] 세그먼트마다 */
+		sg_dma_address(s) = iommu_dma_map_phys(dev, sg_phys(s),	/* [한국어] 각각 독립적으로 매핑한다 — 병합하지 않는다. 바운스 버퍼가 서로 인접하지 않기 때문이다 */
+				s->length, dir, attrs);	/* [한국어] 그 세그먼트의 길이 */
+		if (sg_dma_address(s) == DMA_MAPPING_ERROR)	/* [한국어] 한 세그먼트라도 실패하면 */
+			goto out_unmap;	/* [한국어] 이미 매핑한 것들을 되돌린다 */
+		sg_dma_len(s) = s->length;	/* [한국어] 이 경로에서는 출력 세그먼트 수가 입력과 같다 */
 	}
 
-	return nents;
+	return nents;	/* [한국어] 병합이 없으므로 입력 개수 그대로 */
 
-out_unmap:
-	iommu_dma_unmap_sg_swiotlb(dev, sg, i, dir, attrs | DMA_ATTR_SKIP_CPU_SYNC);
-	return -EIO;
+out_unmap:	/* [한국어] 부분 성공 되감기 */
+	iommu_dma_unmap_sg_swiotlb(dev, sg, i, dir, attrs | DMA_ATTR_SKIP_CPU_SYNC);	/* [한국어] 성공한 i 개만 해제한다. SKIP_CPU_SYNC 를 더하는 것은 아직 장치가 건드린 적이 없어 캐시를 되돌릴 필요가 없기 때문이다 */
+	return -EIO;	/* [한국어] 매핑 실패 */
 }
 
 /*
@@ -1636,29 +1636,29 @@ out_unmap:
 int iommu_dma_map_sg(struct device *dev, struct scatterlist *sg, int nents,
 		enum dma_data_direction dir, unsigned long attrs)
 {
-	struct iommu_domain *domain = iommu_get_dma_domain(dev);
-	struct iommu_dma_cookie *cookie = domain->iova_cookie;
-	struct iova_domain *iovad = &cookie->iovad;
-	struct scatterlist *s, *prev = NULL;
-	int prot = dma_info_to_prot(dir, dev_is_dma_coherent(dev), attrs);
-	struct pci_p2pdma_map_state p2pdma_state = {};
-	dma_addr_t iova;
-	size_t iova_len = 0;
-	unsigned long mask = dma_get_seg_boundary(dev);
-	ssize_t ret;
-	int i;
+	struct iommu_domain *domain = iommu_get_dma_domain(dev);	/* [한국어] 이 장치의 기본 도메인 */
+	struct iommu_dma_cookie *cookie = domain->iova_cookie;	/* [한국어] DMA 상태 */
+	struct iova_domain *iovad = &cookie->iovad;	/* [한국어] IOVA 공간 */
+	struct scatterlist *s, *prev = NULL;	/* [한국어] 순회 커서와 직전 세그먼트 (패딩을 앞 세그먼트에 붙이기 위해 필요) */
+	int prot = dma_info_to_prot(dir, dev_is_dma_coherent(dev), attrs);	/* [한국어] 전체 리스트에 같은 권한을 쓴다 */
+	struct pci_p2pdma_map_state p2pdma_state = {};	/* [한국어] P2PDMA 판정 상태 — 같은 메모리 영역이 반복되면 재판정을 아낀다 */
+	dma_addr_t iova;	/* [한국어] 확보할 IOVA 창 */
+	size_t iova_len = 0;	/* [한국어] 리스트 전체가 IOVA 공간에서 차지할 길이 */
+	unsigned long mask = dma_get_seg_boundary(dev);	/* [한국어] 장치가 넘지 못하는 주소 경계 */
+	ssize_t ret;	/* [한국어] 매핑 결과 */
+	int i;	/* [한국어] 세그먼트 인덱스 */
 
-	if (static_branch_unlikely(&iommu_deferred_attach_enabled)) {
-		ret = iommu_deferred_attach(dev, domain);
-		if (ret)
-			goto out;
+	if (static_branch_unlikely(&iommu_deferred_attach_enabled)) {	/* [한국어] 지연 부착이 필요한 시스템에서만 */
+		ret = iommu_deferred_attach(dev, domain);	/* [한국어] 여기서 실제로 도메인을 건다 */
+		if (ret)	/* [한국어] 부착 실패 */
+			goto out;	/* [한국어] 에러 코드 정규화를 거쳐 반환 */
 	}
 
-	if (dev_use_sg_swiotlb(dev, sg, nents, dir))
-		return iommu_dma_map_sg_swiotlb(dev, sg, nents, dir, attrs);
+	if (dev_use_sg_swiotlb(dev, sg, nents, dir))	/* [한국어] 신뢰할 수 없는 장치이거나 정렬이 위험한 세그먼트가 있으면 */
+		return iommu_dma_map_sg_swiotlb(dev, sg, nents, dir, attrs);	/* [한국어] 병합 없이 하나씩 바운스 매핑하는 경로로 간다 */
 
-	if (!(attrs & DMA_ATTR_SKIP_CPU_SYNC))
-		iommu_dma_sync_sg_for_device(dev, sg, nents, dir);
+	if (!(attrs & DMA_ATTR_SKIP_CPU_SYNC))	/* [한국어] 호출자가 생략하라고 하지 않았으면 */
+		iommu_dma_sync_sg_for_device(dev, sg, nents, dir);	/* [한국어] 매핑 전에 캐시를 밀어낸다 */
 
 	/*
 	 * Work out how much IOVA space we need, and align the segments to
@@ -1666,42 +1666,42 @@ int iommu_dma_map_sg(struct device *dev, struct scatterlist *sg, int nents,
 	 * trickery we can modify the list in-place, but reversibly, by
 	 * stashing the unaligned parts in the as-yet-unused DMA fields.
 	 */
-	for_each_sg(sg, s, nents, i) {
-		size_t s_iova_off = iova_offset(iovad, s->offset);
-		size_t s_length = s->length;
-		size_t pad_len = (mask - iova_len + 1) & mask;
+	for_each_sg(sg, s, nents, i) {	/* [한국어] 1단계 — 필요한 IOVA 길이를 계산하며 리스트를 페이지 정렬로 다듬는다 */
+		size_t s_iova_off = iova_offset(iovad, s->offset);	/* [한국어] 이 세그먼트가 IOMMU 페이지 안에서 시작하는 오프셋 */
+		size_t s_length = s->length;	/* [한국어] 원래 길이 */
+		size_t pad_len = (mask - iova_len + 1) & mask;	/* [한국어] 다음 세그먼트 경계까지 남은 거리. 여기까지 채워야 세그먼트가 경계를 넘지 않는다 */
 
-		switch (pci_p2pdma_state(&p2pdma_state, dev, sg_page(s))) {
-		case PCI_P2PDMA_MAP_THRU_HOST_BRIDGE:
+		switch (pci_p2pdma_state(&p2pdma_state, dev, sg_page(s))) {	/* [한국어] 이 페이지가 P2PDMA 메모리인지, 그렇다면 어떤 경로인지 판정한다 */
+		case PCI_P2PDMA_MAP_THRU_HOST_BRIDGE:	/* [한국어] 호스트 브리지를 거쳐 가는 P2P — 결국 메모리처럼 다뤄야 한다 */
 			/*
 			 * Mapping through host bridge should be mapped with
 			 * regular IOVAs, thus we do nothing here and continue
 			 * below.
 			 */
-			break;
-		case PCI_P2PDMA_MAP_NONE:
-			break;
-		case PCI_P2PDMA_MAP_BUS_ADDR:
+			break;	/* [한국어] 일반 세그먼트와 똑같이 아래에서 매핑한다 (위 영어 주석) */
+		case PCI_P2PDMA_MAP_NONE:	/* [한국어] P2PDMA 가 아닌 평범한 시스템 메모리 */
+			break;	/* [한국어] 일반 처리 */
+		case PCI_P2PDMA_MAP_BUS_ADDR:	/* [한국어] 스위치 안에서 장치끼리 직접 오가는 경우 — IOMMU 를 거치지 않는다 */
 			/*
 			 * iommu_map_sg() will skip this segment as it is marked
 			 * as a bus address, __finalise_sg() will copy the dma
 			 * address into the output segment.
 			 */
-			s->dma_address = pci_p2pdma_bus_addr_map(
-				p2pdma_state.mem, sg_phys(s));
-			sg_dma_len(s) = sg->length;
-			sg_dma_mark_bus_address(s);
-			continue;
+			s->dma_address = pci_p2pdma_bus_addr_map(	/* [한국어] 물리 주소를 버스 주소로 직접 변환해 넣는다 */
+				p2pdma_state.mem, sg_phys(s));	/* [한국어] 그 메모리 영역의 변환 정보 */
+			sg_dma_len(s) = sg->length;	/* [한국어] 길이 기록 */
+			sg_dma_mark_bus_address(s);	/* [한국어] 표식을 단다. iommu_map_sg 가 이 세그먼트를 건너뛰고, __finalise_sg 가 주소를 그대로 출력에 옮긴다 (위 영어 주석) */
+			continue;	/* [한국어] IOVA 길이 계산에서 제외 — 주소 공간을 쓰지 않는다 */
 		default:
-			ret = -EREMOTEIO;
-			goto out_restore_sg;
+			ret = -EREMOTEIO;	/* [한국어] 이 장치에서 도달할 수 없는 P2P 메모리 */
+			goto out_restore_sg;	/* [한국어] 리스트를 원상 복구하고 실패 */
 		}
 
-		sg_dma_address(s) = s_iova_off;
-		sg_dma_len(s) = s_length;
-		s->offset -= s_iova_off;
-		s_length = iova_align(iovad, s_length + s_iova_off);
-		s->length = s_length;
+		sg_dma_address(s) = s_iova_off;	/* [한국어] 아직 쓰이지 않는 DMA 필드에 원래 오프셋을 숨겨 둔다. 제자리에서 리스트를 고치되 되돌릴 수 있게 만드는 요령이다 (위 영어 주석) */
+		sg_dma_len(s) = s_length;	/* [한국어] 원래 길이도 함께 숨긴다 */
+		s->offset -= s_iova_off;	/* [한국어] 페이지 경계로 내린다 — IOMMU API 는 페이지 정렬된 입력만 받는다 */
+		s_length = iova_align(iovad, s_length + s_iova_off);	/* [한국어] 앞 오프셋을 포함해 페이지 단위로 올림 */
+		s->length = s_length;	/* [한국어] 정렬된 길이로 바꿔 둔다 */
 
 		/*
 		 * Due to the alignment of our single IOVA allocation, we can
@@ -1716,42 +1716,42 @@ int iommu_dma_map_sg(struct device *dev, struct scatterlist *sg, int nents,
 		 *   iova_len == 0, thus we cannot dereference prev the first
 		 *   time through here (i.e. before it has a meaningful value).
 		 */
-		if (pad_len && pad_len < s_length - 1) {
-			prev->length += pad_len;
-			iova_len += pad_len;
+		if (pad_len && pad_len < s_length - 1) {	/* [한국어] 이 세그먼트가 장치의 세그먼트 경계를 넘게 된다면 */
+			prev->length += pad_len;	/* [한국어] 앞 세그먼트를 늘려 경계까지 채운다. 그러면 이 세그먼트는 경계에서 시작해 넘지 않는다. 위 영어 주석이 설명하듯, IOVA 창 하나를 정렬해 잡기 때문에 실제 주소를 몰라도 길이만으로 이 배치가 성립한다 */
+			iova_len += pad_len;	/* [한국어] 패딩만큼 필요한 IOVA 도 늘어난다 */
 		}
 
-		iova_len += s_length;
-		prev = s;
+		iova_len += s_length;	/* [한국어] 이 세그먼트가 차지할 길이 누적 */
+		prev = s;	/* [한국어] 다음 회차에서 패딩을 붙일 대상 */
 	}
 
-	if (!iova_len)
-		return __finalise_sg(dev, sg, nents, 0);
+	if (!iova_len)	/* [한국어] IOVA 를 쓰는 세그먼트가 하나도 없다 (전부 P2PDMA 버스 주소) */
+		return __finalise_sg(dev, sg, nents, 0);	/* [한국어] 매핑 없이 출력만 정리한다 */
 
-	iova = iommu_dma_alloc_iova(domain, iova_len, dma_get_mask(dev), dev);
-	if (!iova) {
-		ret = -ENOMEM;
-		goto out_restore_sg;
+	iova = iommu_dma_alloc_iova(domain, iova_len, dma_get_mask(dev), dev);	/* [한국어] 리스트 전체를 담을 연속 IOVA 창을 한 번에 확보한다 — 이것이 sg 를 하나의 주소로 접는 근거다 */
+	if (!iova) {	/* [한국어] IOVA 고갈 */
+		ret = -ENOMEM;	/* [한국어] 이유 기록 */
+		goto out_restore_sg;	/* [한국어] 리스트 복구 후 실패 */
 	}
 
 	/*
 	 * We'll leave any physical concatenation to the IOMMU driver's
 	 * implementation - it knows better than we do.
 	 */
-	ret = iommu_map_sg(domain, iova, sg, nents, prot, GFP_ATOMIC);
-	if (ret < 0 || ret < iova_len)
-		goto out_free_iova;
+	ret = iommu_map_sg(domain, iova, sg, nents, prot, GFP_ATOMIC);	/* [한국어] 물리적으로 인접한 세그먼트를 합치는 것은 IOMMU 코어에 맡긴다 — 페이지 크기 선택까지 함께 판단할 수 있는 쪽이 더 잘한다 (위 영어 주석) */
+	if (ret < 0 || ret < iova_len)	/* [한국어] 실패했거나 일부만 매핑되었다 */
+		goto out_free_iova;	/* [한국어] IOVA 부터 되돌린다 */
 
-	return __finalise_sg(dev, sg, nents, iova);
+	return __finalise_sg(dev, sg, nents, iova);	/* [한국어] 숨겨 둔 오프셋을 복원하고 세그먼트를 병합해 호출자에게 돌려줄 형태로 만든다 */
 
-out_free_iova:
-	iommu_dma_free_iova(domain, iova, iova_len, NULL);
-out_restore_sg:
-	__invalidate_sg(sg, nents);
-out:
-	if (ret != -ENOMEM && ret != -EREMOTEIO)
-		return -EINVAL;
-	return ret;
+out_free_iova:	/* [한국어] 매핑 실패 경로 */
+	iommu_dma_free_iova(domain, iova, iova_len, NULL);	/* [한국어] 확보한 창 반납 (매핑이 없으니 무효화도 불필요) */
+out_restore_sg:	/* [한국어] IOVA 확보 실패와 P2P 오류가 합류 */
+	__invalidate_sg(sg, nents);	/* [한국어] 제자리에서 고쳐 둔 리스트를 원래대로 되돌린다 */
+out:	/* [한국어] 지연 부착 실패도 합류 */
+	if (ret != -ENOMEM && ret != -EREMOTEIO)	/* [한국어] DMA API 는 이 세 값만 의미 있게 구분한다 */
+		return -EINVAL;	/* [한국어] 나머지는 모두 잘못된 인자로 뭉뚱그린다 */
+	return ret;	/* [한국어] -ENOMEM 또는 -EREMOTEIO */
 }
 
 void iommu_dma_unmap_sg(struct device *dev, struct scatterlist *sg, int nents,
