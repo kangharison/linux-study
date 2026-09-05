@@ -579,64 +579,156 @@ int dmar_remove_dev_scope(struct dmar_pci_notify_info *info, u16 segment,
 	return 0;	/* [한국어] 이 항목에는 없었다 */
 }
 
+/*
+ * [한국어]
+ * dmar_pci_bus_add_dev - 새로 나타난 PCI 장치를 DMAR 표의 모든 항목에 연결한다
+ *
+ * @info: 그 장치의 경로 정보.
+ * @return: 0 이상이면 성공, 음수면 실패.
+ *
+ * 장치 하나가 나타나면 여러 표 항목이 그것을 지목하고 있을 수 있다.
+ * 그래서 세 단계로 훑는다.
+ *   1) DRHD 항목들 — 어느 유닛이 이 장치를 담당하는지. include_all 유닛은
+ *      건너뛴다(장치 목록이 없다).
+ *   2) RMRR/ATSR/SATC — dmar_iommu_notify_scope_dev() 가 iommu.c 에서
+ *      그 셋을 훑는다.
+ *   3) 인터럽트 재매핑 — intel_irq_remap_add_device().
+ *
+ * DRHD 순회에서 성공(ret > 0)해도 break 하는 것을 눈여겨볼 것: 한 장치는
+ * 하나의 유닛에만 속하므로 찾으면 더 볼 필요가 없다.
+ *
+ * dmar_dev_scope_status 에 오류를 기록하는 이유: 이 연결이 실패하면 그
+ * 장치가 표에 반영되지 않은 채 남는다. 부팅 후반의 dmar_dev_scope_init 이
+ * 그 상태를 보고 초기화를 실패시킨다 — 조용히 넘어가면 그 장치의 RMRR 이나
+ * ATS 설정이 빠진 채 시스템이 동작하게 된다.
+ *
+ * 실행 컨텍스트: PCI 버스 알림. dmar_global_lock 쓰기 락 아래.
+ */
 static int dmar_pci_bus_add_dev(struct dmar_pci_notify_info *info)
 {
-	int ret = 0;
-	struct dmar_drhd_unit *dmaru;
-	struct acpi_dmar_hardware_unit *drhd;
+	int ret = 0;	/* [한국어] 각 단계의 결과 */
+	struct dmar_drhd_unit *dmaru;	/* [한국어] 유닛 순회 커서 */
+	struct acpi_dmar_hardware_unit *drhd;	/* [한국어] 그 유닛의 원본 ACPI 항목 */
 
-	for_each_drhd_unit(dmaru) {
-		if (dmaru->include_all)
-			continue;
+	for_each_drhd_unit(dmaru) {	/* [한국어] 등록된 유닛들을 훑으며 */
+		if (dmaru->include_all)	/* [한국어] "나머지를 모두 담당한다"는 유닛은 */
+			continue;	/* [한국어] 장치 목록 자체가 없으므로 건너뛴다 */
 
-		drhd = container_of(dmaru->hdr,
-				    struct acpi_dmar_hardware_unit, header);
-		ret = dmar_insert_dev_scope(info, (void *)(drhd + 1),
-				((void *)drhd) + drhd->header.length,
-				dmaru->segment,
-				dmaru->devices, dmaru->devices_cnt);
-		if (ret)
-			break;
+		drhd = container_of(dmaru->hdr,	/* [한국어] 보관된 ACPI 항목으로 */
+				    struct acpi_dmar_hardware_unit, header);	/* [한국어] DRHD 형식으로 해석 */
+		ret = dmar_insert_dev_scope(info, (void *)(drhd + 1),	/* [한국어] 항목 뒤에 이어진 device scope 에서 이 장치를 찾아 연결한다 */
+				((void *)drhd) + drhd->header.length,	/* [한국어] 항목의 끝까지 */
+				dmaru->segment,	/* [한국어] 이 유닛의 세그먼트 */
+				dmaru->devices, dmaru->devices_cnt);	/* [한국어] 연결할 자리들 */
+		if (ret)	/* [한국어] 연결했거나(1) 오류가 났으면(<0) */
+			break;	/* [한국어] 한 장치는 하나의 유닛에만 속하므로 더 볼 필요가 없다 */
 	}
-	if (ret >= 0)
-		ret = dmar_iommu_notify_scope_dev(info);
-	if (ret < 0 && dmar_dev_scope_status == 0)
-		dmar_dev_scope_status = ret;
+	if (ret >= 0)	/* [한국어] DRHD 처리가 실패하지 않았으면 */
+		ret = dmar_iommu_notify_scope_dev(info);	/* [한국어] RMRR/ATSR/SATC 항목에도 연결한다 */
+	if (ret < 0 && dmar_dev_scope_status == 0)	/* [한국어] 오류가 났고 아직 기록되지 않았으면 */
+		dmar_dev_scope_status = ret;	/* [한국어] 기록한다. 이 장치가 표에 반영되지 않은 채 남으면 그 RMRR 이나 ATS 설정이 빠진 상태로 동작하게 되므로, 부팅 후반의 검증이 알아야 한다 */
 
-	if (ret >= 0)
-		intel_irq_remap_add_device(info);
+	if (ret >= 0)	/* [한국어] 여기까지 성공했으면 */
+		intel_irq_remap_add_device(info);	/* [한국어] 인터럽트 재매핑에도 등록한다 */
 
-	return ret;
+	return ret;	/* [한국어] 결과 */
 }
 
+/*
+ * [한국어]
+ * dmar_pci_bus_del_dev - 사라진 PCI 장치를 표의 모든 항목에서 끊는다
+ *
+ * @info: 그 장치의 알림 정보.
+ * @return: 없음.
+ *
+ * add 의 반대이지만 훨씬 단순하다. 실패할 것이 없고(포인터를 NULL 로
+ * 만드는 일뿐이다), 인터럽트 재매핑 쪽은 별도 경로로 정리된다.
+ *
+ * DRHD 순회에서 찾으면 break 하는 것은 add 와 같은 이유다 — 한 장치는
+ * 하나의 유닛에만 연결되어 있다.
+ *
+ * 이 함수가 반드시 불려야 하는 이유: 끊지 않으면 표의 device scope 가
+ * 해제된 struct device 를 가리킨 채 남는다. 나중에 그 항목을 훑는 코드가
+ * use-after-free 를 일으킨다.
+ *
+ * 실행 컨텍스트: PCI 버스 알림. dmar_global_lock 쓰기 락 아래.
+ */
 static void  dmar_pci_bus_del_dev(struct dmar_pci_notify_info *info)
 {
-	struct dmar_drhd_unit *dmaru;
+	struct dmar_drhd_unit *dmaru;	/* [한국어] 유닛 순회 커서 */
 
-	for_each_drhd_unit(dmaru)
-		if (dmar_remove_dev_scope(info, dmaru->segment,
-			dmaru->devices, dmaru->devices_cnt))
-			break;
-	dmar_iommu_notify_scope_dev(info);
+	for_each_drhd_unit(dmaru)	/* [한국어] 등록된 유닛들을 훑으며 */
+		if (dmar_remove_dev_scope(info, dmaru->segment,	/* [한국어] 이 장치가 연결되어 있으면 끊는다 */
+			dmaru->devices, dmaru->devices_cnt))	/* [한국어] 그 유닛의 장치 목록에서 */
+			break;	/* [한국어] 한 유닛에만 연결되어 있으므로 더 볼 필요가 없다 */
+	dmar_iommu_notify_scope_dev(info);	/* [한국어] RMRR/ATSR/SATC 에서도 끊는다. 끊지 않으면 해제된 struct device 를 가리킨 채 남아 나중에 use-after-free 가 된다 */
 }
 
+/*
+ * [한국어]
+ * vf_inherit_msi_domain - SR-IOV 가상 함수가 물리 함수의 인터럽트 도메인을 물려받게 한다
+ *
+ * @pdev: 가상 함수(VF) 장치.
+ * @return: 없음.
+ *
+ * 인터럽트 도메인은 "이 장치의 인터럽트를 누가 할당하고 재매핑하는가"를
+ * 정한다. VF 는 자기 DMAR 유닛 정보를 갖지 않고 PF 의 것을 따르므로,
+ * 인터럽트 도메인도 PF 의 것을 그대로 써야 한다.
+ *
+ * 왜 버스에서 물려받지 않는가(호출부의 영어 주석): 보통은 장치가 버스에서
+ * 도메인을 물려받는 것이 자연스럽다. 그런데 DMAR 은 한 버스에 여러 유닛이
+ * 있을 수 있어 버스 하나에 도메인 하나를 붙일 수 없다. VF 의 가상 버스가
+ * PF 에서 물려받게 하는 방법도 있지만, 그것은 x86 특유의 사정을 다른
+ * 아키텍처에까지 강요하는 셈이라 이렇게 장치 단위로 복사한다.
+ *
+ * 실행 컨텍스트: PCI 버스 알림(VF 추가). 프로세스 컨텍스트.
+ */
 static inline void vf_inherit_msi_domain(struct pci_dev *pdev)
 {
-	struct pci_dev *physfn = pci_physfn(pdev);
+	struct pci_dev *physfn = pci_physfn(pdev);	/* [한국어] 이 VF 의 물리 함수 */
 
-	dev_set_msi_domain(&pdev->dev, dev_get_msi_domain(&physfn->dev));
+	dev_set_msi_domain(&pdev->dev, dev_get_msi_domain(&physfn->dev));	/* [한국어] PF 의 인터럽트 도메인을 그대로 복사한다. VF 는 자기 DMAR 정보를 갖지 않고 PF 를 통해 조회되므로 인터럽트 도메인도 PF 의 것을 써야 한다 */
 }
 
+/*
+ * [한국어]
+ * dmar_pci_bus_notifier - PCI 장치 추가/제거 알림을 받아 DMAR 표를 갱신한다
+ *
+ * @nb: 등록해 둔 알림 블록. @action: 어떤 이벤트인지. @data: 대상 PCI 장치.
+ * @return: NOTIFY_OK 또는 NOTIFY_DONE.
+ *
+ * ACPI DMAR 표는 부팅 시점의 정적인 기록이지만, PCI 장치는 나중에 나타나고
+ * 사라진다. 이 콜백이 그 간극을 메운다 — 표의 경로와 실제 장치를 잇고 끊는
+ * 모든 일의 출발점이다.
+ *
+ * VF 를 특별 취급하는 것이 첫 분기다(위 영어 주석). VF 는 자기 DMAR 정보를
+ * 갖지 않고 device_to_iommu() 가 PF 를 통해 조회하므로, 표에 연결할 것이
+ * 없다. 다만 인터럽트 도메인만은 PF 의 것을 물려받아야 해서 그것만 하고
+ * 돌아간다.
+ *
+ * 추가와 제거 외의 이벤트는 무시한다. 이 파일이 관심 있는 것은 장치의
+ * 존재 여부뿐이다.
+ *
+ * dmar_global_lock 을 쓰기 모드로 잡는 이유: 표의 device scope 배열을
+ * 고치기 때문이다. 읽기 쪽(인터럽트 문맥)은 RCU 로 보호되므로 이 락과
+ * 겹치지 않는다.
+ *
+ * 실행 컨텍스트: PCI 버스 알림 체인. 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   PCI 장치 등록/해제 → 버스 알림 → [dmar_pci_bus_notifier]
+ *     → dmar_pci_bus_add_dev()/del_dev()
+ */
 static int dmar_pci_bus_notifier(struct notifier_block *nb,
 				 unsigned long action, void *data)
 {
-	struct pci_dev *pdev = to_pci_dev(data);
-	struct dmar_pci_notify_info *info;
+	struct pci_dev *pdev = to_pci_dev(data);	/* [한국어] 알림의 대상 장치 */
+	struct dmar_pci_notify_info *info;	/* [한국어] 표와 대조할 경로 정보 */
 
 	/* Only care about add/remove events for physical functions.
 	 * For VFs we actually do the lookup based on the corresponding
 	 * PF in device_to_iommu() anyway. */
-	if (pdev->is_virtfn) {
+	if (pdev->is_virtfn) {	/* [한국어] 가상 함수면 (위 영어 주석) */
 		/*
 		 * Ensure that the VF device inherits the irq domain of the
 		 * PF device. Ideally the device would inherit the domain
@@ -645,48 +737,67 @@ static int dmar_pci_bus_notifier(struct notifier_block *nb,
 		 * from the PF device, but that's yet another x86'sism to
 		 * inflict on everybody else.
 		 */
-		if (action == BUS_NOTIFY_ADD_DEVICE)
-			vf_inherit_msi_domain(pdev);
-		return NOTIFY_DONE;
+		if (action == BUS_NOTIFY_ADD_DEVICE)	/* [한국어] 추가 알림일 때만 */
+			vf_inherit_msi_domain(pdev);	/* [한국어] 인터럽트 도메인을 PF 에서 물려받는다. VF 는 표에 연결할 것이 없어 이것만 하고 돌아간다 */
+		return NOTIFY_DONE;	/* [한국어] 더 처리하지 않는다 */
 	}
 
-	if (action != BUS_NOTIFY_ADD_DEVICE &&
-	    action != BUS_NOTIFY_REMOVED_DEVICE)
-		return NOTIFY_DONE;
+	if (action != BUS_NOTIFY_ADD_DEVICE &&	/* [한국어] 추가도 */
+	    action != BUS_NOTIFY_REMOVED_DEVICE)	/* [한국어] 제거도 아니면 */
+		return NOTIFY_DONE;	/* [한국어] 이 파일이 관심 있는 것은 장치의 존재 여부뿐이다 */
 
-	info = dmar_alloc_pci_notify_info(pdev, action);
-	if (!info)
-		return NOTIFY_DONE;
+	info = dmar_alloc_pci_notify_info(pdev, action);	/* [한국어] 표와 대조할 경로 정보를 만든다 */
+	if (!info)	/* [한국어] 만들 수 없으면(세그먼트가 범위 밖이거나 할당 실패) */
+		return NOTIFY_DONE;	/* [한국어] 처리하지 않는다 */
 
-	down_write(&dmar_global_lock);
-	if (action == BUS_NOTIFY_ADD_DEVICE)
-		dmar_pci_bus_add_dev(info);
-	else if (action == BUS_NOTIFY_REMOVED_DEVICE)
-		dmar_pci_bus_del_dev(info);
-	up_write(&dmar_global_lock);
+	down_write(&dmar_global_lock);	/* [한국어] 표의 device scope 배열을 고치므로 쓰기 락 */
+	if (action == BUS_NOTIFY_ADD_DEVICE)	/* [한국어] 장치가 나타났으면 */
+		dmar_pci_bus_add_dev(info);	/* [한국어] 표의 모든 항목에 연결한다 */
+	else if (action == BUS_NOTIFY_REMOVED_DEVICE)	/* [한국어] 사라졌으면 */
+		dmar_pci_bus_del_dev(info);	/* [한국어] 모든 항목에서 끊는다 */
+	up_write(&dmar_global_lock);	/* [한국어] 락 해제 */
 
-	dmar_free_pci_notify_info(info);
+	dmar_free_pci_notify_info(info);	/* [한국어] 정적 버퍼가 아니었으면 반납한다 */
 
-	return NOTIFY_OK;
+	return NOTIFY_OK;	/* [한국어] 처리했다 */
 }
 
-static struct notifier_block dmar_pci_bus_nb = {
-	.notifier_call = dmar_pci_bus_notifier,
-	.priority = 1,
+static struct notifier_block dmar_pci_bus_nb = {	/* [한국어] PCI 버스 알림 체인에 등록할 블록 */
+	.notifier_call = dmar_pci_bus_notifier,	/* [한국어] 알림이 오면 부를 함수 */
+	.priority = 1,	/* [한국어] 우선순위. 0 보다 높아 다른 소비자보다 먼저 불린다 — 장치가 IOMMU 아래에 들어간 뒤에야 다른 코드가 그것을 쓸 수 있어야 하기 때문이다 */
 };
 
+/*
+ * [한국어]
+ * dmar_find_dmaru - 이미 등록된 DRHD 유닛 중 같은 것을 찾는다
+ *
+ * @drhd: 방금 파싱한 ACPI DRHD 항목.
+ * @return: 같은 유닛이 이미 있으면 그 자료구조, 없으면 NULL.
+ *
+ * 유닛의 정체는 (세그먼트, 레지스터 기저 주소) 한 쌍으로 정해진다. 그
+ * 조합이 같으면 같은 하드웨어다 — 표의 다른 필드가 달라 보여도 마찬가지다.
+ *
+ * 왜 중복 검사가 필요한가: 핫플러그로 같은 표를 다시 파싱하는 경우가 있다.
+ * 그대로 등록하면 같은 유닛이 목록에 두 번 들어가고, 그 유닛에 두 번
+ * 초기화를 시도하게 된다.
+ *
+ * 동기화: dmar_drhd_units 는 RCU 목록이며 dmar_rcu_check() 가 유효한 보호
+ * 조건(rcu_read_lock 안이거나 dmar_global_lock 을 쥐었음)을 lockdep 에 알린다.
+ *
+ * 실행 컨텍스트: 표 파싱 또는 핫플러그. 프로세스 컨텍스트.
+ */
 static struct dmar_drhd_unit *
 dmar_find_dmaru(struct acpi_dmar_hardware_unit *drhd)
 {
-	struct dmar_drhd_unit *dmaru;
+	struct dmar_drhd_unit *dmaru;	/* [한국어] 순회 커서 */
 
-	list_for_each_entry_rcu(dmaru, &dmar_drhd_units, list,
-				dmar_rcu_check())
-		if (dmaru->segment == drhd->segment &&
-		    dmaru->reg_base_addr == drhd->address)
-			return dmaru;
+	list_for_each_entry_rcu(dmaru, &dmar_drhd_units, list,	/* [한국어] 등록된 유닛들을 RCU 순회 */
+				dmar_rcu_check())	/* [한국어] 유효한 보호 조건임을 lockdep 에 알린다 */
+		if (dmaru->segment == drhd->segment &&	/* [한국어] 세그먼트가 같고 */
+		    dmaru->reg_base_addr == drhd->address)	/* [한국어] 레지스터 기저 주소도 같으면 */
+			return dmaru;	/* [한국어] 같은 하드웨어다. 이 한 쌍이 유닛의 정체를 정한다 */
 
-	return NULL;
+	return NULL;	/* [한국어] 등록된 적이 없다 */
 }
 
 /*
@@ -694,117 +805,213 @@ dmar_find_dmaru(struct acpi_dmar_hardware_unit *drhd)
  * structure which uniquely represent one DMA remapping hardware unit
  * present in the platform
  */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * dmar_parse_one_drhd - DRHD 항목 하나를 유닛 자료구조로 만들고 초기화한다
+ *
+ * @header: DMAR 표 안의 DRHD 항목.
+ * @arg: NULL 이 아니면 처리한 개수를 세는 카운터.
+ * @return: 0 성공(중복이라 아무것도 안 한 경우 포함), 음수면 실패.
+ *
+ * VT-d 하드웨어 하나를 커널이 처음 인식하는 지점이다. 여기서 만들어진
+ * struct intel_iommu 를 DMA 재매핑과 인터럽트 재매핑이 함께 쓴다.
+ *
+ * 순서:
+ *   1) 이미 등록된 유닛인지 확인한다(핫플러그로 같은 표를 다시 파싱할 수 있다).
+ *   2) 자료구조와 ACPI 항목 사본을 한 번에 잡는다. _DSM 이 준 버퍼는 반환
+ *      즉시 해제되므로 참조만 들고 있을 수 없다(코드 안 영어 주석).
+ *   3) 레지스터 주소·크기·세그먼트를 옮긴다. 크기가 2^(size+12) 인 것은
+ *      필드가 "4KB 페이지 수의 지수"이기 때문이다.
+ *   4) device scope 를 파싱한다.
+ *   5) alloc_iommu 로 실제 하드웨어를 만진다 — 레지스터를 매핑하고 능력을
+ *      읽는다. 여기서 실패하면 그 유닛은 쓸 수 없다.
+ *   6) 목록에 등록한다. include_all 여부에 따라 위치가 갈린다.
+ *
+ * include_all 플래그: DRHD 의 flags 비트 0 으로, "이 세그먼트에서 다른
+ * 유닛이 담당하지 않는 나머지 장치를 모두 담당한다"는 뜻이다. 이 유닛이
+ * 목록의 꼬리로 가는 이유가 그것이다.
+ *
+ * arg 카운터: 표를 훑으며 유닛이 몇 개나 있었는지 세는 데 쓴다. 하나도
+ * 없으면 VT-d 를 쓸 수 없다는 판단의 근거가 된다.
+ *
+ * 실행 컨텍스트: 표 파싱(부팅) 또는 핫플러그. 프로세스 컨텍스트.
+ */
 static int dmar_parse_one_drhd(struct acpi_dmar_header *header, void *arg)
 {
-	struct acpi_dmar_hardware_unit *drhd;
-	struct dmar_drhd_unit *dmaru;
-	int ret;
+	struct acpi_dmar_hardware_unit *drhd;	/* [한국어] ACPI 항목 */
+	struct dmar_drhd_unit *dmaru;	/* [한국어] 만들 커널 자료구조 */
+	int ret;	/* [한국어] 결과 */
 
-	drhd = (struct acpi_dmar_hardware_unit *)header;
-	dmaru = dmar_find_dmaru(drhd);
-	if (dmaru)
-		goto out;
+	drhd = (struct acpi_dmar_hardware_unit *)header;	/* [한국어] 헤더를 DRHD 항목으로 */
+	dmaru = dmar_find_dmaru(drhd);	/* [한국어] 이미 등록된 유닛인지 */
+	if (dmaru)	/* [한국어] 있으면 */
+		goto out;	/* [한국어] 중복 등록하지 않는다. 핫플러그로 같은 표를 다시 파싱할 수 있다 */
 
-	dmaru = kzalloc(sizeof(*dmaru) + header->length, GFP_KERNEL);
-	if (!dmaru)
-		return -ENOMEM;
+	dmaru = kzalloc(sizeof(*dmaru) + header->length, GFP_KERNEL);	/* [한국어] 자료구조와 ACPI 사본 자리를 한 번에 잡는다 */
+	if (!dmaru)	/* [한국어] 할당 실패 */
+		return -ENOMEM;	/* [한국어] 이 유닛을 쓸 수 없다 */
 
 	/*
 	 * If header is allocated from slab by ACPI _DSM method, we need to
 	 * copy the content because the memory buffer will be freed on return.
 	 */
-	dmaru->hdr = (void *)(dmaru + 1);
-	memcpy(dmaru->hdr, header, header->length);
-	dmaru->reg_base_addr = drhd->address;
-	dmaru->segment = drhd->segment;
+	dmaru->hdr = (void *)(dmaru + 1);	/* [한국어] 사본 자리는 구조체 바로 뒤 */
+	memcpy(dmaru->hdr, header, header->length);	/* [한국어] 내용을 복사한다. ACPI _DSM 이 준 버퍼는 반환 즉시 해제되므로 참조만 들고 있을 수 없다 (위 영어 주석) */
+	dmaru->reg_base_addr = drhd->address;	/* [한국어] 유닛 레지스터의 물리 주소. 세그먼트와 함께 이 유닛의 정체를 이룬다 */
+	dmaru->segment = drhd->segment;	/* [한국어] PCI 세그먼트 */
 	/* The size of the register set is 2 ^ N 4 KB pages. */
-	dmaru->reg_size = 1UL << (drhd->size + 12);
-	dmaru->include_all = drhd->flags & 0x1; /* BIT0: INCLUDE_ALL */
-	dmaru->devices = dmar_alloc_dev_scope((void *)(drhd + 1),
-					      ((void *)drhd) + drhd->header.length,
-					      &dmaru->devices_cnt);
-	if (dmaru->devices_cnt && dmaru->devices == NULL) {
-		kfree(dmaru);
-		return -ENOMEM;
+	dmaru->reg_size = 1UL << (drhd->size + 12);	/* [한국어] 레지스터 영역의 크기. 필드가 "4KB 페이지 수의 지수"라 +12 로 바이트가 된다 (위 영어 주석) */
+	dmaru->include_all = drhd->flags & 0x1; /* BIT0: INCLUDE_ALL */	/* [한국어] 비트 0 이 INCLUDE_ALL — 다른 유닛이 담당하지 않는 나머지 장치를 모두 맡는다는 뜻이다 (위 영어 주석) */
+	dmaru->devices = dmar_alloc_dev_scope((void *)(drhd + 1),	/* [한국어] 항목 뒤에 이어진 장치 목록을 파싱한다 */
+					      ((void *)drhd) + drhd->header.length,	/* [한국어] 항목의 끝까지 */
+					      &dmaru->devices_cnt);	/* [한국어] 개수를 받는다 */
+	if (dmaru->devices_cnt && dmaru->devices == NULL) {	/* [한국어] 장치가 있다고 했는데 파싱에 실패했으면 */
+		kfree(dmaru);	/* [한국어] 자료구조를 반납하고 */
+		return -ENOMEM;	/* [한국어] 실패 */
 	}
 
-	ret = alloc_iommu(dmaru);
-	if (ret) {
-		dmar_free_dev_scope(&dmaru->devices,
-				    &dmaru->devices_cnt);
-		kfree(dmaru);
-		return ret;
+	ret = alloc_iommu(dmaru);	/* [한국어] 실제 하드웨어를 만진다 — 레지스터를 매핑하고 능력을 읽는다 */
+	if (ret) {	/* [한국어] 실패하면 */
+		dmar_free_dev_scope(&dmaru->devices,	/* [한국어] 장치 목록을 반납하고 */
+				    &dmaru->devices_cnt);	/* [한국어] 개수도 되돌린다 */
+		kfree(dmaru);	/* [한국어] 자료구조 반납 */
+		return ret;	/* [한국어] 이 유닛은 쓸 수 없다 */
 	}
-	dmar_register_drhd_unit(dmaru);
+	dmar_register_drhd_unit(dmaru);	/* [한국어] 전역 목록에 등록한다. include_all 여부에 따라 위치가 갈린다 */
 
-out:
-	if (arg)
-		(*(int *)arg)++;
+out:	/* [한국어] 중복이었던 경우가 합류 */
+	if (arg)	/* [한국어] 카운터를 넘겼으면 */
+		(*(int *)arg)++;	/* [한국어] 처리한 유닛 수를 센다. 하나도 없으면 VT-d 를 쓸 수 없다는 판단의 근거가 된다 */
 
-	return 0;
+	return 0;	/* [한국어] 처리 완료 */
 }
 
+/*
+ * [한국어]
+ * dmar_free_drhd - 유닛 자료구조와 그것이 잡은 자원을 모두 반납한다
+ *
+ * @dmaru: 반납할 유닛.
+ * @return: 없음.
+ *
+ * 세 가지를 순서대로 놓는다: device scope 배열(과 그것이 잡은 장치 참조),
+ * struct intel_iommu(레지스터 매핑과 순번 포함), 그리고 자료구조 자신.
+ * ACPI 항목 사본은 자료구조와 같은 할당 안에 있어 별도 해제가 없다.
+ *
+ * 각각을 확인하고 해제하는 것은 파싱이 중간에 실패했을 수도 있기 때문이다 —
+ * device scope 는 만들었지만 alloc_iommu 가 실패한 경우 등.
+ *
+ * 실행 컨텍스트: 파싱 실패 정리 또는 유닛 제거. 프로세스 컨텍스트.
+ */
 static void dmar_free_drhd(struct dmar_drhd_unit *dmaru)
 {
-	if (dmaru->devices && dmaru->devices_cnt)
-		dmar_free_dev_scope(&dmaru->devices, &dmaru->devices_cnt);
-	if (dmaru->iommu)
-		free_iommu(dmaru->iommu);
-	kfree(dmaru);
+	if (dmaru->devices && dmaru->devices_cnt)	/* [한국어] 장치 목록이 있으면 */
+		dmar_free_dev_scope(&dmaru->devices, &dmaru->devices_cnt);	/* [한국어] 그것과 잡아 둔 장치 참조를 놓는다 */
+	if (dmaru->iommu)	/* [한국어] 유닛 구조체가 만들어졌으면 */
+		free_iommu(dmaru->iommu);	/* [한국어] 레지스터 매핑과 순번을 반납한다 */
+	kfree(dmaru);	/* [한국어] 자료구조 자신. ACPI 사본은 같은 할당 안에 있어 별도 해제가 없다 */
 }
 
+/*
+ * [한국어]
+ * dmar_parse_one_andd - ANDD 항목(ACPI 네임스페이스 장치 선언)을 검증하고 기록한다
+ *
+ * @header: ANDD 항목. @arg: 쓰지 않는다.
+ * @return: 0 성공, -EINVAL 이면 펌웨어가 이름을 잘못 적었다.
+ *
+ * ANDD(ACPI Name-space Device Declaration)는 PCI 가 아닌 장치 — SoC 내부의
+ * 가속기 등 — 를 ACPI 이름으로 지목하는 항목이다. 그 이름으로 나중에
+ * probe_acpi_namespace_devices() 가 실제 장치를 찾는다.
+ *
+ * 이 함수가 하는 일은 사실상 검증 하나다: 이름 문자열이 항목 길이 안에서
+ * NUL 로 끝나는지. 끝나지 않으면 그 이름을 문자열로 다루는 순간 항목 밖의
+ * 메모리를 읽게 되므로, 그 항목을 거부하고 커널을 오염 표시한다.
+ *
+ * header->length - 8 이 이름 필드의 최대 길이다 — 앞의 8바이트가 헤더와
+ * device_number 필드이기 때문이다. strnlen 이 그 길이를 그대로 돌려주면
+ * NUL 이 없었다는 뜻이다.
+ *
+ * BIOS 벤더·버전을 함께 찍는 이유는 이 파일의 다른 FW_BUG 들과 같다 —
+ * 이후의 버그 리포트에서 펌웨어를 의심할 근거를 남긴다.
+ *
+ * 실행 컨텍스트: 표 파싱(__init). 부팅 초기.
+ */
 static int __init dmar_parse_one_andd(struct acpi_dmar_header *header,
 				      void *arg)
 {
-	struct acpi_dmar_andd *andd = (void *)header;
+	struct acpi_dmar_andd *andd = (void *)header;	/* [한국어] 헤더를 ANDD 항목으로 */
 
 	/* Check for NUL termination within the designated length */
-	if (strnlen(andd->device_name, header->length - 8) == header->length - 8) {
-		pr_warn(FW_BUG
-			   "Your BIOS is broken; ANDD object name is not NUL-terminated\n"
-			   "BIOS vendor: %s; Ver: %s; Product Version: %s\n",
-			   dmi_get_system_info(DMI_BIOS_VENDOR),
-			   dmi_get_system_info(DMI_BIOS_VERSION),
-			   dmi_get_system_info(DMI_PRODUCT_VERSION));
-		add_taint(TAINT_FIRMWARE_WORKAROUND, LOCKDEP_STILL_OK);
-		return -EINVAL;
+	if (strnlen(andd->device_name, header->length - 8) == header->length - 8) {	/* [한국어] 이름이 항목 길이 안에서 NUL 로 끝나지 않으면 (앞 8바이트는 헤더와 device_number 다) */
+		pr_warn(FW_BUG	/* [한국어] 문자열로 다루는 순간 항목 밖을 읽게 되므로 거부한다 */
+			   "Your BIOS is broken; ANDD object name is not NUL-terminated\n"	/* [한국어] 펌웨어 버그임을 명시 */
+			   "BIOS vendor: %s; Ver: %s; Product Version: %s\n",	/* [한국어] 어느 BIOS 인지 */
+			   dmi_get_system_info(DMI_BIOS_VENDOR),	/* [한국어] 벤더 */
+			   dmi_get_system_info(DMI_BIOS_VERSION),	/* [한국어] 버전 */
+			   dmi_get_system_info(DMI_PRODUCT_VERSION));	/* [한국어] 제품 버전 */
+		add_taint(TAINT_FIRMWARE_WORKAROUND, LOCKDEP_STILL_OK);	/* [한국어] 커널에 오염 표시를 남긴다 */
+		return -EINVAL;	/* [한국어] 이 항목을 쓰지 않는다 */
 	}
-	pr_info("ANDD device: %x name: %s\n", andd->device_number,
-		andd->device_name);
+	pr_info("ANDD device: %x name: %s\n", andd->device_number,	/* [한국어] 정상이면 기록만 남긴다. 이 이름으로 나중에 실제 장치를 찾는다 */
+		andd->device_name);	/* [한국어] ACPI 네임스페이스 이름 */
 
-	return 0;
+	return 0;	/* [한국어] 항목 처리 완료 */
 }
 
 #ifdef CONFIG_ACPI_NUMA
+/*
+ * [한국어]
+ * dmar_parse_one_rhsa - RHSA 항목으로 유닛의 NUMA 노드를 정한다
+ *
+ * @header: RHSA(Remapping Hardware Static Affinity) 항목. @arg: 쓰지 않는다.
+ * @return: 항상 0 — 잘못된 항목이어도 부팅을 막지 않는다.
+ *
+ * RHSA 는 "이 주소의 DMAR 유닛은 이 근접 도메인(NUMA 노드)에 속한다"를
+ * 알려 주는 항목이다. 그 정보로 유닛의 node 를 정하면, 이후 루트 테이블과
+ * 페이지 테이블을 그 노드에서 잡아 하드웨어의 접근 지연을 줄일 수 있다.
+ *
+ * 레지스터 기저 주소로 유닛을 찾는다 — 그것이 유닛의 정체이기 때문이다.
+ * 찾지 못하면 펌웨어가 존재하지 않는 유닛을 가리킨 것이라 FW_BUG 로 남기고
+ * 커널을 오염 표시하되, 0 을 돌려주어 부팅은 계속한다. NUMA 정보가 없으면
+ * 성능이 조금 나빠질 뿐 동작에는 지장이 없기 때문이다.
+ *
+ * 온라인이 아닌 노드를 NUMA_NO_NODE 로 되돌리는 것도 같은 태도다: 펌웨어가
+ * 아직 온라인이 아닌 노드를 가리켰다면 그 노드에서 메모리를 잡을 수 없으므로,
+ * 노드 지정 없이 잡게 한다.
+ *
+ * CONFIG_ACPI_NUMA 를 끈 빌드에서는 dmar_res_noop 으로 대체되어 항목을
+ * 조용히 건너뛴다.
+ *
+ * 실행 컨텍스트: 표 파싱. 프로세스 컨텍스트.
+ */
 static int dmar_parse_one_rhsa(struct acpi_dmar_header *header, void *arg)
 {
-	struct acpi_dmar_rhsa *rhsa;
-	struct dmar_drhd_unit *drhd;
+	struct acpi_dmar_rhsa *rhsa;	/* [한국어] ACPI 항목 */
+	struct dmar_drhd_unit *drhd;	/* [한국어] 유닛 순회 커서 */
 
-	rhsa = (struct acpi_dmar_rhsa *)header;
-	for_each_drhd_unit(drhd) {
-		if (drhd->reg_base_addr == rhsa->base_address) {
-			int node = pxm_to_node(rhsa->proximity_domain);
+	rhsa = (struct acpi_dmar_rhsa *)header;	/* [한국어] 헤더를 RHSA 항목으로 */
+	for_each_drhd_unit(drhd) {	/* [한국어] 등록된 유닛들을 훑으며 */
+		if (drhd->reg_base_addr == rhsa->base_address) {	/* [한국어] 레지스터 주소가 같은 유닛을 찾으면 — 그것이 유닛의 정체다 */
+			int node = pxm_to_node(rhsa->proximity_domain);	/* [한국어] 근접 도메인을 NUMA 노드 번호로 */
 
-			if (node != NUMA_NO_NODE && !node_online(node))
-				node = NUMA_NO_NODE;
-			drhd->iommu->node = node;
-			return 0;
+			if (node != NUMA_NO_NODE && !node_online(node))	/* [한국어] 아직 온라인이 아닌 노드를 가리켰으면 */
+				node = NUMA_NO_NODE;	/* [한국어] 노드 지정 없이 잡게 한다 — 그 노드에서는 메모리를 잡을 수 없다 */
+			drhd->iommu->node = node;	/* [한국어] 유닛에 기록한다. 이후 테이블을 이 노드에서 잡아 하드웨어의 접근 지연을 줄인다 */
+			return 0;	/* [한국어] 처리 완료 */
 		}
 	}
-	pr_warn(FW_BUG
-		"Your BIOS is broken; RHSA refers to non-existent DMAR unit at %llx\n"
-		"BIOS vendor: %s; Ver: %s; Product Version: %s\n",
-		rhsa->base_address,
-		dmi_get_system_info(DMI_BIOS_VENDOR),
-		dmi_get_system_info(DMI_BIOS_VERSION),
-		dmi_get_system_info(DMI_PRODUCT_VERSION));
-	add_taint(TAINT_FIRMWARE_WORKAROUND, LOCKDEP_STILL_OK);
+	pr_warn(FW_BUG	/* [한국어] 존재하지 않는 유닛을 가리켰다 */
+		"Your BIOS is broken; RHSA refers to non-existent DMAR unit at %llx\n"	/* [한국어] 어느 주소인지 */
+		"BIOS vendor: %s; Ver: %s; Product Version: %s\n",	/* [한국어] 어느 BIOS 인지 */
+		rhsa->base_address,	/* [한국어] 문제의 주소 */
+		dmi_get_system_info(DMI_BIOS_VENDOR),	/* [한국어] 벤더 */
+		dmi_get_system_info(DMI_BIOS_VERSION),	/* [한국어] 버전 */
+		dmi_get_system_info(DMI_PRODUCT_VERSION));	/* [한국어] 제품 버전 */
+	add_taint(TAINT_FIRMWARE_WORKAROUND, LOCKDEP_STILL_OK);	/* [한국어] 오염 표시 */
 
-	return 0;
+	return 0;	/* [한국어] 그래도 0 을 돌려준다 — NUMA 정보가 없으면 성능이 조금 나빠질 뿐 동작에는 지장이 없다 */
 }
 #else
-#define	dmar_parse_one_rhsa		dmar_res_noop
+#define	dmar_parse_one_rhsa		dmar_res_noop	/* [한국어] NUMA 를 끈 빌드에서는 RHSA 항목을 조용히 건너뛴다. 노드 정보를 쓸 곳이 없기 때문이다 */
 #endif
 
 static void
