@@ -5947,34 +5947,58 @@ out_unlock:	/* [한국어] 성공·실패 공통 출구 */
  * The device driver about to bind @dev wants to do DMA through the kernel
  * DMA API. Return 0 if it is allowed, otherwise an error.
  */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어)
+ * iommu_device_use_default_domain - 커널 DMA API 로 이 장치를 쓰겠다고 등록한다
+ *
+ * @dev:    바인딩되려는 장치
+ * @return: 0 허용. -EBUSY 면 그룹이 이미 다른 주소 공간을 보고 있다.
+ *          -EPROBE_DEFER 면 아직 기본 도메인이 서지 않아 판단할 수 없다.
+ *
+ * DMA 소유권(DMA ownership) 모델의 커널 쪽 절반이다. 그룹의 주소 공간은 한 번에
+ * 한 주체만 정할 수 있는데, 그 주체는 둘 중 하나다 — 커널 DMA API(평범한 드라이버들)
+ * 이거나, 사용자 공간(VFIO/iommufd)이다. 이 함수는 앞쪽을 주장한다.
+ *
+ * 드라이버 코어가 드라이버를 바인딩하기 직전에 부르고, 여기서 거절하면 바인딩 자체가
+ * 실패한다. 그래서 VFIO 가 장치를 잡고 있는 동안에는 평범한 드라이버가 그 장치에
+ * 붙을 수 없다 — 커널 격리 모델의 핵심 안전장치가 이 한 번의 호출로 성립한다.
+ *
+ * 계수만 늘리고 도메인은 건드리지 않는 점에 주목할 것. 커널 DMA API 사용자들은 모두
+ * 같은 기본 도메인을 공유하므로 서로 배타적이지 않다. 배타성이 필요한 것은 반대편,
+ * 즉 __iommu_take_dma_ownership 쪽이다.
+ *
+ * 실행 컨텍스트: 드라이버 코어의 프로브 직전 경로. 프로세스 문맥.
+ *
+ * 호출 체인: 드라이버 코어 (really_probe 전) → [이 함수]
+ */
 int iommu_device_use_default_domain(struct device *dev)
 {
 	/* Caller is the driver core during the pre-probe path */
-	struct iommu_group *group = dev->iommu_group;
-	int ret = 0;
+	struct iommu_group *group = dev->iommu_group;	/* [한국어] 드라이버 코어가 프로브 직전에 부르므로 그룹은 안정적이다 (위 영어 주석) */
+	int ret = 0;	/* [한국어] 허용 여부 */
 
-	if (!group)
-		return 0;
+	if (!group)	/* [한국어] IOMMU 아래에 있지 않은 장치 */
+		return 0;	/* [한국어] 소유권 개념이 없으므로 무조건 허용 */
 
-	mutex_lock(&group->mutex);
+	mutex_lock(&group->mutex);	/* [한국어] 소유권 계수 변경 구간 */
 	/* We may race against bus_iommu_probe() finalising groups here */
-	if (!group->default_domain) {
-		ret = -EPROBE_DEFER;
-		goto unlock_out;
+	if (!group->default_domain) {	/* [한국어] 부팅 중 bus_iommu_probe 가 아직 이 그룹의 기본 도메인을 세우지 않았을 수 있다 (위 영어 주석) */
+		ret = -EPROBE_DEFER;	/* [한국어] 드라이버 바인딩을 미뤘다가 다시 시도하게 한다 */
+		goto unlock_out;	/* [한국어] 지금은 판단할 수 없다 */
 	}
-	if (group->owner_cnt) {
-		if (group->domain != group->default_domain || group->owner ||
-		    !xa_empty(&group->pasid_array)) {
-			ret = -EBUSY;
-			goto unlock_out;
+	if (group->owner_cnt) {	/* [한국어] 이미 누군가 이 그룹을 쓰고 있다 */
+		if (group->domain != group->default_domain || group->owner ||	/* [한국어] 기본 도메인이 아닌 곳에 붙어 있거나(VFIO 가 가져감), 배타 소유자가 지정돼 있거나 */
+		    !xa_empty(&group->pasid_array)) {	/* [한국어] PASID 부착이 남아 있으면 */
+			ret = -EBUSY;	/* [한국어] 커널 DMA API 로 이 장치를 쓸 수 없다 — 그룹이 이미 다른 주소 공간을 보고 있다 */
+			goto unlock_out;	/* [한국어] 드라이버 바인딩이 거절된다 */
 		}
 	}
 
-	group->owner_cnt++;
+	group->owner_cnt++;	/* [한국어] 커널 DMA API 사용자 하나 추가. 같은 그룹의 여러 드라이버가 동시에 기본 도메인을 공유할 수 있다 */
 
-unlock_out:
-	mutex_unlock(&group->mutex);
-	return ret;
+unlock_out:	/* [한국어] 공통 출구 */
+	mutex_unlock(&group->mutex);	/* [한국어] 락 해제 */
+	return ret;	/* [한국어] 0 이면 드라이버가 바인딩되어도 좋다 */
 }
 
 /**
@@ -5985,64 +6009,127 @@ unlock_out:
  * The device driver doesn't want to do DMA through kernel DMA API anymore.
  * It must be called after iommu_device_use_default_domain().
  */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어)
+ * iommu_device_unuse_default_domain - 커널 DMA API 사용 등록을 취소한다
+ *
+ * @dev: 언바인드된 장치
+ *
+ * use 의 짝이며 드라이버 코어가 언바인드 후에 부른다. 계수가 0 이 되어야 비로소
+ * VFIO 가 이 그룹의 소유권을 가져갈 수 있으므로, 이 호출이 빠지면 장치를 영영
+ * 사용자 공간에 넘길 수 없게 된다.
+ *
+ * WARN 조건 둘이 드라이버 계약을 검사한다 — 짝이 맞지 않는 호출과, SVA 를 정리하지
+ * 않고 떠나는 드라이버다. 후자는 남은 PASID 부착이 해제된 mm 을 가리키게 되어
+ * 실제 메모리 손상으로 이어질 수 있다.
+ *
+ * 실행 컨텍스트: 드라이버 코어의 언바인드 후 경로. 프로세스 문맥.
+ *
+ * 호출 체인: 드라이버 코어 → [이 함수]
+ */
 void iommu_device_unuse_default_domain(struct device *dev)
 {
 	/* Caller is the driver core during the post-probe path */
-	struct iommu_group *group = dev->iommu_group;
+	struct iommu_group *group = dev->iommu_group;	/* [한국어] 드라이버 코어가 언바인드 후에 부른다 (위 영어 주석) */
 
-	if (!group)
-		return;
+	if (!group)	/* [한국어] IOMMU 밖 장치 */
+		return;	/* [한국어] 할 일 없음 */
 
-	mutex_lock(&group->mutex);
-	if (!WARN_ON(!group->owner_cnt || !xa_empty(&group->pasid_array)))
-		group->owner_cnt--;
+	mutex_lock(&group->mutex);	/* [한국어] 계수 변경 구간 */
+	if (!WARN_ON(!group->owner_cnt || !xa_empty(&group->pasid_array)))	/* [한국어] 계수가 0 이면 짝이 맞지 않는 호출이고, PASID 가 남아 있으면 드라이버가 SVA 를 정리하지 않고 떠나는 것이다 — 둘 다 버그 */
+		group->owner_cnt--;	/* [한국어] 정상인 경우에만 하나 뺀다. 0 이 되면 다른 사용자가 소유권을 가져갈 수 있게 된다 */
 
-	mutex_unlock(&group->mutex);
+	mutex_unlock(&group->mutex);	/* [한국어] 락 해제 */
 }
 
+/*
+ * [한국어]
+ * __iommu_group_alloc_blocking_domain - 그룹의 차단 도메인을 준비한다
+ *
+ * @group:  대상 그룹
+ * @return: 0 성공, 음수면 할당 실패
+ *
+ * 차단 도메인은 "이 장치의 모든 DMA 가 실패하는 주소 공간"이다. 소유권이 손을 바꾸는
+ * 순간에 반드시 필요하다 — 커널 매핑을 즉시 무효로 만들고, 새 소유자가 자기 매핑을
+ * 넣기 전까지의 공백 동안 장치가 아무 메모리에도 닿지 못하게 한다. 이 공백이 열려
+ * 있으면 VFIO 로 넘긴 장치가 커널 메모리를 계속 읽을 수 있다.
+ *
+ * 두 가지 방식이 있다. 최신 드라이버는 전역 정적 blocked_domain 을 제공하므로 그것을
+ * 가리키기만 하면 되고(상태가 없어 모든 그룹이 공유 가능), 아직 지원하지 않는
+ * 드라이버를 위해서는 매핑이 하나도 없는 페이지 테이블 도메인을 만들어 흉내 낸다 —
+ * 모든 번역이 실패하므로 결과가 같다.
+ *
+ * 그룹당 한 번만 만들고 iommu_deinit_device 가 마지막 장치와 함께 해제한다.
+ *
+ * 실행 컨텍스트: 그룹 락을 든 채. 프로세스 문맥, 잠들 수 있다.
+ *
+ * 호출 체인: __iommu_take_dma_ownership → [이 함수]
+ */
 static int __iommu_group_alloc_blocking_domain(struct iommu_group *group)
 {
-	struct device *dev = iommu_group_first_dev(group);
-	const struct iommu_ops *ops = dev_iommu_ops(dev);
-	struct iommu_domain *domain;
+	struct device *dev = iommu_group_first_dev(group);	/* [한국어] 도메인 할당의 대표 장치 */
+	const struct iommu_ops *ops = dev_iommu_ops(dev);	/* [한국어] 드라이버 콜백 표 */
+	struct iommu_domain *domain;	/* [한국어] 대체로 만들 빈 도메인 */
 
-	if (group->blocking_domain)
-		return 0;
+	if (group->blocking_domain)	/* [한국어] 이미 만들어 둔 것이 있으면 재사용한다 — 그룹 수명 동안 한 번만 만든다 */
+		return 0;	/* [한국어] 준비 완료 */
 
-	if (ops->blocked_domain) {
-		group->blocking_domain = ops->blocked_domain;
-		return 0;
+	if (ops->blocked_domain) {	/* [한국어] 드라이버가 전역 정적 차단 도메인을 제공하면 */
+		group->blocking_domain = ops->blocked_domain;	/* [한국어] 그것을 가리키기만 한다. 상태가 없어 모든 그룹이 공유할 수 있다 */
+		return 0;	/* [한국어] 할당 없이 끝 */
 	}
 
 	/*
 	 * For drivers that do not yet understand IOMMU_DOMAIN_BLOCKED create an
 	 * empty PAGING domain instead.
 	 */
-	domain = iommu_paging_domain_alloc(dev);
-	if (IS_ERR(domain))
-		return PTR_ERR(domain);
-	group->blocking_domain = domain;
-	return 0;
+	domain = iommu_paging_domain_alloc(dev);	/* [한국어] BLOCKED 를 이해하지 못하는 구형 드라이버를 위해 '매핑이 하나도 없는 페이지 테이블 도메인'을 만든다. 번역이 전부 실패하므로 결과적으로 차단과 같다 (위 영어 주석) */
+	if (IS_ERR(domain))	/* [한국어] 할당 실패 */
+		return PTR_ERR(domain);	/* [한국어] 소유권 획득이 실패한다 */
+	group->blocking_domain = domain;	/* [한국어] 그룹이 소유하며 iommu_deinit_device 가 마지막에 해제한다 */
+	return 0;	/* [한국어] 준비 완료 */
 }
 
+/*
+ * [한국어]
+ * __iommu_take_dma_ownership - 그룹의 주소 공간을 소유자에게 넘긴다 (락은 호출자가 든다)
+ *
+ * @group:  대상 그룹
+ * @owner:  배타성 판정에 쓰이는 호출자 고유 포인터
+ * @return: 0 성공, -EBUSY 면 이미 다른 주체가 쓰는 중
+ *
+ * 소유권 이전의 실제 동작은 딱 하나다 — 그룹을 차단 도메인으로 옮기는 것. 그 순간
+ * 커널이 넣어 둔 모든 매핑이 무효가 되고, 장치는 새 소유자가 자기 도메인을 붙일
+ * 때까지 어떤 메모리에도 닿을 수 없다. VFIO 가 장치를 게스트에 넘기기 전에 커널
+ * 메모리로 가는 길이 확실히 끊겼음을 보장하는 지점이 여기다.
+ *
+ * owner 포인터는 값 자체에 의미가 없고 동일성만 쓰인다. 같은 값을 제시하는 호출만
+ * 계수를 늘릴 수 있어, 한 그룹의 여러 장치를 같은 사용자가 각각 붙잡는 것은 허용하고
+ * 서로 다른 사용자가 섞이는 것은 막는다.
+ *
+ * 실행 컨텍스트: 그룹 락을 든 채. 프로세스 문맥.
+ *
+ * 호출 체인: iommu_group_claim_dma_owner, iommu_device_claim_dma_owner → [이 함수]
+ *            → __iommu_group_alloc_blocking_domain → __iommu_group_set_domain
+ */
 static int __iommu_take_dma_ownership(struct iommu_group *group, void *owner)
 {
-	int ret;
+	int ret;	/* [한국어] 각 단계의 결과 */
 
-	if ((group->domain && group->domain != group->default_domain) ||
-	    !xa_empty(&group->pasid_array))
-		return -EBUSY;
+	if ((group->domain && group->domain != group->default_domain) ||	/* [한국어] 이미 기본 도메인이 아닌 곳에 붙어 있다 = 다른 소유자가 쓰는 중 */
+	    !xa_empty(&group->pasid_array))	/* [한국어] PASID 부착이 남아 있으면 그 주소 공간들이 계속 살아 있어야 한다 */
+		return -EBUSY;	/* [한국어] 소유권을 넘겨받을 수 없다 */
 
-	ret = __iommu_group_alloc_blocking_domain(group);
+	ret = __iommu_group_alloc_blocking_domain(group);	/* [한국어] 넘겨받는 즉시 세워 둘 차단 도메인을 준비한다 */
 	if (ret)
-		return ret;
-	ret = __iommu_group_set_domain(group, group->blocking_domain);
+		return ret;	/* [한국어] 차단 도메인을 못 만들면 소유권도 가질 수 없다 */
+	ret = __iommu_group_set_domain(group, group->blocking_domain);	/* [한국어] 그룹을 차단 도메인으로 옮긴다. 이것이 소유권 이전의 핵심이다 — 커널 매핑을 즉시 무효화해, 새 소유자가 자기 매핑을 넣기 전까지 장치가 어떤 메모리에도 닿지 못하게 만든다 */
 	if (ret)
-		return ret;
+		return ret;	/* [한국어] 전환 실패 — 그룹은 기본 도메인에 그대로 남는다 */
 
-	group->owner = owner;
-	group->owner_cnt++;
-	return 0;
+	group->owner = owner;	/* [한국어] 배타 소유자 표식. 같은 owner 값을 제시하는 호출만 계수를 늘릴 수 있다 */
+	group->owner_cnt++;	/* [한국어] 첫 소유자 */
+	return 0;	/* [한국어] 이제 이 그룹의 DMA 는 소유자의 것이다 */
 }
 
 /**
@@ -6054,24 +6141,44 @@ static int __iommu_take_dma_ownership(struct iommu_group *group, void *owner)
  * ownership in iommu_group level. New invocations on this interface should be
  * prohibited. Only a single owner may exist for a group.
  */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어)
+ * iommu_group_claim_dma_owner - 그룹 전체의 DMA 소유권을 가져간다 (구형 VFIO 호환)
+ *
+ * @group:  대상 그룹
+ * @owner:  호출자 고유 포인터
+ * @return: 0 성공, -EPERM 이면 이미 누군가 쓰는 중
+ *
+ * 아래의 장치 단위 판(iommu_device_claim_dma_owner)과 대비된다. 이쪽은 그룹에
+ * 사용자가 하나도 없을 때만 성공하는 전부-아니면-전무 방식이고, 그래서 그룹 안의
+ * 어떤 장치에라도 평범한 드라이버가 붙어 있으면 실패한다.
+ *
+ * 위 영어 주석이 새 호출을 금지한다고 못 박은 이유가 그것이다. 구형 VFIO 가 그룹
+ * 단위로 장치를 다루던 시절의 인터페이스이며, iommufd 를 비롯한 새 코드는 장치
+ * 단위 판을 쓴다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥. 잠들 수 있다.
+ *
+ * 호출 체인: VFIO 그룹 인터페이스 → [이 함수] → __iommu_take_dma_ownership
+ */
 int iommu_group_claim_dma_owner(struct iommu_group *group, void *owner)
 {
-	int ret = 0;
+	int ret = 0;	/* [한국어] 결과 */
 
-	if (WARN_ON(!owner))
-		return -EINVAL;
+	if (WARN_ON(!owner))	/* [한국어] owner 는 배타성 판정의 유일한 근거라 NULL 이면 의미가 없다 */
+		return -EINVAL;	/* [한국어] 호출자 버그 */
 
-	mutex_lock(&group->mutex);
-	if (group->owner_cnt) {
-		ret = -EPERM;
-		goto unlock_out;
+	mutex_lock(&group->mutex);	/* [한국어] 소유권 변경 구간 */
+	if (group->owner_cnt) {	/* [한국어] 커널 드라이버든 다른 소유자든 이미 쓰는 중이면 */
+		ret = -EPERM;	/* [한국어] 그룹 단위 소유권은 아무도 쓰지 않을 때만 가져갈 수 있다 */
+		goto unlock_out;	/* [한국어] 거절 */
 	}
 
-	ret = __iommu_take_dma_ownership(group, owner);
-unlock_out:
-	mutex_unlock(&group->mutex);
+	ret = __iommu_take_dma_ownership(group, owner);	/* [한국어] 차단 도메인으로 옮기고 소유자를 기록 */
+unlock_out:	/* [한국어] 공통 출구 */
+	mutex_unlock(&group->mutex);	/* [한국어] 락 해제 */
 
-	return ret;
+	return ret;	/* [한국어] 0 이면 VFIO 가 이 그룹의 주소 공간을 통째로 가져갔다 */
 }
 EXPORT_SYMBOL_GPL(iommu_group_claim_dma_owner);
 
@@ -6084,44 +6191,81 @@ EXPORT_SYMBOL_GPL(iommu_group_claim_dma_owner);
  * concurrently claim ownership if they present the same owner value. Returns 0
  * on success and error code on failure
  */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어)
+ * iommu_device_claim_dma_owner - 장치의 DMA 소유권을 가져간다
+ *
+ * @dev:    대상 장치
+ * @owner:  호출자 고유 포인터. 같은 값이면 공유, 다르면 배타.
+ * @return: 0 성공, -EPERM 이면 다른 소유자가 있다
+ *
+ * 현재 쓰이는 소유권 획득 경로다. 그룹 단위 판과 달리, 같은 owner 값을 제시하는
+ * 호출은 계수를 늘리며 공존할 수 있다 — 하나의 그룹에 여러 장치가 있고 vfio-pci
+ * 드라이버가 각각에 바인딩되는 흔한 상황이 그것이다.
+ *
+ * 첫 호출만 실제 소유권 이전(차단 도메인 전환)을 일으키고, 이후 호출은 계수 증가에
+ * 그친다. 마지막 해제에서 다시 기본 도메인으로 돌아온다.
+ *
+ * 실행 컨텍스트: 바인딩된 드라이버의 프로브 경로. 프로세스 문맥.
+ *
+ * 호출 체인: vfio-pci 등 → [이 함수] → __iommu_take_dma_ownership
+ */
 int iommu_device_claim_dma_owner(struct device *dev, void *owner)
 {
 	/* Caller must be a probed driver on dev */
-	struct iommu_group *group = dev->iommu_group;
-	int ret = 0;
+	struct iommu_group *group = dev->iommu_group;	/* [한국어] 호출자는 이 장치에 바인딩된 드라이버여야 한다 */
+	int ret = 0;	/* [한국어] 결과 */
 
-	if (WARN_ON(!owner))
-		return -EINVAL;
+	if (WARN_ON(!owner))	/* [한국어] 배타성 판정 근거가 없다 */
+		return -EINVAL;	/* [한국어] 호출자 버그 */
 
-	if (!group)
-		return -ENODEV;
+	if (!group)	/* [한국어] IOMMU 아래가 아닌 장치는 소유권을 논할 수 없다 */
+		return -ENODEV;	/* [한국어] 거절 */
 
-	mutex_lock(&group->mutex);
-	if (group->owner_cnt) {
-		if (group->owner != owner) {
-			ret = -EPERM;
-			goto unlock_out;
+	mutex_lock(&group->mutex);	/* [한국어] 소유권 변경 구간 */
+	if (group->owner_cnt) {	/* [한국어] 이미 소유자가 있으면 */
+		if (group->owner != owner) {	/* [한국어] 다른 주체가 들고 있다 */
+			ret = -EPERM;	/* [한국어] 배타 소유 위반 */
+			goto unlock_out;	/* [한국어] 거절 */
 		}
-		group->owner_cnt++;
-		goto unlock_out;
+		group->owner_cnt++;	/* [한국어] 같은 owner 라면 계수만 늘린다. 한 그룹에 여러 장치가 있고 같은 사용자(예: vfio-pci 드라이버 하나)가 각각을 붙잡는 경우다 (위 영어 주석) */
+		goto unlock_out;	/* [한국어] 성공 */
 	}
 
-	ret = __iommu_take_dma_ownership(group, owner);
-unlock_out:
-	mutex_unlock(&group->mutex);
-	return ret;
+	ret = __iommu_take_dma_ownership(group, owner);	/* [한국어] 첫 소유자 — 차단 도메인으로 전환한다 */
+unlock_out:	/* [한국어] 공통 출구 */
+	mutex_unlock(&group->mutex);	/* [한국어] 락 해제 */
+	return ret;	/* [한국어] 0 이면 이 장치의 DMA 를 호출자가 소유한다 */
 }
 EXPORT_SYMBOL_GPL(iommu_device_claim_dma_owner);
 
+/*
+ * [한국어]
+ * __iommu_release_dma_ownership - 소유권을 놓고 커널 기본 도메인으로 되돌린다 (락은 호출자가 든다)
+ *
+ * @group: 대상 그룹
+ *
+ * 소유자가 손을 떼는 순간 그룹은 다시 커널 DMA API 의 것이 된다. 도메인 복귀에
+ * nofail 판을 쓰는 것이 이 함수의 성격을 말해 준다 — 여기서 실패하면 그룹이
+ * 소유자도 없고 유효한 도메인도 없는 상태로 남아 복구할 방법이 없기 때문에,
+ * 실패를 허용하지 않는 전환으로 부른다.
+ *
+ * 계수를 감소가 아니라 0 대입으로 처리하는 것은 이 함수가 마지막 참조에서만 불리기
+ * 때문이다. 중간 참조 해제는 호출자가 계수만 줄이고 여기까지 오지 않는다.
+ *
+ * 실행 컨텍스트: 그룹 락을 든 채. 프로세스 문맥.
+ *
+ * 호출 체인: iommu_group_release_dma_owner, iommu_device_release_dma_owner → [이 함수]
+ */
 static void __iommu_release_dma_ownership(struct iommu_group *group)
 {
-	if (WARN_ON(!group->owner_cnt || !group->owner ||
-		    !xa_empty(&group->pasid_array)))
-		return;
+	if (WARN_ON(!group->owner_cnt || !group->owner ||	/* [한국어] 소유하지 않은 그룹을 놓으려 하거나 */
+		    !xa_empty(&group->pasid_array)))	/* [한국어] PASID 부착을 정리하지 않고 놓으려 한다 — 둘 다 사용자 측 버그 */
+		return;	/* [한국어] 상태를 건드리지 않고 물러난다 */
 
-	group->owner_cnt = 0;
-	group->owner = NULL;
-	__iommu_group_set_domain_nofail(group, group->default_domain);
+	group->owner_cnt = 0;	/* [한국어] 계수를 감소가 아니라 0 으로 만든다 — 이 함수는 마지막 참조에서만 불리기 때문 */
+	group->owner = NULL;	/* [한국어] 배타 소유 해제 */
+	__iommu_group_set_domain_nofail(group, group->default_domain);	/* [한국어] 커널의 기본 도메인으로 되돌린다. 실패할 수 없는 전환이다 — 여기서 실패하면 그룹이 소유자도 도메인도 없는 상태로 남기 때문 */
 }
 
 /**
@@ -6130,11 +6274,24 @@ static void __iommu_release_dma_ownership(struct iommu_group *group)
  *
  * Release the DMA ownership claimed by iommu_group_claim_dma_owner().
  */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어)
+ * iommu_group_release_dma_owner - 그룹 단위로 가져간 소유권을 놓는다
+ *
+ * @group: 대상 그룹
+ *
+ * iommu_group_claim_dma_owner 의 짝. 그룹 단위 소유는 계수가 항상 1 이므로
+ * 조건 없이 바로 완전 해제로 간다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥.
+ *
+ * 호출 체인: VFIO 그룹 인터페이스 → [이 함수] → __iommu_release_dma_ownership
+ */
 void iommu_group_release_dma_owner(struct iommu_group *group)
 {
-	mutex_lock(&group->mutex);
-	__iommu_release_dma_ownership(group);
-	mutex_unlock(&group->mutex);
+	mutex_lock(&group->mutex);	/* [한국어] 소유권 변경 구간 */
+	__iommu_release_dma_ownership(group);	/* [한국어] 그룹 단위 소유는 계수가 항상 1 이므로 바로 놓는다 */
+	mutex_unlock(&group->mutex);	/* [한국어] 락 해제 */
 }
 EXPORT_SYMBOL_GPL(iommu_group_release_dma_owner);
 
@@ -6144,17 +6301,32 @@ EXPORT_SYMBOL_GPL(iommu_group_release_dma_owner);
  *
  * Release the DMA ownership claimed by iommu_device_claim_dma_owner().
  */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어)
+ * iommu_device_release_dma_owner - 장치 단위로 가져간 소유권을 놓는다
+ *
+ * @dev: 대상 장치
+ *
+ * 같은 소유자가 잡고 있는 다른 장치가 남아 있으면 계수만 줄이고 도메인은 차단
+ * 상태로 유지한다. 마지막 하나일 때만 기본 도메인으로 되돌린다 — 그룹 안의 일부
+ * 장치만 커널로 돌려보낼 수는 없기 때문이다. 그룹이 곧 격리 단위라는 사실이 여기서
+ * 다시 드러난다.
+ *
+ * 실행 컨텍스트: 드라이버 언바인드 경로. 프로세스 문맥.
+ *
+ * 호출 체인: vfio-pci 등 → [이 함수] → __iommu_release_dma_ownership
+ */
 void iommu_device_release_dma_owner(struct device *dev)
 {
 	/* Caller must be a probed driver on dev */
-	struct iommu_group *group = dev->iommu_group;
+	struct iommu_group *group = dev->iommu_group;	/* [한국어] 호출자는 바인딩된 드라이버 */
 
-	mutex_lock(&group->mutex);
-	if (group->owner_cnt > 1)
-		group->owner_cnt--;
+	mutex_lock(&group->mutex);	/* [한국어] 소유권 변경 구간 */
+	if (group->owner_cnt > 1)	/* [한국어] 같은 소유자의 다른 장치가 아직 남아 있으면 */
+		group->owner_cnt--;	/* [한국어] 계수만 줄인다 — 도메인은 그대로 차단 상태로 둔다 */
 	else
-		__iommu_release_dma_ownership(group);
-	mutex_unlock(&group->mutex);
+		__iommu_release_dma_ownership(group);	/* [한국어] 마지막 하나였다면 기본 도메인으로 완전히 되돌린다 */
+	mutex_unlock(&group->mutex);	/* [한국어] 락 해제 */
 }
 EXPORT_SYMBOL_GPL(iommu_device_release_dma_owner);
 
@@ -6165,15 +6337,30 @@ EXPORT_SYMBOL_GPL(iommu_device_release_dma_owner);
  * This provides status query on a given group. It is racy and only for
  * non-binding status reporting.
  */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어)
+ * iommu_group_dma_owner_claimed - 이 그룹을 누군가 쓰고 있는가 (구속력 없는 조회)
+ *
+ * @group:  대상 그룹
+ * @return: true 면 사용자가 있다
+ *
+ * 락을 놓는 순간 답이 낡는다. 그래서 위 영어 주석이 "racy" 라고 명시했고, 이 값으로
+ * 결정을 내려서는 안 된다 — 실제 판정은 언제나 claim 호출 자체가 그룹 락 아래에서
+ * 한다. 상태 표시(예: VFIO 가 이 그룹을 쓸 수 있는지 사용자에게 보여 주기) 용도다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥.
+ *
+ * 호출 체인: VFIO 상태 조회 → [이 함수]
+ */
 bool iommu_group_dma_owner_claimed(struct iommu_group *group)
 {
-	unsigned int user;
+	unsigned int user;	/* [한국어] 계수 복사본 */
 
-	mutex_lock(&group->mutex);
-	user = group->owner_cnt;
-	mutex_unlock(&group->mutex);
+	mutex_lock(&group->mutex);	/* [한국어] 일관된 값을 읽기 위해 */
+	user = group->owner_cnt;	/* [한국어] 현재 사용자 수 */
+	mutex_unlock(&group->mutex);	/* [한국어] 락을 놓는 순간 값이 낡는다 */
 
-	return user;
+	return user;	/* [한국어] 그래서 위 영어 주석대로 '구속력 없는 상태 조회'용이다. 이 값을 보고 결정을 내리면 경쟁이 생긴다 */
 }
 EXPORT_SYMBOL_GPL(iommu_group_dma_owner_claimed);
 
