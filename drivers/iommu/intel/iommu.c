@@ -4854,12 +4854,34 @@ out_free_dmar:	/* [한국어] 모든 실패 경로가 합류 */
 	return ret;	/* [한국어] 실패 이유. -ENODEV 면 애초에 쓰지 않기로 한 경우다 */
 }
 
+/*
+ * [한국어]
+ * domain_context_clear_one_cb - DMA 별칭 하나마다 컨텍스트 항목을 지우는 콜백
+ *
+ * @pdev: 순회 중인 PCI 장치(여기서는 쓰지 않는다).
+ * @alias: 이 장치가 낼 수 있는 소스 id 하나. 상위 8비트가 버스, 하위 8비트가 devfn.
+ * @opaque: pci_for_each_dma_alias 에 넘긴 device_domain_info.
+ * @return: 항상 0 — 0 이 아니면 순회가 중단되므로, 모든 별칭을 지우려면 0 이어야 한다.
+ *
+ * 왜 별칭마다 지워야 하는가: PCI 장치가 항상 자기 이름으로 DMA 를 내지는
+ * 않는다. PCIe-to-PCI 브리지 뒤의 장치는 브리지의 소스 id 를 쓰고, 일부
+ * 장치는 펌웨어가 정한 별칭을 쓴다. IOMMU 는 소스 id 로 컨텍스트 항목을
+ * 고르므로, 그 장치가 낼 수 있는 모든 소스 id 의 항목을 지워야 번역이
+ * 완전히 끊긴다. 하나라도 남으면 그 id 로 오는 DMA 가 옛 도메인으로 계속
+ * 번역된다.
+ *
+ * 실행 컨텍스트: 장치 분리(detach) 경로. 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   domain_context_clear() → pci_for_each_dma_alias()
+ *     → [domain_context_clear_one_cb] → domain_context_clear_one()
+ */
 static int domain_context_clear_one_cb(struct pci_dev *pdev, u16 alias, void *opaque)
 {
-	struct device_domain_info *info = opaque;
+	struct device_domain_info *info = opaque;	/* [한국어] pci_for_each_dma_alias 가 그대로 넘겨준 장치 정보 */
 
-	domain_context_clear_one(info, PCI_BUS_NUM(alias), alias & 0xff);
-	return 0;
+	domain_context_clear_one(info, PCI_BUS_NUM(alias), alias & 0xff);	/* [한국어] 별칭(alias) 하나의 컨텍스트 항목을 지운다. alias 는 16비트 소스 id 이므로 상위 8비트가 버스, 하위 8비트가 devfn 이다 */
+	return 0;	/* [한국어] 계속 순회한다 — 별칭이 여럿이면 전부 지워야 한다 */
 }
 
 /*
@@ -4868,16 +4890,40 @@ static int domain_context_clear_one_cb(struct pci_dev *pdev, u16 alias, void *op
  * devices, unbinding the driver from any one of them will possibly leave
  * the others unable to operate.
  */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * domain_context_clear - 장치가 쓰는 모든 소스 id 의 컨텍스트 항목을 지운다
+ *
+ * @info: 분리할 장치의 VT-d 정보.
+ * @return: 없음.
+ *
+ * PCI 가 아닌 장치는 별칭이 없으므로 자기 (bus, devfn) 항목만 지우면 된다.
+ * PCI 장치는 pci_for_each_dma_alias 로 가능한 모든 소스 id 를 훑으며 지우고,
+ * 마지막에 ATS 까지 끈다 — 컨텍스트 항목을 지웠는데 장치 내부 번역 캐시가
+ * 살아 있으면 장치는 캐시된 번역으로 DMA 를 계속 낸다.
+ *
+ * 위 영어 주석의 경고: intel-iommu 는 "의존 장치(dependent device)"에 대한
+ * 참조 계수를 두지 않는다. 여러 엔드포인트가 같은 별칭(예: 같은 브리지)을
+ * 공유하는 구성에서 그중 하나만 드라이버를 떼어도 공유하던 컨텍스트 항목이
+ * 지워져 나머지 장치들이 동작하지 못할 수 있다. 이것은 알려진 한계이며,
+ * 그런 장치들이 같은 IOMMU 그룹으로 묶이는 이유이기도 하다.
+ *
+ * 실행 컨텍스트: 장치 분리. 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   device_block_translation() → [domain_context_clear]
+ *     → pci_for_each_dma_alias() → iommu_disable_pci_ats()
+ */
 static void domain_context_clear(struct device_domain_info *info)
 {
-	if (!dev_is_pci(info->dev)) {
-		domain_context_clear_one(info, info->bus, info->devfn);
-		return;
+	if (!dev_is_pci(info->dev)) {	/* [한국어] PCI 가 아닌 장치는 별칭 개념이 없다 */
+		domain_context_clear_one(info, info->bus, info->devfn);	/* [한국어] 자기 자신의 컨텍스트 항목만 지우면 된다 */
+		return;	/* [한국어] 끝 */
 	}
 
-	pci_for_each_dma_alias(to_pci_dev(info->dev),
-			       &domain_context_clear_one_cb, info);
-	iommu_disable_pci_ats(info);
+	pci_for_each_dma_alias(to_pci_dev(info->dev),	/* [한국어] PCI 장치는 자기 이름이 아닌 소스 id 로 DMA 를 낼 수 있다. PCIe-to-PCI 브리지 뒤의 장치나 별칭을 쓰는 장치가 그렇다 */
+			       &domain_context_clear_one_cb, info);	/* [한국어] 가능한 모든 소스 id 의 컨텍스트 항목을 지운다. 하나라도 남으면 그 id 로 오는 DMA 가 여전히 옛 도메인으로 번역된다 */
+	iommu_disable_pci_ats(info);	/* [한국어] 장치 내부 번역 캐시도 끈다. 컨텍스트를 지웠는데 ATS 가 살아 있으면 장치가 캐시된 번역으로 계속 DMA 를 낸다 */
 }
 
 /*
@@ -4885,88 +4931,211 @@ static void domain_context_clear(struct device_domain_info *info)
  * all DMA requests without PASID from the device are blocked. If the page
  * table has been set, clean up the data structures.
  */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * device_block_translation - 장치의 번역을 끊어 DMA 를 전부 막고 자료구조를 정리한다
+ *
+ * @dev: 차단할 장치.
+ * @return: 없음.
+ *
+ * 무엇이 "차단"인가: 컨텍스트 항목(또는 scalable 모드의 PASID 항목)에서
+ * 페이지 테이블 포인터를 지운다. 그러면 이 장치가 내는 PASID 없는 DMA 는
+ * 번역할 곳이 없어 전부 실패한다. 번역을 아예 끄는 것(passthrough)과는
+ * 정반대다 — 통과시키는 게 아니라 막는 것이다.
+ *
+ * 왜 이 상태가 필요한가: 장치를 한 도메인에서 다른 도메인으로 옮기는 사이,
+ * 또는 드라이버가 떨어져 아무 도메인에도 속하지 않는 사이에 그 장치가 옛
+ * 매핑으로 DMA 를 계속 내면 안 된다. 그 틈을 막는 것이 차단 상태다.
+ *
+ * 순서가 중요하다.
+ *   1) cache_tag_unassign_domain — 무효화 대상 목록에서 먼저 뺀다. 그래야
+ *      이후의 도메인 단위 무효화가 이미 떨어져 나갈 장치를 건드리지 않는다.
+ *   2) 하드웨어 항목을 내린다. scalable 모드면 PASID 항목을,
+ *      레거시면 컨텍스트 항목을 지운다. 두 모드에서 "번역이 시작되는 곳"이
+ *      다르기 때문이다. 서브디바이스(dev_is_real_dma_subdevice)는 부모의
+ *      항목을 공유하므로 건너뛴다 — 지우면 부모까지 끊긴다.
+ *   3) domain_attached = false 로 표시한다. 두 번 불려도 안전하도록
+ *      함수 첫머리에서 이 값을 확인한다.
+ *   4) 도메인의 장치 목록에서 빼고, 유닛의 도메인 id 참조를 놓는다.
+ *
+ * 동기화: 도메인의 장치 목록은 domain->lock 으로 보호하며, 이 락은 무효화
+ * 경로에서도 잡히므로 인터럽트를 끈 채(spin_lock_irqsave) 잡는다.
+ * 실행 컨텍스트: 도메인 전환/장치 해제. 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   blocking_domain_attach_dev()/intel_iommu_release_device() 등
+ *     → [device_block_translation]
+ *     → cache_tag_unassign_domain() → intel_pasid_tear_down_entry()
+ *        또는 domain_context_clear() → domain_detach_iommu()
+ */
 void device_block_translation(struct device *dev)
 {
-	struct device_domain_info *info = dev_iommu_priv_get(dev);
-	struct intel_iommu *iommu = info->iommu;
-	unsigned long flags;
+	struct device_domain_info *info = dev_iommu_priv_get(dev);	/* [한국어] 이 장치의 VT-d 쪽 정보 */
+	struct intel_iommu *iommu = info->iommu;	/* [한국어] 담당 유닛 */
+	unsigned long flags;	/* [한국어] 인터럽트 상태 */
 
 	/* Device in DMA blocking state. Noting to do. */
-	if (!info->domain_attached)
-		return;
+	if (!info->domain_attached)	/* [한국어] 이미 차단 상태면 (위 영어 주석) */
+		return;	/* [한국어] 할 일이 없다 */
 
-	if (info->domain)
-		cache_tag_unassign_domain(info->domain, dev, IOMMU_NO_PASID);
+	if (info->domain)	/* [한국어] 붙어 있던 도메인이 있으면 */
+		cache_tag_unassign_domain(info->domain, dev, IOMMU_NO_PASID);	/* [한국어] 무효화 대상 목록에서 이 장치를 뺀다. 먼저 빼 두어야 이후의 도메인 단위 무효화가 이미 떨어진 장치를 건드리지 않는다 */
 
-	if (!dev_is_real_dma_subdevice(dev)) {
-		if (sm_supported(iommu))
-			intel_pasid_tear_down_entry(iommu, dev,
-						    IOMMU_NO_PASID, false);
+	if (!dev_is_real_dma_subdevice(dev)) {	/* [한국어] 실제로 자기 컨텍스트 항목을 갖는 장치라면 (서브디바이스는 부모의 항목을 공유한다) */
+		if (sm_supported(iommu))	/* [한국어] scalable 모드에서는 */
+			intel_pasid_tear_down_entry(iommu, dev,	/* [한국어] PASID 항목을 내린다. 이 모드에서는 컨텍스트 항목이 PASID 디렉터리를 가리키므로 실제 번역을 끊는 곳이 PASID 항목이다 */
+						    IOMMU_NO_PASID, false);	/* [한국어] PASID 를 쓰지 않는 기본 트래픽의 항목. false 는 폴트를 유발하지 말고 조용히 차단하라는 뜻이다 */
 		else
-			domain_context_clear(info);
+			domain_context_clear(info);	/* [한국어] 레거시 모드에서는 컨텍스트 항목 자체를 지운다 */
 	}
 
 	/* Device now in DMA blocking state. */
-	info->domain_attached = false;
+	info->domain_attached = false;	/* [한국어] 이제 이 장치의 DMA 는 차단 상태다 (위 영어 주석) */
 
-	if (!info->domain)
-		return;
+	if (!info->domain)	/* [한국어] 붙어 있던 도메인이 없었으면 */
+		return;	/* [한국어] 정리할 자료구조도 없다 */
 
-	spin_lock_irqsave(&info->domain->lock, flags);
-	list_del(&info->link);
-	spin_unlock_irqrestore(&info->domain->lock, flags);
+	spin_lock_irqsave(&info->domain->lock, flags);	/* [한국어] 도메인의 장치 목록을 바꾼다 */
+	list_del(&info->link);	/* [한국어] 그 목록에서 이 장치를 뺀다 */
+	spin_unlock_irqrestore(&info->domain->lock, flags);	/* [한국어] 락 해제 */
 
-	domain_detach_iommu(info->domain, iommu);
-	info->domain = NULL;
+	domain_detach_iommu(info->domain, iommu);	/* [한국어] 이 유닛에서 도메인 id 참조를 놓는다. 마지막 장치였다면 도메인 id 가 반납된다 */
+	info->domain = NULL;	/* [한국어] 더 이상 어느 도메인에도 속하지 않는다 */
 }
 
+/*
+ * [한국어]
+ * blocking_domain_attach_dev - 장치를 차단 도메인에 붙인다(= 모든 DMA 를 막는다)
+ *
+ * @domain: 전역 blocking_domain. 상태가 없어 실제로는 쓰이지 않는다.
+ * @dev: 차단할 장치.
+ * @old: 직전에 붙어 있던 도메인(코어가 알려 준다). 여기서는 info 로 알 수 있어 쓰지 않는다.
+ * @return: 항상 0. 아무것도 세우지 않고 내리기만 하므로 실패할 수 없다.
+ *
+ * IOMMU 코어의 차단 도메인 규약: 모든 드라이버는 "이 장치의 DMA 를 전부
+ * 막아라"는 요청을 받을 수 있어야 하고, 그 요청은 실패해서는 안 된다.
+ * 실패하면 코어가 장치를 안전한 상태로 되돌릴 방법이 없기 때문이다. 그래서
+ * 이 콜백은 자원을 새로 잡지 않는 경로로만 구성되어 있다.
+ *
+ * 순서: 먼저 iopf(I/O 페이지 폴트) 처리를 떼어 내고 그 다음 번역을 끊는다.
+ * 반대로 하면, 번역이 끊긴 뒤에도 폴트 큐에 남아 있던 요청이 이미 사라진
+ * 도메인을 참조하게 된다.
+ *
+ * 실행 컨텍스트: 도메인 전환, 드라이버 해제, VFIO 반납 등. 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   iommu_attach_device(blocking_domain) → [blocking_domain_attach_dev]
+ *     → iopf_for_domain_remove() → device_block_translation()
+ */
 static int blocking_domain_attach_dev(struct iommu_domain *domain,
 				      struct device *dev,
 				      struct iommu_domain *old)
 {
-	struct device_domain_info *info = dev_iommu_priv_get(dev);
+	struct device_domain_info *info = dev_iommu_priv_get(dev);	/* [한국어] 이 장치의 VT-d 정보 */
 
-	iopf_for_domain_remove(info->domain ? &info->domain->domain : NULL, dev);
-	device_block_translation(dev);
-	return 0;
+	iopf_for_domain_remove(info->domain ? &info->domain->domain : NULL, dev);	/* [한국어] I/O 페이지 폴트 처리를 먼저 떼어 낸다. 번역을 끊은 뒤에도 폴트 큐에 남은 요청이 있으면 이미 사라진 도메인을 참조하게 된다 */
+	device_block_translation(dev);	/* [한국어] 컨텍스트/PASID 항목을 내려 이 장치의 DMA 를 전부 막는다 */
+	return 0;	/* [한국어] 차단 도메인 붙이기는 실패할 수 없다 — 아무것도 세우지 않고 내리기만 하기 때문이다 */
 }
 
-static int blocking_domain_set_dev_pasid(struct iommu_domain *domain,
+static int blocking_domain_set_dev_pasid(struct iommu_domain *domain,	/* [한국어] PASID 단위 차단의 전방 선언. 정의는 SVA 관련 코드 뒤에 있다 */
 					 struct device *dev, ioasid_t pasid,
 					 struct iommu_domain *old);
 
-static struct iommu_domain blocking_domain = {
-	.type = IOMMU_DOMAIN_BLOCKED,
+static struct iommu_domain blocking_domain = {	/* [한국어] 모든 장치가 공유하는 단 하나의 차단 도메인. 상태가 없으므로 인스턴스가 하나면 충분하다 */
+	.type = IOMMU_DOMAIN_BLOCKED,	/* [한국어] 코어가 이 도메인을 "모든 DMA 를 막는 도메인" 으로 인식한다 */
 	.ops = &(const struct iommu_domain_ops) {
-		.attach_dev	= blocking_domain_attach_dev,
-		.set_dev_pasid	= blocking_domain_set_dev_pasid,
+		.attach_dev	= blocking_domain_attach_dev,	/* [한국어] 장치를 여기 붙이면 번역이 내려간다 */
+		.set_dev_pasid	= blocking_domain_set_dev_pasid,	/* [한국어] 특정 PASID 만 차단할 때 */
 	}
 };
 
+/*
+ * [한국어]
+ * paging_domain_alloc - 빈 dmar_domain 을 만들고 내부 자료구조를 초기화한다
+ *
+ * @return: 초기화된 dmar_domain, 실패 시 ERR_PTR(-ENOMEM).
+ *
+ * 도메인은 "하나의 주소 공간"이다. 여러 장치가 같은 도메인에 붙으면 같은
+ * IOVA→PA 매핑을 공유한다. 이 함수는 그 껍데기만 만든다 — 페이지 테이블의
+ * 단계 수와 최상위 테이블은 호출자가 1단계/2단계 중 무엇을 쓸지 정한 뒤
+ * 세운다.
+ *
+ * 초기화하는 것들과 그 이유:
+ *   devices      — 이 도메인에 붙은 장치 목록. 도메인 단위 무효화를 어디에
+ *                  보낼지 정할 때 훑는다.
+ *   dev_pasids   — PASID 단위로 붙은 (장치, PASID) 쌍. SVA/iommufd 가 쓴다.
+ *   cache_tags   — 실제 무효화 대상의 정규화된 목록. 여러 장치가 같은 유닛의
+ *                  같은 도메인 id 를 쓰면 무효화는 한 번이면 되므로, 장치
+ *                  목록과 별도로 이 목록을 유지한다.
+ *   iommu_array  — 유닛 순번 → (도메인 id, 참조 수). 도메인 id 는 유닛마다
+ *                  따로 할당되므로 유닛별로 들고 있어야 한다.
+ *   s1_domains   — 이 도메인을 2단계(부모)로 삼는 1단계 도메인들. 중첩 변환
+ *                  (가상 머신의 게스트 페이지 테이블)에서 쓴다.
+ *
+ * 락을 세 개(lock, cache_lock, s1_lock)로 나눈 이유: 장치 붙이기/떼기,
+ * 무효화 대상 갱신, 중첩 도메인 관리가 서로 다른 빈도와 문맥에서 돌기
+ * 때문이다. 특히 cache_lock 은 무효화 경로에서 자주 잡히므로 분리해 두면
+ * 장치 붙이기가 무효화를 막지 않는다.
+ *
+ * 실행 컨텍스트: 도메인 생성 요청. 프로세스 컨텍스트(GFP_KERNEL).
+ *
+ * 호출 체인:
+ *   intel_iommu_domain_alloc_first_stage()/..._second_stage()
+ *     → [paging_domain_alloc]
+ */
 static struct dmar_domain *paging_domain_alloc(void)
 {
-	struct dmar_domain *domain;
+	struct dmar_domain *domain;	/* [한국어] 만들 도메인 */
 
-	domain = kzalloc_obj(*domain);
-	if (!domain)
-		return ERR_PTR(-ENOMEM);
+	domain = kzalloc_obj(*domain);	/* [한국어] 0 으로 초기화된 도메인 구조체 */
+	if (!domain)	/* [한국어] 할당 실패 */
+		return ERR_PTR(-ENOMEM);	/* [한국어] 에러 포인터로 반환 — 호출자가 IS_ERR 로 구분한다 */
 
-	INIT_LIST_HEAD(&domain->devices);
-	INIT_LIST_HEAD(&domain->dev_pasids);
-	INIT_LIST_HEAD(&domain->cache_tags);
-	spin_lock_init(&domain->lock);
-	spin_lock_init(&domain->cache_lock);
-	xa_init(&domain->iommu_array);
-	INIT_LIST_HEAD(&domain->s1_domains);
-	spin_lock_init(&domain->s1_lock);
+	INIT_LIST_HEAD(&domain->devices);	/* [한국어] 이 도메인에 붙은 장치 목록 */
+	INIT_LIST_HEAD(&domain->dev_pasids);	/* [한국어] PASID 단위로 붙은 (장치, PASID) 쌍 목록 */
+	INIT_LIST_HEAD(&domain->cache_tags);	/* [한국어] 무효화 대상 목록. 어느 유닛의 어느 도메인 id 로 무효화를 보낼지가 여기 쌓인다 */
+	spin_lock_init(&domain->lock);	/* [한국어] devices/dev_pasids 목록을 지키는 락 */
+	spin_lock_init(&domain->cache_lock);	/* [한국어] cache_tags 를 지키는 별도 락. 무효화 경로가 장치 붙이기/떼기와 다른 빈도로 돌기 때문에 락을 나눴다 */
+	xa_init(&domain->iommu_array);	/* [한국어] 유닛별 정보(도메인 id, 참조 수)를 유닛 순번으로 색인한다 */
+	INIT_LIST_HEAD(&domain->s1_domains);	/* [한국어] 이 도메인을 2단계(부모)로 삼는 1단계 중첩 도메인들의 목록 */
+	spin_lock_init(&domain->s1_lock);	/* [한국어] 그 목록을 지키는 락 */
 
-	return domain;
+	return domain;	/* [한국어] 필드만 초기화된 빈 도메인. 페이지 테이블은 호출자가 세운다 */
 }
 
+/*
+ * [한국어]
+ * compute_vasz_lg2_fs - 1단계(First-Stage) 페이지 테이블의 주소 폭과 레벨 수를 정한다
+ *
+ * @iommu: 대상 유닛. 능력 레지스터에서 한계를 읽는다.
+ * @top_level: 출력. 최상위 페이지 테이블 레벨 번호(3 이면 4단계, 4 면 5단계).
+ * @return: 이 도메인이 쓸 수 있는 가상 주소 폭(비트 수).
+ *
+ * 왜 두 값을 함께 정하는가: 페이지 테이블의 단계 수와 다룰 수 있는 주소 폭은
+ * 같은 것의 두 표현이다. 4단계면 48비트, 5단계면 57비트를 덮는다. 그래서 한
+ * 함수가 둘을 함께 결정한다.
+ *
+ * 상한이 둘이고 둘 중 작은 쪽을 따른다.
+ *   - MGAW(Maximum Guest Address Width): 이 유닛의 하드웨어가 실제로 다룰 수
+ *     있는 주소 폭. 이보다 큰 주소를 매핑하면 번역이 실패한다.
+ *   - FSPM 이 함의하는 정규(canonical) 주소 폭: 1단계 테이블은 CPU 페이지
+ *     테이블과 같은 형식이라 x86 의 정규 주소 규칙을 따른다. 4레벨이면
+ *     47비트, 5레벨이면 56비트가 사용자 주소의 상한이다(스펙 3.6, 위 영어 주석).
+ *
+ * 5레벨은 MGAW 가 48을 넘고 cap_fl5lp_support 가 있을 때만 쓴다. 4레벨은
+ * 1단계를 지원하는 모든 하드웨어가 지원하므로 조건 없이 기본값이 된다.
+ *
+ * 실행 컨텍스트: 도메인 생성. 순수 계산이라 락이 필요 없다.
+ *
+ * 호출 체인:
+ *   intel_iommu_domain_alloc_first_stage() → [compute_vasz_lg2_fs]
+ *     → cap_mgaw() / cap_fl5lp_support()
+ */
 static unsigned int compute_vasz_lg2_fs(struct intel_iommu *iommu,
 					unsigned int *top_level)
 {
-	unsigned int mgaw = cap_mgaw(iommu->cap);
+	unsigned int mgaw = cap_mgaw(iommu->cap);	/* [한국어] MGAW(Maximum Guest Address Width) — 이 유닛이 다룰 수 있는 주소 폭 */
 
 	/*
 	 * Spec 3.6 First-Stage Translation:
@@ -4975,73 +5144,137 @@ static unsigned int compute_vasz_lg2_fs(struct intel_iommu *iommu,
 	 * and the lower canonical address width implied by FSPM (i.e.,
 	 * 47-bit when FSPM is 4-level and 56-bit when FSPM is 5-level).
 	 */
-	if (mgaw > 48 && cap_fl5lp_support(iommu->cap)) {
-		*top_level = 4;
-		return min(57, mgaw);
+	if (mgaw > 48 && cap_fl5lp_support(iommu->cap)) {	/* [한국어] 48비트를 넘고 1단계 5레벨 페이지 테이블을 지원하면 */
+		*top_level = 4;	/* [한국어] 최상위 레벨을 4 로 (레벨 0~4, 즉 5단계) */
+		return min(57, mgaw);	/* [한국어] 57비트까지. 스펙 3.6 이 요구하는 상한이며, x86 정규(canonical) 주소의 5레벨 한계와 맞다 (위 영어 주석) */
 	}
 
 	/* Four level is always supported */
-	*top_level = 3;
-	return min(48, mgaw);
+	*top_level = 3;	/* [한국어] 4레벨은 항상 지원된다 (위 영어 주석) */
+	return min(48, mgaw);	/* [한국어] 48비트 상한. MGAW 가 더 작으면 그쪽을 따른다 — 하드웨어가 못 다루는 주소를 쓰면 번역이 실패한다 */
 }
 
+/*
+ * [한국어]
+ * intel_iommu_domain_alloc_first_stage - 1단계(First-Stage) 페이징 도메인을 만든다
+ *
+ * @dev: 이 도메인을 쓸 대표 장치. 테이블 메모리의 NUMA 노드를 정하는 데 쓴다.
+ * @iommu: 그 장치를 맡은 유닛. 어떤 도메인을 만들 수 있는지는 유닛 능력이 정한다.
+ * @flags: iommufd/코어가 요청한 성질. 1단계가 이해하는 것은 PASID 뿐이다.
+ * @return: 만들어진 iommu_domain, 실패 시 ERR_PTR. -EOPNOTSUPP 은 "이 유닛으로는
+ *          1단계를 만들 수 없다"는 뜻이며, 호출자가 2단계로 내려가는 신호가 된다.
+ *
+ * 1단계와 2단계의 차이: VT-d scalable 모드는 변환을 두 단계로 나눈다. 1단계는
+ * CPU 의 페이지 테이블과 같은 x86-64 형식이고, 2단계는 VT-d 고유 형식이다.
+ * 가상화에서 1단계는 게스트가, 2단계는 호스트가 소유하는 구조가 되지만,
+ * 가상화가 아닌 보통의 DMA 매핑에서도 둘 중 하나를 골라 쓴다. 1단계를 선호하는
+ * 이유는 CPU 페이지 테이블과 형식이 같아 SVA(프로세스 주소 공간 공유)로
+ * 자연스럽게 이어지고, 하드웨어가 그쪽에 더 최적화되어 있기 때문이다.
+ *
+ * 설정하는 것들:
+ *   - 주소 폭/레벨: compute_vasz_lg2_fs 가 MGAW 와 정규 주소 규칙을 함께 본다.
+ *   - SIGN_EXTEND: 1단계 주소는 x86 정규 주소라 상위 비트가 부호 확장된다.
+ *   - DMA_INCOHERENT: 유닛의 페이지 워크가 캐시를 스누프하지 않으면
+ *     (!ecap_smpwc) 테이블을 고칠 때마다 캐시를 밀어내야 한다.
+ *   - pgsize_bitmap 정리: 하드웨어가 1GB 페이지를 못 하면 그 크기를 뺀다.
+ *     코어의 매핑 루프는 이 비트맵만 보고 페이지 크기를 고르므로, 여기서
+ *     빼 두지 않으면 하드웨어가 이해하지 못하는 항목을 만들게 된다.
+ *
+ * 실행 컨텍스트: 도메인 생성 요청(코어 또는 iommufd). 프로세스 컨텍스트.
+ * 에러 처리: 페이지 테이블 초기화가 실패하면 도메인 껍데기를 반납한다.
+ *
+ * 호출 체인:
+ *   intel_iommu_domain_alloc_paging_flags() → [이 함수]
+ *     → paging_domain_alloc() → compute_vasz_lg2_fs() → pt_iommu_x86_64_init()
+ */
 static struct iommu_domain *
 intel_iommu_domain_alloc_first_stage(struct device *dev,
 				     struct intel_iommu *iommu, u32 flags)
 {
-	struct pt_iommu_x86_64_cfg cfg = {};
-	struct dmar_domain *dmar_domain;
-	int ret;
+	struct pt_iommu_x86_64_cfg cfg = {};	/* [한국어] 공용 페이지 테이블 라이브러리(io-pgtable 의 후신)에 넘길 설정. 1단계는 x86-64 CPU 페이지 테이블과 형식이 같아 그 구현을 그대로 쓴다 */
+	struct dmar_domain *dmar_domain;	/* [한국어] 만들 도메인 */
+	int ret;	/* [한국어] 초기화 결과 */
 
-	if (flags & ~IOMMU_HWPT_ALLOC_PASID)
-		return ERR_PTR(-EOPNOTSUPP);
+	if (flags & ~IOMMU_HWPT_ALLOC_PASID)	/* [한국어] 1단계 도메인이 이해하는 플래그는 PASID 하나뿐이다 */
+		return ERR_PTR(-EOPNOTSUPP);	/* [한국어] 모르는 플래그가 있으면 거절 — 조용히 무시하면 호출자가 요청한 성질이 없는 도메인을 받게 된다 */
 
 	/* Only SL is available in legacy mode */
-	if (!sm_supported(iommu) || !ecap_flts(iommu->ecap))
-		return ERR_PTR(-EOPNOTSUPP);
+	if (!sm_supported(iommu) || !ecap_flts(iommu->ecap))	/* [한국어] scalable 모드가 아니거나 1단계 변환을 지원하지 않으면 */
+		return ERR_PTR(-EOPNOTSUPP);	/* [한국어] 레거시 모드에는 2단계밖에 없다 (위 영어 주석) */
 
-	dmar_domain = paging_domain_alloc();
-	if (IS_ERR(dmar_domain))
-		return ERR_CAST(dmar_domain);
+	dmar_domain = paging_domain_alloc();	/* [한국어] 빈 도메인 껍데기 */
+	if (IS_ERR(dmar_domain))	/* [한국어] 할당 실패 */
+		return ERR_CAST(dmar_domain);	/* [한국어] 에러를 그대로 전달 */
 
-	cfg.common.hw_max_vasz_lg2 =
-		compute_vasz_lg2_fs(iommu, &cfg.top_level);
-	cfg.common.hw_max_oasz_lg2 = 52;
-	cfg.common.features = BIT(PT_FEAT_SIGN_EXTEND) |
-			      BIT(PT_FEAT_FLUSH_RANGE);
+	cfg.common.hw_max_vasz_lg2 =	/* [한국어] 다룰 수 있는 가상 주소 폭과 */
+		compute_vasz_lg2_fs(iommu, &cfg.top_level);	/* [한국어] 최상위 레벨을 함께 정한다 */
+	cfg.common.hw_max_oasz_lg2 = 52;	/* [한국어] 출력(물리) 주소 폭은 52비트. VT-d 페이지 테이블 항목의 주소 필드 폭이다 */
+	cfg.common.features = BIT(PT_FEAT_SIGN_EXTEND) |	/* [한국어] 상위 비트가 부호 확장되는 주소 형식 (x86 정규 주소와 같다) */
+			      BIT(PT_FEAT_FLUSH_RANGE);	/* [한국어] 범위 단위 무효화를 지원한다고 알린다 */
 	/* First stage always uses scalable mode */
-	if (!ecap_smpwc(iommu->ecap))
-		cfg.common.features |= BIT(PT_FEAT_DMA_INCOHERENT);
-	dmar_domain->iommu.iommu_device = dev;
-	dmar_domain->iommu.nid = dev_to_node(dev);
-	dmar_domain->domain.ops = &intel_fs_paging_domain_ops;
+	if (!ecap_smpwc(iommu->ecap))	/* [한국어] scalable 모드 페이지 워크가 캐시 코히런트하지 않으면 (위 영어 주석) */
+		cfg.common.features |= BIT(PT_FEAT_DMA_INCOHERENT);	/* [한국어] 테이블을 고칠 때마다 캐시를 메모리로 밀어내야 한다고 표시한다 */
+	dmar_domain->iommu.iommu_device = dev;	/* [한국어] 테이블 메모리 할당의 기준이 될 장치 */
+	dmar_domain->iommu.nid = dev_to_node(dev);	/* [한국어] 그 장치와 가까운 NUMA 노드에서 테이블을 잡는다 */
+	dmar_domain->domain.ops = &intel_fs_paging_domain_ops;	/* [한국어] 1단계 전용 콜백 표 */
 	/*
 	 * iotlb sync for map is only needed for legacy implementations that
 	 * explicitly require flushing internal write buffers to ensure memory
 	 * coherence.
 	 */
-	if (rwbf_required(iommu))
-		dmar_domain->iotlb_sync_map = true;
+	if (rwbf_required(iommu))	/* [한국어] 옛 하드웨어 중 내부 쓰기 버퍼를 명시적으로 비워야 하는 것이 있다 (위 영어 주석) */
+		dmar_domain->iotlb_sync_map = true;	/* [한국어] 그런 유닛에서는 매핑 후에도 동기화가 필요하다고 표시한다 */
 
-	ret = pt_iommu_x86_64_init(&dmar_domain->fspt, &cfg, GFP_KERNEL);
-	if (ret) {
-		kfree(dmar_domain);
-		return ERR_PTR(ret);
+	ret = pt_iommu_x86_64_init(&dmar_domain->fspt, &cfg, GFP_KERNEL);	/* [한국어] 실제 페이지 테이블 구조를 만든다 */
+	if (ret) {	/* [한국어] 페이지 테이블 초기화 실패 */
+		kfree(dmar_domain);	/* [한국어] 실패하면 껍데기를 반납 */
+		return ERR_PTR(ret);	/* [한국어] 실패 이유를 전달 */
 	}
 
-	if (!cap_fl1gp_support(iommu->cap))
-		dmar_domain->domain.pgsize_bitmap &= ~(u64)SZ_1G;
-	if (!intel_iommu_superpage)
-		dmar_domain->domain.pgsize_bitmap = SZ_4K;
+	if (!cap_fl1gp_support(iommu->cap))	/* [한국어] 1GB 큰 페이지를 지원하지 않으면 */
+		dmar_domain->domain.pgsize_bitmap &= ~(u64)SZ_1G;	/* [한국어] 그 크기를 후보에서 뺀다. 코어의 매핑 루프가 이 비트맵만 보고 페이지 크기를 고른다 */
+	if (!intel_iommu_superpage)	/* [한국어] 큰 페이지를 아예 끄는 부트 인자가 주어졌으면 */
+		dmar_domain->domain.pgsize_bitmap = SZ_4K;	/* [한국어] 4KB 만 쓴다 */
 
-	return &dmar_domain->domain;
+	return &dmar_domain->domain;	/* [한국어] 코어가 다루는 iommu_domain 포인터로 반환 */
 }
 
+/*
+ * [한국어]
+ * compute_vasz_lg2_ss - 2단계 페이지 테이블의 주소 폭과 레벨 수를 정한다
+ *
+ * @iommu: 대상 유닛.
+ * @top_level: 출력. 최상위 페이지 테이블 레벨.
+ * @return: 쓸 수 있는 가상 주소 폭(비트). 0 이면 어떤 조합도 불가능하다.
+ *
+ * 1단계용(compute_vasz_lg2_fs)과 나뉜 이유: 2단계는 x86 정규 주소 규칙을 따르지
+ * 않는 대신, SAGAW(Supported Adjusted Guest Address Width)라는 별도의 능력
+ * 비트마스크가 어떤 단계 수를 지원하는지 알려 준다. 그래서 MGAW(실제 다룰 수
+ * 있는 주소 폭)와 SAGAW(테이블 단계) 둘을 동시에 만족하는 가장 큰 조합을
+ * 찾아야 한다 — 위 영어 주석이 말하는 그대로다.
+ *
+ * 왜 둘이 어긋날 수 있는가: 하드웨어에 따라 4레벨이나 5레벨 워크를 할 수는
+ * 있지만 IOVA 자체는 3레벨 범위로 제한해야 하는 경우가 있다. 그래서 "워크할 수
+ * 있는 단계"와 "쓸 수 있는 주소 폭"을 따로 확인한다.
+ *
+ * ffs(sagaw >> N) 관용구: SAGAW 마스크에서 최하위로 켜진 비트를 찾아, 그
+ * 문턱 위로 지원되는 첫 단계를 고른다. 큰 쪽부터 검사하므로 결과적으로
+ * 가능한 가장 큰 주소 공간을 고르게 된다.
+ *
+ * 0 반환의 의미: 세 조합 모두 안 되면 이 유닛으로는 2단계 도메인을 만들 수
+ * 없다. 호출자는 그 값으로 만들어진 도메인이 어차피 아무 주소도 매핑하지
+ * 못하므로 실질적으로 실패한다.
+ *
+ * 실행 컨텍스트: 도메인 생성. 순수 계산.
+ *
+ * 호출 체인:
+ *   intel_iommu_domain_alloc_second_stage() → [compute_vasz_lg2_ss]
+ */
 static unsigned int compute_vasz_lg2_ss(struct intel_iommu *iommu,
 					unsigned int *top_level)
 {
-	unsigned int sagaw = cap_sagaw(iommu->cap);
-	unsigned int mgaw = cap_mgaw(iommu->cap);
+	unsigned int sagaw = cap_sagaw(iommu->cap);	/* [한국어] SAGAW — 이 유닛이 지원하는 2단계 페이지 테이블 단계 수의 비트마스크 */
+	unsigned int mgaw = cap_mgaw(iommu->cap);	/* [한국어] MGAW — 실제로 다룰 수 있는 주소 폭 */
 
 	/*
 	 * Find the largest table size that both the mgaw and sagaw support.
@@ -5049,243 +5282,431 @@ static unsigned int compute_vasz_lg2_ss(struct intel_iommu *iommu,
 	 * Some HW may only support a 4 or 5 level walk but must limit IOVA to
 	 * 3 levels.
 	 */
-	if (mgaw > 48 && sagaw >= BIT(3)) {
-		*top_level = 4;
-		return min(57, mgaw);
-	} else if (mgaw > 39 && sagaw >= BIT(2)) {
-		*top_level = 3 + ffs(sagaw >> 3);
-		return min(48, mgaw);
-	} else if (mgaw > 30 && sagaw >= BIT(1)) {
-		*top_level = 2 + ffs(sagaw >> 2);
-		return min(39, mgaw);
+	if (mgaw > 48 && sagaw >= BIT(3)) {	/* [한국어] 48비트를 넘고 5단계를 지원하면 (위 영어 주석) */
+		*top_level = 4;	/* [한국어] 최상위 레벨 4 = 5단계 */
+		return min(57, mgaw);	/* [한국어] 57비트 */
+	} else if (mgaw > 39 && sagaw >= BIT(2)) {	/* [한국어] 39비트를 넘고 4단계를 지원하면 */
+		*top_level = 3 + ffs(sagaw >> 3);	/* [한국어] 지원하는 것 중 가장 큰 단계를 고른다. ffs 로 마스크의 최하위 켜진 비트를 찾는 것이 곧 "48비트 위로 지원되는 첫 단계"다 */
+		return min(48, mgaw);	/* [한국어] 48비트 */
+	} else if (mgaw > 30 && sagaw >= BIT(1)) {	/* [한국어] 30비트를 넘고 3단계를 지원하면 */
+		*top_level = 2 + ffs(sagaw >> 2);	/* [한국어] 같은 방식으로 단계를 고른다 */
+		return min(39, mgaw);	/* [한국어] 39비트 */
 	}
-	return 0;
+	return 0;	/* [한국어] 어느 조합도 안 되면 0 — 호출자가 이 유닛으로는 2단계 도메인을 만들 수 없다고 판단한다 */
 }
 
+/*
+ * [한국어] 2단계 도메인의 dirty(수정됨) 비트 추적 콜백 표.
+ *
+ * 무엇에 쓰는가: 가상 머신 라이브 마이그레이션에서 "장치가 어느 페이지에
+ * 썼는가"를 알아야 한다. CPU 는 페이지 테이블의 dirty 비트로 그것을 알지만,
+ * DMA 는 CPU 를 거치지 않으므로 IOMMU 페이지 테이블에도 같은 비트가 필요하다.
+ * VT-d 의 SSADS(Second-Stage Access/Dirty Support)가 그 기능이다.
+ *
+ * IOMMU_PT_DIRTY_OPS(vtdss) 매크로가 비트를 읽고 지우는 구현을 공용 페이지
+ * 테이블 라이브러리에서 채워 넣는다. 추적을 켜고 끄는 것만 유닛 레지스터를
+ * 건드리는 VT-d 고유 동작이라 set_dirty_tracking 을 따로 지정한다.
+ *
+ * 이 표는 IOMMU_HWPT_ALLOC_DIRTY_TRACKING 을 요청한 도메인에만 달린다.
+ */
 static const struct iommu_dirty_ops intel_second_stage_dirty_ops = {
-	IOMMU_PT_DIRTY_OPS(vtdss),
-	.set_dirty_tracking = intel_iommu_set_dirty_tracking,
+	IOMMU_PT_DIRTY_OPS(vtdss),	/* [한국어] 공용 페이지 테이블 라이브러리가 제공하는 dirty 비트 읽기/지우기 구현 */
+	.set_dirty_tracking = intel_iommu_set_dirty_tracking,	/* [한국어] 추적을 켜고 끄는 것만 VT-d 고유 동작이라 따로 채운다 */
 };
 
+/*
+ * [한국어]
+ * intel_iommu_domain_alloc_second_stage - 2단계(Second-Stage) 페이징 도메인을 만든다
+ *
+ * @dev: 대표 장치. @iommu: 담당 유닛.
+ * @flags: 중첩 부모(NEST_PARENT), dirty 추적, PASID 중 조합.
+ * @return: 만들어진 도메인, 실패 시 ERR_PTR.
+ *
+ * 2단계는 레거시 모드에서 유일하게 쓸 수 있는 형식이고, scalable 모드에서는
+ * 호스트가 소유하는 하위 단계다. 가상화에서 게스트의 1단계 테이블 아래에
+  * 깔리는 것이 이 도메인이며, 그때 nested_parent 로 표시된다.
+ *
+ * 1단계와 달리 다루는 성질이 셋이다.
+ *   - NEST_PARENT: 이 도메인 위에 게스트의 1단계 도메인이 얹힌다. 이때
+ *     PT_FEAT_VTDSS_FORCE_WRITEABLE 를 켜 읽기 전용 매핑을 금지하는데,
+ *     ERRATA_772415_SPR17 하드웨어 결함 때문이다(부모가 읽기 전용인 페이지에서
+ *     중첩 변환이 잘못 동작한다).
+ *   - DIRTY_TRACKING: 라이브 마이그레이션용 dirty 비트 추적.
+ *   - PASID.
+ *
+ * iotlb_sync_map 조건이 1단계보다 넓다: rwbf 뿐 아니라 caching mode 도 포함한다.
+ * caching mode 하드웨어는 "매핑 없음" 항목까지 캐시하므로, 새로 만든 매핑을
+ * 하드웨어에 알리려면 매핑 후에도 무효화를 보내야 한다. 보통의 IOMMU 가
+ * 언매핑 때만 무효화가 필요한 것과 다른 점이다.
+ *
+ * 실행 컨텍스트: 도메인 생성. 프로세스 컨텍스트.
+ * 에러 처리: 요청한 성질을 줄 수 없으면 -EOPNOTSUPP, 테이블 초기화 실패면
+ * 껍데기를 반납하고 그 오류를 전달한다.
+ *
+ * 호출 체인:
+ *   intel_iommu_domain_alloc_paging_flags() → [이 함수]
+ *     → paging_domain_alloc() → compute_vasz_lg2_ss() → pt_iommu_vtdss_init()
+ */
 static struct iommu_domain *
 intel_iommu_domain_alloc_second_stage(struct device *dev,
 				      struct intel_iommu *iommu, u32 flags)
 {
-	struct pt_iommu_vtdss_cfg cfg = {};
-	struct dmar_domain *dmar_domain;
-	unsigned int sslps;
-	int ret;
+	struct pt_iommu_vtdss_cfg cfg = {};	/* [한국어] 2단계 페이지 테이블 설정. 1단계와 달리 VT-d 고유 형식(vtdss)이라 전용 구현을 쓴다 */
+	struct dmar_domain *dmar_domain;	/* [한국어] 만들 도메인 */
+	unsigned int sslps;	/* [한국어] 2단계가 지원하는 큰 페이지 크기 비트맵 */
+	int ret;	/* [한국어] 초기화 결과 */
 
-	if (flags &
+	if (flags &	/* [한국어] 이 도메인이 이해하는 플래그는 셋뿐이다 — 중첩 부모, dirty 추적, PASID */
 	    (~(IOMMU_HWPT_ALLOC_NEST_PARENT | IOMMU_HWPT_ALLOC_DIRTY_TRACKING |
 	       IOMMU_HWPT_ALLOC_PASID)))
-		return ERR_PTR(-EOPNOTSUPP);
+		return ERR_PTR(-EOPNOTSUPP);	/* [한국어] 그 밖의 플래그는 거절 */
 
-	if (((flags & IOMMU_HWPT_ALLOC_NEST_PARENT) &&
-	     !nested_supported(iommu)) ||
-	    ((flags & IOMMU_HWPT_ALLOC_DIRTY_TRACKING) &&
-	     !ssads_supported(iommu)))
-		return ERR_PTR(-EOPNOTSUPP);
+	if (((flags & IOMMU_HWPT_ALLOC_NEST_PARENT) &&	/* [한국어] 중첩 부모를 요청했는데 */
+	     !nested_supported(iommu)) ||	/* [한국어] 하드웨어가 중첩 변환을 못 하거나 */
+	    ((flags & IOMMU_HWPT_ALLOC_DIRTY_TRACKING) &&	/* [한국어] dirty 추적을 요청했는데 */
+	     !ssads_supported(iommu)))	/* [한국어] 2단계 접근/더티 비트를 못 하면 */
+		return ERR_PTR(-EOPNOTSUPP);	/* [한국어] 요청한 성질을 줄 수 없으므로 거절 */
 
 	/* Legacy mode always supports second stage */
-	if (sm_supported(iommu) && !ecap_slts(iommu->ecap))
-		return ERR_PTR(-EOPNOTSUPP);
+	if (sm_supported(iommu) && !ecap_slts(iommu->ecap))	/* [한국어] scalable 모드인데 2단계 변환을 지원하지 않으면 (레거시 모드는 항상 2단계다 — 위 영어 주석) */
+		return ERR_PTR(-EOPNOTSUPP);	/* [한국어] 거절 */
 
-	dmar_domain = paging_domain_alloc();
-	if (IS_ERR(dmar_domain))
-		return ERR_CAST(dmar_domain);
+	dmar_domain = paging_domain_alloc();	/* [한국어] 빈 도메인 껍데기 */
+	if (IS_ERR(dmar_domain))	/* [한국어] 할당 실패 */
+		return ERR_CAST(dmar_domain);	/* [한국어] 전달 */
 
-	cfg.common.hw_max_vasz_lg2 = compute_vasz_lg2_ss(iommu, &cfg.top_level);
-	cfg.common.hw_max_oasz_lg2 = 52;
-	cfg.common.features = BIT(PT_FEAT_FLUSH_RANGE);
+	cfg.common.hw_max_vasz_lg2 = compute_vasz_lg2_ss(iommu, &cfg.top_level);	/* [한국어] 주소 폭과 레벨을 함께 정한다 */
+	cfg.common.hw_max_oasz_lg2 = 52;	/* [한국어] 출력 주소 폭 52비트 */
+	cfg.common.features = BIT(PT_FEAT_FLUSH_RANGE);	/* [한국어] 범위 무효화 지원. 1단계와 달리 부호 확장은 없다 — 2단계 주소는 게스트 물리 주소라 정규 주소 규칙이 적용되지 않는다 */
 
 	/*
 	 * Read-only mapping is disallowed on the domain which serves as the
 	 * parent in a nested configuration, due to HW errata
 	 * (ERRATA_772415_SPR17)
 	 */
-	if (flags & IOMMU_HWPT_ALLOC_NEST_PARENT)
-		cfg.common.features |= BIT(PT_FEAT_VTDSS_FORCE_WRITEABLE);
+	if (flags & IOMMU_HWPT_ALLOC_NEST_PARENT)	/* [한국어] 중첩 부모로 쓸 도메인이면 */
+		cfg.common.features |= BIT(PT_FEAT_VTDSS_FORCE_WRITEABLE);	/* [한국어] 읽기 전용 매핑을 금지한다. ERRATA_772415_SPR17 하드웨어 결함 때문이며, 부모가 읽기 전용인 페이지에서 중첩 변환이 잘못 동작한다 (위 영어 주석) */
 
-	if (!iommu_paging_structure_coherency(iommu))
-		cfg.common.features |= BIT(PT_FEAT_DMA_INCOHERENT);
-	dmar_domain->iommu.iommu_device = dev;
-	dmar_domain->iommu.nid = dev_to_node(dev);
-	dmar_domain->domain.ops = &intel_ss_paging_domain_ops;
-	dmar_domain->nested_parent = flags & IOMMU_HWPT_ALLOC_NEST_PARENT;
+	if (!iommu_paging_structure_coherency(iommu))	/* [한국어] 페이지 테이블 워크가 캐시 코히런트하지 않으면 */
+		cfg.common.features |= BIT(PT_FEAT_DMA_INCOHERENT);	/* [한국어] 테이블 수정 후 캐시를 밀어내야 한다 */
+	dmar_domain->iommu.iommu_device = dev;	/* [한국어] 테이블 할당 기준 장치 */
+	dmar_domain->iommu.nid = dev_to_node(dev);	/* [한국어] 가까운 NUMA 노드 */
+	dmar_domain->domain.ops = &intel_ss_paging_domain_ops;	/* [한국어] 2단계 전용 콜백 표 */
+	dmar_domain->nested_parent = flags & IOMMU_HWPT_ALLOC_NEST_PARENT;	/* [한국어] 이 도메인 아래에 1단계 도메인이 붙을 수 있음을 기록. 해제할 때 자식이 남아 있는지 확인하는 근거가 된다 */
 
-	if (flags & IOMMU_HWPT_ALLOC_DIRTY_TRACKING)
-		dmar_domain->domain.dirty_ops = &intel_second_stage_dirty_ops;
+	if (flags & IOMMU_HWPT_ALLOC_DIRTY_TRACKING)	/* [한국어] dirty 추적을 요청했으면 */
+		dmar_domain->domain.dirty_ops = &intel_second_stage_dirty_ops;	/* [한국어] 그 콜백 표를 단다. 라이브 마이그레이션에서 어느 페이지가 바뀌었는지 추적할 때 쓴다 */
 
-	ret = pt_iommu_vtdss_init(&dmar_domain->sspt, &cfg, GFP_KERNEL);
+	ret = pt_iommu_vtdss_init(&dmar_domain->sspt, &cfg, GFP_KERNEL);	/* [한국어] 실제 페이지 테이블을 만든다 */
 	if (ret) {
-		kfree(dmar_domain);
-		return ERR_PTR(ret);
+		kfree(dmar_domain);	/* [한국어] 실패하면 껍데기 반납 */
+		return ERR_PTR(ret);	/* [한국어] 실패 전달 */
 	}
 
 	/* Adjust the supported page sizes to HW capability */
-	sslps = cap_super_page_val(iommu->cap);
-	if (!(sslps & BIT(0)))
-		dmar_domain->domain.pgsize_bitmap &= ~(u64)SZ_2M;
-	if (!(sslps & BIT(1)))
-		dmar_domain->domain.pgsize_bitmap &= ~(u64)SZ_1G;
-	if (!intel_iommu_superpage)
-		dmar_domain->domain.pgsize_bitmap = SZ_4K;
+	sslps = cap_super_page_val(iommu->cap);	/* [한국어] 하드웨어가 지원하는 큰 페이지 크기 (위 영어 주석) */
+	if (!(sslps & BIT(0)))	/* [한국어] 2MB 를 지원하지 않으면 */
+		dmar_domain->domain.pgsize_bitmap &= ~(u64)SZ_2M;	/* [한국어] 후보에서 뺀다 */
+	if (!(sslps & BIT(1)))	/* [한국어] 1GB 를 지원하지 않으면 */
+		dmar_domain->domain.pgsize_bitmap &= ~(u64)SZ_1G;	/* [한국어] 후보에서 뺀다 */
+	if (!intel_iommu_superpage)	/* [한국어] 큰 페이지를 끄는 부트 인자가 있으면 */
+		dmar_domain->domain.pgsize_bitmap = SZ_4K;	/* [한국어] 4KB 만 */
 
 	/*
 	 * Besides the internal write buffer flush, the caching mode used for
 	 * legacy nested translation (which utilizes shadowing page tables)
 	 * also requires iotlb sync on map.
 	 */
-	if (rwbf_required(iommu) || cap_caching_mode(iommu->cap))
-		dmar_domain->iotlb_sync_map = true;
+	if (rwbf_required(iommu) || cap_caching_mode(iommu->cap))	/* [한국어] 쓰기 버퍼를 비워야 하는 유닛이거나, 캐싱 모드(= 그림자 페이지 테이블을 쓰는 레거시 중첩 변환)면 (위 영어 주석) */
+		dmar_domain->iotlb_sync_map = true;	/* [한국어] 매핑을 만든 뒤에도 동기화가 필요하다. 캐싱 모드에서는 하드웨어가 "없음" 항목까지 캐시하므로, 새로 만든 매핑을 알리려면 무효화를 보내야 한다 */
 
-	return &dmar_domain->domain;
+	return &dmar_domain->domain;	/* [한국어] 완성된 도메인 */
 }
 
+/*
+ * [한국어]
+ * intel_iommu_domain_alloc_paging_flags - 도메인 생성 요청의 진입점. 1단계를 먼저 시도한다
+ *
+ * @dev: 이 도메인을 쓸 장치.
+ * @flags: 요청한 성질.
+ * @user_data: iommufd 가 넘긴 사용자 정의 데이터. 여기서는 지원하지 않는다.
+ * @return: 만들어진 도메인, 실패 시 ERR_PTR.
+ *
+ * iommu_ops.domain_alloc_paging_flags 콜백이며, 코어와 iommufd 가 새 주소
+ * 공간을 요청할 때 불린다.
+ *
+ * 정책: 가능하면 1단계를 쓴다. 1단계는 CPU 페이지 테이블과 형식이 같아
+ * SVA 로 이어지기 쉽고 하드웨어 최적화도 그쪽에 몰려 있다. 1단계가
+ * -EOPNOTSUPP 을 돌려줄 때만 2단계로 내려간다. 이 판별을 위해 두 하위 함수는
+ * "지원하지 않음"과 "다른 이유의 실패"를 반드시 구분해서 돌려줘야 하고,
+ * 그래서 여기서 반환값을 ERR_PTR(-EOPNOTSUPP) 과 정확히 비교한다.
+ *
+ * user_data 가 있으면 거절하는 이유: 그것은 사용자가 형식을 지정해 만드는
+ * 중첩 도메인 요청이며, intel_iommu_domain_alloc_nested 가 따로 처리한다.
+ *
+ * 실행 컨텍스트: 도메인 생성 요청. 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   iommu_domain_alloc()/iommufd → [이 함수]
+ *     → intel_iommu_domain_alloc_first_stage()
+ *     → intel_iommu_domain_alloc_second_stage()
+ */
 static struct iommu_domain *
 intel_iommu_domain_alloc_paging_flags(struct device *dev, u32 flags,
 				      const struct iommu_user_data *user_data)
 {
-	struct device_domain_info *info = dev_iommu_priv_get(dev);
-	struct intel_iommu *iommu = info->iommu;
-	struct iommu_domain *domain;
+	struct device_domain_info *info = dev_iommu_priv_get(dev);	/* [한국어] 이 장치의 VT-d 정보 */
+	struct intel_iommu *iommu = info->iommu;	/* [한국어] 담당 유닛 — 어떤 도메인을 만들 수 있는지는 유닛 능력이 정한다 */
+	struct iommu_domain *domain;	/* [한국어] 1단계 시도 결과 */
 
-	if (user_data)
-		return ERR_PTR(-EOPNOTSUPP);
+	if (user_data)	/* [한국어] iommufd 가 사용자 정의 데이터를 준 경우는 여기서 다루지 않는다 */
+		return ERR_PTR(-EOPNOTSUPP);	/* [한국어] 중첩 도메인 생성 경로로 가야 한다 */
 
 	/* Prefer first stage if possible by default. */
-	domain = intel_iommu_domain_alloc_first_stage(dev, iommu, flags);
-	if (domain != ERR_PTR(-EOPNOTSUPP))
-		return domain;
-	return intel_iommu_domain_alloc_second_stage(dev, iommu, flags);
+	domain = intel_iommu_domain_alloc_first_stage(dev, iommu, flags);	/* [한국어] 1단계를 먼저 시도한다 (위 영어 주석) */
+	if (domain != ERR_PTR(-EOPNOTSUPP))	/* [한국어] 지원하지 않는다는 답이 아니면 */
+		return domain;	/* [한국어] 성공이든 다른 실패든 그대로 반환한다 */
+	return intel_iommu_domain_alloc_second_stage(dev, iommu, flags);	/* [한국어] 1단계가 불가능할 때만 2단계로 내려간다 */
 }
 
+/*
+ * [한국어]
+ * intel_iommu_domain_free - 도메인과 그 페이지 테이블을 반납한다
+ *
+ * @domain: 해제할 코어 도메인.
+ * @return: 없음. 실패를 알릴 방법이 없으므로 위험한 상태면 아무것도 하지 않는다.
+ *
+ * 두 가지를 먼저 확인한다.
+ *   1) 중첩 부모인데 자식 1단계 도메인이 남아 있는가 — 해제하면 자식들이
+ *      사라진 부모 테이블을 가리키게 된다.
+ *   2) 아직 장치가 붙어 있는가 — 그 장치의 컨텍스트 항목이 이 테이블을
+ *      가리키고 있어, 해제하면 하드웨어가 재사용된 메모리를 워크한다.
+ * 둘 다 코어가 순서를 어겼을 때만 일어나므로 WARN_ON 으로 스택을 남기고
+ * 그냥 돌아간다. 메모리를 누수시키는 편이 use-after-free 보다 안전하다.
+ *
+ * 해제 순서: 페이지 테이블(pt_iommu_deinit) → 무효화 명령 버퍼(qi_batch)
+ * → 도메인 구조체. qi_batch 는 이 도메인의 무효화 명령을 모아 두던 버퍼로,
+ * 더 이상 보낼 무효화가 없으므로 함께 반납한다.
+ *
+ * 실행 컨텍스트: 도메인 해제. 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   iommu_domain_free() → [intel_iommu_domain_free] → pt_iommu_deinit()
+ */
 static void intel_iommu_domain_free(struct iommu_domain *domain)
 {
-	struct dmar_domain *dmar_domain = to_dmar_domain(domain);
+	struct dmar_domain *dmar_domain = to_dmar_domain(domain);	/* [한국어] 코어 도메인에서 VT-d 도메인으로 */
 
-	if (WARN_ON(dmar_domain->nested_parent &&
-		    !list_empty(&dmar_domain->s1_domains)))
-		return;
+	if (WARN_ON(dmar_domain->nested_parent &&	/* [한국어] 중첩 부모인데 */
+		    !list_empty(&dmar_domain->s1_domains)))	/* [한국어] 아직 자식 1단계 도메인이 남아 있으면 */
+		return;	/* [한국어] 해제하지 않는다. 해제하면 자식들이 사라진 부모 테이블을 가리키게 된다 */
 
-	if (WARN_ON(!list_empty(&dmar_domain->devices)))
-		return;
+	if (WARN_ON(!list_empty(&dmar_domain->devices)))	/* [한국어] 아직 장치가 붙어 있으면 */
+		return;	/* [한국어] 역시 해제하지 않는다. 코어가 순서를 어긴 것이므로 스택을 남긴다 */
 
-	pt_iommu_deinit(&dmar_domain->iommu);
+	pt_iommu_deinit(&dmar_domain->iommu);	/* [한국어] 페이지 테이블 전체를 반납한다 */
 
-	kfree(dmar_domain->qi_batch);
-	kfree(dmar_domain);
+	kfree(dmar_domain->qi_batch);	/* [한국어] 모아 두었던 무효화 명령 버퍼 */
+	kfree(dmar_domain);	/* [한국어] 도메인 구조체 */
 }
 
+/*
+ * [한국어]
+ * paging_domain_compatible_first_stage - 이미 만들어진 1단계 도메인을 이 유닛에 붙여도 되는지 검사한다
+ *
+ * @dmar_domain: 붙이려는 도메인. 이미 페이지 테이블이 세워져 있고 매핑이
+ *               들어 있을 수도 있다.
+ * @iommu: 붙일 대상 유닛.
+ * @return: 0 이면 붙여도 된다, -EINVAL 이면 안 된다.
+ *
+ * 왜 이 검사가 필요한가: 도메인은 만들 때 특정 장치/유닛의 능력에 맞춰
+ * 설정된다. 그런데 하나의 도메인에 여러 장치를 붙일 수 있고, 그 장치들이 서로
+ * 다른 유닛에 속할 수 있다. 능력이 서로 다른 유닛에 같은 테이블을 물리면
+ * 조용히 잘못 동작하므로(예: 1GB 항목을 못 읽는 유닛), 붙이기 전에 하나하나
+ * 대조해야 한다.
+ *
+ * 검사 항목과 각각이 어긋났을 때 벌어지는 일:
+ *   - 1단계 지원(sm/flts): 애초에 워크할 수 없다.
+ *   - 코히런시: 테이블 수정이 하드웨어에 보이지 않아 옛 매핑이 살아 있는
+ *     것처럼 동작한다.
+ *   - 레벨 수/주소 폭: 상위 주소의 매핑을 번역하지 못한다.
+ *   - 페이지 크기: 이미 만들어진 1GB 항목을 하드웨어가 이해하지 못한다.
+ *   - iotlb_sync_map: 새 매핑이 하드웨어에 반영되지 않는다.
+ * dirty_ops/nested_parent 가 있으면 WARN 하는데, 그것들은 2단계 전용이라
+ * 1단계 도메인에 붙어 있다는 것 자체가 생성 경로의 버그다.
+ *
+ * 실행 컨텍스트: 장치 붙이기. 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   paging_domain_compatible() → [이 함수]
+ */
 static int paging_domain_compatible_first_stage(struct dmar_domain *dmar_domain,
 						struct intel_iommu *iommu)
 {
-	if (WARN_ON(dmar_domain->domain.dirty_ops ||
-		    dmar_domain->nested_parent))
-		return -EINVAL;
+	if (WARN_ON(dmar_domain->domain.dirty_ops ||	/* [한국어] 1단계 도메인에는 dirty 추적이나 */
+		    dmar_domain->nested_parent))	/* [한국어] 중첩 부모 성질이 있을 수 없다 — 둘 다 2단계 전용이다 */
+		return -EINVAL;	/* [한국어] 있으면 만들 때부터 잘못된 것이다 */
 
 	/* Only SL is available in legacy mode */
-	if (!sm_supported(iommu) || !ecap_flts(iommu->ecap))
-		return -EINVAL;
+	if (!sm_supported(iommu) || !ecap_flts(iommu->ecap))	/* [한국어] 이 유닛이 scalable 모드나 1단계 변환을 못 하면 */
+		return -EINVAL;	/* [한국어] 붙일 수 없다 (위 영어 주석) */
 
-	if (!ecap_smpwc(iommu->ecap) &&
-	    !(dmar_domain->fspt.x86_64_pt.common.features &
-	      BIT(PT_FEAT_DMA_INCOHERENT)))
-		return -EINVAL;
+	if (!ecap_smpwc(iommu->ecap) &&	/* [한국어] 이 유닛의 페이지 워크가 코히런트하지 않은데 */
+	    !(dmar_domain->fspt.x86_64_pt.common.features &	/* [한국어] 도메인의 테이블이 */
+	      BIT(PT_FEAT_DMA_INCOHERENT)))	/* [한국어] 비코히런트 모드로 만들어지지 않았으면 */
+		return -EINVAL;	/* [한국어] 이 유닛에 붙이면 테이블 수정이 하드웨어에 보이지 않는다 */
 
 	/* Supports the number of table levels */
-	if (!cap_fl5lp_support(iommu->cap) &&
-	    dmar_domain->fspt.x86_64_pt.common.max_vasz_lg2 > 48)
-		return -EINVAL;
+	if (!cap_fl5lp_support(iommu->cap) &&	/* [한국어] 5레벨을 지원하지 않는 유닛인데 (위 영어 주석) */
+	    dmar_domain->fspt.x86_64_pt.common.max_vasz_lg2 > 48)	/* [한국어] 도메인이 48비트를 넘는 주소를 쓰면 */
+		return -EINVAL;	/* [한국어] 워크할 수 없다 */
 
 	/* Same page size support */
-	if (!cap_fl1gp_support(iommu->cap) &&
-	    (dmar_domain->domain.pgsize_bitmap & SZ_1G))
-		return -EINVAL;
+	if (!cap_fl1gp_support(iommu->cap) &&	/* [한국어] 1GB 페이지를 지원하지 않는 유닛인데 (위 영어 주석) */
+	    (dmar_domain->domain.pgsize_bitmap & SZ_1G))	/* [한국어] 도메인이 그 크기를 쓸 수 있게 되어 있으면 */
+		return -EINVAL;	/* [한국어] 이미 1GB 매핑이 있을 수 있어 위험하다 */
 
 	/* iotlb sync on map requirement */
-	if ((rwbf_required(iommu)) && !dmar_domain->iotlb_sync_map)
-		return -EINVAL;
+	if ((rwbf_required(iommu)) && !dmar_domain->iotlb_sync_map)	/* [한국어] 이 유닛은 매핑 후 동기화가 필요한데 도메인이 그렇게 만들어지지 않았으면 (위 영어 주석) */
+		return -EINVAL;	/* [한국어] 매핑이 하드웨어에 보이지 않을 수 있다 */
 
-	return 0;
+	return 0;	/* [한국어] 모든 조건이 맞는다 — 이 도메인을 이 유닛에 붙여도 된다 */
 }
 
+/*
+ * [한국어]
+ * paging_domain_compatible_second_stage - 2단계 도메인을 이 유닛에 붙여도 되는지 검사한다
+ *
+ * @dmar_domain: 붙이려는 2단계 도메인.
+ * @iommu: 붙일 대상 유닛.
+ * @return: 0 가능, -EINVAL 불가능.
+ *
+ * 1단계용과 같은 목적이지만 확인할 것이 더 많다. 2단계 도메인은 dirty 추적,
+ * 중첩 부모, 강제 코히런시 같은 성질을 가질 수 있고, 그 성질들은 각각 유닛의
+ * 특정 능력 비트를 요구하기 때문이다.
+ *
+ * SAGAW 검사(cap_sagaw & BIT(pt_info.aw))가 1단계와 다른 점이다. 2단계는
+ * 단계 수를 SAGAW 마스크로 지원 여부가 정해지므로, 도메인이 실제로 쓰는
+ * 단계 수가 그 마스크에 있는지 직접 확인해야 한다.
+ *
+ * FORCE_COHERENCE 검사: 도메인이 "이 도메인의 매핑은 항상 캐시 코히런트하게
+ * 다뤄진다"고 약속한 상태(force snooping)라면, 유닛이 snoop control 을
+ * 지원해야 그 약속을 지킬 수 있다. 지원하지 않는 유닛에 붙이면 이미 그
+ * 약속을 믿고 있는 드라이버(예: GPU)가 잘못된 데이터를 보게 된다.
+ *
+ * 위 코드의 FIXME(영어 주석): 이 마지막 검사는 dmar_domain->lock 아래에서
+ * 해야 하는데 그렇지 않다. force snooping 은 동시에 켜질 수 있어서, 검사와
+ * 실제 상태 사이에 창이 있다. 알려진 문제이며 여기서는 고치지 않는다.
+ *
+ * 실행 컨텍스트: 장치 붙이기. 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   paging_domain_compatible() → [이 함수] → pt_iommu_vtdss_hw_info()
+ */
 static int
 paging_domain_compatible_second_stage(struct dmar_domain *dmar_domain,
 				      struct intel_iommu *iommu)
 {
-	unsigned int vasz_lg2 = dmar_domain->sspt.vtdss_pt.common.max_vasz_lg2;
-	unsigned int sslps = cap_super_page_val(iommu->cap);
-	struct pt_iommu_vtdss_hw_info pt_info;
+	unsigned int vasz_lg2 = dmar_domain->sspt.vtdss_pt.common.max_vasz_lg2;	/* [한국어] 이 도메인이 쓰는 주소 폭 */
+	unsigned int sslps = cap_super_page_val(iommu->cap);	/* [한국어] 유닛이 지원하는 큰 페이지 크기 */
+	struct pt_iommu_vtdss_hw_info pt_info;	/* [한국어] 테이블의 하드웨어 관점 정보(단계 수 등) */
 
-	pt_iommu_vtdss_hw_info(&dmar_domain->sspt, &pt_info);
+	pt_iommu_vtdss_hw_info(&dmar_domain->sspt, &pt_info);	/* [한국어] 현재 테이블에서 그 값을 뽑는다 */
 
-	if (dmar_domain->domain.dirty_ops && !ssads_supported(iommu))
-		return -EINVAL;
-	if (dmar_domain->nested_parent && !nested_supported(iommu))
-		return -EINVAL;
+	if (dmar_domain->domain.dirty_ops && !ssads_supported(iommu))	/* [한국어] 도메인이 dirty 추적을 쓰는데 유닛이 못 하면 */
+		return -EINVAL;	/* [한국어] 붙일 수 없다 */
+	if (dmar_domain->nested_parent && !nested_supported(iommu))	/* [한국어] 중첩 부모인데 유닛이 중첩을 못 하면 */
+		return -EINVAL;	/* [한국어] 붙일 수 없다 */
 
 	/* Legacy mode always supports second stage */
-	if (sm_supported(iommu) && !ecap_slts(iommu->ecap))
-		return -EINVAL;
+	if (sm_supported(iommu) && !ecap_slts(iommu->ecap))	/* [한국어] scalable 모드인데 2단계를 못 하면 (레거시는 항상 가능 — 위 영어 주석) */
+		return -EINVAL;	/* [한국어] 붙일 수 없다 */
 
-	if (!iommu_paging_structure_coherency(iommu) &&
-	    !(dmar_domain->sspt.vtdss_pt.common.features &
-	      BIT(PT_FEAT_DMA_INCOHERENT)))
-		return -EINVAL;
+	if (!iommu_paging_structure_coherency(iommu) &&	/* [한국어] 워크가 비코히런트한 유닛인데 */
+	    !(dmar_domain->sspt.vtdss_pt.common.features &	/* [한국어] 도메인 테이블이 */
+	      BIT(PT_FEAT_DMA_INCOHERENT)))	/* [한국어] 비코히런트 모드가 아니면 */
+		return -EINVAL;	/* [한국어] 테이블 수정이 하드웨어에 보이지 않는다 */
 
 	/* Address width falls within the capability */
-	if (cap_mgaw(iommu->cap) < vasz_lg2)
-		return -EINVAL;
+	if (cap_mgaw(iommu->cap) < vasz_lg2)	/* [한국어] 유닛이 다룰 수 있는 주소 폭보다 도메인이 넓으면 (위 영어 주석) */
+		return -EINVAL;	/* [한국어] 상위 주소의 매핑을 번역할 수 없다 */
 
 	/* Page table level is supported. */
-	if (!(cap_sagaw(iommu->cap) & BIT(pt_info.aw)))
-		return -EINVAL;
+	if (!(cap_sagaw(iommu->cap) & BIT(pt_info.aw)))	/* [한국어] 유닛이 이 테이블의 단계 수를 지원하지 않으면 (위 영어 주석) */
+		return -EINVAL;	/* [한국어] 워크 자체가 불가능하다 */
 
 	/* Same page size support */
-	if (!(sslps & BIT(0)) && (dmar_domain->domain.pgsize_bitmap & SZ_2M))
-		return -EINVAL;
-	if (!(sslps & BIT(1)) && (dmar_domain->domain.pgsize_bitmap & SZ_1G))
-		return -EINVAL;
+	if (!(sslps & BIT(0)) && (dmar_domain->domain.pgsize_bitmap & SZ_2M))	/* [한국어] 2MB 를 못 하는 유닛인데 도메인이 쓸 수 있으면 (위 영어 주석) */
+		return -EINVAL;	/* [한국어] 이미 2MB 매핑이 있을 수 있다 */
+	if (!(sslps & BIT(1)) && (dmar_domain->domain.pgsize_bitmap & SZ_1G))	/* [한국어] 1GB 도 마찬가지 */
+		return -EINVAL;	/* [한국어] 붙일 수 없다 */
 
 	/* iotlb sync on map requirement */
-	if ((rwbf_required(iommu) || cap_caching_mode(iommu->cap)) &&
-	    !dmar_domain->iotlb_sync_map)
-		return -EINVAL;
+	if ((rwbf_required(iommu) || cap_caching_mode(iommu->cap)) &&	/* [한국어] 이 유닛은 매핑 후 동기화가 필요한데 (위 영어 주석) */
+	    !dmar_domain->iotlb_sync_map)	/* [한국어] 도메인이 그렇게 만들어지지 않았으면 */
+		return -EINVAL;	/* [한국어] 새 매핑이 하드웨어에 보이지 않는다 */
 
 	/*
 	 * FIXME this is locked wrong, it needs to be under the
 	 * dmar_domain->lock
 	 */
-	if ((dmar_domain->sspt.vtdss_pt.common.features &
-	     BIT(PT_FEAT_VTDSS_FORCE_COHERENCE)) &&
-	    !ecap_sc_support(iommu->ecap))
-		return -EINVAL;
-	return 0;
+	if ((dmar_domain->sspt.vtdss_pt.common.features &	/* [한국어] 도메인이 강제 코히런시(force snooping)를 쓰는데 */
+	     BIT(PT_FEAT_VTDSS_FORCE_COHERENCE)) &&	/* [한국어] (위 FIXME 영어 주석대로 이 검사는 dmar_domain->lock 아래에서 해야 하는데 그렇지 않다 — 알려진 문제다) */
+	    !ecap_sc_support(iommu->ecap))	/* [한국어] 유닛이 snoop control 을 지원하지 않으면 */
+		return -EINVAL;	/* [한국어] 그 도메인이 약속한 코히런시를 이 유닛에서는 지킬 수 없다 */
+	return 0;	/* [한국어] 모든 조건이 맞는다 */
 }
 
+/*
+ * [한국어]
+ * paging_domain_compatible - 도메인을 이 장치에 붙일 수 있는지 판단하고, 필요하면 컨텍스트를 다시 세운다
+ *
+ * @domain: 붙이려는 코어 도메인.
+ * @dev: 붙일 장치.
+ * @return: 0 가능, 음수면 그 이유.
+ *
+ * 도메인 종류(1단계/2단계)에 따라 알맞은 검사 함수로 넘긴다. 두 종류 어느
+ * 쪽도 아니면 WARN 을 남기고 거절한다 — 다른 종류(SVA, nested, identity)는
+ * 이 경로로 오지 않아야 한다.
+ *
+ * 검사를 통과한 뒤의 추가 작업이 중요하다: kdump 로 부팅해 이전 커널의
+ * 컨텍스트 항목을 그대로 물려받은 장치(context_copied)라면, 그 항목은 이전
+ * 커널의 PASID 테이블을 가리키고 있다. 그대로 두면 우리가 만드는 매핑이
+ * 하드웨어에 전혀 반영되지 않으므로, 여기서 intel_pasid_setup_sm_context 로
+ * 우리 형식의 컨텍스트를 다시 세운다. 물려받은 상태를 우리 것으로 전환하는
+ * 마지막 지점이다.
+ *
+ * 이 검사가 언제 불리는가: 장치를 도메인에 붙이기 직전. iommufd 는 도메인을
+ * 재사용하려 할 때 미리 물어보기도 한다.
+ *
+ * 실행 컨텍스트: 장치 붙이기. 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   intel_iommu_attach_device()/iommufd → [paging_domain_compatible]
+ *     → paging_domain_compatible_first_stage()/..._second_stage()
+ *     → intel_pasid_setup_sm_context()
+ */
 int paging_domain_compatible(struct iommu_domain *domain, struct device *dev)
 {
-	struct device_domain_info *info = dev_iommu_priv_get(dev);
-	struct dmar_domain *dmar_domain = to_dmar_domain(domain);
-	struct intel_iommu *iommu = info->iommu;
-	int ret = -EINVAL;
+	struct device_domain_info *info = dev_iommu_priv_get(dev);	/* [한국어] 장치 정보 */
+	struct dmar_domain *dmar_domain = to_dmar_domain(domain);	/* [한국어] VT-d 도메인으로 */
+	struct intel_iommu *iommu = info->iommu;	/* [한국어] 이 장치를 맡은 유닛 */
+	int ret = -EINVAL;	/* [한국어] 기본값은 부적합 */
 
-	if (intel_domain_is_fs_paging(dmar_domain))
-		ret = paging_domain_compatible_first_stage(dmar_domain, iommu);
-	else if (intel_domain_is_ss_paging(dmar_domain))
-		ret = paging_domain_compatible_second_stage(dmar_domain, iommu);
-	else if (WARN_ON(true))
-		ret = -EINVAL;
-	if (ret)
-		return ret;
+	if (intel_domain_is_fs_paging(dmar_domain))	/* [한국어] 1단계 도메인이면 */
+		ret = paging_domain_compatible_first_stage(dmar_domain, iommu);	/* [한국어] 1단계 조건으로 검사 */
+	else if (intel_domain_is_ss_paging(dmar_domain))	/* [한국어] 2단계 도메인이면 */
+		ret = paging_domain_compatible_second_stage(dmar_domain, iommu);	/* [한국어] 2단계 조건으로 검사 */
+	else if (WARN_ON(true))	/* [한국어] 둘 다 아니면 도메인 종류가 잘못된 것이다 */
+		ret = -EINVAL;	/* [한국어] 거절 */
+	if (ret)	/* [한국어] 부적합하면 */
+		return ret;	/* [한국어] 붙일 수 없는 이유를 전달 */
 
-	if (sm_supported(iommu) && !dev_is_real_dma_subdevice(dev) &&
-	    context_copied(iommu, info->bus, info->devfn))
-		return intel_pasid_setup_sm_context(dev);
+	if (sm_supported(iommu) && !dev_is_real_dma_subdevice(dev) &&	/* [한국어] scalable 모드이고 자기 컨텍스트 항목을 갖는 장치인데 */
+	    context_copied(iommu, info->bus, info->devfn))	/* [한국어] 그 컨텍스트 항목을 이전 커널에서 그대로 물려받은 것이라면 (kdump 경로) */
+		return intel_pasid_setup_sm_context(dev);	/* [한국어] 인계받은 항목을 우리 형식으로 다시 세운다. 물려받은 항목은 이전 커널의 PASID 테이블을 가리키고 있어, 그대로 두면 우리가 만든 매핑이 반영되지 않는다 */
 
-	return 0;
+	return 0;	/* [한국어] 이 장치에 이 도메인을 붙일 수 있다 */
 }
 
 static int intel_iommu_attach_device(struct iommu_domain *domain,
