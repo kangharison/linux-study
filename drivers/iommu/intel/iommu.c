@@ -6828,254 +6828,510 @@ out_remove_dev_pasid:	/* [한국어] 폴트 처리 실패가 합류 */
 	return ret;	/* [한국어] 실패 이유 */
 }
 
+/*
+ * [한국어]
+ * intel_iommu_hw_info - 유저스페이스(iommufd)에 이 유닛의 하드웨어 정보를 넘긴다
+ *
+ * @dev: 어느 장치를 통해 묻는지. 그 장치를 맡은 유닛의 정보를 답한다.
+ * @length: 출력. 채운 구조체의 크기.
+ * @type: 입출력. 들어올 때는 사용자가 원하는 형식, 나갈 때는 실제 형식.
+ * @return: kmalloc 한 정보 구조체(코어가 복사한 뒤 해제한다), 실패 시 ERR_PTR.
+ *
+ * 무엇에 쓰는가: iommufd 를 쓰는 VMM(QEMU 등)이 게스트에게 가상 IOMMU 를
+ * 보여 줄 때, 그 가상 IOMMU 의 능력을 실제 하드웨어에서 유도해야 한다. 게스트가
+ * 자기 페이지 테이블을 어떤 형식으로 만들지, 몇 레벨을 쓸지가 모두 이 값에
+ * 달려 있다. 그래서 cap/ecap 레지스터를 가공 없이 그대로 넘긴다.
+ *
+ * flags 의 ERRATA_772415_SPR17: 하드웨어 결함까지 알려 준다. 이 결함이 있는
+ * 하드웨어에서는 중첩 변환의 부모 테이블에 읽기 전용 매핑을 두면 안 되는데,
+ * 그 규칙을 지켜야 하는 것은 게스트 테이블을 만드는 유저스페이스이기 때문이다.
+ *
+ * type 이 입출력인 이유: 사용자는 IOMMU_HW_INFO_TYPE_DEFAULT 로 "이 하드웨어의
+ * 기본 형식을 달라"고 물을 수 있고, 그때 우리가 INTEL_VTD 로 답을 채워 어떤
+ * 형식으로 해석해야 하는지 알려 준다.
+ *
+ * 실행 컨텍스트: iommufd ioctl. 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   iommufd IOMMU_GET_HW_INFO ioctl → [intel_iommu_hw_info]
+ */
 static void *intel_iommu_hw_info(struct device *dev, u32 *length,
 				 enum iommu_hw_info_type *type)
 {
-	struct device_domain_info *info = dev_iommu_priv_get(dev);
-	struct intel_iommu *iommu = info->iommu;
-	struct iommu_hw_info_vtd *vtd;
+	struct device_domain_info *info = dev_iommu_priv_get(dev);	/* [한국어] 장치 정보 */
+	struct intel_iommu *iommu = info->iommu;	/* [한국어] 담당 유닛 */
+	struct iommu_hw_info_vtd *vtd;	/* [한국어] 유저스페이스로 보낼 정보 구조체 */
 
-	if (*type != IOMMU_HW_INFO_TYPE_DEFAULT &&
-	    *type != IOMMU_HW_INFO_TYPE_INTEL_VTD)
-		return ERR_PTR(-EOPNOTSUPP);
+	if (*type != IOMMU_HW_INFO_TYPE_DEFAULT &&	/* [한국어] 사용자가 기본값을 요청한 것도 아니고 */
+	    *type != IOMMU_HW_INFO_TYPE_INTEL_VTD)	/* [한국어] VT-d 형식을 요청한 것도 아니면 */
+		return ERR_PTR(-EOPNOTSUPP);	/* [한국어] 우리가 답할 수 있는 형식이 아니다 */
 
-	vtd = kzalloc_obj(*vtd);
-	if (!vtd)
-		return ERR_PTR(-ENOMEM);
+	vtd = kzalloc_obj(*vtd);	/* [한국어] 정보 구조체 */
+	if (!vtd)	/* [한국어] 할당 실패 */
+		return ERR_PTR(-ENOMEM);	/* [한국어] 전달 */
 
-	vtd->flags = IOMMU_HW_INFO_VTD_ERRATA_772415_SPR17;
-	vtd->cap_reg = iommu->cap;
-	vtd->ecap_reg = iommu->ecap;
-	*length = sizeof(*vtd);
-	*type = IOMMU_HW_INFO_TYPE_INTEL_VTD;
-	return vtd;
+	vtd->flags = IOMMU_HW_INFO_VTD_ERRATA_772415_SPR17;	/* [한국어] 이 하드웨어 결함을 유저스페이스에도 알린다. QEMU 같은 사용자가 게스트 페이지 테이블을 만들 때 읽기 전용 매핑을 피해야 하기 때문이다 */
+	vtd->cap_reg = iommu->cap;	/* [한국어] 능력 레지스터 원본을 그대로 넘긴다. 유저스페이스(iommufd 를 쓰는 VMM)가 게스트에게 보여 줄 가상 IOMMU 의 능력을 이 값에서 유도한다 */
+	vtd->ecap_reg = iommu->ecap;	/* [한국어] 확장 능력도 마찬가지 */
+	*length = sizeof(*vtd);	/* [한국어] 실제로 채운 크기 */
+	*type = IOMMU_HW_INFO_TYPE_INTEL_VTD;	/* [한국어] 어떤 형식으로 답했는지 알려 준다 */
+	return vtd;	/* [한국어] 코어가 유저스페이스로 복사한 뒤 해제한다 */
 }
 
 /* Set dirty tracking for the devices that the domain has been attached. */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * domain_set_dirty_tracking - 이 도메인에 붙은 모든 장치/PASID 에 더티 추적을 켜거나 끈다
+ *
+ * @domain: 대상 도메인. 호출자가 domain->lock 을 쥐고 있어야 한다.
+ * @enable: true 면 켜기, false 면 끄기.
+ * @return: 0 성공, 음수면 도중에 실패(부분 적용 상태로 돌아온다).
+ *
+ * 더티 추적이란: 하드웨어가 페이지 테이블 항목에 "이 페이지에 DMA 쓰기가
+ * 있었다"는 비트를 남기게 하는 기능이다. VM 라이브 마이그레이션에서 장치가
+ * 고친 페이지만 다시 보내려면 이 정보가 필요하다. CPU 쪽 dirty 비트와 목적은
+ * 같지만, DMA 는 CPU 를 거치지 않으므로 IOMMU 가 따로 기록해야 한다.
+ *
+ * 설정이 도메인이 아니라 PASID 항목에 있는 이유: 추적을 켜고 끄는 것은
+ * 페이지 테이블의 성질이 아니라 "이 항목을 통한 접근을 어떻게 기록할지"의
+ * 문제라, 컨텍스트/PASID 항목의 비트로 제어된다. 그래서 도메인에 붙은
+ * 장치 하나하나, PASID 하나하나에 적용해야 한다 — 목록이 둘인 이유다.
+ *
+ * 부분 실패를 그대로 돌려주는 이유: 되돌리기는 호출자
+ * (intel_iommu_set_dirty_tracking)가 원래 값으로 전체를 다시 적용하는 방식으로
+ * 한다. 이미 원래 값인 항목에 다시 적용해도 무해하므로, 여기서 "어디까지
+ * 갔는지"를 기억할 필요가 없다.
+ *
+ * 동기화: domain->lock 을 호출자가 쥔다(lockdep_assert_held 로 확인). 순회
+ * 중에 장치가 붙거나 떨어지면 일부만 설정된 상태가 남기 때문이다.
+ *
+ * 호출 체인:
+ *   intel_iommu_set_dirty_tracking()/parent_domain_set_dirty_tracking()
+ *     → [domain_set_dirty_tracking] → intel_pasid_setup_dirty_tracking()
+ */
 static int domain_set_dirty_tracking(struct dmar_domain *domain, bool enable)
 {
-	struct device_domain_info *info;
-	struct dev_pasid_info *dev_pasid;
-	int ret = 0;
+	struct device_domain_info *info;	/* [한국어] 장치 순회 커서 */
+	struct dev_pasid_info *dev_pasid;	/* [한국어] (장치, PASID) 순회 커서 */
+	int ret = 0;	/* [한국어] 결과 */
 
-	lockdep_assert_held(&domain->lock);
+	lockdep_assert_held(&domain->lock);	/* [한국어] 호출자가 도메인 락을 쥐고 있어야 한다. 순회 중에 장치가 붙거나 떨어지면 일부만 설정된 상태가 남는다 */
 
-	list_for_each_entry(info, &domain->devices, link) {
-		ret = intel_pasid_setup_dirty_tracking(info->iommu, info->dev,
-						       IOMMU_NO_PASID, enable);
-		if (ret)
-			return ret;
+	list_for_each_entry(info, &domain->devices, link) {	/* [한국어] 먼저 PASID 없이 붙은 장치들에 대해 */
+		ret = intel_pasid_setup_dirty_tracking(info->iommu, info->dev,	/* [한국어] 그 장치의 PASID 항목에 추적 비트를 켜거나 끈다 */
+						       IOMMU_NO_PASID, enable);	/* [한국어] 기본 트래픽의 항목 */
+		if (ret)	/* [한국어] 실패하면 */
+			return ret;	/* [한국어] 즉시 돌아간다. 되돌리기는 호출자가 한다 */
 	}
 
-	list_for_each_entry(dev_pasid, &domain->dev_pasids, link_domain) {
-		info = dev_iommu_priv_get(dev_pasid->dev);
-		ret = intel_pasid_setup_dirty_tracking(info->iommu, info->dev,
-						       dev_pasid->pasid, enable);
-		if (ret)
-			break;
+	list_for_each_entry(dev_pasid, &domain->dev_pasids, link_domain) {	/* [한국어] 다음은 PASID 단위로 붙은 것들 */
+		info = dev_iommu_priv_get(dev_pasid->dev);	/* [한국어] 그 장치의 정보 */
+		ret = intel_pasid_setup_dirty_tracking(info->iommu, info->dev,	/* [한국어] 같은 설정을 */
+						       dev_pasid->pasid, enable);	/* [한국어] 그 PASID 의 항목에 */
+		if (ret)	/* [한국어] 실패 */
+			break;	/* [한국어] 중단 */
 	}
 
-	return ret;
+	return ret;	/* [한국어] 0 이면 모두 성공 */
 }
 
+/*
+ * [한국어]
+ * parent_domain_set_dirty_tracking - 중첩 부모 도메인 아래의 모든 1단계 도메인에 더티 추적을 적용한다
+ *
+ * @domain: 2단계(부모) 도메인.
+ * @enable: 켤지 끌지.
+ * @return: 0 성공, 음수면 실패(이미 바꾼 것들은 원래대로 되돌린 상태).
+ *
+ * 왜 자식까지 봐야 하는가: 중첩 변환에서 게스트의 DMA 는 게스트의 1단계
+ * 테이블을 거쳐 호스트의 2단계 테이블로 내려온다. 그런데 더티 비트를 남기는
+ * 설정은 각 장치/PASID 의 항목에 붙어 있고, 게스트 장치들은 1단계 도메인에
+ * 매달려 있다. 그래서 부모에만 켜면 게스트 DMA 는 추적되지 않는다 —
+ * 마이그레이션이 페이지를 놓치게 된다.
+ *
+ * 락이 두 겹인 이유: s1_lock 은 자식 목록을 지키고, 각 자식의 lock 은 그
+ * 자식의 장치 목록을 지킨다. 자식마다 잡았다 놓는 것은 그 락이 인터럽트
+ * 문맥에서도 잡히기 때문(irqsave)이고, s1_lock 은 그렇지 않아 평범한
+ * spin_lock 이면 된다.
+ *
+ * 되돌리기: 실패하면 자식 전체를 부모의 원래 설정(domain->dirty_tracking)으로
+ * 다시 적용한다. 아직 바꾸지 않은 자식에 원래 값을 다시 써도 무해하므로,
+ * 어디까지 진행했는지 기억할 필요가 없다.
+ *
+ * 실행 컨텍스트: 마이그레이션 준비. 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   intel_iommu_set_dirty_tracking() → [parent_domain_set_dirty_tracking]
+ *     → domain_set_dirty_tracking()
+ */
 static int parent_domain_set_dirty_tracking(struct dmar_domain *domain,
 					    bool enable)
 {
-	struct dmar_domain *s1_domain;
-	unsigned long flags;
-	int ret;
+	struct dmar_domain *s1_domain;	/* [한국어] 자식 1단계 도메인 순회 커서 */
+	unsigned long flags;	/* [한국어] 인터럽트 상태 */
+	int ret;	/* [한국어] 결과 */
 
-	spin_lock(&domain->s1_lock);
-	list_for_each_entry(s1_domain, &domain->s1_domains, s2_link) {
-		spin_lock_irqsave(&s1_domain->lock, flags);
-		ret = domain_set_dirty_tracking(s1_domain, enable);
-		spin_unlock_irqrestore(&s1_domain->lock, flags);
-		if (ret)
-			goto err_unwind;
+	spin_lock(&domain->s1_lock);	/* [한국어] 자식 목록을 보호한다. 이 락은 인터럽트 문맥에서 잡히지 않아 irqsave 가 필요 없다 */
+	list_for_each_entry(s1_domain, &domain->s1_domains, s2_link) {	/* [한국어] 이 2단계 도메인 위에 얹힌 1단계 도메인들에 대해 */
+		spin_lock_irqsave(&s1_domain->lock, flags);	/* [한국어] 각 자식 도메인의 장치 목록을 보호한다 */
+		ret = domain_set_dirty_tracking(s1_domain, enable);	/* [한국어] 그 자식에 붙은 모든 장치/PASID 에 설정을 적용 */
+		spin_unlock_irqrestore(&s1_domain->lock, flags);	/* [한국어] 자식 락 해제 */
+		if (ret)	/* [한국어] 하나라도 실패하면 */
+			goto err_unwind;	/* [한국어] 이미 바꾼 것들을 되돌린다 */
 	}
-	spin_unlock(&domain->s1_lock);
-	return 0;
+	spin_unlock(&domain->s1_lock);	/* [한국어] 목록 락 해제 */
+	return 0;	/* [한국어] 모든 자식에 적용 완료 */
 
-err_unwind:
-	list_for_each_entry(s1_domain, &domain->s1_domains, s2_link) {
-		spin_lock_irqsave(&s1_domain->lock, flags);
-		domain_set_dirty_tracking(s1_domain, domain->dirty_tracking);
-		spin_unlock_irqrestore(&s1_domain->lock, flags);
+err_unwind:	/* [한국어] 부분 실패 경로 */
+	list_for_each_entry(s1_domain, &domain->s1_domains, s2_link) {	/* [한국어] 자식 전체를 다시 훑으며 */
+		spin_lock_irqsave(&s1_domain->lock, flags);	/* [한국어] 자식 락 */
+		domain_set_dirty_tracking(s1_domain, domain->dirty_tracking);	/* [한국어] 부모의 원래 설정으로 되돌린다. 아직 바꾸지 않은 자식에 다시 적용해도 값이 같아 무해하므로, 어디까지 진행했는지 기억할 필요 없이 전체를 되돌린다 */
+		spin_unlock_irqrestore(&s1_domain->lock, flags);	/* [한국어] 자식 락 해제 */
 	}
-	spin_unlock(&domain->s1_lock);
-	return ret;
+	spin_unlock(&domain->s1_lock);	/* [한국어] 목록 락 해제 */
+	return ret;	/* [한국어] 실패 이유 */
 }
 
+/*
+ * [한국어]
+ * intel_iommu_set_dirty_tracking - 도메인 단위로 더티 추적을 켜거나 끈다
+ *
+ * @domain: 대상 도메인(2단계, dirty_ops 가 달린 것).
+ * @enable: 켤지 끌지.
+ * @return: 0 성공(이미 원하는 상태였던 경우 포함), 음수면 실패.
+ *
+ * iommu_dirty_ops.set_dirty_tracking 콜백이며, VFIO 가 라이브 마이그레이션을
+ * 시작하기 전에 부른다. 이 뒤로 하드웨어가 DMA 쓰기를 페이지 테이블에 기록하고,
+ * VMM 이 그 비트를 읽어 어떤 페이지를 다시 보낼지 정한다.
+ *
+ * 적용 범위가 둘이다.
+ *   1) 이 도메인에 직접 붙은 장치/PASID.
+ *   2) 이 도메인이 중첩 부모라면, 그 위에 얹힌 1단계 도메인들에 붙은 것까지.
+ *      게스트 DMA 를 놓치지 않으려면 자식까지 켜야 한다.
+ *
+ * 상태 갱신 순서: dmar_domain->dirty_tracking 은 두 적용이 모두 성공한 뒤에야
+ * 쓴다. 그래야 err_unwind 가 "원래 값"으로 되돌릴 수 있다 — 먼저 갱신하면
+ * 되돌릴 값이 사라진다.
+ *
+ * 동기화: dmar_domain->lock 을 잡은 채 검사·적용·갱신을 모두 한다. 그 사이에
+ * 장치가 붙으면 attach 경로가 도메인의 dirty_tracking 을 보고 같은 설정을
+ * 해 주므로 누락이 없다.
+ *
+ * 실행 컨텍스트: VFIO 마이그레이션 설정. 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   iommu_domain_set_dirty_tracking() (VFIO) → [이 함수]
+ *     → domain_set_dirty_tracking() → parent_domain_set_dirty_tracking()
+ */
 static int intel_iommu_set_dirty_tracking(struct iommu_domain *domain,
 					  bool enable)
 {
-	struct dmar_domain *dmar_domain = to_dmar_domain(domain);
-	int ret;
+	struct dmar_domain *dmar_domain = to_dmar_domain(domain);	/* [한국어] VT-d 도메인으로 */
+	int ret;	/* [한국어] 결과 */
 
-	spin_lock(&dmar_domain->lock);
-	if (dmar_domain->dirty_tracking == enable)
-		goto out_unlock;
+	spin_lock(&dmar_domain->lock);	/* [한국어] 설정과 상태 갱신을 한 임계 구역에서 */
+	if (dmar_domain->dirty_tracking == enable)	/* [한국어] 이미 원하는 상태면 */
+		goto out_unlock;	/* [한국어] 할 일이 없다 */
 
-	ret = domain_set_dirty_tracking(dmar_domain, enable);
-	if (ret)
-		goto err_unwind;
+	ret = domain_set_dirty_tracking(dmar_domain, enable);	/* [한국어] 이 도메인에 직접 붙은 장치들에 적용 */
+	if (ret)	/* [한국어] 실패 */
+		goto err_unwind;	/* [한국어] 되돌린다 */
 
-	if (dmar_domain->nested_parent) {
-		ret = parent_domain_set_dirty_tracking(dmar_domain, enable);
-		if (ret)
-			goto err_unwind;
+	if (dmar_domain->nested_parent) {	/* [한국어] 중첩 부모라면 자식 1단계 도메인들에도 적용해야 한다 */
+		ret = parent_domain_set_dirty_tracking(dmar_domain, enable);	/* [한국어] 게스트의 1단계 테이블을 쓰는 DMA 도 추적해야 마이그레이션이 정확하기 때문이다 */
+		if (ret)	/* [한국어] 실패 */
+			goto err_unwind;	/* [한국어] 되돌린다 */
 	}
 
-	dmar_domain->dirty_tracking = enable;
-out_unlock:
-	spin_unlock(&dmar_domain->lock);
+	dmar_domain->dirty_tracking = enable;	/* [한국어] 모두 성공한 뒤에야 상태를 기록한다 */
+out_unlock:	/* [한국어] 이미 원하는 상태였던 경우가 합류 */
+	spin_unlock(&dmar_domain->lock);	/* [한국어] 락 해제 */
 
-	return 0;
+	return 0;	/* [한국어] 성공 */
 
-err_unwind:
-	domain_set_dirty_tracking(dmar_domain, dmar_domain->dirty_tracking);
-	spin_unlock(&dmar_domain->lock);
-	return ret;
+err_unwind:	/* [한국어] 부분 실패 경로 */
+	domain_set_dirty_tracking(dmar_domain, dmar_domain->dirty_tracking);	/* [한국어] 아직 갱신하지 않은 원래 값으로 되돌린다 */
+	spin_unlock(&dmar_domain->lock);	/* [한국어] 락 해제 */
+	return ret;	/* [한국어] 실패 이유 */
 }
 
+/*
+ * [한국어]
+ * context_setup_pass_through - 소스 id 하나의 컨텍스트 항목을 "번역 없이 통과"로 세운다
+ *
+ * @dev: 대상 장치(로그와 유닛 조회에 쓴다).
+ * @bus, @devfn: 세울 컨텍스트 항목의 소스 id. 별칭일 수 있어 장치 자신의
+ *               위치와 다를 수 있다.
+ * @return: 0 성공, -ENOMEM 이면 컨텍스트 테이블을 만들지 못했다.
+ *
+ * 통과(pass-through) 모드란: 컨텍스트 항목의 translation type 을
+ * CONTEXT_TT_PASS_THROUGH 로 두면, 하드웨어가 페이지 테이블을 워크하지 않고
+ * IOVA 를 그대로 물리 주소로 쓴다. 격리는 없지만 번역 비용도 없다. 신뢰할 수
+ * 있는 내부 장치나 IOMMU 로 성능이 떨어지는 장치에 쓴다.
+ *
+ * 세 가지 세부가 통과 모드 특유다.
+ *   - 도메인 id 는 FLPT_DEFAULT_DID 로 고정한다. 번역을 하지 않으니 실제
+ *     주소 공간 구분이 필요 없고, 캐시 무효화의 대상 지정에만 쓰인다.
+ *   - AW(address width)는 하드웨어가 지원하는 최대 AGAW 로 프로그램해야 하고,
+ *     ASR(페이지 테이블 주소)은 하드웨어가 무시한다(위 영어 주석).
+ *   - fault enable 은 켜 둔다. 통과 모드라도 하드웨어가 다룰 수 있는 주소
+ *     범위를 벗어난 접근은 여전히 폴트로 알아야 한다.
+ *
+ * present 를 마지막에 세우는 이유: 이 비트를 켜는 순간부터 하드웨어가 항목을
+ * 사용한다. 나머지 필드가 모두 채워진 뒤여야 절반만 설정된 항목을 워크하는
+ * 일이 없다.
+ *
+ * 이미 세워져 있으면 그냥 돌아간다: 별칭 순회 때문에 같은 항목이 두 번
+ * 들어올 수 있다. 다만 물려받은 항목(context_copied)은 예외로 다시 세운다.
+ *
+ * 동기화: iommu->lock 으로 컨텍스트 테이블 전체를 보호한다.
+ * 실행 컨텍스트: 항등 도메인 부착. 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   device_setup_pass_through()/context_setup_pass_through_cb()
+ *     → [context_setup_pass_through] → iommu_context_addr()
+ *     → copied_context_tear_down() → context_present_cache_flush()
+ */
 static int context_setup_pass_through(struct device *dev, u8 bus, u8 devfn)
 {
-	struct device_domain_info *info = dev_iommu_priv_get(dev);
-	struct intel_iommu *iommu = info->iommu;
-	struct context_entry *context;
+	struct device_domain_info *info = dev_iommu_priv_get(dev);	/* [한국어] 장치 정보 */
+	struct intel_iommu *iommu = info->iommu;	/* [한국어] 담당 유닛 */
+	struct context_entry *context;	/* [한국어] 세울 컨텍스트 항목 */
 
-	spin_lock(&iommu->lock);
-	context = iommu_context_addr(iommu, bus, devfn, 1);
-	if (!context) {
-		spin_unlock(&iommu->lock);
-		return -ENOMEM;
+	spin_lock(&iommu->lock);	/* [한국어] 컨텍스트 테이블 변경 구간 */
+	context = iommu_context_addr(iommu, bus, devfn, 1);	/* [한국어] 이 소스 id 의 항목을 찾는다. 마지막 1 은 없으면 테이블을 만들라는 뜻 */
+	if (!context) {	/* [한국어] 테이블 할당 실패 */
+		spin_unlock(&iommu->lock);	/* [한국어] 락 해제 */
+		return -ENOMEM;	/* [한국어] 설정 불가 */
 	}
 
-	if (context_present(context) && !context_copied(iommu, bus, devfn)) {
-		spin_unlock(&iommu->lock);
-		return 0;
+	if (context_present(context) && !context_copied(iommu, bus, devfn)) {	/* [한국어] 이미 우리가 세운 항목이 있으면 */
+		spin_unlock(&iommu->lock);	/* [한국어] 락 해제 */
+		return 0;	/* [한국어] 다시 세울 필요가 없다. 별칭 순회 때문에 같은 항목이 두 번 올 수 있어 이 검사가 필요하다 */
 	}
 
-	copied_context_tear_down(iommu, context, bus, devfn);
-	context_clear_entry(context);
-	context_set_domain_id(context, FLPT_DEFAULT_DID);
+	copied_context_tear_down(iommu, context, bus, devfn);	/* [한국어] 물려받은 항목이면 이전 커널의 자원을 정리한다 */
+	context_clear_entry(context);	/* [한국어] 항목을 깨끗이 비운다 */
+	context_set_domain_id(context, FLPT_DEFAULT_DID);	/* [한국어] 통과 모드 전용의 고정 도메인 id. 실제 번역을 하지 않으므로 도메인 id 는 캐시 구분용으로만 쓰인다 */
 
 	/*
 	 * In pass through mode, AW must be programmed to indicate the largest
 	 * AGAW value supported by hardware. And ASR is ignored by hardware.
 	 */
-	context_set_address_width(context, iommu->msagaw);
-	context_set_translation_type(context, CONTEXT_TT_PASS_THROUGH);
-	context_set_fault_enable(context);
-	context_set_present(context);
-	if (!ecap_coherent(iommu->ecap))
-		clflush_cache_range(context, sizeof(*context));
-	context_present_cache_flush(iommu, FLPT_DEFAULT_DID, bus, devfn);
-	spin_unlock(&iommu->lock);
+	context_set_address_width(context, iommu->msagaw);	/* [한국어] 통과 모드에서는 AW 를 하드웨어가 지원하는 최대 AGAW 로 프로그램해야 하고 ASR(테이블 주소)은 무시된다 (위 영어 주석) */
+	context_set_translation_type(context, CONTEXT_TT_PASS_THROUGH);	/* [한국어] 번역 없이 통과시키라는 설정. IOVA 가 그대로 물리 주소가 된다 */
+	context_set_fault_enable(context);	/* [한국어] 그래도 폴트 보고는 켜 둔다 — 범위를 벗어난 접근은 여전히 알아야 한다 */
+	context_set_present(context);	/* [한국어] 마지막에 present 를 세운다. 이 비트를 켜는 순간부터 하드웨어가 이 항목을 쓰므로, 나머지 필드가 모두 채워진 뒤여야 한다 */
+	if (!ecap_coherent(iommu->ecap))	/* [한국어] 유닛이 캐시를 스누프하지 않으면 */
+		clflush_cache_range(context, sizeof(*context));	/* [한국어] 항목을 메모리로 밀어낸다 */
+	context_present_cache_flush(iommu, FLPT_DEFAULT_DID, bus, devfn);	/* [한국어] 캐싱 모드 하드웨어가 캐시해 둔 "항목 없음"을 지운다 */
+	spin_unlock(&iommu->lock);	/* [한국어] 락 해제 */
 
-	return 0;
+	return 0;	/* [한국어] 통과 설정 완료 */
 }
 
+/*
+ * [한국어]
+ * context_setup_pass_through_cb - DMA 별칭마다 통과 설정을 반복하는 콜백
+ *
+ * @pdev: 순회 중인 PCI 장치(쓰지 않는다).
+ * @alias: 이 장치가 낼 수 있는 소스 id 하나.
+ * @data: 원본 struct device.
+ * @return: context_setup_pass_through 의 결과. 0 이 아니면 순회가 중단된다.
+ *
+ * domain_context_clear_one_cb 의 반대 방향이다. 장치가 여러 소스 id 로 DMA 를
+ * 낼 수 있으므로, 통과 모드도 그 모든 id 에 대해 세워야 한다. 하나라도
+ * 빠뜨리면 그 id 로 나가는 DMA 만 컨텍스트 항목이 없어 막힌다.
+ *
+ * 여기서는 0 이 아닌 값을 돌려주면 순회가 멈추는데, 통과 설정은 실패하면
+ * 그 장치 전체가 동작하지 못하므로 멈추는 것이 맞다(별칭 지우기와 다른 점).
+ *
+ * 실행 컨텍스트: 항등 도메인 부착. 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   device_setup_pass_through() → pci_for_each_dma_alias()
+ *     → [context_setup_pass_through_cb] → context_setup_pass_through()
+ */
 static int context_setup_pass_through_cb(struct pci_dev *pdev, u16 alias, void *data)
 {
-	struct device *dev = data;
+	struct device *dev = data;	/* [한국어] pci_for_each_dma_alias 가 넘겨준 원본 장치 */
 
-	return context_setup_pass_through(dev, PCI_BUS_NUM(alias), alias & 0xff);
+	return context_setup_pass_through(dev, PCI_BUS_NUM(alias), alias & 0xff);	/* [한국어] 이 별칭의 컨텍스트 항목도 통과로 세운다. 별칭을 빠뜨리면 그 소스 id 로 나가는 DMA 만 막힌다 */
 }
 
+/*
+ * [한국어]
+ * device_setup_pass_through - 장치가 쓰는 모든 소스 id 를 통과 모드로 세운다
+ *
+ * @dev: 대상 장치.
+ * @return: 0 성공, 음수면 실패.
+ *
+ * 레거시 모드(비 scalable)에서 항등 도메인을 붙이는 실제 구현이다. PCI 가
+ * 아닌 장치는 별칭이 없어 자기 항목 하나면 되고, PCI 장치는
+ * pci_for_each_dma_alias 로 모든 소스 id 를 훑는다 — domain_context_clear 와
+ * 정확히 대칭인 구조다.
+ *
+ * scalable 모드에서는 이 함수 대신 intel_pasid_setup_pass_through 가 쓰인다.
+ * 그 모드에서는 번역이 PASID 항목에서 시작하기 때문이다.
+ *
+ * 실행 컨텍스트: 항등 도메인 부착. 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   identity_domain_attach_dev() → [device_setup_pass_through]
+ *     → pci_for_each_dma_alias() → context_setup_pass_through_cb()
+ */
 static int device_setup_pass_through(struct device *dev)
 {
-	struct device_domain_info *info = dev_iommu_priv_get(dev);
+	struct device_domain_info *info = dev_iommu_priv_get(dev);	/* [한국어] 장치 정보 */
 
-	if (!dev_is_pci(dev))
-		return context_setup_pass_through(dev, info->bus, info->devfn);
+	if (!dev_is_pci(dev))	/* [한국어] PCI 가 아니면 별칭이 없다 */
+		return context_setup_pass_through(dev, info->bus, info->devfn);	/* [한국어] 자기 항목 하나만 세운다 */
 
-	return pci_for_each_dma_alias(to_pci_dev(dev),
-				      context_setup_pass_through_cb, dev);
+	return pci_for_each_dma_alias(to_pci_dev(dev),	/* [한국어] PCI 장치는 낼 수 있는 모든 소스 id 에 대해 */
+				      context_setup_pass_through_cb, dev);	/* [한국어] 같은 통과 설정을 반복한다 */
 }
 
+/*
+ * [한국어]
+ * identity_domain_attach_dev - 장치를 항등(통과) 도메인에 붙인다
+ *
+ * @domain: 전역 identity_domain(상태가 없어 쓰이지 않는다).
+ * @dev: 대상 장치. @old: 직전 도메인(쓰지 않는다).
+ * @return: 0 성공, 음수면 실패.
+ *
+ * 항등 도메인이란: IOVA 를 그대로 물리 주소로 쓰는 "번역하지 않는" 도메인이다.
+ * 격리가 필요 없거나 IOMMU 를 켜면 동작하지 않는 장치(RMRR 이 걸린 장치,
+ * iommu=pt 로 부팅한 시스템)에 쓴다. 페이지 테이블이 없으므로 모든 장치가
+ * 하나의 전역 인스턴스를 공유한다.
+ *
+ * 먼저 device_block_translation 으로 현재 설정을 내리는 것은
+ * intel_iommu_attach_device 와 같은 이유다 — 옛 매핑과 새 설정이 겹치는
+ * 순간을 만들지 않고, 실패해도 안전한 차단 상태로 남게 한다.
+ *
+ * 두 모드에서 세우는 곳이 다르다: scalable 모드는 PASID 항목을
+ * (intel_pasid_setup_pass_through), 레거시 모드는 컨텍스트 항목을
+ * (device_setup_pass_through, 별칭 포함) 통과로 세운다.
+ *
+ * PRI 를 건드리지 않는 이유(위 영어 주석): 항등 도메인에는 페이지 요청이
+ * 의미가 없고(매핑이 없을 수가 없다), 이미 차단 상태를 거쳐 왔으므로
+ * 여기서 켜거나 끌 필요가 없다.
+ *
+ * 실행 컨텍스트: 도메인 부착. 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   iommu_attach_device(identity_domain) → [identity_domain_attach_dev]
+ *     → device_block_translation()
+ *     → intel_pasid_setup_pass_through() 또는 device_setup_pass_through()
+ */
 static int identity_domain_attach_dev(struct iommu_domain *domain,
 				      struct device *dev,
 				      struct iommu_domain *old)
 {
-	struct device_domain_info *info = dev_iommu_priv_get(dev);
-	struct intel_iommu *iommu = info->iommu;
-	int ret;
+	struct device_domain_info *info = dev_iommu_priv_get(dev);	/* [한국어] 장치 정보 */
+	struct intel_iommu *iommu = info->iommu;	/* [한국어] 담당 유닛 */
+	int ret;	/* [한국어] 결과 */
 
-	device_block_translation(dev);
+	device_block_translation(dev);	/* [한국어] 먼저 지금 붙어 있는 것을 전부 내린다 */
 
-	if (dev_is_real_dma_subdevice(dev))
-		return 0;
+	if (dev_is_real_dma_subdevice(dev))	/* [한국어] 부모의 컨텍스트 항목을 공유하는 서브디바이스면 */
+		return 0;	/* [한국어] 부모가 이미 통과 상태이므로 따로 세울 것이 없다 */
 
 	/*
 	 * No PRI support with the global identity domain. No need to enable or
 	 * disable PRI in this path as the iommu has been put in the blocking
 	 * state.
 	 */
-	if (sm_supported(iommu))
-		ret = intel_pasid_setup_pass_through(iommu, dev, IOMMU_NO_PASID);
+	if (sm_supported(iommu))	/* [한국어] scalable 모드면 */
+		ret = intel_pasid_setup_pass_through(iommu, dev, IOMMU_NO_PASID);	/* [한국어] PASID 항목을 통과로 세운다 */
 	else
-		ret = device_setup_pass_through(dev);
+		ret = device_setup_pass_through(dev);	/* [한국어] 레거시 모드면 컨텍스트 항목을 통과로 세운다(별칭 포함) */
 
-	if (!ret)
-		info->domain_attached = true;
+	if (!ret)	/* [한국어] 성공했으면 */
+		info->domain_attached = true;	/* [한국어] 붙은 상태로 표시한다. 위 영어 주석대로 이 경로에서는 PRI 를 켜고 끄지 않는다 — 항등 도메인에는 페이지 요청이 의미가 없고, 이미 차단 상태를 거쳐 왔기 때문이다 */
 
-	return ret;
+	return ret;	/* [한국어] 결과 */
 }
 
+/*
+ * [한국어]
+ * identity_domain_set_dev_pasid - 특정 PASID 만 항등(통과) 모드로 만든다
+ *
+ * @domain: 전역 identity_domain. @dev: 장치. @pasid: 대상 PASID.
+ * @old: 이 PASID 가 쓰고 있던 도메인.
+ * @return: 0 성공, -EOPNOTSUPP 이면 이 장치/유닛으로는 불가능.
+ *
+ * 장치 안의 한 주소 공간만 번역 없이 통과시킨다. 같은 장치의 다른 PASID 는
+ * 여전히 번역될 수 있다 — PASID 단위 격리의 유연함이 여기 드러난다.
+ *
+ * 교체 순서는 intel_iommu_set_dev_pasid 와 같은 원칙이다: 폴트 처리를 먼저
+ * 옮기고(하드웨어를 바꾼 직후의 폴트가 새 도메인으로 가도록), 하드웨어
+ * 항목을 교체하고, 성공한 뒤에야 옛 도메인의 기록을 지운다. 하드웨어 교체가
+ * 실패하면 폴트 처리를 되돌려 옛 상태를 온전히 유지한다.
+ *
+ * 항등 도메인이라 domain_add_dev_pasid 를 부르지 않는 점이 다르다. 페이지
+ * 테이블도 도메인 id 도 없으므로 확보할 자원이 없고, 그래서
+ * domain_remove_dev_pasid 도 항등 도메인이면 곧바로 돌아간다.
+ *
+ * 실행 컨텍스트: PASID 부착/교체. 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   iommu_attach_device_pasid(identity_domain) → [이 함수]
+ *     → iopf_for_domain_replace() → domain_setup_passthrough()
+ *     → domain_remove_dev_pasid()
+ */
 static int identity_domain_set_dev_pasid(struct iommu_domain *domain,
 					 struct device *dev, ioasid_t pasid,
 					 struct iommu_domain *old)
 {
-	struct device_domain_info *info = dev_iommu_priv_get(dev);
-	struct intel_iommu *iommu = info->iommu;
-	int ret;
+	struct device_domain_info *info = dev_iommu_priv_get(dev);	/* [한국어] 장치 정보 */
+	struct intel_iommu *iommu = info->iommu;	/* [한국어] 담당 유닛 */
+	int ret;	/* [한국어] 결과 */
 
-	if (!pasid_supported(iommu) || dev_is_real_dma_subdevice(dev))
-		return -EOPNOTSUPP;
+	if (!pasid_supported(iommu) || dev_is_real_dma_subdevice(dev))	/* [한국어] 유닛이 PASID 를 못 하거나 부모 항목을 공유하는 서브디바이스면 */
+		return -EOPNOTSUPP;	/* [한국어] PASID 단위로 항등 매핑을 줄 수 없다 */
 
-	ret = iopf_for_domain_replace(domain, old, dev);
-	if (ret)
-		return ret;
+	ret = iopf_for_domain_replace(domain, old, dev);	/* [한국어] 폴트 처리를 먼저 옮긴다 */
+	if (ret)	/* [한국어] 실패 */
+		return ret;	/* [한국어] 옛 상태 그대로 */
 
-	ret = domain_setup_passthrough(iommu, dev, pasid, old);
-	if (ret) {
-		iopf_for_domain_replace(old, domain, dev);
-		return ret;
+	ret = domain_setup_passthrough(iommu, dev, pasid, old);	/* [한국어] PASID 항목을 통과로 교체한다 */
+	if (ret) {	/* [한국어] 실패하면 */
+		iopf_for_domain_replace(old, domain, dev);	/* [한국어] 폴트 처리를 되돌린다 */
+		return ret;	/* [한국어] 실패 이유 */
 	}
 
-	domain_remove_dev_pasid(old, dev, pasid);
-	return 0;
+	domain_remove_dev_pasid(old, dev, pasid);	/* [한국어] 성공한 뒤에야 옛 도메인의 기록을 지운다 */
+	return 0;	/* [한국어] 이 PASID 는 이제 번역 없이 통과한다 */
 }
 
-static struct iommu_domain identity_domain = {
-	.type = IOMMU_DOMAIN_IDENTITY,
+static struct iommu_domain identity_domain = {	/* [한국어] 모든 장치가 공유하는 단 하나의 항등 도메인. 페이지 테이블이 없어 상태가 없다 */
+	.type = IOMMU_DOMAIN_IDENTITY,	/* [한국어] 코어가 "IOVA = 물리 주소" 도메인으로 인식한다 */
 	.ops = &(const struct iommu_domain_ops) {
-		.attach_dev	= identity_domain_attach_dev,
-		.set_dev_pasid	= identity_domain_set_dev_pasid,
+		.attach_dev	= identity_domain_attach_dev,	/* [한국어] 장치를 통과 모드로 */
+		.set_dev_pasid	= identity_domain_set_dev_pasid,	/* [한국어] 특정 PASID 만 통과 모드로 */
 	},
 };
 
-const struct iommu_domain_ops intel_fs_paging_domain_ops = {
-	IOMMU_PT_DOMAIN_OPS(x86_64),
-	.attach_dev = intel_iommu_attach_device,
-	.set_dev_pasid = intel_iommu_set_dev_pasid,
-	.iotlb_sync_map = intel_iommu_iotlb_sync_map,
-	.flush_iotlb_all = intel_flush_iotlb_all,
-	.iotlb_sync = intel_iommu_tlb_sync,
-	.free = intel_iommu_domain_free,
-	.enforce_cache_coherency = intel_iommu_enforce_cache_coherency_fs,
+const struct iommu_domain_ops intel_fs_paging_domain_ops = {	/* [한국어] 1단계 페이징 도메인의 콜백 표 */
+	IOMMU_PT_DOMAIN_OPS(x86_64),	/* [한국어] map/unmap/iova_to_phys 는 공용 x86-64 페이지 테이블 구현이 채운다 */
+	.attach_dev = intel_iommu_attach_device,	/* [한국어] 장치 부착 */
+	.set_dev_pasid = intel_iommu_set_dev_pasid,	/* [한국어] PASID 부착 */
+	.iotlb_sync_map = intel_iommu_iotlb_sync_map,	/* [한국어] 매핑 후 동기화(필요한 하드웨어에서만) */
+	.flush_iotlb_all = intel_flush_iotlb_all,	/* [한국어] 도메인 전체 무효화 */
+	.iotlb_sync = intel_iommu_tlb_sync,	/* [한국어] 모아 둔 언매핑 범위 무효화 */
+	.free = intel_iommu_domain_free,	/* [한국어] 도메인 해제 */
+	.enforce_cache_coherency = intel_iommu_enforce_cache_coherency_fs,	/* [한국어] 1단계는 PASID 항목에 스누프 제어를 건다 */
 };
 
-const struct iommu_domain_ops intel_ss_paging_domain_ops = {
-	IOMMU_PT_DOMAIN_OPS(vtdss),
-	.attach_dev = intel_iommu_attach_device,
-	.set_dev_pasid = intel_iommu_set_dev_pasid,
-	.iotlb_sync_map = intel_iommu_iotlb_sync_map,
-	.flush_iotlb_all = intel_flush_iotlb_all,
-	.iotlb_sync = intel_iommu_tlb_sync,
-	.free = intel_iommu_domain_free,
-	.enforce_cache_coherency = intel_iommu_enforce_cache_coherency_ss,
+const struct iommu_domain_ops intel_ss_paging_domain_ops = {	/* [한국어] 2단계 페이징 도메인의 콜백 표 */
+	IOMMU_PT_DOMAIN_OPS(vtdss),	/* [한국어] VT-d 고유 형식의 페이지 테이블 구현 */
+	.attach_dev = intel_iommu_attach_device,	/* [한국어] 1단계와 같은 부착 경로를 쓴다 */
+	.set_dev_pasid = intel_iommu_set_dev_pasid,	/* [한국어] 같음 */
+	.iotlb_sync_map = intel_iommu_iotlb_sync_map,	/* [한국어] 같음 */
+	.flush_iotlb_all = intel_flush_iotlb_all,	/* [한국어] 같음 */
+	.iotlb_sync = intel_iommu_tlb_sync,	/* [한국어] 같음 */
+	.free = intel_iommu_domain_free,	/* [한국어] 같음 */
+	.enforce_cache_coherency = intel_iommu_enforce_cache_coherency_ss,	/* [한국어] 2단계만 다르다 — PTE 의 SNP 비트를 쓴다 */
 };
 
 const struct iommu_ops intel_iommu_ops = {
@@ -7351,7 +7607,7 @@ int ecmd_submit_sync(struct intel_iommu *iommu, u8 ecmd, u64 oa, u64 ob)
 {
 	unsigned long flags;
 	u64 res;
-	int ret;
+	int ret;	/* [한국어] 결과 */
 
 	if (!cap_ecmds(iommu->cap))
 		return -ENODEV;
@@ -7386,7 +7642,7 @@ int ecmd_submit_sync(struct intel_iommu *iommu, u8 ecmd, u64 oa, u64 ob)
 err:
 	raw_spin_unlock_irqrestore(&iommu->register_lock, flags);
 
-	return ret;
+	return ret;	/* [한국어] 결과 */
 }
 
 MODULE_IMPORT_NS("GENERIC_PT_IOMMU");
