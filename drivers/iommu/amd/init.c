@@ -5820,216 +5820,321 @@ static void __init ivinfo_init(void *ivrs)
  * After everything is set up the IOMMUs are enabled and the necessary
  * hotplug and suspend notifiers are registered.
  */
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * early_amd_iommu_init - IVRS 표를 훑어 모든 자료구조를 세운다
+ *
+ * @return: 0 성공, 음수면 실패.
+ *
+ * 위 영어 주석이 네 번의 훑기를 열거하는데, 그 순서에 각각 이유가 있다.
+ * 타입을 먼저 고르지 않으면 어느 항목을 읽을지 정할 수 없고, 크기를 재지
+ * 않으면 자료구조를 잡을 수 없고, 자료구조가 없으면 채울 수 없다.
+ *
+ * CMPXCHG16B 검사가 맨 앞에 있는 이유: 128비트 IRTE 와 포스티드 인터럽트
+ * 항목을 원자적으로 갱신하려면 그 명령이 필수다. 없으면 드라이버 전체가
+ * 성립하지 않는다.
+ *
+ * 페이지 테이블 형식 결정이 이 함수에서 가장 복잡한 부분이다. 세 갈래가
+ * 얽혀 있다:
+ *  - 게스트 5단계: CPU 가 LA57 을 쓰고 IOMMU 도 지원할 때만.
+ *  - HATS 가 유효하지 않으면(0x3) 호스트 변환 자체를 포기한다. 펌웨어가
+ *    잘못된 값을 준 경우라 FW_BUG 으로 보고한다.
+ *  - v1 을 쓸 수 없으면 v2 로, 그것도 안 되면 아예 변환하지 않는다(NONE).
+ *    NONE 이어도 인터럽트 재매핑은 계속 쓸 수 있다.
+ *
+ * kdump 에서 disable_iommus 를 건너뛰는 것이 중요하다. 물려받은 변환을
+ * 유지해야 살아 있는 장치의 DMA 가 끊기지 않는다.
+ *
+ * 재매핑용 조회 표를 여기서 잡는 이유: check_ioapic_information 이 통과한
+ * 뒤에야 재매핑을 쓸지 확정되고, 그제서야 그 표가 필요해진다.
+ *
+ * out 레이블에서 표를 반드시 놓는다 — 원 주석대로 ACPI 메모리를 새지
+ * 않게 하기 위해서다.
+ *
+ * 호출 체인:
+ *   state_next() → [이 함수] → check_ivrs_checksum() → init_iommu_all()
+ *     → check_ioapic_information() → init_memory_definitions()
+ */
 static int __init early_amd_iommu_init(void)
 {
-	struct acpi_table_header *ivrs_base;
-	int ret;
-	acpi_status status;
-	u8 efr_hats;
+	struct acpi_table_header *ivrs_base;	/* [한국어] IVRS 표 */
+	int ret;	/* [한국어] 결과 */
+	acpi_status status;	/* [한국어] ACPI 호출의 상태 */
+	u8 efr_hats;	/* [한국어] 호스트 주소 변환 크기 */
 
-	if (!amd_iommu_detected)
-		return -ENODEV;
+	if (!amd_iommu_detected)	/* [한국어] 표를 찾지 못했다 */
+		return -ENODEV;	/* [한국어] 이 기계에 IOMMU 가 없다 */
 
-	status = acpi_get_table("IVRS", 0, &ivrs_base);
-	if (status == AE_NOT_FOUND)
-		return -ENODEV;
-	else if (ACPI_FAILURE(status)) {
-		const char *err = acpi_format_exception(status);
-		pr_err("IVRS table error: %s\n", err);
-		return -EINVAL;
+	status = acpi_get_table("IVRS", 0, &ivrs_base);	/* [한국어] 표를 얻어 매핑한다 */
+	if (status == AE_NOT_FOUND)	/* [한국어] 표가 없다 */
+		return -ENODEV;	/* [한국어] IOMMU 도 없다 */
+	else if (ACPI_FAILURE(status)) {	/* [한국어] 있는데 읽을 수 없다 */
+		const char *err = acpi_format_exception(status);	/* [한국어] 원인을 문자열로 */
+		pr_err("IVRS table error: %s\n", err);	/* [한국어] 사용자가 알 수 있게 */
+		return -EINVAL;	/* [한국어] 진행할 수 없다 */
 	}
 
-	if (!boot_cpu_has(X86_FEATURE_CX16)) {
-		pr_err("Failed to initialize. The CMPXCHG16B feature is required.\n");
-		ret = -EINVAL;
-		goto out;
+	if (!boot_cpu_has(X86_FEATURE_CX16)) {	/* [한국어] 128비트 원자적 교환이 없으면 */
+		pr_err("Failed to initialize. The CMPXCHG16B feature is required.\n");	/* [한국어] IRTE 와 포스티드 항목을 안전하게 갱신할 수 없다 */
+		ret = -EINVAL;	/* [한국어] 드라이버 전체가 성립하지 않는다 */
+		goto out;	/* [한국어] 표를 놓고 나간다 */
 	}
 
 	/*
 	 * Validate checksum here so we don't need to do it when
 	 * we actually parse the table
 	 */
-	ret = check_ivrs_checksum(ivrs_base);
-	if (ret)
-		goto out;
+	ret = check_ivrs_checksum(ivrs_base);	/* [한국어] (원 주석: 파싱할 때마다 하지 않도록 여기서 한 번 검증한다) */
+	if (ret)	/* [한국어] 손상된 표 */
+		goto out;	/* [한국어] 포기 */
 
-	ivinfo_init(ivrs_base);
+	ivinfo_init(ivrs_base);	/* [한국어] 펌웨어의 전역 설정을 사본으로 보관 */
 
-	amd_iommu_target_ivhd_type = get_highest_supported_ivhd_type(ivrs_base);
-	DUMP_printk("Using IVHD type %#x\n", amd_iommu_target_ivhd_type);
+	amd_iommu_target_ivhd_type = get_highest_supported_ivhd_type(ivrs_base);	/* [한국어] 1차 훑기: 쓸 타입을 고른다 */
+	DUMP_printk("Using IVHD type %#x\n", amd_iommu_target_ivhd_type);	/* [한국어] 고른 타입을 남긴다 */
 
 	/*
 	 * now the data structures are allocated and basically initialized
 	 * start the real acpi table scan
 	 */
-	ret = init_iommu_all(ivrs_base);
+	ret = init_iommu_all(ivrs_base);	/* [한국어] (원 주석: 자료구조가 준비됐으니 본격적인 표 스캔을 시작한다) 2·3차 훑기가 그 안에 있다 */
 	if (ret)
 		goto out;
 
 	/* 5 level guest page table */
-	if (cpu_feature_enabled(X86_FEATURE_LA57) &&
-	    FIELD_GET(FEATURE_GATS, amd_iommu_efr) == GUEST_PGTABLE_5_LEVEL)
-		amd_iommu_gpt_level = PAGE_MODE_5_LEVEL;
+	if (cpu_feature_enabled(X86_FEATURE_LA57) &&	/* [한국어] (원 주석: 5단계 게스트 페이지 테이블) CPU 가 57비트 주소를 쓰고 */
+	    FIELD_GET(FEATURE_GATS, amd_iommu_efr) == GUEST_PGTABLE_5_LEVEL)	/* [한국어] IOMMU 도 지원할 때만 */
+		amd_iommu_gpt_level = PAGE_MODE_5_LEVEL;	/* [한국어] 게스트 테이블을 5단계로 */
 
-	efr_hats = FIELD_GET(FEATURE_HATS, amd_iommu_efr);
-	if (efr_hats != 0x3) {
+	efr_hats = FIELD_GET(FEATURE_HATS, amd_iommu_efr);	/* [한국어] 호스트 변환이 몇 단계까지 되는가 */
+	if (efr_hats != 0x3) {	/* [한국어] 유효한 값인가 */
 		/*
 		 * efr[HATS] bits specify the maximum host translation level
 		 * supported, with LEVEL 4 being initial max level.
 		 */
-		amd_iommu_hpt_level = efr_hats + PAGE_MODE_4_LEVEL;
+		amd_iommu_hpt_level = efr_hats + PAGE_MODE_4_LEVEL;	/* [한국어] (원 주석: HATS 는 최대 단계를 나타내며 4단계가 기준이다) */
 	} else {
-		pr_warn_once(FW_BUG "Disable host address translation due to invalid translation level (%#x).\n",
+		pr_warn_once(FW_BUG "Disable host address translation due to invalid translation level (%#x).\n",	/* [한국어] 0x3 은 정의되지 않은 값이라 펌웨어의 문제다 */
 			     efr_hats);
-		amd_iommu_hatdis = true;
+		amd_iommu_hatdis = true;	/* [한국어] 호스트(v1) 변환을 포기한다 */
 	}
 
-	if (amd_iommu_pgtable == PD_MODE_V2) {
-		if (!amd_iommu_v2_pgtbl_supported()) {
-			pr_warn("Cannot enable v2 page table for DMA-API. Fallback to v1.\n");
-			amd_iommu_pgtable = PD_MODE_V1;
+	if (amd_iommu_pgtable == PD_MODE_V2) {	/* [한국어] v2 를 쓰기로 했는데 */
+		if (!amd_iommu_v2_pgtbl_supported()) {	/* [한국어] 하드웨어가 지원하지 않으면 */
+			pr_warn("Cannot enable v2 page table for DMA-API. Fallback to v1.\n");	/* [한국어] 알리고 */
+			amd_iommu_pgtable = PD_MODE_V1;	/* [한국어] v1 로 되돌린다 */
 		}
 	}
 
-	if (amd_iommu_hatdis) {
+	if (amd_iommu_hatdis) {	/* [한국어] (원 주석: 호스트 v1 테이블을 쓸 수 없으니 게스트 v2 를 시도한다) */
 		/*
 		 * Host (v1) page table is not available. Attempt to use
 		 * Guest (v2) page table.
 		 */
-		if (amd_iommu_v2_pgtbl_supported())
-			amd_iommu_pgtable = PD_MODE_V2;
+		if (amd_iommu_v2_pgtbl_supported())	/* [한국어] v2 가 가능하면 */
+			amd_iommu_pgtable = PD_MODE_V2;	/* [한국어] 그쪽으로 */
 		else
-			amd_iommu_pgtable = PD_MODE_NONE;
+			amd_iommu_pgtable = PD_MODE_NONE;	/* [한국어] 둘 다 안 되면 DMA 변환을 포기한다. 인터럽트 재매핑은 여전히 쓸 수 있다 */
 	}
 
 	/* Disable any previously enabled IOMMUs */
-	if (!is_kdump_kernel() || amd_iommu_disabled)
-		disable_iommus();
+	if (!is_kdump_kernel() || amd_iommu_disabled)	/* [한국어] (원 주석: 앞서 켜져 있던 IOMMU 를 끈다) */
+		disable_iommus();	/* [한국어] kdump 에서는 건너뛴다 — 물려받은 변환을 유지해야 DMA 가 끊기지 않는다 */
 
-	if (amd_iommu_irq_remap)
-		amd_iommu_irq_remap = check_ioapic_information();
+	if (amd_iommu_irq_remap)	/* [한국어] 재매핑을 쓰려 하면 */
+		amd_iommu_irq_remap = check_ioapic_information();	/* [한국어] 모든 IOAPIC 이 표에 있는지 확인해 최종 결정한다 */
 
 	if (amd_iommu_irq_remap) {
-		struct amd_iommu_pci_seg *pci_seg;
-		ret = -ENOMEM;
-		for_each_pci_segment(pci_seg) {
-			if (alloc_irq_lookup_table(pci_seg))
-				goto out;
+		struct amd_iommu_pci_seg *pci_seg;	/* [한국어] 세그먼트 순회용 */
+		ret = -ENOMEM;	/* [한국어] 아래 할당이 실패할 때의 코드 */
+		for_each_pci_segment(pci_seg) {	/* [한국어] 재매핑을 쓰기로 확정된 뒤에야 */
+			if (alloc_irq_lookup_table(pci_seg))	/* [한국어] 장치별 재매핑 표 조회 배열을 잡는다 */
+				goto out;	/* [한국어] 실패하면 포기 */
 		}
 	}
 
-	ret = init_memory_definitions(ivrs_base);
+	ret = init_memory_definitions(ivrs_base);	/* [한국어] 4차 훑기: 메모리 요구사항 */
 	if (ret)
 		goto out;
 
 	/* init the device table */
-	init_device_table();
+	init_device_table();	/* [한국어] (원 주석: 장치 테이블 초기화) 모든 장치의 인터럽트 재매핑을 켠다 */
 
 out:
 	/* Don't leak any ACPI memory */
-	acpi_put_table(ivrs_base);
+	acpi_put_table(ivrs_base);	/* [한국어] (원 주석: ACPI 메모리를 새지 않게) 성공이든 실패든 반드시 놓는다 */
 
-	return ret;
+	return ret;	/* [한국어] 네 번의 훑기가 끝났다 */
 }
 
+/*
+ * [한국어]
+ * amd_iommu_enable_interrupts - 모든 유닛의 인터럽트를 잡고 로그를 켠다
+ *
+ * @return: 0 성공, 음수면 실패.
+ *
+ * 순서가 이 함수의 전부이고, 원 주석이 그것을 밝힌다: 핸들러가 준비된
+ * 뒤에야 PPR 과 GA 로그 인터럽트를 켠다.
+ *
+ * 그 전에 켜면 인터럽트가 와도 받을 곳이 없고, 하드웨어는 응답 없는
+ * 인터럽트를 계속 재시도한다. 특히 PPR 은 응답하지 않으면 장치가 멈추므로
+ * 순서를 어기면 증상이 심각하다.
+ *
+ * 레주메 경로에서도 불린다 — 그때는 인터럽트가 이미 잡혀 있어
+ * iommu_init_irq 가 활성화 비트만 다시 세운다.
+ *
+ * 호출 체인:
+ *   state_next()/amd_iommu_resume() → [이 함수] → iommu_init_irq()
+ *     → enable_iommus_vapic() → enable_iommus_ppr()
+ */
 static int amd_iommu_enable_interrupts(void)
 {
-	struct amd_iommu *iommu;
-	int ret = 0;
+	struct amd_iommu *iommu;	/* [한국어] 유닛 순회용 */
+	int ret = 0;	/* [한국어] 결과 */
 
-	for_each_iommu(iommu) {
-		ret = iommu_init_irq(iommu);
+	for_each_iommu(iommu) {	/* [한국어] 유닛마다 */
+		ret = iommu_init_irq(iommu);	/* [한국어] 인터럽트를 잡고 핸들러를 건다 */
 		if (ret)
-			goto out;
+			goto out;	/* [한국어] 하나라도 실패하면 로그를 켜지 않는다 */
 	}
 
 	/*
 	 * Interrupt handler is ready to process interrupts. Enable
 	 * PPR and GA log interrupt for all IOMMUs.
 	 */
-	enable_iommus_vapic();
-	enable_iommus_ppr();
+	enable_iommus_vapic();	/* [한국어] (원 주석: 핸들러가 준비됐으니 PPR 과 GA 로그 인터럽트를 켠다) */
+	enable_iommus_ppr();	/* [한국어] 순서를 어기면 응답 없는 페이지 요청에 장치가 멈춘다 */
 
 out:
-	return ret;
+	return ret;	/* [한국어] 성공이면 0 */
 }
 
+/*
+ * [한국어]
+ * detect_ivrs - 이 기계에 IOMMU 가 있는지, 써도 되는지 판단한다
+ *
+ * @return: 쓸 수 있으면 참.
+ *
+ * 표가 있는지 확인하는 것이 절반이고, 나머지 절반은 알려진 문제 기종을
+ * 거르는 것이다.
+ *
+ * Stoney Ridge 검사가 그 예다. 그 APU 의 내장 그래픽이 IOMMU 와 함께
+ * 쓰이면 오동작해서, PCI 서브시스템이 초기화되기도 전에 설정 공간을 직접
+ * 읽어 판별한다 — 그래서 read_pci_config 를 쓴다.
+ *
+ * amd_iommu_force_enable 로 그 검사를 건너뛸 수 있다. 문제가 고쳐졌거나
+ * 그래픽을 쓰지 않는 구성에서 IOMMU 를 되찾기 위한 탈출구다.
+ *
+ * pci_request_acs 를 부르는 것이 이 함수의 부수적이지만 중요한 일이다.
+ * ACS(Access Control Services)가 없으면 같은 스위치 아래 장치들이 서로의
+ * 트래픽을 가로챌 수 있어 IOMMU 격리가 무의미해진다. PCI 열거 전에
+ * 요청해 두어야 그때 켜진다.
+ *
+ * 표를 놓고 나가는 것에 유의: 여기서는 존재만 확인하고, 실제 파싱은
+ * early_amd_iommu_init 이 다시 얻어 한다.
+ *
+ * 호출 체인:
+ *   state_next() → [이 함수]
+ */
 static bool __init detect_ivrs(void)
 {
-	struct acpi_table_header *ivrs_base;
-	acpi_status status;
-	int i;
+	struct acpi_table_header *ivrs_base;	/* [한국어] IVRS 표 */
+	acpi_status status;	/* [한국어] ACPI 호출 상태 */
+	int i;	/* [한국어] 장치 순회 인덱스 */
 
-	status = acpi_get_table("IVRS", 0, &ivrs_base);
-	if (status == AE_NOT_FOUND)
-		return false;
-	else if (ACPI_FAILURE(status)) {
-		const char *err = acpi_format_exception(status);
-		pr_err("IVRS table error: %s\n", err);
-		return false;
+	status = acpi_get_table("IVRS", 0, &ivrs_base);	/* [한국어] 표의 존재만 확인한다 */
+	if (status == AE_NOT_FOUND)	/* [한국어] 없으면 */
+		return false;	/* [한국어] 이 기계에 IOMMU 가 없다 */
+	else if (ACPI_FAILURE(status)) {	/* [한국어] 있는데 읽을 수 없다 */
+		const char *err = acpi_format_exception(status);	/* [한국어] 원인을 문자열로 */
+		pr_err("IVRS table error: %s\n", err);	/* [한국어] 알린다 */
+		return false;	/* [한국어] 쓸 수 없다 */
 	}
 
-	acpi_put_table(ivrs_base);
+	acpi_put_table(ivrs_base);	/* [한국어] 존재만 확인했으므로 곧바로 놓는다. 실제 파싱은 나중에 다시 얻어 한다 */
 
-	if (amd_iommu_force_enable)
-		goto out;
+	if (amd_iommu_force_enable)	/* [한국어] 사용자가 알려진 문제를 무시하겠다고 했으면 */
+		goto out;	/* [한국어] 기종 검사를 건너뛴다 */
 
 	/* Don't use IOMMU if there is Stoney Ridge graphics */
-	for (i = 0; i < 32; i++) {
-		u32 pci_id;
+	for (i = 0; i < 32; i++) {	/* [한국어] (원 주석: Stoney Ridge 그래픽이 있으면 IOMMU 를 쓰지 않는다) */
+		u32 pci_id;	/* [한국어] 벤더/디바이스 id */
 
-		pci_id = read_pci_config(0, i, 0, 0);
-		if ((pci_id & 0xffff) == 0x1002 && (pci_id >> 16) == 0x98e4) {
-			pr_info("Disable IOMMU on Stoney Ridge\n");
-			return false;
+		pci_id = read_pci_config(0, i, 0, 0);	/* [한국어] PCI 서브시스템 초기화 전이라 설정 공간을 직접 읽는다 */
+		if ((pci_id & 0xffff) == 0x1002 && (pci_id >> 16) == 0x98e4) {	/* [한국어] AMD 벤더의 그 그래픽인가 */
+			pr_info("Disable IOMMU on Stoney Ridge\n");	/* [한국어] 그 조합은 오동작한다 */
+			return false;	/* [한국어] IOMMU 를 포기한다 */
 		}
 	}
 
 out:
 	/* Make sure ACS will be enabled during PCI probe */
-	pci_request_acs();
+	pci_request_acs();	/* [한국어] (원 주석: PCI probe 때 ACS 가 켜지도록 한다) ACS 가 없으면 같은 스위치 아래 장치들이 서로의 트래픽을 가로채 격리가 무의미해진다 */
 
-	return true;
+	return true;	/* [한국어] IOMMU 를 쓸 수 있다 */
 }
 
+/*
+ * [한국어]
+ * iommu_snp_enable - SEV-SNP 를 쓸 수 있는지 확인하고 켠다
+ *
+ * SNP 는 게스트 메모리를 하이퍼바이저로부터도 보호하는 기능이고, 그
+ * 보호의 일부를 IOMMU 가 담당한다. 그래서 IOMMU 가 특정 구성이어야만
+ * SNP 를 쓸 수 있다.
+ *
+ * 세 가지 전제를 확인한다:
+ *  - IOMMU 가 켜져 있고 패스스루가 아니어야 한다. 패스스루면 장치가
+ *    물리 메모리에 직접 닿아 보호가 성립하지 않는다.
+ *  - v1 페이지 테이블이어야 한다. 원 주석대로 DTE[Mode] = 0 은 지원되지
+ *    않는다.
+ *  - 하드웨어가 SNP 를 지원해야 한다.
+ *
+ * 하나라도 어긋나면 SNP 를 끈다. 반쯤 켜진 상태로 두면 게스트가 보호받고
+ * 있다고 믿는데 실제로는 아닌, 가장 나쁜 상황이 된다 — 그래서 조용히
+ * 넘어가지 않고 이유를 각각 로그에 남긴다.
+ *
+ * 호출 체인:
+ *   state_next() → [이 함수] → snp_rmptable_init()
+ */
 static __init void iommu_snp_enable(void)
 {
 #ifdef CONFIG_KVM_AMD_SEV
-	if (!cc_platform_has(CC_ATTR_HOST_SEV_SNP))
-		return;
+	if (!cc_platform_has(CC_ATTR_HOST_SEV_SNP))	/* [한국어] SNP 호스트가 아니면 */
+		return;	/* [한국어] 할 일이 없다 */
 	/*
 	 * The SNP support requires that IOMMU must be enabled, and is
 	 * configured with V1 page table (DTE[Mode] = 0 is not supported).
 	 */
-	if (no_iommu || iommu_default_passthrough()) {
-		pr_warn("SNP: IOMMU disabled or configured in passthrough mode, SNP cannot be supported.\n");
-		goto disable_snp;
+	if (no_iommu || iommu_default_passthrough()) {	/* [한국어] (원 주석: SNP 는 IOMMU 가 켜져 있고 v1 페이지 테이블이어야 한다) */
+		pr_warn("SNP: IOMMU disabled or configured in passthrough mode, SNP cannot be supported.\n");	/* [한국어] 패스스루면 장치가 물리 메모리에 직접 닿아 보호가 성립하지 않는다 */
+		goto disable_snp;	/* [한국어] SNP 를 끈다 */
 	}
 
-	if (amd_iommu_pgtable != PD_MODE_V1) {
-		pr_warn("SNP: IOMMU is configured with V2 page table mode, SNP cannot be supported.\n");
-		goto disable_snp;
+	if (amd_iommu_pgtable != PD_MODE_V1) {	/* [한국어] v1 이 아니면 */
+		pr_warn("SNP: IOMMU is configured with V2 page table mode, SNP cannot be supported.\n");	/* [한국어] DTE[Mode] = 0 은 지원되지 않는다 */
+		goto disable_snp;	/* [한국어] 끈다 */
 	}
 
-	amd_iommu_snp_en = check_feature(FEATURE_SNP);
-	if (!amd_iommu_snp_en) {
-		pr_warn("SNP: IOMMU SNP feature not enabled, SNP cannot be supported.\n");
-		goto disable_snp;
+	amd_iommu_snp_en = check_feature(FEATURE_SNP);	/* [한국어] 하드웨어가 지원하는가 */
+	if (!amd_iommu_snp_en) {	/* [한국어] 아니면 */
+		pr_warn("SNP: IOMMU SNP feature not enabled, SNP cannot be supported.\n");	/* [한국어] 이유를 알린다 */
+		goto disable_snp;	/* [한국어] 끈다 */
 	}
 
 	/*
 	 * Enable host SNP support once SNP support is checked on IOMMU.
 	 */
-	if (snp_rmptable_init()) {
-		pr_warn("SNP: RMP initialization failed, SNP cannot be supported.\n");
-		goto disable_snp;
+	if (snp_rmptable_init()) {	/* [한국어] (원 주석: IOMMU 쪽 확인이 끝난 뒤 호스트 SNP 지원을 켠다) */
+		pr_warn("SNP: RMP initialization failed, SNP cannot be supported.\n");	/* [한국어] 역매핑 테이블이 없으면 보호가 성립하지 않는다 */
+		goto disable_snp;	/* [한국어] 끈다 */
 	}
 
-	pr_info("IOMMU SNP support enabled.\n");
-	return;
+	pr_info("IOMMU SNP support enabled.\n");	/* [한국어] 모든 전제가 갖춰졌다 */
+	return;	/* [한국어] 성공 */
 
 disable_snp:
-	cc_platform_clear(CC_ATTR_HOST_SEV_SNP);
+	cc_platform_clear(CC_ATTR_HOST_SEV_SNP);	/* [한국어] 반쯤 켜진 상태로 두면 게스트가 보호받는다고 믿는데 실제로는 아닌 상황이 된다 */
 #endif
 }
 
