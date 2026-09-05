@@ -1675,9 +1675,25 @@ static void iommu_group_remove_file(struct iommu_group *group,
 	sysfs_remove_file(&group->kobj, &attr->attr);
 }
 
+/*
+ * [한국어]
+ * iommu_group_show_name - sysfs 의 그룹 name 속성 읽기
+ *
+ * @group:  대상 그룹
+ * @buf:    출력 버퍼
+ * @return: 쓴 바이트 수
+ *
+ * 이름은 벤더 드라이버가 iommu_group_set_name 으로 붙인 것이고, 붙이지 않았으면
+ * 이 속성 파일 자체가 만들어지지 않는다. 그래서 여기서는 NULL 검사가 없다 —
+ * 파일이 존재한다는 사실이 이름이 있다는 증거다.
+ *
+ * 실행 컨텍스트: 사용자 공간 read(). 잠들 수 있다.
+ *
+ * 호출 체인: sysfs → iommu_group_attr_show → [이 함수]
+ */
 static ssize_t iommu_group_show_name(struct iommu_group *group, char *buf)
 {
-	return sysfs_emit(buf, "%s\n", group->name);
+	return sysfs_emit(buf, "%s\n", group->name);	/* [한국어] 그룹 이름은 벤더 드라이버가 iommu_group_set_name 으로 붙인 것이며, 없으면 이 속성 자체가 sysfs 에 나타나지 않는다 */
 }
 
 /**
@@ -1689,152 +1705,255 @@ static ssize_t iommu_group_show_name(struct iommu_group *group, char *buf)
  * Elements are sorted by start address and overlapping segments
  * of the same type are merged.
  */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어)
+ * iommu_insert_resv_region - 예약 구간 하나를 정렬 삽입하고 겹치는 것을 병합한다
+ *
+ * @new:     넣을 구간. 이 함수가 복제하므로 호출자는 원본을 계속 소유한다.
+ * @regions: 대상 목록. 시작 주소 오름차순으로 정렬된 상태가 유지된다.
+ * @return:  0 성공, -ENOMEM 이면 복제 실패
+ *
+ * 예약 구간(reserved region)은 "IOMMU 가 마음대로 쓰면 안 되는 IOVA 범위"다.
+ * 종류가 몇 가지 있고 의미가 각각 다르다.
+ *   - DIRECT: 펌웨어가 계속 쓰는 버퍼라 물리 주소 = IOVA 로 직통 매핑해야 한다
+ *     (인텔 RMRR, AMD unity map). 지우면 USB 컨트롤러나 관리 엔진이 죽는다.
+ *   - DIRECT_RELAXABLE: 직통이 바람직하지만 필수는 아니다.
+ *   - MSI / SW_MSI: 인터럽트 메시지가 향하는 주소 창. 데이터 DMA 로 이 주소를
+ *     덮으면 가짜 인터럽트를 만들 수 있어 반드시 비워 둔다.
+ *   - RESERVED: 그 외 쓰면 안 되는 구간.
+ *
+ * 알고리즘은 두 패스다. 먼저 시작 주소 기준으로 자리를 찾아 넣고, 그 다음 목록
+ * 전체를 훑으며 같은 종류끼리 겹치거나 맞닿은 구간을 하나로 합친다. 병합 패스는
+ * 임시 스택을 써서, 종류가 섞여 있어도 같은 종류의 직전 구간만 상대로 삼는다.
+ * 판정에 top_end + 1 이 쓰이는 것에 주의할 것 — 딱 붙은 두 구간도 하나로 합친다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥. GFP_KERNEL 로 할당하므로 잠들 수 있다.
+ *
+ * 호출 체인: iommu_insert_device_resv_regions → [이 함수] → iommu_alloc_resv_region
+ */
 static int iommu_insert_resv_region(struct iommu_resv_region *new,
 				    struct list_head *regions)
 {
-	struct iommu_resv_region *iter, *tmp, *nr, *top;
-	LIST_HEAD(stack);
+	struct iommu_resv_region *iter, *tmp, *nr, *top;	/* [한국어] iter/tmp: 목록 순회용, nr: 새로 복제한 항목, top: 스택 맨 위의 같은 종류 항목 */
+	LIST_HEAD(stack);	/* [한국어] 병합 결과를 쌓아 두는 임시 목록. 원본 목록을 훑으며 하나씩 옮겨 담고 마지막에 통째로 되돌려 놓는다 */
 
-	nr = iommu_alloc_resv_region(new->start, new->length,
-				     new->prot, new->type, GFP_KERNEL);
-	if (!nr)
-		return -ENOMEM;
+	nr = iommu_alloc_resv_region(new->start, new->length,	/* [한국어] 호출자의 항목을 그대로 넣지 않고 복제한다 — 원본은 장치별 목록의 소유이고 곧 iommu_put_resv_regions 로 해제되기 때문 */
+				     new->prot, new->type, GFP_KERNEL);	/* [한국어] 보호 비트와 종류(DIRECT/DIRECT_RELAXABLE/MSI/RESERVED/SW_MSI)까지 그대로 복사 */
+	if (!nr)	/* [한국어] 복제 실패 */
+		return -ENOMEM;	/* [한국어] 호출자가 병합을 중단한다 */
 
 	/* First add the new element based on start address sorting */
-	list_for_each_entry(iter, regions, list) {
-		if (nr->start < iter->start ||
-		    (nr->start == iter->start && nr->type <= iter->type))
-			break;
+	list_for_each_entry(iter, regions, list) {	/* [한국어] 시작 주소 오름차순으로 삽입 위치를 찾는다 */
+		if (nr->start < iter->start ||	/* [한국어] 이 항목보다 앞서면 여기가 자리이고 */
+		    (nr->start == iter->start && nr->type <= iter->type))	/* [한국어] 시작이 같으면 종류 값이 작은 쪽을 앞에 둬 정렬을 안정화한다 */
+			break;	/* [한국어] 삽입 위치 확정 */
 	}
-	list_add_tail(&nr->list, &iter->list);
+	list_add_tail(&nr->list, &iter->list);	/* [한국어] iter 바로 앞에 넣는다. 끝까지 갔다면 iter 는 헤드이므로 목록 맨 뒤가 된다 */
 
 	/* Merge overlapping segments of type nr->type in @regions, if any */
-	list_for_each_entry_safe(iter, tmp, regions, list) {
-		phys_addr_t top_end, iter_end = iter->start + iter->length - 1;
+	list_for_each_entry_safe(iter, tmp, regions, list) {	/* [한국어] 정렬된 목록을 앞에서부터 훑으며 같은 종류끼리 겹치거나 맞닿은 구간을 합친다. 순회 중 항목을 지우므로 _safe 판 */
+		phys_addr_t top_end, iter_end = iter->start + iter->length - 1;	/* [한국어] 각 구간의 마지막 주소 (start + length - 1). 경계 계산을 닫힌 구간으로 통일한다 */
 
 		/* no merge needed on elements of different types than @new */
-		if (iter->type != new->type) {
-			list_move_tail(&iter->list, &stack);
-			continue;
+		if (iter->type != new->type) {	/* [한국어] 이번에 넣은 것과 종류가 다른 구간은 병합 대상이 아니다 */
+			list_move_tail(&iter->list, &stack);	/* [한국어] 건드리지 않고 스택으로 옮긴다 */
+			continue;	/* [한국어] 다음 항목으로 */
 		}
 
 		/* look for the last stack element of same type as @iter */
-		list_for_each_entry_reverse(top, &stack, list)
-			if (top->type == iter->type)
-				goto check_overlap;
+		list_for_each_entry_reverse(top, &stack, list)	/* [한국어] 스택을 뒤에서부터 훑어 같은 종류의 가장 최근 항목을 찾는다 — 종류가 섞여 있어도 같은 종류끼리만 병합하기 위한 것 */
+			if (top->type == iter->type)	/* [한국어] 같은 종류를 찾았다 */
+				goto check_overlap;	/* [한국어] 겹침 여부 판정으로 */
 
-		list_move_tail(&iter->list, &stack);
-		continue;
+		list_move_tail(&iter->list, &stack);	/* [한국어] 같은 종류가 스택에 없다 = 이 종류의 첫 구간이므로 그대로 쌓는다 */
+		continue;	/* [한국어] 다음 항목으로 */
 
-check_overlap:
-		top_end = top->start + top->length - 1;
+check_overlap:	/* [한국어] 스택 맨 위의 같은 종류 구간과 겹치는지 보는 지점 */
+		top_end = top->start + top->length - 1;	/* [한국어] 스택 위 구간의 마지막 주소 */
 
-		if (iter->start > top_end + 1) {
-			list_move_tail(&iter->list, &stack);
+		if (iter->start > top_end + 1) {	/* [한국어] 한 바이트라도 떨어져 있으면 별개 구간이다 (+1 이 있어 '맞닿은' 경우는 병합된다) */
+			list_move_tail(&iter->list, &stack);	/* [한국어] 합치지 않고 그대로 쌓는다 */
 		} else {
-			top->length = max(top_end, iter_end) - top->start + 1;
-			list_del(&iter->list);
-			kfree(iter);
+			top->length = max(top_end, iter_end) - top->start + 1;	/* [한국어] 겹치거나 맞닿았다 — 스택 위 구간을 늘려 둘을 하나로 만든다. iter 가 top 에 완전히 포함될 수도 있어 max 로 끝을 고른다 */
+			list_del(&iter->list);	/* [한국어] 흡수된 항목을 목록에서 뺀다 */
+			kfree(iter);	/* [한국어] 복제본이므로 여기서 해제해도 안전하다 */
 		}
 	}
-	list_splice(&stack, regions);
-	return 0;
+	list_splice(&stack, regions);	/* [한국어] 병합이 끝난 스택을 원본 목록 자리로 되돌린다. 스택에 담긴 순서가 곧 정렬 순서다 */
+	return 0;	/* [한국어] 삽입·병합 완료 */
 }
 
+/*
+ * [한국어]
+ * iommu_insert_device_resv_regions - 장치 하나의 예약 구간들을 그룹 목록에 합친다
+ *
+ * @dev_resv_regions:   드라이버가 방금 채워 준 장치별 목록
+ * @group_resv_regions: 누적 중인 그룹 전체 목록
+ * @return:             0 성공, 음수면 삽입 도중 실패
+ *
+ * 얇은 반복문이지만 소유권 관점에서 의미가 있다. 장치별 목록은 드라이버 소유라
+ * 곧 iommu_put_resv_regions 로 돌아가야 하므로, 여기서 각 항목을 그룹 목록으로
+ * 복제해 옮긴다.
+ *
+ * 실행 컨텍스트: 그룹 락을 든 채. 프로세스 문맥.
+ *
+ * 호출 체인: iommu_get_group_resv_regions → [이 함수] → iommu_insert_resv_region
+ */
 static int
 iommu_insert_device_resv_regions(struct list_head *dev_resv_regions,
 				 struct list_head *group_resv_regions)
 {
-	struct iommu_resv_region *entry;
-	int ret = 0;
+	struct iommu_resv_region *entry;	/* [한국어] 장치 하나가 알린 예약 구간들을 훑는 커서 */
+	int ret = 0;	/* [한국어] 병합 중 발생한 실패 */
 
-	list_for_each_entry(entry, dev_resv_regions, list) {
-		ret = iommu_insert_resv_region(entry, group_resv_regions);
-		if (ret)
-			break;
+	list_for_each_entry(entry, dev_resv_regions, list) {	/* [한국어] 이 장치의 예약 구간을 하나씩 */
+		ret = iommu_insert_resv_region(entry, group_resv_regions);	/* [한국어] 그룹 전체 목록에 정렬 삽입하며 겹치는 것은 합친다 */
+		if (ret)	/* [한국어] 할당 실패 등 */
+			break;	/* [한국어] 더 넣지 않고 중단 — 이미 넣은 것은 호출자가 목록째 처리한다 */
 	}
-	return ret;
+	return ret;	/* [한국어] 성공이면 0 */
 }
 
+/*
+ * [한국어]
+ * iommu_get_group_resv_regions - 그룹 전체가 요구하는 예약 구간의 합집합을 만든다
+ *
+ * @group:  대상 그룹
+ * @head:   결과를 담을 빈 목록 (호출자가 초기화해 넘긴다)
+ * @return: 0 성공, 음수면 도중 실패 (부분 결과가 head 에 남을 수 있다)
+ *
+ * 왜 장치가 아니라 그룹 단위인가 — 그룹이 곧 하나의 주소 공간을 공유하는 단위이기
+ * 때문이다. 같은 그룹의 어떤 장치가 특정 IOVA 를 직통으로 요구하면, 그 도메인을
+ * 함께 쓰는 다른 장치에게도 그 구간은 그대로 보인다. 따라서 "이 주소 공간에서
+ * 자유롭게 쓸 수 없는 범위"는 언제나 그룹 전체의 합집합이다.
+ *
+ * VFIO/iommufd 가 이 목록을 읽어 게스트에게 내줄 IOVA 범위에서 이 구간들을 빼고,
+ * dma-iommu 의 IOVA 할당자도 같은 정보로 예약 영역을 피한다.
+ *
+ * 실행 컨텍스트: 사용자 공간 read() 또는 VFIO ioctl. 프로세스 문맥, 잠들 수 있다.
+ *
+ * 호출 체인: sysfs reserved_regions, VFIO/iommufd → [이 함수]
+ *            → ops->get_resv_regions → iommu_insert_resv_region
+ */
 int iommu_get_group_resv_regions(struct iommu_group *group,
 				 struct list_head *head)
 {
-	struct group_device *device;
-	int ret = 0;
+	struct group_device *device;	/* [한국어] 그룹의 장치들을 훑는 커서 */
+	int ret = 0;	/* [한국어] 수집 결과 */
 
-	mutex_lock(&group->mutex);
-	for_each_group_device(group, device) {
-		struct list_head dev_resv_regions;
+	mutex_lock(&group->mutex);	/* [한국어] 그룹 장치 목록 보호 */
+	for_each_group_device(group, device) {	/* [한국어] 그룹은 함께 격리되는 단위이므로 예약 구간도 그룹 전체의 합집합이어야 한다 — 한 장치가 요구하는 직통 구간은 같은 도메인을 쓰는 다른 장치에게도 그대로 보인다 */
+		struct list_head dev_resv_regions;	/* [한국어] 장치 하나가 알리는 구간을 잠시 담는 목록 */
 
 		/*
 		 * Non-API groups still expose reserved_regions in sysfs,
 		 * so filter out calls that get here that way.
 		 */
-		if (!dev_has_iommu(device->dev))
-			break;
+		if (!dev_has_iommu(device->dev))	/* [한국어] VFIO 가 수동 구성한 그룹의 장치는 IOMMU 드라이버가 없어 ops 를 부를 수 없다 (위 영어 주석) */
+			break;	/* [한국어] 그런 그룹은 예약 구간 개념 자체가 없으므로 중단 */
 
-		INIT_LIST_HEAD(&dev_resv_regions);
-		iommu_get_resv_regions(device->dev, &dev_resv_regions);
-		ret = iommu_insert_device_resv_regions(&dev_resv_regions, head);
-		iommu_put_resv_regions(device->dev, &dev_resv_regions);
-		if (ret)
-			break;
+		INIT_LIST_HEAD(&dev_resv_regions);	/* [한국어] 빈 목록으로 시작 */
+		iommu_get_resv_regions(device->dev, &dev_resv_regions);	/* [한국어] 드라이버에게 이 장치의 예약 구간을 묻는다 — 인텔의 RMRR, AMD 의 unity map, MSI 창 등이 여기서 나온다 */
+		ret = iommu_insert_device_resv_regions(&dev_resv_regions, head);	/* [한국어] 그룹 목록에 정렬 삽입·병합 */
+		iommu_put_resv_regions(device->dev, &dev_resv_regions);	/* [한국어] 장치별 목록은 복제가 끝났으므로 곧바로 돌려준다 */
+		if (ret)	/* [한국어] 삽입 실패 */
+			break;	/* [한국어] 순회 중단 */
 	}
-	mutex_unlock(&group->mutex);
-	return ret;
+	mutex_unlock(&group->mutex);	/* [한국어] 목록 보호 해제 */
+	return ret;	/* [한국어] 0 이면 head 에 그룹 전체 예약 구간이 정렬·병합되어 담겨 있다 */
 }
 EXPORT_SYMBOL_GPL(iommu_get_group_resv_regions);
 
+/*
+ * [한국어]
+ * iommu_group_show_resv_regions - sysfs 의 reserved_regions 속성 읽기
+ *
+ * @group:  대상 그룹
+ * @buf:    출력 버퍼(PAGE_SIZE)
+ * @return: 쓴 바이트 수
+ *
+ * "0x<시작> 0x<끝> <종류>" 형식으로 한 줄에 한 구간씩 찍는다. QEMU 가 VFIO 장치를
+ * 게스트에 붙일 때 이 파일을 읽어, 게스트 물리 주소 배치가 이 구간들과 겹치지
+ * 않도록 조정한다 — 겹치면 게스트 메모리를 매핑하려다 예약 구간과 충돌해 실패한다.
+ *
+ * 목록은 이 함수가 유일한 소유자이므로 출력하면서 곧바로 해제한다.
+ * iommu_get_group_resv_regions 의 반환값을 보지 않는 것은 의도적이다 — 일부만
+ * 모였더라도 있는 만큼은 보여 주는 편이 낫다.
+ *
+ * 실행 컨텍스트: 사용자 공간 read(). 잠들 수 있다.
+ *
+ * 호출 체인: sysfs → iommu_group_attr_show → [이 함수] → iommu_get_group_resv_regions
+ */
 static ssize_t iommu_group_show_resv_regions(struct iommu_group *group,
 					     char *buf)
 {
-	struct iommu_resv_region *region, *next;
-	struct list_head group_resv_regions;
-	int offset = 0;
+	struct iommu_resv_region *region, *next;	/* [한국어] 출력하며 해제할 것이므로 _safe 순회용 두 포인터 */
+	struct list_head group_resv_regions;	/* [한국어] 이 호출에서만 쓰는 임시 목록 */
+	int offset = 0;	/* [한국어] 버퍼에 쓴 누적 바이트 수 */
 
-	INIT_LIST_HEAD(&group_resv_regions);
-	iommu_get_group_resv_regions(group, &group_resv_regions);
+	INIT_LIST_HEAD(&group_resv_regions);	/* [한국어] 빈 목록으로 시작 */
+	iommu_get_group_resv_regions(group, &group_resv_regions);	/* [한국어] 그룹 전체의 예약 구간을 모은다 (실패해도 부분 목록을 그대로 출력한다) */
 
-	list_for_each_entry_safe(region, next, &group_resv_regions, list) {
-		offset += sysfs_emit_at(buf, offset, "0x%016llx 0x%016llx %s\n",
-					(long long)region->start,
-					(long long)(region->start +
-						    region->length - 1),
-					iommu_group_resv_type_string[region->type]);
-		kfree(region);
+	list_for_each_entry_safe(region, next, &group_resv_regions, list) {	/* [한국어] 한 줄에 한 구간씩 찍으며 동시에 해제한다 */
+		offset += sysfs_emit_at(buf, offset, "0x%016llx 0x%016llx %s\n",	/* [한국어] 시작·끝 주소와 종류를 한 줄로. 사용자 공간(특히 VFIO/QEMU)이 이 목록을 읽어 게스트에게 그 주소 구간을 내주지 않도록 피해 간다 */
+					(long long)region->start,	/* [한국어] 시작 주소 */
+					(long long)(region->start +	/* [한국어] 끝 주소는 닫힌 구간으로 */
+						    region->length - 1),	/* [한국어] 마지막 유효 바이트 */
+					iommu_group_resv_type_string[region->type]);	/* [한국어] direct / direct-relaxable / reserved / msi 로 문자열화 */
+		kfree(region);	/* [한국어] 복제본이므로 출력 후 즉시 해제 — 이 함수가 목록의 유일한 소유자다 */
 	}
 
-	return offset;
+	return offset;	/* [한국어] sysfs 에 쓴 총 바이트 수 */
 }
 
+/*
+ * [한국어]
+ * iommu_group_show_type - sysfs 의 그룹 type 속성 읽기 (기본 도메인 종류)
+ *
+ * @group:  대상 그룹
+ * @buf:    출력 버퍼
+ * @return: 쓴 바이트 수
+ *
+ * 이 그룹이 지금 어떤 번역 정책 아래 있는지를 한 단어로 보여 준다. 관리자가
+ * "이 장치의 DMA 가 실제로 IOMMU 를 지나는가"를 확인하는 가장 빠른 방법이며,
+ * 같은 파일에 쓰면 iommu_group_store_type 이 런타임에 정책을 바꾼다.
+ *
+ * 다섯 값의 의미가 그대로 이 서브시스템의 정책 축이다 — blocked(전면 차단),
+ * identity(번역 없음), unmanaged(사용자 공간 소유), DMA(즉시 무효화),
+ * DMA-FQ(지연 무효화). 기본 도메인이 아직 서지 않았으면 "unknown".
+ *
+ * 실행 컨텍스트: 사용자 공간 read(). 그룹 락을 잡는다.
+ *
+ * 호출 체인: sysfs → iommu_group_attr_show → [이 함수]
+ */
 static ssize_t iommu_group_show_type(struct iommu_group *group,
 				     char *buf)
 {
-	char *type = "unknown";
+	char *type = "unknown";	/* [한국어] 기본 도메인이 아직 없거나 알 수 없는 종류일 때의 값 */
 
-	mutex_lock(&group->mutex);
-	if (group->default_domain) {
-		switch (group->default_domain->type) {
-		case IOMMU_DOMAIN_BLOCKED:
-			type = "blocked";
+	mutex_lock(&group->mutex);	/* [한국어] 도메인 포인터를 읽는 동안 교체되지 않도록 */
+	if (group->default_domain) {	/* [한국어] 기본 도메인이 서 있어야 종류를 말할 수 있다 */
+		switch (group->default_domain->type) {	/* [한국어] 도메인 종류를 사용자에게 보여 줄 이름으로 옮긴다 */
+		case IOMMU_DOMAIN_BLOCKED:	/* [한국어] 모든 DMA 차단 */
+			type = "blocked";	/* [한국어] 장치가 어떤 메모리에도 닿지 못한다 */
 			break;
-		case IOMMU_DOMAIN_IDENTITY:
-			type = "identity";
+		case IOMMU_DOMAIN_IDENTITY:	/* [한국어] 항등 — 번역 없이 물리 주소 그대로 */
+			type = "identity";	/* [한국어] 패스스루. 성능 최대, 격리 없음 */
 			break;
-		case IOMMU_DOMAIN_UNMANAGED:
-			type = "unmanaged";
+		case IOMMU_DOMAIN_UNMANAGED:	/* [한국어] 코어가 관리하지 않는 도메인 — VFIO/iommufd 가 직접 매핑을 넣는다 */
+			type = "unmanaged";	/* [한국어] 사용자 공간이 주소 공간을 소유한 상태 */
 			break;
-		case IOMMU_DOMAIN_DMA:
-			type = "DMA";
+		case IOMMU_DOMAIN_DMA:	/* [한국어] 커널 DMA API 용 번역 도메인, 즉시 무효화 */
+			type = "DMA";	/* [한국어] 해제 때마다 IOTLB 를 비운다 — 가장 안전한 기본값 */
 			break;
-		case IOMMU_DOMAIN_DMA_FQ:
-			type = "DMA-FQ";
+		case IOMMU_DOMAIN_DMA_FQ:	/* [한국어] 같은 번역 도메인이지만 flush queue 로 무효화를 모은다 */
+			type = "DMA-FQ";	/* [한국어] 처리량 우선. 해제 직후 잠시 옛 번역이 남는다 */
 			break;
 		}
 	}
-	mutex_unlock(&group->mutex);
+	mutex_unlock(&group->mutex);	/* [한국어] 읽기 완료 */
 
-	return sysfs_emit(buf, "%s\n", type);
+	return sysfs_emit(buf, "%s\n", type);	/* [한국어] 이 파일은 쓰기도 가능하다 — iommu_group_store_type 이 런타임에 종류를 바꾼다 */
 }
 
 static IOMMU_GROUP_ATTR(name, S_IRUGO, iommu_group_show_name, NULL);
@@ -2756,19 +2875,42 @@ EXPORT_SYMBOL_GPL(generic_device_group);
  * iommu-group per iommu driver instance shared by every device
  * probed by that iommu driver.
  */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * generic_single_device_group - IOMMU 인스턴스 하나당 그룹 하나를 공유한다
+ *
+ * @dev:    그룹을 정할 장치
+ * @return: 참조가 하나 늘어난 그룹, 또는 에러 포인터
+ *
+ * device_group 콜백의 세 가지 표준 구현 중 가장 성긴 것이다. 셋을 비교하면 격리
+ * 입도의 스펙트럼이 보인다.
+ *   - generic_device_group: 장치마다 그룹 하나. 격리가 가장 촘촘하다.
+ *   - pci_device_group:     ACS 와 DMA 별칭을 분석해 실제로 분리 가능한 최소 단위를
+ *                           찾는다. PCIe 시스템의 표준.
+ *   - 이 함수:              한 IOMMU 가 맡는 모든 장치가 한 그룹. 하드웨어가 장치를
+ *                           구별하지 못하거나 컨텍스트 표가 하나뿐인 IOMMU 용이다.
+ *
+ * 마지막 그룹이 여기 있다는 점이 중요하다. 인스턴스가 singleton_group 참조를 계속
+ * 들고 있으므로, 모든 장치가 떠나도 그룹은 살아 있다가 iommu_device_unregister
+ * 에서 비로소 해제된다.
+ *
+ * 실행 컨텍스트: 프로브 경로. iommu_probe_device_lock 아래.
+ *
+ * 호출 체인: iommu_init_device → ops->device_group == [이 함수]
+ */
 struct iommu_group *generic_single_device_group(struct device *dev)
 {
-	struct iommu_device *iommu = dev->iommu->iommu_dev;
+	struct iommu_device *iommu = dev->iommu->iommu_dev;	/* [한국어] 이 장치를 담당하는 IOMMU 인스턴스. 그룹을 인스턴스 단위로 하나만 두기 위한 기준점 */
 
-	if (!iommu->singleton_group) {
-		struct iommu_group *group;
+	if (!iommu->singleton_group) {	/* [한국어] 이 IOMMU 의 공용 그룹이 아직 없으면 (첫 장치) */
+		struct iommu_group *group;	/* [한국어] 새로 만들 그룹 */
 
-		group = iommu_group_alloc();
-		if (IS_ERR(group))
-			return group;
-		iommu->singleton_group = group;
+		group = iommu_group_alloc();	/* [한국어] 그룹 하나를 만든다 */
+		if (IS_ERR(group))	/* [한국어] 할당 실패 */
+			return group;	/* [한국어] 에러 포인터를 그대로 올린다 — 호출자가 IS_ERR 로 판별한다 */
+		iommu->singleton_group = group;	/* [한국어] 인스턴스에 매달아 둔다. 이후 모든 장치가 이것을 공유한다 */
 	}
-	return iommu_group_ref_get(iommu->singleton_group);
+	return iommu_group_ref_get(iommu->singleton_group);	/* [한국어] 장치마다 참조를 하나씩 더 잡아 돌려준다. 마지막 장치가 나가도 인스턴스가 든 참조가 남아 그룹은 유지된다 (해제는 iommu_device_unregister 가 한다) */
 }
 EXPORT_SYMBOL_GPL(generic_single_device_group);
 
@@ -2931,37 +3073,64 @@ static struct iommu_domain *__iommu_alloc_identity_domain(struct device *dev)
 	return domain;
 }
 
+/*
+ * [한국어]
+ * __iommu_group_alloc_default_domain - 요청받은 종류의 기본 도메인을 실제로 만든다
+ *
+ * @group:    도메인을 세울 그룹
+ * @req_type: 만들 종류. 0 은 여기까지 오지 않는다 — 상위에서 이미 해석된 값이다.
+ * @return:   도메인 포인터, 또는 에러 포인터
+ *
+ * 기본 도메인 결정은 3층 구조다. 이 함수는 그 맨 아래층으로, "무엇을 만들지"는
+ * 이미 정해진 상태에서 "어떻게 만들지"만 담당한다. 위층인
+ * iommu_group_alloc_default_domain 이 시스템 기본값 → DMA 로 물러서는 정책을 갖고,
+ * 그 위의 iommu_setup_default_domain 이 그룹 전체에 적용한다.
+ *
+ * 두 갈래로 나뉜다. 페이지 테이블이 필요한 종류는 __iommu_paging_domain_alloc_flags
+ * 로, 항등 도메인은 __iommu_alloc_identity_domain 으로 간다.
+ *
+ * PASID 선제 할당이 이 함수의 미묘한 부분이다. 장치가 PASID 를 낼 수 있으면 나중에
+ * SVA 를 붙일 가능성이 있는데, 하드웨어에 따라 RID 도메인과 PASID 도메인의 페이지
+ * 테이블 포맷이 달라 도메인을 통째로 갈아야 할 수 있다. 그래서 처음부터 PASID 호환
+ * 으로 만들어 두고, 드라이버가 지원하지 않으면(-EOPNOTSUPP) 조용히 평범한 도메인
+ * 으로 물러선다.
+ *
+ * 실행 컨텍스트: 그룹 락을 든 채. 프로세스 문맥, 잠들 수 있다.
+ *
+ * 호출 체인: iommu_group_alloc_default_domain → [이 함수]
+ *            → __iommu_paging_domain_alloc_flags / __iommu_alloc_identity_domain
+ */
 static struct iommu_domain *
 __iommu_group_alloc_default_domain(struct iommu_group *group, int req_type)
 {
-	struct device *dev = iommu_group_first_dev(group);
-	struct iommu_domain *dom;
+	struct device *dev = iommu_group_first_dev(group);	/* [한국어] 도메인 할당은 장치 하나를 대표로 삼아 드라이버에게 요청한다 — 그룹의 모든 장치가 같은 IOMMU 를 쓰므로 어느 것이든 답이 같다 */
+	struct iommu_domain *dom;	/* [한국어] 할당 결과 */
 
-	if (group->default_domain && group->default_domain->type == req_type)
-		return group->default_domain;
+	if (group->default_domain && group->default_domain->type == req_type)	/* [한국어] 이미 원하는 종류의 기본 도메인이 서 있으면 */
+		return group->default_domain;	/* [한국어] 다시 만들지 않고 그대로 쓴다 — sysfs 로 같은 종류를 재요청한 경우 등 */
 
 	/*
 	 * When allocating the DMA API domain assume that the driver is going to
 	 * use PASID and make sure the RID's domain is PASID compatible.
 	 */
-	if (req_type & __IOMMU_DOMAIN_PAGING) {
-		dom = __iommu_paging_domain_alloc_flags(dev, req_type,
-			   dev->iommu->max_pasids ? IOMMU_HWPT_ALLOC_PASID : 0);
+	if (req_type & __IOMMU_DOMAIN_PAGING) {	/* [한국어] 페이지 테이블이 필요한 종류(DMA/DMA_FQ/UNMANAGED) */
+		dom = __iommu_paging_domain_alloc_flags(dev, req_type,	/* [한국어] 번역 도메인을 만든다 */
+			   dev->iommu->max_pasids ? IOMMU_HWPT_ALLOC_PASID : 0);	/* [한국어] PASID 를 낼 수 있는 장치라면 처음부터 PASID 호환 도메인으로 만든다. RID 도메인과 PASID 도메인의 페이지 테이블 포맷이 다른 하드웨어가 있어, 나중에 SVA 를 붙이려 할 때 갈아엎지 않으려는 선제 조치다 (위 영어 주석) */
 
 		/*
 		 * If driver does not support PASID feature then
 		 * try to allocate non-PASID domain
 		 */
-		if (PTR_ERR(dom) == -EOPNOTSUPP)
-			dom = __iommu_paging_domain_alloc_flags(dev, req_type, 0);
+		if (PTR_ERR(dom) == -EOPNOTSUPP)	/* [한국어] 드라이버가 PASID 호환 도메인을 지원하지 않는다면 */
+			dom = __iommu_paging_domain_alloc_flags(dev, req_type, 0);	/* [한국어] 플래그 없이 평범한 도메인으로 다시 시도한다 — PASID 를 포기할 뿐 DMA 자체는 살린다 */
 
-		return dom;
+		return dom;	/* [한국어] 성공한 도메인 또는 에러 포인터 */
 	}
 
-	if (req_type == IOMMU_DOMAIN_IDENTITY)
-		return __iommu_alloc_identity_domain(dev);
+	if (req_type == IOMMU_DOMAIN_IDENTITY)	/* [한국어] 번역 없는 통과 도메인 요청 */
+		return __iommu_alloc_identity_domain(dev);	/* [한국어] 드라이버의 정적 identity_domain 이나 domain_alloc_identity 로 만든다 */
 
-	return ERR_PTR(-EINVAL);
+	return ERR_PTR(-EINVAL);	/* [한국어] 기본 도메인이 될 수 없는 종류 (BLOCKED 등) */
 }
 
 /*
@@ -3873,17 +4042,39 @@ EXPORT_SYMBOL_GPL(iommu_detach_device);
  *
  * It should not be called by drivers with driver_managed_dma = true.
  */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어)
+ * iommu_get_domain_for_dev - 이 장치에 현재 걸린 도메인을 돌려준다 (드라이버용)
+ *
+ * @dev:    조회할 장치
+ * @return: 현재 도메인, IOMMU 아래가 아니면 NULL
+ *
+ * 장치 드라이버가 자기 DMA 가 어떤 주소 공간을 지나는지 알아야 할 때 쓴다.
+ * 반환값이 바인딩된 드라이버의 수명 동안 유효한 이유는, 그 사이에는 도메인 교체가
+ * 일어나지 않기 때문이다 — 도메인을 바꾸려면 먼저 DMA 소유권을 가져가야 하고,
+ * 소유권 획득은 드라이버가 붙어 있는 장치에 대해서는 거부된다.
+ *
+ * driver_managed_dma 드라이버가 부르면 안 된다는 제약(위 영어 주석)은 그 드라이버가
+ * 소유권 규칙 밖에 있어 위 보장이 성립하지 않기 때문이다.
+ *
+ * lockdep_assert_not_held 가 있는 것에 주목할 것. 그룹 락을 든 문맥 — 즉 IOMMU
+ * 드라이버 콜백 안 — 에서 필요한 것은 iommu_driver_get_domain_for_dev 쪽이다.
+ *
+ * 실행 컨텍스트: 장치 드라이버. 그룹 락을 들지 않은 상태.
+ *
+ * 호출 체인: 장치 드라이버 → [이 함수]
+ */
 struct iommu_domain *iommu_get_domain_for_dev(struct device *dev)
 {
 	/* Caller must be a probed driver on dev */
-	struct iommu_group *group = dev->iommu_group;
+	struct iommu_group *group = dev->iommu_group;	/* [한국어] 드라이버가 자기 장치에 대해 부르므로 그룹은 이미 안정적이다 */
 
-	if (!group)
-		return NULL;
+	if (!group)	/* [한국어] IOMMU 아래에 있지 않은 장치 */
+		return NULL;	/* [한국어] 번역이 없다는 뜻 */
 
-	lockdep_assert_not_held(&group->mutex);
+	lockdep_assert_not_held(&group->mutex);	/* [한국어] 그룹 락을 든 채로 부르면 안 된다 — 이 함수는 드라이버용 겉면이고, 락을 든 문맥에서 필요한 것은 아래의 iommu_driver_get_domain_for_dev 다 */
 
-	return group->domain;
+	return group->domain;	/* [한국어] 현재 걸린 도메인. 드라이버가 바인딩된 동안에는 바뀌지 않는다 (위 영어 주석) */
 }
 EXPORT_SYMBOL_GPL(iommu_get_domain_for_dev);
 
@@ -3894,11 +4085,31 @@ EXPORT_SYMBOL_GPL(iommu_get_domain_for_dev);
  * This function can be called by an iommu driver that wants to get the physical
  * domain within an iommu callback function where group->mutex is held.
  */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어)
+ * iommu_driver_get_domain_for_dev - 콜백 안에서 '옛 도메인'을 정확히 얻는다 (IOMMU 드라이버용)
+ *
+ * @dev:    조회할 장치
+ * @return: 이 장치가 지금 실제로 붙어 있는 도메인
+ *
+ * 겉보기에는 group->domain 을 읽는 것과 같지만, PCI 함수 리셋 중에는 답이 달라진다.
+ * 리셋 경로는 도메인을 잠시 떼었다가 리셋이 끝난 뒤 다시 붙이는데, 그 사이
+ * group->domain 은 이미 '리셋 후 붙일 도메인'으로 갱신되어 있을 수 있다. 드라이버가
+ * 그것을 옛 도메인으로 오해하면 같은 도메인에서 같은 도메인으로 옮기는 무의미한
+ * 전이가 생긴다.
+ *
+ * group->resetting_domain 이 그 기간의 진짜 현재 상태를 들고 있고, 이 함수가 둘을
+ * 가려 준다. 그룹 락을 든 문맥 — IOMMU 드라이버의 attach 콜백 안 — 전용이다.
+ *
+ * 실행 컨텍스트: IOMMU 드라이버 콜백. 그룹 락을 든 상태.
+ *
+ * 호출 체인: 벤더 드라이버의 attach_dev 계열 → [이 함수]
+ */
 struct iommu_domain *iommu_driver_get_domain_for_dev(struct device *dev)
 {
-	struct iommu_group *group = dev->iommu_group;
+	struct iommu_group *group = dev->iommu_group;	/* [한국어] IOMMU 드라이버 콜백 안에서 불리므로 그룹은 반드시 있다 */
 
-	lockdep_assert_held(&group->mutex);
+	lockdep_assert_held(&group->mutex);	/* [한국어] 이 변형은 그룹 락을 든 문맥 전용이다 */
 
 	/*
 	 * Driver handles the low-level __iommu_attach_device(), including the
@@ -3908,10 +4119,10 @@ struct iommu_domain *iommu_driver_get_domain_for_dev(struct device *dev)
 	 * prevents it from re-attaching the device from group->domain (old) to
 	 * group->domain (new).
 	 */
-	if (group->resetting_domain)
-		return group->resetting_domain;
+	if (group->resetting_domain)	/* [한국어] PCI 함수 리셋 중이라면 group->domain 은 이미 '리셋 후에 붙일 새 도메인'으로 갱신되어 있을 수 있다 */
+		return group->resetting_domain;	/* [한국어] 드라이버가 봐야 하는 '옛 도메인'은 이쪽이다. 이것을 구분하지 않으면 새 도메인에서 새 도메인으로 붙이는 무의미한 전이가 생긴다 (위 영어 주석) */
 
-	return group->domain;
+	return group->domain;	/* [한국어] 리셋 중이 아니면 현재 도메인이 곧 옛 도메인이다 */
 }
 EXPORT_SYMBOL_GPL(iommu_driver_get_domain_for_dev);
 
@@ -3919,33 +4130,93 @@ EXPORT_SYMBOL_GPL(iommu_driver_get_domain_for_dev);
  * For IOMMU_DOMAIN_DMA implementations which already provide their own
  * guarantees that the group and its default domain are valid and correct.
  */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * iommu_get_dma_domain - 검사 없이 기본 도메인을 꺼낸다 (dma-iommu 전용 핫패스)
+ *
+ * @dev:    DMA 를 하려는 장치
+ * @return: 그룹의 기본 도메인
+ *
+ * dma_map_page 마다 불리는 자리라 NULL 검사조차 두지 않았다. dma-iommu 는 자신이
+ * iommu_setup_dma_ops 로 DMA API 를 갈아 끼운 장치에 대해서만 이 함수를 부르고,
+ * 그 시점에 그룹과 기본 도메인이 모두 유효함을 알고 있다.
+ *
+ * iommu_get_domain_for_dev 와의 차이가 계약의 차이다 — 저쪽은 '현재' 도메인
+ * (소유권이 넘어가면 바뀔 수 있는 것)을, 이쪽은 커널 DMA API 전용인 '기본' 도메인을
+ * 돌려준다.
+ *
+ * 실행 컨텍스트: DMA 매핑 핫패스. 아토믹 문맥 포함 어디서든.
+ *
+ * 호출 체인: dma-iommu 의 dma_map_* 구현 → [이 함수]
+ */
 struct iommu_domain *iommu_get_dma_domain(struct device *dev)
 {
-	return dev->iommu_group->default_domain;
+	return dev->iommu_group->default_domain;	/* [한국어] 검사를 전혀 하지 않는다. dma-iommu 는 자신이 붙인 장치에 대해서만 부르고 그룹·기본 도메인이 유효함을 스스로 보장하므로, 핫패스에서 조건 분기를 없앤 것이다 (위 영어 주석) */
 }
 
+/*
+ * [한국어]
+ * iommu_make_pasid_array_entry - PASID 배열에 넣을 태그 붙은 포인터를 만든다
+ *
+ * @domain: 그 PASID 에 붙일 도메인
+ * @handle: 부착 핸들. NULL 이면 도메인을 직접 저장한다.
+ * @return: xarray 에 넣을 태그 포인터
+ *
+ * pasid_array_entry_to_domain 의 짝이다. 같은 xarray 에 두 종류를 담기 위해 포인터
+ * 하위 비트에 태그를 심는다 — 커널 포인터는 최소 4바이트 정렬이라 남는 비트가 있다.
+ *
+ * 왜 두 종류인가. 커널 내부 SVA 는 도메인만 알면 되지만, iommufd 는 사용자 공간이
+ * 부착을 식별할 수 있어야 해서 핸들을 함께 둔다. 핸들이 있으면 도메인은 핸들 안에
+ * 들어가므로 배열에는 핸들만 저장하면 된다.
+ *
+ * 실행 컨텍스트: PASID 부착 경로. 그룹 락 아래.
+ *
+ * 호출 체인: iommu_attach_device_pasid, iommu_replace_device_pasid → [이 함수]
+ */
 static void *iommu_make_pasid_array_entry(struct iommu_domain *domain,
 					  struct iommu_attach_handle *handle)
 {
-	if (handle) {
-		handle->domain = domain;
-		return xa_tag_pointer(handle, IOMMU_PASID_ARRAY_HANDLE);
+	if (handle) {	/* [한국어] iommufd 처럼 부착 핸들을 함께 관리하는 사용자 */
+		handle->domain = domain;	/* [한국어] 핸들 안에 도메인을 기록해 둔다 — 나중에 pasid_array_entry_to_domain 이 여기서 꺼낸다 */
+		return xa_tag_pointer(handle, IOMMU_PASID_ARRAY_HANDLE);	/* [한국어] 핸들 포인터에 '핸들' 태그를 달아 저장한다 */
 	}
 
-	return xa_tag_pointer(domain, IOMMU_PASID_ARRAY_DOMAIN);
+	return xa_tag_pointer(domain, IOMMU_PASID_ARRAY_DOMAIN);	/* [한국어] 핸들이 없으면 도메인을 직접 저장하되 '도메인' 태그를 단다. 포인터 정렬로 남는 하위 비트에 종류를 실어 배열 하나로 두 경우를 담는다 */
 }
 
+/*
+ * [한국어]
+ * domain_iommu_ops_compatible - 이 도메인을 이 드라이버가 다룰 수 있는가
+ *
+ * @ops:    부착을 시도하는 드라이버의 콜백 표
+ * @domain: 붙이려는 도메인
+ * @return: true 면 호환
+ *
+ * 한 시스템에 서로 다른 IOMMU 가 공존할 수 있다 — ARM SoC 에서 SMMUv3 와 별개
+ * 벤더 IOMMU 가 같이 있거나, iommufd 셀프테스트의 가짜 드라이버가 끼는 경우다.
+ * 도메인의 페이지 테이블 포맷은 만든 드라이버의 것이므로, 다른 드라이버가 그것을
+ * 물면 하드웨어가 쓰레기를 워크하게 된다. 이 검사가 그 사고를 막는다.
+ *
+ * 정적 도메인이 예외인 이유는 소유자 필드가 비어 있기 때문이다. blocked/identity
+ * 도메인은 드라이버가 컴파일 시점에 들고 있는 상수라 domain_alloc 을 거치지 않고,
+ * 따라서 owner 를 채울 기회가 없다. 대신 ops 에서 직접 가리키고 있으므로 포인터
+ * 비교만으로 자기 것임을 확인할 수 있다.
+ *
+ * 실행 컨텍스트: 부착 경로. 어디서든.
+ *
+ * 호출 체인: __iommu_attach_group, iommu_attach_device_pasid 등 → [이 함수]
+ */
 static bool domain_iommu_ops_compatible(const struct iommu_ops *ops,
 					struct iommu_domain *domain)
 {
-	if (domain->owner == ops)
-		return true;
+	if (domain->owner == ops)	/* [한국어] 도메인을 만든 드라이버와 지금 부착을 시도하는 드라이버가 같다 */
+		return true;	/* [한국어] 같은 페이지 테이블 포맷이므로 붙일 수 있다 */
 
 	/* For static domains, owner isn't set. */
-	if (domain == ops->blocked_domain || domain == ops->identity_domain)
-		return true;
+	if (domain == ops->blocked_domain || domain == ops->identity_domain)	/* [한국어] 정적 도메인은 드라이버가 컴파일 시점에 들고 있는 것이라 owner 필드가 비어 있다 (위 영어 주석) */
+		return true;	/* [한국어] 그 드라이버 자신의 정적 도메인이므로 호환된다 */
 
-	return false;
+	return false;	/* [한국어] 다른 드라이버의 도메인 — 이종 IOMMU 가 섞인 시스템에서 잘못된 페이지 테이블을 물리는 것을 막는다 */
 }
 
 /*
