@@ -516,18 +516,45 @@ void intel_pasid_tear_down_entry(struct intel_iommu *iommu, struct device *dev,
  * This function flushes cache for a newly setup pasid table entry.
  * Caller of it should not modify the in-use pasid table entries.
  */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * pasid_flush_caches - 새로 세운 PASID 항목이 하드웨어에 보이게 한다
+ *
+ * @iommu: 대상 유닛. @pte: 방금 세운 항목. @pasid: 그 PASID. @did: 도메인 id.
+ * @return: 없음.
+ *
+ * 새 항목을 만든 뒤에 부른다. 항목을 "지울" 때와 달리 대개 무효화가 필요
+ * 없지만, 두 경우가 예외다.
+ *
+ *   [1] 비코히런트 유닛: 우리가 쓴 항목이 CPU 캐시에만 있어 하드웨어가 보지
+ *       못한다. clflush 로 메모리에 밀어낸다.
+ *   [2] 캐싱 모드(에뮬레이션된 IOMMU): "이 PASID 는 설정되지 않았다"까지
+ *       캐시하므로, 그 캐시를 지워야 새 항목이 보인다. PASID 캐시와 IOTLB
+ *       둘 다 비운다.
+ * 그 밖의 하드웨어에서는 쓰기 버퍼만 비우면 된다 — rwbf 를 요구하는 유닛을
+ * 위한 조치이며, 아닌 유닛에서는 사실상 아무 일도 하지 않는다.
+ *
+ * 디바이스 TLB 를 비우지 않는 것을 눈여겨볼 것: 장치는 자기가 요청한 적 없는
+ * 번역을 캐시하지 않으므로, 새 항목이 생겼다고 장치 캐시를 건드릴 이유가 없다.
+ *
+ * 위 영어 주석의 전제: 이 함수는 "새로 세운" 항목에만 쓴다. 이미 쓰이고 있던
+ * 항목을 고친 뒤라면 intel_pasid_flush_present 를 써야 한다 — 그쪽은 장치
+ * 캐시까지 비운다.
+ *
+ * 실행 컨텍스트: 항목 설정 직후, iommu->lock 을 놓은 뒤.
+ */
 static void pasid_flush_caches(struct intel_iommu *iommu,
 				struct pasid_entry *pte,
 			       u32 pasid, u16 did)
 {
-	if (!ecap_coherent(iommu->ecap))
-		clflush_cache_range(pte, sizeof(*pte));
+	if (!ecap_coherent(iommu->ecap))	/* [한국어] 비코히런트 유닛이면 */
+		clflush_cache_range(pte, sizeof(*pte));	/* [한국어] 방금 쓴 항목을 메모리로 밀어낸다 */
 
-	if (cap_caching_mode(iommu->cap)) {
-		pasid_cache_invalidation_with_pasid(iommu, did, pasid);
-		qi_flush_piotlb_all(iommu, did, pasid);
+	if (cap_caching_mode(iommu->cap)) {	/* [한국어] 캐싱 모드(에뮬레이션된 IOMMU)면 */
+		pasid_cache_invalidation_with_pasid(iommu, did, pasid);	/* [한국어] 캐시된 "이 PASID 는 설정되지 않았다"를 지운다 */
+		qi_flush_piotlb_all(iommu, did, pasid);	/* [한국어] 같은 이유로 IOTLB 도 비운다 */
 	} else {
-		iommu_flush_write_buffer(iommu);
+		iommu_flush_write_buffer(iommu);	/* [한국어] 보통의 하드웨어에서는 쓰기 버퍼만 비우면 된다. 디바이스 TLB 는 건드리지 않는다 — 장치는 요청한 적 없는 번역을 캐시하지 않는다 */
 	}
 }
 
@@ -539,13 +566,37 @@ static void pasid_flush_caches(struct intel_iommu *iommu,
  * - Flush the caches per Table 28 ”Guidance to Software for Invalidations“
  *   of VT-d spec 5.0.
  */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * intel_pasid_flush_present - 이미 쓰이고 있던 항목을 고친 뒤 캐시를 비운다
+ *
+ * @iommu: 유닛. @dev: 장치. @pasid: PASID. @did: 도메인 id. @pte: 고친 항목.
+ * @return: 없음.
+ *
+ * pasid_flush_caches 와의 차이가 핵심이다. 저쪽은 "없던 항목이 생겼다"라
+ * 하드웨어가 캐시했을 것이 없지만, 이쪽은 "쓰이던 항목이 바뀌었다"라
+ * 하드웨어와 장치가 옛 내용을 캐시하고 있다. 그래서 세 캐시를 모두 비운다.
+ *
+ * 무효화 순서와 형식은 스펙 5.0 의 Table 28 이 정한 그대로다(위 영어 주석).
+ *   1) 도메인 안에서 그 PASID 만 골라 PASID 캐시를 비운다.
+ *   2) 그 PASID 의 IOTLB 를 비운다.
+ *   3) 디바이스 TLB 를 비운다. RID_PASID(= PASID 없는 트래픽)면 그 장치의
+ *      캐시를 통째로, 아니면 PASID 를 지정해 비운다.
+ * devtlb_invalidation_with_pasid 가 3번의 두 형식을 알아서 고른다.
+ *
+ * 호출 전 조건(위 영어 주석): 호출자가 SSADE 와 P 비트를 제외한 필드만
+ * 고쳤어야 한다. present 를 건드리는 변경은 항목의 소유권이 오가는 것이라
+ * 훨씬 무거운 절차(tear_down → setup)가 필요하다.
+ *
+ * 실행 컨텍스트: 더티 추적 설정 변경 등. iommu->lock 밖에서.
+ */
 static void intel_pasid_flush_present(struct intel_iommu *iommu,
 				      struct device *dev,
 				      u32 pasid, u16 did,
 				      struct pasid_entry *pte)
 {
-	if (!ecap_coherent(iommu->ecap))
-		clflush_cache_range(pte, sizeof(*pte));
+	if (!ecap_coherent(iommu->ecap))	/* [한국어] 비코히런트 유닛이면 */
+		clflush_cache_range(pte, sizeof(*pte));	/* [한국어] 고친 항목을 메모리로 밀어낸다 */
 
 	/*
 	 * VT-d spec 5.0 table28 states guides for cache invalidation:
@@ -558,193 +609,325 @@ static void intel_pasid_flush_present(struct intel_iommu *iommu,
 	 *    - PASID-based Device-TLB invalidation (with S=1 and
 	 *      Addr[63:12]=0x7FFFFFFF_FFFFF) to affected functions
 	 */
-	pasid_cache_invalidation_with_pasid(iommu, did, pasid);
-	qi_flush_piotlb_all(iommu, did, pasid);
+	pasid_cache_invalidation_with_pasid(iommu, did, pasid);	/* [한국어] 스펙 Table 28 의 1번 — 도메인 안에서 그 PASID 만 골라 비운다 */
+	qi_flush_piotlb_all(iommu, did, pasid);	/* [한국어] 2번 — 그 PASID 의 IOTLB */
 
-	devtlb_invalidation_with_pasid(iommu, dev, pasid);
+	devtlb_invalidation_with_pasid(iommu, dev, pasid);	/* [한국어] 3번 — 장치 안의 캐시. RID_PASID 인지에 따라 형식이 갈리며 그 판단은 이 함수가 한다 */
 }
 
 /*
  * Set up the scalable mode pasid table entry for first only
  * translation type.
  */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * pasid_pte_config_first_level - 1단계 변환용 PASID 항목의 비트를 조립한다
+ *
+ * @iommu: 대상 유닛. @pte: 채울 항목. @fsptptr: 1단계 페이지 테이블의 물리 주소.
+ * @did: 도메인 id. @flags: PASID_FLAG_* 조합.
+ * @return: 없음.
+ *
+ * pasid.h 의 setter 들을 순서대로 불러 하나의 완결된 항목을 만든다. 이
+ * 파일의 pasid_pte_config_* 넷이 모두 같은 형태이며, 변환 종류마다 채우는
+ * 필드가 다르다.
+ *
+ * 순서에 두 가지 규칙이 있다.
+ *   - pasid_clear_entry 로 먼저 비운다. setter 들이 마스크 없이 |= 만 하는
+ *     경우가 있어, 이전 값이 남아 있으면 비트가 섞인다.
+ *   - pasid_set_present 를 마지막에 부른다. 그 안의 dma_wmb 가 앞의 모든
+ *     쓰기를 하드웨어에 먼저 보이게 만든다.
+ *
+ * 1단계 항목이 담는 것: 페이지 테이블 주소(flptr)와 레벨 수(flpm), 도메인 id,
+ * 주소 폭, 그리고 두 가지 스누프 설정. SVA 에서는 flptr 에 프로세스의 CR3
+ * 값이 그대로 들어간다 — 1단계 형식이 x86-64 CPU 페이지 테이블과 같기 때문이다.
+ *
+ * 실행 컨텍스트: iommu->lock 을 쥔 채(lockdep_assert_held 로 확인).
+ */
 static void pasid_pte_config_first_level(struct intel_iommu *iommu,
 					 struct pasid_entry *pte,
 					 phys_addr_t fsptptr, u16 did,
 					 int flags)
 {
-	lockdep_assert_held(&iommu->lock);
+	lockdep_assert_held(&iommu->lock);	/* [한국어] 항목 조작은 이 락 아래에서만 — setter 들이 원자적이지 않다 */
 
-	pasid_clear_entry(pte);
+	pasid_clear_entry(pte);	/* [한국어] 먼저 통째로 비운다. setter 중에 마스크 없이 |= 만 하는 것이 있어 이전 값이 남으면 비트가 섞인다 */
 
 	/* Setup the first level page table pointer: */
-	pasid_set_flptr(pte, fsptptr);
+	pasid_set_flptr(pte, fsptptr);	/* [한국어] 1단계 페이지 테이블 주소 (위 영어 주석). SVA 에서는 프로세스의 CR3 값이 그대로 들어간다 */
 
-	if (flags & PASID_FLAG_FL5LP)
-		pasid_set_flpm(pte, 1);
+	if (flags & PASID_FLAG_FL5LP)	/* [한국어] 5레벨을 쓰라고 했으면 */
+		pasid_set_flpm(pte, 1);	/* [한국어] 레벨 수를 5 로. 기본은 4레벨이다 */
 
-	if (flags & PASID_FLAG_PAGE_SNOOP)
-		pasid_set_pgsnp(pte);
+	if (flags & PASID_FLAG_PAGE_SNOOP)	/* [한국어] 페이지 워크 스누프를 요청했으면 */
+		pasid_set_pgsnp(pte);	/* [한국어] 하드웨어가 테이블을 읽을 때도 CPU 캐시를 보게 한다 */
 
-	pasid_set_domain_id(pte, did);
-	pasid_set_address_width(pte, iommu->agaw);
-	pasid_set_page_snoop(pte, flags & PASID_FLAG_PWSNP);
+	pasid_set_domain_id(pte, did);	/* [한국어] IOTLB 태그가 될 도메인 id */
+	pasid_set_address_width(pte, iommu->agaw);	/* [한국어] 이 유닛이 쓰는 주소 폭 */
+	pasid_set_page_snoop(pte, flags & PASID_FLAG_PWSNP);	/* [한국어] 데이터 DMA 의 캐시 스누프 강제 여부 */
 
 	/* Setup Present and PASID Granular Transfer Type: */
-	pasid_set_translation_type(pte, PASID_ENTRY_PGTT_FL_ONLY);
-	pasid_set_present(pte);
+	pasid_set_translation_type(pte, PASID_ENTRY_PGTT_FL_ONLY);	/* [한국어] 1단계만 쓴다고 표시 (위 영어 주석) */
+	pasid_set_present(pte);	/* [한국어] 마지막에 present 를 세운다. 그 안의 dma_wmb 가 위의 모든 쓰기를 먼저 보이게 만든다 */
 }
 
+/*
+ * [한국어]
+ * intel_pasid_setup_first_level - PASID 항목을 1단계 변환으로 세운다
+ *
+ * @iommu: 유닛. @dev: 장치. @fsptptr: 1단계 페이지 테이블의 물리 주소.
+ * @pasid: 대상 PASID. @did: 도메인 id. @flags: PASID_FLAG_* 조합.
+ * @return: 0 성공, -EINVAL(하드웨어 미지원), -ENODEV(항목 없음), -EBUSY(이미 쓰임).
+ *
+ * config 함수를 감싸 검증·락·캐시 무효화를 붙인 진입점이다. 이 파일의 네
+ * setup_* 함수가 모두 같은 골격이다.
+ *
+ * 먼저 하드웨어가 할 수 있는 일인지 확인한다. 1단계 변환 지원(ecap_flts)과,
+ * 5레벨을 요청했다면 그 지원(cap_fl5lp_support)이다. 여기서 걸러 내지 않으면
+ * 하드웨어가 이해하지 못하는 항목을 만들게 되고, 그 결과는 조용한 오동작이다.
+ *
+ * -EBUSY 의 의미: 이미 present 인 항목을 덮어쓰지 않는다. 그 PASID 를 다른
+ * 도메인이 쓰고 있다는 뜻이고, 덮어쓰면 그쪽의 매핑이 소리 없이 사라진다.
+ * 교체가 필요하면 호출자가 먼저 tear_down 해야 한다.
+ *
+ * 락을 놓은 뒤에 캐시를 비우는 순서를 눈여겨볼 것 — 무효화는 하드웨어 완료를
+ * 기다리므로 락을 쥔 채 하면 다른 장치의 부착이 그동안 막힌다.
+ *
+ * 실행 컨텍스트: 도메인 부착, SVA 설정. 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   __domain_setup_first_level()/intel_svm_set_dev_pasid()
+ *     → [intel_pasid_setup_first_level]
+ *     → pasid_pte_config_first_level() → pasid_flush_caches()
+ */
 int intel_pasid_setup_first_level(struct intel_iommu *iommu, struct device *dev,
 				  phys_addr_t fsptptr, u32 pasid, u16 did,
 				  int flags)
 {
-	struct pasid_entry *pte;
+	struct pasid_entry *pte;	/* [한국어] 세울 항목 */
 
-	if (!ecap_flts(iommu->ecap)) {
-		pr_err("No first level translation support on %s\n",
-		       iommu->name);
-		return -EINVAL;
+	if (!ecap_flts(iommu->ecap)) {	/* [한국어] 유닛이 1단계 변환을 못 하면 */
+		pr_err("No first level translation support on %s\n",	/* [한국어] 이유를 남기고 */
+		       iommu->name);	/* [한국어] 어느 유닛인지 */
+		return -EINVAL;	/* [한국어] 거절한다. 여기서 걸러 내지 않으면 하드웨어가 이해 못 하는 항목이 만들어진다 */
 	}
 
-	if ((flags & PASID_FLAG_FL5LP) && !cap_fl5lp_support(iommu->cap)) {
-		pr_err("No 5-level paging support for first-level on %s\n",
-		       iommu->name);
-		return -EINVAL;
+	if ((flags & PASID_FLAG_FL5LP) && !cap_fl5lp_support(iommu->cap)) {	/* [한국어] 5레벨을 요청했는데 지원하지 않으면 */
+		pr_err("No 5-level paging support for first-level on %s\n",	/* [한국어] 이유를 남기고 */
+		       iommu->name);	/* [한국어] 어느 유닛인지 */
+		return -EINVAL;	/* [한국어] 거절 */
 	}
 
-	spin_lock(&iommu->lock);
-	pte = intel_pasid_get_entry(dev, pasid);
-	if (!pte) {
-		spin_unlock(&iommu->lock);
-		return -ENODEV;
+	spin_lock(&iommu->lock);	/* [한국어] 항목 조작 구간 */
+	pte = intel_pasid_get_entry(dev, pasid);	/* [한국어] 그 PASID 의 항목(없으면 테이블을 만든다) */
+	if (!pte) {	/* [한국어] 만들 수 없으면 */
+		spin_unlock(&iommu->lock);	/* [한국어] 락 해제 */
+		return -ENODEV;	/* [한국어] 설정 실패 */
 	}
 
-	if (pasid_pte_is_present(pte)) {
-		spin_unlock(&iommu->lock);
-		return -EBUSY;
+	if (pasid_pte_is_present(pte)) {	/* [한국어] 이미 쓰이고 있는 항목이면 */
+		spin_unlock(&iommu->lock);	/* [한국어] 락 해제 */
+		return -EBUSY;	/* [한국어] 덮어쓰지 않는다. 덮어쓰면 그 PASID 를 쓰던 쪽의 매핑이 소리 없이 사라진다 */
 	}
 
-	pasid_pte_config_first_level(iommu, pte, fsptptr, did, flags);
+	pasid_pte_config_first_level(iommu, pte, fsptptr, did, flags);	/* [한국어] 비트를 조립해 항목을 세운다 */
 
-	spin_unlock(&iommu->lock);
+	spin_unlock(&iommu->lock);	/* [한국어] 무효화는 하드웨어 완료를 기다리므로 락을 먼저 놓는다 */
 
-	pasid_flush_caches(iommu, pte, pasid, did);
+	pasid_flush_caches(iommu, pte, pasid, did);	/* [한국어] 새 항목이 하드웨어에 보이게 한다 */
 
-	return 0;	/* [한국어] 쓸 수 있는 PASID 가 없다 */
+	return 0;	/* [한국어] 1단계 변환이 설정되었다 */
 }
 
 /*
  * Set up the scalable mode pasid entry for second only translation type.
  */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * pasid_pte_config_second_level - 2단계 변환용 PASID 항목의 비트를 조립한다
+ *
+ * @iommu: 유닛. @pte: 채울 항목. @domain: 2단계 페이지 테이블을 가진 도메인.
+ * @did: 도메인 id.
+ * @return: 없음.
+ *
+ * 1단계 판과 골격은 같지만 담는 것이 다르다. 페이지 테이블 주소를 인자로
+ * 받지 않고 도메인의 sspt 에서 직접 꺼낸다 — 2단계 테이블은 도메인이 소유하고
+ * 있어 별도로 전달할 이유가 없다.
+ *
+ * pt_iommu_vtdss_hw_info() 가 공용 페이지 테이블 라이브러리에서 하드웨어에
+ * 넘길 두 값(테이블의 물리 주소, 주소 폭)을 꺼내 준다. 그 두 값이 실제
+ * 테이블의 모양과 어긋나면 하드웨어가 엉뚱한 메모리를 테이블로 읽는다.
+ *
+ * 1단계에 없는 두 설정이 붙는다.
+ *   - pasid_set_fault_enable: 폴트 보고를 켠다.
+ *   - dirty_tracking 이면 SSADE: 2단계 페이지 테이블에 접근/더티 비트를
+ *     기록하게 한다. 더티 추적은 2단계 전용 기능이라 1단계 판에는 없다.
+ *
+ * 스누프 설정이 반대 방향인 것을 눈여겨볼 것: 도메인이 DMA_INCOHERENT 로
+ * 만들어졌으면 스누프를 켜지 않고, 아니면 켠다. 즉 "비코히런트가 아니면
+ * 스누프한다"는 부정의 부정이다.
+ *
+ * 실행 컨텍스트: iommu->lock 을 쥔 채.
+ */
 static void pasid_pte_config_second_level(struct intel_iommu *iommu,
 					  struct pasid_entry *pte,
 					  struct dmar_domain *domain, u16 did)
 {
-	struct pt_iommu_vtdss_hw_info pt_info;
+	struct pt_iommu_vtdss_hw_info pt_info;	/* [한국어] 공용 페이지 테이블 라이브러리에서 꺼낼 하드웨어용 정보 */
 
-	lockdep_assert_held(&iommu->lock);
+	lockdep_assert_held(&iommu->lock);	/* [한국어] 항목 조작은 이 락 아래에서만 */
 
-	pt_iommu_vtdss_hw_info(&domain->sspt, &pt_info);
-	pasid_clear_entry(pte);
-	pasid_set_domain_id(pte, did);
-	pasid_set_slptr(pte, pt_info.ssptptr);
-	pasid_set_address_width(pte, pt_info.aw);
-	pasid_set_translation_type(pte, PASID_ENTRY_PGTT_SL_ONLY);
-	pasid_set_fault_enable(pte);
-	pasid_set_page_snoop(pte, !(domain->sspt.vtdss_pt.common.features &
-				    BIT(PT_FEAT_DMA_INCOHERENT)));
-	if (domain->dirty_tracking)
-		pasid_set_ssade(pte);
+	pt_iommu_vtdss_hw_info(&domain->sspt, &pt_info);	/* [한국어] 테이블의 물리 주소와 주소 폭을 꺼낸다 */
+	pasid_clear_entry(pte);	/* [한국어] 먼저 통째로 비운다 */
+	pasid_set_domain_id(pte, did);	/* [한국어] IOTLB 태그가 될 도메인 id */
+	pasid_set_slptr(pte, pt_info.ssptptr);	/* [한국어] 2단계 페이지 테이블의 물리 주소 */
+	pasid_set_address_width(pte, pt_info.aw);	/* [한국어] 그 테이블의 주소 폭. 실제 깊이와 어긋나면 하드웨어가 엉뚱한 메모리를 테이블로 읽는다 */
+	pasid_set_translation_type(pte, PASID_ENTRY_PGTT_SL_ONLY);	/* [한국어] 2단계만 쓴다고 표시 */
+	pasid_set_fault_enable(pte);	/* [한국어] 폴트 보고를 켠다 */
+	pasid_set_page_snoop(pte, !(domain->sspt.vtdss_pt.common.features &	/* [한국어] 도메인이 비코히런트로 만들어지지 않았으면 */
+				    BIT(PT_FEAT_DMA_INCOHERENT)));	/* [한국어] 스누프를 켠다 — 부정의 부정이라 읽기 까다로운 자리다 */
+	if (domain->dirty_tracking)	/* [한국어] 도메인이 더티 추적 중이면 */
+		pasid_set_ssade(pte);	/* [한국어] 이 항목에도 반영한다. 더티 추적은 2단계 전용이라 1단계 판에는 없는 설정이다 */
 
-	pasid_set_present(pte);
+	pasid_set_present(pte);	/* [한국어] 마지막에 present. 그 안의 dma_wmb 가 위의 모든 쓰기를 먼저 보이게 한다 */
 }
 
+/*
+ * [한국어]
+ * intel_pasid_setup_second_level - PASID 항목을 2단계 변환으로 세운다
+ *
+ * @iommu: 유닛. @domain: 2단계 도메인. @dev: 장치. @pasid: 대상 PASID.
+ * @return: 0 성공, -EINVAL(하드웨어 미지원), -ENODEV, -EBUSY.
+ *
+ * setup_first_level 과 같은 골격이다: 하드웨어 능력 확인 → 락 → 항목 확보 →
+ * 중복 확인 → 조립 → 락 해제 → 캐시 무효화.
+ *
+ * 다른 점은 도메인 id 를 인자로 받지 않고 domain_id_iommu() 로 직접 구한다는
+ * 것이다. 2단계 도메인은 이 유닛에서 자기 id 를 갖고 있기 때문이다(1단계는
+ * SVA 처럼 id 를 갖지 않는 경우가 있어 호출자가 정해 넘긴다).
+ *
+ * 실행 컨텍스트: 도메인 부착. 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   domain_setup_second_level() → [intel_pasid_setup_second_level]
+ *     → pasid_pte_config_second_level() → pasid_flush_caches()
+ */
 int intel_pasid_setup_second_level(struct intel_iommu *iommu,
 				   struct dmar_domain *domain,
 				   struct device *dev, u32 pasid)
 {
-	struct pasid_entry *pte;
-	u16 did;
+	struct pasid_entry *pte;	/* [한국어] 세울 항목 */
+	u16 did;	/* [한국어] 이 유닛에서의 도메인 id */
 
 
 	/*
 	 * If hardware advertises no support for second level
 	 * translation, return directly.
 	 */
-	if (!ecap_slts(iommu->ecap)) {
-		pr_err("No second level translation support on %s\n",
-		       iommu->name);
-		return -EINVAL;
+	if (!ecap_slts(iommu->ecap)) {	/* [한국어] 유닛이 2단계 변환을 못 하면 (위 영어 주석) */
+		pr_err("No second level translation support on %s\n",	/* [한국어] 이유를 남기고 */
+		       iommu->name);	/* [한국어] 어느 유닛인지 */
+		return -EINVAL;	/* [한국어] 거절 */
 	}
 
-	did = domain_id_iommu(domain, iommu);
+	did = domain_id_iommu(domain, iommu);	/* [한국어] 2단계 도메인은 이 유닛에서 자기 id 를 갖고 있어 직접 구한다 */
 
-	spin_lock(&iommu->lock);
-	pte = intel_pasid_get_entry(dev, pasid);
-	if (!pte) {
-		spin_unlock(&iommu->lock);
-		return -ENODEV;
+	spin_lock(&iommu->lock);	/* [한국어] 항목 조작 구간 */
+	pte = intel_pasid_get_entry(dev, pasid);	/* [한국어] 그 PASID 의 항목 */
+	if (!pte) {	/* [한국어] 만들 수 없으면 */
+		spin_unlock(&iommu->lock);	/* [한국어] 락 해제 */
+		return -ENODEV;	/* [한국어] 설정 실패 */
 	}
 
-	if (pasid_pte_is_present(pte)) {
-		spin_unlock(&iommu->lock);
-		return -EBUSY;
+	if (pasid_pte_is_present(pte)) {	/* [한국어] 이미 쓰이고 있으면 */
+		spin_unlock(&iommu->lock);	/* [한국어] 락 해제 */
+		return -EBUSY;	/* [한국어] 덮어쓰지 않는다 */
 	}
 
-	pasid_pte_config_second_level(iommu, pte, domain, did);
-	spin_unlock(&iommu->lock);
+	pasid_pte_config_second_level(iommu, pte, domain, did);	/* [한국어] 비트를 조립한다 */
+	spin_unlock(&iommu->lock);	/* [한국어] 무효화 전에 락을 놓는다 */
 
-	pasid_flush_caches(iommu, pte, pasid, did);
+	pasid_flush_caches(iommu, pte, pasid, did);	/* [한국어] 새 항목이 하드웨어에 보이게 한다 */
 
-	return 0;
+	return 0;	/* [한국어] 2단계 변환이 설정되었다 */
 }
 
 /*
  * Set up dirty tracking on a second only or nested translation type.
  */
+/*
+ * [한국어]
+ * intel_pasid_setup_dirty_tracking - 이미 세워진 항목의 더티 추적만 켜고 끈다
+ *
+ * @iommu: 유닛. @dev: 장치. @pasid: 대상 PASID. @enabled: 켤지 끌지.
+ * @return: 0 성공(이미 원하는 상태면 아무것도 안 하고 0),
+ *          -ENODEV(항목 없음), -EOPNOTSUPP(그 변환 종류로는 불가능).
+ *
+ * 앞의 setup_* 들과 성격이 다르다. 항목을 새로 세우는 것이 아니라 이미
+ * 쓰이고 있는 항목의 비트 하나(SSADE)만 바꾼다. 그래서 present 를 건드리지
+ * 않고, 캐시 무효화도 "고친 항목"에 맞는 무거운 절차를 쓴다.
+ *
+ * 변환 종류를 확인하는 이유: 더티 추적은 2단계 페이지 테이블에 비트를
+ * 기록하는 기능이라, 2단계를 쓰지 않는 항목(1단계 전용, 통과)에서는 켤 수
+ * 없다. 그래서 PGTT 가 SL_ONLY 나 NESTED 일 때만 허용한다.
+ *
+ * 이미 원하는 상태면 곧바로 0 을 돌려주는 것이 중요하다 — 무효화는 값비싼
+ * 왕복이고, 도메인 단위 설정이 장치마다 반복해서 불리기 때문이다.
+ *
+ * 무효화 순서는 스펙 Table 25 가 정한 그대로다(코드 안 영어 주석).
+ *   1) 도메인 안에서 그 PASID 만 골라 PASID 캐시.
+ *   2) IOTLB — PGTT 가 SL 이나 Nested 이므로 도메인 단위 무효화를 쓴다.
+ *      (1단계였다면 PASID 형식이었겠지만 위에서 이미 걸러졌다.)
+ *   3) 디바이스 TLB.
+ *
+ * 실행 컨텍스트: 마이그레이션 준비. 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   domain_set_dirty_tracking() → [intel_pasid_setup_dirty_tracking]
+ *     → pasid_set_ssade()/pasid_clear_ssade()
+ *     → pasid_cache_invalidation_with_pasid() → devtlb_invalidation_with_pasid()
+ */
 int intel_pasid_setup_dirty_tracking(struct intel_iommu *iommu,
 				     struct device *dev, u32 pasid,
 				     bool enabled)
 {
-	struct pasid_entry *pte;
-	u16 did, pgtt;
+	struct pasid_entry *pte;	/* [한국어] 고칠 항목 */
+	u16 did, pgtt;	/* [한국어] 도메인 id 와 변환 종류 */
 
-	spin_lock(&iommu->lock);
+	spin_lock(&iommu->lock);	/* [한국어] 항목 조작 구간 */
 
-	pte = intel_pasid_get_entry(dev, pasid);
-	if (!pte) {
-		spin_unlock(&iommu->lock);
+	pte = intel_pasid_get_entry(dev, pasid);	/* [한국어] 그 PASID 의 항목 */
+	if (!pte) {	/* [한국어] 없으면 */
+		spin_unlock(&iommu->lock);	/* [한국어] 락 해제 */
 		dev_err_ratelimited(
-			dev, "Failed to get pasid entry of PASID %d\n", pasid);
-		return -ENODEV;
+			dev, "Failed to get pasid entry of PASID %d\n", pasid);	/* [한국어] 어느 PASID 인지 남긴다 */
+		return -ENODEV;	/* [한국어] 설정 불가 */
 	}
 
-	did = pasid_get_domain_id(pte);
-	pgtt = pasid_pte_get_pgtt(pte);
-	if (pgtt != PASID_ENTRY_PGTT_SL_ONLY &&
-	    pgtt != PASID_ENTRY_PGTT_NESTED) {
-		spin_unlock(&iommu->lock);
+	did = pasid_get_domain_id(pte);	/* [한국어] 무효화에 쓸 도메인 id */
+	pgtt = pasid_pte_get_pgtt(pte);	/* [한국어] 변환 종류. 더티 추적이 가능한지의 근거다 */
+	if (pgtt != PASID_ENTRY_PGTT_SL_ONLY &&	/* [한국어] 2단계 전용이 아니고 */
+	    pgtt != PASID_ENTRY_PGTT_NESTED) {	/* [한국어] 중첩도 아니면 */
+		spin_unlock(&iommu->lock);	/* [한국어] 락 해제 */
 		dev_err_ratelimited(
 			dev,
-			"Dirty tracking not supported on translation type %d\n",
-			pgtt);
-		return -EOPNOTSUPP;
+			"Dirty tracking not supported on translation type %d\n",	/* [한국어] 더티 비트는 2단계 페이지 테이블에 기록되므로 그것을 쓰지 않는 항목에서는 켤 수 없다 */
+			pgtt);	/* [한국어] 문제의 변환 종류 */
+		return -EOPNOTSUPP;	/* [한국어] 거절 */
 	}
 
-	if (pasid_get_ssade(pte) == enabled) {
-		spin_unlock(&iommu->lock);
-		return 0;
+	if (pasid_get_ssade(pte) == enabled) {	/* [한국어] 이미 원하는 상태면 */
+		spin_unlock(&iommu->lock);	/* [한국어] 락을 놓고 */
+		return 0;	/* [한국어] 무효화 없이 돌아간다. 도메인 단위 설정이 장치마다 반복 호출되므로 이 조기 반환이 실제로 자주 걸린다 */
 	}
 
-	if (enabled)
-		pasid_set_ssade(pte);
+	if (enabled)	/* [한국어] 켜라고 했으면 */
+		pasid_set_ssade(pte);	/* [한국어] SSADE 를 세우고 */
 	else
-		pasid_clear_ssade(pte);
-	spin_unlock(&iommu->lock);
+		pasid_clear_ssade(pte);	/* [한국어] 아니면 지운다 */
+	spin_unlock(&iommu->lock);	/* [한국어] 무효화 전에 락을 놓는다 */
 
-	if (!ecap_coherent(iommu->ecap))
-		clflush_cache_range(pte, sizeof(*pte));
+	if (!ecap_coherent(iommu->ecap))	/* [한국어] 비코히런트 유닛이면 */
+		clflush_cache_range(pte, sizeof(*pte));	/* [한국어] 고친 항목을 메모리로 밀어낸다 */
 
 	/*
 	 * From VT-d spec table 25 "Guidance to Software for Invalidations":
@@ -760,122 +943,223 @@ int intel_pasid_setup_dirty_tracking(struct intel_iommu *iommu,
 	 *    - PASID-based Device-TLB invalidation (with S=1 and
 	 *      Addr[63:12]=0x7FFFFFFF_FFFFF) to affected functions
 	 */
-	pasid_cache_invalidation_with_pasid(iommu, did, pasid);
+	pasid_cache_invalidation_with_pasid(iommu, did, pasid);	/* [한국어] 스펙 Table 25 의 1번 (위 영어 주석) */
 
-	iommu->flush.flush_iotlb(iommu, did, 0, 0, DMA_TLB_DSI_FLUSH);
+	iommu->flush.flush_iotlb(iommu, did, 0, 0, DMA_TLB_DSI_FLUSH);	/* [한국어] 2번 — PGTT 가 SL 이나 Nested 이므로 도메인 단위 IOTLB 무효화를 쓴다 */
 
-	devtlb_invalidation_with_pasid(iommu, dev, pasid);
+	devtlb_invalidation_with_pasid(iommu, dev, pasid);	/* [한국어] 3번 — 장치 안의 캐시 */
 
-	return 0;
+	return 0;	/* [한국어] 추적 설정이 반영되었다 */
 }
 
 /*
  * Set up the scalable mode pasid entry for passthrough translation type.
  */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * pasid_pte_config_pass_through - 통과 변환용 PASID 항목의 비트를 조립한다
+ *
+ * @iommu: 유닛. @pte: 채울 항목. @did: 도메인 id.
+ * @return: 없음.
+ *
+ * 통과 모드는 번역을 하지 않으므로 페이지 테이블 주소가 없다. 그래서 이
+ * config 함수만 다른 셋과 달리 주소 인자를 받지 않는다.
+ *
+ * 그래도 채워야 하는 것들:
+ *   - 도메인 id: 번역은 안 하지만 캐시 무효화의 대상 지정에는 쓰인다.
+ *   - 주소 폭: 하드웨어가 지원하는 값을 넣어야 한다. 통과 모드에서 이 필드가
+ *     무시되지 않고 "다룰 수 있는 주소 범위"를 정하기 때문이다.
+ *   - fault enable: 통과 모드라도 그 범위를 벗어난 접근은 알아야 한다.
+ *   - page snoop: 유닛이 scalable 모드 워크 코히런시를 지원하면 켠다.
+ *
+ * 이것이 레거시 모드의 CONTEXT_TT_PASS_THROUGH 에 대응하는 scalable 모드
+ * 구현이며, 항등 도메인이 이 경로로 세워진다.
+ *
+ * 실행 컨텍스트: iommu->lock 을 쥔 채.
+ */
 static void pasid_pte_config_pass_through(struct intel_iommu *iommu,
 					  struct pasid_entry *pte, u16 did)
 {
-	lockdep_assert_held(&iommu->lock);
+	lockdep_assert_held(&iommu->lock);	/* [한국어] 항목 조작은 이 락 아래에서만 */
 
-	pasid_clear_entry(pte);
-	pasid_set_domain_id(pte, did);
-	pasid_set_address_width(pte, iommu->agaw);
-	pasid_set_translation_type(pte, PASID_ENTRY_PGTT_PT);
-	pasid_set_fault_enable(pte);
-	pasid_set_page_snoop(pte, !!ecap_smpwc(iommu->ecap));
-	pasid_set_present(pte);
+	pasid_clear_entry(pte);	/* [한국어] 먼저 통째로 비운다 */
+	pasid_set_domain_id(pte, did);	/* [한국어] 번역은 안 하지만 캐시 무효화의 대상 지정에 쓰인다 */
+	pasid_set_address_width(pte, iommu->agaw);	/* [한국어] 통과 모드에서도 다룰 수 있는 주소 범위를 정한다 */
+	pasid_set_translation_type(pte, PASID_ENTRY_PGTT_PT);	/* [한국어] 통과라고 표시 — 이 값 때문에 페이지 테이블 주소 필드가 무시된다 */
+	pasid_set_fault_enable(pte);	/* [한국어] 범위를 벗어난 접근은 통과 모드에서도 알아야 한다 */
+	pasid_set_page_snoop(pte, !!ecap_smpwc(iommu->ecap));	/* [한국어] 유닛이 워크 코히런시를 지원하면 스누프를 켠다 */
+	pasid_set_present(pte);	/* [한국어] 마지막에 present */
 }
 
+/*
+ * [한국어]
+ * intel_pasid_setup_pass_through - PASID 항목을 통과 모드로 세운다
+ *
+ * @iommu: 유닛. @dev: 장치. @pasid: 대상 PASID.
+ * @return: 0 성공, -ENODEV, -EBUSY.
+ *
+ * 항등 도메인의 scalable 모드 구현이다. 다른 setup_* 과 골격이 같지만 두
+ * 가지가 다르다.
+ *   - 하드웨어 능력 검사가 없다. 통과 모드는 scalable 모드를 지원하는 모든
+ *     유닛이 할 수 있다.
+ *   - 도메인 id 를 인자로 받지 않고 FLPT_DEFAULT_DID 를 쓴다. 통과 모드는
+ *     주소 공간을 갖지 않아 도메인 id 를 할당받지 않으며, 스펙이 1단계·통과
+ *     항목에 2단계와 다른 id 를 요구하기 때문에 그 예약값을 쓴다.
+ *
+ * 실행 컨텍스트: 항등 도메인 부착. 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   identity_domain_attach_dev()/domain_setup_passthrough()
+ *     → [intel_pasid_setup_pass_through]
+ *     → pasid_pte_config_pass_through() → pasid_flush_caches()
+ */
 int intel_pasid_setup_pass_through(struct intel_iommu *iommu,
 				   struct device *dev, u32 pasid)
 {
-	u16 did = FLPT_DEFAULT_DID;
-	struct pasid_entry *pte;
+	u16 did = FLPT_DEFAULT_DID;	/* [한국어] 통과 모드는 주소 공간이 없어 도메인 id 를 할당받지 않는다. 스펙이 1단계·통과에 2단계와 다른 id 를 요구해 예약값을 쓴다 */
+	struct pasid_entry *pte;	/* [한국어] 세울 항목 */
 
-	spin_lock(&iommu->lock);
-	pte = intel_pasid_get_entry(dev, pasid);
-	if (!pte) {
-		spin_unlock(&iommu->lock);
-		return -ENODEV;
+	spin_lock(&iommu->lock);	/* [한국어] 항목 조작 구간 */
+	pte = intel_pasid_get_entry(dev, pasid);	/* [한국어] 그 PASID 의 항목 */
+	if (!pte) {	/* [한국어] 만들 수 없으면 */
+		spin_unlock(&iommu->lock);	/* [한국어] 락 해제 */
+		return -ENODEV;	/* [한국어] 설정 실패 */
 	}
 
-	if (pasid_pte_is_present(pte)) {
-		spin_unlock(&iommu->lock);
-		return -EBUSY;
+	if (pasid_pte_is_present(pte)) {	/* [한국어] 이미 쓰이고 있으면 */
+		spin_unlock(&iommu->lock);	/* [한국어] 락 해제 */
+		return -EBUSY;	/* [한국어] 덮어쓰지 않는다 */
 	}
 
-	pasid_pte_config_pass_through(iommu, pte, did);
-	spin_unlock(&iommu->lock);
+	pasid_pte_config_pass_through(iommu, pte, did);	/* [한국어] 비트를 조립한다 */
+	spin_unlock(&iommu->lock);	/* [한국어] 무효화 전에 락을 놓는다 */
 
-	pasid_flush_caches(iommu, pte, pasid, did);
+	pasid_flush_caches(iommu, pte, pasid, did);	/* [한국어] 새 항목이 하드웨어에 보이게 한다 */
 
-	return 0;
+	return 0;	/* [한국어] 이 PASID 는 이제 번역 없이 통과한다 */
 }
 
 /*
  * Set the page snoop control for a pasid entry which has been set up.
  */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * intel_pasid_setup_page_snoop_control - 이미 세워진 항목에 캐시 스누프 강제를 켠다
+ *
+ * @iommu: 유닛. @dev: 장치. @pasid: 대상 PASID.
+ * @return: 없음.
+ *
+ * dirty_tracking 판과 성격이 같다 — 쓰이고 있는 항목의 비트 하나만 바꾼다.
+ * 그래서 present 를 건드리지 않고, intel_pasid_flush_present 로 세 캐시를
+ * 모두 비운다.
+ *
+ * 언제 불리는가: VFIO/KVM 이 도메인에 강제 코히런시를 요구할 때
+ * (intel_iommu_enforce_cache_coherency_fs). 1단계 페이지 테이블은 PTE 안에
+ * 스누프 제어 비트를 둘 자리가 없어, 이미 붙어 있는 장치의 PASID 항목을
+ * 하나씩 고쳐야 한다. 2단계는 PTE 마다 SNP 비트가 있어 이 함수가 필요 없다.
+ *
+ * present 가 아니면 WARN 을 남긴다 — 아직 세우지 않은 항목에 정책만 얹는 것은
+ * 호출자의 순서 오류이고, 나중에 그 항목을 세울 때 이 설정이 덮여 사라진다.
+ *
+ * 실행 컨텍스트: 강제 코히런시 설정. 도메인 락을 쥔 채 불린다.
+ *
+ * 호출 체인:
+ *   intel_iommu_enforce_cache_coherency_fs()
+ *     → [intel_pasid_setup_page_snoop_control] → intel_pasid_flush_present()
+ */
 void intel_pasid_setup_page_snoop_control(struct intel_iommu *iommu,
 					  struct device *dev, u32 pasid)
 {
-	struct pasid_entry *pte;
-	u16 did;
+	struct pasid_entry *pte;	/* [한국어] 고칠 항목 */
+	u16 did;	/* [한국어] 무효화에 쓸 도메인 id */
 
-	spin_lock(&iommu->lock);
-	pte = intel_pasid_get_entry(dev, pasid);
-	if (WARN_ON(!pte || !pasid_pte_is_present(pte))) {
-		spin_unlock(&iommu->lock);
-		return;
+	spin_lock(&iommu->lock);	/* [한국어] 항목 조작 구간 */
+	pte = intel_pasid_get_entry(dev, pasid);	/* [한국어] 그 PASID 의 항목 */
+	if (WARN_ON(!pte || !pasid_pte_is_present(pte))) {	/* [한국어] 아직 세우지 않은 항목에 정책만 얹는 것은 호출 순서 오류다 — 나중에 항목을 세울 때 이 설정이 덮여 사라진다 */
+		spin_unlock(&iommu->lock);	/* [한국어] 락 해제 */
+		return;	/* [한국어] 아무것도 하지 않는다 */
 	}
 
-	pasid_set_pgsnp(pte);
-	did = pasid_get_domain_id(pte);
-	spin_unlock(&iommu->lock);
+	pasid_set_pgsnp(pte);	/* [한국어] 페이지 워크도 CPU 캐시를 스누프하게 한다 */
+	did = pasid_get_domain_id(pte);	/* [한국어] 무효화에 쓸 도메인 id 를 락 안에서 읽어 둔다 */
+	spin_unlock(&iommu->lock);	/* [한국어] 무효화 전에 락을 놓는다 */
 
-	intel_pasid_flush_present(iommu, dev, pasid, did, pte);
+	intel_pasid_flush_present(iommu, dev, pasid, did, pte);	/* [한국어] 쓰이고 있던 항목을 고쳤으므로 세 캐시를 모두 비운다 */
 }
 
+/*
+ * [한국어]
+ * pasid_pte_config_nestd - 중첩 변환용 PASID 항목의 비트를 조립한다
+ *
+ * @iommu: 유닛. @pte: 채울 항목. @s1_cfg: 게스트가 준 1단계 설정.
+ * @s2_domain: 부모(호스트) 2단계 도메인. @did: 도메인 id.
+ * @return: 없음.
+ *
+ * 네 config 함수 중 가장 많은 것을 담는다. 중첩에서는 1단계와 2단계 주소가
+ * 모두 유효해야 하기 때문이다.
+ *   게스트 DMA → (게스트의 1단계 테이블) → 게스트 물리 주소
+ *              → (호스트의 2단계 테이블) → 호스트 물리 주소
+ * 하드웨어가 이 두 단계를 스스로 밟으므로, 항목 하나에 두 테이블의 주소가
+ * 함께 들어간다.
+ *
+ * 신뢰 경계가 여기서 드러난다. s1_cfg 는 유저스페이스(VMM)가 준 값이라
+ * 신뢰할 수 없다. 그런데 호스트는 그 테이블을 파싱하지 않고 주소만 하드웨어에
+ * 넘긴다 — 안전한 이유는 그 테이블이 가리키는 모든 주소가 2단계 매핑을 한 번
+ * 더 거치기 때문이다. 게스트가 아무 주소나 적어도 2단계가 허용한 범위를
+ * 벗어날 수 없다.
+ *
+ * 게스트가 요청할 수 있는 것들(s1_cfg->flags):
+ *   SRE — 특권 요청 허용. WPE 는 SRE 안에서만 의미가 있어 중첩 검사를 한다.
+ *   EAFE — 확장 접근 플래그.
+ * 이 플래그들은 setup_nested 가 하드웨어 지원 여부를 먼저 확인한 뒤에만
+ * 여기 도달한다.
+ *
+ * 2단계 쪽 설정(스누프, 더티 추적)은 부모 도메인의 상태를 그대로 따른다 —
+ * 게스트가 정할 수 있는 것이 아니다.
+ *
+ * 실행 컨텍스트: iommu->lock 을 쥔 채.
+ */
 static void pasid_pte_config_nestd(struct intel_iommu *iommu,
 				   struct pasid_entry *pte,
 				   struct iommu_hwpt_vtd_s1 *s1_cfg,
 				   struct dmar_domain *s2_domain,
 				   u16 did)
 {
-	struct pt_iommu_vtdss_hw_info pt_info;
+	struct pt_iommu_vtdss_hw_info pt_info;	/* [한국어] 부모 2단계 테이블의 하드웨어용 정보 */
 
-	lockdep_assert_held(&iommu->lock);
+	lockdep_assert_held(&iommu->lock);	/* [한국어] 항목 조작은 이 락 아래에서만 */
 
-	pt_iommu_vtdss_hw_info(&s2_domain->sspt, &pt_info);
+	pt_iommu_vtdss_hw_info(&s2_domain->sspt, &pt_info);	/* [한국어] 부모 테이블의 물리 주소와 주소 폭을 꺼낸다 */
 
-	pasid_clear_entry(pte);
+	pasid_clear_entry(pte);	/* [한국어] 먼저 통째로 비운다 */
 
-	if (s1_cfg->addr_width == ADDR_WIDTH_5LEVEL)
-		pasid_set_flpm(pte, 1);
+	if (s1_cfg->addr_width == ADDR_WIDTH_5LEVEL)	/* [한국어] 게스트가 5레벨 테이블을 쓴다고 했으면 */
+		pasid_set_flpm(pte, 1);	/* [한국어] 1단계 레벨 수를 5 로 */
 
-	pasid_set_flptr(pte, s1_cfg->pgtbl_addr);
+	pasid_set_flptr(pte, s1_cfg->pgtbl_addr);	/* [한국어] 게스트의 1단계 페이지 테이블 주소. 유저스페이스가 준 값이지만, 그것이 가리키는 모든 주소가 2단계를 한 번 더 거치므로 안전하다 */
 
-	if (s1_cfg->flags & IOMMU_VTD_S1_SRE) {
-		pasid_set_sre(pte);
-		if (s1_cfg->flags & IOMMU_VTD_S1_WPE)
-			pasid_set_wpe(pte);
+	if (s1_cfg->flags & IOMMU_VTD_S1_SRE) {	/* [한국어] 게스트가 특권 요청을 요청했으면 */
+		pasid_set_sre(pte);	/* [한국어] 허용한다 */
+		if (s1_cfg->flags & IOMMU_VTD_S1_WPE)	/* [한국어] 그 안에서 쓰기 보호도 요청했으면 */
+			pasid_set_wpe(pte);	/* [한국어] 켠다. WPE 는 SRE 안에서만 의미가 있어 중첩 검사를 한다 */
 	}
 
-	if (s1_cfg->flags & IOMMU_VTD_S1_EAFE)
-		pasid_set_eafe(pte);
+	if (s1_cfg->flags & IOMMU_VTD_S1_EAFE)	/* [한국어] 확장 접근 플래그를 요청했으면 */
+		pasid_set_eafe(pte);	/* [한국어] 켠다 */
 
-	if (s2_domain->force_snooping)
-		pasid_set_pgsnp(pte);
+	if (s2_domain->force_snooping)	/* [한국어] 부모가 강제 코히런시 중이면 */
+		pasid_set_pgsnp(pte);	/* [한국어] 페이지 워크도 스누프한다. 게스트가 정할 수 있는 것이 아니라 호스트 정책이다 */
 
-	pasid_set_slptr(pte, pt_info.ssptptr);
-	pasid_set_fault_enable(pte);
-	pasid_set_domain_id(pte, did);
-	pasid_set_address_width(pte, pt_info.aw);
-	pasid_set_page_snoop(pte, !(s2_domain->sspt.vtdss_pt.common.features &
-				    BIT(PT_FEAT_DMA_INCOHERENT)));
-	if (s2_domain->dirty_tracking)
-		pasid_set_ssade(pte);
-	pasid_set_translation_type(pte, PASID_ENTRY_PGTT_NESTED);
-	pasid_set_present(pte);
+	pasid_set_slptr(pte, pt_info.ssptptr);	/* [한국어] 부모의 2단계 페이지 테이블 주소 */
+	pasid_set_fault_enable(pte);	/* [한국어] 폴트 보고를 켠다 */
+	pasid_set_domain_id(pte, did);	/* [한국어] IOTLB 태그가 될 도메인 id */
+	pasid_set_address_width(pte, pt_info.aw);	/* [한국어] 2단계 테이블의 주소 폭 */
+	pasid_set_page_snoop(pte, !(s2_domain->sspt.vtdss_pt.common.features &	/* [한국어] 부모가 비코히런트로 만들어지지 않았으면 */
+				    BIT(PT_FEAT_DMA_INCOHERENT)));	/* [한국어] 스누프를 켠다 */
+	if (s2_domain->dirty_tracking)	/* [한국어] 부모가 더티 추적 중이면 */
+		pasid_set_ssade(pte);	/* [한국어] 이 항목에도 반영한다 */
+	pasid_set_translation_type(pte, PASID_ENTRY_PGTT_NESTED);	/* [한국어] 중첩이라고 표시 — 이 값 때문에 1단계와 2단계 주소가 모두 유효해진다 */
+	pasid_set_present(pte);	/* [한국어] 마지막에 present */
 }
 
 /**
@@ -892,57 +1176,57 @@ static void pasid_pte_config_nestd(struct intel_iommu *iommu,
 int intel_pasid_setup_nested(struct intel_iommu *iommu, struct device *dev,
 			     u32 pasid, struct dmar_domain *domain)
 {
-	struct iommu_hwpt_vtd_s1 *s1_cfg = &domain->s1_cfg;
-	struct dmar_domain *s2_domain = domain->s2_domain;
-	u16 did = domain_id_iommu(domain, iommu);
-	struct pasid_entry *pte;
+	struct iommu_hwpt_vtd_s1 *s1_cfg = &domain->s1_cfg;	/* [한국어] 게스트가 준 1단계 설정 */
+	struct dmar_domain *s2_domain = domain->s2_domain;	/* [한국어] 이 도메인이 얹혀 있는 부모 */
+	u16 did = domain_id_iommu(domain, iommu);	/* [한국어] 자식 도메인의 id 를 쓴다 — 하드웨어가 이 id 로 두 단계를 모두 식별한다 */
+	struct pasid_entry *pte;	/* [한국어] 세울 항목 */
 
 	/* Address width should match the address width supported by hardware */
-	switch (s1_cfg->addr_width) {
-	case ADDR_WIDTH_4LEVEL:
-		break;
-	case ADDR_WIDTH_5LEVEL:
-		if (!cap_fl5lp_support(iommu->cap)) {
+	switch (s1_cfg->addr_width) {	/* [한국어] 게스트가 요청한 주소 폭이 하드웨어가 지원하는 것인지 (위 영어 주석) */
+	case ADDR_WIDTH_4LEVEL:	/* [한국어] 4레벨은 */
+		break;	/* [한국어] 항상 지원된다 */
+	case ADDR_WIDTH_5LEVEL:	/* [한국어] 5레벨은 */
+		if (!cap_fl5lp_support(iommu->cap)) {	/* [한국어] 하드웨어가 지원해야 한다 */
 			dev_err_ratelimited(dev,
-					    "5-level paging not supported\n");
-			return -EINVAL;
+					    "5-level paging not supported\n");	/* [한국어] 지원하지 않으면 이유를 남기고 */
+			return -EINVAL;	/* [한국어] 거절 */
 		}
-		break;
-	default:
-		dev_err_ratelimited(dev, "Invalid stage-1 address width %d\n",
-				    s1_cfg->addr_width);
-		return -EINVAL;
+		break;	/* [한국어] 지원하면 통과 */
+	default:	/* [한국어] 그 밖의 값은 */
+		dev_err_ratelimited(dev, "Invalid stage-1 address width %d\n",	/* [한국어] 유저스페이스가 이상한 값을 준 것이다 */
+				    s1_cfg->addr_width);	/* [한국어] 문제의 값 */
+		return -EINVAL;	/* [한국어] 거절 */
 	}
 
-	if ((s1_cfg->flags & IOMMU_VTD_S1_SRE) && !ecap_srs(iommu->ecap)) {
-		pr_err_ratelimited("No supervisor request support on %s\n",
-				   iommu->name);
-		return -EINVAL;
+	if ((s1_cfg->flags & IOMMU_VTD_S1_SRE) && !ecap_srs(iommu->ecap)) {	/* [한국어] 특권 요청을 요청했는데 하드웨어가 못 하면 */
+		pr_err_ratelimited("No supervisor request support on %s\n",	/* [한국어] 이유를 남기고 */
+				   iommu->name);	/* [한국어] 어느 유닛인지 */
+		return -EINVAL;	/* [한국어] 거절 */
 	}
 
-	if ((s1_cfg->flags & IOMMU_VTD_S1_EAFE) && !ecap_eafs(iommu->ecap)) {
-		pr_err_ratelimited("No extended access flag support on %s\n",
-				   iommu->name);
-		return -EINVAL;
+	if ((s1_cfg->flags & IOMMU_VTD_S1_EAFE) && !ecap_eafs(iommu->ecap)) {	/* [한국어] 확장 접근 플래그도 마찬가지 */
+		pr_err_ratelimited("No extended access flag support on %s\n",	/* [한국어] 이유를 남기고 */
+				   iommu->name);	/* [한국어] 어느 유닛인지 */
+		return -EINVAL;	/* [한국어] 거절. 이 검사들이 없으면 하드웨어가 무시하는 설정을 게스트가 켜졌다고 믿게 된다 */
 	}
 
-	spin_lock(&iommu->lock);
-	pte = intel_pasid_get_entry(dev, pasid);
-	if (!pte) {
-		spin_unlock(&iommu->lock);
-		return -ENODEV;
+	spin_lock(&iommu->lock);	/* [한국어] 항목 조작 구간 */
+	pte = intel_pasid_get_entry(dev, pasid);	/* [한국어] 그 PASID 의 항목 */
+	if (!pte) {	/* [한국어] 만들 수 없으면 */
+		spin_unlock(&iommu->lock);	/* [한국어] 락 해제 */
+		return -ENODEV;	/* [한국어] 설정 실패 */
 	}
-	if (pasid_pte_is_present(pte)) {
-		spin_unlock(&iommu->lock);
-		return -EBUSY;
+	if (pasid_pte_is_present(pte)) {	/* [한국어] 이미 쓰이고 있으면 */
+		spin_unlock(&iommu->lock);	/* [한국어] 락 해제 */
+		return -EBUSY;	/* [한국어] 덮어쓰지 않는다 */
 	}
 
-	pasid_pte_config_nestd(iommu, pte, s1_cfg, s2_domain, did);
-	spin_unlock(&iommu->lock);
+	pasid_pte_config_nestd(iommu, pte, s1_cfg, s2_domain, did);	/* [한국어] 두 단계의 주소와 정책을 담아 항목을 세운다 */
+	spin_unlock(&iommu->lock);	/* [한국어] 무효화 전에 락을 놓는다 */
 
-	pasid_flush_caches(iommu, pte, pasid, did);
+	pasid_flush_caches(iommu, pte, pasid, did);	/* [한국어] 새 항목이 하드웨어에 보이게 한다 */
 
-	return 0;
+	return 0;	/* [한국어] 중첩 변환이 설정되었다 */
 }
 
 /*
@@ -978,12 +1262,12 @@ static int pci_pasid_table_teardown(struct pci_dev *pdev, u16 alias, void *data)
 	if (dev == &pdev->dev)
 		device_pasid_table_teardown(dev, PCI_BUS_NUM(alias), alias & 0xff);
 
-	return 0;	/* [한국어] 쓸 수 있는 PASID 가 없다 */
+	return 0;
 }
 
 void intel_pasid_teardown_sm_context(struct device *dev)
 {
-	struct device_domain_info *info = dev_iommu_priv_get(dev);	/* [한국어] 할당에 쓸 NUMA 노드를 얻으려고 */
+	struct device_domain_info *info = dev_iommu_priv_get(dev);
 
 	if (!dev_is_pci(dev)) {
 		device_pasid_table_teardown(dev, info->bus, info->devfn);
