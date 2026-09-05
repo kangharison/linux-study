@@ -1754,102 +1754,164 @@ static void iommu_poll_events(struct amd_iommu *iommu)
 }
 
 #ifdef CONFIG_IRQ_REMAP
-static int (*iommu_ga_log_notifier)(u32);
+static int (*iommu_ga_log_notifier)(u32);	/* [한국어] KVM 이 등록하는 콜백. 놓친 게스트 인터럽트를 태그로 알린다 */
 
+/*
+ * [한국어]
+ * amd_iommu_register_ga_log_notifier - GA 로그 통지 콜백을 등록한다
+ *
+ * @notifier: KVM 이 넘기는 콜백. NULL 이면 해제.
+ * @return: 항상 0.
+ *
+ * GA 로그에는 게스트에 직접 전달하지 못한 인터럽트가 기록되고, KVM 이
+ * 그것을 보고 대신 주입해야 한다. 이 함수가 그 연결을 만든다.
+ *
+ * 해제할 때만 synchronize_rcu 를 부르는 이유를 원 주석이 밝힌다: 인터럽트
+ * 핸들러가 이 콜백을 실행하는 중일 수 있고, 그 상태에서 KVM 모듈이
+ * 언로드되면 사라진 코드로 점프한다. 등록할 때는 그런 위험이 없다.
+ *
+ * 호출 체인:
+ *   KVM 초기화/종료 → [이 함수]
+ */
 int amd_iommu_register_ga_log_notifier(int (*notifier)(u32))
 {
-	iommu_ga_log_notifier = notifier;
+	iommu_ga_log_notifier = notifier;	/* [한국어] KVM 이 놓친 게스트 인터럽트를 대신 주입하는 통로 */
 
 	/*
 	 * Ensure all in-flight IRQ handlers run to completion before returning
 	 * to the caller, e.g. to ensure module code isn't unloaded while it's
 	 * being executed in the IRQ handler.
 	 */
-	if (!notifier)
-		synchronize_rcu();
+	if (!notifier)	/* [한국어] (원 주석: 진행 중인 핸들러가 끝날 때까지 기다린다) */
+		synchronize_rcu();	/* [한국어] 해제할 때만 필요하다 — 핸들러가 실행 중인데 모듈이 언로드되면 사라진 코드로 점프한다 */
 
-	return 0;
+	return 0;	/* [한국어] 실패할 지점이 없다 */
 }
-EXPORT_SYMBOL(amd_iommu_register_ga_log_notifier);
+EXPORT_SYMBOL(amd_iommu_register_ga_log_notifier);	/* [한국어] KVM 모듈이 부른다 */
 
 static void iommu_poll_ga_log(struct amd_iommu *iommu)
 {
-	u32 head, tail;
+	u32 head, tail;	/* [한국어] 읽은 지점과 쌓인 지점 */
 
-	if (iommu->ga_log == NULL)
-		return;
+	if (iommu->ga_log == NULL)	/* [한국어] GA 로그를 쓰지 않는 유닛 */
+		return;	/* [한국어] 할 일이 없다 */
 
-	head = readl(iommu->mmio_base + MMIO_GA_HEAD_OFFSET);
-	tail = readl(iommu->mmio_base + MMIO_GA_TAIL_OFFSET);
+	head = readl(iommu->mmio_base + MMIO_GA_HEAD_OFFSET);	/* [한국어] 어디까지 읽었는가 */
+	tail = readl(iommu->mmio_base + MMIO_GA_TAIL_OFFSET);	/* [한국어] 어디까지 쌓였는가 */
 
-	while (head != tail) {
-		volatile u64 *raw;
-		u64 log_entry;
+	while (head != tail) {	/* [한국어] 로그를 다 비울 때까지 */
+		volatile u64 *raw;	/* [한국어] 하드웨어가 쓰는 메모리 */
+		u64 log_entry;	/* [한국어] 지역 사본 */
 
-		raw = (u64 *)(iommu->ga_log + head);
+		raw = (u64 *)(iommu->ga_log + head);	/* [한국어] 현재 항목 */
 
 		/* Avoid memcpy function-call overhead */
-		log_entry = *raw;
+		log_entry = *raw;	/* [한국어] (원 주석: memcpy 호출 오버헤드를 피한다) 항목이 8바이트뿐이다 */
 
 		/* Update head pointer of hardware ring-buffer */
-		head = (head + GA_ENTRY_SIZE) % GA_LOG_SIZE;
-		writel(head, iommu->mmio_base + MMIO_GA_HEAD_OFFSET);
+		head = (head + GA_ENTRY_SIZE) % GA_LOG_SIZE;	/* [한국어] (원 주석: 하드웨어 링의 머리를 갱신한다) */
+		writel(head, iommu->mmio_base + MMIO_GA_HEAD_OFFSET);	/* [한국어] 먼저 진행시켜 하드웨어가 자리를 재사용할 수 있게 */
 
 		/* Handle GA entry */
-		switch (GA_REQ_TYPE(log_entry)) {
-		case GA_GUEST_NR:
-			if (!iommu_ga_log_notifier)
-				break;
+		switch (GA_REQ_TYPE(log_entry)) {	/* [한국어] (원 주석: GA 항목을 처리한다) */
+		case GA_GUEST_NR:	/* [한국어] 게스트에 전달하지 못한 인터럽트 */
+			if (!iommu_ga_log_notifier)	/* [한국어] KVM 이 등록하지 않았으면 */
+				break;	/* [한국어] 처리할 곳이 없다 — 그 인터럽트는 잃는다 */
 
-			pr_debug("%s: devid=%#x, ga_tag=%#x\n",
+			pr_debug("%s: devid=%#x, ga_tag=%#x\n",	/* [한국어] 어느 장치의 어느 태그인지 */
 				 __func__, GA_DEVID(log_entry),
 				 GA_TAG(log_entry));
 
-			if (iommu_ga_log_notifier(GA_TAG(log_entry)) != 0)
-				pr_err("GA log notifier failed.\n");
+			if (iommu_ga_log_notifier(GA_TAG(log_entry)) != 0)	/* [한국어] 태그로 KVM 이 vCPU 와 벡터를 찾는다 */
+				pr_err("GA log notifier failed.\n");	/* [한국어] 주입에 실패하면 게스트가 인터럽트를 놓친다 */
 			break;
-		default:
+		default:	/* [한국어] 그 밖의 종류는 아직 정의되지 않았다 */
 			break;
 		}
 	}
 }
 
 static void
+/*
+ * [한국어]
+ * amd_iommu_set_pci_msi_domain - 장치의 MSI 를 재매핑 도메인 아래로 옮긴다
+ *
+ * @dev: 대상 장치.
+ * @iommu: 담당 유닛.
+ *
+ * 이 한 줄이 "장치의 MSI 가 반드시 재매핑을 거친다"를 성립시킨다. 이후
+ * 그 장치가 MSI 를 요청하면 커널이 자동으로 이 도메인을 통해 벡터를 잡는다.
+ *
+ * 기본 도메인을 쓰는 장치만 바꾸는 이유: 이미 다른 도메인이 배정된 장치를
+ * 덮어쓰면 안 된다. VMD 아래 장치들이 그런 경우다.
+ */
 amd_iommu_set_pci_msi_domain(struct device *dev, struct amd_iommu *iommu)
 {
-	if (!irq_remapping_enabled || !dev_is_pci(dev) ||
-	    !pci_dev_has_default_msi_parent_domain(to_pci_dev(dev)))
-		return;
+	if (!irq_remapping_enabled || !dev_is_pci(dev) ||	/* [한국어] 재매핑이 꺼져 있거나 PCI 장치가 아니거나 */
+	    !pci_dev_has_default_msi_parent_domain(to_pci_dev(dev)))	/* [한국어] 이미 다른 도메인이 배정됐으면(VMD 아래 장치 등) */
+		return;	/* [한국어] 손대지 않는다 */
 
-	dev_set_msi_domain(dev, iommu->ir_domain);
+	dev_set_msi_domain(dev, iommu->ir_domain);	/* [한국어] 이후 이 장치의 MSI 는 반드시 재매핑을 거친다 */
 }
 
 #else /* CONFIG_IRQ_REMAP */
 static inline void
+/*
+ * [한국어] 재매핑을 끈 커널용 빈 구현.
+ * 도메인 자체가 존재하지 않으므로 바꿀 것이 없다. 호출부를 #ifdef 로
+ * 감싸지 않기 위해 빈 함수를 둔다.
+ */
 amd_iommu_set_pci_msi_domain(struct device *dev, struct amd_iommu *iommu) { }
 #endif /* !CONFIG_IRQ_REMAP */
 
+/*
+ * [한국어]
+ * amd_iommu_handle_irq - 로그 인터럽트를 처리하는 공통 절차
+ *
+ * @data: 대상 유닛.
+ * @evt_type: 로그 이름(로그 메시지용).
+ * @int_mask: 그 로그의 인터럽트 상태 비트.
+ * @overflow_mask: 오버플로 상태 비트.
+ * @int_handler: 로그를 비우는 함수.
+ * @overflow_handler: 넘쳤을 때 되살리는 함수.
+ *
+ * 세 로그가 같은 구조라 하나로 합쳤다.
+ *
+ * 상태 비트를 먼저 지우고 처리하는 순서가 중요하다. 처리 중에 새 항목이
+ * 쌓이면 그 인터럽트를 놓치지 않기 위해서다 — 먼저 지워야 새 사건이
+ * 비트를 다시 세울 수 있다.
+ *
+ * while 루프가 원 주석이 설명하는 ERBT1312 결함 대응이다. 상태 비트를
+ * 지우는 순간 하드웨어가 그 비트를 다시 세울 수 있고, 그러면 이후
+ * 인터럽트가 막힌다. 그래서 처리 후 상태를 다시 읽어, 비트가 남아 있으면
+ * 한 번 더 돈다.
+ *
+ * 실행 컨텍스트: 인터럽트 스레드.
+ *
+ * 호출 체인:
+ *   amd_iommu_int_thread_*() → [이 함수] → iommu_poll_events() 등
+ */
 static void amd_iommu_handle_irq(void *data, const char *evt_type,
 				 u32 int_mask, u32 overflow_mask,
 				 void (*int_handler)(struct amd_iommu *),
 				 void (*overflow_handler)(struct amd_iommu *))
 {
-	struct amd_iommu *iommu = (struct amd_iommu *) data;
-	u32 status = readl(iommu->mmio_base + MMIO_STATUS_OFFSET);
-	u32 mask = int_mask | overflow_mask;
+	struct amd_iommu *iommu = (struct amd_iommu *) data;	/* [한국어] 대상 유닛 */
+	u32 status = readl(iommu->mmio_base + MMIO_STATUS_OFFSET);	/* [한국어] 현재 상태 */
+	u32 mask = int_mask | overflow_mask;	/* [한국어] 이 로그와 관련된 비트들 */
 
-	while (status & mask) {
+	while (status & mask) {	/* [한국어] ERBT1312 대응 — 아래 재판독과 짝을 이룬다 */
 		/* Enable interrupt sources again */
-		writel(mask, iommu->mmio_base + MMIO_STATUS_OFFSET);
+		writel(mask, iommu->mmio_base + MMIO_STATUS_OFFSET);	/* [한국어] (원 주석: 인터럽트 원인을 다시 활성화한다) 처리 전에 지워야 그 사이의 새 사건을 놓치지 않는다 */
 
-		if (int_handler) {
-			pr_devel("Processing IOMMU (ivhd%d) %s Log\n",
+		if (int_handler) {	/* [한국어] 로그를 비우는 함수가 있으면 */
+			pr_devel("Processing IOMMU (ivhd%d) %s Log\n",	/* [한국어] 어느 유닛의 어느 로그인지 */
 				 iommu->index, evt_type);
-			int_handler(iommu);
+			int_handler(iommu);	/* [한국어] 쌓인 항목을 모두 처리한다 */
 		}
 
-		if ((status & overflow_mask) && overflow_handler)
-			overflow_handler(iommu);
+		if ((status & overflow_mask) && overflow_handler)	/* [한국어] 넘쳤고 되살리는 함수가 있으면 */
+			overflow_handler(iommu);	/* [한국어] 로그를 다시 켠다. 잃은 항목은 돌아오지 않는다 */
 
 		/*
 		 * Hardware bug: ERBT1312
@@ -1864,46 +1926,94 @@ static void amd_iommu_handle_irq(void *data, const char *evt_type,
 		 * If not, driver will need to go through the interrupt handler
 		 * again and re-clear the bits
 		 */
-		status = readl(iommu->mmio_base + MMIO_STATUS_OFFSET);
+		status = readl(iommu->mmio_base + MMIO_STATUS_OFFSET);	/* [한국어] (원 주석: ERBT1312 — 비트를 지우는 순간 하드웨어가 다시 세울 수 있고, 그러면 이후 인터럽트가 막힌다) */
 	}
 }
 
+/*
+ * [한국어]
+ * amd_iommu_int_thread_evtlog - 이벤트 로그 인터럽트 핸들러
+ *
+ * @irq: 인터럽트 번호(쓰지 않는다).
+ * @data: 대상 유닛.
+ * @return: 항상 IRQ_HANDLED.
+ *
+ * 공통 절차에 이벤트 로그의 비트와 함수만 넘긴다.
+ *
+ * 항상 IRQ_HANDLED 를 돌려주는 이유: x2APIC 모드에서는 로그마다 전용
+ * 인터럽트라 우리 것이 아닐 수 없고, MSI 모드에서는 통합 핸들러가 세
+ * 로그를 모두 확인한다.
+ */
 irqreturn_t amd_iommu_int_thread_evtlog(int irq, void *data)
 {
-	amd_iommu_handle_irq(data, "Evt", MMIO_STATUS_EVT_INT_MASK,
-			     MMIO_STATUS_EVT_OVERFLOW_MASK,
-			     iommu_poll_events, amd_iommu_restart_event_logging);
+	amd_iommu_handle_irq(data, "Evt", MMIO_STATUS_EVT_INT_MASK,	/* [한국어] 이벤트 로그의 비트와 */
+			     MMIO_STATUS_EVT_OVERFLOW_MASK,	/* [한국어] 오버플로 비트 */
+			     iommu_poll_events, amd_iommu_restart_event_logging);	/* [한국어] 비우는 함수와 되살리는 함수 */
 
-	return IRQ_HANDLED;
+	return IRQ_HANDLED;	/* [한국어] 상태 비트를 보고 자기 것이 아니면 곧바로 돌아가므로 항상 처리했다고 답해도 된다 */
 }
 
+/*
+ * [한국어]
+ * amd_iommu_int_thread_pprlog - PPR 로그 인터럽트 핸들러
+ *
+ * @irq: 인터럽트 번호.
+ * @data: 대상 유닛.
+ * @return: 항상 IRQ_HANDLED.
+ *
+ * 장치가 낸 페이지 폴트를 꺼내 처리 큐에 넣는다. 오버플로가 나면 그 사이의
+ * 요청을 잃어 해당 장치들이 멈출 수 있다.
+ */
 irqreturn_t amd_iommu_int_thread_pprlog(int irq, void *data)
 {
-	amd_iommu_handle_irq(data, "PPR", MMIO_STATUS_PPR_INT_MASK,
-			     MMIO_STATUS_PPR_OVERFLOW_MASK,
-			     amd_iommu_poll_ppr_log, amd_iommu_restart_ppr_log);
+	amd_iommu_handle_irq(data, "PPR", MMIO_STATUS_PPR_INT_MASK,	/* [한국어] PPR 로그의 비트 */
+			     MMIO_STATUS_PPR_OVERFLOW_MASK,	/* [한국어] 오버플로 비트 */
+			     amd_iommu_poll_ppr_log, amd_iommu_restart_ppr_log);	/* [한국어] 폴트를 꺼내 큐에 넣는 함수 */
 
-	return IRQ_HANDLED;
+	return IRQ_HANDLED;	/* [한국어] 처리 완료 */
 }
 
+/*
+ * [한국어]
+ * amd_iommu_int_thread_galog - GA 로그 인터럽트 핸들러
+ *
+ * @irq: 인터럽트 번호.
+ * @data: 대상 유닛.
+ * @return: 항상 IRQ_HANDLED.
+ *
+ * 재매핑을 끈 커널에서는 몸통이 통째로 비어 있다. 그래도 함수가 있어야
+ * 하는 이유: 인터럽트 등록 코드가 이 이름을 참조한다.
+ */
 irqreturn_t amd_iommu_int_thread_galog(int irq, void *data)
 {
 #ifdef CONFIG_IRQ_REMAP
-	amd_iommu_handle_irq(data, "GA", MMIO_STATUS_GALOG_INT_MASK,
-			     MMIO_STATUS_GALOG_OVERFLOW_MASK,
-			     iommu_poll_ga_log, amd_iommu_restart_ga_log);
+	amd_iommu_handle_irq(data, "GA", MMIO_STATUS_GALOG_INT_MASK,	/* [한국어] GA 로그의 비트 */
+			     MMIO_STATUS_GALOG_OVERFLOW_MASK,	/* [한국어] 오버플로 비트 */
+			     iommu_poll_ga_log, amd_iommu_restart_ga_log);	/* [한국어] 놓친 게스트 인터럽트를 KVM 에 넘기는 함수 */
 #endif
 
-	return IRQ_HANDLED;
+	return IRQ_HANDLED;	/* [한국어] 재매핑을 끈 커널에서는 몸통이 비어 있다 */
 }
 
+/*
+ * [한국어]
+ * amd_iommu_int_thread - 세 로그를 모두 확인하는 통합 핸들러
+ *
+ * @irq: 인터럽트 번호.
+ * @data: 대상 유닛.
+ * @return: 항상 IRQ_HANDLED.
+ *
+ * MSI 모드에서 쓴다. 인터럽트가 하나뿐이라 어느 로그의 것인지 알 수 없어
+ * 셋을 모두 확인한다 — 각 핸들러가 상태 비트를 보고 자기 것이 아니면
+ * 곧바로 돌아가므로 낭비가 크지 않다.
+ */
 irqreturn_t amd_iommu_int_thread(int irq, void *data)
 {
-	amd_iommu_int_thread_evtlog(irq, data);
-	amd_iommu_int_thread_pprlog(irq, data);
-	amd_iommu_int_thread_galog(irq, data);
+	amd_iommu_int_thread_evtlog(irq, data);	/* [한국어] 인터럽트가 하나뿐이라 어느 로그인지 알 수 없어 */
+	amd_iommu_int_thread_pprlog(irq, data);	/* [한국어] 셋을 모두 확인한다 */
+	amd_iommu_int_thread_galog(irq, data);	/* [한국어] 각자 상태 비트를 보고 자기 것이 아니면 곧바로 돌아간다 */
 
-	return IRQ_HANDLED;
+	return IRQ_HANDLED;	/* [한국어] 처리 완료 */
 }
 
 /****************************************************************************
@@ -1912,21 +2022,33 @@ irqreturn_t amd_iommu_int_thread(int irq, void *data)
  *
  ****************************************************************************/
 
+/*
+ * [한국어]
+ * dump_command_buffer - 명령 버퍼 전체를 로그에 찍는다
+ *
+ * @iommu: 대상 유닛.
+ *
+ * 완료 대기가 타임아웃했을 때 부른다. 하드웨어가 명령을 소화하지 못하는
+ * 상황이라, 무엇이 들어 있었는지가 원인 추적의 유일한 단서다.
+ *
+ * 512개 항목을 전부 찍는 이유: 링이라 머리 바깥에도 옛 명령이 남아 있고,
+ * 그 잔해가 "언제 멈췄는가"를 알려 준다.
+ */
 static void dump_command_buffer(struct amd_iommu *iommu)
 {
-	struct iommu_cmd *cmd;
-	u32 head, tail;
-	int i;
+	struct iommu_cmd *cmd;	/* [한국어] 현재 슬롯의 명령 */
+	u32 head, tail;	/* [한국어] 하드웨어가 처리한 지점과 드라이버가 넣은 지점 */
+	int i;	/* [한국어] 슬롯 인덱스 */
 
-	head = readl(iommu->mmio_base + MMIO_CMD_HEAD_OFFSET);
-	tail = readl(iommu->mmio_base + MMIO_CMD_TAIL_OFFSET);
+	head = readl(iommu->mmio_base + MMIO_CMD_HEAD_OFFSET);	/* [한국어] 어디까지 처리했는가 */
+	tail = readl(iommu->mmio_base + MMIO_CMD_TAIL_OFFSET);	/* [한국어] 어디까지 넣었는가 — 둘의 차이가 밀린 명령 수다 */
 
-	pr_err("CMD Buffer head=%llu tail=%llu\n", MMIO_CMD_BUFFER_HEAD(head),
+	pr_err("CMD Buffer head=%llu tail=%llu\n", MMIO_CMD_BUFFER_HEAD(head),	/* [한국어] 슬롯 번호로 바꿔 찍는다 */
 	       MMIO_CMD_BUFFER_TAIL(tail));
 
-	for (i = 0; i < CMD_BUFFER_ENTRIES; i++) {
-		cmd = (struct iommu_cmd *)(iommu->cmd_buf + i * sizeof(*cmd));
-		pr_err("%3d: %08x %08x %08x %08x\n", i, cmd->data[0], cmd->data[1], cmd->data[2],
+	for (i = 0; i < CMD_BUFFER_ENTRIES; i++) {	/* [한국어] 512개 전부 — 머리 바깥의 잔해도 단서가 된다 */
+		cmd = (struct iommu_cmd *)(iommu->cmd_buf + i * sizeof(*cmd));	/* [한국어] 그 슬롯의 명령 */
+		pr_err("%3d: %08x %08x %08x %08x\n", i, cmd->data[0], cmd->data[1], cmd->data[2],	/* [한국어] 네 워드를 원시값으로 */
 		       cmd->data[3]);
 	}
 }
