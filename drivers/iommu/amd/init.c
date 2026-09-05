@@ -6544,159 +6544,251 @@ disable_snp:
  *
  ****************************************************************************/
 
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * parse_amd_iommu_dump - amd_iommu_dump 옵션을 처리한다
+ *
+ * @str: 옵션 문자열(값이 없다).
+ * @return: 항상 1 (처리했음).
+ *
+ * IVRS 표의 항목을 하나하나 로그에 찍게 한다. 평소에는 부팅 로그를
+ * 뒤덮으므로 옵션으로만 켠다.
+ */
 static int __init parse_amd_iommu_dump(char *str)
 {
-	amd_iommu_dump = true;
+	amd_iommu_dump = true;	/* [한국어] IVRS 항목을 하나하나 찍게 한다 */
 
-	return 1;
+	return 1;	/* [한국어] 옵션을 처리했음을 알린다 */
 }
 
+/*
+ * [한국어]
+ * parse_amd_iommu_intr - 게스트 인터럽트 전달 모드를 지정한다
+ *
+ * @str: "legacy" 또는 "vapic".
+ * @return: 항상 1.
+ *
+ * legacy 가 LEGACY 가 아니라 LEGACY_GA 로 가는 것이 눈에 띈다. 사용자가
+ * 원하는 것은 "게스트 직접 전달을 쓰지 않는 것"이지 "32비트 IRTE 로
+ * 되돌리는 것"이 아니기 때문이다.
+ */
 static int __init parse_amd_iommu_intr(char *str)
 {
-	for (; *str; ++str) {
-		if (strncmp(str, "legacy", 6) == 0) {
-			amd_iommu_guest_ir = AMD_IOMMU_GUEST_IR_LEGACY_GA;
-			break;
+	for (; *str; ++str) {	/* [한국어] 문자열 어디에서든 키워드를 찾는다 */
+		if (strncmp(str, "legacy", 6) == 0) {	/* [한국어] 게스트 직접 전달을 쓰지 않겠다면 */
+			amd_iommu_guest_ir = AMD_IOMMU_GUEST_IR_LEGACY_GA;	/* [한국어] 128비트 형식은 유지한다 — 사용자가 원하는 것은 전달을 끄는 것이지 형식을 되돌리는 것이 아니다 */
+			break;	/* [한국어] 찾았으면 끝 */
 		}
-		if (strncmp(str, "vapic", 5) == 0) {
-			amd_iommu_guest_ir = AMD_IOMMU_GUEST_IR_VAPIC;
+		if (strncmp(str, "vapic", 5) == 0) {	/* [한국어] 게스트 직접 전달을 쓰겠다면 */
+			amd_iommu_guest_ir = AMD_IOMMU_GUEST_IR_VAPIC;	/* [한국어] 최선의 모드로 */
 			break;
 		}
 	}
-	return 1;
+	return 1;	/* [한국어] 처리 완료 */
 }
 
+/*
+ * [한국어]
+ * parse_amd_iommu_options - amd_iommu= 의 쉼표로 구분된 옵션들을 처리한다
+ *
+ * @str: 옵션 문자열.
+ * @return: 1 처리 완료, -EINVAL 이면 문자열이 없다.
+ *
+ * 대부분은 전역 플래그 하나를 세우는 것이지만, 두 부류가 눈에 띈다.
+ *
+ * 페이지 크기 제한(nohugepages, v2_pgsizes_only): 코어에 광고할 페이지
+ * 크기를 줄인다. 큰 페이지에서만 나타나는 하드웨어 문제를 우회하거나,
+ * 매핑 동작을 예측 가능하게 만들기 위한 진단용 옵션이다.
+ *
+ * fullflush 는 폐기된 이름이라 새 옵션을 안내하고 같은 효과를 적용한다.
+ *
+ * 모르는 옵션은 알리기만 하고 넘어간다 — 오타 하나로 부팅을 막을 이유가 없다.
+ *
+ * 파싱 루프의 마지막 두 줄이 쉼표 구분을 처리한다: 다음 쉼표까지 건너뛰고,
+ * 연속된 쉼표도 넘긴다.
+ */
 static int __init parse_amd_iommu_options(char *str)
 {
-	if (!str)
-		return -EINVAL;
+	if (!str)	/* [한국어] 값이 없다 */
+		return -EINVAL;	/* [한국어] 처리할 것이 없다 */
 
-	while (*str) {
-		if (strncmp(str, "fullflush", 9) == 0) {
-			pr_warn("amd_iommu=fullflush deprecated; use iommu.strict=1 instead\n");
-			iommu_set_dma_strict();
-		} else if (strncmp(str, "force_enable", 12) == 0) {
-			amd_iommu_force_enable = true;
-		} else if (strncmp(str, "off", 3) == 0) {
-			amd_iommu_disabled = true;
-		} else if (strncmp(str, "force_isolation", 15) == 0) {
-			amd_iommu_force_isolation = true;
-		} else if (strncmp(str, "pgtbl_v1", 8) == 0) {
-			amd_iommu_pgtable = PD_MODE_V1;
-		} else if (strncmp(str, "pgtbl_v2", 8) == 0) {
-			amd_iommu_pgtable = PD_MODE_V2;
-		} else if (strncmp(str, "irtcachedis", 11) == 0) {
-			amd_iommu_irtcachedis = true;
-		} else if (strncmp(str, "nohugepages", 11) == 0) {
-			pr_info("Restricting V1 page-sizes to 4KiB");
-			amd_iommu_pgsize_bitmap = AMD_IOMMU_PGSIZES_4K;
-		} else if (strncmp(str, "v2_pgsizes_only", 15) == 0) {
-			pr_info("Restricting V1 page-sizes to 4KiB/2MiB/1GiB");
-			amd_iommu_pgsize_bitmap = AMD_IOMMU_PGSIZES_V2;
+	while (*str) {	/* [한국어] 쉼표로 구분된 옵션들을 하나씩 */
+		if (strncmp(str, "fullflush", 9) == 0) {	/* [한국어] 폐기된 이름 */
+			pr_warn("amd_iommu=fullflush deprecated; use iommu.strict=1 instead\n");	/* [한국어] 새 옵션을 안내하고 */
+			iommu_set_dma_strict();	/* [한국어] 같은 효과를 적용한다 */
+		} else if (strncmp(str, "force_enable", 12) == 0) {	/* [한국어] 알려진 문제 기종에서도 켜라 */
+			amd_iommu_force_enable = true;	/* [한국어] detect_ivrs 의 기종 검사를 건너뛴다 */
+		} else if (strncmp(str, "off", 3) == 0) {	/* [한국어] IOMMU 를 쓰지 마라 */
+			amd_iommu_disabled = true;	/* [한국어] 상태 기계가 CMDLINE_DISABLED 로 간다 */
+		} else if (strncmp(str, "force_isolation", 15) == 0) {	/* [한국어] 장치를 그룹으로 묶지 마라 */
+			amd_iommu_force_isolation = true;	/* [한국어] 보안을 위해 성능을 내주는 선택 */
+		} else if (strncmp(str, "pgtbl_v1", 8) == 0) {	/* [한국어] v1 페이지 테이블을 써라 */
+			amd_iommu_pgtable = PD_MODE_V1;	/* [한국어] IOMMU 고유 형식 */
+		} else if (strncmp(str, "pgtbl_v2", 8) == 0) {	/* [한국어] v2 를 써라 */
+			amd_iommu_pgtable = PD_MODE_V2;	/* [한국어] x86-64 형식 — SVA 가 가능해진다 */
+		} else if (strncmp(str, "irtcachedis", 11) == 0) {	/* [한국어] 인터럽트 재매핑 캐시를 꺼라 */
+			amd_iommu_irtcachedis = true;	/* [한국어] 특정 errata 우회용 */
+		} else if (strncmp(str, "nohugepages", 11) == 0) {	/* [한국어] 큰 페이지를 쓰지 마라 */
+			pr_info("Restricting V1 page-sizes to 4KiB");	/* [한국어] 제한을 알리고 */
+			amd_iommu_pgsize_bitmap = AMD_IOMMU_PGSIZES_4K;	/* [한국어] 코어에 4KB 만 광고한다 */
+		} else if (strncmp(str, "v2_pgsizes_only", 15) == 0) {	/* [한국어] v2 가 지원하는 크기만 써라 */
+			pr_info("Restricting V1 page-sizes to 4KiB/2MiB/1GiB");	/* [한국어] 제한을 알리고 */
+			amd_iommu_pgsize_bitmap = AMD_IOMMU_PGSIZES_V2;	/* [한국어] 세 가지만 광고한다 */
 		} else {
-			pr_notice("Unknown option - '%s'\n", str);
+			pr_notice("Unknown option - '%s'\n", str);	/* [한국어] 오타 하나로 부팅을 막을 이유가 없다 */
 		}
 
-		str += strcspn(str, ",");
-		while (*str == ',')
-			str++;
+		str += strcspn(str, ",");	/* [한국어] 다음 쉼표까지 건너뛴다 */
+		while (*str == ',')	/* [한국어] 연속된 쉼표도 */
+			str++;	/* [한국어] 넘긴다 */
 	}
 
-	return 1;
+	return 1;	/* [한국어] 모든 옵션을 처리했다 */
 }
 
+/*
+ * [한국어]
+ * parse_ivrs_ioapic - ivrs_ioapic= 로 IOAPIC 대응을 손수 지정한다
+ *
+ * @str: "=<id>@<seg>:<bus>:<dev>.<fn>" 형식.
+ * @return: 항상 1.
+ *
+ * 펌웨어가 IVRS 표에 IOAPIC 을 빠뜨렸거나 잘못 적은 기계에서 사용자가
+ * 직접 고칠 수 있게 하는 통로다(quirks.c 가 알려진 기종에 대해 자동으로
+ * 하는 일과 같다).
+ *
+ * 두 가지 형식을 받아들인다. 대괄호를 쓰는 옛 형식은 폐기되었지만 여전히
+ * 동작하며, 경고와 함께 새 형식을 안내한다. 세그먼트를 생략한 짧은 형식은
+ * 세그먼트 0 으로 해석한다.
+ *
+ * cmdline_maps 를 세우는 것이 부수적이지만 중요하다. 나중에
+ * check_ioapic_information 이 그 값을 보고, 표에 없는 IOAPIC 을 발견해도
+ * 펌웨어 버그라고 단정하지 않는다.
+ *
+ * 배열이 가득 차면 무시하고 알린다 — 이 시점에는 목록 자료구조를 쓸 수
+ * 없어 고정 크기 배열이기 때문이다.
+ */
 static int __init parse_ivrs_ioapic(char *str)
 {
-	u32 seg = 0, bus, dev, fn;
-	int id, i;
-	u32 devid;
+	u32 seg = 0, bus, dev, fn;	/* [한국어] 세그먼트는 생략 가능해 0 으로 시작 */
+	int id, i;	/* [한국어] IOAPIC 번호와 배열 인덱스 */
+	u32 devid;	/* [한국어] 조립한 요청자 id */
 
-	if (sscanf(str, "=%d@%x:%x.%x", &id, &bus, &dev, &fn) == 4 ||
-	    sscanf(str, "=%d@%x:%x:%x.%x", &id, &seg, &bus, &dev, &fn) == 5)
-		goto found;
+	if (sscanf(str, "=%d@%x:%x.%x", &id, &bus, &dev, &fn) == 4 ||	/* [한국어] 세그먼트를 생략한 새 형식 */
+	    sscanf(str, "=%d@%x:%x:%x.%x", &id, &seg, &bus, &dev, &fn) == 5)	/* [한국어] 세그먼트를 포함한 새 형식 */
+		goto found;	/* [한국어] 파싱 성공 */
 
-	if (sscanf(str, "[%d]=%x:%x.%x", &id, &bus, &dev, &fn) == 4 ||
-	    sscanf(str, "[%d]=%x:%x:%x.%x", &id, &seg, &bus, &dev, &fn) == 5) {
-		pr_warn("ivrs_ioapic%s option format deprecated; use ivrs_ioapic=%d@%04x:%02x:%02x.%d instead\n",
+	if (sscanf(str, "[%d]=%x:%x.%x", &id, &bus, &dev, &fn) == 4 ||	/* [한국어] 대괄호를 쓰는 옛 형식 */
+	    sscanf(str, "[%d]=%x:%x:%x.%x", &id, &seg, &bus, &dev, &fn) == 5) {	/* [한국어] 세그먼트를 포함한 옛 형식 */
+		pr_warn("ivrs_ioapic%s option format deprecated; use ivrs_ioapic=%d@%04x:%02x:%02x.%d instead\n",	/* [한국어] 여전히 동작하지만 새 형식을 안내한다 */
 			str, id, seg, bus, dev, fn);
-		goto found;
+		goto found;	/* [한국어] 파싱 성공 */
 	}
 
-	pr_err("Invalid command line: ivrs_ioapic%s\n", str);
-	return 1;
+	pr_err("Invalid command line: ivrs_ioapic%s\n", str);	/* [한국어] 어느 형식에도 맞지 않는다 */
+	return 1;	/* [한국어] 무시하고 부팅을 계속한다 */
 
 found:
-	if (early_ioapic_map_size == EARLY_MAP_SIZE) {
-		pr_err("Early IOAPIC map overflow - ignoring ivrs_ioapic%s\n",
+	if (early_ioapic_map_size == EARLY_MAP_SIZE) {	/* [한국어] 고정 배열이 가득 찼다 */
+		pr_err("Early IOAPIC map overflow - ignoring ivrs_ioapic%s\n",	/* [한국어] 이 시점에는 목록 자료구조를 쓸 수 없다 */
 			str);
-		return 1;
+		return 1;	/* [한국어] 이 항목은 무시한다 */
 	}
 
-	devid = IVRS_GET_SBDF_ID(seg, bus, dev, fn);
+	devid = IVRS_GET_SBDF_ID(seg, bus, dev, fn);	/* [한국어] 네 값을 조회 키로 합친다 */
 
-	cmdline_maps			= true;
-	i				= early_ioapic_map_size++;
-	early_ioapic_map[i].id		= id;
-	early_ioapic_map[i].devid	= devid;
-	early_ioapic_map[i].cmd_line	= true;
+	cmdline_maps			= true;	/* [한국어] check_ioapic_information 이 이 값을 보고 펌웨어를 탓하지 않는다 */
+	i				= early_ioapic_map_size++;	/* [한국어] 배열의 다음 칸 */
+	early_ioapic_map[i].id		= id;	/* [한국어] IOAPIC 번호 */
+	early_ioapic_map[i].devid	= devid;	/* [한국어] 요청자 id */
+	early_ioapic_map[i].cmd_line	= true;	/* [한국어] 표의 값보다 우선한다는 표시 */
 
-	return 1;
+	return 1;	/* [한국어] 등록 완료 */
 }
 
+/*
+ * [한국어]
+ * parse_ivrs_hpet - ivrs_hpet= 로 HPET 대응을 손수 지정한다
+ *
+ * @str: IOAPIC 과 같은 형식.
+ * @return: 항상 1.
+ *
+ * parse_ivrs_ioapic 과 완전히 같은 구조이고 대상만 다르다. HPET 도 PCI
+ * 장치가 아니어서 펌웨어가 요청자 id 를 알려 줘야 한다.
+ */
 static int __init parse_ivrs_hpet(char *str)
 {
-	u32 seg = 0, bus, dev, fn;
-	int id, i;
-	u32 devid;
+	u32 seg = 0, bus, dev, fn;	/* [한국어] IOAPIC 파서와 같은 구조 */
+	int id, i;	/* [한국어] HPET 번호와 배열 인덱스 */
+	u32 devid;	/* [한국어] 조회 키 */
 
-	if (sscanf(str, "=%d@%x:%x.%x", &id, &bus, &dev, &fn) == 4 ||
-	    sscanf(str, "=%d@%x:%x:%x.%x", &id, &seg, &bus, &dev, &fn) == 5)
-		goto found;
+	if (sscanf(str, "=%d@%x:%x.%x", &id, &bus, &dev, &fn) == 4 ||	/* [한국어] 세그먼트 생략 */
+	    sscanf(str, "=%d@%x:%x:%x.%x", &id, &seg, &bus, &dev, &fn) == 5)	/* [한국어] 세그먼트 포함 */
+		goto found;	/* [한국어] 성공 */
 
-	if (sscanf(str, "[%d]=%x:%x.%x", &id, &bus, &dev, &fn) == 4 ||
-	    sscanf(str, "[%d]=%x:%x:%x.%x", &id, &seg, &bus, &dev, &fn) == 5) {
-		pr_warn("ivrs_hpet%s option format deprecated; use ivrs_hpet=%d@%04x:%02x:%02x.%d instead\n",
+	if (sscanf(str, "[%d]=%x:%x.%x", &id, &bus, &dev, &fn) == 4 ||	/* [한국어] 옛 형식 */
+	    sscanf(str, "[%d]=%x:%x:%x.%x", &id, &seg, &bus, &dev, &fn) == 5) {	/* [한국어] 옛 형식(세그먼트 포함) */
+		pr_warn("ivrs_hpet%s option format deprecated; use ivrs_hpet=%d@%04x:%02x:%02x.%d instead\n",	/* [한국어] 새 형식을 안내 */
 			str, id, seg, bus, dev, fn);
-		goto found;
+		goto found;	/* [한국어] 성공 */
 	}
 
-	pr_err("Invalid command line: ivrs_hpet%s\n", str);
-	return 1;
+	pr_err("Invalid command line: ivrs_hpet%s\n", str);	/* [한국어] 형식 오류 */
+	return 1;	/* [한국어] 무시 */
 
 found:
-	if (early_hpet_map_size == EARLY_MAP_SIZE) {
-		pr_err("Early HPET map overflow - ignoring ivrs_hpet%s\n",
+	if (early_hpet_map_size == EARLY_MAP_SIZE) {	/* [한국어] 배열이 가득 찼다 */
+		pr_err("Early HPET map overflow - ignoring ivrs_hpet%s\n",	/* [한국어] 무시하고 알린다 */
 			str);
-		return 1;
+		return 1;	/* [한국어] 계속 */
 	}
 
-	devid = IVRS_GET_SBDF_ID(seg, bus, dev, fn);
+	devid = IVRS_GET_SBDF_ID(seg, bus, dev, fn);	/* [한국어] 조회 키로 합친다 */
 
-	cmdline_maps			= true;
-	i				= early_hpet_map_size++;
-	early_hpet_map[i].id		= id;
-	early_hpet_map[i].devid		= devid;
-	early_hpet_map[i].cmd_line	= true;
+	cmdline_maps			= true;	/* [한국어] 사용자 지정이 있음을 기록 */
+	i				= early_hpet_map_size++;	/* [한국어] 배열의 다음 칸 */
+	early_hpet_map[i].id		= id;	/* [한국어] HPET 번호 */
+	early_hpet_map[i].devid		= devid;	/* [한국어] 요청자 id */
+	early_hpet_map[i].cmd_line	= true;	/* [한국어] 우선순위 표시 */
 
-	return 1;
+	return 1;	/* [한국어] 등록 완료 */
 }
 
-#define ACPIID_LEN (ACPIHID_UID_LEN + ACPIHID_HID_LEN)
+#define ACPIID_LEN (ACPIHID_UID_LEN + ACPIHID_HID_LEN)	/* [한국어] HID 와 UID 를 콜론으로 이은 문자열의 최대 길이 */
 
+/*
+ * [한국어]
+ * parse_ivrs_acpihid - ivrs_acpihid= 로 ACPI HID 장치의 대응을 지정한다
+ *
+ * @str: "=<hid>:<uid>@<seg>:<bus>:<dev>.<fn>" 형식.
+ * @return: 항상 1.
+ *
+ * 앞의 두 파서보다 복잡한 이유는 식별자가 숫자가 아니라 문자열이기
+ * 때문이다. '@' 를 찾아 거기서 문자열을 잘라 앞은 HID:UID, 뒤는 주소로
+ * 나눈다.
+ *
+ * UID 의 앞자리 0 을 건너뛰는 처리가 세심하다. 원 주석이 예를 드는데,
+ * "AMDI0095:00" 과 "AMDI0095:0" 이 같은 장치를 뜻하지만 문자열 비교로는
+ * 다르다. ACPI 쪽 비교 함수가 그렇게 동작하므로 여기서 미리 맞춘다.
+ *
+ * 길이 검사가 두 번 있는 이유: HID 와 UID 의 버퍼 크기가 다르고, 넘치면
+ * memcpy 가 이웃 필드를 덮어쓴다.
+ */
 static int __init parse_ivrs_acpihid(char *str)
 {
-	u32 seg = 0, bus, dev, fn;
-	char *hid, *uid, *p, *addr;
-	char acpiid[ACPIID_LEN + 1] = { }; /* size with NULL terminator */
-	int i;
+	u32 seg = 0, bus, dev, fn;	/* [한국어] 세그먼트는 생략 가능 */
+	char *hid, *uid, *p, *addr;	/* [한국어] 문자열을 잘라 가리킬 포인터들 */
+	char acpiid[ACPIID_LEN + 1] = { }; /* size with NULL terminator */	/* [한국어] HID:UID 를 담을 버퍼 (원 주석: 널 종료 포함 크기) */
+	int i;	/* [한국어] 배열 인덱스 */
 
-	addr = strchr(str, '@');
-	if (!addr) {
-		addr = strchr(str, '=');
-		if (!addr)
-			goto not_found;
+	addr = strchr(str, '@');	/* [한국어] 새 형식은 @ 로 식별자와 주소를 나눈다 */
+	if (!addr) {	/* [한국어] @ 가 없으면 옛 형식일 수 있다 */
+		addr = strchr(str, '=');	/* [한국어] = 를 찾아 */
+		if (!addr)	/* [한국어] 그것도 없으면 */
+			goto not_found;	/* [한국어] 형식 오류 */
 
-		++addr;
+		++addr;	/* [한국어] = 다음부터가 값이다 */
 
 		if (strlen(addr) > ACPIID_LEN)
 			goto not_found;
@@ -6705,68 +6797,68 @@ static int __init parse_ivrs_acpihid(char *str)
 		    sscanf(str, "[%x:%x:%x.%x]=%s", &seg, &bus, &dev, &fn, acpiid) == 5) {
 			pr_warn("ivrs_acpihid%s option format deprecated; use ivrs_acpihid=%s@%04x:%02x:%02x.%d instead\n",
 				str, acpiid, seg, bus, dev, fn);
-			goto found;
+			goto found;	/* [한국어] 옛 형식으로 파싱 성공 */
 		}
-		goto not_found;
+		goto not_found;	/* [한국어] 옛 형식으로도 맞지 않는다 */
 	}
 
 	/* We have the '@', make it the terminator to get just the acpiid */
-	*addr++ = 0;
+	*addr++ = 0;	/* [한국어] (원 주석: @ 를 종료 문자로 만들어 앞부분만 acpiid 로 얻는다) */
 
-	if (strlen(str) > ACPIID_LEN)
-		goto not_found;
+	if (strlen(str) > ACPIID_LEN)	/* [한국어] 버퍼보다 길면 */
+		goto not_found;	/* [한국어] 담을 수 없다 */
 
-	if (sscanf(str, "=%s", acpiid) != 1)
-		goto not_found;
+	if (sscanf(str, "=%s", acpiid) != 1)	/* [한국어] = 다음의 HID:UID 를 뽑는다 */
+		goto not_found;	/* [한국어] 형식 오류 */
 
-	if (sscanf(addr, "%x:%x.%x", &bus, &dev, &fn) == 3 ||
-	    sscanf(addr, "%x:%x:%x.%x", &seg, &bus, &dev, &fn) == 4)
-		goto found;
+	if (sscanf(addr, "%x:%x.%x", &bus, &dev, &fn) == 3 ||	/* [한국어] @ 뒤의 주소 — 세그먼트 생략 */
+	    sscanf(addr, "%x:%x:%x.%x", &seg, &bus, &dev, &fn) == 4)	/* [한국어] 세그먼트 포함 */
+		goto found;	/* [한국어] 파싱 성공 */
 
 not_found:
-	pr_err("Invalid command line: ivrs_acpihid%s\n", str);
-	return 1;
+	pr_err("Invalid command line: ivrs_acpihid%s\n", str);	/* [한국어] 어느 형식에도 맞지 않는다 */
+	return 1;	/* [한국어] 무시하고 부팅을 계속한다 */
 
 found:
-	p = acpiid;
-	hid = strsep(&p, ":");
-	uid = p;
+	p = acpiid;	/* [한국어] HID:UID 문자열 */
+	hid = strsep(&p, ":");	/* [한국어] 콜론 앞이 HID */
+	uid = p;	/* [한국어] 뒤가 UID */
 
-	if (!hid || !(*hid) || !uid) {
-		pr_err("Invalid command line: hid or uid\n");
-		return 1;
+	if (!hid || !(*hid) || !uid) {	/* [한국어] 둘 중 하나라도 비었으면 */
+		pr_err("Invalid command line: hid or uid\n");	/* [한국어] 장치를 식별할 수 없다 */
+		return 1;	/* [한국어] 무시 */
 	}
 
 	/*
 	 * Ignore leading zeroes after ':', so e.g., AMDI0095:00
 	 * will match AMDI0095:0 in the second strcmp in acpi_dev_hid_uid_match
 	 */
-	while (*uid == '0' && *(uid + 1))
-		uid++;
+	while (*uid == '0' && *(uid + 1))	/* [한국어] (원 주석: 콜론 뒤의 앞자리 0 을 무시한다) */
+		uid++;	/* [한국어] "AMDI0095:00" 과 "AMDI0095:0" 이 같은 장치를 뜻하는데 문자열 비교로는 다르기 때문이다 */
 
-	if (strlen(hid) >= ACPIHID_HID_LEN) {
-		pr_err("Invalid command line: hid is too long\n");
-		return 1;
-	} else if (strlen(uid) >= ACPIHID_UID_LEN) {
-		pr_err("Invalid command line: uid is too long\n");
-		return 1;
+	if (strlen(hid) >= ACPIHID_HID_LEN) {	/* [한국어] HID 가 버퍼보다 길면 */
+		pr_err("Invalid command line: hid is too long\n");	/* [한국어] memcpy 가 이웃 필드를 덮어쓴다 */
+		return 1;	/* [한국어] 무시 */
+	} else if (strlen(uid) >= ACPIHID_UID_LEN) {	/* [한국어] UID 도 같은 검사 */
+		pr_err("Invalid command line: uid is too long\n");	/* [한국어] 버퍼 크기가 달라 따로 검사한다 */
+		return 1;	/* [한국어] 무시 */
 	}
 
-	i = early_acpihid_map_size++;
-	memcpy(early_acpihid_map[i].hid, hid, strlen(hid));
-	memcpy(early_acpihid_map[i].uid, uid, strlen(uid));
-	early_acpihid_map[i].devid = IVRS_GET_SBDF_ID(seg, bus, dev, fn);
-	early_acpihid_map[i].cmd_line	= true;
+	i = early_acpihid_map_size++;	/* [한국어] 배열의 다음 칸 */
+	memcpy(early_acpihid_map[i].hid, hid, strlen(hid));	/* [한국어] HID 문자열 */
+	memcpy(early_acpihid_map[i].uid, uid, strlen(uid));	/* [한국어] 앞자리 0 을 뗀 UID */
+	early_acpihid_map[i].devid = IVRS_GET_SBDF_ID(seg, bus, dev, fn);	/* [한국어] 조회 키로 합친 요청자 id */
+	early_acpihid_map[i].cmd_line	= true;	/* [한국어] 표의 값보다 우선한다는 표시 */
 
-	return 1;
+	return 1;	/* [한국어] 등록 완료 */
 }
 
-__setup("amd_iommu_dump",	parse_amd_iommu_dump);
-__setup("amd_iommu=",		parse_amd_iommu_options);
-__setup("amd_iommu_intr=",	parse_amd_iommu_intr);
-__setup("ivrs_ioapic",		parse_ivrs_ioapic);
-__setup("ivrs_hpet",		parse_ivrs_hpet);
-__setup("ivrs_acpihid",		parse_ivrs_acpihid);
+__setup("amd_iommu_dump",	parse_amd_iommu_dump);	/* [한국어] 상세 로그 옵션을 커널 명령줄 파서에 등록한다 */
+__setup("amd_iommu=",		parse_amd_iommu_options);	/* [한국어] 쉼표로 구분된 여러 옵션 */
+__setup("amd_iommu_intr=",	parse_amd_iommu_intr);	/* [한국어] 게스트 인터럽트 전달 모드 */
+__setup("ivrs_ioapic",		parse_ivrs_ioapic);	/* [한국어] IOAPIC 대응 재정의 */
+__setup("ivrs_hpet",		parse_ivrs_hpet);	/* [한국어] HPET 대응 재정의 */
+__setup("ivrs_acpihid",		parse_ivrs_acpihid);	/* [한국어] ACPI HID 장치 대응 재정의 */
 
 bool amd_iommu_pasid_supported(void)
 {
