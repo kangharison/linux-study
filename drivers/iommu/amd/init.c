@@ -1602,6 +1602,22 @@ void amd_iommu_restart_log(struct amd_iommu *iommu, const char *evt_type,
  * This function restarts event logging in case the IOMMU experienced
  * an event log buffer overflow.
  */
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * amd_iommu_restart_event_logging - 넘친 이벤트 로그를 되살린다
+ *
+ * @iommu: 대상 유닛.
+ *
+ * 이벤트 로그가 넘쳤다는 것은 그 사이의 오류 보고를 잃었다는 뜻이다.
+ * PPR 과 달리 잃어도 장치가 멈추지는 않지만, 문제의 원인을 알려 줄 기록이
+ * 사라진다.
+ *
+ * 공통 절차에 이벤트 로그의 비트만 넘긴다.
+ *
+ * 호출 체인:
+ *   amd_iommu_int_thread_evtlog() → [이 함수] → amd_iommu_restart_log()
+ */
 void amd_iommu_restart_event_logging(struct amd_iommu *iommu)
 {
 	amd_iommu_restart_log(iommu, "Event", CONTROL_EVT_INT_EN,	/* [한국어] 세 로그가 같은 절차를 쓴다 */
@@ -1612,6 +1628,19 @@ void amd_iommu_restart_event_logging(struct amd_iommu *iommu)
 /*
  * This function restarts event logging in case the IOMMU experienced
  * GA log overflow.
+ */
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * amd_iommu_restart_ga_log - 넘친 GA 로그를 되살린다
+ *
+ * @iommu: 대상 유닛.
+ *
+ * GA 로그가 넘치면 게스트에 전달하지 못한 인터럽트의 기록이 사라지고,
+ * KVM 이 그것을 대신 주입할 수 없게 된다 — 게스트가 인터럽트를 놓친다.
+ *
+ * 호출 체인:
+ *   amd_iommu_int_thread_galog() → [이 함수] → amd_iommu_restart_log()
  */
 void amd_iommu_restart_ga_log(struct amd_iommu *iommu)
 {
@@ -2106,81 +2135,162 @@ static int __init remap_or_alloc_cwwb_sem(struct amd_iommu *iommu)
 	return 0;	/* [한국어] 성공 */
 }
 
+/*
+ * [한국어]
+ * alloc_iommu_buffers - 유닛의 세 버퍼를 모두 준비한다
+ *
+ * @iommu: 대상 유닛.
+ * @return: 0 성공, 음수면 어느 하나가 실패.
+ *
+ * kdump 인지에 따라 통째로 길이 갈린다. 물려받은 커널에서는 세 버퍼를 모두
+ * 옛 커널의 것으로 이어 쓰고(원 주석), 평범한 부팅에서는 새로 잡는다.
+ *
+ * 순서가 같은 것이 눈에 띈다: 완료 대기 → 명령 → 이벤트. 완료 대기가
+ * 먼저인 이유는 명령 버퍼를 켤 때 이미 그 주소가 필요하기 때문이다.
+ *
+ * 실패하면 되감지 않고 그대로 돌아가는데, 호출자(init_iommu_one)가
+ * free_iommu_buffers 로 부분적으로 잡힌 것까지 함께 정리한다.
+ *
+ * 호출 체인:
+ *   init_iommu_one() → [이 함수]
+ */
 static int __init alloc_iommu_buffers(struct amd_iommu *iommu)
 {
-	int ret;
+	int ret;	/* [한국어] 각 단계의 결과 */
 
 	/*
 	 * Reuse/Remap the previous kernel's allocated completion wait
 	 * command and event buffers for kdump boot.
 	 */
-	if (is_kdump_kernel()) {
-		ret = remap_or_alloc_cwwb_sem(iommu);
+	if (is_kdump_kernel()) {	/* [한국어] (원 주석: kdump 에서는 옛 커널의 버퍼를 이어 쓴다) */
+		ret = remap_or_alloc_cwwb_sem(iommu);	/* [한국어] 완료 대기 메모리부터 — 명령 버퍼를 켤 때 이미 필요하다 */
 		if (ret)
 			return ret;
 
-		ret = remap_command_buffer(iommu);
+		ret = remap_command_buffer(iommu);	/* [한국어] 명령 버퍼. 처리 중인 명령이 있을 수 있어 이어 쓰는 것이 중요하다 */
 		if (ret)
 			return ret;
 
-		ret = remap_event_buffer(iommu);
+		ret = remap_event_buffer(iommu);	/* [한국어] 이벤트 버퍼 */
 		if (ret)
 			return ret;
 	} else {
-		ret = alloc_cwwb_sem(iommu);
+		ret = alloc_cwwb_sem(iommu);	/* [한국어] 평범한 부팅에서는 새로 잡는다. 순서는 같다 */
 		if (ret)
 			return ret;
 
-		ret = alloc_command_buffer(iommu);
+		ret = alloc_command_buffer(iommu);	/* [한국어] 명령 버퍼 */
 		if (ret)
 			return ret;
 
-		ret = alloc_event_buffer(iommu);
+		ret = alloc_event_buffer(iommu);	/* [한국어] 이벤트 버퍼 */
 		if (ret)
 			return ret;
 	}
 
-	return 0;
+	return 0;	/* [한국어] 세 버퍼가 모두 준비됐다 */
 }
 
+/*
+ * [한국어]
+ * free_cwwb_sem - 완료 대기 메모리를 놓는다 (평범한 부팅)
+ *
+ * @iommu: 대상 유닛.
+ */
 static void __init free_cwwb_sem(struct amd_iommu *iommu)
 {
-	if (iommu->cmd_sem)
-		iommu_free_pages((void *)iommu->cmd_sem);
+	if (iommu->cmd_sem)	/* [한국어] 잡히지 않았을 수 있다 */
+		iommu_free_pages((void *)iommu->cmd_sem);	/* [한국어] 평범한 부팅에서는 우리가 잡은 페이지다 */
 }
+/*
+ * [한국어]
+ * unmap_cwwb_sem - 완료 대기 메모리를 놓는다 (kdump)
+ *
+ * @iommu: 대상 유닛.
+ *
+ * kdump 안에서도 한 번 더 갈린다. SNP 환경에서는 옛 커널의 메모리를
+ * 매핑해 이어 썼으므로 매핑 해제이고, 아니면 새로 잡았으므로 페이지
+ * 반납이다 — remap_or_alloc_cwwb_sem 의 두 갈래와 정확히 짝이 맞는다.
+ */
 static void __init unmap_cwwb_sem(struct amd_iommu *iommu)
 {
-	if (iommu->cmd_sem) {
-		if (check_feature(FEATURE_SNP))
-			memunmap((void *)iommu->cmd_sem);
+	if (iommu->cmd_sem) {	/* [한국어] 잡히지 않았을 수 있다 */
+		if (check_feature(FEATURE_SNP))	/* [한국어] SNP 에서는 옛 커널의 메모리를 매핑해 이어 썼다 */
+			memunmap((void *)iommu->cmd_sem);	/* [한국어] 그래서 매핑 해제 */
 		else
-			iommu_free_pages((void *)iommu->cmd_sem);
+			iommu_free_pages((void *)iommu->cmd_sem);	/* [한국어] 아니면 새로 잡았으므로 페이지 반납 */
 	}
 }
 
+/*
+ * [한국어]
+ * unmap_command_buffer - 물려받은 명령 버퍼의 매핑을 푼다
+ *
+ * @iommu: 대상 유닛.
+ *
+ * kdump 전용이다. 옛 커널의 메모리이므로 해제하지 않고 매핑만 푼다 —
+ * 그 페이지의 주인은 우리가 아니다.
+ */
 static void __init unmap_command_buffer(struct amd_iommu *iommu)
 {
-	memunmap((void *)iommu->cmd_buf);
+	memunmap((void *)iommu->cmd_buf);	/* [한국어] 옛 커널의 페이지이므로 해제하지 않고 매핑만 푼다 */
 }
 
+/*
+ * [한국어]
+ * unmap_event_buffer - 물려받은 이벤트 버퍼의 매핑을 푼다
+ *
+ * @iommu: 대상 유닛.
+ */
 static void __init unmap_event_buffer(struct amd_iommu *iommu)
 {
-	memunmap(iommu->evt_buf);
+	memunmap(iommu->evt_buf);	/* [한국어] 같은 이유 */
 }
 
+/*
+ * [한국어]
+ * free_iommu_buffers - 유닛의 세 버퍼를 모두 놓는다
+ *
+ * @iommu: 대상 유닛.
+ *
+ * alloc_iommu_buffers 와 같은 갈림길을 그대로 쓴다. 잡은 방법과 놓는 방법이
+ * 짝을 이루어야 하므로 두 함수가 같은 조건으로 갈리는 것이 중요하다.
+ *
+ * 호출 체인:
+ *   free_iommu_one() → [이 함수]
+ */
 static void __init free_iommu_buffers(struct amd_iommu *iommu)
 {
-	if (is_kdump_kernel()) {
-		unmap_cwwb_sem(iommu);
-		unmap_command_buffer(iommu);
-		unmap_event_buffer(iommu);
+	if (is_kdump_kernel()) {	/* [한국어] 잡은 방법과 놓는 방법이 짝을 이뤄야 한다 */
+		unmap_cwwb_sem(iommu);	/* [한국어] 완료 대기 */
+		unmap_command_buffer(iommu);	/* [한국어] 명령 버퍼 */
+		unmap_event_buffer(iommu);	/* [한국어] 이벤트 버퍼 */
 	} else {
-		free_cwwb_sem(iommu);
-		free_command_buffer(iommu);
-		free_event_buffer(iommu);
+		free_cwwb_sem(iommu);	/* [한국어] 평범한 부팅에서는 페이지 반납 */
+		free_command_buffer(iommu);	/* [한국어] 명령 버퍼 */
+		free_event_buffer(iommu);	/* [한국어] 이벤트 버퍼 */
 	}
 }
 
+/*
+ * [한국어]
+ * iommu_enable_xt - x2APIC 목적지(32비트 APIC id)를 켠다
+ *
+ * @iommu: 대상 유닛.
+ *
+ * 원 주석이 전제 조건을 밝힌다: XT 모드는 GA 모드(128비트 IRTE)가 있어야
+ * 성립한다. 32비트 APIC id 를 담으려면 항목이 커야 하는데, 32비트 IRTE 의
+ * 목적지 필드는 8비트뿐이기 때문이다.
+ *
+ * 그래서 두 조건을 함께 본다 — 128비트 형식을 쓰고 있고, x2APIC 모드로
+ * 가기로 결정됐는가.
+ *
+ * 함수 몸통이 통째로 #ifdef 안에 있고 껍데기는 밖에 있다. 재매핑을 끈
+ * 커널에서는 아무 일도 하지 않는다.
+ *
+ * 호출 체인:
+ *   early_enable_iommu()/enable_iommus() → [이 함수]
+ */
 static void iommu_enable_xt(struct amd_iommu *iommu)
 {
 #ifdef CONFIG_IRQ_REMAP
@@ -2188,57 +2298,122 @@ static void iommu_enable_xt(struct amd_iommu *iommu)
 	 * XT mode (32-bit APIC destination ID) requires
 	 * GA mode (128-bit IRTE support) as a prerequisite.
 	 */
-	if (AMD_IOMMU_GUEST_IR_GA(amd_iommu_guest_ir) &&
-	    amd_iommu_xt_mode == IRQ_REMAP_X2APIC_MODE)
-		iommu_feature_enable(iommu, CONTROL_XT_EN);
+	if (AMD_IOMMU_GUEST_IR_GA(amd_iommu_guest_ir) &&	/* [한국어] (원 주석: XT 모드는 GA 모드를 전제로 한다) */
+	    amd_iommu_xt_mode == IRQ_REMAP_X2APIC_MODE)	/* [한국어] 32비트 APIC id 는 128비트 항목에만 담긴다 */
+		iommu_feature_enable(iommu, CONTROL_XT_EN);	/* [한국어] 두 조건이 맞을 때만 켠다 */
 #endif /* CONFIG_IRQ_REMAP */
 }
 
+/*
+ * [한국어]
+ * iommu_enable_gt - 게스트 변환(PASID 별 변환)을 켠다
+ *
+ * @iommu: 대상 유닛.
+ *
+ * PASID 마다 다른 페이지 테이블을 쓰는 기능이며, SVA 와 중첩 변환의 전제다.
+ * 하드웨어가 지원하지 않으면 조용히 돌아간다.
+ *
+ * GCR3TRPMODE 를 함께 켜는 것의 순서 제약을 원 주석이 설명한다: 그 기능은
+ * iommu_snp_enable() 보다 먼저 켜져 있어야 하고, 이 함수가
+ * early_enable_iommu() 에서 불리므로 여기서 켜는 것이 안전하다.
+ *
+ * 호출 체인:
+ *   early_enable_iommu()/enable_iommus() → [이 함수]
+ */
 static void iommu_enable_gt(struct amd_iommu *iommu)
 {
-	if (!check_feature(FEATURE_GT))
-		return;
+	if (!check_feature(FEATURE_GT))	/* [한국어] 하드웨어가 게스트 변환을 지원하지 않으면 */
+		return;	/* [한국어] SVA 와 중첩 변환을 쓸 수 없다 */
 
-	iommu_feature_enable(iommu, CONTROL_GT_EN);
+	iommu_feature_enable(iommu, CONTROL_GT_EN);	/* [한국어] PASID 별 변환을 켠다 */
 
 	/*
 	 * This feature needs to be enabled prior to a call
 	 * to iommu_snp_enable(). Since this function is called
 	 * in early_enable_iommu(), it is safe to enable here.
 	 */
-	if (check_feature2(FEATURE_GCR3TRPMODE))
-		iommu_feature_enable(iommu, CONTROL_GCR3TRPMODE);
+	if (check_feature2(FEATURE_GCR3TRPMODE))	/* [한국어] (원 주석: iommu_snp_enable() 보다 먼저 켜져 있어야 한다) */
+		iommu_feature_enable(iommu, CONTROL_GCR3TRPMODE);	/* [한국어] early_enable_iommu 에서 불리므로 이 순서가 보장된다 */
 }
 
 /* sets a specific bit in the device table entry. */
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * set_dte_bit - DTE 의 비트 하나를 세운다
+ *
+ * @dte: 대상 장치 테이블 항목.
+ * @bit: 0~255 의 비트 번호.
+ *
+ * DTE 는 256비트라 u64 배열 넷으로 표현된다. 비트 번호를 그 배열의 인덱스와
+ * 워드 안의 위치로 쪼개는 것이 이 함수의 전부다 — 상위 2비트가 인덱스,
+ * 하위 6비트가 워드 안의 자리다.
+ *
+ * 이런 도우미가 필요한 이유: IVHD 가 알려 주는 플래그는 DTE 안의 절대 비트
+ * 번호(DEV_ENTRY_*)로 주어지는데, 그것을 배열 접근으로 옮기는 계산을
+ * 호출부마다 반복할 수 없다.
+ *
+ * 호출 체인:
+ *   set_dev_entry_from_acpi() → [이 함수]
+ */
 static void set_dte_bit(struct dev_table_entry *dte, u8 bit)
 {
-	int i = (bit >> 6) & 0x03;
-	int _bit = bit & 0x3f;
+	int i = (bit >> 6) & 0x03;	/* [한국어] 상위 2비트가 u64 배열의 인덱스 */
+	int _bit = bit & 0x3f;	/* [한국어] 하위 6비트가 그 워드 안의 자리 */
 
-	dte->data[i] |= (1UL << _bit);
+	dte->data[i] |= (1UL << _bit);	/* [한국어] 256비트를 배열로 다루기 위한 주소 계산 */
 }
 
+/*
+ * [한국어]
+ * __reuse_device_table - kdump 에서 옛 커널의 장치 테이블을 이어받는다
+ *
+ * @iommu: 대상 유닛.
+ * @return: 이어받기에 성공하면 참.
+ *
+ * kdump 경로에서 가장 조심스러운 함수다. 크래시한 커널이 만든 장치 테이블을
+ * 그대로 쓰면 살아 있는 장치의 DMA 가 끊기지 않지만, 그러려면 그 표가
+ * 우리가 기대하는 형태인지 확인해야 한다.
+ *
+ * 세 가지를 검증한다.
+ *  1) 크기가 우리 계산과 같은가. 다르면 인덱스가 어긋나 엉뚱한 항목을 읽는다.
+ *  2) 주소가 4G 아래인가. 원 주석이 "신뢰할 수 없다"고 표현하는데, 옛
+ *     커널이 정상적으로 잡았다면 GFP_DMA32 로 4G 아래에 있어야 하고,
+ *     아니라면 레지스터 값 자체가 깨졌을 가능성이 높다.
+ *  3) SME 비트를 떼어 진짜 물리 주소를 얻는다(원 주석).
+ *
+ * 그다음이 이 함수의 핵심이다: 옛 표에서 쓰이던 도메인 id 를 모두 예약한다.
+ * 그러지 않으면 새 커널이 같은 id 를 다른 도메인에 발급하고, 하드웨어는
+ * 두 도메인의 캐시를 같은 태그로 섞어 버린다.
+ *
+ * -ENOSPC 를 무시하는 이유도 원 주석에 있다: 여러 장치가 같은 도메인을
+ * 쓰면 같은 id 를 여러 번 예약하게 되고, 두 번째부터는 -ENOSPC 가 정상이다.
+ * 진짜 문제는 -ENOMEM 뿐이다.
+ *
+ * 호출 체인:
+ *   reuse_device_table() → [이 함수] → iommu_memremap()
+ *     → amd_iommu_pdom_id_reserve()
+ */
 static bool __reuse_device_table(struct amd_iommu *iommu)
 {
-	struct amd_iommu_pci_seg *pci_seg = iommu->pci_seg;
-	struct dev_table_entry *old_dev_tbl_entry;
-	u32 lo, hi, old_devtb_size, devid;
-	phys_addr_t old_devtb_phys;
-	u16 dom_id;
-	bool dte_v;
-	u64 entry;
+	struct amd_iommu_pci_seg *pci_seg = iommu->pci_seg;	/* [한국어] 이 유닛이 속한 세그먼트 */
+	struct dev_table_entry *old_dev_tbl_entry;	/* [한국어] 옛 표의 항목 */
+	u32 lo, hi, old_devtb_size, devid;	/* [한국어] 레지스터 두 조각, 옛 표의 크기, 순회 인덱스 */
+	phys_addr_t old_devtb_phys;	/* [한국어] 옛 표의 진짜 물리 주소 */
+	u16 dom_id;	/* [한국어] 옛 항목이 쓰던 도메인 id */
+	bool dte_v;	/* [한국어] 그 항목이 유효했는가 */
+	u64 entry;	/* [한국어] 레지스터 값 전체 */
 
 	/* Each IOMMU use separate device table with the same size */
-	lo = readl(iommu->mmio_base + MMIO_DEV_TABLE_OFFSET);
-	hi = readl(iommu->mmio_base + MMIO_DEV_TABLE_OFFSET + 4);
-	entry = (((u64) hi) << 32) + lo;
+	lo = readl(iommu->mmio_base + MMIO_DEV_TABLE_OFFSET);	/* [한국어] (원 주석: 유닛마다 같은 크기의 별도 장치 테이블을 쓴다) */
+	hi = readl(iommu->mmio_base + MMIO_DEV_TABLE_OFFSET + 4);	/* [한국어] 32비트씩 두 번 읽어 */
+	entry = (((u64) hi) << 32) + lo;	/* [한국어] 64비트로 합친다 */
 
-	old_devtb_size = ((entry & ~PAGE_MASK) + 1) << 12;
-	if (old_devtb_size != pci_seg->dev_table_size) {
-		pr_err("The device table size of IOMMU:%d is not expected!\n",
+	old_devtb_size = ((entry & ~PAGE_MASK) + 1) << 12;	/* [한국어] 하위 비트에 페이지 수가 인코딩되어 있다 */
+	if (old_devtb_size != pci_seg->dev_table_size) {	/* [한국어] 우리 계산과 다르면 */
+		pr_err("The device table size of IOMMU:%d is not expected!\n",	/* [한국어] 인덱스가 어긋나 엉뚱한 항목을 읽게 된다 */
 			iommu->index);
-		return false;
+		return false;	/* [한국어] 물려받기를 포기한다 */
 	}
 
 	/*
@@ -2246,358 +2421,553 @@ static bool __reuse_device_table(struct amd_iommu *iommu)
 	 * memory encryption mask(sme_me_mask), we must remove the memory
 	 * encryption mask to obtain the true physical address in kdump kernel.
 	 */
-	old_devtb_phys = __sme_clr(entry) & PAGE_MASK;
+	old_devtb_phys = __sme_clr(entry) & PAGE_MASK;	/* [한국어] (원 주석: 첫 커널이 SME 를 켰다면 암호화 마스크를 떼어야 진짜 주소가 나온다) */
 
-	if (old_devtb_phys >= 0x100000000ULL) {
-		pr_err("The address of old device table is above 4G, not trustworthy!\n");
-		return false;
+	if (old_devtb_phys >= 0x100000000ULL) {	/* [한국어] 옛 커널이 정상적으로 잡았다면 GFP_DMA32 로 4G 아래에 있어야 한다 */
+		pr_err("The address of old device table is above 4G, not trustworthy!\n");	/* [한국어] (원 주석: 신뢰할 수 없다) 레지스터 값 자체가 깨졌을 가능성이 높다 */
+		return false;	/* [한국어] 포기 */
 	}
 
 	/*
 	 * Re-use the previous kernel's device table for kdump.
 	 */
-	pci_seg->old_dev_tbl_cpy = iommu_memremap(old_devtb_phys, pci_seg->dev_table_size);
-	if (pci_seg->old_dev_tbl_cpy == NULL) {
-		pr_err("Failed to remap memory for reusing old device table!\n");
-		return false;
+	pci_seg->old_dev_tbl_cpy = iommu_memremap(old_devtb_phys, pci_seg->dev_table_size);	/* [한국어] (원 주석: 옛 커널의 장치 테이블을 재사용한다) */
+	if (pci_seg->old_dev_tbl_cpy == NULL) {	/* [한국어] 매핑 실패 */
+		pr_err("Failed to remap memory for reusing old device table!\n");	/* [한국어] 읽을 수 없으면 물려받을 수 없다 */
+		return false;	/* [한국어] 포기 */
 	}
 
-	for (devid = 0; devid <= pci_seg->last_bdf; devid++) {
-		old_dev_tbl_entry = &pci_seg->old_dev_tbl_cpy[devid];
-		dte_v = FIELD_GET(DTE_FLAG_V, old_dev_tbl_entry->data[0]);
-		dom_id = FIELD_GET(DTE_DOMID_MASK, old_dev_tbl_entry->data[1]);
+	for (devid = 0; devid <= pci_seg->last_bdf; devid++) {	/* [한국어] 옛 표의 모든 항목을 훑는다 */
+		old_dev_tbl_entry = &pci_seg->old_dev_tbl_cpy[devid];	/* [한국어] 그 항목 */
+		dte_v = FIELD_GET(DTE_FLAG_V, old_dev_tbl_entry->data[0]);	/* [한국어] 유효했는가 */
+		dom_id = FIELD_GET(DTE_DOMID_MASK, old_dev_tbl_entry->data[1]);	/* [한국어] 어떤 도메인 id 를 쓰고 있었는가 */
 
-		if (!dte_v || !dom_id)
-			continue;
+		if (!dte_v || !dom_id)	/* [한국어] 쓰이지 않던 항목 */
+			continue;	/* [한국어] 예약할 것이 없다 */
 		/*
 		 * ID reservation can fail with -ENOSPC when there
 		 * are multiple devices present in the same domain,
 		 * hence check only for -ENOMEM.
 		 */
-		if (amd_iommu_pdom_id_reserve(dom_id, GFP_KERNEL) == -ENOMEM)
-			return false;
+		if (amd_iommu_pdom_id_reserve(dom_id, GFP_KERNEL) == -ENOMEM)	/* [한국어] (원 주석: 여러 장치가 같은 도메인을 쓰면 -ENOSPC 가 나므로 -ENOMEM 만 본다) */
+			return false;	/* [한국어] 예약하지 않으면 새 커널이 같은 id 를 재발급해 캐시가 섞인다 */
 	}
 
-	return true;
+	return true;	/* [한국어] 옛 표를 안전하게 이어받을 수 있다 */
 }
 
+/*
+ * [한국어]
+ * reuse_device_table - 모든 세그먼트에 대해 옛 장치 테이블을 이어받는다
+ *
+ * @return: 모두 성공하면 참.
+ *
+ * amd_iommu_pre_enabled 가 거짓이면 물려받을 것이 없다 — 옛 커널이 IOMMU 를
+ * 켜지 않은 채 죽었거나, 애초에 kdump 가 아니다.
+ *
+ * 원 주석이 밝히는 최적화: 한 세그먼트의 모든 유닛이 같은 장치 테이블을
+ * 공유하므로, 세그먼트마다 유닛 하나만 처리하면 된다. 안쪽 루프의 break 가
+ * 그것이다.
+ *
+ * 하나라도 실패하면 전체를 포기한다. 일부만 물려받으면 어떤 장치는 옛
+ * 매핑을, 어떤 장치는 빈 표를 보게 되어 상태를 알 수 없게 된다.
+ *
+ * 호출 체인:
+ *   early_enable_iommus() → [이 함수] → __reuse_device_table()
+ */
 static bool reuse_device_table(void)
 {
-	struct amd_iommu *iommu;
-	struct amd_iommu_pci_seg *pci_seg;
+	struct amd_iommu *iommu;	/* [한국어] 유닛 순회용 */
+	struct amd_iommu_pci_seg *pci_seg;	/* [한국어] 세그먼트 순회용 */
 
-	if (!amd_iommu_pre_enabled)
-		return false;
+	if (!amd_iommu_pre_enabled)	/* [한국어] 옛 커널이 IOMMU 를 켜지 않았거나 kdump 가 아니다 */
+		return false;	/* [한국어] 물려받을 것이 없다 */
 
-	pr_warn("Translation is already enabled - trying to reuse translation structures\n");
+	pr_warn("Translation is already enabled - trying to reuse translation structures\n");	/* [한국어] 이 상황 자체가 특별하므로 알린다 */
 
 	/*
 	 * All IOMMUs within PCI segment shares common device table.
 	 * Hence reuse device table only once per PCI segment.
 	 */
-	for_each_pci_segment(pci_seg) {
-		for_each_iommu(iommu) {
-			if (pci_seg->id != iommu->pci_seg->id)
-				continue;
-			if (!__reuse_device_table(iommu))
-				return false;
-			break;
+	for_each_pci_segment(pci_seg) {	/* [한국어] (원 주석: 한 세그먼트의 모든 유닛이 장치 테이블을 공유한다) */
+		for_each_iommu(iommu) {	/* [한국어] 그 세그먼트의 유닛을 찾는다 */
+			if (pci_seg->id != iommu->pci_seg->id)	/* [한국어] 다른 세그먼트의 유닛 */
+				continue;	/* [한국어] 건너뛴다 */
+			if (!__reuse_device_table(iommu))	/* [한국어] 이어받기 시도 */
+				return false;	/* [한국어] 하나라도 실패하면 전체를 포기한다 — 일부만 물려받으면 상태를 알 수 없다 */
+			break;	/* [한국어] 세그먼트당 한 번이면 충분하다 */
 		}
 	}
 
-	return true;
+	return true;	/* [한국어] 모든 세그먼트의 표를 이어받았다 */
 }
 
+/*
+ * [한국어]
+ * amd_iommu_get_ivhd_dte_flags - 이 장치에 적용할 IVHD 지정 플래그를 찾는다
+ *
+ * @segid: PCI 세그먼트.
+ * @devid: 장치 id.
+ * @return: 적용할 플래그가 담긴 DTE, 없으면 NULL.
+ *
+ * 가장 좁은 범위를 고르는 것이 이 함수의 요점이다. IVHD 는 같은 장치를
+ * 여러 항목이 덮을 수 있다 — "모든 장치"를 지정한 항목과 "이 장치 하나"를
+ * 지정한 항목이 함께 있을 수 있다.
+ *
+ * 그때 더 구체적인 지시가 이겨야 한다. 그래서 목록을 끝까지 훑으며 범위의
+ * 길이가 가장 짧은 것을 고른다(원 주석). 먼저 찾은 것을 쓰면 목록의 순서에
+ * 따라 결과가 달라진다.
+ *
+ * 호출 체인:
+ *   amd_iommu_make_clear_dte()/set_dev_entry_from_acpi() → [이 함수]
+ */
 struct dev_table_entry *amd_iommu_get_ivhd_dte_flags(u16 segid, u16 devid)
 {
-	struct ivhd_dte_flags *e;
-	unsigned int best_len = UINT_MAX;
-	struct dev_table_entry *dte = NULL;
+	struct ivhd_dte_flags *e;	/* [한국어] 목록 커서 */
+	unsigned int best_len = UINT_MAX;	/* [한국어] 지금까지 찾은 가장 좁은 범위의 길이 */
+	struct dev_table_entry *dte = NULL;	/* [한국어] 그 범위의 플래그 */
 
-	for_each_ivhd_dte_flags(e) {
+	for_each_ivhd_dte_flags(e) {	/* [한국어] (원 주석: devid 를 포함하는 가장 작은 범위를 찾으려면 끝까지 훑어야 한다) */
 		/*
 		 * Need to go through the whole list to find the smallest range,
 		 * which contains the devid.
 		 */
-		if ((e->segid == segid) &&
-		    (e->devid_first <= devid) && (devid <= e->devid_last)) {
-			unsigned int len = e->devid_last - e->devid_first;
+		if ((e->segid == segid) &&	/* [한국어] 세그먼트가 맞고 */
+		    (e->devid_first <= devid) && (devid <= e->devid_last)) {	/* [한국어] 이 장치를 덮는 범위인가 */
+			unsigned int len = e->devid_last - e->devid_first;	/* [한국어] 그 범위의 길이 */
 
-			if (len < best_len) {
-				dte = &(e->dte);
-				best_len = len;
+			if (len < best_len) {	/* [한국어] 더 구체적인 지시인가 */
+				dte = &(e->dte);	/* [한국어] 그것을 쓴다 */
+				best_len = len;	/* [한국어] 기준을 갱신. 먼저 찾은 것을 쓰면 목록 순서에 결과가 좌우된다 */
 			}
 		}
 	}
-	return dte;
+	return dte;	/* [한국어] 가장 좁은 범위의 플래그, 없으면 NULL */
 }
 
+/*
+ * [한국어]
+ * search_ivhd_dte_flags - 이 범위의 플래그가 이미 등록되어 있는지 본다
+ *
+ * @segid: PCI 세그먼트.
+ * @first: 범위의 시작 장치 id.
+ * @last: 범위의 끝.
+ * @return: 정확히 같은 범위의 항목이 이미 있으면 참.
+ *
+ * amd_iommu_get_ivhd_dte_flags 와 달리 "포함"이 아니라 "정확히 일치"를
+ * 찾는다. 목적이 다르기 때문이다 — 그쪽은 적용할 플래그를 고르는 것이고,
+ * 이쪽은 같은 항목을 두 번 등록하지 않기 위한 중복 검사다.
+ *
+ * 왜 중복이 생기는가: 한 IVRS 표에 같은 유닛에 대한 IVHD 가 여럿 있을 수
+ * 있고, 같은 장치 범위가 반복해서 나타날 수 있다.
+ *
+ * 호출 체인:
+ *   set_dev_entry_from_acpi_range() → [이 함수]
+ */
 static bool search_ivhd_dte_flags(u16 segid, u16 first, u16 last)
 {
-	struct ivhd_dte_flags *e;
+	struct ivhd_dte_flags *e;	/* [한국어] 목록 커서 */
 
-	for_each_ivhd_dte_flags(e) {
-		if ((e->segid == segid) &&
-		    (e->devid_first == first) &&
-		    (e->devid_last == last))
-			return true;
+	for_each_ivhd_dte_flags(e) {	/* [한국어] 등록된 항목을 훑는다 */
+		if ((e->segid == segid) &&	/* [한국어] 세그먼트가 같고 */
+		    (e->devid_first == first) &&	/* [한국어] 시작이 같고 */
+		    (e->devid_last == last))	/* [한국어] 끝도 같은가 — "포함"이 아니라 "정확히 일치"를 본다 */
+			return true;	/* [한국어] 같은 범위가 이미 등록됐다 */
 	}
-	return false;
+	return false;	/* [한국어] 새로 등록해야 한다 */
 }
 
 /*
  * This function takes the device specific flags read from the ACPI
  * table and sets up the device table entry with that information
  */
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * set_dev_entry_from_acpi_range - IVHD 가 지정한 플래그를 장치 범위에 적용한다
+ *
+ * @iommu: 이 장치들을 담당하는 유닛.
+ * @first: 범위의 시작 장치 id.
+ * @last: 범위의 끝.
+ * @flags: ACPI_DEVFLAG_* 조합.
+ * @ext_flags: 확장 플래그(여기서는 쓰지 않는다).
+ *
+ * 두 가지 일을 함께 한다.
+ *
+ * 하나는 플래그를 DTE 형태로 번역해 두 곳에 남기는 것이다. 하나는 실제
+ * 장치 테이블이고, 다른 하나는 amd_ivhd_dev_flags_list 다. 후자가 필요한
+ * 이유: 장치를 도메인에서 뗄 때 DTE 를 초기 상태로 되돌리는데, 그때 이
+ * 플래그들을 되살려야 한다(amd_iommu_make_clear_dte 참고). 표를 다시 읽을
+ * 수는 없으므로 파싱 때 보관해 둔다.
+ *
+ * 다른 하나는 rlookup 표를 채우는 것이다. 이 범위의 장치들은 이 유닛이
+ * 담당한다는 기록이며, 플래그가 없어도 반드시 해야 한다 — 그래서 그 호출만
+ * if 밖에 있다.
+ *
+ * erratum 63 처리가 눈에 띈다. 시스템 관리 필드가 특정 값일 때 쓰기 권한을
+ * 함께 줘야 하는 하드웨어 결함이며, 초기 DTE 에 그 정보가 있어야 하므로
+ * 여기서 미리 얹는다.
+ *
+ * 호출 체인:
+ *   init_iommu_from_acpi() → [이 함수] → set_dte_bit()
+ *     → amd_iommu_set_rlookup_table()
+ */
 static void __init
 set_dev_entry_from_acpi_range(struct amd_iommu *iommu, u16 first, u16 last,
 			      u32 flags, u32 ext_flags)
 {
-	int i;
-	struct dev_table_entry dte = {};
+	int i;	/* [한국어] 범위 순회 인덱스 */
+	struct dev_table_entry dte = {};	/* [한국어] 플래그를 번역해 담을 DTE */
 
 	/* Parse IVHD DTE setting flags and store information */
-	if (flags) {
-		struct ivhd_dte_flags *d;
+	if (flags) {	/* [한국어] (원 주석: IVHD 의 DTE 설정 플래그를 파싱해 보관한다) */
+		struct ivhd_dte_flags *d;	/* [한국어] 목록에 남길 항목 */
 
-		if (search_ivhd_dte_flags(iommu->pci_seg->id, first, last))
-			return;
+		if (search_ivhd_dte_flags(iommu->pci_seg->id, first, last))	/* [한국어] 같은 범위가 이미 등록됐는가 */
+			return;	/* [한국어] 한 표에 같은 범위가 반복해 나타날 수 있다 */
 
-		d = kzalloc_obj(struct ivhd_dte_flags);
-		if (!d)
-			return;
+		d = kzalloc_obj(struct ivhd_dte_flags);	/* [한국어] 보관할 항목 */
+		if (!d)	/* [한국어] 할당 실패 */
+			return;	/* [한국어] 플래그를 보관하지 못하면 나중에 되살릴 수 없지만, 부팅은 계속한다 */
 
-		pr_debug("%s: devid range %#x:%#x\n", __func__, first, last);
+		pr_debug("%s: devid range %#x:%#x\n", __func__, first, last);	/* [한국어] 어떤 범위를 등록하는지 */
 
-		if (flags & ACPI_DEVFLAG_INITPASS)
-			set_dte_bit(&dte, DEV_ENTRY_INIT_PASS);
-		if (flags & ACPI_DEVFLAG_EXTINT)
-			set_dte_bit(&dte, DEV_ENTRY_EINT_PASS);
-		if (flags & ACPI_DEVFLAG_NMI)
-			set_dte_bit(&dte, DEV_ENTRY_NMI_PASS);
-		if (flags & ACPI_DEVFLAG_SYSMGT1)
-			set_dte_bit(&dte, DEV_ENTRY_SYSMGT1);
-		if (flags & ACPI_DEVFLAG_SYSMGT2)
-			set_dte_bit(&dte, DEV_ENTRY_SYSMGT2);
-		if (flags & ACPI_DEVFLAG_LINT0)
-			set_dte_bit(&dte, DEV_ENTRY_LINT0_PASS);
-		if (flags & ACPI_DEVFLAG_LINT1)
-			set_dte_bit(&dte, DEV_ENTRY_LINT1_PASS);
+		if (flags & ACPI_DEVFLAG_INITPASS)	/* [한국어] INIT 인터럽트를 통과시키라는 지시 */
+			set_dte_bit(&dte, DEV_ENTRY_INIT_PASS);	/* [한국어] DTE 의 해당 비트로 번역 */
+		if (flags & ACPI_DEVFLAG_EXTINT)	/* [한국어] 외부 인터럽트 통과 */
+			set_dte_bit(&dte, DEV_ENTRY_EINT_PASS);	/* [한국어] 번역 */
+		if (flags & ACPI_DEVFLAG_NMI)	/* [한국어] NMI 통과 — 재매핑하면 놓칠 수 있어서 */
+			set_dte_bit(&dte, DEV_ENTRY_NMI_PASS);	/* [한국어] 번역 */
+		if (flags & ACPI_DEVFLAG_SYSMGT1)	/* [한국어] 시스템 관리 메시지 처리 비트 1 */
+			set_dte_bit(&dte, DEV_ENTRY_SYSMGT1);	/* [한국어] 번역 */
+		if (flags & ACPI_DEVFLAG_SYSMGT2)	/* [한국어] 같은 필드의 비트 2 */
+			set_dte_bit(&dte, DEV_ENTRY_SYSMGT2);	/* [한국어] 번역 */
+		if (flags & ACPI_DEVFLAG_LINT0)	/* [한국어] 로컬 인터럽트 0 통과 */
+			set_dte_bit(&dte, DEV_ENTRY_LINT0_PASS);	/* [한국어] 번역 */
+		if (flags & ACPI_DEVFLAG_LINT1)	/* [한국어] 로컬 인터럽트 1 통과 */
+			set_dte_bit(&dte, DEV_ENTRY_LINT1_PASS);	/* [한국어] 번역 */
 
 		/* Apply erratum 63, which needs info in initial_dte */
-		if (FIELD_GET(DTE_DATA1_SYSMGT_MASK, dte.data[1]) == 0x1)
-			dte.data[0] |= DTE_FLAG_IW;
+		if (FIELD_GET(DTE_DATA1_SYSMGT_MASK, dte.data[1]) == 0x1)	/* [한국어] (원 주석: erratum 63 — 초기 DTE 에 그 정보가 있어야 한다) */
+			dte.data[0] |= DTE_FLAG_IW;	/* [한국어] 시스템 관리 필드가 이 값이면 쓰기 권한을 함께 줘야 하는 하드웨어 결함 */
 
-		memcpy(&d->dte, &dte, sizeof(dte));
-		d->segid = iommu->pci_seg->id;
-		d->devid_first = first;
-		d->devid_last = last;
-		list_add_tail(&d->list, &amd_ivhd_dev_flags_list);
+		memcpy(&d->dte, &dte, sizeof(dte));	/* [한국어] 번역 결과를 보관한다 — 장치를 뗄 때 되살리기 위해서다 */
+		d->segid = iommu->pci_seg->id;	/* [한국어] 적용 세그먼트 */
+		d->devid_first = first;	/* [한국어] 범위의 시작 */
+		d->devid_last = last;	/* [한국어] 범위의 끝 */
+		list_add_tail(&d->list, &amd_ivhd_dev_flags_list);	/* [한국어] 목록에 등록. 표를 다시 읽을 수 없으므로 여기 남겨 둔다 */
 	}
 
-	for (i = first; i <= last; i++)  {
+	for (i = first; i <= last; i++)  {	/* [한국어] 범위의 모든 장치에 대해 */
 		if (flags) {
-			struct dev_table_entry *dev_table = get_dev_table(iommu);
+			struct dev_table_entry *dev_table = get_dev_table(iommu);	/* [한국어] 이 유닛이 쓰는 장치 테이블 */
 
-			memcpy(&dev_table[i], &dte, sizeof(dte));
+			memcpy(&dev_table[i], &dte, sizeof(dte));	/* [한국어] 플래그가 있으면 DTE 에 미리 얹는다 */
 		}
-		amd_iommu_set_rlookup_table(iommu, i);
+		amd_iommu_set_rlookup_table(iommu, i);	/* [한국어] 플래그가 없어도 담당 유닛 기록은 반드시 한다 — 그래서 if 밖에 있다 */
 	}
 }
 
+/*
+ * [한국어]
+ * set_dev_entry_from_acpi - 장치 하나에 IVHD 플래그를 적용한다
+ *
+ * @iommu: 담당 유닛.
+ * @devid: 장치 id.
+ * @flags: ACPI_DEVFLAG_* 조합.
+ * @ext_flags: 확장 플래그.
+ *
+ * 범위 버전에 시작과 끝을 같게 넘기는 얇은 껍데기다. IVHD 항목이 장치
+ * 하나를 지정하는 경우와 범위를 지정하는 경우가 모두 있어, 호출부가
+ * 어느 쪽인지 신경 쓰지 않게 두 입구를 둔 것이다.
+ */
 static void __init set_dev_entry_from_acpi(struct amd_iommu *iommu,
 					   u16 devid, u32 flags, u32 ext_flags)
 {
-	set_dev_entry_from_acpi_range(iommu, devid, devid, flags, ext_flags);
+	set_dev_entry_from_acpi_range(iommu, devid, devid, flags, ext_flags);	/* [한국어] 시작과 끝을 같게 넘기면 장치 하나가 된다 */
 }
 
+/*
+ * [한국어]
+ * add_special_device - IOAPIC/HPET 의 id → 요청자 id 대응을 등록한다
+ *
+ * @type: IVHD_SPECIAL_IOAPIC 또는 IVHD_SPECIAL_HPET.
+ * @id: 그 장치의 번호.
+ * @devid: 요청자 id. 명령줄 우선 항목이 있으면 그 값으로 덮어써서 돌려준다.
+ * @cmd_line: 이 등록이 커널 명령줄에서 온 것인지.
+ * @return: 0 성공, -EINVAL 이면 모르는 종류, -ENOMEM 이면 할당 실패.
+ *
+ * 명령줄이 표를 이긴다는 규칙이 이 함수의 핵심이다. 목록에 같은 id 의
+ * 명령줄 항목이 이미 있으면 새로 등록하지 않고, 오히려 호출자의 devid 를
+ * 그 값으로 덮어쓴다 — 표를 파싱하던 코드가 그 뒤로는 사용자가 지정한
+ * 값을 쓰게 된다.
+ *
+ * 왜 그런 우선순위가 필요한가: 펌웨어가 IOAPIC 대응을 잘못 적거나 빠뜨린
+ * 기계가 실제로 있고(quirks.c 참고), 그때 사용자가 ivrs_ioapic= 로 고칠
+ * 수 있어야 한다.
+ *
+ * 호출 체인:
+ *   init_iommu_from_acpi()/add_early_maps()/ivrs_ioapic_quirk_cb() → [이 함수]
+ */
 int __init add_special_device(u8 type, u8 id, u32 *devid, bool cmd_line)
 {
-	struct devid_map *entry;
-	struct list_head *list;
+	struct devid_map *entry;	/* [한국어] 목록 커서이자 새 항목 */
+	struct list_head *list;	/* [한국어] 대상 목록(IOAPIC 또는 HPET) */
 
-	if (type == IVHD_SPECIAL_IOAPIC)
-		list = &ioapic_map;
-	else if (type == IVHD_SPECIAL_HPET)
-		list = &hpet_map;
+	if (type == IVHD_SPECIAL_IOAPIC)	/* [한국어] IOAPIC 인가 */
+		list = &ioapic_map;	/* [한국어] 그 목록으로 */
+	else if (type == IVHD_SPECIAL_HPET)	/* [한국어] HPET 인가 */
+		list = &hpet_map;	/* [한국어] 그 목록으로 */
 	else
-		return -EINVAL;
+		return -EINVAL;	/* [한국어] 그 밖의 종류는 모른다 */
 
-	list_for_each_entry(entry, list, list) {
-		if (!(entry->id == id && entry->cmd_line))
-			continue;
+	list_for_each_entry(entry, list, list) {	/* [한국어] 기존 항목을 훑는다 */
+		if (!(entry->id == id && entry->cmd_line))	/* [한국어] 같은 id 의 명령줄 항목만 우선한다 */
+			continue;	/* [한국어] 표에서 온 항목은 우선순위가 없다 */
 
-		pr_info("Command-line override present for %s id %d - ignoring\n",
+		pr_info("Command-line override present for %s id %d - ignoring\n",	/* [한국어] 사용자 지정이 이겼음을 알린다 */
 			type == IVHD_SPECIAL_IOAPIC ? "IOAPIC" : "HPET", id);
 
-		*devid = entry->devid;
+		*devid = entry->devid;	/* [한국어] 호출자의 값을 사용자 지정으로 덮어쓴다 — 이후 파싱이 그 값을 쓴다 */
 
-		return 0;
+		return 0;	/* [한국어] 새로 등록하지 않는다 */
 	}
 
-	entry = kzalloc_obj(*entry);
-	if (!entry)
-		return -ENOMEM;
+	entry = kzalloc_obj(*entry);	/* [한국어] 새 항목 */
+	if (!entry)	/* [한국어] 할당 실패 */
+		return -ENOMEM;	/* [한국어] 이 대응을 등록할 수 없다 */
 
-	entry->id	= id;
-	entry->devid	= *devid;
-	entry->cmd_line	= cmd_line;
+	entry->id	= id;	/* [한국어] 장치 번호 */
+	entry->devid	= *devid;	/* [한국어] 요청자 id */
+	entry->cmd_line	= cmd_line;	/* [한국어] 출처. 이후 우선순위 판단의 근거가 된다 */
 
-	list_add_tail(&entry->list, list);
+	list_add_tail(&entry->list, list);	/* [한국어] 목록 끝에 붙인다 */
 
-	return 0;
+	return 0;	/* [한국어] 등록 완료 */
 }
 
+/*
+ * [한국어]
+ * add_acpi_hid_device - ACPI HID 장치의 대응을 등록한다
+ *
+ * @hid: ACPI HID 문자열.
+ * @uid: UID 문자열(비어 있을 수 있다).
+ * @devid: 요청자 id. 명령줄 우선 항목이 있으면 덮어써서 돌려준다.
+ * @cmd_line: 명령줄에서 온 등록인지.
+ * @return: 0 성공, -ENOMEM 이면 할당 실패.
+ *
+ * add_special_device 와 같은 우선순위 규칙을 따르되, 비교가 더 복잡하다.
+ * HID 는 반드시 같아야 하고, UID 는 양쪽 모두 값이 있을 때만 비교한다 —
+ * 한쪽이 비어 있으면 "지정하지 않음"이라 어느 UID 든 맞는 것으로 본다.
+ *
+ * root_devid 를 devid & ~0x7 로 두는 이유: 기능 번호(하위 3비트)를 지운
+ * 값이 그 장치의 기능 0 이고, 여러 기능을 가진 플랫폼 장치의 대표가 된다.
+ *
+ * 호출 체인:
+ *   init_iommu_from_acpi()/add_early_maps() → [이 함수]
+ */
 static int __init add_acpi_hid_device(u8 *hid, u8 *uid, u32 *devid,
 				      bool cmd_line)
 {
-	struct acpihid_map_entry *entry;
-	struct list_head *list = &acpihid_map;
+	struct acpihid_map_entry *entry;	/* [한국어] 목록 커서이자 새 항목 */
+	struct list_head *list = &acpihid_map;	/* [한국어] 대상 목록 */
 
-	list_for_each_entry(entry, list, list) {
-		if (strcmp(entry->hid, hid) ||
-		    (*uid && *entry->uid && strcmp(entry->uid, uid)) ||
-		    !entry->cmd_line)
-			continue;
+	list_for_each_entry(entry, list, list) {	/* [한국어] 기존 항목을 훑는다 */
+		if (strcmp(entry->hid, hid) ||	/* [한국어] HID 는 반드시 같아야 하고 */
+		    (*uid && *entry->uid && strcmp(entry->uid, uid)) ||	/* [한국어] UID 는 양쪽 다 값이 있을 때만 비교한다 — 비어 있으면 "지정 안 함"이다 */
+		    !entry->cmd_line)	/* [한국어] 명령줄 항목만 우선한다 */
+			continue;	/* [한국어] 조건이 안 맞으면 다음 */
 
-		pr_info("Command-line override for hid:%s uid:%s\n",
+		pr_info("Command-line override for hid:%s uid:%s\n",	/* [한국어] 사용자 지정이 이겼음을 알린다 */
 			hid, uid);
-		*devid = entry->devid;
-		return 0;
+		*devid = entry->devid;	/* [한국어] 호출자의 값을 덮어쓴다 */
+		return 0;	/* [한국어] 새로 등록하지 않는다 */
 	}
 
-	entry = kzalloc_obj(*entry);
-	if (!entry)
-		return -ENOMEM;
+	entry = kzalloc_obj(*entry);	/* [한국어] 새 항목 */
+	if (!entry)	/* [한국어] 할당 실패 */
+		return -ENOMEM;	/* [한국어] 등록 불가 */
 
-	memcpy(entry->uid, uid, strlen(uid));
-	memcpy(entry->hid, hid, strlen(hid));
-	entry->devid = *devid;
-	entry->cmd_line	= cmd_line;
-	entry->root_devid = (entry->devid & (~0x7));
+	memcpy(entry->uid, uid, strlen(uid));	/* [한국어] UID 문자열 복사 */
+	memcpy(entry->hid, hid, strlen(hid));	/* [한국어] HID 문자열 복사 */
+	entry->devid = *devid;	/* [한국어] 요청자 id */
+	entry->cmd_line	= cmd_line;	/* [한국어] 출처 */
+	entry->root_devid = (entry->devid & (~0x7));	/* [한국어] 기능 번호를 지운 값 — 여러 기능을 가진 장치의 대표가 된다 */
 
-	pr_info("%s, add hid:%s, uid:%s, rdevid:%#x\n",
+	pr_info("%s, add hid:%s, uid:%s, rdevid:%#x\n",	/* [한국어] 표에서 왔는지 명령줄에서 왔는지 함께 남긴다 */
 		entry->cmd_line ? "cmd" : "ivrs",
 		entry->hid, entry->uid, entry->root_devid);
 
-	list_add_tail(&entry->list, list);
-	return 0;
+	list_add_tail(&entry->list, list);	/* [한국어] 목록에 등록 */
+	return 0;	/* [한국어] 완료 */
 }
 
+/*
+ * [한국어]
+ * add_early_maps - 커널 명령줄로 지정된 대응들을 목록에 옮긴다
+ *
+ * @return: 0 성공, 음수면 어느 하나가 실패.
+ *
+ * 명령줄은 아주 이른 시점에 파싱되는데, 그때는 아직 목록 자료구조를 쓸 수
+ * 없어 고정 배열(early_*_map)에 담아 두었다. 이제 목록으로 옮긴다.
+ *
+ * 순서가 중요하다: IVHD 파싱보다 먼저 불려야 명령줄 항목이 목록에 이미
+ * 있고, 그래야 add_special_device 의 우선순위 규칙이 동작한다. 반대로
+ * 하면 표의 값이 먼저 등록되어 사용자의 지정이 무시된다.
+ *
+ * 호출 체인:
+ *   init_iommu_from_acpi() (맨 앞) → [이 함수] → add_special_device()
+ *     → add_acpi_hid_device()
+ */
 static int __init add_early_maps(void)
 {
-	int i, ret;
+	int i, ret;	/* [한국어] 순회 인덱스와 결과 */
 
-	for (i = 0; i < early_ioapic_map_size; ++i) {
-		ret = add_special_device(IVHD_SPECIAL_IOAPIC,
-					 early_ioapic_map[i].id,
-					 &early_ioapic_map[i].devid,
-					 early_ioapic_map[i].cmd_line);
+	for (i = 0; i < early_ioapic_map_size; ++i) {	/* [한국어] 명령줄로 지정된 IOAPIC 대응들 */
+		ret = add_special_device(IVHD_SPECIAL_IOAPIC,	/* [한국어] 목록으로 옮긴다 */
+					 early_ioapic_map[i].id,	/* [한국어] IOAPIC 번호 */
+					 &early_ioapic_map[i].devid,	/* [한국어] 요청자 id */
+					 early_ioapic_map[i].cmd_line);	/* [한국어] 명령줄 출처 표시 — 이것이 이후 우선순위의 근거다 */
+		if (ret)	/* [한국어] 등록 실패 */
+			return ret;	/* [한국어] 그대로 보고 */
+	}
+
+	for (i = 0; i < early_hpet_map_size; ++i) {	/* [한국어] HPET 대응들 */
+		ret = add_special_device(IVHD_SPECIAL_HPET,	/* [한국어] 같은 방식 */
+					 early_hpet_map[i].id,	/* [한국어] HPET 번호 */
+					 &early_hpet_map[i].devid,	/* [한국어] 요청자 id */
+					 early_hpet_map[i].cmd_line);	/* [한국어] 출처 */
 		if (ret)
 			return ret;
 	}
 
-	for (i = 0; i < early_hpet_map_size; ++i) {
-		ret = add_special_device(IVHD_SPECIAL_HPET,
-					 early_hpet_map[i].id,
-					 &early_hpet_map[i].devid,
-					 early_hpet_map[i].cmd_line);
+	for (i = 0; i < early_acpihid_map_size; ++i) {	/* [한국어] ACPI HID 대응들 */
+		ret = add_acpi_hid_device(early_acpihid_map[i].hid,	/* [한국어] HID 문자열 */
+					  early_acpihid_map[i].uid,	/* [한국어] UID 문자열 */
+					  &early_acpihid_map[i].devid,	/* [한국어] 요청자 id */
+					  early_acpihid_map[i].cmd_line);	/* [한국어] 출처 */
 		if (ret)
 			return ret;
 	}
 
-	for (i = 0; i < early_acpihid_map_size; ++i) {
-		ret = add_acpi_hid_device(early_acpihid_map[i].hid,
-					  early_acpihid_map[i].uid,
-					  &early_acpihid_map[i].devid,
-					  early_acpihid_map[i].cmd_line);
-		if (ret)
-			return ret;
-	}
-
-	return 0;
+	return 0;	/* [한국어] 명령줄 항목이 모두 목록에 들어갔다 — 이제 표 파싱이 그것을 존중한다 */
 }
 
 /*
  * Takes a pointer to an AMD IOMMU entry in the ACPI table and
  * initializes the hardware and our data structures with it.
  */
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * init_iommu_from_acpi - IVHD 의 장치 항목을 모두 훑어 자료구조를 채운다
+ *
+ * @iommu: 이 IVHD 가 서술하는 유닛.
+ * @h: 그 IVHD 헤더.
+ * @return: 0 성공, 음수면 파싱이나 등록 실패.
+ *
+ * 표를 세 번 훑는 것 중 두 번째의 핵심이다. 여기서 채워지는 것이 이
+ * 드라이버의 조회 경로 전부다: 어느 장치가 이 유닛에 속하는지(rlookup),
+ * 어떤 장치가 다른 이름으로 요청을 내는지(alias), 어떤 특별 요구가
+ * 있는지(DTE 플래그), 그리고 PCI 가 아닌 장치들의 대응(ioapic/hpet/acpihid).
+ *
+ * add_early_maps 를 맨 먼저 부르는 순서가 중요하다. 명령줄로 지정된 대응이
+ * 목록에 먼저 들어가 있어야, 아래에서 표의 값이 그것을 덮어쓰지 않는다.
+ *
+ * 항목 종류가 많지만 구조는 셋으로 나뉜다.
+ *  - 즉시 적용: DEV_ALL, DEV_SELECT, DEV_ALIAS, DEV_EXT_SELECT.
+ *  - 범위의 시작만 기억: *_RANGE_START 계열. 실제 적용은 RANGE_END 에서
+ *    한꺼번에 일어난다. 그래서 devid_start/flags/alias 같은 지역 변수가
+ *    루프를 가로질러 상태를 나른다 — 표가 그렇게 짝을 이뤄 적혀 있기 때문이다.
+ *  - 특별 장치: DEV_SPECIAL, DEV_ACPI_HID. PCI 열거로 발견되지 않는
+ *    장치들의 요청자 id 를 목록에 등록한다.
+ *
+ * 두 특별 장치 경로에서 원 주석이 같은 주의를 준다: add_*_device 가
+ * 명령줄 우선 항목 때문에 devid 를 바꿀 수 있으므로, DTE 설정은 반드시
+ * 그 뒤에 해야 한다. 순서를 바꾸면 사용자가 지정한 장치가 아니라 표의
+ * 장치에 플래그를 얹게 된다.
+ *
+ * 호출 체인:
+ *   init_iommu_one()/init_iommu_all() → [이 함수]
+ *     → add_early_maps() → amd_iommu_apply_ivrs_quirks()
+ *     → set_dev_entry_from_acpi_range() → add_special_device()
+ */
 static int __init init_iommu_from_acpi(struct amd_iommu *iommu,
 					struct ivhd_header *h)
 {
-	u8 *p = (u8 *)h;
-	u8 *end = p, flags = 0;
-	u16 devid = 0, devid_start = 0, devid_to = 0, seg_id;
-	u32 dev_i, ext_flags = 0;
-	bool alias = false;
-	struct ivhd_entry *e;
-	struct amd_iommu_pci_seg *pci_seg = iommu->pci_seg;
-	u32 ivhd_size;
-	int ret;
+	u8 *p = (u8 *)h;	/* [한국어] 항목 구간을 훑을 커서 */
+	u8 *end = p, flags = 0;	/* [한국어] 구간의 끝과, 범위 항목이 나를 플래그 */
+	u16 devid = 0, devid_start = 0, devid_to = 0, seg_id;	/* [한국어] 현재 장치, 범위 시작, 별칭 대상, 세그먼트 */
+	u32 dev_i, ext_flags = 0;	/* [한국어] 범위 순회 인덱스와 확장 플래그 */
+	bool alias = false;	/* [한국어] 지금 모으는 범위가 별칭 범위인가 */
+	struct ivhd_entry *e;	/* [한국어] 현재 항목 */
+	struct amd_iommu_pci_seg *pci_seg = iommu->pci_seg;	/* [한국어] 이 유닛의 세그먼트 — 조회 표들이 거기 있다 */
+	u32 ivhd_size;	/* [한국어] 헤더 크기(타입마다 다르다) */
+	int ret;	/* [한국어] 하위 호출의 결과 */
 
 
-	ret = add_early_maps();
-	if (ret)
-		return ret;
+	ret = add_early_maps();	/* [한국어] 명령줄 대응을 먼저 목록에 넣는다 — 그래야 표의 값이 그것을 이기지 못한다 */
+	if (ret)	/* [한국어] 등록 실패 */
+		return ret;	/* [한국어] 진행할 수 없다 */
 
-	amd_iommu_apply_ivrs_quirks();
+	amd_iommu_apply_ivrs_quirks();	/* [한국어] 표에 빠진 항목이 있는 알려진 기종이면 여기서 채워 넣는다 */
 
 	/*
 	 * First save the recommended feature enable bits from ACPI
 	 */
-	iommu->acpi_flags = h->flags;
+	iommu->acpi_flags = h->flags;	/* [한국어] (원 주석: ACPI 가 권장하는 기능 활성화 비트를 먼저 저장한다) */
 
 	/*
 	 * Done. Now parse the device entries
 	 */
-	ivhd_size = get_ivhd_header_size(h);
-	if (!ivhd_size) {
-		pr_err("Unsupported IVHD type %#x\n", h->type);
-		return -EINVAL;
+	ivhd_size = get_ivhd_header_size(h);	/* [한국어] (원 주석: 이제 장치 항목을 파싱한다) */
+	if (!ivhd_size) {	/* [한국어] 모르는 타입 */
+		pr_err("Unsupported IVHD type %#x\n", h->type);	/* [한국어] 해석할 수 없다 */
+		return -EINVAL;	/* [한국어] 이 IVHD 를 포기한다 */
 	}
 
-	p += ivhd_size;
+	p += ivhd_size;	/* [한국어] 헤더를 지나 첫 항목으로 */
 
-	end += h->length;
+	end += h->length;	/* [한국어] 구간의 끝 */
 
 
-	while (p < end) {
-		e = (struct ivhd_entry *)p;
-		seg_id = pci_seg->id;
+	while (p < end) {	/* [한국어] 항목을 하나씩 */
+		e = (struct ivhd_entry *)p;	/* [한국어] 현재 위치를 항목으로 해석 */
+		seg_id = pci_seg->id;	/* [한국어] 로그에 쓸 세그먼트 번호 */
 
-		switch (e->type) {
-		case IVHD_DEV_ALL:
+		switch (e->type) {	/* [한국어] 항목 종류에 따라 하는 일이 다르다 */
+		case IVHD_DEV_ALL:	/* [한국어] 이 유닛이 세그먼트의 모든 장치를 담당한다 */
 
-			DUMP_printk("  DEV_ALL\t\t\tsetting: %#02x\n", e->flags);
-			set_dev_entry_from_acpi_range(iommu, 0, pci_seg->last_bdf, e->flags, 0);
-			break;
-		case IVHD_DEV_SELECT:
+			DUMP_printk("  DEV_ALL\t\t\tsetting: %#02x\n", e->flags);	/* [한국어] 상세 로그를 켰을 때만 찍힌다 */
+			set_dev_entry_from_acpi_range(iommu, 0, pci_seg->last_bdf, e->flags, 0);	/* [한국어] 0 부터 최대 id 까지 전부에 적용 */
+			break;	/* [한국어] 다음 항목 */
+		case IVHD_DEV_SELECT:	/* [한국어] 장치 하나를 지정 */
 
-			DUMP_printk("  DEV_SELECT\t\t\tdevid: %04x:%02x:%02x.%x flags: %#02x\n",
+			DUMP_printk("  DEV_SELECT\t\t\tdevid: %04x:%02x:%02x.%x flags: %#02x\n",	/* [한국어] 상세 로그 */
 				    seg_id, PCI_BUS_NUM(e->devid),
 				    PCI_SLOT(e->devid),
 				    PCI_FUNC(e->devid),
 				    e->flags);
 
-			devid = e->devid;
-			set_dev_entry_from_acpi(iommu, devid, e->flags, 0);
-			break;
-		case IVHD_DEV_SELECT_RANGE_START:
+			devid = e->devid;	/* [한국어] 그 장치 */
+			set_dev_entry_from_acpi(iommu, devid, e->flags, 0);	/* [한국어] 즉시 적용 */
+			break;	/* [한국어] 다음 */
+		case IVHD_DEV_SELECT_RANGE_START:	/* [한국어] 범위의 시작. 적용은 RANGE_END 에서 */
 
-			DUMP_printk("  DEV_SELECT_RANGE_START\tdevid: %04x:%02x:%02x.%x flags: %#02x\n",
+			DUMP_printk("  DEV_SELECT_RANGE_START\tdevid: %04x:%02x:%02x.%x flags: %#02x\n",	/* [한국어] 상세 로그 */
 				    seg_id, PCI_BUS_NUM(e->devid),
 				    PCI_SLOT(e->devid),
 				    PCI_FUNC(e->devid),
 				    e->flags);
 
-			devid_start = e->devid;
-			flags = e->flags;
-			ext_flags = 0;
-			alias = false;
-			break;
-		case IVHD_DEV_ALIAS:
+			devid_start = e->devid;	/* [한국어] 시작을 기억해 둔다 */
+			flags = e->flags;	/* [한국어] 플래그도 — 끝 항목에는 없기 때문이다 */
+			ext_flags = 0;	/* [한국어] 이 종류에는 확장 플래그가 없다 */
+			alias = false;	/* [한국어] 별칭 범위가 아니다 */
+			break;	/* [한국어] 끝 항목을 기다린다 */
+		case IVHD_DEV_ALIAS:	/* [한국어] 이 장치는 다른 이름으로 요청을 낸다 */
 
-			DUMP_printk("  DEV_ALIAS\t\t\tdevid: %04x:%02x:%02x.%x flags: %#02x devid_to: %02x:%02x.%x\n",
+			DUMP_printk("  DEV_ALIAS\t\t\tdevid: %04x:%02x:%02x.%x flags: %#02x devid_to: %02x:%02x.%x\n",	/* [한국어] 상세 로그 */
 				    seg_id, PCI_BUS_NUM(e->devid),
 				    PCI_SLOT(e->devid),
 				    PCI_FUNC(e->devid),
@@ -2606,15 +2976,15 @@ static int __init init_iommu_from_acpi(struct amd_iommu *iommu,
 				    PCI_SLOT(e->ext >> 8),
 				    PCI_FUNC(e->ext >> 8));
 
-			devid = e->devid;
-			devid_to = e->ext >> 8;
-			set_dev_entry_from_acpi(iommu, devid   , e->flags, 0);
-			set_dev_entry_from_acpi(iommu, devid_to, e->flags, 0);
-			pci_seg->alias_table[devid] = devid_to;
-			break;
-		case IVHD_DEV_ALIAS_RANGE:
+			devid = e->devid;	/* [한국어] 원래 장치 */
+			devid_to = e->ext >> 8;	/* [한국어] 실제로 나타나는 이름 */
+			set_dev_entry_from_acpi(iommu, devid   , e->flags, 0);	/* [한국어] 원래 장치에도 */
+			set_dev_entry_from_acpi(iommu, devid_to, e->flags, 0);	/* [한국어] 별칭 쪽에도 플래그를 적용한다 — 하드웨어가 보는 것은 별칭 쪽이다 */
+			pci_seg->alias_table[devid] = devid_to;	/* [한국어] 조회 표에 대응을 기록 */
+			break;	/* [한국어] 다음 */
+		case IVHD_DEV_ALIAS_RANGE:	/* [한국어] 범위 전체가 하나의 별칭을 쓴다 — 브리지 뒤 장치들 */
 
-			DUMP_printk("  DEV_ALIAS_RANGE\t\tdevid: %04x:%02x:%02x.%x flags: %#02x devid_to: %04x:%02x:%02x.%x\n",
+			DUMP_printk("  DEV_ALIAS_RANGE\t\tdevid: %04x:%02x:%02x.%x flags: %#02x devid_to: %04x:%02x:%02x.%x\n",	/* [한국어] 상세 로그 */
 				    seg_id, PCI_BUS_NUM(e->devid),
 				    PCI_SLOT(e->devid),
 				    PCI_FUNC(e->devid),
@@ -2623,27 +2993,27 @@ static int __init init_iommu_from_acpi(struct amd_iommu *iommu,
 				    PCI_SLOT(e->ext >> 8),
 				    PCI_FUNC(e->ext >> 8));
 
-			devid_start = e->devid;
-			flags = e->flags;
-			devid_to = e->ext >> 8;
-			ext_flags = 0;
-			alias = true;
-			break;
-		case IVHD_DEV_EXT_SELECT:
+			devid_start = e->devid;	/* [한국어] 범위의 시작 */
+			flags = e->flags;	/* [한국어] 플래그 */
+			devid_to = e->ext >> 8;	/* [한국어] 모두가 쓸 별칭 */
+			ext_flags = 0;	/* [한국어] 확장 플래그 없음 */
+			alias = true;	/* [한국어] 끝 항목에서 별칭 처리를 하도록 표시 */
+			break;	/* [한국어] 끝 항목을 기다린다 */
+		case IVHD_DEV_EXT_SELECT:	/* [한국어] 확장 플래그가 딸린 장치 하나 */
 
-			DUMP_printk("  DEV_EXT_SELECT\t\tdevid: %04x:%02x:%02x.%x flags: %#02x ext: %08x\n",
+			DUMP_printk("  DEV_EXT_SELECT\t\tdevid: %04x:%02x:%02x.%x flags: %#02x ext: %08x\n",	/* [한국어] 상세 로그 */
 				    seg_id, PCI_BUS_NUM(e->devid),
 				    PCI_SLOT(e->devid),
 				    PCI_FUNC(e->devid),
 				    e->flags, e->ext);
 
 			devid = e->devid;
-			set_dev_entry_from_acpi(iommu, devid, e->flags,
-						e->ext);
+			set_dev_entry_from_acpi(iommu, devid, e->flags,	/* [한국어] 기본 플래그와 */
+						e->ext);	/* [한국어] 확장 플래그를 함께 */
 			break;
-		case IVHD_DEV_EXT_SELECT_RANGE:
+		case IVHD_DEV_EXT_SELECT_RANGE:	/* [한국어] 확장 플래그가 딸린 범위 */
 
-			DUMP_printk("  DEV_EXT_SELECT_RANGE\tdevid: %04x:%02x:%02x.%x flags: %#02x ext: %08x\n",
+			DUMP_printk("  DEV_EXT_SELECT_RANGE\tdevid: %04x:%02x:%02x.%x flags: %#02x ext: %08x\n",	/* [한국어] 상세 로그 */
 				    seg_id, PCI_BUS_NUM(e->devid),
 				    PCI_SLOT(e->devid),
 				    PCI_FUNC(e->devid),
@@ -2651,49 +3021,49 @@ static int __init init_iommu_from_acpi(struct amd_iommu *iommu,
 
 			devid_start = e->devid;
 			flags = e->flags;
-			ext_flags = e->ext;
+			ext_flags = e->ext;	/* [한국어] 확장 플래그도 끝 항목까지 나른다 */
 			alias = false;
 			break;
-		case IVHD_DEV_RANGE_END:
+		case IVHD_DEV_RANGE_END:	/* [한국어] 범위의 끝. 여기서 실제 적용이 일어난다 */
 
-			DUMP_printk("  DEV_RANGE_END\t\tdevid: %04x:%02x:%02x.%x\n",
+			DUMP_printk("  DEV_RANGE_END\t\tdevid: %04x:%02x:%02x.%x\n",	/* [한국어] 상세 로그 */
 				    seg_id, PCI_BUS_NUM(e->devid),
 				    PCI_SLOT(e->devid),
 				    PCI_FUNC(e->devid));
 
 			devid = e->devid;
-			if (alias) {
-				for (dev_i = devid_start; dev_i <= devid; ++dev_i)
-					pci_seg->alias_table[dev_i] = devid_to;
-				set_dev_entry_from_acpi(iommu, devid_to, flags, ext_flags);
+			if (alias) {	/* [한국어] 별칭 범위였다면 */
+				for (dev_i = devid_start; dev_i <= devid; ++dev_i)	/* [한국어] 범위의 모든 장치가 */
+					pci_seg->alias_table[dev_i] = devid_to;	/* [한국어] 같은 별칭을 쓰게 기록한다 */
+				set_dev_entry_from_acpi(iommu, devid_to, flags, ext_flags);	/* [한국어] 별칭 쪽에도 플래그를 적용 — 하드웨어가 보는 이름이다 */
 			}
-			set_dev_entry_from_acpi_range(iommu, devid_start, devid, flags, ext_flags);
+			set_dev_entry_from_acpi_range(iommu, devid_start, devid, flags, ext_flags);	/* [한국어] 시작 항목에서 기억해 둔 값으로 범위 전체에 적용 */
 			break;
-		case IVHD_DEV_SPECIAL: {
-			u8 handle, type;
-			const char *var;
+		case IVHD_DEV_SPECIAL: {	/* [한국어] IOAPIC/HPET 처럼 PCI 열거로 발견되지 않는 장치 */
+			u8 handle, type;	/* [한국어] 장치 번호와 종류 */
+			const char *var;	/* [한국어] 로그에 쓸 이름 */
 			u32 devid;
 			int ret;
 
-			handle = e->ext & 0xff;
-			devid = PCI_SEG_DEVID_TO_SBDF(seg_id, (e->ext >> 8));
-			type   = (e->ext >> 24) & 0xff;
+			handle = e->ext & 0xff;	/* [한국어] 그 장치의 번호 */
+			devid = PCI_SEG_DEVID_TO_SBDF(seg_id, (e->ext >> 8));	/* [한국어] 인터럽트가 나타날 요청자 id */
+			type   = (e->ext >> 24) & 0xff;	/* [한국어] IOAPIC 인지 HPET 인지 */
 
-			if (type == IVHD_SPECIAL_IOAPIC)
-				var = "IOAPIC";
-			else if (type == IVHD_SPECIAL_HPET)
-				var = "HPET";
+			if (type == IVHD_SPECIAL_IOAPIC)	/* [한국어] IOAPIC 이면 */
+				var = "IOAPIC";	/* [한국어] 로그용 이름 */
+			else if (type == IVHD_SPECIAL_HPET)	/* [한국어] HPET 이면 */
+				var = "HPET";	/* [한국어] 로그용 이름 */
 			else
-				var = "UNKNOWN";
+				var = "UNKNOWN";	/* [한국어] 모르는 종류도 로그에는 남긴다 */
 
-			DUMP_printk("  DEV_SPECIAL(%s[%d])\t\tdevid: %04x:%02x:%02x.%x, flags: %#02x\n",
+			DUMP_printk("  DEV_SPECIAL(%s[%d])\t\tdevid: %04x:%02x:%02x.%x, flags: %#02x\n",	/* [한국어] 상세 로그 */
 				    var, (int)handle,
 				    seg_id, PCI_BUS_NUM(devid),
 				    PCI_SLOT(devid),
 				    PCI_FUNC(devid),
 				    e->flags);
 
-			ret = add_special_device(type, handle, &devid, false);
+			ret = add_special_device(type, handle, &devid, false);	/* [한국어] 대응을 등록한다. 명령줄 우선 항목이 있으면 devid 가 바뀐다 */
 			if (ret)
 				return ret;
 
@@ -2702,65 +3072,65 @@ static int __init init_iommu_from_acpi(struct amd_iommu *iommu,
 			 * command-line override is present. So call
 			 * set_dev_entry_from_acpi after add_special_device.
 			 */
-			set_dev_entry_from_acpi(iommu, devid, e->flags, 0);
+			set_dev_entry_from_acpi(iommu, devid, e->flags, 0);	/* [한국어] (원 주석: add_special_device 가 devid 를 바꿀 수 있으므로 반드시 그 뒤에 부른다) */
 
 			break;
 		}
-		case IVHD_DEV_ACPI_HID: {
+		case IVHD_DEV_ACPI_HID: {	/* [한국어] ACPI HID 로만 식별되는 플랫폼 장치 */
 			u32 devid;
-			u8 hid[ACPIHID_HID_LEN];
-			u8 uid[ACPIHID_UID_LEN];
+			u8 hid[ACPIHID_HID_LEN];	/* [한국어] HID 문자열 버퍼 */
+			u8 uid[ACPIHID_UID_LEN];	/* [한국어] UID 문자열 버퍼 */
 			int ret;
 
-			if (h->type != 0x40) {
-				pr_err(FW_BUG "Invalid IVHD device type %#x\n",
+			if (h->type != 0x40) {	/* [한국어] 이 항목 종류는 40h 타입 IVHD 에만 있을 수 있다 */
+				pr_err(FW_BUG "Invalid IVHD device type %#x\n",	/* [한국어] 다른 타입에 나타났다면 표가 잘못된 것 */
 				       e->type);
-				break;
+				break;	/* [한국어] 건너뛴다 */
 			}
 
-			BUILD_BUG_ON(sizeof(e->ext_hid) != ACPIHID_HID_LEN - 1);
-			memcpy(hid, &e->ext_hid, ACPIHID_HID_LEN - 1);
-			hid[ACPIHID_HID_LEN - 1] = '\0';
+			BUILD_BUG_ON(sizeof(e->ext_hid) != ACPIHID_HID_LEN - 1);	/* [한국어] 표의 HID 필드와 우리 버퍼의 크기가 어긋나면 빌드가 멈춘다 */
+			memcpy(hid, &e->ext_hid, ACPIHID_HID_LEN - 1);	/* [한국어] ext 와 hidh 를 묶은 8바이트가 HID 문자열이다 */
+			hid[ACPIHID_HID_LEN - 1] = '\0';	/* [한국어] 표에는 종료 문자가 없어 직접 붙인다 */
 
-			if (!(*hid)) {
-				pr_err(FW_BUG "Invalid HID.\n");
-				break;
+			if (!(*hid)) {	/* [한국어] 빈 HID */
+				pr_err(FW_BUG "Invalid HID.\n");	/* [한국어] 장치를 식별할 수 없다 */
+				break;	/* [한국어] 건너뛴다 */
 			}
 
-			uid[0] = '\0';
-			switch (e->uidf) {
-			case UID_NOT_PRESENT:
+			uid[0] = '\0';	/* [한국어] UID 는 없을 수 있으므로 빈 문자열로 시작 */
+			switch (e->uidf) {	/* [한국어] UID 의 형식에 따라 읽는 법이 다르다 */
+			case UID_NOT_PRESENT:	/* [한국어] UID 가 없다 */
 
-				if (e->uidl != 0)
-					pr_warn(FW_BUG "Invalid UID length.\n");
-
-				break;
-			case UID_IS_INTEGER:
-
-				sprintf(uid, "%d", e->uid);
+				if (e->uidl != 0)	/* [한국어] 그런데 길이가 0 이 아니면 */
+					pr_warn(FW_BUG "Invalid UID length.\n");	/* [한국어] 표가 모순된 것이라 알린다 */
 
 				break;
-			case UID_IS_CHARACTER:
+			case UID_IS_INTEGER:	/* [한국어] 정수로 주어졌다 */
 
-				memcpy(uid, &e->uid, e->uidl);
-				uid[e->uidl] = '\0';
+				sprintf(uid, "%d", e->uid);	/* [한국어] 문자열로 바꿔 담는다 — 목록의 비교가 문자열이기 때문이다 */
+
+				break;
+			case UID_IS_CHARACTER:	/* [한국어] 문자열로 주어졌다 */
+
+				memcpy(uid, &e->uid, e->uidl);	/* [한국어] uid 필드의 주소부터 uidl 바이트가 실제 내용이다 */
+				uid[e->uidl] = '\0';	/* [한국어] 종료 문자를 붙인다 */
 
 				break;
 			default:
 				break;
 			}
 
-			devid = PCI_SEG_DEVID_TO_SBDF(seg_id, e->devid);
-			DUMP_printk("  DEV_ACPI_HID(%s[%s])\t\tdevid: %04x:%02x:%02x.%x, flags: %#02x\n",
+			devid = PCI_SEG_DEVID_TO_SBDF(seg_id, e->devid);	/* [한국어] 이 장치의 요청자 id */
+			DUMP_printk("  DEV_ACPI_HID(%s[%s])\t\tdevid: %04x:%02x:%02x.%x, flags: %#02x\n",	/* [한국어] 상세 로그 */
 				    hid, uid, seg_id,
 				    PCI_BUS_NUM(devid),
 				    PCI_SLOT(devid),
 				    PCI_FUNC(devid),
 				    e->flags);
 
-			flags = e->flags;
+			flags = e->flags;	/* [한국어] 플래그 */
 
-			ret = add_acpi_hid_device(hid, uid, &devid, false);
+			ret = add_acpi_hid_device(hid, uid, &devid, false);	/* [한국어] 대응을 등록. 여기서도 devid 가 바뀔 수 있다 */
 			if (ret)
 				return ret;
 
@@ -2773,14 +3143,14 @@ static int __init init_iommu_from_acpi(struct amd_iommu *iommu,
 
 			break;
 		}
-		default:
+		default:	/* [한국어] 드라이버가 모르는 항목 종류 */
 			break;
 		}
 
-		p += ivhd_entry_length(p);
+		p += ivhd_entry_length(p);	/* [한국어] 항목마다 크기가 달라 계산해서 건너뛴다 */
 	}
 
-	return 0;
+	return 0;	/* [한국어] 이 유닛의 장치 정보가 모두 자료구조에 들어갔다 */
 }
 
 /* Allocate PCI segment data structure */
