@@ -797,302 +797,396 @@ out:	/* [한국어] 공통 출구 */
 
 static void free_context_table(struct intel_iommu *iommu)
 {
-	struct context_entry *context;
-	int i;
+	struct context_entry *context;	/* [한국어] 해제할 컨텍스트 테이블 */
+	int i;	/* [한국어] 버스 번호 순회 */
 
-	if (!iommu->root_entry)
+	if (!iommu->root_entry)	/* [한국어] 루트 테이블이 없으면 컨텍스트 테이블도 없다 */
 		return;
 
-	for (i = 0; i < ROOT_ENTRY_NR; i++) {
-		context = iommu_context_addr(iommu, i, 0, 0);
-		if (context)
+	for (i = 0; i < ROOT_ENTRY_NR; i++) {	/* [한국어] 256개 버스 각각에 대해 */
+		context = iommu_context_addr(iommu, i, 0, 0);	/* [한국어] 하위 컨텍스트 테이블 (장치 0~127) */
+		if (context)	/* [한국어] 있으면 */
 			iommu_free_pages(context);
 
-		if (!sm_supported(iommu))
+		if (!sm_supported(iommu))	/* [한국어] 레거시 모드는 테이블이 하나뿐이다 */
 			continue;
 
-		context = iommu_context_addr(iommu, i, 0x80, 0);
-		if (context)
+		context = iommu_context_addr(iommu, i, 0x80, 0);	/* [한국어] scalable mode 의 상위 테이블 (장치 128~255) */
+		if (context)	/* [한국어] 있으면 */
 			iommu_free_pages(context);
 	}
 
-	iommu_free_pages(iommu->root_entry);
-	iommu->root_entry = NULL;
+	iommu_free_pages(iommu->root_entry);	/* [한국어] 마지막으로 루트 테이블 */
+	iommu->root_entry = NULL;	/* [한국어] 두 번 해제되지 않도록 */
 }
 
-#ifdef CONFIG_DMAR_DEBUG
+#ifdef CONFIG_DMAR_DEBUG	/* [한국어] 폴트 진단이 켜진 빌드에서만 */
 static void pgtable_walk(struct intel_iommu *iommu, unsigned long pfn,
 			 u8 bus, u8 devfn, struct dma_pte *parent, int level)
 {
-	struct dma_pte *pte;
-	int offset;
+	struct dma_pte *pte;	/* [한국어] 현재 레벨의 항목 */
+	int offset;	/* [한국어] 그 레벨의 인덱스 */
 
-	while (1) {
-		offset = pfn_level_offset(pfn, level);
-		pte = &parent[offset];
+	while (1) {	/* [한국어] 잎에 닿거나 무효 항목을 만날 때까지 */
+		offset = pfn_level_offset(pfn, level);	/* [한국어] 이 레벨에서 주소가 쓰는 인덱스 */
+		pte = &parent[offset];	/* [한국어] 해당 항목 */
 
-		pr_info("pte level: %d, pte value: 0x%016llx\n", level, pte->val);
+		pr_info("pte level: %d, pte value: 0x%016llx\n", level, pte->val);	/* [한국어] 각 레벨의 서술자를 그대로 찍는다. 폴트 원인을 짚으려면 어느 레벨에서 끊겼는지, 권한 비트가 무엇이었는지를 봐야 한다 */
 
-		if (!dma_pte_present(pte)) {
-			pr_info("page table not present at level %d\n", level - 1);
+		if (!dma_pte_present(pte)) {	/* [한국어] 유효하지 않은 항목 */
+			pr_info("page table not present at level %d\n", level - 1);	/* [한국어] 여기서 번역이 끊겼다 — 폴트의 직접 원인이다 */
 			break;
 		}
 
-		if (level == 1 || dma_pte_superpage(pte))
+		if (level == 1 || dma_pte_superpage(pte))	/* [한국어] 마지막 레벨이거나 큰 페이지면 더 내려갈 곳이 없다 */
 			break;
 
-		parent = phys_to_virt(dma_pte_addr(pte));
-		level--;
+		parent = phys_to_virt(dma_pte_addr(pte));	/* [한국어] 다음 레벨 테이블로 */
+		level--;	/* [한국어] 한 단계 내려간다 */
 	}
 }
 
 void dmar_fault_dump_ptes(struct intel_iommu *iommu, u16 source_id,
 			  unsigned long long addr, u32 pasid)
 {
-	struct pasid_dir_entry *dir, *pde;
-	struct pasid_entry *entries, *pte;
-	struct context_entry *ctx_entry;
-	struct root_entry *rt_entry;
-	int i, dir_index, index, level;
-	u8 devfn = source_id & 0xff;
-	u8 bus = source_id >> 8;
-	struct dma_pte *pgtable;
+	struct pasid_dir_entry *dir, *pde;	/* [한국어] PASID 디렉터리와 그 항목 */
+	struct pasid_entry *entries, *pte;	/* [한국어] PASID 테이블과 그 항목 */
+	struct context_entry *ctx_entry;	/* [한국어] 컨텍스트 항목 */
+	struct root_entry *rt_entry;	/* [한국어] 루트 항목 */
+	int i, dir_index, index, level;	/* [한국어] 순회 커서와 인덱스, 페이지 테이블 레벨 */
+	u8 devfn = source_id & 0xff;	/* [한국어] 소스 id 의 하위 8비트가 장치·함수 */
+	u8 bus = source_id >> 8;	/* [한국어] 상위 8비트가 버스 번호 */
+	struct dma_pte *pgtable;	/* [한국어] 최종적으로 워크할 페이지 테이블 */
 
-	pr_info("Dump %s table entries for IOVA 0x%llx\n", iommu->name, addr);
+	pr_info("Dump %s table entries for IOVA 0x%llx\n", iommu->name, addr);	/* [한국어] 어느 유닛의 어느 주소에서 폴트가 났는지 */
 
 	/* root entry dump */
-	if (!iommu->root_entry) {
-		pr_info("root table is not present\n");
+	if (!iommu->root_entry) {	/* [한국어] 루트 테이블조차 없다 */
+		pr_info("root table is not present\n");	/* [한국어] 번역이 설정되지 않은 상태에서 DMA 가 왔다 */
 		return;
 	}
-	rt_entry = &iommu->root_entry[bus];
+	rt_entry = &iommu->root_entry[bus];	/* [한국어] 이 버스의 루트 항목 */
 
-	if (sm_supported(iommu))
+	if (sm_supported(iommu))	/* [한국어] scalable mode 는 항목이 두 배라 상위·하위를 함께 찍는다 */
 		pr_info("scalable mode root entry: hi 0x%016llx, low 0x%016llx\n",
 			rt_entry->hi, rt_entry->lo);
 	else
 		pr_info("root entry: 0x%016llx", rt_entry->lo);
 
 	/* context entry dump */
-	ctx_entry = iommu_context_addr(iommu, bus, devfn, 0);
-	if (!ctx_entry) {
-		pr_info("context table is not present\n");
+	ctx_entry = iommu_context_addr(iommu, bus, devfn, 0);	/* [한국어] 이 장치의 컨텍스트 항목 */
+	if (!ctx_entry) {	/* [한국어] 컨텍스트 테이블이 없다 */
+		pr_info("context table is not present\n");	/* [한국어] 이 버스의 어떤 장치도 설정되지 않았다 */
 		return;
 	}
 
-	pr_info("context entry: hi 0x%016llx, low 0x%016llx\n",
+	pr_info("context entry: hi 0x%016llx, low 0x%016llx\n",	/* [한국어] 컨텍스트 항목의 원본 값. 도메인 id 와 페이지 테이블 루트가 여기 들어 있다 */
 		ctx_entry->hi, ctx_entry->lo);
 
 	/* legacy mode does not require PASID entries */
-	if (!sm_supported(iommu)) {
-		if (!context_present(ctx_entry)) {
-			pr_info("legacy mode page table is not present\n");
+	if (!sm_supported(iommu)) {	/* [한국어] 레거시 모드 */
+		if (!context_present(ctx_entry)) {	/* [한국어] 이 장치의 컨텍스트가 설정되지 않았다 */
+			pr_info("legacy mode page table is not present\n");	/* [한국어] 장치가 IOMMU 에 등록되기 전에 DMA 를 냈다는 뜻 */
 			return;
 		}
-		level = agaw_to_level(ctx_entry->hi & 7);
-		pgtable = phys_to_virt(ctx_entry->lo & VTD_PAGE_MASK);
-		goto pgtable_walk;
+		level = agaw_to_level(ctx_entry->hi & 7);	/* [한국어] 컨텍스트 항목이 페이지 테이블 레벨 수를 담고 있다 */
+		pgtable = phys_to_virt(ctx_entry->lo & VTD_PAGE_MASK);	/* [한국어] 그리고 그 루트 주소 */
+		goto pgtable_walk;	/* [한국어] 페이지 테이블 워크로 */
 	}
 
-	if (!context_present(ctx_entry)) {
-		pr_info("pasid directory table is not present\n");
+	if (!context_present(ctx_entry)) {	/* [한국어] scalable mode 에서 컨텍스트가 없다 */
+		pr_info("pasid directory table is not present\n");	/* [한국어] PASID 디렉터리로 가는 길이 없다 */
 		return;
 	}
 
 	/* get the pointer to pasid directory entry */
-	dir = phys_to_virt(ctx_entry->lo & VTD_PAGE_MASK);
+	dir = phys_to_virt(ctx_entry->lo & VTD_PAGE_MASK);	/* [한국어] scalable mode 의 컨텍스트 항목은 페이지 테이블이 아니라 PASID 디렉터리를 가리킨다 */
 
 	/* For request-without-pasid, get the pasid from context entry */
-	if (intel_iommu_sm && pasid == IOMMU_PASID_INVALID)
-		pasid = IOMMU_NO_PASID;
+	if (intel_iommu_sm && pasid == IOMMU_PASID_INVALID)	/* [한국어] PASID 없는 요청이면 */
+		pasid = IOMMU_NO_PASID;	/* [한국어] PASID 0 을 쓴다 — scalable mode 는 RID 트래픽도 PASID 표를 거치며, 그 자리가 0 번이다 */
 
-	dir_index = pasid >> PASID_PDE_SHIFT;
-	pde = &dir[dir_index];
-	pr_info("pasid dir entry: 0x%016llx\n", pde->val);
+	dir_index = pasid >> PASID_PDE_SHIFT;	/* [한국어] PASID 의 상위 비트가 디렉터리 인덱스 */
+	pde = &dir[dir_index];	/* [한국어] 디렉터리 항목 */
+	pr_info("pasid dir entry: 0x%016llx\n", pde->val);	/* [한국어] 그 값 */
 
 	/* get the pointer to the pasid table entry */
-	entries = get_pasid_table_from_pde(pde);
-	if (!entries) {
-		pr_info("pasid table is not present\n");
+	entries = get_pasid_table_from_pde(pde);	/* [한국어] 디렉터리 항목이 가리키는 PASID 테이블 */
+	if (!entries) {	/* [한국어] 없다 */
+		pr_info("pasid table is not present\n");	/* [한국어] 이 PASID 범위가 설정되지 않았다 */
 		return;
 	}
-	index = pasid & PASID_PTE_MASK;
-	pte = &entries[index];
-	for (i = 0; i < ARRAY_SIZE(pte->val); i++)
-		pr_info("pasid table entry[%d]: 0x%016llx\n", i, pte->val[i]);
+	index = pasid & PASID_PTE_MASK;	/* [한국어] PASID 의 하위 비트가 테이블 인덱스 */
+	pte = &entries[index];	/* [한국어] 이 PASID 의 항목 */
+	for (i = 0; i < ARRAY_SIZE(pte->val); i++)	/* [한국어] PASID 항목은 여러 워드로 이루어져 있다 */
+		pr_info("pasid table entry[%d]: 0x%016llx\n", i, pte->val[i]);	/* [한국어] 전부 찍는다 — 어느 워드의 어느 비트가 잘못되었는지 봐야 하므로 */
 
-	if (!pasid_pte_is_present(pte)) {
-		pr_info("scalable mode page table is not present\n");
+	if (!pasid_pte_is_present(pte)) {	/* [한국어] 이 PASID 가 설정되지 않았다 */
+		pr_info("scalable mode page table is not present\n");	/* [한국어] SVA 바인딩 전에 그 PASID 로 DMA 가 왔다는 뜻 */
 		return;
 	}
 
-	if (pasid_pte_get_pgtt(pte) == PASID_ENTRY_PGTT_FL_ONLY) {
-		level = pte->val[2] & BIT_ULL(2) ? 5 : 4;
-		pgtable = phys_to_virt(pte->val[2] & VTD_PAGE_MASK);
+	if (pasid_pte_get_pgtt(pte) == PASID_ENTRY_PGTT_FL_ONLY) {	/* [한국어] 1단계 번역만 쓰는 경우 (SVA 나 커널 DMA) */
+		level = pte->val[2] & BIT_ULL(2) ? 5 : 4;	/* [한국어] 5단계인지 4단계인지 */
+		pgtable = phys_to_virt(pte->val[2] & VTD_PAGE_MASK);	/* [한국어] 1단계 페이지 테이블 루트 */
 	} else {
-		level = agaw_to_level((pte->val[0] >> 2) & 0x7);
-		pgtable = phys_to_virt(pte->val[0] & VTD_PAGE_MASK);
+		level = agaw_to_level((pte->val[0] >> 2) & 0x7);	/* [한국어] 2단계 번역 — 레벨이 AGAW 로 인코딩되어 있다 */
+		pgtable = phys_to_virt(pte->val[0] & VTD_PAGE_MASK);	/* [한국어] 2단계 페이지 테이블 루트 */
 	}
 
-pgtable_walk:
-	pgtable_walk(iommu, addr >> VTD_PAGE_SHIFT, bus, devfn, pgtable, level);
+pgtable_walk:	/* [한국어] 레거시와 scalable 경로가 합류 */
+	pgtable_walk(iommu, addr >> VTD_PAGE_SHIFT, bus, devfn, pgtable, level);	/* [한국어] 페이지 테이블을 레벨별로 찍는다 */
 }
 #endif
 
 /* iommu handling */
 static int iommu_alloc_root_entry(struct intel_iommu *iommu)
 {
-	struct root_entry *root;
+	struct root_entry *root;	/* [한국어] 만들 루트 테이블 */
 
-	root = iommu_alloc_pages_node_sz(iommu->node, GFP_ATOMIC, SZ_4K);
-	if (!root) {
-		pr_err("Allocating root entry for %s failed\n",
-			iommu->name);
-		return -ENOMEM;
+	root = iommu_alloc_pages_node_sz(iommu->node, GFP_ATOMIC, SZ_4K);	/* [한국어] 이 유닛과 가까운 노드에서 한 페이지. 256개 항목 × 16바이트가 정확히 한 페이지다 */
+	if (!root) {	/* [한국어] 할당 실패 */
+		pr_err("Allocating root entry for %s failed\n",	/* [한국어] 이 유닛을 쓸 수 없다 */
+			iommu->name);	/* [한국어] 어느 유닛인지 */
+		return -ENOMEM;	/* [한국어] 초기화 실패 */
 	}
 
-	__iommu_flush_cache(iommu, root, ROOT_SIZE);
-	iommu->root_entry = root;
+	__iommu_flush_cache(iommu, root, ROOT_SIZE);	/* [한국어] 0 으로 채워진 테이블을 메모리로 밀어낸다 */
+	iommu->root_entry = root;	/* [한국어] 유닛에 매단다 */
 
-	return 0;
+	return 0;	/* [한국어] 루트 테이블 준비 완료 */
 }
 
+/*
+ * [한국어]
+ * iommu_set_root_entry - 루트 테이블 주소를 하드웨어에 알리고 캐시를 비운다
+ *
+ * @iommu: 대상 DMAR 유닛
+ *
+ * 이 함수가 돌아온 뒤부터 하드웨어가 이 커널의 테이블을 워크한다. 주소를 쓰는
+ * 것 자체는 두 줄이고, 나머지가 그 전환을 안전하게 만드는 일이다.
+ *
+ * 주소 하위 비트에 SMT(Scalable Mode Translation)를 얹는 것이 결정적이다. 그 한
+ * 비트가 컨텍스트 항목의 해석을 통째로 바꾼다 — 레거시면 페이지 테이블 루트를,
+ * scalable 이면 PASID 디렉터리를 가리키는 것으로 읽는다.
+ *
+ * 세 캐시(컨텍스트, PASID, IOTLB)를 모두 비우는 이유는 옛 테이블을 통해 캐시된
+ * 내용이 남아 있으면 안 되기 때문이다. Enhanced SRTP 를 지원하는 하드웨어는
+ * 그것을 스스로 하므로 건너뛴다 (위 영어 주석).
+ *
+ * 실행 컨텍스트: 유닛 초기화. 레지스터 락을 잡는다.
+ *
+ * 호출 체인: init_dmars, 리쥼 경로 → [이 함수]
+ */
 static void iommu_set_root_entry(struct intel_iommu *iommu)
 {
-	u64 addr;
-	u32 sts;
-	unsigned long flag;
+	u64 addr;	/* [한국어] 루트 테이블의 물리 주소 + 모드 비트 */
+	u32 sts;	/* [한국어] 상태 레지스터 읽기용 */
+	unsigned long flag;	/* [한국어] 인터럽트 상태 */
 
-	addr = virt_to_phys(iommu->root_entry);
-	if (sm_supported(iommu))
-		addr |= DMA_RTADDR_SMT;
+	addr = virt_to_phys(iommu->root_entry);	/* [한국어] 하드웨어가 볼 주소 */
+	if (sm_supported(iommu))	/* [한국어] scalable mode 로 동작시킬 것이면 */
+		addr |= DMA_RTADDR_SMT;	/* [한국어] 주소 하위 비트에 모드 표시를 얹는다. 이 비트 하나가 컨텍스트 항목의 해석 자체를 바꾼다 — 레거시면 페이지 테이블 루트, scalable 이면 PASID 디렉터리 */
 
-	raw_spin_lock_irqsave(&iommu->register_lock, flag);
-	writeq(addr, iommu->reg + DMAR_RTADDR_REG);
+	raw_spin_lock_irqsave(&iommu->register_lock, flag);	/* [한국어] 레지스터 접근은 이 락으로 직렬화한다. raw 판인 것은 RT 커널에서도 이 구간이 선점되면 안 되기 때문이다 */
+	writeq(addr, iommu->reg + DMAR_RTADDR_REG);	/* [한국어] 루트 테이블 주소를 알린다 */
 
-	writel(iommu->gcmd | DMA_GCMD_SRTP, iommu->reg + DMAR_GCMD_REG);
+	writel(iommu->gcmd | DMA_GCMD_SRTP, iommu->reg + DMAR_GCMD_REG);	/* [한국어] Set Root Table Pointer 명령. 전역 명령 레지스터는 한 번에 하나의 명령만 받으므로 기존 gcmd 값을 함께 써야 다른 설정이 꺼지지 않는다 */
 
 	/* Make sure hardware complete it */
-	IOMMU_WAIT_OP(iommu, DMAR_GSTS_REG,
-		      readl, (sts & DMA_GSTS_RTPS), sts);
+	IOMMU_WAIT_OP(iommu, DMAR_GSTS_REG,	/* [한국어] 완료를 기다린다 */
+		      readl, (sts & DMA_GSTS_RTPS), sts);	/* [한국어] Root Table Pointer Status 가 설 때까지 폴링한다 */
 
-	raw_spin_unlock_irqrestore(&iommu->register_lock, flag);
+	raw_spin_unlock_irqrestore(&iommu->register_lock, flag);	/* [한국어] 레지스터 접근 끝 */
 
 	/*
 	 * Hardware invalidates all DMA remapping hardware translation
 	 * caches as part of SRTP flow.
 	 */
-	if (cap_esrtps(iommu->cap))
-		return;
+	if (cap_esrtps(iommu->cap))	/* [한국어] Enhanced SRTP 를 지원하는 하드웨어는 이 명령만으로 모든 캐시를 비운다 (위 영어 주석) */
+		return;	/* [한국어] 추가 무효화가 불필요하다 */
 
-	iommu->flush.flush_context(iommu, 0, 0, 0, DMA_CCMD_GLOBAL_INVL);
-	if (sm_supported(iommu))
-		qi_flush_pasid_cache(iommu, 0, QI_PC_GLOBAL, 0);
-	iommu->flush.flush_iotlb(iommu, 0, 0, 0, DMA_TLB_GLOBAL_FLUSH);
+	iommu->flush.flush_context(iommu, 0, 0, 0, DMA_CCMD_GLOBAL_INVL);	/* [한국어] 컨텍스트 캐시 전체 무효화. 옛 루트 테이블을 통해 캐시된 장치-도메인 대응이 남아 있으면 안 된다 */
+	if (sm_supported(iommu))	/* [한국어] scalable mode 면 */
+		qi_flush_pasid_cache(iommu, 0, QI_PC_GLOBAL, 0);	/* [한국어] PASID 캐시도 비운다 */
+	iommu->flush.flush_iotlb(iommu, 0, 0, 0, DMA_TLB_GLOBAL_FLUSH);	/* [한국어] IOTLB 전체 무효화. 세 캐시를 모두 비워야 새 테이블이 온전히 적용된다 */
 }
 
+/*
+ * [한국어]
+ * iommu_flush_write_buffer - 하드웨어 내부 쓰기 버퍼를 비운다
+ *
+ * @iommu: 대상 유닛
+ *
+ * 일부 구형 VT-d 하드웨어는 소프트웨어가 쓴 페이지 테이블이 내부 쓰기 버퍼에
+ * 머물러, 워커가 그것을 보지 못하는 결함이 있다. 매핑을 만든 뒤 이 명령으로
+ * 버퍼를 비워야 새 PTE 가 실제로 반영된다.
+ *
+ * cap_rwbf 로 하드웨어가 스스로 요구하는 경우와, DMI 로 특정 보드를 식별해
+ * 켜는 rwbf_quirk 두 경로가 있다.
+ *
+ * 실행 컨텍스트: 매핑 경로. 레지스터 락을 잡는다.
+ *
+ * 호출 체인: 매핑 후 무효화 경로 → [이 함수]
+ */
 void iommu_flush_write_buffer(struct intel_iommu *iommu)
 {
-	u32 val;
-	unsigned long flag;
+	u32 val;	/* [한국어] 상태 레지스터 읽기용 */
+	unsigned long flag;	/* [한국어] 인터럽트 상태 */
 
-	if (!rwbf_quirk && !cap_rwbf(iommu->cap))
-		return;
+	if (!rwbf_quirk && !cap_rwbf(iommu->cap))	/* [한국어] 이 플러시가 필요한 하드웨어가 아니면 */
+		return;	/* [한국어] 할 일이 없다 */
 
-	raw_spin_lock_irqsave(&iommu->register_lock, flag);
-	writel(iommu->gcmd | DMA_GCMD_WBF, iommu->reg + DMAR_GCMD_REG);
+	raw_spin_lock_irqsave(&iommu->register_lock, flag);	/* [한국어] 레지스터 접근 직렬화 */
+	writel(iommu->gcmd | DMA_GCMD_WBF, iommu->reg + DMAR_GCMD_REG);	/* [한국어] Write Buffer Flush 명령. 일부 구형 하드웨어는 페이지 테이블 기입이 내부 쓰기 버퍼에 머물 수 있어, 명시적으로 비워야 워커가 그것을 본다 */
 
 	/* Make sure hardware complete it */
-	IOMMU_WAIT_OP(iommu, DMAR_GSTS_REG,
-		      readl, (!(val & DMA_GSTS_WBFS)), val);
+	IOMMU_WAIT_OP(iommu, DMAR_GSTS_REG,	/* [한국어] 완료 대기 */
+		      readl, (!(val & DMA_GSTS_WBFS)), val);	/* [한국어] Write Buffer Flush Status 가 내려갈 때까지 — 다른 완료 대기와 달리 비트가 '지워지기를' 기다린다 */
 
-	raw_spin_unlock_irqrestore(&iommu->register_lock, flag);
+	raw_spin_unlock_irqrestore(&iommu->register_lock, flag);	/* [한국어] 레지스터 접근 끝 */
 }
 
 /* return value determine if we need a write buffer flush */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * __iommu_flush_context - 컨텍스트 캐시를 무효화한다 (레지스터 방식)
+ *
+ * @iommu:         대상 유닛
+ * @did:           도메인 id (범위가 도메인 이하일 때)
+ * @source_id:     장치의 BDF (장치 단위일 때)
+ * @function_mask: 여러 함수를 한 번에 다룰 마스크
+ * @type:          무효화 범위
+ *
+ * 컨텍스트 캐시는 하드웨어가 "이 소스 id 는 이 도메인, 이 페이지 테이블"이라는
+ * 대응을 기억해 둔 것이다. 장치를 다른 도메인으로 옮기거나 컨텍스트 항목을
+ * 바꾸면 반드시 비워야 하며, 그러지 않으면 하드웨어가 옛 페이지 테이블을 계속
+ * 워크한다.
+ *
+ * 범위가 셋인 이유는 비용 때문이다. 전역 무효화는 시스템의 모든 장치가 다시
+ * 컨텍스트를 읽게 만들어 일시적인 성능 저하를 낳으므로, 가능하면 도메인이나
+ * 장치 단위로 좁힌다.
+ *
+ * 완료를 폴링으로 기다리는 것이 이 방식의 비용이다. 무효화 큐(QI)를 지원하는
+ * 하드웨어는 이 함수 대신 큐에 명령을 넣어 그 대기를 없앤다.
+ *
+ * 실행 컨텍스트: 부착/해제 경로. 레지스터 락을 잡는다.
+ *
+ * 호출 체인: iommu->flush.flush_context == [이 함수] (레지스터 방식일 때)
+ */
 static void __iommu_flush_context(struct intel_iommu *iommu,
 				  u16 did, u16 source_id, u8 function_mask,
 				  u64 type)
 {
-	u64 val = 0;
-	unsigned long flag;
+	u64 val = 0;	/* [한국어] 명령 레지스터에 쓸 값 */
+	unsigned long flag;	/* [한국어] 인터럽트 상태 */
 
-	switch (type) {
-	case DMA_CCMD_GLOBAL_INVL:
-		val = DMA_CCMD_GLOBAL_INVL;
+	switch (type) {	/* [한국어] 무효화 범위에 따라 명령이 다르다 */
+	case DMA_CCMD_GLOBAL_INVL:	/* [한국어] 전역 — 모든 장치의 컨텍스트 캐시 */
+		val = DMA_CCMD_GLOBAL_INVL;	/* [한국어] 추가 인자가 없다 */
 		break;
-	case DMA_CCMD_DOMAIN_INVL:
-		val = DMA_CCMD_DOMAIN_INVL|DMA_CCMD_DID(did);
+	case DMA_CCMD_DOMAIN_INVL:	/* [한국어] 도메인 단위 — 그 도메인에 속한 장치들만 */
+		val = DMA_CCMD_DOMAIN_INVL|DMA_CCMD_DID(did);	/* [한국어] 도메인 id 를 함께 싣는다 */
 		break;
-	case DMA_CCMD_DEVICE_INVL:
-		val = DMA_CCMD_DEVICE_INVL|DMA_CCMD_DID(did)
-			| DMA_CCMD_SID(source_id) | DMA_CCMD_FM(function_mask);
+	case DMA_CCMD_DEVICE_INVL:	/* [한국어] 장치 단위 — 가장 좁은 범위 */
+		val = DMA_CCMD_DEVICE_INVL|DMA_CCMD_DID(did)	/* [한국어] 도메인 id 와 */
+			| DMA_CCMD_SID(source_id) | DMA_CCMD_FM(function_mask);	/* [한국어] 소스 id, 그리고 함수 마스크. 마스크로 여러 함수를 한 번에 무효화할 수 있다 */
 		break;
 	default:
-		pr_warn("%s: Unexpected context-cache invalidation type 0x%llx\n",
-			iommu->name, type);
+		pr_warn("%s: Unexpected context-cache invalidation type 0x%llx\n",	/* [한국어] 알 수 없는 종류 — 호출자 버그 */
+			iommu->name, type);	/* [한국어] 어느 유닛의 어떤 요청이었는지 */
 		return;
 	}
-	val |= DMA_CCMD_ICC;
+	val |= DMA_CCMD_ICC;	/* [한국어] Invalidate Context Cache 비트. 이것을 쓰면 하드웨어가 작업을 시작하고, 끝나면 스스로 지운다 */
 
-	raw_spin_lock_irqsave(&iommu->register_lock, flag);
-	writeq(val, iommu->reg + DMAR_CCMD_REG);
+	raw_spin_lock_irqsave(&iommu->register_lock, flag);	/* [한국어] 레지스터 접근 직렬화 */
+	writeq(val, iommu->reg + DMAR_CCMD_REG);	/* [한국어] 명령을 낸다 */
 
 	/* Make sure hardware complete it */
-	IOMMU_WAIT_OP(iommu, DMAR_CCMD_REG,
-		readq, (!(val & DMA_CCMD_ICC)), val);
+	IOMMU_WAIT_OP(iommu, DMAR_CCMD_REG,	/* [한국어] 완료를 기다린다 */
+		readq, (!(val & DMA_CCMD_ICC)), val);	/* [한국어] ICC 비트가 하드웨어에 의해 지워질 때까지 폴링. 레지스터 방식 무효화가 느린 이유가 이 대기이며, 무효화 큐(QI)가 그것을 없애려고 도입되었다 */
 
-	raw_spin_unlock_irqrestore(&iommu->register_lock, flag);
+	raw_spin_unlock_irqrestore(&iommu->register_lock, flag);	/* [한국어] 레지스터 접근 끝 */
 }
 
+/*
+ * [한국어]
+ * __iommu_flush_iotlb - IOTLB 를 무효화한다 (레지스터 방식)
+ *
+ * @iommu:      대상 유닛
+ * @did:        도메인 id
+ * @addr:       무효화할 주소 (페이지 선택 방식일 때)
+ * @size_order: 그 범위의 크기 로그값
+ * @type:       무효화 범위 (전역/도메인/페이지)
+ *
+ * IOTLB 는 IOVA→물리 번역의 캐시다. 매핑을 지운 뒤 이것을 비우기 전까지 장치는
+ * 여전히 옛 물리 페이지에 닿을 수 있으므로, 그 페이지를 반납하려면 반드시
+ * 거쳐야 하는 관문이다.
+ *
+ * 세 범위 중 도메인 단위(DSI)가 실무에서 가장 중요하다. dma-iommu 의 flush queue
+ * 가 수천 건의 해제를 모았다가 이 명령 한 번으로 정리하며, 그것이 고성능 장치에서
+ * IOMMU 를 켜도 처리량이 버티는 이유다.
+ *
+ * 페이지 선택(PSI)은 주소와 크기를 한 레지스터에 담는데, 주소 정렬이 곧 무효화
+ * 가능한 최대 범위를 제한한다. 그래서 정렬이 나쁜 해제는 결국 도메인 전체 무효화로
+ * 승격되는 경우가 많다.
+ *
+ * 마지막의 IAIG 검사가 진단상 유용하다. 하드웨어가 요청보다 넓은 범위를 비웠으면
+ * 정확성 문제는 없고 성능만 손해이지만, 0 이면 무효화 자체가 수행되지 않은 것이라
+ * 옛 번역이 그대로 남는다.
+ *
+ * 실행 컨텍스트: 해제 경로. 레지스터 락을 잡는다.
+ *
+ * 호출 체인: iommu->flush.flush_iotlb == [이 함수] (레지스터 방식일 때)
+ */
 void __iommu_flush_iotlb(struct intel_iommu *iommu, u16 did, u64 addr,
 			 unsigned int size_order, u64 type)
 {
-	int tlb_offset = ecap_iotlb_offset(iommu->ecap);
-	u64 val = 0, val_iva = 0;
-	unsigned long flag;
+	int tlb_offset = ecap_iotlb_offset(iommu->ecap);	/* [한국어] IOTLB 레지스터의 위치는 하드웨어마다 다르다 — 능력 레지스터가 알려 준다 */
+	u64 val = 0, val_iva = 0;	/* [한국어] 명령 값과 주소 값 */
+	unsigned long flag;	/* [한국어] 인터럽트 상태 */
 
-	switch (type) {
-	case DMA_TLB_GLOBAL_FLUSH:
+	switch (type) {	/* [한국어] 무효화 범위 */
+	case DMA_TLB_GLOBAL_FLUSH:	/* [한국어] 전역 — 모든 도메인의 IOTLB */
 		/* global flush doesn't need set IVA_REG */
-		val = DMA_TLB_GLOBAL_FLUSH|DMA_TLB_IVT;
+		val = DMA_TLB_GLOBAL_FLUSH|DMA_TLB_IVT;	/* [한국어] 주소를 쓸 필요가 없다 (위 영어 주석) */
 		break;
-	case DMA_TLB_DSI_FLUSH:
-		val = DMA_TLB_DSI_FLUSH|DMA_TLB_IVT|DMA_TLB_DID(did);
+	case DMA_TLB_DSI_FLUSH:	/* [한국어] Domain-Selective — 한 도메인 전체 */
+		val = DMA_TLB_DSI_FLUSH|DMA_TLB_IVT|DMA_TLB_DID(did);	/* [한국어] 도메인 id 를 싣는다. dma-iommu 의 flush queue 가 결국 이 명령 하나로 수천 개의 해제를 정리한다 */
 		break;
-	case DMA_TLB_PSI_FLUSH:
-		val = DMA_TLB_PSI_FLUSH|DMA_TLB_IVT|DMA_TLB_DID(did);
+	case DMA_TLB_PSI_FLUSH:	/* [한국어] Page-Selective — 특정 주소 범위만 */
+		val = DMA_TLB_PSI_FLUSH|DMA_TLB_IVT|DMA_TLB_DID(did);	/* [한국어] 도메인 id */
 		/* IH bit is passed in as part of address */
-		val_iva = size_order | addr;
+		val_iva = size_order | addr;	/* [한국어] 주소와 범위 크기를 한 값에 담는다. 하위 비트가 크기의 로그값이고 상위가 주소라, 주소 정렬이 곧 무효화 가능한 최대 범위를 정한다 (위 영어 주석의 IH 비트도 여기 실린다) */
 		break;
 	default:
-		pr_warn("%s: Unexpected iotlb invalidation type 0x%llx\n",
-			iommu->name, type);
+		pr_warn("%s: Unexpected iotlb invalidation type 0x%llx\n",	/* [한국어] 알 수 없는 종류 */
+			iommu->name, type);	/* [한국어] 어느 유닛의 어떤 요청 */
 		return;
 	}
 
-	if (cap_write_drain(iommu->cap))
-		val |= DMA_TLB_WRITE_DRAIN;
+	if (cap_write_drain(iommu->cap))	/* [한국어] 이 하드웨어가 쓰기 배수(drain)를 지원하면 */
+		val |= DMA_TLB_WRITE_DRAIN;	/* [한국어] 무효화 전에 진행 중인 쓰기를 모두 완료시킨다. 그러지 않으면 이미 파이프라인에 들어간 DMA 쓰기가 옛 번역으로 완료될 수 있다 */
 
-	raw_spin_lock_irqsave(&iommu->register_lock, flag);
+	raw_spin_lock_irqsave(&iommu->register_lock, flag);	/* [한국어] 레지스터 접근 직렬화 */
 	/* Note: Only uses first TLB reg currently */
-	if (val_iva)
-		writeq(val_iva, iommu->reg + tlb_offset);
-	writeq(val, iommu->reg + tlb_offset + 8);
+	if (val_iva)	/* [한국어] 주소가 필요한 종류면 */
+		writeq(val_iva, iommu->reg + tlb_offset);	/* [한국어] 주소 레지스터를 먼저 쓴다 */
+	writeq(val, iommu->reg + tlb_offset + 8);	/* [한국어] 그 다음 명령 레지스터. 순서가 뒤집히면 하드웨어가 옛 주소로 무효화한다 */
 
 	/* Make sure hardware complete it */
-	IOMMU_WAIT_OP(iommu, tlb_offset + 8,
-		readq, (!(val & DMA_TLB_IVT)), val);
+	IOMMU_WAIT_OP(iommu, tlb_offset + 8,	/* [한국어] 완료 대기 */
+		readq, (!(val & DMA_TLB_IVT)), val);	/* [한국어] IVT 비트가 지워질 때까지 */
 
-	raw_spin_unlock_irqrestore(&iommu->register_lock, flag);
+	raw_spin_unlock_irqrestore(&iommu->register_lock, flag);	/* [한국어] 레지스터 접근 끝 */
 
 	/* check IOTLB invalidation granularity */
-	if (DMA_TLB_IAIG(val) == 0)
-		pr_err("Flush IOTLB failed\n");
-	if (DMA_TLB_IAIG(val) != DMA_TLB_IIRG(type))
-		pr_debug("TLB flush request %Lx, actual %Lx\n",
-			(unsigned long long)DMA_TLB_IIRG(type),
-			(unsigned long long)DMA_TLB_IAIG(val));
+	if (DMA_TLB_IAIG(val) == 0)	/* [한국어] Invalidation Actual Granularity 가 0 = 하드웨어가 무효화를 수행하지 않았다 */
+		pr_err("Flush IOTLB failed\n");	/* [한국어] 옛 번역이 그대로 남았다는 뜻이라 심각하다 */
+	if (DMA_TLB_IAIG(val) != DMA_TLB_IIRG(type))	/* [한국어] 요청한 범위와 실제 수행된 범위가 다르다 */
+		pr_debug("TLB flush request %Lx, actual %Lx\n",	/* [한국어] 하드웨어가 더 넓은 범위를 비운 경우로, 정확성 문제는 없고 성능만 손해다 */
+			(unsigned long long)DMA_TLB_IIRG(type),	/* [한국어] 요청한 범위 */
+			(unsigned long long)DMA_TLB_IAIG(val));	/* [한국어] 실제 범위 */
 }
 
 static struct device_domain_info *
