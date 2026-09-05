@@ -3643,129 +3643,253 @@ static int __init init_iommu_one_late(struct amd_iommu *iommu)
  *
  * This function search through all IVDB of the maximum supported IVHD
  */
+/*
+ * [한국어]
+ * (위 영어 kernel-doc 에 이어)
+ * get_highest_supported_ivhd_type - 이 표에서 쓸 IVHD 타입을 고른다
+ *
+ * @ivrs: IVRS 표 헤더.
+ * @return: 고른 타입.
+ *
+ * 하나의 IVRS 표에 같은 유닛에 대한 IVHD 가 여러 타입으로 함께 들어 있다.
+ * 하위 호환을 위해 펌웨어가 옛 형식과 새 형식을 나란히 적어 두기 때문이다.
+ * 그중 하나를 골라 일관되게 써야 하며, 새 형식일수록 정보가 많으므로
+ * 가장 높은 것을 고른다.
+ *
+ * 첫 IVHD 의 devid 를 기준으로 삼는 것이 이 함수의 요령이다. 같은 유닛의
+ * 항목들만 비교해야 하는데, 서로 다른 유닛의 항목이 섞여 있어도 devid 로
+ * 구별되기 때문이다.
+ *
+ * 순회 조건에 타입 상한이 들어 있는 이유: 드라이버가 모르는 더 높은 타입이
+ * 나타나면 그 지점에서 멈춘다 — 해석할 수 없는 형식을 고르면 안 된다.
+ *
+ * 호출 체인:
+ *   early_amd_iommu_init() → [이 함수]
+ */
 static u8 get_highest_supported_ivhd_type(struct acpi_table_header *ivrs)
 {
-	u8 *base = (u8 *)ivrs;
-	struct ivhd_header *ivhd = (struct ivhd_header *)
-					(base + IVRS_HEADER_LENGTH);
-	u8 last_type = ivhd->type;
-	u16 devid = ivhd->devid;
+	u8 *base = (u8 *)ivrs;	/* [한국어] 표의 시작. 순회 종료 판단에 쓴다 */
+	struct ivhd_header *ivhd = (struct ivhd_header *)	/* [한국어] 첫 IVHD */
+					(base + IVRS_HEADER_LENGTH);	/* [한국어] 고정 헤더 뒤부터 */
+	u8 last_type = ivhd->type;	/* [한국어] 지금까지 본 가장 높은 타입 */
+	u16 devid = ivhd->devid;	/* [한국어] 기준이 될 유닛. 다른 유닛의 항목과 섞이지 않게 한다 */
 
-	while (((u8 *)ivhd - base < ivrs->length) &&
-	       (ivhd->type <= ACPI_IVHD_TYPE_MAX_SUPPORTED)) {
-		u8 *p = (u8 *) ivhd;
+	while (((u8 *)ivhd - base < ivrs->length) &&	/* [한국어] 표의 끝에 닿기 전이고 */
+	       (ivhd->type <= ACPI_IVHD_TYPE_MAX_SUPPORTED)) {	/* [한국어] 드라이버가 아는 타입인 동안 — 모르는 형식을 고르면 안 된다 */
+		u8 *p = (u8 *) ivhd;	/* [한국어] 다음으로 건너뛸 기준 */
 
-		if (ivhd->devid == devid)
-			last_type = ivhd->type;
-		ivhd = (struct ivhd_header *)(p + ivhd->length);
+		if (ivhd->devid == devid)	/* [한국어] 같은 유닛의 항목이면 */
+			last_type = ivhd->type;	/* [한국어] 더 높은 타입으로 갱신한다. 새 형식일수록 정보가 많다 */
+		ivhd = (struct ivhd_header *)(p + ivhd->length);	/* [한국어] 다음 IVHD 로 */
 	}
 
-	return last_type;
+	return last_type;	/* [한국어] 이 값이 이후 모든 파싱의 기준이 된다 */
 }
 
 /*
  * Iterates over all IOMMU entries in the ACPI table, allocates the
  * IOMMU structure and initializes it with init_iommu_one()
  */
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * init_iommu_all - 표의 모든 IOMMU 를 발견해 초기화한다
+ *
+ * @table: IVRS 표.
+ * @return: 0 성공, 음수면 어느 유닛에서 실패.
+ *
+ * 세 단계로 나뉘어 있고, 그 나눔이 이 함수의 설계다.
+ *
+ * 1단계: IVHD 를 훑으며 유닛 구조체를 만들고 기본 정보를 채운다. 이 시점에는
+ *   각 유닛이 자기 능력만 안다.
+ * 2단계: 모든 유닛의 능력을 AND 해 전역 EFR 을 만든다. 이제서야 "이
+ *   시스템이 무엇을 할 수 있는가"가 확정된다.
+ * 3단계: 그 전역 결정을 전제로 각 유닛을 마무리한다.
+ *
+ * 왜 이렇게 나눠야 하는가: 인터럽트 모드나 물려받기 여부 같은 결정은 모든
+ * 유닛을 본 뒤에야 내릴 수 있는데, 버퍼 할당과 도메인 생성은 그 결정에
+ * 의존한다. 한 번에 처리하면 첫 유닛이 아직 모르는 사실을 전제로 자원을
+ * 잡게 된다.
+ *
+ * target_ivhd_type 만 처리하는 이유: 같은 유닛에 대해 여러 타입의 IVHD 가
+ * 있고, 그중 하나만 골라 써야 유닛이 중복 생성되지 않는다.
+ *
+ * 실패 시 되감지 않는 것에 유의: 호출자가 free_iommu_resources 로 부분적으로
+ * 만들어진 것까지 함께 정리한다.
+ *
+ * 호출 체인:
+ *   early_amd_iommu_init() → [이 함수] → init_iommu_one()
+ *     → get_global_efr() → init_iommu_one_late()
+ */
 static int __init init_iommu_all(struct acpi_table_header *table)
 {
-	u8 *p = (u8 *)table, *end = (u8 *)table;
-	struct ivhd_header *h;
-	struct amd_iommu *iommu;
-	int ret;
+	u8 *p = (u8 *)table, *end = (u8 *)table;	/* [한국어] 표를 훑을 커서와 끝 */
+	struct ivhd_header *h;	/* [한국어] 현재 IVHD */
+	struct amd_iommu *iommu;	/* [한국어] 만들 유닛 */
+	int ret;	/* [한국어] 하위 호출의 결과 */
 
-	end += table->length;
-	p += IVRS_HEADER_LENGTH;
+	end += table->length;	/* [한국어] 표의 끝 */
+	p += IVRS_HEADER_LENGTH;	/* [한국어] 첫 IVHD 로 */
 
 	/* Phase 1: Process all IVHD blocks */
-	while (p < end) {
-		h = (struct ivhd_header *)p;
-		if (*p == amd_iommu_target_ivhd_type) {
+	while (p < end) {	/* [한국어] (원 주석: 1단계 — 모든 IVHD 블록을 처리한다) */
+		h = (struct ivhd_header *)p;	/* [한국어] 현재 위치를 IVHD 로 */
+		if (*p == amd_iommu_target_ivhd_type) {	/* [한국어] 고른 타입만 처리 — 아니면 유닛이 중복 생성된다 */
 
-			DUMP_printk("device: %04x:%02x:%02x.%01x cap: %04x "
+			DUMP_printk("device: %04x:%02x:%02x.%01x cap: %04x "	/* [한국어] 상세 로그: 유닛의 위치와 능력 */
 				    "flags: %01x info %04x\n",
 				    h->pci_seg, PCI_BUS_NUM(h->devid),
 				    PCI_SLOT(h->devid), PCI_FUNC(h->devid),
 				    h->cap_ptr, h->flags, h->info);
-			DUMP_printk("       mmio-addr: %016llx\n",
+			DUMP_printk("       mmio-addr: %016llx\n",	/* [한국어] MMIO 주소 */
 				    h->mmio_phys);
 
-			iommu = kzalloc_obj(struct amd_iommu);
-			if (iommu == NULL)
-				return -ENOMEM;
+			iommu = kzalloc_obj(struct amd_iommu);	/* [한국어] 유닛 구조체 */
+			if (iommu == NULL)	/* [한국어] 메모리 부족 */
+				return -ENOMEM;	/* [한국어] 호출자가 부분적으로 만들어진 것까지 정리한다 */
 
-			ret = init_iommu_one(iommu, h, table);
+			ret = init_iommu_one(iommu, h, table);	/* [한국어] 세그먼트를 잇고 MMIO 를 매핑하고 장치 항목을 파싱한다 */
 			if (ret)
-				return ret;
+				return ret;	/* [한국어] 실패하면 그대로 보고 */
 		}
-		p += h->length;
+		p += h->length;	/* [한국어] 다음 IVHD 로 */
 
 	}
-	WARN_ON(p != end);
+	WARN_ON(p != end);	/* [한국어] 순회가 끝을 정확히 짚지 못하면 표를 잘못 읽은 것이다 */
 
 	/* Phase 2 : Early feature support check */
-	get_global_efr();
+	get_global_efr();	/* [한국어] (원 주석: 2단계 — 이른 기능 지원 확인) 모든 유닛의 공통분을 확정한다 */
 
 	/* Phase 3 : Enabling IOMMU features */
-	for_each_iommu(iommu) {
-		ret = init_iommu_one_late(iommu);
+	for_each_iommu(iommu) {	/* [한국어] (원 주석: 3단계 — IOMMU 기능 활성화) */
+		ret = init_iommu_one_late(iommu);	/* [한국어] 전역 결정을 전제로 각 유닛을 마무리한다 */
 		if (ret)
 			return ret;
 	}
 
-	return 0;
+	return 0;	/* [한국어] 모든 유닛이 켜질 준비를 마쳤다 */
 }
 
+/*
+ * [한국어]
+ * init_iommu_perf_ctr - 성능 카운터의 규모를 읽어 둔다
+ *
+ * @iommu: 대상 유닛.
+ *
+ * 뱅크 수와 뱅크당 카운터 수를 읽는다. perf 계층이 이 값으로 "이 유닛에서
+ * 동시에 몇 개를 셀 수 있는가"를 판단한다.
+ *
+ * 전역 amd_iommu_pc_present 를 세우는 것이 눈에 띈다 — 유닛별 능력을 읽는
+ * 함수인데 전역 플래그를 켠다. 성능 카운터 인터페이스가 유닛 단위가 아니라
+ * 시스템 단위로 노출되기 때문이다.
+ *
+ * 지원하지 않으면 조용히 돌아간다. 성능 카운터는 없어도 IOMMU 동작에
+ * 아무 영향이 없다.
+ *
+ * 호출 체인:
+ *   iommu_init_pci() → [이 함수]
+ */
 static void init_iommu_perf_ctr(struct amd_iommu *iommu)
 {
-	u64 val;
-	struct pci_dev *pdev = iommu->dev;
+	u64 val;	/* [한국어] 설정 레지스터 값 */
+	struct pci_dev *pdev = iommu->dev;	/* [한국어] 로그용 */
 
-	if (!check_feature(FEATURE_PC))
-		return;
+	if (!check_feature(FEATURE_PC))	/* [한국어] 성능 카운터가 없으면 */
+		return;	/* [한국어] 없어도 IOMMU 동작에는 지장이 없다 */
 
-	amd_iommu_pc_present = true;
+	amd_iommu_pc_present = true;	/* [한국어] 전역 플래그 — 카운터 인터페이스가 시스템 단위로 노출되기 때문 */
 
-	pci_info(pdev, "IOMMU performance counters supported\n");
+	pci_info(pdev, "IOMMU performance counters supported\n");	/* [한국어] 쓸 수 있음을 알린다 */
 
-	val = readl(iommu->mmio_base + MMIO_CNTR_CONF_OFFSET);
-	iommu->max_banks = (u8) ((val >> 12) & 0x3f);
-	iommu->max_counters = (u8) ((val >> 7) & 0xf);
+	val = readl(iommu->mmio_base + MMIO_CNTR_CONF_OFFSET);	/* [한국어] 카운터 설정 레지스터 */
+	iommu->max_banks = (u8) ((val >> 12) & 0x3f);	/* [한국어] 뱅크 수 */
+	iommu->max_counters = (u8) ((val >> 7) & 0xf);	/* [한국어] 뱅크당 카운터 수. 둘을 곱한 것이 동시에 셀 수 있는 이벤트 수다 */
 
-	return;
+	return;	/* [한국어] 설정 완료 */
 }
 
+/*
+ * [한국어]
+ * amd_iommu_show_cap - sysfs 로 이 유닛의 능력 값을 보여 준다
+ *
+ * @dev: sysfs 의 device.
+ * @attr: 속성(쓰지 않는다).
+ * @buf: 출력 버퍼.
+ * @return: 쓴 바이트 수.
+ *
+ * PCI 능력 구조에서 읽은 값을 그대로 낸다. 유닛마다 다를 수 있어 유닛별
+ * 속성이다.
+ */
 static ssize_t amd_iommu_show_cap(struct device *dev,
 				  struct device_attribute *attr,
 				  char *buf)
 {
-	struct amd_iommu *iommu = dev_to_amd_iommu(dev);
-	return sysfs_emit(buf, "%x\n", iommu->cap);
+	struct amd_iommu *iommu = dev_to_amd_iommu(dev);	/* [한국어] sysfs device 에서 유닛으로 되짚는다 */
+	return sysfs_emit(buf, "%x\n", iommu->cap);	/* [한국어] 유닛별 값이라 그대로 낸다 */
 }
 static DEVICE_ATTR(cap, S_IRUGO, amd_iommu_show_cap, NULL);
 
+/*
+ * [한국어]
+ * amd_iommu_show_features - sysfs 로 확장 기능 비트를 보여 준다
+ *
+ * @dev: sysfs 의 device(쓰지 않는다).
+ * @attr: 속성(쓰지 않는다).
+ * @buf: 출력 버퍼.
+ * @return: 쓴 바이트 수.
+ *
+ * 유닛별 속성인데 전역 값을 낸다는 점이 cap 과 다르다. 드라이버가 모든
+ * 유닛의 공통분만 쓰므로, 유닛별 값을 보여 주면 실제로 쓸 수 없는 기능을
+ * 광고하게 된다.
+ */
 static ssize_t amd_iommu_show_features(struct device *dev,
 				       struct device_attribute *attr,
 				       char *buf)
 {
-	return sysfs_emit(buf, "%llx:%llx\n", amd_iommu_efr, amd_iommu_efr2);
+	return sysfs_emit(buf, "%llx:%llx\n", amd_iommu_efr, amd_iommu_efr2);	/* [한국어] 전역 공통분을 낸다 — 유닛별 값은 실제로 쓸 수 없는 기능을 광고하게 된다 */
 }
 static DEVICE_ATTR(features, S_IRUGO, amd_iommu_show_features, NULL);
 
+/*
+ * [한국어] sysfs 에 노출할 유닛 속성 목록
+ *
+ * 둘뿐이지만 성격이 다르다. cap 은 유닛별 값이고, features 는 전역
+ * 공통분이다 — 유닛별 능력을 보여 주면 드라이버가 실제로 쓰지 않는 기능을
+ * 사용자가 있다고 오해한다.
+ */
 static struct attribute *amd_iommu_attrs[] = {
 	&dev_attr_cap.attr,
+	/* [한국어] 이 유닛의 PCI 능력 값. 유닛마다 다를 수 있다. */
 	&dev_attr_features.attr,
+	/* [한국어] 확장 기능 비트. 모든 유닛의 공통분을 낸다. */
 	NULL,
+	/* [한국어] 목록의 끝 표시. */
 };
 
+/*
+ * [한국어] 위 속성들을 담을 sysfs 디렉터리
+ *
+ * 유닛의 sysfs 디렉터리 아래 amd-iommu/ 로 나타난다. 이름을 두는 이유:
+ * 코어 IOMMU 계층이 만든 속성들과 벤더 고유 속성을 섞지 않기 위해서다.
+ */
 static struct attribute_group amd_iommu_group = {
 	.name = "amd-iommu",
+	/* [한국어] sysfs 하위 디렉터리 이름. */
 	.attrs = amd_iommu_attrs,
+	/* [한국어] 그 디렉터리에 놓일 속성들. */
 };
 
+/*
+ * [한국어] 유닛 등록 때 코어에 넘길 속성 그룹 목록
+ *
+ * 그룹이 하나뿐이라 배열이 과해 보이지만, 코어의 등록 인터페이스가 목록을
+ * 요구한다. 나중에 그룹을 늘리기 쉽게 하는 형태이기도 하다.
+ */
 static const struct attribute_group *amd_iommu_groups[] = {
 	&amd_iommu_group,
+	/* [한국어] 위에서 정의한 amd-iommu 그룹. */
 	NULL,
+	/* [한국어] 목록의 끝 표시. */
 };
 
 /*
@@ -3773,122 +3897,208 @@ static const struct attribute_group *amd_iommu_groups[] = {
  * of the IOMMU Extended Feature Register [MMIO Offset 0030h].
  * Default to EFR in IVHD since it is available sooner (i.e. before PCI init).
  */
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * late_iommu_features_init - MMIO 에서 읽은 능력이 표와 일치하는지 확인한다
+ *
+ * @iommu: 대상 유닛.
+ *
+ * 이 함수는 값을 쓰기보다 검증하기 위해 있다. 원 주석대로 IVHD 11h/40h 에
+ * 이미 EFR 사본이 있고 그것을 먼저 쓰기로 했으므로, MMIO 에서 읽은 값은
+ * 대조용이다.
+ *
+ * 왜 표를 우선하는가: 표는 PCI 초기화 전에도 읽을 수 있고, 인터럽트 재매핑
+ * 결정이 그보다 먼저 이루어져야 한다. 나중에 MMIO 값이 다르다고 바꾸면
+ * 이미 내린 결정과 어긋난다.
+ *
+ * 그래서 불일치를 발견해도 값을 바꾸지 않고 경고만 한다 — 어느 쪽이 맞든
+ * 이미 표의 값으로 시스템이 구성됐기 때문이다. FW_WARN 인 이유는 두 값이
+ * 다르다는 것 자체가 펌웨어의 문제이기 때문이다.
+ *
+ * amd_iommu_efr 이 아직 0 이면(타입 10h 라 표에 사본이 없었다면) 여기서
+ * 처음 채운다.
+ *
+ * 호출 체인:
+ *   iommu_init_pci() → [이 함수]
+ */
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * late_iommu_features_init - MMIO 에서 읽은 능력이 표와 일치하는지 확인한다
+ *
+ * @iommu: 대상 유닛.
+ *
+ * 이 함수는 값을 쓰기보다 검증하기 위해 있다. 원 주석대로 IVHD 11h/40h 에
+ * 이미 EFR 사본이 있고 그것을 먼저 쓰기로 했으므로, MMIO 에서 읽은 값은
+ * 대조용이다.
+ *
+ * 왜 표를 우선하는가: 표는 PCI 초기화 전에도 읽을 수 있고, 인터럽트 재매핑
+ * 결정이 그보다 먼저 이루어져야 한다. 나중에 MMIO 값이 다르다고 바꾸면
+ * 이미 내린 결정과 어긋난다.
+ *
+ * 그래서 불일치를 발견해도 값을 바꾸지 않고 경고만 한다 — 어느 쪽이 맞든
+ * 이미 표의 값으로 시스템이 구성됐기 때문이다. FW_WARN 인 이유는 두 값이
+ * 다르다는 것 자체가 펌웨어의 문제이기 때문이다.
+ *
+ * amd_iommu_efr 이 아직 0 이면(타입 10h 라 표에 사본이 없었다면) 여기서
+ * 처음 채운다.
+ *
+ * 호출 체인:
+ *   iommu_init_pci() → [이 함수]
+ */
 static void __init late_iommu_features_init(struct amd_iommu *iommu)
 {
-	u64 features, features2;
+	u64 features, features2;	/* [한국어] MMIO 에서 읽은 능력 */
 
-	if (!(iommu->cap & (1 << IOMMU_CAP_EFR)))
-		return;
+	if (!(iommu->cap & (1 << IOMMU_CAP_EFR)))	/* [한국어] 확장 기능 레지스터 자체가 없는 유닛 */
+		return;	/* [한국어] 읽을 것이 없다 */
 
 	/* read extended feature bits */
-	features = readq(iommu->mmio_base + MMIO_EXT_FEATURES);
-	features2 = readq(iommu->mmio_base + MMIO_EXT_FEATURES2);
+	features = readq(iommu->mmio_base + MMIO_EXT_FEATURES);	/* [한국어] (원 주석: 확장 기능 비트를 읽는다) */
+	features2 = readq(iommu->mmio_base + MMIO_EXT_FEATURES2);	/* [한국어] 두 번째 워드 */
 
-	if (!amd_iommu_efr) {
-		amd_iommu_efr = features;
-		amd_iommu_efr2 = features2;
-		return;
+	if (!amd_iommu_efr) {	/* [한국어] 표에 사본이 없었다면(타입 10h) */
+		amd_iommu_efr = features;	/* [한국어] 여기서 처음 채운다 */
+		amd_iommu_efr2 = features2;	/* [한국어] 두 번째 워드도 */
+		return;	/* [한국어] 대조할 대상이 없다 */
 	}
 
 	/*
 	 * Sanity check and warn if EFR values from
 	 * IVHD and MMIO conflict.
 	 */
-	if (features != amd_iommu_efr ||
-	    features2 != amd_iommu_efr2) {
-		pr_warn(FW_WARN
+	if (features != amd_iommu_efr ||	/* [한국어] (원 주석: IVHD 와 MMIO 의 EFR 이 충돌하면 확인하고 경고한다) */
+	    features2 != amd_iommu_efr2) {	/* [한국어] 두 번째 워드도 비교 */
+		pr_warn(FW_WARN	/* [한국어] 값을 바꾸지 않고 경고만 한다 — 이미 표의 값으로 시스템이 구성됐다 */
 			"EFR mismatch. Use IVHD EFR (%#llx : %#llx), EFR2 (%#llx : %#llx).\n",
 			features, amd_iommu_efr,
 			features2, amd_iommu_efr2);
 	}
 }
 
+/*
+ * [한국어]
+ * iommu_init_pci - PCI 열거가 끝난 뒤 유닛을 마저 갖춘다
+ *
+ * @iommu: 대상 유닛.
+ * @return: 0 성공, 음수면 실패.
+ *
+ * 초기화의 세 번째 단계다. 앞의 두 단계는 PCI 서브시스템 없이 진행됐지만,
+ * 여기서는 struct pci_dev 를 얻어 설정 공간을 정상적으로 다룰 수 있다.
+ *
+ * 하는 일:
+ *  - IOMMU 자신의 PCI 장치를 찾는다. 이것이 없으면 아래 모든 것이 불가능하다.
+ *  - PASID 능력을 계산한다. PASMAX 에서 최대 PASID 수를, GLX 에서 GCR3
+ *    테이블의 레벨 수를 얻고, 후자는 모든 유닛의 최소값으로 좁힌다.
+ *  - PPR 로그를 잡고, 성능 카운터 규모를 읽고, 기종별 errata 를 우회한다.
+ *  - sysfs 에 등록하고 코어 IOMMU 계층에 유닛을 등록한다.
+ *
+ * NPCACHE 처리가 눈에 띈다. 하드웨어가 존재하지 않는 항목도 캐시하면
+ * 매핑을 새로 만들 때도 무효화가 필요해져 지연 무효화를 쓸 수 없다. 그래서
+ * strict 모드로 강제한다 — 원 주석이 "가상화 때문"이라고 하는 것은 이
+ * 능력이 주로 가상 IOMMU 에서 나타나기 때문이다.
+ *
+ * RD890 블록은 레주메 대비다. 그 칩셋은 BIOS 가 레지스터를 복원해 주지
+ * 않으므로, 지금 전부 읽어 두었다가 레주메 때 되쓴다. 원 주석이 그 사정을
+ * 밝힌다.
+ *
+ * 마지막 등록 실패 처리가 미묘하다. 원 주석대로, DMA 변환을 지원하지 않아도
+ * 오류를 돌려주지 않는다 — 인터럽트 재매핑만이라도 켜야 하고, 그러려면
+ * 상태 기계가 계속 진행해야 하기 때문이다. sysfs 만 지워 사용자에게
+ * 반쪽짜리 유닛을 노출하지 않는다.
+ *
+ * 호출 체인:
+ *   amd_iommu_init_pci() → [이 함수] → late_iommu_features_init()
+ *     → iommu_enable_gt() → amd_iommu_alloc_ppr_log() → init_iommu_perf_ctr()
+ *     → iommu_device_register()
+ */
 static int __init iommu_init_pci(struct amd_iommu *iommu)
 {
-	int cap_ptr = iommu->cap_ptr;
-	int ret;
+	int cap_ptr = iommu->cap_ptr;	/* [한국어] 설정 공간에서 능력 구조의 위치 */
+	int ret;	/* [한국어] 하위 호출의 결과 */
 
-	iommu->dev = pci_get_domain_bus_and_slot(iommu->pci_seg->id,
-						 PCI_BUS_NUM(iommu->devid),
-						 iommu->devid & 0xff);
-	if (!iommu->dev)
-		return -ENODEV;
+	iommu->dev = pci_get_domain_bus_and_slot(iommu->pci_seg->id,	/* [한국어] IOMMU 자신의 PCI 장치를 찾는다 */
+						 PCI_BUS_NUM(iommu->devid),	/* [한국어] IVHD 가 알려 준 위치로 */
+						 iommu->devid & 0xff);	/* [한국어] devfn */
+	if (!iommu->dev)	/* [한국어] 열거되지 않았다 */
+		return -ENODEV;	/* [한국어] 설정 공간을 다룰 수 없어 아무것도 못 한다 */
 
 	/* ACPI _PRT won't have an IRQ for IOMMU */
-	iommu->dev->irq_managed = 1;
+	iommu->dev->irq_managed = 1;	/* [한국어] (원 주석: ACPI _PRT 에는 IOMMU 용 IRQ 가 없다) PCI 계층이 인터럽트를 배정하려 들지 않게 한다 */
 
-	pci_read_config_dword(iommu->dev, cap_ptr + MMIO_CAP_HDR_OFFSET,
-			      &iommu->cap);
+	pci_read_config_dword(iommu->dev, cap_ptr + MMIO_CAP_HDR_OFFSET,	/* [한국어] 능력 구조의 헤더를 읽어 */
+			      &iommu->cap);	/* [한국어] 보관한다. 아래 판단들이 이 값을 본다 */
 
-	if (!(iommu->cap & (1 << IOMMU_CAP_IOTLB)))
-		amd_iommu_iotlb_sup = false;
+	if (!(iommu->cap & (1 << IOMMU_CAP_IOTLB)))	/* [한국어] 이 유닛이 장치 IOTLB(ATS)를 지원하지 않으면 */
+		amd_iommu_iotlb_sup = false;	/* [한국어] 전역으로 내린다 — 유닛마다 다른 기능은 쓸 수 없다 */
 
-	late_iommu_features_init(iommu);
+	late_iommu_features_init(iommu);	/* [한국어] MMIO 의 능력이 표와 일치하는지 대조한다 */
 
-	if (check_feature(FEATURE_GT)) {
-		int glxval;
-		u64 pasmax;
+	if (check_feature(FEATURE_GT)) {	/* [한국어] 게스트 변환(PASID 별 변환)을 지원하면 */
+		int glxval;	/* [한국어] GCR3 테이블의 레벨 수 */
+		u64 pasmax;	/* [한국어] PASID 폭의 인코딩 */
 
-		pasmax = FIELD_GET(FEATURE_PASMAX, amd_iommu_efr);
-		iommu->iommu.max_pasids = (1 << (pasmax + 1)) - 1;
+		pasmax = FIELD_GET(FEATURE_PASMAX, amd_iommu_efr);	/* [한국어] 몇 비트의 PASID 를 쓸 수 있는지 */
+		iommu->iommu.max_pasids = (1 << (pasmax + 1)) - 1;	/* [한국어] 비트 수를 개수로 — 0 은 예약값이라 -1 한다 */
 
-		BUG_ON(iommu->iommu.max_pasids & ~PASID_MASK);
+		BUG_ON(iommu->iommu.max_pasids & ~PASID_MASK);	/* [한국어] 드라이버가 16비트만 다루므로 그보다 크면 가정이 깨진다 */
 
-		glxval = FIELD_GET(FEATURE_GLX, amd_iommu_efr);
+		glxval = FIELD_GET(FEATURE_GLX, amd_iommu_efr);	/* [한국어] GCR3 테이블 레벨 수 */
 
-		if (amd_iommu_max_glx_val == -1)
-			amd_iommu_max_glx_val = glxval;
+		if (amd_iommu_max_glx_val == -1)	/* [한국어] 첫 유닛이면 */
+			amd_iommu_max_glx_val = glxval;	/* [한국어] 기준값으로 */
 		else
-			amd_iommu_max_glx_val = min(amd_iommu_max_glx_val, glxval);
+			amd_iommu_max_glx_val = min(amd_iommu_max_glx_val, glxval);	/* [한국어] 아니면 최소값으로 좁힌다 — 모든 유닛이 다룰 수 있어야 한다 */
 
-		iommu_enable_gt(iommu);
+		iommu_enable_gt(iommu);	/* [한국어] 게스트 변환을 켠다 */
 	}
 
-	if (check_feature(FEATURE_PPR) && amd_iommu_alloc_ppr_log(iommu))
-		return -ENOMEM;
+	if (check_feature(FEATURE_PPR) && amd_iommu_alloc_ppr_log(iommu))	/* [한국어] PPR 을 지원하면 로그 버퍼를 잡는다 */
+		return -ENOMEM;	/* [한국어] 실패하면 페이지 폴트를 받을 수 없다 */
 
-	if (iommu->cap & (1UL << IOMMU_CAP_NPCACHE)) {
-		pr_info("Using strict mode due to virtualization\n");
-		iommu_set_dma_strict();
-		amd_iommu_np_cache = true;
+	if (iommu->cap & (1UL << IOMMU_CAP_NPCACHE)) {	/* [한국어] 존재하지 않는 항목도 캐시하는 하드웨어인가 */
+		pr_info("Using strict mode due to virtualization\n");	/* [한국어] (원 주석) 이 능력은 주로 가상 IOMMU 에서 나타난다 */
+		iommu_set_dma_strict();	/* [한국어] 매핑 생성 때도 무효화가 필요해 지연 무효화를 쓸 수 없다 */
+		amd_iommu_np_cache = true;	/* [한국어] 매핑 경로가 이 값을 보고 추가 무효화를 낸다 */
 	}
 
-	init_iommu_perf_ctr(iommu);
+	init_iommu_perf_ctr(iommu);	/* [한국어] 성능 카운터의 규모를 읽어 둔다 */
 
-	if (is_rd890_iommu(iommu->dev)) {
-		int i, j;
+	if (is_rd890_iommu(iommu->dev)) {	/* [한국어] 레주메 때 BIOS 가 레지스터를 복원해 주지 않는 칩셋인가 */
+		int i, j;	/* [한국어] 간접 레지스터 순회 인덱스 */
 
-		iommu->root_pdev =
-			pci_get_domain_bus_and_slot(iommu->pci_seg->id,
-						    iommu->dev->bus->number,
-						    PCI_DEVFN(0, 0));
+		iommu->root_pdev =	/* [한국어] 루트 장치를 미리 잡아 둔다 */
+			pci_get_domain_bus_and_slot(iommu->pci_seg->id,	/* [한국어] 같은 세그먼트의 */
+						    iommu->dev->bus->number,	/* [한국어] 같은 버스에서 */
+						    PCI_DEVFN(0, 0));	/* [한국어] 기능 0 장치가 루트다 */
 
 		/*
 		 * Some rd890 systems may not be fully reconfigured by the
 		 * BIOS, so it's necessary for us to store this information so
 		 * it can be reprogrammed on resume
 		 */
-		pci_read_config_dword(iommu->dev, iommu->cap_ptr + 4,
-				&iommu->stored_addr_lo);
-		pci_read_config_dword(iommu->dev, iommu->cap_ptr + 8,
-				&iommu->stored_addr_hi);
+		pci_read_config_dword(iommu->dev, iommu->cap_ptr + 4,	/* [한국어] (원 주석: BIOS 가 완전히 재구성해 주지 않으므로 저장해 두었다가 레주메 때 되쓴다) */
+				&iommu->stored_addr_lo);	/* [한국어] BAR 하위 */
+		pci_read_config_dword(iommu->dev, iommu->cap_ptr + 8,	/* [한국어] BAR 상위 */
+				&iommu->stored_addr_hi);	/* [한국어] 보관 */
 
 		/* Low bit locks writes to configuration space */
-		iommu->stored_addr_lo &= ~1;
+		iommu->stored_addr_lo &= ~1;	/* [한국어] (원 주석: 최하위 비트는 설정 공간 쓰기를 잠근다) 복원 때 잠긴 채로 쓰지 않도록 미리 지운다 */
 
-		for (i = 0; i < 6; i++)
-			for (j = 0; j < 0x12; j++)
-				iommu->stored_l1[i][j] = iommu_read_l1(iommu, i, j);
+		for (i = 0; i < 6; i++)	/* [한국어] L1 은 여섯 블록 */
+			for (j = 0; j < 0x12; j++)	/* [한국어] 블록마다 0x12 개 레지스터 */
+				iommu->stored_l1[i][j] = iommu_read_l1(iommu, i, j);	/* [한국어] 전부 읽어 보관한다 */
 
-		for (i = 0; i < 0x83; i++)
-			iommu->stored_l2[i] = iommu_read_l2(iommu, i);
+		for (i = 0; i < 0x83; i++)	/* [한국어] L2 는 블록 구분 없이 */
+			iommu->stored_l2[i] = iommu_read_l2(iommu, i);	/* [한국어] 0x83 개 */
 	}
 
-	amd_iommu_erratum_746_workaround(iommu);
-	amd_iommu_ats_write_check_workaround(iommu);
+	amd_iommu_erratum_746_workaround(iommu);	/* [한국어] 로그가 변환을 멈추는 결함 우회 */
+	amd_iommu_ats_write_check_workaround(iommu);	/* [한국어] ATS 쓰기 권한 검사 강제 */
 
-	ret = iommu_device_sysfs_add(&iommu->iommu, &iommu->dev->dev,
-			       amd_iommu_groups, "ivhd%d", iommu->index);
+	ret = iommu_device_sysfs_add(&iommu->iommu, &iommu->dev->dev,	/* [한국어] sysfs 에 ivhd<n> 이름으로 등록 */
+			       amd_iommu_groups, "ivhd%d", iommu->index);	/* [한국어] 유닛별 속성 그룹과 함께 */
 	if (ret)
 		return ret;
 
@@ -3896,60 +4106,77 @@ static int __init iommu_init_pci(struct amd_iommu *iommu)
 	 * Allocate per IOMMU IOPF queue here so that in attach device path,
 	 * PRI capable device can be added to IOPF queue
 	 */
-	if (amd_iommu_gt_ppr_supported()) {
-		ret = amd_iommu_iopf_init(iommu);
+	if (amd_iommu_gt_ppr_supported()) {	/* [한국어] (원 주석: attach 경로에서 PRI 장치를 큐에 넣을 수 있도록 여기서 미리 만든다) */
+		ret = amd_iommu_iopf_init(iommu);	/* [한국어] 페이지 폴트 처리 큐 */
 		if (ret)
 			return ret;
 	}
 
-	ret = iommu_device_register(&iommu->iommu, &amd_iommu_ops, NULL);
-	if (ret || amd_iommu_pgtable == PD_MODE_NONE) {
+	ret = iommu_device_register(&iommu->iommu, &amd_iommu_ops, NULL);	/* [한국어] 코어 IOMMU 계층에 이 유닛을 등록한다 */
+	if (ret || amd_iommu_pgtable == PD_MODE_NONE) {	/* [한국어] 등록 실패이거나 DMA 변환을 아예 쓰지 않는 구성 */
 		/*
 		 * Remove sysfs if DMA translation is not supported by the
 		 * IOMMU. Do not return an error to enable IRQ remapping
 		 * in state_next(), DTE[V, TV] must eventually be set to 0.
 		 */
-		iommu_device_sysfs_remove(&iommu->iommu);
+		iommu_device_sysfs_remove(&iommu->iommu);	/* [한국어] (원 주석: 오류를 돌려주지 않는다 — 인터럽트 재매핑을 켜려면 상태 기계가 계속 진행해야 한다) */
 	}
 
-	return pci_enable_device(iommu->dev);
+	return pci_enable_device(iommu->dev);	/* [한국어] IOMMU 자신을 PCI 장치로 활성화한다 */
 }
 
+/*
+ * [한국어]
+ * print_iommu_info - 초기화 결과를 사람이 읽을 수 있게 한 줄로 요약한다
+ *
+ * 부팅 로그에서 "이 기계의 IOMMU 가 무엇을 할 수 있는가"를 한눈에 보여
+ * 주는 곳이다. 문제를 진단할 때 가장 먼저 확인하는 줄이기도 하다.
+ *
+ * feat_str 배열의 인덱스가 곧 EFR 의 비트 번호라는 것이 이 함수의 요령이다.
+ * "[5]"라는 이름이 그 증거로, 5번 비트는 정의되지 않았지만 배열의 자리를
+ * 비울 수 없어 이름을 그렇게 붙였다.
+ *
+ * 뒤쪽 세 기능(GAM_vAPIC, SNP, SEV-TIO)은 비트 번호가 배열 범위를 넘어
+ * 따로 확인한다.
+ *
+ * 호출 체인:
+ *   amd_iommu_init() → [이 함수]
+ */
 static void print_iommu_info(void)
 {
-	int i;
-	static const char * const feat_str[] = {
-		"PreF", "PPR", "X2APIC", "NX", "GT", "[5]",
-		"IA", "GA", "HE", "PC"
+	int i;	/* [한국어] 비트 순회 인덱스 */
+	static const char * const feat_str[] = {	/* [한국어] 배열 인덱스가 곧 EFR 의 비트 번호다 */
+		"PreF", "PPR", "X2APIC", "NX", "GT", "[5]",	/* [한국어] 5번은 정의되지 않았지만 자리를 비울 수 없어 이름을 그렇게 붙였다 */
+		"IA", "GA", "HE", "PC"	/* [한국어] 6~9번 비트 */
 	};
 
-	if (amd_iommu_efr) {
-		pr_info("Extended features (%#llx, %#llx):", amd_iommu_efr, amd_iommu_efr2);
+	if (amd_iommu_efr) {	/* [한국어] 능력을 하나라도 읽었으면 */
+		pr_info("Extended features (%#llx, %#llx):", amd_iommu_efr, amd_iommu_efr2);	/* [한국어] 원시값을 먼저 찍는다 — 이름이 없는 비트도 확인할 수 있게 */
 
-		for (i = 0; i < ARRAY_SIZE(feat_str); ++i) {
-			if (check_feature(1ULL << i))
-				pr_cont(" %s", feat_str[i]);
+		for (i = 0; i < ARRAY_SIZE(feat_str); ++i) {	/* [한국어] 이름이 붙은 비트들 */
+			if (check_feature(1ULL << i))	/* [한국어] 그 비트가 서 있으면 */
+				pr_cont(" %s", feat_str[i]);	/* [한국어] 이름을 이어 붙인다 */
 		}
 
-		if (check_feature(FEATURE_GAM_VAPIC))
-			pr_cont(" GA_vAPIC");
+		if (check_feature(FEATURE_GAM_VAPIC))	/* [한국어] 비트 번호가 배열 범위를 넘는 기능들은 따로 */
+			pr_cont(" GA_vAPIC");	/* [한국어] 게스트 vAPIC */
 
-		if (check_feature(FEATURE_SNP))
-			pr_cont(" SNP");
+		if (check_feature(FEATURE_SNP))	/* [한국어] SEV-SNP */
+			pr_cont(" SNP");	/* [한국어] 보안 중첩 페이징 */
 
-		if (check_feature2(FEATURE_SEVSNPIO_SUP))
-			pr_cont(" SEV-TIO");
+		if (check_feature2(FEATURE_SEVSNPIO_SUP))	/* [한국어] 두 번째 워드의 기능 */
+			pr_cont(" SEV-TIO");	/* [한국어] SEV 환경의 I/O 지원 */
 
-		pr_cont("\n");
+		pr_cont("\n");	/* [한국어] 줄을 마친다 */
 	}
 
-	if (irq_remapping_enabled) {
-		pr_info("Interrupt remapping enabled\n");
-		if (amd_iommu_xt_mode == IRQ_REMAP_X2APIC_MODE)
-			pr_info("X2APIC enabled\n");
+	if (irq_remapping_enabled) {	/* [한국어] 인터럽트 재매핑이 켜졌으면 */
+		pr_info("Interrupt remapping enabled\n");	/* [한국어] 알린다 */
+		if (amd_iommu_xt_mode == IRQ_REMAP_X2APIC_MODE)	/* [한국어] x2APIC 모드까지 갔는가 */
+			pr_info("X2APIC enabled\n");	/* [한국어] CPU 255개를 넘는 목적지를 쓸 수 있다는 뜻 */
 	}
-	if (amd_iommu_pgtable == PD_MODE_V2) {
-		pr_info("V2 page table enabled (Paging mode : %d level)\n",
+	if (amd_iommu_pgtable == PD_MODE_V2) {	/* [한국어] v2 페이지 테이블을 쓰는가 */
+		pr_info("V2 page table enabled (Paging mode : %d level)\n",	/* [한국어] SVA 가 가능하다는 뜻이기도 하다 */
 			amd_iommu_gpt_level);
 	}
 }
