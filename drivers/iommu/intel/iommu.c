@@ -120,6 +120,28 @@ static int no_platform_optin;	/* [한국어] 펌웨어가 IOMMU 사용을 권장
  * Take a root_entry and return the Lower Context Table Pointer (LCTP)
  * if marked present.
  */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * root_entry_lctp - 루트 항목에서 "하위" 컨텍스트 테이블의 물리 주소를 꺼낸다
+ *
+ * @re: 루트 테이블의 항목 하나. 버스 번호 하나에 대응한다.
+ * @return: present 비트가 켜져 있으면 컨텍스트 테이블의 물리 주소, 아니면 0.
+ *
+ * VT-d 의 3단 구조: 루트 테이블(버스로 인덱스) → 컨텍스트 테이블(devfn 으로
+ * 인덱스) → 페이지 테이블. 루트 항목 하나는 128비트(lo/hi)인데, 컨텍스트
+ * 테이블 항목이 16바이트라 한 페이지(4KB)에는 256개가 아니라 128개만 들어간다.
+ * 그래서 devfn 0~127 을 담당하는 "하위" 테이블과 128~255 를 담당하는 "상위"
+ * 테이블로 나누고, 루트 항목의 lo/hi 가 각각을 가리킨다. 이 함수는 그 lo 쪽이다.
+ *
+ * 비트 0 은 present 플래그이고 나머지 상위 비트가 페이지 정렬된 물리 주소라,
+ * VTD_PAGE_MASK 로 플래그 비트를 털어 내면 그대로 주소가 된다.
+ *
+ * 실행 컨텍스트: 어디서든(락 없음, 순수 계산). 테이블 순회·덤프 경로에서 쓴다.
+ *
+ * 호출 체인:
+ *   free_context_table()/dmar_fault_dump_ptes()/copy_translation_tables()
+ *     → [root_entry_lctp]
+ */
 static phys_addr_t root_entry_lctp(struct root_entry *re)
 {
 	if (!(re->lo & 1))	/* [한국어] 비트 0 이 present 플래그다 */
@@ -132,6 +154,24 @@ static phys_addr_t root_entry_lctp(struct root_entry *re)
  * Take a root_entry and return the Upper Context Table Pointer (UCTP)
  * if marked present.
  */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * root_entry_uctp - 루트 항목에서 "상위" 컨텍스트 테이블의 물리 주소를 꺼낸다
+ *
+ * @re: 루트 테이블의 항목 하나.
+ * @return: present 면 물리 주소, 아니면 0.
+ *
+ * root_entry_lctp 의 짝이며 devfn 128~255 를 담당한다. 읽는 필드가 lo 대신
+ * hi 라는 점만 다르다. 두 함수가 따로 있는 이유는 위(root_entry_lctp 주석)에
+ * 설명한 대로 컨텍스트 테이블이 한 페이지에 다 들어가지 않아 둘로 쪼개지기
+ * 때문이다. 호출자는 devfn 의 비트 7 을 보고 어느 쪽을 쓸지 고른다.
+ *
+ * 실행 컨텍스트: 락 없는 순수 계산.
+ *
+ * 호출 체인:
+ *   free_context_table()/dmar_fault_dump_ptes()/copy_translation_tables()
+ *     → [root_entry_uctp]
+ */
 static phys_addr_t root_entry_uctp(struct root_entry *re)
 {
 	if (!(re->hi & 1))	/* [한국어] 상위 항목의 present 플래그 */
@@ -140,6 +180,30 @@ static phys_addr_t root_entry_uctp(struct root_entry *re)
 	return re->hi & VTD_PAGE_MASK;	/* [한국어] 상위 컨텍스트 테이블. 장치 번호 128~255 를 담당하며, 한 페이지에 256개 항목이 들어가지 않아 둘로 나뉜다 */
 }
 
+/*
+ * [한국어]
+ * device_rid_cmp_key - 소스 id(키)와 트리 노드를 비교하는 rbtree 콜백
+ *
+ * @key: 찾는 값. 실제로는 u16 소스 id 를 가리키는 포인터다.
+ * @node: 비교 대상 rbtree 노드. device_domain_info 안에 박혀 있다.
+ * @return: 키가 더 작으면 -1, 크면 1, 같으면 0.
+ *
+ * 왜 소스 id 로 색인하는가: VT-d 하드웨어가 폴트를 보고할 때 알려 주는 것은
+ * struct device 가 아니라 16비트 소스 id(버스 8비트 + devfn 8비트)뿐이다.
+ * 그래서 각 유닛은 자기 아래 장치들을 소스 id 로 색인한 rbtree
+ * (iommu->device_rbtree)로 들고 있어야 하고, 폴트 처리기가 그 트리에서
+ * 장치를 되찾는다. PCI_DEVID(bus, devfn) 이 그 16비트 값을 조립한다.
+ *
+ * 인터페이스가 두 개인 이유: rb_find 는 "키 vs 노드" 비교자를,
+ * rb_find_add 는 "노드 vs 노드" 비교자를 요구한다. 이 함수는 앞쪽이고,
+ * device_rid_cmp 가 뒤쪽으로 이 함수를 감싼다.
+ *
+ * 실행 컨텍스트: device_rbtree_lock 을 쥔 채 호출된다. 순수 비교라 잠들지 않는다.
+ *
+ * 호출 체인:
+ *   device_rbtree_find() → rb_find() → [device_rid_cmp_key]
+ *   device_rbtree_insert() → rb_find_add() → device_rid_cmp() → [이 함수]
+ */
 static int device_rid_cmp_key(const void *key, const struct rb_node *node)
 {
 	struct device_domain_info *info =	/* [한국어] 트리 노드에서 장치 정보로 */
@@ -155,6 +219,24 @@ static int device_rid_cmp_key(const void *key, const struct rb_node *node)
 	return 0;	/* [한국어] 일치 */
 }
 
+/*
+ * [한국어]
+ * device_rid_cmp - 노드 대 노드 비교자. 삽입 시 rbtree 가 쓴다
+ *
+ * @lhs: 새로 넣으려는 노드.
+ * @rhs: 트리에 이미 있는 비교 대상 노드.
+ * @return: -1 / 0 / 1 (device_rid_cmp_key 와 같은 규약).
+ *
+ * 새 노드에서 소스 id 를 뽑아 키로 만든 뒤 device_rid_cmp_key 에 넘긴다.
+ * 비교 규칙을 한 곳에만 두기 위한 얇은 어댑터이며, 두 비교자가 서로 다른
+ * 순서를 쓰게 되는 사고를 막는다.
+ *
+ * 실행 컨텍스트: device_rbtree_lock 을 쥔 삽입 경로. 순수 계산.
+ *
+ * 호출 체인:
+ *   device_rbtree_insert() → rb_find_add() → [device_rid_cmp]
+ *     → device_rid_cmp_key()
+ */
 static int device_rid_cmp(struct rb_node *lhs, const struct rb_node *rhs)
 {
 	struct device_domain_info *info =	/* [한국어] 삽입할 노드의 장치 정보 */
@@ -174,6 +256,31 @@ static int device_rid_cmp(struct rb_node *lhs, const struct rb_node *rhs)
  * released by the iommu subsystem after being returned. The caller
  * should use its own synchronization mechanism to avoid the device
  * being released during its use if its possibly the case.
+ */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * device_rbtree_find - 소스 id 로 이 유닛 아래의 장치를 되찾는다
+ *
+ * @iommu: 폴트를 보고한 DMAR 유닛.
+ * @rid: 하드웨어가 알려 준 16비트 소스 id(버스 8비트 + devfn 8비트).
+ * @return: 등록된 장치의 struct device *, 없으면 NULL.
+ *
+ * 왜 필요한가: VT-d 폴트 레코드와 페이지 요청(PRQ)에는 소스 id 만 들어 있다.
+ * 폴트를 드라이버나 io-pgfault 계층으로 넘기려면 그 숫자를 struct device 로
+ * 되돌려야 하는데, 그 역방향 조회를 이 트리가 담당한다. 장치는 프로브 때
+ * device_rbtree_insert 로 등록되고 release 때 device_rbtree_remove 로 빠진다.
+ *
+ * 동기화: spin_lock_irqsave 를 쓴다. 이 조회가 폴트 인터럽트 핸들러에서도
+ * 불리기 때문에, 같은 락을 인터럽트 밖(프로브/해제)에서 잡을 때 인터럽트를
+ * 막지 않으면 자기 자신과 데드락이 난다.
+ *
+ * 수명 주의(위 영어 주석): 이 함수는 반환한 장치가 곧바로 해제되지 않는다는
+ * 보장을 하지 않는다. 락은 트리 구조만 지키지 장치의 참조 계수를 올리지는
+ * 않기 때문이다. 그 장치를 오래 붙들 호출자는 스스로 참조를 잡아야 한다.
+ *
+ * 호출 체인:
+ *   intel_iommu_fault_handler()/prq_event_thread() → [device_rbtree_find]
+ *     → rb_find() → device_rid_cmp_key()
  */
 struct device *device_rbtree_find(struct intel_iommu *iommu, u16 rid)
 {
@@ -205,6 +312,25 @@ static int device_rbtree_insert(struct intel_iommu *iommu,
 	return 0;	/* [한국어] 등록 완료 — 이제 폴트가 이 장치로 되짚어진다 */
 }
 
+/*
+ * [한국어]
+ * device_rbtree_remove - 소스 id 색인 트리에서 장치를 뺀다
+ *
+ * @info: 제거할 장치의 device_domain_info. info->iommu 가 소속 유닛이다.
+ * @return: 없음.
+ *
+ * 장치가 IOMMU 에서 떨어질 때(intel_iommu_release_device) 호출된다. 이 뒤로는
+ * 그 소스 id 로 오는 폴트가 장치를 찾지 못하고 "알 수 없는 소스" 로 처리된다.
+ * 순서상 중요한 점: 트리에서 빼는 것은 장치를 도메인에서 떼어 낸 뒤여야 한다.
+ * 아직 매핑이 살아 있는 동안 트리에서 빼면, 그 사이 발생한 폴트를 어느 장치의
+ * 것인지 알 수 없게 된다.
+ *
+ * 동기화: device_rbtree_find 와 같은 이유로 spin_lock_irqsave 를 쓴다.
+ * rb_erase 자체는 트리 구조만 바꾸며, info 의 메모리 해제는 호출자 몫이다.
+ *
+ * 호출 체인:
+ *   intel_iommu_release_device() → [device_rbtree_remove] → rb_erase()
+ */
 static void device_rbtree_remove(struct device_domain_info *info)
 {
 	struct intel_iommu *iommu = info->iommu;	/* [한국어] 이 장치를 맡은 DMAR 유닛 */
@@ -292,16 +418,76 @@ static int disable_igfx_iommu;	/* [한국어] 통합 그래픽을 IOMMU 밖에 �
 
 const struct iommu_ops intel_iommu_ops;	/* [한국어] 코어에 등록할 콜백 표. 정의는 파일 끝에 있다 */
 
+/*
+ * [한국어]
+ * translation_pre_enabled - 커널이 시작하기 전에 이미 번역이 켜져 있었는지 본다
+ *
+ * @iommu: 대상 DMAR 유닛.
+ * @return: true 면 우리가 오기 전부터 VT-d 번역이 동작 중이었다.
+ *
+ * 이 상태가 왜 특별한가: kdump 로 부팅한 커널이나, 펌웨어/이전 커널이 IOMMU 를
+ * 켜 둔 채 넘겨준 경우가 여기에 해당한다. 그 순간에도 장치들은 이전 테이블을
+ * 통해 DMA 를 계속하고 있으므로, 번역을 덜컥 끄면 진행 중인 전송이 원래 의도와
+ * 다른 물리 주소로 향한다(끄면 번역 없이 통과하므로 IOVA 가 그대로 물리 주소로
+ * 해석된다). 그래서 이 플래그가 켜져 있으면 copy_translation_tables 로 기존
+ * 테이블을 이어받는 경로를 탄다.
+ *
+ * 플래그는 init_translation_status 가 하드웨어 상태 레지스터를 읽어 세우고,
+ * 인계가 끝나면 clear_translation_pre_enabled 가 지운다.
+ *
+ * 실행 컨텍스트: 초기화 경로. 순수 비트 검사.
+ *
+ * 호출 체인:
+ *   init_dmars()/intel_iommu_add() → [translation_pre_enabled]
+ */
 static bool translation_pre_enabled(struct intel_iommu *iommu)
 {
 	return (iommu->flags & VTD_FLAG_TRANS_PRE_ENABLED);	/* [한국어] 커널이 시작하기 전에 이미 번역이 켜져 있었는가. kexec 나 펌웨어가 켜 둔 경우이며, 그 상태를 함부로 끄면 진행 중인 DMA 가 끊긴다 */
 }
 
+/*
+ * [한국어]
+ * clear_translation_pre_enabled - "인계받을 상태" 표시를 지운다
+ *
+ * @iommu: 대상 DMAR 유닛.
+ * @return: 없음.
+ *
+ * 이전 커널/펌웨어의 테이블을 이어받는 데 실패했거나, 인계를 마치고 우리
+ * 테이블로 전환한 시점에 호출한다. 이 플래그가 남아 있으면 이후 코드가 아직
+ * 남의 테이블이 살아 있다고 오해하고 하드웨어를 건드리지 않으려 하므로,
+ * 전환 사실을 반드시 여기서 기록해야 한다.
+ *
+ * 실행 컨텍스트: 초기화 경로, 단일 스레드. 별도 락 없음.
+ *
+ * 호출 체인:
+ *   init_dmars() (인계 실패/완료 지점) → [clear_translation_pre_enabled]
+ */
 static void clear_translation_pre_enabled(struct intel_iommu *iommu)
 {
 	iommu->flags &= ~VTD_FLAG_TRANS_PRE_ENABLED;	/* [한국어] 우리가 상태를 넘겨받았음을 표시한다 */
 }
 
+/*
+ * [한국어]
+ * init_translation_status - 하드웨어를 읽어 "이미 번역이 켜져 있는지"를 기록한다
+ *
+ * @iommu: 방금 레지스터를 매핑한 DMAR 유닛.
+ * @return: 없음. 결과는 iommu->flags 에 남는다.
+ *
+ * DMAR_GSTS_REG(Global Status Register)의 TES(Translation Enable Status) 비트를
+ * 본다. 이 비트가 켜져 있다는 것은 우리가 아무것도 하기 전에 이미 하드웨어가
+ * 어떤 루트 테이블을 워크하고 있다는 뜻이다.
+ *
+ * 왜 초기화 아주 이른 시점에 읽어야 하는가: 우리가 레지스터를 하나라도 쓰기
+ * 시작하면 원래 상태를 알 길이 없어진다. 그래서 유닛의 레지스터를 매핑한 직후,
+ * 아무것도 바꾸기 전에 한 번 읽어 VTD_FLAG_TRANS_PRE_ENABLED 로 남겨 둔다.
+ * 이후 init_dmars 가 이 값을 보고 기존 테이블 인계(kdump 경로)를 시도한다.
+ *
+ * 실행 컨텍스트: 유닛 초기화 초반. MMIO readl 하나뿐이라 잠들지 않는다.
+ *
+ * 호출 체인:
+ *   init_dmars()/intel_iommu_add() → [init_translation_status] → readl()
+ */
 static void init_translation_status(struct intel_iommu *iommu)
 {
 	u32 gsts;	/* [한국어] 전역 상태 레지스터 값 */
@@ -311,6 +497,36 @@ static void init_translation_status(struct intel_iommu *iommu)
 		iommu->flags |= VTD_FLAG_TRANS_PRE_ENABLED;	/* [한국어] 기억해 둔다. 이후 초기화가 기존 테이블을 이어받을지 새로 만들지를 이 값으로 정한다 */
 }
 
+/*
+ * [한국어]
+ * intel_iommu_setup - "intel_iommu=" 커널 부트 인자를 해석한다
+ *
+ * @str: 등호 뒤의 문자열. 쉼표로 여러 옵션을 이어 쓸 수 있다.
+ * @return: 0 성공, -EINVAL 이면 값이 비어 있다.
+ *
+ * 왜 이렇게 옵션이 많은가: VT-d 는 잘못 켜면 부팅 자체가 막히는 기능이라,
+ * 특정 장치나 특정 기능만 예외로 두는 탈출구가 역사적으로 계속 늘었다.
+ * 여기서 세우는 전역 변수들이 이후 초기화 전반의 정책을 정한다.
+ *
+ * 주요 옵션:
+ *   on/off        — dmar_disabled. off 는 no_platform_optin 까지 세워 펌웨어의
+ *                   권장까지 무시한다.
+ *   igfx_off      — 통합 GPU 만 IOMMU 밖에 둔다. 오래된 iGPU 펌웨어가 IOMMU
+ *                   아래에서 오동작하는 사례가 많아 남아 있는 옵션이다.
+ *   sm_on/sm_off  — scalable mode(PASID/SVA 를 쓰는 새 형식) 강제 on/off.
+ *   strict/       — 무효화 정책. 느슨한(lazy) 모드는 언매핑 후 TLB 를 즉시
+ *   no_strict       비우지 않아 빠르지만, 그 사이 장치가 해제된 페이지에
+ *                   접근할 수 있는 창이 생긴다.
+ *   tboot_noforce — TXT 부팅에서도 실패를 치명적으로 다루지 않는다.
+ *
+ * 파싱 방식: while 루프가 문자열을 훑으며 strncmp 로 접두사를 맞춰 보고,
+ * 쉼표를 만나면 다음 옵션으로 넘어간다. 커널 부트 인자 파서의 전형적인 형태다.
+ *
+ * 실행 컨텍스트: __init. 부팅 극초기, 다른 CPU 가 올라오기 전.
+ *
+ * 호출 체인:
+ *   커널 부트 인자 파서(__setup) → [intel_iommu_setup]
+ */
 static int __init intel_iommu_setup(char *str)
 {
 	if (!str)	/* [한국어] 값 없는 인자 */
@@ -795,6 +1011,33 @@ out:	/* [한국어] 공통 출구 */
 	return iommu;	/* [한국어] NULL 이면 이 장치는 IOMMU 아래가 아니다 */
 }
 
+/*
+ * [한국어]
+ * free_context_table - 유닛의 루트 테이블과 그 아래 컨텍스트 테이블을 모두 반납한다
+ *
+ * @iommu: 대상 DMAR 유닛.
+ * @return: 없음.
+ *
+ * 구조를 따라 아래에서 위로 해제한다: 루트 항목 256개(버스 번호 하나당 하나)를
+ * 훑으며 각 항목의 하위(lctp)·상위(uctp) 컨텍스트 테이블 페이지를 반납하고,
+ * 마지막에 루트 테이블 자신을 반납한다. 한 루트 항목이 테이블 두 개를 가리키는
+ * 이유는 root_entry_lctp 주석에 적힌 대로 컨텍스트 항목 128개가 한 페이지를
+ * 채우기 때문이다.
+ *
+ * 호출 전 조건: 반드시 번역이 꺼진 뒤여야 한다. 하드웨어가 아직 이 테이블을
+ * 워크하고 있는 동안 페이지를 반납하면, 해제되어 재사용된 메모리를 IOMMU 가
+ * 페이지 테이블로 해석하게 된다.
+ *
+ * 동기화: iommu->lock 을 잡는다. 컨텍스트 매핑을 세우는 경로와 같은 락이라,
+ * 해제 중에 새 매핑이 들어오는 일이 없다.
+ *
+ * 실행 컨텍스트: 유닛 해제(free_dmar_iommu) 또는 초기화 실패 정리.
+ * 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   free_dmar_iommu() → [free_context_table]
+ *     → root_entry_lctp()/root_entry_uctp() → iommu_free_pages()
+ */
 static void free_context_table(struct intel_iommu *iommu)
 {
 	struct context_entry *context;	/* [한국어] 해제할 컨텍스트 테이블 */
@@ -940,6 +1183,37 @@ pgtable_walk:	/* [한국어] 레거시와 scalable 경로가 합류 */
 #endif
 
 /* iommu handling */
+/*
+ * [한국어] (위 "iommu handling" 영어 주석에 이어)
+ * iommu_alloc_root_entry - 유닛의 루트 테이블 한 페이지를 잡는다
+ *
+ * @iommu: 대상 DMAR 유닛.
+ * @return: 0 성공, -ENOMEM 실패(그 유닛은 쓸 수 없다).
+ *
+ * 루트 테이블은 VT-d 주소 변환의 최상단이다. PCI 버스 번호(0~255)로 색인되는
+ * 항목 256개 × 16바이트 = 정확히 4KB, 즉 한 페이지다. 그래서 크기 계산 없이
+ * SZ_4K 한 장을 잡는다.
+ *
+ * iommu->node 에서 잡는 이유: 이 페이지는 하드웨어가 매 번역마다 읽는다.
+ * 해당 DMAR 유닛과 같은 NUMA 노드의 메모리를 쓰면 그 접근의 지연이 줄어든다.
+ * GFP_ATOMIC 인 것은 이 경로가 인터럽트를 끈 초기화 구간에서도 불릴 수 있기
+ * 때문이다.
+ *
+ * __iommu_flush_cache: 페이지는 0 으로 초기화되어 있지만, 코히런시가 없는
+ * 유닛(!ecap_coherent)에서는 CPU 캐시에만 있고 메모리에는 아직 반영되지 않았을
+ * 수 있다. 하드웨어는 메모리를 직접 읽으므로 여기서 밀어내야 한다. 그러지
+ * 않으면 유닛이 쓰레기 값을 present 항목으로 오해할 수 있다.
+ *
+ * 이 함수는 테이블을 만들기만 한다. 하드웨어에 주소를 알리는 것은
+ * iommu_set_root_entry 의 몫이며, 그 사이에 kdump 인계(copy_translation_tables)
+ * 가 끼어들 수 있다.
+ *
+ * 실행 컨텍스트: 초기화/핫플러그. 인터럽트를 끈 구간일 수 있어 GFP_ATOMIC.
+ *
+ * 호출 체인:
+ *   init_dmars()/intel_iommu_add() → [iommu_alloc_root_entry]
+ *     → iommu_alloc_pages_node_sz() → __iommu_flush_cache()
+ */
 static int iommu_alloc_root_entry(struct intel_iommu *iommu)
 {
 	struct root_entry *root;	/* [한국어] 만들 루트 테이블 */
@@ -2906,350 +3180,710 @@ static int iommu_suspend(void *data)
  */
 static void iommu_resume(void *data)
 {
-	struct dmar_drhd_unit *drhd;
-	struct intel_iommu *iommu = NULL;
-	unsigned long flag;
+	struct dmar_drhd_unit *drhd;	/* [한국어] 유닛 순회 커서 */
+	struct intel_iommu *iommu = NULL;	/* [한국어] 현재 유닛 */
+	unsigned long flag;	/* [한국어] 인터럽트 상태 */
 
-	if (init_iommu_hw()) {
-		if (force_on)
-			panic("tboot: IOMMU setup failed, DMAR can not resume!\n");
+	if (init_iommu_hw()) {	/* [한국어] 하드웨어 복원 실패 */
+		if (force_on)	/* [한국어] TXT 로 부팅한 경우 */
+			panic("tboot: IOMMU setup failed, DMAR can not resume!\n");	/* [한국어] 격리 없이 계속 동작하느니 멈춘다 — TXT 로 부팅한 이유가 그 격리이기 때문 */
 		else
-			WARN(1, "IOMMU setup failed, DMAR can not resume!\n");
-		return;
+			WARN(1, "IOMMU setup failed, DMAR can not resume!\n");	/* [한국어] 그 외에는 경고만. 격리를 잃은 채로 시스템이 계속 돈다 */
+		return;	/* [한국어] 더 복원할 것이 없다 */
 	}
 
-	for_each_active_iommu(iommu, drhd) {
+	for_each_active_iommu(iommu, drhd) {	/* [한국어] 각 유닛의 폴트 인터럽트 설정을 되돌린다 */
 
-		raw_spin_lock_irqsave(&iommu->register_lock, flag);
+		raw_spin_lock_irqsave(&iommu->register_lock, flag);	/* [한국어] 레지스터 접근 직렬화 */
 
-		writel(iommu->iommu_state[SR_DMAR_FECTL_REG],
-			iommu->reg + DMAR_FECTL_REG);
-		writel(iommu->iommu_state[SR_DMAR_FEDATA_REG],
-			iommu->reg + DMAR_FEDATA_REG);
-		writel(iommu->iommu_state[SR_DMAR_FEADDR_REG],
-			iommu->reg + DMAR_FEADDR_REG);
-		writel(iommu->iommu_state[SR_DMAR_FEUADDR_REG],
-			iommu->reg + DMAR_FEUADDR_REG);
+		writel(iommu->iommu_state[SR_DMAR_FECTL_REG],	/* [한국어] 인터럽트 제어 */
+			iommu->reg + DMAR_FECTL_REG);	/* [한국어] 서스펜드 전 값 그대로 */
+		writel(iommu->iommu_state[SR_DMAR_FEDATA_REG],	/* [한국어] MSI 데이터 */
+			iommu->reg + DMAR_FEDATA_REG);	/* [한국어] 인터럽트 코어가 할당한 값이라 재현할 수 없어 보관해 두었다 */
+		writel(iommu->iommu_state[SR_DMAR_FEADDR_REG],	/* [한국어] MSI 주소 하위 */
+			iommu->reg + DMAR_FEADDR_REG);	/* [한국어] 도어벨 주소 */
+		writel(iommu->iommu_state[SR_DMAR_FEUADDR_REG],	/* [한국어] MSI 주소 상위 */
+			iommu->reg + DMAR_FEUADDR_REG);	/* [한국어] 64비트 주소의 나머지 */
 
-		raw_spin_unlock_irqrestore(&iommu->register_lock, flag);
+		raw_spin_unlock_irqrestore(&iommu->register_lock, flag);	/* [한국어] 레지스터 접근 끝 */
 	}
 }
 
-static const struct syscore_ops iommu_syscore_ops = {
-	.resume		= iommu_resume,
-	.suspend	= iommu_suspend,
+static const struct syscore_ops iommu_syscore_ops = {	/* [한국어] 시스템 코어 서스펜드/리쥼 콜백. 일반 장치 PM 보다 늦게 내려가고 먼저 올라온다 — IOMMU 가 꺼지기 전에 모든 장치가 멈춰야 하기 때문 */
+	.resume		= iommu_resume,	/* [한국어] 리쥼 콜백 */
+	.suspend	= iommu_suspend,	/* [한국어] 서스펜드 콜백 */
 };
 
-static struct syscore iommu_syscore = {
-	.ops = &iommu_syscore_ops,
+static struct syscore iommu_syscore = {	/* [한국어] 등록할 syscore 객체 */
+	.ops = &iommu_syscore_ops,	/* [한국어] 위 콜백들 */
 };
 
+/*
+ * [한국어]
+ * init_iommu_pm_ops - VT-d 유닛의 서스펜드/리줌 콜백을 syscore 에 등록한다
+ *
+ * @return: 없음. 등록은 실패하지 않는다.
+ *
+ * 왜 syscore 인가: 일반 디바이스 PM 콜백은 다른 드라이버들이 아직 살아 있는
+ * 시점에 불린다. 그런데 IOMMU 는 그 드라이버들의 DMA 가 통과하는 길목이라,
+ * "모든 디바이스가 멈춘 뒤 / 어떤 디바이스도 아직 깨어나기 전"에만 끄고 켤 수
+ * 있다. syscore_ops 는 정확히 그 시점(비인터럽트, CPU 하나만 살아 있는 상태)에
+ * 호출되는 마지막/첫 번째 훅이므로 IOMMU 처럼 시스템 전역 자원을 다루는 코드가
+ * 쓰는 자리다.
+ * 실행 컨텍스트: 부팅 중 init_dmars() 성공 후 한 번. 프로세스 컨텍스트.
+ * 등록 이후 iommu_suspend()/iommu_resume() 이 각각 서스펜드 마지막 단계와
+ * 리줌 첫 단계에서 불린다.
+ *
+ * 호출 체인:
+ *   intel_iommu_init() → [init_iommu_pm_ops] → register_syscore()
+ *   (이후) syscore 서스펜드/리줌 → iommu_suspend()/iommu_resume()
+ */
 static void __init init_iommu_pm_ops(void)
 {
-	register_syscore(&iommu_syscore);
+	register_syscore(&iommu_syscore);	/* [한국어] PM 콜백을 등록한다 */
 }
 
 #else
-static inline void init_iommu_pm_ops(void) {}
+static inline void init_iommu_pm_ops(void) {}	/* [한국어] 서스펜드를 지원하지 않는 빌드의 빈 구현 */
 #endif	/* CONFIG_PM */
 
+/*
+ * [한국어]
+ * rmrr_sanity_check - 펌웨어가 보고한 RMRR 구간이 쓸 만한 값인지 검사한다
+ *
+ * @rmrr: DMAR 표에서 읽은 RMRR(Reserved Memory Region Reporting) 항목.
+ *        base_address ~ end_address 는 "닫힌 구간"이다(끝 주소도 포함).
+ * @return: 0 이면 정상, -EINVAL 이면 펌웨어가 이상한 값을 줬다.
+ *
+ * RMRR 이 무엇인가: 펌웨어가 "이 장치는 이 물리 메모리 구간에 계속 DMA 를 한다,
+ * OS 가 IOMMU 를 켜더라도 이 구간만은 항등(identity) 매핑으로 남겨 둬라"고
+ * 선언하는 표다. 레거시 USB 키보드 에뮬레이션, BIOS 가 관리하는 관리 엔진 등이
+ * 대표적이다. 즉 RMRR 은 IOMMU 보호에 뚫는 구멍이므로, 값이 조금이라도
+ * 수상하면 받아들이지 않는 편이 안전하다.
+ *
+ * 검사 항목:
+ *   1) 시작 주소가 페이지 정렬인가 — 페이지 단위로만 매핑할 수 있으므로.
+ *   2) end_address + 1 이 페이지 정렬인가 — 닫힌 구간이라 끝의 다음이 경계다.
+ *   3) 구간이 뒤집혀 있지 않은가.
+ *   4) 아키텍처별 추가 검사(arch_rmrr_sanity_check) — x86 에서는 이 구간이
+ *      커널이 쓰는 정상 메모리(E820 usable)와 겹치면 거부한다. 겹친다면 장치가
+ *      커널 메모리를 마음대로 쓸 권한을 얻는 셈이기 때문이다.
+ *
+ * 실행 컨텍스트: 부팅 중 DMAR 표 파싱, 또는 유닛 핫플러그. 프로세스 컨텍스트.
+ * 에러 처리: 호출자(dmar_parse_one_rmrr)는 이 검사가 실패해도 항목을 버리지는
+ * 않고, FW_BUG 경고를 찍고 커널을 오염(taint) 표시한 뒤 그대로 등록한다.
+ * 부정확한 RMRR 이라도 무시하면 그 장치가 아예 동작하지 않을 수 있어서다.
+ *
+ * 호출 체인:
+ *   dmar_parse_one_rmrr() → [rmrr_sanity_check] → arch_rmrr_sanity_check()
+ */
 static int __init rmrr_sanity_check(struct acpi_dmar_reserved_memory *rmrr)
 {
-	if (!IS_ALIGNED(rmrr->base_address, PAGE_SIZE) ||
-	    !IS_ALIGNED(rmrr->end_address + 1, PAGE_SIZE) ||
-	    rmrr->end_address <= rmrr->base_address ||
-	    arch_rmrr_sanity_check(rmrr))
-		return -EINVAL;
+	if (!IS_ALIGNED(rmrr->base_address, PAGE_SIZE) ||	/* [한국어] 시작 주소가 페이지 정렬이 아니거나 */
+	    !IS_ALIGNED(rmrr->end_address + 1, PAGE_SIZE) ||	/* [한국어] 끝이 페이지 경계가 아니거나 (닫힌 구간이라 +1) */
+	    rmrr->end_address <= rmrr->base_address ||	/* [한국어] 범위가 거꾸로이거나 */
+	    arch_rmrr_sanity_check(rmrr))	/* [한국어] 아키텍처가 추가로 거부하면 (예: 그 범위가 커널 이미지와 겹치는 경우) */
+		return -EINVAL;	/* [한국어] 이 RMRR 은 신뢰할 수 없다 */
 
-	return 0;
+	return 0;	/* [한국어] 정상적인 항목 */
 }
 
+/*
+ * [한국어]
+ * dmar_parse_one_rmrr - DMAR 표의 RMRR 항목 하나를 커널 자료구조로 등록한다
+ *
+ * @header: DMAR 표 안의 항목 헤더. 실제로는 struct acpi_dmar_reserved_memory 다.
+ *          DMAR 표 자체는 부팅 내내 매핑된 채로 남으므로 포인터를 그대로 보관해도 된다.
+ *          (ATSR/SATC 와 다른 점 — 그쪽은 _DSM 이 준 임시 버퍼라 복사해야 한다.)
+ * @arg: dmar_table_detect 계열의 콜백 규약 때문에 있는 자리. 여기서는 쓰지 않는다.
+ * @return: 0 성공, -ENOMEM 할당/파싱 실패.
+ *
+ * 하는 일: 항목의 값을 검사하고(rmrr_sanity_check), dmar_rmrr_unit 을 만들어
+ * 구간과 대상 장치 목록을 담은 뒤 전역 dmar_rmrr_units 목록에 매단다.
+ * 이 목록은 나중에 두 곳에서 쓰인다.
+ *   - device_rmrr_is_relaxable() / device_def_domain_type(): 이 장치가 RMRR 을
+ *     가지면 기본 도메인을 항등(identity)으로 강제할지 결정한다.
+ *   - intel_iommu_get_resv_regions(): 그 구간을 예약 영역으로 보고해, IOVA
+ *     할당기가 그 주소를 다른 매핑에 쓰지 않게 한다.
+ *
+ * 값이 이상할 때: 항목을 버리지 않고 FW_BUG 경고를 출력하고
+ * add_taint(TAINT_FIRMWARE_WORKAROUND) 로 커널에 표시를 남긴 뒤 계속 진행한다.
+ * BIOS 벤더/버전을 함께 찍는 이유는, 이후 올라오는 버그 리포트에서 펌웨어를
+ * 의심할 근거를 남기기 위해서다.
+ *
+ * 장치 목록: 항목 구조체 바로 뒤에 device scope 배열이 이어 붙어 있다.
+ * (void *)(rmrr + 1) 이 그 시작, ((void *)rmrr) + header.length 가 끝이다.
+ * 이 포인터 산술이 ACPI 가변 길이 항목을 읽는 표준 관용구다.
+ *
+ * 실행 컨텍스트: 부팅 중 DMAR 파싱(__init). 프로세스 컨텍스트, 단일 스레드.
+ * 에러 처리: 장치 목록 파싱이 실패하면 free_rmrru 로 가서 자료구조를 반납한다.
+ *
+ * 호출 체인:
+ *   dmar_table_init() → dmar_walk_dmar_table() → [dmar_parse_one_rmrr]
+ *     → rmrr_sanity_check() / dmar_alloc_dev_scope()
+ */
 int __init dmar_parse_one_rmrr(struct acpi_dmar_header *header, void *arg)
 {
-	struct acpi_dmar_reserved_memory *rmrr;
-	struct dmar_rmrr_unit *rmrru;
+	struct acpi_dmar_reserved_memory *rmrr;	/* [한국어] ACPI 항목 */
+	struct dmar_rmrr_unit *rmrru;	/* [한국어] 만들 커널 자료구조 */
 
-	rmrr = (struct acpi_dmar_reserved_memory *)header;
-	if (rmrr_sanity_check(rmrr)) {
-		pr_warn(FW_BUG
+	rmrr = (struct acpi_dmar_reserved_memory *)header;	/* [한국어] ACPI 헤더를 RMRR 항목으로 */
+	if (rmrr_sanity_check(rmrr)) {	/* [한국어] 값이 이상하면 */
+		pr_warn(FW_BUG	/* [한국어] 펌웨어 버그임을 명시한다 */
 			   "Your BIOS is broken; bad RMRR [%#018Lx-%#018Lx]\n"
 			   "BIOS vendor: %s; Ver: %s; Product Version: %s\n",
 			   rmrr->base_address, rmrr->end_address,
 			   dmi_get_system_info(DMI_BIOS_VENDOR),
 			   dmi_get_system_info(DMI_BIOS_VERSION),
 			   dmi_get_system_info(DMI_PRODUCT_VERSION));
-		add_taint(TAINT_FIRMWARE_WORKAROUND, LOCKDEP_STILL_OK);
+		add_taint(TAINT_FIRMWARE_WORKAROUND, LOCKDEP_STILL_OK);	/* [한국어] 커널에 오염 표시를 남긴다 — 이후 문제 보고에서 펌웨어를 의심할 근거가 된다 */
 	}
 
-	rmrru = kzalloc_obj(*rmrru);
-	if (!rmrru)
+	rmrru = kzalloc_obj(*rmrru);	/* [한국어] 커널 자료구조 */
+	if (!rmrru)	/* [한국어] 할당 실패 */
 		goto out;
 
-	rmrru->hdr = header;
+	rmrru->hdr = header;	/* [한국어] 원본 ACPI 항목을 가리킨다 (DMAR 표는 부팅 내내 유지된다) */
 
-	rmrru->base_address = rmrr->base_address;
-	rmrru->end_address = rmrr->end_address;
+	rmrru->base_address = rmrr->base_address;	/* [한국어] 예약 구간의 시작 */
+	rmrru->end_address = rmrr->end_address;	/* [한국어] 끝 */
 
-	rmrru->devices = dmar_alloc_dev_scope((void *)(rmrr + 1),
+	rmrru->devices = dmar_alloc_dev_scope((void *)(rmrr + 1),	/* [한국어] 이 예약이 적용되는 장치 목록을 파싱한다. 항목 뒤에 이어 붙어 있다 */
 				((void *)rmrr) + rmrr->header.length,
 				&rmrru->devices_cnt);
-	if (rmrru->devices_cnt && rmrru->devices == NULL)
+	if (rmrru->devices_cnt && rmrru->devices == NULL)	/* [한국어] 장치가 있다고 했는데 파싱에 실패했다 */
 		goto free_rmrru;
 
-	list_add(&rmrru->list, &dmar_rmrr_units);
+	list_add(&rmrru->list, &dmar_rmrr_units);	/* [한국어] 전역 목록에 등록. 나중에 장치를 프로브할 때 이 목록을 훑어 항등 매핑을 만든다 */
 
-	return 0;
-free_rmrru:
-	kfree(rmrru);
-out:
-	return -ENOMEM;
+	return 0;	/* [한국어] 항목 하나 처리 완료 */
+free_rmrru:	/* [한국어] 파싱 실패 경로 */
+	kfree(rmrru);	/* [한국어] 자료구조 반납 */
+out:	/* [한국어] 할당 실패가 합류 */
+	return -ENOMEM;	/* [한국어] 처리 실패 */
 }
 
+/*
+ * [한국어]
+ * dmar_find_atsr - 같은 내용의 ATSR 항목이 이미 등록되어 있는지 찾는다
+ *
+ * @atsr: 방금 파싱한 ACPI ATSR 항목.
+ * @return: 같은 항목이 이미 있으면 그 dmar_atsr_unit, 없으면 NULL.
+ *
+ * ATSR 이 무엇인가: ATSR(Root Port ATS Capability Reporting)은 "이 PCIe 루트
+ * 포트 아래의 장치들은 ATS(Address Translation Services)를 쓸 수 있다"고
+ * 선언하는 DMAR 표 항목이다. ATS 는 장치가 자기 안에 번역 캐시(ATC/디바이스
+ * TLB)를 두는 기능이라, 커널이 매핑을 풀 때 IOMMU 뿐 아니라 그 장치의 캐시도
+ * 무효화해야 한다. 그래서 어떤 포트가 ATS 를 지원하는지 미리 알아야 한다.
+ *
+ * 왜 중복 검사가 필요한가: 부팅 때 파싱한 표를, PCIe 호스트 브리지 핫플러그
+ * 이벤트에서 ACPI _DSM 이 다시 돌려주는 경우가 있다. 그대로 등록하면 같은
+ * 항목이 두 번 목록에 들어간다. 그래서 세그먼트 → 길이 → 전체 바이트 비교
+ * 순으로(싼 것부터) 같은 항목인지 확인한다.
+ *
+ * 동기화: dmar_atsr_units 는 RCU 목록이다. 순회 중에 dmar_parse_one_satc/atsr
+ * 이 list_add_rcu 로 항목을 추가하거나 dmar_release_one_atsr 가 지울 수 있어서,
+ * 읽는 쪽은 rcu 순회를, 지우는 쪽은 synchronize_rcu 를 쓴다. dmar_rcu_check()
+ * 는 "rcu_read_lock 안이거나 dmar_global_lock 을 쥐고 있다"는 조건을 lockdep 에
+ * 알려 주는 표현식이다.
+ * 실행 컨텍스트: 부팅 파싱 또는 핫플러그. 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   dmar_parse_one_atsr()/dmar_release_one_atsr()/dmar_check_one_atsr()
+ *     → [dmar_find_atsr]
+ */
 static struct dmar_atsr_unit *dmar_find_atsr(struct acpi_dmar_atsr *atsr)
 {
-	struct dmar_atsr_unit *atsru;
-	struct acpi_dmar_atsr *tmp;
+	struct dmar_atsr_unit *atsru;	/* [한국어] 순회 커서 */
+	struct acpi_dmar_atsr *tmp;	/* [한국어] 비교할 항목 */
 
-	list_for_each_entry_rcu(atsru, &dmar_atsr_units, list,
+	list_for_each_entry_rcu(atsru, &dmar_atsr_units, list,	/* [한국어] RCU 순회 — 유닛 핫플러그로 목록이 바뀔 수 있다 */
 				dmar_rcu_check()) {
-		tmp = (struct acpi_dmar_atsr *)atsru->hdr;
-		if (atsr->segment != tmp->segment)
-			continue;
-		if (atsr->header.length != tmp->header.length)
-			continue;
-		if (memcmp(atsr, tmp, atsr->header.length) == 0)
-			return atsru;
+		tmp = (struct acpi_dmar_atsr *)atsru->hdr;	/* [한국어] 보관된 원본 항목 */
+		if (atsr->segment != tmp->segment)	/* [한국어] 세그먼트가 다르면 */
+			continue;	/* [한국어] 다른 항목 */
+		if (atsr->header.length != tmp->header.length)	/* [한국어] 길이가 다르면 */
+			continue;	/* [한국어] 다른 항목 */
+		if (memcmp(atsr, tmp, atsr->header.length) == 0)	/* [한국어] 내용이 완전히 같으면 */
+			return atsru;	/* [한국어] 같은 항목이다. 핫플러그로 같은 표를 다시 파싱할 때 중복 등록을 막는다 */
 	}
 
-	return NULL;
+	return NULL;	/* [한국어] 등록된 적이 없다 */
 }
 
+/*
+ * [한국어]
+ * dmar_parse_one_atsr - ACPI ATSR 항목 하나를 커널 자료구조로 등록한다
+ *
+ * @hdr: DMAR 표 또는 _DSM 이 돌려준 버퍼 안의 항목 헤더.
+ * @arg: 콜백 규약상의 자리. 쓰지 않는다.
+ * @return: 0 성공(중복이라 아무것도 안 한 경우도 0), -ENOMEM 실패.
+ *
+ * 하는 일: 중복이 아니면 dmar_atsr_unit 을 만들어 ACPI 항목의 사본과 ATS 를
+ * 지원하는 포트 목록을 담고, RCU 목록 dmar_atsr_units 에 매단다.
+ *
+ * 왜 ACPI 항목을 복사하는가: 부팅 시의 DMAR 표는 계속 매핑되어 있지만,
+ * 핫플러그 경로에서는 ACPI _DSM 메서드가 슬랩에서 잡은 버퍼를 돌려주고 그
+ * 버퍼는 반환 즉시 해제된다. 그래서 구조체 뒤에 hdr->length 만큼을 함께
+ * 할당(kzalloc(sizeof + length))하고 내용을 복사한 뒤, atsru->hdr 이 그
+ * 사본을 가리키게 한다. 이렇게 하면 해제도 kfree 한 번으로 끝난다.
+ *
+ * include_all: flags 의 bit0 이 켜져 있으면 "이 세그먼트의 모든 루트 포트가
+ * ATS 를 지원한다"는 뜻이라 장치 목록이 없다. 꺼져 있으면 항목 뒤에 이어진
+ * device scope 배열이 대상 포트를 하나씩 지정한다. 나중에
+ * dmar_find_matched_atsr_unit() 이 이 두 경우를 구분해 판단한다.
+ *
+ * 부팅 후 핫플러그인데 VT-d 가 꺼져 있으면(system_state >= SYSTEM_RUNNING &&
+ * !intel_iommu_enabled) 등록할 이유가 없으므로 곧바로 0 을 돌려준다.
+ *
+ * 실행 컨텍스트: 부팅 중 DMAR 파싱, 또는 PCIe 호스트 브리지 핫플러그 알림.
+ * 프로세스 컨텍스트. 목록 추가는 list_add_rcu 라 동시 순회와 안전하다.
+ * 에러 처리: 장치 목록 파싱이 실패하면 방금 만든 자료구조를 해제하고
+ * -ENOMEM 을 돌려준다. 호출자는 핫플러그 전체를 실패시킨다.
+ *
+ * 호출 체인:
+ *   dmar_walk_dmar_table()/dmar_hotplug_insert() → [dmar_parse_one_atsr]
+ *     → dmar_find_atsr() / dmar_alloc_dev_scope()
+ */
 int dmar_parse_one_atsr(struct acpi_dmar_header *hdr, void *arg)
 {
-	struct acpi_dmar_atsr *atsr;
-	struct dmar_atsr_unit *atsru;
+	struct acpi_dmar_atsr *atsr;	/* [한국어] ACPI 항목 */
+	struct dmar_atsr_unit *atsru;	/* [한국어] 커널 자료구조 */
 
-	if (system_state >= SYSTEM_RUNNING && !intel_iommu_enabled)
-		return 0;
+	if (system_state >= SYSTEM_RUNNING && !intel_iommu_enabled)	/* [한국어] 부팅이 끝난 뒤의 핫플러그인데 VT-d 가 꺼져 있으면 */
+		return 0;	/* [한국어] 등록할 이유가 없다 */
 
-	atsr = container_of(hdr, struct acpi_dmar_atsr, header);
-	atsru = dmar_find_atsr(atsr);
-	if (atsru)
-		return 0;
+	atsr = container_of(hdr, struct acpi_dmar_atsr, header);	/* [한국어] 헤더에서 ATSR 항목으로 */
+	atsru = dmar_find_atsr(atsr);	/* [한국어] 이미 등록된 항목인지 */
+	if (atsru)	/* [한국어] 있으면 */
+		return 0;	/* [한국어] 중복 등록하지 않는다 */
 
-	atsru = kzalloc(sizeof(*atsru) + hdr->length, GFP_KERNEL);
-	if (!atsru)
-		return -ENOMEM;
+	atsru = kzalloc(sizeof(*atsru) + hdr->length, GFP_KERNEL);	/* [한국어] 자료구조와 ACPI 항목 사본을 한 번에 잡는다 */
+	if (!atsru)	/* [한국어] 할당 실패 */
+		return -ENOMEM;	/* [한국어] 등록 불가 */
 
 	/*
 	 * If memory is allocated from slab by ACPI _DSM method, we need to
 	 * copy the memory content because the memory buffer will be freed
 	 * on return.
 	 */
-	atsru->hdr = (void *)(atsru + 1);
-	memcpy(atsru->hdr, hdr, hdr->length);
-	atsru->include_all = atsr->flags & 0x1;
-	if (!atsru->include_all) {
-		atsru->devices = dmar_alloc_dev_scope((void *)(atsr + 1),
-				(void *)atsr + atsr->header.length,
-				&atsru->devices_cnt);
-		if (atsru->devices_cnt && atsru->devices == NULL) {
-			kfree(atsru);
-			return -ENOMEM;
+	atsru->hdr = (void *)(atsru + 1);	/* [한국어] 사본을 담을 자리는 구조체 바로 뒤 */
+	memcpy(atsru->hdr, hdr, hdr->length);	/* [한국어] 내용을 복사한다. ACPI _DSM 이 준 버퍼는 반환 즉시 해제되므로 참조만 들고 있을 수 없다 (위 영어 주석) */
+	atsru->include_all = atsr->flags & 0x1;	/* [한국어] 이 유닛 아래 모든 포트가 ATS 를 지원한다는 표시 */
+	if (!atsru->include_all) {	/* [한국어] 특정 포트만 지정한 경우 */
+		atsru->devices = dmar_alloc_dev_scope((void *)(atsr + 1),	/* [한국어] 그 포트 목록을 파싱한다 */
+				(void *)atsr + atsr->header.length,	/* [한국어] 항목의 끝까지 */
+				&atsru->devices_cnt);	/* [한국어] 개수를 받는다 */
+		if (atsru->devices_cnt && atsru->devices == NULL) {	/* [한국어] 파싱 실패 */
+			kfree(atsru);	/* [한국어] 자료구조 반납 */
+			return -ENOMEM;	/* [한국어] 등록 실패 */
 		}
 	}
 
-	list_add_rcu(&atsru->list, &dmar_atsr_units);
+	list_add_rcu(&atsru->list, &dmar_atsr_units);	/* [한국어] RCU 목록에 등록. 순회 중에도 안전하게 추가된다 */
 
-	return 0;
+	return 0;	/* [한국어] 항목 등록 완료 */
 }
 
+/*
+ * [한국어]
+ * intel_iommu_free_atsr - dmar_atsr_unit 하나와 그 장치 목록을 해제한다
+ *
+ * @atsru: 이미 목록에서 빠져 있고, RCU 유예 기간도 지난 자료구조.
+ * @return: 없음.
+ *
+ * 장치 목록(devices 배열)은 dmar_alloc_dev_scope 가 따로 잡은 메모리라
+ * 먼저 dmar_free_dev_scope 로 반납하고, 그 다음 자료구조 본체를 해제한다.
+ * ACPI 항목 사본은 atsru 와 같은 할당 안에 있으므로 별도 해제가 없다.
+ *
+ * 호출 전 조건: 반드시 list_del_rcu + synchronize_rcu 이후여야 한다.
+ * 그러지 않으면 RCU 순회 중인 다른 CPU 가 해제된 메모리를 읽는다.
+ * 실행 컨텍스트: 프로세스 컨텍스트(synchronize_rcu 뒤라 잠들 수 있는 자리).
+ *
+ * 호출 체인:
+ *   dmar_release_one_atsr()/intel_iommu_free_dmars() → [intel_iommu_free_atsr]
+ *     → dmar_free_dev_scope()
+ */
 static void intel_iommu_free_atsr(struct dmar_atsr_unit *atsru)
 {
-	dmar_free_dev_scope(&atsru->devices, &atsru->devices_cnt);
-	kfree(atsru);
+	dmar_free_dev_scope(&atsru->devices, &atsru->devices_cnt);	/* [한국어] 장치 목록 해제 */
+	kfree(atsru);	/* [한국어] 자료구조 반납 (ACPI 사본도 같은 할당 안에 있다) */
 }
 
+/*
+ * [한국어]
+ * dmar_release_one_atsr - 등록된 ATSR 항목을 목록에서 제거하고 해제한다
+ *
+ * @hdr: 제거할 ATSR 항목의 ACPI 헤더.
+ * @arg: 콜백 규약상의 자리. 쓰지 않는다.
+ * @return: 항상 0. 등록된 적이 없어도 성공으로 본다(제거할 게 없을 뿐이다).
+ *
+ * 언제 불리는가: PCIe 호스트 브리지가 뽑히면서 그 브리지가 보고했던 ATSR 이
+ * 더 이상 유효하지 않을 때. 실제 제거 전에 dmar_check_one_atsr 가 먼저
+ * "지워도 되는지"를 물어보고, 통과한 뒤에 이 함수가 불린다.
+ *
+ * RCU 제거 3단계: list_del_rcu 로 목록에서 끊고 → synchronize_rcu 로 이미
+ * 진행 중인 순회가 모두 끝날 때까지 기다리고 → 그제서야 해제한다. 이 순서를
+ * 어기면 dmar_find_atsr 처럼 rcu 순회 중인 코드가 해제된 메모리를 읽는다.
+ * synchronize_rcu 는 잠들 수 있으므로 프로세스 컨텍스트에서만 부를 수 있다.
+ *
+ * 실행 컨텍스트: ACPI 핫플러그 처리 경로. 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   dmar_hotplug_remove() → [dmar_release_one_atsr]
+ *     → dmar_find_atsr() → list_del_rcu() → synchronize_rcu()
+ *     → intel_iommu_free_atsr()
+ */
 int dmar_release_one_atsr(struct acpi_dmar_header *hdr, void *arg)
 {
-	struct acpi_dmar_atsr *atsr;
-	struct dmar_atsr_unit *atsru;
+	struct acpi_dmar_atsr *atsr;	/* [한국어] ACPI 항목 */
+	struct dmar_atsr_unit *atsru;	/* [한국어] 등록된 자료구조 */
 
-	atsr = container_of(hdr, struct acpi_dmar_atsr, header);
-	atsru = dmar_find_atsr(atsr);
-	if (atsru) {
-		list_del_rcu(&atsru->list);
-		synchronize_rcu();
-		intel_iommu_free_atsr(atsru);
+	atsr = container_of(hdr, struct acpi_dmar_atsr, header);	/* [한국어] 헤더에서 항목으로 */
+	atsru = dmar_find_atsr(atsr);	/* [한국어] 등록된 것을 찾는다 */
+	if (atsru) {	/* [한국어] 있으면 */
+		list_del_rcu(&atsru->list);	/* [한국어] 목록에서 뺀다 */
+		synchronize_rcu();	/* [한국어] 진행 중인 순회가 끝날 때까지 기다린다. 그러지 않으면 해제된 항목을 읽는 순회가 남는다 */
+		intel_iommu_free_atsr(atsru);	/* [한국어] 이제 안전하게 해제 */
 	}
 
-	return 0;
+	return 0;	/* [한국어] 제거 완료 */
 }
 
+/*
+ * [한국어]
+ * dmar_check_one_atsr - ATSR 항목을 지워도 되는지 미리 확인한다
+ *
+ * @hdr: 지우려는 ATSR 항목의 ACPI 헤더.
+ * @arg: 콜백 규약상의 자리. 쓰지 않는다.
+ * @return: 0 이면 제거해도 된다, -EBUSY 면 아직 쓰이는 중이라 거절.
+ *
+ * 왜 확인 단계가 따로 있는가: ACPI 핫플러그는 "검사 → 실제 수행"의 2단계로
+ * 돈다. 여러 항목 중 하나라도 제거가 불가능하면 아무것도 건드리지 않고 통째로
+ * 실패시켜야 중간 상태가 남지 않는다. 이 함수가 그 검사 단계다.
+ *
+ * 판단 기준: include_all 항목이면 특정 장치를 지목한 게 아니므로 언제든 지울
+ * 수 있다. 반대로 device scope 로 포트를 지목한 항목이면,
+ * for_each_active_dev_scope 로 아직 살아 있는(struct device 가 매달린) 항목이
+ * 하나라도 있는지 본다. 하나라도 있으면 그 장치가 ATS 를 쓰는 중일 수 있으므로
+ * -EBUSY 로 거절한다 — 루프 몸통에서 곧바로 return 하는 것은 "존재 여부"만
+ * 보면 되기 때문이다.
+ *
+ * 실행 컨텍스트: ACPI 핫플러그 검사 단계. 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   dmar_hotplug_remove() → [dmar_check_one_atsr] → dmar_find_atsr()
+ */
 int dmar_check_one_atsr(struct acpi_dmar_header *hdr, void *arg)
 {
-	int i;
-	struct device *dev;
-	struct acpi_dmar_atsr *atsr;
-	struct dmar_atsr_unit *atsru;
+	int i;	/* [한국어] 장치 순회 인덱스 */
+	struct device *dev;	/* [한국어] 순회 커서 */
+	struct acpi_dmar_atsr *atsr;	/* [한국어] ACPI 항목 */
+	struct dmar_atsr_unit *atsru;	/* [한국어] 등록된 자료구조 */
 
-	atsr = container_of(hdr, struct acpi_dmar_atsr, header);
-	atsru = dmar_find_atsr(atsr);
-	if (!atsru)
-		return 0;
+	atsr = container_of(hdr, struct acpi_dmar_atsr, header);	/* [한국어] 헤더에서 항목으로 */
+	atsru = dmar_find_atsr(atsr);	/* [한국어] 등록된 것을 찾는다 */
+	if (!atsru)	/* [한국어] 없으면 제거해도 무방하다 */
+		return 0;	/* [한국어] 허용 */
 
-	if (!atsru->include_all && atsru->devices && atsru->devices_cnt) {
-		for_each_active_dev_scope(atsru->devices, atsru->devices_cnt,
-					  i, dev)
-			return -EBUSY;
+	if (!atsru->include_all && atsru->devices && atsru->devices_cnt) {	/* [한국어] 특정 포트를 지정한 항목이고 장치 목록이 있으면 */
+		for_each_active_dev_scope(atsru->devices, atsru->devices_cnt,	/* [한국어] 아직 살아 있는 장치가 하나라도 있는지 */
+					  i, dev)	/* [한국어] 순회 */
+			return -EBUSY;	/* [한국어] 있으면 제거를 거절한다 — 그 장치가 ATS 를 쓰는 중일 수 있다 */
 	}
 
-	return 0;
+	return 0;	/* [한국어] 제거해도 된다 */
 }
 
+/*
+ * [한국어]
+ * dmar_find_satc - 같은 내용의 SATC 항목이 이미 등록되어 있는지 찾는다
+ *
+ * @satc: 방금 파싱한 ACPI SATC 항목.
+ * @return: 같은 항목이 있으면 그 dmar_satc_unit, 없으면 NULL.
+ *
+ * SATC 가 무엇인가: SATC(SoC Integrated Address Translation Cache)는 SoC 에
+ * 통합된 장치들 중 "번역 캐시(ATC)를 반드시 켜야만 정상 동작하는" 것들을
+ * 알려 주는 DMAR 표 항목이다. ATSR 이 "ATS 를 쓸 수 있다"는 능력 보고라면,
+ * SATC 의 atc_required 플래그는 "ATS 가 없으면 이 장치는 못 쓴다"는 요구다.
+ * 이 값은 나중에 dev_needs_extra_dtlb_flush / ATS 활성화 판단에 쓰인다.
+ *
+ * 비교 방식은 dmar_find_atsr 과 같다: 세그먼트 → 헤더 길이 → 전체 바이트
+ * memcmp 순으로 싼 검사부터 걸러 낸다. 목적도 같다 — 핫플러그에서 같은 표를
+ * 다시 파싱했을 때 중복 등록을 막는 것.
+ *
+ * 동기화: dmar_satc_units 는 RCU 목록이며 dmar_rcu_check() 가 lockdep 에
+ * 유효한 보호 조건을 알려 준다.
+ * 실행 컨텍스트: 부팅 파싱 또는 핫플러그. 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   dmar_parse_one_satc() → [dmar_find_satc]
+ */
 static struct dmar_satc_unit *dmar_find_satc(struct acpi_dmar_satc *satc)
 {
-	struct dmar_satc_unit *satcu;
-	struct acpi_dmar_satc *tmp;
+	struct dmar_satc_unit *satcu;	/* [한국어] 순회 커서 */
+	struct acpi_dmar_satc *tmp;	/* [한국어] 비교할 항목 */
 
-	list_for_each_entry_rcu(satcu, &dmar_satc_units, list,
-				dmar_rcu_check()) {
-		tmp = (struct acpi_dmar_satc *)satcu->hdr;
-		if (satc->segment != tmp->segment)
-			continue;
-		if (satc->header.length != tmp->header.length)
-			continue;
-		if (memcmp(satc, tmp, satc->header.length) == 0)
-			return satcu;
+	list_for_each_entry_rcu(satcu, &dmar_satc_units, list,	/* [한국어] RCU 순회 */
+				dmar_rcu_check()) {	/* [한국어] RCU 사용 조건 검증 */
+		tmp = (struct acpi_dmar_satc *)satcu->hdr;	/* [한국어] 보관된 원본 */
+		if (satc->segment != tmp->segment)	/* [한국어] 세그먼트가 다르면 */
+			continue;	/* [한국어] 다른 항목 */
+		if (satc->header.length != tmp->header.length)	/* [한국어] 길이가 다르면 */
+			continue;	/* [한국어] 다른 항목 */
+		if (memcmp(satc, tmp, satc->header.length) == 0)	/* [한국어] 내용이 같으면 */
+			return satcu;	/* [한국어] 같은 항목 */
 	}
 
-	return NULL;
+	return NULL;	/* [한국어] 등록된 적이 없다 */
 }
 
+/*
+ * [한국어]
+ * dmar_parse_one_satc - ACPI SATC 항목 하나를 커널 자료구조로 등록한다
+ *
+ * @hdr: DMAR 표 또는 _DSM 버퍼 안의 SATC 항목 헤더.
+ * @arg: 콜백 규약상의 자리. 쓰지 않는다.
+ * @return: 0 성공(중복이면 아무것도 안 하고 0), -ENOMEM 실패.
+ *
+ * 하는 일: 중복이 아니면 dmar_satc_unit 을 만들어 ACPI 사본과 대상 장치 목록,
+ * 그리고 atc_required 플래그를 담아 RCU 목록에 매단다.
+ *
+ * atc_required(flags bit0): 이 목록에 있는 장치들은 디바이스 TLB 없이는
+ * 동작하지 못한다는 뜻이다. 그래서 나중에 이 장치를 프로브할 때, ATS 능력이
+ * 있으면 무조건 켜야 하고 끌 수도 없다. 일반 PCIe 장치의 ATS 가 "성능을 위한
+ * 선택"인 것과 달리 SoC 통합 장치에서는 동작 조건이다.
+ *
+ * ATSR 과 마찬가지로 ACPI 버퍼가 곧 해제될 수 있으므로
+ * kzalloc(sizeof(*satcu) + hdr->length) 로 사본 자리를 함께 잡아 복사한다.
+ * 장치 목록은 include_all 같은 예외 없이 항상 파싱한다 — SATC 는 대상 장치를
+ * 반드시 지목하는 표이기 때문이다.
+ *
+ * 실행 컨텍스트: 부팅 중 DMAR 파싱, 또는 핫플러그. 프로세스 컨텍스트.
+ * 에러 처리: 장치 목록 파싱 실패 시 자료구조를 반납하고 -ENOMEM.
+ *
+ * 호출 체인:
+ *   dmar_walk_dmar_table()/dmar_hotplug_insert() → [dmar_parse_one_satc]
+ *     → dmar_find_satc() / dmar_alloc_dev_scope()
+ */
 int dmar_parse_one_satc(struct acpi_dmar_header *hdr, void *arg)
 {
-	struct acpi_dmar_satc *satc;
-	struct dmar_satc_unit *satcu;
+	struct acpi_dmar_satc *satc;	/* [한국어] ACPI 항목 */
+	struct dmar_satc_unit *satcu;	/* [한국어] 커널 자료구조 */
 
-	if (system_state >= SYSTEM_RUNNING && !intel_iommu_enabled)
-		return 0;
+	if (system_state >= SYSTEM_RUNNING && !intel_iommu_enabled)	/* [한국어] 부팅 후 핫플러그인데 VT-d 가 꺼져 있으면 */
+		return 0;	/* [한국어] 등록하지 않는다 */
 
-	satc = container_of(hdr, struct acpi_dmar_satc, header);
-	satcu = dmar_find_satc(satc);
-	if (satcu)
-		return 0;
+	satc = container_of(hdr, struct acpi_dmar_satc, header);	/* [한국어] 헤더에서 항목으로 */
+	satcu = dmar_find_satc(satc);	/* [한국어] 이미 등록되었는지 */
+	if (satcu)	/* [한국어] 있으면 */
+		return 0;	/* [한국어] 중복 등록하지 않는다 */
 
-	satcu = kzalloc(sizeof(*satcu) + hdr->length, GFP_KERNEL);
-	if (!satcu)
-		return -ENOMEM;
+	satcu = kzalloc(sizeof(*satcu) + hdr->length, GFP_KERNEL);	/* [한국어] 자료구조와 ACPI 사본을 한 번에 */
+	if (!satcu)	/* [한국어] 할당 실패 */
+		return -ENOMEM;	/* [한국어] 등록 불가 */
 
-	satcu->hdr = (void *)(satcu + 1);
-	memcpy(satcu->hdr, hdr, hdr->length);
-	satcu->atc_required = satc->flags & 0x1;
-	satcu->devices = dmar_alloc_dev_scope((void *)(satc + 1),
-					      (void *)satc + satc->header.length,
-					      &satcu->devices_cnt);
-	if (satcu->devices_cnt && !satcu->devices) {
-		kfree(satcu);
-		return -ENOMEM;
+	satcu->hdr = (void *)(satcu + 1);	/* [한국어] 사본 자리 */
+	memcpy(satcu->hdr, hdr, hdr->length);	/* [한국어] ACPI 버퍼가 곧 해제되므로 복사한다 */
+	satcu->atc_required = satc->flags & 0x1;	/* [한국어] 이 장치들은 ATS 가 필수라는 표시. SoC 통합 장치 중 번역 캐시 없이는 동작하지 못하는 것들이 있다 */
+	satcu->devices = dmar_alloc_dev_scope((void *)(satc + 1),	/* [한국어] 대상 장치 목록을 파싱한다 */
+					      (void *)satc + satc->header.length,	/* [한국어] 항목의 끝까지 */
+					      &satcu->devices_cnt);	/* [한국어] 개수를 받는다 */
+	if (satcu->devices_cnt && !satcu->devices) {	/* [한국어] 파싱 실패 */
+		kfree(satcu);	/* [한국어] 자료구조 반납 */
+		return -ENOMEM;	/* [한국어] 등록 실패 */
 	}
-	list_add_rcu(&satcu->list, &dmar_satc_units);
+	list_add_rcu(&satcu->list, &dmar_satc_units);	/* [한국어] RCU 목록에 등록 */
 
-	return 0;
+	return 0;	/* [한국어] 등록 완료 */
 }
 
+/*
+ * [한국어]
+ * intel_iommu_add - 핫플러그로 새로 나타난 DRHD 유닛 하나를 동작 상태로 세운다
+ *
+ * @dmaru: 새로 추가된 DRHD(DMA Remapping Hardware unit Definition) 유닛.
+ *         dmaru->iommu 는 이미 dmar_alloc_dev_scope 계열이 만들어 둔 상태다.
+ * @return: 0 성공, 음수면 실패(그 경우 유닛은 정지되고 자료구조도 반납된다).
+ *
+ * 왜 필요한가: 부팅 때는 init_dmars() 가 모든 유닛을 한꺼번에 세우지만,
+ * PCIe 호스트 브리지가 나중에 꽂히면 그 브리지에 딸린 VT-d 유닛도 그때
+ * 초기화해야 한다. 이 함수가 init_dmars 의 유닛 1개짜리 버전이다.
+ *
+ * 순서가 중요한 이유 — 아래 단계는 하드웨어 요구 순서 그대로다.
+ *   1) 펌웨어가 번역을 켜 둔 채 넘겨줬으면 먼저 끈다. 우리가 세운 적 없는
+ *      루트 테이블이 살아 있는 상태에서 뭘 바꾸면 진행 중인 DMA 가 엉킨다.
+ *   2) iommu_alloc_root_entry — 루트 테이블을 만든다.
+ *   3) intel_svm_check — 이 유닛이 SVA(PASID/PRI)를 지원하는지 표시한다.
+ *   4) dmaru->ignored 인 유닛(intel_iommu=off 대상 등)은 여기서 끝낸다.
+ *      단 PMR(Protected Memory Region)만은 반드시 꺼야 한다. BIOS 가 켜 둔
+ *      보호 영역이 남아 있으면 그 아래 장치의 DMA 가 통째로 막히기 때문이다.
+ *   5) intel_iommu_init_qi — 큐 기반 무효화(QI)를 세운다. 이후의 모든 캐시
+ *      무효화가 이 큐를 쓴다.
+ *   6) PRS 지원 유닛이면 페이지 요청 큐(PRQ)를 세운다.
+ *   7) dmar_set_interrupt — 폴트 인터럽트를 건다.
+ *   8) iommu_set_root_entry → iommu_enable_translation — 루트 테이블 주소를
+ *      하드웨어에 알리고 번역을 켠다. 반드시 이 순서다.
+ *   9) 마지막으로 PMR 을 끈다.
+ *
+ * 실행 컨텍스트: ACPI 핫플러그 처리. 프로세스 컨텍스트.
+ * 에러 처리: 6~7 단계에서 실패하면 disable_dmar_iommu 로 유닛을 정지시킨 뒤
+ * free_dmar_iommu 로 자료구조를 반납한다. 2 단계 실패는 아직 켠 게 없으므로
+ * out 으로 바로 가서 반납만 한다.
+ *
+ * 호출 체인:
+ *   dmar_iommu_hotplug() → [intel_iommu_add]
+ *     → iommu_alloc_root_entry() → intel_iommu_init_qi()
+ *     → intel_iommu_enable_prq() → dmar_set_interrupt()
+ *     → iommu_set_root_entry() → iommu_enable_translation()
+ */
 static int intel_iommu_add(struct dmar_drhd_unit *dmaru)
 {
-	struct intel_iommu *iommu = dmaru->iommu;
-	int ret;
+	struct intel_iommu *iommu = dmaru->iommu;	/* [한국어] 추가된 유닛 */
+	int ret;	/* [한국어] 각 단계의 결과 */
 
 	/*
 	 * Disable translation if already enabled prior to OS handover.
 	 */
-	if (iommu->gcmd & DMA_GCMD_TE)
-		iommu_disable_translation(iommu);
+	if (iommu->gcmd & DMA_GCMD_TE)	/* [한국어] 펌웨어가 켜 둔 상태로 넘어왔으면 (위 영어 주석) */
+		iommu_disable_translation(iommu);	/* [한국어] 우리가 다시 세운다 */
 
-	ret = iommu_alloc_root_entry(iommu);
-	if (ret)
-		goto out;
+	ret = iommu_alloc_root_entry(iommu);	/* [한국어] 루트 테이블을 만든다 */
+	if (ret)	/* [한국어] 실패 */
+		goto out;	/* [한국어] 정리하고 나간다 */
 
-	intel_svm_check(iommu);
+	intel_svm_check(iommu);	/* [한국어] SVA 지원 여부를 확인한다 */
 
-	if (dmaru->ignored) {
+	if (dmaru->ignored) {	/* [한국어] 무시하는 유닛이면 */
 		/*
 		 * we always have to disable PMRs or DMA may fail on this device
 		 */
-		if (force_on)
-			iommu_disable_protect_mem_regions(iommu);
-		return 0;
+		if (force_on)	/* [한국어] 강제 모드에서는 */
+			iommu_disable_protect_mem_regions(iommu);	/* [한국어] 보호 영역만 끈다 (위 영어 주석) */
+		return 0;	/* [한국어] 나머지 설정은 하지 않는다 */
 	}
 
-	intel_iommu_init_qi(iommu);
-	iommu_flush_write_buffer(iommu);
+	intel_iommu_init_qi(iommu);	/* [한국어] 무효화 큐를 세운다 */
+	iommu_flush_write_buffer(iommu);	/* [한국어] 쓰기 버퍼 정리 */
 
-	if (ecap_prs(iommu->ecap)) {
-		ret = intel_iommu_enable_prq(iommu);
-		if (ret)
-			goto disable_iommu;
+	if (ecap_prs(iommu->ecap)) {	/* [한국어] PRI 를 지원하면 */
+		ret = intel_iommu_enable_prq(iommu);	/* [한국어] 페이지 요청 큐를 세운다 */
+		if (ret)	/* [한국어] 실패 */
+			goto disable_iommu;	/* [한국어] 유닛을 정지시키고 정리 */
 	}
 
-	ret = dmar_set_interrupt(iommu);
-	if (ret)
-		goto disable_iommu;
+	ret = dmar_set_interrupt(iommu);	/* [한국어] 폴트 인터럽트를 건다 */
+	if (ret)	/* [한국어] 실패 */
+		goto disable_iommu;	/* [한국어] 정리 */
 
-	iommu_set_root_entry(iommu);
-	iommu_enable_translation(iommu);
+	iommu_set_root_entry(iommu);	/* [한국어] 루트 테이블을 하드웨어에 알린다 */
+	iommu_enable_translation(iommu);	/* [한국어] 번역을 켠다 */
 
-	iommu_disable_protect_mem_regions(iommu);
-	return 0;
+	iommu_disable_protect_mem_regions(iommu);	/* [한국어] BIOS 보호 영역을 끈다 */
+	return 0;	/* [한국어] 유닛이 동작을 시작했다 */
 
-disable_iommu:
-	disable_dmar_iommu(iommu);
-out:
-	free_dmar_iommu(iommu);
-	return ret;
+disable_iommu:	/* [한국어] 설정 도중 실패한 경로 */
+	disable_dmar_iommu(iommu);	/* [한국어] 유닛을 정지 */
+out:	/* [한국어] 루트 테이블 실패가 합류 */
+	free_dmar_iommu(iommu);	/* [한국어] 자료구조 반납 */
+	return ret;	/* [한국어] 실패 이유 */
 }
 
+/*
+ * [한국어]
+ * dmar_iommu_hotplug - VT-d 유닛의 추가/제거 요청을 처리하는 진입점
+ *
+ * @dmaru: 대상 DRHD 유닛.
+ * @insert: true 면 추가(세워서 켜기), false 면 제거(끄고 반납).
+ * @return: 0 성공, -EINVAL 이면 유닛 구조체가 없다. 추가 실패 시 그 이유.
+ *
+ * 왜 필요한가: DMAR 표에 정의된 VT-d 유닛은 PCIe 호스트 브리지 단위로
+ * 존재한다. 브리지가 핫플러그되면 유닛도 함께 나타나거나 사라지므로, DMAR
+ * 코어(dmar.c)가 그 사실을 이 콜백으로 알려 준다. 즉 이 함수는 dmar.c 의
+ * 일반 핫플러그 처리와 intel/iommu.c 의 실제 초기화 사이의 다리다.
+ *
+ * intel_iommu_enabled 가 꺼져 있으면 아무 일도 하지 않는다. 번역을 아예 쓰지
+ * 않는 부팅에서는 유닛을 세울 필요도, 끌 필요도 없기 때문이다.
+ *
+ * 제거 경로가 두 단계인 이유: disable_dmar_iommu 는 번역을 끄고 이 유닛에
+ * 매달린 도메인들을 떼어 내는 "동작 정지"이고, free_dmar_iommu 는 큐/테이블/
+ * 비트맵 같은 메모리를 반납하는 "자원 회수"다. 순서를 바꾸면 아직 하드웨어가
+ * 참조 중인 메모리를 해제하게 된다.
+ *
+ * 실행 컨텍스트: ACPI 핫플러그. 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   dmar_hotplug_insert()/dmar_hotplug_remove() → [dmar_iommu_hotplug]
+ *     → intel_iommu_add() 또는 disable_dmar_iommu() + free_dmar_iommu()
+ */
 int dmar_iommu_hotplug(struct dmar_drhd_unit *dmaru, bool insert)
 {
-	int ret = 0;
-	struct intel_iommu *iommu = dmaru->iommu;
+	int ret = 0;	/* [한국어] 결과 */
+	struct intel_iommu *iommu = dmaru->iommu;	/* [한국어] 대상 유닛 */
 
-	if (!intel_iommu_enabled)
-		return 0;
-	if (iommu == NULL)
-		return -EINVAL;
+	if (!intel_iommu_enabled)	/* [한국어] VT-d 가 꺼져 있으면 */
+		return 0;	/* [한국어] 할 일 없음 */
+	if (iommu == NULL)	/* [한국어] 유닛 구조체가 없다 */
+		return -EINVAL;	/* [한국어] 잘못된 요청 */
 
-	if (insert) {
-		ret = intel_iommu_add(dmaru);
+	if (insert) {	/* [한국어] 유닛이 추가된 경우 */
+		ret = intel_iommu_add(dmaru);	/* [한국어] 세우고 번역을 켠다 */
 	} else {
-		disable_dmar_iommu(iommu);
-		free_dmar_iommu(iommu);
+		disable_dmar_iommu(iommu);	/* [한국어] 제거된 경우 — 정지시키고 */
+		free_dmar_iommu(iommu);	/* [한국어] 자료구조를 반납한다 */
 	}
 
-	return ret;
+	return ret;	/* [한국어] 결과 */
 }
 
+/*
+ * [한국어]
+ * intel_iommu_free_dmars - 파싱해 둔 RMRR/ATSR/SATC 항목을 전부 반납한다
+ *
+ * @return: 없음.
+ *
+ * 언제 불리는가: intel_iommu_init() 이 도중에 실패해서 되돌릴 때, 그리고
+ * 모듈 정리 경로에서. 부팅이 성공하면 이 목록들은 시스템이 살아 있는 내내
+ * 유지되므로 이 함수는 실질적으로 실패 경로 전용이다.
+ *
+ * 세 목록을 각각 비운다. 모두 list_for_each_entry_safe 를 쓰는데, 순회 중에
+ * 현재 항목을 목록에서 빼고 해제하기 때문이다(다음 포인터를 미리 들고 있어야
+ * 한다). 여기서는 RCU 목록이라도 list_del_rcu + synchronize_rcu 가 아니라
+ * 평범한 list_del 을 쓰는데, 이 시점에는 동시에 순회하는 코드가 없기
+ * 때문이다 — 초기화가 실패했거나 모듈이 내려가는 중이라 진입점이 모두 닫혀
+ * 있다.
+ *
+ * 해제 방식이 항목마다 다른 이유: RMRR/SATC 는 device scope 배열을 따로
+ * 잡았으므로 dmar_free_dev_scope 로 먼저 반납하고 본체를 kfree 한다.
+ * ATSR 은 같은 일을 intel_iommu_free_atsr 헬퍼가 대신한다(제거 경로에서도
+ * 같은 헬퍼를 쓰기 때문에 함수로 빼 두었다).
+ *
+ * 실행 컨텍스트: 부팅 실패 정리 또는 모듈 해제. 프로세스 컨텍스트.
+ *
+ * 호출 체인:
+ *   intel_iommu_init() 실패 경로 → [intel_iommu_free_dmars]
+ *     → dmar_free_dev_scope() / intel_iommu_free_atsr()
+ */
 static void intel_iommu_free_dmars(void)
 {
-	struct dmar_rmrr_unit *rmrru, *rmrr_n;
-	struct dmar_atsr_unit *atsru, *atsr_n;
-	struct dmar_satc_unit *satcu, *satc_n;
+	struct dmar_rmrr_unit *rmrru, *rmrr_n;	/* [한국어] 해제하며 순회 */
+	struct dmar_atsr_unit *atsru, *atsr_n;	/* [한국어] 마찬가지 */
+	struct dmar_satc_unit *satcu, *satc_n;	/* [한국어] 마찬가지 */
 
-	list_for_each_entry_safe(rmrru, rmrr_n, &dmar_rmrr_units, list) {
-		list_del(&rmrru->list);
-		dmar_free_dev_scope(&rmrru->devices, &rmrru->devices_cnt);
-		kfree(rmrru);
+	list_for_each_entry_safe(rmrru, rmrr_n, &dmar_rmrr_units, list) {	/* [한국어] RMRR 항목들을 */
+		list_del(&rmrru->list);	/* [한국어] 목록에서 빼고 */
+		dmar_free_dev_scope(&rmrru->devices, &rmrru->devices_cnt);	/* [한국어] 장치 목록 해제 */
+		kfree(rmrru);	/* [한국어] 자료구조 해제 */
 	}
 
-	list_for_each_entry_safe(atsru, atsr_n, &dmar_atsr_units, list) {
-		list_del(&atsru->list);
-		intel_iommu_free_atsr(atsru);
+	list_for_each_entry_safe(atsru, atsr_n, &dmar_atsr_units, list) {	/* [한국어] ATSR 항목들 */
+		list_del(&atsru->list);	/* [한국어] 목록에서 제거 */
+		intel_iommu_free_atsr(atsru);	/* [한국어] 해제 */
 	}
-	list_for_each_entry_safe(satcu, satc_n, &dmar_satc_units, list) {
-		list_del(&satcu->list);
-		dmar_free_dev_scope(&satcu->devices, &satcu->devices_cnt);
-		kfree(satcu);
+	list_for_each_entry_safe(satcu, satc_n, &dmar_satc_units, list) {	/* [한국어] SATC 항목들 */
+		list_del(&satcu->list);	/* [한국어] 목록에서 제거 */
+		dmar_free_dev_scope(&satcu->devices, &satcu->devices_cnt);	/* [한국어] 장치 목록 해제 */
+		kfree(satcu);	/* [한국어] 자료구조 해제 */
 	}
 }
 
