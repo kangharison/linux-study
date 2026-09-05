@@ -2736,6 +2736,27 @@ static int iommu_bus_notifier(struct notifier_block *nb,
  * Combine the driver's chosen def_domain_type across all the devices in a
  * group. Drivers must give a consistent result.
  */
+/*
+ * [한국어] (위 영어 주석에 이어) 그룹 안 장치들의 요구를 하나로 합친다.
+ *
+ * 왜 합쳐야 하는가: 그룹의 장치들은 같은 도메인을 공유하므로 종류가
+ * 하나여야 한다. 그런데 종류를 정하는 것은 장치마다 불리는 드라이버
+ * 콜백이라, 장치마다 다른 답이 나올 수 있다.
+ *
+ * 이 함수는 장치 하나를 볼 때마다 불려 지금까지의 결론(cur_type)과
+ * 이번 답을 합친다. 0 은 "의견 없음"이라 상대의 답을 그대로 받고,
+ * 같으면 문제가 없다.
+ *
+ * 둘 다 의견이 있는데 다르면 그것은 위 영어 주석대로 드라이버 버그다.
+ * 같은 그룹의 장치들에 서로 다른 종류를 요구한다는 것은 성립할 수
+ * 없는 요청이기 때문이다. 그래도 부팅을 막지 않고 IDENTITY 쪽을 택해
+ * 밀고 나간다 -- 통과 모드가 더 관대해서 어느 장치든 동작은 하기
+ * 때문이며, 격리를 잃는 대신 시스템이 뜨는 쪽을 고른 것이다.
+ *
+ * 실행 컨텍스트: 그룹 설정 경로. group->mutex 를 든 채 불린다.
+ *
+ * 호출 체인: iommu_get_default_domain_type → [이 함수] → ops->def_domain_type
+ */
 static int iommu_get_def_domain_type(struct iommu_group *group,
 				     struct device *dev, int cur_type)
 {
@@ -2747,19 +2768,21 @@ static int iommu_get_def_domain_type(struct iommu_group *group,
 		 * Drivers that declare a global static default_domain will
 		 * always choose that.
 		 */
+		/* [한국어] 위 영어 주석대로 정적 도메인을 선언한 드라이버는
+		 * 선택의 여지가 없다 — 그 종류가 곧 답이다. */
 		type = ops->default_domain->type;
 	} else {
 		if (ops->def_domain_type)
-			type = ops->def_domain_type(dev);
+			type = ops->def_domain_type(dev);	/* [한국어] 장치를 보고 드라이버가 판단한다 */
 		else
-			return cur_type;
+			return cur_type;	/* [한국어] 의견이 없는 드라이버 — 지금까지의 결론을 그대로 둔다 */
 	}
 	if (!type || cur_type == type)
-		return cur_type;
+		return cur_type;	/* [한국어] 0 은 "상관없음". 같으면 합칠 것도 없다 */
 	if (!cur_type)
-		return type;
+		return type;	/* [한국어] 첫 의견이다 */
 
-	dev_err_ratelimited(
+	dev_err_ratelimited(	/* [한국어] 여기 왔다면 드라이버가 성립할 수 없는 요구를 한 것이다 */
 		dev,
 		"IOMMU driver error, requesting conflicting def_domain_type, %s and %s, for devices in group %u.\n",
 		iommu_domain_type_str(cur_type), iommu_domain_type_str(type),
@@ -2769,6 +2792,9 @@ static int iommu_get_def_domain_type(struct iommu_group *group,
 	 * Try to recover, drivers are allowed to force IDENTITY or DMA, IDENTITY
 	 * takes precedence.
 	 */
+	/* [한국어] 위 영어 주석대로 부팅을 막는 대신 통과 모드를 택한다.
+	 * 더 관대해서 어느 장치든 동작은 하기 때문이며, 격리를 잃는 대신
+	 * 시스템이 뜨는 쪽을 고른 것이다. */
 	if (type == IOMMU_DOMAIN_IDENTITY)
 		return type;
 	return cur_type;
@@ -2778,12 +2804,39 @@ static int iommu_get_def_domain_type(struct iommu_group *group,
  * A target_type of 0 will select the best domain type. 0 can be returned in
  * this case meaning the global default should be used.
  */
+/*
+ * [한국어] (위 영어 주석에 이어) 그룹 전체를 훑어 최종 도메인 종류를 정한다.
+ *
+ * 세 가지가 결론에 개입하며, 뒤로 갈수록 강하다.
+ *
+ * 먼저 드라이버들의 의견을 합친다(위 함수). 그다음 빌드 설정이 개입해,
+ * 공통 DMA ops 가 없는 커널에서는 DMA 도메인 자체를 쓸 수 없으므로
+ * IDENTITY 로 돌린다.
+ *
+ * 마지막이 신뢰할 수 없는 장치다. Thunderbolt 로 꽂은 외장 장치처럼
+ * 물리적으로 접근 가능한 것들이며, 그런 장치에는 반드시 번역을 걸어야
+ * 한다. 통과시키면 사용자가 케이블 하나로 호스트 메모리 전체를 읽을 수
+ * 있기 때문이다. 그래서 드라이버가 다른 종류를 요구했다면 그 요구를
+ * 꺾는 것이 아니라 아예 probe 를 거절한다 -- 격리를 포기하느니 그
+ * 장치를 쓰지 않는 쪽이다.
+ *
+ * target_type 은 sysfs 로 사용자가 지정한 값이며, 드라이버 의견과
+ * 충돌하면 역시 거절한다.
+ *
+ * @group:       대상 그룹
+ * @target_type: 사용자가 지정한 종류. 0 이면 자동.
+ * @return: 정해진 종류. 0 이면 전역 기본값을 쓰라는 뜻. -1 이면 거절.
+ *
+ * 실행 컨텍스트: 그룹 설정 경로. group->mutex 를 든 채 불린다.
+ *
+ * 호출 체인: iommu_setup_default_domain → [이 함수]
+ */
 static int iommu_get_default_domain_type(struct iommu_group *group,
 					 int target_type)
 {
-	struct device *untrusted = NULL;
+	struct device *untrusted = NULL;	/* [한국어] 신뢰할 수 없는 장치를 하나라도 찾으면 여기 담긴다 */
 	struct group_device *gdev;
-	int driver_type = 0;
+	int driver_type = 0;	/* [한국어] 0 은 아직 의견 없음 */
 
 	lockdep_assert_held(&group->mutex);
 
@@ -2826,31 +2879,46 @@ static int iommu_get_default_domain_type(struct iommu_group *group,
 			driver_type = IOMMU_DOMAIN_IDENTITY;
 	}
 
-	if (untrusted) {
+	if (untrusted) {	/* [한국어] Thunderbolt 외장 장치 등 물리적으로 접근 가능한 것 */
 		if (driver_type && driver_type != IOMMU_DOMAIN_DMA) {
-			dev_err_ratelimited(
+			dev_err_ratelimited(	/* [한국어] 격리를 포기하느니 이 장치를 쓰지 않는 쪽을 고른다 */
 				untrusted,
 				"Device is not trusted, but driver is overriding group %u to %s, refusing to probe.\n",
 				group->id, iommu_domain_type_str(driver_type));
 			return -1;
 		}
-		driver_type = IOMMU_DOMAIN_DMA;
+		driver_type = IOMMU_DOMAIN_DMA;	/* [한국어] 반드시 번역 — 통과시키면 케이블 하나로 호스트 메모리를 읽을 수 있다 */
 	}
 
-	if (target_type) {
+	if (target_type) {	/* [한국어] sysfs 로 사용자가 지정한 값 */
 		if (driver_type && target_type != driver_type)
-			return -1;
+			return -1;	/* [한국어] 드라이버가 못박은 것과 충돌하면 거절한다 */
 		return target_type;
 	}
-	return driver_type;
+	return driver_type;	/* [한국어] 0 이면 호출자가 전역 기본값을 쓴다 */
 }
 
+/*
+ * [한국어]
+ * iommu_group_do_probe_finalize - 도메인까지 붙은 뒤 드라이버에 마무리를 맡긴다
+ *
+ * @dev: 대상 장치
+ * @return: 없음
+ *
+ * 왜 별도 단계인가: 일부 드라이버는 장치가 실제로 도메인에 붙은 뒤에야
+ * 할 수 있는 일이 있다. probe 단계에서는 아직 도메인이 없어 그 작업을
+ * 할 수 없으므로, 모든 설정이 끝난 뒤 한 번 더 불러 준다.
+ *
+ * 콜백이 없는 드라이버가 대부분이라 조용히 넘어간다.
+ *
+ * 호출 체인: bus_iommu_probe / iommu_probe_device → [이 함수] → ops->probe_finalize
+ */
 static void iommu_group_do_probe_finalize(struct device *dev)
 {
 	const struct iommu_ops *ops = dev_iommu_ops(dev);
 
 	if (ops->probe_finalize)
-		ops->probe_finalize(dev);
+		ops->probe_finalize(dev);	/* [한국어] 도메인이 붙은 뒤에야 할 수 있는 일을 드라이버가 여기서 한다 */
 }
 
 static int bus_iommu_probe(const struct bus_type *bus)
