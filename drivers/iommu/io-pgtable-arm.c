@@ -553,48 +553,48 @@ static int __arm_lpae_map(struct arm_lpae_io_pgtable *data, unsigned long iova,
 static arm_lpae_iopte arm_lpae_prot_to_pte(struct arm_lpae_io_pgtable *data,
 					   int prot)
 {
-	arm_lpae_iopte pte;
+	arm_lpae_iopte pte;	/* [한국어] 조립할 권한·속성 비트 */
 
-	if (data->iop.fmt == ARM_64_LPAE_S1 ||
-	    data->iop.fmt == ARM_32_LPAE_S1) {
-		pte = ARM_LPAE_PTE_nG;
-		if (!(prot & IOMMU_WRITE) && (prot & IOMMU_READ))
-			pte |= ARM_LPAE_PTE_AP_RDONLY;
-		else if (data->iop.cfg.quirks & IO_PGTABLE_QUIRK_ARM_HD)
-			pte |= ARM_LPAE_PTE_DBM;
-		if (!(prot & IOMMU_PRIV))
-			pte |= ARM_LPAE_PTE_AP_UNPRIV;
+	if (data->iop.fmt == ARM_64_LPAE_S1 ||	/* [한국어] stage-1 (OS 가 관리하는 번역) */
+	    data->iop.fmt == ARM_32_LPAE_S1) {	/* [한국어] 32비트 판도 같은 인코딩 */
+		pte = ARM_LPAE_PTE_nG;	/* [한국어] non-Global — 이 매핑은 특정 주소 공간에 묶인다. IOMMU 매핑은 전역일 이유가 없다 */
+		if (!(prot & IOMMU_WRITE) && (prot & IOMMU_READ))	/* [한국어] 읽기만 요청했다 (DMA_TO_DEVICE) */
+			pte |= ARM_LPAE_PTE_AP_RDONLY;	/* [한국어] 읽기 전용으로 못박는다. 장치가 이 버퍼를 덮어쓰려 하면 폴트가 나며, 이것이 DMA 방향 신고가 실제로 강제되는 지점이다 */
+		else if (data->iop.cfg.quirks & IO_PGTABLE_QUIRK_ARM_HD)	/* [한국어] 쓰기가 허용되고 하드웨어 더티 추적이 켜져 있으면 */
+			pte |= ARM_LPAE_PTE_DBM;	/* [한국어] RDONLY 없이 DBM 만 세워 둔다. 하드웨어가 첫 쓰기를 만나면 RDONLY 를 조작해 더티를 기록하고, 그 상태를 iopte_writeable_dirty 가 읽는다 */
+		if (!(prot & IOMMU_PRIV))	/* [한국어] 특권 접근을 요구하지 않았으면 */
+			pte |= ARM_LPAE_PTE_AP_UNPRIV;	/* [한국어] 비특권 접근을 허용한다 */
 	} else {
-		pte = ARM_LPAE_PTE_HAP_FAULT;
-		if (prot & IOMMU_READ)
-			pte |= ARM_LPAE_PTE_HAP_READ;
-		if (prot & IOMMU_WRITE)
-			pte |= ARM_LPAE_PTE_HAP_WRITE;
+		pte = ARM_LPAE_PTE_HAP_FAULT;	/* [한국어] stage-2 — 권한 비트 배치가 다르다. 0 에서 시작해 필요한 것만 켠다 */
+		if (prot & IOMMU_READ)	/* [한국어] 읽기 요청 */
+			pte |= ARM_LPAE_PTE_HAP_READ;	/* [한국어] 읽기 허용 */
+		if (prot & IOMMU_WRITE)	/* [한국어] 쓰기 요청 */
+			pte |= ARM_LPAE_PTE_HAP_WRITE;	/* [한국어] 쓰기 허용 */
 	}
 
 	/*
 	 * Note that this logic is structured to accommodate Mali LPAE
 	 * having stage-1-like attributes but stage-2-like permissions.
 	 */
-	if (data->iop.fmt == ARM_64_LPAE_S2 ||
-	    data->iop.fmt == ARM_32_LPAE_S2) {
-		if (prot & IOMMU_MMIO) {
-			pte |= ARM_LPAE_PTE_MEMATTR_DEV;
-		} else if (prot & IOMMU_CACHE) {
-			if (data->iop.cfg.quirks & IO_PGTABLE_QUIRK_ARM_S2FWB)
-				pte |= ARM_LPAE_PTE_MEMATTR_FWB_WB;
+	if (data->iop.fmt == ARM_64_LPAE_S2 ||	/* [한국어] 캐시 속성도 stage 에 따라 인코딩이 다르다 */
+	    data->iop.fmt == ARM_32_LPAE_S2) {	/* [한국어] stage-2 는 속성을 서술자에 직접 넣는다 */
+		if (prot & IOMMU_MMIO) {	/* [한국어] 장치 레지스터 매핑 */
+			pte |= ARM_LPAE_PTE_MEMATTR_DEV;	/* [한국어] Device — 병합·재정렬·투기 접근 금지 */
+		} else if (prot & IOMMU_CACHE) {	/* [한국어] 캐시 가능 매핑 */
+			if (data->iop.cfg.quirks & IO_PGTABLE_QUIRK_ARM_S2FWB)	/* [한국어] FWB 가 켜져 있으면 stage-2 가 stage-1 의 속성을 덮어쓴다 */
+				pte |= ARM_LPAE_PTE_MEMATTR_FWB_WB;	/* [한국어] 게스트가 무엇을 지정하든 Write-Back 으로 강제 */
 			else
-				pte |= ARM_LPAE_PTE_MEMATTR_OIWB;
+				pte |= ARM_LPAE_PTE_MEMATTR_OIWB;	/* [한국어] FWB 가 없으면 stage-1 의 지정을 허용하는 조합 */
 		} else {
-			pte |= ARM_LPAE_PTE_MEMATTR_NC;
+			pte |= ARM_LPAE_PTE_MEMATTR_NC;	/* [한국어] 비캐시 */
 		}
 	} else {
-		if (prot & IOMMU_MMIO)
-			pte |= (ARM_LPAE_MAIR_ATTR_IDX_DEV
-				<< ARM_LPAE_PTE_ATTRINDX_SHIFT);
-		else if (prot & IOMMU_CACHE)
-			pte |= (ARM_LPAE_MAIR_ATTR_IDX_CACHE
-				<< ARM_LPAE_PTE_ATTRINDX_SHIFT);
+		if (prot & IOMMU_MMIO)	/* [한국어] stage-1 은 MAIR 인덱스로 간접 지정한다 */
+			pte |= (ARM_LPAE_MAIR_ATTR_IDX_DEV	/* [한국어] 장치 메모리 인덱스 */
+				<< ARM_LPAE_PTE_ATTRINDX_SHIFT);	/* [한국어] ATTRINDX 필드 위치로 */
+		else if (prot & IOMMU_CACHE)	/* [한국어] 캐시 가능 매핑 */
+			pte |= (ARM_LPAE_MAIR_ATTR_IDX_CACHE	/* [한국어] 캐시 인덱스 */
+				<< ARM_LPAE_PTE_ATTRINDX_SHIFT);	/* [한국어] 같은 필드로. 지정하지 않으면 인덱스 0(비캐시)이 된다 */
 	}
 
 	/*
@@ -603,94 +603,94 @@ static arm_lpae_iopte arm_lpae_prot_to_pte(struct arm_lpae_io_pgtable *data,
 	 * "outside the GPU" (i.e. either the Inner or System domain in CPU
 	 * terms, depending on coherency).
 	 */
-	if (prot & IOMMU_CACHE && data->iop.fmt != ARM_MALI_LPAE)
-		pte |= ARM_LPAE_PTE_SH_IS;
+	if (prot & IOMMU_CACHE && data->iop.fmt != ARM_MALI_LPAE)	/* [한국어] 캐시 일관성이 필요하고 Mali 가 아니면 */
+		pte |= ARM_LPAE_PTE_SH_IS;	/* [한국어] 내부 공유 — CPU 클러스터와 일관성을 유지한다 */
 	else
-		pte |= ARM_LPAE_PTE_SH_OS;
+		pte |= ARM_LPAE_PTE_SH_OS;	/* [한국어] 외부 공유. Mali 는 공유 도메인의 의미가 달라(내부 = GPU 코어들, 외부 = GPU 밖) 항상 이쪽을 쓴다 (위 영어 주석) */
 
-	if (prot & IOMMU_NOEXEC)
-		pte |= ARM_LPAE_PTE_XN;
+	if (prot & IOMMU_NOEXEC)	/* [한국어] 실행 금지 요청 */
+		pte |= ARM_LPAE_PTE_XN;	/* [한국어] 장치가 이 매핑에서 명령어를 가져오지 못한다 */
 
-	if (data->iop.cfg.quirks & IO_PGTABLE_QUIRK_ARM_NS)
-		pte |= ARM_LPAE_PTE_NS;
+	if (data->iop.cfg.quirks & IO_PGTABLE_QUIRK_ARM_NS)	/* [한국어] 비보안 세계 매핑이면 */
+		pte |= ARM_LPAE_PTE_NS;	/* [한국어] 그 표시 */
 
-	if (data->iop.fmt != ARM_MALI_LPAE)
-		pte |= ARM_LPAE_PTE_AF;
+	if (data->iop.fmt != ARM_MALI_LPAE)	/* [한국어] Mali 는 이 비트를 쓰지 않는다 */
+		pte |= ARM_LPAE_PTE_AF;	/* [한국어] Access Flag 를 항상 세운다. IOMMU 는 접근 추적을 하지 않으므로 0 으로 두면 첫 접근마다 무의미한 폴트가 난다 */
 
-	return pte;
+	return pte;	/* [한국어] 이 권한 조합에 해당하는 서술자 비트 */
 }
 
 static int arm_lpae_map_pages(struct io_pgtable_ops *ops, unsigned long iova,
 			      phys_addr_t paddr, size_t pgsize, size_t pgcount,
 			      int iommu_prot, gfp_t gfp, size_t *mapped)
 {
-	struct arm_lpae_io_pgtable *data = io_pgtable_ops_to_data(ops);
-	struct io_pgtable_cfg *cfg = &data->iop.cfg;
-	arm_lpae_iopte *ptep = data->pgd;
-	int ret, lvl = data->start_level;
-	arm_lpae_iopte prot;
-	long iaext = (s64)iova >> cfg->ias;
+	struct arm_lpae_io_pgtable *data = io_pgtable_ops_to_data(ops);	/* [한국어] ops 에서 이 구현의 자료로 */
+	struct io_pgtable_cfg *cfg = &data->iop.cfg;	/* [한국어] 주소 폭과 quirk 확인용 */
+	arm_lpae_iopte *ptep = data->pgd;	/* [한국어] 최상위 테이블에서 시작 */
+	int ret, lvl = data->start_level;	/* [한국어] 시작 레벨 */
+	arm_lpae_iopte prot;	/* [한국어] 조립된 권한 비트 */
+	long iaext = (s64)iova >> cfg->ias;	/* [한국어] 입력 주소가 허용 폭을 넘는지 보기 위해 부호 확장 시프트를 한다. 유효한 주소면 결과가 전부 0(또는 TTBR1 이면 전부 1)이다 */
 
-	if (WARN_ON(!pgsize || (pgsize & cfg->pgsize_bitmap) != pgsize))
-		return -EINVAL;
+	if (WARN_ON(!pgsize || (pgsize & cfg->pgsize_bitmap) != pgsize))	/* [한국어] 이 테이블이 지원하지 않는 페이지 크기 */
+		return -EINVAL;	/* [한국어] 호출자의 크기 선택이 잘못되었다 */
 
-	if (cfg->quirks & IO_PGTABLE_QUIRK_ARM_TTBR1)
-		iaext = ~iaext;
-	if (WARN_ON(iaext || paddr >> cfg->oas))
-		return -ERANGE;
+	if (cfg->quirks & IO_PGTABLE_QUIRK_ARM_TTBR1)	/* [한국어] 상위 주소 공간(TTBR1)을 쓰는 구성이면 */
+		iaext = ~iaext;	/* [한국어] 유효한 주소는 상위 비트가 전부 1 이므로 뒤집어 같은 검사를 쓴다 */
+	if (WARN_ON(iaext || paddr >> cfg->oas))	/* [한국어] 입력 주소가 폭을 넘거나 물리 주소가 출력 폭을 넘는다 */
+		return -ERANGE;	/* [한국어] 이 테이블로는 표현할 수 없는 매핑 */
 
-	if (!(iommu_prot & (IOMMU_READ | IOMMU_WRITE)))
-		return -EINVAL;
+	if (!(iommu_prot & (IOMMU_READ | IOMMU_WRITE)))	/* [한국어] 읽기도 쓰기도 아닌 매핑 */
+		return -EINVAL;	/* [한국어] 의미가 없다 */
 
-	prot = arm_lpae_prot_to_pte(data, iommu_prot);
-	ret = __arm_lpae_map(data, iova, paddr, pgsize, pgcount, prot, lvl,
-			     ptep, gfp, mapped);
+	prot = arm_lpae_prot_to_pte(data, iommu_prot);	/* [한국어] 권한을 서술자 비트로 변환 */
+	ret = __arm_lpae_map(data, iova, paddr, pgsize, pgcount, prot, lvl,	/* [한국어] 레벨을 내려가며 기입 */
+			     ptep, gfp, mapped);	/* [한국어] 최상위 테이블부터 */
 	/*
 	 * Synchronise all PTE updates for the new mapping before there's
 	 * a chance for anything to kick off a table walk for the new iova.
 	 */
-	wmb();
+	wmb();	/* [한국어] 기입이 모두 보이게 만든 뒤에야 이 IOVA 로 워크가 시작될 수 있다. 드라이버가 이 함수에서 돌아온 직후 장치를 깨울 수 있기 때문이다 (위 영어 주석) */
 
-	return ret;
+	return ret;	/* [한국어] 0 이면 mapped 만큼 매핑되었다 */
 }
 
 static void __arm_lpae_free_pgtable(struct arm_lpae_io_pgtable *data, int lvl,
 				    arm_lpae_iopte *ptep)
 {
-	arm_lpae_iopte *start, *end;
-	unsigned long table_size;
+	arm_lpae_iopte *start, *end;	/* [한국어] 이 테이블의 순회 범위 */
+	unsigned long table_size;	/* [한국어] 이 테이블의 크기 */
 
-	if (lvl == data->start_level)
-		table_size = ARM_LPAE_PGD_SIZE(data);
+	if (lvl == data->start_level)	/* [한국어] 최상위 테이블이면 */
+		table_size = ARM_LPAE_PGD_SIZE(data);	/* [한국어] PGD 크기 (이어붙였으면 더 크다) */
 	else
-		table_size = ARM_LPAE_GRANULE(data);
+		table_size = ARM_LPAE_GRANULE(data);	/* [한국어] 중간 테이블은 한 장 */
 
-	start = ptep;
+	start = ptep;	/* [한국어] 해제할 때 쓸 시작 주소 */
 
 	/* Only leaf entries at the last level */
-	if (lvl == ARM_LPAE_MAX_LEVELS - 1)
-		end = ptep;
+	if (lvl == ARM_LPAE_MAX_LEVELS - 1)	/* [한국어] 마지막 레벨에는 하위 테이블이 없다 */
+		end = ptep;	/* [한국어] 순회할 것이 없다 — 잎만 있으므로 곧바로 이 테이블을 해제한다 */
 	else
-		end = (void *)ptep + table_size;
+		end = (void *)ptep + table_size;	/* [한국어] 중간 레벨은 전체를 훑는다 */
 
-	while (ptep != end) {
-		arm_lpae_iopte pte = *ptep++;
+	while (ptep != end) {	/* [한국어] 항목을 하나씩 */
+		arm_lpae_iopte pte = *ptep++;	/* [한국어] 읽고 전진 */
 
-		if (!pte || iopte_leaf(pte, lvl, data->iop.fmt))
-			continue;
+		if (!pte || iopte_leaf(pte, lvl, data->iop.fmt))	/* [한국어] 비었거나 잎이면 하위 테이블이 없다 */
+			continue;	/* [한국어] 건너뛴다 */
 
-		__arm_lpae_free_pgtable(data, lvl + 1, iopte_deref(pte, data));
+		__arm_lpae_free_pgtable(data, lvl + 1, iopte_deref(pte, data));	/* [한국어] 하위 테이블을 먼저 해제한다 — 후위 순회여야 부모를 지나며 접근하지 않는다 */
 	}
 
-	__arm_lpae_free_pages(start, table_size, &data->iop.cfg, data->iop.cookie);
+	__arm_lpae_free_pages(start, table_size, &data->iop.cfg, data->iop.cookie);	/* [한국어] 자식을 다 정리한 뒤 이 테이블을 반납 */
 }
 
 static void arm_lpae_free_pgtable(struct io_pgtable *iop)
 {
-	struct arm_lpae_io_pgtable *data = io_pgtable_to_data(iop);
+	struct arm_lpae_io_pgtable *data = io_pgtable_to_data(iop);	/* [한국어] 공통 객체에서 이 구현의 자료로 */
 
-	__arm_lpae_free_pgtable(data, data->start_level, data->pgd);
-	kfree(data);
+	__arm_lpae_free_pgtable(data, data->start_level, data->pgd);	/* [한국어] 최상위부터 후위 순회로 전체 테이블을 반납 */
+	kfree(data);	/* [한국어] 형상 구조체 해제 */
 }
 
 static size_t __arm_lpae_unmap(struct arm_lpae_io_pgtable *data,
@@ -698,179 +698,204 @@ static size_t __arm_lpae_unmap(struct arm_lpae_io_pgtable *data,
 			       unsigned long iova, size_t size, size_t pgcount,
 			       int lvl, arm_lpae_iopte *ptep)
 {
-	arm_lpae_iopte pte;
-	struct io_pgtable *iop = &data->iop;
-	int i = 0, num_entries, max_entries, unmap_idx_start;
+	arm_lpae_iopte pte;	/* [한국어] 현재 항목 */
+	struct io_pgtable *iop = &data->iop;	/* [한국어] TLB 콜백과 설정을 꺼내기 위해 */
+	int i = 0, num_entries, max_entries, unmap_idx_start;	/* [한국어] 이번에 지울 항목 수와 시작 인덱스 */
 
 	/* Something went horribly wrong and we ran out of page table */
-	if (WARN_ON(lvl == ARM_LPAE_MAX_LEVELS))
-		return 0;
+	if (WARN_ON(lvl == ARM_LPAE_MAX_LEVELS))	/* [한국어] 마지막 레벨을 지나 더 내려가려 한다 = 워크가 끝났는데 크기가 맞지 않았다 */
+		return 0;	/* [한국어] 0 바이트 해제 (위 영어 주석: 뭔가 크게 잘못된 것이다) */
 
-	unmap_idx_start = ARM_LPAE_LVL_IDX(iova, lvl, data);
-	ptep += unmap_idx_start;
-	pte = READ_ONCE(*ptep);
-	if (!pte) {
-		WARN_ON(!(data->iop.cfg.quirks & IO_PGTABLE_QUIRK_NO_WARN));
-		return 0;
+	unmap_idx_start = ARM_LPAE_LVL_IDX(iova, lvl, data);	/* [한국어] 이 레벨의 인덱스 */
+	ptep += unmap_idx_start;	/* [한국어] 해당 항목으로 */
+	pte = READ_ONCE(*ptep);	/* [한국어] 한 번만 읽는다 */
+	if (!pte) {	/* [한국어] 비어 있다 — 매핑되지 않은 구간을 해제하려 한다 */
+		WARN_ON(!(data->iop.cfg.quirks & IO_PGTABLE_QUIRK_NO_WARN));	/* [한국어] 대개 상위 계층의 버그이지만, 일부 드라이버는 이 경고를 끈다 */
+		return 0;	/* [한국어] 지운 것이 없다 */
 	}
 
 	/* If the size matches this level, we're in the right place */
-	if (size == ARM_LPAE_BLOCK_SIZE(lvl, data)) {
-		max_entries = arm_lpae_max_entries(unmap_idx_start, data);
-		num_entries = min_t(int, pgcount, max_entries);
+	if (size == ARM_LPAE_BLOCK_SIZE(lvl, data)) {	/* [한국어] 요청 크기가 이 레벨의 항목 크기와 같다 — 여기가 지울 자리다 */
+		max_entries = arm_lpae_max_entries(unmap_idx_start, data);	/* [한국어] 이 테이블 페이지 안에서 연속으로 다룰 수 있는 항목 수 */
+		num_entries = min_t(int, pgcount, max_entries);	/* [한국어] 요청 개수와 그 한계 중 작은 쪽 */
 
 		/* Find and handle non-leaf entries */
-		for (i = 0; i < num_entries; i++) {
-			pte = READ_ONCE(ptep[i]);
-			if (!pte) {
-				WARN_ON(!(data->iop.cfg.quirks & IO_PGTABLE_QUIRK_NO_WARN));
-				break;
+		for (i = 0; i < num_entries; i++) {	/* [한국어] 지울 항목들을 먼저 훑는다 */
+			pte = READ_ONCE(ptep[i]);	/* [한국어] 각 항목 */
+			if (!pte) {	/* [한국어] 중간에 빈 항목을 만났다 */
+				WARN_ON(!(data->iop.cfg.quirks & IO_PGTABLE_QUIRK_NO_WARN));	/* [한국어] 매핑과 해제의 범위가 어긋났다 */
+				break;	/* [한국어] 여기까지만 처리한다 */
 			}
 
-			if (!iopte_leaf(pte, lvl, iop->fmt)) {
-				__arm_lpae_clear_pte(&ptep[i], &iop->cfg, 1);
+			if (!iopte_leaf(pte, lvl, iop->fmt)) {	/* [한국어] 잎이 아니라 하위 테이블이다 — 요청 크기가 이 레벨인데 더 잘게 매핑되어 있었다는 뜻 */
+				__arm_lpae_clear_pte(&ptep[i], &iop->cfg, 1);	/* [한국어] 먼저 이 항목을 지워 하위 테이블로 가는 길을 끊는다 */
 
 				/* Also flush any partial walks */
-				io_pgtable_tlb_flush_walk(iop, iova + i * size, size,
-							  ARM_LPAE_GRANULE(data));
-				__arm_lpae_free_pgtable(data, lvl + 1, iopte_deref(pte, data));
+				io_pgtable_tlb_flush_walk(iop, iova + i * size, size,	/* [한국어] 하드웨어가 캐시해 둔 '부분 워크'까지 지워야 한다. 항목만 지우면 워크 캐시에 남은 중간 결과가 이미 해제된 테이블을 가리킨다 (위 영어 주석) */
+							  ARM_LPAE_GRANULE(data));	/* [한국어] 무효화 입도 */
+				__arm_lpae_free_pgtable(data, lvl + 1, iopte_deref(pte, data));	/* [한국어] 그 다음에야 하위 테이블을 통째로 반납한다 */
 			}
 		}
 
 		/* Clear the remaining entries */
-		__arm_lpae_clear_pte(ptep, &iop->cfg, i);
+		__arm_lpae_clear_pte(ptep, &iop->cfg, i);	/* [한국어] 실제로 처리한 i 개를 지운다. 위 루프에서 이미 지운 것도 있지만 다시 지워도 무해하고, 비일관 하드웨어의 캐시 플러시를 한 번에 하기 위해서다 */
 
-		if (gather && !iommu_iotlb_gather_queued(gather))
-			for (int j = 0; j < i; j++)
-				io_pgtable_tlb_add_page(iop, gather, iova + j * size, size);
+		if (gather && !iommu_iotlb_gather_queued(gather))	/* [한국어] 지연 무효화가 아니면 (queued 면 상위가 나중에 통째로 비운다) */
+			for (int j = 0; j < i; j++)	/* [한국어] 지운 각 항목에 대해 */
+				io_pgtable_tlb_add_page(iop, gather, iova + j * size, size);	/* [한국어] 무효화 범위를 수집기에 쌓는다. 실제 무효화는 드라이버가 나중에 한 번에 낸다 */
 
-		return i * size;
-	} else if (iopte_leaf(pte, lvl, iop->fmt)) {
-		WARN_ONCE(true, "Unmap of a partial large IOPTE is not allowed");
-		return 0;
+		return i * size;	/* [한국어] 실제로 지운 바이트 수 */
+	} else if (iopte_leaf(pte, lvl, iop->fmt)) {	/* [한국어] 요청 크기가 이 레벨보다 작은데 여기에 잎이 있다 = 큰 블록의 일부만 지우려 한다 */
+		WARN_ONCE(true, "Unmap of a partial large IOPTE is not allowed");	/* [한국어] 블록 분할은 지원하지 않는다. iommu_unmap 이 '매핑을 쪼갤 수 없다'고 못박은 제약이 여기서 강제된다 */
+		return 0;	/* [한국어] 지우지 않는다 — 일부만 지우면 나머지가 주인 없이 남는다 */
 	}
 
 	/* Keep on walkin' */
-	ptep = iopte_deref(pte, data);
-	return __arm_lpae_unmap(data, gather, iova, size, pgcount, lvl + 1, ptep);
+	ptep = iopte_deref(pte, data);	/* [한국어] 테이블 항목이다 — 한 레벨 내려간다 */
+	return __arm_lpae_unmap(data, gather, iova, size, pgcount, lvl + 1, ptep);	/* [한국어] 같은 일을 반복 (위 영어 주석) */
 }
 
 static size_t arm_lpae_unmap_pages(struct io_pgtable_ops *ops, unsigned long iova,
 				   size_t pgsize, size_t pgcount,
 				   struct iommu_iotlb_gather *gather)
 {
-	struct arm_lpae_io_pgtable *data = io_pgtable_ops_to_data(ops);
-	struct io_pgtable_cfg *cfg = &data->iop.cfg;
-	arm_lpae_iopte *ptep = data->pgd;
-	long iaext = (s64)iova >> cfg->ias;
+	struct arm_lpae_io_pgtable *data = io_pgtable_ops_to_data(ops);	/* [한국어] ops 에서 이 구현의 자료로 */
+	struct io_pgtable_cfg *cfg = &data->iop.cfg;	/* [한국어] 주소 폭과 지원 페이지 크기 확인용 */
+	arm_lpae_iopte *ptep = data->pgd;	/* [한국어] 최상위 테이블에서 시작 */
+	long iaext = (s64)iova >> cfg->ias;	/* [한국어] 입력 주소 폭 검사 (매핑 경로와 같은 관용구) */
 
-	if (WARN_ON(!pgsize || (pgsize & cfg->pgsize_bitmap) != pgsize || !pgcount))
-		return 0;
+	if (WARN_ON(!pgsize || (pgsize & cfg->pgsize_bitmap) != pgsize || !pgcount))	/* [한국어] 지원하지 않는 크기이거나 개수가 0 */
+		return 0;	/* [한국어] 0 바이트 해제 */
 
-	if (cfg->quirks & IO_PGTABLE_QUIRK_ARM_TTBR1)
-		iaext = ~iaext;
-	if (WARN_ON(iaext))
-		return 0;
+	if (cfg->quirks & IO_PGTABLE_QUIRK_ARM_TTBR1)	/* [한국어] 상위 주소 공간 구성 */
+		iaext = ~iaext;	/* [한국어] 유효 주소의 상위 비트가 1 이므로 뒤집는다 */
+	if (WARN_ON(iaext))	/* [한국어] 주소 폭을 벗어났다 */
+		return 0;	/* [한국어] 해제할 수 없다 */
 
-	return __arm_lpae_unmap(data, gather, iova, pgsize, pgcount,
-				data->start_level, ptep);
+	return __arm_lpae_unmap(data, gather, iova, pgsize, pgcount,	/* [한국어] 레벨을 내려가며 지운다 */
+				data->start_level, ptep);	/* [한국어] 최상위부터 */
 }
 
+/*
+ * [한국어] 페이지 테이블 순회의 문맥.
+ *
+ * 물리 주소 조회, 더티 페이지 수집, 디버그 덤프가 모두 같은 워크를 필요로 하므로,
+ * 워크 자체는 한 번만 구현하고 각 레벨에서 무엇을 할지를 콜백으로 뺐다.
+ * visit_iova_to_phys / visit_dirty / visit_pgtable_walk 가 그 콜백들이다.
+ */
 struct io_pgtable_walk_data {
+	/* [한국어] 순회 중인 페이지 테이블. 콜백이 포맷(iopte_leaf 판정)과 설정을
+	 * 알아야 하므로 함께 전달한다. */
 	struct io_pgtable		*iop;
+	/* [한국어] 콜백 전용 문맥. 무엇이 들어 있는지는 visit 함수만 안다 —
+	 * 물리 주소 조회면 iova_to_phys_data, 더티 수집이면 iommu_dirty_bitmap. */
 	void				*data;
+	/* [한국어] 각 항목에서 불리는 콜백.
+	 * 0 이 아닌 값을 돌려주면 순회가 그 자리에서 멈춘다.
+	 * 잎에서 멈출지 더 내려갈지는 콜백이 아니라 워크가 판단한다. */
 	int (*visit)(struct io_pgtable_walk_data *walk_data, int lvl,
 		     arm_lpae_iopte *ptep, size_t size);
+	/* [한국어] 순회 동작을 바꾸는 플래그. 더티 수집에서 '읽고 지우기'
+	 * (IOMMU_DIRTY_NO_CLEAR 의 반대) 같은 요청이 여기 실린다. */
 	unsigned long			flags;
+	/* [한국어] 지금 보고 있는 IOVA. 잎을 만날 때마다 그 블록 크기만큼 전진한다.
+	 * 범위 순회(더티 수집)에서는 이 값이 진행 커서 역할을 한다. */
 	u64				addr;
+	/* [한국어] 순회를 멈출 IOVA (배타적). const 인 것은 순회 도중 바뀌어서는
+	 * 안 되기 때문이다 — 단일 주소 조회는 addr + 1 로 설정해 한 항목만 본다. */
 	const u64			end;
 };
 
-static int __arm_lpae_iopte_walk(struct arm_lpae_io_pgtable *data,
+static int __arm_lpae_iopte_walk(struct arm_lpae_io_pgtable *data,	/* [한국어] 전방 선언 — visit 콜백이 재귀적으로 이 함수를 부른다 */
 				 struct io_pgtable_walk_data *walk_data,
 				 arm_lpae_iopte *ptep,
 				 int lvl);
 
+/*
+ * [한국어] iova_to_phys 순회가 결과를 담아 오는 자리.
+ * 잎 항목과 그 레벨이 필요하다 — 레벨을 알아야 블록 크기를 알고, 그래야
+ * 블록 안에서의 오프셋을 물리 주소에 더할 수 있다.
+ */
 struct iova_to_phys_data {
-	arm_lpae_iopte pte;
-	int lvl;
+	arm_lpae_iopte pte;	/* [한국어] 찾은 잎 항목 */
+	int lvl;	/* [한국어] 그 항목이 있던 레벨 (블록 크기를 알아야 오프셋을 더할 수 있다) */
 };
 
 static int visit_iova_to_phys(struct io_pgtable_walk_data *walk_data, int lvl,
 			      arm_lpae_iopte *ptep, size_t size)
 {
-	struct iova_to_phys_data *data = walk_data->data;
-	data->pte = *ptep;
-	data->lvl = lvl;
-	return 0;
+	struct iova_to_phys_data *data = walk_data->data;	/* [한국어] 이 순회의 결과를 담을 자리 */
+	data->pte = *ptep;	/* [한국어] 도달한 항목을 기록 */
+	data->lvl = lvl;	/* [한국어] 그 레벨도 */
+	return 0;	/* [한국어] 순회 계속 — 잎에서 자동으로 멈춘다 */
 }
 
 static phys_addr_t arm_lpae_iova_to_phys(struct io_pgtable_ops *ops,
 					 unsigned long iova)
 {
-	struct arm_lpae_io_pgtable *data = io_pgtable_ops_to_data(ops);
-	struct iova_to_phys_data d;
-	struct io_pgtable_walk_data walk_data = {
-		.data = &d,
+	struct arm_lpae_io_pgtable *data = io_pgtable_ops_to_data(ops);	/* [한국어] 이 구현의 자료 */
+	struct iova_to_phys_data d;	/* [한국어] 순회 결과 */
+	struct io_pgtable_walk_data walk_data = {	/* [한국어] 순회 설정 */
+		.data = &d,	/* [한국어] 결과를 담을 자리 */
 		.visit = visit_iova_to_phys,
 		.addr = iova,
 		.end = iova + 1,
 	};
-	int ret;
+	int ret;	/* [한국어] 순회 결과 */
 
-	ret = __arm_lpae_iopte_walk(data, &walk_data, data->pgd, data->start_level);
-	if (ret)
+	ret = __arm_lpae_iopte_walk(data, &walk_data, data->pgd, data->start_level);	/* [한국어] 최상위부터 걸어 내려간다 */
+	if (ret)	/* [한국어] 도중에 무효 항목을 만났다 */
 		return 0;
 
-	iova &= (ARM_LPAE_BLOCK_SIZE(d.lvl, data) - 1);
-	return iopte_to_paddr(d.pte, data) | iova;
+	iova &= (ARM_LPAE_BLOCK_SIZE(d.lvl, data) - 1);	/* [한국어] 도달한 레벨의 블록 안에서의 오프셋만 남긴다. 2MB 블록에 매핑되어 있었다면 하위 21비트가 오프셋이다 */
+	return iopte_to_paddr(d.pte, data) | iova;	/* [한국어] 블록의 물리 시작 주소에 그 오프셋을 더해 최종 물리 주소를 만든다 */
 }
 
 static int visit_pgtable_walk(struct io_pgtable_walk_data *walk_data, int lvl,
 			      arm_lpae_iopte *ptep, size_t size)
 {
-	struct arm_lpae_io_pgtable_walk_data *data = walk_data->data;
-	data->ptes[lvl] = *ptep;
-	return 0;
+	struct arm_lpae_io_pgtable_walk_data *data = walk_data->data;	/* [한국어] 디버깅용 순회 — 각 레벨의 항목을 그대로 기록한다 */
+	data->ptes[lvl] = *ptep;	/* [한국어] 레벨별 서술자를 배열에 담는다. debugfs 로 페이지 테이블 상태를 들여다볼 때 쓴다 */
+	return 0;	/* [한국어] 순회 계속 */
 }
 
 static int arm_lpae_pgtable_walk(struct io_pgtable_ops *ops, unsigned long iova,
 				 void *wd)
 {
-	struct arm_lpae_io_pgtable *data = io_pgtable_ops_to_data(ops);
-	struct io_pgtable_walk_data walk_data = {
-		.data = wd,
+	struct arm_lpae_io_pgtable *data = io_pgtable_ops_to_data(ops);	/* [한국어] 이 구현의 자료 */
+	struct io_pgtable_walk_data walk_data = {	/* [한국어] 순회 설정 */
+		.data = wd,	/* [한국어] 호출자가 준 결과 자리 */
 		.visit = visit_pgtable_walk,
 		.addr = iova,
 		.end = iova + 1,
 	};
 
-	return __arm_lpae_iopte_walk(data, &walk_data, data->pgd, data->start_level);
+	return __arm_lpae_iopte_walk(data, &walk_data, data->pgd, data->start_level);	/* [한국어] 최상위부터 순회 */
 }
 
 static int io_pgtable_visit(struct arm_lpae_io_pgtable *data,
 			    struct io_pgtable_walk_data *walk_data,
 			    arm_lpae_iopte *ptep, int lvl)
 {
-	struct io_pgtable *iop = &data->iop;
-	arm_lpae_iopte pte = READ_ONCE(*ptep);
+	struct io_pgtable *iop = &data->iop;	/* [한국어] 포맷 정보 */
+	arm_lpae_iopte pte = READ_ONCE(*ptep);	/* [한국어] 항목을 한 번만 읽는다 */
 
-	size_t size = ARM_LPAE_BLOCK_SIZE(lvl, data);
-	int ret = walk_data->visit(walk_data, lvl, ptep, size);
-	if (ret)
+	size_t size = ARM_LPAE_BLOCK_SIZE(lvl, data);	/* [한국어] 이 레벨의 항목이 덮는 크기 */
+	int ret = walk_data->visit(walk_data, lvl, ptep, size);	/* [한국어] 방문자 콜백 — 무엇을 할지는 호출자가 정한다 (물리 주소 조회, 더티 수집, 덤프) */
+	if (ret)	/* [한국어] 콜백이 중단을 요청했다 */
 		return ret;
 
-	if (iopte_leaf(pte, lvl, iop->fmt)) {
-		walk_data->addr += size;
-		return 0;
+	if (iopte_leaf(pte, lvl, iop->fmt)) {	/* [한국어] 잎에 도달했다 */
+		walk_data->addr += size;	/* [한국어] 다음 주소로 전진하고 */
+		return 0;	/* [한국어] 더 내려가지 않는다 */
 	}
 
-	if (!iopte_table(pte, lvl)) {
-		return -EINVAL;
+	if (!iopte_table(pte, lvl)) {	/* [한국어] 잎도 테이블도 아니다 = 무효 항목 */
+		return -EINVAL;	/* [한국어] 이 주소에는 매핑이 없다 */
 	}
 
-	ptep = iopte_deref(pte, data);
-	return __arm_lpae_iopte_walk(data, walk_data, ptep, lvl + 1);
+	ptep = iopte_deref(pte, data);	/* [한국어] 테이블이면 다음 레벨로 */
+	return __arm_lpae_iopte_walk(data, walk_data, ptep, lvl + 1);	/* [한국어] 한 단계 내려가 계속 */
 }
 
 static int __arm_lpae_iopte_walk(struct arm_lpae_io_pgtable *data,
@@ -878,42 +903,42 @@ static int __arm_lpae_iopte_walk(struct arm_lpae_io_pgtable *data,
 				 arm_lpae_iopte *ptep,
 				 int lvl)
 {
-	u32 idx;
-	int max_entries, ret;
+	u32 idx;	/* [한국어] 항목 인덱스 */
+	int max_entries, ret;	/* [한국어] 이 테이블의 항목 수와 결과 */
 
-	if (WARN_ON(lvl == ARM_LPAE_MAX_LEVELS))
+	if (WARN_ON(lvl == ARM_LPAE_MAX_LEVELS))	/* [한국어] 레벨을 다 썼는데도 잎을 못 만났다 */
 		return -EINVAL;
 
-	if (lvl == data->start_level)
+	if (lvl == data->start_level)	/* [한국어] 최상위 테이블이면 */
 		max_entries = ARM_LPAE_PGD_SIZE(data) / sizeof(arm_lpae_iopte);
 	else
 		max_entries = ARM_LPAE_PTES_PER_TABLE(data);
 
-	for (idx = ARM_LPAE_LVL_IDX(walk_data->addr, lvl, data);
-	     (idx < max_entries) && (walk_data->addr < walk_data->end); ++idx) {
-		ret = io_pgtable_visit(data, walk_data, ptep + idx, lvl);
-		if (ret)
+	for (idx = ARM_LPAE_LVL_IDX(walk_data->addr, lvl, data);	/* [한국어] 현재 주소의 인덱스부터 */
+	     (idx < max_entries) && (walk_data->addr < walk_data->end); ++idx) {	/* [한국어] 테이블 끝이나 요청 범위 끝까지 */
+		ret = io_pgtable_visit(data, walk_data, ptep + idx, lvl);	/* [한국어] 항목 하나를 방문한다 (잎이면 콜백만, 테이블이면 재귀) */
+		if (ret)	/* [한국어] 중단 요청 또는 오류 */
 			return ret;
 	}
 
-	return 0;
+	return 0;	/* [한국어] 이 테이블의 순회 완료 */
 }
 
 static int visit_dirty(struct io_pgtable_walk_data *walk_data, int lvl,
 		       arm_lpae_iopte *ptep, size_t size)
 {
-	struct iommu_dirty_bitmap *dirty = walk_data->data;
+	struct iommu_dirty_bitmap *dirty = walk_data->data;	/* [한국어] 더티 페이지를 담을 비트맵 */
 
-	if (!iopte_leaf(*ptep, lvl, walk_data->iop->fmt))
+	if (!iopte_leaf(*ptep, lvl, walk_data->iop->fmt))	/* [한국어] 잎이 아니면 더티 정보가 없다 */
 		return 0;
 
-	if (iopte_writeable_dirty(*ptep)) {
-		iommu_dirty_bitmap_record(dirty, walk_data->addr, size);
-		if (!(walk_data->flags & IOMMU_DIRTY_NO_CLEAR))
-			iopte_set_writeable_clean(ptep);
+	if (iopte_writeable_dirty(*ptep)) {	/* [한국어] DBM 은 서 있고 RDONLY 는 지워졌다 = 하드웨어가 이 페이지에 쓰기를 감지했다 */
+		iommu_dirty_bitmap_record(dirty, walk_data->addr, size);	/* [한국어] 사용자 공간(주로 VFIO 라이브 마이그레이션)이 읽을 비트맵에 표시한다 */
+		if (!(walk_data->flags & IOMMU_DIRTY_NO_CLEAR))	/* [한국어] 호출자가 '읽기만' 하라고 하지 않았으면 */
+			iopte_set_writeable_clean(ptep);	/* [한국어] RDONLY 를 다시 세워 다음 쓰기를 또 감지하게 만든다. 마이그레이션의 반복 라운드마다 새로 더러워진 페이지만 얻는 방식이다 */
 	}
 
-	return 0;
+	return 0;	/* [한국어] 순회 계속 — 범위 전체를 훑어야 한다 */
 }
 
 static int arm_lpae_read_and_clear_dirty(struct io_pgtable_ops *ops,
@@ -921,33 +946,33 @@ static int arm_lpae_read_and_clear_dirty(struct io_pgtable_ops *ops,
 					 unsigned long flags,
 					 struct iommu_dirty_bitmap *dirty)
 {
-	struct arm_lpae_io_pgtable *data = io_pgtable_ops_to_data(ops);
-	struct io_pgtable_cfg *cfg = &data->iop.cfg;
-	struct io_pgtable_walk_data walk_data = {
-		.iop = &data->iop,
-		.data = dirty,
-		.visit = visit_dirty,
-		.flags = flags,
-		.addr = iova,
-		.end = iova + size,
+	struct arm_lpae_io_pgtable *data = io_pgtable_ops_to_data(ops);	/* [한국어] 이 구현의 자료 */
+	struct io_pgtable_cfg *cfg = &data->iop.cfg;	/* [한국어] 주소 폭 검사용 */
+	struct io_pgtable_walk_data walk_data = {	/* [한국어] 범위 순회 설정 */
+		.iop = &data->iop,	/* [한국어] 포맷 판정에 필요 */
+		.data = dirty,	/* [한국어] 콜백에 넘길 비트맵 */
+		.visit = visit_dirty,	/* [한국어] 각 잎에서 더티를 수집한다 */
+		.flags = flags,	/* [한국어] 읽고 지울지 읽기만 할지 */
+		.addr = iova,	/* [한국어] 시작 주소 */
+		.end = iova + size,	/* [한국어] 끝 주소 (배타적) */
 	};
-	arm_lpae_iopte *ptep = data->pgd;
-	int lvl = data->start_level;
+	arm_lpae_iopte *ptep = data->pgd;	/* [한국어] 최상위 테이블 */
+	int lvl = data->start_level;	/* [한국어] 시작 레벨 */
 
-	if (WARN_ON(!size))
-		return -EINVAL;
-	if (WARN_ON((iova + size - 1) & ~(BIT(cfg->ias) - 1)))
-		return -EINVAL;
-	if (data->iop.fmt != ARM_64_LPAE_S1)
-		return -EINVAL;
+	if (WARN_ON(!size))	/* [한국어] 범위가 0 */
+		return -EINVAL;	/* [한국어] 잘못된 요청 */
+	if (WARN_ON((iova + size - 1) & ~(BIT(cfg->ias) - 1)))	/* [한국어] 범위가 입력 주소 폭을 넘는다 */
+		return -EINVAL;	/* [한국어] 표현할 수 없는 범위 */
+	if (data->iop.fmt != ARM_64_LPAE_S1)	/* [한국어] 하드웨어 더티 추적은 64비트 stage-1 에서만 지원된다 */
+		return -EINVAL;	/* [한국어] 그 외 포맷에서는 쓸 수 없다 */
 
-	return __arm_lpae_iopte_walk(data, &walk_data, ptep, lvl);
+	return __arm_lpae_iopte_walk(data, &walk_data, ptep, lvl);	/* [한국어] 범위를 순회하며 더티를 수집한다 */
 }
 
 static void arm_lpae_restrict_pgsizes(struct io_pgtable_cfg *cfg)
 {
-	unsigned long granule, page_sizes;
-	unsigned int max_addr_bits = 48;
+	unsigned long granule, page_sizes;	/* [한국어] 고를 입도와 그에 따른 페이지 크기 집합 */
+	unsigned int max_addr_bits = 48;	/* [한국어] 기본 주소 폭 상한. 64K 입도만 52비트까지 간다 */
 
 	/*
 	 * We need to restrict the supported page sizes to match the
@@ -956,183 +981,183 @@ static void arm_lpae_restrict_pgsizes(struct io_pgtable_cfg *cfg)
 	 * While we're at it, restrict the block sizes to match the
 	 * chosen granule.
 	 */
-	if (cfg->pgsize_bitmap & PAGE_SIZE)
-		granule = PAGE_SIZE;
-	else if (cfg->pgsize_bitmap & ~PAGE_MASK)
-		granule = 1UL << __fls(cfg->pgsize_bitmap & ~PAGE_MASK);
-	else if (cfg->pgsize_bitmap & PAGE_MASK)
-		granule = 1UL << __ffs(cfg->pgsize_bitmap & PAGE_MASK);
+	if (cfg->pgsize_bitmap & PAGE_SIZE)	/* [한국어] 드라이버가 알린 크기 중 CPU 페이지 크기가 있으면 */
+		granule = PAGE_SIZE;	/* [한국어] 그것을 고른다 — CPU 와 입도가 같아야 매핑이 낭비 없이 맞아떨어진다 (위 영어 주석) */
+	else if (cfg->pgsize_bitmap & ~PAGE_MASK)	/* [한국어] CPU 페이지보다 작은 크기가 있으면 */
+		granule = 1UL << __fls(cfg->pgsize_bitmap & ~PAGE_MASK);	/* [한국어] 그중 가장 큰 것. 작은 쪽을 선호하는 것은 큰 입도가 CPU 페이지 하나를 매핑할 때 주변까지 열어 버리기 때문이다 */
+	else if (cfg->pgsize_bitmap & PAGE_MASK)	/* [한국어] CPU 페이지보다 큰 것만 있으면 */
+		granule = 1UL << __ffs(cfg->pgsize_bitmap & PAGE_MASK);	/* [한국어] 그중 가장 작은 것 */
 	else
-		granule = 0;
+		granule = 0;	/* [한국어] 쓸 수 있는 크기가 없다 */
 
-	switch (granule) {
-	case SZ_4K:
-		page_sizes = (SZ_4K | SZ_2M | SZ_1G);
+	switch (granule) {	/* [한국어] 입도가 정해지면 블록 크기도 따라 정해진다 */
+	case SZ_4K:	/* [한국어] 4K 입도, 레벨당 9비트 */
+		page_sizes = (SZ_4K | SZ_2M | SZ_1G);	/* [한국어] 페이지 / 레벨2 블록 / 레벨1 블록 */
 		break;
-	case SZ_16K:
-		page_sizes = (SZ_16K | SZ_32M);
+	case SZ_16K:	/* [한국어] 16K 입도, 레벨당 11비트 */
+		page_sizes = (SZ_16K | SZ_32M);	/* [한국어] 페이지 / 레벨2 블록. 레벨1 블록(64GB)은 아키텍처가 허용하지 않는다 */
 		break;
-	case SZ_64K:
-		max_addr_bits = 52;
-		page_sizes = (SZ_64K | SZ_512M);
-		if (cfg->oas > 48)
-			page_sizes |= 1ULL << 42; /* 4TB */
+	case SZ_64K:	/* [한국어] 64K 입도, 레벨당 13비트 */
+		max_addr_bits = 52;	/* [한국어] 이 입도에서만 52비트 주소가 가능하다 — 서술자의 남는 하위 비트에 상위 주소를 접어 넣을 수 있기 때문 */
+		page_sizes = (SZ_64K | SZ_512M);	/* [한국어] 페이지 / 레벨2 블록 */
+		if (cfg->oas > 48)	/* [한국어] 52비트 물리 주소를 쓰는 구성이면 */
+			page_sizes |= 1ULL << 42; /* 4TB */	/* [한국어] 레벨1 블록까지 쓸 수 있다 */
 		break;
 	default:
-		page_sizes = 0;
+		page_sizes = 0;	/* [한국어] 알 수 없는 입도 — 아래에서 비트맵이 0 이 되어 alloc 이 실패한다 */
 	}
 
-	cfg->pgsize_bitmap &= page_sizes;
-	cfg->ias = min(cfg->ias, max_addr_bits);
-	cfg->oas = min(cfg->oas, max_addr_bits);
+	cfg->pgsize_bitmap &= page_sizes;	/* [한국어] 드라이버가 알린 것과 이 입도에서 실제로 가능한 것의 교집합 */
+	cfg->ias = min(cfg->ias, max_addr_bits);	/* [한국어] 입력 주소 폭을 상한으로 조인다 */
+	cfg->oas = min(cfg->oas, max_addr_bits);	/* [한국어] 출력 주소 폭도. 이 두 줄이 드라이버가 과하게 신고한 값을 하드웨어 현실로 되돌린다 */
 }
 
 static struct arm_lpae_io_pgtable *
 arm_lpae_alloc_pgtable(struct io_pgtable_cfg *cfg)
 {
-	struct arm_lpae_io_pgtable *data;
-	int levels, va_bits, pg_shift;
+	struct arm_lpae_io_pgtable *data;	/* [한국어] 만들 테이블 객체 */
+	int levels, va_bits, pg_shift;	/* [한국어] 레벨 수, 페이지 오프셋을 뺀 주소 비트, 페이지 시프트 */
 
-	arm_lpae_restrict_pgsizes(cfg);
+	arm_lpae_restrict_pgsizes(cfg);	/* [한국어] 드라이버가 알린 크기를 실제 가능한 것으로 조인다 */
 
-	if (!(cfg->pgsize_bitmap & (SZ_4K | SZ_16K | SZ_64K)))
+	if (!(cfg->pgsize_bitmap & (SZ_4K | SZ_16K | SZ_64K)))	/* [한국어] 쓸 수 있는 입도가 하나도 남지 않았다 */
 		return NULL;
 
-	if (cfg->ias > ARM_LPAE_MAX_ADDR_BITS)
+	if (cfg->ias > ARM_LPAE_MAX_ADDR_BITS)	/* [한국어] 입력 주소 폭이 LPAE 한계를 넘는다 */
 		return NULL;
 
-	if (cfg->oas > ARM_LPAE_MAX_ADDR_BITS)
+	if (cfg->oas > ARM_LPAE_MAX_ADDR_BITS)	/* [한국어] 출력 주소 폭도 */
 		return NULL;
 
-	data = kmalloc_obj(*data);
-	if (!data)
+	data = kmalloc_obj(*data);	/* [한국어] 형상 구조체 */
+	if (!data)	/* [한국어] 할당 실패 */
 		return NULL;
 
-	pg_shift = __ffs(cfg->pgsize_bitmap);
-	data->bits_per_level = pg_shift - ilog2(sizeof(arm_lpae_iopte));
+	pg_shift = __ffs(cfg->pgsize_bitmap);	/* [한국어] 가장 작은 크기가 이 테이블의 입도다 */
+	data->bits_per_level = pg_shift - ilog2(sizeof(arm_lpae_iopte));	/* [한국어] 테이블 한 장이 담는 항목 수의 로그. 4K 입도면 12 - 3 = 9비트(512항목) */
 
-	va_bits = cfg->ias - pg_shift;
-	levels = DIV_ROUND_UP(va_bits, data->bits_per_level);
-	data->start_level = ARM_LPAE_MAX_LEVELS - levels;
+	va_bits = cfg->ias - pg_shift;	/* [한국어] 페이지 내 오프셋을 뺀, 인덱싱에 쓰이는 주소 비트 수 */
+	levels = DIV_ROUND_UP(va_bits, data->bits_per_level);	/* [한국어] 레벨당 bits_per_level 씩 소비하므로 올림 나눗셈으로 레벨 수가 나온다 */
+	data->start_level = ARM_LPAE_MAX_LEVELS - levels;	/* [한국어] 레벨은 아래에서부터 번호가 매겨지므로, 필요한 레벨이 적을수록 시작 레벨이 높아진다 */
 
 	/* Calculate the actual size of our pgd (without concatenation) */
-	data->pgd_bits = va_bits - (data->bits_per_level * (levels - 1));
+	data->pgd_bits = va_bits - (data->bits_per_level * (levels - 1));	/* [한국어] 최상위 테이블이 담당할 비트 수. 나머지 레벨이 다 쓰고 남은 만큼이라 대개 bits_per_level 보다 작다 */
 
-	data->iop.ops = (struct io_pgtable_ops) {
-		.map_pages	= arm_lpae_map_pages,
+	data->iop.ops = (struct io_pgtable_ops) {	/* [한국어] 공통 계층이 부를 함수표를 채운다 */
+		.map_pages	= arm_lpae_map_pages,	/* [한국어] 매핑 */
 		.unmap_pages	= arm_lpae_unmap_pages,
 		.iova_to_phys	= arm_lpae_iova_to_phys,
 		.read_and_clear_dirty = arm_lpae_read_and_clear_dirty,
 		.pgtable_walk	= arm_lpae_pgtable_walk,
 	};
 
-	return data;
+	return data;	/* [한국어] 형상이 정해진 테이블 객체 (PGD 는 아직 없다) */
 }
 
 static struct io_pgtable *
 arm_64_lpae_alloc_pgtable_s1(struct io_pgtable_cfg *cfg, void *cookie)
 {
-	u64 reg;
-	struct arm_lpae_io_pgtable *data;
-	typeof(&cfg->arm_lpae_s1_cfg.tcr) tcr = &cfg->arm_lpae_s1_cfg.tcr;
-	bool tg1;
+	u64 reg;	/* [한국어] MAIR 값을 조립할 임시 */
+	struct arm_lpae_io_pgtable *data;	/* [한국어] 만들 테이블 */
+	typeof(&cfg->arm_lpae_s1_cfg.tcr) tcr = &cfg->arm_lpae_s1_cfg.tcr;	/* [한국어] 드라이버에게 돌려줄 TCR 필드들. 이 함수의 절반이 이 레지스터를 채우는 일이다 */
+	bool tg1;	/* [한국어] TTBR1(상위 주소 공간)용 인코딩을 쓸지 */
 
-	if (cfg->quirks & ~(IO_PGTABLE_QUIRK_ARM_NS |
+	if (cfg->quirks & ~(IO_PGTABLE_QUIRK_ARM_NS |	/* [한국어] 이 포맷이 이해하는 quirk 목록. 모르는 것이 하나라도 있으면 */
 			    IO_PGTABLE_QUIRK_ARM_TTBR1 |
 			    IO_PGTABLE_QUIRK_ARM_OUTER_WBWA |
 			    IO_PGTABLE_QUIRK_ARM_HD |
 			    IO_PGTABLE_QUIRK_NO_WARN))
-		return NULL;
+		return NULL;	/* [한국어] 거절한다 — 조용히 무시하면 드라이버가 켜졌다고 착각한다 */
 
-	data = arm_lpae_alloc_pgtable(cfg);
-	if (!data)
-		return NULL;
+	data = arm_lpae_alloc_pgtable(cfg);	/* [한국어] 형상 계산과 객체 생성 */
+	if (!data)	/* [한국어] 실패 */
+		return NULL;	/* [한국어] 포맷을 만들 수 없다 */
 
 	/* TCR */
-	if (cfg->coherent_walk) {
-		tcr->sh = ARM_LPAE_TCR_SH_IS;
-		tcr->irgn = ARM_LPAE_TCR_RGN_WBWA;
-		tcr->orgn = ARM_LPAE_TCR_RGN_WBWA;
-		if (cfg->quirks & IO_PGTABLE_QUIRK_ARM_OUTER_WBWA)
-			goto out_free_data;
+	if (cfg->coherent_walk) {	/* [한국어] IOMMU 가 테이블을 읽을 때 CPU 캐시를 보는 하드웨어면 */
+		tcr->sh = ARM_LPAE_TCR_SH_IS;	/* [한국어] 테이블 접근을 내부 공유로 — 캐시 일관성 프로토콜에 참여시킨다 */
+		tcr->irgn = ARM_LPAE_TCR_RGN_WBWA;	/* [한국어] 내부 캐시 가능 */
+		tcr->orgn = ARM_LPAE_TCR_RGN_WBWA;	/* [한국어] 외부 캐시 가능. 하드웨어가 캐시에서 테이블을 읽으므로 소프트웨어 플러시가 필요 없다 */
+		if (cfg->quirks & IO_PGTABLE_QUIRK_ARM_OUTER_WBWA)	/* [한국어] 일관성 있는 구성에서 이 quirk 는 모순이다 */
+			goto out_free_data;	/* [한국어] 거절 */
 	} else {
-		tcr->sh = ARM_LPAE_TCR_SH_OS;
-		tcr->irgn = ARM_LPAE_TCR_RGN_NC;
-		if (!(cfg->quirks & IO_PGTABLE_QUIRK_ARM_OUTER_WBWA))
-			tcr->orgn = ARM_LPAE_TCR_RGN_NC;
+		tcr->sh = ARM_LPAE_TCR_SH_OS;	/* [한국어] 비일관 하드웨어 — 외부 공유 */
+		tcr->irgn = ARM_LPAE_TCR_RGN_NC;	/* [한국어] 내부 비캐시. 하드웨어가 캐시를 보지 않으므로 캐시 가능으로 두면 옛 내용을 읽는다 */
+		if (!(cfg->quirks & IO_PGTABLE_QUIRK_ARM_OUTER_WBWA))	/* [한국어] 외부 캐시를 쓰라는 요청이 없으면 */
+			tcr->orgn = ARM_LPAE_TCR_RGN_NC;	/* [한국어] 외부도 비캐시 */
 		else
-			tcr->orgn = ARM_LPAE_TCR_RGN_WBWA;
+			tcr->orgn = ARM_LPAE_TCR_RGN_WBWA;	/* [한국어] 일부 SoC 는 외부 캐시만 일관성을 보장한다 — 그런 하드웨어를 위한 quirk */
 	}
 
-	tg1 = cfg->quirks & IO_PGTABLE_QUIRK_ARM_TTBR1;
-	switch (ARM_LPAE_GRANULE(data)) {
-	case SZ_4K:
-		tcr->tg = tg1 ? ARM_LPAE_TCR_TG1_4K : ARM_LPAE_TCR_TG0_4K;
+	tg1 = cfg->quirks & IO_PGTABLE_QUIRK_ARM_TTBR1;	/* [한국어] TTBR0(하위)와 TTBR1(상위)의 입도 인코딩이 다르다 */
+	switch (ARM_LPAE_GRANULE(data)) {	/* [한국어] 입도를 TCR 의 TG 필드 값으로 */
+	case SZ_4K:	/* [한국어] 4K 입도 */
+		tcr->tg = tg1 ? ARM_LPAE_TCR_TG1_4K : ARM_LPAE_TCR_TG0_4K;	/* [한국어] TTBR0/1 에 따라 다른 인코딩 — 아키텍처가 두 필드의 값 배치를 다르게 정해 두었다 */
 		break;
-	case SZ_16K:
-		tcr->tg = tg1 ? ARM_LPAE_TCR_TG1_16K : ARM_LPAE_TCR_TG0_16K;
+	case SZ_16K:	/* [한국어] 16K 입도 */
+		tcr->tg = tg1 ? ARM_LPAE_TCR_TG1_16K : ARM_LPAE_TCR_TG0_16K;	/* [한국어] 마찬가지 */
 		break;
-	case SZ_64K:
-		tcr->tg = tg1 ? ARM_LPAE_TCR_TG1_64K : ARM_LPAE_TCR_TG0_64K;
+	case SZ_64K:	/* [한국어] 64K 입도 */
+		tcr->tg = tg1 ? ARM_LPAE_TCR_TG1_64K : ARM_LPAE_TCR_TG0_64K;	/* [한국어] 마찬가지 */
 		break;
 	}
 
-	switch (cfg->oas) {
-	case 32:
-		tcr->ips = ARM_LPAE_TCR_PS_32_BIT;
+	switch (cfg->oas) {	/* [한국어] 출력 주소 폭을 IPS 필드 값으로 */
+	case 32:	/* [한국어] 32비트 */
+		tcr->ips = ARM_LPAE_TCR_PS_32_BIT;	/* [한국어] 인코딩 0 */
 		break;
-	case 36:
-		tcr->ips = ARM_LPAE_TCR_PS_36_BIT;
+	case 36:	/* [한국어] 36비트 */
+		tcr->ips = ARM_LPAE_TCR_PS_36_BIT;	/* [한국어] 인코딩 1 */
 		break;
-	case 40:
-		tcr->ips = ARM_LPAE_TCR_PS_40_BIT;
+	case 40:	/* [한국어] 40비트 */
+		tcr->ips = ARM_LPAE_TCR_PS_40_BIT;	/* [한국어] 인코딩 2 */
 		break;
-	case 42:
-		tcr->ips = ARM_LPAE_TCR_PS_42_BIT;
+	case 42:	/* [한국어] 42비트 */
+		tcr->ips = ARM_LPAE_TCR_PS_42_BIT;	/* [한국어] 인코딩 3 */
 		break;
-	case 44:
-		tcr->ips = ARM_LPAE_TCR_PS_44_BIT;
+	case 44:	/* [한국어] 44비트 */
+		tcr->ips = ARM_LPAE_TCR_PS_44_BIT;	/* [한국어] 인코딩 4 */
 		break;
-	case 48:
-		tcr->ips = ARM_LPAE_TCR_PS_48_BIT;
+	case 48:	/* [한국어] 48비트 */
+		tcr->ips = ARM_LPAE_TCR_PS_48_BIT;	/* [한국어] 인코딩 5 */
 		break;
-	case 52:
-		tcr->ips = ARM_LPAE_TCR_PS_52_BIT;
+	case 52:	/* [한국어] 52비트 (64K 입도에서만) */
+		tcr->ips = ARM_LPAE_TCR_PS_52_BIT;	/* [한국어] 인코딩 6 */
 		break;
 	default:
-		goto out_free_data;
+		goto out_free_data;	/* [한국어] 아키텍처가 정의하지 않은 폭 */
 	}
 
-	tcr->tsz = 64ULL - cfg->ias;
+	tcr->tsz = 64ULL - cfg->ias;	/* [한국어] 입력 주소 폭은 '무시할 상위 비트 수'로 인코딩된다. 48비트 주소면 TSZ = 16 */
 
 	/* MAIRs */
-	reg = (ARM_LPAE_MAIR_ATTR_NC
-	       << ARM_LPAE_MAIR_ATTR_SHIFT(ARM_LPAE_MAIR_ATTR_IDX_NC)) |
-	      (ARM_LPAE_MAIR_ATTR_WBRWA
-	       << ARM_LPAE_MAIR_ATTR_SHIFT(ARM_LPAE_MAIR_ATTR_IDX_CACHE)) |
-	      (ARM_LPAE_MAIR_ATTR_DEVICE
-	       << ARM_LPAE_MAIR_ATTR_SHIFT(ARM_LPAE_MAIR_ATTR_IDX_DEV)) |
-	      (ARM_LPAE_MAIR_ATTR_INC_OWBRWA
-	       << ARM_LPAE_MAIR_ATTR_SHIFT(ARM_LPAE_MAIR_ATTR_IDX_INC_OCACHE));
+	reg = (ARM_LPAE_MAIR_ATTR_NC	/* [한국어] MAIR 레지스터를 조립한다. PTE 의 ATTRINDX 가 이 레지스터의 8비트 슬롯을 가리키므로, 인덱스와 속성의 대응을 여기서 정한다 */
+	       << ARM_LPAE_MAIR_ATTR_SHIFT(ARM_LPAE_MAIR_ATTR_IDX_NC)) |	/* [한국어] 인덱스 0 = 비캐시 */
+	      (ARM_LPAE_MAIR_ATTR_WBRWA	/* [한국어] Write-Back 읽기·쓰기 할당 */
+	       << ARM_LPAE_MAIR_ATTR_SHIFT(ARM_LPAE_MAIR_ATTR_IDX_CACHE)) |	/* [한국어] 인덱스 1 = 캐시 가능 (IOMMU_CACHE 매핑이 쓴다) */
+	      (ARM_LPAE_MAIR_ATTR_DEVICE	/* [한국어] Device-nGnRE */
+	       << ARM_LPAE_MAIR_ATTR_SHIFT(ARM_LPAE_MAIR_ATTR_IDX_DEV)) |	/* [한국어] 인덱스 2 = MMIO 매핑 */
+	      (ARM_LPAE_MAIR_ATTR_INC_OWBRWA	/* [한국어] 내부 비캐시 + 외부 Write-Back */
+	       << ARM_LPAE_MAIR_ATTR_SHIFT(ARM_LPAE_MAIR_ATTR_IDX_INC_OCACHE));	/* [한국어] 인덱스 3 = 비대칭 캐시 구성용 */
 
-	cfg->arm_lpae_s1_cfg.mair = reg;
+	cfg->arm_lpae_s1_cfg.mair = reg;	/* [한국어] 드라이버가 이 값을 MAIR 레지스터에 쓴다 */
 
 	/* Looking good; allocate a pgd */
-	data->pgd = __arm_lpae_alloc_pages(ARM_LPAE_PGD_SIZE(data),
-					   GFP_KERNEL, cfg, cookie);
-	if (!data->pgd)
-		goto out_free_data;
+	data->pgd = __arm_lpae_alloc_pages(ARM_LPAE_PGD_SIZE(data),	/* [한국어] 이제 형상이 확정됐으므로 최상위 테이블을 잡는다 */
+					   GFP_KERNEL, cfg, cookie);	/* [한국어] 초기화 경로라 잠들 수 있다 */
+	if (!data->pgd)	/* [한국어] 할당 실패 */
+		goto out_free_data;	/* [한국어] 형상 구조체도 반납 */
 
 	/* Ensure the empty pgd is visible before any actual TTBR write */
-	wmb();
+	wmb();	/* [한국어] 빈 PGD 가 메모리에 보인 뒤에야 드라이버가 TTBR 을 쓸 수 있다. 순서가 뒤집히면 하드웨어가 쓰레기 테이블을 워크한다 (위 영어 주석) */
 
 	/* TTBR */
-	cfg->arm_lpae_s1_cfg.ttbr = virt_to_phys(data->pgd);
-	return &data->iop;
+	cfg->arm_lpae_s1_cfg.ttbr = virt_to_phys(data->pgd);	/* [한국어] 드라이버가 이 물리 주소를 TTBR 레지스터에 쓴다 — 하드웨어가 테이블을 찾는 유일한 경로다 */
+	return &data->iop;	/* [한국어] 공통 계층이 받을 객체 */
 
-out_free_data:
-	kfree(data);
-	return NULL;
+out_free_data:	/* [한국어] 실패 경로 */
+	kfree(data);	/* [한국어] 형상 구조체 반납 (PGD 는 아직 없거나 이 경로로 오지 않는다) */
+	return NULL;	/* [한국어] 포맷 생성 실패 */
 }
 
 static struct io_pgtable *
