@@ -2451,19 +2451,42 @@ out:	/* [한국어] 공통 출구 */
 	return ret;	/* [한국어] 0 이면 이 버스의 컨텍스트가 모두 옮겨졌다 */
 }
 
+/*
+ * [한국어]
+ * copy_translation_tables - 앞선 커널의 번역 구조를 통째로 인수인계한다
+ *
+ * @iommu:  대상 유닛
+ * @return: 0 성공, 음수면 인수인계 불가
+ *
+ * kdump 의 핵심 함수다. 하드웨어 레지스터에서 앞선 커널의 루트 테이블 주소를
+ * 직접 읽어, 그 아래의 컨텍스트 테이블을 모두 우리 메모리로 복사한다. 매핑이
+ * 유지되므로 진행 중이던 DMA 가 끊기지 않고, 그래서 덤프를 쓸 디스크 컨트롤러가
+ * 계속 동작한다.
+ *
+ * 모드가 다르면 곧바로 포기하는 것이 이 함수의 첫 판단이다. RTT(scalable) 비트는
+ * 번역을 끈 상태에서만 바꿀 수 있는데, 끄는 순간 진행 중인 DMA 가 물리 주소로
+ * 통과해 메모리를 덮어쓴다 (위 영어 주석). 인수인계를 포기하는 편이 안전하다.
+ *
+ * 옛 테이블을 그대로 쓰지 않고 복사하는 이유는 소유권이다. 그 메모리는 크래시
+ * 커널이 관리하는 영역이 아니라 언제 재사용될지 알 수 없다.
+ *
+ * 실행 컨텍스트: 유닛 초기화 (kdump). 프로세스 문맥.
+ *
+ * 호출 체인: init_dmars → [이 함수] → copy_context_table
+ */
 static int copy_translation_tables(struct intel_iommu *iommu)
 {
-	struct context_entry **ctxt_tbls;
-	struct root_entry *old_rt;
-	phys_addr_t old_rt_phys;
-	int ctxt_table_entries;
-	u64 rtaddr_reg;
-	int bus, ret;
-	bool new_ext, ext;
+	struct context_entry **ctxt_tbls;	/* [한국어] 새로 만든 컨텍스트 테이블들을 모을 배열 */
+	struct root_entry *old_rt;	/* [한국어] 앞선 커널의 루트 테이블 (임시 매핑) */
+	phys_addr_t old_rt_phys;	/* [한국어] 그 물리 주소 */
+	int ctxt_table_entries;	/* [한국어] 배열 크기 */
+	u64 rtaddr_reg;	/* [한국어] 현재 하드웨어의 루트 주소 레지스터 값 */
+	int bus, ret;	/* [한국어] 버스 순회와 결과 */
+	bool new_ext, ext;	/* [한국어] 앞선 커널과 우리가 각각 확장 모드였는가 */
 
-	rtaddr_reg = readq(iommu->reg + DMAR_RTADDR_REG);
-	ext        = !!(rtaddr_reg & DMA_RTADDR_SMT);
-	new_ext    = !!sm_supported(iommu);
+	rtaddr_reg = readq(iommu->reg + DMAR_RTADDR_REG);	/* [한국어] 하드웨어에게 직접 묻는다 — 앞선 커널이 무엇을 설정했는지는 이 레지스터만이 안다 */
+	ext        = !!(rtaddr_reg & DMA_RTADDR_SMT);	/* [한국어] 앞선 커널이 scalable mode 였는가 */
+	new_ext    = !!sm_supported(iommu);	/* [한국어] 우리가 쓸 모드 */
 
 	/*
 	 * The RTT bit can only be changed when translation is disabled,
@@ -2471,81 +2494,105 @@ static int copy_translation_tables(struct intel_iommu *iommu)
 	 * corruption. So bail out and don't copy anything if we would
 	 * have to change the bit.
 	 */
-	if (new_ext != ext)
-		return -EINVAL;
+	if (new_ext != ext)	/* [한국어] 모드가 다르다 */
+		return -EINVAL;	/* [한국어] RTT 비트는 번역을 끈 상태에서만 바꿀 수 있고, 끄는 순간 진행 중인 DMA 가 물리 주소로 통과해 데이터가 손상된다. 그래서 복사를 포기한다 (위 영어 주석) */
 
-	iommu->copied_tables = bitmap_zalloc(BIT_ULL(16), GFP_KERNEL);
-	if (!iommu->copied_tables)
-		return -ENOMEM;
+	iommu->copied_tables = bitmap_zalloc(BIT_ULL(16), GFP_KERNEL);	/* [한국어] 65536개 소스 id 각각에 대해 '물려받은 항목인가'를 기록할 비트맵 */
+	if (!iommu->copied_tables)	/* [한국어] 할당 실패 */
+		return -ENOMEM;	/* [한국어] 복사 불가 */
 
-	old_rt_phys = rtaddr_reg & VTD_PAGE_MASK;
-	if (!old_rt_phys)
-		return -EINVAL;
+	old_rt_phys = rtaddr_reg & VTD_PAGE_MASK;	/* [한국어] 앞선 커널의 루트 테이블 주소 */
+	if (!old_rt_phys)	/* [한국어] 주소가 없다 */
+		return -EINVAL;	/* [한국어] 복사할 것이 없다 */
 
-	old_rt = memremap(old_rt_phys, PAGE_SIZE, MEMREMAP_WB);
-	if (!old_rt)
-		return -ENOMEM;
+	old_rt = memremap(old_rt_phys, PAGE_SIZE, MEMREMAP_WB);	/* [한국어] 임시로 매핑한다. 그 메모리는 크래시 커널의 선형 매핑 안에 없을 수 있다 */
+	if (!old_rt)	/* [한국어] 매핑 실패 */
+		return -ENOMEM;	/* [한국어] 복사 불가 */
 
 	/* This is too big for the stack - allocate it from slab */
-	ctxt_table_entries = ext ? 512 : 256;
-	ret = -ENOMEM;
-	ctxt_tbls = kcalloc(ctxt_table_entries, sizeof(void *), GFP_KERNEL);
-	if (!ctxt_tbls)
-		goto out_unmap;
+	ctxt_table_entries = ext ? 512 : 256;	/* [한국어] 확장 모드는 버스마다 테이블이 둘 */
+	ret = -ENOMEM;	/* [한국어] 아래 할당 실패 시의 값 */
+	ctxt_tbls = kcalloc(ctxt_table_entries, sizeof(void *), GFP_KERNEL);	/* [한국어] 스택에 두기엔 너무 크다 (위 영어 주석) */
+	if (!ctxt_tbls)	/* [한국어] 할당 실패 */
+		goto out_unmap;	/* [한국어] 임시 매핑을 풀고 나간다 */
 
-	for (bus = 0; bus < 256; bus++) {
-		ret = copy_context_table(iommu, &old_rt[bus],
-					 ctxt_tbls, bus, ext);
-		if (ret) {
-			pr_err("%s: Failed to copy context table for bus %d\n",
-				iommu->name, bus);
-			continue;
+	for (bus = 0; bus < 256; bus++) {	/* [한국어] 모든 버스에 대해 */
+		ret = copy_context_table(iommu, &old_rt[bus],	/* [한국어] 그 버스의 컨텍스트 테이블을 옮긴다 */
+					 ctxt_tbls, bus, ext);	/* [한국어] 결과를 배열에 담는다 */
+		if (ret) {	/* [한국어] 한 버스가 실패해도 */
+			pr_err("%s: Failed to copy context table for bus %d\n",	/* [한국어] 기록만 남기고 */
+				iommu->name, bus);	/* [한국어] 어느 유닛의 어느 버스인지 */
+			continue;	/* [한국어] 나머지 버스는 계속 옮긴다 — 일부라도 살리는 편이 낫다 */
 		}
 	}
 
-	spin_lock(&iommu->lock);
+	spin_lock(&iommu->lock);	/* [한국어] 루트 테이블 변경 구간 */
 
 	/* Context tables are copied, now write them to the root_entry table */
-	for (bus = 0; bus < 256; bus++) {
-		int idx = ext ? bus * 2 : bus;
-		u64 val;
+	for (bus = 0; bus < 256; bus++) {	/* [한국어] 옮긴 테이블들을 루트에 연결한다 */
+		int idx = ext ? bus * 2 : bus;	/* [한국어] 확장 모드의 인덱스 보정 */
+		u64 val;	/* [한국어] 루트 항목에 쓸 값 */
 
-		if (ctxt_tbls[idx]) {
-			val = virt_to_phys(ctxt_tbls[idx]) | 1;
-			iommu->root_entry[bus].lo = val;
+		if (ctxt_tbls[idx]) {	/* [한국어] 하위 테이블이 있으면 */
+			val = virt_to_phys(ctxt_tbls[idx]) | 1;	/* [한국어] 물리 주소 + present 비트 */
+			iommu->root_entry[bus].lo = val;	/* [한국어] 우리 루트 테이블에 연결 */
 		}
 
-		if (!ext || !ctxt_tbls[idx + 1])
-			continue;
+		if (!ext || !ctxt_tbls[idx + 1])	/* [한국어] 확장 모드가 아니거나 상위 테이블이 없으면 */
+			continue;	/* [한국어] 다음 버스로 */
 
-		val = virt_to_phys(ctxt_tbls[idx + 1]) | 1;
-		iommu->root_entry[bus].hi = val;
+		val = virt_to_phys(ctxt_tbls[idx + 1]) | 1;	/* [한국어] 상위 테이블의 주소 */
+		iommu->root_entry[bus].hi = val;	/* [한국어] 루트 항목의 상위 절반에 */
 	}
 
-	spin_unlock(&iommu->lock);
+	spin_unlock(&iommu->lock);	/* [한국어] 루트 테이블 변경 끝 */
 
-	kfree(ctxt_tbls);
+	kfree(ctxt_tbls);	/* [한국어] 임시 배열 해제 (테이블 자체는 루트가 참조한다) */
 
-	__iommu_flush_cache(iommu, iommu->root_entry, PAGE_SIZE);
+	__iommu_flush_cache(iommu, iommu->root_entry, PAGE_SIZE);	/* [한국어] 루트 테이블을 메모리로 밀어낸다 */
 
-	ret = 0;
+	ret = 0;	/* [한국어] 복사 완료 */
 
-out_unmap:
-	memunmap(old_rt);
+out_unmap:	/* [한국어] 임시 매핑 해제 경로 */
+	memunmap(old_rt);	/* [한국어] 앞선 커널의 루트 테이블 매핑 해제 */
 
-	return ret;
+	return ret;	/* [한국어] 0 이면 인수인계 성공 */
 }
 
+/*
+ * [한국어]
+ * init_dmars - 모든 DMAR 유닛을 세우고 번역을 켠다
+ *
+ * @return: 0 성공, 음수 실패
+ *
+ * 이 드라이버의 부팅 초기화 본체다. 세 번의 순회로 나뉘어 있고, 그 분할에 이유가
+ * 있다.
+ *
+ *  1) 유닛마다 무효화 큐를 세우고 루트 테이블을 만든다. kdump 면 앞선 커널의
+ *     설정을 인수인계한다. PASID 상한도 여기서 모든 유닛의 최솟값으로 정해지는데,
+ *     PASID 가 전역 자원이라 어느 유닛에서도 표현 가능해야 하기 때문이다.
+ *  2) 모든 유닛의 큐가 준비된 뒤에야 루트 테이블을 설치한다. 일부 X58 칩셋에서
+ *     이 순서가 아니면 flush_context 가 영영 끝나지 않아 부팅이 멈춘다
+ *     (위 영어 주석).
+ *  3) 폴트 인터럽트와 PRI 큐를 걸고 번역을 켠다.
+ *
+ * 실패하면 이미 설정한 유닛들을 모두 되돌린다. 반쯤 켜진 상태로 두면 일부 장치만
+ * 격리되어, 어느 장치가 무엇을 볼 수 있는지 알 수 없게 된다.
+ *
+ * 실행 컨텍스트: 부팅 초기화. dmar_global_lock 을 든 채 (일부 구간에서 잠깐 놓는다).
+ *
+ * 호출 체인: intel_iommu_init → [이 함수]
+ */
 static int __init init_dmars(void)
 {
-	struct dmar_drhd_unit *drhd;
-	struct intel_iommu *iommu;
-	int ret;
+	struct dmar_drhd_unit *drhd;	/* [한국어] 유닛 순회 커서 */
+	struct intel_iommu *iommu;	/* [한국어] 현재 유닛 */
+	int ret;	/* [한국어] 각 단계의 결과 */
 
-	for_each_iommu(iommu, drhd) {
-		if (drhd->ignored) {
-			iommu_disable_translation(iommu);
-			continue;
+	for_each_iommu(iommu, drhd) {	/* [한국어] 1단계 — 유닛마다 큐와 루트 테이블을 준비한다 */
+		if (drhd->ignored) {	/* [한국어] 무시하도록 표시된 유닛 */
+			iommu_disable_translation(iommu);	/* [한국어] 번역을 꺼 둔다 */
+			continue;	/* [한국어] 설정하지 않는다 */
 		}
 
 		/*
@@ -2553,21 +2600,21 @@ static int __init init_dmars(void)
 		 * We need to ensure the system pasid table is no bigger
 		 * than the smallest supported.
 		 */
-		if (pasid_supported(iommu)) {
-			u32 temp = 2 << ecap_pss(iommu->ecap);
+		if (pasid_supported(iommu)) {	/* [한국어] PASID 를 지원하는 유닛이면 */
+			u32 temp = 2 << ecap_pss(iommu->ecap);	/* [한국어] 이 유닛이 지원하는 PASID 개수 */
 
-			intel_pasid_max_id = min_t(u32, temp,
-						   intel_pasid_max_id);
+			intel_pasid_max_id = min_t(u32, temp,	/* [한국어] 시스템 전체의 상한을 가장 작은 유닛에 맞춘다. PASID 는 전역 자원이라 어느 유닛에서도 표현 가능해야 한다 (위 영어 주석) */
+						   intel_pasid_max_id);	/* [한국어] 현재까지의 최솟값 */
 		}
 
-		intel_iommu_init_qi(iommu);
-		init_translation_status(iommu);
+		intel_iommu_init_qi(iommu);	/* [한국어] 무효화 큐를 세우고 방식을 정한다 */
+		init_translation_status(iommu);	/* [한국어] 번역이 이미 켜져 있었는지 확인한다 */
 
-		if (translation_pre_enabled(iommu) && !is_kdump_kernel()) {
-			iommu_disable_translation(iommu);
-			clear_translation_pre_enabled(iommu);
-			pr_warn("Translation was enabled for %s but we are not in kdump mode\n",
-				iommu->name);
+		if (translation_pre_enabled(iommu) && !is_kdump_kernel()) {	/* [한국어] 켜져 있는데 크래시 커널이 아니다 */
+			iommu_disable_translation(iommu);	/* [한국어] 펌웨어가 켜 둔 것이므로 우리가 다시 세운다 */
+			clear_translation_pre_enabled(iommu);	/* [한국어] 인수인계 표시 해제 */
+			pr_warn("Translation was enabled for %s but we are not in kdump mode\n",	/* [한국어] 펌웨어가 IOMMU 를 켜 둔 채 넘긴 것은 흔치 않은 상황이라 알린다 */
+				iommu->name);	/* [한국어] 어느 유닛인지 */
 		}
 
 		/*
@@ -2575,15 +2622,15 @@ static int __init init_dmars(void)
 		 * we could share the same root & context tables
 		 * among all IOMMU's. Need to Split it later.
 		 */
-		ret = iommu_alloc_root_entry(iommu);
-		if (ret)
-			goto free_iommu;
+		ret = iommu_alloc_root_entry(iommu);	/* [한국어] 우리 루트 테이블을 만든다 */
+		if (ret)	/* [한국어] 할당 실패 */
+			goto free_iommu;	/* [한국어] 여기까지 설정한 유닛들을 정리한다 */
 
-		if (translation_pre_enabled(iommu)) {
-			pr_info("Translation already enabled - trying to copy translation structures\n");
+		if (translation_pre_enabled(iommu)) {	/* [한국어] 크래시 커널이고 번역이 켜져 있다 */
+			pr_info("Translation already enabled - trying to copy translation structures\n");	/* [한국어] 인수인계를 시도한다 */
 
-			ret = copy_translation_tables(iommu);
-			if (ret) {
+			ret = copy_translation_tables(iommu);	/* [한국어] 앞선 커널의 설정을 옮긴다 */
+			if (ret) {	/* [한국어] 실패 */
 				/*
 				 * We found the IOMMU with translation
 				 * enabled - but failed to copy over the
@@ -2593,17 +2640,17 @@ static int __init init_dmars(void)
 				 * This might cause DMAR faults, but
 				 * probably the dump will still succeed.
 				 */
-				pr_err("Failed to copy translation tables from previous kernel for %s\n",
-				       iommu->name);
-				iommu_disable_translation(iommu);
-				clear_translation_pre_enabled(iommu);
+				pr_err("Failed to copy translation tables from previous kernel for %s\n",	/* [한국어] 진행 중이던 DMA 가 끊길 수 있음을 알린다 */
+				       iommu->name);	/* [한국어] 어느 유닛인지 */
+				iommu_disable_translation(iommu);	/* [한국어] 깨끗한 상태에서 다시 시작한다. 폴트가 날 수 있지만 덤프는 성공할 가능성이 높다 (위 영어 주석) */
+				clear_translation_pre_enabled(iommu);	/* [한국어] 인수인계 포기 */
 			} else {
-				pr_info("Copied translation tables from previous kernel for %s\n",
-					iommu->name);
+				pr_info("Copied translation tables from previous kernel for %s\n",	/* [한국어] 인수인계 성공 */
+					iommu->name);	/* [한국어] 어느 유닛인지 */
 			}
 		}
 
-		intel_svm_check(iommu);
+		intel_svm_check(iommu);	/* [한국어] 이 유닛에서 SVA 를 쓸 수 있는지 확인하고 기록한다 */
 	}
 
 	/*
@@ -2611,12 +2658,12 @@ static int __init init_dmars(void)
 	 * caches. This is required on some Intel X58 chipsets, otherwise the
 	 * flush_context function will loop forever and the boot hangs.
 	 */
-	for_each_active_iommu(iommu, drhd) {
-		iommu_flush_write_buffer(iommu);
-		iommu_set_root_entry(iommu);
+	for_each_active_iommu(iommu, drhd) {	/* [한국어] 2단계 — 모든 유닛의 큐가 준비된 뒤에 루트 테이블을 설치한다 */
+		iommu_flush_write_buffer(iommu);	/* [한국어] 쓰기 버퍼를 먼저 비운다 */
+		iommu_set_root_entry(iommu);	/* [한국어] 루트 주소를 알리고 캐시를 비운다. 이 순서가 아니면 일부 X58 칩셋에서 flush_context 가 영영 끝나지 않아 부팅이 멈춘다 (위 영어 주석) */
 	}
 
-	check_tylersburg_isoch();
+	check_tylersburg_isoch();	/* [한국어] 특정 칩셋의 아이소크로너스 DMA 결함을 확인한다 */
 
 	/*
 	 * for each drhd
@@ -2625,158 +2672,238 @@ static int __init init_dmars(void)
 	 *   global invalidate iotlb
 	 *   enable translation
 	 */
-	for_each_iommu(iommu, drhd) {
-		if (drhd->ignored) {
+	for_each_iommu(iommu, drhd) {	/* [한국어] 3단계 — 폴트 로그를 켜고 번역을 활성화한다 (위 영어 주석) */
+		if (drhd->ignored) {	/* [한국어] 무시하는 유닛이라도 */
 			/*
 			 * we always have to disable PMRs or DMA may fail on
 			 * this device
 			 */
-			if (force_on)
-				iommu_disable_protect_mem_regions(iommu);
-			continue;
+			if (force_on)	/* [한국어] 강제 모드면 */
+				iommu_disable_protect_mem_regions(iommu);	/* [한국어] 보호 영역만은 꺼야 한다 — 그러지 않으면 이 장치의 DMA 가 실패한다 (위 영어 주석) */
+			continue;	/* [한국어] 나머지 설정은 건너뛴다 */
 		}
 
-		iommu_flush_write_buffer(iommu);
+		iommu_flush_write_buffer(iommu);	/* [한국어] 번역을 켜기 전에 쓰기 버퍼를 비운다 */
 
-		if (ecap_prs(iommu->ecap)) {
+		if (ecap_prs(iommu->ecap)) {	/* [한국어] 페이지 요청 큐를 지원하는 유닛이면 */
 			/*
 			 * Call dmar_alloc_hwirq() with dmar_global_lock held,
 			 * could cause possible lock race condition.
 			 */
-			up_write(&dmar_global_lock);
-			ret = intel_iommu_enable_prq(iommu);
-			down_write(&dmar_global_lock);
-			if (ret)
-				goto free_iommu;
+			up_write(&dmar_global_lock);	/* [한국어] 전역 락을 잠깐 놓는다. dmar_alloc_hwirq 가 그 락을 다시 잡으려 해 교착이 되기 때문이다 (위 영어 주석) */
+			ret = intel_iommu_enable_prq(iommu);	/* [한국어] PRI 큐를 세운다 — SVA 의 요구 페이징이 이것 위에 선다 */
+			down_write(&dmar_global_lock);	/* [한국어] 다시 잡는다 */
+			if (ret)	/* [한국어] 큐 생성 실패 */
+				goto free_iommu;	/* [한국어] 여기까지 설정한 것을 정리한다 */
 		}
 
-		ret = dmar_set_interrupt(iommu);
-		if (ret)
-			goto free_iommu;
+		ret = dmar_set_interrupt(iommu);	/* [한국어] 폴트 인터럽트를 건다. 이것이 있어야 번역 실패가 보고된다 */
+		if (ret)	/* [한국어] 인터럽트 등록 실패 */
+			goto free_iommu;	/* [한국어] 정리 */
 	}
 
-	return 0;
+	return 0;	/* [한국어] 모든 유닛이 번역을 시작했다 */
 
-free_iommu:
-	for_each_active_iommu(iommu, drhd) {
-		disable_dmar_iommu(iommu);
-		free_dmar_iommu(iommu);
+free_iommu:	/* [한국어] 실패 경로 */
+	for_each_active_iommu(iommu, drhd) {	/* [한국어] 설정한 유닛들을 */
+		disable_dmar_iommu(iommu);	/* [한국어] 정지시키고 */
+		free_dmar_iommu(iommu);	/* [한국어] 자료구조를 반납한다 */
 	}
 
-	return ret;
+	return ret;	/* [한국어] 실패 이유 */
 }
 
+/*
+ * [한국어]
+ * init_no_remapping_devices - 켤 필요가 없거나 켜서는 안 되는 유닛을 표시한다
+ *
+ * 두 가지를 판별한다.
+ *
+ * 첫째, 담당 장치가 하나도 없는 유닛. ACPI 표에 있지만 그 장치들이 실제로는
+ * 존재하지 않는 경우이며, 켜 봐야 아무 일도 하지 않으므로 무시한다.
+ *
+ * 둘째, 그래픽만 담당하는 유닛. 이 표시(gfx_dedicated)가 두 곳에서 쓰인다 —
+ * intel_iommu=igfx_off 면 통째로 무시하고, kexec 로 넘어갈 때는 번역을 끄지 않는다.
+ * 후자는 디스플레이가 계속 DMA 를 내고 있어, 번역을 끄면 넘어가는 커널에서
+ * 화면이 깨지기 때문이다.
+ *
+ * 실행 컨텍스트: 부팅 초기화.
+ *
+ * 호출 체인: intel_iommu_init → [이 함수]
+ */
 static void __init init_no_remapping_devices(void)
 {
-	struct dmar_drhd_unit *drhd;
-	struct device *dev;
-	int i;
+	struct dmar_drhd_unit *drhd;	/* [한국어] 유닛 순회 커서 */
+	struct device *dev;	/* [한국어] 범위 표의 장치 순회 커서 */
+	int i;	/* [한국어] 인덱스 */
 
-	for_each_drhd_unit(drhd) {
-		if (!drhd->include_all) {
-			for_each_active_dev_scope(drhd->devices,
-						  drhd->devices_cnt, i, dev)
-				break;
+	for_each_drhd_unit(drhd) {	/* [한국어] 1단계 — 담당 장치가 하나도 없는 유닛을 걸러 낸다 */
+		if (!drhd->include_all) {	/* [한국어] '나머지 전부'를 담당하는 유닛이 아니면 */
+			for_each_active_dev_scope(drhd->devices,	/* [한국어] 범위 표에 살아 있는 장치가 있는지 */
+						  drhd->devices_cnt, i, dev)	/* [한국어] 하나만 찾으면 된다 */
+				break;	/* [한국어] 첫 장치에서 멈춘다 */
 			/* ignore DMAR unit if no devices exist */
-			if (i == drhd->devices_cnt)
-				drhd->ignored = 1;
+			if (i == drhd->devices_cnt)	/* [한국어] 끝까지 갔다 = 장치가 하나도 없다 */
+				drhd->ignored = 1;	/* [한국어] 이 유닛은 무시한다 — 담당할 장치가 없으니 켤 이유가 없다 */
 		}
 	}
 
-	for_each_active_drhd_unit(drhd) {
-		if (drhd->include_all)
-			continue;
+	for_each_active_drhd_unit(drhd) {	/* [한국어] 2단계 — 그래픽 전용 유닛을 식별한다 */
+		if (drhd->include_all)	/* [한국어] '나머지 전부'를 담당하면 그래픽 전용일 수 없다 */
+			continue;	/* [한국어] 건너뛴다 */
 
-		for_each_active_dev_scope(drhd->devices,
-					  drhd->devices_cnt, i, dev)
-			if (!dev_is_pci(dev) || !IS_GFX_DEVICE(to_pci_dev(dev)))
-				break;
-		if (i < drhd->devices_cnt)
-			continue;
+		for_each_active_dev_scope(drhd->devices,	/* [한국어] 이 유닛의 장치들 중 */
+					  drhd->devices_cnt, i, dev)	/* [한국어] 하나씩 */
+			if (!dev_is_pci(dev) || !IS_GFX_DEVICE(to_pci_dev(dev)))	/* [한국어] 그래픽이 아닌 것이 있으면 */
+				break;	/* [한국어] 전용이 아니다 */
+		if (i < drhd->devices_cnt)	/* [한국어] 중간에 멈췄다 = 그래픽 아닌 장치가 있다 */
+			continue;	/* [한국어] 다음 유닛으로 */
 
 		/* This IOMMU has *only* gfx devices. Either bypass it or
 		   set the gfx_mapped flag, as appropriate */
-		drhd->gfx_dedicated = 1;
-		if (disable_igfx_iommu)
-			drhd->ignored = 1;
+		drhd->gfx_dedicated = 1;	/* [한국어] 이 유닛은 그래픽만 담당한다. kexec 때 번역을 끄지 않는 예외가 이 표시를 본다 — 디스플레이가 계속 DMA 를 내고 있기 때문이다 */
+		if (disable_igfx_iommu)	/* [한국어] 통합 그래픽을 IOMMU 밖에 두라는 설정이면 */
+			drhd->ignored = 1;	/* [한국어] 이 유닛을 통째로 무시한다 (위 영어 주석) */
 	}
 }
 
-#ifdef CONFIG_SUSPEND
+#ifdef CONFIG_SUSPEND	/* [한국어] 서스펜드 지원이 켜진 빌드에서만 */
+/*
+ * [한국어]
+ * init_iommu_hw - 서스펜드에서 깨어난 뒤 하드웨어를 다시 세운다
+ *
+ * @return: 0 성공, 음수 실패
+ *
+ * 서스펜드는 IOMMU 레지스터를 초기화하므로 루트 테이블 주소부터 다시 알려야 한다.
+ * 소프트웨어 자료구조(페이지 테이블, 컨텍스트 테이블)는 메모리에 그대로 남아 있어
+ * 다시 만들 필요는 없다.
+ *
+ * 무효화 큐를 먼저 되살리는 순서가 중요하다. 아래의 iommu_set_root_entry 가
+ * 캐시를 비우는데, 그 무효화가 큐를 통해 나가기 때문이다.
+ *
+ * 실행 컨텍스트: 리쥼. 인터럽트가 꺼진 상태일 수 있다.
+ *
+ * 호출 체인: iommu_resume → [이 함수]
+ */
 static int init_iommu_hw(void)
 {
-	struct dmar_drhd_unit *drhd;
-	struct intel_iommu *iommu = NULL;
-	int ret;
+	struct dmar_drhd_unit *drhd;	/* [한국어] 유닛 순회 커서 */
+	struct intel_iommu *iommu = NULL;	/* [한국어] 현재 유닛 */
+	int ret;	/* [한국어] 결과 */
 
-	for_each_active_iommu(iommu, drhd) {
-		if (iommu->qi) {
-			ret = dmar_reenable_qi(iommu);
-			if (ret)
-				return ret;
+	for_each_active_iommu(iommu, drhd) {	/* [한국어] 먼저 모든 유닛의 무효화 큐를 되살린다 */
+		if (iommu->qi) {	/* [한국어] 큐를 쓰던 유닛이면 */
+			ret = dmar_reenable_qi(iommu);	/* [한국어] 큐를 다시 켠다. 아래에서 캐시를 비우려면 이것이 먼저여야 한다 */
+			if (ret)	/* [한국어] 실패 */
+				return ret;	/* [한국어] 리쥼 불가 */
 		}
 	}
 
-	for_each_iommu(iommu, drhd) {
-		if (drhd->ignored) {
+	for_each_iommu(iommu, drhd) {	/* [한국어] 그 다음 각 유닛을 복원한다 */
+		if (drhd->ignored) {	/* [한국어] 무시하는 유닛이라도 */
 			/*
 			 * we always have to disable PMRs or DMA may fail on
 			 * this device
 			 */
-			if (force_on)
-				iommu_disable_protect_mem_regions(iommu);
-			continue;
+			if (force_on)	/* [한국어] 강제 모드면 */
+				iommu_disable_protect_mem_regions(iommu);	/* [한국어] 보호 영역은 꺼야 한다 (위 영어 주석) */
+			continue;	/* [한국어] 나머지는 건너뛴다 */
 		}
 
-		iommu_flush_write_buffer(iommu);
-		iommu_set_root_entry(iommu);
-		iommu_enable_translation(iommu);
-		iommu_disable_protect_mem_regions(iommu);
+		iommu_flush_write_buffer(iommu);	/* [한국어] 쓰기 버퍼 정리 */
+		iommu_set_root_entry(iommu);	/* [한국어] 루트 테이블을 다시 알린다 — 서스펜드로 레지스터가 초기화되었다 */
+		iommu_enable_translation(iommu);	/* [한국어] 번역을 다시 켠다 */
+		iommu_disable_protect_mem_regions(iommu);	/* [한국어] BIOS 가 리쥼 중에 다시 켰을 수 있는 보호 영역을 끈다 */
 	}
 
-	return 0;
+	return 0;	/* [한국어] 하드웨어 상태 복원 완료 */
 }
 
+/*
+ * [한국어]
+ * iommu_flush_all - 모든 유닛의 모든 캐시를 비운다
+ *
+ * 서스펜드 직전에 부른다. 깨어난 뒤 하드웨어가 옛 번역을 들고 있으면 안 되고,
+ * 특히 하드웨어에 따라 서스펜드 중 캐시 내용이 어떻게 되는지 보장이 없기 때문이다.
+ *
+ * 실행 컨텍스트: 서스펜드 경로.
+ *
+ * 호출 체인: iommu_suspend → [이 함수]
+ */
 static void iommu_flush_all(void)
 {
-	struct dmar_drhd_unit *drhd;
-	struct intel_iommu *iommu;
+	struct dmar_drhd_unit *drhd;	/* [한국어] 유닛 순회 커서 */
+	struct intel_iommu *iommu;	/* [한국어] 현재 유닛 */
 
-	for_each_active_iommu(iommu, drhd) {
-		iommu->flush.flush_context(iommu, 0, 0, 0,
-					   DMA_CCMD_GLOBAL_INVL);
-		iommu->flush.flush_iotlb(iommu, 0, 0, 0,
-					 DMA_TLB_GLOBAL_FLUSH);
+	for_each_active_iommu(iommu, drhd) {	/* [한국어] 모든 유닛에 대해 */
+		iommu->flush.flush_context(iommu, 0, 0, 0,	/* [한국어] 컨텍스트 캐시 전체 무효화 */
+					   DMA_CCMD_GLOBAL_INVL);	/* [한국어] 전역 */
+		iommu->flush.flush_iotlb(iommu, 0, 0, 0,	/* [한국어] IOTLB 도 */
+					 DMA_TLB_GLOBAL_FLUSH);	/* [한국어] 전역. 서스펜드 전에 캐시를 비워, 깨어난 뒤 옛 번역이 남지 않게 한다 */
 	}
 }
 
+/*
+ * [한국어]
+ * iommu_suspend - 서스펜드 전에 IOMMU 를 정지시키고 상태를 저장한다
+ *
+ * @data:   syscore 콜백 인자 (쓰지 않는다)
+ * @return: 항상 0
+ *
+ * 하는 일은 세 가지다. 캐시를 비우고, 번역을 끄고, 하드웨어가 잃어버릴 레지스터
+ * 값을 소프트웨어에 보관한다.
+ *
+ * 보관하는 것이 폴트 인터럽트 설정뿐인 것에 주목할 것. 루트 테이블 주소는
+ * 소프트웨어가 이미 알고 있어 다시 계산할 수 있지만, MSI 메시지 주소와 데이터는
+ * 인터럽트 코어가 할당한 값이라 재현할 수 없다.
+ *
+ * 실행 컨텍스트: syscore 서스펜드. 인터럽트가 꺼진 상태.
+ *
+ * 호출 체인: syscore_ops.suspend == [이 함수]
+ */
 static int iommu_suspend(void *data)
 {
-	struct dmar_drhd_unit *drhd;
-	struct intel_iommu *iommu = NULL;
-	unsigned long flag;
+	struct dmar_drhd_unit *drhd;	/* [한국어] 유닛 순회 커서 */
+	struct intel_iommu *iommu = NULL;	/* [한국어] 현재 유닛 */
+	unsigned long flag;	/* [한국어] 인터럽트 상태 */
 
-	iommu_flush_all();
+	iommu_flush_all();	/* [한국어] 모든 캐시를 먼저 비운다 */
 
-	for_each_active_iommu(iommu, drhd) {
-		iommu_disable_translation(iommu);
+	for_each_active_iommu(iommu, drhd) {	/* [한국어] 각 유닛에 대해 */
+		iommu_disable_translation(iommu);	/* [한국어] 번역을 끈다 — 서스펜드 중에는 DMA 가 없어야 한다 */
 
-		raw_spin_lock_irqsave(&iommu->register_lock, flag);
+		raw_spin_lock_irqsave(&iommu->register_lock, flag);	/* [한국어] 레지스터 접근 직렬화 */
 
-		iommu->iommu_state[SR_DMAR_FECTL_REG] =
-			readl(iommu->reg + DMAR_FECTL_REG);
-		iommu->iommu_state[SR_DMAR_FEDATA_REG] =
-			readl(iommu->reg + DMAR_FEDATA_REG);
-		iommu->iommu_state[SR_DMAR_FEADDR_REG] =
-			readl(iommu->reg + DMAR_FEADDR_REG);
-		iommu->iommu_state[SR_DMAR_FEUADDR_REG] =
-			readl(iommu->reg + DMAR_FEUADDR_REG);
+		iommu->iommu_state[SR_DMAR_FECTL_REG] =	/* [한국어] 폴트 인터럽트 제어 레지스터를 */
+			readl(iommu->reg + DMAR_FECTL_REG);	/* [한국어] 저장해 둔다. 서스펜드로 하드웨어 상태가 사라지므로 소프트웨어가 기억해야 한다 */
+		iommu->iommu_state[SR_DMAR_FEDATA_REG] =	/* [한국어] 인터럽트 데이터 */
+			readl(iommu->reg + DMAR_FEDATA_REG);	/* [한국어] MSI 메시지의 데이터 부분 */
+		iommu->iommu_state[SR_DMAR_FEADDR_REG] =	/* [한국어] 인터럽트 주소 하위 */
+			readl(iommu->reg + DMAR_FEADDR_REG);	/* [한국어] MSI 도어벨 주소 */
+		iommu->iommu_state[SR_DMAR_FEUADDR_REG] =	/* [한국어] 인터럽트 주소 상위 */
+			readl(iommu->reg + DMAR_FEUADDR_REG);	/* [한국어] 64비트 주소의 나머지 절반 */
 
-		raw_spin_unlock_irqrestore(&iommu->register_lock, flag);
+		raw_spin_unlock_irqrestore(&iommu->register_lock, flag);	/* [한국어] 레지스터 접근 끝 */
 	}
-	return 0;
+	return 0;	/* [한국어] 서스펜드 준비 완료 */
 }
 
+/*
+ * [한국어]
+ * iommu_resume - 깨어난 뒤 IOMMU 를 복원한다
+ *
+ * @data: syscore 콜백 인자 (쓰지 않는다)
+ *
+ * 하드웨어를 다시 세우고 보관해 둔 폴트 인터럽트 설정을 되돌린다.
+ *
+ * 복원에 실패했을 때의 처리가 이 함수의 성격을 말해 준다. force_on(TXT 부팅)이면
+ * panic 이다 — 격리가 보장되지 않는 상태로 계속 동작하느니 멈추는 편이 낫다는
+ * 판단이며, 그것이 TXT 로 부팅한 이유이기도 하다.
+ *
+ * 실행 컨텍스트: syscore 리쥼. 인터럽트가 꺼진 상태.
+ *
+ * 호출 체인: syscore_ops.resume == [이 함수] → init_iommu_hw
+ */
 static void iommu_resume(void *data)
 {
 	struct dmar_drhd_unit *drhd;
