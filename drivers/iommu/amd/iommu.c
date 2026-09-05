@@ -305,15 +305,15 @@ static void update_dte256(struct amd_iommu *iommu, struct iommu_dev_data *dev_da
 		/* Existing DTE is valid. New DTE is not valid.  */
 		write_dte_lower128(ptr, new);	/* [한국어] 무효화하는 경우이므로 하위를 먼저 — V 를 내린 뒤에는 하드웨어가 읽지 않는다 */
 		write_dte_upper128(ptr, new);	/* [한국어] 그다음 상위 */
-		iommu_flush_dte_sync(iommu, dev_data->devid);
+		iommu_flush_dte_sync(iommu, dev_data->devid);	/* [한국어] 캐시를 지우고 완료를 기다린다 */
 	} else if (!FIELD_GET(DTE_FLAG_GV, ptr->data[0])) {	/* [한국어] (원 주석: 둘 다 유효하고, 기존에는 게스트 페이지 테이블이 없다) */
 		/*
 		 * Both DTEs are valid.
 		 * Existing DTE has no guest page table.
 		 */
 		write_dte_upper128(ptr, new);	/* [한국어] GV 가 서게 되므로 유효화와 같은 순서 */
-		write_dte_lower128(ptr, new);
-		iommu_flush_dte_sync(iommu, dev_data->devid);
+		write_dte_lower128(ptr, new);	/* [한국어] 무효화하는 경우이므로 하위를 먼저 */
+		iommu_flush_dte_sync(iommu, dev_data->devid);	/* [한국어] 캐시를 지우고 완료를 기다린다 */
 	} else if (!FIELD_GET(DTE_FLAG_GV, new->data[0])) {	/* [한국어] (원 주석: 기존에는 게스트 테이블이 있고 새 것에는 없다) */
 		/*
 		 * Both DTEs are valid.
@@ -321,8 +321,8 @@ static void update_dte256(struct amd_iommu *iommu, struct iommu_dev_data *dev_da
 		 * new DTE has no guest page table,
 		 */
 		write_dte_lower128(ptr, new);	/* [한국어] GV 가 내려가므로 무효화와 같은 순서 */
-		write_dte_upper128(ptr, new);
-		iommu_flush_dte_sync(iommu, dev_data->devid);
+		write_dte_upper128(ptr, new);	/* [한국어] GV 가 서게 되므로 유효화와 같은 순서로 상위를 먼저 */
+		iommu_flush_dte_sync(iommu, dev_data->devid);	/* [한국어] 캐시를 지우고 완료를 기다린다 */
 	} else if (FIELD_GET(DTE_GPT_LEVEL_MASK, ptr->data[2]) !=	/* [한국어] (원 주석: 둘 다 게스트 테이블이 있는데 레벨 수가 다르다) */
 		   FIELD_GET(DTE_GPT_LEVEL_MASK, new->data[2])) {	/* [한국어] 상위와 하위를 모두 고쳐야 해 안전한 순서가 없다 */
 		/*
@@ -340,7 +340,7 @@ static void update_dte256(struct amd_iommu *iommu, struct iommu_dev_data *dev_da
 		/* Then update DTE */
 		write_dte_upper128(ptr, new);	/* [한국어] (원 주석: 그다음 DTE 를 갱신한다) 이제 꺼진 항목이라 순서가 자유롭다 */
 		write_dte_lower128(ptr, new);	/* [한국어] 마지막에 V 를 세워 켠다 */
-		iommu_flush_dte_sync(iommu, dev_data->devid);
+		iommu_flush_dte_sync(iommu, dev_data->devid);	/* [한국어] 레벨을 바꾼 뒤 캐시를 지운다 */
 	} else {
 		/*
 		 * Both DTEs are valid and have guest page table,
@@ -783,13 +783,13 @@ static int clone_alias(struct pci_dev *pdev_origin, u16 alias, void *data)
 	alias_data = find_dev_data(iommu, alias);	/* [한국어] (원 주석: 별칭을 설정한다) 없으면 여기서 만들어진다 */
 	if (!alias_data) {	/* [한국어] 만들지 못했다 */
 		pr_err("%s : Failed to get alias dev_data for 0x%x\n", __func__, alias);	/* [한국어] 메모리 부족일 가능성이 높다 */
-		ret = -EINVAL;
-		goto out;
+		ret = -EINVAL;	/* [한국어] 별칭 상태를 못 만들면 항목도 맞출 수 없다 */
+		goto out;	/* [한국어] 정리 경로로 */
 	}
 	update_dte256(iommu, alias_data, &new);	/* [한국어] 별칭 항목에도 같은 내용을 쓴다 — 하드웨어는 이 이름으로 요청을 본다 */
 
 	amd_iommu_set_rlookup_table(iommu, alias);	/* [한국어] 그 별칭 id 로 오는 이벤트도 이 유닛이 처리한다 */
-out:
+out:	/* [한국어] 실패든 성공이든 여기로 모인다 */
 	return ret;	/* [한국어] 성공이면 0 */
 }
 
@@ -1532,7 +1532,7 @@ static void amd_iommu_report_rmp_fault(struct amd_iommu *iommu, volatile u32 *ev
 /* [한국어] RW 비트가 서 있으면 쓰기 요청.
  * report_iommu_fault 에 넘길 방향을 정하는 데 쓴다. */
 #define IS_WRITE_REQUEST(flags)			\
-	((flags) & EVENT_FLAG_RW)
+	((flags) & EVENT_FLAG_RW)	/* [한국어] RW 비트가 서 있으면 쓰기 요청 */
 
 /*
  * [한국어]
@@ -1607,7 +1607,7 @@ static void amd_iommu_report_page_fault(struct amd_iommu *iommu,
 			domain_id, address, flags);
 	}
 
-out:
+out:	/* [한국어] PCI 참조를 놓고 나가는 공통 경로 */
 	if (pdev)	/* [한국어] 참조를 */
 		pci_dev_put(pdev);	/* [한국어] 놓는다 */
 }
@@ -1647,7 +1647,7 @@ static void iommu_print_event(struct amd_iommu *iommu, void *__evt)
 	u64 address, ctrl;	/* [한국어] 사건 주소와 제어 레지스터 */
 	u32 pasid;	/* [한국어] 도메인 id 또는 PASID — 같은 자리를 종류에 따라 달리 읽는다 */
 
-retry:
+retry:	/* [한국어] 항목이 아직 다 쓰이지 않았으면 여기로 돌아온다 */
 	type    = (event[1] >> EVENT_TYPE_SHIFT)  & EVENT_TYPE_MASK;	/* [한국어] 사건 종류 */
 	devid   = (event[0] >> EVENT_DEVID_SHIFT) & EVENT_DEVID_MASK;	/* [한국어] 요청을 낸 장치 */
 	pasid   = (event[0] & EVENT_DOMID_MASK_HI) |	/* [한국어] 상위 4비트와 */
@@ -1769,7 +1769,7 @@ static void iommu_poll_events(struct amd_iommu *iommu)
 
 }
 
-#ifdef CONFIG_IRQ_REMAP
+#ifdef CONFIG_IRQ_REMAP	/* [한국어] 인터럽트 재매핑을 켠 커널에서만 쓰이는 부분 */
 static int (*iommu_ga_log_notifier)(u32);	/* [한국어] KVM 이 등록하는 콜백. 놓친 게스트 인터럽트를 태그로 알린다 */
 
 /*
@@ -1864,7 +1864,6 @@ static void iommu_poll_ga_log(struct amd_iommu *iommu)
 	}
 }
 
-static void
 /*
  * [한국어]
  * amd_iommu_set_pci_msi_domain - 장치의 MSI 를 재매핑 도메인 아래로 옮긴다
@@ -1878,6 +1877,7 @@ static void
  * 기본 도메인을 쓰는 장치만 바꾸는 이유: 이미 다른 도메인이 배정된 장치를
  * 덮어쓰면 안 된다. VMD 아래 장치들이 그런 경우다.
  */
+static void
 amd_iommu_set_pci_msi_domain(struct device *dev, struct amd_iommu *iommu)
 {
 	if (!irq_remapping_enabled || !dev_is_pci(dev) ||	/* [한국어] 재매핑이 꺼져 있거나 PCI 장치가 아니거나 */
@@ -1888,12 +1888,12 @@ amd_iommu_set_pci_msi_domain(struct device *dev, struct amd_iommu *iommu)
 }
 
 #else /* CONFIG_IRQ_REMAP */
-static inline void
 /*
  * [한국어] 재매핑을 끈 커널용 빈 구현.
  * 도메인 자체가 존재하지 않으므로 바꿀 것이 없다. 호출부를 #ifdef 로
  * 감싸지 않기 위해 빈 함수를 둔다.
  */
+static inline void
 amd_iommu_set_pci_msi_domain(struct device *dev, struct amd_iommu *iommu) { }
 #endif /* !CONFIG_IRQ_REMAP */
 
@@ -2019,7 +2019,7 @@ irqreturn_t amd_iommu_int_thread_pprlog(int irq, void *data)
  */
 irqreturn_t amd_iommu_int_thread_galog(int irq, void *data)
 {
-#ifdef CONFIG_IRQ_REMAP
+#ifdef CONFIG_IRQ_REMAP	/* [한국어] 재매핑을 끈 커널에서는 GA 로그 자체가 없다 */
 	amd_iommu_handle_irq(data, "GA", MMIO_STATUS_GALOG_INT_MASK,	/* [한국어] GA 로그의 비트 */
 			     MMIO_STATUS_GALOG_OVERFLOW_MASK,	/* [한국어] 오버플로 비트 */
 			     iommu_poll_ga_log, amd_iommu_restart_ga_log);	/* [한국어] 놓친 게스트 인터럽트를 KVM 에 넘기는 함수 */
@@ -2375,7 +2375,7 @@ static void build_inv_iotlb_pages(struct iommu_cmd *cmd, u16 devid, int qdep,
 	cmd->data[1]  = devid;	/* [한국어] 형식상 두 번 실린다 */
 	cmd->data[2]  = lower_32_bits(inv_address);	/* [한국어] 주소 하위 */
 	cmd->data[3]  = upper_32_bits(inv_address);	/* [한국어] 상위 */
-	if (gn) {
+	if (gn) {	/* [한국어] PASID 별 무효화면 */
 		cmd->data[0] |= ((pasid >> 8) & 0xff) << 16;	/* [한국어] PASID 의 상위 바이트 */
 		cmd->data[1] |= (pasid & 0xff) << 16;	/* [한국어] 하위 바이트 — 연속된 자리가 없어 두 워드에 나뉜다 */
 		cmd->data[2] |= CMD_INV_IOMMU_PAGES_GN_MASK;	/* [한국어] PASID 별 무효화임을 표시 */
@@ -2495,7 +2495,7 @@ static int __iommu_queue_command_sync(struct amd_iommu *iommu,
 	u32 left, next_tail;	/* [한국어] 남은 자리와 다음 꼬리 위치 */
 
 	next_tail = (iommu->cmd_buf_tail + sizeof(*cmd)) % CMD_BUFFER_SIZE;	/* [한국어] 이 명령을 넣으면 꼬리가 어디로 가는가 */
-again:
+again:	/* [한국어] 하드웨어가 명령을 소비하기를 기다린 뒤 다시 잰다 */
 	left      = (iommu->cmd_buf_head - next_tail) % CMD_BUFFER_SIZE;	/* [한국어] 하드웨어가 처리한 지점까지의 여유 */
 
 	if (left <= 0x20) {	/* [한국어] 완료 대기가 들어갈 자리를 남겨 둬야 한다 — 그것마저 못 넣으면 교착이다 */
@@ -3025,7 +3025,7 @@ static int device_flush_dte(struct iommu_dev_data *dev_data)
 	alias = pci_seg->alias_table[dev_data->devid];	/* [한국어] 표가 알려 준 별칭 */
 	if (alias != dev_data->devid) {	/* [한국어] 자기 자신이 아니면 */
 		ret = iommu_flush_dte(iommu, alias);	/* [한국어] 위 순회에 포함되지 않았을 수 있어 따로 지운다 */
-		if (ret)
+		if (ret)	/* [한국어] 별칭 무효화가 실패했으면 */
 			return ret;	/* [한국어] 실패하면 보고 */
 	}
 
@@ -3255,7 +3255,7 @@ void amd_iommu_domain_flush_pages(struct protection_domain *domain,
 	}
 
 	/* Wait until IOMMU TLB and all device IOTLB flushes are complete */
-	domain_flush_complete(domain);
+	domain_flush_complete(domain);	/* [한국어] 모든 무효화가 끝난 것을 확인하고 돌아간다 */
 }
 
 /* Flush the whole IO/TLB for a given protection domain - including PDE */
@@ -4100,7 +4100,7 @@ static int pdom_attach_iommu(struct amd_iommu *iommu,
 		goto out_unlock;	/* [한국어] 풀고 나간다 */
 	}
 
-out_unlock:
+out_unlock:	/* [한국어] 경합에 졌거나 이미 있었으면 여기로 */
 	spin_unlock_irqrestore(&pdom->lock, flags);	/* [한국어] 배열 갱신 끝 */
 	return ret;	/* [한국어] 성패 */
 }
@@ -4218,7 +4218,7 @@ static int attach_device(struct device *dev,
 	/* Update device table */
 	dev_update_dte(dev_data, true);	/* [한국어] (원 주석: 장치 테이블 갱신) 하드웨어가 새 매핑을 보기 시작하는 순간 */
 
-out:
+out:	/* [한국어] 성공·실패 모두 뮤텍스를 풀고 나간다 */
 	mutex_unlock(&dev_data->mutex);	/* [한국어] 장치 상태 보호 해제 */
 
 	return ret;	/* [한국어] 성패 */
@@ -4289,7 +4289,7 @@ static void detach_device(struct device *dev)
 	/* decrease reference counters - needs to happen after the flushes */
 	pdom_detach_iommu(iommu, domain);	/* [한국어] (원 주석: 참조 감소 — 플러시 뒤여야 한다) 먼저 내리면 명령 보낼 유닛을 잃는다 */
 
-out:
+out:	/* [한국어] 이미 떨어져 있었으면 여기로 */
 	mutex_unlock(&dev_data->mutex);	/* [한국어] 장치 상태 보호 해제 */
 }
 
@@ -4376,7 +4376,7 @@ static struct iommu_device *amd_iommu_probe_device(struct device *dev)
 	if (dev_is_pci(dev))	/* [한국어] PCI 장치면 */
 		pci_prepare_ats(to_pci_dev(dev), PAGE_SHIFT);	/* [한국어] ATS 무효화 단위를 페이지 크기로 맞춘다 */
 
-out_err:
+out_err:	/* [한국어] 실패해도 반환값만 다를 뿐 같은 곳으로 모인다 */
 	return iommu_dev;	/* [한국어] 담당 유닛 또는 오류 */
 }
 
@@ -4654,12 +4654,12 @@ static void amd_iommu_iotlb_sync(struct iommu_domain *domain,
 	iommu_put_pages_list(&gather->freelist);	/* [한국어] 비로소 페이지를 반납한다 — 순서가 바뀌면 재할당된 메모리를 하드웨어가 읽는다 */
 }
 
-static const struct pt_iommu_driver_ops amd_hw_driver_ops_v1 = {
+static const struct pt_iommu_driver_ops amd_hw_driver_ops_v1 = {	/* [한국어] generic_pt 계층이 드라이버에 되묻는 콜백들 */
 	.get_top_lock = amd_iommu_get_top_lock,	/* [한국어] 최상위 교체 시 쓸 락을 드라이버에게 물어본다 */
 	.change_top = amd_iommu_change_top,	/* [한국어] 단계가 늘 때 모든 DTE 를 다시 쓴다 */
 };
 
-static const struct iommu_domain_ops amdv1_ops = {
+static const struct iommu_domain_ops amdv1_ops = {	/* [한국어] v1 도메인이 코어에 제공하는 연산 */
 	IOMMU_PT_DOMAIN_OPS(amdv1),	/* [한국어] map/unmap 등은 공용 v1 구현이 채운다 */
 	.iotlb_sync_map = amd_iommu_iotlb_sync_map,
 	.flush_iotlb_all = amd_iommu_flush_iotlb_all,
@@ -4669,7 +4669,7 @@ static const struct iommu_domain_ops amdv1_ops = {
 	.enforce_cache_coherency = amd_iommu_enforce_cache_coherency,
 };
 
-static const struct iommu_dirty_ops amdv1_dirty_ops = {
+static const struct iommu_dirty_ops amdv1_dirty_ops = {	/* [한국어] v1 에서만 쓰는 더티 추적 연산 */
 	IOMMU_PT_DIRTY_OPS(amdv1),	/* [한국어] 더티 비트 읽기·정리는 공용 구현이 채운다 */
 	.set_dirty_tracking = amd_iommu_set_dirty_tracking,	/* [한국어] 추적을 켜고 끄는 것만 드라이버가 맡는다 */
 };
@@ -4755,7 +4755,7 @@ static struct iommu_domain *amd_iommu_domain_alloc_paging_v1(struct device *dev,
 	return &domain->domain;	/* [한국어] 공용 도메인으로 돌려준다 */
 }
 
-static const struct iommu_domain_ops amdv2_ops = {
+static const struct iommu_domain_ops amdv2_ops = {	/* [한국어] v2 도메인이 코어에 제공하는 연산 */
 	IOMMU_PT_DOMAIN_OPS(x86_64),	/* [한국어] map/unmap 등은 공용 x86-64 구현이 채운다 */
 	.iotlb_sync_map = amd_iommu_iotlb_sync_map,
 	.flush_iotlb_all = amd_iommu_flush_iotlb_all,
@@ -4857,60 +4857,82 @@ static inline bool is_nest_parent_supported(u32 flags)
 	       check_feature2(FEATURE_GCR3TRPMODE);	/* [한국어] GCR3 표를 2단계로 걷는 모드 */
 }
 
+/*
+ * [한국어]
+ * amd_iommu_domain_alloc_paging_flags - 요청 속성에 맞는 도메인 형식을 고른다
+ *
+ * @dev: 이 도메인을 쓸 장치.
+ * @flags: iommufd 가 요청한 속성.
+ * @user_data: 벤더별 추가 데이터(이 드라이버는 받지 않는다).
+ * @return: 새 도메인, 지원하지 않는 조합이면 ERR_PTR(-EOPNOTSUPP).
+ *
+ * v1 과 v2 중 무엇을 만들지 정하는 분기점이다. 속성마다 필요한 형식이
+ * 정해져 있다.
+ *  - 더티 추적과 중첩 부모: v1 만 지원한다.
+ *  - PASID: v2 가 필요하다(프로세스 페이지 테이블과 같은 형식이라야 한다).
+ *  - 아무 요청도 없으면 커맨드라인이 고른 쪽을 먼저 시도하고, 그 형식을
+ *    하드웨어가 못 걸면 다른 쪽으로 넘어간다.
+ *
+ * 지원 여부를 미리 확인해 break 로 빠지는 구조라, 조건에 맞지 않으면
+ * 마지막의 -EOPNOTSUPP 로 떨어진다 — 요청과 다른 형식을 조용히 내주지 않는다.
+ *
+ * 호출 체인:
+ *   iommu 코어/iommufd → [이 함수] → amd_iommu_domain_alloc_paging_v1/v2()
+ */
 static struct iommu_domain *
 amd_iommu_domain_alloc_paging_flags(struct device *dev, u32 flags,
 				    const struct iommu_user_data *user_data)
 
 {
-	struct amd_iommu *iommu = get_amd_iommu_from_dev(dev);
-	const u32 supported_flags = IOMMU_HWPT_ALLOC_DIRTY_TRACKING |
-						IOMMU_HWPT_ALLOC_PASID |
-						IOMMU_HWPT_ALLOC_NEST_PARENT;
+	struct amd_iommu *iommu = get_amd_iommu_from_dev(dev);	/* [한국어] 더티 추적 지원 여부를 유닛에 묻는다 */
+	const u32 supported_flags = IOMMU_HWPT_ALLOC_DIRTY_TRACKING |	/* [한국어] 이 드라이버가 아는 속성들 */
+						IOMMU_HWPT_ALLOC_PASID |	/* [한국어] PASID 를 쓰겠다 */
+						IOMMU_HWPT_ALLOC_NEST_PARENT;	/* [한국어] 중첩 변환의 부모가 되겠다 */
 
-	if ((flags & ~supported_flags) || user_data)
-		return ERR_PTR(-EOPNOTSUPP);
+	if ((flags & ~supported_flags) || user_data)	/* [한국어] 모르는 속성이나 벤더 데이터가 오면 */
+		return ERR_PTR(-EOPNOTSUPP);	/* [한국어] 조용히 무시하지 않고 거절한다 */
 
-	switch (flags & supported_flags) {
-	case IOMMU_HWPT_ALLOC_DIRTY_TRACKING:
-	case IOMMU_HWPT_ALLOC_NEST_PARENT:
-	case IOMMU_HWPT_ALLOC_DIRTY_TRACKING | IOMMU_HWPT_ALLOC_NEST_PARENT:
+	switch (flags & supported_flags) {	/* [한국어] 조합에 따라 형식을 고른다 */
+	case IOMMU_HWPT_ALLOC_DIRTY_TRACKING:	/* [한국어] 더티 추적만 */
+	case IOMMU_HWPT_ALLOC_NEST_PARENT:	/* [한국어] 중첩 부모만 */
+	case IOMMU_HWPT_ALLOC_DIRTY_TRACKING | IOMMU_HWPT_ALLOC_NEST_PARENT:	/* [한국어] 둘 다 — 모두 v1 만 지원한다 */
 		/*
 		 * Allocate domain with v1 page table for dirty tracking
 		 * and/or Nest parent.
 		 */
-		if ((flags & IOMMU_HWPT_ALLOC_DIRTY_TRACKING) &&
-		    !amd_iommu_hd_support(iommu))
-			break;
+		if ((flags & IOMMU_HWPT_ALLOC_DIRTY_TRACKING) &&	/* [한국어] (원 주석: 더티 추적과 중첩 부모는 v1 표로 만든다) */
+		    !amd_iommu_hd_support(iommu))	/* [한국어] 하드웨어가 더티 갱신을 못 하면 */
+			break;	/* [한국어] 요청을 들어줄 수 없다 */
 
-		if ((flags & IOMMU_HWPT_ALLOC_NEST_PARENT) &&
-		    !is_nest_parent_supported(flags))
-			break;
+		if ((flags & IOMMU_HWPT_ALLOC_NEST_PARENT) &&	/* [한국어] 중첩 부모를 요청했는데 */
+		    !is_nest_parent_supported(flags))	/* [한국어] 필요한 세 기능이 없으면 */
+			break;	/* [한국어] 거절한다 */
 
-		return amd_iommu_domain_alloc_paging_v1(dev, flags);
-	case IOMMU_HWPT_ALLOC_PASID:
+		return amd_iommu_domain_alloc_paging_v1(dev, flags);	/* [한국어] AMD 고유 형식 */
+	case IOMMU_HWPT_ALLOC_PASID:	/* [한국어] PASID 를 쓰겠다면 */
 		/* Allocate domain with v2 page table if IOMMU supports PASID. */
-		if (!amd_iommu_pasid_supported())
-			break;
-		return amd_iommu_domain_alloc_paging_v2(dev, flags);
-	case 0: {
-		struct iommu_domain *ret;
+		if (!amd_iommu_pasid_supported())	/* [한국어] (원 주석: IOMMU 가 PASID 를 지원하면 v2 표로 만든다) */
+			break;	/* [한국어] 못 쓰면 거절 */
+		return amd_iommu_domain_alloc_paging_v2(dev, flags);	/* [한국어] 프로세스 페이지 테이블과 같은 형식 */
+	case 0: {	/* [한국어] 아무 요청도 없으면 */
+		struct iommu_domain *ret;	/* [한국어] 첫 시도의 결과 */
 
 		/* If nothing specific is required use the kernel commandline default */
-		if (amd_iommu_pgtable == PD_MODE_V1) {
-			ret = amd_iommu_domain_alloc_paging_v1(dev, flags);
-			if (ret != ERR_PTR(-EOPNOTSUPP))
-				return ret;
-			return amd_iommu_domain_alloc_paging_v2(dev, flags);
+		if (amd_iommu_pgtable == PD_MODE_V1) {	/* [한국어] (원 주석: 특별한 요구가 없으면 커맨드라인 기본값을 쓴다) */
+			ret = amd_iommu_domain_alloc_paging_v1(dev, flags);	/* [한국어] v1 을 먼저 */
+			if (ret != ERR_PTR(-EOPNOTSUPP))	/* [한국어] 하드웨어가 걸 수 있으면 */
+				return ret;	/* [한국어] 그대로 쓴다 */
+			return amd_iommu_domain_alloc_paging_v2(dev, flags);	/* [한국어] 못 걸면 다른 형식으로 */
 		}
-		ret = amd_iommu_domain_alloc_paging_v2(dev, flags);
-		if (ret != ERR_PTR(-EOPNOTSUPP))
-			return ret;
-		return amd_iommu_domain_alloc_paging_v1(dev, flags);
+		ret = amd_iommu_domain_alloc_paging_v2(dev, flags);	/* [한국어] 기본이 v2 면 그쪽부터 */
+		if (ret != ERR_PTR(-EOPNOTSUPP))	/* [한국어] 걸 수 있으면 */
+			return ret;	/* [한국어] 그대로 */
+		return amd_iommu_domain_alloc_paging_v1(dev, flags);	/* [한국어] 아니면 v1 로 */
 	}
-	default:
+	default:	/* [한국어] 그 밖의 조합은 아래에서 거절된다 */
 		break;
 	}
-	return ERR_PTR(-EOPNOTSUPP);
+	return ERR_PTR(-EOPNOTSUPP);	/* [한국어] 요청과 다른 형식을 조용히 내주지 않는다 */
 }
 
 /*
@@ -4988,7 +5010,7 @@ static int blocked_domain_set_dev_pasid(struct iommu_domain *domain,
 	return 0;	/* [한국어] 실패할 수 없는 경로 */
 }
 
-static struct iommu_domain blocked_domain = {
+static struct iommu_domain blocked_domain = {	/* [한국어] 모든 DMA 를 막는 전역 도메인 — 인스턴스가 하나면 충분하다 */
 	.type = IOMMU_DOMAIN_BLOCKED,	/* [한국어] 상태가 없는 이름뿐인 도메인 — 실제 동작은 DTE 를 변환 불가로 만드는 것이다 */
 	.ops = &(const struct iommu_domain_ops) {
 		.attach_dev     = blocked_domain_attach_device,	/* [한국어] 장치 전체를 막는다 */
@@ -4996,7 +5018,7 @@ static struct iommu_domain blocked_domain = {
 	}
 };
 
-static struct protection_domain identity_domain;
+static struct protection_domain identity_domain;	/* [한국어] 변환 없이 통과시키는 전역 도메인 */
 
 /*
  * [한국어]
@@ -5024,7 +5046,7 @@ static int amd_iommu_identity_attach(struct iommu_domain *dom, struct device *de
 	return amd_iommu_attach_device(dom, dev, old);	/* [한국어] 나머지는 일반 attach 와 같다 */
 }
 
-static const struct iommu_domain_ops identity_domain_ops = {
+static const struct iommu_domain_ops identity_domain_ops = {	/* [한국어] 통과 도메인은 attach 만 따로 가로챈다 */
 	.attach_dev = amd_iommu_identity_attach,	/* [한국어] SNP 확인만 더한 일반 attach */
 };
 
@@ -5100,7 +5122,7 @@ static int amd_iommu_attach_device(struct iommu_domain *dom, struct device *dev,
 
 	ret = attach_device(dev, domain);	/* [한국어] 새 도메인에 */
 
-#ifdef CONFIG_IRQ_REMAP
+#ifdef CONFIG_IRQ_REMAP	/* [한국어] 재매핑을 켠 커널에서만 필요한 필드 */
 	if (AMD_IOMMU_GUEST_IR_VAPIC(amd_iommu_guest_ir)) {	/* [한국어] 게스트 인터럽트 직접 전달을 쓰는 구성인가 */
 		if (dom->type == IOMMU_DOMAIN_UNMANAGED)	/* [한국어] 사용자 공간에 넘긴 장치만 */
 			dev_data->use_vapic = 1;	/* [한국어] 게스트 vCPU 로 인터럽트를 직접 보낸다 */
@@ -5136,7 +5158,7 @@ static bool amd_iommu_capable(struct device *dev, enum iommu_cap cap)
 	case IOMMU_CAP_PRE_BOOT_PROTECTION:	/* [한국어] 부팅 전부터 보호되고 있었나 */
 		return amdr_ivrs_remap_support;	/* [한국어] 펌웨어가 재매핑을 켜 두었는지 IVRS 가 알려 준다 */
 	case IOMMU_CAP_ENFORCE_CACHE_COHERENCY:	/* [한국어] 일관성 강제를 요청할 수 있나 */
-		return true;
+		return true;	/* [한국어] 일관성 강제를 요청할 수 있다 */
 	case IOMMU_CAP_DIRTY_TRACKING: {	/* [한국어] 더티 추적 */
 		struct amd_iommu *iommu = get_amd_iommu_from_dev(dev);	/* [한국어] 유닛마다 다를 수 있다 */
 
@@ -5148,7 +5170,7 @@ static bool amd_iommu_capable(struct device *dev, enum iommu_cap cap)
 		return amd_iommu_iotlb_sup &&	/* [한국어] 유닛이 장치 IOTLB 무효화를 보낼 수 있고 */
 			 (dev_data->flags & AMD_IOMMU_DEVICE_FLAG_ATS_SUP);	/* [한국어] 장치도 ATS 를 광고해야 한다 */
 	}
-	default:
+	default:	/* [한국어] 모르는 능력은 아래에서 거짓으로 답한다 */
 		break;
 	}
 
@@ -5375,7 +5397,7 @@ static bool amd_iommu_enforce_cache_coherency(struct iommu_domain *domain)
 	return true;	/* [한국어] (원 주석: IOMMU_PTE_FC 는 늘 설정된다) 켜고 끌 것이 없다 */
 }
 
-const struct iommu_ops amd_iommu_ops = {
+const struct iommu_ops amd_iommu_ops = {	/* [한국어] 이 드라이버가 iommu 코어에 등록하는 전체 연산 집합 */
 	.capable = amd_iommu_capable,	/* [한국어] 하드웨어 능력 질의 */
 	.hw_info = amd_iommufd_hw_info,	/* [한국어] iommufd 에 하드웨어 정보를 넘긴다 */
 	.blocked_domain = &blocked_domain,	/* [한국어] 모든 DMA 를 막는 전역 도메인 */
@@ -5394,7 +5416,7 @@ const struct iommu_ops amd_iommu_ops = {
 	.viommu_init = amd_iommufd_viommu_init,	/* [한국어] 그 객체를 초기화한다 */
 };
 
-#ifdef CONFIG_IRQ_REMAP
+#ifdef CONFIG_IRQ_REMAP	/* [한국어] 여기부터가 인터럽트 재매핑 구현이다 */
 
 /*****************************************************************************
  *
@@ -5403,7 +5425,7 @@ const struct iommu_ops amd_iommu_ops = {
  *****************************************************************************/
 
 static struct irq_chip amd_ir_chip;
-static DEFINE_SPINLOCK(iommu_table_lock);
+static DEFINE_SPINLOCK(iommu_table_lock);	/* [한국어] 인터럽트 재매핑 표 조회 배열을 지키는 전역 락 */
 
 /*
  * [한국어]
@@ -5479,7 +5501,7 @@ static void iommu_flush_irt_and_complete(struct amd_iommu *iommu, u16 devid)
 	wait_on_sem(iommu, data);	/* [한국어] 하드웨어가 그 값을 쓸 때까지 */
 	return;	/* [한국어] 무효화가 끝났다 */
 
-out_err:
+out_err:	/* [한국어] 명령을 넣지 못했으면 락만 풀고 나간다 */
 	raw_spin_unlock_irqrestore(&iommu->lock, flags);	/* [한국어] 실패 경로도 락은 풀어야 한다 */
 }
 
@@ -5534,7 +5556,7 @@ static void set_dte_irq_entry(struct amd_iommu *iommu, u16 devid,
 	new |= DTE_IRQ_REMAP_ENABLE;	/* [한국어] 재매핑 활성 */
 	WRITE_ONCE(dte->data[2], new);	/* [한국어] 인터럽트 전용 절반만 갱신한다 */
 
-	if (dev_data)
+	if (dev_data)	/* [한국어] 아직 probe 전이면 경쟁 상대가 없다 */
 		spin_unlock(&dev_data->dte_lock);	/* [한국어] 읽기-수정-쓰기 끝 */
 }
 
@@ -5744,10 +5766,10 @@ static struct irq_remap_table *alloc_irq_table(struct amd_iommu *iommu,
 	if (devid != alias)	/* [한국어] IVRS 별칭이 따로 있으면 */
 		set_remap_table_entry(iommu, alias, table);	/* [한국어] 위 순회에 없을 수 있어 따로 연결한다 */
 
-out_wait:
+out_wait:	/* [한국어] 표를 공유하게 된 경우 — 넣어 둔 명령을 기다린다 */
 	iommu_completion_wait(iommu);	/* [한국어] 넣어 둔 DTE 무효화가 모두 끝나기를 */
 
-out_unlock:
+out_unlock:	/* [한국어] 이미 있었던 경우 — 기다릴 명령이 없다 */
 	spin_unlock_irqrestore(&iommu_table_lock, flags);	/* [한국어] 조회 배열 보호 해제 */
 
 	if (new_table) {	/* [한국어] 경합에 져서 쓰이지 않았으면 */
@@ -5820,7 +5842,7 @@ static int alloc_irq_index(struct amd_iommu *iommu, u16 devid, int count,
 
 	index = -ENOSPC;	/* [한국어] 표가 가득 찼다 */
 
-out:
+out:	/* [한국어] 연속된 자리를 찾았으면 여기로 */
 	raw_spin_unlock_irqrestore(&table->lock, flags);	/* [한국어] 할당 보호 해제 */
 
 	return index;	/* [한국어] 첫 항목의 색인 또는 오류 */
@@ -6157,7 +6179,7 @@ static void irte_ga_set_affinity(struct amd_iommu *iommu, void *entry, u16 devid
 	}
 }
 
-#define IRTE_ALLOCATED (~1U)
+#define IRTE_ALLOCATED (~1U)	/* [한국어] 유효 비트만 꺼진 0 이 아닌 값 — 자리 표시 전용 */
 /*
  * [한국어]
  * irte_set_allocated - 32비트 항목 자리를 "사용 중"으로 표시한다
@@ -6282,13 +6304,13 @@ static int get_devid(struct irq_alloc_info *info)
 	case X86_IRQ_ALLOC_TYPE_PCI_MSI:	/* [한국어] 일반 MSI */
 	case X86_IRQ_ALLOC_TYPE_PCI_MSIX:	/* [한국어] 와 MSI-X 는 */
 		return get_device_sbdf_id(msi_desc_to_dev(info->desc));	/* [한국어] 실제 PCI 주소가 있다 */
-	default:
+	default:	/* [한국어] 그 밖의 종류는 인터럽트를 낼 수 없다 */
 		WARN_ON_ONCE(1);	/* [한국어] 모르는 종류는 코드 쪽 누락이다 */
 		return -1;	/* [한국어] 호출자가 실패로 처리한다 */
 	}
 }
 
-struct irq_remap_ops amd_iommu_irq_ops = {
+struct irq_remap_ops amd_iommu_irq_ops = {	/* [한국어] x86 인터럽트 재매핑 공통 계층이 부르는 훅 */
 	.prepare		= amd_iommu_prepare,	/* [한국어] 부팅 초기 하드웨어 준비 */
 	.enable			= amd_iommu_enable,	/* [한국어] 재매핑을 켠다 */
 	.disable		= amd_iommu_disable,	/* [한국어] 끈다 */
@@ -6372,13 +6394,13 @@ static void irq_remapping_prepare_irte(struct amd_ir_data *data,
 		fill_msi_msg(&data->msi_entry, irte_info->index);	/* [한국어] 장치가 보낼 메시지에는 표 색인을 적는다 */
 		break;	/* [한국어] 짝짓기 끝 */
 
-	default:
+	default:	/* [한국어] 준비 함수가 없는 종류는 여기 올 수 없다 */
 		BUG_ON(1);	/* [한국어] 그 밖의 종류는 여기 올 수 없다 */
 		break;
 	}
 }
 
-struct amd_irte_ops irte_32_ops = {
+struct amd_irte_ops irte_32_ops = {	/* [한국어] 32비트 항목 형식의 구현 */
 	.prepare = irte_prepare,	/* [한국어] 32비트 항목을 채운다 */
 	.activate = irte_activate,	/* [한국어] 유효 비트를 세운다 */
 	.deactivate = irte_deactivate,	/* [한국어] 유효 비트를 내린다 */
@@ -6388,7 +6410,7 @@ struct amd_irte_ops irte_32_ops = {
 	.clear_allocated = irte_clear_allocated,	/* [한국어] 자리를 비운다 */
 };
 
-struct amd_irte_ops irte_128_ops = {
+struct amd_irte_ops irte_128_ops = {	/* [한국어] 128비트(GA) 항목 형식의 구현 */
 	.prepare = irte_ga_prepare,	/* [한국어] 128비트 항목을 채운다 */
 	.activate = irte_ga_activate,	/* [한국어] 유효 비트를 세운다 */
 	.deactivate = irte_ga_deactivate,	/* [한국어] 유효 비트를 내린다 */
@@ -6522,7 +6544,7 @@ static int irq_remapping_alloc(struct irq_domain *domain, unsigned int virq,
 
 	return 0;	/* [한국어] 모두 준비됐다 */
 
-out_free_data:
+out_free_data:	/* [한국어] 인터럽트별 상태를 만들다 실패했으면 여기로 */
 	for (i--; i >= 0; i--) {	/* [한국어] 실패 지점 직전까지 되짚으며 */
 		irq_data = irq_domain_get_irq_data(domain, virq + i);	/* [한국어] 각 인터럽트의 */
 		if (irq_data)	/* [한국어] 상태가 있으면 */
@@ -6530,7 +6552,7 @@ out_free_data:
 	}
 	for (i = 0; i < nr_irqs; i++)	/* [한국어] 잡아 둔 표 자리를 */
 		free_irte(iommu, devid, index + i);	/* [한국어] 모두 반납한다 */
-out_free_parent:
+out_free_parent:	/* [한국어] 표 자리를 못 잡았으면 부모 벡터만 되돌린다 */
 	irq_domain_free_irqs_common(domain, virq, nr_irqs);	/* [한국어] 부모 도메인의 벡터까지 */
 	return ret;	/* [한국어] 실패 이유 */
 }
@@ -6567,7 +6589,7 @@ static void irq_remapping_free(struct irq_domain *domain, unsigned int virq,
 	irq_domain_free_irqs_common(domain, virq, nr_irqs);	/* [한국어] 마지막으로 부모 도메인의 벡터를 */
 }
 
-static void amd_ir_update_irte(struct irq_data *irqd, struct amd_iommu *iommu,
+static void amd_ir_update_irte(struct irq_data *irqd, struct amd_iommu *iommu,	/* [한국어] 아래 activate 가 먼저 쓰므로 전방 선언한다 */
 			       struct amd_ir_data *ir_data,
 			       struct irq_2_irte *irte_info,
 			       struct irq_cfg *cfg);
@@ -6663,7 +6685,7 @@ static int irq_remapping_select(struct irq_domain *d, struct irq_fwspec *fwspec,
 	return iommu && iommu->ir_domain == d;	/* [한국어] 그 유닛의 도메인이 나인지 */
 }
 
-static const struct irq_domain_ops amd_ir_domain_ops = {
+static const struct irq_domain_ops amd_ir_domain_ops = {	/* [한국어] 재매핑 인터럽트 도메인의 연산 */
 	.select = irq_remapping_select,	/* [한국어] 이 도메인이 맡는 인터럽트인지 답한다 */
 	.alloc = irq_remapping_alloc,	/* [한국어] 벡터와 표 자리를 함께 잡는다 */
 	.free = irq_remapping_free,	/* [한국어] 둘을 함께 반납한다 */
@@ -6671,19 +6693,35 @@ static const struct irq_domain_ops amd_ir_domain_ops = {
 	.deactivate = irq_remapping_deactivate,	/* [한국어] 항목을 무효로 만든다 */
 };
 
+/*
+ * [한국어]
+ * __amd_iommu_update_ga - 게스트 항목에 vCPU 의 현재 위치를 적는다
+ *
+ * @entry: 게스트 모드 재매핑 항목.
+ * @cpu: 그 vCPU 가 지금 도는 물리 CPU, 실행 중이 아니면 음수.
+ * @ga_log_intr: 실행 중이 아닐 때 GA 로그에 남길 것인가.
+ *
+ * 게스트 인터럽트 직접 전달의 상태 기계가 이 세 필드다. vCPU 가 어느 물리
+ * CPU 에서 돌고 있으면 그 APIC id 를 적고 IsRun 을 세운다 — 하드웨어가
+ * 하이퍼바이저를 거치지 않고 그 CPU 에 인터럽트를 꽂는다.
+ *
+ * 돌고 있지 않으면 IsRun 을 내린다. 그때 인터럽트가 오면 하드웨어는 전달할
+ * 곳이 없으므로, GALogIntr 가 서 있으면 GA 로그에 남기고 호스트를 깨운다.
+ * KVM 은 vCPU 가 블록되어 깨울 필요가 있을 때만 그것을 요청한다.
+ */
 static void __amd_iommu_update_ga(struct irte_ga *entry, int cpu,
 				  bool ga_log_intr)
 {
-	if (cpu >= 0) {
-		entry->lo.fields_vapic.destination =
-					APICID_TO_IRTE_DEST_LO(cpu);
-		entry->hi.fields.destination =
-					APICID_TO_IRTE_DEST_HI(cpu);
-		entry->lo.fields_vapic.is_run = true;
-		entry->lo.fields_vapic.ga_log_intr = false;
+	if (cpu >= 0) {	/* [한국어] vCPU 가 어느 물리 CPU 에서 돌고 있으면 */
+		entry->lo.fields_vapic.destination =	/* [한국어] 그 CPU 로 직접 꽂는다 */
+					APICID_TO_IRTE_DEST_LO(cpu);	/* [한국어] APIC id 하위 */
+		entry->hi.fields.destination =	/* [한국어] 상위 */
+					APICID_TO_IRTE_DEST_HI(cpu);	/* [한국어] 두 자리에 나눠 */
+		entry->lo.fields_vapic.is_run = true;	/* [한국어] 하드웨어가 직접 전달해도 된다는 표시 */
+		entry->lo.fields_vapic.ga_log_intr = false;	/* [한국어] 전달되므로 로그가 필요 없다 */
 	} else {
-		entry->lo.fields_vapic.is_run = false;
-		entry->lo.fields_vapic.ga_log_intr = ga_log_intr;
+		entry->lo.fields_vapic.is_run = false;	/* [한국어] 실행 중이 아니면 직접 전달할 수 없다 */
+		entry->lo.fields_vapic.ga_log_intr = ga_log_intr;	/* [한국어] 블록된 vCPU 를 깨워야 할 때만 로그에 남긴다 */
 	}
 }
 
@@ -6704,133 +6742,214 @@ static void __amd_iommu_update_ga(struct irte_ga *entry, int cpu,
  * and thus don't require an invalidation to ensure the IOMMU consumes fresh
  * information.
  */
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * amd_iommu_update_ga - vCPU 스케줄 전환을 항목에 반영한다
+ *
+ * @data: 이 인터럽트의 드라이버 상태.
+ * @cpu: vCPU 가 도는 물리 CPU, 아니면 음수.
+ * @ga_log_intr: 블록된 vCPU 를 깨울 필요가 있는가.
+ * @return: 0 성공, -EINVAL/-ENODEV 면 쓸 수 없는 구성.
+ *
+ * KVM 이 vCPU 를 넣고 뺄 때마다 부르는 빠른 경로다. 그래서 무효화를 하지
+ * 않는다 — 원 주석이 근거를 든다: 목적지·IsRun·GATag 는 하드웨어가 캐시하지
+ * 않는 필드라, 표만 고쳐도 다음 인터럽트가 새 값을 본다.
+ *
+ * 무효화 한 번이 완료 대기를 포함해 수 마이크로초라, 스케줄마다 그것을
+ * 치르면 게스트 성능이 크게 떨어진다.
+ */
 int amd_iommu_update_ga(void *data, int cpu, bool ga_log_intr)
 {
-	struct amd_ir_data *ir_data = (struct amd_ir_data *)data;
-	struct irte_ga *entry = (struct irte_ga *) ir_data->entry;
+	struct amd_ir_data *ir_data = (struct amd_ir_data *)data;	/* [한국어] KVM 이 들고 있던 드라이버 상태 */
+	struct irte_ga *entry = (struct irte_ga *) ir_data->entry;	/* [한국어] 항목 사본 */
 
-	if (WARN_ON_ONCE(!AMD_IOMMU_GUEST_IR_VAPIC(amd_iommu_guest_ir)))
-		return -EINVAL;
+	if (WARN_ON_ONCE(!AMD_IOMMU_GUEST_IR_VAPIC(amd_iommu_guest_ir)))	/* [한국어] vAPIC 구성이 아니면 */
+		return -EINVAL;	/* [한국어] 불릴 수 없는 경로다 */
 
-	if (!entry || !entry->lo.fields_vapic.guest_mode)
-		return 0;
+	if (!entry || !entry->lo.fields_vapic.guest_mode)	/* [한국어] 게스트 모드가 아니면 */
+		return 0;	/* [한국어] 고칠 것이 없다 */
 
-	if (!ir_data->iommu)
-		return -ENODEV;
+	if (!ir_data->iommu)	/* [한국어] 담당 유닛이 없으면 */
+		return -ENODEV;	/* [한국어] 표를 찾을 수 없다 */
 
-	__amd_iommu_update_ga(entry, cpu, ga_log_intr);
+	__amd_iommu_update_ga(entry, cpu, ga_log_intr);	/* [한국어] 사본에 새 위치를 적고 */
 
-	return __modify_irte_ga(ir_data->iommu, ir_data->irq_2_irte.devid,
-				ir_data->irq_2_irte.index, entry);
+	return __modify_irte_ga(ir_data->iommu, ir_data->irq_2_irte.devid,	/* [한국어] 무효화 없이 표만 고친다 */
+				ir_data->irq_2_irte.index, entry);	/* [한국어] 이 필드들은 하드웨어가 캐시하지 않는다 */
 }
-EXPORT_SYMBOL(amd_iommu_update_ga);
+EXPORT_SYMBOL(amd_iommu_update_ga);	/* [한국어] KVM 모듈이 vCPU 스케줄마다 부른다 */
 
+/*
+ * [한국어]
+ * amd_iommu_activate_guest_mode - 인터럽트를 게스트 직접 전달로 바꾼다
+ *
+ * @data: 이 인터럽트의 드라이버 상태.
+ * @cpu: vCPU 가 도는 물리 CPU, 아니면 음수.
+ * @ga_log_intr: 블록된 vCPU 알림이 필요한가.
+ * @return: 0 성공, 음수면 실패.
+ *
+ * 항목의 해석 자체가 바뀐다. guest_mode 가 서면 하드웨어는 같은 128비트를
+ * 다른 필드로 읽어, 목적지 대신 게스트 APIC 백킹 페이지와 게스트 벡터를
+ * 본다.
+ *
+ * 두 절반을 모두 지우고 다시 채우는 이유가 그것이다 — 앞 해석의 값이 남아
+ * 있으면 새 해석에서 엉뚱한 필드가 된다. 유효 비트만 살려 두는 것은 그
+ * 인터럽트가 켜져 있었는지를 잃지 않기 위해서다.
+ *
+ * GATag 는 하드웨어가 전달에 실패했을 때 GA 로그에 남기는 표식이다. KVM 이
+ * 그것으로 어느 vCPU 의 어느 벡터인지 알아낸다.
+ */
 int amd_iommu_activate_guest_mode(void *data, int cpu, bool ga_log_intr)
 {
-	struct amd_ir_data *ir_data = (struct amd_ir_data *)data;
-	struct irte_ga *entry = (struct irte_ga *) ir_data->entry;
-	u64 valid;
+	struct amd_ir_data *ir_data = (struct amd_ir_data *)data;	/* [한국어] 드라이버 상태 */
+	struct irte_ga *entry = (struct irte_ga *) ir_data->entry;	/* [한국어] 항목 사본 */
+	u64 valid;	/* [한국어] 살려 둘 유효 비트 */
 
-	if (WARN_ON_ONCE(!AMD_IOMMU_GUEST_IR_VAPIC(amd_iommu_guest_ir)))
-		return -EINVAL;
+	if (WARN_ON_ONCE(!AMD_IOMMU_GUEST_IR_VAPIC(amd_iommu_guest_ir)))	/* [한국어] vAPIC 구성이 아니면 */
+		return -EINVAL;	/* [한국어] 불릴 수 없는 경로 */
 
-	if (!entry)
-		return 0;
+	if (!entry)	/* [한국어] 사본이 없으면 */
+		return 0;	/* [한국어] 할 일이 없다 */
 
-	valid = entry->lo.fields_vapic.valid;
+	valid = entry->lo.fields_vapic.valid;	/* [한국어] 인터럽트가 켜져 있었는지를 잃지 않는다 */
 
-	entry->lo.val = 0;
-	entry->hi.val = 0;
+	entry->lo.val = 0;	/* [한국어] 해석이 통째로 바뀌므로 */
+	entry->hi.val = 0;	/* [한국어] 옛 값을 남기면 엉뚱한 필드가 된다 */
 
-	entry->lo.fields_vapic.valid       = valid;
-	entry->lo.fields_vapic.guest_mode  = 1;
-	entry->hi.fields.ga_root_ptr       = ir_data->ga_root_ptr;
-	entry->hi.fields.vector            = ir_data->ga_vector;
-	entry->lo.fields_vapic.ga_tag      = ir_data->ga_tag;
+	entry->lo.fields_vapic.valid       = valid;	/* [한국어] 켜짐 상태만 복원 */
+	entry->lo.fields_vapic.guest_mode  = 1;	/* [한국어] 하드웨어가 이 128비트를 게스트 형식으로 읽는다 */
+	entry->hi.fields.ga_root_ptr       = ir_data->ga_root_ptr;	/* [한국어] 게스트 APIC 백킹 페이지 */
+	entry->hi.fields.vector            = ir_data->ga_vector;	/* [한국어] 게스트가 보는 벡터 번호 */
+	entry->lo.fields_vapic.ga_tag      = ir_data->ga_tag;	/* [한국어] 전달 실패 시 GA 로그에 남길 표식 */
 
-	__amd_iommu_update_ga(entry, cpu, ga_log_intr);
+	__amd_iommu_update_ga(entry, cpu, ga_log_intr);	/* [한국어] 현재 vCPU 위치까지 */
 
-	return modify_irte_ga(ir_data->iommu, ir_data->irq_2_irte.devid,
-			      ir_data->irq_2_irte.index, entry);
+	return modify_irte_ga(ir_data->iommu, ir_data->irq_2_irte.devid,	/* [한국어] 해석이 바뀌었으므로 캐시도 지운다 */
+			      ir_data->irq_2_irte.index, entry);	/* [한국어] 표 자리 */
 }
-EXPORT_SYMBOL(amd_iommu_activate_guest_mode);
+EXPORT_SYMBOL(amd_iommu_activate_guest_mode);	/* [한국어] KVM 이 인터럽트를 게스트에 걸 때 */
 
+/*
+ * [한국어]
+ * amd_iommu_deactivate_guest_mode - 인터럽트를 호스트 전달로 되돌린다
+ *
+ * @data: 이 인터럽트의 드라이버 상태.
+ * @return: 0 성공, 음수면 실패.
+ *
+ * activate 의 반대다. 항목을 지우고 호스트 해석의 필드로 다시 채운다.
+ * 목적지는 호스트가 마지막으로 정한 CPU 와 벡터를 쓴다 — 그 값을
+ * ir_data->cfg 에 남겨 두는 이유가 이것이다.
+ *
+ * 게스트 모드가 아니면 아무 일도 하지 않는다. 중복 호출이 흔하다.
+ */
 int amd_iommu_deactivate_guest_mode(void *data)
 {
-	struct amd_ir_data *ir_data = (struct amd_ir_data *)data;
-	struct irte_ga *entry = (struct irte_ga *) ir_data->entry;
-	struct irq_cfg *cfg = ir_data->cfg;
-	u64 valid;
+	struct amd_ir_data *ir_data = (struct amd_ir_data *)data;	/* [한국어] 드라이버 상태 */
+	struct irte_ga *entry = (struct irte_ga *) ir_data->entry;	/* [한국어] 항목 사본 */
+	struct irq_cfg *cfg = ir_data->cfg;	/* [한국어] 되돌릴 호스트 목적지 */
+	u64 valid;	/* [한국어] 살려 둘 유효 비트 */
 
-	if (WARN_ON_ONCE(!AMD_IOMMU_GUEST_IR_VAPIC(amd_iommu_guest_ir)))
-		return -EINVAL;
+	if (WARN_ON_ONCE(!AMD_IOMMU_GUEST_IR_VAPIC(amd_iommu_guest_ir)))	/* [한국어] vAPIC 구성이 아니면 */
+		return -EINVAL;	/* [한국어] 불릴 수 없는 경로 */
 
-	if (!entry || !entry->lo.fields_vapic.guest_mode)
-		return 0;
+	if (!entry || !entry->lo.fields_vapic.guest_mode)	/* [한국어] 이미 호스트 모드면 */
+		return 0;	/* [한국어] 중복 호출이 흔하다 */
 
-	valid = entry->lo.fields_remap.valid;
+	valid = entry->lo.fields_remap.valid;	/* [한국어] 켜짐 상태를 보존 */
 
-	entry->lo.val = 0;
-	entry->hi.val = 0;
+	entry->lo.val = 0;	/* [한국어] 해석이 바뀌므로 지우고 */
+	entry->hi.val = 0;	/* [한국어] 다시 채운다 */
 
-	entry->lo.fields_remap.valid       = valid;
-	entry->lo.fields_remap.dm          = apic->dest_mode_logical;
-	entry->lo.fields_remap.int_type    = APIC_DELIVERY_MODE_FIXED;
-	entry->hi.fields.vector            = cfg->vector;
-	entry->lo.fields_remap.destination =
-				APICID_TO_IRTE_DEST_LO(cfg->dest_apicid);
-	entry->hi.fields.destination =
-				APICID_TO_IRTE_DEST_HI(cfg->dest_apicid);
+	entry->lo.fields_remap.valid       = valid;	/* [한국어] 켜짐 상태만 복원 */
+	entry->lo.fields_remap.dm          = apic->dest_mode_logical;	/* [한국어] 호스트의 목적지 해석 방식 */
+	entry->lo.fields_remap.int_type    = APIC_DELIVERY_MODE_FIXED;	/* [한국어] 고정 전달 */
+	entry->hi.fields.vector            = cfg->vector;	/* [한국어] 호스트가 마지막으로 정한 벡터 */
+	entry->lo.fields_remap.destination =	/* [한국어] 호스트 CPU 하위 */
+				APICID_TO_IRTE_DEST_LO(cfg->dest_apicid);	/* [한국어] APIC id 를 쪼개 */
+	entry->hi.fields.destination =	/* [한국어] 상위 */
+				APICID_TO_IRTE_DEST_HI(cfg->dest_apicid);	/* [한국어] 두 자리에 */
 
-	return modify_irte_ga(ir_data->iommu, ir_data->irq_2_irte.devid,
-			      ir_data->irq_2_irte.index, entry);
+	return modify_irte_ga(ir_data->iommu, ir_data->irq_2_irte.devid,	/* [한국어] 해석이 바뀌었으므로 캐시도 지운다 */
+			      ir_data->irq_2_irte.index, entry);	/* [한국어] 표 자리 */
 }
-EXPORT_SYMBOL(amd_iommu_deactivate_guest_mode);
+EXPORT_SYMBOL(amd_iommu_deactivate_guest_mode);	/* [한국어] KVM 이 그것을 되돌릴 때 */
 
+/*
+ * [한국어]
+ * amd_ir_set_vcpu_affinity - KVM 이 인터럽트를 vCPU 에 걸거나 뗀다
+ *
+ * @data: 이 인터럽트의 코어 상태.
+ * @info: KVM 이 넘긴 게스트 정보, NULL 이면 해제 요청.
+ * @return: 0 성공, -EINVAL 이면 게스트 전달을 쓸 수 없는 장치.
+ *
+ * 게스트에 넘긴 장치의 인터럽트를 하이퍼바이저를 거치지 않고 vCPU 에 바로
+ * 넣기 위한 진입점이다. VM 진입·퇴출 한 번이 사라지므로 지연이 크게 준다.
+ *
+ * use_vapic 을 확인하는 이유가 원 주석에 있다. attach 때 UNMANAGED 도메인이
+ * 아니었던 장치는 게스트 전달을 준비하지 않았으므로, 항목 해석을 바꾸면
+ * 호스트 인터럽트가 사라진다.
+ *
+ * cfg 를 여기서 저장해 두는 이유: 나중에 게스트 모드를 풀 때 되돌릴 호스트
+ * 목적지가 필요하다.
+ */
 static int amd_ir_set_vcpu_affinity(struct irq_data *data, void *info)
 {
-	int ret;
-	struct amd_iommu_pi_data *pi_data = info;
-	struct amd_ir_data *ir_data = data->chip_data;
-	struct irq_2_irte *irte_info = &ir_data->irq_2_irte;
-	struct iommu_dev_data *dev_data;
+	int ret;	/* [한국어] 결과 */
+	struct amd_iommu_pi_data *pi_data = info;	/* [한국어] KVM 이 넘긴 게스트 정보 */
+	struct amd_ir_data *ir_data = data->chip_data;	/* [한국어] 드라이버 상태 */
+	struct irq_2_irte *irte_info = &ir_data->irq_2_irte;	/* [한국어] 표 자리 */
+	struct iommu_dev_data *dev_data;	/* [한국어] 장치가 게스트 전달을 준비했는지 본다 */
 
-	if (WARN_ON_ONCE(!AMD_IOMMU_GUEST_IR_VAPIC(amd_iommu_guest_ir)))
-		return -EINVAL;
+	if (WARN_ON_ONCE(!AMD_IOMMU_GUEST_IR_VAPIC(amd_iommu_guest_ir)))	/* [한국어] vAPIC 구성이 아니면 */
+		return -EINVAL;	/* [한국어] KVM 이 이 경로를 쓰면 안 된다 */
 
-	if (ir_data->iommu == NULL)
-		return -EINVAL;
+	if (ir_data->iommu == NULL)	/* [한국어] 담당 유닛이 없으면 */
+		return -EINVAL;	/* [한국어] 표를 찾을 수 없다 */
 
-	dev_data = search_dev_data(ir_data->iommu, irte_info->devid);
+	dev_data = search_dev_data(ir_data->iommu, irte_info->devid);	/* [한국어] 장치의 벤더 상태 */
 
 	/* Note:
 	 * This device has never been set up for guest mode.
 	 * we should not modify the IRTE
 	 */
-	if (!dev_data || !dev_data->use_vapic)
-		return -EINVAL;
+	if (!dev_data || !dev_data->use_vapic)	/* [한국어] (원 주석: 게스트 모드로 설정된 적이 없는 장치는 IRTE 를 고치면 안 된다) */
+		return -EINVAL;	/* [한국어] 항목 해석을 바꾸면 호스트 인터럽트가 사라진다 */
 
-	ir_data->cfg = irqd_cfg(data);
+	ir_data->cfg = irqd_cfg(data);	/* [한국어] 나중에 게스트 모드를 풀 때 되돌릴 목적지 */
 
-	if (pi_data) {
-		pi_data->ir_data = ir_data;
+	if (pi_data) {	/* [한국어] 게스트에 거는 요청이면 */
+		pi_data->ir_data = ir_data;	/* [한국어] KVM 이 나중에 이 상태로 돌아온다 */
 
-		ir_data->ga_root_ptr = (pi_data->vapic_addr >> 12);
-		ir_data->ga_vector = pi_data->vector;
-		ir_data->ga_tag = pi_data->ga_tag;
-		if (pi_data->is_guest_mode)
-			ret = amd_iommu_activate_guest_mode(ir_data, pi_data->cpu,
-							    pi_data->ga_log_intr);
+		ir_data->ga_root_ptr = (pi_data->vapic_addr >> 12);	/* [한국어] 게스트 APIC 백킹 페이지 번호 */
+		ir_data->ga_vector = pi_data->vector;	/* [한국어] 게스트가 보는 벡터 */
+		ir_data->ga_tag = pi_data->ga_tag;	/* [한국어] 전달 실패 시 KVM 이 vCPU 를 찾을 표식 */
+		if (pi_data->is_guest_mode)	/* [한국어] 게스트 모드로 켜라는 뜻이면 */
+			ret = amd_iommu_activate_guest_mode(ir_data, pi_data->cpu,	/* [한국어] 항목 해석을 바꾼다 */
+							    pi_data->ga_log_intr);	/* [한국어] 블록된 vCPU 알림 여부 */
 		else
-			ret = amd_iommu_deactivate_guest_mode(ir_data);
+			ret = amd_iommu_deactivate_guest_mode(ir_data);	/* [한국어] 아니면 호스트 전달로 */
 	} else {
-		ret = amd_iommu_deactivate_guest_mode(ir_data);
+		ret = amd_iommu_deactivate_guest_mode(ir_data);	/* [한국어] 정보가 없으면 해제 요청이다 */
 	}
 
-	return ret;
+	return ret;	/* [한국어] 성패 */
 }
 
 
+/*
+ * [한국어]
+ * amd_ir_update_irte - 항목의 목적지와 벡터를 갱신한다
+ *
+ * @irqd: 코어 인터럽트 상태(쓰지 않는다).
+ * @iommu: 담당 유닛.
+ * @ir_data: 드라이버 상태.
+ * @irte_info: 표 자리.
+ * @cfg: 새 벡터와 목적지 CPU.
+ *
+ * 형식별 set_affinity 로 넘기는 얇은 껍질이다. 게스트 모드 항목이면 그
+ * 구현이 알아서 건너뛴다.
+ */
 static void amd_ir_update_irte(struct irq_data *irqd, struct amd_iommu *iommu,
 			       struct amd_ir_data *ir_data,
 			       struct irq_2_irte *irte_info,
@@ -6841,82 +6960,128 @@ static void amd_ir_update_irte(struct irq_data *irqd, struct amd_iommu *iommu,
 	 * Atomically updates the IRTE with the new destination, vector
 	 * and flushes the interrupt entry cache.
 	 */
-	iommu->irte_ops->set_affinity(iommu, ir_data->entry, irte_info->devid,
-				      irte_info->index, cfg->vector,
-				      cfg->dest_apicid);
+	iommu->irte_ops->set_affinity(iommu, ir_data->entry, irte_info->devid,	/* [한국어] (원 주석: 새 목적지·벡터로 IRTE 를 원자적으로 갱신하고 캐시를 비운다) */
+				      irte_info->index, cfg->vector,	/* [한국어] 표 자리와 새 벡터 */
+				      cfg->dest_apicid);	/* [한국어] 게스트 모드 항목이면 구현이 알아서 건너뛴다 */
 }
 
+/*
+ * [한국어]
+ * amd_ir_set_affinity - 인터럽트를 받을 CPU 를 바꾼다
+ *
+ * @data: 이 인터럽트.
+ * @mask: 허용 CPU 집합.
+ * @force: 강제 이동인가.
+ * @return: IRQ_SET_MASK_OK_DONE, 실패하면 음수.
+ *
+ * 두 계층이 협력한다. 부모(벡터 도메인)가 새 CPU 와 벡터를 고르고, 이
+ * 계층이 그 결과를 표 항목에 적는다.
+ *
+ * 옛 벡터 정리를 항목 갱신 뒤로 미루는 것이 핵심이다. 원 주석이 짚듯 이
+ * 시점부터 인터럽트가 새 목적지로 오기 시작하므로, 그 전에 옛 벡터를
+ * 놓으면 이동 중인 인터럽트가 갈 곳을 잃는다.
+ */
 static int amd_ir_set_affinity(struct irq_data *data,
 			       const struct cpumask *mask, bool force)
 {
-	struct amd_ir_data *ir_data = data->chip_data;
-	struct irq_2_irte *irte_info = &ir_data->irq_2_irte;
-	struct irq_cfg *cfg = irqd_cfg(data);
-	struct irq_data *parent = data->parent_data;
-	struct amd_iommu *iommu = ir_data->iommu;
-	int ret;
+	struct amd_ir_data *ir_data = data->chip_data;	/* [한국어] 드라이버 상태 */
+	struct irq_2_irte *irte_info = &ir_data->irq_2_irte;	/* [한국어] 표 자리 */
+	struct irq_cfg *cfg = irqd_cfg(data);	/* [한국어] 부모가 채울 벡터와 목적지 */
+	struct irq_data *parent = data->parent_data;	/* [한국어] 벡터 도메인 쪽 상태 */
+	struct amd_iommu *iommu = ir_data->iommu;	/* [한국어] 담당 유닛 */
+	int ret;	/* [한국어] 결과 */
 
-	if (!iommu)
-		return -ENODEV;
+	if (!iommu)	/* [한국어] 유닛이 없으면 */
+		return -ENODEV;	/* [한국어] 표를 고칠 수 없다 */
 
-	ret = parent->chip->irq_set_affinity(parent, mask, force);
-	if (ret < 0 || ret == IRQ_SET_MASK_OK_DONE)
-		return ret;
+	ret = parent->chip->irq_set_affinity(parent, mask, force);	/* [한국어] 새 CPU 와 벡터는 부모가 고른다 */
+	if (ret < 0 || ret == IRQ_SET_MASK_OK_DONE)	/* [한국어] 실패했거나 부모가 이미 끝냈으면 */
+		return ret;	/* [한국어] 내가 할 일이 없다 */
 
-	amd_ir_update_irte(data, iommu, ir_data, irte_info, cfg);
+	amd_ir_update_irte(data, iommu, ir_data, irte_info, cfg);	/* [한국어] 그 결과를 표 항목에 적는다 */
 	/*
 	 * After this point, all the interrupts will start arriving
 	 * at the new destination. So, time to cleanup the previous
 	 * vector allocation.
 	 */
-	vector_schedule_cleanup(cfg);
+	vector_schedule_cleanup(cfg);	/* [한국어] (원 주석: 이 시점부터 새 목적지로 오므로 이제 옛 벡터를 정리한다) */
 
-	return IRQ_SET_MASK_OK_DONE;
+	return IRQ_SET_MASK_OK_DONE;	/* [한국어] 코어에 이미 반영했다고 알린다 */
 }
 
+/*
+ * [한국어]
+ * ir_compose_msi_msg - 장치에 쓸 MSI 메시지를 돌려준다
+ *
+ * @irq_data: 이 인터럽트.
+ * @msg: 채울 메시지.
+ *
+ * 재매핑에서는 메시지가 인터럽트마다 고정이다 — 표 색인만 담고 있고,
+ * 목적지 변경은 표를 고쳐서 하기 때문이다. 그래서 alloc 때 만들어 둔 것을
+ * 그대로 복사하면 된다.
+ */
 static void ir_compose_msi_msg(struct irq_data *irq_data, struct msi_msg *msg)
 {
-	struct amd_ir_data *ir_data = irq_data->chip_data;
+	struct amd_ir_data *ir_data = irq_data->chip_data;	/* [한국어] 드라이버 상태 */
 
-	*msg = ir_data->msi_entry;
+	*msg = ir_data->msi_entry;	/* [한국어] 메시지는 표 색인만 담아 인터럽트마다 고정이다 */
 }
 
-static struct irq_chip amd_ir_chip = {
-	.name			= "AMD-IR",
-	.irq_ack		= apic_ack_irq,
-	.irq_set_affinity	= amd_ir_set_affinity,
-	.irq_set_vcpu_affinity	= amd_ir_set_vcpu_affinity,
-	.irq_compose_msi_msg	= ir_compose_msi_msg,
+static struct irq_chip amd_ir_chip = {	/* [한국어] 재매핑을 거치는 인터럽트의 컨트롤러 동작 */
+	.name			= "AMD-IR",	/* [한국어] /proc/interrupts 에 보이는 이름 */
+	.irq_ack		= apic_ack_irq,	/* [한국어] EOI 는 아키텍처 공용 구현 */
+	.irq_set_affinity	= amd_ir_set_affinity,	/* [한국어] 목적지 변경은 표 항목을 고쳐서 */
+	.irq_set_vcpu_affinity	= amd_ir_set_vcpu_affinity,	/* [한국어] KVM 이 인터럽트를 vCPU 에 건다 */
+	.irq_compose_msi_msg	= ir_compose_msi_msg,	/* [한국어] 장치에 쓸 메시지를 돌려준다 */
 };
 
-static const struct msi_parent_ops amdvi_msi_parent_ops = {
-	.supported_flags	= X86_VECTOR_MSI_FLAGS_SUPPORTED | MSI_FLAG_MULTI_PCI_MSI,
-	.bus_select_token	= DOMAIN_BUS_AMDVI,
-	.bus_select_mask	= MATCH_PCI_MSI,
-	.prefix			= "IR-",
-	.init_dev_msi_info	= msi_parent_init_dev_msi_info,
+static const struct msi_parent_ops amdvi_msi_parent_ops = {	/* [한국어] MSI 자식 도메인이 이 도메인을 부모로 삼을 조건 */
+	.supported_flags	= X86_VECTOR_MSI_FLAGS_SUPPORTED | MSI_FLAG_MULTI_PCI_MSI,	/* [한국어] 다중 MSI 까지 지원한다 */
+	.bus_select_token	= DOMAIN_BUS_AMDVI,	/* [한국어] 자식 도메인이 이 부모를 고르는 표식 */
+	.bus_select_mask	= MATCH_PCI_MSI,	/* [한국어] PCI MSI 자식만 받는다 */
+	.prefix			= "IR-",	/* [한국어] 재매핑을 거친다는 표시가 이름에 붙는다 */
+	.init_dev_msi_info	= msi_parent_init_dev_msi_info,	/* [한국어] 자식 도메인 정보 초기화는 공용 구현 */
 };
 
+/*
+ * [한국어]
+ * amd_iommu_create_irq_domain - 이 유닛의 인터럽트 재매핑 도메인을 만든다
+ *
+ * @iommu: 대상 유닛.
+ * @return: 0 성공, -ENOMEM 실패.
+ *
+ * 인터럽트 도메인은 계층으로 쌓인다. 이 도메인의 부모가 아키텍처의 벡터
+ * 도메인이라, 벡터 할당은 위로 올라가고 재매핑 항목 관리는 여기서 한다.
+ *
+ * ISOLATED_MSI 표시가 중요하다. "이 도메인을 거친 MSI 는 다른 장치의
+ * 인터럽트를 위조할 수 없다"는 선언이고, VFIO 가 장치를 사용자에게 넘겨도
+ * 되는지 판단할 때 이 표시를 본다.
+ *
+ * 유닛마다 도메인을 따로 만드는 이유: 각 유닛이 자기 재매핑 표를 갖는다.
+ *
+ * 호출 체인:
+ *   amd_iommu_init_pci() → [이 함수]
+ */
 int amd_iommu_create_irq_domain(struct amd_iommu *iommu)
 {
-	struct irq_domain_info info = {
-		.fwnode		= irq_domain_alloc_named_id_fwnode("AMD-IR", iommu->index),
-		.ops		= &amd_ir_domain_ops,
-		.domain_flags	= IRQ_DOMAIN_FLAG_ISOLATED_MSI,
-		.host_data	= iommu,
-		.parent		= arch_get_ir_parent_domain(),
+	struct irq_domain_info info = {	/* [한국어] 도메인 생성 정보 */
+		.fwnode		= irq_domain_alloc_named_id_fwnode("AMD-IR", iommu->index),	/* [한국어] 유닛마다 구분되는 이름 */
+		.ops		= &amd_ir_domain_ops,	/* [한국어] alloc/free/activate 구현 */
+		.domain_flags	= IRQ_DOMAIN_FLAG_ISOLATED_MSI,	/* [한국어] 이 도메인을 거친 MSI 는 위조가 불가능하다는 선언 */
+		.host_data	= iommu,	/* [한국어] 콜백에서 담당 유닛을 되찾는다 */
+		.parent		= arch_get_ir_parent_domain(),	/* [한국어] 벡터 할당은 아키텍처 도메인이 맡는다 */
 	};
 
-	if (!info.fwnode)
-		return -ENOMEM;
+	if (!info.fwnode)	/* [한국어] 이름을 못 만들었으면 */
+		return -ENOMEM;	/* [한국어] 도메인도 만들 수 없다 */
 
-	iommu->ir_domain = msi_create_parent_irq_domain(&info, &amdvi_msi_parent_ops);
-	if (!iommu->ir_domain) {
-		irq_domain_free_fwnode(info.fwnode);
-		return -ENOMEM;
+	iommu->ir_domain = msi_create_parent_irq_domain(&info, &amdvi_msi_parent_ops);	/* [한국어] MSI 자식 도메인의 부모가 된다 */
+	if (!iommu->ir_domain) {	/* [한국어] 실패면 */
+		irq_domain_free_fwnode(info.fwnode);	/* [한국어] 이름도 되돌린다 */
+		return -ENOMEM;	/* [한국어] 호출자에게 */
 	}
-	return 0;
+	return 0;	/* [한국어] 성공 */
 }
 #endif
 
-MODULE_IMPORT_NS("GENERIC_PT_IOMMU");
+MODULE_IMPORT_NS("GENERIC_PT_IOMMU");	/* [한국어] 페이지 테이블 구현을 공용 계층에서 가져다 쓴다 */
