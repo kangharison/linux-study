@@ -697,158 +697,158 @@ EXPORT_SYMBOL(iommu_dma_get_resv_regions);	/* [한국어] 벤더 드라이버가
 static int cookie_init_hw_msi_region(struct iommu_dma_cookie *cookie,
 		phys_addr_t start, phys_addr_t end)
 {
-	struct iova_domain *iovad = &cookie->iovad;
-	struct iommu_dma_msi_page *msi_page;
-	int i, num_pages;
+	struct iova_domain *iovad = &cookie->iovad;	/* [한국어] 이 도메인의 IOVA 공간 */
+	struct iommu_dma_msi_page *msi_page;	/* [한국어] 만들 매핑 기록 */
+	int i, num_pages;	/* [한국어] 페이지 순회 커서와 개수 */
 
-	start -= iova_offset(iovad, start);
-	num_pages = iova_align(iovad, end - start) >> iova_shift(iovad);
+	start -= iova_offset(iovad, start);	/* [한국어] 페이지 경계로 내림 — 도어벨은 페이지 단위로만 매핑할 수 있다 */
+	num_pages = iova_align(iovad, end - start) >> iova_shift(iovad);	/* [한국어] 창 전체를 덮는 페이지 수 */
 
-	for (i = 0; i < num_pages; i++) {
-		msi_page = kmalloc_obj(*msi_page);
-		if (!msi_page)
-			return -ENOMEM;
+	for (i = 0; i < num_pages; i++) {	/* [한국어] 각 페이지마다 기록을 하나씩 */
+		msi_page = kmalloc_obj(*msi_page);	/* [한국어] 매핑 기록 */
+		if (!msi_page)	/* [한국어] 할당 실패 */
+			return -ENOMEM;	/* [한국어] 이미 만든 것들은 쿠키 목록에 남아 해제 시 함께 정리된다 */
 
-		msi_page->phys = start;
-		msi_page->iova = start;
-		INIT_LIST_HEAD(&msi_page->list);
-		list_add(&msi_page->list, &cookie->msi_page_list);
-		start += iovad->granule;
+		msi_page->phys = start;	/* [한국어] 도어벨의 물리 주소 */
+		msi_page->iova = start;	/* [한국어] IOVA 도 같은 값이다 — 이 창은 예약되어 있어 항등으로 쓰므로 실제 매핑을 만들 필요조차 없다. 하드웨어 MSI 창(IOMMU_RESV_MSI)이 이런 형태다 */
+		INIT_LIST_HEAD(&msi_page->list);	/* [한국어] 목록 고리 초기화 */
+		list_add(&msi_page->list, &cookie->msi_page_list);	/* [한국어] 도메인 목록에 등록 — 이후 조회가 여기서 곧바로 찾는다 */
+		start += iovad->granule;	/* [한국어] 다음 페이지로 */
 	}
 
-	return 0;
+	return 0;	/* [한국어] 창 전체를 기록했다 */
 }
 
 static int iommu_dma_ranges_sort(void *priv, const struct list_head *a,
 		const struct list_head *b)
 {
-	struct resource_entry *res_a = list_entry(a, typeof(*res_a), node);
-	struct resource_entry *res_b = list_entry(b, typeof(*res_b), node);
+	struct resource_entry *res_a = list_entry(a, typeof(*res_a), node);	/* [한국어] 비교할 첫 항목 */
+	struct resource_entry *res_b = list_entry(b, typeof(*res_b), node);	/* [한국어] 비교할 둘째 항목 */
 
-	return res_a->res->start > res_b->res->start;
+	return res_a->res->start > res_b->res->start;	/* [한국어] 시작 주소 오름차순. 아래 예약 루프가 '구간 사이의 틈'을 계산하려면 정렬이 전제된다 */
 }
 
 static int iova_reserve_pci_windows(struct pci_dev *dev,
 		struct iova_domain *iovad)
 {
-	struct pci_host_bridge *bridge = pci_find_host_bridge(dev->bus);
-	struct resource_entry *window;
-	unsigned long lo, hi;
-	phys_addr_t start = 0, end;
+	struct pci_host_bridge *bridge = pci_find_host_bridge(dev->bus);	/* [한국어] 이 장치가 달린 호스트 브리지 — 주소 창 정보를 들고 있다 */
+	struct resource_entry *window;	/* [한국어] 창 순회 커서 */
+	unsigned long lo, hi;	/* [한국어] 예약할 pfn 범위 */
+	phys_addr_t start = 0, end;	/* [한국어] dma_ranges 사이의 '틈'을 계산할 커서 */
 
-	resource_list_for_each_entry(window, &bridge->windows) {
-		if (resource_type(window->res) != IORESOURCE_MEM)
+	resource_list_for_each_entry(window, &bridge->windows) {	/* [한국어] 브리지가 CPU 쪽으로 노출하는 창들 */
+		if (resource_type(window->res) != IORESOURCE_MEM)	/* [한국어] I/O 포트 창은 DMA 주소와 겹치지 않는다 */
 			continue;
 
-		lo = iova_pfn(iovad, window->res->start - window->offset);
-		hi = iova_pfn(iovad, window->res->end - window->offset);
-		reserve_iova(iovad, lo, hi);
+		lo = iova_pfn(iovad, window->res->start - window->offset);	/* [한국어] 버스 주소로 환산한 시작 */
+		hi = iova_pfn(iovad, window->res->end - window->offset);	/* [한국어] 끝 */
+		reserve_iova(iovad, lo, hi);	/* [한국어] 이 범위를 IOVA 로 내주면 안 된다. 장치가 그 주소로 DMA 하면 메모리가 아니라 다른 장치의 MMIO 로 가 버리기 때문이다 — P2P 창과 DMA 주소의 충돌 */
 	}
 
 	/* Get reserved DMA windows from host bridge */
-	list_sort(NULL, &bridge->dma_ranges, iommu_dma_ranges_sort);
-	resource_list_for_each_entry(window, &bridge->dma_ranges) {
-		end = window->res->start - window->offset;
-resv_iova:
-		if (end > start) {
-			lo = iova_pfn(iovad, start);
-			hi = iova_pfn(iovad, end);
-			reserve_iova(iovad, lo, hi);
-		} else if (end < start) {
+	list_sort(NULL, &bridge->dma_ranges, iommu_dma_ranges_sort);	/* [한국어] 아래 루프가 '허용된 창들 사이의 틈'을 계산하므로 시작 주소순 정렬이 필요하다 */
+	resource_list_for_each_entry(window, &bridge->dma_ranges) {	/* [한국어] 브리지가 DMA 를 허용하는 범위들 */
+		end = window->res->start - window->offset;	/* [한국어] 이번 허용 창의 시작 = 직전 틈의 끝 */
+resv_iova:	/* [한국어] 마지막 창 뒤의 남은 영역을 처리하려고 되돌아오는 지점 */
+		if (end > start) {	/* [한국어] 직전 창 끝과 이번 창 시작 사이에 틈이 있다 */
+			lo = iova_pfn(iovad, start);	/* [한국어] 틈의 시작 */
+			hi = iova_pfn(iovad, end);	/* [한국어] 틈의 끝 */
+			reserve_iova(iovad, lo, hi);	/* [한국어] 그 틈은 브리지가 DMA 를 통과시키지 않는 구간이므로 IOVA 로 내주면 안 된다. dma_ranges 는 '허용 목록'이고 이 루프는 그 여집합을 예약한다 */
+		} else if (end < start) {	/* [한국어] 창들이 겹쳤다 */
 			/* DMA ranges should be non-overlapping */
-			dev_err(&dev->dev,
-				"Failed to reserve IOVA [%pa-%pa]\n",
-				&start, &end);
-			return -EINVAL;
+			dev_err(&dev->dev,	/* [한국어] 펌웨어가 기술한 dma_ranges 가 잘못된 것이다 */
+				"Failed to reserve IOVA [%pa-%pa]\n",	/* [한국어] 겹친 범위를 그대로 남긴다 */
+				&start, &end);	/* [한국어] 문제의 두 경계 */
+			return -EINVAL;	/* [한국어] 이 상태로는 안전한 주소 공간을 만들 수 없다 */
 		}
 
-		start = window->res->end - window->offset + 1;
+		start = window->res->end - window->offset + 1;	/* [한국어] 다음 틈의 시작 = 이번 창의 끝 바로 다음 */
 		/* If window is last entry */
-		if (window->node.next == &bridge->dma_ranges &&
-		    end != ~(phys_addr_t)0) {
-			end = ~(phys_addr_t)0;
-			goto resv_iova;
+		if (window->node.next == &bridge->dma_ranges &&	/* [한국어] 마지막 창이고 */
+		    end != ~(phys_addr_t)0) {	/* [한국어] 아직 주소 공간 끝까지 처리하지 않았다면 */
+			end = ~(phys_addr_t)0;	/* [한국어] 끝을 주소 공간 최상단으로 놓고 */
+			goto resv_iova;	/* [한국어] 마지막 창 뒤의 영역도 예약한다 */
 		}
 	}
 
-	return 0;
+	return 0;	/* [한국어] 브리지 제약이 모두 IOVA 공간에 반영되었다 */
 }
 
 static int iova_reserve_iommu_regions(struct device *dev,
 		struct iommu_domain *domain)
 {
-	struct iommu_dma_cookie *cookie = domain->iova_cookie;
-	struct iova_domain *iovad = &cookie->iovad;
-	struct iommu_resv_region *region;
-	LIST_HEAD(resv_regions);
-	int ret = 0;
+	struct iommu_dma_cookie *cookie = domain->iova_cookie;	/* [한국어] 이 도메인의 DMA 상태 */
+	struct iova_domain *iovad = &cookie->iovad;	/* [한국어] IOVA 공간 */
+	struct iommu_resv_region *region;	/* [한국어] 예약 구간 순회 커서 */
+	LIST_HEAD(resv_regions);	/* [한국어] 드라이버가 알려 줄 구간을 받을 목록 */
+	int ret = 0;	/* [한국어] 결과 */
 
-	if (dev_is_pci(dev)) {
-		ret = iova_reserve_pci_windows(to_pci_dev(dev), iovad);
-		if (ret)
-			return ret;
+	if (dev_is_pci(dev)) {	/* [한국어] PCI 장치면 */
+		ret = iova_reserve_pci_windows(to_pci_dev(dev), iovad);	/* [한국어] 브리지의 주소 창 제약을 먼저 반영한다 */
+		if (ret)	/* [한국어] 브리지 정보가 모순되면 */
+			return ret;	/* [한국어] 도메인을 세울 수 없다 */
 	}
 
-	iommu_get_resv_regions(dev, &resv_regions);
-	list_for_each_entry(region, &resv_regions, list) {
-		unsigned long lo, hi;
+	iommu_get_resv_regions(dev, &resv_regions);	/* [한국어] IOMMU 드라이버와 펌웨어가 알리는 예약 구간 (RMRR, MSI 창 등) */
+	list_for_each_entry(region, &resv_regions, list) {	/* [한국어] 하나씩 */
+		unsigned long lo, hi;	/* [한국어] 예약할 pfn 범위 */
 
 		/* We ARE the software that manages these! */
-		if (region->type == IOMMU_RESV_SW_MSI)
-			continue;
+		if (region->type == IOMMU_RESV_SW_MSI)	/* [한국어] 소프트웨어 MSI 창은 이 파일이 직접 관리한다 (위 영어 주석) */
+			continue;	/* [한국어] 예약하지 않는다 — 나중에 alloc_iova 로 정상 할당해 쓸 것이기 때문 */
 
-		lo = iova_pfn(iovad, region->start);
-		hi = iova_pfn(iovad, region->start + region->length - 1);
-		reserve_iova(iovad, lo, hi);
+		lo = iova_pfn(iovad, region->start);	/* [한국어] 구간의 시작 pfn */
+		hi = iova_pfn(iovad, region->start + region->length - 1);	/* [한국어] 끝 pfn (닫힌 구간) */
+		reserve_iova(iovad, lo, hi);	/* [한국어] 할당 대상에서 뺀다 */
 
-		if (region->type == IOMMU_RESV_MSI)
-			ret = cookie_init_hw_msi_region(cookie, region->start,
-					region->start + region->length);
-		if (ret)
-			break;
+		if (region->type == IOMMU_RESV_MSI)	/* [한국어] 하드웨어가 고정한 MSI 창이면 */
+			ret = cookie_init_hw_msi_region(cookie, region->start,	/* [한국어] 그 창의 각 페이지를 항등 매핑 기록으로 미리 등록해 둔다 */
+					region->start + region->length);	/* [한국어] 창의 끝 */
+		if (ret)	/* [한국어] 기록 생성 실패 */
+			break;	/* [한국어] 중단 */
 	}
-	iommu_put_resv_regions(dev, &resv_regions);
+	iommu_put_resv_regions(dev, &resv_regions);	/* [한국어] 드라이버에게 목록을 돌려준다 */
 
-	return ret;
+	return ret;	/* [한국어] 0 이면 이 장치가 쓰면 안 되는 모든 주소가 IOVA 공간에서 빠졌다 */
 }
 
 static bool dev_is_untrusted(struct device *dev)
 {
-	return dev_is_pci(dev) && to_pci_dev(dev)->untrusted;
+	return dev_is_pci(dev) && to_pci_dev(dev)->untrusted;	/* [한국어] 물리적으로 접근 가능한 위치(Thunderbolt 등)에 꽂힌 장치. PCI 코어가 표시해 준다 */
 }
 
 static bool dev_use_swiotlb(struct device *dev, size_t size,
 			    enum dma_data_direction dir)
 {
-	return IS_ENABLED(CONFIG_SWIOTLB) &&
-		(dev_is_untrusted(dev) ||
-		 dma_kmalloc_needs_bounce(dev, size, dir));
+	return IS_ENABLED(CONFIG_SWIOTLB) &&	/* [한국어] 바운스 버퍼가 빌드에 있어야 하고 */
+		(dev_is_untrusted(dev) ||	/* [한국어] 신뢰할 수 없는 장치이거나 — 그런 장치에는 IOMMU 페이지 하나를 통째로 내줘야 하는데, 요청이 페이지보다 작으면 같은 페이지의 다른 데이터가 함께 노출된다 */
+		 dma_kmalloc_needs_bounce(dev, size, dir));	/* [한국어] 또는 kmalloc 버퍼가 캐시라인 경계에 맞지 않아, 비일관 장치에서 캐시 관리가 이웃 데이터를 건드릴 수 있는 경우 */
 }
 
 static bool dev_use_sg_swiotlb(struct device *dev, struct scatterlist *sg,
 			       int nents, enum dma_data_direction dir)
 {
-	struct scatterlist *s;
-	int i;
+	struct scatterlist *s;	/* [한국어] 세그먼트 순회 커서 */
+	int i;	/* [한국어] 인덱스 */
 
-	if (!IS_ENABLED(CONFIG_SWIOTLB))
-		return false;
+	if (!IS_ENABLED(CONFIG_SWIOTLB))	/* [한국어] 바운스 버퍼가 없는 빌드 */
+		return false;	/* [한국어] 우회할 방법이 없다 */
 
-	if (dev_is_untrusted(dev))
-		return true;
+	if (dev_is_untrusted(dev))	/* [한국어] 신뢰할 수 없는 장치는 세그먼트를 볼 것도 없이 */
+		return true;	/* [한국어] 전부 바운스 */
 
 	/*
 	 * If kmalloc() buffers are not DMA-safe for this device and
 	 * direction, check the individual lengths in the sg list. If any
 	 * element is deemed unsafe, use the swiotlb for bouncing.
 	 */
-	if (!dma_kmalloc_safe(dev, dir)) {
-		for_each_sg(sg, s, nents, i)
-			if (!dma_kmalloc_size_aligned(s->length))
-				return true;
+	if (!dma_kmalloc_safe(dev, dir)) {	/* [한국어] 이 장치·방향에서 kmalloc 버퍼가 DMA 안전하지 않다면 (위 영어 주석) */
+		for_each_sg(sg, s, nents, i)	/* [한국어] 각 세그먼트의 길이를 확인해 */
+			if (!dma_kmalloc_size_aligned(s->length))	/* [한국어] 캐시라인 정렬이 보장되지 않는 크기가 하나라도 있으면 */
+				return true;	/* [한국어] 리스트 전체를 바운스한다 — 부분만 바운스하면 주소 연속성이 깨진다 */
 	}
 
-	return false;
+	return false;	/* [한국어] 그대로 매핑해도 안전하다 */
 }
 
 /**
@@ -862,14 +862,14 @@ static void iommu_dma_init_options(struct iommu_dma_options *options,
 				   struct device *dev)
 {
 	/* Shadowing IOTLB flushes do better with a single large queue */
-	if (dev->iommu->shadow_on_flush) {
-		options->qt = IOMMU_DMA_OPTS_SINGLE_QUEUE;
-		options->fq_timeout = IOVA_SINGLE_FQ_TIMEOUT;
-		options->fq_size = IOVA_SINGLE_FQ_SIZE;
+	if (dev->iommu->shadow_on_flush) {	/* [한국어] 무효화가 하이퍼바이저로 트랩되어 그림자 페이지 테이블을 갱신하는 환경(중첩 가상화 등). 무효화 한 번의 비용이 매우 크다 */
+		options->qt = IOMMU_DMA_OPTS_SINGLE_QUEUE;	/* [한국어] 큐를 하나만 두고 */
+		options->fq_timeout = IOVA_SINGLE_FQ_TIMEOUT;	/* [한국어] 주기를 길게(1초) */
+		options->fq_size = IOVA_SINGLE_FQ_SIZE;	/* [한국어] 크게(32768) 잡아, 무효화 한 번에 정리되는 양을 최대화한다 (위 영어 주석) */
 	} else {
-		options->qt = IOMMU_DMA_OPTS_PER_CPU_QUEUE;
-		options->fq_size = IOVA_DEFAULT_FQ_SIZE;
-		options->fq_timeout = IOVA_DEFAULT_FQ_TIMEOUT;
+		options->qt = IOMMU_DMA_OPTS_PER_CPU_QUEUE;	/* [한국어] 보통은 CPU 별 큐 — 락 경쟁이 없다 */
+		options->fq_size = IOVA_DEFAULT_FQ_SIZE;	/* [한국어] 작게(256) */
+		options->fq_timeout = IOVA_DEFAULT_FQ_TIMEOUT;	/* [한국어] 주기도 짧게(10ms) */
 	}
 }
 
@@ -877,9 +877,9 @@ static bool iommu_domain_supports_fq(struct device *dev,
 				     struct iommu_domain *domain)
 {
 	/* iommupt always supports DMA-FQ */
-	if (iommupt_from_domain(domain))
-		return true;
-	return device_iommu_capable(dev, IOMMU_CAP_DEFERRED_FLUSH);
+	if (iommupt_from_domain(domain))	/* [한국어] 공용 페이지 테이블 계층으로 만든 도메인이면 */
+		return true;	/* [한국어] 그쪽은 지연 무효화를 항상 지원한다 */
+	return device_iommu_capable(dev, IOMMU_CAP_DEFERRED_FLUSH);	/* [한국어] 레거시 드라이버는 능력을 직접 물어본다. 범위 무효화를 제대로 못 하는 하드웨어는 지연 무효화를 쓸 수 없다 */
 }
 
 /**
@@ -893,58 +893,58 @@ static bool iommu_domain_supports_fq(struct device *dev,
  */
 static int iommu_dma_init_domain(struct iommu_domain *domain, struct device *dev)
 {
-	struct iommu_dma_cookie *cookie = domain->iova_cookie;
-	const struct bus_dma_region *map = dev->dma_range_map;
-	unsigned long order, base_pfn;
-	struct iova_domain *iovad;
-	int ret;
+	struct iommu_dma_cookie *cookie = domain->iova_cookie;	/* [한국어] 이 도메인의 DMA 상태 */
+	const struct bus_dma_region *map = dev->dma_range_map;	/* [한국어] 장치가 실제로 낼 수 있는 주소 범위 (DT/ACPI 가 기술) */
+	unsigned long order, base_pfn;	/* [한국어] IOVA 입도의 로그값과 할당 하한 */
+	struct iova_domain *iovad;	/* [한국어] 세울 IOVA 공간 */
+	int ret;	/* [한국어] 결과 */
 
-	if (!cookie || domain->cookie_type != IOMMU_COOKIE_DMA_IOVA)
-		return -EINVAL;
+	if (!cookie || domain->cookie_type != IOMMU_COOKIE_DMA_IOVA)	/* [한국어] DMA API 용 쿠키가 붙은 도메인이 아니다 */
+		return -EINVAL;	/* [한국어] 초기화 대상이 아니다 */
 
-	iovad = &cookie->iovad;
+	iovad = &cookie->iovad;	/* [한국어] 쿠키 안에 박힌 IOVA 공간 */
 
 	/* Use the smallest supported page size for IOVA granularity */
-	order = __ffs(domain->pgsize_bitmap);
-	base_pfn = 1;
+	order = __ffs(domain->pgsize_bitmap);	/* [한국어] IOMMU 가 지원하는 가장 작은 페이지를 IOVA 입도로 삼는다 — 그보다 잘게 나눠 봐야 매핑할 수 없다 */
+	base_pfn = 1;	/* [한국어] 0 을 비워 둔다. DMA 주소 0 을 오류값으로 쓰는 코드가 많아, 유효한 매핑이 그 자리에 오면 안 된다 (위 영어 주석) */
 
 	/* Check the domain allows at least some access to the device... */
-	if (map) {
-		if (dma_range_map_min(map) > domain->geometry.aperture_end ||
-		    dma_range_map_max(map) < domain->geometry.aperture_start) {
-			pr_warn("specified DMA range outside IOMMU capability\n");
-			return -EFAULT;
+	if (map) {	/* [한국어] 장치의 주소 범위 정보가 있으면 */
+		if (dma_range_map_min(map) > domain->geometry.aperture_end ||	/* [한국어] 장치가 낼 수 있는 최소 주소가 IOMMU 창보다 위이거나 */
+		    dma_range_map_max(map) < domain->geometry.aperture_start) {	/* [한국어] 최대 주소가 창보다 아래면 — 겹치는 구간이 전혀 없다 */
+			pr_warn("specified DMA range outside IOMMU capability\n");	/* [한국어] 펌웨어 기술과 하드웨어가 모순된다 */
+			return -EFAULT;	/* [한국어] 이 장치는 이 IOMMU 아래에서 DMA 할 수 없다 */
 		}
 	}
 	/* ...then finally give it a kicking to make sure it fits */
-	base_pfn = max_t(unsigned long, base_pfn,
-			 domain->geometry.aperture_start >> order);
+	base_pfn = max_t(unsigned long, base_pfn,	/* [한국어] IOMMU 창의 시작보다 아래는 쓸 수 없다 */
+			 domain->geometry.aperture_start >> order);	/* [한국어] 창 시작을 pfn 으로 환산해 하한에 반영 */
 
 	/* start_pfn is always nonzero for an already-initialised domain */
-	if (iovad->start_pfn) {
-		if (1UL << order != iovad->granule ||
-		    base_pfn != iovad->start_pfn) {
-			pr_warn("Incompatible range for DMA domain\n");
-			return -EFAULT;
+	if (iovad->start_pfn) {	/* [한국어] 이미 초기화된 도메인이다 (위 영어 주석 — 0 이 아니면 세워진 것이다) */
+		if (1UL << order != iovad->granule ||	/* [한국어] 입도가 다르거나 */
+		    base_pfn != iovad->start_pfn) {	/* [한국어] 하한이 다르면 — 이미 나간 IOVA 들의 의미가 바뀐다 */
+			pr_warn("Incompatible range for DMA domain\n");	/* [한국어] 기존 매핑을 무효로 만들 수 없다 */
+			return -EFAULT;	/* [한국어] 같은 도메인에 조건이 다른 장치를 붙일 수 없다 */
 		}
 
-		return 0;
+		return 0;	/* [한국어] 같은 조건이면 재초기화는 무해하다 — 그냥 성공으로 돌아간다 */
 	}
 
-	init_iova_domain(iovad, 1UL << order, base_pfn);
-	ret = iova_domain_init_rcaches(iovad);
-	if (ret)
-		return ret;
+	init_iova_domain(iovad, 1UL << order, base_pfn);	/* [한국어] IOVA 공간을 세운다 (앵커 심기 포함) */
+	ret = iova_domain_init_rcaches(iovad);	/* [한국어] CPU 별 캐시 계층까지 */
+	if (ret)	/* [한국어] 캐시 준비 실패 */
+		return ret;	/* [한국어] 성능이 아니라 메모리 문제이므로 실패로 처리한다 */
 
-	iommu_dma_init_options(&cookie->options, dev);
+	iommu_dma_init_options(&cookie->options, dev);	/* [한국어] 하드웨어 특성을 보고 큐 정책을 정한다 */
 
 	/* If the FQ fails we can simply fall back to strict mode */
-	if (domain->type == IOMMU_DOMAIN_DMA_FQ &&
-	    (!iommu_domain_supports_fq(dev, domain) ||
-	     iommu_dma_init_fq(domain)))
-		domain->type = IOMMU_DOMAIN_DMA;
+	if (domain->type == IOMMU_DOMAIN_DMA_FQ &&	/* [한국어] 지연 무효화를 쓰기로 되어 있는데 */
+	    (!iommu_domain_supports_fq(dev, domain) ||	/* [한국어] 하드웨어가 지원하지 않거나 */
+	     iommu_dma_init_fq(domain)))	/* [한국어] 큐를 못 만들었다면 */
+		domain->type = IOMMU_DOMAIN_DMA;	/* [한국어] 조용히 즉시 무효화로 내려앉는다. 성능은 떨어져도 정확성은 그대로다 (위 영어 주석) */
 
-	return iova_reserve_iommu_regions(dev, domain);
+	return iova_reserve_iommu_regions(dev, domain);	/* [한국어] 마지막으로 이 장치가 쓰면 안 되는 주소들을 IOVA 공간에서 뺀다 */
 }
 
 /**
@@ -959,47 +959,47 @@ static int iommu_dma_init_domain(struct iommu_domain *domain, struct device *dev
 static int dma_info_to_prot(enum dma_data_direction dir, bool coherent,
 		     unsigned long attrs)
 {
-	int prot;
+	int prot;	/* [한국어] IOMMU 페이지 권한 비트로 조립할 값 */
 
-	if (attrs & DMA_ATTR_MMIO)
-		prot = IOMMU_MMIO;
+	if (attrs & DMA_ATTR_MMIO)	/* [한국어] 메모리가 아니라 장치 레지스터를 매핑하는 경우 (P2PDMA 등) */
+		prot = IOMMU_MMIO;	/* [한국어] 캐시 속성을 device 로 — 투기적 읽기나 병합이 일어나면 MMIO 부작용이 어긋난다 */
 	else
-		prot = coherent ? IOMMU_CACHE : 0;
+		prot = coherent ? IOMMU_CACHE : 0;	/* [한국어] 장치가 캐시 일관성을 가지면 캐시 가능으로 매핑한다. 아니면 비캐시로 두고, 드라이버가 dma_sync 로 명시적 캐시 관리를 해야 한다 */
 
-	if (attrs & DMA_ATTR_PRIVILEGED)
-		prot |= IOMMU_PRIV;
+	if (attrs & DMA_ATTR_PRIVILEGED)	/* [한국어] 특권 접근 요청 (일부 ARM 장치가 두 권한 수준으로 DMA 한다) */
+		prot |= IOMMU_PRIV;	/* [한국어] PTE 에 특권 비트를 세운다 */
 
-	switch (dir) {
-	case DMA_BIDIRECTIONAL:
-		return prot | IOMMU_READ | IOMMU_WRITE;
-	case DMA_TO_DEVICE:
-		return prot | IOMMU_READ;
-	case DMA_FROM_DEVICE:
-		return prot | IOMMU_WRITE;
+	switch (dir) {	/* [한국어] DMA 방향을 읽기/쓰기 권한으로 옮긴다 */
+	case DMA_BIDIRECTIONAL:	/* [한국어] 양방향 */
+		return prot | IOMMU_READ | IOMMU_WRITE;	/* [한국어] 둘 다 허용 */
+	case DMA_TO_DEVICE:	/* [한국어] 장치가 메모리를 읽어 간다 */
+		return prot | IOMMU_READ;	/* [한국어] 읽기만 — 쓰기를 막는 것이 격리의 실질이다. 장치가 이 버퍼를 덮어쓰려 하면 폴트가 난다 */
+	case DMA_FROM_DEVICE:	/* [한국어] 장치가 메모리에 써 넣는다 */
+		return prot | IOMMU_WRITE;	/* [한국어] 쓰기만 */
 	default:
-		return 0;
+		return 0;	/* [한국어] DMA_NONE 등 — 권한 없는 매핑은 만들 수 없으므로 호출자가 실패로 다룬다 */
 	}
 }
 
 static dma_addr_t iommu_dma_alloc_iova(struct iommu_domain *domain,
 		size_t size, u64 dma_limit, struct device *dev)
 {
-	struct iommu_dma_cookie *cookie = domain->iova_cookie;
-	struct iova_domain *iovad = &cookie->iovad;
-	unsigned long shift, iova_len, iova;
+	struct iommu_dma_cookie *cookie = domain->iova_cookie;	/* [한국어] 이 도메인의 DMA 상태 */
+	struct iova_domain *iovad = &cookie->iovad;	/* [한국어] IOVA 공간 */
+	unsigned long shift, iova_len, iova;	/* [한국어] 입도 로그값, 페이지 단위 길이, 확보한 pfn */
 
-	if (domain->cookie_type == IOMMU_COOKIE_DMA_MSI) {
-		domain->msi_cookie->msi_iova += size;
-		return domain->msi_cookie->msi_iova - size;
+	if (domain->cookie_type == IOMMU_COOKIE_DMA_MSI) {	/* [한국어] MSI 전용 축소판 쿠키에는 할당자가 없다 */
+		domain->msi_cookie->msi_iova += size;	/* [한국어] 예약된 창에서 순서대로 떼어 쓴다 */
+		return domain->msi_cookie->msi_iova - size;	/* [한국어] 방금 뗀 구간의 시작 */
 	}
 
-	shift = iova_shift(iovad);
-	iova_len = size >> shift;
+	shift = iova_shift(iovad);	/* [한국어] 바이트 ↔ pfn 변환에 쓸 시프트 */
+	iova_len = size >> shift;	/* [한국어] 요청 길이를 페이지 수로 */
 
-	dma_limit = min_not_zero(dma_limit, dev->bus_dma_limit);
+	dma_limit = min_not_zero(dma_limit, dev->bus_dma_limit);	/* [한국어] 장치의 DMA 마스크와 버스가 통과시키는 상한 중 작은 쪽. 0 은 '제한 없음'이므로 min_not_zero 를 쓴다 */
 
-	if (domain->geometry.force_aperture)
-		dma_limit = min(dma_limit, (u64)domain->geometry.aperture_end);
+	if (domain->geometry.force_aperture)	/* [한국어] IOMMU 창 밖은 절대 쓸 수 없는 하드웨어면 */
+		dma_limit = min(dma_limit, (u64)domain->geometry.aperture_end);	/* [한국어] 창 끝으로 한 번 더 조인다 */
 
 	/*
 	 * Try to use all the 32-bit PCI addresses first. The original SAC vs.
@@ -1012,90 +1012,90 @@ static dma_addr_t iommu_dma_alloc_iova(struct iommu_domain *domain,
 	 * some inherent bug in handling >32-bit addresses, or not all the
 	 * expected address bits are wired up between the device and the IOMMU.
 	 */
-	if (dma_limit > DMA_BIT_MASK(32) && dev->iommu->pci_32bit_workaround) {
-		iova = alloc_iova_fast(iovad, iova_len,
-				       DMA_BIT_MASK(32) >> shift, false);
-		if (iova)
-			goto done;
+	if (dma_limit > DMA_BIT_MASK(32) && dev->iommu->pci_32bit_workaround) {	/* [한국어] 64비트를 쓸 수 있는 장치라도 일단 32비트 영역부터 시도한다. PCIe 에서는 SAC/DAC 구분이 의미를 잃었지만, 상위 주소 비트를 제대로 배선하지 않았거나 마스크를 잘못 신고하는 하드웨어·펌웨어가 여전히 남아 있기 때문이다 (위 영어 주석) */
+		iova = alloc_iova_fast(iovad, iova_len,	/* [한국어] 32비트 영역에서만 시도 */
+				       DMA_BIT_MASK(32) >> shift, false);	/* [한국어] 상한을 4GB 로. 마지막 false 는 '실패해도 캐시를 비우지 말라'는 뜻 — 아래 64비트 시도가 남아 있으므로 여기서 캐시를 헐 이유가 없다 */
+		if (iova)	/* [한국어] 32비트 영역에서 확보했다 */
+			goto done;	/* [한국어] 가장 안전한 결과 */
 
-		dev->iommu->pci_32bit_workaround = false;
-		dev_notice(dev, "Using %d-bit DMA addresses\n", bits_per(dma_limit));
+		dev->iommu->pci_32bit_workaround = false;	/* [한국어] 32비트 영역이 고갈되었다. 이후로는 이 장치에 대해 시도조차 하지 않는다 — 매번 실패하는 할당을 반복하면 그 자체가 비용이다 */
+		dev_notice(dev, "Using %d-bit DMA addresses\n", bits_per(dma_limit));	/* [한국어] 이 시점 이후 장치가 오작동하면 원인이 상위 주소 비트에 있음을 알려 주는 단서다 (위 영어 주석) */
 	}
 
-	iova = alloc_iova_fast(iovad, iova_len, dma_limit >> shift, true);
-done:
-	return (dma_addr_t)iova << shift;
+	iova = alloc_iova_fast(iovad, iova_len, dma_limit >> shift, true);	/* [한국어] 전체 영역에서 시도. 마지막 true 는 '실패하면 캐시를 비우고 재시도하라' — 여기가 마지막 기회다 */
+done:	/* [한국어] 32비트 성공 경로가 합류 */
+	return (dma_addr_t)iova << shift;	/* [한국어] pfn 을 실제 DMA 주소로 되돌린다. 실패했으면 iova 가 0 이라 0 이 나가고, 그것이 곧 DMA_MAPPING_ERROR 다 */
 }
 
 static void iommu_dma_free_iova(struct iommu_domain *domain, dma_addr_t iova,
 				size_t size, struct iommu_iotlb_gather *gather)
 {
-	struct iova_domain *iovad = &domain->iova_cookie->iovad;
+	struct iova_domain *iovad = &domain->iova_cookie->iovad;	/* [한국어] IOVA 공간 */
 
 	/* The MSI case is only ever cleaning up its most recent allocation */
-	if (domain->cookie_type == IOMMU_COOKIE_DMA_MSI)
-		domain->msi_cookie->msi_iova -= size;
-	else if (gather && gather->queued)
-		queue_iova(domain->iova_cookie, iova_pfn(iovad, iova),
-				size >> iova_shift(iovad),
-				&gather->freelist);
+	if (domain->cookie_type == IOMMU_COOKIE_DMA_MSI)	/* [한국어] MSI 축소판 쿠키 */
+		domain->msi_cookie->msi_iova -= size;	/* [한국어] 가장 최근 할당만 되돌린다 — 스택처럼 쓰는 단순 구조다 (위 영어 주석) */
+	else if (gather && gather->queued)	/* [한국어] 이 도메인이 지연 무효화를 쓰고, 이번 해제가 그 경로로 왔다 */
+		queue_iova(domain->iova_cookie, iova_pfn(iovad, iova),	/* [한국어] IOVA 를 곧바로 돌려주지 않고 큐에 넣는다 */
+				size >> iova_shift(iovad),	/* [한국어] 페이지 수 */
+				&gather->freelist);	/* [한국어] 비워진 페이지 테이블 페이지도 함께 미룬다 */
 	else
-		free_iova_fast(iovad, iova_pfn(iovad, iova),
-				size >> iova_shift(iovad));
+		free_iova_fast(iovad, iova_pfn(iovad, iova),	/* [한국어] 즉시 무효화(strict) 경로 — 이미 IOTLB 를 비웠으므로 바로 반납해도 안전하다 */
+				size >> iova_shift(iovad));	/* [한국어] 페이지 수 */
 }
 
 static void __iommu_dma_unmap(struct device *dev, dma_addr_t dma_addr,
 		size_t size)
 {
-	struct iommu_domain *domain = iommu_get_dma_domain(dev);
-	struct iommu_dma_cookie *cookie = domain->iova_cookie;
-	struct iova_domain *iovad = &cookie->iovad;
-	size_t iova_off = iova_offset(iovad, dma_addr);
-	struct iommu_iotlb_gather iotlb_gather;
-	size_t unmapped;
+	struct iommu_domain *domain = iommu_get_dma_domain(dev);	/* [한국어] 이 장치의 기본 도메인 (검사 없는 핫패스용 접근자) */
+	struct iommu_dma_cookie *cookie = domain->iova_cookie;	/* [한국어] DMA 상태 */
+	struct iova_domain *iovad = &cookie->iovad;	/* [한국어] IOVA 공간 */
+	size_t iova_off = iova_offset(iovad, dma_addr);	/* [한국어] IOVA 가 페이지 경계에서 얼마나 들어가 있는지 */
+	struct iommu_iotlb_gather iotlb_gather;	/* [한국어] 무효화 범위 수집기 (스택) */
+	size_t unmapped;	/* [한국어] 실제로 해제된 바이트 */
 
-	dma_addr -= iova_off;
-	size = iova_align(iovad, size + iova_off);
-	iommu_iotlb_gather_init(&iotlb_gather);
-	iotlb_gather.queued = READ_ONCE(cookie->fq_domain);
+	dma_addr -= iova_off;	/* [한국어] 페이지 경계로 내린다 — 매핑도 같은 방식으로 확장해 만들었다 */
+	size = iova_align(iovad, size + iova_off);	/* [한국어] 앞쪽 오프셋을 더한 뒤 페이지 단위로 올림 */
+	iommu_iotlb_gather_init(&iotlb_gather);	/* [한국어] 빈 수집기로 시작 */
+	iotlb_gather.queued = READ_ONCE(cookie->fq_domain);	/* [한국어] 이 한 줄이 strict/lazy 를 가른다. fq_domain 이 있으면 queued 가 참이 되고, iommu.c 의 드라이버들은 그것을 보고 즉시 무효화를 생략한다 */
 
-	unmapped = iommu_unmap_fast(domain, dma_addr, size, &iotlb_gather);
-	WARN_ON(unmapped != size);
+	unmapped = iommu_unmap_fast(domain, dma_addr, size, &iotlb_gather);	/* [한국어] PTE 를 지우고 무효화 범위만 모은다 */
+	WARN_ON(unmapped != size);	/* [한국어] 요청한 만큼 지우지 못했다 = 매핑과 해제의 크기가 어긋났다는 뜻. 드라이버가 dma_unmap 에 잘못된 길이를 넘긴 전형적인 버그다 */
 
-	if (!iotlb_gather.queued)
-		iommu_iotlb_sync(domain, &iotlb_gather);
-	iommu_dma_free_iova(domain, dma_addr, size, &iotlb_gather);
+	if (!iotlb_gather.queued)	/* [한국어] 즉시 무효화 정책이면 */
+		iommu_iotlb_sync(domain, &iotlb_gather);	/* [한국어] 여기서 IOTLB 를 비우고 완료를 기다린다. 이 줄이 dma_unmap 지연의 대부분이며, flush queue 가 없애려는 것이 바로 이 대기다 */
+	iommu_dma_free_iova(domain, dma_addr, size, &iotlb_gather);	/* [한국어] IOVA 를 반납하거나(strict) 큐에 넣는다(lazy) */
 }
 
 static dma_addr_t __iommu_dma_map(struct device *dev, phys_addr_t phys,
 		size_t size, int prot, u64 dma_mask)
 {
-	struct iommu_domain *domain = iommu_get_dma_domain(dev);
-	struct iommu_dma_cookie *cookie = domain->iova_cookie;
-	struct iova_domain *iovad = &cookie->iovad;
-	size_t iova_off = iova_offset(iovad, phys);
-	dma_addr_t iova;
+	struct iommu_domain *domain = iommu_get_dma_domain(dev);	/* [한국어] 이 장치의 기본 도메인 */
+	struct iommu_dma_cookie *cookie = domain->iova_cookie;	/* [한국어] DMA 상태 */
+	struct iova_domain *iovad = &cookie->iovad;	/* [한국어] IOVA 공간 */
+	size_t iova_off = iova_offset(iovad, phys);	/* [한국어] 물리 주소가 IOMMU 페이지 안에서 얼마나 들어가 있는지. 이 오프셋만큼 앞을 포함해 매핑하고, 반환 주소에는 다시 더해 준다 */
+	dma_addr_t iova;	/* [한국어] 확보한 IOVA */
 
-	if (static_branch_unlikely(&iommu_deferred_attach_enabled) &&
-	    iommu_deferred_attach(dev, domain))
-		return DMA_MAPPING_ERROR;
+	if (static_branch_unlikely(&iommu_deferred_attach_enabled) &&	/* [한국어] 지연 부착이 필요한 하드웨어가 하나라도 있는 시스템에서만 이 분기가 존재한다 */
+	    iommu_deferred_attach(dev, domain))	/* [한국어] 첫 DMA 인 지금 실제로 도메인을 하드웨어에 건다 */
+		return DMA_MAPPING_ERROR;	/* [한국어] 부착 실패 — 매핑할 수 없다 */
 
 	/* If anyone ever wants this we'd need support in the IOVA allocator */
-	if (dev_WARN_ONCE(dev, dma_get_min_align_mask(dev) > iova_mask(iovad),
-	    "Unsupported alignment constraint\n"))
-		return DMA_MAPPING_ERROR;
+	if (dev_WARN_ONCE(dev, dma_get_min_align_mask(dev) > iova_mask(iovad),	/* [한국어] 장치가 IOMMU 페이지보다 큰 정렬을 요구한다 (위 영어 주석 — IOVA 할당자가 그것을 표현하지 못한다) */
+	    "Unsupported alignment constraint\n"))	/* [한국어] 드라이버의 요구를 만족시킬 수 없다 */
+		return DMA_MAPPING_ERROR;	/* [한국어] 매핑 거절 */
 
-	size = iova_align(iovad, size + iova_off);
+	size = iova_align(iovad, size + iova_off);	/* [한국어] 앞쪽 오프셋을 포함해 페이지 단위로 올림. IOMMU 는 페이지 단위로만 매핑하므로 요청보다 넓은 범위가 장치에 열리며, 그래서 신뢰할 수 없는 장치는 이 경로가 아니라 swiotlb 로 보낸다 */
 
-	iova = iommu_dma_alloc_iova(domain, size, dma_mask, dev);
-	if (!iova)
-		return DMA_MAPPING_ERROR;
+	iova = iommu_dma_alloc_iova(domain, size, dma_mask, dev);	/* [한국어] 주소를 먼저 확보한다 */
+	if (!iova)	/* [한국어] IOVA 고갈 */
+		return DMA_MAPPING_ERROR;	/* [한국어] 드라이버는 재시도하거나 요청을 쪼갠다 */
 
-	if (iommu_map(domain, iova, phys - iova_off, size, prot, GFP_ATOMIC)) {
-		iommu_dma_free_iova(domain, iova, size, NULL);
-		return DMA_MAPPING_ERROR;
+	if (iommu_map(domain, iova, phys - iova_off, size, prot, GFP_ATOMIC)) {	/* [한국어] 확보한 IOVA 에 물리 페이지를 매핑한다. 물리 주소도 페이지 경계로 내려 시작을 맞춘다. GFP_ATOMIC 인 것은 이 경로가 인터럽트 문맥에서도 불리기 때문이다 */
+		iommu_dma_free_iova(domain, iova, size, NULL);	/* [한국어] 매핑 실패 — 확보한 주소를 즉시 되돌린다. gather 가 NULL 이라 큐를 거치지 않고 바로 반납하는데, 매핑이 없었으니 무효화할 것도 없기 때문이다 */
+		return DMA_MAPPING_ERROR;	/* [한국어] 매핑 실패 */
 	}
-	return iova + iova_off;
+	return iova + iova_off;	/* [한국어] 페이지 경계로 내렸던 오프셋을 다시 더해 돌려준다 — 장치가 실제로 쓸 주소다 */
 }
 
 static void __iommu_dma_free_pages(struct page **pages, int count)
