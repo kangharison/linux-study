@@ -3038,46 +3038,85 @@ static int device_flush_dte(struct iommu_dev_data *dev_data)
 	return ret;	/* [한국어] 성패 */
 }
 
+/*
+ * [한국어]
+ * domain_flush_pages_v2 - 2단계 페이지 테이블 도메인의 범위를 무효화한다
+ *
+ * @pdom: 대상 도메인.
+ * @address: 범위의 시작.
+ * @size: 크기.
+ * @return: 0 성공, 음수면 어느 명령이 큐에 들어가지 못했다.
+ *
+ * v2 모드에서는 도메인 id 가 도메인이 아니라 장치별 GCR3 정보에 붙어 있다.
+ * 한 도메인에 붙은 장치들이 서로 다른 id 를 가질 수 있으므로, 장치 목록을
+ * 훑으며 각자의 id 로 명령을 하나씩 만든다.
+ *
+ * v1 쪽(domain_flush_pages_v1)과 대조하면 차이가 분명하다: 그쪽은 도메인
+ * id 하나로 명령 한 개를 만들어 여러 유닛에 뿌린다.
+ *
+ * 실행 컨텍스트: domain->lock 을 쥔 채.
+ *
+ * 호출 체인:
+ *   __domain_flush_pages() → [이 함수] → iommu_queue_command()
+ */
 static int domain_flush_pages_v2(struct protection_domain *pdom,
 				 u64 address, size_t size)
 {
-	struct iommu_dev_data *dev_data;
-	struct iommu_cmd cmd;
-	int ret = 0;
+	struct iommu_dev_data *dev_data;	/* [한국어] 도메인에 붙은 장치들 */
+	struct iommu_cmd cmd;	/* [한국어] 장치마다 다시 만드는 명령 */
+	int ret = 0;	/* [한국어] 큐 삽입 결과를 모은다 */
 
-	lockdep_assert_held(&pdom->lock);
-	list_for_each_entry(dev_data, &pdom->dev_list, list) {
-		struct amd_iommu *iommu = get_amd_iommu_from_dev(dev_data->dev);
-		u16 domid = dev_data->gcr3_info.domid;
+	lockdep_assert_held(&pdom->lock);	/* [한국어] 장치 목록을 훑는 동안 바뀌면 안 된다 */
+	list_for_each_entry(dev_data, &pdom->dev_list, list) {	/* [한국어] v2 는 도메인 id 가 장치별이라 목록을 훑어야 한다 */
+		struct amd_iommu *iommu = get_amd_iommu_from_dev(dev_data->dev);	/* [한국어] 그 장치를 맡은 유닛 */
+		u16 domid = dev_data->gcr3_info.domid;	/* [한국어] 그 장치에 배정된 도메인 id */
 
-		build_inv_iommu_pages(&cmd, address, size,
-				      domid, IOMMU_NO_PASID, true);
+		build_inv_iommu_pages(&cmd, address, size,	/* [한국어] 그 id 로 무효화 명령을 */
+				      domid, IOMMU_NO_PASID, true);	/* [한국어] PASID 는 따지지 않되 게스트 모드 표시는 켠다 */
 
-		ret |= iommu_queue_command(iommu, &cmd);
+		ret |= iommu_queue_command(iommu, &cmd);	/* [한국어] 하나라도 실패하면 결과에 남는다 */
 	}
 
-	return ret;
+	return ret;	/* [한국어] 성패 */
 }
 
+/*
+ * [한국어]
+ * domain_flush_pages_v1 - 1단계 페이지 테이블 도메인의 범위를 무효화한다
+ *
+ * @pdom: 대상 도메인.
+ * @address: 범위의 시작.
+ * @size: 크기.
+ * @return: 0 성공, 음수면 큐 삽입 실패가 하나라도 있었다.
+ *
+ * v1 모드에서는 도메인 id 가 도메인 자체에 붙어 있다. 그래서 명령은 하나면
+ * 되고, 그 명령을 이 도메인에 장치를 걸고 있는 모든 유닛에 뿌린다.
+ *
+ * 마지막 조각이 중첩 변환이다. 이 도메인이 부모 노릇을 하고 있으면 그 위에
+ * 얹힌 게스트 도메인들의 태그로도 지워야 한다 — 그 몫을
+ * iommu_flush_pages_v1_hdom_ids() 가 맡는다.
+ *
+ * 실행 컨텍스트: domain->lock 을 쥔 채.
+ */
 static int domain_flush_pages_v1(struct protection_domain *pdom,
 				 u64 address, size_t size)
 {
-	struct pdom_iommu_info *pdom_iommu_info;
-	struct iommu_cmd cmd;
-	int ret = 0;
-	unsigned long i;
+	struct pdom_iommu_info *pdom_iommu_info;	/* [한국어] 이 도메인에 장치를 걸고 있는 유닛들 */
+	struct iommu_cmd cmd;	/* [한국어] 한 번 만들어 여러 유닛에 재사용 */
+	int ret = 0;	/* [한국어] 큐 삽입 결과를 모은다 */
+	unsigned long i;	/* [한국어] xarray 인덱스 */
 
-	lockdep_assert_held(&pdom->lock);
+	lockdep_assert_held(&pdom->lock);	/* [한국어] 유닛 배열이 바뀌면 안 된다 */
 
-	build_inv_iommu_pages(&cmd, address, size,
-			      pdom->id, IOMMU_NO_PASID, false);
+	build_inv_iommu_pages(&cmd, address, size,	/* [한국어] v1 은 도메인 id 가 도메인 자체에 있어 명령 하나면 된다 */
+			      pdom->id, IOMMU_NO_PASID, false);	/* [한국어] 게스트 모드가 아니다 */
 
-	xa_for_each(&pdom->iommu_array, i, pdom_iommu_info) {
+	xa_for_each(&pdom->iommu_array, i, pdom_iommu_info) {	/* [한국어] 장치를 걸고 있는 유닛 전부에 */
 		/*
 		 * Devices of this domain are behind this IOMMU
 		 * We need a TLB flush
 		 */
-		ret |= iommu_queue_command(pdom_iommu_info->iommu, &cmd);
+		ret |= iommu_queue_command(pdom_iommu_info->iommu, &cmd);	/* [한국어] (원 주석: 이 유닛 뒤에 이 도메인의 장치가 있으므로 TLB 를 비워야 한다) */
 	}
 
 	/*
@@ -3088,56 +3127,97 @@ static int domain_flush_pages_v1(struct protection_domain *pdom,
 	 *
 	 * See drivers/iommu/amd/nested.c: amd_iommu_alloc_domain_nested()
 	 */
-	if (!list_empty(&pdom->viommu_list))
-		ret |= iommu_flush_pages_v1_hdom_ids(pdom, address, size);
+	if (!list_empty(&pdom->viommu_list))	/* [한국어] 중첩 변환의 부모 노릇을 하고 있으면 */
+		ret |= iommu_flush_pages_v1_hdom_ids(pdom, address, size);	/* [한국어] 게스트 도메인 태그로도 지워야 한다 */
 
-	return ret;
+	return ret;	/* [한국어] 성패 */
 }
 
 /*
  * TLB invalidation function which is called from the mapping functions.
  * It flushes range of PTEs of the domain.
  */
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * __domain_flush_pages - 도메인의 IOMMU 캐시와 장치 캐시를 모두 무효화한다
+ *
+ * @domain: 대상 도메인.
+ * @address: 범위의 시작.
+ * @size: 크기.
+ *
+ * 무효화가 두 곳에서 일어나야 한다는 것이 요점이다. 먼저 페이지 테이블
+ * 모드에 맞는 방식으로 IOMMU 쪽 TLB 를 지우고, 이어서 ATS 를 켠 장치마다
+ * 그 안의 IOTLB 를 지운다. 한쪽만 지우면 그쪽 캐시가 옛 매핑을 계속 쓴다.
+ *
+ * 이 함수는 명령을 넣기만 한다. 실제 완료를 기다리는 일은 호출자가 한다 —
+ * 여러 번 부른 뒤 마지막에 한 번만 기다리면 되기 때문이다.
+ *
+ * 실행 컨텍스트: domain->lock 을 쥔 채.
+ */
 static void __domain_flush_pages(struct protection_domain *domain,
 				 u64 address, size_t size)
 {
-	struct iommu_dev_data *dev_data;
-	int ret = 0;
-	ioasid_t pasid = IOMMU_NO_PASID;
-	bool gn = false;
+	struct iommu_dev_data *dev_data;	/* [한국어] 장치 순회용 */
+	int ret = 0;	/* [한국어] 실패를 모은다 */
+	ioasid_t pasid = IOMMU_NO_PASID;	/* [한국어] 도메인 단위 무효화라 PASID 는 없다 */
+	bool gn = false;	/* [한국어] 게스트 모드(v2) 표시 */
 
-	lockdep_assert_held(&domain->lock);
+	lockdep_assert_held(&domain->lock);	/* [한국어] 장치 목록 보호 */
 
-	if (pdom_is_v2_pgtbl_mode(domain)) {
-		gn = true;
-		ret = domain_flush_pages_v2(domain, address, size);
+	if (pdom_is_v2_pgtbl_mode(domain)) {	/* [한국어] 2단계 테이블 도메인이면 */
+		gn = true;	/* [한국어] 장치 명령에도 게스트 모드로 표시해야 한다 */
+		ret = domain_flush_pages_v2(domain, address, size);	/* [한국어] 장치별 도메인 id 로 */
 	} else {
-		ret = domain_flush_pages_v1(domain, address, size);
+		ret = domain_flush_pages_v1(domain, address, size);	/* [한국어] 도메인 id 하나로 */
 	}
 
-	list_for_each_entry(dev_data, &domain->dev_list, list) {
+	list_for_each_entry(dev_data, &domain->dev_list, list) {	/* [한국어] 이제 장치 안의 캐시를 */
 
-		if (!dev_data->ats_enabled)
-			continue;
+		if (!dev_data->ats_enabled)	/* [한국어] 변환을 캐시하지 않는 장치는 */
+			continue;	/* [한국어] 지울 것이 없다 */
 
-		ret |= device_flush_iotlb(dev_data, address, size, pasid, gn);
+		ret |= device_flush_iotlb(dev_data, address, size, pasid, gn);	/* [한국어] 장치 쪽을 지우지 않으면 그 장치만 옛 매핑을 쓴다 */
 	}
 
-	WARN_ON(ret);
+	WARN_ON(ret);	/* [한국어] 큐가 가득 차 명령을 못 넣었다면 무효화가 새어 나간 것이다 */
 }
 
+/*
+ * [한국어]
+ * amd_iommu_domain_flush_pages - 도메인 매핑 변경을 하드웨어에 반영한다
+ *
+ * @domain: 대상 도메인.
+ * @address: 범위의 시작.
+ * @size: 크기.
+ *
+ * 매핑을 바꾼 쪽이 부르는 최상위 무효화 진입점이다. 보통은 __domain_flush_pages
+ * 를 한 번 부르고 완료를 기다리면 끝난다.
+ *
+ * NpCache 가 켜져 있으면 이야기가 달라진다. 그 비트는 사실상 "우리가 가상
+ * 머신 안이고 상대는 vIOMMU 다"라는 신호다. 하드웨어의 무효화 명령은
+ * 2의 거듭제곱 정렬 범위만 표현할 수 있어 임의 범위는 바깥으로 넓혀지는데,
+ * 실물 하드웨어에서는 그 여분이 공짜인 반면 하이퍼바이저는 그만큼을
+ * 실제로 훑어야 한다. 그래서 여기서는 범위를 정렬된 조각으로 쪼개
+ * 여러 번 나누어 보낸다 — 명령 수는 늘지만 상대의 일은 줄어든다.
+ *
+ * 실행 컨텍스트: domain->lock 을 쥔 채.
+ *
+ * 호출 체인:
+ *   iotlb_sync/unmap 경로 → [이 함수] → __domain_flush_pages() → domain_flush_complete()
+ */
 void amd_iommu_domain_flush_pages(struct protection_domain *domain,
 				  u64 address, size_t size)
 {
-	lockdep_assert_held(&domain->lock);
+	lockdep_assert_held(&domain->lock);	/* [한국어] 장치 목록과 유닛 배열 보호 */
 
-	if (likely(!amd_iommu_np_cache)) {
-		__domain_flush_pages(domain, address, size);
+	if (likely(!amd_iommu_np_cache)) {	/* [한국어] 실물 하드웨어의 일반 경로 */
+		__domain_flush_pages(domain, address, size);	/* [한국어] 범위를 한 번에 넘긴다 */
 
 		/* Wait until IOMMU TLB and all device IOTLB flushes are complete */
-		domain_flush_complete(domain);
+		domain_flush_complete(domain);	/* [한국어] (원 주석: IOMMU TLB 와 모든 장치 IOTLB 무효화가 끝날 때까지 기다린다) */
 
-		return;
+		return;	/* [한국어] 끝 */
 	}
 
 	/*
@@ -3150,11 +3230,11 @@ void amd_iommu_domain_flush_pages(struct protection_domain *domain,
 	 * between the natural alignment of the address that we flush and the
 	 * greatest naturally aligned region that fits in the range.
 	 */
-	while (size != 0) {
-		int addr_alignment = __ffs(address);
-		int size_alignment = __fls(size);
-		int min_alignment;
-		size_t flush_size;
+	while (size != 0) {	/* [한국어] vIOMMU 상대: 정렬된 조각으로 쪼개 보낸다 */
+		int addr_alignment = __ffs(address);	/* [한국어] 주소가 몇 비트까지 정렬되어 있나 */
+		int size_alignment = __fls(size);	/* [한국어] 남은 크기에 들어가는 가장 큰 2의 거듭제곱 */
+		int min_alignment;	/* [한국어] 둘 중 작은 쪽이 이번에 보낼 크기 */
+		size_t flush_size;	/* [한국어] 이번 조각의 크기 */
 
 		/*
 		 * size is always non-zero, but address might be zero, causing
@@ -3162,16 +3242,16 @@ void amd_iommu_domain_flush_pages(struct protection_domain *domain,
 		 * argument in __ffs(address) to long might trim the high bits
 		 * of the address on x86-32, cast to long when doing the check.
 		 */
-		if (likely((unsigned long)address != 0))
-			min_alignment = min(addr_alignment, size_alignment);
+		if (likely((unsigned long)address != 0))	/* [한국어] 주소가 0 이면 __ffs 가 의미를 잃는다 */
+			min_alignment = min(addr_alignment, size_alignment);	/* [한국어] 정렬과 크기 양쪽을 넘지 않는 조각 */
 		else
-			min_alignment = size_alignment;
+			min_alignment = size_alignment;	/* [한국어] 주소 0 은 무한히 정렬된 셈이라 크기만 본다 */
 
-		flush_size = 1ul << min_alignment;
+		flush_size = 1ul << min_alignment;	/* [한국어] 이번에 지울 크기 */
 
-		__domain_flush_pages(domain, address, flush_size);
-		address += flush_size;
-		size -= flush_size;
+		__domain_flush_pages(domain, address, flush_size);	/* [한국어] 정확히 그 조각만 — 하이퍼바이저가 헛일을 하지 않는다 */
+		address += flush_size;	/* [한국어] 다음 조각으로 */
+		size -= flush_size;	/* [한국어] 남은 만큼 줄인다 */
 	}
 
 	/* Wait until IOMMU TLB and all device IOTLB flushes are complete */
@@ -3179,48 +3259,104 @@ void amd_iommu_domain_flush_pages(struct protection_domain *domain,
 }
 
 /* Flush the whole IO/TLB for a given protection domain - including PDE */
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * amd_iommu_domain_flush_all - 도메인의 캐시를 통째로 비운다
+ *
+ * @domain: 대상 도메인.
+ *
+ * 주소 0 부터 "전 범위" 마법값까지를 지운다. 범위를 따질 수 없거나 따져
+ * 봐야 의미가 없을 때 — 도메인 해제, 상위 페이지 테이블 교체 등 — 쓴다.
+ */
 static void amd_iommu_domain_flush_all(struct protection_domain *domain)
 {
-	amd_iommu_domain_flush_pages(domain, 0,
-				     CMD_INV_IOMMU_ALL_PAGES_ADDRESS);
+	amd_iommu_domain_flush_pages(domain, 0,	/* [한국어] 주소 0 부터 */
+				     CMD_INV_IOMMU_ALL_PAGES_ADDRESS);	/* [한국어] 전 범위를 뜻하는 마법값까지 */
 }
 
+/*
+ * [한국어]
+ * amd_iommu_dev_flush_pasid_pages - 한 PASID 의 매핑 변경을 반영한다
+ *
+ * @dev_data: 대상 장치.
+ * @pasid: 대상 PASID.
+ * @address: 범위의 시작.
+ * @size: 크기.
+ *
+ * SVA 처럼 프로세스 주소 공간을 장치에 직접 붙인 경우, 무효화 단위가
+ * 도메인이 아니라 (장치, PASID) 쌍이다. 그 PASID 만 지우므로 같은 장치의
+ * 다른 주소 공간은 캐시를 잃지 않는다.
+ *
+ * 여기서는 명령을 넣고 완료까지 기다린다 — mmu_notifier 경로에서 불리는데,
+ * 그쪽은 반환 시점에 무효화가 끝나 있다고 가정한다.
+ */
 void amd_iommu_dev_flush_pasid_pages(struct iommu_dev_data *dev_data,
 				     ioasid_t pasid, u64 address, size_t size)
 {
-	struct iommu_cmd cmd;
-	struct amd_iommu *iommu = get_amd_iommu_from_dev(dev_data->dev);
+	struct iommu_cmd cmd;	/* [한국어] 무효화 명령 */
+	struct amd_iommu *iommu = get_amd_iommu_from_dev(dev_data->dev);	/* [한국어] 명령을 보낼 유닛 */
 
-	build_inv_iommu_pages(&cmd, address, size,
-			      dev_data->gcr3_info.domid, pasid, true);
-	iommu_queue_command(iommu, &cmd);
+	build_inv_iommu_pages(&cmd, address, size,	/* [한국어] 이 (장치, PASID) 쌍의 범위만 */
+			      dev_data->gcr3_info.domid, pasid, true);	/* [한국어] 장치별 도메인 id 와 PASID 로 태그된 항목 */
+	iommu_queue_command(iommu, &cmd);	/* [한국어] IOMMU 쪽 TLB */
 
-	if (dev_data->ats_enabled)
-		device_flush_iotlb(dev_data, address, size, pasid, true);
+	if (dev_data->ats_enabled)	/* [한국어] 장치도 캐시하고 있으면 */
+		device_flush_iotlb(dev_data, address, size, pasid, true);	/* [한국어] 그쪽도 */
 
-	iommu_completion_wait(iommu);
+	iommu_completion_wait(iommu);	/* [한국어] mmu_notifier 는 반환 시점에 끝나 있다고 가정한다 */
 }
 
+/*
+ * [한국어]
+ * dev_flush_pasid_all - 한 PASID 의 캐시를 통째로 비운다
+ *
+ * @dev_data: 대상 장치.
+ * @pasid: 대상 PASID.
+ *
+ * GCR3 항목이 바뀌면 그 PASID 의 주소 공간 자체가 달라지므로 범위를 따질
+ * 수 없다. update_gcr3() 가 쓴다.
+ */
 static void dev_flush_pasid_all(struct iommu_dev_data *dev_data,
 				ioasid_t pasid)
 {
-	amd_iommu_dev_flush_pasid_pages(dev_data, pasid, 0,
-					CMD_INV_IOMMU_ALL_PAGES_ADDRESS);
+	amd_iommu_dev_flush_pasid_pages(dev_data, pasid, 0,	/* [한국어] 주소 0 부터 */
+					CMD_INV_IOMMU_ALL_PAGES_ADDRESS);	/* [한국어] 전 범위 — GCR3 가 바뀌면 주소 공간 자체가 달라진다 */
 }
 
+/*
+ * [한국어]
+ * amd_iommu_complete_ppr - 페이지 폴트 처리 결과를 장치에 돌려준다
+ *
+ * @dev: 폴트를 낸 장치.
+ * @pasid: 그 폴트의 PASID.
+ * @status: 처리 결과(성공/실패/무효).
+ * @tag: 장치가 붙였던 요청 식별자.
+ * @return: 큐 삽입 결과.
+ *
+ * PPR 은 장치가 "이 주소를 매핑해 달라"고 요청하고 기다리는 프로토콜이다.
+ * 커널이 폴트를 처리한 뒤 이 응답을 보내야 장치가 멈춰 있던 요청을 다시
+ * 시도한다 — 응답이 없으면 그 요청은 영영 진행되지 않는다.
+ *
+ * pri_tlp 를 함께 싣는 이유: 장치가 요청을 보낼 때 쓴 TLP 접두 형식을
+ * 응답에도 그대로 맞춰야 장치가 짝을 찾는다.
+ *
+ * 호출 체인:
+ *   iommu 코어의 페이지 응답 경로 → [이 함수] → build_complete_ppr()
+ */
 int amd_iommu_complete_ppr(struct device *dev, u32 pasid, int status, int tag)
 {
-	struct iommu_dev_data *dev_data;
-	struct amd_iommu *iommu;
-	struct iommu_cmd cmd;
+	struct iommu_dev_data *dev_data;	/* [한국어] 장치의 벤더 상태 */
+	struct amd_iommu *iommu;	/* [한국어] 응답을 보낼 유닛 */
+	struct iommu_cmd cmd;	/* [한국어] COMPLETE_PPR 명령 */
 
-	dev_data = dev_iommu_priv_get(dev);
-	iommu    = get_amd_iommu_from_dev(dev);
+	dev_data = dev_iommu_priv_get(dev);	/* [한국어] probe 때 붙여 둔 상태 */
+	iommu    = get_amd_iommu_from_dev(dev);	/* [한국어] 그 장치를 맡은 유닛 */
 
-	build_complete_ppr(&cmd, dev_data->devid, pasid, status,
-			   tag, dev_data->pri_tlp);
+	build_complete_ppr(&cmd, dev_data->devid, pasid, status,	/* [한국어] 누구의 어느 요청에 대한 응답인지 */
+			   tag, dev_data->pri_tlp);	/* [한국어] tag 로 짝을 찾고, TLP 형식은 요청 때와 맞춰야 한다 */
 
-	return iommu_queue_command(iommu, &cmd);
+	return iommu_queue_command(iommu, &cmd);	/* [한국어] 응답이 가야 장치가 멈춘 요청을 다시 시도한다 */
 }
 
 /****************************************************************************
@@ -3232,259 +3368,461 @@ int amd_iommu_complete_ppr(struct device *dev, u32 pasid, int status, int tag)
  * contain.
  *
  ****************************************************************************/
+/*
+ * [한국어]
+ * amd_iommu_pdom_id_alloc - 도메인 id 를 하나 배정한다
+ *
+ * @return: 1 이상의 id, 실패하면 음수.
+ *
+ * 도메인 id 는 하드웨어가 TLB 항목에 붙이는 태그다. 0 은 예약값이라 1 부터
+ * 나눠 준다. GFP_ATOMIC 인 이유는 장치 attach 가 스핀락 아래에서 일어날 수
+ * 있어서다.
+ */
 int amd_iommu_pdom_id_alloc(void)
 {
-	return ida_alloc_range(&pdom_ids, 1, MAX_DOMAIN_ID - 1, GFP_ATOMIC);
+	return ida_alloc_range(&pdom_ids, 1, MAX_DOMAIN_ID - 1, GFP_ATOMIC);	/* [한국어] 0 은 예약값이고, attach 가 스핀락 아래일 수 있어 ATOMIC */
 }
 
+/*
+ * [한국어]
+ * amd_iommu_pdom_id_reserve - 특정 도메인 id 를 찜해 둔다
+ *
+ * @id: 찜할 id.
+ * @gfp: 할당 플래그.
+ * @return: 성공하면 그 id, 이미 쓰이고 있으면 -ENOSPC.
+ *
+ * kdump 로 앞 커널의 장치 테이블을 물려받을 때 쓴다. 그 표에 이미 적혀 있는
+ * id 를 새 커널이 다시 나눠 주면 하드웨어 캐시에서 두 도메인이 섞인다.
+ */
 int amd_iommu_pdom_id_reserve(u16 id, gfp_t gfp)
 {
-	return ida_alloc_range(&pdom_ids, id, id, gfp);
+	return ida_alloc_range(&pdom_ids, id, id, gfp);	/* [한국어] 정확히 그 id 만 — 이미 쓰이면 -ENOSPC */
 }
 
+/*
+ * [한국어]
+ * amd_iommu_pdom_id_free - 도메인 id 를 반납한다
+ *
+ * @id: 반납할 id.
+ *
+ * 반납 전에 그 id 로 태그된 캐시를 비워 두어야 한다. 그러지 않으면 같은 id 를
+ * 받은 다음 도메인이 남의 변환을 물려받는다.
+ */
 void amd_iommu_pdom_id_free(int id)
 {
-	ida_free(&pdom_ids, id);
+	ida_free(&pdom_ids, id);	/* [한국어] 반납 전에 그 id 로 태그된 캐시를 비워 두어야 한다 */
 }
 
+/*
+ * [한국어]
+ * amd_iommu_pdom_id_destroy - id 할당기를 통째로 해제한다
+ *
+ * 모듈 해제 경로에서 ida 가 내부적으로 잡아 둔 비트맵을 돌려준다.
+ */
 void amd_iommu_pdom_id_destroy(void)
 {
-	ida_destroy(&pdom_ids);
+	ida_destroy(&pdom_ids);	/* [한국어] ida 내부 비트맵까지 돌려준다 */
 }
 
+/*
+ * [한국어]
+ * free_gcr3_tbl_level1 - GCR3 표의 마지막 단계를 해제한다
+ *
+ * @tbl: 512 항목짜리 한 페이지.
+ *
+ * 이 단계의 항목은 프로세스별 페이지 테이블 루트를 가리킨다. 유효 비트가
+ * 선 항목만 실제 페이지를 갖고 있으므로 그것만 돌려준다.
+ *
+ * 항목이 물리 주소로 적혀 있어 iommu_phys_to_virt 로 되돌려야 한다 —
+ * 하드웨어가 읽는 표라 커널 가상 주소가 아니다.
+ */
 static void free_gcr3_tbl_level1(u64 *tbl)
 {
-	u64 *ptr;
-	int i;
+	u64 *ptr;	/* [한국어] 항목이 가리키는 페이지 */
+	int i;	/* [한국어] 항목 인덱스 */
 
-	for (i = 0; i < 512; ++i) {
-		if (!(tbl[i] & GCR3_VALID))
-			continue;
+	for (i = 0; i < 512; ++i) {	/* [한국어] 한 페이지에 512 항목 */
+		if (!(tbl[i] & GCR3_VALID))	/* [한국어] 비어 있는 항목은 */
+			continue;	/* [한국어] 해제할 것이 없다 */
 
-		ptr = iommu_phys_to_virt(tbl[i] & PAGE_MASK);
+		ptr = iommu_phys_to_virt(tbl[i] & PAGE_MASK);	/* [한국어] 하드웨어가 읽는 표라 물리 주소로 적혀 있다 */
 
-		iommu_free_pages(ptr);
+		iommu_free_pages(ptr);	/* [한국어] 마지막 단계 — 프로세스 페이지 테이블 루트를 담던 페이지 */
 	}
 }
 
+/*
+ * [한국어]
+ * free_gcr3_tbl_level2 - GCR3 표의 중간 단계를 해제한다
+ *
+ * @tbl: 512 항목짜리 한 페이지.
+ *
+ * 이 단계의 항목은 다음 단계 표를 가리키므로, 각 항목마다 아래 단계를 먼저
+ * 비운 뒤에야 이 페이지를 버릴 수 있다. 아래에서 위로 올라가는 순서다.
+ */
 static void free_gcr3_tbl_level2(u64 *tbl)
 {
-	u64 *ptr;
-	int i;
+	u64 *ptr;	/* [한국어] 아래 단계 표 */
+	int i;	/* [한국어] 항목 인덱스 */
 
-	for (i = 0; i < 512; ++i) {
-		if (!(tbl[i] & GCR3_VALID))
-			continue;
+	for (i = 0; i < 512; ++i) {	/* [한국어] 한 페이지에 512 항목 */
+		if (!(tbl[i] & GCR3_VALID))	/* [한국어] 비어 있는 항목은 */
+			continue;	/* [한국어] 건너뛴다 */
 
-		ptr = iommu_phys_to_virt(tbl[i] & PAGE_MASK);
+		ptr = iommu_phys_to_virt(tbl[i] & PAGE_MASK);	/* [한국어] 다음 단계 표의 위치 */
 
-		free_gcr3_tbl_level1(ptr);
+		free_gcr3_tbl_level1(ptr);	/* [한국어] 아래를 먼저 비워야 이 페이지를 버릴 수 있다 */
 	}
 }
 
+/*
+ * [한국어]
+ * free_gcr3_table - 장치의 GCR3 표를 통째로 해제한다
+ *
+ * @gcr3_info: 해제할 표의 상태.
+ *
+ * 단계 수(glx)에 따라 몇 겹을 벗겨야 하는지가 달라진다. 0 이면 표 자체가
+ * 한 페이지뿐이다.
+ *
+ * 도메인 id 를 여기서 반납하는 이유: v2 모드의 도메인 id 는 도메인이 아니라
+ * 이 표에 붙어 있다(장치별로 하나). 표가 사라지면 그 id 도 쓸모가 없다.
+ */
 static void free_gcr3_table(struct gcr3_tbl_info *gcr3_info)
 {
-	if (gcr3_info->glx == 2)
-		free_gcr3_tbl_level2(gcr3_info->gcr3_tbl);
-	else if (gcr3_info->glx == 1)
-		free_gcr3_tbl_level1(gcr3_info->gcr3_tbl);
+	if (gcr3_info->glx == 2)	/* [한국어] 세 겹짜리 표 */
+		free_gcr3_tbl_level2(gcr3_info->gcr3_tbl);	/* [한국어] 중간 단계부터 벗긴다 */
+	else if (gcr3_info->glx == 1)	/* [한국어] 두 겹짜리 표 */
+		free_gcr3_tbl_level1(gcr3_info->gcr3_tbl);	/* [한국어] 마지막 단계만 */
 	else
-		WARN_ON_ONCE(gcr3_info->glx != 0);
+		WARN_ON_ONCE(gcr3_info->glx != 0);	/* [한국어] 0 이 아니면 표 구조가 깨진 것이다 */
 
-	gcr3_info->glx = 0;
+	gcr3_info->glx = 0;	/* [한국어] 두 번 해제되지 않도록 */
 
 	/* Free per device domain ID */
-	amd_iommu_pdom_id_free(gcr3_info->domid);
+	amd_iommu_pdom_id_free(gcr3_info->domid);	/* [한국어] (원 주석: 장치별 도메인 id 를 반납한다) v2 의 id 는 이 표에 붙어 있다 */
 
-	iommu_free_pages(gcr3_info->gcr3_tbl);
-	gcr3_info->gcr3_tbl = NULL;
+	iommu_free_pages(gcr3_info->gcr3_tbl);	/* [한국어] 최상위 페이지 */
+	gcr3_info->gcr3_tbl = NULL;	/* [한국어] 이후 setup 이 -EBUSY 를 내지 않도록 */
 }
 
 /*
  * Number of GCR3 table levels required. Level must be 4-Kbyte
  * page and can contain up to 512 entries.
  */
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * get_gcr3_levels - PASID 개수에 필요한 GCR3 단계 수를 구한다
+ *
+ * @pasids: 담아야 할 PASID 수, -1 이면 하드웨어 최대치를 쓴다.
+ * @return: 단계 수(0 이면 한 페이지짜리 평면 표).
+ *
+ * 한 페이지가 512 = 2^9 항목이므로 PASID 비트 수를 9 로 나눈 만큼 단계가
+ * 필요하다. 마지막 단계는 0 으로 세므로 1 을 뺀다.
+ */
 static int get_gcr3_levels(int pasids)
 {
-	int levels;
+	int levels;	/* [한국어] 필요한 단계 수 */
 
-	if (pasids == -1)
-		return amd_iommu_max_glx_val;
+	if (pasids == -1)	/* [한국어] 최대치를 쓰라는 뜻이면 */
+		return amd_iommu_max_glx_val;	/* [한국어] 하드웨어가 허용하는 만큼 */
 
-	levels = get_count_order(pasids);
+	levels = get_count_order(pasids);	/* [한국어] PASID 를 담는 데 필요한 비트 수 */
 
-	return levels ? (DIV_ROUND_UP(levels, 9) - 1) : levels;
+	return levels ? (DIV_ROUND_UP(levels, 9) - 1) : levels;	/* [한국어] 한 단계가 9 비트를 소화하고, 마지막 단계는 0 으로 센다 */
 }
 
+/*
+ * [한국어]
+ * setup_gcr3_table - 장치의 GCR3 표를 만든다
+ *
+ * @gcr3_info: 채울 상태.
+ * @iommu: NUMA 노드를 고르기 위한 유닛(없으면 NULL).
+ * @pasids: 담아야 할 PASID 수.
+ * @return: 0 성공, -EINVAL 하드웨어 한계 초과, -EBUSY 이미 있음, -ENOSPC id 고갈, -ENOMEM.
+ *
+ * 최상위 한 페이지만 미리 잡고 아래 단계는 필요할 때 __get_gcr3_pte 가
+ * 만든다 — PASID 공간은 크지만 실제로 쓰이는 것은 몇 개뿐이다.
+ *
+ * 도메인 id 를 여기서 배정하는 이유: v2 모드에서 TLB 태그는 이 표를 가진
+ * 장치 단위로 매겨진다.
+ *
+ * 유닛의 NUMA 노드를 쓰는 이유: 하드웨어가 이 표를 DMA 로 읽으므로 가까운
+ * 노드에 두는 편이 빠르다.
+ */
 static int setup_gcr3_table(struct gcr3_tbl_info *gcr3_info,
 			    struct amd_iommu *iommu, int pasids)
 {
-	int levels = get_gcr3_levels(pasids);
-	int nid = iommu ? dev_to_node(&iommu->dev->dev) : NUMA_NO_NODE;
-	int domid;
+	int levels = get_gcr3_levels(pasids);	/* [한국어] 몇 겹이 필요한가 */
+	int nid = iommu ? dev_to_node(&iommu->dev->dev) : NUMA_NO_NODE;	/* [한국어] 하드웨어가 DMA 로 읽으므로 가까운 노드에 */
+	int domid;	/* [한국어] 이 표에 붙일 도메인 id */
 
-	if (levels > amd_iommu_max_glx_val)
-		return -EINVAL;
+	if (levels > amd_iommu_max_glx_val)	/* [한국어] 하드웨어가 걸을 수 있는 단계를 넘으면 */
+		return -EINVAL;	/* [한국어] 만들어도 쓸 수 없다 */
 
-	if (gcr3_info->gcr3_tbl)
-		return -EBUSY;
+	if (gcr3_info->gcr3_tbl)	/* [한국어] 이미 표가 있으면 */
+		return -EBUSY;	/* [한국어] 덮어쓰면 기존 매핑이 샌다 */
 
 	/* Allocate per device domain ID */
-	domid = amd_iommu_pdom_id_alloc();
-	if (domid <= 0)
-		return -ENOSPC;
-	gcr3_info->domid = domid;
+	domid = amd_iommu_pdom_id_alloc();	/* [한국어] (원 주석: 장치별 도메인 id 를 배정한다) */
+	if (domid <= 0)	/* [한국어] 0 은 예약값이라 유효한 결과가 아니다 */
+		return -ENOSPC;	/* [한국어] id 가 고갈됐다 */
+	gcr3_info->domid = domid;	/* [한국어] 이후 무효화 명령이 이 id 를 쓴다 */
 
-	gcr3_info->gcr3_tbl = iommu_alloc_pages_node_sz(nid, GFP_ATOMIC, SZ_4K);
-	if (gcr3_info->gcr3_tbl == NULL) {
-		amd_iommu_pdom_id_free(domid);
-		return -ENOMEM;
+	gcr3_info->gcr3_tbl = iommu_alloc_pages_node_sz(nid, GFP_ATOMIC, SZ_4K);	/* [한국어] 최상위 한 페이지만 — 아래는 필요할 때 만든다 */
+	if (gcr3_info->gcr3_tbl == NULL) {	/* [한국어] 할당 실패면 */
+		amd_iommu_pdom_id_free(domid);	/* [한국어] 방금 잡은 id 를 되돌린다 */
+		return -ENOMEM;	/* [한국어] 호출자에게 */
 	}
 
-	gcr3_info->glx = levels;
+	gcr3_info->glx = levels;	/* [한국어] 해제할 때 몇 겹을 벗길지 여기 남는다 */
 
-	return 0;
+	return 0;	/* [한국어] 성공 */
 }
 
+/*
+ * [한국어]
+ * __get_gcr3_pte - PASID 에 해당하는 GCR3 항목을 찾는다
+ *
+ * @gcr3_info: 대상 표.
+ * @pasid: 찾을 PASID.
+ * @alloc: 중간 단계가 없을 때 만들 것인가.
+ * @return: 마지막 단계의 항목 포인터, 없거나 만들지 못하면 NULL.
+ *
+ * PASID 를 9 비트씩 잘라 위 단계부터 내려간다. 페이지 테이블 워크와 같은
+ * 구조이고, 다른 점은 하드웨어가 아니라 소프트웨어가 걷는다는 것뿐이다.
+ *
+ * alloc 이 참이면 없는 중간 단계를 만들며 내려간다. GFP_ATOMIC 인 이유는
+ * attach 경로가 스핀락 아래일 수 있어서다.
+ */
 static u64 *__get_gcr3_pte(struct gcr3_tbl_info *gcr3_info,
 			   ioasid_t pasid, bool alloc)
 {
-	int index;
-	u64 *pte;
-	u64 *root = gcr3_info->gcr3_tbl;
-	int level = gcr3_info->glx;
+	int index;	/* [한국어] 이번 단계의 항목 번호 */
+	u64 *pte;	/* [한국어] 그 항목 */
+	u64 *root = gcr3_info->gcr3_tbl;	/* [한국어] 최상위 표에서 시작 */
+	int level = gcr3_info->glx;	/* [한국어] 남은 단계 수 */
 
-	while (true) {
+	while (true) {	/* [한국어] 마지막 단계에 닿을 때까지 */
 
-		index = (pasid >> (9 * level)) & 0x1ff;
-		pte   = &root[index];
+		index = (pasid >> (9 * level)) & 0x1ff;	/* [한국어] PASID 를 9 비트씩 잘라 이번 단계의 색인으로 */
+		pte   = &root[index];	/* [한국어] 이번 단계의 항목 */
 
-		if (level == 0)
-			break;
+		if (level == 0)	/* [한국어] 마지막 단계면 */
+			break;	/* [한국어] 이 항목이 답이다 */
 
-		if (!(*pte & GCR3_VALID)) {
-			if (!alloc)
-				return NULL;
+		if (!(*pte & GCR3_VALID)) {	/* [한국어] 아래 단계가 아직 없으면 */
+			if (!alloc)	/* [한국어] 만들지 말라고 했으면 */
+				return NULL;	/* [한국어] 없다고 답한다 */
 
-			root = (void *)get_zeroed_page(GFP_ATOMIC);
-			if (root == NULL)
-				return NULL;
+			root = (void *)get_zeroed_page(GFP_ATOMIC);	/* [한국어] attach 가 스핀락 아래일 수 있어 ATOMIC */
+			if (root == NULL)	/* [한국어] 메모리 부족 */
+				return NULL;	/* [한국어] 호출자가 -ENOMEM 으로 바꾼다 */
 
-			*pte = iommu_virt_to_phys(root) | GCR3_VALID;
+			*pte = iommu_virt_to_phys(root) | GCR3_VALID;	/* [한국어] 하드웨어가 읽을 물리 주소로 적는다 */
 		}
 
-		root = iommu_phys_to_virt(*pte & PAGE_MASK);
+		root = iommu_phys_to_virt(*pte & PAGE_MASK);	/* [한국어] 다음 단계로 내려간다 */
 
-		level -= 1;
+		level -= 1;	/* [한국어] 남은 단계를 줄이며 */
 	}
 
-	return pte;
+	return pte;	/* [한국어] 마지막 단계의 항목 */
 }
 
+/*
+ * [한국어]
+ * update_gcr3 - 한 PASID 의 페이지 테이블 루트를 넣거나 지운다
+ *
+ * @dev_data: 대상 장치.
+ * @pasid: 대상 PASID.
+ * @gcr3: 넣을 루트의 물리 주소(지울 때는 무시).
+ * @set: 넣을 것인가 지울 것인가.
+ * @return: 0 성공, -ENOMEM 이면 중간 단계를 만들지 못했다.
+ *
+ * 이 한 줄이 "이 장치가 이 PASID 로 접근하면 이 주소 공간을 본다"를 정한다.
+ *
+ * 쓰고 나서 반드시 그 PASID 의 캐시를 통째로 비운다 — 항목이 바뀌면 주소
+ * 공간 자체가 달라지므로 캐시에 남은 모든 변환이 무효다.
+ */
 static int update_gcr3(struct iommu_dev_data *dev_data,
 		       ioasid_t pasid, unsigned long gcr3, bool set)
 {
-	struct gcr3_tbl_info *gcr3_info = &dev_data->gcr3_info;
-	u64 *pte;
+	struct gcr3_tbl_info *gcr3_info = &dev_data->gcr3_info;	/* [한국어] 이 장치의 GCR3 표 */
+	u64 *pte;	/* [한국어] 고칠 항목 */
 
-	pte = __get_gcr3_pte(gcr3_info, pasid, true);
-	if (pte == NULL)
-		return -ENOMEM;
+	pte = __get_gcr3_pte(gcr3_info, pasid, true);	/* [한국어] 없으면 중간 단계를 만들며 찾는다 */
+	if (pte == NULL)	/* [한국어] 중간 단계를 만들지 못했다 */
+		return -ENOMEM;	/* [한국어] 호출자에게 */
 
-	if (set)
-		*pte = (gcr3 & PAGE_MASK) | GCR3_VALID;
+	if (set)	/* [한국어] 붙이는 경우 */
+		*pte = (gcr3 & PAGE_MASK) | GCR3_VALID;	/* [한국어] 이 PASID 가 볼 주소 공간의 루트 */
 	else
-		*pte = 0;
+		*pte = 0;	/* [한국어] 떼는 경우 — 이후 접근은 막힌다 */
 
-	dev_flush_pasid_all(dev_data, pasid);
-	return 0;
+	dev_flush_pasid_all(dev_data, pasid);	/* [한국어] 주소 공간 자체가 달라졌으므로 그 PASID 캐시를 통째로 */
+	return 0;	/* [한국어] 성공 */
 }
 
+/*
+ * [한국어]
+ * amd_iommu_set_gcr3 - PASID 에 주소 공간을 붙인다
+ *
+ * @dev_data: 대상 장치.
+ * @pasid: 붙일 PASID.
+ * @gcr3: 그 주소 공간의 페이지 테이블 루트(물리 주소).
+ * @return: 0 성공, 음수면 실패.
+ *
+ * SVA 나 PASID 도메인 attach 의 마지막 단계다. 성공하면 참조 수를 올려
+ * 두는데, 이 수가 0 이 되는 시점이 GCR3 표를 버릴 수 있는 시점이다.
+ *
+ * 실행 컨텍스트: 장치 그룹 뮤텍스를 쥔 채(assert 로 강제).
+ */
 int amd_iommu_set_gcr3(struct iommu_dev_data *dev_data, ioasid_t pasid,
 		       unsigned long gcr3)
 {
-	struct gcr3_tbl_info *gcr3_info = &dev_data->gcr3_info;
-	int ret;
+	struct gcr3_tbl_info *gcr3_info = &dev_data->gcr3_info;	/* [한국어] 이 장치의 GCR3 표 */
+	int ret;	/* [한국어] 결과 */
 
-	iommu_group_mutex_assert(dev_data->dev);
+	iommu_group_mutex_assert(dev_data->dev);	/* [한국어] pasid_cnt 는 이 뮤텍스가 지킨다 */
 
-	ret = update_gcr3(dev_data, pasid, gcr3, true);
-	if (ret)
-		return ret;
+	ret = update_gcr3(dev_data, pasid, gcr3, true);	/* [한국어] 항목에 루트를 넣는다 */
+	if (ret)	/* [한국어] 실패면 */
+		return ret;	/* [한국어] 참조 수를 올리지 않는다 */
 
-	gcr3_info->pasid_cnt++;
-	return ret;
+	gcr3_info->pasid_cnt++;	/* [한국어] 이 수가 0 이 되면 표를 버릴 수 있다 */
+	return ret;	/* [한국어] 성공 */
 }
 
+/*
+ * [한국어]
+ * amd_iommu_clear_gcr3 - PASID 에서 주소 공간을 뗀다
+ *
+ * @dev_data: 대상 장치.
+ * @pasid: 뗄 PASID.
+ * @return: 0 성공, 음수면 실패.
+ *
+ * set 의 반대다. 항목을 0 으로 만들고 참조 수를 내린다. 이후 그 PASID 로
+ * 오는 접근은 하드웨어에서 막힌다.
+ */
 int amd_iommu_clear_gcr3(struct iommu_dev_data *dev_data, ioasid_t pasid)
 {
-	struct gcr3_tbl_info *gcr3_info = &dev_data->gcr3_info;
-	int ret;
+	struct gcr3_tbl_info *gcr3_info = &dev_data->gcr3_info;	/* [한국어] 이 장치의 GCR3 표 */
+	int ret;	/* [한국어] 결과 */
 
-	iommu_group_mutex_assert(dev_data->dev);
+	iommu_group_mutex_assert(dev_data->dev);	/* [한국어] pasid_cnt 보호 */
 
-	ret = update_gcr3(dev_data, pasid, 0, false);
-	if (ret)
-		return ret;
+	ret = update_gcr3(dev_data, pasid, 0, false);	/* [한국어] 항목을 0 으로 */
+	if (ret)	/* [한국어] 실패면 */
+		return ret;	/* [한국어] 참조 수를 내리지 않는다 */
 
-	gcr3_info->pasid_cnt--;
-	return ret;
+	gcr3_info->pasid_cnt--;	/* [한국어] 0 이 되면 표 해제 조건이 선다 */
+	return ret;	/* [한국어] 성공 */
 }
 
 /*
  * Note:
  * The old value for GCR3 table and GPT have been cleared from caller.
  */
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * set_dte_gcr3_table - DTE 에 GCR3 표를 실어 v2 모드를 지시한다
+ *
+ * @dev_data: 대상 장치.
+ * @new: 채울 새 DTE(호출자가 0 으로 만들어 온다).
+ *
+ * DTE 한 항목에 GCR3 표의 물리 주소를 넣는 방식이 이 함수의 특이점이다.
+ * 51 비트 주소가 세 조각(14:12, 30:15, 51:31)으로 흩어져 들어간다 —
+ * 다른 필드들 사이에 남은 자리를 그러모아 쓰기 때문이다.
+ *
+ * GV 는 "게스트 변환을 쓴다", GIOV 는 "1단계는 GCR3, 2단계는 없다"를 뜻한다.
+ * GLX 는 표의 단계 수라 하드웨어가 몇 겹을 걸어야 하는지 알려 준다.
+ */
 static void set_dte_gcr3_table(struct iommu_dev_data *dev_data,
 			       struct dev_table_entry *new)
 {
-	struct gcr3_tbl_info *gcr3_info = &dev_data->gcr3_info;
-	u64 gcr3 = iommu_virt_to_phys(gcr3_info->gcr3_tbl);
+	struct gcr3_tbl_info *gcr3_info = &dev_data->gcr3_info;	/* [한국어] 실을 표 */
+	u64 gcr3 = iommu_virt_to_phys(gcr3_info->gcr3_tbl);	/* [한국어] 하드웨어가 읽을 물리 주소 */
 
-	new->data[0] |= DTE_FLAG_TV |
-			(dev_data->ppr ? DTE_FLAG_PPR : 0) |
-			(pdom_is_v2_pgtbl_mode(dev_data->domain) ?  DTE_FLAG_GIOV : 0) |
-			DTE_FLAG_GV |
-			FIELD_PREP(DTE_GLX, gcr3_info->glx) |
-			FIELD_PREP(DTE_GCR3_14_12, gcr3 >> 12) |
-			DTE_FLAG_IR | DTE_FLAG_IW;
+	new->data[0] |= DTE_FLAG_TV |	/* [한국어] 변환 항목이 유효하다 */
+			(dev_data->ppr ? DTE_FLAG_PPR : 0) |	/* [한국어] 페이지 폴트 요청을 받을 장치인가 */
+			(pdom_is_v2_pgtbl_mode(dev_data->domain) ?  DTE_FLAG_GIOV : 0) |	/* [한국어] 1단계만 쓰고 2단계는 없다는 표시 */
+			DTE_FLAG_GV |	/* [한국어] 게스트 변환(GCR3)을 쓴다 */
+			FIELD_PREP(DTE_GLX, gcr3_info->glx) |	/* [한국어] 하드웨어가 몇 겹을 걸어야 하는가 */
+			FIELD_PREP(DTE_GCR3_14_12, gcr3 >> 12) |	/* [한국어] 주소의 첫 조각 — 남은 자리에 흩어 넣는다 */
+			DTE_FLAG_IR | DTE_FLAG_IW;	/* [한국어] 읽기·쓰기 허용 */
 
-	new->data[1] |= FIELD_PREP(DTE_DOMID_MASK, dev_data->gcr3_info.domid) |
-			FIELD_PREP(DTE_GCR3_30_15, gcr3 >> 15) |
-			(dev_data->ats_enabled ? DTE_FLAG_IOTLB : 0) |
-			FIELD_PREP(DTE_GCR3_51_31, gcr3 >> 31);
+	new->data[1] |= FIELD_PREP(DTE_DOMID_MASK, dev_data->gcr3_info.domid) |	/* [한국어] TLB 태그가 될 장치별 도메인 id */
+			FIELD_PREP(DTE_GCR3_30_15, gcr3 >> 15) |	/* [한국어] 주소의 둘째 조각 */
+			(dev_data->ats_enabled ? DTE_FLAG_IOTLB : 0) |	/* [한국어] 장치가 변환을 캐시해도 되는가 */
+			FIELD_PREP(DTE_GCR3_51_31, gcr3 >> 31);	/* [한국어] 주소의 셋째 조각 */
 
 	/* Guest page table can only support 4 and 5 levels  */
-	if (amd_iommu_gpt_level == PAGE_MODE_5_LEVEL)
-		new->data[2] |= FIELD_PREP(DTE_GPT_LEVEL_MASK, GUEST_PGTABLE_5_LEVEL);
+	if (amd_iommu_gpt_level == PAGE_MODE_5_LEVEL)	/* [한국어] (원 주석: 게스트 페이지 테이블은 4·5 단계만 지원한다) */
+		new->data[2] |= FIELD_PREP(DTE_GPT_LEVEL_MASK, GUEST_PGTABLE_5_LEVEL);	/* [한국어] 5단계 주소 공간 */
 	else
-		new->data[2] |= FIELD_PREP(DTE_GPT_LEVEL_MASK, GUEST_PGTABLE_4_LEVEL);
+		new->data[2] |= FIELD_PREP(DTE_GPT_LEVEL_MASK, GUEST_PGTABLE_4_LEVEL);	/* [한국어] 아니면 4단계 */
 }
 
+/*
+ * [한국어]
+ * amd_iommu_set_dte_v1 - DTE 에 v1 페이지 테이블을 실는다
+ *
+ * @dev_data: 대상 장치.
+ * @domain: 그 장치가 붙은 도메인.
+ * @domid: DTE 에 적을 도메인 id.
+ * @pt_info: 페이지 테이블 루트와 단계 수.
+ * @new: 채울 새 DTE.
+ *
+ * 일반적인 DMA 변환 경로다. 루트의 물리 주소와 단계 수를 적으면 하드웨어가
+ * 그 표를 걷는다.
+ *
+ * __sme_set 이 붙는 이유: SME(메모리 암호화)가 켜진 시스템에서는 페이지
+ * 테이블도 암호화 비트가 선 주소로 접근해야 한다.
+ *
+ * 중첩 변환(nested.c)에서도 이 함수를 쓰기 때문에 도메인이 아니라 domid 를
+ * 따로 받는다 — 그쪽은 게스트 도메인 id 를 적어야 한다.
+ */
 void amd_iommu_set_dte_v1(struct iommu_dev_data *dev_data,
 			  struct protection_domain *domain, u16 domid,
 			  struct pt_iommu_amdv1_hw_info *pt_info,
 			  struct dev_table_entry *new)
 {
-	u64 host_pt_root = __sme_set(pt_info->host_pt_root);
+	u64 host_pt_root = __sme_set(pt_info->host_pt_root);	/* [한국어] SME 가 켜지면 암호화 비트가 선 주소로 접근해야 한다 */
 
 	/* Note Dirty tracking is used for v1 table only for now */
-	new->data[0] |= DTE_FLAG_TV |
-			FIELD_PREP(DTE_MODE_MASK, pt_info->mode) |
-			(domain->dirty_tracking ? DTE_FLAG_HAD : 0) |
-			FIELD_PREP(DTE_HOST_TRP, host_pt_root >> 12) |
-			DTE_FLAG_IR | DTE_FLAG_IW;
+	new->data[0] |= DTE_FLAG_TV |	/* [한국어] (원 주석: 더티 추적은 아직 v1 표에서만 쓴다) 변환 항목 유효 */
+			FIELD_PREP(DTE_MODE_MASK, pt_info->mode) |	/* [한국어] 페이지 테이블 단계 수 */
+			(domain->dirty_tracking ? DTE_FLAG_HAD : 0) |	/* [한국어] 하드웨어가 더티 비트를 갱신하게 할 것인가 */
+			FIELD_PREP(DTE_HOST_TRP, host_pt_root >> 12) |	/* [한국어] 최상위 표의 물리 주소 */
+			DTE_FLAG_IR | DTE_FLAG_IW;	/* [한국어] 읽기·쓰기 허용 */
 
-	new->data[1] |= FIELD_PREP(DTE_DOMID_MASK, domid) |
-			(dev_data->ats_enabled ? DTE_FLAG_IOTLB : 0);
+	new->data[1] |= FIELD_PREP(DTE_DOMID_MASK, domid) |	/* [한국어] TLB 태그 — 중첩에서는 게스트 id 가 들어온다 */
+			(dev_data->ats_enabled ? DTE_FLAG_IOTLB : 0);	/* [한국어] 장치 캐시 허용 여부 */
 }
 
+/*
+ * [한국어]
+ * set_dte_v1 - 페이지 테이블 정보를 모아 v1 DTE 를 만든다
+ *
+ * @dev_data: 대상 장치.
+ * @domain: 붙은 도메인.
+ * @domid: 적을 도메인 id.
+ * @top_paddr: 새 최상위 표의 물리 주소(0 이면 현재 것을 조회).
+ * @top_level: 그 단계.
+ * @new: 채울 새 DTE.
+ *
+ * 두 경로가 이 함수로 들어온다. 페이지 테이블 최상위가 커지는 중이면 아직
+ * 도메인에 반영되기 전의 새 루트를 인자로 받고, 그 밖의 경우(장치 attach)
+ * 에는 도메인에서 현재 루트를 읽어 온다.
+ */
 static void set_dte_v1(struct iommu_dev_data *dev_data,
 		       struct protection_domain *domain, u16 domid,
 		       phys_addr_t top_paddr, unsigned int top_level,
 		       struct dev_table_entry *new)
 {
-	struct pt_iommu_amdv1_hw_info pt_info;
+	struct pt_iommu_amdv1_hw_info pt_info;	/* [한국어] 루트와 단계 수를 담는다 */
 
 	/*
 	 * When updating the IO pagetable, the new top and level
@@ -3492,82 +3830,142 @@ static void set_dte_v1(struct iommu_dev_data *dev_data,
 	 * device attach, retrieve the current pagetable info
 	 * via the IOMMU PT API.
 	 */
-	if (top_paddr) {
-		pt_info.host_pt_root = top_paddr;
-		pt_info.mode = top_level + 1;
+	if (top_paddr) {	/* [한국어] (원 주석: 페이지 테이블 갱신 중에는 새 최상위가 인자로 온다) */
+		pt_info.host_pt_root = top_paddr;	/* [한국어] 아직 도메인에 반영되기 전의 새 루트 */
+		pt_info.mode = top_level + 1;	/* [한국어] 단계 수는 0 기반 레벨에 1 을 더한 값 */
 	} else {
-		WARN_ON(top_paddr || top_level);
-		pt_iommu_amdv1_hw_info(&domain->amdv1, &pt_info);
+		WARN_ON(top_paddr || top_level);	/* [한국어] 둘 다 0 이어야 이 갈래다 */
+		pt_iommu_amdv1_hw_info(&domain->amdv1, &pt_info);	/* [한국어] (원 주석: 그 밖의 경우 — 장치 attach — 는 현재 값을 조회한다) */
 	}
 
-	amd_iommu_set_dte_v1(dev_data, domain, domid, &pt_info, new);
+	amd_iommu_set_dte_v1(dev_data, domain, domid, &pt_info, new);	/* [한국어] 모은 정보로 DTE 를 채운다 */
 }
 
+/*
+ * [한국어]
+ * set_dte_passthrough - 변환 없이 통과시키는 DTE 를 만든다
+ *
+ * @dev_data: 대상 장치.
+ * @domain: identity 도메인.
+ * @new: 채울 새 DTE.
+ *
+ * TV 를 세우되 페이지 테이블 모드를 0 으로 둔다. 그 조합이 "변환 항목은
+ * 유효하지만 걸을 표가 없다" = 주소를 그대로 쓴다는 뜻이다.
+ *
+ * 도메인 id 를 여전히 적는 이유: 무효화 명령이 그 id 로 대상을 고르므로,
+ * 통과 도메인도 태그를 가져야 나중에 지울 수 있다.
+ */
 static void set_dte_passthrough(struct iommu_dev_data *dev_data,
 				struct protection_domain *domain,
 				struct dev_table_entry *new)
 {
-	new->data[0] |= DTE_FLAG_TV | DTE_FLAG_IR | DTE_FLAG_IW;
+	new->data[0] |= DTE_FLAG_TV | DTE_FLAG_IR | DTE_FLAG_IW;	/* [한국어] TV 만 세우고 표를 두지 않으면 주소를 그대로 쓴다 */
 
-	new->data[1] |= FIELD_PREP(DTE_DOMID_MASK, domain->id) |
-			(dev_data->ats_enabled) ? DTE_FLAG_IOTLB : 0;
+	new->data[1] |= FIELD_PREP(DTE_DOMID_MASK, domain->id) |	/* [한국어] 통과 도메인도 태그가 있어야 나중에 지울 수 있다 */
+			(dev_data->ats_enabled) ? DTE_FLAG_IOTLB : 0;	/* [한국어] 장치 캐시 허용 여부 */
 }
 
+/*
+ * [한국어]
+ * set_dte_entry - 장치의 DTE 를 도메인에 맞게 다시 쓴다
+ *
+ * @iommu: 담당 유닛.
+ * @dev_data: 대상 장치.
+ * @top_paddr: 새 최상위 표(페이지 테이블 성장 중일 때만, 아니면 0).
+ * @top_level: 그 단계.
+ *
+ * 항상 0 에서 시작해 필요한 비트만 세우는 구조다. 기존 값을 고치지 않고
+ * 통째로 다시 만드는 편이 남은 비트로 인한 사고를 막는다.
+ *
+ * 네 갈래 중 하나가 골라진다: GCR3 표가 있으면 v2, identity 면 통과,
+ * 일반 페이징이면 v1. 어디에도 맞지 않으면 코드 쪽 버그다.
+ *
+ * 마지막의 old_domid 처리가 kdump 를 위한 것이다. 앞 커널의 장치 테이블을
+ * 물려받았다면 이 항목에 그 커널이 쓰던 도메인 id 가 남아 있는데, 그 id 로
+ * 태그된 캐시를 지우지 않고 덮어쓰면 새 도메인이 죽은 커널의 변환을
+ * 물려받는다.
+ *
+ * 호출 체인:
+ *   dev_update_dte()/attach_device() → [이 함수] → amd_iommu_update_dte()
+ */
 static void set_dte_entry(struct amd_iommu *iommu,
 			  struct iommu_dev_data *dev_data,
 			  phys_addr_t top_paddr, unsigned int top_level)
 {
-	u32 old_domid;
-	struct dev_table_entry new = {};
-	struct protection_domain *domain = dev_data->domain;
-	struct gcr3_tbl_info *gcr3_info = &dev_data->gcr3_info;
-	struct dev_table_entry *dte = &get_dev_table(iommu)[dev_data->devid];
+	u32 old_domid;	/* [한국어] 이 항목에 남아 있던 도메인 id */
+	struct dev_table_entry new = {};	/* [한국어] 항상 0 에서 시작 — 남은 비트로 인한 사고를 막는다 */
+	struct protection_domain *domain = dev_data->domain;	/* [한국어] 붙일 도메인 */
+	struct gcr3_tbl_info *gcr3_info = &dev_data->gcr3_info;	/* [한국어] v2 여부를 가른다 */
+	struct dev_table_entry *dte = &get_dev_table(iommu)[dev_data->devid];	/* [한국어] 하드웨어가 읽는 실제 항목 */
 
-	amd_iommu_make_clear_dte(dev_data, &new);
+	amd_iommu_make_clear_dte(dev_data, &new);	/* [한국어] 장치 공통 비트(인터럽트 설정 등)를 먼저 */
 
-	old_domid = READ_ONCE(dte->data[1]) & DTE_DOMID_MASK;
-	if (gcr3_info->gcr3_tbl)
-		set_dte_gcr3_table(dev_data, &new);
-	else if (domain->domain.type == IOMMU_DOMAIN_IDENTITY)
-		set_dte_passthrough(dev_data, domain, &new);
-	else if ((domain->domain.type & __IOMMU_DOMAIN_PAGING) &&
-		 domain->pd_mode == PD_MODE_V1)
-		set_dte_v1(dev_data, domain, domain->id, top_paddr, top_level, &new);
+	old_domid = READ_ONCE(dte->data[1]) & DTE_DOMID_MASK;	/* [한국어] 덮어쓰기 전에 옛 id 를 읽어 둔다 */
+	if (gcr3_info->gcr3_tbl)	/* [한국어] GCR3 표가 있으면 */
+		set_dte_gcr3_table(dev_data, &new);	/* [한국어] v2/게스트 변환 */
+	else if (domain->domain.type == IOMMU_DOMAIN_IDENTITY)	/* [한국어] 통과 도메인이면 */
+		set_dte_passthrough(dev_data, domain, &new);	/* [한국어] 변환 없이 */
+	else if ((domain->domain.type & __IOMMU_DOMAIN_PAGING) &&	/* [한국어] 일반 페이징이고 */
+		 domain->pd_mode == PD_MODE_V1)	/* [한국어] v1 표를 쓰면 */
+		set_dte_v1(dev_data, domain, domain->id, top_paddr, top_level, &new);	/* [한국어] 호스트 페이지 테이블 */
 	else
-		WARN_ON(true);
+		WARN_ON(true);	/* [한국어] 어디에도 맞지 않으면 코드 쪽 버그다 */
 
-	amd_iommu_update_dte(iommu, dev_data, &new);
+	amd_iommu_update_dte(iommu, dev_data, &new);	/* [한국어] 256비트 갱신 규칙에 맞춰 쓰고 캐시를 지운다 */
 
 	/*
 	 * A kdump kernel might be replacing a domain ID that was copied from
 	 * the previous kernel--if so, it needs to flush the translation cache
 	 * entries for the old domain ID that is being overwritten
 	 */
-	if (old_domid) {
-		amd_iommu_flush_tlb_domid(iommu, old_domid);
+	if (old_domid) {	/* [한국어] (원 주석: kdump 커널이 앞 커널에서 복사한 도메인 id 를 덮어쓰는 중일 수 있다) */
+		amd_iommu_flush_tlb_domid(iommu, old_domid);	/* [한국어] 지우지 않으면 새 도메인이 죽은 커널의 변환을 물려받는다 */
 	}
 }
 
 /*
  * Clear DMA-remap related flags to block all DMA (blockeded domain)
  */
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * clear_dte_entry - 모든 DMA 를 막는 DTE 로 되돌린다
+ *
+ * @iommu: 담당 유닛.
+ * @dev_data: 대상 장치.
+ *
+ * 변환 관련 비트를 모두 내린 항목을 쓴다. 항목 자체는 유효하되 변환할
+ * 방법이 없으므로 하드웨어가 접근을 거부한다 — 항목을 통째로 무효화하는
+ * 것과는 다르다. blocked 도메인이 이 상태다.
+ */
 static void clear_dte_entry(struct amd_iommu *iommu, struct iommu_dev_data *dev_data)
 {
-	struct dev_table_entry new = {};
+	struct dev_table_entry new = {};	/* [한국어] 전부 0 에서 시작 */
 
-	amd_iommu_make_clear_dte(dev_data, &new);
-	amd_iommu_update_dte(iommu, dev_data, &new);
+	amd_iommu_make_clear_dte(dev_data, &new);	/* [한국어] 변환 비트 없이 장치 공통 비트만 */
+	amd_iommu_update_dte(iommu, dev_data, &new);	/* [한국어] 항목은 유효하되 변환할 방법이 없어 접근이 거부된다 */
 }
 
 /* Update and flush DTE for the given device */
+/*
+ * [한국어]
+ * (위 영어 주석에 이어)
+ * dev_update_dte - 장치의 DTE 를 세우거나 지운다
+ *
+ * @dev_data: 대상 장치.
+ * @set: 참이면 현재 도메인에 맞게 세우고, 거짓이면 막는다.
+ *
+ * attach/detach 양쪽이 같은 진입점을 쓰도록 감싼 함수다. 캐시 무효화까지는
+ * amd_iommu_update_dte 안에서 일어난다.
+ */
 static void dev_update_dte(struct iommu_dev_data *dev_data, bool set)
 {
-	struct amd_iommu *iommu = get_amd_iommu_from_dev(dev_data->dev);
+	struct amd_iommu *iommu = get_amd_iommu_from_dev(dev_data->dev);	/* [한국어] 이 장치를 맡은 유닛 */
 
-	if (set)
-		set_dte_entry(iommu, dev_data, 0, 0);
+	if (set)	/* [한국어] 붙이는 경우 */
+		set_dte_entry(iommu, dev_data, 0, 0);	/* [한국어] 현재 도메인에 맞게 (페이지 테이블은 도메인에서 조회) */
 	else
-		clear_dte_entry(iommu, dev_data);
+		clear_dte_entry(iommu, dev_data);	/* [한국어] 떼는 경우 — 모든 DMA 를 막는다 */
 }
 
 /*
