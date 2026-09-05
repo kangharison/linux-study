@@ -381,12 +381,52 @@ static void device_rbtree_remove(struct device_domain_info *info)
  * 않으므로 커널이 받아들일 수밖에 없다.
  */
 struct dmar_rmrr_unit {
-	struct list_head list;		/* list of rmrr units	*/	/* [한국어] 전역 RMRR 목록의 고리 */
-	struct acpi_dmar_header *hdr;	/* ACPI header		*/	/* [한국어] 원본 ACPI 항목. 재파싱이나 진단에 쓴다 */
-	u64	base_address;		/* reserved base address*/	/* [한국어] 예약 구간의 시작 물리 주소 */
-	u64	end_address;		/* reserved end address */	/* [한국어] 끝 주소 (포함) */
-	struct dmar_dev_scope *devices;	/* target devices */	/* [한국어] 이 예약이 적용되는 장치 목록. 펌웨어가 버스·장치 경로로 지정한다 */
-	int	devices_cnt;		/* target device count */	/* [한국어] 그 개수 */
+	struct list_head list;		/* list of rmrr units	*/
+	/* [한국어] (원 주석: list of rmrr units) 전역 rmrr units 목록에 이 항목을 매다는 고리.
+	 * 설정자: 부팅 중 DMAR 표를 파싱하며 rmrr units 항목을 만날 때마다 매단다.
+	 * 읽는 자: 장치를 도메인에 붙일 때 이 목록을 훑어, 그 장치에 해당하는 예약 구간을
+	 *   항등 매핑으로 미리 넣는다.
+	 * 동기화: 목록은 부팅과 핫플러그 때만 바뀌고, dmar_global_lock 이 지킨다. */
+	struct acpi_dmar_header *hdr;	/* ACPI header		*/
+	/* [한국어] (원 주석: ACPI header) 이 항목의 원본 ACPI 구조체를 가리키는 포인터.
+	 * 설정자: 파싱이 ACPI 표 안의 해당 위치를 그대로 담는다 — 복사하지 않는다.
+	 * 읽는 자: 진단과 재파싱 경로. RMRR 항목의 원본을 그대로 보여 줄 때 쓴다.
+	 * 왜 원본을 들고 있는가: 파싱 때 뽑아 둔 필드 말고도 나중에 필요한 값이 생길
+	 *   수 있고, 진단할 때 펌웨어가 실제로 뭐라고 적었는지 보여 줄 수 있어야 한다.
+	 * 수명: ACPI 표는 부팅 뒤에도 매핑된 채 남으므로 이 포인터는 계속 유효하다. */
+	u64	base_address;		/* reserved base address*/
+	/* [한국어] (원 주석: reserved base address) 예약 구간의 시작 물리 주소.
+	 * 설정자: RMRR 항목 파싱에서.
+	 * 읽는 자: 이 구간을 항등 매핑으로 넣을 때, 그리고 사용자가 만든 매핑이
+	 *   이 구간과 겹치지 않는지 검사할 때.
+	 * 왜 항등 매핑이어야 하는가: 이 구간은 펌웨어나 SMM 이 이미 물리 주소로
+	 *   접근하고 있는 곳이다. IOVA 와 물리 주소가 같아야 그 접근이 IOMMU 를
+	 *   켠 뒤에도 계속 동작한다.
+	 * 값 범위: 페이지 정렬이 보장되지 않아, 매핑할 때 페이지 경계로 넓혀야 한다. */
+	u64	end_address;		/* reserved end address */
+	/* [한국어] (원 주석: reserved end address) 예약 구간의 끝 주소 — 포함 관계다.
+	 * 설정자/읽는 자: 위 base_address 와 같다.
+	 * 포함이라는 점이 중요하다: 크기는 end - base + 1 이며, 반열린 구간으로
+	 *   오해하면 마지막 페이지가 매핑되지 않아 그 장치만 간헐적으로 실패한다.
+	 * 이 구간이 IOMMU 격리의 명백한 구멍이라는 점은 위 블록 주석에 적어 두었다 —
+	 *   그래도 받아들일 수밖에 없는 이유까지 함께. */
+	struct dmar_dev_scope *devices;	/* target devices */
+	/* [한국어] (원 주석: target devices) 이 항목이 적용되는 장치들의 목록.
+	 * 설정자: dmar_parse_dev_scope() 가 ACPI 항목 안의 장치 범위(scope)를 훑어 만든다.
+	 * 읽는 자: 도메인을 만들 때 그 도메인에 속한 장치가 이 목록에 있는지 보고, 있으면
+	 *   위 주소 구간을 항등 매핑으로 넣는다.
+	 * 어떻게 장치를 지정하는가: 펌웨어는 PCI 주소가 아니라 "이 루트 포트에서
+	 *   출발해 이 경로를 따라간 장치" 라는 형태로 적는다. 부팅 시점에는 아직
+	 *   열거되지 않은 장치도 가리킬 수 있어야 하기 때문이다.
+	 * 동기화: 장치가 핫플러그될 때 갱신되며, dmar_global_lock 이 지킨다. */
+	int	devices_cnt;		/* target device count */
+	/* [한국어] (원 주석: target device count) 위 devices 배열에 든 항목의 개수.
+	 * 설정자: 장치 범위를 파싱할 때 정해지고, 핫플러그로 장치가 나타나거나
+	 *   사라지면 그에 맞춰 바뀐다.
+	 * 읽는 자: 그 배열을 훑는 모든 자리. 배열에 끝 표식이 없으므로 이 값이
+	 *   유일한 경계다.
+	 * 값 범위: 0 이상. 0 이면 이 항목이 가리키는 장치가 현재 하나도 없다는 뜻인데,
+	 *   아직 열거되지 않았을 뿐 나중에 나타날 수 있어 항목 자체는 남겨 둔다. */
 };
 
 /*
@@ -399,11 +439,45 @@ struct dmar_rmrr_unit {
  * include_all 이 서 있으면 그 유닛 아래의 모든 포트가 해당된다.
  */
 struct dmar_atsr_unit {
-	struct list_head list;		/* list of ATSR units */	/* [한국어] 전역 ATSR 목록의 고리 */
-	struct acpi_dmar_header *hdr;	/* ACPI header */	/* [한국어] 원본 ACPI 항목 */
-	struct dmar_dev_scope *devices;	/* target devices */	/* [한국어] ATS 를 지원하는 루트 포트들 */
-	int devices_cnt;		/* target device count */	/* [한국어] 그 개수 */
-	u8 include_all:1;		/* include all ports */	/* [한국어] 이 유닛 아래 모든 포트가 해당된다는 표시. 포트를 일일이 나열하지 않아도 되게 한다 */
+	struct list_head list;		/* list of ATSR units */
+	/* [한국어] (원 주석: list of ATSR units) 전역 ATSR units 목록에 이 항목을 매다는 고리.
+	 * 설정자: 부팅 중 DMAR 표를 파싱하며 ATSR units 항목을 만날 때마다 매단다.
+	 * 읽는 자: 장치의 ATS 를 켜도 되는지 판정할 때 이 목록을 훑는다. 그 장치가 어느
+	 *   ATSR 유닛의 범위에 드는지가 곧 펌웨어의 승인 여부다.
+	 * 동기화: 목록은 부팅과 핫플러그 때만 바뀌고, dmar_global_lock 이 지킨다. */
+	struct acpi_dmar_header *hdr;	/* ACPI header */
+	/* [한국어] (원 주석: ACPI header) 이 항목의 원본 ACPI 구조체를 가리키는 포인터.
+	 * 설정자: 파싱이 ACPI 표 안의 해당 위치를 그대로 담는다 — 복사하지 않는다.
+	 * 읽는 자: 진단 경로, 그리고 핫플러그 때 장치 범위를 다시 훑을 때.
+	 * 왜 원본을 들고 있는가: 파싱 때 뽑아 둔 필드 말고도 나중에 필요한 값이 생길
+	 *   수 있고, 진단할 때 펌웨어가 실제로 뭐라고 적었는지 보여 줄 수 있어야 한다.
+	 * 수명: ACPI 표는 부팅 뒤에도 매핑된 채 남으므로 이 포인터는 계속 유효하다. */
+	struct dmar_dev_scope *devices;	/* target devices */
+	/* [한국어] (원 주석: target devices) 이 항목이 적용되는 장치들의 목록.
+	 * 설정자: dmar_parse_dev_scope() 가 ACPI 항목 안의 장치 범위(scope)를 훑어 만든다.
+	 * 읽는 자: dmar_ats_supported() 가 그 장치의 상위 루트 포트가 여기 있는지 확인한다.
+	 *   아래 include_all 이 서 있으면 이 목록을 보지 않는다.
+	 * 어떻게 장치를 지정하는가: 펌웨어는 PCI 주소가 아니라 "이 루트 포트에서
+	 *   출발해 이 경로를 따라간 장치" 라는 형태로 적는다. 부팅 시점에는 아직
+	 *   열거되지 않은 장치도 가리킬 수 있어야 하기 때문이다.
+	 * 동기화: 장치가 핫플러그될 때 갱신되며, dmar_global_lock 이 지킨다. */
+	int devices_cnt;		/* target device count */
+	/* [한국어] (원 주석: target device count) 위 devices 배열에 든 항목의 개수.
+	 * 설정자: 장치 범위를 파싱할 때 정해지고, 핫플러그로 장치가 나타나거나
+	 *   사라지면 그에 맞춰 바뀐다.
+	 * 읽는 자: 그 배열을 훑는 모든 자리. 배열에 끝 표식이 없으므로 이 값이
+	 *   유일한 경계다.
+	 * 값 범위: 0 이상. 0 이면 이 항목이 가리키는 장치가 현재 하나도 없다는 뜻인데,
+	 *   아직 열거되지 않았을 뿐 나중에 나타날 수 있어 항목 자체는 남겨 둔다. */
+	u8 include_all:1;		/* include all ports */
+	/* [한국어] (원 주석: include all ports) 이 유닛 아래의 모든 포트가 해당된다는 표시.
+	 * 설정자: ATSR 항목 파싱이 ACPI 플래그를 그대로 옮긴다.
+	 * 읽는 자: dmar_ats_supported(). 이 비트가 서 있으면 위 devices 목록을
+	 *   훑지 않고 곧바로 승인한다.
+	 * 왜 필요한가: 루트 포트가 수십 개인 시스템에서 전부 ATS 를 지원한다면
+	 *   그것을 하나하나 나열하는 것은 낭비다. 비트 하나로 "전부"를 표현한다.
+	 * 비트필드인 이유: 이 구조체가 항목마다 하나씩 만들어지고, 남는 자리에
+	 *   다른 플래그가 추가될 여지를 남겨 둔다. */
 };
 
 /*
@@ -414,11 +488,44 @@ struct dmar_atsr_unit {
  * 능력 비트로는 알 수 없어 펌웨어가 별도로 알려 준다.
  */
 struct dmar_satc_unit {
-	struct list_head list;		/* list of SATC units */	/* [한국어] 전역 SATC 목록의 고리 */
-	struct acpi_dmar_header *hdr;	/* ACPI header */	/* [한국어] 원본 ACPI 항목 */
-	struct dmar_dev_scope *devices;	/* target devices */	/* [한국어] SoC 통합 ATS 장치들 */
-	struct intel_iommu *iommu;	/* the corresponding iommu */	/* [한국어] 이 항목을 담당하는 DMAR 유닛 */
-	int devices_cnt;		/* target device count */	/* [한국어] 장치 개수 */
+	struct list_head list;		/* list of SATC units */
+	/* [한국어] (원 주석: list of SATC units) 전역 SATC units 목록에 이 항목을 매다는 고리.
+	 * 설정자: 부팅 중 DMAR 표를 파싱하며 SATC units 항목을 만날 때마다 매단다.
+	 * 읽는 자: SoC 통합 장치의 ATS 를 판정할 때 이 목록을 훑는다. 표준 PCIe ATS 능력
+	 *   비트로는 알 수 없는 장치들이 여기 있다.
+	 * 동기화: 목록은 부팅과 핫플러그 때만 바뀌고, dmar_global_lock 이 지킨다. */
+	struct acpi_dmar_header *hdr;	/* ACPI header */
+	/* [한국어] (원 주석: ACPI header) 이 항목의 원본 ACPI 구조체를 가리키는 포인터.
+	 * 설정자: 파싱이 ACPI 표 안의 해당 위치를 그대로 담는다 — 복사하지 않는다.
+	 * 읽는 자: 진단 경로, 그리고 핫플러그 때 장치 범위를 다시 훑을 때.
+	 * 왜 원본을 들고 있는가: 파싱 때 뽑아 둔 필드 말고도 나중에 필요한 값이 생길
+	 *   수 있고, 진단할 때 펌웨어가 실제로 뭐라고 적었는지 보여 줄 수 있어야 한다.
+	 * 수명: ACPI 표는 부팅 뒤에도 매핑된 채 남으므로 이 포인터는 계속 유효하다. */
+	struct dmar_dev_scope *devices;	/* target devices */
+	/* [한국어] (원 주석: target devices) 이 항목이 적용되는 장치들의 목록.
+	 * 설정자: dmar_parse_dev_scope() 가 ACPI 항목 안의 장치 범위(scope)를 훑어 만든다.
+	 * 읽는 자: dmar_ats_supported() 가 그 장치가 여기 있는지 확인한다. 있으면 표준 ATS
+	 *   능력 구조가 없어도 ATS 를 쓸 수 있다.
+	 * 어떻게 장치를 지정하는가: 펌웨어는 PCI 주소가 아니라 "이 루트 포트에서
+	 *   출발해 이 경로를 따라간 장치" 라는 형태로 적는다. 부팅 시점에는 아직
+	 *   열거되지 않은 장치도 가리킬 수 있어야 하기 때문이다.
+	 * 동기화: 장치가 핫플러그될 때 갱신되며, dmar_global_lock 이 지킨다. */
+	struct intel_iommu *iommu;	/* the corresponding iommu */
+	/* [한국어] (원 주석: the corresponding iommu) 이 SATC 항목을 담당하는 DMAR 유닛.
+	 * 설정자: 파싱이 항목의 세그먼트 번호로 유닛을 찾아 담는다.
+	 * 읽는 자: 그 장치의 ATS 를 다룰 때 어느 유닛에 명령을 보낼지 정하는 곳.
+	 * 왜 RMRR/ATSR 에는 없고 여기만 있는가: SATC 는 SoC 안에서 직접 연결된
+	 *   장치를 다루므로, 그 장치가 어느 유닛에 매여 있는지가 표에 명시된다.
+	 *   RMRR 과 ATSR 은 PCI 경로로 장치를 지정해 유닛을 나중에 찾을 수 있다.
+	 * 값 범위: NULL 일 수 있다 — 해당 유닛이 아직 초기화되지 않았을 때. */
+	int devices_cnt;		/* target device count */
+	/* [한국어] (원 주석: target device count) 위 devices 배열에 든 항목의 개수.
+	 * 설정자: 장치 범위를 파싱할 때 정해지고, 핫플러그로 장치가 나타나거나
+	 *   사라지면 그에 맞춰 바뀐다.
+	 * 읽는 자: 그 배열을 훑는 모든 자리. 배열에 끝 표식이 없으므로 이 값이
+	 *   유일한 경계다.
+	 * 값 범위: 0 이상. 0 이면 이 항목이 가리키는 장치가 현재 하나도 없다는 뜻인데,
+	 *   아직 열거되지 않았을 뿐 나중에 나타날 수 있어 항목 자체는 남겨 둔다. */
 	u8 atc_required:1;		/* ATS is required */
 	/* [한국어] 이 SATC 항목의 장치들이 ATS 를 "반드시" 켜야 하는지 여부.
 	 * 설정자: dmar_parse_one_satc() 가 ACPI 항목의 flags 비트 0 을 그대로 옮긴다.
