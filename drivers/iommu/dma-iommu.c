@@ -265,6 +265,24 @@ struct iommu_dma_msi_cookie {
 static DEFINE_STATIC_KEY_FALSE(iommu_deferred_attach_enabled);	/* [한국어] 지연 부착이 필요한 하드웨어가 있을 때만 켜지는 정적 키. 매 매핑마다 검사가 들어가는 자리라, 대부분의 시스템에서 그 분기 자체를 지워 버리기 위해 static key 를 쓴다 */
 bool iommu_dma_forcedac __read_mostly;	/* [한국어] PCIe 장치에 64비트 주소(DAC)를 강제할지. 켜면 32비트 영역을 아끼지만 오래된 장치에서 문제가 생길 수 있다 */
 
+/*
+ * [한국어]
+ * iommu_dma_forcedac_setup - "iommu.forcedac=" 부트 인자를 처리한다
+ *
+ * @str:    인자 값
+ * @return: 0 성공, 음수면 값 해석 실패
+ *
+ * 기본적으로 IOVA 할당은 32비트 영역부터 시도한다. PCIe 에서는 SAC/DAC 구분이
+ * 의미를 잃었지만, 상위 주소 비트를 제대로 배선하지 않았거나 DMA 마스크를 잘못
+ * 신고하는 하드웨어가 남아 있어 보수적으로 낮은 주소를 먼저 쓴다.
+ *
+ * 이 인자를 켜면 그 배려를 끄고 처음부터 전체 주소 공간을 쓴다. 32비트 영역이
+ * 좁아 병목이 되는 시스템(수백 개의 큐를 가진 고성능 장치 여럿)에서 의미가 있다.
+ *
+ * 실행 컨텍스트: early_param — 부팅 초기.
+ *
+ * 호출 체인: 부트 인자 파서 → [이 함수]
+ */
 static int __init iommu_dma_forcedac_setup(char *str)
 {
 	int ret = kstrtobool(str, &iommu_dma_forcedac);	/* [한국어] 부트 인자 값 해석 */
@@ -352,6 +370,20 @@ static inline bool fq_full(struct iova_fq *fq)
 	return (((fq->tail + 1) & fq->mod_mask) == fq->head);	/* [한국어] 한 칸을 비워 둬 '가득 참'과 '빔'을 구별한다. 그 한 칸이 없으면 head==tail 이 두 뜻을 갖는다 */
 }
 
+/*
+ * [한국어]
+ * fq_ring_add - 링 버퍼에 자리 하나를 확보한다
+ *
+ * @fq:     대상 큐 (가득 차 있지 않아야 한다)
+ * @return: 쓸 수 있는 항목의 인덱스
+ *
+ * tail 을 전진시키고 이전 값을 돌려주는 것이 전부다. 가득 참 검사는 호출자가
+ * 이미 마쳤다는 전제이며, 그래서 여기에는 검사가 없다.
+ *
+ * 실행 컨텍스트: 큐 락을 든 채.
+ *
+ * 호출 체인: queue_iova → [이 함수]
+ */
 static inline unsigned int fq_ring_add(struct iova_fq *fq)
 {
 	unsigned int idx = fq->tail;	/* [한국어] 넣을 자리 */
@@ -363,6 +395,27 @@ static inline unsigned int fq_ring_add(struct iova_fq *fq)
 	return idx;	/* [한국어] 방금 확보한 자리의 인덱스 */
 }
 
+/*
+ * [한국어]
+ * fq_ring_free_locked - 무효화가 끝난 항목들을 실제로 반납한다 (락 없음)
+ *
+ * @cookie: 도메인의 DMA 상태 (완료 카운터를 읽는다)
+ * @fq:     훑을 큐
+ *
+ * 지연 무효화의 정확성이 이 함수 한 줄에 걸려 있다 — 항목의 counter 가 완료
+ * 카운터보다 작을 때만 반납한다. 그 조건이 뜻하는 바는 "이 항목이 큐에 들어간
+ * 뒤에 시작된 전체 무효화가 이미 끝났다"이고, 따라서 그 IOVA 를 가리키던 IOTLB
+ * 항목은 더 이상 존재하지 않는다.
+ *
+ * 링은 시간순이므로 조건에 걸리는 첫 항목에서 멈추면 뒤는 볼 필요가 없다.
+ *
+ * 페이지 테이블 페이지도 같은 조건에서 함께 반납한다. 먼저 놓으면 아직 무효화되지
+ * 않은 IOTLB 항목이 참조하던 표가 다른 용도로 재사용된다.
+ *
+ * 실행 컨텍스트: 큐 락을 든 채. 인터럽트 문맥 가능.
+ *
+ * 호출 체인: queue_iova, fq_ring_free → [이 함수] → free_iova_fast
+ */
 static void fq_ring_free_locked(struct iommu_dma_cookie *cookie, struct iova_fq *fq)
 {
 	u64 counter = atomic64_read(&cookie->fq_flush_finish_cnt);	/* [한국어] '완료된' 무효화 횟수. 이 값보다 작은 counter 를 가진 항목만 반납해도 안전하다 */
@@ -386,6 +439,20 @@ static void fq_ring_free_locked(struct iommu_dma_cookie *cookie, struct iova_fq 
 	}
 }
 
+/*
+ * [한국어]
+ * fq_ring_free - 락을 잡고 반납을 수행한다
+ *
+ * @cookie: 도메인의 DMA 상태
+ * @fq:     훑을 큐
+ *
+ * fq_ring_free_locked 의 락 포함판. 타이머 콜백처럼 락을 아직 잡지 않은 문맥에서
+ * 쓴다. irqsave 인 것은 이 큐를 인터럽트 문맥의 dma_unmap 도 만지기 때문이다.
+ *
+ * 실행 컨텍스트: 어디서든.
+ *
+ * 호출 체인: fq_flush_timeout → [이 함수]
+ */
 static void fq_ring_free(struct iommu_dma_cookie *cookie, struct iova_fq *fq)
 {
 	unsigned long flags;	/* [한국어] 인터럽트 상태 */
@@ -395,6 +462,25 @@ static void fq_ring_free(struct iommu_dma_cookie *cookie, struct iova_fq *fq)
 	spin_unlock_irqrestore(&fq->lock, flags);	/* [한국어] 락 해제 */
 }
 
+/*
+ * [한국어]
+ * fq_flush_iotlb - 도메인 전체 IOTLB 를 한 번에 비운다
+ *
+ * @cookie: 도메인의 DMA 상태
+ *
+ * 지연 무효화의 이득이 여기서 실현된다. 구간별 무효화를 수백 번 내리는 대신
+ * 전체를 한 번 비우고, 그동안 큐에 쌓인 IOVA 를 모두 풀어 준다.
+ *
+ * 카운터를 앞뒤로 감싸는 순서가 핵심이다. start 를 먼저 올리므로, 이 시점 이후에
+ * 큐에 들어가는 항목은 더 큰 counter 를 갖게 되어 이번 무효화의 보호를 받지
+ * 못한다 — 그것이 정확한 판정이다. finish 를 나중에 올리므로, 그 값을 본 CPU 는
+ * 무효화가 실제로 끝났음을 알 수 있다.
+ *
+ * 실행 컨텍스트: 어디서든. 하드웨어 완료를 기다리므로 비싸다.
+ *
+ * 호출 체인: queue_iova(큐 포화), fq_flush_timeout → [이 함수]
+ *            → domain->ops->flush_iotlb_all
+ */
 static void fq_flush_iotlb(struct iommu_dma_cookie *cookie)
 {
 	atomic64_inc(&cookie->fq_flush_start_cnt);	/* [한국어] 무효화를 '시작한다'고 먼저 알린다. 이 시점 이후 큐에 들어가는 항목은 더 큰 counter 를 갖게 되어, 이번 무효화의 보호를 받지 못한다 — 그것이 정확하다 */
@@ -402,6 +488,26 @@ static void fq_flush_iotlb(struct iommu_dma_cookie *cookie)
 	atomic64_inc(&cookie->fq_flush_finish_cnt);	/* [한국어] 완료를 알린다. 이 증가를 본 CPU 는 그 이전 counter 의 항목을 안전하게 반납할 수 있다 */
 }
 
+/*
+ * [한국어]
+ * fq_flush_timeout - 주기적으로 큐를 비운다
+ *
+ * @t: 타이머 구조체 (여기서 소유 쿠키를 되짚는다)
+ *
+ * 큐가 차기만 기다리면 DMA 가 뜸해진 뒤 해제된 IOVA 가 무한정 묶인 채 남는다.
+ * 이 타이머가 회수의 하한을 보장한다.
+ *
+ * 무효화를 한 번만 내리고 모든 CPU 의 큐를 훑는 순서가 요점이다. 전체 IOTLB 를
+ * 비우는 동작이므로 CPU 별로 반복할 이유가 없고, 그 한 번으로 전 CPU 의 대기분이
+ * 함께 풀린다.
+ *
+ * 타이머 플래그를 맨 먼저 내리는 것도 의도적이다. 아래 작업 도중에 새 항목이
+ * 들어오면 그쪽이 타이머를 다시 걸 수 있어야 한다.
+ *
+ * 실행 컨텍스트: 소프트 인터럽트(타이머 콜백).
+ *
+ * 호출 체인: 타이머 → [이 함수] → fq_flush_iotlb, fq_ring_free
+ */
 static void fq_flush_timeout(struct timer_list *t)
 {
 	struct iommu_dma_cookie *cookie = timer_container_of(cookie, t,	/* [한국어] 타이머 구조체에서 소유 쿠키로 되짚는다 */
@@ -419,6 +525,31 @@ static void fq_flush_timeout(struct timer_list *t)
 	}
 }
 
+/*
+ * [한국어]
+ * queue_iova - 해제된 IOVA 를 무효화 대기 큐에 넣는다
+ *
+ * @cookie:   도메인의 DMA 상태
+ * @pfn:      해제된 구간의 시작 pfn
+ * @pages:    페이지 수
+ * @freelist: 이 해제로 비게 된 페이지 테이블 페이지들
+ *
+ * 지연 무효화 정책(DMA_FQ)에서 dma_unmap 이 도달하는 곳이다. PTE 는 이미 지워졌지만
+ * IOTLB 에는 옛 번역이 남아 있으므로, 그 IOVA 를 곧바로 재사용하면 장치가 이미
+ * 반납된 페이지에 닿을 수 있다. 그래서 여기 담아 두었다가 전체 무효화가 한 번
+ * 끝난 뒤에 iova.c 로 돌려준다.
+ *
+ * 맨 앞의 smp_mb() 가 두 가지를 보장한다. 드라이버의 PTE 제거가 이 항목의 등록보다
+ * 먼저 보이게 하고(다른 CPU 가 곧바로 무효화를 내려도 지워진 PTE 를 본다),
+ * iommu_dma_init_fq 가 쓴 큐 상태를 반쯤 본 채로 만지지 않게 한다.
+ *
+ * 큐가 가득 차면 지연의 이득을 포기하고 여기서 직접 무효화를 내린다. 그 전에 먼저
+ * 이미 완료된 항목을 거두어, 그 상황 자체를 드물게 만든다.
+ *
+ * 실행 컨텍스트: dma_unmap 경로. 인터럽트 문맥 가능.
+ *
+ * 호출 체인: iommu_dma_free_iova → [이 함수] → fq_ring_free_locked, fq_flush_iotlb
+ */
 static void queue_iova(struct iommu_dma_cookie *cookie,
 		unsigned long pfn, unsigned long pages,
 		struct iommu_pages_list *freelist)
@@ -471,6 +602,19 @@ static void queue_iova(struct iommu_dma_cookie *cookie,
 			  jiffies + msecs_to_jiffies(cookie->options.fq_timeout));	/* [한국어] 큐가 차지 않아도 이 시간 안에는 반드시 회수된다 */
 }
 
+/*
+ * [한국어]
+ * iommu_dma_free_fq_single - 전역 큐 하나를 해제한다
+ *
+ * @fq: 해제할 큐
+ *
+ * 남아 있는 항목의 페이지 테이블 페이지만 반납한다. IOVA 는 도메인이 통째로
+ * 사라지는 중이라 개별 반납이 무의미하고, put_iova_domain 이 트리를 통째로 비운다.
+ *
+ * 실행 컨텍스트: 도메인 해체. 프로세스 문맥.
+ *
+ * 호출 체인: iommu_dma_free_fq → [이 함수]
+ */
 static void iommu_dma_free_fq_single(struct iova_fq *fq)
 {
 	int idx;	/* [한국어] 링 순회 커서 */
@@ -480,6 +624,20 @@ static void iommu_dma_free_fq_single(struct iova_fq *fq)
 	vfree(fq);	/* [한국어] 큐 자체 해제 (vmalloc 으로 잡았다) */
 }
 
+/*
+ * [한국어]
+ * iommu_dma_free_fq_percpu - CPU 별 큐 배열을 해제한다
+ *
+ * @percpu_fq: 해제할 percpu 큐 배열
+ *
+ * single 판과 같은 이유로 페이지 테이블 페이지만 거둔다 (위 영어 주석). 다만
+ * for_each_possible_cpu 로 도는 것에 주의 — 지금 오프라인인 CPU 의 큐에도 항목이
+ * 남아 있을 수 있다.
+ *
+ * 실행 컨텍스트: 도메인 해체. 프로세스 문맥.
+ *
+ * 호출 체인: iommu_dma_free_fq → [이 함수]
+ */
 static void iommu_dma_free_fq_percpu(struct iova_fq __percpu *percpu_fq)
 {
 	int cpu, idx;	/* [한국어] CPU 와 링 순회 커서 */
@@ -495,6 +653,21 @@ static void iommu_dma_free_fq_percpu(struct iova_fq __percpu *percpu_fq)
 	free_percpu(percpu_fq);	/* [한국어] percpu 배열 해제 */
 }
 
+/*
+ * [한국어]
+ * iommu_dma_free_fq - 도메인의 flush queue 전체를 걷어 낸다
+ *
+ * @cookie: 도메인의 DMA 상태
+ *
+ * fq_domain 이 NULL 이면 지연 무효화를 쓰지 않는 도메인이라 할 일이 없다.
+ *
+ * timer_delete_sync 로 타이머가 끝나기를 기다리는 것이 순서상 중요하다. 콜백이
+ * 도는 도중에 큐를 해제하면 해제된 메모리를 훑게 된다.
+ *
+ * 실행 컨텍스트: 도메인 해체. 프로세스 문맥, 잠들 수 있다.
+ *
+ * 호출 체인: iommu_put_dma_cookie → [이 함수]
+ */
 static void iommu_dma_free_fq(struct iommu_dma_cookie *cookie)
 {
 	if (!cookie->fq_domain)	/* [한국어] 지연 무효화를 쓰지 않는 도메인 */
@@ -507,6 +680,23 @@ static void iommu_dma_free_fq(struct iommu_dma_cookie *cookie)
 		iommu_dma_free_fq_percpu(cookie->percpu_fq);	/* [한국어] CPU 별 큐 */
 }
 
+/*
+ * [한국어]
+ * iommu_dma_init_one_fq - 큐 하나의 링 상태를 초기화한다
+ *
+ * @fq:      초기화할 큐 (메모리는 이미 확보되어 있다)
+ * @fq_size: 항목 수. 반드시 2의 거듭제곱이어야 한다.
+ *
+ * mod_mask 를 fq_size - 1 로 두는 것이 링의 전부다. 크기가 2의 거듭제곱이라
+ * 인덱스를 나눗셈 없이 AND 한 번으로 감쌀 수 있고, 그래서 핫패스에서 비용이 없다.
+ *
+ * freelist 초기화는 처음 한 번만 필요하다 — 항목은 반납 뒤에도 재사용되며
+ * fq_ring_free_locked 가 다시 빈 상태로 되돌려 놓는다.
+ *
+ * 실행 컨텍스트: 도메인 초기화. 프로세스 문맥.
+ *
+ * 호출 체인: iommu_dma_init_fq_single/percpu → [이 함수]
+ */
 static void iommu_dma_init_one_fq(struct iova_fq *fq, size_t fq_size)
 {
 	int i;	/* [한국어] 항목 초기화 커서 */
@@ -522,6 +712,23 @@ static void iommu_dma_init_one_fq(struct iova_fq *fq, size_t fq_size)
 			IOMMU_PAGES_LIST_INIT(fq->entries[i].freelist);	/* [한국어] 빈 상태로 초기화. 항목은 재사용되므로 처음 한 번만 하면 된다 */
 }
 
+/*
+ * [한국어]
+ * iommu_dma_init_fq_single - 시스템 전체가 공유할 큐 하나를 만든다
+ *
+ * @cookie: 도메인의 DMA 상태
+ * @return: 0 성공, -ENOMEM 이면 지연 무효화를 켤 수 없다
+ *
+ * 32768 항목이라 수 MB 에 이른다. 물리 연속을 요구할 수 없으므로 vmalloc 을 쓰며,
+ * 큐 접근이 이미 락 아래이므로 vmalloc 의 접근 비용은 문제가 되지 않는다.
+ *
+ * 이 구성은 무효화 한 번이 매우 비싼 환경(하이퍼바이저로 트랩되는 그림자 페이지
+ * 테이블 등)에서 선택된다. 큐가 클수록 무효화 한 번에 정리되는 양이 많다.
+ *
+ * 실행 컨텍스트: 도메인 초기화. 프로세스 문맥, 잠들 수 있다.
+ *
+ * 호출 체인: iommu_dma_init_fq → [이 함수]
+ */
 static int iommu_dma_init_fq_single(struct iommu_dma_cookie *cookie)
 {
 	size_t fq_size = cookie->options.fq_size;	/* [한국어] 전역 큐는 32768 항목으로 크다 */
@@ -536,6 +743,23 @@ static int iommu_dma_init_fq_single(struct iommu_dma_cookie *cookie)
 	return 0;	/* [한국어] 전역 큐 준비 완료 */
 }
 
+/*
+ * [한국어]
+ * iommu_dma_init_fq_percpu - CPU 마다 작은 큐를 하나씩 만든다 (기본 구성)
+ *
+ * @cookie: 도메인의 DMA 상태
+ * @return: 0 성공, -ENOMEM 이면 지연 무효화를 켤 수 없다
+ *
+ * 각 CPU 가 자기 큐에만 넣으므로 락 경쟁이 사실상 없다. 대신 큐가 작아(256) 자주
+ * 차고, 그때마다 전체 무효화가 일어난다.
+ *
+ * for_each_possible_cpu 로 초기화하는 것이 중요하다 — 나중에 핫플러그로 올라오는
+ * CPU 도 자기 큐를 이미 가지고 있어야 하며, 그때 아토믹 문맥에서 할당할 수는 없다.
+ *
+ * 실행 컨텍스트: 도메인 초기화. 프로세스 문맥, 잠들 수 있다.
+ *
+ * 호출 체인: iommu_dma_init_fq → [이 함수]
+ */
 static int iommu_dma_init_fq_percpu(struct iommu_dma_cookie *cookie)
 {
 	size_t fq_size = cookie->options.fq_size;	/* [한국어] CPU 별 큐는 256 항목으로 작다 */
@@ -554,6 +778,25 @@ static int iommu_dma_init_fq_percpu(struct iommu_dma_cookie *cookie)
 }
 
 /* sysfs updates are serialised by the mutex of the group owning @domain */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * iommu_dma_init_fq - 도메인에 지연 무효화를 켠다
+ *
+ * @domain: 대상 도메인
+ * @return: 0 성공, -ENOMEM 이면 즉시 무효화로 남는다
+ *
+ * sysfs 로 type 을 DMA-FQ 로 바꿀 때, 그리고 도메인 초기화 때 불린다. 이미 켜져
+ * 있으면 아무 일도 하지 않는 멱등 함수다.
+ *
+ * 마지막 두 줄의 순서가 이 함수의 계약이다. smp_wmb() 뒤에 fq_domain 을 쓰는데,
+ * 그 대입이 곧 "지연 무효화 켜짐" 스위치이기 때문이다. 해제 경로가 이 필드를 보고
+ * queue_iova 로 들어가므로, 큐가 완성되기 전에 켜면 다른 CPU 가 반쯤 만들어진
+ * 링을 만지게 된다.
+ *
+ * 실행 컨텍스트: 그룹 락 아래(sysfs 경로) 또는 도메인 초기화. 프로세스 문맥.
+ *
+ * 호출 체인: iommu_group_store_type, iommu_dma_init_domain → [이 함수]
+ */
 int iommu_dma_init_fq(struct iommu_domain *domain)
 {
 	struct iommu_dma_cookie *cookie = domain->iova_cookie;	/* [한국어] 이 도메인의 DMA 상태 */
@@ -590,6 +833,25 @@ int iommu_dma_init_fq(struct iommu_domain *domain)
  * iommu_get_dma_cookie - Acquire DMA-API resources for a domain
  * @domain: IOMMU domain to prepare for DMA-API usage
  */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어)
+ * iommu_get_dma_cookie - 도메인을 커널 DMA API 용으로 표시하고 상태를 붙인다
+ *
+ * @domain: 준비할 도메인
+ * @return: 0 성공, -EEXIST 면 이미 다른 쿠키가 있다, -ENOMEM 이면 할당 실패
+ *
+ * cookie_type 을 IOMMU_COOKIE_DMA_IOVA 로 세우는 것이 이 함수의 실질이다. 그
+ * 값이 iommu.c 곳곳의 분기 기준이 된다 — 도메인 해제 시 무엇을 풀지, MSI 매핑을
+ * 누가 담당할지, 폴트 핸들러 자리를 쓸 수 있는지가 모두 여기서 갈린다.
+ *
+ * IOVA 공간 자체는 아직 세우지 않는다. 그것은 장치의 주소 제약을 알아야 가능해서
+ * iommu_dma_init_domain 이 장치와 함께 처리한다. 그 사이 iovad.granule 이 0 인
+ * 것이 "아직 세워지지 않음"의 표식이 된다.
+ *
+ * 실행 컨텍스트: 도메인 생성. 프로세스 문맥.
+ *
+ * 호출 체인: iommu.c 의 iommu_setup_default_domain → [이 함수]
+ */
 int iommu_get_dma_cookie(struct iommu_domain *domain)
 {
 	struct iommu_dma_cookie *cookie;	/* [한국어] 만들 쿠키 */
@@ -619,6 +881,25 @@ int iommu_get_dma_cookie(struct iommu_domain *domain)
  * number of PAGE_SIZE mappings necessary to cover every MSI doorbell address
  * used by the devices attached to @domain.
  */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어)
+ * iommu_get_msi_cookie - MSI 재매핑만 코어에 맡긴다
+ *
+ * @domain: 준비할 도메인 (UNMANAGED 여야 한다)
+ * @base:   MSI 매핑에 쓸 IOVA 창의 시작 주소
+ * @return: 0 성공, -EINVAL 이면 도메인 종류가 맞지 않음, -EEXIST 면 쿠키 중복
+ *
+ * VFIO 처럼 IOVA 를 직접 관리하는 사용자를 위한 것이다. DMA API 는 쓰지 않지만
+ * MSI 도어벨 매핑만은 코어에 맡기고 싶을 때 쓴다 — 그 매핑을 직접 만들려면
+ * 인터럽트 컨트롤러의 도어벨 주소를 알아야 하는데, 그것은 아키텍처마다 다르다.
+ *
+ * 할당자가 없으므로 호출자가 충분히 큰 연속 창을 미리 예약해 base 로 넘겨야 하고,
+ * 코어는 그 창에서 순서대로 페이지를 떼어 쓴다 (위 영어 주석).
+ *
+ * 실행 컨텍스트: 도메인 생성 직후. 프로세스 문맥.
+ *
+ * 호출 체인: VFIO → [이 함수]
+ */
 int iommu_get_msi_cookie(struct iommu_domain *domain, dma_addr_t base)
 {
 	struct iommu_dma_msi_cookie *cookie;	/* [한국어] 만들 축소판 쿠키 */
@@ -645,6 +926,23 @@ EXPORT_SYMBOL(iommu_get_msi_cookie);	/* [한국어] VFIO 등 도메인을 직접
  * iommu_put_dma_cookie - Release a domain's DMA mapping resources
  * @domain: IOMMU domain previously prepared by iommu_get_dma_cookie()
  */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어)
+ * iommu_put_dma_cookie - DMA 상태를 통째로 해제한다
+ *
+ * @domain: 사라지는 도메인
+ *
+ * 해제 순서가 정해져 있다. flush queue 먼저(타이머 정지 포함), 그 다음 IOVA 공간,
+ * 마지막에 MSI 기록이다. 큐가 IOVA 를 참조하고 있으므로 뒤집으면 해제된 것을
+ * 만진다.
+ *
+ * iovad.granule 검사가 필요한 이유는 쿠키만 만들어지고 iommu_dma_init_domain 이
+ * 불리기 전에 도메인이 해제되는 경로가 있기 때문이다. 그때는 IOVA 공간이 없다.
+ *
+ * 실행 컨텍스트: 도메인 해제. 프로세스 문맥, 잠들 수 있다.
+ *
+ * 호출 체인: iommu.c 의 iommu_domain_free → [이 함수]
+ */
 void iommu_put_dma_cookie(struct iommu_domain *domain)
 {
 	struct iommu_dma_cookie *cookie = domain->iova_cookie;	/* [한국어] 해제할 쿠키 */
@@ -662,6 +960,19 @@ void iommu_put_dma_cookie(struct iommu_domain *domain)
 /**
  * iommu_put_msi_cookie - Release a domain's MSI mapping resources
  * @domain: IOMMU domain previously prepared by iommu_get_msi_cookie()
+ */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어)
+ * iommu_put_msi_cookie - 축소판 쿠키를 해제한다
+ *
+ * @domain: 사라지는 도메인
+ *
+ * 매핑 기록만 거둔다. 실제 IOVA 매핑은 도메인의 페이지 테이블과 함께 사라지고,
+ * IOVA 창은 애초에 호출자 소유였다.
+ *
+ * 실행 컨텍스트: 도메인 해제. 프로세스 문맥.
+ *
+ * 호출 체인: iommu.c 의 iommu_domain_free → [이 함수]
  */
 void iommu_put_msi_cookie(struct iommu_domain *domain)
 {
@@ -683,6 +994,24 @@ void iommu_put_msi_cookie(struct iommu_domain *domain)
  * ITS region reservation on ACPI based ARM platforms that may require HW MSI
  * reservation.
  */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어)
+ * iommu_dma_get_resv_regions - 펌웨어가 기술한 공통 예약 구간을 모은다
+ *
+ * @dev:  대상 장치
+ * @list: 예약 구간을 매달 목록
+ *
+ * 벤더 드라이버의 get_resv_regions 콜백이 자기 하드웨어 고유 구간(RMRR 등)을
+ * 알리기 전에, 아키텍처 공통 부분을 이 함수로 채운다. 현재는 주로 ARM 플랫폼의
+ * GICv3 ITS 창이며, 그 주소로 오는 쓰기는 인터럽트로 해석되므로 데이터 DMA 가
+ * 절대 그 자리를 쓰면 안 된다 (위 영어 주석).
+ *
+ * DT 와 ACPI 를 모두 확인하는 것에 주의할 것 — 두 방식이 공존할 수 있다.
+ *
+ * 실행 컨텍스트: 프로브 경로. 프로세스 문맥.
+ *
+ * 호출 체인: 벤더 드라이버의 get_resv_regions → [이 함수]
+ */
 void iommu_dma_get_resv_regions(struct device *dev, struct list_head *list)
 {
 
@@ -694,6 +1023,27 @@ void iommu_dma_get_resv_regions(struct device *dev, struct list_head *list)
 }
 EXPORT_SYMBOL(iommu_dma_get_resv_regions);	/* [한국어] 벤더 드라이버가 자기 get_resv_regions 콜백에서 이 공통 부분을 그대로 부른다 */
 
+/*
+ * [한국어]
+ * cookie_init_hw_msi_region - 하드웨어가 고정한 MSI 창을 항등 매핑으로 미리 등록한다
+ *
+ * @cookie: 도메인의 DMA 상태
+ * @start:  창의 시작 물리 주소
+ * @end:    창의 끝
+ * @return: 0 성공, -ENOMEM 이면 기록 생성 실패
+ *
+ * IOMMU_RESV_MSI 구간은 하드웨어가 그 주소를 그대로 인터럽트로 해석하는 창이다.
+ * 즉 번역이 개입할 수 없으므로 IOVA == 물리 주소로 쓸 수밖에 없고, 그래서 창의
+ * 각 페이지에 대해 iova == phys 인 기록을 미리 만들어 둔다.
+ *
+ * 실제 매핑을 만들지 않는다는 점이 중요하다. 그 범위는 이미 reserve_iova 로
+ * 할당 대상에서 빠져 있고, 하드웨어가 번역 없이 처리하므로 페이지 테이블에 넣을
+ * 것이 없다. 이 목록은 나중에 iommu_dma_get_msi_page 가 조회할 때 쓰인다.
+ *
+ * 실행 컨텍스트: 도메인 초기화. 프로세스 문맥.
+ *
+ * 호출 체인: iova_reserve_iommu_regions → [이 함수]
+ */
 static int cookie_init_hw_msi_region(struct iommu_dma_cookie *cookie,
 		phys_addr_t start, phys_addr_t end)
 {
@@ -719,6 +1069,21 @@ static int cookie_init_hw_msi_region(struct iommu_dma_cookie *cookie,
 	return 0;	/* [한국어] 창 전체를 기록했다 */
 }
 
+/*
+ * [한국어]
+ * iommu_dma_ranges_sort - dma_ranges 항목을 시작 주소 오름차순으로 비교한다
+ *
+ * @priv:   list_sort 가 넘겨 주는 문맥 (여기서는 쓰지 않는다)
+ * @a, @b:  비교할 두 항목
+ * @return: a 가 뒤에 와야 하면 1
+ *
+ * iova_reserve_pci_windows 가 "허용된 창들 사이의 틈"을 계산하려면 목록이 정렬되어
+ * 있어야 한다. 펌웨어가 순서를 보장하지 않으므로 여기서 한 번 정렬한다.
+ *
+ * 실행 컨텍스트: 도메인 초기화. 프로세스 문맥.
+ *
+ * 호출 체인: list_sort → [이 함수]
+ */
 static int iommu_dma_ranges_sort(void *priv, const struct list_head *a,
 		const struct list_head *b)
 {
@@ -728,6 +1093,27 @@ static int iommu_dma_ranges_sort(void *priv, const struct list_head *a,
 	return res_a->res->start > res_b->res->start;	/* [한국어] 시작 주소 오름차순. 아래 예약 루프가 '구간 사이의 틈'을 계산하려면 정렬이 전제된다 */
 }
 
+/*
+ * [한국어]
+ * iova_reserve_pci_windows - PCI 브리지의 주소 제약을 IOVA 공간에 반영한다
+ *
+ * @dev:   PCI 장치
+ * @iovad: 이 장치가 쓸 IOVA 공간
+ * @return: 0 성공, -EINVAL 이면 펌웨어가 기술한 창이 서로 겹친다
+ *
+ * IOVA 는 장치가 버스에 내는 주소이고, 그 버스에는 다른 장치의 MMIO 창도 함께
+ * 놓여 있다. 두 가지를 반영해야 한다.
+ *
+ *  1) 브리지의 메모리 창(bridge->windows): 그 주소로 간 트랜잭션은 메모리가 아니라
+ *     다른 장치의 레지스터로 간다. IOVA 로 내주면 DMA 가 P2P 쓰기로 바뀐다.
+ *  2) DMA 허용 범위(bridge->dma_ranges)의 여집합: 그 범위 밖 주소는 브리지가
+ *     상류로 통과시키지 않는다. 목록을 정렬한 뒤 창들 사이의 '틈'과 마지막 창
+ *     뒤의 영역을 예약하는 것이 그 여집합을 구하는 방식이다.
+ *
+ * 실행 컨텍스트: 도메인 초기화. 프로세스 문맥.
+ *
+ * 호출 체인: iova_reserve_iommu_regions → [이 함수] → reserve_iova
+ */
 static int iova_reserve_pci_windows(struct pci_dev *dev,
 		struct iova_domain *iovad)
 {
@@ -774,6 +1160,26 @@ resv_iova:	/* [한국어] 마지막 창 뒤의 남은 영역을 처리하려고 
 	return 0;	/* [한국어] 브리지 제약이 모두 IOVA 공간에 반영되었다 */
 }
 
+/*
+ * [한국어]
+ * iova_reserve_iommu_regions - 이 장치가 쓰면 안 되는 주소를 모두 IOVA 공간에서 뺀다
+ *
+ * @dev:    대상 장치
+ * @domain: 그 장치가 붙을 도메인
+ * @return: 0 성공, 음수면 실패
+ *
+ * 도메인 초기화의 마지막 단계다. 세 출처에서 제약이 온다 — PCI 브리지 토폴로지,
+ * IOMMU 드라이버가 아는 하드웨어 예약 구간, 펌웨어가 기술한 직통 매핑이다.
+ *
+ * SW_MSI 를 건너뛰는 것이 유일한 예외다. 그 창은 이 파일 자신이 관리하며, 예약해
+ * 두는 대신 필요할 때 정상적으로 할당해 쓴다 (위 영어 주석). 반대로 하드웨어가
+ * 고정한 MSI 창(IOMMU_RESV_MSI)은 예약과 동시에 항등 매핑 기록까지 만든다.
+ *
+ * 실행 컨텍스트: 도메인 초기화. 프로세스 문맥, 잠들 수 있다.
+ *
+ * 호출 체인: iommu_dma_init_domain → [이 함수]
+ *            → iova_reserve_pci_windows, iommu_get_resv_regions, reserve_iova
+ */
 static int iova_reserve_iommu_regions(struct device *dev,
 		struct iommu_domain *domain)
 {
@@ -812,11 +1218,50 @@ static int iova_reserve_iommu_regions(struct device *dev,
 	return ret;	/* [한국어] 0 이면 이 장치가 쓰면 안 되는 모든 주소가 IOVA 공간에서 빠졌다 */
 }
 
+/*
+ * [한국어]
+ * dev_is_untrusted - 물리적으로 탈착 가능한 위치에 꽂힌 장치인가
+ *
+ * @dev:    대상 장치
+ * @return: true 면 신뢰할 수 없다
+ *
+ * PCI 코어가 Thunderbolt 등 외부에서 꽂을 수 있는 경로 뒤의 장치에 표시해 준다.
+ * 이 판정 하나가 이 파일의 여러 정책을 바꾼다 — 부분 페이지 매핑을 바운스 버퍼로
+ * 우회시키고, 최대 매핑 크기를 바운스 버퍼 크기로 제한하며, sg 병합을 포기하게
+ * 만든다.
+ *
+ * 이유는 하나다. IOMMU 는 페이지 단위로만 매핑하므로, 페이지보다 작은 버퍼를
+ * 그대로 매핑하면 같은 페이지의 다른 커널 데이터까지 그 장치에 열린다.
+ *
+ * 실행 컨텍스트: 어디서든.
+ *
+ * 호출 체인: dev_use_swiotlb, dev_use_sg_swiotlb, iommu_dma_max_mapping_size → [이 함수]
+ */
 static bool dev_is_untrusted(struct device *dev)
 {
 	return dev_is_pci(dev) && to_pci_dev(dev)->untrusted;	/* [한국어] 물리적으로 접근 가능한 위치(Thunderbolt 등)에 꽂힌 장치. PCI 코어가 표시해 준다 */
 }
 
+/*
+ * [한국어]
+ * dev_use_swiotlb - 이 매핑을 바운스 버퍼로 우회시켜야 하는가
+ *
+ * @dev:    대상 장치
+ * @size:   매핑 길이
+ * @dir:    DMA 방향
+ * @return: true 면 바운스 필요
+ *
+ * 두 가지 이유가 있다. 신뢰할 수 없는 장치는 부분 페이지 노출을 막기 위해서이고,
+ * kmalloc 버퍼는 캐시라인 정렬 문제 때문이다 — 비일관 장치에서 캐시 관리를 하면
+ * 같은 캐시라인을 공유하는 이웃 데이터까지 무효화되거나 덮어써진다.
+ *
+ * 이 함수는 "바운스가 필요한 장치인가"만 판정하고, 실제로 우회할지는 호출자가
+ * iova_unaligned 와 함께 본다. 정렬이 맞으면 노출될 여지가 없어 바운스가 불필요하다.
+ *
+ * 실행 컨텍스트: 매핑 경로. 어디서든.
+ *
+ * 호출 체인: iommu_dma_map_phys, dma_iova_link, sync 계열 → [이 함수]
+ */
 static bool dev_use_swiotlb(struct device *dev, size_t size,
 			    enum dma_data_direction dir)
 {
@@ -825,6 +1270,24 @@ static bool dev_use_swiotlb(struct device *dev, size_t size,
 		 dma_kmalloc_needs_bounce(dev, size, dir));	/* [한국어] 또는 kmalloc 버퍼가 캐시라인 경계에 맞지 않아, 비일관 장치에서 캐시 관리가 이웃 데이터를 건드릴 수 있는 경우 */
 }
 
+/*
+ * [한국어]
+ * dev_use_sg_swiotlb - 이 scatterlist 를 통째로 바운스해야 하는가
+ *
+ * @dev:    대상 장치
+ * @sg:     첫 세그먼트
+ * @nents:  세그먼트 수
+ * @dir:    DMA 방향
+ * @return: true 면 리스트 전체를 바운스 경로로
+ *
+ * 부분 바운스가 불가능하다는 점이 단일 매핑판과의 차이다. 일부 세그먼트만 바운스
+ * 버퍼로 옮기면 그 버퍼들이 원본과 물리적으로 인접하지 않아, 하나의 연속 IOVA
+ * 창으로 접는 전제가 깨진다. 그래서 한 세그먼트라도 위험하면 전부 바운스한다.
+ *
+ * 실행 컨텍스트: 매핑 경로. 어디서든.
+ *
+ * 호출 체인: iommu_dma_map_sg → [이 함수]
+ */
 static bool dev_use_sg_swiotlb(struct device *dev, struct scatterlist *sg,
 			       int nents, enum dma_data_direction dir)
 {
@@ -858,6 +1321,24 @@ static bool dev_use_sg_swiotlb(struct device *dev, struct scatterlist *sg,
  *
  * This allows tuning dma-iommu specific to device properties
  */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어)
+ * iommu_dma_init_options - 하드웨어 특성에 맞는 큐 정책을 고른다
+ *
+ * @options: 채울 옵션 구조체
+ * @dev:     정책의 근거가 될 장치
+ *
+ * 판단 기준은 shadow_on_flush 하나다. 무효화가 하이퍼바이저로 트랩되어 그림자
+ * 페이지 테이블을 갱신하는 환경에서는 무효화 한 번의 비용이 수십 배 비싸므로,
+ * 큐를 크게(32768) 하나만 두고 주기를 길게(1초) 잡아 무효화 횟수 자체를 줄인다.
+ *
+ * 그 외에는 CPU 별 작은 큐가 유리하다 — 락 경쟁이 없고, 무효화가 싸므로 자주
+ * 하더라도 손해가 크지 않다.
+ *
+ * 실행 컨텍스트: 도메인 초기화. 프로세스 문맥.
+ *
+ * 호출 체인: iommu_dma_init_domain → [이 함수]
+ */
 static void iommu_dma_init_options(struct iommu_dma_options *options,
 				   struct device *dev)
 {
@@ -873,6 +1354,24 @@ static void iommu_dma_init_options(struct iommu_dma_options *options,
 	}
 }
 
+/*
+ * [한국어]
+ * iommu_domain_supports_fq - 이 도메인에서 지연 무효화를 쓸 수 있는가
+ *
+ * @dev:    대상 장치
+ * @domain: 확인할 도메인
+ * @return: true 면 DMA-FQ 가 가능하다
+ *
+ * 지연 무효화는 "전체 IOTLB 를 한 번에 비우기"에 의존한다. 그 동작을 제대로
+ * 제공하지 못하는 하드웨어에서는 쓸 수 없으므로 드라이버에게 능력을 물어본다.
+ *
+ * 공용 페이지 테이블 계층(iommupt)으로 만든 도메인은 항상 지원한다 — 그 계층이
+ * 무효화 의미를 스스로 보장하기 때문이다.
+ *
+ * 실행 컨텍스트: 도메인 초기화. 프로세스 문맥.
+ *
+ * 호출 체인: iommu_dma_init_domain → [이 함수]
+ */
 static bool iommu_domain_supports_fq(struct device *dev,
 				     struct iommu_domain *domain)
 {
@@ -890,6 +1389,32 @@ static bool iommu_domain_supports_fq(struct device *dev,
  * If the geometry and dma_range_map include address 0, we reserve that page
  * to ensure it is an invalid IOVA. It is safe to reinitialise a domain, but
  * any change which could make prior IOVAs invalid will fail.
+ */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어)
+ * iommu_dma_init_domain - 도메인에 실제 IOVA 주소 공간을 세운다
+ *
+ * @domain: iommu_get_dma_cookie 를 이미 거친 도메인
+ * @dev:    이 도메인을 쓸 장치 (주소 제약의 출처)
+ * @return: 0 성공, -EINVAL/-EFAULT 면 이 장치를 이 도메인에 붙일 수 없다
+ *
+ * 쿠키를 만드는 것과 IOVA 공간을 세우는 것을 나눠 둔 이유가 여기 있다. 주소 공간의
+ * 입도와 하한은 IOMMU 의 능력과 장치의 주소 범위가 모두 정해져야 결정할 수 있고,
+ * 그것은 장치가 도메인에 붙는 시점에야 알 수 있다.
+ *
+ * 재초기화가 허용된다는 점이 중요하다. 같은 도메인에 여러 장치가 붙으면 이 함수가
+ * 장치마다 불리는데, 두 번째부터는 조건이 같은지만 확인하고 돌아간다. 조건이
+ * 다르면 이미 나간 IOVA 들의 의미가 바뀌므로 거절한다 — 그것이 "서로 다른 주소
+ * 제약을 가진 장치는 같은 도메인을 공유할 수 없다"의 구현이다.
+ *
+ * 마지막의 DMA-FQ 후퇴가 이 파일의 성격을 보여 준다. 지연 무효화를 못 켜면 조용히
+ * 즉시 무효화로 내려앉는다 — 느려질 뿐 정확성은 그대로이기 때문이다.
+ *
+ * 실행 컨텍스트: 장치 프로브 경로. 프로세스 문맥, 잠들 수 있다.
+ *
+ * 호출 체인: iommu_setup_dma_ops → [이 함수]
+ *            → init_iova_domain, iova_domain_init_rcaches, iommu_dma_init_fq,
+ *              iova_reserve_iommu_regions
  */
 static int iommu_dma_init_domain(struct iommu_domain *domain, struct device *dev)
 {
@@ -956,6 +1481,26 @@ static int iommu_dma_init_domain(struct iommu_domain *domain, struct device *dev
  *
  * Return: corresponding IOMMU API page protection flags
  */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어)
+ * dma_info_to_prot - DMA API 의 방향·속성을 IOMMU 페이지 권한으로 옮긴다
+ *
+ * @dir:      DMA 방향
+ * @coherent: 장치가 캐시 일관성을 갖는가
+ * @attrs:    DMA 속성
+ * @return:   IOMMU_READ/WRITE/CACHE/PRIV/MMIO 조합
+ *
+ * 이 작은 변환에 IOMMU 격리의 실질이 들어 있다. DMA_TO_DEVICE 는 읽기 전용 PTE 가
+ * 되므로, 장치가 그 버퍼를 덮어쓰려 하면 폴트가 난다 — 방향을 정확히 신고한
+ * 드라이버는 버그 있는 장치로부터 자기 데이터를 지킬 수 있다.
+ *
+ * 캐시 속성도 여기서 갈린다. 일관성 있는 장치면 IOMMU_CACHE 로 캐시 가능하게
+ * 매핑하고, 아니면 비캐시로 두어 드라이버가 dma_sync 로 명시적 관리를 하게 한다.
+ *
+ * 실행 컨텍스트: 매핑 경로. 어디서든.
+ *
+ * 호출 체인: 모든 매핑 진입점 → [이 함수]
+ */
 static int dma_info_to_prot(enum dma_data_direction dir, bool coherent,
 		     unsigned long attrs)
 {
@@ -981,6 +1526,32 @@ static int dma_info_to_prot(enum dma_data_direction dir, bool coherent,
 	}
 }
 
+/*
+ * [한국어]
+ * iommu_dma_alloc_iova - 이 도메인에서 IOVA 구간을 확보한다
+ *
+ * @domain:    대상 도메인
+ * @size:      필요한 길이 (이미 페이지 정렬됨)
+ * @dma_limit: 장치가 낼 수 있는 최대 주소
+ * @dev:       요청하는 장치
+ * @return:    확보한 DMA 주소, 실패하면 0
+ *
+ * 상한을 세 겹으로 좁힌다 — 장치의 DMA 마스크, 버스가 통과시키는 한계, 그리고
+ * IOMMU 창의 끝이다. 그 안에서 iova.c 에 실제 배정을 맡긴다.
+ *
+ * 32비트 우선 시도가 이 함수의 특징적인 부분이다. PCIe 에서는 SAC/DAC 구분이
+ * 의미를 잃었지만 상위 주소 비트를 잘못 다루는 하드웨어가 남아 있어, 64비트를
+ * 쓸 수 있는 장치라도 일단 4GB 아래에서 찾아본다. 그 영역이 고갈되면 플래그를
+ * 내려 이후로는 시도조차 하지 않고, 그 전환을 dev_notice 로 남겨 장치가 그때부터
+ * 오작동하면 원인을 짚을 수 있게 한다.
+ *
+ * MSI 축소판 쿠키는 할당자가 없어 예약된 창에서 순서대로 떼어 쓴다.
+ *
+ * 실행 컨텍스트: 매핑 경로. 인터럽트 문맥 가능.
+ *
+ * 호출 체인: __iommu_dma_map, iommu_dma_map_sg, dma_iova_try_alloc → [이 함수]
+ *            → alloc_iova_fast
+ */
 static dma_addr_t iommu_dma_alloc_iova(struct iommu_domain *domain,
 		size_t size, u64 dma_limit, struct device *dev)
 {
@@ -1027,6 +1598,27 @@ done:	/* [한국어] 32비트 성공 경로가 합류 */
 	return (dma_addr_t)iova << shift;	/* [한국어] pfn 을 실제 DMA 주소로 되돌린다. 실패했으면 iova 가 0 이라 0 이 나가고, 그것이 곧 DMA_MAPPING_ERROR 다 */
 }
 
+/*
+ * [한국어]
+ * iommu_dma_free_iova - IOVA 구간을 돌려주거나 무효화 대기 큐에 넣는다
+ *
+ * @domain: 대상 도메인
+ * @iova:   반납할 구간의 시작
+ * @size:   길이
+ * @gather: 이번 해제의 무효화 수집기. NULL 이면 무효화할 것이 없다는 뜻.
+ *
+ * strict/lazy 정책이 실제로 갈리는 세 갈래다. gather->queued 가 참이면 큐에 넣어
+ * 무효화가 끝난 뒤에 반납하고, 아니면 즉시 반납한다 — 즉시 반납이 안전한 이유는
+ * 호출자가 이미 iommu_iotlb_sync 로 무효화를 끝냈기 때문이다.
+ *
+ * gather 가 NULL 인 경우는 매핑 실패 되감기다. 매핑이 없었으니 IOTLB 에 남을 것도
+ * 없어 곧바로 돌려줘도 된다.
+ *
+ * 실행 컨텍스트: 해제 경로. 인터럽트 문맥 가능.
+ *
+ * 호출 체인: __iommu_dma_unmap, 매핑 실패 경로 → [이 함수]
+ *            → queue_iova 또는 free_iova_fast
+ */
 static void iommu_dma_free_iova(struct iommu_domain *domain, dma_addr_t iova,
 				size_t size, struct iommu_iotlb_gather *gather)
 {
@@ -1044,6 +1636,29 @@ static void iommu_dma_free_iova(struct iommu_domain *domain, dma_addr_t iova,
 				size >> iova_shift(iovad));	/* [한국어] 페이지 수 */
 }
 
+/*
+ * [한국어]
+ * __iommu_dma_unmap - IOVA 매핑을 지우고 주소를 회수한다 (공통 해제 경로)
+ *
+ * @dev:      대상 장치
+ * @dma_addr: 해제할 DMA 주소
+ * @size:     길이
+ *
+ * 모든 해제 진입점이 결국 이곳으로 모인다. 하는 일은 네 단계다 — 범위를 페이지
+ * 경계로 되돌리고, PTE 를 지우고, 정책에 따라 무효화하고, IOVA 를 회수한다.
+ *
+ * gather.queued 를 fq_domain 유무로 세우는 한 줄이 정책의 전달 통로다. 그 값이
+ * 참이면 벤더 드라이버가 iommu_unmap_fast 안에서 즉시 무효화를 생략하고, 이
+ * 함수도 iommu_iotlb_sync 를 건너뛴다.
+ *
+ * unmapped != size 경고는 실전에서 자주 보게 되는 것이다 — 드라이버가 dma_unmap 에
+ * 매핑 때와 다른 길이를 넘긴 전형적인 버그를 잡아낸다.
+ *
+ * 실행 컨텍스트: 해제 경로. 인터럽트 문맥 가능.
+ *
+ * 호출 체인: iommu_dma_unmap_phys, iommu_dma_unmap_sg, iommu_dma_free → [이 함수]
+ *            → iommu_unmap_fast, iommu_dma_free_iova
+ */
 static void __iommu_dma_unmap(struct device *dev, dma_addr_t dma_addr,
 		size_t size)
 {
@@ -1067,6 +1682,29 @@ static void __iommu_dma_unmap(struct device *dev, dma_addr_t dma_addr,
 	iommu_dma_free_iova(domain, dma_addr, size, &iotlb_gather);	/* [한국어] IOVA 를 반납하거나(strict) 큐에 넣는다(lazy) */
 }
 
+/*
+ * [한국어]
+ * __iommu_dma_map - 물리 연속 구간 하나를 IOVA 에 매핑한다 (공통 매핑 경로)
+ *
+ * @dev:      대상 장치
+ * @phys:     매핑할 물리 시작 주소
+ * @size:     길이
+ * @prot:     IOMMU 페이지 권한
+ * @dma_mask: 이 매핑에 쓸 주소 상한
+ * @return:   장치가 쓸 DMA 주소, 실패하면 DMA_MAPPING_ERROR
+ *
+ * 페이지 정렬 처리가 이 함수의 핵심이다. 요청한 물리 주소가 IOMMU 페이지 중간에서
+ * 시작하면 그 앞부분까지 포함해 매핑하고, 반환 주소에 오프셋을 다시 더해 준다.
+ * 결과적으로 장치에는 요청보다 넓은 범위가 열리며, 그 페이지에 다른 데이터가 있다면
+ * 함께 노출된다 — 신뢰할 수 없는 장치를 바운스 버퍼로 우회시키는 이유가 이것이다.
+ *
+ * 순서는 항상 IOVA 확보 → 매핑이며, 매핑이 실패하면 확보한 주소를 즉시 되돌린다.
+ *
+ * 실행 컨텍스트: 매핑 경로. 인터럽트 문맥 가능 (GFP_ATOMIC).
+ *
+ * 호출 체인: iommu_dma_map_phys, iommu_dma_alloc → [이 함수]
+ *            → iommu_dma_alloc_iova, iommu_map
+ */
 static dma_addr_t __iommu_dma_map(struct device *dev, phys_addr_t phys,
 		size_t size, int prot, u64 dma_mask)
 {
@@ -1098,6 +1736,20 @@ static dma_addr_t __iommu_dma_map(struct device *dev, phys_addr_t phys,
 	return iova + iova_off;	/* [한국어] 페이지 경계로 내렸던 오프셋을 다시 더해 돌려준다 — 장치가 실제로 쓸 주소다 */
 }
 
+/*
+ * [한국어]
+ * __iommu_dma_free_pages - 낱장 페이지 배열을 반납한다
+ *
+ * @pages: 페이지 포인터 배열
+ * @count: 개수
+ *
+ * 고차 블록으로 잡았더라도 __iommu_dma_alloc_pages 가 split_page 로 쪼개 두었기
+ * 때문에 전부 단일 페이지로 반납할 수 있다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥.
+ *
+ * 호출 체인: iommu_dma_alloc_remap, __iommu_dma_free 등 → [이 함수]
+ */
 static void __iommu_dma_free_pages(struct page **pages, int count)
 {
 	while (count--)	/* [한국어] 뒤에서부터 하나씩 */
@@ -1105,6 +1757,31 @@ static void __iommu_dma_free_pages(struct page **pages, int count)
 	kvfree(pages);	/* [한국어] 포인터 배열 자체 (kvzalloc 으로 잡았다) */
 }
 
+/*
+ * [한국어]
+ * __iommu_dma_alloc_pages - 흩어져도 좋은 페이지들을 모은다
+ *
+ * @dev:        대상 장치 (NUMA 노드 선택에 쓰인다)
+ * @count:      필요한 페이지 수
+ * @order_mask: 시도해 볼 할당 차수들의 비트마스크
+ * @gfp:        할당 플래그
+ * @return:     페이지 포인터 배열, 실패하면 NULL
+ *
+ * 큰 차수부터 시도해 내려가는 것이 전략이다. 고차 블록을 얻으면 그만큼 IOMMU 가
+ * 큰 페이지로 매핑할 수 있어 PTE 와 IOTLB 소모가 줄지만, 실패해도 작은 페이지로
+ * 채우면 그만이다. 그래서 물러설 여지가 있는 동안은 __GFP_NORETRY 를 붙여 메모리
+ * 압박을 만들지 않는다 (위 영어 주석).
+ *
+ * 고차 블록을 얻으면 split_page 로 낱장으로 쪼갠다. 배열에 낱장으로 담아야 각
+ * 페이지를 독립적으로 참조하고 해제할 수 있기 때문이다.
+ *
+ * HIGHMEM 을 허용하는 것도 이 경로의 특징이다 — IOMMU 가 어떤 물리 페이지든
+ * 매핑할 수 있으므로 저역 메모리를 아낄 이유가 없다.
+ *
+ * 실행 컨텍스트: coherent 할당 경로. 프로세스 문맥, 잠들 수 있다.
+ *
+ * 호출 체인: __iommu_dma_alloc_noncontiguous → [이 함수]
+ */
 static struct page **__iommu_dma_alloc_pages(struct device *dev,
 		unsigned int count, unsigned long order_mask, gfp_t gfp)
 {
@@ -1160,6 +1837,34 @@ static struct page **__iommu_dma_alloc_pages(struct device *dev,
 /*
  * If size is less than PAGE_SIZE, then a full CPU page will be allocated,
  * but an IOMMU which supports smaller pages might not map the whole thing.
+ */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * __iommu_dma_alloc_noncontiguous - 흩어진 페이지를 하나의 IOVA 창으로 접는다
+ *
+ * @dev:    대상 장치
+ * @size:   요청 크기
+ * @sgt:    결과 scatterlist (호출자 소유)
+ * @gfp:    할당 플래그
+ * @attrs:  DMA 속성
+ * @return: 페이지 배열, 실패하면 NULL
+ *
+ * IOMMU 가 있어서 가능해지는 일의 전형이다. coherent 할당은 원래 물리적으로 연속인
+ * 메모리를 요구하지만, IOMMU 아래에서는 아무 데서나 페이지를 모아 하나의 연속
+ * IOVA 창에 접어 넣으면 장치가 보기에 연속이 된다. 큰 버퍼 할당이 단편화 때문에
+ * 실패하는 일이 사라진다.
+ *
+ * 중간의 gfp 플래그 정리가 눈에 잘 띄지 않지만 중요하다. 존 지정과 정책 플래그는
+ * 데이터 페이지 할당에만 의미가 있고, 그 뒤의 sg 테이블이나 페이지 테이블 할당에
+ * 그대로 적용하면 오히려 해가 된다 (위 영어 주석).
+ *
+ * 비일관 장치용이면 매핑 전에 arch_dma_prep_coherent 로 캐시를 비운다 — 이 페이지들은
+ * 앞으로 비캐시로 접근되므로 캐시에 남은 옛 내용이 나중에 write-back 되면 안 된다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥, 잠들 수 있다.
+ *
+ * 호출 체인: iommu_dma_alloc_remap, iommu_dma_alloc_noncontiguous → [이 함수]
+ *            → __iommu_dma_alloc_pages, iommu_dma_alloc_iova, iommu_map_sg
  */
 static struct page **__iommu_dma_alloc_noncontiguous(struct device *dev,
 		size_t size, struct sg_table *sgt, gfp_t gfp, unsigned long attrs)
@@ -1235,6 +1940,28 @@ out_free_pages:	/* [한국어] IOVA 확보에 실패한 지점이 합류 */
 	return NULL;	/* [한국어] 할당 실패 */
 }
 
+/*
+ * [한국어]
+ * iommu_dma_alloc_remap - 흩어진 페이지를 양쪽 모두에서 연속으로 보이게 만든다
+ *
+ * @dev:        대상 장치
+ * @size:       요청 크기
+ * @dma_handle: 장치가 쓸 주소를 여기에 채운다
+ * @gfp:        할당 플래그
+ * @attrs:      DMA 속성
+ * @return:     CPU 가 쓸 가상 주소, 실패하면 NULL
+ *
+ * 같은 흩어진 페이지 묶음을 두 번 접는다 — 장치 쪽은 IOMMU 페이지 테이블이,
+ * CPU 쪽은 커널 페이지 테이블(vmap)이 연속으로 만들어 준다. 그래서 드라이버는
+ * 물리 연속을 전혀 의식하지 않고 큰 coherent 버퍼를 쓸 수 있다.
+ *
+ * 비일관 장치면 dma_pgprot 이 CPU 쪽 매핑을 비캐시로 만든다. 그래야 CPU 와 장치가
+ * 같은 데이터를 다르게 보는 일이 없다.
+ *
+ * 실행 컨텍스트: 잠들 수 있는 문맥에서만 (vmap 때문). 프로세스 문맥.
+ *
+ * 호출 체인: iommu_dma_alloc → [이 함수] → __iommu_dma_alloc_noncontiguous
+ */
 static void *iommu_dma_alloc_remap(struct device *dev, size_t size,
 		dma_addr_t *dma_handle, gfp_t gfp, unsigned long attrs)
 {
@@ -1268,6 +1995,14 @@ out_unmap:	/* [한국어] vmap 실패 경로 */
  * array as well (except for the fallback case).  This can go away any time,
  * e.g. when a vmap-variant that takes a scatterlist comes along.
  */
+/*
+ * [한국어] (위 영어 주석에 이어) sgt 와 페이지 배열을 함께 들고 있는 그릇.
+ *
+ * DMA API 사용자에게는 sg_table 만 보이지만, 내부적으로는 vmap 이나 해제에 페이지
+ * 배열이 필요하다. sgt 를 구조체의 첫 필드로 두어 container_of 로 되짚을 수 있게
+ * 했다. 위 영어 주석대로 임시방편이며, scatterlist 를 받는 vmap 변형이 생기면
+ * 사라질 수 있다.
+ */
 struct dma_sgt_handle {
 	struct sg_table sgt;	/* [한국어] 호출자에게 돌려줄 scatterlist */
 	struct page **pages;	/* [한국어] DMA API 내부에서 vmap/해제에 쓸 페이지 배열. 사용자는 이것을 몰라도 된다 (위 영어 주석) */
@@ -1292,6 +2027,22 @@ struct sg_table *iommu_dma_alloc_noncontiguous(struct device *dev, size_t size,
 	return &sh->sgt;	/* [한국어] 호출자에게는 sgt 만 보인다 */
 }
 
+/*
+ * [한국어]
+ * iommu_dma_free_noncontiguous - 비연속 할당을 해제한다
+ *
+ * @dev:  대상 장치
+ * @size: 할당 크기
+ * @sgt:  alloc 이 돌려준 sg_table
+ * @dir:  DMA 방향
+ *
+ * 순서가 정해져 있다. 장치 쪽 매핑을 먼저 지운 뒤에야 페이지를 반납할 수 있다 —
+ * 반대로 하면 반납된 페이지에 장치가 계속 DMA 할 수 있는 창이 열린다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥.
+ *
+ * 호출 체인: DMA API → [이 함수]
+ */
 void iommu_dma_free_noncontiguous(struct device *dev, size_t size,
 		struct sg_table *sgt, enum dma_data_direction dir)
 {
@@ -1303,6 +2054,22 @@ void iommu_dma_free_noncontiguous(struct device *dev, size_t size,
 	kfree(sh);	/* [한국어] 핸들 해제 */
 }
 
+/*
+ * [한국어]
+ * iommu_dma_vmap_noncontiguous - 비연속 할당을 CPU 가상 주소로 매핑한다
+ *
+ * @dev:    대상 장치
+ * @size:   매핑할 크기
+ * @sgt:    alloc 이 돌려준 sg_table
+ * @return: 커널 가상 주소, 실패하면 NULL
+ *
+ * 핸들에 보관해 둔 페이지 배열 덕분에 vmap 을 그대로 부를 수 있다. scatterlist 만
+ * 가지고는 이 API 를 쓸 수 없어 배열을 따로 들고 있는 것이다 (위 영어 주석).
+ *
+ * 실행 컨텍스트: 프로세스 문맥, 잠들 수 있다.
+ *
+ * 호출 체인: DMA API → [이 함수]
+ */
 void *iommu_dma_vmap_noncontiguous(struct device *dev, size_t size,
 		struct sg_table *sgt)
 {
@@ -1311,6 +2078,23 @@ void *iommu_dma_vmap_noncontiguous(struct device *dev, size_t size,
 	return vmap(sgt_handle(sgt)->pages, count, VM_MAP, PAGE_KERNEL);	/* [한국어] 보관해 둔 페이지 배열 덕분에 vmap 을 그대로 부를 수 있다 — scatterlist 만으로는 이 API 가 없다 (위 영어 주석) */
 }
 
+/*
+ * [한국어]
+ * iommu_dma_mmap_noncontiguous - 비연속 할당을 사용자 공간에 매핑한다
+ *
+ * @dev:    대상 장치
+ * @vma:    사용자 매핑 영역
+ * @size:   할당 크기
+ * @sgt:    alloc 이 돌려준 sg_table
+ * @return: 0 성공, -ENXIO 면 요청 범위가 할당 범위를 벗어난다
+ *
+ * 범위 검사가 보안상 필수다. 없으면 사용자가 오프셋을 크게 주어 할당 범위 밖의
+ * 커널 페이지를 매핑할 수 있다.
+ *
+ * 실행 컨텍스트: mmap 시스템 호출. 프로세스 문맥.
+ *
+ * 호출 체인: DMA API → [이 함수]
+ */
 int iommu_dma_mmap_noncontiguous(struct device *dev, struct vm_area_struct *vma,
 		size_t size, struct sg_table *sgt)
 {
@@ -1321,6 +2105,25 @@ int iommu_dma_mmap_noncontiguous(struct device *dev, struct vm_area_struct *vma,
 	return vm_map_pages(vma, sgt_handle(sgt)->pages, count);	/* [한국어] 사용자 공간에 이 페이지들을 매핑한다 */
 }
 
+/*
+ * [한국어]
+ * iommu_dma_sync_single_for_cpu - 장치가 쓴 내용을 CPU 가 보도록 맞춘다
+ *
+ * @dev:        대상 장치
+ * @dma_handle: 동기화할 DMA 주소
+ * @size:       길이
+ * @dir:        DMA 방향
+ *
+ * 두 가지 일을 순서대로 한다 — 캐시 무효화와 바운스 버퍼 되복사다. 순서가 중요한데,
+ * 캐시를 먼저 비워야 복사가 메모리의 최신 내용을 읽는다.
+ *
+ * 일관성 있는 장치이고 바운스도 쓰지 않으면 할 일이 없어 곧바로 돌아간다. 이 빠른
+ * 탈출이 대부분의 시스템에서 이 함수를 사실상 공짜로 만든다.
+ *
+ * 실행 컨텍스트: 어디서든. 인터럽트 문맥 가능.
+ *
+ * 호출 체인: 드라이버의 dma_sync_single_for_cpu → [이 함수]
+ */
 void iommu_dma_sync_single_for_cpu(struct device *dev, dma_addr_t dma_handle,
 		size_t size, enum dma_data_direction dir)
 {
@@ -1338,6 +2141,23 @@ void iommu_dma_sync_single_for_cpu(struct device *dev, dma_addr_t dma_handle,
 	swiotlb_sync_single_for_cpu(dev, phys, size, dir);	/* [한국어] 바운스 버퍼를 썼다면 그 내용을 원본 버퍼로 되복사한다. 순서가 중요하다 — 캐시를 먼저 무효화해야 복사가 최신 데이터를 읽는다 */
 }
 
+/*
+ * [한국어]
+ * iommu_dma_sync_single_for_device - CPU 가 쓴 내용을 장치가 보도록 맞춘다
+ *
+ * @dev:        대상 장치
+ * @dma_handle: 동기화할 DMA 주소
+ * @size:       길이
+ * @dir:        DMA 방향
+ *
+ * for_cpu 의 거울상이며, 내부 순서가 정확히 반대다 — 바운스 버퍼로 먼저 복사하고
+ * 그 다음 캐시를 밀어낸다. 복사가 캐시에 남을 수 있으므로 그 순서여야 장치가
+ * 최신 내용을 본다.
+ *
+ * 실행 컨텍스트: 어디서든. 인터럽트 문맥 가능.
+ *
+ * 호출 체인: 드라이버의 dma_sync_single_for_device → [이 함수]
+ */
 void iommu_dma_sync_single_for_device(struct device *dev, dma_addr_t dma_handle,
 		size_t size, enum dma_data_direction dir)
 {
@@ -1355,6 +2175,25 @@ void iommu_dma_sync_single_for_device(struct device *dev, dma_addr_t dma_handle,
 	}
 }
 
+/*
+ * [한국어]
+ * iommu_dma_sync_sg_for_cpu - scatterlist 전체를 CPU 쪽으로 동기화한다
+ *
+ * @dev:    대상 장치
+ * @sgl:    첫 세그먼트
+ * @nelems: 세그먼트 수
+ * @dir:    DMA 방향
+ *
+ * 매핑 방식에 따라 두 갈래다. 바운스 경로로 매핑되었으면 세그먼트마다 단일 매핑과
+ * 같은 처리를 반복하고, 아니면 캐시 무효화만 하면 된다.
+ *
+ * 후자에서 arch_sync_dma_flush 를 루프 밖에 두는 것에 주목할 것 — 완료 대기는
+ * 세그먼트마다 할 이유가 없다.
+ *
+ * 실행 컨텍스트: 어디서든.
+ *
+ * 호출 체인: 드라이버의 dma_sync_sg_for_cpu → [이 함수]
+ */
 void iommu_dma_sync_sg_for_cpu(struct device *dev, struct scatterlist *sgl,
 		int nelems, enum dma_data_direction dir)
 {
@@ -1372,6 +2211,22 @@ void iommu_dma_sync_sg_for_cpu(struct device *dev, struct scatterlist *sgl,
 	}
 }
 
+/*
+ * [한국어]
+ * iommu_dma_sync_sg_for_device - scatterlist 전체를 장치 쪽으로 동기화한다
+ *
+ * @dev:    대상 장치
+ * @sgl:    첫 세그먼트
+ * @nelems: 세그먼트 수
+ * @dir:    DMA 방향
+ *
+ * for_cpu 의 대칭. 매핑 직전에도 불리는데, 그때는 CPU 가 채워 넣은 요청 데이터를
+ * 장치가 볼 수 있게 만드는 역할이다.
+ *
+ * 실행 컨텍스트: 어디서든.
+ *
+ * 호출 체인: 드라이버의 dma_sync_sg_for_device, iommu_dma_map_sg → [이 함수]
+ */
 void iommu_dma_sync_sg_for_device(struct device *dev, struct scatterlist *sgl,
 		int nelems, enum dma_data_direction dir)
 {
@@ -1390,6 +2245,29 @@ void iommu_dma_sync_sg_for_device(struct device *dev, struct scatterlist *sgl,
 	}
 }
 
+/*
+ * [한국어]
+ * iommu_dma_map_swiotlb - 버퍼를 바운스 버퍼로 복사한다
+ *
+ * @dev:    대상 장치
+ * @phys:   원본 물리 주소
+ * @size:   길이
+ * @dir:    DMA 방향
+ * @attrs:  DMA 속성
+ * @return: 바운스 버퍼의 물리 주소, 실패하면 DMA_MAPPING_ERROR
+ *
+ * IOMMU 는 페이지 단위로만 매핑하므로, 페이지 중간에서 시작하거나 끝나는 버퍼를
+ * 그대로 매핑하면 같은 페이지의 다른 데이터까지 장치에 열린다. 전용 버퍼로 옮겨
+ * 그 페이지를 통째로 이 전송의 것으로 만드는 것이 이 함수다.
+ *
+ * 앞뒤 패딩을 0 으로 지우는 부분이 요점이다. swiotlb 는 요청 범위만 채워 주므로,
+ * 같은 페이지의 나머지에는 이전 사용자의 커널 데이터가 남아 있다. 신뢰할 수 없는
+ * 장치는 그것까지 읽을 수 있으므로 반드시 지워야 한다 (위 영어 주석).
+ *
+ * 실행 컨텍스트: 매핑 경로. 인터럽트 문맥 가능.
+ *
+ * 호출 체인: iommu_dma_map_phys, iommu_dma_iova_bounce_and_link → [이 함수]
+ */
 static phys_addr_t iommu_dma_map_swiotlb(struct device *dev, phys_addr_t phys,
 		size_t size, enum dma_data_direction dir, unsigned long attrs)
 {
@@ -1432,12 +2310,53 @@ static phys_addr_t iommu_dma_map_swiotlb(struct device *dev, phys_addr_t phys,
  * the IOMMU granule. Returns non-zero if either the start or end
  * address is not aligned to the granule boundary.
  */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * iova_unaligned - 버퍼의 시작이나 끝이 IOMMU 페이지 경계에서 벗어나는가
+ *
+ * @iovad:  IOVA 공간 (입도를 안다)
+ * @phys:   버퍼의 물리 시작 주소
+ * @size:   길이
+ * @return: 0 이 아니면 어긋난다
+ *
+ * phys | size 를 한 번에 보는 것이 요령이다. 시작이 정렬되어 있고 길이도 페이지의
+ * 배수여야 끝도 경계에 맞으므로, 둘을 OR 해 하위 비트가 남는지만 확인하면 된다.
+ *
+ * 이 판정이 바운스 여부를 가른다. 정렬이 맞으면 페이지 전체가 이 버퍼의 것이라
+ * 노출될 여지가 없어, 신뢰할 수 없는 장치라도 바운스 없이 직접 매핑한다.
+ *
+ * 실행 컨텍스트: 어디서든.
+ *
+ * 호출 체인: iommu_dma_map_phys, dma_iova_link → [이 함수]
+ */
 static inline size_t iova_unaligned(struct iova_domain *iovad, phys_addr_t phys,
 				    size_t size)
 {
 	return iova_offset(iovad, phys | size);	/* [한국어] 시작 주소와 길이를 OR 해 한 번에 본다 — 둘 중 하나라도 IOMMU 페이지 경계에 맞지 않으면 0 이 아니다 (위 영어 주석) */
 }
 
+/*
+ * [한국어]
+ * iommu_dma_map_phys - 물리 구간 하나를 매핑한다 (dma_map_page/resource 의 구현)
+ *
+ * @dev:    대상 장치
+ * @phys:   매핑할 물리 주소
+ * @size:   길이
+ * @dir:    DMA 방향
+ * @attrs:  DMA 속성
+ * @return: 장치가 쓸 DMA 주소, 실패하면 DMA_MAPPING_ERROR
+ *
+ * 드라이버의 dma_map_page 가 IOMMU 아래에서 도달하는 곳이다. 세 단계를 거친다 —
+ * 필요하면 바운스 버퍼로 우회, 비일관 장치면 캐시 밀어내기, 그리고 실제 매핑.
+ *
+ * 바운스 판정이 두 조건의 AND 인 것이 중요하다. "바운스가 필요한 장치"이면서
+ * "실제로 정렬이 어긋난" 경우에만 우회한다. 신뢰할 수 없는 장치라도 페이지 정렬
+ * 버퍼는 노출 위험이 없어 복사 비용을 치를 이유가 없다.
+ *
+ * 실행 컨텍스트: 어디서든. 인터럽트 문맥 가능.
+ *
+ * 호출 체인: DMA API → [이 함수] → iommu_dma_map_swiotlb, __iommu_dma_map
+ */
 dma_addr_t iommu_dma_map_phys(struct device *dev, phys_addr_t phys, size_t size,
 		enum dma_data_direction dir, unsigned long attrs)
 {
@@ -1474,6 +2393,26 @@ dma_addr_t iommu_dma_map_phys(struct device *dev, phys_addr_t phys, size_t size,
 	return iova;	/* [한국어] 성공 시 장치가 쓸 DMA 주소 */
 }
 
+/*
+ * [한국어]
+ * iommu_dma_unmap_phys - 물리 구간 매핑을 해제한다 (dma_unmap_page 의 구현)
+ *
+ * @dev:        대상 장치
+ * @dma_handle: 해제할 DMA 주소
+ * @size:       길이
+ * @dir:        DMA 방향
+ * @attrs:      DMA 속성
+ *
+ * 순서가 정해져 있다. 물리 주소를 먼저 역변환하고(매핑을 지운 뒤에는 불가능하다),
+ * 캐시를 동기화하고, 매핑을 지우고, 마지막에 바운스 버퍼를 되돌린다.
+ *
+ * WARN_ON(!phys) 는 이중 해제를 잡는다 — 이미 지워진 주소를 다시 해제하려는 경우로,
+ * 그대로 진행하면 엉뚱한 IOVA 를 지우게 된다.
+ *
+ * 실행 컨텍스트: 어디서든. 인터럽트 문맥 가능.
+ *
+ * 호출 체인: DMA API → [이 함수] → __iommu_dma_unmap, swiotlb_tbl_unmap_single
+ */
 void iommu_dma_unmap_phys(struct device *dev, dma_addr_t dma_handle,
 		size_t size, enum dma_data_direction dir, unsigned long attrs)
 {
@@ -1504,6 +2443,33 @@ void iommu_dma_unmap_phys(struct device *dev, dma_addr_t dma_handle,
  * At this point the segments are already laid out by iommu_dma_map_sg() to
  * avoid individually crossing any boundaries, so we merely need to check a
  * segment's start address to avoid concatenating across one.
+ */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * __finalise_sg - 매핑된 scatterlist 를 호출자에게 돌려줄 형태로 정리한다
+ *
+ * @sg:       입력 리스트 (제자리에서 고친다)
+ * @nents:    입력 세그먼트 수
+ * @dma_addr: 확보한 IOVA 창의 시작
+ * @return:   출력 세그먼트 수 (대개 입력보다 훨씬 적다)
+ *
+ * iommu_dma_map_sg 가 매핑 전에 리스트를 페이지 정렬로 고치면서 원래 offset/length 를
+ * 아직 쓰이지 않는 DMA 필드에 숨겨 두었다. 이 함수가 그것을 되돌리면서, 동시에
+ * IOVA 상에서 연속인 세그먼트들을 하나의 출력 세그먼트로 합친다.
+ *
+ * 합칠 수 있는 조건이 네 가지다 — 쌓고 있는 출력이 있고, 이 세그먼트가 IOVA 페이지
+ * 경계에서 시작하며(사이에 틈이 없다), 장치의 세그먼트 경계를 넘지 않고, 합친
+ * 길이가 최대 세그먼트 크기를 넘지 않는다.
+ *
+ * 결과적으로 수십 개의 sg 항목이 한두 개로 줄어드는 일이 흔하다. NVMe 가 큰 I/O 를
+ * 적은 수의 SGL 항목으로 보낼 수 있는 이유가 이것이다.
+ *
+ * P2PDMA 세그먼트는 IOVA 를 쓰지 않으므로 병합 대상이 아니며, 자기 버스 주소를
+ * 그대로 출력에 옮기고 표식을 다시 단다.
+ *
+ * 실행 컨텍스트: 매핑 경로. 인터럽트 문맥 가능.
+ *
+ * 호출 체인: iommu_dma_map_sg → [이 함수]
  */
 static int __finalise_sg(struct device *dev, struct scatterlist *sg, int nents,
 		dma_addr_t dma_addr)
@@ -1573,6 +2539,24 @@ static int __finalise_sg(struct device *dev, struct scatterlist *sg, int nents,
  * If mapping failed, then just restore the original list,
  * but making sure the DMA fields are invalidated.
  */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * __invalidate_sg - 매핑에 실패했을 때 리스트를 원래대로 되돌린다
+ *
+ * @sg:    입력 리스트
+ * @nents: 세그먼트 수
+ *
+ * iommu_dma_map_sg 가 제자리에서 고친 offset/length 를 숨겨 둔 값으로 복원하고,
+ * DMA 필드는 무효로 만든다. 호출자가 실패한 리스트를 그대로 다시 쓸 수 있어야
+ * 하기 때문이다 (예: 요청을 쪼개 재시도).
+ *
+ * DMA_MAPPING_ERROR 와 0 을 검사하는 것은 아직 손대지 않은 세그먼트를 구별하기
+ * 위해서다 — 순회 도중에 실패했으면 뒤쪽은 원본 그대로다.
+ *
+ * 실행 컨텍스트: 매핑 실패 경로. 인터럽트 문맥 가능.
+ *
+ * 호출 체인: iommu_dma_map_sg → [이 함수]
+ */
 static void __invalidate_sg(struct scatterlist *sg, int nents)
 {
 	struct scatterlist *s;	/* [한국어] 순회 커서 */
@@ -1592,6 +2576,23 @@ static void __invalidate_sg(struct scatterlist *sg, int nents)
 	}
 }
 
+/*
+ * [한국어]
+ * iommu_dma_unmap_sg_swiotlb - 바운스 경로로 매핑된 리스트를 해제한다
+ *
+ * @dev:   대상 장치
+ * @sg:    첫 세그먼트
+ * @nents: 세그먼트 수
+ * @dir:   DMA 방향
+ * @attrs: DMA 속성
+ *
+ * 바운스 경로는 병합하지 않고 세그먼트마다 독립적으로 매핑했으므로, 해제도 1:1 로
+ * 반복한다. 일반 경로가 창 하나를 한 번에 해제하는 것과 대비된다.
+ *
+ * 실행 컨텍스트: 어디서든.
+ *
+ * 호출 체인: iommu_dma_unmap_sg, iommu_dma_map_sg_swiotlb 되감기 → [이 함수]
+ */
 static void iommu_dma_unmap_sg_swiotlb(struct device *dev, struct scatterlist *sg,
 		int nents, enum dma_data_direction dir, unsigned long attrs)
 {
@@ -1603,6 +2604,28 @@ static void iommu_dma_unmap_sg_swiotlb(struct device *dev, struct scatterlist *s
 				sg_dma_len(s), dir, attrs);	/* [한국어] 그 세그먼트의 길이 */
 }
 
+/*
+ * [한국어]
+ * iommu_dma_map_sg_swiotlb - 리스트 전체를 바운스 버퍼로 매핑한다
+ *
+ * @dev:    대상 장치
+ * @sg:     첫 세그먼트
+ * @nents:  세그먼트 수
+ * @dir:    DMA 방향
+ * @attrs:  DMA 속성
+ * @return: 성공 시 nents (병합이 없어 입력과 같다), 실패 시 -EIO
+ *
+ * 병합을 포기하는 것이 이 경로의 대가다. 바운스 버퍼들은 서로 인접하지 않으므로
+ * 하나의 연속 IOVA 창으로 접을 수 없고, 세그먼트마다 따로 매핑해야 한다. 그래서
+ * 신뢰할 수 없는 장치는 IOMMU 를 쓰면서도 sg 병합의 이득을 받지 못한다.
+ *
+ * 리스트에 swiotlb 표식을 다는 것이 첫 줄인데, 이후의 sync 와 해제가 그 표식을
+ * 보고 경로를 가르기 때문이다.
+ *
+ * 실행 컨텍스트: 매핑 경로. 어디서든.
+ *
+ * 호출 체인: iommu_dma_map_sg → [이 함수] → iommu_dma_map_phys
+ */
 static int iommu_dma_map_sg_swiotlb(struct device *dev, struct scatterlist *sg,
 		int nents, enum dma_data_direction dir, unsigned long attrs)
 {
@@ -1632,6 +2655,35 @@ out_unmap:	/* [한국어] 부분 성공 되감기 */
  * aligned to IOMMU pages. Hence the need for this complicated bit of
  * impedance-matching, to be able to hand off a suitably-aligned list,
  * but still preserve the original offsets and sizes for the caller.
+ */
+/*
+ * [한국어] (위 영어 주석에 이어)
+ * iommu_dma_map_sg - scatterlist 를 하나의 연속 IOVA 창으로 접는다 (dma_map_sg 의 구현)
+ *
+ * @dev:    대상 장치
+ * @sg:     첫 세그먼트
+ * @nents:  세그먼트 수
+ * @dir:    DMA 방향
+ * @attrs:  DMA 속성
+ * @return: 출력 세그먼트 수(양수), 실패하면 음수
+ *
+ * IOMMU 를 켜는 가장 실질적인 이득이 이 함수다. 블록 계층이 넘긴 수십 개의 흩어진
+ * 페이지가 장치에게는 한두 개의 연속 구간으로 보이게 된다.
+ *
+ * 두 단계로 나뉜다. 먼저 리스트 전체를 훑어 필요한 IOVA 길이를 계산하면서 각
+ * 세그먼트를 페이지 정렬로 다듬고(원래 값은 DMA 필드에 숨긴다), 그 다음 창 하나를
+ * 확보해 iommu_map_sg 로 통째로 채운다. 마지막에 __finalise_sg 가 원래 값을
+ * 복원하며 세그먼트를 병합한다.
+ *
+ * 패딩 처리가 이 함수에서 가장 미묘한 부분이다. 어떤 세그먼트가 장치의 세그먼트
+ * 경계를 넘게 되면, 그 세그먼트가 아니라 '앞' 세그먼트를 늘려 경계까지 채운다.
+ * IOVA 창 하나를 정렬해 잡기 때문에 실제 주소를 몰라도 길이만으로 이 배치가
+ * 성립한다 (위 영어 주석의 세 가정).
+ *
+ * 실행 컨텍스트: 어디서든. 인터럽트 문맥 가능 (GFP_ATOMIC).
+ *
+ * 호출 체인: DMA API → [이 함수]
+ *            → iommu_dma_alloc_iova, iommu_map_sg, __finalise_sg
  */
 int iommu_dma_map_sg(struct device *dev, struct scatterlist *sg, int nents,
 		enum dma_data_direction dir, unsigned long attrs)
@@ -1754,6 +2806,27 @@ out:	/* [한국어] 지연 부착 실패도 합류 */
 	return ret;	/* [한국어] -ENOMEM 또는 -EREMOTEIO */
 }
 
+/*
+ * [한국어]
+ * iommu_dma_unmap_sg - scatterlist 매핑을 해제한다 (dma_unmap_sg 의 구현)
+ *
+ * @dev:    대상 장치
+ * @sg:     첫 세그먼트
+ * @nents:  세그먼트 수
+ * @dir:    DMA 방향
+ * @attrs:  DMA 속성
+ *
+ * 리스트 전체가 하나의 연속 IOVA 창에 들어 있으므로, 시작과 끝만 찾으면 한 번의
+ * unmap 으로 끝난다 (위 영어 주석). 세그먼트가 몇 개든 IOMMU 호출은 한 번이라는
+ * 점이 병합의 또 다른 이득이다.
+ *
+ * P2PDMA 세그먼트는 IOVA 를 쓰지 않으므로 범위 계산에서 제외하고 표식만 지운다.
+ * 길이 0 세그먼트는 __finalise_sg 가 병합하며 남긴 빈 자리로, 리스트의 끝을 뜻한다.
+ *
+ * 실행 컨텍스트: 어디서든. 인터럽트 문맥 가능.
+ *
+ * 호출 체인: DMA API → [이 함수] → __iommu_dma_unmap
+ */
 void iommu_dma_unmap_sg(struct device *dev, struct scatterlist *sg, int nents,
 		enum dma_data_direction dir, unsigned long attrs)
 {
@@ -1804,6 +2877,23 @@ void iommu_dma_unmap_sg(struct device *dev, struct scatterlist *sg, int nents,
 		__iommu_dma_unmap(dev, start, end - start);	/* [한국어] 창 전체를 한 번에 해제한다. 세그먼트 수와 무관하게 unmap 호출이 한 번이라는 점이 병합의 또 다른 이득이다 */
 }
 
+/*
+ * [한국어]
+ * __iommu_dma_free - coherent 할당의 CPU 쪽 자원을 해제한다
+ *
+ * @dev:      대상 장치
+ * @size:     할당 크기
+ * @cpu_addr: alloc 이 돌려준 가상 주소
+ *
+ * coherent 할당에 경로가 여럿이라(아토믹 풀, 재매핑된 흩어진 페이지, 재매핑된
+ * 연속 블록, lowmem 연속 블록) 어느 쪽이었는지 여기서 되짚어야 한다. 판별 근거는
+ * 주소의 성질뿐이다 — 풀에 속하는지, vmalloc 영역인지, 페이지 배열이 등록되어
+ * 있는지.
+ *
+ * 실행 컨텍스트: 프로세스 문맥.
+ *
+ * 호출 체인: iommu_dma_free, iommu_dma_alloc 에러 경로 → [이 함수]
+ */
 static void __iommu_dma_free(struct device *dev, size_t size, void *cpu_addr)
 {
 	size_t alloc_size = PAGE_ALIGN(size);	/* [한국어] 실제로 잡았던 크기 */
@@ -1835,6 +2925,23 @@ static void __iommu_dma_free(struct device *dev, size_t size, void *cpu_addr)
 		dma_free_contiguous(dev, page, alloc_size);	/* [한국어] CMA 또는 버디 할당자로 반납 */
 }
 
+/*
+ * [한국어]
+ * iommu_dma_free - coherent 할당을 해제한다 (dma_free_coherent 의 구현)
+ *
+ * @dev:      대상 장치
+ * @size:     할당 크기
+ * @cpu_addr: CPU 가상 주소
+ * @handle:   장치가 쓰던 DMA 주소
+ * @attrs:    DMA 속성
+ *
+ * 장치 쪽 매핑을 먼저 지우고 그 다음 메모리를 반납한다. 반대로 하면 반납된
+ * 페이지에 장치가 계속 DMA 할 수 있는 창이 열린다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥.
+ *
+ * 호출 체인: DMA API → [이 함수]
+ */
 void iommu_dma_free(struct device *dev, size_t size, void *cpu_addr,
 		dma_addr_t handle, unsigned long attrs)
 {
@@ -1842,6 +2949,31 @@ void iommu_dma_free(struct device *dev, size_t size, void *cpu_addr,
 	__iommu_dma_free(dev, size, cpu_addr);	/* [한국어] 그 다음 CPU 쪽 매핑과 페이지를 정리 */
 }
 
+/*
+ * [한국어]
+ * iommu_dma_alloc_pages - 물리적으로 연속인 블록을 잡고 필요하면 재매핑한다
+ *
+ * @dev:    대상 장치
+ * @size:   요청 크기
+ * @pagep:  확보한 첫 페이지를 여기에 돌려준다
+ * @gfp:    할당 플래그
+ * @attrs:  DMA 속성
+ * @return: CPU 가 쓸 주소, 실패하면 NULL
+ *
+ * 흩어진 페이지를 접는 경로를 쓸 수 없을 때의 대안이다 — 아토믹 문맥이거나
+ * DMA_ATTR_FORCE_CONTIGUOUS 요청일 때 여기로 온다. 물리 연속을 요구하므로 큰
+ * 크기에서는 실패할 수 있고, 그래서 CMA 를 먼저 시도한다.
+ *
+ * 비일관 장치이거나 highmem 페이지를 얻었으면 커널 가상 매핑을 새로 만든다.
+ * 전자는 비캐시 속성이 필요해서이고, 후자는 선형 매핑이 없어서다.
+ *
+ * memset 으로 0 을 채우는 것은 선택이 아니다 — 이전 사용자의 커널 데이터가 장치에
+ * 노출되면 안 된다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥 또는 아토믹(gfp 가 정한다).
+ *
+ * 호출 체인: iommu_dma_alloc → [이 함수]
+ */
 static void *iommu_dma_alloc_pages(struct device *dev, size_t size,
 		struct page **pagep, gfp_t gfp, unsigned long attrs)
 {
@@ -1879,6 +3011,32 @@ out_free_pages:	/* [한국어] 가상 매핑 실패 경로 */
 	return NULL;	/* [한국어] 할당 실패 */
 }
 
+/*
+ * [한국어]
+ * iommu_dma_alloc - coherent DMA 버퍼를 할당한다 (dma_alloc_coherent 의 구현)
+ *
+ * @dev:    대상 장치
+ * @size:   요청 크기
+ * @handle: 장치가 쓸 DMA 주소를 여기에 채운다
+ * @gfp:    할당 플래그
+ * @attrs:  DMA 속성
+ * @return: CPU 가 쓸 주소, 실패하면 NULL
+ *
+ * 세 경로로 갈린다.
+ *  - 잠들 수 있고 물리 연속을 강제하지 않으면: 흩어진 페이지를 IOVA 창 하나로
+ *    접는다. IOMMU 를 쓰는 가장 큰 이득이며, 단편화된 시스템에서도 큰 버퍼가
+ *    실패하지 않는다.
+ *  - 아토믹 문맥의 비일관 장치: 미리 만들어 둔 비캐시 풀에서 꺼낸다. 아토믹
+ *    문맥에서는 페이지 재매핑을 할 수 없기 때문이다.
+ *  - 그 외: 물리 연속 블록을 잡는다.
+ *
+ * NVMe 드라이버의 큐 메모리, 네트워크 드라이버의 디스크립터 링이 이 함수로 온다.
+ *
+ * 실행 컨텍스트: gfp 가 정한다.
+ *
+ * 호출 체인: DMA API → [이 함수]
+ *            → iommu_dma_alloc_remap / dma_alloc_from_pool / iommu_dma_alloc_pages
+ */
 void *iommu_dma_alloc(struct device *dev, size_t size, dma_addr_t *handle,
 		gfp_t gfp, unsigned long attrs)
 {
@@ -1913,6 +3071,28 @@ void *iommu_dma_alloc(struct device *dev, size_t size, dma_addr_t *handle,
 	return cpu_addr;	/* [한국어] CPU 는 이 주소, 장치는 *handle 로 같은 메모리를 본다 */
 }
 
+/*
+ * [한국어]
+ * iommu_dma_mmap - coherent 버퍼를 사용자 공간에 매핑한다 (dma_mmap_coherent 의 구현)
+ *
+ * @dev:      대상 장치
+ * @vma:      사용자 매핑 영역
+ * @cpu_addr: alloc 이 돌려준 주소
+ * @dma_addr: 장치가 쓰는 주소 (여기서는 쓰지 않는다)
+ * @size:     할당 크기
+ * @attrs:    DMA 속성
+ * @return:   0 성공, -ENXIO 면 범위 초과
+ *
+ * 사용자 공간 매핑에도 같은 캐시 속성을 적용하는 것이 중요하다. 비일관 장치의
+ * 버퍼를 사용자가 캐시 가능으로 보면 장치가 쓴 내용을 못 보거나 그 반대가 된다.
+ *
+ * 범위 검사는 보안 경계다. 없으면 사용자가 오프셋을 크게 주어 할당 범위 밖의
+ * 커널 메모리를 매핑할 수 있다.
+ *
+ * 실행 컨텍스트: mmap 시스템 호출. 프로세스 문맥.
+ *
+ * 호출 체인: DMA API → [이 함수]
+ */
 int iommu_dma_mmap(struct device *dev, struct vm_area_struct *vma,
 		void *cpu_addr, dma_addr_t dma_addr, size_t size,
 		unsigned long attrs)
@@ -1944,6 +3124,25 @@ int iommu_dma_mmap(struct device *dev, struct vm_area_struct *vma,
 			       vma->vm_page_prot);	/* [한국어] 위에서 정한 캐시 속성 */
 }
 
+/*
+ * [한국어]
+ * iommu_dma_get_sgtable - coherent 버퍼를 기술하는 scatterlist 를 만든다
+ *
+ * @dev:      대상 장치
+ * @sgt:      채울 sg_table
+ * @cpu_addr: alloc 이 돌려준 주소
+ * @dma_addr: 장치가 쓰는 주소
+ * @size:     할당 크기
+ * @attrs:    DMA 속성
+ * @return:   0 성공, 음수 실패
+ *
+ * dma-buf 로 버퍼를 다른 드라이버와 공유할 때 쓴다. 할당 경로에 따라 결과가 다른데,
+ * 흩어진 페이지였으면 여러 세그먼트가 되고 연속 블록이었으면 하나가 된다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥, 잠들 수 있다.
+ *
+ * 호출 체인: DMA API → [이 함수]
+ */
 int iommu_dma_get_sgtable(struct device *dev, struct sg_table *sgt,
 		void *cpu_addr, dma_addr_t dma_addr, size_t size,
 		unsigned long attrs)
@@ -1971,6 +3170,23 @@ int iommu_dma_get_sgtable(struct device *dev, struct sg_table *sgt,
 	return ret;	/* [한국어] 0 이면 sgt 가 이 버퍼를 기술한다 */
 }
 
+/*
+ * [한국어]
+ * iommu_dma_get_merge_boundary - 상위 계층이 세그먼트를 합쳐도 되는 경계를 알린다
+ *
+ * @dev:    대상 장치
+ * @return: IOMMU 최소 페이지 크기 - 1
+ *
+ * 블록 계층이 bio 를 합칠지 판단할 때 참고한다. 이 경계를 넘지 않는 한 IOMMU 가
+ * 여러 페이지를 하나의 연속 IOVA 로 만들어 주므로, 장치가 보기에는 어차피 하나의
+ * 구간이다. 그래서 상위에서 미리 나눌 이유가 없다.
+ *
+ * 이 값이 있어서 NVMe 가 큰 I/O 를 적은 수의 SGL/PRP 항목으로 보낼 수 있다.
+ *
+ * 실행 컨텍스트: 어디서든.
+ *
+ * 호출 체인: 블록 계층의 병합 판정 → [이 함수]
+ */
 unsigned long iommu_dma_get_merge_boundary(struct device *dev)
 {
 	struct iommu_domain *domain = iommu_get_dma_domain(dev);	/* [한국어] 이 장치의 도메인 */
@@ -1978,11 +3194,40 @@ unsigned long iommu_dma_get_merge_boundary(struct device *dev)
 	return (1UL << __ffs(domain->pgsize_bitmap)) - 1;	/* [한국어] IOMMU 최소 페이지 크기 - 1. 블록 계층이 '이 경계를 넘지 않는 한 세그먼트를 합쳐도 IOMMU 가 하나로 매핑해 준다'고 판단하는 근거다 — NVMe 가 큰 I/O 를 적은 SGL 항목으로 보낼 수 있는 이유 */
 }
 
+/*
+ * [한국어]
+ * iommu_dma_opt_mapping_size - 성능상 유리한 매핑 크기의 상한
+ *
+ * @return: IOVA 캐시가 담을 수 있는 최대 크기 (기본 설정에서 128KB)
+ *
+ * 이 크기를 넘는 매핑은 IOVA 캐시를 우회해 매번 트리 락을 잡는다. 블록 계층이
+ * 요청을 이 단위로 쪼개면 락 경쟁이 사라져 처리량이 크게 달라지므로, 상위에
+ * 그 경계를 알려 준다.
+ *
+ * 실행 컨텍스트: 어디서든.
+ *
+ * 호출 체인: 블록 계층의 max_sectors 계산 → [이 함수]
+ */
 size_t iommu_dma_opt_mapping_size(void)
 {
 	return iova_rcache_range();	/* [한국어] IOVA 캐시가 담을 수 있는 최대 크기. 이 크기를 넘는 매핑은 매번 IOVA 트리 락을 잡으므로, 블록 계층이 요청을 이 단위로 쪼개면 처리량이 크게 달라진다 */
 }
 
+/*
+ * [한국어]
+ * iommu_dma_max_mapping_size - 한 번에 매핑할 수 있는 최대 크기
+ *
+ * @dev:    대상 장치
+ * @return: 신뢰할 수 없는 장치면 바운스 버퍼 크기, 아니면 무제한
+ *
+ * opt_mapping_size 와 다르다. 저쪽은 "이 이상이면 느려진다"는 권고이고, 이쪽은
+ * "이 이상은 불가능하다"는 한계다. 신뢰할 수 없는 장치는 모든 매핑이 바운스 버퍼를
+ * 거치므로 그 버퍼 하나의 크기가 곧 상한이 된다.
+ *
+ * 실행 컨텍스트: 어디서든.
+ *
+ * 호출 체인: DMA API, 블록 계층 → [이 함수]
+ */
 size_t iommu_dma_max_mapping_size(struct device *dev)
 {
 	if (dev_is_untrusted(dev))	/* [한국어] 신뢰할 수 없는 장치는 항상 바운스 버퍼를 거친다 */
@@ -2006,6 +3251,28 @@ size_t iommu_dma_max_mapping_size(struct device *dev)
  *
  * Returns %true if the IOVA-based DMA API can be used and IOVA space has been
  * allocated, or %false if the regular DMA API should be used.
+ */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어)
+ * dma_iova_try_alloc - 여러 조각을 채워 넣을 IOVA 창을 미리 확보한다
+ *
+ * @dev:    대상 장치
+ * @state:  창의 상태를 담을 구조체 (호출자 소유)
+ * @phys:   정렬 계산용 물리 주소 (0 도 가능)
+ * @size:   창의 크기
+ * @return: true 면 IOVA 경로를 쓸 수 있고 창이 확보되었다
+ *
+ * dma_map_sg 와 다른 사용 모델을 위한 것이다. 저쪽은 리스트 전체를 한 번에 받아
+ * 처리하지만, 이 API 는 창을 먼저 잡고 호출자가 조각을 하나씩 link 해 넣은 뒤
+ * 마지막에 sync 를 한 번 부른다. 페이지를 모으는 과정과 매핑을 겹쳐 진행해야 하는
+ * 블록 계층이나 RDMA 등록 경로에서 쓴다.
+ *
+ * false 를 돌려주는 것이 오류가 아니라는 점에 주의할 것 — 이 장치가 IOMMU 경로를
+ * 쓰지 않는다는 뜻이며, 호출자는 일반 DMA API 로 돌아가면 된다.
+ *
+ * 실행 컨텍스트: 프로세스 문맥 또는 아토믹.
+ *
+ * 호출 체인: 블록 계층/RDMA → [이 함수] → iommu_dma_alloc_iova
  */
 bool dma_iova_try_alloc(struct device *dev, struct dma_iova_state *state,
 		phys_addr_t phys, size_t size)
@@ -2064,6 +3331,23 @@ EXPORT_SYMBOL_GPL(dma_iova_try_alloc);	/* [한국어] 블록 계층·RDMA 처럼
  * which unlinks all ranges and frees the IOVA space in a single efficient
  * operation.
  */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어)
+ * dma_iova_free - 확보했던 IOVA 창을 반납한다
+ *
+ * @dev:   대상 장치
+ * @state: 창의 상태
+ *
+ * 매핑은 이미 dma_iova_unlink 로 전부 지워져 있어야 한다. 그래서 gather 에 NULL 을
+ * 넘기고, 무효화 없이 곧바로 반납한다.
+ *
+ * 모든 조각을 unlink 한 뒤 free 하는 대신, dma_iova_destroy 를 쓰면 두 동작이
+ * 한 번에 처리되어 더 효율적이다 (위 영어 주석).
+ *
+ * 실행 컨텍스트: 어디서든.
+ *
+ * 호출 체인: 블록 계층/RDMA, dma_iova_destroy → [이 함수]
+ */
 void dma_iova_free(struct device *dev, struct dma_iova_state *state)
 {
 	struct iommu_domain *domain = iommu_get_dma_domain(dev);	/* [한국어] 도메인 */
@@ -2077,6 +3361,25 @@ void dma_iova_free(struct device *dev, struct dma_iova_state *state)
 }
 EXPORT_SYMBOL_GPL(dma_iova_free);	/* [한국어] try_alloc 의 짝 */
 
+/*
+ * [한국어]
+ * __dma_iova_link - 조각 하나를 창 안에 매핑한다 (동기화 없음)
+ *
+ * @dev:   대상 장치
+ * @addr:  창 안의 목적지 IOVA
+ * @phys:  매핑할 물리 주소
+ * @size:  길이
+ * @dir:   DMA 방향
+ * @attrs: DMA 속성
+ * @return: 0 성공, 음수 실패
+ *
+ * iommu_map_nosync 를 쓰는 것이 이 API 전체의 설계다 — 조각마다 IOTLB 동기화를
+ * 하면 조각 수만큼 비용이 드는데, 마지막에 dma_iova_sync 로 한 번만 하면 된다.
+ *
+ * 실행 컨텍스트: 어디서든. 인터럽트 문맥 가능 (GFP_ATOMIC).
+ *
+ * 호출 체인: dma_iova_link, iommu_dma_iova_link_swiotlb → [이 함수]
+ */
 static int __dma_iova_link(struct device *dev, dma_addr_t addr,
 		phys_addr_t phys, size_t size, enum dma_data_direction dir,
 		unsigned long attrs)
@@ -2091,6 +3394,31 @@ static int __dma_iova_link(struct device *dev, dma_addr_t addr,
 			prot, GFP_ATOMIC);	/* [한국어] 아토믹 문맥에서도 불릴 수 있다 */
 }
 
+/*
+ * [한국어]
+ * iommu_dma_iova_bounce_and_link - 정렬이 어긋난 조각을 바운스해 창에 연결한다
+ *
+ * @dev:            대상 장치
+ * @addr:           창 안의 목적지 IOVA
+ * @phys:           원본 물리 주소
+ * @bounce_len:     바운스할 길이
+ * @dir:            DMA 방향
+ * @attrs:          DMA 속성
+ * @iova_start_pad: 페이지 경계까지의 앞쪽 여백
+ * @return:         0 성공, -ENOMEM 이면 바운스 실패
+ *
+ * 조각의 머리나 꼬리가 IOMMU 페이지 중간에 걸릴 때 쓴다. 그 페이지에는 이 조각
+ * 말고 다른 데이터도 들어 있으므로 통째로 매핑할 수 없고, 전용 버퍼로 복사해
+ * 그 페이지를 이 전송의 것으로 만든다.
+ *
+ * IOVA 와 바운스 버퍼를 같은 오프셋만큼 내려 정렬을 맞추는 것이 요점이다 —
+ * swiotlb 가 그 정렬로 버퍼를 잡아 주기 때문에 성립한다.
+ *
+ * 실행 컨텍스트: 어디서든.
+ *
+ * 호출 체인: iommu_dma_iova_link_swiotlb → [이 함수]
+ *            → iommu_dma_map_swiotlb, __dma_iova_link
+ */
 static int iommu_dma_iova_bounce_and_link(struct device *dev, dma_addr_t addr,
 		phys_addr_t phys, size_t bounce_len,
 		enum dma_data_direction dir, unsigned long attrs,
@@ -2114,6 +3442,31 @@ static int iommu_dma_iova_bounce_and_link(struct device *dev, dma_addr_t addr,
 	return error;	/* [한국어] 0 이면 이 조각이 연결되었다 */
 }
 
+/*
+ * [한국어]
+ * iommu_dma_iova_link_swiotlb - 머리와 꼬리만 바운스하고 가운데는 직접 매핑한다
+ *
+ * @dev:    대상 장치
+ * @state:  창의 상태
+ * @phys:   조각의 물리 주소
+ * @offset: 창 안의 위치
+ * @size:   조각의 길이
+ * @dir:    DMA 방향
+ * @attrs:  DMA 속성
+ * @return: 0 성공, 음수 실패
+ *
+ * 복사 비용을 최소화하는 것이 이 함수의 목적이다. 조각 전체를 바운스하면 큰 버퍼도
+ * 통째로 복사해야 하지만, 실제로 위험한 것은 페이지 경계에 걸친 앞뒤 조각뿐이다.
+ * 가운데의 완전한 페이지들은 다른 데이터가 섞이지 않으므로 그대로 매핑해도 된다.
+ *
+ * 바운스를 한 번이라도 쓰면 state 에 표식을 남긴다. 해제 경로가 그 표식을 보고
+ * 페이지 단위 느린 경로로 들어가 바운스 버퍼를 되돌린다.
+ *
+ * 실행 컨텍스트: 어디서든.
+ *
+ * 호출 체인: dma_iova_link → [이 함수]
+ *            → iommu_dma_iova_bounce_and_link, __dma_iova_link
+ */
 static int iommu_dma_iova_link_swiotlb(struct device *dev,
 		struct dma_iova_state *state, phys_addr_t phys, size_t offset,
 		size_t size, enum dma_data_direction dir, unsigned long attrs)
@@ -2181,6 +3534,31 @@ out_unmap:	/* [한국어] 부분 성공 되감기 */
  * The caller is responsible to call to dma_iova_sync() to sync IOTLB at
  * the end of linkage.
  */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어)
+ * dma_iova_link - 창 안의 한 위치에 물리 구간을 연결한다
+ *
+ * @dev:    대상 장치
+ * @state:  try_alloc 이 만든 창의 상태
+ * @phys:   연결할 물리 주소
+ * @offset: 창 안의 위치
+ * @size:   길이
+ * @dir:    DMA 방향
+ * @attrs:  DMA 속성
+ * @return: 0 성공, 음수 실패
+ *
+ * IOTLB 동기화를 하지 않는 것이 이 API 의 요점이다. 여러 번 부른 뒤 마지막에
+ * dma_iova_sync 를 한 번만 부르면 되므로, 조각이 많을수록 이득이 크다.
+ *
+ * 첫 검사가 이 API 의 제약을 드러낸다 — 정렬이 어긋난 조각은 창의 맨 앞에만 올 수
+ * 있다. 중간에 오면 앞 조각과 같은 IOMMU 페이지를 공유하게 되어 서로의 매핑을
+ * 덮어쓰기 때문이다.
+ *
+ * 실행 컨텍스트: 어디서든. 인터럽트 문맥 가능.
+ *
+ * 호출 체인: 블록 계층/RDMA → [이 함수]
+ *            → iommu_dma_iova_link_swiotlb 또는 __dma_iova_link
+ */
 int dma_iova_link(struct device *dev, struct dma_iova_state *state,
 		phys_addr_t phys, size_t offset, size_t size,
 		enum dma_data_direction dir, unsigned long attrs)
@@ -2231,6 +3609,24 @@ EXPORT_SYMBOL_GPL(dma_iova_link);	/* [한국어] 여러 조각을 하나의 IOVA
  * the IOVA-contiguous range created by one ore more dma_iova_link() calls
  * to sync the IOTLB.
  */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어)
+ * dma_iova_sync - 여러 번의 link 를 한 번에 하드웨어에 반영한다
+ *
+ * @dev:    대상 장치
+ * @state:  창의 상태
+ * @offset: 동기화할 구간의 시작
+ * @size:   길이
+ * @return: 0 성공, 음수 실패
+ *
+ * link 가 미뤄 둔 두 가지를 여기서 처리한다 — 캐시 쓰기 완료 대기와 IOTLB 반영이다.
+ * 조각마다 하면 조각 수만큼 비용이 드는 일을 한 번으로 줄이는 것이 이 API 계열의
+ * 존재 이유다.
+ *
+ * 실행 컨텍스트: 어디서든.
+ *
+ * 호출 체인: 블록 계층/RDMA → [이 함수] → iommu_sync_map
+ */
 int dma_iova_sync(struct device *dev, struct dma_iova_state *state,
 		size_t offset, size_t size)
 {
@@ -2247,6 +3643,30 @@ int dma_iova_sync(struct device *dev, struct dma_iova_state *state,
 }
 EXPORT_SYMBOL_GPL(dma_iova_sync);	/* [한국어] link 를 여러 번 부른 뒤 마지막에 한 번 */
 
+/*
+ * [한국어]
+ * iommu_dma_iova_unlink_range_slow - 페이지 단위로 훑으며 바운스와 캐시를 정리한다
+ *
+ * @dev:   대상 장치
+ * @addr:  구간의 시작 IOVA
+ * @size:  길이
+ * @dir:   DMA 방향
+ * @attrs: DMA 속성
+ *
+ * 이름의 slow 가 정확하다 — 페이지마다 IOVA→물리 역변환을 하고 swiotlb 반납을
+ * 시도한다. 창 안의 어느 페이지가 바운스 버퍼인지 기록해 두지 않기 때문에 하나씩
+ * 확인할 수밖에 없다.
+ *
+ * swiotlb_tbl_unmap_single 이 바운스 버퍼가 아닌 주소에 대해 무해하게 지나간다는
+ * 성질을 이용해, 확인 없이 모든 페이지에 대해 부른다.
+ *
+ * 그래서 호출자는 바운스를 썼거나 캐시 동기화가 필요한 경우에만 이 경로를 탄다 —
+ * 둘 다 아니면 이 비용을 완전히 건너뛴다.
+ *
+ * 실행 컨텍스트: 해제 경로. 어디서든.
+ *
+ * 호출 체인: __iommu_dma_iova_unlink → [이 함수]
+ */
 static void iommu_dma_iova_unlink_range_slow(struct device *dev,
 		dma_addr_t addr, size_t size, enum dma_data_direction dir,
 		unsigned long attrs)
@@ -2285,6 +3705,30 @@ static void iommu_dma_iova_unlink_range_slow(struct device *dev,
 		arch_sync_dma_flush();	/* [한국어] 한 번만 완료 대기 */
 }
 
+/*
+ * [한국어]
+ * __iommu_dma_iova_unlink - 창의 일부 또는 전부를 해제한다
+ *
+ * @dev:       대상 장치
+ * @state:     창의 상태
+ * @offset:    해제할 구간의 시작 위치
+ * @size:      길이
+ * @dir:       DMA 방향
+ * @attrs:     DMA 속성
+ * @free_iova: true 면 IOVA 창까지 반납한다 (destroy 경로)
+ *
+ * unlink 와 destroy 를 하나로 합친 구현이다. 차이는 free_iova 하나이며, 그 값이
+ * 지연 무효화 사용 여부까지 결정한다 — IOVA 를 반납하지 않는 unlink 는 큐를 쓸 수
+ * 없다. 큐는 IOVA 반납과 무효화를 함께 미루는 장치이기 때문이다.
+ *
+ * 느린 경로 진입 조건이 두 가지인 것에 주목할 것. 바운스 버퍼를 되돌려야 하거나,
+ * 비일관 장치의 캐시를 무효화해야 할 때만 페이지 단위로 훑는다.
+ *
+ * 실행 컨텍스트: 어디서든. 인터럽트 문맥 가능.
+ *
+ * 호출 체인: dma_iova_unlink, dma_iova_destroy → [이 함수]
+ *            → iommu_unmap_fast, iommu_dma_free_iova
+ */
 static void __iommu_dma_iova_unlink(struct device *dev,
 		struct dma_iova_state *state, size_t offset, size_t size,
 		enum dma_data_direction dir, unsigned long attrs,
@@ -2328,6 +3772,24 @@ static void __iommu_dma_iova_unlink(struct device *dev,
  *
  * Unlink a range of IOVA space for the given IOVA state.
  */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어)
+ * dma_iova_unlink - 창의 일부 매핑을 지운다 (창 자체는 유지)
+ *
+ * @dev:    대상 장치
+ * @state:  창의 상태
+ * @offset: 지울 구간의 시작
+ * @size:   길이
+ * @dir:    DMA 방향
+ * @attrs:  DMA 속성
+ *
+ * 창을 남겨 두므로 같은 자리에 다른 내용을 다시 link 할 수 있다. RDMA 메모리 영역
+ * 재등록처럼 주소는 유지하고 내용만 바꾸는 사용 사례를 위한 것이다.
+ *
+ * 실행 컨텍스트: 어디서든.
+ *
+ * 호출 체인: 블록 계층/RDMA → [이 함수] → __iommu_dma_iova_unlink
+ */
 void dma_iova_unlink(struct device *dev, struct dma_iova_state *state,
 		size_t offset, size_t size, enum dma_data_direction dir,
 		unsigned long attrs)
@@ -2348,6 +3810,26 @@ EXPORT_SYMBOL_GPL(dma_iova_unlink);	/* [한국어] 조각 단위 해제 */
  * range of IOVA from dma_addr to @mapped_len must all be linked, and be the
  * only linked IOVA in state.
  */
+/*
+ * [한국어] (위 영어 kernel-doc 에 이어)
+ * dma_iova_destroy - 매핑을 지우고 창까지 한 번에 반납한다
+ *
+ * @dev:        대상 장치
+ * @state:      창의 상태
+ * @mapped_len: 실제로 연결된 길이
+ * @dir:        DMA 방향
+ * @attrs:      DMA 속성
+ *
+ * unlink 후 free 를 따로 부르는 것보다 효율적이다. 해제와 IOVA 반납을 한 번의
+ * 무효화 안에서 처리하기 때문이며, 특히 지연 무효화를 쓸 때 차이가 크다.
+ *
+ * mapped_len 이 0 인 경우를 따로 다루는 것은 첫 link 부터 실패한 상황을 위한 것이다.
+ * 지울 매핑이 없으므로 창만 반납한다 (위 영어 주석).
+ *
+ * 실행 컨텍스트: 어디서든.
+ *
+ * 호출 체인: 블록 계층/RDMA → [이 함수] → __iommu_dma_iova_unlink 또는 dma_iova_free
+ */
 void dma_iova_destroy(struct device *dev, struct dma_iova_state *state,
 		size_t mapped_len, enum dma_data_direction dir,
 		unsigned long attrs)
@@ -2364,6 +3846,26 @@ void dma_iova_destroy(struct device *dev, struct dma_iova_state *state,
 }
 EXPORT_SYMBOL_GPL(dma_iova_destroy);	/* [한국어] link 을 여러 번 한 뒤 한 번에 정리하는 종료 경로 */
 
+/*
+ * [한국어]
+ * iommu_setup_dma_ops - 장치의 DMA 를 이 파일의 구현으로 갈아 끼운다
+ *
+ * @dev:    대상 장치
+ * @domain: 이 장치가 붙은 도메인
+ *
+ * 이 파일 전체가 언제부터 동작하는지를 정하는 함수다. dev->dma_iommu 를 세우는
+ * 한 줄이 지나면 그 장치의 dma_map_page 는 물리 주소가 아니라 IOVA 를 돌려주기
+ * 시작한다 — 드라이버 입장에서 "IOMMU 가 켜졌다"의 실제 의미가 그것이다.
+ *
+ * 실패해도 장치를 못 쓰게 만들지 않는다. dma_iommu 를 다시 내려 플랫폼 기본
+ * 경로(직접 매핑 또는 swiotlb)로 되돌리고 경고만 남긴다 — 격리는 잃지만 동작은
+ * 한다는 선택이다.
+ *
+ * 실행 컨텍스트: 장치 프로브 경로. 그룹 락 아래. 프로세스 문맥.
+ *
+ * 호출 체인: iommu.c 의 __iommu_probe_device, bus_iommu_probe → [이 함수]
+ *            → iommu_dma_init_domain
+ */
 void iommu_setup_dma_ops(struct device *dev, struct iommu_domain *domain)
 {
 	if (dev_is_pci(dev))	/* [한국어] PCI 장치면 */
@@ -2380,12 +3882,44 @@ out_err:	/* [한국어] 초기화 실패 경로 */
 	dev->dma_iommu = false;	/* [한국어] 플랫폼 기본 DMA 경로(직접 매핑 또는 swiotlb)로 되돌린다. 격리는 잃지만 장치는 동작한다 */
 }
 
+/*
+ * [한국어]
+ * has_msi_cookie - 이 도메인이 MSI 매핑을 관리하는가
+ *
+ * @domain: 확인할 도메인
+ * @return: true 면 MSI 매핑 목록이 존재한다
+ *
+ * 두 종류의 쿠키가 모두 MSI 목록을 갖고 있다 — 커널 DMA API 용 전체 쿠키와,
+ * VFIO 등이 MSI 재매핑만 맡길 때 쓰는 축소판이다. 아래의 접근자들이 BUG() 로
+ * 끝나지 않으려면 호출 전에 이 검사를 거쳐야 한다.
+ *
+ * 실행 컨텍스트: 어디서든.
+ *
+ * 호출 체인: iommu_dma_sw_msi → [이 함수]
+ */
 static bool has_msi_cookie(const struct iommu_domain *domain)
 {
 	return domain && (domain->cookie_type == IOMMU_COOKIE_DMA_IOVA ||	/* [한국어] 완전한 DMA 쿠키이거나 */
 			  domain->cookie_type == IOMMU_COOKIE_DMA_MSI);	/* [한국어] MSI 전용 축소판 쿠키. 둘 중 하나여야 MSI 매핑 목록이 존재한다 */
 }
 
+/*
+ * [한국어]
+ * cookie_msi_granule - MSI 매핑의 단위 크기
+ *
+ * @domain: 대상 도메인
+ * @return: 매핑 단위 (바이트)
+ *
+ * 전체 쿠키는 IOVA 공간의 입도를 쓰고, 축소판 쿠키는 IOVA 공간이 없어 CPU 페이지
+ * 크기를 쓴다. 이 값이 도어벨 주소를 어디까지 내림할지, 매핑을 몇 바이트로 만들지를
+ * 결정한다.
+ *
+ * default 에서 BUG() 인 것은 has_msi_cookie 검사를 건너뛴 호출자를 잡기 위해서다.
+ *
+ * 실행 컨텍스트: 어디서든.
+ *
+ * 호출 체인: iommu_dma_get_msi_page, iommu_dma_sw_msi → [이 함수]
+ */
 static size_t cookie_msi_granule(const struct iommu_domain *domain)
 {
 	switch (domain->cookie_type) {	/* [한국어] 쿠키 종류에 따라 MSI 매핑의 단위가 다르다 */
@@ -2393,11 +3927,25 @@ static size_t cookie_msi_granule(const struct iommu_domain *domain)
 		return domain->iova_cookie->iovad.granule;	/* [한국어] IOVA 공간의 입도를 그대로 쓴다 */
 	case IOMMU_COOKIE_DMA_MSI:	/* [한국어] 축소판 쿠키에는 IOVA 공간이 없다 */
 		return PAGE_SIZE;	/* [한국어] CPU 페이지 크기로 대신한다 */
-	default:
+	default:	/* [한국어] MSI 쿠키가 없는 도메인 — 호출자가 has_msi_cookie 검사를 건너뛴 것 */
 		BUG();	/* [한국어] MSI 쿠키가 없는 도메인에서 불렸다 = 호출자가 has_msi_cookie 검사를 건너뛴 것 */
 	}
 }
 
+/*
+ * [한국어]
+ * cookie_msi_pages - 이 도메인의 MSI 매핑 목록을 얻는다
+ *
+ * @domain: 대상 도메인
+ * @return: 매핑 기록들의 목록 머리
+ *
+ * 두 쿠키 형태에서 목록의 위치가 달라 여기서 갈라 준다. granule 과 같은 이유로
+ * default 는 BUG() 다.
+ *
+ * 실행 컨텍스트: 어디서든.
+ *
+ * 호출 체인: iommu_dma_get_msi_page → [이 함수]
+ */
 static struct list_head *cookie_msi_pages(const struct iommu_domain *domain)
 {
 	switch (domain->cookie_type) {	/* [한국어] 쿠키 종류에 따라 목록의 위치가 다르다 */
@@ -2405,11 +3953,34 @@ static struct list_head *cookie_msi_pages(const struct iommu_domain *domain)
 		return &domain->iova_cookie->msi_page_list;	/* [한국어] 큰 쿠키 안의 목록 */
 	case IOMMU_COOKIE_DMA_MSI:	/* [한국어] 축소판 쿠키 */
 		return &domain->msi_cookie->msi_page_list;	/* [한국어] 작은 쿠키 안의 목록 */
-	default:
+	default:	/* [한국어] 같은 이유 */
 		BUG();	/* [한국어] MSI 쿠키가 없는 도메인 */
 	}
 }
 
+/*
+ * [한국어]
+ * iommu_dma_get_msi_page - MSI 도어벨 페이지의 매핑을 찾거나 만든다
+ *
+ * @dev:      MSI 를 설정할 장치
+ * @msi_addr: 도어벨의 물리 주소
+ * @domain:   그 장치의 도메인
+ * @return:   매핑 기록, 실패하면 NULL
+ *
+ * MSI 는 약속된 주소로의 메모리 쓰기이므로, IOMMU 아래의 장치는 그 주소도 번역을
+ * 거친다. 도어벨의 물리 주소를 이 도메인의 IOVA 공간에 매핑해 두고, 장치에는 그
+ * IOVA 를 프로그래밍해야 인터럽트가 전달된다.
+ *
+ * 페이지 단위로 캐시하는 것이 요점이다. 한 시스템의 수천 개 MSI 벡터가 대개 같은
+ * 도어벨 페이지를 쓰므로, 벡터마다 IOVA 를 새로 떼면 주소 공간이 금세 소모된다.
+ *
+ * 권한이 쓰기 전용인 것도 의도적이다 — 장치가 도어벨을 읽을 이유가 없고, 읽기를
+ * 막아 두면 그 매핑으로 할 수 있는 일이 인터럽트 발생 하나로 제한된다.
+ *
+ * 실행 컨텍스트: MSI 설정 경로. 그룹 락 아래. 프로세스 문맥.
+ *
+ * 호출 체인: iommu_dma_sw_msi → [이 함수] → iommu_dma_alloc_iova, iommu_map
+ */
 static struct iommu_dma_msi_page *iommu_dma_get_msi_page(struct device *dev,
 		phys_addr_t msi_addr, struct iommu_domain *domain)
 {
@@ -2448,6 +4019,26 @@ out_free_page:	/* [한국어] IOVA 확보 실패가 합류 */
 	return NULL;	/* [한국어] MSI 설정 실패 */
 }
 
+/*
+ * [한국어]
+ * iommu_dma_sw_msi - MSI 서술자에 번역 가능한 도어벨 주소를 채워 준다
+ *
+ * @domain:   장치가 붙은 도메인
+ * @desc:     MSI 서술자 (결과를 여기에 기록한다)
+ * @msi_addr: 인터럽트 컨트롤러가 알려 준 도어벨 물리 주소
+ * @return:   0 성공, -ENOMEM 이면 매핑 실패
+ *
+ * iommu.c 의 iommu_dma_prepare_msi 가 도메인 종류를 보고 이쪽 또는 iommufd 쪽으로
+ * 갈라 부른다. 이 함수는 커널이 IOVA 를 관리하는 경우를 맡는다.
+ *
+ * MSI 매핑을 관리하지 않는 도메인이면 IOVA 0 을 돌려주는데, 그것이 "번역 없이
+ * 원래 물리 주소를 쓰라"는 신호다 — 항등 도메인이 그런 경우다.
+ *
+ * 실행 컨텍스트: MSI 설정 경로. 그룹 락 아래(assert 로 확인). 프로세스 문맥.
+ *
+ * 호출 체인: iommu.c 의 iommu_dma_prepare_msi → [이 함수]
+ *            → iommu_dma_get_msi_page
+ */
 int iommu_dma_sw_msi(struct iommu_domain *domain, struct msi_desc *desc,
 		     phys_addr_t msi_addr)
 {
@@ -2469,6 +4060,26 @@ int iommu_dma_sw_msi(struct iommu_domain *domain, struct msi_desc *desc,
 	return 0;	/* [한국어] MSI 준비 완료 */
 }
 
+/*
+ * [한국어]
+ * iommu_dma_init - 이 파일의 부팅 초기화
+ *
+ * @return: 0 성공, 음수면 IOVA 슬랩 준비 실패
+ *
+ * 하는 일은 두 가지다. IOVA 슬랩을 준비하고(이후 만들어지는 모든 도메인이 공유),
+ * kdump 커널이면 지연 부착을 켠다.
+ *
+ * kdump 조건이 미묘하다. 크래시 덤프 커널은 앞선 커널이 남긴 하드웨어 상태 위에서
+ * 부팅하는데, 그때 도메인을 곧바로 걸면 아직 진행 중인 DMA(예: 덤프를 쓸 디스크
+ * 컨트롤러의 동작)가 끊긴다. 첫 DMA 시점까지 부착을 미루면 그 전환이 안전한
+ * 순간에 일어난다.
+ *
+ * arch_initcall 이라 IOMMU 드라이버 초기화보다 먼저 돈다.
+ *
+ * 실행 컨텍스트: 부팅 초기 initcall. 프로세스 문맥.
+ *
+ * 호출 체인: arch_initcall → [이 함수] → iova_cache_get
+ */
 static int iommu_dma_init(void)
 {
 	if (is_kdump_kernel())	/* [한국어] 크래시 덤프 커널이다 */
